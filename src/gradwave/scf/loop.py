@@ -223,7 +223,8 @@ def scf(
         else:
             scheme = SCHEMES[smearing]
             mu = float(find_fermi(eigs, system.kweights, scheme, width, system.n_electrons))
-            occ, s = occupations_and_entropy(eigs, torch.tensor(mu), scheme, width)
+            # NB: bare torch.tensor(mu) would be float32 and shift N_e by ~1e-7
+            occ, s = occupations_and_entropy(eigs, torch.tensor(mu, dtype=RDTYPE), scheme, width)
             entropy_term = -width * (2.0 * system.kweights[:, None] * s).sum()
 
         rho_out = density_from_orbitals(coeffs, occ, system.kweights, spheres, grid.shape, vol)

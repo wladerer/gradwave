@@ -1,0 +1,21 @@
+# Silicon SCF — minimal example (uses the test-fixture pseudopotential)
+structure:
+  cell: [[0.0, 2.715, 2.715], [2.715, 0.0, 2.715], [2.715, 2.715, 0.0]]
+  positions: {frac: [[0.0, 0.0, 0.0], [0.25, 0.25, 0.25]]}
+  species: [Si, Si]
+
+pseudopotentials:
+  dir: ../tests/fixtures/qe/pseudos
+  map: {Si: Si_ONCV_PBE-1.2.upf}
+
+ecut: 300.0          # eV — quick demo; use ~408 eV (30 Ry) for production
+xc: pbe
+kpoints: {mesh: [2, 2, 2]}
+smearing: {type: none}
+
+scf:
+  etol: 1.0e-8
+  rhotol: 1.0e-7
+
+task: scf
+output: {dir: ./out}
