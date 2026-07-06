@@ -73,7 +73,7 @@ def test_monkhorst_pack_weights_and_tr():
     reduced = {tuple(np.round(ki, 9)) for ki in k}
     for kf in kfull:
         pos = tuple(np.round(kf, 9))
-        neg = tuple(np.round(-((-(-kf) + 0.5) % 1.0 - 0.5), 9))
+        neg = tuple(np.round(-((kf + 0.5) % 1.0 - 0.5), 9))  # fold(-kf) to (-1/2, 1/2]
         assert pos in reduced or neg in reduced
 
 
