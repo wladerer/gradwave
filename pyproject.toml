@@ -1,0 +1,51 @@
+[project]
+name = "gradwave"
+version = "0.1.0"
+description = "Differentiable plane-wave DFT for periodic solids in PyTorch"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Will Laderer", email = "wtladerer@gmail.com" }]
+dependencies = [
+    "torch>=2.4",
+    "numpy>=1.26",
+    "scipy>=1.12",
+    "ase>=3.23",
+    "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+symmetry = ["spglib>=2.4"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-xdist",
+    "ruff>=0.6",
+    "sympy>=1.12",
+]
+
+[project.scripts]
+gradwave = "gradwave.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gradwave"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: expensive integration tests (converged fixture variants)",
+    "gpu: requires CUDA device",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "NPY", "B"]
+ignore = ["E741"]  # l is a perfectly good angular momentum variable
