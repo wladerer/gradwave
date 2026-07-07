@@ -14,11 +14,15 @@ def sad_density(
     positions: torch.Tensor,  # (na, 3) Å (detached — guess is not differentiated)
     species_of_atom: list[int],
     upfs: list,  # [UPFData] per species
-    n_electrons: float,
+    n_electrons: float | None,
     species_scale=None,  # per-species factor (spin-channel splits), default 1
     atom_scale=None,  # per-ATOM factor (AFM seeds); overrides species_scale
+    clamp_positive: bool = True,
 ) -> torch.Tensor:
-    """ρ₀(r) on the dense grid [e/Å³], rescaled to exactly N_e electrons."""
+    """ρ₀(r) on the dense grid [e/Å³], rescaled to exactly N_e electrons.
+
+    n_electrons=None skips rescaling and clamping — used for magnetization
+    channels, which may integrate to ~0 and take either sign."""
     device = grid.g2.device
     g = torch.sqrt(grid.g2).reshape(-1).cpu().numpy()  # radial tables are numpy-side
     uniq, inverse = np.unique(np.round(g, 9), return_inverse=True)
@@ -46,11 +50,13 @@ def sad_density(
         rho_g += sfac * shell.to(CDTYPE) / vol
 
     # rescale so that Ω·ρ(G=0) = N_e exactly (mesh-truncation fix)
-    scale = n_electrons / (vol * rho_g[0].real)
-    rho_g = rho_g * scale
+    if n_electrons is not None:
+        rho_g = rho_g * (n_electrons / (vol * rho_g[0].real))
     rho_g = torch.where(grid.dens_mask.reshape(-1), rho_g, torch.zeros_like(rho_g))
 
     rho_r = torch.fft.ifftn(rho_g.reshape(grid.shape) * grid.n_points, dim=(-3, -2, -1)).real
+    if n_electrons is None or not clamp_positive:
+        return rho_r
     # SAD can dip slightly negative between atoms; floor tiny negatives, then
     # restore exact normalization (the mixer pins the G=0 channel)
     rho_r = torch.clamp(rho_r, min=1e-12)

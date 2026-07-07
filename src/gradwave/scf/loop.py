@@ -115,6 +115,7 @@ def setup_system(
     use_symmetry: bool = False,
     symprec: float = 1e-6,
     fft_shape=None,
+    time_reversal: bool = True,  # False for noncollinear/SOC (TR flips m)
 ) -> System:
     """use_symmetry: reduce k to the IBZ and symmetrize ρ each SCF step.
     Requires an unshifted (Γ-centered) mesh — shifted meshes fall back to
@@ -161,7 +162,7 @@ def setup_system(
         rho_symmetrizer = RhoSymmetrizer(grid.shape, sym, dens_mask=grid.dens_mask)
         kfrac, kw = reduce_mesh(kmesh, kshift, sym)
     else:
-        kfrac, kw = monkhorst_pack(kmesh, kshift)
+        kfrac, kw = monkhorst_pack(kmesh, kshift, time_reversal=time_reversal)
     spheres = [build_gsphere(grid, ecut, k) for k in kfrac]
 
     charges = torch.tensor([upfs[s].z_valence for s in species_of_atom], dtype=RDTYPE)
