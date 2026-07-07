@@ -57,6 +57,7 @@ class BandsParams:
     path: str = ""  # ASE bandpath string, e.g. "LGXUG"; empty = ASE default
     npoints: int = 120
     nbands: int | None = None
+    irreps: bool = False  # label bands at special points with Mulliken symbols
 
 
 @dataclass(frozen=True)

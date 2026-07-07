@@ -132,6 +132,28 @@ def run(inp: Input, verbose: bool = True) -> dict:
             "eigenvalues_eV": bs.eigenvalues.tolist(),
             "reference_eV": bs.reference,
         }
+        if inp.bands.irreps:
+            import numpy as np
+
+            from gradwave.postscf.irreps import band_irreps
+
+            cache = {}
+            ann = []
+            for xt, lab in bs.labels:
+                idx = int(np.argmin(np.abs(np.asarray(bs.x) - xt)))
+                kf = tuple(np.round(bs.kpts_frac[idx], 8))
+                if kf not in cache:
+                    cache[kf] = band_irreps(res, list(kf), nbands=inp.bands.nbands)
+                out = cache[kf]
+                ann.append({
+                    "x": float(xt), "name": lab,
+                    "clusters": [
+                        {"e": float(np.mean(c.energies)), "label": c.label,
+                         "dim": c.dim, "warning": c.warning}
+                        for c in out.clusters
+                    ],
+                })
+            summary["irreps"] = ann
     else:
         raise ValueError(inp.task)
 

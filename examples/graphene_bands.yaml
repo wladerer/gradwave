@@ -21,7 +21,7 @@ scf:
   rhotol: 1.0e-7
 
 task: bands
-bands: {path: GMKG, npoints: 61, nbands: 10}
+bands: {path: GMKG, npoints: 61, nbands: 10, irreps: true}
 
 device: cuda
 output: {dir: ./out_graphene}

@@ -32,6 +32,25 @@ def main():
         ax.plot(x, [e[b] - ref for e in eigs], color="#2060a0", lw=1.2)
     for xt, _lab in d["labels"]:
         ax.axvline(xt, color="0.8", lw=0.6, zorder=0)
+    if "irreps" in d:
+        xmax = max(x)
+        seen = set()
+        for point in d["irreps"]:
+            key = round(point["x"], 8)
+            if key in seen:
+                continue
+            seen.add(key)
+            at_end = point["x"] > 0.98 * xmax
+            dx = -0.012 * xmax if at_end else 0.012 * xmax
+            ha = "right" if at_end else "left"
+            for cl in point["clusters"]:
+                y = cl["e"] - ref
+                if not (args.window[0] < y < args.window[1]):
+                    continue
+                ax.annotate(cl["label"], (point["x"] + dx, y), fontsize=7,
+                            ha=ha, va="center", color="#a03020",
+                            bbox=dict(boxstyle="round,pad=0.12", fc="white",
+                                      ec="none", alpha=0.75))
     ax.axhline(0.0, color="0.6", lw=0.6, ls="--", zorder=0)
     ax.set_xticks([xt for xt, _ in d["labels"]])
     ax.set_xticklabels([lab.replace("G", "Γ") for _, lab in d["labels"]])
