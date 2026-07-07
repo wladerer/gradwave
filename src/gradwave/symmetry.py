@@ -40,6 +40,7 @@ class SpaceGroup:
     translations: np.ndarray  # (nops, 3) fractional w
     atom_map: np.ndarray  # (nops, na) int — op sends atom a onto atom_map[op, a]
     international: str
+    origin_shift: np.ndarray = None  # spglib standard-origin shift (fractional)
 
     @property
     def n_ops(self) -> int:
@@ -92,6 +93,7 @@ def find_spacegroup(
     return SpaceGroup(
         rotations=rots, translations=trans, atom_map=atom_map,
         international=ds.international,
+        origin_shift=np.asarray(ds.origin_shift, dtype=float),
     )
 
 
