@@ -1,0 +1,35 @@
+&control
+  calculation = 'scf'
+  prefix = 'cr_afm_ci'
+  pseudo_dir = '../pseudos'
+  outdir = './tmp'
+  verbosity = 'high'
+/
+&system
+  ibrav = 0
+  nat = 2
+  ntyp = 2
+  ecutwfc = 60.0
+  occupations = 'smearing'
+  smearing = 'gaussian'
+  degauss = 0.0073498649
+  nspin = 2
+  starting_magnetization(1) = 0.4
+  starting_magnetization(2) = -0.4
+  nbnd = 22
+/
+&electrons
+  conv_thr = 1.0d-10
+/
+ATOMIC_SPECIES
+Cr1 51.996 Cr_ONCV_PBE-1.2.upf
+Cr2 51.996 Cr_ONCV_PBE-1.2.upf
+CELL_PARAMETERS angstrom
+2.88 0.00 0.00
+0.00 2.88 0.00
+0.00 0.00 2.88
+ATOMIC_POSITIONS crystal
+Cr1 0.00 0.00 0.00
+Cr2 0.50 0.50 0.50
+K_POINTS automatic
+4 4 4 0 0 0

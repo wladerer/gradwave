@@ -16,6 +16,7 @@ def sad_density(
     upfs: list,  # [UPFData] per species
     n_electrons: float,
     species_scale=None,  # per-species factor (spin-channel splits), default 1
+    atom_scale=None,  # per-ATOM factor (AFM seeds); overrides species_scale
 ) -> torch.Tensor:
     """ρ₀(r) on the dense grid [e/Å³], rescaled to exactly N_e electrons."""
     device = grid.g2.device
@@ -35,7 +36,13 @@ def sad_density(
             continue
         gvec = grid.g_cart.reshape(-1, 3)
         phase = gvec @ pos[atoms].T  # (nG, natoms_s)
-        sfac = torch.exp(torch.complex(torch.zeros_like(phase), -phase)).sum(dim=1)
+        sfac_a = torch.exp(torch.complex(torch.zeros_like(phase), -phase))
+        if atom_scale is not None:
+            w_at = torch.tensor([float(atom_scale[a]) for a in atoms],
+                                dtype=sfac_a.real.dtype, device=device)
+            sfac = (sfac_a * w_at[None, :]).sum(dim=1)
+        else:
+            sfac = sfac_a.sum(dim=1)
         rho_g += sfac * shell.to(CDTYPE) / vol
 
     # rescale so that Ω·ρ(G=0) = N_e exactly (mesh-truncation fix)

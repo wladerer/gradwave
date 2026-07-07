@@ -280,7 +280,7 @@ def scf(
     diago_tol: float = 1e-9,
     verbose: bool = True,
     nspin: int = 1,
-    start_mag=None,  # per-species initial moment fractions (nspin=2)
+    start_mag=None,  # initial moment fractions: per-species OR per-atom (nspin=2)
 ) -> SCFResult:
     grid, spheres = system.grid, system.spheres
     vol = grid.volume
@@ -303,18 +303,33 @@ def scf(
         rho_s = [sad_density(grid, system.positions, system.species_of_atom,
                              system.upfs, system.n_electrons)]
     else:
+        na = len(system.species_of_atom)
         nspecies = len(system.upfs)
-        mags = list(start_mag) if start_mag is not None else [0.5] * nspecies
-        z_by_species = [0.0] * nspecies
+        if start_mag is None:
+            mags_at = [0.5] * na
+        elif len(start_mag) == na:
+            mags_at = [float(m) for m in start_mag]
+        elif len(start_mag) == nspecies:
+            mags_at = [float(start_mag[sp]) for sp in system.species_of_atom]
+        else:
+            raise ValueError("start_mag must have one entry per atom or per species")
+        mags_by_sp = {}
         for a, sp in enumerate(system.species_of_atom):
-            z_by_species[sp] += float(system.charges[a])
-        n_up = sum(z * (1 + m) / 2 for z, m in zip(z_by_species, mags, strict=True))
+            mags_by_sp.setdefault(sp, set()).add(round(mags_at[a], 12))
+        uniform_per_species = all(len(v) == 1 for v in mags_by_sp.values())
+        if system.rho_symmetrizer is not None and not uniform_per_species:
+            raise ValueError(
+                "non-uniform per-atom moments break the chemical space group "
+                "(magnetic group is smaller) — build the system with "
+                "use_symmetry=False for AFM/ferrimagnetic configurations"
+            )
+        n_up = sum(float(system.charges[a]) * (1 + mags_at[a]) / 2 for a in range(na))
         n_dn = system.n_electrons - n_up
         rho_s = [
             sad_density(grid, system.positions, system.species_of_atom, system.upfs,
-                        n_up, species_scale=[(1 + m) / 2 for m in mags]),
+                        n_up, atom_scale=[(1 + m) / 2 for m in mags_at]),
             sad_density(grid, system.positions, system.species_of_atom, system.upfs,
-                        n_dn, species_scale=[(1 - m) / 2 for m in mags]),
+                        n_dn, atom_scale=[(1 - m) / 2 for m in mags_at]),
         ]
 
     mask_flat = grid.dens_mask.reshape(-1)
