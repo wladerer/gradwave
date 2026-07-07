@@ -37,6 +37,8 @@ to GPU. On NixOS, expose the driver to the managed-Python torch via
 | C (diamond) | 2 | 8 | 40 Ry | 8 | 3.8 s | 0.9 s |
 | GaAs (zincblende, Ga-3d, l=2) | 2 | 18 | 40 Ry | 8 | 16.5 s | 2.8 s |
 | Al (fcc metal, smeared) | 1 | 11 | 40 Ry | 29 | 13.1 s | 3.9 s |
+| Cu (fcc d-band metal, 3s3p semicore) | 1 | 19 | 45 Ry | 29 | — | 5.1 s |
+| Cu₃Al (L1₂ intermetallic) | 4 | 68 | 45 Ry | 10 | — | 23.5 s |
 | MgO (rocksalt) | 2 | 16 | 50 Ry | 8 | 7.0 s | 1.5 s |
 | Si₈ (conventional cell) | 8 | 32 | 30 Ry | 4 | 22.9 s | 5.1 s |
 | Si₆₄ (2×2×2 supercell, Γ) | 64 | 256 | 30 Ry | 1 | — | 231 s |
