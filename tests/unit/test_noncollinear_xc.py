@@ -49,3 +49,21 @@ def test_bxc_parallel_to_m():
     # B_xc ∥ m pointwise (locally collinear): cross product vanishes
     cross = torch.linalg.cross(bxc.T, m_vec.T)
     assert float(cross.abs().max()) < 1e-10 * float(bxc.abs().max())
+
+
+def test_complex_ylm_vs_scipy():
+    import numpy as np
+    from scipy.special import sph_harm_y
+
+    from gradwave.core.spinor_proj import complex_ylm
+
+    rng = np.random.default_rng(4)
+    pts = rng.normal(size=(40, 3))
+    theta = np.arccos(np.clip(pts[:, 2] / np.linalg.norm(pts, axis=1), -1, 1))
+    phi = np.arctan2(pts[:, 1], pts[:, 0])
+    ours = complex_ylm(3, torch.as_tensor(pts, dtype=torch.float64)).numpy()
+    for l in range(4):
+        for m in range(-l, l + 1):
+            ref = sph_harm_y(l, m, theta, phi)
+            got = ours[:, l * l + l + m]
+            assert np.abs(got - ref).max() < 1e-7, (l, m)

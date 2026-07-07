@@ -35,6 +35,7 @@ class BetaProjector:
     l: int
     rbeta: np.ndarray  # r·β(r), converted (see module docstring), truncated at cutoff index
     cutoff_idx: int  # number of valid mesh points (kkbeta)
+    j: float | None = None  # total angular momentum (fully-relativistic UPFs)
 
 
 @dataclass(frozen=True)
@@ -95,8 +96,7 @@ def parse_upf(path: str | Path) -> UPFData:
             f"{path}: gradwave supports norm-conserving pseudopotentials only "
             f"(got pseudo_type={pseudo_type!r}). Use PseudoDojo or SG15 ONCV UPF files."
         )
-    if flag("has_so"):
-        raise ValueError(f"{path}: spin-orbit UPF files are not supported")
+    has_so = flag("has_so")
 
     mesh = root.find("PP_MESH")
     r = _parse_floats(mesh.find("PP_R").text) * BOHR_ANG
@@ -105,6 +105,14 @@ def parse_upf(path: str | Path) -> UPFData:
     vloc = _parse_floats(root.find("PP_LOCAL").text) * RY_EV
 
     nonlocal_ = root.find("PP_NONLOCAL")
+    jjj = {}
+    if has_so:
+        so = root.find("PP_SPIN_ORB")
+        if so is None:
+            raise ValueError(f"{path}: has_so but no PP_SPIN_ORB block")
+        for child in so:
+            if child.tag.startswith("PP_RELBETA"):
+                jjj[int(child.attrib["index"])] = float(child.attrib["jjj"])
     betas = []
     for child in sorted(
         (c for c in nonlocal_ if c.tag.startswith("PP_BETA.")),
@@ -113,9 +121,11 @@ def parse_upf(path: str | Path) -> UPFData:
         l = int(child.attrib["angular_momentum"])
         kkbeta = int(child.attrib.get("cutoff_radius_index", len(r)))
         vals = _parse_floats(child.text) * BOHR_ANG ** (-0.5)
+        idx = int(child.tag.split(".")[1])  # index attr can be "*" in SG15 FR
         # Respect the hard truncation: SG15 β are exactly zero-padded/noisy
         # beyond kkbeta; integrating past it adds noise.
-        betas.append(BetaProjector(l=l, rbeta=vals[:kkbeta], cutoff_idx=kkbeta))
+        betas.append(BetaProjector(l=l, rbeta=vals[:kkbeta], cutoff_idx=kkbeta,
+                                   j=jjj.get(idx)))
 
     nproj = len(betas)
     dij = np.zeros((nproj, nproj))

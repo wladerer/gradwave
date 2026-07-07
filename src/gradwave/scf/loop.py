@@ -61,6 +61,8 @@ class System:
     batch: object = None  # core.batch.BatchedK — the padded k-batched tensors
     sym: object = None  # symmetry.SpaceGroup when IBZ reduction is active, else None
     rho_symmetrizer: object = None  # symmetry.RhoSymmetrizer (paired with sym)
+    so_beta_tables: list | None = None  # FR pseudos: per-species (nk, nchan, npw_max)
+    is_fr: bool = False  # fully-relativistic pseudos (spinor SCF only)
 
     def to(self, device) -> "System":
         """Copy with every tensor moved to `device` (setup stays CPU/numpy-built)."""
@@ -94,6 +96,10 @@ class System:
             vloc_tables=self.vloc_tables.to(device),
             rho_symmetrizer=(
                 self.rho_symmetrizer.to(device) if self.rho_symmetrizer is not None else None
+            ),
+            so_beta_tables=(
+                [t.to(device) for t in self.so_beta_tables]
+                if self.so_beta_tables is not None else None
             ),
         )
 
@@ -183,14 +189,25 @@ def setup_system(
         vloc_tables.append(tab[inverse].reshape(grid.shape))
     vloc_tables = torch.as_tensor(np.stack(vloc_tables), dtype=RDTYPE)
 
-    # per-k projector data
+    # per-k projector data (scalar path); FR pseudos store raw F tables for
+    # the spinor projector builder instead (scalar m-expansion is invalid)
+    is_fr = any(b.j is not None for u in upfs for b in u.betas)
     proj_data = []
-    for sph in spheres:
+    npw_max = max(sph.npw for sph in spheres)
+    so_tabs = [torch.zeros(len(spheres), u.n_proj, npw_max, dtype=RDTYPE) for u in upfs] \
+        if is_fr else None
+    for ik, sph in enumerate(spheres):
         q = np.sqrt(sph.kpg2.numpy())
         beta_tables = [
             torch.as_tensor(beta_form_factors(upf, q), dtype=RDTYPE) for upf in upfs
         ]
-        beta_ls = [[b.l for b in upf.betas] for upf in upfs]
+        if is_fr:
+            for sp_i in range(len(upfs)):
+                so_tabs[sp_i][ik, :, : sph.npw] = beta_tables[sp_i]
+            beta_ls = [[] for _ in upfs]
+            beta_tables = [t[:0] for t in beta_tables]
+        else:
+            beta_ls = [[b.l for b in upf.betas] for upf in upfs]
         dij_species = [torch.as_tensor(upf.dij, dtype=RDTYPE) for upf in upfs]
         proj_data.append(
             build_projector_data(
@@ -217,6 +234,8 @@ def setup_system(
         ecut=ecut,
         sym=sym,
         rho_symmetrizer=rho_symmetrizer,
+        so_beta_tables=so_tabs,
+        is_fr=is_fr,
     )
 
 
@@ -290,6 +309,9 @@ def scf(
         raise ValueError("nspin must be 1 or 2 (noncollinear is future work)")
     if nspin == 2 and smearing == "none":
         raise ValueError("nspin=2 requires smearing (fixed magnetic occupations ambiguous)")
+    if system.is_fr:
+        raise ValueError("fully-relativistic pseudos require the spinor SCF "
+                         "(scf_noncollinear) — SOC has no collinear representation")
     g_spin = 2.0 / nspin
     if kerker is None:
         # auto policy: metals always; insulators once the cell is large

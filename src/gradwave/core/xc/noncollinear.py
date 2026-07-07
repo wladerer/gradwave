@@ -47,12 +47,27 @@ class NoncollinearXC(torch.nn.Module):
         return self.collinear.energy(rho_up, rho_dn, volume, sigma_uu, sigma_dd, sigma_tot)
 
 
+def energy_with_grid(nc_xc: NoncollinearXC, rho, m_vec, grid):
+    """E_xc with locally-collinear GGA σ's computed spectrally (in-graph)."""
+    from gradwave.core.density import sigma_from_rho
+
+    m_norm = torch.sqrt((m_vec**2).sum(dim=0) + nc_xc.m_eps)
+    r_up, r_dn = 0.5 * (rho + m_norm), 0.5 * (rho - m_norm)
+    if nc_xc.collinear.needs_gradient:
+        s_uu = sigma_from_rho(r_up, grid.g_cart)
+        s_dd = sigma_from_rho(r_dn, grid.g_cart)
+        s_tt = sigma_from_rho(rho, grid.g_cart)
+    else:
+        s_uu = s_dd = s_tt = None
+    return nc_xc.collinear.energy(r_up, r_dn, grid.volume, s_uu, s_dd, s_tt)
+
+
 def vxc_and_bxc(nc_xc: NoncollinearXC, rho, m_vec, grid):
-    """(v_xc(r), B⃗_xc(r), E_xc) via one autograd call (LDA-level fields)."""
+    """(v_xc(r), B⃗_xc(r), E_xc) via one autograd call — GGA terms included."""
     r = rho.detach().clone().requires_grad_(True)
     m = m_vec.detach().clone().requires_grad_(True)
     with torch.enable_grad():
-        e = nc_xc.energy(r, m, grid.volume)
+        e = energy_with_grid(nc_xc, r, m, grid)
         vr, vm = torch.autograd.grad(e, (r, m))
     scale = grid.n_points / grid.volume
     return vr * scale, vm * scale, e.detach()
