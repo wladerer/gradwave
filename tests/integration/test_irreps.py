@@ -43,7 +43,9 @@ def test_gamma_labels(graphene):
 
 
 def test_k_dirac_pair_is_e_doubleprime(graphene):
-    out = band_irreps(graphene, [1 / 3, 1 / 3, 0], nbands=6)
+    # cluster_tol generous enough to fuse the σ E' doublet, whose grid-level
+    # splitting at these cheap settings is a few meV
+    out = band_irreps(graphene, [1 / 3, 1 / 3, 0], nbands=6, cluster_tol=8e-3)
     # the cluster at E_F must be the 2D E'' irrep, exactly degenerate
     ef = graphene.fermi
     dirac = min(out.clusters, key=lambda c: abs(np.mean(c.energies) - ef))
