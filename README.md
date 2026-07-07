@@ -24,9 +24,26 @@ Differentiable plane-wave density functional theory for periodic solids, in PyTo
 | + symmetry, RTX 3050 laptop GPU (complex128) | **1.4 s** |
 
 The SCF runs fully k-batched: padded `(nk, nb, npw_max)` layout, batched
-FFT Hamiltonian applies, batched QR/eigh Davidson. `System.to("cuda")`
-moves a prepared calculation to GPU. On NixOS, expose the driver to the
-managed-Python torch via `/run/opengl-driver/lib` (see docs in repo).
+FFT Hamiltonian applies, batched QR/eigh Davidson, band-chunked dense-grid
+ops to bound GPU memory. `System.to("cuda")` moves a prepared calculation
+to GPU. On NixOS, expose the driver to the managed-Python torch via
+`/run/opengl-driver/lib` (see docs in repo).
+
+### Cross-system matrix (`benchmarks/bench_matrix.py`, symmetry on)
+
+| case | atoms | e⁻ | ecut | k (IBZ) | 8-core CPU | RTX 3050 |
+|---|---|---|---|---|---|---|
+| Si (diamond) | 2 | 8 | 30 Ry | 8 | 6.1 s | 1.4 s |
+| C (diamond) | 2 | 8 | 40 Ry | 8 | 3.8 s | 0.9 s |
+| GaAs (zincblende, Ga-3d, l=2) | 2 | 18 | 40 Ry | 8 | 16.5 s | 2.8 s |
+| Al (fcc metal, smeared) | 1 | 11 | 40 Ry | 29 | 13.1 s | 3.9 s |
+| MgO (rocksalt) | 2 | 16 | 50 Ry | 8 | 7.0 s | 1.5 s |
+| Si₈ (conventional cell) | 8 | 32 | 30 Ry | 4 | 22.9 s | 5.1 s |
+| Si₆₄ (2×2×2 supercell, Γ) | 64 | 256 | 30 Ry | 1 | — | 306 s |
+
+All validated against QE at matched settings (≤ 1 meV/atom; GaAs at
+0.003 meV/atom exercises the d-channel projectors). Si₆₄(Γ) reproduces
+Si₈(2×2×2) to 3 µeV/atom — exact supercell folding equivalence.
 
 - Norm-conserving pseudopotentials (Quantum ESPRESSO UPF v2: PseudoDojo / SG15 ONCV), Kleinman–Bylander form
 - Base units: **eV** and **Ångström**; float64/complex128 throughout
