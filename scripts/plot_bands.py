@@ -30,7 +30,7 @@ def main():
     nb = len(eigs[0])
     for b in range(nb):
         ax.plot(x, [e[b] - ref for e in eigs], color="#2060a0", lw=1.2)
-    for xt, lab in d["labels"]:
+    for xt, _lab in d["labels"]:
         ax.axvline(xt, color="0.8", lw=0.6, zorder=0)
     ax.axhline(0.0, color="0.6", lw=0.6, ls="--", zorder=0)
     ax.set_xticks([xt for xt, _ in d["labels"]])
