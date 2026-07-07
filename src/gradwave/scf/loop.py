@@ -303,7 +303,7 @@ def scf(
 
         e_free_prev = e_free
         mixed = mixer.step(rho_in_vec, rho_out_vec)
-        rho_g_new = torch.zeros(grid.n_points, dtype=CDTYPE)
+        rho_g_new = torch.zeros(grid.n_points, dtype=CDTYPE, device=device)
         rho_g_new[mask_flat] = mixed
         rho = (
             torch.fft.ifftn(rho_g_new.reshape(grid.shape) * grid.n_points, dim=(-3, -2, -1))
