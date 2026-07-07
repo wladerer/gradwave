@@ -75,12 +75,44 @@ def result_summary(res: SCFResult) -> dict:
     }
 
 
+def run_relax(inp: Input, verbose: bool = True) -> dict:
+    from ase.optimize import BFGS, FIRE
+
+    from gradwave.calculator import GradWave
+
+    atoms = inp.atoms.copy()
+    atoms.calc = GradWave(
+        ecut=inp.ecut,
+        pseudopotentials={s: str(inp.pseudo_dir / f) for s, f in inp.pseudo_map.items()},
+        xc=inp.xc,
+        kpts=inp.kpoints.mesh,
+        kshift=inp.kpoints.shift,
+        smearing=inp.smearing.type,
+        width=inp.smearing.width,
+        nbands=inp.nbands,
+        etol=inp.scf.etol,
+        rhotol=inp.scf.rhotol,
+        verbose=False,
+    )
+    opt_cls = {"fire": FIRE, "bfgs": BFGS}[inp.relax.optimizer]
+    opt = opt_cls(atoms, logfile="-" if verbose else None)
+    converged = opt.run(fmax=inp.relax.fmax, steps=inp.relax.max_steps)
+    return {
+        "converged": bool(converged),
+        "n_steps": opt.nsteps,
+        "energy_eV": float(atoms.get_potential_energy()),
+        "fmax_eV_ang": float(abs(atoms.get_forces()).max()),
+        "positions_ang": atoms.get_positions().tolist(),
+        "cell_ang": atoms.cell.array.tolist(),
+    }
+
+
 def run(inp: Input, verbose: bool = True) -> dict:
     if inp.task == "scf":
         res = run_scf(inp, verbose=verbose)
         summary = result_summary(res)
     elif inp.task == "relax":
-        raise NotImplementedError("task: relax lands with milestone M2")
+        summary = run_relax(inp, verbose=verbose)
     elif inp.task == "bands":
         raise NotImplementedError("task: bands lands with milestone M3")
     else:

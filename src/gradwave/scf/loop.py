@@ -58,6 +58,7 @@ class System:
     proj_data: list  # per-k ProjectorData
     n_electrons: float
     nbands: int
+    ecut: float = 0.0  # eV — needed to build additional G-spheres (band paths)
 
 
 def _unique_shells(vals: np.ndarray):
@@ -125,6 +126,7 @@ def setup_system(
         proj_data=proj_data,
         n_electrons=n_electrons,
         nbands=nbands,
+        ecut=ecut,
     )
 
 
