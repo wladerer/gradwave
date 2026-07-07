@@ -1,0 +1,29 @@
+&control
+  calculation = 'scf'
+  prefix = 'mgo_pbe_ci'
+  pseudo_dir = '../pseudos'
+  outdir = './tmp'
+  verbosity = 'high'
+/
+&system
+  ibrav = 0
+  nat = 2
+  ntyp = 2
+  ecutwfc = 40.0
+  occupations = 'fixed'
+/
+&electrons
+  conv_thr = 1.0d-12
+/
+ATOMIC_SPECIES
+Mg 24.305 Mg_ONCV_PBE-1.2.upf
+O 15.999 O_ONCV_PBE-1.2.upf
+CELL_PARAMETERS angstrom
+0.0000 2.1060 2.1060
+2.1060 0.0000 2.1060
+2.1060 2.1060 0.0000
+ATOMIC_POSITIONS crystal
+Mg 0.00 0.00 0.00
+O  0.50 0.50 0.50
+K_POINTS automatic
+2 2 2 0 0 0

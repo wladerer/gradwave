@@ -25,6 +25,13 @@ RY = 13.605693122994
 SI_CELL = 5.43 / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 SI_POS = np.array([[0.0, 0, 0], [5.43 / 4] * 3])
 AL_CELL = 4.05 / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+FCC = np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+C_CELL = 3.567 / 2 * FCC
+C_POS = np.array([[0.0, 0, 0], [3.567 / 4] * 3])
+GAAS_CELL = 5.653 / 2 * FCC
+GAAS_POS = np.array([[0.0, 0, 0], [5.653 / 4] * 3])
+MGO_CELL = 4.212 / 2 * FCC
+MGO_POS = np.array([[0.0, 0.0, 0.0], [2.106, 2.106, 2.106]])  # frac (.5,.5,.5)
 
 CASES = {
     "si_lda_ci": dict(xc=LDA_PW92, ecut=15 * RY, kmesh=(2, 2, 2), cell=SI_CELL, pos=SI_POS,
@@ -34,6 +41,19 @@ CASES = {
     "al_pbe_ci": dict(xc=PBE, ecut=20 * RY, kmesh=(2, 2, 2), cell=AL_CELL,
                       pos=np.zeros((1, 3)), pseudo="Al_ONCV_PBE-1.2.upf", nat=1,
                       smearing="gaussian", nbands=10, slow=False),
+    # new chemistries: C (hard, light), GaAs (two species, Ga d-channel l=2
+    # projectors + 3d semicore), MgO (ionic, O)
+    "c_pbe_ci": dict(xc=PBE, ecut=30 * RY, kmesh=(2, 2, 2), cell=C_CELL, pos=C_POS,
+                     pseudo="C_ONCV_PBE-1.2.upf", nat=2, smearing="none", slow=False),
+    # PBE+SG15 GaAs at this mesh is a ZERO-gap semimetal (PBE gap collapse):
+    # fixed occupations oscillate between degenerate states, so both codes
+    # use matched 0.02 eV Gaussian smearing here.
+    "gaas_pbe_ci": dict(xc=PBE, ecut=30 * RY, kmesh=(2, 2, 2), cell=GAAS_CELL,
+                        pos=GAAS_POS, pseudo=("Ga_ONCV_PBE-1.2.upf", "As_ONCV_PBE-1.2.upf"),
+                        nat=2, smearing="gaussian", width=0.02, nbands=13, slow=False),
+    "mgo_pbe_ci": dict(xc=PBE, ecut=40 * RY, kmesh=(2, 2, 2), cell=MGO_CELL,
+                       pos=MGO_POS, pseudo=("Mg_ONCV_PBE-1.2.upf", "O_ONCV_PBE-1.2.upf"),
+                       nat=2, smearing="none", slow=False),
     "si_lda_scf": dict(xc=LDA_PW92, ecut=30 * RY, kmesh=(4, 4, 4), cell=SI_CELL, pos=SI_POS,
                        pseudo="Si_ONCV_PBE-1.2.upf", nat=2, smearing="none", slow=True),
     "si_pbe_scf": dict(xc=PBE, ecut=30 * RY, kmesh=(4, 4, 4), cell=SI_CELL, pos=SI_POS,
@@ -47,12 +67,14 @@ CASES = {
 def run_case(name):
     cfg = CASES[name]
     ref = json.loads((FIX / name / "reference.json").read_text())
-    upf = parse_upf(FIX / "pseudos" / cfg["pseudo"])
+    pseudos = cfg["pseudo"] if isinstance(cfg["pseudo"], tuple) else (cfg["pseudo"],)
+    upfs = [parse_upf(FIX / "pseudos" / p) for p in pseudos]
+    species = list(range(len(upfs))) if len(upfs) == cfg["nat"] else [0] * cfg["nat"]
     system = setup_system(
-        cfg["cell"], cfg["pos"], [0] * cfg["nat"], [upf],
+        cfg["cell"], cfg["pos"], species, upfs,
         ecut=cfg["ecut"], kmesh=cfg["kmesh"], nbands=cfg.get("nbands"),
     )
-    res = scf(system, cfg["xc"](), smearing=cfg["smearing"], width=0.1,
+    res = scf(system, cfg["xc"](), smearing=cfg["smearing"], width=cfg.get("width", 0.1),
               etol=1e-9, rhotol=1e-8, verbose=False)
     assert res.converged, f"{name}: SCF did not converge"
     assert res.n_iter < 25, f"{name}: too many SCF iterations ({res.n_iter})"
