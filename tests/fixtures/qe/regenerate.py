@@ -101,6 +101,22 @@ def run_case(case: Path) -> None:
     prefix = re.search(r"prefix\s*=\s*'([^']+)'", (case / "pw.in").read_text()).group(1)
     xml_path = case / "tmp" / f"{prefix}.save" / "data-file-schema.xml"
     data = {"qe_version": qe_version(), **parse_xml(xml_path), **parse_stdout_terms(txt.stdout)}
+
+    # optional second stage: non-SCF bands run reusing the same outdir
+    if (case / "pw_bands.in").exists():
+        btxt = subprocess.run(
+            ["pw.x", "-in", "pw_bands.in"], cwd=case, capture_output=True, text=True
+        )
+        if "JOB DONE" not in btxt.stdout:
+            print(btxt.stdout[-3000:])
+            raise RuntimeError(f"{case.name}: bands pw.x failed")
+        bdata = parse_xml(xml_path)
+        data["bands"] = {
+            "k_points_tpiba": bdata["k_points_tpiba"],
+            "eigenvalues_eV": bdata["eigenvalues_eV"],
+            "vbm_eV": bdata.get("vbm_eV"),
+        }
+
     (case / "reference.json").write_text(json.dumps(data, indent=1))
     print(f"   etot = {data['etot_eV']:.8f} eV  -> reference.json")
 

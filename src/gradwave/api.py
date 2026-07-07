@@ -114,7 +114,21 @@ def run(inp: Input, verbose: bool = True) -> dict:
     elif inp.task == "relax":
         summary = run_relax(inp, verbose=verbose)
     elif inp.task == "bands":
-        raise NotImplementedError("task: bands lands with milestone M3")
+        from gradwave.postscf.bands import bands_along_ase_path
+
+        res = run_scf(inp, verbose=verbose)
+        bs = bands_along_ase_path(
+            res, inp.atoms, path=inp.bands.path, npoints=inp.bands.npoints,
+            nbands=inp.bands.nbands, verbose=verbose,
+        )
+        summary = {
+            "scf": result_summary(res),
+            "kpts_frac": bs.kpts_frac.tolist(),
+            "x": bs.x.tolist(),
+            "labels": bs.labels,
+            "eigenvalues_eV": bs.eigenvalues.tolist(),
+            "reference_eV": bs.reference,
+        }
     else:
         raise ValueError(inp.task)
 
