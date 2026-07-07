@@ -61,3 +61,54 @@ def forces(res: SCFResult, remove_net: bool = True) -> torch.Tensor:
 
         f = symmetrize_forces(f, system.sym, grid.cell)
     return f
+
+
+def hubbard_force(res: SCFResult, manifolds) -> torch.Tensor:
+    """+U contribution to the Hellmann–Feynman force, −dE_U/dτ, (na, 3) [eV/Å].
+
+    E_U enters through the atomic-orbital projector phases e^{−i(k+G)·τ}; with
+    the orbitals and occupations detached (stationary at convergence), autograd
+    of E_U over the differentiable projectors gives the force. Works for both
+    nspin=1 and 2, and is additive to the (KB/local/Ewald) force above — kept
+    separate because the full nspin=2/NLCC force path is not yet assembled.
+    """
+    from gradwave.core.hubbard import (
+        build_hubbard_projectors,
+        hubbard_energy,
+        hubbard_projectors,
+        occupation_matrices,
+    )
+
+    system = res.system
+    nspin = getattr(res, "nspin", 1)
+    pos = system.positions.detach().clone().requires_grad_(True)
+    hub = build_hubbard_projectors(system, manifolds)
+    q = hubbard_projectors(hub, pos)  # differentiable in pos
+
+    kw = system.kweights
+    if nspin == 2:
+        occ = res.occupations.detach()  # (2, nk, nb) in [0,1]
+        # res.coeffs is [spin][k] ragged; rebuild padded (nk, nb, npw_max)
+        e_u = 0.0
+        for sp in range(2):
+            cpad = _pad_coeffs(res.coeffs[sp], hub.q_free.shape[-1], q.device)
+            mats = occupation_matrices(q, cpad, occ[sp], kw, hub.sites)
+            e_u = e_u + hubbard_energy(mats, hub.sites)
+    else:
+        occ = res.occupations.detach()
+        cpad = _pad_coeffs(res.coeffs, hub.q_free.shape[-1], q.device)
+        mats = occupation_matrices(q, cpad, 0.5 * occ, kw, hub.sites)
+        e_u = 2.0 * hubbard_energy(mats, hub.sites)
+
+    (grad,) = torch.autograd.grad(e_u, pos)
+    return -grad
+
+
+def _pad_coeffs(coeffs_per_k, npw_max, device):
+    """[(nb, npw_k)] per k → padded (nk, nb, npw_max), detached."""
+    nk = len(coeffs_per_k)
+    nb = coeffs_per_k[0].shape[0]
+    out = torch.zeros(nk, nb, npw_max, dtype=torch.complex128, device=device)
+    for ik, c in enumerate(coeffs_per_k):
+        out[ik, :, : c.shape[1]] = c.detach().to(device)
+    return out

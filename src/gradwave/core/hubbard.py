@@ -46,15 +46,28 @@ class HubbardManifold:
 
 @dataclass
 class HubbardData:
-    """Frozen (positions-fixed) Hubbard projectors for the batched apply."""
+    """Position-independent Hubbard projector factors (setup product).
 
-    q: torch.Tensor  # (nk, nproj, npw_max) complex atomic-orbital projectors
+    The atomic-orbital projectors factor as q_free·e^{−i(k+G)·τ}; keeping the
+    phase separate lets positions flow through autograd for +U forces, exactly
+    like the KB ProjectorData/projectors() split."""
+
+    q_free: torch.Tensor  # (nk, nproj, npw_max) — (4π/√Ω)(−i)^l Y_lm F, no phase
+    atom_of_col: torch.Tensor  # (nproj,) int64 — atom index per projector column
+    kpg: torch.Tensor  # (nk, npw_max, 3) k+G for the phase
     sites: list  # per correlated atom: {atom, l, u, j, start, dim}
     nproj: int
 
     @property
     def n_sites(self) -> int:
         return len(self.sites)
+
+
+def hubbard_projectors(hub: HubbardData, positions: torch.Tensor) -> torch.Tensor:
+    """Phased projectors q (nk, nproj, npw_max), differentiable in positions."""
+    phase_arg = torch.einsum("kgd,ad->kga", hub.kpg, positions)  # (nk, npw, na)
+    phases = torch.exp(torch.complex(torch.zeros_like(phase_arg), -phase_arg))
+    return hub.q_free * phases[:, :, hub.atom_of_col].permute(0, 2, 1)
 
 
 def manifold_radial(upf, l: int) -> np.ndarray:
@@ -96,8 +109,7 @@ def build_hubbard_projectors(system, manifolds: list[HubbardManifold]) -> Hubbar
         col += 2 * m.l + 1
     nproj = col
 
-    q = torch.zeros(len(system.spheres), nproj, npw_max, dtype=CDTYPE, device=device)
-    pos = system.positions
+    q_free = torch.zeros(len(system.spheres), nproj, npw_max, dtype=CDTYPE, device=device)
     for ik, sph in enumerate(system.spheres):
         npw = sph.npw
         kpg = sph.kpg.to(device)
@@ -113,47 +125,44 @@ def build_hubbard_projectors(system, manifolds: list[HubbardManifold]) -> Hubbar
             site = next(x for x in sites if x["atom"] == a)
             l = site["l"]
             pref = (4.0 * math.pi / math.sqrt(vol)) * _MINUS_I_POW[l]
-            phase = torch.exp(torch.complex(
-                torch.zeros(npw, dtype=RDTYPE, device=device), -(kpg @ pos[a])))
             for mm in range(2 * l + 1):
                 yl = y[:, l * l + mm]
-                q[ik, site["start"] + mm, :npw] = pref * (f_by_sp[s] * yl).to(CDTYPE) * phase
-    return HubbardData(q=q, sites=sites, nproj=nproj)
+                q_free[ik, site["start"] + mm, :npw] = pref * (f_by_sp[s] * yl).to(CDTYPE)
+    return HubbardData(q_free=q_free,
+                       atom_of_col=torch.tensor([x["atom"] for x in sites
+                                                 for _ in range(x["dim"])],
+                                                dtype=torch.int64, device=device),
+                       kpg=bk.kpg, sites=sites, nproj=nproj)
 
 
-def hubbard_becp(hub: HubbardData, coeffs: torch.Tensor) -> torch.Tensor:
-    """⟨φ_p|ψ_b⟩ per k: (nk, nb, nproj)."""
-    return torch.einsum("kpg,kbg->kbp", hub.q.conj(), coeffs)
-
-
-def occupation_matrices(hub: HubbardData, coeffs: torch.Tensor, occ: torch.Tensor,
-                        kweights: torch.Tensor) -> list[torch.Tensor]:
+def occupation_matrices(q: torch.Tensor, coeffs: torch.Tensor, occ: torch.Tensor,
+                        kweights: torch.Tensor, sites: list) -> list[torch.Tensor]:
     """Per-site occupation matrices n^I_{mm'} (Hermitian) for one spin channel.
 
-    coeffs (nk, nb, npw_max), occ (nk, nb) in the channel's electron units,
-    kweights (nk,). On-site blocks only (Dudarev is on-site)."""
-    becp = hubbard_becp(hub, coeffs)  # (nk, nb, nproj)
+    q (nk, nproj, npw_max) phased projectors, coeffs (nk, nb, npw_max), occ
+    (nk, nb) in the channel's electron units. On-site blocks (Dudarev)."""
+    becp = torch.einsum("kpg,kbg->kbp", q.conj(), coeffs)  # (nk, nb, nproj)
     w = (kweights[:, None] * occ).to(RDTYPE)
     n_full = torch.einsum("kb,kbp,kbq->pq", w, becp, becp.conj())  # (nproj, nproj)
     return [n_full[s["start"]:s["start"] + s["dim"],
-                   s["start"]:s["start"] + s["dim"]] for s in hub.sites]
+                   s["start"]:s["start"] + s["dim"]] for s in sites]
 
 
-def hubbard_energy(mats: list[torch.Tensor], hub: HubbardData) -> torch.Tensor:
+def hubbard_energy(mats: list[torch.Tensor], sites: list) -> torch.Tensor:
     """Dudarev E_U for one spin channel: Σ_I (U−J)/2 Tr[n(1−n)]."""
-    e = torch.zeros((), dtype=RDTYPE, device=hub.q.device)
-    for n, s in zip(mats, hub.sites, strict=True):
+    e = torch.zeros((), dtype=RDTYPE, device=mats[0].device)
+    for n, s in zip(mats, sites, strict=True):
         uj = s["u"] - s["j"]
         e = e + 0.5 * uj * (torch.trace(n).real - torch.trace(n @ n).real)
     return e
 
 
-def hubbard_dmatrix(mats: list[torch.Tensor], hub: HubbardData) -> torch.Tensor:
+def hubbard_dmatrix(mats: list[torch.Tensor], sites: list, nproj: int,
+                    device) -> torch.Tensor:
     """Block-diagonal D^I_{mm'} = (U−J)(½δ − n^I) over all correlated sites,
     shape (nproj, nproj) complex Hermitian (one spin channel)."""
-    device = hub.q.device
-    d = torch.zeros(hub.nproj, hub.nproj, dtype=CDTYPE, device=device)
-    for n, s in zip(mats, hub.sites, strict=True):
+    d = torch.zeros(nproj, nproj, dtype=CDTYPE, device=device)
+    for n, s in zip(mats, sites, strict=True):
         uj = s["u"] - s["j"]
         dim, st = s["dim"], s["start"]
         eye = torch.eye(dim, dtype=CDTYPE, device=device)

@@ -341,6 +341,7 @@ def scf(
     start_mag=None,  # initial moment fractions: per-species OR per-atom (nspin=2)
     mixed_precision: bool = False,  # opt-in fp32 draft (see note at resolution below)
     hubbard=None,  # list[core.hubbard.HubbardManifold] — Dudarev DFT+U corrections
+    hub_alpha=None,  # per-site rigid manifold potential α [eV] — linear-response probe
 ) -> SCFResult:
     grid, spheres = system.grid, system.spheres
     vol = grid.volume
@@ -427,11 +428,12 @@ def scf(
     # DFT+U: frozen atomic-orbital projectors; the per-spin occupation matrices
     # are recomputed from the orbitals each iteration (like the density) and
     # lag one step into V_U — they converge as the density does.
-    hub = None
+    hub = hub_q = None
     n_hub_s = None
     if hubbard:
-        from gradwave.core.hubbard import build_hubbard_projectors
+        from gradwave.core.hubbard import build_hubbard_projectors, hubbard_projectors
         hub = build_hubbard_projectors(system, hubbard)
+        hub_q = hubbard_projectors(hub, system.positions)  # phased (positions fixed)
         n_hub_s = [[torch.zeros(s["dim"], s["dim"], dtype=CDTYPE, device=device)
                     for s in hub.sites] for _ in range(nspin)]
 
@@ -491,11 +493,16 @@ def scf(
             hub_dij = None
             if hub is not None:
                 from gradwave.core.hubbard import hubbard_dmatrix
+                dij = hubbard_dmatrix(n_hub_s[sp], hub.sites, hub.nproj, device)
+                if hub_alpha is not None:  # rigid manifold probe α·I (linear response)
+                    for si, s in enumerate(hub.sites):
+                        st, dim = s["start"], s["dim"]
+                        dij[st:st + dim, st:st + dim] += hub_alpha[si] * torch.eye(
+                            dim, dtype=CDTYPE, device=device)
                 # apply convention wants D^T; D is Hermitian so D^T = conj(D)
-                hub_dij = hubbard_dmatrix(n_hub_s[sp], hub).conj()
+                hub_dij = dij.conj()
             h = BatchedHamiltonian(bk, grid.shape, veff_s[sp], projs_b,
-                                   hub_q=hub.q if hub is not None else None,
-                                   hub_dij=hub_dij)
+                                   hub_q=hub_q, hub_dij=hub_dij)
             dav = davidson_batched(h.apply, coeffs_b_s[sp].to(cdtype), t_solve,
                                    bk.mask, tol=tol_eff)
             eigs_s[sp] = dav.eigenvalues.to(RDTYPE)
@@ -536,13 +543,13 @@ def scf(
             if nspin == 2:
                 for sp in range(nspin):
                     n_hub_s[sp] = occupation_matrices(
-                        hub, coeffs_b_s[sp], occ_s[sp], system.kweights)
-                e_hub = sum(hubbard_energy(n_hub_s[sp], hub) for sp in range(nspin))
+                        hub_q, coeffs_b_s[sp], occ_s[sp], system.kweights, hub.sites)
+                e_hub = sum(hubbard_energy(n_hub_s[sp], hub.sites) for sp in range(nspin))
             else:
                 n_half = occupation_matrices(
-                    hub, coeffs_b_s[0], 0.5 * occ_s[0], system.kweights)
+                    hub_q, coeffs_b_s[0], 0.5 * occ_s[0], system.kweights, hub.sites)
                 n_hub_s = [n_half, n_half]
-                e_hub = 2.0 * hubbard_energy(n_half, hub)
+                e_hub = 2.0 * hubbard_energy(n_half, hub.sites)
 
         rho_out_s = [
             symmetrize(density_b(coeffs_b_s[sp], occ_s[sp], system.kweights,

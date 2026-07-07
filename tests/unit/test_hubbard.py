@@ -17,6 +17,7 @@ from gradwave.core.hubbard import (
     build_hubbard_projectors,
     hubbard_dmatrix,
     hubbard_energy,
+    hubbard_projectors,
     manifold_radial,
     occupation_matrices,
 )
@@ -47,7 +48,7 @@ def test_projector_overlap_diagonal_isolated_atom():
                           ecut=40 * RY, kmesh=(1, 1, 1))
     hub = build_hubbard_projectors(system, [HubbardManifold(0, l=2, u=5.0, j=0.8)])
     assert hub.nproj == 5 and hub.n_sites == 1
-    q = hub.q[0]  # (5, npw) at Γ
+    q = hubbard_projectors(hub, system.positions)[0]  # (5, npw) at Γ
     s = (q.conj() @ q.T).real
     diag = torch.diag(s)
     off = s - torch.diag(diag)
@@ -68,6 +69,7 @@ def test_occupation_matrix_and_energy_algebra():
                           ecut=25 * RY, kmesh=(1, 1, 1))
     U, J = 5.0, 0.8
     hub = build_hubbard_projectors(system, [HubbardManifold(0, l=2, u=U, j=J)])
+    q = hubbard_projectors(hub, system.positions)
     npw = system.batch.npw_max
     nk, nb = 1, 6
     coeffs = torch.randn(nk, nb, npw, dtype=torch.complex128)
@@ -75,22 +77,46 @@ def test_occupation_matrix_and_energy_algebra():
     occ = torch.rand(nk, nb, dtype=torch.float64)
     kw = torch.ones(nk, dtype=torch.float64)
 
-    mats = occupation_matrices(hub, coeffs, occ, kw)
+    mats = occupation_matrices(q, coeffs, occ, kw, hub.sites)
     n = mats[0]
     assert n.shape == (5, 5)
     assert torch.allclose(n, n.conj().T, atol=1e-12)  # Hermitian
     # trace equals Σ_kv w f |⟨φ|ψ⟩|² summed over the manifold
-    becp = torch.einsum("kpg,kbg->kbp", hub.q.conj(), coeffs)
+    becp = torch.einsum("kpg,kbg->kbp", q.conj(), coeffs)
     tr_ref = float((kw[:, None] * occ * (becp.abs() ** 2).sum(-1)).sum())
     assert abs(float(torch.trace(n).real) - tr_ref) < 1e-10
 
     # Dudarev E_U = (U−J)/2 Tr[n(1−n)]
-    e = hubbard_energy(mats, hub)
+    e = hubbard_energy(mats, hub.sites)
     e_ref = 0.5 * (U - J) * float((torch.trace(n) - torch.trace(n @ n)).real)
     assert abs(float(e) - e_ref) < 1e-10
 
     # D = (U−J)(½I − n), Hermitian
-    d = hubbard_dmatrix(mats, hub)
+    d = hubbard_dmatrix(mats, hub.sites, hub.nproj, torch.device("cpu"))
     eye = torch.eye(5, dtype=torch.complex128)
     assert torch.allclose(d, (U - J) * (0.5 * eye - n), atol=1e-12)
     assert torch.allclose(d, d.conj().T, atol=1e-12)
+
+
+def test_hubbard_force_gradcheck():
+    """E_U's position derivative (the +U force) via autograd vs finite diff.
+    This is the projector-phase differentiability that hubbard_force relies on;
+    tested here on frozen synthetic orbitals so no SCF is needed."""
+    torch.manual_seed(1)
+    se = parse_upf(FIX / "pseudos" / "PD_Se_FR.upf")
+    # two atoms so a phase gradient is nonzero
+    system = setup_system(9.0 * np.eye(3), np.array([[0.0, 0, 0], [2.3, 0.4, 0.0]]),
+                          [0, 0], [se], ecut=20 * RY, kmesh=(1, 1, 1))
+    hub = build_hubbard_projectors(system, [HubbardManifold(0, l=2, u=5.0, j=0.5)])
+    npw = system.batch.npw_max
+    coeffs = torch.randn(1, 4, npw, dtype=torch.complex128) * system.batch.mask[:, None, :]
+    occ = torch.rand(1, 4, dtype=torch.float64)
+    kw = torch.ones(1, dtype=torch.float64)
+
+    def e_u(pos):
+        q = hubbard_projectors(hub, pos)
+        mats = occupation_matrices(q, coeffs, occ, kw, hub.sites)
+        return hubbard_energy(mats, hub.sites)
+
+    pos = system.positions.clone().requires_grad_(True)
+    assert torch.autograd.gradcheck(e_u, (pos,), atol=1e-6, rtol=1e-4)
