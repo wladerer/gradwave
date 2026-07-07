@@ -13,6 +13,20 @@ Differentiable plane-wave density functional theory for periodic solids, in PyTo
 | Si band structure L–Γ–X–U–Γ (occupied) | < 10 meV |
 | dE/dθ, dL(ρ)/dθ (learnable XC) vs SCF finite differences | 1e-5 / 2e-4 rel |
 
+## Performance (Si LDA, 30 Ry, 4×4×4 — `benchmarks/bench_scf.py`)
+
+| configuration | SCF wall time |
+|---|---|
+| per-k Python loop (v0), 8-core CPU | 218 s |
+| k-batched + adaptive diago tolerance, 8-core CPU | 33 s |
+| 22-thread CPU | 15 s |
+| RTX 3050 laptop GPU (complex128) | **4.7 s** |
+
+The SCF runs fully k-batched: padded `(nk, nb, npw_max)` layout, batched
+FFT Hamiltonian applies, batched QR/eigh Davidson. `System.to("cuda")`
+moves a prepared calculation to GPU. On NixOS, expose the driver to the
+managed-Python torch via `/run/opengl-driver/lib` (see docs in repo).
+
 - Norm-conserving pseudopotentials (Quantum ESPRESSO UPF v2: PseudoDojo / SG15 ONCV), Kleinman–Bylander form
 - Base units: **eV** and **Ångström**; float64/complex128 throughout
 - SCF total energies, Hellmann–Feynman forces, geometry optimization (via ASE), band structures
