@@ -19,11 +19,11 @@ import torch
 
 from gradwave.constants import HBAR2_2M
 from gradwave.core.density import density_from_orbitals, sigma_from_rho
+from gradwave.core.energies.hartree import hartree_potential_g
+from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.energies.total import EnergyBreakdown, total_energy
 from gradwave.core.fftbox import r_to_g
 from gradwave.core.hamiltonian import HamiltonianK, becp, build_projector_data, projectors
-from gradwave.core.energies.hartree import hartree_potential_g
-from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.occupations import (
     SCHEMES,
     find_fermi,
