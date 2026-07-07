@@ -148,7 +148,7 @@ def solve_adjoint(res: SCFResult, xc, vbar_r: torch.Tensor, beta: float = 0.4,
                   tol: float = 1e-9, max_iter: int = 100) -> torch.Tensor:
     """Solve u = v̄ + K_Hxc[χ₀ u] by damped fixed-point iteration."""
     u = vbar_r.clone()
-    for i in range(max_iter):
+    for _ in range(max_iter):
         u_new = vbar_r + apply_k_hxc(res, xc, apply_chi0(res, u))
         du = float(torch.linalg.norm(u_new - u)) / max(1.0, float(torch.linalg.norm(u)))
         u = u + beta * (u_new - u)

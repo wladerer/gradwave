@@ -52,7 +52,6 @@ def force_constants_gamma(
 
 def gamma_phonons(phi: np.ndarray, masses_amu: np.ndarray) -> np.ndarray:
     """Frequencies [cm⁻¹] from Γ force constants; negative = imaginary mode."""
-    na = len(masses_amu)
     msqrt = np.repeat(np.sqrt(masses_amu), 3)
     dyn = phi / np.outer(msqrt, msqrt)
     dyn = 0.5 * (dyn + dyn.T)

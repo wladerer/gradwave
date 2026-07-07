@@ -49,7 +49,7 @@ def test_de_dtheta_matches_scf_finite_differences():
     grads = energy_param_grads(res, xc)
 
     h = 1e-4
-    for raw_name, param in xc.named_parameters():
+    for raw_name, _param in xc.named_parameters():
         vals = []
         for sign in (+1, -1):
             xc2 = LearnableX(kappa=0.65, mu=0.18)
