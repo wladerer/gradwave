@@ -1,0 +1,27 @@
+# Graphene band structure: SCF on a 12x12x1 mesh, then Γ-M-K-Γ bands.
+# The Dirac crossing at K is the acceptance check.
+structure:
+  cell: [[2.46, 0.0, 0.0], [-1.23, 2.130422, 0.0], [0.0, 0.0, 15.0]]
+  positions: {frac: [[0.0, 0.0, 0.5], [0.333333333333, 0.666666666667, 0.5]]}
+  species: [C, C]
+
+pseudopotentials:
+  dir: ../tests/fixtures/qe/pseudos
+  map: {C: C_ONCV_PBE-1.2.upf}
+
+ecut: 544.228          # 40 Ry
+xc: pbe
+kpoints: {mesh: [12, 12, 1]}
+smearing: {type: gaussian, width: 0.05}   # Dirac semimetal
+nbands: 12
+symmetry: true
+
+scf:
+  etol: 1.0e-8
+  rhotol: 1.0e-7
+
+task: bands
+bands: {path: GMKG, npoints: 61, nbands: 10}
+
+device: cuda
+output: {dir: ./out_graphene}

@@ -133,7 +133,30 @@ def setup_system(
         if sym.n_ops <= 1:
             sym = None  # P1 — nothing to gain, keep the plain path
 
-    grid = build_fft_grid(cell, ecut, equal_dims=sym is not None, shape_override=fft_shape)
+    # equalize only symmetry-COUPLED axes (a slab's z axis stays independent
+    # of the in-plane pair — blanket cubic boxes would triple slab grids)
+    axis_groups = False
+    if sym is not None:
+        coupled = np.zeros((3, 3), dtype=bool)
+        for w in sym.rotations:
+            coupled |= w != 0
+        coupled |= coupled.T
+        groups, seen = [], set()
+        for i in range(3):
+            if i in seen:
+                continue
+            group = {i}
+            frontier = {i}
+            while frontier:
+                j = frontier.pop()
+                for k2 in range(3):
+                    if coupled[j, k2] and k2 not in group:
+                        group.add(k2)
+                        frontier.add(k2)
+            seen |= group
+            groups.append(tuple(sorted(group)))
+        axis_groups = groups
+    grid = build_fft_grid(cell, ecut, equal_dims=axis_groups, shape_override=fft_shape)
     if sym is not None:
         rho_symmetrizer = RhoSymmetrizer(grid.shape, sym, dens_mask=grid.dens_mask)
         kfrac, kw = reduce_mesh(kmesh, kshift, sym)

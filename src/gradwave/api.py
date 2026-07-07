@@ -35,6 +35,8 @@ def build_system(inp: Input):
 
 def run_scf(inp: Input, system=None, verbose: bool = True) -> SCFResult:
     system = system or build_system(inp)
+    if inp.device != "cpu":
+        system = system.to(inp.device)
     xc = XC_REGISTRY[inp.xc]()
     kerker = inp.scf.mixing.kerker
     return scf(

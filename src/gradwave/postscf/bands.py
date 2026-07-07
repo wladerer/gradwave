@@ -42,16 +42,18 @@ def band_structure(
     grid = system.grid
     nbands = nbands or system.nbands
     v_eff = res.v_eff
+    device = v_eff.device
 
     beta_ls = [[b.l for b in upf.betas] for upf in system.upfs]
-    dij_species = [torch.as_tensor(upf.dij, dtype=RDTYPE) for upf in system.upfs]
+    dij_species = [torch.as_tensor(upf.dij, dtype=RDTYPE, device=device) for upf in system.upfs]
 
     eigs = np.empty((len(kpts_frac), nbands))
     for i, kf in enumerate(np.asarray(kpts_frac, dtype=float)):
-        sph = build_gsphere(grid, system.ecut, kf)
-        q = np.sqrt(sph.kpg2.numpy())
+        sph = build_gsphere(grid, system.ecut, kf, device=device)
+        q = np.sqrt(sph.kpg2.cpu().numpy())
         beta_tables = [
-            torch.as_tensor(beta_form_factors(upf, q), dtype=RDTYPE) for upf in system.upfs
+            torch.as_tensor(beta_form_factors(upf, q), dtype=RDTYPE, device=device)
+            for upf in system.upfs
         ]
         pd = build_projector_data(
             sph, system.species_of_atom, beta_tables, beta_ls, dij_species, grid.volume
@@ -59,12 +61,12 @@ def band_structure(
         p = projectors(pd, system.positions)
         h = HamiltonianK(sph, grid.shape, v_eff, pd, p)
 
-        c0 = torch.zeros(nbands, sph.npw, dtype=CDTYPE)
+        c0 = torch.zeros(nbands, sph.npw, dtype=CDTYPE, device=device)
         c0[torch.arange(nbands), torch.arange(nbands)] = 1.0
         from gradwave.solvers.davidson import davidson
 
         out = davidson(h.apply, c0, HBAR2_2M * sph.kpg2, tol=diago_tol, max_iter=80)
-        eigs[i] = out.eigenvalues.numpy()
+        eigs[i] = out.eigenvalues.cpu().numpy()
         if verbose:
             print(f"  band k {i+1}/{len(kpts_frac)}  max|res| = {out.residual_norms.max():.1e}")
 

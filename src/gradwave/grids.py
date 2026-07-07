@@ -87,10 +87,15 @@ def build_fft_grid(
             # minimal box: integer Miller extent of the density sphere
             m_i = int(np.floor(gmax_dens * np.linalg.norm(cell[i]) / (2.0 * np.pi)))
             shape.append(good_fft_size(2 * m_i + 1))
-        if equal_dims:
+        if equal_dims is True:
             # symmetry operations permute axes; a cubic box is always closed
             # under m → Wᵀm mod n
             shape = [max(shape)] * 3
+        elif equal_dims:  # iterable of axis groups, e.g. [(0, 1)] for a slab
+            for group in equal_dims:
+                n = max(shape[i] for i in group)
+                for i in group:
+                    shape[i] = n
         shape = tuple(shape)
 
     millers = np.meshgrid(
