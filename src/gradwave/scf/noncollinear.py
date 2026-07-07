@@ -80,7 +80,10 @@ class SpinorHamiltonian:
                 "t": self.bk.t.to(rdtype),
                 "v_uu": self._v_uu.to(rdtype),
                 "v_dd": self._v_dd.to(rdtype),
-                "v_ud": self._v_ud.to(cdtype),
+                # real/imag of ⟨↑|V̂|↓⟩ kept separate + contiguous so the
+                # real-decomposed compiled mix fuses (Inductor skips complex)
+                "v_ud_re": self._v_ud.real.to(rdtype).contiguous(),
+                "v_ud_im": self._v_ud.imag.to(rdtype).contiguous(),
                 "p": self.p.to(cdtype),
                 "q": None if self.q is None else self.q.to(cdtype),
                 "dij_so": None if self.dij_so is None else self.dij_so.to(cdtype),
@@ -119,7 +122,7 @@ class SpinorHamiltonian:
                 h_u, h_d = spin_mix_diag(psi_u, psi_d, tab["v_uu"], tab["v_dd"])
             else:
                 h_u, h_d = spin_mix(psi_u, psi_d, tab["v_uu"], tab["v_dd"],
-                                    tab["v_ud"])
+                                    tab["v_ud_re"], tab["v_ud_im"])
             hud = box_to_sphere_b(torch.cat([h_u, h_d], dim=1), bk)
             out_u[:, lo:hi] += hud[:, :nbc]
             out_d[:, lo:hi] += hud[:, nbc:]
