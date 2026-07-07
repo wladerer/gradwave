@@ -13,8 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from gradwave.constants import HBAR2_2M
-from gradwave.core.hamiltonian import HamiltonianK, build_projector_data, projectors
+from gradwave.core.hamiltonian import build_projector_data
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.grids import build_gsphere
 from gradwave.pseudo.kb import beta_form_factors
@@ -49,28 +48,39 @@ def band_structure(
     beta_ls = [[b.l for b in upf.betas] for upf in system.upfs]
     dij_species = [torch.as_tensor(upf.dij, dtype=RDTYPE, device=device) for upf in system.upfs]
 
-    eigs = np.empty((len(kpts_frac), nbands))
-    for i, kf in enumerate(np.asarray(kpts_frac, dtype=float)):
-        sph = build_gsphere(grid, system.ecut, kf, device=device)
-        q = np.sqrt(sph.kpg2.cpu().numpy())
-        beta_tables = [
-            torch.as_tensor(beta_form_factors(upf, q), dtype=RDTYPE, device=device)
-            for upf in system.upfs
-        ]
-        pd = build_projector_data(
-            sph, system.species_of_atom, beta_tables, beta_ls, dij_species, grid.volume
-        )
-        p = projectors(pd, system.positions)
-        h = HamiltonianK(sph, grid.shape, v_eff, pd, p)
+    kpts = np.asarray(kpts_frac, dtype=float)
+    eigs = np.empty((len(kpts), nbands))
 
-        c0 = torch.zeros(nbands, sph.npw, dtype=CDTYPE, device=device)
-        c0[torch.arange(nbands), torch.arange(nbands)] = 1.0
-        from gradwave.solvers.davidson import davidson
+    # batch path points through the k-batched solver (the v0 per-k loop was
+    # ~10x slower); chunk count bounded by dense-box memory (~1.5 GB budget)
+    n_box = grid.shape[0] * grid.shape[1] * grid.shape[2]
+    chunk = max(1, min(24, int(1.5e9 / (nbands * n_box * 16))))
+    from gradwave.core.batch import BatchedHamiltonian, build_batched, projectors_b
+    from gradwave.solvers.davidson import davidson_batched
 
-        out = davidson(h.apply, c0, HBAR2_2M * sph.kpg2, tol=diago_tol, max_iter=80)
-        eigs[i] = out.eigenvalues.cpu().numpy()
+    for lo in range(0, len(kpts), chunk):
+        hi = min(lo + chunk, len(kpts))
+        spheres = [build_gsphere(grid, system.ecut, k, device=device) for k in kpts[lo:hi]]
+        pd_list = []
+        for sph in spheres:
+            q = np.sqrt(sph.kpg2.cpu().numpy())
+            beta_tables = [
+                torch.as_tensor(beta_form_factors(upf, q), dtype=RDTYPE, device=device)
+                for upf in system.upfs
+            ]
+            pd_list.append(build_projector_data(
+                sph, system.species_of_atom, beta_tables, beta_ls, dij_species,
+                grid.volume))
+        bk = build_batched(spheres, pd_list, device=device)
+        p_b = projectors_b(bk, system.positions)
+        h = BatchedHamiltonian(bk, grid.shape, v_eff, p_b)
+        c0 = torch.zeros(hi - lo, nbands, bk.npw_max, dtype=CDTYPE, device=device)
+        c0[:, torch.arange(nbands), torch.arange(nbands)] = 1.0
+        out = davidson_batched(h.apply, c0, bk.t, bk.mask, tol=diago_tol, max_iter=80)
+        eigs[lo:hi] = out.eigenvalues.cpu().numpy()
         if verbose:
-            print(f"  band k {i+1}/{len(kpts_frac)}  max|res| = {out.residual_norms.max():.1e}")
+            print(f"  band chunk {lo}-{hi - 1}/{len(kpts) - 1}  "
+                  f"max|res| = {float(out.residual_norms.max()):.1e}", flush=True)
 
     # reference energy: Fermi (smeared) or VBM (highest eigenvalue with occ > 0)
     if float(res.occupations.min()) < 1e-12 and float(res.occupations.max()) > 1.999999:
