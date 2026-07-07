@@ -140,6 +140,7 @@ def scf_noncollinear(
     mixing_history: int = 8,
     diago_tol: float = 1e-9,
     verbose: bool = True,
+    nonmagnetic: bool = False,  # pin m⃗ ≡ 0 (QE's domag=false): nonmagnetic + SOC
 ) -> NCResult:
     if system.rho_symmetrizer is not None:
         raise ValueError("noncollinear SCF requires use_symmetry=False")
@@ -165,11 +166,17 @@ def scf_noncollinear(
     mask_flat = grid.dens_mask.reshape(-1)
     g2_vec = grid.g2.reshape(-1)[mask_flat]
     ng = int(mask_flat.sum())
-    kerker_mask = torch.cat([torch.ones(ng, dtype=torch.bool, device=device),
-                             torch.zeros(3 * ng, dtype=torch.bool, device=device)])
-    mixer = PulayMixer(torch.cat([g2_vec] * 4), alpha=mixing_alpha,
-                       history=mixing_history, kerker=True, check_g0=False,
-                       kerker_mask=kerker_mask)
+    n_chan = 1 if nonmagnetic else 4
+    if nonmagnetic:
+        m = torch.zeros_like(m)
+        mixer = PulayMixer(g2_vec, alpha=mixing_alpha, history=mixing_history,
+                           kerker=True, check_g0=True)
+    else:
+        kerker_mask = torch.cat([torch.ones(ng, dtype=torch.bool, device=device),
+                                 torch.zeros(3 * ng, dtype=torch.bool, device=device)])
+        mixer = PulayMixer(torch.cat([g2_vec] * 4), alpha=mixing_alpha,
+                           history=mixing_history, kerker=True, check_g0=False,
+                           kerker_mask=kerker_mask)
 
     projs_b = projectors_b(bk, system.positions)
     q_so = dij_so = None
@@ -201,6 +208,8 @@ def scf_noncollinear(
         v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
                                dim=(-3, -2, -1)) * grid.n_points).real
         v_xc, b_xc, _ = vxc_and_bxc(xc, rho, m, grid, rho_core=system.rho_core)
+        if nonmagnetic:
+            b_xc = torch.zeros_like(b_xc)
         v_r = v_h + v_xc + vloc_r
 
         tol_eff = max(diago_tol, 1e-3) if it == 1 else \
@@ -265,7 +274,11 @@ def scf_noncollinear(
                                    nonlocal_=e_nl, ewald=e_ew, smearing=entropy_term)
         e_free = float(energies.free_energy)
 
-        vin, vout = vec_of([rho, *m]), vec_of([rho_out, *m_out])
+        if nonmagnetic:
+            m_out = torch.zeros_like(m_out)
+            vin, vout = vec_of([rho]), vec_of([rho_out])
+        else:
+            vin, vout = vec_of([rho, *m]), vec_of([rho_out, *m_out])
         res_norm = float(torch.linalg.norm(vout - vin)) * vol
         de = abs(e_free - e_free_prev) if e_free_prev is not None else float("inf")
         history.append({"iter": it, "free_energy": e_free, "dE": de, "res": res_norm})
@@ -283,12 +296,14 @@ def scf_noncollinear(
         e_free_prev = e_free
         mixed = mixer.step(vin, vout)
         fields = []
-        for c4 in range(4):
+        for c4 in range(n_chan):
             gnew = torch.zeros(grid.n_points, dtype=CDTYPE, device=device)
             gnew[mask_flat] = mixed[c4 * ng:(c4 + 1) * ng]
             fields.append((torch.fft.ifftn(gnew.reshape(grid.shape) * grid.n_points,
                                            dim=(-3, -2, -1))).real)
-        rho, m = fields[0], torch.stack(fields[1:])
+        rho = fields[0]
+        if not nonmagnetic:
+            m = torch.stack(fields[1:])
 
     m_int = [float(m[i].mean()) * vol for i in range(3)]
     m_norm = torch.sqrt((m**2).sum(dim=0))
