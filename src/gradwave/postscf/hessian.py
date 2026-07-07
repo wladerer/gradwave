@@ -13,7 +13,6 @@ Units: force constants eV/Å²; frequencies via
 from __future__ import annotations
 
 import numpy as np
-import torch
 
 from gradwave.postscf.forces import forces
 
