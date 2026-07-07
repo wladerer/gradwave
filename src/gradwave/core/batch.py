@@ -117,12 +117,17 @@ class BatchedHamiltonian:
     g_to_r_b/box_to_sphere_b remain the differentiable API.
     """
 
-    def __init__(self, bk: BatchedK, shape, v_eff_r: torch.Tensor, p: torch.Tensor):
+    def __init__(self, bk: BatchedK, shape, v_eff_r: torch.Tensor, p: torch.Tensor,
+                 hub_q: torch.Tensor | None = None, hub_dij: torch.Tensor | None = None):
         self.bk = bk
         self.shape = shape
         self.n = shape[0] * shape[1] * shape[2]
         self.v_eff_r = v_eff_r
         self.p = p  # (nk, nproj, npw_max)
+        # DFT+U: atomic-orbital projectors + density-dependent D-matrix, added
+        # as a second nonlocal term (same becp contraction as KB).
+        self.hub_q = hub_q  # (nk, nproj_U, npw_max)
+        self.hub_dij = hub_dij  # (nproj_U, nproj_U) — already transposed for the apply
         # padded slots → trash index n (one past the box)
         self.idx_scatter = torch.where(
             bk.mask, bk.flat_idx, torch.full_like(bk.flat_idx, self.n)
@@ -198,6 +203,10 @@ class BatchedHamiltonian:
         if p.shape[1]:
             b = torch.einsum("kpg,kbg->kbp", p.conj(), c)
             out = out + torch.einsum("kbp,pq,kqg->kbg", b, dij, p)
+        if self.hub_q is not None and self.hub_dij is not None:
+            hq = self.hub_q.to(c.dtype)
+            bh = torch.einsum("kpg,kbg->kbp", hq.conj(), c)
+            out = out + torch.einsum("kbp,pq,kqg->kbg", bh, self.hub_dij.to(c.dtype), hq)
         return out * bk.mask[:, None, :]
 
 

@@ -54,11 +54,13 @@ class EnergyBreakdown:
     nonlocal_: torch.Tensor
     ewald: torch.Tensor
     smearing: torch.Tensor  # −σS (zero for fixed occupations)
+    hubbard: torch.Tensor = 0.0  # Dudarev E_U (zero without +U)
 
     @property
     def total(self) -> torch.Tensor:
         """Kohn–Sham energy E (without the smearing term)."""
-        return self.kinetic + self.hartree + self.xc + self.local + self.nonlocal_ + self.ewald
+        return (self.kinetic + self.hartree + self.xc + self.local + self.nonlocal_
+                + self.ewald + self.hubbard)
 
     @property
     def free_energy(self) -> torch.Tensor:

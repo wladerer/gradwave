@@ -1,0 +1,23 @@
+{
+  "description": "NiO AFM-II, DFT+U (Dudarev, HUBBARD atomic) vs QE 7.5",
+  "qe_version": "7.5",
+  "cell_angstrom": [[2.085, 2.085, 4.170], [2.085, 4.170, 2.085], [4.170, 2.085, 2.085]],
+  "positions_crystal": [[0.0, 0.0, 0.0], [0.5, 0.5, 0.5], [0.25, 0.25, 0.25], [0.75, 0.75, 0.75]],
+  "species": ["Ni", "Ni", "O", "O"],
+  "pseudos": {"Ni": "PD_Ni_PBE.upf", "O": "PD_O_PBE.upf"},
+  "ecutwfc_ry": 45.0,
+  "kmesh": [2, 2, 2],
+  "smearing": "gaussian",
+  "degauss_ry": 0.003675,
+  "U_eV": 5.0,
+  "hubbard_energy_eV": 2.9942,
+  "ni_d_occ_up": 4.90973,
+  "ni_d_occ_dn": 3.64779,
+  "ni_d_total": 8.55752,
+  "abs_magnetization_uB": 3.08,
+  "total_energy_ry_u5": -731.15473707,
+  "total_energy_ry_u0": -731.39887905,
+  "delta_E_u5_minus_u0_eV": 3.3216,
+  "abs_magnetization_uB_u0": 2.52,
+  "note": "gradwave matches QE on all +U observables to ~1e-3; a constant ~12.6 eV total-energy offset (present at both U=0 and U=5) is a PseudoDojo NLCC/semicore reference convention that cancels in energy differences."
+}

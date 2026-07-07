@@ -303,6 +303,7 @@ class SCFResult:
     rho_spin: list | None = None  # [ρ↑, ρ↓] when nspin=2
     mag_total: float = 0.0  # ∫(ρ↑−ρ↓) dr [μB]
     mag_abs: float = 0.0  # ∫|ρ↑−ρ↓| dr [μB]
+    hub_occ: list | None = None  # DFT+U per-spin occupation matrices [σ][site]
 
 
 def vxc_spin_potential(xc, rho_up, rho_dn, grid):
@@ -339,6 +340,7 @@ def scf(
     nspin: int = 1,
     start_mag=None,  # initial moment fractions: per-species OR per-atom (nspin=2)
     mixed_precision: bool = False,  # opt-in fp32 draft (see note at resolution below)
+    hubbard=None,  # list[core.hubbard.HubbardManifold] — Dudarev DFT+U corrections
 ) -> SCFResult:
     grid, spheres = system.grid, system.spheres
     vol = grid.volume
@@ -421,6 +423,18 @@ def scf(
 
     # frozen projector matrices (positions fixed during SCF)
     projs_b = projectors_b(bk, system.positions)
+
+    # DFT+U: frozen atomic-orbital projectors; the per-spin occupation matrices
+    # are recomputed from the orbitals each iteration (like the density) and
+    # lag one step into V_U — they converge as the density does.
+    hub = None
+    n_hub_s = None
+    if hubbard:
+        from gradwave.core.hubbard import build_hubbard_projectors
+        hub = build_hubbard_projectors(system, hubbard)
+        n_hub_s = [[torch.zeros(s["dim"], s["dim"], dtype=CDTYPE, device=device)
+                    for s in hub.sites] for _ in range(nspin)]
+
     vloc_g = local_potential_g(
         system.positions, system.species_index, system.vloc_tables, grid.g_cart, vol
     )
@@ -474,7 +488,14 @@ def scf(
         cdtype = CDTYPE_LOW if use_low else CDTYPE
         t_solve = bk.t.to(RDTYPE_LOW) if use_low else bk.t
         for sp in range(nspin):
-            h = BatchedHamiltonian(bk, grid.shape, veff_s[sp], projs_b)
+            hub_dij = None
+            if hub is not None:
+                from gradwave.core.hubbard import hubbard_dmatrix
+                # apply convention wants D^T; D is Hermitian so D^T = conj(D)
+                hub_dij = hubbard_dmatrix(n_hub_s[sp], hub).conj()
+            h = BatchedHamiltonian(bk, grid.shape, veff_s[sp], projs_b,
+                                   hub_q=hub.q if hub is not None else None,
+                                   hub_dij=hub_dij)
             dav = davidson_batched(h.apply, coeffs_b_s[sp].to(cdtype), t_solve,
                                    bk.mask, tol=tol_eff)
             eigs_s[sp] = dav.eigenvalues.to(RDTYPE)
@@ -506,6 +527,23 @@ def scf(
                 ent = ent - width * (g_spin * system.kweights[:, None] * s_ent).sum()
             entropy_term = ent
 
+        # DFT+U occupation matrices from the fresh orbitals; E_U (Dudarev).
+        # occ_s is per-spin f∈[0,1] when nspin=2; for nspin=1 the [0,2]
+        # occupation splits into two equal spin channels.
+        e_hub = torch.zeros((), dtype=RDTYPE, device=device)
+        if hub is not None:
+            from gradwave.core.hubbard import hubbard_energy, occupation_matrices
+            if nspin == 2:
+                for sp in range(nspin):
+                    n_hub_s[sp] = occupation_matrices(
+                        hub, coeffs_b_s[sp], occ_s[sp], system.kweights)
+                e_hub = sum(hubbard_energy(n_hub_s[sp], hub) for sp in range(nspin))
+            else:
+                n_half = occupation_matrices(
+                    hub, coeffs_b_s[0], 0.5 * occ_s[0], system.kweights)
+                n_hub_s = [n_half, n_half]
+                e_hub = 2.0 * hubbard_energy(n_half, hub)
+
         rho_out_s = [
             symmetrize(density_b(coeffs_b_s[sp], occ_s[sp], system.kweights,
                                  bk, grid.shape, vol))
@@ -530,6 +568,7 @@ def scf(
                 vloc_tables=system.vloc_tables, becp_per_k=becps_s[0],
                 dij_full=_stack_dij(system), xc=xc, entropy_term=entropy_term,
             )
+            energies.hubbard = e_hub
         else:
             from gradwave.core.energies.ewald import ewald_energy
             from gradwave.core.energies.hartree import hartree_energy
@@ -558,7 +597,7 @@ def scf(
             e_ew = ewald_energy(system.positions, system.charges, grid.cell)
             energies = EnergyBreakdown(
                 kinetic=e_kin, hartree=e_h, xc=e_xc, local=e_loc,
-                nonlocal_=e_nl, ewald=e_ew, smearing=entropy_term,
+                nonlocal_=e_nl, ewald=e_ew, smearing=entropy_term, hubbard=e_hub,
             )
         e_free = float(energies.free_energy)
 
@@ -614,6 +653,7 @@ def scf(
             converged=converged, n_iter=it, energies=energies, fermi=mu,
             eigenvalues=eigs_s[0], occupations=occ_s[0], coeffs=coeffs_list_s[0],
             rho=rho_tot_final, v_eff=veff_s[0], system=system, history=history,
+            hub_occ=n_hub_s,
         )
     m_density = rho_s[0] - rho_s[1]
     return SCFResult(
@@ -623,6 +663,7 @@ def scf(
         system=system, history=history, nspin=2, rho_spin=rho_s,
         mag_total=float(m_density.mean()) * vol,
         mag_abs=float(m_density.abs().mean()) * vol,
+        hub_occ=n_hub_s,
     )
 
 
