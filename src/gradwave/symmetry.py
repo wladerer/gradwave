@@ -57,8 +57,24 @@ def find_spacegroup(
     numbers = np.asarray(species_of_atom, dtype=int)
     ds = spglib.get_symmetry_dataset((cell, frac, numbers), symprec=symprec)
 
-    rots = np.asarray(ds.rotations, dtype=np.int64)
-    trans = np.asarray(ds.translations, dtype=np.float64)
+    rots_all = np.asarray(ds.rotations, dtype=np.int64)
+    trans_all = np.asarray(ds.translations, dtype=np.float64)
+
+    # Supercells carry pure lattice translations: spglib returns every
+    # (rotation × centering) combination — up to 48·N ops whose symmetrizer
+    # maps would be gigabytes for large cells (observed: 1536 ops → 9 GB →
+    # OOM for a 64-atom Si supercell). Keep one representative translation
+    # per unique rotation (QE does the same); this preserves the point-group
+    # physics and drops only the enforcement of sub-supercell periodicity.
+    seen: dict[bytes, int] = {}
+    keep = []
+    for i, w_mat in enumerate(rots_all):
+        key = w_mat.tobytes()
+        if key not in seen:
+            seen[key] = i
+            keep.append(i)
+    rots = rots_all[keep]
+    trans = trans_all[keep]
 
     # atom permutations: op sends atom a to the site matching W x_a + w
     na = len(frac)
