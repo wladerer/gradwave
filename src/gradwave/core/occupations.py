@@ -8,12 +8,26 @@ error. Definitions follow QE (wgauss/w1gauss):
   smearing contribution to the free energy: E_smear = −σ Σ_k w_k Σ_n 2·s(x_nk),
   F = E_KS − σS;  E₀ = (E + F)/2 is the σ→0 extrapolation (Gaussian case).
 
+Every scheme derives from a smeared delta δ̃(t) = −f′(t):
+
+    f(x) = ∫_x^∞ δ̃(t) dt          (occupation)
+    s(x) = ∫_x^∞ t·δ̃(t) dt        (generalized entropy; E_smear = −σ Σ 2w s)
+
+tests/unit/test_occupations.py verifies the (f, s) pairing for every scheme
+by computing δ̃ from f via autograd and quadrature-integrating t·δ̃.
+
   fermi-dirac: f = 1/(1+e^x),   s = −[f ln f + (1−f)ln(1−f)]
   gaussian:    f = erfc(x)/2,   s = e^{−x²}/(2√π)
+  mp1 (Methfessel–Paxton, order 1; kernel D₁ = (3/2 − t²)e^{−t²}/√π):
+               f = erfc(x)/2 − x e^{−x²}/(2√π)
+               s = (1 − 2x²) e^{−x²}/(4√π)          (negative for |x| > 1/√2)
+  cold (Marzari–Vanderbilt; u = x + 1/√2):
+               f = erfc(u)/2 + e^{−u²}/√(2π)
+               s = u e^{−u²}/√(2π)
 
-Methfessel–Paxton is DEFERRED: its occupation is non-monotone in μ (needs a
-bracketed root search, not bisection) and its entropy pairing must be
-validated against QE fixtures first. The SCF milestone uses gaussian/FD.
+mp1/cold occupations are locally non-monotone in μ (f can slightly exceed
+[0,1]); plain bisection on N(μ) still converges in practice (QE does the
+same) because the wiggles are small and local.
 """
 
 from __future__ import annotations
@@ -57,7 +71,35 @@ class Gaussian(Smearing):
         return torch.exp(-x * x) / (2.0 * math.sqrt(math.pi))
 
 
-SCHEMES = {c.name: c for c in (FermiDirac(), Gaussian())}
+class MethfesselPaxton1(Smearing):
+    """MP order 1 (QE smearing='mp'). Kernel D₁(t) = (3/2 − t²)e^{−t²}/√π."""
+
+    name = "mp1"
+
+    def occupation(self, x):
+        return 0.5 * torch.erfc(x) - x * torch.exp(-x * x) / (2.0 * math.sqrt(math.pi))
+
+    def entropy(self, x):
+        return (1.0 - 2.0 * x * x) * torch.exp(-x * x) / (4.0 * math.sqrt(math.pi))
+
+
+class MarzariVanderbilt(Smearing):
+    """Cold smearing (QE smearing='mv'/'cold')."""
+
+    name = "cold"
+
+    def occupation(self, x):
+        u = x + 1.0 / math.sqrt(2.0)
+        return 0.5 * torch.erfc(u) + torch.exp(-u * u) / math.sqrt(2.0 * math.pi)
+
+    def entropy(self, x):
+        u = x + 1.0 / math.sqrt(2.0)
+        return u * torch.exp(-u * u) / math.sqrt(2.0 * math.pi)
+
+
+SCHEMES = {
+    c.name: c for c in (FermiDirac(), Gaussian(), MethfesselPaxton1(), MarzariVanderbilt())
+}
 
 
 def find_fermi(

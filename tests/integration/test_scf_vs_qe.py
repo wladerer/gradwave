@@ -59,6 +59,14 @@ CASES = {
     "cu_pbe_ci": dict(xc=PBE, ecut=40 * RY, kmesh=(2, 2, 2), cell=CU_CELL,
                       pos=np.zeros((1, 3)), pseudo="Cu_ONCV_PBE-1.2.upf",
                       nat=1, smearing="gaussian", nbands=16, slow=False),
+    # smearing-scheme validation: same Al system, MP1 and Marzari-Vanderbilt —
+    # matches QE's F only if BOTH the occupation and its paired entropy agree
+    "al_mp1_ci": dict(xc=PBE, ecut=20 * RY, kmesh=(2, 2, 2), cell=AL_CELL,
+                      pos=np.zeros((1, 3)), pseudo="Al_ONCV_PBE-1.2.upf", nat=1,
+                      smearing="mp1", nbands=10, slow=False),
+    "al_cold_ci": dict(xc=PBE, ecut=20 * RY, kmesh=(2, 2, 2), cell=AL_CELL,
+                       pos=np.zeros((1, 3)), pseudo="Al_ONCV_PBE-1.2.upf", nat=1,
+                       smearing="cold", nbands=10, slow=False),
     "si_lda_scf": dict(xc=LDA_PW92, ecut=30 * RY, kmesh=(4, 4, 4), cell=SI_CELL, pos=SI_POS,
                        pseudo="Si_ONCV_PBE-1.2.upf", nat=2, smearing="none", slow=True),
     "si_pbe_scf": dict(xc=PBE, ecut=30 * RY, kmesh=(4, 4, 4), cell=SI_CELL, pos=SI_POS,
@@ -75,9 +83,12 @@ def run_case(name):
     pseudos = cfg["pseudo"] if isinstance(cfg["pseudo"], tuple) else (cfg["pseudo"],)
     upfs = [parse_upf(FIX / "pseudos" / p) for p in pseudos]
     species = list(range(len(upfs))) if len(upfs) == cfg["nat"] else [0] * cfg["nat"]
+    # pin the FFT box to QE's — XC grid integration differs at the meV level
+    # for semicore densities when box sizes differ (both boxes are valid)
     system = setup_system(
         cfg["cell"], cfg["pos"], species, upfs,
         ecut=cfg["ecut"], kmesh=cfg["kmesh"], nbands=cfg.get("nbands"),
+        fft_shape=ref.get("fft_dims"),
     )
     res = scf(system, cfg["xc"](), smearing=cfg["smearing"], width=cfg.get("width", 0.1),
               etol=1e-9, rhotol=1e-8, verbose=False)

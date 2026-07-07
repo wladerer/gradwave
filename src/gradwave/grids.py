@@ -64,20 +64,34 @@ class FFTGrid:
         return s[0] * s[1] * s[2]
 
 
-def build_fft_grid(cell: np.ndarray, ecut: float, device=None, equal_dims: bool = False) -> FFTGrid:
+def build_fft_grid(
+    cell: np.ndarray,
+    ecut: float,
+    device=None,
+    equal_dims: bool = False,
+    shape_override=None,
+) -> FFTGrid:
+    """shape_override pins the FFT box (e.g. to QE's dims for µeV-level
+    comparisons: XC grid integration differs at the meV level for sharp
+    semicore densities when box sizes differ, even though both boxes hold
+    the density sphere exactly)."""
     cell = np.asarray(cell, dtype=np.float64)
     b = reciprocal_cell(cell)
     gmax_dens = 2.0 * gmax_from_ecut(ecut)
 
-    shape = []
-    for i in range(3):
-        m_i = int(np.floor(gmax_dens * np.linalg.norm(cell[i]) / (2.0 * np.pi)))
-        shape.append(good_fft_size(2 * m_i + 1))
-    if equal_dims:
-        # symmetry operations permute axes; a cubic box is always closed
-        # under m → Wᵀm mod n
-        shape = [max(shape)] * 3
-    shape = tuple(shape)
+    if shape_override is not None:
+        shape = tuple(int(n) for n in shape_override)
+    else:
+        shape = []
+        for i in range(3):
+            # minimal box: integer Miller extent of the density sphere
+            m_i = int(np.floor(gmax_dens * np.linalg.norm(cell[i]) / (2.0 * np.pi)))
+            shape.append(good_fft_size(2 * m_i + 1))
+        if equal_dims:
+            # symmetry operations permute axes; a cubic box is always closed
+            # under m → Wᵀm mod n
+            shape = [max(shape)] * 3
+        shape = tuple(shape)
 
     millers = np.meshgrid(
         *[np.fft.fftfreq(n, d=1.0 / n).astype(np.int64) for n in shape], indexing="ij"

@@ -1,0 +1,30 @@
+&control
+  calculation = 'scf'
+  prefix = 'al_mp1_ci'
+  pseudo_dir = '../pseudos'
+  outdir = './tmp'
+  verbosity = 'high'
+/
+&system
+  ibrav = 0
+  nat = 1
+  ntyp = 1
+  ecutwfc = 20.0
+  occupations = 'smearing'
+  smearing = 'mp'
+  degauss = 0.0073498649
+  nbnd = 10
+/
+&electrons
+  conv_thr = 1.0d-12
+/
+ATOMIC_SPECIES
+Al 26.9815 Al_ONCV_PBE-1.2.upf
+CELL_PARAMETERS angstrom
+0.000 2.025 2.025
+2.025 0.000 2.025
+2.025 2.025 0.000
+ATOMIC_POSITIONS crystal
+Al 0.00 0.00 0.00
+K_POINTS automatic
+2 2 2 0 0 0

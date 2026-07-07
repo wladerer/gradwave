@@ -21,8 +21,14 @@ from gradwave.core.hamiltonian import becp, projectors
 from gradwave.scf.loop import SCFResult, _stack_dij
 
 
-def forces(res: SCFResult) -> torch.Tensor:
-    """F_a = −dE/dτ_a, (na, 3) [eV/Å], at the converged SCF point."""
+def forces(res: SCFResult, remove_net: bool = True) -> torch.Tensor:
+    """F_a = −dE/dτ_a, (na, 3) [eV/Å], at the converged SCF point.
+
+    remove_net subtracts the mean force (default). The net component is
+    unphysical XC-grid egg-box noise — large for semicore species (~0.01
+    eV/Å for Al at 20 Ry vs ~1e-5 for valence-only Si) — and QE/VASP remove
+    it the same way; with it removed, forces match QE to ~1e-5 eV/Å.
+    """
     system = res.system
     grid = system.grid
     pos = system.positions.detach().clone().requires_grad_(True)
@@ -44,6 +50,8 @@ def forces(res: SCFResult) -> torch.Tensor:
     )
     (grad,) = torch.autograd.grad(e_pos, pos)
     f = -grad
+    if remove_net:
+        f = f - f.mean(dim=0, keepdim=True)
     if system.sym is not None:
         from gradwave.symmetry import symmetrize_forces
 

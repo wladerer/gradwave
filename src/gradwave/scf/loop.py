@@ -114,6 +114,7 @@ def setup_system(
     nbands: int | None = None,
     use_symmetry: bool = False,
     symprec: float = 1e-6,
+    fft_shape=None,
 ) -> System:
     """use_symmetry: reduce k to the IBZ and symmetrize ρ each SCF step.
     Requires an unshifted (Γ-centered) mesh — shifted meshes fall back to
@@ -132,7 +133,7 @@ def setup_system(
         if sym.n_ops <= 1:
             sym = None  # P1 — nothing to gain, keep the plain path
 
-    grid = build_fft_grid(cell, ecut, equal_dims=sym is not None)
+    grid = build_fft_grid(cell, ecut, equal_dims=sym is not None, shape_override=fft_shape)
     if sym is not None:
         rho_symmetrizer = RhoSymmetrizer(grid.shape, sym, dens_mask=grid.dens_mask)
         kfrac, kw = reduce_mesh(kmesh, kshift, sym)

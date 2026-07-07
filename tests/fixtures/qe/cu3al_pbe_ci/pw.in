@@ -1,0 +1,34 @@
+&control
+  calculation = 'scf'
+  prefix = 'cu3al_pbe_ci'
+  pseudo_dir = '../pseudos'
+  outdir = './tmp'
+  verbosity = 'high'
+/
+&system
+  ibrav = 0
+  nat = 4
+  ntyp = 2
+  ecutwfc = 40.0
+  occupations = 'smearing'
+  smearing = 'gaussian'
+  degauss = 0.0073498649
+  nbnd = 45
+/
+&electrons
+  conv_thr = 1.0d-12
+/
+ATOMIC_SPECIES
+Al 26.9815 Al_ONCV_PBE-1.2.upf
+Cu 63.546 Cu_ONCV_PBE-1.2.upf
+CELL_PARAMETERS angstrom
+3.70 0.00 0.00
+0.00 3.70 0.00
+0.00 0.00 3.70
+ATOMIC_POSITIONS crystal
+Al 0.00 0.00 0.00
+Cu 0.00 0.50 0.50
+Cu 0.50 0.00 0.50
+Cu 0.50 0.50 0.00
+K_POINTS automatic
+2 2 2 0 0 0

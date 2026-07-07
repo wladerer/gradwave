@@ -45,12 +45,38 @@ def test_fd_entropy_matches_definition():
     assert torch.allclose(fd.entropy(x), -inner, atol=1e-12)
 
 
-def test_entropy_positive_and_peaked_at_mu():
+def test_entropy_shapes():
     x = torch.linspace(-5, 5, 101, dtype=torch.float64)
-    for scheme in SCHEMES.values():
-        s = scheme.entropy(x)
+    # FD/gaussian: positive, peaked at μ
+    for name in ("fermi-dirac", "gaussian"):
+        s = SCHEMES[name].entropy(x)
         assert torch.all(s >= 0)
-        assert s.argmax() == 50  # peak at x = 0 (ε = μ)
+        assert s.argmax() == 50
+    # mp1: negative beyond |x| = 1/√2 by construction
+    s_mp = SCHEMES["mp1"].entropy(x)
+    assert s_mp[50] > 0 and s_mp[0] <= 0 or abs(s_mp[0]) < 1e-12
+    assert float(SCHEMES["mp1"].entropy(torch.tensor([1.0], dtype=torch.float64))) < 0
+    # cold: odd-like around u = 0 (x = −1/√2), vanishing at that point
+    assert abs(float(SCHEMES["cold"].entropy(
+        torch.tensor([-(2.0 ** -0.5)], dtype=torch.float64)))) < 1e-14
+
+
+def test_entropy_pairs_with_occupation_all_schemes():
+    # The load-bearing identity: s(x) = ∫_x^∞ t·δ̃(t) dt with δ̃ = −f′,
+    # δ̃ obtained from the occupation via autograd — validates every (f, s)
+    # pair without trusting the hand-derived formulas.
+    for name, scheme in SCHEMES.items():
+        for x0 in (-2.0, -0.7, 0.0, 0.5, 1.7):
+            t = torch.linspace(x0, x0 + 30.0, 60001, dtype=torch.float64,
+                               requires_grad=True)
+            f = scheme.occupation(t)
+            (df,) = torch.autograd.grad(f.sum(), t)
+            integrand = -t.detach() * df
+            s_num = torch.trapezoid(integrand, t.detach())
+            s_ref = float(scheme.entropy(torch.tensor([x0], dtype=torch.float64)))
+            # tolerance is trapezoid truncation (h=5e-4 → ~1e-8), far below
+            # any wrong-formula scale (~1e-2)
+            assert abs(float(s_num) - s_ref) < 5e-8, (name, x0, float(s_num), s_ref)
 
 
 def test_fixed_occupations():

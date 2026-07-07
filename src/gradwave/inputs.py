@@ -35,7 +35,7 @@ class SCFParams:
 
 @dataclass(frozen=True)
 class SmearingParams:
-    type: str = "none"  # none | fermi-dirac | gaussian
+    type: str = "none"  # none | fermi-dirac | gaussian | mp1 | cold
     width: float = 0.1  # eV
 
 
@@ -119,7 +119,7 @@ def load_input(path: str | Path) -> Input:
     if task not in ("scf", "relax", "bands"):
         raise ValueError(f"unknown task {task!r}")
     smtype = sm.get("type", "none")
-    if smtype not in ("none", "fermi-dirac", "gaussian"):
+    if smtype not in ("none", "fermi-dirac", "gaussian", "mp1", "cold"):
         raise ValueError(f"unknown smearing type {smtype!r}")
 
     nbands = raw.get("nbands", "auto")
