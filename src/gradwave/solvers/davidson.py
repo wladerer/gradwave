@@ -106,17 +106,26 @@ def _orthonormalize_b(
 
     For rank-deficient input, QR's surplus columns are arbitrary orthonormal
     complements that may LEAK INTO PADDED SLOTS (spurious near-zero Ritz
-    values). A tiny deterministic masked jitter guarantees full rank inside
-    the masked space, so Q stays in it; the jitter is far below Davidson's
-    correction scale and does not affect converged results.
+    values). Rows that are (near-)zero AFTER projection get a deterministic
+    masked jitter (then re-projection) so the input is full-rank INSIDE the
+    masked complement space; healthy rows stay bit-exact — a blanket jitter
+    would put a noise floor under the SCF density residual.
     """
-    gen = torch.Generator(device="cpu").manual_seed(v.shape[1] + 7919)
-    noise = torch.randn(*v.shape, 2, generator=gen, dtype=torch.float64)
-    jitter = torch.view_as_complex(noise).to(v.device).to(v.dtype)
-    v = (v + 1e-10 * jitter) * mask[:, None, :]
-    if against is not None and against.shape[1]:
-        for _ in range(2):  # two projection passes for stability
-            v = v - (v @ against.conj().transpose(-1, -2)) @ against
+
+    def project(x):
+        if against is not None and against.shape[1]:
+            for _ in range(2):  # two passes for stability
+                x = x - (x @ against.conj().transpose(-1, -2)) @ against
+        return x
+
+    v = project(v * mask[:, None, :])
+    row_norm = torch.linalg.norm(v, dim=-1, keepdim=True).real
+    degenerate = row_norm < 1e-8
+    if bool(degenerate.any()):
+        gen = torch.Generator(device="cpu").manual_seed(v.shape[1] + 7919)
+        noise = torch.randn(*v.shape, 2, generator=gen, dtype=torch.float64)
+        jitter = torch.view_as_complex(noise).to(v.device).to(v.dtype)
+        v = project((v + degenerate * jitter) * mask[:, None, :])
     q, _ = torch.linalg.qr(v.transpose(-1, -2), mode="reduced")
     return q.transpose(-1, -2)
 
