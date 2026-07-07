@@ -61,23 +61,35 @@ class SpinorHamiltonian:
         self.dij_so = dij_so
         self.m = bk.npw_max
 
+    def _band_chunk(self, nk: int, device) -> int:
+        """Bands per chunk: the potential mix holds ~6 dense-grid temporaries
+        (two ψ components + products); keep each under ~250 MB on GPU."""
+        if device.type != "cuda":
+            return 1_000_000
+        n = self.shape[0] * self.shape[1] * self.shape[2]
+        return max(1, int(2.5e8 / (16 * n * max(nk, 1))))
+
     def apply(self, c: torch.Tensor) -> torch.Tensor:
         bk, m = self.bk, self.m
         cu, cd = c[..., :m], c[..., m:]
         out_u = bk.t[:, None, :] * cu
         out_d = bk.t[:, None, :] * cd
 
-        psi_u = g_to_r_b(cu, bk, self.shape)
-        psi_d = g_to_r_b(cd, bk, self.shape)
         bx, by, bz = self.b_r[0], self.b_r[1], self.b_r[2]
         v_uu = self.v_r + bz
         v_dd = self.v_r - bz
         v_ud = torch.complex(bx, -by)  # ⟨↑|V̂|↓⟩ = Bx − iBy
-        h_u = psi_u * v_uu + psi_d * v_ud
-        h_d = psi_u * v_ud.conj() + psi_d * v_dd
 
-        out_u = out_u + box_to_sphere_b(h_u, bk)
-        out_d = out_d + box_to_sphere_b(h_d, bk)
+        nk, nb = c.shape[0], c.shape[1]
+        chunk = self._band_chunk(nk, c.device)
+        for lo in range(0, nb, chunk):
+            hi = min(lo + chunk, nb)
+            psi_u = g_to_r_b(cu[:, lo:hi], bk, self.shape)
+            psi_d = g_to_r_b(cd[:, lo:hi], bk, self.shape)
+            h_u = psi_u * v_uu + psi_d * v_ud
+            h_d = psi_u * v_ud.conj() + psi_d * v_dd
+            out_u[:, lo:hi] += box_to_sphere_b(h_u, bk)
+            out_d[:, lo:hi] += box_to_sphere_b(h_d, bk)
 
         mask = bk.mask[:, None, :]
         out = torch.cat([out_u * mask, out_d * mask], dim=-1)
