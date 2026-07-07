@@ -19,8 +19,9 @@ Differentiable plane-wave density functional theory for periodic solids, in PyTo
 |---|---|
 | per-k Python loop (v0), 8-core CPU | 218 s |
 | k-batched + adaptive diago tolerance, 8-core CPU | 33 s |
-| 22-thread CPU | 15 s |
-| RTX 3050 laptop GPU (complex128) | **4.7 s** |
+| + spglib symmetry (36 → 8 k in the IBZ), 8-core CPU | 7.1 s |
+| + symmetry, 22-thread CPU | 4.6 s |
+| + symmetry, RTX 3050 laptop GPU (complex128) | **1.4 s** |
 
 The SCF runs fully k-batched: padded `(nk, nb, npw_max)` layout, batched
 FFT Hamiltonian applies, batched QR/eigh Davidson. `System.to("cuda")`
