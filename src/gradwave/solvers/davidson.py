@@ -150,12 +150,13 @@ def davidson_batched(
 ) -> BatchedDavidsonResult:
     nk, nb, m = x0.shape
     max_dim = min(max_dim_factor * nb, int(mask.sum(dim=1).min()))
+    rdtype = x0.real.dtype  # float32 in the mixed-precision draft phase, else float64
 
     v = _orthonormalize_b(x0, mask)
     hv = h_apply(v)
-    eig = torch.zeros(nk, nb, dtype=torch.float64, device=x0.device)
+    eig = torch.zeros(nk, nb, dtype=rdtype, device=x0.device)
     x = v[:, :nb]
-    rn = torch.full((nk, nb), float("inf"), dtype=torch.float64, device=x0.device)
+    rn = torch.full((nk, nb), float("inf"), dtype=rdtype, device=x0.device)
 
     for it in range(1, max_iter + 1):
         s = torch.einsum("kig,kjg->kij", v.conj(), hv)
@@ -201,3 +202,40 @@ def davidson_batched(
             hv = torch.cat([hv, h_apply(d)], dim=1)
 
     return BatchedDavidsonResult(eig, x, max_iter, rn)
+
+
+@torch.no_grad()
+def davidson_batched_ms(
+    h_apply,
+    x0: torch.Tensor,
+    t: torch.Tensor,
+    mask: torch.Tensor,
+    tol: float = 1e-9,
+    max_iter: int = 40,
+    max_dim_factor: int = 4,
+    crossover: float = 1e-5,
+    mixed_precision: bool = True,
+) -> BatchedDavidsonResult:
+    """Two-stage Davidson: a fast low-precision draft to `crossover`, then a
+    full-precision polish to `tol` warm-started from it.
+
+    The draft runs in the dtype of `x0` cast down to complex64 (and `t` to
+    float32) so a dtype-polymorphic H apply computes in fp32 throughout — the
+    regime where a GeForce is 8–32× faster than fp64. The polish re-solves in
+    the original precision, so the returned eigenpairs are full-precision
+    regardless of the draft. Skipped (single fp64 solve) when mixed_precision
+    is off, x0 is already low precision, or crossover ≥ tol."""
+    from gradwave.dtypes import real_of
+
+    low = torch.complex64
+    if (not mixed_precision) or x0.dtype == low or crossover >= tol:
+        return davidson_batched(h_apply, x0, t, mask, tol=tol, max_iter=max_iter,
+                                max_dim_factor=max_dim_factor)
+    hi_dtype = x0.dtype
+    draft = davidson_batched(
+        h_apply, x0.to(low), t.to(real_of(low)), mask,
+        tol=crossover, max_iter=max_iter, max_dim_factor=max_dim_factor,
+    )
+    x1 = draft.eigenvectors.to(hi_dtype)
+    return davidson_batched(h_apply, x1, t, mask, tol=tol, max_iter=max_iter,
+                            max_dim_factor=max_dim_factor)

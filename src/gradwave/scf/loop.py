@@ -31,7 +31,7 @@ from gradwave.core.occupations import (
     occupations_and_entropy,
 )
 from gradwave.core.xc.base import XCFunctional
-from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.dtypes import CDTYPE, CDTYPE_LOW, RDTYPE, RDTYPE_LOW
 from gradwave.grids import build_fft_grid, build_gsphere
 from gradwave.kpoints import monkhorst_pack
 from gradwave.pseudo.kb import beta_form_factors
@@ -168,7 +168,9 @@ def setup_system(
     grid = build_fft_grid(cell, ecut, equal_dims=axis_groups, shape_override=fft_shape)
     if sym is not None:
         rho_symmetrizer = RhoSymmetrizer(grid.shape, sym, dens_mask=grid.dens_mask)
-        kfrac, kw = reduce_mesh(kmesh, kshift, sym)
+        # time_reversal=False for magnetic systems (k≢−k); for nonmagnetic runs
+        # (incl. nonmagnetic + SOC, where Kramers keeps k≡−k) it stays True
+        kfrac, kw = reduce_mesh(kmesh, kshift, sym, time_reversal=time_reversal)
     else:
         kfrac, kw = monkhorst_pack(kmesh, kshift, time_reversal=time_reversal)
     spheres = [build_gsphere(grid, ecut, k) for k in kfrac]
@@ -192,16 +194,28 @@ def setup_system(
     vloc_tables = torch.as_tensor(np.stack(vloc_tables), dtype=RDTYPE)
 
     # per-k projector data (scalar path); FR pseudos store raw F tables for
-    # the spinor projector builder instead (scalar m-expansion is invalid)
+    # the spinor projector builder instead (scalar m-expansion is invalid).
+    #
+    # The projector radial transform F_i(|k+G|) depends only on the MAGNITUDE
+    # |k+G|, and neighbouring k-points share most of their |k+G| shells. Pool
+    # every |k+G| across the whole mesh, dedupe, and run each species' SBT once
+    # on the unique shells; per-k tables are then a gather. This collapses the
+    # nk independent radial-transform sweeps that dominated large-cell setup.
     is_fr = any(b.j is not None for u in upfs for b in u.betas)
+    npw_list = [sph.npw for sph in spheres]
+    npw_max = max(npw_list)
+    q_per_k = [np.sqrt(sph.kpg2.numpy()) for sph in spheres]
+    uniq_q, inv_q = _unique_shells(np.concatenate(q_per_k))
+    ff_species = [beta_form_factors(upf, uniq_q) for upf in upfs]  # (nproj, n_uniq)
+    offs = np.cumsum([0, *npw_list])
     proj_data = []
-    npw_max = max(sph.npw for sph in spheres)
     so_tabs = [torch.zeros(len(spheres), u.n_proj, npw_max, dtype=RDTYPE) for u in upfs] \
         if is_fr else None
+    dij_species = [torch.as_tensor(upf.dij, dtype=RDTYPE) for upf in upfs]
     for ik, sph in enumerate(spheres):
-        q = np.sqrt(sph.kpg2.numpy())
+        inv_k = inv_q[offs[ik]:offs[ik + 1]]
         beta_tables = [
-            torch.as_tensor(beta_form_factors(upf, q), dtype=RDTYPE) for upf in upfs
+            torch.as_tensor(ff[:, inv_k], dtype=RDTYPE) for ff in ff_species
         ]
         if is_fr:
             for sp_i in range(len(upfs)):
@@ -210,7 +224,6 @@ def setup_system(
             beta_tables = [t[:0] for t in beta_tables]
         else:
             beta_ls = [[b.l for b in upf.betas] for upf in upfs]
-        dij_species = [torch.as_tensor(upf.dij, dtype=RDTYPE) for upf in upfs]
         proj_data.append(
             build_projector_data(
                 sph, species_of_atom, beta_tables, beta_ls, dij_species, grid.volume
@@ -325,6 +338,7 @@ def scf(
     verbose: bool = True,
     nspin: int = 1,
     start_mag=None,  # initial moment fractions: per-species OR per-atom (nspin=2)
+    mixed_precision: bool | None = None,  # fp32 draft while tol_eff loose (GPU); None → auto
 ) -> SCFResult:
     grid, spheres = system.grid, system.spheres
     vol = grid.volume
@@ -398,6 +412,10 @@ def scf(
 
     device = system.positions.device
     bk = system.batch
+    # fp32 draft pays off only on GPU (fp64 GEMM/FFT are 8–32×/2–4× slower there)
+    if mixed_precision is None:
+        mixed_precision = device.type == "cuda"
+    mp_crossover = 1e-5  # switch to fp64 once the diago tolerance drops below this
 
     # frozen projector matrices (positions fixed during SCF)
     projs_b = projectors_b(bk, system.positions)
@@ -450,10 +468,21 @@ def scf(
             tol_eff = max(diago_tol, 1e-3)
         else:
             tol_eff = max(diago_tol, min(1e-3, 0.03 * history[-1]["res"]))
+        use_low = mixed_precision and tol_eff > mp_crossover
+        cdtype = CDTYPE_LOW if use_low else CDTYPE
+        t_solve = bk.t.to(RDTYPE_LOW) if use_low else bk.t
         for sp in range(nspin):
             h = BatchedHamiltonian(bk, grid.shape, veff_s[sp], projs_b)
-            dav = davidson_batched(h.apply, coeffs_b_s[sp], bk.t, bk.mask, tol=tol_eff)
-            eigs_s[sp], coeffs_b_s[sp] = dav.eigenvalues, dav.eigenvectors
+            dav = davidson_batched(h.apply, coeffs_b_s[sp].to(cdtype), t_solve,
+                                   bk.mask, tol=tol_eff)
+            eigs_s[sp] = dav.eigenvalues.to(RDTYPE)
+            c = dav.eigenvectors.to(CDTYPE)
+            if use_low:
+                # fp32 leaves ‖ψ‖ accurate only to ~1e-6; renormalize in fp64
+                # so the density's electron count (ρ at G=0) is conserved to
+                # the mixer's tolerance (off-diagonal overlaps don't touch G=0)
+                c = c / torch.linalg.norm(c, dim=-1, keepdim=True).clamp_min(1e-30)
+            coeffs_b_s[sp] = c
 
         if smearing == "none":
             occ_s = [fixed_occupations(eigs_s[0], system.n_electrons)]

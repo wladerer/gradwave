@@ -56,7 +56,9 @@ def band_structure(
     n_box = grid.shape[0] * grid.shape[1] * grid.shape[2]
     chunk = max(1, min(24, int(1.5e9 / (nbands * n_box * 16))))
     from gradwave.core.batch import BatchedHamiltonian, build_batched, projectors_b
-    from gradwave.solvers.davidson import davidson_batched
+    from gradwave.solvers.davidson import davidson_batched_ms
+
+    mixed_precision = device.type == "cuda"
 
     for lo in range(0, len(kpts), chunk):
         hi = min(lo + chunk, len(kpts))
@@ -76,7 +78,8 @@ def band_structure(
         h = BatchedHamiltonian(bk, grid.shape, v_eff, p_b)
         c0 = torch.zeros(hi - lo, nbands, bk.npw_max, dtype=CDTYPE, device=device)
         c0[:, torch.arange(nbands), torch.arange(nbands)] = 1.0
-        out = davidson_batched(h.apply, c0, bk.t, bk.mask, tol=diago_tol, max_iter=80)
+        out = davidson_batched_ms(h.apply, c0, bk.t, bk.mask, tol=diago_tol,
+                                  max_iter=80, mixed_precision=mixed_precision)
         eigs[lo:hi] = out.eigenvalues.cpu().numpy()
         if verbose:
             print(f"  band chunk {lo}-{hi - 1}/{len(kpts) - 1}  "

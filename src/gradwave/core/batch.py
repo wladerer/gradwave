@@ -128,6 +128,27 @@ class BatchedHamiltonian:
             bk.mask, bk.flat_idx, torch.full_like(bk.flat_idx, self.n)
         )
         self._box = None
+        self._tab_cache: dict = {}  # cdtype → cast (t, v_eff, p, dij) for mixed precision
+
+    def _tables(self, cdtype):
+        """Cast tables to the working precision of the coefficients (cached).
+
+        Feeding complex64 coefficients is not enough on its own: multiplying by
+        an fp64 table promotes the result back to complex128. Precomputing
+        matching-precision copies keeps the whole apply in fp32 when asked."""
+        cached = self._tab_cache.get(cdtype)
+        if cached is None:
+            from gradwave.dtypes import real_of
+
+            rdtype = real_of(cdtype)
+            cached = (
+                self.bk.t.to(rdtype),
+                self.v_eff_r.to(rdtype),
+                self.p.to(cdtype),
+                self.bk.dij_full.to(cdtype),
+            )
+            self._tab_cache[cdtype] = cached
+        return cached
 
     def _get_box(self, nk: int, nb: int, dtype, device):
         if (
@@ -151,7 +172,8 @@ class BatchedHamiltonian:
         bound peak memory on the dense grid (math identical)."""
         bk = self.bk
         nk, nb, m = c.shape
-        out = bk.t[:, None, :] * c
+        t_r, v_eff, p, dij = self._tables(c.dtype)
+        out = t_r[:, None, :] * c
 
         chunk = self._band_chunk(nk, c.device)
         for lo in range(0, nb, chunk):
@@ -165,15 +187,13 @@ class BatchedHamiltonian:
                                   dim=(-3, -2, -1))
             # fftn(ifftn(·)) is norm-neutral: the 1/N and ×N of the fftbox
             # conventions cancel, so no scaling factors here
-            vg = torch.fft.fftn(psi * self.v_eff_r, dim=(-3, -2, -1)).reshape(nk, nbc, self.n)
+            vg = torch.fft.fftn(psi * v_eff, dim=(-3, -2, -1)).reshape(nk, nbc, self.n)
             gath = bk.flat_idx[:, None, :].expand(nk, nbc, m)
             out[:, lo:hi] += vg.gather(2, gath)
 
-        if self.p.shape[1]:
-            b = torch.einsum("kpg,kbg->kbp", self.p.conj(), c)
-            out = out + torch.einsum(
-                "kbp,pq,kqg->kbg", b, bk.dij_full.to(c.dtype), self.p
-            )
+        if p.shape[1]:
+            b = torch.einsum("kpg,kbg->kbp", p.conj(), c)
+            out = out + torch.einsum("kbp,pq,kqg->kbg", b, dij, p)
         return out * bk.mask[:, None, :]
 
 

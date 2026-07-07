@@ -37,11 +37,11 @@ from gradwave.core.energies.total import EnergyBreakdown
 from gradwave.core.fftbox import r_to_g
 from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
 from gradwave.core.xc.noncollinear import NoncollinearXC, vxc_and_bxc
-from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.dtypes import CDTYPE, CDTYPE_LOW, RDTYPE, RDTYPE_LOW
 from gradwave.scf.guess import sad_density
 from gradwave.scf.loop import System, _stack_dij
 from gradwave.scf.mixing import PulayMixer
-from gradwave.solvers.davidson import davidson_batched
+from gradwave.solvers.davidson import davidson_batched, davidson_batched_ms
 
 
 class SpinorHamiltonian:
@@ -54,12 +54,39 @@ class SpinorHamiltonian:
     def __init__(self, bk: BatchedK, shape, v_r, b_vec_r, p, q=None, dij_so=None):
         self.bk = bk
         self.shape = shape
-        self.v_r = v_r  # (n1,n2,n3) scalar potential [eV]
-        self.b_r = b_vec_r  # (3, n1,n2,n3) exchange field [eV]
         self.p = p  # (nk, nproj, npw_max) scalar projectors
         self.q = q  # (nk, nproj_so, 2·npw_max) spinor projectors (FR)
         self.dij_so = dij_so
         self.m = bk.npw_max
+        # Precompute the 2×2 potential blocks once (fixed per H): the diagonal
+        # spin channels v ± Bz and the off-diagonal Bx − iBy. Nonmagnetic runs
+        # (B⃗ ≡ 0) take a fast path that skips the spin-flip term entirely.
+        bx, by, bz = b_vec_r[0], b_vec_r[1], b_vec_r[2]
+        self.b_zero = float(b_vec_r.abs().max()) == 0.0
+        self._v_uu = v_r + bz  # ⟨↑|V̂|↑⟩ (real)
+        self._v_dd = v_r - bz  # ⟨↓|V̂|↓⟩ (real)
+        self._v_ud = torch.complex(bx, -by)  # ⟨↑|V̂|↓⟩ (complex)
+        self._cache: dict = {}
+
+    def _tables(self, cdtype):
+        """Working-precision copies of the fixed tensors (cached per dtype)."""
+        cached = self._cache.get(cdtype)
+        if cached is None:
+            from gradwave.dtypes import real_of
+
+            rdtype = real_of(cdtype)
+            cached = {
+                "t": self.bk.t.to(rdtype),
+                "v_uu": self._v_uu.to(rdtype),
+                "v_dd": self._v_dd.to(rdtype),
+                "v_ud": self._v_ud.to(cdtype),
+                "p": self.p.to(cdtype),
+                "q": None if self.q is None else self.q.to(cdtype),
+                "dij_so": None if self.dij_so is None else self.dij_so.to(cdtype),
+                "dij": self.bk.dij_full.to(cdtype),
+            }
+            self._cache[cdtype] = cached
+        return cached
 
     def _band_chunk(self, nk: int, device) -> int:
         """Bands per chunk: the potential mix holds ~6 dense-grid temporaries
@@ -71,40 +98,46 @@ class SpinorHamiltonian:
 
     def apply(self, c: torch.Tensor) -> torch.Tensor:
         bk, m = self.bk, self.m
+        tab = self._tables(c.dtype)
+        t_r = tab["t"]
         cu, cd = c[..., :m], c[..., m:]
-        out_u = bk.t[:, None, :] * cu
-        out_d = bk.t[:, None, :] * cd
-
-        bx, by, bz = self.b_r[0], self.b_r[1], self.b_r[2]
-        v_uu = self.v_r + bz
-        v_dd = self.v_r - bz
-        v_ud = torch.complex(bx, -by)  # ⟨↑|V̂|↓⟩ = Bx − iBy
+        out_u = t_r[:, None, :] * cu
+        out_d = t_r[:, None, :] * cd
 
         nk, nb = c.shape[0], c.shape[1]
         chunk = self._band_chunk(nk, c.device)
         for lo in range(0, nb, chunk):
             hi = min(lo + chunk, nb)
-            psi_u = g_to_r_b(cu[:, lo:hi], bk, self.shape)
-            psi_d = g_to_r_b(cd[:, lo:hi], bk, self.shape)
-            h_u = psi_u * v_uu + psi_d * v_ud
-            h_d = psi_u * v_ud.conj() + psi_d * v_dd
-            out_u[:, lo:hi] += box_to_sphere_b(h_u, bk)
-            out_d[:, lo:hi] += box_to_sphere_b(h_d, bk)
+            nbc = hi - lo
+            # fuse both spinor components into a single batched FFT pair
+            cud = torch.cat([cu[:, lo:hi], cd[:, lo:hi]], dim=1)
+            psi = g_to_r_b(cud, bk, self.shape)
+            psi_u, psi_d = psi[:, :nbc], psi[:, nbc:]
+            if self.b_zero:  # B⃗ = 0: diagonal spin blocks, no spin flip
+                h_u = psi_u * tab["v_uu"]
+                h_d = psi_d * tab["v_dd"]
+            else:
+                v_ud = tab["v_ud"]
+                h_u = psi_u * tab["v_uu"] + psi_d * v_ud
+                h_d = psi_u * v_ud.conj() + psi_d * tab["v_dd"]
+            hud = box_to_sphere_b(torch.cat([h_u, h_d], dim=1), bk)
+            out_u[:, lo:hi] += hud[:, :nbc]
+            out_d[:, lo:hi] += hud[:, nbc:]
 
         mask = bk.mask[:, None, :]
         out = torch.cat([out_u * mask, out_d * mask], dim=-1)
 
         if self.q is not None:  # spin-orbit (j-resolved) nonlocal
-            b = torch.einsum("kpg,kbg->kbp", self.q.conj(), c)
-            out = out + torch.einsum("kbp,pq,kqg->kbg", b,
-                                     self.dij_so.to(c.dtype), self.q) \
+            q = tab["q"]
+            b = torch.einsum("kpg,kbg->kbp", q.conj(), c)
+            out = out + torch.einsum("kbp,pq,kqg->kbg", b, tab["dij_so"], q) \
                 * torch.cat([mask, mask], dim=-1)
         elif self.p.shape[1]:
-            dij = bk.dij_full.to(c.dtype)
-            bu = torch.einsum("kpg,kbg->kbp", self.p.conj(), cu)
-            bd = torch.einsum("kpg,kbg->kbp", self.p.conj(), cd)
-            nl = torch.cat([torch.einsum("kbp,pq,kqg->kbg", bu, dij, self.p) * mask,
-                            torch.einsum("kbp,pq,kqg->kbg", bd, dij, self.p) * mask],
+            dij, p = tab["dij"], tab["p"]
+            bu = torch.einsum("kpg,kbg->kbp", p.conj(), cu)
+            bd = torch.einsum("kpg,kbg->kbp", p.conj(), cd)
+            nl = torch.cat([torch.einsum("kbp,pq,kqg->kbg", bu, dij, p) * mask,
+                            torch.einsum("kbp,pq,kqg->kbg", bd, dij, p) * mask],
                            dim=-1)
             out = out + nl
         return out
@@ -141,12 +174,20 @@ def scf_noncollinear(
     diago_tol: float = 1e-9,
     verbose: bool = True,
     nonmagnetic: bool = False,  # pin m⃗ ≡ 0 (QE's domag=false): nonmagnetic + SOC
+    mixed_precision: bool | None = None,  # fp32 draft while tol_eff loose (GPU); None → auto
 ) -> NCResult:
-    if system.rho_symmetrizer is not None:
-        raise ValueError("noncollinear SCF requires use_symmetry=False")
+    if system.rho_symmetrizer is not None and not nonmagnetic:
+        raise ValueError(
+            "noncollinear SCF with a nonzero m⃗ requires use_symmetry=False "
+            "(time reversal and the space group act on m⃗); the nonmagnetic "
+            "(m⃗ ≡ 0) case keeps the full crystal symmetry — pass nonmagnetic=True"
+        )
     grid, bk = system.grid, system.batch
     vol, nk = grid.volume, len(system.spheres)
     device = system.positions.device
+    if mixed_precision is None:
+        mixed_precision = device.type == "cuda"
+    mp_crossover = 1e-5
     nbands = 2 * system.nbands  # spinor bands hold one electron each
     m_pw = bk.npw_max
     mag_vec_init = torch.as_tensor(mag_vec_init, dtype=RDTYPE)
@@ -200,6 +241,15 @@ def scf_noncollinear(
     e_free_prev, converged, history = None, False, []
     mu = 0.0
 
+    # nonmagnetic + SOC keeps the full crystal symmetry (m⃗ ≡ 0): reduce k to
+    # the IBZ in setup_system and symmetrize ρ each step, exactly as the scalar
+    # path does. m⃗ is never symmetrized (it is pinned to zero here).
+    def symmetrize(r_out):
+        if system.rho_symmetrizer is None:
+            return r_out
+        sym_g = system.rho_symmetrizer.apply(r_to_g(r_out.to(CDTYPE)))
+        return torch.fft.ifftn(sym_g * grid.n_points, dim=(-3, -2, -1)).real
+
     def vec_of(fields):
         return torch.cat([r_to_g(f.to(CDTYPE)).reshape(-1)[mask_flat] for f in fields])
 
@@ -214,9 +264,18 @@ def scf_noncollinear(
 
         tol_eff = max(diago_tol, 1e-3) if it == 1 else \
             max(diago_tol, min(1e-3, 0.03 * history[-1]["res"]))
+        use_low = mixed_precision and tol_eff > mp_crossover
+        cdtype = CDTYPE_LOW if use_low else CDTYPE
+        t2_solve = t2.to(RDTYPE_LOW) if use_low else t2
         h = SpinorHamiltonian(bk, grid.shape, v_r, b_xc, projs_b, q=q_so, dij_so=dij_so)
-        dav = davidson_batched(h.apply, coeffs, t2, mask2, tol=tol_eff)
-        eigs, coeffs = dav.eigenvalues, dav.eigenvectors
+        dav = davidson_batched(h.apply, coeffs.to(cdtype), t2_solve, mask2, tol=tol_eff)
+        eigs = dav.eigenvalues.to(RDTYPE)
+        coeffs = dav.eigenvectors.to(CDTYPE)
+        if use_low:
+            # fp32 draft: renormalize spinors in fp64 so the electron count
+            # (ρ at G=0) stays conserved through mixing (see collinear scf)
+            coeffs = coeffs / torch.linalg.norm(
+                coeffs, dim=-1, keepdim=True).clamp_min(1e-30)
 
         mu = float(find_fermi(eigs, system.kweights, scheme, width,
                               system.n_electrons, degeneracy=1.0))
@@ -246,6 +305,7 @@ def scf_noncollinear(
                 m_out[1] += 2.0 * ud.imag
                 m_out[2] += uu - dd
         rho_out, m_out = rho_out / vol, m_out / vol
+        rho_out = symmetrize(rho_out)  # no-op unless IBZ symmetry is active
 
         # energies
         rho_g_out = r_to_g(rho_out.to(CDTYPE))
@@ -327,7 +387,8 @@ def _slice_bk(bk: BatchedK, ik: int) -> BatchedK:
 @torch.no_grad()
 def band_structure_nc(res: NCResult, xc: NoncollinearXC, kpts_frac,
                       nbands: int | None = None, diago_tol: float = 1e-8,
-                      chunk: int = 4, verbose: bool = False):
+                      chunk: int = 4, verbose: bool = False,
+                      mixed_precision: bool | None = None):
     """Spinor band energies along arbitrary k (SOC-aware): rebuilds the
     converged potential from (ρ, m⃗) and solves per path chunk."""
     import numpy as np
@@ -341,6 +402,8 @@ def band_structure_nc(res: NCResult, xc: NoncollinearXC, kpts_frac,
     system = res.system
     grid = system.grid
     device = res.rho.device
+    if mixed_precision is None:
+        mixed_precision = device.type == "cuda"
     nbands = nbands or 2 * system.nbands
     kpts = np.asarray(kpts_frac, dtype=float)
 
@@ -388,7 +451,8 @@ def band_structure_nc(res: NCResult, xc: NoncollinearXC, kpts_frac,
             c0[:, b_i, (b_i // 2) + (b_i % 2) * bk.npw_max] = 1.0
         t2 = torch.cat([bk.t, bk.t], dim=-1)
         mask2 = torch.cat([bk.mask, bk.mask], dim=-1)
-        out = davidson_batched(h.apply, c0, t2, mask2, tol=diago_tol, max_iter=100)
+        out = davidson_batched_ms(h.apply, c0, t2, mask2, tol=diago_tol,
+                                  max_iter=100, mixed_precision=mixed_precision)
         eigs[lo:hi] = out.eigenvalues.cpu().numpy()
         if verbose:
             print(f"  nc-band chunk {lo}-{hi - 1}/{len(kpts) - 1} "
