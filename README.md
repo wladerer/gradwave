@@ -2,6 +2,17 @@
 
 Differentiable plane-wave density functional theory for periodic solids, in PyTorch.
 
+## Validation vs Quantum ESPRESSO 7.5 (identical UPF / ecut / k-mesh)
+
+| quantity | agreement |
+|---|---|
+| Si total energy (LDA & PBE, 30 Ry, 4×4×4) | ≤ 0.001 meV/atom |
+| Al free energy (PBE, semicore, Gaussian smearing, 40 Ry) | < 2 meV/atom |
+| Al Fermi level | < 10 meV |
+| Si forces (displaced, vs `tprnfor`) | < 5 meV/Å |
+| Si band structure L–Γ–X–U–Γ (occupied) | < 10 meV |
+| dE/dθ, dL(ρ)/dθ (learnable XC) vs SCF finite differences | 1e-5 / 2e-4 rel |
+
 - Norm-conserving pseudopotentials (Quantum ESPRESSO UPF v2: PseudoDojo / SG15 ONCV), Kleinman–Bylander form
 - Base units: **eV** and **Ångström**; float64/complex128 throughout
 - SCF total energies, Hellmann–Feynman forces, geometry optimization (via ASE), band structures
