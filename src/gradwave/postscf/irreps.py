@@ -95,7 +95,7 @@ def little_group(k_frac: np.ndarray, sg, cell: np.ndarray) -> list[dict]:
     for w_mat, w_vec in zip(sg.rotations, sg.translations, strict=True):
         w_inv_t = np.round(np.linalg.inv(w_mat).T).astype(np.int64)
         g0 = w_inv_t @ k_frac - k_frac
-        if np.max(np.abs(g0 - np.round(g0))) > 1e-8:
+        if np.max(np.abs(g0 - np.round(g0))) > 1e-6:
             continue
         s = _cartesian_rotation(w_mat, cell)
         kind, order, axis = _classify_op(s)

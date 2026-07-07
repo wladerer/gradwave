@@ -1674,5 +1674,241 @@
    6.719115950030991
   ]
  ],
- "reference_eV": -1.6591852495715522
+ "reference_eV": -1.6591852495715522,
+ "irreps": [
+  {
+   "x": 0.0,
+   "name": "G",
+   "clusters": [
+    {
+     "e": -21.378503923846022,
+     "label": "A1g",
+     "dim": 1,
+     "warning": ""
+    },
+    {
+     "e": -9.362668230517682,
+     "label": "A2u",
+     "dim": 1,
+     "warning": ""
+    },
+    {
+     "e": -4.710103419639847,
+     "label": "E2g",
+     "dim": 2,
+     "warning": ""
+    },
+    {
+     "e": 1.514959561214422,
+     "label": "A1g",
+     "dim": 1,
+     "warning": ""
+    },
+    {
+     "e": 2.4104049091856004,
+     "label": "A2u",
+     "dim": 1,
+     "warning": ""
+    },
+    {
+     "e": 2.847726935291896,
+     "label": "A1g",
+     "dim": 1,
+     "warning": ""
+    },
+    {
+     "e": 4.748422060663927,
+     "label": "A2u",
+     "dim": 1,
+     "warning": ""
+    },
+    {
+     "e": 5.566399834674466,
+     "label": "A1g",
+     "dim": 1,
+     "warning": ""
+    },
+    {
+     "e": 6.719109813392598,
+     "label": "?",
+     "dim": 1,
+     "warning": "cluster not closed under group (accidental degeneracy?)"
+    }
+   ]
+  },
+  {
+   "x": 1.474633629458714,
+   "name": "M",
+   "clusters": [
+    {
+     "e": -16.096897919999385,
+     "label": "Ag",
+     "dim": 1,
+     "warning": "eigensolve residual 3.8e-06"
+    },
+    {
+     "e": -15.030617168502507,
+     "label": "B3u",
+     "dim": 1,
+     "warning": "eigensolve residual 3.8e-06"
+    },
+    {
+     "e": -8.138723921614238,
+     "label": "B1g",
+     "dim": 1,
+     "warning": "eigensolve residual 3.8e-06"
+    },
+    {
+     "e": -4.042170643250088,
+     "label": "B1u",
+     "dim": 1,
+     "warning": "eigensolve residual 3.8e-06"
+    },
+    {
+     "e": 0.031113190995696743,
+     "label": "B2g",
+     "dim": 1,
+     "warning": "eigensolve residual 3.8e-06"
+    },
+    {
+     "e": 5.695704947590875,
+     "label": "B3u",
+     "dim": 1,
+     "warning": "eigensolve residual 3.8e-06"
+    },
+    {
+     "e": 9.428452736302269,
+     "label": "Ag",
+     "dim": 1,
+     "warning": "eigensolve residual 3.8e-06"
+    },
+    {
+     "e": 9.578898238087245,
+     "label": "B3u",
+     "dim": 1,
+     "warning": "eigensolve residual 3.8e-06"
+    },
+    {
+     "e": 10.325958401850158,
+     "label": "B2g",
+     "dim": 1,
+     "warning": "eigensolve residual 3.8e-06"
+    },
+    {
+     "e": 10.536384990190625,
+     "label": "B1u",
+     "dim": 1,
+     "warning": "eigensolve residual 3.8e-06"
+    }
+   ]
+  },
+  {
+   "x": 2.326013752382777,
+   "name": "K",
+   "clusters": [
+    {
+     "e": -14.397300977398494,
+     "label": "E",
+     "dim": 2,
+     "warning": "eigensolve residual 2.2e-04"
+    },
+    {
+     "e": -12.31223883925347,
+     "label": "B1",
+     "dim": 1,
+     "warning": "eigensolve residual 2.2e-04"
+    },
+    {
+     "e": -1.659209896728368,
+     "label": "E",
+     "dim": 2,
+     "warning": "eigensolve residual 2.2e-04"
+    },
+    {
+     "e": 8.921491716725637,
+     "label": "A2",
+     "dim": 1,
+     "warning": "eigensolve residual 2.2e-04"
+    },
+    {
+     "e": 11.284160677864989,
+     "label": "E",
+     "dim": 2,
+     "warning": "eigensolve residual 2.2e-04"
+    },
+    {
+     "e": 11.845428902162153,
+     "label": "B1",
+     "dim": 1,
+     "warning": "eigensolve residual 2.2e-04"
+    },
+    {
+     "e": 13.251867862264572,
+     "label": "?",
+     "dim": 1,
+     "warning": "cluster not closed under group (accidental degeneracy?)"
+    }
+   ]
+  },
+  {
+   "x": 4.028773998230903,
+   "name": "G",
+   "clusters": [
+    {
+     "e": -21.378503923846022,
+     "label": "A1g",
+     "dim": 1,
+     "warning": ""
+    },
+    {
+     "e": -9.362668230517682,
+     "label": "A2u",
+     "dim": 1,
+     "warning": ""
+    },
+    {
+     "e": -4.710103419639847,
+     "label": "E2g",
+     "dim": 2,
+     "warning": ""
+    },
+    {
+     "e": 1.514959561214422,
+     "label": "A1g",
+     "dim": 1,
+     "warning": ""
+    },
+    {
+     "e": 2.4104049091856004,
+     "label": "A2u",
+     "dim": 1,
+     "warning": ""
+    },
+    {
+     "e": 2.847726935291896,
+     "label": "A1g",
+     "dim": 1,
+     "warning": ""
+    },
+    {
+     "e": 4.748422060663927,
+     "label": "A2u",
+     "dim": 1,
+     "warning": ""
+    },
+    {
+     "e": 5.566399834674466,
+     "label": "A1g",
+     "dim": 1,
+     "warning": ""
+    },
+    {
+     "e": 6.719109813392598,
+     "label": "?",
+     "dim": 1,
+     "warning": "cluster not closed under group (accidental degeneracy?)"
+    }
+   ]
+  }
+ ]
 }

@@ -141,10 +141,12 @@ def run(inp: Input, verbose: bool = True) -> dict:
             ann = []
             for xt, lab in bs.labels:
                 idx = int(np.argmin(np.abs(np.asarray(bs.x) - xt)))
-                kf = tuple(np.round(bs.kpts_frac[idx], 8))
-                if kf not in cache:
-                    cache[kf] = band_irreps(res, list(kf), nbands=inp.bands.nbands)
-                out = cache[kf]
+                kf_exact = bs.kpts_frac[idx]  # full precision — rounding here
+                # shrinks the little group at threshold (1/3 vs 0.33333333)
+                key = tuple(np.round(kf_exact, 8))
+                if key not in cache:
+                    cache[key] = band_irreps(res, kf_exact, nbands=inp.bands.nbands)
+                out = cache[key]
                 ann.append({
                     "x": float(xt), "name": lab,
                     "clusters": [
