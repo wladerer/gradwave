@@ -39,7 +39,10 @@ to GPU. On NixOS, expose the driver to the managed-Python torch via
 | Al (fcc metal, smeared) | 1 | 11 | 40 Ry | 29 | 13.1 s | 3.9 s |
 | MgO (rocksalt) | 2 | 16 | 50 Ry | 8 | 7.0 s | 1.5 s |
 | Si₈ (conventional cell) | 8 | 32 | 30 Ry | 4 | 22.9 s | 5.1 s |
-| Si₆₄ (2×2×2 supercell, Γ) | 64 | 256 | 30 Ry | 1 | — | 306 s |
+| Si₆₄ (2×2×2 supercell, Γ) | 64 | 256 | 30 Ry | 1 | — | 231 s |
+
+Large cells auto-enable Kerker mixing (charge-sloshing control: Si₆₄
+converges in 25 iterations instead of 54).
 
 All validated against QE at matched settings (≤ 1 meV/atom; GaAs at
 0.003 meV/atom exercises the d-channel projectors). Si₆₄(Γ) reproduces
