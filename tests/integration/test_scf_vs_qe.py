@@ -32,6 +32,7 @@ GAAS_CELL = 5.653 / 2 * FCC
 GAAS_POS = np.array([[0.0, 0, 0], [5.653 / 4] * 3])
 MGO_CELL = 4.212 / 2 * FCC
 MGO_POS = np.array([[0.0, 0.0, 0.0], [2.106, 2.106, 2.106]])  # frac (.5,.5,.5)
+CU_CELL = 3.615 / 2 * FCC
 
 CASES = {
     "si_lda_ci": dict(xc=LDA_PW92, ecut=15 * RY, kmesh=(2, 2, 2), cell=SI_CELL, pos=SI_POS,
@@ -54,6 +55,10 @@ CASES = {
     "mgo_pbe_ci": dict(xc=PBE, ecut=40 * RY, kmesh=(2, 2, 2), cell=MGO_CELL,
                        pos=MGO_POS, pseudo=("Mg_ONCV_PBE-1.2.upf", "O_ONCV_PBE-1.2.upf"),
                        nat=2, smearing="none", slow=False),
+    # Cu: d-band metal (3s3p semicore + 3d10 4s1, l=2 projectors, smeared)
+    "cu_pbe_ci": dict(xc=PBE, ecut=40 * RY, kmesh=(2, 2, 2), cell=CU_CELL,
+                      pos=np.zeros((1, 3)), pseudo="Cu_ONCV_PBE-1.2.upf",
+                      nat=1, smearing="gaussian", nbands=16, slow=False),
     "si_lda_scf": dict(xc=LDA_PW92, ecut=30 * RY, kmesh=(4, 4, 4), cell=SI_CELL, pos=SI_POS,
                        pseudo="Si_ONCV_PBE-1.2.upf", nat=2, smearing="none", slow=True),
     "si_pbe_scf": dict(xc=PBE, ecut=30 * RY, kmesh=(4, 4, 4), cell=SI_CELL, pos=SI_POS,
