@@ -1807,43 +1807,43 @@
    "name": "K",
    "clusters": [
     {
-     "e": -14.397300977398494,
-     "label": "E",
+     "e": -14.397300977398476,
+     "label": "E'",
      "dim": 2,
-     "warning": "eigensolve residual 2.2e-04"
+     "warning": ""
     },
     {
-     "e": -12.31223883925347,
-     "label": "B1",
+     "e": -12.312238839253485,
+     "label": "A1'",
      "dim": 1,
-     "warning": "eigensolve residual 2.2e-04"
+     "warning": ""
     },
     {
-     "e": -1.659209896728368,
-     "label": "E",
+     "e": -1.6592098967283757,
+     "label": "E''",
      "dim": 2,
-     "warning": "eigensolve residual 2.2e-04"
+     "warning": ""
     },
     {
-     "e": 8.921491716725637,
-     "label": "A2",
+     "e": 8.921491716725617,
+     "label": "A2''",
      "dim": 1,
-     "warning": "eigensolve residual 2.2e-04"
+     "warning": ""
     },
     {
-     "e": 11.284160677864989,
-     "label": "E",
+     "e": 11.284160677253563,
+     "label": "E'",
      "dim": 2,
-     "warning": "eigensolve residual 2.2e-04"
+     "warning": ""
     },
     {
-     "e": 11.845428902162153,
-     "label": "B1",
+     "e": 11.845428902162164,
+     "label": "A2'",
      "dim": 1,
-     "warning": "eigensolve residual 2.2e-04"
+     "warning": ""
     },
     {
-     "e": 13.251867862264572,
+     "e": 13.251760867600323,
      "label": "?",
      "dim": 1,
      "warning": "cluster not closed under group (accidental degeneracy?)"
