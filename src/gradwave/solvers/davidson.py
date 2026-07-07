@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import torch
 
-from gradwave.solvers.precond import teter
+from gradwave.solvers.precond import teter, teter_b
 
 
 @dataclass
@@ -89,3 +89,97 @@ def davidson(
             hv = torch.cat([hv, h_apply(t)])
 
     return DavidsonResult(eig, x, max_iter, res_norms)
+
+
+# ---------------------------------------------------------------------------
+# k-batched variant: all k-points advance together with uniform subspace size,
+# so every step is one batched tensor op (batched FFT H-applies, batched QR,
+# batched eigh). No locking — converged bands ride along; the cost of a step
+# is set by the batch anyway, and uniformity is what buys the throughput.
+# ---------------------------------------------------------------------------
+
+
+def _orthonormalize_b(
+    v: torch.Tensor, mask: torch.Tensor, against: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Rows of v (nk, j, npw) → orthonormal per k; padded slots stay zero.
+
+    For rank-deficient input, QR's surplus columns are arbitrary orthonormal
+    complements that may LEAK INTO PADDED SLOTS (spurious near-zero Ritz
+    values). A tiny deterministic masked jitter guarantees full rank inside
+    the masked space, so Q stays in it; the jitter is far below Davidson's
+    correction scale and does not affect converged results.
+    """
+    gen = torch.Generator(device="cpu").manual_seed(v.shape[1] + 7919)
+    noise = torch.randn(*v.shape, 2, generator=gen, dtype=torch.float64)
+    jitter = torch.view_as_complex(noise).to(v.device).to(v.dtype)
+    v = (v + 1e-10 * jitter) * mask[:, None, :]
+    if against is not None and against.shape[1]:
+        for _ in range(2):  # two projection passes for stability
+            v = v - (v @ against.conj().transpose(-1, -2)) @ against
+    q, _ = torch.linalg.qr(v.transpose(-1, -2), mode="reduced")
+    return q.transpose(-1, -2)
+
+
+@dataclass
+class BatchedDavidsonResult:
+    eigenvalues: torch.Tensor  # (nk, nb) ascending
+    eigenvectors: torch.Tensor  # (nk, nb, npw_max), padded slots zero
+    n_iter: int
+    residual_norms: torch.Tensor  # (nk, nb)
+
+
+@torch.no_grad()
+def davidson_batched(
+    h_apply,
+    x0: torch.Tensor,  # (nk, nb, npw_max), padded slots zero
+    t: torch.Tensor,  # (nk, npw_max) kinetic diagonal, 0 in padding
+    mask: torch.Tensor,  # (nk, npw_max) bool
+    tol: float = 1e-9,
+    max_iter: int = 40,
+    max_dim_factor: int = 4,
+) -> BatchedDavidsonResult:
+    nk, nb, m = x0.shape
+    max_dim = min(max_dim_factor * nb, int(mask.sum(dim=1).min()))
+
+    v = _orthonormalize_b(x0, mask)
+    hv = h_apply(v)
+    eig = torch.zeros(nk, nb, dtype=torch.float64, device=x0.device)
+    x = v[:, :nb]
+    rn = torch.full((nk, nb), float("inf"), dtype=torch.float64, device=x0.device)
+
+    for it in range(1, max_iter + 1):
+        s = torch.einsum("kig,kjg->kij", v.conj(), hv)
+        s = 0.5 * (s + s.conj().transpose(-1, -2))
+        w, u = torch.linalg.eigh(s)
+        eig = w[:, :nb].real
+        x = torch.einsum("kja,kjg->kag", u[:, :, :nb], v)
+        hx = torch.einsum("kja,kjg->kag", u[:, :, :nb], hv)
+
+        r = hx - eig[..., None] * x
+        rn = torch.linalg.norm(r, dim=-1).real
+        if float(rn.max()) < tol:
+            return BatchedDavidsonResult(eig, x, it, rn)
+
+        # expand with the worst unconverged residuals only — uniform count
+        # across k (max over k of the per-k unconverged tally) keeps batching
+        n_add = int((rn > tol).sum(dim=1).max())
+        sel = torch.argsort(rn, dim=1, descending=True)[:, :n_add]  # (nk, n_add)
+        r_sel = torch.gather(r, 1, sel[..., None].expand(-1, -1, m))
+
+        t_band = torch.einsum("kbg,kg,kbg->kb", x.conj(), t.to(x.dtype), x).real
+        tb_sel = torch.gather(t_band, 1, sel)
+        d = teter_b(r_sel, t, tb_sel)
+
+        if v.shape[1] + n_add > max_dim:
+            # restart: Ritz vectors are orthonormal and hx is already known —
+            # no re-application of H needed
+            d = _orthonormalize_b(d, mask, against=x)
+            v = torch.cat([x, d], dim=1)
+            hv = torch.cat([hx, h_apply(d)], dim=1)
+        else:
+            d = _orthonormalize_b(d, mask, against=v)
+            v = torch.cat([v, d], dim=1)
+            hv = torch.cat([hv, h_apply(d)], dim=1)
+
+    return BatchedDavidsonResult(eig, x, max_iter, rn)

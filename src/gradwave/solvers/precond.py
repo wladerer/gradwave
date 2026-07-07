@@ -15,3 +15,14 @@ def teter(residual: torch.Tensor, t_g: torch.Tensor, t_band: torch.Tensor) -> to
     x2 = x * x
     num = 27.0 + 18.0 * x + 12.0 * x2 + 8.0 * x2 * x
     return residual * (num / (num + 16.0 * x2 * x2))
+
+
+def teter_b(residual: torch.Tensor, t_g: torch.Tensor, t_band: torch.Tensor) -> torch.Tensor:
+    """Batched TPA filter: residual (nk, nb, npw), t_g (nk, npw), t_band (nk, nb).
+
+    Padded slots have t_g = 0 → K = 1, residual there is 0 anyway.
+    """
+    x = t_g[:, None, :] / torch.clamp(t_band[..., None], min=1e-12)
+    x2 = x * x
+    num = 27.0 + 18.0 * x + 12.0 * x2 + 8.0 * x2 * x
+    return residual * (num / (num + 16.0 * x2 * x2))

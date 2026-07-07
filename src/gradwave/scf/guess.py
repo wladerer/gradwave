@@ -17,15 +17,16 @@ def sad_density(
     n_electrons: float,
 ) -> torch.Tensor:
     """ρ₀(r) on the dense grid [e/Å³], rescaled to exactly N_e electrons."""
-    g = torch.sqrt(grid.g2).reshape(-1).numpy()
+    device = grid.g2.device
+    g = torch.sqrt(grid.g2).reshape(-1).cpu().numpy()  # radial tables are numpy-side
     uniq, inverse = np.unique(np.round(g, 9), return_inverse=True)
     vol = grid.volume
 
-    rho_g = torch.zeros(grid.n_points, dtype=CDTYPE)
+    rho_g = torch.zeros(grid.n_points, dtype=CDTYPE, device=device)
     pos = positions.detach()
     for s, upf in enumerate(upfs):
-        table = torch.as_tensor(rhoatom_of_q(upf, uniq), dtype=torch.float64)
-        shell = table[torch.as_tensor(inverse)]
+        table = torch.as_tensor(rhoatom_of_q(upf, uniq), dtype=torch.float64, device=device)
+        shell = table[torch.as_tensor(inverse, device=device)]
         atoms = [a for a, sa in enumerate(species_of_atom) if sa == s]
         if not atoms:
             continue

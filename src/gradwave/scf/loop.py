@@ -12,18 +12,18 @@ residual ‖ρ_out − ρ_in‖·Ω/N_G < rhotol (electrons-scale measure).
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 
 import numpy as np
 import torch
 
-from gradwave.constants import HBAR2_2M
-from gradwave.core.density import density_from_orbitals, sigma_from_rho
+from gradwave.core.density import sigma_from_rho
 from gradwave.core.energies.hartree import hartree_potential_g
 from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.energies.total import EnergyBreakdown, total_energy
 from gradwave.core.fftbox import r_to_g
-from gradwave.core.hamiltonian import HamiltonianK, becp, build_projector_data, projectors
+from gradwave.core.hamiltonian import build_projector_data
 from gradwave.core.occupations import (
     SCHEMES,
     find_fermi,
@@ -39,7 +39,6 @@ from gradwave.pseudo.local import alpha_z, vloc_of_g
 from gradwave.pseudo.upf import UPFData
 from gradwave.scf.guess import sad_density
 from gradwave.scf.mixing import PulayMixer
-from gradwave.solvers.davidson import davidson
 
 
 @dataclass
@@ -59,6 +58,39 @@ class System:
     n_electrons: float
     nbands: int
     ecut: float = 0.0  # eV — needed to build additional G-spheres (band paths)
+    batch: object = None  # core.batch.BatchedK — the padded k-batched tensors
+
+    def to(self, device) -> "System":
+        """Copy with every tensor moved to `device` (setup stays CPU/numpy-built)."""
+
+        def mv(obj, fields):
+            return dataclasses.replace(
+                obj, **{f: getattr(obj, f).to(device) for f in fields}
+            )
+
+        grid = mv(self.grid, ["g_cart", "g2", "dens_mask"])
+        spheres = [mv(s, ["k_cart", "miller", "kpg", "kpg2", "flat_idx"]) for s in self.spheres]
+        proj_data = [
+            mv(pd, ["atom_index", "f_ylm_phase_free", "kpg", "dij_full"])
+            for pd in self.proj_data
+        ]
+        batch = mv(
+            self.batch,
+            ["npw", "mask", "flat_idx", "kpg", "t", "proj_phase_free",
+             "proj_atom_index", "dij_full"],
+        )
+        return dataclasses.replace(
+            self,
+            grid=grid,
+            spheres=spheres,
+            proj_data=proj_data,
+            batch=batch,
+            kweights=self.kweights.to(device),
+            positions=self.positions.to(device),
+            charges=self.charges.to(device),
+            species_index=self.species_index.to(device),
+            vloc_tables=self.vloc_tables.to(device),
+        )
 
 
 def _unique_shells(vals: np.ndarray):
@@ -113,9 +145,12 @@ def setup_system(
             )
         )
 
+    from gradwave.core.batch import build_batched
+
     return System(
         grid=grid,
         spheres=spheres,
+        batch=build_batched(spheres, proj_data),
         kweights=torch.as_tensor(kw, dtype=RDTYPE),
         positions=torch.as_tensor(np.asarray(positions), dtype=RDTYPE),
         species_of_atom=list(species_of_atom),
@@ -183,25 +218,28 @@ def scf(
     g2_vec = grid.g2.reshape(-1)[mask_flat]
     mixer = PulayMixer(g2_vec, alpha=mixing_alpha, history=mixing_history, kerker=kerker)
 
+    from gradwave.core.batch import BatchedHamiltonian, becp_b, density_b, projectors_b
+    from gradwave.solvers.davidson import davidson_batched
+
+    device = system.positions.device
+    bk = system.batch
+
     # frozen projector matrices (positions fixed during SCF)
-    projs = [projectors(pd, system.positions) for pd in system.proj_data]
+    projs_b = projectors_b(bk, system.positions)
     vloc_g = local_potential_g(
         system.positions, system.species_index, system.vloc_tables, grid.g_cart, vol
     )
     vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
 
     # initial orbitals: lowest-kinetic plane waves (sphere ordering is by |k+G|²)
-    coeffs = []
-    for sph in spheres:
-        c = torch.zeros(nb, sph.npw, dtype=CDTYPE)
-        c[torch.arange(nb), torch.arange(nb)] = 1.0
-        coeffs.append(c)
+    coeffs_b = torch.zeros(nk, nb, bk.npw_max, dtype=CDTYPE, device=device)
+    coeffs_b[:, torch.arange(nb), torch.arange(nb)] = 1.0
 
     e_free_prev, converged, history = None, False, []
-    eigs = torch.zeros(nk, nb, dtype=RDTYPE)
-    occ = torch.zeros(nk, nb, dtype=RDTYPE)
-    mu, entropy_term = 0.0, torch.zeros((), dtype=RDTYPE)
-    v_eff = torch.zeros(grid.shape, dtype=RDTYPE)
+    eigs = torch.zeros(nk, nb, dtype=RDTYPE, device=device)
+    occ = torch.zeros(nk, nb, dtype=RDTYPE, device=device)
+    mu, entropy_term = 0.0, torch.zeros((), dtype=RDTYPE, device=device)
+    v_eff = torch.zeros(grid.shape, dtype=RDTYPE, device=device)
 
     for it in range(1, max_iter + 1):
         rho_g_box = r_to_g(rho.to(CDTYPE))
@@ -212,27 +250,35 @@ def scf(
         v_xc_r, _ = vxc_potential(xc, rho, grid)
         v_eff = v_h_r + v_xc_r + vloc_r
 
-        for ik, sph in enumerate(spheres):
-            h = HamiltonianK(sph, grid.shape, v_eff, system.proj_data[ik], projs[ik])
-            t_g = HBAR2_2M * sph.kpg2
-            res = davidson(h.apply, coeffs[ik], t_g, tol=diago_tol)
-            eigs[ik], coeffs[ik] = res.eigenvalues, res.eigenvectors
+        # adaptive diagonalization tolerance (QE-style): loose while the
+        # density is far from self-consistent, tightening with the residual
+        if it == 1:
+            tol_eff = max(diago_tol, 1e-3)
+        else:
+            tol_eff = max(diago_tol, min(1e-3, 0.03 * history[-1]["res"]))
+        h = BatchedHamiltonian(bk, grid.shape, v_eff, projs_b)
+        dav = davidson_batched(h.apply, coeffs_b, bk.t, bk.mask, tol=tol_eff)
+        eigs, coeffs_b = dav.eigenvalues, dav.eigenvectors
 
         if smearing == "none":
             occ = fixed_occupations(eigs, system.n_electrons)
             mu = float(eigs[:, int(system.n_electrons // 2) - 1].max())
-            entropy_term = torch.zeros((), dtype=RDTYPE)
+            entropy_term = torch.zeros((), dtype=RDTYPE, device=device)
         else:
             scheme = SCHEMES[smearing]
             mu = float(find_fermi(eigs, system.kweights, scheme, width, system.n_electrons))
             # NB: bare torch.tensor(mu) would be float32 and shift N_e by ~1e-7
-            occ, s = occupations_and_entropy(eigs, torch.tensor(mu, dtype=RDTYPE), scheme, width)
+            occ, s = occupations_and_entropy(
+                eigs, torch.tensor(mu, dtype=RDTYPE, device=device), scheme, width
+            )
             entropy_term = -width * (2.0 * system.kweights[:, None] * s).sum()
 
-        rho_out = density_from_orbitals(coeffs, occ, system.kweights, spheres, grid.shape, vol)
+        rho_out = density_b(coeffs_b, occ, system.kweights, bk, grid.shape, vol)
 
-        # energy at (orbitals, rho_out)
-        becps = [becp(projs[ik], coeffs[ik]) for ik in range(nk)]
+        # energy at (orbitals, rho_out); per-k trimmed views for the energy assembly
+        coeffs = [coeffs_b[ik, :, : int(bk.npw[ik])] for ik in range(nk)]
+        bb = becp_b(projs_b, coeffs_b)
+        becps = [bb[ik] for ik in range(nk)]
         energies = total_energy(
             coeffs_per_k=coeffs, occ=occ, kweights=system.kweights, spheres=spheres,
             grid=grid, rho=rho_out, positions=system.positions, charges=system.charges,
@@ -250,7 +296,7 @@ def scf(
         if verbose:
             print(f"  SCF {it:3d}  F = {e_free:+.10f} eV   dE = {de:.3e}   |drho| = {res_norm:.3e}")
 
-        if de < etol and res_norm < rhotol:
+        if de < etol and res_norm < rhotol and tol_eff <= diago_tol * 1.01:
             converged = True
             rho = rho_out
             break
