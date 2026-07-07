@@ -111,6 +111,7 @@ class NCResult:
     eigenvalues: torch.Tensor  # (nk, nb)
     system: System
     history: list = field(default_factory=list)
+    coeffs: torch.Tensor | None = None  # (nk, nb, 2·npw_max) spinor coefficients
 
 
 @torch.no_grad()
@@ -187,7 +188,7 @@ def scf_noncollinear(
         rho_g_box = r_to_g(rho.to(CDTYPE))
         v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
                                dim=(-3, -2, -1)) * grid.n_points).real
-        v_xc, b_xc, _ = vxc_and_bxc(xc, rho, m, grid)
+        v_xc, b_xc, _ = vxc_and_bxc(xc, rho, m, grid, rho_core=system.rho_core)
         v_r = v_h + v_xc + vloc_r
 
         tol_eff = max(diago_tol, 1e-3) if it == 1 else \
@@ -230,7 +231,7 @@ def scf_noncollinear(
         e_h = hartree_energy(rho_g_out, grid.g2, vol)
         from gradwave.core.xc.noncollinear import energy_with_grid
 
-        e_xc = energy_with_grid(xc, rho_out, m_out, grid)
+        e_xc = energy_with_grid(xc, rho_out, m_out, grid, rho_core=system.rho_core)
         e_loc = local_energy(rho_g_out, vloc_g, vol)
         if q_so is not None:
             b_so = torch.einsum("kpg,kbg->kbp", q_so.conj(), coeffs)
@@ -280,6 +281,7 @@ def scf_noncollinear(
         converged=converged, n_iter=it, energies=energies, fermi=mu,
         mag_vec=tuple(m_int), mag_abs=float(m_norm.mean()) * vol,
         rho=rho, m=m, eigenvalues=eigs, system=system, history=history,
+        coeffs=coeffs,
     )
 
 

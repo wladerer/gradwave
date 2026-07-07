@@ -20,3 +20,11 @@ from gradwave.pseudo.upf import UPFData
 def rhoatom_of_q(upf: UPFData, q: np.ndarray) -> np.ndarray:
     """ρ̂(q) for q (nq,) in Å⁻¹ (q=0 allowed → ≈ Z_val). Returns (nq,)."""
     return sbt(0, upf.rhoatom, upf.r, upf.rab, np.asarray(q, dtype=np.float64))
+
+
+def core_density_of_q(upf: UPFData, q: np.ndarray) -> np.ndarray:
+    """NLCC core density transform ∫4πr²ρc j₀(qr) dr; zeros if no NLCC."""
+    if upf.core_rho is None:
+        return np.zeros_like(np.asarray(q, dtype=np.float64))
+    g = 4.0 * np.pi * upf.r**2 * upf.core_rho
+    return sbt(0, g, upf.r, upf.rab, np.asarray(q, dtype=np.float64))

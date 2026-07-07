@@ -87,14 +87,16 @@ def total_energy(
     dij_full: torch.Tensor,
     xc: XCFunctional,
     entropy_term: torch.Tensor | None = None,  # −σS, precomputed by SCF layer
+    rho_core: torch.Tensor | None = None,  # NLCC: shifts the XC argument ONLY
 ) -> EnergyBreakdown:
     volume = grid.volume
     rho_g = r_to_g(rho.to(torch.complex128))
 
     e_kin = kinetic_energy(coeffs_per_k, occ, kweights, spheres)
     e_h = hartree_energy(rho_g, grid.g2, volume)
-    sigma = sigma_from_rho(rho, grid.g_cart) if xc.needs_gradient else None
-    e_xc = xc.energy(rho, volume, sigma)
+    rho_xc = rho if rho_core is None else rho + rho_core
+    sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
+    e_xc = xc.energy(rho_xc, volume, sigma)
     vloc_g = local_potential_g(positions, species_index, vloc_tables, grid.g_cart, volume)
     e_loc = local_energy(rho_g, vloc_g, volume)
     e_nl = nonlocal_energy(becp_per_k, dij_full, occ, kweights)

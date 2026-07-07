@@ -63,6 +63,7 @@ class System:
     rho_symmetrizer: object = None  # symmetry.RhoSymmetrizer (paired with sym)
     so_beta_tables: list | None = None  # FR pseudos: per-species (nk, nchan, npw_max)
     is_fr: bool = False  # fully-relativistic pseudos (spinor SCF only)
+    rho_core: torch.Tensor | None = None  # NLCC core density on the grid [e/Å³]
 
     def to(self, device) -> "System":
         """Copy with every tensor moved to `device` (setup stays CPU/numpy-built)."""
@@ -101,6 +102,7 @@ class System:
                 [t.to(device) for t in self.so_beta_tables]
                 if self.so_beta_tables is not None else None
             ),
+            rho_core=self.rho_core.to(device) if self.rho_core is not None else None,
         )
 
 
@@ -215,6 +217,27 @@ def setup_system(
             )
         )
 
+    # NLCC core density on the grid (frozen; enters XC only)
+    rho_core = None
+    if any(u.core_rho is not None for u in upfs):
+        from gradwave.core.structure import structure_factors
+        from gradwave.pseudo.atomic import core_density_of_q
+
+        core_g = torch.zeros(grid.n_points, dtype=CDTYPE)
+        pos_t = torch.as_tensor(np.asarray(positions), dtype=RDTYPE)
+        for sp_i, upf in enumerate(upfs):
+            tab = torch.as_tensor(core_density_of_q(upf, uniq), dtype=RDTYPE)
+            shell = tab[torch.as_tensor(inverse)]
+            atoms = [a for a, sa in enumerate(species_of_atom) if sa == sp_i]
+            if not atoms:
+                continue
+            sfac = structure_factors(pos_t[atoms], grid.g_cart).sum(dim=0).reshape(-1)
+            core_g += sfac * shell.to(CDTYPE) / grid.volume
+        core_g = torch.where(grid.dens_mask.reshape(-1), core_g, torch.zeros_like(core_g))
+        rho_core = torch.fft.ifftn(
+            core_g.reshape(grid.shape) * grid.n_points, dim=(-3, -2, -1)
+        ).real.clamp(min=0.0)
+
     from gradwave.core.batch import build_batched
 
     return System(
@@ -236,6 +259,7 @@ def setup_system(
         rho_symmetrizer=rho_symmetrizer,
         so_beta_tables=so_tabs,
         is_fr=is_fr,
+        rho_core=rho_core,
     )
 
 
@@ -406,11 +430,18 @@ def scf(
             torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2), dim=(-3, -2, -1))
             * grid.n_points
         ).real
+        core = system.rho_core
         if nspin == 1:
-            v_xc_r, _ = vxc_potential(xc, rho_tot, grid)
+            v_xc_r, _ = vxc_potential(xc, rho_tot if core is None else rho_tot + core, grid)
             veff_s = [v_h_r + v_xc_r + vloc_r]
         else:
-            v_up, v_dn, _ = vxc_spin_potential(xc, rho_s[0], rho_s[1], grid)
+            cu2 = None if core is None else 0.5 * core
+            v_up, v_dn, _ = vxc_spin_potential(
+                xc,
+                rho_s[0] if core is None else rho_s[0] + cu2,
+                rho_s[1] if core is None else rho_s[1] + cu2,
+                grid,
+            )
             veff_s = [v_h_r + v_up + vloc_r, v_h_r + v_dn + vloc_r]
 
         # adaptive diagonalization tolerance (QE-style): loose while the
@@ -480,13 +511,15 @@ def scf(
                                        system.kweights, spheres)
                         for sp in range(nspin))
             e_h = hartree_energy(rho_g_out, grid.g2, vol)
+            c2 = 0.0 if system.rho_core is None else 0.5 * system.rho_core
+            r_u, r_d = rho_out_s[0] + c2, rho_out_s[1] + c2
             if xc.needs_gradient:
-                s_uu = sigma_from_rho(rho_out_s[0], grid.g_cart)
-                s_dd = sigma_from_rho(rho_out_s[1], grid.g_cart)
-                s_tt = sigma_from_rho(rho_tot_out, grid.g_cart)
+                s_uu = sigma_from_rho(r_u, grid.g_cart)
+                s_dd = sigma_from_rho(r_d, grid.g_cart)
+                s_tt = sigma_from_rho(r_u + r_d, grid.g_cart)
             else:
                 s_uu = s_dd = s_tt = None
-            e_xc = xc.energy(rho_out_s[0], rho_out_s[1], vol, s_uu, s_dd, s_tt)
+            e_xc = xc.energy(r_u, r_d, vol, s_uu, s_dd, s_tt)
             e_loc = local_energy(rho_g_out, vloc_g, vol)
             e_nl = sum(nonlocal_energy(becps_s[sp], _stack_dij(system),
                                        occ_s[sp], system.kweights)

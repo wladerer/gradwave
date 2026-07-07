@@ -31,6 +31,8 @@ def forces(res: SCFResult, remove_net: bool = True) -> torch.Tensor:
     """
     if getattr(res, "nspin", 1) != 1:
         raise NotImplementedError("forces for nspin=2 land next — SCF/magnetization only for now")
+    if getattr(res.system, "rho_core", None) is not None:
+        raise NotImplementedError("NLCC force term (force_cc) not implemented yet")
     system = res.system
     grid = system.grid
     pos = system.positions.detach().clone().requires_grad_(True)

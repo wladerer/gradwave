@@ -51,6 +51,7 @@ class UPFData:
     betas: tuple[BetaProjector, ...]
     dij: np.ndarray  # (nproj, nproj) [eV-scaled, see module docstring]
     rhoatom: np.ndarray  # 4πr²ρ_atom(r) [Å⁻¹] — integrates to ~Z_val
+    core_rho: np.ndarray | None = None  # NLCC ρ_core(r) [e/Å³] (added to XC only)
 
     @property
     def n_proj(self) -> int:
@@ -134,11 +135,10 @@ def parse_upf(path: str | Path) -> UPFData:
 
     rhoatom = _parse_floats(root.find("PP_RHOATOM").text) / BOHR_ANG
 
+    core_rho = None
     if flag("core_correction"):
-        raise ValueError(
-            f"{path}: NLCC (core_correction) UPF files are not supported yet — "
-            "pick a pseudopotential without nonlinear core correction."
-        )
+        # PP_NLCC stores ρ_core(r) directly (NOT 4πr²ρ), in bohr⁻³
+        core_rho = _parse_floats(root.find("PP_NLCC").text) / BOHR_ANG**3
 
     n = len(r)
     for name, arr in (("PP_RAB", rab), ("PP_LOCAL", vloc), ("PP_RHOATOM", rhoatom)):
@@ -157,4 +157,5 @@ def parse_upf(path: str | Path) -> UPFData:
         betas=tuple(betas),
         dij=dij,
         rhoatom=rhoatom,
+        core_rho=core_rho,
     )
