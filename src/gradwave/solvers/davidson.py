@@ -181,11 +181,20 @@ def davidson_batched(
         d = teter_b(r_sel, t, tb_sel)
 
         if v.shape[1] + n_add > max_dim:
-            # restart: Ritz vectors are orthonormal and hx is already known —
-            # no re-application of H needed
-            d = _orthonormalize_b(d, mask, against=x)
-            v = torch.cat([x, d], dim=1)
-            hv = torch.cat([hx, h_apply(d)], dim=1)
+            # Restart reusing hx (no H re-application) — but the Ritz block
+            # accumulates orthonormality drift across restarts, which at tight
+            # tolerances corrupts the Rayleigh–Ritz projection (observed as a
+            # ~1 eV energy jump on CUDA). Kill the drift with a QR of x and
+            # transform hx by the same triangular factor: x_old = Rᵀ·x_new ⇒
+            # hx_new = (Rᵀ)⁻¹·hx_old. Cost: one (nb × nb) triangular solve.
+            q, rmat = torch.linalg.qr(x.transpose(-1, -2), mode="reduced")
+            x_orth = q.transpose(-1, -2)
+            hx_orth = torch.linalg.solve_triangular(
+                rmat.transpose(-1, -2), hx, upper=False
+            )
+            d = _orthonormalize_b(d, mask, against=x_orth)
+            v = torch.cat([x_orth, d], dim=1)
+            hv = torch.cat([hx_orth, h_apply(d)], dim=1)
         else:
             d = _orthonormalize_b(d, mask, against=v)
             v = torch.cat([v, d], dim=1)
