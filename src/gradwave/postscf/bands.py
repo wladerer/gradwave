@@ -58,7 +58,7 @@ def band_structure(
     from gradwave.core.batch import BatchedHamiltonian, build_batched, projectors_b
     from gradwave.solvers.davidson import davidson_batched_ms
 
-    mixed_precision = device.type == "cuda"
+    mixed_precision = False  # opt-in only (fp32 draft is situational — see scf())
 
     for lo in range(0, len(kpts), chunk):
         hi = min(lo + chunk, len(kpts))

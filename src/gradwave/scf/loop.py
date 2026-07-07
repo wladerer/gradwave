@@ -338,7 +338,7 @@ def scf(
     verbose: bool = True,
     nspin: int = 1,
     start_mag=None,  # initial moment fractions: per-species OR per-atom (nspin=2)
-    mixed_precision: bool | None = None,  # fp32 draft while tol_eff loose (GPU); None → auto
+    mixed_precision: bool = False,  # opt-in fp32 draft (see note at resolution below)
 ) -> SCFResult:
     grid, spheres = system.grid, system.spheres
     vol = grid.volume
@@ -412,9 +412,11 @@ def scf(
 
     device = system.positions.device
     bk = system.batch
-    # fp32 draft pays off only on GPU (fp64 GEMM/FFT are 8–32×/2–4× slower there)
-    if mixed_precision is None:
-        mixed_precision = device.type == "cuda"
+    # Opt-in, NOT auto: benchmarking (RTX 3050) showed the fp32 draft is
+    # situational — a clear win only for moderate-grid, many-k, smeared/SOC
+    # systems (e.g. GaAs, 1.45×), but a REGRESSION for fixed-occupation
+    # insulators (Si8 0.35×: the fp32 draft inflates SCF iterations ~50%) and
+    # neutral for metals / very large grids. Callers enable it per system.
     mp_crossover = 1e-5  # switch to fp64 once the diago tolerance drops below this
 
     # frozen projector matrices (positions fixed during SCF)

@@ -35,7 +35,6 @@ from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.energies.nl_pp import nonlocal_energy
 from gradwave.core.energies.total import EnergyBreakdown
 from gradwave.core.fftbox import r_to_g
-from gradwave.core.fused import spin_mix, spin_mix_diag
 from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
 from gradwave.core.xc.noncollinear import NoncollinearXC, vxc_and_bxc
 from gradwave.dtypes import CDTYPE, CDTYPE_LOW, RDTYPE, RDTYPE_LOW
@@ -80,10 +79,7 @@ class SpinorHamiltonian:
                 "t": self.bk.t.to(rdtype),
                 "v_uu": self._v_uu.to(rdtype),
                 "v_dd": self._v_dd.to(rdtype),
-                # real/imag of ⟨↑|V̂|↓⟩ kept separate + contiguous so the
-                # real-decomposed compiled mix fuses (Inductor skips complex)
-                "v_ud_re": self._v_ud.real.to(rdtype).contiguous(),
-                "v_ud_im": self._v_ud.imag.to(rdtype).contiguous(),
+                "v_ud": self._v_ud.to(cdtype),
                 "p": self.p.to(cdtype),
                 "q": None if self.q is None else self.q.to(cdtype),
                 "dij_so": None if self.dij_so is None else self.dij_so.to(cdtype),
@@ -119,10 +115,12 @@ class SpinorHamiltonian:
             psi = g_to_r_b(cud, bk, self.shape)
             psi_u, psi_d = psi[:, :nbc], psi[:, nbc:]
             if self.b_zero:  # B⃗ = 0: diagonal spin blocks, no spin flip
-                h_u, h_d = spin_mix_diag(psi_u, psi_d, tab["v_uu"], tab["v_dd"])
+                h_u = psi_u * tab["v_uu"]
+                h_d = psi_d * tab["v_dd"]
             else:
-                h_u, h_d = spin_mix(psi_u, psi_d, tab["v_uu"], tab["v_dd"],
-                                    tab["v_ud_re"], tab["v_ud_im"])
+                v_ud = tab["v_ud"]
+                h_u = psi_u * tab["v_uu"] + psi_d * v_ud
+                h_d = psi_u * v_ud.conj() + psi_d * tab["v_dd"]
             hud = box_to_sphere_b(torch.cat([h_u, h_d], dim=1), bk)
             out_u[:, lo:hi] += hud[:, :nbc]
             out_d[:, lo:hi] += hud[:, nbc:]
@@ -177,7 +175,7 @@ def scf_noncollinear(
     diago_tol: float = 1e-9,
     verbose: bool = True,
     nonmagnetic: bool = False,  # pin m⃗ ≡ 0 (QE's domag=false): nonmagnetic + SOC
-    mixed_precision: bool | None = None,  # fp32 draft while tol_eff loose (GPU); None → auto
+    mixed_precision: bool = False,  # opt-in fp32 draft (situational — see scf())
 ) -> NCResult:
     if system.rho_symmetrizer is not None and not nonmagnetic:
         raise ValueError(
@@ -188,8 +186,6 @@ def scf_noncollinear(
     grid, bk = system.grid, system.batch
     vol, nk = grid.volume, len(system.spheres)
     device = system.positions.device
-    if mixed_precision is None:
-        mixed_precision = device.type == "cuda"
     mp_crossover = 1e-5
     nbands = 2 * system.nbands  # spinor bands hold one electron each
     m_pw = bk.npw_max
@@ -391,7 +387,7 @@ def _slice_bk(bk: BatchedK, ik: int) -> BatchedK:
 def band_structure_nc(res: NCResult, xc: NoncollinearXC, kpts_frac,
                       nbands: int | None = None, diago_tol: float = 1e-8,
                       chunk: int = 4, verbose: bool = False,
-                      mixed_precision: bool | None = None):
+                      mixed_precision: bool = False):
     """Spinor band energies along arbitrary k (SOC-aware): rebuilds the
     converged potential from (ρ, m⃗) and solves per path chunk."""
     import numpy as np
@@ -405,8 +401,6 @@ def band_structure_nc(res: NCResult, xc: NoncollinearXC, kpts_frac,
     system = res.system
     grid = system.grid
     device = res.rho.device
-    if mixed_precision is None:
-        mixed_precision = device.type == "cuda"
     nbands = nbands or 2 * system.nbands
     kpts = np.asarray(kpts_frac, dtype=float)
 
