@@ -40,6 +40,15 @@ from gradwave.scf.loop import SCFResult
 from gradwave.solvers.precond import teter
 
 
+def _check_no_symmetry(res: SCFResult):
+    if getattr(res.system, "sym", None) is not None:
+        raise NotImplementedError(
+            "implicit SCF backward requires use_symmetry=False: a perturbation "
+            "breaks the crystal symmetry, so the response needs the full "
+            "(TR-reduced) k-mesh"
+        )
+
+
 def _occupied(res: SCFResult, ik: int):
     occ = res.occupations[ik]
     n_occ = int((occ > 1e-8).sum())
@@ -103,6 +112,7 @@ def _sternheimer(h: HamiltonianK, c_occ, eps_occ, w_r, alpha: float, tol: float,
 def apply_chi0(res: SCFResult, w_r: torch.Tensor, tol: float = 1e-8,
                max_iter: int = 200) -> torch.Tensor:
     """δρ(r) = χ₀ w for a real local field w(r) [insulator]."""
+    _check_no_symmetry(res)
     system = res.system
     grid = system.grid
     hs = _hamiltonians(res)

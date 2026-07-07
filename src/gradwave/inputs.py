@@ -70,6 +70,7 @@ class Input:
     smearing: SmearingParams = field(default_factory=SmearingParams)
     nbands: int | None = None
     scf: SCFParams = field(default_factory=SCFParams)
+    symmetry: bool = True  # IBZ reduction + density symmetrization
     task: str = "scf"  # scf | relax | bands
     relax: RelaxParams = field(default_factory=RelaxParams)
     bands: BandsParams = field(default_factory=BandsParams)
@@ -133,6 +134,7 @@ def load_input(path: str | Path) -> Input:
         ),
         smearing=SmearingParams(type=smtype, width=float(sm.get("width", 0.1))),
         nbands=None if nbands == "auto" else int(nbands),
+        symmetry=bool(raw.get("symmetry", True)),
         scf=SCFParams(
             max_iter=int(scf_raw.get("max_iter", 100)),
             etol=float(scf_raw.get("etol", 1e-8)),

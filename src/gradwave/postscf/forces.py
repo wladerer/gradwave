@@ -43,4 +43,9 @@ def forces(res: SCFResult) -> torch.Tensor:
         + ewald_energy(pos, system.charges, grid.cell)
     )
     (grad,) = torch.autograd.grad(e_pos, pos)
-    return -grad
+    f = -grad
+    if system.sym is not None:
+        from gradwave.symmetry import symmetrize_forces
+
+        f = symmetrize_forces(f, system.sym, grid.cell)
+    return f

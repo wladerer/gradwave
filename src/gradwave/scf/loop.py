@@ -59,6 +59,8 @@ class System:
     nbands: int
     ecut: float = 0.0  # eV — needed to build additional G-spheres (band paths)
     batch: object = None  # core.batch.BatchedK — the padded k-batched tensors
+    sym: object = None  # symmetry.SpaceGroup when IBZ reduction is active, else None
+    rho_symmetrizer: object = None  # symmetry.RhoSymmetrizer (paired with sym)
 
     def to(self, device) -> "System":
         """Copy with every tensor moved to `device` (setup stays CPU/numpy-built)."""
@@ -90,6 +92,9 @@ class System:
             charges=self.charges.to(device),
             species_index=self.species_index.to(device),
             vloc_tables=self.vloc_tables.to(device),
+            rho_symmetrizer=(
+                self.rho_symmetrizer.to(device) if self.rho_symmetrizer is not None else None
+            ),
         )
 
 
@@ -107,9 +112,32 @@ def setup_system(
     kmesh=(1, 1, 1),
     kshift=(0, 0, 0),
     nbands: int | None = None,
+    use_symmetry: bool = False,
+    symprec: float = 1e-6,
 ) -> System:
-    grid = build_fft_grid(cell, ecut)
-    kfrac, kw = monkhorst_pack(kmesh, kshift)
+    """use_symmetry: reduce k to the IBZ and symmetrize ρ each SCF step.
+    Requires an unshifted (Γ-centered) mesh — shifted meshes fall back to
+    time-reversal-only reduction. M4's implicit backward requires
+    use_symmetry=False (a perturbation breaks the crystal symmetry).
+    """
+    cell = np.asarray(cell, dtype=np.float64)
+    positions = np.asarray(positions, dtype=np.float64)
+
+    sym = rho_symmetrizer = None
+    if use_symmetry and tuple(kshift) == (0, 0, 0):
+        from gradwave.symmetry import RhoSymmetrizer, find_spacegroup, reduce_mesh
+
+        frac = positions @ np.linalg.inv(cell)
+        sym = find_spacegroup(cell, frac, species_of_atom, symprec=symprec)
+        if sym.n_ops <= 1:
+            sym = None  # P1 — nothing to gain, keep the plain path
+
+    grid = build_fft_grid(cell, ecut, equal_dims=sym is not None)
+    if sym is not None:
+        rho_symmetrizer = RhoSymmetrizer(grid.shape, sym, dens_mask=grid.dens_mask)
+        kfrac, kw = reduce_mesh(kmesh, kshift, sym)
+    else:
+        kfrac, kw = monkhorst_pack(kmesh, kshift)
     spheres = [build_gsphere(grid, ecut, k) for k in kfrac]
 
     charges = torch.tensor([upfs[s].z_valence for s in species_of_atom], dtype=RDTYPE)
@@ -162,6 +190,8 @@ def setup_system(
         n_electrons=n_electrons,
         nbands=nbands,
         ecut=ecut,
+        sym=sym,
+        rho_symmetrizer=rho_symmetrizer,
     )
 
 
@@ -274,6 +304,13 @@ def scf(
             entropy_term = -width * (2.0 * system.kweights[:, None] * s).sum()
 
         rho_out = density_b(coeffs_b, occ, system.kweights, bk, grid.shape, vol)
+        if system.rho_symmetrizer is not None:
+            # IBZ-weighted density is not symmetric; project back onto the
+            # invariant subspace (exact — see symmetry.py conventions)
+            rho_sym_g = system.rho_symmetrizer.apply(r_to_g(rho_out.to(CDTYPE)))
+            rho_out = (
+                torch.fft.ifftn(rho_sym_g * grid.n_points, dim=(-3, -2, -1))
+            ).real
 
         # energy at (orbitals, rho_out); per-k trimmed views for the energy assembly
         coeffs = [coeffs_b[ik, :, : int(bk.npw[ik])] for ik in range(nk)]

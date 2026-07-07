@@ -64,7 +64,7 @@ class FFTGrid:
         return s[0] * s[1] * s[2]
 
 
-def build_fft_grid(cell: np.ndarray, ecut: float, device=None) -> FFTGrid:
+def build_fft_grid(cell: np.ndarray, ecut: float, device=None, equal_dims: bool = False) -> FFTGrid:
     cell = np.asarray(cell, dtype=np.float64)
     b = reciprocal_cell(cell)
     gmax_dens = 2.0 * gmax_from_ecut(ecut)
@@ -73,6 +73,10 @@ def build_fft_grid(cell: np.ndarray, ecut: float, device=None) -> FFTGrid:
     for i in range(3):
         m_i = int(np.floor(gmax_dens * np.linalg.norm(cell[i]) / (2.0 * np.pi)))
         shape.append(good_fft_size(2 * m_i + 1))
+    if equal_dims:
+        # symmetry operations permute axes; a cubic box is always closed
+        # under m → Wᵀm mod n
+        shape = [max(shape)] * 3
     shape = tuple(shape)
 
     millers = np.meshgrid(

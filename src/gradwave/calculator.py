@@ -38,6 +38,7 @@ class GradWave(Calculator):
         smearing: str = "none",
         width: float = 0.1,
         nbands: int | None = None,
+        use_symmetry: bool = True,
         etol: float = 1e-8,
         rhotol: float = 1e-7,
         verbose: bool = False,
@@ -46,7 +47,8 @@ class GradWave(Calculator):
         super().__init__(**kwargs)
         self.parameters.update(
             dict(ecut=ecut, xc=xc, kpts=tuple(kpts), kshift=tuple(kshift),
-                 smearing=smearing, width=width, nbands=nbands, etol=etol, rhotol=rhotol)
+                 smearing=smearing, width=width, nbands=nbands,
+                 use_symmetry=use_symmetry, etol=etol, rhotol=rhotol)
         )
         self._pseudo_paths = dict(pseudopotentials)
         self._upf_cache: dict[str, object] = {}
@@ -78,6 +80,7 @@ class GradWave(Calculator):
             kmesh=self.parameters["kpts"],
             kshift=self.parameters["kshift"],
             nbands=self.parameters["nbands"],
+            use_symmetry=self.parameters["use_symmetry"],
         )
         self._system, self._system_key = system, key
         return system

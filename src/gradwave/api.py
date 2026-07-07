@@ -29,6 +29,7 @@ def build_system(inp: Input):
         kmesh=inp.kpoints.mesh,
         kshift=inp.kpoints.shift,
         nbands=inp.nbands,
+        use_symmetry=inp.symmetry,
     )
 
 

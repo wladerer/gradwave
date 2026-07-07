@@ -12,10 +12,8 @@ dependencies = [
     "scipy>=1.12",
     "ase>=3.23",
     "pyyaml>=6",
+    "spglib>=2.4",
 ]
-
-[project.optional-dependencies]
-symmetry = ["spglib>=2.4"]
 
 [dependency-groups]
 dev = [
