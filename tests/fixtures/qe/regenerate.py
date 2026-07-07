@@ -43,6 +43,11 @@ def parse_stdout_terms(text: str) -> dict:
         "smearing": r"smearing contrib.*=\s*([-\d.]+)\s*Ry",
         "internal_energy": r"internal energy E=F\+TS\s*=\s*([-\d.]+)\s*Ry",
     }
+    for key, pat in (("total_magnetization", r"total magnetization\s*=\s*([-\d.]+)"),
+                     ("absolute_magnetization", r"absolute magnetization\s*=\s*([-\d.]+)")):
+        hits = re.findall(pat, text)
+        if hits:
+            terms[key] = float(hits[-1])
     for key, pat in patterns.items():
         m = re.search(pat, text)
         if m:
@@ -101,6 +106,10 @@ def run_case(case: Path) -> None:
     prefix = re.search(r"prefix\s*=\s*'([^']+)'", (case / "pw.in").read_text()).group(1)
     xml_path = case / "tmp" / f"{prefix}.save" / "data-file-schema.xml"
     data = {"qe_version": qe_version(), **parse_xml(xml_path), **parse_stdout_terms(txt.stdout)}
+    m = re.search(r"Dense\s+grid:.*FFT dimensions:\s*\(\s*(\d+),\s*(\d+),\s*(\d+)\)",
+                  txt.stdout)
+    if m:
+        data["fft_dims"] = [int(m.group(i)) for i in (1, 2, 3)]
 
     # optional second stage: non-SCF bands run reusing the same outdir
     if (case / "pw_bands.in").exists():

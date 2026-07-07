@@ -72,6 +72,8 @@ class Input:
     nbands: int | None = None
     scf: SCFParams = field(default_factory=SCFParams)
     symmetry: bool = True  # IBZ reduction + density symmetrization
+    nspin: int = 1  # 1 | 2 (collinear)
+    start_mag: dict | None = None  # element -> initial moment fraction (nspin=2)
     task: str = "scf"  # scf | relax | bands
     relax: RelaxParams = field(default_factory=RelaxParams)
     bands: BandsParams = field(default_factory=BandsParams)
@@ -136,6 +138,8 @@ def load_input(path: str | Path) -> Input:
         smearing=SmearingParams(type=smtype, width=float(sm.get("width", 0.1))),
         nbands=None if nbands == "auto" else int(nbands),
         symmetry=bool(raw.get("symmetry", True)),
+        nspin=int(raw.get("nspin", 1)),
+        start_mag=raw.get("start_mag"),
         scf=SCFParams(
             max_iter=int(scf_raw.get("max_iter", 100)),
             etol=float(scf_raw.get("etol", 1e-8)),

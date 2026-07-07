@@ -27,7 +27,11 @@ class PulayMixer:
         history: int = 8,
         kerker: bool = False,
         q0: float = 1.1,
+        check_g0: bool = True,
+        kerker_mask=None,  # per-component bool; None → kerker applies to all
     ):
+        self.check_g0 = check_g0
+        self.kerker_mask = kerker_mask
         self.g2 = g2
         self.alpha = alpha
         self.history = history
@@ -40,6 +44,8 @@ class PulayMixer:
         if not self.kerker:
             return self.alpha * r
         fac = self.g2 / (self.g2 + self.q0**2)
+        if self.kerker_mask is not None:
+            fac = torch.where(self.kerker_mask, fac, torch.ones_like(fac))
         return self.alpha * fac * r
 
     def _metric(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -53,7 +59,8 @@ class PulayMixer:
     def step(self, rho_in: torch.Tensor, rho_out: torch.Tensor) -> torch.Tensor:
         """Next ρ_in(G) from the current (ρ_in, ρ_out) pair."""
         res = rho_out - rho_in
-        assert res[0].abs() < 1e-8, "G=0 residual nonzero — density not normalized"
+        if self.check_g0:
+            assert res[0].abs() < 1e-8, "G=0 residual nonzero — density not normalized"
 
         self._rho_in.append(rho_in)
         self._res.append(res)

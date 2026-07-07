@@ -110,8 +110,10 @@ def find_fermi(
     n_electrons: float,
     tol: float = 1e-12,
     max_iter: int = 200,
+    degeneracy: float = 2.0,
 ) -> torch.Tensor:
-    """Bisection for μ such that Σ_k w_k Σ_n 2 f((ε−μ)/σ) = N_e.
+    """Bisection for μ such that Σ_k w_k Σ_n g·f((ε−μ)/σ) = N_e
+    (g = degeneracy: 2 spin-restricted, 1 per collinear spin channel).
 
     eigs: (nk, nb) [eV]; kweights: (nk,) summing to 1. Monotone for FD and
     Gaussian occupations (NOT for Methfessel–Paxton — needs a bracket).
@@ -123,7 +125,7 @@ def find_fermi(
 
     def count(mu):
         f = smearing.occupation((eigs - mu) / width)
-        return (2.0 * kweights[:, None] * f).sum()
+        return (degeneracy * kweights[:, None] * f).sum()
 
     if not (count(lo) <= n_electrons <= count(hi)):
         raise RuntimeError("Fermi bisection bracket failed — not enough bands?")
@@ -143,13 +145,11 @@ def occupations_and_entropy(
     mu: torch.Tensor,
     smearing: Smearing,
     width: float,
+    degeneracy: float = 2.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """f_nk ∈ [0,2] (spin factor 2 included) and Σ_n s_nk per k (no weights).
-
-    Returns (f (nk,nb), s (nk,nb)); E_smear = −σ Σ w_k Σ_n 2·s_nk.
-    """
+    """f_nk ∈ [0, g] and s_nk per state; E_smear = −σ Σ w_k Σ_n g·s_nk."""
     x = (eigs - mu) / width
-    return 2.0 * smearing.occupation(x), smearing.entropy(x)
+    return degeneracy * smearing.occupation(x), smearing.entropy(x)
 
 
 def fixed_occupations(eigs: torch.Tensor, n_electrons: float) -> torch.Tensor:

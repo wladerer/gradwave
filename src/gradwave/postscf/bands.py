@@ -38,6 +38,8 @@ def band_structure(
     diago_tol: float = 1e-9,
     verbose: bool = False,
 ) -> BandStructure:
+    if getattr(res, "nspin", 1) != 1:
+        raise NotImplementedError("spin-resolved band structures land next")
     system = res.system
     grid = system.grid
     nbands = nbands or system.nbands

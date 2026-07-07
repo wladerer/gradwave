@@ -41,6 +41,8 @@ from gradwave.solvers.precond import teter
 
 
 def _check_no_symmetry(res: SCFResult):
+    if getattr(res, "nspin", 1) != 1:
+        raise NotImplementedError("implicit backward for nspin=2 is future work")
     if getattr(res.system, "sym", None) is not None:
         raise NotImplementedError(
             "implicit SCF backward requires use_symmetry=False: a perturbation "

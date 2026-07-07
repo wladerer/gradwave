@@ -37,11 +37,23 @@ def run_scf(inp: Input, system=None, verbose: bool = True) -> SCFResult:
     system = system or build_system(inp)
     if inp.device != "cpu":
         system = system.to(inp.device)
-    xc = XC_REGISTRY[inp.xc]()
+    if inp.nspin == 2:
+        from gradwave.core.xc.spin import LSDA_PW92 as SLSDA
+        from gradwave.core.xc.spin import SpinPBE
+
+        xc = {"lda": SLSDA, "pbe": SpinPBE}[inp.xc]()
+        symbols = inp.atoms.get_chemical_symbols()
+        species = sorted(set(symbols))
+        mags = [float((inp.start_mag or {}).get(s2, 0.5)) for s2 in species]
+    else:
+        xc = XC_REGISTRY[inp.xc]()
+        mags = None
     kerker = inp.scf.mixing.kerker
     return scf(
         system,
         xc,
+        nspin=inp.nspin,
+        start_mag=mags,
         smearing=inp.smearing.type if inp.smearing.type != "none" else "none",
         width=inp.smearing.width,
         max_iter=inp.scf.max_iter,
@@ -64,6 +76,9 @@ def result_summary(res: SCFResult) -> dict:
         "free_energy_eV": float(e.free_energy),
         "e0_eV": float(e.e0),
         "fermi_eV": res.fermi,
+        "nspin": getattr(res, "nspin", 1),
+        "total_magnetization_muB": getattr(res, "mag_total", 0.0),
+        "absolute_magnetization_muB": getattr(res, "mag_abs", 0.0),
         "terms_eV": {
             "kinetic": float(e.kinetic),
             "hartree": float(e.hartree),

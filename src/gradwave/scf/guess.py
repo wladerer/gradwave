@@ -15,6 +15,7 @@ def sad_density(
     species_of_atom: list[int],
     upfs: list,  # [UPFData] per species
     n_electrons: float,
+    species_scale=None,  # per-species factor (spin-channel splits), default 1
 ) -> torch.Tensor:
     """ρ₀(r) on the dense grid [e/Å³], rescaled to exactly N_e electrons."""
     device = grid.g2.device
@@ -25,7 +26,9 @@ def sad_density(
     rho_g = torch.zeros(grid.n_points, dtype=CDTYPE, device=device)
     pos = positions.detach()
     for s, upf in enumerate(upfs):
-        table = torch.as_tensor(rhoatom_of_q(upf, uniq), dtype=torch.float64, device=device)
+        scale = 1.0 if species_scale is None else float(species_scale[s])
+        table = scale * torch.as_tensor(
+            rhoatom_of_q(upf, uniq), dtype=torch.float64, device=device)
         shell = table[torch.as_tensor(inverse, device=device)]
         atoms = [a for a, sa in enumerate(species_of_atom) if sa == s]
         if not atoms:

@@ -29,6 +29,8 @@ def forces(res: SCFResult, remove_net: bool = True) -> torch.Tensor:
     eV/Å for Al at 20 Ry vs ~1e-5 for valence-only Si) — and QE/VASP remove
     it the same way; with it removed, forces match QE to ~1e-5 eV/Å.
     """
+    if getattr(res, "nspin", 1) != 1:
+        raise NotImplementedError("forces for nspin=2 land next — SCF/magnetization only for now")
     system = res.system
     grid = system.grid
     pos = system.positions.detach().clone().requires_grad_(True)
