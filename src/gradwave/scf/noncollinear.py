@@ -35,6 +35,7 @@ from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.energies.nl_pp import nonlocal_energy
 from gradwave.core.energies.total import EnergyBreakdown
 from gradwave.core.fftbox import r_to_g
+from gradwave.core.fused import spin_mix, spin_mix_diag
 from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
 from gradwave.core.xc.noncollinear import NoncollinearXC, vxc_and_bxc
 from gradwave.dtypes import CDTYPE, CDTYPE_LOW, RDTYPE, RDTYPE_LOW
@@ -88,13 +89,14 @@ class SpinorHamiltonian:
             self._cache[cdtype] = cached
         return cached
 
-    def _band_chunk(self, nk: int, device) -> int:
+    def _band_chunk(self, nk: int, device, elem_bytes: int = 16) -> int:
         """Bands per chunk: the potential mix holds ~6 dense-grid temporaries
-        (two ψ components + products); keep each under ~250 MB on GPU."""
+        (two ψ components + products); keep each under ~250 MB on GPU.
+        elem_bytes lets the fp32 draft (8 B) take twice the bands of fp64."""
         if device.type != "cuda":
             return 1_000_000
         n = self.shape[0] * self.shape[1] * self.shape[2]
-        return max(1, int(2.5e8 / (16 * n * max(nk, 1))))
+        return max(1, int(2.5e8 / (elem_bytes * n * max(nk, 1))))
 
     def apply(self, c: torch.Tensor) -> torch.Tensor:
         bk, m = self.bk, self.m
@@ -105,7 +107,7 @@ class SpinorHamiltonian:
         out_d = t_r[:, None, :] * cd
 
         nk, nb = c.shape[0], c.shape[1]
-        chunk = self._band_chunk(nk, c.device)
+        chunk = self._band_chunk(nk, c.device, c.element_size())
         for lo in range(0, nb, chunk):
             hi = min(lo + chunk, nb)
             nbc = hi - lo
@@ -114,12 +116,10 @@ class SpinorHamiltonian:
             psi = g_to_r_b(cud, bk, self.shape)
             psi_u, psi_d = psi[:, :nbc], psi[:, nbc:]
             if self.b_zero:  # B⃗ = 0: diagonal spin blocks, no spin flip
-                h_u = psi_u * tab["v_uu"]
-                h_d = psi_d * tab["v_dd"]
+                h_u, h_d = spin_mix_diag(psi_u, psi_d, tab["v_uu"], tab["v_dd"])
             else:
-                v_ud = tab["v_ud"]
-                h_u = psi_u * tab["v_uu"] + psi_d * v_ud
-                h_d = psi_u * v_ud.conj() + psi_d * tab["v_dd"]
+                h_u, h_d = spin_mix(psi_u, psi_d, tab["v_uu"], tab["v_dd"],
+                                    tab["v_ud"])
             hud = box_to_sphere_b(torch.cat([h_u, h_d], dim=1), bk)
             out_u[:, lo:hi] += hud[:, :nbc]
             out_d[:, lo:hi] += hud[:, nbc:]
@@ -286,7 +286,7 @@ def scf_noncollinear(
         # Pauli-decomposed density matrix (accumulated per k to bound memory)
         rho_out = torch.zeros(grid.shape, dtype=RDTYPE, device=device)
         m_out = torch.zeros(3, *grid.shape, dtype=RDTYPE, device=device)
-        nbc = h._band_chunk(1, coeffs.device)
+        nbc = h._band_chunk(1, coeffs.device, coeffs.element_size())
         for ik in range(nk):
             w = system.kweights[ik]
             bk1 = _slice_bk(bk, ik)

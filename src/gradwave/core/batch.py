@@ -160,12 +160,16 @@ class BatchedHamiltonian:
             self._box = torch.zeros(nk, nb, self.n + 1, dtype=dtype, device=device)
         return self._box[:, :nb]
 
-    def _band_chunk(self, nk: int, device) -> int:
+    def _band_chunk(self, nk: int, device, elem_bytes: int = 16) -> int:
         """Bands per chunk so dense-box temporaries stay under ~380 MB on GPU
-        (the apply chain holds ~4 such temporaries at once). CPU: no limit."""
+        (the apply chain holds ~4 such temporaries at once). CPU: no limit.
+
+        elem_bytes scales the budget by the coefficient precision: the fp32
+        draft (complex64, 8 B) fits twice as many bands as fp64 (complex128,
+        16 B), giving larger — and thus more efficient — batched FFTs."""
         if device.type != "cuda":
             return 1_000_000
-        return max(1, int(4e8 / (16 * self.n * max(nk, 1))))
+        return max(1, int(4e8 / (elem_bytes * self.n * max(nk, 1))))
 
     def apply(self, c: torch.Tensor) -> torch.Tensor:
         """(nk, nb, npw_max) → H c, mask preserved. Chunked over bands to
@@ -175,7 +179,7 @@ class BatchedHamiltonian:
         t_r, v_eff, p, dij = self._tables(c.dtype)
         out = t_r[:, None, :] * c
 
-        chunk = self._band_chunk(nk, c.device)
+        chunk = self._band_chunk(nk, c.device, c.element_size())
         for lo in range(0, nb, chunk):
             hi = min(lo + chunk, nb)
             cc = c[:, lo:hi]
@@ -209,7 +213,7 @@ def density_b(
     nk, nb, _ = coeffs.shape
     n = shape[0] * shape[1] * shape[2]
     if coeffs.device.type == "cuda":
-        chunk = max(1, int(4e8 / (16 * n * max(nk, 1))))
+        chunk = max(1, int(4e8 / (coeffs.element_size() * n * max(nk, 1))))
     else:
         chunk = nb
     w = kweights[:, None] * occ
