@@ -139,22 +139,35 @@ class BatchedHamiltonian:
             self._box = torch.zeros(nk, nb, self.n + 1, dtype=dtype, device=device)
         return self._box[:, :nb]
 
+    def _band_chunk(self, nk: int, device) -> int:
+        """Bands per chunk so dense-box temporaries stay under ~380 MB on GPU
+        (the apply chain holds ~4 such temporaries at once). CPU: no limit."""
+        if device.type != "cuda":
+            return 1_000_000
+        return max(1, int(4e8 / (16 * self.n * max(nk, 1))))
+
     def apply(self, c: torch.Tensor) -> torch.Tensor:
-        """(nk, nb, npw_max) → H c, mask preserved."""
+        """(nk, nb, npw_max) → H c, mask preserved. Chunked over bands to
+        bound peak memory on the dense grid (math identical)."""
         bk = self.bk
         nk, nb, m = c.shape
         out = bk.t[:, None, :] * c
 
-        box = self._get_box(nk, nb, c.dtype, c.device)
-        idx = self.idx_scatter[:, None, :].expand(nk, nb, m)
-        box.scatter_(2, idx, c)
-        psi = torch.fft.ifftn(box[..., : self.n].reshape(nk, nb, *self.shape),
-                              dim=(-3, -2, -1))
-        # fftn(ifftn(·)) is norm-neutral: the 1/N and ×N of the fftbox
-        # conventions cancel, so no scaling factors here
-        vg = torch.fft.fftn(psi * self.v_eff_r, dim=(-3, -2, -1)).reshape(nk, nb, self.n)
-        gath = bk.flat_idx[:, None, :].expand(nk, nb, m)
-        out = out + vg.gather(2, gath)
+        chunk = self._band_chunk(nk, c.device)
+        for lo in range(0, nb, chunk):
+            hi = min(lo + chunk, nb)
+            cc = c[:, lo:hi]
+            nbc = hi - lo
+            box = self._get_box(nk, nbc, cc.dtype, cc.device)
+            idx = self.idx_scatter[:, None, :].expand(nk, nbc, m)
+            box.scatter_(2, idx, cc)
+            psi = torch.fft.ifftn(box[..., : self.n].reshape(nk, nbc, *self.shape),
+                                  dim=(-3, -2, -1))
+            # fftn(ifftn(·)) is norm-neutral: the 1/N and ×N of the fftbox
+            # conventions cancel, so no scaling factors here
+            vg = torch.fft.fftn(psi * self.v_eff_r, dim=(-3, -2, -1)).reshape(nk, nbc, self.n)
+            gath = bk.flat_idx[:, None, :].expand(nk, nbc, m)
+            out[:, lo:hi] += vg.gather(2, gath)
 
         if self.p.shape[1]:
             b = torch.einsum("kpg,kbg->kbp", self.p.conj(), c)
@@ -172,10 +185,23 @@ def density_b(
     shape,
     volume: float,
 ) -> torch.Tensor:
-    """ρ(r) on the dense grid [e/Å³]."""
-    psi = g_to_r_b(coeffs, bk, shape)
-    w = (kweights[:, None] * occ).to(psi.real.dtype)
-    return torch.einsum("kb,kbxyz->xyz", w, psi.real**2 + psi.imag**2) / volume
+    """ρ(r) on the dense grid [e/Å³]. Band-chunked to bound dense-grid memory."""
+    nk, nb, _ = coeffs.shape
+    n = shape[0] * shape[1] * shape[2]
+    if coeffs.device.type == "cuda":
+        chunk = max(1, int(4e8 / (16 * n * max(nk, 1))))
+    else:
+        chunk = nb
+    w = kweights[:, None] * occ
+    rho = None
+    for lo in range(0, nb, chunk):
+        hi = min(lo + chunk, nb)
+        psi = g_to_r_b(coeffs[:, lo:hi], bk, shape)
+        contrib = torch.einsum(
+            "kb,kbxyz->xyz", w[:, lo:hi].to(psi.real.dtype), psi.real**2 + psi.imag**2
+        )
+        rho = contrib if rho is None else rho + contrib
+    return rho / volume
 
 
 def becp_b(p: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
