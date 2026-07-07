@@ -61,12 +61,14 @@ def _cg(l: int, j: float, mj: float):
     return c_up, m_up, c_dn, m_dn
 
 
-def build_so_projectors(bk, system) -> tuple[torch.Tensor, torch.Tensor]:
+def build_so_projectors(bk, system, so_tables=None) -> tuple[torch.Tensor, torch.Tensor]:
     """(q (nk, nproj_so, 2·npw_max), dij_so) for fully-relativistic pseudos.
 
-    Uses system.so_beta_tables (per-k per-species F_i(|k+G|)) built by
-    setup_system, and current (fixed) positions for the phases.
+    so_tables: per-species (nk, nchan, npw_max) F_i(|k+G|); defaults to
+    system.so_beta_tables (the SCF mesh). Pass fresh tables for band paths.
     """
+    if so_tables is None:
+        so_tables = system.so_beta_tables
     device = bk.mask.device
     nk, m_pw = bk.nk, bk.npw_max
     lmax = max(b.l for u in system.upfs for b in u.betas)
@@ -83,7 +85,7 @@ def build_so_projectors(bk, system) -> tuple[torch.Tensor, torch.Tensor]:
         upf = system.upfs[sp]
         for i, beta in enumerate(upf.betas):
             l, j = beta.l, beta.j
-            f_tab = system.so_beta_tables[sp][:, i, :]  # (nk, npw_max)
+            f_tab = so_tables[sp][:, i, :]  # (nk, npw_max)
             pref = (4.0 * math.pi) * _MINUS_I_POW[l]
             n_mj = int(round(2 * j + 1))
             for imj in range(n_mj):
