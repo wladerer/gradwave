@@ -22,10 +22,12 @@ def main(argv=None) -> int:
     if args.command == "run":
         inp = load_input(args.input)
         summary = run(inp, verbose=not args.quiet)
-        e = summary["free_energy_eV"]
-        print(f"{'converged' if summary['converged'] else 'NOT CONVERGED'}: "
-              f"F = {e:.8f} eV ({summary['n_iter']} iterations)")
-        return 0 if summary["converged"] else 1
+        scf = summary.get("scf", summary)  # bands task nests the SCF block
+        if "free_energy_eV" in scf:
+            print(f"{'converged' if scf['converged'] else 'NOT CONVERGED'}: "
+                  f"F = {scf['free_energy_eV']:.8f} eV ({scf['n_iter']} iterations)")
+            return 0 if scf["converged"] else 1
+        return 0
     return 2
 
 
