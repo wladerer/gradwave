@@ -67,6 +67,14 @@ def parse_xml(xml_path: Path) -> dict:
     hom = bs.find("highestOccupiedLevel")
     if hom is not None:
         data["vbm_eV"] = float(hom.text) * HARTREE_EV
+    fr = out.find("forces")
+    if fr is not None:
+        # QE XML forces are Ha/bohr
+        vals = [float(x) for x in fr.text.split()]
+        ha_bohr_to_ev_ang = HARTREE_EV / 0.529177210903
+        data["forces_eV_ang"] = [
+            [v * ha_bohr_to_ev_ang for v in vals[i : i + 3]] for i in range(0, len(vals), 3)
+        ]
     kpts, eigs, occs = [], [], []
     for ks in bs.findall("ks_energies"):
         kpts.append([float(x) for x in ks.find("k_point").text.split()])

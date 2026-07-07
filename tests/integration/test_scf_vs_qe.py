@@ -73,7 +73,7 @@ def test_scf_vs_qe_ci(name):
 @pytest.mark.slow
 @pytest.mark.parametrize("name", [n for n, c in CASES.items() if c["slow"]])
 def test_scf_vs_qe_converged(name):
-    torch.set_num_threads(16)
+    torch.set_num_threads(8)
     res, ref = run_case(name)
     if "fermi_eV" in ref:
         assert abs(res.fermi - ref["fermi_eV"]) < 0.010  # 10 meV
