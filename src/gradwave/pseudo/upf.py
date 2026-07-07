@@ -39,6 +39,20 @@ class BetaProjector:
 
 
 @dataclass(frozen=True)
+class AtomicOrbital:
+    """A pseudo-atomic wavefunction from PP_PSWFC — the localized orbital used
+    as the DFT+U projector (and for LCAO/PDOS). Stored r·R_nl(r) scaled by
+    BOHR^{-1/2} exactly like r·β, so the radial form factor reuses the same
+    spherical Bessel transform. Normalized ∫(r·R)² dr = 1 with dr in Å."""
+
+    l: int
+    label: str  # e.g. "3D", "4S"
+    occupation: float  # reference atomic occupation of this orbital
+    rchi: np.ndarray  # r·R_nl(r) [Å^{-1/2}], full mesh
+    j: float | None = None  # total angular momentum (fully-relativistic UPFs)
+
+
+@dataclass(frozen=True)
 class UPFData:
     element: str
     z_valence: float
@@ -52,10 +66,17 @@ class UPFData:
     dij: np.ndarray  # (nproj, nproj) [eV-scaled, see module docstring]
     rhoatom: np.ndarray  # 4πr²ρ_atom(r) [Å⁻¹] — integrates to ~Z_val
     core_rho: np.ndarray | None = None  # NLCC ρ_core(r) [e/Å³] (added to XC only)
+    pswfc: tuple[AtomicOrbital, ...] = ()  # PP_PSWFC atomic orbitals (empty if none)
 
     @property
     def n_proj(self) -> int:
         return len(self.betas)
+
+    def hubbard_orbitals(self, l: int) -> list[AtomicOrbital]:
+        """PP_PSWFC orbitals with angular momentum `l` (the +U manifold).
+        Returns j-split channels for fully-relativistic pseudos; the caller
+        combines or picks per its projection scheme."""
+        return [w for w in self.pswfc if w.l == l]
 
 
 def _parse_floats(text: str) -> np.ndarray:
@@ -135,6 +156,32 @@ def parse_upf(path: str | Path) -> UPFData:
 
     rhoatom = _parse_floats(root.find("PP_RHOATOM").text) / BOHR_ANG
 
+    # PP_PSWFC atomic orbitals (present in PseudoDojo, absent/empty in SG15).
+    # Stored r·R_nl in Bohr; the BOHR^{-1/2} scaling keeps ∫(r·R)² dr = 1 with
+    # dr in Å and matches the r·β convention so the SBT form factor is reused.
+    jchi = {}
+    if has_so:
+        so = root.find("PP_SPIN_ORB")
+        for child in (so if so is not None else ()):
+            if child.tag.startswith("PP_RELWFC"):
+                jchi[int(child.attrib["index"])] = float(child.attrib["jchi"])
+    pswfc = []
+    pswfc_block = root.find("PP_PSWFC")
+    if pswfc_block is not None:
+        for child in sorted(
+            (c for c in pswfc_block if c.tag.startswith("PP_CHI.")),
+            key=lambda c: int(c.tag.split(".")[1]),
+        ):
+            vals = _parse_floats(child.text) * BOHR_ANG ** (-0.5)
+            idx = int(child.tag.split(".")[1])
+            pswfc.append(AtomicOrbital(
+                l=int(child.attrib["l"]),
+                label=child.attrib.get("label", "").strip(),
+                occupation=float(child.attrib.get("occupation", "0")),
+                rchi=vals,
+                j=jchi.get(idx),
+            ))
+
     core_rho = None
     if flag("core_correction"):
         # PP_NLCC stores ρ_core(r) directly (NOT 4πr²ρ), in bohr⁻³
@@ -158,4 +205,5 @@ def parse_upf(path: str | Path) -> UPFData:
         dij=dij,
         rhoatom=rhoatom,
         core_rho=core_rho,
+        pswfc=tuple(pswfc),
     )
