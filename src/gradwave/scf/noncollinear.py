@@ -206,21 +206,24 @@ def scf_noncollinear(
         # Pauli-decomposed density matrix (accumulated per k to bound memory)
         rho_out = torch.zeros(grid.shape, dtype=RDTYPE, device=device)
         m_out = torch.zeros(3, *grid.shape, dtype=RDTYPE, device=device)
+        nbc = h._band_chunk(1, coeffs.device)
         for ik in range(nk):
             w = system.kweights[ik]
-            cu = coeffs[ik:ik + 1, :, :m_pw]
-            cd = coeffs[ik:ik + 1, :, m_pw:]
             bk1 = _slice_bk(bk, ik)
-            pu = g_to_r_b(cu, bk1, grid.shape)[0]
-            pd = g_to_r_b(cd, bk1, grid.shape)[0]
-            f = (w * occ[ik]).to(pu.real.dtype)
-            uu = torch.einsum("b,bxyz->xyz", f, pu.real**2 + pu.imag**2)
-            dd = torch.einsum("b,bxyz->xyz", f, pd.real**2 + pd.imag**2)
-            ud = torch.einsum("b,bxyz->xyz", f.to(CDTYPE), pu.conj() * pd)
-            rho_out += uu + dd
-            m_out[0] += 2.0 * ud.real
-            m_out[1] += 2.0 * ud.imag
-            m_out[2] += uu - dd
+            for lo in range(0, nbands, nbc):
+                hi = min(lo + nbc, nbands)
+                cu = coeffs[ik:ik + 1, lo:hi, :m_pw]
+                cd = coeffs[ik:ik + 1, lo:hi, m_pw:]
+                pu = g_to_r_b(cu, bk1, grid.shape)[0]
+                pd = g_to_r_b(cd, bk1, grid.shape)[0]
+                f = (w * occ[ik, lo:hi]).to(pu.real.dtype)
+                uu = torch.einsum("b,bxyz->xyz", f, pu.real**2 + pu.imag**2)
+                dd = torch.einsum("b,bxyz->xyz", f, pd.real**2 + pd.imag**2)
+                ud = torch.einsum("b,bxyz->xyz", f.to(CDTYPE), pu.conj() * pd)
+                rho_out += uu + dd
+                m_out[0] += 2.0 * ud.real
+                m_out[1] += 2.0 * ud.imag
+                m_out[2] += uu - dd
         rho_out, m_out = rho_out / vol, m_out / vol
 
         # energies
