@@ -12,6 +12,8 @@ Differentiable plane-wave density functional theory for periodic solids, in PyTo
 | Si forces (displaced, vs `tprnfor`) | < 5 meV/Å |
 | Si band structure L–Γ–X–U–Γ (occupied) | < 10 meV |
 | dE/dθ, dL(ρ)/dθ (learnable XC) vs SCF finite differences | 1e-5 / 2e-4 rel |
+| bcc Fe ferromagnet (spin-PBE, 60 Ry): free energy | < 0.1 meV/atom |
+| bcc Fe magnetic moment | 2.2244 vs QE 2.22 μB (exp. 2.22) |
 
 ## Performance (Si LDA, 30 Ry, 4×4×4 — `benchmarks/bench_scf.py`)
 
@@ -51,6 +53,7 @@ All validated against QE at matched settings (≤ 1 meV/atom; GaAs at
 Si₈(2×2×2) to 3 µeV/atom — exact supercell folding equivalence.
 
 - Norm-conserving pseudopotentials (Quantum ESPRESSO UPF v2: PseudoDojo / SG15 ONCV), Kleinman–Bylander form
+- Collinear spin polarization (LSDA / spin-PBE) — `nspin: 2` + `start_mag` in YAML
 - Base units: **eV** and **Ångström**; float64/complex128 throughout
 - SCF total energies, Hellmann–Feynman forces, geometry optimization (via ASE), band structures
 - Autograd infrastructure: implicit differentiation through the SCF fixed point for
