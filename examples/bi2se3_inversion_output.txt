@@ -1,0 +1,32 @@
+=== no-SOC (SG15 SR pseudos) ===
+  ne=48 nk=8 npw=4881 grid=(80, 80, 80)
+  conv=True iters=18
+  Gamma clusters around the gap (band_irreps, parity from g/u):
+    bands 19-20:   Eg  E=-1.7153 eV  [VB]
+    bands 21-22:   Eu  E=-1.0030 eV  [VB]
+    bands 23-23:  A2u  E=-0.0721 eV  [VB]
+    bands 24-24:  A1g  E=+0.0721 eV  [CB]
+    bands 25-26:   Eg  E=+0.9665 eV  [CB]
+
+=== SOC (PseudoDojo FR pseudos, NLCC) ===
+  ne=78 nk=8 npw=4881 grid=(80, 80, 80) NLCC=True
+  conv=True iters=20
+  Gamma gap-edge states (occupied spinor states: 78):
+    band 74: E=-0.5296 eV  parity=-1.000  [VB]
+    band 75: E=-0.5296 eV  parity=-1.000  [VB]
+    band 76: E=-0.2800 eV  parity=+1.000  [VB]
+    band 77: E=-0.2800 eV  parity=+1.000  [VB]
+    band 78: E=+0.2340 eV  parity=-1.000  [CB]
+    band 79: E=+0.2340 eV  parity=-1.000  [CB]
+    band 80: E=+1.3709 eV  parity=+1.000  [CB]
+    band 81: E=+1.3709 eV  parity=+1.000  [CB]
+
+Timings:
+  SR setup     7.6
+  SR scf       59.3
+  SR iters     18
+  SR irreps    2.4
+  FR setup     10.9
+  FR scf       749.2
+  FR iters     20
+  FR parity    0.1
