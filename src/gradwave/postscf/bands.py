@@ -58,6 +58,7 @@ def band_structure(
     from gradwave.core.batch import BatchedHamiltonian, build_batched, projectors_b
     from gradwave.solvers.davidson import davidson_batched
 
+    prev_c = prev_miller = None  # warm start: adjacent path points share eigenvectors
     for lo in range(0, len(kpts), chunk):
         hi = min(lo + chunk, len(kpts))
         spheres = [build_gsphere(grid, system.ecut, k, device=device) for k in kpts[lo:hi]]
@@ -76,8 +77,26 @@ def band_structure(
         h = BatchedHamiltonian(bk, grid.shape, v_eff, p_b)
         c0 = torch.zeros(hi - lo, nbands, bk.npw_max, dtype=CDTYPE, device=device)
         c0[:, torch.arange(nbands), torch.arange(nbands)] = 1.0
+        if prev_c is not None:
+            # map the previous point's eigenvectors onto each new sphere by
+            # shared Miller indices — kills most cold-start Davidson iterations
+            prev_map = {tuple(m): i for i, m in enumerate(prev_miller)}
+            for ic, sph in enumerate(spheres):
+                mil = sph.miller.cpu().numpy()
+                src, dst = [], []
+                for gi, m in enumerate(mil):
+                    pi = prev_map.get(tuple(m))
+                    if pi is not None:
+                        src.append(pi)
+                        dst.append(gi)
+                view = c0[ic]
+                view[:, torch.as_tensor(dst, device=device)] = \
+                    prev_c[:, src].to(device=device, dtype=CDTYPE)
         out = davidson_batched(h.apply, c0, bk.t, bk.mask, tol=diago_tol, max_iter=80)
         eigs[lo:hi] = out.eigenvalues.cpu().numpy()
+        last = hi - lo - 1
+        prev_c = out.eigenvectors[last, :, : spheres[last].npw].cpu()
+        prev_miller = spheres[last].miller.cpu().numpy()
         if verbose:
             print(f"  band chunk {lo}-{hi - 1}/{len(kpts) - 1}  "
                   f"max|res| = {float(out.residual_norms.max()):.1e}", flush=True)
