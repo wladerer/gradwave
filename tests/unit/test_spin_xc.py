@@ -38,8 +38,8 @@ def test_full_polarization_exchange_scaling():
     zero = torch.full_like(rho, 1e-15)
     e = LSDA_PW92().energy_density(rho, zero)
     # E_x[ρ,0] = ½E_x[2ρ] ⇒ ε_x = 2^{1/3}·ε_x_unpol(ρ)
-    from gradwave.core.xc.base import to_au
     from gradwave.constants import HARTREE_EV
+    from gradwave.core.xc.base import to_au
 
     rho_au = to_au(rho)
     ex_expect = 2.0 ** (1.0 / 3.0) * eps_x_lda(rho_au)
