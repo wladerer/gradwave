@@ -239,7 +239,13 @@ def scf(
     vol = grid.volume
     nk, nb = len(spheres), system.nbands
     if kerker is None:
-        kerker = smearing != "none"
+        # auto policy: metals always; insulators once the cell is large
+        # enough that long-wavelength charge sloshing dominates mixing —
+        # the sloshing amplification goes like 4πe²χ/G²_min, so switch on
+        # when the smallest nonzero |G| drops below ~0.8 Å⁻¹ (L ≳ 8 Å).
+        g2_nonzero = grid.g2.reshape(-1)
+        g2_min = float(g2_nonzero[g2_nonzero > 1e-12].min())
+        kerker = (smearing != "none") or (g2_min < 0.64)
 
     rho = sad_density(grid, system.positions, system.species_of_atom, system.upfs,
                       system.n_electrons)
