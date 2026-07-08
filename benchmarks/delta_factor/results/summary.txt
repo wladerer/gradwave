@@ -1,0 +1,19 @@
+case   code    a0 (Å)  B0 (GPa)  B0prm  ΔE_pt max Δ (meV/at)
+si     gw     5.48932     87.97  4.222     0.000     0.0001
+si     qe     5.48932     87.97  4.223
+       off  abs offset   -0.001 meV/atom
+c      gw     3.57076    412.70  4.955     0.000     0.0002
+c      qe     3.57076    412.70  4.955
+       off  abs offset   -0.010 meV/atom
+gaas   gw     5.75441     64.78  3.834     0.013     0.0098
+gaas   qe     5.75453     64.65  3.861
+       off  abs offset   -0.001 meV/atom
+mgo    gw     4.25050    153.90  8.030     0.001     0.0007
+mgo    qe     4.25050    153.89  8.028
+       off  abs offset   -0.003 meV/atom
+al     gw     4.04638     80.74  3.139     0.080     0.0553
+al     qe     4.04603     81.30  3.649
+       off  abs offset   +3.074 meV/atom
+cu     gw     3.64014    137.90  5.149     0.334     0.1634
+cu     qe     3.63997    137.31  5.007
+       off  abs offset   +3.188 meV/atom
