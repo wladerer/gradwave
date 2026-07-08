@@ -22,8 +22,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-# (2l+1)!! up to l=4 (l=4 appears only in the derivative of l=3)
-_DFACT = [1.0, 3.0, 15.0, 105.0, 945.0]
+# (2l+1)!! up to l=5 (l=4 = augmentation channels; l=5 only in their derivative)
+_DFACT = [1.0, 3.0, 15.0, 105.0, 945.0, 10395.0]
 _SERIES_X = 4.0
 _CHUNK = 4_000_000  # max elements of one (nq_chunk, nmesh) block
 
@@ -53,8 +53,8 @@ def jl_t(l: int, x: torch.Tensor) -> torch.Tensor:
     """j_l(x) for l ≤ 4, elementwise, x ≥ 0. Plain tensor math (call under
     no_grad — the analytic-derivative path in sbt_t exists precisely so this
     never needs to be traced)."""
-    if not 0 <= l <= 4:
-        raise ValueError(f"l={l} out of supported range 0..4")
+    if not 0 <= l <= 5:
+        raise ValueError(f"l={l} out of supported range 0..5")
     small = x < _SERIES_X
     xs = torch.where(small, x, torch.full_like(x, 1.0))
     x2 = xs * xs
@@ -76,9 +76,13 @@ def jl_t(l: int, x: torch.Tensor) -> torch.Tensor:
         big = (3.0 * u2 * u - u) * s - 3.0 * u2 * c
     elif l == 3:
         big = (15.0 * u2 * u2 - 6.0 * u2) * s - (15.0 * u2 * u - u) * c
-    else:
+    elif l == 4:
         big = (105.0 * u2 * u2 * u - 45.0 * u2 * u + u) * s + (
             -105.0 * u2 * u2 + 10.0 * u2
+        ) * c
+    else:  # l == 5, via upward recurrence coefficients (verified vs j4/j3)
+        big = (945.0 * u2 * u2 * u2 - 420.0 * u2 * u2 + 15.0 * u2) * s + (
+            -945.0 * u2 * u2 * u + 105.0 * u2 * u - u
         ) * c
     return torch.where(small, acc, big)
 

@@ -64,8 +64,24 @@ class GradWave(Calculator):
 
     def _upf(self, symbol):
         if symbol not in self._upf_cache:
-            self._upf_cache[symbol] = parse_upf(self._pseudo_paths[symbol])
+            path = self._pseudo_paths[symbol]
+            try:
+                self._upf_cache[symbol] = parse_upf(path)
+            except ValueError as err:
+                if "norm-conserving" not in str(err):
+                    raise
+                from gradwave.pseudo.upf_paw import parse_upf_paw
+
+                self._upf_cache[symbol] = parse_upf_paw(path)
         return self._upf_cache[symbol]
+
+    def _is_uspp(self, species):
+        from gradwave.pseudo.upf_paw import PAWData
+
+        kinds = {isinstance(self._upf(s), PAWData) for s in species}
+        if len(kinds) > 1:
+            raise ValueError("mixing NC and USPP/PAW pseudopotentials is not supported")
+        return kinds.pop()
 
     def _get_system(self, atoms):
         symbols = atoms.get_chemical_symbols()
@@ -94,6 +110,10 @@ class GradWave(Calculator):
     def calculate(self, atoms=None, properties=("energy",), system_changes=all_changes):
         super().calculate(atoms, properties, system_changes)
         p = self.parameters
+        symbols = self.atoms.get_chemical_symbols()
+        if self._is_uspp(sorted(set(symbols))):
+            self._calculate_uspp(properties)
+            return
         system = self._get_system(self.atoms)
         res = scf(
             system, _XC[p["xc"]](),
@@ -112,6 +132,40 @@ class GradWave(Calculator):
             sig = hf_stress(res, _XC[p["xc"]]()).cpu().numpy()
             # ASE Voigt order (xx, yy, zz, yz, xz, xy); ASE's convention is
             # +(1/Ω)∂E/∂ε, same as ours
+            self.results["stress"] = np.array([
+                sig[0, 0], sig[1, 1], sig[2, 2], sig[1, 2], sig[0, 2], sig[0, 1],
+            ])
+
+    def _calculate_uspp(self, properties):
+        """USPP/PAW route (nspin=1; per-k unbatched — slower than the NC path)."""
+        from gradwave.scf.uspp import scf_uspp, setup_uspp
+
+        p = self.parameters
+        atoms = self.atoms
+        symbols = atoms.get_chemical_symbols()
+        species = sorted(set(symbols))
+        system = setup_uspp(
+            atoms.cell.array, atoms.get_positions(),
+            [species.index(s) for s in symbols],
+            [self._upf(s) for s in species],
+            ecut=p["ecut"], kmesh=p["kpts"], nbands=p["nbands"],
+        )
+        res = scf_uspp(system, _XC[p["xc"]](), smearing=p["smearing"],
+                       width=p["width"], etol=p["etol"], rhotol=p["rhotol"],
+                       verbose=self._verbose)
+        if not res["converged"]:
+            raise RuntimeError("gradwave USPP SCF did not converge")
+        self.last_result = res
+        xc = _XC[p["xc"]]()
+        self.results["energy"] = float(res["energies"].free_energy)
+        self.results["free_energy"] = float(res["energies"].free_energy)
+        from gradwave.postscf.paw_forces import forces_uspp
+
+        self.results["forces"] = forces_uspp(res, xc).cpu().numpy()
+        if "stress" in properties:
+            from gradwave.postscf.paw_stress import stress_uspp
+
+            sig = stress_uspp(res, xc).cpu().numpy()
             self.results["stress"] = np.array([
                 sig[0, 0], sig[1, 1], sig[2, 2], sig[1, 2], sig[0, 2], sig[0, 1],
             ])

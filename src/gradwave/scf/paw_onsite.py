@@ -281,39 +281,110 @@ class OneCenter:
             v_lm = v_lm - div_lm
         return v_lm, e_xc
 
+    def xc_terms_spin(self, rho_lm_s: list, core: np.ndarray):
+        """Spin-polarized XC: (v_lm per spin [2×(mesh,l2)], E_xc). The core is
+        split half/half between the channels (QE convention). GGA vector
+        fields: h_σ = (2 e_{σσ} ∇ρ_σ + e_{tt} ∇ρ_tot)·r²."""
+        r2 = self.r**2
+        rm2 = np.where(r2 > 0, 1.0 / r2, 0.0)
+        rm1 = np.where(self.r > 0, 1.0 / self.r, 0.0)
+        rho_full, grads_np = [], []
+        for rl in rho_lm_s:
+            rho_rad = self._lm2rad(rl)
+            rho_full.append(rho_rad * rm2[:, None] + 0.5 * core[:, None])
+            dr = _radial_gradient(rho_full[-1].T, self.r).T
+            gth = (rl @ self.dylmt[:, : self.l2].T) * (rm2 * rm1)[:, None]
+            gph = (rl @ self.dylmp[:, : self.l2].T) * (rm2 * rm1)[:, None]
+            grads_np.append(np.stack([dr, gph, gth], axis=0))
+        ru = torch.tensor(rho_full[0].reshape(-1), requires_grad=True)
+        rd = torch.tensor(rho_full[1].reshape(-1), requires_grad=True)
+        gga = getattr(self.xc, "needs_gradient", False)
+        if gga:
+            g_tot = grads_np[0] + grads_np[1]
+            s_uu = torch.tensor((grads_np[0] ** 2).sum(0).reshape(-1), requires_grad=True)
+            s_dd = torch.tensor((grads_np[1] ** 2).sum(0).reshape(-1), requires_grad=True)
+            s_tt = torch.tensor((g_tot**2).sum(0).reshape(-1), requires_grad=True)
+            e_density = self.xc.energy_density(ru, rd, s_uu, s_dd, s_tt)
+            leaves = [ru, rd, s_uu, s_dd, s_tt]
+        else:
+            e_density = self.xc.energy_density(ru, rd)
+            leaves = [ru, rd]
+        g = torch.autograd.grad(e_density.sum(), leaves)
+        e_pt = e_density.detach().numpy().reshape(self.mesh, self.nx)
+        e_xc = float(self.ww @ simpson((e_pt * r2[:, None]).T, self.rab))
+
+        v_lms = []
+        for isp in range(2):
+            v1 = g[isp].detach().numpy().reshape(self.mesh, self.nx)
+            v_lm = v1 @ (self.ww[:, None] * self.ylm[:, : self.l2])
+            if gga:
+                e_ss = g[2 + isp].detach().numpy().reshape(self.mesh, self.nx)
+                e_tt = g[4].detach().numpy().reshape(self.mesh, self.nx)
+                h = (2.0 * e_ss[None] * grads_np[isp] + e_tt[None] * g_tot) * r2[None, :, None]
+                h_lm = np.stack([hc @ (self.ww[:, None] * self.ylm) for hc in h])
+                aux = np.zeros((self.mesh, self.nx))
+                for lm in range(self.lm_max):
+                    aux += np.outer(h_lm[1, :, lm], self.dylmp[:, lm])
+                    aux += np.outer(
+                        h_lm[2, :, lm],
+                        self.dylmt[:, lm] * self.sin_th
+                        + 2.0 * self.ylm[:, lm] * self.cos_th,
+                    )
+                div_lm = aux @ (self.ww[:, None] * self.ylm[:, : self.l2])
+                rm3 = np.where(self.r > 0, self.r ** -3.0, 0.0)
+                div_lm = div_lm * rm3[:, None]
+                for lm in range(self.l2):
+                    div_lm[:, lm] += _radial_gradient(h_lm[0, :, lm], self.r) * rm2
+                v_lm = v_lm - div_lm
+            v_lms.append(v_lm)
+        return v_lms, e_xc
+
     # ---------- per-atom driver ----------
 
-    def energy_and_ddd(self, rho_ij: torch.Tensor):
-        """One-center energy [eV] and ddd (nm, nm) [eV] for one atom."""
-        rho = rho_ij.detach().cpu().numpy().real
-        e_tot = 0.0
-        v_saved = {}
-        for what, core, sgn in (("ae", self.core_ae, 1.0), ("ps", self.core_ps, -1.0)):
-            rl = self.rho_lm(rho, what)
-            v_h, e_h = self.hartree(rl)
-            v_x, e_x = self.xc_terms(rl, core)
-            e_tot += sgn * (e_h + e_x)
-            v_saved[what] = v_h + v_x
+    def energy_and_ddd(self, rho_ij):
+        """One-center energy [eV] and ddd [eV] for one atom.
 
-        ddd = np.zeros((self.nm, self.nm))
+        rho_ij: (nm, nm) tensor (nspin=1) → returns (E, ddd);
+        or [ρ↑_ij, ρ↓_ij] → returns (E, [ddd↑, ddd↓]).
+        """
+        spin = isinstance(rho_ij, (list, tuple))
+        rhos = ([m.detach().cpu().numpy().real for m in rho_ij]
+                if spin else [rho_ij.detach().cpu().numpy().real])
+        e_tot = 0.0
+        v_saved = {}  # what → list of per-spin (v_H + v_xc)_lm
+        for what, core, sgn in (("ae", self.core_ae, 1.0), ("ps", self.core_ps, -1.0)):
+            rls = [self.rho_lm(r, what) for r in rhos]
+            v_h, e_h = self.hartree(sum(rls))
+            if spin:
+                v_xs, e_x = self.xc_terms_spin(rls, core)
+                v_saved[what] = [v_h + v_x for v_x in v_xs]
+            else:
+                v_x, e_x = self.xc_terms(rls[0], core)
+                v_saved[what] = [v_h + v_x]
+            e_tot += sgn * (e_h + e_x)
+
         wk = simpson_weights(self.rab[: self.kkbeta])
-        for a, (i, _li, lmi) in enumerate(self.idx):
-            for b in range(a, self.nm):
-                j, _lj, lmj = self.idx[b]
-                key = (min(i, j), max(i, j))
-                cy = self.gaunt[:, lmi, lmj]
-                nz = np.nonzero(np.abs(cy) > 1e-12)[0]
-                val = 0.0
-                for lm in nz:
-                    ll = int(math.isqrt(lm))
-                    f_ae = self.pfunc_ae[key][: self.kkbeta]
-                    base, per_l = self.pfunc_ps[key]
-                    f_ps = per_l.get(ll, base)[: self.kkbeta]
-                    val += cy[lm] * float(
-                        (wk * f_ae * v_saved["ae"][: self.kkbeta, lm]).sum()
-                    )
-                    val -= cy[lm] * float(
-                        (wk * f_ps * v_saved["ps"][: self.kkbeta, lm]).sum()
-                    )
-                ddd[a, b] = ddd[b, a] = val
-        return e_tot, torch.as_tensor(ddd, dtype=torch.float64)
+        ddds = []
+        for isp in range(len(rhos)):
+            ddd = np.zeros((self.nm, self.nm))
+            for a, (i, _li, lmi) in enumerate(self.idx):
+                for b in range(a, self.nm):
+                    j, _lj, lmj = self.idx[b]
+                    key = (min(i, j), max(i, j))
+                    cy = self.gaunt[:, lmi, lmj]
+                    nz = np.nonzero(np.abs(cy) > 1e-12)[0]
+                    val = 0.0
+                    for lm in nz:
+                        ll = int(math.isqrt(lm))
+                        f_ae = self.pfunc_ae[key][: self.kkbeta]
+                        base, per_l = self.pfunc_ps[key]
+                        f_ps = per_l.get(ll, base)[: self.kkbeta]
+                        val += cy[lm] * float(
+                            (wk * f_ae * v_saved["ae"][isp][: self.kkbeta, lm]).sum()
+                        )
+                        val -= cy[lm] * float(
+                            (wk * f_ps * v_saved["ps"][isp][: self.kkbeta, lm]).sum()
+                        )
+                    ddd[a, b] = ddd[b, a] = val
+            ddds.append(torch.as_tensor(ddd, dtype=torch.float64))
+        return (e_tot, ddds) if spin else (e_tot, ddds[0])
