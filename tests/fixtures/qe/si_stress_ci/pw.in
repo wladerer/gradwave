@@ -1,0 +1,30 @@
+&control
+  calculation = 'scf'
+  prefix = 'si_stress'
+  pseudo_dir = '../pseudos'
+  outdir = './tmp'
+  verbosity = 'high'
+  tstress = .true.
+  tprnfor = .true.
+/
+&system
+  ibrav = 0
+  nat = 2
+  ntyp = 1
+  ecutwfc = 30.0
+  occupations = 'fixed'
+/
+&electrons
+  conv_thr = 1.0d-12
+/
+ATOMIC_SPECIES
+Si 28.0855 Si_ONCV_PBE-1.2.upf
+CELL_PARAMETERS angstrom
+0.0108600000 2.7041400000 2.7285750000
+2.7421500000 0.0162900000 2.7231450000
+2.7530100000 2.7095700000 0.0054300000
+ATOMIC_POSITIONS angstrom
+Si 0.0000000000 0.0000000000 0.0000000000
+Si 1.4265050000 1.3275000000 1.3842875000
+K_POINTS automatic
+2 2 2 0 0 0

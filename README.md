@@ -69,8 +69,10 @@ See `examples/` for input files. Any geometry format ASE can read is accepted.
 
 ## Scope fences (current)
 
-- Fixed cell only: no stress tensor or variable-cell relaxation yet
-  (do not wrap the calculator in `ExpCellFilter`).
+- Stress is fixed-basis (Nielsen–Martin, same convention as QE): variable-cell
+  relaxation via `FrechetCellFilter` works, but carries the usual Pulay
+  pressure at low ecut — converge ecut or re-relax at the final cell.
+- Stress with nspin=2, spin-orbit, or DFT+U is not implemented yet.
 - Norm-conserving pseudopotentials only — PAW/ultrasoft UPF files are rejected at parse time.
 
 ## Development

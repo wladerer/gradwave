@@ -67,6 +67,12 @@ class UPFData:
     rhoatom: np.ndarray  # 4πr²ρ_atom(r) [Å⁻¹] — integrates to ~Z_val
     core_rho: np.ndarray | None = None  # NLCC ρ_core(r) [e/Å³] (added to XC only)
     pswfc: tuple[AtomicOrbital, ...] = ()  # PP_PSWFC atomic orbitals (empty if none)
+    # QE truncates LOCAL-channel radial integrals (v_loc, alpha-Z, ρ_core,
+    # ρ_atom) at r = 10 bohr with an odd point count (readpp.f90's msh) — for
+    # meshes reaching past 10 bohr the UPF tail deviates from −Z/r by ~1e-5 eV
+    # and integrating it shifts v_loc(G=0) by ~0.1 eV·Å³ (a rigid ~8 meV
+    # eigenvalue offset for Ni). 0 means "unset" (synthetic data): full mesh.
+    msh: int = 0
 
     @property
     def n_proj(self) -> int:
@@ -206,4 +212,14 @@ def parse_upf(path: str | Path) -> UPFData:
         rhoatom=rhoatom,
         core_rho=core_rho,
         pswfc=tuple(pswfc),
+        msh=_qe_msh(r),
     )
+
+
+def _qe_msh(r_ang: np.ndarray) -> int:
+    """QE's readpp.f90 rule: 1-based index of the first mesh point beyond
+    10 bohr (or the mesh size), rounded DOWN to odd for Simpson."""
+    rmax = 10.0 * BOHR_ANG
+    n_le = int(np.searchsorted(r_ang, rmax, side="right"))
+    ir = n_le + 1 if n_le < len(r_ang) else len(r_ang)
+    return 2 * ((ir + 1) // 2) - 1

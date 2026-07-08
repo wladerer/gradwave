@@ -17,14 +17,21 @@ from gradwave.pseudo.radial import sbt
 from gradwave.pseudo.upf import UPFData
 
 
+def _msh(upf: UPFData) -> int:
+    """QE's msh: local-channel integrals stop at 10 bohr (see upf.py)."""
+    return upf.msh if upf.msh > 0 else len(upf.r)
+
+
 def rhoatom_of_q(upf: UPFData, q: np.ndarray) -> np.ndarray:
     """ρ̂(q) for q (nq,) in Å⁻¹ (q=0 allowed → ≈ Z_val). Returns (nq,)."""
-    return sbt(0, upf.rhoatom, upf.r, upf.rab, np.asarray(q, dtype=np.float64))
+    n = _msh(upf)
+    return sbt(0, upf.rhoatom[:n], upf.r[:n], upf.rab[:n], np.asarray(q, dtype=np.float64))
 
 
 def core_density_of_q(upf: UPFData, q: np.ndarray) -> np.ndarray:
     """NLCC core density transform ∫4πr²ρc j₀(qr) dr; zeros if no NLCC."""
     if upf.core_rho is None:
         return np.zeros_like(np.asarray(q, dtype=np.float64))
-    g = 4.0 * np.pi * upf.r**2 * upf.core_rho
-    return sbt(0, g, upf.r, upf.rab, np.asarray(q, dtype=np.float64))
+    n = _msh(upf)
+    g = 4.0 * np.pi * upf.r[:n] ** 2 * upf.core_rho[:n]
+    return sbt(0, g, upf.r[:n], upf.rab[:n], np.asarray(q, dtype=np.float64))

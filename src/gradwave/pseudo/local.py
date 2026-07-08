@@ -31,15 +31,21 @@ from gradwave.pseudo.upf import UPFData
 RC_DEFAULT = BOHR_ANG  # 1 Bohr in Å
 
 
+def _msh(upf: UPFData) -> int:
+    """QE's msh: local-channel integrals stop at 10 bohr (see upf.py)."""
+    return upf.msh if upf.msh > 0 else len(upf.r)
+
+
 def _v_short_range(upf: UPFData, rc: float) -> np.ndarray:
-    """V_sr(r) = V_loc(r) + Z e² erf(r/rc)/r, with the finite r→0 limit."""
-    r = upf.r
+    """V_sr(r) = V_loc(r) + Z e² erf(r/rc)/r on r[:msh], finite r→0 limit."""
+    n = _msh(upf)
+    r = upf.r[:n]
     zval = upf.z_valence
     erf_over_r = np.empty_like(r)
     nonzero = r > 0
     erf_over_r[nonzero] = erf(r[nonzero] / rc) / r[nonzero]
     erf_over_r[~nonzero] = 2.0 / (np.sqrt(np.pi) * rc)
-    return upf.vloc + zval * E2 * erf_over_r
+    return upf.vloc[:n] + zval * E2 * erf_over_r
 
 
 def vloc_of_g(upf: UPFData, g: np.ndarray, rc: float = RC_DEFAULT) -> np.ndarray:
@@ -51,14 +57,16 @@ def vloc_of_g(upf: UPFData, g: np.ndarray, rc: float = RC_DEFAULT) -> np.ndarray
     g = np.asarray(g, dtype=np.float64)
     if np.any(g < 1e-10):
         raise ValueError("vloc_of_g is defined for G > 0 only; G=0 belongs to alpha_z()")
+    n = _msh(upf)
     vsr = _v_short_range(upf, rc)
-    short = 4.0 * np.pi * sbt(0, vsr * upf.r**2, upf.r, upf.rab, g)
+    short = 4.0 * np.pi * sbt(0, vsr * upf.r[:n] ** 2, upf.r[:n], upf.rab[:n], g)
     tail = -4.0 * np.pi * upf.z_valence * E2 * np.exp(-0.25 * (g * rc) ** 2) / g**2
     return short + tail
 
 
 def alpha_z(upf: UPFData, rc: float = RC_DEFAULT) -> float:
     """The G=0 short-range moment α = 4π∫(V_loc + Z e²/r) r² dr, in eV·Å³."""
+    n = _msh(upf)
     vsr = _v_short_range(upf, rc)
-    short = 4.0 * np.pi * simpson(vsr * upf.r**2, upf.rab)
+    short = 4.0 * np.pi * simpson(vsr * upf.r[:n] ** 2, upf.rab[:n])
     return float(short + np.pi * upf.z_valence * E2 * rc**2)

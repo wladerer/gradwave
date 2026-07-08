@@ -1,9 +1,14 @@
 """ASE Calculator interface (Layer C).
 
-Fixed cell only: no stress, no variable-cell relaxation (do not wrap in
-ExpCellFilter) — the radial→G tables are not differentiable in the cell.
+Supports energy, forces, and stress (fixed-basis, via the differentiable
+radial transforms in pseudo/radial_torch.py), so variable-cell relaxation
+through ase.filters.FrechetCellFilter works. The usual plane-wave caveat
+applies: relaxing the cell at fixed ecut carries Pulay (basis-incompleteness)
+pressure — converge ecut or re-relax at the new cell.
+
 Geometry setup (grids, form-factor tables) is cached and reused when only
-positions change, which is the common case during a relaxation.
+positions change, which is the common case during a relaxation; any cell
+change triggers a full re-setup.
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ _XC = {"lda": LDA_PW92, "pbe": PBE}
 
 
 class GradWave(Calculator):
-    implemented_properties = ["energy", "free_energy", "forces"]
+    implemented_properties = ["energy", "free_energy", "forces", "stress"]
 
     def __init__(
         self,
@@ -101,3 +106,12 @@ class GradWave(Calculator):
         self.results["energy"] = float(res.energies.free_energy)  # consistent forces
         self.results["free_energy"] = float(res.energies.free_energy)
         self.results["forces"] = hf_forces(res).cpu().numpy()
+        if "stress" in properties:
+            from gradwave.postscf.stress import stress as hf_stress
+
+            sig = hf_stress(res, _XC[p["xc"]]()).cpu().numpy()
+            # ASE Voigt order (xx, yy, zz, yz, xz, xy); ASE's convention is
+            # +(1/Ω)∂E/∂ε, same as ours
+            self.results["stress"] = np.array([
+                sig[0, 0], sig[1, 1], sig[2, 2], sig[1, 2], sig[0, 2], sig[0, 1],
+            ])

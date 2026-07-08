@@ -1,0 +1,31 @@
+&control
+  calculation = 'scf'
+  prefix = 'mgo_stress'
+  pseudo_dir = '../pseudos'
+  outdir = './tmp'
+  verbosity = 'high'
+  tstress = .true.
+  tprnfor = .true.
+/
+&system
+  ibrav = 0
+  nat = 2
+  ntyp = 2
+  ecutwfc = 40.0
+  occupations = 'fixed'
+/
+&electrons
+  conv_thr = 1.0d-12
+/
+ATOMIC_SPECIES
+Mg 24.305 Mg_ONCV_PBE-1.2.upf
+O 15.999 O_ONCV_PBE-1.2.upf
+CELL_PARAMETERS angstrom
+0.0000000000 2.0744100000 2.0744100000
+2.0744100000 0.0000000000 2.0744100000
+2.0744100000 2.0744100000 0.0000000000
+ATOMIC_POSITIONS crystal
+Mg 0.00 0.00 0.00
+O  0.50 0.50 0.50
+K_POINTS automatic
+2 2 2 0 0 0

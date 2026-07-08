@@ -1,0 +1,32 @@
+&control
+  calculation = 'scf'
+  prefix = 'ni_stress'
+  pseudo_dir = '../pseudos'
+  outdir = './tmp'
+  verbosity = 'high'
+  tstress = .true.
+  tprnfor = .true.
+/
+&system
+  ibrav = 0
+  nat = 1
+  ntyp = 1
+  ecutwfc = 60.0
+  occupations = 'smearing'
+  smearing = 'gaussian'
+  degauss = 0.0073498649
+  nbnd = 14
+/
+&electrons
+  conv_thr = 1.0d-12
+/
+ATOMIC_SPECIES
+Ni 58.6934 PD_Ni_PBE.upf
+CELL_PARAMETERS angstrom
+0.0000000000 1.7776000000 1.7776000000
+1.7776000000 0.0000000000 1.7776000000
+1.7776000000 1.7776000000 0.0000000000
+ATOMIC_POSITIONS crystal
+Ni 0.00 0.00 0.00
+K_POINTS automatic
+4 4 4 0 0 0

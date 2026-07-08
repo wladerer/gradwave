@@ -247,9 +247,12 @@ def setup_system(
             sfac = structure_factors(pos_t[atoms], grid.g_cart).sum(dim=0).reshape(-1)
             core_g += sfac * shell.to(CDTYPE) / grid.volume
         core_g = torch.where(grid.dens_mask.reshape(-1), core_g, torch.zeros_like(core_g))
+        # NO clamp on the Gibbs oscillations of the sphere-truncated core: QE
+        # keeps them (its XC floors ρ pointwise, as does ours via to_au) and
+        # clamping shifts E_xc by several meV for sharp 3d cores
         rho_core = torch.fft.ifftn(
             core_g.reshape(grid.shape) * grid.n_points, dim=(-3, -2, -1)
-        ).real.clamp(min=0.0)
+        ).real
 
     from gradwave.core.batch import build_batched
 
@@ -579,6 +582,7 @@ def scf(
                 charges=system.charges, species_index=system.species_index,
                 vloc_tables=system.vloc_tables, becp_per_k=becps_s[0],
                 dij_full=_stack_dij(system), xc=xc, entropy_term=entropy_term,
+                rho_core=system.rho_core,
             )
             energies.hubbard = e_hub
         else:
