@@ -68,31 +68,57 @@ class PulayMixer:
             self._rho_in.pop(0)
             self._res.pop(0)
 
-        m = len(self._res)
-        if m == 1:
-            return rho_in + self._precondition(res)
+        # stale-history filter: entries whose residual is far larger than the
+        # current one carry curvature information from a region the iteration
+        # has left; keeping them distorts the DIIS extrapolation near
+        # convergence (the NiO+U tail was dominated by this)
+        r_now = self._metric(res, res)
+        while len(self._res) > 2:
+            r_old = self._metric(self._res[0], self._res[0])
+            if r_old > 1e8 * r_now:
+                self._rho_in.pop(0)
+                self._res.pop(0)
+            else:
+                break
 
-        # bordered system: [B 1; 1ᵀ 0][c; λ] = [0; 1], B_ij = <R_i, R_j>
-        b = torch.zeros((m + 1, m + 1), dtype=torch.float64, device=rho_in.device)
-        for i in range(m):
-            for j in range(i, m):
-                bij = self._metric(self._res[i], self._res[j])
-                b[i, j] = b[j, i] = bij
-        b[:m, m] = 1.0
-        b[m, :m] = 1.0
-        rhs = torch.zeros(m + 1, dtype=torch.float64, device=rho_in.device)
-        rhs[m] = 1.0
+        while True:
+            m = len(self._res)
+            if m == 1:
+                return rho_in + self._precondition(res)
 
-        # ill-conditioning → drop oldest history and retry, else linear step
-        try:
-            cond = torch.linalg.cond(b[:m, :m])
-            if not torch.isfinite(cond) or cond > 1e12:
-                raise RuntimeError
-            coeff = torch.linalg.solve(b, rhs)[:m]
-        except RuntimeError:
-            self._rho_in = self._rho_in[-1:]
-            self._res = self._res[-1:]
-            return rho_in + self._precondition(res)
+            # bordered system: [B 1; 1ᵀ 0][c; λ] = [0; 1], B_ij = <R_i, R_j>.
+            # Solve in the diagonal-normalized basis (B̃ = D⁻¹BD⁻¹, D = √diag B)
+            # so the Tikhonov term is scale-invariant: residual norms span many
+            # orders across the history, and a regularizer scaled to the raw
+            # matrix would swamp the newest (smallest-residual) entries.
+            b0 = torch.zeros((m, m), dtype=torch.float64, device=rho_in.device)
+            for i in range(m):
+                for j in range(i, m):
+                    bij = self._metric(self._res[i], self._res[j])
+                    b0[i, j] = b0[j, i] = bij
+            d = torch.sqrt(b0.diagonal().clamp_min(1e-300))
+            bn = b0 / d[:, None] / d[None, :]
+            bn = bn + 1e-10 * torch.eye(m, dtype=torch.float64, device=rho_in.device)
+
+            b = torch.zeros((m + 1, m + 1), dtype=torch.float64, device=rho_in.device)
+            b[:m, :m] = bn
+            b[:m, m] = 1.0 / d
+            b[m, :m] = 1.0 / d
+            rhs = torch.zeros(m + 1, dtype=torch.float64, device=rho_in.device)
+            rhs[m] = 1.0
+
+            # residual ill-conditioning → drop the OLDEST entry and retry
+            # (a full reset discards curvature the next steps need)
+            try:
+                cond = torch.linalg.cond(bn)
+                if not torch.isfinite(cond) or cond > 1e14:
+                    raise RuntimeError
+                coeff = torch.linalg.solve(b, rhs)[:m] / d
+            except RuntimeError:
+                self._rho_in.pop(0)
+                self._res.pop(0)
+                continue
+            break
 
         rho_opt = sum(c * r for c, r in zip(coeff, self._rho_in, strict=True))
         res_opt = sum(c * r for c, r in zip(coeff, self._res, strict=True))

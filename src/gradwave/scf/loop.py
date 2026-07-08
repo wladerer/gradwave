@@ -481,11 +481,16 @@ def scf(
             veff_s = [v_h_r + v_up + vloc_r, v_h_r + v_dn + vloc_r]
 
         # adaptive diagonalization tolerance (QE-style): loose while the
-        # density is far from self-consistent, tightening with the residual
+        # density is far from self-consistent, tightening QUADRATICALLY with
+        # the residual (QE's ethr ~ dr2/nelec/10). A linear schedule floors
+        # each iteration's density residual at the eigensolver noise, so the
+        # tail converges at the schedule's pace instead of the mixer's.
         if it == 1:
             tol_eff = max(diago_tol, 1e-3)
         else:
-            tol_eff = max(diago_tol, min(1e-3, 0.03 * history[-1]["res"]))
+            r_prev = history[-1]["res"]
+            tol_eff = max(diago_tol,
+                          min(1e-3, 0.1 * r_prev * r_prev / system.n_electrons))
         use_low = mixed_precision and tol_eff > mp_crossover
         cdtype = CDTYPE_LOW if use_low else CDTYPE
         t_solve = bk.t.to(RDTYPE_LOW) if use_low else bk.t
