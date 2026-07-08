@@ -1,0 +1,19 @@
+{
+  "description": "QE 7.5 ph.x epsil/zeu references (E-field DFPT at Gamma)",
+  "qe_version": "7.5",
+  "si": {
+    "a_angstrom": 5.43, "ecutwfc_ry": 40.0, "kmesh": [4, 4, 4], "fft": [32, 32, 32],
+    "pseudo": "Si_ONCV_PBE-1.2.upf",
+    "eps_inf": 23.890405468,
+    "born_raw_diag": -1.17227,
+    "note": "4x4x4-mesh values (NOT k-converged; both codes agree on the raw physics). born_raw = before QE's post-hoc ASR enforcement; symmetry makes the ASR-corrected Z* exactly 0. QE needed nr=32 (30 is incompatible with the 1/4,1/4,1/4 fractional translation); gradwave ran its natural 30^3 grid - eps agrees to 4e-4 regardless."
+  },
+  "mgo": {
+    "a_angstrom": 4.212, "ecutwfc_ry": 65.0, "kmesh": [4, 4, 4], "fft": [30, 30, 30],
+    "pseudos": {"Mg": "Mg_ONCV_PBE-1.2.upf", "O": "O_ONCV_PBE-1.2.upf"},
+    "eps_inf": 3.438618316,
+    "born_raw": {"Mg": 1.98782, "O": -2.07537},
+    "asr_sum_raw": -0.08755,
+    "note": "gradwave: eps 3.449147 (0.31%), Z*Mg 1.98649 (0.07%), Z*O -2.07738 (0.10%), ASR sum -0.09089. dk-independent to 6 decimals (2e-3..5e-4), so the residual is a genuine cross-code difference, within the sub-1% range mature DFPT codes show for eps_inf."
+  }
+}
