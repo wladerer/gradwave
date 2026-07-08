@@ -69,7 +69,8 @@ class GradWave(Calculator):
         if self._system is not None and key == self._system_key:
             return dataclasses.replace(
                 self._system,
-                positions=torch.as_tensor(atoms.get_positions(), dtype=RDTYPE),
+                positions=torch.as_tensor(atoms.get_positions(), dtype=RDTYPE).to(
+                    self._system.positions.device),
             )
         system = setup_system(
             cell=atoms.cell.array,
