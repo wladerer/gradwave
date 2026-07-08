@@ -116,3 +116,30 @@ def test_nio_energy_derivative_u_hellmann_feynman():
     assert resp.converged and resm.converged
     de_fd = (float(resp.energies.total) - float(resm.energies.total)) / (2 * du)
     assert abs(de_hf - de_fd) < 1e-4, (de_hf, de_fd)
+
+
+@pytest.mark.slow
+def test_nio_linear_response_u_autodiff():
+    """Analytic (Sternheimer) linear-response U: no finite differences, no
+    probe SCF re-runs — one ground state, Hxc kernel via autograd HVP. Must
+    match hp.x DFPT and the FD implementation (which it replaces)."""
+    from gradwave.postscf.hubbard_u import linear_response_u_autodiff
+
+    torch.set_num_threads(8)
+    ref = json.load(open(FIX / "nio_hp" / "reference.json"))
+    cell = np.array(ref["cell_angstrom"])
+    frac = np.array(ref["positions_crystal"])
+    ni = parse_upf(FIX / "pseudos" / ref["pseudos"]["Ni"])
+    o = parse_upf(FIX / "pseudos" / ref["pseudos"]["O"])
+    system = setup_system(cell, frac @ cell, [0, 0, 1, 1], [ni, o],
+                          ecut=ref["ecutwfc_ry"] * RY, kmesh=tuple(ref["kmesh"]),
+                          nbands=40)
+    out = linear_response_u_autodiff(
+        system, SpinPBE(), l=2, species=0, site=0, smearing="gaussian", width=0.05,
+        scf_kwargs=dict(etol=1e-7, rhotol=1e-6, verbose=False, nspin=2,
+                        start_mag=[+0.5, -0.5, 0, 0], max_iter=150))
+    # infinitesimal response vs the FD (alpha=0.1) columns of this session
+    assert abs(out["chi0"] - (-0.21360)) < 2e-3
+    assert abs(out["chi"] - (-0.08733)) < 2e-3
+    assert abs(out["U_eV"] - ref["hubbard_U_eV"]) < 0.15, out["U_eV"]  # vs hp.x
+    assert out["n_outer"] < 50  # Anderson-accelerated fixed point
