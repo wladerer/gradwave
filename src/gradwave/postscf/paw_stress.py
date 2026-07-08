@@ -31,6 +31,8 @@ _MINUS_I_POW = [1.0 + 0.0j, -1.0j, -1.0 + 0.0j, 1.0j, 1.0 + 0.0j]  # (−i)^L, L
 
 def stress_uspp(res: dict, xc) -> torch.Tensor:
     """σ (3,3) [eV/Å³] for a converged scf_uspp result (nspin=1)."""
+    if res.get("nspin", 1) != 1:
+        raise NotImplementedError("USPP/PAW stress for nspin=2 not implemented yet")
     system = res["system"]
     eps = torch.zeros(3, 3, dtype=torch.float64, requires_grad=True)
     e = _energy_strained_uspp(res, xc, eps)

@@ -181,7 +181,21 @@ def setup_uspp(
     vloc_tables = torch.as_tensor(np.stack(vloc_tables), dtype=RDTYPE)
 
     dij_species = [torch.as_tensor(p.dij, dtype=RDTYPE) for p in paws]
-    q_species = [torch.as_tensor(p.q, dtype=RDTYPE) for p in paws]
+    # S weights from the SAME radial integrals as the augmentation tables —
+    # PP_Q agrees with ∫q⁰_ij dr only to the file's print precision (~5e-8 per
+    # pair), and any mismatch breaks exact charge conservation (ρ_aug carries
+    # Q̃(0)=∫q⁰ while S-normalization would enforce PP_Q). QE's init_us_1
+    # recomputes qq from qfuncl the same way.
+    from gradwave.pseudo.radial import simpson as _simpson
+
+    q_species = []
+    for p in paws:
+        qm = np.array(p.q, dtype=np.float64)
+        for (i, j, ll), qfun in p.qijl.items():
+            if ll == 0:
+                val = float(_simpson(qfun, p.rab[: p.aug_cutoff_idx]))
+                qm[i, j] = qm[j, i] = val
+        q_species.append(torch.as_tensor(qm, dtype=RDTYPE))
     beta_ls = [[b.l for b in p.betas] for p in paws]
     proj_data, q_full = [], None
     for sph in spheres:
@@ -366,50 +380,61 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     phase_arg = system.g_sphere @ system.positions.T  # (nGm, na)
     phase_pos = torch.exp(torch.complex(torch.zeros_like(phase_arg), phase_arg))
 
+    # Mixing vector = [ρ channels on the density sphere, flattened becsum per
+    # spin]. Mixing becsum TOGETHER with ρ (QE keeps it inside rho%mix the
+    # same way) is essential for metals: the D-feedback loops (∫v_eff Q and
+    # the one-center ddd) must see a becsum coherent with the mixed density —
+    # a fresh or independently-damped becsum gives a gain>1 charge
+    # oscillation for semicore-metal PAW (fcc Ni diverges with ×9/iteration).
+    # Kerker damps the ρ-TOTAL block only (becsum is localized; the
+    # magnetization channel must keep its G=0 free for ↑↓ transfer).
     g2_mix = grid.g2.reshape(-1)[mask_flat]
-    if nspin == 1:
-        mixer = PulayMixer(g2_mix, alpha=mixing_alpha, history=mixing_history)
-    else:
-        ng = g2_mix.shape[0]
-        kerker_mask = torch.cat([torch.ones(ng, dtype=torch.bool),
-                                 torch.zeros(ng, dtype=torch.bool)])
-        mixer = PulayMixer(torch.cat([g2_mix, g2_mix]), alpha=mixing_alpha,
-                           history=mixing_history, kerker=(smearing != "none"),
-                           kerker_mask=kerker_mask, check_g0=False)
+    ng = g2_mix.shape[0]
+    nbec = sum((s1 - s0) ** 2 for (s0, s1) in system.atom_slices)
+    g2_full = torch.cat([g2_mix] * nspin + [torch.zeros(nbec)] * nspin)
+    kerker_mask = torch.cat([
+        torch.ones(ng, dtype=torch.bool),
+        torch.zeros(ng * (nspin - 1) + nbec * nspin, dtype=torch.bool),
+    ])
+    mixer = PulayMixer(g2_full, alpha=mixing_alpha, history=mixing_history,
+                       kerker=(smearing != "none"), kerker_mask=kerker_mask,
+                       check_g0=False)
     coeffs = [[None] * nk for _ in range(nspin)]
     e_free_prev, history, converged = None, [], False
     occ_s = entropy_term = eigs_s = mu = None
     energies = None
 
     # PAW one-center machinery; becsum seeded from the reference atomic
-    # occupations (spin-split by start_mag). ddd feeds the Hamiltonian from
-    # the PREVIOUS becsum; the reported energy is recomputed at the final one.
+    # occupations (spin-split by start_mag; zeros for bare USPP where the UPF
+    # carries no PP_OCCUPATIONS). rho_ij_mix is the MIXER-side becsum used
+    # for the one-center ddd; rho_ij_s holds each iteration's fresh becsum.
     is_paw = any(p.is_paw for p in system.paws)
     onec = None
-    rho_ij_s = None
     if is_paw:
         from gradwave.scf.paw_onsite import OneCenter
 
         onec = [OneCenter(p, xc) for p in system.paws]
-        rho_ij_s = [[] for _ in range(nspin)]
-        for sp in system.species_of_atom:
-            paw = system.paws[sp]
-            nm = sum(2 * b.l + 1 for b in paw.betas)
-            for isp in range(nspin):
+    rho_ij_s = [[] for _ in range(nspin)]
+    for sp in system.species_of_atom:
+        paw = system.paws[sp]
+        nm = sum(2 * b.l + 1 for b in paw.betas)
+        for isp in range(nspin):
+            m0 = torch.zeros(nm, nm, dtype=CDTYPE)
+            if paw.paw_occ is not None:
                 frac = 0.5 if nspin == 1 else spin_frac[isp][sp]
-                m0 = torch.zeros(nm, nm, dtype=CDTYPE)
                 col = 0
                 for i, b in enumerate(paw.betas):
                     for _m in range(2 * b.l + 1):
                         m0[col, col] = paw.paw_occ[i] / (2 * b.l + 1) * (
                             2.0 * frac if nspin == 1 else frac)
                         col += 1
-                rho_ij_s[isp].append(m0)
+            rho_ij_s[isp].append(m0)
+    rho_ij_mix = [[m.clone() for m in ch] for ch in rho_ij_s]
 
     def _becsum_for_onec(a):
         if nspin == 1:
-            return rho_ij_s[0][a]
-        return [rho_ij_s[0][a], rho_ij_s[1][a]]
+            return rho_ij_mix[0][a]
+        return [rho_ij_mix[0][a], rho_ij_mix[1][a]]
 
     for it in range(1, max_iter + 1):
         rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
@@ -582,15 +607,19 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         )
         e_free = float(energies.free_energy)
 
-        def to_mix(chans):
+        def to_mix(chans, becs):
             vecs = [r_to_g(c.to(CDTYPE)).reshape(-1)[mask_flat] for c in chans]
-            if nspin == 1:
-                return vecs[0]
-            return torch.cat([vecs[0] + vecs[1], vecs[0] - vecs[1]])
+            if nspin == 2:
+                vecs = [vecs[0] + vecs[1], vecs[0] - vecs[1]]
+            bec_flat = [torch.cat([m.reshape(-1) for m in becs[isp]])
+                        for isp in range(nspin)]
+            return torch.cat(vecs + bec_flat)
 
-        rho_in_vec = to_mix(rho_s)
-        rho_out_vec = to_mix(rho_out_s)
-        res_norm = float(torch.linalg.norm(rho_out_vec - rho_in_vec)) * vol
+        rho_in_vec = to_mix(rho_s, rho_ij_mix)
+        rho_out_vec = to_mix(rho_out_s, rho_ij_s)
+        res_norm = float(
+            torch.linalg.norm(rho_out_vec[: ng * nspin] - rho_in_vec[: ng * nspin])
+        ) * vol
         de = abs(e_free - e_free_prev) if e_free_prev is not None else float("inf")
         history.append({"iter": it, "free_energy": e_free, "dE": de, "res": res_norm})
         if verbose:
@@ -603,20 +632,22 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         if de < etol and res_norm < rhotol and tol_eff <= diago_tol * 1.01:
             converged = True
             rho_s = rho_out_s
-            if is_paw:  # report the one-center energy at the FINAL becsum
+            if is_paw:  # report the one-center energy at the FINAL fresh becsum
                 e_onec = torch.zeros((), dtype=RDTYPE)
                 for a, sp in enumerate(system.species_of_atom):
-                    e1c, _ = onec[sp].energy_and_ddd(_becsum_for_onec(a))
+                    fresh = (rho_ij_s[0][a] if nspin == 1
+                             else [rho_ij_s[0][a], rho_ij_s[1][a]])
+                    e1c, _ = onec[sp].energy_and_ddd(fresh)
                     e_onec = e_onec + e1c
                 energies.onecenter = e_onec
             break
         e_free_prev = e_free
         mixed = mixer.step(rho_in_vec, rho_out_vec)
+        rho_block, bec_block = mixed[: ng * nspin], mixed[ng * nspin:]
         if nspin == 1:
-            chan_vecs = [mixed]
+            chan_vecs = [rho_block]
         else:
-            ngm = mixed.shape[0] // 2
-            tot, mag_v = mixed[:ngm], mixed[ngm:]
+            tot, mag_v = rho_block[:ng], rho_block[ng:]
             chan_vecs = [(tot + mag_v) / 2.0, (tot - mag_v) / 2.0]
         rho_s = []
         for vec in chan_vecs:
@@ -624,6 +655,15 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
             rho_g_new[mask_flat] = vec
             rho_s.append((torch.fft.ifftn(rho_g_new.reshape(shape) * grid.n_points,
                                           dim=(-3, -2, -1))).real)
+        # unpack the mixed becsum (Hermitize — linear combinations preserve it
+        # up to roundoff) for the next iteration's one-center ddd
+        off = 0
+        for isp in range(nspin):
+            for a, (s0, s1) in enumerate(system.atom_slices):
+                nm_a = s1 - s0
+                m = bec_block[off:off + nm_a * nm_a].reshape(nm_a, nm_a)
+                rho_ij_mix[isp][a] = 0.5 * (m + m.conj().T)
+                off += nm_a * nm_a
 
     rho_final = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
     out = dict(

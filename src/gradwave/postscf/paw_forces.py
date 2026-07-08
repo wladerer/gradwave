@@ -34,6 +34,8 @@ from gradwave.dtypes import CDTYPE
 
 def forces_uspp(res: dict, xc, remove_net: bool = True) -> torch.Tensor:
     """F_a = −dE/dτ_a (na, 3) [eV/Å] for a converged scf_uspp result."""
+    if res.get("nspin", 1) != 1:
+        raise NotImplementedError("USPP/PAW forces for nspin=2 not implemented yet")
     system = res["system"]
     grid = system.grid
     vol = grid.volume
