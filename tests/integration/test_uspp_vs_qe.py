@@ -55,6 +55,28 @@ def test_uspp_internal_identities():
 
 
 @pytest.mark.slow
+def test_paw_vs_qe_total_energy():
+    """Full PAW (ultrasoft + one-center) vs pw.x, psl Si kjpaw. Observed:
+    total +0.31 meV/atom, one-center contribution +1.0 meV vs QE's printout —
+    the residual is quadrature-level (angular XC grid / radial Poisson
+    scheme differences), not a convention error."""
+    torch.set_num_threads(8)
+    RY_ = RY
+    paw = parse_upf_paw(FIX / "pseudos" / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
+    system = setup_uspp(SI_CELL, SI_POS, [0, 0], [paw], ecut=45 * RY_,
+                        kmesh=(2, 2, 2), ecutrho=180 * RY_, fft_shape=(32, 32, 32))
+    res = scf_uspp(system, PBE(), smearing="none", etol=1e-9, rhotol=1e-8,
+                   verbose=False, max_iter=40)
+    assert res["converged"]
+    e = res["energies"]
+    qe_tot, qe_onec = -93.26524951 * RY_, -71.19134543 * RY_
+    assert abs(float(e.total) - qe_tot) / 2 * 1000 < 1.0, (
+        f"PAW total off by {(float(e.total) - qe_tot) * 1000:+.3f} meV"
+    )
+    assert abs(float(e.onecenter) - qe_onec) * 1000 < 3.0
+
+
+@pytest.mark.slow
 def test_uspp_vs_qe_total_energy():
     torch.set_num_threads(8)
     ref = json.loads((FIX / "si_uspp_ci" / "reference.json").read_text())

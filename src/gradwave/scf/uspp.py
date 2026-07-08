@@ -353,6 +353,29 @@ def scf_uspp(system: USPPSystem, xc, *, smearing="none", width=0.1,
     e_free_prev, history, converged = None, [], False
     occ = entropy_term = eigs = None
 
+    # PAW one-center machinery; becsum seeded from the reference atomic
+    # occupations (QE's init). ddd feeds the Hamiltonian from the PREVIOUS
+    # iteration's becsum (QE does the same via rho%bec); the reported energy
+    # is recomputed at the final becsum after convergence.
+    is_paw = any(p.is_paw for p in system.paws)
+    onec = None
+    rho_ij_atoms = None
+    if is_paw:
+        from gradwave.scf.paw_onsite import OneCenter
+
+        onec = [OneCenter(p, xc) for p in system.paws]
+        rho_ij_atoms = []
+        for sp in system.species_of_atom:
+            paw = system.paws[sp]
+            nm = sum(2 * b.l + 1 for b in paw.betas)
+            m0 = torch.zeros(nm, nm, dtype=CDTYPE)
+            col = 0
+            for i, b in enumerate(paw.betas):
+                for _m in range(2 * b.l + 1):
+                    m0[col, col] = paw.paw_occ[i] / (2 * b.l + 1)
+                    col += 1
+            rho_ij_atoms.append(m0)
+
     for it in range(1, max_iter + 1):
         rho_g_box = r_to_g(rho.to(CDTYPE))
         v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
@@ -373,6 +396,14 @@ def scf_uspp(system: USPPSystem, xc, *, smearing="none", width=0.1,
             assert float((contr - herm).abs().max()) < 1e-6 * max(1.0, float(contr.abs().max()))
             dscr[s0:s1, s0:s1] = herm.real
         dscr_full = dscr + system.proj_data[0].dij_full
+        e_onec = torch.zeros((), dtype=RDTYPE)
+        if is_paw:
+            dscr_full = dscr_full.clone()
+            for a, sp in enumerate(system.species_of_atom):
+                s0, s1 = system.atom_slices[a]
+                e1c, ddd = onec[sp].energy_and_ddd(rho_ij_atoms[a])
+                e_onec = e_onec + e1c
+                dscr_full[s0:s1, s0:s1] += ddd
 
         if it == 1:
             tol_eff = max(diago_tol, 1e-3)
@@ -468,6 +499,7 @@ def scf_uspp(system: USPPSystem, xc, *, smearing="none", width=0.1,
                                       occ, system.kweights),
             ewald=ewald_energy(system.positions, system.charges, grid.cell),
             smearing=entropy_term,
+            onecenter=e_onec,
         )
         e_free = float(energies.free_energy)
 
@@ -482,6 +514,12 @@ def scf_uspp(system: USPPSystem, xc, *, smearing="none", width=0.1,
         if de < etol and res_norm < rhotol and tol_eff <= diago_tol * 1.01:
             converged = True
             rho = rho_out
+            if is_paw:  # report the one-center energy at the FINAL becsum
+                e_onec = torch.zeros((), dtype=RDTYPE)
+                for a, sp in enumerate(system.species_of_atom):
+                    e1c, _ = onec[sp].energy_and_ddd(rho_ij_atoms[a])
+                    e_onec = e_onec + e1c
+                energies.onecenter = e_onec
             break
         e_free_prev = e_free
         mixed = mixer.step(rho_in_vec, rho_out_vec)

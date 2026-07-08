@@ -55,12 +55,13 @@ class EnergyBreakdown:
     ewald: torch.Tensor
     smearing: torch.Tensor  # −σS (zero for fixed occupations)
     hubbard: torch.Tensor = 0.0  # Dudarev E_U (zero without +U)
+    onecenter: torch.Tensor = 0.0  # PAW one-center Σ±(E_H+E_xc) (zero for NC/USPP)
 
     @property
     def total(self) -> torch.Tensor:
         """Kohn–Sham energy E (without the smearing term)."""
         return (self.kinetic + self.hartree + self.xc + self.local + self.nonlocal_
-                + self.ewald + self.hubbard)
+                + self.ewald + self.hubbard + self.onecenter)
 
     @property
     def free_energy(self) -> torch.Tensor:
