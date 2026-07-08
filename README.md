@@ -74,9 +74,13 @@ See `examples/` for input files. Any geometry format ASE can read is accepted.
   pressure at low ecut — converge ecut or re-relax at the final cell.
 - Stress with nspin=2, spin-orbit, or DFT+U is not implemented yet.
 - Ultrasoft and PAW datasets (psl `q_with_l` UPFs) run through `scf/uspp.py`
-  (energies validated vs QE; USPP 0.1 µeV, PAW 0.3 meV/atom). Forces, stress,
-  spin, and the differentiable post-SCF machinery currently assume
-  norm-conserving pseudopotentials; old-style USPPs with polynomial
+  with energies, autograd forces, autograd stress, and collinear spin, all
+  validated vs QE (USPP energy 0.1 µeV; PAW energy 0.3 meV/atom, forces
+  1e-4 eV/Å, stress 0.13 kbar, ferromagnetic Ni 1.6 meV/atom; Γ phonons via
+  FD of the analytic forces, 0.003% vs ph.x — see examples/si_paw_phonon.py).
+  Not yet for USPP/PAW: nspin=2 forces/stress, k-space symmetry, SOC, +U,
+  the implicit-differentiation (Sternheimer) machinery, and GPU batching —
+  those remain norm-conserving-only. Old-style USPPs with polynomial
   augmentation refits (nqf > 0, e.g. GBRV) are rejected at parse time.
 
 ## Development
