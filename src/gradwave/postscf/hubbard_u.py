@@ -62,7 +62,7 @@ def energy_derivative_u(res, manifolds: list[HubbardManifold]) -> float:
 
 def _site_occupations(res, hub, hub_q) -> torch.Tensor:
     """Per-site total occupation N_I = Σ_σ Tr[n^{Iσ}] from a converged result."""
-    n = torch.zeros(hub.n_sites, dtype=RDTYPE)
+    n = torch.zeros(hub.n_sites, dtype=RDTYPE, device=hub_q.device)
     for sp in range(res.nspin):
         occ_sp = res.occupations if res.nspin == 1 else res.occupations[sp]
         w = 0.5 * occ_sp if res.nspin == 1 else occ_sp
@@ -77,7 +77,7 @@ def _site_occupations(res, hub, hub_q) -> torch.Tensor:
 def _pad(coeffs_per_k, npw_max):
     nk = len(coeffs_per_k)
     nb = coeffs_per_k[0].shape[0]
-    out = torch.zeros(nk, nb, npw_max, dtype=CDTYPE)
+    out = torch.zeros(nk, nb, npw_max, dtype=CDTYPE, device=coeffs_per_k[0].device)
     for ik, c in enumerate(coeffs_per_k):
         out[ik, :, : c.shape[1]] = c.detach()
     return out
@@ -103,10 +103,11 @@ def _bare_response_occ(system, base_res, hub, hub_q, alpha_vec, xc, smearing, wi
 
     eigs_s, coeffs_s = [], []
     for sp in range(nspin):
-        dij = torch.zeros(hub.nproj, hub.nproj, dtype=CDTYPE)
+        dij = torch.zeros(hub.nproj, hub.nproj, dtype=CDTYPE, device=hub_q.device)
         for si, s in enumerate(hub.sites):
             st, dim = s["start"], s["dim"]
-            dij[st:st + dim, st:st + dim] += alpha_vec[si] * torch.eye(dim, dtype=CDTYPE)
+            dij[st:st + dim, st:st + dim] += alpha_vec[si] * torch.eye(
+                dim, dtype=CDTYPE, device=hub_q.device)
         h = BatchedHamiltonian(bk, grid.shape, veff[sp], projs_b,
                                hub_q=hub_q, hub_dij=dij.conj())
         c0 = base_res.coeffs[sp] if nspin == 2 else base_res.coeffs
@@ -120,7 +121,7 @@ def _bare_response_occ(system, base_res, hub, hub_q, alpha_vec, xc, smearing, wi
     kw_cat = torch.cat([system.kweights] * nspin)
     mu = torch.as_tensor(find_fermi(eigs_cat, kw_cat, scheme, width,
                                     system.n_electrons, degeneracy=g_spin)).to(RDTYPE)
-    n = torch.zeros(hub.n_sites, dtype=RDTYPE)
+    n = torch.zeros(hub.n_sites, dtype=RDTYPE, device=hub_q.device)
     for sp in range(nspin):
         occ, _ = occupations_and_entropy(eigs_s[sp], mu, scheme, width, degeneracy=g_spin)
         w = g_spin * occ if nspin == 1 else occ  # to electron units per spin
@@ -311,7 +312,7 @@ def _response_columns(res, xc, hub, hub_q, site, *, beta=0.2, outer_tol=1e-6,
     # eigenvalues well below −1 (NiO: ≈ −6) — an antisymmetric Δm mode on the
     # two Ni that plain Richardson iteration amplifies.
     n_pts = grid.n_points
-    u_flat = torch.zeros(2 * n_pts, dtype=RDTYPE)
+    u_flat = torch.zeros(2 * n_pts, dtype=RDTYPE, device=hub_q.device)
     prev_u, prev_r, hist_du, hist_dr = None, None, [], []
     dpsi = [torch.zeros_like(c_occ[sp]) for sp in range(2)]
     chi0_col, chi_prev = None, None
