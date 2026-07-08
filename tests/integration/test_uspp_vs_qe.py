@@ -89,3 +89,30 @@ def test_uspp_vs_qe_total_energy():
     assert res["converged"]
     diff_mev = abs(float(res["energies"].total) - ref["etot_eV"]) * 1000
     assert diff_mev < 0.05, f"USPP total off by {diff_mev:.5f} meV"
+
+
+@pytest.mark.slow
+def test_paw_spin_vs_qe():
+    """Ferromagnetic fcc Ni kjpaw (spn semicore) — spin-polarized USPP/PAW SCF
+    with spin one-center XC. Observed: F +1.6 meV/atom, m 0.594 vs QE 0.59 μB.
+    The mixer needs the full stability stack for this system (becsum in the
+    Pulay vector, Kerker on the total, trust-region resets, α = 0.3); the
+    residual plateaus at ~1e-3 (metallic occupation noise), so the gate is
+    the energy/moment, not the formal rhotol."""
+    from gradwave.core.xc.spin import SpinPBE
+
+    torch.set_num_threads(8)
+    ref = json.loads((FIX / "ni_paw_spin_ci" / "reference.json").read_text())
+    paw = parse_upf_paw(FIX / "pseudos" / "Ni.pbe-spn-kjpaw_psl.1.0.0.UPF")
+    cell = np.array([[0.0, 1.76, 1.76], [1.76, 0.0, 1.76], [1.76, 1.76, 0.0]])
+    system = setup_uspp(cell, np.zeros((1, 3)), [0], [paw], ecut=50 * RY,
+                        kmesh=(4, 4, 4), ecutrho=400 * RY, nbands=18,
+                        fft_shape=ref["fft_dims"])
+    res = scf_uspp(system, SpinPBE(), nspin=2, start_mag=[0.5],
+                   smearing="gaussian", width=0.1, etol=1e-5, rhotol=5e-4,
+                   mixing_alpha=0.3, verbose=False, max_iter=80)
+    e = res["energies"]
+    dF = abs(float(e.free_energy) - ref["etot_Ry"] * RY) * 1000
+    assert dF < 5.0, f"F off by {dF:.2f} meV"
+    assert abs(res["mag_total"] - ref["mag_muB"]) < 0.02
+    assert abs(float(e.onecenter) / RY - ref["onecenter_Ry"]) < 0.005

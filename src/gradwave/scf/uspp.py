@@ -343,7 +343,8 @@ def davidson_gen(hs: _HkS, x0: torch.Tensor, nbands: int, tol: float,
 
 def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
              smearing="none", width=0.1, max_iter=60, etol=1e-8, rhotol=1e-7,
-             diago_tol=1e-9, mixing_alpha=0.7, mixing_history=8, verbose=True):
+             diago_tol=1e-9, mixing_alpha=0.7, mixing_history=8,
+             trust_factor=20.0, verbose=True):
     """USPP/PAW SCF. nspin=2 takes a SpinXC functional and per-species
     start_mag (list, in [-1, 1]); mixing then runs in the (total,
     magnetization) basis with Kerker on the total for smeared systems."""
@@ -642,6 +643,16 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                 energies.onecenter = e_onec
             break
         e_free_prev = e_free
+        # trust region: a residual jump means the DIIS history is lying about
+        # the curvature (typical of the wild first USPP/PAW iterations from
+        # the SAD + atomic-becsum start); discard it and restart from a plain
+        # damped step rather than extrapolating into nonsense
+        best_res = min(h["res"] for h in history)
+        if it > 1 and res_norm > trust_factor * best_res:
+            mixer.reset()
+            if verbose:
+                print(f"  USPP {it:3d}  [mixer reset: residual jumped "
+                      f"{res_norm:.2e} > {trust_factor:g}x best {best_res:.2e}]")
         mixed = mixer.step(rho_in_vec, rho_out_vec)
         rho_block, bec_block = mixed[: ng * nspin], mixed[ng * nspin:]
         if nspin == 1:
