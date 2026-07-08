@@ -36,7 +36,7 @@ def force_constants_gamma(
                 pos = positions.copy()
                 pos[a, i] += sign * h
                 res = make_scf(pos)
-                store.append(forces(res).numpy().reshape(-1))
+                store.append(forces(res).cpu().numpy().reshape(-1))
             phi[:, col] = -(fplus[0] - fminus[0]) / (2.0 * h)
     phi = 0.5 * (phi + phi.T)
     if acoustic_sum_rule:

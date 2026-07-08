@@ -44,7 +44,7 @@ def test_smeared_metal_forces_vs_qe():
     e = float(res.energies.free_energy)
     assert abs(e - ref["etot_eV"]) / 4 * 1000 < 0.01  # meV/atom, grid-matched
 
-    f_us = forces(res).numpy()
+    f_us = forces(res).cpu().numpy()
     f_qe = np.array(ref["forces_eV_ang"])
     # net force removed on both sides (QE does the same) → tight agreement
     assert np.abs(f_us - f_qe).max() < 5e-4, f"\nqe:\n{f_qe}\nus:\n{f_us}"

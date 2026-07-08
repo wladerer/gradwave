@@ -99,4 +99,4 @@ class GradWave(Calculator):
         self.last_result = res
         self.results["energy"] = float(res.energies.free_energy)  # consistent forces
         self.results["free_energy"] = float(res.energies.free_energy)
-        self.results["forces"] = hf_forces(res).numpy()
+        self.results["forces"] = hf_forces(res).cpu().numpy()

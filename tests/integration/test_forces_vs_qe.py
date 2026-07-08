@@ -39,7 +39,7 @@ def si_result():
 def test_forces_match_qe(si_result):
     ref = json.loads((FIX / "si_forces_ci" / "reference.json").read_text())
     f_qe = np.array(ref["forces_eV_ang"])
-    f_us = forces(si_result).numpy()
+    f_us = forces(si_result).cpu().numpy()
     assert np.abs(f_us - f_qe).max() < 5e-3, f"\nqe:\n{f_qe}\nus:\n{f_us}"
 
 
