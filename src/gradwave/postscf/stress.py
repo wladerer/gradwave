@@ -121,7 +121,8 @@ def _energy_strained(res, xc, eps: torch.Tensor) -> torch.Tensor:
     rho_g = rho_t / omega.to(rho_t.dtype)
 
     # ---- Hartree (G=0 excluded)
-    inv_g2 = torch.where(is_g0, torch.zeros_like(g2_sph), 1.0 / torch.where(is_g0, torch.ones_like(g2_sph), g2_sph))
+    g2_safe = torch.where(is_g0, torch.ones_like(g2_sph), g2_sph)
+    inv_g2 = torch.where(is_g0, torch.zeros_like(g2_sph), 1.0 / g2_safe)
     e_h = 0.5 * 4.0 * math.pi * E2 / omega * ((rho_t.abs() ** 2) * inv_g2).sum()
 
     # ---- local pseudopotential (G=0 carries alpha-Z)
@@ -192,7 +193,7 @@ def _energy_strained(res, xc, eps: torch.Tensor) -> torch.Tensor:
         y = ylm_all(lmax, kpg)
         pref = 4.0 * math.pi / torch.sqrt(omega)
         cols = []
-        for a, sp in enumerate(system.species_of_atom):
+        for sp in system.species_of_atom:
             tab = tabs[sp]
             for i, l in enumerate(tab.beta_l):
                 f = tab.beta_of_g(i, q_k)

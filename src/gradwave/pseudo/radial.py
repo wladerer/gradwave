@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import numpy as np
 
-# (2l+1)!! for the small-argument series
-_DFACT = {0: 1.0, 1: 3.0, 2: 15.0, 3: 105.0}
+# (2l+1)!! for the small-argument series (l=4 appears in USPP/PAW
+# augmentation channels, L ≤ 2·l_max_beta)
+_DFACT = {0: 1.0, 1: 3.0, 2: 15.0, 3: 105.0, 4: 945.0}
 
 
 def simpson(fvals: np.ndarray, rab: np.ndarray) -> np.ndarray:
@@ -81,8 +82,12 @@ def sph_jl(l: int, x: np.ndarray) -> np.ndarray:
         big = s / xb**2 - c / xb
     elif l == 2:
         big = (3.0 / xb**3 - 1.0 / xb) * s - 3.0 / xb**2 * c
-    else:
+    elif l == 3:
         big = (15.0 / xb**4 - 6.0 / xb**2) * s - (15.0 / xb**3 - 1.0 / xb) * c
+    else:
+        big = (105.0 / xb**5 - 45.0 / xb**3 + 1.0 / xb) * s + (
+            -105.0 / xb**4 + 10.0 / xb**2
+        ) * c
     out[~small] = big
     return out
 

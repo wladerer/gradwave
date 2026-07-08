@@ -1,0 +1,498 @@
+"""Ultrasoft/PAW plane-wave SCF — stage 1: augmentation + S-operator (Layer B).
+
+The ultrasoft generalized eigenproblem H|ψ⟩ = ε S|ψ⟩ with
+
+    S = 1 + Σ_a Σ_ij q_ij |β^a_i⟩⟨β^a_j|,   q_ij = ∫ Q_ij(r⃗) d³r
+    ρ(r) = ρ_smooth(r) + ρ_aug(r),
+    ρ_aug(G) = (1/Ω) Σ_a e^{−iG·τ_a} Σ_ij ρ^a_ij Q̃_ij(G)
+    ρ^a_ij = Σ_nk w_k f_nk ⟨ψ|β^a_i⟩⟨β^a_j|ψ⟩
+    D^scr_ij = D_ij + ∫ v_eff(r) Q_ij(r⃗−τ_a) d³r        (rebuilt each iteration)
+
+with the augmentation form factors from the UPF's per-L radial functions:
+
+    Q̃_(i,mi),(j,mj)(G) = 4π Σ_{LM} (−i)^L c^{LM}_{limi,ljmj} Y_LM(Ĝ) ∫ q^L_ij(r) j_L(Gr) dr
+
+(c = real Gaunt coefficients, core/gaunt.py). The plane-wave energy terms are
+assembled exactly as in the NC loop but with ρ = ρ_s + ρ_aug and the BARE
+D_ij in E_NL; the one-center PAW corrections (stage 2, postscf/paw_onsite.py)
+add per-atom radial-grid terms on top and are required to match QE's total.
+
+Deliberately per-k and unbatched — correctness first; the batched fast path
+can absorb it later.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+
+import numpy as np
+import torch
+
+from gradwave.constants import HBAR2_2M
+from gradwave.core.energies.ewald import ewald_energy
+from gradwave.core.energies.hartree import hartree_energy, hartree_potential_g
+from gradwave.core.energies.kinetic import kinetic_energy
+from gradwave.core.energies.local_pp import local_energy, local_potential_g
+from gradwave.core.energies.nl_pp import nonlocal_energy
+from gradwave.core.energies.total import EnergyBreakdown
+from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
+from gradwave.core.gaunt import real_gaunt_table, ylm_np
+from gradwave.core.hamiltonian import ProjectorData, becp, build_projector_data, projectors
+from gradwave.core.occupations import (
+    SCHEMES,
+    find_fermi,
+    fixed_occupations,
+    occupations_and_entropy,
+)
+from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.grids import build_fft_grid, build_gsphere
+from gradwave.pseudo.kb import beta_form_factors
+from gradwave.pseudo.radial import sbt
+from gradwave.pseudo.upf_paw import PAWData
+from gradwave.scf.guess import sad_density
+from gradwave.scf.loop import vxc_potential
+from gradwave.scf.mixing import PulayMixer
+from gradwave.solvers.precond import teter
+
+_MINUS_I_POW_L = [1.0, -1.0j, -1.0, 1.0j, 1.0]  # (−i)^L, L ≤ 4
+
+
+@dataclass
+class AugSpecies:
+    """m-expanded augmentation form factors of one species on the density
+    sphere: q_g[i, j, :] = Q̃_(i,mi),(j,mj)(G) (dimensionless charge)."""
+
+    q_g: torch.Tensor  # (nproj_m, nproj_m, nGm) complex128
+    q_int: torch.Tensor  # (nproj_m, nproj_m) real — ∫Q d³r, the S weights
+
+
+@dataclass
+class USPPSystem:
+    grid: object
+    spheres: list
+    kweights: torch.Tensor
+    positions: torch.Tensor
+    species_of_atom: list
+    paws: list
+    charges: torch.Tensor
+    n_electrons: float
+    nbands: int
+    ecut: float
+    proj_data: list  # per-k ProjectorData (dij_full = BARE D, m-expanded)
+    q_full: torch.Tensor  # (nproj_tot, nproj_tot) m-expanded S weights
+    aug: list  # per-species AugSpecies
+    sphere_idx: torch.Tensor  # (nGm,) flat indices of the density sphere
+    g_sphere: torch.Tensor  # (nGm, 3)
+    vloc_tables: torch.Tensor
+    rho_core: torch.Tensor | None
+    atom_slices: list = field(default_factory=list)  # per-atom projector column ranges
+
+
+def _mexp_index_map(paw: PAWData):
+    """[(channel i, l, m_col)] in projector-column order for one atom."""
+    out = []
+    for i, b in enumerate(paw.betas):
+        for m_col in range(2 * b.l + 1):
+            out.append((i, b.l, m_col))
+    return out
+
+
+def _aug_tables(paw: PAWData, g_sphere: np.ndarray) -> AugSpecies:
+    """FT of every m-expanded augmentation function on the density sphere."""
+    lmax_b = max(b.l for b in paw.betas)
+    gnorm = np.linalg.norm(g_sphere, axis=1)
+    uniq, inv = np.unique(np.round(gnorm, 10), return_inverse=True)
+    y = ylm_np(2 * lmax_b, g_sphere)  # (nGm, (2lb+1)²)
+    c_gaunt = real_gaunt_table(lmax_b)  # (LM, lm_i, lm_j)
+
+    # radial transforms per (channel pair, L) on unique shells
+    n = paw.aug_cutoff_idx
+    rad: dict[tuple, np.ndarray] = {}
+    for (i, j, ll), qfun in paw.qijl.items():
+        rad[(i, j, ll)] = sbt(ll, qfun, paw.r[:n], paw.rab[:n], uniq)[inv]
+
+    idx = _mexp_index_map(paw)
+    nm = len(idx)
+    q_g = np.zeros((nm, nm, len(g_sphere)), dtype=np.complex128)
+    for a, (i, li, mi) in enumerate(idx):
+        for b, (j, lj, mj) in enumerate(idx):
+            key = (i, j) if (i, j) in {(p, q) for (p, q, _) in paw.qijl} else (j, i)
+            lm_i, lm_j = li * li + mi, lj * lj + mj
+            acc = np.zeros(len(g_sphere), dtype=np.complex128)
+            for ll in range(abs(li - lj), li + lj + 1):
+                if (key[0], key[1], ll) not in rad:
+                    continue
+                f_l = rad[(key[0], key[1], ll)]
+                cy = c_gaunt[ll * ll : (ll + 1) ** 2, lm_i, lm_j]  # (2L+1,)
+                ang = y[:, ll * ll : (ll + 1) ** 2] @ cy
+                acc += _MINUS_I_POW_L[ll] * ang * f_l
+            q_g[a, b] = 4.0 * math.pi * acc
+
+    q_int = np.zeros((nm, nm))
+    for a, (i, li, mi) in enumerate(idx):
+        for b, (j, lj, mj) in enumerate(idx):
+            if li == lj and mi == mj:
+                q_int[a, b] = paw.q[i, j]
+    return AugSpecies(
+        q_g=torch.as_tensor(q_g, dtype=CDTYPE),
+        q_int=torch.as_tensor(q_int, dtype=RDTYPE),
+    )
+
+
+def setup_uspp(
+    cell,
+    positions,
+    species_of_atom,
+    paws: list[PAWData],
+    ecut: float,
+    kmesh=(1, 1, 1),
+    nbands: int | None = None,
+    ecutrho: float | None = None,
+    fft_shape=None,
+) -> USPPSystem:
+    from gradwave.kpoints import monkhorst_pack
+    from gradwave.pseudo.local import alpha_z, vloc_of_g
+    from gradwave.scf.loop import _unique_shells
+
+    cell = np.asarray(cell, dtype=np.float64)
+    positions = np.asarray(positions, dtype=np.float64)
+    if ecutrho is None:
+        ecutrho = 4.0 * ecut
+    # build_fft_grid derives the density sphere as 2·G_max(ecut_arg)
+    grid = build_fft_grid(cell, ecutrho / 4.0, shape_override=fft_shape)
+    kfrac, kw = monkhorst_pack(kmesh, (0, 0, 0), time_reversal=True)
+    spheres = [build_gsphere(grid, ecut, k) for k in kfrac]
+
+    charges = torch.tensor([paws[s].z_valence for s in species_of_atom], dtype=RDTYPE)
+    n_electrons = float(charges.sum())
+    if nbands is None:
+        nocc = int(np.ceil(n_electrons / 2.0))
+        nbands = max(int(np.ceil(nocc * 1.2)), nocc + 4)
+
+    g_flat = np.sqrt(grid.g2.reshape(-1).numpy())
+    uniq, inverse = _unique_shells(g_flat)
+    vloc_tables = []
+    for paw in paws:
+        tab = np.empty_like(uniq)
+        tab[0] = alpha_z(paw)
+        tab[1:] = vloc_of_g(paw, uniq[1:])
+        vloc_tables.append(tab[inverse].reshape(grid.shape))
+    vloc_tables = torch.as_tensor(np.stack(vloc_tables), dtype=RDTYPE)
+
+    dij_species = [torch.as_tensor(p.dij, dtype=RDTYPE) for p in paws]
+    q_species = [torch.as_tensor(p.q, dtype=RDTYPE) for p in paws]
+    beta_ls = [[b.l for b in p.betas] for p in paws]
+    proj_data, q_full = [], None
+    for sph in spheres:
+        q_of_k = np.sqrt(sph.kpg2.numpy())
+        beta_tables = [
+            torch.as_tensor(beta_form_factors(p, q_of_k), dtype=RDTYPE) for p in paws
+        ]
+        proj_data.append(
+            build_projector_data(sph, species_of_atom, beta_tables, beta_ls,
+                                 dij_species, grid.volume)
+        )
+        if q_full is None:  # m-expansion identical at every k — reuse the builder
+            q_full = build_projector_data(
+                sph, species_of_atom, beta_tables, beta_ls, q_species, grid.volume
+            ).dij_full
+
+    # density sphere and per-species augmentation tables
+    mask = grid.dens_mask.reshape(-1)
+    sphere_idx = torch.nonzero(mask, as_tuple=False).reshape(-1)
+    g_sphere = grid.g_cart.reshape(-1, 3)[sphere_idx]
+    aug = [_aug_tables(p, g_sphere.numpy()) for p in paws]
+
+    rho_core = None
+    if any(p.core_rho is not None for p in paws):
+        from gradwave.core.structure import structure_factors
+        from gradwave.pseudo.atomic import core_density_of_q
+
+        core_g = torch.zeros(grid.n_points, dtype=CDTYPE)
+        pos_t = torch.as_tensor(positions, dtype=RDTYPE)
+        for sp_i, paw in enumerate(paws):
+            tab = torch.as_tensor(core_density_of_q(paw, uniq), dtype=RDTYPE)
+            shell = tab[torch.as_tensor(inverse)]
+            atoms = [a for a, sa in enumerate(species_of_atom) if sa == sp_i]
+            if not atoms:
+                continue
+            sfac = structure_factors(pos_t[atoms], grid.g_cart).sum(dim=0).reshape(-1)
+            core_g += sfac * shell.to(CDTYPE) / grid.volume
+        core_g = torch.where(mask, core_g, torch.zeros_like(core_g))
+        rho_core = torch.fft.ifftn(
+            core_g.reshape(grid.shape) * grid.n_points, dim=(-3, -2, -1)
+        ).real
+
+    # per-atom projector column ranges (atoms in order, matching build order)
+    slices, start = [], 0
+    for sp in species_of_atom:
+        nm = sum(2 * b.l + 1 for b in paws[sp].betas)
+        slices.append((start, start + nm))
+        start += nm
+
+    return USPPSystem(
+        grid=grid, spheres=spheres,
+        kweights=torch.as_tensor(kw, dtype=RDTYPE),
+        positions=torch.as_tensor(positions, dtype=RDTYPE),
+        species_of_atom=list(species_of_atom), paws=list(paws), charges=charges,
+        n_electrons=n_electrons, nbands=nbands, ecut=ecut,
+        proj_data=proj_data, q_full=q_full, aug=aug,
+        sphere_idx=sphere_idx, g_sphere=g_sphere,
+        vloc_tables=vloc_tables, rho_core=rho_core, atom_slices=slices,
+    )
+
+
+class _HkS:
+    """H and S applies at one k for fixed v_eff and screened D."""
+
+    def __init__(self, sphere, shape, v_eff_r, pd: ProjectorData, p, dscr, q_full):
+        self.sphere, self.shape = sphere, shape
+        self.v_eff_r = v_eff_r
+        self.p = p
+        self.dscr = dscr.to(CDTYPE)
+        self.q = q_full.to(CDTYPE)
+        self.t = HBAR2_2M * sphere.kpg2
+
+    def h(self, c):
+        out = self.t * c
+        psi = g_to_r(c, self.sphere.flat_idx, self.shape)
+        out = out + box_to_sphere(r_to_g(psi * self.v_eff_r), self.sphere.flat_idx)
+        b = becp(self.p, c)
+        return out + (b @ self.dscr) @ self.p
+
+    def s(self, c):
+        b = becp(self.p, c)
+        return c + (b @ self.q) @ self.p
+
+
+def davidson_gen(hs: _HkS, x0: torch.Tensor, nbands: int, tol: float,
+                 max_iter: int = 60, max_dim: int | None = None):
+    """Block Davidson for H x = ε S x. x0 (nb0 ≥ nbands, npw).
+
+    HV/SV are cached — H and S act only on the block of new directions each
+    iteration; restarts contract them through the Ritz rotation.
+    """
+    npw = x0.shape[1]
+    max_dim = max_dim or min(npw, max(4 * nbands, nbands + 24))
+
+    def ortho_block(d, v_prev):
+        """Orthonormalize d against v_prev and internally (two GS passes)."""
+        for _ in range(2):
+            if v_prev is not None:
+                d = d - (d @ v_prev.conj().T) @ v_prev
+            q, _ = torch.linalg.qr(d.T, mode="reduced")
+            d = q.T.contiguous()
+        return d
+
+    v_sub = ortho_block(x0, None)
+    hv, sv = hs.h(v_sub), hs.s(v_sub)
+    eps = x = hx = sx = None
+    for _ in range(max_iter):
+        h_sub = v_sub.conj() @ hv.T
+        s_sub = v_sub.conj() @ sv.T
+        h_sub = 0.5 * (h_sub + h_sub.conj().T)
+        s_sub = 0.5 * (s_sub + s_sub.conj().T)
+        ell = torch.linalg.cholesky(s_sub)
+        a = torch.linalg.solve_triangular(ell, h_sub, upper=False)  # L⁻¹H
+        # (L⁻¹H)L⁻† = (L⁻¹ (L⁻¹H)†)† — solve with L again, then dagger
+        a = torch.linalg.solve_triangular(ell, a.conj().T, upper=False).conj().T
+        w, u = torch.linalg.eigh(0.5 * (a + a.conj().T))
+        u = torch.linalg.solve_triangular(ell.conj().T, u, upper=True)
+        eps = w[:nbands].real
+        u_r = u[:, :nbands].T.to(CDTYPE)
+        x, hx, sx = u_r @ v_sub, u_r @ hv, u_r @ sv
+        r = hx - eps[:, None].to(CDTYPE) * sx
+        rnorm = torch.linalg.norm(r, dim=1)
+        if float(rnorm.max()) < tol:
+            return eps, x
+        active = rnorm > tol
+        d = teter(r[active], hs.t, eps[active])
+        if v_sub.shape[0] + int(active.sum()) > max_dim:
+            # restart from the Ritz vectors, RE-ORTHONORMALIZED in the
+            # standard metric (they are S-orthonormal; using them as-is lets
+            # the basis drift toward linear dependence and the ill-conditioned
+            # overlap Cholesky then produces spurious below-minimum states).
+            # HV/SV rotate with the same triangular transform: x = RᵀQᵀ ⇒
+            # basis Qᵀ = R⁻ᵀ x.
+            qq, rr = torch.linalg.qr(x.T, mode="reduced")
+            v_sub = qq.T.contiguous()
+            rt = rr.T  # x = RᵀQᵀ (plain transpose), so Qᵀ = (Rᵀ)⁻¹x
+            hv = torch.linalg.solve_triangular(rt, hx, upper=False)
+            sv = torch.linalg.solve_triangular(rt, sx, upper=False)
+        d = ortho_block(d, v_sub)
+        v_sub = torch.cat([v_sub, d], dim=0)
+        hv = torch.cat([hv, hs.h(d)], dim=0)
+        sv = torch.cat([sv, hs.s(d)], dim=0)
+    return eps, x
+
+
+def scf_uspp(system: USPPSystem, xc, *, smearing="none", width=0.1,
+             max_iter=60, etol=1e-8, rhotol=1e-7, diago_tol=1e-9,
+             mixing_alpha=0.7, mixing_history=8, verbose=True):
+    grid = system.grid
+    vol = grid.volume
+    nk, nb = len(system.spheres), system.nbands
+    shape = grid.shape
+    mask_flat = grid.dens_mask.reshape(-1)
+
+    rho = sad_density(grid, system.positions, system.species_of_atom,
+                      system.paws, system.n_electrons)
+    projs = [projectors(pd, system.positions) for pd in system.proj_data]
+    vloc_g = local_potential_g(system.positions, torch.tensor(system.species_of_atom),
+                               system.vloc_tables, grid.g_cart, vol)
+    vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
+
+    # e^{+iG·τ_a} on the density sphere, for D-screening and ρ_aug phases
+    phase_arg = system.g_sphere @ system.positions.T  # (nGm, na)
+    phase_pos = torch.exp(torch.complex(torch.zeros_like(phase_arg), phase_arg))
+
+    g2_mix = grid.g2.reshape(-1)[mask_flat]
+    mixer = PulayMixer(g2_mix, alpha=mixing_alpha, history=mixing_history)
+    coeffs = [None] * nk
+    e_free_prev, history, converged = None, [], False
+    occ = entropy_term = eigs = None
+
+    for it in range(1, max_iter + 1):
+        rho_g_box = r_to_g(rho.to(CDTYPE))
+        v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
+                               dim=(-3, -2, -1)) * grid.n_points).real
+        rho_xc = rho if system.rho_core is None else rho + system.rho_core
+        v_xc, _ = vxc_potential(xc, rho_xc, grid)
+        v_eff = v_h + v_xc + vloc_r
+
+        # screened D per atom: D_ij + ∫v_eff Q_ij(r−τ) = D_ij + Σ_G ṽ(G) e^{iGτ} Q̃_ij(G)*
+        v_eff_g = r_to_g(v_eff.to(CDTYPE)).reshape(-1)[mask_flat]
+        dscr = torch.zeros_like(system.q_full)
+        for a, sp in enumerate(system.species_of_atom):
+            s0, s1 = system.atom_slices[a]
+            contr = torch.einsum(
+                "ijg,g->ij", system.aug[sp].q_g.conj(), v_eff_g * phase_pos[:, a]
+            )
+            herm = 0.5 * (contr + contr.conj().T)
+            assert float((contr - herm).abs().max()) < 1e-6 * max(1.0, float(contr.abs().max()))
+            dscr[s0:s1, s0:s1] = herm.real
+        dscr_full = dscr + system.proj_data[0].dij_full
+
+        if it == 1:
+            tol_eff = max(diago_tol, 1e-3)
+        else:
+            r_prev = history[-1]["res"]
+            tol_eff = max(diago_tol, min(1e-3, 0.1 * r_prev * r_prev / system.n_electrons))
+
+        eigs_l = []
+        for ik, sph in enumerate(system.spheres):
+            hs = _HkS(sph, shape, v_eff, system.proj_data[ik], projs[ik],
+                      dscr_full, system.q_full)
+            if coeffs[ik] is None:
+                gen = torch.Generator().manual_seed(1234 + ik)
+                x0 = torch.randn(nb + 4, sph.npw, generator=gen, dtype=torch.float64) \
+                    + 1j * torch.randn(nb + 4, sph.npw, generator=gen, dtype=torch.float64)
+                # bias toward low kinetic energy
+                x0 = x0 * torch.exp(-0.5 * HBAR2_2M * sph.kpg2 / system.ecut * 4.0)
+                x0 = x0.to(CDTYPE)
+            else:
+                x0 = coeffs[ik]
+            e_k, c_k = davidson_gen(hs, x0, nb, tol=tol_eff)
+            # S-normalize
+            b = becp(projs[ik], c_k)
+            snorm = (c_k.abs() ** 2).sum(dim=1).real + torch.einsum(
+                "bi,ij,bj->b", b.conj(), system.q_full.to(CDTYPE), b
+            ).real
+            c_k = c_k / torch.sqrt(snorm)[:, None]
+            coeffs[ik] = c_k
+            eigs_l.append(e_k)
+        eigs = torch.stack(eigs_l)
+
+        if smearing == "none":
+            occ = fixed_occupations(eigs, system.n_electrons)
+            mu = float(eigs[:, int(system.n_electrons // 2) - 1].max())
+            entropy_term = torch.zeros((), dtype=RDTYPE)
+        else:
+            scheme = SCHEMES[smearing]
+            mu = float(find_fermi(eigs, system.kweights, scheme, width,
+                                  system.n_electrons))
+            mu_t = torch.tensor(mu, dtype=RDTYPE)
+            occ, s_ent = occupations_and_entropy(eigs, mu_t, scheme, width)
+            entropy_term = -width * (2.0 * system.kweights[:, None] * s_ent).sum()
+
+        # smooth density + augmentation
+        rho_s = torch.zeros(shape, dtype=RDTYPE)
+        becps = []
+        rho_ij_atoms = [torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE)
+                        for (s0, s1) in system.atom_slices]
+        for ik, sph in enumerate(system.spheres):
+            c = coeffs[ik]
+            psi_r = g_to_r(c, sph.flat_idx, shape)  # (nb, n1,n2,n3)
+            w = system.kweights[ik] * occ[ik]
+            rho_s = rho_s + torch.einsum("b,bxyz->xyz", w, (psi_r.abs() ** 2)) / vol
+            b = becp(projs[ik], c)
+            becps.append(b)
+            for a, (s0, s1) in enumerate(system.atom_slices):
+                ba = b[:, s0:s1]
+                rho_ij_atoms[a] = rho_ij_atoms[a] + torch.einsum(
+                    "b,bi,bj->ij", w.to(CDTYPE), ba.conj(), ba
+                )
+        # time-reversal partner (reduced mesh): Hermitian part
+        rho_ij_atoms = [0.5 * (m + m.conj().T) for m in rho_ij_atoms]
+
+        aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE)
+        for a, sp in enumerate(system.species_of_atom):
+            qg = system.aug[sp].q_g
+            aug_sph = aug_sph + phase_pos[:, a].conj() * torch.einsum(
+                "ij,ijg->g", rho_ij_atoms[a], qg
+            )
+        aug_box = torch.zeros(grid.n_points, dtype=CDTYPE)
+        aug_box[system.sphere_idx] = aug_sph / vol
+        rho_aug = (torch.fft.ifftn(aug_box.reshape(shape) * grid.n_points,
+                                   dim=(-3, -2, -1))).real
+        rho_out = rho_s + rho_aug
+
+        n_tot = float(rho_out.sum()) * vol / grid.n_points
+        assert abs(n_tot - system.n_electrons) < 1e-6, (
+            f"charge not conserved: {n_tot:.8f} vs {system.n_electrons}"
+        )
+
+        # energies (BARE D in E_NL; ρ_out everywhere else)
+        rho_g_out = r_to_g(rho_out.to(CDTYPE))
+        rho_xc_out = rho_out if system.rho_core is None else rho_out + system.rho_core
+        from gradwave.core.density import sigma_from_rho
+
+        sigma = sigma_from_rho(rho_xc_out, grid.g_cart) if xc.needs_gradient else None
+        energies = EnergyBreakdown(
+            kinetic=kinetic_energy(coeffs, occ, system.kweights, system.spheres),
+            hartree=hartree_energy(rho_g_out, grid.g2, vol),
+            xc=xc.energy(rho_xc_out, vol, sigma),
+            local=local_energy(rho_g_out, vloc_g, vol),
+            nonlocal_=nonlocal_energy(becps, system.proj_data[0].dij_full,
+                                      occ, system.kweights),
+            ewald=ewald_energy(system.positions, system.charges, grid.cell),
+            smearing=entropy_term,
+        )
+        e_free = float(energies.free_energy)
+
+        rho_in_vec = r_to_g(rho.to(CDTYPE)).reshape(-1)[mask_flat]
+        rho_out_vec = rho_g_out.reshape(-1)[mask_flat]
+        res_norm = float(torch.linalg.norm(rho_out_vec - rho_in_vec)) * vol
+        de = abs(e_free - e_free_prev) if e_free_prev is not None else float("inf")
+        history.append({"iter": it, "free_energy": e_free, "dE": de, "res": res_norm})
+        if verbose:
+            print(f"  USPP {it:3d}  F = {e_free:+.10f} eV  dE = {de:.3e}  "
+                  f"|drho| = {res_norm:.3e}")
+        if de < etol and res_norm < rhotol and tol_eff <= diago_tol * 1.01:
+            converged = True
+            rho = rho_out
+            break
+        e_free_prev = e_free
+        mixed = mixer.step(rho_in_vec, rho_out_vec)
+        rho_g_new = torch.zeros(grid.n_points, dtype=CDTYPE)
+        rho_g_new[mask_flat] = mixed
+        rho = (torch.fft.ifftn(rho_g_new.reshape(shape) * grid.n_points,
+                               dim=(-3, -2, -1))).real
+
+    return dict(
+        converged=converged, n_iter=len(history), energies=energies,
+        eigenvalues=eigs, occupations=occ, coeffs=coeffs, rho=rho,
+        rho_ij_atoms=rho_ij_atoms, becps=becps, history=history,
+        fermi=mu, system=system,
+    )
