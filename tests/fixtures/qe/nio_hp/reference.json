@@ -1,0 +1,14 @@
+{
+  "description": "NiO AFM-II linear-response Hubbard U vs QE 7.5 hp.x (DFPT)",
+  "qe_version": "7.5",
+  "cell_angstrom": [[2.085, 2.085, 4.170], [2.085, 4.170, 2.085], [4.170, 2.085, 2.085]],
+  "positions_crystal": [[0.0, 0.0, 0.0], [0.5, 0.5, 0.5], [0.25, 0.25, 0.25], [0.75, 0.75, 0.75]],
+  "species": ["Ni", "Ni", "O", "O"],
+  "pseudos": {"Ni": "PD_Ni_PBE.upf", "O": "PD_O_PBE.upf"},
+  "ecutwfc_ry": 40.0,
+  "kmesh": [2, 2, 2],
+  "hubbard_projectors": "atomic",
+  "hp_nq": [1, 1, 1],
+  "hubbard_U_eV": 6.4308,
+  "note": "hp.x needs the two-step insulator procedure (smeared SCF, then occupations='fixed' with tot_magnetization=0 and nbnd=24, then hp.x with U_in=1e-8); the single-step smeared run aborts on the metallic Fermi-shift term. nq=1,1,1 (Gamma-only perturbation) matches gradwave's single-cell finite-difference response. gradwave linear_response_u gives 6.4493 eV (0.3% off)."
+}

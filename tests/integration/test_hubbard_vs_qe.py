@@ -56,3 +56,63 @@ def test_nio_afm_hubbard_vs_qe():
     # magnetization (spin-density integral)
     assert abs(res.mag_abs - ref["abs_magnetization_uB"]) < 0.05
     assert abs(res.mag_total) < 1e-3  # AFM: net zero
+
+
+@pytest.mark.slow
+def test_nio_linear_response_u_vs_hp():
+    """The code computes its own U (Cococcioni linear response) vs QE hp.x DFPT.
+
+    hp.x with nq=1,1,1 perturbs the same single cell as gradwave's rigid-probe
+    finite difference, so the two are directly comparable. Reference generated
+    with the two-step insulator procedure (see reference.json note).
+    """
+    from gradwave.postscf.hubbard_u import linear_response_u
+
+    torch.set_num_threads(8)
+    ref = json.load(open(FIX / "nio_hp" / "reference.json"))
+    cell = np.array(ref["cell_angstrom"])
+    frac = np.array(ref["positions_crystal"])
+    ni = parse_upf(FIX / "pseudos" / ref["pseudos"]["Ni"])
+    o = parse_upf(FIX / "pseudos" / ref["pseudos"]["O"])
+    system = setup_system(cell, frac @ cell, [0, 0, 1, 1], [ni, o],
+                          ecut=ref["ecutwfc_ry"] * RY, kmesh=tuple(ref["kmesh"]),
+                          nbands=40)
+    out = linear_response_u(system, SpinPBE(), l=2, species=0, site=0, alpha=0.1,
+                            smearing="gaussian", width=0.05,
+                            scf_kwargs=dict(etol=1e-7, rhotol=1e-6, verbose=False,
+                                            nspin=2, start_mag=[+0.5, -0.5, 0, 0],
+                                            max_iter=150))
+    # localizing perturbation: |chi0| > |chi|, both negative
+    assert out["chi0"] < out["chi"] < 0.0
+    assert abs(out["U_eV"] - ref["hubbard_U_eV"]) < 0.15, out["U_eV"]
+
+
+@pytest.mark.slow
+def test_nio_energy_derivative_u_hellmann_feynman():
+    """dE_total/dU from the Hellmann-Feynman identity Σ ½Tr[n(1−n)] vs
+    finite-difference SCF re-runs — U as a first-class differentiable parameter.
+
+    ecut 40 Ry is required: at 30 Ry the semicore PseudoDojo Ni doesn't converge
+    and lands on a different occupation branch, breaking the FD comparison."""
+    from gradwave.postscf.hubbard_u import energy_derivative_u
+
+    torch.set_num_threads(8)
+    ref = json.load(open(FIX / "nio_hp" / "reference.json"))
+    cell = np.array(ref["cell_angstrom"])
+    frac = np.array(ref["positions_crystal"])
+    ni = parse_upf(FIX / "pseudos" / ref["pseudos"]["Ni"])
+    o = parse_upf(FIX / "pseudos" / ref["pseudos"]["O"])
+    system = setup_system(cell, frac @ cell, [0, 0, 1, 1], [ni, o],
+                          ecut=40 * RY, kmesh=(2, 2, 2), nbands=40)
+    kw = dict(width=0.05, etol=1e-7, rhotol=1e-6, verbose=False, nspin=2,
+              start_mag=[+0.5, -0.5, 0, 0], max_iter=150, smearing="gaussian")
+    u0, du = 5.0, 0.1
+    man = lambda u: [HubbardManifold(species=0, l=2, u=u, j=0.0)]  # noqa: E731
+    res0 = scf(system, SpinPBE(), hubbard=man(u0), **kw)
+    assert res0.converged
+    de_hf = energy_derivative_u(res0, man(u0))
+    resp = scf(system, SpinPBE(), hubbard=man(u0 + du), **kw)
+    resm = scf(system, SpinPBE(), hubbard=man(u0 - du), **kw)
+    assert resp.converged and resm.converged
+    de_fd = (float(resp.energies.total) - float(resm.energies.total)) / (2 * du)
+    assert abs(de_hf - de_fd) < 1e-4, (de_hf, de_fd)
