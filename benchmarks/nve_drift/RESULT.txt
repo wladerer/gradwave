@@ -1,0 +1,12 @@
+NVE energy conservation — rattled Si8, velocity-Verlet dt=2fs, 0.5 ps,
+PBE ONCV 30 Ry, 2x2x2 k, etol 1e-8 / rhotol 1e-7, GradWave calculator on
+CUDA (RTX 3050, 15.6 s/step). Forces are autograd Hellmann-Feynman.
+
+  T_avg                 180 K
+  Etot rms fluctuation  0.067 meV/atom   (bounded Verlet dt^2 oscillation)
+  Etot peak-to-peak     0.31  meV/atom
+  secular drift         -14 ueV/atom/ps  (linear fit; oscillation-phase bound)
+  half-vs-half mean     +0.9 ueV/atom    (true secular component)
+
+The total energy is conserved at the SCF-tolerance floor over 250 steps:
+the autograd force is the exact derivative of the SCF energy surface.
