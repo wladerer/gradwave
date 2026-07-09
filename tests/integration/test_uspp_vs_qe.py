@@ -116,3 +116,39 @@ def test_paw_spin_vs_qe():
     assert dF < 5.0, f"F off by {dF:.2f} meV"
     assert abs(res["mag_total"] - ref["mag_muB"]) < 0.02
     assert abs(float(e.onecenter) / RY - ref["onecenter_Ry"]) < 0.005
+
+
+@pytest.mark.slow
+def test_paw_symmetry_ibz_equals_full_mesh():
+    """IBZ + rho/becsum symmetrization vs the full TR mesh (observed equality
+    to 1e-7 eV; 36 -> 8 k for diamond Si, ~5x faster)."""
+    torch.set_num_threads(8)
+    paw = parse_upf_paw(FIX / "pseudos" / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
+    vals = {}
+    for sym in (False, True):
+        system = setup_uspp(SI_CELL, SI_POS, [0, 0], [paw], ecut=25 * RY,
+                            kmesh=(4, 4, 4), use_symmetry=sym)
+        r = scf_uspp(system, PBE(), smearing="none", etol=1e-9, rhotol=1e-8,
+                     verbose=False, max_iter=30)
+        assert r["converged"]
+        vals[sym] = float(r["energies"].total)
+    assert abs(vals[True] - vals[False]) < 1e-6
+
+
+@pytest.mark.slow
+def test_paw_bands_vs_qe():
+    """Frozen-potential generalized solves at arbitrary k: Si PAW Γ eigenvalues
+    vs QE's printed bands from the si_paw_ci reference run (observed 0.65 meV,
+    the one-center quadrature scale)."""
+    from gradwave.postscf.uspp_bands import bands_uspp
+
+    torch.set_num_threads(8)
+    paw = parse_upf_paw(FIX / "pseudos" / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
+    system = setup_uspp(SI_CELL, SI_POS, [0, 0], [paw], ecut=45 * RY,
+                        kmesh=(2, 2, 2), ecutrho=180 * RY, fft_shape=(32, 32, 32))
+    res = scf_uspp(system, PBE(), smearing="none", etol=1e-9, rhotol=1e-8,
+                   verbose=False, max_iter=40)
+    assert res["converged"]
+    eigs = bands_uspp(res, PBE(), [[0.0, 0.0, 0.0]], nbands=4)[0]
+    qe_gamma = [-5.5159, 6.5075, 6.5075, 6.5075]  # pw.x verbosity=high printout
+    assert np.abs(eigs.numpy() - np.array(qe_gamma)).max() < 0.005
