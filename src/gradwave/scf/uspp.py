@@ -87,6 +87,9 @@ class USPPSystem:
     vloc_tables: torch.Tensor
     rho_core: torch.Tensor | None
     atom_slices: list = field(default_factory=list)  # per-atom projector column ranges
+    sym: object = None  # SpaceGroup when use_symmetry
+    rho_symmetrizer: object = None
+    becsum_sym: object = None
 
 
 def _mexp_index_map(paw: PAWData):
@@ -150,6 +153,8 @@ def setup_uspp(
     nbands: int | None = None,
     ecutrho: float | None = None,
     fft_shape=None,
+    use_symmetry: bool = False,
+    symprec: float = 1e-6,
 ) -> USPPSystem:
     from gradwave.kpoints import monkhorst_pack
     from gradwave.pseudo.local import alpha_z, vloc_of_g
@@ -159,9 +164,24 @@ def setup_uspp(
     positions = np.asarray(positions, dtype=np.float64)
     if ecutrho is None:
         ecutrho = 4.0 * ecut
+    sym = rho_symmetrizer = None
+    if use_symmetry:
+        from gradwave.symmetry import find_spacegroup
+
+        frac = positions @ np.linalg.inv(cell)
+        sym = find_spacegroup(cell, frac, list(species_of_atom), symprec=symprec)
+        if sym.n_ops <= 1:
+            sym = None
     # build_fft_grid derives the density sphere as 2·G_max(ecut_arg)
-    grid = build_fft_grid(cell, ecutrho / 4.0, shape_override=fft_shape)
-    kfrac, kw = monkhorst_pack(kmesh, (0, 0, 0), time_reversal=True)
+    grid = build_fft_grid(cell, ecutrho / 4.0, shape_override=fft_shape,
+                          equal_dims=sym is not None)
+    if sym is not None:
+        from gradwave.symmetry import RhoSymmetrizer, reduce_mesh
+
+        rho_symmetrizer = RhoSymmetrizer(grid.shape, sym, dens_mask=grid.dens_mask)
+        kfrac, kw = reduce_mesh(kmesh, (0, 0, 0), sym, time_reversal=True)
+    else:
+        kfrac, kw = monkhorst_pack(kmesh, (0, 0, 0), time_reversal=True)
     spheres = [build_gsphere(grid, ecut, k) for k in kfrac]
 
     charges = torch.tensor([paws[s].z_valence for s in species_of_atom], dtype=RDTYPE)
@@ -254,7 +274,16 @@ def setup_uspp(
         proj_data=proj_data, q_full=q_full, aug=aug,
         sphere_idx=sphere_idx, g_sphere=g_sphere,
         vloc_tables=vloc_tables, rho_core=rho_core, atom_slices=slices,
+        sym=sym, rho_symmetrizer=rho_symmetrizer,
+        becsum_sym=(None if sym is None else _make_becsum_sym(
+            sym, cell, paws, species_of_atom, slices)),
     )
+
+
+def _make_becsum_sym(sym, cell, paws, species_of_atom, slices):
+    from gradwave.scf.paw_symmetry import BecsumSymmetrizer
+
+    return BecsumSymmetrizer(sym, cell, paws, species_of_atom, slices)
 
 
 class _HkS:
@@ -397,9 +426,16 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         torch.ones(ng, dtype=torch.bool),
         torch.zeros(ng * (nspin - 1) + nbec * nspin, dtype=torch.bool),
     ])
+    # the on-site becsum↔ddd feedback is the stiffest direction (on-site
+    # Hartree curvature ~tens of eV) — take smaller plain steps on the becsum
+    # block while DIIS accumulates curvature
+    step_scale = torch.cat([
+        torch.ones(ng * nspin, dtype=torch.float64),
+        torch.full((nbec * nspin,), 0.4, dtype=torch.float64),
+    ])
     mixer = PulayMixer(g2_full, alpha=mixing_alpha, history=mixing_history,
                        kerker=(smearing != "none"), kerker_mask=kerker_mask,
-                       check_g0=False)
+                       check_g0=False, step_scale=step_scale)
     coeffs = [[None] * nk for _ in range(nspin)]
     e_free_prev, history, converged = None, [], False
     occ_s = entropy_term = eigs_s = mu = None
@@ -557,6 +593,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                         "b,bi,bj->ij", w.to(CDTYPE), ba.conj(), ba
                     )
             rho_ij_s[isp] = [0.5 * (m + m.conj().T) for m in rho_ij_s[isp]]
+            if system.becsum_sym is not None:
+                rho_ij_s[isp] = system.becsum_sym.apply(rho_ij_s[isp])
             becps_s.append(becps)
 
             aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE)
@@ -568,7 +606,12 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
             aug_box[system.sphere_idx] = aug_sph / vol
             rho_aug = (torch.fft.ifftn(aug_box.reshape(shape) * grid.n_points,
                                        dim=(-3, -2, -1))).real
-            rho_out_s.append(rho_sp + rho_aug)
+            rho_out_sp = rho_sp + rho_aug
+            if system.rho_symmetrizer is not None:
+                sym_g = system.rho_symmetrizer.apply(r_to_g(rho_out_sp.to(CDTYPE)))
+                rho_out_sp = torch.fft.ifftn(
+                    sym_g * grid.n_points, dim=(-3, -2, -1)).real
+            rho_out_s.append(rho_out_sp)
         rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
 
         n_tot = float(rho_tot_out.sum()) * vol / grid.n_points

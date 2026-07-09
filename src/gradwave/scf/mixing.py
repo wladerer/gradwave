@@ -29,9 +29,11 @@ class PulayMixer:
         q0: float = 1.1,
         check_g0: bool = True,
         kerker_mask=None,  # per-component bool; None → kerker applies to all
+        step_scale=None,  # per-component multiplier on the damped step (None → 1)
     ):
         self.check_g0 = check_g0
         self.kerker_mask = kerker_mask
+        self.step_scale = step_scale
         self.g2 = g2
         self.alpha = alpha
         self.history = history
@@ -42,11 +44,15 @@ class PulayMixer:
 
     def _precondition(self, r: torch.Tensor) -> torch.Tensor:
         if not self.kerker:
-            return self.alpha * r
-        fac = self.g2 / (self.g2 + self.q0**2)
-        if self.kerker_mask is not None:
-            fac = torch.where(self.kerker_mask, fac, torch.ones_like(fac))
-        return self.alpha * fac * r
+            out = self.alpha * r
+        else:
+            fac = self.g2 / (self.g2 + self.q0**2)
+            if self.kerker_mask is not None:
+                fac = torch.where(self.kerker_mask, fac, torch.ones_like(fac))
+            out = self.alpha * fac * r
+        if self.step_scale is not None:
+            out = out * self.step_scale
+        return out
 
     def _metric(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         w = 1.0 / (self.g2 + self.q0**2)
