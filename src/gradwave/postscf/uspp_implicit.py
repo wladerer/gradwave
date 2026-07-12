@@ -30,8 +30,23 @@ gives every parameter gradient at once:
 δρ_tot already contains the augmentation response — that is what makes the
 split-basis kernel block-diagonal). Anderson mixing on the composite u —
 the NiO lesson: plain damping diverges near spin instabilities, and the
-becsum↔ddd on-site mode is the stiffest direction here too. Insulators,
-nspin=1, no symmetry, no +U.
+becsum↔ddd on-site mode is the stiffest direction here too.
+
+Symmetry-reduced (IBZ) SCF points are supported. The symmetrized SCF map is
+x_out = 𝒮 χ̃(Kx + p) with 𝒮 the (ρ, becsum) symmetrizers; both are group
+averages of orthogonal operations, hence self-adjoint projections, so the
+transposed fixed point just applies them to u before each χ̃:
+
+    u = (v̄, 0) + K χ̃ 𝒮 u,        dL/dθ = ⟨χ̃𝒮u, p_θ⟩
+
+The one wrinkle is ordering: the SCF symmetrizes becsum BEFORE building the
+augmentation density and rho-symmetrizes after, but the augmentation map is
+group-EQUIVARIANT (S_ρ∘Aug = Aug∘S_b — the correctness content of the
+becsum symmetrizer), so the transpose of the composite collapses to
+symmetrizing apply_chi0's two inputs and touching nothing inside. On the
+symmetric subspace the weighted-IBZ response followed by symmetrization IS
+the full-BZ response, so gradients match the full-mesh adjoint exactly, at
+1/|G|-ish the Sternheimer cost. Insulators, nspin=1, no +U.
 """
 
 from __future__ import annotations
@@ -87,12 +102,6 @@ def _check_supported(res: dict):
         raise NotImplementedError("USPP adjoint: nspin=2 is future work")
     if "hub_occ" in res:
         raise NotImplementedError("USPP adjoint: +U response not implemented")
-    system = res["system"]
-    if getattr(system, "sym", None) is not None:
-        raise NotImplementedError(
-            "USPP adjoint requires use_symmetry=False: a perturbation breaks "
-            "the crystal symmetry, so the response needs the full "
-            "(TR-reduced) k-mesh")
 
 
 def _occupied_uspp(res: dict, ik: int):
@@ -335,6 +344,17 @@ def uspp_density_loss_param_grads(
                             for n in nbec])
         dpsi_warm = [torch.zeros_like(c) for c in cs.c_occ]
 
+        def symmetrize(w_r, d_bare):
+            """𝒮ᵀu = 𝒮u (self-adjoint projections), mirroring the SCF's
+            per-iteration symmetrization on the transposed side."""
+            if system.rho_symmetrizer is not None:
+                w_g = system.rho_symmetrizer.apply(r_to_g(w_r.to(CDTYPE)))
+                w_r = (torch.fft.ifftn(w_g * n_pts, dim=(-3, -2, -1))).real
+            if system.becsum_sym is not None:
+                d_bare = [m.real for m in system.becsum_sym.apply(
+                    [m.to(CDTYPE) for m in d_bare])]
+            return w_r, d_bare
+
         # Anderson-accelerated fixed point u = l + K χ̃ u (plain damping
         # diverges for gain>1 modes — NiO lesson; the on-site becsum↔ddd
         # feedback is stiff in exactly the same way the SCF mixer sees).
@@ -343,7 +363,7 @@ def uspp_density_loss_param_grads(
         hist_du, hist_dr = [], []
         drho = dbec = None
         for it in range(1, max_outer + 1):
-            w_r, d_bare = split(u)
+            w_r, d_bare = symmetrize(*split(u))
             drho, dbec = cs.apply_chi0(w_r, d_bare, dpsi_warm, cg_tol,
                                        cg_max_iter)
             g_u = l_vec + join(cs.k_hxc_grid(drho),

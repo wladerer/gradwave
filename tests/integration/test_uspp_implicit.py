@@ -100,3 +100,51 @@ def test_paw_density_loss_grads_vs_fd():
     rel = abs(an - fd) / abs(fd)
     # observed 1.2e-6 (FD floor); gate at the NC milestone's 2e-4 class
     assert rel < 2e-4, f"dL/d(raw_mu) adjoint {an} vs FD {fd} (rel {rel:.2e})"
+
+
+@pytest.mark.slow
+def test_paw_density_loss_grads_ibz_equals_full():
+    """IBZ (use_symmetry=True) adjoint == full-mesh adjoint. The transposed
+    symmetrized SCF map applies the self-adjoint symmetrizers to u before
+    each response, and on the symmetric subspace the weighted-IBZ response
+    is the full-BZ response — so the gradients must agree to solver
+    tolerance, at ~n_IBZ/n_full of the Sternheimer cost (3/8 here).
+
+    The FFT box must be commensurate with the non-symmorphic translations
+    for this to gate tightly: diamond's (1/4,1/4,1/4) glide maps the
+    real-space grid onto itself only when dims % 4 == 0. ecut 25/100 gives
+    24^3 (commensurate: full-vs-IBZ densities agree to 2e-9); at 18^3 the
+    un-projected full-mesh fixed point retains a genuine 2e-4 asymmetric
+    component from pointwise XC on the glide-incommensurate grid, and the
+    two adjoints correctly differ at that (state) level."""
+    torch.set_num_threads(8)
+    paw = parse_upf_paw(FIX / "pseudos" / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
+    pos = np.array([[0.0, 0.0, 0.0], [1.3575, 1.3575, 1.3575]])
+    xc = LearnableX()
+
+    def scf_at(use_sym, fft_shape=None):
+        s = setup_uspp(SI_CELL, pos, [0, 0], [paw], ecut=25 * RY,
+                       kmesh=(2, 2, 2), ecutrho=100 * RY,
+                       use_symmetry=use_sym, fft_shape=fft_shape)
+        r = scf_uspp(s, xc, etol=1e-12, rhotol=1e-10, verbose=False,
+                     max_iter=80)
+        assert r["converged"]
+        return r
+
+    res_sym = scf_at(True)
+    shape = tuple(res_sym["system"].grid.shape)
+    res_full = scf_at(False, fft_shape=shape)
+    assert len(res_sym["system"].spheres) < len(res_full["system"].spheres)
+
+    rho_ref = (0.95 * res_sym["rho"]).detach().clone()
+
+    def loss_fn(rho):
+        d = rho - rho_ref
+        return (d * d).sum()
+
+    _, g_full = uspp_density_loss_param_grads(res_full, xc, loss_fn)
+    _, g_sym = uspp_density_loss_param_grads(res_sym, xc, loss_fn)
+    for name in ("raw_mu", "raw_kappa"):
+        a, b = float(g_full[name]), float(g_sym[name])
+        rel = abs(a - b) / max(abs(a), 1e-30)
+        assert rel < 1e-6, f"{name}: full {a} vs IBZ {b} (rel {rel:.2e})"
