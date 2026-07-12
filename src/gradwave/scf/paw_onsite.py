@@ -261,34 +261,35 @@ class OneCenter:
         cfrac = 0.5 if spin else 1.0
         gga = getattr(self.xc, "needs_gradient", False)
 
-        leaves, dens, grads = [], [], []
-        for rl_np in rho_lms:
-            rl = torch.as_tensor(rl_np, dtype=torch.float64).requires_grad_(True)
-            leaves.append(rl)
-            rho_rad = rl @ tt["ylm"].T  # (mesh, nx), r² included
-            dens.append(rho_rad * tt["rm2"][:, None] + cfrac * core[:, None])
-            if gga:
-                dr = self._rgrad_t(dens[-1], tt)
-                gth = (rl @ tt["dylmt"].T) * tt["rm3"][:, None]
-                gph = (rl @ tt["dylmp"].T) * tt["rm3"][:, None]
-                grads.append(torch.stack([dr, gth, gph]))
-        if spin:
-            if gga:
-                g_tot = grads[0] + grads[1]
-                e = self.xc.energy_density(
-                    dens[0].reshape(-1), dens[1].reshape(-1),
-                    (grads[0] ** 2).sum(0).reshape(-1),
-                    (grads[1] ** 2).sum(0).reshape(-1),
-                    (g_tot**2).sum(0).reshape(-1))
+        with torch.enable_grad():  # callable under a no_grad SCF driver
+            leaves, dens, grads = [], [], []
+            for rl_np in rho_lms:
+                rl = torch.as_tensor(rl_np, dtype=torch.float64).requires_grad_(True)
+                leaves.append(rl)
+                rho_rad = rl @ tt["ylm"].T  # (mesh, nx), r² included
+                dens.append(rho_rad * tt["rm2"][:, None] + cfrac * core[:, None])
+                if gga:
+                    dr = self._rgrad_t(dens[-1], tt)
+                    gth = (rl @ tt["dylmt"].T) * tt["rm3"][:, None]
+                    gph = (rl @ tt["dylmp"].T) * tt["rm3"][:, None]
+                    grads.append(torch.stack([dr, gth, gph]))
+            if spin:
+                if gga:
+                    g_tot = grads[0] + grads[1]
+                    e = self.xc.energy_density(
+                        dens[0].reshape(-1), dens[1].reshape(-1),
+                        (grads[0] ** 2).sum(0).reshape(-1),
+                        (grads[1] ** 2).sum(0).reshape(-1),
+                        (g_tot**2).sum(0).reshape(-1))
+                else:
+                    e = self.xc.energy_density(dens[0].reshape(-1),
+                                               dens[1].reshape(-1))
             else:
-                e = self.xc.energy_density(dens[0].reshape(-1),
-                                           dens[1].reshape(-1))
-        else:
-            sig = (grads[0] ** 2).sum(0).reshape(-1) if gga else None
-            e = self.xc.energy_density(dens[0].reshape(-1), sig)
-        e_xc = (e.reshape(self.mesh, self.nx) * tt["wq"][:, None]
-                * tt["ww"][None, :]).sum()
-        gs = torch.autograd.grad(e_xc, leaves)
+                sig = (grads[0] ** 2).sum(0).reshape(-1) if gga else None
+                e = self.xc.energy_density(dens[0].reshape(-1), sig)
+            e_xc = (e.reshape(self.mesh, self.nx) * tt["wq"][:, None]
+                    * tt["ww"][None, :]).sum()
+            gs = torch.autograd.grad(e_xc, leaves)
         return float(e_xc.detach()), [g.numpy() for g in gs]
 
     def energy_theta(self, rho_ij) -> torch.Tensor:

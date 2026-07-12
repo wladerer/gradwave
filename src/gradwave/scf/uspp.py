@@ -411,6 +411,7 @@ def davidson_gen(hs: _HkS, x0: torch.Tensor, nbands: int, tol: float,
     return eps, x
 
 
+@torch.no_grad()
 def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
              smearing="none", width=0.1, max_iter=60, etol=1e-8, rhotol=1e-7,
              diago_tol=1e-9, mixing_alpha=0.7, mixing_history=8,
