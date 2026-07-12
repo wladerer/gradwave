@@ -62,6 +62,24 @@ def _cumint(g: np.ndarray) -> np.ndarray:
     return out
 
 
+def _cumint_t(g: torch.Tensor) -> torch.Tensor:
+    """Torch (differentiable) twin of _cumint — identical stencil, built
+    functionally (stack/cat, no in-place) so autograd can traverse it."""
+    n = g.shape[-1]
+    pair = (g[..., 0:-2:2] + 4.0 * g[..., 1:-1:2] + g[..., 2::2]) / 3.0
+    even = torch.cumsum(pair, dim=-1)  # I at indices 2, 4, …, 2·npairs
+    even_prev = torch.cat([torch.zeros_like(even[..., :1]), even[..., :-1]], dim=-1)
+    odd = even_prev + (
+        5.0 * g[..., 0:-2:2] + 8.0 * g[..., 1:-1:2] - g[..., 2::2]
+    ) / 12.0  # I at indices 1, 3, …, 2·npairs−1
+    core = torch.stack([odd, even], dim=-1).reshape(*even.shape[:-1], -1)
+    out = torch.cat([torch.zeros_like(g[..., :1]), core], dim=-1)
+    if n % 2 == 0:  # final even-count point: trapezoid closure
+        tail = out[..., -1:] + 0.5 * (g[..., -2:-1] + g[..., -1:])
+        out = torch.cat([out, tail], dim=-1)
+    return out
+
+
 class OneCenter:
     """Per-species one-center integrator. Call energy_and_ddd per atom."""
 
@@ -224,6 +242,8 @@ class OneCenter:
                                        dtype=torch.float64)
 
             r = self.r
+            lls = np.arange(self.lmax_rho + 1)[:, None]  # (nl, 1)
+            rl_neg = np.where(r > 0, r[None, :] ** -(lls + 1), 0.0)
             self._tt = dict(
                 ylm=t(self.ylm[:, : self.l2]),
                 dylmt=t(self.dylmt[:, : self.l2]),
@@ -237,8 +257,76 @@ class OneCenter:
                 c0=(r[0] - r[1]) / (r[2] - r[1]),
                 core_ae=t(self.core_ae),
                 core_ps=t(self.core_ps),
+                # radial-Poisson tables per l: integrands and prefactor powers
+                h_a=t(r[None, :] ** lls * self.rab[None, :]),
+                h_b=t(rl_neg * self.rab[None, :]),
+                h_vn=t(rl_neg),
+                h_vp=t(r[None, :] ** lls),
+                wsimp=t(self.w_simp),
             )
         return self._tt
+
+    # ---------- dense linear maps ρ_ij → ρ_lm (torch chain) ----------
+
+    def _rho_lm_maps(self):
+        """T_what (nf·l2, nm²) with rho_lm_t(ρ)[:nf] = (T @ ρ.flat).reshape —
+        the EXACT linearization of rho_lm (same Gaunt/pfunc/per-L aug
+        selection, same 1e-12 Gaunt threshold)."""
+        if hasattr(self, "_T"):
+            return self._T
+        # actual radial support of every pair function used (aug q^L tails
+        # may outrun aug_cutoff_idx on some files — scan, don't assume)
+        nf = self.ircut
+        for key in self.pfunc_ae:
+            base, per_l = self.pfunc_ps[key]
+            for f in [self.pfunc_ae[key], base, *per_l.values()]:
+                nz = np.nonzero(f)[0]
+                if len(nz):
+                    nf = max(nf, int(nz[-1]) + 1)
+        self._nf = nf
+        T = {}
+        for what in ("ae", "ps"):
+            mat = np.zeros((nf, self.l2, self.nm, self.nm))
+            for a, (i, _li, lmi) in enumerate(self.idx):
+                for b, (j, _lj, lmj) in enumerate(self.idx):
+                    key = (min(i, j), max(i, j))
+                    cy = self.gaunt[:, lmi, lmj]
+                    nz = np.nonzero(np.abs(cy) > 1e-12)[0]
+                    for lm in nz:
+                        ll = int(math.isqrt(lm))
+                        if what == "ae":
+                            f = self.pfunc_ae[key]
+                        else:
+                            base, per_l = self.pfunc_ps[key]
+                            f = per_l.get(ll, base)
+                        mat[:, lm, a, b] += cy[lm] * f[:nf]
+            T[what] = torch.as_tensor(
+                mat.reshape(nf * self.l2, self.nm * self.nm))
+        self._T = T
+        return T
+
+    def rho_lm_t(self, rho_ij: torch.Tensor, what: str) -> torch.Tensor:
+        """(mesh, l2) torch ρ_lm, differentiable in rho_ij (real (nm, nm))."""
+        T = self._rho_lm_maps()[what]
+        cut = (T @ rho_ij.reshape(-1)).reshape(self._nf, self.l2)
+        pad = torch.zeros(self.mesh - self._nf, self.l2, dtype=cut.dtype)
+        return torch.cat([cut, pad], dim=0)
+
+    def hartree_t(self, rho_lm: torch.Tensor):
+        """Torch twin of hartree(): (v_lm (mesh, l2) [eV], E_H [eV])."""
+        tt = self._torch_tables()
+        cols = []
+        for lm in range(self.l2):
+            ll = int(math.isqrt(lm))
+            f = rho_lm[:, lm]
+            a_in = _cumint_t(f * tt["h_a"][ll])
+            b_all = _cumint_t(f * tt["h_b"][ll])
+            b_out = b_all[-1] - b_all
+            pref = 4.0 * math.pi * E2 / (2 * ll + 1)
+            cols.append(pref * (tt["h_vn"][ll] * a_in + tt["h_vp"][ll] * b_out))
+        v = torch.stack(cols, dim=1)
+        e = 0.5 * (tt["wsimp"][:, None] * v * rho_lm).sum()
+        return v, e
 
     def _rgrad_t(self, f: torch.Tensor, tt) -> torch.Tensor:
         """QE radial_gradient iflag=0 stencil, torch, f (mesh, nx)."""
@@ -255,85 +343,94 @@ class OneCenter:
         density and gradient chains, no integration by parts. (The divergence
         form of v_xc is only δE/δρ up to lm-truncation error; using it as ddd
         broke force↔energy consistency at 1e-2 eV/Å on spin O₂.)"""
-        tt = self._torch_tables()
-        spin = len(rho_lms) == 2
-        core = tt["core_ae"] if what == "ae" else tt["core_ps"]
-        cfrac = 0.5 if spin else 1.0
-        gga = getattr(self.xc, "needs_gradient", False)
-
         with torch.enable_grad():  # callable under a no_grad SCF driver
-            leaves, dens, grads = [], [], []
-            for rl_np in rho_lms:
-                rl = torch.as_tensor(rl_np, dtype=torch.float64).requires_grad_(True)
-                leaves.append(rl)
-                rho_rad = rl @ tt["ylm"].T  # (mesh, nx), r² included
-                dens.append(rho_rad * tt["rm2"][:, None] + cfrac * core[:, None])
-                if gga:
-                    dr = self._rgrad_t(dens[-1], tt)
-                    gth = (rl @ tt["dylmt"].T) * tt["rm3"][:, None]
-                    gph = (rl @ tt["dylmp"].T) * tt["rm3"][:, None]
-                    grads.append(torch.stack([dr, gth, gph]))
-            if spin:
-                if gga:
-                    g_tot = grads[0] + grads[1]
-                    e = self.xc.energy_density(
-                        dens[0].reshape(-1), dens[1].reshape(-1),
-                        (grads[0] ** 2).sum(0).reshape(-1),
-                        (grads[1] ** 2).sum(0).reshape(-1),
-                        (g_tot**2).sum(0).reshape(-1))
-                else:
-                    e = self.xc.energy_density(dens[0].reshape(-1),
-                                               dens[1].reshape(-1))
-            else:
-                sig = (grads[0] ** 2).sum(0).reshape(-1) if gga else None
-                e = self.xc.energy_density(dens[0].reshape(-1), sig)
-            e_xc = (e.reshape(self.mesh, self.nx) * tt["wq"][:, None]
-                    * tt["ww"][None, :]).sum()
+            leaves = [torch.as_tensor(rl_np, dtype=torch.float64).requires_grad_(True)
+                      for rl_np in rho_lms]
+            e_xc = self._exc_t(leaves, what)
             gs = torch.autograd.grad(e_xc, leaves)
         return float(e_xc.detach()), [g.numpy() for g in gs]
 
-    def energy_theta(self, rho_ij) -> torch.Tensor:
-        """E_1c as a torch scalar with the XC-functional parameters ON THE
-        GRAPH (densities fixed) — the one-center piece of dE_total/dθ by
-        stationarity. Hartree is θ-independent and enters as a constant."""
-        spin = isinstance(rho_ij, (list, tuple))
-        rhos = ([m.detach().cpu().numpy().real for m in rho_ij]
-                if spin else [rho_ij.detach().cpu().numpy().real])
+    def _exc_t(self, rls: list, what: str) -> torch.Tensor:
+        """E_xc [eV] as a torch scalar from (mesh, l2) torch ρ_lm tensors —
+        the quadrature body shared by _xc_exact, e1c_t and energy_theta."""
         tt = self._torch_tables()
+        spin = len(rls) == 2
+        core = tt["core_ae"] if what == "ae" else tt["core_ps"]
+        cfrac = 0.5 if spin else 1.0
         gga = getattr(self.xc, "needs_gradient", False)
+        dens, grads = [], []
+        for rl in rls:
+            rho_rad = rl @ tt["ylm"].T  # (mesh, nx), r² included
+            dens.append(rho_rad * tt["rm2"][:, None] + cfrac * core[:, None])
+            if gga:
+                dr = self._rgrad_t(dens[-1], tt)
+                gth = (rl @ tt["dylmt"].T) * tt["rm3"][:, None]
+                gph = (rl @ tt["dylmp"].T) * tt["rm3"][:, None]
+                grads.append(torch.stack([dr, gth, gph]))
+        if spin:
+            if gga:
+                g_tot = grads[0] + grads[1]
+                e = self.xc.energy_density(
+                    dens[0].reshape(-1), dens[1].reshape(-1),
+                    (grads[0] ** 2).sum(0).reshape(-1),
+                    (grads[1] ** 2).sum(0).reshape(-1),
+                    (g_tot**2).sum(0).reshape(-1))
+            else:
+                e = self.xc.energy_density(dens[0].reshape(-1),
+                                           dens[1].reshape(-1))
+        else:
+            sig = (grads[0] ** 2).sum(0).reshape(-1) if gga else None
+            e = self.xc.energy_density(dens[0].reshape(-1), sig)
+        return (e.reshape(self.mesh, self.nx) * tt["wq"][:, None]
+                * tt["ww"][None, :]).sum()
+
+    # ---------- fully in-graph one-center chain (torch) ----------
+
+    def e1c_t(self, rho_ijs: list) -> torch.Tensor:
+        """E_1c [eV] as a torch scalar, fully differentiable in the REAL
+        (nm, nm) rho_ij tensors AND the XC-functional parameters: dense-T
+        ρ_lm, torch radial Poisson, the exact angular XC quadrature."""
         e_tot = torch.zeros((), dtype=torch.float64)
         for what, sgn in (("ae", 1.0), ("ps", -1.0)):
-            rls = [self.rho_lm(r, what) for r in rhos]
-            _, e_h = self.hartree(sum(rls))
-            core = tt["core_ae"] if what == "ae" else tt["core_ps"]
-            cfrac = 0.5 if spin else 1.0
-            dens, grads = [], []
-            for rl_np in rls:
-                rl = torch.as_tensor(rl_np, dtype=torch.float64)
-                rho_rad = rl @ tt["ylm"].T
-                dens.append(rho_rad * tt["rm2"][:, None] + cfrac * core[:, None])
-                if gga:
-                    dr = self._rgrad_t(dens[-1], tt)
-                    gth = (rl @ tt["dylmt"].T) * tt["rm3"][:, None]
-                    gph = (rl @ tt["dylmp"].T) * tt["rm3"][:, None]
-                    grads.append(torch.stack([dr, gth, gph]))
-            if spin:
-                if gga:
-                    g_tot = grads[0] + grads[1]
-                    sigs = ((grads[0] ** 2).sum(0).reshape(-1),
-                            (grads[1] ** 2).sum(0).reshape(-1),
-                            (g_tot**2).sum(0).reshape(-1))
-                else:
-                    sigs = (None, None, None)
-                e = self.xc.energy_density(dens[0].reshape(-1),
-                                           dens[1].reshape(-1), *sigs)
-            else:
-                sig = (grads[0] ** 2).sum(0).reshape(-1) if gga else None
-                e = self.xc.energy_density(dens[0].reshape(-1), sig)
-            e_xc = (e.reshape(self.mesh, self.nx) * tt["wq"][:, None]
-                    * tt["ww"][None, :]).sum()
-            e_tot = e_tot + sgn * (e_h + e_xc)
+            rls = [self.rho_lm_t(r, what) for r in rho_ijs]
+            _, e_h = self.hartree_t(sum(rls))
+            e_tot = e_tot + sgn * (e_h + self._exc_t(rls, what))
         return e_tot
+
+    @staticmethod
+    def _to_real_t(rho_ij) -> torch.Tensor:
+        m = rho_ij.detach()
+        if m.is_complex():
+            m = m.real
+        return m.cpu().to(torch.float64)
+
+    def hvp_becsum(self, rho_ij, vec):
+        """One-center Hessian-vector product ∂²E_1c/∂ρ_ij² · vec.
+
+        rho_ij, vec: (nm, nm) tensors (nspin=1) or 2-lists (spin); returns
+        the matching structure of real float64 (nm, nm) tensors."""
+        spin = isinstance(rho_ij, (list, tuple))
+        rhos = ([self._to_real_t(m) for m in rho_ij] if spin
+                else [self._to_real_t(rho_ij)])
+        vecs = ([self._to_real_t(m) for m in vec] if spin
+                else [self._to_real_t(vec)])
+        with torch.enable_grad():
+            leaves = [m.clone().requires_grad_(True) for m in rhos]
+            e = self.e1c_t(leaves)
+            gs = torch.autograd.grad(e, leaves, create_graph=True)
+            inner = sum((g * v).sum() for g, v in zip(gs, vecs, strict=True))
+            hv = torch.autograd.grad(inner, leaves)
+        hv = [h.detach() for h in hv]
+        return hv if spin else hv[0]
+
+    def energy_theta(self, rho_ij) -> torch.Tensor:
+        """E_1c as a torch scalar with the XC-functional parameters ON THE
+        GRAPH (densities fixed and detached) — the one-center piece of
+        dE_total/dθ by stationarity. Hartree is θ-independent."""
+        spin = isinstance(rho_ij, (list, tuple))
+        rhos = [self._to_real_t(m) for m in (rho_ij if spin else [rho_ij])]
+        with torch.enable_grad():
+            return self.e1c_t(rhos)
 
     # ---------- per-atom driver ----------
 
@@ -342,48 +439,20 @@ class OneCenter:
 
         rho_ij: (nm, nm) tensor (nspin=1) → returns (E, ddd);
         or [ρ↑_ij, ρ↓_ij] → returns (E, [ddd↑, ddd↓]).
+
+        ddd = autograd through the full torch chain (dense-T ρ_lm → torch
+        radial Poisson → angular XC quadrature), so it is the derivative of
+        the energy actually returned, bit-for-bit consistent with e1c_t. (The
+        earlier hand-assembled Hartree term truncated its quadrature at
+        kkbeta while the pair functions run to aug_cutoff_idx > kkbeta on psl
+        meshes — a 3e-7 relative inconsistency the energy-space FD exposes.)
         """
         spin = isinstance(rho_ij, (list, tuple))
-        rhos = ([m.detach().cpu().numpy().real for m in rho_ij]
-                if spin else [rho_ij.detach().cpu().numpy().real])
-        e_tot = 0.0
-        # what → (v_H)_lm (potential, spin-shared) and per-spin dE_xc/dρ_lm
-        # (weighted derivative — quadrature weights already inside)
-        vh_saved, gx_saved = {}, {}
-        for what, sgn in (("ae", 1.0), ("ps", -1.0)):
-            rls = [self.rho_lm(r, what) for r in rhos]
-            v_h, e_h = self.hartree(sum(rls))
-            e_x, gxs = self._xc_exact(rls, what)
-            vh_saved[what] = v_h
-            gx_saved[what] = gxs
-            e_tot += sgn * (e_h + e_x)
-
-        wk = simpson_weights(self.rab[: self.kkbeta])
-        ddds = []
-        for isp in range(len(rhos)):
-            ddd = np.zeros((self.nm, self.nm))
-            for a, (i, _li, lmi) in enumerate(self.idx):
-                for b in range(a, self.nm):
-                    j, _lj, lmj = self.idx[b]
-                    key = (min(i, j), max(i, j))
-                    cy = self.gaunt[:, lmi, lmj]
-                    nz = np.nonzero(np.abs(cy) > 1e-12)[0]
-                    val = 0.0
-                    for lm in nz:
-                        ll = int(math.isqrt(lm))
-                        f_ae = self.pfunc_ae[key]
-                        base, per_l = self.pfunc_ps[key]
-                        f_ps = per_l.get(ll, base)
-                        val += cy[lm] * float(
-                            (wk * f_ae[: self.kkbeta]
-                             * vh_saved["ae"][: self.kkbeta, lm]).sum()
-                            + (f_ae * gx_saved["ae"][isp][:, lm]).sum()
-                        )
-                        val -= cy[lm] * float(
-                            (wk * f_ps[: self.kkbeta]
-                             * vh_saved["ps"][: self.kkbeta, lm]).sum()
-                            + (f_ps * gx_saved["ps"][isp][:, lm]).sum()
-                        )
-                    ddd[a, b] = ddd[b, a] = val
-            ddds.append(torch.as_tensor(ddd, dtype=torch.float64))
+        rhos = [self._to_real_t(m) for m in (rho_ij if spin else [rho_ij])]
+        with torch.enable_grad():
+            leaves = [m.clone().requires_grad_(True) for m in rhos]
+            e = self.e1c_t(leaves)
+            gs = torch.autograd.grad(e, leaves)
+        e_tot = float(e.detach())
+        ddds = [g.detach() for g in gs]
         return (e_tot, ddds) if spin else (e_tot, ddds[0])
