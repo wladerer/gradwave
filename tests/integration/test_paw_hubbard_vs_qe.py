@@ -60,3 +60,27 @@ def test_paw_hubbard_vs_qe():
                    max_iter=50, hubbard=[HubbardManifold(species=0, l=1, u=0.0)])
     assert abs(float(ru0["energies"].free_energy)
                - float(r0["energies"].free_energy)) < 1e-10
+
+
+@pytest.mark.slow
+def test_paw_hubbard_forces_vs_qe():
+    """+U-PAW forces: E_U(tau) in-graph (phi phases + beta phases inside the
+    S-dressing, one autograd backward). Observed 1.2e-5 eV/A on ~0.9 eV/A
+    components vs QE; internal FD agrees at the truncation floor (4e-4 at
+    ecut 20, d=0.004 A)."""
+    from gradwave.postscf.paw_forces import forces_uspp
+
+    torch.set_num_threads(8)
+    ref = json.loads(
+        (FIX / "si_paw_hubbard_force_ci" / "reference.json").read_text())
+    paw = parse_upf_paw(FIX / "pseudos" / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
+    pos = np.array([[0.0, 0.0, 0.0], [1.4075, 1.3175, 1.3775]])
+    system = setup_uspp(SI_CELL, pos, [0, 0], [paw], ecut=45 * RY,
+                        kmesh=(2, 2, 2), ecutrho=180 * RY,
+                        fft_shape=ref["fft_dims"])
+    r = scf_uspp(system, PBE(), etol=1e-10, rhotol=1e-9, verbose=False,
+                 max_iter=50, hubbard=[HubbardManifold(species=0, l=1, u=2.0)])
+    assert r["converged"]
+    f = forces_uspp(r, PBE()).cpu().numpy()
+    qe = np.array(ref["forces_eV_A"])
+    assert np.abs(f - qe).max() < 1e-3, np.abs(f - qe).max()

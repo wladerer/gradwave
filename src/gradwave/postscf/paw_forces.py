@@ -104,6 +104,16 @@ def forces_uspp(res: dict, xc, remove_net: bool = True) -> torch.Tensor:
     phase_arg = system.g_sphere @ pos.T
     phases = torch.exp(torch.complex(torch.zeros_like(phase_arg), phase_arg))
 
+    # DFT+U: E_U(τ) joins the τ-differentiable energy as the explicit
+    # in-graph n(τ) expression — autograd carries the φ phases AND the β
+    # phases inside the S-dressing
+    hub_sites = res.get("hub_sites")
+    hub_phi_free = None
+    if hub_sites is not None:
+        from gradwave.scf.uspp_hubbard import hubbard_e_channel, phi_free_per_k
+
+        hub_phi_free = phi_free_per_k(system, hub_sites)
+
     e = ewald_energy(pos, system.charges, grid.cell)
     q = system.q_full.to(CDTYPE)
     rho_chans = []
@@ -132,6 +142,12 @@ def forces_uspp(res: dict, xc, remove_net: bool = True) -> torch.Tensor:
         if is_paw:
             for a in range(len(system.atom_slices)):
                 e = e + (ddd_atoms[a][isp].to(CDTYPE) * rho_ij[a]).sum().real
+        if hub_sites is not None:
+            mult = 2.0 if nspin == 1 else 1.0
+            e = e + mult * hubbard_e_channel(
+                hub_sites, hub_phi_free, system.q_full, pos, system.spheres,
+                projs, coeffs, becps, occ, kw,
+                occ_scale=(0.5 if nspin == 1 else 1.0))
 
     rho_tot = sum(rho_chans)
     rho_g = r_to_g(rho_tot.to(CDTYPE))

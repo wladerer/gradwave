@@ -32,6 +32,10 @@ _MINUS_I_POW = [1.0 + 0.0j, -1.0j, -1.0 + 0.0j, 1.0j, 1.0 + 0.0j]  # (−i)^L, L
 
 def stress_uspp(res: dict, xc) -> torch.Tensor:
     """σ (3,3) [eV/Å³] for a converged scf_uspp result (nspin 1 or 2)."""
+    if res.get("hub_sites") is not None:
+        raise NotImplementedError(
+            "stress with DFT+U on USPP/PAW not implemented (the strained "
+            "S-dressed orbital projections are missing)")
     system = res["system"]
     eps = torch.zeros(3, 3, dtype=torch.float64, requires_grad=True,
                       device=system.positions.device)

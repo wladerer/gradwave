@@ -27,6 +27,10 @@ def bands_uspp(res: dict, xc, k_frac_list, nbands: int | None = None,
     """Eigenvalues (nk, nbands) [eV] at the given fractional k-points."""
     if res.get("nspin", 1) != 1:
         raise NotImplementedError("USPP bands for nspin=2 not implemented yet")
+    if res.get("hub_sites") is not None:
+        raise NotImplementedError(
+            "USPP bands with DFT+U not implemented (V_U missing from the "
+            "frozen band Hamiltonian)")
     system = res["system"]
     grid = system.grid
     vol = grid.volume
