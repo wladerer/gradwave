@@ -114,7 +114,9 @@ def test_paw_spin_vs_qe():
     e = res["energies"]
     dF = abs(float(e.free_energy) - ref["etot_Ry"] * RY) * 1000
     assert dF < 5.0, f"F off by {dF:.2f} meV"
-    assert abs(res["mag_total"] - ref["mag_muB"]) < 0.02
+    # ±m branches are degenerate without SOC — which one the SCF lands on
+    # depends on the mixing trajectory; gate the magnitude
+    assert abs(abs(res["mag_total"]) - ref["mag_muB"]) < 0.02
     assert abs(float(e.onecenter) / RY - ref["onecenter_Ry"]) < 0.005
 
 

@@ -30,6 +30,8 @@ class PulayMixer:
         check_g0: bool = True,
         kerker_mask=None,  # per-component bool; None → kerker applies to all
         step_scale=None,  # per-component multiplier on the damped step (None → 1)
+        coeff_cap: float | None = None,  # ℓ₁ bound on DIIS coefficients (see step())
+        step_cap: float | None = None,  # ‖Δρ‖ bound in damped-step units (see step())
     ):
         self.check_g0 = check_g0
         self.kerker_mask = kerker_mask
@@ -39,6 +41,8 @@ class PulayMixer:
         self.history = history
         self.kerker = kerker
         self.q0 = q0
+        self.coeff_cap = coeff_cap
+        self.step_cap = step_cap
         self._rho_in: list[torch.Tensor] = []
         self._res: list[torch.Tensor] = []
 
@@ -126,6 +130,34 @@ class PulayMixer:
                 continue
             break
 
+        # Σc=1 bounds nothing: near-parallel early residuals admit large ±c
+        # whose ρ_opt extrapolates far outside the region where the SCF map
+        # is linear (Ni₂ spin: first DIIS step sent |R| 37→615). Blend toward
+        # the pure newest-point step (c = e_last, still Σc=1) until ‖c‖₁ fits.
+        # OPT-IN (default None): stiff metals NEED >cap quasi-Newton steps —
+        # capped, FM Ni's on-site mode (damped gain > 1) limit-cycles forever.
+        cnorm = coeff.abs().sum()
+        if self.coeff_cap is not None and cnorm > self.coeff_cap:
+            theta = (self.coeff_cap - 1.0) / (cnorm - 1.0)
+            e_last = torch.zeros_like(coeff)
+            e_last[-1] = 1.0
+            coeff = theta * coeff + (1.0 - theta) * e_last
+
         rho_opt = sum(c * r for c, r in zip(coeff, self._rho_in, strict=True))
         res_opt = sum(c * r for c, r in zip(coeff, self._res, strict=True))
-        return rho_opt + self._precondition(res_opt)
+        rho_new = rho_opt + self._precondition(res_opt)
+
+        # step-norm trust region: the coefficient cap bounds the extrapolation
+        # weights, but ‖Δρ‖ can still leave the linear-response region when
+        # the residual itself is large (FM metals: the magnetization channel
+        # is locally EXPANSIVE near a wrong moment — Stoner curvature — so
+        # early residuals grow until DIIS learns the Jacobian; unbounded steps
+        # blow up first). Scale the step to step_cap × the damped-step norm —
+        # the scale empirically inside the linear region.
+        if self.step_cap is not None:
+            step = rho_new - rho_in
+            lim = self.step_cap * torch.linalg.norm(self._precondition(res))
+            snorm = torch.linalg.norm(step)
+            if snorm > lim:
+                rho_new = rho_in + step * (lim / snorm)
+        return rho_new

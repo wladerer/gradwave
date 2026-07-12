@@ -1,0 +1,34 @@
+&control
+  calculation = 'scf'
+  prefix = 'o2'
+  pseudo_dir = '.'
+  outdir = './tmp'
+  verbosity = 'high'
+  tstress = .true.
+  tprnfor = .true.
+/
+&system
+  ibrav = 1
+  celldm(1) = 11.338356810276
+  nat = 2
+  ntyp = 1
+  ecutwfc = 50.0
+  ecutrho = 400.0
+  occupations = 'smearing'
+  smearing = 'gaussian'
+  degauss = 0.01
+  nbnd = 10
+  nspin = 2
+  starting_magnetization(1) = 0.5
+/
+&electrons
+  conv_thr = 1.0d-10
+  mixing_beta = 0.3
+/
+ATOMIC_SPECIES
+O 15.999 O.pbe-n-kjpaw_psl.1.0.0.UPF
+ATOMIC_POSITIONS angstrom
+O 3.0000 3.0000 2.4000
+O 3.0600 3.0000 3.7500
+K_POINTS automatic
+1 1 1 0 0 0

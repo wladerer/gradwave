@@ -5,20 +5,24 @@ Per PAW atom with occupation matrix ρ_ij (m-expanded becsum):
     E_1c = Σ_{AE,PS} sgn · ( E_H[ρ_LM] + E_xc[ρ_LM, ρ_core] ),  sgn = +1 AE, −1 PS
     ρ_LM(r) = Σ_ij ρ_ij c^{LM}_{lm_i,lm_j} · pfunc_ij(r)        (r² included)
         AE: pfunc = u_i u_j;  PS: ũ_i ũ_j + q^L_ij(r)           (both zero past r_aug)
-    ddd_ij = ∂E_1c/∂ρ_ij = Σ sgn Σ_LM c^{LM}_ij ∫ pfunc^L_ij (v_H + v_xc)_LM dr
+    ddd_ij = ∂E_1c/∂ρ_ij  (EXACT for the quadrature actually summed)
 
 ddd feeds back into the SCF Hamiltonian (added to the screened D in
 scf/uspp.py); the energy is added to the plane-wave total. Radial Hartree per
-LM channel is the multipole integral solution; XC is evaluated pointwise on a
-QE-convention angular grid (Gauss–Legendre × uniform φ, lmax = 3·l_max_rho
-plus 2 extra projection l's for GGA) with gradients assembled in spherical
-components (∂_r via QE's 3-point nonuniform stencil, angular via ∂θ/∂φ tables
-of the real harmonics). All in numpy/torch float64 per atom type — setup-layer
-speed is irrelevant (meshes ~1100 × ~120 directions).
+LM channel is the multipole integral solution (its ddd is the exact
+derivative — self-adjoint). XC is evaluated pointwise on a QE-convention
+angular grid (Gauss–Legendre × uniform φ, lmax = 3·l_max_rho plus 2 extra
+l's, matching QE's grid) with gradients in spherical components (∂_r via
+QE's 3-point nonuniform stencil, angular via ∂θ/∂φ tables of the real
+harmonics); the XC ddd comes from autograd through that quadrature
+(_xc_exact), NOT from QE's divergence-form v_xc — integration by parts on
+the lm-truncated expansion makes ddd ≠ ∂E/∂ρ_ij at the 0.05–1% level, which
+broke force↔energy consistency at 1e-2 eV/Å on spin O₂ (QE carries the same
+inconsistency; energies are unaffected). All float64 per atom type —
+setup-layer speed is irrelevant (meshes ~1100 × ~120 directions).
 
 Conventions verified by unit tests: radial Poisson vs an analytic Gaussian
-shell, ∇ρ and the divergence identity ∫div F = surface term on synthetic
-band-limited fields, and (the real gate) QE's printed one-center energy.
+shell, QE's printed one-center energy, and ddd == FD(E_1c) in becsum space.
 """
 
 from __future__ import annotations
@@ -30,7 +34,6 @@ import torch
 
 from gradwave.constants import E2
 from gradwave.core.gaunt import real_gaunt_table, ylm_np
-from gradwave.pseudo.radial import simpson
 from gradwave.pseudo.radial_torch import simpson_weights
 from gradwave.pseudo.upf_paw import PAWData
 
@@ -38,19 +41,6 @@ from gradwave.pseudo.upf_paw import PAWData
 LM_FACT = 3  # max l for the non-GGA angular grid: LM_FACT · lmax_rho
 LM_FACT_X = 3  # same, GGA
 XLM = 2  # extra projection l's for the GGA divergence
-
-
-def _radial_gradient(f: np.ndarray, r: np.ndarray) -> np.ndarray:
-    """QE radial_gradient iflag=0: 3-point nonuniform stencil; gf[-1]=0,
-    gf[0] linearly extrapolated. f (..., n)."""
-    gf = np.zeros_like(f)
-    rp = r[2:] - r[1:-1]
-    rm = r[:-2] - r[1:-1]
-    gf[..., 1:-1] = (
-        rp**2 * (f[..., :-2] - f[..., 1:-1]) - rm**2 * (f[..., 2:] - f[..., 1:-1])
-    ) / (rp * rm * (rp - rm))
-    gf[..., 0] = gf[..., 1] + (gf[..., 2] - gf[..., 1]) * (r[0] - r[1]) / (r[2] - r[1])
-    return gf
 
 
 def _cumint(g: np.ndarray) -> np.ndarray:
@@ -225,119 +215,81 @@ class OneCenter:
         """(mesh, nx) → (mesh, nlm) projection with the angular weights."""
         return f_rad @ (self.ww[:, None] * self.ylm[:, :nlm])
 
-    def xc_terms(self, rho_lm: np.ndarray, core: np.ndarray):
-        """(v_lm (mesh, l2) [eV], E_xc [eV]) on the angular grid (LDA + GGA)."""
-        r2 = self.r**2
-        rm2 = np.where(r2 > 0, 1.0 / r2, 0.0)
-        rho_rad = self._lm2rad(rho_lm)  # (mesh, nx), r² included
-        rho_full = rho_rad * rm2[:, None] + core[:, None]  # true density
+    # ---------- exact XC (autograd through the quadrature) ----------
 
-        rho_t = torch.tensor(rho_full.reshape(-1), requires_grad=True)
+    def _torch_tables(self):
+        if not hasattr(self, "_tt"):
+            def t(a):
+                return torch.as_tensor(np.ascontiguousarray(a),
+                                       dtype=torch.float64)
+
+            r = self.r
+            self._tt = dict(
+                ylm=t(self.ylm[:, : self.l2]),
+                dylmt=t(self.dylmt[:, : self.l2]),
+                dylmp=t(self.dylmp[:, : self.l2]),
+                rm2=t(np.where(r > 0, r**-2.0, 0.0)),
+                rm3=t(np.where(r > 0, r**-3.0, 0.0)),
+                wq=t(self.w_simp * r**2),  # radial quadrature incl. r²
+                ww=t(self.ww),
+                rp=t(r[2:] - r[1:-1]),
+                rm_=t(r[:-2] - r[1:-1]),
+                c0=(r[0] - r[1]) / (r[2] - r[1]),
+                core_ae=t(self.core_ae),
+                core_ps=t(self.core_ps),
+            )
+        return self._tt
+
+    def _rgrad_t(self, f: torch.Tensor, tt) -> torch.Tensor:
+        """QE radial_gradient iflag=0 stencil, torch, f (mesh, nx)."""
+        rp = tt["rp"][:, None]
+        rm = tt["rm_"][:, None]
+        mid = (rp**2 * (f[:-2] - f[1:-1]) - rm**2 * (f[2:] - f[1:-1])) / (
+            rp * rm * (rp - rm))
+        g0 = mid[0] + (mid[1] - mid[0]) * tt["c0"]
+        return torch.cat([g0[None], mid, torch.zeros_like(f[:1])], dim=0)
+
+    def _xc_exact(self, rho_lms: list, what: str):
+        """(E_xc [eV], [dE_xc/dρ_lm (mesh, l2) numpy] per spin) with the
+        derivative EXACT for the quadrature actually summed — autograd through
+        density and gradient chains, no integration by parts. (The divergence
+        form of v_xc is only δE/δρ up to lm-truncation error; using it as ddd
+        broke force↔energy consistency at 1e-2 eV/Å on spin O₂.)"""
+        tt = self._torch_tables()
+        spin = len(rho_lms) == 2
+        core = tt["core_ae"] if what == "ae" else tt["core_ps"]
+        cfrac = 0.5 if spin else 1.0
         gga = getattr(self.xc, "needs_gradient", False)
-        if gga:
-            # spherical gradient components
-            dr = _radial_gradient(rho_full.T, self.r).T  # (mesh, nx)
-            gth = (rho_lm @ self.dylmt[:, : self.l2].T) * (rm2 * np.where(
-                self.r > 0, 1.0 / self.r, 0.0))[:, None]
-            gph = (rho_lm @ self.dylmp[:, : self.l2].T) * (rm2 * np.where(
-                self.r > 0, 1.0 / self.r, 0.0))[:, None]
-            grad = np.stack([dr, gph, gth], axis=0)  # (3, mesh, nx) QE order r,φ,θ
-            sigma_np = (grad**2).sum(axis=0)
-            sigma_t = torch.tensor(sigma_np.reshape(-1), requires_grad=True)
-            e_density = self.xc.energy_density(rho_t, sigma_t)
-        else:
-            sigma_t = None
-            e_density = self.xc.energy_density(rho_t)
-        e_sum = e_density.sum()
-        grads = torch.autograd.grad(e_sum, [rho_t] + ([sigma_t] if gga else []))
-        v1 = grads[0].detach().numpy().reshape(self.mesh, self.nx)
-        e_pt = e_density.detach().numpy().reshape(self.mesh, self.nx)
 
-        # energy: Σ_ix ww ∫ e_xc(r,ix) r² dr
-        e_xc = float(self.ww @ simpson((e_pt * r2[:, None]).T, self.rab))
-        v_lm = self._rad2lm(v1, self.l2)
-
-        if gga:
-            v2 = 2.0 * grads[1].detach().numpy().reshape(self.mesh, self.nx)
-            # h = 2 ∂e/∂σ ∇ρ, r² included (QE convention); project to the FULL
-            # lm_max (lmax + ladd) — that is what the extra XLM l's are for
-            h = v2[None] * grad * r2[None, :, None]  # (3, mesh, nx)
-            h_lm = np.stack([
-                hc @ (self.ww[:, None] * self.ylm) for hc in h
-            ])  # (3, mesh, lm_max)
-            # divergence (QE PAW_divergence): angular part on directions
-            aux = np.zeros((self.mesh, self.nx))
-            for lm in range(self.lm_max):
-                aux += np.outer(h_lm[1, :, lm], self.dylmp[:, lm])
-                aux += np.outer(
-                    h_lm[2, :, lm],
-                    self.dylmt[:, lm] * self.sin_th + 2.0 * self.ylm[:, lm] * self.cos_th,
-                )
-            div_lm = aux @ (self.ww[:, None] * self.ylm[:, : self.l2])
-            rm3 = np.where(self.r > 0, self.r ** -3.0, 0.0)
-            div_lm = div_lm * rm3[:, None]
-            for lm in range(self.l2):
-                div_lm[:, lm] += _radial_gradient(h_lm[0, :, lm], self.r) * rm2
-            v_lm = v_lm - div_lm
-        return v_lm, e_xc
-
-    def xc_terms_spin(self, rho_lm_s: list, core: np.ndarray):
-        """Spin-polarized XC: (v_lm per spin [2×(mesh,l2)], E_xc). The core is
-        split half/half between the channels (QE convention). GGA vector
-        fields: h_σ = (2 e_{σσ} ∇ρ_σ + e_{tt} ∇ρ_tot)·r²."""
-        r2 = self.r**2
-        rm2 = np.where(r2 > 0, 1.0 / r2, 0.0)
-        rm1 = np.where(self.r > 0, 1.0 / self.r, 0.0)
-        rho_full, grads_np = [], []
-        for rl in rho_lm_s:
-            rho_rad = self._lm2rad(rl)
-            rho_full.append(rho_rad * rm2[:, None] + 0.5 * core[:, None])
-            dr = _radial_gradient(rho_full[-1].T, self.r).T
-            gth = (rl @ self.dylmt[:, : self.l2].T) * (rm2 * rm1)[:, None]
-            gph = (rl @ self.dylmp[:, : self.l2].T) * (rm2 * rm1)[:, None]
-            grads_np.append(np.stack([dr, gph, gth], axis=0))
-        ru = torch.tensor(rho_full[0].reshape(-1), requires_grad=True)
-        rd = torch.tensor(rho_full[1].reshape(-1), requires_grad=True)
-        gga = getattr(self.xc, "needs_gradient", False)
-        if gga:
-            g_tot = grads_np[0] + grads_np[1]
-            s_uu = torch.tensor((grads_np[0] ** 2).sum(0).reshape(-1), requires_grad=True)
-            s_dd = torch.tensor((grads_np[1] ** 2).sum(0).reshape(-1), requires_grad=True)
-            s_tt = torch.tensor((g_tot**2).sum(0).reshape(-1), requires_grad=True)
-            e_density = self.xc.energy_density(ru, rd, s_uu, s_dd, s_tt)
-            leaves = [ru, rd, s_uu, s_dd, s_tt]
-        else:
-            e_density = self.xc.energy_density(ru, rd)
-            leaves = [ru, rd]
-        g = torch.autograd.grad(e_density.sum(), leaves)
-        e_pt = e_density.detach().numpy().reshape(self.mesh, self.nx)
-        e_xc = float(self.ww @ simpson((e_pt * r2[:, None]).T, self.rab))
-
-        v_lms = []
-        for isp in range(2):
-            v1 = g[isp].detach().numpy().reshape(self.mesh, self.nx)
-            v_lm = v1 @ (self.ww[:, None] * self.ylm[:, : self.l2])
+        leaves, dens, grads = [], [], []
+        for rl_np in rho_lms:
+            rl = torch.as_tensor(rl_np, dtype=torch.float64).requires_grad_(True)
+            leaves.append(rl)
+            rho_rad = rl @ tt["ylm"].T  # (mesh, nx), r² included
+            dens.append(rho_rad * tt["rm2"][:, None] + cfrac * core[:, None])
             if gga:
-                e_ss = g[2 + isp].detach().numpy().reshape(self.mesh, self.nx)
-                e_tt = g[4].detach().numpy().reshape(self.mesh, self.nx)
-                h = (2.0 * e_ss[None] * grads_np[isp] + e_tt[None] * g_tot) * r2[None, :, None]
-                h_lm = np.stack([hc @ (self.ww[:, None] * self.ylm) for hc in h])
-                aux = np.zeros((self.mesh, self.nx))
-                for lm in range(self.lm_max):
-                    aux += np.outer(h_lm[1, :, lm], self.dylmp[:, lm])
-                    aux += np.outer(
-                        h_lm[2, :, lm],
-                        self.dylmt[:, lm] * self.sin_th
-                        + 2.0 * self.ylm[:, lm] * self.cos_th,
-                    )
-                div_lm = aux @ (self.ww[:, None] * self.ylm[:, : self.l2])
-                rm3 = np.where(self.r > 0, self.r ** -3.0, 0.0)
-                div_lm = div_lm * rm3[:, None]
-                for lm in range(self.l2):
-                    div_lm[:, lm] += _radial_gradient(h_lm[0, :, lm], self.r) * rm2
-                v_lm = v_lm - div_lm
-            v_lms.append(v_lm)
-        return v_lms, e_xc
+                dr = self._rgrad_t(dens[-1], tt)
+                gth = (rl @ tt["dylmt"].T) * tt["rm3"][:, None]
+                gph = (rl @ tt["dylmp"].T) * tt["rm3"][:, None]
+                grads.append(torch.stack([dr, gth, gph]))
+        if spin:
+            if gga:
+                g_tot = grads[0] + grads[1]
+                e = self.xc.energy_density(
+                    dens[0].reshape(-1), dens[1].reshape(-1),
+                    (grads[0] ** 2).sum(0).reshape(-1),
+                    (grads[1] ** 2).sum(0).reshape(-1),
+                    (g_tot**2).sum(0).reshape(-1))
+            else:
+                e = self.xc.energy_density(dens[0].reshape(-1),
+                                           dens[1].reshape(-1))
+        else:
+            sig = (grads[0] ** 2).sum(0).reshape(-1) if gga else None
+            e = self.xc.energy_density(dens[0].reshape(-1), sig)
+        e_xc = (e.reshape(self.mesh, self.nx) * tt["wq"][:, None]
+                * tt["ww"][None, :]).sum()
+        gs = torch.autograd.grad(e_xc, leaves)
+        return float(e_xc.detach()), [g.numpy() for g in gs]
 
     # ---------- per-atom driver ----------
 
@@ -351,16 +303,15 @@ class OneCenter:
         rhos = ([m.detach().cpu().numpy().real for m in rho_ij]
                 if spin else [rho_ij.detach().cpu().numpy().real])
         e_tot = 0.0
-        v_saved = {}  # what → list of per-spin (v_H + v_xc)_lm
-        for what, core, sgn in (("ae", self.core_ae, 1.0), ("ps", self.core_ps, -1.0)):
+        # what → (v_H)_lm (potential, spin-shared) and per-spin dE_xc/dρ_lm
+        # (weighted derivative — quadrature weights already inside)
+        vh_saved, gx_saved = {}, {}
+        for what, sgn in (("ae", 1.0), ("ps", -1.0)):
             rls = [self.rho_lm(r, what) for r in rhos]
             v_h, e_h = self.hartree(sum(rls))
-            if spin:
-                v_xs, e_x = self.xc_terms_spin(rls, core)
-                v_saved[what] = [v_h + v_x for v_x in v_xs]
-            else:
-                v_x, e_x = self.xc_terms(rls[0], core)
-                v_saved[what] = [v_h + v_x]
+            e_x, gxs = self._xc_exact(rls, what)
+            vh_saved[what] = v_h
+            gx_saved[what] = gxs
             e_tot += sgn * (e_h + e_x)
 
         wk = simpson_weights(self.rab[: self.kkbeta])
@@ -376,14 +327,18 @@ class OneCenter:
                     val = 0.0
                     for lm in nz:
                         ll = int(math.isqrt(lm))
-                        f_ae = self.pfunc_ae[key][: self.kkbeta]
+                        f_ae = self.pfunc_ae[key]
                         base, per_l = self.pfunc_ps[key]
-                        f_ps = per_l.get(ll, base)[: self.kkbeta]
+                        f_ps = per_l.get(ll, base)
                         val += cy[lm] * float(
-                            (wk * f_ae * v_saved["ae"][isp][: self.kkbeta, lm]).sum()
+                            (wk * f_ae[: self.kkbeta]
+                             * vh_saved["ae"][: self.kkbeta, lm]).sum()
+                            + (f_ae * gx_saved["ae"][isp][:, lm]).sum()
                         )
                         val -= cy[lm] * float(
-                            (wk * f_ps * v_saved["ps"][isp][: self.kkbeta, lm]).sum()
+                            (wk * f_ps[: self.kkbeta]
+                             * vh_saved["ps"][: self.kkbeta, lm]).sum()
+                            + (f_ps * gx_saved["ps"][isp][:, lm]).sum()
                         )
                     ddd[a, b] = ddd[b, a] = val
             ddds.append(torch.as_tensor(ddd, dtype=torch.float64))
