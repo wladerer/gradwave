@@ -507,6 +507,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                        check_g0=False, step_scale=step_scale)
     coeffs = [[None] * nk for _ in range(nspin)]
     e_free_prev, history, converged = None, [], False
+    rescue_count, seed_salt = 0, 0  # solver-blowup rescue state (task #55)
+    last_reset_it = -10  # trust-region reset cooldown (task #55)
     occ_s = entropy_term = eigs_s = mu = None
     energies = None
 
@@ -612,7 +614,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                     x0 = torch.zeros(nk, nb + 4, bk.npw_max, dtype=CDTYPE,
                                      device=dev)
                     for ik, sph in enumerate(system.spheres):
-                        gen = torch.Generator().manual_seed(1234 + ik + 7777 * isp)
+                        gen = torch.Generator().manual_seed(
+                            1234 + ik + 7777 * isp + seed_salt)
                         xk = torch.randn(nb + 4, sph.npw, generator=gen,
                                          dtype=torch.float64) \
                             + 1j * torch.randn(nb + 4, sph.npw, generator=gen,
@@ -641,7 +644,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                           hub_d=hub_d)
                 if coeffs[isp][ik] is None:
                     # seed on CPU (device-independent determinism), then move
-                    gen = torch.Generator().manual_seed(1234 + ik + 7777 * isp)
+                    gen = torch.Generator().manual_seed(
+                        1234 + ik + 7777 * isp + seed_salt)
                     x0 = torch.randn(nb + 4, sph.npw, generator=gen, dtype=torch.float64) \
                         + 1j * torch.randn(nb + 4, sph.npw, generator=gen,
                                            dtype=torch.float64)
@@ -686,9 +690,9 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         # into two equal channels)
         e_hub = torch.zeros((), dtype=RDTYPE, device=dev)
         if hub is not None:
-            def _padded_coeffs(isp):
+            def _padded_coeffs(isp, _cb=coeffs_b):
                 if batched:
-                    return coeffs_b[isp]
+                    return _cb[isp]
                 cp = torch.zeros(nk, nb, bk.npw_max, dtype=CDTYPE, device=dev)
                 for ik, sph in enumerate(system.spheres):
                     cp[ik, :, :sph.npw] = coeffs[isp][ik]
@@ -795,6 +799,26 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                         for isp in range(nspin)]
             return torch.cat(vecs + bec_flat)
 
+        # solver-blowup rescue: a warm-started Davidson can deterministically
+        # return states ~10² eV up from a CONVERGED-quality density (F falls
+        # off a cliff, |Δρ| freezes, mixer resets change nothing — task #55
+        # fingerprint). Detect the jump, throw away the poisoned warm starts,
+        # and re-solve from salted fresh seeds WITHOUT feeding the garbage
+        # into the mixer.
+        if (e_free_prev is not None and history
+                and abs(e_free - e_free_prev) > 5.0
+                and history[-1]["res"] < 1e-2 and rescue_count < 2):
+            rescue_count += 1
+            seed_salt = 104729 * rescue_count
+            coeffs_b = [None] * nspin
+            for isp in range(nspin):
+                coeffs[isp] = [None] * nk
+            if verbose:
+                print(f"  USPP {it:3d}  [solver blowup: dE = "
+                      f"{abs(e_free - e_free_prev):.1f} eV from residual "
+                      f"{history[-1]['res']:.1e} — reseeding eigensolver]")
+            continue
+
         rho_in_vec = to_mix(rho_s, rho_ij_mix)
         rho_out_vec = to_mix(rho_out_s, rho_ij_s)
         res_norm = float(
@@ -825,10 +849,20 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         # trust region: a residual jump means the DIIS history is lying about
         # the curvature (typical of the wild first USPP/PAW iterations from
         # the SAD + atomic-becsum start); discard it and restart from a plain
-        # damped step rather than extrapolating into nonsense
-        best_res = min(h["res"] for h in history)
-        if it > 1 and res_norm > trust_factor * best_res:
+        # damped step rather than extrapolating into nonsense.
+        # WINDOWED baseline + cooldown (task #55): with an all-time best, one
+        # touch of the eigensolver noise floor poisons the criterion forever —
+        # every subsequent iteration resets the mixer, DIIS never re-learns,
+        # and the SCF degenerates into pure damped iteration, which DIVERGES
+        # geometrically (×2.5/iter observed) for gain>1 sloshing modes and
+        # ends 148 eV up in a frozen limit cycle. Recent-best forgets old
+        # floors; the cooldown stops a reset that didn't help from re-firing
+        # before DIIS has curvature again.
+        best_res = min(h["res"] for h in history[-10:])
+        if (it > 1 and res_norm > trust_factor * best_res
+                and it - last_reset_it >= 5):
             mixer.reset()
+            last_reset_it = it
             if verbose:
                 print(f"  USPP {it:3d}  [mixer reset: residual jumped "
                       f"{res_norm:.2e} > {trust_factor:g}x best {best_res:.2e}]")
