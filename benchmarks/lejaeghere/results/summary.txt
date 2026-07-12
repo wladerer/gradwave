@@ -1,0 +1,10 @@
+case  code    V0 (Å³/at)  B0 (GPa)     B1  Δ_wien2k    Δ_qe  (meV/atom)
+si    gw         20.4511     89.10  4.329     0.061  0.0172   [vs QE: V0 20.4502, B0 89.11, B1 4.329; offset +0.267, pt-wise 0.0308 meV/at]
+si    wien2k     20.4530     88.55  4.310
+ge    gw         23.9210     58.38  4.393     0.096  0.0176   [vs QE: V0 23.9196, B0 58.39, B1 4.401; offset +0.132, pt-wise 0.0311 meV/at]
+ge    wien2k     23.9148     59.13  4.990
+al    gw         16.4770     78.60  4.728     0.049  0.0140   [vs QE: V0 16.4762, B0 78.61, B1 4.727; offset +0.178, pt-wise 0.0254 meV/at]
+al    wien2k     16.4796     78.08  4.570
+cu    gw         11.9711    141.20  5.002     0.638  0.0157   [vs QE: V0 11.9706, B0 141.22, B1 5.002; offset +0.089, pt-wise 0.0288 meV/at]
+cu    wien2k     11.9511    141.34  4.860
+ni    -- gradwave data incomplete (0/7) --

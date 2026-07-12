@@ -1,0 +1,32 @@
+&control
+  calculation = 'scf'
+  prefix = 'si5'
+  outdir = './tmp'
+  pseudo_dir = '/home/wladerer/github/QSuite/tests/fixtures/qe/pseudos'
+  verbosity = 'low'
+/
+&system
+  ibrav = 0
+  nat = 2
+  ntyp = 1
+  ecutwfc = 45.0
+  ecutrho = 180.0
+  nr1 = 32
+  nr2 = 32
+  nr3 = 32
+  occupations = 'fixed'
+/
+&electrons
+  conv_thr = 1.0d-10
+/
+ATOMIC_SPECIES
+  Si  28.085  Si.pbe-n-kjpaw_psl.1.0.0.UPF
+CELL_PARAMETERS angstrom
+  0.000000000000  2.770746452637  2.770746452637
+  2.770746452637  0.000000000000  2.770746452637
+  2.770746452637  2.770746452637  0.000000000000
+ATOMIC_POSITIONS crystal
+  Si  0.0000000000  0.0000000000  0.0000000000
+  Si  0.2500000000  0.2500000000  0.2500000000
+K_POINTS automatic
+  8 8 8 0 0 0

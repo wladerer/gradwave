@@ -1,0 +1,36 @@
+&control
+  calculation = 'scf'
+  prefix = 'ni0'
+  outdir = './tmp'
+  pseudo_dir = '/home/wladerer/github/QSuite/tests/fixtures/qe/pseudos'
+  verbosity = 'low'
+/
+&system
+  ibrav = 0
+  nat = 1
+  ntyp = 1
+  ecutwfc = 75.0
+  ecutrho = 480.0
+  nr1 = 35
+  nr2 = 35
+  nr3 = 35
+  occupations = 'smearing'
+  smearing = 'gaussian'
+  degauss = 0.0100000000
+  nbnd = 14
+  nspin = 2
+  starting_magnetization(1) = 0.60
+/
+&electrons
+  conv_thr = 1.0d-10
+/
+ATOMIC_SPECIES
+  Ni  58.693  Ni.pbe-spn-kjpaw_psl.1.0.0.UPF
+CELL_PARAMETERS angstrom
+  0.000000000000  1.723230363306  1.723230363306
+  1.723230363306  0.000000000000  1.723230363306
+  1.723230363306  1.723230363306  0.000000000000
+ATOMIC_POSITIONS crystal
+  Ni  0.0000000000  0.0000000000  0.0000000000
+K_POINTS automatic
+  12 12 12 0 0 0

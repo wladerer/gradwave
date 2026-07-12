@@ -1,0 +1,35 @@
+&control
+  calculation = 'scf'
+  prefix = 'ge0'
+  outdir = './tmp'
+  pseudo_dir = '/home/wladerer/github/QSuite/tests/fixtures/qe/pseudos'
+  verbosity = 'low'
+/
+&system
+  ibrav = 0
+  nat = 2
+  ntyp = 1
+  ecutwfc = 45.0
+  ecutrho = 240.0
+  nr1 = 40
+  nr2 = 40
+  nr3 = 40
+  occupations = 'smearing'
+  smearing = 'gaussian'
+  degauss = 0.0020000000
+  nbnd = 18
+/
+&electrons
+  conv_thr = 1.0d-10
+/
+ATOMIC_SPECIES
+  Ge  72.63  Ge.pbe-dn-kjpaw_psl.1.0.0.UPF
+CELL_PARAMETERS angstrom
+  0.000000000000  2.822267679522  2.822267679522
+  2.822267679522  0.000000000000  2.822267679522
+  2.822267679522  2.822267679522  0.000000000000
+ATOMIC_POSITIONS crystal
+  Ge  0.0000000000  0.0000000000  0.0000000000
+  Ge  0.2500000000  0.2500000000  0.2500000000
+K_POINTS automatic
+  8 8 8 0 0 0

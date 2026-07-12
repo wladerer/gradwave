@@ -1,0 +1,34 @@
+&control
+  calculation = 'scf'
+  prefix = 'al1'
+  outdir = './tmp'
+  pseudo_dir = '/home/wladerer/github/QSuite/tests/fixtures/qe/pseudos'
+  verbosity = 'low'
+/
+&system
+  ibrav = 0
+  nat = 1
+  ntyp = 1
+  ecutwfc = 35.0
+  ecutrho = 160.0
+  nr1 = 24
+  nr2 = 24
+  nr3 = 24
+  occupations = 'smearing'
+  smearing = 'gaussian'
+  degauss = 0.0100000000
+  nbnd = 8
+/
+&electrons
+  conv_thr = 1.0d-10
+/
+ATOMIC_SPECIES
+  Al  26.982  Al.pbe-n-kjpaw_psl.1.0.0.UPF
+CELL_PARAMETERS angstrom
+  0.000000000000  1.992489162301  1.992489162301
+  1.992489162301  0.000000000000  1.992489162301
+  1.992489162301  1.992489162301  0.000000000000
+ATOMIC_POSITIONS crystal
+  Al  0.0000000000  0.0000000000  0.0000000000
+K_POINTS automatic
+  16 16 16 0 0 0

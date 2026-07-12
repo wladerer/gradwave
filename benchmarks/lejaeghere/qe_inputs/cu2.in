@@ -1,0 +1,34 @@
+&control
+  calculation = 'scf'
+  prefix = 'cu2'
+  outdir = './tmp'
+  pseudo_dir = '/home/wladerer/github/QSuite/tests/fixtures/qe/pseudos'
+  verbosity = 'low'
+/
+&system
+  ibrav = 0
+  nat = 1
+  ntyp = 1
+  ecutwfc = 50.0
+  ecutrho = 280.0
+  nr1 = 27
+  nr2 = 27
+  nr3 = 27
+  occupations = 'smearing'
+  smearing = 'gaussian'
+  degauss = 0.0100000000
+  nbnd = 14
+/
+&electrons
+  conv_thr = 1.0d-10
+/
+ATOMIC_SPECIES
+  Cu  63.546  Cu.pbe-dn-kjpaw_psl.1.0.0.UPF
+CELL_PARAMETERS angstrom
+  0.000000000000  1.802469757874  1.802469757874
+  1.802469757874  0.000000000000  1.802469757874
+  1.802469757874  1.802469757874  0.000000000000
+ATOMIC_POSITIONS crystal
+  Cu  0.0000000000  0.0000000000  0.0000000000
+K_POINTS automatic
+  16 16 16 0 0 0
