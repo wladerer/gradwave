@@ -321,20 +321,29 @@ def _make_becsum_sym(sym, cell, paws, species_of_atom, slices):
 class _HkS:
     """H and S applies at one k for fixed v_eff and screened D."""
 
-    def __init__(self, sphere, shape, v_eff_r, pd: ProjectorData, p, dscr, q_full):
+    def __init__(self, sphere, shape, v_eff_r, pd: ProjectorData, p, dscr, q_full,
+                 hub_sphi=None, hub_d=None):
         self.sphere, self.shape = sphere, shape
         self.v_eff_r = v_eff_r
         self.p = p
         self.dscr = dscr.to(CDTYPE)
         self.q = q_full.to(CDTYPE)
         self.t = HBAR2_2M * sphere.kpg2
+        # DFT+U: S-dressed atomic-orbital projectors + Dudarev D (apply
+        # convention wants D^T = conj(D) for Hermitian D, like the NC path)
+        self.hub_sphi = hub_sphi
+        self.hub_d = hub_d
 
     def h(self, c):
         out = self.t * c
         psi = g_to_r(c, self.sphere.flat_idx, self.shape)
         out = out + box_to_sphere(r_to_g(psi * self.v_eff_r), self.sphere.flat_idx)
         b = becp(self.p, c)
-        return out + (b @ self.dscr) @ self.p
+        out = out + (b @ self.dscr) @ self.p
+        if self.hub_sphi is not None:
+            bh = becp(self.hub_sphi, c)
+            out = out + (bh @ self.hub_d) @ self.hub_sphi
+        return out
 
     def s(self, c):
         b = becp(self.p, c)
@@ -405,12 +414,14 @@ def davidson_gen(hs: _HkS, x0: torch.Tensor, nbands: int, tol: float,
 def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
              smearing="none", width=0.1, max_iter=60, etol=1e-8, rhotol=1e-7,
              diago_tol=1e-9, mixing_alpha=0.7, mixing_history=8,
-             trust_factor=20.0, batched=True, verbose=True):
+             trust_factor=20.0, batched=True, hubbard=None, verbose=True):
     """USPP/PAW SCF. nspin=2 takes a SpinXC functional and per-species
     start_mag (list, in [-1, 1]); mixing then runs in the (total,
     magnetization) basis with Kerker on the total for smeared systems.
     batched=True solves all k in one padded generalized-Davidson block
-    (identical eigenpairs; batched=False is the reference per-k path)."""
+    (identical eigenpairs; batched=False is the reference per-k path).
+    hubbard: list[HubbardManifold] — Dudarev DFT+U with S-metric occupation
+    matrices (QE U_projection_type='atomic' convention for USPP)."""
     grid = system.grid
     vol = grid.volume
     dev = system.positions.device
@@ -440,12 +451,26 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     projs = [projectors(pd, system.positions) for pd in system.proj_data]
     bk = p_b = None
     coeffs_b = [None] * nspin
-    if batched:
+    if batched or hubbard:
         from gradwave.core.batch import becp_b, build_batched, projectors_b
-        from gradwave.scf.uspp_batch import BatchedHS, davidson_gen_batched
 
         bk = build_batched(system.spheres, system.proj_data, device=dev)
         p_b = projectors_b(bk, system.positions)
+    if batched:
+        from gradwave.scf.uspp_batch import BatchedHS, davidson_gen_batched
+    hub = None
+    n_hub_s = None
+    if hubbard:
+        from gradwave.core.hubbard import (
+            hubbard_dmatrix,
+            hubbard_energy,
+            occupation_matrices,
+        )
+        from gradwave.scf.uspp_hubbard import build_uspp_hubbard
+
+        hub = build_uspp_hubbard(system, hubbard, bk, p_b)
+        n_hub_s = [[torch.zeros(s["dim"], s["dim"], dtype=CDTYPE, device=dev)
+                    for s in hub.sites] for _ in range(nspin)]
     vloc_g = local_potential_g(system.positions,
                                torch.tensor(system.species_of_atom, device=dev),
                                system.vloc_tables, grid.g_cart, vol)
@@ -574,9 +599,14 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
 
         eigs_s = []
         for isp in range(nspin):
+            hub_d = None
+            if hub is not None:
+                hub_d = hubbard_dmatrix(n_hub_s[isp], hub.sites, hub.nproj,
+                                        dev).conj()  # apply wants D^T
             if batched:
                 hs_b = BatchedHS(bk, shape, veff_s[isp], p_b, dscr_s[isp],
-                                 system.q_full)
+                                 system.q_full, hub_sphi=hub.sphi if hub else None,
+                                 hub_d=hub_d)
                 if coeffs_b[isp] is None:
                     # per-k CPU seeds (identical to the per-k path), padded
                     x0 = torch.zeros(nk, nb + 4, bk.npw_max, dtype=CDTYPE,
@@ -606,7 +636,9 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
             eigs_l = []
             for ik, sph in enumerate(system.spheres):
                 hs = _HkS(sph, shape, veff_s[isp], system.proj_data[ik], projs[ik],
-                          dscr_s[isp], system.q_full)
+                          dscr_s[isp], system.q_full,
+                          hub_sphi=(hub.sphi[ik, :, :sph.npw] if hub else None),
+                          hub_d=hub_d)
                 if coeffs[isp][ik] is None:
                     # seed on CPU (device-independent determinism), then move
                     gen = torch.Generator().manual_seed(1234 + ik + 7777 * isp)
@@ -648,6 +680,33 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                 occ_s.append(o)
                 ent = ent - width * (g_spin * system.kweights[:, None] * s_ent).sum()
             entropy_term = ent
+
+        # DFT+U: fresh S-metric occupation matrices + Dudarev E_U (lags one
+        # step into V_U like the NC path; nspin=1 splits [0,2] occupations
+        # into two equal channels)
+        e_hub = torch.zeros((), dtype=RDTYPE, device=dev)
+        if hub is not None:
+            def _padded_coeffs(isp):
+                if batched:
+                    return coeffs_b[isp]
+                cp = torch.zeros(nk, nb, bk.npw_max, dtype=CDTYPE, device=dev)
+                for ik, sph in enumerate(system.spheres):
+                    cp[ik, :, :sph.npw] = coeffs[isp][ik]
+                return cp
+
+            if nspin == 2:
+                for isp in range(nspin):
+                    n_hub_s[isp] = occupation_matrices(
+                        hub.sphi, _padded_coeffs(isp), occ_s[isp],
+                        system.kweights, hub.sites)
+                e_hub = sum(hubbard_energy(n_hub_s[isp], hub.sites)
+                            for isp in range(nspin))
+            else:
+                n_half = occupation_matrices(
+                    hub.sphi, _padded_coeffs(0), 0.5 * occ_s[0],
+                    system.kweights, hub.sites)
+                n_hub_s = [n_half]
+                e_hub = 2.0 * hubbard_energy(n_half, hub.sites)
 
         # smooth densities + per-spin becsum + augmentation
         rho_out_s, becps_s = [], []
@@ -723,6 +782,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                           for isp in range(nspin)),
             ewald=ewald_energy(system.positions, system.charges, grid.cell),
             smearing=entropy_term,
+            hubbard=e_hub if hub is not None else 0.0,
             onecenter=e_onec,
         )
         e_free = float(energies.free_energy)
@@ -805,6 +865,9 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         becps=becps_s[0] if nspin == 1 else becps_s, history=history,
         fermi=mu, system=system, nspin=nspin,
     )
+    if hub is not None:
+        out["hub_occ"] = n_hub_s
+        out["hub_sites"] = hub.sites
     if nspin == 2:
         out["rho_spin"] = rho_s
         out["mag_total"] = float((rho_s[0] - rho_s[1]).sum()) * vol / grid.n_points

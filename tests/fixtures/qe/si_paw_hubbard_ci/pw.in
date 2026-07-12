@@ -1,0 +1,30 @@
+&control
+  calculation = 'scf'
+  prefix = 'sihub'
+  pseudo_dir = '.'
+  outdir = './tmp'
+  verbosity = 'high'
+/
+&system
+  ibrav = 0
+  nat = 2
+  ntyp = 1
+  ecutwfc = 45.0
+  ecutrho = 180.0
+/
+&electrons
+  conv_thr = 1.0d-12
+/
+ATOMIC_SPECIES
+Si 28.0855 Si.pbe-n-kjpaw_psl.1.0.0.UPF
+CELL_PARAMETERS angstrom
+0.000 2.715 2.715
+2.715 0.000 2.715
+2.715 2.715 0.000
+ATOMIC_POSITIONS angstrom
+Si 0.0000 0.0000 0.0000
+Si 1.3575 1.3575 1.3575
+K_POINTS automatic
+2 2 2 0 0 0
+HUBBARD (atomic)
+U Si-3p 2.0

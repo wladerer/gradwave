@@ -28,6 +28,7 @@ import numpy as np
 
 from gradwave.constants import BOHR_ANG, RY_EV
 from gradwave.pseudo.upf import (
+    AtomicOrbital,
     BetaProjector,
     _parse_floats,
     _qe_msh,
@@ -69,10 +70,15 @@ class PAWData:
     ae_core_rho: np.ndarray | None = None  # AE ρ_core(r) [e/Å³]
     ae_vloc: np.ndarray | None = None  # AE local (Hartree-screened) potential [eV]
     core_energy: float = 0.0  # frozen-core energy [eV]
+    chi: tuple[AtomicOrbital, ...] = ()  # PP_PSWFC atomic orbitals (+U/LCAO)
 
     @property
     def n_proj(self) -> int:
         return len(self.betas)
+
+    def hubbard_orbitals(self, l: int) -> list[AtomicOrbital]:
+        """PP_PSWFC orbitals with angular momentum `l` (the +U manifold)."""
+        return [w for w in self.chi if w.l == l]
 
 
 def parse_upf_paw(path) -> PAWData:
@@ -132,6 +138,22 @@ def parse_upf_paw(path) -> PAWData:
         key = (int(i) - 1, int(j) - 1, int(l))
         qijl[key] = vals[:cutoff_idx]
 
+    # PP_PSWFC atomic orbitals (same conventions as upf.py: r·R scaled
+    # BOHR^{-1/2}, matching r·β so the SBT form factor is reused)
+    chi = []
+    pswfc_block = root.find("PP_PSWFC")
+    if pswfc_block is not None:
+        for child in sorted(
+            (c for c in pswfc_block if c.tag.startswith("PP_CHI.")),
+            key=lambda c: int(c.tag.split(".")[1]),
+        ):
+            chi.append(AtomicOrbital(
+                l=int(child.attrib["l"]),
+                label=child.attrib.get("label", "").strip(),
+                occupation=float(child.attrib.get("occupation", "0")),
+                rchi=_parse_floats(child.text) * BOHR_ANG ** (-0.5),
+            ))
+
     rhoatom = _parse_floats(root.find("PP_RHOATOM").text) / BOHR_ANG
     core_rho = None
     nlcc = root.find("PP_NLCC")
@@ -181,4 +203,5 @@ def parse_upf_paw(path) -> PAWData:
         ae_core_rho=ae_core,
         ae_vloc=ae_vloc,
         core_energy=core_energy,
+        chi=tuple(chi),
     )

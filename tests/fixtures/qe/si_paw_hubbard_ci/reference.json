@@ -1,0 +1,12 @@
+{
+ "qe_version": "v.7.5",
+ "etot_eV": -1267.0124684869813,
+ "hubbard_eV": 1.8648654163586225,
+ "fft_dims": [
+  32,
+  32,
+  32
+ ],
+ "occ_eig_per_spin": 0.808,
+ "system": "Si kjpaw ideal cell, U=2 eV on 3p, HUBBARD (atomic), 2x2x2, fixed occ"
+}

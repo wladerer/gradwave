@@ -23,14 +23,18 @@ from gradwave.solvers.davidson import _orthonormalize_b, teter_b
 
 
 class BatchedHS:
-    """H and S applies for all k at once, fixed v_eff and screened D."""
+    """H and S applies for all k at once, fixed v_eff and screened D.
+    hub_sphi/hub_d: optional DFT+U term (S-dressed orbital projectors +
+    Dudarev D, already conj-transposed for the apply convention)."""
 
-    def __init__(self, bk: BatchedK, shape, v_eff_r, p, dscr, q_full):
+    def __init__(self, bk: BatchedK, shape, v_eff_r, p, dscr, q_full,
+                 hub_sphi=None, hub_d=None):
         self.bk = bk
         self.p = p  # (nk, nproj, npw_max)
         self.q = q_full.to(p.dtype)
         self.ham = BatchedHamiltonian(
-            dataclasses.replace(bk, dij_full=dscr), shape, v_eff_r, p
+            dataclasses.replace(bk, dij_full=dscr), shape, v_eff_r, p,
+            hub_q=hub_sphi, hub_dij=hub_d,
         )
         self.t = bk.t
 
