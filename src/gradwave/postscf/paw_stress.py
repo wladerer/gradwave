@@ -33,7 +33,8 @@ _MINUS_I_POW = [1.0 + 0.0j, -1.0j, -1.0 + 0.0j, 1.0j, 1.0 + 0.0j]  # (−i)^L, L
 def stress_uspp(res: dict, xc) -> torch.Tensor:
     """σ (3,3) [eV/Å³] for a converged scf_uspp result (nspin 1 or 2)."""
     system = res["system"]
-    eps = torch.zeros(3, 3, dtype=torch.float64, requires_grad=True)
+    eps = torch.zeros(3, 3, dtype=torch.float64, requires_grad=True,
+                      device=system.positions.device)
     e = _energy_strained_uspp(res, xc, eps)
     (grad,) = torch.autograd.grad(e, eps)
     return 0.5 * (grad + grad.T) / system.grid.volume
@@ -42,7 +43,8 @@ def stress_uspp(res: dict, xc) -> torch.Tensor:
 def _strained_aug(system, rho_ij, tabs, gaunt, y_aug, q_sph, phases, omega):
     """ρ_aug(G(ε)) on the sphere from one spin channel's strained becsum."""
     cdt = torch.complex128
-    aug_sph = torch.zeros(q_sph.shape[0], dtype=cdt)
+    dev = q_sph.device
+    aug_sph = torch.zeros(q_sph.shape[0], dtype=cdt, device=dev)
     for a, sp in enumerate(system.species_of_atom):
         paw = system.paws[sp]
         idx = []
@@ -50,9 +52,9 @@ def _strained_aug(system, rho_ij, tabs, gaunt, y_aug, q_sph, phases, omega):
             for m in range(2 * bb.l + 1):
                 idx.append((i, bb.l * bb.l + m))
         n_aug = paw.aug_cutoff_idx
-        w_aug = torch.as_tensor(simpson_weights(paw.rab[:n_aug]))
-        r_aug = torch.as_tensor(paw.r[:n_aug])
-        acc_a = torch.zeros(q_sph.shape[0], dtype=cdt)
+        w_aug = torch.as_tensor(simpson_weights(paw.rab[:n_aug]), device=dev)
+        r_aug = torch.as_tensor(paw.r[:n_aug], device=dev)
+        acc_a = torch.zeros(q_sph.shape[0], dtype=cdt, device=dev)
         for (i, j, ll), qfun in paw.qijl.items():
             rows_i = [k for k, (ci, _) in enumerate(idx) if ci == i]
             rows_j = [k for k, (cj, _) in enumerate(idx) if cj == j]
@@ -65,7 +67,7 @@ def _strained_aug(system, rho_ij, tabs, gaunt, y_aug, q_sph, phases, omega):
                     "Mij,ji->M", cblk, rho_ij[a][rows_j][:, rows_i])
             if float(b_lm.detach().abs().max()) < 1e-14:
                 continue
-            fq = sbt_t(ll, torch.as_tensor(qfun), r_aug, w_aug, q_sph)
+            fq = sbt_t(ll, torch.as_tensor(qfun, device=dev), r_aug, w_aug, q_sph)
             ang = y_aug[:, ll * ll:(ll + 1) ** 2].to(cdt) @ b_lm
             acc_a = acc_a + _MINUS_I_POW[ll] * fq.to(cdt) * ang
         aug_sph = aug_sph + phases[:, a] * 4.0 * math.pi * acc_a
@@ -80,9 +82,10 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
     rdt = torch.float64
     cdt = torch.complex128
     nspin, coeffs_s, occ_s, eigs_s, becsum_s, rho_sp_mixed = _normalize_spin(res)
+    dev = system.positions.device
 
-    f_map = torch.eye(3, dtype=rdt) + eps
-    a0 = torch.as_tensor(grid.cell, dtype=rdt)
+    f_map = torch.eye(3, dtype=rdt, device=dev) + eps
+    a0 = torch.as_tensor(grid.cell, dtype=rdt, device=dev)
     a_e = a0 @ f_map.T
     b_e = 2.0 * math.pi * torch.linalg.inv(a_e).T
     omega0 = grid.volume
@@ -91,7 +94,7 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
     pos_e = system.positions.detach() @ f_map.T
 
     mask = grid.dens_mask.reshape(-1)
-    m_box = _box_millers(shape, None)
+    m_box = _box_millers(shape, dev)
     m_sph = m_box[mask]
     g_sph = m_sph @ b_e
     g2_sph = (g_sph**2).sum(-1)
@@ -101,12 +104,12 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
     sphere_idx = system.sphere_idx
 
     kw = system.kweights
-    tabs = [RadialTables(p) for p in system.paws]
+    tabs = [RadialTables(p, device=dev) for p in system.paws]
     lmax_b = max(b.l for p in system.paws for b in p.betas)
 
     from gradwave.core.gaunt import real_gaunt_table
 
-    gaunt = torch.as_tensor(real_gaunt_table(lmax_b))
+    gaunt = torch.as_tensor(real_gaunt_table(lmax_b), device=dev)
     y_aug = ylm_all(2 * lmax_b, g_sph)
     phase_arg = g_sph @ pos_e.T
     phases = torch.exp(torch.complex(torch.zeros_like(phase_arg), -phase_arg))
@@ -126,10 +129,10 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
         coeffs = [c.detach() for c in coeffs_s[isp]]
         occ = occ_s[isp].detach()
         eigs = eigs_s[isp].detach()
-        rho_ij = [torch.zeros(s1 - s0, s1 - s0, dtype=cdt)
+        rho_ij = [torch.zeros(s1 - s0, s1 - s0, dtype=cdt, device=dev)
                   for (s0, s1) in system.atom_slices]
         for ik, sph in enumerate(system.spheres):
-            kfrac = torch.as_tensor(sph.k_frac, dtype=rdt)
+            kfrac = torch.as_tensor(sph.k_frac, dtype=rdt, device=dev)
             kpg = (sph.miller.to(rdt) + kfrac) @ b_e
             kpg2 = (kpg**2).sum(-1)
             c = coeffs[ik]
@@ -171,9 +174,9 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
             for a, sp in enumerate(system.species_of_atom):
                 bec = (becsum_s[0][a] if nspin == 1
                        else [becsum_s[0][a], becsum_s[1][a]])
-                _, ddd = onec[sp].energy_and_ddd(bec)
+                _, ddd = onec[sp].energy_and_ddd(bec)  # one-center is CPU-side
                 ddd_isp = ddd if nspin == 1 else ddd[isp]
-                e_total = e_total + (ddd_isp.to(cdt) * rho_ij[a]).sum().real
+                e_total = e_total + (ddd_isp.to(cdt).to(dev) * rho_ij[a]).sum().real
 
         aug_sph = _strained_aug(system, rho_ij, tabs, gaunt, y_aug, q_sph,
                                 phases, omega)
@@ -183,7 +186,7 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
         rho_sph_sp = rho_st / omega.to(cdt) + aug_sph
         rho_sph_chans.append(rho_sph_sp)
         n_pts = grid.n_points
-        rho_box = torch.zeros(n_pts, dtype=cdt)
+        rho_box = torch.zeros(n_pts, dtype=cdt, device=dev)
         rho_box[sphere_idx] = rho_sph_sp
         rho_r_chans.append(torch.fft.ifftn(
             rho_box.reshape(shape) * n_pts, dim=(-3, -2, -1)).real)
@@ -208,7 +211,7 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
     # XC on the strained real-space densities (+ strained NLCC core)
     rho_core_e = None
     if system.rho_core is not None:
-        core = torch.zeros(q_sph.shape[0], dtype=cdt)
+        core = torch.zeros(q_sph.shape[0], dtype=cdt, device=dev)
         for sp, tab in enumerate(tabs):
             if tab.core_g is None:
                 continue
@@ -217,7 +220,7 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
                 continue
             f_core = tab.core_of_g(q_sph)
             core = core + phases[:, atoms].sum(dim=1) * f_core.to(cdt) / omega.to(cdt)
-        core_box = torch.zeros(grid.n_points, dtype=cdt)
+        core_box = torch.zeros(grid.n_points, dtype=cdt, device=dev)
         core_box[sphere_idx] = core
         rho_core_e = torch.fft.ifftn(
             core_box.reshape(shape) * grid.n_points, dim=(-3, -2, -1)).real

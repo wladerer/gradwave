@@ -30,6 +30,7 @@ def bands_uspp(res: dict, xc, k_frac_list, nbands: int | None = None,
     system = res["system"]
     grid = system.grid
     vol = grid.volume
+    dev = system.positions.device
     nbands = nbands or system.nbands
     mask_flat = grid.dens_mask.reshape(-1)
 
@@ -41,7 +42,7 @@ def bands_uspp(res: dict, xc, k_frac_list, nbands: int | None = None,
     rho_xc = rho if system.rho_core is None else rho + system.rho_core
     v_xc, _ = vxc_potential(xc, rho_xc, grid)
     vloc_g = local_potential_g(system.positions,
-                               torch.tensor(system.species_of_atom),
+                               torch.tensor(system.species_of_atom, device=dev),
                                system.vloc_tables, grid.g_cart, vol)
     vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
     v_eff = v_h + v_xc + vloc_r
@@ -66,25 +67,29 @@ def bands_uspp(res: dict, xc, k_frac_list, nbands: int | None = None,
         for a, sp in enumerate(system.species_of_atom):
             _, ddd = onec[sp].energy_and_ddd(res["rho_ij_atoms"][a])
             s0, s1 = system.atom_slices[a]
-            dscr_full[s0:s1, s0:s1] += ddd
+            dscr_full[s0:s1, s0:s1] += ddd.to(dev)
 
-    dij_species = [torch.as_tensor(p.dij, dtype=RDTYPE) for p in system.paws]
+    dij_species = [torch.as_tensor(p.dij, dtype=RDTYPE, device=dev)
+                   for p in system.paws]
     beta_ls = [[b.l for b in p.betas] for p in system.paws]
     out = []
     for k in k_frac_list:
-        sph = build_gsphere(grid, system.ecut, np.asarray(k, dtype=float))
-        q_of_k = np.sqrt(sph.kpg2.numpy())
-        beta_tables = [torch.as_tensor(beta_form_factors(p, q_of_k), dtype=RDTYPE)
+        sph = build_gsphere(grid, system.ecut, np.asarray(k, dtype=float),
+                            device=dev)
+        q_of_k = np.sqrt(sph.kpg2.cpu().numpy())
+        beta_tables = [torch.as_tensor(beta_form_factors(p, q_of_k),
+                                       dtype=RDTYPE, device=dev)
                        for p in system.paws]
         pd = build_projector_data(sph, system.species_of_atom, beta_tables,
                                   beta_ls, dij_species, vol)
         p = projectors(pd, system.positions)
         hs = _HkS(sph, grid.shape, v_eff, pd, p, dscr_full, system.q_full)
+        # seed on CPU (device-independent determinism), then move
         gen = torch.Generator().manual_seed(4321)
         x0 = (torch.randn(nbands + 4, sph.npw, generator=gen, dtype=torch.float64)
               + 1j * torch.randn(nbands + 4, sph.npw, generator=gen,
                                  dtype=torch.float64))
-        x0 = (x0 * torch.exp(-0.5 * sph.kpg2 / system.ecut * 4.0)).to(CDTYPE)
+        x0 = (x0.to(dev) * torch.exp(-0.5 * sph.kpg2 / system.ecut * 4.0)).to(CDTYPE)
         eps, _ = davidson_gen(hs, x0, nbands, tol=tol, max_iter=120)
         out.append(eps)
     return torch.stack(out)

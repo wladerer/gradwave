@@ -23,6 +23,7 @@ can absorb it later.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass, field
 
@@ -90,6 +91,37 @@ class USPPSystem:
     sym: object = None  # SpaceGroup when use_symmetry
     rho_symmetrizer: object = None
     becsum_sym: object = None
+
+    def to(self, device) -> "USPPSystem":
+        """Copy with every tensor moved to `device` (mirrors System.to; the
+        paws' numpy radial tables and the one-center machinery stay CPU)."""
+
+        def mv(obj, fields):
+            return dataclasses.replace(
+                obj, **{f: getattr(obj, f).to(device) for f in fields}
+            )
+
+        return dataclasses.replace(
+            self,
+            grid=mv(self.grid, ["g_cart", "g2", "dens_mask"]),
+            spheres=[mv(s, ["k_cart", "miller", "kpg", "kpg2", "flat_idx"])
+                     for s in self.spheres],
+            proj_data=[mv(pd, ["atom_index", "f_ylm_phase_free", "kpg", "dij_full"])
+                       for pd in self.proj_data],
+            aug=[mv(a, ["q_g", "q_int"]) for a in self.aug],
+            kweights=self.kweights.to(device),
+            positions=self.positions.to(device),
+            charges=self.charges.to(device),
+            q_full=self.q_full.to(device),
+            sphere_idx=self.sphere_idx.to(device),
+            g_sphere=self.g_sphere.to(device),
+            vloc_tables=self.vloc_tables.to(device),
+            rho_core=self.rho_core.to(device) if self.rho_core is not None else None,
+            rho_symmetrizer=(self.rho_symmetrizer.to(device)
+                             if self.rho_symmetrizer is not None else None),
+            becsum_sym=(self.becsum_sym.to(device)
+                        if self.becsum_sym is not None else None),
+        )
 
 
 def _mexp_index_map(paw: PAWData):
@@ -379,6 +411,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     magnetization) basis with Kerker on the total for smeared systems."""
     grid = system.grid
     vol = grid.volume
+    dev = system.positions.device
     nk, nb = len(system.spheres), system.nbands
     shape = grid.shape
     mask_flat = grid.dens_mask.reshape(-1)
@@ -403,7 +436,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         spin_frac = [up, dn]
 
     projs = [projectors(pd, system.positions) for pd in system.proj_data]
-    vloc_g = local_potential_g(system.positions, torch.tensor(system.species_of_atom),
+    vloc_g = local_potential_g(system.positions,
+                               torch.tensor(system.species_of_atom, device=dev),
                                system.vloc_tables, grid.g_cart, vol)
     vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
 
@@ -421,17 +455,17 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     g2_mix = grid.g2.reshape(-1)[mask_flat]
     ng = g2_mix.shape[0]
     nbec = sum((s1 - s0) ** 2 for (s0, s1) in system.atom_slices)
-    g2_full = torch.cat([g2_mix] * nspin + [torch.zeros(nbec)] * nspin)
+    g2_full = torch.cat([g2_mix] * nspin + [torch.zeros(nbec, device=dev)] * nspin)
     kerker_mask = torch.cat([
-        torch.ones(ng, dtype=torch.bool),
-        torch.zeros(ng * (nspin - 1) + nbec * nspin, dtype=torch.bool),
+        torch.ones(ng, dtype=torch.bool, device=dev),
+        torch.zeros(ng * (nspin - 1) + nbec * nspin, dtype=torch.bool, device=dev),
     ])
     # the on-site becsum↔ddd feedback is the stiffest direction (on-site
     # Hartree curvature ~tens of eV) — take smaller plain steps on the becsum
     # block while DIIS accumulates curvature
     step_scale = torch.cat([
-        torch.ones(ng * nspin, dtype=torch.float64),
-        torch.full((nbec * nspin,), 0.4, dtype=torch.float64),
+        torch.ones(ng * nspin, dtype=torch.float64, device=dev),
+        torch.full((nbec * nspin,), 0.4, dtype=torch.float64, device=dev),
     ])
     mixer = PulayMixer(g2_full, alpha=mixing_alpha, history=mixing_history,
                        kerker=(smearing != "none"), kerker_mask=kerker_mask,
@@ -456,7 +490,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         paw = system.paws[sp]
         nm = sum(2 * b.l + 1 for b in paw.betas)
         for isp in range(nspin):
-            m0 = torch.zeros(nm, nm, dtype=CDTYPE)
+            m0 = torch.zeros(nm, nm, dtype=CDTYPE, device=dev)
             if paw.paw_occ is not None:
                 frac = 0.5 if nspin == 1 else spin_frac[isp][sp]
                 col = 0
@@ -508,18 +542,19 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                 herm = 0.5 * (contr + contr.conj().T)
                 dscr[s0:s1, s0:s1] = herm.real
             dscr_s.append(dscr + system.proj_data[0].dij_full)
-        e_onec = torch.zeros((), dtype=RDTYPE)
+        e_onec = torch.zeros((), dtype=RDTYPE, device=dev)
         if is_paw:
             dscr_s = [d.clone() for d in dscr_s]
             for a, sp in enumerate(system.species_of_atom):
                 s0, s1 = system.atom_slices[a]
+                # one-center runs on CPU (per-atom radial work); ddd crosses back
                 e1c, ddd = onec[sp].energy_and_ddd(_becsum_for_onec(a))
                 e_onec = e_onec + e1c
                 if nspin == 1:
-                    dscr_s[0][s0:s1, s0:s1] += ddd
+                    dscr_s[0][s0:s1, s0:s1] += ddd.to(dev)
                 else:
                     for isp in range(nspin):
-                        dscr_s[isp][s0:s1, s0:s1] += ddd[isp]
+                        dscr_s[isp][s0:s1, s0:s1] += ddd[isp].to(dev)
 
         if it == 1:
             tol_eff = max(diago_tol, 1e-3)
@@ -534,11 +569,13 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                 hs = _HkS(sph, shape, veff_s[isp], system.proj_data[ik], projs[ik],
                           dscr_s[isp], system.q_full)
                 if coeffs[isp][ik] is None:
+                    # seed on CPU (device-independent determinism), then move
                     gen = torch.Generator().manual_seed(1234 + ik + 7777 * isp)
                     x0 = torch.randn(nb + 4, sph.npw, generator=gen, dtype=torch.float64) \
                         + 1j * torch.randn(nb + 4, sph.npw, generator=gen,
                                            dtype=torch.float64)
-                    x0 = x0 * torch.exp(-0.5 * HBAR2_2M * sph.kpg2 / system.ecut * 4.0)
+                    x0 = x0.to(dev) * torch.exp(
+                        -0.5 * HBAR2_2M * sph.kpg2 / system.ecut * 4.0)
                     x0 = x0.to(CDTYPE)
                 else:
                     x0 = coeffs[isp][ik]
@@ -557,15 +594,15 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                 raise ValueError("nspin=2 requires smearing (shared Fermi level)")
             occ_s = [fixed_occupations(eigs_s[0], system.n_electrons)]
             mu = float(eigs_s[0][:, int(system.n_electrons // 2) - 1].max())
-            entropy_term = torch.zeros((), dtype=RDTYPE)
+            entropy_term = torch.zeros((), dtype=RDTYPE, device=dev)
         else:
             scheme = SCHEMES[smearing]
             eigs_cat = torch.cat(eigs_s, dim=0)
             kw_cat = torch.cat([system.kweights] * nspin)
             mu = float(find_fermi(eigs_cat, kw_cat, scheme, width,
                                   system.n_electrons, degeneracy=g_spin))
-            mu_t = torch.tensor(mu, dtype=RDTYPE)
-            occ_s, ent = [], torch.zeros((), dtype=RDTYPE)
+            mu_t = torch.tensor(mu, dtype=RDTYPE, device=dev)
+            occ_s, ent = [], torch.zeros((), dtype=RDTYPE, device=dev)
             for isp in range(nspin):
                 o, s_ent = occupations_and_entropy(
                     eigs_s[isp], mu_t, scheme, width, degeneracy=g_spin)
@@ -575,10 +612,10 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
 
         # smooth densities + per-spin becsum + augmentation
         rho_out_s, becps_s = [], []
-        rho_ij_s = [[torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE)
+        rho_ij_s = [[torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
                      for (s0, s1) in system.atom_slices] for _ in range(nspin)]
         for isp in range(nspin):
-            rho_sp = torch.zeros(shape, dtype=RDTYPE)
+            rho_sp = torch.zeros(shape, dtype=RDTYPE, device=dev)
             becps = []
             for ik, sph in enumerate(system.spheres):
                 c = coeffs[isp][ik]
@@ -597,12 +634,12 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                 rho_ij_s[isp] = system.becsum_sym.apply(rho_ij_s[isp])
             becps_s.append(becps)
 
-            aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE)
+            aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE, device=dev)
             for a, sp in enumerate(system.species_of_atom):
                 aug_sph = aug_sph + phase_pos[:, a].conj() * torch.einsum(
                     "ij,ijg->g", rho_ij_s[isp][a], system.aug[sp].q_g
                 )
-            aug_box = torch.zeros(grid.n_points, dtype=CDTYPE)
+            aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
             aug_box[system.sphere_idx] = aug_sph / vol
             rho_aug = (torch.fft.ifftn(aug_box.reshape(shape) * grid.n_points,
                                        dim=(-3, -2, -1))).real
@@ -677,7 +714,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
             converged = True
             rho_s = rho_out_s
             if is_paw:  # report the one-center energy at the FINAL fresh becsum
-                e_onec = torch.zeros((), dtype=RDTYPE)
+                e_onec = torch.zeros((), dtype=RDTYPE, device=dev)
                 for a, sp in enumerate(system.species_of_atom):
                     fresh = (rho_ij_s[0][a] if nspin == 1
                              else [rho_ij_s[0][a], rho_ij_s[1][a]])
@@ -705,7 +742,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
             chan_vecs = [(tot + mag_v) / 2.0, (tot - mag_v) / 2.0]
         rho_s = []
         for vec in chan_vecs:
-            rho_g_new = torch.zeros(grid.n_points, dtype=CDTYPE)
+            rho_g_new = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
             rho_g_new[mask_flat] = vec
             rho_s.append((torch.fft.ifftn(rho_g_new.reshape(shape) * grid.n_points,
                                           dim=(-3, -2, -1))).real)

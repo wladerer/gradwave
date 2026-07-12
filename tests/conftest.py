@@ -10,10 +10,16 @@ import os
 _dev = os.environ.get("GRADWAVE_TEST_DEVICE")
 if _dev and _dev != "cpu":
     import gradwave.scf.loop as _loop
+    import gradwave.scf.uspp as _uspp
 
     _orig_setup = _loop.setup_system
+    _orig_setup_uspp = _uspp.setup_uspp
 
     def _setup_on_device(*args, **kwargs):
         return _orig_setup(*args, **kwargs).to(_dev)
 
+    def _setup_uspp_on_device(*args, **kwargs):
+        return _orig_setup_uspp(*args, **kwargs).to(_dev)
+
     _loop.setup_system = _setup_on_device
+    _uspp.setup_uspp = _setup_uspp_on_device

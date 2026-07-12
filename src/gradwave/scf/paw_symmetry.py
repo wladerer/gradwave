@@ -79,6 +79,10 @@ class BecsumSymmetrizer:
             self.d_full.append(per_sp)
         self.species_of_atom = list(species_of_atom)
 
+    def to(self, device) -> "BecsumSymmetrizer":
+        self.d_full = [[d.to(device) for d in per_sp] for per_sp in self.d_full]
+        return self
+
     def apply(self, rho_ij_atoms: list) -> list:
         """ρ^a ← (1/N) Σ_op D ρ^{map(op,a)} Dᵀ (one spin channel)."""
         n_ops = self.sg.n_ops

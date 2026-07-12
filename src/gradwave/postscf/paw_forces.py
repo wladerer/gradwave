@@ -47,12 +47,13 @@ def _normalize_spin(res: dict):
 def _aug_from_becsum(system, rho_ij, phases):
     """ρ_aug(r) from one spin channel's becsum with given e^{+iGτ} phases."""
     grid = system.grid
-    aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE)
+    dev = phases.device
+    aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE, device=dev)
     for a, sp in enumerate(system.species_of_atom):
         aug_sph = aug_sph + phases[:, a].conj() * torch.einsum(
             "ij,ijg->g", rho_ij[a], system.aug[sp].q_g
         )
-    aug_box = torch.zeros(grid.n_points, dtype=CDTYPE)
+    aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
     aug_box[system.sphere_idx] = aug_sph / grid.volume
     return torch.fft.ifftn(aug_box.reshape(grid.shape) * grid.n_points,
                            dim=(-3, -2, -1)).real
@@ -91,11 +92,13 @@ def forces_uspp(res: dict, xc, remove_net: bool = True) -> torch.Tensor:
 
         onec = {sp: OneCenter(system.paws[sp], xc)
                 for sp in set(system.species_of_atom)}
+        dev0 = system.positions.device
         for a, sp in enumerate(system.species_of_atom):
             bec = (becsum_s[0][a] if nspin == 1
                    else [becsum_s[0][a], becsum_s[1][a]])
-            _, ddd = onec[sp].energy_and_ddd(bec)
-            ddd_atoms.append([ddd] if nspin == 1 else ddd)
+            _, ddd = onec[sp].energy_and_ddd(bec)  # one-center is CPU-side
+            ddd_atoms.append([ddd.to(dev0)] if nspin == 1
+                             else [d.to(dev0) for d in ddd])
 
     projs = [projectors(pd, pos) for pd in system.proj_data]
     phase_arg = system.g_sphere @ pos.T
@@ -109,7 +112,7 @@ def forces_uspp(res: dict, xc, remove_net: bool = True) -> torch.Tensor:
         occ = occ_s[isp].detach()
         eigs = eigs_s[isp].detach()
         becps = [becp(projs[ik], coeffs[ik]) for ik in range(len(coeffs))]
-        rho_ij = [torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE)
+        rho_ij = [torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=pos.device)
                   for (s0, s1) in system.atom_slices]
         for ik, b in enumerate(becps):
             w = (kw[ik] * occ[ik]).to(CDTYPE)
@@ -139,17 +142,18 @@ def forces_uspp(res: dict, xc, remove_net: bool = True) -> torch.Tensor:
         from gradwave.pseudo.radial_torch import RadialTables
 
         q_sph = torch.linalg.norm(system.g_sphere, dim=1)
-        core = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE)
+        core = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE,
+                           device=pos.device)
         for sp in set(system.species_of_atom):
             paw = system.paws[sp]
             if paw.core_rho is None:
                 continue
-            tab = RadialTables(paw)
+            tab = RadialTables(paw, device=pos.device)
             with torch.no_grad():
                 f_core = tab.core_of_g(q_sph)
             atoms = [a for a, sa in enumerate(system.species_of_atom) if sa == sp]
             core = core + phases[:, atoms].conj().sum(dim=1) * f_core.to(CDTYPE) / vol
-        core_box = torch.zeros(grid.n_points, dtype=CDTYPE)
+        core_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=pos.device)
         core_box[system.sphere_idx] = core
         rho_core = torch.fft.ifftn(core_box.reshape(shape) * grid.n_points,
                                    dim=(-3, -2, -1)).real
@@ -171,7 +175,8 @@ def forces_uspp(res: dict, xc, remove_net: bool = True) -> torch.Tensor:
             s_uu = s_dd = s_tt = None
         e = e + xc.energy(r_u, r_d, vol, s_uu, s_dd, s_tt)
 
-    species_index = torch.tensor(system.species_of_atom, dtype=torch.int64)
+    species_index = torch.tensor(system.species_of_atom, dtype=torch.int64,
+                                 device=pos.device)
     vloc_g = local_potential_g(pos, species_index, system.vloc_tables,
                                grid.g_cart, vol)
     e = e + hartree_energy(rho_g, grid.g2, vol) + local_energy(rho_g, vloc_g, vol)
