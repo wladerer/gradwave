@@ -405,10 +405,12 @@ def davidson_gen(hs: _HkS, x0: torch.Tensor, nbands: int, tol: float,
 def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
              smearing="none", width=0.1, max_iter=60, etol=1e-8, rhotol=1e-7,
              diago_tol=1e-9, mixing_alpha=0.7, mixing_history=8,
-             trust_factor=20.0, verbose=True):
+             trust_factor=20.0, batched=True, verbose=True):
     """USPP/PAW SCF. nspin=2 takes a SpinXC functional and per-species
     start_mag (list, in [-1, 1]); mixing then runs in the (total,
-    magnetization) basis with Kerker on the total for smeared systems."""
+    magnetization) basis with Kerker on the total for smeared systems.
+    batched=True solves all k in one padded generalized-Davidson block
+    (identical eigenpairs; batched=False is the reference per-k path)."""
     grid = system.grid
     vol = grid.volume
     dev = system.positions.device
@@ -436,6 +438,14 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         spin_frac = [up, dn]
 
     projs = [projectors(pd, system.positions) for pd in system.proj_data]
+    bk = p_b = None
+    coeffs_b = [None] * nspin
+    if batched:
+        from gradwave.core.batch import becp_b, build_batched, projectors_b
+        from gradwave.scf.uspp_batch import BatchedHS, davidson_gen_batched
+
+        bk = build_batched(system.spheres, system.proj_data, device=dev)
+        p_b = projectors_b(bk, system.positions)
     vloc_g = local_potential_g(system.positions,
                                torch.tensor(system.species_of_atom, device=dev),
                                system.vloc_tables, grid.g_cart, vol)
@@ -564,6 +574,35 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
 
         eigs_s = []
         for isp in range(nspin):
+            if batched:
+                hs_b = BatchedHS(bk, shape, veff_s[isp], p_b, dscr_s[isp],
+                                 system.q_full)
+                if coeffs_b[isp] is None:
+                    # per-k CPU seeds (identical to the per-k path), padded
+                    x0 = torch.zeros(nk, nb + 4, bk.npw_max, dtype=CDTYPE,
+                                     device=dev)
+                    for ik, sph in enumerate(system.spheres):
+                        gen = torch.Generator().manual_seed(1234 + ik + 7777 * isp)
+                        xk = torch.randn(nb + 4, sph.npw, generator=gen,
+                                         dtype=torch.float64) \
+                            + 1j * torch.randn(nb + 4, sph.npw, generator=gen,
+                                               dtype=torch.float64)
+                        xk = xk.to(dev) * torch.exp(
+                            -0.5 * HBAR2_2M * sph.kpg2 / system.ecut * 4.0)
+                        x0[ik, :, :sph.npw] = xk.to(CDTYPE)
+                else:
+                    x0 = coeffs_b[isp]
+                eig_b, x_b = davidson_gen_batched(hs_b, x0, nb, tol=tol_eff)
+                b_all = becp_b(p_b, x_b)
+                snorm = (x_b.abs() ** 2).sum(dim=-1) + torch.einsum(
+                    "kbi,ij,kbj->kb", b_all.conj(),
+                    system.q_full.to(CDTYPE), b_all).real
+                x_b = x_b / torch.sqrt(snorm)[..., None]
+                coeffs_b[isp] = x_b
+                for ik, sph in enumerate(system.spheres):
+                    coeffs[isp][ik] = x_b[ik, :, :sph.npw]
+                eigs_s.append(eig_b)
+                continue
             eigs_l = []
             for ik, sph in enumerate(system.spheres):
                 hs = _HkS(sph, shape, veff_s[isp], system.proj_data[ik], projs[ik],

@@ -1,0 +1,151 @@
+"""k-batched USPP/PAW eigensolve (Layer B fast path).
+
+Batches the generalized problem H|ψ⟩ = εS|ψ⟩ over all k at once using the
+NC padded-batch machinery (core/batch.py): H reuses BatchedHamiltonian with
+the per-iteration screened D swapped in; S = 1 + Σ q|β⟩⟨β| is one becp
+contraction. davidson_gen_batched mirrors davidson_batched (uniform
+subspace across k, worst-residual expansion, QR-restart reusing cached
+applies) and the per-k davidson_gen reduction (standard-orthonormal basis,
+batched Cholesky L⁻¹HL⁻† — NOT L⁻¹HL⁻¹, the complex-eigensolver trap).
+
+Correctness contract: identical eigenpairs to the per-k davidson_gen path
+at the same tolerance (validated on the Si USPP/PAW fast test).
+"""
+
+from __future__ import annotations
+
+import dataclasses
+
+import torch
+
+from gradwave.core.batch import BatchedHamiltonian, BatchedK, becp_b
+from gradwave.solvers.davidson import _orthonormalize_b, teter_b
+
+
+class BatchedHS:
+    """H and S applies for all k at once, fixed v_eff and screened D."""
+
+    def __init__(self, bk: BatchedK, shape, v_eff_r, p, dscr, q_full):
+        self.bk = bk
+        self.p = p  # (nk, nproj, npw_max)
+        self.q = q_full.to(p.dtype)
+        self.ham = BatchedHamiltonian(
+            dataclasses.replace(bk, dij_full=dscr), shape, v_eff_r, p
+        )
+        self.t = bk.t
+
+    def h(self, c):
+        return self.ham.apply(c)
+
+    def s(self, c):
+        b = becp_b(self.p, c)
+        return (c + torch.einsum("kbp,pq,kqg->kbg", b, self.q, self.p)
+                ) * self.bk.mask[:, None, :]
+
+
+def davidson_gen_batched(hs: BatchedHS, x0: torch.Tensor, nbands: int,
+                         tol: float, max_iter: int = 60,
+                         max_dim_factor: int = 4):
+    """Block Davidson for H x = ε S x over (nk, ·, npw_max) padded blocks.
+
+    Returns (eig (nk, nbands), x (nk, nbands, npw_max)); x is Ritz-rotated
+    from a standard-orthonormal basis (not S-normalized — callers normalize).
+    """
+    nk, nb0, m = x0.shape
+    mask = hs.bk.mask
+    max_dim = min(int(hs.bk.npw.min()),
+                  max(max_dim_factor * nbands, nbands + 24))
+
+    def _contract(x_r, hx_r, sx_r):
+        """QR-restart: re-orthonormalize the Ritz block in the standard
+        metric, rotating the cached applies with the triangular factor."""
+        q, rmat = torch.linalg.qr(x_r.transpose(-1, -2), mode="reduced")
+        rt = rmat.transpose(-1, -2)
+        return (q.transpose(-1, -2).contiguous(),
+                torch.linalg.solve_triangular(rt, hx_r, upper=False),
+                torch.linalg.solve_triangular(rt, sx_r, upper=False))
+
+    def _subspace(v_, hv_, sv_):
+        h_sub = torch.einsum("kig,kjg->kij", v_.conj(), hv_)
+        s_sub = torch.einsum("kig,kjg->kij", v_.conj(), sv_)
+        return (0.5 * (h_sub + h_sub.conj().transpose(-1, -2)),
+                0.5 * (s_sub + s_sub.conj().transpose(-1, -2)))
+
+    v = _orthonormalize_b(x0, mask)
+    hv, sv = hs.h(v), hs.s(v)
+    eig = x = hx = sx = None
+    for _ in range(max_iter):
+        # at low ecut the USPP S can be INDEFINITE on the truncated sphere
+        # (negative q eigenvalues; QE errors out the same way) — an orthonormal
+        # basis touching those directions makes vSv† non-PD or near-singular,
+        # and a near-singular reduction yields garbage rotations (spurious
+        # below-minimum states) long before the Cholesky actually fails.
+        # Mirror the per-k guard exactly: drop the OLDEST subspace entries
+        # while cond > 1e14 OR the factorization fails (keeps the newest
+        # curvature; contracting to the Ritz block instead KEEPS the
+        # contaminated directions and cycles forever).
+        while True:
+            h_sub, s_sub = _subspace(v, hv, sv)
+            ell, info = torch.linalg.cholesky_ex(s_sub)
+            bad = int(info.max()) > 0
+            if not bad:
+                cond = torch.linalg.cond(s_sub)
+                bad = bool((~torch.isfinite(cond)).any()) or float(cond.max()) > 1e14
+            if not bad or v.shape[1] <= nbands + 1:
+                break
+            v, hv, sv = v[:, 1:], hv[:, 1:], sv[:, 1:]
+        if int(info.max()) > 0:
+            eye = torch.eye(s_sub.shape[-1], dtype=s_sub.dtype,
+                            device=s_sub.device)
+            ell = torch.linalg.cholesky(s_sub + 1e-10 * eye)
+        a = torch.linalg.solve_triangular(ell, h_sub, upper=False)  # L⁻¹H
+        a = torch.linalg.solve_triangular(
+            ell, a.conj().transpose(-1, -2), upper=False
+        ).conj().transpose(-1, -2)  # (L⁻¹H)L⁻†
+        w, u = torch.linalg.eigh(0.5 * (a + a.conj().transpose(-1, -2)))
+        u = torch.linalg.solve_triangular(ell.conj().transpose(-1, -2), u,
+                                          upper=True)
+        eig = w[:, :nbands].real
+        u_r = u[:, :, :nbands].transpose(-1, -2).to(x0.dtype)  # (nk, nb, nsub)
+        x = torch.einsum("kbj,kjg->kbg", u_r, v)
+        hx = torch.einsum("kbj,kjg->kbg", u_r, hv)
+        sx = torch.einsum("kbj,kjg->kbg", u_r, sv)
+
+        r = hx - eig[..., None].to(x0.dtype) * sx
+        rn = torch.linalg.norm(r, dim=-1).real
+        if float(rn.max()) < tol:
+            return eig, x
+
+        # uniform expansion count across k (batching invariant): the worst
+        # unconverged residuals everywhere, max tally over k
+        n_add = int((rn > tol).sum(dim=1).max())
+        sel = torch.argsort(rn, dim=1, descending=True)[:, :n_add]
+        r_sel = torch.gather(r, 1, sel[..., None].expand(-1, -1, m))
+        # TPA scale = band kinetic expectation (POSITIVE — like the NC batched
+        # solver, per teter's contract). The per-k path passes eigenvalues and
+        # survives their negativity because its plain QR renormalizes the
+        # ~1e-14 preconditioned rows; _orthonormalize_b instead declares rows
+        # < 1e-8 degenerate and REPLACES them with jitter — random directions,
+        # no convergence for any band with eps <= 0.
+        t_band = torch.einsum("kbg,kg,kbg->kb", x.conj(), hs.t.to(x.dtype),
+                              x).real
+        tb_sel = torch.gather(t_band, 1, sel)
+        d = teter_b(r_sel, hs.t, tb_sel)
+        # unit-normalize rows BEFORE ortho: near-converged residuals are tiny
+        # (~1e-9) but their directions are the information; below the 1e-8
+        # threshold _orthonormalize_b would replace them with rank-safety
+        # jitter, flooring the SCF density residual near 1e-8 (per-k avoids
+        # this because plain QR rescales). Truly zero rows still jitter.
+        dn = torch.linalg.norm(d, dim=-1, keepdim=True).real
+        d = torch.where(dn > 1e-300, d / dn.clamp_min(1e-300), d)
+
+        if v.shape[1] + n_add > max_dim:
+            # restart from the Ritz block re-orthonormalized in the STANDARD
+            # metric (S-orthonormal-as-is drifts toward linear dependence and
+            # the overlap Cholesky then yields spurious below-minimum states)
+            v, hv, sv = _contract(x, hx, sx)
+        d = _orthonormalize_b(d, mask, against=v)
+        v = torch.cat([v, d], dim=1)
+        hv = torch.cat([hv, hs.h(d)], dim=1)
+        sv = torch.cat([sv, hs.s(d)], dim=1)
+    return eig, x
