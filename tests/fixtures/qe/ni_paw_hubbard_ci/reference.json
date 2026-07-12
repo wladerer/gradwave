@@ -1,0 +1,16 @@
+{
+ "qe_version": "v.7.5",
+ "etot_eV": -5837.07912011786,
+ "hubbard_eV": 1.2561720126250795,
+ "fft_dims": [
+  30,
+  30,
+  30
+ ],
+ "mag_muB": 0.52,
+ "tr_ns_updown": [
+  4.79285,
+  4.21658
+ ],
+ "system": "FM fcc Ni kjpaw, U=3 eV on 3d, HUBBARD (atomic), 4x4x4, gaussian 0.1 eV"
+}
