@@ -291,6 +291,49 @@ class OneCenter:
         gs = torch.autograd.grad(e_xc, leaves)
         return float(e_xc.detach()), [g.numpy() for g in gs]
 
+    def energy_theta(self, rho_ij) -> torch.Tensor:
+        """E_1c as a torch scalar with the XC-functional parameters ON THE
+        GRAPH (densities fixed) — the one-center piece of dE_total/dθ by
+        stationarity. Hartree is θ-independent and enters as a constant."""
+        spin = isinstance(rho_ij, (list, tuple))
+        rhos = ([m.detach().cpu().numpy().real for m in rho_ij]
+                if spin else [rho_ij.detach().cpu().numpy().real])
+        tt = self._torch_tables()
+        gga = getattr(self.xc, "needs_gradient", False)
+        e_tot = torch.zeros((), dtype=torch.float64)
+        for what, sgn in (("ae", 1.0), ("ps", -1.0)):
+            rls = [self.rho_lm(r, what) for r in rhos]
+            _, e_h = self.hartree(sum(rls))
+            core = tt["core_ae"] if what == "ae" else tt["core_ps"]
+            cfrac = 0.5 if spin else 1.0
+            dens, grads = [], []
+            for rl_np in rls:
+                rl = torch.as_tensor(rl_np, dtype=torch.float64)
+                rho_rad = rl @ tt["ylm"].T
+                dens.append(rho_rad * tt["rm2"][:, None] + cfrac * core[:, None])
+                if gga:
+                    dr = self._rgrad_t(dens[-1], tt)
+                    gth = (rl @ tt["dylmt"].T) * tt["rm3"][:, None]
+                    gph = (rl @ tt["dylmp"].T) * tt["rm3"][:, None]
+                    grads.append(torch.stack([dr, gth, gph]))
+            if spin:
+                if gga:
+                    g_tot = grads[0] + grads[1]
+                    sigs = ((grads[0] ** 2).sum(0).reshape(-1),
+                            (grads[1] ** 2).sum(0).reshape(-1),
+                            (g_tot**2).sum(0).reshape(-1))
+                else:
+                    sigs = (None, None, None)
+                e = self.xc.energy_density(dens[0].reshape(-1),
+                                           dens[1].reshape(-1), *sigs)
+            else:
+                sig = (grads[0] ** 2).sum(0).reshape(-1) if gga else None
+                e = self.xc.energy_density(dens[0].reshape(-1), sig)
+            e_xc = (e.reshape(self.mesh, self.nx) * tt["wq"][:, None]
+                    * tt["ww"][None, :]).sum()
+            e_tot = e_tot + sgn * (e_h + e_xc)
+        return e_tot
+
     # ---------- per-atom driver ----------
 
     def energy_and_ddd(self, rho_ij):
