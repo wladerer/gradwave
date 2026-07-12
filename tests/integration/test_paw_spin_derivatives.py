@@ -11,6 +11,8 @@ QE anchoring is inherited: the nspin=1 path is held to the si_paw_force_ci
 reference (1.3e-4 eV/Å, 0.13 kbar) by test_paw_derivatives_vs_qe.py.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -21,7 +23,10 @@ from gradwave.postscf.paw_forces import forces_uspp
 from gradwave.postscf.paw_stress import stress_uspp
 from gradwave.scf.uspp import scf_uspp, setup_uspp
 
-from .test_paw_derivatives_vs_qe import FIX, RY, SI_CELL, SI_POS_DISP
+FIX = Path(__file__).parents[1] / "fixtures" / "qe"
+RY = 13.605693122994
+SI_CELL = 5.43 / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+SI_POS_DISP = np.array([[0.0, 0.0, 0.0], [1.4075, 1.3175, 1.3775]])
 
 
 @pytest.mark.slow
