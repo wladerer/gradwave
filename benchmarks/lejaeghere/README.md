@@ -47,3 +47,21 @@ settings), and the published QE/psl Δ values (~0.3-0.6 meV/atom for these
 elements) are the fair target. Δ(gradwave vs QE) at identical settings
 isolates the implementation and should sit at the 0.01 meV/atom scale
 seen in `benchmarks/delta_factor/` for norm-conserving pseudos.
+
+## Results (2026-07)
+
+Δ vs WIEN2k (meV/atom): Si 0.061, Ge 0.096, Al 0.049, Cu 0.638,
+Ni 2.909. Δ vs QE at pinned identical settings: 0.014-0.034 across all
+five — the implementation floor. Cu and Ni sit at their pseudization
+limits (gradwave and QE agree to 0.02-0.03 while both differ from the
+all-electron curve identically), so the WIEN2k gap is a property of the
+psl 1.0.0 pseudos, not of either implementation. Ni ran FM at every
+volume (m 0.64-0.70 μB, matching QE's 0.68 at V0).
+
+FM Ni convergence notes, learned the hard way: the default mixing
+(alpha 0.7) collapses the moment to the NM branch — the damped alpha 0.3
+of the validated ni_paw_spin config is required; the density residual
+plateaus at metallic occupation noise, so the driver gates the energy
+tail (last-10 spread < 1e-5 eV) and a surviving moment instead of the
+converged flag; one volume (1.06) still landed NM from the 0.6-seed
+trajectory and needed start_mag 0.8.
