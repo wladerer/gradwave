@@ -414,10 +414,11 @@ def davidson_gen(hs: _HkS, x0: torch.Tensor, nbands: int, tol: float,
 @torch.no_grad()
 def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
              smearing="none", width=0.1, max_iter=60, etol=1e-8, rhotol=1e-7,
-             diago_tol=1e-9, mixing_alpha=0.7, mixing_history=8,
+             diago_tol=1e-9, mixing_alpha=0.7, mixing_history=None,
              trust_factor=20.0, batched=True, hubbard=None, start_from=None,
              criterion="drho", rho_safety=1e-2, adapt_step=False,
-             mixing_scheme="pulay", spin_precond=False, verbose=True):
+             mixing_scheme="pulay", mixing_kerker=None, mixing_metric="plain",
+             spin_precond=False, verbose=True):
     """USPP/PAW SCF. nspin=2 takes a SpinXC functional and per-species
     start_mag (list, in [-1, 1]); mixing then runs in the (total,
     magnetization) basis with Kerker on the total for smeared systems.
@@ -564,22 +565,34 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
             torch.ones(ng * (nspin - 1), dtype=torch.int64, device=dev),
             torch.full((nbec * nspin,), 2, dtype=torch.int64, device=dev),
         ])
+    use_kerker = (smearing != "none") if mixing_kerker is None \
+        else bool(mixing_kerker)
+    if mixing_history is None:
+        # per-scheme defaults, measured on FM Ni (see JohnsonMixer)
+        mixing_history = 12 if mixing_scheme == "johnson" else 8
+    metric_w = None
+    if mixing_metric == "coulomb":
+        # QE rho_ddot: Coulomb-metric inner products (long-range emphasis).
+        # G=0 is EXCLUDED (zero weight — 1/G² there poisons the Gram
+        # matrix); becsum components get unit weight
+        wg = torch.where(g2_mix > 1e-12, 1.0 / g2_mix.clamp_min(1e-12),
+                         torch.zeros_like(g2_mix))
+        metric_w = torch.cat([wg] * nspin
+                             + [torch.ones(nbec, device=dev)] * nspin)
     if mixing_scheme == "broyden":
         mixer = BroydenMixer(g2_full, alpha=mixing_alpha,
-                             history=mixing_history,
-                             kerker=(smearing != "none"),
+                             history=mixing_history, kerker=use_kerker,
                              kerker_mask=kerker_mask, check_g0=False,
                              step_scale=step_scale)
     elif mixing_scheme == "johnson":
         mixer = JohnsonMixer(g2_full, alpha=mixing_alpha,
-                             history=mixing_history,
-                             kerker=(smearing != "none"),
+                             history=mixing_history, kerker=use_kerker,
                              kerker_mask=kerker_mask, check_g0=False,
-                             step_scale=step_scale)
+                             step_scale=step_scale, metric_w=metric_w)
     else:
         mixer = PulayMixer(g2_full, alpha=mixing_alpha,
                            history=mixing_history,
-                           kerker=(smearing != "none"),
+                           kerker=use_kerker,
                            kerker_mask=kerker_mask, check_g0=False,
                            step_scale=step_scale, adapt_blocks=adapt_ids)
     coeffs = [[None] * nk for _ in range(nspin)]

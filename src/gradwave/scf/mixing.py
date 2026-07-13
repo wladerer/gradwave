@@ -129,19 +129,26 @@ class JohnsonMixer:
     Ni: pair normalization (scale invariance across a residual range of
     10⁴), w0-regularized simultaneous solve (near-parallel garbage pairs
     are damped, not exactly enforced), and no compounding of stale
-    corrections."""
+    corrections.
+
+    Measured Ni defaults (etol 1e-6 energy criterion, default alpha):
+    history 8 → 44 iterations, 12 → 27, 16 → 26, 25 → 27, so 12 is the
+    default (saturation); Kerker ON beats OFF (44 vs 58); the Coulomb
+    metric option does not converge this system and stays non-default."""
 
     def __init__(
         self,
         g2: torch.Tensor,
         alpha: float = 0.7,
-        history: int = 8,
+        history: int = 12,
         kerker: bool = False,
         q0: float = 1.1,
         check_g0: bool = True,
         kerker_mask=None,
         step_scale=None,
         w0: float = 0.01,
+        metric_w=None,  # per-component inner-product weights (QE rho_ddot
+        # uses the Coulomb metric; None → plain l2)
     ):
         self.g2 = g2
         self.alpha = alpha
@@ -152,6 +159,7 @@ class JohnsonMixer:
         self.kerker_mask = kerker_mask
         self.step_scale = step_scale
         self.w0 = w0
+        self.metric_w = metric_w
         self.extra_precond = None
         self._df: list[torch.Tensor] = []
         self._u: list[torch.Tensor] = []
@@ -186,8 +194,14 @@ class JohnsonMixer:
         m = len(self._df)
         if m:
             dfm = torch.stack(self._df)
-            a = torch.einsum("ig,jg->ij", dfm.conj(), dfm).real
-            c = torch.einsum("ig,g->i", dfm.conj(), f).real
+            if self.metric_w is not None:
+                a = torch.einsum("ig,g,jg->ij", dfm.conj(), self.metric_w,
+                                 dfm).real
+                c = torch.einsum("ig,g,g->i", dfm.conj(), self.metric_w,
+                                 f).real
+            else:
+                a = torch.einsum("ig,jg->ij", dfm.conj(), dfm).real
+                c = torch.einsum("ig,g->i", dfm.conj(), f).real
             beta = torch.linalg.solve(
                 self.w0**2 * torch.eye(m, dtype=a.dtype, device=a.device)
                 + a, c)
