@@ -102,6 +102,7 @@ elif mode == "run":
                          start_mag=cfg["start_mag"],
                          smearing=cfg["smearing"], width=cfg["width"],
                          mixing_alpha=cfg.get("mixing_alpha", 0.7),
+                         mixing_scheme=cfg.get("mixing_scheme", "pulay"),
                          criterion=cfg.get("criterion", "drho"),
                          etol=1e-9, rhotol=cfg.get("rhotol", 1e-8),
                          verbose=False, max_iter=150, start_from=prev_res)

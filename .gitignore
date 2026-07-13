@@ -9,3 +9,4 @@ benchmarks/results/
 tests/fixtures/qe/**/tmp/
 *.wfc*
 *.save/
+benchmarks/*.pt

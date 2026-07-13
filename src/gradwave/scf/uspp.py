@@ -53,7 +53,7 @@ from gradwave.pseudo.radial import sbt
 from gradwave.pseudo.upf_paw import PAWData
 from gradwave.scf.guess import sad_density
 from gradwave.scf.loop import vxc_potential
-from gradwave.scf.mixing import PulayMixer
+from gradwave.scf.mixing import BroydenMixer, JohnsonMixer, PulayMixer
 from gradwave.solvers.precond import teter
 
 _MINUS_I_POW_L = [1.0, -1.0j, -1.0, 1.0j, 1.0]  # (−i)^L, L ≤ 4
@@ -416,7 +416,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
              smearing="none", width=0.1, max_iter=60, etol=1e-8, rhotol=1e-7,
              diago_tol=1e-9, mixing_alpha=0.7, mixing_history=8,
              trust_factor=20.0, batched=True, hubbard=None, start_from=None,
-             criterion="drho", rho_safety=1e-2, verbose=True):
+             criterion="drho", rho_safety=1e-2, adapt_step=False,
+             mixing_scheme="pulay", spin_precond=False, verbose=True):
     """USPP/PAW SCF. nspin=2 takes a SpinXC functional and per-species
     start_mag (list, in [-1, 1]); mixing then runs in the (total,
     magnetization) basis with Kerker on the total for smeared systems.
@@ -435,7 +436,26 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     converges on a settled 3-iteration free-energy tail (< etol) with only
     the loose rho_safety residual bound — the honest criterion for smeared
     metals, whose residual floors at occupation noise (O(res²) energy
-    error) while F is long converged."""
+    error) while F is long converged.
+    adapt_step: OPT-IN per-block adaptive damping. Blocks whose residual
+    grows across iterations get their damped step cut by the observed
+    gain, with a plateau-triggered global halving on top. On FM Ni at the
+    default mixing_alpha this prevents the silent collapse to the NM
+    branch (m and F land at the validated values), but it does NOT reach
+    tight convergence — the monotone multipliers over-react to transient
+    startup growth (measured head-to-head: static alpha=0.3 converges to
+    |dρ| 2e-3 where adaptive stalls at 2e-2 with the ρ-block floored).
+    Use it as a stabilizer for exploratory runs at unknown damping; for
+    production FM metals keep hand-set mixing_alpha (0.3 for Ni).
+    mixing_scheme: "pulay" (default) or "broyden" — limited-memory
+    Broyden-II, whose sequential secant updates keep directional gain
+    estimates that Pulay's residual-span extrapolation loses (the QE
+    default scheme; candidate replacement for hand-set damping on FM
+    metals).
+    spin_precond: Stoner preconditioner on the magnetization channel
+    (smeared nspin=2 only; scf/spin_precond.py) — the physics-informed
+    treatment of the Stoner-expansive mode, applied to residuals before
+    damping/mixing."""
     grid = system.grid
     vol = grid.volume
     dev = system.positions.device
@@ -534,9 +554,34 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         torch.ones(ng * nspin, dtype=torch.float64, device=dev),
         torch.full((nbec * nspin,), 0.4, dtype=torch.float64, device=dev),
     ])
-    mixer = PulayMixer(g2_full, alpha=mixing_alpha, history=mixing_history,
-                       kerker=(smearing != "none"), kerker_mask=kerker_mask,
-                       check_g0=False, step_scale=step_scale)
+    # opt-in per-block adaptive damping: blocks = ρ_tot grid, m grid,
+    # becsum (see the docstring for its honest scope — collapse
+    # protection, not a replacement for hand-set damping)
+    adapt_ids = None
+    if adapt_step:
+        adapt_ids = torch.cat([
+            torch.zeros(ng, dtype=torch.int64, device=dev),
+            torch.ones(ng * (nspin - 1), dtype=torch.int64, device=dev),
+            torch.full((nbec * nspin,), 2, dtype=torch.int64, device=dev),
+        ])
+    if mixing_scheme == "broyden":
+        mixer = BroydenMixer(g2_full, alpha=mixing_alpha,
+                             history=mixing_history,
+                             kerker=(smearing != "none"),
+                             kerker_mask=kerker_mask, check_g0=False,
+                             step_scale=step_scale)
+    elif mixing_scheme == "johnson":
+        mixer = JohnsonMixer(g2_full, alpha=mixing_alpha,
+                             history=mixing_history,
+                             kerker=(smearing != "none"),
+                             kerker_mask=kerker_mask, check_g0=False,
+                             step_scale=step_scale)
+    else:
+        mixer = PulayMixer(g2_full, alpha=mixing_alpha,
+                           history=mixing_history,
+                           kerker=(smearing != "none"),
+                           kerker_mask=kerker_mask, check_g0=False,
+                           step_scale=step_scale, adapt_blocks=adapt_ids)
     coeffs = [[None] * nk for _ in range(nspin)]
     e_free_prev, history, converged = None, [], False
     rescue_count, seed_salt = 0, 0  # solver-blowup rescue state (task #55)
@@ -633,7 +678,10 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                         dscr_s[isp][s0:s1, s0:s1] += ddd[isp].to(dev)
 
         if it == 1:
-            tol_eff = max(diago_tol, 1e-3)
+            # SAD starts don't deserve a tight first solve; warm starts do
+            # (their density is already near a fixed point — scan/rig
+            # callers control precision through diago_tol)
+            tol_eff = max(diago_tol, 1e-3) if start_from is None else diago_tol
         else:
             r_prev = history[-1]["res"]
             tol_eff = max(diago_tol, min(1e-3, 0.1 * r_prev * r_prev / system.n_electrons))
@@ -919,6 +967,24 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
             if verbose:
                 print(f"  USPP {it:3d}  [mixer reset: residual jumped "
                       f"{res_norm:.2e} > {trust_factor:g}x best {best_res:.2e}]")
+        if spin_precond and nspin == 2 and smearing != "none":
+            # Stoner preconditioner on the m-channel (arXiv:2606.26693):
+            # rebuilt each iteration from the current orbitals; neutralizes
+            # the Stoner-expansive magnetization mode that plain damping
+            # amplifies and history mixing cannot hold
+            from gradwave.scf.spin_precond import build_stoner_precond
+
+            sp = build_stoner_precond(
+                system, coeffs, eigs_s, mu, SCHEMES[smearing], width,
+                rho_out_s[0] + rho_out_s[1], rho_out_s[0] - rho_out_s[1], xc)
+            if sp is None:
+                mixer.extra_precond = None
+            else:
+                def _spin_pc(rvec, _sp=sp):
+                    out = rvec.clone()
+                    out[ng:2 * ng] = _sp.apply(rvec[ng:2 * ng])
+                    return out
+                mixer.extra_precond = _spin_pc
         mixed = mixer.step(rho_in_vec, rho_out_vec)
         rho_block, bec_block = mixed[: ng * nspin], mixed[ng * nspin:]
         if nspin == 1:
@@ -951,6 +1017,9 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         rho_ij_atoms=rho_ij_s[0] if nspin == 1 else rho_ij_s,
         becps=becps_s[0] if nspin == 1 else becps_s, history=history,
         fermi=mu, system=system, nspin=nspin, smearing=smearing, width=width,
+        mixer_mult=(dict(mixer._block_mult)
+                    if getattr(mixer, "_block_mult", None) else None),
+        rho_out_spin=rho_out_s,  # RAW map output (pre-mixing) — rig/diagnostics
     )
     if hub is not None:
         out["hub_occ"] = n_hub_s
