@@ -415,14 +415,27 @@ def davidson_gen(hs: _HkS, x0: torch.Tensor, nbands: int, tol: float,
 def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
              smearing="none", width=0.1, max_iter=60, etol=1e-8, rhotol=1e-7,
              diago_tol=1e-9, mixing_alpha=0.7, mixing_history=8,
-             trust_factor=20.0, batched=True, hubbard=None, verbose=True):
+             trust_factor=20.0, batched=True, hubbard=None, start_from=None,
+             criterion="drho", rho_safety=1e-2, verbose=True):
     """USPP/PAW SCF. nspin=2 takes a SpinXC functional and per-species
     start_mag (list, in [-1, 1]); mixing then runs in the (total,
     magnetization) basis with Kerker on the total for smeared systems.
     batched=True solves all k in one padded generalized-Davidson block
     (identical eigenpairs; batched=False is the reference per-k path).
     hubbard: list[HubbardManifold] — Dudarev DFT+U with S-metric occupation
-    matrices (QE U_projection_type='atomic' convention for USPP)."""
+    matrices (QE U_projection_type='atomic' convention for USPP).
+    start_from: a previous scf_uspp result on the SAME FFT grid and spin
+    count — seeds (ρ, becsum) from its converged state instead of SAD +
+    atomic occupations. The density is rescaled by the volume ratio so the
+    electron count is conserved. This is the right start for scans (EOS
+    volumes, displacements): adjacent points are small perturbations, so
+    the warm start both cuts iterations and keeps trajectory-dependent
+    branches (FM vs NM) from flipping between points.
+    criterion: "drho" (default) demands both etol and rhotol; "energy"
+    converges on a settled 3-iteration free-energy tail (< etol) with only
+    the loose rho_safety residual bound — the honest criterion for smeared
+    metals, whose residual floors at occupation noise (O(res²) energy
+    error) while F is long converged."""
     grid = system.grid
     vol = grid.volume
     dev = system.positions.device
@@ -431,7 +444,25 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     mask_flat = grid.dens_mask.reshape(-1)
     g_spin = 2 if nspin == 1 else 1
 
-    if nspin == 1:
+    if start_from is not None:
+        prev_grid = start_from["system"].grid
+        if tuple(prev_grid.shape) != tuple(shape):
+            raise ValueError("start_from requires the same FFT grid "
+                             f"({tuple(prev_grid.shape)} vs {tuple(shape)})")
+        if start_from.get("nspin", 1) != nspin:
+            raise ValueError("start_from nspin mismatch")
+        # ρ carries a 1/Ω normalization: rescale by the volume ratio so the
+        # electron count is exactly conserved on the new cell
+        chg = float(prev_grid.volume) / float(vol)
+        if nspin == 1:
+            rho_s = [start_from["rho"].detach().to(dev) * chg]
+            spin_frac = [None]
+        else:
+            rho_s = [r.detach().to(dev) * chg for r in start_from["rho_spin"]]
+            mags = list(start_mag or [0.0] * len(system.paws))
+            spin_frac = [[(1.0 + m) / 2.0 for m in mags],
+                         [(1.0 - m) / 2.0 for m in mags]]
+    elif nspin == 1:
         rho_s = [sad_density(grid, system.positions, system.species_of_atom,
                              system.paws, system.n_electrons)]
         spin_frac = [None]
@@ -524,20 +555,27 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
 
         onec = [OneCenter(p, xc) for p in system.paws]
     rho_ij_s = [[] for _ in range(nspin)]
-    for sp in system.species_of_atom:
-        paw = system.paws[sp]
-        nm = sum(2 * b.l + 1 for b in paw.betas)
+    if start_from is not None:
+        prev_bec = start_from["rho_ij_atoms"]
         for isp in range(nspin):
-            m0 = torch.zeros(nm, nm, dtype=CDTYPE, device=dev)
-            if paw.paw_occ is not None:
-                frac = 0.5 if nspin == 1 else spin_frac[isp][sp]
-                col = 0
-                for i, b in enumerate(paw.betas):
-                    for _m in range(2 * b.l + 1):
-                        m0[col, col] = paw.paw_occ[i] / (2 * b.l + 1) * (
-                            2.0 * frac if nspin == 1 else frac)
-                        col += 1
-            rho_ij_s[isp].append(m0)
+            src = prev_bec if nspin == 1 else prev_bec[isp]
+            rho_ij_s[isp] = [m.detach().to(device=dev, dtype=CDTYPE).clone()
+                             for m in src]
+    else:
+        for sp in system.species_of_atom:
+            paw = system.paws[sp]
+            nm = sum(2 * b.l + 1 for b in paw.betas)
+            for isp in range(nspin):
+                m0 = torch.zeros(nm, nm, dtype=CDTYPE, device=dev)
+                if paw.paw_occ is not None:
+                    frac = 0.5 if nspin == 1 else spin_frac[isp][sp]
+                    col = 0
+                    for i, b in enumerate(paw.betas):
+                        for _m in range(2 * b.l + 1):
+                            m0[col, col] = paw.paw_occ[i] / (2 * b.l + 1) * (
+                                2.0 * frac if nspin == 1 else frac)
+                            col += 1
+                rho_ij_s[isp].append(m0)
     rho_ij_mix = [[m.clone() for m in ch] for ch in rho_ij_s]
 
     def _becsum_for_onec(a):
@@ -834,7 +872,21 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                 mag = f"  m = {m:+.4f} muB"
             print(f"  USPP {it:3d}  F = {e_free:+.10f} eV  dE = {de:.3e}  "
                   f"|drho| = {res_norm:.3e}{mag}")
-        if de < etol and res_norm < rhotol and tol_eff <= diago_tol * 1.01:
+        if criterion == "energy":
+            # QE-style energy criterion: the free energy is variational, its
+            # error is O(residual²), and for smeared metals the residual
+            # floors at occupation noise long after F has settled. Require a
+            # settled 3-iteration tail (a single small dE can be a sloshing
+            # coincidence) plus a loose residual safety that excludes frozen
+            # limit cycles without demanding the unreachable plateau floor.
+            tail = [h["free_energy"] for h in history[-3:]]
+            done = (len(tail) == 3 and max(tail) - min(tail) < etol
+                    and res_norm < rho_safety
+                    and tol_eff <= diago_tol * 1.01)
+        else:
+            done = (de < etol and res_norm < rhotol
+                    and tol_eff <= diago_tol * 1.01)
+        if done:
             converged = True
             rho_s = rho_out_s
             if is_paw:  # report the one-center energy at the FINAL fresh becsum

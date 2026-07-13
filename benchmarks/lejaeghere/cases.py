@@ -50,13 +50,14 @@ CASES = {
                kmesh=(16, 16, 16), smearing="gaussian", width=0.01 * RY,
                nbands=14, nspin=1, start_mag=None),
     # FM Ni needs the damped mixer (alpha 0.3 — the validated ni_paw_spin
-    # config; alpha 0.7 collapses the moment to the NM branch) and accepts
-    # the metallic-occupation residual plateau: converge on the energy tail
+    # config; alpha 0.7 collapses the moment to the NM branch) and the
+    # energy convergence criterion: its density residual floors at metallic
+    # occupation noise while the free energy is long settled
     "ni": dict(pseudo="Ni.pbe-spn-kjpaw_psl.1.0.0.UPF", elems=["Ni"],
                frac=[[0, 0, 0]], ecut_ry=75, ecutrho_ry=480,
                kmesh=(12, 12, 12), smearing="gaussian", width=0.01 * RY,
                nbands=14, nspin=2, start_mag=[0.8],
-               mixing_alpha=0.3, rhotol=2e-3),
+               mixing_alpha=0.3, criterion="energy"),
 }
 
 
