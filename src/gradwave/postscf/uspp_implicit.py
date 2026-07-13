@@ -46,7 +46,30 @@ becsum symmetrizer), so the transpose of the composite collapses to
 symmetrizing apply_chi0's two inputs and touching nothing inside. On the
 symmetric subspace the weighted-IBZ response followed by symmetrization IS
 the full-BZ response, so gradients match the full-mesh adjoint exactly, at
-1/|G|-ish the Sternheimer cost. Insulators, nspin=1, no +U.
+1/|G|-ish the Sternheimer cost.
+
+Smeared metals: occupations respond too. χ̃ decomposes exactly over the
+COMPUTED band window (Davidson always carries empty buffer bands, so no
+de Gironcoli θ̃ partition is needed):
+
+  (a) response into the uncomputed complement — Sternheimer solves for the
+      occupation-carrying bands with the WHOLE window projected out, so the
+      shifted operator stays positive definite even with states straddling
+      μ (the complement spectrum starts above the window top);
+  (b) window↔window pairs — an explicit sum over states with divided-
+      difference weights (f_n − f_m)/(ε_n − ε_m), which tend to f′ at
+      degeneracies (safe at the Fermi surface where sharp-occupation
+      denominators would blow up);
+  (c) the Fermi-surface diagonal δf_n = f′(ε_n)(δε_n − δμ), with
+      δμ = Σ w f′ δε / Σ w f′ from particle conservation — a rank-one
+      coupling across the whole BZ, δε_n = ⟨ψ_n|δv + Σ δD|β⟩⟨β||ψ_n⟩.
+
+Each piece is symmetric ((a)+(b) by pair symmetry of the weights, (c) is
+diag + rank-one built from one vector), so χ̃ᵀ = χ̃ still holds and the
+transposed fixed point is unchanged. f′ vanishes → (c) drops out and (b)
+reduces to the occupied↔empty-window pairs: the insulator limit is exact,
+not a special case. Free-energy gradients (M1) never needed any of this —
+F is stationary in the occupations. nspin=1, no +U.
 """
 
 from __future__ import annotations
@@ -102,14 +125,26 @@ def _check_supported(res: dict):
         raise NotImplementedError("USPP adjoint: nspin=2 is future work")
     if "hub_occ" in res:
         raise NotImplementedError("USPP adjoint: +U response not implemented")
+    occ = res["occupations"]
+    frac = bool(((occ > _F_CUT) & ((occ - 2.0).abs() > _F_CUT)).any())
+    if frac and res.get("smearing", "none") == "none":
+        raise ValueError("USPP adjoint: fractional occupations but no "
+                         "smearing metadata in the result dict")
 
 
-def _occupied_uspp(res: dict, ik: int):
-    occ = res["occupations"][ik]
-    n_occ = int((occ > 1e-8).sum())
-    if not torch.all((occ[:n_occ] - 2.0).abs() < 1e-8):
-        raise NotImplementedError("USPP adjoint supports insulators only (occ = 2)")
-    return res["coeffs"][ik][:n_occ], res["eigenvalues"][ik][:n_occ].to(RDTYPE)
+_F_CUT = 1e-8  # bands above this occupation get Sternheimer solves
+
+
+def _window_uspp(res: dict, ik: int):
+    """The full computed-band window at k (coeffs, ε, f) plus the number of
+    occupation-carrying bands to solve for. Bands are ε-sorted; the solved
+    set must be a prefix (mp1/cold non-monotonicity lives at f ~ 1e-2,
+    far above the cut)."""
+    occ = res["occupations"][ik].to(RDTYPE)
+    n_solve = int((occ > _F_CUT).sum())
+    if not torch.all(occ[:n_solve] > _F_CUT):
+        raise NotImplementedError("USPP adjoint: non-prefix band occupations")
+    return res["coeffs"][ik], res["eigenvalues"][ik].to(RDTYPE), occ, n_solve
 
 
 class _ConvergedUSPP:
@@ -162,21 +197,54 @@ class _ConvergedUSPP:
                 _, ddd = self.onec[sp].energy_and_ddd(self.rho_ij[a])
                 dscr[s0:s1, s0:s1] += ddd.to(dev)
 
-        self.hks, self.c_occ, self.s_occ, self.eps_occ = [], [], [], []
-        self.b_occ, self.shifts, self.t_band = [], [], []
+        # smearing scheme for f′ (Fermi-surface response weights); None for
+        # fixed occupations, where every f′-term vanishes identically
+        from gradwave.core.occupations import SCHEMES
+
+        smear = res.get("smearing", "none")
+        self.scheme = SCHEMES[smear] if smear != "none" else None
+        self.width = float(res.get("width", 0.0))
+        self.mu = res.get("fermi")
+
+        self.hks, self.c_win, self.s_win, self.eps_win = [], [], [], []
+        self.f_win, self.fp_win, self.n_solve = [], [], []
+        self.b_win, self.shifts, self.t_band = [], [], []
         for ik, sph in enumerate(system.spheres):
             p = projectors(system.proj_data[ik], system.positions)
             hk = _HkS(sph, self.shape, self.v_eff, system.proj_data[ik], p,
                       dscr, system.q_full)
-            c, eps = _occupied_uspp(res, ik)
+            c, eps, f, ns = _window_uspp(res, ik)
+            fp = self._f_prime(eps)
+            if self.scheme is not None and (
+                    ns == len(f) or float(fp[-1].abs()) > 1e-10):
+                raise ValueError(
+                    "USPP adjoint: band window too thin — the top computed "
+                    "band still carries occupation/Fermi-surface weight; "
+                    "re-run the SCF with more nbands")
             self.hks.append(hk)
-            self.c_occ.append(c)
-            self.s_occ.append(hk.s(c))
-            self.eps_occ.append(eps)
-            self.b_occ.append(becp(p, c))
+            self.c_win.append(c)
+            self.s_win.append(hk.s(c))
+            self.eps_win.append(eps)
+            self.f_win.append(f)
+            self.fp_win.append(fp)
+            self.n_solve.append(ns)
+            self.b_win.append(becp(p, c))
             self.shifts.append(2.0 * float(eps.max() - eps.min()) + 10.0)
             self.t_band.append(torch.clamp(torch.einsum(
-                "bg,g,bg->b", c.conj(), hk.t.to(c.dtype), c).real, min=1e-6))
+                "bg,g,bg->b", c[:ns].conj(), hk.t.to(c.dtype), c[:ns]).real,
+                min=1e-6))
+
+    def _f_prime(self, eps: torch.Tensor) -> torch.Tensor:
+        """df/dε per band (≤ 0, includes the g = 2 spin factor) — computed
+        by autograd through the scheme's occupation function, so every
+        smearing stays scheme-consistent for free."""
+        if self.scheme is None or self.width <= 0.0:
+            return torch.zeros_like(eps)
+        x = ((eps - self.mu) / self.width).detach().requires_grad_(True)
+        with torch.enable_grad():
+            f = self.scheme.occupation(x)
+            (dfdx,) = torch.autograd.grad(f.sum(), x)
+        return 2.0 * dfdx / self.width
 
     def _aug_dmat(self, w_r: torch.Tensor) -> torch.Tensor:
         """Block-diagonal ∫w(r) Q_ij(r−τ_a) d³r — same pairing the SCF uses
@@ -192,11 +260,14 @@ class _ConvergedUSPP:
         return out
 
     def _sternheimer_k(self, ik: int, rhs, x0, tol: float, max_iter: int):
-        """(H − ε_n S + α S|ψ⟩⟨ψ|S) δψ_n = rhs, in the S-metric conduction
-        space (P_c = 1 − Σ|ψ⟩⟨ψ|S projects the WHOLE occupied subspace, so
-        degenerate valence tops are handled together)."""
+        """(H − ε_n S + α S|ψ⟩⟨ψ|S) δψ_n = rhs, in the S-metric complement
+        of the computed-band WINDOW (P_c = 1 − Σ|ψ⟩⟨ψ|S over every computed
+        band): window↔window response goes through the explicit pair sum,
+        and projecting the empties too keeps H − ε_n S positive definite
+        for metallic ε_n at the Fermi level."""
         hk = self.hks[ik]
-        c, s, eps = self.c_occ[ik], self.s_occ[ik], self.eps_occ[ik]
+        c, s = self.c_win[ik], self.s_win[ik]
+        eps = self.eps_win[ik][:self.n_solve[ik]]
         alpha = self.shifts[ik]
 
         def pc(x):  # 1 − Σ|ψ⟩⟨Sψ|
@@ -243,25 +314,86 @@ class _ConvergedUSPP:
         drho_sm = torch.zeros(self.shape, dtype=RDTYPE)
         dbec = [torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE)
                 for (s0, s1) in system.atom_slices]
+        # Fermi-surface accumulators: δρ_FS = A − δμ·B with δμ = num/den
+        # assembled only after the k loop (particle conservation couples
+        # every k-point through the single scalar δμ)
+        num_mu = den_mu = 0.0
+        a_r = torch.zeros(grid.n_points, dtype=RDTYPE)
+        b_r = torch.zeros(grid.n_points, dtype=RDTYPE)
+        a_bec = [torch.zeros_like(m) for m in dbec]
+        b_bec = [torch.zeros_like(m) for m in dbec]
         for ik, sph in enumerate(system.spheres):
-            hk, c = self.hks[ik], self.c_occ[ik]
+            hk, c = self.hks[ik], self.c_win[ik]
+            ns = self.n_solve[ik]
+            f, eps, fp = self.f_win[ik], self.eps_win[ik], self.fp_win[ik]
+            wk = float(kw[ik])
             psi_r = g_to_r(c, sph.flat_idx, self.shape)
-            w_psi = box_to_sphere(r_to_g(psi_r * w_r), sph.flat_idx)
-            beta_term = (self.b_occ[ik] @ dpert.to(CDTYPE)) @ hk.p
-            rhs = w_psi + beta_term
-            rhs = -(rhs - (rhs @ c.conj().T) @ self.s_occ[ik])  # −P_c† dV ψ
+            dv_psi = (box_to_sphere(r_to_g(psi_r * w_r), sph.flat_idx)
+                      + (self.b_win[ik] @ dpert.to(CDTYPE)) @ hk.p)
+            # ⟨ψ_m|δV|ψ_n⟩ over the whole window (Hermitian: δV is real
+            # local + real-symmetric D, and the sphere projection commutes
+            # with the c_m pairing)
+            dvmat = torch.einsum("mg,ng->mn", c.conj(), dv_psi)
+
+            # (a) complement response: solves for occupation-carrying bands
+            rhs = dv_psi[:ns]
+            rhs = -(rhs - (rhs @ c.conj().T) @ self.s_win[ik])  # −P_c† dV ψ
             dpsi = self._sternheimer_k(ik, rhs, dpsi_warm[ik], cg_tol,
                                        cg_max_iter)
             dpsi_warm[ik] = dpsi
             dpsi_r = g_to_r(dpsi, sph.flat_idx, self.shape)
-            # f = 2, plus the c.c. pair (ψ*δψ + δψ*ψ)
-            drho_sm += 4.0 * float(kw[ik]) * (psi_r.conj() * dpsi_r).real.sum(dim=0)
+            fw = f[:ns]
+            # per-band f_n, plus the c.c. pair (ψ*δψ + δψ*ψ)
+            drho_sm += 2.0 * wk * torch.einsum(
+                "b,bxyz->xyz", fw, (psi_r[:ns].conj() * dpsi_r).real)
             b_d = becp(hk.p, dpsi)
-            w2 = (2.0 * kw[ik]).to(CDTYPE)
             for a, (s0, s1) in enumerate(system.atom_slices):
-                bo, bd = self.b_occ[ik][:, s0:s1], b_d[:, s0:s1]
-                dbec[a] += w2 * (torch.einsum("bi,bj->ij", bd.conj(), bo)
-                                 + torch.einsum("bi,bj->ij", bo.conj(), bd))
+                bo, bd = self.b_win[ik][:ns, s0:s1], b_d[:, s0:s1]
+                m1 = torch.einsum("b,bi,bj->ij", fw.to(CDTYPE),
+                                  bd.conj(), bo)
+                dbec[a] += wk * (m1 + m1.conj().T)
+
+            # (b) window↔window pairs: divided-difference weights
+            # (f_n−f_m)/(ε_n−ε_m) → f′ at degeneracies; diagonal excluded
+            # (that is the FS term). Insulators: only occ↔empty survive.
+            de = eps[:, None] - eps[None, :]
+            near = de.abs() < 1e-6
+            wmat = torch.where(
+                near, 0.5 * (fp[:, None] + fp[None, :]),
+                (f[:, None] - f[None, :])
+                / torch.where(near, torch.ones_like(de), de))
+            wmat.fill_diagonal_(0.0)
+            m_pair = wmat.to(CDTYPE) * dvmat.mT  # M_nm = W_nm ⟨ψ_m|δV|ψ_n⟩
+            psi_flat = psi_r.reshape(len(f), -1)
+            phi = m_pair @ psi_flat
+            drho_sm += wk * (psi_flat.conj() * phi).real.sum(dim=0).reshape(
+                self.shape)
+            for a, (s0, s1) in enumerate(system.atom_slices):
+                bw = self.b_win[ik][:, s0:s1]
+                dbec[a] += wk * torch.einsum("nm,ni,mj->ij", m_pair,
+                                             bw.conj(), bw)
+
+            # (c) Fermi-surface diagonal: δf_n = f′_n (δε_n − δμ)
+            fs = fp.abs() > 1e-14
+            if bool(fs.any()):
+                deps = dvmat.diagonal().real[fs]
+                cfs = wk * fp[fs]
+                num_mu += float((cfs * deps).sum())
+                den_mu += float(cfs.sum())
+                dens = (psi_flat[fs].conj() * psi_flat[fs]).real
+                a_r += ((cfs * deps)[:, None] * dens).sum(dim=0)
+                b_r += (cfs[:, None] * dens).sum(dim=0)
+                for a, (s0, s1) in enumerate(system.atom_slices):
+                    bwf = self.b_win[ik][fs, s0:s1]
+                    a_bec[a] += torch.einsum(
+                        "n,ni,nj->ij", (cfs * deps).to(CDTYPE),
+                        bwf.conj(), bwf)
+                    b_bec[a] += torch.einsum(
+                        "n,ni,nj->ij", cfs.to(CDTYPE), bwf.conj(), bwf)
+        dmu = num_mu / den_mu if abs(den_mu) > 1e-12 else 0.0
+        drho_sm += (a_r - dmu * b_r).reshape(self.shape)
+        for a in range(len(dbec)):
+            dbec[a] += a_bec[a] - dmu * b_bec[a]
         dbec = [0.5 * (m + m.conj().T) for m in dbec]
 
         aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE)
@@ -342,7 +474,8 @@ def uspp_density_loss_param_grads(
 
         l_vec = join(vbar, [torch.zeros(n, n, dtype=torch.float64)
                             for n in nbec])
-        dpsi_warm = [torch.zeros_like(c) for c in cs.c_occ]
+        dpsi_warm = [torch.zeros_like(c[:ns])
+                     for c, ns in zip(cs.c_win, cs.n_solve, strict=True)]
 
         def symmetrize(w_r, d_bare):
             """𝒮ᵀu = 𝒮u (self-adjoint projections), mirroring the SCF's

@@ -103,6 +103,56 @@ def test_paw_density_loss_grads_vs_fd():
 
 
 @pytest.mark.slow
+def test_metal_paw_density_loss_grads_vs_fd():
+    """Fermi-surface response term: for a smeared metal the density adjoint
+    carries three channels — Sternheimer into the uncomputed complement,
+    the explicit window-pair sum with divided-difference occupation
+    weights, and the diagonal δf_n = f′(δε_n − δμ) with δμ from particle
+    conservation (rank-one coupling across the BZ). Validated against
+    central FD of complete smeared-SCF re-runs on Al kjpaw."""
+    torch.set_num_threads(8)
+    paw = parse_upf_paw(FIX / "pseudos" / "Al.pbe-n-kjpaw_psl.1.0.0.UPF")
+    a = 4.04
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0.0, 0.0]])
+
+    def scf_at(xc):
+        s = setup_uspp(cell, pos, [0], [paw], ecut=20 * RY,
+                       kmesh=(2, 2, 2), ecutrho=100 * RY, nbands=8)
+        r = scf_uspp(s, xc, smearing="gaussian", width=0.5, etol=1e-12,
+                     rhotol=1e-10, verbose=False, max_iter=120)
+        assert r["converged"]
+        return r
+
+    xc0 = LearnableX()
+    res = scf_at(xc0)
+    occ = res["occupations"]
+    assert bool(((occ > 1e-4) & (occ < 2.0 - 1e-4)).any()), \
+        "test premise: fractional occupations must be present"
+    rho_ref = (0.95 * res["rho"]).detach().clone()
+
+    def loss_fn(rho):
+        d = rho - rho_ref
+        return (d * d).sum()
+
+    loss, grads = uspp_density_loss_param_grads(res, xc0, loss_fn)
+
+    h = 2e-3
+    for name in ("raw_mu", "raw_kappa"):
+        vals = []
+        for sgn in (+1, -1):
+            xc = LearnableX()
+            with torch.no_grad():
+                getattr(xc, name).add_(sgn * h)
+            vals.append(float(loss_fn(scf_at(xc)["rho"])))
+        fd = (vals[0] - vals[1]) / (2 * h)
+        an = float(grads[name])
+        rel = abs(an - fd) / max(abs(fd), 1e-30)
+        assert rel < 2e-4, \
+            f"dL/d({name}) adjoint {an} vs FD {fd} (rel {rel:.2e})"
+
+
+@pytest.mark.slow
 def test_paw_density_loss_grads_ibz_equals_full():
     """IBZ (use_symmetry=True) adjoint == full-mesh adjoint. The transposed
     symmetrized SCF map applies the self-adjoint symmetrizers to u before

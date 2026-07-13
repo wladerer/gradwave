@@ -898,7 +898,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         coeffs=coeffs[0] if nspin == 1 else coeffs, rho=rho_final,
         rho_ij_atoms=rho_ij_s[0] if nspin == 1 else rho_ij_s,
         becps=becps_s[0] if nspin == 1 else becps_s, history=history,
-        fermi=mu, system=system, nspin=nspin,
+        fermi=mu, system=system, nspin=nspin, smearing=smearing, width=width,
     )
     if hub is not None:
         out["hub_occ"] = n_hub_s
