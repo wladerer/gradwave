@@ -106,6 +106,13 @@ version.
   only if the overhead is <10% and NC maintenance is actually hurting,
   neither is true today.
 
+**Done, minimal as specified (2026-07-14, commit ca233b5).** The one
+genuinely duplicated block — shared-Fermi occupations/entropy — moved
+to scf/common.py and both loops consume it. Trust region, rescue, and
+the energy criterion turned out to be USPP-only stabilizers, not
+shared logic, so they stayed put. The unification spike remains
+unspent by design.
+
 ## Stage 5 — Test tiering
 
 The "fast" suite has crept from seconds to ~10 minutes and the four
@@ -144,6 +151,14 @@ lower-cutoff rewrites of individual tests were not needed to reach the
   mixer overhaul's winner makes them unnecessary, which is the point of
   the overhaul. Anything that must stay gets a comment naming the reason
   and the evidence.
+
+**Done (2026-07-14, commits 5216ff2 + 3602bd0 + 332f180).** The
+workaround knobs are deleted and the johnson Δ re-run reproduces every
+fitted digit without them; benchmarks/structures.py now owns the shared
+fcc/EOS construction for both Δ families (geometry verified bit-exact).
+bench_* stay self-contained on purpose. With this, every stage of the
+plan is closed except the stage-4 unification spike, which stays gated
+on its own criteria.
 
 ## Sequencing and effort
 
