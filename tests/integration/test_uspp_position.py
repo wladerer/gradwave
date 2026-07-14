@@ -22,6 +22,7 @@ import torch
 from gradwave.core.xc.pbe import PBE
 from gradwave.postscf.uspp_position import (
     bare_position_derivative,
+    hessian_column,
     position_density_response,
 )
 from gradwave.pseudo.upf_paw import parse_upf_paw
@@ -108,3 +109,41 @@ def test_position_density_response_vs_scf_fd():
         relb = float((dbec_an[i] - dfd).abs().max()
                      / dfd.abs().max().clamp_min(1e-30))
         assert relb < 2e-4, f"self-consistent dbec[{i}] rel {relb:.2e}"
+
+
+@pytest.mark.slow
+def test_hessian_column_vs_fd_of_forces():
+    """Stage 3: one analytic Hessian column (mixed second derivative
+    through the self-consistent response, contracted through the force
+    graph) vs central FD of the validated analytic forces. Observed
+    2.0e-5 relative (the h² floor). Uses a displaced geometry so every
+    column entry is nonzero."""
+    from gradwave.postscf.paw_forces import forces_uspp
+
+    torch.set_num_threads(8)
+    paw = parse_upf_paw(FIX / "pseudos" / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
+    pos0 = np.array([[0.02, -0.01, 0.015], [1.3575, 1.36, 1.35]])
+
+    def scf_at(pos, shape=None, prev=None):
+        r = scf_uspp(_build(paw, pos, shape=shape), PBE(), etol=1e-12,
+                     rhotol=1e-10, verbose=False, max_iter=80,
+                     start_from=prev)
+        assert r["converged"]
+        return r
+
+    res = scf_at(pos0)
+    shape = tuple(res["system"].grid.shape)
+    a, alpha = 1, 0
+    col_an = hessian_column(res, PBE(), a, alpha)
+
+    h = 2e-3
+    pp, pm = pos0.copy(), pos0.copy()
+    pp[a, alpha] += h
+    pm[a, alpha] -= h
+    fp = forces_uspp(scf_at(pp, shape=shape, prev=res), PBE(),
+                     remove_net=False)
+    fm = forces_uspp(scf_at(pm, shape=shape, prev=res), PBE(),
+                     remove_net=False)
+    col_fd = -(fp - fm) / (2 * h)
+    rel = float((col_an - col_fd).norm() / col_fd.norm())
+    assert rel < 2e-4, f"hessian column rel {rel:.2e}"

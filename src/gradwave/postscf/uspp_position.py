@@ -142,10 +142,11 @@ class PositionPerturbation:
         dp[self.s0:self.s1] = -1j * kpga[None, :] * hk.p[self.s0:self.s1]
         return dp
 
-    def dh_ds_psi(self, isp: int, ik: int):
-        """(δH|ψ⟩, δS|ψ⟩) over the window at k — bare perturbation only
-        (local δv_loc, D re-screening, moving projectors); the
-        self-consistent (Hartree+XC+ddd) response is K's job."""
+    def dh_ds_psi(self, isp: int, ik: int, w_extra=None, d_extra=None):
+        """(δH|ψ⟩, δS|ψ⟩) over the window at k. Bare perturbation by
+        default (local δv_loc, D re-screening, moving projectors); pass
+        w_extra (grid) and d_extra (full D matrix) to add the converged
+        self-consistent potential change for total-δψ reconstruction."""
         cs = self.cs
         hk = cs.hks[isp][ik]
         c = cs.c_win[isp][ik]
@@ -155,9 +156,11 @@ class PositionPerturbation:
         db = becp(dp, c)
         dscr = hk.dscr
         qf = hk.q
+        dv = self.dv_r if w_extra is None else self.dv_r + w_extra
+        dd = self.d_dscr if d_extra is None else self.d_dscr + d_extra
         psi_r = g_to_r(c, sph.flat_idx, cs.shape)
-        dh = box_to_sphere(r_to_g(psi_r * self.dv_r), sph.flat_idx)
-        dh = dh + (b @ self.d_dscr.to(CDTYPE)) @ hk.p
+        dh = box_to_sphere(r_to_g(psi_r * dv), sph.flat_idx)
+        dh = dh + (b @ dd.to(CDTYPE)) @ hk.p
         dh = dh + (b @ dscr) @ dp + (db @ dscr) @ hk.p
         ds = (b @ qf) @ dp + (db @ qf) @ hk.p
         return dh, ds, dp, db
@@ -339,3 +342,200 @@ def position_density_response(res: dict, xc, a: int, alpha: int, *,
             inner_tol=inner_tol, max_inner=max_inner, cg_tol=cg_tol,
             cg_max_iter=cg_max_iter, verbose=verbose)
     return d_rho, d_bec, w_tot
+
+
+def _total_orbital_response(cs, pert, w_grid, d_ddd, cg_tol=1e-10,
+                            cg_max_iter=400):
+    """δψ_n, δε_n, and the SMOOTH density derivative at the TOTAL
+    perturbation (bare position motion + converged self-consistent
+    potential change). One window-PT + Sternheimer pass per k."""
+    system = cs.system
+    isp = 0
+    d_extra = cs._aug_dmat(w_grid)
+    for a, (s0, s1) in enumerate(system.atom_slices):
+        d_extra[s0:s1, s0:s1] += d_ddd[a].real
+    dpsi_all, deps_all = [], []
+    drho_sm = torch.zeros(cs.shape, dtype=RDTYPE)
+    warm = [torch.zeros_like(c[:n_sv]) for c, n_sv in
+            zip(cs.c_win[0], cs.n_solve[0], strict=True)]
+    for ik, sph in enumerate(system.spheres):
+        c = cs.c_win[isp][ik]
+        ns = cs.n_solve[isp][ik]
+        f, eps = cs.f_win[isp][ik], cs.eps_win[isp][ik]
+        wk = float(system.kweights[ik])
+        dh, ds, dp, db = pert.dh_ds_psi(isp, ik, w_extra=w_grid,
+                                        d_extra=d_extra)
+        hmat = torch.einsum("mg,ng->mn", c.conj(), dh)
+        smat = torch.einsum("mg,ng->mn", c.conj(), ds)
+        de = (eps[None, :] - eps[:, None]).to(CDTYPE)
+        num = hmat - smat * eps[None, :].to(CDTYPE)
+        safe = de.abs() > 1e-8
+        de_safe = torch.where(safe, de, torch.ones_like(de))
+        cmn = torch.where(safe, num / de_safe, -0.5 * smat)
+        dpsi_win = cmn.mT @ c
+        rhs = dh[:ns] - eps[:ns, None].to(CDTYPE) * ds[:ns]
+        rhs = -(rhs - (rhs @ c.conj().T) @ cs.s_win[isp][ik])
+        dperp = cs._sternheimer_k(isp, ik, rhs, warm[ik], cg_tol,
+                                  cg_max_iter)
+        dpsi = dpsi_win[:ns] + dperp
+        deps = (hmat.diagonal().real - eps * smat.diagonal().real)[:ns]
+        dpsi_all.append(dpsi)
+        deps_all.append(deps)
+        fw = f[:ns]
+        psi_r = g_to_r(c[:ns], sph.flat_idx, cs.shape)
+        dpsi_r = g_to_r(dpsi, sph.flat_idx, cs.shape)
+        drho_sm += 2.0 * wk * torch.einsum(
+            "b,bxyz->xyz", fw, (psi_r.conj() * dpsi_r).real)
+    return dpsi_all, deps_all, drho_sm / cs.vol
+
+
+def hessian_column(res: dict, xc, a: int, alpha: int, *,
+                   response_kw=None, verbose: bool = False):
+    """d²E/dτ dτ_{aα} — one analytic Hessian column (na, 3), no SCF
+    re-runs. The τ-graph of the force expression is differentiated once
+    more along the direction (e_{aα}, δstate/δτ_{aα}): the scalar
+    s = dE'/dλ (one create_graph backward plus real pairings with the
+    state response) has ∂s/∂τ equal to the full mixed column, explicit
+    ∂²E/∂τ∂τ' included. Insulators, nspin=1, no +U."""
+    from gradwave.core.density import sigma_from_rho
+    from gradwave.core.energies.ewald import ewald_energy
+    from gradwave.core.energies.hartree import hartree_energy
+    from gradwave.core.energies.local_pp import local_energy
+    from gradwave.core.energies.nl_pp import nonlocal_energy
+    from gradwave.core.hamiltonian import projectors
+    from gradwave.postscf.paw_forces import _aug_at_fixed, _aug_from_becsum
+
+    _check_supported(res)
+    if res.get("nspin", 1) != 1 or "hub_occ" in res:
+        raise NotImplementedError("hessian_column: nspin=1, no +U")
+    if res.get("smearing", "none") != "none":
+        raise NotImplementedError("hessian_column: insulators only")
+    system = res["system"]
+    grid = system.grid
+    vol, shape = grid.volume, grid.shape
+    kw = system.kweights
+    rkw = dict(response_kw or {})
+    rkw.setdefault("verbose", verbose)
+
+    with torch.no_grad():
+        cs = _ConvergedUSPP(res, xc)
+        pert = PositionPerturbation(cs, a, alpha)
+        warm = [torch.zeros_like(c[:n_sv]) for c, n_sv in
+                zip(cs.c_win[0], cs.n_solve[0], strict=True)]
+        bare_rho, bare_bec = pert.bare_map_derivative(warm)
+        d_rho, d_bec, (w_grid, d_ddd) = _self_consistent_response(
+            cs, bare_rho, bare_bec, **rkw)
+        dpsi_all, deps_all, drho_sm = _total_orbital_response(
+            cs, pert, w_grid, d_ddd)
+        dbec_tot = d_bec  # self-consistent becsum response (Hermitian)
+        # ddd response at the converged becsum response
+        dddd = cs.hvp_onecenter([[m.to(torch.complex128)
+                                  for m in dbec_tot]])[0]
+
+    # rebuild the force-energy graph with STATE LEAVES
+    pos = system.positions.detach().clone().requires_grad_(True)
+    coeffs0 = res["coeffs"]
+    occ = res["occupations"].detach()
+    eigs0 = res["eigenvalues"].detach()
+    is_paw = any(p.is_paw for p in system.paws)
+    ddd_leaves = []
+    if is_paw:
+        from gradwave.scf.paw_onsite import OneCenter
+
+        onec = {sp: OneCenter(system.paws[sp], xc)
+                for sp in set(system.species_of_atom)}
+        for at, sp in enumerate(system.species_of_atom):
+            _, ddd = onec[sp].energy_and_ddd(res["rho_ij_atoms"][at].detach())
+            ddd_leaves.append(ddd.detach().clone().requires_grad_(True))
+    ns_k = cs.n_solve[0]
+    c_leaves = [res["coeffs"][ik][:ns_k[ik]].detach().clone()
+                .requires_grad_(True) for ik in range(len(coeffs0))]
+    eps_leaf = eigs0.clone().requires_grad_(True)
+    rho_s_fixed = (res["rho"].detach()
+                   - _aug_at_fixed(res, system, None)).detach()
+    rho_s_leaf = rho_s_fixed.clone().requires_grad_(True)
+
+    projs = [projectors(pd, pos) for pd in system.proj_data]
+    phase_arg = system.g_sphere @ pos.T
+    phases = torch.exp(torch.complex(torch.zeros_like(phase_arg),
+                                     phase_arg))
+    q = system.q_full.to(CDTYPE)
+    e = ewald_energy(pos, system.charges, grid.cell)
+    becps_full, rho_ij = [], [
+        torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=pos.device)
+        for (s0, s1) in system.atom_slices]
+    for ik in range(len(c_leaves)):
+        nsk = ns_k[ik]
+        b = becp(projs[ik], c_leaves[ik])
+        becps_full.append(b)
+        w = (kw[ik] * occ[ik][:nsk]).to(CDTYPE)
+        for at, (s0, s1) in enumerate(system.atom_slices):
+            ba = b[:, s0:s1]
+            rho_ij[at] = rho_ij[at] + torch.einsum("b,bi,bj->ij", w,
+                                                   ba.conj(), ba)
+    rho_ij = [0.5 * (m + m.conj().T) for m in rho_ij]
+    rho_aug = _aug_from_becsum(system, rho_ij, phases)
+    rho_tot = rho_s_leaf + rho_aug
+    ns0 = ns_k[0]
+    assert all(n == ns0 for n in ns_k), "insulator: uniform occupied count"
+    e = e + nonlocal_energy(becps_full, system.proj_data[0].dij_full,
+                            occ[:, :ns0], kw)
+    for ik, b in enumerate(becps_full):
+        nsk = ns_k[ik]
+        quad = torch.einsum("bi,ij,bj->b", b.conj(), q, b).real
+        e = e - (kw[ik] * occ[ik][:nsk] * eps_leaf[ik][:nsk] * quad).sum()
+    if is_paw:
+        for at in range(len(system.atom_slices)):
+            e = e + (ddd_leaves[at].to(CDTYPE) * rho_ij[at]).sum().real
+    rho_g = r_to_g(rho_tot.to(CDTYPE))
+    rho_core = None
+    if system.rho_core is not None:
+        from gradwave.pseudo.radial_torch import RadialTables
+
+        q_sph = torch.linalg.norm(system.g_sphere, dim=1)
+        core = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE)
+        for sp in set(system.species_of_atom):
+            paw = system.paws[sp]
+            if paw.core_rho is None:
+                continue
+            tab = RadialTables(paw, device=pos.device)
+            with torch.no_grad():
+                f_core = tab.core_of_g(q_sph)
+            atoms = [at for at, sa in enumerate(system.species_of_atom)
+                     if sa == sp]
+            core = core + phases[:, atoms].conj().sum(dim=1) \
+                * f_core.to(CDTYPE) / vol
+        core_box = torch.zeros(grid.n_points, dtype=CDTYPE)
+        core_box[system.sphere_idx] = core
+        rho_core = torch.fft.ifftn(core_box.reshape(shape) * grid.n_points,
+                                   dim=(-3, -2, -1)).real
+    rho_xc = rho_tot if rho_core is None else rho_tot + rho_core
+    sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
+    e = e + xc.energy(rho_xc, vol, sigma)
+    species_index = torch.tensor(system.species_of_atom, dtype=torch.int64)
+    vloc_g = local_potential_g(pos, species_index, system.vloc_tables,
+                               grid.g_cart, vol)
+    e = e + hartree_energy(rho_g, grid.g2, vol) + local_energy(rho_g,
+                                                               vloc_g, vol)
+
+    leaves = [pos, rho_s_leaf, eps_leaf] + c_leaves + ddd_leaves
+    grads = torch.autograd.grad(e, leaves, create_graph=True)
+    g_pos, g_rho, g_eps = grads[0], grads[1], grads[2]
+    g_c = grads[3:3 + len(c_leaves)]
+    g_ddd = grads[3 + len(c_leaves):]
+
+    # directional derivative de'/dλ along (e_{aα}, δstate); torch's
+    # complex grads are conjugate-Wirtinger, so the real pairing for a
+    # complex leaf is Re⟨g, δz⟩ summed over both Wirtinger halves —
+    # (g.conj()*δz).real reproduces d/dt e(z + t δz)
+    s = g_pos[a, alpha]
+    s = s + (g_rho * drho_sm).sum()
+    for ik in range(len(c_leaves)):
+        s = s + (g_c[ik].conj() * dpsi_all[ik]).real.sum()
+    for ik in range(len(c_leaves)):
+        nsk = ns_k[ik]
+        s = s + (g_eps[ik][:nsk] * deps_all[ik]).sum()
+    for at in range(len(ddd_leaves)):
+        s = s + (g_ddd[at] * dddd[at].real).sum()
+    (col,) = torch.autograd.grad(s, pos)
+    return col.detach()
