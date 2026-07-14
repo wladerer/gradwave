@@ -416,7 +416,11 @@ $\delta\mu$. The spin-degenerate limit reproduces the unpolarized
 gradients to $10^{-5}$, triplet O$_2$ matches finite differences to
 $2\times10^{-5}$, and ferromagnetic Ni, where both spin channels are
 metallic, matches at the $10^{-4}$ level set by the metallic convergence
-floor.
+floor. With a Hubbard manifold active the response vector gains the
+occupation-matrix block, whose kernel is the Dudarev second derivative
+$-(U-J)$, and the +$U$ gradients match finite differences to
+$1.2\times10^{-6}$ with the occupation feedback contributing 1.6\% of
+the total.
 
 \subsection{The Hubbard $U$}
 \label{sec:u}
@@ -562,9 +566,10 @@ gradient is a trace of quantities the +$U$ SCF already computes. Each of
 these normally exists in a production code as its own hand-derived module,
 specialized to a particular functional.
 
-The present limitations are explicit. The +$U$ occupation response
-remains future work, and the electric-field solvers cover
-norm-conserving insulators. Neither is structural. The most direct next
+The present limitations are explicit. The electric-field solvers cover
+norm-conserving insulators, and the second position derivatives go
+through finite differences of the analytic forces rather than one
+implicit backward. Neither is structural. The most direct next
 steps are LO-TO splitting from the computed Born charges and
 magnetocrystalline anisotropy torques $dE/d\hat{\mathbf{m}}$, for which
 the required components already exist.
