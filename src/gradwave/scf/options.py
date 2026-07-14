@@ -25,7 +25,11 @@ class MixerOptions:
     trust_factor: float = 20.0
     adapt_step: bool = False  # opt-in collapse protection (see lessons.md)
     spin_precond: bool = False  # Stoner m-channel preconditioner
-    bec_step_scale: float = 0.4
+    # None → per-scheme default: 1.0 for johnson, 0.4 otherwise. The 0.4
+    # damping of the on-site becsum↔ddd mode is a Pulay-era stabilizer;
+    # Johnson's normalized multisecant handles that mode natively and the
+    # damping just brakes the composite (FM Ni: 27 it at 0.4 → 16 at 1.0)
+    bec_step_scale: float | None = None
 
 
 @dataclass(frozen=True)

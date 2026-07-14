@@ -460,7 +460,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     damping/mixing.
     opts: an SCFOptions object (scf/options.py) — the readable form of
     all of the above; when given it overrides the flat kwargs."""
-    mixing_w0, bec_step_scale = 0.01, 0.4  # MixerOptions defaults
+    mixing_w0, bec_step_scale = 0.01, None  # MixerOptions defaults
     if opts is not None:
         smearing, width = opts.smearing, opts.width
         max_iter, etol, rhotol = opts.max_iter, opts.etol, opts.rhotol
@@ -561,6 +561,10 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     # channel keeps its G=0 free for ↑↓ transfer), the becsum step scale
     # (the on-site becsum↔ddd feedback is the stiffest direction), and the
     # adaptive-damping block ids
+    if bec_step_scale is None:
+        # Johnson handles the on-site becsum↔ddd mode without extra
+        # damping (FM Ni 27→16 it); the 0.4 stays for pulay/broyden
+        bec_step_scale = 1.0 if mixing_scheme == "johnson" else 0.4
     layout = MixLayout(grid, nspin, system.atom_slices, device=dev,
                        bec_step_scale=bec_step_scale)
     g2_mix, ng, nbec = layout.g2_sphere, layout.ng, layout.nbec

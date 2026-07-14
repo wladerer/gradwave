@@ -127,6 +127,16 @@ before re-deriving it.
   ingredients are the Fermi-surface adjoint terms), not a schedule.
   Adaptive damping line searches match good fixed damping at best and fail
   on transition metals per their own authors.
+- Stabilizers tuned for one mixer become brakes under a better one. The
+  0.4 becsum step scale that tamed the on-site becsum↔ddd mode for Pulay
+  cost Johnson eleven iterations on FM Ni (27 at 0.4 → 19 at 0.7 → 16 at
+  1.0, identical F and moment; w0 variations 0.005–0.05 all land 31–33,
+  a dead end). QE mixes becsum unscaled inside rho%mix, and this was the
+  bulk of the remaining iteration gap: johnson-16 at our tail-of-3
+  etol 1e-6 is QE-equivalent ~11–12 vs their 12. Johnson's per-scheme
+  default is now bec_step_scale 1.0 (Pulay keeps 0.4); Si/Al golden
+  energies and the O₂ molecule confirm speed changed, physics did not.
+  When a scheme changes, re-audit every crutch the old scheme needed.
 
 ## Metals and smearing
 
