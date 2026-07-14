@@ -151,8 +151,6 @@ def uspp_energy_param_grads(res: dict, xc) -> dict[str, torch.Tensor]:
 def _check_supported(res: dict):
     if res.get("nspin", 1) not in (1, 2):
         raise NotImplementedError("USPP adjoint: nspin must be 1 or 2")
-    if "hub_occ" in res:
-        raise NotImplementedError("USPP adjoint: +U response not implemented")
     occ = res["occupations"]
     f_full = 2.0 if res.get("nspin", 1) == 1 else 1.0
     frac = bool(((occ > _F_CUT) & ((occ - f_full).abs() > _F_CUT)).any())
@@ -254,6 +252,35 @@ class _ConvergedUSPP:
                     for isp in range(ns):
                         dscr_sp[isp][s0:s1, s0:s1] += ddd[isp].to(dev)
 
+        # DFT+U: rebuild the S-dressed orbital projectors and freeze the
+        # converged V_U (the +U channel enters the response exactly like
+        # the KB nonlocal one — a projector perturbation with a Hermitian
+        # D — and its kernel is the Dudarev second derivative −(U−J)).
+        # nspin=1 keeps the SCF's half-occupancy convention: ONE occupation
+        # channel n_half built with 0.5·f, whose D applies to both spins.
+        self.hub = None
+        hub_d_sp = [None] * ns
+        if "hub_occ" in res:
+            from gradwave.core.batch import build_batched, projectors_b
+            from gradwave.core.hubbard import HubbardManifold, hubbard_dmatrix
+            from gradwave.scf.uspp_hubbard import build_uspp_hubbard
+
+            sites = res["hub_sites"]
+            man = {}
+            for st in sites:
+                sp = system.species_of_atom[st["atom"]]
+                man[sp] = HubbardManifold(species=sp, l=st["l"], u=st["u"],
+                                          j=st["j"])
+            bk = build_batched(system.spheres, system.proj_data, device=dev)
+            p_b = projectors_b(bk, system.positions)
+            self.hub = build_uspp_hubbard(system, list(man.values()), bk, p_b)
+            self.n_hub = [[m.detach() for m in ch] for ch in res["hub_occ"]]
+            self.nsh = len(self.n_hub)  # 1 (n_half) or 2 hub channels
+            self.hub_w = 0.5 if ns == 1 else 1.0  # δn weight per SCF f
+            hub_d_sp = [hubbard_dmatrix(self.n_hub[min(isp, self.nsh - 1)],
+                                        self.hub.sites, self.hub.nproj,
+                                        dev).conj() for isp in range(ns)]
+
         # smearing scheme for f′ (Fermi-surface response weights); None for
         # fixed occupations, where every f′-term vanishes identically
         from gradwave.core.occupations import SCHEMES
@@ -271,14 +298,18 @@ class _ConvergedUSPP:
         self.fp_win = [[] for _ in range(ns)]
         self.n_solve = [[] for _ in range(ns)]
         self.b_win = [[] for _ in range(ns)]
+        self.bh_win = [[] for _ in range(ns)]  # ⟨Sφ|ψ⟩ window projections
         self.shifts = [[] for _ in range(ns)]
         self.t_band = [[] for _ in range(ns)]
         for ik, sph in enumerate(system.spheres):
             p = projectors(system.proj_data[ik], system.positions)
+            sphi_k = (self.hub.sphi[ik, :, :sph.npw]
+                      if self.hub is not None else None)
             for isp in range(ns):
                 hk = _HkS(sph, self.shape, self.veff_sp[isp],
                           system.proj_data[ik], p, dscr_sp[isp],
-                          system.q_full)
+                          system.q_full, hub_sphi=sphi_k,
+                          hub_d=hub_d_sp[isp])
                 c, eps, f, n_sv = _window_uspp(res, isp, ik)
                 fp = self._f_prime(eps)
                 if self.scheme is not None and (
@@ -295,6 +326,8 @@ class _ConvergedUSPP:
                 self.fp_win[isp].append(fp)
                 self.n_solve[isp].append(n_sv)
                 self.b_win[isp].append(becp(p, c))
+                self.bh_win[isp].append(
+                    becp(sphi_k, c) if sphi_k is not None else None)
                 self.shifts[isp].append(
                     2.0 * float(eps.max() - eps.min()) + 10.0)
                 self.t_band[isp].append(torch.clamp(torch.einsum(
@@ -394,17 +427,32 @@ class _ConvergedUSPP:
         return pc(x)
 
     def apply_chi0(self, w_sp: list, d_bare_sp: list, dpsi_warm: list,
-                   cg_tol: float, cg_max_iter: int):
-        """Composite response χ̃(w, D_bare) → per-spin (δρ_σ(r), δbec_σ).
+                   cg_tol: float, cg_max_iter: int, d_hub_sp=None):
+        """Composite response χ̃(w, D_bare, D_hub) → per-spin (δρ_σ(r),
+        δbec_σ) and, with +U, the per-channel occupation-matrix response
+        δn (returned third; None otherwise).
 
         w_sp: per-spin grid fields, each acting as a v_eff^σ increment
         (local on the grid AND ∫w^σ Q into D^σ). d_bare_sp: per-spin lists
-        of per-atom real (nm, nm) bare-D perturbations (one-center). The
-        spin channels respond independently except through δμ: the shared
+        of per-atom real (nm, nm) bare-D perturbations (one-center).
+        d_hub_sp: per-hub-channel lists of per-site Hermitian (dim, dim)
+        V_U D-matrix perturbations (one channel for nspin=1, applied to
+        both spins per the SCF's half-occupancy convention). The spin
+        channels respond independently except through δμ: the shared
         Fermi level's particle-conservation sums run over BOTH channels."""
         system, grid = self.system, self.grid
         kw = system.kweights
         nsp = self.nspin
+        hubp_sp = [None] * nsp
+        if self.hub is not None and d_hub_sp is not None:
+            for isp in range(nsp):
+                ch = d_hub_sp[min(isp, self.nsh - 1)]
+                dmat = torch.zeros(self.hub.nproj, self.hub.nproj,
+                                   dtype=CDTYPE)
+                for m, st in zip(ch, self.hub.sites, strict=True):
+                    s0, d = st["start"], st["dim"]
+                    dmat[s0:s0 + d, s0:s0 + d] = 0.5 * (m + m.conj().T)
+                hubp_sp[isp] = dmat.conj()  # apply convention (D^T)
         dpert_sp = []
         for isp in range(nsp):
             dpert = self._aug_dmat(w_sp[isp])
@@ -424,6 +472,12 @@ class _ConvergedUSPP:
         b_r = [torch.zeros(grid.n_points, dtype=RDTYPE) for _ in range(nsp)]
         a_bec = [[torch.zeros_like(m) for m in ch] for ch in dbec]
         b_bec = [[torch.zeros_like(m) for m in ch] for ch in dbec]
+        dnh = a_hub = b_hub = None
+        if self.hub is not None:
+            def _hub_zeros():
+                return [[torch.zeros(st["dim"], st["dim"], dtype=CDTYPE)
+                         for st in self.hub.sites] for _ in range(self.nsh)]
+            dnh, a_hub, b_hub = _hub_zeros(), _hub_zeros(), _hub_zeros()
         for isp in range(nsp):
             for ik, sph in enumerate(system.spheres):
                 hk, c = self.hks[isp][ik], self.c_win[isp][ik]
@@ -436,6 +490,9 @@ class _ConvergedUSPP:
                                         sph.flat_idx)
                           + (self.b_win[isp][ik]
                              @ dpert_sp[isp].to(CDTYPE)) @ hk.p)
+                if hubp_sp[isp] is not None:
+                    dv_psi = dv_psi + (self.bh_win[isp][ik]
+                                       @ hubp_sp[isp]) @ hk.hub_sphi
                 # ⟨ψ_m|δV|ψ_n⟩ over the whole window (Hermitian: δV is real
                 # local + real-symmetric D, and the sphere projection
                 # commutes with the c_m pairing)
@@ -459,6 +516,19 @@ class _ConvergedUSPP:
                     m1 = torch.einsum("b,bi,bj->ij", fw.to(CDTYPE),
                                       bd.conj(), bo)
                     dbec[isp][a] += wk * (m1 + m1.conj().T)
+                if self.hub is not None:
+                    # hub convention n_pq = Σ wf ⟨φ_p|ψ⟩⟨ψ|φ_q⟩ (conj on the
+                    # SECOND index, opposite to becsum); nspin=1 carries the
+                    # SCF's half-occupancy weight
+                    bh = self.bh_win[isp][ik]
+                    bh_d = becp(hk.hub_sphi, dpsi)
+                    ich = min(isp, self.nsh - 1)
+                    for si, st in enumerate(self.hub.sites):
+                        s0, d = st["start"], st["dim"]
+                        m1 = torch.einsum("b,bp,bq->pq", fw.to(CDTYPE),
+                                          bh_d[:, s0:s0 + d],
+                                          bh[:ns, s0:s0 + d].conj())
+                        dnh[ich][si] += self.hub_w * wk * (m1 + m1.conj().T)
 
                 # (b) window↔window pairs: divided-difference weights
                 # (f_n−f_m)/(ε_n−ε_m) → f′ at degeneracies; diagonal
@@ -480,6 +550,14 @@ class _ConvergedUSPP:
                     bw = self.b_win[isp][ik][:, s0:s1]
                     dbec[isp][a] += wk * torch.einsum(
                         "nm,ni,mj->ij", m_pair, bw.conj(), bw)
+                if self.hub is not None:
+                    bh = self.bh_win[isp][ik]
+                    ich = min(isp, self.nsh - 1)
+                    for si, st in enumerate(self.hub.sites):
+                        s0, d = st["start"], st["dim"]
+                        bhs = bh[:, s0:s0 + d]
+                        dnh[ich][si] += self.hub_w * wk * torch.einsum(
+                            "nm,mp,nq->pq", m_pair, bhs, bhs.conj())
 
                 # (c) Fermi-surface diagonal: δf_n = f′_n (δε_n − δμ)
                 fs = fp.abs() > 1e-14
@@ -498,6 +576,18 @@ class _ConvergedUSPP:
                             bwf.conj(), bwf)
                         b_bec[isp][a] += torch.einsum(
                             "n,ni,nj->ij", cfs.to(CDTYPE), bwf.conj(), bwf)
+                    if self.hub is not None:
+                        bh = self.bh_win[isp][ik]
+                        ich = min(isp, self.nsh - 1)
+                        for si, st in enumerate(self.hub.sites):
+                            s0, d = st["start"], st["dim"]
+                            bhf = bh[fs, s0:s0 + d]
+                            a_hub[ich][si] += self.hub_w * torch.einsum(
+                                "n,np,nq->pq", (cfs * deps).to(CDTYPE),
+                                bhf, bhf.conj())
+                            b_hub[ich][si] += self.hub_w * torch.einsum(
+                                "n,np,nq->pq", cfs.to(CDTYPE),
+                                bhf, bhf.conj())
         dmu = num_mu / den_mu if abs(den_mu) > 1e-12 else 0.0
         drho_out = []
         for isp in range(nsp):
@@ -517,7 +607,12 @@ class _ConvergedUSPP:
                 aug_box.reshape(self.shape) * grid.n_points,
                 dim=(-3, -2, -1)).real
             drho_out.append(drho_sm[isp] / self.vol + drho_aug)
-        return drho_out, dbec
+        if self.hub is not None:
+            for ich in range(self.nsh):
+                for si in range(len(self.hub.sites)):
+                    m = dnh[ich][si] + a_hub[ich][si] - dmu * b_hub[ich][si]
+                    dnh[ich][si] = 0.5 * (m + m.conj().T)
+        return drho_out, dbec, dnh
 
     def k_hxc_grid(self, drho_sp: list) -> list:
         """(K_Hxc δρ)^σ(r) per spin: the Hartree kernel acts on δρ_tot and
@@ -583,6 +678,18 @@ class _ConvergedUSPP:
                 out[1].append(hd)
         return out
 
+    def k_hub(self, dnh: list) -> list:
+        """Dudarev kernel per hub channel: δD_U = −(U−J)·herm(δn). The
+        second derivative of E_U = Σ (U−J)/2 Tr[n − n²] is −(U−J) on the
+        Hermitian part, and the D-matrix the SCF applies is built from the
+        same channel's matrix (n_half for nspin=1), so no extra spin
+        factors appear."""
+        out = []
+        for ch in dnh:
+            out.append([-(st["u"] - st["j"]) * 0.5 * (m + m.conj().T)
+                        for m, st in zip(ch, self.hub.sites, strict=True)])
+        return out
+
 
 def uspp_density_loss_param_grads(
     res: dict, xc, loss_fn, *, beta: float = 0.2, history: int = 8,
@@ -607,11 +714,16 @@ def uspp_density_loss_param_grads(
             (vbar,) = torch.autograd.grad(loss, rho_leaf)
 
         nbec = [s1 - s0 for (s0, s1) in system.atom_slices]
+        nsh = cs.nsh if cs.hub is not None else 0
+        hub_dims = ([st["dim"] for st in cs.hub.sites]
+                    if cs.hub is not None else [])
 
         def split(u):
-            """Flat u → (per-spin grid fields, per-spin per-atom mats).
-            Layout mirrors the mixer: all grid channels, then all becsum
-            channels."""
+            """Flat u → (per-spin grid fields, per-spin per-atom becsum
+            mats, per-channel per-site hub mats or None). Layout mirrors
+            the mixer for the first two blocks; the hub block appends the
+            V_U D-matrix perturbations as (Re, Im) pairs (n is complex
+            Hermitian, unlike the real becsum block)."""
             w_sp, off = [], 0
             for _ in range(nsp):
                 w_sp.append(u[off:off + n_pts].reshape(grid.shape))
@@ -623,16 +735,34 @@ def uspp_density_loss_param_grads(
                     mats.append(u[off:off + n * n].reshape(n, n))
                     off += n * n
                 mats_sp.append(mats)
-            return w_sp, mats_sp
+            hub_sp = None
+            if nsh:
+                hub_sp = []
+                for _ in range(nsh):
+                    ch = []
+                    for d in hub_dims:
+                        re = u[off:off + d * d].reshape(d, d)
+                        im = u[off + d * d:off + 2 * d * d].reshape(d, d)
+                        ch.append(torch.complex(re, im))
+                        off += 2 * d * d
+                    hub_sp.append(ch)
+            return w_sp, mats_sp, hub_sp
 
-        def join(w_sp, mats_sp):
-            return torch.cat(
-                [w.reshape(-1) for w in w_sp]
-                + [m.reshape(-1) for mats in mats_sp for m in mats])
+        def join(w_sp, mats_sp, hub_sp=None):
+            parts = ([w.reshape(-1) for w in w_sp]
+                     + [m.reshape(-1) for mats in mats_sp for m in mats])
+            if nsh:
+                for ch in hub_sp:
+                    for m in ch:
+                        parts.append(m.real.reshape(-1))
+                        parts.append(m.imag.reshape(-1))
+            return torch.cat(parts)
 
         zero_bec = [[torch.zeros(n, n, dtype=torch.float64) for n in nbec]
                     for _ in range(nsp)]
-        l_vec = join([vbar] * nsp, zero_bec)
+        zero_hub = ([[torch.zeros(d, d, dtype=CDTYPE) for d in hub_dims]
+                     for _ in range(nsh)] if nsh else None)
+        l_vec = join([vbar] * nsp, zero_bec, zero_hub)
         dpsi_warm = [[torch.zeros_like(c[:n_sv]) for c, n_sv in
                       zip(cs.c_win[isp], cs.n_solve[isp], strict=True)]
                      for isp in range(nsp)]
@@ -662,11 +792,14 @@ def uspp_density_loss_param_grads(
         hist_du, hist_dr = [], []
         drho = dbec = None
         for it in range(1, max_outer + 1):
-            w_sp, d_bare_sp = symmetrize(*split(u))
-            drho, dbec = cs.apply_chi0(w_sp, d_bare_sp, dpsi_warm, cg_tol,
-                                       cg_max_iter)
+            w_sp, d_bare_sp, d_hub_sp = split(u)
+            w_sp, d_bare_sp = symmetrize(w_sp, d_bare_sp)
+            drho, dbec, dnh = cs.apply_chi0(w_sp, d_bare_sp, dpsi_warm,
+                                            cg_tol, cg_max_iter,
+                                            d_hub_sp=d_hub_sp)
             g_u = l_vec + join(cs.k_hxc_grid(drho),
-                               cs.hvp_onecenter(dbec))
+                               cs.hvp_onecenter(dbec),
+                               cs.k_hub(dnh) if nsh else None)
             r_vec = g_u - u
             rn = float(torch.linalg.norm(r_vec)) / max(
                 1.0, float(torch.linalg.norm(u)))

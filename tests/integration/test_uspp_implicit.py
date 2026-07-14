@@ -267,6 +267,60 @@ def test_spin_o2_grads_vs_fd():
 
 
 @pytest.mark.slow
+def test_paw_hubbard_density_loss_grads_vs_fd():
+    """+U occupation response: with a Hubbard manifold active, the
+    composite adjoint carries a third block — the occupation-matrix
+    response δn with the Dudarev kernel δD_U = −(U−J)·herm(δn) — and the
+    frozen window operators include the converged V_U. The feedback is
+    1.6% of dL/dθ on this system (U = 4 on Si 3p), so the 2e-5 gate fails
+    by four orders of magnitude if the block is dead. Observed:
+    dE/dθ 8.9e-9, dL/dθ 1.2e-6 relative vs FD SCF re-runs."""
+    from gradwave.scf.uspp_hubbard import HubbardManifold
+
+    torch.set_num_threads(8)
+    paw = parse_upf_paw(FIX / "pseudos" / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
+    pos = np.array([[0.0, 0.0, 0.0], [1.3575, 1.3575, 1.3575]])
+    hub = [HubbardManifold(species=0, l=1, u=4.0)]
+
+    def scf_at(xc):
+        s = setup_uspp(SI_CELL, pos, [0, 0], [paw], ecut=15 * RY,
+                       kmesh=(2, 2, 2), ecutrho=60 * RY)
+        r = scf_uspp(s, xc, etol=1e-12, rhotol=1e-10, verbose=False,
+                     max_iter=80, hubbard=hub)
+        assert r["converged"]
+        return r
+
+    xc0 = LearnableX()
+    res = scf_at(xc0)
+    g_e = uspp_energy_param_grads(res, xc0)
+    rho_ref = (0.95 * res["rho"]).detach().clone()
+
+    def loss_fn(rho):
+        d = rho - rho_ref
+        return (d * d).sum()
+
+    _, g_l = uspp_density_loss_param_grads(res, xc0, loss_fn)
+
+    h = 2e-3
+    es, ls = [], []
+    for sgn in (+1, -1):
+        xc = LearnableX()
+        with torch.no_grad():
+            xc.raw_mu.add_(sgn * h)
+        r = scf_at(xc)
+        es.append(float(r["energies"].free_energy))
+        ls.append(float(loss_fn(r["rho"])))
+    fd_e = (es[0] - es[1]) / (2 * h)
+    fd_l = (ls[0] - ls[1]) / (2 * h)
+    rel_e = abs(float(g_e["raw_mu"]) - fd_e) / abs(fd_e)
+    rel_l = abs(float(g_l["raw_mu"]) - fd_l) / abs(fd_l)
+    assert rel_e < 1e-6, f"dE/dθ {float(g_e['raw_mu'])} vs FD {fd_e} " \
+                         f"(rel {rel_e:.2e})"
+    assert rel_l < 2e-5, f"dL/dθ {float(g_l['raw_mu'])} vs FD {fd_l} " \
+                         f"(rel {rel_l:.2e})"
+
+
+@pytest.mark.slow
 def test_fm_ni_density_loss_grads_vs_fd():
     """The cross-spin δμ coupling — the one piece of the spin adjoint the
     O₂ gate cannot see (integer occupations there). FM Ni is a smeared

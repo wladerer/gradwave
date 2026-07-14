@@ -57,6 +57,11 @@ def newton_polish(res: dict, xc, *, tol: float = 1e-10, max_newton: int = 5,
         raise NotImplementedError("newton_polish: nspin=2 raw-map plumbing "
                                   "not implemented (adjoint spin machinery "
                                   "exists; the finisher is single-channel)")
+    if "hub_occ" in res:
+        raise NotImplementedError("newton_polish: +U raw-map plumbing not "
+                                  "implemented (the adjoint's +U response "
+                                  "exists; the finisher's packed vector "
+                                  "lacks the occupation block)")
     system = res["system"]
     grid = system.grid
     shape, n_pts = tuple(grid.shape), grid.n_points
@@ -126,7 +131,7 @@ def newton_polish(res: dict, xc, *, tol: float = 1e-10, max_newton: int = 5,
                 v_sp = cs.k_hxc_grid([d_rho])
                 d_ddd = cs.hvp_onecenter([[m.to(torch.complex128)
                                            for m in d_bec]])
-                chi_rho, chi_bec = cs.apply_chi0(
+                chi_rho, chi_bec, _ = cs.apply_chi0(
                     v_sp, d_ddd, dpsi_warm, cg_tol, cg_max_iter)
                 g_vec = r_vec + _pack(chi_rho[0].to(RDTYPE),
                                       [m.real.to(RDTYPE)
