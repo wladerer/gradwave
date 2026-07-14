@@ -74,6 +74,12 @@ J-apply cost.
 Gate, fast suite, golden energies, plus three slow anchors (si_paw vs QE,
 ni spin vs QE, batched-vs-per-k equality).
 
+**Prepared (2026-07-13).** docs/refactor_stage3.md holds the measured
+consumer map, the string-anchored anatomy of scf_uspp, the
+IterOps/IterState/_scf_iteration contract, the four-commit sequence
+with per-commit gates, and the trap list. Execution is a fresh-session
+job per the sequencing rule below.
+
 ## Stage 4 — NC/USPP sharing (deliberately minimal)
 
 Full unification (NC as the S=1 special case of the generalized loop) is
