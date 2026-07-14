@@ -460,6 +460,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     damping/mixing.
     opts: an SCFOptions object (scf/options.py) — the readable form of
     all of the above; when given it overrides the flat kwargs."""
+    mixing_w0, bec_step_scale = 0.01, 0.4  # MixerOptions defaults
     if opts is not None:
         smearing, width = opts.smearing, opts.width
         max_iter, etol, rhotol = opts.max_iter, opts.etol, opts.rhotol
@@ -471,6 +472,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         mixing_scheme, mixing_kerker = mx.scheme, mx.kerker
         mixing_metric, trust_factor = mx.metric, mx.trust_factor
         adapt_step, spin_precond = mx.adapt_step, mx.spin_precond
+        mixing_w0, bec_step_scale = mx.w0, mx.bec_step_scale
     grid = system.grid
     vol = grid.volume
     dev = system.positions.device
@@ -559,7 +561,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     # channel keeps its G=0 free for ↑↓ transfer), the becsum step scale
     # (the on-site becsum↔ddd feedback is the stiffest direction), and the
     # adaptive-damping block ids
-    layout = MixLayout(grid, nspin, system.atom_slices, device=dev)
+    layout = MixLayout(grid, nspin, system.atom_slices, device=dev,
+                       bec_step_scale=bec_step_scale)
     g2_mix, ng, nbec = layout.g2_sphere, layout.ng, layout.nbec
     g2_full, kerker_mask = layout.g2_full, layout.kerker_mask
     step_scale = layout.step_scale
@@ -587,7 +590,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         mixer = JohnsonMixer(g2_full, alpha=mixing_alpha,
                              history=mixing_history, kerker=use_kerker,
                              kerker_mask=kerker_mask, check_g0=False,
-                             step_scale=step_scale, metric_w=metric_w)
+                             step_scale=step_scale, metric_w=metric_w,
+                             w0=mixing_w0)
     else:
         mixer = PulayMixer(g2_full, alpha=mixing_alpha,
                            history=mixing_history,
