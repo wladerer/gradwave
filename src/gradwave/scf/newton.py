@@ -26,7 +26,7 @@ import torch
 
 from gradwave.dtypes import RDTYPE
 from gradwave.postscf.uspp_implicit import _check_supported, _ConvergedUSPP
-from gradwave.scf.uspp import scf_uspp
+from gradwave.scf.uspp_loop import _build_iter_ops, _scf_iteration
 
 
 def _pack(w_r, mats):
@@ -61,24 +61,27 @@ def newton_polish(res: dict, xc, *, tol: float = 1e-10, max_newton: int = 5,
     grid = system.grid
     shape, n_pts = tuple(grid.shape), grid.n_points
     nbec = [s1 - s0 for (s0, s1) in system.atom_slices]
-    kw = dict(nspin=1, smearing=res.get("smearing", "none"),
-              width=res.get("width", 0.1))
+    smearing = res.get("smearing", "none")
+    width = res.get("width", 0.1)
+    # the raw map is evaluated through _scf_iteration directly (stage 3):
+    # operators built once, orbital warm starts carried across Newton steps
+    ops = _build_iter_ops(system, xc, nspin=1, smearing=smearing,
+                          width=width, batched=True)
+    coeffs = [[None] * ops.nk]
+    coeffs_b = [None]
 
     rho = res["rho"].detach().clone()
     bec = [m.detach().clone() for m in res["rho_ij_atoms"]]
     hist_out = []
-    r1 = None
+    it_out = None
     best = float("inf")
     stalls = 0
     with torch.no_grad():
         for step in range(1, max_newton + 1):
-            state = dict(system=system, nspin=1, rho=rho,
-                         rho_ij_atoms=bec)
-            r1 = scf_uspp(system, xc, max_iter=1, start_from=state,
-                          diago_tol=diago_tol, etol=1e-300, rhotol=1e-300,
-                          verbose=False, **kw)
-            f_rho = r1["rho_out_spin"][0]
-            f_bec = r1["rho_ij_atoms"]
+            it_out = _scf_iteration(ops, [rho], [bec], coeffs, coeffs_b,
+                                    None, diago_tol, 0)
+            f_rho = it_out["rho_out_s"][0]
+            f_bec = it_out["rho_ij_s"][0]
             r_rho = (f_rho - rho).to(RDTYPE)
             r_bec = [(a - b).real.to(RDTYPE) for a, b in
                      zip(f_bec, bec, strict=True)]
@@ -102,11 +105,13 @@ def newton_polish(res: dict, xc, *, tol: float = 1e-10, max_newton: int = 5,
                 stalls = 0
             best = min(best, rn)
 
-            # Jacobian frozen at the CURRENT x: the 1-iteration call's
-            # orbitals diagonalize H[x], so they define χ̃ at x exactly
-            jac_res = dict(r1)
-            jac_res["rho"] = rho
-            jac_res["rho_ij_atoms"] = bec
+            # Jacobian frozen at the CURRENT x: the iteration's orbitals
+            # diagonalize H[x], so they define χ̃ at x exactly
+            jac_res = dict(system=system, nspin=1, smearing=smearing,
+                           width=width, coeffs=coeffs[0],
+                           eigenvalues=it_out["eigs_s"][0],
+                           occupations=it_out["occ_s"][0],
+                           fermi=it_out["mu"], rho=rho, rho_ij_atoms=bec)
             cs = _ConvergedUSPP(jac_res, xc)
             dpsi_warm = [[torch.zeros_like(c[:ns]) for c, ns in
                           zip(cs.c_win[0], cs.n_solve[0], strict=True)]]
@@ -154,7 +159,11 @@ def newton_polish(res: dict, xc, *, tol: float = 1e-10, max_newton: int = 5,
             d_rho, d_bec = _unpack(d, shape, n_pts, nbec)
             rho = rho + d_rho
             bec = [b + m.to(b.dtype) for b, m in zip(bec, d_bec, strict=True)]
-    out = dict(r1)
+    out = dict(res)
+    out.update(coeffs=coeffs[0], eigenvalues=it_out["eigs_s"][0],
+               occupations=it_out["occ_s"][0], fermi=it_out["mu"],
+               energies=it_out["energies"], becps=it_out["becps_s"][0],
+               rho_out_spin=it_out["rho_out_s"])
     out["rho"] = rho
     out["rho_ij_atoms"] = bec
     out["newton"] = hist_out

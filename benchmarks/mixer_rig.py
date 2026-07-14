@@ -16,7 +16,7 @@ Stages:
   test  <rig.pt>   run the mixer zoo on the linear model x -> x* + J(x-x*)
                    and print iterations-to-tolerance per configuration
 
-The FD map evaluation runs scf_uspp(max_iter=1, start_from=..., tight
+The FD map evaluation calls _scf_iteration directly (tight
 diago_tol) and reads the RAW pre-mixing output (rho_out_spin +
 rho_ij_atoms), so every physical coupling (spin, becsum<->ddd, smearing,
 Fermi shift, augmentation) is in J exactly.
@@ -40,6 +40,7 @@ from gradwave.core.xc.spin import SpinPBE  # noqa: E402
 from gradwave.dtypes import CDTYPE  # noqa: E402
 from gradwave.pseudo.upf_paw import parse_upf_paw  # noqa: E402
 from gradwave.scf.uspp import scf_uspp, setup_uspp  # noqa: E402
+from gradwave.scf.uspp_loop import _build_iter_ops, _scf_iteration  # noqa: E402
 
 RY = 13.605693122994
 FIX = ROOT / "tests/fixtures/qe"
@@ -99,14 +100,26 @@ class Packing:
         return rho_spin, rho_ij
 
 
+_RAW_CACHE = {}
+
+
 def raw_map(system, xc, pk, v):
-    """One tight SCF iteration: packed density in -> RAW packed density out."""
+    """One tight SCF iteration: packed density in -> RAW packed density out.
+    Direct _scf_iteration evaluation (stage 3): operators built once per
+    system, orbital warm starts carried across J-applies — roughly half
+    the old scf_uspp(max_iter=1) round-trip cost."""
+    key = id(system)
+    if key not in _RAW_CACHE:
+        ops = _build_iter_ops(system, xc, nspin=2,
+                              smearing=SCF_KW["smearing"],
+                              width=SCF_KW["width"], batched=True)
+        _RAW_CACHE[key] = (ops, [[None] * ops.nk for _ in range(2)],
+                           [None, None])
+    ops, coeffs, coeffs_b = _RAW_CACHE[key]
     rho_spin, rho_ij = pk.unpack(v)
-    state = dict(system=system, nspin=2, rho_spin=rho_spin,
-                 rho_ij_atoms=rho_ij)
-    r = scf_uspp(system, xc, max_iter=1, start_from=state, diago_tol=1e-11,
-                 etol=1e-30, rhotol=1e-30, verbose=False, **SCF_KW)
-    return pk.pack(r["rho_out_spin"], r["rho_ij_atoms"])
+    step = _scf_iteration(ops, rho_spin, rho_ij, coeffs, coeffs_b, None,
+                          1e-11, 0)
+    return pk.pack(step["rho_out_s"], step["rho_ij_s"])
 
 
 def build(out_path):
