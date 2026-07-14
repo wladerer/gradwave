@@ -68,3 +68,25 @@ def test_gradcheck_spin_functionals():
     assert torch.autograd.gradcheck(
         lambda a, b, x, y, z: SpinPBE().energy_density(a, b, x, y, z).sum(),
         (ru, rd, suu, sdd, stt), atol=1e-7)
+
+
+def test_learnable_spin_x_limits():
+    """LearnableSpinX at the PBE initialization equals SpinPBE exactly, and
+    at zeta=0 (equal channels, sigma_tot = 4*sigma_uu) equals LearnableX
+    with the same (kappa, mu) via exact exchange spin scaling."""
+    from gradwave.core.xc.learnable import LearnableSpinX, LearnableX
+
+    gen = torch.Generator().manual_seed(7)
+    ru = 0.01 + 0.3 * torch.rand(64, generator=gen, dtype=torch.float64)
+    rd = 0.01 + 0.3 * torch.rand(64, generator=gen, dtype=torch.float64)
+    suu = 0.1 * torch.rand(64, generator=gen, dtype=torch.float64)
+    sdd = 0.1 * torch.rand(64, generator=gen, dtype=torch.float64)
+    stt = suu + sdd + 0.05 * torch.rand(64, generator=gen, dtype=torch.float64)
+
+    a = SpinPBE().energy_density(ru, rd, suu, sdd, stt)
+    b = LearnableSpinX().energy_density(ru, rd, suu, sdd, stt)
+    assert float((a - b.detach()).abs().max()) < 1e-13
+
+    c = LearnableSpinX(kappa=0.9, mu=0.3).energy_density(ru, ru, suu, suu, 4 * suu)
+    d = LearnableX(kappa=0.9, mu=0.3).energy_density(2 * ru, 4 * suu)
+    assert float((c - d).detach().abs().max()) < 1e-13

@@ -53,6 +53,10 @@ def newton_polish(res: dict, xc, *, tol: float = 1e-10, max_newton: int = 5,
     dict (fresh orbitals/energies from the final residual evaluation,
     plus a "newton" list of per-step residual norms)."""
     _check_supported(res)
+    if res.get("nspin", 1) != 1:
+        raise NotImplementedError("newton_polish: nspin=2 raw-map plumbing "
+                                  "not implemented (adjoint spin machinery "
+                                  "exists; the finisher is single-channel)")
     system = res["system"]
     grid = system.grid
     shape, n_pts = tuple(grid.shape), grid.n_points
@@ -104,8 +108,8 @@ def newton_polish(res: dict, xc, *, tol: float = 1e-10, max_newton: int = 5,
             jac_res["rho"] = rho
             jac_res["rho_ij_atoms"] = bec
             cs = _ConvergedUSPP(jac_res, xc)
-            dpsi_warm = [torch.zeros_like(c[:ns]) for c, ns in
-                         zip(cs.c_win, cs.n_solve, strict=True)]
+            dpsi_warm = [[torch.zeros_like(c[:ns]) for c, ns in
+                          zip(cs.c_win[0], cs.n_solve[0], strict=True)]]
 
             # inner solve: δ = r + χ̃(K δ), Anderson-accelerated — the
             # same fixed-point shape as the adjoint, on the forward side
@@ -114,13 +118,14 @@ def newton_polish(res: dict, xc, *, tol: float = 1e-10, max_newton: int = 5,
             hist_dd, hist_dg = [], []
             for _it in range(1, max_inner + 1):
                 d_rho, d_bec = _unpack(d, shape, n_pts, nbec)
-                v_r = cs.k_hxc_grid(d_rho)
-                d_ddd = cs.hvp_onecenter([m.to(torch.complex128)
-                                          for m in d_bec])
+                v_sp = cs.k_hxc_grid([d_rho])
+                d_ddd = cs.hvp_onecenter([[m.to(torch.complex128)
+                                           for m in d_bec]])
                 chi_rho, chi_bec = cs.apply_chi0(
-                    v_r, d_ddd, dpsi_warm, cg_tol, cg_max_iter)
-                g_vec = r_vec + _pack(chi_rho.to(RDTYPE),
-                                      [m.real.to(RDTYPE) for m in chi_bec])
+                    v_sp, d_ddd, dpsi_warm, cg_tol, cg_max_iter)
+                g_vec = r_vec + _pack(chi_rho[0].to(RDTYPE),
+                                      [m.real.to(RDTYPE)
+                                       for m in chi_bec[0]])
                 g_res = g_vec - d
                 gn = float(torch.linalg.norm(g_res)) / max(
                     1.0, float(torch.linalg.norm(d)))

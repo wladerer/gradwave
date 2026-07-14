@@ -153,6 +153,175 @@ def test_metal_paw_density_loss_grads_vs_fd():
 
 
 @pytest.mark.slow
+def test_spin_degenerate_density_loss_matches_nspin1():
+    """nspin=2 adjoint in the degenerate limit: a broken-symmetry-free spin
+    SCF on Si (m = 0) must give the same dL/dθ as the nspin=1 adjoint on
+    the identical smeared configuration — the per-spin Sternheimer, spin
+    K_Hxc HVP, and spin one-center HVP collapse to the unpolarized
+    machinery when the channels are equal."""
+    from gradwave.core.xc.learnable import LearnableSpinX
+
+    torch.set_num_threads(8)
+    paw = parse_upf_paw(FIX / "pseudos" / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
+    pos = np.array([[0.0, 0.0, 0.0], [1.3575, 1.3575, 1.3575]])
+    kw = dict(smearing="gaussian", width=0.1, etol=1e-12, rhotol=1e-10,
+              verbose=False, max_iter=80)
+
+    def system():
+        return setup_uspp(SI_CELL, pos, [0, 0], [paw], ecut=15 * RY,
+                          kmesh=(2, 2, 2), ecutrho=60 * RY)
+
+    xc1 = LearnableX()
+    res1 = scf_uspp(system(), xc1, **kw)
+    assert res1["converged"]
+    xc2 = LearnableSpinX()
+    res2 = scf_uspp(system(), xc2, nspin=2, start_mag=[0.0], **kw)
+    assert res2["converged"]
+    assert abs(res2["mag_total"]) < 1e-8
+    assert abs(float(res1["energies"].free_energy)
+               - float(res2["energies"].free_energy)) < 1e-6
+
+    rho_ref = (0.95 * res1["rho"]).detach().clone()
+
+    def loss_fn(rho):
+        d = rho - rho_ref
+        return (d * d).sum()
+
+    _, g1 = uspp_density_loss_param_grads(res1, xc1, loss_fn)
+    _, g2 = uspp_density_loss_param_grads(res2, xc2, loss_fn)
+    for name in ("raw_mu", "raw_kappa"):
+        a, b = float(g1[name]), float(g2[name])
+        rel = abs(a - b) / max(abs(a), 1e-30)
+        assert rel < 1e-5, f"{name}: nspin=1 {a} vs nspin=2 {b} (rel {rel:.2e})"
+
+
+@pytest.mark.slow
+def test_spin_o2_grads_vs_fd():
+    """Real-moment spin adjoint: O₂ triplet (m = 2, integer occupations,
+    Γ-only) — dE/dθ by stationarity AND density-loss dL/dθ through the
+    composite spin adjoint, both against central FD of full nspin=2 SCF
+    re-runs (the same two re-runs feed both gates). Exercises the per-spin
+    Sternheimer, the spin f_xc HVP with genuinely different channels, and
+    the cross-spin one-center Hessian blocks; the δμ Fermi-surface coupling
+    stays dormant here (integer occupations) and gets its own FM-metal
+    gate."""
+    from gradwave.core.xc.learnable import LearnableSpinX
+
+    torch.set_num_threads(8)
+    paw = parse_upf_paw(FIX / "pseudos" / "O.pbe-n-kjpaw_psl.1.0.0.UPF")
+    cell = 6.0 * np.eye(3)
+    pos = np.array([[3.0, 3.0, 2.40], [3.06, 3.0, 3.75]])
+
+    def scf_at(xc):
+        # 25 Ry limit-cycles at |Δρ| ~1e-3; 35/280 converges cleanly but
+        # the molecular noise floor sits at |Δρ| ~1.5e-6 and F wanders at
+        # ~5e-8 eV, so the flag must come from the energy criterion at an
+        # etol above that noise (the 18-iteration tail is then clean)
+        s = setup_uspp(cell, pos, [0, 0], [paw], ecut=35 * RY,
+                       kmesh=(1, 1, 1), ecutrho=280 * RY, nbands=10)
+        r = scf_uspp(s, xc, nspin=2, start_mag=[0.5], smearing="gaussian",
+                     width=0.01 * RY, etol=3e-7, criterion="energy",
+                     rhotol=1e-9, verbose=False, max_iter=90)
+        assert r["converged"]
+        assert abs(r["mag_total"] - 2.0) < 1e-2
+        return r
+
+    xc0 = LearnableSpinX()
+    res = scf_at(xc0)
+    g_e = uspp_energy_param_grads(res, xc0)
+
+    rho_ref = (0.95 * res["rho"]).detach().clone()
+
+    def loss_fn(rho):
+        d = rho - rho_ref
+        return (d * d).sum()
+
+    # history 40: the vacuum spin-f_xc broadens the Kχ̃ spectrum (max|K|
+    # sits at the density-floor shell covering half the box) and
+    # restarted-Anderson(8) stagnates at 1e-2; near-unrestarted Anderson
+    # is GMRES-like on this LINEAR system and goes through. cg_tol must
+    # be 1e-10: it is an ABSOLUTE residual norm and the kernel amplifies
+    # |u| by ~1e3, so 1e-8 floors the outer loop at ~2e-6 relative.
+    _, g_l = uspp_density_loss_param_grads(
+        res, xc0, loss_fn, history=40, beta=0.3, max_outer=300,
+        outer_tol=2e-6, cg_tol=1e-10)
+
+    h = 5e-3  # FD signal ≫ the 5e-8 molecular F-noise (rel noise ~3e-5)
+    es, ls = [], []
+    for sgn in (+1, -1):
+        xc = LearnableSpinX()
+        with torch.no_grad():
+            xc.raw_mu.add_(sgn * h)
+        r = scf_at(xc)
+        es.append(float(r["energies"].free_energy))
+        ls.append(float(loss_fn(r["rho"])))
+    fd_e = (es[0] - es[1]) / (2 * h)
+    fd_l = (ls[0] - ls[1]) / (2 * h)
+    rel_e = abs(float(g_e["raw_mu"]) - fd_e) / abs(fd_e)
+    rel_l = abs(float(g_l["raw_mu"]) - fd_l) / abs(fd_l)
+    # observed: rel_e 2.6e-7, rel_l 2.2e-5
+    assert rel_e < 1e-5, f"dE/dθ {float(g_e['raw_mu'])} vs FD {fd_e} " \
+                         f"(rel {rel_e:.2e})"
+    assert rel_l < 2e-4, f"dL/dθ {float(g_l['raw_mu'])} vs FD {fd_l} " \
+                         f"(rel {rel_l:.2e})"
+
+
+@pytest.mark.torture
+def test_fm_ni_density_loss_grads_vs_fd():
+    """The cross-spin δμ coupling — the one piece of the spin adjoint the
+    O₂ gate cannot see (integer occupations there). FM Ni is a smeared
+    metal with a real Fermi surface in BOTH channels: δμ's particle-
+    conservation sums run over both spins and feed back into each, so an
+    FD match here validates channels (a)+(b)+(c) of the metallic response
+    in the spin-polarized case. ~2 h on 8 cores; run when the spin
+    response machinery changes."""
+    from gradwave.core.xc.learnable import LearnableSpinX
+
+    torch.set_num_threads(8)
+    paw = parse_upf_paw(FIX / "pseudos" / "Ni.pbe-spn-kjpaw_psl.1.0.0.UPF")
+    cell = np.array([[0.0, 1.76, 1.76], [1.76, 0.0, 1.76],
+                     [1.76, 1.76, 0.0]])
+
+    def scf_at(xc):
+        # nbands 24 (not the SCF-sufficient 18): the adjoint needs the top
+        # computed band free of occupation/Fermi-surface weight
+        s = setup_uspp(cell, np.zeros((1, 3)), [0], [paw], ecut=50 * RY,
+                       kmesh=(4, 4, 4), ecutrho=400 * RY, nbands=24)
+        r = scf_uspp(s, xc, nspin=2, start_mag=[0.8], smearing="gaussian",
+                     width=0.1, etol=1e-6, criterion="energy",
+                     mixing_scheme="johnson", verbose=False, max_iter=120)
+        assert r["converged"]
+        assert abs(r["mag_total"]) > 0.1, "NM collapse — seed/trajectory"
+        return r
+
+    xc0 = LearnableSpinX()
+    res = scf_at(xc0)
+    rho_ref = (0.95 * res["rho"]).detach().clone()
+
+    def loss_fn(rho):
+        d = rho - rho_ref
+        return (d * d).sum()
+
+    _, g_l = uspp_density_loss_param_grads(
+        res, xc0, loss_fn, history=40, beta=0.3, max_outer=300,
+        outer_tol=1e-6, cg_tol=1e-10)
+
+    h = 5e-3
+    vals = []
+    for sgn in (+1, -1):
+        xc = LearnableSpinX()
+        with torch.no_grad():
+            xc.raw_mu.add_(sgn * h)
+        vals.append(float(loss_fn(scf_at(xc)["rho"])))
+    fd = (vals[0] - vals[1]) / (2 * h)
+    an = float(g_l["raw_mu"])
+    rel = abs(an - fd) / abs(fd)
+    # gate reflects the FM-metal SCF noise floor (etol 1e-6, occupation
+    # plateau); a broken δμ channel misses by orders of magnitude
+    assert rel < 5e-3, f"dL/dθ adjoint {an} vs FD {fd} (rel {rel:.2e})"
+
+
+@pytest.mark.slow
 def test_paw_density_loss_grads_ibz_equals_full():
     """IBZ (use_symmetry=True) adjoint == full-mesh adjoint. The transposed
     symmetrized SCF map applies the self-adjoint symmetrizers to u before
