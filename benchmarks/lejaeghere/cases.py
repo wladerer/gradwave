@@ -34,26 +34,30 @@ CASES = {
     "si": dict(pseudo="Si.pbe-n-kjpaw_psl.1.0.0.UPF", elems=["Si", "Si"],
                frac=[[0, 0, 0], [0.25] * 3], ecut_ry=45, ecutrho_ry=180,
                kmesh=(8, 8, 8), smearing="none", width=0.0, nbands=None,
-               nspin=1, start_mag=None),
+               nspin=1, start_mag=None, mixing_scheme="johnson"),
     # PBE Ge is a near-zero-gap semiconductor — tiny smearing keeps the
     # occupations well-defined across the volume scan
     "ge": dict(pseudo="Ge.pbe-dn-kjpaw_psl.1.0.0.UPF", elems=["Ge", "Ge"],
                frac=[[0, 0, 0], [0.25] * 3], ecut_ry=45, ecutrho_ry=240,
                kmesh=(8, 8, 8), smearing="gaussian", width=0.002 * RY,
-               nbands=18, nspin=1, start_mag=None),
+               nbands=18, nspin=1, start_mag=None,
+               mixing_scheme="johnson"),
     "al": dict(pseudo="Al.pbe-n-kjpaw_psl.1.0.0.UPF", elems=["Al"],
                frac=[[0, 0, 0]], ecut_ry=35, ecutrho_ry=160,
                kmesh=(16, 16, 16), smearing="gaussian", width=0.01 * RY,
-               nbands=8, nspin=1, start_mag=None),
+               nbands=8, nspin=1, start_mag=None,
+               mixing_scheme="johnson"),
     "cu": dict(pseudo="Cu.pbe-dn-kjpaw_psl.1.0.0.UPF", elems=["Cu"],
                frac=[[0, 0, 0]], ecut_ry=50, ecutrho_ry=280,
                kmesh=(16, 16, 16), smearing="gaussian", width=0.01 * RY,
-               nbands=14, nspin=1, start_mag=None),
-    # FM Ni: Johnson mixing converges the FM branch at the DEFAULT damping
-    # (measured head-to-head on the ni_paw_spin config: 44 iterations vs
-    # 118 for hand-damped pulay alpha 0.3; pulay 0.7 collapses the moment,
-    # unweighted broyden diverges — the measured Stoner-mode gain is -3.5,
-    # plain-step stability boundary alpha 0.44). Energy criterion because
+               nbands=14, nspin=1, start_mag=None,
+               mixing_scheme="johnson"),
+    # Johnson everywhere (2026-07-13): the QE-class mixer at default
+    # damping, becsum unscaled (bec_step_scale 1.0 per-scheme default —
+    # FM Ni reference config 16 iterations vs 118 for hand-damped pulay
+    # alpha 0.3; pulay 0.7 collapses the moment, unweighted broyden
+    # diverges; the measured Stoner-mode gain is -3.5, plain-step
+    # stability boundary alpha 0.44). Energy criterion for Ni because
     # the residual floors at metallic occupation noise; warm-start
     # chaining across volumes holds the branch between scan points.
     "ni": dict(pseudo="Ni.pbe-spn-kjpaw_psl.1.0.0.UPF", elems=["Ni"],
