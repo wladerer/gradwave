@@ -57,7 +57,7 @@ SYSTEMS = {
                                  ecutrho=60 * RY),
         spin=False,
         scf=dict(etol=1e-11, rhotol=1e-9, verbose=False, max_iter=80),
-        adj={}),
+        adj=dict(floor_tol=1e-4)),
     "al": dict(
         build=lambda: setup_uspp(AL_CELL, np.zeros((1, 3)), [0], [paw_al],
                                  ecut=20 * RY, kmesh=(2, 2, 2),
@@ -65,7 +65,7 @@ SYSTEMS = {
         spin=False,
         scf=dict(smearing="gaussian", width=0.5, etol=1e-11, rhotol=1e-9,
                  verbose=False, max_iter=120),
-        adj={}),
+        adj=dict(floor_tol=1e-4)),
     "si_u4": dict(
         build=lambda: setup_uspp(SI_CELL, SI_POS, [0, 0], [paw_si],
                                  ecut=15 * RY, kmesh=(2, 2, 2),
@@ -73,7 +73,7 @@ SYSTEMS = {
         spin=False,
         scf=dict(etol=1e-11, rhotol=1e-9, verbose=False, max_iter=80,
                  hubbard=[HubbardManifold(species=0, l=1, u=4.0)]),
-        adj={}),
+        adj=dict(floor_tol=1e-4)),
     "o2": dict(
         build=lambda: setup_uspp(O2_CELL, O2_POS, [0, 0], [paw_o],
                                  ecut=35 * RY, kmesh=(1, 1, 1),
@@ -82,9 +82,11 @@ SYSTEMS = {
         scf=dict(nspin=2, start_mag=[0.5], smearing="gaussian",
                  width=0.01 * RY, etol=3e-7, criterion="energy",
                  rhotol=1e-9, verbose=False, max_iter=90),
-        # vacuum spin-f_xc broadens the kernel spectrum (O2 test lessons)
-        adj=dict(history=40, beta=0.3, max_outer=300, outer_tol=2e-6,
-                 cg_tol=1e-10)),
+        # vacuum spin-f_xc broadens the kernel spectrum (O2 test
+        # lessons), and the achievable floor rises off-reference — 5e-5
+        # in u is ~1e-4 in the gradient, far below Adam's noise scale
+        adj=dict(history=40, beta=0.3, max_outer=120, outer_tol=2e-5,
+                 cg_tol=1e-10, floor_tol=3e-4)),
 }
 
 

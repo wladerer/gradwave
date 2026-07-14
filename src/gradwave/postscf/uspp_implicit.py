@@ -84,7 +84,11 @@ the double backward through the joint E_1c(bec↑, bec↓). All blocks stay
 symmetric (f_xc^{↑↓} = f_xc^{↓↑} by equality of mixed partials; the δμ term
 is a rank-one of one composite vector), so the transposed fixed point and
 the IBZ machinery carry over unchanged. The loss stays a functional of the
-TOTAL density, so v̄ seeds both channels equally. No +U.
+TOTAL density, so v̄ seeds both channels equally.
+
+DFT+U: the composite vector gains the occupation-matrix response δn per
+hub channel, the frozen window operators carry the converged V_U, and the
+kernel block is the Dudarev second derivative δD_U = −(U−J)·herm(δn).
 """
 
 from __future__ import annotations
@@ -694,13 +698,21 @@ class _ConvergedUSPP:
 def uspp_density_loss_param_grads(
     res: dict, xc, loss_fn, *, beta: float = 0.2, history: int = 8,
     outer_tol: float = 1e-9, max_outer: int = 100, cg_tol: float = 1e-8,
-    cg_max_iter: int = 200, verbose: bool = False,
+    cg_max_iter: int = 200, floor_tol: float | None = None,
+    verbose: bool = False,
 ) -> tuple[torch.Tensor, dict]:
     """dL/dθ of a density-dependent loss through the USPP/PAW SCF fixed
     point. loss_fn: rho(grid tensor of the TOTAL density) -> scalar torch
     tensor (pure, differentiable) — for nspin=2 the loss stays a functional
     of ρ_tot, so its gradient seeds both spin channels equally. Returns
-    (L, {param_name: grad})."""
+    (L, {param_name: grad}).
+
+    floor_tol: opt-in stagnation acceptance. Some systems' achievable
+    outer floor wanders (the O₂ vacuum spin-f_xc lesson, and it drifts
+    with the functional parameters during training); when the residual
+    stops improving for 15 iterations and the best seen is below
+    floor_tol, the best iterate is used instead of raising. None keeps
+    the strict behavior for validation work."""
     _check_supported(res)
     with torch.no_grad():
         cs = _ConvergedUSPP(res, xc)
@@ -791,6 +803,7 @@ def uspp_density_loss_param_grads(
         prev_u = prev_r = None
         hist_du, hist_dr = [], []
         drho = dbec = None
+        rn_best, u_best, it_best = float("inf"), None, 0
         for it in range(1, max_outer + 1):
             w_sp, d_bare_sp, d_hub_sp = split(u)
             w_sp, d_bare_sp = symmetrize(w_sp, d_bare_sp)
@@ -806,6 +819,19 @@ def uspp_density_loss_param_grads(
             if verbose:
                 print(f"  uspp-adjoint it {it:3d}: |r|/|u| = {rn:.3e}")
             if rn < outer_tol:
+                break
+            if rn < rn_best:
+                rn_best, u_best, it_best = rn, u.clone(), it
+            if (floor_tol is not None and rn_best < floor_tol
+                    and it - it_best >= 15):
+                if verbose:
+                    print(f"  uspp-adjoint: floored at {rn_best:.2e} "
+                          f"(no improvement for {it - it_best} its)")
+                w_sp, d_bare_sp, d_hub_sp = split(u_best)
+                w_sp, d_bare_sp = symmetrize(w_sp, d_bare_sp)
+                drho, dbec, dnh = cs.apply_chi0(
+                    w_sp, d_bare_sp, dpsi_warm, cg_tol, cg_max_iter,
+                    d_hub_sp=d_hub_sp)
                 break
             if prev_r is not None:
                 hist_du.append(u - prev_u)
