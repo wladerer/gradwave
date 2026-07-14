@@ -77,8 +77,17 @@ ni spin vs QE, batched-vs-per-k equality).
 **Prepared (2026-07-13).** docs/refactor_stage3.md holds the measured
 consumer map, the string-anchored anatomy of scf_uspp, the
 IterOps/IterState/_scf_iteration contract, the four-commit sequence
-with per-commit gates, and the trap list. Execution is a fresh-session
-job per the sequencing rule below.
+with per-commit gates, and the trap list.
+
+**Done (2026-07-13, commits 84f7a78 / 15c6cb6 / 4d3+30e9924).** Four
+commits as planned: setup → uspp_setup.py (287 lines), driver →
+uspp_loop.py with uspp.py a 22-line facade, _scf_iteration extracted
+(loop body verbatim; driver keeps tolerance schedule, rescue,
+convergence, trust, mixing), newton + rig switched to direct
+evaluation. Every gate green including the nine slow anchors. The
+sentinel-tolerance hack is gone; measured payoff: rig J-apply 23.5 s →
+7.1 s warm (|F(x*)−x*| 2.4e-11 through the new path), newton polish
+suite minutes → 44 s.
 
 ## Stage 4 — NC/USPP sharing (deliberately minimal)
 
