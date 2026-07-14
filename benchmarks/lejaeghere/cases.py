@@ -9,12 +9,12 @@ Reference values are WIEN2k version 13.1 (calcDelta package 3.0):
 V0 in A^3/atom, B0 in GPa, B1 dimensionless. Structures are derived from
 the reference V0 (cubic subset only, so V0 fixes the lattice constant).
 """
-import numpy as np
+import sys
+from pathlib import Path
 
-RY = 13.605693122994
-FCC = np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
-# volume factors applied to the reference equilibrium volume
-SCALES = [0.94, 0.96, 0.98, 1.00, 1.02, 1.04, 1.06]
+sys.path.insert(0, str(Path(__file__).parents[1]))
+from structures import EOS_SCALES as SCALES  # noqa: E402,F401
+from structures import RY, a_from_v0, fcc_geometry  # noqa: E402,F401
 
 # WIEN2k v13.1: V0 (A^3/atom), B0 (GPa), B1. Cubic members only — the
 # reference C is graphite (V0 11.64 A^3/atom is the PBE interlayer, not
@@ -71,9 +71,5 @@ CASES = {
 def geometry(case, scale):
     """(cell, cart_positions, elems) at volume factor `scale` x V0_ref."""
     cfg = CASES[case]
-    v0_atom = WIEN2K[case][0]
-    v_cell = len(cfg["elems"]) * v0_atom * scale
-    a = (4.0 * v_cell) ** (1.0 / 3.0)  # fcc primitive: V_cell = a^3/4
-    cell = a / 2.0 * FCC
-    pos = np.array(cfg["frac"], dtype=np.float64) @ cell
-    return cell, pos, cfg["elems"]
+    a = a_from_v0(WIEN2K[case][0], len(cfg["elems"]), scale)
+    return fcc_geometry(a, cfg["frac"], cfg["elems"])

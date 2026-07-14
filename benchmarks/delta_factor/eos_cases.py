@@ -1,10 +1,10 @@
 """Shared Δ-factor EOS case definitions (PBE, ONCV-1.2 pseudos, fcc cells)."""
-import numpy as np
+import sys
+from pathlib import Path
 
-RY = 13.605693122994
-FCC = np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
-# volume factors, ±6% around reference volume (standard Δ window)
-SCALES = [0.94, 0.96, 0.98, 1.00, 1.02, 1.04, 1.06]
+sys.path.insert(0, str(Path(__file__).parents[1]))
+from structures import EOS_SCALES as SCALES  # noqa: E402,F401
+from structures import RY, fcc_geometry, scaled_a  # noqa: E402,F401
 
 CASES = {
     "si":   dict(a=5.43,  elems=["Si", "Si"], frac=[[0, 0, 0], [0.25] * 3],
@@ -25,6 +25,4 @@ CASES = {
 def geometry(case, scale):
     """(cell, cart_positions, elems) for a volume factor `scale`."""
     cfg = CASES[case]
-    cell = cfg["a"] * scale ** (1.0 / 3.0) / 2.0 * FCC
-    pos = np.array(cfg["frac"]) @ cell
-    return cell, pos, cfg["elems"]
+    return fcc_geometry(scaled_a(cfg["a"], scale), cfg["frac"], cfg["elems"])
