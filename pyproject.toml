@@ -36,9 +36,17 @@ packages = ["src/gradwave"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "slow: expensive integration tests (converged fixture variants)",
+    "standard: seconds-class integration tests, excluded from the fast gate",
+    "slow: minutes-class QE-comparison tests, nightly or pre-release",
+    "torture: tests over ~10 minutes (spin and FD monsters), run manually when their subsystem changes",
     "gpu: requires CUDA device",
 ]
+# Tiers (docs/refactor_plan.md stage 5). A test carries at most one tier
+# marker; unmarked tests are the fast tier by definition.
+#   fast gate (<2 min):  pytest -m "not standard and not slow and not torture and not gpu"
+#   standard / CI:       pytest -m "not slow and not torture and not gpu"
+#   nightly:             pytest -m "not torture and not gpu"
+#   torture (manual):    pytest -m torture
 
 [tool.ruff]
 line-length = 100

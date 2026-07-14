@@ -107,6 +107,19 @@ One audit pass moves tests that crept upward back down (several
 "fast" tests run multi-second SCFs that a lower cutoff would test
 equally well).
 
+**Done (2026-07-13).** Measured with `--durations=0`: the 138-test
+not-slow suite took 588 s, of which the 15 tests over 5 s accounted for
+~510 s. Those 15 carry `standard` (file-level for metal_forces,
+uspp_batched_equality, dos, golden_energies; function-level for the
+stress_vs_qe CI cases and stress_with_symmetry; param-level for
+gaas_pbe_ci). Five monsters moved from `slow` to `torture` (ni+U vs QE,
+o2 triplet, spin-degenerate forces/stress, nio linear-response U vs hp,
+nio dE/dU Hellmann-Feynman). Result: fast tier 122 tests in 81 s,
+fast+standard identical to the old not-slow set (138), torture 5. Tier
+commands are recorded in pyproject.toml and the README. The audit's
+lower-cutoff rewrites of individual tests were not needed to reach the
+2-minute target and are left for when a fast test regresses.
+
 ## Stage 6 — Benchmark hygiene
 
 - One shared case-construction helper for the benchmark family

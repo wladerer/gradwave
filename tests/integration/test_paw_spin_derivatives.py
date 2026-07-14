@@ -29,7 +29,7 @@ SI_CELL = 5.43 / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 SI_POS_DISP = np.array([[0.0, 0.0, 0.0], [1.4075, 1.3175, 1.3775]])
 
 
-@pytest.mark.slow
+@pytest.mark.torture
 def test_spin_degenerate_forces_stress_match_nspin1():
     torch.set_num_threads(8)
     from gradwave.pseudo.upf_paw import parse_upf_paw

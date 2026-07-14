@@ -30,7 +30,7 @@ FIX = Path(__file__).parents[1] / "fixtures" / "qe"
 RY = 13.605693122994
 
 
-@pytest.mark.slow
+@pytest.mark.torture
 def test_o2_triplet_forces_stress_vs_qe():
     torch.set_num_threads(8)
     ref = json.loads((FIX / "o2_paw_spin_ci" / "reference.json").read_text())

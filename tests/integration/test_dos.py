@@ -3,12 +3,15 @@ explicitly diagonalized spectrum — cumulative state counts in the window
 where explicit eigenvalues exist (all bands below the highest computed one)."""
 
 import numpy as np
+import pytest
 import torch
 
 from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.postscf.dos import kpm_dos
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
+
+pytestmark = pytest.mark.standard
 
 RY = 13.605693122994
 A = 5.43

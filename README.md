@@ -87,9 +87,18 @@ See `examples/` for input files. Any geometry format ASE can read is accepted.
 
 ```bash
 uv sync            # managed venv with all dev deps
-uv run pytest -n auto
+uv run pytest -m "not standard and not slow and not torture and not gpu"   # fast gate, ~80 s
 uv run ruff check
 ```
+
+The suite is tiered by marker (unmarked tests are the fast tier):
+
+| tier | select | wall time | when |
+|---|---|---|---|
+| fast | `-m "not standard and not slow and not torture and not gpu"` | ~80 s | every commit |
+| standard | `-m "not slow and not torture and not gpu"` | ~10 min | CI |
+| nightly | `-m "not torture and not gpu"` | hours | nightly / pre-release |
+| torture | `-m torture` | 10 min – hours each | manually, when their subsystem changes |
 
 Reference data is generated against Quantum ESPRESSO `pw.x` with the *same* UPF files
 (`tests/fixtures/qe/regenerate.py`; QE via `nix shell nixpkgs#quantum-espresso`).

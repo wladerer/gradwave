@@ -58,7 +58,7 @@ def test_nio_afm_hubbard_vs_qe():
     assert abs(res.mag_total) < 1e-3  # AFM: net zero
 
 
-@pytest.mark.slow
+@pytest.mark.torture
 def test_nio_linear_response_u_vs_hp():
     """The code computes its own U (Cococcioni linear response) vs QE hp.x DFPT.
 
@@ -87,7 +87,7 @@ def test_nio_linear_response_u_vs_hp():
     assert abs(out["U_eV"] - ref["hubbard_U_eV"]) < 0.15, out["U_eV"]
 
 
-@pytest.mark.slow
+@pytest.mark.torture
 def test_nio_energy_derivative_u_hellmann_feynman():
     """dE_total/dU from the Hellmann-Feynman identity Σ ½Tr[n(1−n)] vs
     finite-difference SCF re-runs — U as a first-class differentiable parameter.

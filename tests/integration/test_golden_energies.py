@@ -11,11 +11,14 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from gradwave.core.xc.pbe import PBE
 from gradwave.pseudo.upf_paw import parse_upf_paw
 from gradwave.scf.uspp import scf_uspp, setup_uspp
+
+pytestmark = pytest.mark.standard
 
 FIX = Path(__file__).parents[1] / "fixtures"
 RY = 13.605693122994

@@ -20,6 +20,8 @@ from gradwave.postscf.paw_forces import forces_uspp
 from gradwave.pseudo.upf_paw import parse_upf_paw
 from gradwave.scf.uspp import scf_uspp, setup_uspp
 
+pytestmark = pytest.mark.standard
+
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
 RY = 13.605693122994
 SI_CELL = 5.43 / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])

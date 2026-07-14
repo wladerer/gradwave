@@ -102,7 +102,10 @@ def run_case(name):
     return res, ref
 
 
-@pytest.mark.parametrize("name", [n for n, c in CASES.items() if not c["slow"]])
+@pytest.mark.parametrize(
+    "name",
+    [pytest.param(n, marks=pytest.mark.standard) if n == "gaas_pbe_ci" else n
+     for n, c in CASES.items() if not c["slow"]])
 def test_scf_vs_qe_ci(name):
     torch.set_num_threads(4)
     run_case(name)

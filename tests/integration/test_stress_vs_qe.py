@@ -93,6 +93,7 @@ def run_case(name):
     return res
 
 
+@pytest.mark.standard
 @pytest.mark.parametrize("name", [n for n, c in CASES.items() if not c["slow"]])
 def test_stress_vs_qe_ci(name):
     torch.set_num_threads(4)
@@ -106,6 +107,7 @@ def test_stress_vs_qe_slow(name):
     run_case(name)
 
 
+@pytest.mark.standard
 def test_stress_with_symmetry():
     """IBZ k-set + stress symmetrization must reproduce the full-mesh QE
     tensor: the strain derivative of the IBZ-restricted expression is only

@@ -21,7 +21,7 @@ FIX = Path(__file__).parents[1] / "fixtures" / "qe"
 RY = 13.605693122994
 
 
-@pytest.mark.slow
+@pytest.mark.torture
 def test_paw_hubbard_ni_vs_qe():
     torch.set_num_threads(8)
     ref = json.loads((FIX / "ni_paw_hubbard_ci" / "reference.json").read_text())
