@@ -266,15 +266,15 @@ def test_spin_o2_grads_vs_fd():
                          f"(rel {rel_l:.2e})"
 
 
-@pytest.mark.torture
+@pytest.mark.slow
 def test_fm_ni_density_loss_grads_vs_fd():
     """The cross-spin δμ coupling — the one piece of the spin adjoint the
     O₂ gate cannot see (integer occupations there). FM Ni is a smeared
     metal with a real Fermi surface in BOTH channels: δμ's particle-
     conservation sums run over both spins and feed back into each, so an
     FD match here validates channels (a)+(b)+(c) of the metallic response
-    in the spin-polarized case. ~2 h on 8 cores; run when the spin
-    response machinery changes."""
+    in the spin-polarized case. ~8 min on 8 cores (johnson bec-1.0 SCFs
+    + relative-tolerance CG). Observed rel 1e-4 class."""
     from gradwave.core.xc.learnable import LearnableSpinX
 
     torch.set_num_threads(8)
