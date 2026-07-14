@@ -24,12 +24,6 @@ from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.energies.total import EnergyBreakdown, total_energy
 from gradwave.core.fftbox import r_to_g
 from gradwave.core.hamiltonian import build_projector_data
-from gradwave.core.occupations import (
-    SCHEMES,
-    find_fermi,
-    fixed_occupations,
-    occupations_and_entropy,
-)
 from gradwave.core.xc.base import XCFunctional
 from gradwave.dtypes import CDTYPE, CDTYPE_LOW, RDTYPE, RDTYPE_LOW
 from gradwave.grids import build_fft_grid, build_gsphere
@@ -37,6 +31,7 @@ from gradwave.kpoints import monkhorst_pack
 from gradwave.pseudo.kb import beta_form_factors
 from gradwave.pseudo.local import alpha_z, vloc_of_g
 from gradwave.pseudo.upf import UPFData
+from gradwave.scf.common import shared_fermi_occupations
 from gradwave.scf.guess import sad_density
 from gradwave.scf.mixing import PulayMixer
 
@@ -356,7 +351,6 @@ def scf(
     if system.is_fr:
         raise ValueError("fully-relativistic pseudos require the spinor SCF "
                          "(scf_noncollinear) — SOC has no collinear representation")
-    g_spin = 2.0 / nspin
     if kerker is None:
         # auto policy: metals always; insulators once the cell is large
         # enough that long-wavelength charge sloshing dominates mixing —
@@ -522,25 +516,9 @@ def scf(
                 c = c / torch.linalg.norm(c, dim=-1, keepdim=True).clamp_min(1e-30)
             coeffs_b_s[sp] = c
 
-        if smearing == "none":
-            occ_s = [fixed_occupations(eigs_s[0], system.n_electrons)]
-            mu = float(eigs_s[0][:, int(system.n_electrons // 2) - 1].max())
-            entropy_term = torch.zeros((), dtype=RDTYPE, device=device)
-        else:
-            scheme = SCHEMES[smearing]
-            eigs_cat = torch.cat(eigs_s, dim=0)  # (nspin·nk, nb)
-            kw_cat = torch.cat([system.kweights] * nspin)
-            mu = float(find_fermi(eigs_cat, kw_cat, scheme, width,
-                                  system.n_electrons, degeneracy=g_spin))
-            # NB: bare torch.tensor(mu) would be float32 and shift N_e by ~1e-7
-            mu_t = torch.tensor(mu, dtype=RDTYPE, device=device)
-            occ_s, ent = [], torch.zeros((), dtype=RDTYPE, device=device)
-            for sp in range(nspin):
-                o, s_ent = occupations_and_entropy(
-                    eigs_s[sp], mu_t, scheme, width, degeneracy=g_spin)
-                occ_s.append(o)
-                ent = ent - width * (g_spin * system.kweights[:, None] * s_ent).sum()
-            entropy_term = ent
+        occ_s, mu, entropy_term = shared_fermi_occupations(
+            eigs_s, system.kweights, smearing, width, system.n_electrons,
+            nspin, device)
 
         # DFT+U occupation matrices from the fresh orbitals; E_U (Dudarev).
         # occ_s is per-spin f∈[0,1] when nspin=2; for nspin=1 the [0,2]

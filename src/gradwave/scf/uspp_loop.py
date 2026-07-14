@@ -38,11 +38,9 @@ from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
 from gradwave.core.hamiltonian import ProjectorData, becp, projectors
 from gradwave.core.occupations import (
     SCHEMES,
-    find_fermi,
-    fixed_occupations,
-    occupations_and_entropy,
 )
 from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.scf.common import shared_fermi_occupations
 from gradwave.scf.guess import sad_density
 from gradwave.scf.layout import MixLayout
 from gradwave.scf.loop import vxc_potential
@@ -231,7 +229,7 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
     vloc_g, vloc_r, phase_pos = ops.vloc_g, ops.vloc_r, ops.phase_pos
     is_paw, onec = ops.is_paw, ops.onec
     grid, vol, dev, shape = ops.grid, ops.vol, ops.dev, ops.shape
-    mask_flat, g_spin, nk, nb = ops.mask_flat, ops.g_spin, ops.nk, ops.nb
+    mask_flat, nk, nb = ops.mask_flat, ops.nk, ops.nb
     if batched:
         from gradwave.core.batch import becp_b
         from gradwave.scf.uspp_batch import BatchedHS, davidson_gen_batched
@@ -360,26 +358,9 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
             eigs_l.append(e_k)
         eigs_s.append(torch.stack(eigs_l))
 
-    if smearing == "none":
-        if nspin != 1:
-            raise ValueError("nspin=2 requires smearing (shared Fermi level)")
-        occ_s = [fixed_occupations(eigs_s[0], system.n_electrons)]
-        mu = float(eigs_s[0][:, int(system.n_electrons // 2) - 1].max())
-        entropy_term = torch.zeros((), dtype=RDTYPE, device=dev)
-    else:
-        scheme = SCHEMES[smearing]
-        eigs_cat = torch.cat(eigs_s, dim=0)
-        kw_cat = torch.cat([system.kweights] * nspin)
-        mu = float(find_fermi(eigs_cat, kw_cat, scheme, width,
-                              system.n_electrons, degeneracy=g_spin))
-        mu_t = torch.tensor(mu, dtype=RDTYPE, device=dev)
-        occ_s, ent = [], torch.zeros((), dtype=RDTYPE, device=dev)
-        for isp in range(nspin):
-            o, s_ent = occupations_and_entropy(
-                eigs_s[isp], mu_t, scheme, width, degeneracy=g_spin)
-            occ_s.append(o)
-            ent = ent - width * (g_spin * system.kweights[:, None] * s_ent).sum()
-        entropy_term = ent
+    occ_s, mu, entropy_term = shared_fermi_occupations(
+        eigs_s, system.kweights, smearing, width, system.n_electrons,
+        nspin, dev)
 
     # DFT+U: fresh S-metric occupation matrices + Dudarev E_U (lags one
     # step into V_U like the NC path; nspin=1 splits [0,2] occupations
