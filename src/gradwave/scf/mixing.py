@@ -19,7 +19,49 @@ from __future__ import annotations
 import torch
 
 
-class BroydenMixer:
+class _DampedMixerBase:
+    """Shared plumbing for every mixer: the damped, optionally
+    Kerker-preconditioned plain step P·r with per-component step scaling
+    and the per-iteration extra_precond hook (Stoner spin preconditioner).
+    Subclasses own only their history state and step() algorithm."""
+
+    def __init__(
+        self,
+        g2: torch.Tensor,  # (n,) |G|² per component; 0 on non-grid blocks
+        alpha: float = 0.7,
+        history: int = 8,
+        kerker: bool = False,
+        q0: float = 1.1,
+        check_g0: bool = True,
+        kerker_mask=None,  # per-component bool; None → kerker on all
+        step_scale=None,  # per-component multiplier on the damped step
+    ):
+        self.g2 = g2
+        self.alpha = alpha
+        self.history = history
+        self.kerker = kerker
+        self.q0 = q0
+        self.check_g0 = check_g0
+        self.kerker_mask = kerker_mask
+        self.step_scale = step_scale
+        self.extra_precond = None
+
+    def _damped(self, r: torch.Tensor) -> torch.Tensor:
+        if self.extra_precond is not None:
+            r = self.extra_precond(r)
+        if not self.kerker:
+            out = self.alpha * r
+        else:
+            fac = self.g2 / (self.g2 + self.q0**2)
+            if self.kerker_mask is not None:
+                fac = torch.where(self.kerker_mask, fac, torch.ones_like(fac))
+            out = self.alpha * fac * r
+        if self.step_scale is not None:
+            out = out * self.step_scale
+        return out
+
+
+class BroydenMixer(_DampedMixerBase):
     """Limited-memory Broyden's second method (QE mixing_mode='plain').
 
     Maintains an approximate inverse Jacobian B of the residual map through
@@ -38,43 +80,11 @@ class BroydenMixer:
     sequentially each step, so dropping the oldest pair is exact
     limited-memory Broyden on the window (m² dot products per step)."""
 
-    def __init__(
-        self,
-        g2: torch.Tensor,
-        alpha: float = 0.7,
-        history: int = 8,
-        kerker: bool = False,
-        q0: float = 1.1,
-        check_g0: bool = True,
-        kerker_mask=None,
-        step_scale=None,
-    ):
-        self.g2 = g2
-        self.alpha = alpha
-        self.history = history
-        self.kerker = kerker
-        self.q0 = q0
-        self.check_g0 = check_g0
-        self.kerker_mask = kerker_mask
-        self.step_scale = step_scale
-        self.extra_precond = None  # per-iteration hook (Stoner spin precond)
+    def __init__(self, g2, **kw):
+        super().__init__(g2, **kw)
         self._pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
         self._prev_in = None
         self._prev_res = None
-
-    def _damped(self, r: torch.Tensor) -> torch.Tensor:
-        if self.extra_precond is not None:
-            r = self.extra_precond(r)
-        if not self.kerker:
-            out = self.alpha * r
-        else:
-            fac = self.g2 / (self.g2 + self.q0**2)
-            if self.kerker_mask is not None:
-                fac = torch.where(self.kerker_mask, fac, torch.ones_like(fac))
-            out = self.alpha * fac * r
-        if self.step_scale is not None:
-            out = out * self.step_scale
-        return out
 
     def _apply_b(self, v, us, ys):
         """B v with B = −αP + Σ u_i ⟨y_i|·⟩ (rank-one secant corrections)."""
@@ -113,7 +123,7 @@ class BroydenMixer:
         return rho_in - self._apply_b(res, us, ys)
 
 
-class JohnsonMixer:
+class JohnsonMixer(_DampedMixerBase):
     """Johnson's modified Broyden method (PRB 38, 12807) — the QE scheme.
 
     Multisecant inverse-Jacobian update over normalized residual
@@ -136,37 +146,17 @@ class JohnsonMixer:
     default (saturation); Kerker ON beats OFF (44 vs 58); the Coulomb
     metric option does not converge this system and stays non-default."""
 
-    def __init__(
-        self,
-        g2: torch.Tensor,
-        alpha: float = 0.7,
-        history: int = 12,
-        kerker: bool = False,
-        q0: float = 1.1,
-        check_g0: bool = True,
-        kerker_mask=None,
-        step_scale=None,
-        w0: float = 0.01,
-        metric_w=None,  # per-component inner-product weights (QE rho_ddot
-        # uses the Coulomb metric; None → plain l2)
-    ):
-        self.g2 = g2
-        self.alpha = alpha
-        self.history = history
-        self.kerker = kerker
-        self.q0 = q0
-        self.check_g0 = check_g0
-        self.kerker_mask = kerker_mask
-        self.step_scale = step_scale
+    def __init__(self, g2, history: int = 12, w0: float = 0.01,
+                 metric_w=None, **kw):
+        # metric_w: per-component inner-product weights (QE rho_ddot uses
+        # the Coulomb metric; None → plain l2)
+        super().__init__(g2, history=history, **kw)
         self.w0 = w0
         self.metric_w = metric_w
-        self.extra_precond = None
         self._df: list[torch.Tensor] = []
         self._u: list[torch.Tensor] = []
         self._prev_in = None
         self._prev_f = None
-
-    _damped = BroydenMixer._damped
 
     def reset(self):
         self._df.clear()
@@ -210,30 +200,17 @@ class JohnsonMixer:
         return x_new
 
 
-class PulayMixer:
+class PulayMixer(_DampedMixerBase):
     def __init__(
         self,
-        g2: torch.Tensor,  # (nG,) |G|² over the density sphere, G=0 first entry allowed
-        alpha: float = 0.7,
-        history: int = 8,
-        kerker: bool = False,
-        q0: float = 1.1,
-        check_g0: bool = True,
-        kerker_mask=None,  # per-component bool; None → kerker applies to all
-        step_scale=None,  # per-component multiplier on the damped step (None → 1)
+        g2: torch.Tensor,
         coeff_cap: float | None = None,  # ℓ₁ bound on DIIS coefficients (see step())
         step_cap: float | None = None,  # ‖Δρ‖ bound in damped-step units (see step())
         adapt_blocks=None,  # (n,) int block ids → per-block adaptive damping
         adapt_floor: float = 0.05,  # smallest adaptive multiplier
+        **kw,
     ):
-        self.check_g0 = check_g0
-        self.kerker_mask = kerker_mask
-        self.step_scale = step_scale
-        self.g2 = g2
-        self.alpha = alpha
-        self.history = history
-        self.kerker = kerker
-        self.q0 = q0
+        super().__init__(g2, **kw)
         self.coeff_cap = coeff_cap
         self.step_cap = step_cap
         self.adapt_blocks = adapt_blocks
@@ -248,22 +225,11 @@ class PulayMixer:
             ids = torch.unique(adapt_blocks).tolist()
             self._block_masks = [(b, adapt_blocks == b) for b in ids]
             self._block_mult = {b: 1.0 for b in ids}
-        self.extra_precond = None  # per-iteration hook (Stoner spin precond)
         self._rho_in: list[torch.Tensor] = []
         self._res: list[torch.Tensor] = []
 
-    def _precondition(self, r: torch.Tensor) -> torch.Tensor:
-        if self.extra_precond is not None:
-            r = self.extra_precond(r)
-        if not self.kerker:
-            out = self.alpha * r
-        else:
-            fac = self.g2 / (self.g2 + self.q0**2)
-            if self.kerker_mask is not None:
-                fac = torch.where(self.kerker_mask, fac, torch.ones_like(fac))
-            out = self.alpha * fac * r
-        if self.step_scale is not None:
-            out = out * self.step_scale
+    def _damped(self, r: torch.Tensor) -> torch.Tensor:
+        out = super()._damped(r)
         if self._mult_vec is not None:
             out = out * self._mult_vec
         return out
@@ -376,7 +342,7 @@ class PulayMixer:
         while True:
             m = len(self._res)
             if m == 1:
-                return rho_in + self._precondition(res)
+                return rho_in + self._damped(res)
 
             # bordered system: [B 1; 1ᵀ 0][c; λ] = [0; 1], B_ij = <R_i, R_j>.
             # Solve in the diagonal-normalized basis (B̃ = D⁻¹BD⁻¹, D = √diag B)
@@ -427,7 +393,7 @@ class PulayMixer:
 
         rho_opt = sum(c * r for c, r in zip(coeff, self._rho_in, strict=True))
         res_opt = sum(c * r for c, r in zip(coeff, self._res, strict=True))
-        rho_new = rho_opt + self._precondition(res_opt)
+        rho_new = rho_opt + self._damped(res_opt)
 
         # step-norm trust region: the coefficient cap bounds the extrapolation
         # weights, but ‖Δρ‖ can still leave the linear-response region when
@@ -438,7 +404,7 @@ class PulayMixer:
         # the scale empirically inside the linear region.
         if self.step_cap is not None:
             step = rho_new - rho_in
-            lim = self.step_cap * torch.linalg.norm(self._precondition(res))
+            lim = self.step_cap * torch.linalg.norm(self._damped(res))
             snorm = torch.linalg.norm(step)
             if snorm > lim:
                 rho_new = rho_in + step * (lim / snorm)
