@@ -79,14 +79,21 @@ def ewald_energy(
 
     # real space: pair separations (na, na, nR, 3)
     d = positions[:, None, None, :] - positions[None, :, None, :] + images[None, None, :, :]
-    r = torch.linalg.norm(d, dim=-1)
-    na = r.shape[0]
+    na = positions.shape[0]
     self_pair = (
         (torch.eye(na, dtype=torch.bool, device=dev))[:, :, None]
         & (torch.linalg.norm(images, dim=-1) < 1e-12)[None, None, :]
     )
-    r_safe = torch.where(self_pair, torch.ones_like(r), r)
-    pair = torch.erfc(sqrt_eta * r_safe) / r_safe
+    # shift the (masked-out) self pairs to |d| = 1 BEFORE the norm: the
+    # norm at d = 0 has NaN second derivatives even when the entries are
+    # masked afterward (the dead branch poisons double backward — the
+    # Hessian path needs create_graph through this sum; forces only ever
+    # saw the guarded first derivative)
+    offset = torch.zeros(3, dtype=RDTYPE, device=dev)
+    offset[0] = 1.0
+    d = d + self_pair[..., None].to(RDTYPE) * offset
+    r = torch.linalg.norm(d, dim=-1)
+    pair = torch.erfc(sqrt_eta * r) / r
     pair = torch.where(self_pair, torch.zeros_like(pair), pair)
     e_real = 0.5 * E2 * torch.einsum("a,b,abr->", z, z, pair)
 
