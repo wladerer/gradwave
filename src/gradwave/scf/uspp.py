@@ -52,6 +52,7 @@ from gradwave.pseudo.kb import beta_form_factors
 from gradwave.pseudo.radial import sbt
 from gradwave.pseudo.upf_paw import PAWData
 from gradwave.scf.guess import sad_density
+from gradwave.scf.layout import MixLayout
 from gradwave.scf.loop import vxc_potential
 from gradwave.scf.mixing import BroydenMixer, JohnsonMixer, PulayMixer
 from gradwave.solvers.precond import teter
@@ -418,7 +419,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
              trust_factor=20.0, batched=True, hubbard=None, start_from=None,
              criterion="drho", rho_safety=1e-2, adapt_step=False,
              mixing_scheme="pulay", mixing_kerker=None, mixing_metric="plain",
-             spin_precond=False, verbose=True):
+             spin_precond=False, opts=None, verbose=True):
     """USPP/PAW SCF. nspin=2 takes a SpinXC functional and per-species
     start_mag (list, in [-1, 1]); mixing then runs in the (total,
     magnetization) basis with Kerker on the total for smeared systems.
@@ -456,7 +457,20 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     spin_precond: Stoner preconditioner on the magnetization channel
     (smeared nspin=2 only; scf/spin_precond.py) — the physics-informed
     treatment of the Stoner-expansive mode, applied to residuals before
-    damping/mixing."""
+    damping/mixing.
+    opts: an SCFOptions object (scf/options.py) — the readable form of
+    all of the above; when given it overrides the flat kwargs."""
+    if opts is not None:
+        smearing, width = opts.smearing, opts.width
+        max_iter, etol, rhotol = opts.max_iter, opts.etol, opts.rhotol
+        diago_tol, criterion = opts.diago_tol, opts.criterion
+        rho_safety, batched, verbose = opts.rho_safety, opts.batched, \
+            opts.verbose
+        mx = opts.mixer
+        mixing_alpha, mixing_history = mx.alpha, mx.history
+        mixing_scheme, mixing_kerker = mx.scheme, mx.kerker
+        mixing_metric, trust_factor = mx.metric, mx.trust_factor
+        adapt_step, spin_precond = mx.adapt_step, mx.spin_precond
     grid = system.grid
     vol = grid.volume
     dev = system.positions.device
@@ -540,31 +554,16 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     # oscillation for semicore-metal PAW (fcc Ni diverges with ×9/iteration).
     # Kerker damps the ρ-TOTAL block only (becsum is localized; the
     # magnetization channel must keep its G=0 free for ↑↓ transfer).
-    g2_mix = grid.g2.reshape(-1)[mask_flat]
-    ng = g2_mix.shape[0]
-    nbec = sum((s1 - s0) ** 2 for (s0, s1) in system.atom_slices)
-    g2_full = torch.cat([g2_mix] * nspin + [torch.zeros(nbec, device=dev)] * nspin)
-    kerker_mask = torch.cat([
-        torch.ones(ng, dtype=torch.bool, device=dev),
-        torch.zeros(ng * (nspin - 1) + nbec * nspin, dtype=torch.bool, device=dev),
-    ])
-    # the on-site becsum↔ddd feedback is the stiffest direction (on-site
-    # Hartree curvature ~tens of eV) — take smaller plain steps on the becsum
-    # block while DIIS accumulates curvature
-    step_scale = torch.cat([
-        torch.ones(ng * nspin, dtype=torch.float64, device=dev),
-        torch.full((nbec * nspin,), 0.4, dtype=torch.float64, device=dev),
-    ])
-    # opt-in per-block adaptive damping: blocks = ρ_tot grid, m grid,
-    # becsum (see the docstring for its honest scope — collapse
-    # protection, not a replacement for hand-set damping)
-    adapt_ids = None
-    if adapt_step:
-        adapt_ids = torch.cat([
-            torch.zeros(ng, dtype=torch.int64, device=dev),
-            torch.ones(ng * (nspin - 1), dtype=torch.int64, device=dev),
-            torch.full((nbec * nspin,), 2, dtype=torch.int64, device=dev),
-        ])
+    # MixLayout owns the composite-vector structure: packing, Kerker mask
+    # (ρ-total block only — becsum is localized and the magnetization
+    # channel keeps its G=0 free for ↑↓ transfer), the becsum step scale
+    # (the on-site becsum↔ddd feedback is the stiffest direction), and the
+    # adaptive-damping block ids
+    layout = MixLayout(grid, nspin, system.atom_slices, device=dev)
+    g2_mix, ng, nbec = layout.g2_sphere, layout.ng, layout.nbec
+    g2_full, kerker_mask = layout.g2_full, layout.kerker_mask
+    step_scale = layout.step_scale
+    adapt_ids = layout.block_ids if adapt_step else None
     use_kerker = (smearing != "none") if mixing_kerker is None \
         else bool(mixing_kerker)
     if mixing_history is None:
@@ -891,13 +890,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         )
         e_free = float(energies.free_energy)
 
-        def to_mix(chans, becs):
-            vecs = [r_to_g(c.to(CDTYPE)).reshape(-1)[mask_flat] for c in chans]
-            if nspin == 2:
-                vecs = [vecs[0] + vecs[1], vecs[0] - vecs[1]]
-            bec_flat = [torch.cat([m.reshape(-1) for m in becs[isp]])
-                        for isp in range(nspin)]
-            return torch.cat(vecs + bec_flat)
+        to_mix = layout.pack
 
         # solver-blowup rescue: a warm-started Davidson can deterministically
         # return states ~10² eV up from a CONVERGED-quality density (F falls
@@ -999,27 +992,13 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                     return out
                 mixer.extra_precond = _spin_pc
         mixed = mixer.step(rho_in_vec, rho_out_vec)
-        rho_block, bec_block = mixed[: ng * nspin], mixed[ng * nspin:]
-        if nspin == 1:
-            chan_vecs = [rho_block]
-        else:
-            tot, mag_v = rho_block[:ng], rho_block[ng:]
-            chan_vecs = [(tot + mag_v) / 2.0, (tot - mag_v) / 2.0]
-        rho_s = []
-        for vec in chan_vecs:
-            rho_g_new = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
-            rho_g_new[mask_flat] = vec
-            rho_s.append((torch.fft.ifftn(rho_g_new.reshape(shape) * grid.n_points,
-                                          dim=(-3, -2, -1))).real)
-        # unpack the mixed becsum (Hermitize — linear combinations preserve it
-        # up to roundoff) for the next iteration's one-center ddd
-        off = 0
+        rho_s, bec_mixed = layout.unpack(mixed)
+        # Hermitize the mixed becsum (linear combinations preserve it up
+        # to roundoff) for the next iteration's one-center ddd
         for isp in range(nspin):
-            for a, (s0, s1) in enumerate(system.atom_slices):
-                nm_a = s1 - s0
-                m = bec_block[off:off + nm_a * nm_a].reshape(nm_a, nm_a)
+            for a in range(len(system.atom_slices)):
+                m = bec_mixed[isp][a]
                 rho_ij_mix[isp][a] = 0.5 * (m + m.conj().T)
-                off += nm_a * nm_a
 
     rho_final = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
     out = dict(
