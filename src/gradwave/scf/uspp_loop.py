@@ -23,6 +23,8 @@ can absorb it later.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 
 from gradwave.constants import HBAR2_2M
@@ -142,6 +144,352 @@ def davidson_gen(hs: _HkS, x0: torch.Tensor, nbands: int, tol: float,
     return eps, x
 
 
+
+@dataclass
+class _IterOps:
+    """Frozen per-run operators and tables for `_scf_iteration` — everything
+    the one-iteration SCF map needs beyond the state it maps. Built once by
+    `_build_iter_ops`; newton.py and the mixer rig construct it directly to
+    evaluate the raw map without the driver."""
+
+    system: USPPSystem
+    xc: object
+    nspin: int
+    smearing: str
+    width: float
+    batched: bool
+    projs: list
+    bk: object
+    p_b: object
+    hub: object
+    vloc_g: torch.Tensor
+    vloc_r: torch.Tensor
+    phase_pos: torch.Tensor
+    is_paw: bool
+    onec: list | None
+    grid: object
+    vol: float
+    dev: object
+    shape: tuple
+    mask_flat: torch.Tensor
+    g_spin: int
+    nk: int
+    nb: int
+
+
+def _build_iter_ops(system: USPPSystem, xc, *, nspin=1, smearing="none",
+                    width=0.1, batched=True, hubbard=None) -> _IterOps:
+    grid = system.grid
+    vol = grid.volume
+    dev = system.positions.device
+    projs = [projectors(pd, system.positions) for pd in system.proj_data]
+    bk = p_b = None
+    if batched or hubbard:
+        from gradwave.core.batch import build_batched, projectors_b
+
+        bk = build_batched(system.spheres, system.proj_data, device=dev)
+        p_b = projectors_b(bk, system.positions)
+    hub = None
+    if hubbard:
+        from gradwave.scf.uspp_hubbard import build_uspp_hubbard
+
+        hub = build_uspp_hubbard(system, hubbard, bk, p_b)
+    vloc_g = local_potential_g(system.positions,
+                               torch.tensor(system.species_of_atom, device=dev),
+                               system.vloc_tables, grid.g_cart, vol)
+    vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
+    phase_arg = system.g_sphere @ system.positions.T  # (nGm, na)
+    phase_pos = torch.exp(torch.complex(torch.zeros_like(phase_arg), phase_arg))
+    is_paw = any(p.is_paw for p in system.paws)
+    onec = None
+    if is_paw:
+        from gradwave.scf.paw_onsite import OneCenter
+
+        onec = [OneCenter(p, xc) for p in system.paws]
+    return _IterOps(system=system, xc=xc, nspin=nspin, smearing=smearing,
+                    width=width, batched=batched, projs=projs, bk=bk, p_b=p_b,
+                    hub=hub, vloc_g=vloc_g, vloc_r=vloc_r, phase_pos=phase_pos,
+                    is_paw=is_paw, onec=onec, grid=grid, vol=vol, dev=dev,
+                    shape=grid.shape, mask_flat=grid.dens_mask.reshape(-1),
+                    g_spin=2 if nspin == 1 else 1, nk=len(system.spheres),
+                    nb=system.nbands)
+
+
+@torch.no_grad()
+def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
+                   n_hub_s, tol_eff, seed_salt):
+    """ONE evaluation of the SCF map at (rho_s, rho_ij_mix): potentials →
+    screened D (+ one-center ddd from the MIXER-side becsum) → generalized
+    Davidson (warm-started via coeffs/coeffs_b, mutated in place) →
+    shared-Fermi occupations (+U matrices) → fresh densities/becsum →
+    energy assembly. No mixing, no convergence judgment, no rescue —
+    those belong to the driver (or to newton/the rig, which call this
+    directly)."""
+    system, xc, nspin = ops.system, ops.xc, ops.nspin
+    smearing, width, batched = ops.smearing, ops.width, ops.batched
+    projs, bk, p_b, hub = ops.projs, ops.bk, ops.p_b, ops.hub
+    vloc_g, vloc_r, phase_pos = ops.vloc_g, ops.vloc_r, ops.phase_pos
+    is_paw, onec = ops.is_paw, ops.onec
+    grid, vol, dev, shape = ops.grid, ops.vol, ops.dev, ops.shape
+    mask_flat, g_spin, nk, nb = ops.mask_flat, ops.g_spin, ops.nk, ops.nb
+    if batched:
+        from gradwave.core.batch import becp_b
+        from gradwave.scf.uspp_batch import BatchedHS, davidson_gen_batched
+    if hub is not None:
+        from gradwave.core.hubbard import (
+            hubbard_dmatrix,
+            hubbard_energy,
+            occupation_matrices,
+        )
+
+    def _becsum_for_onec(a):
+        if nspin == 1:
+            return rho_ij_mix[0][a]
+        return [rho_ij_mix[0][a], rho_ij_mix[1][a]]
+
+    rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
+    rho_g_box = r_to_g(rho_tot.to(CDTYPE))
+    v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
+                           dim=(-3, -2, -1)) * grid.n_points).real
+    core = system.rho_core
+    if nspin == 1:
+        v_xc, _ = vxc_potential(xc, rho_tot if core is None else rho_tot + core,
+                                grid)
+        veff_s = [v_h + v_xc + vloc_r]
+    else:
+        from gradwave.scf.loop import vxc_spin_potential
+
+        c2 = None if core is None else 0.5 * core
+        v_up, v_dn, _ = vxc_spin_potential(
+            xc,
+            rho_s[0] if core is None else rho_s[0] + c2,
+            rho_s[1] if core is None else rho_s[1] + c2,
+            grid,
+        )
+        veff_s = [v_h + v_up + vloc_r, v_h + v_dn + vloc_r]
+
+    # screened D per spin/atom: D_ij + Σ_G ṽ_σ(G) e^{iGτ} Q̃_ij(G)*
+    dscr_s = []
+    for isp in range(nspin):
+        v_eff_g = r_to_g(veff_s[isp].to(CDTYPE)).reshape(-1)[mask_flat]
+        dscr = torch.zeros_like(system.q_full)
+        for a, sp in enumerate(system.species_of_atom):
+            s0, s1 = system.atom_slices[a]
+            contr = torch.einsum(
+                "ijg,g->ij", system.aug[sp].q_g.conj(), v_eff_g * phase_pos[:, a]
+            )
+            herm = 0.5 * (contr + contr.conj().T)
+            dscr[s0:s1, s0:s1] = herm.real
+        dscr_s.append(dscr + system.proj_data[0].dij_full)
+    e_onec = torch.zeros((), dtype=RDTYPE, device=dev)
+    if is_paw:
+        dscr_s = [d.clone() for d in dscr_s]
+        for a, sp in enumerate(system.species_of_atom):
+            s0, s1 = system.atom_slices[a]
+            # one-center runs on CPU (per-atom radial work); ddd crosses back
+            e1c, ddd = onec[sp].energy_and_ddd(_becsum_for_onec(a))
+            e_onec = e_onec + e1c
+            if nspin == 1:
+                dscr_s[0][s0:s1, s0:s1] += ddd.to(dev)
+            else:
+                for isp in range(nspin):
+                    dscr_s[isp][s0:s1, s0:s1] += ddd[isp].to(dev)
+
+    eigs_s = []
+    for isp in range(nspin):
+        hub_d = None
+        if hub is not None:
+            hub_d = hubbard_dmatrix(n_hub_s[isp], hub.sites, hub.nproj,
+                                    dev).conj()  # apply wants D^T
+        if batched:
+            hs_b = BatchedHS(bk, shape, veff_s[isp], p_b, dscr_s[isp],
+                             system.q_full, hub_sphi=hub.sphi if hub else None,
+                             hub_d=hub_d)
+            if coeffs_b[isp] is None:
+                # per-k CPU seeds (identical to the per-k path), padded
+                x0 = torch.zeros(nk, nb + 4, bk.npw_max, dtype=CDTYPE,
+                                 device=dev)
+                for ik, sph in enumerate(system.spheres):
+                    gen = torch.Generator().manual_seed(
+                        1234 + ik + 7777 * isp + seed_salt)
+                    xk = torch.randn(nb + 4, sph.npw, generator=gen,
+                                     dtype=torch.float64) \
+                        + 1j * torch.randn(nb + 4, sph.npw, generator=gen,
+                                           dtype=torch.float64)
+                    xk = xk.to(dev) * torch.exp(
+                        -0.5 * HBAR2_2M * sph.kpg2 / system.ecut * 4.0)
+                    x0[ik, :, :sph.npw] = xk.to(CDTYPE)
+            else:
+                x0 = coeffs_b[isp]
+            eig_b, x_b = davidson_gen_batched(hs_b, x0, nb, tol=tol_eff)
+            b_all = becp_b(p_b, x_b)
+            snorm = (x_b.abs() ** 2).sum(dim=-1) + torch.einsum(
+                "kbi,ij,kbj->kb", b_all.conj(),
+                system.q_full.to(CDTYPE), b_all).real
+            x_b = x_b / torch.sqrt(snorm)[..., None]
+            coeffs_b[isp] = x_b
+            for ik, sph in enumerate(system.spheres):
+                coeffs[isp][ik] = x_b[ik, :, :sph.npw]
+            eigs_s.append(eig_b)
+            continue
+        eigs_l = []
+        for ik, sph in enumerate(system.spheres):
+            hs = _HkS(sph, shape, veff_s[isp], system.proj_data[ik], projs[ik],
+                      dscr_s[isp], system.q_full,
+                      hub_sphi=(hub.sphi[ik, :, :sph.npw] if hub else None),
+                      hub_d=hub_d)
+            if coeffs[isp][ik] is None:
+                # seed on CPU (device-independent determinism), then move
+                gen = torch.Generator().manual_seed(
+                    1234 + ik + 7777 * isp + seed_salt)
+                x0 = torch.randn(nb + 4, sph.npw, generator=gen, dtype=torch.float64) \
+                    + 1j * torch.randn(nb + 4, sph.npw, generator=gen,
+                                       dtype=torch.float64)
+                x0 = x0.to(dev) * torch.exp(
+                    -0.5 * HBAR2_2M * sph.kpg2 / system.ecut * 4.0)
+                x0 = x0.to(CDTYPE)
+            else:
+                x0 = coeffs[isp][ik]
+            e_k, c_k = davidson_gen(hs, x0, nb, tol=tol_eff)
+            b = becp(projs[ik], c_k)
+            snorm = (c_k.abs() ** 2).sum(dim=1).real + torch.einsum(
+                "bi,ij,bj->b", b.conj(), system.q_full.to(CDTYPE), b
+            ).real
+            c_k = c_k / torch.sqrt(snorm)[:, None]
+            coeffs[isp][ik] = c_k
+            eigs_l.append(e_k)
+        eigs_s.append(torch.stack(eigs_l))
+
+    if smearing == "none":
+        if nspin != 1:
+            raise ValueError("nspin=2 requires smearing (shared Fermi level)")
+        occ_s = [fixed_occupations(eigs_s[0], system.n_electrons)]
+        mu = float(eigs_s[0][:, int(system.n_electrons // 2) - 1].max())
+        entropy_term = torch.zeros((), dtype=RDTYPE, device=dev)
+    else:
+        scheme = SCHEMES[smearing]
+        eigs_cat = torch.cat(eigs_s, dim=0)
+        kw_cat = torch.cat([system.kweights] * nspin)
+        mu = float(find_fermi(eigs_cat, kw_cat, scheme, width,
+                              system.n_electrons, degeneracy=g_spin))
+        mu_t = torch.tensor(mu, dtype=RDTYPE, device=dev)
+        occ_s, ent = [], torch.zeros((), dtype=RDTYPE, device=dev)
+        for isp in range(nspin):
+            o, s_ent = occupations_and_entropy(
+                eigs_s[isp], mu_t, scheme, width, degeneracy=g_spin)
+            occ_s.append(o)
+            ent = ent - width * (g_spin * system.kweights[:, None] * s_ent).sum()
+        entropy_term = ent
+
+    # DFT+U: fresh S-metric occupation matrices + Dudarev E_U (lags one
+    # step into V_U like the NC path; nspin=1 splits [0,2] occupations
+    # into two equal channels)
+    e_hub = torch.zeros((), dtype=RDTYPE, device=dev)
+    if hub is not None:
+        def _padded_coeffs(isp, _cb=coeffs_b):
+            if batched:
+                return _cb[isp]
+            cp = torch.zeros(nk, nb, bk.npw_max, dtype=CDTYPE, device=dev)
+            for ik, sph in enumerate(system.spheres):
+                cp[ik, :, :sph.npw] = coeffs[isp][ik]
+            return cp
+
+        if nspin == 2:
+            for isp in range(nspin):
+                n_hub_s[isp] = occupation_matrices(
+                    hub.sphi, _padded_coeffs(isp), occ_s[isp],
+                    system.kweights, hub.sites)
+            e_hub = sum(hubbard_energy(n_hub_s[isp], hub.sites)
+                        for isp in range(nspin))
+        else:
+            n_half = occupation_matrices(
+                hub.sphi, _padded_coeffs(0), 0.5 * occ_s[0],
+                system.kweights, hub.sites)
+            n_hub_s = [n_half]
+            e_hub = 2.0 * hubbard_energy(n_half, hub.sites)
+
+    # smooth densities + per-spin becsum + augmentation
+    rho_out_s, becps_s = [], []
+    rho_ij_s = [[torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
+                 for (s0, s1) in system.atom_slices] for _ in range(nspin)]
+    for isp in range(nspin):
+        rho_sp = torch.zeros(shape, dtype=RDTYPE, device=dev)
+        becps = []
+        for ik, sph in enumerate(system.spheres):
+            c = coeffs[isp][ik]
+            psi_r = g_to_r(c, sph.flat_idx, shape)
+            w = system.kweights[ik] * occ_s[isp][ik]
+            rho_sp = rho_sp + torch.einsum("b,bxyz->xyz", w, (psi_r.abs() ** 2)) / vol
+            b = becp(projs[ik], c)
+            becps.append(b)
+            for a, (s0, s1) in enumerate(system.atom_slices):
+                ba = b[:, s0:s1]
+                rho_ij_s[isp][a] = rho_ij_s[isp][a] + torch.einsum(
+                    "b,bi,bj->ij", w.to(CDTYPE), ba.conj(), ba
+                )
+        rho_ij_s[isp] = [0.5 * (m + m.conj().T) for m in rho_ij_s[isp]]
+        if system.becsum_sym is not None:
+            rho_ij_s[isp] = system.becsum_sym.apply(rho_ij_s[isp])
+        becps_s.append(becps)
+
+        aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE, device=dev)
+        for a, sp in enumerate(system.species_of_atom):
+            aug_sph = aug_sph + phase_pos[:, a].conj() * torch.einsum(
+                "ij,ijg->g", rho_ij_s[isp][a], system.aug[sp].q_g
+            )
+        aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
+        aug_box[system.sphere_idx] = aug_sph / vol
+        rho_aug = (torch.fft.ifftn(aug_box.reshape(shape) * grid.n_points,
+                                   dim=(-3, -2, -1))).real
+        rho_out_sp = rho_sp + rho_aug
+        if system.rho_symmetrizer is not None:
+            sym_g = system.rho_symmetrizer.apply(r_to_g(rho_out_sp.to(CDTYPE)))
+            rho_out_sp = torch.fft.ifftn(
+                sym_g * grid.n_points, dim=(-3, -2, -1)).real
+        rho_out_s.append(rho_out_sp)
+    rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
+
+    n_tot = float(rho_tot_out.sum()) * vol / grid.n_points
+    assert abs(n_tot - system.n_electrons) < 1e-5, (
+        f"charge not conserved: {n_tot:.8f} vs {system.n_electrons}"
+    )
+
+    rho_g_out = r_to_g(rho_tot_out.to(CDTYPE))
+    from gradwave.core.density import sigma_from_rho
+
+    if nspin == 1:
+        rho_xc_out = rho_tot_out if core is None else rho_tot_out + core
+        sigma = sigma_from_rho(rho_xc_out, grid.g_cart) if xc.needs_gradient else None
+        e_xc = xc.energy(rho_xc_out, vol, sigma)
+    else:
+        c2 = 0.0 if core is None else 0.5 * core
+        r_u, r_d = rho_out_s[0] + c2, rho_out_s[1] + c2
+        if xc.needs_gradient:
+            s_uu = sigma_from_rho(r_u, grid.g_cart)
+            s_dd = sigma_from_rho(r_d, grid.g_cart)
+            s_tt = sigma_from_rho(r_u + r_d, grid.g_cart)
+        else:
+            s_uu = s_dd = s_tt = None
+        e_xc = xc.energy(r_u, r_d, vol, s_uu, s_dd, s_tt)
+    energies = EnergyBreakdown(
+        kinetic=sum(kinetic_energy(coeffs[isp], occ_s[isp], system.kweights,
+                                   system.spheres) for isp in range(nspin)),
+        hartree=hartree_energy(rho_g_out, grid.g2, vol),
+        xc=e_xc,
+        local=local_energy(rho_g_out, vloc_g, vol),
+        nonlocal_=sum(nonlocal_energy(becps_s[isp], system.proj_data[0].dij_full,
+                                      occ_s[isp], system.kweights)
+                      for isp in range(nspin)),
+        ewald=ewald_energy(system.positions, system.charges, grid.cell),
+        smearing=entropy_term,
+        hubbard=e_hub if hub is not None else 0.0,
+        onecenter=e_onec,
+    )
+    return dict(eigs_s=eigs_s, occ_s=occ_s, mu=mu, n_hub_s=n_hub_s,
+                rho_out_s=rho_out_s, rho_ij_s=rho_ij_s, becps_s=becps_s,
+                energies=energies)
+
+
 @torch.no_grad()
 def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
              smearing="none", width=0.1, max_iter=60, etol=1e-8, rhotol=1e-7,
@@ -206,10 +554,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     grid = system.grid
     vol = grid.volume
     dev = system.positions.device
-    nk, nb = len(system.spheres), system.nbands
+    nk = len(system.spheres)
     shape = grid.shape
-    mask_flat = grid.dens_mask.reshape(-1)
-    g_spin = 2 if nspin == 1 else 1
 
     if start_from is not None:
         prev_grid = start_from["system"].grid
@@ -247,36 +593,13 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         ]
         spin_frac = [up, dn]
 
-    projs = [projectors(pd, system.positions) for pd in system.proj_data]
-    bk = p_b = None
-    coeffs_b = [None] * nspin
-    if batched or hubbard:
-        from gradwave.core.batch import becp_b, build_batched, projectors_b
-
-        bk = build_batched(system.spheres, system.proj_data, device=dev)
-        p_b = projectors_b(bk, system.positions)
-    if batched:
-        from gradwave.scf.uspp_batch import BatchedHS, davidson_gen_batched
-    hub = None
+    ops = _build_iter_ops(system, xc, nspin=nspin, smearing=smearing,
+                          width=width, batched=batched, hubbard=hubbard)
+    hub = ops.hub
     n_hub_s = None
-    if hubbard:
-        from gradwave.core.hubbard import (
-            hubbard_dmatrix,
-            hubbard_energy,
-            occupation_matrices,
-        )
-        from gradwave.scf.uspp_hubbard import build_uspp_hubbard
-
-        hub = build_uspp_hubbard(system, hubbard, bk, p_b)
+    if hub is not None:
         n_hub_s = [[torch.zeros(s["dim"], s["dim"], dtype=CDTYPE, device=dev)
                     for s in hub.sites] for _ in range(nspin)]
-    vloc_g = local_potential_g(system.positions,
-                               torch.tensor(system.species_of_atom, device=dev),
-                               system.vloc_tables, grid.g_cart, vol)
-    vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
-
-    phase_arg = system.g_sphere @ system.positions.T  # (nGm, na)
-    phase_pos = torch.exp(torch.complex(torch.zeros_like(phase_arg), phase_arg))
 
     # Mixing vector = [ρ channels on the density sphere, flattened becsum per
     # spin]. Mixing becsum TOGETHER with ρ (QE keeps it inside rho%mix the
@@ -333,16 +656,18 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                            kerker_mask=kerker_mask, check_g0=False,
                            step_scale=step_scale, adapt_blocks=adapt_ids)
     coeffs = [[None] * nk for _ in range(nspin)]
+    coeffs_b = [None] * nspin
     e_free_prev, history, converged = None, [], False
     rescue_count, seed_salt = 0, 0  # solver-blowup rescue state (task #55)
     last_reset_it = -10  # trust-region reset cooldown (task #55)
-    occ_s = entropy_term = eigs_s = mu = None
+    occ_s = eigs_s = mu = None
     energies = None
 
     # PAW one-center machinery; becsum seeded from the reference atomic
     # occupations (spin-split by start_mag; zeros for bare USPP where the UPF
     # carries no PP_OCCUPATIONS). rho_ij_mix is the MIXER-side becsum used
     # for the one-center ddd; rho_ij_s holds each iteration's fresh becsum.
+    is_paw, onec = ops.is_paw, ops.onec
     is_paw = any(p.is_paw for p in system.paws)
     onec = None
     if is_paw:
@@ -373,60 +698,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                 rho_ij_s[isp].append(m0)
     rho_ij_mix = [[m.clone() for m in ch] for ch in rho_ij_s]
 
-    def _becsum_for_onec(a):
-        if nspin == 1:
-            return rho_ij_mix[0][a]
-        return [rho_ij_mix[0][a], rho_ij_mix[1][a]]
-
     for it in range(1, max_iter + 1):
-        rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
-        rho_g_box = r_to_g(rho_tot.to(CDTYPE))
-        v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
-                               dim=(-3, -2, -1)) * grid.n_points).real
-        core = system.rho_core
-        if nspin == 1:
-            v_xc, _ = vxc_potential(xc, rho_tot if core is None else rho_tot + core,
-                                    grid)
-            veff_s = [v_h + v_xc + vloc_r]
-        else:
-            from gradwave.scf.loop import vxc_spin_potential
-
-            c2 = None if core is None else 0.5 * core
-            v_up, v_dn, _ = vxc_spin_potential(
-                xc,
-                rho_s[0] if core is None else rho_s[0] + c2,
-                rho_s[1] if core is None else rho_s[1] + c2,
-                grid,
-            )
-            veff_s = [v_h + v_up + vloc_r, v_h + v_dn + vloc_r]
-
-        # screened D per spin/atom: D_ij + Σ_G ṽ_σ(G) e^{iGτ} Q̃_ij(G)*
-        dscr_s = []
-        for isp in range(nspin):
-            v_eff_g = r_to_g(veff_s[isp].to(CDTYPE)).reshape(-1)[mask_flat]
-            dscr = torch.zeros_like(system.q_full)
-            for a, sp in enumerate(system.species_of_atom):
-                s0, s1 = system.atom_slices[a]
-                contr = torch.einsum(
-                    "ijg,g->ij", system.aug[sp].q_g.conj(), v_eff_g * phase_pos[:, a]
-                )
-                herm = 0.5 * (contr + contr.conj().T)
-                dscr[s0:s1, s0:s1] = herm.real
-            dscr_s.append(dscr + system.proj_data[0].dij_full)
-        e_onec = torch.zeros((), dtype=RDTYPE, device=dev)
-        if is_paw:
-            dscr_s = [d.clone() for d in dscr_s]
-            for a, sp in enumerate(system.species_of_atom):
-                s0, s1 = system.atom_slices[a]
-                # one-center runs on CPU (per-atom radial work); ddd crosses back
-                e1c, ddd = onec[sp].energy_and_ddd(_becsum_for_onec(a))
-                e_onec = e_onec + e1c
-                if nspin == 1:
-                    dscr_s[0][s0:s1, s0:s1] += ddd.to(dev)
-                else:
-                    for isp in range(nspin):
-                        dscr_s[isp][s0:s1, s0:s1] += ddd[isp].to(dev)
-
         if it == 1:
             # SAD starts don't deserve a tight first solve; warm starts do
             # (their density is already near a fixed point — scan/rig
@@ -436,196 +708,12 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
             r_prev = history[-1]["res"]
             tol_eff = max(diago_tol, min(1e-3, 0.1 * r_prev * r_prev / system.n_electrons))
 
-        eigs_s = []
-        for isp in range(nspin):
-            hub_d = None
-            if hub is not None:
-                hub_d = hubbard_dmatrix(n_hub_s[isp], hub.sites, hub.nproj,
-                                        dev).conj()  # apply wants D^T
-            if batched:
-                hs_b = BatchedHS(bk, shape, veff_s[isp], p_b, dscr_s[isp],
-                                 system.q_full, hub_sphi=hub.sphi if hub else None,
-                                 hub_d=hub_d)
-                if coeffs_b[isp] is None:
-                    # per-k CPU seeds (identical to the per-k path), padded
-                    x0 = torch.zeros(nk, nb + 4, bk.npw_max, dtype=CDTYPE,
-                                     device=dev)
-                    for ik, sph in enumerate(system.spheres):
-                        gen = torch.Generator().manual_seed(
-                            1234 + ik + 7777 * isp + seed_salt)
-                        xk = torch.randn(nb + 4, sph.npw, generator=gen,
-                                         dtype=torch.float64) \
-                            + 1j * torch.randn(nb + 4, sph.npw, generator=gen,
-                                               dtype=torch.float64)
-                        xk = xk.to(dev) * torch.exp(
-                            -0.5 * HBAR2_2M * sph.kpg2 / system.ecut * 4.0)
-                        x0[ik, :, :sph.npw] = xk.to(CDTYPE)
-                else:
-                    x0 = coeffs_b[isp]
-                eig_b, x_b = davidson_gen_batched(hs_b, x0, nb, tol=tol_eff)
-                b_all = becp_b(p_b, x_b)
-                snorm = (x_b.abs() ** 2).sum(dim=-1) + torch.einsum(
-                    "kbi,ij,kbj->kb", b_all.conj(),
-                    system.q_full.to(CDTYPE), b_all).real
-                x_b = x_b / torch.sqrt(snorm)[..., None]
-                coeffs_b[isp] = x_b
-                for ik, sph in enumerate(system.spheres):
-                    coeffs[isp][ik] = x_b[ik, :, :sph.npw]
-                eigs_s.append(eig_b)
-                continue
-            eigs_l = []
-            for ik, sph in enumerate(system.spheres):
-                hs = _HkS(sph, shape, veff_s[isp], system.proj_data[ik], projs[ik],
-                          dscr_s[isp], system.q_full,
-                          hub_sphi=(hub.sphi[ik, :, :sph.npw] if hub else None),
-                          hub_d=hub_d)
-                if coeffs[isp][ik] is None:
-                    # seed on CPU (device-independent determinism), then move
-                    gen = torch.Generator().manual_seed(
-                        1234 + ik + 7777 * isp + seed_salt)
-                    x0 = torch.randn(nb + 4, sph.npw, generator=gen, dtype=torch.float64) \
-                        + 1j * torch.randn(nb + 4, sph.npw, generator=gen,
-                                           dtype=torch.float64)
-                    x0 = x0.to(dev) * torch.exp(
-                        -0.5 * HBAR2_2M * sph.kpg2 / system.ecut * 4.0)
-                    x0 = x0.to(CDTYPE)
-                else:
-                    x0 = coeffs[isp][ik]
-                e_k, c_k = davidson_gen(hs, x0, nb, tol=tol_eff)
-                b = becp(projs[ik], c_k)
-                snorm = (c_k.abs() ** 2).sum(dim=1).real + torch.einsum(
-                    "bi,ij,bj->b", b.conj(), system.q_full.to(CDTYPE), b
-                ).real
-                c_k = c_k / torch.sqrt(snorm)[:, None]
-                coeffs[isp][ik] = c_k
-                eigs_l.append(e_k)
-            eigs_s.append(torch.stack(eigs_l))
-
-        if smearing == "none":
-            if nspin != 1:
-                raise ValueError("nspin=2 requires smearing (shared Fermi level)")
-            occ_s = [fixed_occupations(eigs_s[0], system.n_electrons)]
-            mu = float(eigs_s[0][:, int(system.n_electrons // 2) - 1].max())
-            entropy_term = torch.zeros((), dtype=RDTYPE, device=dev)
-        else:
-            scheme = SCHEMES[smearing]
-            eigs_cat = torch.cat(eigs_s, dim=0)
-            kw_cat = torch.cat([system.kweights] * nspin)
-            mu = float(find_fermi(eigs_cat, kw_cat, scheme, width,
-                                  system.n_electrons, degeneracy=g_spin))
-            mu_t = torch.tensor(mu, dtype=RDTYPE, device=dev)
-            occ_s, ent = [], torch.zeros((), dtype=RDTYPE, device=dev)
-            for isp in range(nspin):
-                o, s_ent = occupations_and_entropy(
-                    eigs_s[isp], mu_t, scheme, width, degeneracy=g_spin)
-                occ_s.append(o)
-                ent = ent - width * (g_spin * system.kweights[:, None] * s_ent).sum()
-            entropy_term = ent
-
-        # DFT+U: fresh S-metric occupation matrices + Dudarev E_U (lags one
-        # step into V_U like the NC path; nspin=1 splits [0,2] occupations
-        # into two equal channels)
-        e_hub = torch.zeros((), dtype=RDTYPE, device=dev)
-        if hub is not None:
-            def _padded_coeffs(isp, _cb=coeffs_b):
-                if batched:
-                    return _cb[isp]
-                cp = torch.zeros(nk, nb, bk.npw_max, dtype=CDTYPE, device=dev)
-                for ik, sph in enumerate(system.spheres):
-                    cp[ik, :, :sph.npw] = coeffs[isp][ik]
-                return cp
-
-            if nspin == 2:
-                for isp in range(nspin):
-                    n_hub_s[isp] = occupation_matrices(
-                        hub.sphi, _padded_coeffs(isp), occ_s[isp],
-                        system.kweights, hub.sites)
-                e_hub = sum(hubbard_energy(n_hub_s[isp], hub.sites)
-                            for isp in range(nspin))
-            else:
-                n_half = occupation_matrices(
-                    hub.sphi, _padded_coeffs(0), 0.5 * occ_s[0],
-                    system.kweights, hub.sites)
-                n_hub_s = [n_half]
-                e_hub = 2.0 * hubbard_energy(n_half, hub.sites)
-
-        # smooth densities + per-spin becsum + augmentation
-        rho_out_s, becps_s = [], []
-        rho_ij_s = [[torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
-                     for (s0, s1) in system.atom_slices] for _ in range(nspin)]
-        for isp in range(nspin):
-            rho_sp = torch.zeros(shape, dtype=RDTYPE, device=dev)
-            becps = []
-            for ik, sph in enumerate(system.spheres):
-                c = coeffs[isp][ik]
-                psi_r = g_to_r(c, sph.flat_idx, shape)
-                w = system.kweights[ik] * occ_s[isp][ik]
-                rho_sp = rho_sp + torch.einsum("b,bxyz->xyz", w, (psi_r.abs() ** 2)) / vol
-                b = becp(projs[ik], c)
-                becps.append(b)
-                for a, (s0, s1) in enumerate(system.atom_slices):
-                    ba = b[:, s0:s1]
-                    rho_ij_s[isp][a] = rho_ij_s[isp][a] + torch.einsum(
-                        "b,bi,bj->ij", w.to(CDTYPE), ba.conj(), ba
-                    )
-            rho_ij_s[isp] = [0.5 * (m + m.conj().T) for m in rho_ij_s[isp]]
-            if system.becsum_sym is not None:
-                rho_ij_s[isp] = system.becsum_sym.apply(rho_ij_s[isp])
-            becps_s.append(becps)
-
-            aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE, device=dev)
-            for a, sp in enumerate(system.species_of_atom):
-                aug_sph = aug_sph + phase_pos[:, a].conj() * torch.einsum(
-                    "ij,ijg->g", rho_ij_s[isp][a], system.aug[sp].q_g
-                )
-            aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
-            aug_box[system.sphere_idx] = aug_sph / vol
-            rho_aug = (torch.fft.ifftn(aug_box.reshape(shape) * grid.n_points,
-                                       dim=(-3, -2, -1))).real
-            rho_out_sp = rho_sp + rho_aug
-            if system.rho_symmetrizer is not None:
-                sym_g = system.rho_symmetrizer.apply(r_to_g(rho_out_sp.to(CDTYPE)))
-                rho_out_sp = torch.fft.ifftn(
-                    sym_g * grid.n_points, dim=(-3, -2, -1)).real
-            rho_out_s.append(rho_out_sp)
-        rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
-
-        n_tot = float(rho_tot_out.sum()) * vol / grid.n_points
-        assert abs(n_tot - system.n_electrons) < 1e-5, (
-            f"charge not conserved: {n_tot:.8f} vs {system.n_electrons}"
-        )
-
-        rho_g_out = r_to_g(rho_tot_out.to(CDTYPE))
-        from gradwave.core.density import sigma_from_rho
-
-        if nspin == 1:
-            rho_xc_out = rho_tot_out if core is None else rho_tot_out + core
-            sigma = sigma_from_rho(rho_xc_out, grid.g_cart) if xc.needs_gradient else None
-            e_xc = xc.energy(rho_xc_out, vol, sigma)
-        else:
-            c2 = 0.0 if core is None else 0.5 * core
-            r_u, r_d = rho_out_s[0] + c2, rho_out_s[1] + c2
-            if xc.needs_gradient:
-                s_uu = sigma_from_rho(r_u, grid.g_cart)
-                s_dd = sigma_from_rho(r_d, grid.g_cart)
-                s_tt = sigma_from_rho(r_u + r_d, grid.g_cart)
-            else:
-                s_uu = s_dd = s_tt = None
-            e_xc = xc.energy(r_u, r_d, vol, s_uu, s_dd, s_tt)
-        energies = EnergyBreakdown(
-            kinetic=sum(kinetic_energy(coeffs[isp], occ_s[isp], system.kweights,
-                                       system.spheres) for isp in range(nspin)),
-            hartree=hartree_energy(rho_g_out, grid.g2, vol),
-            xc=e_xc,
-            local=local_energy(rho_g_out, vloc_g, vol),
-            nonlocal_=sum(nonlocal_energy(becps_s[isp], system.proj_data[0].dij_full,
-                                          occ_s[isp], system.kweights)
-                          for isp in range(nspin)),
-            ewald=ewald_energy(system.positions, system.charges, grid.cell),
-            smearing=entropy_term,
-            hubbard=e_hub if hub is not None else 0.0,
-            onecenter=e_onec,
-        )
+        step = _scf_iteration(ops, rho_s, rho_ij_mix, coeffs, coeffs_b,
+                              n_hub_s, tol_eff, seed_salt)
+        eigs_s, occ_s, mu = step["eigs_s"], step["occ_s"], step["mu"]
+        n_hub_s = step["n_hub_s"]
+        rho_out_s, rho_ij_s = step["rho_out_s"], step["rho_ij_s"]
+        becps_s, energies = step["becps_s"], step["energies"]
         e_free = float(energies.free_energy)
 
         to_mix = layout.pack
