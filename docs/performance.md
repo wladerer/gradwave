@@ -119,15 +119,23 @@ now bfgs). The remaining 3.4× against QE is per-ionic-step cost.
 
 The obvious fix — warm-starting each step's SCF — was built (NC
 start_from with atomic-density extrapolation and orbital reuse in the
-calculator) and measured to help only the fixed-geometry case:
-same-position restarts drop 9 → 2 iterations, which is what checkpoint
-restarts and parameter scans want, but 10–20 mÅ ionic moves stay at ~8
-iterations from any seed. The NC mixer's tail contraction, not the
-seed, sets that count. QE's 3–5-cycle steps rest on state the mixer
-KEEPS between ionic steps (Broyden history and ethr continuity), which
-is a separate project. Wall-clock deltas between warm-start variants
-measured back-to-back on the laptop were dominated by thermal
-throttling — iteration counts are the trustworthy metric here.
+calculator) and helps the fixed-geometry case: same-position restarts
+drop 9 → 2 iterations, which is what checkpoint restarts and parameter
+scans want. Ionic moves stay at ~8 iterations from any seed.
+
+That turned out to be parity, not a deficit. Reading the per-cycle
+counts out of the same pw.x run: QE takes 7/6/6/5/4/4 iterations per
+ionic step, resets its Broyden mixer every SCF cycle, and starts warm
+steps at ethr 1e-6 — the same rule implemented here. An earlier note in
+this file blamed "mixer state QE keeps between steps"; that was wrong,
+QE keeps none. The remaining 3.4× is per-ITERATION throughput: QE ~0.4
+s/iteration against ~1.4 s here on the same 8 cores for C at 50 Ry
+(threaded FFT + band solver maturity), plus the per-step autograd force
+backward. Closing it is solver-kernel work, not SCF-logic work.
+
+Wall-clock deltas between warm-start variants measured back-to-back on
+the laptop were dominated by thermal throttling — iteration counts are
+the trustworthy metric for solver-logic questions.
 
 ## Deferred with measurement: Γ-point real wavefunctions
 
