@@ -147,3 +147,41 @@ def test_hessian_column_vs_fd_of_forces():
     col_fd = -(fp - fm) / (2 * h)
     rel = float((col_an - col_fd).norm() / col_fd.norm())
     assert rel < 2e-4, f"hessian column rel {rel:.2e}"
+
+
+@pytest.mark.slow
+def test_gamma_hessian_symmetry_reconstruction():
+    """HessianSymmetry on real columns: ideal diamond Si needs ONE
+    irreducible displacement; a second column computed directly must
+    match its symmetry reconstruction. This gates the rotation/atom-map
+    conventions against the actual response physics (the unit test only
+    checks internal consistency on synthetic matrices)."""
+    from gradwave.postscf.phonons import HessianSymmetry
+
+    torch.set_num_threads(8)
+    paw = parse_upf_paw(FIX / "pseudos" / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
+    # 20³, NOT the auto 18³: the diamond glide translation (¼,¼,¼) must
+    # land on grid points or the XC-quadrature eggbox breaks the group
+    # invariance of the discretized energy surface itself (measured:
+    # 2.6e-2 column anisotropy at 18³ — see gamma_hessian's guard)
+    res = scf_uspp(_build(paw, POS0, shape=(20, 20, 20)), PBE(),
+                   etol=1e-12, rhotol=1e-10, verbose=False, max_iter=80)
+    assert res["converged"]
+    system = res["system"]
+    hs = HessianSymmetry(np.asarray(system.grid.cell),
+                         system.positions.detach().cpu().numpy(),
+                         list(system.species_of_atom))
+    assert len(hs.displacements) == 1
+
+    cols = [hessian_column(res, PBE(), a, alpha)
+            for a, alpha in hs.displacements]
+    h_rec = hs.reconstruct(cols)
+
+    # a column NOT in the irreducible set, computed directly
+    col_direct = hessian_column(res, PBE(), 1, 2).numpy()
+    # measured 4.1e-5 at 20³ — the residual XC-quadrature eggbox at this
+    # coarse grid, not the reconstruction (18³ sits at 5.2e-2; the same
+    # anisotropy is in the directly computed 6-column Hessian)
+    rel = (np.linalg.norm(h_rec[:, :, 1, 2] - col_direct)
+           / np.linalg.norm(col_direct))
+    assert rel < 2e-4, f"symmetry-reconstructed column rel {rel:.2e}"
