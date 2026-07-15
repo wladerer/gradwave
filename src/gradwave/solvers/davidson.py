@@ -180,6 +180,15 @@ def davidson_batched(
         t_band = torch.einsum("kbg,kg,kbg->kb", x.conj(), t.to(x.dtype), x).real
         tb_sel = torch.gather(t_band, 1, sel)
         d = teter_b(r_sel, t, tb_sel)
+        # unit-normalize rows BEFORE ortho: near-converged residuals are
+        # tiny but their DIRECTIONS are the information; below the 1e-8
+        # threshold _orthonormalize_b replaces them with rank-safety
+        # jitter — random directions that waste the whole expansion round.
+        # The USPP batched solver learned this first; measured here the
+        # jitter fired on most rounds (251 H-applies for 9 SCF solves,
+        # 1.4 s of torch.randn in a 21 s profile).
+        dn = torch.linalg.norm(d, dim=-1, keepdim=True).real
+        d = torch.where(dn > 1e-300, d / dn.clamp_min(1e-300), d)
 
         if v.shape[1] + n_add > max_dim:
             # Restart reusing hx (no H re-application) — but the Ritz block
