@@ -43,6 +43,11 @@ class SCFOptions:
     criterion: str = "drho"  # drho | energy
     rho_safety: float = 1e-2
     batched: bool = True
+    # fp32 draft for the batched Davidson while the diago tolerance is
+    # loose (> 1e-5); subspace algebra and every SCF quantity stay fp64,
+    # so converged results are unchanged. Opt-in; the payoff is on GPUs
+    # where consumer fp64 throughput is 1/64 of fp32.
+    mixed_precision: bool = False
     verbose: bool = True
     mixer: MixerOptions = field(default_factory=MixerOptions)
 

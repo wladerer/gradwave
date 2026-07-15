@@ -37,13 +37,22 @@ class BatchedHS:
             hub_q=hub_sphi, hub_dij=hub_d,
         )
         self.t = bk.t
+        self._pq_cache: dict = {}  # cdtype → (p, q) for mixed precision
+
+    def _pq(self, cdtype):
+        cached = self._pq_cache.get(cdtype)
+        if cached is None:
+            cached = (self.p.to(cdtype), self.q.to(cdtype))
+            self._pq_cache[cdtype] = cached
+        return cached
 
     def h(self, c):
-        return self.ham.apply(c)
+        return self.ham.apply(c)  # dtype-follows c (BatchedHamiltonian._tables)
 
     def s(self, c):
-        b = becp_b(self.p, c)
-        return (c + torch.einsum("kbp,pq,kqg->kbg", b, self.q, self.p)
+        p, q = self._pq(c.dtype)
+        b = becp_b(p, c)
+        return (c + torch.einsum("kbp,pq,kqg->kbg", b, q, p)
                 ) * self.bk.mask[:, None, :]
 
 
@@ -70,8 +79,14 @@ def davidson_gen_batched(hs: BatchedHS, x0: torch.Tensor, nbands: int,
                 torch.linalg.solve_triangular(rt, sx_r, upper=False))
 
     def _subspace(v_, hv_, sv_):
-        h_sub = torch.einsum("kig,kjg->kij", v_.conj(), hv_)
-        s_sub = torch.einsum("kig,kjg->kij", v_.conj(), sv_)
+        # subspace algebra ALWAYS in fp64: the generalized reduction's
+        # Cholesky of a near-singular S is exactly where fp32 produces
+        # garbage rotations; the matrices are (nk, nsub, nsub)-tiny, so
+        # upcasting costs nothing while the applies stay low-precision
+        h_sub = torch.einsum("kig,kjg->kij", v_.conj(), hv_).to(
+            torch.complex128)
+        s_sub = torch.einsum("kig,kjg->kij", v_.conj(), sv_).to(
+            torch.complex128)
         return (0.5 * (h_sub + h_sub.conj().transpose(-1, -2)),
                 0.5 * (s_sub + s_sub.conj().transpose(-1, -2)))
 
@@ -134,7 +149,9 @@ def davidson_gen_batched(hs: BatchedHS, x0: torch.Tensor, nbands: int,
         t_band = torch.einsum("kbg,kg,kbg->kb", x.conj(), hs.t.to(x.dtype),
                               x).real
         tb_sel = torch.gather(t_band, 1, sel)
-        d = teter_b(r_sel, hs.t, tb_sel)
+        # cast t to the residual's real dtype — fp64 tables would silently
+        # promote a complex64 residual back to complex128
+        d = teter_b(r_sel, hs.t.to(r_sel.real.dtype), tb_sel)
         # unit-normalize rows BEFORE ortho: near-converged residuals are tiny
         # (~1e-9) but their directions are the information; below the 1e-8
         # threshold _orthonormalize_b would replace them with rank-safety

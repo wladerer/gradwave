@@ -39,7 +39,7 @@ from gradwave.core.hamiltonian import ProjectorData, becp, projectors
 from gradwave.core.occupations import (
     SCHEMES,
 )
-from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.dtypes import CDTYPE, CDTYPE_LOW, RDTYPE
 from gradwave.scf.common import shared_fermi_occupations
 from gradwave.scf.guess import sad_density
 from gradwave.scf.layout import MixLayout
@@ -173,10 +173,15 @@ class _IterOps:
     g_spin: int
     nk: int
     nb: int
+    mixed_precision: bool = False
+
+
+_MP_CROSSOVER = 1e-5  # diago tol above this runs the fp32 draft solves
 
 
 def _build_iter_ops(system: USPPSystem, xc, *, nspin=1, smearing="none",
-                    width=0.1, batched=True, hubbard=None) -> _IterOps:
+                    width=0.1, batched=True, hubbard=None,
+                    mixed_precision=False) -> _IterOps:
     grid = system.grid
     vol = grid.volume
     dev = system.positions.device
@@ -210,7 +215,7 @@ def _build_iter_ops(system: USPPSystem, xc, *, nspin=1, smearing="none",
                     is_paw=is_paw, onec=onec, grid=grid, vol=vol, dev=dev,
                     shape=grid.shape, mask_flat=grid.dens_mask.reshape(-1),
                     g_spin=2 if nspin == 1 else 1, nk=len(system.spheres),
-                    nb=system.nbands)
+                    nb=system.nbands, mixed_precision=mixed_precision)
 
 
 @torch.no_grad()
@@ -319,7 +324,13 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
                     x0[ik, :, :sph.npw] = xk.to(CDTYPE)
             else:
                 x0 = coeffs_b[isp]
-            eig_b, x_b = davidson_gen_batched(hs_b, x0, nb, tol=tol_eff)
+            # fp32 draft while the diago tolerance is loose; the subspace
+            # reduction inside stays fp64 and the S-normalization below is
+            # fp64 always, so the fp64 finish is bit-identical physics
+            use_low = ops.mixed_precision and tol_eff > _MP_CROSSOVER
+            eig_b, x_b = davidson_gen_batched(
+                hs_b, x0.to(CDTYPE_LOW) if use_low else x0, nb, tol=tol_eff)
+            x_b = x_b.to(CDTYPE)
             b_all = becp_b(p_b, x_b)
             snorm = (x_b.abs() ** 2).sum(dim=-1) + torch.einsum(
                 "kbi,ij,kbj->kb", b_all.conj(),
@@ -478,7 +489,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
              trust_factor=20.0, batched=True, hubbard=None, start_from=None,
              criterion="drho", rho_safety=1e-2, adapt_step=False,
              mixing_scheme="pulay", mixing_kerker=None, mixing_metric="plain",
-             spin_precond=False, opts=None, verbose=True):
+             spin_precond=False, mixed_precision=False, opts=None,
+             verbose=True):
     """USPP/PAW SCF. nspin=2 takes a SpinXC functional and per-species
     start_mag (list, in [-1, 1]); mixing then runs in the (total,
     magnetization) basis with Kerker on the total for smeared systems.
@@ -517,6 +529,12 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     (smeared nspin=2 only; scf/spin_precond.py) — the physics-informed
     treatment of the Stoner-expansive mode, applied to residuals before
     damping/mixing.
+    mixed_precision: fp32 draft in the batched generalized Davidson while
+    the adaptive diago tolerance is above 1e-5; the subspace reduction and
+    S-normalization stay fp64 and the final iterations re-polish in fp64,
+    so converged results are unchanged. Batched path only (the per-k
+    reference path ignores it). The payoff is on consumer GPUs (fp64 at
+    1/64 of fp32 throughput); CPU gains are modest.
     opts: an SCFOptions object (scf/options.py) — the readable form of
     all of the above; when given it overrides the flat kwargs."""
     mixing_w0, bec_step_scale = 0.01, None  # MixerOptions defaults
@@ -526,6 +544,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         diago_tol, criterion = opts.diago_tol, opts.criterion
         rho_safety, batched, verbose = opts.rho_safety, opts.batched, \
             opts.verbose
+        mixed_precision = opts.mixed_precision
         mx = opts.mixer
         mixing_alpha, mixing_history = mx.alpha, mx.history
         mixing_scheme, mixing_kerker = mx.scheme, mx.kerker
@@ -575,7 +594,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         spin_frac = [up, dn]
 
     ops = _build_iter_ops(system, xc, nspin=nspin, smearing=smearing,
-                          width=width, batched=batched, hubbard=hubbard)
+                          width=width, batched=batched, hubbard=hubbard,
+                          mixed_precision=mixed_precision)
     hub = ops.hub
     n_hub_s = None
     if hub is not None:
