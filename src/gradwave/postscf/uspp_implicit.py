@@ -241,6 +241,7 @@ class _ConvergedUSPP:
         self.rho_ij_sp = (
             [[m.detach() for m in res["rho_ij_atoms"]]] if ns == 1
             else [[m.detach() for m in ch] for ch in res["rho_ij_atoms"]])
+        self.hvp_at = None
         if self.is_paw:
             from gradwave.scf.paw_onsite import OneCenter
 
@@ -255,6 +256,10 @@ class _ConvergedUSPP:
                 else:
                     for isp in range(ns):
                         dscr_sp[isp][s0:s1, s0:s1] += ddd[isp].to(dev)
+            # HVPs are all taken at the frozen converged becsum — build
+            # each atom's first-order graph once, pay one backward per call
+            self.hvp_at = [self.onec[sp].hvp_factory(self._bec_at(a))
+                           for a, sp in enumerate(system.species_of_atom)]
 
         # DFT+U: rebuild the S-dressed orbital projectors and freeze the
         # converged V_U (the +U channel enters the response exactly like
@@ -672,7 +677,7 @@ class _ConvergedUSPP:
         cross-spin blocks automatically."""
         out = [[] for _ in range(self.nspin)]
         dev = self.system.positions.device
-        for a, sp in enumerate(self.system.species_of_atom):
+        for a, _sp in enumerate(self.system.species_of_atom):
             ms = []
             for isp in range(self.nspin):
                 m = 0.5 * (dbec_sp[isp][a] + dbec_sp[isp][a].conj().T)
@@ -683,10 +688,9 @@ class _ConvergedUSPP:
             elif self.nspin == 1:
                 # one-center quadrature is CPU-anchored (_to_real_t);
                 # bridge back to the composite vector's device
-                out[0].append(self.onec[sp].hvp_becsum(
-                    self.rho_ij_sp[0][a], ms[0]).to(dev))
+                out[0].append(self.hvp_at[a](ms[0]).to(dev))
             else:
-                hu, hd = self.onec[sp].hvp_becsum(self._bec_at(a), ms)
+                hu, hd = self.hvp_at[a](ms)
                 out[0].append(hu.to(dev))
                 out[1].append(hd.to(dev))
         return out
