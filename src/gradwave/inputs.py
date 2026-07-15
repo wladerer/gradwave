@@ -18,9 +18,9 @@ from ase.io import read as ase_read
 
 @dataclass(frozen=True)
 class MixingParams:
-    scheme: str = "pulay"  # pulay | linear
+    scheme: str = "pulay"  # pulay | broyden | johnson (USPP/PAW path)
     alpha: float = 0.7
-    history: int = 8
+    history: int | None = None  # None → per-scheme default (johnson 12, else 8)
     kerker: str | bool = "auto"  # auto: on iff smearing enabled
 
 
@@ -66,6 +66,7 @@ class Input:
     pseudo_dir: Path
     pseudo_map: dict[str, str]
     ecut: float
+    ecutrho: float | None = None  # USPP/PAW density cutoff; None → 4×ecut
     xc: str = "pbe"  # lda | pbe
     kpoints: KPointsParams = field(default_factory=KPointsParams)
     smearing: SmearingParams = field(default_factory=SmearingParams)
@@ -79,6 +80,9 @@ class Input:
     bands: BandsParams = field(default_factory=BandsParams)
     device: str = "cpu"
     output_dir: Path = Path("./out")
+    output_checkpoint: bool = True  # write checkpoint.pt after SCF tasks
+    output_wavefunctions: bool = False  # include coeffs in the checkpoint
+    restart: Path | None = None  # checkpoint.pt to warm-start from (USPP/PAW)
 
 
 def _load_structure(spec, base: Path) -> Atoms:
@@ -125,12 +129,21 @@ def load_input(path: str | Path) -> Input:
     if smtype not in ("none", "fermi-dirac", "gaussian", "mp1", "cold"):
         raise ValueError(f"unknown smearing type {smtype!r}")
 
+    mix_scheme = str(mix_raw.get("scheme", "pulay"))
+    if mix_scheme not in ("pulay", "broyden", "johnson", "linear"):
+        raise ValueError(f"unknown mixing scheme {mix_scheme!r}")
+
+    out_raw = raw.get("output", {})
+    restart = raw.get("restart")
+
     nbands = raw.get("nbands", "auto")
+    ecutrho = raw.get("ecutrho")
     return Input(
         atoms=atoms,
         pseudo_dir=pseudo_dir,
         pseudo_map=pseudo_map,
         ecut=float(raw["ecut"]),
+        ecutrho=None if ecutrho is None else float(ecutrho),
         xc=xc,
         kpoints=KPointsParams(
             mesh=tuple(kp.get("mesh", (1, 1, 1))), shift=tuple(kp.get("shift", (0, 0, 0)))
@@ -151,5 +164,8 @@ def load_input(path: str | Path) -> Input:
         relax=RelaxParams(**raw.get("relax", {})),
         bands=BandsParams(**raw.get("bands", {})),
         device=raw.get("device", "cpu"),
-        output_dir=base / raw.get("output", {}).get("dir", "./out"),
+        output_dir=base / out_raw.get("dir", "./out"),
+        output_checkpoint=bool(out_raw.get("checkpoint", True)),
+        output_wavefunctions=bool(out_raw.get("wavefunctions", False)),
+        restart=None if restart is None else (base / restart),
     )

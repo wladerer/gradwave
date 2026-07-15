@@ -1,0 +1,38 @@
+# gradwave input — Si PAW SCF. Run with:  gradwave input_si.yaml -o out/
+# Every key below except structure/pseudopotentials/ecut has a default.
+
+structure:
+  cell: [[0.0, 2.715, 2.715], [2.715, 0.0, 2.715], [2.715, 2.715, 0.0]]
+  positions:
+    cart: [[0.0, 0.0, 0.0], [1.3575, 1.3575, 1.3575]]
+  species: [Si, Si]
+  # or a file ASE reads:  structure: si.cif
+
+pseudopotentials:
+  dir: ../tests/fixtures/qe/pseudos
+  map: {Si: Si.pbe-n-kjpaw_psl.1.0.0.UPF}   # NC or USPP/PAW, auto-detected
+
+ecut: 408.17          # eV (30 Ry)
+ecutrho: 1632.68      # eV; USPP/PAW density cutoff, default 4x ecut
+xc: pbe               # lda | pbe
+kpoints: {mesh: [4, 4, 4]}
+smearing: {type: none, width: 0.1}   # none | fermi-dirac | gaussian | mp1 | cold
+symmetry: true        # IBZ reduction + density symmetrization
+nspin: 1              # 2 for collinear spin (+ start_mag per element)
+
+scf:
+  max_iter: 100
+  etol: 1.0e-8        # eV
+  rhotol: 1.0e-7
+  mixing: {scheme: johnson}   # pulay | broyden | johnson
+
+task: scf             # scf | relax | bands
+# relax: {optimizer: fire, fmax: 0.01, max_steps: 200}
+# bands: {path: LGXUG, npoints: 120}
+
+# restart: out/checkpoint.pt    # warm-start from a previous run's state
+
+output:
+  dir: ./out
+  checkpoint: true          # write restartable state after SCF
+  wavefunctions: false      # keep coeffs out of the checkpoint (large)
