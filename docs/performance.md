@@ -152,6 +152,33 @@ Wall-clock deltas between warm-start variants measured back-to-back on
 the laptop were dominated by thermal throttling — iteration counts are
 the trustworthy metric for solver-logic questions.
 
+## GPU verification of the kernel story (RTX 3050, 2026-07-15)
+
+The kernel-level claim verifies emphatically; the end-to-end claim does
+not, and the reason is instructive. Microbenchmarks on the exact hot
+shapes from the laptop profile (batched FFT (288, 21³), batched
+Hermitian eigh (36, 32, 32)):
+
+| kernel | laptop cpu c128 | 3050 c128 | 3050 c64 |
+|---|---|---|---|
+| batched FFT | 13.1 ms | 6.5 ms | **1.1 ms (12×)** |
+| batched eigh | 4.9 ms | 2.4 ms | **0.5 ms (10×)** |
+
+cuFFT and cuSOLVER's batched Jacobi are exactly the purpose-built
+implementations claimed. But the same C 50 Ry SCF end-to-end gains only
+11–15% on the GPU (4³: 0.83 → 0.73 s/it; 6³: 2.41 → 2.16 s/it), with
+mixed precision neutral, and free energies identical to 7e-12 eV
+everywhere. Scaling the k-mesh 4.7× did NOT widen the GPU edge, which
+falsifies a pure launch-latency explanation: the Davidson driver
+synchronizes with the host every expansion round (the rn.max()
+convergence scalar and the n_add tally), so the pipeline drains ~124
+times per SCF regardless of batch width. Getting kernel-level gains
+end-to-end at these sizes means sync-free convergence logic (fixed
+expansion counts checked every few rounds, or CUDA graphs) — real
+engineering, noted as future work. Larger grids and heavier bands
+shift the balance toward the kernels naturally, which is why the
+earlier Si 30 Ry and USPP benchmarks saw real GPU wins.
+
 ## Deferred with measurement: Γ-point real wavefunctions
 
 The O₂ 35/280 SCF profile (53 s total) breaks down as 22 s Davidson H
