@@ -177,14 +177,28 @@ falsified too: a sync-free Davidson (delayed convergence via pinned
 async copy + event query, delayed expansion counts, sync-free rank
 repair) measures SLOWER than the synchronous path at both sizes
 (0.85 vs 0.73 s/it at 4³, 2.37 vs 2.16 at 6³), physics identical. The
-binding constraint at these sizes is the eager-mode host itself,
-serially issuing dozens of small kernels per expansion round; the
-syncs ride on that, they don't cause it, and the delayed expansion
-count does extra H-apply work. The sync-free path stays in the solver
-(default off) as the substrate for the actual fix, a CUDA-graphs
-capture of the expansion round. Larger grids and heavier bands shift
-the balance toward the kernels naturally, which is why the earlier
-Si 30 Ry and USPP benchmarks saw real GPU wins.
+delayed expansion count also does extra H-apply work.
+
+The third hypothesis — eager-mode launch overhead, fixable by CUDA
+graphs — was probed and falsified as well: capturing the real
+BatchedHamiltonian.apply in a CUDA graph replays bit-identically at
+1.0–1.1× eager speed across all four bucket shapes. The kernels are
+already back-to-back. (For the record: apply and qr are capturable,
+torch's eigh is not — host info checks.)
+
+The probe also exposed the real answer. The 10 ms apply at nbnd 8 is
+two 6.5 ms c128 FFTs plus fp64 einsums — genuine kernel execution on
+a GeForce card whose fp64 runs at 1/64 rate. The c64 twin kernels are
+6–12× faster on the same device, so the small-system GPU gap is
+PRECISION, not structure: the fp32 draft's window (diago tol > 1e-5,
+the first few SCF iterations) is too short to matter at 9-iteration
+solves, and everything after runs crippled fp64. Structural fixes
+were never going to move this. What would: an fp32-dominant solver
+schedule (draft far deeper, fp64 only for the final polish), or a
+datacenter-class fp64 GPU. The sync-free path stays in the solver
+(default off) since any deeper-fp32 redesign would want it. Larger
+grids and heavier bands amortize the fp64 handicap, which is why the
+earlier Si 30 Ry and USPP benchmarks saw real GPU wins.
 
 ## Deferred with measurement: Γ-point real wavefunctions
 
