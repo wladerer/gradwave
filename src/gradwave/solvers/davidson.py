@@ -100,7 +100,8 @@ def davidson(
 
 
 def _orthonormalize_b(
-    v: torch.Tensor, mask: torch.Tensor, against: torch.Tensor | None = None
+    v: torch.Tensor, mask: torch.Tensor, against: torch.Tensor | None = None,
+    jitter: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Rows of v (nk, j, npw) → orthonormal per k; padded slots stay zero.
 
@@ -110,6 +111,11 @@ def _orthonormalize_b(
     masked jitter (then re-projection) so the input is full-rank INSIDE the
     masked complement space; healthy rows stay bit-exact — a blanket jitter
     would put a noise floor under the SCF density residual.
+
+    jitter: optional pre-generated (nk, ≥j, npw) noise. When given, the
+    degenerate-row repair is applied as an UNCONDITIONAL masked add — the
+    `bool(any())` shortcut is a host sync every call, which is exactly
+    what the sync-free GPU Davidson must avoid.
     """
 
     def project(x):
@@ -121,11 +127,14 @@ def _orthonormalize_b(
     v = project(v * mask[:, None, :])
     row_norm = torch.linalg.norm(v, dim=-1, keepdim=True).real
     degenerate = row_norm < 1e-8
-    if bool(degenerate.any()):
+    if jitter is not None:
+        v = project((v + degenerate * jitter[:, : v.shape[1]])
+                    * mask[:, None, :])
+    elif bool(degenerate.any()):
         gen = torch.Generator(device="cpu").manual_seed(v.shape[1] + 7919)
         noise = torch.randn(*v.shape, 2, generator=gen, dtype=torch.float64)
-        jitter = torch.view_as_complex(noise).to(v.device).to(v.dtype)
-        v = project((v + degenerate * jitter) * mask[:, None, :])
+        jit = torch.view_as_complex(noise).to(v.device).to(v.dtype)
+        v = project((v + degenerate * jit) * mask[:, None, :])
     q, _ = torch.linalg.qr(v.transpose(-1, -2), mode="reduced")
     return q.transpose(-1, -2)
 
@@ -147,12 +156,40 @@ def davidson_batched(
     tol: float = 1e-9,
     max_iter: int = 40,
     max_dim_factor: int = 4,
+    sync_free: bool | None = None,  # None → on for CUDA inputs
 ) -> BatchedDavidsonResult:
+    """sync_free avoids every per-round host readback (the pipeline-drain
+    bottleneck on GPUs at small sizes): convergence stats travel through a
+    non-blocking copy into pinned memory and are judged one round late via
+    a CUDA event query that never blocks. Worst case is one extra
+    expansion round after convergence, whose Rayleigh–Ritz solution is
+    strictly better. CPU behavior is bit-identical to the synchronous
+    path."""
     nk, nb, m = x0.shape
     max_dim = min(max_dim_factor * nb, int(mask.sum(dim=1).min()))
     rdtype = x0.real.dtype  # float32 in the mixed-precision draft phase, else float64
+    if sync_free is None:
+        sync_free = x0.is_cuda
 
-    v = _orthonormalize_b(x0, mask)
+    jitter = None
+    ev = flag_host = pending_stats = None
+    use_event = sync_free and x0.is_cuda
+    if sync_free:
+        gen = torch.Generator(device="cpu").manual_seed(nb + 7919)
+        noise = torch.randn(nk, nb + 1, m, 2, generator=gen,
+                            dtype=torch.float64)
+        jitter = torch.view_as_complex(noise).to(x0.device).to(x0.dtype)
+        if use_event:
+            ev = torch.cuda.Event()
+            flag_host = torch.zeros(2, dtype=torch.float64).pin_memory()
+        else:
+            # CPU twin of the delayed-check algorithm (for testing it
+            # without a GPU); reads are free here
+            flag_host = torch.zeros(2, dtype=torch.float64)
+    n_add_cur = nb
+    pending = False
+
+    v = _orthonormalize_b(x0, mask, jitter=jitter)
     hv = h_apply(v)
     eig = torch.zeros(nk, nb, dtype=rdtype, device=x0.device)
     x = v[:, :nb]
@@ -168,12 +205,31 @@ def davidson_batched(
 
         r = hx - eig[..., None] * x
         rn = torch.linalg.norm(r, dim=-1).real
-        if float(rn.max()) < tol:
-            return BatchedDavidsonResult(eig, x, it, rn)
-
-        # expand with the worst unconverged residuals only — uniform count
-        # across k (max over k of the per-k unconverged tally) keeps batching
-        n_add = int((rn > tol).sum(dim=1).max())
+        if not sync_free:
+            if float(rn.max()) < tol:
+                return BatchedDavidsonResult(eig, x, it, rn)
+            # expand with the worst unconverged residuals only — uniform
+            # count across k (max over k of the per-k unconverged tally)
+            # keeps batching
+            n_add = int((rn > tol).sum(dim=1).max())
+        else:
+            # judge the stats copy launched in an earlier round; query()
+            # never blocks, and the returned (eig, x) are the CURRENT
+            # round's — at least one refinement past the converged one
+            if pending and (not use_event or ev.query()):
+                if float(flag_host[0]) < tol:
+                    return BatchedDavidsonResult(eig, x, it, rn)
+                n_add_cur = max(1, min(nb, int(flag_host[1])))
+                pending = False
+            if not pending:
+                pending_stats = torch.stack(
+                    [rn.max().to(torch.float64),
+                     (rn > tol).sum(dim=1).max().to(torch.float64)])
+                flag_host.copy_(pending_stats, non_blocking=use_event)
+                if use_event:
+                    ev.record()
+                pending = True
+            n_add = n_add_cur
         sel = torch.argsort(rn, dim=1, descending=True)[:, :n_add]  # (nk, n_add)
         r_sel = torch.gather(r, 1, sel[..., None].expand(-1, -1, m))
 
@@ -202,11 +258,11 @@ def davidson_batched(
             hx_orth = torch.linalg.solve_triangular(
                 rmat.transpose(-1, -2), hx, upper=False
             )
-            d = _orthonormalize_b(d, mask, against=x_orth)
+            d = _orthonormalize_b(d, mask, against=x_orth, jitter=jitter)
             v = torch.cat([x_orth, d], dim=1)
             hv = torch.cat([hx_orth, h_apply(d)], dim=1)
         else:
-            d = _orthonormalize_b(d, mask, against=v)
+            d = _orthonormalize_b(d, mask, against=v, jitter=jitter)
             v = torch.cat([v, d], dim=1)
             hv = torch.cat([hv, h_apply(d)], dim=1)
 
