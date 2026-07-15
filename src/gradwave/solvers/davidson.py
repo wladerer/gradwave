@@ -112,10 +112,13 @@ def _orthonormalize_b(
     masked complement space; healthy rows stay bit-exact — a blanket jitter
     would put a noise floor under the SCF density residual.
 
-    jitter: optional pre-generated (nk, ≥j, npw) noise. When given, the
-    degenerate-row repair is applied as an UNCONDITIONAL masked add — the
-    `bool(any())` shortcut is a host sync every call, which is exactly
-    what the sync-free GPU Davidson must avoid.
+    jitter: optional pre-generated (nk, ≥j, npw) noise for the sync-free
+    path — the `bool(any())` shortcut below is a host sync every call.
+    Rows arrive unit-normalized there, so a BLANKET 1e-10 relative
+    jitter folded in before the single projection rank-repairs zero rows
+    (QR normalizes the surviving 1e-10 direction) while perturbing
+    healthy rows at 1e-10, far below any solver tolerance; the
+    conditional path's second projection never runs.
     """
 
     def project(x):
@@ -124,13 +127,15 @@ def _orthonormalize_b(
                 x = x - (x @ against.conj().transpose(-1, -2)) @ against
         return x
 
+    if jitter is not None:
+        v = v + 1e-10 * jitter[:, : v.shape[1]]
     v = project(v * mask[:, None, :])
+    if jitter is not None:
+        q, _ = torch.linalg.qr(v.transpose(-1, -2), mode="reduced")
+        return q.transpose(-1, -2)
     row_norm = torch.linalg.norm(v, dim=-1, keepdim=True).real
     degenerate = row_norm < 1e-8
-    if jitter is not None:
-        v = project((v + degenerate * jitter[:, : v.shape[1]])
-                    * mask[:, None, :])
-    elif bool(degenerate.any()):
+    if bool(degenerate.any()):
         gen = torch.Generator(device="cpu").manual_seed(v.shape[1] + 7919)
         noise = torch.randn(*v.shape, 2, generator=gen, dtype=torch.float64)
         jit = torch.view_as_complex(noise).to(v.device).to(v.dtype)
