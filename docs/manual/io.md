@@ -15,6 +15,110 @@ detected from the UPF files, so the same input schema drives norm-conserving and
 USPP/PAW runs. `ecutrho` and the mixing scheme apply to the USPP/PAW path. The
 explicit `gradwave run input.yaml` form remains valid.
 
+## Input keywords
+
+The YAML file parses into the frozen `Input` schema
+([API reference](api/highlevel.md#gradwave.inputs.Input)). Every key except
+`structure`, `pseudopotentials`, and `ecut` has a default, so a minimal input is
+short. Energies are eV and lengths are Å throughout. A dash in the unit column
+means the quantity is dimensionless or a plain count.
+
+### Top level
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `structure` | *required* | Å | mapping or string | Inline `cell`/`positions`/`species` block, or a filename in any format ASE reads (cif, POSCAR, xyz). |
+| `pseudopotentials` | *required* | — | mapping | `dir` and `map`; see below. |
+| `ecut` | *required* | eV | float | Plane-wave kinetic-energy cutoff for the wavefunctions. |
+| `ecutrho` | `4 × ecut` | eV | float | Density/augmentation cutoff. USPP/PAW only; ignored for norm-conserving. |
+| `xc` | `pbe` | — | string | Functional: `lda` or `pbe`. |
+| `nbands` | `auto` | — | int or `auto` | Number of Kohn-Sham bands. `auto` picks from the electron count. |
+| `symmetry` | `true` | — | bool | Reduce k to the IBZ and symmetrize the density each step. |
+| `nspin` | `1` | — | int | `1` unpolarized, `2` collinear spin. |
+| `start_mag` | `null` | — | mapping | Element → initial moment fraction in [-1, 1] (nspin=2). |
+| `task` | `scf` | — | string | `scf`, `relax`, or `bands`. |
+| `device` | `cpu` | — | string | Torch device, e.g. `cpu` or `cuda`. |
+| `restart` | `null` | — | path | Checkpoint file to warm-start the density from. |
+
+### `structure`
+
+Provide either a filename string or the inline block below.
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `cell` | *required* | Å | list[list[float]] | 3×3 lattice vectors as rows. |
+| `positions.cart` | *required* | Å | list[list[float]] | Cartesian coordinates. Use this **or** `frac`. |
+| `positions.frac` | *required* | — | list[list[float]] | Fractional coordinates. Use this **or** `cart`. |
+| `species` | *required* | — | list[string] | Chemical symbols, one per atom. |
+
+### `pseudopotentials`
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `dir` | *required* | — | path | Directory of UPF files, relative to the input file. |
+| `map` | *required* | — | mapping | Element → UPF filename. NC or USPP/PAW, auto-detected. |
+
+### `kpoints`
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `mesh` | `[1, 1, 1]` | — | list[int] | Monkhorst-Pack grid dimensions. |
+| `shift` | `[0, 0, 0]` | — | list[int] | Grid offset; `[0,0,0]` is Γ-centered. |
+
+### `smearing`
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `type` | `none` | — | string | `none`, `fermi-dirac`, `gaussian`, `mp1`, or `cold`. |
+| `width` | `0.1` | eV | float | Smearing width (electronic temperature scale). |
+
+### `scf`
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `max_iter` | `100` | — | int | Maximum self-consistency iterations. |
+| `etol` | `1.0e-8` | eV | float | Total-energy convergence threshold. |
+| `rhotol` | `1.0e-7` | — | float | Density-residual convergence threshold. |
+| `diago.tol` | `1.0e-9` | — | float | Davidson eigensolver residual tolerance. |
+
+### `scf.mixing`
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `scheme` | `pulay` | — | string | `pulay`, `broyden`, `johnson`, or `linear`. |
+| `alpha` | `0.7` | — | float | Linear mixing fraction. |
+| `history` | `null` | — | int | Mixing history depth. `null` uses the per-scheme default (johnson 12, else 8). |
+| `kerker` | `auto` | — | string or bool | Kerker preconditioner: `auto` (on when smearing is enabled), `true`, or `false`. |
+
+### `relax`
+
+Used when `task: relax`.
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `optimizer` | `bfgs` | — | string | `bfgs` or `fire`. |
+| `fmax` | `0.01` | eV/Å | float | Force convergence criterion. |
+| `max_steps` | `200` | — | int | Maximum ionic steps. |
+
+### `bands`
+
+Used when `task: bands`.
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `path` | `""` | — | string | ASE bandpath string, e.g. `LGXUG`. Empty uses the lattice default. |
+| `npoints` | `120` | — | int | Number of k-points along the path. |
+| `nbands` | `null` | — | int | Bands to solve. `null` reuses the SCF count. |
+| `irreps` | `false` | — | bool | Label bands at special points with Mulliken symbols. |
+
+### `output`
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `dir` | `./out` | — | path | Output directory, relative to the input file. |
+| `checkpoint` | `true` | — | bool | Write `checkpoint.pt` after SCF tasks. |
+| `wavefunctions` | `false` | — | bool | Include the wavefunction coefficients in the checkpoint (large). |
+
 ## Output files
 
 Each run writes three files into the output directory.
