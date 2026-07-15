@@ -169,15 +169,22 @@ implementations claimed. But the same C 50 Ry SCF end-to-end gains only
 11–15% on the GPU (4³: 0.83 → 0.73 s/it; 6³: 2.41 → 2.16 s/it), with
 mixed precision neutral, and free energies identical to 7e-12 eV
 everywhere. Scaling the k-mesh 4.7× did NOT widen the GPU edge, which
-falsifies a pure launch-latency explanation: the Davidson driver
-synchronizes with the host every expansion round (the rn.max()
-convergence scalar and the n_add tally), so the pipeline drains ~124
-times per SCF regardless of batch width. Getting kernel-level gains
-end-to-end at these sizes means sync-free convergence logic (fixed
-expansion counts checked every few rounds, or CUDA graphs) — real
-engineering, noted as future work. Larger grids and heavier bands
-shift the balance toward the kernels naturally, which is why the
-earlier Si 30 Ry and USPP benchmarks saw real GPU wins.
+falsifies a pure launch-latency explanation.
+
+The next hypothesis — per-round host syncs (the rn.max() convergence
+scalar and n_add tally) draining the pipeline — was then BUILT and
+falsified too: a sync-free Davidson (delayed convergence via pinned
+async copy + event query, delayed expansion counts, sync-free rank
+repair) measures SLOWER than the synchronous path at both sizes
+(0.85 vs 0.73 s/it at 4³, 2.37 vs 2.16 at 6³), physics identical. The
+binding constraint at these sizes is the eager-mode host itself,
+serially issuing dozens of small kernels per expansion round; the
+syncs ride on that, they don't cause it, and the delayed expansion
+count does extra H-apply work. The sync-free path stays in the solver
+(default off) as the substrate for the actual fix, a CUDA-graphs
+capture of the expansion round. Larger grids and heavier bands shift
+the balance toward the kernels naturally, which is why the earlier
+Si 30 Ry and USPP benchmarks saw real GPU wins.
 
 ## Deferred with measurement: Γ-point real wavefunctions
 

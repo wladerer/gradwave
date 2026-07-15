@@ -161,20 +161,22 @@ def davidson_batched(
     tol: float = 1e-9,
     max_iter: int = 40,
     max_dim_factor: int = 4,
-    sync_free: bool | None = None,  # None → on for CUDA inputs
+    sync_free: bool = False,
 ) -> BatchedDavidsonResult:
-    """sync_free avoids every per-round host readback (the pipeline-drain
-    bottleneck on GPUs at small sizes): convergence stats travel through a
-    non-blocking copy into pinned memory and are judged one round late via
-    a CUDA event query that never blocks. Worst case is one extra
-    expansion round after convergence, whose Rayleigh–Ritz solution is
-    strictly better. CPU behavior is bit-identical to the synchronous
-    path."""
+    """sync_free removes every per-round host readback: convergence stats
+    travel through a non-blocking copy into pinned memory and are judged
+    one round late via a CUDA event query that never blocks; worst case
+    is one extra expansion round whose Rayleigh–Ritz solution is strictly
+    better. MEASURED VERDICT (RTX 3050, C 50 Ry, 2026-07-15): still
+    slower than the synchronous path at 4³ AND 6³ (0.85 vs 0.73 s/it;
+    2.37 vs 2.16) — the binding constraint at these sizes is the eager-
+    mode host ISSUING dozens of small kernels per round, not the syncs
+    riding on it, and the delayed expansion count does extra H-apply
+    work. Default off; the path is kept as the substrate for a CUDA-
+    graphs round capture, which is the real fix."""
     nk, nb, m = x0.shape
     max_dim = min(max_dim_factor * nb, int(mask.sum(dim=1).min()))
     rdtype = x0.real.dtype  # float32 in the mixed-precision draft phase, else float64
-    if sync_free is None:
-        sync_free = x0.is_cuda
 
     jitter = None
     ev = flag_host = pending_stats = None
