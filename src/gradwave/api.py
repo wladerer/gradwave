@@ -111,9 +111,6 @@ def run_scf(inp: Input, system=None, verbose: bool = True):
     if inp.restart is not None:
         from gradwave.checkpoint import as_start_from, load_checkpoint
 
-        if not uspp:
-            raise ValueError("restart from checkpoint requires USPP/PAW "
-                             "(the NC loop has no start_from)")
         start_from = as_start_from(load_checkpoint(inp.restart))
 
     kerker = inp.scf.mixing.kerker
@@ -134,7 +131,7 @@ def run_scf(inp: Input, system=None, verbose: bool = True):
                         mixing_kerker=kerker, start_from=start_from, **common)
     from gradwave.scf.loop import scf
 
-    return scf(system, xc, kerker=kerker,
+    return scf(system, xc, kerker=kerker, start_from=start_from,
                mixing_history=inp.scf.mixing.history or 8, **common)
 
 

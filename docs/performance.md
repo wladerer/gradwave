@@ -115,12 +115,19 @@ land the same minimum (final coordinates agree to 1e-4 Å).
 
 Two separate factors made the original run slow. The optimizer default
 was FIRE (25 steps where BFGS needs 3 — an 8.5× penalty; the default is
-now bfgs). The remaining 3.4× against QE is per-ionic-step cost: QE
-extrapolates the density and wavefunctions between steps so each SCF
-after the first takes 3–5 cycles, while the calculator re-runs every
-SCF cold from SAD. The fix is a start_from for the NC loop plus
-calculator-level state reuse — the USPP/PAW path already has the
-former.
+now bfgs). The remaining 3.4× against QE is per-ionic-step cost.
+
+The obvious fix — warm-starting each step's SCF — was built (NC
+start_from with atomic-density extrapolation and orbital reuse in the
+calculator) and measured to help only the fixed-geometry case:
+same-position restarts drop 9 → 2 iterations, which is what checkpoint
+restarts and parameter scans want, but 10–20 mÅ ionic moves stay at ~8
+iterations from any seed. The NC mixer's tail contraction, not the
+seed, sets that count. QE's 3–5-cycle steps rest on state the mixer
+KEEPS between ionic steps (Broyden history and ethr continuity), which
+is a separate project. Wall-clock deltas between warm-start variants
+measured back-to-back on the laptop were dominated by thermal
+throttling — iteration counts are the trustworthy metric here.
 
 ## Deferred with measurement: Γ-point real wavefunctions
 

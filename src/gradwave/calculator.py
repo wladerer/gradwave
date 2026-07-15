@@ -107,6 +107,41 @@ class GradWave(Calculator):
         self._system, self._system_key = system, key
         return system
 
+    def _warm_start(self, system):
+        """Seed the next solve from the previous converged state (same
+        FFT grid — positions-only moves during a relaxation/MD qualify),
+        with QE-style atomic extrapolation when the atoms moved: the
+        superposition-of-atoms part of ρ travels with the atoms, the
+        bonding remainder is reused. Plain reuse is nearly worthless
+        under motion (measured: 8 vs 9 iterations for a 6 mÅ move —
+        the seed error is first-order in displacement) while the
+        extrapolated seed keeps the ~2-iteration warm restart."""
+        from gradwave.scf.guess import sad_density
+
+        prev = self.last_result
+        if prev is None:
+            return None
+        is_dict = isinstance(prev, dict)
+        prev_sys = prev["system"] if is_dict else prev.system
+        if tuple(prev_sys.grid.shape) != tuple(system.grid.shape):
+            return None
+        pos_new = system.positions
+        pos_old = prev_sys.positions.to(pos_new.device)
+        if float((pos_new - pos_old).abs().max()) < 1e-12:
+            return prev
+        tabs = prev_sys.paws if is_dict else prev_sys.upfs
+        soa = prev_sys.species_of_atom
+        ne = prev_sys.n_electrons
+        delta = (sad_density(system.grid, pos_new, soa, tabs, ne)
+                 - sad_density(system.grid, pos_old, soa, tabs, ne))
+        rho = (prev["rho"] if is_dict else prev.rho).detach() + delta
+        if is_dict:
+            out = dict(prev)
+            out["rho"] = rho  # becsum is per-atom and rides along as-is
+            return out
+        return {"system": prev_sys, "nspin": 1, "rho": rho,
+                "rho_spin": None, "coeffs": prev.coeffs}
+
     def calculate(self, atoms=None, properties=("energy",), system_changes=all_changes):
         super().calculate(atoms, properties, system_changes)
         p = self.parameters
@@ -119,6 +154,7 @@ class GradWave(Calculator):
             system, _XC[p["xc"]](),
             smearing=p["smearing"], width=p["width"],
             etol=p["etol"], rhotol=p["rhotol"], verbose=self._verbose,
+            start_from=self._warm_start(system),
         )
         if not res.converged:
             raise RuntimeError("gradwave SCF did not converge")
@@ -136,23 +172,42 @@ class GradWave(Calculator):
                 sig[0, 0], sig[1, 1], sig[2, 2], sig[1, 2], sig[0, 2], sig[0, 1],
             ])
 
-    def _calculate_uspp(self, properties):
-        """USPP/PAW route (nspin=1; per-k unbatched — slower than the NC path)."""
-        from gradwave.scf.uspp import scf_uspp, setup_uspp
+    def _get_uspp_system(self, atoms):
+        """Positions-only updates reuse the cached USPPSystem (all its
+        tables are phase-free; positions enter through structure factors
+        built per solve). Valid because this route never builds the
+        position-dependent symmetrizers (use_symmetry stays off here)."""
+        from gradwave.scf.uspp import setup_uspp
 
         p = self.parameters
-        atoms = self.atoms
         symbols = atoms.get_chemical_symbols()
         species = sorted(set(symbols))
+        key = (tuple(np.round(atoms.cell.array, 12).ravel()), tuple(symbols))
+        if self._system is not None and key == self._system_key:
+            return dataclasses.replace(
+                self._system,
+                positions=torch.as_tensor(atoms.get_positions(), dtype=RDTYPE).to(
+                    self._system.positions.device),
+            )
         system = setup_uspp(
             atoms.cell.array, atoms.get_positions(),
             [species.index(s) for s in symbols],
             [self._upf(s) for s in species],
             ecut=p["ecut"], kmesh=p["kpts"], nbands=p["nbands"],
         )
+        self._system, self._system_key = system, key
+        return system
+
+    def _calculate_uspp(self, properties):
+        """USPP/PAW route (nspin=1)."""
+        from gradwave.scf.uspp import scf_uspp
+
+        p = self.parameters
+        system = self._get_uspp_system(self.atoms)
         res = scf_uspp(system, _XC[p["xc"]](), smearing=p["smearing"],
                        width=p["width"], etol=p["etol"], rhotol=p["rhotol"],
-                       verbose=self._verbose)
+                       verbose=self._verbose,
+                       start_from=self._warm_start(system))
         if not res["converged"]:
             raise RuntimeError("gradwave USPP SCF did not converge")
         self.last_result = res

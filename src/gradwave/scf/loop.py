@@ -340,6 +340,7 @@ def scf(
     mixed_precision: bool = False,  # opt-in fp32 draft (see note at resolution below)
     hubbard=None,  # list[core.hubbard.HubbardManifold] — Dudarev DFT+U corrections
     hub_alpha=None,  # per-site rigid manifold potential α [eV] — linear-response probe
+    start_from=None,  # previous SCFResult (or checkpoint view) on the SAME FFT grid
 ) -> SCFResult:
     grid, spheres = system.grid, system.spheres
     vol = grid.volume
@@ -360,7 +361,27 @@ def scf(
         g2_min = float(g2_nonzero[g2_nonzero > 1e-12].min())
         kerker = (smearing != "none") or (g2_min < 0.64)
 
-    if nspin == 1:
+    if start_from is not None:
+        # mirror of the USPP warm start: seed ρ from the previous state,
+        # rescaled by the volume ratio so the electron count is conserved
+        def _prev(key, default=None):
+            return (start_from.get(key, default)
+                    if isinstance(start_from, dict)
+                    else getattr(start_from, key, default))
+
+        prev_grid = _prev("system").grid
+        if tuple(prev_grid.shape) != tuple(grid.shape):
+            raise ValueError("start_from requires the same FFT grid "
+                             f"({tuple(prev_grid.shape)} vs {tuple(grid.shape)})")
+        if int(_prev("nspin", 1) or 1) != nspin:
+            raise ValueError("start_from nspin mismatch")
+        dev = system.positions.device
+        chg = float(prev_grid.volume) / float(vol)
+        if nspin == 1:
+            rho_s = [_prev("rho").detach().to(dev) * chg]
+        else:
+            rho_s = [r.detach().to(dev) * chg for r in _prev("rho_spin")]
+    elif nspin == 1:
         rho_s = [sad_density(grid, system.positions, system.species_of_atom,
                              system.upfs, system.n_electrons)]
     else:
@@ -443,6 +464,26 @@ def scf(
     c0 = torch.zeros(nk, nb, bk.npw_max, dtype=CDTYPE, device=device)
     c0[:, torch.arange(nb), torch.arange(nb)] = 1.0
     coeffs_b_s = [c0.clone() for _ in range(nspin)]
+    if start_from is not None:
+        # wavefunction reuse (the QE wfc-extrapolation analogue): previous
+        # orbitals are near-solutions after small moves, so the first tight
+        # Davidson converges in a few expansions instead of from scratch.
+        # Shape guards fall back to the plane-wave seed silently.
+        prev_c = (start_from.get("coeffs") if isinstance(start_from, dict)
+                  else getattr(start_from, "coeffs", None))
+        if prev_c is not None:
+            chans = [prev_c] if nspin == 1 else list(prev_c)
+            compat = len(chans) == nspin and all(
+                len(ch) == nk and all(
+                    ch[ik].shape[0] >= nb
+                    and ch[ik].shape[1] == int(bk.npw[ik])
+                    for ik in range(nk))
+                for ch in chans)
+            if compat:
+                for sp, ch in enumerate(chans):
+                    for ik in range(nk):
+                        coeffs_b_s[sp][ik, :, : int(bk.npw[ik])] = (
+                            ch[ik][:nb].to(device=device, dtype=CDTYPE))
 
     e_free_prev, converged, history = None, False, []
     eigs_s = [torch.zeros(nk, nb, dtype=RDTYPE, device=device) for _ in range(nspin)]
@@ -483,7 +524,13 @@ def scf(
         # each iteration's density residual at the eigensolver noise, so the
         # tail converges at the schedule's pace instead of the mixer's.
         if it == 1:
-            tol_eff = max(diago_tol, 1e-3)
+            # warm starts skip the loose first solve (it would floor the
+            # density residual at eigensolver noise), but NOT all the way
+            # to diago_tol: after an ionic move the seed orbitals are
+            # stale and one full-precision Davidson against the new H is
+            # slower than letting the schedule tighten from 1e-6
+            # (measured on diamond relax: 61 s tight vs 47 s baseline)
+            tol_eff = max(diago_tol, 1e-3 if start_from is None else 1e-6)
         else:
             r_prev = history[-1]["res"]
             tol_eff = max(diago_tol,

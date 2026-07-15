@@ -180,6 +180,17 @@ scf: {{etol: 1.0e-8, rhotol: 1.0e-7}}
                str(tmp_path / "conv.png")])
     assert rc == 0 and (tmp_path / "conv.png").exists()
 
+    # NC restart from the checkpoint: same F, fewer iterations
+    (tmp_path / "input2.yaml").write_text(
+        (tmp_path / "input.yaml").read_text()
+        + f"restart: {out / 'checkpoint.pt'}\n")
+    out2 = tmp_path / "results2"
+    assert main([str(tmp_path / "input2.yaml"), "-o", str(out2), "-q"]) == 0
+    s2 = json.loads((out2 / "scf.json").read_text())
+    assert s2["scf"]["n_iter"] < summary["scf"]["n_iter"]
+    assert abs(s2["scf"]["energies_eV"]["free_energy"]
+               - summary["scf"]["energies_eV"]["free_energy"]) < 1e-6
+
 
 @pytest.mark.standard
 def test_cli_end_to_end_paw_with_restart(tmp_path):

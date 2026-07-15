@@ -6,10 +6,9 @@ readable across sessions. Wavefunctions are EXCLUDED by default (they
 dominate the file size and the restart path only consumes the density
 and becsum); pass wavefunctions=True to archive them.
 
-Restart consumes exactly what scf_uspp(start_from=...) reads — the FFT
-grid shape and volume, ρ (per spin), and the becsum — so a checkpoint
-restarts any USPP/PAW run on the same grid. NC results can be saved and
-analyzed but not yet warm-restarted (the NC loop has no start_from).
+Restart consumes exactly what the solvers' start_from reads — the FFT
+grid shape and volume, ρ (per spin), and for USPP/PAW the becsum — so a
+checkpoint restarts either formalism on the same grid.
 """
 
 from __future__ import annotations
@@ -115,18 +114,19 @@ def load_checkpoint(path) -> dict:
 
 
 def as_start_from(payload: dict) -> dict:
-    """The scf_uspp(start_from=...) view of a loaded checkpoint: a shim
-    dict carrying grid shape/volume, densities and becsum. The solver
-    validates grid compatibility and rescales ρ by the volume ratio."""
-    if payload["kind"] != "uspp":
-        raise ValueError("restart is only supported for USPP/PAW "
-                         "checkpoints (the NC loop has no start_from)")
+    """The start_from view of a loaded checkpoint: a shim dict carrying
+    grid shape/volume, densities and (USPP/PAW) the becsum. The solvers
+    validate grid compatibility and rescale ρ by the volume ratio."""
     shim_grid = SimpleNamespace(shape=tuple(payload["grid_shape"]),
                                 volume=float(payload["volume_ang3"]))
-    return {
+    out = {
         "system": SimpleNamespace(grid=shim_grid),
         "nspin": payload["nspin"],
         "rho": payload["rho"],
         "rho_spin": payload.get("rho_spin"),
-        "rho_ij_atoms": payload["rho_ij_atoms"],
     }
+    if payload["kind"] == "uspp":
+        out["rho_ij_atoms"] = payload["rho_ij_atoms"]
+    elif payload.get("coeffs") is not None:
+        out["coeffs"] = payload["coeffs"]  # NC orbital reuse when archived
+    return out

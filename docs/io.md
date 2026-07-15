@@ -38,9 +38,9 @@ Each run writes three files into the output directory.
 
 In YAML the `restart:` key does the same. Restarting requires the same
 FFT grid and spin count (the solver validates both and rescales ρ by
-the volume ratio, so small cell changes in EOS-style scans work).
-Restart is a USPP/PAW feature; NC results save for archival and
-analysis but the NC loop has no `start_from` yet.
+the volume ratio, so small cell changes in EOS-style scans work). Both
+formalisms restart; the ASE calculator applies the same density reuse
+automatically between ionic steps of a relaxation or MD run.
 
 ## Analysis (pandas + matplotlib)
 
