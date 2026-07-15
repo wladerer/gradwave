@@ -128,10 +128,25 @@ counts out of the same pw.x run: QE takes 7/6/6/5/4/4 iterations per
 ionic step, resets its Broyden mixer every SCF cycle, and starts warm
 steps at ethr 1e-6 — the same rule implemented here. An earlier note in
 this file blamed "mixer state QE keeps between steps"; that was wrong,
-QE keeps none. The remaining 3.4× is per-ITERATION throughput: QE ~0.4
-s/iteration against ~1.4 s here on the same 8 cores for C at 50 Ry
-(threaded FFT + band solver maturity), plus the per-step autograd force
-backward. Closing it is solver-kernel work, not SCF-logic work.
+QE keeps none. The remaining gap is per-ITERATION throughput.
+
+Profiling that throughput found the dominant defect immediately: the
+NC batched Davidson fed unnormalized preconditioned residual rows to
+_orthonormalize_b, whose 1e-8 rank threshold replaced near-converged
+rows with jitter — random expansion directions on most rounds (251
+H-applies for 9 SCF solves, 1.4 s of torch.randn in a 21 s profile).
+The USPP solver had this fix already; back-porting it halved the
+per-iteration cost (1.77 → 0.89 s/it, identical trajectory). The
+same-session rematch: QE 18.5 s, gradwave 35.8 s — 1.9× from 3.4×.
+
+What remains and what does not pay on this hardware: forces are 0.07 s
+per step (the "autograd backward" theory was wrong); the fp32 draft is
+SLOWER on CPU for this system (casting overhead beats pocketfft's fp32
+gain — its wins are elsewhere); QE's nbnd=4 against our auto nbands=8
+for a fixed-occupation insulator is worth ~10% (noisy) and is a policy
+choice, not a defect. The remaining ~1.9× lives in kernel maturity
+(FFT and small batched linear algebra against decades-tuned FFTW +
+LAPACK band paths) and shrinks naturally on GPU.
 
 Wall-clock deltas between warm-start variants measured back-to-back on
 the laptop were dominated by thermal throttling — iteration counts are
