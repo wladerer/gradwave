@@ -83,10 +83,12 @@ SYSTEMS = {
                  width=0.01 * RY, etol=3e-7, criterion="energy",
                  rhotol=1e-9, verbose=False, max_iter=90),
         # vacuum spin-f_xc broadens the kernel spectrum (O2 test
-        # lessons), and the achievable floor rises off-reference — 5e-5
-        # in u is ~1e-4 in the gradient, far below Adam's noise scale
+        # lessons); kerker_q0 damps the low-G vacuum noise that set the
+        # old stagnation floor (measured: floored 1.4e-4 -> converges
+        # 1.4e-5). floor_tol stays as the safety net for parameter
+        # points where the floor wanders back up.
         adj=dict(history=40, beta=0.3, max_outer=120, outer_tol=2e-5,
-                 cg_tol=1e-10, floor_tol=3e-4)),
+                 cg_tol=1e-10, floor_tol=3e-4, kerker_q0=1.5)),
 }
 
 

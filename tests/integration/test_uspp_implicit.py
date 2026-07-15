@@ -421,3 +421,35 @@ def test_paw_density_loss_grads_ibz_equals_full():
         a, b = float(g_full[name]), float(g_sym[name])
         rel = abs(a - b) / max(abs(a), 1e-30)
         assert rel < 1e-6, f"{name}: full {a} vs IBZ {b} (rel {rel:.2e})"
+
+
+@pytest.mark.slow
+def test_kerker_preconditioner_leaves_gradient_invariant():
+    """kerker_q0 changes only the outer solver's path, never its fixed
+    point: Si insulator gradients with and without must agree to the
+    solver tolerance. (Its measured value is on vacuum cells — it breaks
+    the O2 stagnation floor — but the invariance gate lives on cheap Si.)"""
+    torch.set_num_threads(8)
+    paw = parse_upf_paw(FIX / "pseudos" / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
+    pos = np.array([[0.0, 0.0, 0.0], [1.3575, 1.3575, 1.3575]])
+    s = setup_uspp(SI_CELL, pos, [0, 0], [paw], ecut=15 * RY,
+                   kmesh=(2, 2, 2), ecutrho=60 * RY)
+    xc = LearnableX()
+    r = scf_uspp(s, xc, etol=1e-11, rhotol=1e-9, verbose=False, max_iter=60)
+    assert r["converged"]
+    rho_ref = 0.999 * r["rho"].detach().clone()
+    norm = float((rho_ref**2).sum())
+
+    def loss_fn(rho):
+        d = rho - rho_ref
+        return (d * d).sum() / norm
+
+    _, g0 = uspp_density_loss_param_grads(r, xc, loss_fn, outer_tol=1e-10)
+    _, g1 = uspp_density_loss_param_grads(r, xc, loss_fn, outer_tol=1e-10,
+                                          kerker_q0=1.5)
+    # measured agreement 2.6e-6 relative — set by the inner CG noise the
+    # two different outer trajectories accumulate, not by the fixed point
+    for name in g0:
+        a, b = float(g0[name]), float(g1[name])
+        assert abs(a - b) <= 1e-4 * max(abs(a), abs(b), 1e-12), \
+            f"{name}: {a} vs {b}"

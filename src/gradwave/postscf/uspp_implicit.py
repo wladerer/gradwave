@@ -447,12 +447,13 @@ class _ConvergedUSPP:
         system, grid = self.system, self.grid
         kw = system.kweights
         nsp = self.nspin
+        dev = system.positions.device
         hubp_sp = [None] * nsp
         if self.hub is not None and d_hub_sp is not None:
             for isp in range(nsp):
                 ch = d_hub_sp[min(isp, self.nsh - 1)]
                 dmat = torch.zeros(self.hub.nproj, self.hub.nproj,
-                                   dtype=CDTYPE)
+                                   dtype=CDTYPE, device=dev)
                 for m, st in zip(ch, self.hub.sites, strict=True):
                     s0, d = st["start"], st["dim"]
                     dmat[s0:s0 + d, s0:s0 + d] = 0.5 * (m + m.conj().T)
@@ -464,22 +465,26 @@ class _ConvergedUSPP:
                 dpert[s0:s1, s0:s1] += d_bare_sp[isp][a].to(dpert.dtype)
             dpert_sp.append(dpert)
 
-        drho_sm = [torch.zeros(self.shape, dtype=RDTYPE) for _ in range(nsp)]
-        dbec = [[torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE)
+        drho_sm = [torch.zeros(self.shape, dtype=RDTYPE, device=dev)
+                   for _ in range(nsp)]
+        dbec = [[torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
                  for (s0, s1) in system.atom_slices] for _ in range(nsp)]
         # Fermi-surface accumulators: δρ_FS = A − δμ·B with δμ = num/den
         # assembled only after the (spin, k) loops — particle conservation
         # couples every k-point AND both spin channels through the single
         # scalar δμ (the one cross-spin term in χ̃)
         num_mu = den_mu = 0.0
-        a_r = [torch.zeros(grid.n_points, dtype=RDTYPE) for _ in range(nsp)]
-        b_r = [torch.zeros(grid.n_points, dtype=RDTYPE) for _ in range(nsp)]
+        a_r = [torch.zeros(grid.n_points, dtype=RDTYPE, device=dev)
+               for _ in range(nsp)]
+        b_r = [torch.zeros(grid.n_points, dtype=RDTYPE, device=dev)
+               for _ in range(nsp)]
         a_bec = [[torch.zeros_like(m) for m in ch] for ch in dbec]
         b_bec = [[torch.zeros_like(m) for m in ch] for ch in dbec]
         dnh = a_hub = b_hub = None
         if self.hub is not None:
             def _hub_zeros():
-                return [[torch.zeros(st["dim"], st["dim"], dtype=CDTYPE)
+                return [[torch.zeros(st["dim"], st["dim"], dtype=CDTYPE,
+                                     device=dev)
                          for st in self.hub.sites] for _ in range(self.nsh)]
             dnh, a_hub, b_hub = _hub_zeros(), _hub_zeros(), _hub_zeros()
         for isp in range(nsp):
@@ -600,12 +605,13 @@ class _ConvergedUSPP:
                 dbec[isp][a] += a_bec[isp][a] - dmu * b_bec[isp][a]
             dbec[isp] = [0.5 * (m + m.conj().T) for m in dbec[isp]]
 
-            aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE)
+            aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE,
+                                  device=dev)
             for a, sp in enumerate(system.species_of_atom):
                 aug_sph = aug_sph + self.phase_pos[:, a].conj() \
                     * torch.einsum("ij,ijg->g", dbec[isp][a],
                                    system.aug[sp].q_g)
-            aug_box = torch.zeros(grid.n_points, dtype=CDTYPE)
+            aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
             aug_box[system.sphere_idx] = aug_sph / self.vol
             drho_aug = torch.fft.ifftn(
                 aug_box.reshape(self.shape) * grid.n_points,
@@ -665,6 +671,7 @@ class _ConvergedUSPP:
         double backward through the joint E_1c(bec↑, bec↓) carries the
         cross-spin blocks automatically."""
         out = [[] for _ in range(self.nspin)]
+        dev = self.system.positions.device
         for a, sp in enumerate(self.system.species_of_atom):
             ms = []
             for isp in range(self.nspin):
@@ -674,12 +681,14 @@ class _ConvergedUSPP:
                 for isp in range(self.nspin):
                     out[isp].append(torch.zeros_like(ms[isp]))
             elif self.nspin == 1:
-                out[0].append(
-                    self.onec[sp].hvp_becsum(self.rho_ij_sp[0][a], ms[0]))
+                # one-center quadrature is CPU-anchored (_to_real_t);
+                # bridge back to the composite vector's device
+                out[0].append(self.onec[sp].hvp_becsum(
+                    self.rho_ij_sp[0][a], ms[0]).to(dev))
             else:
                 hu, hd = self.onec[sp].hvp_becsum(self._bec_at(a), ms)
-                out[0].append(hu)
-                out[1].append(hd)
+                out[0].append(hu.to(dev))
+                out[1].append(hd.to(dev))
         return out
 
     def k_hub(self, dnh: list) -> list:
@@ -699,7 +708,7 @@ def uspp_density_loss_param_grads(
     res: dict, xc, loss_fn, *, beta: float = 0.2, history: int = 8,
     outer_tol: float = 1e-9, max_outer: int = 100, cg_tol: float = 1e-8,
     cg_max_iter: int = 200, floor_tol: float | None = None,
-    verbose: bool = False,
+    kerker_q0: float | None = None, verbose: bool = False,
 ) -> tuple[torch.Tensor, dict]:
     """dL/dθ of a density-dependent loss through the USPP/PAW SCF fixed
     point. loss_fn: rho(grid tensor of the TOTAL density) -> scalar torch
@@ -712,7 +721,17 @@ def uspp_density_loss_param_grads(
     with the functional parameters during training); when the residual
     stops improving for 15 iterations and the best seen is below
     floor_tol, the best iterate is used instead of raising. None keeps
-    the strict behavior for validation work."""
+    the strict behavior for validation work.
+
+    kerker_q0: opt-in Kerker preconditioning of the outer residual's
+    grid blocks, factor G²/(G²+q0²) (q0 in Å⁻¹), floored at 0.05 so the
+    G≈0 modes still converge (u lives in the potential channel — its
+    G=0 component is not fixed by charge conservation). The fixed point
+    is unchanged. Measured: no help on small metals (Anderson with
+    history is already near-exact there — Al 3→7 its), but it breaks
+    the vacuum-cell stagnation floor (O₂ spin: floored at 1.4e-4
+    without, converges to 1.4e-5 with q0=1.5) — the floor is low-G
+    residual noise amplified through 4π/G² in the vacuum region."""
     _check_supported(res)
     with torch.no_grad():
         cs = _ConvergedUSPP(res, xc)
@@ -770,10 +789,11 @@ def uspp_density_loss_param_grads(
                         parts.append(m.imag.reshape(-1))
             return torch.cat(parts)
 
-        zero_bec = [[torch.zeros(n, n, dtype=torch.float64) for n in nbec]
-                    for _ in range(nsp)]
-        zero_hub = ([[torch.zeros(d, d, dtype=CDTYPE) for d in hub_dims]
-                     for _ in range(nsh)] if nsh else None)
+        dev = vbar.device
+        zero_bec = [[torch.zeros(n, n, dtype=torch.float64, device=dev)
+                     for n in nbec] for _ in range(nsp)]
+        zero_hub = ([[torch.zeros(d, d, dtype=CDTYPE, device=dev)
+                      for d in hub_dims] for _ in range(nsh)] if nsh else None)
         l_vec = join([vbar] * nsp, zero_bec, zero_hub)
         dpsi_warm = [[torch.zeros_like(c[:n_sv]) for c, n_sv in
                       zip(cs.c_win[isp], cs.n_solve[isp], strict=True)]
@@ -796,9 +816,28 @@ def uspp_density_loss_param_grads(
                     for ch in d_bare_sp]
             return w_sp, d_bare_sp
 
+        kfac = None
+        if kerker_q0 is not None:
+            g2 = grid.g2
+            kfac = (g2 / (g2 + kerker_q0 * kerker_q0)).clamp_min(0.05)
+
+        def precondition(r):
+            """Kerker-filter the grid blocks of a residual; becsum and
+            hub blocks pass through (they carry no G²-divergent kernel)."""
+            if kfac is None:
+                return r
+            w_sp, mats_sp, hub_sp = split(r)
+            w_sp = [
+                torch.fft.ifftn(r_to_g(w.to(CDTYPE)) * kfac * n_pts,
+                                dim=(-3, -2, -1)).real
+                for w in w_sp]
+            return join(w_sp, mats_sp, hub_sp)
+
         # Anderson-accelerated fixed point u = l + K χ̃ u (plain damping
         # diverges for gain>1 modes — NiO lesson; the on-site becsum↔ddd
         # feedback is stiff in exactly the same way the SCF mixer sees).
+        # With kerker_q0 the Anderson recursion runs on the preconditioned
+        # residual; the convergence check stays on the raw one.
         u = l_vec.clone()
         prev_u = prev_r = None
         hist_du, hist_dr = [], []
@@ -833,20 +872,21 @@ def uspp_density_loss_param_grads(
                     w_sp, d_bare_sp, dpsi_warm, cg_tol, cg_max_iter,
                     d_hub_sp=d_hub_sp)
                 break
+            p_vec = precondition(r_vec)
             if prev_r is not None:
                 hist_du.append(u - prev_u)
-                hist_dr.append(r_vec - prev_r)
+                hist_dr.append(p_vec - prev_r)
                 if len(hist_dr) > history:
                     hist_du.pop(0)
                     hist_dr.pop(0)
-            prev_u, prev_r = u, r_vec
+            prev_u, prev_r = u, p_vec
             if hist_dr:
                 dr_m = torch.stack(hist_dr, dim=1)  # (n_u, h)
                 du_m = torch.stack(hist_du, dim=1)
-                gamma = torch.linalg.lstsq(dr_m, r_vec[:, None]).solution[:, 0]
-                u = u + beta * r_vec - (du_m + beta * dr_m) @ gamma
+                gamma = torch.linalg.lstsq(dr_m, p_vec[:, None]).solution[:, 0]
+                u = u + beta * p_vec - (du_m + beta * dr_m) @ gamma
             else:
-                u = u + beta * r_vec
+                u = u + beta * p_vec
         else:
             raise RuntimeError(
                 f"USPP adjoint fixed point not converged ({rn:.2e} after "
@@ -889,7 +929,10 @@ def uspp_density_loss_param_grads(
                     g1s = torch.autograd.grad(e1, leaves, create_graph=True)
                     for isp in range(nsp):
                         db = 0.5 * (dbec[isp][a] + dbec[isp][a].conj().T)
-                        inner = inner + (g1s[isp] * db.real.detach()).sum()
+                        # g1s lives on the CPU one-center graph; pair there
+                        # and let .to() carry the graph across devices
+                        pair = (g1s[isp] * db.real.detach().cpu()).sum()
+                        inner = inner + pair.to(inner.device)
             # ONE shared n_pts/Ω: u was seeded with the grid-gradient v̄
             # (= (Ω/n_pts)·physical δL/δρ), so the whole response Cu carries
             # that scale and BOTH pairings (grid and one-center trace) need
