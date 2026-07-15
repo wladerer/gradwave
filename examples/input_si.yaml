@@ -27,7 +27,7 @@ scf:
   mixing: {scheme: johnson}   # pulay | broyden | johnson
 
 task: scf             # scf | relax | bands
-# relax: {optimizer: fire, fmax: 0.01, max_steps: 200}
+# relax: {optimizer: bfgs, fmax: 0.01, max_steps: 200}
 # bands: {path: LGXUG, npoints: 120}
 
 # restart: out/checkpoint.pt    # warm-start from a previous run's state

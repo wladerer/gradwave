@@ -1,0 +1,30 @@
+# Diamond geometry optimization. The second carbon starts displaced
+# ~0.08 Å off the ideal (a/4, a/4, a/4) site; BFGS relaxes it back.
+# Run with:  gradwave input_diamond_relax.yaml -o out_diamond/
+
+structure:
+  cell: [[0.0, 1.7835, 1.7835], [1.7835, 0.0, 1.7835], [1.7835, 1.7835, 0.0]]
+  positions:
+    cart: [[0.0, 0.0, 0.0], [0.9518, 0.8618, 0.9318]]   # ideal: 0.89175 each
+  species: [C, C]
+
+pseudopotentials:
+  dir: ../tests/fixtures/qe/pseudos
+  map: {C: C_ONCV_PBE-1.2.upf}
+
+ecut: 680.28          # eV (50 Ry — hard C ONCV pseudo)
+xc: pbe
+kpoints: {mesh: [4, 4, 4]}
+
+scf:
+  etol: 1.0e-8
+  rhotol: 1.0e-7
+
+task: relax
+relax:
+  optimizer: bfgs
+  fmax: 0.01          # eV/Å
+  max_steps: 100
+
+output:
+  dir: ./out_diamond

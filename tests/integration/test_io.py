@@ -65,10 +65,10 @@ def test_human_report_from_summary():
     from gradwave.output import format_output
 
     text = format_output(_canned_summary())
-    for token in ("gradwave 0.1.0", "structure", "parameters",
-                  "self-consistency", "converged in 3 iterations",
-                  "free energy F", "-245.0000000000", "band gap",
-                  "eigenvalues"):
+    for token in ("gradwave 0.1.0", "── structure", "── parameters",
+                  "── self-consistency", "converged in 3 iterations",
+                  "free energy F", "-245.0000000000", "gap 0.6000 eV",
+                  "── eigenvalues"):
         assert token in text, token
 
 

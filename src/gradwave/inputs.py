@@ -47,7 +47,10 @@ class KPointsParams:
 
 @dataclass(frozen=True)
 class RelaxParams:
-    optimizer: str = "fire"  # fire | bfgs
+    # bfgs is the default: on displaced diamond it needs 3 steps where
+    # fire needs 25 (measured 2026-07-15); fire remains available for
+    # far-from-minimum or noisy-force cases
+    optimizer: str = "bfgs"  # bfgs | fire
     fmax: float = 0.01  # eV/Å
     max_steps: int = 200
 

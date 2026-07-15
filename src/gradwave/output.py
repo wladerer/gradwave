@@ -1,181 +1,225 @@
 """Human-readable output writer (Layer C).
 
 One plain-text file per task, written next to the machine-readable JSON.
-The JSON is the parsing target; this file is for eyes. Sections appear
-in run order: header, structure, parameters, SCF trace, energies, then
-task-specific blocks (relax trajectory, band summary).
+The JSON is the parsing target; this file is for eyes. Sections open
+with a light rule carrying the section name; parameters sit in two
+columns; every field degrades gracefully when absent so older JSONs
+still render.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-_W = 78
-
-
-def _rule(ch="-"):
-    return ch * _W
+_W = 72
 
 
 def _sec(title):
-    return f"\n{_rule('=')}\n  {title}\n{_rule('=')}"
+    pad = _W - len(title) - 4
+    return f"\n── {title} {'─' * max(pad, 4)}"
 
 
-def _kv(label, value, unit=""):
-    unit = f" {unit}" if unit else ""
-    return f"  {label:<28s}{value}{unit}"
+def _cols(pairs, width=34):
+    """Two-column 'label  value' layout from a list of (label, value)."""
+    cells = [f"{lab:<12s}{val}" for lab, val in pairs]
+    lines = []
+    for i in range(0, len(cells), 2):
+        left = cells[i]
+        right = cells[i + 1] if i + 1 < len(cells) else ""
+        lines.append(f"   {left:<{width}s}{right}".rstrip())
+    return lines
 
 
 def _structure_lines(struct):
     lines = [_sec("structure")]
-    lines.append("  cell [Å]:")
-    for row in struct["cell_ang"]:
-        lines.append("    " + "".join(f"{x:14.8f}" for x in row))
-    lines.append("  positions [Å]:")
+    cell = struct["cell_ang"]
+    for i, row in enumerate(cell):
+        label = "cell [Å]" if i == 0 else ""
+        lines.append(f"   {label:<12s}" + "".join(f"{x:12.6f}" for x in row))
+    facts = []
+    if struct.get("volume_ang3"):
+        facts.append(f"volume {struct['volume_ang3']:.3f} Å³")
+    if struct.get("spacegroup"):
+        facts.append(f"space group {struct['spacegroup']}")
+    if facts:
+        lines.append("   " + " · ".join(facts))
+    lines.append("")
     for sym, pos in zip(struct["species"], struct["positions_ang"],
                         strict=True):
-        lines.append(f"    {sym:<4s}" + "".join(f"{x:14.8f}" for x in pos))
+        lines.append(f"   {sym:<4s}" + "".join(f"{x:12.6f}" for x in pos))
     return lines
 
 
 def _parameters_lines(par):
     lines = [_sec("parameters")]
-    lines.append(_kv("formalism", par["formalism"]))
-    lines.append(_kv("xc", par["xc"]))
-    lines.append(_kv("ecut", f"{par['ecut_eV']:.2f}", "eV"))
-    if par.get("ecutrho_eV"):
-        lines.append(_kv("ecutrho", f"{par['ecutrho_eV']:.2f}", "eV"))
-    mesh = "x".join(str(n) for n in par["kmesh"])
+    mesh = "×".join(str(n) for n in par["kmesh"])
     if par.get("nk"):
-        mesh += f"  ({par['nk']} points after reduction)"
-    lines.append(_kv("k-mesh", mesh))
-    lines.append(_kv("spin channels", par["nspin"]))
-    if par["smearing"] != "none":
-        lines.append(_kv("smearing",
-                         f"{par['smearing']} (width {par['width_eV']} eV)"))
-    lines.append(_kv("symmetry", "on" if par["symmetry"] else "off"))
+        mesh += f" → {par['nk']} k"
+    pairs = [
+        ("formalism", par["formalism"]),
+        ("xc", par["xc"].upper()),
+        ("ecut", f"{par['ecut_eV']:.2f} eV"),
+        ("ecutrho", f"{par['ecutrho_eV']:.2f} eV"
+         if par.get("ecutrho_eV") else "—"),
+        ("k-mesh", mesh),
+        ("spin", str(par["nspin"])),
+        ("smearing", par["smearing"] if par["smearing"] == "none"
+         else f"{par['smearing']} ({par['width_eV']} eV)"),
+        ("symmetry", "on" if par["symmetry"] else "off"),
+    ]
+    if par.get("n_electrons"):
+        pairs.append(("electrons", f"{par['n_electrons']:g}"))
+    if par.get("nbands"):
+        pairs.append(("bands", str(par["nbands"])))
+    if par.get("fft_grid"):
+        pairs.append(("FFT grid",
+                      "×".join(str(n) for n in par["fft_grid"])))
+    if par.get("npw"):
+        pairs.append(("plane waves", f"{par['npw']} (k 1)"))
+    lines += _cols(pairs)
     for sym, fname in par["pseudos"].items():
-        lines.append(_kv(f"pseudo {sym}", fname))
+        lines.append(f"   {'pseudo ' + sym:<12s}{fname}")
     return lines
 
 
-def _scf_lines(scf):
+def _scf_lines(scf, runtime=None):
     lines = [_sec("self-consistency")]
     trace = scf.get("trace", [])
     if trace:
-        lines.append(f"  {'iter':>4s} {'free energy [eV]':>20s} "
-                     f"{'dE [eV]':>12s} {'|drho|':>12s}")
+        lines.append(f"   {'it':>4s}   {'F [eV]':>18s}   {'ΔE [eV]':>10s}"
+                     f"   {'|Δρ|':>10s}")
         for h in trace:
             de = h.get("dE_eV")
-            lines.append(
-                f"  {h['iter']:>4d} {h['free_energy_eV']:>20.10f} "
-                f"{'' if de is None else format(de, '>12.3e'):>12s} "
-                f"{h['drho']:>12.3e}")
+            de_s = "—" if de is None else f"{abs(de):10.2e}"
+            lines.append(f"   {h['iter']:>4d}   {h['free_energy_eV']:>18.10f}"
+                         f"   {de_s:>10s}   {h['drho']:>10.2e}")
     tag = "converged" if scf["converged"] else "NOT CONVERGED"
-    lines.append(f"\n  {tag} in {scf['n_iter']} iterations")
-    e = scf["energies_eV"]
-    lines.append(_sec("energies [eV]"))
-    for key in ("kinetic", "hartree", "xc", "local", "nonlocal", "ewald",
-                "hubbard", "onecenter", "smearing"):
-        if key in e and abs(e[key]) > 0 or key in (
-                "kinetic", "hartree", "xc", "local", "nonlocal", "ewald"):
-            lines.append(_kv(key, f"{e[key]:20.10f}"))
-    lines.append("  " + "-" * 50)
-    lines.append(_kv("total energy E", f"{e['total']:20.10f}"))
-    lines.append(_kv("free energy F = E - sigma*S", f"{e['free_energy']:20.10f}"))
-    if scf.get("fermi_eV") is not None:
-        lines.append(_kv("Fermi energy", f"{scf['fermi_eV']:.6f}", "eV"))
-    if scf.get("gap_eV") is not None:
-        lines.append(_kv("band gap", f"{scf['gap_eV']:.4f}", "eV"))
-    if scf.get("total_magnetization_muB") is not None:
-        lines.append(_kv("total magnetization",
-                         f"{scf['total_magnetization_muB']:.4f}", "muB"))
-        lines.append(_kv("absolute magnetization",
-                         f"{scf['absolute_magnetization_muB']:.4f}", "muB"))
+    tail = f"   {tag} in {scf['n_iter']} iterations"
+    if runtime is not None:
+        tail += f" · {runtime:.1f} s"
+    lines += ["", tail]
     return lines
 
 
-def _eigenvalue_lines(summary, max_k=None):
+def _energy_lines(scf):
+    e = scf["energies_eV"]
+    lines = [_sec("energy [eV]")]
+    shown = [("kinetic", "kinetic"), ("hartree", "hartree"), ("xc", "xc"),
+             ("local", "local pp"), ("nonlocal", "nonlocal pp"),
+             ("ewald", "ewald"), ("onecenter", "one-center (PAW)"),
+             ("hubbard", "hubbard U"), ("smearing", "smearing −σS")]
+    for key, label in shown:
+        val = e.get(key, 0.0)
+        core = key in ("kinetic", "hartree", "xc", "local", "nonlocal",
+                       "ewald")
+        if core or abs(val) > 0:
+            lines.append(f"   {label:<18s}{val:>20.10f}")
+    lines.append(f"   {'':<18s}{'─' * 20:>20s}")
+    lines.append(f"   {'total E':<18s}{e['total']:>20.10f}")
+    lines.append(f"   {'free energy F':<18s}{e['free_energy']:>20.10f}")
+    facts = []
+    if scf.get("fermi_eV") is not None:
+        facts.append(f"Fermi {scf['fermi_eV']:.4f} eV")
+    if scf.get("gap_eV") is not None:
+        facts.append(f"gap {scf['gap_eV']:.4f} eV")
+    if scf.get("total_magnetization_muB") is not None:
+        facts.append(f"m {scf['total_magnetization_muB']:.4f} μB "
+                     f"(|m| {scf['absolute_magnetization_muB']:.4f})")
+    if facts:
+        lines += ["", "   " + " · ".join(facts)]
+    return lines
+
+
+def _eigenvalue_lines(summary, max_k=8):
     eig = summary.get("eigenvalues_eV")
     occ = summary.get("occupations")
     if eig is None:
         return []
-    lines = [_sec("eigenvalues [eV] (occupations)")]
-    nspin = summary["parameters"]["nspin"]
+    lines = [_sec("eigenvalues [eV] (occupation)")]
+    par = summary["parameters"]
+    nspin = par["nspin"]
     spins = [eig] if nspin == 1 else eig
     occs = [occ] if nspin == 1 else occ
     for isp, (es, fs) in enumerate(zip(spins, occs, strict=True)):
         if nspin == 2:
-            lines.append(f"\n  spin {'up' if isp == 0 else 'down'}:")
-        shown = es if max_k is None else es[:max_k]
-        for ik, (ek, fk) in enumerate(zip(shown, fs, strict=False)):
-            lines.append(f"  k {ik + 1}  (weight "
-                         f"{summary['parameters']['kweights'][ik]:.6f})")
+            lines.append(f"   spin {'up' if isp == 0 else 'down'}:")
+        for ik, (ek, fk) in enumerate(zip(es[:max_k], fs, strict=False)):
+            w = par["kweights"][ik] if par.get("kweights") else None
+            head = f"   k {ik + 1}"
+            if w is not None:
+                head += f" · weight {w:.6f}"
+            lines.append(head)
             for j in range(0, len(ek), 4):
-                lines.append("    " + "".join(
-                    f"{ev:12.5f} ({f:6.4f})"
+                lines.append("     " + "  ".join(
+                    f"{ev:9.4f} ({f:5.3f})"
                     for ev, f in zip(ek[j:j + 4], fk[j:j + 4], strict=True)))
-        if max_k is not None and len(es) > max_k:
-            lines.append(f"  ... {len(es) - max_k} more k-points in the JSON")
+        if len(es) > max_k:
+            lines.append(f"   … {len(es) - max_k} more k-points in the JSON")
     return lines
 
 
 def _relax_lines(relax):
     lines = [_sec("relaxation")]
-    lines.append(f"  {'step':>4s} {'energy [eV]':>20s} {'fmax [eV/Å]':>14s}")
+    lines.append(f"   optimizer {relax.get('optimizer', '?')} · "
+                 f"target fmax {relax.get('fmax_target_eV_ang', '?')} eV/Å")
+    lines.append("")
+    lines.append(f"   {'step':>4s}   {'E [eV]':>18s}   {'fmax [eV/Å]':>12s}")
     for step in relax.get("trajectory", []):
-        lines.append(f"  {step['step']:>4d} {step['energy_eV']:>20.10f} "
-                     f"{step['fmax_eV_ang']:>14.6f}")
+        lines.append(f"   {step['step']:>4d}   "
+                     f"{step['energy_eV']:>18.10f}   "
+                     f"{step['fmax_eV_ang']:>12.6f}")
     tag = "converged" if relax["converged"] else "NOT CONVERGED"
-    lines.append(f"\n  {tag} after {relax['n_steps']} steps "
-                 f"(fmax {relax['fmax_eV_ang']:.6f} eV/Å)")
-    lines.append("\n  final positions [Å]:")
+    lines += ["", f"   {tag} after {relax['n_steps']} steps · "
+              f"fmax {relax['fmax_eV_ang']:.6f} eV/Å"]
+    if relax.get("max_displacement_ang") is not None:
+        lines.append(f"   max displacement from start: "
+                     f"{relax['max_displacement_ang']:.4f} Å")
+    lines.append("")
+    lines.append("   final positions [Å]:")
     for sym, pos in zip(relax["species"], relax["positions_ang"],
                         strict=True):
-        lines.append(f"    {sym:<4s}" + "".join(f"{x:14.8f}" for x in pos))
+        lines.append(f"   {sym:<4s}" + "".join(f"{x:12.6f}" for x in pos))
     return lines
 
 
 def _bands_lines(bands):
     lines = [_sec("band structure")]
-    labels = " - ".join(lab for _x, lab in bands["labels"])
-    lines.append(_kv("path", labels))
-    lines.append(_kv("k-points", len(bands["x"])))
-    nb = len(bands["eigenvalues_eV"][0])
-    lines.append(_kv("bands", nb))
+    labels = " – ".join(lab for _x, lab in bands["labels"])
+    pairs = [("path", labels),
+             ("k-points", str(len(bands["x"]))),
+             ("bands", str(len(bands["eigenvalues_eV"][0])))]
     if bands.get("reference_eV") is not None:
-        lines.append(_kv("reference (E=0)", f"{bands['reference_eV']:.6f}",
-                         "eV"))
-    lines.append("  full dispersion data in the JSON; plot with "
-                 "`gradwave plot bands.json`")
+        pairs.append(("E = 0 at", f"{bands['reference_eV']:.6f} eV"))
+    lines += _cols(pairs)
+    lines.append("   dispersion data in the JSON · "
+                 "plot with `gradwave plot bands.json`")
     return lines
 
 
 def format_output(summary: dict) -> str:
     """The full human-readable report for a task summary dict."""
     code = summary["code"]
-    lines = [
-        _rule("="),
-        f"  gradwave {code['version']} — {summary['task']} run",
-        f"  {code['created']}",
-        _rule("="),
-    ]
+    created = code["created"].replace("T", " ")
+    head = f"gradwave {code['version']} · {summary['task']} run · {created}"
+    lines = [head, "─" * min(len(head), _W)]
     lines += _structure_lines(summary["structure"])
     lines += _parameters_lines(summary["parameters"])
     if "scf" in summary:
-        lines += _scf_lines(summary["scf"])
-        lines += _eigenvalue_lines(summary, max_k=8)
+        lines += _scf_lines(summary["scf"], summary.get("runtime_s"))
+        lines += _energy_lines(summary["scf"])
+        lines += _eigenvalue_lines(summary)
     if "relax" in summary:
         lines += _relax_lines(summary["relax"])
     if "bands" in summary:
         lines += _bands_lines(summary["bands"])
-    if "runtime_s" in summary:
-        lines.append("")
-        lines.append(_kv("wall time", f"{summary['runtime_s']:.1f}", "s"))
+    tail = []
+    if "runtime_s" in summary and "scf" not in summary:
+        tail.append(f"wall time {summary['runtime_s']:.1f} s")
     if "outputs" in summary:
-        for name, rel in summary["outputs"].items():
-            lines.append(_kv(name, rel))
-    lines.append(_rule("="))
+        tail.append("files " + " · ".join(summary["outputs"].values()))
+    if tail:
+        lines += ["", "   " + "  |  ".join(tail)]
+    lines.append("")
     return "\n".join(lines) + "\n"
 
 

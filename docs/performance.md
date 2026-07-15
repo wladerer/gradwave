@@ -101,6 +101,27 @@ bridge crosses to the CPU every outer iteration. The plumbing is a
 correctness enabler; the payoff arrives with many-k or big-box systems,
 the same routing rule the SCF already follows.
 
+## Relaxation timing vs QE (2026-07-15)
+
+Displaced diamond (C ONCV, 50 Ry, 4³, fmax 0.01 eV/Å), identical
+geometry and pseudo in both codes on the same 8 laptop cores; all three
+land the same minimum (final coordinates agree to 1e-4 Å).
+
+| run | ionic steps | wall |
+|---|---|---|
+| QE 7.5, BFGS | 5 (6 SCFs) | 14.0 s |
+| gradwave, BFGS | 3 | 47.6 s |
+| gradwave, FIRE | 25 | 405 s |
+
+Two separate factors made the original run slow. The optimizer default
+was FIRE (25 steps where BFGS needs 3 — an 8.5× penalty; the default is
+now bfgs). The remaining 3.4× against QE is per-ionic-step cost: QE
+extrapolates the density and wavefunctions between steps so each SCF
+after the first takes 3–5 cycles, while the calculator re-runs every
+SCF cold from SAD. The fix is a start_from for the NC loop plus
+calculator-level state reuse — the USPP/PAW path already has the
+former.
+
 ## Deferred with measurement: Γ-point real wavefunctions
 
 The O₂ 35/280 SCF profile (53 s total) breaks down as 22 s Davidson H

@@ -209,11 +209,7 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
         "code": {"name": "gradwave", "version": __version__,
                  "created": datetime.datetime.now().isoformat(timespec="seconds")},
         "task": task,
-        "structure": {
-            "cell_ang": inp.atoms.cell.array.tolist(),
-            "positions_ang": inp.atoms.get_positions().tolist(),
-            "species": inp.atoms.get_chemical_symbols(),
-        },
+        "structure": _structure_block(inp),
         "parameters": {
             "formalism": "uspp/paw" if uspp else "nc",
             "xc": inp.xc,
@@ -226,6 +222,10 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
             "smearing": inp.smearing.type,
             "width_eV": float(inp.smearing.width),
             "symmetry": bool(inp.symmetry),
+            "n_electrons": float(system.n_electrons),
+            "nbands": int(system.nbands),
+            "fft_grid": list(system.grid.shape),
+            "npw": int(system.spheres[0].npw),
             "pseudos": {s: inp.pseudo_map[s] for s in species},
         },
         "scf": scf_block,
@@ -313,6 +313,9 @@ def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object]:
         "energy_eV": float(atoms.get_potential_energy()),
         "fmax_eV_ang": float(
             np.linalg.norm(atoms.get_forces(), axis=1).max()),
+        "max_displacement_ang": float(np.linalg.norm(
+            atoms.get_positions() - inp.atoms.get_positions(),
+            axis=1).max()),
         "species": atoms.get_chemical_symbols(),
         "positions_ang": atoms.get_positions().tolist(),
         "cell_ang": atoms.cell.array.tolist(),
@@ -379,11 +382,7 @@ def run(inp: Input, verbose: bool = True) -> dict:
                      "created": datetime.datetime.now().isoformat(
                          timespec="seconds")},
             "task": "relax",
-            "structure": {
-                "cell_ang": inp.atoms.cell.array.tolist(),
-                "positions_ang": inp.atoms.get_positions().tolist(),
-                "species": inp.atoms.get_chemical_symbols(),
-            },
+            "structure": _structure_block(inp),
             "parameters": _relax_parameters(inp),
             "relax": relax,
             "runtime_s": round(time.time() - t0, 2),
@@ -413,6 +412,27 @@ def run(inp: Input, verbose: bool = True) -> dict:
         print(f"wrote {outdir / inp.task}.json / .out"
               + (" / checkpoint.pt" if "checkpoint" in outputs else ""))
     return summary
+
+
+def _structure_block(inp: Input) -> dict:
+    import numpy as np
+
+    block = {
+        "cell_ang": inp.atoms.cell.array.tolist(),
+        "positions_ang": inp.atoms.get_positions().tolist(),
+        "species": inp.atoms.get_chemical_symbols(),
+        "volume_ang3": float(abs(np.linalg.det(inp.atoms.cell.array))),
+    }
+    try:
+        import spglib
+
+        ds = spglib.get_symmetry_dataset(
+            (inp.atoms.cell.array, inp.atoms.get_scaled_positions(),
+             inp.atoms.get_atomic_numbers()), symprec=1e-5)
+        block["spacegroup"] = f"{ds.international} ({ds.number})"
+    except Exception:
+        pass
+    return block
 
 
 def _relax_parameters(inp: Input) -> dict:
