@@ -1,0 +1,10 @@
+{
+ "comment": "Zincblende SiGe (a = 5.545 A Vegard), psl kjpaw Si + dn-kjpaw Ge, PBE, 45/240 Ry, 4x4x4, nr 40^3 pinned (glide-commensurate). QE 7.5 on asus, 2026-07-14. ph.x Gamma DFPT, tr2_ph 1e-16, no NAC. gradwave: analytic Hessian via postscf/uspp_position.hessian_column (one SCF + six response solves).",
+ "qe_version": "7.5",
+ "etot_Ry": -362.24545809,
+ "gamma_optical_cm1": 419.141947,
+ "gamma_acoustic_raw_cm1": -6.221871,
+ "gradwave_etot_Ry": -362.24542515,
+ "gradwave_optical_cm1": [419.34, 419.46, 419.46],
+ "masses_amu": {"Si": 28.0855, "Ge": 72.63}
+}

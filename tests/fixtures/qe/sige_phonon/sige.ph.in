@@ -1,0 +1,10 @@
+gamma phonon SiGe PAW
+&INPUTPH
+  prefix = 'sige'
+  outdir = './tmp'
+  tr2_ph = 1.0d-16
+  amass(1) = 28.0855
+  amass(2) = 72.63
+  fildyn = 'sige.dyn'
+/
+0.0 0.0 0.0

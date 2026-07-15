@@ -122,6 +122,7 @@ def main():
     mu = _inv_softplus(0.30).clone().requires_grad_(False)
     opt_state = {"m": torch.zeros(2), "v": torch.zeros(2), "t": 0}
     lr, b1, b2, eps = 0.05, 0.9, 0.999, 1e-8
+    prev_loss = None
     hist = []
     print(f"start: kappa={float(torch.nn.functional.softplus(kap)):.4f} "
           f"mu={float(torch.nn.functional.softplus(mu)):.4f} "
@@ -149,7 +150,12 @@ def main():
             total += float(loss)
             grad += torch.tensor([float(g["raw_kappa"]),
                                   float(g["raw_mu"])])
-        # Adam on the raw (softplus) parameters
+        # Adam with backtracking: halve the rate when the loss rises
+        # (fixed lr 0.05 overshoots past the optimum — the same artifact
+        # the NC two-parameter fit documents)
+        if prev_loss is not None and total > prev_loss:
+            lr *= 0.5
+        prev_loss = total
         opt_state["t"] += 1
         opt_state["m"] = b1 * opt_state["m"] + (1 - b1) * grad
         opt_state["v"] = b2 * opt_state["v"] + (1 - b2) * grad * grad
@@ -161,7 +167,7 @@ def main():
         k_now = float(torch.nn.functional.softplus(kap))
         m_now = float(torch.nn.functional.softplus(mu))
         hist.append(dict(epoch=ep, loss=total, kappa=k_now, mu=m_now,
-                         seconds=round(time.time() - t0)))
+                         lr=lr, seconds=round(time.time() - t0)))
         print(f"epoch {ep:3d}: loss {total:.6e}  kappa {k_now:.4f}  "
               f"mu {m_now:.4f}  ({time.time() - t0:.0f}s)")
         OUT.write_text(json.dumps(dict(
