@@ -233,6 +233,14 @@ not better, until the cell grows past the fp64 crossover. Threading did not help
 small problem past 8 cores, 16 threads came out marginally slower. Run small PAW-metal
 campaigns on the CPU.
 
+Re-measured on AC power, the CPU point drops to 67 s (4.2 s/iter) while the GPU holds
+near 900 s (903 s, 56 s/iter), so the true GPU-vs-CPU gap is 13.5×, wider than the
+8.3× above. The battery run had throttled the CPU, not the GPU: for this fp64-bound
+workload the card ran at 100 percent utilization drawing only 25 W of its 60 W budget
+at a full 1942 MHz, so it had no idle power for AC to unlock. The table keeps the
+original battery figures, measured together with the QE and per-iteration factors; the
+AC re-run only sharpens the precision conclusion below.
+
 ### Where the PAW-metal time goes
 
 Profiling one fcc Pt SCF (`benchmarks/pt_uspp_bench.py --profile`, 6x6x6, 67.5 s / 17
@@ -284,6 +292,12 @@ the gap is precision, not structure. The fp32 draft window, the first few SCF
 iterations above diagonalizer tolerance 1e-5, is too short to matter at 9-iteration
 solves, and everything after runs in crippled fp64.
 
+Direct evidence the bound is arithmetic and not clocks or power: on AC an fcc-Pt SCF
+ran the RTX 3050 at 100 percent utilization while drawing only 25 W of its 60 W budget
+at a full 1942 MHz, and unplugging barely changed the wall time (903 vs 976 s). A
+clock- or power-limited kernel draws its whole budget; a card starved of fp64 units
+saturates the few it has and idles the rest of the die, which is this trace exactly.
+
 What would actually move it is an fp32-dominant solver schedule that drafts far
 deeper and reserves fp64 for a final polish, or a datacenter-class fp64 GPU. Larger
 grids and heavier bands amortize the fp64 handicap on their own, which is why the
@@ -319,3 +333,7 @@ stretches its legs.
   mixed-versus-fp64 energy gap that was entirely the structural difference between two
   rattles, and it vanished to 1e-9 meV the moment the perturbed geometry was built
   once and reused. Draw the structure before the loop, not inside it.
+- **Benchmark on AC power.** A laptop on battery caps CPU turbo, so a CPU-vs-GPU or
+  cross-code comparison taken unplugged flatters the GPU by handicapping the CPU. The
+  fcc-Pt CPU point moved 118 → 67 s plugged in while the fp64-bound GPU held near
+  900 s, turning an apparent 8.3× GPU deficit into the true 13.5×.
