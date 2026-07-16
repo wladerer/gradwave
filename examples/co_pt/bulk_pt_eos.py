@@ -97,6 +97,7 @@ def main():
         system = system.to(device)
         t0 = time.time()
         res = scf_uspp(system, PBE(), smearing="gaussian", width=WIDTH,
+                       mixing_scheme="johnson",  # ~13 vs 17 iters on this metal
                        etol=1e-8, rhotol=1e-7, max_iter=80, verbose=False,
                        start_from=prev)
         prev = res

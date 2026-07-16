@@ -62,6 +62,25 @@ defect, which the [Performance](performance.md) page works through in full.
   ph.x enforces the same constraint harder.
 - Mask the symmetrizer to the density sphere. Box-Nyquist folding is ill-defined for
   glide phases.
+- A hard USPP/PAW pseudo wastes the wavefunction FFT on the dense grid. gradwave sizes
+  one FFT box from `ecutrho` and runs the Davidson H-apply (`g_to_r`/`r_to_g` per band,
+  per k, per subspace vector, the hottest kernel) on it. For Pt at 40/400 Ry that box is
+  35^3 where the wavefunctions only need the smooth box 21^3 that holds their products,
+  2*Gmax(ecutwfc). That is 4.6x too many points on the single most-called transform.
+  Norm-conserving does not have the problem, its `ecutrho = 4*ecutwfc` box already is the
+  smooth box, so this is USPP/PAW only.
+- The dual grid is exact, not an approximation. For the local term
+  `<psi_i|V|psi_j>` only the smooth part of V contributes, because any two wavefunction
+  G-vectors differ by at most `2*Gmax(ecutwfc)`, so V truncated to the smooth sphere
+  reproduces `H|psi>` to round-off (verified, relative error 6e-16). The recipe, the same
+  one QE uses, has three parts. Run the wavefunction `g_to_r`/`r_to_g` on the smooth box,
+  built at `ecutwfc` with a per-sphere `flat_idx` into it that aligns to the dense spheres
+  because `build_gsphere` gives the same Miller ordering. Filter `v_eff` to the smooth box
+  each iteration through a precomputed smooth-to-dense Miller index map. Build the smooth
+  density `|psi|^2` on the smooth box and embed it into the dense box in G-space before
+  adding the dense augmentation. The augmentation, the one-center work, and Hartree/XC
+  stay on the dense grid. Expected about 1.3x on hard PAW, where the FFT is 34 percent of
+  the SCF.
 
 ## Eigensolvers
 
@@ -140,6 +159,14 @@ defect, which the [Performance](performance.md) page works through in full.
 - Match the reference's occupation scheme before suspecting forces. A smeared run
   against a fixed-occupation reference legitimately differs, since displaced Si at 0.05
   eV smearing has 0.9 percent fractional occupations.
+- The mixing scheme sets the iteration count on a metal, the smearing kernel does not.
+  On 1-atom fcc Pt (PAW, 40/400 Ry, 6x6x6, 0.2 eV) `johnson` converges in 13 iterations
+  where `pulay` takes 17 and `broyden` 20, and gaussian/cold/mp1 are all within one
+  iteration of each other at fixed scheme. Johnson (Kerker-preconditioned Broyden with
+  the metric on the total density) is the right default for a smeared metal. The
+  converged free energy is bit-identical across schemes, so this is pure iteration
+  count. It does not close the gap to QE's 7 iterations, which is a starting-density and
+  preconditioner-quality difference, not a scheme choice.
 
 ## Spin
 

@@ -189,6 +189,30 @@ not better, until the cell grows past the fp64 crossover. Threading did not help
 small problem past 8 cores, 16 threads came out marginally slower. Run small PAW-metal
 campaigns on the CPU.
 
+### Where the PAW-metal time goes
+
+Profiling one fcc Pt SCF (`bench/pt_uspp_bench.py --profile`, 6x6x6, 67.5 s / 17
+iterations on 8 CPU threads) splits the per-iteration cost as follows.
+
+| cost | share | note |
+|---|---|---|
+| FFT (`ifftn`+`fftn`, mostly the wavefunction H-apply) | 34% | dense grid, dual-grid target |
+| einsum (projectors + one-center) | 9% | |
+| PAW one-center D-matrix via autograd `run_backward` | 5% | QE does it analytically |
+| subspace `eigh` | 5% | |
+| Davidson diagnostics (`linalg.cond` + `abs`) | 5% | conditioning guard |
+| misc Davidson (qr, solve_triangular, norm, cat) | 7% | |
+
+The 37 times factors as roughly 16 times per iteration and 2.3 times iteration count.
+For the iteration count, the mixing scheme is the lever and the smearing kernel is not.
+Sweeping fcc Pt, `johnson` converges in 13 iterations against `pulay` 17 and `broyden`
+20, and gaussian, cold, and mp1 sit within one iteration at fixed scheme. The converged
+free energy is bit-identical, so johnson is a free 1.3 times on a smeared metal (now the
+metal-campaign default). It does not reach QE's 7 iterations, which is a starting-density
+and preconditioner-quality gap. For the per-iteration 16 times, the largest single lever
+is the dense-grid wavefunction FFT (34 percent), which a dual grid cuts about fourfold on
+this pseudo, verified exact and specced in the wisdom notes.
+
 ## The GPU story is precision, not structure
 
 The kernel-level claim verifies emphatically. On the exact hot shapes from the
