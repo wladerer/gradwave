@@ -129,6 +129,86 @@ def dos_frame(source, width: float = 0.1, npoints: int = 800, window=None):
     return df
 
 
+def _is_noncollinear_block(b) -> bool:
+    return isinstance(b, dict) and (b.get("noncollinear") or "m_z" in b)
+
+
+def _pdos_block(source) -> dict:
+    """Extract the projected-DOS dict from a ProjectedDOS/SOC ProjectedDOS, a raw
+    block, or a JSON summary that carries a top-level ``pdos`` key. Collinear and
+    j-resolved share the (total, groups) schema; the noncollinear spin-texture
+    block is handled by _noncollinear_block/noncollinear_pdos_frame."""
+    if hasattr(source, "to_dict") and hasattr(source, "groups"):
+        return source.to_dict()
+    if isinstance(source, dict) and "groups" in source and "energy_eV" in source:
+        return source
+    s = load(source)
+    if "pdos" not in s:
+        raise ValueError("no projected DOS in this result "
+                         "(run with projections enabled)")
+    block = s["pdos"]
+    if _is_noncollinear_block(block):
+        raise ValueError("this is a noncollinear (spin-texture) PDOS; use "
+                         "noncollinear_pdos_frame / plot_spin_texture")
+    return block
+
+
+def _noncollinear_block(source) -> dict:
+    """The noncollinear PDOS dict from a NoncollinearPDOS, a raw block, or a JSON
+    summary carrying a top-level ``pdos`` that is noncollinear."""
+    if hasattr(source, "to_dict") and hasattr(source, "m_z"):
+        return source.to_dict()
+    if _is_noncollinear_block(source):
+        return source
+    s = load(source)
+    block = s.get("pdos")
+    if not _is_noncollinear_block(block):
+        raise ValueError("no noncollinear projected DOS in this result")
+    return block
+
+
+def pdos_frame(source):
+    """Tidy projected-DOS frame. One column per group (and per spin for
+    nspin=2, suffixed _up/_down). ``df.attrs`` carries fermi_eV and spilling."""
+    pd = _pd()
+    block = _pdos_block(source)
+    nspin = block["nspin"]
+    cols = {"energy_eV": np.asarray(block["energy_eV"], dtype=float)}
+
+    def add(name, arr):
+        a = np.asarray(arr, dtype=float)
+        if nspin == 1:
+            cols[name] = a
+        else:
+            cols[f"{name}_up"], cols[f"{name}_down"] = a[0], a[1]
+
+    add("total", block["total"])
+    for lab, arr in block["groups"].items():
+        add(lab, arr)
+    df = pd.DataFrame(cols)
+    df.attrs.update(fermi_eV=block.get("fermi_eV"),
+                    spilling=block.get("spilling"), nspin=nspin)
+    return df
+
+
+def noncollinear_pdos_frame(source):
+    """Tidy noncollinear PDOS frame. Columns are the charge n(E) and the spin
+    texture m_x/m_y/m_z(E) per group, prefixed ``charge_``/``mx_``/``my_``/``mz_``,
+    plus the total charge. ``df.attrs`` carries fermi_eV and spilling."""
+    pd = _pd()
+    block = _noncollinear_block(source)
+    cols = {"energy_eV": np.asarray(block["energy_eV"], dtype=float),
+            "total_charge": np.asarray(block["total_charge"], dtype=float)}
+    for key, pre in (("charge", "charge"), ("m_x", "mx"), ("m_y", "my"),
+                     ("m_z", "mz")):
+        for lab, arr in block[key].items():
+            cols[f"{pre}_{lab}"] = np.asarray(arr, dtype=float)
+    df = pd.DataFrame(cols)
+    df.attrs.update(fermi_eV=block.get("fermi_eV"),
+                    spilling=block.get("spilling"), noncollinear=True)
+    return df
+
+
 def _finish(fig, ax, path):
     fig.tight_layout()
     if path is not None:
@@ -194,4 +274,70 @@ def plot_dos(source, path=None, ax=None, width: float = 0.1):
         ax.axvline(df.attrs["fermi_eV"], color="#52514e", lw=0.7, ls="--")
     ax.set_xlabel("E [eV]")
     ax.set_ylabel("DOS [states/eV]")
+    return _finish(ax.figure, ax, path)
+
+
+_PDOS_COLORS = ["#2a78d6", "#1baf7a", "#d6892a", "#a24bd6", "#d64b6b",
+                "#4bb8d6", "#7a7a2a", "#d62a2a"]
+
+
+def plot_pdos(source, path=None, ax=None, total=True):
+    """Projected DOS, one curve per group, the total behind them. Spin-down is
+    plotted negative for nspin=2."""
+    plt = _plt()
+    df = pdos_frame(source)
+    nspin = df.attrs.get("nspin", 1)
+    if ax is None:
+        _fig, ax = plt.subplots(figsize=(5.8, 3.8))
+    e = df["energy_eV"]
+    groups = [c[:-3] for c in df.columns if c.endswith("_up") and c != "total_up"] \
+        if nspin == 2 else [c for c in df.columns
+                            if c not in ("energy_eV", "total")]
+
+    def draw(name, color):
+        if nspin == 1:
+            ax.plot(e, df[name], color=color, lw=1.2, label=name)
+        else:
+            ax.plot(e, df[f"{name}_up"], color=color, lw=1.2, label=name)
+            ax.plot(e, -df[f"{name}_down"], color=color, lw=1.2)
+
+    if total:
+        if nspin == 1:
+            ax.fill_between(e, df["total"], color="#c9c9c9", label="total")
+        else:
+            ax.fill_between(e, df["total_up"], color="#e0e0e0")
+            ax.fill_between(e, -df["total_down"], color="#e0e0e0")
+    for i, g in enumerate(groups):
+        draw(g, _PDOS_COLORS[i % len(_PDOS_COLORS)])
+    if df.attrs.get("fermi_eV") is not None:
+        ax.axvline(df.attrs["fermi_eV"], color="#52514e", lw=0.7, ls="--")
+    if nspin == 2:
+        ax.axhline(0.0, color="#52514e", lw=0.5)
+    ax.set_xlabel("E [eV]")
+    ax.set_ylabel("PDOS [states/eV]")
+    ax.legend(frameon=False, fontsize=8, ncol=2)
+    return _finish(ax.figure, ax, path)
+
+
+def plot_spin_texture(source, path=None, ax=None, group="total", component="z"):
+    """Noncollinear PDOS: the charge n(E) filled in grey with the chosen spin
+    texture component m_x/m_y/m_z(E) overlaid (positive above, negative below).
+    ``group`` picks the group column ('total' is the total charge)."""
+    plt = _plt()
+    df = noncollinear_pdos_frame(source)
+    if ax is None:
+        _fig, ax = plt.subplots(figsize=(5.8, 3.8))
+    e = df["energy_eV"]
+    charge = df["total_charge"] if group == "total" else df[f"charge_{group}"]
+    mcol = "total" if group == "total" else group
+    m = df[f"m{component}_{mcol}"] if f"m{component}_{mcol}" in df else None
+    ax.fill_between(e, charge, color="#c9c9c9", label=f"charge ({group})")
+    if m is not None:
+        ax.plot(e, m, color="#d64b6b", lw=1.3, label=f"m_{component} ({group})")
+        ax.axhline(0.0, color="#52514e", lw=0.5)
+    if df.attrs.get("fermi_eV") is not None:
+        ax.axvline(df.attrs["fermi_eV"], color="#52514e", lw=0.7, ls="--")
+    ax.set_xlabel("E [eV]")
+    ax.set_ylabel("PDOS / spin texture [states/eV]")
+    ax.legend(frameon=False, fontsize=8)
     return _finish(ax.figure, ax, path)

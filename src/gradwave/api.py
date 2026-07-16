@@ -414,6 +414,19 @@ def _error_estimate_block(res, inp) -> dict:
     return block
 
 
+def _pdos_summary_block(res, inp: Input) -> dict:
+    """Löwdin projected-DOS block for the summary JSON. Returns a graceful
+    ``{'available': False, ...}`` when the pseudopotentials omit PP_PSWFC."""
+    from gradwave.postscf.pdos import projected_dos
+    p = inp.projections
+    try:
+        block = projected_dos(res, group_by=p.group_by, width=p.width,
+                              npoints=p.npoints).to_dict()
+        return block
+    except (ValueError, NotImplementedError) as err:
+        return {"available": False, "reason": str(err)}
+
+
 def run(inp: Input, verbose: bool = True) -> dict:
     """Execute inp.task and write <task>.json, <task>.out and (for SCF
     state) checkpoint.pt into inp.output_dir."""
@@ -426,6 +439,8 @@ def run(inp: Input, verbose: bool = True) -> dict:
         summary = build_summary(res, inp, "scf", runtime_s=time.time() - t0)
         if inp.error_estimate:
             summary["error_estimate"] = _error_estimate_block(res, inp)
+        if inp.projections.enabled:
+            summary["pdos"] = _pdos_summary_block(res, inp)
     elif inp.task == "relax":
         relax, _atoms = run_relax(inp, verbose=verbose)
         from gradwave import __version__
