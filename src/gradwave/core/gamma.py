@@ -74,6 +74,8 @@ def build_gamma_basis(sphere, shape, device=None) -> GammaBasis:
     """
     n1, n2, n3 = (int(s) for s in shape)
     nh3 = n3 // 2 + 1
+    if device is None:
+        device = sphere.miller.device  # keep every map on the sphere's device
     miller = sphere.miller.detach().cpu().numpy().astype(np.int64)
     npw = miller.shape[0]
 
@@ -84,14 +86,14 @@ def build_gamma_basis(sphere, shape, device=None) -> GammaBasis:
     def flat3(b):
         return (b[:, 0] * n2 + b[:, 1]) * n3 + b[:, 2]
 
-    lut = {int(f): g for g, f in enumerate(flat3(box))}
-    partner = np.empty(npw, dtype=np.int64)
-    for g, f in enumerate(flat3(neg_box)):
-        j = lut.get(int(f))
-        if j is None:
-            raise ValueError("Gamma basis requires a sphere closed under G -> -G "
-                             "(k must be the Gamma point)")
-        partner[g] = j
+    # partner[g] = sphere index of -G, via a box -> sphere scatter (the sphere is
+    # injective into the box). A missing partner means the sphere is not closed.
+    box_to_g = np.full(n1 * n2 * n3, -1, dtype=np.int64)
+    box_to_g[flat3(box)] = np.arange(npw)
+    partner = box_to_g[flat3(neg_box)]
+    if np.any(partner < 0):
+        raise ValueError("Gamma basis requires a sphere closed under G -> -G "
+                         "(k must be the Gamma point)")
 
     # representatives: G=0 first, then the lexicographically positive member of
     # each {G,-G} pair. With key(m) = (m3,m2,m1), exactly one of m,-m is positive.
@@ -109,17 +111,12 @@ def build_gamma_basis(sphere, shape, device=None) -> GammaBasis:
     if nhalf != (npw + 1) // 2:
         raise ValueError(f"half-sphere size {nhalf} != expected {(npw + 1) // 2}")
 
-    # full -> half source slot and conjugate flag
+    # full -> half source slot and conjugate flag: a representative reads its own
+    # slot; the other member of each pair reads its partner's slot, conjugated.
     half_pos = np.full(npw, -1, dtype=np.int64)
     half_pos[rep_full] = np.arange(nhalf)
-    src_half = np.empty(npw, dtype=np.int64)
-    conj_full = np.zeros(npw, dtype=bool)
-    for g in range(npw):
-        if rep_mask[g]:
-            src_half[g] = half_pos[g]
-        else:
-            src_half[g] = half_pos[partner[g]]
-            conj_full[g] = True
+    src_half = np.where(rep_mask, half_pos, half_pos[partner])
+    conj_full = ~rep_mask
 
     # back-gather out of the rfft half-box (last axis kept for i3 <= n3//2)
     rep_box = box[rep_full]
