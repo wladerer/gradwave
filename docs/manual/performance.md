@@ -63,6 +63,18 @@ the fp32 drafts inflate the iteration count. On a consumer GPU whose fp64 runs a
 fraction of fp32 rate the option is nearly neutral on small systems, for the reason
 in the GPU section below. Measure it on your workload rather than assuming it helps.
 
+The clearest single predictor is system size, not the metal-versus-insulator axis.
+On the RTX 3050 the end-to-end speedup grows monotonically with the cell, from 1.14
+times on 2-atom Si through 1.28 times on 16 atoms to 1.39 times on 54, because the
+fp32 draft only pays once the dense subspace eigensolve and the big-sphere
+Hamiltonian applies dominate the per-iteration cost. A 2-atom cell is the wrong
+regime to judge it. There the eigensolve is negligible and the density-build FFTs,
+which stay fp64 for charge conservation, set the floor. The draft costs nothing in
+accuracy at any size. On a frozen geometry the mixed and fp64 free energies agree to
+1e-9 meV at every convergence threshold from 1e-7 to 1e-10, with identical iteration
+counts, so the fp64 polish removes the draft error whether or not the run stops
+early.
+
 ### Irreducible phonon displacements
 
 For a Γ Hessian, `HessianSymmetry` computes only the displacement columns whose
@@ -173,7 +185,13 @@ What would actually move it is an fp32-dominant solver schedule that drafts far
 deeper and reserves fp64 for a final polish, or a datacenter-class fp64 GPU. Larger
 grids and heavier bands amortize the fp64 handicap on their own, which is why the
 larger norm-conserving and USPP benchmarks see real GPU wins while one-atom cells do
-not.
+not. On the RTX 3050 a 16-atom Si cell already runs 1.69 times faster than the
+8-core CPU at fp64, so the card is worth using once the cell reaches production size,
+even though the 2-atom toy loses to the CPU on kernel-launch and transfer overhead.
+The earlier impression that this GPU was hopeless came from a magnetic PAW metal that
+ran 250 iterations over 27 k-points and two spins with the one-center work on the
+CPU, which is iteration count and host round-trips, not a regime where the GPU
+stretches its legs.
 
 ## Measuring performance without fooling yourself
 
@@ -192,3 +210,9 @@ not.
   true one-iteration map reduces that to milliseconds and measures the actual gain
   spectrum. The rig sees local convergence only, never basin selection, so confirm
   the winner once on a real SCF.
+- **Freeze the geometry when comparing precisions or codes.** A benchmark that
+  rattles the structure with a fresh random draw on each run compares different
+  systems, not different methods. A per-call rattle once showed a 200 meV
+  mixed-versus-fp64 energy gap that was entirely the structural difference between two
+  rattles, and it vanished to 1e-9 meV the moment the perturbed geometry was built
+  once and reused. Draw the structure before the loop, not inside it.
