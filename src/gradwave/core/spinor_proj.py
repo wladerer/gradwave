@@ -24,10 +24,9 @@ import math
 
 import torch
 
+from gradwave.constants import MINUS_I_POW as _MINUS_I_POW
 from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE
-
-_MINUS_I_POW = [1.0 + 0.0j, -1.0j, -1.0 + 0.0j, 1.0j]
 
 
 def complex_ylm(lmax: int, g: torch.Tensor) -> torch.Tensor:

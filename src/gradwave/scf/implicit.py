@@ -33,9 +33,9 @@ import torch
 
 from gradwave.constants import E2
 from gradwave.core.density import sigma_from_rho
-from gradwave.core.xc.base import xc_eager
 from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
 from gradwave.core.hamiltonian import HamiltonianK, projectors
+from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.scf.loop import SCFResult
 from gradwave.solvers.precond import teter

@@ -22,7 +22,8 @@ import math
 import torch
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
-from gradwave.core.xc.base import RHO_FLOOR_AU, CompilableXC
+from gradwave.core.xc.base import CompilableXC
+from gradwave.core.xc.base import to_au as _to_au
 from gradwave.core.xc.lda_pw92 import eps_x_lda
 
 _F_DD0 = 1.709920934161365  # f″(0)
@@ -70,10 +71,6 @@ class SpinXC(CompilableXC, torch.nn.Module):
     def energy(self, rho_up, rho_dn, volume, sigma_uu=None, sigma_dd=None, sigma_tot=None):
         e = self.eval_energy_density(rho_up, rho_dn, sigma_uu, sigma_dd, sigma_tot)
         return e.sum() * (volume / e.numel())
-
-
-def _to_au(rho):
-    return torch.clamp(rho * BOHR_ANG**3, min=RHO_FLOOR_AU)
 
 
 class LSDA_PW92(SpinXC):

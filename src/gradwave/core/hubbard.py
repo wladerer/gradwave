@@ -27,11 +27,10 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from gradwave.constants import MINUS_I_POW as _MINUS_I_POW
 from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.pseudo.radial import sbt
-
-_MINUS_I_POW = [1.0 + 0.0j, -1.0j, -1.0 + 0.0j, 1.0j]  # (−i)^l
 
 
 @dataclass(frozen=True)

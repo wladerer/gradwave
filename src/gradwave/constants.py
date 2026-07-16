@@ -22,18 +22,7 @@ E2 = HARTREE_EV * BOHR_ANG
 # Boltzmann constant in eV/K (for converting smearing widths quoted in K).
 KB_EV = 8.617333262e-5
 
-
-def ry_to_ev(x):
-    return x * RY_EV
-
-
-def ha_to_ev(x):
-    return x * HARTREE_EV
-
-
-def bohr_to_ang(x):
-    return x * BOHR_ANG
-
-
-def ang_to_bohr(x):
-    return x / BOHR_ANG
+# (−i)^l phase for real-space projector/harmonic transforms, scalar-indexed as
+# MINUS_I_POW[l]. Tabulated to l = 4 (covers every caller); a longer table than
+# a given caller needs is harmless since it is only ever indexed.
+MINUS_I_POW = (1.0 + 0.0j, -1.0j, -1.0 + 0.0j, 1.0j, 1.0 + 0.0j)

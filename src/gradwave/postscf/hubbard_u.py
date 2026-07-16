@@ -38,7 +38,6 @@ import torch
 
 from gradwave.constants import E2
 from gradwave.core.density import sigma_from_rho
-from gradwave.core.xc.base import xc_eager
 from gradwave.core.fftbox import r_to_g
 from gradwave.core.hubbard import (
     HubbardManifold,
@@ -46,6 +45,7 @@ from gradwave.core.hubbard import (
     hubbard_projectors,
     occupation_matrices,
 )
+from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.scf.loop import scf
 
@@ -75,12 +75,15 @@ def _site_occupations(res, hub, hub_q) -> torch.Tensor:
     return n * (2.0 if res.nspin == 1 else 1.0)
 
 
-def _pad(coeffs_per_k, npw_max):
+def _pad(coeffs_per_k, npw_max, device=None):
+    """[(nb, npw_k)] per k → padded (nk, nb, npw_max), detached. `device`
+    defaults to the coeffs' own device (a no-op move in that case)."""
     nk = len(coeffs_per_k)
     nb = coeffs_per_k[0].shape[0]
-    out = torch.zeros(nk, nb, npw_max, dtype=CDTYPE, device=coeffs_per_k[0].device)
+    dev = device if device is not None else coeffs_per_k[0].device
+    out = torch.zeros(nk, nb, npw_max, dtype=CDTYPE, device=dev)
     for ik, c in enumerate(coeffs_per_k):
-        out[ik, :, : c.shape[1]] = c.detach()
+        out[ik, :, : c.shape[1]] = c.detach().to(dev)
     return out
 
 

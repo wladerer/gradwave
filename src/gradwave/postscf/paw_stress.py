@@ -21,13 +21,12 @@ import math
 import torch
 
 from gradwave.constants import E2, HBAR2_2M
+from gradwave.constants import MINUS_I_POW as _MINUS_I_POW
 from gradwave.core.fftbox import r_to_g
 from gradwave.core.ylm import ylm_all
 from gradwave.postscf.paw_forces import _aug_at_fixed, _normalize_spin
 from gradwave.postscf.stress import _box_millers, _ewald_strained
 from gradwave.pseudo.radial_torch import RadialTables, sbt_t, simpson_weights
-
-_MINUS_I_POW = [1.0 + 0.0j, -1.0j, -1.0 + 0.0j, 1.0j, 1.0 + 0.0j]  # (−i)^L, L ≤ 4
 
 
 def stress_uspp(res: dict, xc) -> torch.Tensor:

@@ -30,12 +30,12 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from gradwave.constants import MINUS_I_POW as _MINUS_I_POW
 from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.pseudo.radial import sbt
 from gradwave.scf.loop import SCFResult
 
-_MINUS_I_POW = [1.0 + 0.0j, -1.0j, -1.0 + 0.0j, 1.0j]  # (-i)^l
 _M_LABELS = {0: [""], 1: ["z", "x", "y"],  # real-harmonic order of ylm_all
              2: ["z2", "xz", "yz", "x2-y2", "xy"],
              3: ["z3", "xz2", "yz2", "zx2-zy2", "xyz", "xx2-3yy2", "3xx2-yy2"]}

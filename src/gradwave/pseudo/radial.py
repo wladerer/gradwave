@@ -18,15 +18,12 @@ import numpy as np
 _DFACT = {0: 1.0, 1: 3.0, 2: 15.0, 3: 105.0, 4: 945.0}
 
 
-def simpson(fvals: np.ndarray, rab: np.ndarray) -> np.ndarray:
-    """∫ f dr on the UPF mesh via composite Simpson in the mesh index.
+def _simpson_index_weights(n: int) -> np.ndarray:
+    """Composite-Simpson weights in the mesh index, so ∫f dr = Σ f·rab·w.
 
-    fvals: (..., n) integrand values; rab: (n,) dr/di weights.
-    For even point counts, Simpson covers the first n-1 points and the last
-    interval is closed with a trapezoid (matches QE's accuracy class).
+    Odd n: the plain 1/3 rule. Even n: 1/3 rule over the first n-3 points plus a
+    3/8 closure over the last 4 — uniformly O(h⁴), unlike a trapezoid closure.
     """
-    g = fvals * rab
-    n = g.shape[-1]
     if n < 4:
         raise ValueError("need at least 4 mesh points")
     w = np.zeros(n)
@@ -35,8 +32,6 @@ def simpson(fvals: np.ndarray, rab: np.ndarray) -> np.ndarray:
         w[1::2] = 4.0 / 3.0
         w[0] = w[-1] = 1.0 / 3.0
     else:
-        # 1/3 rule over the first n-3 points (odd count), 3/8 rule over the
-        # last 4 points — uniformly O(h⁴), unlike a trapezoid closure.
         m = n - 3
         w[:m] = 2.0 / 3.0
         w[1:m:2] = 4.0 / 3.0
@@ -44,7 +39,16 @@ def simpson(fvals: np.ndarray, rab: np.ndarray) -> np.ndarray:
         w[m - 1] = 1.0 / 3.0 + 3.0 / 8.0
         w[m], w[m + 1] = 9.0 / 8.0, 9.0 / 8.0
         w[m + 2] = 3.0 / 8.0
-    return (g * w).sum(axis=-1)
+    return w
+
+
+def simpson(fvals: np.ndarray, rab: np.ndarray) -> np.ndarray:
+    """∫ f dr on the UPF mesh via composite Simpson in the mesh index.
+
+    fvals: (..., n) integrand values; rab: (n,) dr/di weights.
+    """
+    g = fvals * rab
+    return (g * _simpson_index_weights(g.shape[-1])).sum(axis=-1)
 
 
 def sph_jl(l: int, x: np.ndarray) -> np.ndarray:

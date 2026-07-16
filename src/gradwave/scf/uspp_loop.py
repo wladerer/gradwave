@@ -678,13 +678,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     # occupations (spin-split by start_mag; zeros for bare USPP where the UPF
     # carries no PP_OCCUPATIONS). rho_ij_mix is the MIXER-side becsum used
     # for the one-center ddd; rho_ij_s holds each iteration's fresh becsum.
-    is_paw, onec = ops.is_paw, ops.onec
-    is_paw = any(p.is_paw for p in system.paws)
-    onec = None
-    if is_paw:
-        from gradwave.scf.paw_onsite import OneCenter
-
-        onec = [OneCenter(p, xc) for p in system.paws]
+    is_paw, onec = ops.is_paw, ops.onec  # reuse the OneCenter list built in _build_iter_ops
     rho_ij_s = [[] for _ in range(nspin)]
     if start_from is not None:
         prev_bec = start_from["rho_ij_atoms"]

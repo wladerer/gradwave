@@ -22,6 +22,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from gradwave.pseudo.radial import _simpson_index_weights
+
 # (2l+1)!! up to l=5 (l=4 = augmentation channels; l=5 only in their derivative)
 _DFACT = [1.0, 3.0, 15.0, 105.0, 945.0, 10395.0]
 _SERIES_X = 4.0
@@ -30,23 +32,7 @@ _CHUNK = 4_000_000  # max elements of one (nq_chunk, nmesh) block
 
 def simpson_weights(rab: np.ndarray) -> np.ndarray:
     """Combined Simpson × mesh weights so that ∫f dr = Σ f·w (numpy, setup)."""
-    n = len(rab)
-    if n < 4:
-        raise ValueError("need at least 4 mesh points")
-    w = np.zeros(n)
-    if n % 2 == 1:
-        w[:] = 2.0 / 3.0
-        w[1::2] = 4.0 / 3.0
-        w[0] = w[-1] = 1.0 / 3.0
-    else:
-        m = n - 3
-        w[:m] = 2.0 / 3.0
-        w[1:m:2] = 4.0 / 3.0
-        w[0] = 1.0 / 3.0
-        w[m - 1] = 1.0 / 3.0 + 3.0 / 8.0
-        w[m], w[m + 1] = 9.0 / 8.0, 9.0 / 8.0
-        w[m + 2] = 3.0 / 8.0
-    return w * rab
+    return _simpson_index_weights(len(rab)) * rab
 
 
 def jl_t(l: int, x: torch.Tensor) -> torch.Tensor:

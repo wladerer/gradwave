@@ -18,6 +18,7 @@ from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.energies.nl_pp import nonlocal_energy
 from gradwave.core.fftbox import r_to_g
 from gradwave.core.hamiltonian import becp, projectors
+from gradwave.postscf.hubbard_u import _pad
 from gradwave.scf.loop import SCFResult, _stack_dij
 
 
@@ -91,24 +92,14 @@ def hubbard_force(res: SCFResult, manifolds) -> torch.Tensor:
         # res.coeffs is [spin][k] ragged; rebuild padded (nk, nb, npw_max)
         e_u = 0.0
         for sp in range(2):
-            cpad = _pad_coeffs(res.coeffs[sp], hub.q_free.shape[-1], q.device)
+            cpad = _pad(res.coeffs[sp], hub.q_free.shape[-1], q.device)
             mats = occupation_matrices(q, cpad, occ[sp], kw, hub.sites)
             e_u = e_u + hubbard_energy(mats, hub.sites)
     else:
         occ = res.occupations.detach()
-        cpad = _pad_coeffs(res.coeffs, hub.q_free.shape[-1], q.device)
+        cpad = _pad(res.coeffs, hub.q_free.shape[-1], q.device)
         mats = occupation_matrices(q, cpad, 0.5 * occ, kw, hub.sites)
         e_u = 2.0 * hubbard_energy(mats, hub.sites)
 
     (grad,) = torch.autograd.grad(e_u, pos)
     return -grad
-
-
-def _pad_coeffs(coeffs_per_k, npw_max, device):
-    """[(nb, npw_k)] per k → padded (nk, nb, npw_max), detached."""
-    nk = len(coeffs_per_k)
-    nb = coeffs_per_k[0].shape[0]
-    out = torch.zeros(nk, nb, npw_max, dtype=torch.complex128, device=device)
-    for ik, c in enumerate(coeffs_per_k):
-        out[ik, :, : c.shape[1]] = c.detach().to(device)
-    return out

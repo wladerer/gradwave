@@ -13,13 +13,9 @@ from __future__ import annotations
 
 import numpy as np
 
+from gradwave.pseudo.local import _msh
 from gradwave.pseudo.radial import sbt
 from gradwave.pseudo.upf import UPFData
-
-
-def _msh(upf: UPFData) -> int:
-    """QE's msh: local-channel integrals stop at 10 bohr (see upf.py)."""
-    return upf.msh if upf.msh > 0 else len(upf.r)
 
 
 def rhoatom_of_q(upf: UPFData, q: np.ndarray) -> np.ndarray:

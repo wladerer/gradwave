@@ -34,10 +34,9 @@ import numpy as np
 import torch
 
 from gradwave.constants import E2, HBAR2_2M
+from gradwave.constants import MINUS_I_POW as _MINUS_I_POW
 from gradwave.core.ylm import ylm_all
 from gradwave.pseudo.radial_torch import RadialTables
-
-_MINUS_I_POW = [1.0 + 0.0j, -1.0j, -1.0 + 0.0j, 1.0j]
 
 EV_A3_TO_KBAR = 1602.176634  # 1 eV/Å³ = 160.2176634 GPa
 

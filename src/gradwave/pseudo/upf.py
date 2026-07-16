@@ -203,7 +203,7 @@ def parse_upf(path: str | Path) -> UPFData:
         z_valence=float(h["z_valence"]),
         l_max=int(h["l_max"]),
         functional=h.get("functional", "").strip(),
-        core_correction=False,
+        core_correction=core_rho is not None,
         r=r,
         rab=rab,
         vloc=vloc,

@@ -23,7 +23,6 @@ from gradwave.constants import BOHR_ANG, HARTREE_EV
 from gradwave.core.xc.base import XCFunctional, to_au
 from gradwave.core.xc.lda_pw92 import eps_c_pw92, eps_x_lda
 from gradwave.core.xc.spin import SpinXC, eps_c_pw92_spin
-from gradwave.core.xc.spin import _to_au as _spin_to_au
 
 _BETA = 0.06672455060314922
 _GAMMA = (1.0 - math.log(2.0)) / math.pi**2
@@ -98,7 +97,7 @@ class LearnableSpinX(SpinXC):
 
     def energy_density(self, rho_up, rho_dn, sigma_uu=None, sigma_dd=None,
                        sigma_tot=None):
-        ru, rd = _spin_to_au(rho_up), _spin_to_au(rho_dn)
+        ru, rd = to_au(rho_up), to_au(rho_dn)
         rho = ru + rd
         zeta = (ru - rd) / rho
         kappa, mu = self.kappa, self.mu

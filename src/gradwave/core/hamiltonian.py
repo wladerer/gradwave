@@ -24,10 +24,9 @@ from dataclasses import dataclass
 import torch
 
 from gradwave.constants import HBAR2_2M
+from gradwave.constants import MINUS_I_POW as _MINUS_I_POW
 from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
 from gradwave.core.ylm import ylm_all
-
-_MINUS_I_POW = [1.0 + 0.0j, -1.0j, -1.0 + 0.0j, 1.0j]  # (−i)^l
 
 
 @dataclass
