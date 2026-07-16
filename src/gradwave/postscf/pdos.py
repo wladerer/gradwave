@@ -11,8 +11,12 @@ core/hubbard.py,
 and the projection is Loewdin-orthonormalized so the per-state weights obey the
 sum rule up to the plane-wave truncation, which the spilling parameter reports.
 
-Coverage here: norm-conserving, nspin=1 and 2. USPP/PAW (the S-metric) and the
-noncollinear/SOC projections extend this in the same module.
+For USPP/PAW the overlap is not the identity, so the projection uses the S-metric
+<phi|S|psi> and the Loewdin overlap <phi|S|phi>, with S = 1 + sum_ij |beta_i> q_ij
+<beta_j| built from the same augmentation charges q_ij the SCF uses.
+
+Coverage here: norm-conserving and USPP/PAW, nspin=1 and 2. The noncollinear/SOC
+projections extend this in the same module.
 
 Reference: D. Sanchez-Portal et al., the Loewdin population analysis behind QE's
 projwfc.x.
@@ -74,17 +78,33 @@ class ProjectedDOS:
         }
 
 
+def _is_uspp_system(system) -> bool:
+    """USPP/PAW systems carry the augmentation weights; NC systems carry .upfs."""
+    return hasattr(system, "paws") and hasattr(system, "q_full")
+
+
+def _species_orbitals(system, sp):
+    """(pseudopotential, PP_PSWFC atomic orbitals) for species `sp`. The radial
+    tables live on .pswfc for norm-conserving UPFData and on .chi for PAWData,
+    but both are AtomicOrbital(l, label, rchi=r·R_nl) with matching .r/.rab."""
+    if _is_uspp_system(system):
+        pp = system.paws[sp]
+        return pp, getattr(pp, "chi", ())
+    pp = system.upfs[sp]
+    return pp, getattr(pp, "pswfc", ())
+
+
 def _atomic_columns(system) -> list[AOColumn]:
     """Every PP_PSWFC orbital of every atom, expanded over m."""
     cols = []
     for a, sp in enumerate(system.species_of_atom):
-        pswfc = getattr(system.upfs[sp], "pswfc", ())
-        if not pswfc:
+        pp, orbs = _species_orbitals(system, sp)
+        if not orbs:
             raise ValueError(
-                f"{system.upfs[sp].element}: the pseudopotential carries no "
-                "PP_PSWFC atomic orbitals, so a projected DOS is not available "
-                "(SG15 ONCV omits them; use a PseudoDojo or psl pseudo)")
-        for o in pswfc:
+                f"{pp.element}: the pseudopotential carries no PP_PSWFC atomic "
+                "orbitals, so a projected DOS is not available (SG15 ONCV omits "
+                "them; use a PseudoDojo or psl pseudo)")
+        for o in orbs:
             for m in range(2 * o.l + 1):
                 cols.append(AOColumn(a, sp, o.label, o.l, m))
     return cols
@@ -101,8 +121,8 @@ def _ao_projectors_k(system, sph, cols, device):
     # radial form factors F_nl(q), cached per (species, orbital label)
     fcache: dict[tuple, torch.Tensor] = {}
     for sp in set(system.species_of_atom):
-        u = system.upfs[sp]
-        for o in u.pswfc:
+        u, orbs = _species_orbitals(system, sp)
+        for o in orbs:
             key = (sp, o.label)
             if key not in fcache:
                 fcache[key] = torch.as_tensor(
@@ -132,6 +152,31 @@ def _lowdin_weights(becp, overlap, floor=1e-8):
     return (proj.real ** 2 + proj.imag ** 2)            # (nb, nproj)
 
 
+def _nc_weights_k(system, sph, ik, c, cols, device):
+    """Norm-conserving Löwdin weights (nb, nproj); overlap is the bare AO Gram."""
+    q = _ao_projectors_k(system, sph, cols, device)     # (nproj, npw)
+    becp = torch.einsum("bg,pg->bp", c, q.conj())        # <phi_p|psi_b>
+    overlap = torch.einsum("ig,jg->ij", q.conj(), q)     # <phi_i|phi_j>
+    return _lowdin_weights(becp, overlap).cpu().numpy()
+
+
+def _uspp_weights_k(system, sph, ik, c, cols, device):
+    """USPP/PAW Löwdin weights with the S-metric. becp = <phi|S|psi> and the
+    overlap = <phi|S|phi>, where the augmentation S = 1 + sum_ij |beta_i> q_ij
+    <beta_j| reuses the SCF's m-expanded beta projectors and charges q_full."""
+    from gradwave.core.hamiltonian import projectors
+    q = _ao_projectors_k(system, sph, cols, device)             # (nproj, npw)
+    pbeta = projectors(system.proj_data[ik], system.positions).to(device)  # (nb_i, npw)
+    qf = system.q_full.to(device).to(CDTYPE)                    # (nb_i, nb_i)
+    becp_bare = torch.einsum("bg,pg->bp", c, q.conj())          # <phi_p|psi_b>
+    beta_psi = torch.einsum("bg,ig->bi", c, pbeta.conj())       # <beta_i|psi_b>
+    phi_beta = torch.einsum("pg,ig->pi", q.conj(), pbeta)       # <phi_p|beta_i>
+    pq = phi_beta @ qf                                          # (nproj, nb_i)
+    becp = becp_bare + torch.einsum("pj,bj->bp", pq, beta_psi)  # <phi|S|psi>
+    overlap = torch.einsum("ig,jg->ij", q.conj(), q) + pq @ phi_beta.conj().T
+    return _lowdin_weights(becp, overlap).cpu().numpy()
+
+
 def _group_key(col: AOColumn, group_by: str):
     if group_by == "total":
         return "total"
@@ -144,25 +189,39 @@ def _group_key(col: AOColumn, group_by: str):
     return f"atom{col.atom + 1}:{col.label}{('_' + suffix) if suffix else ''}"
 
 
+def _unpack_result(res):
+    """(system, nspin, eig[None-padded to (nspin,...)], coeffs[spin][k], fermi,
+    device, weight_fn) for a norm-conserving SCFResult or a USPP result dict."""
+    if isinstance(res, SCFResult):
+        system = res.system
+        nspin = int(getattr(res, "nspin", 1))
+        eig = res.eigenvalues if nspin == 2 else res.eigenvalues[None]
+        coeffs = res.coeffs if nspin == 2 else [res.coeffs]
+        return (system, nspin, eig, coeffs, res.fermi, res.rho.device,
+                _nc_weights_k)
+    if isinstance(res, dict) and _is_uspp_system(res.get("system")):
+        system = res["system"]
+        nspin = int(res.get("nspin", 1))
+        eig = res["eigenvalues"] if nspin == 2 else res["eigenvalues"][None]
+        coeffs = res["coeffs"] if nspin == 2 else [res["coeffs"]]
+        return (system, nspin, eig, coeffs, res.get("fermi"),
+                res["rho"].device, _uspp_weights_k)
+    raise NotImplementedError(
+        "projected DOS supports the norm-conserving SCFResult and the USPP/PAW "
+        "result dict; noncollinear is a separate path")
+
+
 @torch.no_grad()
 def projected_dos(res, *, width: float = 0.1, npoints: int = 800, window=None,
                   group_by: str = "l") -> ProjectedDOS:
-    """Löwdin-projected DOS of a converged norm-conserving SCF.
+    """Löwdin-projected DOS of a converged norm-conserving or USPP/PAW SCF.
 
     group_by is one of 'atom', 'l' (atom + orbital), 'lm' (adds m), or 'total'.
     Spin channels come back stacked on axis 0 for nspin=2.
     """
-    if not isinstance(res, SCFResult):
-        raise NotImplementedError(
-            "projected DOS currently supports the norm-conserving SCFResult; "
-            "USPP/PAW and noncollinear are separate paths")
-    system = res.system
-    device = res.rho.device
-    nspin = int(getattr(res, "nspin", 1))
+    system, nspin, eig, coeffs, fermi, device, weight_k = _unpack_result(res)
     cols = _atomic_columns(system)
 
-    eig = res.eigenvalues if nspin == 2 else res.eigenvalues[None]
-    coeffs = res.coeffs if nspin == 2 else [res.coeffs]
     kw = system.kweights.to(device)
     g_spin = 2.0 if nspin == 1 else 1.0
 
@@ -174,10 +233,7 @@ def projected_dos(res, *, width: float = 0.1, npoints: int = 800, window=None,
     for isp in range(nspin):
         for ik, sph in enumerate(system.spheres):
             c = coeffs[isp][ik].to(device)                 # (nb, npw)
-            q = _ao_projectors_k(system, sph, cols, device)  # (nproj, npw)
-            becp = torch.einsum("bg,pg->bp", c, q.conj())    # <phi_p|psi_b>
-            overlap = torch.einsum("ig,jg->ij", q.conj(), q)  # <phi_i|phi_j>
-            wgt = _lowdin_weights(becp, overlap).cpu().numpy()  # (nb, nproj)
+            wgt = weight_k(system, sph, ik, c, cols, device)  # (nb, nproj)
             sl = slice(ik * nb, (ik + 1) * nb)
             weights[isp, sl] = wgt
             kweight_state[isp, sl] = float(kw[ik])
@@ -212,6 +268,6 @@ def projected_dos(res, *, width: float = 0.1, npoints: int = 800, window=None,
 
     return ProjectedDOS(
         energy_eV=grid, total=total, groups=groups, spilling=spilling,
-        fermi_eV=None if res.fermi is None else float(res.fermi),
+        fermi_eV=None if fermi is None else float(fermi),
         nspin=nspin, group_by=group_by,
     )
