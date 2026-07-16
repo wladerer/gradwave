@@ -63,6 +63,12 @@ from gradwave.core.hamiltonian import (
 )
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.grids import build_gsphere, gmax_from_ecut
+from gradwave.postscf.uspp_frozen import (
+    aug_density_from_becsum,
+    frozen_veff,
+    screen_phase,
+    screened_dscr,
+)
 from gradwave.pseudo.kb import beta_form_factors
 from gradwave.scf.implicit import apply_chi0, apply_k_hxc
 from gradwave.scf.loop import SCFResult
@@ -306,70 +312,8 @@ def _uspp_frozen_operators(res: dict, xc):
     Hamiltonian H_s(k) c = eps S(k) c that the complement correction perturbs.
     Returns ``(veff_s, dscr_s)`` as lists of length nspin.
     """
-    from gradwave.core.energies.hartree import hartree_potential_g
-
-    system = res["system"]
-    grid = system.grid
-    vol = grid.volume
-    dev = system.positions.device
-    mask_flat = grid.dens_mask.reshape(-1)
-    nspin = int(res.get("nspin", 1))
-    core = system.rho_core
-
-    rho_tot = res["rho"].detach()
-    rho_g_box = r_to_g(rho_tot.to(CDTYPE))
-    v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
-                           dim=(-3, -2, -1)) * grid.n_points).real
-    vloc_g = local_potential_g(
-        system.positions, torch.as_tensor(system.species_of_atom, device=dev),
-        system.vloc_tables, grid.g_cart, vol)
-    vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
-
-    if nspin == 1:
-        from gradwave.scf.loop import vxc_potential
-
-        v_xc, _ = vxc_potential(xc, rho_tot if core is None else rho_tot + core,
-                                grid)
-        veff_s = [v_h + v_xc + vloc_r]
-    else:
-        from gradwave.scf.loop import vxc_spin_potential
-
-        rho_s = res["rho_spin"]
-        c2 = None if core is None else 0.5 * core
-        v_up, v_dn, _ = vxc_spin_potential(
-            xc, rho_s[0] if core is None else rho_s[0] + c2,
-            rho_s[1] if core is None else rho_s[1] + c2, grid)
-        veff_s = [v_h + v_up + vloc_r, v_h + v_dn + vloc_r]
-
-    phase_arg = system.g_sphere @ system.positions.T
-    phase_pos = torch.exp(torch.complex(torch.zeros_like(phase_arg), phase_arg))
-    dscr_s = []
-    for isp in range(nspin):
-        v_eff_g = r_to_g(veff_s[isp].to(CDTYPE)).reshape(-1)[mask_flat]
-        dscr = torch.zeros_like(system.q_full)
-        for a, sp in enumerate(system.species_of_atom):
-            s0, s1 = system.atom_slices[a]
-            contr = torch.einsum("ijg,g->ij", system.aug[sp].q_g.conj(),
-                                 v_eff_g * phase_pos[:, a])
-            dscr[s0:s1, s0:s1] = (0.5 * (contr + contr.conj().T)).real
-        dscr_s.append(dscr + system.proj_data[0].dij_full)
-
-    if any(p.is_paw for p in system.paws):
-        from gradwave.scf.paw_onsite import OneCenter
-
-        onec = {sp: OneCenter(system.paws[sp], xc)
-                for sp in set(system.species_of_atom)}
-        dscr_s = [d.clone() for d in dscr_s]
-        bec = res["rho_ij_atoms"]
-        for a, sp in enumerate(system.species_of_atom):
-            s0, s1 = system.atom_slices[a]
-            if nspin == 1:
-                _, ddd = onec[sp].energy_and_ddd(bec[a])
-                dscr_s[0][s0:s1, s0:s1] += ddd.to(dev)
-            else:
-                _, ddd = onec[sp].energy_and_ddd([bec[0][a], bec[1][a]])
-                for isp in range(nspin):
-                    dscr_s[isp][s0:s1, s0:s1] += ddd[isp].to(dev)
+    veff_s = frozen_veff(res, xc)
+    dscr_s = screened_dscr(res, xc, veff_s)
     return veff_s, dscr_s
 
 
@@ -395,17 +339,7 @@ def _uspp_enlarged_hks(system, k_frac, ecut_large, v_eff, dscr_full, device):
 
 def _aug_density_from_becsum(system, becsum, device):
     """Augmentation density on the real grid from a per-atom becsum list."""
-    grid = system.grid
-    phase_arg = system.g_sphere @ system.positions.T
-    phase_pos = torch.exp(torch.complex(torch.zeros_like(phase_arg), phase_arg))
-    aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE, device=device)
-    for a, sp in enumerate(system.species_of_atom):
-        aug_sph = aug_sph + phase_pos[:, a].conj() * torch.einsum(
-            "ij,ijg->g", becsum[a], system.aug[sp].q_g)
-    aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=device)
-    aug_box[system.sphere_idx] = aug_sph / grid.volume
-    return (torch.fft.ifftn(aug_box.reshape(grid.shape) * grid.n_points,
-                            dim=(-3, -2, -1))).real
+    return aug_density_from_becsum(system, becsum, screen_phase(system))
 
 
 @torch.no_grad()

@@ -32,6 +32,7 @@ from gradwave.core.energies.nl_pp import nonlocal_energy
 from gradwave.core.fftbox import r_to_g
 from gradwave.core.hamiltonian import becp, projectors
 from gradwave.dtypes import CDTYPE
+from gradwave.postscf.uspp_frozen import aug_density_from_becsum
 
 
 def _normalize_spin(res: dict):
@@ -46,17 +47,7 @@ def _normalize_spin(res: dict):
 
 def _aug_from_becsum(system, rho_ij, phases):
     """ρ_aug(r) from one spin channel's becsum with given e^{+iGτ} phases."""
-    grid = system.grid
-    dev = phases.device
-    aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE, device=dev)
-    for a, sp in enumerate(system.species_of_atom):
-        aug_sph = aug_sph + phases[:, a].conj() * torch.einsum(
-            "ij,ijg->g", rho_ij[a], system.aug[sp].q_g
-        )
-    aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
-    aug_box[system.sphere_idx] = aug_sph / grid.volume
-    return torch.fft.ifftn(aug_box.reshape(grid.shape) * grid.n_points,
-                           dim=(-3, -2, -1)).real
+    return aug_density_from_becsum(system, rho_ij, phases)
 
 
 def _aug_at_fixed(res: dict, system, isp: int | None = None) -> torch.Tensor:

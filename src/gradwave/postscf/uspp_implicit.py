@@ -104,6 +104,7 @@ from gradwave.core.hamiltonian import becp, projectors
 from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.postscf._anderson import AndersonMixer
+from gradwave.postscf.uspp_frozen import aug_dmat
 from gradwave.solvers.precond import teter
 
 
@@ -368,15 +369,7 @@ class _ConvergedUSPP:
     def _aug_dmat(self, w_r: torch.Tensor) -> torch.Tensor:
         """Block-diagonal ∫w(r) Q_ij(r−τ_a) d³r — same pairing the SCF uses
         to screen D with v_eff (a grid perturbation enters D through it)."""
-        system = self.system
-        w_g = r_to_g(w_r.to(CDTYPE)).reshape(-1)[self.mask_flat]
-        out = torch.zeros_like(system.q_full)
-        for a, sp in enumerate(system.species_of_atom):
-            s0, s1 = system.atom_slices[a]
-            contr = torch.einsum("ijg,g->ij", system.aug[sp].q_g.conj(),
-                                 w_g * self.phase_pos[:, a])
-            out[s0:s1, s0:s1] = (0.5 * (contr + contr.conj().T)).real
-        return out
+        return aug_dmat(self.system, w_r, self.phase_pos)
 
     def _sternheimer_k(self, isp: int, ik: int, rhs, x0, tol: float,
                        max_iter: int):

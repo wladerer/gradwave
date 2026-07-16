@@ -11,14 +11,11 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from gradwave.core.energies.hartree import hartree_potential_g
-from gradwave.core.energies.local_pp import local_potential_g
-from gradwave.core.fftbox import r_to_g
 from gradwave.core.hamiltonian import build_projector_data, projectors
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.grids import build_gsphere
+from gradwave.postscf.uspp_frozen import frozen_veff, screened_dscr
 from gradwave.pseudo.kb import beta_form_factors
-from gradwave.scf.loop import vxc_potential
 from gradwave.scf.uspp import _HkS, davidson_gen
 
 
@@ -36,42 +33,11 @@ def bands_uspp(res: dict, xc, k_frac_list, nbands: int | None = None,
     vol = grid.volume
     dev = system.positions.device
     nbands = nbands or system.nbands
-    mask_flat = grid.dens_mask.reshape(-1)
 
-    # frozen v_eff from the converged density
-    rho = res["rho"].detach()
-    rho_g_box = r_to_g(rho.to(CDTYPE))
-    v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
-                           dim=(-3, -2, -1)) * grid.n_points).real
-    rho_xc = rho if system.rho_core is None else rho + system.rho_core
-    v_xc, _ = vxc_potential(xc, rho_xc, grid)
-    vloc_g = local_potential_g(system.positions,
-                               torch.tensor(system.species_of_atom, device=dev),
-                               system.vloc_tables, grid.g_cart, vol)
-    vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
-    v_eff = v_h + v_xc + vloc_r
-
-    # frozen screened D: ∫v_eff Q + bare + one-center ddd at converged becsum
-    v_eff_g = r_to_g(v_eff.to(CDTYPE)).reshape(-1)[mask_flat]
-    phase_arg = system.g_sphere @ system.positions.T
-    phase_pos = torch.exp(torch.complex(torch.zeros_like(phase_arg), phase_arg))
-    dscr = torch.zeros_like(system.q_full)
-    for a, sp in enumerate(system.species_of_atom):
-        s0, s1 = system.atom_slices[a]
-        contr = torch.einsum("ijg,g->ij", system.aug[sp].q_g.conj(),
-                             v_eff_g * phase_pos[:, a])
-        dscr[s0:s1, s0:s1] = (0.5 * (contr + contr.conj().T)).real
-    dscr_full = dscr + system.proj_data[0].dij_full
-    if any(p.is_paw for p in system.paws):
-        from gradwave.scf.paw_onsite import OneCenter
-
-        onec = {sp: OneCenter(system.paws[sp], xc)
-                for sp in set(system.species_of_atom)}
-        dscr_full = dscr_full.clone()
-        for a, sp in enumerate(system.species_of_atom):
-            _, ddd = onec[sp].energy_and_ddd(res["rho_ij_atoms"][a])
-            s0, s1 = system.atom_slices[a]
-            dscr_full[s0:s1, s0:s1] += ddd.to(dev)
+    # frozen v_eff and screened D (∫v_eff Q + bare + one-center ddd) at the
+    # converged density/becsum
+    v_eff = frozen_veff(res, xc)[0]
+    dscr_full = screened_dscr(res, xc, [v_eff])[0]
 
     dij_species = [torch.as_tensor(p.dij, dtype=RDTYPE, device=dev)
                    for p in system.paws]
