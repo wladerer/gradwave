@@ -78,6 +78,50 @@ class ProjectedDOS:
         }
 
 
+@dataclass
+class NoncollinearPDOS:
+    """Projected DOS of a noncollinear spinor SCF. `charge` is the atom/orbital-
+    resolved DOS n(E); `m_x/m_y/m_z` are the spin-texture components, the Pauli
+    decomposition <phi~|sigma|phi~> of the same projected amplitudes, so a group's
+    magnetization density of states is (m_x, m_y, m_z) and its magnitude names the
+    local spin axis at each energy."""
+
+    energy_eV: np.ndarray            # (npoints,)
+    total_charge: np.ndarray         # (npoints,)
+    charge: dict                     # group label -> (npoints,)
+    m_x: dict                        # group label -> (npoints,)
+    m_y: dict
+    m_z: dict
+    spilling: float
+    fermi_eV: float | None
+    group_by: str
+
+    def to_dict(self) -> dict:
+        def _col(a):
+            return np.asarray(a).tolist()
+
+        def _grp(d):
+            return {k: _col(v) for k, v in d.items()}
+        return {
+            "energy_eV": _col(self.energy_eV),
+            "total_charge": _col(self.total_charge),
+            "charge": _grp(self.charge),
+            "m_x": _grp(self.m_x), "m_y": _grp(self.m_y), "m_z": _grp(self.m_z),
+            "spilling": self.spilling,
+            "fermi_eV": self.fermi_eV,
+            "noncollinear": True,
+            "group_by": self.group_by,
+        }
+
+
+def _broaden(grid, energies, per_state, width):
+    """Gaussian-broadened spectral sum. energies (nstate,), per_state (nstate,)
+    already carries the k-weight, spin degeneracy, and orbital weight."""
+    inv = 1.0 / (width * math.sqrt(2 * math.pi))
+    return (np.exp(-0.5 * ((grid[:, None] - energies[None, :]) / width) ** 2)
+            * inv * per_state[None, :]).sum(axis=1)
+
+
 def _is_uspp_system(system) -> bool:
     """USPP/PAW systems carry the augmentation weights; NC systems carry .upfs."""
     return hasattr(system, "paws") and hasattr(system, "q_full")
@@ -142,14 +186,21 @@ def _ao_projectors_k(system, sph, cols, device):
     return q
 
 
-def _lowdin_weights(becp, overlap, floor=1e-8):
-    """Loewdin-orthonormalized |<phi~_p|psi_b>|^2 from raw <phi_p|psi_b> and the
-    AO overlap <phi_i|phi_j>. becp (nb, nproj), overlap (nproj, nproj)."""
+def _lowdin_project(becp, overlap, floor=1e-8):
+    """Loewdin-orthonormalized amplitudes <phi~_p|psi_b> = (<phi_p|psi_b> O^{-1/2})
+    from raw becp (nb, nproj) and the AO overlap O = <phi_i|phi_j> (nproj, nproj).
+    Returns the complex amplitudes so a caller can form |.|^2 (populations) or the
+    cross terms proj_up* proj_dn (the noncollinear spin texture)."""
     w, v = torch.linalg.eigh(overlap)
     w = w.clamp_min(floor)
     o_inv_sqrt = (v * w.rsqrt()) @ v.conj().T          # O^{-1/2}, Hermitian
-    proj = becp @ o_inv_sqrt                            # (nb, nproj)
-    return (proj.real ** 2 + proj.imag ** 2)            # (nb, nproj)
+    return becp @ o_inv_sqrt                            # (nb, nproj), complex
+
+
+def _lowdin_weights(becp, overlap, floor=1e-8):
+    """Loewdin-orthonormalized populations |<phi~_p|psi_b>|^2 (nb, nproj)."""
+    proj = _lowdin_project(becp, overlap, floor)
+    return proj.real ** 2 + proj.imag ** 2
 
 
 def _nc_weights_k(system, sph, ik, c, cols, device):
@@ -248,13 +299,10 @@ def projected_dos(res, *, width: float = 0.1, npoints: int = 800, window=None,
     if window is None:
         window = (all_e.min() - 10 * width, all_e.max() + 10 * width)
     grid = np.linspace(window[0], window[1], npoints)
-    inv = 1.0 / (width * math.sqrt(2 * math.pi))
 
     def broaden(state_weight, isp):
-        e = all_e[isp]
-        g = (np.exp(-0.5 * ((grid[:, None] - e[None, :]) / width) ** 2) * inv
-             * (kweight_state[isp] * g_spin * state_weight)[None, :]).sum(axis=1)
-        return g
+        return _broaden(grid, all_e[isp],
+                        kweight_state[isp] * g_spin * state_weight, width)
 
     labels = sorted({_group_key(c, group_by) for c in cols})
     groups = {}
@@ -270,4 +318,81 @@ def projected_dos(res, *, width: float = 0.1, npoints: int = 800, window=None,
         energy_eV=grid, total=total, groups=groups, spilling=spilling,
         fermi_eV=None if fermi is None else float(fermi),
         nspin=nspin, group_by=group_by,
+    )
+
+
+@torch.no_grad()
+def projected_dos_noncollinear(res, *, width: float = 0.1, npoints: int = 800,
+                               window=None, group_by: str = "l") -> NoncollinearPDOS:
+    """Charge and spin-texture projected DOS of a noncollinear spinor SCF.
+
+    Each spinor band is projected onto the pseudo-atomic orbitals per spin
+    component, Löwdin-orthonormalized against the shared spatial overlap. The
+    Pauli decomposition of the resulting amplitudes gives the charge n(E) and the
+    spin-texture m_x/m_y/m_z(E), resolved by atom and orbital. The projection uses
+    scalar AOs, so it applies with or without spin-orbit coupling (the j-resolved
+    split is projected_dos_soc)."""
+    from gradwave.scf.noncollinear import NCResult
+    if not isinstance(res, NCResult):
+        raise NotImplementedError(
+            "projected_dos_noncollinear expects a noncollinear NCResult")
+    system = res.system
+    device = res.coeffs.device
+    cols = _atomic_columns(system)
+    m_pw = system.batch.npw_max
+    kw = system.kweights.to(device)
+
+    eig = res.eigenvalues                       # (nk, nb)
+    nk, nb = eig.shape
+    all_e = eig.reshape(-1).cpu().numpy()        # (nk*nb,)
+    nstate = all_e.shape[0]
+    n_pop = np.zeros((nstate, len(cols)))        # charge population per AO
+    mx = np.zeros((nstate, len(cols)))
+    my = np.zeros((nstate, len(cols)))
+    mz = np.zeros((nstate, len(cols)))
+    kweight_state = np.zeros(nstate)
+
+    for ik, sph in enumerate(system.spheres):
+        npw = sph.npw
+        c = res.coeffs[ik].to(device)                       # (nb, 2·m_pw)
+        cu, cd = c[:, :npw], c[:, m_pw:m_pw + npw]           # up / down components
+        q = _ao_projectors_k(system, sph, cols, device)     # (nproj, npw)
+        overlap = torch.einsum("ig,jg->ij", q.conj(), q)     # spatial AO overlap
+        pu = _lowdin_project(torch.einsum("bg,pg->bp", cu, q.conj()), overlap)
+        pd = _lowdin_project(torch.einsum("bg,pg->bp", cd, q.conj()), overlap)
+        au, ad = (pu.real ** 2 + pu.imag ** 2), (pd.real ** 2 + pd.imag ** 2)
+        cross = pu.conj() * pd                               # <phi~|up>* <phi~|down>
+        sl = slice(ik * nb, (ik + 1) * nb)
+        n_pop[sl] = (au + ad).cpu().numpy()
+        mz[sl] = (au - ad).cpu().numpy()
+        mx[sl] = (2.0 * cross.real).cpu().numpy()
+        my[sl] = (2.0 * cross.imag).cpu().numpy()
+        kweight_state[sl] = float(kw[ik])
+
+    # spilling on the charge channel (each spinor band holds one electron, g=1)
+    captured = (n_pop.sum(axis=1) * kweight_state).sum()
+    spilling = float(1.0 - captured / kweight_state.sum())
+
+    if window is None:
+        window = (all_e.min() - 10 * width, all_e.max() + 10 * width)
+    grid = np.linspace(window[0], window[1], npoints)
+
+    def chan(pop, mask):
+        return _broaden(grid, all_e, kweight_state * pop[:, mask].sum(axis=1), width)
+
+    labels = sorted({_group_key(c, group_by) for c in cols})
+    masks = {lab: np.array([_group_key(c, group_by) == lab for c in cols])
+             for lab in labels}
+    charge = {lab: chan(n_pop, msk) for lab, msk in masks.items()}
+    m_x = {lab: chan(mx, msk) for lab, msk in masks.items()}
+    m_y = {lab: chan(my, msk) for lab, msk in masks.items()}
+    m_z = {lab: chan(mz, msk) for lab, msk in masks.items()}
+    full = np.ones(len(cols), dtype=bool)
+    total_charge = chan(n_pop, full)
+
+    return NoncollinearPDOS(
+        energy_eV=grid, total_charge=total_charge, charge=charge,
+        m_x=m_x, m_y=m_y, m_z=m_z, spilling=spilling,
+        fermi_eV=None if res.fermi is None else float(res.fermi),
+        group_by=group_by,
     )
