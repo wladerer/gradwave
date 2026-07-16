@@ -27,13 +27,17 @@ This is a post-processing step on a converged SCF. It never enters the SCF hot
 path, so it does not affect solve performance; the cost is a handful of extra
 FFTs per occupied band plus (if requested) one dielectric solve.
 
-Coverage here: norm-conserving and ultrasoft/PAW, nspin=1, use_symmetry=False
-(a perturbation breaks the crystal symmetry, so the response needs the full
-k-mesh; the same restriction the implicit-diff response carries). The USPP/PAW
-path uses the generalized residual R = P_annulus(H - eps S) psi and adds the
-augmentation-charge response: dpsi perturbs the on-site occupations (becsum),
-which feed the augmentation density through the Q functions. Metals are staged
-separately.
+Coverage. Density and energy error: norm-conserving and ultrasoft/PAW, nspin=1
+and nspin=2, use_symmetry=False (a perturbation breaks the crystal symmetry, so
+the response needs the full k-mesh; the same restriction the implicit-diff
+response carries). Force error: norm-conserving nspin=1. The USPP/PAW path uses
+the generalized residual R = P_annulus(H - eps S) psi and adds the
+augmentation-charge response, dpsi perturbs the on-site occupations (becsum),
+which feed the augmentation density through the Q functions. For nspin=2 the
+complement correction runs per spin channel (each with its own v_eff and
+eigenvalues) and the density and energy errors sum over the two channels. When
+nspin=2 is used with smearing (required), the estimate on partially occupied
+bands is the leading first-order term only.
 """
 
 from __future__ import annotations
@@ -55,7 +59,7 @@ from gradwave.core.hamiltonian import (
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.grids import build_gsphere, gmax_from_ecut
 from gradwave.pseudo.kb import beta_form_factors
-from gradwave.scf.implicit import _check_no_symmetry, apply_chi0, apply_k_hxc
+from gradwave.scf.implicit import apply_chi0, apply_k_hxc
 from gradwave.scf.loop import SCFResult
 
 
@@ -82,15 +86,28 @@ class DiscretizationError:
     drho_smooth: torch.Tensor | None = None  # USPP: smooth part of drho (aug excluded)
 
 
-def _occupied(res: SCFResult, ik: int):
-    """Occupied coefficients, eigenvalues, occupations at one k (nspin=1)."""
-    occ = res.occupations[ik]
+def _occupied(res: SCFResult, ik: int, sp: int | None = None):
+    """Occupied coefficients, eigenvalues, occupations at one k.
+
+    ``sp`` selects the spin channel for nspin=2 (occupations then in [0,1]);
+    None is the nspin=1 path (occupations in [0,2]).
+    """
+    if sp is None:
+        occ, coeffs, eig = res.occupations[ik], res.coeffs[ik], res.eigenvalues[ik]
+    else:
+        occ = res.occupations[sp][ik]
+        coeffs = res.coeffs[sp][ik]
+        eig = res.eigenvalues[sp][ik]
     n_occ = int((occ > 1e-8).sum())
-    return res.coeffs[ik][:n_occ], res.eigenvalues[ik][:n_occ], occ[:n_occ]
+    return coeffs[:n_occ], eig[:n_occ], occ[:n_occ]
 
 
-def _enlarged_hamiltonian(res: SCFResult, k_frac, ecut_large: float, device):
-    """Build a HamiltonianK on the enlarged G-sphere at ecut_large for one k."""
+def _enlarged_hamiltonian(res: SCFResult, k_frac, ecut_large: float, device,
+                          v_eff=None):
+    """Build a HamiltonianK on the enlarged G-sphere at ecut_large for one k.
+
+    ``v_eff`` overrides ``res.v_eff`` (the per-spin potential for nspin=2).
+    """
     system = res.system
     grid = system.grid
     sph = build_gsphere(grid, ecut_large, k_frac, device=device)
@@ -105,7 +122,8 @@ def _enlarged_hamiltonian(res: SCFResult, k_frac, ecut_large: float, device):
         sph, system.species_of_atom, beta_tables, beta_ls, dij_species, grid.volume
     )
     p = projectors(pd, system.positions)
-    return sph, HamiltonianK(sph, grid.shape, res.v_eff, pd, p)
+    v = res.v_eff if v_eff is None else v_eff
+    return sph, HamiltonianK(sph, grid.shape, v, pd, p)
 
 
 @torch.no_grad()
@@ -148,8 +166,9 @@ def estimate_density_error(
 
     Parameters
     ----------
-    res : SCFResult
-        A converged norm-conserving SCF (nspin=1, use_symmetry=False).
+    res : SCFResult or dict
+        A converged SCF, use_symmetry=False. An ``SCFResult`` (norm-conserving,
+        nspin=1 or 2) or the dict returned by ``scf_uspp`` (USPP/PAW, nspin=1).
     ecut_large : float, optional
         Cutoff [eV] of the enlarged basis defining the complement annulus. If
         None, uses ``factor * res.system.ecut``. Must satisfy
@@ -162,11 +181,15 @@ def estimate_density_error(
         return _estimate_density_error_uspp(
             res, ecut_large=ecut_large, factor=factor, xc=xc, verbose=verbose,
         )
-    _check_no_symmetry(res)
+    if getattr(res.system, "sym", None) is not None:
+        raise NotImplementedError(
+            "discretization error requires use_symmetry=False: a perturbation "
+            "breaks the crystal symmetry, so the response needs the full k-mesh")
     system = res.system
     grid = system.grid
     device = res.v_eff.device
     ecut = float(system.ecut)
+    nspin = int(getattr(res, "nspin", 1))
     if ecut_large is None:
         ecut_large = factor * ecut
     if gmax_from_ecut(ecut_large) > 2.0 * gmax_from_ecut(ecut) * (1.0 + 1e-9):
@@ -177,43 +200,65 @@ def estimate_density_error(
 
     drho = torch.zeros(grid.shape, dtype=RDTYPE, device=device)
     denergy = 0.0
-    dpsi_all, psi_large_all, occ_all, sph_all = [], [], [], []
+    # per-spin lists (single spin channel when nspin=1)
+    spins = [None] if nspin == 1 else list(range(nspin))
+    dpsi_s, psi_large_s, occ_s, sph_s = [], [], [], []
 
-    for ik, sph0 in enumerate(system.spheres):
-        c_occ, eps_occ, occ = _occupied(res, ik)
-        sph1, h1 = _enlarged_hamiltonian(res, sph0.k_frac, ecut_large, device)
+    for sp in spins:
+        v_eff_sp = res.v_eff if sp is None else res.v_eff[sp]
+        dpsi_k, psi_large_k, occ_k, sph_k = [], [], [], []
+        for ik, sph0 in enumerate(system.spheres):
+            c_occ, eps_occ, occ = _occupied(res, ik, sp)
+            sph1, h1 = _enlarged_hamiltonian(
+                res, sph0.k_frac, ecut_large, device, v_eff=v_eff_sp)
 
-        # zero-pad occupied orbitals from the Ecut sphere onto the enlarged one
-        box = sphere_to_box(c_occ, sph0.flat_idx, grid.shape)
-        c_occ_1 = box_to_sphere(box, sph1.flat_idx)  # (n_occ, npw1)
+            # zero-pad occupied orbitals from the Ecut sphere onto the enlarged one
+            box = sphere_to_box(c_occ, sph0.flat_idx, grid.shape)
+            c_occ_1 = box_to_sphere(box, sph1.flat_idx)  # (n_occ, npw1)
 
-        # complement residual R = P_annulus (H - eps) psi
-        resid = h1.apply(c_occ_1) - eps_occ[:, None] * c_occ_1
-        annulus = h1.t > ecut * (1.0 + 1e-9)  # (npw1,) bool
-        denom = torch.clamp(h1.t[None, :] - eps_occ[:, None], min=1e-3)
-        corr = -resid / denom.to(resid.dtype)
-        dpsi = torch.where(annulus[None, :], corr, torch.zeros_like(resid))
+            # complement residual R = P_annulus (H - eps) psi
+            resid = h1.apply(c_occ_1) - eps_occ[:, None] * c_occ_1
+            annulus = h1.t > ecut * (1.0 + 1e-9)  # (npw1,) bool
+            denom = torch.clamp(h1.t[None, :] - eps_occ[:, None], min=1e-3)
+            corr = -resid / denom.to(resid.dtype)
+            dpsi = torch.where(annulus[None, :], corr, torch.zeros_like(resid))
 
-        # density error contribution: drho = sum_i f_i * 2 Re(psi_i* dpsi_i)
-        psi_r = g_to_r(c_occ, sph0.flat_idx, grid.shape)
-        dpsi_r = g_to_r(dpsi, sph1.flat_idx, grid.shape)
-        w = 2.0 * float(system.kweights[ik])  # 2 = c.c. pair (psi* dpsi + dpsi* psi)
-        drho += w * (occ.view(-1, 1, 1, 1) * (psi_r.conj() * dpsi_r).real).sum(dim=0)
+            # density error contribution: drho = sum_i f_i * 2 Re(psi_i* dpsi_i).
+            # occ is [0,2] for nspin=1 and [0,1] per spin channel for nspin=2;
+            # the factor 2 below is the c.c. pair, not spin degeneracy.
+            psi_r = g_to_r(c_occ, sph0.flat_idx, grid.shape)
+            dpsi_r = g_to_r(dpsi, sph1.flat_idx, grid.shape)
+            w = 2.0 * float(system.kweights[ik])
+            drho += w * (occ.view(-1, 1, 1, 1) * (psi_r.conj() * dpsi_r).real).sum(dim=0)
 
-        # energy error contribution: dE = sum_i f_i <dpsi_i | R_i> (2nd order, < 0);
-        # dpsi is annulus-only, so this picks the complement part of the residual
-        de_band = (dpsi.conj() * resid).real.sum(dim=1)  # (n_occ,)
-        denergy += float(system.kweights[ik]) * float((occ * de_band).sum())
+            # energy error contribution: dE = sum_i f_i <dpsi_i | R_i> (2nd order,
+            # < 0); dpsi is annulus-only, so this picks the complement residual
+            de_band = (dpsi.conj() * resid).real.sum(dim=1)  # (n_occ,)
+            denergy += float(system.kweights[ik]) * float((occ * de_band).sum())
 
-        dpsi_all.append(dpsi)
-        psi_large_all.append(c_occ_1)
-        occ_all.append(occ)
-        sph_all.append(sph1)
+            dpsi_k.append(dpsi)
+            psi_large_k.append(c_occ_1)
+            occ_k.append(occ)
+            sph_k.append(sph1)
+        dpsi_s.append(dpsi_k)
+        psi_large_s.append(psi_large_k)
+        occ_s.append(occ_k)
+        sph_s.append(sph_k)
+
+    # nspin=1 keeps the flat per-k layout the force path consumes
+    if nspin == 1:
+        dpsi_all, psi_large_all, occ_all, sph_all = (
+            dpsi_s[0], psi_large_s[0], occ_s[0], sph_s[0])
+    else:
+        dpsi_all, psi_large_all, occ_all, sph_all = (
+            dpsi_s, psi_large_s, occ_s, sph_s)
 
     drho = drho / grid.volume
     drho_fo = drho.clone()
 
     if dyson:
+        if nspin != 1:
+            raise NotImplementedError("Dyson dressing is nspin=1 only")
         if xc is None:
             raise ValueError("dyson=True requires the xc functional")
         drho = _dyson_dress(
