@@ -38,6 +38,7 @@ from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
 from gradwave.core.hamiltonian import becp
 from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.postscf._anderson import AndersonMixer
 from gradwave.postscf.uspp_implicit import _check_supported, _ConvergedUSPP
 from gradwave.scf.newton import _pack, _unpack
 
@@ -277,8 +278,7 @@ def _self_consistent_response(cs, bare_rho, bare_bec, *, beta=0.3,
     dpsi_warm = [[torch.zeros_like(c[:n_sv]) for c, n_sv in
                   zip(cs.c_win[0], cs.n_solve[0], strict=True)]]
     d = r_vec.clone()
-    prev_d = prev_g = None
-    hist_dd, hist_dg = [], []
+    mixer = AndersonMixer(history, beta)
     w_sp = None
     for it in range(1, max_inner + 1):
         d_rho, d_bec = _unpack(d, shape, n_pts, nbec)
@@ -296,20 +296,7 @@ def _self_consistent_response(cs, bare_rho, bare_bec, *, beta=0.3,
         if gn < inner_tol:
             d = g_vec
             break
-        if prev_g is not None:
-            hist_dd.append(d - prev_d)
-            hist_dg.append(g_res - prev_g)
-            if len(hist_dg) > history:
-                hist_dd.pop(0)
-                hist_dg.pop(0)
-        prev_d, prev_g = d, g_res
-        if hist_dg:
-            dg = torch.stack(hist_dg, dim=1)
-            dd = torch.stack(hist_dd, dim=1)
-            gam = torch.linalg.lstsq(dg, g_res[:, None]).solution[:, 0]
-            d = d + beta * g_res - (dd + beta * dg) @ gam
-        else:
-            d = d + beta * g_res
+        d = mixer.step(d, g_res)
     else:
         raise RuntimeError(f"position response not converged ({gn:.2e} "
                            f"after {max_inner} iterations)")

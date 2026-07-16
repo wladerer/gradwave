@@ -36,6 +36,7 @@ from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.fftbox import r_to_g
 from gradwave.core.hamiltonian import build_projector_data, projectors
 from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.postscf._anderson import AndersonMixer
 from gradwave.postscf.hubbard_u import _cg_sternheimer_b, _pad
 from gradwave.pseudo.kb import beta_form_factors
 from gradwave.scf.implicit import apply_k_hxc
@@ -133,7 +134,7 @@ def dielectric_born(res, xc, *, dk: float = 1e-3, cg_tol: float = 1e-9,
     for b_dir in range(3):
         # Anderson-accelerated fixed point on u = K_Hxc[Δρ(E-probe + u)]
         u_flat = torch.zeros(n_pts, dtype=RDTYPE, device=c_occ.device)
-        prev_u, prev_r, hist_du, hist_dr = None, None, [], []
+        mixer = AndersonMixer(history, beta)
         dpsi = torch.zeros_like(c_occ)
         col_prev = None
         for it in range(1, max_outer + 1):
@@ -157,20 +158,7 @@ def dielectric_born(res, xc, *, dk: float = 1e-3, cg_tol: float = 1e-9,
                 break
             col_prev = col
             r_vec = apply_k_hxc(res, xc, drho).reshape(-1).to(u_flat.device) - u_flat
-            if prev_r is not None:
-                hist_du.append(u_flat - prev_u)
-                hist_dr.append(r_vec - prev_r)
-                if len(hist_dr) > history:
-                    hist_du.pop(0)
-                    hist_dr.pop(0)
-            prev_u, prev_r = u_flat, r_vec
-            if hist_dr:
-                dr_m = torch.stack(hist_dr, dim=1)
-                du_m = torch.stack(hist_du, dim=1)
-                gamma = torch.linalg.lstsq(dr_m, r_vec[:, None]).solution[:, 0]
-                u_flat = u_flat + beta * r_vec - (du_m + beta * dr_m) @ gamma
-            else:
-                u_flat = u_flat + beta * r_vec
+            u_flat = mixer.step(u_flat, r_vec)
         else:
             raise RuntimeError(f"E-field response ({b_dir}) not converged")
         dpsi_all.append(dpsi)

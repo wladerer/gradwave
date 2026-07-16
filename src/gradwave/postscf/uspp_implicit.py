@@ -103,6 +103,7 @@ from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
 from gradwave.core.hamiltonian import becp, projectors
 from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.postscf._anderson import AndersonMixer
 from gradwave.solvers.precond import teter
 
 
@@ -846,8 +847,7 @@ def uspp_density_loss_param_grads(
         # With kerker_q0 the Anderson recursion runs on the preconditioned
         # residual; the convergence check stays on the raw one.
         u = l_vec.clone()
-        prev_u = prev_r = None
-        hist_du, hist_dr = [], []
+        mixer = AndersonMixer(history, beta)
         drho = dbec = None
         rn_best, u_best, it_best = float("inf"), None, 0
         for it in range(1, max_outer + 1):
@@ -880,20 +880,7 @@ def uspp_density_loss_param_grads(
                     d_hub_sp=d_hub_sp)
                 break
             p_vec = precondition(r_vec)
-            if prev_r is not None:
-                hist_du.append(u - prev_u)
-                hist_dr.append(p_vec - prev_r)
-                if len(hist_dr) > history:
-                    hist_du.pop(0)
-                    hist_dr.pop(0)
-            prev_u, prev_r = u, p_vec
-            if hist_dr:
-                dr_m = torch.stack(hist_dr, dim=1)  # (n_u, h)
-                du_m = torch.stack(hist_du, dim=1)
-                gamma = torch.linalg.lstsq(dr_m, p_vec[:, None]).solution[:, 0]
-                u = u + beta * p_vec - (du_m + beta * dr_m) @ gamma
-            else:
-                u = u + beta * p_vec
+            u = mixer.step(u, p_vec)
         else:
             raise RuntimeError(
                 f"USPP adjoint fixed point not converged ({rn:.2e} after "

@@ -47,6 +47,7 @@ from gradwave.core.hubbard import (
 )
 from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.postscf._anderson import AndersonMixer
 from gradwave.scf.loop import scf
 
 
@@ -318,7 +319,7 @@ def _response_columns(res, xc, hub, hub_q, site, *, beta=0.2, outer_tol=1e-6,
     # two Ni that plain Richardson iteration amplifies.
     n_pts = grid.n_points
     u_flat = torch.zeros(2 * n_pts, dtype=RDTYPE, device=hub_q.device)
-    prev_u, prev_r, hist_du, hist_dr = None, None, [], []
+    mixer = AndersonMixer(history, beta)
     dpsi = [torch.zeros_like(c_occ[sp]) for sp in range(2)]
     chi0_col, chi_prev = None, None
     for it in range(1, max_outer + 1):
@@ -347,20 +348,7 @@ def _response_columns(res, xc, hub, hub_q, site, *, beta=0.2, outer_tol=1e-6,
         chi_prev = chi_col
         du, dd = _k_hxc_spin(res, xc, drho[0], drho[1])
         r_vec = torch.cat([du.reshape(-1), dd.reshape(-1)]) - u_flat
-        if prev_r is not None:
-            hist_du.append(u_flat - prev_u)
-            hist_dr.append(r_vec - prev_r)
-            if len(hist_dr) > history:
-                hist_du.pop(0)
-                hist_dr.pop(0)
-        prev_u, prev_r = u_flat, r_vec
-        if hist_dr:
-            dr_m = torch.stack(hist_dr, dim=1)  # (2n, h)
-            du_m = torch.stack(hist_du, dim=1)
-            gamma = torch.linalg.lstsq(dr_m, r_vec[:, None]).solution[:, 0]
-            u_flat = u_flat + beta * r_vec - (du_m + beta * dr_m) @ gamma
-        else:
-            u_flat = u_flat + beta * r_vec
+        u_flat = mixer.step(u_flat, r_vec)
     raise RuntimeError(f"response fixed point not converged in {max_outer} iterations")
 
 
