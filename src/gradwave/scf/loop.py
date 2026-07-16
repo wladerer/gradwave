@@ -316,6 +316,86 @@ def vxc_spin_potential(xc, rho_up, rho_dn, grid):
     return vu * scale, vd * scale, e_xc.detach()
 
 
+def _seed_density(system, nspin, start_from, start_mag, grid, vol):
+    """Initial per-spin density: warm-start from a previous state (volume-
+    rescaled so the electron count is conserved), else SAD — spin-split by
+    start_mag for nspin=2."""
+    if start_from is not None:
+        def _prev(key, default=None):
+            return (start_from.get(key, default)
+                    if isinstance(start_from, dict)
+                    else getattr(start_from, key, default))
+
+        prev_grid = _prev("system").grid
+        if tuple(prev_grid.shape) != tuple(grid.shape):
+            raise ValueError("start_from requires the same FFT grid "
+                             f"({tuple(prev_grid.shape)} vs {tuple(grid.shape)})")
+        if int(_prev("nspin", 1) or 1) != nspin:
+            raise ValueError("start_from nspin mismatch")
+        dev = system.positions.device
+        chg = float(prev_grid.volume) / float(vol)
+        if nspin == 1:
+            return [_prev("rho").detach().to(dev) * chg]
+        return [r.detach().to(dev) * chg for r in _prev("rho_spin")]
+    if nspin == 1:
+        return [sad_density(grid, system.positions, system.species_of_atom,
+                            system.upfs, system.n_electrons)]
+    na = len(system.species_of_atom)
+    nspecies = len(system.upfs)
+    if start_mag is None:
+        mags_at = [0.5] * na
+    elif len(start_mag) == na:
+        mags_at = [float(m) for m in start_mag]
+    elif len(start_mag) == nspecies:
+        mags_at = [float(start_mag[sp]) for sp in system.species_of_atom]
+    else:
+        raise ValueError("start_mag must have one entry per atom or per species")
+    mags_by_sp = {}
+    for a, sp in enumerate(system.species_of_atom):
+        mags_by_sp.setdefault(sp, set()).add(round(mags_at[a], 12))
+    uniform_per_species = all(len(v) == 1 for v in mags_by_sp.values())
+    if system.rho_symmetrizer is not None and not uniform_per_species:
+        raise ValueError(
+            "non-uniform per-atom moments break the chemical space group "
+            "(magnetic group is smaller) — build the system with "
+            "use_symmetry=False for AFM/ferrimagnetic configurations"
+        )
+    n_up = sum(float(system.charges[a]) * (1 + mags_at[a]) / 2 for a in range(na))
+    n_dn = system.n_electrons - n_up
+    return [
+        sad_density(grid, system.positions, system.species_of_atom, system.upfs,
+                    n_up, atom_scale=[(1 + m) / 2 for m in mags_at]),
+        sad_density(grid, system.positions, system.species_of_atom, system.upfs,
+                    n_dn, atom_scale=[(1 - m) / 2 for m in mags_at]),
+    ]
+
+
+def _seed_orbitals(nk, nb, bk, nspin, device, start_from):
+    """Initial per-spin orbital guess: an identity block of the lowest-|k+G|²
+    plane waves, overwritten by shape-compatible previous orbitals (the QE
+    wfc-extrapolation analogue) when start_from carries them."""
+    c0 = torch.zeros(nk, nb, bk.npw_max, dtype=CDTYPE, device=device)
+    c0[:, torch.arange(nb), torch.arange(nb)] = 1.0
+    coeffs_b_s = [c0.clone() for _ in range(nspin)]
+    if start_from is not None:
+        prev_c = (start_from.get("coeffs") if isinstance(start_from, dict)
+                  else getattr(start_from, "coeffs", None))
+        if prev_c is not None:
+            chans = [prev_c] if nspin == 1 else list(prev_c)
+            compat = len(chans) == nspin and all(
+                len(ch) == nk and all(
+                    ch[ik].shape[0] >= nb
+                    and ch[ik].shape[1] == int(bk.npw[ik])
+                    for ik in range(nk))
+                for ch in chans)
+            if compat:
+                for sp, ch in enumerate(chans):
+                    for ik in range(nk):
+                        coeffs_b_s[sp][ik, :, : int(bk.npw[ik])] = (
+                            ch[ik][:nb].to(device=device, dtype=CDTYPE))
+    return coeffs_b_s
+
+
 @torch.no_grad()
 def scf(
     system: System,
@@ -359,58 +439,7 @@ def scf(
         g2_min = float(g2_nonzero[g2_nonzero > 1e-12].min())
         kerker = (smearing != "none") or (g2_min < 0.64)
 
-    if start_from is not None:
-        # mirror of the USPP warm start: seed ρ from the previous state,
-        # rescaled by the volume ratio so the electron count is conserved
-        def _prev(key, default=None):
-            return (start_from.get(key, default)
-                    if isinstance(start_from, dict)
-                    else getattr(start_from, key, default))
-
-        prev_grid = _prev("system").grid
-        if tuple(prev_grid.shape) != tuple(grid.shape):
-            raise ValueError("start_from requires the same FFT grid "
-                             f"({tuple(prev_grid.shape)} vs {tuple(grid.shape)})")
-        if int(_prev("nspin", 1) or 1) != nspin:
-            raise ValueError("start_from nspin mismatch")
-        dev = system.positions.device
-        chg = float(prev_grid.volume) / float(vol)
-        if nspin == 1:
-            rho_s = [_prev("rho").detach().to(dev) * chg]
-        else:
-            rho_s = [r.detach().to(dev) * chg for r in _prev("rho_spin")]
-    elif nspin == 1:
-        rho_s = [sad_density(grid, system.positions, system.species_of_atom,
-                             system.upfs, system.n_electrons)]
-    else:
-        na = len(system.species_of_atom)
-        nspecies = len(system.upfs)
-        if start_mag is None:
-            mags_at = [0.5] * na
-        elif len(start_mag) == na:
-            mags_at = [float(m) for m in start_mag]
-        elif len(start_mag) == nspecies:
-            mags_at = [float(start_mag[sp]) for sp in system.species_of_atom]
-        else:
-            raise ValueError("start_mag must have one entry per atom or per species")
-        mags_by_sp = {}
-        for a, sp in enumerate(system.species_of_atom):
-            mags_by_sp.setdefault(sp, set()).add(round(mags_at[a], 12))
-        uniform_per_species = all(len(v) == 1 for v in mags_by_sp.values())
-        if system.rho_symmetrizer is not None and not uniform_per_species:
-            raise ValueError(
-                "non-uniform per-atom moments break the chemical space group "
-                "(magnetic group is smaller) — build the system with "
-                "use_symmetry=False for AFM/ferrimagnetic configurations"
-            )
-        n_up = sum(float(system.charges[a]) * (1 + mags_at[a]) / 2 for a in range(na))
-        n_dn = system.n_electrons - n_up
-        rho_s = [
-            sad_density(grid, system.positions, system.species_of_atom, system.upfs,
-                        n_up, atom_scale=[(1 + m) / 2 for m in mags_at]),
-            sad_density(grid, system.positions, system.species_of_atom, system.upfs,
-                        n_dn, atom_scale=[(1 - m) / 2 for m in mags_at]),
-        ]
+    rho_s = _seed_density(system, nspin, start_from, start_mag, grid, vol)
 
     mask_flat = grid.dens_mask.reshape(-1)
     g2_vec = grid.g2.reshape(-1)[mask_flat]
@@ -458,30 +487,9 @@ def scf(
     )
     vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
 
-    # initial orbitals: lowest-kinetic plane waves (sphere ordering is by |k+G|²)
-    c0 = torch.zeros(nk, nb, bk.npw_max, dtype=CDTYPE, device=device)
-    c0[:, torch.arange(nb), torch.arange(nb)] = 1.0
-    coeffs_b_s = [c0.clone() for _ in range(nspin)]
-    if start_from is not None:
-        # wavefunction reuse (the QE wfc-extrapolation analogue): previous
-        # orbitals are near-solutions after small moves, so the first tight
-        # Davidson converges in a few expansions instead of from scratch.
-        # Shape guards fall back to the plane-wave seed silently.
-        prev_c = (start_from.get("coeffs") if isinstance(start_from, dict)
-                  else getattr(start_from, "coeffs", None))
-        if prev_c is not None:
-            chans = [prev_c] if nspin == 1 else list(prev_c)
-            compat = len(chans) == nspin and all(
-                len(ch) == nk and all(
-                    ch[ik].shape[0] >= nb
-                    and ch[ik].shape[1] == int(bk.npw[ik])
-                    for ik in range(nk))
-                for ch in chans)
-            if compat:
-                for sp, ch in enumerate(chans):
-                    for ik in range(nk):
-                        coeffs_b_s[sp][ik, :, : int(bk.npw[ik])] = (
-                            ch[ik][:nb].to(device=device, dtype=CDTYPE))
+    # initial orbitals: lowest-kinetic plane waves, reusing previous orbitals
+    # (QE wfc-extrapolation analogue) when start_from carries compatible ones
+    coeffs_b_s = _seed_orbitals(nk, nb, bk, nspin, device, start_from)
 
     e_free_prev, converged, history = None, False, []
     eigs_s = [torch.zeros(nk, nb, dtype=RDTYPE, device=device) for _ in range(nspin)]
