@@ -35,9 +35,38 @@ nav:
       - Learning XC by AD: learning-xc.md
   - Inputs and outputs: io.md
   - Reference: reference.md
+  - API reference:
+      - Overview: api/index.md
+      - High-level API: api/highlevel.md
+      - SCF engine: api/scf.md
+      - Properties: api/properties.md
+      - Exchange–correlation: api/xc.md
+      - Pseudopotentials: api/pseudopotentials.md
   - Performance: performance.md
   - Wisdom: wisdom.md
   - Bibliography: bibliography.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_root_heading: true
+            show_root_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            show_source: false
+            heading_level: 3
+            members_order: source
+            separate_signature: true
+            show_signature_annotations: true
+            signature_crossrefs: true
+            merge_init_into_class: true
+            docstring_section_style: list
+            filters: ["!^_"]
 
 markdown_extensions:
   - admonition

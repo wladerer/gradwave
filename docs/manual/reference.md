@@ -1,7 +1,9 @@
 # Reference
 
 The terse command-line and entry-point tables. The [Inputs and outputs](io.md) page
-covers the file schema, checkpoints, and analysis in full.
+covers the file schema, checkpoints, and analysis in full, and the
+[API reference](api/index.md) documents every public function and class from its
+docstrings.
 
 ## CLI
 
@@ -31,3 +33,6 @@ key list, the checkpoint API, and the analysis helpers.
 | `LearnableX`, `LearnableSpinX` (`core.xc.learnable`) | learnable exchange |
 | `energy_param_grads` (`core.xc.learnable`) | free dE/dθ at convergence |
 | `uspp_density_loss_param_grads` (`postscf.uspp_implicit`) | density-loss adjoint |
+
+The [API reference](api/index.md) expands each of these with full signatures,
+grouped by subsystem.
