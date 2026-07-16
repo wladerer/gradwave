@@ -360,6 +360,60 @@ def _bands_extra(inp: Input, res, verbose: bool) -> dict:
     return {"bands": bands}
 
 
+def _error_estimate_block(res, inp) -> dict:
+    """Post-SCF plane-wave (Ecut) discretization-error estimate for the output.
+
+    Cheap post-processing (no larger SCF): the first-order complement correction
+    of Cancès et al. gives the estimated basis-set error in the energy (a
+    definite lowering), the density, and, for norm-conserving nspin=1, the
+    Hellmann-Feynman forces. Reported as an indicator, not a rigorous bound.
+    Degrades gracefully when the run's formalism/settings are outside coverage.
+    """
+    from gradwave.postscf.discretization_error import (
+        estimate_density_error,
+        estimate_force_error,
+    )
+
+    _species, upfs, _soa = _species_upfs(inp)
+    uspp = _is_uspp(upfs)
+    xc = _spin_setup(inp)[0] if inp.nspin == 2 else XC_REGISTRY[inp.xc]()
+    system = _get(res, "system")
+    nspin = int(_get(res, "nspin", 1) or 1)
+    natom = len(system.positions)
+    grid = system.grid
+    vol, npts = grid.volume, grid.n_points
+    nelec = float(system.n_electrons)
+    try:
+        err = estimate_density_error(res, xc=xc)
+    except NotImplementedError as e:
+        return {"available": False, "reason": str(e)}
+
+    drho = err.drho
+    free_e = float(_get(res, "energies").free_energy)
+    block = {
+        "available": True,
+        "method": "Cances first-order complement (post-SCF)",
+        "ecut_eV": err.ecut,
+        "ecut_large_eV": err.ecut_large,
+        "denergy_eV": float(err.denergy),
+        "denergy_meV_per_atom": float(err.denergy) / natom * 1e3,
+        "free_energy_extrapolated_eV": free_e + float(err.denergy),
+        "drho_L1_per_electron": float(drho.abs().sum()) * vol / npts / nelec,
+        "int_drho": float(drho.sum()) * vol / npts,
+        "note": "first-order estimate, indicative not a rigorous bound",
+    }
+    force_ok = (not uspp and nspin == 1
+                and getattr(system, "rho_core", None) is None)
+    if force_ok:
+        try:
+            fe = estimate_force_error(res, err).norm(dim=1)
+            block["force_error_max_eV_ang"] = float(fe.max())
+            block["force_error_rms_eV_ang"] = float((fe ** 2).mean().sqrt())
+        except NotImplementedError:
+            pass
+    return block
+
+
 def run(inp: Input, verbose: bool = True) -> dict:
     """Execute inp.task and write <task>.json, <task>.out and (for SCF
     state) checkpoint.pt into inp.output_dir."""
@@ -370,6 +424,8 @@ def run(inp: Input, verbose: bool = True) -> dict:
     if inp.task == "scf":
         res = run_scf(inp, verbose=verbose)
         summary = build_summary(res, inp, "scf", runtime_s=time.time() - t0)
+        if inp.error_estimate:
+            summary["error_estimate"] = _error_estimate_block(res, inp)
     elif inp.task == "relax":
         relax, _atoms = run_relax(inp, verbose=verbose)
         from gradwave import __version__
