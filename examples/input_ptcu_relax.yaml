@@ -1,0 +1,59 @@
+# PtCu (L1_0 / CuAu-type ordered alloy) geometry optimization with symmetry.
+#
+# The two Cu atoms start ~0.08 Å above their ideal z = c/2 plane; BFGS relaxes
+# the Cu sublattice back down to the symmetric L1_0 site. Displacing both Cu
+# equally keeps them equivalent, so the tetragonal symmetry is preserved along
+# the whole path and `symmetry: true` reduces k to the IBZ at every ionic step.
+#
+#   gradwave input_ptcu_relax.yaml -o out_ptcu/
+#
+# This relaxes atomic positions only (the `task: relax` driver is atoms-only).
+# The cell a, c are held fixed; a variable-cell (c/a) relaxation needs
+# ase.filters.FrechetCellFilter, which the GradWave calculator supports from
+# Python but the CLI relax does not wrap. Relaxing a cell at fixed ecut also
+# carries Pulay stress, so converge ecut or re-relax at the new cell.
+
+structure:
+  # tetragonal L1_0: Pt plane at z = 0, Cu plane at z = c/2.  a = 3.80, c = 3.60 Å
+  cell: [[3.80, 0.0, 0.0], [0.0, 3.80, 0.0], [0.0, 0.0, 3.60]]
+  positions:
+    cart:
+      - [0.00, 0.00, 0.00]    # Pt
+      - [1.90, 1.90, 0.00]    # Pt
+      - [1.90, 0.00, 1.88]    # Cu   (ideal z = 1.80; +0.08 Å)
+      - [0.00, 1.90, 1.88]    # Cu   (ideal z = 1.80; +0.08 Å)
+  species: [Pt, Pt, Cu, Cu]
+
+pseudopotentials:
+  dir: ../tests/fixtures/qe/pseudos
+  map:
+    Pt: Pt.pbe-n-kjpaw_psl.1.0.0.UPF
+    Cu: Cu.pbe-dn-kjpaw_psl.1.0.0.UPF
+
+ecut: 680.28          # eV (50 Ry, wavefunctions)
+ecutrho: 5442.28      # eV (400 Ry, PAW density/augmentation)
+xc: pbe
+nspin: 1              # PtCu L1_0 is non-magnetic
+symmetry: true        # reduce k to the IBZ + symmetrize the density each step
+
+kpoints:
+  mesh: [8, 8, 8]
+
+smearing:
+  type: gaussian      # PtCu is a metal
+  width: 0.1          # eV
+
+scf:
+  etol: 1.0e-8
+  rhotol: 1.0e-7
+  mixing:
+    scheme: johnson   # best convergence for a smeared metal
+
+task: relax
+relax:
+  optimizer: bfgs
+  fmax: 0.01          # eV/Å
+  max_steps: 100
+
+output:
+  dir: ./out_ptcu
