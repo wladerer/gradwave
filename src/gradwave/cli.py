@@ -36,7 +36,8 @@ def _build_parser():
     p_plot.add_argument("result", help="path to <task>.json")
     p_plot.add_argument("-o", "--output", metavar="FILE",
                         help="figure file (default: alongside the JSON)")
-    p_plot.add_argument("--kind", choices=("auto", "scf", "bands", "dos"),
+    p_plot.add_argument("--kind",
+                        choices=("auto", "scf", "bands", "dos", "pdos"),
                         default="auto")
     p_plot.add_argument("--width", type=float, default=0.1,
                         help="DOS broadening [eV]")
@@ -74,13 +75,23 @@ def _cmd_plot(args) -> int:
     summary = analysis.load(args.result)
     kind = args.kind
     if kind == "auto":
-        kind = "bands" if "bands" in summary else "scf"
+        if "bands" in summary:
+            kind = "bands"
+        elif "pdos" in summary:
+            kind = "pdos"
+        else:
+            kind = "scf"
     out = args.output or str(
         Path(args.result).with_suffix("")) + f".{kind}.png"
     if kind == "scf":
         analysis.plot_scf(summary, path=out)
     elif kind == "bands":
         analysis.plot_bands(summary, path=out)
+    elif kind == "pdos":
+        if analysis._is_noncollinear_block(summary.get("pdos")):
+            analysis.plot_spin_texture(summary, path=out)
+        else:
+            analysis.plot_pdos(summary, path=out)
     else:
         analysis.plot_dos(summary, path=out, width=args.width)
     print(f"wrote {out}")

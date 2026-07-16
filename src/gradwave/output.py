@@ -196,6 +196,37 @@ def _bands_lines(bands):
     return lines
 
 
+def _pdos_lines(pdos):
+    """Projected-DOS summary: spilling and the integrated Löwdin weight per group
+    (electrons per group, summed over the spectrum). Spin-resolved for nspin=2."""
+    import numpy as np
+
+    lines = ["", "   projected DOS"]
+    if not pdos.get("available", True):
+        lines.append(f"   unavailable · {pdos.get('reason', '')}")
+        return lines
+    e = np.asarray(pdos["energy_eV"], dtype=float)
+    nspin = int(pdos.get("nspin", 1))
+    lines.append(f"   group_by {pdos['group_by']} · "
+                 f"spilling {pdos['spilling']:.4f} · "
+                 f"integrated Löwdin weight [electrons]")
+
+    def integ(arr):
+        a = np.asarray(arr, dtype=float)
+        return np.trapezoid(a, e, axis=-1)
+
+    if nspin == 2:
+        lines.append(f"   {'group':<20s}{'up':>10s}{'down':>10s}{'net':>10s}")
+        for lab, arr in sorted(pdos["groups"].items()):
+            up, dn = integ(arr)
+            lines.append(f"   {lab:<20s}{up:>10.4f}{dn:>10.4f}{up - dn:>+10.4f}")
+    else:
+        lines.append(f"   {'group':<28s}{'weight':>12s}")
+        for lab, arr in sorted(pdos["groups"].items()):
+            lines.append(f"   {lab:<28s}{float(integ(arr)):>12.4f}")
+    return lines
+
+
 def format_output(summary: dict) -> str:
     """The full human-readable report for a task summary dict."""
     code = summary["code"]
@@ -208,6 +239,8 @@ def format_output(summary: dict) -> str:
         lines += _scf_lines(summary["scf"], summary.get("runtime_s"))
         lines += _energy_lines(summary["scf"])
         lines += _eigenvalue_lines(summary)
+    if "pdos" in summary:
+        lines += _pdos_lines(summary["pdos"])
     if "relax" in summary:
         lines += _relax_lines(summary["relax"])
     if "bands" in summary:

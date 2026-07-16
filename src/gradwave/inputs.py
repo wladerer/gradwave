@@ -64,6 +64,14 @@ class BandsParams:
 
 
 @dataclass(frozen=True)
+class ProjectionsParams:
+    enabled: bool = False
+    group_by: str = "l"      # atom | l | lm | total (j | jmj for FR)
+    width: float = 0.1       # gaussian broadening [eV]
+    npoints: int = 800
+
+
+@dataclass(frozen=True)
 class Input:
     atoms: Atoms
     pseudo_dir: Path
@@ -81,6 +89,7 @@ class Input:
     task: str = "scf"  # scf | relax | bands
     relax: RelaxParams = field(default_factory=RelaxParams)
     bands: BandsParams = field(default_factory=BandsParams)
+    projections: ProjectionsParams = field(default_factory=ProjectionsParams)
     device: str = "cpu"
     output_dir: Path = Path("./out")
     output_checkpoint: bool = True  # write checkpoint.pt after SCF tasks
@@ -141,6 +150,16 @@ def load_input(path: str | Path) -> Input:
 
     nbands = raw.get("nbands", "auto")
     ecutrho = raw.get("ecutrho")
+    proj_raw = raw.get("projections", False)
+    if isinstance(proj_raw, bool):
+        projections = ProjectionsParams(enabled=proj_raw)
+    else:
+        projections = ProjectionsParams(
+            enabled=bool(proj_raw.get("enabled", True)),
+            group_by=str(proj_raw.get("group_by", "l")),
+            width=float(proj_raw.get("width", 0.1)),
+            npoints=int(proj_raw.get("npoints", 800)),
+        )
     return Input(
         atoms=atoms,
         pseudo_dir=pseudo_dir,
@@ -166,6 +185,7 @@ def load_input(path: str | Path) -> Input:
         task=task,
         relax=RelaxParams(**raw.get("relax", {})),
         bands=BandsParams(**raw.get("bands", {})),
+        projections=projections,
         device=raw.get("device", "cpu"),
         output_dir=base / out_raw.get("dir", "./out"),
         output_checkpoint=bool(out_raw.get("checkpoint", True)),
