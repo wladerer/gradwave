@@ -197,17 +197,25 @@ physics.
   helper, and the truncation conventions (the msh-at-10-bohr atomic-wfc cutoff that the
   +U path already honors) all carry over unchanged.
 
-The honest magnitude. This mostly helps the first SCF iteration, since every later
-iteration already warm-starts its orbitals from the previous one, so expect roughly one
-to three iterations saved on a cold solve rather than a large fraction of the run. It
-does not close the metal iteration gap against QE, which is a mixer and preconditioner
-question, not a starting-orbital one. The reason to do it anyway is that it composes
-with CheFSI, whose convergence rate depends directly on how much of the wanted subspace
-is already present in the start. A Chebyshev filter fed atomic orbitals needs fewer
-rounds than one fed smooth plane waves, so atomic seeding and CheFSI compound. Build it
-alongside the CheFSI benchmark and measure the pair. Estimate about a day, almost all of it validation that the seeded
-solve reaches the same converged energy as the plane-wave-seeded one, which it must to
-machine precision since the guess only sets the starting point.
+TRIED, does not pay off on its own. Built `lcao_seed` next to `sad_density` (per-k
+atomic-orbital block, QR-orthonormalized to 8e-15, padded with plane waves past the
+orbital count) and wired it at the `c0` site. It reaches the plane-wave-seeded energy to
+machine precision, as it must (NC O2 gives dF = 5e-12 eV, fcc Ni gives dF = 3e-11 eV).
+The predicted one-to-three iteration saving is real but small (O2 goes 28 to 26
+iterations, fcc Ni 6x6x6 goes 12 to 12), and the per-k seed build costs enough that wall
+time came out neutral to slightly worse (Ni, 108 s to 122 s). The reason is the one the
+prediction named. The loop already runs the first diagonalization at a loose 1e-3
+tolerance, so a crude
+plane-wave start converges the cheap early eigensolves fine, and the total SCF count is
+set by density mixing, not by initial-orbital quality. Reverted the wiring rather than
+add per-k overhead to the default path for no measured gain.
+
+The remaining reason to revisit is that it composes with CheFSI, whose convergence rate
+depends directly on how much of the wanted subspace is already in the start. A Chebyshev
+filter fed atomic orbitals needs fewer rounds than one fed smooth plane waves, so the
+pair should be measured together. That is the only configuration where the seed cost
+might be repaid, and it is worth building `lcao_seed` back only alongside a CheFSI-default
+benchmark that shows the compound win.
 
 ## Learned meta-GGA and the kinetic energy density
 
