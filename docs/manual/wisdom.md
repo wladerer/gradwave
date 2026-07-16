@@ -238,9 +238,9 @@ defect, which the [Performance](performance.md) page works through in full.
 - torch.compile cannot double-backward. The `f_xc` kernel is a double backward through
   `E_xc`, so a compiled XC functional would crash the second grad, and the failure lands
   in the caller's grad call where no try/except reaches it. The opt-in `compile_xc` path
-  handles this in the autograd graph. `_DoubleSafeXC` in `core/xc/base.py` reads
-  `torch.is_grad_enabled()` inside its backward, which is true exactly when the caller
-  asked for `create_graph`, and routes that case to eager. First backward (`v_xc`) stays
+  handles this by having the `f_xc` response and HVP call sites wrap their
+  `xc.energy()` in the `xc_eager()` context manager (`core/xc/base.py`), a thread-local
+  switch that forces `eval_energy_density` back to eager. First backward (`v_xc`) stays
   compiled, second backward (`f_xc`) falls back, and no response caller changes.
 - Validate finite differences on a ladder. Analytic against a finite difference of
   complete SCF re-runs at 1e-5 to 1e-7 relative is the floor for first derivatives. When

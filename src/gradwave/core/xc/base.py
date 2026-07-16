@@ -61,7 +61,7 @@ class CompilableXC:
 
     The XC transcendental chain is real-valued and fuses well under Inductor,
     unlike the complex FFT-bound Hamiltonian apply where two earlier attempts
-    measured no gain (see docs/torch-compile.md). Compilation is lazy and
+    measured no gain. Compilation is lazy and
     per-instance. Any compile or runtime error, a missing host toolchain on a
     stock checkout or a Triton libcuda gap, latches the eager path so nothing
     downstream breaks. Route every hot caller through eval_energy_density so the

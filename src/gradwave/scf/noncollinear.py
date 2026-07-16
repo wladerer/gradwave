@@ -1,4 +1,4 @@
-"""Non-collinear spinor SCF (no spin-orbit yet) — see docs/noncollinear.md.
+"""Non-collinear spinor SCF (no spin-orbit yet).
 
 Spinors ride the existing k-batched machinery as DOUBLED plane-wave vectors
 c (nk, nb, 2·npw_max): [.., :npw] = up component, [.., npw:] = down. The

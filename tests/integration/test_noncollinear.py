@@ -1,4 +1,4 @@
-"""Spinor SCF validation ladder (docs/noncollinear.md, no SOC):
+"""Spinor SCF validation ladder (no SOC):
 1. collinear limit: moments along ẑ reproduce nspin=2 LSDA exactly;
 2. global rotation invariance: x̂ and tilted moments give the same F
    (verified to ~0.2 µeV — the precision floor for future MCA work)."""

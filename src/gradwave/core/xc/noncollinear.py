@@ -15,7 +15,7 @@ the correct magnitude — no hand-coded projection anywhere. The |m⃗| → 0
 limit is regularized smoothly (ε in the norm); B_xc → 0 there as it must.
 
 This module is the XC leg of the non-collinear phase; the spinor
-Hamiltonian/SCF (see docs/noncollinear.md) consumes (v_xc, B⃗_xc) as the
+Hamiltonian/SCF consumes (v_xc, B⃗_xc) as the
 2×2 potential  V = v_xc·1 + B⃗_xc·σ⃗.
 """
 

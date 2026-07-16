@@ -1,7 +1,7 @@
 """Bit-accuracy gate for the opt-in compiled XC path (compile_xc).
 
 The XC transcendental chain is real-valued and fuses under Inductor, unlike the
-complex FFT-bound Hamiltonian apply (see docs/torch-compile.md). enable_compile()
+complex FFT-bound Hamiltonian apply. enable_compile()
 routes energy_density through torch.compile with an eager fallback. These tests
 pin the contract that matters regardless of whether the host toolchain is present:
 

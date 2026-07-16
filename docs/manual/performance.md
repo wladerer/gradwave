@@ -106,8 +106,7 @@ response, and the Newton step all inherit it.
 torch.compile is dead on the complex FFT-bound Hamiltonian apply, the entry below
 still stands for that. The exchange-correlation functional is the opposite case. It
 is real-valued and runs a chain of roughly thirty elementwise transcendental
-operations that Inductor fuses well, and the analysis and two failed complex
-attempts are in `docs/torch-compile.md`. Passing `compile_xc=True` to the `GradWave`
+operations that Inductor fuses well. Passing `compile_xc=True` to the `GradWave`
 calculator, or calling `xc.enable_compile()`, routes `XCFunctional.energy_density`
 through a cached compiled callable with an eager fallback.
 
@@ -131,9 +130,9 @@ whether or not it succeeds, so it pays back only over a long SCF or a training r
 never a one-shot, which is why the gate test is in the slow tier. Second,
 torch.compile with aot_autograd cannot double-backward, and the `f_xc` response
 kernel (dielectric, Newton, Stoner, learned-U) is exactly a double backward through
-`E_xc`. The `_DoubleSafeXC` autograd wrapper detects the second-derivative path by
-`torch.is_grad_enabled()` inside its backward and routes it to eager automatically,
-so response and HVP code stays correct with `compile_xc` on, it just does not
+`E_xc`. Those call sites wrap their `xc.energy()` in the `xc_eager()` context
+manager (`core/xc/base.py`), which forces the eager path, so response and HVP code
+stays correct with `compile_xc` on, it just does not
 accelerate there. Correcting the earlier report, HVP-based learned-XC training does
 not benefit for the same reason, only the forward and `v_xc` legs do.
 
@@ -161,7 +160,7 @@ time again.
   operations, and the real-decomposed slice that would compile is too small next
   to the FFTs. It was tried and removed for the complex apply. The real-valued XC
   layer is a separate live win and is not covered by this line, see "Compiled XC
-  layer" below and docs/torch-compile.md.
+  layer" below.
 - **fp32 drafting on a CPU insulator.** The cast overhead beats pocketfft's fp32
   gain, so the draft is slower for that case. The mixed-precision wins are on GPU
   many-k and smeared workloads, not here.

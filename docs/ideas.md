@@ -132,8 +132,7 @@ that varies the screening with the local density, which damps the modes a bare
 Kerker leaves. The Stoner preconditioner that was built targets the magnetic
 instability and proved too expensive per iteration, so a cheap Kerker-plus-local-TF
 for ordinary non-magnetic metals is the untried and lighter object, and the audit
-estimates it at roughly 2.3x on every metal. Full go/no-go in
-`docs/optimization-audit.md`. Validate against the Pt harness, and measure before
+estimated it at roughly 2.3x on every metal. Validate against the Pt harness, and measure before
 believing, since the atomic-seeding item below looked equally promising on paper and
 did not pay off.
 
@@ -343,7 +342,7 @@ Landed as the opt-in `compile_xc` flag (`GradWave(compile_xc=True)` or
 toolchain. Compiled aot_autograd cannot double-backward, so the `f_xc` response
 and HVP sites wrap their `xc.energy()` in `xc_eager()` to stay eager, which means
 only the forward and first-order `v_xc` legs accelerate. Details in
-`docs/torch-compile.md` and `docs/manual/performance.md`.
+`docs/manual/performance.md`.
 
 The original analysis, kept for the reasoning. The compiler is dead on the complex,
 FFT-bound Hamiltonian apply, which two earlier attempts already confirmed, but the
@@ -359,7 +358,7 @@ point, opt-in with an eager fallback for the NixOS toolchain gap.
 
 Landed as commit `71a5265`, about 2x on the USPP/PAW H-apply FFT by running the
 smooth wavefunctions on a coarse grid and the augmentation on the dense grid,
-matching the audit spec. Full writeup in `docs/optimization-audit.md`.
+matching the audit spec.
 
 ## CheFSI, benchmarked no-go on the RTX 3050 (DONE)
 

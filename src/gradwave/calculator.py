@@ -71,7 +71,7 @@ class GradWave(Calculator):
 
     def _make_xc(self):
         """Instantiate the XC functional, opting into the compiled real-valued
-        energy_density path when compile_xc is set (see docs/torch-compile.md).
+        energy_density path when compile_xc is set.
         The functional degrades to eager on any toolchain gap, so this is safe
         to leave on. It pays only for XC-heavy, CPU-bound work (PAW one-center
         loop, response HVPs, learned-XC training), not a plain FFT-bound SCF."""
