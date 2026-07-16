@@ -40,7 +40,7 @@ from gradwave.core.occupations import (
     SCHEMES,
 )
 from gradwave.dtypes import CDTYPE, CDTYPE_LOW, RDTYPE
-from gradwave.scf.common import shared_fermi_occupations
+from gradwave.scf.common import shared_fermi_occupations, spin_sigmas, symmetrize_rho
 from gradwave.scf.guess import sad_density
 from gradwave.scf.layout import MixLayout
 from gradwave.scf.loop import vxc_potential
@@ -444,10 +444,7 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
         rho_aug = (torch.fft.ifftn(aug_box.reshape(shape) * grid.n_points,
                                    dim=(-3, -2, -1))).real
         rho_out_sp = rho_sp + rho_aug
-        if system.rho_symmetrizer is not None:
-            sym_g = system.rho_symmetrizer.apply(r_to_g(rho_out_sp.to(CDTYPE)))
-            rho_out_sp = torch.fft.ifftn(
-                sym_g * grid.n_points, dim=(-3, -2, -1)).real
+        rho_out_sp = symmetrize_rho(system.rho_symmetrizer, rho_out_sp, grid)
         rho_out_s.append(rho_out_sp)
     rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
 
@@ -466,12 +463,7 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
     else:
         c2 = 0.0 if core is None else 0.5 * core
         r_u, r_d = rho_out_s[0] + c2, rho_out_s[1] + c2
-        if xc.needs_gradient:
-            s_uu = sigma_from_rho(r_u, grid.g_cart)
-            s_dd = sigma_from_rho(r_d, grid.g_cart)
-            s_tt = sigma_from_rho(r_u + r_d, grid.g_cart)
-        else:
-            s_uu = s_dd = s_tt = None
+        s_uu, s_dd, s_tt = spin_sigmas(r_u, r_d, xc, grid.g_cart)
         e_xc = xc.energy(r_u, r_d, vol, s_uu, s_dd, s_tt)
     energies = EnergyBreakdown(
         kinetic=sum(kinetic_energy(coeffs[isp], occ_s[isp], system.kweights,

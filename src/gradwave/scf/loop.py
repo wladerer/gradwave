@@ -31,7 +31,7 @@ from gradwave.kpoints import monkhorst_pack
 from gradwave.pseudo.kb import beta_form_factors
 from gradwave.pseudo.local import alpha_z, vloc_of_g
 from gradwave.pseudo.upf import UPFData
-from gradwave.scf.common import shared_fermi_occupations
+from gradwave.scf.common import shared_fermi_occupations, spin_sigmas, symmetrize_rho
 from gradwave.scf.guess import sad_density
 from gradwave.scf.mixing import PulayMixer
 
@@ -309,12 +309,7 @@ def vxc_spin_potential(xc, rho_up, rho_dn, grid):
     ru = rho_up.detach().clone().requires_grad_(True)
     rd = rho_dn.detach().clone().requires_grad_(True)
     with torch.enable_grad():
-        if xc.needs_gradient:
-            s_uu = sigma_from_rho(ru, grid.g_cart)
-            s_dd = sigma_from_rho(rd, grid.g_cart)
-            s_tot = sigma_from_rho(ru + rd, grid.g_cart)
-        else:
-            s_uu = s_dd = s_tot = None
+        s_uu, s_dd, s_tot = spin_sigmas(ru, rd, xc, grid.g_cart)
         e_xc = xc.energy(ru, rd, grid.volume, s_uu, s_dd, s_tot)
         vu, vd = torch.autograd.grad(e_xc, (ru, rd))
     scale = grid.n_points / grid.volume
@@ -495,10 +490,7 @@ def scf(
     veff_s = [torch.zeros(grid.shape, dtype=RDTYPE, device=device) for _ in range(nspin)]
 
     def symmetrize(r_out):
-        if system.rho_symmetrizer is None:
-            return r_out
-        sym_g = system.rho_symmetrizer.apply(r_to_g(r_out.to(CDTYPE)))
-        return (torch.fft.ifftn(sym_g * grid.n_points, dim=(-3, -2, -1))).real
+        return symmetrize_rho(system.rho_symmetrizer, r_out, grid)
 
     for it in range(1, max_iter + 1):
         rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
@@ -633,12 +625,7 @@ def scf(
             e_h = hartree_energy(rho_g_out, grid.g2, vol)
             c2 = 0.0 if system.rho_core is None else 0.5 * system.rho_core
             r_u, r_d = rho_out_s[0] + c2, rho_out_s[1] + c2
-            if xc.needs_gradient:
-                s_uu = sigma_from_rho(r_u, grid.g_cart)
-                s_dd = sigma_from_rho(r_d, grid.g_cart)
-                s_tt = sigma_from_rho(r_u + r_d, grid.g_cart)
-            else:
-                s_uu = s_dd = s_tt = None
+            s_uu, s_dd, s_tt = spin_sigmas(r_u, r_d, xc, grid.g_cart)
             e_xc = xc.energy(r_u, r_d, vol, s_uu, s_dd, s_tt)
             e_loc = local_energy(rho_g_out, vloc_g, vol)
             e_nl = sum(nonlocal_energy(becps_s[sp], _stack_dij(system),

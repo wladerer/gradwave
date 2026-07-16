@@ -38,6 +38,7 @@ from gradwave.core.fftbox import r_to_g
 from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
 from gradwave.core.xc.noncollinear import NoncollinearXC, vxc_and_bxc
 from gradwave.dtypes import CDTYPE, CDTYPE_LOW, RDTYPE, RDTYPE_LOW
+from gradwave.scf.common import symmetrize_rho
 from gradwave.scf.guess import sad_density
 from gradwave.scf.loop import System, _stack_dij
 from gradwave.scf.mixing import PulayMixer
@@ -244,10 +245,7 @@ def scf_noncollinear(
     # the IBZ in setup_system and symmetrize ρ each step, exactly as the scalar
     # path does. m⃗ is never symmetrized (it is pinned to zero here).
     def symmetrize(r_out):
-        if system.rho_symmetrizer is None:
-            return r_out
-        sym_g = system.rho_symmetrizer.apply(r_to_g(r_out.to(CDTYPE)))
-        return torch.fft.ifftn(sym_g * grid.n_points, dim=(-3, -2, -1)).real
+        return symmetrize_rho(system.rho_symmetrizer, r_out, grid)
 
     def vec_of(fields):
         return torch.cat([r_to_g(f.to(CDTYPE)).reshape(-1)[mask_flat] for f in fields])

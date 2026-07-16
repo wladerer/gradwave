@@ -96,7 +96,7 @@ def build_stoner_precond(system, coeffs_s, eigs_s, mu, scheme,
 
     # local m-m kernel diagonal K_mm(r) = ∂v_m/∂m at the current (ρ, m):
     # for a local kernel, (K·1)(r) IS the diagonal — one double backward
-    from gradwave.core.density import sigma_from_rho
+    from gradwave.scf.common import spin_sigmas
 
     rho_leaf = rho_tot.detach().clone()
     m_leaf = m_r.detach().clone().requires_grad_(True)
@@ -107,12 +107,7 @@ def build_stoner_precond(system, coeffs_s, eigs_s, mu, scheme,
         if system.rho_core is not None:
             up = up + 0.5 * system.rho_core
             dn = dn + 0.5 * system.rho_core
-        if xc.needs_gradient:
-            s_uu = sigma_from_rho(up, grid.g_cart)
-            s_dd = sigma_from_rho(dn, grid.g_cart)
-            s_tot = sigma_from_rho(up + dn, grid.g_cart)
-        else:
-            s_uu = s_dd = s_tot = None
+        s_uu, s_dd, s_tot = spin_sigmas(up, dn, xc, grid.g_cart)
         e_xc = xc.energy(up, dn, vol, s_uu, s_dd, s_tot)
         (v_m,) = torch.autograd.grad(e_xc, m_leaf, create_graph=True)
         (fmm,) = torch.autograd.grad(v_m.sum(), m_leaf)

@@ -7,13 +7,43 @@ from __future__ import annotations
 
 import torch
 
+from gradwave.core.density import sigma_from_rho
+from gradwave.core.fftbox import r_to_g
 from gradwave.core.occupations import (
     SCHEMES,
     find_fermi,
     fixed_occupations,
     occupations_and_entropy,
 )
-from gradwave.dtypes import RDTYPE
+from gradwave.dtypes import CDTYPE, RDTYPE
+
+
+def symmetrize_rho(rho_symmetrizer, r_out, grid):
+    """Round-trip a real-space density through the symmetry averager (via G).
+
+    Returns ``r_out`` unchanged when there is no symmetrizer. Shared by the
+    collinear, USPP/PAW, and noncollinear loops, which all applied this exact
+    FFT → apply → iFFT round-trip inline.
+    """
+    if rho_symmetrizer is None:
+        return r_out
+    sym_g = rho_symmetrizer.apply(r_to_g(r_out.to(CDTYPE)))
+    return torch.fft.ifftn(sym_g * grid.n_points, dim=(-3, -2, -1)).real
+
+
+def spin_sigmas(r_u, r_d, xc, g_cart):
+    """(σ_uu, σ_dd, σ_tot) for a GGA, or (None, None, None) for an LDA.
+
+    σ_tot uses the total density r_u + r_d. Callers that need autograd through
+    the densities supply leaf tensors and wrap the call in enable_grad.
+    """
+    if not xc.needs_gradient:
+        return None, None, None
+    return (
+        sigma_from_rho(r_u, g_cart),
+        sigma_from_rho(r_d, g_cart),
+        sigma_from_rho(r_u + r_d, g_cart),
+    )
 
 
 def shared_fermi_occupations(eigs_s, kweights, smearing, width, n_electrons,
