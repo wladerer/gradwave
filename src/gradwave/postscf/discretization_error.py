@@ -28,9 +28,14 @@ path, so it does not affect solve performance; the cost is a handful of extra
 FFTs per occupied band plus (if requested) one dielectric solve.
 
 Coverage. Density and energy error: norm-conserving and ultrasoft/PAW, nspin=1
-and nspin=2, use_symmetry=False (a perturbation breaks the crystal symmetry, so
-the response needs the full k-mesh; the same restriction the implicit-diff
-response carries). Force error: norm-conserving nspin=1. The USPP/PAW path uses
+and nspin=2. Force error: norm-conserving nspin=1. Symmetry: for norm-conserving
+nspin=1 the estimate runs on the IBZ k-points and folds the density error over
+the star (the same operator the SCF applies to rho), while the force error
+symmetrizes the output dF vector like ground-state forces. USPP/PAW, nspin=2,
+and the Dyson dressing still require use_symmetry=False (a perturbation breaks
+the crystal symmetry, so a genuine response needs the full k-mesh; folding the
+IBZ output only works for a fully symmetric perturbation like the complement
+correction). The USPP/PAW path uses
 the generalized residual R = P_annulus(H - eps S) psi and adds the
 augmentation-charge response, dpsi perturbs the on-site occupations (becsum),
 which feed the augmentation density through the Q functions. For nspin=2 the
@@ -167,8 +172,9 @@ def estimate_density_error(
     Parameters
     ----------
     res : SCFResult or dict
-        A converged SCF, use_symmetry=False. An ``SCFResult`` (norm-conserving,
-        nspin=1 or 2) or the dict returned by ``scf_uspp`` (USPP/PAW, nspin=1).
+        A converged SCF. An ``SCFResult`` (norm-conserving, nspin=1 or 2;
+        use_symmetry allowed for nspin=1) or the dict returned by ``scf_uspp``
+        (USPP/PAW, nspin=1, use_symmetry=False).
     ecut_large : float, optional
         Cutoff [eV] of the enlarged basis defining the complement annulus. If
         None, uses ``factor * res.system.ecut``. Must satisfy
@@ -181,15 +187,24 @@ def estimate_density_error(
         return _estimate_density_error_uspp(
             res, ecut_large=ecut_large, factor=factor, xc=xc, verbose=verbose,
         )
-    if getattr(res.system, "sym", None) is not None:
-        raise NotImplementedError(
-            "discretization error requires use_symmetry=False: a perturbation "
-            "breaks the crystal symmetry, so the response needs the full k-mesh")
     system = res.system
     grid = system.grid
     device = res.v_eff.device
     ecut = float(system.ecut)
     nspin = int(getattr(res, "nspin", 1))
+    sym = getattr(system, "sym", None)
+    # With symmetry on, the complement runs on the IBZ k-points and the density
+    # error is symmetrized (folded over the star) exactly as the SCF symmetrizes
+    # rho. The energy error is a scalar BZ integral, so the IBZ-weighted sum is
+    # already correct. Only the density channel needs the fold, and only for the
+    # collinear-nonmagnetic case (nspin=1); AFM/ferrimagnetic symmetry is out of
+    # scope. The force propagation then symmetrizes the output dF vector.
+    if sym is not None and nspin != 1:
+        raise NotImplementedError(
+            "symmetric discretization error is nspin=1 only; use "
+            "use_symmetry=False for nspin=2")
+    if sym is not None and dyson:
+        raise NotImplementedError("Dyson dressing requires use_symmetry=False")
     if ecut_large is None:
         ecut_large = factor * ecut
     if gmax_from_ecut(ecut_large) > 2.0 * gmax_from_ecut(ecut) * (1.0 + 1e-9):
@@ -254,6 +269,10 @@ def estimate_density_error(
             dpsi_s, psi_large_s, occ_s, sph_s)
 
     drho = drho / grid.volume
+    if sym is not None:
+        # fold the IBZ complement over the star, same operator the SCF uses on rho
+        sym_g = system.rho_symmetrizer.apply(r_to_g(drho.to(CDTYPE)))
+        drho = (torch.fft.ifftn(sym_g * grid.n_points, dim=(-3, -2, -1))).real
     drho_fo = drho.clone()
 
     if dyson:
@@ -279,55 +298,79 @@ def estimate_density_error(
 
 
 def _uspp_frozen_operators(res: dict, xc):
-    """Frozen v_eff and screened D (dscr_full) of a converged USPP/PAW SCF.
+    """Frozen per-spin v_eff and screened D of a converged USPP/PAW SCF.
 
-    Rebuilt from the converged density and becsum exactly as
-    ``postscf.uspp_bands.bands_uspp``. Together with ``system.q_full`` these
-    define the band Hamiltonian H(k) c = eps S(k) c that the complement
-    correction perturbs.
+    Rebuilt from the converged density and becsum exactly as the USPP SCF map
+    (postscf.uspp_bands.bands_uspp for nspin=1; the per-spin v_xc and one-center
+    ddd for nspin=2). Together with ``system.q_full`` these define the band
+    Hamiltonian H_s(k) c = eps S(k) c that the complement correction perturbs.
+    Returns ``(veff_s, dscr_s)`` as lists of length nspin.
     """
     from gradwave.core.energies.hartree import hartree_potential_g
-    from gradwave.scf.loop import vxc_potential
 
     system = res["system"]
     grid = system.grid
     vol = grid.volume
     dev = system.positions.device
     mask_flat = grid.dens_mask.reshape(-1)
+    nspin = int(res.get("nspin", 1))
+    core = system.rho_core
 
-    rho = res["rho"].detach()
-    rho_g_box = r_to_g(rho.to(CDTYPE))
+    rho_tot = res["rho"].detach()
+    rho_g_box = r_to_g(rho_tot.to(CDTYPE))
     v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
                            dim=(-3, -2, -1)) * grid.n_points).real
-    rho_xc = rho if system.rho_core is None else rho + system.rho_core
-    v_xc, _ = vxc_potential(xc, rho_xc, grid)
     vloc_g = local_potential_g(
         system.positions, torch.as_tensor(system.species_of_atom, device=dev),
         system.vloc_tables, grid.g_cart, vol)
     vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
-    v_eff = v_h + v_xc + vloc_r
 
-    v_eff_g = r_to_g(v_eff.to(CDTYPE)).reshape(-1)[mask_flat]
+    if nspin == 1:
+        from gradwave.scf.loop import vxc_potential
+
+        v_xc, _ = vxc_potential(xc, rho_tot if core is None else rho_tot + core,
+                                grid)
+        veff_s = [v_h + v_xc + vloc_r]
+    else:
+        from gradwave.scf.loop import vxc_spin_potential
+
+        rho_s = res["rho_spin"]
+        c2 = None if core is None else 0.5 * core
+        v_up, v_dn, _ = vxc_spin_potential(
+            xc, rho_s[0] if core is None else rho_s[0] + c2,
+            rho_s[1] if core is None else rho_s[1] + c2, grid)
+        veff_s = [v_h + v_up + vloc_r, v_h + v_dn + vloc_r]
+
     phase_arg = system.g_sphere @ system.positions.T
     phase_pos = torch.exp(torch.complex(torch.zeros_like(phase_arg), phase_arg))
-    dscr = torch.zeros_like(system.q_full)
-    for a, sp in enumerate(system.species_of_atom):
-        s0, s1 = system.atom_slices[a]
-        contr = torch.einsum("ijg,g->ij", system.aug[sp].q_g.conj(),
-                             v_eff_g * phase_pos[:, a])
-        dscr[s0:s1, s0:s1] = (0.5 * (contr + contr.conj().T)).real
-    dscr_full = dscr + system.proj_data[0].dij_full
+    dscr_s = []
+    for isp in range(nspin):
+        v_eff_g = r_to_g(veff_s[isp].to(CDTYPE)).reshape(-1)[mask_flat]
+        dscr = torch.zeros_like(system.q_full)
+        for a, sp in enumerate(system.species_of_atom):
+            s0, s1 = system.atom_slices[a]
+            contr = torch.einsum("ijg,g->ij", system.aug[sp].q_g.conj(),
+                                 v_eff_g * phase_pos[:, a])
+            dscr[s0:s1, s0:s1] = (0.5 * (contr + contr.conj().T)).real
+        dscr_s.append(dscr + system.proj_data[0].dij_full)
+
     if any(p.is_paw for p in system.paws):
         from gradwave.scf.paw_onsite import OneCenter
 
         onec = {sp: OneCenter(system.paws[sp], xc)
                 for sp in set(system.species_of_atom)}
-        dscr_full = dscr_full.clone()
+        dscr_s = [d.clone() for d in dscr_s]
+        bec = res["rho_ij_atoms"]
         for a, sp in enumerate(system.species_of_atom):
-            _, ddd = onec[sp].energy_and_ddd(res["rho_ij_atoms"][a])
             s0, s1 = system.atom_slices[a]
-            dscr_full[s0:s1, s0:s1] += ddd.to(dev)
-    return v_eff, dscr_full
+            if nspin == 1:
+                _, ddd = onec[sp].energy_and_ddd(bec[a])
+                dscr_s[0][s0:s1, s0:s1] += ddd.to(dev)
+            else:
+                _, ddd = onec[sp].energy_and_ddd([bec[0][a], bec[1][a]])
+                for isp in range(nspin):
+                    dscr_s[isp][s0:s1, s0:s1] += ddd[isp].to(dev)
+    return veff_s, dscr_s
 
 
 def _uspp_enlarged_hks(system, k_frac, ecut_large, v_eff, dscr_full, device):
@@ -367,7 +410,7 @@ def _aug_density_from_becsum(system, becsum, device):
 
 @torch.no_grad()
 def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
-    """USPP/PAW discretization density error (nspin=1, use_symmetry=False).
+    """USPP/PAW discretization density error (nspin=1 or 2, use_symmetry=False).
 
     Adds two things to the NC recipe. The complement residual uses the
     generalized metric, R = P_annulus (H - eps S) psi, built from the enlarged
@@ -378,8 +421,6 @@ def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
 
     fed through the Q functions exactly as the SCF builds rho_aug.
     """
-    if res.get("nspin", 1) != 1:
-        raise NotImplementedError("USPP density error is nspin=1 only for now")
     if res.get("hub_sites") is not None:
         raise NotImplementedError("USPP density error with DFT+U not implemented")
     if getattr(res["system"], "sym", None) is not None:
@@ -395,6 +436,7 @@ def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
     vol = grid.volume
     dev = system.positions.device
     ecut = float(system.ecut)
+    nspin = int(res.get("nspin", 1))
     if ecut_large is None:
         ecut_large = factor * ecut
     if gmax_from_ecut(ecut_large) > 2.0 * gmax_from_ecut(ecut) * (1.0 + 1e-9):
@@ -403,67 +445,85 @@ def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
             "enlarged sphere would not fit the density FFT box. Lower ecut_large."
         )
 
-    v_eff, dscr_full = _uspp_frozen_operators(res, xc)
+    veff_s, dscr_s = _uspp_frozen_operators(res, xc)
     coeffs = res["coeffs"]
     eigs = res["eigenvalues"]
     occs = res["occupations"]
 
     drho_smooth = torch.zeros(grid.shape, dtype=RDTYPE, device=dev)
     denergy = 0.0
-    dpsi_all, psi_large_all, occ_all, sph_all = [], [], [], []
-    dbecsum = [torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
-               for (s0, s1) in system.atom_slices]
+    spins = [None] if nspin == 1 else list(range(nspin))
+    dpsi_s, psi_large_s, occ_s_out, sph_s = [], [], [], []
+    # per-spin becsum change (a single channel when nspin=1)
+    dbecsum_s = [[torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
+                  for (s0, s1) in system.atom_slices] for _ in spins]
 
-    for ik, sph0 in enumerate(system.spheres):
-        occ_k = occs[ik]
-        n_occ = int((occ_k > 1e-8).sum())
-        c_occ = coeffs[ik][:n_occ]
-        eps_occ = eigs[ik][:n_occ]
-        occ = occ_k[:n_occ]
-        sph1, hs, pd1, p1 = _uspp_enlarged_hks(
-            system, sph0.k_frac, ecut_large, v_eff, dscr_full, dev)
+    for isp_i, sp in enumerate(spins):
+        c_sp = coeffs if sp is None else coeffs[sp]
+        e_sp = eigs if sp is None else eigs[sp]
+        o_sp = occs if sp is None else occs[sp]
+        v_eff, dscr_full = veff_s[isp_i], dscr_s[isp_i]
+        dbecsum = dbecsum_s[isp_i]
+        dpsi_k, psi_large_k, occ_k_out, sph_k = [], [], [], []
+        for ik, sph0 in enumerate(system.spheres):
+            occ_k = o_sp[ik]
+            n_occ = int((occ_k > 1e-8).sum())
+            c_occ = c_sp[ik][:n_occ]
+            eps_occ = e_sp[ik][:n_occ]
+            occ = occ_k[:n_occ]
+            sph1, hs, pd1, p1 = _uspp_enlarged_hks(
+                system, sph0.k_frac, ecut_large, v_eff, dscr_full, dev)
 
-        # zero-pad occupied orbitals onto the enlarged sphere
-        box = sphere_to_box(c_occ, sph0.flat_idx, grid.shape)
-        c_occ_1 = box_to_sphere(box, sph1.flat_idx)
+            # zero-pad occupied orbitals onto the enlarged sphere
+            box = sphere_to_box(c_occ, sph0.flat_idx, grid.shape)
+            c_occ_1 = box_to_sphere(box, sph1.flat_idx)
 
-        # generalized complement residual R = P_annulus (H - eps S) psi
-        resid = hs.h(c_occ_1) - eps_occ[:, None].to(CDTYPE) * hs.s(c_occ_1)
-        annulus = hs.t > ecut * (1.0 + 1e-9)
-        denom = torch.clamp(hs.t[None, :] - eps_occ[:, None], min=1e-3)
-        corr = -resid / denom.to(resid.dtype)
-        dpsi = torch.where(annulus[None, :], corr, torch.zeros_like(resid))
+            # generalized complement residual R = P_annulus (H - eps S) psi
+            resid = hs.h(c_occ_1) - eps_occ[:, None].to(CDTYPE) * hs.s(c_occ_1)
+            annulus = hs.t > ecut * (1.0 + 1e-9)
+            denom = torch.clamp(hs.t[None, :] - eps_occ[:, None], min=1e-3)
+            corr = -resid / denom.to(resid.dtype)
+            dpsi = torch.where(annulus[None, :], corr, torch.zeros_like(resid))
 
-        # smooth-density change
-        psi_r = g_to_r(c_occ, sph0.flat_idx, grid.shape)
-        dpsi_r = g_to_r(dpsi, sph1.flat_idx, grid.shape)
-        w = float(system.kweights[ik])
-        drho_smooth += (2.0 * w) * (occ.view(-1, 1, 1, 1)
-                                    * (psi_r.conj() * dpsi_r).real).sum(dim=0)
+            # smooth-density change (occ is [0,2] for nspin=1, [0,1] per spin)
+            psi_r = g_to_r(c_occ, sph0.flat_idx, grid.shape)
+            dpsi_r = g_to_r(dpsi, sph1.flat_idx, grid.shape)
+            w = float(system.kweights[ik])
+            drho_smooth += (2.0 * w) * (occ.view(-1, 1, 1, 1)
+                                        * (psi_r.conj() * dpsi_r).real).sum(dim=0)
 
-        # on-site occupation (becsum) change from the enlarged projectors
-        bpsi = becp(p1, c_occ_1)
-        bdps = becp(p1, dpsi)
-        wk = (w * occ).to(CDTYPE)
-        for a, (s0, s1) in enumerate(system.atom_slices):
-            m = torch.einsum("b,bi,bj->ij", wk, bpsi[:, s0:s1].conj(),
-                             bdps[:, s0:s1])
-            dbecsum[a] = dbecsum[a] + m + m.conj().T
+            # on-site occupation (becsum) change from the enlarged projectors
+            bpsi = becp(p1, c_occ_1)
+            bdps = becp(p1, dpsi)
+            wk = (w * occ).to(CDTYPE)
+            for a, (s0, s1) in enumerate(system.atom_slices):
+                m = torch.einsum("b,bi,bj->ij", wk, bpsi[:, s0:s1].conj(),
+                                 bdps[:, s0:s1])
+                dbecsum[a] = dbecsum[a] + m + m.conj().T
 
-        # energy change (2nd order): sum_i f_i <dpsi_i | R_i>
-        de_band = (dpsi.conj() * resid).real.sum(dim=1)
-        denergy += w * float((occ * de_band).sum())
+            # energy change (2nd order): sum_i f_i <dpsi_i | R_i>
+            de_band = (dpsi.conj() * resid).real.sum(dim=1)
+            denergy += w * float((occ * de_band).sum())
 
-        dpsi_all.append(dpsi)
-        psi_large_all.append(c_occ_1)
-        occ_all.append(occ)
-        sph_all.append(sph1)
+            dpsi_k.append(dpsi)
+            psi_large_k.append(c_occ_1)
+            occ_k_out.append(occ)
+            sph_k.append(sph1)
+        dpsi_s.append(dpsi_k)
+        psi_large_s.append(psi_large_k)
+        occ_s_out.append(occ_k_out)
+        sph_s.append(sph_k)
 
     drho_smooth = drho_smooth / vol
-    dbecsum = [0.5 * (m + m.conj().T) for m in dbecsum]
-    if system.becsum_sym is not None:
-        dbecsum = system.becsum_sym.apply(dbecsum)
-    drho_aug = _aug_density_from_becsum(system, dbecsum, dev)
+    # augmentation change, summed over spin channels
+    drho_aug = torch.zeros(grid.shape, dtype=RDTYPE, device=dev)
+    dbecsum_out = []
+    for isp_i in range(len(spins)):
+        dbec = [0.5 * (m + m.conj().T) for m in dbecsum_s[isp_i]]
+        if system.becsum_sym is not None:
+            dbec = system.becsum_sym.apply(dbec)
+        drho_aug = drho_aug + _aug_density_from_becsum(system, dbec, dev)
+        dbecsum_out.append(dbec)
     drho = drho_smooth + drho_aug
 
     if verbose:
@@ -471,10 +531,17 @@ def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
         print(f"  USPP drho: int(drho)={dq:.3e}, denergy={denergy:.4e} eV",
               flush=True)
 
+    if nspin == 1:
+        dpsi_all, psi_large_all = dpsi_s[0], psi_large_s[0]
+        occ_all, sph_all, dbecsum_ret = occ_s_out[0], sph_s[0], dbecsum_out[0]
+    else:
+        dpsi_all, psi_large_all = dpsi_s, psi_large_s
+        occ_all, sph_all, dbecsum_ret = occ_s_out, sph_s, dbecsum_out
+
     return DiscretizationError(
         drho=drho, drho_first_order=drho, denergy=denergy, dpsi=dpsi_all,
         psi_large=psi_large_all, occ=occ_all, spheres_large=sph_all, ecut=ecut,
-        ecut_large=ecut_large, dyson=False, uspp=True, dbecsum=dbecsum,
+        ecut_large=ecut_large, dyson=False, uspp=True, dbecsum=dbecsum_ret,
         drho_smooth=drho_smooth,
     )
 
@@ -565,6 +632,12 @@ def estimate_force_error(
     dF = -dgrad
     if remove_net:
         dF = dF - dF.mean(dim=0, keepdim=True)
+    if system.sym is not None:
+        # the IBZ estimate gives the force error on the irreducible set; project
+        # onto the symmetry-invariant subspace exactly as ground-state forces do
+        from gradwave.symmetry import symmetrize_forces
+
+        dF = symmetrize_forces(dF, system.sym, grid.cell)
     return dF
 
 

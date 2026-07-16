@@ -214,9 +214,36 @@ differentiable-DFT coupling of arXiv:2509.07785. A few things are not obvious.
   first-order δρ by (1 − χ₀K)⁻¹ is structurally derived but was neutral to slightly
   negative on the one insulator tested, so the exact Schur coupling still needs
   pinning against the reference. Leave `dyson=False` for now.
-- Coverage is norm-conserving, nspin=1, use_symmetry=False, matching the response
-  machinery it borrows. A perturbation breaks the crystal symmetry, so the response
-  needs the full k-mesh.
+- The USPP/PAW density error has two channels, not one. The complement residual uses
+  the generalized metric, R = P_annulus(H − εS)ψ, and the density change is the smooth
+  part from δψ PLUS an augmentation part from the on-site occupation (becsum) change,
+  δbecsum fed through the Q functions. On Si2 the augmentation channel lifts the density
+  correlation from 0.51 (smooth only) to 0.74. ∫δρ is no longer exactly zero: the smooth
+  part cancels but the augmentation carries a small S-orthogonality residual (~3e-5 per
+  electron on Si), which is negligible. The USPP energy ratio (0.99 on Si) came out
+  tighter than the NC diamond case (0.73), but that is the system, not the method, so do
+  not read it as a general improvement.
+- The nspin=2 path runs the correction per spin channel, each with its own v_eff and
+  eigenvalues, and sums δρ and δE over the two channels. The nonmagnetic limit
+  (start_mag=0) reproduces the nspin=1 estimate to machine precision, which is the
+  cheapest regression test. On ferromagnetic bcc Fe the density correlation is 0.96 and
+  the energy ratio 0.97. Because nspin=2 forces smearing, partially occupied bands carry
+  only the leading first-order term, so the estimate is best on gapped or well-separated
+  bands.
+- Symmetry does not have to be off, for the right reason. The complement correction is a
+  fully symmetric perturbation (the high-G complement of psi_Sk is the complement of psi_k
+  rotated), so for NC nspin=1 the estimate runs on the IBZ k-points and folds the density
+  error over the star with the same operator the SCF applies to rho, and the force error
+  symmetrizes the output dF vector exactly as ground-state forces do. On [111]-displaced
+  diamond Si (n_ops=12, 36 to 13 k-points) the symmetric dF matches the full-BZ dF to
+  0.1 percent and is symmetry-invariant to 1e-19. What genuinely needs the full k-mesh is
+  a real response to a symmetry-breaking perturbation (USPP augmentation, nspin=2 spin
+  channels, the Dyson dressing, and stress), where folding the IBZ output is not valid.
+- Coverage. Density and energy error: NC and USPP/PAW, nspin=1 and 2. Force error: NC
+  nspin=1 (the USPP force needs the augmentation and one-center force terms; the nspin=2
+  force needs the per-spin channels threaded through the propagation). Symmetry is
+  supported for the NC nspin=1 density, energy, and force error; USPP/PAW, nspin=2, and
+  Dyson still require use_symmetry=False.
 
 ## Process and validation
 
