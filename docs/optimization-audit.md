@@ -212,6 +212,15 @@ Smaller, lower-risk, and each removes a named line from a committed profile.
   Kerker-plus-local-TF for ordinary non-magnetic metals is a different and lighter
   object and is the untried half of the "preconditioner quality" gap.
 
+  The gap is metal-specific, not a PAW or spin-polarization problem. On the O2 triplet
+  nspin=2 PAW reference (`o2_paw_spin_ci`), gradwave converges in 21 iterations to QE's
+  20 on the identical input (gradwave Johnson mixer with the etol-and-rhotol dual
+  criterion, QE plain Broyden beta=0.3 with conv_thr=1e-10 Ry, and the energies agree to
+  0.6 meV with moment 2.000 muB in both). A gapped magnetic system has no charge-sloshing
+  bottleneck,
+  so both codes converge at the same rate. Only the metal (Pt) opens the 16-vs-7 gap, so
+  the preconditioner is the right lever and spin is orthogonal to it.
+
 ## 4. Does the architecture need to change? No, and here is the test
 
 The tempting radical answer is to leave plane waves for a real-space finite-element or
