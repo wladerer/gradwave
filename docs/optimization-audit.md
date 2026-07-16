@@ -101,11 +101,13 @@ schedule (the filter is where the fp32 lives).
 ### Implementation
 
 A working, tested solver is in `src/gradwave/solvers/chebyshev.py`, written to the
-same signature as `davidson_batched` so it is a drop-in. It is now wired into the NC
+same signature as `davidson_batched` so it is a drop-in. It is wired into the NC
 batched SCF as an opt-in, `scf(..., eigensolver="chebyshev")`, with Davidson the
 default. On Si (LDA, 2x2x2, 15 Ry) the two solvers converge to the same free energy
-bit-for-bit in the same iteration count, so the wiring is correct. What is still
-deferred is the GPU fp32-deep benchmark and the default flip, not the wiring.
+bit-for-bit in the same iteration count, so the wiring is correct. The GPU fp32-deep
+benchmark is also done, and it came back a no-go on the RTX 3050 (CheFSI 2.5 to 5x
+slower than Davidson at every grid size that fits in 6 GB). The default stays
+Davidson. See the benchmark result under "What is left to touch" below.
 
 The module has three pieces.
 
@@ -147,21 +149,30 @@ These isolate the eigensolver with no SCF or pseudopotential in the loop.
 
 What is left to touch, in order.
 
-- Wiring. Done for the NC collinear batched path, `scf(..., eigensolver="chebyshev")`
-  swaps `chebyshev_filtered_batched` in at the `scf/loop.py` call site, Davidson stays
-  the default, and `tests/integration/test_scf_vs_qe.py` pins the two to the same
-  energy. Still open are the noncollinear twins (`scf/noncollinear.py:270`, `:451`) and
-  the fp32-deep `chebyshev_filtered_batched_ms` composition, which needs the loop's
-  per-iteration precision switch replaced by the solver's own draft-then-polish.
-- The GPU benchmark that decides it. Run the NC medium-cell case (the 16-to-54-atom Si
-  range where mixed-precision Davidson already shows 1.28 to 1.39 times) on the RTX
-  3050 with `chebyshev_filtered_batched_ms`, fp32-deep, and compare end-to-end wall
-  time and iteration count against Davidson. The claim is that the fp32 filter converts
-  the measured 12x c64 FFT advantage into an end-to-end gain Davidson cannot reach.
-  This is also the go/no-go test for the architecture question in section 4.
+- Wiring. Done for the NC collinear path (`scf(..., eigensolver="chebyshev")`),
+  Davidson stays the default, and `tests/integration/test_scf_vs_qe.py` pins the two
+  to the same energy. The noncollinear spinor twin was tried and is a clean drop-in,
+  since the SpinorHamiltonian is still a standard Hermitian problem, but on a captured
+  Al spinor H CheFSI ran the full 100-iteration cap without reaching 1e-8 while
+  Davidson converged in 18, landing 3.8e-4 eV off. CheFSI converges slowly on the
+  dense metal spinor spectrum, so with the no-go benchmark below the noncollinear path
+  stays on Davidson and is not wired. The fp32-deep `chebyshev_filtered_batched_ms`
+  composition is likewise not wired.
+- The GPU benchmark that decides it, DONE, and it is a no-go on the RTX 3050. A fixed
+  converged Hamiltonian was extracted and all four solver variants timed on the GPU.
+  On a small many-k system (Si, 4x4x4 k, grid 24^3) CheFSI ran 5x slower than
+  Davidson. On the larger grid it was built for (conventional Si8, 2x2x2 k, grid 35^3)
+  a direct FFT probe measured the fp32 batch at 2.81 ms against fp64 at 9.44 ms, a
+  3.4x fp32 FFT advantage, not the 12x the premise assumed. The fp32-deep CheFSI still
+  came in 2.5x slower than fp64 Davidson (best CheFSI 14.7 s vs best Davidson 5.9 s),
+  because the degree-12 filter does 2 to 3x more H-applies and the 3.4x FFT gain does
+  not cover that. Both grids are below the size where the fp32 FFT advantage would
+  reach 12x, and 6 GB caps how far the grid can grow, so the verdict on this card is
+  that CheFSI does not beat Davidson. It stays opt-in and off by default. Revisit on a
+  larger card where the grid, and with it the fp32 FFT gain, can grow.
 - Degree schedule. A fixed degree of 8 to 12 is a fine start; raising it as the density
-  converges pairs with the existing quadratic diagonalizer-tolerance schedule. Tune
-  only after the benchmark shows the base case works.
+  converges pairs with the existing quadratic diagonalizer-tolerance schedule. Only
+  relevant if a bigger card reopens the benchmark.
 - USPP/PAW, the larger follow-on. The filter needs the S-metric, either `S^{-1}H`
   applies or the `L^{-1} H L^{-dagger}` basis, and the indefinite-S-at-low-cutoff trap
   still governs the final Rayleigh-Ritz. Do this only after the NC win is proven. The

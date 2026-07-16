@@ -150,9 +150,10 @@ Full writeup in `docs/optimization-audit.md`. Status of the ordered conclusions:
 the dual grid is DONE, landed as commit `71a5265`, about 2x on the USPP/PAW H-apply
 FFT, matching the spec; (2) CheFSI is DONE and BENCHMARKED, and the go/no-go came
 back no-go on the RTX 3050. The solver is in `solvers/chebyshev.py`, unit-tested and
-wired opt-in as `scf(..., eigensolver="chebyshev")` for the NC and noncollinear
-paths, bit-identical to Davidson on the real NC SCF regression. But the RTX 3050
-fp32-deep benchmark
+wired opt-in as `scf(..., eigensolver="chebyshev")` on the NC collinear path,
+bit-identical to Davidson on the real NC SCF regression. The noncollinear spinor twin
+was tried but left unwired, CheFSI converges too slowly on the dense metal spinor
+spectrum (100-iteration cap vs Davidson's 18). But the RTX 3050 fp32-deep benchmark
 found it 2.5 to 5x SLOWER than Davidson at every grid size that fits in 6 GB, up to a
 35^3 grid. The fp32 FFT advantage there is only about 3.4x, not the 12x the larger
 systems would need, and CheFSI does 2 to 3x more H-applies, so the filter loses. It
