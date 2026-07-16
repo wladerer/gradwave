@@ -16,15 +16,6 @@ first.
   constant is already fit).
 - Compute the CO adsorption binding energy on that slab.
 
-### 0.23 eV total-energy offset vs QE (fcc Pt PAW)
-
-gradwave gives −10167.53 eV against QE's −10167.30 eV for 1-atom fcc Pt
-(a = 3.97 Å, 40/400 Ry, 12×12×12, gaussian 0.2 eV, identical psl kjpaw
-pseudopotential). 0.23 eV is large for a converged metal. The likely cause is a
-smearing free-energy (−TS) convention or a k-weight detail. It mostly cancels
-in binding-energy differences but should still be pinned down by comparing the
-energy-term breakdown against QE's.
-
 ## Estimator and post-processing
 
 ### Coarse-space Dyson refinement of δρ (task, not yet validated)

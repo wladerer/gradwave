@@ -1,0 +1,17 @@
+{
+  "system": "fcc Pt, psl kjpaw, PBE, nonmagnetic PAW metal, gaussian smeared",
+  "provenance": "QE 7.5 pw.x, verbosity=high; fresh run 2026-07-16",
+  "a_ang": 3.97,
+  "ecutwfc_Ry": 40.0,
+  "ecutrho_Ry": 400.0,
+  "kmesh": [6, 6, 6],
+  "smearing": "gaussian",
+  "degauss_eV": 0.2,
+  "nbnd": 14,
+  "fft_dims": [36, 36, 36],
+  "free_energy_Ry": -747.30615379,
+  "internal_energy_Ry": -747.30404703,
+  "onecenter_Ry": -684.71709107,
+  "smearing_Ry": -0.00210675,
+  "note": "F -10167.618 eV; gradwave matches to 0.24 meV. A stale -10167.30 eV QE figure once suggested a 0.23 eV offset that fresh QE (this file) shows does not exist."
+}

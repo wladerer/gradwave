@@ -213,8 +213,10 @@ Ry, 12×12×12 giving 72 irreducible k, gaussian 0.2 eV) on the same asus box, Q
 | gradwave | 8 CPU threads | 16 | 118 s | 7.4 |
 | gradwave | RTX 3050 | 16 | 976 s | 61 |
 
-The energies agree (QE −10167.30 eV, gradwave −10167.53 eV, a 0.23 eV offset worth
-pinning separately), so this is a clean speed gap. It factors into three independent
+The energies agree to sub-meV: QE and gradwave both give −10167.53 eV, matching to
+0.25 meV with every term within 3 meV, re-verified fresh at 6×6×6 and 12×12×12. An
+earlier −10167.30 QE figure recorded here was a bad reference, not a real offset. So
+this is a clean speed gap. It factors into three independent
 terms that multiply to the 305 times CPU-to-GPU-vs-QE spread.
 
 - 8.3 times, the same gradwave code on the RTX 3050 versus the CPU (976/118). Pure

@@ -154,3 +154,28 @@ def test_paw_bands_vs_qe():
     eigs = bands_uspp(res, PBE(), [[0.0, 0.0, 0.0]], nbands=4)[0]
     qe_gamma = [-5.5159, 6.5075, 6.5075, 6.5075]  # pw.x verbosity=high printout
     assert np.abs(eigs.numpy() - np.array(qe_gamma)).max() < 0.005
+
+
+@pytest.mark.slow
+def test_paw_metal_pt_vs_qe():
+    """Nonmagnetic PAW metal (fcc Pt kjpaw, gaussian-smeared) vs pw.x — the one
+    PAW-metal cell, since the other PAW-vs-QE tests are a Si insulator and a Ni
+    spin metal. Observed F +0.24 meV, one-center -1.9 meV vs QE's printout
+    (quadrature scale). Pins the fcc-Pt reference: a stale -10167.30 eV QE figure
+    once suggested a 0.23 eV offset that fresh QE (this fixture) shows is not real.
+    Grid pinned to QE's dense FFT dims per the reference-grid rule in wisdom."""
+    torch.set_num_threads(8)
+    ref = json.loads((FIX / "pt_paw_metal_ci" / "reference.json").read_text())
+    paw = parse_upf_paw(FIX / "pseudos" / "Pt.pbe-n-kjpaw_psl.1.0.0.UPF")
+    cell = 0.5 * 3.97 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    system = setup_uspp(cell, np.zeros((1, 3)), [0], [paw], ecut=40 * RY,
+                        kmesh=tuple(ref["kmesh"]), ecutrho=400 * RY, nbands=14,
+                        fft_shape=tuple(ref["fft_dims"]))
+    res = scf_uspp(system, PBE(), smearing="gaussian", width=0.2, etol=1e-8,
+                   rhotol=1e-7, verbose=False, max_iter=80)
+    assert res["converged"]
+    e = res["energies"]
+    dF = abs(float(e.free_energy) - ref["free_energy_Ry"] * RY) * 1000
+    assert dF < 3.0, f"F off by {dF:.3f} meV"
+    d_onec = abs(float(e.onecenter) / RY - ref["onecenter_Ry"]) * RY * 1000
+    assert d_onec < 5.0, f"one-center off by {d_onec:.3f} meV"

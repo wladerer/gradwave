@@ -1,0 +1,29 @@
+&control
+  calculation = 'scf'
+  prefix = 'pt'
+  outdir = './out'
+  pseudo_dir = './'
+  verbosity = 'high'
+/
+&system
+  ibrav = 2
+  celldm(1) = 7.502216
+  nat = 1
+  ntyp = 1
+  ecutwfc = 40.0
+  ecutrho = 400.0
+  occupations = 'smearing'
+  smearing = 'gaussian'
+  degauss = 0.01469966
+  nbnd = 14
+/
+&electrons
+  conv_thr = 1.0d-10
+  mixing_beta = 0.3
+/
+ATOMIC_SPECIES
+  Pt 195.084 Pt.pbe-n-kjpaw_psl.1.0.0.UPF
+ATOMIC_POSITIONS crystal
+  Pt 0.0 0.0 0.0
+K_POINTS automatic
+  6 6 6 0 0 0
