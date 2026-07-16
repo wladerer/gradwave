@@ -182,14 +182,18 @@ What is left to touch, in order.
 
 Smaller, lower-risk, and each removes a named line from a committed profile.
 
-- **Drop `linalg.cond` from the Davidson conditioning guard.** The batched USPP solver
-  computes a full condition number of the subspace overlap every round
-  (`scf/uspp_batch.py`), which is an SVD, and reads it back to the host to branch. The
-  per-k path does not; it attempts the Cholesky and catches the failure, which
-  `wisdom.md` records as the correct pattern. Switching the batched guard to
-  try-factorize-and-catch removes an SVD-per-round and a host sync-per-round. This is
-  part of the 5% "Davidson diagnostics" line in the PAW profile plus one of the
-  per-round drains the GPU story cares about.
+- **DONE. Dropped `linalg.cond` from the Davidson conditioning guard.** The batched
+  USPP solver computed a full condition number of the subspace overlap every round
+  (`scf/uspp_batch.py`), an SVD read back to the host to branch, on top of the
+  `cholesky_ex` it already ran. Probing a low-ecut Si PAW SCF (8, 10, 12 Ry, where the
+  truncated-sphere S goes indefinite) showed the overlap tips into non-PD, which
+  `cholesky_ex` flags with info>0, long before its condition number nears the 1e14
+  trip. Over 700 cond calls, the SVD branch never fired independently and the max
+  condition number observed was ~9e7. The factorization catch is the whole guard, as
+  the per-k path already assumed. Removed the cond SVD and its host sync per round.
+  The batched-vs-per-k equality tests (identical eigenpairs) and USPP/PAW-vs-QE
+  regression still pass. This was part of the 5% "Davidson diagnostics" line in the
+  PAW profile.
 - **Make the one-center ddd cheaper.** The PAW profile spends 5% on the one-center
   D-matrix via an autograd `run_backward` every iteration, and notes QE does it
   analytically. The response HVP already got the `hvp_factory` treatment; the
@@ -241,7 +245,7 @@ it is not.
    item most likely to move the central GPU number. The solver is written and unit-tested
    (`solvers/chebyshev.py`, `tests/unit/test_chebyshev.py`); what remains is the SCF
    wiring at `loop.py:555` and the RTX 3050 benchmark that is also the section 4 go/no-go.
-3. The `linalg.cond` guard and the one-center ddd. Cheap, low risk, each removes a
-   named profile line.
+3. The `linalg.cond` guard (DONE, see section 3) and the one-center ddd. Cheap, low
+   risk, each removes a named profile line.
 4. Kerker-plus-local-TF metal preconditioner. The untried half of the metal
    iteration-count gap.

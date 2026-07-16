@@ -96,20 +96,23 @@ def davidson_gen_batched(hs: BatchedHS, x0: torch.Tensor, nbands: int,
     for _ in range(max_iter):
         # at low ecut the USPP S can be INDEFINITE on the truncated sphere
         # (negative q eigenvalues; QE errors out the same way) — an orthonormal
-        # basis touching those directions makes vSv† non-PD or near-singular,
-        # and a near-singular reduction yields garbage rotations (spurious
-        # below-minimum states) long before the Cholesky actually fails.
-        # Mirror the per-k guard exactly: drop the OLDEST subspace entries
-        # while cond > 1e14 OR the factorization fails (keeps the newest
-        # curvature; contracting to the Ritz block instead KEEPS the
-        # contaminated directions and cycles forever).
+        # basis touching those directions makes vSv† non-PD, and the reduction
+        # then yields garbage rotations (spurious below-minimum states). The
+        # Cholesky factorization is exactly the non-PD detector, since
+        # cholesky_ex reports info>0 the moment vSv† loses positive-definiteness.
+        # Drop the
+        # OLDEST subspace entries while it fails (keeps the newest curvature;
+        # contracting to the Ritz block instead KEEPS the contaminated
+        # directions and cycles forever). A prior guard also computed a full
+        # linalg.cond every round, but probing a low-ecut Si PAW SCF (8-12 Ry)
+        # showed the overlap tips into non-PD (info>0) long before its condition
+        # number nears the 1e14 trip (max observed ~9e7), so the cond SVD never
+        # fired independently. The factorization catch is the whole guard, as
+        # in the per-k path.
         while True:
             h_sub, s_sub = _subspace(v, hv, sv)
             ell, info = torch.linalg.cholesky_ex(s_sub)
             bad = int(info.max()) > 0
-            if not bad:
-                cond = torch.linalg.cond(s_sub)
-                bad = bool((~torch.isfinite(cond)).any()) or float(cond.max()) > 1e14
             if not bad or v.shape[1] <= nbands + 1:
                 break
             v, hv, sv = v[:, 1:], hv[:, 1:], sv[:, 1:]
