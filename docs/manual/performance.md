@@ -234,7 +234,7 @@ campaigns on the CPU.
 
 ### Where the PAW-metal time goes
 
-Profiling one fcc Pt SCF (`bench/pt_uspp_bench.py --profile`, 6x6x6, 67.5 s / 17
+Profiling one fcc Pt SCF (`benchmarks/pt_uspp_bench.py --profile`, 6x6x6, 67.5 s / 17
 iterations on 8 CPU threads) splits the per-iteration cost as follows.
 
 | cost | share | note |

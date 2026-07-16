@@ -11,3 +11,6 @@ tests/fixtures/qe/**/tmp/
 *.save/
 benchmarks/*.pt
 site/
+
+# stray editor/tool temp input
+input_tmp.in

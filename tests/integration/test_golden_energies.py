@@ -1,4 +1,4 @@
-"""Golden-energy gate for the refactor (docs/refactor_plan.md, stage 0).
+"""Golden-energy gate for the structural refactor (stage 0).
 
 Three cheap systems spanning PAW insulator, bare ultrasoft, and smeared
 PAW metal, converged tightly and compared against recorded values at

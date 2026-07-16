@@ -3,10 +3,10 @@
 One place to measure every performance change against QE's 3.2 s for the same
 1-atom fcc Pt point (psl kjpaw, PBE, 40/400 Ry, 12x12x12, gaussian 0.2 eV).
 
-    python bench/pt_uspp_bench.py                       # time (default 6x6x6)
-    python bench/pt_uspp_bench.py --kmesh 12 12 12      # the QE-matched point
-    python bench/pt_uspp_bench.py --profile             # cProfile one SCF
-    python bench/pt_uspp_bench.py --device cuda
+    python benchmarks/pt_uspp_bench.py                       # time (default 6x6x6)
+    python benchmarks/pt_uspp_bench.py --kmesh 12 12 12      # the QE-matched point
+    python benchmarks/pt_uspp_bench.py --profile             # cProfile one SCF
+    python benchmarks/pt_uspp_bench.py --device cuda
 
 Reports iterations, wall, per-iteration, and the free energy so a change that
 trades iteration count for per-iteration cost is visible in both columns. The
@@ -76,7 +76,6 @@ def main():
         pr.enable()
         dt, r = run(system, args.smearing, args.width)
         pr.disable()
-        st = pstats.Stats(pr, stream=io.StringIO())
         print(f"\nSCF: {r['n_iter']} it, {dt:.1f}s, {dt/r['n_iter']:.2f} s/it, "
               f"E={float(r['energies'].free_energy):.6f} eV\n", flush=True)
         for sort in ("tottime", "cumtime"):

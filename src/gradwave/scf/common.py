@@ -1,7 +1,7 @@
 """Blocks genuinely shared between the NC and USPP/PAW SCF loops
 (refactor stage 4, deliberately minimal — full loop unification is
-deferred until the S=1 overhead is measured AND NC maintenance hurts;
-see docs/refactor_plan.md)."""
+deferred until the S=1 overhead is measured AND NC maintenance hurts).
+"""
 
 from __future__ import annotations
 
