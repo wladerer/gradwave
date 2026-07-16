@@ -130,6 +130,27 @@ def _energy_lines(scf):
     return lines
 
 
+def _error_lines(err):
+    lines = [_sec("basis-set error estimate")]
+    if not err.get("available", True):
+        lines.append(f"   unavailable — {err.get('reason', 'out of coverage')}")
+        return lines
+    pairs = [
+        ("Ecut", f"{err['ecut_eV']:.1f} eV"),
+        ("Ecut large", f"{err['ecut_large_eV']:.1f} eV"),
+        ("δE", f"{err['denergy_eV']:.4e} eV"),
+        ("δE/atom", f"{err['denergy_meV_per_atom']:.3f} meV"),
+        ("F → limit", f"{err['free_energy_extrapolated_eV']:.10f} eV"),
+        ("∫|δρ|/e⁻", f"{err['drho_L1_per_electron']:.3e}"),
+    ]
+    if "force_error_max_eV_ang" in err:
+        pairs.append(("δF max", f"{err['force_error_max_eV_ang']:.3e} eV/Å"))
+        pairs.append(("δF rms", f"{err['force_error_rms_eV_ang']:.3e} eV/Å"))
+    lines += _cols(pairs)
+    lines.append(f"   {err['note']}")
+    return lines
+
+
 def _eigenvalue_lines(summary, max_k=8):
     eig = summary.get("eigenvalues_eV")
     occ = summary.get("occupations")
@@ -207,6 +228,8 @@ def format_output(summary: dict) -> str:
     if "scf" in summary:
         lines += _scf_lines(summary["scf"], summary.get("runtime_s"))
         lines += _energy_lines(summary["scf"])
+        if "error_estimate" in summary:
+            lines += _error_lines(summary["error_estimate"])
         lines += _eigenvalue_lines(summary)
     if "relax" in summary:
         lines += _relax_lines(summary["relax"])

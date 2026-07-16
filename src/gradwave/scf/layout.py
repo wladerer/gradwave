@@ -5,7 +5,7 @@ becsum per spin], with nspin=2 grid channels in the (total, magnetization)
 basis. Before this class the packing was assembled inline in the SCF loop
 and re-derived independently by the mixer rig, the Newton finisher, and
 ad-hoc scripts; every copy was one normalization bug waiting to happen
-(docs/lessons.md, Conventions). The layout also owns the derived mixer
+(docs/manual/wisdom.md, Conventions). The layout also owns the derived mixer
 vectors, Kerker mask (ρ-total block only), becsum step scale, and adaptive
 block ids.
 """
