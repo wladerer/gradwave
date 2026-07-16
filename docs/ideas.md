@@ -1,8 +1,147 @@
 # Ideas and future work
 
 A running backlog for gradwave, with enough reasoning attached that each item
-can be picked up cold. Not commitments, just directions worth taking, ordered
-roughly by how ready they are to build.
+can be picked up cold. Not commitments, just directions worth taking. The open
+backlog comes first, then a "Done and resolved" section that keeps the reasoning
+for items already built or settled.
+
+# Open backlog
+
+## Scaling up: RI and tensor hypercontraction
+
+Framing first, because it reframes the GPU results in the done section. The
+CheFSI no-go, the EOS-batching analysis, and the 128-atom memory cliff were all
+measured on a consumer RTX 3050, whose fp64 throughput is a small fraction of its
+fp32 and whose 6 GB caps the grid. Those numbers bound that card, not GPUs in
+general. A datacenter card with real fp64 changes the CheFSI arithmetic story on
+its own, before any code change. But the more durable lever is to cut the
+operation count itself, which helps on the CPU path and on any GPU, and that is
+what resolution of identity and tensor hypercontraction do. They are also the
+enabling substrate for exact exchange, the biggest single physics gap in the
+code, so the scaling work and the accuracy work are the same work.
+
+### Resolution of identity (RI, density fitting)
+
+RI expands products of orbitals in an auxiliary basis so a four-center
+electron-repulsion object factorizes through two- and three-center intermediates.
+In a plane-wave code the Hartree term is already O(N log N) through the FFT, so
+RI is not a Hartree win. Where it pays is exact exchange. The Fock term is the
+O(N^4) bottleneck that keeps hybrids out of the code, and RI on the orbital pair
+densities `rho_ij(r) = psi_i*(r) psi_j(r)` is the standard route to make it
+affordable. So RI is not a standalone feature, it is the substrate that makes the
+biggest missing physics piece, hybrid functionals, tractable.
+
+- The auxiliary representation. A plane-wave code already carries a complete
+  auxiliary basis in the dense-grid plane waves, so a pair density is exact on the
+  grid. The cost problem is the number of pairs, O(N^2) of them, each needing an
+  FFT to Coulomb-couple. RI proper compresses that, and its plane-wave-native form
+  is the ISDF factorization below.
+- The differentiable angle. The fit is a linear solve against a metric, which is
+  differentiable end to end, so a learnable hybrid could carry the exchange-mixing
+  fraction and the range-separation length as trained parameters on top of an
+  RI-compressed Fock build.
+
+### Tensor hypercontraction and ISDF
+
+Tensor hypercontraction factorizes the pair-product tensor into a small set of
+interpolation points and interpolation vectors, so an object that is O(N^2) in
+orbital pairs and O(N_grid) in real space collapses to O(N) points times a
+compact factor. The plane-wave-native form is interpolative separable density
+fitting (ISDF, Lu and Ying), which writes `psi_i(r) psi_j(r)` approximately as
+`sum_mu zeta_mu(r) psi_i(r_mu) psi_j(r_mu)` over a small chosen point set
+`{r_mu}`. A QR-pivoted or centroidal-Voronoi point selection makes the rank grow
+like N rather than N^2.
+
+- Why it is the right scaling lever. It cuts the FLOP count of the exchange and
+  correlation builds directly, so unlike the CheFSI fp32 story it does not depend
+  on a particular card's fp64 throughput. It helps on the CPU path and on any GPU.
+  That is the durable answer to "scale up", attack the operation count, not only
+  the hardware.
+- What it unlocks. ISDF is the standard enabling technique for affordable exact
+  exchange and RPA correlation in plane-wave codes (Qbox, PWDFT, and the ISDF-K
+  line of work). With ISDF in place a hybrid functional and an RPA correlation
+  energy both become reachable, which is the jump from a very well validated GGA
+  code to one that does electronic structure GGA cannot.
+- Build order. Land ISDF first as a compression of the pair densities with a
+  QR-pivoted point selection, validate the compressed Fock exchange energy against
+  a direct plane-wave Fock build on a small molecule to milli-eV, then layer the
+  learnable-hybrid parameters and, separately, the RPA correlation contraction.
+  Each stage is a set of tensor contractions, so it stays inside the
+  differentiable-by-construction design.
+- The honest caveat. ISDF has its own accuracy knob, the interpolation-point
+  count, and the point selection is the subtle part. Budget the validation against
+  direct Fock, not against another approximate method, and treat the rank as a
+  convergence parameter reported alongside the result.
+
+## Exact exchange and hybrid functionals
+
+The biggest single physics gap, and the reason the two scaling items above are
+worth building. Every energy, gap, force, and adsorbate level gradwave produces
+sits on a GGA electronic structure with self-interaction error, so band gaps come
+out too small and defect and adsorbate levels land in the wrong place. There is no
+exact exchange anywhere in the SCF Hamiltonian today (`postscf/exchange.py` is
+Heisenberg J-couplings, not Fock). A hybrid needs a Fock exchange operator applied
+each SCF step, which is the O(N^4) object RI and ISDF exist to tame. The payoff
+that no mainstream code has is a learnable hybrid, the mixing fraction and
+range separation as trained parameters through the existing `learnable.py` slot,
+which only makes sense once the Fock build is affordable. Sequence it after ISDF.
+
+## Learned meta-GGA and the kinetic energy density
+
+The learnable functional spans GGA form only, the two PBE parameters kappa and mu.
+Every modern accurate semilocal functional (SCAN, r2SCAN) is meta-GGA, which means
+it depends on the kinetic energy density `tau(r) = (1/2) Σ_i f_i |∇ψ_i(r)|²` on
+top of rho and `|∇rho|²`. Without tau the learnable-XC path cannot fit, learn
+against, or even compare with the functionals people actually use, so it cannot go
+past GGA form. This is the natural next rung for the differentiable-XC work and the
+one that lets `train_xc_paw` learn a real functional rather than only recover PBE.
+It is also the cheaper stepping stone before hybrids, roughly a week against a
+much larger EXX build.
+
+- New piece, tau on the grid. Each occupied orbital's gradient is `i(k+G)` in
+  reciprocal space, so `∇ψ_i` is one FFT per band per Cartesian direction, squared
+  and accumulated with the occupations. This reuses the density-build FFT machinery
+  with an extra factor of `i(k+G)`; the batched g-to-r path already carries the
+  orbitals, so it is an added contraction, not a new solver.
+- New piece, the meta-GGA potential. `v_tau = ∂e_xc/∂tau` does not act
+  multiplicatively on rho. It enters the Hamiltonian as a tau-dependent
+  modification of the kinetic term, `-∇·(v_tau ∇ψ)`, which makes this a generalized
+  Kohn-Sham scheme and touches the H-apply, not just the functional. Autograd gives
+  `∂e/∂tau` exactly the way it already gives `v_xc`, so no hand-derived kernel is
+  needed, but the extra operator has to be wired into `BatchedHamiltonian.apply`
+  and into the force and stress terms.
+- Reuse, the functional interface. `XCFunctional.energy_density` gains a third
+  argument `tau` beside rho and sigma, and the autograd `v_xc`/`f_xc` machinery, the
+  spin channels, and the learnable-parameter graph all extend without new
+  derivations.
+
+Validate against QE `input_dft='scan'` (or r2SCAN) at pinned settings to the usual
+milli-eV, then expose a learnable meta-GGA (an r2SCAN-form functional with
+learnable parameters) and repeat the `train_xc_paw` recovery test at the meta-GGA
+level. This is the item that most directly serves what makes gradwave distinct from
+a very well-validated second copy of QE.
+
+## Kerker-plus-local-TF metal preconditioner
+
+The highest-value remaining SCF-perf item. fcc Pt takes 16 SCF iterations to QE's
+7, and the O2 nspin=2 PAW check (21 vs 20) confirms the gap is metal-specific, not
+a spin or PAW problem, so the lever is the density preconditioner. gradwave uses a
+bare Kerker, whose factor `G²/(G²+q0²)` damps long-wavelength charge sloshing with a
+fixed screening length. QE's default couples Kerker with a local Thomas-Fermi term
+that varies the screening with the local density, which damps the modes a bare
+Kerker leaves. The Stoner preconditioner that was built targets the magnetic
+instability and proved too expensive per iteration, so a cheap Kerker-plus-local-TF
+for ordinary non-magnetic metals is the untried and lighter object, and the audit
+estimates it at roughly 2.3x on every metal. Full go/no-go in
+`docs/optimization-audit.md`. Validate against the Pt harness, and measure before
+believing, since the atomic-seeding item below looked equally promising on paper and
+did not pay off.
+
+The one-center ddd is the other named micro-cost from the audit, 5% of the PAW
+profile through an autograd backward per iteration. It is already compiled when
+`compile_xc=True` (the `energy_and_ddd` path is a single backward), so the remaining
+question is only whether an analytic quadrature derivative beats the compiled
+autograd, which is a small isolated experiment, not a feature.
 
 ## RAIRS and a slab dipole moment
 
@@ -94,15 +233,10 @@ Make an explicit matrix of feature x {NC, USPP/PAW} x {nspin=1, 2} and close the
 gaps. Most of the per-channel machinery exists, so the work is threading the spin
 index and the S-metric or augmentation consistently, plus tests at each new cell of
 the matrix. Unglamorous, but it is what makes the code trustworthy on real systems
-like magnetic surfaces and spin-polarized adsorbates.
-
-## Trajectory and extended-xyz output for optimizations
-
-DONE for relax. `run_relax` accumulates an ASE frame per optimizer step with energy
-and forces frozen on a `SinglePointCalculator`, and `run` writes them to `relax.xyz`
-(extxyz) next to the JSON, re-readable in ovito or the ASE gui. Regression in
-`tests/integration/test_io.py::test_relax_writes_extxyz_trajectory`. MD does not have
-an output path yet, so the same frame accumulation extends there once it lands.
+like magnetic surfaces and spin-polarized adsorbates. The SCF core itself is already
+even here, the batched USPP/PAW eigensolve is validated at nspin=2 (O2 triplet,
+batched vs per-k to 7e-12 eV, and 21 iterations to QE's 20), so the gaps are in the
+postscf property layer, not the solver.
 
 ## Batched multi-structure SCF, and the EOS-on-GPU question
 
@@ -144,112 +278,6 @@ exactly the regime where stacking several into one padded solve wins. A batch of
 insulator structures is also the shape of a learned-XC training set and an EOS or
 convergence sweep, so this feature and the meta-GGA training work reinforce each other.
 
-## Optimization audit (dual grid, CheFSI, and whether the architecture holds)
-
-Full writeup in `docs/optimization-audit.md`. Status of the ordered conclusions: (1)
-the dual grid is DONE, landed as commit `71a5265`, about 2x on the USPP/PAW H-apply
-FFT, matching the spec; (2) CheFSI is DONE and BENCHMARKED, and the go/no-go came
-back no-go on the RTX 3050. The solver is in `solvers/chebyshev.py`, unit-tested and
-wired opt-in as `scf(..., eigensolver="chebyshev")` on the NC collinear path,
-bit-identical to Davidson on the real NC SCF regression. The noncollinear spinor twin
-was tried but left unwired, CheFSI converges too slowly on the dense metal spinor
-spectrum (100-iteration cap vs Davidson's 18). But the RTX 3050 fp32-deep benchmark
-found it 2.5 to 5x SLOWER than Davidson at every grid size that fits in 6 GB, up to a
-35^3 grid. The fp32 FFT advantage there is only about 3.4x, not the 12x the larger
-systems would need, and CheFSI does 2 to 3x more H-applies, so the filter loses. It
-stays opt-in and off by default. Revisit only on a bigger card where the grid can
-grow into the regime where the fp32 FFT gain dominates; (3) two profile-visible
-micro-costs remain, the per-round
-`linalg.cond` SVD in the batched Davidson guard (the per-k path already catches
-Cholesky failures instead) and the autograd one-center ddd; (4) a Kerker-plus-local-TF
-metal preconditioner, the untried half of the 16-vs-7 iteration gap and now the
-highest-value remaining perf item, since it is a 2.3x on every metal and the dual grid
-has already taken the FFT win. A real-space rewrite is not warranted, with an explicit
-go/no-go test in the doc.
-
-## Atomic-orbital seeding for the initial wavefunctions
-
-The SCF starts from a superposition-of-atomic-densities guess for the density, which is
-fine and is what QE does too, but the initial *wavefunctions* handed to the first
-Davidson solve are bare lowest-kinetic plane waves. `scf/loop.py` builds `c0` as an
-identity block on the first `nb` sphere entries, which are ordered by `|k+G|²`, so the
-starting subspace is the `nb` smoothest plane waves and nothing about the atoms. That
-guess is poor enough that the loop deliberately runs the first diagonalization at a
-loose `1e-3` tolerance (`loop.py:533`) before tightening. QE's default instead projects
-the atomic pseudo-wavefunctions onto the plane-wave basis (`startingwfc='atomic'`),
-which starts the eigensolver much closer to the occupied manifold.
-
-We already have every piece to do the same. The atomic orbitals are parsed and in-tree,
-`upf.pswfc` for norm-conserving and `paw.chi` for PAW, both `AtomicOrbital(l, label,
-rchi=r·R_nl)`, with the `_species_orbitals` helper in `postscf/pdos.py` that already
-pulls them per species. The projector that maps a radial orbital onto the plane-wave
-basis is the same structure used everywhere else, `(4π/√Ω)(−i)^l Y_lm(k+G) F(|k+G|)
-e^{−i(k+G)τ}` with `F` the spherical Bessel transform of `rχ·r`, identical to the KB,
-Hubbard, and PDOS projector builds. So this is assembly of existing parts, not new
-physics.
-
-- New piece, small. Build the initial `(nk, nb, npw)` block from the atomic orbitals:
-  stack the per-atom `|l, m⟩` projectors up to `nb` columns, pad with the current
-  lowest-plane-wave columns when the atomic set is smaller than `nb` (the QE
-  `atomic+random` fallback), and orthonormalize. One function next to `sad_density` in
-  `scf/guess.py`, wired at the `c0` construction site in `loop.py`.
-- Reuse, everything else. The SBT and Ylm projector machinery, the species-orbital
-  helper, and the truncation conventions (the msh-at-10-bohr atomic-wfc cutoff that the
-  +U path already honors) all carry over unchanged.
-
-TRIED, does not pay off on its own. Built `lcao_seed` next to `sad_density` (per-k
-atomic-orbital block, QR-orthonormalized to 8e-15, padded with plane waves past the
-orbital count) and wired it at the `c0` site. It reaches the plane-wave-seeded energy to
-machine precision, as it must (NC O2 gives dF = 5e-12 eV, fcc Ni gives dF = 3e-11 eV).
-The predicted one-to-three iteration saving is real but small (O2 goes 28 to 26
-iterations, fcc Ni 6x6x6 goes 12 to 12), and the per-k seed build costs enough that wall
-time came out neutral to slightly worse (Ni, 108 s to 122 s). The reason is the one the
-prediction named. The loop already runs the first diagonalization at a loose 1e-3
-tolerance, so a crude
-plane-wave start converges the cheap early eigensolves fine, and the total SCF count is
-set by density mixing, not by initial-orbital quality. Reverted the wiring rather than
-add per-k overhead to the default path for no measured gain.
-
-The remaining reason to revisit is that it composes with CheFSI, whose convergence rate
-depends directly on how much of the wanted subspace is already in the start. A Chebyshev
-filter fed atomic orbitals needs fewer rounds than one fed smooth plane waves, so the
-pair should be measured together. That is the only configuration where the seed cost
-might be repaid, and it is worth building `lcao_seed` back only alongside a CheFSI-default
-benchmark that shows the compound win.
-
-## Learned meta-GGA and the kinetic energy density
-
-The learnable functional spans GGA form only, the two PBE parameters kappa and mu. Every
-modern accurate semilocal functional (SCAN, r2SCAN) is meta-GGA, which means it depends
-on the kinetic energy density `tau(r) = (1/2) Σ_i f_i |∇ψ_i(r)|²` on top of rho and
-`|∇rho|²`. Without tau the learnable-XC path cannot fit, learn against, or even compare
-with the functionals people actually use, so it cannot go past GGA form. This is the
-natural next rung for the differentiable-XC work and the one that lets `train_xc_paw`
-learn a real functional rather than only recover PBE.
-
-- New piece, tau on the grid. Each occupied orbital's gradient is `i(k+G)` in reciprocal
-  space, so `∇ψ_i` is one FFT per band per Cartesian direction, squared and accumulated
-  with the occupations. This reuses the density-build FFT machinery with an extra factor
-  of `i(k+G)`; the batched g-to-r path already carries the orbitals, so it is an added
-  contraction, not a new solver.
-- New piece, the meta-GGA potential. `v_tau = ∂e_xc/∂tau` does not act multiplicatively
-  on rho. It enters the Hamiltonian as a tau-dependent modification of the kinetic term,
-  `-∇·(v_tau ∇ψ)`, which makes this a generalized Kohn-Sham scheme and touches the
-  H-apply, not just the functional. Autograd gives `∂e/∂tau` exactly the way it already
-  gives `v_xc`, so no hand-derived kernel is needed, but the extra operator has to be
-  wired into `BatchedHamiltonian.apply` and into the force and stress terms.
-- Reuse, the functional interface. `XCFunctional.energy_density` gains a third argument
-  `tau` beside rho and sigma; the autograd `v_xc`/`f_xc` machinery, the spin channels,
-  and the learnable-parameter graph all extend without new derivations.
-
-Validate against QE `input_dft='scan'` (or r2SCAN) at pinned settings to the usual
-milli-eV, then expose a learnable meta-GGA (an r2SCAN-form functional with learnable
-parameters) and repeat the `train_xc_paw` recovery test at the meta-GGA level. Estimate
-about a week, most of it the generalized-KS potential in the H-apply and the matching
-force and stress terms, which are the parts that are genuinely new rather than a threaded
-argument. This is the item that most directly serves what makes gradwave distinct from a
-very well-validated second copy of QE.
-
 ## Gamma-only real wavefunctions for slabs and molecules
 
 At the Gamma point the orbitals can be taken real, because time reversal makes
@@ -258,7 +286,7 @@ path stores that half sphere and runs the H-apply on a real-to-complex FFT, whic
 about 2x on the single hottest kernel, with the subspace algebra real rather than
 complex on top of that. The performance notes deferred this because for a general
 many-k run it caps the end-to-end gain at roughly 1.3 to 1.5x for the most invasive
-change in the stack. The reason to build it now is the workload: slabs and molecules are
+change in the stack. The reason to build it now is the workload. Slabs and molecules are
 sampled at Gamma alone by construction, so for exactly those systems the Gamma path is
 not a special case, it is the whole calculation, and the invasive change touches the one
 k-point that matters.
@@ -266,7 +294,7 @@ k-point that matters.
 - New piece, a real-wavefunction representation at Gamma. Impose `ψ(G) = ψ*(-G)`, store
   the independent half sphere with the `G=0` component real, and run the H-apply with
   `rfftn`/`irfftn`. The local potential multiply and the projector contractions carry
-  over with the reality constraint; the subspace eigensolve becomes a real symmetric one.
+  over with the reality constraint, and the subspace eigensolve becomes a real symmetric one.
 - Reuse, the solver structure. Davidson and CheFSI both work unchanged in real
   arithmetic; CheFSI in particular gets cheaper, since a real filter halves the FFT and
   the arithmetic together, so Gamma-only slabs are where CheFSI and this specialization
@@ -300,9 +328,15 @@ This only matters if larger cells become a goal, defects, bigger slabs, or super
 finite-q phonons, so it is a when-you-need-it item rather than a now item. But it is the
 one thing standing between the current sub-100-atom validation regime and running the
 kind of system where the code would do new science, so it is worth knowing the fix is a
-tiling change and not an architecture change.
+tiling change and not an architecture change. The ISDF work above is the complementary
+lever, it lowers the operation count where this item lowers the peak memory.
 
-## torch.compile for the exchange-correlation layer
+# Done and resolved
+
+Kept for the reasoning. Each of these is either landed in the code or settled as a
+measured negative.
+
+## torch.compile for the exchange-correlation layer (DONE)
 
 Landed as the opt-in `compile_xc` flag (`GradWave(compile_xc=True)` or
 `xc.enable_compile()`). Measured 19x forward and 16x forward-plus-`v_xc` at 64³,
@@ -310,16 +344,87 @@ Landed as the opt-in `compile_xc` flag (`GradWave(compile_xc=True)` or
 toolchain. Compiled aot_autograd cannot double-backward, so the `f_xc` response
 and HVP sites wrap their `xc.energy()` in `xc_eager()` to stay eager, which means
 only the forward and first-order `v_xc` legs accelerate. Details in
-`docs/torch-compile.md` and `docs/manual/performance.md`. The backlog item below
-is the original analysis, kept for the reasoning.
+`docs/torch-compile.md` and `docs/manual/performance.md`.
 
-Full analysis in `docs/torch-compile.md`. The one-line version: the compiler is dead
-on the complex, FFT-bound Hamiltonian apply, which two earlier attempts already
-confirmed, but the real-valued XC functional was never isolated and compiles to 8x
-forward and about 30x forward-plus-`v_xc` on a 64^3 grid, bit-accurate to 5e-15. The
+The original analysis, kept for the reasoning. The compiler is dead on the complex,
+FFT-bound Hamiltonian apply, which two earlier attempts already confirmed, but the
+real-valued XC functional was never isolated and compiles well on a 64^3 grid. The
 end-to-end effect on a plain SCF is only a few percent because XC is a minority of
-runtime and its FFT-based gradient assembly does not compile, but learned-XC training,
-the PAW one-center angular loop, and the `f_xc` response HVPs call the XC
+runtime and its FFT-based gradient assembly does not compile, but learned-XC
+training, the PAW one-center angular loop, and the `f_xc` response HVPs call the XC
 transcendental chain far more than once per iteration and are CPU-bound, so those are
 the real targets. Insertion point is the single `XCFunctional.energy_density` choke
 point, opt-in with an eager fallback for the NixOS toolchain gap.
+
+## Dual FFT grid (DONE)
+
+Landed as commit `71a5265`, about 2x on the USPP/PAW H-apply FFT by running the
+smooth wavefunctions on a coarse grid and the augmentation on the dense grid,
+matching the audit spec. Full writeup in `docs/optimization-audit.md`.
+
+## CheFSI, benchmarked no-go on the RTX 3050 (DONE)
+
+Chebyshev-filtered subspace iteration is in `solvers/chebyshev.py`, unit-tested and
+wired opt-in as `scf(..., eigensolver="chebyshev")` on the NC collinear path,
+bit-identical to Davidson on the real NC SCF regression. The noncollinear spinor
+twin was tried but left unwired, CheFSI converges too slowly on the dense metal
+spinor spectrum (100-iteration cap vs Davidson's 18). The RTX 3050 fp32-deep
+benchmark found it 2.5 to 5x slower than Davidson at every grid size that fits in 6
+GB, up to 35^3. The fp32 FFT advantage there is only about 3.4x, not the 12x the
+larger systems would need, and CheFSI does 2 to 3x more H-applies, so the filter
+loses. It stays opt-in and off by default. Revisit on a bigger card where the grid
+can grow into the regime where the fp32 FFT gain dominates, which is the same
+hardware caveat the scaling section above opens with.
+
+## Batched Davidson conditioning guard, cond-SVD removed (DONE)
+
+The k-batched USPP/PAW generalized Davidson computed a full `linalg.cond` of the
+subspace overlap every round on top of the `cholesky_ex` it already ran. Probing a
+low-ecut Si PAW SCF (8, 10, 12 Ry) showed the overlap tips into non-PD, which
+`cholesky_ex` flags with info>0, long before its condition number nears the 1e14
+trip (max observed ~9e7), so the SVD never fired independently and was pure cost.
+Removed it. Batched-vs-per-k equality (identical eigenpairs) and USPP/PAW-vs-QE
+regression still pass, including nspin=2 PAW (O2 triplet, 7e-12 eV). Recorded in
+`docs/manual/wisdom.md` under Eigensolvers.
+
+## Extended-xyz trajectory output for relax (DONE)
+
+`run_relax` accumulates an ASE frame per optimizer step with energy and forces
+frozen on a `SinglePointCalculator`, and `run` writes them to `relax.xyz` (extxyz)
+next to the JSON, re-readable in ovito or the ASE gui. The relax CLI now returns
+exit 0 on normal completion, since reaching the ionic-step limit still yields a
+valid trajectory, with convergence carried by the JSON `relax.converged` flag.
+Regression in `tests/integration/test_io.py::test_relax_writes_extxyz_trajectory`.
+MD does not have an output path yet, so the same frame accumulation extends there
+once it lands.
+
+## Atomic-orbital seeding for the initial wavefunctions (TRIED, no net gain)
+
+The idea was to hand the first Davidson solve a superposition of pseudo-atomic
+orbitals instead of bare lowest-kinetic plane waves. `scf/loop.py` builds `c0` as an
+identity block on the first `nb` sphere entries, the smoothest plane waves and
+nothing about the atoms, poor enough that the loop runs the first diagonalization at
+a loose `1e-3` tolerance before tightening. QE's default instead projects the atomic
+pseudo-wavefunctions onto the plane-wave basis (`startingwfc='atomic'`). All the
+pieces existed in-tree, the `upf.pswfc`/`paw.chi` orbitals and the SBT-and-Ylm
+projector build shared with the KB, Hubbard, and PDOS paths.
+
+Built `lcao_seed` (per-k atomic-orbital block, QR-orthonormalized to 8e-15, padded
+with plane waves past the orbital count) and wired it at the `c0` site. It reaches
+the plane-wave-seeded energy to machine precision, as it must (NC O2 gives dF = 5e-12
+eV, fcc Ni gives dF = 3e-11 eV). The predicted one-to-three iteration saving is real
+but small (O2 goes 28 to 26 iterations, fcc Ni 6x6x6 goes 12 to 12), and the per-k
+seed build costs enough that wall time came out neutral to slightly worse (Ni, 108 s
+to 122 s). The reason is the one the prediction named. The loop already runs the
+first diagonalization at a loose 1e-3 tolerance, so a crude plane-wave start
+converges the cheap early eigensolves fine, and the total SCF count is set by density
+mixing, not by initial-orbital quality. Reverted the wiring rather than add per-k
+overhead to the default path for no measured gain. Recorded in
+`docs/manual/wisdom.md` under SCF and mixing.
+
+The remaining reason to revisit is that it composes with CheFSI, whose convergence
+rate depends directly on how much of the wanted subspace is already in the start. A
+Chebyshev filter fed atomic orbitals needs fewer rounds than one fed smooth plane
+waves, so the pair should be measured together. That is the only configuration where
+the seed cost might be repaid, and it is worth building `lcao_seed` back only
+alongside a CheFSI-default benchmark that shows the compound win.
