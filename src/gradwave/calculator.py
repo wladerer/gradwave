@@ -38,6 +38,7 @@ class GradWave(Calculator):
         ecut: float,
         pseudopotentials: dict[str, str],  # element → UPF path
         xc: str = "pbe",
+        ecutrho: float | None = None,  # density cutoff (USPP/PAW); default 4×ecut
         kpts=(1, 1, 1),
         kshift=(0, 0, 0),
         smearing: str = "none",
@@ -46,19 +47,22 @@ class GradWave(Calculator):
         use_symmetry: bool = True,
         etol: float = 1e-8,
         rhotol: float = 1e-7,
+        device: str = "cpu",
         verbose: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.parameters.update(
-            dict(ecut=ecut, xc=xc, kpts=tuple(kpts), kshift=tuple(kshift),
-                 smearing=smearing, width=width, nbands=nbands,
-                 use_symmetry=use_symmetry, etol=etol, rhotol=rhotol)
+            dict(ecut=ecut, ecutrho=ecutrho, xc=xc, kpts=tuple(kpts),
+                 kshift=tuple(kshift), smearing=smearing, width=width,
+                 nbands=nbands, use_symmetry=use_symmetry, etol=etol,
+                 rhotol=rhotol)
         )
         self._pseudo_paths = dict(pseudopotentials)
         self._upf_cache: dict[str, object] = {}
         self._system = None
         self._system_key = None
+        self._device = device
         self._verbose = verbose
         self.last_result = None
 
@@ -103,7 +107,7 @@ class GradWave(Calculator):
             kshift=self.parameters["kshift"],
             nbands=self.parameters["nbands"],
             use_symmetry=self.parameters["use_symmetry"],
-        )
+        ).to(self._device)
         self._system, self._system_key = system, key
         return system
 
@@ -173,17 +177,20 @@ class GradWave(Calculator):
             ])
 
     def _get_uspp_system(self, atoms):
-        """Positions-only updates reuse the cached USPPSystem (all its
-        tables are phase-free; positions enter through structure factors
-        built per solve). Valid because this route never builds the
-        position-dependent symmetrizers (use_symmetry stays off here)."""
+        """With use_symmetry off, positions-only updates reuse the cached
+        USPPSystem (its tables are phase-free; positions enter through
+        structure factors built per solve). With use_symmetry on the density
+        symmetrizer and the IBZ k-mesh are position-dependent, so the system
+        is rebuilt every call — spglib then finds the current configuration's
+        group (dropping to time-reversal-only when a move breaks it)."""
         from gradwave.scf.uspp import setup_uspp
 
         p = self.parameters
         symbols = atoms.get_chemical_symbols()
         species = sorted(set(symbols))
         key = (tuple(np.round(atoms.cell.array, 12).ravel()), tuple(symbols))
-        if self._system is not None and key == self._system_key:
+        if (not p["use_symmetry"] and self._system is not None
+                and key == self._system_key):
             return dataclasses.replace(
                 self._system,
                 positions=torch.as_tensor(atoms.get_positions(), dtype=RDTYPE).to(
@@ -194,7 +201,8 @@ class GradWave(Calculator):
             [species.index(s) for s in symbols],
             [self._upf(s) for s in species],
             ecut=p["ecut"], kmesh=p["kpts"], nbands=p["nbands"],
-        )
+            ecutrho=p.get("ecutrho"), use_symmetry=p["use_symmetry"],
+        ).to(self._device)
         self._system, self._system_key = system, key
         return system
 
