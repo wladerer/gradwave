@@ -182,6 +182,42 @@ defect, which the [Performance](performance.md) page works through in full.
   two analytic routes disagree at 3e-7, energy-space Richardson finite differencing
   arbitrates.
 
+## Discretization error estimation
+
+The `postscf/discretization_error.py` estimator perturbs the converged solution
+into the high-G complement to estimate the plane-wave (Ecut) basis error, then
+propagates it to quantities of interest. It follows Cancès et al. and the
+differentiable-DFT coupling of arXiv:2509.07785. A few things are not obvious.
+
+- The complement correction is cheap and needs no larger SCF. The enlarged sphere
+  is a subset of the density FFT box, and the first-order correction is a diagonal
+  divide δφ = −R/(T_G − ε) on the annulus, since the Laplacian dominates at high G.
+  Keep it a post-processing step, never in the SCF hot path.
+- The density change integrates to zero. The correction is orthogonal to the
+  occupied space, so ∫δρ = 0 to first order. If it does not, the residual or the
+  padding is wrong.
+- The forward-mode force propagation is δF ≈ (∂F/∂P)δP with a FIXED δP, one AD
+  pass. This works because the force's δP-response is dominated by ⟨δφ|∂R/∂τ⟩, the
+  ion moving. It reproduces the reference error to a 0.99 correlation.
+- The energy error is second order, not first. The naive first-order term
+  Σ f 2Re⟨δφ|R⟩ is halved by the second-order term at the variational optimum, so
+  the correct estimate is δE = Σ f ⟨δφ|R⟩ with factor 1, not 2. A factor-2 form
+  overshoots by 2x. It is a definite energy lowering.
+- The naive force recipe does NOT extend to stress. Propagating a fixed δP through
+  the fixed-basis stress gives a cleanly anti-correlated estimate (correlation near
+  −1, about −0.5x the true error). The reason is that σ = ∂E/∂ε and its δP-response
+  is dominated by the strain-response of the orbital correction, the ⟨∂δφ/∂ε|R⟩
+  term, which a fixed-δφ forward pass omits. Forces avoid this because the ion-motion
+  term dominates there. A correct stress estimate needs a strain-parameterized
+  residual, δφ differentiated through strain, not one AD pass.
+- The coarse-space Dyson refinement is opt-in and not yet validated. Dressing the
+  first-order δρ by (1 − χ₀K)⁻¹ is structurally derived but was neutral to slightly
+  negative on the one insulator tested, so the exact Schur coupling still needs
+  pinning against the reference. Leave `dyson=False` for now.
+- Coverage is norm-conserving, nspin=1, use_symmetry=False, matching the response
+  machinery it borrows. A perturbation breaks the crystal symmetry, so the response
+  needs the full k-mesh.
+
 ## Process and validation
 
 - Check what a reference structure actually is. The Lejaeghere reference for carbon is

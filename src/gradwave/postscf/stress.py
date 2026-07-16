@@ -84,15 +84,27 @@ def symmetrize_stress(sigma: torch.Tensor, sg, cell: np.ndarray) -> torch.Tensor
     return acc / sg.n_ops
 
 
-def _energy_strained(res, xc, eps: torch.Tensor) -> torch.Tensor:
+def _energy_strained(
+    res, xc, eps: torch.Tensor, *, rho=None, coeffs=None, spheres=None
+) -> torch.Tensor:
     """The KS energy as a function of strain at fixed coefficients/occupations.
 
     Also usable with a plain (non-leaf) eps for finite-difference checks.
+
+    The optional ``rho`` (grid density), ``coeffs`` (per-k, on ``spheres``) and
+    ``spheres`` override the converged, detached electronic state. They are used
+    WITHOUT detaching, so a caller can carry an extra autograd graph through them
+    (e.g. a density-matrix perturbation for a discretization-error estimate).
+    When omitted the converged detached state is used, i.e. the plain stress.
     """
     system = res.system
     grid = system.grid
     dev = system.positions.device
     rdt = torch.float64
+
+    rho = res.rho.detach() if rho is None else rho
+    coeffs = [c.detach() for c in res.coeffs] if coeffs is None else coeffs
+    spheres = system.spheres if spheres is None else spheres
 
     f_map = torch.eye(3, dtype=rdt, device=dev) + eps
     a0 = torch.as_tensor(grid.cell, dtype=rdt, device=dev)
@@ -117,7 +129,7 @@ def _energy_strained(res, xc, eps: torch.Tensor) -> torch.Tensor:
     # fixed density coefficients: ρ̃(G) = ρ(G)·Ω₀  [e]
     from gradwave.core.fftbox import r_to_g
 
-    rho_t = (r_to_g(res.rho.detach().to(torch.complex128)) * omega0).reshape(-1)[mask]
+    rho_t = (r_to_g(rho.to(torch.complex128)) * omega0).reshape(-1)[mask]
     rho_g = rho_t / omega.to(rho_t.dtype)
 
     # ---- Hartree (G=0 excluded)
@@ -141,7 +153,7 @@ def _energy_strained(res, xc, eps: torch.Tensor) -> torch.Tensor:
         e_loc = e_loc + (rho_g.conj() * s_sp * v.to(rho_g.dtype)).sum().real
 
     # ---- XC (density values scale as 1/detJ; NLCC core rebuilt on the graph)
-    rho_e = res.rho.detach() * (omega0 / omega)
+    rho_e = rho * (omega0 / omega)
     rho_xc = rho_e
     if system.rho_core is not None:
         core = torch.zeros(g2_sph.shape[0], dtype=torch.complex128, device=dev)
@@ -171,13 +183,12 @@ def _energy_strained(res, xc, eps: torch.Tensor) -> torch.Tensor:
     e_xc = xc.energy(rho_xc, omega, sigma_xc)
 
     # ---- kinetic + nonlocal, per k (strained k+G from integer Miller + k_frac)
-    coeffs = [c.detach() for c in res.coeffs]
     occ = res.occupations.detach()
     kw = system.kweights
     e_kin = torch.zeros((), dtype=rdt, device=dev)
     e_nl = torch.zeros((), dtype=rdt, device=dev)
     lmax = max((b.l for u in system.upfs for b in u.betas), default=0)
-    for ik, sph in enumerate(system.spheres):
+    for ik, sph in enumerate(spheres):
         kfrac = torch.as_tensor(sph.k_frac, dtype=rdt, device=dev)
         kpg = (sph.miller.to(rdt) + kfrac) @ b_e  # (npw, 3)
         kpg2 = (kpg**2).sum(-1)
