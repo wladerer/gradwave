@@ -4,6 +4,26 @@ Total, spin-projected, atom- and orbital-projected DOS, and noncollinear
 projections (charge, spin texture, and j-resolved SOC). The reference for every
 projected quantity is Quantum ESPRESSO's `projwfc.x`.
 
+## Status
+
+Phases 1-6 are implemented in `postscf/pdos.py` with the analysis, output, JSON,
+and CLI wiring, and a durable test at `tests/integration/test_pdos.py`. Phase 0
+(dense nscf mesh + MV/tetrahedron broadening) is not done; the PDOS runs on the
+SCF k-mesh with gaussian broadening.
+
+- `projected_dos` covers norm-conserving and USPP/PAW, nspin=1 and 2. USPP uses
+  the S-metric `<phi|S|psi>` / `<phi|S|phi>`, verified by the per-state captured
+  weight staying <= 1 where the bare overlap overshoots.
+- `projected_dos_noncollinear` returns the charge n(E) and the spin texture
+  m_x/m_y/m_z(E). The m_z group DOS reproduces the collinear (up-down) group PDOS
+  and the texture rotates rigidly with the moment.
+- `projected_dos_soc` resolves each shell into its j channels. The j-summed
+  charge equals the scalar-l charge exactly only for l=0. For l>0 the two differ
+  slightly (<1% here) because a fully-relativistic pseudo carries distinct
+  radials R_{n,l,j} for the two j of a given l, so the scalar-AO and spinor-AO
+  spans are genuinely different subspaces. This is physics, not a normalization
+  bug, and it is the one place the internal cross-check is inexact.
+
 ## What already exists
 
 The two hard ingredients are in the tree for other reasons, so most of this is
