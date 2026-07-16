@@ -396,3 +396,153 @@ def projected_dos_noncollinear(res, *, width: float = 0.1, npoints: int = 800,
         fermi_eV=None if res.fermi is None else float(res.fermi),
         group_by=group_by,
     )
+
+
+@dataclass
+class SOColumn:
+    """One spin-angular (j, mj) atomic-orbital projector column."""
+
+    atom: int
+    species: int
+    label: str        # e.g. "6P"
+    l: int
+    j: float          # l ± 1/2
+    mj: float         # -j .. j
+
+
+def _atomic_columns_so(system) -> list[SOColumn]:
+    """Every PP_PSWFC orbital expanded over (j, mj); j comes from the FR pseudo."""
+    cols = []
+    for a, sp in enumerate(system.species_of_atom):
+        u = system.upfs[sp]
+        orbs = getattr(u, "pswfc", ())
+        if not orbs:
+            raise ValueError(
+                f"{u.element}: the pseudopotential carries no PP_PSWFC atomic "
+                "orbitals, so a j-resolved PDOS is not available")
+        for o in orbs:
+            j = getattr(o, "j", None)
+            if j is None:
+                raise ValueError(
+                    f"{u.element}: PP_PSWFC orbitals carry no total angular "
+                    "momentum j, so a j-resolved PDOS needs a fully-relativistic "
+                    "pseudo (use projected_dos_noncollinear for scalar orbitals)")
+            for imj in range(int(round(2 * j + 1))):
+                cols.append(SOColumn(a, sp, o.label, o.l, float(j), -j + imj))
+    return cols
+
+
+def _ao_spinor_projectors_k(system, sph, cols, device):
+    """Spin-angular AO projectors on one G-sphere, returned as separate up/down
+    components qu, qd (each nproj, npw). Each |l, j, mj> is the Clebsch-Gordan
+    combination c_up Y_l^{mj-1/2} chi_up + c_dn Y_l^{mj+1/2} chi_dn, the same
+    construction core/spinor_proj.py uses for the SOC beta projectors."""
+    from gradwave.core.spinor_proj import _cg, complex_ylm
+    vol = system.grid.volume
+    kpg = sph.kpg.to(device)
+    npw = sph.npw
+    qmag = np.sqrt(sph.kpg2.cpu().numpy())
+    lmax = max(c.l for c in cols)
+    yc = complex_ylm(lmax, kpg)  # (npw, (lmax+1)^2), index l^2 + l + m
+    # radial form factors F_nl(q), one per (species, label, j) since j splits R_nl
+    fcache: dict[tuple, torch.Tensor] = {}
+    for sp in set(system.species_of_atom):
+        u = system.upfs[sp]
+        for o in u.pswfc:
+            key = (sp, o.label, float(o.j))
+            if key not in fcache:
+                fcache[key] = torch.as_tensor(
+                    sbt(o.l, o.rchi * u.r, u.r, u.rab, qmag),
+                    dtype=RDTYPE, device=device).to(CDTYPE)
+    phase_arg = kpg @ system.positions.to(device).T
+    phase = torch.exp(torch.complex(torch.zeros_like(phase_arg), -phase_arg))
+
+    qu = torch.zeros(len(cols), npw, dtype=CDTYPE, device=device)
+    qd = torch.zeros(len(cols), npw, dtype=CDTYPE, device=device)
+    for p, c in enumerate(cols):
+        pref = (4.0 * math.pi / math.sqrt(vol)) * _MINUS_I_POW[c.l]
+        base = pref * fcache[(c.species, c.label, c.j)] * phase[:, c.atom]
+        c_up, m_up, c_dn, m_dn = _cg(c.l, c.j, c.mj)
+        if m_up is not None:
+            qu[p] = base * (c_up * yc[:, c.l * c.l + c.l + m_up])
+        if m_dn is not None:
+            qd[p] = base * (c_dn * yc[:, c.l * c.l + c.l + m_dn])
+    return qu, qd
+
+
+def _group_key_so(col: SOColumn, group_by: str):
+    if group_by == "total":
+        return "total"
+    if group_by == "atom":
+        return f"atom{col.atom + 1}"
+    if group_by == "l":
+        return f"atom{col.atom + 1}:{col.label}"
+    jtag = f"j{col.j:.1f}"
+    if group_by == "jmj":
+        return f"atom{col.atom + 1}:{col.label}_{jtag}_mj{col.mj:+.1f}"
+    return f"atom{col.atom + 1}:{col.label}_{jtag}"           # group_by == "j"
+
+
+@torch.no_grad()
+def projected_dos_soc(res, *, width: float = 0.1, npoints: int = 800, window=None,
+                      group_by: str = "j") -> ProjectedDOS:
+    """j-resolved projected DOS of a fully-relativistic spinor SCF.
+
+    Projects the spinor states onto spin-angular atomic orbitals |n l j mj> built
+    from the FR pseudo's PP_PSWFC radials and Clebsch-Gordan coefficients, so a
+    spin-orbit-split shell (e.g. p_{1/2} vs p_{3/2}) resolves into its j channels.
+    group_by is 'j' (atom + orbital + j), 'jmj' (adds mj), 'l', 'atom', or 'total'.
+    """
+    from gradwave.scf.noncollinear import NCResult
+    if not isinstance(res, NCResult):
+        raise NotImplementedError(
+            "projected_dos_soc expects a fully-relativistic noncollinear NCResult")
+    system = res.system
+    if not getattr(system, "is_fr", False):
+        raise NotImplementedError(
+            "j-resolved PDOS needs a fully-relativistic (SOC) pseudo; use "
+            "projected_dos_noncollinear for scalar-relativistic noncollinear SCF")
+    device = res.coeffs.device
+    cols = _atomic_columns_so(system)
+    m_pw = system.batch.npw_max
+    kw = system.kweights.to(device)
+
+    eig = res.eigenvalues                       # (nk, nb)
+    nk, nb = eig.shape
+    all_e = eig.reshape(-1).cpu().numpy()
+    nstate = all_e.shape[0]
+    weights = np.zeros((nstate, len(cols)))
+    kweight_state = np.zeros(nstate)
+    for ik, sph in enumerate(system.spheres):
+        npw = sph.npw
+        c = res.coeffs[ik].to(device)                       # (nb, 2·m_pw)
+        cu, cd = c[:, :npw], c[:, m_pw:m_pw + npw]
+        qu, qd = _ao_spinor_projectors_k(system, sph, cols, device)
+        becp = (torch.einsum("bg,pg->bp", cu, qu.conj())
+                + torch.einsum("bg,pg->bp", cd, qd.conj()))  # <Phi_p|psi_b>
+        overlap = (torch.einsum("pg,qg->pq", qu.conj(), qu)
+                   + torch.einsum("pg,qg->pq", qd.conj(), qd))  # <Phi_p|Phi_q>
+        wgt = _lowdin_weights(becp, overlap).cpu().numpy()
+        sl = slice(ik * nb, (ik + 1) * nb)
+        weights[sl] = wgt
+        kweight_state[sl] = float(kw[ik])
+
+    captured = (weights.sum(axis=1) * kweight_state).sum()
+    spilling = float(1.0 - captured / kweight_state.sum())
+    if window is None:
+        window = (all_e.min() - 10 * width, all_e.max() + 10 * width)
+    grid = np.linspace(window[0], window[1], npoints)
+
+    def chan(mask):
+        return _broaden(grid, all_e, kweight_state * weights[:, mask].sum(axis=1),
+                        width)
+
+    labels = sorted({_group_key_so(c, group_by) for c in cols})
+    groups = {lab: chan(np.array([_group_key_so(c, group_by) == lab for c in cols]))
+              for lab in labels}
+    total = chan(np.ones(len(cols), dtype=bool))
+    return ProjectedDOS(
+        energy_eV=grid, total=total, groups=groups, spilling=spilling,
+        fermi_eV=None if res.fermi is None else float(res.fermi),
+        nspin=1, group_by=group_by,
+    )
