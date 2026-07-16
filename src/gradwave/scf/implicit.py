@@ -33,6 +33,7 @@ import torch
 
 from gradwave.constants import E2
 from gradwave.core.density import sigma_from_rho
+from gradwave.core.xc.base import xc_eager
 from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
 from gradwave.core.hamiltonian import HamiltonianK, projectors
 from gradwave.dtypes import CDTYPE, RDTYPE
@@ -142,9 +143,10 @@ def apply_k_hxc(res: SCFResult, xc, w_r: torch.Tensor) -> torch.Tensor:
     kh = (torch.fft.ifftn(4.0 * math.pi * E2 * w_g * inv_g2, dim=(-3, -2, -1))
           * grid.n_points).real
 
-    # XC: f_xc·w = d/dρ ⟨v_xc(ρ), w⟩ (double backward through E_xc)
+    # XC: f_xc·w = d/dρ ⟨v_xc(ρ), w⟩ (double backward through E_xc). xc_eager()
+    # forces eager, since compiled aot_autograd cannot double-backward.
     rho = res.rho.detach().clone().requires_grad_(True)
-    with torch.enable_grad():
+    with torch.enable_grad(), xc_eager():
         sigma = sigma_from_rho(rho, grid.g_cart) if xc.needs_gradient else None
         e_xc = xc.energy(rho, grid.volume, sigma)
         (v_xc,) = torch.autograd.grad(e_xc, rho, create_graph=True)
@@ -185,9 +187,10 @@ def density_loss_param_grads(res: SCFResult, xc, loss_fn) -> tuple[torch.Tensor,
     u = solve_adjoint(res, xc, vbar)
     chi0_u = apply_chi0(res, u)
 
-    # dL/dθ = ⟨χ₀u, ∂v_xc/∂θ⟩: differentiate ⟨χ₀u, v_xc(ρ; θ)⟩ w.r.t. θ at fixed ρ
+    # dL/dθ = ⟨χ₀u, ∂v_xc/∂θ⟩, differentiate ⟨χ₀u, v_xc(ρ; θ)⟩ w.r.t. θ at fixed ρ.
+    # Double backward through E_xc, so force eager with xc_eager().
     rho_fixed = res.rho.detach().clone().requires_grad_(True)
-    with torch.enable_grad():
+    with torch.enable_grad(), xc_eager():
         sigma = sigma_from_rho(rho_fixed, grid.g_cart) if xc.needs_gradient else None
         e_xc = xc.energy(rho_fixed, grid.volume, sigma)
         (v_xc,) = torch.autograd.grad(e_xc, rho_fixed, create_graph=True)

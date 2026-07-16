@@ -22,7 +22,7 @@ import math
 import torch
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
-from gradwave.core.xc.base import RHO_FLOOR_AU
+from gradwave.core.xc.base import RHO_FLOOR_AU, CompilableXC
 from gradwave.core.xc.lda_pw92 import eps_x_lda
 
 _F_DD0 = 1.709920934161365  # f″(0)
@@ -59,7 +59,7 @@ def eps_c_pw92_spin(rho_au: torch.Tensor, zeta: torch.Tensor) -> torch.Tensor:
     return ec0 + alpha_c * fz / _F_DD0 * (1.0 - z4) + (ec1 - ec0) * fz * z4
 
 
-class SpinXC(torch.nn.Module):
+class SpinXC(CompilableXC, torch.nn.Module):
     """Base: maps per-spin grid densities (and gradients) to e_xc [eV/Å³]."""
 
     needs_gradient: bool = False
@@ -68,7 +68,7 @@ class SpinXC(torch.nn.Module):
         raise NotImplementedError
 
     def energy(self, rho_up, rho_dn, volume, sigma_uu=None, sigma_dd=None, sigma_tot=None):
-        e = self.energy_density(rho_up, rho_dn, sigma_uu, sigma_dd, sigma_tot)
+        e = self.eval_energy_density(rho_up, rho_dn, sigma_uu, sigma_dd, sigma_tot)
         return e.sum() * (volume / e.numel())
 
 

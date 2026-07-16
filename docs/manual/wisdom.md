@@ -206,6 +206,13 @@ defect, which the [Performance](performance.md) page works through in full.
   conservation, and it vanishes smoothly in the insulating limit.
 - Floor densities before fractional powers. `torch.where` evaluates both branches, and a
   NaN in the dead branch poisons the backward.
+- torch.compile cannot double-backward. The `f_xc` kernel is a double backward through
+  `E_xc`, so a compiled XC functional would crash the second grad, and the failure lands
+  in the caller's grad call where no try/except reaches it. The opt-in `compile_xc` path
+  handles this in the autograd graph. `_DoubleSafeXC` in `core/xc/base.py` reads
+  `torch.is_grad_enabled()` inside its backward, which is true exactly when the caller
+  asked for `create_graph`, and routes that case to eager. First backward (`v_xc`) stays
+  compiled, second backward (`f_xc`) falls back, and no response caller changes.
 - Validate finite differences on a ladder. Analytic against a finite difference of
   complete SCF re-runs at 1e-5 to 1e-7 relative is the floor for first derivatives. When
   two analytic routes disagree at 3e-7, energy-space Richardson finite differencing

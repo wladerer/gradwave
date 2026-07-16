@@ -101,6 +101,7 @@ from gradwave.constants import E2
 from gradwave.core.density import sigma_from_rho
 from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
 from gradwave.core.hamiltonian import becp, projectors
+from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.solvers.precond import teter
 
@@ -644,7 +645,8 @@ class _ConvergedUSPP:
         scale = grid.n_points / self.vol
         if self.nspin == 1:
             rho = self.rho_xc.detach().clone().requires_grad_(True)
-            with torch.enable_grad():
+            # Double backward through E_xc, force eager (compile cannot do it).
+            with torch.enable_grad(), xc_eager():
                 sigma = (sigma_from_rho(rho, grid.g_cart)
                          if self.xc.needs_gradient else None)
                 e_xc = self.xc.energy(rho, self.vol, sigma)
@@ -656,7 +658,8 @@ class _ConvergedUSPP:
         c2 = 0.0 if core is None else 0.5 * core
         ru = (self.rho_sp[0] + c2).detach().clone().requires_grad_(True)
         rd = (self.rho_sp[1] + c2).detach().clone().requires_grad_(True)
-        with torch.enable_grad():
+        # Double backward through E_xc, force eager (compile cannot do it).
+        with torch.enable_grad(), xc_eager():
             if self.xc.needs_gradient:
                 s_uu = sigma_from_rho(ru, grid.g_cart)
                 s_dd = sigma_from_rho(rd, grid.g_cart)
@@ -897,8 +900,9 @@ def uspp_density_loss_param_grads(
                 f"{max_outer} iterations)")
 
         # dL/dθ = Σ_σ ⟨δρ_σ, ∂v_xc^σ/∂θ⟩ + Σ_a Σ_σ Tr[δbec_aσ ∂ddd_aσ/∂θ]
+        # Double backward through E_xc for the θ-derivative, force eager.
         params = list(xc.parameters())
-        with torch.enable_grad():
+        with torch.enable_grad(), xc_eager():
             if nsp == 1:
                 rho_fix = cs.rho_xc.detach().clone().requires_grad_(True)
                 sigma = (sigma_from_rho(rho_fix, grid.g_cart)

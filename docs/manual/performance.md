@@ -101,6 +101,47 @@ retaining it, rather than rebuilding it per call, cuts a spin PAW HVP from 870 t
 524 milliseconds with bit-identical results. The density-loss adjoint, the position
 response, and the Newton step all inherit it.
 
+### Compiled XC layer (opt-in)
+
+torch.compile is dead on the complex FFT-bound Hamiltonian apply, the entry below
+still stands for that. The exchange-correlation functional is the opposite case. It
+is real-valued and runs a chain of roughly thirty elementwise transcendental
+operations that Inductor fuses well, and the analysis and two failed complex
+attempts are in `docs/torch-compile.md`. Passing `compile_xc=True` to the `GradWave`
+calculator, or calling `xc.enable_compile()`, routes `XCFunctional.energy_density`
+through a cached compiled callable with an eager fallback.
+
+Measured on `PBE.energy_density`, a 64³ grid, float64, 8 CPU threads. The ratio is
+the reliable figure since eager and compiled are timed back to back in one process.
+
+| path | eager | compiled | speedup |
+|---|---|---|---|
+| forward energy density | 1173 ms | 61 ms | 19x |
+| forward + v_xc backward | 2693 ms | 171 ms | 16x |
+
+The v_xc result is bit-accurate to eager at 3e-16, and the forward value is exact.
+The win concentrates where the XC transcendental chain runs many times per SCF
+iteration and is not FFT-bound, namely the PAW one-center quadrature
+(`scf/paw_onsite.py`) and learned-XC training. On a plain ground-state SCF the
+end-to-end gain is a few percent, because XC is a minority of runtime and its
+FFT-based gradient assembly in `core/density.py` is outside the compiled kernel.
+
+Two limits set the scope. First, the first compile traces for about a minute
+whether or not it succeeds, so it pays back only over a long SCF or a training run,
+never a one-shot, which is why the gate test is in the slow tier. Second,
+torch.compile with aot_autograd cannot double-backward, and the `f_xc` response
+kernel (dielectric, Newton, Stoner, learned-U) is exactly a double backward through
+`E_xc`. The `_DoubleSafeXC` autograd wrapper detects the second-derivative path by
+`torch.is_grad_enabled()` inside its backward and routes it to eager automatically,
+so response and HVP code stays correct with `compile_xc` on, it just does not
+accelerate there. Correcting the earlier report, HVP-based learned-XC training does
+not benefit for the same reason, only the forward and `v_xc` legs do.
+
+On NixOS the compiled path needs `openssl` on `PATH` for Inductor cache hashing and
+`TRITON_LIBCUDA_PATH=/run/opengl-driver/lib` on GPU. When either is absent the first
+call latches to eager and returns the identical result, so the flag is always safe
+to leave on.
+
 ## What does not help
 
 These were built or measured and did not pay. They are here so no one spends the
@@ -116,9 +157,11 @@ time again.
 - **CUDA graphs.** Capturing the real batched Hamiltonian apply replays
   bit-identically at 1.0 to 1.1 times eager speed. The kernels are already
   back-to-back, so there is no launch gap to remove.
-- **torch.compile.** Inductor does not codegen complex operations, and the
-  real-decomposed slice that would compile is too small next to the FFTs. It was
-  tried and removed.
+- **torch.compile on the Hamiltonian apply.** Inductor does not codegen complex
+  operations, and the real-decomposed slice that would compile is too small next
+  to the FFTs. It was tried and removed for the complex apply. The real-valued XC
+  layer is a separate live win and is not covered by this line, see "Compiled XC
+  layer" below and docs/torch-compile.md.
 - **fp32 drafting on a CPU insulator.** The cast overhead beats pocketfft's fp32
   gain, so the draft is slower for that case. The mixed-precision wins are on GPU
   many-k and smeared workloads, not here.

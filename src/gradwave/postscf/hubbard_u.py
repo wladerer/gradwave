@@ -38,6 +38,7 @@ import torch
 
 from gradwave.constants import E2
 from gradwave.core.density import sigma_from_rho
+from gradwave.core.xc.base import xc_eager
 from gradwave.core.fftbox import r_to_g
 from gradwave.core.hubbard import (
     HubbardManifold,
@@ -239,7 +240,8 @@ def _k_hxc_spin(res, xc, dru, drd):
     cu2 = 0.0 if core is None else 0.5 * core
     ru = (res.rho_spin[0] + cu2).detach().clone().requires_grad_(True)
     rd = (res.rho_spin[1] + cu2).detach().clone().requires_grad_(True)
-    with torch.enable_grad():
+    # Double backward through E_xc for the f_xc kernel, so force eager.
+    with torch.enable_grad(), xc_eager():
         if xc.needs_gradient:
             s_uu = sigma_from_rho(ru, grid.g_cart)
             s_dd = sigma_from_rho(rd, grid.g_cart)

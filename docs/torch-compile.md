@@ -130,3 +130,22 @@ the Hamiltonian apply alone; that verdict is settled. And correct the blanket
 "tried and removed" line in `docs/manual/performance.md` to say the complex apply
 was tried and removed while the real-valued XC layer is a live win, so the next
 reader does not inherit the overgeneralization this note exists to fix.
+
+## Implemented, and one correction
+
+Landed as the `compile_xc` flag on the `GradWave` calculator, backed by
+`CompilableXC` and `_DoubleSafeXC` in `core/xc/base.py`, with the bit-accuracy gate
+in `tests/unit/test_xc_compile.py`. Measured here at 64³ float64, 8 threads, the
+compiled forward is 19x eager and forward-plus-`v_xc` is 16x, `v_xc` bit-accurate to
+3e-16. Numbers and scope are in `docs/manual/performance.md` under "Compiled XC
+layer".
+
+The gate forced one correction. This PyTorch's aot_autograd cannot double-backward
+through compiled code, it raises `does not currently support double backward`, not a
+slow-but-correct result. So the `f_xc` HVP does not compile at all, and the hope
+above that response HVPs and HVP-based learned-XC training would benefit was wrong.
+Only the forward and the first-order `v_xc` compile. `_DoubleSafeXC` detects the
+second-derivative path with `torch.is_grad_enabled()` inside its backward and routes
+it to eager, so response and training code stays correct with the flag on, it just
+does not accelerate on the HVP leg. The forward and `v_xc` legs of training still
+win, which keeps learned-XC the strongest target, just for a narrower reason.

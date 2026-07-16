@@ -48,6 +48,7 @@ class GradWave(Calculator):
         etol: float = 1e-8,
         rhotol: float = 1e-7,
         device: str = "cpu",
+        compile_xc: bool = False,
         verbose: bool = False,
         **kwargs,
     ):
@@ -63,8 +64,20 @@ class GradWave(Calculator):
         self._system = None
         self._system_key = None
         self._device = device
+        self._compile_xc = compile_xc
         self._verbose = verbose
         self.last_result = None
+
+    def _make_xc(self):
+        """Instantiate the XC functional, opting into the compiled real-valued
+        energy_density path when compile_xc is set (see docs/torch-compile.md).
+        The functional degrades to eager on any toolchain gap, so this is safe
+        to leave on. It pays only for XC-heavy, CPU-bound work (PAW one-center
+        loop, response HVPs, learned-XC training), not a plain FFT-bound SCF."""
+        xc = _XC[self.parameters["xc"]]()
+        if self._compile_xc:
+            xc.enable_compile()
+        return xc
 
     def _upf(self, symbol):
         if symbol not in self._upf_cache:
@@ -155,7 +168,7 @@ class GradWave(Calculator):
             return
         system = self._get_system(self.atoms)
         res = scf(
-            system, _XC[p["xc"]](),
+            system, self._make_xc(),
             smearing=p["smearing"], width=p["width"],
             etol=p["etol"], rhotol=p["rhotol"], verbose=self._verbose,
             start_from=self._warm_start(system),
@@ -169,7 +182,7 @@ class GradWave(Calculator):
         if "stress" in properties:
             from gradwave.postscf.stress import stress as hf_stress
 
-            sig = hf_stress(res, _XC[p["xc"]]()).cpu().numpy()
+            sig = hf_stress(res, self._make_xc()).cpu().numpy()
             # ASE Voigt order (xx, yy, zz, yz, xz, xy); ASE's convention is
             # +(1/Ω)∂E/∂ε, same as ours
             self.results["stress"] = np.array([
@@ -212,14 +225,14 @@ class GradWave(Calculator):
 
         p = self.parameters
         system = self._get_uspp_system(self.atoms)
-        res = scf_uspp(system, _XC[p["xc"]](), smearing=p["smearing"],
+        res = scf_uspp(system, self._make_xc(), smearing=p["smearing"],
                        width=p["width"], etol=p["etol"], rhotol=p["rhotol"],
                        verbose=self._verbose,
                        start_from=self._warm_start(system))
         if not res["converged"]:
             raise RuntimeError("gradwave USPP SCF did not converge")
         self.last_result = res
-        xc = _XC[p["xc"]]()
+        xc = self._make_xc()
         self.results["energy"] = float(res["energies"].free_energy)
         self.results["free_energy"] = float(res["energies"].free_energy)
         from gradwave.postscf.paw_forces import forces_uspp

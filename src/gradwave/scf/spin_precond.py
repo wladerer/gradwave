@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import torch
 
+from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE
 
 
@@ -99,7 +100,8 @@ def build_stoner_precond(system, coeffs_s, eigs_s, mu, scheme,
 
     rho_leaf = rho_tot.detach().clone()
     m_leaf = m_r.detach().clone().requires_grad_(True)
-    with torch.enable_grad():
+    # Double backward through E_xc for the Stoner kernel, so force eager.
+    with torch.enable_grad(), xc_eager():
         up = 0.5 * (rho_leaf + m_leaf)
         dn = 0.5 * (rho_leaf - m_leaf)
         if system.rho_core is not None:

@@ -36,6 +36,7 @@ import torch
 from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
 from gradwave.core.hamiltonian import becp
+from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.postscf.uspp_implicit import _check_supported, _ConvergedUSPP
 from gradwave.scf.newton import _pack, _unpack
@@ -97,7 +98,8 @@ def _fxc_apply(cs, w: torch.Tensor) -> torch.Tensor:
 
     grid = cs.grid
     rho = cs.rho_xc.detach().clone().requires_grad_(True)
-    with torch.enable_grad():
+    # Double backward through E_xc for the position f_xc, so force eager.
+    with torch.enable_grad(), xc_eager():
         sigma = (sigma_from_rho(rho, grid.g_cart)
                  if cs.xc.needs_gradient else None)
         e_xc = cs.xc.energy(rho, cs.vol, sigma)
@@ -511,7 +513,10 @@ def hessian_column(res: dict, xc, a: int, alpha: int, *,
                                    dim=(-3, -2, -1)).real
     rho_xc = rho_tot if rho_core is None else rho_tot + rho_core
     sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
-    e = e + xc.energy(rho_xc, vol, sigma)
+    # grads below take create_graph=True (a second backward follows), so keep
+    # this E_xc eager, compiled aot_autograd cannot double-backward.
+    with xc_eager():
+        e = e + xc.energy(rho_xc, vol, sigma)
     species_index = torch.tensor(system.species_of_atom, dtype=torch.int64)
     vloc_g = local_potential_g(pos, species_index, system.vloc_tables,
                                grid.g_cart, vol)

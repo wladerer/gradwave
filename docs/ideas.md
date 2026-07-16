@@ -140,6 +140,13 @@ EOS, phonon stencils) and run the heavy cases one at a time.
 
 ## torch.compile for the exchange-correlation layer
 
+Landed as the opt-in `compile_xc` flag (`GradWave(compile_xc=True)` or
+`xc.enable_compile()`). Measured 19x forward and 16x forward-plus-`v_xc` at 64³,
+`v_xc` bit-accurate to 3e-16, with an eager fallback and automatic double-backward
+routing so response and HVP code stays correct. Details in `docs/torch-compile.md`
+and `docs/manual/performance.md`. The remaining backlog item below is the original
+analysis, kept for the reasoning.
+
 Full analysis in `docs/torch-compile.md`. The one-line version: the compiler is dead
 on the complex, FFT-bound Hamiltonian apply, which two earlier attempts already
 confirmed, but the real-valued XC functional was never isolated and compiles to 8x

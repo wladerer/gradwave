@@ -22,14 +22,113 @@ fractional powers/logs; test densities sit far above the floor.
 
 from __future__ import annotations
 
+import contextlib
+import threading
+
 import torch
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
 
 RHO_FLOOR_AU = 1e-14  # a.u.; well below any physical grid density
 
+# Thread-local switch that forces eager energy_density even when a functional
+# has compile enabled. torch.compile with aot_autograd does not support double
+# backward, and the f_xc kernel (dielectric/Newton/Stoner/learned-U) is exactly
+# a double backward through E_xc, so those call sites wrap themselves in
+# xc_eager() to stay on the eager path. The failure would otherwise raise inside
+# the caller's second grad(), past any try/except here.
+_EAGER_TLS = threading.local()
 
-class XCFunctional(torch.nn.Module):
+
+def _force_eager() -> bool:
+    return getattr(_EAGER_TLS, "on", False)
+
+
+@contextlib.contextmanager
+def xc_eager():
+    """Force any compile-enabled XC functional onto its eager path inside this
+    block. Required around f_xc HVPs, since compiled code cannot double-backward."""
+    prev = getattr(_EAGER_TLS, "on", False)
+    _EAGER_TLS.on = True
+    try:
+        yield
+    finally:
+        _EAGER_TLS.on = prev
+
+
+class CompilableXC:
+    """Mixin, opt-in torch.compile of energy_density with an eager fallback.
+
+    The XC transcendental chain is real-valued and fuses well under Inductor,
+    unlike the complex FFT-bound Hamiltonian apply where two earlier attempts
+    measured no gain (see docs/torch-compile.md). Compilation is lazy and
+    per-instance. Any compile or runtime error, a missing host toolchain on a
+    stock checkout or a Triton libcuda gap, latches the eager path so nothing
+    downstream breaks. Route every hot caller through eval_energy_density so the
+    flag reaches the PAW one-center loop, not just energy().
+
+    Scope is first order, the compiled forward and its single backward v_xc. This
+    PyTorch's aot_autograd cannot double-backward through compiled code, and the
+    f_xc kernel is a double backward through E_xc, so those response and HVP call
+    sites wrap their xc.energy() in xc_eager() to force this path back to eager.
+    """
+
+    _xc_compile_on: bool = False
+    _xc_compile_dead: bool = False
+    _xc_compile_dynamic: bool = True
+    _xc_compiled = None
+    _xc_compile_kwargs = None
+    _xc_compile_error = None
+
+    def enable_compile(self, dynamic: bool = True, **kwargs):
+        """Turn on the compiled energy_density path. dynamic=True avoids a
+        recompile per grid size, which otherwise dominates short runs."""
+        self._xc_compile_on = True
+        self._xc_compile_dynamic = dynamic
+        self._xc_compile_kwargs = kwargs
+        self._xc_compiled = None
+        self._xc_compile_dead = False
+        self._xc_compile_error = None
+        return self
+
+    def disable_compile(self):
+        self._xc_compile_on = False
+        self._xc_compiled = None
+        return self
+
+    def eval_energy_density(self, *args):
+        """energy_density through the compiled callable when enabled, else eager.
+
+        The compiled path serves the forward and its single backward (v_xc), which
+        torch.compile handles correctly, including the GGA case where sigma is a
+        function of rho in the outer graph. Double backward (f_xc) is unsupported,
+        so those callers force this back to eager with xc_eager(). The eager
+        fallback re-runs energy_density itself, so a genuine bug in the functional
+        still raises. Only compile-layer failures are swallowed, and they latch
+        _xc_compile_dead with the message on _xc_compile_error.
+        """
+        if not self._xc_compile_on or self._xc_compile_dead or _force_eager():
+            return self.energy_density(*args)
+        if self._xc_compiled is None:
+            try:
+                self._xc_compiled = torch.compile(
+                    self.energy_density,
+                    dynamic=self._xc_compile_dynamic,
+                    **(self._xc_compile_kwargs or {}),
+                )
+            except Exception as exc:  # toolchain absent, degrade to eager
+                self._xc_compile_dead = True
+                self._xc_compile_error = repr(exc)
+                return self.energy_density(*args)
+        try:
+            return self._xc_compiled(*args)
+        except Exception as exc:  # first-call compile failure (toolchain gap)
+            self._xc_compile_dead = True
+            self._xc_compile_error = repr(exc)
+            return self.energy_density(*args)
+
+
+class XCFunctional(CompilableXC, torch.nn.Module):
     """Base class. Subclasses implement energy_density()."""
 
     needs_gradient: bool = False  # True for GGAs
@@ -42,7 +141,7 @@ class XCFunctional(torch.nn.Module):
         self, rho: torch.Tensor, volume: float, sigma: torch.Tensor | None = None
     ) -> torch.Tensor:
         """E_xc [eV] = (Ω/N)Σ e_xc."""
-        e = self.energy_density(rho, sigma)
+        e = self.eval_energy_density(rho, sigma)
         return e.sum() * (volume / e.numel())
 
 

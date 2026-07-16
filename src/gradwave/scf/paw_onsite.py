@@ -34,6 +34,7 @@ import torch
 
 from gradwave.constants import E2
 from gradwave.core.gaunt import real_gaunt_table, ylm_np
+from gradwave.core.xc.base import xc_eager
 from gradwave.pseudo.radial_torch import simpson_weights
 from gradwave.pseudo.upf_paw import PAWData
 
@@ -370,17 +371,17 @@ class OneCenter:
         if spin:
             if gga:
                 g_tot = grads[0] + grads[1]
-                e = self.xc.energy_density(
+                e = self.xc.eval_energy_density(
                     dens[0].reshape(-1), dens[1].reshape(-1),
                     (grads[0] ** 2).sum(0).reshape(-1),
                     (grads[1] ** 2).sum(0).reshape(-1),
                     (g_tot**2).sum(0).reshape(-1))
             else:
-                e = self.xc.energy_density(dens[0].reshape(-1),
-                                           dens[1].reshape(-1))
+                e = self.xc.eval_energy_density(dens[0].reshape(-1),
+                                                dens[1].reshape(-1))
         else:
             sig = (grads[0] ** 2).sum(0).reshape(-1) if gga else None
-            e = self.xc.energy_density(dens[0].reshape(-1), sig)
+            e = self.xc.eval_energy_density(dens[0].reshape(-1), sig)
         return (e.reshape(self.mesh, self.nx) * tt["wq"][:, None]
                 * tt["ww"][None, :]).sum()
 
@@ -423,7 +424,12 @@ class OneCenter:
         spin = isinstance(rho_ij, (list, tuple))
         rhos = ([self._to_real_t(m) for m in rho_ij] if spin
                 else [self._to_real_t(rho_ij)])
-        with torch.enable_grad():
+        # The HVP is a double backward through e1c_t's XC quadrature, so build
+        # the first-order graph eager (compiled aot_autograd cannot double
+        # backward). Forcing eager here keeps the whole retained graph eager, so
+        # the second backward in hvp() works. The one-center potential in
+        # energy_and_ddd stays compiled, that path is a single backward.
+        with torch.enable_grad(), xc_eager():
             leaves = [m.clone().requires_grad_(True) for m in rhos]
             e = self.e1c_t(leaves)
             gs = torch.autograd.grad(e, leaves, create_graph=True)
