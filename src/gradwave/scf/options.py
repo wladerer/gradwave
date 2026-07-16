@@ -23,7 +23,7 @@ class MixerOptions:
     metric: str = "plain"  # plain | coulomb (johnson only)
     w0: float = 0.01  # johnson regularization
     trust_factor: float = 20.0
-    adapt_step: bool = False  # opt-in collapse protection (see lessons.md)
+    adapt_step: bool = False  # opt-in collapse protection (see docs/manual/wisdom.md)
     spin_precond: bool = False  # Stoner m-channel preconditioner
     # None → per-scheme default: 1.0 for johnson, 0.4 otherwise. The 0.4
     # damping of the on-site becsum↔ddd mode is a Pulay-era stabilizer;

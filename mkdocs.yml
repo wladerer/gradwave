@@ -1,0 +1,57 @@
+site_name: gradwave manual
+site_description: Differentiable plane-wave DFT in PyTorch
+docs_dir: docs/manual
+use_directory_urls: true
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - toc.follow
+    - content.code.copy
+
+nav:
+  - Overview: index.md
+  - Installation: installation.md
+  - Tutorials:
+      - Geometry optimization: geometry-optimization.md
+      - Learning XC by AD: learning-xc.md
+  - Inputs and outputs: io.md
+  - Reference: reference.md
+  - Performance: performance.md
+  - Wisdom: wisdom.md
+  - Bibliography: bibliography.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.arithmatex:
+      generic: true
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
