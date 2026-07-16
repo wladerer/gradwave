@@ -118,3 +118,30 @@ def test_scf_vs_qe_converged(name):
     res, ref = run_case(name)
     if "fermi_eV" in ref:
         assert abs(res.fermi - ref["fermi_eV"]) < 0.010  # 10 meV
+
+
+@pytest.mark.standard
+@pytest.mark.parametrize("name", ["si_lda_ci", "al_pbe_ci"])
+def test_chebyshev_matches_davidson(name):
+    """CheFSI is a drop-in for Davidson on the NC batched path. The two solve the
+    same fixed H each SCF iteration, so the converged free energy must agree to
+    the diagonalizer tolerance. Covers an insulator (Si) and a smeared metal (Al)."""
+    torch.set_num_threads(4)
+    cfg = CASES[name]
+    pseudos = cfg["pseudo"] if isinstance(cfg["pseudo"], tuple) else (cfg["pseudo"],)
+    upfs = [parse_upf(FIX / "pseudos" / p) for p in pseudos]
+    species = list(range(len(upfs))) if len(upfs) == cfg["nat"] else [0] * cfg["nat"]
+
+    def energy(solver):
+        system = setup_system(cfg["cell"], cfg["pos"], species, upfs,
+                              ecut=cfg["ecut"], kmesh=cfg["kmesh"],
+                              nbands=cfg.get("nbands"))
+        res = scf(system, cfg["xc"](), smearing=cfg["smearing"],
+                  width=cfg.get("width", 0.1), etol=1e-9, rhotol=1e-8,
+                  verbose=False, eigensolver=solver)
+        assert res.converged, f"{name}/{solver} did not converge"
+        return float(res.energies.free_energy)
+
+    e_dav, e_che = energy("davidson"), energy("chebyshev")
+    assert abs(e_dav - e_che) / cfg["nat"] < 1e-6, (
+        f"{name}: davidson {e_dav:.9f} vs chebyshev {e_che:.9f}")

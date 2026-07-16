@@ -49,6 +49,7 @@ class GradWave(Calculator):
         rhotol: float = 1e-7,
         device: str = "cpu",
         compile_xc: bool = False,
+        eigensolver: str = "davidson",  # davidson | chebyshev (NC path only)
         verbose: bool = False,
         **kwargs,
     ):
@@ -57,7 +58,7 @@ class GradWave(Calculator):
             dict(ecut=ecut, ecutrho=ecutrho, xc=xc, kpts=tuple(kpts),
                  kshift=tuple(kshift), smearing=smearing, width=width,
                  nbands=nbands, use_symmetry=use_symmetry, etol=etol,
-                 rhotol=rhotol)
+                 rhotol=rhotol, eigensolver=eigensolver)
         )
         self._pseudo_paths = dict(pseudopotentials)
         self._upf_cache: dict[str, object] = {}
@@ -171,6 +172,7 @@ class GradWave(Calculator):
             system, self._make_xc(),
             smearing=p["smearing"], width=p["width"],
             etol=p["etol"], rhotol=p["rhotol"], verbose=self._verbose,
+            eigensolver=p["eigensolver"],
             start_from=self._warm_start(system),
         )
         if not res.converged:
@@ -224,6 +226,10 @@ class GradWave(Calculator):
         from gradwave.scf.uspp import scf_uspp
 
         p = self.parameters
+        if p["eigensolver"] != "davidson":
+            raise ValueError(
+                "eigensolver='chebyshev' is norm-conserving only; the USPP/PAW "
+                "generalized S-metric problem is not supported yet")
         system = self._get_uspp_system(self.atoms)
         res = scf_uspp(system, self._make_xc(), smearing=p["smearing"],
                        width=p["width"], etol=p["etol"], rhotol=p["rhotol"],

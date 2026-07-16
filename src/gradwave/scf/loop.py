@@ -338,6 +338,7 @@ def scf(
     nspin: int = 1,
     start_mag=None,  # initial moment fractions: per-species OR per-atom (nspin=2)
     mixed_precision: bool = False,  # opt-in fp32 draft (see note at resolution below)
+    eigensolver: str = "davidson",  # davidson | chebyshev (NC standard problem only)
     hubbard=None,  # list[core.hubbard.HubbardManifold] — Dudarev DFT+U corrections
     hub_alpha=None,  # per-site rigid manifold potential α [eV] — linear-response probe
     start_from=None,  # previous SCFResult (or checkpoint view) on the SAME FFT grid
@@ -347,6 +348,8 @@ def scf(
     nk, nb = len(spheres), system.nbands
     if nspin not in (1, 2):
         raise ValueError("nspin must be 1 or 2 (noncollinear is future work)")
+    if eigensolver not in ("davidson", "chebyshev"):
+        raise ValueError("eigensolver must be 'davidson' or 'chebyshev'")
     if nspin == 2 and smearing == "none":
         raise ValueError("nspin=2 requires smearing (fixed magnetic occupations ambiguous)")
     if system.is_fr:
@@ -552,8 +555,14 @@ def scf(
                 hub_dij = dij.conj()
             h = BatchedHamiltonian(bk, grid.shape, veff_s[sp], projs_b,
                                    hub_q=hub_q, hub_dij=hub_dij)
-            dav = davidson_batched(h.apply, coeffs_b_s[sp].to(cdtype), t_solve,
-                                   bk.mask, tol=tol_eff)
+            if eigensolver == "chebyshev":
+                from gradwave.solvers.chebyshev import chebyshev_filtered_batched
+                dav = chebyshev_filtered_batched(
+                    h.apply, coeffs_b_s[sp].to(cdtype), t_solve, bk.mask,
+                    tol=tol_eff)
+            else:
+                dav = davidson_batched(h.apply, coeffs_b_s[sp].to(cdtype),
+                                       t_solve, bk.mask, tol=tol_eff)
             eigs_s[sp] = dav.eigenvalues.to(RDTYPE)
             c = dav.eigenvectors.to(CDTYPE)
             if use_low:
