@@ -96,6 +96,11 @@ defect, which the [Performance](performance.md) page works through in full.
   cutoff, and QE errors identically. The batched solver must mirror the per-k path's
   drop-oldest conditioning guard, whose Cholesky failures are silently caught, and never
   contract to the contaminated Ritz block.
+- Do not add a condition-number check to that guard. The `cholesky_ex` info flag already
+  catches the non-PD overlap that produces the below-minimum Ritz values, and it fires
+  before a still-PD overlap ever gets near-singular. Probing low-cutoff Si PAW (8 to 12
+  Ry), the overlap condition number stayed below 1e8 while the factorization failure
+  triggered, so a per-round `linalg.cond` SVD never fired independently and was pure cost.
 - Build the preconditioner from positive band kinetic expectations. Eigenvalues go
   negative below the Fermi level, the clamp makes near-zero rows, and rank-safety jitter
   then replaces physical rows with noise.
@@ -149,6 +154,13 @@ defect, which the [Performance](performance.md) page works through in full.
   a brake under a better one. The 0.4 becsum step scale that tamed the on-site
   becsum-ddd mode for Pulay cost Johnson eleven iterations on ferromagnetic Ni. QE mixes
   becsum unscaled, and matching that closed the bulk of the remaining iteration gap.
+- A better initial wavefunction does not cut the SCF iteration count. Seeding the first
+  Davidson from atomic orbitals instead of plane waves reaches the same energy to machine
+  precision but saves at most a couple of iterations (O2 28 to 26, fcc Ni 12 to 12), and
+  the per-k build cost makes wall time neutral to worse. The count is set by density
+  mixing, and the first diagonalization already runs at a loose 1e-3 tolerance, so the
+  better start is masked. Atomic seeding is worth revisiting only paired with CheFSI,
+  whose rate depends on how much of the wanted subspace is already in the start.
 
 ## Metals and smearing
 
@@ -169,6 +181,11 @@ defect, which the [Performance](performance.md) page works through in full.
   converged free energy is bit-identical across schemes, so this is pure iteration
   count. It does not close the gap to QE's 7 iterations, which is a starting-density and
   preconditioner-quality difference, not a scheme choice.
+- The QE iteration gap is metal-specific, not a PAW or spin problem. The O2 triplet
+  nspin=2 PAW converges in 21 iterations to QE's 20 on the identical input, so a gapped
+  magnetic system shows no gap. Only the metal opens the 16-to-7 distance, which points
+  at the density preconditioner and leaves spin orthogonal to it. Do not chase the metal
+  gap through the spin or PAW machinery.
 
 ## Spin
 
