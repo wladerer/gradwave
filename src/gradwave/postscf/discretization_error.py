@@ -27,9 +27,12 @@ This is a post-processing step on a converged SCF. It never enters the SCF hot
 path, so it does not affect solve performance; the cost is a handful of extra
 FFTs per occupied band plus (if requested) one dielectric solve.
 
-Coverage here: norm-conserving, nspin=1, use_symmetry=False (a perturbation
-breaks the crystal symmetry, so the response needs the full k-mesh; the same
-restriction the implicit-diff response carries). USPP/PAW and metals are staged
+Coverage here: norm-conserving and ultrasoft/PAW, nspin=1, use_symmetry=False
+(a perturbation breaks the crystal symmetry, so the response needs the full
+k-mesh; the same restriction the implicit-diff response carries). The USPP/PAW
+path uses the generalized residual R = P_annulus(H - eps S) psi and adds the
+augmentation-charge response: dpsi perturbs the on-site occupations (becsum),
+which feed the augmentation density through the Q functions. Metals are staged
 separately.
 """
 
@@ -74,6 +77,9 @@ class DiscretizationError:
     ecut: float                  # eV
     ecut_large: float            # eV
     dyson: bool
+    uspp: bool = False           # USPP/PAW generalized-metric path
+    dbecsum: list | None = None  # USPP: per-atom (nproj_a, nproj_a) on-site becsum change
+    drho_smooth: torch.Tensor | None = None  # USPP: smooth part of drho (aug excluded)
 
 
 def _occupied(res: SCFResult, ik: int):
@@ -152,6 +158,10 @@ def estimate_density_error(
         If True, dress the first-order estimate with the coarse-space dielectric
         response (needs ``xc``).
     """
+    if isinstance(res, dict):
+        return _estimate_density_error_uspp(
+            res, ecut_large=ecut_large, factor=factor, xc=xc, verbose=verbose,
+        )
     _check_no_symmetry(res)
     system = res.system
     grid = system.grid
@@ -218,6 +228,212 @@ def estimate_density_error(
     )
 
 
+# --------------------------------------------------------------------------- #
+#  USPP / PAW path                                                            #
+# --------------------------------------------------------------------------- #
+
+
+def _uspp_frozen_operators(res: dict, xc):
+    """Frozen v_eff and screened D (dscr_full) of a converged USPP/PAW SCF.
+
+    Rebuilt from the converged density and becsum exactly as
+    ``postscf.uspp_bands.bands_uspp``. Together with ``system.q_full`` these
+    define the band Hamiltonian H(k) c = eps S(k) c that the complement
+    correction perturbs.
+    """
+    from gradwave.core.energies.hartree import hartree_potential_g
+    from gradwave.scf.loop import vxc_potential
+
+    system = res["system"]
+    grid = system.grid
+    vol = grid.volume
+    dev = system.positions.device
+    mask_flat = grid.dens_mask.reshape(-1)
+
+    rho = res["rho"].detach()
+    rho_g_box = r_to_g(rho.to(CDTYPE))
+    v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
+                           dim=(-3, -2, -1)) * grid.n_points).real
+    rho_xc = rho if system.rho_core is None else rho + system.rho_core
+    v_xc, _ = vxc_potential(xc, rho_xc, grid)
+    vloc_g = local_potential_g(
+        system.positions, torch.as_tensor(system.species_of_atom, device=dev),
+        system.vloc_tables, grid.g_cart, vol)
+    vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
+    v_eff = v_h + v_xc + vloc_r
+
+    v_eff_g = r_to_g(v_eff.to(CDTYPE)).reshape(-1)[mask_flat]
+    phase_arg = system.g_sphere @ system.positions.T
+    phase_pos = torch.exp(torch.complex(torch.zeros_like(phase_arg), phase_arg))
+    dscr = torch.zeros_like(system.q_full)
+    for a, sp in enumerate(system.species_of_atom):
+        s0, s1 = system.atom_slices[a]
+        contr = torch.einsum("ijg,g->ij", system.aug[sp].q_g.conj(),
+                             v_eff_g * phase_pos[:, a])
+        dscr[s0:s1, s0:s1] = (0.5 * (contr + contr.conj().T)).real
+    dscr_full = dscr + system.proj_data[0].dij_full
+    if any(p.is_paw for p in system.paws):
+        from gradwave.scf.paw_onsite import OneCenter
+
+        onec = {sp: OneCenter(system.paws[sp], xc)
+                for sp in set(system.species_of_atom)}
+        dscr_full = dscr_full.clone()
+        for a, sp in enumerate(system.species_of_atom):
+            _, ddd = onec[sp].energy_and_ddd(res["rho_ij_atoms"][a])
+            s0, s1 = system.atom_slices[a]
+            dscr_full[s0:s1, s0:s1] += ddd.to(dev)
+    return v_eff, dscr_full
+
+
+def _uspp_enlarged_hks(system, k_frac, ecut_large, v_eff, dscr_full, device):
+    """Enlarged-sphere generalized band Hamiltonian _HkS at one k for USPP."""
+    from gradwave.scf.uspp import _HkS
+
+    grid = system.grid
+    sph = build_gsphere(grid, ecut_large, np.asarray(k_frac, dtype=float),
+                        device=device)
+    q = np.sqrt(sph.kpg2.cpu().numpy())
+    beta_ls = [[b.l for b in p.betas] for p in system.paws]
+    dij_species = [torch.as_tensor(p.dij, dtype=RDTYPE, device=device)
+                   for p in system.paws]
+    beta_tables = [torch.as_tensor(beta_form_factors(p, q), dtype=RDTYPE,
+                                   device=device) for p in system.paws]
+    pd = build_projector_data(sph, system.species_of_atom, beta_tables,
+                              beta_ls, dij_species, grid.volume)
+    p = projectors(pd, system.positions)
+    hs = _HkS(sph, grid.shape, v_eff, pd, p, dscr_full, system.q_full)
+    return sph, hs, pd, p
+
+
+def _aug_density_from_becsum(system, becsum, device):
+    """Augmentation density on the real grid from a per-atom becsum list."""
+    grid = system.grid
+    phase_arg = system.g_sphere @ system.positions.T
+    phase_pos = torch.exp(torch.complex(torch.zeros_like(phase_arg), phase_arg))
+    aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE, device=device)
+    for a, sp in enumerate(system.species_of_atom):
+        aug_sph = aug_sph + phase_pos[:, a].conj() * torch.einsum(
+            "ij,ijg->g", becsum[a], system.aug[sp].q_g)
+    aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=device)
+    aug_box[system.sphere_idx] = aug_sph / grid.volume
+    return (torch.fft.ifftn(aug_box.reshape(grid.shape) * grid.n_points,
+                            dim=(-3, -2, -1))).real
+
+
+@torch.no_grad()
+def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
+    """USPP/PAW discretization density error (nspin=1, use_symmetry=False).
+
+    Adds two things to the NC recipe. The complement residual uses the
+    generalized metric, R = P_annulus (H - eps S) psi, built from the enlarged
+    _HkS. And the density change has two channels, the smooth part from dpsi
+    and an augmentation part from the on-site occupation (becsum) change
+
+        dbecsum^a_ij = sum_k w_k sum_b f_b [<psi_b|beta_i><beta_j|dpsi_b> + c.c.]
+
+    fed through the Q functions exactly as the SCF builds rho_aug.
+    """
+    if res.get("nspin", 1) != 1:
+        raise NotImplementedError("USPP density error is nspin=1 only for now")
+    if res.get("hub_sites") is not None:
+        raise NotImplementedError("USPP density error with DFT+U not implemented")
+    if getattr(res["system"], "sym", None) is not None:
+        raise NotImplementedError(
+            "USPP density error requires use_symmetry=False: a perturbation "
+            "breaks the crystal symmetry, so the response needs the full k-mesh")
+    if xc is None:
+        raise ValueError("USPP density error requires the xc functional (to "
+                         "rebuild v_eff and the one-center ddd)")
+
+    system = res["system"]
+    grid = system.grid
+    vol = grid.volume
+    dev = system.positions.device
+    ecut = float(system.ecut)
+    if ecut_large is None:
+        ecut_large = factor * ecut
+    if gmax_from_ecut(ecut_large) > 2.0 * gmax_from_ecut(ecut) * (1.0 + 1e-9):
+        raise ValueError(
+            f"ecut_large={ecut_large:.1f} eV exceeds 4*ecut={4 * ecut:.1f} eV; the "
+            "enlarged sphere would not fit the density FFT box. Lower ecut_large."
+        )
+
+    v_eff, dscr_full = _uspp_frozen_operators(res, xc)
+    coeffs = res["coeffs"]
+    eigs = res["eigenvalues"]
+    occs = res["occupations"]
+
+    drho_smooth = torch.zeros(grid.shape, dtype=RDTYPE, device=dev)
+    denergy = 0.0
+    dpsi_all, psi_large_all, occ_all, sph_all = [], [], [], []
+    dbecsum = [torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
+               for (s0, s1) in system.atom_slices]
+
+    for ik, sph0 in enumerate(system.spheres):
+        occ_k = occs[ik]
+        n_occ = int((occ_k > 1e-8).sum())
+        c_occ = coeffs[ik][:n_occ]
+        eps_occ = eigs[ik][:n_occ]
+        occ = occ_k[:n_occ]
+        sph1, hs, pd1, p1 = _uspp_enlarged_hks(
+            system, sph0.k_frac, ecut_large, v_eff, dscr_full, dev)
+
+        # zero-pad occupied orbitals onto the enlarged sphere
+        box = sphere_to_box(c_occ, sph0.flat_idx, grid.shape)
+        c_occ_1 = box_to_sphere(box, sph1.flat_idx)
+
+        # generalized complement residual R = P_annulus (H - eps S) psi
+        resid = hs.h(c_occ_1) - eps_occ[:, None].to(CDTYPE) * hs.s(c_occ_1)
+        annulus = hs.t > ecut * (1.0 + 1e-9)
+        denom = torch.clamp(hs.t[None, :] - eps_occ[:, None], min=1e-3)
+        corr = -resid / denom.to(resid.dtype)
+        dpsi = torch.where(annulus[None, :], corr, torch.zeros_like(resid))
+
+        # smooth-density change
+        psi_r = g_to_r(c_occ, sph0.flat_idx, grid.shape)
+        dpsi_r = g_to_r(dpsi, sph1.flat_idx, grid.shape)
+        w = float(system.kweights[ik])
+        drho_smooth += (2.0 * w) * (occ.view(-1, 1, 1, 1)
+                                    * (psi_r.conj() * dpsi_r).real).sum(dim=0)
+
+        # on-site occupation (becsum) change from the enlarged projectors
+        bpsi = becp(p1, c_occ_1)
+        bdps = becp(p1, dpsi)
+        wk = (w * occ).to(CDTYPE)
+        for a, (s0, s1) in enumerate(system.atom_slices):
+            m = torch.einsum("b,bi,bj->ij", wk, bpsi[:, s0:s1].conj(),
+                             bdps[:, s0:s1])
+            dbecsum[a] = dbecsum[a] + m + m.conj().T
+
+        # energy change (2nd order): sum_i f_i <dpsi_i | R_i>
+        de_band = (dpsi.conj() * resid).real.sum(dim=1)
+        denergy += w * float((occ * de_band).sum())
+
+        dpsi_all.append(dpsi)
+        psi_large_all.append(c_occ_1)
+        occ_all.append(occ)
+        sph_all.append(sph1)
+
+    drho_smooth = drho_smooth / vol
+    dbecsum = [0.5 * (m + m.conj().T) for m in dbecsum]
+    if system.becsum_sym is not None:
+        dbecsum = system.becsum_sym.apply(dbecsum)
+    drho_aug = _aug_density_from_becsum(system, dbecsum, dev)
+    drho = drho_smooth + drho_aug
+
+    if verbose:
+        dq = float(drho.sum()) * vol / grid.n_points
+        print(f"  USPP drho: int(drho)={dq:.3e}, denergy={denergy:.4e} eV",
+              flush=True)
+
+    return DiscretizationError(
+        drho=drho, drho_first_order=drho, denergy=denergy, dpsi=dpsi_all,
+        psi_large=psi_large_all, occ=occ_all, spheres_large=sph_all, ecut=ecut,
+        ecut_large=ecut_large, dyson=False, uspp=True, dbecsum=dbecsum,
+        drho_smooth=drho_smooth,
+    )
+
+
 def _enlarged_projector_data(res: SCFResult, sph, device):
     """ProjectorData on a given (enlarged) sphere for the nonlocal energy."""
     system = res.system
@@ -257,6 +473,10 @@ def estimate_force_error(
     channels stay consistent; a Dyson-dressed δρ would need the matching dressed
     δφ, which is future work.
     """
+    if err.uspp:
+        raise NotImplementedError(
+            "force error estimate is norm-conserving only; the USPP/PAW force "
+            "needs the augmentation and one-center force terms in P(eps)")
     if getattr(res, "nspin", 1) != 1:
         raise NotImplementedError("force error estimate is nspin=1 only for now")
     if getattr(res.system, "rho_core", None) is not None:
