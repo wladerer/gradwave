@@ -158,6 +158,37 @@ and is a policy choice, not a defect. The remaining 1.9 times is FFT and small
 batched linear algebra against decades-tuned FFTW and LAPACK, and it shrinks on GPU
 and with system size.
 
+## Case study, a hard PAW metal vs QE
+
+The diamond number above is a favorable case, a norm-conserving insulator with BFGS
+parity. A hard PAW metal is the other end. One-atom fcc Pt (psl kjpaw, PBE, 40/400
+Ry, 12×12×12 giving 72 irreducible k, gaussian 0.2 eV) on the same asus box, QE
+`pw.x` on 8 MPI ranks with k-pools against gradwave on the CPU and on the RTX 3050.
+
+| run | hardware | iters | wall | s/iter |
+|---|---|---|---|---|
+| QE `pw.x` | 8 CPU cores | 7 | 3.2 s | 0.46 |
+| gradwave | 8 CPU threads | 16 | 118 s | 7.4 |
+| gradwave | RTX 3050 | 16 | 976 s | 61 |
+
+The energies agree (QE −10167.30 eV, gradwave −10167.53 eV, a 0.23 eV offset worth
+pinning separately), so this is a clean speed gap. It factors into three independent
+terms that multiply to the 305 times CPU-to-GPU-vs-QE spread.
+
+- 8.3 times, the same gradwave code on the RTX 3050 versus the CPU (976/118). Pure
+  consumer-GPU fp64 tax, the card is slower than the CPU it ships with for a one-atom
+  cell that never fills it. The GPU actively hurts here.
+- 16 times, gradwave-CPU versus QE per iteration (7.4 / 0.46). PyTorch dispatch and a
+  less-tuned 400 Ry augmentation against decades of Fortran.
+- 2.3 times, gradwave takes 16 iterations to QE's 7. Its default mixing converges a
+  metal slower than QE's.
+
+So the honest per-regime picture is 1.9 times for an NC insulator relax and about 37
+times for a hard PAW metal on the CPU, and the laptop GPU makes the metal case worse,
+not better, until the cell grows past the fp64 crossover. Threading did not help this
+small problem past 8 cores, 16 threads came out marginally slower. Run small PAW-metal
+campaigns on the CPU.
+
 ## The GPU story is precision, not structure
 
 The kernel-level claim verifies emphatically. On the exact hot shapes from the
