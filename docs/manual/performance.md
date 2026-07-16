@@ -210,36 +210,37 @@ Ry, 12×12×12 giving 72 irreducible k, gaussian 0.2 eV) on the same asus box, Q
 | run | hardware | iters | wall | s/iter |
 |---|---|---|---|---|
 | QE `pw.x` | 8 CPU cores | 7 | 3.2 s | 0.46 |
-| gradwave | 8 CPU threads | 16 | 118 s | 7.4 |
-| gradwave | RTX 3050 | 16 | 976 s | 61 |
+| gradwave | 8 CPU threads | 16 | 67 s | 4.2 |
+| gradwave | RTX 3050 | 16 | 903 s | 56 |
+
+The gradwave rows are on AC power; QE is the reference run. An earlier set read 118 s
+on the CPU and 976 s on the GPU on battery, which had throttled the CPU (its turbo is
+capped unplugged) but not the fp64-bound GPU, flattering the GPU by shrinking the CPU
+baseline — see the AC-power caveat under "Measuring performance" below.
 
 The energies agree to sub-meV: QE and gradwave both give −10167.53 eV, matching to
 0.25 meV with every term within 3 meV, re-verified fresh at 6×6×6 and 12×12×12. An
 earlier −10167.30 QE figure recorded here was a bad reference, not a real offset. So
-this is a clean speed gap. It factors into three independent
-terms that multiply to the 305 times CPU-to-GPU-vs-QE spread.
+this is a clean speed gap. It factors into three independent terms that multiply to
+the 283 times CPU-to-GPU-vs-QE spread.
 
-- 8.3 times, the same gradwave code on the RTX 3050 versus the CPU (976/118). Pure
-  consumer-GPU fp64 tax, the card is slower than the CPU it ships with for a one-atom
-  cell that never fills it. The GPU actively hurts here.
-- 16 times, gradwave-CPU versus QE per iteration (7.4 / 0.46). PyTorch dispatch and a
+- 13.5 times, the same gradwave code on the RTX 3050 versus the CPU (903/67). Pure
+  consumer-GPU fp64 tax: the card is far slower than the CPU it ships with for a
+  one-atom cell that never fills it, running at 100 percent utilization while drawing
+  only 25 W of its 60 W budget at a full 1942 MHz — the fp64 units saturated while the
+  rest of the die idles. The GPU actively hurts here, and AC power widens this gap
+  rather than closing it, because it unthrottles the CPU and cannot feed the
+  arithmetic-bound GPU.
+- 9 times, gradwave-CPU versus QE per iteration (4.2 / 0.46). PyTorch dispatch and a
   less-tuned 400 Ry augmentation against decades of Fortran.
 - 2.3 times, gradwave takes 16 iterations to QE's 7. Its default mixing converges a
   metal slower than QE's.
 
-So the honest per-regime picture is 1.9 times for an NC insulator relax and about 37
+So the honest per-regime picture is 1.9 times for an NC insulator relax and about 21
 times for a hard PAW metal on the CPU, and the laptop GPU makes the metal case worse,
 not better, until the cell grows past the fp64 crossover. Threading did not help this
 small problem past 8 cores, 16 threads came out marginally slower. Run small PAW-metal
 campaigns on the CPU.
-
-Re-measured on AC power, the CPU point drops to 67 s (4.2 s/iter) while the GPU holds
-near 900 s (903 s, 56 s/iter), so the true GPU-vs-CPU gap is 13.5×, wider than the
-8.3× above. The battery run had throttled the CPU, not the GPU: for this fp64-bound
-workload the card ran at 100 percent utilization drawing only 25 W of its 60 W budget
-at a full 1942 MHz, so it had no idle power for AC to unlock. The table keeps the
-original battery figures, measured together with the QE and per-iteration factors; the
-AC re-run only sharpens the precision conclusion below.
 
 ### Where the PAW-metal time goes
 
@@ -255,7 +256,7 @@ iterations on 8 CPU threads) splits the per-iteration cost as follows.
 | Davidson diagnostics (`linalg.cond` + `abs`) | 5% | conditioning guard |
 | misc Davidson (qr, solve_triangular, norm, cat) | 7% | |
 
-The 37 times factors as roughly 16 times per iteration and 2.3 times iteration count.
+The 21 times factors as roughly 9 times per iteration and 2.3 times iteration count.
 For the iteration count, the mixing scheme is the lever and the smearing kernel is not.
 Sweeping fcc Pt, `johnson` converges in 13 iterations against `pulay` 17 and `broyden`
 20, and gaussian, cold, and mp1 sit within one iteration at fixed scheme. The converged
