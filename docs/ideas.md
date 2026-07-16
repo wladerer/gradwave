@@ -137,3 +137,16 @@ concurrency would help here. Three ways, cheapest first.
 Note that this only pays for small systems where a single SCF underfills the GPU. The
 slab already uses more of the card, so batch structures for the cheap cases (bulk
 EOS, phonon stencils) and run the heavy cases one at a time.
+
+## torch.compile for the exchange-correlation layer
+
+Full analysis in `docs/torch-compile.md`. The one-line version: the compiler is dead
+on the complex, FFT-bound Hamiltonian apply, which two earlier attempts already
+confirmed, but the real-valued XC functional was never isolated and compiles to 8x
+forward and about 30x forward-plus-`v_xc` on a 64^3 grid, bit-accurate to 5e-15. The
+end-to-end effect on a plain SCF is only a few percent because XC is a minority of
+runtime and its FFT-based gradient assembly does not compile, but learned-XC training,
+the PAW one-center angular loop, and the `f_xc` response HVPs call the XC
+transcendental chain far more than once per iteration and are CPU-bound, so those are
+the real targets. Insertion point is the single `XCFunctional.energy_density` choke
+point, opt-in with an eager fallback for the NixOS toolchain gap.
