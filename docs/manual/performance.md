@@ -210,8 +210,12 @@ Sweeping fcc Pt, `johnson` converges in 13 iterations against `pulay` 17 and `br
 free energy is bit-identical, so johnson is a free 1.3 times on a smeared metal (now the
 metal-campaign default). It does not reach QE's 7 iterations, which is a starting-density
 and preconditioner-quality gap. For the per-iteration 16 times, the largest single lever
-is the dense-grid wavefunction FFT (34 percent), which a dual grid cuts about fourfold on
-this pseudo, verified exact and specced in the wisdom notes.
+is the dense-grid wavefunction FFT (34 percent). The dual grid now runs the batched
+H-apply local term on the smooth `ecutwfc` box instead of the dense `ecutrho` box, exact
+by the bandwidth argument (see the wisdom notes) and verified two ways, the batched path
+matches the dense per-k reference to 2e-13 eV and the Pt free energy is unchanged. It
+halves the FFT time on Pt for about 1.2 times, and the win grows with `ecutrho/ecutwfc`.
+The density-build FFT is still dense, a further increment.
 
 ## The GPU story is precision, not structure
 

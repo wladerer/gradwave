@@ -118,11 +118,20 @@ class BatchedHamiltonian:
     """
 
     def __init__(self, bk: BatchedK, shape, v_eff_r: torch.Tensor, p: torch.Tensor,
-                 hub_q: torch.Tensor | None = None, hub_dij: torch.Tensor | None = None):
+                 hub_q: torch.Tensor | None = None, hub_dij: torch.Tensor | None = None,
+                 smooth=None):
         self.bk = bk
+        # dual grid (USPP/PAW): run the local-potential FFT on the smaller
+        # smooth box. Exact for ⟨ψ|V|ψ⟩ (see uspp_setup). The kinetic and
+        # nonlocal terms are sphere-based and untouched.
+        if smooth is not None:
+            shape, flat_idx, v_eff_r = smooth
+        else:
+            flat_idx = bk.flat_idx
         self.shape = shape
         self.n = shape[0] * shape[1] * shape[2]
         self.v_eff_r = v_eff_r
+        self.gather_idx = flat_idx  # box → sphere for the local term
         self.p = p  # (nk, nproj, npw_max)
         # DFT+U: atomic-orbital projectors + density-dependent D-matrix, added
         # as a second nonlocal term (same becp contraction as KB).
@@ -130,7 +139,7 @@ class BatchedHamiltonian:
         self.hub_dij = hub_dij  # (nproj_U, nproj_U) — already transposed for the apply
         # padded slots → trash index n (one past the box)
         self.idx_scatter = torch.where(
-            bk.mask, bk.flat_idx, torch.full_like(bk.flat_idx, self.n)
+            bk.mask, flat_idx, torch.full_like(flat_idx, self.n)
         )
         self._box = None
         self._tab_cache: dict = {}  # cdtype → cast (t, v_eff, p, dij) for mixed precision
@@ -197,7 +206,7 @@ class BatchedHamiltonian:
             # fftn(ifftn(·)) is norm-neutral: the 1/N and ×N of the fftbox
             # conventions cancel, so no scaling factors here
             vg = torch.fft.fftn(psi * v_eff, dim=(-3, -2, -1)).reshape(nk, nbc, self.n)
-            gath = bk.flat_idx[:, None, :].expand(nk, nbc, m)
+            gath = self.gather_idx[:, None, :].expand(nk, nbc, m)
             out[:, lo:hi] += vg.gather(2, gath)
 
         if p.shape[1]:

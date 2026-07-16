@@ -28,6 +28,18 @@ from gradwave.pseudo.upf_paw import PAWData
 _MINUS_I_POW_L = [1.0, -1.0j, -1.0, 1.0j, 1.0]  # (−i)^L, L ≤ 4
 
 
+def _smooth_to_dense_map(shape_s, shape_d) -> torch.Tensor:
+    """(n_smooth,) map from smooth-box flat index to dense-box flat index by
+    shared Miller vector, for filtering v_eff onto the smooth grid."""
+    def freqs(n):
+        return np.fft.fftfreq(n, d=1.0 / n).astype(np.int64)
+    m0, m1, m2 = (m.reshape(-1) for m in np.meshgrid(
+        freqs(shape_s[0]), freqs(shape_s[1]), freqs(shape_s[2]), indexing="ij"))
+    n0, n1, n2 = shape_d
+    dense = (m0 % n0) * (n1 * n2) + (m1 % n1) * n2 + (m2 % n2)
+    return torch.as_tensor(dense, dtype=torch.int64)
+
+
 @dataclass
 class AugSpecies:
     """m-expanded augmentation form factors of one species on the density
@@ -60,6 +72,11 @@ class USPPSystem:
     sym: object = None  # SpaceGroup when use_symmetry
     rho_symmetrizer: object = None
     becsum_sym: object = None
+    # dual grid: the H-apply local term runs on the smaller wavefunction box
+    # (2·G_max(ecut)) instead of the dense ecutrho box. None disables it.
+    smooth_shape: tuple = None
+    smooth_flat_idx: torch.Tensor = None  # (nk, npw_max) into the smooth box
+    smooth2dense: torch.Tensor = None  # (n_smooth,) smooth→dense flat, by Miller
 
     def to(self, device) -> "USPPSystem":
         """Copy with every tensor moved to `device` (mirrors System.to; the
@@ -90,6 +107,10 @@ class USPPSystem:
                              if self.rho_symmetrizer is not None else None),
             becsum_sym=(self.becsum_sym.to(device)
                         if self.becsum_sym is not None else None),
+            smooth_flat_idx=(self.smooth_flat_idx.to(device)
+                             if self.smooth_flat_idx is not None else None),
+            smooth2dense=(self.smooth2dense.to(device)
+                          if self.smooth2dense is not None else None),
         )
 
 
@@ -185,6 +206,21 @@ def setup_uspp(
         kfrac, kw = monkhorst_pack(kmesh, (0, 0, 0), time_reversal=True)
     spheres = [build_gsphere(grid, ecut, k) for k in kfrac]
 
+    # dual grid: a smaller box holding only the wavefunction-product sphere
+    # (2·G_max(ecut)). The Davidson H-apply local term runs there rather than
+    # on the dense ecutrho box. Exact for ⟨ψ|V|ψ⟩ because two wavefunction
+    # G-vectors differ by at most 2·G_max(ecut), so V truncated to this sphere
+    # reproduces the matrix elements. Norm-conserving already has ecutrho =
+    # 4·ecutwfc, so its box is this box and the smooth path is a no-op there.
+    smooth_grid = build_fft_grid(cell, ecut, equal_dims=sym is not None)
+    smooth_shape = tuple(int(n) for n in smooth_grid.shape)
+    npw_max_s = max(s.miller.shape[0] for s in spheres)
+    smooth_flat_idx = torch.zeros(len(spheres), npw_max_s, dtype=torch.int64)
+    for ik, k in enumerate(kfrac):
+        ss = build_gsphere(smooth_grid, ecut, k)  # same Miller order as dense
+        smooth_flat_idx[ik, : ss.flat_idx.shape[0]] = ss.flat_idx
+    smooth2dense = _smooth_to_dense_map(smooth_shape, tuple(grid.shape))
+
     charges = torch.tensor([paws[s].z_valence for s in species_of_atom], dtype=RDTYPE)
     n_electrons = float(charges.sum())
     if nbands is None:
@@ -276,6 +312,8 @@ def setup_uspp(
         sphere_idx=sphere_idx, g_sphere=g_sphere,
         vloc_tables=vloc_tables, rho_core=rho_core, atom_slices=slices,
         sym=sym, rho_symmetrizer=rho_symmetrizer,
+        smooth_shape=smooth_shape, smooth_flat_idx=smooth_flat_idx,
+        smooth2dense=smooth2dense,
         becsum_sym=(None if sym is None else _make_becsum_sym(
             sym, cell, paws, species_of_atom, slices)),
     )

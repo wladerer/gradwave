@@ -28,13 +28,13 @@ class BatchedHS:
     Dudarev D, already conj-transposed for the apply convention)."""
 
     def __init__(self, bk: BatchedK, shape, v_eff_r, p, dscr, q_full,
-                 hub_sphi=None, hub_d=None):
+                 hub_sphi=None, hub_d=None, smooth=None):
         self.bk = bk
         self.p = p  # (nk, nproj, npw_max)
         self.q = q_full.to(p.dtype)
         self.ham = BatchedHamiltonian(
             dataclasses.replace(bk, dij_full=dscr), shape, v_eff_r, p,
-            hub_q=hub_sphi, hub_dij=hub_d,
+            hub_q=hub_sphi, hub_dij=hub_d, smooth=smooth,
         )
         self.t = bk.t
         self._pq_cache: dict = {}  # cdtype → (p, q) for mixed precision

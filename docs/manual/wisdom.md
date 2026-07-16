@@ -72,15 +72,17 @@ defect, which the [Performance](performance.md) page works through in full.
 - The dual grid is exact, not an approximation. For the local term
   `<psi_i|V|psi_j>` only the smooth part of V contributes, because any two wavefunction
   G-vectors differ by at most `2*Gmax(ecutwfc)`, so V truncated to the smooth sphere
-  reproduces `H|psi>` to round-off (verified, relative error 6e-16). The recipe, the same
-  one QE uses, has three parts. Run the wavefunction `g_to_r`/`r_to_g` on the smooth box,
-  built at `ecutwfc` with a per-sphere `flat_idx` into it that aligns to the dense spheres
-  because `build_gsphere` gives the same Miller ordering. Filter `v_eff` to the smooth box
-  each iteration through a precomputed smooth-to-dense Miller index map. Build the smooth
-  density `|psi|^2` on the smooth box and embed it into the dense box in G-space before
-  adding the dense augmentation. The augmentation, the one-center work, and Hartree/XC
-  stay on the dense grid. Expected about 1.3x on hard PAW, where the FFT is 34 percent of
-  the SCF.
+  reproduces `H|psi>` to round-off (verified, relative error 6e-16). Implemented for the
+  batched USPP H-apply local term (`setup_uspp` builds the smooth box and a per-sphere
+  `flat_idx` into it, aligned to the dense spheres because `build_gsphere` gives the same
+  Miller ordering, and the loop filters `v_eff` to the smooth box each iteration through a
+  precomputed smooth-to-dense Miller index map). The augmentation, the density build, the
+  one-center work, and Hartree/XC stay on the dense grid, so the density-build FFT is not
+  yet dual-gridded (a follow-up). Validated two ways, the batched path matches the dense
+  per-k reference to 2e-13 eV on Al, and the fcc Pt free energy is bit-identical before
+  and after. Measured on Pt at 40/400 Ry it halves the FFT time (34 percent of the SCF)
+  for about 1.2x, more on harder pseudos and less on softer ones because the win scales
+  with `ecutrho/ecutwfc`.
 
 ## Eigensolvers
 

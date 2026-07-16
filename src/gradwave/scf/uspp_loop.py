@@ -305,9 +305,19 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
             hub_d = hubbard_dmatrix(n_hub_s[isp], hub.sites, hub.nproj,
                                     dev).conj()  # apply wants D^T
         if batched:
+            smooth = None
+            if system.smooth_shape is not None:
+                # filter v_eff onto the smooth box (dense G-coeffs restricted to
+                # the smooth sphere by Miller), for the dual-grid H-apply
+                ns = system.smooth_shape[0] * system.smooth_shape[1] \
+                    * system.smooth_shape[2]
+                vg = r_to_g(veff_s[isp].to(CDTYPE)).reshape(-1)[system.smooth2dense]
+                v_s = (torch.fft.ifftn(vg.reshape(system.smooth_shape),
+                                       dim=(-3, -2, -1)) * ns).real
+                smooth = (system.smooth_shape, system.smooth_flat_idx, v_s)
             hs_b = BatchedHS(bk, shape, veff_s[isp], p_b, dscr_s[isp],
                              system.q_full, hub_sphi=hub.sphi if hub else None,
-                             hub_d=hub_d)
+                             hub_d=hub_d, smooth=smooth)
             if coeffs_b[isp] is None:
                 # per-k CPU seeds (identical to the per-k path), padded
                 x0 = torch.zeros(nk, nb + 4, bk.npw_max, dtype=CDTYPE,
