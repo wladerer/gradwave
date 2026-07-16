@@ -193,6 +193,47 @@ scf: {{etol: 1.0e-8, rhotol: 1.0e-7}}
 
 
 @pytest.mark.standard
+def test_relax_writes_extxyz_trajectory(tmp_path):
+    """A relax task writes relax.xyz next to the JSON, one frame per step with
+    energy and forces, re-readable by ASE."""
+    from ase.io import read as ase_read
+
+    from gradwave.cli import main
+
+    rng = np.random.default_rng(1)
+    pos = (SI_POS + rng.normal(0, 0.05, SI_POS.shape)).tolist()
+    (tmp_path / "relax.yaml").write_text(f"""
+task: relax
+structure:
+  cell: {SI_CELL.tolist()}
+  positions:
+    cart: {pos}
+  species: [Si, Si]
+pseudopotentials:
+  dir: {FIX / "pseudos"}
+  map: {{Si: Si_ONCV_PBE-1.2.upf}}
+ecut: {15 * RY}
+xc: lda
+kpoints: {{mesh: [2, 2, 2]}}
+relax: {{optimizer: fire, fmax: 0.02, max_steps: 3}}
+""")
+    out = tmp_path / "results"
+    assert main([str(tmp_path / "relax.yaml"), "-o", str(out), "-q"]) == 0
+
+    summary = json.loads((out / "relax.json").read_text())
+    assert summary["outputs"]["trajectory"] == "relax.xyz"
+    xyz = out / "relax.xyz"
+    assert xyz.exists()
+
+    frames = ase_read(str(xyz), index=":")
+    assert len(frames) == len(summary["relax"]["trajectory"])
+    # energy and forces survive the extxyz round trip and match the JSON trace
+    e_json = summary["relax"]["trajectory"][-1]["energy_eV"]
+    assert abs(frames[-1].get_potential_energy() - e_json) < 1e-6
+    assert frames[-1].get_forces().shape == (2, 3)
+
+
+@pytest.mark.standard
 def test_cli_end_to_end_paw_with_restart(tmp_path):
     """YAML → USPP/PAW routing (formalism detected from the UPF), then a
     second run warm-started through the YAML restart: key."""

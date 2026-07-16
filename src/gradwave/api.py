@@ -262,8 +262,11 @@ def result_summary(res) -> dict:
     }
 
 
-def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object]:
-    """Relax with ASE; returns (relax block, final atoms)."""
+def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object, list]:
+    """Relax with ASE, returning (relax block, final atoms, per-step ASE frames).
+
+    The frames carry energy and forces (SinglePointCalculator) so the caller can
+    write an extxyz trajectory next to the JSON."""
     from ase.optimize import BFGS, FIRE
 
     from gradwave.calculator import GradWave
@@ -286,17 +289,24 @@ def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object]:
     opt_cls = {"fire": FIRE, "bfgs": BFGS}[inp.relax.optimizer]
     opt = opt_cls(atoms, logfile="-" if verbose else None)
     trajectory = []
+    frames = []  # ASE Atoms per step, energy+forces frozen for extxyz output
 
     def _record():
         import numpy as np
+        from ase.calculators.singlepoint import SinglePointCalculator
 
         forces = atoms.get_forces()
+        energy = float(atoms.get_potential_energy())
         trajectory.append({
             "step": opt.nsteps,
-            "energy_eV": float(atoms.get_potential_energy()),
+            "energy_eV": energy,
             "fmax_eV_ang": float(np.linalg.norm(forces, axis=1).max()),
             "positions_ang": atoms.get_positions().tolist(),
         })
+        frame = atoms.copy()
+        frame.calc = SinglePointCalculator(frame, energy=energy, forces=forces)
+        frame.info["step"] = opt.nsteps
+        frames.append(frame)
 
     opt.attach(_record)
     converged = opt.run(fmax=inp.relax.fmax, steps=inp.relax.max_steps)
@@ -318,7 +328,7 @@ def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object]:
         "cell_ang": atoms.cell.array.tolist(),
         "trajectory": trajectory,
     }
-    return relax, atoms
+    return relax, atoms, frames
 
 
 def _bands_extra(inp: Input, res, verbose: bool) -> dict:
@@ -434,6 +444,7 @@ def run(inp: Input, verbose: bool = True) -> dict:
 
     t0 = time.time()
     res = None
+    _frames = None
     if inp.task == "scf":
         res = run_scf(inp, verbose=verbose)
         summary = build_summary(res, inp, "scf", runtime_s=time.time() - t0)
@@ -442,7 +453,7 @@ def run(inp: Input, verbose: bool = True) -> dict:
         if inp.projections.enabled:
             summary["pdos"] = _pdos_summary_block(res, inp)
     elif inp.task == "relax":
-        relax, _atoms = run_relax(inp, verbose=verbose)
+        relax, _atoms, _frames = run_relax(inp, verbose=verbose)
         from gradwave import __version__
 
         summary = {
@@ -472,6 +483,11 @@ def run(inp: Input, verbose: bool = True) -> dict:
         ck = save_checkpoint(res, outdir / "checkpoint.pt",
                              wavefunctions=inp.output_wavefunctions)
         outputs["checkpoint"] = ck.name
+    if inp.task == "relax" and _frames:
+        from ase.io import write as ase_write
+
+        ase_write(str(outdir / "relax.xyz"), _frames, format="extxyz")
+        outputs["trajectory"] = "relax.xyz"
     summary["outputs"] = {**outputs, "json": f"{inp.task}.json",
                           "report": f"{inp.task}.out"}
     (outdir / f"{inp.task}.json").write_text(json.dumps(summary, indent=1))

@@ -98,11 +98,11 @@ like magnetic surfaces and spin-polarized adsorbates.
 
 ## Trajectory and extended-xyz output for optimizations
 
-Relaxations and MD should write an extxyz trajectory next to the JSON, one frame per
-step with positions and the energy and forces in the comment line. ASE writes extxyz
-natively, so this is small. It makes trajectories viewable in ovito or the ASE gui
-and re-loadable for restart or analysis. Add it to the relax and MD output path in
-`api.py` / `output.py`.
+DONE for relax. `run_relax` accumulates an ASE frame per optimizer step with energy
+and forces frozen on a `SinglePointCalculator`, and `run` writes them to `relax.xyz`
+(extxyz) next to the JSON, re-readable in ovito or the ASE gui. Regression in
+`tests/integration/test_io.py::test_relax_writes_extxyz_trajectory`. MD does not have
+an output path yet, so the same frame accumulation extends there once it lands.
 
 ## Batched multi-structure SCF, and the EOS-on-GPU question
 

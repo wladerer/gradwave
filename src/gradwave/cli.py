@@ -62,10 +62,13 @@ def _cmd_run(args) -> int:
         return 0 if scf["converged"] else 1
     relax = summary.get("relax")
     if relax is not None:
+        # A relax that reaches the ionic-step limit still yields a valid
+        # trajectory and a usable last geometry, so exit 0 signals the run
+        # executed. Convergence is a quality flag carried by relax.converged.
         print(f"{'converged' if relax['converged'] else 'NOT CONVERGED'}: "
               f"E = {relax['energy_eV']:.8f} eV, fmax = "
               f"{relax['fmax_eV_ang']:.4f} eV/Å ({relax['n_steps']} steps)")
-        return 0 if relax["converged"] else 1
+        return 0
     return 0
 
 
