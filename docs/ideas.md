@@ -281,31 +281,30 @@ convergence sweep, so this feature and the meta-GGA training work reinforce each
 ## Gamma-only real wavefunctions for slabs and molecules
 
 At the Gamma point the orbitals can be taken real, because time reversal makes
-`ψ(-G) = ψ*(G)`, so only half the plane-wave sphere is independent. A Gamma-specialized
-path stores that half sphere and runs the H-apply on a real-to-complex FFT, which is
-about 2x on the single hottest kernel, with the subspace algebra real rather than
-complex on top of that. The performance notes deferred this because for a general
-many-k run it caps the end-to-end gain at roughly 1.3 to 1.5x for the most invasive
-change in the stack. The reason to build it now is the workload. Slabs and molecules are
-sampled at Gamma alone by construction, so for exactly those systems the Gamma path is
-not a special case, it is the whole calculation, and the invasive change touches the one
-k-point that matters.
+`ψ(-G) = ψ*(G)`, so only half the plane-wave sphere is independent. The foundation for
+this is built and validated in `core/gamma.py`, gated to machine precision against the
+complex path (apply 1e-13, frozen-potential eigenvalues 5e-14). It stores the half
+sphere, runs the local term on `irfftn`/`rfftn`, and solves the eigenproblem as a real
+symmetric one in a feature embedding where the half-sphere metric is the plain dot
+product, so the standard Davidson applies unchanged.
 
-- New piece, a real-wavefunction representation at Gamma. Impose `ψ(G) = ψ*(-G)`, store
-  the independent half sphere with the `G=0` component real, and run the H-apply with
-  `rfftn`/`irfftn`. The local potential multiply and the projector contractions carry
-  over with the reality constraint, and the subspace eigensolve becomes a real symmetric one.
-- Reuse, the solver structure. Davidson and CheFSI both work unchanged in real
-  arithmetic; CheFSI in particular gets cheaper, since a real filter halves the FFT and
-  the arithmetic together, so Gamma-only slabs are where CheFSI and this specialization
-  compound.
+The premise was a roughly 2x real-FFT win on the hottest kernel. That did not appear on
+the available CPU. The forward-plus-inverse real transform measured 0.75x to 1.25x the
+complex pair on non-power-of-two boxes at 63^3 and 72^3, so the H-apply came out 0.97x
+in isolation, and the full solver ran slower still (directionally 0.6x to 0.8x) once the
+per-apply overhead compounds over the Davidson iterations. The real-transform advantage
+is grid-size and library dependent, and MKL did not deliver it here. The correctness is
+solid, so the work that remains is measurement and integration rather than the core
+representation.
 
-Scope it to a single Gamma k-point first, insulators and molecules, then metals at Gamma
-with smeared occupations. The gain is 1.3 to 1.5x on the H-apply-dominated molecular
-and slab SCF, which is the regime the RAIRS and surface-chemistry work lives in, so it
-pairs with those. It is a real project, not a tweak, because it changes the core
-wavefunction representation, so land it behind a flag and gate it against the complex
-Gamma path to machine precision.
+- Re-measure on a GPU. cuFFT's real transform behaves differently from MKL's, and the
+  memory story is also better on the GPU, so the win may exist there even though it does
+  not on this CPU. This is the first thing to check before investing more.
+- Wire it into the SCF loop behind a flag, for a single Gamma k-point, insulators and
+  molecules first, then metals at Gamma with smeared occupations. The density build,
+  mixing, and energy assembly are unchanged, only the diagonalize call swaps.
+- The memory angle stands on its own. The real-space fields are half the size, so this
+  pairs with the size-ceiling item below independent of any speedup.
 
 ## Raising the system-size ceiling past the dense-allocation cliff
 

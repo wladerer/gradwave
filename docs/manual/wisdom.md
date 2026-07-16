@@ -83,6 +83,18 @@ defect, which the [Performance](performance.md) page works through in full.
   and after. Measured on Pt at 40/400 Ry it halves the FFT time (34 percent of the SCF)
   for about 1.2x, more on harder pseudos and less on softer ones because the win scales
   with `ecutrho/ecutwfc`.
+- A real FFT is not automatically faster than a complex one. The Gamma-real path
+  (`core/gamma.py`) stores the half sphere and runs the H-apply on `irfftn`/`rfftn`,
+  which in theory halves the hottest kernel. Measured on this CPU (MKL, non-power-of-two
+  boxes) the forward-plus-inverse real transform ran 0.75x to 1.25x the complex pair
+  across 63^3 and 72^3 at 8 and 24 bands, so the H-apply came out 0.97x in isolation,
+  neutral to slightly slower. The full Davidson solver ran slower still (0.6x to 0.8x
+  across contended runs, so directional rather than precise) because the per-apply embed
+  and full-sphere reconstruction overhead compounds over the iterations. The
+  real-transform advantage is grid-size and library dependent and did not appear here.
+  The path is correct to machine precision and stands as the substrate for a GPU (cuFFT)
+  re-measure and for the memory-ceiling angle, where the real-space fields are half the
+  size, but it is not a CPU speedup as built.
 
 ## Eigensolvers
 
