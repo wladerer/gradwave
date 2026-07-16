@@ -22,30 +22,18 @@ import math
 import torch
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
+from gradwave.core.xc._pbe_kernels import pbe_enhancement, pbe_h
 from gradwave.core.xc.base import CompilableXC
 from gradwave.core.xc.base import to_au as _to_au
-from gradwave.core.xc.lda_pw92 import eps_x_lda
+from gradwave.core.xc.lda_pw92 import _EC0, _g_pw92, eps_x_lda
 
 _F_DD0 = 1.709920934161365  # f″(0)
 _FZ_DEN = 2.0 ** (4.0 / 3.0) - 2.0
 
-# PW92 G-function parameter sets: (A, α1, β1, β2, β3, β4)
-_EC0 = (0.031091, 0.21370, 7.5957, 3.5876, 1.6382, 0.49294)
+# PW92 spin-polarization G-function sets (A, α1, β1, β2, β3, β4); the
+# unpolarized _EC0 and _g_pw92 come from lda_pw92.
 _EC1 = (0.015545, 0.20548, 14.1189, 6.1977, 3.3662, 0.62517)
 _MAC = (0.016887, 0.11125, 10.357, 3.6231, 0.88026, 0.49671)  # −α_c
-
-_KAPPA = 0.804
-_MU = 0.2195149727645171
-_BETA = 0.06672455060314922
-_GAMMA = (1.0 - math.log(2.0)) / math.pi**2
-
-
-def _g_pw92(rs, p):
-    a, a1, b1, b2, b3, b4 = p
-    srs = torch.sqrt(rs)
-    q0 = -2.0 * a * (1.0 + a1 * rs)
-    q1 = 2.0 * a * (b1 * srs + b2 * rs + b3 * rs * srs + b4 * rs * rs)
-    return q0 * torch.log1p(1.0 / q1)
 
 
 def eps_c_pw92_spin(rho_au: torch.Tensor, zeta: torch.Tensor) -> torch.Tensor:
@@ -103,7 +91,7 @@ class SpinPBE(SpinXC):
             grad = torch.sqrt(s2au + 1e-30)
             kf = (3.0 * math.pi**2 * r2) ** (1.0 / 3.0)
             s_red = grad / (2.0 * kf * r2)
-            fx = 1.0 + _KAPPA - _KAPPA / (1.0 + _MU * s_red * s_red / _KAPPA)
+            fx = pbe_enhancement(s_red * s_red)
             ex_dens = ex_dens + 0.5 * r2 * eps_x_lda(r2) * fx
         eps_x = ex_dens / rho  # per-electron [Ha]
 
@@ -115,11 +103,6 @@ class SpinPBE(SpinXC):
         ks = torch.sqrt(4.0 * kf / math.pi)
         sig_t = torch.clamp(sigma_tot * BOHR_ANG**8, min=0.0)
         t2 = sig_t / (2.0 * phi * ks * rho) ** 2
-        phi3 = phi**3
-        expo = torch.exp(-ec_lda / (_GAMMA * phi3))
-        a = (_BETA / _GAMMA) / torch.clamp(expo - 1.0, min=1e-30)
-        num = 1.0 + a * t2
-        den = 1.0 + a * t2 + (a * t2) ** 2
-        h = _GAMMA * phi3 * torch.log1p((_BETA / _GAMMA) * t2 * num / den)
+        h = pbe_h(t2, ec_lda, phi**3)
 
         return (rho_up + rho_dn) * (eps_x + ec_lda + h) * HARTREE_EV

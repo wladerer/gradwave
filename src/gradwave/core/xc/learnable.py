@@ -20,15 +20,13 @@ import math
 import torch
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
+from gradwave.core.xc._pbe_kernels import KAPPA, MU, pbe_enhancement, pbe_h
 from gradwave.core.xc.base import XCFunctional, to_au
 from gradwave.core.xc.lda_pw92 import eps_c_pw92, eps_x_lda
 from gradwave.core.xc.spin import SpinXC, eps_c_pw92_spin
 
-_BETA = 0.06672455060314922
-_GAMMA = (1.0 - math.log(2.0)) / math.pi**2
-
-PBE_KAPPA = 0.804
-PBE_MU = 0.2195149727645171
+# PBE reference values, re-exported for callers that initialize at PBE.
+PBE_KAPPA, PBE_MU = KAPPA, MU
 
 
 class LearnableX(XCFunctional):
@@ -60,17 +58,12 @@ class LearnableX(XCFunctional):
         s2 = (grad_au / (2.0 * kf * rho_au)) ** 2
 
         kappa, mu = self.kappa, self.mu
-        fx = 1.0 + kappa - kappa / (1.0 + mu * s2 / kappa)
-        eps_x = eps_x_lda(rho_au) * fx
+        eps_x = eps_x_lda(rho_au) * pbe_enhancement(s2, kappa, mu)
 
         eps_c_lda = eps_c_pw92(rho_au)
         ks = torch.sqrt(4.0 * kf / math.pi)
         t2 = sigma_au / (2.0 * ks * rho_au) ** 2
-        expo = torch.exp(-eps_c_lda / _GAMMA)
-        a = (_BETA / _GAMMA) / torch.clamp(expo - 1.0, min=1e-30)
-        num = 1.0 + a * t2
-        den = 1.0 + a * t2 + (a * t2) ** 2
-        h = _GAMMA * torch.log1p((_BETA / _GAMMA) * t2 * num / den)
+        h = pbe_h(t2, eps_c_lda)
         return rho * (eps_x + eps_c_lda + h) * HARTREE_EV
 
 
@@ -110,7 +103,7 @@ class LearnableSpinX(SpinXC):
             grad = torch.sqrt(s2au + 1e-30)
             kf = (3.0 * math.pi**2 * r2) ** (1.0 / 3.0)
             s_red = grad / (2.0 * kf * r2)
-            fx = 1.0 + kappa - kappa / (1.0 + mu * s_red * s_red / kappa)
+            fx = pbe_enhancement(s_red * s_red, kappa, mu)
             ex_dens = ex_dens + 0.5 * r2 * eps_x_lda(r2) * fx
         eps_x = ex_dens / rho
 
@@ -122,12 +115,7 @@ class LearnableSpinX(SpinXC):
         ks = torch.sqrt(4.0 * kf / math.pi)
         sig_t = torch.clamp(sigma_tot * BOHR_ANG**8, min=0.0)
         t2 = sig_t / (2.0 * phi * ks * rho) ** 2
-        phi3 = phi**3
-        expo = torch.exp(-ec_lda / (_GAMMA * phi3))
-        a = (_BETA / _GAMMA) / torch.clamp(expo - 1.0, min=1e-30)
-        num = 1.0 + a * t2
-        den = 1.0 + a * t2 + (a * t2) ** 2
-        h = _GAMMA * phi3 * torch.log1p((_BETA / _GAMMA) * t2 * num / den)
+        h = pbe_h(t2, ec_lda, phi**3)
 
         return (rho_up + rho_dn) * (eps_x + ec_lda + h) * HARTREE_EV
 

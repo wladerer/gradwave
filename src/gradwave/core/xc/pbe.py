@@ -19,13 +19,9 @@ import math
 import torch
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
+from gradwave.core.xc._pbe_kernels import pbe_enhancement, pbe_h
 from gradwave.core.xc.base import XCFunctional, to_au
 from gradwave.core.xc.lda_pw92 import eps_c_pw92, eps_x_lda
-
-_KAPPA = 0.804
-_MU = 0.2195149727645171
-_BETA = 0.06672455060314922
-_GAMMA = (1.0 - math.log(2.0)) / math.pi**2
 
 
 class PBE(XCFunctional):
@@ -42,18 +38,11 @@ class PBE(XCFunctional):
 
         kf = (3.0 * math.pi**2 * rho_au) ** (1.0 / 3.0)
         s = grad_au / (2.0 * kf * rho_au)
-        fx = 1.0 + _KAPPA - _KAPPA / (1.0 + _MU * s * s / _KAPPA)
-        eps_x = eps_x_lda(rho_au) * fx
+        eps_x = eps_x_lda(rho_au) * pbe_enhancement(s * s)
 
         eps_c_lda = eps_c_pw92(rho_au)
         ks = torch.sqrt(4.0 * kf / math.pi)
         t = grad_au / (2.0 * ks * rho_au)
-        t2 = t * t
-        expo = torch.exp(-eps_c_lda / _GAMMA)
-        a = (_BETA / _GAMMA) / torch.clamp(expo - 1.0, min=1e-30)
-        num = 1.0 + a * t2
-        den = 1.0 + a * t2 + (a * t2) ** 2
-        h = _GAMMA * torch.log1p((_BETA / _GAMMA) * t2 * num / den)
-        eps_c = eps_c_lda + h
+        eps_c = eps_c_lda + pbe_h(t * t, eps_c_lda)
 
         return rho * (eps_x + eps_c) * HARTREE_EV
