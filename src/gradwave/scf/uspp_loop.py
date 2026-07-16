@@ -484,6 +484,53 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
                 energies=energies)
 
 
+def _build_mixer(scheme, g2_full, *, alpha, history, kerker, kerker_mask,
+                 step_scale, metric_w, w0, adapt_ids):
+    """Construct the charge mixer for the requested scheme over the composite
+    (density + becsum) vector. Kept out of scf_uspp so the scheme dispatch is
+    one place."""
+    if scheme == "broyden":
+        return BroydenMixer(g2_full, alpha=alpha, history=history, kerker=kerker,
+                            kerker_mask=kerker_mask, check_g0=False,
+                            step_scale=step_scale)
+    if scheme == "johnson":
+        return JohnsonMixer(g2_full, alpha=alpha, history=history, kerker=kerker,
+                            kerker_mask=kerker_mask, check_g0=False,
+                            step_scale=step_scale, metric_w=metric_w, w0=w0)
+    return PulayMixer(g2_full, alpha=alpha, history=history, kerker=kerker,
+                      kerker_mask=kerker_mask, check_g0=False,
+                      step_scale=step_scale, adapt_blocks=adapt_ids)
+
+
+def _seed_becsum(system, nspin, start_from, spin_frac, dev):
+    """Per-spin becsum seed: from a warm-start state, else the reference atomic
+    PAW occupations (spin-split by start_mag); zeros for bare USPP without
+    PP_OCCUPATIONS."""
+    rho_ij_s = [[] for _ in range(nspin)]
+    if start_from is not None:
+        prev_bec = start_from["rho_ij_atoms"]
+        for isp in range(nspin):
+            src = prev_bec if nspin == 1 else prev_bec[isp]
+            rho_ij_s[isp] = [m.detach().to(device=dev, dtype=CDTYPE).clone()
+                             for m in src]
+        return rho_ij_s
+    for sp in system.species_of_atom:
+        paw = system.paws[sp]
+        nm = sum(2 * b.l + 1 for b in paw.betas)
+        for isp in range(nspin):
+            m0 = torch.zeros(nm, nm, dtype=CDTYPE, device=dev)
+            if paw.paw_occ is not None:
+                frac = 0.5 if nspin == 1 else spin_frac[isp][sp]
+                col = 0
+                for i, b in enumerate(paw.betas):
+                    for _m in range(2 * b.l + 1):
+                        m0[col, col] = paw.paw_occ[i] / (2 * b.l + 1) * (
+                            2.0 * frac if nspin == 1 else frac)
+                        col += 1
+            rho_ij_s[isp].append(m0)
+    return rho_ij_s
+
+
 @torch.no_grad()
 def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
              smearing="none", width=0.1, max_iter=60, etol=1e-8, rhotol=1e-7,
@@ -641,23 +688,10 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                          torch.zeros_like(g2_mix))
         metric_w = torch.cat([wg] * nspin
                              + [torch.ones(nbec, device=dev)] * nspin)
-    if mixing_scheme == "broyden":
-        mixer = BroydenMixer(g2_full, alpha=mixing_alpha,
-                             history=mixing_history, kerker=use_kerker,
-                             kerker_mask=kerker_mask, check_g0=False,
-                             step_scale=step_scale)
-    elif mixing_scheme == "johnson":
-        mixer = JohnsonMixer(g2_full, alpha=mixing_alpha,
-                             history=mixing_history, kerker=use_kerker,
-                             kerker_mask=kerker_mask, check_g0=False,
-                             step_scale=step_scale, metric_w=metric_w,
-                             w0=mixing_w0)
-    else:
-        mixer = PulayMixer(g2_full, alpha=mixing_alpha,
-                           history=mixing_history,
-                           kerker=use_kerker,
-                           kerker_mask=kerker_mask, check_g0=False,
-                           step_scale=step_scale, adapt_blocks=adapt_ids)
+    mixer = _build_mixer(mixing_scheme, g2_full, alpha=mixing_alpha,
+                         history=mixing_history, kerker=use_kerker,
+                         kerker_mask=kerker_mask, step_scale=step_scale,
+                         metric_w=metric_w, w0=mixing_w0, adapt_ids=adapt_ids)
     coeffs = [[None] * nk for _ in range(nspin)]
     coeffs_b = [None] * nspin
     e_free_prev, history, converged = None, [], False
@@ -671,28 +705,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     # carries no PP_OCCUPATIONS). rho_ij_mix is the MIXER-side becsum used
     # for the one-center ddd; rho_ij_s holds each iteration's fresh becsum.
     is_paw, onec = ops.is_paw, ops.onec  # reuse the OneCenter list built in _build_iter_ops
-    rho_ij_s = [[] for _ in range(nspin)]
-    if start_from is not None:
-        prev_bec = start_from["rho_ij_atoms"]
-        for isp in range(nspin):
-            src = prev_bec if nspin == 1 else prev_bec[isp]
-            rho_ij_s[isp] = [m.detach().to(device=dev, dtype=CDTYPE).clone()
-                             for m in src]
-    else:
-        for sp in system.species_of_atom:
-            paw = system.paws[sp]
-            nm = sum(2 * b.l + 1 for b in paw.betas)
-            for isp in range(nspin):
-                m0 = torch.zeros(nm, nm, dtype=CDTYPE, device=dev)
-                if paw.paw_occ is not None:
-                    frac = 0.5 if nspin == 1 else spin_frac[isp][sp]
-                    col = 0
-                    for i, b in enumerate(paw.betas):
-                        for _m in range(2 * b.l + 1):
-                            m0[col, col] = paw.paw_occ[i] / (2 * b.l + 1) * (
-                                2.0 * frac if nspin == 1 else frac)
-                            col += 1
-                rho_ij_s[isp].append(m0)
+    rho_ij_s = _seed_becsum(system, nspin, start_from, spin_frac, dev)
     rho_ij_mix = [[m.clone() for m in ch] for ch in rho_ij_s]
 
     for it in range(1, max_iter + 1):
