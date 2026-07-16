@@ -129,6 +129,44 @@ def dos_frame(source, width: float = 0.1, npoints: int = 800, window=None):
     return df
 
 
+def _pdos_block(source) -> dict:
+    """Extract the projected-DOS dict from a ProjectedDOS, a raw block, or a
+    JSON summary that carries a top-level ``pdos`` key."""
+    if hasattr(source, "to_dict") and hasattr(source, "groups"):
+        return source.to_dict()
+    if isinstance(source, dict) and "groups" in source and "energy_eV" in source:
+        return source
+    s = load(source)
+    if "pdos" not in s:
+        raise ValueError("no projected DOS in this result "
+                         "(run with projections enabled)")
+    return s["pdos"]
+
+
+def pdos_frame(source):
+    """Tidy projected-DOS frame. One column per group (and per spin for
+    nspin=2, suffixed _up/_down). ``df.attrs`` carries fermi_eV and spilling."""
+    pd = _pd()
+    block = _pdos_block(source)
+    nspin = block["nspin"]
+    cols = {"energy_eV": np.asarray(block["energy_eV"], dtype=float)}
+
+    def add(name, arr):
+        a = np.asarray(arr, dtype=float)
+        if nspin == 1:
+            cols[name] = a
+        else:
+            cols[f"{name}_up"], cols[f"{name}_down"] = a[0], a[1]
+
+    add("total", block["total"])
+    for lab, arr in block["groups"].items():
+        add(lab, arr)
+    df = pd.DataFrame(cols)
+    df.attrs.update(fermi_eV=block.get("fermi_eV"),
+                    spilling=block.get("spilling"), nspin=nspin)
+    return df
+
+
 def _finish(fig, ax, path):
     fig.tight_layout()
     if path is not None:
@@ -194,4 +232,46 @@ def plot_dos(source, path=None, ax=None, width: float = 0.1):
         ax.axvline(df.attrs["fermi_eV"], color="#52514e", lw=0.7, ls="--")
     ax.set_xlabel("E [eV]")
     ax.set_ylabel("DOS [states/eV]")
+    return _finish(ax.figure, ax, path)
+
+
+_PDOS_COLORS = ["#2a78d6", "#1baf7a", "#d6892a", "#a24bd6", "#d64b6b",
+                "#4bb8d6", "#7a7a2a", "#d62a2a"]
+
+
+def plot_pdos(source, path=None, ax=None, total=True):
+    """Projected DOS, one curve per group, the total behind them. Spin-down is
+    plotted negative for nspin=2."""
+    plt = _plt()
+    df = pdos_frame(source)
+    nspin = df.attrs.get("nspin", 1)
+    if ax is None:
+        _fig, ax = plt.subplots(figsize=(5.8, 3.8))
+    e = df["energy_eV"]
+    groups = [c[:-3] for c in df.columns if c.endswith("_up") and c != "total_up"] \
+        if nspin == 2 else [c for c in df.columns
+                            if c not in ("energy_eV", "total")]
+
+    def draw(name, color):
+        if nspin == 1:
+            ax.plot(e, df[name], color=color, lw=1.2, label=name)
+        else:
+            ax.plot(e, df[f"{name}_up"], color=color, lw=1.2, label=name)
+            ax.plot(e, -df[f"{name}_down"], color=color, lw=1.2)
+
+    if total:
+        if nspin == 1:
+            ax.fill_between(e, df["total"], color="#c9c9c9", label="total")
+        else:
+            ax.fill_between(e, df["total_up"], color="#e0e0e0")
+            ax.fill_between(e, -df["total_down"], color="#e0e0e0")
+    for i, g in enumerate(groups):
+        draw(g, _PDOS_COLORS[i % len(_PDOS_COLORS)])
+    if df.attrs.get("fermi_eV") is not None:
+        ax.axvline(df.attrs["fermi_eV"], color="#52514e", lw=0.7, ls="--")
+    if nspin == 2:
+        ax.axhline(0.0, color="#52514e", lw=0.5)
+    ax.set_xlabel("E [eV]")
+    ax.set_ylabel("PDOS [states/eV]")
+    ax.legend(frameon=False, fontsize=8, ncol=2)
     return _finish(ax.figure, ax, path)
