@@ -172,15 +172,16 @@ below is roughly in impact order.
   sweet spot. The MAE map (next section) is the better *visual* deliverable and the
   natural second step once the SOC force-theorem path is in.
 
-**The concrete blocker for all of the SOC-dependent items is a pseudopotential
-gap.** DMI and single-ion anisotropy K need spin-orbit coupling *on a magnetic
-atom*, but every fully-relativistic pseudo in the fixtures is non-magnetic (As, Ga,
-Bi, Se — the topological-insulator set); Fe, Cr, and Ni are scalar-relativistic
-only, so their SOC channels are exactly zero and cannot be validated. CrI3 also has
-no iodine pseudo at all. So the first step for the DMI/MAE/2D-magnet work is
-obtaining a fully-relativistic magnetic pseudo (e.g. a PseudoDojo FR Fe/Ni/Cr, and
-an I) and re-validating; the Heisenberg-J machinery (`postscf/spin_exchange.py`) and
-the one-call `characterize_magnetism` routine are done and need no new pseudo.
+**The pseudopotential blocker is now cleared.** DMI and single-ion anisotropy K need
+spin-orbit coupling *on a magnetic atom*. The fully-relativistic magnetic pseudos
+(and iodine) are now in the fixtures — `Fe/Co/Ni/Cr/Pt_ONCV_PBE_FR-1.0.upf` and
+`I_ONCV_PBE_FR-1.1.upf`, pulled from the SG15 ONCV set (quantum-simulation.org, the
+same source as the scalar `_ONCV_PBE` pseudos). A magnetic FR pseudo correctly
+triggers the SOC path (`system.is_fr` → j-resolved spinor projectors). The natural
+order: L1_0 FePt MAE (`Fe_FR` + `Pt_FR`, ~2-3 meV/f.u., far above the 0.2 µeV floor)
+→ hcp Co (~65 µeV) → CrI3 (`Cr_FR` + `I_FR`) for the full J/K/DMI story. The
+Heisenberg-J machinery (`postscf/spin_exchange.py`) and the `characterize_magnetism`
+routine already work without SOC.
 
 ## Magnetocrystalline anisotropy (MAE maps) and per-atom spin torques
 
