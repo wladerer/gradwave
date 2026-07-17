@@ -456,6 +456,27 @@ def _pdos_summary_block(res, inp: Input) -> dict:
         return {"available": False, "reason": str(err)}
 
 
+def run_magnetism(inp: Input, verbose: bool = True):
+    """Characterize the magnetism of the input system (task: magnetism). Builds a
+    non-collinear XC from inp.xc, runs `characterize_magnetism`, and returns the
+    MagneticReport."""
+    from gradwave.core.xc.noncollinear import NoncollinearXC
+    from gradwave.core.xc.spin import LSDA_PW92, SpinPBE
+    from gradwave.postscf.magnetism import characterize_magnetism
+
+    system = build_system(inp)
+    if inp.device != "cpu":
+        system = system.to(inp.device)
+    xc = NoncollinearXC({"lda": LSDA_PW92, "pbe": SpinPBE}[inp.xc]())
+    m = inp.magnetism
+    smtype = inp.smearing.type if inp.smearing.type != "none" else "gaussian"
+    return characterize_magnetism(
+        system, xc, exchange=m.exchange, ref_atom=m.ref_atom, lam=m.lam,
+        delta=m.delta, seed_scale=m.seed_scale, smearing=smtype,
+        width=inp.smearing.width, max_iter=inp.scf.max_iter, etol=inp.scf.etol,
+        rhotol=inp.scf.rhotol, mixing_alpha=inp.scf.mixing.alpha, verbose=verbose)
+
+
 def run(inp: Input, verbose: bool = True) -> dict:
     """Execute inp.task and write <task>.json, <task>.out and (for SCF
     state) checkpoint.pt into inp.output_dir."""
@@ -490,6 +511,33 @@ def run(inp: Input, verbose: bool = True) -> dict:
         summary = build_summary(res, inp, "bands",
                                 extra=_bands_extra(inp, res, verbose),
                                 runtime_s=time.time() - t0)
+    elif inp.task == "magnetism":
+        report = run_magnetism(inp, verbose=verbose)
+        if verbose:
+            print(report.summary())
+        from gradwave import __version__
+
+        summary = {
+            "code": {"name": "gradwave", "version": __version__,
+                     "created": datetime.datetime.now().isoformat(
+                         timespec="seconds")},
+            "task": "magnetism",
+            "structure": _structure_block(inp),
+            "parameters": _relax_parameters(inp),
+            "magnetism": {
+                "ordering": report.ordering,
+                "total_moment_muB": round(report.total_moment, 4),
+                "atomic_moments_muB": report.moment_magnitudes,
+                "moment_vectors_muB": report.moment_vectors,
+                "exchange_J_meV": None if report.exchange_J is None else
+                {str(i): round(J * 1000, 3) for i, J in report.exchange_J.items()},
+                "dmi_meV": None if report.dmi is None else
+                {str(i): round(d * 1000, 4) for i, d in report.dmi.items()},
+                "curie_temperature_mfa_K": None if report.curie_temperature_mfa is None
+                else round(report.curie_temperature_mfa),
+            },
+            "runtime_s": round(time.time() - t0, 2),
+        }
     else:
         raise ValueError(inp.task)
 

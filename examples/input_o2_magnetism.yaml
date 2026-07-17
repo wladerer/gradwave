@@ -1,0 +1,32 @@
+# gradwave input — one-call magnetic characterization of the O2 triplet.
+# Runs a non-collinear reference SCF for the moments, then extracts the Heisenberg
+# exchange from the autograd torque. Run with:
+#     gradwave run input_o2_magnetism.yaml
+
+structure:
+  cell: [[6.0, 0, 0], [0, 6.0, 0], [0, 0, 6.0]]
+  positions:
+    cart: [[3.0, 3.0, 2.395], [3.0, 3.0, 3.605]]
+  species: [O, O]
+
+pseudopotentials:
+  dir: ../tests/fixtures/qe/pseudos
+  map: {O: O_ONCV_PBE-1.2.upf}
+
+ecut: 408.17               # eV (30 Ry)
+xc: lda
+kpoints: {mesh: [1, 1, 1]}
+smearing: {type: gaussian, width: 0.1}
+nbands: 10
+symmetry: false           # a magnetic moment breaks the crystal symmetry
+
+# conservative mixing: the bare non-collinear SCF is multi-stable, and an
+# aggressive mixing can drop O2 into a low-spin basin (0.31 instead of 1.0 μB).
+scf: {mixing: {alpha: 0.4}}
+
+task: magnetism
+magnetism:
+  exchange: true          # extract Heisenberg J from the torque (~3 constrained SCFs)
+  lam: 8.0
+
+output: {dir: ./out_o2_mag}

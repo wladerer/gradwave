@@ -203,6 +203,25 @@ def _relax_lines(relax):
     return lines
 
 
+def _magnetism_lines(mag):
+    lines = [_sec("magnetism")]
+    lines.append(f"   ordering: {mag['ordering']}")
+    lines.append(f"   total moment: {mag['total_moment_muB']:.3f} μB")
+    moms = ", ".join(f"{m:.3f}" for m in mag["atomic_moments_muB"])
+    lines.append(f"   atomic moments [μB]: {moms}")
+    if mag.get("exchange_J_meV"):
+        js = ", ".join(f"J_{i} = {J:+.1f}" for i, J in mag["exchange_J_meV"].items())
+        lines.append(f"   Heisenberg exchange [meV]: {js}")
+        dmi = mag.get("dmi_meV") or {}
+        if any(abs(d) > 1e-3 for d in dmi.values()):
+            ds = ", ".join(f"D_{i} = {d:+.3f}" for i, d in dmi.items())
+            lines.append(f"   DMI [meV]: {ds}")
+        if mag.get("curie_temperature_mfa_K") is not None:
+            lines.append(f"   mean-field T_c (nn): {mag['curie_temperature_mfa_K']} K")
+    lines.append("")
+    return lines
+
+
 def _bands_lines(bands):
     lines = [_sec("band structure")]
     labels = " – ".join(lab for _x, lab in bands["labels"])
@@ -268,6 +287,8 @@ def format_output(summary: dict) -> str:
         lines += _relax_lines(summary["relax"])
     if "bands" in summary:
         lines += _bands_lines(summary["bands"])
+    if "magnetism" in summary:
+        lines += _magnetism_lines(summary["magnetism"])
     tail = []
     if "runtime_s" in summary and "scf" not in summary:
         tail.append(f"wall time {summary['runtime_s']:.1f} s")

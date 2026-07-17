@@ -172,6 +172,16 @@ below is roughly in impact order.
   sweet spot. The MAE map (next section) is the better *visual* deliverable and the
   natural second step once the SOC force-theorem path is in.
 
+**The concrete blocker for all of the SOC-dependent items is a pseudopotential
+gap.** DMI and single-ion anisotropy K need spin-orbit coupling *on a magnetic
+atom*, but every fully-relativistic pseudo in the fixtures is non-magnetic (As, Ga,
+Bi, Se — the topological-insulator set); Fe, Cr, and Ni are scalar-relativistic
+only, so their SOC channels are exactly zero and cannot be validated. CrI3 also has
+no iodine pseudo at all. So the first step for the DMI/MAE/2D-magnet work is
+obtaining a fully-relativistic magnetic pseudo (e.g. a PseudoDojo FR Fe/Ni/Cr, and
+an I) and re-validating; the Heisenberg-J machinery (`postscf/spin_exchange.py`) and
+the one-call `characterize_magnetism` routine are done and need no new pseudo.
+
 ## Magnetocrystalline anisotropy (MAE maps) and per-atom spin torques
 
 The constrained-moment work (`postscf/moment_config.py`) already produces one half

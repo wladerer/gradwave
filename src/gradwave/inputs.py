@@ -74,6 +74,15 @@ class ProjectionsParams:
 
 
 @dataclass(frozen=True)
+class MagnetismParams:
+    exchange: bool = True      # extract J/D from the torque (adds ~3 constrained SCFs)
+    lam: float = 8.0           # constraint penalty strength [eV/μB²]
+    delta: float = 0.08        # moment-tilt step for the torque derivative [rad]
+    seed_scale: float = 1.5    # high-spin seed for the reference SCF (multi-stable)
+    ref_atom: int = 0          # atom whose moment is tilted for the exchange scan
+
+
+@dataclass(frozen=True)
 class Input:
     atoms: Atoms
     pseudo_dir: Path
@@ -88,9 +97,10 @@ class Input:
     symmetry: bool = True  # IBZ reduction + density symmetrization
     nspin: int = 1  # 1 | 2 (collinear)
     start_mag: dict | None = None  # element -> initial moment fraction (nspin=2)
-    task: str = "scf"  # scf | relax | bands
+    task: str = "scf"  # scf | relax | bands | magnetism
     relax: RelaxParams = field(default_factory=RelaxParams)
     bands: BandsParams = field(default_factory=BandsParams)
+    magnetism: MagnetismParams = field(default_factory=MagnetismParams)
     projections: ProjectionsParams = field(default_factory=ProjectionsParams)
     device: str = "cpu"
     output_dir: Path = Path("./out")
@@ -138,7 +148,7 @@ def load_input(path: str | Path) -> Input:
     if xc not in ("lda", "pbe"):
         raise ValueError(f"unknown xc {xc!r} (lda | pbe)")
     task = raw.get("task", "scf")
-    if task not in ("scf", "relax", "bands"):
+    if task not in ("scf", "relax", "bands", "magnetism"):
         raise ValueError(f"unknown task {task!r}")
     smtype = sm.get("type", "none")
     if smtype not in ("none", "fermi-dirac", "gaussian", "mp1", "cold"):
@@ -188,6 +198,7 @@ def load_input(path: str | Path) -> Input:
         task=task,
         relax=RelaxParams(**raw.get("relax", {})),
         bands=BandsParams(**raw.get("bands", {})),
+        magnetism=MagnetismParams(**raw.get("magnetism", {})),
         projections=projections,
         device=raw.get("device", "cpu"),
         output_dir=base / out_raw.get("dir", "./out"),

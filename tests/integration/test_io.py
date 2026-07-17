@@ -72,6 +72,60 @@ def test_human_report_from_summary():
         assert token in text, token
 
 
+def _canned_magnetism_summary():
+    return {
+        "code": {"name": "gradwave", "version": "0.1.0",
+                 "created": "2026-07-17T12:00:00"},
+        "task": "magnetism",
+        "structure": {"cell_ang": [[6, 0, 0], [0, 6, 0], [0, 0, 6]],
+                      "positions_ang": [[3, 3, 2.4], [3, 3, 3.6]],
+                      "species": ["O", "O"]},
+        "parameters": {"formalism": "nc", "xc": "lda", "ecut_eV": 408.0,
+                       "ecutrho_eV": None, "kmesh": [1, 1, 1], "nk": 1,
+                       "kweights": [1.0], "nspin": 1, "smearing": "gaussian",
+                       "width_eV": 0.1, "symmetry": False,
+                       "pseudos": {"O": "O.upf"}},
+        "magnetism": {"ordering": "ferromagnetic", "total_moment_muB": 1.999,
+                      "atomic_moments_muB": [1.0, 1.0],
+                      "moment_vectors_muB": [[0, 0, 1.0], [0, 0, 1.0]],
+                      "exchange_J_meV": {"1": 1434.0}, "dmi_meV": {"1": 0.0},
+                      "curie_temperature_mfa_K": 11094},
+        "runtime_s": 300.0,
+        "outputs": {"json": "magnetism.json", "report": "magnetism.out"},
+    }
+
+
+def test_magnetism_report_from_summary():
+    from gradwave.output import format_output
+
+    text = format_output(_canned_magnetism_summary())
+    for token in ("── magnetism", "ordering: ferromagnetic",
+                  "atomic moments [μB]: 1.000, 1.000", "Heisenberg exchange",
+                  "J_1 = +1434", "mean-field T_c"):
+        assert token in text, token
+
+
+def test_load_input_magnetism_block(tmp_path):
+    from gradwave.inputs import load_input
+
+    (tmp_path / "in.yaml").write_text(f"""
+structure:
+  cell: [[6, 0, 0], [0, 6, 0], [0, 0, 6]]
+  positions: {{cart: [[3, 3, 2.4], [3, 3, 3.6]]}}
+  species: [O, O]
+pseudopotentials:
+  dir: {FIX / "pseudos"}
+  map: {{O: O_ONCV_PBE-1.2.upf}}
+ecut: 408.17
+task: magnetism
+magnetism: {{exchange: false, lam: 6.0, ref_atom: 1}}
+""")
+    inp = load_input(tmp_path / "in.yaml")
+    assert inp.task == "magnetism"
+    assert inp.magnetism.exchange is False
+    assert inp.magnetism.lam == 6.0 and inp.magnetism.ref_atom == 1
+
+
 def test_analysis_frames_and_plots(tmp_path):
     from gradwave import analysis
 

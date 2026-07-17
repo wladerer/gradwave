@@ -207,6 +207,45 @@ $\theta=135°$ it demagnetizes to 1.73 μB because shrinking the moment is the c
 to satisfy $|\mathbf{M}^\perp|^2$. Only the magnitude-robust penalty traces the
 fixed-moment dispersion the whole way around.
 
+## One-call characterization: `task: magnetism`
+
+The routines above are also exposed as a single input task.
+`characterize_magnetism` runs a non-collinear reference SCF for the atomic moments,
+extracts the Heisenberg exchange from the torque, and reports the ordering, moments,
+J, DMI, and a mean-field Curie temperature. From YAML
+(`examples/input_o2_magnetism.yaml`):
+
+```yaml
+task: magnetism
+magnetism:
+  exchange: true          # extract J from the torque (~3 constrained SCFs)
+  lam: 8.0
+scf: {mixing: {alpha: 0.4}}   # conservative: the NC SCF is multi-stable
+```
+
+writes `magnetism.json` and a formatted `magnetism.out`:
+
+```
+── magnetism ───────────────────────────────
+   ordering: ferromagnetic
+   total moment: 1.999 μB
+   atomic moments [μB]: 1.000, 1.000
+   Heisenberg exchange [meV]: J_1 = +1434.0
+```
+
+Set `exchange: false` for a cheap moments-and-ordering pass. Or call the routine
+directly and inspect the `MagneticReport`:
+
+```python
+from gradwave.postscf.magnetism import characterize_magnetism
+report = characterize_magnetism(system, xc, exchange=True)
+print(report.summary())
+```
+
+The DMI and single-ion anisotropy channels are reported as ~0 without spin-orbit
+coupling (as symmetry requires); they light up once a fully-relativistic magnetic
+pseudopotential is supplied — see the anisotropy notes in `docs/ideas.md`.
+
 ## Gotchas
 
 - A fully-relativistic pseudopotential is required for SOC; the collinear `scf`
