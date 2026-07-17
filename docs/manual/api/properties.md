@@ -73,16 +73,6 @@ the converged potential.
 
 ::: gradwave.postscf.irreps.IrrepCluster
 
-## Magnetic exchange
-
-Heisenberg exchange constants by energy mapping over collinear orderings.
-
-::: gradwave.postscf.exchange.heisenberg_fit
-
-::: gradwave.postscf.exchange.shell_sums
-
-::: gradwave.postscf.exchange.mean_field_tc
-
 ## Hubbard U as an observable
 
 The Hubbard U is a first-class differentiable output, not only an input.

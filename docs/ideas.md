@@ -79,8 +79,7 @@ The biggest single physics gap, and the reason the two scaling items above are
 worth building. Every energy, gap, force, and adsorbate level gradwave produces
 sits on a GGA electronic structure with self-interaction error, so band gaps come
 out too small and defect and adsorbate levels land in the wrong place. There is no
-exact exchange anywhere in the SCF Hamiltonian today (`postscf/exchange.py` is
-Heisenberg J-couplings, not Fock). A hybrid needs a Fock exchange operator applied
+exact exchange anywhere in the SCF Hamiltonian today. A hybrid needs a Fock exchange operator applied
 each SCF step, which is the O(N^4) object RI and ISDF exist to tame. The payoff
 that no mainstream code has is a learnable hybrid, the mixing fraction and
 range separation as trained parameters through the existing `learnable.py` slot,

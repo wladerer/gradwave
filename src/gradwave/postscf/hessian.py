@@ -57,36 +57,3 @@ def gamma_phonons(phi: np.ndarray, masses_amu: np.ndarray) -> np.ndarray:
     dyn = 0.5 * (dyn + dyn.T)
     evals = np.linalg.eigvalsh(dyn)
     return np.sign(evals) * SQRT_EV_AMU_ANG2_TO_CM1 * np.sqrt(np.abs(evals))
-
-
-def hessian_wrt_positions_fd_energy(
-    make_scf, positions: np.ndarray, h: float = 5e-3
-) -> np.ndarray:
-    """Reference: d²E/dτ² by second differences of the ENERGY (validation only)."""
-    na = positions.shape[0]
-    n = 3 * na
-
-    def e_at(pos):
-        return float(make_scf(pos).energies.total)
-
-    e0 = e_at(positions)
-    hess = np.zeros((n, n))
-    for p in range(n):
-        for q in range(p, n):
-            dp = np.zeros(n)
-            dq = np.zeros(n)
-            dp[p] = h
-            dq[q] = h
-            dpm, dqm = dp.reshape(na, 3), dq.reshape(na, 3)
-            if p == q:
-                hess[p, p] = (
-                    e_at(positions + dpm) - 2 * e0 + e_at(positions - dpm)
-                ) / h**2
-            else:
-                hess[p, q] = hess[q, p] = (
-                    e_at(positions + dpm + dqm)
-                    - e_at(positions + dpm - dqm)
-                    - e_at(positions - dpm + dqm)
-                    + e_at(positions - dpm - dqm)
-                ) / (4 * h**2)
-    return hess
