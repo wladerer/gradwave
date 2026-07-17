@@ -58,6 +58,7 @@ def test_symmetrizer_idempotent_and_invariant():
     assert float(rho_r.imag.abs().max()) < 1e-12 * float(rho_r.real.abs().max())
 
 
+@pytest.mark.standard  # runs the SCF twice (IBZ vs full mesh)
 @pytest.mark.parametrize(
     ("name", "cell", "pos", "nat", "pseudo", "xc", "smearing", "nbands"),
     [
@@ -85,6 +86,7 @@ def test_ibz_scf_equals_full_mesh(name, cell, pos, nat, pseudo, xc, smearing, nb
     assert len(results[True].system.spheres) < len(results[False].system.spheres)
 
 
+@pytest.mark.standard  # full SCF on displaced Si
 def test_symmetrized_forces_on_displaced_si():
     # Two identical atoms ALWAYS have midpoint inversion symmetry (P-1), so
     # the symmetric run enforces F1 = -F2 exactly; the unsymmetrized run

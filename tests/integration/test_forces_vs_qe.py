@@ -26,6 +26,9 @@ FRAC = np.array([[0.0, 0.0, 0.0], [0.24, 0.26, 0.255]])  # matches si_forces_ci/
 POS = FRAC @ CELL
 
 
+pytestmark = pytest.mark.standard  # full SCF vs QE; not a fast-gate test
+
+
 @pytest.fixture(scope="module")
 def si_result():
     torch.set_num_threads(4)

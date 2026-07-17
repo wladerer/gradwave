@@ -25,6 +25,9 @@ CELL = A / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 POS = np.array([[0.0, 0, 0], [A / 4] * 3])
 
 
+pytestmark = pytest.mark.standard  # full SCF vs QE; not a fast-gate test
+
+
 @pytest.fixture(scope="module")
 def bands_pair():
     torch.set_num_threads(4)

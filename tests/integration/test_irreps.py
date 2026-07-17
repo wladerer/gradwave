@@ -19,6 +19,9 @@ RY = 13.605693122994
 A = 2.46
 
 
+pytestmark = pytest.mark.standard  # full SCF vs QE; not a fast-gate test
+
+
 @pytest.fixture(scope="module")
 def graphene():
     torch.set_num_threads(4)

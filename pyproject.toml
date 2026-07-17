@@ -47,7 +47,7 @@ markers = [
     "torture: tests over ~10 minutes (spin and FD monsters), run manually when their subsystem changes",
     "gpu: requires CUDA device",
 ]
-# Tiers (docs/refactor_plan.md stage 5). A test carries at most one tier
+# Tiers. A test carries at most one tier
 # marker; unmarked tests are the fast tier by definition.
 #   fast gate (<2 min):  pytest -m "not standard and not slow and not torture and not gpu"
 #   standard / CI:       pytest -m "not slow and not torture and not gpu"
