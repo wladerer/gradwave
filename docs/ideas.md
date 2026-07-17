@@ -120,6 +120,58 @@ learnable parameters) and repeat the `train_xc_paw` recovery test at the meta-GG
 level. This is the item that most directly serves what makes gradwave distinct from
 a very well-validated second copy of QE.
 
+## Differentiable spintronics: spin Hamiltonians, DMI, and inverse design
+
+The constrained non-collinear framework (`postscf/moment_config.py`,
+`scf/moment_penalty.py`) is differentiable, and that is the lever that separates it
+from the constrained-DFT in QE/VASP/FLEUR. The per-atom torque `dW/de_I` is
+autograd-exact (validated to a finite difference at ratio 1.000), not
+finite-differenced, and the magnitude-robust `vector` penalty holds an arbitrary
+non-collinear texture at fixed moment instead of letting it collapse. Every item
+here is a thing that is cheap *because* of AD and awkward otherwise; the framing
+below is roughly in impact order.
+
+- **The killer app: extract the spin Hamiltonian (J, D, K) by differentiating the
+  torque.** The whole spintronics modeling stack — atomistic spin dynamics
+  (VAMPIRE, Spirit), micromagnetics (mumax) — runs on
+  `H = -Σ J_ij S_i·S_j - Σ D_ij·(S_i×S_j) - Σ K_i (S_i·n)²`, and DFT's job is to
+  parametrize it. Conventionally that is finite-difference energy mapping (fragile)
+  or a separate Green's-function (LKAG) machinery. Here the Heisenberg `J_ij`, the
+  Dzyaloshinskii–Moriya vectors `D_ij`, and the anisotropy `K` are *derivatives of
+  the torque*: `d(dW/de_I)/de_J` is the exchange/DMI coupling tensor between sites I
+  and J, so a second autograd pass over the torque we already compute gives the
+  couplings directly, cross-terms included. The DMI is the prize — it needs SOC and
+  non-collinearity (both present), it sets skyrmion chirality and size, and it is
+  notoriously noisy to compute by finite differences. A differentiable,
+  magnitude-conserving DMI extractor is methodologically novel, not just a demo, and
+  it is the bridge from small-cell plane-wave DFT to device-scale spin dynamics: the
+  code cannot simulate a 50 nm skyrmion, but it can hand a clean spin Hamiltonian to
+  a code that can. This is the highest-impact direction. Second derivatives of the
+  penalty scalar are already within reach of the autograd path; the work is wiring
+  the site-pair Hessian and validating J against a known magnet.
+- **Chiral textures and the micromagnetic DMI from spin-spiral asymmetry.** The Fe
+  spin-spiral demo (`examples/fe_spin_spiral.py`) traces `E(theta)` with inversion
+  symmetry, so `E(+q) = E(-q)`. Break inversion — an interface (Co/Pt, Fe/Ir) or a
+  B20 bulk (MnSi, FeGe) — and turn SOC on, and `E(+q) ≠ E(-q)`: the chiral splitting
+  whose `q→0` slope *is* the micromagnetic DMI constant. Demonstrating a measured
+  `E(+q) - E(-q)` is a direct extension of the committed spiral sweep (add SOC,
+  rotate in the DMI-active plane, sweep signed q) and a genuine chiral-magnetism
+  result.
+- **Inverse design — the differentiable moonshot.** Energy is differentiable w.r.t.
+  atomic positions, moment directions, and in principle strain and composition, so a
+  gradient-based search can optimize *toward a target magnetic property*: the strain
+  that maximizes DMI, the composition that flips the easy axis. No finite-difference
+  code can do this. Higher risk — it needs gradients through the SCF, not just the
+  envelope torque — but it is the purest expression of the gradwave thesis applied to
+  magnetism.
+- **Demonstration vehicle: 2D magnets.** CrI3, Fe3GeTe2, CrSBr maximize impact per
+  core-hour: small unit cells (tractable in plane waves), large anisotropy (clears
+  the ~0.2 µeV rotation-invariance precision floor that cubic Fe sits on), and open
+  questions about their DMI, topological magnons, and stacking-dependent order. A
+  J/D/K extraction on CrI3, with DMI as the headline, is the tractable-plus-novel
+  sweet spot. The MAE map (next section) is the better *visual* deliverable and the
+  natural second step once the SOC force-theorem path is in.
+
 ## Magnetocrystalline anisotropy (MAE maps) and per-atom spin torques
 
 The constrained-moment work (`postscf/moment_config.py`) already produces one half
