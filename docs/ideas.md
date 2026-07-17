@@ -120,6 +120,57 @@ learnable parameters) and repeat the `train_xc_paw` recovery test at the meta-GG
 level. This is the item that most directly serves what makes gradwave distinct from
 a very well-validated second copy of QE.
 
+## Magnetocrystalline anisotropy (MAE maps) and per-atom spin torques
+
+The constrained-moment work (`postscf/moment_config.py`) already produces one half
+of this for free. `constrained_moment_scf` returns a per-atom transverse torque
+`-dW/de_I`, validated to a finite difference at ratio 1.000 — that *is* the
+magnetic force-theorem spin torque on each atom. Without spin-orbit coupling it is
+the inter-atomic exchange torque (what drives the config search and sets a spin
+spiral's stiffness); with a fully-relativistic pseudo the same per-atom torque
+picks up the on-site anisotropy term. So "individual spin torques" is not a future
+capability, it is what the module returns today. The missing half is the *global*
+anisotropy: MAE maps `E(theta, phi)` over the magnetization sphere.
+
+The ingredients are in the tree. The SOC path exists — `core/spinor_proj.py` builds
+the j = l ± ½ resolved projectors and `SpinorHamiltonian` accepts them (`q`,
+`dij_so`). `NCResult.energies.free_energy` gives a total energy per direction, so
+`MAE = E(n1) - E(n2)` and a full surface are directly a direction sweep. The
+efficient route is the torque method: one SOC evaluation per direction yields the
+anisotropy torque `-dE/dn`, and integrating it over the sphere reconstructs the
+surface — and that torque is the machinery we already have, applied to the total
+moment instead of a local one.
+
+Three things are genuinely in the way, and the third is the only real code.
+
+- **Precision floor.** `test_noncollinear.py` pins rotation-invariance (MAE ≡ 0
+  without SOC) to ~0.2 µeV, the numerical noise floor. Cubic Fe's MAE is ~1 µeV/atom,
+  sitting right on it — reproducible only with great care. Start instead on a
+  high-anisotropy case that clears the floor by orders of magnitude: L1_0 FePt
+  (~1 meV/atom), hcp Co (~65 µeV), or a uniaxial 2D magnet.
+- **k-convergence.** Metal MAE converges painfully slowly in k (thousands of points,
+  or fine-smearing / Fermi-surface-aware tricks). A cost problem, not a capability
+  gap, but it is the reason the force theorem matters.
+- **No force-theorem path for SOC yet.** The standard cheap recipe — converge the
+  density scalar-relativistically once, add SOC *non-self-consistently*, and take
+  occupied-band-energy differences per direction — is not wired. The frozen-potential
+  band-solve infrastructure already exists (`postscf/uspp_bands.py`, `core/gamma.py`,
+  the one-shot solve in `postscf/hubbard_u.py`); it just is not connected to the SOC
+  Hamiltonian plus a directional band sum. Without it, MAE falls back to a full
+  self-consistent SOC SCF per direction: affordable for FePt-class anisotropy, too
+  expensive and too noisy for Fe.
+
+What to build, all reusing what is here: (1) a global spin-axis control (rotate all
+local `e_I` together — a one-line special case of the per-atom constraint, or seed
+and let SOC pin it); (2) a force-theorem evaluator that freezes the converged
+density, adds the SOC block, and does one non-SCF diagonalization per direction into
+`dE(n)`, reusing the frozen-potential solve and the spinor projector block; (3) a
+thin sweep/integrate layer over `(theta, phi)` taking energy differences or
+integrating the torque into the anisotropy surface. The blocker is not the math —
+the torque is already exact and autograd-derived — it is getting a fully-relativistic
+pseudopotential into the fixtures and writing that force-theorem loop so the map is
+affordable.
+
 ## One-center ddd analytic derivative
 
 The one-center ddd is a named micro-cost from the performance audit, 5% of the PAW
@@ -257,6 +308,20 @@ concurrency would help here. Three ways, cheapest first.
 Note that this only pays for small systems where a single SCF underfills the GPU. The
 slab already uses more of the card, so batch structures for the cheap cases (bulk
 EOS, phonon stencils) and run the heavy cases one at a time.
+
+The cleanest first target is a spin-spiral / magnetic-dispersion sweep (see
+`examples/fe_spin_spiral.py`). Every angle theta is the *identical* cell, k-mesh, and
+band count -- same FFT dims, same tensor shapes -- so the batch has zero raggedness in
+the data layout; only the per-point convergence count differs. That is a strictly
+cleaner batching case than the EOS, where the cells (and their FFT boxes) vary slightly
+with volume. The one wrinkle is the same one everywhere: the frustrated large-angle
+points need many more iterations than the collinear ones, so a lockstep batched solve
+either over-iterates the easy members or needs per-member convergence masking. The real
+blocker is the hardware, not the workload -- on the RTX 3050 the sweep is fp64-bound and
+7.8x slower than the CPU (it runs as concurrent CPU processes today, see the done
+section on the measured 3050 profile). On a card with real fp64 (A100/H100, fp64 = 1/2
+fp32) and tens of GB, stacking these identical independent SCFs to fill the device is
+exactly where the batched-multi-structure path first pays off.
 
 The best fit is GGA insulators. They are fixed-occupation, converge in few
 iterations, and hold a small grid, so a single one badly underfills the card, which is

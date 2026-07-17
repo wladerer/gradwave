@@ -1,0 +1,86 @@
+[
+  {
+    "theta": 135.0,
+    "mode": "perp",
+    "converged": true,
+    "energy_eV": -6429.627666593533,
+    "moment_muB": [
+      1.727,
+      1.734
+    ],
+    "relative_angle_deg": 133.9,
+    "seconds": 2675
+  },
+  {
+    "theta": 180.0,
+    "mode": "perp",
+    "converged": true,
+    "energy_eV": -6429.521652952738,
+    "moment_muB": [
+      1.319,
+      1.319
+    ],
+    "relative_angle_deg": 180.0,
+    "seconds": 1839
+  },
+  {
+    "theta": 0.0,
+    "mode": "vector",
+    "converged": true,
+    "energy_eV": -6430.423892039452,
+    "moment_muB": [
+      2.222,
+      2.222
+    ],
+    "relative_angle_deg": 0.0,
+    "seconds": 2249
+  },
+  {
+    "theta": 45.0,
+    "mode": "vector",
+    "converged": true,
+    "energy_eV": -6430.343898476986,
+    "moment_muB": [
+      2.225,
+      2.225
+    ],
+    "relative_angle_deg": 44.5,
+    "seconds": 2695
+  },
+  {
+    "theta": 90.0,
+    "mode": "vector",
+    "converged": true,
+    "energy_eV": -6430.015395262218,
+    "moment_muB": [
+      2.218,
+      2.218
+    ],
+    "relative_angle_deg": 88.9,
+    "seconds": 2411
+  },
+  {
+    "theta": 135.0,
+    "mode": "vector",
+    "converged": true,
+    "energy_eV": -6429.564770772978,
+    "moment_muB": [
+      2.203,
+      2.203
+    ],
+    "relative_angle_deg": 133.8,
+    "seconds": 2430
+  },
+  {
+    "theta": 180.0,
+    "mode": "vector",
+    "converged": true,
+    "energy_eV": -6429.221394611296,
+    "moment_muB": [
+      2.197,
+      2.197
+    ],
+    "relative_angle_deg": 180.0,
+    "seconds": 2696
+  }
+]

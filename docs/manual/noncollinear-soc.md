@@ -178,6 +178,35 @@ matches a finite difference of $W$ to a part in $10^3$.
     angle stiffer; a natural collinear axis (parallel or antiparallel) converges
     far more easily than an oblique one.
 
+### Spin-spiral dispersion of bcc Fe
+
+The magnitude-robust constraint is exactly what a frozen spin spiral needs: hold
+every atomic moment at full magnitude while rotating its direction. `gradwave` has
+no generalized-Bloch machinery, but a *commensurate* spiral needs none — a two-atom
+bcc cell (corner + body-center sublattices) with the body-center moment rotated by
+$\theta$ relative to the corner is a spiral of pitch $\theta$ per (111) step. Sweeping
+$\theta$ with `mode="vector"` traces the adiabatic ("frozen-magnon") dispersion
+$E(\theta)$ at fixed moment (`examples/fe_spin_spiral.py`, run on CPU):
+
+| $\theta$ | $E(\theta)-E(0)$ | $\lvert\mathbf{M}\rvert$ (vector) | $\lvert\mathbf{M}\rvert$ (perp) |
+|---|---|---|---|
+| 0°   | 0 meV      | 2.222 μB | — |
+| 45°  | +80 meV    | 2.225 μB | — |
+| 90°  | +409 meV   | 2.218 μB | — |
+| 135° | +859 meV   | 2.203 μB | 1.73 μB |
+| 180° | +1203 meV  | 2.197 μB | 1.32 μB |
+
+![bcc Fe spin-spiral dispersion](../../examples/fe_spin_spiral.png)
+
+`E(\theta)` rises monotonically from the ferromagnetic ground state ($\theta=0$) to the
+antiparallel state, and the `vector` moment holds ~2.2 μB across the whole spiral. The
+`perp` penalty tells the other half of the story: at the *collinear* endpoints it is
+fine ($\theta=180°$ relaxes to the true bcc-Fe antiferromagnet, 1.32 μB — a smaller
+moment than the ferromagnet, which is correct Fe physics), but at the *non-collinear*
+$\theta=135°$ it demagnetizes to 1.73 μB because shrinking the moment is the cheap way
+to satisfy $|\mathbf{M}^\perp|^2$. Only the magnitude-robust penalty traces the
+fixed-moment dispersion the whole way around.
+
 ## Gotchas
 
 - A fully-relativistic pseudopotential is required for SOC; the collinear `scf`
