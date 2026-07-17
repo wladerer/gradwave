@@ -377,6 +377,40 @@ datacenter fp64 GPU.
 Kept for the reasoning. Each of these is either landed in the code or settled as a
 measured negative.
 
+## RMM-DIIS solver and whole-step CUDA graph (both TRIED, measured negatives)
+
+Prompted by the GPU profile above (dense-LA-bound, 32-46 percent launch gap), two of
+the three levers it suggested were built and measured, and neither pays for small
+cells.
+
+RMM-DIIS (a `solvers/rmm_diis.py` prototype, since removed) replaces the block
+Davidson's growing Rayleigh-Ritz subspace with per-band residual minimization, so it
+has no per-round eigh and no m x m subspace GEMM - the 64 percent the profile flagged.
+It needed two fixes to converge at all: a units-correct preconditioner (teter_b is a
+dimensionless filter, right for Davidson subspace expansion but not for a direct Jacobi
+step) and an exact line search (Teter-Payne preconditioned CG - a fixed step does not
+converge). After both it converges on a FIXED operator (synthetic batched Hermitian, err
+2e-11) but in about 100 iterations to the block Davidson's 22, at two H-applies per
+iteration. In the real SCF it is worse than slow: on smeared fcc Al it hit the iteration
+cap without converging and returned the wrong energy (-368 vs -1828 eV), at 1,548,800
+band-applies against Davidson's 10,512 (147x). The reasons are exactly the textbook
+ones: subspace methods converge in far fewer iterations, the SCF drives the solver with
+a loose-early tolerance schedule that a residual method handles poorly, and a metal's
+near-degenerate bands break the per-band tracking. RMM-DIIS is a large-system solver
+(where the O(N^3) subspace eigh/GEMM finally dominates) and an MD warm-start refiner, not
+a small-cell Davidson replacement - and the dense LA it removes, while 64 percent of GPU
+time, is cheap in absolute terms at small cell size. Removed the prototype.
+
+The whole-step CUDA graph is blocked upstream: `torch.linalg.eigh` is not CUDA-graph
+capturable (it does a host-side info check), and it sits in the Davidson inner loop every
+expansion round, so a whole-step capture fragments into tiny pieces around each eigh
+rather than removing the launch gap. It genuinely needs the eigh out of the hot loop,
+which was RMM-DIIS's job, and RMM-DIIS is not viable here. So the 32-46 percent launch
+gap is real but not reclaimable by either lever without a solver that avoids eigh
+altogether. Net: the measured GPU bottleneck resists these fixes because the eigh is both
+cliff-hit and non-capturable and removing the subspace method costs convergence speed;
+the durable levers stay throughput batching and a datacenter fp64 GPU.
+
 ## Local Thomas–Fermi metal preconditioner (DONE)
 
 Landed as opt-in `precond="local_tf"` on both `scf` and `scf_uspp`
