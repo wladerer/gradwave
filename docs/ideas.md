@@ -328,6 +328,32 @@ exactly what `core/batch.py` already does over `(nk, nb, grid)`, and the CPU FFT
 already on MKL rather than pocketfft, so the "free 1.5-2x pocketfft to MKL" swap is
 not available here. What remains, ranked by how well it fits this code:
 
+MEASURED on the RTX 3050 (2026-07-16, torch.profiler on 8 NC SCF iterations, aten-op
+device time, no kernel double-count). This revises the "FFT-bound" framing for the GPU
+small-cell regime, which came from CPU profiles and the molecule-in-large-box / USPP-Pt
+cases. For an ordinary small crystal on the GPU the FFT is only about 12 percent:
+
+    Si8 2x2x2 (nband 20, m~40, box 27^3): GPU-busy 2111 ms, launch/sync gap 996 ms
+      = 32% of wall.  GEMM(bmm) 43%, eigh 21%, QR/ortho 14%, FFT 12%, other 10%.
+    Si2 4x4x4 (nband  8, m~16, box 20^3): GPU-busy  652 ms, launch/sync gap 559 ms
+      = 46% of wall.  QR/ortho 44%, GEMM 23%, FFT 12%, eigh 11%, other 10%.
+
+Two things fall out. First, a small-cell GPU SCF is dense-linear-algebra-bound, not
+FFT-bound: GEMM + eigh + QR are about 78 percent of GPU-busy time (small boxes make the
+FFT cheap, and fp64 GEMM/eigh/QR pay the same 1/64 fp64 tax). Second, the launch/sync
+gap is 32-46 percent of wall (profiler-inflated but consistent with the earlier finding
+that eager dispatch of dozens of tiny kernels per Davidson round is the binding GPU
+constraint) - that gap is exactly what a whole-step CUDA graph reclaims. The eigh cliff
+is visible: eigh 11 percent at m~16 vs 21 percent at m~40 (the n>32 cusolver-batched
+fallback, measured 2.5-4.5x on its own). Reprioritized by this data: (1) whole-step CUDA
+graph to close the 32-46 percent launch gap, (2) cut the dense subspace LA - RMM-DIIS is
+now attractive because it removes the Rayleigh-Ritz (eigh) AND the subspace
+orthonormalization (QR), together 35 percent (Si8) to 54 percent (Si2) of GPU-busy - and
+a c64 subspace reduction on the NC standard problem would dodge both the fp64 tax and the
+eigh cliff, (3) the FFT is no longer the thing to chase on GPU small cells.
+
+
+
 - Whole-SCF-step CUDA-graph capture of the dispatch-bound glue. The measured GPU
   negatives so far were an apply-only CUDA graph (1.0-1.1x, the back-to-back FFT
   kernels have no launch gap) and torch.compile on the XC functional in isolation.
