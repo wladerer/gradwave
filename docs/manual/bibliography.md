@@ -20,4 +20,10 @@ the text link here.
 <li id="dfpt">S. Baroni, S. de Gironcoli, A. Dal Corso, and P. Giannozzi, "Phonons and related crystal properties from density-functional perturbation theory," Rev. Mod. Phys. <strong>73</strong>, 515 (2001).</li>
 <li id="anderson">D. G. Anderson, "Iterative Procedures for Nonlinear Integral Equations," J. ACM <strong>12</strong>, 547 (1965).</li>
 <li id="kerker">G. P. Kerker, "Efficient iteration scheme for self-consistent pseudopotential calculations," Phys. Rev. B <strong>23</strong>, 3082 (1981).</li>
+<li id="togo">A. Togo and I. Tanaka, "Spglib: a software library for crystal symmetry search," arXiv:1808.01590 (2018).</li>
+<li id="cances">E. Cancès, G. Dusson, Y. Maday, B. Stamm, and M. Vohralík, "A perturbation-method-based post-processing for the planewave discretization of Kohn-Sham models," J. Comput. Phys. <strong>307</strong>, 446 (2016).</li>
+<li id="dudarev">S. L. Dudarev, G. A. Botton, S. Y. Savrasov, C. J. Humphreys, and A. P. Sutton, "Electron-energy-loss spectra and the structural stability of nickel oxide: An LSDA+U study," Phys. Rev. B <strong>57</strong>, 1505 (1998).</li>
+<li id="cococcioni">M. Cococcioni and S. de Gironcoli, "Linear response approach to the calculation of the effective interaction parameters in the LDA+U method," Phys. Rev. B <strong>71</strong>, 035105 (2005).</li>
+<li id="dalcorso">A. Dal Corso and A. Mosca Conte, "Spin-orbit coupling with ultrasoft pseudopotentials: Application to Au and Pt," Phys. Rev. B <strong>71</strong>, 115106 (2005).</li>
+<li id="bi2se3">H. Zhang, C.-X. Liu, X.-L. Qi, X. Dai, Z. Fang, and S.-C. Zhang, "Topological insulators in Bi2Se3, Bi2Te3 and Sb2Te3 with a single Dirac cone on the surface," Nat. Phys. <strong>5</strong>, 438 (2009).</li>
 </ol>

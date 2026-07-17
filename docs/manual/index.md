@@ -9,9 +9,11 @@ gives the response of the self-consistent density to any parameter of the
 functional.
 
 This manual is organized as a wiki. Start with [Installation](installation.md),
-then work through the two tutorials. The first relaxes a geometry with exact
-autograd forces. The second trains an exchange-correlation functional back to
-PBE[[10]](bibliography.md#pbe) through the self-consistent density. Each tutorial
+then work through the tutorials. They relax a geometry with exact autograd
+forces, train an exchange-correlation functional back to PBE[[10]](bibliography.md#pbe)
+through the self-consistent density, reduce the Brillouin zone by symmetry,
+estimate the plane-wave basis error, determine the Hubbard U from linear
+response, and add spin-orbit coupling. Each tutorial
 opens with the theory it rests on, then runs a shipped example. The
 [Reference](reference.md) page collects the CLI, the output files, and the entry
 points, and the [Bibliography](bibliography.md) lists every citation.
@@ -47,6 +49,10 @@ tensor is float64 or complex128.
 | [Installation](installation.md) | set up the environment and run the first SCF |
 | [Geometry optimization](geometry-optimization.md) | relax a structure with autograd forces |
 | [Learning XC by AD](learning-xc.md) | train a functional through the SCF density |
+| [Symmetry reduction](symmetry.md) | IBZ k-reduction and density symmetrization |
+| [Basis-set error estimation](error-estimation.md) | estimate the plane-wave (Ecut) error |
+| [Differentiable Hubbard U](hubbard-u.md) | DFT+U and U from linear response |
+| [Non-collinear magnetism and SOC](noncollinear-soc.md) | spinor SCF and spin-orbit coupling |
 | [Inputs and outputs](io.md) | input schema, output files, checkpoints, analysis |
 | [Reference](reference.md) | CLI and entry points |
 | [Performance](performance.md) | where time goes, what helps, the GPU precision story |

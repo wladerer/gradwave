@@ -173,4 +173,4 @@ chain reuses each system's converged density across epochs.
 
 ## Next
 
-See the [Reference](reference.md) page for the CLI, output files, and entry points.
+Continue to [Symmetry reduction](symmetry.md).

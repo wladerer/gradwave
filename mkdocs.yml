@@ -33,6 +33,10 @@ nav:
   - Tutorials:
       - Geometry optimization: geometry-optimization.md
       - Learning XC by AD: learning-xc.md
+      - Symmetry reduction: symmetry.md
+      - Basis-set error estimation: error-estimation.md
+      - Differentiable Hubbard U: hubbard-u.md
+      - Non-collinear magnetism and SOC: noncollinear-soc.md
   - Inputs and outputs: io.md
   - Reference: reference.md
   - API reference:
