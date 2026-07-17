@@ -53,6 +53,17 @@ terms. Each function documents which formalisms and spin settings it supports.
 
 ::: gradwave.postscf.dos.kpm_dos
 
+## Projected density of states
+
+Atom-, orbital-, spin-, and (fully-relativistic) j-resolved projections; see
+the `projections` input block in [Inputs and outputs](../io.md).
+
+::: gradwave.postscf.pdos.projected_dos
+
+::: gradwave.postscf.pdos.projected_dos_noncollinear
+
+::: gradwave.postscf.pdos.projected_dos_soc
+
 ## Dielectric response
 
 ε∞ and Born effective charges from E-field density-functional perturbation
@@ -85,3 +96,14 @@ linear-response U.
 ::: gradwave.postscf.hubbard_u.linear_response_u
 
 ::: gradwave.postscf.hubbard_u.linear_response_u_autodiff
+
+## Basis-set error estimate
+
+The plane-wave (Ecut) discretization error from one converged run; see the
+[Basis-set error estimation](../error-estimation.md) tutorial.
+
+::: gradwave.postscf.discretization_error.estimate_density_error
+
+::: gradwave.postscf.discretization_error.estimate_force_error
+
+::: gradwave.postscf.discretization_error.DiscretizationError

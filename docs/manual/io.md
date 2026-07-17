@@ -115,6 +115,21 @@ Used when `task: bands`.
 | `nbands` | `null` | — | int | Bands to solve. `null` reuses the SCF count. |
 | `irreps` | `false` | — | bool | Label bands at special points with Mulliken symbols. |
 
+### `projections`
+
+Adds a projected density of states to an `scf` run, written to the `pdos` block
+of the JSON. Set `projections: true` for defaults, or a mapping for control.
+Requires a pseudopotential with atomic orbitals (`PP_PSWFC`).
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `enabled` | `false` | — | bool | Compute the projected DOS; `projections: true` is shorthand. |
+| `group_by` | `l` | — | string | Aggregate by `atom`, `l`, `lm`, or `total` (`j`, `jmj` for fully-relativistic). |
+| `width` | `0.1` | eV | float | Gaussian broadening. |
+| `npoints` | `800` | — | int | Energy grid points. |
+
+Plot it with `gradwave plot <scf.json> --kind pdos`.
+
 ### `output`
 
 | keyword | default | unit | type | description |

@@ -32,6 +32,16 @@ the one-center term are handled inside the loop.
 
 ::: gradwave.scf.uspp.USPPSystem
 
+## Non-collinear / spin-orbit
+
+The spinor SCF for non-collinear magnetism and spin-orbit coupling, run under
+`no_grad` like the other drivers; see the
+[Non-collinear magnetism and SOC](../noncollinear-soc.md) tutorial.
+
+::: gradwave.scf.noncollinear.scf_noncollinear
+
+::: gradwave.scf.noncollinear.NCResult
+
 ## Options
 
 The runner accepts flat keyword arguments, but the loop internally normalizes
@@ -53,3 +63,18 @@ scheme.
 ::: gradwave.scf.mixing.JohnsonMixer
 
 ::: gradwave.scf.mixing.BroydenMixer
+
+## Symmetry
+
+IBZ k-point reduction and density symmetrization used by the setup path; see
+the [Symmetry reduction](../symmetry.md) tutorial.
+
+::: gradwave.symmetry.find_spacegroup
+
+::: gradwave.symmetry.reduce_mesh
+
+::: gradwave.symmetry.SpaceGroup
+
+::: gradwave.symmetry.RhoSymmetrizer
+
+::: gradwave.symmetry.symmetrize_forces
