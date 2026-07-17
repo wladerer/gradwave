@@ -82,6 +82,11 @@ gradwave plot out/bands.json
 
 Set `irreps: true` to label bands at the special points with Mulliken symbols.
 
+![Graphene band structure with irrep labels](img/graphene_bands_irreps.png)
+
+*Graphene along Γ-M-K-Γ, each state at a special point labeled with its
+point-group irrep.*
+
 ## Density of states
 
 A total DOS comes from any SCF result at plot time.

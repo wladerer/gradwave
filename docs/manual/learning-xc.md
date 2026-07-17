@@ -135,6 +135,12 @@ recovered $(\kappa, \mu)$. The loss is a relative density MSE, the optimizer is
 Adam with backtracking that halves the rate when the loss rises, and a warm-start
 chain reuses each system's converged density across epochs.
 
+![Learnable-XC training trajectory](img/train_xc_paw.png)
+
+The summed density loss falls by about two orders of magnitude, and both exchange
+parameters converge onto their PBE values (dashed) through the self-consistent
+response.
+
 ## Adjoint knobs
 
 `uspp_density_loss_param_grads` takes the solver controls as keywords.

@@ -64,8 +64,13 @@ whatever the unconstrained SCF settles into.
 `scf` and a fully-relativistic `scf_noncollinear(..., nonmagnetic=True)`, and
 labels the parity of the Γ states around the gap. Without SOC the ordering is the
 normal-insulator one. With SOC the conduction and valence parities **swap**, the
-$Z_2$-nontrivial signature of the topological surface states.[[22]](bibliography.md#bi2se3) The band overlay
-is committed alongside the script.
+$Z_2$-nontrivial signature of the topological surface states.[[22]](bibliography.md#bi2se3)
+
+![Bi₂Se₃ band structure with and without SOC](img/bi2se3_bands_overlay.png)
+
+The scalar-relativistic and fully-relativistic bands are overlaid on the same path.
+Spin-orbit coupling opens and inverts the gap at Γ, and the valence-band maximum
+moves off Γ into a camelback.
 
 The SOC machinery is validated quantitatively on the GaAs valence split-off. The
 $\Gamma_8$ (four-fold) sits above $\Gamma_7$ (two-fold) with a spin-orbit gap
