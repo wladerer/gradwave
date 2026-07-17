@@ -177,6 +177,9 @@ def scf_noncollinear(
     verbose: bool = True,
     nonmagnetic: bool = False,  # pin m⃗ ≡ 0 (QE's domag=false): nonmagnetic + SOC
     mixed_precision: bool = False,  # opt-in fp32 draft (situational — see scf())
+    constrain_dirs=None,  # (na,3) unit target directions ê_I for constrained moments
+    constrain_lambda: float = 0.0,  # penalty strength λ [eV/μB²] (Ma-Dudarev)
+    atom_weights=None,  # (na,*grid) Hirshfeld weights; required when constraining
 ) -> NCResult:
     if system.rho_symmetrizer is not None and not nonmagnetic:
         raise ValueError(
@@ -257,6 +260,16 @@ def scf_noncollinear(
         v_xc, b_xc, _ = vxc_and_bxc(xc, rho, m, grid, rho_core=system.rho_core)
         if nonmagnetic:
             b_xc = torch.zeros_like(b_xc)
+        elif constrain_dirs is not None:
+            # Ma-Dudarev constraining field B_c = 2λ Σ_I w_I M_I^⊥ pins each
+            # atomic moment M_I = ∫ w_I m⃗ dr toward its target ê_I. It is the
+            # functional derivative of the penalty E_p = Σ λ|M_I^⊥|², so it adds
+            # to the exchange field b_xc (= δE/δm⃗) directly.
+            cf = vol / grid.n_points
+            m_at = torch.einsum("axyz,ixyz->ai", atom_weights, m) * cf   # M_I (na,3)
+            m_perp = m_at - (m_at * constrain_dirs).sum(-1, keepdim=True) * constrain_dirs
+            b_xc = b_xc + 2.0 * constrain_lambda * torch.einsum(
+                "ai,axyz->ixyz", m_perp, atom_weights)
         v_r = v_h + v_xc + vloc_r
 
         tol_eff = max(diago_tol, 1e-3) if it == 1 else \

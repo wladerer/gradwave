@@ -107,3 +107,15 @@ The plane-wave (Ecut) discretization error from one converged run; see the
 ::: gradwave.postscf.discretization_error.estimate_force_error
 
 ::: gradwave.postscf.discretization_error.DiscretizationError
+
+## Magnetic configuration (constrained)
+
+Constrained non-collinear DFT: hold atomic moments toward target directions and
+descend the torque to the ground-state configuration; see the
+[Non-collinear magnetism and SOC](../noncollinear-soc.md) tutorial.
+
+::: gradwave.postscf.moment_config.atomic_weights
+
+::: gradwave.postscf.moment_config.constrained_moment_scf
+
+::: gradwave.postscf.moment_config.relax_moment_directions

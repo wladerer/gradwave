@@ -36,9 +36,10 @@ converges the spinor density.
 ```python
 from gradwave.scf.noncollinear import scf_noncollinear
 from gradwave.core.xc.noncollinear import NoncollinearXC
+from gradwave.core.xc.spin import LSDA_PW92
 
 res = scf_noncollinear(
-    system, NoncollinearXC(),
+    system, NoncollinearXC(LSDA_PW92()),   # wrap any collinear SpinXC
     mag_vec_init=[[0.0, 0.0, 0.4]],   # (na, 3): direction · fraction per atom
     smearing="gaussian", width=0.1,
 )
@@ -84,15 +85,62 @@ under 1 meV/atom, and the triplet O₂ molecule lands the $m = 2\,\mu_B$ moment 
 $10^{-3}$. The USPP/PAW spin path (`scf_uspp`, `nspin=2`) carries the same
 `start_mag` and `mag_total`.
 
-!!! warning "Moment-direction optimization is an outlook, not a worked example"
-    gradwave converges a non-collinear configuration from a chosen starting
-    orientation, but it does **not yet** optimize the moment directions themselves.
-    A magnetocrystalline-anisotropy torque $\mathrm{d}E/\mathrm{d}\hat{\mathbf{m}}$
-    or a constrained-moment Lagrange field would let a gradient step search for the
-    ground-state orientation; the spinor and SOC components exist, but that
-    differentiable path is future work, and the non-collinear SCF currently runs
-    without a gradient graph. Treat "learned magnetic configuration" as a direction,
-    not a shipped feature.
+## Optimizing the magnetic configuration
+
+The moment *directions* are themselves degrees of freedom, and gradwave finds the
+ground-state configuration by constrained density-functional theory: each atomic
+moment is held toward a target direction $\hat{\mathbf{e}}_I$ by a penalty field,
+and the torque that would rotate the *unconstrained* moment is read off and
+descended.
+
+Following Ma and Dudarev,[[23]](bibliography.md#madudarev) an atomic moment $\mathbf{M}_I = \int
+w_I(\mathbf{r})\,\mathbf{m}(\mathbf{r})\,\mathrm{d}^3r$ — with a Hirshfeld weight
+$w_I$ localizing on atom $I$ — is pinned to $\hat{\mathbf{e}}_I$ by adding a
+penalty $E_p = \sum_I \lambda\,|\mathbf{M}_I^\perp|^2$ to the energy, which
+contributes a constraining field $\mathbf{B}_c = 2\lambda \sum_I w_I\,
+\mathbf{M}_I^\perp$ to the spinor Hamiltonian. The gradient of the constrained
+functional $W = E_\text{KS} + E_p$ with respect to a target direction is
+
+$$ \frac{\partial W}{\partial \hat{\mathbf{e}}_I} = -2\lambda\,(\mathbf{M}_I \cdot \hat{\mathbf{e}}_I)\,\mathbf{M}_I^\perp, $$
+
+which gradwave validates against a finite difference of $W$ (they agree to a ratio
+of 1.000). A configuration is a stationary point of the true energy when no
+constraint is needed, $\mathbf{M}_I^\perp \to 0$.
+
+```python
+from gradwave.postscf.moment_config import relax_moment_directions
+
+# two O moments started 45° apart, in the x–z plane
+dirs0 = [[0.0, 0.0, 1.0], [0.707, 0.0, 0.707]]
+final, history = relax_moment_directions(
+    system, NoncollinearXC(LSDA_PW92()), dirs0,
+    lam=2.0, step=0.5, smearing="gaussian", width=0.1)
+```
+
+Each sweep runs a constrained SCF, reads the torque, and rotates the targets
+downhill. For triplet O₂, a ferromagnet, two moments started 45° apart collapse
+to parallel in three sweeps and the energy falls to the unconstrained
+ground-state value:
+
+| sweep | relative angle | energy (eV) |
+|---|---|---|
+| start | 45.0° | −840.675 |
+| 1 | 4.6° | −840.823 |
+| 2 | 0.3° | −840.825 |
+
+`constrained_moment_scf` runs a single constrained point (returning the atomic
+moments, the constraining field, and the torque) and `relax_moment_directions`
+wraps the descent. With a fully-relativistic pseudopotential the same machinery
+gives the magnetocrystalline-anisotropy torque, since spin-orbit coupling ties
+the moment to the lattice.
+
+!!! note "Where the constraint is well-posed"
+    The penalty holds a *direction*; the moment *magnitude* is free. A strongly
+    ferromagnetic system forced to a large relative angle can lower its energy by
+    demagnetizing (the penalty $|\mathbf{M}^\perp|^2$ is satisfied trivially at
+    $\mathbf{M}=0$), so the constraint is best applied at moderate angles where the
+    moment is robust, exactly the regime a descent toward the ground state passes
+    through.
 
 ## Gotchas
 
