@@ -15,9 +15,16 @@ Measured on an 8-core laptop (fcc Al, PBE, gaussian 0.1 eV), NC path:
     Al(100) slab, 4 layers     kerker 21   local_tf 17   (1.24x)
     Al(100) slab, 6 layers     kerker 27   local_tf 21   (1.29x)
 
+PAW path (kjpaw Al, 25/120 Ry, johnson mixing, 5 A vacuum on the slab):
+
+    bulk fcc Al PAW (8x8x8)    kerker 10   local_tf 10   (neutral)
+    Al(100) PAW slab, 4 layers kerker 23   local_tf 19   (1.21x)
+
 Energies are bit-identical between the two preconditioners (same fixed point,
 different path). Iteration count, not wall time, is the trustworthy metric for a
-solver-logic question (see docs/manual/performance.md).
+solver-logic question (see docs/manual/performance.md); on the slab the fewer
+iterations also win on wall time, and the screened-Poisson CG adds no measurable
+per-iteration cost there (it is a few box FFTs against the dense-grid Davidson).
 """
 
 import sys
