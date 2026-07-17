@@ -317,6 +317,61 @@ kind of system where the code would do new science, so it is worth knowing the f
 tiling change and not an architecture change. The ISDF work above is the complementary
 lever, it lowers the operation count where this item lowers the peak memory.
 
+## Acceleration frontier, 2024-2026 literature sweep
+
+A focused survey of the recent literature (done after the local-TF preconditioner
+landed) for levers that pass the filter "single GPU or CPU, small FFT-bound cell,
+fp64". Two of the sweep's headline ideas turned out to be already implemented: the
+Gong and Dal Corso trick of batching the H-apply FFTs across all bands and k-points
+into one call (arXiv:2412.01695, worth 6x on their small-cell many-k H-apply) is
+exactly what `core/batch.py` already does over `(nk, nb, grid)`, and the CPU FFT is
+already on MKL rather than pocketfft, so the "free 1.5-2x pocketfft to MKL" swap is
+not available here. What remains, ranked by how well it fits this code:
+
+- Whole-SCF-step CUDA-graph capture of the dispatch-bound glue. The measured GPU
+  negatives so far were an apply-only CUDA graph (1.0-1.1x, the back-to-back FFT
+  kernels have no launch gap) and torch.compile on the XC functional in isolation.
+  Neither touched the 55-65 percent of a step that is many-tiny-kernel real-valued
+  glue between the FFTs (XC assembly, mixing, occupations, PAW one-center, density
+  build). Capturing the whole step as one CUDA graph (the PyGraph line,
+  arXiv:2503.19779, averages 1.18x and never regresses where naive reduce-overhead
+  degrades up to 32 percent) removes the per-kernel launch overhead across that glue,
+  which is exactly where an 8-core host plus a consumer GPU hurt most. CUDA-graph
+  capture, unlike torch.compile fullgraph, tolerates the complex FFTs (the earlier
+  apply probe captured them fine), so the whole step is capturable. It cannot speed
+  the FFTs themselves. Estimate 1.2-1.5x on the non-FFT fraction, GPU only, needs
+  measuring on the RTX 3050. Highest-value new software lever.
+- The batched `eigh` size cliff (diagnostic, cheap). `davidson_batched` calls
+  `torch.linalg.eigh` on the `(nk, m, m)` subspace matrix with `m` about `2*nband`.
+  On CUDA the fast `cusolverXsyevBatched` path is used only for `n <= 32`; above that
+  PyTorch loops per-matrix (measured about 83x slower at the boundary, pytorch#175585).
+  Every real system has `m > 32`, so the subspace diagonalization is probably on the
+  slow per-k loop on the 3050. It is only about 5 percent of the CPU profile, but the
+  cliff can inflate it on GPU. A ten-minute microbenchmark on asus settles whether it
+  matters; if it does, cap or tile the subspace or split the batched solve.
+- ML density initializer, plane-wave-native. "Global Plane Waves From Local
+  Gaussians" (arXiv:2601.19966) and a transferability study (arXiv:2509.25724) report
+  25-33 percent fewer SCF iterations, and show a density init transfers out of
+  distribution where an ML-Hamiltonian init collapses. It only cuts iteration count,
+  not per-iteration FFTs, so about a 1.3x ceiling on a single point, but it stacks
+  with everything and its training set is the same shape as the learned-XC data. For
+  MD and relaxation the cheaper analog is wavefunction/Grassmann extrapolation across
+  geometries (about 3 iterations per step, JCTC 2022 1c00751), which QE and VASP
+  already do and gradwave's warm-start approximates.
+
+Skip, from the same sweep, because they do not transfer: distributed GPU eigensolvers
+(ELPA, ChASE, SIRIUS all lose on small subspace matrices), ML Hamiltonian predictors
+and learned preconditioners (they need a localized basis; our kinetic preconditioner
+is already analytic), tensor-core FP16 FFT (accuracy-fatal against QE-grade fp64),
+FP8-emulated fp64 FFT (Blackwell-only, no FP8 on Ampere), NUFFT (our grid is uniform),
+and VkFFT (wins only at large-prime grids; `good_fft_size` restricts to 2*3*5*7
+radices cuFFT already handles). RMM-DIIS is the one prototype-worthy eigensolver, it
+removes the Rayleigh-Ritz that CheFSI could not, but the RR is cheap at small cell
+size so the win is uncertain. The through-line matches the earlier audit: on a single
+small SCF the consumer-GPU fp64 tax is the wall, and the durable levers are throughput
+(batch many small structures), fewer iterations (learned or extrapolated start), and a
+datacenter fp64 GPU.
+
 # Done and resolved
 
 Kept for the reasoning. Each of these is either landed in the code or settled as a
