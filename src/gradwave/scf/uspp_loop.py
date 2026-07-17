@@ -538,8 +538,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
              trust_factor=20.0, batched=True, hubbard=None, start_from=None,
              criterion="drho", rho_safety=1e-2, adapt_step=False,
              mixing_scheme="pulay", mixing_kerker=None, mixing_metric="plain",
-             spin_precond=False, mixed_precision=False, opts=None,
-             verbose=True):
+             spin_precond=False, mixed_precision=False, precond="kerker",
+             opts=None, verbose=True):
     """USPP/PAW SCF. nspin=2 takes a SpinXC functional and per-species
     start_mag (list, in [-1, 1]); mixing then runs in the (total,
     magnetization) basis with Kerker on the total for smeared systems.
@@ -600,6 +600,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         mixing_metric, trust_factor = mx.metric, mx.trust_factor
         adapt_step, spin_precond = mx.adapt_step, mx.spin_precond
         mixing_w0, bec_step_scale = mx.w0, mx.bec_step_scale
+        precond = mx.precond
     grid = system.grid
     vol = grid.volume
     dev = system.positions.device
@@ -692,6 +693,19 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                          history=mixing_history, kerker=use_kerker,
                          kerker_mask=kerker_mask, step_scale=step_scale,
                          metric_w=metric_w, w0=mixing_w0, adapt_ids=adapt_ids)
+    if precond not in ("kerker", "local_tf"):
+        raise ValueError("precond must be 'kerker' or 'local_tf'")
+    tf_precond = None
+    if precond == "local_tf":
+        # position-dependent TF screening on the ρ-total block of the composite
+        # mixing vector (the first `ng` entries; becsum and the magnetization
+        # channel keep plain damping, matching the kerker_mask). set_density()
+        # is called with the current smooth density each iteration.
+        from gradwave.scf.local_tf import LocalTFPrecond
+        tf_precond = LocalTFPrecond(grid.g2, grid.shape, layout.mask,
+                                    q0_max=mixer.q0)
+        mixer.precond_op = tf_precond
+        mixer.precond_slice = slice(0, ng)
     coeffs = [[None] * nk for _ in range(nspin)]
     coeffs_b = [None] * nspin
     e_free_prev, history, converged = None, [], False
@@ -827,6 +841,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                     out[ng:2 * ng] = _sp.apply(rvec[ng:2 * ng])
                     return out
                 mixer.extra_precond = _spin_pc
+        if tf_precond is not None:
+            tf_precond.set_density(rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1])
         mixed = mixer.step(rho_in_vec, rho_out_vec)
         rho_s, bec_mixed = layout.unpack(mixed)
         # Hermitize the mixed becsum (linear combinations preserve it up

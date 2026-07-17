@@ -50,6 +50,7 @@ class GradWave(Calculator):
         device: str = "cpu",
         compile_xc: bool = False,
         eigensolver: str = "davidson",  # davidson | chebyshev (NC path only)
+        precond: str = "kerker",  # kerker | local_tf (NC path only)
         verbose: bool = False,
         **kwargs,
     ):
@@ -58,7 +59,7 @@ class GradWave(Calculator):
             dict(ecut=ecut, ecutrho=ecutrho, xc=xc, kpts=tuple(kpts),
                  kshift=tuple(kshift), smearing=smearing, width=width,
                  nbands=nbands, use_symmetry=use_symmetry, etol=etol,
-                 rhotol=rhotol, eigensolver=eigensolver)
+                 rhotol=rhotol, eigensolver=eigensolver, precond=precond)
         )
         self._pseudo_paths = dict(pseudopotentials)
         self._upf_cache: dict[str, object] = {}
@@ -172,7 +173,7 @@ class GradWave(Calculator):
             system, self._make_xc(),
             smearing=p["smearing"], width=p["width"],
             etol=p["etol"], rhotol=p["rhotol"], verbose=self._verbose,
-            eigensolver=p["eigensolver"],
+            eigensolver=p["eigensolver"], precond=p["precond"],
             start_from=self._warm_start(system),
         )
         if not res.converged:

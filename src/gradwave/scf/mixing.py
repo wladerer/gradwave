@@ -45,11 +45,23 @@ class _DampedMixerBase:
         self.kerker_mask = kerker_mask
         self.step_scale = step_scale
         self.extra_precond = None
+        # optional position-dependent preconditioner on the density-total block
+        # (local Thomas–Fermi). When set it REPLACES the constant Kerker factor
+        # on that block; other blocks (magnetization, becsum) keep plain damping.
+        self.precond_op = None
+        self.precond_slice = None  # slice of r the precond_op acts on (None → all)
 
     def _damped(self, r: torch.Tensor) -> torch.Tensor:
         if self.extra_precond is not None:
             r = self.extra_precond(r)
-        if not self.kerker:
+        if self.precond_op is not None:
+            if self.precond_slice is None:
+                out = self.alpha * self.precond_op(r)
+            else:
+                out = self.alpha * r.clone()
+                sl = self.precond_slice
+                out[sl] = self.alpha * self.precond_op(r[sl])
+        elif not self.kerker:
             out = self.alpha * r
         else:
             fac = self.g2 / (self.g2 + self.q0**2)

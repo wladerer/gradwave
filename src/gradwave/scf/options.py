@@ -20,6 +20,7 @@ class MixerOptions:
     alpha: float = 0.7
     history: int | None = None  # None → per-scheme default (johnson 12, else 8)
     kerker: bool | None = None  # None → on for smeared systems
+    precond: str = "kerker"  # kerker | local_tf (position-dependent TF screening)
     metric: str = "plain"  # plain | coulomb (johnson only)
     w0: float = 0.01  # johnson regularization
     trust_factor: float = 20.0
