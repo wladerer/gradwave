@@ -121,26 +121,14 @@ learnable parameters) and repeat the `train_xc_paw` recovery test at the meta-GG
 level. This is the item that most directly serves what makes gradwave distinct from
 a very well-validated second copy of QE.
 
-## Kerker-plus-local-TF metal preconditioner
+## One-center ddd analytic derivative
 
-The highest-value remaining SCF-perf item. fcc Pt takes 16 SCF iterations to QE's
-7, and the O2 nspin=2 PAW check (21 vs 20) confirms the gap is metal-specific, not
-a spin or PAW problem, so the lever is the density preconditioner. gradwave uses a
-bare Kerker, whose factor `G²/(G²+q0²)` damps long-wavelength charge sloshing with a
-fixed screening length. QE's default couples Kerker with a local Thomas-Fermi term
-that varies the screening with the local density, which damps the modes a bare
-Kerker leaves. The Stoner preconditioner that was built targets the magnetic
-instability and proved too expensive per iteration, so a cheap Kerker-plus-local-TF
-for ordinary non-magnetic metals is the untried and lighter object, and the audit
-estimated it at roughly 2.3x on every metal. Validate against the Pt harness, and measure before
-believing, since the atomic-seeding item below looked equally promising on paper and
-did not pay off.
-
-The one-center ddd is the other named micro-cost from the audit, 5% of the PAW
+The one-center ddd is a named micro-cost from the performance audit, 5% of the PAW
 profile through an autograd backward per iteration. It is already compiled when
 `compile_xc=True` (the `energy_and_ddd` path is a single backward), so the remaining
 question is only whether an analytic quadrature derivative beats the compiled
-autograd, which is a small isolated experiment, not a feature.
+autograd, which is a small isolated experiment, not a feature. (The local-TF metal
+preconditioner that used to head this section is now built, see the done section.)
 
 ## RAIRS and a slab dipole moment
 
@@ -333,6 +321,42 @@ lever, it lowers the operation count where this item lowers the peak memory.
 
 Kept for the reasoning. Each of these is either landed in the code or settled as a
 measured negative.
+
+## Local Thomas–Fermi metal preconditioner (DONE)
+
+Landed as opt-in `precond="local_tf"` on both `scf` and `scf_uspp`
+(`scf/local_tf.py`, default `"kerker"`). The bare Kerker filter screens charge
+sloshing with a single length `1/q0`, right for a bulk metal but wrong for an
+inhomogeneous cell, where a fixed `q0` over-screens the vacuum. Following QE's
+`mixing_mode='local-TF'`, `LocalTFPrecond` lets the screening wavevector track the
+local density, `q²(r)=min(q²_TF(r), q0_max²)` with `q²_TF=(4/π)k_F(r)`, capped at
+the bare `q0` so a bulk metal is unchanged. It is applied by a short
+preconditioned-CG solve of the screened-Poisson operator (a few box FFTs per
+mixing step, warm-started across iterations), acting on the ρ-total block only.
+
+Measured (NC, fcc Al, PBE, gaussian 0.1 eV): energies bit-identical to bare Kerker
+(same fixed point). Bulk 8×8×8 neutral (9→9), Al(100) slab 21→17 (4 layers) and
+27→21 (6 layers) iterations, the margin growing with cell inhomogeneity, exactly the
+inhomogeneous regime the operator targets. So the original framing was right that a
+fixed Kerker is the wrong operator away from a uniform bulk, but the win is on slabs
+and molecules, not on a homogeneous bulk metal, where Kerker at a sensible `q0` is
+already near-optimal. The bulk-Pt 16-vs-7 iteration gap is therefore a
+starting-density and Broyden-history question more than a screening-length one, and
+this preconditioner does not by itself close it. Unit tests pin the three operator
+limits (`tests/unit/test_local_tf.py`), integration tests gate the fixed-point
+invariant on NC and USPP (`tests/integration/test_local_tf_scf.py`), and the
+slab iteration-count win lives in `benchmarks/bench_precond.py`.
+
+Two follow-ups worth noting. First, building this surfaced and fixed a separate
+bug: `setup_uspp` sized the FFT box as a blanket cube for any symmetric cell, so an
+anisotropic slab got a 105³ box instead of 20×20×105, a 27.6× over-allocation that
+OOMs during setup, now fixed by porting the NC path's symmetry-coupled axis grouping
+(`symmetry.coupled_axis_groups`). Second, the modern parameter-free successor to
+local-TF is the LDOS preconditioner of Herbst and Levitt (arXiv:2009.01665, DFTK's
+default), which adapts the screening to whether each region is metallic or
+insulating from the local density of states rather than a Thomas–Fermi model. If
+local-TF ever underdelivers on a strongly mixed metal-vacuum-insulator cell, that is
+the next rung, and it reuses the same reciprocal-space mixing hook.
 
 ## torch.compile for the exchange-correlation layer (DONE)
 
