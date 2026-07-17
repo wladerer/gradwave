@@ -215,6 +215,30 @@ defect, which the [Performance](performance.md) page works through in full.
 - Some references are not worth generating. The displaced-Ni₂ torture geometry made QE
   itself bounce for 54 to 100 Broyden iterations. Validate on degenerate limits and clean
   integer-occupation systems like the O₂ triplet instead.
+- The direction-only moment constraint has a magnitude loophole. The Ma-Dudarev
+  $|M^\perp|^2$ penalty is minimized at $M=0$, so a frustrated non-collinear target
+  demagnetizes to satisfy it for free. It is fine at collinear endpoints (a forced
+  antiparallel target relaxes to the true smaller AFM moment), but at oblique angles use
+  the magnitude-robust $|M - m_0\hat e|^2$ ("vector") penalty, which charges $\lambda
+  m_0^2$ for demagnetizing. bcc Fe forced to a 135° spiral: perp collapses to 1.7 μB,
+  vector holds 2.2.
+- Spin Hamiltonians (J, D, K) come from the torque, not energy mapping. The exchange
+  tensor is the site-to-site derivative of the autograd torque, $\mathcal{J}_{IJ} =
+  \partial T_I/\partial\hat e_J$ — tilt one moment, read the induced torque on the
+  others. Because the torque is already an analytic gradient this is *one* finite-
+  difference order, not the two of energy mapping, so it is lower-noise. bcc Fe
+  validates: $J_1 \approx 22$ meV (LKAG ~15-19), DMI zero by centrosymmetry, mean-field
+  $T_c$ 1388 K matching Pajda's MFA. A small cell folds periodic images, so it yields the
+  shell-summed $J(q=0)$ (hence $J_1 \approx J_{01}/8$, a slight overcount); per-shell
+  $J_n$ needs a supercell or the reciprocal-space $J(q)$ route.
+- Seed non-collinear references high-spin. The bare unconstrained non-collinear SCF is
+  multi-stable — a weak moment seed collapses O₂ or Fe to a low-spin or nonmagnetic
+  solution. Seed above saturation (`mag_init_scale` ~1.5) and let it relax down, or pass
+  the target magnitude explicitly.
+- Constrained non-collinear at strongly-frustrated oblique angles can limit-cycle at a
+  small residual rather than converge tightly, though the moment values stay stable. Raise
+  the penalty $\lambda$; a collinear axis (parallel or antiparallel) converges far more
+  easily than an oblique one.
 
 ## Response, adjoints, and autograd
 
@@ -324,4 +348,24 @@ differentiable-DFT coupling of arXiv:2509.07785. A few things are not obvious.
   of an hour-long run with it, and `timeout` kills the wrapper while the python orphans.
 - Do not match a process by its own command line. `pgrep -f` matches the shell running it
   when the pattern appears in the command line. Use `ps aux | grep "[p]attern"` or exact
-  PID kills.
+  PID kills. This bites remotely too: `ssh host 'pkill -f pat'` matches the ssh command's
+  own remote shell and kills the job you just launched.
+- Detach remote background jobs with `setsid`, not bare `nohup`. `nohup cmd &` launched
+  inside `ssh host '...'` still takes SIGHUP when the ssh session closes and dies. Wrap
+  the work in a launcher that spawns the parallel jobs and `wait`s, and run it with
+  `setsid nohup bash launcher.sh >log 2>&1 </dev/null &`; that survives the disconnect.
+- Non-interactive ssh has no login environment. `ssh host 'python ...'` fails with
+  `python: not found` and `module: command not found` because the profile is never
+  sourced. Call the interpreter by full path (`~/.venvs/base/bin/python`) and `source`
+  the module init explicitly.
+- A shared HPC cluster's Python environment fights you; build it from conda-forge. On
+  Hoffman2 the login profile forced `pip --user`, put a broken py3.9 `~/.local` on
+  `PYTHONPATH`, shipped GCC < 9.3 (so any source-built wheel dies), and threw an OpenBLAS
+  memory error on the login node. The robust fix is conda-forge for the whole scientific
+  stack (self-contained binaries, no compiler, no user-site) with pip only for the CUDA
+  torch wheel, then run with `PYTHONPATH=<your src>`, `PYTHONNOUSERSITE=1`, and an
+  `OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS` cap so imports work on the login node.
+- Independent SCF points parallelize; do not run them serially. A spin-spiral or
+  dispersion sweep is embarrassingly parallel — running the angles as concurrent
+  processes (a few threads each) cut a ~2-hour serial sweep to ~30 minutes, and it is the
+  same shape the batched-multi-structure GPU work would eventually fill.

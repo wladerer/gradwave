@@ -311,6 +311,21 @@ ran 250 iterations over 27 k-points and two spins with the one-center work on th
 CPU, which is iteration count and host round-trips, not a regime where the GPU
 stretches its legs.
 
+### Confirmed on a datacenter fp64 GPU (A100)
+
+The prediction held. On an NVIDIA A100-SXM4-40GB (UCLA Hoffman2), a double-precision
+GEMM clocks ~4.9 TFLOP/s — roughly 35× the RTX 3050's fp64 — and a constrained
+non-collinear bcc-Fe spin-spiral point (2-atom cell, 60 Ry, 3×3×3, 24 bands) runs in
+97 s against ~516 s on the 22-core asus CPU at 16 threads, about 5×. The GPU energy
+bit-matches the CPU (−6430.0154 eV), so the fp64 path is correct, not merely fast,
+and the 40 GB lifts the 6 GB grid ceiling that capped the 3050. This is the
+datacenter-class fp64 card the section predicted would move the needle, and it is
+what makes the spin-Hamiltonian and MAE work tractable at useful cell sizes — the
+three-SCF Fe exchange benchmark ran there in minutes. One caveat learned the hard
+way: the *CPU cores* of a shared GPU node can be far slower than a dedicated CPU box
+(a single Fe SCF on 8 such cores ran past a one-hour walltime), so benchmark the GPU
+against a real CPU reference, never the GPU node's own cores.
+
 ## Measuring performance without fooling yourself
 
 - **Iteration counts are more trustworthy than wall time for solver-logic
