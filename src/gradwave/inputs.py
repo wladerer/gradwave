@@ -51,8 +51,10 @@ class RelaxParams:
     # fire needs 25 (measured 2026-07-15); fire remains available for
     # far-from-minimum or noisy-force cases
     optimizer: str = "bfgs"  # bfgs | fire
-    fmax: float = 0.01  # eV/Å
+    fmax: float = 0.01  # eV/Å (also gates stress under cell relaxation)
     max_steps: int = 200
+    cell: bool = False  # variable-cell: relax the lattice with the atoms (stress)
+    pressure: float = 0.0  # external hydrostatic pressure [GPa]; cell relaxation only
 
 
 @dataclass(frozen=True)

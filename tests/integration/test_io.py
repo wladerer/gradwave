@@ -272,3 +272,42 @@ scf: {{etol: 1.0e-8, rhotol: 1.0e-7, mixing: {{scheme: johnson}}}}
     assert s2["scf"]["n_iter"] < s1["scf"]["n_iter"]
     assert abs(s2["scf"]["energies_eV"]["free_energy"]
                - s1["scf"]["energies_eV"]["free_energy"]) < 1e-6
+
+
+@pytest.mark.slow
+def test_variable_cell_relax_reduces_stress(tmp_path):
+    """`relax.cell: true` runs a variable-cell (FrechetCellFilter) relaxation.
+    A 3%-compressed Si diamond (atoms on symmetric sites, so only the cell has a
+    force) relaxes back to a near-stress-free state; relax.json reports the moving
+    cell, its volume, and the final stress."""
+    from gradwave.cli import main
+
+    strained = (0.97 * SI_CELL).tolist()  # 3% isotropic compression
+    v_start = float(abs(np.linalg.det(np.array(strained))))
+    (tmp_path / "vc.yaml").write_text(f"""
+task: relax
+structure:
+  cell: {strained}
+  positions:
+    frac: [[0.0, 0.0, 0.0], [0.25, 0.25, 0.25]]
+  species: [Si, Si]
+pseudopotentials:
+  dir: {FIX / "pseudos"}
+  map: {{Si: Si_ONCV_PBE-1.2.upf}}
+ecut: {30 * RY}
+xc: lda
+kpoints: {{mesh: [4, 4, 4]}}
+relax: {{optimizer: bfgs, fmax: 0.02, max_steps: 20, cell: true}}
+""")
+    out = tmp_path / "results"
+    assert main([str(tmp_path / "vc.yaml"), "-o", str(out), "-q"]) == 0
+
+    r = json.loads((out / "relax.json").read_text())["relax"]
+    assert r["cell_relaxed"] is True
+    assert r["converged"], f"variable-cell relax not converged in {r['n_steps']} steps"
+    # converged => nearly stress-free, and the compressed cell expanded back
+    assert r["max_stress_eV_ang3"] < 1.0e-3, r["max_stress_eV_ang3"]
+    assert r["volume_ang3"] > v_start, (r["volume_ang3"], v_start)
+    # the cell genuinely moves step to step (not an atoms-only run)
+    cells = [f["cell_ang"] for f in r["trajectory"]]
+    assert cells[0] != cells[-1]

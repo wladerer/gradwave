@@ -287,7 +287,17 @@ def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object, list]:
         verbose=False,
     )
     opt_cls = {"fire": FIRE, "bfgs": BFGS}[inp.relax.optimizer]
-    opt = opt_cls(atoms, logfile="-" if verbose else None)
+    target = atoms
+    if inp.relax.cell:
+        from ase.filters import FrechetCellFilter
+
+        # ASE stress/pressure is eV/Å³; the user knob is GPa. The filter adds
+        # the cell degrees of freedom, so opt.run(fmax) then gates BOTH the
+        # atomic forces and the stress (external pressure subtracted).
+        gpa_to_ev_a3 = 1.0 / 160.21766208
+        target = FrechetCellFilter(
+            atoms, scalar_pressure=inp.relax.pressure * gpa_to_ev_a3)
+    opt = opt_cls(target, logfile="-" if verbose else None)
     trajectory = []
     frames = []  # ASE Atoms per step, energy+forces frozen for extxyz output
 
@@ -302,9 +312,13 @@ def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object, list]:
             "energy_eV": energy,
             "fmax_eV_ang": float(np.linalg.norm(forces, axis=1).max()),
             "positions_ang": atoms.get_positions().tolist(),
+            "cell_ang": atoms.cell.array.tolist(),
         })
         frame = atoms.copy()
-        frame.calc = SinglePointCalculator(frame, energy=energy, forces=forces)
+        sp_kw = {"energy": energy, "forces": forces}
+        if inp.relax.cell:
+            sp_kw["stress"] = atoms.get_stress()
+        frame.calc = SinglePointCalculator(frame, **sp_kw)
         frame.info["step"] = opt.nsteps
         frames.append(frame)
 
@@ -316,6 +330,7 @@ def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object, list]:
         "converged": bool(converged),
         "n_steps": opt.nsteps,
         "optimizer": inp.relax.optimizer,
+        "cell_relaxed": bool(inp.relax.cell),
         "fmax_target_eV_ang": inp.relax.fmax,
         "energy_eV": float(atoms.get_potential_energy()),
         "fmax_eV_ang": float(
@@ -326,8 +341,12 @@ def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object, list]:
         "species": atoms.get_chemical_symbols(),
         "positions_ang": atoms.get_positions().tolist(),
         "cell_ang": atoms.cell.array.tolist(),
+        "volume_ang3": float(atoms.get_volume()),
         "trajectory": trajectory,
     }
+    if inp.relax.cell:
+        relax["max_stress_eV_ang3"] = float(np.abs(atoms.get_stress()).max())
+        relax["pressure_GPa"] = inp.relax.pressure
     return relax, atoms, frames
 
 

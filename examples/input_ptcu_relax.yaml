@@ -7,11 +7,11 @@
 #
 #   gradwave input_ptcu_relax.yaml -o out_ptcu/
 #
-# This relaxes atomic positions only (the `task: relax` driver is atoms-only).
-# The cell a, c are held fixed; a variable-cell (c/a) relaxation needs
-# ase.filters.FrechetCellFilter, which the GradWave calculator supports from
-# Python but the CLI relax does not wrap. Relaxing a cell at fixed ecut also
-# carries Pulay stress, so converge ecut or re-relax at the new cell.
+# This relaxes atomic positions only. To relax the lattice too (the real L1_0
+# degree of freedom is c/a) add `cell: true` under `relax` for a variable-cell
+# run via ase.filters.FrechetCellFilter. Relaxing a cell at fixed ecut carries
+# Pulay stress, so converge ecut or re-relax at the new cell, and the plain
+# filter does not constrain the tetragonal symmetry.
 
 structure:
   # tetragonal L1_0: Pt plane at z = 0, Cu plane at z = c/2.  a = 3.80, c = 3.60 Å

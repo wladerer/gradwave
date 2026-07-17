@@ -97,8 +97,12 @@ Used when `task: relax`.
 | keyword | default | unit | type | description |
 |---|---|---|---|---|
 | `optimizer` | `bfgs` | — | string | `bfgs` or `fire`. |
-| `fmax` | `0.01` | eV/Å | float | Force convergence criterion. |
+| `fmax` | `0.01` | eV/Å | float | Convergence criterion; gates the stress too under `cell`. |
 | `max_steps` | `200` | — | int | Maximum ionic steps. |
+| `cell` | `false` | — | bool | Variable-cell relaxation: relax the lattice with the atoms via `FrechetCellFilter` (stress). |
+| `pressure` | `0.0` | GPa | float | External hydrostatic pressure, applied during cell relaxation. |
+
+With `cell: true` the `relax.json` also reports `volume_ang3` and `max_stress_eV_ang3`. Relaxing a cell at fixed `ecut` carries Pulay (basis-incompleteness) stress, so converge `ecut` first or re-relax at the new cell. The plain filter does not constrain symmetry.
 
 ### `bands`
 
