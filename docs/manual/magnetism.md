@@ -118,7 +118,7 @@ $E(\theta)$ at fixed moment (`examples/fe_spin_spiral.py`, run on CPU).
 | 135° | +859 meV   | 2.203 μB | 1.73 μB |
 | 180° | +1203 meV  | 2.197 μB | 1.32 μB |
 
-![bcc Fe spin-spiral dispersion](../../examples/fe_spin_spiral.png)
+![bcc Fe spin-spiral dispersion](img/fe_spin_spiral.png)
 
 $E(\theta)$ rises monotonically from the ferromagnetic ground state ($\theta=0$) to the
 antiparallel state, and the `vector` moment holds ~2.2 μB across the whole spiral. The
