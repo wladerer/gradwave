@@ -131,3 +131,27 @@ torque from one scalar, live in `gradwave.scf.moment_penalty`.
 ::: gradwave.scf.moment_penalty.field_coeff
 
 ::: gradwave.scf.moment_penalty.direction_gradient
+
+## Spin-Hamiltonian parameters (J, D, K)
+
+The exchange tensor `𝒥ᵢⱼ = ∂Tᵢ/∂êⱼ` is the site-to-site derivative of the
+constrained-moment torque; `decompose` splits it into the isotropic Heisenberg J,
+the DMI vector component, and the symmetric-traceless anisotropic exchange. See the
+bcc Fe benchmark against Pajda 2001 in `examples/fe_exchange.py`.
+
+::: gradwave.postscf.spin_exchange.exchange_from_atom
+
+::: gradwave.postscf.spin_exchange.decompose
+
+::: gradwave.postscf.spin_exchange.heisenberg_couplings
+
+## Magnetic characterization (one call)
+
+`characterize_magnetism` is the high-level entry point: it runs a non-collinear
+reference SCF for the atomic moments, extracts the exchange couplings, and returns a
+`MagneticReport` with the moments, magnetic ordering, Heisenberg J, DMI, and a
+mean-field Curie temperature — the important quantities and qualities in one call.
+
+::: gradwave.postscf.magnetism.characterize_magnetism
+
+::: gradwave.postscf.magnetism.MagneticReport
