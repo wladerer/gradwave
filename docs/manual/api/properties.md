@@ -116,6 +116,18 @@ descend the torque to the ground-state configuration; see the
 
 ::: gradwave.postscf.moment_config.atomic_weights
 
+::: gradwave.postscf.moment_config.reference_moment_magnitudes
+
 ::: gradwave.postscf.moment_config.constrained_moment_scf
 
 ::: gradwave.postscf.moment_config.relax_moment_directions
+
+The `"perp"` (direction-only) and `"vector"` (magnitude-robust) penalties, and
+the autograd that produces both the SCF constraining field and the config-search
+torque from one scalar, live in `gradwave.scf.moment_penalty`.
+
+::: gradwave.scf.moment_penalty.penalty_energy
+
+::: gradwave.scf.moment_penalty.field_coeff
+
+::: gradwave.scf.moment_penalty.direction_gradient

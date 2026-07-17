@@ -42,6 +42,7 @@ from gradwave.scf.common import symmetrize_rho
 from gradwave.scf.guess import sad_density
 from gradwave.scf.loop import System, _stack_dij
 from gradwave.scf.mixing import PulayMixer
+from gradwave.scf.moment_penalty import field_coeff
 from gradwave.solvers.davidson import davidson_batched
 
 
@@ -180,6 +181,8 @@ def scf_noncollinear(
     constrain_dirs=None,  # (na,3) unit target directions ê_I for constrained moments
     constrain_lambda: float = 0.0,  # penalty strength λ [eV/μB²] (Ma-Dudarev)
     atom_weights=None,  # (na,*grid) Hirshfeld weights; required when constraining
+    constrain_mode: str = "perp",  # "perp" (direction only) or "vector" (+magnitude)
+    constrain_target_mag=None,  # per-atom |M| target [μB] for mode="vector"
 ) -> NCResult:
     if system.rho_symmetrizer is not None and not nonmagnetic:
         raise ValueError(
@@ -261,15 +264,16 @@ def scf_noncollinear(
         if nonmagnetic:
             b_xc = torch.zeros_like(b_xc)
         elif constrain_dirs is not None:
-            # Ma-Dudarev constraining field B_c = 2λ Σ_I w_I M_I^⊥ pins each
-            # atomic moment M_I = ∫ w_I m⃗ dr toward its target ê_I. It is the
-            # functional derivative of the penalty E_p = Σ λ|M_I^⊥|², so it adds
-            # to the exchange field b_xc (= δE/δm⃗) directly.
+            # Constraining field B_c(r) = Σ_I (∂E_p/∂M_I) w_I(r) pins each atomic
+            # moment M_I = ∫ w_I m⃗ dr toward its target ê_I. ∂E_p/∂M_I comes from
+            # autograd on penalty_energy (gradwave.scf.moment_penalty), so the
+            # direction-only "perp" and magnitude-robust "vector" penalties share
+            # one definition. It adds to the exchange field b_xc (= δE/δm⃗).
             cf = vol / grid.n_points
             m_at = torch.einsum("axyz,ixyz->ai", atom_weights, m) * cf   # M_I (na,3)
-            m_perp = m_at - (m_at * constrain_dirs).sum(-1, keepdim=True) * constrain_dirs
-            b_xc = b_xc + 2.0 * constrain_lambda * torch.einsum(
-                "ai,axyz->ixyz", m_perp, atom_weights)
+            g = field_coeff(m_at, constrain_dirs, constrain_lambda,
+                            constrain_mode, constrain_target_mag)
+            b_xc = b_xc + torch.einsum("ai,axyz->ixyz", g, atom_weights)
         v_r = v_h + v_xc + vloc_r
 
         tol_eff = max(diago_tol, 1e-3) if it == 1 else \

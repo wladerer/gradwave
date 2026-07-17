@@ -25,7 +25,18 @@ and dE/dê_I = -T_I. A configuration is a stationary point of the true energy
 when every T_I vanishes (no constraint needed). `relax_moment_directions`
 descends the torque to find the ground-state configuration.
 
-All of this is validated against a finite difference of the constrained energy.
+The magnitude problem
+---------------------
+The |M_I^⊥|² penalty ("perp" mode) constrains only the moment *direction*: it is
+minimized (→ 0) at M_I = 0, so a strongly-coupled magnet forced to a large
+relative angle can satisfy the constraint for free by demagnetizing. The
+magnitude-robust "vector" mode pins the full moment vector,
+E_p = Σ λ|M_I − m0_I ê_I|², so demagnetization costs λ m0_I² and each moment is
+held at its target magnitude m0_I at any angle — enough to hold, e.g., a
+metastable antiferromagnetic state that "perp" would collapse. Both penalties
+(and both the SCF field and this torque) come from one differentiable definition
+in `gradwave.scf.moment_penalty`, so they stay mutually consistent by
+construction. All of it is validated against a finite difference of W.
 """
 
 from __future__ import annotations
@@ -34,6 +45,11 @@ import torch
 
 from gradwave.core.xc.noncollinear import NoncollinearXC
 from gradwave.scf.guess import sad_density
+from gradwave.scf.moment_penalty import (
+    direction_gradient,
+    field_coeff,
+    penalty_energy,
+)
 from gradwave.scf.noncollinear import scf_noncollinear
 
 
@@ -71,40 +87,78 @@ def _unit(v, eps: float = 1e-30):
     return v / torch.linalg.norm(v, dim=-1, keepdim=True).clamp_min(eps)
 
 
+def reference_moment_magnitudes(system, xc: NoncollinearXC, directions, *,
+                                weights=None, mag_init_scale: float = 1.5,
+                                **scf_kwargs):
+    """|M_I| [μB] of each atom from one *unconstrained* non-collinear SCF seeded
+    along `directions`. Used as the target magnitude for the "vector" penalty so
+    the constraint holds each moment at its natural self-consistent size.
+
+    Seeded high-spin (mag_init_scale=1.5, above saturation) then relaxed down,
+    because the bare non-collinear SCF is often multi-stable — a weak seed can
+    collapse to a low-spin or nonmagnetic solution. This is a convenience; for a
+    delicate system prefer passing `target_mag` to `constrained_moment_scf`
+    explicitly (e.g. from a collinear spin-polarized reference)."""
+    dirs = _unit(torch.as_tensor(directions, dtype=torch.float64,
+                                 device=system.positions.device))
+    if weights is None:
+        weights = atomic_weights(system)
+    res = scf_noncollinear(system, xc, mag_vec_init=(mag_init_scale * dirs).tolist(),
+                           **scf_kwargs)
+    cf = system.grid.volume / system.grid.n_points
+    M = _atomic_moments(res.m, weights, cf)
+    return torch.linalg.norm(M, dim=-1)                  # (na,)
+
+
 def constrained_moment_scf(system, xc: NoncollinearXC, directions, *, lam: float,
-                           weights=None, mag_init_scale: float = 0.6, **scf_kwargs):
+                           weights=None, mode: str = "perp", target_mag=None,
+                           mag_init_scale: float = 0.6, **scf_kwargs):
     """Constrained non-collinear SCF pinning each atomic moment M_I toward the
     unit direction directions[I] with penalty strength lam. Returns
 
         (res, info)
 
-    where info is a dict with atomic moments `M` (na,3), transverse residual
-    `M_perp` (na,3), the constraining field per atom `B_c = 2λ M_perp`, the
-    torque `torque = -B_c` (na,3, transverse to ê), and `energy_eV` (the true KS
-    free energy, penalty excluded).
+    `mode` selects the penalty (see gradwave.scf.moment_penalty):
+      "perp"    E_p = λΣ|M_I^⊥|²          — direction only (demagnetizes when a
+                                            strong pair is forced far apart).
+      "vector"  E_p = λΣ|M_I − m0_I ê_I|²  — pins magnitude too, so the moment is
+                                            held at full size at any angle. m0_I
+                                            is `target_mag` (per-atom |M| [μB]);
+                                            if None it is measured by an
+                                            unconstrained reference SCF.
+
+    info keys: atomic moments `M` (na,3), transverse residual `M_perp` (na,3),
+    per-atom constraining field `B_c = ∂E_p/∂M` (na,3), the descent `torque`
+    (na,3, transverse to ê), the envelope `energy_grad = dW/dê`, `energy_eV` (the
+    true KS free energy, penalty excluded), `W_eV` (constrained functional),
+    `target_mag` (na, or None), and `converged`.
     """
     dirs = _unit(torch.as_tensor(directions, dtype=torch.float64,
                                  device=system.positions.device))
     if weights is None:
         weights = atomic_weights(system)
+    if mode == "vector" and target_mag is None:
+        target_mag = reference_moment_magnitudes(
+            system, xc, dirs, weights=weights, mag_init_scale=mag_init_scale,
+            **scf_kwargs)
     res = scf_noncollinear(
         system, xc, mag_vec_init=(mag_init_scale * dirs).tolist(),
         constrain_dirs=dirs, constrain_lambda=lam, atom_weights=weights,
-        **scf_kwargs)
+        constrain_mode=mode, constrain_target_mag=target_mag, **scf_kwargs)
     cf = system.grid.volume / system.grid.n_points
     M = _atomic_moments(res.m, weights, cf)
     m_dot_e = (M * dirs).sum(-1, keepdim=True)          # (M_I·ê_I), (na,1)
     Mperp = M - m_dot_e * dirs                           # transverse moment M_I^⊥
-    Bc = 2.0 * lam * Mperp                               # constraining field
-    # Envelope gradient of the constrained functional W = E_KS + λΣ|M^⊥|²:
-    #   dW/dê_I = ∂E_p/∂ê_I = -2λ (M_I·ê_I) M_I^⊥   (transverse to ê_I)
-    # validated to ratio 1.000 against a finite difference of W. The descent
-    # torque (rotate ê_I downhill in energy) is its negative.
-    grad = -2.0 * lam * m_dot_e * Mperp                 # dW/dê_I
-    ep = float(lam * (Mperp ** 2).sum())
+    # Field and envelope gradient both come from autograd on the same penalty,
+    # so "perp" and "vector" stay consistent with the SCF field with no
+    # hand-derived formula to keep in sync.
+    Bc = field_coeff(M, dirs, lam, mode, target_mag)     # ∂E_p/∂M_I
+    grad = direction_gradient(M, dirs, lam, mode, target_mag)  # dW/dê_I ⟂ ê
+    ep = float(penalty_energy(M, dirs, lam, mode, target_mag))
     info = {
         "directions": dirs, "M": M, "M_perp": Mperp, "B_c": Bc,
         "energy_grad": grad, "torque": -grad,
+        "target_mag": target_mag,
         "energy_eV": float(res.energies.free_energy),   # physical KS energy
         "W_eV": float(res.energies.free_energy) + ep,   # constrained functional
         "converged": bool(res.converged),
@@ -114,8 +168,8 @@ def constrained_moment_scf(system, xc: NoncollinearXC, directions, *, lam: float
 
 def relax_moment_directions(system, xc: NoncollinearXC, directions0, *,
                             lam: float, step: float = 0.5, tol: float = 1e-2,
-                            max_sweeps: int = 40, weights=None, verbose: bool = True,
-                            **scf_kwargs):
+                            max_sweeps: int = 40, weights=None, mode: str = "perp",
+                            target_mag=None, verbose: bool = True, **scf_kwargs):
     """Gradient-descend the moment directions to the ground-state configuration.
 
     Each sweep runs a constrained SCF at the current targets, reads the descent
@@ -123,15 +177,22 @@ def relax_moment_directions(system, xc: NoncollinearXC, directions0, *,
     (ê ← unit(ê + step·T)). Convergence is measured by the moment misalignment
     max_I |M_I^⊥| [μB]: it → 0 when each moment already sits along its target, so
     no constraint is needed and the configuration is a self-consistent stationary
-    point of the true energy. Returns (directions (na,3), history)."""
+    point of the true energy. `mode`/`target_mag` pick the penalty (see
+    `constrained_moment_scf`); for mode="vector" the reference magnitude is
+    measured once here and reused across sweeps. Returns (directions (na,3),
+    history)."""
     dirs = _unit(torch.as_tensor(directions0, dtype=torch.float64,
                                  device=system.positions.device))
     if weights is None:
         weights = atomic_weights(system)
+    if mode == "vector" and target_mag is None:
+        target_mag = reference_moment_magnitudes(system, xc, dirs, weights=weights,
+                                                 **scf_kwargs)
     history = []
     for sweep in range(1, max_sweeps + 1):
-        _, info = constrained_moment_scf(system, xc, dirs, lam=lam,
-                                         weights=weights, verbose=False, **scf_kwargs)
+        _, info = constrained_moment_scf(system, xc, dirs, lam=lam, weights=weights,
+                                         mode=mode, target_mag=target_mag,
+                                         verbose=False, **scf_kwargs)
         misalign = float(torch.linalg.norm(info["M_perp"], dim=-1).max())
         history.append({"sweep": sweep, "energy_eV": info["energy_eV"],
                         "misalign_muB": misalign, "directions": dirs.tolist()})

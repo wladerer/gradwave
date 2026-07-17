@@ -134,13 +134,49 @@ wraps the descent. With a fully-relativistic pseudopotential the same machinery
 gives the magnetocrystalline-anisotropy torque, since spin-orbit coupling ties
 the moment to the lattice.
 
-!!! note "Where the constraint is well-posed"
-    The penalty holds a *direction*; the moment *magnitude* is free. A strongly
-    ferromagnetic system forced to a large relative angle can lower its energy by
-    demagnetizing (the penalty $|\mathbf{M}^\perp|^2$ is satisfied trivially at
-    $\mathbf{M}=0$), so the constraint is best applied at moderate angles where the
-    moment is robust, exactly the regime a descent toward the ground state passes
-    through.
+### The magnitude problem, and holding a moment at any angle
+
+The $|\mathbf{M}^\perp|^2$ penalty constrains only the moment *direction*, and it
+is minimized ($E_p \to 0$) at $\mathbf{M}=0$. So a strongly-coupled magnet forced
+to a large relative angle has a cheap escape: it demagnetizes rather than holding
+its moments apart. This is not a numerical artifact — reducing $|\mathbf{M}|$ is a
+real way out of frustration — but it means `mode="perp"` cannot represent, say, a
+metastable antiferromagnetic state.
+
+The `mode="vector"` penalty pins the full moment vector,
+$E_p = \sum_I \lambda\,|\mathbf{M}_I - m^0_I\,\hat{\mathbf{e}}_I|^2$, so
+demagnetizing now costs $\lambda\,(m^0_I)^2$. The target magnitude $m^0_I$ defaults
+to the unconstrained self-consistent $|\mathbf{M}_I|$ (measured once by
+`reference_moment_magnitudes`). Forcing the two O moments of O₂ *antiparallel*
+shows the difference sharply:
+
+```python
+m0 = reference_moment_magnitudes(system, xc, [[0, 0, 1], [0, 0, 1]], weights=w)
+afm = [[0, 0, 1], [0, 0, -1]]                       # target: antiparallel
+_, perp = constrained_moment_scf(system, xc, afm, lam=8.0, weights=w, mode="perp")
+_, vec  = constrained_moment_scf(system, xc, afm, lam=8.0, weights=w,
+                                 mode="vector", target_mag=m0)
+```
+
+| mode | $\lvert\mathbf{M}_I\rvert$ (μB) | $M_z$ (μB) | outcome |
+|---|---|---|---|
+| `perp`   | 0.00, 0.00 | 0.00, 0.00 | demagnetized — constraint met for free |
+| `vector` | 0.81, 0.81 | +0.81, −0.81 | genuine antiferromagnet, held |
+
+The held antiferromagnetic state sits ≈3.0 eV above the ferromagnetic ground
+state — O₂'s exchange splitting, a number `perp` cannot produce because it never
+holds the moments. The field, the torque, and both penalty forms are one
+differentiable definition (`gradwave.scf.moment_penalty`), so the SCF field and
+the config-search gradient stay consistent by construction, and the gradient
+matches a finite difference of $W$ to a part in $10^3$.
+
+!!! note "Penalty stiffness vs. convergence"
+    `vector` holds *magnitude* robustly, but a finite $\lambda$ is a soft
+    constraint: it trades the target *angle* against the exchange energy, and the
+    constrained SCF for a strongly-frustrated forced angle can settle into a small
+    residual plateau rather than converging tightly. Raise $\lambda$ to hold the
+    angle stiffer; a natural collinear axis (parallel or antiparallel) converges
+    far more easily than an oblique one.
 
 ## Gotchas
 
