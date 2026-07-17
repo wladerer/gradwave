@@ -141,25 +141,8 @@ def setup_system(
     # of the in-plane pair — blanket cubic boxes would triple slab grids)
     axis_groups = False
     if sym is not None:
-        coupled = np.zeros((3, 3), dtype=bool)
-        for w in sym.rotations:
-            coupled |= w != 0
-        coupled |= coupled.T
-        groups, seen = [], set()
-        for i in range(3):
-            if i in seen:
-                continue
-            group = {i}
-            frontier = {i}
-            while frontier:
-                j = frontier.pop()
-                for k2 in range(3):
-                    if coupled[j, k2] and k2 not in group:
-                        group.add(k2)
-                        frontier.add(k2)
-            seen |= group
-            groups.append(tuple(sorted(group)))
-        axis_groups = groups
+        from gradwave.symmetry import coupled_axis_groups
+        axis_groups = coupled_axis_groups(sym)
     grid = build_fft_grid(cell, ecut, equal_dims=axis_groups, shape_override=fft_shape)
     if sym is not None:
         rho_symmetrizer = RhoSymmetrizer(grid.shape, sym, dens_mask=grid.dens_mask)
@@ -414,6 +397,7 @@ def scf(
     start_mag=None,  # initial moment fractions: per-species OR per-atom (nspin=2)
     mixed_precision: bool = False,  # opt-in fp32 draft (see note at resolution below)
     eigensolver: str = "davidson",  # davidson | chebyshev (NC standard problem only)
+    precond: str = "kerker",  # kerker | local_tf (position-dependent TF screening)
     hubbard=None,  # list[core.hubbard.HubbardManifold] — Dudarev DFT+U corrections
     hub_alpha=None,  # per-site rigid manifold potential α [eV] — linear-response probe
     start_from=None,  # previous SCFResult (or checkpoint view) on the SAME FFT grid
@@ -454,6 +438,18 @@ def scf(
                                  torch.zeros_like(g2_vec, dtype=torch.bool)])
     mixer = PulayMixer(g2_mix, alpha=mixing_alpha, history=mixing_history,
                        kerker=kerker, check_g0=nspin == 1, kerker_mask=kerker_mask)
+
+    if precond not in ("kerker", "local_tf"):
+        raise ValueError("precond must be 'kerker' or 'local_tf'")
+    tf_precond = None
+    if precond == "local_tf":
+        # position-dependent TF screening on the density-total block; capped at
+        # the bare-Kerker q0 so a bulk metal is unchanged and only the vacuum is
+        # unscreened. set_density() is called with the current n(r) each iter.
+        from gradwave.scf.local_tf import LocalTFPrecond
+        tf_precond = LocalTFPrecond(grid.g2, grid.shape, mask_flat, q0_max=mixer.q0)
+        mixer.precond_op = tf_precond
+        mixer.precond_slice = slice(0, g2_vec.shape[0]) if nspin == 2 else None
 
     from gradwave.core.batch import BatchedHamiltonian, becp_b, density_b, projectors_b
     from gradwave.solvers.davidson import davidson_batched
@@ -502,6 +498,8 @@ def scf(
 
     for it in range(1, max_iter + 1):
         rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
+        if tf_precond is not None:
+            tf_precond.set_density(rho_tot)
         rho_g_box = r_to_g(rho_tot.to(CDTYPE))
         v_h_r = (
             torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2), dim=(-3, -2, -1))

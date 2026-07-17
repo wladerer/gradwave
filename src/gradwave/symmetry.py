@@ -97,6 +97,34 @@ def find_spacegroup(
     )
 
 
+def coupled_axis_groups(sg: SpaceGroup) -> list[tuple[int, ...]]:
+    """Group the three lattice axes that the point-group rotations actually
+    mix, as `equal_dims` for `build_fft_grid`. The FFT box must be closed under
+    m → Wᵀm, so coupled axes need equal dimensions — but only coupled ones. A
+    slab's vacuum axis is independent of the in-plane pair, so it stays its own
+    group; equalizing all three (a blanket cubic box) would blow the slab grid
+    up by the vacuum-to-in-plane ratio (e.g. an Al(100) slab at ecutrho=120 Ry
+    becomes 105³ instead of ~19×19×105, a ~30× over-allocation)."""
+    coupled = np.zeros((3, 3), dtype=bool)
+    for w in sg.rotations:
+        coupled |= np.asarray(w) != 0
+    coupled |= coupled.T
+    groups, seen = [], set()
+    for i in range(3):
+        if i in seen:
+            continue
+        group, frontier = {i}, {i}
+        while frontier:
+            j = frontier.pop()
+            for k in range(3):
+                if coupled[j, k] and k not in group:
+                    group.add(k)
+                    frontier.add(k)
+        seen |= group
+        groups.append(tuple(sorted(group)))
+    return groups
+
+
 def reduce_mesh(mesh, shift, sg: SpaceGroup, time_reversal: bool = True):
     """IBZ reduction of a Γ-centered MP mesh. Returns (k_frac (nk,3), weights).
 

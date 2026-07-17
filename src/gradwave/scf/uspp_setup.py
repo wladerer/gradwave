@@ -194,9 +194,17 @@ def setup_uspp(
         sym = find_spacegroup(cell, frac, list(species_of_atom), symprec=symprec)
         if sym.n_ops <= 1:
             sym = None
+    # equalize only symmetry-COUPLED axes (a slab's vacuum axis stays
+    # independent of the in-plane pair); a blanket cubic box would blow the slab
+    # dense grid up by the vacuum-to-in-plane ratio — matches the NC setup path.
+    if sym is not None:
+        from gradwave.symmetry import coupled_axis_groups
+        axis_groups = coupled_axis_groups(sym)
+    else:
+        axis_groups = False
     # build_fft_grid derives the density sphere as 2·G_max(ecut_arg)
     grid = build_fft_grid(cell, ecutrho / 4.0, shape_override=fft_shape,
-                          equal_dims=sym is not None)
+                          equal_dims=axis_groups)
     if sym is not None:
         from gradwave.symmetry import RhoSymmetrizer, reduce_mesh
 
@@ -212,7 +220,7 @@ def setup_uspp(
     # G-vectors differ by at most 2·G_max(ecut), so V truncated to this sphere
     # reproduces the matrix elements. Norm-conserving already has ecutrho =
     # 4·ecutwfc, so its box is this box and the smooth path is a no-op there.
-    smooth_grid = build_fft_grid(cell, ecut, equal_dims=sym is not None)
+    smooth_grid = build_fft_grid(cell, ecut, equal_dims=axis_groups)
     smooth_shape = tuple(int(n) for n in smooth_grid.shape)
     npw_max_s = max(s.miller.shape[0] for s in spheres)
     smooth_flat_idx = torch.zeros(len(spheres), npw_max_s, dtype=torch.int64)
