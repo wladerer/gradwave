@@ -30,6 +30,7 @@ theme:
 nav:
   - Overview: index.md
   - Installation: installation.md
+  - Cookbook: cookbook.md
   - Tutorials:
       - Geometry optimization: geometry-optimization.md
       - Learning XC by AD: learning-xc.md
@@ -37,6 +38,7 @@ nav:
       - Basis-set error estimation: error-estimation.md
       - Differentiable Hubbard U: hubbard-u.md
       - Non-collinear magnetism and SOC: noncollinear-soc.md
+      - Magnetic structure and spin Hamiltonians: magnetism.md
   - Inputs and outputs: io.md
   - Reference: reference.md
   - API reference:

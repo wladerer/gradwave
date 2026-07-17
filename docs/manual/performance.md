@@ -6,7 +6,7 @@ committed benchmarks on an 8-core laptop and an RTX 3050, at identical cutoff,
 k-mesh, and pseudopotential to Quantum ESPRESSO. Read the [Wisdom](wisdom.md) page
 for the shorter list of do and do-not rules that these measurements produced.
 
-The one-line summary is that the small-system gap against a mature code is kernel
+The small-system gap against a mature code is kernel
 maturity and, on a consumer GPU, fp64 throughput. It is not an architectural
 defect, and no structural rewrite of the solver moves it.
 
@@ -213,10 +213,10 @@ Ry, 12×12×12 giving 72 irreducible k, gaussian 0.2 eV) on the same asus box, Q
 | gradwave | 8 CPU threads | 16 | 67 s | 4.2 |
 | gradwave | RTX 3050 | 16 | 903 s | 56 |
 
-The gradwave rows are on AC power; QE is the reference run. An earlier set read 118 s
+The gradwave rows are on AC power. QE is the reference run. An earlier set read 118 s
 on the CPU and 976 s on the GPU on battery, which had throttled the CPU (its turbo is
 capped unplugged) but not the fp64-bound GPU, flattering the GPU by shrinking the CPU
-baseline — see the AC-power caveat under "Measuring performance" below.
+baseline. See the AC-power caveat under "Measuring performance" below.
 
 The energies agree to sub-meV: QE and gradwave both give −10167.53 eV, matching to
 0.25 meV with every term within 3 meV, re-verified fresh at 6×6×6 and 12×12×12. An
@@ -227,8 +227,8 @@ the 283 times CPU-to-GPU-vs-QE spread.
 - 13.5 times, the same gradwave code on the RTX 3050 versus the CPU (903/67). Pure
   consumer-GPU fp64 tax: the card is far slower than the CPU it ships with for a
   one-atom cell that never fills it, running at 100 percent utilization while drawing
-  only 25 W of its 60 W budget at a full 1942 MHz — the fp64 units saturated while the
-  rest of the die idles. The GPU actively hurts here, and AC power widens this gap
+  only 25 W of its 60 W budget at a full 1942 MHz, the fp64 units saturated while the
+  rest of the die idles. The GPU is a net loss here, and AC power widens this gap
   rather than closing it, because it unthrottles the CPU and cannot feed the
   arithmetic-bound GPU.
 - 9 times, gradwave-CPU versus QE per iteration (4.2 / 0.46). PyTorch dispatch and a
@@ -296,7 +296,7 @@ solves, and everything after runs in crippled fp64.
 Direct evidence the bound is arithmetic and not clocks or power: on AC an fcc-Pt SCF
 ran the RTX 3050 at 100 percent utilization while drawing only 25 W of its 60 W budget
 at a full 1942 MHz, and unplugging barely changed the wall time (903 vs 976 s). A
-clock- or power-limited kernel draws its whole budget; a card starved of fp64 units
+clock- or power-limited kernel draws its whole budget. A card starved of fp64 units
 saturates the few it has and idles the rest of the die, which is this trace exactly.
 
 What would actually move it is an fp32-dominant solver schedule that drafts far
@@ -314,13 +314,13 @@ stretches its legs.
 ### Confirmed on a datacenter fp64 GPU (A100)
 
 The prediction held. On an NVIDIA A100-SXM4-40GB (UCLA Hoffman2), a double-precision
-GEMM clocks ~4.9 TFLOP/s — roughly 35× the RTX 3050's fp64 — and a constrained
+GEMM clocks ~4.9 TFLOP/s, roughly 35× the RTX 3050's fp64, and a constrained
 non-collinear bcc-Fe spin-spiral point (2-atom cell, 60 Ry, 3×3×3, 24 bands) runs in
 97 s against ~516 s on the 22-core asus CPU at 16 threads, about 5×. The GPU energy
 bit-matches the CPU (−6430.0154 eV), so the fp64 path is correct, not merely fast,
 and the 40 GB lifts the 6 GB grid ceiling that capped the 3050. This is the
 datacenter-class fp64 card the section predicted would move the needle, and it is
-what makes the spin-Hamiltonian and MAE work tractable at useful cell sizes — the
+what makes the spin-Hamiltonian and MAE work tractable at useful cell sizes. The
 three-SCF Fe exchange benchmark ran there in minutes. One caveat learned the hard
 way: the *CPU cores* of a shared GPU node can be far slower than a dedicated CPU box
 (a single Fe SCF on 8 such cores ran past a one-hour walltime), so benchmark the GPU

@@ -66,7 +66,7 @@ projectors).
 ## Determine U, and its gradient
 
 `linear_response_u` runs the finite-difference probe (one base plus two perturbed
-SCFs for $\chi$, cheap one-shot solves for $\chi^0$); `linear_response_u_autodiff`
+SCFs for $\chi$, cheap one-shot solves for $\chi^0$). `linear_response_u_autodiff`
 gets the same number from a single ground-state SCF using conduction-projected
 Sternheimer response, with the Hartree-XC screening kernel taken as an autograd
 Hessian-vector product of $E_\text{Hxc}$ (so any twice-differentiable, including
@@ -88,13 +88,13 @@ print(energy_derivative_u(res, [HubbardManifold(species=0, l=2, u=5.0)]))
 ## Validation
 
 - **NiO, U from response vs QE `hp.x`.** The DFPT reference U on Ni 3d is
-  6.4308 eV; `linear_response_u` gives 6.4493 eV (0.3%) and the autodiff variant
+  6.4308 eV. `linear_response_u` gives 6.4493 eV (0.3%) and the autodiff variant
   matches $\chi^0 = -0.2136$, $\chi = -0.0873$ from one SCF. Both localize
   correctly, $\chi^0 < \chi < 0$.
 - **NiO, exact dE/dU.** The Hellmann-Feynman value matches a central difference of
   full SCF re-runs to $10^{-4}$.
 - **Si (PAW), U = 2 eV on 3p.** $E_U$ agrees with QE to 0.008 meV, the total to
-  0.31 meV/atom, forces to ~$10^{-5}$ eV/Å; and $U=0$ reproduces the plain PAW SCF
+  0.31 meV/atom, forces to ~$10^{-5}$ eV/Å, and $U=0$ reproduces the plain PAW SCF
   to $10^{-10}$, so the machinery is inert when off.
 - **Ni (PAW), U = 3 eV on 3d.** Spin-polarized $E_U$ to 0.004 meV, moment within
   0.02 $\mu_B$ of QE.
@@ -102,23 +102,23 @@ print(energy_derivative_u(res, [HubbardManifold(species=0, l=2, u=5.0)]))
 ## Gotchas
 
 - **The pseudopotential must carry the manifold's atomic orbital** (`PP_PSWFC`).
-  PseudoDojo and psl (kjpaw/rrkjus) sets have it; SG15/ONCV generally do not, and
+  PseudoDojo and psl (kjpaw/rrkjus) sets have it. SG15/ONCV generally do not, and
   give total DOS but no +U. For PAW the *raw* pseudo-orbital amplitudes are used
-  (a PAW pseudo-orbital's plain norm is deliberately not one — the $S$ overlap
+  (a PAW pseudo-orbital's plain norm is deliberately not one, since the $S$ overlap
   supplies the rest), and renormalizing them is a ~100 meV error.
 - `linear_response_u_autodiff` is insulators-only (it projects onto the conduction
   space). The finite-difference `linear_response_u` handles metals.
 - The magnetization channel of the response can have a screening eigenvalue well
   below $-1$ (NiO reaches $\approx -6$), so the interacting fixed point needs
-  Anderson acceleration, not plain damping — handled internally.
+  Anderson acceleration, not plain damping, handled internally.
 - A constant total-energy offset from a pseudo's semicore/NLCC convention cancels
   in $\Delta E(U)$ and in response, so compare differences, not absolute totals.
 
 !!! note "Learning U vs learning the functional"
     U here is a *determinable and differentiable* input, with an exact
-    $\mathrm{d}E/\mathrm{d}U$ — the substrate a learning loop would use. The
+    $\mathrm{d}E/\mathrm{d}U$, the substrate a learning loop would use. The
     parameter gradwave actually trains today is the exchange-correlation
-    functional; see [Learning XC by AD](learning-xc.md), whose adjoint carries a
+    functional. See [Learning XC by AD](learning-xc.md), whose adjoint carries a
     +U occupation-response channel so it trains correctly through a +U ground
     state.
 

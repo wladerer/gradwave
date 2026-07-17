@@ -18,7 +18,7 @@ Hellmann-Feynman theorem,[[3]](bibliography.md#feynman)
 $$ \mathbf{F}_I = -\left\langle \psi \left| \frac{\partial \hat{H}}{\partial \mathbf{R}_I} \right| \psi \right\rangle. $$
 
 gradwave does not code this by hand. It differentiates the detached converged
-energy with one reverse-mode pass, so the positions flow through the Ewald sum,
+energy with one reverse-mode pass, so the positions enter through the Ewald sum,
 the structure factors, and the projector phases, and the result matches the
 Hellmann-Feynman force to autograd precision. A relaxation drives the largest
 force below a threshold,

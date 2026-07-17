@@ -32,7 +32,7 @@ on-site occupancies (becsum), the same job QE's `PAW_symmetrize` does.
 
 ## Inspect the symmetry
 
-`find_spacegroup` and `reduce_mesh` work standalone — a pseudopotential is not
+`find_spacegroup` and `reduce_mesh` work standalone. A pseudopotential is not
 needed to count the IBZ.
 
 ```python
@@ -56,7 +56,7 @@ assert abs(w.sum() - 1.0) < 1e-12          # weights sum to one
 `SpaceGroup` with `.rotations`, `.translations`, `.atom_map`, `.international`,
 and `.n_ops`. `reduce_mesh(mesh, shift, sg, time_reversal=True)` returns the IBZ
 k-points and their weights. Reduction is valid for unshifted Γ-centered
-Monkhorst-Pack meshes; a shifted mesh may not be group-invariant, and the caller
+Monkhorst-Pack meshes. A shifted mesh may not be group-invariant, and the caller
 falls back to time-reversal-only folding.
 
 ## Use it in a run
@@ -69,7 +69,7 @@ symmetry: true        # IBZ reduction + density symmetrization (default)
 
 Set `symmetry: false` to run the full mesh. Under the hood `setup_system` /
 `setup_uspp` detect the space group, reduce the mesh, and attach a density
-symmetrizer that the SCF loop applies to the output density each iteration; a P1
+symmetrizer that the SCF loop applies to the output density each iteration. A P1
 cell (no symmetry) transparently falls back to the full mesh. From Python the
 same flag is `use_symmetry=True`.
 
@@ -91,11 +91,11 @@ See [Performance](performance.md) for where the 5-to-14× speedup lands.
 
 - **Non-symmorphic operations must be commensurate with the grid.** A glide like
   the diamond $(\tfrac14, \tfrac14, \tfrac14)$ needs FFT dimensions divisible by 4.
-  gradwave equalizes symmetry-coupled axes automatically; on an incommensurate box
+  gradwave equalizes symmetry-coupled axes automatically. On an incommensurate box
   the full-mesh fixed point itself carries a ~$2\times10^{-4}$ asymmetric density
   component, so an IBZ-vs-full comparison fails at $10^{-4}$ with no bug present.
 - **The symmetrizer is masked to the density sphere.** At the box Nyquist boundary
-  the folded Miller map misidentifies $G$-vectors for glide phases; physical
+  the folded Miller map misidentifies $G$-vectors for glide phases. Physical
   densities are zero there, and masking makes the operator exactly idempotent.
 - **Turn symmetry off for symmetry-breaking work.** Antiferromagnetic and
   ferrimagnetic orderings, a real response to a perturbation (the implicit-differentiation
@@ -103,7 +103,7 @@ See [Performance](performance.md) for where the 5-to-14× speedup lands.
   all need `use_symmetry=False`, because the perturbation lowers the crystal
   symmetry. gradwave raises a clear error when a magnetic ordering needs it.
 - **Time reversal** ($k \to -k$) is on by default and shrinks the IBZ further. It
-  is switched off for magnetic systems where $k \not\equiv -k$; a nonmagnetic
+  is switched off for magnetic systems where $k \not\equiv -k$. A nonmagnetic
   spin-orbit run keeps it through Kramers degeneracy.
 
 ## Next
