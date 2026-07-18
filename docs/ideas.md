@@ -234,6 +234,45 @@ the torque is already exact and autograd-derived — it is getting a fully-relat
 pseudopotential into the fixtures and writing that force-theorem loop so the map is
 affordable.
 
+## Magnetic space groups (Shubnikov symmetry) for non-collinear k-reduction
+
+Every magnetic non-collinear run today uses the FULL k-mesh — `scf_noncollinear`
+(and the spinor PAW loop) refuse `use_symmetry` for any nonzero m⃗, because the
+existing spglib machinery only knows the paramagnetic group. That is the safe
+choice, not the cheap one: the FePt MAE runs carry 384 unreduced k-points, and the
+k-cost is the whole reason the force-theorem item above matters.
+
+The physics: a finite m⃗ changes the symmetry group itself. Time reversal dies (no
+k ↔ −k Kramers folding — the code already handles the *nonmagnetic* SOC case, where
+TR survives and the IBZ test pins it). And the moment filters the point group,
+because m⃗ is an axial vector (transforms as det(R)·R) locked to the lattice by SOC:
+an operation survives only if it maps the magnetization field onto itself.
+Operations that flip m⃗ survive only *combined with time reversal* — the anti-unitary
+half of the magnetic (Shubnikov) group, which relates band energies at Rk without
+being a unitary symmetry of H. Concretely for L1_0 FePt (paramagnetic D4h, 16 ops
++ TR): moments along c leave the unitary C4h (8 ops, ~8x k-reduction); moments
+in-plane leave ~C2h (4 ops, ~4x). The easy-axis state is literally more symmetric
+than the hard-axis one — the anisotropy, seen group-theoretically.
+
+What to build, on top of the existing spglib path: (1) filter the space group by the
+axial-vector action on the moment field (and classify the surviving anti-unitary
+R·T elements); (2) symmetrize (ρ, m⃗) with m⃗ transformed as an axial vector — and
+the on-site becsum's four Pauli channels likewise, mirroring `becsum_sym`; (3) fold
+k with the magnetic little groups, using the anti-unitary elements for band-energy
+relations only. spglib ships magnetic space-group (Shubnikov) support since 2.0, so
+the group identification is available off the shelf; the work is the axial-vector
+symmetrization and the k-folding bookkeeping.
+
+One caveat that is easy to get wrong: for MAE *differences*, do not reduce each
+orientation to its own IBZ. The two orientations have different magnetic groups, so
+per-orientation reduction samples k differently and the Fermi-surface
+discretization error stops cancelling in E(hard) − E(easy) — poisoning a ~meV
+difference of ~6 keV totals. Reduce both orientations by the ops *shared* by both
+magnetic groups (~C2h for the FePt pair, still ~4x), or keep the full mesh, which
+is what the current scripts deliberately do. For single-orientation SCF (spirals,
+constrained configurations, J/D/K extraction), the full per-configuration reduction
+is safe and is worth up to ~8x on the tetragonal magnets.
+
 ## One-center ddd analytic derivative
 
 The one-center ddd is a named micro-cost from the performance audit, 5% of the PAW
