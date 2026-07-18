@@ -452,6 +452,37 @@ def _error_estimate_block(res, inp) -> dict:
             block["dgap_eV"] = gap["dgap_eV"]
         except (NotImplementedError, ValueError):
             pass
+    # other numerical convergence errors (SCF self-consistency, smearing). These
+    # are separate axes from the basis-set error; k-point sampling needs a mesh
+    # sweep (estimate_kpoint_error) and is not reachable from one run.
+    from gradwave.postscf.convergence_error import (
+        estimate_scf_error,
+        estimate_smearing_error,
+    )
+    if not uspp:
+        try:
+            scfe = estimate_scf_error(res, xc)
+            block["scf_convergence"] = {
+                "denergy_eV": scfe.denergy,
+                "denergy_meV_per_atom": scfe.denergy / natom * 1e3,
+                "residual_L1_per_electron": scfe.residual_norm,
+                "screened": scfe.screened,
+                "energy_converged_estimate_eV": scfe.energy_converged_estimate,
+            }
+        except (NotImplementedError, ValueError):
+            pass
+    try:
+        sme = estimate_smearing_error(
+            res, scheme=inp.smearing.type, width=inp.smearing.width)
+        block["smearing"] = {
+            "scheme": sme.scheme,
+            "dsmearing_eV": sme.dsmearing,
+            "energy_extrapolated_eV": sme.energy_extrapolated,
+            "residual_bound_eV": sme.half_width,
+            "note": sme.note,
+        }
+    except (NotImplementedError, ValueError):
+        pass
     return block
 
 

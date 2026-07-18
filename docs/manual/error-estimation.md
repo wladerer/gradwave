@@ -89,6 +89,8 @@ carries the same fields.
 | `force_error_max_eV_ang`, `force_error_rms_eV_ang` | the force error (NC nspin=1 or 2) |
 | `gap_eV`, `gap_extrapolated_eV`, `dgap_eV` | the band gap, its extrapolation, and the error (NC insulators) |
 | `ecut_eV`, `ecut_large_eV` | the base and enlarged cutoffs |
+| `scf_convergence` | sub-block: the SCF self-consistency energy error (see below) |
+| `smearing` | sub-block: the finite-temperature (smearing) energy error (see below) |
 
 When the run is outside the supported coverage the block is
 `{"available": false, "reason": ...}` and the report prints `unavailable —
@@ -141,6 +143,71 @@ gap, the extrapolated gap $\varepsilon + \delta\varepsilon$ at each edge, and
 their difference; it raises for a metal/semimetal. On loosely converged silicon
 the extrapolated gap recovers roughly half of the remaining basis-set gap error.
 
+## Beyond the basis: SCF, smearing, and k-point error
+
+The plane-wave cutoff is one axis of the numerical error budget. Three more sit
+in `postscf.convergence_error`, and each has a different structure. None of them
+touch the exchange-correlation model error, which no internal estimate reaches
+(the reasoning is in `docs/ideas.md`).
+
+**SCF convergence error.** Stopping the iteration at a finite density tolerance
+leaves a residual $r = \rho_\text{out} - \rho_\text{in}$. Because the energy is
+stationary at the fixed point, the energy error is second order in $r$,
+
+$$ \delta E_\text{scf} = \tfrac{1}{2}\, \langle r \,|\, K_\text{Hxc} \,|\, (1 - \chi_0 K_\text{Hxc})^{-1} r \rangle, $$
+
+the Hartree-XC energy of the residual density screened by the SCF dielectric
+operator. Both operators are the response primitives the Dyson dressing already
+uses, so no new SCF is taken, only the stored last-step residual and one Dyson
+solve. The screened form needs $\chi_0$ (insulator, nspin=1, use_symmetry=False);
+elsewhere the unscreened $\tfrac{1}{2}\langle r | K_\text{Hxc} | r \rangle$ is
+reported as an overestimate. The estimate is a definite raising: the converged
+energy is below the reported one, `energy_converged_estimate_eV = F - δE_scf`.
+The cross-check is a loose-versus-tight pair of runs, the way the eigenvalue
+error cross-checks against `denergy`.
+
+```python
+from gradwave.postscf.convergence_error import estimate_scf_error
+
+scfe = estimate_scf_error(res, PBE())   # res from a (possibly loose) scf(...)
+print(scfe.denergy, scfe.screened, scfe.energy_converged_estimate)
+```
+
+**Smearing error.** A finite electronic temperature $\sigma$ reports the free
+energy $F = E - \sigma S$, not the $\sigma\to 0$ energy. The scheme-matched
+extrapolation $E_0 = (E + F)/2$ cancels the leading entropy-order term for every
+smearing this code carries, because each is a matched occupation/entropy pair.
+The reported free energy differs from $E_0$ by $-\sigma S/2$, and that difference
+is `dsmearing`. Be careful with the technique. The extrapolation is a variational
+one, valid only because the pair is built for it; a fixed-occupation run has no
+smearing error at all (the estimator raises), and a deliberately
+physical-temperature Fermi-Dirac run wants the finite-$T$ free energy kept rather
+than removed. The `note` field states the per-scheme caveat.
+
+```python
+from gradwave.postscf.convergence_error import estimate_smearing_error
+
+sme = estimate_smearing_error(res, scheme="mp1", width=0.2)
+print(sme.energy_extrapolated, sme.dsmearing)   # E0 and the F -> E0 correction
+```
+
+**k-point sampling error.** Brillouin-zone integration is a quadrature, not a
+truncated variational space, so the complement/second-order structure does not
+transfer. It is reached instead by mesh extrapolation: run the same cell at a few
+rising meshes and fit $E(N_k) = E_\infty + c\,N_k^{-p}$, reporting the dense-k
+limit and the residual of the finest mesh. This one needs more than a single run,
+so it is a Python helper rather than part of the automatic block. Extrapolate at
+a fixed smearing width, since a metal's k-convergence rate is set by the
+Fermi-surface discontinuity and changes with the width.
+
+```python
+from gradwave.postscf.convergence_error import estimate_kpoint_error
+
+# free energies from scf(...) at 4x4x4, 6x6x6, 8x8x8
+kp = estimate_kpoint_error([4**3, 6**3, 8**3], [E4, E6, E8])
+print(kp["e_infinity_eV"], kp["error_eV"], kp["exponent"])
+```
+
 ## Coverage
 
 | quantity | norm-conserving | USPP/PAW |
@@ -150,6 +217,10 @@ the extrapolated gap recovers roughly half of the remaining basis-set gap error.
 | force error | nspin=1, nspin=2 (no NLCC) | not available |
 | eigenvalue / gap error | nspin=1, nspin=2 | not available |
 | stress error | not available (deferred) | not available |
+| SCF error (screened) | nspin=1 insulator, no symmetry | not available |
+| SCF error (unscreened bound) | nspin=1, nspin=2 | not available |
+| smearing error | any smeared run (all schemes) | any smeared run |
+| k-point error | mesh sweep (any run) | mesh sweep (any run) |
 
 Symmetry is supported for the norm-conserving nspin=1 density, energy, and force
 error: the estimate runs on the IBZ and folds the density error over the star

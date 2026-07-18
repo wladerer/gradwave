@@ -150,8 +150,22 @@ def _error_lines(err):
         pairs.append(("gap", f"{err['gap_eV']:.4f} eV"))
         pairs.append(("gap → limit", f"{err['gap_extrapolated_eV']:.4f} eV"))
         pairs.append(("δgap", f"{err['dgap_eV']:.4e} eV"))
+    scf = err.get("scf_convergence")
+    if scf is not None:
+        pairs.append(("δE scf", f"{scf['denergy_eV']:.3e} eV"))
+        pairs.append(("∫|δρscf|/e⁻", f"{scf['residual_L1_per_electron']:.2e}"))
+    sm = err.get("smearing")
+    if sm is not None:
+        pairs.append(("δE smear", f"{sm['dsmearing_eV']:.3e} eV"))
+        pairs.append(("E → σ=0", f"{sm['energy_extrapolated_eV']:.8f} eV"))
     lines += _cols(pairs)
     lines.append(f"   {err['note']}")
+    if scf is not None:
+        mode = "dielectric-screened" if scf["screened"] else "unscreened upper bound"
+        lines.append(f"   SCF error: {mode}; converged energy ≈ "
+                     f"{scf['energy_converged_estimate_eV']:.8f} eV")
+    if sm is not None and sm.get("note"):
+        lines.append(f"   smearing: {sm['note']}")
     return lines
 
 
