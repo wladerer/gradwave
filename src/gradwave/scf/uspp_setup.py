@@ -177,7 +177,12 @@ def setup_uspp(
     fft_shape=None,
     use_symmetry: bool = False,
     symprec: float = 1e-6,
+    magmoms=None,  # (na, 3) moment directions → magnetic (Shubnikov) symmetry
 ) -> USPPSystem:
+    """magmoms (with use_symmetry=True) builds the system for the MAGNETIC
+    space group of that moment configuration: magnetic-IBZ k-fold plus
+    (ρ, m⃗, becsum) symmetrizers over the full Shubnikov group. Only
+    scf_uspp_noncollinear consumes such a system; scf_uspp rejects it."""
     from gradwave.kpoints import monkhorst_pack
     from gradwave.pseudo.local import alpha_z, vloc_of_g
     from gradwave.scf.loop import _unique_shells
@@ -186,7 +191,7 @@ def setup_uspp(
     positions = np.asarray(positions, dtype=np.float64)
     if ecutrho is None:
         ecutrho = 4.0 * ecut
-    sym = rho_symmetrizer = None
+    sym = rho_symmetrizer = mag_sym = None
     if use_symmetry:
         from gradwave.symmetry import find_spacegroup
 
@@ -194,18 +199,30 @@ def setup_uspp(
         sym = find_spacegroup(cell, frac, list(species_of_atom), symprec=symprec)
         if sym.n_ops <= 1:
             sym = None
+        elif magmoms is not None:
+            from gradwave.symmetry import magnetic_spacegroup
+
+            mag_sym = magnetic_spacegroup(sym, magmoms, cell)
+            sym = mag_sym.unitary
     # equalize only symmetry-COUPLED axes (a slab's vacuum axis stays
     # independent of the in-plane pair); a blanket cubic box would blow the slab
     # dense grid up by the vacuum-to-in-plane ratio — matches the NC setup path.
     if sym is not None:
         from gradwave.symmetry import coupled_axis_groups
-        axis_groups = coupled_axis_groups(sym)
+        axis_groups = coupled_axis_groups(
+            mag_sym.combined() if mag_sym is not None else sym)
     else:
         axis_groups = False
     # build_fft_grid derives the density sphere as 2·G_max(ecut_arg)
     grid = build_fft_grid(cell, ecutrho / 4.0, shape_override=fft_shape,
                           equal_dims=axis_groups)
-    if sym is not None:
+    if mag_sym is not None:
+        from gradwave.symmetry import MagneticSymmetrizer, reduce_mesh_magnetic
+
+        rho_symmetrizer = MagneticSymmetrizer(grid.shape, mag_sym, cell,
+                                              dens_mask=grid.dens_mask)
+        kfrac, kw = reduce_mesh_magnetic(kmesh, (0, 0, 0), mag_sym)
+    elif sym is not None:
         from gradwave.symmetry import RhoSymmetrizer, reduce_mesh
 
         rho_symmetrizer = RhoSymmetrizer(grid.shape, sym, dens_mask=grid.dens_mask)
@@ -323,11 +340,15 @@ def setup_uspp(
         smooth_shape=smooth_shape, smooth_flat_idx=smooth_flat_idx,
         smooth2dense=smooth2dense,
         becsum_sym=(None if sym is None else _make_becsum_sym(
-            sym, cell, paws, species_of_atom, slices)),
+            mag_sym if mag_sym is not None else sym,
+            cell, paws, species_of_atom, slices)),
     )
 
 
 def _make_becsum_sym(sym, cell, paws, species_of_atom, slices):
-    from gradwave.scf.paw_symmetry import BecsumSymmetrizer
+    from gradwave.scf.paw_symmetry import BecsumSymmetrizer, MagneticBecsumSymmetrizer
+    from gradwave.symmetry import MagneticGroup
 
+    if isinstance(sym, MagneticGroup):
+        return MagneticBecsumSymmetrizer(sym, cell, paws, species_of_atom, slices)
     return BecsumSymmetrizer(sym, cell, paws, species_of_atom, slices)

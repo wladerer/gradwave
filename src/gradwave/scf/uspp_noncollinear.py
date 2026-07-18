@@ -41,6 +41,7 @@ from gradwave.core.fftbox import r_to_g
 from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
 from gradwave.core.xc.noncollinear import NoncollinearXC, energy_with_grid, vxc_and_bxc
 from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.scf.common import symmetrize_rho
 from gradwave.scf.guess import sad_density
 from gradwave.scf.mixing import PulayMixer
 from gradwave.scf.paw_noncollinear import (
@@ -148,8 +149,17 @@ def scf_uspp_noncollinear(
     if getattr(xc, "needs_gradient", False):
         raise NotImplementedError(
             "non-collinear USPP/PAW is LDA-only (the on-site NC XC is LDA-only)")
-    if system.rho_symmetrizer is not None or system.becsum_sym is not None:
-        raise ValueError("non-collinear USPP/PAW requires use_symmetry=False")
+    # Magnetic-symmetry systems (setup_uspp(..., magmoms=...)) carry a
+    # MagneticSymmetrizer + MagneticBecsumSymmetrizer pair and fold k into the
+    # magnetic IBZ; (ρ, m⃗, becsum) are re-symmetrized over the full Shubnikov
+    # group every iteration. Plain paramagnetic symmetrizers remain invalid
+    # here (the space group and time reversal act on m⃗).
+    mag_sym_active = hasattr(system.rho_symmetrizer, "apply_m")
+    if not mag_sym_active and (
+            system.rho_symmetrizer is not None or system.becsum_sym is not None):
+        raise ValueError(
+            "non-collinear USPP/PAW requires use_symmetry=False or a magnetic-"
+            "symmetry system (setup_uspp(..., magmoms=...))")
     ncxc = NoncollinearXC(xc)
     ops = _build_iter_ops(system, xc, nspin=1, smearing=smearing, width=width,
                           batched=True)
@@ -317,6 +327,10 @@ def scf_uspp_noncollinear(
                     bec_out[c4][a] = bec_out[c4][a] + chans[c4]
         rho_out, m_out = rho_out / vol, m_out / vol
         bec_out_r = [[c.real for c in bec_out[c4]] for c4 in range(4)]
+        if mag_sym_active:
+            # symmetrize the becsum BEFORE building the augmentation charge so
+            # the smooth and one-center densities carry the same symmetry
+            bec_out_r = system.becsum_sym.apply(bec_out_r)
 
         # augmentation: n_aug → ρ, m⃗_aug → m⃗, from the matching becsum channel
         targets = [rho_out, m_out[0], m_out[1], m_out[2]]
@@ -333,6 +347,11 @@ def scf_uspp_noncollinear(
                 aug_box.reshape(shape) * grid.n_points, dim=(-3, -2, -1)).real)
         rho_out = targets[0] + aug_fields[0]
         m_out = torch.stack([targets[1 + i] + aug_fields[1 + i] for i in range(3)])
+        if mag_sym_active:
+            rho_out = symmetrize_rho(system.rho_symmetrizer, rho_out, grid)
+            m_g = torch.stack([r_to_g(m_out[i].to(CDTYPE)) for i in range(3)])
+            m_out = torch.fft.ifftn(system.rho_symmetrizer.apply_m(m_g)
+                                    * grid.n_points, dim=(-3, -2, -1)).real
 
         n_tot = float(rho_out.sum()) * vol / grid.n_points
         assert abs(n_tot - system.n_electrons) < 1e-5, (

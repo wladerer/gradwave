@@ -119,16 +119,25 @@ def setup_system(
     symprec: float = 1e-6,
     fft_shape=None,
     time_reversal: bool = True,  # False for noncollinear/SOC (TR flips m)
+    magmoms=None,  # (na, 3) moment directions → magnetic (Shubnikov) symmetry
 ) -> System:
     """use_symmetry: reduce k to the IBZ and symmetrize ρ each SCF step.
     Requires an unshifted (Γ-centered) mesh — shifted meshes fall back to
     time-reversal-only reduction. M4's implicit backward requires
     use_symmetry=False (a perturbation breaks the crystal symmetry).
+
+    magmoms (with use_symmetry=True) switches to the MAGNETIC space group of
+    that moment configuration: k folds into the magnetic IBZ (unitary ops as
+    W⁻ᵀ, anti-unitary g·T ops as −W⁻ᵀ — time_reversal is ignored, the group
+    decides) and (ρ, m⃗) are symmetrized over the full Shubnikov group each
+    step. Only scf_noncollinear consumes such a system; the collinear loops
+    reject it. Directions are what matter — magnitudes only distinguish
+    zero from nonzero and same from different.
     """
     cell = np.asarray(cell, dtype=np.float64)
     positions = np.asarray(positions, dtype=np.float64)
 
-    sym = rho_symmetrizer = None
+    sym = rho_symmetrizer = mag_sym = None
     if use_symmetry and tuple(kshift) == (0, 0, 0):
         from gradwave.symmetry import RhoSymmetrizer, find_spacegroup, reduce_mesh
 
@@ -136,15 +145,27 @@ def setup_system(
         sym = find_spacegroup(cell, frac, species_of_atom, symprec=symprec)
         if sym.n_ops <= 1:
             sym = None  # P1 — nothing to gain, keep the plain path
+        elif magmoms is not None:
+            from gradwave.symmetry import magnetic_spacegroup
+
+            mag_sym = magnetic_spacegroup(sym, magmoms, cell)
+            sym = mag_sym.unitary
 
     # equalize only symmetry-COUPLED axes (a slab's z axis stays independent
     # of the in-plane pair — blanket cubic boxes would triple slab grids)
     axis_groups = False
     if sym is not None:
         from gradwave.symmetry import coupled_axis_groups
-        axis_groups = coupled_axis_groups(sym)
+        axis_groups = coupled_axis_groups(
+            mag_sym.combined() if mag_sym is not None else sym)
     grid = build_fft_grid(cell, ecut, equal_dims=axis_groups, shape_override=fft_shape)
-    if sym is not None:
+    if mag_sym is not None:
+        from gradwave.symmetry import MagneticSymmetrizer, reduce_mesh_magnetic
+
+        rho_symmetrizer = MagneticSymmetrizer(grid.shape, mag_sym, cell,
+                                              dens_mask=grid.dens_mask)
+        kfrac, kw = reduce_mesh_magnetic(kmesh, kshift, mag_sym)
+    elif sym is not None:
         rho_symmetrizer = RhoSymmetrizer(grid.shape, sym, dens_mask=grid.dens_mask)
         # time_reversal=False for magnetic systems (k≢−k); for nonmagnetic runs
         # (incl. nonmagnetic + SOC, where Kramers keeps k≡−k) it stays True
@@ -414,6 +435,10 @@ def scf(
     if system.is_fr:
         raise ValueError("fully-relativistic pseudos require the spinor SCF "
                          "(scf_noncollinear) — SOC has no collinear representation")
+    if hasattr(system.rho_symmetrizer, "apply_m"):
+        raise ValueError("system was built with magnetic symmetry (magmoms=...) — "
+                         "only scf_noncollinear consumes it (anti-unitary ops would "
+                         "mis-fold collinear spin channels); rebuild without magmoms")
     if kerker is None:
         # auto policy: metals always; insulators once the cell is large
         # enough that long-wavelength charge sloshing dominates mixing —

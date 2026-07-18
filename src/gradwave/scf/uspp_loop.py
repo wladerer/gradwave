@@ -601,6 +601,11 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         adapt_step, spin_precond = mx.adapt_step, mx.spin_precond
         mixing_w0, bec_step_scale = mx.w0, mx.bec_step_scale
         precond = mx.precond
+    if hasattr(system.rho_symmetrizer, "apply_m"):
+        raise ValueError("system was built with magnetic symmetry (magmoms=...) — "
+                         "only scf_uspp_noncollinear consumes it (anti-unitary ops "
+                         "would mis-fold collinear spin channels); rebuild without "
+                         "magmoms")
     grid = system.grid
     vol = grid.volume
     dev = system.positions.device

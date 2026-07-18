@@ -60,6 +60,70 @@ def ylm_rotation_matrices(sg, cell: np.ndarray, lmax: int) -> list:
     return out
 
 
+class MagneticBecsumSymmetrizer:
+    """Pauli-channel becsum symmetrization under a magnetic (Shubnikov) group.
+
+    Spatial half: BecsumSymmetrizer's per-op D^l blocks on the COMBINED op
+    list (unitary then anti-unitary). Channel half: the n channel is a scalar;
+    (mx, my, mz) mix through the axial 3×3  s_T·det(S)·S  paired with the SAME
+    op as the D-blocks and atom map (s_T = −1 on the anti-unitary set). The
+    pairing is fixed empirically: this orientation makes the group average
+    idempotent (a projector — see the unit test); the transposed axial breaks
+    idempotency outright. Anti-unitary ops additionally complex-conjugate the
+    on-site matrix (T is anti-unitary; the projectors are real, so K is
+    elementwise conj — a no-op on the Hermitized real becsum the spinor loop
+    keeps, retained for correctness).
+    """
+
+    def __init__(self, mg, cell, paws, species_of_atom, atom_slices):
+        self._bec = BecsumSymmetrizer(mg.combined(), cell, paws,
+                                      species_of_atom, atom_slices)
+        a_t = np.asarray(cell, dtype=float).T
+        a_t_inv = np.linalg.inv(a_t)
+        ax = []
+        for iop, w_mat in enumerate(self._bec.sg.rotations):
+            s = a_t @ w_mat @ a_t_inv
+            r_ax = np.linalg.det(s) * s  # axial (pseudo-vector) action
+            if iop >= mg.n_unitary:
+                r_ax = -r_ax  # s_T: time reversal flips m⃗
+            ax.append(r_ax)
+        self.axial = torch.as_tensor(np.stack(ax), dtype=torch.float64)
+        self.n_unitary = mg.n_unitary
+
+    def to(self, device) -> "MagneticBecsumSymmetrizer":
+        self._bec.to(device)
+        self.axial = self.axial.to(device)
+        return self
+
+    def apply(self, chans_atoms: list) -> list:
+        """[4][na] Pauli channels [n_ij, mx_ij, my_ij, mz_ij] → symmetrized
+        (same nesting; accumulation runs in complex128, real inputs come back
+        real — the symmetrized imaginary part of a Hermitian channel is the
+        antisymmetric piece the spinor loop discards anyway)."""
+        sgc, bec = self._bec.sg, self._bec
+        na = len(chans_atoms[0])
+        acc = [[torch.zeros(m.shape, dtype=torch.complex128, device=m.device)
+                for m in ch] for ch in chans_atoms]
+        for iop in range(sgc.n_ops):
+            amap, ax = sgc.atom_map[iop], self.axial[iop]
+            anti = iop >= self.n_unitary
+            for a in range(na):
+                d = bec.d_full[iop][bec.species_of_atom[a]]
+                src = [chans_atoms[c][int(amap[a])].to(torch.complex128)
+                       for c in range(4)]
+                if anti:
+                    src = [x.conj() for x in src]
+                acc[0][a] = acc[0][a] + d @ src[0] @ d.T
+                for i in range(3):
+                    mix = ax[i, 0] * src[1] + ax[i, 1] * src[2] + ax[i, 2] * src[3]
+                    acc[i + 1][a] = acc[i + 1][a] + d @ mix @ d.T
+        return [
+            [(m / sgc.n_ops if ch0.is_complex() else (m / sgc.n_ops).real.to(ch0.dtype))
+             for m, ch0 in zip(ch, chans_atoms[c], strict=True)]
+            for c, ch in enumerate(acc)
+        ]
+
+
 class BecsumSymmetrizer:
     """Precomputed per-op rotation blocks expanded to the projector columns."""
 

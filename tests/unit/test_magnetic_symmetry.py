@@ -176,3 +176,54 @@ def test_field_symmetrizer_uniform_moments():
             assert torch.allclose(m_s, m, atol=1e-11)
         else:
             assert float(m_s.abs().max()) < 1e-11
+
+
+def test_magnetic_becsum_symmetrizer():
+    """bct O-pair (I4/mmm after translation dedup, atom-swapping ops included),
+    FM m∥z: symmetrized Pauli becsum channels must be idempotent, invariant
+    under every single-op action, and keep mx=my=0 for a collinear input."""
+    from gradwave.pseudo.upf_paw import parse_upf_paw
+    from gradwave.scf.paw_symmetry import MagneticBecsumSymmetrizer
+
+    o = parse_upf_paw("tests/fixtures/qe/pseudos/O.pbe-n-kjpaw_psl.1.0.0.UPF")
+    a, c = 3.0, 4.1
+    cell = np.diag([a, a, c])
+    frac = np.array([[0.0, 0, 0], [0.5, 0.5, 0.5]])
+    sg = find_spacegroup(cell, frac, [0, 0])
+    mg = magnetic_spacegroup(sg, [[0, 0, 1.0], [0, 0, 1.0]], cell)
+    assert (mg.n_unitary, mg.n_anti) == (8, 8)
+    ms = MagneticBecsumSymmetrizer(mg, cell, [o], [0, 0], None)
+
+    nm = sum(2 * b.l + 1 for b in o.betas)
+    gen = torch.Generator().manual_seed(3)
+
+    def rand_sym():
+        x = torch.randn(nm, nm, dtype=torch.float64, generator=gen)
+        return 0.5 * (x + x.T)
+
+    chans = [[rand_sym() for _ in range(2)] for _ in range(4)]
+    sym1 = ms.apply(chans)
+    sym2 = ms.apply(sym1)
+    for c1, c2 in zip(sym1, sym2, strict=True):
+        for m1, m2 in zip(c1, c2, strict=True):
+            assert torch.allclose(m1, m2, atol=1e-12)
+
+    # single-op invariance: one term of apply (times N) must fix the output
+    sgc, bec = ms._bec.sg, ms._bec
+    for iop in range(sgc.n_ops):
+        amap, ax = sgc.atom_map[iop], ms.axial[iop]
+        for at in range(2):
+            d = bec.d_full[iop][0].real  # real inputs, real D blocks
+            src = [sym1[ch][int(amap[at])] for ch in range(4)]
+            assert torch.allclose(d @ src[0] @ d.T, sym1[0][at], atol=1e-11)
+            for i in range(3):
+                mix = ax[i, 0] * src[1] + ax[i, 1] * src[2] + ax[i, 2] * src[3]
+                assert torch.allclose(d @ mix @ d.T, sym1[i + 1][at], atol=1e-11)
+
+    # collinear input (mx=my=0) stays collinear under a z-axis magnetic group
+    zeros = [torch.zeros(nm, nm, dtype=torch.float64) for _ in range(2)]
+    col = [[rand_sym(), rand_sym()], list(zeros), list(zeros),
+           [rand_sym(), rand_sym()]]
+    scol = ms.apply(col)
+    assert float(scol[1][0].abs().max()) < 1e-13
+    assert float(scol[2][1].abs().max()) < 1e-13

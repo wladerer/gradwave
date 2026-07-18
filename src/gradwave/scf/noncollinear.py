@@ -18,8 +18,11 @@ Mixing runs on the 4-vector (ρ, m⃗) with Kerker on the ρ block ONLY
 (the collinear lesson: Kerker's G=0 zero must never pin magnetization).
 
 Each spinor band holds ONE electron (Fermi degeneracy g = 1). Build the
-System with time_reversal=False: TR flips m⃗, so the reduced mesh is only
-valid for collinear-limit checks.
+System with time_reversal=False: TR flips m⃗, so the plain TR-reduced mesh
+is only valid for collinear-limit checks. For real k-savings pass
+setup_system(..., use_symmetry=True, magmoms=...): k then folds into the
+MAGNETIC IBZ of the Shubnikov group (anti-unitary g·T ops act as −W⁻ᵀ) and
+(ρ, m⃗) are re-symmetrized over the full magnetic group each iteration.
 """
 
 from __future__ import annotations
@@ -195,10 +198,18 @@ def scf_noncollinear(
     constrain_mode: str = "perp",  # "perp" (direction only) or "vector" (+magnitude)
     constrain_target_mag=None,  # per-atom |M| target [μB] for mode="vector"
 ) -> NCResult:
-    if system.rho_symmetrizer is not None and not nonmagnetic:
+    # A plain RhoSymmetrizer (paramagnetic group) is only valid with m⃗ ≡ 0.
+    # A MagneticSymmetrizer (setup_system(..., magmoms=...)) carries the
+    # Shubnikov group of the moment configuration and symmetrizes m⃗ too, so
+    # magnetic runs on the magnetic IBZ are allowed. The seeded mag_vec_init
+    # must match the magmoms the group was built from — symmetrization
+    # projects every iteration onto that magnetic symmetry.
+    mag_sym_active = hasattr(system.rho_symmetrizer, "apply_m")
+    if system.rho_symmetrizer is not None and not (nonmagnetic or mag_sym_active):
         raise ValueError(
             "noncollinear SCF with a nonzero m⃗ requires use_symmetry=False "
-            "(time reversal and the space group act on m⃗); the nonmagnetic "
+            "(time reversal and the space group act on m⃗) or a MAGNETIC "
+            "symmetry system (setup_system(..., magmoms=...)); the nonmagnetic "
             "(m⃗ ≡ 0) case keeps the full crystal symmetry — pass nonmagnetic=True"
         )
     grid, bk = system.grid, system.batch
@@ -280,9 +291,17 @@ def scf_noncollinear(
 
     # nonmagnetic + SOC keeps the full crystal symmetry (m⃗ ≡ 0): reduce k to
     # the IBZ in setup_system and symmetrize ρ each step, exactly as the scalar
-    # path does. m⃗ is never symmetrized (it is pinned to zero here).
+    # path does. With a MagneticSymmetrizer, m⃗ is symmetrized as well —
+    # spatially like ρ but mixed by the per-op axial 3×3 (s_T·det(S)·S).
     def symmetrize(r_out):
         return symmetrize_rho(system.rho_symmetrizer, r_out, grid)
+
+    def symmetrize_m(m_r):
+        if not mag_sym_active or nonmagnetic:
+            return m_r
+        m_g = torch.stack([r_to_g(m_r[i].to(CDTYPE)) for i in range(3)])
+        m_g = system.rho_symmetrizer.apply_m(m_g)
+        return torch.fft.ifftn(m_g * grid.n_points, dim=(-3, -2, -1)).real
 
     def vec_of(fields):
         return torch.cat([r_to_g(f.to(CDTYPE)).reshape(-1)[mask_flat] for f in fields])
@@ -351,6 +370,7 @@ def scf_noncollinear(
                 m_out[2] += uu - dd
         rho_out, m_out = rho_out / vol, m_out / vol
         rho_out = symmetrize(rho_out)  # no-op unless IBZ symmetry is active
+        m_out = symmetrize_m(m_out)  # no-op unless MAGNETIC symmetry is active
 
         # energies
         rho_g_out = r_to_g(rho_out.to(CDTYPE))

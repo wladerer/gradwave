@@ -273,34 +273,35 @@ relations only. spglib ships magnetic space-group (Shubnikov) support since 2.0,
 the group identification is available off the shelf; the work is the axial-vector
 symmetrization and the k-folding bookkeeping.
 
-Implementation sketch (planned 2026-07-18, grounded in the existing machinery):
-(1) `magnetic_spacegroup(sg, magmoms, cell)` in symmetry.py — classify each
-paramagnetic op by the axial-vector action det(R)·R·m on the moments into
-unitary / anti-unitary (op·T) / dropped; primary via spglib.get_magnetic_symmetry
-(present in spglib 2.7) with our own filter as cross-check. (2)
-`reduce_mesh_magnetic` — the existing orbit fold with unitary {W^-T} plus
-anti-unitary {-W^-T}. **Phases 1+2 alone unlock the force-theorem MAE**: the FT
-evaluator is eigenvalue-only (no density reconstruction), so magnetic k-folding
-gives it the full ~8x savings with none of the symmetrization work — pair the two
-backlog items and build that first. (3) Field symmetrization for self-consistent
-folded-k runs: m⃗ reuses RhoSymmetrizer's per-op G-space index maps with a 3x3
-axial channel mixer (s_T·det(R)·R, s_T = -1 for anti-unitary); the becsum's
-spatial half (atom permutation + real-Ylm D^l blocks) already exists in
-BecsumSymmetrizer — the addition is the same axial 3x3 across the (mx,my,mz)
-Pauli channels. (4) Wire through setup and drop the hard use_symmetry=False.
-Validation ladder: magmoms=0 reproduces today's IBZ exactly; bcc Fe m||z
-magnetic-IBZ == full mesh to ueV; an anti-unitary-only fold matches full mesh;
-FePt MAE under shared-subgroup reduction reproduces the full-mesh MAE.
+**LANDED (2026-07-18).** All four phases are in: (1) `magnetic_spacegroup(sg,
+magmoms, cell)` in symmetry.py — the axial-vector filter det(S)·S·m⃗ classifying
+each paramagnetic op as unitary / anti-unitary (op·T) / dropped, cross-checked
+against spglib.get_magnetic_symmetry; (2) `reduce_mesh_magnetic` — the shared
+orbit fold with unitary {W⁻ᵀ} ∪ anti-unitary {−W⁻ᵀ}, grey group (m⃗=0)
+reproducing the paramagnetic+TR fold bit-for-bit; (3) `MagneticSymmetrizer`
+(grid ρ, m⃗: RhoSymmetrizer maps on the combined op list + per-op axial 3×3 with
+s_T=−1 on the anti set) and `MagneticBecsumSymmetrizer` (BecsumSymmetrizer D^l
+blocks + the same axial across the Pauli channels + conj on anti ops); (4)
+`setup_system`/`setup_uspp` take `magmoms=`, both spinor loops consume the
+magnetic system and re-symmetrize (ρ, m⃗[, becsum]) each iteration, and the
+collinear loops reject magnetic systems. Measured folds: FePt m∥[001] (6,6,4)
+144→30 k (equals the para+TR IBZ — inversion is unitary for axial vectors);
+m∥[100] 144→48; bcc Fe m∥z 64→13. Validation (tests/unit/
+test_magnetic_symmetry.py, tests/integration/test_magnetic_ibz.py): SOC FePt
+magnetic IBZ ≡ full mesh to 5.0e-11 eV; polar (inversion-broken) FePt exercises
+the anti-unitary-only fold (27→6 where unitary ops alone give 9); spinor PAW Si
+grey group ≡ symmetrized collinear scf_uspp to 5.1e-11 eV. The force-theorem
+MAE evaluator on the magnetic IBZ is the natural next stage.
 
-One caveat that is easy to get wrong: for MAE *differences*, do not reduce each
-orientation to its own IBZ. The two orientations have different magnetic groups, so
-per-orientation reduction samples k differently and the Fermi-surface
-discretization error stops cancelling in E(hard) − E(easy) — poisoning a ~meV
-difference of ~6 keV totals. Reduce both orientations by the ops *shared* by both
-magnetic groups (~C2h for the FePt pair, still ~4x), or keep the full mesh, which
-is what the current scripts deliberately do. For single-orientation SCF (spirals,
-constrained configurations, J/D/K extraction), the full per-configuration reduction
-is safe and is worth up to ~8x on the tetragonal magnets.
+The caveat the original plan carried — "do not reduce each orientation to its
+own IBZ for MAE differences" — turned out to be wrong for this folding: the
+magnetic-IBZ sum is exactly the full-mesh sum re-weighted (measured 5e-11 eV,
+five orders below the meV signal), so each orientation's k-discretization error
+is identical to its full-mesh value and the common-mode cancellation in
+E(hard) − E(easy) survives per-orientation folding untouched. The caveat only
+bites if the two orientations use *different underlying meshes*. Keep the same
+(n1,n2,n3) mesh for both and fold each by its own magnetic group ([001]→30 k,
+[100]→48 k at (6,6,4)): 3.7× on the MAE pair, exactness preserved.
 
 ## One-center ddd analytic derivative
 
