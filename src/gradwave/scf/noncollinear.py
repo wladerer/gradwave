@@ -174,6 +174,8 @@ def scf_noncollinear(
     rhotol: float = 1e-7,
     mixing_alpha: float = 0.5,
     mixing_history: int = 8,
+    mag_mixing_alpha: float | None = None,  # separate step for m⃗ (None → max(mixing_alpha,0.6))
+    adaptive: bool = True,  # back off mixing on a stalled/oscillating residual
     diago_tol: float = 1e-9,
     verbose: bool = True,
     nonmagnetic: bool = False,  # pin m⃗ ≡ 0 (QE's domag=false): nonmagnetic + SOC
@@ -214,6 +216,19 @@ def scf_noncollinear(
     g2_vec = grid.g2.reshape(-1)[mask_flat]
     ng = int(mask_flat.sum())
     n_chan = 1 if nonmagnetic else 4
+    # magnetization-aware mixing: ρ and m⃗ ride one packed vector but must NOT
+    # share a single step. QE/VASP mix the spin channel separately from charge;
+    # here m⃗ gets its own step through the mixer's per-component step_scale.
+    # The failure mode is moment COLLAPSE: at a small mixing_alpha the charge is
+    # under-relaxed and the magnetization, dragged toward the transient small
+    # m_out before the exchange field self-consistifies, decays into the wrong
+    # nonmagnetic basin (bcc O2: |M| → 0 at alpha=0.4 while alpha=0.7 keeps the
+    # triplet). Decoupling the m⃗ step with a floor keeps the magnetization mixed
+    # vigorously enough to hold the magnetic branch regardless of the charge
+    # step; the adaptive backoff below is the counterweight against overshoot.
+    if mag_mixing_alpha is None:
+        mag_mixing_alpha = max(mixing_alpha, 0.6)
+    base_step_scale = None
     if nonmagnetic:
         m = torch.zeros_like(m)
         mixer = PulayMixer(g2_vec, alpha=mixing_alpha, history=mixing_history,
@@ -221,9 +236,13 @@ def scf_noncollinear(
     else:
         kerker_mask = torch.cat([torch.ones(ng, dtype=torch.bool, device=device),
                                  torch.zeros(3 * ng, dtype=torch.bool, device=device)])
+        ratio = mag_mixing_alpha / mixing_alpha if mixing_alpha > 0 else 1.0
+        base_step_scale = torch.cat([
+            torch.ones(ng, dtype=RDTYPE, device=device),
+            torch.full((3 * ng,), float(ratio), dtype=RDTYPE, device=device)])
         mixer = PulayMixer(torch.cat([g2_vec] * 4), alpha=mixing_alpha,
                            history=mixing_history, kerker=True, check_g0=False,
-                           kerker_mask=kerker_mask)
+                           kerker_mask=kerker_mask, step_scale=base_step_scale)
 
     projs_b = projectors_b(bk, system.positions)
     q_so = dij_so = None
@@ -246,6 +265,9 @@ def scf_noncollinear(
     scheme = SCHEMES[smearing]
     e_free_prev, converged, history = None, False, []
     mu = 0.0
+    # adaptive mixing-backoff state: a global step multiplier layered on top of
+    # base_step_scale, cut when the residual stops falling (see the loop below).
+    adapt_mult, last_backoff, stall_window = 1.0, 0, 6
 
     # nonmagnetic + SOC keeps the full crystal symmetry (m⃗ ≡ 0): reduce k to
     # the IBZ in setup_system and symmetrize ρ each step, exactly as the scalar
@@ -368,6 +390,24 @@ def scf_noncollinear(
             break
 
         e_free_prev = e_free
+        # adaptive fallback: a residual that stops decreasing over a window
+        # (stall) or bounces (limit cycle at a frustrated moment / SOC) means
+        # the step is too aggressive for the local Jacobian. Halve the global
+        # step multiplier and drop the DIIS history so the pre-stall vectors
+        # stop fighting the recovery, instead of silently running to max_iter.
+        if (adaptive and it - last_backoff >= stall_window
+                and it > 2 * stall_window and adapt_mult > 0.1):
+            recent = min(h["res"] for h in history[-stall_window:])
+            before = min(h["res"] for h in history[-2 * stall_window:-stall_window])
+            if recent > 0.9 * before:
+                adapt_mult = max(0.5 * adapt_mult, 0.1)
+                mixer.step_scale = (adapt_mult if base_step_scale is None
+                                    else base_step_scale * adapt_mult)
+                mixer.reset()
+                last_backoff = it
+                if verbose:
+                    print(f"  NC-SCF: residual stalled — mixing step x{adapt_mult:.2f}",
+                          flush=True)
         mixed = mixer.step(vin, vout)
         fields = []
         for c4 in range(n_chan):
