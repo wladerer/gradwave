@@ -85,3 +85,33 @@ def onsite_nc_energy_and_field(oc, nm_lms, what: str):
         e = onsite_nc_exc(oc, leaves, what)
         grads = torch.autograd.grad(e, leaves)
     return float(e.detach()), list(grads)
+
+
+def e1c_nc_t(oc, comps):
+    """Full non-collinear one-center energy [eV] (AE − PS), Hartree on the density
+    channel + the non-collinear XC. ``comps`` = [n_ij, mx_ij, my_ij, mz_ij], the four
+    Pauli channels of the 2×2-in-spin on-site becsum, each a real (nm, nm) tensor
+    (n_ij = ρ↑↑+ρ↓↓, mz_ij = ρ↑↑−ρ↓↓, mx_ij = ρ↑↓+ρ↓↑, my_ij = i(ρ↑↓−ρ↓↑); all
+    Hermitian → real-representable). The on-site Hartree is spin-independent, so it
+    couples to n only."""
+    e = torch.zeros((), dtype=torch.float64)
+    for what, sgn in (("ae", 1.0), ("ps", -1.0)):
+        lms = [oc.rho_lm_t(c, what) for c in comps]      # [n_lm, mx_lm, my_lm, mz_lm]
+        _, e_h = oc.hartree_t(lms[0])                     # Hartree on n only
+        e = e + sgn * (e_h + onsite_nc_exc(oc, lms, what))
+    return e
+
+
+def onsite_nc_energy_and_ddd(oc, comps):
+    """(E_1c [eV], [ddd_n, ddd_mx, ddd_my, ddd_mz]) — the non-collinear one-center
+    energy and the on-site potential as its exact autograd derivative w.r.t. the four
+    becsum channels. The 2×2-in-spin on-site potential is D = ddd_n·1 + ddd_m⃗·σ⃗
+    (i.e. D↑↑ = ddd_n+ddd_mz, D↓↓ = ddd_n−ddd_mz, D↑↓ from ddd_mx, ddd_my) — the
+    v·1 + B⃗·σ that enters the spinor Hamiltonian's nonlocal D_ij. In the collinear
+    limit (mx=my=0), ddd_n ± ddd_mz reproduce the collinear ``energy_and_ddd``'s
+    [ddd_up, ddd_down]."""
+    leaves = [c.detach().clone().requires_grad_(True) for c in comps]
+    with torch.enable_grad():
+        e = e1c_nc_t(oc, leaves)
+        grads = torch.autograd.grad(e, leaves)
+    return float(e.detach()), list(grads)

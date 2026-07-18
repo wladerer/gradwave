@@ -11,7 +11,11 @@ import torch
 
 from gradwave.core.xc.spin import LSDA_PW92
 from gradwave.pseudo.upf_paw import parse_upf_paw
-from gradwave.scf.paw_noncollinear import onsite_nc_energy_and_field, onsite_nc_exc
+from gradwave.scf.paw_noncollinear import (
+    onsite_nc_energy_and_ddd,
+    onsite_nc_energy_and_field,
+    onsite_nc_exc,
+)
 from gradwave.scf.paw_onsite import OneCenter
 
 PSEUDO = "tests/fixtures/qe/pseudos/Si.pbe-n-kjpaw_psl.1.0.0.UPF"
@@ -65,3 +69,21 @@ def test_onsite_nc_xc_field_matches_fd():
     ep = float(onsite_nc_exc(oc, [n_lm, z, z, mz_lm * (1 + eps)], "ae"))
     em = float(onsite_nc_exc(oc, [n_lm, z, z, mz_lm * (1 - eps)], "ae"))
     assert abs(ad / ((ep - em) / (2 * eps)) - 1) < 1e-4
+
+
+def test_onsite_nc_onecenter_ddd_collinear_limit():
+    """The full one-center corrector (Hartree + XC) and its 2×2 on-site potential:
+    in the collinear limit the energy matches the collinear energy_and_ddd, and the
+    2×2 ddd reduces to [ddd_up, ddd_down] via ddd_n ± ddd_mz with zero off-diagonal."""
+    oc, paw = _oc()
+    nm = sum(2 * b.l + 1 for b in paw.betas)
+    rup = _rho(paw, nm, 1, 0.02) * 1.15
+    rdn = _rho(paw, nm, 2, 0.02) * 0.85
+    e_col, (ddd_up, ddd_dn) = oc.energy_and_ddd([rup, rdn])
+    n_ij, mz_ij = rup + rdn, rup - rdn
+    zero = torch.zeros_like(n_ij)
+    e_nc, (dn_, dmx, dmy, dmz) = onsite_nc_energy_and_ddd(oc, [n_ij, zero, zero, mz_ij])
+    assert abs(e_nc - e_col) < 1e-8
+    assert float((dn_ + dmz - ddd_up).abs().max()) < 1e-8
+    assert float((dn_ - dmz - ddd_dn).abs().max()) < 1e-8
+    assert float(dmx.abs().max()) < 1e-8 and float(dmy.abs().max()) < 1e-8
