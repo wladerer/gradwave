@@ -20,29 +20,17 @@ LDA only for now: a non-collinear GGA on-site XC needs the gradient of |m⃗| (t
 smooth-grid ``NoncollinearXC`` carries the same restriction), so a GGA functional
 raises here.
 
-Scope: this module is the *on-site XC* half of a full non-collinear PAW SCF — the
-one piece that is standalone and exactly testable (collinear limit + rotation +
+Scope: this module holds the on-site (augmentation) pieces of non-collinear PAW —
+the ones that are standalone and exactly testable (collinear limit + rotation +
 autograd field, all to machine precision; see tests/integration/test_paw_
-noncollinear.py). The remaining, tightly-coupled pieces of a spinor PAW SCF (to be
-built on top of ``scf/uspp_loop.py`` + ``scf/noncollinear.py``) are:
-
-  1. a doubled coefficient layout (nk, nb, 2·npw) replacing the per-spin coeff lists;
-  2. a spinor generalized-eigen operator — merge ``SpinorHamiltonian.apply`` (the
-     v·1+B⃗·σ local mix) with the batched PAW ``h``/dual-grid, plus an S⊗1₂ overlap
-     apply, solved by ``davidson_gen_batched``;
-  3. a 2×2-in-spin on-site becsum (accumulate uu/dd/ud/du blocks from the two spinor
-     components) → decompose to (n_ij, m⃗_ij);
-  4. this on-site XC returning a 2×2 ddd, added as spin-diagonal *and* off-diagonal
-     D_ij blocks in the nonlocal apply;
-  5. a 4-channel augmentation charge (n_aug→ρ, m⃗_aug→m⃗) from the 2×2 becsum;
-  6. a 4-channel MixLayout (Kerker on n only) carrying the 2×2 becsum.
-
-Validation ladder for the full loop: the collinear limit (all moments ∥ ẑ must
-reproduce the collinear nspin=2 PAW energy) and rotation invariance (energy
-independent of the global spin axis without SOC) — the same self-checks that
-validated the norm-conserving spinor SCF, and the two handles already proven for
-this on-site XC. SOC-in-the-augmentation (the all-electron core term that makes PAW
-more accurate than a norm-conserving FR pseudo for MAE/DMI) is a further stage.
+noncollinear.py): the non-collinear on-site XC, the full one-center corrector
+(energy + 2×2 ddd), and the spinor on-site becsum. The full spinor PAW SCF loop
+that consumes them lives in ``scf/uspp_noncollinear.py``, validated by the
+collinear limit (Si exact; O2 |ΔF| = 1e-8 eV vs nspin=2) and rotation invariance
+(|ΔF| = 1.3e-7 eV, exercising the off-diagonal D↑↓ blocks) — see
+tests/integration/test_uspp_noncollinear.py. SOC-in-the-augmentation (the
+all-electron core term that makes PAW more accurate than a norm-conserving FR
+pseudo for MAE/DMI) is the remaining stage.
 """
 
 from __future__ import annotations
