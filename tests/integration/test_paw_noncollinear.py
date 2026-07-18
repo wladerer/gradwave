@@ -15,6 +15,7 @@ from gradwave.scf.paw_noncollinear import (
     onsite_nc_energy_and_ddd,
     onsite_nc_energy_and_field,
     onsite_nc_exc,
+    spinor_onsite_becsum,
 )
 from gradwave.scf.paw_onsite import OneCenter
 
@@ -87,3 +88,20 @@ def test_onsite_nc_onecenter_ddd_collinear_limit():
     assert float((dn_ + dmz - ddd_up).abs().max()) < 1e-8
     assert float((dn_ - dmz - ddd_dn).abs().max()) < 1e-8
     assert float(dmx.abs().max()) < 1e-8 and float(dmy.abs().max()) < 1e-8
+
+
+def test_spinor_onsite_becsum_hermitian_and_collinear_limit():
+    """The 2×2 on-site becsum Pauli decomposition: every channel is Hermitian, and a
+    pure-up spinor gives n = mz = the collinear up-becsum with zero off-diagonal."""
+    torch.manual_seed(0)
+    nb, npr = 6, 4
+    bu = torch.randn(nb, npr, dtype=torch.complex128)
+    bd = torch.randn(nb, npr, dtype=torch.complex128)
+    w = torch.rand(nb, dtype=torch.float64)
+    for c in spinor_onsite_becsum(bu, bd, w):
+        assert float((c - c.conj().T).abs().max()) < 1e-12
+    n0, mx0, my0, mz0 = spinor_onsite_becsum(bu, torch.zeros_like(bd), w)
+    r = torch.einsum("b,bi,bj->ij", w, bu.conj(), bu)
+    r = 0.5 * (r + r.conj().T)
+    assert float((n0 - r).abs().max()) < 1e-12 and float((mz0 - r).abs().max()) < 1e-12
+    assert float(mx0.abs().max()) < 1e-12 and float(my0.abs().max()) < 1e-12

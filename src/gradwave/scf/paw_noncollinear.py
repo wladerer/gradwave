@@ -87,6 +87,23 @@ def onsite_nc_energy_and_field(oc, nm_lms, what: str):
     return float(e.detach()), list(grads)
 
 
+def spinor_onsite_becsum(b_up, b_dn, w):
+    """The 2×2-in-spin on-site becsum from spinor projections, Pauli-decomposed.
+
+    ``b_up``, ``b_dn`` are (nb, nproj) projections ⟨p_i|ψ_{up,dn}⟩ for one atom's
+    projector block; ``w`` is (nb,) occupation weights (kweight·occ). Returns the
+    four Hermitian channels [n_ij, mx_ij, my_ij, mz_ij], each (nproj, nproj) complex,
+    with n = ρ↑↑+ρ↓↓, mz = ρ↑↑−ρ↓↓, mx = ρ↑↓+ρ↓↑, my = i(ρ↑↓−ρ↓↑). Mirrors the grid
+    Pauli decomposition in ``scf/noncollinear.py`` but on projector indices; feeds
+    ``e1c_nc_t`` / ``onsite_nc_energy_and_ddd``."""
+    r_uu = torch.einsum("b,bi,bj->ij", w, b_up.conj(), b_up)
+    r_dd = torch.einsum("b,bi,bj->ij", w, b_dn.conj(), b_dn)
+    r_ud = torch.einsum("b,bi,bj->ij", w, b_up.conj(), b_dn)
+    r_du = torch.einsum("b,bi,bj->ij", w, b_dn.conj(), b_up)
+    chans = (r_uu + r_dd, r_ud + r_du, 1j * (r_ud - r_du), r_uu - r_dd)
+    return [0.5 * (x + x.conj().transpose(-1, -2)) for x in chans]   # Hermitize
+
+
 def e1c_nc_t(oc, comps):
     """Full non-collinear one-center energy [eV] (AE − PS), Hartree on the density
     channel + the non-collinear XC. ``comps`` = [n_ij, mx_ij, my_ij, mz_ij], the four
