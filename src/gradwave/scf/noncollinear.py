@@ -132,19 +132,26 @@ class SpinorHamiltonian:
         mask = bk.mask[:, None, :]
         out = torch.cat([out_u * mask, out_d * mask], dim=-1)
 
+        # nonlocal, band-chunked like the FFT mix above: the unchunked einsums
+        # materialize (nk, nb, 2·npw) temporaries — at 384 k and a 240-vector
+        # Davidson block that is a >5 GB spike per temporary, which OOM-killed
+        # the A100 FePt run through allocator fragmentation. In-place adds on
+        # band slices bound the spike at the chunk size.
         if self.q is not None:  # spin-orbit (j-resolved) nonlocal
-            q = tab["q"]
-            b = torch.einsum("kpg,kbg->kbp", q.conj(), c)
-            out = out + torch.einsum("kbp,pq,kqg->kbg", b, tab["dij_so"], q) \
-                * torch.cat([mask, mask], dim=-1)
+            q, dso = tab["q"], tab["dij_so"]
+            mask2 = torch.cat([mask, mask], dim=-1)
+            for lo in range(0, nb, chunk):
+                hi = min(lo + chunk, nb)
+                b = torch.einsum("kpg,kbg->kbp", q.conj(), c[:, lo:hi])
+                out[:, lo:hi] += torch.einsum("kbp,pq,kqg->kbg", b, dso, q) * mask2
         elif self.p.shape[1]:
             dij, p = tab["dij"], tab["p"]
-            bu = torch.einsum("kpg,kbg->kbp", p.conj(), cu)
-            bd = torch.einsum("kpg,kbg->kbp", p.conj(), cd)
-            nl = torch.cat([torch.einsum("kbp,pq,kqg->kbg", bu, dij, p) * mask,
-                            torch.einsum("kbp,pq,kqg->kbg", bd, dij, p) * mask],
-                           dim=-1)
-            out = out + nl
+            for lo in range(0, nb, chunk):
+                hi = min(lo + chunk, nb)
+                bu = torch.einsum("kpg,kbg->kbp", p.conj(), cu[:, lo:hi])
+                bd = torch.einsum("kpg,kbg->kbp", p.conj(), cd[:, lo:hi])
+                out[:, lo:hi, :m] += torch.einsum("kbp,pq,kqg->kbg", bu, dij, p) * mask
+                out[:, lo:hi, m:] += torch.einsum("kbp,pq,kqg->kbg", bd, dij, p) * mask
         return out
 
 
