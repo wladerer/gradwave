@@ -46,6 +46,18 @@ def save_checkpoint(res, path, *, wavefunctions: bool = False) -> Path:
     is_uspp = isinstance(res, dict)
     get = (res.get if is_uspp
            else lambda k, d=None: getattr(res, k, d))
+    # A non-collinear result (NCResult) is a non-dict carrying the m⃗ field
+    # and the integrated moment vector; the collinear/norm-conserving
+    # SCFResult has neither. Its kind is "noncollinear" (distinct from the
+    # "nc" = norm-conserving collinear kind).
+    is_ncmag = (not is_uspp and get("mag_vec") is not None
+                and get("m") is not None)
+    if is_uspp:
+        kind = "uspp"
+    elif is_ncmag:
+        kind = "noncollinear"
+    else:
+        kind = "nc"
     system = get("system")
     grid = system.grid
     e = get("energies")
@@ -54,7 +66,7 @@ def save_checkpoint(res, path, *, wavefunctions: bool = False) -> Path:
         "format": FORMAT,
         "version": VERSION,
         "code_version": __version__,
-        "kind": "uspp" if is_uspp else "nc",
+        "kind": kind,
         # geometry + discretization (enough to validate a restart)
         "cell_ang": np.asarray(grid.cell, dtype=float),
         "positions_ang": _cpu(system.positions).numpy(),
@@ -93,6 +105,14 @@ def save_checkpoint(res, path, *, wavefunctions: bool = False) -> Path:
         for key in ("mag_total", "mag_abs"):
             if key in res:
                 payload[key] = float(res[key])
+    if is_ncmag:
+        # the full spinor state: total density ρ, magnetization field m⃗
+        # (3,*grid) and the integrated moment. Restart re-seeds the atomic
+        # moments from m⃗ (see nc_mag_seed), so the field is the load-bearing
+        # quantity — always archived regardless of the wavefunctions flag.
+        payload["m"] = _cpu(get("m"))
+        payload["mag_vec"] = [float(x) for x in get("mag_vec")]
+        payload["mag_abs"] = float(get("mag_abs", 0.0) or 0.0)
     if wavefunctions:
         payload["coeffs"] = _cpu_tree(get("coeffs"))
 
@@ -113,10 +133,45 @@ def load_checkpoint(path) -> dict:
     return payload
 
 
+def nc_mag_seed(payload: dict, system) -> "torch.Tensor":
+    """Per-atom moment seed (na, 3) [μB] for warm-starting a non-collinear
+    SCF from a checkpoint.
+
+    scf_noncollinear has no density-level warm-start hook (its only seed is
+    mag_vec_init, the per-atom moment fraction·direction). We recover a
+    faithful magnetic seed by decomposing the checkpoint's m⃗ field onto the
+    atoms with the same Hirshfeld weights the magnetism task uses. The FFT
+    grid must match, since m⃗ is stored on it."""
+    if payload.get("kind") != "noncollinear":
+        raise ValueError(f"checkpoint kind {payload.get('kind')!r} is not a "
+                         "non-collinear SCF result")
+    m = payload.get("m")
+    if m is None:
+        raise ValueError("non-collinear checkpoint has no m⃗ field to restart from")
+    from gradwave.postscf.moment_config import atomic_weights
+
+    grid = system.grid
+    if tuple(m.shape[-3:]) != tuple(grid.shape):
+        raise ValueError(
+            "non-collinear restart requires the same FFT grid "
+            f"({tuple(m.shape[-3:])} vs {tuple(grid.shape)})")
+    m = m.to(system.positions.device)
+    w = atomic_weights(system)
+    cf = grid.volume / grid.n_points
+    return torch.einsum("axyz,ixyz->ai", w, m) * cf  # (na, 3) [μB]
+
+
 def as_start_from(payload: dict) -> dict:
     """The start_from view of a loaded checkpoint: a shim dict carrying
     grid shape/volume, densities and (USPP/PAW) the becsum. The solvers
-    validate grid compatibility and rescale ρ by the volume ratio."""
+    validate grid compatibility and rescale ρ by the volume ratio.
+
+    Non-collinear checkpoints have no collinear start_from view — restart a
+    non-collinear SCF via nc_mag_seed instead."""
+    if payload.get("kind") == "noncollinear":
+        raise ValueError(
+            "non-collinear checkpoint cannot seed a collinear SCF; use "
+            "nc_mag_seed to warm-start a non-collinear run")
     shim_grid = SimpleNamespace(shape=tuple(payload["grid_shape"]),
                                 volume=float(payload["volume_ang3"]))
     out = {

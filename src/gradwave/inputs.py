@@ -96,7 +96,8 @@ class Input:
     scf: SCFParams = field(default_factory=SCFParams)
     symmetry: bool = True  # IBZ reduction + density symmetrization
     nspin: int = 1  # 1 | 2 (collinear)
-    start_mag: dict | None = None  # element -> initial moment fraction (nspin=2)
+    noncollinear: bool = False  # spinor (non-collinear) SCF for task: scf
+    start_mag: dict | None = None  # element -> initial moment fraction (nspin=2/NC seed)
     task: str = "scf"  # scf | relax | bands | magnetism
     relax: RelaxParams = field(default_factory=RelaxParams)
     bands: BandsParams = field(default_factory=BandsParams)
@@ -187,6 +188,7 @@ def load_input(path: str | Path) -> Input:
         nbands=None if nbands == "auto" else int(nbands),
         symmetry=bool(raw.get("symmetry", True)),
         nspin=int(raw.get("nspin", 1)),
+        noncollinear=bool(raw.get("noncollinear", False)),
         start_mag=raw.get("start_mag"),
         scf=SCFParams(
             max_iter=int(scf_raw.get("max_iter", 100)),

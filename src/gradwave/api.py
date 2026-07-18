@@ -101,6 +101,8 @@ def run_scf(inp: Input, system=None, verbose: bool = True):
     system = system or build_system(inp)
     if inp.device != "cpu":
         system = system.to(inp.device)
+    if inp.noncollinear:
+        return _run_scf_noncollinear(inp, system, verbose)
     if inp.nspin == 2:
         xc, mags = _spin_setup(inp)
     else:
@@ -133,6 +135,43 @@ def run_scf(inp: Input, system=None, verbose: bool = True):
 
     return scf(system, xc, kerker=kerker, start_from=start_from,
                mixing_history=inp.scf.mixing.history or 8, **common)
+
+
+def _run_scf_noncollinear(inp: Input, system, verbose: bool):
+    """A plain non-collinear (spinor) SCF for task: scf with
+    noncollinear: true. Builds a NoncollinearXC from inp.xc (as run_magnetism
+    does), seeds the atomic moments along +z from start_mag (or warm-starts
+    from a checkpoint's m⃗ field), and returns the NCResult."""
+    import torch
+
+    from gradwave.core.xc.noncollinear import NoncollinearXC
+    from gradwave.core.xc.spin import LSDA_PW92, SpinPBE
+    from gradwave.scf.noncollinear import scf_noncollinear
+
+    xc = NoncollinearXC({"lda": LSDA_PW92, "pbe": SpinPBE}[inp.xc]())
+
+    if inp.restart is not None:
+        from gradwave.checkpoint import load_checkpoint, nc_mag_seed
+
+        mag_vec_init = nc_mag_seed(load_checkpoint(inp.restart), system)
+    else:
+        # high-spin seed along +z; per-species magnitude from start_mag (a
+        # moment fraction ~ scale on the SAD magnetization), default 1.0
+        symbols = inp.atoms.get_chemical_symbols()
+        z = torch.tensor([0.0, 0.0, 1.0], dtype=torch.float64)
+        scales = [float((inp.start_mag or {}).get(s, 1.0)) for s in symbols]
+        mag_vec_init = torch.stack([s * z for s in scales])  # (na, 3)
+
+    # NC SCF requires a real smearing scheme (spinor bands hold one electron)
+    smtype = inp.smearing.type if inp.smearing.type != "none" else "gaussian"
+    return scf_noncollinear(
+        system, xc, mag_vec_init=mag_vec_init,
+        smearing=smtype, width=inp.smearing.width,
+        max_iter=inp.scf.max_iter, etol=inp.scf.etol, rhotol=inp.scf.rhotol,
+        mixing_alpha=inp.scf.mixing.alpha,
+        mixing_history=inp.scf.mixing.history or 8,
+        diago_tol=inp.scf.diago_tol, verbose=verbose,
+    )
 
 
 def _get(res, key, default=None):
@@ -168,6 +207,11 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
     occ = _get(res, "occupations")
     species, upfs, _soa = _species_upfs(inp)
     uspp = _is_uspp(upfs)
+    # a non-collinear NCResult carries an integrated moment vector but no
+    # occupations (spinor bands each hold one electron); the gap/occupations
+    # blocks degrade gracefully below.
+    mag_vec = _get(res, "mag_vec")
+    is_ncmag = mag_vec is not None and not isinstance(res, dict)
 
     import math
 
@@ -186,7 +230,7 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
         "n_iter": int(_get(res, "n_iter")),
         "fermi_eV": None if _get(res, "fermi") is None
         else float(_get(res, "fermi")),
-        "gap_eV": _gap(eig.tolist(), occ.tolist(), nspin),
+        "gap_eV": None if occ is None else _gap(eig.tolist(), occ.tolist(), nspin),
         "energies_eV": {
             "kinetic": float(e.kinetic), "hartree": float(e.hartree),
             "xc": float(e.xc), "local": float(e.local),
@@ -201,6 +245,11 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
     if nspin == 2:
         scf_block["total_magnetization_muB"] = float(_get(res, "mag_total", 0.0))
         scf_block["absolute_magnetization_muB"] = float(_get(res, "mag_abs", 0.0))
+    if is_ncmag:
+        mv = [float(x) for x in mag_vec]
+        scf_block["magnetization_vector_muB"] = mv
+        scf_block["total_magnetization_muB"] = float((sum(x * x for x in mv)) ** 0.5)
+        scf_block["absolute_magnetization_muB"] = float(_get(res, "mag_abs", 0.0))
 
     summary = {
         "code": {"name": "gradwave", "version": __version__,
@@ -208,7 +257,8 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
         "task": task,
         "structure": _structure_block(inp),
         "parameters": {
-            "formalism": "uspp/paw" if uspp else "nc",
+            "formalism": "noncollinear" if is_ncmag else (
+                "uspp/paw" if uspp else "nc"),
             "xc": inp.xc,
             "ecut_eV": float(inp.ecut),
             "ecutrho_eV": float(inp.ecutrho) if (uspp and inp.ecutrho) else None,
@@ -227,7 +277,7 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
         },
         "scf": scf_block,
         "eigenvalues_eV": eig.tolist(),
-        "occupations": occ.tolist(),
+        "occupations": [] if occ is None else occ.tolist(),
     }
     if runtime_s is not None:
         summary["runtime_s"] = round(float(runtime_s), 2)
