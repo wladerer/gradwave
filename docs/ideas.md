@@ -273,6 +273,25 @@ relations only. spglib ships magnetic space-group (Shubnikov) support since 2.0,
 the group identification is available off the shelf; the work is the axial-vector
 symmetrization and the k-folding bookkeeping.
 
+Implementation sketch (planned 2026-07-18, grounded in the existing machinery):
+(1) `magnetic_spacegroup(sg, magmoms, cell)` in symmetry.py — classify each
+paramagnetic op by the axial-vector action det(R)·R·m on the moments into
+unitary / anti-unitary (op·T) / dropped; primary via spglib.get_magnetic_symmetry
+(present in spglib 2.7) with our own filter as cross-check. (2)
+`reduce_mesh_magnetic` — the existing orbit fold with unitary {W^-T} plus
+anti-unitary {-W^-T}. **Phases 1+2 alone unlock the force-theorem MAE**: the FT
+evaluator is eigenvalue-only (no density reconstruction), so magnetic k-folding
+gives it the full ~8x savings with none of the symmetrization work — pair the two
+backlog items and build that first. (3) Field symmetrization for self-consistent
+folded-k runs: m⃗ reuses RhoSymmetrizer's per-op G-space index maps with a 3x3
+axial channel mixer (s_T·det(R)·R, s_T = -1 for anti-unitary); the becsum's
+spatial half (atom permutation + real-Ylm D^l blocks) already exists in
+BecsumSymmetrizer — the addition is the same axial 3x3 across the (mx,my,mz)
+Pauli channels. (4) Wire through setup and drop the hard use_symmetry=False.
+Validation ladder: magmoms=0 reproduces today's IBZ exactly; bcc Fe m||z
+magnetic-IBZ == full mesh to ueV; an anti-unitary-only fold matches full mesh;
+FePt MAE under shared-subgroup reduction reproduces the full-mesh MAE.
+
 One caveat that is easy to get wrong: for MAE *differences*, do not reduce each
 orientation to its own IBZ. The two orientations have different magnetic groups, so
 per-orientation reduction samples k differently and the Fermi-surface
