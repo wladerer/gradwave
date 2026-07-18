@@ -12,11 +12,20 @@ textbook MAE k-convergence lesson: never trust an anisotropy sign from a coarse
 mesh, and keep the SAME full mesh for both orientations so the k-error cancels
 in the difference (see the magnetic-space-groups note in docs/ideas.md).
 
+Magnetic-IBZ update (asus CPU, same physics, measured 2026-07-18): with
+setup_system(..., use_symmetry=True, magmoms=...) each orientation folds by its
+OWN magnetic (Shubnikov) group — [001] keeps C4h + 8 anti-unitary ops (144 -> 30 k),
+[100] keeps C2h + 4 (144 -> 48 k) — and reproduces MAE = +2.5520 meV/cell to all
+printed digits in 486 s + 815 s (~22 min vs ~78 min full-mesh, 3.6x). The fold is
+exact (the magnetic-IBZ sum IS the full-mesh sum re-weighted, validated to 5e-11 eV
+in tests/integration/test_magnetic_ibz.py), so per-orientation reduction preserves
+the common-mode k-error cancellation as long as both use the same underlying mesh.
+
 L1_0 FePt (alternating Fe/Pt layers along c) is the textbook high-MAE magnet: easy
 axis along c, MAE ~ 2-3 meV/f.u. in DFT — orders of magnitude above the ~0.2 ueV
 rotation-invariance precision floor, so it is the right first validation of the
 spin-orbit path on a magnetic system. MAE = E([100]) - E([001]); positive = easy
-axis c. The two orientations share the k-mesh, so the k-sampling error largely
+axis c. The two orientations share the underlying k-mesh, so the k-sampling error
 cancels in the difference.
 
 SOC metals converge slowly and the density residual floors at occupation noise, so
@@ -48,12 +57,16 @@ KMESH = (6, 6, 4)
 
 
 def energy(axis, tag):
-    system = setup_system(cell, pos, [0, 1], [fe, pt], ecut=70 * RY, kmesh=KMESH,
-                          nbands=30, time_reversal=False)
-    if dev != "cpu":
-        system = system.to(dev)
     ax = np.array(axis, float)
     init = [(3.0 * ax).tolist(), (0.4 * ax).tolist()]   # Fe ~3, Pt induced ~0.4
+    # magnetic (Shubnikov) symmetry: fold k into the magnetic IBZ of THIS
+    # orientation ([001] -> 30 k, [100] -> 48 k from the 144 full mesh) and
+    # re-symmetrize (rho, m) each iteration. Exact vs full mesh to ~5e-11 eV.
+    system = setup_system(cell, pos, [0, 1], [fe, pt], ecut=70 * RY, kmesh=KMESH,
+                          nbands=30, use_symmetry=True, magmoms=init)
+    if dev != "cpu":
+        system = system.to(dev)
+    print(f"[{tag}] nk={len(system.spheres)} (full={np.prod(KMESH)})", flush=True)
     t = time.time()
     res = scf_noncollinear(system, NoncollinearXC(LSDA_PW92()), mag_vec_init=init,
                            smearing="gaussian", width=0.1, etol=1e-9, rhotol=1e-7,
