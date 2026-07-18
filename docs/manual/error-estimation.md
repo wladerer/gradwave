@@ -8,8 +8,8 @@ pass that needs no larger SCF, following the perturbation post-processing of
 Cancès et al.[[18]](bibliography.md#cances)
 
 Turn it on and the run reports how far the energy still has to fall, the
-extrapolated energy, the density error, and — for a norm-conserving run
-(spin-unpolarized or spin-polarized) — the force error.
+extrapolated energy, the density error, the band-gap error, and — for a
+norm-conserving run (spin-unpolarized or spin-polarized) — the force error.
 
 ## Theory
 
@@ -87,6 +87,7 @@ carries the same fields.
 | `drho_L1_per_electron` | $\int |\delta\rho|$ per electron, the density-error norm |
 | `int_drho` | $\int \delta\rho$; near zero confirms the correction is charge-conserving |
 | `force_error_max_eV_ang`, `force_error_rms_eV_ang` | the force error (NC nspin=1 or 2) |
+| `gap_eV`, `gap_extrapolated_eV`, `dgap_eV` | the band gap, its extrapolation, and the error (NC insulators) |
 | `ecut_eV`, `ecut_large_eV` | the base and enlarged cutoffs |
 
 When the run is outside the supported coverage the block is
@@ -95,9 +96,11 @@ When the run is outside the supported coverage the block is
 
 ## Drive it from Python
 
-The estimator is two functions. `estimate_density_error` takes a converged `scf`
-result (norm-conserving) or a `scf_uspp` dict (USPP/PAW); `estimate_force_error`
-turns that into a per-atom force error.
+The estimator is a small set of functions. `estimate_density_error` takes a
+converged `scf` result (norm-conserving) or a `scf_uspp` dict (USPP/PAW);
+`estimate_force_error` turns that into a per-atom force error, and
+`estimate_eigenvalue_error` / `estimate_gap_error` (below) give band and gap
+errors.
 
 ```python
 from gradwave.postscf.discretization_error import (
@@ -114,6 +117,30 @@ dF = estimate_force_error(res, err)   # (na, 3) eV/Å; add to F to approach the 
 so the enlarged sphere fits inside the density FFT box. For USPP/PAW pass the
 functional too, `estimate_density_error(res_uspp, ecut_large=30*RY, xc=PBE())`.
 
+## Eigenvalue and gap error
+
+The per-band term the energy error sums over occupations, $\delta\varepsilon_i =
+\langle \delta\psi_i | R_i \rangle$, is exactly the second-order shift of the
+$i$-th Kohn-Sham eigenvalue toward the infinite-basis limit ($\delta\varepsilon
+\le 0$, a definite lowering). Running it on the empty bands as well turns the
+estimator into a band-structure and band-gap error tool at no extra SCF cost.
+
+```python
+from gradwave.postscf.discretization_error import (
+    estimate_eigenvalue_error, estimate_gap_error)
+
+eige = estimate_eigenvalue_error(res, ecut_large=35 * RY)  # per-band δε [eV]
+gap = estimate_gap_error(res, eige)     # dict: gap, extrapolated gap, δgap, VBM/CBM
+print(gap["gap_eV"], gap["gap_extrapolated_eV"], gap["dgap_eV"])
+```
+
+Because the occupied shifts are the same quantity the energy error integrates,
+their occupation-weighted BZ sum reproduces `denergy` exactly. `estimate_gap_error`
+locates the VBM and CBM over the BZ (and both spin channels) and reports the raw
+gap, the extrapolated gap $\varepsilon + \delta\varepsilon$ at each edge, and
+their difference; it raises for a metal/semimetal. On loosely converged silicon
+the extrapolated gap recovers roughly half of the remaining basis-set gap error.
+
 ## Coverage
 
 | quantity | norm-conserving | USPP/PAW |
@@ -121,6 +148,7 @@ functional too, `estimate_density_error(res_uspp, ecut_large=30*RY, xc=PBE())`.
 | density error | nspin=1, nspin=2 | nspin=1, nspin=2 |
 | energy error | nspin=1, nspin=2 | nspin=1, nspin=2 |
 | force error | nspin=1, nspin=2 (no NLCC) | not available |
+| eigenvalue / gap error | nspin=1, nspin=2 | not available |
 | stress error | not available (deferred) | not available |
 
 Symmetry is supported for the norm-conserving nspin=1 density, energy, and force

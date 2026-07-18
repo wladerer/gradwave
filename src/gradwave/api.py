@@ -400,7 +400,9 @@ def _error_estimate_block(res, inp) -> dict:
     """
     from gradwave.postscf.discretization_error import (
         estimate_density_error,
+        estimate_eigenvalue_error,
         estimate_force_error,
+        estimate_gap_error,
     )
 
     _species, upfs, _soa = _species_upfs(inp)
@@ -439,6 +441,16 @@ def _error_estimate_block(res, inp) -> dict:
             block["force_error_max_eV_ang"] = float(fe.max())
             block["force_error_rms_eV_ang"] = float((fe ** 2).mean().sqrt())
         except NotImplementedError:
+            pass
+    # band-gap error (NC only; skipped for metals/semimetals and USPP/PAW)
+    if not uspp:
+        try:
+            eige = estimate_eigenvalue_error(res, ecut_large=err.ecut_large)
+            gap = estimate_gap_error(res, eige)
+            block["gap_eV"] = gap["gap_eV"]
+            block["gap_extrapolated_eV"] = gap["gap_extrapolated_eV"]
+            block["dgap_eV"] = gap["dgap_eV"]
+        except (NotImplementedError, ValueError):
             pass
     return block
 

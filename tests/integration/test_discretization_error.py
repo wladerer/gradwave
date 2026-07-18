@@ -16,7 +16,9 @@ from gradwave.core.xc.pbe import PBE
 from gradwave.core.xc.spin import SpinPBE
 from gradwave.postscf.discretization_error import (
     estimate_density_error,
+    estimate_eigenvalue_error,
     estimate_force_error,
+    estimate_gap_error,
 )
 from gradwave.pseudo.upf import parse_upf
 from gradwave.pseudo.upf_paw import parse_upf_paw
@@ -65,6 +67,50 @@ def test_nc_complement_invariants():
     assert abs(dq_per_e) < 1e-3           # charge-conserving
     assert est.denergy < 0.0              # definite lowering
     assert -5.0 < est.denergy < 0.0       # sane magnitude (eV)
+
+
+def test_eigenvalue_error_reproduces_energy_error():
+    """δε <= 0 for every band, and the occupation-weighted sum of the occupied
+    shifts reproduces denergy (the two paths compute the same per-band term)."""
+    torch.set_num_threads(4)
+    upf = parse_upf(FIX / "Si_ONCV_PBE-1.2.upf")
+    cell, pos = _si_cell()
+    system = setup_system(cell, pos, [0, 0], [upf], ecut=15 * RY, kmesh=(2, 2, 2))
+    res = scf(system, PBE(), smearing="none", etol=1e-9, rhotol=1e-8,
+              verbose=False)
+    err = estimate_density_error(res, ecut_large=35 * RY)
+    eige = estimate_eigenvalue_error(res, ecut_large=35 * RY)
+
+    assert all(float(de.max()) <= 1e-12 for de in eige.deig)   # definite lowering
+    de_tot = 0.0
+    for ik in range(len(system.spheres)):
+        occ, de = res.occupations[ik], eige.deig[ik]
+        de_tot += float(system.kweights[ik]) * float((occ[:de.shape[0]] * de).sum())
+    assert abs(de_tot - err.denergy) < 1e-6 * abs(err.denergy)  # == denergy
+
+
+@pytest.mark.slow
+def test_gap_error_moves_toward_high_cutoff():
+    """The extrapolated gap eps+δε is closer to the high-cutoff gap than the
+    raw low-cutoff gap (the correction reduces the basis-set gap error)."""
+    torch.set_num_threads(8)
+    upf = parse_upf(FIX / "Si_ONCV_PBE-1.2.upf")
+    cell, pos = _si_cell()
+
+    def run(ecut):
+        system = setup_system(cell, pos, [0, 0], [upf], ecut=ecut, kmesh=(4, 4, 4))
+        return scf(system, PBE(), smearing="none", etol=1e-10, rhotol=1e-9,
+                   verbose=False)
+
+    lo, hi = run(14 * RY), run(30 * RY)
+    ge_lo = estimate_gap_error(lo, estimate_eigenvalue_error(lo, ecut_large=30 * RY))
+    gap_hi = estimate_gap_error(
+        hi, estimate_eigenvalue_error(hi, ecut_large=75 * RY))["gap_eV"]
+
+    assert ge_lo["gap_eV"] > 0.0 and not ge_lo["direct"]        # Si indirect gap
+    err_raw = abs(ge_lo["gap_eV"] - gap_hi)
+    err_corr = abs(ge_lo["gap_extrapolated_eV"] - gap_hi)
+    assert err_corr < err_raw                                   # correction helps
 
 
 def test_nspin2_nonmagnetic_limit_matches_nspin1():

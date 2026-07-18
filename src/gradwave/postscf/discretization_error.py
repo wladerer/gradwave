@@ -49,6 +49,7 @@ bands is the leading first-order term only.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -113,6 +114,13 @@ def _occupied(res: SCFResult, ik: int, sp: int | None = None):
         eig = res.eigenvalues[sp][ik]
     n_occ = int((occ > 1e-8).sum())
     return coeffs[:n_occ], eig[:n_occ], occ[:n_occ]
+
+
+def _bands_at(res: SCFResult, ik: int, sp: int | None = None):
+    """All computed coefficients and eigenvalues at one k (and spin channel)."""
+    if sp is None:
+        return res.coeffs[ik], res.eigenvalues[ik]
+    return res.coeffs[sp][ik], res.eigenvalues[sp][ik]
 
 
 def _enlarged_hamiltonian(res: SCFResult, k_frac, ecut_large: float, device,
@@ -592,6 +600,165 @@ def estimate_force_error(
 
         dF = symmetrize_forces(dF, system.sym, grid.cell)
     return dF
+
+
+# --------------------------------------------------------------------------- #
+#  Eigenvalue / band-gap error                                                #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class EigenvalueError:
+    """Estimated Ecut discretization error of the Kohn-Sham eigenvalues.
+
+    ``deig`` is the second-order eigenvalue shift toward the infinite-basis
+    limit (<= 0, a definite lowering), same sign convention as the energy
+    error: eps_exact ~= eps + deig. Layout mirrors the SCF eigenvalues -- a
+    per-k list of (nband_sel,) tensors for nspin=1, nested [spin][k] for
+    nspin=2. ``eig`` carries the matching base eigenvalues [eV].
+    """
+
+    deig: list
+    eig: list
+    ecut: float
+    ecut_large: float
+    nspin: int = 1
+
+
+def _band_eig_error(h1, sph0, sph1, coeffs, eig, grid_shape, ecut):
+    """Per-band δε on one k/spin from the enlarged Hamiltonian ``h1``.
+
+    The same complement correction as the density estimate, run on every band:
+    R = P_annulus (H - eps) psi, δψ = -R/(T_G - eps), and the second-order
+    eigenvalue shift is δε = <δψ | R> = -sum_annulus |R|^2/(T_G - eps) <= 0.
+    This is the per-band term the energy error sums over occupations.
+    """
+    box = sphere_to_box(coeffs, sph0.flat_idx, grid_shape)
+    c1 = box_to_sphere(box, sph1.flat_idx)
+    resid = h1.apply(c1) - eig[:, None] * c1
+    annulus = h1.t > ecut * (1.0 + 1e-9)
+    denom = torch.clamp(h1.t[None, :] - eig[:, None], min=1e-3)
+    dpsi = torch.where(annulus[None, :], -resid / denom.to(resid.dtype),
+                       torch.zeros_like(resid))
+    return (dpsi.conj() * resid).real.sum(dim=1)  # (nband,) <= 0
+
+
+@torch.no_grad()
+def estimate_eigenvalue_error(
+    res: SCFResult,
+    *,
+    ecut_large: float | None = None,
+    factor: float = 2.5,
+    bands=None,
+) -> EigenvalueError:
+    """Estimate the plane-wave discretization error of the KS eigenvalues.
+
+    Reuses the complement correction of the density/energy estimate. The term
+    the energy error already sums over occupations, δε_i = <δψ_i | R_i>, is
+    exactly the second-order eigenvalue shift; running it on the empty bands as
+    well turns the estimator into a band-structure and band-gap error tool. The
+    shift is a definite lowering (δε <= 0), so the occupation-weighted sum of
+    the occupied-band shifts reproduces ``estimate_density_error(...).denergy``.
+
+    Norm-conserving, nspin=1 or 2. ``bands`` selects a subset (an index list or
+    slice); None uses every band the SCF computed -- keep the default for gap
+    analysis, which needs the frontier bands.
+    """
+    if isinstance(res, dict):
+        raise NotImplementedError(
+            "eigenvalue error is norm-conserving only for now (no USPP/PAW)")
+    system = res.system
+    grid = system.grid
+    device = res.v_eff.device
+    ecut = float(system.ecut)
+    nspin = int(getattr(res, "nspin", 1))
+    if ecut_large is None:
+        ecut_large = factor * ecut
+    if gmax_from_ecut(ecut_large) > 2.0 * gmax_from_ecut(ecut) * (1.0 + 1e-9):
+        raise ValueError(
+            f"ecut_large={ecut_large:.1f} eV exceeds 4*ecut={4 * ecut:.1f} eV; the "
+            "enlarged sphere would not fit the density FFT box. Lower ecut_large."
+        )
+
+    spins = [None] if nspin == 1 else list(range(nspin))
+    deig_s, eig_s = [], []
+    for sp in spins:
+        v_eff_sp = res.v_eff if sp is None else res.v_eff[sp]
+        deig_k, eig_k = [], []
+        for ik, sph0 in enumerate(system.spheres):
+            coeffs, eig = _bands_at(res, ik, sp)
+            sel = slice(None) if bands is None else bands
+            c_sel, eps_sel = coeffs[sel], eig[sel]
+            sph1, h1 = _enlarged_hamiltonian(
+                res, sph0.k_frac, ecut_large, device, v_eff=v_eff_sp)
+            deig_k.append(
+                _band_eig_error(h1, sph0, sph1, c_sel, eps_sel, grid.shape, ecut))
+            eig_k.append(eps_sel.clone())
+        deig_s.append(deig_k)
+        eig_s.append(eig_k)
+
+    if nspin == 1:
+        deig, eig = deig_s[0], eig_s[0]
+    else:
+        deig, eig = deig_s, eig_s
+    return EigenvalueError(deig=deig, eig=eig, ecut=ecut,
+                           ecut_large=ecut_large, nspin=nspin)
+
+
+def estimate_gap_error(res: SCFResult, eigerr: EigenvalueError, *,
+                       occ_threshold: float | None = None) -> dict:
+    """Band-gap discretization error from a full-band ``EigenvalueError``.
+
+    Locates the valence-band maximum and conduction-band minimum over the BZ
+    (and both spin channels), then reports the base gap, the extrapolated gap
+    (eps + δε at each edge), and their difference. The eigenvalue error must
+    have been computed with the default ``bands=None`` so the band index lines
+    up with the occupations. Raises ValueError for a metal/semimetal (VBM >=
+    CBM) or when no empty band is available to resolve the CBM.
+    """
+    nspin = int(getattr(res, "nspin", 1))
+    full = 2.0 if nspin == 1 else 1.0
+    thr = 0.5 * full if occ_threshold is None else occ_threshold
+    deig_s = [eigerr.deig] if nspin == 1 else eigerr.deig
+    spins = [None] if nspin == 1 else list(range(nspin))
+
+    vbm, cbm = -math.inf, math.inf
+    dvbm = dcbm = 0.0
+    vk = ck = vsp = csp = -1
+    for isp, sp in enumerate(spins):
+        for ik in range(len(res.system.spheres)):
+            occ = res.occupations[ik] if sp is None else res.occupations[sp][ik]
+            _, eig = _bands_at(res, ik, sp)
+            de = deig_s[isp][ik]
+            n = de.shape[0]
+            occ, eig = occ[:n], eig[:n]
+            filled = occ > thr
+            if bool(filled.any()):
+                iv = int(torch.where(filled)[0].max())
+                if float(eig[iv]) > vbm:
+                    vbm, dvbm, vk, vsp = float(eig[iv]), float(de[iv]), ik, isp
+            empty = ~filled
+            if bool(empty.any()):
+                ic = int(torch.where(empty)[0].min())
+                if float(eig[ic]) < cbm:
+                    cbm, dcbm, ck, csp = float(eig[ic]), float(de[ic]), ik, isp
+
+    if not (math.isfinite(vbm) and math.isfinite(cbm)):
+        raise ValueError(
+            "cannot resolve a gap: no empty band available -- increase nbands")
+    if vbm >= cbm:
+        raise ValueError(
+            f"system is metallic/semimetallic (VBM {vbm:.3f} >= CBM {cbm:.3f} "
+            "eV); band-gap error is undefined")
+    gap, dgap = cbm - vbm, dcbm - dvbm
+    return {
+        "gap_eV": gap,
+        "gap_extrapolated_eV": gap + dgap,
+        "dgap_eV": dgap,
+        "vbm_eV": vbm, "cbm_eV": cbm,
+        "dvbm_eV": dvbm, "dcbm_eV": dcbm,
+        "direct": (vk == ck and vsp == csp),
+    }
 
 
 # NOTE on stress. The naive fixed-δP linearization that works for forces,

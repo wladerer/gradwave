@@ -146,6 +146,10 @@ def _error_lines(err):
     if "force_error_max_eV_ang" in err:
         pairs.append(("δF max", f"{err['force_error_max_eV_ang']:.3e} eV/Å"))
         pairs.append(("δF rms", f"{err['force_error_rms_eV_ang']:.3e} eV/Å"))
+    if "gap_eV" in err:
+        pairs.append(("gap", f"{err['gap_eV']:.4f} eV"))
+        pairs.append(("gap → limit", f"{err['gap_extrapolated_eV']:.4f} eV"))
+        pairs.append(("δgap", f"{err['dgap_eV']:.4e} eV"))
     lines += _cols(pairs)
     lines.append(f"   {err['note']}")
     return lines
