@@ -204,6 +204,16 @@ anisotropy torque `-dE/dn`, and integrating it over the sphere reconstructs the
 surface — and that torque is the machinery we already have, applied to the total
 moment instead of a local one.
 
+**Proof-of-physics landed (2026-07-18): the two-point MAE of L1_0 FePt by full SOC
+SCF is correct** — +2.55 meV/cell (+1.28 meV/atom), easy axis [001], magnitude in
+the literature band, both orientations converged to ~1e-11 eV (`examples/
+fept_mae.py`, 144 k, on the asus CPU). The 48-k mesh gives the WRONG easy axis
+(−1.39 meV/cell toward [100]) — the textbook sampling-error sign flip, measured
+here directly. So the remaining work is exactly the cost problem below: the
+force-theorem evaluator to make dense-k sweeps and full E(theta, phi) maps
+affordable, plus magnetic-space-group reduction (next section) for the ~4-8x
+k-savings.
+
 Three things are genuinely in the way, and the third is the only real code.
 
 - **Precision floor.** `test_noncollinear.py` pins rotation-invariance (MAE ≡ 0
