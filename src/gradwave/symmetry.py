@@ -125,17 +125,20 @@ def coupled_axis_groups(sg: SpaceGroup) -> list[tuple[int, ...]]:
     return groups
 
 
-def reduce_mesh(mesh, shift, sg: SpaceGroup, time_reversal: bool = True):
-    """IBZ reduction of a Γ-centered MP mesh. Returns (k_frac (nk,3), weights).
+def _k_ops(rotations) -> list[np.ndarray]:
+    """Reciprocal-space integer action of fractional rotations: k' = W⁻ᵀ k."""
+    return [np.round(np.linalg.inv(w).T).astype(np.int64) for w in rotations]
 
-    Only valid for unshifted meshes (asserted by the caller); orbits are taken
-    under {W⁻ᵀ} and optionally time reversal.
+
+def _orbit_reduce(mesh, ops_t):
+    """Fold a Γ-centered MP mesh into orbits under integer k-space ops.
+
+    ops_t is a list of (3,3) integer matrices acting on the mesh integers m
+    (k = m/n). Returns (k_frac (nk,3) in (-1/2,1/2], weights summing to 1).
     """
     mesh = np.asarray(mesh, dtype=np.int64)
     grids = [np.arange(n) for n in mesh]
     mm = np.stack(np.meshgrid(*grids, indexing="ij"), -1).reshape(-1, 3)  # integer m, k=m/n
-
-    inv_rots_t = np.array([np.round(np.linalg.inv(w).T).astype(np.int64) for w in sg.rotations])
 
     def key_of(m_int):
         return tuple(m_int % mesh)
@@ -147,12 +150,7 @@ def reduce_mesh(mesh, shift, sg: SpaceGroup, time_reversal: bool = True):
     for i, m in enumerate(mm):
         if owner[i] >= 0:
             continue
-        orbit = set()
-        for w_t in inv_rots_t:
-            im = w_t @ m
-            orbit.add(index[key_of(im)])
-            if time_reversal:
-                orbit.add(index[key_of(-im)])
+        orbit = {index[key_of(w_t @ m)] for w_t in ops_t}
         rep = len(reps)
         for j in orbit:
             owner[j] = rep
@@ -164,6 +162,109 @@ def reduce_mesh(mesh, shift, sg: SpaceGroup, time_reversal: bool = True):
     w = np.array(weights)
     assert abs(w.sum() - 1.0) < 1e-12
     return kfrac, w
+
+
+def reduce_mesh(mesh, shift, sg: SpaceGroup, time_reversal: bool = True):
+    """IBZ reduction of a Γ-centered MP mesh. Returns (k_frac (nk,3), weights).
+
+    Only valid for unshifted meshes (asserted by the caller); orbits are taken
+    under {W⁻ᵀ} and optionally time reversal.
+    """
+    ops_t = _k_ops(sg.rotations)
+    if time_reversal:
+        ops_t = ops_t + [-w for w in ops_t]
+    return _orbit_reduce(mesh, ops_t)
+
+
+@dataclass(frozen=True)
+class MagneticGroup:
+    """Shubnikov magnetic space group of a (possibly non-collinear) moment set.
+
+    `unitary` ops leave the moments invariant and act exactly like an ordinary
+    SpaceGroup (drop-in for RhoSymmetrizer/BecsumSymmetrizer). The anti-unitary
+    set holds ops that reverse every moment and therefore survive only combined
+    with time reversal (g·T); they act on k as −W⁻ᵀ and add a −1 to any axial
+    (m⃗) channel. With all moments zero this is the grey group: every op appears
+    in both sets, and the magnetic k-fold reduces to reduce_mesh(..., TR=True).
+    """
+
+    unitary: SpaceGroup
+    anti_rotations: np.ndarray  # (n_anti, 3, 3) int fractional W
+    anti_translations: np.ndarray  # (n_anti, 3) fractional w
+    anti_atom_map: np.ndarray  # (n_anti, na)
+
+    @property
+    def n_unitary(self) -> int:
+        return self.unitary.n_ops
+
+    @property
+    def n_anti(self) -> int:
+        return len(self.anti_rotations)
+
+    def combined(self) -> SpaceGroup:
+        """Unitary + anti-unitary spatial parts as one SpaceGroup (in that
+        order — axial factors index ops ≥ n_unitary as the anti set)."""
+        return SpaceGroup(
+            rotations=np.concatenate([self.unitary.rotations, self.anti_rotations]),
+            translations=np.concatenate([self.unitary.translations, self.anti_translations]),
+            atom_map=np.concatenate([self.unitary.atom_map, self.anti_atom_map]),
+            international=self.unitary.international,
+            origin_shift=self.unitary.origin_shift,
+        )
+
+
+def magnetic_spacegroup(
+    sg: SpaceGroup, magmoms, cell: np.ndarray, tol: float = 1e-5
+) -> MagneticGroup:
+    """Filter the paramagnetic group by its action on the atomic moments.
+
+    Moments are axial vectors: an op with fractional rotation W (Cartesian
+    S = Aᵀ W A⁻ᵀ) sends m⃗_a on atom a to det(S)·S·m⃗_a on atom map(op, a).
+    Ops with m⃗' = m⃗ everywhere are unitary; m⃗' = −m⃗ everywhere survive as
+    anti-unitary g·T; anything else is dropped (they'd relate *different*
+    magnetic configurations). Cross-checked against spglib's
+    get_magnetic_symmetry in tests — this filter inherits find_spacegroup's
+    dedup and atom mapping instead of re-deriving them.
+    """
+    m = np.atleast_2d(np.asarray(magmoms, dtype=float))
+    a_t = np.asarray(cell, dtype=float).T
+    a_t_inv = np.linalg.inv(a_t)
+    scale = max(1.0, float(np.abs(m).max()))
+    keep_u, keep_a = [], []
+    for iop, w_mat in enumerate(sg.rotations):
+        s = a_t @ w_mat @ a_t_inv
+        r_ax = np.linalg.det(s) * s  # axial (pseudo-vector) action
+        m_img = m @ r_ax.T  # det(S)·S·m⃗_a, per atom
+        m_tgt = m[sg.atom_map[iop]]  # moments at the image sites
+        if np.abs(m_img - m_tgt).max() < tol * scale:
+            keep_u.append(iop)
+        if np.abs(m_img + m_tgt).max() < tol * scale:
+            keep_a.append(iop)
+    unitary = SpaceGroup(
+        rotations=sg.rotations[keep_u],
+        translations=sg.translations[keep_u],
+        atom_map=sg.atom_map[keep_u],
+        international=sg.international,
+        origin_shift=sg.origin_shift,
+    )
+    return MagneticGroup(
+        unitary=unitary,
+        anti_rotations=sg.rotations[keep_a],
+        anti_translations=sg.translations[keep_a],
+        anti_atom_map=sg.atom_map[keep_a],
+    )
+
+
+def reduce_mesh_magnetic(mesh, shift, mg: MagneticGroup):
+    """Magnetic-IBZ reduction of a Γ-centered MP mesh under a Shubnikov group.
+
+    Unitary ops act on k as W⁻ᵀ; anti-unitary ops (g·T) as −W⁻ᵀ (time reversal
+    sends k → −k). Zero moments (grey group) reproduce
+    reduce_mesh(..., time_reversal=True) exactly. Returns (k_frac, weights).
+    """
+    ops_t = _k_ops(mg.unitary.rotations)
+    ops_t += [-w for w in _k_ops(mg.anti_rotations)]
+    return _orbit_reduce(mesh, ops_t)
 
 
 class RhoSymmetrizer:
@@ -220,6 +321,58 @@ class RhoSymmetrizer:
         flat = rho_g_box.reshape(-1) * self.mask
         acc = (self.phase * flat[self.idx]).mean(dim=0) * self.mask
         return acc.reshape(self.shape)
+
+
+class MagneticSymmetrizer:
+    """G-space symmetrization of (ρ, m⃗) under a magnetic (Shubnikov) group.
+
+    The spatial part is a RhoSymmetrizer over the COMBINED op list (unitary
+    then anti-unitary): ρ and m⃗ are real fields, so time reversal itself acts
+    trivially on their G-space maps and only the spatial parts of the
+    anti-unitary ops fold charge. The m⃗ channels additionally mix through the
+    axial 3×3  s_T·det(S)·S  per op, with s_T = −1 on the anti-unitary set
+    (T reverses magnetization). Both ρ and m⃗ are thus constrained by the FULL
+    magnetic group — the anti-unitary half is not lost by working in the
+    magnetic IBZ of reduce_mesh_magnetic.
+    """
+
+    def __init__(self, shape, mg: MagneticGroup, cell: np.ndarray, dens_mask=None):
+        combined = mg.combined()
+        self.rho_sym = RhoSymmetrizer(shape, combined, dens_mask=dens_mask)
+        a_t = np.asarray(cell, dtype=float).T
+        a_t_inv = np.linalg.inv(a_t)
+        ax = []
+        for iop, w_mat in enumerate(combined.rotations):
+            s = a_t @ w_mat @ a_t_inv
+            r_ax = np.linalg.det(s) * s
+            if iop >= mg.n_unitary:
+                r_ax = -r_ax  # s_T: time reversal flips m⃗
+            ax.append(r_ax)
+        self.axial = torch.as_tensor(np.stack(ax), dtype=torch.float64)
+        self.shape = tuple(shape)
+
+    def to(self, device) -> "MagneticSymmetrizer":
+        new = object.__new__(MagneticSymmetrizer)
+        new.rho_sym = self.rho_sym.to(device)
+        new.axial = self.axial.to(device)
+        new.shape = self.shape
+        return new
+
+    def apply(self, rho_g_box: torch.Tensor) -> torch.Tensor:
+        """Symmetrize ρ(G) on the dense box: (n1,n2,n3) complex → same."""
+        return self.rho_sym.apply(rho_g_box)
+
+    def apply_m(self, m_g_box: torch.Tensor) -> torch.Tensor:
+        """Symmetrize m⃗(G): (3, n1,n2,n3) complex → same.
+
+        m_α(G) ← (1/N) Σ_op  ax[op]_{αβ} · e^{−2πi m·w_op} · m_β(W_opᵀ G).
+        """
+        rs = self.rho_sym
+        flat = m_g_box.reshape(3, -1) * rs.mask
+        gathered = flat[:, rs.idx]  # (3, nops, N)
+        mixed = torch.einsum("oab,bon->aon", self.axial.to(flat.dtype), gathered)
+        acc = (rs.phase * mixed).mean(dim=1) * rs.mask
+        return acc.reshape(3, *self.shape)
 
 
 def symmetrize_forces(forces: torch.Tensor, sg: SpaceGroup, cell: np.ndarray) -> torch.Tensor:
