@@ -194,6 +194,126 @@ def test_grad_energy_equals_hamiltonian_spin():
             assert float(gap / expected.abs().max()) < 1e-10, f"spin {sp}"
 
 
+def _eh_gap_uspp(upf_name, nb, occ_values, ecut_ry=16.0, seed=0):
+    """USPP/PAW gate: grad E == 2 w f (H c) with H's screened D built from
+    the SAME state (v_eff from ρ[c] incl. augmentation, ddd from becsum[c]).
+    This is the exact regime of the original ddd bug: the one-center term
+    enters E as e1c_t(becsum) and enters H as ddd = ∂e1c/∂becsum — the gate
+    fails unless they are derivatives of each other through the full
+    ρ_aug/Q̃/phase chain. No S term appears: at unconstrained coefficients
+    the energy's gradient IS Hc (εSc arises only from the orthonormality
+    constraint at stationarity)."""
+    from gradwave.constants import HBAR2_2M
+    from gradwave.core.density import sigma_from_rho
+    from gradwave.core.fftbox import g_to_r
+    from gradwave.core.hamiltonian import becp, projectors
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.pseudo.upf_paw import parse_upf_paw
+    from gradwave.scf.paw_onsite import OneCenter
+    from gradwave.scf.uspp import setup_uspp
+    from gradwave.scf.uspp_loop import _HkS, uspp_potentials_dscr
+
+    a = 5.43
+    lattice = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0.0, 0.0], [1.45, 1.27, 1.41]])  # rattled, P1
+    paw = parse_upf_paw(FIX / "pseudos" / upf_name)
+    system = setup_uspp(lattice, pos, [0, 0], [paw], ecut=ecut_ry * RY,
+                        kmesh=(2, 1, 1))
+    xc = PBE()
+    grid, spheres = system.grid, system.spheres
+    nk, vol, shape = len(spheres), grid.volume, grid.shape
+    kw = system.kweights
+    occ = torch.tensor(occ_values, dtype=RDTYPE)[None, :].repeat(nk, 1)
+    occ[1:] = occ[1:].flip(dims=(1,))
+
+    projs = [projectors(pd, system.positions) for pd in system.proj_data]
+    phase_arg = system.g_sphere @ system.positions.T
+    phase_pos = torch.exp(torch.complex(torch.zeros_like(phase_arg), phase_arg))
+    onec = ([OneCenter(p, xc) for p in system.paws]
+            if any(p.is_paw for p in system.paws) else None)
+    vloc_g = local_potential_g(system.positions,
+                               torch.tensor(system.species_of_atom),
+                               system.vloc_tables, grid.g_cart, vol)
+    vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
+
+    cs = []
+    for ik, sph in enumerate(spheres):
+        gen = torch.Generator().manual_seed(seed + 31 * ik)
+        c = (torch.randn(nb, sph.npw, generator=gen, dtype=torch.float64)
+             + 1j * torch.randn(nb, sph.npw, generator=gen, dtype=torch.float64))
+        c = c.to(CDTYPE) / (1.0 + HBAR2_2M * sph.kpg2)
+        c = c / torch.linalg.norm(c, dim=-1, keepdim=True)
+        cs.append(c.requires_grad_(True))
+
+    # ---- E(c), mirroring _scf_iteration's density/energy assembly ----
+    rho_sm = torch.zeros(shape, dtype=RDTYPE)
+    becps = []
+    rho_ij = [torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE)
+              for (s0, s1) in system.atom_slices]
+    for ik, sph in enumerate(spheres):
+        psi = g_to_r(cs[ik], sph.flat_idx, shape)
+        w = kw[ik] * occ[ik]
+        rho_sm = rho_sm + torch.einsum("b,bxyz->xyz", w, psi.abs() ** 2) / vol
+        b = becp(projs[ik], cs[ik])
+        becps.append(b)
+        for ia, (s0, s1) in enumerate(system.atom_slices):
+            ba = b[:, s0:s1]
+            rho_ij[ia] = rho_ij[ia] + torch.einsum(
+                "b,bi,bj->ij", w.to(CDTYPE), ba.conj(), ba)
+    rho_ij = [0.5 * (m + m.conj().T) for m in rho_ij]
+    aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE)
+    for ia, sp in enumerate(system.species_of_atom):
+        aug_sph = aug_sph + phase_pos[:, ia].conj() * torch.einsum(
+            "ij,ijg->g", rho_ij[ia], system.aug[sp].q_g)
+    aug_box = torch.zeros(grid.n_points, dtype=CDTYPE)
+    aug_box[system.sphere_idx] = aug_sph / vol
+    rho_aug = torch.fft.ifftn(aug_box.reshape(shape) * grid.n_points,
+                              dim=(-3, -2, -1)).real
+    rho_tot = rho_sm + rho_aug
+
+    rho_g = r_to_g(rho_tot.to(CDTYPE))
+    core = system.rho_core
+    rho_xc = rho_tot if core is None else rho_tot + core
+    sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
+    e = (kinetic_energy(cs, occ, kw, spheres)
+         + hartree_energy(rho_g, grid.g2, vol)
+         + xc.energy(rho_xc, vol, sigma)
+         + local_energy(rho_g, vloc_g, vol)
+         + nonlocal_energy(becps, system.proj_data[0].dij_full, occ, kw))
+    if onec is not None:
+        for ia, sp in enumerate(system.species_of_atom):
+            e = e + onec[sp].e1c_t([rho_ij[ia].real])
+    grads = torch.autograd.grad(e, cs)
+
+    # ---- H side: the SCF's own potentials + screened D at the same state ----
+    with torch.no_grad():
+        veff_s, dscr_s, _ = uspp_potentials_dscr(
+            system, xc, [rho_tot.detach()],
+            [[m.detach() for m in rho_ij]], vloc_r, phase_pos, onec)
+        gap = 0.0
+        for ik, sph in enumerate(spheres):
+            hs = _HkS(sph, shape, veff_s[0], system.proj_data[ik], projs[ik],
+                      dscr_s[0], system.q_full)
+            expected = 2.0 * kw[ik] * occ[ik, :, None] * hs.h(cs[ik].detach())
+            gap = max(gap, float((grads[ik] - expected).abs().max()
+                                 / expected.abs().max()))
+    return gap
+
+
+def test_grad_energy_equals_hamiltonian_uspp():
+    """Bare USPP (rrkjus): gates the Q̃ augmentation-density chain and the
+    ∫v_eff Q screening of D against autograd of the assembled energy."""
+    assert _eh_gap_uspp("Si.pbe-n-rrkjus_psl.1.0.0.UPF", nb=5,
+                        occ_values=[2.0, 2.0, 2.0, 1.2, 0.4]) < 1e-10
+
+
+def test_grad_energy_equals_hamiltonian_paw():
+    """PAW (kjpaw): additionally gates ddd == ∂E_1c/∂becsum through the full
+    orbital chain — the term class of the original ddd bug."""
+    assert _eh_gap_uspp("Si.pbe-n-kjpaw_psl.1.0.0.UPF", nb=5,
+                        occ_values=[2.0, 2.0, 2.0, 1.2, 0.4]) < 1e-10
+
+
 def test_potentials_equal_autograd_of_energies():
     """Closed-form v_H, v_loc vs autograd of E_H, E_loc — two independent
     implementations of the same functional derivative must agree."""

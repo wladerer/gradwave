@@ -64,6 +64,17 @@ gates the identical code path). Covered: LDA, PBE (the σ chain), NLCC
 autograd check on v_H and v_loc. A deliberately mismatched E/H pair (LDA vs
 PBE) registers at 1.8e-3, seven orders above the gate, so the test has teeth.
 
+The USPP/PAW version of the gate uses `_HkS` at
+`uspp_potentials_dscr(...)` (the USPP loop's potential + screened-D
+assembly, extracted the same way): grad E == 2wf(Hc) where H's
+D = dij + ∫v_eff Q̃ + ddd(becsum), with v_eff from ρ[c] including the
+augmentation density and ddd from becsum[c]. No S term appears: at
+unconstrained coefficients the energy's gradient IS Hc; εSc only arises
+from the orthonormality constraint at stationarity. The PAW variant is the
+exact term class of the original `ddd` bug — it passes only because ddd is
+autograd of `e1c_t` at the same becsum, and the gate composes that with the
+full Q̃/phase/ρ_aug orbital chain.
+
 Why off-stationarity matters: at a converged SCF point, an E/H inconsistency
 is second-order in the error and invisible; against QE it can be exactly
 invisible when shared. At a random state it is first-order and glaring. The
@@ -92,18 +103,24 @@ Rules learned the hard way, now policy:
 - A derivative test against QE is not a derivative test against our own
   energy. Do both.
 
-## Tier 1: metamorphic invariance battery (next)
+## Tier 1: metamorphic invariance battery (started)
 
 Exact identities of the theory under input transformations. The metamorphic
 testing literature (Kanewala; MorphQ found 14 confirmed Qiskit bugs with no
 oracle at all) says to impose them per layer, not only end-to-end, so
 compensating errors cannot hide.
 
-- **Supercell identity**: E(N×1×1 supercell at folded k) == N·E(primitive)
-  to solver tolerance. Same ecut means the supercell basis is exactly the
-  union of the folded primitive bases, so this is an identity, not a
-  convergence statement. One test exercises k-weights, Fermi level, Hartree
-  G=0, smearing entropy, and symmetrization at once.
+- **Supercell identity** (implemented,
+  `tests/integration/test_supercell_identity.py`): E(2×1×1 supercell at Γ)
+  == 2·E(primitive at k=(2,1,1)) on a rattled P1 geometry, with the
+  supercell FFT grid pinned to 2× the primitive grid so the quadratures
+  sample identical points. Same ecut means the supercell basis is exactly
+  the union of the folded primitive bases, so this is an identity at solver
+  tolerance, not a convergence statement (passes at <2e-6 eV/atom).
+  Eigenvalues fold (Γ supercell == sorted union over folded k) and forces
+  map rigidly onto the copies. One test exercises k-weights, Fermi filling,
+  Hartree G=0 ownership, nonlocal phases, and the density assembly at once.
+  Extensions: N along other axes, smeared metals, USPP/PAW systems.
 - Rigid translation (E invariant, forces mapped rigidly), atom permutation,
   equivalent-cell re-parameterization (Niggli/rotated frame), k → −k,
   random U(N) rotation inside degenerate/occupied subspaces (ρ, E, forces
@@ -158,11 +175,8 @@ Hamiltonian terms, same pattern:
 
 - +U (V_U from Dudarev D at random occupation matrices vs grad of E_U
   through `occupation_matrices`)
-- USPP/PAW (generalized eigenproblem: grad E == 2wf(Hc − εSc) needs the
-  S-side treated explicitly; screened D and `ddd_paw` from the previous
-  becsum lag one iteration in the SCF by design, so gate the consistent
-  pair, not the lagged one)
 - SOC spinors (doubled pw axis; same contraction)
+- nspin=2 USPP/PAW (per-channel becsum + spin ddd)
 - smeared occupations as functions of ε (adds the entropy chain; the fixed-f
   identity is what the SCF actually iterates, so this is optional)
 

@@ -179,6 +179,73 @@ class _IterOps:
 _MP_CROSSOVER = 1e-5  # diago tol above this runs the fp32 draft solves
 
 
+def uspp_potentials_dscr(system, xc, rho_s, rho_ij_s, vloc_r, phase_pos, onec):
+    """(veff_s, dscr_s, e_onec) from the per-channel FULL densities (smooth +
+    aug) and per-atom becsums — THE assembly the USPP/PAW SCF iterates with.
+    A standalone function (not inlined in `_scf_iteration`) so the
+    off-stationarity E↔H consistency gate can test the exact potential and
+    screened D the solver applies
+    (tests/unit/test_energy_hamiltonian_consistency.py).
+
+    rho_ij_s: [spin][atom] becsum matrices (the mixer-side becsum in the SCF;
+    the same-state becsum in the gate). onec: per-species OneCenter list for
+    PAW, None for bare USPP."""
+    grid = system.grid
+    dev = system.positions.device
+    nspin = len(rho_s)
+    rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
+    rho_g_box = r_to_g(rho_tot.to(CDTYPE))
+    v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
+                           dim=(-3, -2, -1)) * grid.n_points).real
+    core = system.rho_core
+    if nspin == 1:
+        v_xc, _ = vxc_potential(xc, rho_tot if core is None else rho_tot + core,
+                                grid)
+        veff_s = [v_h + v_xc + vloc_r]
+    else:
+        from gradwave.scf.loop import vxc_spin_potential
+
+        c2 = None if core is None else 0.5 * core
+        v_up, v_dn, _ = vxc_spin_potential(
+            xc,
+            rho_s[0] if core is None else rho_s[0] + c2,
+            rho_s[1] if core is None else rho_s[1] + c2,
+            grid,
+        )
+        veff_s = [v_h + v_up + vloc_r, v_h + v_dn + vloc_r]
+
+    # screened D per spin/atom: D_ij + Σ_G ṽ_σ(G) e^{iGτ} Q̃_ij(G)*
+    mask_flat = grid.dens_mask.reshape(-1)
+    dscr_s = []
+    for isp in range(nspin):
+        v_eff_g = r_to_g(veff_s[isp].to(CDTYPE)).reshape(-1)[mask_flat]
+        dscr = torch.zeros_like(system.q_full)
+        for a, sp in enumerate(system.species_of_atom):
+            s0, s1 = system.atom_slices[a]
+            contr = torch.einsum(
+                "ijg,g->ij", system.aug[sp].q_g.conj(), v_eff_g * phase_pos[:, a]
+            )
+            herm = 0.5 * (contr + contr.conj().T)
+            dscr[s0:s1, s0:s1] = herm.real
+        dscr_s.append(dscr + system.proj_data[0].dij_full)
+    e_onec = torch.zeros((), dtype=RDTYPE, device=dev)
+    if onec is not None:
+        dscr_s = [d.clone() for d in dscr_s]
+        for a, sp in enumerate(system.species_of_atom):
+            s0, s1 = system.atom_slices[a]
+            # one-center runs on CPU (per-atom radial work); ddd crosses back
+            bec_a = (rho_ij_s[0][a] if nspin == 1
+                     else [rho_ij_s[0][a], rho_ij_s[1][a]])
+            e1c, ddd = onec[sp].energy_and_ddd(bec_a)
+            e_onec = e_onec + e1c
+            if nspin == 1:
+                dscr_s[0][s0:s1, s0:s1] += ddd.to(dev)
+            else:
+                for isp in range(nspin):
+                    dscr_s[isp][s0:s1, s0:s1] += ddd[isp].to(dev)
+    return veff_s, dscr_s, e_onec
+
+
 def _build_iter_ops(system: USPPSystem, xc, *, nspin=1, smearing="none",
                     width=0.1, batched=True, hubbard=None,
                     mixed_precision=False) -> _IterOps:
@@ -245,58 +312,10 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
             occupation_matrices,
         )
 
-    def _becsum_for_onec(a):
-        if nspin == 1:
-            return rho_ij_mix[0][a]
-        return [rho_ij_mix[0][a], rho_ij_mix[1][a]]
-
-    rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
-    rho_g_box = r_to_g(rho_tot.to(CDTYPE))
-    v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
-                           dim=(-3, -2, -1)) * grid.n_points).real
+    veff_s, dscr_s, e_onec = uspp_potentials_dscr(
+        system, xc, rho_s, rho_ij_mix, vloc_r, phase_pos,
+        onec if is_paw else None)
     core = system.rho_core
-    if nspin == 1:
-        v_xc, _ = vxc_potential(xc, rho_tot if core is None else rho_tot + core,
-                                grid)
-        veff_s = [v_h + v_xc + vloc_r]
-    else:
-        from gradwave.scf.loop import vxc_spin_potential
-
-        c2 = None if core is None else 0.5 * core
-        v_up, v_dn, _ = vxc_spin_potential(
-            xc,
-            rho_s[0] if core is None else rho_s[0] + c2,
-            rho_s[1] if core is None else rho_s[1] + c2,
-            grid,
-        )
-        veff_s = [v_h + v_up + vloc_r, v_h + v_dn + vloc_r]
-
-    # screened D per spin/atom: D_ij + Σ_G ṽ_σ(G) e^{iGτ} Q̃_ij(G)*
-    dscr_s = []
-    for isp in range(nspin):
-        v_eff_g = r_to_g(veff_s[isp].to(CDTYPE)).reshape(-1)[mask_flat]
-        dscr = torch.zeros_like(system.q_full)
-        for a, sp in enumerate(system.species_of_atom):
-            s0, s1 = system.atom_slices[a]
-            contr = torch.einsum(
-                "ijg,g->ij", system.aug[sp].q_g.conj(), v_eff_g * phase_pos[:, a]
-            )
-            herm = 0.5 * (contr + contr.conj().T)
-            dscr[s0:s1, s0:s1] = herm.real
-        dscr_s.append(dscr + system.proj_data[0].dij_full)
-    e_onec = torch.zeros((), dtype=RDTYPE, device=dev)
-    if is_paw:
-        dscr_s = [d.clone() for d in dscr_s]
-        for a, sp in enumerate(system.species_of_atom):
-            s0, s1 = system.atom_slices[a]
-            # one-center runs on CPU (per-atom radial work); ddd crosses back
-            e1c, ddd = onec[sp].energy_and_ddd(_becsum_for_onec(a))
-            e_onec = e_onec + e1c
-            if nspin == 1:
-                dscr_s[0][s0:s1, s0:s1] += ddd.to(dev)
-            else:
-                for isp in range(nspin):
-                    dscr_s[isp][s0:s1, s0:s1] += ddd[isp].to(dev)
 
     eigs_s = []
     for isp in range(nspin):
