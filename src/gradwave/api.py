@@ -394,7 +394,7 @@ def _error_estimate_block(res, inp) -> dict:
 
     Cheap post-processing (no larger SCF): the first-order complement correction
     of Cancès et al. gives the estimated basis-set error in the energy (a
-    definite lowering), the density, and, for norm-conserving nspin=1, the
+    definite lowering), the density, and, for norm-conserving nspin=1 or 2, the
     Hellmann-Feynman forces. Reported as an indicator, not a rigorous bound.
     Degrades gracefully when the run's formalism/settings are outside coverage.
     """
@@ -431,7 +431,7 @@ def _error_estimate_block(res, inp) -> dict:
         "int_drho": float(drho.sum()) * vol / npts,
         "note": "first-order estimate, indicative not a rigorous bound",
     }
-    force_ok = (not uspp and nspin == 1
+    force_ok = (not uspp and nspin in (1, 2)
                 and getattr(system, "rho_core", None) is None)
     if force_ok:
         try:

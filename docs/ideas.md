@@ -326,8 +326,9 @@ thermal equation of state.
 ## Full nspin=2 and PAW coverage for every feature
 
 Coverage is uneven across the postscf features. Several are nspin=1 or NC only.
-`dielectric_born` is nspin=1 insulators, parts of the discretization-error force path
-are NC nspin=1, and the noncollinear and SOC PDOS paths have their own constraints.
+`dielectric_born` is nspin=1 insulators, the discretization-error force path
+is NC (nspin=1 or 2, no USPP/PAW), and the noncollinear and SOC PDOS paths have their
+own constraints.
 
 Make an explicit matrix of feature x {NC, USPP/PAW} x {nspin=1, 2} and close the
 gaps. Most of the per-channel machinery exists, so the work is threading the spin

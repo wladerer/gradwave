@@ -8,8 +8,8 @@ pass that needs no larger SCF, following the perturbation post-processing of
 Cancès et al.[[18]](bibliography.md#cances)
 
 Turn it on and the run reports how far the energy still has to fall, the
-extrapolated energy, the density error, and — for a norm-conserving spin-unpolarized
-run — the force error.
+extrapolated energy, the density error, and — for a norm-conserving run
+(spin-unpolarized or spin-polarized) — the force error.
 
 ## Theory
 
@@ -86,7 +86,7 @@ carries the same fields.
 | `free_energy_extrapolated_eV` | $F + \delta E$, the energy the cutoff is converging to |
 | `drho_L1_per_electron` | $\int |\delta\rho|$ per electron, the density-error norm |
 | `int_drho` | $\int \delta\rho$; near zero confirms the correction is charge-conserving |
-| `force_error_max_eV_ang`, `force_error_rms_eV_ang` | the force error (NC nspin=1 only) |
+| `force_error_max_eV_ang`, `force_error_rms_eV_ang` | the force error (NC nspin=1 or 2) |
 | `ecut_eV`, `ecut_large_eV` | the base and enlarged cutoffs |
 
 When the run is outside the supported coverage the block is
@@ -120,7 +120,7 @@ functional too, `estimate_density_error(res_uspp, ecut_large=30*RY, xc=PBE())`.
 |---|---|---|
 | density error | nspin=1, nspin=2 | nspin=1, nspin=2 |
 | energy error | nspin=1, nspin=2 | nspin=1, nspin=2 |
-| force error | **nspin=1 only** (no NLCC) | not available |
+| force error | nspin=1, nspin=2 (no NLCC) | not available |
 | stress error | not available (deferred) | not available |
 
 Symmetry is supported for the norm-conserving nspin=1 density, energy, and force

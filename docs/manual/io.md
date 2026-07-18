@@ -167,13 +167,13 @@ converged" without a cutoff sweep.
 The `<task>.json` gains an `error_estimate` block and the `<task>.out` a matching
 section. The reported fields are the estimated energy error `denergy_eV` (a definite
 lowering) and the extrapolated `free_energy_extrapolated_eV`, the density-error L1
-norm per electron, and, for norm-conserving nspin=1 runs, the Hellmann-Feynman force
-error (`force_error_max_eV_ang` and the rms). It is a first-order indicator, not a
+norm per electron, and, for norm-conserving runs (nspin=1 or 2), the Hellmann-Feynman
+force error (`force_error_max_eV_ang` and the rms). It is a first-order indicator, not a
 rigorous bound, so use it to gate convergence, not to quote an uncertainty. When the
 run is outside coverage, USPP or PAW with symmetry on for example, the block records
 `available: false` with the reason rather than failing the run. Coverage is
 norm-conserving and USPP/PAW for the energy and density error, norm-conserving
-nspin=1 for the force error.
+(nspin=1 or 2) for the force error.
 
 ## Checkpoints
 

@@ -113,6 +113,42 @@ def test_symmetric_force_error_matches_full_bz():
     assert float(resid.abs().max()) < 1e-10               # exactly invariant
 
 
+def test_nspin2_force_error_matches_nspin1():
+    """Force error for nspin=2 at zero moment reproduces the nspin=1 estimate.
+
+    The nonlocal channel now sums over spin channels; a nonmagnetic run splits
+    the nspin=1 orbitals into two identical half-occupied channels, so the two
+    estimates must agree to round-off. Uses a displaced two-atom cell so there
+    is a real force (and force error) to compare.
+    """
+    torch.set_num_threads(4)
+    upf = parse_upf(FIX / "Si_ONCV_PBE-1.2.upf")
+    a = 5.43
+    shift = 0.10 * np.array([1.0, 1, 1]) / np.sqrt(3)
+    pos = (np.array([[0.0, 0, 0], [a / 4, a / 4, a / 4]])
+           + np.array([[0, 0, 0], shift]))
+
+    def make():
+        return setup_system(a / 2 * FCC, pos, [0, 0], [upf], ecut=18 * RY,
+                            kmesh=(2, 2, 2), use_symmetry=False, nbands=8)
+
+    kw = dict(smearing="gaussian", width=0.1, etol=1e-10, rhotol=1e-9,
+              verbose=False)
+    r1 = scf(make(), PBE(), **kw)
+    r2 = scf(make(), SpinPBE(), nspin=2, start_mag=[0.0, 0.0], **kw)
+    e1 = estimate_density_error(r1, ecut_large=40 * RY)
+    e2 = estimate_density_error(r2, ecut_large=40 * RY)
+    f1 = estimate_force_error(r1, e1)
+    f2 = estimate_force_error(r2, e2)
+
+    assert float(f1.abs().max()) > 1e-4                 # a real signal to match
+    assert float((f1 - f2).abs().max()) < 1e-6          # spin summation exact
+    # The nspin=2 nonlocal channel loops over spins with per-spin δφ and
+    # occupations; the moment magnitude hits no separate branch, so the
+    # zero-moment limit already exercises the full spin path. A converged
+    # magnetic-metal force reference (Fe/Co/Ni ONCV) is too costly for CI.
+
+
 @pytest.mark.slow
 def test_nc_low_to_high_reduces_density_error():
     """The estimate correlates with the true low->high change and reduces it."""

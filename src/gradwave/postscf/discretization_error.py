@@ -28,7 +28,9 @@ path, so it does not affect solve performance; the cost is a handful of extra
 FFTs per occupied band plus (if requested) one dielectric solve.
 
 Coverage. Density and energy error: norm-conserving and ultrasoft/PAW, nspin=1
-and nspin=2. Force error: norm-conserving nspin=1. Symmetry: for norm-conserving
+and nspin=2. Force error: norm-conserving nspin=1 and nspin=2 (the nonlocal
+channel sums over spin channels; nspin=2 runs on the full BZ, since a magnetic
+run already requires use_symmetry=False). Symmetry: for norm-conserving
 nspin=1 the estimate runs on the IBZ k-points and folds the density error over
 the star (the same operator the SCF applies to rho), while the force error
 symmetrizes the output dF vector like ground-state forces. USPP/PAW, nspin=2,
@@ -518,47 +520,64 @@ def estimate_force_error(
     The first-order δP is used (drho_first_order together with dpsi) so the two
     channels stay consistent; a Dyson-dressed δρ would need the matching dressed
     δφ, which is future work.
+
+    Norm-conserving, nspin=1 or 2 (no NLCC). For nspin=2 the nonlocal channel
+    sums over the two spin channels — each with its own orbital corrections and
+    occupations (in [0,1]) — while the local channel already sees the
+    spin-summed density error ``drho_first_order``.
     """
     if err.uspp:
         raise NotImplementedError(
             "force error estimate is norm-conserving only; the USPP/PAW force "
             "needs the augmentation and one-center force terms in P(eps)")
-    if getattr(res, "nspin", 1) != 1:
-        raise NotImplementedError("force error estimate is nspin=1 only for now")
     if getattr(res.system, "rho_core", None) is not None:
         raise NotImplementedError("NLCC force term not supported in the error estimate")
+    nspin = int(getattr(res, "nspin", 1))
     system = res.system
     grid = system.grid
     device = res.v_eff.device
 
-    drho = err.drho_first_order  # consistent with err.dpsi
-    rho0 = res.rho.detach()
+    drho = err.drho_first_order  # consistent with err.dpsi; total (spin-summed) drho
+    rho0 = res.rho.detach()      # total density for nspin=1 and 2
 
     pos = system.positions.detach().clone().requires_grad_(True)
     eps = torch.zeros((), dtype=RDTYPE, device=device, requires_grad=True)
 
-    # local channel: density enters through rho_g
+    # local channel: total density enters through rho_g
     rho_e_g = r_to_g((rho0 + eps * drho).to(CDTYPE))
     vloc_g = local_potential_g(
         pos, system.species_index, system.vloc_tables, grid.g_cart, grid.volume
     )
     energy = local_energy(rho_e_g, vloc_g, grid.volume)
 
-    # nonlocal channel: orbital corrections enter through becp on the enlarged sphere
-    nk = len(err.spheres_large)
-    nocc_max = max(o.shape[0] for o in err.occ)
-    occ_t = torch.zeros(nk, nocc_max, dtype=RDTYPE, device=device)
-    becps = []
+    # nonlocal channel: orbital corrections enter through becp on the enlarged
+    # sphere, summed over spin channels. For nspin=1 the estimator returns flat
+    # per-k lists; for nspin=2 they are nested [spin][k], so normalize to a
+    # per-spin layout here. Each spin channel carries its own occupations
+    # (in [0,1]) and its own δφ.
+    if nspin == 1:
+        dpsi_s, psi_large_s, occ_s, sph_s = (
+            [err.dpsi], [err.psi_large], [err.occ], [err.spheres_large])
+    else:
+        dpsi_s, psi_large_s, occ_s, sph_s = (
+            err.dpsi, err.psi_large, err.occ, err.spheres_large)
+
+    nk = len(sph_s[0])
+    nocc_max = max(o.shape[0] for occ_k in occ_s for o in occ_k)
     dij_enl = None
-    for ik, sph1 in enumerate(err.spheres_large):
-        pd1 = _enlarged_projector_data(res, sph1, device)
-        if dij_enl is None:
-            dij_enl = pd1.dij_full
-        p1 = projectors(pd1, pos)  # differentiable in positions
-        c1_e = err.psi_large[ik] + eps * err.dpsi[ik]  # (n_occ, npw1), differentiable in eps
-        becps.append(becp(p1, c1_e))
-        occ_t[ik, : err.occ[ik].shape[0]] = err.occ[ik]
-    energy = energy + nonlocal_energy(becps, dij_enl, occ_t, system.kweights)
+    for isp in range(nspin):
+        occ_t = torch.zeros(nk, nocc_max, dtype=RDTYPE, device=device)
+        becps = []
+        for ik, sph1 in enumerate(sph_s[isp]):
+            pd1 = _enlarged_projector_data(res, sph1, device)
+            if dij_enl is None:
+                dij_enl = pd1.dij_full
+            p1 = projectors(pd1, pos)  # differentiable in positions
+            # (n_occ, npw1), differentiable in eps
+            c1_e = psi_large_s[isp][ik] + eps * dpsi_s[isp][ik]
+            becps.append(becp(p1, c1_e))
+            occ_t[ik, : occ_s[isp][ik].shape[0]] = occ_s[isp][ik]
+        energy = energy + nonlocal_energy(becps, dij_enl, occ_t, system.kweights)
     # Ewald has no δP dependence, so it drops out of ∂/∂ε.
 
     (de_deps,) = torch.autograd.grad(energy, eps, create_graph=True)
