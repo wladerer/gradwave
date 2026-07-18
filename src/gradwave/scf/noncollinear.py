@@ -92,12 +92,14 @@ class SpinorHamiltonian:
 
     def _band_chunk(self, nk: int, device, elem_bytes: int = 16) -> int:
         """Bands per chunk: the potential mix holds ~6 dense-grid temporaries
-        (two ψ components + products); keep each under ~250 MB on GPU.
-        elem_bytes lets the fp32 draft (8 B) take twice the bands of fp64."""
-        if device.type != "cuda":
-            return 1_000_000
+        (two ψ components + products); keep each under ~250 MB on GPU and
+        ~400 MB on CPU. The CPU bound matters at many k: an unchunked apply on
+        a 144-k SOC metal materializes (nk, 2·nb, grid) FFT temporaries — 8+ GB
+        — and OOM-kills small-RAM hosts (asus, 14 GB). elem_bytes lets the fp32
+        draft (8 B) take twice the bands of fp64."""
         n = self.shape[0] * self.shape[1] * self.shape[2]
-        return max(1, int(2.5e8 / (elem_bytes * n * max(nk, 1))))
+        budget = 2.5e8 if device.type == "cuda" else 4.0e8
+        return max(1, int(budget / (elem_bytes * n * max(nk, 1))))
 
     def apply(self, c: torch.Tensor) -> torch.Tensor:
         bk, m = self.bk, self.m
