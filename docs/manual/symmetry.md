@@ -1,7 +1,7 @@
 # Symmetry reduction
 
 Reducing the k-mesh to the irreducible Brillouin zone (IBZ) and symmetrizing the
-density each step is the single largest speed lever in gradwave, worth 5 to 14
+density each step is the largest single source of speedup in gradwave, giving 5 to 14
 times depending on the point group. It is on by default (`symmetry: true`) and
 gated by tests that check the reduced and full-mesh energies agree.
 
@@ -16,7 +16,7 @@ symmetry, so only one representative per orbit needs solving. gradwave finds the
 space group with spglib,[[17]](bibliography.md#togo) builds each k-point's orbit under the inverse-transpose
 rotations (plus $k \to -k$ when time reversal holds), and keeps one representative
 with a weight equal to its orbit size. A larger point group means larger orbits
-and a smaller IBZ: diamond Si ($Fd\bar{3}m$, 48 operations) folds a $4\times4\times4$
+and a smaller IBZ. For example, diamond Si ($Fd\bar{3}m$, 48 operations) folds a $4\times4\times4$
 mesh from 64 points to 8, matching QE.
 
 **Density symmetrization.** The self-consistent density must carry the full point-group
@@ -25,14 +25,14 @@ $G$-vector every SCF iteration,
 
 $$ \tilde\rho_\text{sym}(G) = \frac{1}{N_\text{ops}} \sum_{\{W|w\}} e^{-i G \cdot w}\, \tilde\rho(W^{-1} G), $$
 
-masked to the density sphere where the Miller-index map is exact. This projects
+masked to the density sphere where the Miller-index map is exact. This averaging projects
 out the small asymmetric component that an IBZ sum would otherwise leave, so the
-reduced run reproduces the full-mesh energy. PAW additionally symmetrizes the
+reduced calculation reproduces the full-mesh energy. PAW additionally symmetrizes the
 on-site occupancies (becsum), the same job QE's `PAW_symmetrize` does.
 
 ## Inspect the symmetry
 
-`find_spacegroup` and `reduce_mesh` work standalone — a pseudopotential is not
+`find_spacegroup` and `reduce_mesh` work standalone. A pseudopotential is not
 needed to count the IBZ.
 
 ```python
@@ -56,10 +56,10 @@ assert abs(w.sum() - 1.0) < 1e-12          # weights sum to one
 `SpaceGroup` with `.rotations`, `.translations`, `.atom_map`, `.international`,
 and `.n_ops`. `reduce_mesh(mesh, shift, sg, time_reversal=True)` returns the IBZ
 k-points and their weights. Reduction is valid for unshifted Γ-centered
-Monkhorst-Pack meshes; a shifted mesh may not be group-invariant, and the caller
+Monkhorst-Pack meshes. A shifted mesh may not be group-invariant, and the caller
 falls back to time-reversal-only folding.
 
-## Use it in a run
+## Use it in a calculation
 
 Symmetry is a single input flag, on by default:
 
@@ -69,13 +69,13 @@ symmetry: true        # IBZ reduction + density symmetrization (default)
 
 Set `symmetry: false` to run the full mesh. Under the hood `setup_system` /
 `setup_uspp` detect the space group, reduce the mesh, and attach a density
-symmetrizer that the SCF loop applies to the output density each iteration; a P1
+symmetrizer that the SCF loop applies to the output density each iteration. A P1
 cell (no symmetry) transparently falls back to the full mesh. From Python the
 same flag is `use_symmetry=True`.
 
 ## Validation
 
-The reduced and full-mesh runs must land the same energy, and the suite gates on
+The reduced and full-mesh calculations must give the same energy, and the suite gates on
 it:
 
 - norm-conserving Si and Al: IBZ vs full-mesh free energy agree to $5\times10^{-7}$ eV.
@@ -91,11 +91,11 @@ See [Performance](performance.md) for where the 5-to-14× speedup lands.
 
 - **Non-symmorphic operations must be commensurate with the grid.** A glide like
   the diamond $(\tfrac14, \tfrac14, \tfrac14)$ needs FFT dimensions divisible by 4.
-  gradwave equalizes symmetry-coupled axes automatically; on an incommensurate box
+  gradwave equalizes symmetry-coupled axes automatically. On an incommensurate box
   the full-mesh fixed point itself carries a ~$2\times10^{-4}$ asymmetric density
   component, so an IBZ-vs-full comparison fails at $10^{-4}$ with no bug present.
 - **The symmetrizer is masked to the density sphere.** At the box Nyquist boundary
-  the folded Miller map misidentifies $G$-vectors for glide phases; physical
+  the folded Miller map misidentifies $G$-vectors for glide phases. Physical
   densities are zero there, and masking makes the operator exactly idempotent.
 - **Turn symmetry off for symmetry-breaking work.** Antiferromagnetic and
   ferrimagnetic orderings, a real response to a perturbation (the implicit-differentiation
@@ -103,8 +103,8 @@ See [Performance](performance.md) for where the 5-to-14× speedup lands.
   all need `use_symmetry=False`, because the perturbation lowers the crystal
   symmetry. gradwave raises a clear error when a magnetic ordering needs it.
 - **Time reversal** ($k \to -k$) is on by default and shrinks the IBZ further. It
-  is switched off for magnetic systems where $k \not\equiv -k$; a nonmagnetic
-  spin-orbit run keeps it through Kramers degeneracy.
+  is switched off for magnetic systems where $k \not\equiv -k$. A nonmagnetic
+  spin-orbit calculation keeps it through Kramers degeneracy.
 
 ## Next
 

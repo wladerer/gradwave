@@ -1,9 +1,14 @@
 # Non-collinear magnetism and spin-orbit coupling
 
 gradwave solves the two-component (spinor) Kohn-Sham problem, so magnetic moments
-can point in any direction and spin-orbit coupling (SOC) can mix them. The showcase
-is a topological band inversion: in Bi₂Se₃ spin-orbit coupling swaps the parity of
+can point in any direction and spin-orbit coupling (SOC) can mix them. A topological
+band inversion demonstrates both. In Bi₂Se₃ spin-orbit coupling swaps the parity of
 the states across the gap at Γ, the fingerprint of a topological insulator.
+
+This page covers the spinor SCF, SOC from a fully-relativistic pseudopotential, and
+collinear spin as the cheaper special case. To extract magnetic structure, the
+ground-state moment configuration, exchange constants, and spin Hamiltonians, see
+[Magnetic structure and spin Hamiltonians](magnetism.md).
 
 ## Theory
 
@@ -43,27 +48,32 @@ res = scf_noncollinear(
     mag_vec_init=[[0.0, 0.0, 0.4]],   # (na, 3): direction · fraction per atom
     smearing="gaussian", width=0.1,
 )
-res.mag_vec     # ∫ m⃗ dr — the net moment vector
+res.mag_vec     # ∫ m⃗ dr, the net moment vector
 res.mag_abs     # ∫ |m⃗| dr
 res.m           # (3, grid) magnetization field
 ```
 
 For a nonmagnetic system where only the spin-orbit splitting matters, pin the
-moment to zero with `nonmagnetic=True` (QE's `domag=false`): the spinor structure
+moment to zero with `nonmagnetic=True` (QE's `domag=false`). The spinor structure
 and SOC stay, the magnetization does not. The converged moment *direction* is
 whatever the unconstrained SCF settles into.
 
 ## Spin-orbit band inversion in Bi₂Se₃
 
-`examples/bi2se3_inversion.py` runs the calculation twice — a scalar-relativistic
-`scf` and a fully-relativistic `scf_noncollinear(..., nonmagnetic=True)` — and
+`examples/bi2se3_inversion.py` runs the calculation twice, a scalar-relativistic
+`scf` and a fully-relativistic `scf_noncollinear(..., nonmagnetic=True)`, and
 labels the parity of the Γ states around the gap. Without SOC the ordering is the
-normal-insulator one; with SOC the conduction and valence parities **swap**, the
-$Z_2$-nontrivial signature of the topological surface states.[[22]](bibliography.md#bi2se3) The band overlay
-is committed alongside the script.
+normal-insulator one. With SOC the conduction and valence parities **swap**, the
+$Z_2$-nontrivial signature of the topological surface states.[[22]](bibliography.md#bi2se3)
 
-The SOC machinery is validated quantitatively on the GaAs valence split-off: the
-$\Gamma_8$ (four-fold) sits above $\Gamma_7$ (two-fold) with a spin-orbit gap
+![Bi₂Se₃ band structure with and without SOC](img/bi2se3_bands_overlay.png)
+
+The scalar-relativistic and fully-relativistic bands are overlaid on the same path.
+Spin-orbit coupling opens and inverts the gap at Γ, and the valence-band maximum
+moves off Γ into a camelback.
+
+The SOC machinery is validated quantitatively on the GaAs valence split-off. The
+$\Gamma_8$ (four-fold) lies above $\Gamma_7$ (two-fold) with a spin-orbit gap
 $\Delta_0 = 0.336$ eV against QE's fully-relativistic reference (experiment 0.34 eV),
 agreeing to $2\times10^{-3}$ eV. Spin-orbit character is also resolvable in the
 projected density of states, separating a shell into its $j$ channels (a
@@ -71,7 +81,7 @@ $6P_{1/2}$ from a $6P_{3/2}$, for instance).
 
 ## Collinear spin, with numbers
 
-When the moments are collinear a full spinor solve is unnecessary — set `nspin=2`
+When the moments are collinear a full spinor solve is unnecessary. Set `nspin=2`
 and an initial moment fraction, and read the converged moment off the result.
 
 ```python
@@ -80,184 +90,25 @@ res = scf(system, SpinPBE(), nspin=2, start_mag=[0.4],   # bcc Fe
 res.mag_total    # ∫ (ρ↑ − ρ↓) dr [μB]
 ```
 
-This path is QE-validated: bcc Fe converges within 0.02 $\mu_B$ of QE's moment and
-under 1 meV/atom, and the triplet O₂ molecule lands the $m = 2\,\mu_B$ moment to
+This path is QE-validated. bcc Fe converges within 0.02 $\mu_B$ of QE's moment and
+under 1 meV/atom, and the triplet O₂ molecule reproduces the $m = 2\,\mu_B$ moment to
 $10^{-3}$. The USPP/PAW spin path (`scf_uspp`, `nspin=2`) carries the same
 `start_mag` and `mag_total`.
 
-## Optimizing the magnetic configuration
-
-The moment *directions* are themselves degrees of freedom, and gradwave finds the
-ground-state configuration by constrained density-functional theory: each atomic
-moment is held toward a target direction $\hat{\mathbf{e}}_I$ by a penalty field,
-and the torque that would rotate the *unconstrained* moment is read off and
-descended.
-
-Following Ma and Dudarev,[[23]](bibliography.md#madudarev) an atomic moment $\mathbf{M}_I = \int
-w_I(\mathbf{r})\,\mathbf{m}(\mathbf{r})\,\mathrm{d}^3r$ — with a Hirshfeld weight
-$w_I$ localizing on atom $I$ — is pinned to $\hat{\mathbf{e}}_I$ by adding a
-penalty $E_p = \sum_I \lambda\,|\mathbf{M}_I^\perp|^2$ to the energy, which
-contributes a constraining field $\mathbf{B}_c = 2\lambda \sum_I w_I\,
-\mathbf{M}_I^\perp$ to the spinor Hamiltonian. The gradient of the constrained
-functional $W = E_\text{KS} + E_p$ with respect to a target direction is
-
-$$ \frac{\partial W}{\partial \hat{\mathbf{e}}_I} = -2\lambda\,(\mathbf{M}_I \cdot \hat{\mathbf{e}}_I)\,\mathbf{M}_I^\perp, $$
-
-which gradwave validates against a finite difference of $W$ (they agree to a ratio
-of 1.000). A configuration is a stationary point of the true energy when no
-constraint is needed, $\mathbf{M}_I^\perp \to 0$.
-
-```python
-from gradwave.postscf.moment_config import relax_moment_directions
-
-# two O moments started 45° apart, in the x–z plane
-dirs0 = [[0.0, 0.0, 1.0], [0.707, 0.0, 0.707]]
-final, history = relax_moment_directions(
-    system, NoncollinearXC(LSDA_PW92()), dirs0,
-    lam=2.0, step=0.5, smearing="gaussian", width=0.1)
-```
-
-Each sweep runs a constrained SCF, reads the torque, and rotates the targets
-downhill. For triplet O₂, a ferromagnet, two moments started 45° apart collapse
-to parallel in three sweeps and the energy falls to the unconstrained
-ground-state value:
-
-| sweep | relative angle | energy (eV) |
-|---|---|---|
-| start | 45.0° | −840.675 |
-| 1 | 4.6° | −840.823 |
-| 2 | 0.3° | −840.825 |
-
-`constrained_moment_scf` runs a single constrained point (returning the atomic
-moments, the constraining field, and the torque) and `relax_moment_directions`
-wraps the descent. With a fully-relativistic pseudopotential the same machinery
-gives the magnetocrystalline-anisotropy torque, since spin-orbit coupling ties
-the moment to the lattice.
-
-### The magnitude problem, and holding a moment at any angle
-
-The $|\mathbf{M}^\perp|^2$ penalty constrains only the moment *direction*, and it
-is minimized ($E_p \to 0$) at $\mathbf{M}=0$. So a strongly-coupled magnet forced
-to a large relative angle has a cheap escape: it demagnetizes rather than holding
-its moments apart. This is not a numerical artifact — reducing $|\mathbf{M}|$ is a
-real way out of frustration — but it means `mode="perp"` cannot represent, say, a
-metastable antiferromagnetic state.
-
-The `mode="vector"` penalty pins the full moment vector,
-$E_p = \sum_I \lambda\,|\mathbf{M}_I - m^0_I\,\hat{\mathbf{e}}_I|^2$, so
-demagnetizing now costs $\lambda\,(m^0_I)^2$. The target magnitude $m^0_I$ defaults
-to the unconstrained self-consistent $|\mathbf{M}_I|$ (measured once by
-`reference_moment_magnitudes`). Forcing the two O moments of O₂ *antiparallel*
-shows the difference sharply:
-
-```python
-m0 = reference_moment_magnitudes(system, xc, [[0, 0, 1], [0, 0, 1]], weights=w)
-afm = [[0, 0, 1], [0, 0, -1]]                       # target: antiparallel
-_, perp = constrained_moment_scf(system, xc, afm, lam=8.0, weights=w, mode="perp")
-_, vec  = constrained_moment_scf(system, xc, afm, lam=8.0, weights=w,
-                                 mode="vector", target_mag=m0)
-```
-
-| mode | $\lvert\mathbf{M}_I\rvert$ (μB) | $M_z$ (μB) | outcome |
-|---|---|---|---|
-| `perp`   | 0.00, 0.00 | 0.00, 0.00 | demagnetized — constraint met for free |
-| `vector` | 0.81, 0.81 | +0.81, −0.81 | genuine antiferromagnet, held |
-
-The held antiferromagnetic state sits ≈3.0 eV above the ferromagnetic ground
-state — O₂'s exchange splitting, a number `perp` cannot produce because it never
-holds the moments. The field, the torque, and both penalty forms are one
-differentiable definition (`gradwave.scf.moment_penalty`), so the SCF field and
-the config-search gradient stay consistent by construction, and the gradient
-matches a finite difference of $W$ to a part in $10^3$.
-
-!!! note "Penalty stiffness vs. convergence"
-    `vector` holds *magnitude* robustly, but a finite $\lambda$ is a soft
-    constraint: it trades the target *angle* against the exchange energy, and the
-    constrained SCF for a strongly-frustrated forced angle can settle into a small
-    residual plateau rather than converging tightly. Raise $\lambda$ to hold the
-    angle stiffer; a natural collinear axis (parallel or antiparallel) converges
-    far more easily than an oblique one.
-
-### Spin-spiral dispersion of bcc Fe
-
-The magnitude-robust constraint is exactly what a frozen spin spiral needs: hold
-every atomic moment at full magnitude while rotating its direction. `gradwave` has
-no generalized-Bloch machinery, but a *commensurate* spiral needs none — a two-atom
-bcc cell (corner + body-center sublattices) with the body-center moment rotated by
-$\theta$ relative to the corner is a spiral of pitch $\theta$ per (111) step. Sweeping
-$\theta$ with `mode="vector"` traces the adiabatic ("frozen-magnon") dispersion
-$E(\theta)$ at fixed moment (`examples/fe_spin_spiral.py`, run on CPU):
-
-| $\theta$ | $E(\theta)-E(0)$ | $\lvert\mathbf{M}\rvert$ (vector) | $\lvert\mathbf{M}\rvert$ (perp) |
-|---|---|---|---|
-| 0°   | 0 meV      | 2.222 μB | — |
-| 45°  | +80 meV    | 2.225 μB | — |
-| 90°  | +409 meV   | 2.218 μB | — |
-| 135° | +859 meV   | 2.203 μB | 1.73 μB |
-| 180° | +1203 meV  | 2.197 μB | 1.32 μB |
-
-![bcc Fe spin-spiral dispersion](../../examples/fe_spin_spiral.png)
-
-`E(\theta)` rises monotonically from the ferromagnetic ground state ($\theta=0$) to the
-antiparallel state, and the `vector` moment holds ~2.2 μB across the whole spiral. The
-`perp` penalty tells the other half of the story: at the *collinear* endpoints it is
-fine ($\theta=180°$ relaxes to the true bcc-Fe antiferromagnet, 1.32 μB — a smaller
-moment than the ferromagnet, which is correct Fe physics), but at the *non-collinear*
-$\theta=135°$ it demagnetizes to 1.73 μB because shrinking the moment is the cheap way
-to satisfy $|\mathbf{M}^\perp|^2$. Only the magnitude-robust penalty traces the
-fixed-moment dispersion the whole way around.
-
-## One-call characterization: `task: magnetism`
-
-The routines above are also exposed as a single input task.
-`characterize_magnetism` runs a non-collinear reference SCF for the atomic moments,
-extracts the Heisenberg exchange from the torque, and reports the ordering, moments,
-J, DMI, and a mean-field Curie temperature. From YAML
-(`examples/input_o2_magnetism.yaml`):
-
-```yaml
-task: magnetism
-magnetism:
-  exchange: true          # extract J from the torque (~3 constrained SCFs)
-  lam: 8.0
-scf: {mixing: {alpha: 0.4}}   # conservative: the NC SCF is multi-stable
-```
-
-writes `magnetism.json` and a formatted `magnetism.out`:
-
-```
-── magnetism ───────────────────────────────
-   ordering: ferromagnetic
-   total moment: 1.999 μB
-   atomic moments [μB]: 1.000, 1.000
-   Heisenberg exchange [meV]: J_1 = +1434.0
-```
-
-Set `exchange: false` for a cheap moments-and-ordering pass. Or call the routine
-directly and inspect the `MagneticReport`:
-
-```python
-from gradwave.postscf.magnetism import characterize_magnetism
-report = characterize_magnetism(system, xc, exchange=True)
-print(report.summary())
-```
-
-The DMI and single-ion anisotropy channels are reported as ~0 without spin-orbit
-coupling (as symmetry requires); they light up once a fully-relativistic magnetic
-pseudopotential is supplied — see the anisotropy notes in `docs/ideas.md`.
-
 ## Gotchas
 
-- A fully-relativistic pseudopotential is required for SOC; the collinear `scf`
-  rejects one. PseudoDojo fully-relativistic sets work; note that their NLCC is
-  unsupported on the spin-orbit path, while SG15 fully-relativistic works.
-- Symmetry is off for a magnetic non-collinear run — a net moment breaks the
-  crystal symmetry — so these use the full mesh. A nonmagnetic SOC run keeps
+- A fully-relativistic pseudopotential is required for SOC, and the collinear `scf`
+  rejects one. PseudoDojo fully-relativistic sets work, though their NLCC is
+  unsupported on the spin-orbit path. SG15 fully-relativistic works.
+- Symmetry is off for a magnetic non-collinear calculation, because a net moment breaks the
+  crystal symmetry, so these use the full mesh. A nonmagnetic SOC calculation keeps
   time-reversal (Kramers) reduction.
-- The $\pm\mathbf{m}$ branches are exactly degenerate without spin-orbit coupling;
-  the branch the SCF lands on depends on the trajectory. Gate on the moment
+- The $\pm\mathbf{m}$ branches are exactly degenerate without spin-orbit coupling,
+  and the branch the SCF settles into depends on the trajectory. Gate on the moment
   magnitude, not its sign.
 
 ## Next
 
-See the [Reference](reference.md) page for the CLI, output files, and entry points.
+Continue to [Magnetic structure and spin Hamiltonians](magnetism.md), which reads
+the ground-state moment configuration and the exchange constants out of this spinor
+SCF.

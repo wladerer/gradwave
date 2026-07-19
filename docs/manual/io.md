@@ -1,6 +1,6 @@
 # Inputs and outputs
 
-This page covers the input schema, the files a run writes, how to restart from a
+This page covers the input schema, the files a calculation writes, how to restart from a
 checkpoint, and how to load results for analysis. The [Reference](reference.md) page
 has the terse CLI and entry-point tables.
 
@@ -12,7 +12,7 @@ has the terse CLI and entry-point tables.
 
 `examples/input_si.yaml` documents every key with its default. The formalism is
 detected from the UPF files, so the same input schema drives norm-conserving and
-USPP/PAW runs. `ecutrho` and the mixing scheme apply to the USPP/PAW path. The
+USPP/PAW calculations. `ecutrho` and the mixing scheme apply to the USPP/PAW path. The
 explicit `gradwave run input.yaml` form remains valid.
 
 ## Input keywords
@@ -30,7 +30,7 @@ means the quantity is dimensionless or a plain count.
 | `structure` | *required* | Å | mapping or string | Inline `cell`/`positions`/`species` block, or a filename in any format ASE reads (cif, POSCAR, xyz). |
 | `pseudopotentials` | *required* | — | mapping | `dir` and `map`; see below. |
 | `ecut` | *required* | eV | float | Plane-wave kinetic-energy cutoff for the wavefunctions. |
-| `ecutrho` | `4 × ecut` | eV | float | Density/augmentation cutoff. USPP/PAW only; ignored for norm-conserving. |
+| `ecutrho` | `4 × ecut` | eV | float | Density/augmentation cutoff. USPP/PAW only. Ignored for norm-conserving. |
 | `xc` | `pbe` | — | string | Functional: `lda` or `pbe`. |
 | `nbands` | `auto` | — | int or `auto` | Number of Kohn-Sham bands. `auto` picks from the electron count. |
 | `symmetry` | `true` | — | bool | Reduce k to the IBZ and symmetrize the density each step. |
@@ -63,7 +63,7 @@ Provide either a filename string or the inline block below.
 | keyword | default | unit | type | description |
 |---|---|---|---|---|
 | `mesh` | `[1, 1, 1]` | — | list[int] | Monkhorst-Pack grid dimensions. |
-| `shift` | `[0, 0, 0]` | — | list[int] | Grid offset; `[0,0,0]` is Γ-centered. |
+| `shift` | `[0, 0, 0]` | — | list[int] | Grid offset. `[0,0,0]` is Γ-centered. |
 
 ### `smearing`
 
@@ -97,7 +97,7 @@ Used when `task: relax`.
 | keyword | default | unit | type | description |
 |---|---|---|---|---|
 | `optimizer` | `bfgs` | — | string | `bfgs` or `fire`. |
-| `fmax` | `0.01` | eV/Å | float | Convergence criterion; gates the stress too under `cell`. |
+| `fmax` | `0.01` | eV/Å | float | Convergence criterion. Gates the stress too under `cell`. |
 | `max_steps` | `200` | — | int | Maximum ionic steps. |
 | `cell` | `false` | — | bool | Variable-cell relaxation: relax the lattice with the atoms via `FrechetCellFilter` (stress). |
 | `pressure` | `0.0` | GPa | float | External hydrostatic pressure, applied during cell relaxation. |
@@ -117,7 +117,7 @@ Used when `task: bands`.
 
 ### `projections`
 
-Adds a projected density of states to an `scf` run, written to the `pdos` block
+Adds a projected density of states to an `scf` calculation, written to the `pdos` block
 of the JSON. Set `projections: true` for defaults, or a mapping for control.
 Requires a pseudopotential with atomic orbitals (`PP_PSWFC`).
 
@@ -140,7 +140,7 @@ Plot it with `gradwave plot <scf.json> --kind pdos`.
 
 ## Output files
 
-Each run writes three files into the output directory.
+Each calculation writes three files into the output directory.
 
 - `<task>.json` is the machine-readable summary and the parsing target. The
   top-level keys are stable, `code`, `task`, `structure`, `parameters`, `scf` (with
@@ -167,11 +167,11 @@ converged" without a cutoff sweep.
 The `<task>.json` gains an `error_estimate` block and the `<task>.out` a matching
 section. The reported fields are the estimated energy error `denergy_eV` (a definite
 lowering) and the extrapolated `free_energy_extrapolated_eV`, the density-error L1
-norm per electron, and, for norm-conserving runs (nspin=1 or 2), the Hellmann-Feynman
+norm per electron, and, for norm-conserving calculations (nspin=1 or 2), the Hellmann-Feynman
 force error (`force_error_max_eV_ang` and the rms). It is a first-order indicator, not a
 rigorous bound, so use it to gate convergence, not to quote an uncertainty. When the
-run is outside coverage, USPP or PAW with symmetry on for example, the block records
-`available: false` with the reason rather than failing the run. Coverage is
+calculation is outside coverage, USPP or PAW with symmetry on for example, the block records
+`available: false` with the reason rather than failing the calculation. Coverage is
 norm-conserving and USPP/PAW for the energy and density error, norm-conserving
 (nspin=1 or 2) for the force error.
 

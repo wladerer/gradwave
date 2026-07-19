@@ -11,7 +11,7 @@ Run the shipped Si PAW example to confirm the SCF works end to end.
 
     uv run gradwave examples/input_si.yaml -o out/
 
-The last line prints the converged free energy and the iteration count. The run
+The last line prints the converged free energy and the iteration count. The calculation
 writes `out/scf.out`, `out/scf.json`, and `out/checkpoint.pt`.
 
 ## What you need

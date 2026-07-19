@@ -1,12 +1,12 @@
 # Performance
 
-This page explains where a gradwave run spends its time, which levers move it,
+This page explains where a gradwave calculation spends its time, which levers move it,
 and which plausible-sounding optimizations do nothing. The numbers come from
 committed benchmarks on an 8-core laptop and an RTX 3050, at identical cutoff,
 k-mesh, and pseudopotential to Quantum ESPRESSO. Read the [Wisdom](wisdom.md) page
 for the shorter list of do and do-not rules that these measurements produced.
 
-The one-line summary is that the small-system gap against a mature code is kernel
+The small-system gap against a mature code is kernel
 maturity and, on a consumer GPU, fp64 throughput. It is not an architectural
 defect, and no structural rewrite of the solver moves it.
 
@@ -32,7 +32,7 @@ or avoids redoing it.
 ### IBZ symmetry
 
 Reducing the k-mesh to the irreducible wedge with G-space density symmetrization is
-the largest single lever, worth 5 to 14 times depending on the point group. It is
+the largest single lever, giving 5 to 14 times depending on the point group. It is
 on by default (`use_symmetry=True`) and gated by tests that check the reduced and
 full-mesh energies agree. Reach for this first.
 
@@ -44,10 +44,10 @@ checkpoint restarts and parameter scans want. An ionic move still costs about 8
 iterations from any seed, so warm-starting helps repeated calculations at fixed or
 near-fixed geometry more than it helps a single relaxation.
 
-Warm-starting the SCF density across EOS volumes is a clear win, since the fixed
+Warm-starting the SCF density across EOS volumes clearly helps, since the fixed
 point barely moves and branch selection stays stable. Warm-starting band-path
 chunks from a single previous point is the opposite. Near-degenerate seeded
-subspaces stall the adaptive Davidson and the run gets 2.5 times slower, so band
+subspaces stall the adaptive Davidson and the calculation gets 2.5 times slower, so band
 paths solve cold.
 
 ### Mixed precision
@@ -55,9 +55,9 @@ paths solve cold.
 Opt-in `mixed_precision=True` runs fp32 draft solves while the adaptive diagonalizer
 tolerance is above 1e-5, with the subspace reduction and the S-normalization always
 in fp64. The generalized subspace reduction must stay fp64 because an fp32 Cholesky
-of the near-singular USPP overlap produces garbage rotations.
+of the near-singular USPP overlap produces invalid rotations.
 
-This is not a general win. It helps moderate-grid, many-k, smeared or spin-orbit
+This does not help in general. It helps moderate-grid, many-k, smeared or spin-orbit
 cases by up to about 1.45 times. It regresses fixed-occupation insulators, where
 the fp32 drafts inflate the iteration count. On a consumer GPU whose fp64 runs at a
 fraction of fp32 rate the option is nearly neutral on small systems, for the reason
@@ -66,13 +66,13 @@ in the GPU section below. Measure it on your workload rather than assuming it he
 The clearest single predictor is system size, not the metal-versus-insulator axis.
 On the RTX 3050 the end-to-end speedup grows monotonically with the cell, from 1.14
 times on 2-atom Si through 1.28 times on 16 atoms to 1.39 times on 54, because the
-fp32 draft only pays once the dense subspace eigensolve and the big-sphere
+fp32 draft only helps once the dense subspace eigensolve and the big-sphere
 Hamiltonian applies dominate the per-iteration cost. A 2-atom cell is the wrong
 regime to judge it. There the eigensolve is negligible and the density-build FFTs,
 which stay fp64 for charge conservation, set the floor. The draft costs nothing in
 accuracy at any size. On a frozen geometry the mixed and fp64 free energies agree to
 1e-9 meV at every convergence threshold from 1e-7 to 1e-10, with identical iteration
-counts, so the fp64 polish removes the draft error whether or not the run stops
+counts, so the fp64 polish removes the draft error whether or not the calculation stops
 early.
 
 ### Irreducible phonon displacements
@@ -103,7 +103,7 @@ response, and the Newton step all inherit it.
 
 ### Compiled XC layer (opt-in)
 
-torch.compile is dead on the complex FFT-bound Hamiltonian apply, the entry below
+torch.compile does not help the complex FFT-bound Hamiltonian apply, the entry below
 still stands for that. The exchange-correlation functional is the opposite case. It
 is real-valued and runs a chain of roughly thirty elementwise transcendental
 operations that Inductor fuses well. Passing `compile_xc=True` to the `GradWave`
@@ -119,15 +119,15 @@ the reliable figure since eager and compiled are timed back to back in one proce
 | forward + v_xc backward | 2693 ms | 171 ms | 16x |
 
 The v_xc result is bit-accurate to eager at 3e-16, and the forward value is exact.
-The win concentrates where the XC transcendental chain runs many times per SCF
+The gain concentrates where the XC transcendental chain runs many times per SCF
 iteration and is not FFT-bound, namely the PAW one-center quadrature
 (`scf/paw_onsite.py`) and learned-XC training. On a plain ground-state SCF the
 end-to-end gain is a few percent, because XC is a minority of runtime and its
 FFT-based gradient assembly in `core/density.py` is outside the compiled kernel.
 
 Two limits set the scope. First, the first compile traces for about a minute
-whether or not it succeeds, so it pays back only over a long SCF or a training run,
-never a one-shot, which is why the gate test is in the slow tier. Second,
+whether or not it succeeds, so it is only worthwhile over a long SCF or a training calculation,
+never a single one, which is why the gate test is in the slow tier. Second,
 torch.compile with aot_autograd cannot double-backward, and the `f_xc` response
 kernel (dielectric, Newton, Stoner, learned-U) is exactly a double backward through
 `E_xc`. Those call sites wrap their `xc.energy()` in the `xc_eager()` context
@@ -143,7 +143,7 @@ to leave on.
 
 ## What does not help
 
-These were built or measured and did not pay. They are here so no one spends the
+These were built or measured and gave no gain. They are here so no one spends the
 time again.
 
 - **A structural GPU rewrite for small systems.** The small-system GPU gap is fp64
@@ -152,21 +152,21 @@ time again.
   the expansion tally) with pinned async copies and event queries measures slower
   than the synchronous path at every size tested, and the delayed expansion count
   does extra work. The code path stays in the solver, default off, because a future
-  fp32-deep redesign would want it, but on its own it is not a win.
+  fp32-deep redesign would want it, but on its own it does not help.
 - **CUDA graphs.** Capturing the real batched Hamiltonian apply replays
   bit-identically at 1.0 to 1.1 times eager speed. The kernels are already
   back-to-back, so there is no launch gap to remove.
 - **torch.compile on the Hamiltonian apply.** Inductor does not codegen complex
   operations, and the real-decomposed slice that would compile is too small next
   to the FFTs. It was tried and removed for the complex apply. The real-valued XC
-  layer is a separate live win and is not covered by this line, see "Compiled XC
+  layer is a separate live gain and is not covered by this line, see "Compiled XC
   layer" below.
 - **fp32 drafting on a CPU insulator.** The cast overhead beats pocketfft's fp32
-  gain, so the draft is slower for that case. The mixed-precision wins are on GPU
+  gain, so the draft is slower for that case. The mixed-precision gains are on GPU
   many-k and smeared workloads, not here.
 - **Γ-point real wavefunctions.** Half-basis real algebra at Γ can at best halve the
   Hamiltonian-apply share, which caps the end-to-end gain at roughly 1.3 to 1.5
-  times, for the most invasive change in the stack. Mixed precision already banks
+  times, for the most invasive change in the stack. Mixed precision already gives
   1.2 times on the same system at a fraction of the risk. This is deferred, not
   rejected, and worth revisiting only if Γ-only molecular workloads dominate.
 
@@ -182,7 +182,7 @@ a large deficit and turned out to be two small things plus kernel maturity.
 | gradwave, BFGS | 3 | 47.6 s |
 | gradwave, FIRE | 25 | 405 s |
 
-Two separate factors made the original run slow.
+Two separate factors made the original calculation slow.
 
 - The optimizer default was FIRE, which took 25 steps where BFGS takes 3, an 8.5
   times penalty. The default is now `bfgs`.
@@ -192,10 +192,10 @@ Two separate factors made the original run slow.
   The USPP solver already had the fix. Back-porting it halved the per-iteration cost
   with an identical trajectory and closed the gap from 3.4 times to 1.9 times.
 
-What did not turn out to be the problem is as useful as what was. QE keeps no mixer
+The ruled-out causes are as informative as the real one. QE keeps no mixer
 state between ionic steps, so an early guess that it did was wrong. Forces cost 0.07
 seconds per step, so the theory that the autograd backward was expensive was wrong.
-QE's smaller band count for a fixed-occupation insulator is worth about 10 percent
+QE's smaller band count for a fixed-occupation insulator gives about 10 percent
 and is a policy choice, not a defect. The remaining 1.9 times is FFT and small
 batched linear algebra against decades-tuned FFTW and LAPACK, and it shrinks on GPU
 and with system size.
@@ -213,10 +213,10 @@ Ry, 12×12×12 giving 72 irreducible k, gaussian 0.2 eV) on the same asus box, Q
 | gradwave | 8 CPU threads | 16 | 67 s | 4.2 |
 | gradwave | RTX 3050 | 16 | 903 s | 56 |
 
-The gradwave rows are on AC power; QE is the reference run. An earlier set read 118 s
+The gradwave rows are on AC power. QE is the reference calculation. An earlier set read 118 s
 on the CPU and 976 s on the GPU on battery, which had throttled the CPU (its turbo is
 capped unplugged) but not the fp64-bound GPU, flattering the GPU by shrinking the CPU
-baseline — see the AC-power caveat under "Measuring performance" below.
+baseline. See the AC-power caveat under "Measuring performance" below.
 
 The energies agree to sub-meV: QE and gradwave both give −10167.53 eV, matching to
 0.25 meV with every term within 3 meV, re-verified fresh at 6×6×6 and 12×12×12. An
@@ -225,10 +225,10 @@ this is a clean speed gap. It factors into three independent terms that multiply
 the 283 times CPU-to-GPU-vs-QE spread.
 
 - 13.5 times, the same gradwave code on the RTX 3050 versus the CPU (903/67). Pure
-  consumer-GPU fp64 tax: the card is far slower than the CPU it ships with for a
+  consumer-GPU fp64 tax. The card is far slower than the CPU it ships with for a
   one-atom cell that never fills it, running at 100 percent utilization while drawing
-  only 25 W of its 60 W budget at a full 1942 MHz — the fp64 units saturated while the
-  rest of the die idles. The GPU actively hurts here, and AC power widens this gap
+  only 25 W of its 60 W budget at a full 1942 MHz, the fp64 units saturated while the
+  rest of the die idles. The GPU is slower than the CPU here, and AC power widens this gap
   rather than closing it, because it unthrottles the CPU and cannot feed the
   arithmetic-bound GPU.
 - 9 times, gradwave-CPU versus QE per iteration (4.2 / 0.46). PyTorch dispatch and a
@@ -259,20 +259,20 @@ iterations on 8 CPU threads) splits the per-iteration cost as follows.
 The 21 times factors as roughly 9 times per iteration and 2.3 times iteration count.
 For the iteration count, the mixing scheme is the lever and the smearing kernel is not.
 Sweeping fcc Pt, `johnson` converges in 13 iterations against `pulay` 17 and `broyden`
-20, and gaussian, cold, and mp1 sit within one iteration at fixed scheme. The converged
-free energy is bit-identical, so johnson is a free 1.3 times on a smeared metal (now the
+20, and gaussian, cold, and mp1 agree to within one iteration at fixed scheme. The converged
+free energy is bit-identical, so johnson gives 1.3 times on a smeared metal at no accuracy cost (now the
 metal-campaign default). It does not reach QE's 7 iterations, which is a starting-density
 and preconditioner-quality gap. For the per-iteration 16 times, the largest single lever
 is the dense-grid wavefunction FFT (34 percent). The dual grid now runs the batched
 H-apply local term on the smooth `ecutwfc` box instead of the dense `ecutrho` box, exact
 by the bandwidth argument (see the wisdom notes) and verified two ways, the batched path
 matches the dense per-k reference to 2e-13 eV and the Pt free energy is unchanged. It
-halves the FFT time on Pt for about 1.2 times, and the win grows with `ecutrho/ecutwfc`.
+halves the FFT time on Pt for about 1.2 times, and the gain grows with `ecutrho/ecutwfc`.
 The density-build FFT is still dense, a further increment.
 
-## The GPU story is precision, not structure
+## The GPU limit is precision, not structure
 
-The kernel-level claim verifies emphatically. On the exact hot shapes from the
+The kernel-level claim verifies. On the exact hot shapes from the
 laptop profile, a consumer GPU is much faster than the laptop CPU, and faster still
 in single precision.
 
@@ -282,7 +282,7 @@ in single precision.
 | batched Hermitian eigh | 4.9 ms | 2.4 ms | 0.5 ms (10×) |
 
 Yet the same small SCF gains only 11 to 15 percent end to end on that GPU. Scaling
-the k-mesh nearly 5 times did not widen the edge, which rules out a pure launch-
+the k-mesh nearly 5 times did not widen the speedup, which rules out a pure launch-
 latency story. Three structural fixes were built and each failed to move it, listed
 above.
 
@@ -296,31 +296,30 @@ solves, and everything after runs in crippled fp64.
 Direct evidence the bound is arithmetic and not clocks or power: on AC an fcc-Pt SCF
 ran the RTX 3050 at 100 percent utilization while drawing only 25 W of its 60 W budget
 at a full 1942 MHz, and unplugging barely changed the wall time (903 vs 976 s). A
-clock- or power-limited kernel draws its whole budget; a card starved of fp64 units
-saturates the few it has and idles the rest of the die, which is this trace exactly.
+clock- or power-limited kernel draws its whole budget. A card with few fp64 units saturates them and leaves the rest of the die idle, which is this trace exactly.
 
 What would actually move it is an fp32-dominant solver schedule that drafts far
 deeper and reserves fp64 for a final polish, or a datacenter-class fp64 GPU. Larger
 grids and heavier bands amortize the fp64 handicap on their own, which is why the
-larger norm-conserving and USPP benchmarks see real GPU wins while one-atom cells do
+larger norm-conserving and USPP benchmarks run faster on the GPU while one-atom cells do
 not. On the RTX 3050 a 16-atom Si cell already runs 1.69 times faster than the
 8-core CPU at fp64, so the card is worth using once the cell reaches production size,
-even though the 2-atom toy loses to the CPU on kernel-launch and transfer overhead.
+even though the 2-atom cell is slower than the CPU on kernel-launch and transfer overhead.
 The earlier impression that this GPU was hopeless came from a magnetic PAW metal that
 ran 250 iterations over 27 k-points and two spins with the one-center work on the
-CPU, which is iteration count and host round-trips, not a regime where the GPU
-stretches its legs.
+CPU, which is iteration count and host round-trips, not a regime that uses the GPU's
+throughput.
 
 ### Confirmed on a datacenter fp64 GPU (A100)
 
 The prediction held. On an NVIDIA A100-SXM4-40GB (UCLA Hoffman2), a double-precision
-GEMM clocks ~4.9 TFLOP/s — roughly 35× the RTX 3050's fp64 — and a constrained
+GEMM clocks ~4.9 TFLOP/s, roughly 35× the RTX 3050's fp64, and a constrained
 non-collinear bcc-Fe spin-spiral point (2-atom cell, 60 Ry, 3×3×3, 24 bands) runs in
 97 s against ~516 s on the 22-core asus CPU at 16 threads, about 5×. The GPU energy
 bit-matches the CPU (−6430.0154 eV), so the fp64 path is correct, not merely fast,
 and the 40 GB lifts the 6 GB grid ceiling that capped the 3050. This is the
-datacenter-class fp64 card the section predicted would move the needle, and it is
-what makes the spin-Hamiltonian and MAE work tractable at useful cell sizes — the
+datacenter-class fp64 card the section predicted would change the result, and it is
+what makes the spin-Hamiltonian and MAE work tractable at useful cell sizes. The
 three-SCF Fe exchange benchmark ran there in minutes. One caveat learned the hard
 way: the *CPU cores* of a shared GPU node can be far slower than a dedicated CPU box
 (a single Fe SCF on 8 such cores ran past a one-hour walltime), so benchmark the GPU
@@ -344,7 +343,7 @@ against a real CPU reference, never the GPU node's own cores.
   spectrum. The rig sees local convergence only, never basin selection, so confirm
   the winner once on a real SCF.
 - **Freeze the geometry when comparing precisions or codes.** A benchmark that
-  rattles the structure with a fresh random draw on each run compares different
+  rattles the structure with a fresh random draw on each calculation compares different
   systems, not different methods. A per-call rattle once showed a 200 meV
   mixed-versus-fp64 energy gap that was entirely the structural difference between two
   rattles, and it vanished to 1e-9 meV the moment the perturbed geometry was built

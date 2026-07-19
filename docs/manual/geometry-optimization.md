@@ -17,8 +17,8 @@ Hellmann-Feynman theorem,[[3]](bibliography.md#feynman)
 
 $$ \mathbf{F}_I = -\left\langle \psi \left| \frac{\partial \hat{H}}{\partial \mathbf{R}_I} \right| \psi \right\rangle. $$
 
-gradwave does not code this by hand. It differentiates the detached converged
-energy with one reverse-mode pass, so the positions flow through the Ewald sum,
+gradwave does not implement this explicitly. It differentiates the detached converged
+energy with one reverse-mode pass, so the positions enter through the Ewald sum,
 the structure factors, and the projector phases, and the result matches the
 Hellmann-Feynman force to autograd precision. A relaxation drives the largest
 force below a threshold,
@@ -78,12 +78,12 @@ Use `fire` when the start is far from the minimum or the surface is rough.
     uv run gradwave examples/input_diamond_relax.yaml -o out_diamond/
 
 ASE prints the BFGS log as it runs, one line per ionic step with the energy and
-the maximum force. The final line reports whether the run converged, the energy,
+the maximum force. The final line reports whether the calculation converged, the energy,
 the fmax reached, and the step count.
 
 ## Read the output
 
-Three files land in `out_diamond/`.
+Three files are written to `out_diamond/`.
 
 - `relax.out` is the human report. Structure, parameters, the ionic step table,
   and the final geometry.
@@ -153,7 +153,7 @@ couple of SCF iterations.
 - On small cells gradwave is slower per ionic step than `pw.x`, mostly from FFT
   and small batched linear-algebra kernel maturity against decades-tuned FFTW and
   LAPACK. The gap shrinks on GPU and on larger systems. See
-  [Performance](performance.md) for the measured comparison, which works through why
+  [Performance](performance.md) for the measured comparison, which explains why
   the gap is not architectural.
 
 ## Next

@@ -2,20 +2,20 @@
 
 A plane-wave calculation has one systematic convergence knob, the kinetic-energy
 cutoff `ecut`. The usual way to know whether it is converged is a cutoff sweep,
-several full runs at rising `ecut`. gradwave instead estimates the remaining
-plane-wave (Ecut) error from a **single** converged run, as a cheap post-SCF
+several full calculations at rising `ecut`. gradwave instead estimates the remaining
+plane-wave (Ecut) error from a **single** converged calculation, as a cheap post-SCF
 pass that needs no larger SCF, following the perturbation post-processing of
 Cancès et al.[[18]](bibliography.md#cances)
 
-Turn it on and the run reports how far the energy still has to fall, the
-extrapolated energy, the density error, the band-gap error, and — for a
-norm-conserving run (spin-unpolarized or spin-polarized) — the force error.
+Turn it on and the calculation reports how far the energy still has to fall, the
+extrapolated energy, the density error, the band-gap error, and (for a
+norm-conserving calculation, spin-unpolarized or spin-polarized) the force error.
 
 ## Theory
 
 The occupied orbitals are converged inside the sphere $T_G \le E_\text{cut}$ but
 truncated at its edge. Enlarge the sphere to $E_\text{cut} < T_G \le
-E_\text{cut}^\text{large}$ and estimate the piece of each orbital that lives on
+E_\text{cut}^\text{large}$ and estimate the part of each orbital on
 that annulus. At high kinetic energy the Hamiltonian is dominated by the diagonal
 Laplacian, so the first-order correction is a diagonal divide,
 
@@ -29,13 +29,13 @@ no larger SCF required. Three facts make the estimate trustworthy and cheap.
 - **The energy error is second order, a definite lowering.** The correct estimate
   is $\delta E = \sum_i f_i \langle \delta\psi_i | R_i \rangle$ with a factor of
   one, not two: at the variational optimum the naive first-order term is halved by
-  the second-order term. $\delta E < 0$ always — the exact energy is below the
+  the second-order term. $\delta E < 0$ always, so the exact energy is below the
   computed one.
 - **The force error is one extra pass.** Propagating the *fixed* orbital
   correction through the force, $\delta F \approx (\partial F / \partial P)\,
   \delta P$, needs a single automatic-differentiation pass, no response solve. It
   works because the force's sensitivity is dominated by the ion-motion term
-  $\langle \delta\psi | \partial R / \partial \tau\rangle$; the estimate tracks
+  $\langle \delta\psi | \partial R / \partial \tau\rangle$. The estimate tracks
   the true error closely (correlation ~0.99 on displaced diamond).
 
 For ultrasoft and PAW the density error has **two channels**: the smooth part from
@@ -44,7 +44,7 @@ $\delta\psi$ and an augmentation part from the change in the on-site occupations
 P_\text{annulus}(\hat{H} - \varepsilon \hat{S})\psi$.
 
 !!! note "Not stress, and not a rigorous bound"
-    The same fixed-$\delta P$ recipe does **not** extend to stress: it comes out
+    The same fixed-$\delta P$ recipe does **not** extend to stress: it is
     cleanly *anti*-correlated with the true error, because the stress error is
     dominated by the strain-response of the orbital correction, which a fixed-$\delta\psi$
     pass omits. Stress error is deferred. And the estimate is a first-order
@@ -76,7 +76,7 @@ The `scf.json` gains an `error_estimate` block and `scf.out` a matching section.
 
 ## Read the output
 
-The human report prints a `basis-set error estimate` section; the JSON block
+The human report prints a `basis-set error estimate` section. The JSON block
 carries the same fields.
 
 | field | meaning |
@@ -92,14 +92,14 @@ carries the same fields.
 | `scf_convergence` | sub-block: the SCF self-consistency energy error (see below) |
 | `smearing` | sub-block: the finite-temperature (smearing) energy error (see below) |
 
-When the run is outside the supported coverage the block is
+When the calculation is outside the supported coverage the block is
 `{"available": false, "reason": ...}` and the report prints `unavailable —
-<reason>` rather than failing the run.
+<reason>` rather than failing the calculation.
 
 ## Drive it from Python
 
 The estimator is a small set of functions. `estimate_density_error` takes a
-converged `scf` result (norm-conserving) or a `scf_uspp` dict (USPP/PAW);
+converged `scf` result (norm-conserving) or a `scf_uspp` dict (USPP/PAW).
 `estimate_force_error` turns that into a per-atom force error, and
 `estimate_eigenvalue_error` / `estimate_gap_error` (below) give band and gap
 errors.
@@ -235,8 +235,8 @@ result to ~1e-4. USPP/PAW, nspin=2, and the opt-in Dyson dressing require
 - `int_drho` should be ~0. A nonzero value flags an under-converged density or a
   padding problem, not a small real error.
 - The coarse-space **Dyson refinement** (`dyson=True`) is opt-in, Python-only, and
-  not yet validated — leave it off.
-- Choose `ecut` genuinely loose to see a signal; at a well-converged cutoff
+  not yet validated. Leave it off.
+- Choose `ecut` genuinely loose to see a signal. At a well-converged cutoff
   `denergy_eV` is already tiny, which is the answer you want.
 
 ## Next
