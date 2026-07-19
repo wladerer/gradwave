@@ -1,5 +1,5 @@
 """End-to-end spin-Hamiltonian extraction (postscf/spin_exchange.py) on a real
-constrained-DFT torque, not synthetic tensors.
+constrained-DFT torque rather than synthetic tensors.
 
 The system is the same triplet O2 molecule as test_moment_config.py: two
 genuinely magnetic atoms whose moments couple ferromagnetically (the triplet

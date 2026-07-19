@@ -90,7 +90,7 @@ paramagnetic time-reversal fold exactly.
 The savings are largest on the systems where cost is highest. L1_0 FePt with the
 moment along [001] folds a $6\times6\times4$ mesh from 144 to 30 k-points, the
 in-plane orientation to 48, and bcc Fe folds $4\times4\times4$ from 64 to 13.
-The fold is exact, not approximate: the magnetic-IBZ SCF reproduces the
+The fold introduces no approximation: the magnetic-IBZ SCF reproduces the
 full-mesh free energy to $5\times10^{-11}$ eV on the FePt spin-orbit case, and
 each orientation may be folded by its own magnetic group for an anisotropy
 difference as long as both share the same underlying mesh, because the folded

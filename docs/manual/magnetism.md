@@ -174,6 +174,58 @@ reported as ~0 without spin-orbit coupling, as symmetry requires. They become
 nonzero once a fully-relativistic magnetic pseudopotential is supplied. See the
 anisotropy notes in `docs/ideas.md`.
 
+## Magnetocrystalline anisotropy
+
+With fully-relativistic pseudopotentials the total energy depends on the
+magnetization direction, and the difference is the magnetocrystalline
+anisotropy energy (MAE). Two routes are available.
+
+**Self-consistent differences.** Converge one full SOC SCF per direction and
+subtract. `examples/fept_mae.py` runs L1_0 FePt this way: at the converged
+$6\times6\times4$ mesh (70 Ry, LSDA), $\mathrm{MAE} = E[100] - E[001] =
++2.552$ meV/cell, easy axis along $c$, consistent with the 1 to 3 meV/f.u.
+range reported for FePt. Each orientation folds by its own magnetic group
+([Magnetic symmetry](symmetry.md#magnetic-shubnikov-symmetry)) as long as both
+share the underlying mesh. The 48-point mesh gives the *wrong* easy axis
+($-1.39$ meV/cell), the textbook k-convergence trap. Never trust an anisotropy
+sign from a coarse mesh. `tests/integration/test_fept_mae.py` gates this
+result.
+
+**The magnetic force theorem.** `postscf.mae.force_theorem_mae` replaces all
+but the first SCF. It freezes the converged $(\rho, \mathbf{m})$ of a
+reference direction, and for each requested direction rotates the
+magnetization rigidly, rebuilds the frozen-potential spinor Hamiltonian, and
+diagonalizes once. To second order in the density change the band-energy
+difference equals the total-energy difference, because the double-counting
+terms are evaluated on the same frozen fields and cancel exactly.
+
+```python
+from gradwave.postscf.mae import force_theorem_mae
+
+res = scf_noncollinear(system, xc, mag_vec_init=..., ...)  # one SCF, full mesh
+ft = force_theorem_mae(res, xc, [[0, 0, 1], [1, 0, 0], [1, 1, 0]])
+ft.mae          # F_band(n) − F_band(ref) per direction [eV]
+```
+
+The rotation is exact for the potential (the locally-collinear $B_{xc}$
+co-rotates with $\mathbf{m}$ and $v_{xc}$ is unchanged), and the anisotropy
+enters only through the lattice-fixed SOC projectors. Each one-shot solve is
+seeded with the SU(2)-rotated reference spinors, so it costs roughly one SCF
+iteration per direction. This is the route to full $E(\theta, \phi)$ maps
+rather than two-point differences. The reference must be converged on the full
+mesh (`use_symmetry=False, time_reversal=False`). A mesh folded by the
+reference magnetic group is not a valid quadrature for a rotated moment.
+
+Validation: without SOC the band sum is direction-independent to below
+$10^{-6}$ eV (the rotation is then an exact symmetry), and the reference
+direction reproduces the converged SCF spectrum
+(`tests/integration/test_mae_force_theorem.py`). On FePt at the converged
+mesh (`examples/fept_mae_force_theorem.py`) the force-theorem MAE is
+$+2.673$ meV/cell against the self-consistent $+2.552$ (4.7%), each extra
+direction costs about an eighth of a full SCF, and the $45°$-tilted direction
+lands at half the $[100]$ value — the uniaxial $\sin^2\theta$ form measured
+directly.
+
 ## Gotchas
 
 - The direction-only penalty (`mode="perp"`) has a magnitude loophole and
