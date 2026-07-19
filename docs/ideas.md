@@ -303,6 +303,20 @@ bites if the two orientations use *different underlying meshes*. Keep the same
 (n1,n2,n3) mesh for both and fold each by its own magnetic group ([001]→30 k,
 [100]→48 k at (6,6,4)): 3.7× on the MAE pair, exactness preserved.
 
+## Davidson subspace Gram: conj-copy memory spike at large nk
+
+Measured on the A100 384-k FePt run (job 14076535, 2026-07-18): with
+fragmentation already fixed (expandable_segments), the run died at 32.2 GiB
+allocated when `davidson_batched`'s subspace overlap
+`torch.einsum("kig,kjg->kij", v.conj(), hv)` requested another 6.68 GiB —
+einsum materializes `.conj()` as a full copy of the (nk, nsub, 2npw) subspace
+block. Two cheap fixes when it next matters: chunk the Gram over k (the result
+is only (nk, nsub, nsub), tiny), or restructure to avoid the conj copy
+(`(hv @ v.mH)`-style batched matmul conjugates lazily). Deferred because the
+magnetic-IBZ fold (60–100 k instead of 384) removed the pressure — but any
+future dense-k run without magnetic symmetry hits the same wall at
+nk·nsub·2npw·16 B ≈ 7 GiB per copy.
+
 ## One-center ddd analytic derivative
 
 The one-center ddd is a named micro-cost from the performance audit, 5% of the PAW
