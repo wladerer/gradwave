@@ -203,11 +203,14 @@ compensating errors cannot hide.
 Extend `test_energy_hamiltonian_consistency.py` to the remaining
 Hamiltonian terms, same pattern:
 
-- SOC spinors (doubled pw axis; same contraction). The +U gate is done
-  (Dudarev V_U vs autograd of E_U through the occupation matrices,
-  including the nspin=1 half-occupation bookkeeping), and so is nspin=2
-  USPP/PAW (per-channel ρ_aug/becsum, ∫v_eff_σ Q screening, spin ddd from
-  energy_and_ddd([ρ↑,ρ↓]) as the exact channel-derivative of e1c_t).
+All Hamiltonian term classes are now gated: the +U gate (Dudarev V_U vs
+autograd of E_U through the occupation matrices, including the nspin=1
+half-occupation bookkeeping), nspin=2 USPP/PAW (per-channel ρ_aug/becsum,
+∫v_eff_σ Q screening, spin ddd from energy_and_ddd([ρ↑,ρ↓]) as the exact
+channel-derivative of e1c_t), and SOC spinors (the Pauli-decomposition
+m⃗-chain vs the B⃗_xc·σ⃗ apply, and the j-resolved nonlocal dij_so
+contraction vs E_NL, on the doubled plane-wave axis). Remaining:
+
 - smeared occupations as functions of ε (adds the entropy chain; the fixed-f
   identity is what the SCF actually iterates, so this is optional)
 

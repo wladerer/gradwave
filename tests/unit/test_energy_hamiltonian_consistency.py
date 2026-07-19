@@ -403,6 +403,85 @@ def test_grad_energy_equals_hamiltonian_paw_spin():
                                     [1.0, 1.0, 0.7, 0.3, 0.1])) < 1e-10
 
 
+def test_grad_energy_equals_hamiltonian_soc_spinor():
+    """SOC spinors: grad E == 2 w f (H c) on the doubled plane-wave axis.
+    Gates the whole noncollinear chain at first order — the Pauli
+    decomposition (m_x/m_y factors, the ⟨↑|V̂|↓⟩ = Bx − iBy sign), the
+    exchange-field apply B⃗·σ⃗ against the m⃗-chain of the energy, and the
+    j-resolved nonlocal (E_NL = Σ w f b†D_so b vs H's q/dij_so contraction,
+    incl. the spinor-projector conjugation conventions). Spinor bands carry
+    one electron each (occ ≤ 1)."""
+    from gradwave.core.batch import g_to_r_b
+    from gradwave.core.spinor_proj import build_so_projectors
+    from gradwave.core.xc.noncollinear import (
+        NoncollinearXC,
+        energy_with_grid,
+        vxc_and_bxc,
+    )
+    from gradwave.core.xc.spin import SpinPBE
+    from gradwave.scf.noncollinear import SpinorHamiltonian
+
+    a = 5.653
+    lattice = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0.0, 0.0], [1.52, 1.36, 1.47]])  # rattled, P1
+    ga = parse_upf(FIX / "pseudos" / "Ga_ONCV_PBE_FR-1.0.upf")
+    ars = parse_upf(FIX / "pseudos" / "As_ONCV_PBE_FR-1.1.upf")
+    system = setup_system(lattice, pos, [0, 1], [ga, ars], ecut=14 * RY,
+                          kmesh=(2, 1, 1), time_reversal=False)
+    assert system.is_fr
+    xc = NoncollinearXC(SpinPBE())
+    grid, bk = system.grid, system.batch
+    nk, vol, shape, m_pw = bk.nk, grid.volume, grid.shape, bk.npw_max
+    kw = system.kweights
+    nb = 8
+    occ = _occ(system, nb, [1.0, 1.0, 0.9, 0.7, 0.55, 0.35, 0.2, 0.1])
+
+    projs = projectors_b(bk, system.positions)
+    q_so, dij_so = build_so_projectors(bk, system)
+    vloc_g = local_potential_g(system.positions, system.species_index,
+                               system.vloc_tables, grid.g_cart, vol)
+    mask2 = torch.cat([bk.mask, bk.mask], dim=-1)
+
+    gen = torch.Generator().manual_seed(5)
+    c = (torch.randn(nk, nb, 2 * m_pw, generator=gen, dtype=RDTYPE)
+         + 1j * torch.randn(nk, nb, 2 * m_pw, generator=gen, dtype=RDTYPE))
+    t2 = torch.cat([bk.t, bk.t], dim=-1)
+    c = c.to(CDTYPE) / (1.0 + t2)[:, None, :] * mask2[:, None, :]
+    c = (c / torch.linalg.norm(c, dim=-1, keepdim=True)).requires_grad_(True)
+
+    # ---- E(c): the Pauli-decomposed density + scf_noncollinear's assembly ----
+    f = kw[:, None] * occ
+    pu = g_to_r_b(c[..., :m_pw], bk, shape)
+    pd = g_to_r_b(c[..., m_pw:], bk, shape)
+    uu = torch.einsum("kb,kbxyz->xyz", f, pu.real**2 + pu.imag**2)
+    dd = torch.einsum("kb,kbxyz->xyz", f, pd.real**2 + pd.imag**2)
+    ud = torch.einsum("kb,kbxyz->xyz", f.to(CDTYPE), pu.conj() * pd)
+    rho = (uu + dd) / vol
+    m_vec = torch.stack([2.0 * ud.real, 2.0 * ud.imag, uu - dd]) / vol
+
+    rho_g = r_to_g(rho.to(CDTYPE))
+    b_so = torch.einsum("kpg,kbg->kbp", q_so.conj(), c)
+    e = (torch.einsum("kb,kbg,kg->", f, c.real**2 + c.imag**2, t2)
+         + hartree_energy(rho_g, grid.g2, vol)
+         + energy_with_grid(xc, rho, m_vec, grid, rho_core=system.rho_core)
+         + local_energy(rho_g, vloc_g, vol)
+         + nonlocal_energy([b_so[ik] for ik in range(nk)], dij_so, occ, kw))
+    (g,) = torch.autograd.grad(e, c)
+
+    # ---- H side: v·1 + B⃗_xc·σ⃗ + j-resolved nonlocal at the same state ----
+    with torch.no_grad():
+        v_h = (torch.fft.ifftn(hartree_potential_g(rho_g.detach(), grid.g2),
+                               dim=(-3, -2, -1)) * grid.n_points).real
+        v_xc, b_xc, _ = vxc_and_bxc(xc, rho.detach(), m_vec.detach(), grid,
+                                    rho_core=system.rho_core)
+        v_r = v_h + v_xc + local_potential_r(system, vloc_g)
+        h = SpinorHamiltonian(bk, shape, v_r, b_xc, projs, q=q_so,
+                              dij_so=dij_so)
+        expected = 2.0 * kw[:, None, None] * occ[:, :, None] * h.apply(c.detach())
+    gap = ((g - expected) * mask2[:, None, :]).abs().max()
+    assert float(gap / expected.abs().max()) < 1e-10
+
+
 def test_potentials_equal_autograd_of_energies():
     """Closed-form v_H, v_loc vs autograd of E_H, E_loc — two independent
     implementations of the same functional derivative must agree."""
