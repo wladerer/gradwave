@@ -498,11 +498,20 @@ numerical errors are a solved problem in principle, the accuracy that matters is
 the functional, and the differentiable framework's advantage on that term is
 sensitivity and the density-driven half, not an absolute bar.
 
-Build order. SCF-convergence error first (cleanest fit, reuses the response
-operators, cross-checks against a tight-vs-loose run the way the eigenvalue error
-cross-checks against `denergy`); the fractional-charge self-interaction probe second
-(self-contained, no second functional); k-point extrapolation and the DC-DFT density
-sensitivity after, as the higher-value but structurally different pieces.
+**Numerical terms LANDED (2026-07-18).** The SCF-convergence, smearing, and
+k-point estimators are in `postscf/convergence_error.py`, validated in
+`tests/integration/test_convergence_error.py`: `estimate_scf_error` (the
+second-order residual energy, screened through `apply_chi0`/`apply_k_hxc` where
+chi0 is available, unscreened overestimate elsewhere, cross-checked against a
+tight-vs-loose run), `estimate_smearing_error` (the scheme-matched
+`E0 = (E+F)/2` extrapolation with per-scheme caveats), and
+`estimate_kpoint_error` (mesh extrapolation `E(N_k) → E_inf`, the
+non-variational term that needs more than one run). Together with the Ecut
+estimate in `discretization_error.py`, the trackable numerical budget is built.
+What remains open from this section is the model-term tooling: the
+fractional-charge self-interaction probe (self-contained, no second functional)
+and the DC-DFT density-sensitivity piece, plus the smaller density-grid
+(`ecutrho`) and finite-size terms.
 
 ## Batched multi-structure SCF, and the EOS-on-GPU question
 

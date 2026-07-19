@@ -30,8 +30,11 @@ builds these $j$-resolved spinor projectors from complex spherical harmonics and
 Clebsch-Gordan coefficients[[21]](bibliography.md#dalcorso) and adds them as a genuine $2\times2$ block in
 the non-local Hamiltonian. Because spin-orbit coupling breaks the separate spin
 and spatial rotation symmetries, time-reversal k-reduction is kept only through
-Kramers degeneracy for a nonmagnetic cell, and the mesh falls back to the full
-Brillouin zone once a net moment breaks it.
+Kramers degeneracy for a nonmagnetic cell. A net moment breaks time reversal as
+a standalone symmetry, but the mesh does not fall back to the full Brillouin
+zone: passing `magmoms=` at setup folds k by the magnetic (Shubnikov) group of
+the moment configuration instead — see
+[Magnetic symmetry](symmetry.md#magnetic-shubnikov-symmetry).
 
 ## The non-collinear SCF
 
@@ -100,9 +103,13 @@ $10^{-3}$. The USPP/PAW spin path (`scf_uspp`, `nspin=2`) carries the same
 - A fully-relativistic pseudopotential is required for SOC, and the collinear `scf`
   rejects one. PseudoDojo fully-relativistic sets work, though their NLCC is
   unsupported on the spin-orbit path. SG15 fully-relativistic works.
-- Symmetry is off for a magnetic non-collinear calculation, because a net moment breaks the
-  crystal symmetry, so these use the full mesh. A nonmagnetic SOC calculation keeps
-  time-reversal (Kramers) reduction.
+- A magnetic non-collinear calculation uses the full mesh by default, because a
+  net moment lowers the crystal symmetry. It does not have to: pass `magmoms=` to
+  `setup_system`/`setup_uspp` and the k-mesh folds by the magnetic (Shubnikov)
+  group instead (L1_0 FePt, m ∥ [001]: 144 → 30 k), exact against the full mesh
+  to $5\times10^{-11}$ eV. See
+  [Magnetic symmetry](symmetry.md#magnetic-shubnikov-symmetry). A nonmagnetic
+  SOC calculation keeps time-reversal (Kramers) reduction automatically.
 - The $\pm\mathbf{m}$ branches are exactly degenerate without spin-orbit coupling,
   and the branch the SCF settles into depends on the trajectory. Gate on the moment
   magnitude, not its sign.
