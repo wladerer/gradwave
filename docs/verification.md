@@ -120,7 +120,11 @@ compensating errors cannot hide.
   Eigenvalues fold (Γ supercell == sorted union over folded k) and forces
   map rigidly onto the copies. One test exercises k-weights, Fermi filling,
   Hartree G=0 ownership, nonlocal phases, and the density assembly at once.
-  Extensions: N along other axes, smeared metals, USPP/PAW systems.
+  The USPP/PAW + smeared variant is implemented too (kjpaw Si, gaussian
+  smearing): per-copy becsums/one-center energies replicate, the
+  augmentation density folds through the supercell phases, and the
+  shared Fermi level fills the folded spectrum identically (marked
+  slow). Extensions: N along other axes.
 - Permutation + translation (implemented,
   `tests/integration/test_metamorphic_invariance.py`): atom relabeling is
   exact to SCF tolerance (tested tight on heteropolar GaAs, <5e-8
