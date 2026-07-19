@@ -262,12 +262,26 @@ FT difference tracks the two-SCF difference within the 30% gate. At scale
 [100] — the uniaxial K₁ sin²θ form measured directly from four one-shot solves.
 Each direction costs ~11 min against ~84 min for a full SCF (7.7×), which is
 what makes E(θ, φ) maps affordable. Items (1) and (3) above are subsumed: the
-directions list is the sweep layer. The remaining k-cost lever is that the
-force theorem currently needs the FULL mesh — a fold by the reference magnetic
-group is not a valid quadrature for a rotated moment — so folding each one-shot
-solve into its OWN direction's magnetic IBZ (the same per-orientation trick the
-magnetic-space-group section validated for SCF pairs) is the natural next
-stage, and it compounds with the ~7.7× per-direction saving.
+directions list is the sweep layer.
+
+**Per-direction magnetic-IBZ folding LANDED (2026-07-19).**
+`force_theorem_mae(..., magmoms=...)` folds each one-shot solve into its own
+direction's Shubnikov IBZ: the per-atom reference moments rotate with the
+direction, the magnetic group of the rotated texture folds the mesh
+(`reduce_mesh_magnetic`), and — because every folded representative is a point
+of the full mesh — the solve runs on a subset of the stored reference spheres
+with the folded weights, and the SU(2)-rotated seeds gather straight from the
+reference coefficients. The reference SCF still needs the full mesh. Only the
+evaluations fold. The fold is exact for the collinear part of the frozen
+magnetization (ρ and |m⃗| carry the crystal symmetry, the uniform rotated
+direction transforms as an axial vector). The SOC-induced transverse textures
+in m⃗(r) formally break it, but the measured folded-vs-full residual on the
+small FePt system is ~4e-12 eV, far below the force-theorem error
+(tests/integration/test_mae_force_theorem.py, gate at 1e-6). On the 6×6×4
+mesh the folds are [001]→30/144, [100]→48, generic (010)-plane tilt→56,
+compounding with the 7.7× per-direction saving.
+examples/fept_mae_map.py uses this for an E(θ) scan [001]→[100] with a
+K₁sin²θ + K₂sin⁴θ fit.
 
 ## Magnetic space groups (Shubnikov symmetry) for non-collinear k-reduction
 
