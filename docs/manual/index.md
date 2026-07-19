@@ -4,8 +4,8 @@ gradwave is a differentiable plane-wave density functional theory code written
 in PyTorch. It solves the Kohn-Sham equations[[1]](bibliography.md#ks) in a
 plane-wave basis with norm-conserving or ultrasoft/PAW pseudopotentials. Every
 energy term is differentiable, so one reverse-mode pass through the total energy
-gives forces, a second gives the Hessian, and an implicit-differentiation wrapper
-gives the response of the self-consistent density to any parameter of the
+gives the forces and a second the Hessian. An implicit-differentiation wrapper
+returns the response of the self-consistent density to any parameter of the
 functional.
 
 This manual is organized as a wiki. Start with [Installation](installation.md),
