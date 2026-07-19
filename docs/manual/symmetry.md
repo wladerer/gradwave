@@ -59,6 +59,47 @@ k-points and their weights. Reduction is valid for unshifted Γ-centered
 Monkhorst-Pack meshes. A shifted mesh may not be group-invariant, and the caller
 falls back to time-reversal-only folding.
 
+## Magnetic (Shubnikov) symmetry
+
+A magnetic cell does not have to fall back to the full mesh. A finite moment
+field changes the symmetry group rather than destroying it: the moment is an
+axial vector locked to the lattice, so each paramagnetic operation either maps
+the moment field onto itself (a unitary operation of the magnetic group), maps
+it onto its reversal (surviving only combined with time reversal, the
+anti-unitary half of the Shubnikov group), or relates two different magnetic
+configurations and is dropped. `magnetic_spacegroup(sg, magmoms, cell)` performs
+that filter, cross-checked against spglib's magnetic symmetry detection, and
+`reduce_mesh_magnetic` folds the k-mesh with the unitary operations acting as
+$W^{-\top}$ and the anti-unitary ones as $-W^{-\top}$.
+
+To use it, pass the per-atom moment directions at setup:
+
+```python
+system = setup_system(cell, pos, species, pseudos, ecut=ecut, kmesh=(6, 6, 4),
+                      use_symmetry=True, magmoms=[[0, 0, 3.0], [0, 0, 0.4]])
+res = scf_noncollinear(system, xc, mag_vec_init=[[0, 0, 3.0], [0, 0, 0.4]], ...)
+```
+
+`setup_uspp` takes the same argument for the spinor USPP/PAW path. The SCF loop
+then re-symmetrizes the charge and the magnetization each iteration under the
+full magnetic group, with the magnetization transformed as an axial vector and
+reversed under the anti-unitary operations (PAW additionally symmetrizes the
+four Pauli channels of the on-site occupancies). Zero moments reproduce the
+paramagnetic time-reversal fold exactly.
+
+The savings are largest on the systems where cost is highest. L1_0 FePt with the
+moment along [001] folds a $6\times6\times4$ mesh from 144 to 30 k-points, the
+in-plane orientation to 48, and bcc Fe folds $4\times4\times4$ from 64 to 13.
+The fold is exact, not approximate: the magnetic-IBZ SCF reproduces the
+full-mesh free energy to $5\times10^{-11}$ eV on the FePt spin-orbit case, and
+each orientation may be folded by its own magnetic group for an anisotropy
+difference as long as both share the same underlying mesh, because the folded
+sum is the full-mesh sum re-weighted.
+
+The collinear `scf`/`scf_uspp` loops reject a system built with `magmoms=` —
+the magnetic fold is for the spinor paths, and a collinear calculation would
+mis-fold the spin channels.
+
 ## Use it in a calculation
 
 Symmetry is a single input flag, on by default:
@@ -97,14 +138,19 @@ See [Performance](performance.md) for where the 5-to-14× speedup lands.
 - **The symmetrizer is masked to the density sphere.** At the box Nyquist boundary
   the folded Miller map misidentifies $G$-vectors for glide phases. Physical
   densities are zero there, and masking makes the operator exactly idempotent.
-- **Turn symmetry off for symmetry-breaking work.** Antiferromagnetic and
-  ferrimagnetic orderings, a real response to a perturbation (the implicit-differentiation
-  backward, USPP/PAW or nspin=2 discretization-error estimates, the Dyson dressing)
-  all need `use_symmetry=False`, because the perturbation lowers the crystal
-  symmetry. gradwave raises a clear error when a magnetic ordering needs it.
-- **Time reversal** ($k \to -k$) is on by default and shrinks the IBZ further. It
-  is switched off for magnetic systems where $k \not\equiv -k$. A nonmagnetic
-  spin-orbit calculation keeps it through Kramers degeneracy.
+- **Turn symmetry off for symmetry-breaking work.** A real response to a
+  perturbation (the implicit-differentiation backward, USPP/PAW or nspin=2
+  discretization-error estimates, the Dyson dressing) needs `use_symmetry=False`,
+  because the perturbation lowers the crystal symmetry. For a magnetic ordering
+  the right tool is the magnetic group above: pass `magmoms=` instead of turning
+  symmetry off, and gradwave raises a clear error when a collinear path is asked
+  to consume a magnetic system.
+- **Time reversal** ($k \to -k$) is on by default and shrinks the IBZ further.
+  A net moment breaks it as a standalone symmetry, but operations that reverse
+  the moment survive combined with it as the anti-unitary half of the magnetic
+  group, so part of the reduction comes back through `magmoms=`. A nonmagnetic
+  spin-orbit calculation keeps the full time-reversal fold through Kramers
+  degeneracy.
 
 ## Next
 

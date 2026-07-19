@@ -50,6 +50,24 @@ chunks from a single previous point is the opposite. Near-degenerate seeded
 subspaces stall the adaptive Davidson and the calculation gets 2.5 times slower, so band
 paths solve cold.
 
+### Local-TF preconditioner for inhomogeneous cells (opt-in)
+
+The default Kerker filter screens long-wavelength charge sloshing with a single
+screening length, the right operator for a bulk metal and the wrong one for a
+cell with vacuum, where a fixed screening over-damps the modes that must stay
+free in the vacuum region. `precond="local_tf"` on `scf` and `scf_uspp` (following QE's
+`mixing_mode='local-TF'`) lets the screening wavevector track the local density,
+capped at the bare Kerker value so a homogeneous bulk is unchanged. It is
+applied by a short warm-started conjugate-gradient solve, a couple of FFT pairs
+per mixing step.
+
+Measured on fcc Al slabs: the 4-layer Al(100) slab drops from 21 to 17
+iterations and the 6-layer from 27 to 21, with the converged energy
+bit-identical to bare Kerker (same fixed point, different route). Bulk Al is
+unchanged (9 iterations either way), so the gain is specifically the
+inhomogeneous cells (slabs and molecules) and grows with the vacuum fraction.
+The iteration-count benchmark lives in `benchmarks/bench_precond.py`.
+
 ### Mixed precision
 
 Opt-in `mixed_precision=True` runs fp32 draft solves while the adaptive diagonalizer

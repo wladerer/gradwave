@@ -104,6 +104,12 @@ Used when `task: relax`.
 
 With `cell: true` the `relax.json` also reports `volume_ang3` and `max_stress_eV_ang3`. Relaxing a cell at fixed `ecut` carries Pulay (basis-incompleteness) stress, so converge `ecut` first or re-relax at the new cell. The plain filter does not constrain symmetry.
 
+A relax task also writes `relax.xyz`, an extended-xyz trajectory with one frame
+per ionic step carrying the energy and forces, readable by ovito, the ASE gui,
+or `ase.io.read(..., index=":")`. Reaching `max_steps` still writes the
+trajectory and exits 0. Convergence is carried by the `relax.converged` flag in
+the JSON.
+
 ### `bands`
 
 Used when `task: bands`.
@@ -154,7 +160,9 @@ Each calculation writes three files into the output directory.
   dominate the file size and a restart consumes only the density and becsum. Set
   `output.wavefunctions: true` to archive them.
 
-`<task>` is `scf`, `relax`, or `bands`.
+`<task>` is `scf`, `relax`, or `bands`. A relax task additionally writes the
+`relax.xyz` extended-xyz trajectory described above, referenced from the JSON
+as `outputs.trajectory`.
 
 ## Basis-set error estimate
 

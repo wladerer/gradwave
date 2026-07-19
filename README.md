@@ -14,6 +14,9 @@ Differentiable plane-wave density functional theory for periodic solids, in PyTo
 | dE/dθ, dL(ρ)/dθ (learnable XC) vs SCF finite differences | 1e-5 / 2e-4 rel |
 | bcc Fe ferromagnet (spin-PBE, 60 Ry): free energy | < 0.1 meV/atom |
 | bcc Fe magnetic moment | 2.2244 vs QE 2.22 μB (exp. 2.22) |
+| NiO Hubbard U vs `hp.x` DFPT | 6.449 vs 6.431 eV (0.3%) |
+| Si Γ phonon (PAW) vs `ph.x` | 0.003% |
+| GaAs spin-orbit split-off Δ₀ vs fully-relativistic QE | 0.336 eV, 2e-3 eV |
 
 ## Performance (Si LDA, 30 Ry, 4×4×4 — `benchmarks/bench_scf.py`)
 
@@ -46,18 +49,31 @@ to GPU. On NixOS, expose the driver to the managed-Python torch via
 | Si₆₄ (2×2×2 supercell, Γ) | 64 | 256 | 30 Ry | 1 | — | 231 s |
 
 Large cells auto-enable Kerker mixing (charge-sloshing control: Si₆₄
-converges in 25 iterations instead of 54).
+converges in 25 iterations instead of 54); slabs and molecules can opt into
+the local-TF preconditioner (`precond="local_tf"`) for fewer iterations in
+inhomogeneous cells.
 
 All validated against QE at matched settings (≤ 1 meV/atom; GaAs at
 0.003 meV/atom exercises the d-channel projectors). Si₆₄(Γ) reproduces
 Si₈(2×2×2) to 3 µeV/atom — exact supercell folding equivalence.
 
-- Norm-conserving pseudopotentials (Quantum ESPRESSO UPF v2: PseudoDojo / SG15 ONCV), Kleinman–Bylander form
-- Collinear spin polarization (LSDA / spin-PBE) — `nspin: 2` + `start_mag` in YAML
-- Base units: **eV** and **Ångström**; float64/complex128 throughout
-- SCF total energies, Hellmann–Feynman forces, geometry optimization (via ASE), band structures
-- Autograd infrastructure: implicit differentiation through the SCF fixed point for
-  learnable XC functionals and automatic Hessians/phonons
+- Norm-conserving (PseudoDojo / SG15 ONCV, Kleinman–Bylander) and ultrasoft/PAW
+  pseudopotentials (psl `q_with_l` UPFs), detected from the UPF file
+- SCF total and free energies, Hellmann–Feynman forces, stress, geometry and
+  variable-cell relaxation (via ASE), band structures with irrep labels, total
+  and projected (l, m, j) DOS, Γ-point phonons
+- Collinear spin (`nspin: 2`), non-collinear magnetism, and spin-orbit coupling
+  from fully-relativistic pseudopotentials
+- Constrained non-collinear moments with autograd-exact torques, spin spirals,
+  magnetocrystalline anisotropy, and Heisenberg/DMI exchange constants
+- DFT+U with the Hubbard U from linear response and an exact dE/dU
+- IBZ symmetry reduction with density/becsum symmetrization, including magnetic
+  (Shubnikov) groups for non-collinear cells (`magmoms=`)
+- Single-run error estimates: plane-wave (Ecut) discretization, SCF
+  convergence, smearing, and k-point extrapolation
+- Autograd infrastructure: implicit differentiation through the SCF fixed point
+  for learnable XC functionals and automatic Hessians/phonons
+- Base units: **eV** and **Ångström**; float64/complex128 throughout, CPU and GPU
 
 ## Usage
 
@@ -72,16 +88,21 @@ See `examples/` for input files. Any geometry format ASE can read is accepted.
 - Stress is fixed-basis (Nielsen–Martin, same convention as QE): variable-cell
   relaxation via `FrechetCellFilter` works, but carries the usual Pulay
   pressure at low ecut — converge ecut or re-relax at the final cell.
-- Stress with nspin=2, spin-orbit, or DFT+U is not implemented yet.
-- Ultrasoft and PAW datasets (psl `q_with_l` UPFs) run through `scf/uspp.py`
-  with energies, autograd forces, autograd stress, and collinear spin, all
+- On the norm-conserving path, forces and stress are nspin=1 only (no NLCC
+  force term), and stress excludes fully-relativistic pseudos and DFT+U. The
+  USPP/PAW path carries forces and stress at nspin=1 and 2. Its stress
+  excludes DFT+U (the strained S-dressed projections are missing).
+- USPP/PAW otherwise runs the full stack: k-space symmetry with becsum
+  symmetrization, collinear spin, non-collinear/SOC spinors, +U, the
+  implicit-differentiation (Sternheimer) machinery, and GPU batching — all
   validated vs QE (USPP energy 0.1 µeV; PAW energy 0.3 meV/atom, forces
   1e-4 eV/Å, stress 0.13 kbar, ferromagnetic Ni 1.6 meV/atom; Γ phonons via
   FD of the analytic forces, 0.003% vs ph.x — see examples/si_paw_phonon.py).
-  Not yet for USPP/PAW: nspin=2 forces/stress, k-space symmetry, SOC, +U,
-  the implicit-differentiation (Sternheimer) machinery, and GPU batching —
-  those remain norm-conserving-only. Old-style USPPs with polynomial
-  augmentation refits (nqf > 0, e.g. GBRV) are rejected at parse time.
+  Old-style USPPs with polynomial augmentation refits (nqf > 0, e.g. GBRV)
+  are rejected at parse time.
+- `dielectric_born` (ε∞, Born charges, IR) is nspin=1 scalar-relativistic
+  insulators only. Hybrids/exact exchange and meta-GGA functionals are not
+  implemented (semilocal LDA/GGA only).
 
 ## Development
 
