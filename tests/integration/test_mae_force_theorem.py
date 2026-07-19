@@ -22,7 +22,7 @@ Two rungs:
 3. Per-direction magnetic-IBZ fold -> full-mesh band sums. With magmoms=
    each one-shot solve folds into its own direction's Shubnikov IBZ; the
    folded band free energies must reproduce the full-mesh ones. The fold is
-   exact for the collinear part of the frozen magnetization; the SOC-induced
+   exact for the collinear part of the frozen magnetization. The SOC-induced
    transverse textures in m(r) set the residual this gate bounds.
 """
 

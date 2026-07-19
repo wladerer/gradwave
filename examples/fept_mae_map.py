@@ -5,10 +5,10 @@ each magnetization direction one frozen-potential diagonalization instead of
 a full SCF. Here ``magmoms=`` folds each of those solves into the
 direction's own magnetic (Shubnikov) IBZ over the same underlying mesh:
 on the (6, 6, 4) mesh [001] keeps 30 of 144 k-points, [100] keeps 48 and a
-generic tilt in the (010) plane keeps 56. The two savings compound — the
+generic tilt in the (010) plane keeps 56. The two savings compound: the
 reference SCF is paid once on the full mesh, and every additional direction
-costs a fraction of a single full-mesh solve. That is what makes dense maps
-E(theta, phi) affordable.
+costs a fraction of a single full-mesh solve. That is what makes dense
+E(theta, phi) maps cheap enough to run.
 
 The scan tilts m from [001] (the easy axis) to [100] in the (010) plane and
 fits the uniaxial form
@@ -17,7 +17,7 @@ fits the uniaxial form
 
 The validation run in fept_mae_force_theorem.py already saw the 45-degree
 direction land at half the [100] value, which is what a dominant K1 sin^2
-term predicts; this script measures the whole curve.
+term predicts. This script measures the whole curve.
 """
 import time
 

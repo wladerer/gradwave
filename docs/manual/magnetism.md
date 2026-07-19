@@ -225,8 +225,8 @@ stored k-points with the folded weights. On the FePt $6\times6\times4$ mesh
 $[001]$ keeps 30 of 144 points, $[100]$ keeps 48 and a generic $(010)$-plane
 tilt keeps 56, so this compounds with the force-theorem saving. The fold is
 exact for the collinear part of the frozen magnetization (measured residual
-$\sim 4\times10^{-12}$ eV against the full-mesh sums); the reference SCF
-still needs the full mesh, only the evaluations fold.
+$\sim 4\times10^{-12}$ eV against the full-mesh sums). The reference SCF
+still needs the full mesh. Only the evaluations fold.
 `examples/fept_mae_map.py` uses this to scan $E(\theta)$ from $[001]$ to
 $[100]$ and fit $K_1\sin^2\theta + K_2\sin^4\theta$.
 

@@ -271,12 +271,12 @@ direction, the magnetic group of the rotated texture folds the mesh
 (`reduce_mesh_magnetic`), and — because every folded representative is a point
 of the full mesh — the solve runs on a subset of the stored reference spheres
 with the folded weights, and the SU(2)-rotated seeds gather straight from the
-reference coefficients. The reference SCF still needs the full mesh; only the
+reference coefficients. The reference SCF still needs the full mesh. Only the
 evaluations fold. The fold is exact for the collinear part of the frozen
 magnetization (ρ and |m⃗| carry the crystal symmetry, the uniform rotated
-direction transforms as an axial vector); the SOC-induced transverse textures
+direction transforms as an axial vector). The SOC-induced transverse textures
 in m⃗(r) formally break it, but the measured folded-vs-full residual on the
-small FePt system is ~4e-12 eV — far below the force-theorem error
+small FePt system is ~4e-12 eV, far below the force-theorem error
 (tests/integration/test_mae_force_theorem.py, gate at 1e-6). On the 6×6×4
 mesh the folds are [001]→30/144, [100]→48, generic (010)-plane tilt→56,
 compounding with the 7.7× per-direction saving.

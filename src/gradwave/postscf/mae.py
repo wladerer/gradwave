@@ -39,7 +39,7 @@ of the full mesh, so the solve runs on a subset of the reference spheres with
 the folded weights, and the SU(2)-rotated seeds gather straight from the
 reference coefficients. The fold is exact for the collinear part of the
 frozen magnetization (rho and |m| carry the crystal symmetry, the uniform
-rotated direction transforms as an axial vector); the small SOC-induced
+rotated direction transforms as an axial vector). The small SOC-induced
 transverse textures in m(r) break it at a level the folded-vs-full gate in
 tests/integration/test_mae_force_theorem.py measures.
 """
@@ -190,8 +190,8 @@ def force_theorem_mae(
     solve into its own direction's magnetic (Shubnikov) IBZ: the moments are
     rotated with the direction, the magnetic group of the rotated texture
     folds the mesh, and the solve runs on the surviving subset of the stored
-    k-points with the folded weights. The reference still needs the full
-    mesh — the fold happens per evaluation, never on the SCF."""
+    k-points with the folded weights. The reference SCF still needs the full
+    mesh. Only the evaluations fold."""
     eval_system = res.system if system is None else system
     if eval_system.rho_symmetrizer is not None:
         raise ValueError(
