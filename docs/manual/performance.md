@@ -1,6 +1,6 @@
 # Performance
 
-This page explains where a gradwave calculation spends its time, which levers move it,
+This page explains where a gradwave calculation spends its time, what reduces it,
 and which plausible-sounding optimizations do nothing. The numbers come from
 committed benchmarks on an 8-core laptop and an RTX 3050, at identical cutoff,
 k-mesh, and pseudopotential to Quantum ESPRESSO. Read the [Wisdom](wisdom.md) page
@@ -24,15 +24,15 @@ box at a 35/280 Ry cutoff pair, spends its 53 seconds like this.
 | density build, occupations, rest | remainder |
 
 The FFT and the small batched linear algebra inside the eigensolver dominate.
-Every lever below either removes work from those two, moves it to better hardware,
+Every optimization below either removes work from those two, moves it to better hardware,
 or avoids redoing it.
 
-## What actually helps
+## What helps
 
 ### IBZ symmetry
 
 Reducing the k-mesh to the irreducible wedge with G-space density symmetrization is
-the largest single lever, giving 5 to 14 times depending on the point group. It is
+the largest single source of speedup, giving 5 to 14 times depending on the point group. It is
 on by default (`use_symmetry=True`) and gated by tests that check the reduced and
 full-mesh energies agree. Reach for this first.
 
@@ -191,7 +191,7 @@ time again.
 ## Case study, geometry relaxation vs QE
 
 Relaxing displaced diamond with an identical pseudo, cutoff, and k-mesh in both
-codes on the same cores, both landing the same minimum to 1e-4 Å, first looked like
+codes on the same cores, both reaching the same minimum to 1e-4 Å, first looked like
 a large deficit and turned out to be two small things plus kernel maturity.
 
 | run | ionic steps | wall |
@@ -257,7 +257,7 @@ the 283 times CPU-to-GPU-vs-QE spread.
 So the honest per-regime picture is 1.9 times for an NC insulator relax and about 21
 times for a hard PAW metal on the CPU, and the laptop GPU makes the metal case worse,
 not better, until the cell grows past the fp64 crossover. Threading did not help this
-small problem past 8 cores, 16 threads came out marginally slower. Run small PAW-metal
+small problem past 8 cores, 16 threads were marginally slower. Run small PAW-metal
 campaigns on the CPU.
 
 ### Where the PAW-metal time goes
@@ -275,12 +275,12 @@ iterations on 8 CPU threads) splits the per-iteration cost as follows.
 | misc Davidson (qr, solve_triangular, norm, cat) | 7% | |
 
 The 21 times factors as roughly 9 times per iteration and 2.3 times iteration count.
-For the iteration count, the mixing scheme is the lever and the smearing kernel is not.
+For the iteration count, the mixing scheme drives it and the smearing kernel does not.
 Sweeping fcc Pt, `johnson` converges in 13 iterations against `pulay` 17 and `broyden`
 20, and gaussian, cold, and mp1 agree to within one iteration at fixed scheme. The converged
 free energy is bit-identical, so johnson gives 1.3 times on a smeared metal at no accuracy cost (now the
 metal-campaign default). It does not reach QE's 7 iterations, which is a starting-density
-and preconditioner-quality gap. For the per-iteration 16 times, the largest single lever
+and preconditioner-quality gap. For the per-iteration 16 times, the largest single contributor
 is the dense-grid wavefunction FFT (34 percent). The dual grid now runs the batched
 H-apply local term on the smooth `ecutwfc` box instead of the dense `ecutrho` box, exact
 by the bandwidth argument (see the wisdom notes) and verified two ways, the batched path
@@ -316,7 +316,7 @@ ran the RTX 3050 at 100 percent utilization while drawing only 25 W of its 60 W 
 at a full 1942 MHz, and unplugging barely changed the wall time (903 vs 976 s). A
 clock- or power-limited kernel draws its whole budget. A card with few fp64 units saturates them and leaves the rest of the die idle, which is this trace exactly.
 
-What would actually move it is an fp32-dominant solver schedule that drafts far
+What would move it is an fp32-dominant solver schedule that drafts far
 deeper and reserves fp64 for a final polish, or a datacenter-class fp64 GPU. Larger
 grids and heavier bands amortize the fp64 handicap on their own, which is why the
 larger norm-conserving and USPP benchmarks run faster on the GPU while one-atom cells do
@@ -338,8 +338,7 @@ bit-matches the CPU (−6430.0154 eV), so the fp64 path is correct, not merely f
 and the 40 GB lifts the 6 GB grid ceiling that capped the 3050. This is the
 datacenter-class fp64 card the section predicted would change the result, and it is
 what makes the spin-Hamiltonian and MAE work tractable at useful cell sizes. The
-three-SCF Fe exchange benchmark ran there in minutes. One caveat learned the hard
-way: the *CPU cores* of a shared GPU node can be far slower than a dedicated CPU box
+three-SCF Fe exchange benchmark ran there in minutes. One caveat: the *CPU cores* of a shared GPU node can be far slower than a dedicated CPU box
 (a single Fe SCF on 8 such cores ran past a one-hour walltime), so benchmark the GPU
 against a real CPU reference, never the GPU node's own cores.
 
@@ -357,7 +356,7 @@ against a real CPU reference, never the GPU node's own cores.
   energy tail.
 - **Screen mixers on a linearized rig, confirm on the real SCF.** A real SCF costs
   15 to 50 minutes per mixer data point. Arnoldi on finite-difference applies of the
-  true one-iteration map reduces that to milliseconds and measures the actual gain
+  true one-iteration map reduces that to milliseconds and measures the gain
   spectrum. The rig sees local convergence only, never basin selection, so confirm
   the winner once on a real SCF.
 - **Freeze the geometry when comparing precisions or codes.** A benchmark that

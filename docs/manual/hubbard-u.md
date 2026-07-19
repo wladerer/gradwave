@@ -1,7 +1,7 @@
 # Differentiable Hubbard U
 
 A GGA underbinds the localized $d$ and $f$ electrons of transition-metal
-compounds. The DFT+U correction fixes this with a single parameter per manifold,
+compounds. The DFT+U correction fixes this with a single parameter per manifold.
 The parameter itself is not guessed. gradwave computes it from linear
 response and exposes its exact energy derivative, so U is a determinable,
 differentiable quantity rather than a fitted input.
@@ -116,7 +116,7 @@ print(energy_derivative_u(res, [HubbardManifold(species=0, l=2, u=5.0)]))
 !!! note "Learning U vs learning the functional"
     U here is a *determinable and differentiable* input, with an exact
     $\mathrm{d}E/\mathrm{d}U$, the substrate a learning loop would use. The
-    parameter gradwave actually trains today is the exchange-correlation
+    parameter gradwave trains today is the exchange-correlation
     functional. See [Learning XC by AD](learning-xc.md), whose adjoint carries a
     +U occupation-response channel so it trains correctly through a +U ground
     state.

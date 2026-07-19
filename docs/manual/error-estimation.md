@@ -4,7 +4,7 @@ A plane-wave calculation has one systematic convergence knob, the kinetic-energy
 cutoff `ecut`. The usual way to know whether it is converged is a cutoff sweep,
 several full calculations at rising `ecut`. gradwave instead estimates the remaining
 plane-wave (Ecut) error from a **single** converged calculation, as a cheap post-SCF
-pass that needs no larger SCF, following the perturbation post-processing of
+pass, following the perturbation post-processing of
 Cancès et al.[[18]](bibliography.md#cances)
 
 Turn it on and the calculation reports how far the energy still has to fall, the
@@ -45,7 +45,7 @@ P_\text{annulus}(\hat{H} - \varepsilon \hat{S})\psi$.
 
 !!! note "Not stress, and not a rigorous bound"
     The same fixed-$\delta P$ recipe does **not** extend to stress: it is
-    cleanly *anti*-correlated with the true error, because the stress error is
+    *anti*-correlated with the true error, because the stress error is
     dominated by the strain-response of the orbital correction, which a fixed-$\delta\psi$
     pass omits. Stress error is deferred. And the estimate is a first-order
     indicator for gating convergence, not a certified error bar.
@@ -92,9 +92,8 @@ carries the same fields.
 | `scf_convergence` | sub-block: the SCF self-consistency energy error (see below) |
 | `smearing` | sub-block: the finite-temperature (smearing) energy error (see below) |
 
-When the calculation is outside the supported coverage the block is
-`{"available": false, "reason": ...}` and the report prints `unavailable —
-<reason>` rather than failing the calculation.
+When the calculation is outside the supported coverage the report prints
+`unavailable — <reason>` rather than failing the calculation.
 
 ## Drive it from Python
 
