@@ -27,7 +27,7 @@ The FFT and the small batched linear algebra inside the eigensolver dominate.
 Every optimization below either removes work from those two, moves it to better hardware,
 or avoids redoing it.
 
-## What actually helps
+## What helps
 
 ### IBZ symmetry
 
@@ -257,7 +257,7 @@ iterations on 8 CPU threads) splits the per-iteration cost as follows.
 | misc Davidson (qr, solve_triangular, norm, cat) | 7% | |
 
 The 21 times factors as roughly 9 times per iteration and 2.3 times iteration count.
-For the iteration count, the mixing scheme is the deciding factor and the smearing kernel is not.
+For the iteration count, the mixing scheme drives it and the smearing kernel does not.
 Sweeping fcc Pt, `johnson` converges in 13 iterations against `pulay` 17 and `broyden`
 20, and gaussian, cold, and mp1 agree to within one iteration at fixed scheme. The converged
 free energy is bit-identical, so johnson gives 1.3 times on a smeared metal at no accuracy cost (now the
@@ -298,7 +298,7 @@ ran the RTX 3050 at 100 percent utilization while drawing only 25 W of its 60 W 
 at a full 1942 MHz, and unplugging barely changed the wall time (903 vs 976 s). A
 clock- or power-limited kernel draws its whole budget. A card with few fp64 units saturates them and leaves the rest of the die idle, which is this trace exactly.
 
-What would actually move it is an fp32-dominant solver schedule that drafts far
+What would move it is an fp32-dominant solver schedule that drafts far
 deeper and reserves fp64 for a final polish, or a datacenter-class fp64 GPU. Larger
 grids and heavier bands amortize the fp64 handicap on their own, which is why the
 larger norm-conserving and USPP benchmarks run faster on the GPU while one-atom cells do
@@ -338,7 +338,7 @@ against a real CPU reference, never the GPU node's own cores.
   energy tail.
 - **Screen mixers on a linearized rig, confirm on the real SCF.** A real SCF costs
   15 to 50 minutes per mixer data point. Arnoldi on finite-difference applies of the
-  true one-iteration map reduces that to milliseconds and measures the actual gain
+  true one-iteration map reduces that to milliseconds and measures the gain
   spectrum. The rig sees local convergence only, never basin selection, so confirm
   the winner once on a real SCF.
 - **Freeze the geometry when comparing precisions or codes.** A benchmark that

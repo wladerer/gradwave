@@ -332,7 +332,7 @@ differentiable-DFT coupling of arXiv:2509.07785. A few things are not obvious.
 
 ## Process and validation
 
-- Check what a reference structure actually is. The Lejaeghere reference for carbon is
+- Check what a reference structure is. The Lejaeghere reference for carbon is
   graphite, not diamond.
 - Pin everything in a cross-code comparison. Pseudo, cutoffs, k-mesh, FFT dimensions,
   occupation scheme, and compare the quantity the other code prints.
