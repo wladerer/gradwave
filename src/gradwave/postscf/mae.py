@@ -33,8 +33,15 @@ Scope: norm-conserving spinor path (scf_noncollinear on an is_fr system).
 The reference must be converged on the FULL k-mesh (use_symmetry=False,
 time_reversal=False): a k-mesh folded by the magnetic group of the reference
 axis is not a valid quadrature for a rotated moment, whose magnetic group is
-different. Folding each direction into its own magnetic IBZ is the natural
-next stage (docs/ideas.md).
+different. With ``magmoms=`` each one-shot solve instead folds into its OWN
+direction's magnetic (Shubnikov) IBZ: the folded representatives are points
+of the full mesh, so the solve runs on a subset of the reference spheres with
+the folded weights, and the SU(2)-rotated seeds gather straight from the
+reference coefficients. The fold is exact for the collinear part of the
+frozen magnetization (rho and |m| carry the crystal symmetry, the uniform
+rotated direction transforms as an axial vector); the small SOC-induced
+transverse textures in m(r) break it at a level the folded-vs-full gate in
+tests/integration/test_mae_force_theorem.py measures.
 """
 
 from __future__ import annotations
@@ -42,9 +49,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 
-from gradwave.core.batch import projectors_b
+from gradwave.core.batch import build_batched, projectors_b
 from gradwave.core.energies.hartree import hartree_potential_g
 from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.fftbox import r_to_g
@@ -102,6 +110,40 @@ def _spin_rotate(coeffs: torch.Tensor, m_pw: int, axis, theta: float) -> torch.T
     return torch.cat([uu * cu + ud * cd, du * cu + dd * cd], dim=-1)
 
 
+def _mesh_key(kfrac, mesh):
+    """Integer mesh coordinates of a fractional k-point, as a dict key."""
+    return tuple(int(x) for x in np.round(np.asarray(kfrac) * mesh).astype(np.int64) % mesh)
+
+
+def _fold_setup(eval_system):
+    """Paramagnetic group and full-mesh index map for per-direction folding.
+
+    Returns (sg, cell, mesh, full_index) where mesh is the (3,) MP division
+    recovered from the stored sphere k-points and full_index maps the integer
+    mesh coordinates of every k-point to its index in eval_system.spheres.
+    Raises if the stored k-set does not form a full Γ-centered MP mesh —
+    only then is every folded representative guaranteed to be a stored point.
+    """
+    from gradwave.symmetry import find_spacegroup
+
+    cell = np.asarray(eval_system.grid.cell, dtype=np.float64)
+    kf = np.array([s.k_frac for s in eval_system.spheres])
+    mesh = np.array([len(np.unique(np.round(kf[:, i], 9))) for i in range(3)],
+                    dtype=np.int64)
+    on_mesh = np.abs(kf * mesh - np.round(kf * mesh)).max() < 1e-8
+    keys = {_mesh_key(k, mesh) for k in kf}
+    if len(kf) != int(mesh.prod()) or not on_mesh or len(keys) != len(kf):
+        raise ValueError(
+            "magmoms= folding needs the reference on a full Γ-centered "
+            f"Monkhorst-Pack mesh; the stored {len(kf)} k-points do not form "
+            f"one (inferred divisions {tuple(int(n) for n in mesh)})")
+    full_index = {_mesh_key(k, mesh): i for i, k in enumerate(kf)}
+    pos = eval_system.positions.detach().cpu().numpy()
+    sg = find_spacegroup(cell, pos @ np.linalg.inv(cell),
+                         eval_system.species_of_atom)
+    return sg, cell, mesh, full_index
+
+
 @dataclass
 class MAEResult:
     """Force-theorem band free energies over magnetization directions.
@@ -109,13 +151,16 @@ class MAEResult:
     ``band_free_energies[i]`` is F_band for ``directions[i]`` [eV];
     ``mae`` is F_band - F_band[0], the anisotropy relative to the first
     (reference) direction. ``eigenvalues[i]`` is the (nk, nb) spectrum and
-    ``fermi[i]`` the direction's own Fermi level."""
+    ``fermi[i]`` the direction's own Fermi level. ``nk[i]`` is the number of
+    k-points the direction was evaluated on (its magnetic-IBZ fold when
+    ``magmoms=`` was passed, the full mesh otherwise)."""
 
     directions: list
     band_free_energies: torch.Tensor  # (ndir,) [eV]
     mae: torch.Tensor                 # (ndir,) F - F[0] [eV]
     fermi: list
     eigenvalues: list                 # per direction (nk, nb)
+    nk: list                          # per direction k-count
 
 
 @torch.no_grad()
@@ -128,6 +173,7 @@ def force_theorem_mae(
     width: float = 0.1,
     diago_tol: float = 1e-10,
     system=None,           # optional full-mesh evaluation system (same box)
+    magmoms=None,          # (na,3) reference per-atom moments → per-direction fold
     verbose: bool = True,
 ) -> MAEResult:
     """Anisotropy energies from one converged SOC SCF plus one frozen-potential
@@ -137,7 +183,15 @@ def force_theorem_mae(
     system with the full k-mesh. ``directions`` is a list of magnetization
     axes; the first is the reference for the returned ``mae`` differences (it
     is re-evaluated through the same one-shot machinery, so the force-theorem
-    residual cancels in the difference rather than contaminating it)."""
+    residual cancels in the difference rather than contaminating it).
+
+    ``magmoms`` (the per-atom moments of the reference texture, e.g. the
+    ``mag_vec_init`` the reference SCF was seeded with) folds each one-shot
+    solve into its own direction's magnetic (Shubnikov) IBZ: the moments are
+    rotated with the direction, the magnetic group of the rotated texture
+    folds the mesh, and the solve runs on the surviving subset of the stored
+    k-points with the folded weights. The reference still needs the full
+    mesh — the fold happens per evaluation, never on the SCF."""
     eval_system = res.system if system is None else system
     if eval_system.rho_symmetrizer is not None:
         raise ValueError(
@@ -186,8 +240,16 @@ def force_theorem_mae(
         q_so, dij_so = build_so_projectors(bk, eval_system)
     t2 = torch.cat([bk.t, bk.t], dim=-1)
     mask2 = torch.cat([bk.mask, bk.mask], dim=-1)
+    c_all = res.coeffs.to(device)
 
-    f_band, fermis, spectra = [], [], []
+    fold = magmoms is not None
+    if fold:
+        from gradwave.symmetry import magnetic_spacegroup, reduce_mesh_magnetic
+
+        magmoms_np = np.atleast_2d(np.asarray(magmoms, dtype=np.float64))
+        sg0, cell, mesh, full_index = _fold_setup(eval_system)
+
+    f_band, fermis, spectra, nks = [], [], [], []
     for n_dir in directions:
         n_t = _unit(torch.as_tensor(n_dir, dtype=RDTYPE))
         r_mat, axis, theta = _rotation_between(ref, n_t)
@@ -196,28 +258,62 @@ def force_theorem_mae(
         # call on the rotated field is the exactly-rotated frozen potential
         v_xc, b_xc, _ = vxc_and_bxc(xc, rho, m_rot, grid,
                                     rho_core=eval_system.rho_core)
-        h = SpinorHamiltonian(bk, grid.shape, v_h + v_xc + vloc_r, b_xc,
-                              projs_b, q=q_so, dij_so=dij_so)
-        seed = _spin_rotate(res.coeffs.to(device), m_pw, axis, theta)
-        dav = davidson_batched(h.apply, seed, t2, mask2, tol=diago_tol)
+
+        if fold:
+            # this direction's Shubnikov group folds the mesh; every
+            # representative is a stored full-mesh point, so the solve runs
+            # on a subset of the reference spheres and seeds
+            mg = magnetic_spacegroup(sg0, magmoms_np @ r_mat.numpy().T, cell)
+            kfrac_d, kw_np = reduce_mesh_magnetic(
+                tuple(int(x) for x in mesh), (0, 0, 0), mg)
+            idx = [full_index[_mesh_key(k, mesh)] for k in kfrac_d]
+            bk_d = build_batched([eval_system.spheres[i] for i in idx],
+                                 [eval_system.proj_data[i] for i in idx],
+                                 device=device)
+            m_d = bk_d.npw_max
+            t2_d = torch.cat([bk_d.t, bk_d.t], dim=-1)
+            mask2_d = torch.cat([bk_d.mask, bk_d.mask], dim=-1)
+            projs_d = projectors_b(bk_d, eval_system.positions)
+            q_d = dij_d = None
+            if eval_system.is_fr:
+                from gradwave.core.spinor_proj import build_so_projectors
+
+                tabs = [t[idx][:, :, :m_d] for t in eval_system.so_beta_tables]
+                q_d, dij_d = build_so_projectors(bk_d, eval_system,
+                                                 so_tables=tabs)
+            kw_d = torch.as_tensor(kw_np, dtype=RDTYPE, device=device)
+            seed0 = torch.cat([c_all[idx, :, :m_d],
+                               c_all[idx, :, m_pw:m_pw + m_d]], dim=-1)
+        else:
+            bk_d, m_d, t2_d, mask2_d = bk, m_pw, t2, mask2
+            projs_d, q_d, dij_d = projs_b, q_so, dij_so
+            kw_d, seed0 = eval_system.kweights, c_all
+
+        h = SpinorHamiltonian(bk_d, grid.shape, v_h + v_xc + vloc_r, b_xc,
+                              projs_d, q=q_d, dij_so=dij_d)
+        seed = _spin_rotate(seed0, m_d, axis, theta)
+        dav = davidson_batched(h.apply, seed, t2_d, mask2_d, tol=diago_tol)
         eigs = dav.eigenvalues.to(RDTYPE)
 
-        mu = float(find_fermi(eigs, eval_system.kweights, scheme, width,
+        mu = float(find_fermi(eigs, kw_d, scheme, width,
                               eval_system.n_electrons, degeneracy=1.0))
         mu_t = torch.tensor(mu, dtype=RDTYPE, device=eigs.device)
         occ, s_ent = occupations_and_entropy(eigs, mu_t, scheme, width,
                                              degeneracy=1.0)
-        e_band = float((eval_system.kweights[:, None] * occ * eigs).sum())
-        entropy_term = float(-width * (eval_system.kweights[:, None] * s_ent).sum())
+        e_band = float((kw_d[:, None] * occ * eigs).sum())
+        entropy_term = float(-width * (kw_d[:, None] * s_ent).sum())
         f_band.append(e_band + entropy_term)
         fermis.append(mu)
         spectra.append(eigs)
+        nks.append(int(eigs.shape[0]))
         if verbose:
             d_mev = (f_band[-1] - f_band[0]) * 1000.0
             print(f"  FT-MAE n=({float(n_t[0]):+.3f},{float(n_t[1]):+.3f},"
-                  f"{float(n_t[2]):+.3f})  F_band = {f_band[-1]:+.8f} eV  "
-                  f"dF = {d_mev:+.4f} meV", flush=True)
+                  f"{float(n_t[2]):+.3f})  nk={nks[-1]}  "
+                  f"F_band = {f_band[-1]:+.8f} eV  dF = {d_mev:+.4f} meV",
+                  flush=True)
 
     f_t = torch.tensor(f_band, dtype=RDTYPE)
     return MAEResult(directions=list(directions), band_free_energies=f_t,
-                     mae=f_t - f_t[0], fermi=fermis, eigenvalues=spectra)
+                     mae=f_t - f_t[0], fermi=fermis, eigenvalues=spectra,
+                     nk=nks)

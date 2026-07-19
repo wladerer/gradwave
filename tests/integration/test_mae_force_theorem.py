@@ -18,6 +18,12 @@ Two rungs:
    k-converged, so the number is not the physical MAE. Both routes share the
    mesh, and the gate checks that they agree with each other rather than
    with the literature value.
+
+3. Per-direction magnetic-IBZ fold -> full-mesh band sums. With magmoms=
+   each one-shot solve folds into its own direction's Shubnikov IBZ; the
+   folded band free energies must reproduce the full-mesh ones. The fold is
+   exact for the collinear part of the frozen magnetization; the SOC-induced
+   transverse textures in m(r) set the residual this gate bounds.
 """
 
 import numpy as np
@@ -105,3 +111,28 @@ def test_soc_force_theorem_tracks_self_consistent_mae():
         f"FT {d_ft * 1e3:+.4f} vs SCF {d_scf * 1e3:+.4f} meV: opposite sign"
     assert abs(d_ft - d_scf) < 0.3 * abs(d_scf) + 5e-5, \
         f"FT {d_ft * 1e3:+.4f} vs SCF {d_scf * 1e3:+.4f} meV"
+
+
+@pytest.mark.slow
+def test_folded_directions_match_full_mesh():
+    torch.set_num_threads(8)
+    xc = NoncollinearXC(LSDA_PW92())
+    res = _fept_scf([0, 0, 1.0])
+
+    # two directions whose Shubnikov groups fold the (2,2,2) mesh (8 -> 6)
+    # and two whose groups leave every point in its own orbit (8 -> 8)
+    dirs = [[0, 0, 1.0], [1.0, 0, 0], [SQ2, SQ2, 0], [SQ2, 0, SQ2]]
+    full = force_theorem_mae(res, xc, dirs, verbose=False)
+    fold = force_theorem_mae(res, xc, dirs, verbose=False,
+                             magmoms=[[0, 0, 3.0], [0, 0, 0.4]])
+
+    assert full.nk == [8, 8, 8, 8]
+    assert fold.nk == [6, 8, 6, 8], f"folds {fold.nk}"
+
+    # the fold is exact for the frozen fields (measured residual ~4e-12 eV);
+    # the gate leaves room for the reference SCF's convergence-level
+    # symmetry breaking of rho, nothing more
+    d_f = (fold.band_free_energies - full.band_free_energies).abs().max()
+    assert float(d_f) < 1e-6, f"folded vs full F_band off by {float(d_f):.2e} eV"
+    d_mae = (fold.mae - full.mae).abs().max()
+    assert float(d_mae) < 1e-6, f"folded vs full MAE off by {float(d_mae):.2e} eV"

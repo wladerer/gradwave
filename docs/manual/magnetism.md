@@ -216,6 +216,20 @@ rather than two-point differences. The reference must be converged on the full
 mesh (`use_symmetry=False, time_reversal=False`). A mesh folded by the
 reference magnetic group is not a valid quadrature for a rotated moment.
 
+**Per-direction magnetic-IBZ folding.** Passing `magmoms=` (the per-atom
+moments of the reference texture, the same list the SCF was seeded with)
+folds each one-shot solve into its *own* direction's magnetic Shubnikov IBZ:
+the moments are rotated with the direction, the magnetic group of the rotated
+texture folds the mesh, and the solve runs on the surviving subset of the
+stored k-points with the folded weights. On the FePt $6\times6\times4$ mesh
+$[001]$ keeps 30 of 144 points, $[100]$ keeps 48 and a generic $(010)$-plane
+tilt keeps 56, so this compounds with the force-theorem saving. The fold is
+exact for the collinear part of the frozen magnetization (measured residual
+$\sim 4\times10^{-12}$ eV against the full-mesh sums); the reference SCF
+still needs the full mesh, only the evaluations fold.
+`examples/fept_mae_map.py` uses this to scan $E(\theta)$ from $[001]$ to
+$[100]$ and fit $K_1\sin^2\theta + K_2\sin^4\theta$.
+
 Validation: without SOC the band sum is direction-independent to below
 $10^{-6}$ eV (the rotation is then an exact symmetry), and the reference
 direction reproduces the converged SCF spectrum

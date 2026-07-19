@@ -8,7 +8,9 @@ spinors. The force theorem needs the FULL mesh (a k-fold by the reference
 magnetic group is not a valid quadrature for a rotated moment), so the
 reference SCF here costs more than a magnetic-IBZ one. The saving grows with
 the number of directions, which is why this is the route to MAE maps
-E(theta, phi) rather than a two-point difference.
+E(theta, phi) rather than a two-point difference. fept_mae_map.py adds the
+next lever: magmoms= folds each one-shot solve into its own direction's
+magnetic IBZ, so the tilted solves themselves run on 30-56 of the 144 points.
 
 Self-consistent yardstick at the same mesh/ecut (fept_mae.py, asus CPU):
     kmesh (6,6,4) = 144 k, 70 Ry: MAE = E[100]-E[001] = +2.552 meV/cell,
