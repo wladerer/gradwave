@@ -78,7 +78,7 @@ Two capabilities follow from that design.
   forces[[3]](bibliography.md#feynman) from autograd, driven by any ASE
   optimizer.[[4]](bibliography.md#ase)
 - Functionals are trained by gradient descent through the SCF fixed point, where
-  each gradient is one adjoint solve and no finite differences are taken.
+  each gradient is one adjoint solve rather than finite differences.
 
 The code is validated against Quantum ESPRESSO
 `pw.x`[[5]](bibliography.md#qe) at identical cutoff, k-mesh, and pseudopotential.

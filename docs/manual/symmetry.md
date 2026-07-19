@@ -1,8 +1,8 @@
 # Symmetry reduction
 
 Reducing the k-mesh to the irreducible Brillouin zone (IBZ) and symmetrizing the
-density each step is the largest single source of speedup in gradwave, giving 5 to 14
-times depending on the point group. It is on by default (`symmetry: true`) and
+density each step is the largest single source of speedup in gradwave. The reduction
+gives 5 to 14 times, depending on the point group. It is on by default (`symmetry: true`) and
 gated by tests that check the reduced and full-mesh energies agree.
 
 ## Theory
@@ -85,7 +85,7 @@ it:
   (applying it twice matches to $10^{-14}$) and enforces $F_1 = -F_2$ on a
   two-atom cell to $10^{-10}$.
 
-See [Performance](performance.md) for where the 5-to-14× speedup lands.
+See [Performance](performance.md) for how the 5-to-14× speedup breaks down by system.
 
 ## Gotchas
 

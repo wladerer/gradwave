@@ -85,8 +85,8 @@ grads = energy_param_grads(res, xc)    # {'raw_kappa': ..., 'raw_mu': ...}
 ```
 
 `energy_param_grads` differentiates $E_\text{xc}$ at the frozen converged density.
-The gradients come back keyed on the raw (pre-softplus) parameters, which is what
-an optimizer steps on.
+The gradients are keyed on the raw (pre-softplus) parameters, which an optimizer
+steps on.
 
 ## The response case, density loss
 

@@ -173,7 +173,7 @@ time again.
 ## Case study, geometry relaxation vs QE
 
 Relaxing displaced diamond with an identical pseudo, cutoff, and k-mesh in both
-codes on the same cores, both landing the same minimum to 1e-4 Å, first looked like
+codes on the same cores, both reaching the same minimum to 1e-4 Å, first looked like
 a large deficit and turned out to be two small things plus kernel maturity.
 
 | run | ionic steps | wall |
@@ -239,7 +239,7 @@ the 283 times CPU-to-GPU-vs-QE spread.
 So the honest per-regime picture is 1.9 times for an NC insulator relax and about 21
 times for a hard PAW metal on the CPU, and the laptop GPU makes the metal case worse,
 not better, until the cell grows past the fp64 crossover. Threading did not help this
-small problem past 8 cores, 16 threads came out marginally slower. Run small PAW-metal
+small problem past 8 cores, 16 threads were marginally slower. Run small PAW-metal
 campaigns on the CPU.
 
 ### Where the PAW-metal time goes
@@ -320,8 +320,7 @@ bit-matches the CPU (−6430.0154 eV), so the fp64 path is correct, not merely f
 and the 40 GB lifts the 6 GB grid ceiling that capped the 3050. This is the
 datacenter-class fp64 card the section predicted would change the result, and it is
 what makes the spin-Hamiltonian and MAE work tractable at useful cell sizes. The
-three-SCF Fe exchange benchmark ran there in minutes. One caveat learned the hard
-way: the *CPU cores* of a shared GPU node can be far slower than a dedicated CPU box
+three-SCF Fe exchange benchmark ran there in minutes. One caveat: the *CPU cores* of a shared GPU node can be far slower than a dedicated CPU box
 (a single Fe SCF on 8 such cores ran past a one-hour walltime), so benchmark the GPU
 against a real CPU reference, never the GPU node's own cores.
 

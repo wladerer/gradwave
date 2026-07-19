@@ -183,7 +183,7 @@ anisotropy notes in `docs/ideas.md`.
   is multi-stable, and a weak moment seed collapses O₂ or Fe to a low-spin or
   nonmagnetic solution. Seed above saturation (`mag_init_scale` ~1.5) and let it
   relax down, or pass the target magnitude explicitly.
-- A constrained run at a strongly-frustrated oblique angle can limit-cycle at a
+- A constrained calculation at a strongly-frustrated oblique angle can limit-cycle at a
   small residual rather than converge tightly, though the moment values stay stable.
   Raise $\lambda$, and prefer a collinear axis where the physics allows it.
 - A small cell folds periodic images, so the extracted $J$ is the shell-summed

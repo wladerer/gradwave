@@ -1,7 +1,7 @@
 # Differentiable Hubbard U
 
 A GGA underbinds the localized $d$ and $f$ electrons of transition-metal
-compounds. The DFT+U correction fixes this with a single parameter per manifold,
+compounds. The DFT+U correction fixes this with a single parameter per manifold.
 The parameter itself is not guessed. gradwave computes it from linear
 response and exposes its exact energy derivative, so U is a determinable,
 differentiable quantity rather than a fitted input.

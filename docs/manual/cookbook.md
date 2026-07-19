@@ -123,7 +123,7 @@ Non-collinear moments, spin-orbit coupling, and exchange constants are in
 ## Check the cutoff without a sweep
 
 Add one line to an `scf` calculation and the report gains a basis-set error estimate, the
-energy the cutoff is converging to, from a single calculation.
+energy the cutoff is converging to.
 
 ```yaml
 output: {error_estimate: true}

@@ -120,7 +120,7 @@ defect, which the [Performance](performance.md) page works through in full.
   expansion rows before orthonormalization. Otherwise near-converged residuals floor
   around 1e-8, whose signature is exact energies with `converged=False` for 60
   iterations.
-- Do not feed a walked-off warm start to the mixer. A warm-started Davidson can
+- Do not feed a diverged warm start to the mixer. A warm-started Davidson can
   deterministically diverge from a converged-quality density, with 100 eV
   energy jumps and a frozen residual that mixer resets do not touch. The rescue is
   discarding the warm start and re-solving from salted seeds without feeding the garbage
@@ -257,7 +257,7 @@ defect, which the [Performance](performance.md) page works through in full.
 - Floor densities before fractional powers. `torch.where` evaluates both branches, and a
   NaN in the dead branch poisons the backward.
 - torch.compile cannot double-backward. The `f_xc` kernel is a double backward through
-  `E_xc`, so a compiled XC functional would crash the second grad, and the failure lands
+  `E_xc`, so a compiled XC functional would crash the second grad, and the failure surfaces
   in the caller's grad call where no try/except reaches it. The opt-in `compile_xc` path
   handles this by having the `f_xc` response and HVP call sites wrap their
   `xc.energy()` in the `xc_eager()` context manager (`core/xc/base.py`), a thread-local
