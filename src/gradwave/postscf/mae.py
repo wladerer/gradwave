@@ -19,7 +19,7 @@ Why the rotation is exact for the potential: the locally-collinear XC gives
 B_xc parallel to m with magnitude a function of (rho, |m|) only, so rotating m
 rigidly rotates B_xc rigidly and leaves v_xc untouched. The anisotropy enters
 solely through the SOC projector block, which is fixed in the lattice frame
-and does NOT co-rotate - without it (a scalar-relativistic pseudo) the band
+and does NOT co-rotate. Without it (a scalar-relativistic pseudo) the band
 sum is exactly direction-independent, which is the rotation-invariance gate in
 tests/integration/test_mae_force_theorem.py.
 

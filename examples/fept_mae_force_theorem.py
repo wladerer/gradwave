@@ -1,20 +1,29 @@
 """L1_0 FePt MAE by the magnetic force theorem: one SOC SCF, cheap directions.
 
-The self-consistent route (fept_mae.py) pays a full SOC SCF per direction.
+The self-consistent route (fept_mae.py) costs a full SOC SCF per direction.
 Here one reference SCF along [001] freezes (rho, m); every other direction is
 a rigid rotation of the magnetization plus ONE frozen-potential
 diagonalization (postscf/mae.py), seeded with the SU(2)-rotated reference
 spinors. The force theorem needs the FULL mesh (a k-fold by the reference
 magnetic group is not a valid quadrature for a rotated moment), so the
-reference SCF here costs more than a magnetic-IBZ one - the payoff scales
-with the number of directions, which is why this is the route to MAE maps
+reference SCF here costs more than a magnetic-IBZ one. The saving grows with
+the number of directions, which is why this is the route to MAE maps
 E(theta, phi) rather than a two-point difference.
 
 Self-consistent yardstick at the same mesh/ecut (fept_mae.py, asus CPU):
     kmesh (6,6,4) = 144 k, 70 Ry: MAE = E[100]-E[001] = +2.552 meV/cell,
     easy axis [001].
-The force-theorem number should land in the same band (agreement to ~10-30%
-is the textbook expectation for FePt-class anisotropy).
+The force-theorem number should land in the same band. Agreement within
+roughly 10-30% is a reasonable expectation for FePt-class anisotropy.
+
+Measured (this script, 8-core CPU, 2026-07-19):
+    [001] reference SCF: 26 iterations, 5048 s, |M| = 3.223 muB.
+    4 force-theorem directions: 2612 s total (~11 min each, ~7.7x cheaper
+    than a full SCF per direction).
+    FT MAE [100]-[001] = +2.6727 meV/cell vs self-consistent +2.552 (4.7%).
+    [110] = +2.7131 (in-plane anisotropy only 0.04 meV, as tetragonal
+    symmetry wants); [101] = +1.3398 ~ half of [100], the uniaxial
+    K1 sin^2(theta) form evaluated at theta = 45 deg.
 """
 import time
 

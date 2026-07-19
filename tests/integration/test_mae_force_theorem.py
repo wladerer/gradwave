@@ -6,17 +6,18 @@ Two rungs:
    spin rotation is an exact symmetry of H (nothing in the Hamiltonian is
    locked to the lattice spin frame), so the frozen-potential band sum must be
    IDENTICAL for every magnetization direction to solver precision. This
-   gates the whole pipeline - the rigid rotation of (m, B_xc), the SU(2)
-   seed, the one-shot solve, and the band sum - with the anisotropy switched
-   off by construction. The reference direction must also reproduce the SCF
+   gates the whole pipeline with the anisotropy switched off by construction:
+   the rigid rotation of (m, B_xc), the SU(2) seed, the one-shot solve, and
+   the band sum. The reference direction must also reproduce the SCF
    spectrum, pinning the frozen potential against the converged one.
 
 2. SOC -> force theorem tracks self-consistency. On L1_0 FePt (fully
    relativistic Fe+Pt, small full mesh) the force-theorem band-energy
    difference must reproduce the two-SCF total-energy difference to the
-   second-order accuracy the theorem promises. The mesh is far from
-   k-converged, so the number is not the physical MAE - both routes share the
-   mesh, and the gate is their mutual agreement, not the literature value.
+   second-order accuracy the theorem predicts. The mesh is far from
+   k-converged, so the number is not the physical MAE. Both routes share the
+   mesh, and the gate checks that they agree with each other rather than
+   with the literature value.
 """
 
 import numpy as np

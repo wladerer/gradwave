@@ -244,6 +244,31 @@ the torque is already exact and autograd-derived — it is getting a fully-relat
 pseudopotential into the fixtures and writing that force-theorem loop so the map is
 affordable.
 
+**Force-theorem evaluator LANDED (2026-07-19).** `postscf/mae.py`
+`force_theorem_mae`: one converged SOC SCF along a reference axis, then per
+direction a rigid rotation of (m⃗, B_xc) — exact for the locally-collinear XC,
+since B_xc co-rotates with m⃗ and v_xc depends only on (ρ, |m⃗|) — one
+frozen-potential spinor diagonalization seeded with the SU(2)-rotated reference
+spinors, and the occupied band free energy at that direction's own Fermi level.
+The anisotropy enters solely through the lattice-fixed SOC projectors, so a
+scalar-relativistic system gives an exactly direction-independent band sum, and
+that is the correctness gate: measured invariant to <1e-6 eV over four
+directions, with the reference direction reproducing the converged SCF spectrum
+(tests/integration/test_mae_force_theorem.py). At a shared small FePt mesh the
+FT difference tracks the two-SCF difference within the 30% gate. At scale
+(examples/fept_mae_force_theorem.py, 144 k full mesh, 70 Ry): FT MAE
+[100]−[001] = +2.673 meV/cell vs the self-consistent +2.552 (4.7%), [110]
++2.713 (in-plane spread 0.04 meV), and the 45°-tilted [101] at +1.340 ≈ half of
+[100] — the uniaxial K₁ sin²θ form measured directly from four one-shot solves.
+Each direction costs ~11 min against ~84 min for a full SCF (7.7×), which is
+what makes E(θ, φ) maps affordable. Items (1) and (3) above are subsumed: the
+directions list is the sweep layer. The remaining k-cost lever is that the
+force theorem currently needs the FULL mesh — a fold by the reference magnetic
+group is not a valid quadrature for a rotated moment — so folding each one-shot
+solve into its OWN direction's magnetic IBZ (the same per-orientation trick the
+magnetic-space-group section validated for SCF pairs) is the natural next
+stage, and it compounds with the ~7.7× per-direction saving.
+
 ## Magnetic space groups (Shubnikov symmetry) for non-collinear k-reduction
 
 Every magnetic non-collinear run today uses the FULL k-mesh — `scf_noncollinear`

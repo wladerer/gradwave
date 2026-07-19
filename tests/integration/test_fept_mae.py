@@ -5,7 +5,8 @@ asus CPU, 2026-07-18, and recorded in the example header): at the converged
 (6, 6, 4) mesh the MAE = E[100] - E[001] is +2.552 meV/cell -- easy axis [001],
 magnitude in the literature band (~1-3 meV/f.u.). The 48-k mesh gives the
 WRONG easy axis (-1.39 meV/cell), so this gate deliberately runs the dense
-mesh; a cheap-mesh version would pin the sampling artifact, not the physics.
+mesh; a cheap-mesh version would pin the sampling artifact rather than the
+physics.
 
 Each orientation folds by its own magnetic (Shubnikov) group over the SAME
 underlying mesh ([001] -> 30 k, [100] -> 48 k from 144), which preserves the
