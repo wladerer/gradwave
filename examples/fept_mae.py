@@ -6,6 +6,13 @@ Measured (asus CPU, LSDA, 70 Ry, fully-relativistic SG15 Fe/Pt, gaussian 0.1 eV)
     kmesh (6,6,4) = 144 k:  MAE = +2.552 meV/cell (+1.28 meV/atom) -> easy axis
                             [001], correct for FePt, magnitude in the literature
                             band (~1-3 meV/f.u.)
+    kmesh (8,8,6) = 384 k:  MAE = +2.993 meV/cell (+1.50 meV/atom), A100 40GB
+                            via the magnetic IBZ ([001] 60 k / 395 s, [100]
+                            100 k / 671 s, nbands 40; both |dE| ~ 2e-12 eV,
+                            |M| = 3.284/3.286) — UNFOLDED this run OOMs the
+                            card twice over (Davidson subspace ~32+7 GiB at
+                            384 k), so magnetic folding is what makes dense-k
+                            MAE affordable at all, not just faster.
 Both orientations converge to |dE| ~ 1e-11 eV (five orders below the signal) in
 ~26-28 iterations; |M| = 3.22-3.25 muB. The sign flip from 48 -> 144 k is the
 textbook MAE k-convergence lesson: never trust an anisotropy sign from a coarse
