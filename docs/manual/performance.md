@@ -1,6 +1,6 @@
 # Performance
 
-This page explains where a gradwave calculation spends its time, which levers move it,
+This page explains where a gradwave calculation spends its time, what reduces it,
 and which plausible-sounding optimizations do nothing. The numbers come from
 committed benchmarks on an 8-core laptop and an RTX 3050, at identical cutoff,
 k-mesh, and pseudopotential to Quantum ESPRESSO. Read the [Wisdom](wisdom.md) page
@@ -24,7 +24,7 @@ box at a 35/280 Ry cutoff pair, spends its 53 seconds like this.
 | density build, occupations, rest | remainder |
 
 The FFT and the small batched linear algebra inside the eigensolver dominate.
-Every lever below either removes work from those two, moves it to better hardware,
+Every optimization below either removes work from those two, moves it to better hardware,
 or avoids redoing it.
 
 ## What actually helps
@@ -32,7 +32,7 @@ or avoids redoing it.
 ### IBZ symmetry
 
 Reducing the k-mesh to the irreducible wedge with G-space density symmetrization is
-the largest single lever, giving 5 to 14 times depending on the point group. It is
+the largest single source of speedup, giving 5 to 14 times depending on the point group. It is
 on by default (`use_symmetry=True`) and gated by tests that check the reduced and
 full-mesh energies agree. Reach for this first.
 
@@ -257,12 +257,12 @@ iterations on 8 CPU threads) splits the per-iteration cost as follows.
 | misc Davidson (qr, solve_triangular, norm, cat) | 7% | |
 
 The 21 times factors as roughly 9 times per iteration and 2.3 times iteration count.
-For the iteration count, the mixing scheme is the lever and the smearing kernel is not.
+For the iteration count, the mixing scheme is the deciding factor and the smearing kernel is not.
 Sweeping fcc Pt, `johnson` converges in 13 iterations against `pulay` 17 and `broyden`
 20, and gaussian, cold, and mp1 agree to within one iteration at fixed scheme. The converged
 free energy is bit-identical, so johnson gives 1.3 times on a smeared metal at no accuracy cost (now the
 metal-campaign default). It does not reach QE's 7 iterations, which is a starting-density
-and preconditioner-quality gap. For the per-iteration 16 times, the largest single lever
+and preconditioner-quality gap. For the per-iteration 16 times, the largest single contributor
 is the dense-grid wavefunction FFT (34 percent). The dual grid now runs the batched
 H-apply local term on the smooth `ecutwfc` box instead of the dense `ecutrho` box, exact
 by the bandwidth argument (see the wisdom notes) and verified two ways, the batched path
