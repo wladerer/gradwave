@@ -131,9 +131,22 @@ compensating errors cannot hide.
   → 2.5e-6 at 60 Ry. A useful solution-verification number in its own
   right: egg-box forces at 20 Ry Si are ~1.5e-4 eV/Å, a floor for
   relaxation convergence criteria.
-- Still to do: equivalent-cell re-parameterization (Niggli/rotated frame),
-  k → −k, random U(N) rotation inside degenerate/occupied subspaces
-  (ρ, E, forces invariant).
+- k → −k (implemented, same file): on a shifted MP mesh over a rattled P1
+  cell only time reversal relates the ±k pairs; the TR-halved mesh
+  reproduces the full mesh to <5e-8 eV/atom and 1e-6 eV/Å — gates the
+  H(−k) = H(k)* conjugation/phase conventions end to end.
+- Cell re-parameterization (implemented, same file): the same crystal in a
+  rigidly rotated Cartesian frame — every Cartesian intermediate (g_cart,
+  the σ chain, Ewald, projector Ylm's) re-indexes while E is invariant and
+  forces co-rotate (<5e-8 eV/atom, 1e-6 eV/Å). Still to do: the
+  same-lattice different-primitive-vectors variant (Niggli); the
+  reciprocal lattice and G-sphere are identical, but a fractional k-mesh
+  maps onto different k-points, so it needs explicit k-point control.
+- U(N) gauge rotation (implemented, `tests/unit/test_gauge_invariance.py`):
+  a random unitary inside an equal-occupation block at each k leaves ρ
+  (<1e-12) and every energy term (<1e-10 eV) invariant at random
+  off-stationary coefficients, with an unequal-occupation control proving
+  the machinery would see a violation.
 - Already present in this spirit: IBZ == full mesh (+0.0000 meV), rotation
   invariance of noncollinear (0.19 µeV), collinear limit, ζ=0 limit.
 - Upgrade path: property-based randomization (seeded random low-symmetry
@@ -192,8 +205,9 @@ Hamiltonian terms, same pattern:
 
 - SOC spinors (doubled pw axis; same contraction). The +U gate is done
   (Dudarev V_U vs autograd of E_U through the occupation matrices,
-  including the nspin=1 half-occupation bookkeeping).
-- nspin=2 USPP/PAW (per-channel becsum + spin ddd)
+  including the nspin=1 half-occupation bookkeeping), and so is nspin=2
+  USPP/PAW (per-channel ρ_aug/becsum, ∫v_eff_σ Q screening, spin ddd from
+  energy_and_ddd([ρ↑,ρ↓]) as the exact channel-derivative of e1c_t).
 - smeared occupations as functions of ε (adds the entropy chain; the fixed-f
   identity is what the SCF actually iterates, so this is optional)
 
