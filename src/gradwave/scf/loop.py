@@ -322,6 +322,42 @@ def vxc_spin_potential(xc, rho_up, rho_dn, grid):
     return vu * scale, vd * scale, e_xc.detach()
 
 
+def local_potential_r(system, vloc_g: torch.Tensor | None = None) -> torch.Tensor:
+    """v_loc(r) on the dense grid [eV] — the SCF's local-potential path."""
+    grid = system.grid
+    if vloc_g is None:
+        vloc_g = local_potential_g(system.positions, system.species_index,
+                                   system.vloc_tables, grid.g_cart, grid.volume)
+    return (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
+
+
+def effective_potentials(system, xc, rho_s: list, vloc_r: torch.Tensor) -> list:
+    """Per-spin v_eff(r) from per-channel densities — THE assembly the SCF
+    iterates with. A standalone function (not inlined in the loop) so the
+    off-stationarity E↔H consistency gate can test the exact potential the
+    solver applies (tests/unit/test_energy_hamiltonian_consistency.py)."""
+    grid = system.grid
+    nspin = len(rho_s)
+    rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
+    v_h_r = (
+        torch.fft.ifftn(hartree_potential_g(r_to_g(rho_tot.to(CDTYPE)), grid.g2),
+                        dim=(-3, -2, -1))
+        * grid.n_points
+    ).real
+    core = system.rho_core
+    if nspin == 1:
+        v_xc_r, _ = vxc_potential(xc, rho_tot if core is None else rho_tot + core, grid)
+        return [v_h_r + v_xc_r + vloc_r]
+    cu2 = None if core is None else 0.5 * core
+    v_up, v_dn, _ = vxc_spin_potential(
+        xc,
+        rho_s[0] if core is None else rho_s[0] + cu2,
+        rho_s[1] if core is None else rho_s[1] + cu2,
+        grid,
+    )
+    return [v_h_r + v_up + vloc_r, v_h_r + v_dn + vloc_r]
+
+
 def _seed_density(system, nspin, start_from, start_mag, grid, vol):
     """Initial per-spin density: warm-start from a previous state (volume-
     rescaled so the electron count is conserved), else SAD — spin-split by
@@ -508,7 +544,7 @@ def scf(
     vloc_g = local_potential_g(
         system.positions, system.species_index, system.vloc_tables, grid.g_cart, vol
     )
-    vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
+    vloc_r = local_potential_r(system, vloc_g)
 
     # initial orbitals: lowest-kinetic plane waves, reusing previous orbitals
     # (QE wfc-extrapolation analogue) when start_from carries compatible ones
@@ -527,24 +563,7 @@ def scf(
         rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
         if tf_precond is not None:
             tf_precond.set_density(rho_tot)
-        rho_g_box = r_to_g(rho_tot.to(CDTYPE))
-        v_h_r = (
-            torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2), dim=(-3, -2, -1))
-            * grid.n_points
-        ).real
-        core = system.rho_core
-        if nspin == 1:
-            v_xc_r, _ = vxc_potential(xc, rho_tot if core is None else rho_tot + core, grid)
-            veff_s = [v_h_r + v_xc_r + vloc_r]
-        else:
-            cu2 = None if core is None else 0.5 * core
-            v_up, v_dn, _ = vxc_spin_potential(
-                xc,
-                rho_s[0] if core is None else rho_s[0] + cu2,
-                rho_s[1] if core is None else rho_s[1] + cu2,
-                grid,
-            )
-            veff_s = [v_h_r + v_up + vloc_r, v_h_r + v_dn + vloc_r]
+        veff_s = effective_potentials(system, xc, rho_s, vloc_r)
 
         # adaptive diagonalization tolerance (QE-style): loose while the
         # density is far from self-consistent, tightening QUADRATICALLY with
