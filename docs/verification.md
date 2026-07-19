@@ -130,14 +130,22 @@ compensating errors cannot hide.
 - Upgrade path: property-based randomization (seeded random low-symmetry
   structures per CI run) instead of fixed fixtures.
 
-## Tier 2: exact solutions and convergence orders
+## Tier 2: exact solutions and convergence orders (started)
 
-- Empty lattice (V=0): free-electron bands to machine precision. Isolates
-  kinetic + sphere + FFT machinery.
-- 1D cosine potential: analytic Mathieu band structure through the full 3D
-  solver.
-- Isolated pseudo-atom in a box vs our own radial atomic solver (the SAD
-  path): 3D machinery against 1D quadrature.
+- Empty lattice (implemented, `tests/unit/test_exact_limits.py`): V=0 on a
+  triclinic cell at a generic k gives free-electron bands from the
+  production BatchedHamiltonian + Davidson stack to <1e-9 eV. Isolates
+  kinetic + sphere + FFT machinery; no lattice symmetry to hide
+  indexing/convention errors.
+- Cosine potential (implemented, same file): V0·cos(2πx/a) maps to
+  Mathieu's equation; band edges at Γ (a_0, b_2, a_2, ...) and X
+  (b_1, a_1, b_3, ...) match scipy's characteristic values to <1e-7 eV.
+  A nontrivial analytic band structure through the full 3D solver — the
+  single-harmonic potential makes the basis error superexponentially
+  small, so the comparison is at solver tolerance.
+- Isolated pseudo-atom in a box vs a radial atomic solver (the SAD path):
+  needs a 1D radial KS solver, which the repo does not currently have —
+  future work.
 - Order-of-accuracy assertions: measure the convergence exponent of each
   quadrature (Simpson O(h⁴) radial, angular XC grid, SBT) and assert the
   *rate*, not just smallness. Salari & Knupp's blind study: planted bugs
