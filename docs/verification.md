@@ -215,8 +215,15 @@ channel-derivative of e1c_t), and SOC spinors (the Pauli-decomposition
 m⃗-chain vs the B⃗_xc·σ⃗ apply, and the j-resolved nonlocal dij_so
 contraction vs E_NL, on the doubled plane-wave axis). Remaining:
 
-- smeared occupations as functions of ε (adds the entropy chain; the fixed-f
-  identity is what the SCF actually iterates, so this is optional)
+- Smeared occupations as functions of ε: done as a Legendre-consistency
+  gate (`tests/unit/test_smearing_consistency.py`) — dF/dε_nk = w_k f_nk
+  for every smearing scheme through the SCF's own
+  `shared_fermi_occupations` (incl. the nspin=2 shared-μ bookkeeping),
+  perturbing the most fractional state where the entropy chain is
+  maximally active; a deliberately mismatched occupation/entropy pair
+  breaks it at first order. This is the identity that makes smeared
+  forces Hellmann-Feynman forces of F (Mermin) and the classic trap for
+  Methfessel-Paxton / Marzari-Vanderbilt entropy expressions.
 
 ## Citations
 
