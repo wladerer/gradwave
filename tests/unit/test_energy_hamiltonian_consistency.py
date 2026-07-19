@@ -93,7 +93,7 @@ def _occ(system, nb, values):
     return occ
 
 
-def _eh_gap_nspin1(system, xc, nb, occ_values, seed=0):
+def _eh_gap_nspin1(system, xc, nb, occ_values, seed=0, hubbard=None):
     """max |grad E − 2 w f Hc| / max |2 w f Hc| over the masked region."""
     grid, bk, spheres = system.grid, system.batch, system.spheres
     nk = bk.nk
@@ -101,6 +101,14 @@ def _eh_gap_nspin1(system, xc, nb, occ_values, seed=0):
     occ = _occ(system, nb, occ_values)
     projs = projectors_b(bk, system.positions)
     dij = _stack_dij(system)
+    hub = hub_q = None
+    if hubbard is not None:
+        from gradwave.core.hubbard import (
+            build_hubbard_projectors,
+            hubbard_projectors,
+        )
+        hub = build_hubbard_projectors(system, hubbard)
+        hub_q = hubbard_projectors(hub, system.positions)
 
     c = _random_coeffs(system, nb, seed).requires_grad_(True)
     trimmed = [c[ik, :, : int(bk.npw[ik])] for ik in range(nk)]
@@ -112,16 +120,44 @@ def _eh_gap_nspin1(system, xc, nb, occ_values, seed=0):
         becp_per_k=[becp_b(projs, c)[ik] for ik in range(nk)], dij_full=dij,
         xc=xc, rho_core=system.rho_core,
     )
-    (g,) = torch.autograd.grad(eb.total, c)
+    e_tot = eb.total
+    n_half = None
+    if hub is not None:
+        from gradwave.core.hubbard import hubbard_energy, occupation_matrices
+        # mirror of scf.loop's nspin=1 +U bookkeeping: [0,2] occupations
+        # split into two equal spin channels, E_U doubled
+        n_half = occupation_matrices(hub_q, c, 0.5 * occ, kw, hub.sites)
+        e_tot = e_tot + 2.0 * hubbard_energy(n_half, hub.sites)
+    (g,) = torch.autograd.grad(e_tot, c)
 
     with torch.no_grad():
+        hub_dij = None
+        if hub is not None:
+            from gradwave.core.hubbard import hubbard_dmatrix
+            hub_dij = hubbard_dmatrix([m.detach() for m in n_half], hub.sites,
+                                      hub.nproj, c.device).conj()
         veff = effective_potentials(system, xc, [rho.detach()],
                                     local_potential_r(system))[0]
-        h = BatchedHamiltonian(bk, grid.shape, veff, projs)
+        h = BatchedHamiltonian(bk, grid.shape, veff, projs,
+                               hub_q=hub_q, hub_dij=hub_dij)
         expected = 2.0 * kw[:, None, None] * occ[:, :, None] * h.apply(c.detach())
     mask = bk.mask[:, None, :]
     gap = ((g - expected) * mask).abs().max()
     return float(gap / expected.abs().max())
+
+
+def test_grad_energy_equals_hamiltonian_hubbard():
+    """+U: Dudarev V_U = (U−J)(½−n) applied by the SCF vs autograd of E_U
+    through the occupation matrices — including the nspin=1 half-occupation
+    channel-splitting bookkeeping, which is exactly where a factor slip
+    would hide."""
+    from gradwave.core.hubbard import HubbardManifold
+    from gradwave.core.xc.pbe import PBE
+    system = _ni_box()
+    gap = _eh_gap_nspin1(system, PBE(), nb=8,
+                         occ_values=[2.0] * 5 + [1.5, 0.8, 0.3],
+                         hubbard=[HubbardManifold(0, l=2, u=5.0, j=0.8)])
+    assert gap < 1e-10
 
 
 def test_grad_energy_equals_hamiltonian_lda():

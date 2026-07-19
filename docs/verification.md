@@ -121,10 +121,19 @@ compensating errors cannot hide.
   map rigidly onto the copies. One test exercises k-weights, Fermi filling,
   Hartree G=0 ownership, nonlocal phases, and the density assembly at once.
   Extensions: N along other axes, smeared metals, USPP/PAW systems.
-- Rigid translation (E invariant, forces mapped rigidly), atom permutation,
-  equivalent-cell re-parameterization (Niggli/rotated frame), k → −k,
-  random U(N) rotation inside degenerate/occupied subspaces (ρ, E, forces
-  invariant).
+- Permutation + translation (implemented,
+  `tests/integration/test_metamorphic_invariance.py`): atom relabeling is
+  exact to SCF tolerance (tested tight on heteropolar GaAs, <5e-8
+  eV/atom); rigid translation is invariant up to the XC-quadrature
+  aliasing (egg-box) floor, which the test MEASURED rather than assumed:
+  Si 5.6e-7 eV/atom at 14 Ry and 4.6e-6 at 20 Ry (non-monotonic — the
+  minimal FFT box changes shape with ecut), GaAs semicore 9.1e-5 at 25 Ry
+  → 2.5e-6 at 60 Ry. A useful solution-verification number in its own
+  right: egg-box forces at 20 Ry Si are ~1.5e-4 eV/Å, a floor for
+  relaxation convergence criteria.
+- Still to do: equivalent-cell re-parameterization (Niggli/rotated frame),
+  k → −k, random U(N) rotation inside degenerate/occupied subspaces
+  (ρ, E, forces invariant).
 - Already present in this spirit: IBZ == full mesh (+0.0000 meV), rotation
   invariance of noncollinear (0.19 µeV), collinear limit, ζ=0 limit.
 - Upgrade path: property-based randomization (seeded random low-symmetry
@@ -181,9 +190,9 @@ compensating errors cannot hide.
 Extend `test_energy_hamiltonian_consistency.py` to the remaining
 Hamiltonian terms, same pattern:
 
-- +U (V_U from Dudarev D at random occupation matrices vs grad of E_U
-  through `occupation_matrices`)
-- SOC spinors (doubled pw axis; same contraction)
+- SOC spinors (doubled pw axis; same contraction). The +U gate is done
+  (Dudarev V_U vs autograd of E_U through the occupation matrices,
+  including the nspin=1 half-occupation bookkeeping).
 - nspin=2 USPP/PAW (per-channel becsum + spin ddd)
 - smeared occupations as functions of ε (adds the entropy chain; the fixed-f
   identity is what the SCF actually iterates, so this is optional)
