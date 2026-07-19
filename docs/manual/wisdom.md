@@ -2,7 +2,7 @@
 
 Things that cost real time to learn and are not obvious from the code. Each entry is
 a rule with the symptom that motivates it. If what you are seeing matches a symptom
-below, trust the entry before re-deriving it. The marquee example is that the
+below, trust the entry before re-deriving it. The clearest example is that the
 small-system speed gap is fp64 precision and kernel maturity, not an architectural
 defect, which the [Performance](performance.md) page works through in full.
 
@@ -19,7 +19,7 @@ defect, which the [Performance](performance.md) page works through in full.
   pairing, never per term. The hardest USPP adjoint bug was converting one pairing but
   not its composite partner, which silently broke the becsum block.
 - torch returns conjugate Wirtinger gradients for a real scalar of complex inputs.
-  Every hand-written backward must match that convention. It is documented in
+  Every explicitly implemented backward must match that convention. It is documented in
   `fftbox.py` and nowhere else on purpose.
 - Everything is float64 or complex128, always explicit. `torch.tensor(x)` defaults to
   float32 and once broke Fermi-level bisection.
@@ -81,15 +81,15 @@ defect, which the [Performance](performance.md) page works through in full.
   yet dual-gridded (a follow-up). Validated two ways, the batched path matches the dense
   per-k reference to 2e-13 eV on Al, and the fcc Pt free energy is bit-identical before
   and after. Measured on Pt at 40/400 Ry it halves the FFT time (34 percent of the SCF)
-  for about 1.2x, more on harder pseudos and less on softer ones because the win scales
+  for about 1.2x, more on harder pseudos and less on softer ones because the gain scales
   with `ecutrho/ecutwfc`.
 - A real FFT is not automatically faster than a complex one. The Gamma-real path
   (`core/gamma.py`) stores the half sphere and runs the H-apply on `irfftn`/`rfftn`,
   which in theory halves the hottest kernel. Measured on this CPU (MKL, non-power-of-two
   boxes) the forward-plus-inverse real transform ran 0.75x to 1.25x the complex pair
-  across 63^3 and 72^3 at 8 and 24 bands, so the H-apply came out 0.97x in isolation,
+  across 63^3 and 72^3 at 8 and 24 bands, so the H-apply was 0.97x in isolation,
   neutral to slightly slower. The full Davidson solver ran slower still (0.6x to 0.8x
-  across contended runs, so directional rather than precise) because the per-apply embed
+  under CPU contention, so directional rather than precise) because the per-apply embed
   and full-sphere reconstruction overhead compounds over the iterations. The
   real-transform advantage is grid-size and library dependent and did not appear here.
   The path is correct to machine precision and stands as the substrate for a GPU (cuFFT)
@@ -99,7 +99,7 @@ defect, which the [Performance](performance.md) page works through in full.
 ## Eigensolvers
 
 - Re-orthonormalize the reused Ritz block on a Davidson restart. Drift compounds at
-  tight tolerance into eV-scale energy jumps, and it bites CUDA first while staying
+  tight tolerance into eV-scale energy jumps, and it manifests on CUDA first while staying
   latent on CPU.
 - For a complex generalized problem, form $L^{-1} H L^{-\dagger}$, not $L^{-1} H
   L^{-1}$. The error is invisible on real matrices and produces Ritz values below the
@@ -121,7 +121,7 @@ defect, which the [Performance](performance.md) page works through in full.
   around 1e-8, whose signature is exact energies with `converged=False` for 60
   iterations.
 - Do not feed a walked-off warm start to the mixer. A warm-started Davidson can
-  deterministically walk off a cliff from a converged-quality density, with 100 eV
+  deterministically diverge from a converged-quality density, with 100 eV
   energy jumps and a frozen residual that mixer resets do not touch. The rescue is
   discarding the warm start and re-solving from salted seeds without feeding the garbage
   to the mixer.
@@ -131,7 +131,7 @@ defect, which the [Performance](performance.md) page works through in full.
 - Mix the composite (density, becsum) pair for USPP/PAW. Mixing becsum outside the
   Pulay vector produces a gain-per-iteration charge oscillation on semicore-metal PAW.
 - Kerker damps the density-total block only. A per-channel Kerker with a $G=0$ zero
-  freezes interspin charge transfer and blows up spin SCFs, so spin mixing runs in the
+  freezes interspin charge transfer and makes spin SCFs diverge, so spin mixing runs in the
   (total, magnetization) basis.
 - Solve DIIS in the diagonally-normalized basis with scale-invariant Tikhonov.
   Regularization scaled to the raw matrix swamps the newest small-residual entries and
@@ -149,7 +149,7 @@ defect, which the [Performance](performance.md) page works through in full.
 - Treat ferromagnetic metals near the Stoner instability as the adversarial case. The
   map has a measured gain near $-6$ on the spin mode, and its consequences were each
   learned separately. Default damping collapses the moment to the nonmagnetic branch
-  silently. Hand damping converges slowly. Scalar adaptive step controllers either
+  silently. Manual damping converges slowly. Scalar adaptive step controllers either
   over-damp permanently or ride the stability boundary. Plain unweighted Broyden diverges
   because early garbage secant pairs poison the inverse Jacobian. Johnson's weights, the
   normalization plus the w0 regularization, are the load-bearing part of QE's mixer, not
@@ -162,8 +162,7 @@ defect, which the [Performance](performance.md) page works through in full.
   operator, the $\chi_0$-diagonal preconditioner whose ingredients are the Fermi-surface
   adjoint terms, not a schedule. Adaptive damping line searches match good fixed damping
   at best and fail on transition metals.
-- Re-audit every crutch when you change mixers. A stabilizer tuned for one mixer becomes
-  a brake under a better one. The 0.4 becsum step scale that tamed the on-site
+- Re-audit every crutch when you change mixers. A stabilizer tuned for one mixer slows convergence under a better one. The 0.4 becsum step scale that suppressed the on-site
   becsum-ddd mode for Pulay cost Johnson eleven iterations on ferromagnetic Ni. QE mixes
   becsum unscaled, and matching that closed the bulk of the remaining iteration gap.
 - A better initial wavefunction does not cut the SCF iteration count. Seeding the first
@@ -182,8 +181,7 @@ defect, which the [Performance](performance.md) page works through in full.
 - Assert that fractional occupations exist before testing metallic physics. A coarse
   k-mesh can have none at small smearing. Al on a 2×2×2 mesh needs 0.5 eV of smearing
   before anything is fractional.
-- Match the reference's occupation scheme before suspecting forces. A smeared run
-  against a fixed-occupation reference legitimately differs, since displaced Si at 0.05
+- Match the reference's occupation scheme before suspecting forces. A smeared calculation against a fixed-occupation reference legitimately differs, since displaced Si at 0.05
   eV smearing has 0.9 percent fractional occupations.
 - The mixing scheme sets the iteration count on a metal, the smearing kernel does not.
   On 1-atom fcc Pt (PAW, 40/400 Ry, 6x6x6, 0.2 eV) `johnson` converges in 13 iterations
@@ -213,15 +211,14 @@ defect, which the [Performance](performance.md) page works through in full.
 - Gate the moment sign. The $\pm m$ branches are exactly degenerate without spin-orbit
   and the trajectory selects one.
 - Some references are not worth generating. The displaced-Ni₂ torture geometry made QE
-  itself bounce for 54 to 100 Broyden iterations. Validate on degenerate limits and clean
+  itself oscillate for 54 to 100 Broyden iterations. Validate on degenerate limits and clean
   integer-occupation systems like the O₂ triplet instead.
 - The direction-only moment constraint has a magnitude loophole. The Ma-Dudarev
   $|M^\perp|^2$ penalty is minimized at $M=0$, so a frustrated non-collinear target
-  demagnetizes to satisfy it for free. It is fine at collinear endpoints (a forced
+  demagnetizes to satisfy it at no penalty. It is fine at collinear endpoints (a forced
   antiparallel target relaxes to the true smaller AFM moment), but at oblique angles use
   the magnitude-robust $|M - m_0\hat e|^2$ ("vector") penalty, which charges $\lambda
-  m_0^2$ for demagnetizing. bcc Fe forced to a 135° spiral: perp collapses to 1.7 μB,
-  vector holds 2.2.
+  m_0^2$ for demagnetizing. bcc Fe forced to a 135° spiral, perp collapses to 1.7 μB and vector holds 2.2.
 - Spin Hamiltonians (J, D, K) come from the torque, not energy mapping. The exchange
   tensor is the site-to-site derivative of the autograd torque, $\mathcal{J}_{IJ} =
   \partial T_I/\partial\hat e_J$. Tilt one moment, read the induced torque on the
@@ -244,7 +241,7 @@ defect, which the [Performance](performance.md) page works through in full.
 
 - Never trace the SCF loop or the eigensolver with autograd. Derivatives are taken at
   the converged point, by stationarity for energy gradients and by Sternheimer plus
-  autograd HVP kernels for everything else. No hand-derived $f_{xc}$ exists anywhere in
+  autograd HVP kernels for everything else. No explicitly derived $f_{xc}$ exists anywhere in
   the code, which is why every solver works for learnable functionals unchanged.
 - Use Anderson mixing on response fixed points, not plain damped iteration, which
   diverges near spin instabilities. NiO's antisymmetric mode has a $K\chi_0$ eigenvalue
@@ -309,8 +306,7 @@ differentiable-DFT coupling of arXiv:2509.07785. A few things are not obvious.
   δbecsum fed through the Q functions. On Si2 the augmentation channel lifts the density
   correlation from 0.51 (smooth only) to 0.74. ∫δρ is no longer exactly zero: the smooth
   part cancels but the augmentation carries a small S-orthogonality residual (~3e-5 per
-  electron on Si), which is negligible. The USPP energy ratio (0.99 on Si) came out
-  tighter than the NC diamond case (0.73), but that is the system, not the method, so do
+  electron on Si), which is negligible. The USPP energy ratio (0.99 on Si) was tighter than the NC diamond case (0.73), but that is the system, not the method, so do
   not read it as a general improvement.
 - The nspin=2 path runs the correction per spin channel, each with its own v_eff and
   eigenvalues, and sums δρ and δE over the two channels. The nonmagnetic limit
@@ -344,11 +340,11 @@ differentiable-DFT coupling of arXiv:2509.07785. A few things are not obvious.
   implementation, while Δ against QE at pinned settings isolates the implementation. Cu
   and Ni look bad on the first axis and sit exactly at the psl pseudization limit on the
   second.
-- Write long remote runs to a file on the remote host. A killed ssh pipe takes the output
-  of an hour-long run with it, and `timeout` kills the wrapper while the python orphans.
+- Write long remote calculations to a file on the remote host. A killed ssh pipe takes the output
+  of an hour-long calculation with it, and `timeout` kills the wrapper while the python orphans.
 - Do not match a process by its own command line. `pgrep -f` matches the shell running it
   when the pattern appears in the command line. Use `ps aux | grep "[p]attern"` or exact
-  PID kills. This bites remotely too: `ssh host 'pkill -f pat'` matches the ssh command's
+  PID kills. The same failure occurs remotely too: `ssh host 'pkill -f pat'` matches the ssh command's
   own remote shell and kills the job you just launched.
 - Detach remote background jobs with `setsid`, not bare `nohup`. `nohup cmd &` launched
   inside `ssh host '...'` still takes SIGHUP when the ssh session closes and dies. Wrap
@@ -358,7 +354,7 @@ differentiable-DFT coupling of arXiv:2509.07785. A few things are not obvious.
   `python: not found` and `module: command not found` because the profile is never
   sourced. Call the interpreter by full path (`~/.venvs/base/bin/python`) and `source`
   the module init explicitly.
-- A shared HPC cluster's Python environment fights you. Build it from conda-forge. On
+- A shared HPC cluster's Python environment works against you. Build it from conda-forge. On
   Hoffman2 the login profile forced `pip --user`, put a broken py3.9 `~/.local` on
   `PYTHONPATH`, shipped GCC < 9.3 (so any source-built wheel dies), and threw an OpenBLAS
   memory error on the login node. The robust fix is conda-forge for the whole scientific

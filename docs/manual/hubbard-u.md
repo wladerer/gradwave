@@ -2,7 +2,7 @@
 
 A GGA underbinds the localized $d$ and $f$ electrons of transition-metal
 compounds. The DFT+U correction fixes this with a single parameter per manifold,
-and the parameter itself is not a knob to guess: gradwave computes it from linear
+The parameter itself is not guessed. gradwave computes it from linear
 response and exposes its exact energy derivative, so U is a determinable,
 differentiable quantity rather than a fitted input.
 
@@ -17,8 +17,7 @@ where $n^{I\sigma}_{mm'} = \sum_{kv} f_{kv\sigma} \langle \phi^I_m | \psi_{kv} \
 \langle \psi_{kv} | \phi^I_{m'} \rangle$ is the occupation matrix of the $(l)$
 manifold on atom $I$, built from the pseudo-atomic orbitals $\phi^I_m$. The
 potential $V_U$ is a nonlocal projector with a density-dependent D-matrix, so it
-plugs into the same projector contraction the Kleinman-Bylander nonlocal term
-already uses. For USPP/PAW the overlaps carry the $S$-metric, $\langle \phi | S |
+uses the same projector contraction as the Kleinman-Bylander nonlocal term. For USPP/PAW the overlaps carry the $S$-metric, $\langle \phi | S |
 \psi \rangle$, matching QE's `U_projection_type='atomic'`.
 
 **U from linear response.** Following Cococcioni and de Gironcoli,[[20]](bibliography.md#cococcioni) a
@@ -70,7 +69,7 @@ SCFs for $\chi$, cheap one-shot solves for $\chi^0$). `linear_response_u_autodif
 gets the same number from a single ground-state SCF using conduction-projected
 Sternheimer response, with the Hartree-XC screening kernel taken as an autograd
 Hessian-vector product of $E_\text{Hxc}$ (so any twice-differentiable, including
-learnable, functional works with no hand-coded $f_\text{xc}$).
+learnable, functional works with no explicitly written $f_\text{xc}$).
 
 ```python
 from gradwave.postscf.hubbard_u import (

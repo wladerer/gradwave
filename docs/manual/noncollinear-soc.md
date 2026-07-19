@@ -2,7 +2,7 @@
 
 gradwave solves the two-component (spinor) Kohn-Sham problem, so magnetic moments
 can point in any direction and spin-orbit coupling (SOC) can mix them. A topological
-band inversion demonstrates it. In Bi₂Se₃ spin-orbit coupling swaps the parity of
+band inversion demonstrates both. In Bi₂Se₃ spin-orbit coupling swaps the parity of
 the states across the gap at Γ, the fingerprint of a topological insulator.
 
 This page covers the spinor SCF, SOC from a fully-relativistic pseudopotential, and
@@ -73,7 +73,7 @@ Spin-orbit coupling opens and inverts the gap at Γ, and the valence-band maximu
 moves off Γ into a camelback.
 
 The SOC machinery is validated quantitatively on the GaAs valence split-off. The
-$\Gamma_8$ (four-fold) sits above $\Gamma_7$ (two-fold) with a spin-orbit gap
+$\Gamma_8$ (four-fold) lies above $\Gamma_7$ (two-fold) with a spin-orbit gap
 $\Delta_0 = 0.336$ eV against QE's fully-relativistic reference (experiment 0.34 eV),
 agreeing to $2\times10^{-3}$ eV. Spin-orbit character is also resolvable in the
 projected density of states, separating a shell into its $j$ channels (a
@@ -91,7 +91,7 @@ res.mag_total    # ∫ (ρ↑ − ρ↓) dr [μB]
 ```
 
 This path is QE-validated. bcc Fe converges within 0.02 $\mu_B$ of QE's moment and
-under 1 meV/atom, and the triplet O₂ molecule lands the $m = 2\,\mu_B$ moment to
+under 1 meV/atom, and the triplet O₂ molecule reproduces the $m = 2\,\mu_B$ moment to
 $10^{-3}$. The USPP/PAW spin path (`scf_uspp`, `nspin=2`) carries the same
 `start_mag` and `mag_total`.
 
@@ -100,11 +100,11 @@ $10^{-3}$. The USPP/PAW spin path (`scf_uspp`, `nspin=2`) carries the same
 - A fully-relativistic pseudopotential is required for SOC, and the collinear `scf`
   rejects one. PseudoDojo fully-relativistic sets work, though their NLCC is
   unsupported on the spin-orbit path. SG15 fully-relativistic works.
-- Symmetry is off for a magnetic non-collinear run, because a net moment breaks the
-  crystal symmetry, so these use the full mesh. A nonmagnetic SOC run keeps
+- Symmetry is off for a magnetic non-collinear calculation, because a net moment breaks the
+  crystal symmetry, so these use the full mesh. A nonmagnetic SOC calculation keeps
   time-reversal (Kramers) reduction.
 - The $\pm\mathbf{m}$ branches are exactly degenerate without spin-orbit coupling,
-  and the branch the SCF lands on depends on the trajectory. Gate on the moment
+  and the branch the SCF settles into depends on the trajectory. Gate on the moment
   magnitude, not its sign.
 
 ## Next

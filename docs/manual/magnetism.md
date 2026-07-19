@@ -60,8 +60,8 @@ the moment to the lattice.
 
 The $|\mathbf{M}^\perp|^2$ penalty constrains only the moment *direction*, and it
 is minimized ($E_p \to 0$) at $\mathbf{M}=0$. So a strongly-coupled magnet forced
-to a large relative angle has a cheap escape. It demagnetizes rather than holding
-its moments apart. Demagnetizing is a genuine physical route out of frustration,
+to a large relative angle demagnetizes rather than holding its moments apart, a
+low-energy way to satisfy the constraint. Demagnetizing is a genuine physical route out of frustration,
 not a solver artifact. The consequence is that `mode="perp"` cannot represent a
 metastable antiferromagnetic state.
 
@@ -82,10 +82,10 @@ _, vec  = constrained_moment_scf(system, xc, afm, lam=8.0, weights=w,
 
 | mode | $\lvert\mathbf{M}_I\rvert$ (μB) | $M_z$ (μB) | outcome |
 |---|---|---|---|
-| `perp`   | 0.00, 0.00 | 0.00, 0.00 | demagnetized, constraint met for free |
+| `perp`   | 0.00, 0.00 | 0.00, 0.00 | demagnetized, constraint met at no energy cost |
 | `vector` | 0.81, 0.81 | +0.81, −0.81 | genuine antiferromagnet, held |
 
-The held antiferromagnetic state sits ≈3.0 eV above the ferromagnetic ground
+The held antiferromagnetic state lies ≈3.0 eV above the ferromagnetic ground
 state, which is O₂'s exchange splitting, a number `perp` cannot produce because it
 never holds the moments. The field, the torque, and both penalty forms are one
 differentiable definition (`gradwave.scf.moment_penalty`), so the SCF field and
@@ -102,7 +102,7 @@ matches a finite difference of $W$ to a part in $10^3$.
 
 ## Spin-spiral dispersion of bcc Fe
 
-The magnitude-robust constraint is exactly what a frozen spin spiral needs, holding
+The magnitude-robust constraint is what a frozen spin spiral requires, holding
 every atomic moment at full magnitude while rotating its direction. `gradwave` has
 no generalized-Bloch machinery, but a *commensurate* spiral needs none. A two-atom
 bcc cell (corner and body-center sublattices) with the body-center moment rotated by

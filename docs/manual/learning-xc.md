@@ -6,7 +6,7 @@ At any positive $\kappa$ and $\mu$ it keeps the uniform-gas limit and the
 Lieb-Oxford bound, so a partly trained functional is still a valid
 generalized-gradient approximation.
 
-The training run recovers PBE from a perturbed start.
+Training recovers PBE from a perturbed start.
 
 | | $\kappa$ | $\mu$ | |
 |---|---|---|---|
@@ -35,7 +35,7 @@ $\mu = 0.2195$ the functional is PBE.
 
 ## Two gradient regimes
 
-Which backward you need depends on what the loss touches.[[13]](bibliography.md#kasim)
+Which backward you need depends on which quantities enter the loss.[[13]](bibliography.md#kasim)
 
 ### Energy loss
 
@@ -60,7 +60,7 @@ Jacobian of the map,
 
 $$ \frac{\mathrm{d}\rho^\star}{\mathrm{d}\theta} = \left( I - \frac{\partial G}{\partial \rho} \right)^{-1} \frac{\partial G}{\partial \theta}. $$
 
-For a scalar loss $L(\rho^\star)$ the gradient never forms this explicitly. It
+For a scalar loss $L(\rho^\star)$ the gradient never forms the inverse explicitly. It
 solves one adjoint linear system for $w$ and contracts,
 
 $$ \left( I - \frac{\partial G}{\partial \rho} \right)^{\!\top} w = \frac{\partial L}{\partial \rho}, \qquad \frac{\mathrm{d}L}{\mathrm{d}\theta} = w^{\!\top} \frac{\partial G}{\partial \theta}. $$
@@ -70,10 +70,10 @@ Sternheimer equations, the density functional perturbation theory kernel of Baro
 et al.,[[14]](bibliography.md#dfpt) and it is accelerated by Anderson
 mixing[[15]](bibliography.md#anderson) and Kerker
 preconditioning.[[16]](bibliography.md#kerker) `uspp_density_loss_param_grads` runs
-exactly one such solve per gradient. The norm-conserving analog lives in
+exactly one such solve per gradient. The norm-conserving analog is in
 `scf/implicit.py`.
 
-## The free case, energy loss
+## The no-solve case, energy loss
 
 ```python
 from gradwave.core.xc.learnable import LearnableX, energy_param_grads
@@ -109,7 +109,7 @@ loss, grads = uspp_density_loss_param_grads(res, xc, loss_fn, floor_tol=1e-4)
 !!! note "Which path"
     `energy_param_grads` takes a norm-conserving `scf` result.
     `uspp_density_loss_param_grads` takes a USPP/PAW `scf_uspp` result. The
-    norm-conserving density-loss analog lives in `scf/implicit.py`.
+    norm-conserving density-loss analog is in `scf/implicit.py`.
 
 ## Run the full example
 
@@ -130,7 +130,7 @@ adjoint solve.
 
     uv run python examples/train_xc_paw.py 20
 
-The run writes `examples/train_xc_paw.json` with the per-epoch loss and the
+This writes `examples/train_xc_paw.json` with the per-epoch loss and the
 recovered $(\kappa, \mu)$. The loss is a relative density MSE, the optimizer is
 Adam with backtracking that halves the rate when the loss rises, and a warm-start
 chain reuses each system's converged density across epochs.
@@ -158,7 +158,7 @@ response.
     `floor_tol` and `kerker_q0` exist for vacuum cells. O₂ in a box has an
     achievable outer floor that wanders with the functional parameters. The Kerker
     factor $q^2 / (q^2 + q_0^2)$ damps the long-wavelength vacuum noise that set the
-    old stagnation floor. Setting `kerker_q0=1.5` measured a drop from a floored
+    old stagnation floor. With `kerker_q0=1.5`, the floor dropped from
     1.4e-4 to a converged 1.4e-5. `floor_tol` stays as the safety net for parameter
     points where the floor wanders back up. Leave both unset for validation work,
     where the strict behavior is what you want.

@@ -31,7 +31,7 @@ key list, the checkpoint API, and the analysis helpers.
 | `scf_uspp`, `setup_uspp` (`scf.uspp`) | USPP/PAW SCF |
 | `GradWave` (`calculator`) | ASE calculator, energy, forces, stress |
 | `LearnableX`, `LearnableSpinX` (`core.xc.learnable`) | learnable exchange |
-| `energy_param_grads` (`core.xc.learnable`) | free dE/dθ at convergence |
+| `energy_param_grads` (`core.xc.learnable`) | dE/dθ at convergence, no extra solve |
 | `uspp_density_loss_param_grads` (`postscf.uspp_implicit`) | density-loss adjoint |
 
 The [API reference](api/index.md) expands each of these with full signatures,

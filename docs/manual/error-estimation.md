@@ -2,20 +2,20 @@
 
 A plane-wave calculation has one systematic convergence knob, the kinetic-energy
 cutoff `ecut`. The usual way to know whether it is converged is a cutoff sweep,
-several full runs at rising `ecut`. gradwave instead estimates the remaining
-plane-wave (Ecut) error from a **single** converged run, as a cheap post-SCF
+several full calculations at rising `ecut`. gradwave instead estimates the remaining
+plane-wave (Ecut) error from a **single** converged calculation, as a cheap post-SCF
 pass that needs no larger SCF, following the perturbation post-processing of
 Cancès et al.[[18]](bibliography.md#cances)
 
-Turn it on and the run reports how far the energy still has to fall, the
+Turn it on and the calculation reports how far the energy still has to fall, the
 extrapolated energy, the density error, and (for a norm-conserving spin-unpolarized
-run) the force error.
+calculation) the force error.
 
 ## Theory
 
 The occupied orbitals are converged inside the sphere $T_G \le E_\text{cut}$ but
 truncated at its edge. Enlarge the sphere to $E_\text{cut} < T_G \le
-E_\text{cut}^\text{large}$ and estimate the piece of each orbital that lives on
+E_\text{cut}^\text{large}$ and estimate the part of each orbital on
 that annulus. At high kinetic energy the Hamiltonian is dominated by the diagonal
 Laplacian, so the first-order correction is a diagonal divide,
 
@@ -29,7 +29,7 @@ no larger SCF required. Three facts make the estimate trustworthy and cheap.
 - **The energy error is second order, a definite lowering.** The correct estimate
   is $\delta E = \sum_i f_i \langle \delta\psi_i | R_i \rangle$ with a factor of
   one, not two: at the variational optimum the naive first-order term is halved by
-  the second-order term. $\delta E < 0$ always. The exact energy is below the
+  the second-order term. $\delta E < 0$ always, so the exact energy is below the
   computed one.
 - **The force error is one extra pass.** Propagating the *fixed* orbital
   correction through the force, $\delta F \approx (\partial F / \partial P)\,
@@ -44,7 +44,7 @@ $\delta\psi$ and an augmentation part from the change in the on-site occupations
 P_\text{annulus}(\hat{H} - \varepsilon \hat{S})\psi$.
 
 !!! note "Not stress, and not a rigorous bound"
-    The same fixed-$\delta P$ recipe does **not** extend to stress: it comes out
+    The same fixed-$\delta P$ recipe does **not** extend to stress: it is
     cleanly *anti*-correlated with the true error, because the stress error is
     dominated by the strain-response of the orbital correction, which a fixed-$\delta\psi$
     pass omits. Stress error is deferred. And the estimate is a first-order
@@ -89,9 +89,9 @@ carries the same fields.
 | `force_error_max_eV_ang`, `force_error_rms_eV_ang` | the force error (NC nspin=1 only) |
 | `ecut_eV`, `ecut_large_eV` | the base and enlarged cutoffs |
 
-When the run is outside the supported coverage the block is
+When the calculation is outside the supported coverage the block is
 `{"available": false, "reason": ...}` and the report prints `unavailable —
-<reason>` rather than failing the run.
+<reason>` rather than failing the calculation.
 
 ## Drive it from Python
 

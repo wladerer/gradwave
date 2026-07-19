@@ -5,7 +5,7 @@ result now. Each entry is the shortest path to one quantity. The tutorials carry
 theory and the validation behind each of these. The full input schema is on the
 [Inputs and outputs](io.md) page.
 
-Every run needs three things, a `structure`, a `pseudopotentials` block, and an
+Every calculation needs three things, a `structure`, a `pseudopotentials` block, and an
 `ecut` in eV. Everything else has a default. Energies are eV and lengths are Å.
 
 ## Ground-state SCF
@@ -108,8 +108,7 @@ gradwave plot out/scf.json --kind pdos
 
 ## Collinear spin
 
-Set `nspin: 2` and seed a moment fraction per element. The converged moment lands in
-the report.
+Set `nspin: 2` and seed a moment fraction per element. The converged moment is reported.
 
 ```yaml
 nspin: 2
@@ -123,8 +122,8 @@ Non-collinear moments, spin-orbit coupling, and exchange constants are in
 
 ## Check the cutoff without a sweep
 
-Add one line to an `scf` run and the report gains a basis-set error estimate, the
-energy the cutoff is converging to, from a single run.
+Add one line to an `scf` calculation and the report gains a basis-set error estimate, the
+energy the cutoff is converging to, from a single calculation.
 
 ```yaml
 output: {error_estimate: true}
@@ -159,5 +158,5 @@ system = system.to("cuda")
 ```
 
 The GPU is worth using once the cell reaches production size. On small cells the
-fp64 tax on a consumer card loses to the CPU, worked through on the
+fp64 cost on a consumer card is slower than the CPU, worked through on the
 [Performance](performance.md) page.

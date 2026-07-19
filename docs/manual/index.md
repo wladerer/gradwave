@@ -29,7 +29,7 @@ collects the CLI, the output files, and the entry points, and the
 - Band structures with point-group irrep labels, total and projected (l, m, j)
   density of states.
 - Brillouin-zone reduction by symmetry, with density and becsum symmetrization.
-- Basis-set (Ecut) error estimation from a single run, no cutoff sweep.
+- Basis-set (Ecut) error estimation from a single calculation, no cutoff sweep.
 - Exchange-correlation functionals trained by gradient descent through the SCF
   density, each gradient one adjoint solve.
 - DFT+U with the Hubbard U determined from linear response and an exact dE/dU.
