@@ -28,7 +28,9 @@ path, so it does not affect solve performance; the cost is a handful of extra
 FFTs per occupied band plus (if requested) one dielectric solve.
 
 Coverage. Density and energy error: norm-conserving and ultrasoft/PAW, nspin=1
-and nspin=2. Force error: norm-conserving nspin=1. Symmetry: for norm-conserving
+and nspin=2. Force error: norm-conserving nspin=1 and nspin=2 (the nonlocal
+channel sums over spin channels; nspin=2 runs on the full BZ, since a magnetic
+run already requires use_symmetry=False). Symmetry: for norm-conserving
 nspin=1 the estimate runs on the IBZ k-points and folds the density error over
 the star (the same operator the SCF applies to rho), while the force error
 symmetrizes the output dF vector like ground-state forces. USPP/PAW, nspin=2,
@@ -47,6 +49,7 @@ bands is the leading first-order term only.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -111,6 +114,13 @@ def _occupied(res: SCFResult, ik: int, sp: int | None = None):
         eig = res.eigenvalues[sp][ik]
     n_occ = int((occ > 1e-8).sum())
     return coeffs[:n_occ], eig[:n_occ], occ[:n_occ]
+
+
+def _bands_at(res: SCFResult, ik: int, sp: int | None = None):
+    """All computed coefficients and eigenvalues at one k (and spin channel)."""
+    if sp is None:
+        return res.coeffs[ik], res.eigenvalues[ik]
+    return res.coeffs[sp][ik], res.eigenvalues[sp][ik]
 
 
 def _enlarged_hamiltonian(res: SCFResult, k_frac, ecut_large: float, device,
@@ -518,47 +528,64 @@ def estimate_force_error(
     The first-order δP is used (drho_first_order together with dpsi) so the two
     channels stay consistent; a Dyson-dressed δρ would need the matching dressed
     δφ, which is future work.
+
+    Norm-conserving, nspin=1 or 2 (no NLCC). For nspin=2 the nonlocal channel
+    sums over the two spin channels — each with its own orbital corrections and
+    occupations (in [0,1]) — while the local channel already sees the
+    spin-summed density error ``drho_first_order``.
     """
     if err.uspp:
         raise NotImplementedError(
             "force error estimate is norm-conserving only; the USPP/PAW force "
             "needs the augmentation and one-center force terms in P(eps)")
-    if getattr(res, "nspin", 1) != 1:
-        raise NotImplementedError("force error estimate is nspin=1 only for now")
     if getattr(res.system, "rho_core", None) is not None:
         raise NotImplementedError("NLCC force term not supported in the error estimate")
+    nspin = int(getattr(res, "nspin", 1))
     system = res.system
     grid = system.grid
     device = res.v_eff.device
 
-    drho = err.drho_first_order  # consistent with err.dpsi
-    rho0 = res.rho.detach()
+    drho = err.drho_first_order  # consistent with err.dpsi; total (spin-summed) drho
+    rho0 = res.rho.detach()      # total density for nspin=1 and 2
 
     pos = system.positions.detach().clone().requires_grad_(True)
     eps = torch.zeros((), dtype=RDTYPE, device=device, requires_grad=True)
 
-    # local channel: density enters through rho_g
+    # local channel: total density enters through rho_g
     rho_e_g = r_to_g((rho0 + eps * drho).to(CDTYPE))
     vloc_g = local_potential_g(
         pos, system.species_index, system.vloc_tables, grid.g_cart, grid.volume
     )
     energy = local_energy(rho_e_g, vloc_g, grid.volume)
 
-    # nonlocal channel: orbital corrections enter through becp on the enlarged sphere
-    nk = len(err.spheres_large)
-    nocc_max = max(o.shape[0] for o in err.occ)
-    occ_t = torch.zeros(nk, nocc_max, dtype=RDTYPE, device=device)
-    becps = []
+    # nonlocal channel: orbital corrections enter through becp on the enlarged
+    # sphere, summed over spin channels. For nspin=1 the estimator returns flat
+    # per-k lists; for nspin=2 they are nested [spin][k], so normalize to a
+    # per-spin layout here. Each spin channel carries its own occupations
+    # (in [0,1]) and its own δφ.
+    if nspin == 1:
+        dpsi_s, psi_large_s, occ_s, sph_s = (
+            [err.dpsi], [err.psi_large], [err.occ], [err.spheres_large])
+    else:
+        dpsi_s, psi_large_s, occ_s, sph_s = (
+            err.dpsi, err.psi_large, err.occ, err.spheres_large)
+
+    nk = len(sph_s[0])
+    nocc_max = max(o.shape[0] for occ_k in occ_s for o in occ_k)
     dij_enl = None
-    for ik, sph1 in enumerate(err.spheres_large):
-        pd1 = _enlarged_projector_data(res, sph1, device)
-        if dij_enl is None:
-            dij_enl = pd1.dij_full
-        p1 = projectors(pd1, pos)  # differentiable in positions
-        c1_e = err.psi_large[ik] + eps * err.dpsi[ik]  # (n_occ, npw1), differentiable in eps
-        becps.append(becp(p1, c1_e))
-        occ_t[ik, : err.occ[ik].shape[0]] = err.occ[ik]
-    energy = energy + nonlocal_energy(becps, dij_enl, occ_t, system.kweights)
+    for isp in range(nspin):
+        occ_t = torch.zeros(nk, nocc_max, dtype=RDTYPE, device=device)
+        becps = []
+        for ik, sph1 in enumerate(sph_s[isp]):
+            pd1 = _enlarged_projector_data(res, sph1, device)
+            if dij_enl is None:
+                dij_enl = pd1.dij_full
+            p1 = projectors(pd1, pos)  # differentiable in positions
+            # (n_occ, npw1), differentiable in eps
+            c1_e = psi_large_s[isp][ik] + eps * dpsi_s[isp][ik]
+            becps.append(becp(p1, c1_e))
+            occ_t[ik, : occ_s[isp][ik].shape[0]] = occ_s[isp][ik]
+        energy = energy + nonlocal_energy(becps, dij_enl, occ_t, system.kweights)
     # Ewald has no δP dependence, so it drops out of ∂/∂ε.
 
     (de_deps,) = torch.autograd.grad(energy, eps, create_graph=True)
@@ -573,6 +600,165 @@ def estimate_force_error(
 
         dF = symmetrize_forces(dF, system.sym, grid.cell)
     return dF
+
+
+# --------------------------------------------------------------------------- #
+#  Eigenvalue / band-gap error                                                #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class EigenvalueError:
+    """Estimated Ecut discretization error of the Kohn-Sham eigenvalues.
+
+    ``deig`` is the second-order eigenvalue shift toward the infinite-basis
+    limit (<= 0, a definite lowering), same sign convention as the energy
+    error: eps_exact ~= eps + deig. Layout mirrors the SCF eigenvalues -- a
+    per-k list of (nband_sel,) tensors for nspin=1, nested [spin][k] for
+    nspin=2. ``eig`` carries the matching base eigenvalues [eV].
+    """
+
+    deig: list
+    eig: list
+    ecut: float
+    ecut_large: float
+    nspin: int = 1
+
+
+def _band_eig_error(h1, sph0, sph1, coeffs, eig, grid_shape, ecut):
+    """Per-band δε on one k/spin from the enlarged Hamiltonian ``h1``.
+
+    The same complement correction as the density estimate, run on every band:
+    R = P_annulus (H - eps) psi, δψ = -R/(T_G - eps), and the second-order
+    eigenvalue shift is δε = <δψ | R> = -sum_annulus |R|^2/(T_G - eps) <= 0.
+    This is the per-band term the energy error sums over occupations.
+    """
+    box = sphere_to_box(coeffs, sph0.flat_idx, grid_shape)
+    c1 = box_to_sphere(box, sph1.flat_idx)
+    resid = h1.apply(c1) - eig[:, None] * c1
+    annulus = h1.t > ecut * (1.0 + 1e-9)
+    denom = torch.clamp(h1.t[None, :] - eig[:, None], min=1e-3)
+    dpsi = torch.where(annulus[None, :], -resid / denom.to(resid.dtype),
+                       torch.zeros_like(resid))
+    return (dpsi.conj() * resid).real.sum(dim=1)  # (nband,) <= 0
+
+
+@torch.no_grad()
+def estimate_eigenvalue_error(
+    res: SCFResult,
+    *,
+    ecut_large: float | None = None,
+    factor: float = 2.5,
+    bands=None,
+) -> EigenvalueError:
+    """Estimate the plane-wave discretization error of the KS eigenvalues.
+
+    Reuses the complement correction of the density/energy estimate. The term
+    the energy error already sums over occupations, δε_i = <δψ_i | R_i>, is
+    exactly the second-order eigenvalue shift; running it on the empty bands as
+    well turns the estimator into a band-structure and band-gap error tool. The
+    shift is a definite lowering (δε <= 0), so the occupation-weighted sum of
+    the occupied-band shifts reproduces ``estimate_density_error(...).denergy``.
+
+    Norm-conserving, nspin=1 or 2. ``bands`` selects a subset (an index list or
+    slice); None uses every band the SCF computed -- keep the default for gap
+    analysis, which needs the frontier bands.
+    """
+    if isinstance(res, dict):
+        raise NotImplementedError(
+            "eigenvalue error is norm-conserving only for now (no USPP/PAW)")
+    system = res.system
+    grid = system.grid
+    device = res.v_eff.device
+    ecut = float(system.ecut)
+    nspin = int(getattr(res, "nspin", 1))
+    if ecut_large is None:
+        ecut_large = factor * ecut
+    if gmax_from_ecut(ecut_large) > 2.0 * gmax_from_ecut(ecut) * (1.0 + 1e-9):
+        raise ValueError(
+            f"ecut_large={ecut_large:.1f} eV exceeds 4*ecut={4 * ecut:.1f} eV; the "
+            "enlarged sphere would not fit the density FFT box. Lower ecut_large."
+        )
+
+    spins = [None] if nspin == 1 else list(range(nspin))
+    deig_s, eig_s = [], []
+    for sp in spins:
+        v_eff_sp = res.v_eff if sp is None else res.v_eff[sp]
+        deig_k, eig_k = [], []
+        for ik, sph0 in enumerate(system.spheres):
+            coeffs, eig = _bands_at(res, ik, sp)
+            sel = slice(None) if bands is None else bands
+            c_sel, eps_sel = coeffs[sel], eig[sel]
+            sph1, h1 = _enlarged_hamiltonian(
+                res, sph0.k_frac, ecut_large, device, v_eff=v_eff_sp)
+            deig_k.append(
+                _band_eig_error(h1, sph0, sph1, c_sel, eps_sel, grid.shape, ecut))
+            eig_k.append(eps_sel.clone())
+        deig_s.append(deig_k)
+        eig_s.append(eig_k)
+
+    if nspin == 1:
+        deig, eig = deig_s[0], eig_s[0]
+    else:
+        deig, eig = deig_s, eig_s
+    return EigenvalueError(deig=deig, eig=eig, ecut=ecut,
+                           ecut_large=ecut_large, nspin=nspin)
+
+
+def estimate_gap_error(res: SCFResult, eigerr: EigenvalueError, *,
+                       occ_threshold: float | None = None) -> dict:
+    """Band-gap discretization error from a full-band ``EigenvalueError``.
+
+    Locates the valence-band maximum and conduction-band minimum over the BZ
+    (and both spin channels), then reports the base gap, the extrapolated gap
+    (eps + δε at each edge), and their difference. The eigenvalue error must
+    have been computed with the default ``bands=None`` so the band index lines
+    up with the occupations. Raises ValueError for a metal/semimetal (VBM >=
+    CBM) or when no empty band is available to resolve the CBM.
+    """
+    nspin = int(getattr(res, "nspin", 1))
+    full = 2.0 if nspin == 1 else 1.0
+    thr = 0.5 * full if occ_threshold is None else occ_threshold
+    deig_s = [eigerr.deig] if nspin == 1 else eigerr.deig
+    spins = [None] if nspin == 1 else list(range(nspin))
+
+    vbm, cbm = -math.inf, math.inf
+    dvbm = dcbm = 0.0
+    vk = ck = vsp = csp = -1
+    for isp, sp in enumerate(spins):
+        for ik in range(len(res.system.spheres)):
+            occ = res.occupations[ik] if sp is None else res.occupations[sp][ik]
+            _, eig = _bands_at(res, ik, sp)
+            de = deig_s[isp][ik]
+            n = de.shape[0]
+            occ, eig = occ[:n], eig[:n]
+            filled = occ > thr
+            if bool(filled.any()):
+                iv = int(torch.where(filled)[0].max())
+                if float(eig[iv]) > vbm:
+                    vbm, dvbm, vk, vsp = float(eig[iv]), float(de[iv]), ik, isp
+            empty = ~filled
+            if bool(empty.any()):
+                ic = int(torch.where(empty)[0].min())
+                if float(eig[ic]) < cbm:
+                    cbm, dcbm, ck, csp = float(eig[ic]), float(de[ic]), ik, isp
+
+    if not (math.isfinite(vbm) and math.isfinite(cbm)):
+        raise ValueError(
+            "cannot resolve a gap: no empty band available -- increase nbands")
+    if vbm >= cbm:
+        raise ValueError(
+            f"system is metallic/semimetallic (VBM {vbm:.3f} >= CBM {cbm:.3f} "
+            "eV); band-gap error is undefined")
+    gap, dgap = cbm - vbm, dcbm - dvbm
+    return {
+        "gap_eV": gap,
+        "gap_extrapolated_eV": gap + dgap,
+        "dgap_eV": dgap,
+        "vbm_eV": vbm, "cbm_eV": cbm,
+        "dvbm_eV": dvbm, "dcbm_eV": dcbm,
+        "direct": (vk == ck and vsp == csp),
+    }
 
 
 # NOTE on stress. The naive fixed-δP linearization that works for forces,

@@ -329,10 +329,10 @@ differentiable-DFT coupling of arXiv:2509.07785. A few things are not obvious.
   a real response to a symmetry-breaking perturbation (USPP augmentation, nspin=2 spin
   channels, the Dyson dressing, and stress), where folding the IBZ output is not valid.
 - Coverage. Density and energy error: NC and USPP/PAW, nspin=1 and 2. Force error: NC
-  nspin=1 (the USPP force needs the augmentation and one-center force terms; the nspin=2
-  force needs the per-spin channels threaded through the propagation). Symmetry is
-  supported for the NC nspin=1 density, energy, and force error; USPP/PAW, nspin=2, and
-  Dyson still require use_symmetry=False.
+  nspin=1 and 2 (the nonlocal channel sums over spin channels; USPP force still needs the
+  augmentation and one-center force terms). Symmetry is supported for the NC nspin=1
+  density, energy, and force error; USPP/PAW, nspin=2, and Dyson still require
+  use_symmetry=False (so the nspin=2 force error runs on the full BZ).
 
 ## Process and validation
 

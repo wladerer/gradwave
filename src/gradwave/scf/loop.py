@@ -306,6 +306,8 @@ class SCFResult:
     mag_total: float = 0.0  # ∫(ρ↑−ρ↓) dr [μB]
     mag_abs: float = 0.0  # ∫|ρ↑−ρ↓| dr [μB]
     hub_occ: list | None = None  # DFT+U per-spin occupation matrices [σ][site]
+    drho_scf: torch.Tensor | None = None  # last self-consistency residual ρ_out−ρ_in
+                                          # (total density) for the SCF-error estimate
 
 
 def vxc_spin_potential(xc, rho_up, rho_dn, grid):
@@ -682,6 +684,9 @@ def scf(
             assert torch.isfinite(rho_out_vec).all(), "density diverged (NaN/Inf)"
             assert tot_res.abs() < 1e-8, "total G=0 residual nonzero"
         res_norm = float(torch.linalg.norm(rho_out_vec - rho_in_vec)) * vol
+        # keep the real-space total-density residual of the last step for the
+        # post-SCF convergence-error estimate (ρ_out − ρ_in at this iteration)
+        drho_scf = rho_tot_out - rho_tot
         de = abs(e_free - e_free_prev) if e_free_prev is not None else float("inf")
         history.append({"iter": it, "free_energy": e_free, "dE": de, "res": res_norm})
         if verbose:
@@ -721,7 +726,7 @@ def scf(
             converged=converged, n_iter=it, energies=energies, fermi=mu,
             eigenvalues=eigs_s[0], occupations=occ_s[0], coeffs=coeffs_list_s[0],
             rho=rho_tot_final, v_eff=veff_s[0], system=system, history=history,
-            hub_occ=n_hub_s,
+            hub_occ=n_hub_s, drho_scf=drho_scf,
         )
     m_density = rho_s[0] - rho_s[1]
     return SCFResult(
@@ -731,7 +736,7 @@ def scf(
         system=system, history=history, nspin=2, rho_spin=rho_s,
         mag_total=float(m_density.mean()) * vol,
         mag_abs=float(m_density.abs().mean()) * vol,
-        hub_occ=n_hub_s,
+        hub_occ=n_hub_s, drho_scf=drho_scf,
     )
 
 

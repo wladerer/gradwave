@@ -395,8 +395,9 @@ thermal equation of state.
 ## Full nspin=2 and PAW coverage for every feature
 
 Coverage is uneven across the postscf features. Several are nspin=1 or NC only.
-`dielectric_born` is nspin=1 insulators, parts of the discretization-error force path
-are NC nspin=1, and the noncollinear and SOC PDOS paths have their own constraints.
+`dielectric_born` is nspin=1 insulators, the discretization-error force path
+is NC (nspin=1 or 2, no USPP/PAW), and the noncollinear and SOC PDOS paths have their
+own constraints.
 
 Make an explicit matrix of feature x {NC, USPP/PAW} x {nspin=1, 2} and close the
 gaps. Most of the per-channel machinery exists, so the work is threading the spin
@@ -406,6 +407,102 @@ like magnetic surfaces and spin-polarized adsorbates. The SCF core itself is alr
 even here, the batched USPP/PAW eigensolve is validated at nspin=2 (O2 triplet,
 batched vs per-k to 7e-12 eV, and 21 iterations to QE's 20), so the gaps are in the
 postscf property layer, not the solver.
+
+## Error estimation: the rest of the budget, and what it can and cannot reach
+
+The discretization estimate (`postscf/discretization_error.py`) is one term in a
+larger error budget, and it is the cleanest one because a plane-wave cutoff is a
+variational truncation: a converged truth exists at infinite basis, the energy is
+stationary there, so the error is second order and a single cheap perturbative pass
+reaches it. Density, energy, force (NC nspin=1/2), and now per-band eigenvalue and
+band-gap errors all fall out of the same complement correction. This section records
+what the other terms are, which of them share that structure, and whether adding
+them up ever gives the true error. It never does, and the reason bounds the whole
+program, so it is worth writing down.
+
+Split the budget into a numerical part and a model part. Every number sits at some
+distance from reality, and that distance factors:
+
+    E_computed - E_reality = (E_computed - E_KS_converged) + (E_KS_converged - E_reality)
+                              \______ numerical ______/       \____ model (XC) ____/
+
+`E_KS_converged` is the exact-basis, dense-k, fully self-consistent Kohn-Sham energy
+for the functional you chose. The numerical term is the sum of the convergence
+errors (cutoff, k-points, SCF, smearing, density grid, cell size). The model term is
+the XC functional error. The two are categorically different, and only the first is
+reachable from inside a calculation.
+
+The numerical terms are trackable, roughly additive, and individually cheap.
+
+- SCF convergence error. Stopping the iteration at finite `rhotol` leaves a density
+  residual `drho = rho_out - rho_in`. Because the energy is stationary at the fixed
+  point, the error is `~ (1/2) <drho | K_Hxc + chi0 | drho>`, second order in the
+  residual (this is why the energy converges as the square of the density). The
+  kernel is exactly the operators `scf/implicit.py` already exposes for the Dyson
+  dressing, so this is a few lines and one response application, no new SCF. The
+  Harris-Foulkes vs Kohn-Sham energy pair at the last step brackets it as a
+  zero-machinery cross-check.
+- k-point sampling error. The largest untracked term for metals and small cells, and
+  the one that does not share the variational structure: BZ integration is a
+  quadrature, not a truncated variational space, so the complement trick does not
+  transfer. It is reachable instead by mesh extrapolation or integrand-smoothness
+  estimates. Different math, higher value.
+- Smearing / electronic temperature. The `E - (1/2)TS` (Methfessel-Paxton) T->0
+  correction adds almost no cost: the entropy term is already computed in
+  `shared_fermi_occupations`, so exposing the extrapolated energy is the whole task.
+- Density-grid (`ecutrho`) and finite-size round out the list. The first is the same
+  perturbative logic on the dense grid (USPP/PAW-relevant). The second is
+  system-specific (Makov-Payne image corrections for charged/defect/molecular cells).
+
+At leading order these add, but not exactly: the axes couple (the basis error depends
+on the density, which depends on the k-mesh), so the true numerical error carries
+cross terms the per-axis estimates omit. Summed, they estimate the distance to
+`E_KS_converged` well; they do not reproduce it to machine precision.
+
+The model term, the XC error, is categorically not internally reachable. Converge
+every numerical knob and you are left with the exact answer for an approximate
+functional, off from reality by the XC error, and nothing in the run measures it: it
+needs external reference (CCSD(T), QMC, experiment) or the exact functional. What is
+available is weaker, and worth being precise about.
+
+- Density-corrected decomposition (DC-DFT). The XC error splits into a
+  functional-driven part (wrong functional on the exact density, not recoverable
+  internally) and a density-driven part (`E_xc[rho_A] - E_xc[rho_B]` for a better
+  density `rho_B`, computable and correctable). The textbook `rho_B` is the
+  self-interaction-free Hartree-Fock density, which needs exact exchange the code
+  does not have cheaply; the available proxy is the LDA<->PBE density sensitivity,
+  and the differentiable machinery carries the resulting density change to any
+  observable exactly as the force estimate does.
+- Functional sensitivity. The `learnable.py` slot plus autograd give
+  `d(observable)/d(XC parameters)` in one pass, a linearized single-run version of
+  the BEEF ensemble spread. It is a variance, not the error, and it is calibrated to
+  whatever the parameters span.
+- Self-interaction diagnostic. `E(N)` should be piecewise-linear in fractional
+  electron number for the exact functional. The deviation is a direct, fully internal
+  measure of the delocalization error that dominates gaps and charge transfer,
+  needing only the fractional occupations the smearing path already supports.
+
+Self-interaction and the density-driven error are decompositions of the XC term, not
+independent channels to add on top of it; treating them as separate additive errors
+would double-count.
+
+So, does the full budget give the true error? No, for two reasons stacked. The XC
+(model) term is not knowable from inside the calculation, so there is an irreducible
+unknown no combination of internal estimates reaches; and even the numerical terms
+only sum to leading order, missing their cross-coupling. What the numerical budget
+does provide is a defensible estimate of the distance to `E_KS_converged`: you can drive
+the cutoff, k-point, SCF, and smearing errors to near zero and know that you have.
+The XC error is then both the largest remaining term for most production work and the
+only one you cannot self-certify. That is the honest shape of the effort. The
+numerical errors are a solved problem in principle, the accuracy that matters is in
+the functional, and the differentiable framework's advantage on that term is
+sensitivity and the density-driven half, not an absolute bar.
+
+Build order. SCF-convergence error first (cleanest fit, reuses the response
+operators, cross-checks against a tight-vs-loose run the way the eigenvalue error
+cross-checks against `denergy`); the fractional-charge self-interaction probe second
+(self-contained, no second functional); k-point extrapolation and the DC-DFT density
+sensitivity after, as the higher-value but structurally different pieces.
 
 ## Batched multi-structure SCF, and the EOS-on-GPU question
 

@@ -444,13 +444,15 @@ def _error_estimate_block(res, inp) -> dict:
 
     Cheap post-processing (no larger SCF): the first-order complement correction
     of Cancès et al. gives the estimated basis-set error in the energy (a
-    definite lowering), the density, and, for norm-conserving nspin=1, the
+    definite lowering), the density, and, for norm-conserving nspin=1 or 2, the
     Hellmann-Feynman forces. Reported as an indicator, not a rigorous bound.
     Degrades gracefully when the run's formalism/settings are outside coverage.
     """
     from gradwave.postscf.discretization_error import (
         estimate_density_error,
+        estimate_eigenvalue_error,
         estimate_force_error,
+        estimate_gap_error,
     )
 
     _species, upfs, _soa = _species_upfs(inp)
@@ -481,7 +483,7 @@ def _error_estimate_block(res, inp) -> dict:
         "int_drho": float(drho.sum()) * vol / npts,
         "note": "first-order estimate, indicative not a rigorous bound",
     }
-    force_ok = (not uspp and nspin == 1
+    force_ok = (not uspp and nspin in (1, 2)
                 and getattr(system, "rho_core", None) is None)
     if force_ok:
         try:
@@ -490,6 +492,47 @@ def _error_estimate_block(res, inp) -> dict:
             block["force_error_rms_eV_ang"] = float((fe ** 2).mean().sqrt())
         except NotImplementedError:
             pass
+    # band-gap error (NC only; skipped for metals/semimetals and USPP/PAW)
+    if not uspp:
+        try:
+            eige = estimate_eigenvalue_error(res, ecut_large=err.ecut_large)
+            gap = estimate_gap_error(res, eige)
+            block["gap_eV"] = gap["gap_eV"]
+            block["gap_extrapolated_eV"] = gap["gap_extrapolated_eV"]
+            block["dgap_eV"] = gap["dgap_eV"]
+        except (NotImplementedError, ValueError):
+            pass
+    # other numerical convergence errors (SCF self-consistency, smearing). These
+    # are separate axes from the basis-set error; k-point sampling needs a mesh
+    # sweep (estimate_kpoint_error) and is not reachable from one run.
+    from gradwave.postscf.convergence_error import (
+        estimate_scf_error,
+        estimate_smearing_error,
+    )
+    if not uspp:
+        try:
+            scfe = estimate_scf_error(res, xc)
+            block["scf_convergence"] = {
+                "denergy_eV": scfe.denergy,
+                "denergy_meV_per_atom": scfe.denergy / natom * 1e3,
+                "residual_L1_per_electron": scfe.residual_norm,
+                "screened": scfe.screened,
+                "energy_converged_estimate_eV": scfe.energy_converged_estimate,
+            }
+        except (NotImplementedError, ValueError):
+            pass
+    try:
+        sme = estimate_smearing_error(
+            res, scheme=inp.smearing.type, width=inp.smearing.width)
+        block["smearing"] = {
+            "scheme": sme.scheme,
+            "dsmearing_eV": sme.dsmearing,
+            "energy_extrapolated_eV": sme.energy_extrapolated,
+            "residual_bound_eV": sme.half_width,
+            "note": sme.note,
+        }
+    except (NotImplementedError, ValueError):
+        pass
     return block
 
 
