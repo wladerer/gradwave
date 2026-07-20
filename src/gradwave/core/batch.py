@@ -142,7 +142,8 @@ class BatchedHamiltonian:
             bk.mask, flat_idx, torch.full_like(flat_idx, self.n)
         )
         self._box = None
-        self._tab_cache: dict = {}  # cdtype → cast (t, v_eff, p, dij) for mixed precision
+        self._tab_cache: dict = {}  # cdtype → cast (t, v_eff, p, p_conj, dij)
+        self._hub_cache: dict = {}  # cdtype → cast (hub_q, hub_q_conj, hub_dij)
 
     def _tables(self, cdtype):
         """Cast tables to the working precision of the coefficients (cached).
@@ -155,10 +156,15 @@ class BatchedHamiltonian:
             from gradwave.dtypes import real_of
 
             rdtype = real_of(cdtype)
+            p = self.p.to(cdtype)
             cached = (
                 self.bk.t.to(rdtype),
                 self.v_eff_r.to(rdtype),
-                self.p.to(cdtype),
+                p,
+                # cached resolved conjugate: constant for the H's lifetime but
+                # consumed every apply — materializing p.conj() per Davidson
+                # round re-allocates the full projector table twice per round
+                p.conj().resolve_conj(),
                 self.bk.dij_full.to(cdtype),
             )
             self._tab_cache[cdtype] = cached
@@ -190,7 +196,7 @@ class BatchedHamiltonian:
         bound peak memory on the dense grid (math identical)."""
         bk = self.bk
         nk, nb, m = c.shape
-        t_r, v_eff, p, dij = self._tables(c.dtype)
+        t_r, v_eff, p, p_conj, dij = self._tables(c.dtype)
         out = t_r[:, None, :] * c
 
         chunk = self._band_chunk(nk, c.device, c.element_size())
@@ -210,13 +216,21 @@ class BatchedHamiltonian:
             out[:, lo:hi] += vg.gather(2, gath)
 
         if p.shape[1]:
-            b = torch.einsum("kpg,kbg->kbp", p.conj(), c)
+            b = torch.einsum("kpg,kbg->kbp", p_conj, c)
             out = out + torch.einsum("kbp,pq,kqg->kbg", b, dij, p)
         if self.hub_q is not None and self.hub_dij is not None:
-            hq = self.hub_q.to(c.dtype)
-            bh = torch.einsum("kpg,kbg->kbp", hq.conj(), c)
-            out = out + torch.einsum("kbp,pq,kqg->kbg", bh, self.hub_dij.to(c.dtype), hq)
+            hq, hq_conj, hd = self._hub_tables(c.dtype)
+            bh = torch.einsum("kpg,kbg->kbp", hq_conj, c)
+            out = out + torch.einsum("kbp,pq,kqg->kbg", bh, hd, hq)
         return out * bk.mask[:, None, :]
+
+    def _hub_tables(self, cdtype):
+        cached = self._hub_cache.get(cdtype)
+        if cached is None:
+            hq = self.hub_q.to(cdtype)
+            cached = (hq, hq.conj().resolve_conj(), self.hub_dij.to(cdtype))
+            self._hub_cache[cdtype] = cached
+        return cached
 
 
 def density_b(
@@ -246,6 +260,9 @@ def density_b(
     return rho / volume
 
 
-def becp_b(p: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
-    """⟨p|ψ⟩ overlaps (nk, nb, nproj)."""
-    return torch.einsum("kpg,kbg->kbp", p.conj(), c)
+def becp_b(p: torch.Tensor, c: torch.Tensor,
+           p_conj: torch.Tensor | None = None) -> torch.Tensor:
+    """⟨p|ψ⟩ overlaps (nk, nb, nproj). Pass a cached resolved conjugate via
+    p_conj in per-round hot paths to skip re-materializing p.conj()."""
+    pc = p.conj() if p_conj is None else p_conj
+    return torch.einsum("kpg,kbg->kbp", pc, c)

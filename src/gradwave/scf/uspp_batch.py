@@ -37,12 +37,15 @@ class BatchedHS:
             hub_q=hub_sphi, hub_dij=hub_d, smooth=smooth,
         )
         self.t = bk.t
-        self._pq_cache: dict = {}  # cdtype → (p, q) for mixed precision
+        self._pq_cache: dict = {}  # cdtype → (p, p_conj, q) for mixed precision
 
     def _pq(self, cdtype):
         cached = self._pq_cache.get(cdtype)
         if cached is None:
-            cached = (self.p.to(cdtype), self.q.to(cdtype))
+            p = self.p.to(cdtype)
+            # conjugate cached: S is applied every Davidson round and a fresh
+            # p.conj() there re-materializes the whole projector table
+            cached = (p, p.conj().resolve_conj(), self.q.to(cdtype))
             self._pq_cache[cdtype] = cached
         return cached
 
@@ -50,8 +53,8 @@ class BatchedHS:
         return self.ham.apply(c)  # dtype-follows c (BatchedHamiltonian._tables)
 
     def s(self, c):
-        p, q = self._pq(c.dtype)
-        b = becp_b(p, c)
+        p, p_conj, q = self._pq(c.dtype)
+        b = becp_b(p, c, p_conj=p_conj)
         return (c + torch.einsum("kbp,pq,kqg->kbg", b, q, p)
                 ) * self.bk.mask[:, None, :]
 
@@ -82,11 +85,13 @@ def davidson_gen_batched(hs: BatchedHS, x0: torch.Tensor, nbands: int,
         # subspace algebra ALWAYS in fp64: the generalized reduction's
         # Cholesky of a near-singular S is exactly where fp32 produces
         # garbage rotations; the matrices are (nk, nsub, nsub)-tiny, so
-        # upcasting costs nothing while the applies stay low-precision
-        h_sub = torch.einsum("kig,kjg->kij", v_.conj(), hv_).to(
-            torch.complex128)
-        s_sub = torch.einsum("kig,kjg->kij", v_.conj(), sv_).to(
-            torch.complex128)
+        # upcasting costs nothing while the applies stay low-precision.
+        # matmul on the lazy-conj + transpose views — same contraction as
+        # einsum("kig,kjg->kij", v.conj(), ·) without materializing a conj
+        # copy of the whole subspace (the large-nk memory spike)
+        vc = v_.conj()
+        h_sub = torch.matmul(vc, hv_.mT).to(torch.complex128)
+        s_sub = torch.matmul(vc, sv_.mT).to(torch.complex128)
         return (0.5 * (h_sub + h_sub.conj().transpose(-1, -2)),
                 0.5 * (s_sub + s_sub.conj().transpose(-1, -2)))
 

@@ -119,7 +119,12 @@ def find_fermi(
     Gaussian occupations (NOT for Methfessel–Paxton — needs a bracket).
     Runs detached — μ is an implicit function handled analytically in M4.
     """
-    eigs = eigs.detach()
+    device = eigs.device
+    # bisect on a CPU copy: the eigenvalue array is tiny, and every bracket
+    # comparison on a device tensor is an implicit host sync — ~45 serialized
+    # GPU stalls per SCF iteration for pure latency (CPU runs: a no-op move)
+    eigs = eigs.detach().cpu()
+    kweights = kweights.detach().cpu()
     lo = eigs.min() - 10.0 * width - 1.0
     hi = eigs.max() + 10.0 * width + 1.0
 
@@ -137,7 +142,7 @@ def find_fermi(
             hi = mid
         if hi - lo < tol:
             break
-    return 0.5 * (lo + hi)
+    return (0.5 * (lo + hi)).to(device)
 
 
 def occupations_and_entropy(

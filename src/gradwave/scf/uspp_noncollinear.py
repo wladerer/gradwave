@@ -30,9 +30,11 @@ use_symmetry=False, exactly like the norm-conserving spinor loop.
 
 from __future__ import annotations
 
+import dataclasses
+
 import torch
 
-from gradwave.core.batch import becp_b, box_to_sphere_b, g_to_r_b
+from gradwave.core.batch import box_to_sphere_b, g_to_r_b
 from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.hartree import hartree_energy, hartree_potential_g
 from gradwave.core.energies.nl_pp import nonlocal_energy
@@ -68,11 +70,14 @@ class SpinorBatchedHS:
     and in projector space through the four screened-D channels; S = 1 + Σq|β⟩⟨β|
     is spin-diagonal (no SOC), applied per component with the same q_full."""
 
-    def __init__(self, bk, shape, v_r, b_vec_r, p, d_chan, q_full):
+    def __init__(self, bk, shape, v_r, b_vec_r, p, d_chan, q_full, smooth=None):
         self.inner = bk
         self.bk = _SpinorBK(bk)
         self.shape = shape
         self.p = p
+        # constant per SCF iteration but consumed every Davidson round: cache
+        # the resolved conjugate once instead of materializing p.conj() per apply
+        self.p_conj = p.conj().resolve_conj()
         self.q_full = q_full.to(CDTYPE)
         self.m = bk.npw_max
         self.t = torch.cat([bk.t, bk.t], dim=-1)
@@ -85,6 +90,27 @@ class SpinorBatchedHS:
         self._v_uu = v_r + bz
         self._v_dd = v_r - bz
         self._v_ud = torch.complex(bx, -by)
+        # dual grid (USPP/PAW): the local 2×2 mix runs on the smaller smooth
+        # box — exact for ⟨ψ|V|ψ⟩ since ψ†ψ products live within twice the
+        # wavefunction cutoff (same argument as the collinear BatchedHamiltonian;
+        # the 2×2 blocks are plain grid fields, so it holds per block). The
+        # kinetic and nonlocal terms are sphere-based and untouched. The caller
+        # passes smooth = (shape_s, flat_idx_s) with the potentials already
+        # filtered onto the smooth box.
+        self._fft_bk = bk
+        self._fft_shape = shape
+        if smooth is not None:
+            shape_s, flat_idx_s = smooth
+            self._fft_bk = dataclasses.replace(bk, flat_idx=flat_idx_s)
+            self._fft_shape = shape_s
+
+    def _band_chunk(self, nk: int, device, elem_bytes: int = 16) -> int:
+        """Bands per chunk for the local mix + nonlocal einsums, mirroring
+        SpinorHamiltonian: bound the (nk, 2·nb, grid) FFT temporaries and the
+        (nk, nb, 2·npw) nonlocal temporaries at large k/band counts."""
+        n = self._fft_shape[0] * self._fft_shape[1] * self._fft_shape[2]
+        budget = 2.5e8 if device.type == "cuda" else 4.0e8
+        return max(1, int(budget / (elem_bytes * n * max(nk, 1))))
 
     def h(self, c):
         bk, m = self.inner, self.m
@@ -92,23 +118,31 @@ class SpinorBatchedHS:
         t_r = bk.t
         out_u = t_r[:, None, :] * cu
         out_d = t_r[:, None, :] * cd
-        # local 2×2 mix (dense grid; correctness-first — no smooth dual box)
-        psi = g_to_r_b(torch.cat([cu, cd], dim=1), bk, self.shape)
-        nb = cu.shape[1]
-        psi_u, psi_d = psi[:, :nb], psi[:, nb:]
-        if self.b_zero:
-            h_u = psi_u * self._v_uu
-            h_d = psi_d * self._v_dd
-        else:
-            h_u = psi_u * self._v_uu + psi_d * self._v_ud
-            h_d = psi_u * self._v_ud.conj() + psi_d * self._v_dd
-        hud = box_to_sphere_b(torch.cat([h_u, h_d], dim=1), bk)
-        out_u = out_u + hud[:, :nb]
-        out_d = out_d + hud[:, nb:]
-        # nonlocal: 2×2 screened D in projector space
-        p = self.p
-        bu = becp_b(p, cu)
-        bd = becp_b(p, cd)
+        nk, nb = c.shape[0], c.shape[1]
+        fbk = self._fft_bk
+        chunk = self._band_chunk(nk, c.device, c.element_size())
+        for lo in range(0, nb, chunk):
+            hi = min(lo + chunk, nb)
+            nbc = hi - lo
+            # local 2×2 mix — both spinor components in ONE batched FFT pair,
+            # on the smooth box when the dual grid is active
+            psi = g_to_r_b(torch.cat([cu[:, lo:hi], cd[:, lo:hi]], dim=1),
+                           fbk, self._fft_shape)
+            psi_u, psi_d = psi[:, :nbc], psi[:, nbc:]
+            if self.b_zero:
+                h_u = psi_u * self._v_uu
+                h_d = psi_d * self._v_dd
+            else:
+                h_u = psi_u * self._v_uu + psi_d * self._v_ud
+                h_d = psi_u * self._v_ud.conj() + psi_d * self._v_dd
+            hud = box_to_sphere_b(torch.cat([h_u, h_d], dim=1), fbk)
+            out_u[:, lo:hi] += hud[:, :nbc]
+            out_d[:, lo:hi] += hud[:, nbc:]
+        # nonlocal: 2×2 screened D in projector space; one fused becp for
+        # both spin components
+        p, pc = self.p, self.p_conj
+        bud = torch.einsum("kpg,kbg->kbp", pc, torch.cat([cu, cd], dim=1))
+        bu, bd = bud[:, :nb], bud[:, nb:]
         out_u = out_u + torch.einsum(
             "kbp,pq,kqg->kbg", bu, self._d_uu, p) + torch.einsum(
             "kbp,pq,kqg->kbg", bd, self._d_ud, p)
@@ -121,9 +155,11 @@ class SpinorBatchedHS:
     def s(self, c):
         bk, m = self.inner, self.m
         mask = bk.mask[:, None, :]
+        nb = c.shape[1]
+        bud = torch.einsum("kpg,kbg->kbp", self.p_conj,
+                           torch.cat([c[..., :m], c[..., m:]], dim=1))
         outs = []
-        for blk in (c[..., :m], c[..., m:]):
-            b = becp_b(self.p, blk)
+        for blk, b in ((c[..., :m], bud[:, :nb]), (c[..., m:], bud[:, nb:])):
             outs.append((blk + torch.einsum(
                 "kbp,pq,kqg->kbg", b, self.q_full, self.p)) * mask)
         return torch.cat(outs, dim=-1)
@@ -249,6 +285,17 @@ def scf_uspp_noncollinear(
     energies = None
     q_c = system.q_full.to(CDTYPE)
     dij_bare = system.proj_data[0].dij_full
+    # atoms grouped by species: the per-iteration ∫(v,B⃗)Q and augmentation
+    # contractions batch over the atom axis (one einsum per species instead
+    # of a Python loop of tiny kernels per atom per channel)
+    sp_atoms: dict[int, list[int]] = {}
+    for a, sp in enumerate(system.species_of_atom):
+        sp_atoms.setdefault(sp, []).append(a)
+    smooth_geom = None
+    if system.smooth_shape is not None:
+        ns_smooth = (system.smooth_shape[0] * system.smooth_shape[1]
+                     * system.smooth_shape[2])
+        smooth_geom = (system.smooth_shape, system.smooth_flat_idx)
 
     for it in range(1, max_iter + 1):
         # ---- potentials ----
@@ -258,15 +305,21 @@ def scf_uspp_noncollinear(
         v_r = v_h + v_xc + ops.vloc_r
 
         # ---- screened D: four channels, ∫(v, B⃗) Q + bare D + one-center ddd ----
-        pots = (v_r, b_xc[0], b_xc[1], b_xc[2])
+        # one FFT for all four channels, one einsum per species over
+        # (channel, atom) — not a per-atom Python loop with a q_g.conj()
+        # re-materialized 4·na times per iteration
+        pots = torch.stack([v_r, b_xc[0], b_xc[1], b_xc[2]])
+        pots_g_box = r_to_g(pots.to(CDTYPE)).reshape(4, -1)
+        pot_g = pots_g_box[:, mask_flat]
         d_chan = [torch.zeros_like(system.q_full) for _ in range(4)]
-        for c4, pot in enumerate(pots):
-            pot_g = r_to_g(pot.to(CDTYPE)).reshape(-1)[mask_flat]
-            for a, sp in enumerate(system.species_of_atom):
+        for sp, atoms in sp_atoms.items():
+            contr = torch.einsum("ijg,cg,ga->caij", system.aug[sp].q_g.conj(),
+                                 pot_g, ops.phase_pos[:, atoms])
+            herm = (0.5 * (contr + contr.conj().transpose(-2, -1))).real
+            for i, a in enumerate(atoms):
                 s0, s1 = system.atom_slices[a]
-                contr = torch.einsum("ijg,g->ij", system.aug[sp].q_g.conj(),
-                                     pot_g * ops.phase_pos[:, a])
-                d_chan[c4][s0:s1, s0:s1] = (0.5 * (contr + contr.conj().T)).real
+                for c4 in range(4):
+                    d_chan[c4][s0:s1, s0:s1] = herm[c4, i]
         d_chan[0] = d_chan[0] + dij_bare
         e_onec = torch.zeros((), dtype=RDTYPE, device=dev)
         if ops.is_paw:
@@ -281,15 +334,36 @@ def scf_uspp_noncollinear(
         # ---- spinor generalized eigensolve + S-normalization ----
         tol_eff = max(diago_tol, 1e-3) if it == 1 else \
             max(diago_tol, min(1e-3, 0.03 * history[-1]["res"]))
-        hs = SpinorBatchedHS(bk, shape, v_r, b_xc, p_b, d_chan, system.q_full)
+        smooth = None
+        if smooth_geom is not None:
+            # filter the 2×2 potential fields onto the smooth box (the dense
+            # G-coeffs above restricted to the smooth sphere by shared Miller)
+            # for the dual-grid H-apply; filtering is linear, so filtering the
+            # (v, B⃗) fields and combining into the 2×2 blocks commutes
+            vb_s = (torch.fft.ifftn(
+                pots_g_box[:, system.smooth2dense].reshape(
+                    4, *system.smooth_shape),
+                dim=(-3, -2, -1)) * ns_smooth).real
+            v_r_h, b_xc_h = vb_s[0], vb_s[1:]
+            smooth = smooth_geom
+        else:
+            v_r_h, b_xc_h = v_r, b_xc
+        hs = SpinorBatchedHS(bk, shape, v_r_h, b_xc_h, p_b, d_chan,
+                             system.q_full, smooth=smooth)
         eigs, x = davidson_gen_batched(hs, coeffs, nbands, tol=tol_eff)
         eigs = eigs.to(RDTYPE)
-        bu = becp_b(p_b, x[..., :m_pw])
-        bd = becp_b(p_b, x[..., m_pw:])
+        # one fused becp for both spin components; ⟨β|ψ⟩ is linear, so the
+        # S-normalized projections come from the same contraction (reused by
+        # the density/becsum build below instead of a second becp pass)
+        bud = torch.einsum("kpg,kbg->kbp", hs.p_conj,
+                           torch.cat([x[..., :m_pw], x[..., m_pw:]], dim=1))
+        bu, bd = bud[:, :nbands], bud[:, nbands:]
         snorm = (x.abs() ** 2).sum(dim=-1) \
             + torch.einsum("kbi,ij,kbj->kb", bu.conj(), q_c, bu).real \
             + torch.einsum("kbi,ij,kbj->kb", bd.conj(), q_c, bd).real
-        coeffs = x / torch.sqrt(snorm)[..., None]
+        sn = torch.sqrt(snorm)[..., None]
+        coeffs = x / sn
+        bu, bd = bu / sn, bd / sn
 
         # ---- occupations (spinor: one electron per band) ----
         mu = float(find_fermi(eigs, system.kweights, scheme, width,
@@ -300,31 +374,38 @@ def scf_uspp_noncollinear(
         entropy_term = -width * (system.kweights[:, None] * s_ent).sum()
 
         # ---- densities: Pauli grid channels + 2×2 becsum + 4-channel aug ----
-        bu = becp_b(p_b, coeffs[..., :m_pw])
-        bd = becp_b(p_b, coeffs[..., m_pw:])
+        # k-batched, band-chunked, both spinor components in one batched FFT —
+        # mirrors the H-apply instead of launching nk small FFTs per iteration
         rho_out = torch.zeros(shape, dtype=RDTYPE, device=dev)
         m_out = torch.zeros(3, *shape, dtype=RDTYPE, device=dev)
-        bec_out = [[torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
-                    for (s0, s1) in system.atom_slices] for _ in range(4)]
-        for ik in range(nk):
-            w = (system.kweights[ik] * occ[ik]).to(RDTYPE)
-            cu = coeffs[ik:ik + 1, :, :m_pw]
-            cd = coeffs[ik:ik + 1, :, m_pw:]
-            bk1 = _slice_bk(bk, ik)
-            pu = g_to_r_b(cu, bk1, shape)[0]
-            pd = g_to_r_b(cd, bk1, shape)[0]
-            uu = torch.einsum("b,bxyz->xyz", w, pu.real ** 2 + pu.imag ** 2)
-            dd = torch.einsum("b,bxyz->xyz", w, pd.real ** 2 + pd.imag ** 2)
-            ud = torch.einsum("b,bxyz->xyz", w.to(CDTYPE), pu.conj() * pd)
+        w_kb = (system.kweights[:, None] * occ).to(RDTYPE)
+        nbc = max(1, int((2.5e8 if dev.type == "cuda" else 4.0e8)
+                         / (coeffs.element_size() * grid.n_points * nk)))
+        for lo in range(0, nbands, nbc):
+            hi = min(lo + nbc, nbands)
+            nbb = hi - lo
+            cud = torch.cat([coeffs[:, lo:hi, :m_pw], coeffs[:, lo:hi, m_pw:]],
+                            dim=1)
+            psi = g_to_r_b(cud, bk, shape)
+            pu, pd = psi[:, :nbb], psi[:, nbb:]
+            f = w_kb[:, lo:hi]
+            uu = torch.einsum("kb,kbxyz->xyz", f, pu.real ** 2 + pu.imag ** 2)
+            dd = torch.einsum("kb,kbxyz->xyz", f, pd.real ** 2 + pd.imag ** 2)
+            ud = torch.einsum("kb,kbxyz->xyz", f.to(CDTYPE), pu.conj() * pd)
             rho_out += uu + dd
             m_out[0] += 2.0 * ud.real
             m_out[1] += 2.0 * ud.imag
             m_out[2] += uu - dd
-            for a, (s0, s1) in enumerate(system.atom_slices):
-                chans = spinor_onsite_becsum(bu[ik, :, s0:s1], bd[ik, :, s0:s1],
-                                             w.to(CDTYPE))
-                for c4 in range(4):
-                    bec_out[c4][a] = bec_out[c4][a] + chans[c4]
+        # becsum from the already-computed S-normalized projections, with k
+        # folded into the band axis (the einsums contract over bands anyway)
+        bec_out = [[None] * len(system.atom_slices) for _ in range(4)]
+        w_flat = w_kb.reshape(-1).to(CDTYPE)
+        bu_f = bu.reshape(nk * nbands, -1)
+        bd_f = bd.reshape(nk * nbands, -1)
+        for a, (s0, s1) in enumerate(system.atom_slices):
+            chans = spinor_onsite_becsum(bu_f[:, s0:s1], bd_f[:, s0:s1], w_flat)
+            for c4 in range(4):
+                bec_out[c4][a] = chans[c4]
         rho_out, m_out = rho_out / vol, m_out / vol
         bec_out_r = [[c.real for c in bec_out[c4]] for c4 in range(4)]
         if mag_sym_active:
@@ -332,21 +413,24 @@ def scf_uspp_noncollinear(
             # the smooth and one-center densities carry the same symmetry
             bec_out_r = system.becsum_sym.apply(bec_out_r)
 
-        # augmentation: n_aug → ρ, m⃗_aug → m⃗, from the matching becsum channel
-        targets = [rho_out, m_out[0], m_out[1], m_out[2]]
-        aug_fields = []
-        for c4 in range(4):
-            aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE,
-                                  device=dev)
-            for a, sp in enumerate(system.species_of_atom):
-                aug_sph = aug_sph + ops.phase_pos[:, a].conj() * torch.einsum(
-                    "ij,ijg->g", bec_out_r[c4][a].to(CDTYPE), system.aug[sp].q_g)
-            aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
-            aug_box[system.sphere_idx] = aug_sph / vol
-            aug_fields.append(torch.fft.ifftn(
-                aug_box.reshape(shape) * grid.n_points, dim=(-3, -2, -1)).real)
-        rho_out = targets[0] + aug_fields[0]
-        m_out = torch.stack([targets[1 + i] + aug_fields[1 + i] for i in range(3)])
+        # augmentation: n_aug → ρ, m⃗_aug → m⃗, from the matching becsum channel —
+        # all four channels and all atoms of a species in one einsum, one
+        # batched FFT for the four aug fields
+        aug_sph4 = torch.zeros(4, system.sphere_idx.shape[0], dtype=CDTYPE,
+                               device=dev)
+        for sp, atoms in sp_atoms.items():
+            bec_sp = torch.stack([
+                torch.stack([bec_out_r[c4][a].to(CDTYPE) for a in atoms])
+                for c4 in range(4)])                       # (4, na_sp, nm, nm)
+            aug_sph4 += torch.einsum("caij,ijg,ga->cg", bec_sp,
+                                     system.aug[sp].q_g,
+                                     ops.phase_pos[:, atoms].conj())
+        aug_box = torch.zeros(4, grid.n_points, dtype=CDTYPE, device=dev)
+        aug_box[:, system.sphere_idx] = aug_sph4 / vol
+        aug_fields = torch.fft.ifftn(aug_box.reshape(4, *shape) * grid.n_points,
+                                     dim=(-3, -2, -1)).real
+        rho_out = rho_out + aug_fields[0]
+        m_out = m_out + aug_fields[1:]
         if mag_sym_active:
             rho_out = symmetrize_rho(system.rho_symmetrizer, rho_out, grid)
             m_g = torch.stack([r_to_g(m_out[i].to(CDTYPE)) for i in range(3)])
@@ -412,12 +496,3 @@ def _local_energy(rho_g_box, vloc_g, vol):
     from gradwave.core.energies.local_pp import local_energy
 
     return local_energy(rho_g_box, vloc_g, vol)
-
-
-def _slice_bk(bk, ik: int):
-    import dataclasses
-
-    return dataclasses.replace(
-        bk, npw=bk.npw[ik:ik + 1], mask=bk.mask[ik:ik + 1],
-        flat_idx=bk.flat_idx[ik:ik + 1], kpg=bk.kpg[ik:ik + 1], t=bk.t[ik:ik + 1],
-        proj_phase_free=bk.proj_phase_free[ik:ik + 1])

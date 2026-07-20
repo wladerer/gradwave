@@ -203,7 +203,11 @@ def davidson_batched(
     rn = torch.full((nk, nb), float("inf"), dtype=rdtype, device=x0.device)
 
     for it in range(1, max_iter + 1):
-        s = torch.einsum("kig,kjg->kij", v.conj(), hv)
+        # matmul on the lazy-conj + transpose VIEWS: same contraction as
+        # einsum("kig,kjg->kij", v.conj(), hv) without materializing a
+        # conj copy of the whole subspace — that transient peaks right
+        # before restart and was the A100 large-nk memory spike
+        s = torch.matmul(v.conj(), hv.mT)
         s = 0.5 * (s + s.conj().transpose(-1, -2))
         w, u = torch.linalg.eigh(s)
         eig = w[:, :nb].real

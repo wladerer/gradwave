@@ -179,6 +179,15 @@ class _IterOps:
 _MP_CROSSOVER = 1e-5  # diago tol above this runs the fp32 draft solves
 
 
+def _species_atoms(system) -> dict[int, list[int]]:
+    """Atoms grouped by species, for batching per-atom augmentation
+    contractions into one einsum per species."""
+    groups: dict[int, list[int]] = {}
+    for a, sp in enumerate(system.species_of_atom):
+        groups.setdefault(sp, []).append(a)
+    return groups
+
+
 def uspp_potentials_dscr(system, xc, rho_s, rho_ij_s, vloc_r, phase_pos, onec):
     """(veff_s, dscr_s, e_onec) from the per-channel FULL densities (smooth +
     aug) and per-atom becsums — THE assembly the USPP/PAW SCF iterates with.
@@ -214,19 +223,22 @@ def uspp_potentials_dscr(system, xc, rho_s, rho_ij_s, vloc_r, phase_pos, onec):
         )
         veff_s = [v_h + v_up + vloc_r, v_h + v_dn + vloc_r]
 
-    # screened D per spin/atom: D_ij + Σ_G ṽ_σ(G) e^{iGτ} Q̃_ij(G)*
+    # screened D per spin/atom: D_ij + Σ_G ṽ_σ(G) e^{iGτ} Q̃_ij(G)* —
+    # batched over the atoms of each species (one einsum per species, one
+    # q_g.conj() per species, instead of a Python loop of small kernels
+    # re-materializing the conjugate per atom)
     mask_flat = grid.dens_mask.reshape(-1)
     dscr_s = []
     for isp in range(nspin):
         v_eff_g = r_to_g(veff_s[isp].to(CDTYPE)).reshape(-1)[mask_flat]
         dscr = torch.zeros_like(system.q_full)
-        for a, sp in enumerate(system.species_of_atom):
-            s0, s1 = system.atom_slices[a]
-            contr = torch.einsum(
-                "ijg,g->ij", system.aug[sp].q_g.conj(), v_eff_g * phase_pos[:, a]
-            )
-            herm = 0.5 * (contr + contr.conj().T)
-            dscr[s0:s1, s0:s1] = herm.real
+        for sp, atoms in _species_atoms(system).items():
+            contr = torch.einsum("ijg,g,ga->aij", system.aug[sp].q_g.conj(),
+                                 v_eff_g, phase_pos[:, atoms])
+            herm = (0.5 * (contr + contr.conj().transpose(-2, -1))).real
+            for i, a in enumerate(atoms):
+                s0, s1 = system.atom_slices[a]
+                dscr[s0:s1, s0:s1] = herm[i]
         dscr_s.append(dscr + system.proj_data[0].dij_full)
     e_onec = torch.zeros((), dtype=RDTYPE, device=dev)
     if onec is not None:
@@ -301,7 +313,7 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
     vloc_g, vloc_r, phase_pos = ops.vloc_g, ops.vloc_r, ops.phase_pos
     is_paw, onec = ops.is_paw, ops.onec
     grid, vol, dev, shape = ops.grid, ops.vol, ops.dev, ops.shape
-    mask_flat, nk, nb = ops.mask_flat, ops.nk, ops.nb
+    nk, nb = ops.nk, ops.nb
     if batched:
         from gradwave.core.batch import becp_b
         from gradwave.scf.uspp_batch import BatchedHS, davidson_gen_batched
@@ -430,34 +442,56 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
             e_hub = 2.0 * hubbard_energy(n_half, hub.sites)
 
     # smooth densities + per-spin becsum + augmentation
+    sp_atoms = _species_atoms(system)
     rho_out_s, becps_s = [], []
     rho_ij_s = [[torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
                  for (s0, s1) in system.atom_slices] for _ in range(nspin)]
     for isp in range(nspin):
-        rho_sp = torch.zeros(shape, dtype=RDTYPE, device=dev)
-        becps = []
-        for ik, sph in enumerate(system.spheres):
-            c = coeffs[isp][ik]
-            psi_r = g_to_r(c, sph.flat_idx, shape)
-            w = system.kweights[ik] * occ_s[isp][ik]
-            rho_sp = rho_sp + torch.einsum("b,bxyz->xyz", w, (psi_r.abs() ** 2)) / vol
-            b = becp(projs[ik], c)
-            becps.append(b)
+        if batched:
+            # k-batched: one band-chunked batched FFT stack for the density,
+            # one becp einsum over all k, and the becsum contracted with k
+            # folded into the band axis — instead of nk small FFTs plus
+            # nk·na tiny einsums per iteration
+            from gradwave.core.batch import density_b
+
+            x_b = coeffs_b[isp]
+            rho_sp = density_b(x_b, occ_s[isp], system.kweights, bk, shape, vol)
+            b_all = becp_b(p_b, x_b)
+            becps = [b_all[ik] for ik in range(nk)]
+            w_all = (system.kweights[:, None] * occ_s[isp]).reshape(-1).to(CDTYPE)
+            b_flat = b_all.reshape(nk * nb, -1)
             for a, (s0, s1) in enumerate(system.atom_slices):
-                ba = b[:, s0:s1]
-                rho_ij_s[isp][a] = rho_ij_s[isp][a] + torch.einsum(
-                    "b,bi,bj->ij", w.to(CDTYPE), ba.conj(), ba
-                )
+                ba = b_flat[:, s0:s1]
+                rho_ij_s[isp][a] = torch.einsum("b,bi,bj->ij", w_all,
+                                                ba.conj(), ba)
+        else:
+            rho_sp = torch.zeros(shape, dtype=RDTYPE, device=dev)
+            becps = []
+            for ik, sph in enumerate(system.spheres):
+                c = coeffs[isp][ik]
+                psi_r = g_to_r(c, sph.flat_idx, shape)
+                w = system.kweights[ik] * occ_s[isp][ik]
+                rho_sp = rho_sp + torch.einsum("b,bxyz->xyz", w,
+                                               (psi_r.abs() ** 2)) / vol
+                b = becp(projs[ik], c)
+                becps.append(b)
+                for a, (s0, s1) in enumerate(system.atom_slices):
+                    ba = b[:, s0:s1]
+                    rho_ij_s[isp][a] = rho_ij_s[isp][a] + torch.einsum(
+                        "b,bi,bj->ij", w.to(CDTYPE), ba.conj(), ba
+                    )
         rho_ij_s[isp] = [0.5 * (m + m.conj().T) for m in rho_ij_s[isp]]
         if system.becsum_sym is not None:
             rho_ij_s[isp] = system.becsum_sym.apply(rho_ij_s[isp])
         becps_s.append(becps)
 
+        # augmentation charge: all atoms of a species in one einsum
         aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE, device=dev)
-        for a, sp in enumerate(system.species_of_atom):
-            aug_sph = aug_sph + phase_pos[:, a].conj() * torch.einsum(
-                "ij,ijg->g", rho_ij_s[isp][a], system.aug[sp].q_g
-            )
+        for sp, atoms in sp_atoms.items():
+            bec_sp = torch.stack([rho_ij_s[isp][a] for a in atoms])
+            aug_sph = aug_sph + torch.einsum(
+                "aij,ijg,ga->g", bec_sp, system.aug[sp].q_g,
+                phase_pos[:, atoms].conj())
         aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
         aug_box[system.sphere_idx] = aug_sph / vol
         rho_aug = (torch.fft.ifftn(aug_box.reshape(shape) * grid.n_points,
