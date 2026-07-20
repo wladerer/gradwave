@@ -566,6 +566,77 @@ fractional-charge self-interaction probe (self-contained, no second functional)
 and the DC-DFT density-sensitivity piece, plus the smaller density-grid
 (`ecutrho`) and finite-size terms.
 
+## Showcase figures: noncollinear magnetism and error estimates
+
+The validation record is tables of meV agreements against QE, which persuades a
+methods reader and no one else. A small set of figures would carry the two
+capabilities that distinguish the code, autograd through the full spinor stack
+and per-calculation numerical error bars. DFTK has the Cancès/Herbst error
+bounds and several codes do noncollinear SOC, but the combination, and anything
+built on spinor autograd, has no published counterpart to point at. Candidates
+below, roughly by impact, each grounded in what exists in the tree today.
+
+Noncollinear magnetism.
+
+- **MAE sphere for FePt.** `examples/fept_mae_map.py` already scans E(theta)
+  along [001]→[100]. The full version is E(theta, phi) − E(easy) as a heatmap
+  on the sphere (Mollweide projection), easy axis marked, with a few full-SCF
+  anchor points overlaid to show the force-theorem accuracy. The per-direction
+  magnetic-IBZ folding plus the 7.7× one-shot saving is what makes the map
+  affordable, so the figure doubles as the cost story.
+- **Torque against angle.** Plot the autograd dE/dtheta of the moment
+  direction as a smooth curve and overlay finite-difference slopes of the
+  E(theta) scan as points. One figure shows the SOC physics and that the
+  spinor stack differentiates. The per-atom torque is validated in
+  `moment_config`. The global-axis torque through the SOC energy is the piece
+  the "MCA dE/dtheta" line in the backlog still owes, so this figure is also
+  the natural acceptance test for it.
+- **Real-space magnetization texture.** A quiver plot of m⃗(r) on a plane
+  through the cell, arrows colored by |m⃗|, density as a background contour.
+  The strongest subject is a 120° Néel state on a triangular Mn or Cr
+  lattice, because frustration forces genuine noncollinearity and a collinear
+  code cannot represent the ground state at all. The Fe spiral
+  (`examples/fe_spin_spiral.py`) is the already-computed fallback.
+- **k-space spin texture.** `projected_dos_noncollinear` already Pauli-decomposes
+  each state into (n, m_x, m_y, m_z). Coloring a band path by ⟨sigma_z⟩ with
+  in-plane arrows at each k gives the spin-momentum-locking picture around
+  Gamma for Bi₂Se₃, whose SOC bands are already validated
+  (`examples/bi2se3_inversion.py`). Needs the per-state amplitudes routed onto
+  a band path rather than binned into a DOS.
+- **Magnetic-IBZ folding diagram.** The full mesh next to the Shubnikov IBZ
+  for FePt m∥[001] (144→30) and m∥[100] (144→48), with the folded-vs-full
+  energy residual quoted. A methods figure, narrower audience.
+
+Error estimates.
+
+- **Estimated against true error.** For a grid of systems and cutoffs, scatter
+  the `discretization_error` estimate against the measured error to a
+  converged-Ecut reference. Points on or bounded by the diagonal are the whole
+  argument for trusting the estimator, and the plot the Herbst/Levitt paper
+  the module follows leads with. The EOS/Δ-factor infrastructure
+  already produces the reference energies.
+- **EOS with error bars.** E(V) at a deliberately modest cutoff with per-point
+  error bars, overlaid on the converged curve, the bars visibly containing it,
+  and the fitted a₀/B₀ carrying propagated uncertainties. The force version is
+  displaced-Si force components with bars against converged forces.
+- **Stacked error budget.** One bar per system, stacked into basis, SCF,
+  smearing, and k-sampling terms from `discretization_error.py` plus
+  `convergence_error.py`. No other code's output decomposes this way, so the
+  figure states the capability without a caption.
+
+The combination, and the strongest single figure, is **MAE with numerical error
+bars**. Anisotropy energies sit at tens of µeV to meV, exactly the scale where
+convergence is the standing doubt, so E(n̂) − E(easy) with a shaded numerical
+uncertainty band makes a scientific claim rather than a benchmark claim, namely
+that the easy-axis assignment clears the error bar (or honestly, at which
+Ecut/k-mesh it does not). The `discretization_error` estimator covers NC
+nspin=1/2 but not the spinor/SOC path, so it needs the spinor extension first,
+and this figure is the reason to build it.
+
+Several items are half-built (the MAE scan, the spiral, the Bi₂Se₃ band data,
+the EOS scans), so the marginal work is mostly plotting plus a few targeted
+calculations, with the heavy SOC sweeps routed to the GPU box as usual.
+
 ## Batched multi-structure SCF, and the EOS-on-GPU question
 
 Question, would an EOS go faster by batching several volumes on the GPU at once?
