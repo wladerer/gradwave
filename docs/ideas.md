@@ -86,12 +86,31 @@ above: at a rank past the co-density space ISDF ≡ direct to machine precision
 `tests/integration/test_isdf_vs_direct.py`), and below saturation the exchange
 error falls monotonically with the rank (8-atom Si measured 6.4 eV → 0.24 eV →
 1e-14 as n_μ → 40 → 80 → 136, the 16·17/2 real-orbital co-density rank), so the
-rank is the accuracy knob exactly as the caveat asks. What remains: multi-k
-exchange (q = k−k′ phases), a truncated Coulomb / G=0 term for physically
-isolated molecules, wiring the Fock operator into the SCF Hamiltonian (this cut
-computes the energy from converged orbitals, it does not yet act in the
-self-consistent loop), and then the learnable-hybrid parameters and the RPA
-correlation contraction.
+rank is the accuracy knob exactly as the caveat asks.
+
+**Exchange operator + ACE LANDED (2026-07-20), single-k (Γ).**
+`postscf/exchange.py` builds on the factorization to give the pieces a hybrid
+SCF actually needs — the *operator*, not only the energy. The direct Fock
+operator `V_x φ = −Σ_j ψ_j v[ψ_j*φ]` (`exchange_operator_direct`, the O(N_occ²)
+pair-FFT reference); the ISDF-accelerated operator on the occupied set
+(`exchange_operator_isdf`, `V_x ψ_t = −Σ_μ v[ζ_μ] B(r,r_μ) ψ_t(r_μ)`, one
+Coulomb solve per interpolation vector instead of N_occ² pair solves); and the
+adaptively-compressed exchange (`build_ace`, Lin Lin JCTC 2016): the Cholesky of
+the exchange matrix gives a low-rank `V_x ≈ −Σ_k |ξ_k⟩⟨ξ_k|` that is *exact* on
+the occupied subspace, the object a generalized-KS Hamiltonian would carry.
+Validated on converged Γ Si and synthetic orbitals (`tests/unit/test_exchange.py`,
+`tests/integration/test_exchange_operator.py`): the operator energy equals the
+contracted energy build to machine precision; the ISDF operator saturates to the
+direct operator (rel-err 2e-2 → 1e-13 as the rank fills); and ACE reproduces
+`V_x ψ_n` on every occupied n to ~5e-14.
+
+What remains, in build order: wire the ACE operator into
+`BatchedHamiltonian.apply` and iterate exchange to self-consistency (the outer
+ACE/EXX loop — the operator now exists, it just does not yet act in the SCF);
+multi-k exchange (q = k−k′ phases); a truncated Coulomb / G=0 term for
+physically isolated molecules; then the learnable-hybrid parameters (mixing
+fraction and range separation through `learnable.py`) and the RPA correlation
+contraction.
 
 ## Exact exchange and hybrid functionals
 
