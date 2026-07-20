@@ -73,6 +73,26 @@ like N rather than N^2.
   direct Fock, not against another approximate method, and treat the rank as a
   convergence parameter reported alongside the result.
 
+**First cut LANDED (2026-07-20), single-k (Γ).** `postscf/isdf.py`: the
+pivoted-QR interpolation-point selector (`select_interpolation_points`, exact
+pair matrix for small orbital sets, randomized Khatri–Rao sketch above a
+threshold), the `M S⁻¹` fit (`build_isdf`), the interpolation-vector Coulomb
+coupling (`_coulomb_coupling`, reusing the `hartree.py` G=0-excluded 4πe²/G²
+kernel), and the fully-contracted exchange energy
+`E_x = −½ Σ_μν W_μν |D_μν|²` (`ISDFExchange.energy`). Validated against a direct
+O(N²) pair-FFT Fock build (`exchange_energy_direct`) — the build-order gate
+above: at a rank past the co-density space ISDF ≡ direct to machine precision
+(synthetic complex orbitals, `tests/unit/test_isdf.py`; converged Γ Si,
+`tests/integration/test_isdf_vs_direct.py`), and below saturation the exchange
+error falls monotonically with the rank (8-atom Si measured 6.4 eV → 0.24 eV →
+1e-14 as n_μ → 40 → 80 → 136, the 16·17/2 real-orbital co-density rank), so the
+rank is the accuracy knob exactly as the caveat asks. What remains: multi-k
+exchange (q = k−k′ phases), a truncated Coulomb / G=0 term for physically
+isolated molecules, wiring the Fock operator into the SCF Hamiltonian (this cut
+computes the energy from converged orbitals, it does not yet act in the
+self-consistent loop), and then the learnable-hybrid parameters and the RPA
+correlation contraction.
+
 ## Exact exchange and hybrid functionals
 
 The biggest single physics gap, and the reason the two scaling items above are
