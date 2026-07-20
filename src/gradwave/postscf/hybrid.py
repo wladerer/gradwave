@@ -34,6 +34,7 @@ import torch
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
 from gradwave.core.batch import box_to_sphere_b, g_to_r_b
+from gradwave.core.density import sigma_from_rho
 from gradwave.core.xc._pbe_kernels import pbe_enhancement, pbe_h
 from gradwave.core.xc.base import to_au
 from gradwave.core.xc.lda_pw92 import eps_c_pw92, eps_x_lda
@@ -45,7 +46,12 @@ from gradwave.postscf.exchange import (
     exchange_operator_direct,
     physical_orbitals,
 )
-from gradwave.postscf.exchange_multik import multik_exchange_operator
+from gradwave.postscf.exchange_multik import (
+    HybridExchangeParams,
+    multik_exchange_energy,
+    multik_exchange_operator,
+    occupied_periodic_orbitals,
+)
 from gradwave.scf.loop import scf
 
 
@@ -212,7 +218,7 @@ class MultiKFockExchange:
 
 
 def hybrid_scf(system, alpha: float = 0.25, *, mode: str = "full", omega=None,
-               **scf_kwargs):
+               params: HybridExchangeParams | None = None, **scf_kwargs):
     """Self-consistent PBE0-form / screened global hybrid, exchange fraction ``alpha``.
 
     Runs the standard SCF with the semilocal exchange scaled by (1−α) and α·Fock
@@ -222,8 +228,82 @@ def hybrid_scf(system, alpha: float = 0.25, *, mode: str = "full", omega=None,
     operator but not yet the matching range-separated semilocal exchange (see
     ``MultiKFockExchange`` — the semilocal side would double-count long-range
     exchange), so treat them as the operator half of a screened hybrid. At α = 0
-    this is exactly a PBE SCF. Extra keyword arguments pass through to ``scf``."""
+    this is exactly a PBE SCF. Extra keyword arguments pass through to ``scf``.
+
+    Pass a ``HybridExchangeParams`` as ``params`` to solve at its current (α, ω)
+    values — the SCF itself runs under ``no_grad``; gradients for a *learned*
+    hybrid come from ``differentiable_hybrid_energy`` on the converged result."""
+    if params is not None:
+        alpha = float(params.alpha)
+        mode = params.mode
+        omega = float(params.omega) if params.mode != "full" else None
     xc = ScaledExchangePBE(alpha)
     fock = (MultiKFockExchange(alpha, mode=mode, omega=omega)
             if alpha > 0.0 else None)
     return scf(system, xc, fock=fock, **scf_kwargs)
+
+
+def _pbe_exchange_energy(res) -> float:
+    """∫ρ ε_x^PBE on the converged density [eV] — the exchange ``ScaledExchangePBE``
+    scales by (1−α). Computed as (full PBE XC) − (PBE with exchange removed), so it
+    matches the SCF's semilocal-exchange bookkeeping exactly. θ-independent."""
+    system = res.system
+    vol = system.grid.volume
+    rho = res.rho if res.system.rho_core is None else res.rho + res.system.rho_core
+    sigma = sigma_from_rho(rho, system.grid.g_cart)
+    e_full = PBE().energy(rho, vol, sigma)
+    e_no_x = ScaledExchangePBE(1.0).energy(rho, vol, sigma)
+    return float(e_full - e_no_x)
+
+
+def differentiable_hybrid_energy(res, params: HybridExchangeParams, *,
+                                 occ_tol: float = 1e-6) -> torch.Tensor:
+    """Converged hybrid total energy as a differentiable function of (α, ω).
+
+    Turns a converged hybrid SCF into a trainable objective. At self-consistency
+    the orbitals/density are stationary, so by the Hellmann–Feynman theorem
+    dE_total/dθ = ∂E_total/∂θ — only the *explicit* θ-dependence of the exchange
+    terms survives, evaluated on the *frozen* converged orbitals and density. The
+    returned scalar equals ``res.energies.total`` in value and carries the exact
+    dE_total/dα, dE_total/dω into ``params`` on ``.backward()``; build any loss on
+    it (e.g. matching a reference gap or energy) and step an optimizer over the
+    ``params`` to train a learned hybrid. Single spin (nspin=1).
+
+    The frozen pieces, matching the SCF's (1−α)E_x^PBE + α E_x^Fock split:
+      E_x^Fock(ω) = (2/nspin)·``multik_exchange_energy``(ω)  — differentiable in ω,
+      E_x^PBE     = ∫ρ ε_x^PBE                               — a θ-independent constant,
+    and the θ-dependent energy α·(E_x^Fock(ω) − E_x^PBE) has α-derivative
+    E_x^Fock − E_x^PBE (the exact exchange-mixing gradient) and ω-derivative
+    α·∂E_x^Fock/∂ω."""
+    if getattr(res, "nspin", 1) != 1:
+        raise ValueError("differentiable_hybrid_energy supports nspin=1")
+    system = res.system
+    vol = system.grid.volume
+    u, kc, kw = occupied_periodic_orbitals(res, system, occ_tol)
+    u = [x.detach() for x in u]                          # frozen occupied orbitals
+    omega = params.omega if params.mode != "full" else None
+    e_fock = 2.0 * multik_exchange_energy(u, kc, kw, system.grid.g_cart, vol,
+                                          mode=params.mode, omega=omega)
+    e_x_pbe = _pbe_exchange_energy(res)                  # θ-independent constant
+    e_theta = params.alpha * (e_fock - e_x_pbe)
+    e_const = float(res.energies.total) - float(e_theta.detach())
+    return e_const + e_theta
+
+
+def hybrid_energy_gradient(res, params: HybridExchangeParams, *,
+                           occ_tol: float = 1e-6):
+    """Exact stationary (dE_total/dα, dE_total/dω) at the converged hybrid [eV].
+
+    Convenience/verification wrapper over ``differentiable_hybrid_energy``: runs
+    one backward pass and chain-rules the raw-parameter gradients back to the
+    physical (α, ω). The ω-gradient is ``None`` for ``mode="full"``."""
+    e = differentiable_hybrid_energy(res, params, occ_tol=occ_tol)
+    params.zero_grad(set_to_none=True)
+    e.backward()
+    alpha = float(params.alpha.detach())
+    d_alpha = float(params.raw_alpha.grad) / (alpha * (1.0 - alpha))
+    if params.mode == "full":
+        return d_alpha, None
+    omega = float(params.omega.detach())
+    d_omega = float(params.raw_omega.grad) / (1.0 - math.exp(-omega))
+    return d_alpha, d_omega

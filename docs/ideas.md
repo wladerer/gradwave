@@ -168,6 +168,21 @@ direct operator (rel-err 2e-2 → 1e-13 as the rank fills); and ACE reproduces
   the range-separated (wPBE) enhancement, still open; use `mode="full"` for a
   physically complete SCF until then.
 
+**Learned hybrid LANDED (2026-07-20).** The mixing α and screening ω are now
+trainable end to end. `hybrid.differentiable_hybrid_energy(res, params)` turns a
+converged hybrid SCF into a differentiable objective via the stationary-energy
+(Hellmann–Feynman) derivative: at self-consistency the density is variational, so
+dE_total/dθ = ∂E_total/∂θ — only the *explicit* θ-dependence of the exchange terms
+on the frozen converged orbitals survives. It returns a scalar equal in value to
+`res.energies.total` whose (α, ω) gradient is that exact derivative, so a plain
+optimizer over `HybridExchangeParams` trains the hybrid. `hybrid_scf(..., params=)`
+solves at the current param values (the SCF stays `no_grad`; the gradient rides the
+converged result). The training loop is: converge → build the differentiable energy
+→ backprop a loss → step. Validated (`tests/integration/test_learned_hybrid.py`):
+the differentiable energy equals the SCF total; dE/dα matches a finite difference of
+*re-converged* SCF energies to 6e-7 (rel), dE/dω to 2e-3; and a backward+optimizer
+step moves (α, ω). This is the payoff no mainstream code has — see the framing below.
+
 What remains, in build order: a Gygi–Baldereschi q+G=0 correction to complete
 unscreened `full`/PBE0 at fine meshes (the divergent q+G=0 cell is dropped today,
 converging slowly in N_k); the range-separated (wPBE) semilocal exchange to
@@ -176,14 +191,16 @@ the RPA correlation contraction.
 
 ## Exact exchange and hybrid functionals
 
-**Status: a self-consistent PBE0-form hybrid SCF runs on a k-mesh.** The energy,
-operator, ACE, multi-k build, range-separated kernel, differentiable hybrid
-parameters, the ISDF-K compression, the self-consistent Γ hybrid SCF, and now the
-k-mesh lift (per-k ACE with each k's exchange summed over the whole BZ, α·V_x
-acting in `BatchedHamiltonian.apply` block-by-block) all landed (see the LANDED
-notes under the ISDF section above). gradwave *self-consistently solves* a PBE0
-hybrid on a full-BZ k-mesh (gap opening measured); the remaining physics tails are
-the Gygi–Baldereschi q+G=0 correction (fine-mesh PBE0 convergence) and the wPBE
+**Status: a learned PBE0-form hybrid SCF runs on a k-mesh — mixing/screening are
+trainable.** The energy, operator, ACE, multi-k build, range-separated kernel,
+differentiable hybrid parameters, the ISDF-K compression, the self-consistent Γ
+hybrid SCF, the k-mesh lift (per-k ACE with each k's exchange summed over the whole
+BZ, α·V_x acting in `BatchedHamiltonian.apply` block-by-block), and now the learned
+hybrid (differentiable dE_total/dα, dE_total/dω through the stationary-energy
+theorem) all landed (see the LANDED notes under the ISDF section above). gradwave
+*self-consistently solves* a PBE0 hybrid on a full-BZ k-mesh (gap opening measured)
+and *trains* its mixing and screening against a target. The remaining physics tails
+are the Gygi–Baldereschi q+G=0 correction (fine-mesh PBE0 convergence) and the wPBE
 semilocal screening (complete HSE). The paragraphs below are the original framing,
 kept for the reasoning.
 
@@ -194,8 +211,12 @@ out too small and defect and adsorbate levels land in the wrong place. There is 
 exact exchange anywhere in the SCF Hamiltonian today. A hybrid needs a Fock exchange operator applied
 each SCF step, which is the O(N^4) object RI and ISDF exist to tame. The payoff
 that no mainstream code has is a learnable hybrid, the mixing fraction and
-range separation as trained parameters through the existing `learnable.py` slot,
-which only makes sense once the Fock build is affordable. Sequence it after ISDF.
+range separation as trained parameters, which only makes sense once the Fock build
+is affordable. **This is now realized** (see the Learned hybrid LANDED note above):
+the ISDF/ACE Fock build is affordable, the k-mesh hybrid SCF converges, and
+`differentiable_hybrid_energy` exposes the exact dE_total/dα, dE_total/dω so α and ω
+train end to end against a target. The remaining reach is the same as any hybrid —
+finer meshes (Gygi–Baldereschi) and a complete screened form (wPBE).
 
 ## Learned meta-GGA and the kinetic energy density
 
