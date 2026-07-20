@@ -276,6 +276,69 @@ def test_uspp_eigenvalue_reproduces_energy_error():
     assert gap["gap_eV"] > 0.0
 
 
+def _disp_paw_cell(a=5.43, shift=np.array([0.11, -0.06, 0.04])):
+    cell = a / 2 * FCC
+    pos = np.array([[0.0, 0, 0], [a / 4, a / 4, a / 4]]) + np.array([[0, 0, 0], shift])
+    return cell, pos
+
+
+@pytest.mark.slow
+def test_uspp_force_error_vs_high_cutoff():
+    """USPP/PAW force error on a displaced cell: δF correlates with the true
+    low->high force change and reduces it, with a sane magnitude ratio.
+
+    Exercises the augmentation, S-orthogonality, and one-center ddd channels of
+    the P(eps) propagation against a finite-cutoff force reference."""
+    torch.set_num_threads(8)
+    from gradwave.postscf.paw_forces import forces_uspp
+
+    paw = parse_upf_paw(FIX / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
+    cell, pos = _disp_paw_cell()
+
+    def run(ecut):
+        return scf_uspp(setup_uspp(cell, pos, [0, 0], [paw], ecut=ecut,
+                                   kmesh=(2, 2, 2), ecutrho=4 * ecut),
+                        PBE(), etol=1e-10, rhotol=1e-9, verbose=False, max_iter=80)
+
+    lo, hi = run(12 * RY), run(30 * RY)
+    err = estimate_density_error(lo, ecut_large=30 * RY, xc=PBE())
+    dF = estimate_force_error(lo, err, xc=PBE())
+    true_dF = forces_uspp(hi, PBE()) - forces_uspp(lo, PBE())
+
+    assert float(dF.abs().max()) > 1e-3                 # a real signal
+    assert _corr(dF, true_dF) > 0.9                     # right direction
+    assert 0.4 < float(dF.norm() / true_dF.norm()) < 1.6   # right scale
+    f_lo = forces_uspp(lo, PBE())
+    before = float((f_lo - forces_uspp(hi, PBE())).abs().sum())
+    after = float((f_lo + dF - forces_uspp(hi, PBE())).abs().sum())
+    assert after < before                               # reduces the error
+
+
+@pytest.mark.slow
+def test_uspp_nspin2_force_error_matches_nspin1():
+    """USPP/PAW force error at zero moment: nspin=2 reproduces nspin=1 to
+    round-off (the per-spin loop, per-spin smooth-density and becsum responses,
+    and the one-center HVP all reduce to the single-channel case)."""
+    torch.set_num_threads(8)
+    paw = parse_upf_paw(FIX / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
+    cell, pos = _disp_paw_cell(shift=np.array([0.11, -0.06, 0.04]))
+    kw = dict(smearing="gaussian", width=0.1, etol=1e-10, rhotol=1e-9,
+              verbose=False, max_iter=80)
+
+    def mk(ecut):
+        return setup_uspp(cell, pos, [0, 0], [paw], ecut=ecut, kmesh=(2, 2, 2),
+                          ecutrho=4 * ecut)
+
+    r1 = scf_uspp(mk(12 * RY), PBE(), **kw)
+    f1 = estimate_force_error(r1, estimate_density_error(r1, ecut_large=30 * RY,
+                                                         xc=PBE()), xc=PBE())
+    r2 = scf_uspp(mk(12 * RY), SpinPBE(), nspin=2, start_mag=[0.0, 0.0], **kw)
+    f2 = estimate_force_error(r2, estimate_density_error(r2, ecut_large=30 * RY,
+                                                         xc=SpinPBE()), xc=SpinPBE())
+    assert float(f1.abs().max()) > 1e-3
+    assert float((f1 - f2).abs().max()) < 1e-6
+
+
 # --------------------------------------------------------------------------- #
 #  Non-collinear (spinor) path                                                #
 # --------------------------------------------------------------------------- #

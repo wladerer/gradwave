@@ -506,13 +506,16 @@ def _error_estimate_block(res, inp) -> dict:
         "int_drho": float(drho.sum()) * vol / npts,
         "note": "first-order estimate, indicative not a rigorous bound",
     }
-    # force error: norm-conserving collinear only (USPP augmentation/one-center
-    # and the spinor force terms in P(eps) are not assembled).
-    force_ok = (not uspp and not is_nc and nspin in (1, 2)
-                and getattr(system, "rho_core", None) is None)
+    # force error: norm-conserving collinear (no NLCC) or USPP/PAW (nspin=1, 2,
+    # incl. NLCC, no +U). The spinor force terms in P(eps) are not assembled.
+    if uspp:
+        force_ok = not is_nc and _get(res, "hub_sites") is None
+    else:
+        force_ok = (not is_nc and nspin in (1, 2)
+                    and getattr(system, "rho_core", None) is None)
     if force_ok:
         try:
-            fe = estimate_force_error(res, err).norm(dim=1)
+            fe = estimate_force_error(res, err, xc=xc).norm(dim=1)
             block["force_error_max_eV_ang"] = float(fe.max())
             block["force_error_rms_eV_ang"] = float((fe ** 2).mean().sqrt())
         except NotImplementedError:

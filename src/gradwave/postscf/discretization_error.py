@@ -32,11 +32,12 @@ Coverage.
     (spinor); nspin=1 and nspin=2 throughout.
   Eigenvalue + band-gap error: the same three formalisms, nspin=1 and 2 (the
     per-band second-order shift the energy error already sums over occupations).
-  Force error: norm-conserving collinear only (nspin=1 and 2). USPP/PAW forces
-    need the augmentation, one-center, and S-orthogonality terms in P(eps)
-    (template: postscf.uspp_position.hessian_column); the NLCC force term and
-    the spinor force are not assembled -- the NLCC one is blocked on the
-    ground-state NLCC force (postscf.forces), which is itself unimplemented.
+  Force error: norm-conserving collinear (nspin=1 and 2, no NLCC) and USPP/PAW
+    (nspin=1 and 2, including NLCC). The USPP/PAW path propagates delta-P through
+    the augmentation density, the S-orthogonality constraint, and the PAW
+    one-center ddd response (following postscf.uspp_position.hessian_column). Not
+    assembled: the norm-conserving NLCC force term (blocked on the ground-state
+    NLCC force in postscf.forces, itself unimplemented) and the spinor force.
 
 The USPP/PAW path uses the generalized residual R = P_annulus(H - eps S) psi and
 adds the augmentation-charge response: dpsi perturbs the on-site occupations
@@ -110,7 +111,9 @@ class DiscretizationError:
     dyson: bool
     uspp: bool = False           # USPP/PAW generalized-metric path
     dbecsum: list | None = None  # USPP: per-atom (nproj_a, nproj_a) on-site becsum change
-    drho_smooth: torch.Tensor | None = None  # USPP: smooth part of drho (aug excluded)
+    drho_smooth: torch.Tensor | None = None  # USPP: smooth part of drho (aug excluded, spin-summed)
+    deig: list | None = None     # USPP: per-k (n_occ,) occupied eigenvalue error (S-term response)
+    drho_smooth_spin: list | None = None  # USPP: per-spin smooth drho (force error XC channel)
 
 
 def _occupied(res: SCFResult, ik: int, sp: int | None = None):
@@ -426,10 +429,11 @@ def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
     eigs = res["eigenvalues"]
     occs = res["occupations"]
 
-    drho_smooth = torch.zeros(grid.shape, dtype=RDTYPE, device=dev)
     denergy = 0.0
     spins = [None] if nspin == 1 else list(range(nspin))
-    dpsi_s, psi_large_s, occ_s_out, sph_s = [], [], [], []
+    drho_smooth_sp = [torch.zeros(grid.shape, dtype=RDTYPE, device=dev)
+                      for _ in spins]
+    dpsi_s, psi_large_s, occ_s_out, sph_s, deig_s = [], [], [], [], []
     # per-spin becsum change (a single channel when nspin=1)
     dbecsum_s = [[torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
                   for (s0, s1) in system.atom_slices] for _ in spins]
@@ -440,7 +444,7 @@ def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
         o_sp = occs if sp is None else occs[sp]
         v_eff, dscr_full = veff_s[isp_i], dscr_s[isp_i]
         dbecsum = dbecsum_s[isp_i]
-        dpsi_k, psi_large_k, occ_k_out, sph_k = [], [], [], []
+        dpsi_k, psi_large_k, occ_k_out, sph_k, deig_k = [], [], [], [], []
         for ik, sph0 in enumerate(system.spheres):
             occ_k = o_sp[ik]
             n_occ = int((occ_k > 1e-8).sum())
@@ -465,7 +469,7 @@ def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
             psi_r = g_to_r(c_occ, sph0.flat_idx, grid.shape)
             dpsi_r = g_to_r(dpsi, sph1.flat_idx, grid.shape)
             w = float(system.kweights[ik])
-            drho_smooth += (2.0 * w) * (occ.view(-1, 1, 1, 1)
+            drho_smooth_sp[isp_i] += (2.0 * w) * (occ.view(-1, 1, 1, 1)
                                         * (psi_r.conj() * dpsi_r).real).sum(dim=0)
 
             # on-site occupation (becsum) change from the enlarged projectors
@@ -477,7 +481,9 @@ def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
                                  bdps[:, s0:s1])
                 dbecsum[a] = dbecsum[a] + m + m.conj().T
 
-            # energy change (2nd order): sum_i f_i <dpsi_i | R_i>
+            # energy change (2nd order): sum_i f_i <dpsi_i | R_i>. de_band is also
+            # the per-band eigenvalue error, the S-orthogonality response the
+            # force-error estimate pairs against eps.
             de_band = (dpsi.conj() * resid).real.sum(dim=1)
             denergy += w * float((occ * de_band).sum())
 
@@ -485,12 +491,15 @@ def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
             psi_large_k.append(c_occ_1)
             occ_k_out.append(occ)
             sph_k.append(sph1)
+            deig_k.append(de_band)
         dpsi_s.append(dpsi_k)
         psi_large_s.append(psi_large_k)
         occ_s_out.append(occ_k_out)
         sph_s.append(sph_k)
+        deig_s.append(deig_k)
 
-    drho_smooth = drho_smooth / vol
+    drho_smooth_sp = [d / vol for d in drho_smooth_sp]
+    drho_smooth = sum(drho_smooth_sp)
     # augmentation change, summed over spin channels
     drho_aug = torch.zeros(grid.shape, dtype=RDTYPE, device=dev)
     dbecsum_out = []
@@ -510,15 +519,17 @@ def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
     if nspin == 1:
         dpsi_all, psi_large_all = dpsi_s[0], psi_large_s[0]
         occ_all, sph_all, dbecsum_ret = occ_s_out[0], sph_s[0], dbecsum_out[0]
+        deig_all = deig_s[0]
     else:
         dpsi_all, psi_large_all = dpsi_s, psi_large_s
         occ_all, sph_all, dbecsum_ret = occ_s_out, sph_s, dbecsum_out
+        deig_all = deig_s
 
     return DiscretizationError(
         drho=drho, drho_first_order=drho, denergy=denergy, dpsi=dpsi_all,
         psi_large=psi_large_all, occ=occ_all, spheres_large=sph_all, ecut=ecut,
         ecut_large=ecut_large, dyson=False, uspp=True, dbecsum=dbecsum_ret,
-        drho_smooth=drho_smooth,
+        drho_smooth=drho_smooth, deig=deig_all, drho_smooth_spin=drho_smooth_sp,
     )
 
 
@@ -607,10 +618,221 @@ def _enlarged_projector_data(res: SCFResult, sph, device):
     )
 
 
+def _uspp_enlarged_projdata(system, sph1, device):
+    """USPP/PAW ProjectorData on a given enlarged sphere (differentiable becp)."""
+    q = np.sqrt(sph1.kpg2.cpu().numpy())
+    beta_ls = [[b.l for b in p.betas] for p in system.paws]
+    dij_species = [torch.as_tensor(p.dij, dtype=RDTYPE, device=device)
+                   for p in system.paws]
+    beta_tables = [torch.as_tensor(beta_form_factors(p, q), dtype=RDTYPE,
+                                   device=device) for p in system.paws]
+    return build_projector_data(sph1, system.species_of_atom, beta_tables,
+                                beta_ls, dij_species, system.grid.volume)
+
+
+def _estimate_force_error_uspp(res: dict, err: DiscretizationError, xc, *,
+                               remove_net: bool = True) -> torch.Tensor:
+    """USPP/PAW discretization force error, δF ≈ ∂²E/∂τ∂ε along the estimator's δP.
+
+    Rebuilds the τ-differentiable USPP/PAW force energy (postscf.paw_forces) with
+    the state carried by leaves -- the smooth density, the occupied orbitals on
+    the enlarged sphere, the eigenvalues (in the S-orthogonality constraint), and
+    the PAW one-center ddd -- and takes the mixed derivative along the complement
+    perturbation δP. The δP pieces are the estimator's own outputs: drho_smooth
+    (per spin), dpsi (orbital corrections), deig (eigenvalue error, the response
+    the S-constraint pairs against), and dbecsum (feeding the augmentation density
+    and, through the one-center Hessian-vector product, the ddd response). Follows
+    postscf.uspp_position.hessian_column but with δP in place of the SCF's
+    position response and no explicit ∂²E/∂τ∂τ' term. nspin=1 or 2; the crystal
+    symmetry must be off (as for the USPP density error).
+    """
+    from gradwave.core.density import sigma_from_rho
+    from gradwave.core.energies.hartree import hartree_energy
+    from gradwave.core.xc.base import xc_eager
+    from gradwave.postscf.paw_forces import _aug_at_fixed, _aug_from_becsum
+    from gradwave.postscf.uspp_implicit import _ConvergedUSPP
+
+    system = res["system"]
+    if getattr(system, "sym", None) is not None:
+        raise NotImplementedError(
+            "USPP force error requires use_symmetry=False (a perturbation breaks "
+            "the crystal symmetry, so the response needs the full k-mesh)")
+    if res.get("hub_sites") is not None:
+        raise NotImplementedError("USPP force error with DFT+U not implemented")
+    if xc is None:
+        raise ValueError("USPP force error requires the xc functional (to rebuild "
+                         "v_eff, the augmentation, and the one-center ddd)")
+
+    grid = system.grid
+    vol, shape = grid.volume, grid.shape
+    kw = system.kweights
+    dev = system.positions.device
+    nspin = int(res.get("nspin", 1))
+
+    def _s(x):
+        return [x] if nspin == 1 else list(x)
+
+    psi_s, dpsi_s, occ_s = _s(err.psi_large), _s(err.dpsi), _s(err.occ)
+    deig_s, dbec_s, sph_s = _s(err.deig), _s(err.dbecsum), _s(err.spheres_large)
+    drho_sm_s = err.drho_smooth_spin
+    eigs_src = res["eigenvalues"]
+    nk = len(sph_s[0])
+    species = system.species_of_atom
+    is_paw = any(p.is_paw for p in system.paws)
+
+    pos = system.positions.detach().clone().requires_grad_(True)
+    # enlarged projectors (the enlarged spheres are spin-independent)
+    pd_list = [_uspp_enlarged_projdata(system, sph_s[0][ik], dev)
+               for ik in range(nk)]
+    projs = [projectors(pd, pos) for pd in pd_list]
+    phase_arg = system.g_sphere @ pos.T
+    phases = torch.exp(torch.complex(torch.zeros_like(phase_arg), phase_arg))
+    q_full = system.q_full.to(CDTYPE)
+    dij_full = system.proj_data[0].dij_full.to(CDTYPE)
+
+    # ddd response to the becsum perturbation (PAW one-center Hessian-vector
+    # product); ddd leaves frozen at the converged becsum.
+    dddd_s = None
+    ddd_leaves = [[None] * len(system.atom_slices) for _ in range(nspin)]
+    if is_paw:
+        with torch.no_grad():
+            cs = _ConvergedUSPP(res, xc)
+            dddd_s = cs.hvp_onecenter(
+                [[m.to(CDTYPE) for m in dbec_s[isp]] for isp in range(nspin)])
+        from gradwave.scf.paw_onsite import OneCenter
+        onec = {sp: OneCenter(system.paws[sp], xc) for sp in set(species)}
+        becsum = res["rho_ij_atoms"]
+        for at, sp in enumerate(species):
+            bec = becsum[at] if nspin == 1 else [becsum[0][at], becsum[1][at]]
+            _, ddd = onec[sp].energy_and_ddd(bec)
+            ddd_ch = [ddd] if nspin == 1 else list(ddd)
+            for isp in range(nspin):
+                ddd_leaves[isp][at] = (ddd_ch[isp].detach().clone().to(dev)
+                                       .requires_grad_(True))
+
+    leaves, responses = [], []      # matched (leaf, δstate) pairs for the s scalar
+
+    # smooth-density leaves (per spin), response = per-spin smooth drho
+    rho_s_leaves = []
+    for isp in range(nspin):
+        rho_sp_isp = res["rho"] if nspin == 1 else res["rho_spin"][isp]
+        fixed = (rho_sp_isp.detach() - _aug_at_fixed(res, system, isp)).detach()
+        leaf = fixed.clone().requires_grad_(True)
+        rho_s_leaves.append(leaf)
+        leaves.append(leaf)
+        responses.append(drho_sm_s[isp])
+
+    # orbital + eigenvalue leaves and the augmentation/one-center energy per spin
+    e = pos.sum() * 0.0             # scalar seed on the pos graph
+    rho_chans = []
+    for isp in range(nspin):
+        e_full = eigs_src if nspin == 1 else eigs_src[isp]
+        rho_ij = [torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
+                  for (s0, s1) in system.atom_slices]
+        for ik in range(nk):
+            c_leaf = psi_s[isp][ik].detach().clone().requires_grad_(True)
+            leaves.append(c_leaf)
+            responses.append(dpsi_s[isp][ik])
+            n_occ = occ_s[isp][ik].shape[0]
+            eps_leaf = e_full[ik][:n_occ].detach().clone().requires_grad_(True)
+            leaves.append(eps_leaf)
+            responses.append(deig_s[isp][ik])
+
+            b = becp(projs[ik], c_leaf)
+            w = (kw[ik] * occ_s[isp][ik]).to(CDTYPE)
+            for a, (s0, s1) in enumerate(system.atom_slices):
+                ba = b[:, s0:s1]
+                rho_ij[a] = rho_ij[a] + torch.einsum("b,bi,bj->ij", w,
+                                                     ba.conj(), ba)
+            # nonlocal (bare D) + S-orthogonality constraint (−Σ w f ε ⟨ψ|Q|ψ⟩)
+            nl = torch.einsum("bi,ij,bj->b", b.conj(), dij_full, b).real
+            e = e + (kw[ik] * occ_s[isp][ik] * nl).sum()
+            so = torch.einsum("bi,ij,bj->b", b.conj(), q_full, b).real
+            e = e - (kw[ik] * occ_s[isp][ik] * eps_leaf * so).sum()
+        rho_ij = [0.5 * (m + m.conj().T) for m in rho_ij]
+        if is_paw:
+            for a in range(len(system.atom_slices)):
+                e = e + (ddd_leaves[isp][a].to(CDTYPE) * rho_ij[a]).sum().real
+                leaves.append(ddd_leaves[isp][a])
+                responses.append(dddd_s[isp][a].real)
+        rho_chans.append(rho_s_leaves[isp] + _aug_from_becsum(system, rho_ij, phases))
+
+    # local + Hartree see the total density; XC sees the spin channels (+ NLCC)
+    rho_tot = sum(rho_chans)
+    rho_core = _uspp_rho_core_on_graph(system, phases, pos)
+    if nspin == 1:
+        rho_xc = rho_tot if rho_core is None else rho_tot + rho_core
+        sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
+        with xc_eager():
+            e = e + xc.energy(rho_xc, vol, sigma)
+    else:
+        c2 = 0.0 if rho_core is None else 0.5 * rho_core
+        r_u, r_d = rho_chans[0] + c2, rho_chans[1] + c2
+        if xc.needs_gradient:
+            s_uu = sigma_from_rho(r_u, grid.g_cart)
+            s_dd = sigma_from_rho(r_d, grid.g_cart)
+            s_tt = sigma_from_rho(r_u + r_d, grid.g_cart)
+        else:
+            s_uu = s_dd = s_tt = None
+        with xc_eager():
+            e = e + xc.energy(r_u, r_d, vol, s_uu, s_dd, s_tt)
+    rho_g = r_to_g(rho_tot.to(CDTYPE))
+    species_index = torch.tensor(species, dtype=torch.int64, device=dev)
+    vloc_g = local_potential_g(pos, species_index, system.vloc_tables,
+                               grid.g_cart, vol)
+    e = e + hartree_energy(rho_g, grid.g2, vol) + local_energy(rho_g, vloc_g, vol)
+
+    # s = ∂E/∂ε along δP (no explicit ∂E/∂τ term: ε perturbs only the state);
+    # δF = -∂/∂τ s. Complex leaves pair via Re⟨g, δz⟩ (conjugate-Wirtinger).
+    grads = torch.autograd.grad(e, leaves, create_graph=True)
+    s = pos.sum() * 0.0
+    for g, d in zip(grads, responses, strict=True):
+        if g.is_complex():
+            s = s + (g.conj() * d).real.sum()
+        else:
+            s = s + (g * d.real if d.is_complex() else g * d).sum()
+    (dgrad,) = torch.autograd.grad(s, pos)
+    dF = -dgrad
+    if remove_net:
+        dF = dF - dF.mean(dim=0, keepdim=True)
+    return dF.detach()
+
+
+def _uspp_rho_core_on_graph(system, phases, pos):
+    """NLCC core density on the graph (differentiable in positions), or None.
+
+    Copied from postscf.paw_forces: the core rides the same e^{+iGτ} phases as
+    the augmentation, so its τ-derivative is the NLCC core force and it enters
+    the XC argument here.
+    """
+    if system.rho_core is None:
+        return None
+    from gradwave.pseudo.radial_torch import RadialTables
+
+    grid = system.grid
+    vol = grid.volume
+    q_sph = torch.linalg.norm(system.g_sphere, dim=1)
+    core = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE, device=pos.device)
+    for sp in set(system.species_of_atom):
+        paw = system.paws[sp]
+        if paw.core_rho is None:
+            continue
+        tab = RadialTables(paw, device=pos.device)
+        with torch.no_grad():
+            f_core = tab.core_of_g(q_sph)
+        atoms = [a for a, sa in enumerate(system.species_of_atom) if sa == sp]
+        core = core + phases[:, atoms].conj().sum(dim=1) * f_core.to(CDTYPE) / vol
+    core_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=pos.device)
+    core_box[system.sphere_idx] = core
+    return torch.fft.ifftn(core_box.reshape(grid.shape) * grid.n_points,
+                           dim=(-3, -2, -1)).real
+
+
 def estimate_force_error(
     res: SCFResult,
     err: DiscretizationError,
     *,
+    xc=None,
     remove_net: bool = True,
 ) -> torch.Tensor:
     """Discretization error in the Hellmann-Feynman forces, δF ≈ (∂F/∂P) δP.
@@ -630,20 +852,20 @@ def estimate_force_error(
     channels stay consistent; a Dyson-dressed δρ would need the matching dressed
     δφ, which is future work.
 
-    Norm-conserving, nspin=1 or 2 (no NLCC). For nspin=2 the nonlocal channel
-    sums over the two spin channels — each with its own orbital corrections and
-    occupations (in [0,1]) — while the local channel already sees the
-    spin-summed density error ``drho_first_order``.
+    Norm-conserving (nspin=1 or 2, no NLCC) or USPP/PAW (nspin=1 or 2, needs
+    ``xc``). For nspin=2 the nonlocal channel sums over the two spin channels --
+    each with its own orbital corrections and occupations (in [0,1]) -- while the
+    local channel already sees the spin-summed density error. The USPP/PAW path
+    additionally propagates δP through the augmentation density (δbecsum), the
+    S-orthogonality constraint (via the eigenvalue error), and the PAW one-center
+    ddd response, following ``postscf.uspp_position.hessian_column``.
     """
     if _is_ncresult(res):
         raise NotImplementedError(
             "force error estimate is norm-conserving collinear only; the spinor "
             "force terms in P(eps) are not assembled")
     if err.uspp:
-        raise NotImplementedError(
-            "force error estimate is norm-conserving only; the USPP/PAW force "
-            "needs the augmentation and one-center force terms in P(eps) "
-            "(template: postscf.uspp_position.hessian_column)")
+        return _estimate_force_error_uspp(res, err, xc, remove_net=remove_net)
     if getattr(res.system, "rho_core", None) is not None:
         raise NotImplementedError(
             "NLCC force term not supported in the error estimate: it is blocked "
