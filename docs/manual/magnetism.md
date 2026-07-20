@@ -183,8 +183,10 @@ anisotropy energy (MAE). Two routes are available.
 **Self-consistent differences.** Converge one full SOC SCF per direction and
 subtract. `examples/fept_mae.py` runs L1_0 FePt this way: at the converged
 $6\times6\times4$ mesh (70 Ry, LSDA), $\mathrm{MAE} = E[100] - E[001] =
-+2.552$ meV/cell, easy axis along $c$, consistent with the 1 to 3 meV/f.u.
-range reported for FePt. Each orientation folds by its own magnetic group
++2.552$ meV/cell, easy axis along $c$, within the 1.8 to 4.3 meV/f.u. band
+of published LDA values; the converged full-potential LDA reference is
+3.0 meV/f.u. against a 1.3 to 1.4 meV experiment.[[24]](bibliography.md#khan)
+Each orientation folds by its own magnetic group
 ([Magnetic symmetry](symmetry.md#magnetic-shubnikov-symmetry)) as long as both
 share the underlying mesh. The 48-point mesh gives the *wrong* easy axis
 ($-1.39$ meV/cell), the textbook k-convergence trap. Never trust an anisotropy

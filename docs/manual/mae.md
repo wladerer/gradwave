@@ -78,6 +78,8 @@ $K_2 = -0.0358$ meV/cell, largest fit residual 1.5 μeV — FePt follows the
 single-constant form to within a percent. The whole map costs about an hour
 of CPU; each extra direction about two minutes.
 
+![L1₀ FePt E(θ) anisotropy: measured points, uniaxial fit, and μeV residuals](img/fept_mae_map.png)
+
 The script writes two machine-readable files next to its stdout log:
 
 - `fept_mae_map.json` — θ values, measured $\Delta F$, the fit, fold counts,
@@ -86,6 +88,29 @@ The script writes two machine-readable files next to its stdout log:
   per-direction eigenvalue spectra and Fermi levels. Reload with
   `MAEResult.load("fept_mae_map.pt")`; this is what makes later
   band-resolved analysis possible without repeating the SCF.
+
+## Against the literature
+
+Khan, Blaha, Ebert, Minár, and Šipr[[24]](bibliography.md#khan) is the
+detailed reference study for exactly this system: two full-potential
+all-electron methods (FLAPW and KKR) converge on an LDA MCA energy of
+**3.0 meV/f.u.**, they fit the same angular form and get
+$K_1 = 3.008$ meV with $K_2 = 0.092$ meV, and they survey earlier LDA
+work spanning 1.8 to 4.3 meV. Three useful calibration points fall out:
+
+- Our k-converged number sits on theirs. The 384-k magnetic-IBZ run
+  (`examples/fept_mae.py` header) gives $+2.993$ meV/cell; the map above,
+  at the cheaper $6\times6\times4$ mesh, gives $+2.66$ — the gap is
+  k-convergence, and the easy axis and curve shape are stable across it.
+- Experiment is $1.3$–$1.4$ meV/f.u. The factor-of-two LDA overestimate is
+  a functional error shared by every LDA code, so the correct target for
+  verifying the *implementation* is agreement with other LDA results;
+  closing the gap to experiment requires going beyond the functional.
+- Their force-theorem values differ from their total-energy differences by
+  up to $\sim 0.3$ meV across codes (2.85–3.12), the same few-percent
+  band our 4.2% force-theorem-vs-self-consistent agreement lands in. Their
+  $K_2/K_1 \approx +3\%$ against our $-1.3\%$ shows the sin⁴ term is small
+  and method-sensitive; the sin² term carries the physics in both.
 
 ## Plotting
 
