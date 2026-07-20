@@ -1,7 +1,9 @@
 """Command-line interface.
 
+    gradwave init relax -o input.yaml  # write a starter input for a task
     gradwave input.yaml                # run, outputs to the YAML's output.dir
     gradwave input.yaml -o results/    # override the output directory
+    gradwave validate input.yaml       # parse and check, run nothing
     gradwave plot out/scf.json         # convergence / bands / DOS figure
 
 The explicit `gradwave run input.yaml` form still works.
@@ -15,7 +17,7 @@ from pathlib import Path
 
 from gradwave import __version__
 
-_COMMANDS = {"run", "plot"}
+_COMMANDS = {"init", "run", "validate", "plot"}
 
 
 def _build_parser():
@@ -31,6 +33,19 @@ def _build_parser():
                        help="output directory (overrides output.dir)")
     p_run.add_argument("-q", "--quiet", action="store_true")
 
+    p_init = sub.add_parser(
+        "init", help="write a starter input for a task (relax, bands, ...)")
+    p_init.add_argument("template", nargs="?",
+                        help="template name; omit to list the available ones")
+    p_init.add_argument("-o", "--output", metavar="FILE",
+                        help="write here instead of stdout")
+    p_init.add_argument("--force", action="store_true",
+                        help="overwrite an existing --output file")
+
+    p_val = sub.add_parser(
+        "validate", help="parse and check an input without running it")
+    p_val.add_argument("input", help="path to input.yaml")
+
     p_plot = sub.add_parser(
         "plot", help="plot a result JSON (scf convergence, bands, or dos)")
     p_plot.add_argument("result", help="path to <task>.json")
@@ -44,13 +59,81 @@ def _build_parser():
     return parser
 
 
+def _cmd_init(args) -> int:
+    from gradwave import templates
+
+    if not args.template:
+        print("available templates (gradwave init <name>):")
+        for name, desc in templates.summaries().items():
+            print(f"  {name:14s} {desc}")
+        return 0
+    try:
+        text = templates.render(args.template)
+    except KeyError:
+        print(f"error: unknown template {args.template!r}; choices: "
+              f"{', '.join(templates.names())}", file=sys.stderr)
+        return 1
+    if args.output:
+        out = Path(args.output)
+        if out.exists() and not args.force:
+            print(f"error: {out} exists (use --force to overwrite)",
+                  file=sys.stderr)
+            return 1
+        out.write_text(text)
+        print(f"wrote {out}  —  edit the structure and pseudopotentials, then "
+              f"`gradwave validate {out}`")
+        return 0
+    sys.stdout.write(text)
+    return 0
+
+
+def _load_checked(path):
+    """Load an input, turning the schema errors into a one-line message and a
+    non-zero exit rather than a traceback. Returns (Input, None) or (None, rc)."""
+    from gradwave.inputs import InputError, load_input
+
+    try:
+        return load_input(path), None
+    except (InputError, FileNotFoundError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return None, 1
+
+
+def _cmd_validate(args) -> int:
+    import numpy as np
+
+    inp, rc = _load_checked(args.input)
+    if inp is None:
+        return rc
+    a = inp.atoms
+    formula = a.get_chemical_formula()
+    print(f"ok: {args.input}")
+    print(f"  task        {inp.task}")
+    print(f"  structure   {formula}  ({len(a)} atoms)")
+    print(f"  cell [Å]    {np.array2string(a.cell.array, precision=4)}")
+    print(f"  ecut [eV]   {inp.ecut:g}"
+          + (f"   ecutrho {inp.ecutrho:g}" if inp.ecutrho else ""))
+    print(f"  xc          {inp.xc}")
+    print(f"  kpoints     mesh {list(inp.kpoints.mesh)} shift "
+          f"{list(inp.kpoints.shift)}")
+    print(f"  smearing    {inp.smearing.type}"
+          + (f" ({inp.smearing.width} eV)" if inp.smearing.type != "none" else ""))
+    print(f"  nspin       {inp.nspin}"
+          + ("  noncollinear" if inp.noncollinear else ""))
+    print(f"  pseudos     {inp.pseudo_map}")
+    print(f"  device      {inp.device}")
+    print(f"  output_dir  {inp.output_dir}")
+    return 0
+
+
 def _cmd_run(args) -> int:
     import dataclasses
 
     from gradwave.api import run
-    from gradwave.inputs import load_input
 
-    inp = load_input(args.input)
+    inp, rc = _load_checked(args.input)
+    if inp is None:
+        return rc
     if args.output:
         inp = dataclasses.replace(inp, output_dir=Path(args.output))
     summary = run(inp, verbose=inp.verbose and not args.quiet)
@@ -107,8 +190,12 @@ def main(argv=None) -> int:
     if argv and argv[0] not in _COMMANDS and not argv[0].startswith("-"):
         argv.insert(0, "run")
     args = _build_parser().parse_args(argv)
+    if args.command == "init":
+        return _cmd_init(args)
     if args.command == "run":
         return _cmd_run(args)
+    if args.command == "validate":
+        return _cmd_validate(args)
     if args.command == "plot":
         return _cmd_plot(args)
     return 2

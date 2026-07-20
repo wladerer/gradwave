@@ -29,6 +29,7 @@ theme:
 
 nav:
   - Overview: index.md
+  - Architecture: architecture.md
   - Installation: installation.md
   - Cookbook: cookbook.md
   - Tutorials:
@@ -82,7 +83,11 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.arithmatex:

@@ -13,8 +13,8 @@ hold the physics layers and are imported directly when needed.
 
 from gradwave.api import run
 from gradwave.calculator import GradWave
-from gradwave.inputs import Input, load_input
+from gradwave.inputs import Input, InputError, load_input
 
 __version__ = "0.1.0"
 
-__all__ = ["Input", "load_input", "run", "GradWave", "__version__"]
+__all__ = ["Input", "InputError", "load_input", "run", "GradWave", "__version__"]

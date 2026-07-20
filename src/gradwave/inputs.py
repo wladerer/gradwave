@@ -7,6 +7,8 @@ All energies in eV, lengths in Å (the package-wide convention).
 
 from __future__ import annotations
 
+import dataclasses
+import difflib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,6 +16,11 @@ import numpy as np
 import yaml
 from ase import Atoms
 from ase.io import read as ase_read
+
+
+class InputError(ValueError):
+    """A malformed input file. Carries the input path (prepended by
+    ``load_input``) so the message points at the file the user edited."""
 
 
 @dataclass(frozen=True)
@@ -97,6 +104,7 @@ class Input:
     symmetry: bool = True  # IBZ reduction + density symmetrization
     nspin: int = 1  # 1 | 2 (collinear)
     noncollinear: bool = False  # spinor (non-collinear) SCF for task: scf
+    nonmagnetic: bool = False  # with noncollinear: pin m⃗ ≡ 0 (spin-orbit only, keeps symmetry)
     start_mag: dict | None = None  # element -> initial moment fraction (nspin=2/NC seed)
     task: str = "scf"  # scf | relax | bands | magnetism
     relax: RelaxParams = field(default_factory=RelaxParams)
@@ -115,6 +123,63 @@ class Input:
     restart: Path | None = None  # checkpoint.pt to warm-start from (USPP/PAW)
 
 
+def _check_keys(label: str, got, allowed) -> None:
+    """Reject unknown keys in a mapping with a did-you-mean hint, so a typo
+    like `optimzer:` fails loudly at parse time instead of being silently
+    dropped (a dropped key means the default is used and the result is quietly
+    wrong)."""
+    if not isinstance(got, dict):
+        raise InputError(f"{label} must be a mapping, got {type(got).__name__}")
+    allowed = set(allowed)
+    unknown = [k for k in got if k not in allowed]
+    if not unknown:
+        return
+    parts = []
+    for k in unknown:
+        near = difflib.get_close_matches(str(k), [str(a) for a in allowed], n=1)
+        parts.append(f"{k!r}" + (f" (did you mean {near[0]!r}?)" if near else ""))
+    raise InputError(
+        f"unknown key(s) in {label}: {', '.join(parts)}. "
+        f"valid keys: {', '.join(sorted(str(a) for a in allowed))}")
+
+
+def _build(cls, raw, label):
+    """Construct a frozen params dataclass from a mapping, rejecting unknown
+    keys first so `RelaxParams(**{'optimzer': ...})` reports the typo by name
+    rather than raising a bare TypeError from the constructor."""
+    _check_keys(label, raw, {f.name for f in dataclasses.fields(cls)})
+    return cls(**raw)
+
+
+def _read_atoms(path: Path, fmt=None, index=-1) -> Atoms:
+    """Read a geometry through ASE and enforce the plane-wave prerequisites.
+
+    ASE guesses the format from the extension/content; `fmt` overrides that
+    when the guess misfires. Multi-image files (trajectories, multi-frame xyz)
+    default to the last frame (`index=-1`) rather than silently — pass a
+    `structure.index` to choose. A structure with no 3D cell cannot be run by a
+    plane-wave code, so that fails here with a clear message rather than deep in
+    grid construction."""
+    try:
+        atoms = ase_read(str(path), format=fmt, index=index)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"structure file not found: {path}") from None
+    except Exception as e:  # ASE raises a grab-bag of parse errors
+        hint = "" if fmt else " (try setting structure.format)"
+        raise InputError(f"could not read structure {path}: {e}{hint}") from None
+    if isinstance(atoms, list):
+        raise InputError(
+            f"structure.index {index!r} selected {len(atoms)} frames; "
+            f"give a single integer index (e.g. 0 or -1)")
+    if atoms.cell.rank < 3:
+        raise InputError(
+            f"structure {path} has no 3D cell (cell rank {atoms.cell.rank}); "
+            f"plane-wave DFT requires a periodic cell. If this is a molecule, "
+            f"put it in a box (e.g. a POSCAR/cif with a lattice).")
+    atoms.pbc = True
+    return atoms
+
+
 def _normalize_kerker(value):
     """MixingParams.kerker accepts "auto", a bool, or the on/off/true/false
     string spellings (a bare `kerker: off` is already a YAML bool); anything
@@ -129,61 +194,157 @@ def _normalize_kerker(value):
             return True
         if s in ("off", "false"):
             return False
-    raise ValueError(
+    raise InputError(
         f"invalid mixing.kerker {value!r} (auto | on | off | true | false)")
 
 
 def _load_structure(spec, base: Path) -> Atoms:
+    """Three spellings, all reaching the same Atoms:
+
+      structure: geometry.cif                     # bare filename (any ASE format)
+      structure: {file: t.xyz, format: extxyz, index: 0}   # file + read controls
+      structure: {cell: ..., positions: ..., species: ...} # inline block
+    """
     if isinstance(spec, str):
-        return ase_read(base / spec)
+        return _read_atoms(base / spec)
+    if not isinstance(spec, dict):
+        raise InputError(
+            f"structure must be a filename or a mapping, got {type(spec).__name__}")
+    if "file" in spec:
+        _check_keys("structure", spec, {"file", "format", "index"})
+        return _read_atoms(base / spec["file"], fmt=spec.get("format"),
+                           index=spec.get("index", -1))
+    _check_keys("structure", spec, {"cell", "positions", "species"})
+    for req in ("cell", "positions", "species"):
+        if req not in spec:
+            raise InputError(f"inline structure is missing required key {req!r}")
     cell = np.asarray(spec["cell"], dtype=float)
     posblock = spec["positions"]
+    _check_keys("structure.positions", posblock, {"cart", "frac"})
     species = spec["species"]
     if "frac" in posblock:
         atoms = Atoms(species, scaled_positions=posblock["frac"], cell=cell, pbc=True)
-    else:
+    elif "cart" in posblock:
         atoms = Atoms(species, positions=posblock["cart"], cell=cell, pbc=True)
+    else:
+        raise InputError("structure.positions needs a 'cart' or 'frac' block")
     return atoms
 
 
+# Every top-level key the schema understands; anything else is a typo. Kept
+# beside the Input fields it feeds so the two do not drift.
+_ALLOWED_TOP = {
+    "structure", "pseudopotentials", "ecut", "ecutrho", "xc", "kpoints",
+    "smearing", "nbands", "symmetry", "nspin", "noncollinear", "nonmagnetic",
+    "start_mag",
+    "scf", "task", "relax", "bands", "magnetism", "projections", "device",
+    "verbose", "output", "error_estimate", "restart",
+}
+
+
 def load_input(path: str | Path) -> Input:
+    """Parse a YAML input into the frozen `Input` schema. Every `InputError`
+    is re-raised with the file path prepended so the message names the file the
+    user edited."""
     path = Path(path)
+    try:
+        return _load_input(path)
+    except InputError as e:
+        raise InputError(f"{path}: {e}") from None
+
+
+def _load_input(path: Path) -> Input:
     raw = yaml.safe_load(path.read_text())
     base = path.parent
 
+    if not isinstance(raw, dict):
+        raise InputError("input must be a YAML mapping of keywords")
+    _check_keys("input", raw, _ALLOWED_TOP)
+    for req in ("structure", "pseudopotentials", "ecut"):
+        if req not in raw:
+            raise InputError(f"missing required key {req!r}")
+
     atoms = _load_structure(raw["structure"], base)
     pp = raw["pseudopotentials"]
+    _check_keys("pseudopotentials", pp, {"dir", "map"})
+    for req in ("dir", "map"):
+        if req not in pp:
+            raise InputError(f"pseudopotentials is missing required key {req!r}")
     pseudo_dir = (base / pp["dir"]).resolve()
     pseudo_map = dict(pp["map"])
     for sym in set(atoms.get_chemical_symbols()):
         if sym not in pseudo_map:
-            raise ValueError(f"no pseudopotential mapped for element {sym}")
+            raise InputError(f"no pseudopotential mapped for element {sym}")
         if not (pseudo_dir / pseudo_map[sym]).exists():
             raise FileNotFoundError(pseudo_dir / pseudo_map[sym])
 
     kp = raw.get("kpoints", {})
+    _check_keys("kpoints", kp, {"mesh", "shift"})
     sm = raw.get("smearing", {})
+    _check_keys("smearing", sm, {"type", "width"})
     scf_raw = dict(raw.get("scf", {}))
-    mix_raw = scf_raw.pop("mixing", {})
+    _check_keys("scf", scf_raw, {"max_iter", "etol", "rhotol", "mixing", "diago"})
+    mix_raw = dict(scf_raw.pop("mixing", {}))
     diago = scf_raw.pop("diago", {})
+    _check_keys("scf.diago", diago, {"tol"})
 
     xc = str(raw.get("xc", "pbe")).lower()
     if xc not in ("lda", "pbe"):
-        raise ValueError(f"unknown xc {xc!r} (lda | pbe)")
+        raise InputError(f"unknown xc {xc!r} (lda | pbe)")
     task = raw.get("task", "scf")
     if task not in ("scf", "relax", "bands", "magnetism"):
-        raise ValueError(f"unknown task {task!r}")
+        raise InputError(
+            f"unknown task {task!r} (scf | relax | bands | magnetism)")
+    nspin = int(raw.get("nspin", 1))
+    if nspin not in (1, 2):
+        raise InputError(f"nspin must be 1 or 2, got {nspin}")
+
+    # A magnetic spinor SCF (a magnetic noncollinear run, and the magnetism
+    # task's constrained tilt scans) cannot use IBZ symmetry reduction: time
+    # reversal and the space group act on the moment vector, so the driver
+    # rejects a symmetrized density. Default symmetry off for these modes and
+    # reject an explicit `symmetry: true` here, where the message can point at
+    # the fix, rather than letting it surface as a ValueError deep in the SCF.
+    # A spin-orbit-only run (nonmagnetic: true) pins m⃗ ≡ 0, so Kramers keeps
+    # the full crystal symmetry and it behaves like a plain SCF for symmetry.
+    noncollinear = bool(raw.get("noncollinear", False))
+    nonmagnetic = bool(raw.get("nonmagnetic", False))
+    if nonmagnetic and not noncollinear:
+        raise InputError(
+            "nonmagnetic requires noncollinear: true — it pins the spinor "
+            "moment to zero for a spin-orbit-only run")
+    magnetic_spinor = (noncollinear and not nonmagnetic) or task == "magnetism"
+    sym_raw = raw.get("symmetry")
+    if magnetic_spinor:
+        if sym_raw is True:
+            mode = "magnetism" if task == "magnetism" else "noncollinear"
+            raise InputError(
+                f"symmetry: true is invalid for a {mode} run — time reversal "
+                f"and the space group act on the moment vector, so IBZ "
+                f"reduction is rejected. Set symmetry: false (the default for "
+                f"these modes), or for spin-orbit without magnetism add "
+                f"nonmagnetic: true, which keeps symmetry.")
+        symmetry = False
+    else:
+        symmetry = True if sym_raw is None else bool(sym_raw)
+
+    mesh = tuple(kp.get("mesh", (1, 1, 1)))
+    if len(mesh) != 3:
+        raise InputError(f"kpoints.mesh must have 3 entries, got {list(mesh)}")
     smtype = sm.get("type", "none")
     if smtype not in ("none", "fermi-dirac", "gaussian", "mp1", "cold"):
-        raise ValueError(f"unknown smearing type {smtype!r}")
+        raise InputError(f"unknown smearing type {smtype!r}")
 
+    _check_keys("scf.mixing", mix_raw, {f.name for f in dataclasses.fields(MixingParams)})
     mix_scheme = str(mix_raw.get("scheme", "pulay"))
     if mix_scheme not in ("pulay", "broyden", "johnson", "linear"):
-        raise ValueError(f"unknown mixing scheme {mix_scheme!r}")
+        raise InputError(f"unknown mixing scheme {mix_scheme!r}")
     if "kerker" in mix_raw:
         mix_raw["kerker"] = _normalize_kerker(mix_raw["kerker"])
 
     out_raw = raw.get("output", {})
+    _check_keys("output", out_raw,
+                {"dir", "checkpoint", "wavefunctions", "error_estimate"})
     restart = raw.get("restart")
 
     nbands = raw.get("nbands", "auto")
@@ -192,6 +353,8 @@ def load_input(path: str | Path) -> Input:
     if isinstance(proj_raw, bool):
         projections = ProjectionsParams(enabled=proj_raw)
     else:
+        _check_keys("projections", proj_raw,
+                    {"enabled", "group_by", "width", "npoints"})
         projections = ProjectionsParams(
             enabled=bool(proj_raw.get("enabled", True)),
             group_by=str(proj_raw.get("group_by", "l")),
@@ -206,13 +369,14 @@ def load_input(path: str | Path) -> Input:
         ecutrho=None if ecutrho is None else float(ecutrho),
         xc=xc,
         kpoints=KPointsParams(
-            mesh=tuple(kp.get("mesh", (1, 1, 1))), shift=tuple(kp.get("shift", (0, 0, 0)))
+            mesh=mesh, shift=tuple(kp.get("shift", (0, 0, 0)))
         ),
         smearing=SmearingParams(type=smtype, width=float(sm.get("width", 0.1))),
         nbands=None if nbands == "auto" else int(nbands),
-        symmetry=bool(raw.get("symmetry", True)),
-        nspin=int(raw.get("nspin", 1)),
-        noncollinear=bool(raw.get("noncollinear", False)),
+        symmetry=symmetry,
+        nspin=nspin,
+        noncollinear=noncollinear,
+        nonmagnetic=nonmagnetic,
         start_mag=raw.get("start_mag"),
         scf=SCFParams(
             max_iter=int(scf_raw.get("max_iter", 100)),
@@ -222,9 +386,9 @@ def load_input(path: str | Path) -> Input:
             diago_tol=float(diago.get("tol", 1e-9)),
         ),
         task=task,
-        relax=RelaxParams(**raw.get("relax", {})),
-        bands=BandsParams(**raw.get("bands", {})),
-        magnetism=MagnetismParams(**raw.get("magnetism", {})),
+        relax=_build(RelaxParams, raw.get("relax", {}), "relax"),
+        bands=_build(BandsParams, raw.get("bands", {}), "bands"),
+        magnetism=_build(MagnetismParams, raw.get("magnetism", {}), "magnetism"),
         projections=projections,
         device=raw.get("device", "cpu"),
         verbose=bool(raw.get("verbose", True)),
