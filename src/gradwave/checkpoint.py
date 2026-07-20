@@ -22,6 +22,19 @@ FORMAT = "gradwave-checkpoint"
 VERSION = 1
 
 
+def energies_eV_dict(e) -> dict:
+    """The 11-term energy breakdown (eV) shared by the checkpoint payload and
+    the api summary. build_summary adds the derived e0 on top."""
+    return {
+        "kinetic": float(e.kinetic), "hartree": float(e.hartree),
+        "xc": float(e.xc), "local": float(e.local),
+        "nonlocal": float(e.nonlocal_), "ewald": float(e.ewald),
+        "smearing": float(e.smearing), "hubbard": float(e.hubbard),
+        "onecenter": float(e.onecenter),
+        "total": float(e.total), "free_energy": float(e.free_energy),
+    }
+
+
 def _cpu(t):
     return t.detach().cpu() if isinstance(t, torch.Tensor) else t
 
@@ -83,14 +96,7 @@ def save_checkpoint(res, path, *, wavefunctions: bool = False) -> Path:
         "fermi_eV": None if get("fermi") is None else float(get("fermi")),
         "smearing": get("smearing", "none"),
         "width_eV": float(get("width", 0.0) or 0.0),
-        "energies_eV": {
-            "kinetic": float(e.kinetic), "hartree": float(e.hartree),
-            "xc": float(e.xc), "local": float(e.local),
-            "nonlocal": float(e.nonlocal_), "ewald": float(e.ewald),
-            "smearing": float(e.smearing), "hubbard": float(e.hubbard),
-            "onecenter": float(e.onecenter),
-            "total": float(e.total), "free_energy": float(e.free_energy),
-        },
+        "energies_eV": energies_eV_dict(e),
         "eigenvalues_eV": _cpu(get("eigenvalues")),
         "occupations": _cpu(get("occupations")),
         "rho": _cpu(get("rho")),
@@ -122,8 +128,23 @@ def save_checkpoint(res, path, *, wavefunctions: bool = False) -> Path:
     return path
 
 
+def _allow_numpy_globals() -> None:
+    """Allowlist the numpy reconstruction globals so our own checkpoints load
+    under weights_only=True. The payload carries a couple of numpy arrays (cell,
+    positions); weights_only never executes arbitrary pickles, so this stays
+    safe while covering the array reconstruct path."""
+    import numpy as np
+    from numpy.core.multiarray import _reconstruct
+
+    dtype_classes = [getattr(np.dtypes, n) for n in dir(np.dtypes)
+                     if n.endswith("DType")]
+    torch.serialization.add_safe_globals(
+        [_reconstruct, np.ndarray, np.dtype, *dtype_classes])
+
+
 def load_checkpoint(path) -> dict:
-    payload = torch.load(Path(path), map_location="cpu", weights_only=False)
+    _allow_numpy_globals()
+    payload = torch.load(Path(path), map_location="cpu", weights_only=True)
     if payload.get("format") != FORMAT:
         raise ValueError(f"{path} is not a gradwave checkpoint")
     if payload.get("version", 0) > VERSION:

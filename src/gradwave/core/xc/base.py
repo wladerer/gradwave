@@ -117,15 +117,28 @@ class CompilableXC:
                     **(self._xc_compile_kwargs or {}),
                 )
             except Exception as exc:  # toolchain absent, degrade to eager
-                self._xc_compile_dead = True
-                self._xc_compile_error = repr(exc)
+                self._latch_eager(exc)
                 return self.energy_density(*args)
         try:
             return self._xc_compiled(*args)
         except Exception as exc:  # first-call compile failure (toolchain gap)
-            self._xc_compile_dead = True
-            self._xc_compile_error = repr(exc)
+            self._latch_eager(exc)
             return self.energy_density(*args)
+
+    def _latch_eager(self, exc: Exception) -> None:
+        """Permanently fall back to the eager path and warn once. The latch runs
+        only on the first failure (subsequent calls short-circuit on
+        _xc_compile_dead), so the warning fires exactly once and makes the
+        resulting performance cliff visible instead of silent."""
+        import warnings
+
+        self._xc_compile_dead = True
+        self._xc_compile_error = repr(exc)
+        warnings.warn(
+            f"XC compile disabled, falling back to the eager energy_density path "
+            f"for the rest of this run: {self._xc_compile_error}",
+            stacklevel=2,
+        )
 
 
 class XCFunctional(CompilableXC, torch.nn.Module):

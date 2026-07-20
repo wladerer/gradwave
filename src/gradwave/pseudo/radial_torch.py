@@ -36,7 +36,7 @@ def simpson_weights(rab: np.ndarray) -> np.ndarray:
 
 
 def jl_t(l: int, x: torch.Tensor) -> torch.Tensor:
-    """j_l(x) for l ≤ 4, elementwise, x ≥ 0. Plain tensor math (call under
+    """j_l(x) for l ≤ 5, elementwise, x ≥ 0. Plain tensor math (call under
     no_grad — the analytic-derivative path in sbt_t exists precisely so this
     never needs to be traced)."""
     if not 0 <= l <= 5:
@@ -74,7 +74,7 @@ def jl_t(l: int, x: torch.Tensor) -> torch.Tensor:
 
 
 def _djl_t(l: int, x: torch.Tensor) -> torch.Tensor:
-    """j_l'(x) via the 1/x-free three-term identity (l ≤ 3)."""
+    """j_l'(x) via the 1/x-free three-term identity (l ≤ 4; needs j_{l+1})."""
     if l == 0:
         return -jl_t(1, x)
     return (l * jl_t(l - 1, x) - (l + 1) * jl_t(l + 1, x)) / (2 * l + 1)
@@ -170,4 +170,8 @@ class RadialTables:
         return sbt_t(self.beta_l[i], self.beta_g[i], self.beta_r[i], self.beta_w[i], q)
 
     def core_of_g(self, q: torch.Tensor) -> torch.Tensor:
+        # No NLCC for this species: match the numpy contract and return zeros
+        # rather than raising, so callers need not special-case core_rho=None.
+        if self.core_g is None:
+            return torch.zeros_like(q)
         return sbt_t(0, self.core_g, self.r, self.w, q)

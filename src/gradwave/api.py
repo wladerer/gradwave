@@ -13,29 +13,45 @@ import datetime
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from gradwave.core.xc.base import XCFunctional
 from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.core.xc.pbe import PBE
+from gradwave.core.xc.spin import LSDA_PW92, SpinPBE
 from gradwave.inputs import Input
 
 XC_REGISTRY: dict[str, type[XCFunctional]] = {"lda": LDA_PW92, "pbe": PBE}
+SPIN_XC_REGISTRY: dict[str, type] = {"lda": LSDA_PW92, "pbe": SpinPBE}
 _OCC_TOL = 1e-6
+# the collinear/NC solvers build a fixed-length Pulay history and need an int
+# (None is not accepted, unlike the USPP path); this names the default the api
+# forwards, matching the per-scheme default those solvers use internally
+_DEFAULT_MIXING_HISTORY = 8
+# UPFs are static for a run; cache by path so build_summary / run_scf /
+# _error_estimate_block / _parameters_block parse each pseudo once, not 3-4×
+_UPF_CACHE: dict[str, object] = {}
 
 
 def _load_upf(path):
     """Parse a UPF of either family (NC via upf.py, USPP/PAW via
-    upf_paw.py — same detection the ASE calculator uses)."""
+    upf_paw.py — same detection the ASE calculator uses), cached by path."""
+    key = str(path)
+    cached = _UPF_CACHE.get(key)
+    if cached is not None:
+        return cached
     from gradwave.pseudo.upf import parse_upf
 
     try:
-        return parse_upf(path)
+        upf = parse_upf(path)
     except ValueError as err:
         if "norm-conserving" not in str(err):
             raise
         from gradwave.pseudo.upf_paw import parse_upf_paw
 
-        return parse_upf_paw(path)
+        upf = parse_upf_paw(path)
+    _UPF_CACHE[key] = upf
+    return upf
 
 
 def _species_upfs(inp: Input):
@@ -84,9 +100,7 @@ def build_system(inp: Input):
 
 
 def _spin_setup(inp: Input):
-    from gradwave.core.xc.spin import LSDA_PW92, SpinPBE
-
-    xc = {"lda": LSDA_PW92, "pbe": SpinPBE}[inp.xc]()
+    xc = SPIN_XC_REGISTRY[inp.xc]()
     symbols = inp.atoms.get_chemical_symbols()
     species = sorted(set(symbols))
     mags = [float((inp.start_mag or {}).get(s, 0.5)) for s in species]
@@ -134,7 +148,8 @@ def run_scf(inp: Input, system=None, verbose: bool = True):
     from gradwave.scf.loop import scf
 
     return scf(system, xc, kerker=kerker, start_from=start_from,
-               mixing_history=inp.scf.mixing.history or 8, **common)
+               mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
+               **common)
 
 
 def _run_scf_noncollinear(inp: Input, system, verbose: bool):
@@ -145,10 +160,9 @@ def _run_scf_noncollinear(inp: Input, system, verbose: bool):
     import torch
 
     from gradwave.core.xc.noncollinear import NoncollinearXC
-    from gradwave.core.xc.spin import LSDA_PW92, SpinPBE
     from gradwave.scf.noncollinear import scf_noncollinear
 
-    xc = NoncollinearXC({"lda": LSDA_PW92, "pbe": SpinPBE}[inp.xc]())
+    xc = NoncollinearXC(SPIN_XC_REGISTRY[inp.xc]())
 
     if inp.restart is not None:
         from gradwave.checkpoint import load_checkpoint, nc_mag_seed
@@ -169,7 +183,7 @@ def _run_scf_noncollinear(inp: Input, system, verbose: bool):
         smearing=smtype, width=inp.smearing.width,
         max_iter=inp.scf.max_iter, etol=inp.scf.etol, rhotol=inp.scf.rhotol,
         mixing_alpha=inp.scf.mixing.alpha,
-        mixing_history=inp.scf.mixing.history or 8,
+        mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
         diago_tol=inp.scf.diago_tol, verbose=verbose,
     )
 
@@ -199,6 +213,7 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
                   extra: dict | None = None) -> dict:
     """The unified machine-readable summary for a task run."""
     from gradwave import __version__
+    from gradwave.checkpoint import energies_eV_dict
 
     system = _get(res, "system")
     e = _get(res, "energies")
@@ -233,12 +248,7 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
         else float(_get(res, "fermi")),
         "gap_eV": None if occ is None else _gap(eig.tolist(), occ.tolist(), nspin),
         "energies_eV": {
-            "kinetic": float(e.kinetic), "hartree": float(e.hartree),
-            "xc": float(e.xc), "local": float(e.local),
-            "nonlocal": float(e.nonlocal_), "ewald": float(e.ewald),
-            "smearing": float(e.smearing), "hubbard": float(e.hubbard),
-            "onecenter": float(e.onecenter), "total": float(e.total),
-            "free_energy": float(e.free_energy),
+            **energies_eV_dict(e),
             "e0": float(0.5 * (e.total + e.free_energy)),
         },
         "trace": trace,
@@ -287,32 +297,6 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
     return summary
 
 
-def result_summary(res) -> dict:
-    """Backward-compatible flat summary of a bare SCF result (no Input
-    context — prefer build_summary for file output)."""
-    e = _get(res, "energies")
-    return {
-        "converged": bool(_get(res, "converged")),
-        "n_iter": int(_get(res, "n_iter")),
-        "energy_eV": float(e.total),
-        "free_energy_eV": float(e.free_energy),
-        "e0_eV": float(0.5 * (e.total + e.free_energy)),
-        "fermi_eV": None if _get(res, "fermi") is None
-        else float(_get(res, "fermi")),
-        "nspin": int(_get(res, "nspin", 1) or 1),
-        "total_magnetization_muB": float(_get(res, "mag_total", 0.0) or 0.0),
-        "absolute_magnetization_muB": float(_get(res, "mag_abs", 0.0) or 0.0),
-        "terms_eV": {
-            "kinetic": float(e.kinetic), "hartree": float(e.hartree),
-            "xc": float(e.xc), "local": float(e.local),
-            "nonlocal": float(e.nonlocal_), "ewald": float(e.ewald),
-            "smearing": float(e.smearing),
-        },
-        "eigenvalues_eV": _get(res, "eigenvalues").tolist(),
-        "occupations": _get(res, "occupations").tolist(),
-    }
-
-
 def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object, list]:
     """Relax with ASE, returning (relax block, final atoms, per-step ASE frames).
 
@@ -323,18 +307,30 @@ def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object, list]:
     from gradwave.calculator import GradWave
 
     atoms = inp.atoms.copy()
+    kerker = inp.scf.mixing.kerker
+    kerker = None if kerker == "auto" else bool(kerker)
     atoms.calc = GradWave(
         ecut=inp.ecut,
         pseudopotentials={s: str(inp.pseudo_dir / f)
                           for s, f in inp.pseudo_map.items()},
         xc=inp.xc,
+        ecutrho=inp.ecutrho,
         kpts=inp.kpoints.mesh,
         kshift=inp.kpoints.shift,
         smearing=inp.smearing.type,
         width=inp.smearing.width,
         nbands=inp.nbands,
+        use_symmetry=inp.symmetry,
+        nspin=inp.nspin,
+        max_iter=inp.scf.max_iter,
         etol=inp.scf.etol,
         rhotol=inp.scf.rhotol,
+        diago_tol=inp.scf.diago_tol,
+        mixing_scheme=inp.scf.mixing.scheme,
+        mixing_alpha=inp.scf.mixing.alpha,
+        mixing_history=inp.scf.mixing.history,
+        mixing_kerker=kerker,
+        device=inp.device,
         verbose=False,
     )
     opt_cls = {"fire": FIRE, "bfgs": BFGS}[inp.relax.optimizer]
@@ -449,9 +445,8 @@ def _error_estimate_xc(inp):
     """
     if inp.noncollinear:
         from gradwave.core.xc.noncollinear import NoncollinearXC
-        from gradwave.core.xc.spin import LSDA_PW92, SpinPBE
 
-        return NoncollinearXC({"lda": LSDA_PW92, "pbe": SpinPBE}[inp.xc]())
+        return NoncollinearXC(SPIN_XC_REGISTRY[inp.xc]())
     return _spin_setup(inp)[0] if inp.nspin == 2 else XC_REGISTRY[inp.xc]()
 
 
@@ -518,8 +513,8 @@ def _error_estimate_block(res, inp) -> dict:
             fe = estimate_force_error(res, err, xc=xc).norm(dim=1)
             block["force_error_max_eV_ang"] = float(fe.max())
             block["force_error_rms_eV_ang"] = float((fe ** 2).mean().sqrt())
-        except NotImplementedError:
-            pass
+        except NotImplementedError as exc:
+            block["force_error"] = {"available": False, "reason": str(exc)}
     # band-gap error (insulators; NC/USPP/PAW now covered, skipped for metals).
     try:
         eig_kw = dict(smearing=nc_scheme, width=inp.smearing.width) if is_nc else {}
@@ -536,8 +531,8 @@ def _error_estimate_block(res, inp) -> dict:
         block["gap_eV"] = gap["gap_eV"]
         block["gap_extrapolated_eV"] = gap["gap_extrapolated_eV"]
         block["dgap_eV"] = gap["dgap_eV"]
-    except (NotImplementedError, ValueError):
-        pass
+    except (NotImplementedError, ValueError) as exc:
+        block["gap_error"] = {"available": False, "reason": str(exc)}
     # other numerical convergence errors (SCF self-consistency, smearing). These
     # are separate axes from the basis-set error; k-point sampling needs a mesh
     # sweep (estimate_kpoint_error) and is not reachable from one run.
@@ -560,8 +555,12 @@ def _error_estimate_block(res, inp) -> dict:
         except (NotImplementedError, ValueError):
             pass
     try:
+        # estimate_smearing_error reads res.energies; a USPP/PAW result is a
+        # plain dict, so pass a shim carrying just the energy breakdown it needs
+        sme_res = res if not isinstance(res, dict) else SimpleNamespace(
+            energies=res["energies"])
         sme = estimate_smearing_error(
-            res, scheme=nc_scheme if is_nc else inp.smearing.type,
+            sme_res, scheme=nc_scheme if is_nc else inp.smearing.type,
             width=inp.smearing.width)
         block["smearing"] = {
             "scheme": sme.scheme,
@@ -570,8 +569,11 @@ def _error_estimate_block(res, inp) -> dict:
             "residual_bound_eV": sme.half_width,
             "note": sme.note,
         }
-    except (NotImplementedError, ValueError):
-        pass
+    except (NotImplementedError, ValueError) as exc:
+        # record the reason under a distinct key: the human report reads
+        # block["smearing"] eagerly, so an available:False entry there would
+        # break it (a fixed-occupation run raises here every time)
+        block["smearing_error"] = {"available": False, "reason": str(exc)}
     return block
 
 
@@ -615,13 +617,12 @@ def run_magnetism(inp: Input, verbose: bool = True):
     non-collinear XC from inp.xc, runs `characterize_magnetism`, and returns the
     MagneticReport."""
     from gradwave.core.xc.noncollinear import NoncollinearXC
-    from gradwave.core.xc.spin import LSDA_PW92, SpinPBE
     from gradwave.postscf.magnetism import characterize_magnetism
 
     system = build_system(inp)
     if inp.device != "cpu":
         system = system.to(inp.device)
-    xc = NoncollinearXC({"lda": LSDA_PW92, "pbe": SpinPBE}[inp.xc]())
+    xc = NoncollinearXC(SPIN_XC_REGISTRY[inp.xc]())
     m = inp.magnetism
     smtype = inp.smearing.type if inp.smearing.type != "none" else "gaussian"
     return characterize_magnetism(
@@ -659,7 +660,7 @@ def run(inp: Input, verbose: bool = True) -> dict:
                          timespec="seconds")},
             "task": "relax",
             "structure": _structure_block(inp),
-            "parameters": _relax_parameters(inp),
+            "parameters": _parameters_block(inp),
             "relax": relax,
             "runtime_s": round(time.time() - t0, 2),
         }
@@ -690,7 +691,7 @@ def run(inp: Input, verbose: bool = True) -> dict:
                          timespec="seconds")},
             "task": "magnetism",
             "structure": _structure_block(inp),
-            "parameters": _relax_parameters(inp),
+            "parameters": _parameters_block(inp),
             "magnetism": {
                 "ordering": report.ordering,
                 "total_moment_muB": round(report.total_moment, 4),
@@ -706,7 +707,8 @@ def run(inp: Input, verbose: bool = True) -> dict:
             "runtime_s": round(time.time() - t0, 2),
         }
     else:
-        raise ValueError(inp.task)
+        raise ValueError(
+            f"unknown task {inp.task!r} (scf | relax | bands | magnetism)")
 
     outdir = Path(inp.output_dir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -744,20 +746,33 @@ def _structure_block(inp: Input) -> dict:
     }
     try:
         import spglib
-
+    except ImportError:
+        return block
+    try:
         ds = spglib.get_symmetry_dataset(
             (inp.atoms.cell.array, inp.atoms.get_scaled_positions(),
              inp.atoms.get_atomic_numbers()), symprec=1e-5)
         block["spacegroup"] = f"{ds.international} ({ds.number})"
-    except Exception:
+    except (TypeError, AttributeError, spglib.SpglibError):
+        # a degenerate/near-singular cell makes spglib raise or return None
+        # (AttributeError on the None dataset); drop the field, don't swallow
+        # unrelated bugs
         pass
     return block
 
 
-def _relax_parameters(inp: Input) -> dict:
+def _parameters_block(inp: Input) -> dict:
+    """Parameters block for the tasks written without a materialized System
+    (relax, magnetism). The magnetism run is always the non-collinear/spinor
+    formalism (matching build_summary's convention); relax follows the
+    pseudopotential family."""
     species, upfs, _soa = _species_upfs(inp)
+    if inp.task == "magnetism":
+        formalism = "noncollinear"
+    else:
+        formalism = "uspp/paw" if _is_uspp(upfs) else "nc"
     return {
-        "formalism": "uspp/paw" if _is_uspp(upfs) else "nc",
+        "formalism": formalism,
         "xc": inp.xc,
         "ecut_eV": float(inp.ecut),
         "ecutrho_eV": None,

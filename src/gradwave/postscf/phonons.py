@@ -19,12 +19,25 @@ spglib finds at symprec.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import torch
 
+from gradwave.constants import HBAR2_2M
 from gradwave.symmetry import SpaceGroup, find_spacegroup
 
 _RANK_TOL = 1e-8
+
+# ω[cm⁻¹] = _SQRT_EV_AMU_ANG2_TO_CM1 · sign(λ)·√|λ| for the mass-weighted
+# eigenvalues λ [eV/(amu·Å²)]. Derived from the shared plane-wave kinetic
+# prefactor HBAR2_2M = ħ²/2mₑ [eV·Å²]:  (ħω)² = 2·HBAR2_2M·(mₑ/u)·λ  [eV²],
+# so ħω[eV] = √(2·HBAR2_2M·mₑ/u)·√λ, then eV→cm⁻¹ via e/(hc). The mₑ/u ratio
+# and e/(hc) are CODATA-2018 (not in gradwave.constants, which only fixes the
+# eV/Å unit system). Value matches the older explicit-SI form to ~13 digits.
+_ME_OVER_U = 5.48579909065e-4        # electron mass / atomic mass unit
+_EV_TO_CM1 = 8065.54393734921        # 1 eV in cm⁻¹  = e/(h·c)
+_SQRT_EV_AMU_ANG2_TO_CM1 = math.sqrt(2.0 * HBAR2_2M * _ME_OVER_U) * _EV_TO_CM1
 
 
 class HessianSymmetry:
@@ -155,12 +168,8 @@ def gamma_hessian(res: dict, xc, *, response_kw=None,
 def gamma_frequencies(hess: np.ndarray, masses_amu) -> np.ndarray:
     """Frequencies [cm⁻¹] (negative = imaginary) from an (na,3,na,3)
     Hessian [eV/Å²] and per-atom masses [amu]."""
-    ev_a2 = 1.602176634e-19 / 1e-20
-    amu = 1.66053906660e-27
-    c_cm = 2.99792458e10
     m = np.asarray(masses_amu, dtype=float)
     na = len(m)
     d = hess / np.sqrt(m[:, None, None, None] * m[None, None, :, None])
     w2 = np.linalg.eigvalsh(d.reshape(3 * na, 3 * na))
-    w2_si = w2 * ev_a2 / amu
-    return np.sqrt(np.abs(w2_si)) * np.sign(w2) / (2 * np.pi * c_cm)
+    return np.sign(w2) * _SQRT_EV_AMU_ANG2_TO_CM1 * np.sqrt(np.abs(w2))

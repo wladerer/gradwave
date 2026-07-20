@@ -2,7 +2,7 @@
 
 Mixing operates on ρ(G) over the density sphere (complex vectors). The G=0
 component is pinned (both ρ_in and ρ_out integrate to N_e, so the residual
-there is zero by construction — asserted).
+there is zero by construction — checked).
 
 Kerker: R̃(G) = R(G)·G²/(G² + q0²) suppresses long-wavelength charge
 sloshing in metals; q0 default 1.1 Å⁻¹ (~0.58 bohr⁻¹). Off for insulators
@@ -72,6 +72,13 @@ class _DampedMixerBase:
             out = out * self.step_scale
         return out
 
+    @property
+    def block_mult(self):
+        """Per-block adaptive-damping multipliers {block_id: multiplier} for
+        the driver's result dict, or None when this mixer has no per-block
+        adaptation (only PulayMixer with adapt_blocks tracks them)."""
+        return None
+
 
 class BroydenMixer(_DampedMixerBase):
     """Limited-memory Broyden's second method (QE mixing_mode='plain').
@@ -112,8 +119,8 @@ class BroydenMixer(_DampedMixerBase):
 
     def step(self, rho_in: torch.Tensor, rho_out: torch.Tensor) -> torch.Tensor:
         res = rho_out - rho_in
-        if self.check_g0:
-            assert res[0].abs() < 1e-8, "G=0 residual nonzero"
+        if self.check_g0 and res[0].abs() >= 1e-8:
+            raise ValueError("G=0 residual nonzero")
         if self._prev_in is not None:
             s = rho_in - self._prev_in
             y = res - self._prev_res
@@ -178,8 +185,8 @@ class JohnsonMixer(_DampedMixerBase):
 
     def step(self, rho_in: torch.Tensor, rho_out: torch.Tensor) -> torch.Tensor:
         f = rho_out - rho_in
-        if self.check_g0:
-            assert f[0].abs() < 1e-8, "G=0 residual nonzero"
+        if self.check_g0 and f[0].abs() >= 1e-8:
+            raise ValueError("G=0 residual nonzero")
         if self._prev_in is not None:
             df = f - self._prev_f
             nrm = float(torch.linalg.norm(df))
@@ -245,6 +252,10 @@ class PulayMixer(_DampedMixerBase):
         if self._mult_vec is not None:
             out = out * self._mult_vec
         return out
+
+    @property
+    def block_mult(self):
+        return dict(self._block_mult) if self._block_mult else None
 
     def _adapt(self, res: torch.Tensor):
         """Per-block gain tracking. A block whose residual grows across
@@ -327,8 +338,8 @@ class PulayMixer(_DampedMixerBase):
     def step(self, rho_in: torch.Tensor, rho_out: torch.Tensor) -> torch.Tensor:
         """Next ρ_in(G) from the current (ρ_in, ρ_out) pair."""
         res = rho_out - rho_in
-        if self.check_g0:
-            assert res[0].abs() < 1e-8, "G=0 residual nonzero — density not normalized"
+        if self.check_g0 and res[0].abs() >= 1e-8:
+            raise ValueError("G=0 residual nonzero — density not normalized")
         if self._block_masks is not None:
             self._adapt(res)
 
@@ -378,16 +389,15 @@ class PulayMixer(_DampedMixerBase):
             rhs[m] = 1.0
 
             # residual ill-conditioning → drop the OLDEST entry and retry
-            # (a full reset discards curvature the next steps need)
-            try:
-                cond = torch.linalg.cond(bn)
-                if not torch.isfinite(cond) or cond > 1e14:
-                    raise RuntimeError
-                coeff = torch.linalg.solve(b, rhs)[:m] / d
-            except RuntimeError:
+            # (a full reset discards curvature the next steps need). A flag
+            # (not raise/except) so a genuine linalg.solve failure below is
+            # not swallowed as ill-conditioning.
+            cond = torch.linalg.cond(bn)
+            if not torch.isfinite(cond) or cond > 1e14:
                 self._rho_in.pop(0)
                 self._res.pop(0)
                 continue
+            coeff = torch.linalg.solve(b, rhs)[:m] / d
             break
 
         # Σc=1 bounds nothing: near-parallel early residuals admit large ±c

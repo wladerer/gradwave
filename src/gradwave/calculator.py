@@ -23,7 +23,6 @@ from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.core.xc.pbe import PBE
 from gradwave.dtypes import RDTYPE
 from gradwave.postscf.forces import forces as hf_forces
-from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
 
 _XC = {"lda": LDA_PW92, "pbe": PBE}
@@ -45,8 +44,15 @@ class GradWave(Calculator):
         width: float = 0.1,
         nbands: int | None = None,
         use_symmetry: bool = True,
+        nspin: int = 1,  # 1 only: nspin=2 forces are not implemented (see below)
+        max_iter: int = 100,
         etol: float = 1e-8,
         rhotol: float = 1e-7,
+        diago_tol: float = 1e-9,
+        mixing_scheme: str = "pulay",  # USPP/PAW path only (NC scf is Pulay)
+        mixing_alpha: float = 0.7,
+        mixing_history: int | None = None,  # None → solver's per-scheme default
+        mixing_kerker=None,  # None → auto (on iff smeared)
         device: str = "cpu",
         compile_xc: bool = False,
         eigensolver: str = "davidson",  # davidson | chebyshev (NC path only)
@@ -55,11 +61,23 @@ class GradWave(Calculator):
         **kwargs,
     ):
         super().__init__(**kwargs)
+        if nspin != 1:
+            # forces/stress (the reason this calculator exists — relaxation)
+            # have no collinear-spin implementation yet, so honoring nspin=2
+            # here would silently fall over inside hf_forces
+            raise ValueError(
+                "GradWave calculator supports nspin=1 only; collinear-spin "
+                "forces are not implemented (run task: scf via the api for a "
+                "single-point nspin=2 energy)")
         self.parameters.update(
             dict(ecut=ecut, ecutrho=ecutrho, xc=xc, kpts=tuple(kpts),
                  kshift=tuple(kshift), smearing=smearing, width=width,
-                 nbands=nbands, use_symmetry=use_symmetry, etol=etol,
-                 rhotol=rhotol, eigensolver=eigensolver, precond=precond)
+                 nbands=nbands, use_symmetry=use_symmetry, nspin=nspin,
+                 max_iter=max_iter, etol=etol, rhotol=rhotol,
+                 diago_tol=diago_tol, mixing_scheme=mixing_scheme,
+                 mixing_alpha=mixing_alpha, mixing_history=mixing_history,
+                 mixing_kerker=mixing_kerker, eigensolver=eigensolver,
+                 precond=precond)
         )
         self._pseudo_paths = dict(pseudopotentials)
         self._upf_cache: dict[str, object] = {}
@@ -82,25 +100,18 @@ class GradWave(Calculator):
         return xc
 
     def _upf(self, symbol):
+        # shared loader (NC / USPP-PAW detection) lives in api; keep the
+        # per-instance cache so a relaxation parses each pseudo once
         if symbol not in self._upf_cache:
-            path = self._pseudo_paths[symbol]
-            try:
-                self._upf_cache[symbol] = parse_upf(path)
-            except ValueError as err:
-                if "norm-conserving" not in str(err):
-                    raise
-                from gradwave.pseudo.upf_paw import parse_upf_paw
+            from gradwave.api import _load_upf
 
-                self._upf_cache[symbol] = parse_upf_paw(path)
+            self._upf_cache[symbol] = _load_upf(self._pseudo_paths[symbol])
         return self._upf_cache[symbol]
 
     def _is_uspp(self, species):
-        from gradwave.pseudo.upf_paw import PAWData
+        from gradwave.api import _is_uspp
 
-        kinds = {isinstance(self._upf(s), PAWData) for s in species}
-        if len(kinds) > 1:
-            raise ValueError("mixing NC and USPP/PAW pseudopotentials is not supported")
-        return kinds.pop()
+        return _is_uspp([self._upf(s) for s in species])
 
     def _get_system(self, atoms):
         symbols = atoms.get_chemical_symbols()
@@ -169,12 +180,18 @@ class GradWave(Calculator):
             self._calculate_uspp(properties)
             return
         system = self._get_system(self.atoms)
+        # NC scf takes an int mixing_history (None isn't accepted); omit it so
+        # the solver's own default stands when the user left it unset
+        mix_kw = ({} if p["mixing_history"] is None
+                  else {"mixing_history": p["mixing_history"]})
         res = scf(
             system, self._make_xc(),
             smearing=p["smearing"], width=p["width"],
-            etol=p["etol"], rhotol=p["rhotol"], verbose=self._verbose,
+            max_iter=p["max_iter"], etol=p["etol"], rhotol=p["rhotol"],
+            mixing_alpha=p["mixing_alpha"], kerker=p["mixing_kerker"],
+            diago_tol=p["diago_tol"], verbose=self._verbose,
             eigensolver=p["eigensolver"], precond=p["precond"],
-            start_from=self._warm_start(system),
+            start_from=self._warm_start(system), **mix_kw,
         )
         if not res.converged:
             raise RuntimeError("gradwave SCF did not converge")
@@ -232,9 +249,15 @@ class GradWave(Calculator):
                 "eigensolver='chebyshev' is norm-conserving only; the USPP/PAW "
                 "generalized S-metric problem is not supported yet")
         system = self._get_uspp_system(self.atoms)
+        # scf_uspp takes mixing_history=None natively (per-scheme default)
         res = scf_uspp(system, self._make_xc(), smearing=p["smearing"],
-                       width=p["width"], etol=p["etol"], rhotol=p["rhotol"],
-                       precond=p["precond"], verbose=self._verbose,
+                       width=p["width"], max_iter=p["max_iter"],
+                       etol=p["etol"], rhotol=p["rhotol"],
+                       diago_tol=p["diago_tol"], mixing_scheme=p["mixing_scheme"],
+                       mixing_alpha=p["mixing_alpha"],
+                       mixing_history=p["mixing_history"],
+                       mixing_kerker=p["mixing_kerker"], precond=p["precond"],
+                       verbose=self._verbose,
                        start_from=self._warm_start(system))
         if not res["converged"]:
             raise RuntimeError("gradwave USPP SCF did not converge")

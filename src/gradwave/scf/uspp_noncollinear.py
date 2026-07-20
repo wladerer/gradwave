@@ -51,7 +51,7 @@ from gradwave.scf.paw_noncollinear import (
     onsite_nc_energy_and_ddd,
     spinor_onsite_becsum,
 )
-from gradwave.scf.uspp_loop import _build_iter_ops
+from gradwave.scf.uspp_loop import _build_iter_ops, _seed_becsum, _species_atoms
 from gradwave.scf.uspp_setup import USPPSystem
 
 
@@ -217,16 +217,12 @@ def scf_uspp_noncollinear(
                     None, atom_scale=[float(mag_vec_init[a, i]) for a in range(na)])
         for i in range(3)]).to(dev)
     bec_chan = [[] for _ in range(4)]      # [n, mx, my, mz] per atom, real (nm, nm)
-    for a, sp in enumerate(system.species_of_atom):
-        paw = system.paws[sp]
-        nm = sum(2 * b.l + 1 for b in paw.betas)
-        n0 = torch.zeros(nm, nm, dtype=RDTYPE, device=dev)
-        if paw.paw_occ is not None:
-            col = 0
-            for i, b in enumerate(paw.betas):
-                for _ in range(2 * b.l + 1):
-                    n0[col, col] = paw.paw_occ[i] / (2 * b.l + 1)
-                    col += 1
+    # the n-channel is the same reference atomic-occupation diagonal the
+    # collinear USPP path seeds (spin-summed, i.e. the nspin=1 becsum); reuse
+    # _seed_becsum for it and direct the moment onto the m-channels
+    n_seed = _seed_becsum(system, 1, None, [None], dev)[0]
+    for a in range(na):
+        n0 = n_seed[a].real
         d = mag_vec_init[a]
         scale = min(float(d.norm()), 0.9)
         dirv = d / d.norm() if float(d.norm()) > 1e-12 else torch.zeros(3)
@@ -289,9 +285,7 @@ def scf_uspp_noncollinear(
     # atoms grouped by species: the per-iteration ∫(v,B⃗)Q and augmentation
     # contractions batch over the atom axis (one einsum per species instead
     # of a Python loop of tiny kernels per atom per channel)
-    sp_atoms: dict[int, list[int]] = {}
-    for a, sp in enumerate(system.species_of_atom):
-        sp_atoms.setdefault(sp, []).append(a)
+    sp_atoms = _species_atoms(system)
     smooth_geom = None
     if system.smooth_shape is not None:
         ns_smooth = (system.smooth_shape[0] * system.smooth_shape[1]
@@ -440,8 +434,9 @@ def scf_uspp_noncollinear(
                                     * grid.n_points, dim=(-3, -2, -1)).real
 
         n_tot = float(rho_out.sum()) * vol / grid.n_points
-        assert abs(n_tot - system.n_electrons) < 1e-5, (
-            f"charge not conserved: {n_tot:.8f} vs {system.n_electrons}")
+        if abs(n_tot - system.n_electrons) >= 1e-5:
+            raise ValueError(
+                f"charge not conserved: {n_tot:.8f} vs {system.n_electrons}")
 
         # ---- energies ----
         rho_g_out = r_to_g(rho_out.to(CDTYPE))

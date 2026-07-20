@@ -19,6 +19,12 @@ from gradwave.grids import build_gsphere
 from gradwave.pseudo.kb import beta_form_factors
 from gradwave.scf.loop import SCFResult
 
+# A state counts as partially occupied (⇒ metal) when its occupation lands
+# meaningfully inside (0, 2). One consistent tolerance for both the metal gate
+# and the VBM mask; smeared metals keep states far from E_F pinned at 0/2 to
+# machine precision, so a tighter gate misreads them as insulating.
+_OCC_TOL = 1e-4
+
 
 @dataclass
 class BandStructure:
@@ -85,12 +91,16 @@ def band_structure(
             print(f"  band chunk {lo}-{hi - 1}/{len(kpts) - 1}  "
                   f"max|res| = {float(out.residual_norms.max()):.1e}", flush=True)
 
-    # reference energy: Fermi (smeared) or VBM (highest eigenvalue with occ > 0)
-    if float(res.occupations.min()) < 1e-12 and float(res.occupations.max()) > 1.999999:
-        occ_mask = res.occupations > 1e-6
-        reference = float(res.eigenvalues[occ_mask].max())
-    else:
+    # reference energy: Fermi (metal) or VBM (fixed/insulating occupations).
+    # SCFResult carries no smearing scheme/width, so decide from the
+    # occupations themselves: a metal has at least one partially-filled state
+    # (occ in [tol, 2-tol]); an insulator's occupations are all ~0 or ~2.
+    occ = res.occupations
+    is_metal = bool(((occ > _OCC_TOL) & (occ < 2.0 - _OCC_TOL)).any())
+    if is_metal:
         reference = res.fermi
+    else:
+        reference = float(res.eigenvalues[occ > _OCC_TOL].max())
     return BandStructure(kpts_frac=np.asarray(kpts_frac), eigenvalues=eigs, reference=reference)
 
 

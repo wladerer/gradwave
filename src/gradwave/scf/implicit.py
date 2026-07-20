@@ -99,14 +99,25 @@ def _sternheimer(h: HamiltonianK, c_occ, eps_occ, w_r, alpha: float, tol: float,
     for _ in range(max_iter):
         ap = a_apply(p)
         pap = torch.einsum("bg,bg->b", p.conj(), ap).real
-        alpha_cg = rz / torch.clamp(pap, min=1e-300)
+        p2 = torch.einsum("bg,bg->b", p.conj(), p).real
+        # per-band breakdown guard (mirrors the USPP twin in
+        # postscf/uspp_implicit.py): freeze bands whose curvature is
+        # non-positive or non-finite — their p is zeroed, so they stay
+        # frozen. The projected operator is positive definite on the
+        # conduction space, so this only fires at the round-off floor after
+        # stagnation, where an unguarded pap ≤ 0 gives a 1e300 step → Inf → NaN.
+        ok = torch.isfinite(pap) & (pap > 1e-30 * p2.clamp_min(1e-300))
+        if not bool(ok.any()):
+            break
+        alpha_cg = torch.where(ok, rz / pap.clamp_min(1e-300), torch.zeros_like(rz))
         x = x + alpha_cg[:, None] * p
         r = r - alpha_cg[:, None] * ap
         if float(torch.linalg.norm(r, dim=1).max()) < tol:
             break
         z = teter(r, t_g, t_band)
         rz_new = torch.einsum("bg,bg->b", r.conj(), z).real
-        p = z + (rz_new / torch.clamp(rz, min=1e-300))[:, None] * p
+        beta = torch.where(ok, rz_new / rz.clamp_min(1e-300), torch.zeros_like(rz))
+        p = torch.where(ok[:, None], z + beta[:, None] * p, torch.zeros_like(p))
         rz = rz_new
     return p_c(x)
 
@@ -119,7 +130,7 @@ def apply_chi0(res: SCFResult, w_r: torch.Tensor, tol: float = 1e-8,
     system = res.system
     grid = system.grid
     hs = _hamiltonians(res)
-    dr = torch.zeros(grid.shape, dtype=RDTYPE)
+    dr = torch.zeros(grid.shape, dtype=RDTYPE, device=res.v_eff.device)
     for ik, h in enumerate(hs):
         c_occ, eps_occ = _occupied(res, ik)
         gap_shift = 2.0 * float(eps_occ.max() - eps_occ.min()) + 10.0

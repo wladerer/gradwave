@@ -1,9 +1,10 @@
 """Monkhorst–Pack k-meshes with time-reversal reduction.
 
-Full spglib symmetry reduction is a later milestone; time reversal (k ≡ −k
-mod G, valid without spin-orbit) already halves most meshes. Weights sum
-to 1. QE 'shift' convention: shift_i ∈ {0, 1} displaces the mesh by half a
-grid step along axis i.
+Full spglib space-group reduction lives in symmetry.reduce_mesh; this module
+does the lighter time-reversal reduction (k ≡ −k mod G, valid without
+spin-orbit) which already halves most meshes. Weights sum to 1. QE 'shift'
+convention: shift_i ∈ {0, 1} displaces the mesh by half a grid step along
+axis i.
 """
 
 from __future__ import annotations

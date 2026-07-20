@@ -100,7 +100,7 @@ class DiscretizationError:
     """
 
     drho: torch.Tensor           # (n1,n2,n3) real, estimated density error
-    drho_first_order: torch.Tensor   # drho before any Dyson dressing
+    drho_first_order: torch.Tensor   # pre-Dyson drho (== drho on USPP/spinor, no dressing there)
     denergy: float               # estimated total-energy error [eV] (2nd order, < 0)
     dpsi: list                   # per-k (n_occ, npw_large) complex, orbital correction
     psi_large: list              # per-k (n_occ, npw_large) complex, occ orbitals on large sphere
@@ -224,13 +224,22 @@ def estimate_density_error(
         ecut_large <= 4*ecut so the enlarged sphere fits the density FFT box.
     dyson : bool
         If True, dress the first-order estimate with the coarse-space dielectric
-        response (needs ``xc``).
+        response (needs ``xc``). Only implemented on the norm-conserving
+        (``SCFResult``) path; requesting it on the USPP/PAW or spinor paths
+        raises ``NotImplementedError`` (the ``dyson_*`` tuning kwargs are inert
+        there).
     """
     if isinstance(res, dict):
+        if dyson:
+            raise NotImplementedError(
+                "Dyson dressing not implemented for the USPP/spinor path")
         return _estimate_density_error_uspp(
             res, ecut_large=ecut_large, factor=factor, xc=xc, verbose=verbose,
         )
     if _is_ncresult(res):
+        if dyson:
+            raise NotImplementedError(
+                "Dyson dressing not implemented for the USPP/spinor path")
         if xc is None:
             raise ValueError("non-collinear density error requires xc (the "
                              "NoncollinearXC used for the run)")
@@ -382,7 +391,7 @@ def _uspp_enlarged_hks(system, k_frac, ecut_large, v_eff, dscr_full, device):
     return sph, hs, pd, p
 
 
-def _aug_density_from_becsum(system, becsum, device):
+def _aug_density_from_becsum(system, becsum):
     """Augmentation density on the real grid from a per-atom becsum list."""
     return aug_density_from_becsum(system, becsum, screen_phase(system))
 
@@ -505,9 +514,8 @@ def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
     dbecsum_out = []
     for isp_i in range(len(spins)):
         dbec = [0.5 * (m + m.conj().T) for m in dbecsum_s[isp_i]]
-        if system.becsum_sym is not None:
-            dbec = system.becsum_sym.apply(dbec)
-        drho_aug = drho_aug + _aug_density_from_becsum(system, dbec, dev)
+        # becsum symmetrization is gated above (sym is None here, so becsum_sym is too)
+        drho_aug = drho_aug + _aug_density_from_becsum(system, dbec)
         dbecsum_out.append(dbec)
     drho = drho_smooth + drho_aug
 
@@ -1044,8 +1052,6 @@ def _spinor_complement(res, *, ecut_large, factor, xc, smearing, width):
                                system.vloc_tables, grid.g_cart, vol)
     vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
     v_r = v_h + v_xc + vloc_r
-    if float(b_xc.abs().max()) == 0.0:
-        b_xc = torch.zeros_like(b_xc)
 
     bk0 = system.batch
     m0 = bk0.npw_max

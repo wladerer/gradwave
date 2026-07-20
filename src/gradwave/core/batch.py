@@ -22,6 +22,11 @@ import torch
 from gradwave.constants import HBAR2_2M
 from gradwave.dtypes import CDTYPE, RDTYPE
 
+# GPU dense-grid temporary budget [bytes]: bands are chunked so the ~4 dense-box
+# temporaries the apply/density chain holds at once stay under this. Sizes a
+# band chunk as budget / (elem_bytes · n_grid · nk). CPU paths do not chunk.
+_GPU_DENSE_BUDGET_BYTES = 4e8
+
 
 @dataclass
 class BatchedK:
@@ -73,7 +78,8 @@ def build_batched(spheres, proj_data, device=None) -> BatchedK:
         proj_phase_free=pf,
         proj_atom_index=proj_data[0].atom_index.to(device) if nproj else
         torch.zeros(0, dtype=torch.int64, device=device),
-        dij_full=proj_data[0].dij_full.to(device),
+        dij_full=proj_data[0].dij_full.to(device) if nproj else
+        torch.zeros((0, 0), dtype=RDTYPE, device=device),
     )
 
 
@@ -189,7 +195,7 @@ class BatchedHamiltonian:
         16 B), giving larger — and thus more efficient — batched FFTs."""
         if device.type != "cuda":
             return 1_000_000
-        return max(1, int(4e8 / (elem_bytes * self.n * max(nk, 1))))
+        return max(1, int(_GPU_DENSE_BUDGET_BYTES / (elem_bytes * self.n * max(nk, 1))))
 
     def apply(self, c: torch.Tensor) -> torch.Tensor:
         """(nk, nb, npw_max) → H c, mask preserved. Chunked over bands to
@@ -216,7 +222,7 @@ class BatchedHamiltonian:
             out[:, lo:hi] += vg.gather(2, gath)
 
         if p.shape[1]:
-            b = torch.einsum("kpg,kbg->kbp", p_conj, c)
+            b = becp_b(p, c, p_conj)
             out = out + torch.einsum("kbp,pq,kqg->kbg", b, dij, p)
         if self.hub_q is not None and self.hub_dij is not None:
             hq, hq_conj, hd = self._hub_tables(c.dtype)
@@ -245,7 +251,7 @@ def density_b(
     nk, nb, _ = coeffs.shape
     n = shape[0] * shape[1] * shape[2]
     if coeffs.device.type == "cuda":
-        chunk = max(1, int(4e8 / (coeffs.element_size() * n * max(nk, 1))))
+        chunk = max(1, int(_GPU_DENSE_BUDGET_BYTES / (coeffs.element_size() * n * max(nk, 1))))
     else:
         chunk = nb
     w = kweights[:, None] * occ

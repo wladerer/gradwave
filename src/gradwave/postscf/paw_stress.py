@@ -24,28 +24,34 @@ from gradwave.constants import E2, HBAR2_2M
 from gradwave.constants import MINUS_I_POW as _MINUS_I_POW
 from gradwave.core.fftbox import r_to_g
 from gradwave.core.ylm import ylm_all
+from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.postscf.paw_forces import _aug_at_fixed, _normalize_spin
 from gradwave.postscf.stress import _box_millers, _ewald_strained
 from gradwave.pseudo.radial_torch import RadialTables, sbt_t, simpson_weights
 
 
-def stress_uspp(res: dict, xc) -> torch.Tensor:
+def stress_uspp(res: dict, xc, symmetrize: bool = True) -> torch.Tensor:
     """σ (3,3) [eV/Å³] for a converged scf_uspp result (nspin 1 or 2)."""
     if res.get("hub_sites") is not None:
         raise NotImplementedError(
             "stress with DFT+U on USPP/PAW not implemented (the strained "
             "S-dressed orbital projections are missing)")
     system = res["system"]
-    eps = torch.zeros(3, 3, dtype=torch.float64, requires_grad=True,
+    eps = torch.zeros(3, 3, dtype=RDTYPE, requires_grad=True,
                       device=system.positions.device)
     e = _energy_strained_uspp(res, xc, eps)
     (grad,) = torch.autograd.grad(e, eps)
-    return 0.5 * (grad + grad.T) / system.grid.volume
+    sigma = 0.5 * (grad + grad.T) / system.grid.volume
+    if symmetrize and getattr(system, "sym", None) is not None:
+        from gradwave.postscf.stress import symmetrize_stress
+
+        sigma = symmetrize_stress(sigma, system.sym, system.grid.cell)
+    return sigma
 
 
-def _strained_aug(system, rho_ij, tabs, gaunt, y_aug, q_sph, phases, omega):
+def _strained_aug(system, rho_ij, gaunt, y_aug, q_sph, phases, omega):
     """ρ_aug(G(ε)) on the sphere from one spin channel's strained becsum."""
-    cdt = torch.complex128
+    cdt = CDTYPE
     dev = q_sph.device
     aug_sph = torch.zeros(q_sph.shape[0], dtype=cdt, device=dev)
     for a, sp in enumerate(system.species_of_atom):
@@ -74,7 +80,6 @@ def _strained_aug(system, rho_ij, tabs, gaunt, y_aug, q_sph, phases, omega):
             ang = y_aug[:, ll * ll:(ll + 1) ** 2].to(cdt) @ b_lm
             acc_a = acc_a + _MINUS_I_POW[ll] * fq.to(cdt) * ang
         aug_sph = aug_sph + phases[:, a] * 4.0 * math.pi * acc_a
-        _ = tabs
     return aug_sph / omega.to(cdt)
 
 
@@ -82,8 +87,8 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
     system = res["system"]
     grid = system.grid
     shape = grid.shape
-    rdt = torch.float64
-    cdt = torch.complex128
+    rdt = RDTYPE
+    cdt = CDTYPE
     nspin, coeffs_s, occ_s, eigs_s, becsum_s, rho_sp_mixed = _normalize_spin(res)
     dev = system.positions.device
 
@@ -181,7 +186,7 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
                 ddd_isp = ddd if nspin == 1 else ddd[isp]
                 e_total = e_total + (ddd_isp.to(cdt).to(dev) * rho_ij[a]).sum().real
 
-        aug_sph = _strained_aug(system, rho_ij, tabs, gaunt, y_aug, q_sph,
+        aug_sph = _strained_aug(system, rho_ij, gaunt, y_aug, q_sph,
                                 phases, omega)
         rho_s_fix = (rho_sp_mixed[isp].detach()
                      - _aug_at_fixed(res, system, isp)).detach()

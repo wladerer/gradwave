@@ -30,9 +30,11 @@ from gradwave.constants import BOHR_ANG, RY_EV
 from gradwave.pseudo.upf import (
     AtomicOrbital,
     BetaProjector,
+    _check_mesh_lengths,
     _parse_floats,
     _qe_msh,
     _read_root,
+    _validate_root,
 )
 
 
@@ -86,6 +88,7 @@ def parse_upf_paw(path) -> PAWData:
 
     path = Path(path)
     root = _read_root(path)
+    _validate_root(root, path)
     h = root.find("PP_HEADER").attrib
 
     def flag(name: str) -> bool:
@@ -159,6 +162,8 @@ def parse_upf_paw(path) -> PAWData:
     nlcc = root.find("PP_NLCC")
     if nlcc is not None:
         core_rho = _parse_floats(nlcc.text) / BOHR_ANG**3
+
+    _check_mesh_lengths(path, len(r), {"PP_RAB": rab, "PP_LOCAL": vloc, "PP_RHOATOM": rhoatom})
 
     aewfc, pswfc = [], []
     paw_occ = ae_core = ae_vloc = None

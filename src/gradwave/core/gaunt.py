@@ -40,7 +40,6 @@ def ylm_np(lmax: int, vecs: np.ndarray) -> np.ndarray:
     unit = v / safe[..., None]
     zero = norm < 1e-14
     ct = np.where(zero, 1.0, unit[..., 2])  # cosθ
-    st = np.sqrt(np.clip(1.0 - ct * ct, 0.0, 1.0))
     phi = np.arctan2(unit[..., 1], unit[..., 0])
 
     out = np.empty((*v.shape[:-1], (lmax + 1) ** 2))
@@ -56,7 +55,6 @@ def ylm_np(lmax: int, vecs: np.ndarray) -> np.ndarray:
         y00 = out[..., 0].copy()
         out[zero] = 0.0
         out[..., 0] = y00
-    _ = st  # cosθ-only recurrences via lpmv; st retained for clarity
     return out
 
 

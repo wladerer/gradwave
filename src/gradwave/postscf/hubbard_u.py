@@ -1,6 +1,6 @@
 """Hubbard U as a determinable quantity, not just an input.
 
-Two capabilities:
+Three capabilities:
 
 1. `energy_derivative_u` — the exact analytic dE_total/dU. At SCF convergence
    the KS energy is stationary in the density, so by Hellmann–Feynman the total
@@ -89,7 +89,7 @@ def _pad(coeffs_per_k, npw_max, device=None):
 
 
 @torch.no_grad()
-def _bare_response_occ(system, base_res, hub, hub_q, alpha_vec, xc, smearing, width):
+def _bare_response_occ(system, base_res, hub, hub_q, alpha_vec, smearing, width):
     """One non-self-consistent diagonalization at frozen (converged) v_eff plus
     the rigid probe α, returning per-site total occupations N_I."""
     from gradwave.core.batch import BatchedHamiltonian, projectors_b
@@ -128,9 +128,9 @@ def _bare_response_occ(system, base_res, hub, hub_q, alpha_vec, xc, smearing, wi
                                     system.n_electrons, degeneracy=g_spin)).to(RDTYPE)
     n = torch.zeros(hub.n_sites, dtype=RDTYPE, device=hub_q.device)
     for sp in range(nspin):
-        occ, _ = occupations_and_entropy(eigs_s[sp], mu, scheme, width, degeneracy=g_spin)
-        w = g_spin * occ if nspin == 1 else occ  # to electron units per spin
-        w = 0.5 * w if nspin == 1 else w
+        # occupations_and_entropy already returns g·f (g = g_spin = 2/nspin), the
+        # per-state weight occupation_matrices expects; the old ×g×½ was a no-op.
+        w, _ = occupations_and_entropy(eigs_s[sp], mu, scheme, width, degeneracy=g_spin)
         mats = occupation_matrices(hub_q, coeffs_s[sp], w, system.kweights, hub.sites)
         for i, m in enumerate(mats):
             n[i] += torch.trace(m).real
@@ -163,21 +163,30 @@ def linear_response_u(system, xc, l: int, species: int, *, site: int = 0,
         chi_cols.append(_site_occupations(r, hub, hub_q))
         # bare: one diagonalization at the base self-consistent potential
         chi0_cols.append(_bare_response_occ(system, base, hub, hub_q,
-                                            torch.tensor(av), xc, smearing, width))
+                                            torch.tensor(av), smearing, width))
 
     # central difference dN_I/dα_site
     chi_col = (chi_cols[0] - chi_cols[1]) / (2 * alpha)   # (ns,)
     chi0_col = (chi0_cols[0] - chi0_cols[1]) / (2 * alpha)
-    return _assemble_u(chi_col, chi0_col, site)
+    return _assemble_u(chi_col, chi0_col, site, hub.sites, system.species_of_atom)
 
 
-def _assemble_u(chi_col: torch.Tensor, chi0_col: torch.Tensor, site: int) -> dict:
+def _assemble_u(chi_col: torch.Tensor, chi0_col: torch.Tensor, site: int,
+                sites: list, species_of_atom) -> dict:
     """U = (χ0^{-1} − χ^{-1})_II from one response column.
 
     Two equivalent sites: the symmetric [[a,b],[b,a]] matrix is known from
     perturbing one site; otherwise the single-site scalar estimate."""
     ns = chi_col.shape[0]
     if ns == 2:
+        s0, s1 = sites[site], sites[1 - site]
+        if (species_of_atom[s0["atom"]] != species_of_atom[s1["atom"]]
+                or s0["l"] != s1["l"]):
+            raise NotImplementedError(
+                "linear-response U for two Hubbard sites of different species "
+                "or l is not implemented: the [[a,b],[b,a]] symmetric-response "
+                "reconstruction from a single perturbed site assumes the two "
+                "sites are symmetry-equivalent")
         chi = torch.tensor([[chi_col[site], chi_col[1 - site]],
                             [chi_col[1 - site], chi_col[site]]])
         chi0 = torch.tensor([[chi0_col[site], chi0_col[1 - site]],
@@ -373,6 +382,6 @@ def linear_response_u_autodiff(system, xc, l: int, species: int, *, site: int = 
     chi0_col, chi_col, n_outer = _response_columns(
         base, xc, hub, hub_q, site, beta=beta, outer_tol=outer_tol,
         max_outer=max_outer, cg_tol=cg_tol, history=history, verbose=verbose)
-    out = _assemble_u(chi_col, chi0_col, site)
+    out = _assemble_u(chi_col, chi0_col, site, hub.sites, system.species_of_atom)
     out["n_outer"] = n_outer
     return out

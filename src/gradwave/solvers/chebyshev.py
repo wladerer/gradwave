@@ -246,7 +246,8 @@ def chebyshev_filtered_batched_ms(
             degree=degree, n_lanczos=n_lanczos,
         )
     hi_dtype = x0.dtype
-    # bounds are cheap and precision-insensitive; compute once in low precision
+    # bounds are cheap and precision-insensitive; compute once and reuse for
+    # both the draft and the polish (_lanczos_bounds runs in fp64 internally)
     lo, hi = _lanczos_bounds(h_apply, mask, steps=n_lanczos)
     draft = chebyshev_filtered_batched(
         h_apply, x0.to(low), t.to(real_of(low)), mask,

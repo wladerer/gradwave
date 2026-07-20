@@ -77,16 +77,19 @@ def _drho_core_r(system, a: int, alpha: int) -> torch.Tensor:
     from gradwave.scf.loop import _unique_shells
 
     grid = system.grid
-    g_flat = np.sqrt(grid.g2.reshape(-1).numpy())
+    dev = system.positions.device
+    # the shell table is built through scipy/numpy (CPU), then moved back to
+    # the working device so the response stays on-device
+    g_flat = np.sqrt(grid.g2.reshape(-1).cpu().numpy())
     uniq, inverse = _unique_shells(g_flat)
-    tab = torch.as_tensor(core_density_of_q(paw, uniq), dtype=RDTYPE)
-    shell = tab[torch.as_tensor(inverse)]
-    gc = grid.g_cart.reshape(-1, 3)
+    tab = torch.as_tensor(core_density_of_q(paw, uniq), dtype=RDTYPE, device=dev)
+    shell = tab[torch.as_tensor(inverse, device=dev)]
+    gc = grid.g_cart.reshape(-1, 3).to(dev)
     phase = torch.exp(torch.complex(
-        torch.zeros(gc.shape[0], dtype=RDTYPE),
+        torch.zeros(gc.shape[0], dtype=RDTYPE, device=dev),
         -(gc @ system.positions[a].to(RDTYPE))))
     dcore_g = (-1j * gc[:, alpha].to(CDTYPE)) * phase         * shell.to(CDTYPE) / grid.volume
-    mask = grid.dens_mask.reshape(-1)
+    mask = grid.dens_mask.reshape(-1).to(dev)
     dcore_g = torch.where(mask, dcore_g, torch.zeros_like(dcore_g))
     return torch.fft.ifftn(dcore_g.reshape(grid.shape) * grid.n_points,
                            dim=(-3, -2, -1)).real
@@ -176,10 +179,11 @@ class PositionPerturbation:
         the becsum projectors and the augmentation phases."""
         cs = self.cs
         system, grid = cs.system, cs.grid
+        dev = system.positions.device
         kw = system.kweights
         isp = 0  # nspin=1 scope
-        drho_sm = torch.zeros(cs.shape, dtype=RDTYPE)
-        dbec = [torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE)
+        drho_sm = torch.zeros(cs.shape, dtype=RDTYPE, device=dev)
+        dbec = [torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
                 for (s0, s1) in system.atom_slices]
         for ik, sph in enumerate(system.spheres):
             hk, c = cs.hks[isp][ik], cs.c_win[isp][ik]
@@ -227,7 +231,8 @@ class PositionPerturbation:
 
         # augmentation density: response becsum at fixed phases plus the
         # explicit phase motion of atom a with the map-output becsum
-        aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE)
+        aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE,
+                              device=dev)
         for at, sp in enumerate(system.species_of_atom):
             aug_sph = aug_sph + cs.phase_pos[:, at].conj() * torch.einsum(
                 "ij,ijg->g", dbec[at], system.aug[sp].q_g)
@@ -237,7 +242,7 @@ class PositionPerturbation:
             * torch.einsum("ij,ijg->g",
                            cs.rho_ij_sp[isp][self.a].to(CDTYPE),
                            system.aug[sp_a].q_g)
-        aug_box = torch.zeros(grid.n_points, dtype=CDTYPE)
+        aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
         aug_box[system.sphere_idx] = aug_sph / cs.vol
         drho_aug = torch.fft.ifftn(aug_box.reshape(cs.shape) * grid.n_points,
                                    dim=(-3, -2, -1)).real
@@ -482,7 +487,8 @@ def hessian_column(res: dict, xc, a: int, alpha: int, *,
         from gradwave.pseudo.radial_torch import RadialTables
 
         q_sph = torch.linalg.norm(system.g_sphere, dim=1)
-        core = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE)
+        core = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE,
+                           device=pos.device)
         for sp in set(system.species_of_atom):
             paw = system.paws[sp]
             if paw.core_rho is None:
@@ -494,7 +500,7 @@ def hessian_column(res: dict, xc, a: int, alpha: int, *,
                      if sa == sp]
             core = core + phases[:, atoms].conj().sum(dim=1) \
                 * f_core.to(CDTYPE) / vol
-        core_box = torch.zeros(grid.n_points, dtype=CDTYPE)
+        core_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=pos.device)
         core_box[system.sphere_idx] = core
         rho_core = torch.fft.ifftn(core_box.reshape(shape) * grid.n_points,
                                    dim=(-3, -2, -1)).real
@@ -504,7 +510,8 @@ def hessian_column(res: dict, xc, a: int, alpha: int, *,
     # this E_xc eager, compiled aot_autograd cannot double-backward.
     with xc_eager():
         e = e + xc.energy(rho_xc, vol, sigma)
-    species_index = torch.tensor(system.species_of_atom, dtype=torch.int64)
+    species_index = torch.tensor(system.species_of_atom, dtype=torch.int64,
+                                 device=pos.device)
     vloc_g = local_potential_g(pos, species_index, system.vloc_tables,
                                grid.g_cart, vol)
     e = e + hartree_energy(rho_g, grid.g2, vol) + local_energy(rho_g,

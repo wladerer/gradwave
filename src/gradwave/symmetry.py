@@ -40,7 +40,7 @@ class SpaceGroup:
     translations: np.ndarray  # (nops, 3) fractional w
     atom_map: np.ndarray  # (nops, na) int — op sends atom a onto atom_map[op, a]
     international: str
-    origin_shift: np.ndarray = None  # spglib standard-origin shift (fractional)
+    origin_shift: np.ndarray | None = None  # spglib standard-origin shift (fractional)
 
     @property
     def n_ops(self) -> int:
@@ -57,6 +57,12 @@ def find_spacegroup(
     frac = np.asarray(frac_positions, dtype=float) % 1.0
     numbers = np.asarray(species_of_atom, dtype=int)
     ds = spglib.get_symmetry_dataset((cell, frac, numbers), symprec=symprec)
+    if ds is None:
+        raise ValueError(
+            f"spglib.get_symmetry_dataset returned None (symprec={symprec}); "
+            f"check the cell/positions for a degenerate or ill-conditioned "
+            f"lattice (cell=\n{cell})"
+        )
 
     rots_all = np.asarray(ds.rotations, dtype=np.int64)
     trans_all = np.asarray(ds.translations, dtype=np.float64)
@@ -167,9 +173,13 @@ def _orbit_reduce(mesh, ops_t):
 def reduce_mesh(mesh, shift, sg: SpaceGroup, time_reversal: bool = True):
     """IBZ reduction of a Γ-centered MP mesh. Returns (k_frac (nk,3), weights).
 
-    Only valid for unshifted meshes (asserted by the caller); orbits are taken
-    under {W⁻ᵀ} and optionally time reversal.
+    Only valid for unshifted meshes; orbits are taken under {W⁻ᵀ} and
+    optionally time reversal.
     """
+    if np.any(shift):
+        raise NotImplementedError(
+            "shifted meshes not supported here; caller must reduce unshifted"
+        )
     ops_t = _k_ops(sg.rotations)
     if time_reversal:
         ops_t = ops_t + [-w for w in ops_t]
@@ -262,6 +272,10 @@ def reduce_mesh_magnetic(mesh, shift, mg: MagneticGroup):
     sends k → −k). Zero moments (grey group) reproduce
     reduce_mesh(..., time_reversal=True) exactly. Returns (k_frac, weights).
     """
+    if np.any(shift):
+        raise NotImplementedError(
+            "shifted meshes not supported here; caller must reduce unshifted"
+        )
     ops_t = _k_ops(mg.unitary.rotations)
     ops_t += [-w for w in _k_ops(mg.anti_rotations)]
     return _orbit_reduce(mesh, ops_t)

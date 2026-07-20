@@ -48,6 +48,10 @@ from gradwave.scf.implicit import apply_chi0, apply_k_hxc
 from gradwave.scf.loop import SCFResult
 
 
+class DysonNotConverged(RuntimeError):
+    """The screening Dyson fixed point did not reach ``tol`` within ``max_iter``."""
+
+
 # --------------------------------------------------------------------------- #
 #  Smearing / electronic-temperature error                                    #
 # --------------------------------------------------------------------------- #
@@ -192,7 +196,7 @@ def estimate_scf_error(res: SCFResult, xc, *,
                              max_iter=dyson_max_iter)
             denergy = 0.5 * float((x * kr).sum()) * cell
             used_screened = True
-        except (NotImplementedError, RuntimeError):
+        except (NotImplementedError, DysonNotConverged):
             if screened is True:
                 raise
     nelec = float(system.n_electrons)
@@ -225,7 +229,8 @@ def _dyson_solve(res, xc, r, *, beta, tol, max_iter):
         x = x + beta * (x_new - x)
         if step < tol:
             return x
-    raise RuntimeError(f"Dyson solve not converged ({step:.2e} after {max_iter} iters)")
+    raise DysonNotConverged(
+        f"Dyson solve not converged ({step:.2e} after {max_iter} iters)")
 
 
 # --------------------------------------------------------------------------- #

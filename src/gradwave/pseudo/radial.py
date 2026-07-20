@@ -52,7 +52,7 @@ def simpson(fvals: np.ndarray, rab: np.ndarray) -> np.ndarray:
 
 
 def sph_jl(l: int, x: np.ndarray) -> np.ndarray:
-    """Spherical Bessel j_l (l ≤ 3) to full float64 precision.
+    """Spherical Bessel j_l (l ≤ 4) to full float64 precision.
 
     The closed trigonometric forms (j₁ = sin x/x² − cos x/x, ...) suffer
     catastrophic cancellation for small x — worse with rising l (j₃ cancels
@@ -62,7 +62,7 @@ def sph_jl(l: int, x: np.ndarray) -> np.ndarray:
     do not use it.)
     """
     if l not in _DFACT:
-        raise ValueError(f"l={l} out of supported range 0..3")
+        raise ValueError(f"l={l} out of supported range 0..4")
     x = np.asarray(x, dtype=np.float64)
     out = np.empty_like(x)
 

@@ -38,13 +38,24 @@ class NoncollinearXC(torch.nn.Module):
     def needs_gradient(self) -> bool:
         return self.collinear.needs_gradient
 
-    def energy(self, rho, m_vec, volume, sigma_uu=None, sigma_dd=None, sigma_tot=None):
+    def energy(self, rho, m_vec, volume, sigma_uu=None, sigma_dd=None, sigma_tot=None,
+               rho_core=None):
         """E_xc [eV]. rho (grid), m_vec (3, grid). GGA σ's are those of the
-        locally-collinear channels (caller builds them from ρ± spectra)."""
-        m_norm = torch.sqrt((m_vec**2).sum(dim=0) + self.m_eps)
-        rho_up = 0.5 * (rho + m_norm)
-        rho_dn = 0.5 * (rho - m_norm)
-        return self.collinear.energy(rho_up, rho_dn, volume, sigma_uu, sigma_dd, sigma_tot)
+        locally-collinear channels (caller builds them from ρ± spectra).
+        rho_core (NLCC) shifts ρ only — same semantics as energy_with_grid, so
+        the two entry points share the ρ± projection and cannot disagree."""
+        r_up, r_dn = _rho_pm(self, rho, m_vec, rho_core)
+        return self.collinear.energy(r_up, r_dn, volume, sigma_uu, sigma_dd, sigma_tot)
+
+
+def _rho_pm(nc_xc: NoncollinearXC, rho, m_vec, rho_core):
+    """Locally-collinear channels ρ± = (ρ ± |m⃗|)/2, with the NLCC core (which
+    carries no magnetization) folded into ρ before the split. Shared by both
+    energy entry points so the projection is defined in exactly one place."""
+    if rho_core is not None:
+        rho = rho + rho_core
+    m_norm = torch.sqrt((m_vec**2).sum(dim=0) + nc_xc.m_eps)
+    return 0.5 * (rho + m_norm), 0.5 * (rho - m_norm)
 
 
 def energy_with_grid(nc_xc: NoncollinearXC, rho, m_vec, grid, rho_core=None):
@@ -52,14 +63,12 @@ def energy_with_grid(nc_xc: NoncollinearXC, rho, m_vec, grid, rho_core=None):
     rho_core (NLCC) shifts ρ only — the core carries no magnetization."""
     from gradwave.core.density import sigma_from_rho
 
-    if rho_core is not None:
-        rho = rho + rho_core
-    m_norm = torch.sqrt((m_vec**2).sum(dim=0) + nc_xc.m_eps)
-    r_up, r_dn = 0.5 * (rho + m_norm), 0.5 * (rho - m_norm)
+    r_up, r_dn = _rho_pm(nc_xc, rho, m_vec, rho_core)
     if nc_xc.collinear.needs_gradient:
+        rho_tot = rho if rho_core is None else rho + rho_core
         s_uu = sigma_from_rho(r_up, grid.g_cart)
         s_dd = sigma_from_rho(r_dn, grid.g_cart)
-        s_tt = sigma_from_rho(rho, grid.g_cart)
+        s_tt = sigma_from_rho(rho_tot, grid.g_cart)
     else:
         s_uu = s_dd = s_tt = None
     return nc_xc.collinear.energy(r_up, r_dn, grid.volume, s_uu, s_dd, s_tt)

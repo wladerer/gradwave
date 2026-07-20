@@ -23,12 +23,14 @@ from dataclasses import dataclass
 
 import torch
 
+from gradwave.constants import KB_EV
 from gradwave.core.xc.noncollinear import NoncollinearXC
 from gradwave.postscf.moment_config import atomic_weights
 from gradwave.postscf.spin_exchange import decompose, exchange_from_atom
 from gradwave.scf.noncollinear import scf_noncollinear
 
-KB = 8.617333e-5  # eV/K
+# A site counts as magnetic when its moment magnitude exceeds this [μB].
+MOMENT_TOL_MUB = 0.15
 
 
 @dataclass
@@ -69,7 +71,7 @@ def _atomic_moment_vectors(system, m, weights):
     return torch.einsum("axyz,ixyz->ai", weights, m) * cf     # (na, 3) [μB]
 
 
-def _classify(moment_vectors, mags, exchange_J, mag_tol=0.15):
+def _classify(moment_vectors, mags, exchange_J, mag_tol=MOMENT_TOL_MUB):
     if float(max(mags)) < mag_tol:
         return "nonmagnetic"
     if exchange_J is not None and len(exchange_J):
@@ -114,7 +116,7 @@ def characterize_magnetism(system, xc: NoncollinearXC, *, seed_scale: float = 1.
     total = float(torch.linalg.norm(M.sum(0)))
 
     exchange_J = dmi = tc = None
-    if exchange and float(mags.max()) >= 0.15:
+    if exchange and float(mags.max()) >= MOMENT_TOL_MUB:
         tensors, _ = exchange_from_atom(system, xc, j=ref_atom, m0=mags,
                                         ref_dir=(0, 0, 1), delta=delta, lam=lam,
                                         weights=weights, **scf_kwargs)
@@ -122,7 +124,7 @@ def characterize_magnetism(system, xc: NoncollinearXC, *, seed_scale: float = 1.
         for i, Jt in tensors.items():
             J_iso, D_ref, _ = decompose(Jt)
             exchange_J[i], dmi[i] = J_iso, D_ref
-        tc = (2.0 / 3.0) * sum(exchange_J.values()) / KB
+        tc = (2.0 / 3.0) * sum(exchange_J.values()) / KB_EV
 
     ordering = _classify(M, mags, exchange_J)
     return MagneticReport(

@@ -466,7 +466,8 @@ def scf(
     vol = grid.volume
     nk, nb = len(spheres), system.nbands
     if nspin not in (1, 2):
-        raise ValueError("nspin must be 1 or 2 (noncollinear is future work)")
+        raise ValueError("nspin must be 1 or 2 (noncollinear spin uses "
+                         "scf_noncollinear, the spinor SCF)")
     if eigensolver not in ("davidson", "chebyshev"):
         raise ValueError("eigensolver must be 'davidson' or 'chebyshev'")
     if nspin == 2 and smearing == "none":
@@ -707,8 +708,10 @@ def scf(
         rho_out_vec = to_mix_basis(rho_out_s)
         if nspin == 2:  # only the TOTAL is conserved; its G=0 residual must vanish
             tot_res = rho_out_vec[0] - rho_in_vec[0]
-            assert torch.isfinite(rho_out_vec).all(), "density diverged (NaN/Inf)"
-            assert tot_res.abs() < 1e-8, "total G=0 residual nonzero"
+            if not torch.isfinite(rho_out_vec).all():
+                raise RuntimeError("density diverged (NaN/Inf)")
+            if tot_res.abs() >= 1e-8:
+                raise ValueError("total G=0 residual nonzero")
         res_norm = float(torch.linalg.norm(rho_out_vec - rho_in_vec)) * vol
         # keep the real-space total-density residual of the last step for the
         # post-SCF convergence-error estimate (ρ_out − ρ_in at this iteration)

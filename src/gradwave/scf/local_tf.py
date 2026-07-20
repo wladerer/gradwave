@@ -42,8 +42,7 @@ from __future__ import annotations
 
 import torch
 
-# CODATA Bohr radius in Angstrom (matches the value used across the pseudo layer)
-_BOHR = 0.52917721067
+from gradwave.constants import BOHR_ANG as _BOHR  # shared CODATA Bohr radius [Å]
 
 
 class LocalTFPrecond:

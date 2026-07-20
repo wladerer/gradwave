@@ -14,6 +14,7 @@ Cutoff logic (eV/Å units, T(G) = HBAR2_2M·|k+G|²):
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -68,10 +69,14 @@ def build_fft_grid(
     cell: np.ndarray,
     ecut: float,
     device=None,
-    equal_dims: bool = False,
+    equal_dims: bool | Sequence[Sequence[int]] = False,
     shape_override=None,
 ) -> FFTGrid:
-    """shape_override pins the FFT box (e.g. to QE's dims for µeV-level
+    """equal_dims: True forces a cubic box; an iterable of axis-index groups
+    (e.g. [(0, 1)] for a slab) instead equalizes only the coupled axes within
+    each group (see symmetry.coupled_axis_groups).
+
+    shape_override pins the FFT box (e.g. to QE's dims for µeV-level
     comparisons: XC grid integration differs at the meV level for sharp
     semicore densities when box sizes differ, even though both boxes hold
     the density sphere exactly)."""

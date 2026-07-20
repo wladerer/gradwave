@@ -54,8 +54,8 @@ class EnergyBreakdown:
     nonlocal_: torch.Tensor
     ewald: torch.Tensor
     smearing: torch.Tensor  # −σS (zero for fixed occupations)
-    hubbard: torch.Tensor = 0.0  # Dudarev E_U (zero without +U)
-    onecenter: torch.Tensor = 0.0  # PAW one-center Σ±(E_H+E_xc) (zero for NC/USPP)
+    hubbard: torch.Tensor | float = 0.0  # Dudarev E_U (zero without +U)
+    onecenter: torch.Tensor | float = 0.0  # PAW one-center Σ±(E_H+E_xc) (zero for NC/USPP)
 
     @property
     def total(self) -> torch.Tensor:

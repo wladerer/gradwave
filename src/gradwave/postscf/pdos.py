@@ -177,12 +177,10 @@ def _ao_projectors_k(system, sph, cols, device):
     phase = torch.exp(torch.complex(torch.zeros_like(phase_arg), -phase_arg))
 
     q = torch.zeros(len(cols), npw, dtype=CDTYPE, device=device)
-    orb_of = {(c.species, c.label) for c in cols}
-    fkey = {(sp, lab): fcache[(sp, lab)] for (sp, lab) in orb_of}
     for p, c in enumerate(cols):
         pref = (4.0 * math.pi / math.sqrt(vol)) * _MINUS_I_POW[c.l]
         yl = y[:, c.l * c.l + c.m]
-        q[p] = pref * (fkey[(c.species, c.label)] * yl).to(CDTYPE) * phase[:, c.atom]
+        q[p] = pref * (fcache[(c.species, c.label)] * yl).to(CDTYPE) * phase[:, c.atom]
     return q
 
 

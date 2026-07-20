@@ -115,6 +115,24 @@ class Input:
     restart: Path | None = None  # checkpoint.pt to warm-start from (USPP/PAW)
 
 
+def _normalize_kerker(value):
+    """MixingParams.kerker accepts "auto", a bool, or the on/off/true/false
+    string spellings (a bare `kerker: off` is already a YAML bool); anything
+    else is a user error rather than a silent truthy string."""
+    if value == "auto" or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s == "auto":
+            return "auto"
+        if s in ("on", "true"):
+            return True
+        if s in ("off", "false"):
+            return False
+    raise ValueError(
+        f"invalid mixing.kerker {value!r} (auto | on | off | true | false)")
+
+
 def _load_structure(spec, base: Path) -> Atoms:
     if isinstance(spec, str):
         return ase_read(base / spec)
@@ -162,6 +180,8 @@ def load_input(path: str | Path) -> Input:
     mix_scheme = str(mix_raw.get("scheme", "pulay"))
     if mix_scheme not in ("pulay", "broyden", "johnson", "linear"):
         raise ValueError(f"unknown mixing scheme {mix_scheme!r}")
+    if "kerker" in mix_raw:
+        mix_raw["kerker"] = _normalize_kerker(mix_raw["kerker"])
 
     out_raw = raw.get("output", {})
     restart = raw.get("restart")

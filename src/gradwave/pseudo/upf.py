@@ -97,18 +97,33 @@ def _read_root(path: Path) -> ET.Element:
         # Some UPF generators emit stray '&' or '<'-adjacent junk inside
         # PP_INFO free text. Drop PP_INFO (metadata only) and retry.
         cleaned = re.sub(r"<PP_INFO>.*?</PP_INFO>", "<PP_INFO></PP_INFO>", text, flags=re.DOTALL)
-        cleaned = cleaned.replace("&", "&amp;")
+        # Escape only bare '&' — leave already-valid entities (&amp; &lt; &gt;
+        # &quot; &apos; &#nn;) untouched so we don't double-escape.
+        cleaned = re.sub(r"&(?!amp;|lt;|gt;|quot;|apos;|#)", "&amp;", cleaned)
         return ET.fromstring(cleaned)
 
 
-def parse_upf(path: str | Path) -> UPFData:
-    path = Path(path)
-    root = _read_root(path)
+def _validate_root(root: ET.Element, path: Path) -> None:
+    """Up-front UPF sanity checks shared by parse_upf and parse_upf_paw:
+    root tag is UPF and the version is v2."""
     if root.tag != "UPF":
         raise ValueError(f"{path}: not a UPF file (root tag {root.tag!r})")
     version = root.attrib.get("version", "")
     if not version.startswith("2."):
         raise ValueError(f"{path}: only UPF v2 is supported, got version {version!r}")
+
+
+def _check_mesh_lengths(path: Path, n: int, arrays: dict[str, np.ndarray]) -> None:
+    """Assert each named radial array matches the PP_MESH point count n."""
+    for name, arr in arrays.items():
+        if len(arr) != n:
+            raise ValueError(f"{path}: {name} length {len(arr)} != mesh size {n}")
+
+
+def parse_upf(path: str | Path) -> UPFData:
+    path = Path(path)
+    root = _read_root(path)
+    _validate_root(root, path)
 
     header = root.find("PP_HEADER")
     if header is None:
@@ -133,7 +148,10 @@ def parse_upf(path: str | Path) -> UPFData:
     vloc = _parse_floats(root.find("PP_LOCAL").text) * RY_EV
 
     nonlocal_ = root.find("PP_NONLOCAL")
+    # Fully-relativistic UPFs carry PP_RELBETA (β total-j) and PP_RELWFC (χ
+    # total-j) side by side in one PP_SPIN_ORB block — read both in one pass.
     jjj = {}
+    jchi = {}
     if has_so:
         so = root.find("PP_SPIN_ORB")
         if so is None:
@@ -141,6 +159,8 @@ def parse_upf(path: str | Path) -> UPFData:
         for child in so:
             if child.tag.startswith("PP_RELBETA"):
                 jjj[int(child.attrib["index"])] = float(child.attrib["jjj"])
+            elif child.tag.startswith("PP_RELWFC"):
+                jchi[int(child.attrib["index"])] = float(child.attrib["jchi"])
     betas = []
     for child in sorted(
         (c for c in nonlocal_ if c.tag.startswith("PP_BETA.")),
@@ -165,12 +185,6 @@ def parse_upf(path: str | Path) -> UPFData:
     # PP_PSWFC atomic orbitals (present in PseudoDojo, absent/empty in SG15).
     # Stored r·R_nl in Bohr; the BOHR^{-1/2} scaling keeps ∫(r·R)² dr = 1 with
     # dr in Å and matches the r·β convention so the SBT form factor is reused.
-    jchi = {}
-    if has_so:
-        so = root.find("PP_SPIN_ORB")
-        for child in (so if so is not None else ()):
-            if child.tag.startswith("PP_RELWFC"):
-                jchi[int(child.attrib["index"])] = float(child.attrib["jchi"])
     pswfc = []
     pswfc_block = root.find("PP_PSWFC")
     if pswfc_block is not None:
@@ -193,10 +207,7 @@ def parse_upf(path: str | Path) -> UPFData:
         # PP_NLCC stores ρ_core(r) directly (NOT 4πr²ρ), in bohr⁻³
         core_rho = _parse_floats(root.find("PP_NLCC").text) / BOHR_ANG**3
 
-    n = len(r)
-    for name, arr in (("PP_RAB", rab), ("PP_LOCAL", vloc), ("PP_RHOATOM", rhoatom)):
-        if len(arr) != n:
-            raise ValueError(f"{path}: {name} length {len(arr)} != mesh size {n}")
+    _check_mesh_lengths(path, len(r), {"PP_RAB": rab, "PP_LOCAL": vloc, "PP_RHOATOM": rhoatom})
 
     return UPFData(
         element=h["element"].strip(),

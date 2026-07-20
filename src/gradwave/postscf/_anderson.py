@@ -19,7 +19,7 @@ import torch
 
 
 class AndersonMixer:
-    """Type-I Anderson mixing over a rolling window of `history` secant pairs."""
+    """Type-II Anderson mixing over a rolling window of `history` secant pairs."""
 
     def __init__(self, history: int, beta: float):
         self.history = history
@@ -41,6 +41,17 @@ class AndersonMixer:
         if self.hist_dr:
             dr_m = torch.stack(self.hist_dr, dim=1)
             du_m = torch.stack(self.hist_du, dim=1)
-            gamma = torch.linalg.lstsq(dr_m, r[:, None]).solution[:, 0]
+            # Rank-safe least squares for gamma = argmin ‖r − ΔR γ‖. A plain
+            # torch.linalg.lstsq uses CUDA's gels driver, which assumes ΔR is
+            # full rank and returns garbage on the (common) rank-deficient
+            # secant matrix. Solve the Tikhonov-damped normal equations
+            # (ΔRᴴΔR + λI) γ = ΔRᴴr instead; λ is a tiny fraction of the ΔRᴴΔR
+            # diagonal, so well-conditioned windows match the old lstsq result.
+            drh = dr_m.conj().transpose(-2, -1)
+            ata = drh @ dr_m
+            lam = 1e-12 * ata.diagonal().abs().max().clamp_min(1e-300)
+            ata = ata + lam * torch.eye(ata.shape[0], dtype=ata.dtype,
+                                        device=ata.device)
+            gamma = torch.linalg.solve(ata, drh @ r[:, None])[:, 0]
             return u + self.beta * r - (du_m + self.beta * dr_m) @ gamma
         return u + self.beta * r

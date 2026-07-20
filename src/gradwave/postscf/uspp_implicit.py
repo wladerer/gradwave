@@ -160,13 +160,14 @@ def _check_supported(res: dict):
         raise NotImplementedError("USPP adjoint: nspin must be 1 or 2")
     occ = res["occupations"]
     f_full = 2.0 if res.get("nspin", 1) == 1 else 1.0
-    frac = bool(((occ > _F_CUT) & ((occ - f_full).abs() > _F_CUT)).any())
+    frac = bool(((occ > _F_CUT) & ((occ - f_full).abs() > _F_FULL_TOL)).any())
     if frac and res.get("smearing", "none") == "none":
         raise ValueError("USPP adjoint: fractional occupations but no "
                          "smearing metadata in the result dict")
 
 
 _F_CUT = 1e-8  # bands above this occupation get Sternheimer solves
+_F_FULL_TOL = 1e-8  # |occ - f_full| below this counts as fully filled (not fractional)
 
 
 def _window_uspp(res: dict, isp: int, ik: int):

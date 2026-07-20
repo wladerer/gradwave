@@ -27,6 +27,7 @@ from gradwave.constants import HBAR2_2M
 from gradwave.constants import MINUS_I_POW as _MINUS_I_POW
 from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
 from gradwave.core.ylm import ylm_all
+from gradwave.dtypes import CDTYPE, RDTYPE
 
 
 @dataclass
@@ -69,12 +70,12 @@ def build_projector_data(
                 f = beta_tables[s][i]  # (npw,)
                 yl = y[:, lm_index(l, m_col)]
                 pref = (4.0 * math.pi / math.sqrt(volume)) * _MINUS_I_POW[l]
-                cols_a.append(pref * (f * yl).to(torch.complex128))
+                cols_a.append(pref * (f * yl).to(CDTYPE))
                 atom_idx.append(a)
         cols += cols_a
         # expanded block
         nb_a = len(cols_a)
-        block = torch.zeros((nb_a, nb_a), dtype=torch.float64, device=y.device)
+        block = torch.zeros((nb_a, nb_a), dtype=RDTYPE, device=y.device)
         row = 0
         offs = []
         for i in range(nchan):
@@ -89,10 +90,14 @@ def build_projector_data(
                     block[offs[i] + m_col, offs[j] + m_col] = d
         blocks.append(block)
 
-    dij_full = torch.block_diag(*blocks) if blocks else torch.zeros((0, 0), dtype=torch.float64)
+    dij_full = (
+        torch.block_diag(*blocks) if blocks
+        else torch.zeros((0, 0), dtype=RDTYPE, device=y.device)
+    )
     return ProjectorData(
         atom_index=torch.tensor(atom_idx, dtype=torch.int64, device=y.device),
-        f_ylm_phase_free=torch.stack(cols, dim=0) if cols else torch.zeros((0, sphere.npw)),
+        f_ylm_phase_free=torch.stack(cols, dim=0) if cols
+        else torch.zeros((0, sphere.npw), dtype=CDTYPE, device=y.device),
         kpg=sphere.kpg,
         dij_full=dij_full,
     )
@@ -133,5 +138,5 @@ class HamiltonianK:
         out = out + box_to_sphere(r_to_g(v_psi), self.sphere.flat_idx)
         if self.p.shape[0]:
             b = becp(self.p, c)  # (nb, np)
-            out = out + (b.to(torch.complex128) @ self.pd.dij_full.to(torch.complex128)) @ self.p
+            out = out + (b.to(self.p.dtype) @ self.pd.dij_full.to(self.p.dtype)) @ self.p
         return out

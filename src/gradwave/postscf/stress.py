@@ -36,6 +36,7 @@ import torch
 from gradwave.constants import E2, HBAR2_2M
 from gradwave.constants import MINUS_I_POW as _MINUS_I_POW
 from gradwave.core.ylm import ylm_all
+from gradwave.dtypes import RDTYPE
 from gradwave.pseudo.radial_torch import RadialTables
 
 EV_A3_TO_KBAR = 1602.176634  # 1 eV/Å³ = 160.2176634 GPa
@@ -99,7 +100,7 @@ def _energy_strained(
     system = res.system
     grid = system.grid
     dev = system.positions.device
-    rdt = torch.float64
+    rdt = RDTYPE
 
     rho = res.rho.detach() if rho is None else rho
     coeffs = [c.detach() for c in res.coeffs] if coeffs is None else coeffs

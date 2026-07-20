@@ -192,4 +192,8 @@ def forces_uspp(res: dict, xc, remove_net: bool = True) -> torch.Tensor:
     f = -grad
     if remove_net:
         f = f - f.mean(dim=0, keepdim=True)
+    if getattr(system, "sym", None) is not None:
+        from gradwave.symmetry import symmetrize_forces
+
+        f = symmetrize_forces(f, system.sym, grid.cell)
     return f

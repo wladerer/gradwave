@@ -382,6 +382,10 @@ def scf_noncollinear(
         rho_out, m_out = rho_out / vol, m_out / vol
         rho_out = symmetrize(rho_out)  # no-op unless IBZ symmetry is active
         m_out = symmetrize_m(m_out)  # no-op unless MAGNETIC symmetry is active
+        if nonmagnetic:
+            # pin m⃗ ≡ 0 BEFORE E_xc so the pinned state's energy sees no
+            # eigensolver noise in m_out (mirror the b_xc zeroing above)
+            m_out = torch.zeros_like(m_out)
 
         # energies
         rho_g_out = r_to_g(rho_out.to(CDTYPE))
@@ -410,8 +414,7 @@ def scf_noncollinear(
                                    nonlocal_=e_nl, ewald=e_ew, smearing=entropy_term)
         e_free = float(energies.free_energy)
 
-        if nonmagnetic:
-            m_out = torch.zeros_like(m_out)
+        if nonmagnetic:  # m_out already pinned to 0 above (before E_xc)
             vin, vout = vec_of([rho]), vec_of([rho_out])
         else:
             vin, vout = vec_of([rho, *m]), vec_of([rho_out, *m_out])

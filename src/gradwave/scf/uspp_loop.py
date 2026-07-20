@@ -180,6 +180,20 @@ class _IterOps:
 _MP_CROSSOVER = 1e-5  # diago tol above this runs the fp32 draft solves
 
 
+def _resolve_start_mag(start_mag, species_of_atom, n_species) -> list[float]:
+    """Per-ATOM moment fractions from start_mag, mirroring loop._seed_density:
+    accept one entry per atom (AFM/ferrimagnetic seeds) or one per species
+    (broadcast to that species' atoms); raise on a length matching neither."""
+    na = len(species_of_atom)
+    if start_mag is None:
+        return [0.0] * na
+    if len(start_mag) == na and na != n_species:
+        return [float(m) for m in start_mag]
+    if len(start_mag) == n_species:
+        return [float(start_mag[sp]) for sp in species_of_atom]
+    raise ValueError("start_mag must have one entry per atom or per species")
+
+
 def _species_atoms(system) -> dict[int, list[int]]:
     """Atoms grouped by species, for batching per-atom augmentation
     contractions into one einsum per species."""
@@ -503,9 +517,10 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
     rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
 
     n_tot = float(rho_tot_out.sum()) * vol / grid.n_points
-    assert abs(n_tot - system.n_electrons) < 1e-5, (
-        f"charge not conserved: {n_tot:.8f} vs {system.n_electrons}"
-    )
+    if abs(n_tot - system.n_electrons) >= 1e-5:
+        raise ValueError(
+            f"charge not conserved: {n_tot:.8f} vs {system.n_electrons}"
+        )
 
     rho_g_out = r_to_g(rho_tot_out.to(CDTYPE))
     from gradwave.core.density import sigma_from_rho
@@ -543,6 +558,8 @@ def _build_mixer(scheme, g2_full, *, alpha, history, kerker, kerker_mask,
     """Construct the charge mixer for the requested scheme over the composite
     (density + becsum) vector. Kept out of scf_uspp so the scheme dispatch is
     one place."""
+    if scheme not in ("pulay", "broyden", "johnson"):
+        raise ValueError("mixing_scheme must be 'pulay', 'broyden', or 'johnson'")
     if scheme == "broyden":
         return BroydenMixer(g2_full, alpha=alpha, history=history, kerker=kerker,
                             kerker_mask=kerker_mask, check_g0=False,
@@ -568,13 +585,13 @@ def _seed_becsum(system, nspin, start_from, spin_frac, dev):
             rho_ij_s[isp] = [m.detach().to(device=dev, dtype=CDTYPE).clone()
                              for m in src]
         return rho_ij_s
-    for sp in system.species_of_atom:
+    for a, sp in enumerate(system.species_of_atom):
         paw = system.paws[sp]
         nm = sum(2 * b.l + 1 for b in paw.betas)
         for isp in range(nspin):
             m0 = torch.zeros(nm, nm, dtype=CDTYPE, device=dev)
             if paw.paw_occ is not None:
-                frac = 0.5 if nspin == 1 else spin_frac[isp][sp]
+                frac = 0.5 if nspin == 1 else spin_frac[isp][a]
                 col = 0
                 for i, b in enumerate(paw.betas):
                     for _m in range(2 * b.l + 1):
@@ -594,9 +611,11 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
              mixing_scheme="pulay", mixing_kerker=None, mixing_metric="plain",
              spin_precond=False, mixed_precision=False, precond="kerker",
              opts=None, verbose=True):
-    """USPP/PAW SCF. nspin=2 takes a SpinXC functional and per-species
-    start_mag (list, in [-1, 1]); mixing then runs in the (total,
-    magnetization) basis with Kerker on the total for smeared systems.
+    """USPP/PAW SCF. nspin=2 takes a SpinXC functional and start_mag (list,
+    in [-1, 1]) with one entry per species OR one per atom (the latter for
+    AFM/ferrimagnetic seeds; a length matching neither raises); mixing then
+    runs in the (total, magnetization) basis with Kerker on the total for
+    smeared systems.
     batched=True solves all k in one padded generalized-Davidson block
     (identical eigenpairs; batched=False is the reference per-k path).
     hubbard: list[HubbardManifold] — Dudarev DFT+U with S-metric occupation
@@ -639,9 +658,41 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     reference path ignores it). The payoff is on consumer GPUs (fp64 at
     1/64 of fp32 throughput); CPU gains are modest.
     opts: an SCFOptions object (scf/options.py) — the readable form of
-    all of the above; when given it overrides the flat kwargs."""
+    all of the above. When given, the flat config kwargs must be left at
+    their defaults; supplying both opts and a non-default flat kwarg raises
+    ValueError (rather than silently overwriting it)."""
     mixing_w0, bec_step_scale = 0.01, None  # MixerOptions defaults
     if opts is not None:
+        # opts is the readable form of every flat config kwarg; passing both is
+        # ambiguous, so reject any flat kwarg left non-default alongside opts
+        # rather than silently overwriting it.
+        _flat_defaults = {
+            "smearing": "none", "width": 0.1, "max_iter": 60, "etol": 1e-8,
+            "rhotol": 1e-7, "diago_tol": 1e-9, "mixing_alpha": 0.7,
+            "mixing_history": None, "trust_factor": 20.0, "batched": True,
+            "criterion": "drho", "rho_safety": 1e-2, "adapt_step": False,
+            "mixing_scheme": "pulay", "mixing_kerker": None,
+            "mixing_metric": "plain", "spin_precond": False,
+            "mixed_precision": False, "precond": "kerker", "verbose": True,
+        }
+        _supplied = {
+            k for k, v in (
+                ("smearing", smearing), ("width", width), ("max_iter", max_iter),
+                ("etol", etol), ("rhotol", rhotol), ("diago_tol", diago_tol),
+                ("mixing_alpha", mixing_alpha), ("mixing_history", mixing_history),
+                ("trust_factor", trust_factor), ("batched", batched),
+                ("criterion", criterion), ("rho_safety", rho_safety),
+                ("adapt_step", adapt_step), ("mixing_scheme", mixing_scheme),
+                ("mixing_kerker", mixing_kerker), ("mixing_metric", mixing_metric),
+                ("spin_precond", spin_precond), ("mixed_precision", mixed_precision),
+                ("precond", precond), ("verbose", verbose),
+            ) if v != _flat_defaults[k]
+        }
+        if _supplied:
+            raise ValueError(
+                "scf_uspp: configure through `opts` OR the flat keyword "
+                "arguments, not both (conflicting flat kwargs: "
+                f"{sorted(_supplied)})")
         smearing, width = opts.smearing, opts.width
         max_iter, etol, rhotol = opts.max_iter, opts.etol, opts.rhotol
         diago_tol, criterion = opts.diago_tol, opts.criterion
@@ -655,6 +706,10 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         adapt_step, spin_precond = mx.adapt_step, mx.spin_precond
         mixing_w0, bec_step_scale = mx.w0, mx.bec_step_scale
         precond = mx.precond
+    if criterion not in ("drho", "energy"):
+        raise ValueError("criterion must be 'drho' or 'energy'")
+    if mixing_metric not in ("plain", "coulomb"):
+        raise ValueError("mixing_metric must be 'plain' or 'coulomb'")
     if hasattr(system.rho_symmetrizer, "apply_m"):
         raise ValueError("system was built with magnetic symmetry (magmoms=...) — "
                          "only scf_uspp_noncollinear consumes it (anti-unitary ops "
@@ -681,7 +736,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
             spin_frac = [None]
         else:
             rho_s = [r.detach().to(dev) * chg for r in start_from["rho_spin"]]
-            mags = list(start_mag or [0.0] * len(system.paws))
+            mags = _resolve_start_mag(start_mag, system.species_of_atom,
+                                      len(system.paws))
             spin_frac = [[(1.0 + m) / 2.0 for m in mags],
                          [(1.0 - m) / 2.0 for m in mags]]
     elif nspin == 1:
@@ -689,16 +745,21 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                              system.paws, system.n_electrons)]
         spin_frac = [None]
     else:
-        mags = list(start_mag or [0.0] * len(system.paws))
+        # per-ATOM moment fractions (AFM/ferrimagnetic seeds pass one entry per
+        # atom; a per-species list is broadcast). sad_density's atom_scale seeds
+        # each atom directly — identical to the old species_scale path when the
+        # moments are uniform within a species.
+        mags = _resolve_start_mag(start_mag, system.species_of_atom,
+                                  len(system.paws))
         up = [(1.0 + m) / 2.0 for m in mags]
         dn = [(1.0 - m) / 2.0 for m in mags]
-        n_up = sum(float(system.charges[a]) * up[sp]
-                   for a, sp in enumerate(system.species_of_atom))
+        n_up = sum(float(system.charges[a]) * up[a]
+                   for a in range(len(system.species_of_atom)))
         rho_s = [
             sad_density(grid, system.positions, system.species_of_atom,
-                        system.paws, n_up, species_scale=up),
+                        system.paws, n_up, atom_scale=up),
             sad_density(grid, system.positions, system.species_of_atom,
-                        system.paws, system.n_electrons - n_up, species_scale=dn),
+                        system.paws, system.n_electrons - n_up, atom_scale=dn),
         ]
         spin_frac = [up, dn]
 
@@ -922,8 +983,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         rho_ij_atoms=rho_ij_s[0] if nspin == 1 else rho_ij_s,
         becps=becps_s[0] if nspin == 1 else becps_s, history=history,
         fermi=mu, system=system, nspin=nspin, smearing=smearing, width=width,
-        mixer_mult=(dict(mixer._block_mult)
-                    if getattr(mixer, "_block_mult", None) else None),
+        mixer_mult=mixer.block_mult,
         rho_out_spin=rho_out_s,  # RAW map output (pre-mixing) — rig/diagnostics
     )
     if hub is not None:
