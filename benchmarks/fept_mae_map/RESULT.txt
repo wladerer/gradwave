@@ -1,0 +1,24 @@
+FePt E(theta) anisotropy map — magnetic force theorem with per-direction
+magnetic-IBZ (Shubnikov) folding, examples/fept_mae_map.py. L1_0 FePt
+(a = 2.723 A, c = 3.712 A), fully-relativistic ONCV Fe/Pt, LSDA (PW92) + SOC,
+gaussian smearing 0.1 eV, 6x6x4 full mesh (144 k), 70 Ry. Theta scan
+[001] -> [100] in the (010) plane, 7 directions. asus CPU, 8 torch threads,
+batched spinor density path, 2026-07-19. Raw output: fept_mae_map_asus_cpu.log.
+
+  reference SCF [001]   26 it, 2450 s, |M| = 3.2232 muB
+                        (pre-batching record on the same box: 5048 s at the
+                        same 26 iterations -> 2.06x from the batched path)
+  7 folded FT solves    889 s total, ~2.1 min each
+                        folds 30/56/56/56/56/56/48 of 144
+  K1                    +2.6965 meV/cell
+  K2                    -0.0358 meV/cell   (K2/K1 = -1.3%)
+  max fit residual      1.5 ueV            (theta = 30 deg)
+  MAE [100]-[001]       +2.660 meV/cell    (self-consistent route +2.552, 4.2%)
+
+The 45-degree point reproduces the unfolded full-mesh value (+1.3398 meV) to
+all printed digits, confirming the per-direction fold exact at production
+scale. Marginal cost of one extra direction on this mesh and machine:
+~84 min for a self-consistent SCF, ~11 min for a full-mesh force-theorem
+solve (pre-batching), 2.1 min folded on the batched path — 40x end to end.
+FePt follows the single-constant uniaxial form K1 sin^2(theta) to within a
+percent; K2 carries the remainder.
