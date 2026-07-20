@@ -32,6 +32,7 @@ from gradwave.core.energies.nl_pp import nonlocal_energy
 from gradwave.core.fftbox import r_to_g
 from gradwave.core.hamiltonian import becp, projectors
 from gradwave.dtypes import CDTYPE
+from gradwave.postscf._response import spin_sigma_triple
 from gradwave.postscf.uspp_frozen import aug_density_from_becsum
 
 
@@ -48,6 +49,39 @@ def _normalize_spin(res: dict):
 def _aug_from_becsum(system, rho_ij, phases):
     """ρ_aug(r) from one spin channel's becsum with given e^{+iGτ} phases."""
     return aug_density_from_becsum(system, rho_ij, phases)
+
+
+def rho_core_on_graph(system, phases) -> torch.Tensor | None:
+    """NLCC core density on the τ-graph, or None when the system has no core.
+
+    The core rides the same e^{+iGτ} phases as the augmentation (pass the
+    in-graph ``phases`` built from a positions leaf), so its τ-derivative is
+    the NLCC core force once it enters the XC argument. Shared by
+    ``forces_uspp``, ``uspp_position.hessian_column`` and the USPP
+    discretization force error.
+    """
+    if system.rho_core is None:
+        return None
+    from gradwave.pseudo.radial_torch import RadialTables
+
+    grid = system.grid
+    vol = grid.volume
+    dev = phases.device
+    q_sph = torch.linalg.norm(system.g_sphere, dim=1)
+    core = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE, device=dev)
+    for sp in set(system.species_of_atom):
+        paw = system.paws[sp]
+        if paw.core_rho is None:
+            continue
+        tab = RadialTables(paw, device=dev)
+        with torch.no_grad():
+            f_core = tab.core_of_g(q_sph)
+        atoms = [a for a, sa in enumerate(system.species_of_atom) if sa == sp]
+        core = core + phases[:, atoms].conj().sum(dim=1) * f_core.to(CDTYPE) / vol
+    core_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
+    core_box[system.sphere_idx] = core
+    return torch.fft.ifftn(core_box.reshape(grid.shape) * grid.n_points,
+                           dim=(-3, -2, -1)).real
 
 
 def _aug_at_fixed(res: dict, system, isp: int | None = None) -> torch.Tensor:
@@ -144,26 +178,7 @@ def forces_uspp(res: dict, xc, remove_net: bool = True) -> torch.Tensor:
     rho_g = r_to_g(rho_tot.to(CDTYPE))
 
     # NLCC core on the graph
-    rho_core = None
-    if system.rho_core is not None:
-        from gradwave.pseudo.radial_torch import RadialTables
-
-        q_sph = torch.linalg.norm(system.g_sphere, dim=1)
-        core = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE,
-                           device=pos.device)
-        for sp in set(system.species_of_atom):
-            paw = system.paws[sp]
-            if paw.core_rho is None:
-                continue
-            tab = RadialTables(paw, device=pos.device)
-            with torch.no_grad():
-                f_core = tab.core_of_g(q_sph)
-            atoms = [a for a, sa in enumerate(system.species_of_atom) if sa == sp]
-            core = core + phases[:, atoms].conj().sum(dim=1) * f_core.to(CDTYPE) / vol
-        core_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=pos.device)
-        core_box[system.sphere_idx] = core
-        rho_core = torch.fft.ifftn(core_box.reshape(shape) * grid.n_points,
-                                   dim=(-3, -2, -1)).real
+    rho_core = rho_core_on_graph(system, phases)
 
     from gradwave.core.density import sigma_from_rho
 
@@ -174,12 +189,7 @@ def forces_uspp(res: dict, xc, remove_net: bool = True) -> torch.Tensor:
     else:
         c2 = 0.0 if rho_core is None else 0.5 * rho_core
         r_u, r_d = rho_chans[0] + c2, rho_chans[1] + c2
-        if xc.needs_gradient:
-            s_uu = sigma_from_rho(r_u, grid.g_cart)
-            s_dd = sigma_from_rho(r_d, grid.g_cart)
-            s_tt = sigma_from_rho(r_u + r_d, grid.g_cart)
-        else:
-            s_uu = s_dd = s_tt = None
+        s_uu, s_dd, s_tt = spin_sigma_triple(xc, r_u, r_d, grid.g_cart)
         e = e + xc.energy(r_u, r_d, vol, s_uu, s_dd, s_tt)
 
     species_index = torch.tensor(system.species_of_atom, dtype=torch.int64,

@@ -39,6 +39,8 @@ from gradwave.core.hamiltonian import becp
 from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.postscf._anderson import AndersonMixer
+from gradwave.postscf._response import fxc_hvp
+from gradwave.postscf.uspp_frozen import aug_density_from_becsum
 from gradwave.postscf.uspp_implicit import _check_supported, _ConvergedUSPP
 from gradwave.scf.newton import _pack, _unpack
 
@@ -97,20 +99,9 @@ def _drho_core_r(system, a: int, alpha: int) -> torch.Tensor:
 
 def _fxc_apply(cs, w: torch.Tensor) -> torch.Tensor:
     """f_xc·w at the converged density — the XC half of k_hxc_grid without
-    the Hartree kernel (the NLCC core carries no Hartree)."""
-    from gradwave.core.density import sigma_from_rho
-
-    grid = cs.grid
-    rho = cs.rho_xc.detach().clone().requires_grad_(True)
-    # Double backward through E_xc for the position f_xc, so force eager.
-    with torch.enable_grad(), xc_eager():
-        sigma = (sigma_from_rho(rho, grid.g_cart)
-                 if cs.xc.needs_gradient else None)
-        e_xc = cs.xc.energy(rho, cs.vol, sigma)
-        (v_xc,) = torch.autograd.grad(e_xc, rho, create_graph=True)
-        inner = (v_xc * w.detach()).sum()
-        (fxc_w,) = torch.autograd.grad(inner, rho)
-    return fxc_w * (grid.n_points / cs.vol)
+    the Hartree kernel (the NLCC core carries no Hartree). Shared HVP from
+    postscf._response."""
+    return fxc_hvp(cs.xc, cs.rho_xc, cs.grid, w)
 
 
 class PositionPerturbation:
@@ -171,6 +162,43 @@ class PositionPerturbation:
         ds = (b @ qf) @ dp + (db @ qf) @ hk.p
         return dh, ds, dp, db
 
+    def window_response(self, isp, ik, warm, cg_tol, cg_max_iter,
+                        w_extra=None, d_extra=None):
+        """Window S-metric perturbation theory + complement Sternheimer at
+        one k. Returns (dpsi, hmat, smat, db): the occupied-band orbital
+        response (window part + Sternheimer complement), the window matrices
+        ⟨m|δH|n⟩ and ⟨m|δS|n⟩, and the moving-projector becp change.
+        Updates warm[ik] with the complement solution (the warm start).
+
+        ``w_extra``/``d_extra`` add the converged self-consistent potential
+        change for total-δψ reconstruction (see ``dh_ds_psi``)."""
+        cs = self.cs
+        c = cs.c_win[isp][ik]
+        ns = cs.n_solve[isp][ik]
+        eps = cs.eps_win[isp][ik]
+        dh, ds, dp, db = self.dh_ds_psi(isp, ik, w_extra=w_extra,
+                                        d_extra=d_extra)
+
+        # window coefficients c_mn (m any window state, n occupied)
+        hmat = torch.einsum("mg,ng->mn", c.conj(), dh)
+        smat = torch.einsum("mg,ng->mn", c.conj(), ds)
+        de = (eps[None, :] - eps[:, None]).to(CDTYPE)  # ε_n − ε_m
+        num = hmat - smat * eps[None, :].to(CDTYPE)
+        safe = de.abs() > 1e-8
+        de_safe = torch.where(safe, de, torch.ones_like(de))
+        # m ≠ n: c_mn = ⟨m|δH − ε_n δS|n⟩/(ε_n − ε_m); degenerate and
+        # diagonal entries take the S-orthonormality gauge −½⟨m|δS|n⟩
+        # (equal-f degenerate rotations cancel in every invariant sum)
+        cmn = torch.where(safe, num / de_safe, -0.5 * smat)
+        dpsi_win = cmn.mT @ c  # δψ_n(win) = Σ_m c_mn ψ_m, rows n
+
+        # complement: (H − ε_n S) δψ⊥ = −P_c†(δH − ε_n δS)|ψ_n⟩, occ n
+        rhs = dh[:ns] - eps[:ns, None].to(CDTYPE) * ds[:ns]
+        rhs = -(rhs - (rhs @ c.conj().T) @ cs.s_win[isp][ik])
+        dperp = cs._sternheimer_k(isp, ik, rhs, warm[ik], cg_tol, cg_max_iter)
+        warm[ik] = dperp
+        return dpsi_win[:ns] + dperp, hmat, smat, db
+
     def bare_map_derivative(self, dpsi_warm, cg_tol=1e-10, cg_max_iter=400):
         """∂F/∂τ_{aα} at fixed input x: (δρ_out, δbec_out per atom).
 
@@ -188,30 +216,10 @@ class PositionPerturbation:
         for ik, sph in enumerate(system.spheres):
             hk, c = cs.hks[isp][ik], cs.c_win[isp][ik]
             ns = cs.n_solve[isp][ik]
-            f, eps = cs.f_win[isp][ik], cs.eps_win[isp][ik]
+            f = cs.f_win[isp][ik]
             wk = float(kw[ik])
-            dh, ds, dp, db = self.dh_ds_psi(isp, ik)
-
-            # window coefficients c_mn (m any window state, n occupied)
-            hmat = torch.einsum("mg,ng->mn", c.conj(), dh)
-            smat = torch.einsum("mg,ng->mn", c.conj(), ds)
-            de = (eps[None, :] - eps[:, None]).to(CDTYPE)  # ε_n − ε_m
-            num = hmat - smat * eps[None, :].to(CDTYPE)
-            safe = de.abs() > 1e-8
-            de_safe = torch.where(safe, de, torch.ones_like(de))
-            # m ≠ n: c_mn = ⟨m|δH − ε_n δS|n⟩/(ε_n − ε_m); degenerate and
-            # diagonal entries take the S-orthonormality gauge −½⟨m|δS|n⟩
-            # (equal-f degenerate rotations cancel in every invariant sum)
-            cmn = torch.where(safe, num / de_safe, -0.5 * smat)
-            dpsi_win = cmn.mT @ c  # δψ_n(win) = Σ_m c_mn ψ_m, rows n
-
-            # complement: (H − ε_n S) δψ⊥ = −P_c†(δH − ε_n δS)|ψ_n⟩, occ n
-            rhs = dh[:ns] - eps[:ns, None].to(CDTYPE) * ds[:ns]
-            rhs = -(rhs - (rhs @ c.conj().T) @ cs.s_win[isp][ik])
-            dperp = cs._sternheimer_k(isp, ik, rhs, dpsi_warm[ik],
-                                      cg_tol, cg_max_iter)
-            dpsi_warm[ik] = dperp
-            dpsi = dpsi_win[:ns] + dperp
+            dpsi, _hmat, _smat, db = self.window_response(
+                isp, ik, dpsi_warm, cg_tol, cg_max_iter)
 
             fw = f[:ns]
             psi_r = g_to_r(c[:ns], sph.flat_idx, cs.shape)
@@ -229,23 +237,20 @@ class PositionPerturbation:
                 dbec[at] += wk * (m1 + m1.conj().T)
         dbec = [0.5 * (m + m.conj().T) for m in dbec]
 
-        # augmentation density: response becsum at fixed phases plus the
-        # explicit phase motion of atom a with the map-output becsum
-        aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE,
-                              device=dev)
-        for at, sp in enumerate(system.species_of_atom):
-            aug_sph = aug_sph + cs.phase_pos[:, at].conj() * torch.einsum(
-                "ij,ijg->g", dbec[at], system.aug[sp].q_g)
+        # augmentation density: response becsum at fixed phases (the shared
+        # becsum→ρ_aug builder) plus the explicit phase motion of atom a with
+        # the map-output becsum, which stays local to this perturbation
+        drho_aug = aug_density_from_becsum(system, dbec, cs.phase_pos)
         g_a = system.g_sphere[:, self.alpha].to(CDTYPE)
         sp_a = system.species_of_atom[self.a]
-        aug_sph = aug_sph + (-1j * g_a) * cs.phase_pos[:, self.a].conj() \
+        aug_sph = (-1j * g_a) * cs.phase_pos[:, self.a].conj() \
             * torch.einsum("ij,ijg->g",
                            cs.rho_ij_sp[isp][self.a].to(CDTYPE),
                            system.aug[sp_a].q_g)
         aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
         aug_box[system.sphere_idx] = aug_sph / cs.vol
-        drho_aug = torch.fft.ifftn(aug_box.reshape(cs.shape) * grid.n_points,
-                                   dim=(-3, -2, -1)).real
+        drho_aug = drho_aug + torch.fft.ifftn(
+            aug_box.reshape(cs.shape) * grid.n_points, dim=(-3, -2, -1)).real
         return drho_sm / cs.vol + drho_aug, dbec
 
 
@@ -357,21 +362,9 @@ def _total_orbital_response(cs, pert, w_grid, d_ddd, cg_tol=1e-10,
         ns = cs.n_solve[isp][ik]
         f, eps = cs.f_win[isp][ik], cs.eps_win[isp][ik]
         wk = float(system.kweights[ik])
-        dh, ds, dp, db = pert.dh_ds_psi(isp, ik, w_extra=w_grid,
-                                        d_extra=d_extra)
-        hmat = torch.einsum("mg,ng->mn", c.conj(), dh)
-        smat = torch.einsum("mg,ng->mn", c.conj(), ds)
-        de = (eps[None, :] - eps[:, None]).to(CDTYPE)
-        num = hmat - smat * eps[None, :].to(CDTYPE)
-        safe = de.abs() > 1e-8
-        de_safe = torch.where(safe, de, torch.ones_like(de))
-        cmn = torch.where(safe, num / de_safe, -0.5 * smat)
-        dpsi_win = cmn.mT @ c
-        rhs = dh[:ns] - eps[:ns, None].to(CDTYPE) * ds[:ns]
-        rhs = -(rhs - (rhs @ c.conj().T) @ cs.s_win[isp][ik])
-        dperp = cs._sternheimer_k(isp, ik, rhs, warm[ik], cg_tol,
-                                  cg_max_iter)
-        dpsi = dpsi_win[:ns] + dperp
+        dpsi, hmat, smat, _db = pert.window_response(
+            isp, ik, warm, cg_tol, cg_max_iter, w_extra=w_grid,
+            d_extra=d_extra)
         deps = (hmat.diagonal().real - eps * smat.diagonal().real)[:ns]
         dpsi_all.append(dpsi)
         deps_all.append(deps)
@@ -397,7 +390,11 @@ def hessian_column(res: dict, xc, a: int, alpha: int, *,
     from gradwave.core.energies.local_pp import local_energy
     from gradwave.core.energies.nl_pp import nonlocal_energy
     from gradwave.core.hamiltonian import projectors
-    from gradwave.postscf.paw_forces import _aug_at_fixed, _aug_from_becsum
+    from gradwave.postscf.paw_forces import (
+        _aug_at_fixed,
+        _aug_from_becsum,
+        rho_core_on_graph,
+    )
 
     _check_supported(res)
     if res.get("nspin", 1) != 1 or "hub_occ" in res:
@@ -482,28 +479,7 @@ def hessian_column(res: dict, xc, a: int, alpha: int, *,
         for at in range(len(system.atom_slices)):
             e = e + (ddd_leaves[at].to(CDTYPE) * rho_ij[at]).sum().real
     rho_g = r_to_g(rho_tot.to(CDTYPE))
-    rho_core = None
-    if system.rho_core is not None:
-        from gradwave.pseudo.radial_torch import RadialTables
-
-        q_sph = torch.linalg.norm(system.g_sphere, dim=1)
-        core = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE,
-                           device=pos.device)
-        for sp in set(system.species_of_atom):
-            paw = system.paws[sp]
-            if paw.core_rho is None:
-                continue
-            tab = RadialTables(paw, device=pos.device)
-            with torch.no_grad():
-                f_core = tab.core_of_g(q_sph)
-            atoms = [at for at, sa in enumerate(system.species_of_atom)
-                     if sa == sp]
-            core = core + phases[:, atoms].conj().sum(dim=1) \
-                * f_core.to(CDTYPE) / vol
-        core_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=pos.device)
-        core_box[system.sphere_idx] = core
-        rho_core = torch.fft.ifftn(core_box.reshape(shape) * grid.n_points,
-                                   dim=(-3, -2, -1)).real
+    rho_core = rho_core_on_graph(system, phases)
     rho_xc = rho_tot if rho_core is None else rho_tot + rho_core
     sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
     # grads below take create_graph=True (a second backward follows), so keep

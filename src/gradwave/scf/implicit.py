@@ -27,16 +27,23 @@ This module is the mathematical core that a torch.autograd.Function wrapper
 
 from __future__ import annotations
 
-import math
-
 import torch
 
-from gradwave.constants import E2
 from gradwave.core.density import sigma_from_rho
 from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
 from gradwave.core.hamiltonian import HamiltonianK, projectors
 from gradwave.core.xc.base import xc_eager
-from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.dtypes import RDTYPE
+
+# Cycle-free import direction: postscf._response depends only on core/, and
+# gradwave.postscf's __init__ is empty, so scf modules may pull the shared
+# response kernels from there.
+from gradwave.postscf._response import (
+    dyson_fixed_point,
+    fxc_hvp,
+    hartree_kernel,
+    sternheimer_shift,
+)
 from gradwave.scf.loop import SCFResult
 from gradwave.solvers.precond import teter
 
@@ -133,7 +140,7 @@ def apply_chi0(res: SCFResult, w_r: torch.Tensor, tol: float = 1e-8,
     dr = torch.zeros(grid.shape, dtype=RDTYPE, device=res.v_eff.device)
     for ik, h in enumerate(hs):
         c_occ, eps_occ = _occupied(res, ik)
-        gap_shift = 2.0 * float(eps_occ.max() - eps_occ.min()) + 10.0
+        gap_shift = sternheimer_shift(eps_occ)
         dpsi = _sternheimer(h, c_occ, eps_occ, w_r, alpha=gap_shift, tol=tol, max_iter=max_iter)
         psi_r = g_to_r(c_occ, h.sphere.flat_idx, grid.shape)
         dpsi_r = g_to_r(dpsi, h.sphere.flat_idx, grid.shape)
@@ -144,42 +151,30 @@ def apply_chi0(res: SCFResult, w_r: torch.Tensor, tol: float = 1e-8,
 
 
 def apply_k_hxc(res: SCFResult, xc, w_r: torch.Tensor) -> torch.Tensor:
-    """(K_Hxc w)(r) = Hartree kernel + f_xc·w, via autograd HVP for the XC part."""
-    grid = res.system.grid
-    # Hartree: 4πe²/G² in reciprocal space
-    w_g = r_to_g(w_r.to(CDTYPE))
-    inv_g2 = torch.where(
-        grid.g2 > 1e-12, 1.0 / torch.clamp(grid.g2, min=1e-12), torch.zeros_like(grid.g2)
-    )
-    kh = (torch.fft.ifftn(4.0 * math.pi * E2 * w_g * inv_g2, dim=(-3, -2, -1))
-          * grid.n_points).real
+    """(K_Hxc w)(r) = Hartree kernel + f_xc·w, via autograd HVP for the XC part.
 
-    # XC: f_xc·w = d/dρ ⟨v_xc(ρ), w⟩ (double backward through E_xc). xc_eager()
-    # forces eager, since compiled aot_autograd cannot double-backward.
-    rho = res.rho.detach().clone().requires_grad_(True)
-    with torch.enable_grad(), xc_eager():
-        sigma = sigma_from_rho(rho, grid.g_cart) if xc.needs_gradient else None
-        e_xc = xc.energy(rho, grid.volume, sigma)
-        (v_xc,) = torch.autograd.grad(e_xc, rho, create_graph=True)
-        inner = (v_xc * w_r.detach()).sum()
-        (fxc_w,) = torch.autograd.grad(inner, rho)
-    # v_xc here is per-grid-cell dE/dρ_j; convert both ways: kernel in physical
-    # units needs (N/Ω)² · (Ω/N) = N/Ω on the product
-    return kh + fxc_w * (grid.n_points / grid.volume)
+    Both kernels are the shared response primitives in postscf._response
+    (``fxc_hvp`` carries the per-grid-cell → physical n_points/Ω conversion).
+    """
+    grid = res.system.grid
+    return hartree_kernel(grid, w_r) + fxc_hvp(xc, res.rho, grid, w_r)
 
 
 @torch.no_grad()
 def solve_adjoint(res: SCFResult, xc, vbar_r: torch.Tensor, beta: float = 0.4,
                   tol: float = 1e-9, max_iter: int = 100) -> torch.Tensor:
     """Solve u = v̄ + K_Hxc[χ₀ u] by damped fixed-point iteration."""
-    u = vbar_r.clone()
-    for _ in range(max_iter):
-        u_new = vbar_r + apply_k_hxc(res, xc, apply_chi0(res, u))
-        du = float(torch.linalg.norm(u_new - u)) / max(1.0, float(torch.linalg.norm(u)))
-        u = u + beta * (u_new - u)
-        if du < tol:
-            return u
-    raise RuntimeError(f"adjoint fixed point not converged ({du:.2e} after {max_iter} iters)")
+
+    def _fail(step):
+        raise RuntimeError(
+            f"adjoint fixed point not converged ({step:.2e} after {max_iter} iters)")
+
+    # Defaults (beta 0.4, tol 1e-9, max_iter 100) and the raise-on-failure are
+    # this site's historical behavior; the sibling Dyson loops differ (see
+    # dyson_fixed_point's note).
+    return dyson_fixed_point(
+        lambda u: apply_k_hxc(res, xc, apply_chi0(res, u)), vbar_r,
+        beta=beta, tol=tol, max_iter=max_iter, on_fail=_fail)
 
 
 def density_loss_param_grads(res: SCFResult, xc, loss_fn) -> tuple[torch.Tensor, dict]:

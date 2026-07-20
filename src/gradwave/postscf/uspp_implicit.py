@@ -93,18 +93,28 @@ kernel block is the Dudarev second derivative δD_U = −(U−J)·herm(δn).
 
 from __future__ import annotations
 
-import math
-
 import torch
 
-from gradwave.constants import E2
 from gradwave.core.density import sigma_from_rho
 from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
 from gradwave.core.hamiltonian import becp, projectors
 from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.postscf._anderson import AndersonMixer
-from gradwave.postscf.uspp_frozen import aug_dmat
+from gradwave.postscf._response import (
+    fxc_hvp,
+    fxc_hvp_spin,
+    hartree_kernel,
+    spin_sigma_triple,
+    sternheimer_shift,
+)
+from gradwave.postscf.uspp_frozen import (
+    aug_density_from_becsum,
+    aug_dmat,
+    frozen_veff,
+    screen_phase,
+    screened_dscr,
+)
 from gradwave.solvers.precond import teter
 
 
@@ -126,12 +136,7 @@ def uspp_energy_param_grads(res: dict, xc) -> dict[str, torch.Tensor]:
         c2 = 0.0 if core is None else 0.5 * core
         ru = res["rho_spin"][0].detach() + c2
         rd = res["rho_spin"][1].detach() + c2
-        if xc.needs_gradient:
-            s_uu = sigma_from_rho(ru, grid.g_cart)
-            s_dd = sigma_from_rho(rd, grid.g_cart)
-            s_tot = sigma_from_rho(ru + rd, grid.g_cart)
-        else:
-            s_uu = s_dd = s_tot = None
+        s_uu, s_dd, s_tot = spin_sigma_triple(xc, ru, rd, grid.g_cart)
         e_theta = xc.energy(ru, rd, grid.volume, s_uu, s_dd, s_tot)
 
     if any(p.is_paw for p in system.paws):
@@ -193,9 +198,6 @@ class _ConvergedUSPP:
     augmentation pairing and the one-center machinery."""
 
     def __init__(self, res: dict, xc):
-        from gradwave.core.energies.hartree import hartree_potential_g
-        from gradwave.core.energies.local_pp import local_potential_g
-        from gradwave.scf.loop import vxc_potential
         from gradwave.scf.uspp import _HkS
 
         system = res["system"]
@@ -212,34 +214,13 @@ class _ConvergedUSPP:
         self.rho_xc = rho if core is None else rho + core
         self.rho_sp = ([rho] if ns == 1
                        else [r.detach() for r in res["rho_spin"]])
-        rho_g_box = r_to_g(rho.to(CDTYPE))
-        v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
-                               dim=(-3, -2, -1)) * grid.n_points).real
-        vloc_g = local_potential_g(
-            system.positions, torch.tensor(system.species_of_atom, device=dev),
-            system.vloc_tables, grid.g_cart, self.vol)
-        vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
-        if ns == 1:
-            v_xc, _ = vxc_potential(xc, self.rho_xc, grid)
-            self.veff_sp = [v_h + v_xc + vloc_r]
-        else:
-            from gradwave.scf.loop import vxc_spin_potential
 
-            c2 = None if core is None else 0.5 * core
-            v_up, v_dn, _ = vxc_spin_potential(
-                xc,
-                self.rho_sp[0] if core is None else self.rho_sp[0] + c2,
-                self.rho_sp[1] if core is None else self.rho_sp[1] + c2,
-                grid)
-            self.veff_sp = [v_h + v_up + vloc_r, v_h + v_dn + vloc_r]
+        # frozen v_eff and screened D from the shared uspp_frozen builders
+        # (∫v_eff^σ Q + PAW one-center ddd^σ, exactly the SCF's screening)
+        self.veff_sp = frozen_veff(res, xc)
+        self.phase_pos = screen_phase(system)
+        dscr_sp = screened_dscr(res, xc, self.veff_sp)
 
-        phase_arg = system.g_sphere @ system.positions.T  # (nGm, na)
-        self.phase_pos = torch.exp(
-            torch.complex(torch.zeros_like(phase_arg), phase_arg))
-
-        # screened D per spin at the converged state (∫v_eff^σ Q + ddd^σ)
-        dscr_sp = [system.proj_data[0].dij_full + self._aug_dmat(v)
-                   for v in self.veff_sp]
         self.is_paw = any(p.is_paw for p in system.paws)
         self.onec = None
         self.rho_ij_sp = (
@@ -251,15 +232,6 @@ class _ConvergedUSPP:
 
             self.onec = {sp: OneCenter(system.paws[sp], xc)
                          for sp in set(system.species_of_atom)}
-            dscr_sp = [d.clone() for d in dscr_sp]
-            for a, sp in enumerate(system.species_of_atom):
-                s0, s1 = system.atom_slices[a]
-                _, ddd = self.onec[sp].energy_and_ddd(self._bec_at(a))
-                if ns == 1:
-                    dscr_sp[0][s0:s1, s0:s1] += ddd.to(dev)
-                else:
-                    for isp in range(ns):
-                        dscr_sp[isp][s0:s1, s0:s1] += ddd[isp].to(dev)
             # HVPs are all taken at the frozen converged becsum — build
             # each atom's first-order graph once, pay one backward per call
             self.hvp_at = [self.onec[sp].hvp_factory(self._bec_at(a))
@@ -341,8 +313,7 @@ class _ConvergedUSPP:
                 self.b_win[isp].append(becp(p, c))
                 self.bh_win[isp].append(
                     becp(sphi_k, c) if sphi_k is not None else None)
-                self.shifts[isp].append(
-                    2.0 * float(eps.max() - eps.min()) + 10.0)
+                self.shifts[isp].append(sternheimer_shift(eps))
                 self.t_band[isp].append(torch.clamp(torch.einsum(
                     "bg,g,bg->b", c[:n_sv].conj(), hk.t.to(c.dtype),
                     c[:n_sv]).real, min=1e-6))
@@ -606,17 +577,8 @@ class _ConvergedUSPP:
                 dbec[isp][a] += a_bec[isp][a] - dmu * b_bec[isp][a]
             dbec[isp] = [0.5 * (m + m.conj().T) for m in dbec[isp]]
 
-            aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE,
-                                  device=dev)
-            for a, sp in enumerate(system.species_of_atom):
-                aug_sph = aug_sph + self.phase_pos[:, a].conj() \
-                    * torch.einsum("ij,ijg->g", dbec[isp][a],
-                                   system.aug[sp].q_g)
-            aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
-            aug_box[system.sphere_idx] = aug_sph / self.vol
-            drho_aug = torch.fft.ifftn(
-                aug_box.reshape(self.shape) * grid.n_points,
-                dim=(-3, -2, -1)).real
+            drho_aug = aug_density_from_becsum(system, dbec[isp],
+                                               self.phase_pos)
             drho_out.append(drho_sm[isp] / self.vol + drho_aug)
         if self.hub is not None:
             for ich in range(self.nsh):
@@ -628,45 +590,17 @@ class _ConvergedUSPP:
     def k_hxc_grid(self, drho_sp: list) -> list:
         """(K_Hxc δρ)^σ(r) per spin: the Hartree kernel acts on δρ_tot and
         enters every channel; f_xc is the autograd HVP of the grid E_xc at
-        the converged density (spin HVP for nspin=2 — the NiO-validated
-        kernel from hubbard_u._k_hxc_spin, NLCC core split half/half)."""
-        grid = self.grid
-        w_g = r_to_g(sum(drho_sp).to(CDTYPE))
-        inv_g2 = torch.where(grid.g2 > 1e-12,
-                             1.0 / torch.clamp(grid.g2, min=1e-12),
-                             torch.zeros_like(grid.g2))
-        kh = (torch.fft.ifftn(4.0 * math.pi * E2 * w_g * inv_g2,
-                              dim=(-3, -2, -1)) * grid.n_points).real
-        scale = grid.n_points / self.vol
+        the converged density (spin HVP for nspin=2, NLCC core split
+        half/half). Both kernels are the shared postscf._response ones."""
+        kh = hartree_kernel(self.grid, sum(drho_sp))
         if self.nspin == 1:
-            rho = self.rho_xc.detach().clone().requires_grad_(True)
-            # Double backward through E_xc, force eager (compile cannot do it).
-            with torch.enable_grad(), xc_eager():
-                sigma = (sigma_from_rho(rho, grid.g_cart)
-                         if self.xc.needs_gradient else None)
-                e_xc = self.xc.energy(rho, self.vol, sigma)
-                (v_xc,) = torch.autograd.grad(e_xc, rho, create_graph=True)
-                inner = (v_xc * drho_sp[0].detach()).sum()
-                (fxc_w,) = torch.autograd.grad(inner, rho)
-            return [kh + fxc_w * scale]
+            return [kh + fxc_hvp(self.xc, self.rho_xc, self.grid, drho_sp[0])]
         core = self.system.rho_core
         c2 = 0.0 if core is None else 0.5 * core
-        ru = (self.rho_sp[0] + c2).detach().clone().requires_grad_(True)
-        rd = (self.rho_sp[1] + c2).detach().clone().requires_grad_(True)
-        # Double backward through E_xc, force eager (compile cannot do it).
-        with torch.enable_grad(), xc_eager():
-            if self.xc.needs_gradient:
-                s_uu = sigma_from_rho(ru, grid.g_cart)
-                s_dd = sigma_from_rho(rd, grid.g_cart)
-                s_tot = sigma_from_rho(ru + rd, grid.g_cart)
-            else:
-                s_uu = s_dd = s_tot = None
-            e_xc = self.xc.energy(ru, rd, self.vol, s_uu, s_dd, s_tot)
-            vu, vd = torch.autograd.grad(e_xc, (ru, rd), create_graph=True)
-            inner = ((vu * drho_sp[0].detach()).sum()
-                     + (vd * drho_sp[1].detach()).sum())
-            fu, fd = torch.autograd.grad(inner, (ru, rd))
-        return [kh + fu * scale, kh + fd * scale]
+        fu, fd = fxc_hvp_spin(self.xc, self.rho_sp[0] + c2,
+                              self.rho_sp[1] + c2, self.grid,
+                              drho_sp[0], drho_sp[1])
+        return [kh + fu, kh + fd]
 
     def hvp_onecenter(self, dbec_sp: list) -> list:
         """H_1c δbec per spin: per-atom one-center Hessian-vector products
@@ -897,12 +831,7 @@ def uspp_density_loss_param_grads(
                 c2 = 0.0 if core is None else 0.5 * core
                 ru = (cs.rho_sp[0] + c2).detach().clone().requires_grad_(True)
                 rd = (cs.rho_sp[1] + c2).detach().clone().requires_grad_(True)
-                if xc.needs_gradient:
-                    s_uu = sigma_from_rho(ru, grid.g_cart)
-                    s_dd = sigma_from_rho(rd, grid.g_cart)
-                    s_tot = sigma_from_rho(ru + rd, grid.g_cart)
-                else:
-                    s_uu = s_dd = s_tot = None
+                s_uu, s_dd, s_tot = spin_sigma_triple(xc, ru, rd, grid.g_cart)
                 e_xc = xc.energy(ru, rd, grid.volume, s_uu, s_dd, s_tot)
                 vu, vd = torch.autograd.grad(e_xc, (ru, rd),
                                              create_graph=True)

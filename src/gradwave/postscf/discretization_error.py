@@ -80,6 +80,7 @@ from gradwave.core.hamiltonian import (
 )
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.grids import build_gsphere, gmax_from_ecut
+from gradwave.postscf._response import dyson_fixed_point, spin_sigma_triple
 from gradwave.postscf.uspp_frozen import (
     aug_density_from_becsum,
     frozen_veff,
@@ -145,6 +146,57 @@ def _bands_at(res: SCFResult, ik: int, sp: int | None = None):
     return coeffs[sp][ik], eigs[sp][ik]
 
 
+def _resolve_ecut_large(system, ecut_large, factor):
+    """Default ``ecut_large`` to factor*ecut and validate it fits the box.
+
+    The enlarged sphere must satisfy gmax(ecut_large) <= 2*gmax(ecut), i.e.
+    ecut_large <= 4*ecut, so it fits the density FFT box.
+    """
+    ecut = float(system.ecut)
+    if ecut_large is None:
+        ecut_large = factor * ecut
+    if gmax_from_ecut(ecut_large) > 2.0 * gmax_from_ecut(ecut) * (1.0 + 1e-9):
+        raise ValueError(
+            f"ecut_large={ecut_large:.1f} eV exceeds 4*ecut={4 * ecut:.1f} eV; the "
+            "enlarged sphere would not fit the density FFT box. Lower ecut_large."
+        )
+    return ecut_large
+
+
+def _projdata_on_sphere(system, sph, device, pseudos):
+    """ProjectorData on a given (enlarged) sphere for the ``pseudos`` list —
+    ``system.upfs`` on the norm-conserving path, ``system.paws`` for USPP/PAW
+    (the two carry the same betas/dij interface)."""
+    beta_ls = [[b.l for b in p.betas] for p in pseudos]
+    dij_species = [torch.as_tensor(p.dij, dtype=RDTYPE, device=device)
+                   for p in pseudos]
+    q = np.sqrt(sph.kpg2.cpu().numpy())
+    beta_tables = [torch.as_tensor(beta_form_factors(p, q), dtype=RDTYPE,
+                                   device=device) for p in pseudos]
+    return build_projector_data(sph, system.species_of_atom, beta_tables,
+                                beta_ls, dij_species, system.grid.volume)
+
+
+def _pad_to_sphere(coeffs, sph0, sph1, grid_shape):
+    """Zero-pad coefficients from the run sphere onto the enlarged one."""
+    box = sphere_to_box(coeffs, sph0.flat_idx, grid_shape)
+    return box_to_sphere(box, sph1.flat_idx)
+
+
+def _complement_correction(resid, t, eps, ecut):
+    """δψ = −P_annulus R / (T_G − ε): the diagonal complement correction.
+
+    ``resid`` is the (possibly generalized) residual R = P(H − εS)ψ; ``t`` the
+    kinetic energies of the enlarged basis; broadcasting supports both the
+    per-k (nband, npw) layout (1-D ``t``/``eps``) and the batched spinor
+    (nk, nband, 2·npw_max) layout (2-D ``t``/``eps``).
+    """
+    annulus = t > ecut * (1.0 + 1e-9)
+    denom = torch.clamp(t.unsqueeze(-2) - eps.unsqueeze(-1), min=1e-3)
+    corr = -resid / denom.to(resid.dtype)
+    return torch.where(annulus.unsqueeze(-2), corr, torch.zeros_like(resid))
+
+
 def _enlarged_hamiltonian(res: SCFResult, k_frac, ecut_large: float, device,
                           v_eff=None):
     """Build a HamiltonianK on the enlarged G-sphere at ecut_large for one k.
@@ -154,16 +206,7 @@ def _enlarged_hamiltonian(res: SCFResult, k_frac, ecut_large: float, device,
     system = res.system
     grid = system.grid
     sph = build_gsphere(grid, ecut_large, k_frac, device=device)
-    beta_ls = [[b.l for b in upf.betas] for upf in system.upfs]
-    dij_species = [torch.as_tensor(upf.dij, dtype=RDTYPE, device=device) for upf in system.upfs]
-    q = np.sqrt(sph.kpg2.cpu().numpy())
-    beta_tables = [
-        torch.as_tensor(beta_form_factors(upf, q), dtype=RDTYPE, device=device)
-        for upf in system.upfs
-    ]
-    pd = build_projector_data(
-        sph, system.species_of_atom, beta_tables, beta_ls, dij_species, grid.volume
-    )
+    pd = _projdata_on_sphere(system, sph, device, system.upfs)
     p = projectors(pd, system.positions)
     v = res.v_eff if v_eff is None else v_eff
     return sph, HamiltonianK(sph, grid.shape, v, pd, p)
@@ -176,20 +219,15 @@ def _dyson_dress(res, xc, drho0, *, beta, tol, max_iter, verbose):
     Solves the fixed point  drho = drho0 + chi0[ K_Hxc[ drho ] ], i.e. applies
     (1 - chi0 K)^-1 to the complement estimate, capturing the coarse-space
     self-consistent part of the error. Damped iteration reusing the response
-    primitives from scf/implicit.py.
+    primitives from scf/implicit.py. This site's historical behavior — an
+    |x_new| step denominator, defaults (beta 0.4, tol 1e-6, max_iter 60) and
+    a silent return of the unconverged iterate — is preserved explicitly;
+    see ``dyson_fixed_point``'s note on the former copies' divergence.
     """
-    drho = drho0.clone()
-    for it in range(max_iter):
-        induced = apply_chi0(res, apply_k_hxc(res, xc, drho))
-        drho_new = drho0 + induced
-        denom_n = max(1.0, float(torch.linalg.norm(drho_new)))
-        step = float(torch.linalg.norm(drho_new - drho)) / denom_n
-        drho = drho + beta * (drho_new - drho)
-        if verbose:
-            print(f"  dyson it {it}: rel step {step:.2e}", flush=True)
-        if step < tol:
-            break
-    return drho
+    return dyson_fixed_point(
+        lambda d: apply_chi0(res, apply_k_hxc(res, xc, d)), drho0,
+        beta=beta, tol=tol, max_iter=max_iter, on_fail=None, denom_new=True,
+        verbose=verbose)
 
 
 @torch.no_grad()
@@ -269,13 +307,7 @@ def estimate_density_error(
             "use_symmetry=False for nspin=2")
     if sym is not None and dyson:
         raise NotImplementedError("Dyson dressing requires use_symmetry=False")
-    if ecut_large is None:
-        ecut_large = factor * ecut
-    if gmax_from_ecut(ecut_large) > 2.0 * gmax_from_ecut(ecut) * (1.0 + 1e-9):
-        raise ValueError(
-            f"ecut_large={ecut_large:.1f} eV exceeds 4*ecut={4 * ecut:.1f} eV; the "
-            "enlarged sphere would not fit the density FFT box. Lower ecut_large."
-        )
+    ecut_large = _resolve_ecut_large(system, ecut_large, factor)
 
     drho = torch.zeros(grid.shape, dtype=RDTYPE, device=device)
     denergy = 0.0
@@ -292,15 +324,11 @@ def estimate_density_error(
                 res, sph0.k_frac, ecut_large, device, v_eff=v_eff_sp)
 
             # zero-pad occupied orbitals from the Ecut sphere onto the enlarged one
-            box = sphere_to_box(c_occ, sph0.flat_idx, grid.shape)
-            c_occ_1 = box_to_sphere(box, sph1.flat_idx)  # (n_occ, npw1)
+            c_occ_1 = _pad_to_sphere(c_occ, sph0, sph1, grid.shape)  # (n_occ, npw1)
 
-            # complement residual R = P_annulus (H - eps) psi
+            # complement residual R = P_annulus (H - eps) psi and correction
             resid = h1.apply(c_occ_1) - eps_occ[:, None] * c_occ_1
-            annulus = h1.t > ecut * (1.0 + 1e-9)  # (npw1,) bool
-            denom = torch.clamp(h1.t[None, :] - eps_occ[:, None], min=1e-3)
-            corr = -resid / denom.to(resid.dtype)
-            dpsi = torch.where(annulus[None, :], corr, torch.zeros_like(resid))
+            dpsi = _complement_correction(resid, h1.t, eps_occ, ecut)
 
             # density error contribution: drho = sum_i f_i * 2 Re(psi_i* dpsi_i).
             # occ is [0,2] for nspin=1 and [0,1] per spin channel for nspin=2;
@@ -382,17 +410,23 @@ def _uspp_enlarged_hks(system, k_frac, ecut_large, v_eff, dscr_full, device):
     grid = system.grid
     sph = build_gsphere(grid, ecut_large, np.asarray(k_frac, dtype=float),
                         device=device)
-    q = np.sqrt(sph.kpg2.cpu().numpy())
-    beta_ls = [[b.l for b in p.betas] for p in system.paws]
-    dij_species = [torch.as_tensor(p.dij, dtype=RDTYPE, device=device)
-                   for p in system.paws]
-    beta_tables = [torch.as_tensor(beta_form_factors(p, q), dtype=RDTYPE,
-                                   device=device) for p in system.paws]
-    pd = build_projector_data(sph, system.species_of_atom, beta_tables,
-                              beta_ls, dij_species, grid.volume)
+    pd = _projdata_on_sphere(system, sph, device, system.paws)
     p = projectors(pd, system.positions)
     hs = _HkS(sph, grid.shape, v_eff, pd, p, dscr_full, system.q_full)
     return sph, hs, pd, p
+
+
+def _uspp_band_correction(hs, sph0, sph1, coeffs, eps, grid_shape, ecut):
+    """Pad + generalized residual + complement correction on one k for USPP.
+
+    R = P_annulus (H − εS) ψ on the enlarged _HkS, δψ = −R/(T_G − ε) on the
+    annulus. Returns (c1, resid, dpsi); the per-band second-order shift is
+    (dpsi.conj() * resid).real.sum(dim=1).
+    """
+    c1 = _pad_to_sphere(coeffs, sph0, sph1, grid_shape)
+    resid = hs.h(c1) - eps[:, None].to(CDTYPE) * hs.s(c1)
+    dpsi = _complement_correction(resid, hs.t, eps, ecut)
+    return c1, resid, dpsi
 
 
 def _aug_density_from_becsum(system, becsum):
@@ -429,13 +463,7 @@ def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
     dev = system.positions.device
     ecut = float(system.ecut)
     nspin = int(res.get("nspin", 1))
-    if ecut_large is None:
-        ecut_large = factor * ecut
-    if gmax_from_ecut(ecut_large) > 2.0 * gmax_from_ecut(ecut) * (1.0 + 1e-9):
-        raise ValueError(
-            f"ecut_large={ecut_large:.1f} eV exceeds 4*ecut={4 * ecut:.1f} eV; the "
-            "enlarged sphere would not fit the density FFT box. Lower ecut_large."
-        )
+    ecut_large = _resolve_ecut_large(system, ecut_large, factor)
 
     veff_s, dscr_s = _uspp_frozen_operators(res, xc)
     coeffs = res["coeffs"]
@@ -467,16 +495,9 @@ def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
             sph1, hs, pd1, p1 = _uspp_enlarged_hks(
                 system, sph0.k_frac, ecut_large, v_eff, dscr_full, dev)
 
-            # zero-pad occupied orbitals onto the enlarged sphere
-            box = sphere_to_box(c_occ, sph0.flat_idx, grid.shape)
-            c_occ_1 = box_to_sphere(box, sph1.flat_idx)
-
-            # generalized complement residual R = P_annulus (H - eps S) psi
-            resid = hs.h(c_occ_1) - eps_occ[:, None].to(CDTYPE) * hs.s(c_occ_1)
-            annulus = hs.t > ecut * (1.0 + 1e-9)
-            denom = torch.clamp(hs.t[None, :] - eps_occ[:, None], min=1e-3)
-            corr = -resid / denom.to(resid.dtype)
-            dpsi = torch.where(annulus[None, :], corr, torch.zeros_like(resid))
+            # zero-pad + generalized residual R = P_annulus (H - eps S) psi
+            c_occ_1, resid, dpsi = _uspp_band_correction(
+                hs, sph0, sph1, c_occ, eps_occ, grid.shape, ecut)
 
             # smooth-density change (occ is [0,2] for nspin=1, [0,1] per spin)
             psi_r = g_to_r(c_occ, sph0.flat_idx, grid.shape)
@@ -571,13 +592,7 @@ def _estimate_eigenvalue_error_uspp(res: dict, *, ecut_large, factor, xc, bands)
     dev = system.positions.device
     ecut = float(system.ecut)
     nspin = int(res.get("nspin", 1))
-    if ecut_large is None:
-        ecut_large = factor * ecut
-    if gmax_from_ecut(ecut_large) > 2.0 * gmax_from_ecut(ecut) * (1.0 + 1e-9):
-        raise ValueError(
-            f"ecut_large={ecut_large:.1f} eV exceeds 4*ecut={4 * ecut:.1f} eV; the "
-            "enlarged sphere would not fit the density FFT box. Lower ecut_large."
-        )
+    ecut_large = _resolve_ecut_large(system, ecut_large, factor)
 
     veff_s, dscr_s = _uspp_frozen_operators(res, xc)
     coeffs, eigs = res["coeffs"], res["eigenvalues"]
@@ -594,13 +609,8 @@ def _estimate_eigenvalue_error_uspp(res: dict, *, ecut_large, factor, xc, bands)
             eps_sel = e_sp[ik][sel]
             sph1, hs, _pd1, _p1 = _uspp_enlarged_hks(
                 system, sph0.k_frac, ecut_large, v_eff, dscr_full, dev)
-            box = sphere_to_box(c_sel, sph0.flat_idx, grid.shape)
-            c1 = box_to_sphere(box, sph1.flat_idx)
-            resid = hs.h(c1) - eps_sel[:, None].to(CDTYPE) * hs.s(c1)
-            annulus = hs.t > ecut * (1.0 + 1e-9)
-            denom = torch.clamp(hs.t[None, :] - eps_sel[:, None], min=1e-3)
-            dpsi = torch.where(annulus[None, :], -resid / denom.to(resid.dtype),
-                               torch.zeros_like(resid))
+            _c1, resid, dpsi = _uspp_band_correction(
+                hs, sph0, sph1, c_sel, eps_sel, grid.shape, ecut)
             deig_k.append((dpsi.conj() * resid).real.sum(dim=1))
             eig_k.append(eps_sel.clone())
         deig_s.append(deig_k)
@@ -612,34 +622,6 @@ def _estimate_eigenvalue_error_uspp(res: dict, *, ecut_large, factor, xc, bands)
         deig, eig = deig_s, eig_s
     return EigenvalueError(deig=deig, eig=eig, ecut=ecut,
                            ecut_large=ecut_large, nspin=nspin)
-
-
-def _enlarged_projector_data(res: SCFResult, sph, device):
-    """ProjectorData on a given (enlarged) sphere for the nonlocal energy."""
-    system = res.system
-    grid = system.grid
-    beta_ls = [[b.l for b in upf.betas] for upf in system.upfs]
-    dij_species = [torch.as_tensor(upf.dij, dtype=RDTYPE, device=device) for upf in system.upfs]
-    q = np.sqrt(sph.kpg2.cpu().numpy())
-    beta_tables = [
-        torch.as_tensor(beta_form_factors(upf, q), dtype=RDTYPE, device=device)
-        for upf in system.upfs
-    ]
-    return build_projector_data(
-        sph, system.species_of_atom, beta_tables, beta_ls, dij_species, grid.volume
-    )
-
-
-def _uspp_enlarged_projdata(system, sph1, device):
-    """USPP/PAW ProjectorData on a given enlarged sphere (differentiable becp)."""
-    q = np.sqrt(sph1.kpg2.cpu().numpy())
-    beta_ls = [[b.l for b in p.betas] for p in system.paws]
-    dij_species = [torch.as_tensor(p.dij, dtype=RDTYPE, device=device)
-                   for p in system.paws]
-    beta_tables = [torch.as_tensor(beta_form_factors(p, q), dtype=RDTYPE,
-                                   device=device) for p in system.paws]
-    return build_projector_data(sph1, system.species_of_atom, beta_tables,
-                                beta_ls, dij_species, system.grid.volume)
 
 
 def _estimate_force_error_uspp(res: dict, err: DiscretizationError, xc, *,
@@ -661,7 +643,11 @@ def _estimate_force_error_uspp(res: dict, err: DiscretizationError, xc, *,
     from gradwave.core.density import sigma_from_rho
     from gradwave.core.energies.hartree import hartree_energy
     from gradwave.core.xc.base import xc_eager
-    from gradwave.postscf.paw_forces import _aug_at_fixed, _aug_from_becsum
+    from gradwave.postscf.paw_forces import (
+        _aug_at_fixed,
+        _aug_from_becsum,
+        rho_core_on_graph,
+    )
     from gradwave.postscf.uspp_implicit import _ConvergedUSPP
 
     system = res["system"]
@@ -694,7 +680,7 @@ def _estimate_force_error_uspp(res: dict, err: DiscretizationError, xc, *,
 
     pos = system.positions.detach().clone().requires_grad_(True)
     # enlarged projectors (the enlarged spheres are spin-independent)
-    pd_list = [_uspp_enlarged_projdata(system, sph_s[0][ik], dev)
+    pd_list = [_projdata_on_sphere(system, sph_s[0][ik], dev, system.paws)
                for ik in range(nk)]
     projs = [projectors(pd, pos) for pd in pd_list]
     phase_arg = system.g_sphere @ pos.T
@@ -771,7 +757,7 @@ def _estimate_force_error_uspp(res: dict, err: DiscretizationError, xc, *,
 
     # local + Hartree see the total density; XC sees the spin channels (+ NLCC)
     rho_tot = sum(rho_chans)
-    rho_core = _uspp_rho_core_on_graph(system, phases, pos)
+    rho_core = rho_core_on_graph(system, phases)
     if nspin == 1:
         rho_xc = rho_tot if rho_core is None else rho_tot + rho_core
         sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
@@ -780,12 +766,7 @@ def _estimate_force_error_uspp(res: dict, err: DiscretizationError, xc, *,
     else:
         c2 = 0.0 if rho_core is None else 0.5 * rho_core
         r_u, r_d = rho_chans[0] + c2, rho_chans[1] + c2
-        if xc.needs_gradient:
-            s_uu = sigma_from_rho(r_u, grid.g_cart)
-            s_dd = sigma_from_rho(r_d, grid.g_cart)
-            s_tt = sigma_from_rho(r_u + r_d, grid.g_cart)
-        else:
-            s_uu = s_dd = s_tt = None
+        s_uu, s_dd, s_tt = spin_sigma_triple(xc, r_u, r_d, grid.g_cart)
         with xc_eager():
             e = e + xc.energy(r_u, r_d, vol, s_uu, s_dd, s_tt)
     rho_g = r_to_g(rho_tot.to(CDTYPE))
@@ -808,36 +789,6 @@ def _estimate_force_error_uspp(res: dict, err: DiscretizationError, xc, *,
     if remove_net:
         dF = dF - dF.mean(dim=0, keepdim=True)
     return dF.detach()
-
-
-def _uspp_rho_core_on_graph(system, phases, pos):
-    """NLCC core density on the graph (differentiable in positions), or None.
-
-    Copied from postscf.paw_forces: the core rides the same e^{+iGτ} phases as
-    the augmentation, so its τ-derivative is the NLCC core force and it enters
-    the XC argument here.
-    """
-    if system.rho_core is None:
-        return None
-    from gradwave.pseudo.radial_torch import RadialTables
-
-    grid = system.grid
-    vol = grid.volume
-    q_sph = torch.linalg.norm(system.g_sphere, dim=1)
-    core = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE, device=pos.device)
-    for sp in set(system.species_of_atom):
-        paw = system.paws[sp]
-        if paw.core_rho is None:
-            continue
-        tab = RadialTables(paw, device=pos.device)
-        with torch.no_grad():
-            f_core = tab.core_of_g(q_sph)
-        atoms = [a for a, sa in enumerate(system.species_of_atom) if sa == sp]
-        core = core + phases[:, atoms].conj().sum(dim=1) * f_core.to(CDTYPE) / vol
-    core_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=pos.device)
-    core_box[system.sphere_idx] = core
-    return torch.fft.ifftn(core_box.reshape(grid.shape) * grid.n_points,
-                           dim=(-3, -2, -1)).real
 
 
 def estimate_force_error(
@@ -919,7 +870,7 @@ def estimate_force_error(
         occ_t = torch.zeros(nk, nocc_max, dtype=RDTYPE, device=device)
         becps = []
         for ik, sph1 in enumerate(sph_s[isp]):
-            pd1 = _enlarged_projector_data(res, sph1, device)
+            pd1 = _projdata_on_sphere(system, sph1, device, system.upfs)
             if dij_enl is None:
                 dij_enl = pd1.dij_full
             p1 = projectors(pd1, pos)  # differentiable in positions
@@ -1049,12 +1000,7 @@ def _spinor_complement(res, *, ecut_large, factor, xc, smearing, width):
     device = res.rho.device
     ecut = float(system.ecut)
     vol = grid.volume
-    if ecut_large is None:
-        ecut_large = factor * ecut
-    if gmax_from_ecut(ecut_large) > 2.0 * gmax_from_ecut(ecut) * (1.0 + 1e-9):
-        raise ValueError(
-            f"ecut_large={ecut_large:.1f} eV exceeds 4*ecut={4 * ecut:.1f} eV; the "
-            "enlarged sphere would not fit the density FFT box. Lower ecut_large.")
+    ecut_large = _resolve_ecut_large(system, ecut_large, factor)
 
     # frozen spinor potential rebuilt from the converged (rho, m), the same
     # v_r = v_H + v_xc + v_loc and exchange field b_xc the SCF forms each step.
@@ -1105,10 +1051,7 @@ def _spinor_complement(res, *, ecut_large, factor, xc, smearing, width):
     mask2 = torch.cat([bk1.mask, bk1.mask], dim=-1)      # (nk, 2*m1)
     hc1 = h1.apply(c1)
     resid = hc1 - eps[:, :, None] * c1
-    annulus = t2 > ecut * (1.0 + 1e-9)                   # (nk, 2*m1)
-    denom = torch.clamp(t2[:, None, :] - eps[:, :, None], min=1e-3)
-    dpsi = torch.where(annulus[:, None, :], -resid / denom.to(resid.dtype),
-                       torch.zeros_like(resid))
+    dpsi = _complement_correction(resid, t2, eps, ecut)
     dpsi = dpsi * mask2[:, None, :]
 
     return {
@@ -1222,13 +1165,9 @@ def _band_eig_error(h1, sph0, sph1, coeffs, eig, grid_shape, ecut):
     eigenvalue shift is δε = <δψ | R> = -sum_annulus |R|^2/(T_G - eps) <= 0.
     This is the per-band term the energy error sums over occupations.
     """
-    box = sphere_to_box(coeffs, sph0.flat_idx, grid_shape)
-    c1 = box_to_sphere(box, sph1.flat_idx)
+    c1 = _pad_to_sphere(coeffs, sph0, sph1, grid_shape)
     resid = h1.apply(c1) - eig[:, None] * c1
-    annulus = h1.t > ecut * (1.0 + 1e-9)
-    denom = torch.clamp(h1.t[None, :] - eig[:, None], min=1e-3)
-    dpsi = torch.where(annulus[None, :], -resid / denom.to(resid.dtype),
-                       torch.zeros_like(resid))
+    dpsi = _complement_correction(resid, h1.t, eig, ecut)
     return (dpsi.conj() * resid).real.sum(dim=1)  # (nband,) <= 0
 
 
@@ -1279,13 +1218,7 @@ def estimate_eigenvalue_error(
     device = res.v_eff.device
     ecut = float(system.ecut)
     nspin = int(getattr(res, "nspin", 1))
-    if ecut_large is None:
-        ecut_large = factor * ecut
-    if gmax_from_ecut(ecut_large) > 2.0 * gmax_from_ecut(ecut) * (1.0 + 1e-9):
-        raise ValueError(
-            f"ecut_large={ecut_large:.1f} eV exceeds 4*ecut={4 * ecut:.1f} eV; the "
-            "enlarged sphere would not fit the density FFT box. Lower ecut_large."
-        )
+    ecut_large = _resolve_ecut_large(system, ecut_large, factor)
 
     spins = [None] if nspin == 1 else list(range(nspin))
     deig_s, eig_s = [], []

@@ -37,7 +37,12 @@ from gradwave.core.fftbox import r_to_g
 from gradwave.core.hamiltonian import build_projector_data, projectors
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.postscf._anderson import AndersonMixer
-from gradwave.postscf.hubbard_u import _cg_sternheimer_b, _pad
+from gradwave.postscf._response import (
+    cg_sternheimer,
+    insulator_window,
+    pad_coeffs,
+    sternheimer_shift,
+)
 from gradwave.pseudo.kb import beta_form_factors
 from gradwave.scf.implicit import apply_k_hxc
 
@@ -103,14 +108,11 @@ def dielectric_born(res, xc, *, dk: float = 1e-3, cg_tol: float = 1e-9,
     kw = system.kweights
     vol = grid.volume
 
-    occ = res.occupations
-    nocc = int((occ[0] > 1.0).sum())
-    if not ((occ[:, :nocc] - 2.0).abs().max() < 1e-6
-            and (occ[:, nocc:].abs().max() < 1e-6 if occ.shape[1] > nocc else True)):
-        raise NotImplementedError("insulating occupations (f=2) required")
-    c_occ = _pad(res.coeffs, bk.npw_max)[:, :nocc]
+    nocc = insulator_window(res.occupations, 2.0,
+                            "insulating occupations (f=2) required")
+    c_occ = pad_coeffs(res.coeffs, bk.npw_max)[:, :nocc]
     eps_occ = res.eigenvalues[:, :nocc].to(RDTYPE)
-    shift = 2.0 * float(eps_occ.max() - eps_occ.min()) + 10.0
+    shift = sternheimer_shift(eps_occ)
 
     from gradwave.core.batch import BatchedHamiltonian, box_to_sphere_b
 
@@ -124,8 +126,8 @@ def dielectric_born(res, xc, *, dk: float = 1e-3, cg_tol: float = 1e-9,
     xi = []
     for a in range(3):
         rhs = -1j * p_c(_dhdk_psi(system, c_occ, a, dk))
-        xi.append(_cg_sternheimer_b(h, bk, c_occ, eps_occ, rhs,
-                                    torch.zeros_like(rhs), shift, tol=cg_tol))
+        xi.append(cg_sternheimer(h, bk, c_occ, eps_occ, rhs,
+                                 torch.zeros_like(rhs), shift, tol=cg_tol))
 
     psi_r = g_to_r_b(c_occ, bk, grid.shape)
     n_pts = grid.n_points
@@ -142,8 +144,8 @@ def dielectric_born(res, xc, *, dk: float = 1e-3, cg_tol: float = 1e-9,
             if it > 1:
                 u_r = u_flat.reshape(grid.shape)
                 rhs = rhs - p_c(box_to_sphere_b(psi_r * u_r.to(psi_r.dtype), bk))
-            dpsi = _cg_sternheimer_b(h, bk, c_occ, eps_occ, rhs, dpsi, shift,
-                                     tol=cg_tol)
+            dpsi = cg_sternheimer(h, bk, c_occ, eps_occ, rhs, dpsi, shift,
+                                  tol=cg_tol)
             dpsi_r = g_to_r_b(dpsi, bk, grid.shape)
             drho = 4.0 * (kw[:, None, None, None, None]
                           * (psi_r.conj() * dpsi_r).real).sum(dim=(0, 1)) / vol

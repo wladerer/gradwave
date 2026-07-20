@@ -44,12 +44,21 @@ import torch
 
 from gradwave.core.occupations import SCHEMES
 from gradwave.dtypes import RDTYPE
+
+# DysonNotConverged moved to postscf._response with the shared Dyson solver;
+# re-exported here for the callers that import it from this module.
+from gradwave.postscf._response import DysonNotConverged, dyson_fixed_point
 from gradwave.scf.implicit import apply_chi0, apply_k_hxc
 from gradwave.scf.loop import SCFResult
 
-
-class DysonNotConverged(RuntimeError):
-    """The screening Dyson fixed point did not reach ``tol`` within ``max_iter``."""
+__all__ = [
+    "DysonNotConverged",
+    "ScfConvergenceError",
+    "SmearingError",
+    "estimate_kpoint_error",
+    "estimate_scf_error",
+    "estimate_smearing_error",
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -220,17 +229,18 @@ def _dyson_solve(res, xc, r, *, beta, tol, max_iter):
     Solves x = r + chi0[K_Hxc[x]], the same operator ``discretization_error``'s
     Dyson dressing uses, here applied to the SCF residual. chi0 restricts this
     to nspin=1 insulators with use_symmetry=False (apply_chi0 raises otherwise).
+    Defaults (beta 0.4, tol 1e-7, max_iter 80 at the caller) and the
+    DysonNotConverged raise are this site's historical behavior; see
+    ``dyson_fixed_point``'s note on the divergence between the former copies.
     """
-    x = r.clone()
-    for _ in range(max_iter):
-        x_new = r + apply_chi0(res, apply_k_hxc(res, xc, x))
-        denom = max(1.0, float(torch.linalg.norm(x)))
-        step = float(torch.linalg.norm(x_new - x)) / denom
-        x = x + beta * (x_new - x)
-        if step < tol:
-            return x
-    raise DysonNotConverged(
-        f"Dyson solve not converged ({step:.2e} after {max_iter} iters)")
+
+    def _fail(step):
+        raise DysonNotConverged(
+            f"Dyson solve not converged ({step:.2e} after {max_iter} iters)")
+
+    return dyson_fixed_point(
+        lambda x: apply_chi0(res, apply_k_hxc(res, xc, x)), r,
+        beta=beta, tol=tol, max_iter=max_iter, on_fail=_fail)
 
 
 # --------------------------------------------------------------------------- #
