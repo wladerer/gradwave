@@ -6,7 +6,6 @@ the dtype-polymorphic H apply and the two-stage band solver on CPU.
 
 from pathlib import Path
 
-import numpy as np
 import pytest
 import torch
 
@@ -75,10 +74,9 @@ def test_uspp_paw_scf_mixed_precision_matches_fp64():
 
     torch.set_num_threads(4)
     paw = parse_upf_paw(FIX / "pseudos" / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
-    pos = np.array([[0.0, 0, 0], [A / 4] * 3])
 
     def run(mp):
-        s = setup_uspp(SI_CELL, pos, [0, 0], [paw], ecut=15 * RY,
+        s = setup_uspp(SI_CELL, SI_POS, [0, 0], [paw], ecut=15 * RY,
                        kmesh=(2, 2, 2), ecutrho=60 * RY)
         return scf_uspp(s, PBE(), etol=1e-10, rhotol=1e-9, verbose=False,
                         max_iter=60, mixed_precision=mp)
