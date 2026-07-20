@@ -124,24 +124,43 @@ direct operator (rel-err 2e-2 → 1e-13 as the rank fills); and ACE reproduces
   (autograd dE/dω matches finite difference to 1e-9), so a learned hybrid trains
   the mixing and range end to end.
 
-What remains, in build order: wire the ACE operator into
-`BatchedHamiltonian.apply` and iterate exchange to self-consistency (the outer
-ACE/EXX loop — the operator and the differentiable energy now exist, they just
-do not yet act in the SCF); the multi-k *ISDF-K* acceleration (this multi-k
-build is the direct O(N_k² N_occ²) reference the interpolation compression will
-target); a Gygi–Baldereschi q+G=0 correction to complete unscreened `full`/PBE0
-(screened HSE is already complete); a truncated Coulomb for physically isolated
-molecules; and the RPA correlation contraction.
+**Self-consistent hybrid SCF + ISDF-K LANDED (2026-07-20), Γ.**
+- `postscf/hybrid.py` — a self-consistent PBE0-form global hybrid at Γ.
+  `ScaledExchangePBE` scales the semilocal exchange by (1−α); `GammaFockExchange`
+  is an SCF `fock` hook that rebuilds the ACE operator from the current orbitals
+  each iteration (lagging one step like DFT+U) and adds α·V_x to
+  `BatchedHamiltonian.apply` plus α·E_x as the new `EnergyBreakdown.fock` term.
+  The hook is a minimal, guarded addition to `scf` (default `fock=None` leaves
+  every existing path bit-identical — golden energies and the E↔H consistency
+  gate still pass). Validated (`tests/integration/test_hybrid_scf.py`): α=0
+  reproduces the PBE SCF exactly; PBE0 (α=0.25) converges and opens the Γ Si gap
+  2.32→2.97 eV; the Fock energy matches the ACE energy on the converged orbitals.
+  The spin factor (2/nspin in the energy, none in the operator) keeps energy and
+  operator derivative-consistent.
+- `postscf/isdf_k.py` — the multi-k ISDF acceleration. One shared interpolation
+  set (points + ζ) fit across all occupied orbitals over the BZ compresses every
+  co-density; the exchange contracts through a per-q Coulomb matrix V^q and per-k
+  point-Grams A_k with N_μ FFTs instead of N_k²·N_occ² co-density FFTs. Reduces
+  to the Γ ISDF build exactly and matches the direct `multik_exchange_energy` at
+  saturated rank, with the rank as the accuracy knob and the range-separated
+  kernel supported (`tests/integration/test_isdf_k.py`).
+
+What remains, in build order: lift the hybrid SCF from Γ to a k-mesh (per-k ACE
+through the `exchange_multik`/ISDF-K kernel — the Γ loop wiring and the multi-k
+energy both exist, the join is the work); a Gygi–Baldereschi q+G=0 correction to
+complete unscreened `full`/PBE0 (screened HSE is already complete); a truncated
+Coulomb for physically isolated molecules; and the RPA correlation contraction.
 
 ## Exact exchange and hybrid functionals
 
-**Status: the exchange machinery is built; the remaining step is making it act in
-the SCF.** The energy, the operator, ACE, the multi-k build, the range-separated
-kernel, and the differentiable hybrid parameters all landed (see the LANDED notes
-under the ISDF section above). What is not yet done is wiring the Fock operator
-into `BatchedHamiltonian.apply` and iterating exchange to self-consistency — so
-gradwave can *compute* exact/screened exchange on converged orbitals but does not
-yet *self-consistently* solve a hybrid. The paragraphs below are the original
+**Status: a self-consistent hybrid SCF runs at Γ; the remaining step is the
+k-mesh.** The energy, operator, ACE, multi-k build, range-separated kernel,
+differentiable hybrid parameters, the ISDF-K compression, and now the
+self-consistent Γ hybrid SCF (α·V_x acting in `BatchedHamiltonian.apply`, α·E_x
+in the total) all landed (see the LANDED notes under the ISDF section above).
+gradwave *self-consistently solves* a PBE0-form hybrid at Γ (gap opening measured);
+the open step is generalizing that loop to a full k-mesh. The paragraphs below are
+the original
 framing, kept for the reasoning.
 
 The biggest single physics gap, and the reason the two scaling items above are

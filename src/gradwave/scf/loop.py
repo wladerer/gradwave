@@ -413,7 +413,15 @@ def scf(
     hubbard=None,  # list[core.hubbard.HubbardManifold] — Dudarev DFT+U corrections
     hub_alpha=None,  # per-site rigid manifold potential α [eV] — linear-response probe
     start_from=None,  # previous SCFResult (or checkpoint view) on the SAME FFT grid
+    fock=None,  # optional orbital-dependent operator (hybrid Fock exchange); see below
 ) -> SCFResult:
+    # `fock`, when given, adds an orbital-dependent operator to the Hamiltonian
+    # each SCF step (a hybrid functional's Fock exchange). It must expose
+    # `rebuild(coeffs_b_s, occ_s, system) -> (apply_delta_s, e_fock)`, returning a
+    # per-spin list of callables (nk,nb,npw)->(nk,nb,npw) added to h.apply and the
+    # exchange energy scalar. Like DFT+U, the operator lags one iteration (built
+    # from the previous step's orbitals) and converges as the density does; the
+    # matching semilocal-exchange down-scaling lives in the passed-in `xc`.
     grid, spheres = system.grid, system.spheres
     vol = grid.volume
     nk, nb = len(spheres), system.nbands
@@ -509,6 +517,11 @@ def scf(
     mu, entropy_term = 0.0, torch.zeros((), dtype=RDTYPE, device=device)
     veff_s = [torch.zeros(grid.shape, dtype=RDTYPE, device=device) for _ in range(nspin)]
 
+    # hybrid Fock exchange: the operator lags one iteration (built from the
+    # previous step's orbitals), like the DFT+U occupation matrices above.
+    fock_apply_s = None
+    e_fock = torch.zeros((), dtype=RDTYPE, device=device)
+
     def symmetrize(r_out):
         return symmetrize_rho(system.rho_symmetrizer, r_out, grid)
 
@@ -546,13 +559,18 @@ def scf(
                 hub_dij = dij.conj()
             h = BatchedHamiltonian(bk, grid.shape, veff_s[sp], projs_b,
                                    hub_q=hub_q, hub_dij=hub_dij)
+            apply = h.apply
+            if fock_apply_s is not None and fock_apply_s[sp] is not None:
+                _fa = fock_apply_s[sp]
+                def apply(c, _base=h.apply, _f=_fa):
+                    return _base(c) + _f(c)
             if eigensolver == "chebyshev":
                 from gradwave.solvers.chebyshev import chebyshev_filtered_batched
                 dav = chebyshev_filtered_batched(
-                    h.apply, coeffs_b_s[sp].to(cdtype), t_solve, bk.mask,
+                    apply, coeffs_b_s[sp].to(cdtype), t_solve, bk.mask,
                     tol=tol_eff)
             else:
-                dav = davidson_batched(h.apply, coeffs_b_s[sp].to(cdtype),
+                dav = davidson_batched(apply, coeffs_b_s[sp].to(cdtype),
                                        t_solve, bk.mask, tol=tol_eff)
             eigs_s[sp] = dav.eigenvalues.to(RDTYPE)
             c = dav.eigenvectors.to(CDTYPE)
@@ -566,6 +584,11 @@ def scf(
         occ_s, mu, entropy_term = shared_fermi_occupations(
             eigs_s, system.kweights, smearing, width, system.n_electrons,
             nspin, device)
+
+        # hybrid Fock: rebuild the exchange operator from the fresh orbitals
+        # (used next iteration) and its energy (used in this iteration's total).
+        if fock is not None:
+            fock_apply_s, e_fock = fock.rebuild(coeffs_b_s, occ_s, system)
 
         # DFT+U occupation matrices from the fresh orbitals; E_U (Dudarev).
         # occ_s is per-spin f∈[0,1] when nspin=2; for nspin=1 the [0,2]
@@ -615,6 +638,7 @@ def scf(
                 rho_core=system.rho_core,
             )
             energies.hubbard = e_hub
+            energies.fock = e_fock
         else:
             rho_g_out = r_to_g(rho_tot_out.to(CDTYPE))
             energies = assemble_pw_energies(
@@ -624,6 +648,7 @@ def scf(
                                grid.g_cart),
                 vloc_g, becps_s, _stack_dij(system), system.positions,
                 system.charges, entropy_term, nspin, e_hub=e_hub)
+            energies.fock = e_fock
         e_free = float(energies.free_energy)
 
         rho_in_vec = layout.pack(rho_s)
