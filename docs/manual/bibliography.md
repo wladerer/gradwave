@@ -28,4 +28,8 @@ the text link here.
 <li id="bi2se3">H. Zhang, C.-X. Liu, X.-L. Qi, X. Dai, Z. Fang, and S.-C. Zhang, "Topological insulators in Bi2Se3, Bi2Te3 and Sb2Te3 with a single Dirac cone on the surface," Nat. Phys. <strong>5</strong>, 438 (2009).</li>
 <li id="madudarev">P.-W. Ma and S. L. Dudarev, "Constrained density functional theory and its application in long-timescale simulations of magnetic materials," Phys. Rev. B <strong>91</strong>, 054420 (2015).</li>
 <li id="khan">S. A. Khan, P. Blaha, H. Ebert, J. Minár, and O. Šipr, "Magnetocrystalline anisotropy of FePt: A detailed view," Phys. Rev. B <strong>94</strong>, 144436 (2016).</li>
+<li id="pbe0">C. Adamo and V. Barone, "Toward reliable density functional methods without adjustable parameters: The PBE0 model," J. Chem. Phys. <strong>110</strong>, 6158 (1999).</li>
+<li id="hse">J. Heyd, G. E. Scuseria, and M. Ernzerhof, "Hybrid functionals based on a screened Coulomb potential," J. Chem. Phys. <strong>118</strong>, 8207 (2003).</li>
+<li id="isdf">J. Lu and L. Ying, "Compression of the electron repulsion integral tensor in tensor hypercontraction format with cubic scaling cost," J. Comput. Phys. <strong>302</strong>, 329 (2015).</li>
+<li id="ace">L. Lin, "Adaptively Compressed Exchange Operator," J. Chem. Theory Comput. <strong>12</strong>, 2242 (2016).</li>
 </ol>

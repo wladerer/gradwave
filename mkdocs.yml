@@ -32,14 +32,19 @@ nav:
   - Installation: installation.md
   - Cookbook: cookbook.md
   - Tutorials:
-      - Geometry optimization: geometry-optimization.md
-      - Learning XC by AD: learning-xc.md
-      - Symmetry reduction: symmetry.md
-      - Basis-set error estimation: error-estimation.md
-      - Differentiable Hubbard U: hubbard-u.md
-      - Non-collinear magnetism and SOC: noncollinear-soc.md
-      - Magnetic structure and spin Hamiltonians: magnetism.md
-      - Magnetocrystalline anisotropy: mae.md
+      - Structure and forces:
+          - Geometry optimization: geometry-optimization.md
+      - Magnetism and spin-orbit:
+          - Non-collinear magnetism and SOC: noncollinear-soc.md
+          - Magnetic structure and spin Hamiltonians: magnetism.md
+          - Magnetocrystalline anisotropy: mae.md
+      - Differentiable functionals:
+          - Learning XC by AD: learning-xc.md
+          - Differentiable Hubbard U: hubbard-u.md
+          - Hybrid functionals: hybrid-functionals.md
+      - Convergence and error control:
+          - Symmetry reduction: symmetry.md
+          - Basis-set error estimation: error-estimation.md
   - Inputs and outputs: io.md
   - Reference: reference.md
   - API reference:

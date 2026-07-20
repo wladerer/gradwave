@@ -3,9 +3,11 @@
 Layer A. An `XCFunctional` maps the density to the exchange-correlation energy
 density as a pure tensor function, so autograd gives the potential and, through
 the SCF fixed point, the response to any functional parameter. The learnable
-functionals expose (κ, μ) as trainable parameters; the implicit-differentiation
+functionals expose (κ, μ) as trainable parameters, and the learnable hybrid
+exposes the exchange mixing α and screening ω; the implicit-differentiation
 helpers turn a density-dependent loss into a gradient with one adjoint solve.
-For the training workflow in prose, see [Learning XC by AD](../learning-xc.md).
+For the training workflows in prose, see [Learning XC by AD](../learning-xc.md)
+and [Hybrid functionals](../hybrid-functionals.md).
 
 ## Functional interface
 
@@ -45,6 +47,26 @@ magnetization vector, in the locally-collinear approximation.
 ::: gradwave.core.xc.learnable.LearnableSpinX
 
 ::: gradwave.core.xc.learnable.energy_param_grads
+
+## Hybrid functionals
+
+Exact (Fock) exchange acting in the SCF, with the mixing α and screening ω
+trainable. `hybrid_scf` solves a global (PBE0-form) or screened hybrid;
+`differentiable_hybrid_energy` turns the converged result into an objective
+differentiable in (α, ω). For the workflow in prose, see
+[Hybrid functionals](../hybrid-functionals.md).
+
+::: gradwave.postscf.hybrid.hybrid_scf
+
+::: gradwave.postscf.hybrid.differentiable_hybrid_energy
+
+::: gradwave.postscf.hybrid.hybrid_energy_gradient
+
+::: gradwave.postscf.exchange_multik.HybridExchangeParams
+
+::: gradwave.postscf.hybrid.ScaledExchangePBE
+
+::: gradwave.postscf.hybrid.MultiKFockExchange
 
 ## Differentiating through the SCF
 

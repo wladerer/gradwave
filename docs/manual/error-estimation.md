@@ -55,8 +55,10 @@ P_\text{annulus}(\hat{H} - \varepsilon \hat{S})\psi$.
 The estimate is on by default for `scf`, `bands`, and `relax` tasks (for a
 relax, it describes the final geometry — the calculator's last converged SCF).
 Set `error_estimate: false` (either at the top level or under `output:`) to
-skip it; magnetism tasks never carry one (spinor SCFs are outside every
-estimator's coverage).
+skip it. The `magnetism` task carries no automatic block, but the estimator does
+cover the spinor path: run `task: scf` with `noncollinear: true` and the block
+attaches to the non-collinear/SOC SCF (density, energy, and eigenvalue error;
+`use_symmetry=False`).
 
 ```yaml
 task: scf
@@ -209,25 +211,31 @@ kp = estimate_kpoint_error([4**3, 6**3, 8**3], [E4, E6, E8])
 print(kp["e_infinity_eV"], kp["error_eV"], kp["exponent"])
 ```
 
+`examples/kmesh_error.py` runs the whole sweep on silicon end to end. Keep the
+meshes in the asymptotic regime: a too-coarse mesh sits off the power law and
+drags the fit (dropping a 2×2×2 Si point, ~2.5 eV off, is what turns the
+extrapolation monotone). At 4/6/8³ it reports $E_\infty \approx -214.483$ eV with
+the 8×8×8 residual near 7 meV.
+
 ## Coverage
 
-| quantity | norm-conserving | USPP/PAW |
-|---|---|---|
-| density error | nspin=1, nspin=2 | nspin=1, nspin=2 |
-| energy error | nspin=1, nspin=2 | nspin=1, nspin=2 |
-| force error | nspin=1, nspin=2 (no NLCC) | not available |
-| eigenvalue / gap error | nspin=1, nspin=2 | not available |
-| stress error | not available (deferred) | not available |
-| SCF error (screened) | nspin=1 insulator, no symmetry | not available |
-| SCF error (unscreened bound) | nspin=1, nspin=2 | not available |
-| smearing error | any smeared run (all schemes) | any smeared run |
-| k-point error | mesh sweep (any run) | mesh sweep (any run) |
+| quantity | norm-conserving | USPP/PAW | non-collinear / SOC |
+|---|---|---|---|
+| density error | nspin=1, nspin=2 | nspin=1, nspin=2 | spinor |
+| energy error | nspin=1, nspin=2 | nspin=1, nspin=2 | spinor |
+| force error | nspin=1, nspin=2 (no NLCC) | not available | not available |
+| eigenvalue / gap error | nspin=1, nspin=2 | not available | eigenvalue (spinor) |
+| stress error | not available (deferred) | not available | not available |
+| SCF error (screened) | nspin=1 insulator, no symmetry | not available | not available |
+| SCF error (unscreened bound) | nspin=1, nspin=2 | not available | not available |
+| smearing error | any smeared run (all schemes) | any smeared run | any smeared run |
+| k-point error | mesh sweep (any run) | mesh sweep (any run) | mesh sweep (any run) |
 
 Symmetry is supported for the norm-conserving nspin=1 density, energy, and force
 error: the estimate runs on the IBZ and folds the density error over the star
 with the same symmetrizer the SCF applies to the density, matching the full-BZ
-result to ~1e-4. USPP/PAW, nspin=2, and the opt-in Dyson dressing require
-`use_symmetry=False`.
+result to ~1e-4. USPP/PAW, nspin=2, the non-collinear/SOC spinor path, and the
+opt-in Dyson dressing require `use_symmetry=False`.
 
 ## Gotchas
 
