@@ -27,6 +27,7 @@ MAGNETIC IBZ of the Shubnikov group (anti-unitary g·T ops act as −W⁻ᵀ) an
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 import torch
@@ -80,13 +81,19 @@ class SpinorHamiltonian:
             from gradwave.dtypes import real_of
 
             rdtype = real_of(cdtype)
+            p = self.p.to(cdtype)
+            q = None if self.q is None else self.q.to(cdtype)
             cached = {
                 "t": self.bk.t.to(rdtype),
                 "v_uu": self._v_uu.to(rdtype),
                 "v_dd": self._v_dd.to(rdtype),
                 "v_ud": self._v_ud.to(cdtype),
-                "p": self.p.to(cdtype),
-                "q": None if self.q is None else self.q.to(cdtype),
+                "p": p,
+                # conjugates cached too: they are constant per H but consumed
+                # in every band chunk of every Davidson round
+                "p_conj": p.conj().resolve_conj(),
+                "q": q,
+                "q_conj": None if q is None else q.conj().resolve_conj(),
                 "dij_so": None if self.dij_so is None else self.dij_so.to(cdtype),
                 "dij": self.bk.dij_full.to(cdtype),
             }
@@ -141,18 +148,18 @@ class SpinorHamiltonian:
         # the A100 FePt run through allocator fragmentation. In-place adds on
         # band slices bound the spike at the chunk size.
         if self.q is not None:  # spin-orbit (j-resolved) nonlocal
-            q, dso = tab["q"], tab["dij_so"]
+            q, qc, dso = tab["q"], tab["q_conj"], tab["dij_so"]
             mask2 = torch.cat([mask, mask], dim=-1)
             for lo in range(0, nb, chunk):
                 hi = min(lo + chunk, nb)
-                b = torch.einsum("kpg,kbg->kbp", q.conj(), c[:, lo:hi])
+                b = torch.einsum("kpg,kbg->kbp", qc, c[:, lo:hi])
                 out[:, lo:hi] += torch.einsum("kbp,pq,kqg->kbg", b, dso, q) * mask2
         elif self.p.shape[1]:
-            dij, p = tab["dij"], tab["p"]
+            dij, p, pc = tab["dij"], tab["p"], tab["p_conj"]
             for lo in range(0, nb, chunk):
                 hi = min(lo + chunk, nb)
-                bu = torch.einsum("kpg,kbg->kbp", p.conj(), cu[:, lo:hi])
-                bd = torch.einsum("kpg,kbg->kbp", p.conj(), cd[:, lo:hi])
+                bu = torch.einsum("kpg,kbg->kbp", pc, cu[:, lo:hi])
+                bd = torch.einsum("kpg,kbg->kbp", pc, cd[:, lo:hi])
                 out[:, lo:hi, :m] += torch.einsum("kbp,pq,kqg->kbg", bu, dij, p) * mask
                 out[:, lo:hi, m:] += torch.einsum("kbp,pq,kqg->kbg", bd, dij, p) * mask
         return out
@@ -307,6 +314,7 @@ def scf_noncollinear(
         return torch.cat([r_to_g(f.to(CDTYPE)).reshape(-1)[mask_flat] for f in fields])
 
     for it in range(1, max_iter + 1):
+        t_it = time.perf_counter()
         rho_g_box = r_to_g(rho.to(CDTYPE))
         v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
                                dim=(-3, -2, -1)) * grid.n_points).real
@@ -347,27 +355,30 @@ def scf_noncollinear(
         occ, s_ent = occupations_and_entropy(eigs, mu_t, scheme, width, degeneracy=1.0)
         entropy_term = -width * (system.kweights[:, None] * s_ent).sum()
 
-        # Pauli-decomposed density matrix (accumulated per k to bound memory)
+        # Pauli-decomposed density matrix — k-batched with both spinor
+        # components fused into ONE batched FFT per band chunk, exactly like
+        # the H-apply (a per-k loop here launches nk small FFTs per chunk and
+        # is kernel-launch-bound on multi-k GPU runs). Band-chunking alone
+        # bounds the dense-grid memory.
         rho_out = torch.zeros(grid.shape, dtype=RDTYPE, device=device)
         m_out = torch.zeros(3, *grid.shape, dtype=RDTYPE, device=device)
-        nbc = h._band_chunk(1, coeffs.device, coeffs.element_size())
-        for ik in range(nk):
-            w = system.kweights[ik]
-            bk1 = _slice_bk(bk, ik)
-            for lo in range(0, nbands, nbc):
-                hi = min(lo + nbc, nbands)
-                cu = coeffs[ik:ik + 1, lo:hi, :m_pw]
-                cd = coeffs[ik:ik + 1, lo:hi, m_pw:]
-                pu = g_to_r_b(cu, bk1, grid.shape)[0]
-                pd = g_to_r_b(cd, bk1, grid.shape)[0]
-                f = (w * occ[ik, lo:hi]).to(pu.real.dtype)
-                uu = torch.einsum("b,bxyz->xyz", f, pu.real**2 + pu.imag**2)
-                dd = torch.einsum("b,bxyz->xyz", f, pd.real**2 + pd.imag**2)
-                ud = torch.einsum("b,bxyz->xyz", f.to(CDTYPE), pu.conj() * pd)
-                rho_out += uu + dd
-                m_out[0] += 2.0 * ud.real
-                m_out[1] += 2.0 * ud.imag
-                m_out[2] += uu - dd
+        nbc = h._band_chunk(nk, coeffs.device, coeffs.element_size())
+        w_kb = system.kweights[:, None] * occ
+        for lo in range(0, nbands, nbc):
+            hi = min(lo + nbc, nbands)
+            nbb = hi - lo
+            cud = torch.cat([coeffs[:, lo:hi, :m_pw], coeffs[:, lo:hi, m_pw:]],
+                            dim=1)
+            psi = g_to_r_b(cud, bk, grid.shape)
+            pu, pd = psi[:, :nbb], psi[:, nbb:]
+            f = w_kb[:, lo:hi].to(pu.real.dtype)
+            uu = torch.einsum("kb,kbxyz->xyz", f, pu.real**2 + pu.imag**2)
+            dd = torch.einsum("kb,kbxyz->xyz", f, pd.real**2 + pd.imag**2)
+            ud = torch.einsum("kb,kbxyz->xyz", f.to(CDTYPE), pu.conj() * pd)
+            rho_out += uu + dd
+            m_out[0] += 2.0 * ud.real
+            m_out[1] += 2.0 * ud.imag
+            m_out[2] += uu - dd
         rho_out, m_out = rho_out / vol, m_out / vol
         rho_out = symmetrize(rho_out)  # no-op unless IBZ symmetry is active
         m_out = symmetrize_m(m_out)  # no-op unless MAGNETIC symmetry is active
@@ -406,7 +417,8 @@ def scf_noncollinear(
             vin, vout = vec_of([rho, *m]), vec_of([rho_out, *m_out])
         res_norm = float(torch.linalg.norm(vout - vin)) * vol
         de = abs(e_free - e_free_prev) if e_free_prev is not None else float("inf")
-        history.append({"iter": it, "free_energy": e_free, "dE": de, "res": res_norm})
+        history.append({"iter": it, "free_energy": e_free, "dE": de,
+                        "res": res_norm, "t": time.perf_counter() - t_it})
         if verbose:
             mv = [float(m_out[i].mean()) * vol for i in range(3)]
             print(f"  NC-SCF {it:3d}  F = {e_free:+.8f}  dE = {de:.2e}  "
@@ -455,13 +467,4 @@ def scf_noncollinear(
         mag_vec=tuple(m_int), mag_abs=float(m_norm.mean()) * vol,
         rho=rho, m=m, eigenvalues=eigs, system=system, history=history,
         coeffs=coeffs,
-    )
-
-
-def _slice_bk(bk: BatchedK, ik: int) -> BatchedK:
-    return BatchedK(
-        npw=bk.npw[ik:ik + 1], mask=bk.mask[ik:ik + 1], flat_idx=bk.flat_idx[ik:ik + 1],
-        kpg=bk.kpg[ik:ik + 1], t=bk.t[ik:ik + 1],
-        proj_phase_free=bk.proj_phase_free[ik:ik + 1],
-        proj_atom_index=bk.proj_atom_index, dij_full=bk.dij_full,
     )

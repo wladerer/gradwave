@@ -50,7 +50,7 @@ class GradWave(Calculator):
         device: str = "cpu",
         compile_xc: bool = False,
         eigensolver: str = "davidson",  # davidson | chebyshev (NC path only)
-        precond: str = "kerker",  # kerker | local_tf (NC path only)
+        precond: str = "kerker",  # kerker | local_tf (NC and USPP/PAW paths)
         verbose: bool = False,
         **kwargs,
     ):
@@ -234,7 +234,7 @@ class GradWave(Calculator):
         system = self._get_uspp_system(self.atoms)
         res = scf_uspp(system, self._make_xc(), smearing=p["smearing"],
                        width=p["width"], etol=p["etol"], rhotol=p["rhotol"],
-                       verbose=self._verbose,
+                       precond=p["precond"], verbose=self._verbose,
                        start_from=self._warm_start(system))
         if not res["converged"]:
             raise RuntimeError("gradwave USPP SCF did not converge")

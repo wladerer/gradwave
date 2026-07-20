@@ -13,6 +13,7 @@ residual ‖ρ_out − ρ_in‖·Ω/N_G < rhotol (electrons-scale measure).
 from __future__ import annotations
 
 import dataclasses
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -560,6 +561,7 @@ def scf(
         return symmetrize_rho(system.rho_symmetrizer, r_out, grid)
 
     for it in range(1, max_iter + 1):
+        t_it = time.perf_counter()
         rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
         if tf_precond is not None:
             tf_precond.set_density(rho_tot)
@@ -644,15 +646,20 @@ def scf(
         ]
         rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
 
-        # energy at (orbitals, rho_out); per-k trimmed views for the assembly
+        # energy at (orbitals, rho_out); per-k trimmed views for the assembly.
+        # npw from the CPU-side spheres (int(bk.npw[ik]) is a host sync per k
+        # per iteration — the probe counted 36/iteration); ONE becp over the
+        # whole batch, then per-k views (calling becp_b inside the per-k
+        # comprehension recomputed the full-batch contraction nk times)
         coeffs_list_s = [
-            [coeffs_b_s[sp][ik, :, : int(bk.npw[ik])] for ik in range(nk)]
+            [coeffs_b_s[sp][ik, :, : system.spheres[ik].npw]
+             for ik in range(nk)]
             for sp in range(nspin)
         ]
-        becps_s = [
-            [becp_b(projs_b, coeffs_b_s[sp])[ik] for ik in range(nk)]
-            for sp in range(nspin)
-        ]
+        becps_s = []
+        for sp in range(nspin):
+            b_all = becp_b(projs_b, coeffs_b_s[sp])
+            becps_s.append([b_all[ik] for ik in range(nk)])
         if nspin == 1:
             energies = total_energy(
                 coeffs_per_k=coeffs_list_s[0], occ=occ_s[0], kweights=system.kweights,
@@ -707,7 +714,8 @@ def scf(
         # post-SCF convergence-error estimate (ρ_out − ρ_in at this iteration)
         drho_scf = rho_tot_out - rho_tot
         de = abs(e_free - e_free_prev) if e_free_prev is not None else float("inf")
-        history.append({"iter": it, "free_energy": e_free, "dE": de, "res": res_norm})
+        history.append({"iter": it, "free_energy": e_free, "dE": de,
+                        "res": res_norm, "t": time.perf_counter() - t_it})
         if verbose:
             mag = ""
             if nspin == 2:

@@ -107,7 +107,10 @@ class Input:
     output_dir: Path = Path("./out")
     output_checkpoint: bool = True  # write checkpoint.pt after SCF tasks
     output_wavefunctions: bool = False  # include coeffs in the checkpoint
-    error_estimate: bool = False  # post-SCF plane-wave (Ecut) error estimate
+    # post-SCF numerical-error estimates (basis set, SCF, smearing) in the
+    # output — on by default; every estimate is derived from the finished
+    # run (no extra SCF) and out-of-coverage runs degrade to available: false
+    error_estimate: bool = True
     restart: Path | None = None  # checkpoint.pt to warm-start from (USPP/PAW)
 
 
@@ -207,6 +210,6 @@ def load_input(path: str | Path) -> Input:
         output_checkpoint=bool(out_raw.get("checkpoint", True)),
         output_wavefunctions=bool(out_raw.get("wavefunctions", False)),
         error_estimate=bool(out_raw.get("error_estimate",
-                                        raw.get("error_estimate", False))),
+                                        raw.get("error_estimate", True))),
         restart=None if restart is None else (base / restart),
     )

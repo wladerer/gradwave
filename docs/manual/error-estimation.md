@@ -52,8 +52,11 @@ P_\text{annulus}(\hat{H} - \varepsilon \hat{S})\psi$.
 
 ## Run it from an input file
 
-Set `error_estimate: true` (either at the top level or under `output:`) on an
-`scf` task.
+The estimate is on by default for `scf`, `bands`, and `relax` tasks (for a
+relax, it describes the final geometry — the calculator's last converged SCF).
+Set `error_estimate: false` (either at the top level or under `output:`) to
+skip it; magnetism tasks never carry one (spinor SCFs are outside every
+estimator's coverage).
 
 ```yaml
 task: scf
@@ -69,7 +72,6 @@ xc: pbe
 kpoints: {mesh: [4, 4, 4]}
 output:
   dir: ./out_si
-  error_estimate: true
 ```
 
 The `scf.json` gains an `error_estimate` block and `scf.out` a matching section.
