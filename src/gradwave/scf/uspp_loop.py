@@ -23,6 +23,7 @@ can absorb it later.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import torch
@@ -781,6 +782,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     rho_ij_mix = [[m.clone() for m in ch] for ch in rho_ij_s]
 
     for it in range(1, max_iter + 1):
+        t_it = time.perf_counter()
         if it == 1:
             # SAD starts don't deserve a tight first solve; warm starts do
             # (their density is already near a fixed point — scan/rig
@@ -826,7 +828,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
             torch.linalg.norm(rho_out_vec[: ng * nspin] - rho_in_vec[: ng * nspin])
         ) * vol
         de = abs(e_free - e_free_prev) if e_free_prev is not None else float("inf")
-        history.append({"iter": it, "free_energy": e_free, "dE": de, "res": res_norm})
+        history.append({"iter": it, "free_energy": e_free, "dE": de,
+                        "res": res_norm, "t": time.perf_counter() - t_it})
         if verbose:
             mag = ""
             if nspin == 2:

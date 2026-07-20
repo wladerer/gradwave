@@ -86,13 +86,19 @@ def _scf_lines(scf, runtime=None):
     lines = [_sec("self-consistency")]
     trace = scf.get("trace", [])
     if trace:
-        lines.append(f"   {'it':>4s}   {'F [eV]':>18s}   {'ΔE [eV]':>10s}"
-                     f"   {'|Δρ|':>10s}")
+        timed = any("t_s" in h for h in trace)
+        head = (f"   {'it':>4s}   {'F [eV]':>18s}   {'ΔE [eV]':>10s}"
+                f"   {'|Δρ|':>10s}")
+        lines.append(head + (f"   {'t [s]':>8s}" if timed else ""))
         for h in trace:
             de = h.get("dE_eV")
             de_s = "—" if de is None else f"{abs(de):10.2e}"
-            lines.append(f"   {h['iter']:>4d}   {h['free_energy_eV']:>18.10f}"
-                         f"   {de_s:>10s}   {h['drho']:>10.2e}")
+            row = (f"   {h['iter']:>4d}   {h['free_energy_eV']:>18.10f}"
+                   f"   {de_s:>10s}   {h['drho']:>10.2e}")
+            if timed:
+                t = h.get("t_s")
+                row += f"   {t:>8.2f}" if t is not None else f"   {'—':>8s}"
+            lines.append(row)
     tag = "converged" if scf["converged"] else "NOT CONVERGED"
     tail = f"   {tag} in {scf['n_iter']} iterations"
     if runtime is not None:
@@ -285,6 +291,74 @@ def _pdos_lines(pdos):
     return lines
 
 
+def _provenance_lines(prov):
+    """Machine/process context: was this box contested, how hot, what did
+    the run actually consume. Everything degrades gracefully — the block
+    renders whatever fields the recording platform could read."""
+    lines = [_sec("machine")]
+    host = prov.get("host", {})
+    cpu = prov.get("cpu", {})
+    mem = prov.get("memory", {})
+    code = prov.get("code", {})
+    pairs = [("host", host.get("hostname", "?")),
+             ("os", host.get("os", "?"))]
+    if cpu.get("model"):
+        pairs.append(("cpu", cpu["model"]))
+    pairs.append(("cores", f"{cpu.get('logical_cores', '?')} "
+                           f"(torch {cpu.get('torch_threads', '?')} threads)"))
+    if mem.get("total_gb") is not None:
+        pairs.append(("ram", f"{mem['total_gb']:.1f} GB "
+                             f"({mem.get('available_gb', 0):.1f} free at start)"))
+    gpu = prov.get("gpu")
+    if gpu:
+        gline = f"{gpu['name']} ({gpu['vram_total_gb']:.1f} GB)"
+        if gpu.get("temperature_c") is not None:
+            gline += f" · {gpu['temperature_c']:.0f} °C at start"
+        pairs.append(("gpu", gline))
+    if code:
+        commit = f" @ {code['git']}" if code.get("git") else ""
+        pairs.append(("code", f"gradwave {code.get('gradwave', '?')}{commit} · "
+                              f"torch {code.get('torch', '?')}"))
+    for lab, val in pairs:
+        lines.append(f"   {lab:<8s}{val}")
+
+    def _load_str(ld):
+        if ld is None or ld.get("load_1m") is None:
+            return None
+        s = f"load {ld['load_1m']:.2f}"
+        busy = ld.get("busy_other_processes") or []
+        if busy:
+            s += " · busy: " + ", ".join(
+                f"{p['comm']} {p['pcpu']:.0f}%" for p in busy[:3])
+        else:
+            s += " · no competing processes"
+        return s
+
+    def _temp_str(th):
+        return (None if not th or th.get("max_c") is None
+                else f"{th['max_c']:.0f} °C")
+
+    start = _load_str(prov.get("load"))
+    end = _load_str(prov.get("load_end"))
+    if start or end:
+        lines.append(f"   {'start':<8s}{start or '—'}"
+                     + (f" · {_temp_str(prov.get('thermal'))}"
+                        if _temp_str(prov.get("thermal")) else ""))
+        lines.append(f"   {'end':<8s}{end or '—'}"
+                     + (f" · {_temp_str(prov.get('thermal_end'))}"
+                        if _temp_str(prov.get("thermal_end")) else ""))
+    proc = prov.get("process")
+    if proc:
+        bits = [f"wall {proc['wall_s']:.1f} s",
+                f"cpu {proc['cpu_s']:.1f} s "
+                f"(≈{proc.get('effective_threads', 0):.1f} threads)",
+                f"peak rss {proc['peak_rss_gb']:.2f} GB"]
+        if proc.get("cuda_peak_alloc_gb") is not None:
+            bits.append(f"cuda peak {proc['cuda_peak_alloc_gb']:.2f} GB")
+        lines.append(f"   {'process':<8s}" + " · ".join(bits))
+    return lines
+
+
 def format_output(summary: dict) -> str:
     """The full human-readable report for a task summary dict."""
     code = summary["code"]
@@ -307,6 +381,8 @@ def format_output(summary: dict) -> str:
         lines += _bands_lines(summary["bands"])
     if "magnetism" in summary:
         lines += _magnetism_lines(summary["magnetism"])
+    if "provenance" in summary:
+        lines += _provenance_lines(summary["provenance"])
     tail = []
     if "runtime_s" in summary and "scf" not in summary:
         tail.append(f"wall time {summary['runtime_s']:.1f} s")

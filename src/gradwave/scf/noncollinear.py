@@ -27,6 +27,7 @@ MAGNETIC IBZ of the Shubnikov group (anti-unitary g·T ops act as −W⁻ᵀ) an
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 import torch
@@ -313,6 +314,7 @@ def scf_noncollinear(
         return torch.cat([r_to_g(f.to(CDTYPE)).reshape(-1)[mask_flat] for f in fields])
 
     for it in range(1, max_iter + 1):
+        t_it = time.perf_counter()
         rho_g_box = r_to_g(rho.to(CDTYPE))
         v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
                                dim=(-3, -2, -1)) * grid.n_points).real
@@ -415,7 +417,8 @@ def scf_noncollinear(
             vin, vout = vec_of([rho, *m]), vec_of([rho_out, *m_out])
         res_norm = float(torch.linalg.norm(vout - vin)) * vol
         de = abs(e_free - e_free_prev) if e_free_prev is not None else float("inf")
-        history.append({"iter": it, "free_energy": e_free, "dE": de, "res": res_norm})
+        history.append({"iter": it, "free_energy": e_free, "dE": de,
+                        "res": res_norm, "t": time.perf_counter() - t_it})
         if verbose:
             mv = [float(m_out[i].mean()) * vol for i in range(3)]
             print(f"  NC-SCF {it:3d}  F = {e_free:+.8f}  dE = {de:.2e}  "

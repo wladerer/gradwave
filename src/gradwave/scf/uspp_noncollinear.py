@@ -31,6 +31,7 @@ use_symmetry=False, exactly like the norm-conserving spinor loop.
 from __future__ import annotations
 
 import dataclasses
+import time
 
 import torch
 
@@ -298,6 +299,7 @@ def scf_uspp_noncollinear(
         smooth_geom = (system.smooth_shape, system.smooth_flat_idx)
 
     for it in range(1, max_iter + 1):
+        t_it = time.perf_counter()
         # ---- potentials ----
         v_h = (torch.fft.ifftn(hartree_potential_g(r_to_g(rho.to(CDTYPE)), grid.g2),
                                dim=(-3, -2, -1)) * grid.n_points).real
@@ -468,7 +470,8 @@ def scf_uspp_noncollinear(
         vout = pack(rho_out, m_out, bec_out_r)
         res_norm = float(torch.linalg.norm(vout - vin)) * vol
         de = abs(e_free - e_free_prev) if e_free_prev is not None else float("inf")
-        history.append({"iter": it, "free_energy": e_free, "dE": de, "res": res_norm})
+        history.append({"iter": it, "free_energy": e_free, "dE": de,
+                        "res": res_norm, "t": time.perf_counter() - t_it})
         if verbose:
             mv = [float(m_out[i].mean()) * vol for i in range(3)]
             print(f"  NC-USPP {it:3d}  F = {e_free:+.8f}  dE = {de:.2e}  "

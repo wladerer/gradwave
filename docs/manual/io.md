@@ -150,11 +150,13 @@ Each calculation writes three files into the output directory.
 
 - `<task>.json` is the machine-readable summary and the parsing target. The
   top-level keys are stable, `code`, `task`, `structure`, `parameters`, `scf` (with
-  `energies_eV` and the per-iteration `trace`), `eigenvalues_eV`, `occupations`, a
-  `relax` or `bands` block for those tasks, and `runtime_s`.
+  `energies_eV` and the per-iteration `trace`, each entry carrying its wall time
+  `t_s`), `eigenvalues_eV`, `occupations`, a `relax` or `bands` block for those
+  tasks, `runtime_s`, and `provenance`.
 - `<task>.out` is the human-readable report. Structure, parameters, the SCF
-  iteration table, the energy breakdown, the gap or Fermi level and magnetization,
-  and eigenvalues for the first eight k-points.
+  iteration table (with per-iteration times), the energy breakdown, the gap or
+  Fermi level and magnetization, eigenvalues for the first eight k-points, and
+  the machine section.
 - `checkpoint.pt` is restartable state, written for SCF tasks under the
   `output.checkpoint` key. Wavefunctions are excluded by default because they
   dominate the file size and a restart consumes only the density and becsum. Set
@@ -163,6 +165,19 @@ Each calculation writes three files into the output directory.
 `<task>` is `scf`, `relax`, or `bands`. A relax task additionally writes the
 `relax.xyz` extended-xyz trajectory described above, referenced from the JSON
 as `outputs.trajectory`.
+
+Every output carries a `provenance` block (`gradwave/runinfo.py`) recording the
+context a timing needs to be trusted months later: timestamp with timezone,
+host and code versions (gradwave + git commit, torch, python), CPU model and
+core/thread counts, RAM total and available, GPU name/VRAM/utilization/
+temperature when CUDA is present, load averages and the busiest competing
+processes sampled at run start AND end (the contested-machine indicator),
+thermal-zone temperatures at both points (throttling shows up as the drift),
+and process accounting: wall time, CPU time, effective threads (their ratio —
+far below `torch_threads` fingerprints a contested box), peak RSS, and peak
+CUDA memory. Collection is best-effort and dependency-free (`/proc`, `/sys`,
+`nvidia-smi`); unreadable fields are absent rather than errors. The `.out`
+report renders it as the closing `machine` section.
 
 ## Basis-set error estimate
 

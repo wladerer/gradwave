@@ -222,7 +222,8 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
 
     trace = [
         {"iter": h["iter"], "free_energy_eV": float(h["free_energy"]),
-         "dE_eV": _finite(h["dE"]), "drho": float(h["res"])}
+         "dE_eV": _finite(h["dE"]), "drho": float(h["res"]),
+         **({"t_s": round(float(h["t"]), 3)} if "t" in h else {})}
         for h in (_get(res, "history") or [])
     ]
     scf_block = {
@@ -574,7 +575,10 @@ def run(inp: Input, verbose: bool = True) -> dict:
     """Execute inp.task and write <task>.json, <task>.out and (for SCF
     state) checkpoint.pt into inp.output_dir."""
     from gradwave.output import write_output
+    from gradwave.runinfo import ProcessMeter, machine_snapshot, provenance_block
 
+    snap = machine_snapshot()
+    meter = ProcessMeter()
     t0 = time.time()
     res = None
     _frames = None
@@ -648,6 +652,7 @@ def run(inp: Input, verbose: bool = True) -> dict:
 
         ase_write(str(outdir / "relax.xyz"), _frames, format="extxyz")
         outputs["trajectory"] = "relax.xyz"
+    summary["provenance"] = provenance_block(snap, meter)
     summary["outputs"] = {**outputs, "json": f"{inp.task}.json",
                           "report": f"{inp.task}.out"}
     (outdir / f"{inp.task}.json").write_text(json.dumps(summary, indent=1))
