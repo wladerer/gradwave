@@ -29,19 +29,25 @@ from dataclasses import dataclass
 import torch
 
 from gradwave.constants import HBAR2_2M
-from gradwave.core.energies.ewald import ewald_energy
-from gradwave.core.energies.hartree import hartree_energy, hartree_potential_g
-from gradwave.core.energies.kinetic import kinetic_energy
-from gradwave.core.energies.local_pp import local_energy, local_potential_g
-from gradwave.core.energies.nl_pp import nonlocal_energy
-from gradwave.core.energies.total import EnergyBreakdown
+from gradwave.core.energies.hartree import hartree_potential_g
+from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
 from gradwave.core.hamiltonian import ProjectorData, becp, projectors
 from gradwave.core.occupations import (
     SCHEMES,
 )
 from gradwave.dtypes import CDTYPE, CDTYPE_LOW, RDTYPE
-from gradwave.scf.common import shared_fermi_occupations, spin_sigmas, symmetrize_rho
+from gradwave.scf.common import (
+    MP_CROSSOVER,
+    adaptive_diago_tol,
+    assemble_pw_energies,
+    convergence_gate,
+    record_iteration,
+    shared_fermi_occupations,
+    spin_xc_energy,
+    symmetrize_rho,
+    warm_start_densities,
+)
 from gradwave.scf.guess import sad_density
 from gradwave.scf.layout import MixLayout
 from gradwave.scf.loop import vxc_potential
@@ -178,7 +184,7 @@ class _IterOps:
     mixed_precision: bool = False
 
 
-_MP_CROSSOVER = 1e-5  # diago tol above this runs the fp32 draft solves
+_MP_CROSSOVER = MP_CROSSOVER  # diago tol above this runs the fp32 draft solves
 
 
 def _resolve_start_mag(start_mag, species_of_atom, n_species) -> list[float]:
@@ -531,24 +537,12 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
         sigma = sigma_from_rho(rho_xc_out, grid.g_cart) if xc.needs_gradient else None
         e_xc = xc.energy(rho_xc_out, vol, sigma)
     else:
-        c2 = 0.0 if core is None else 0.5 * core
-        r_u, r_d = rho_out_s[0] + c2, rho_out_s[1] + c2
-        s_uu, s_dd, s_tt = spin_sigmas(r_u, r_d, xc, grid.g_cart)
-        e_xc = xc.energy(r_u, r_d, vol, s_uu, s_dd, s_tt)
-    energies = EnergyBreakdown(
-        kinetic=sum(kinetic_energy(coeffs[isp], occ_s[isp], system.kweights,
-                                   system.spheres) for isp in range(nspin)),
-        hartree=hartree_energy(rho_g_out, grid.g2, vol),
-        xc=e_xc,
-        local=local_energy(rho_g_out, vloc_g, vol),
-        nonlocal_=sum(nonlocal_energy(becps_s[isp], system.proj_data[0].dij_full,
-                                      occ_s[isp], system.kweights)
-                      for isp in range(nspin)),
-        ewald=ewald_energy(system.positions, system.charges, grid.cell),
-        smearing=entropy_term,
-        hubbard=e_hub if hub is not None else 0.0,
-        onecenter=e_onec,
-    )
+        e_xc = spin_xc_energy(xc, rho_out_s, core, vol, grid.g_cart)
+    energies = assemble_pw_energies(
+        coeffs, occ_s, system.kweights, system.spheres, grid, vol, rho_g_out,
+        e_xc, vloc_g, becps_s, system.proj_data[0].dij_full, system.positions,
+        system.charges, entropy_term, nspin,
+        e_hub=e_hub if hub is not None else 0.0, e_onec=e_onec)
     return dict(eigs_s=eigs_s, occ_s=occ_s, mu=mu, n_hub_s=n_hub_s,
                 rho_out_s=rho_out_s, rho_ij_s=rho_ij_s, becps_s=becps_s,
                 energies=energies)
@@ -723,20 +717,12 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     shape = grid.shape
 
     if start_from is not None:
-        prev_grid = start_from["system"].grid
-        if tuple(prev_grid.shape) != tuple(shape):
-            raise ValueError("start_from requires the same FFT grid "
-                             f"({tuple(prev_grid.shape)} vs {tuple(shape)})")
-        if start_from.get("nspin", 1) != nspin:
-            raise ValueError("start_from nspin mismatch")
-        # ρ carries a 1/Ω normalization: rescale by the volume ratio so the
-        # electron count is exactly conserved on the new cell
-        chg = float(prev_grid.volume) / float(vol)
+        # shared grid/nspin validation + volume-ratio rescale (electron count
+        # exactly conserved on the new cell) — common.warm_start_densities
+        rho_s = warm_start_densities(start_from, nspin, grid, vol, dev)
         if nspin == 1:
-            rho_s = [start_from["rho"].detach().to(dev) * chg]
             spin_frac = [None]
         else:
-            rho_s = [r.detach().to(dev) * chg for r in start_from["rho_spin"]]
             mags = _resolve_start_mag(start_mag, system.species_of_atom,
                                       len(system.paws))
             spin_frac = [[(1.0 + m) / 2.0 for m in mags],
@@ -845,14 +831,13 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
 
     for it in range(1, max_iter + 1):
         t_it = time.perf_counter()
-        if it == 1:
-            # SAD starts don't deserve a tight first solve; warm starts do
-            # (their density is already near a fixed point — scan/rig
-            # callers control precision through diago_tol)
-            tol_eff = max(diago_tol, 1e-3) if start_from is None else diago_tol
-        else:
-            r_prev = history[-1]["res"]
-            tol_eff = max(diago_tol, min(1e-3, 0.1 * r_prev * r_prev / system.n_electrons))
+        # quadratic schedule (common.adaptive_diago_tol). SAD starts don't
+        # deserve a tight first solve; warm starts do (their density is
+        # already near a fixed point — scan/rig callers control precision
+        # through diago_tol)
+        tol_eff = adaptive_diago_tol(
+            it, history, diago_tol, system.n_electrons, schedule="quadratic",
+            first_tol=1e-3 if start_from is None else diago_tol)
 
         step = _scf_iteration(ops, rho_s, rho_ij_mix, coeffs, coeffs_b,
                               n_hub_s, tol_eff, seed_salt)
@@ -889,9 +874,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         res_norm = float(
             torch.linalg.norm(rho_out_vec[: ng * nspin] - rho_in_vec[: ng * nspin])
         ) * vol
-        de = abs(e_free - e_free_prev) if e_free_prev is not None else float("inf")
-        history.append({"iter": it, "free_energy": e_free, "dE": de,
-                        "res": res_norm, "t": time.perf_counter() - t_it})
+        de = record_iteration(history, it, e_free, e_free_prev, res_norm, t_it)
         if verbose:
             mag = ""
             if nspin == 2:
@@ -911,8 +894,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                     and res_norm < rho_safety
                     and tol_eff <= diago_tol * 1.01)
         else:
-            done = (de < etol and res_norm < rhotol
-                    and tol_eff <= diago_tol * 1.01)
+            done = convergence_gate(de, res_norm, tol_eff, etol, rhotol,
+                                    diago_tol)
         if done:
             converged = True
             rho_s = rho_out_s

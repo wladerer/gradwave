@@ -28,13 +28,32 @@ from gradwave.core.hamiltonian import build_projector_data
 from gradwave.core.xc.base import XCFunctional
 from gradwave.dtypes import CDTYPE, CDTYPE_LOW, RDTYPE, RDTYPE_LOW
 from gradwave.grids import build_fft_grid, build_gsphere
-from gradwave.kpoints import monkhorst_pack
 from gradwave.pseudo.kb import beta_form_factors
-from gradwave.pseudo.local import alpha_z, vloc_of_g
 from gradwave.pseudo.upf import UPFData
-from gradwave.scf.common import shared_fermi_occupations, spin_sigmas, symmetrize_rho
+from gradwave.scf.common import (
+    MP_CROSSOVER,
+    adaptive_diago_tol,
+    assemble_pw_energies,
+    convergence_gate,
+    record_iteration,
+    shared_fermi_occupations,
+    spin_sigmas,
+    spin_xc_energy,
+    symmetrize_rho,
+    warm_start_densities,
+)
 from gradwave.scf.guess import sad_density
+from gradwave.scf.layout import MixLayout
 from gradwave.scf.mixing import PulayMixer
+from gradwave.scf.setup_common import (
+    _unique_shells,
+    build_core_density,
+    build_symmetrizer_and_kpoints,
+    build_vloc_tables,
+    coupled_axes,
+    default_nbands,
+    find_symmetry_groups,
+)
 
 
 @dataclass
@@ -102,11 +121,6 @@ class System:
         )
 
 
-def _unique_shells(vals: np.ndarray):
-    uniq, inverse = np.unique(np.round(vals, 9), return_inverse=True)
-    return uniq, inverse
-
-
 def setup_system(
     cell: np.ndarray,
     positions: np.ndarray,  # (na,3) Cartesian Å
@@ -138,60 +152,31 @@ def setup_system(
     cell = np.asarray(cell, dtype=np.float64)
     positions = np.asarray(positions, dtype=np.float64)
 
-    sym = rho_symmetrizer = mag_sym = None
+    sym = mag_sym = None
     if use_symmetry and tuple(kshift) == (0, 0, 0):
-        from gradwave.symmetry import RhoSymmetrizer, find_spacegroup, reduce_mesh
+        sym, mag_sym = find_symmetry_groups(cell, positions, species_of_atom,
+                                            symprec, magmoms)
 
-        frac = positions @ np.linalg.inv(cell)
-        sym = find_spacegroup(cell, frac, species_of_atom, symprec=symprec)
-        if sym.n_ops <= 1:
-            sym = None  # P1 — nothing to gain, keep the plain path
-        elif magmoms is not None:
-            from gradwave.symmetry import magnetic_spacegroup
-
-            mag_sym = magnetic_spacegroup(sym, magmoms, cell)
-            sym = mag_sym.unitary
-
-    # equalize only symmetry-COUPLED axes (a slab's z axis stays independent
-    # of the in-plane pair — blanket cubic boxes would triple slab grids)
-    axis_groups = False
-    if sym is not None:
-        from gradwave.symmetry import coupled_axis_groups
-        axis_groups = coupled_axis_groups(
-            mag_sym.combined() if mag_sym is not None else sym)
-    grid = build_fft_grid(cell, ecut, equal_dims=axis_groups, shape_override=fft_shape)
-    if mag_sym is not None:
-        from gradwave.symmetry import MagneticSymmetrizer, reduce_mesh_magnetic
-
-        rho_symmetrizer = MagneticSymmetrizer(grid.shape, mag_sym, cell,
-                                              dens_mask=grid.dens_mask)
-        kfrac, kw = reduce_mesh_magnetic(kmesh, kshift, mag_sym)
-    elif sym is not None:
-        rho_symmetrizer = RhoSymmetrizer(grid.shape, sym, dens_mask=grid.dens_mask)
-        # time_reversal=False for magnetic systems (k≢−k); for nonmagnetic runs
-        # (incl. nonmagnetic + SOC, where Kramers keeps k≡−k) it stays True
-        kfrac, kw = reduce_mesh(kmesh, kshift, sym, time_reversal=time_reversal)
-    else:
-        kfrac, kw = monkhorst_pack(kmesh, kshift, time_reversal=time_reversal)
+    # equalize only symmetry-COUPLED axes (setup_common.coupled_axes)
+    grid = build_fft_grid(cell, ecut, equal_dims=coupled_axes(sym, mag_sym),
+                          shape_override=fft_shape)
+    # time_reversal=False for magnetic systems (k≢−k); for nonmagnetic runs
+    # (incl. nonmagnetic + SOC, where Kramers keeps k≡−k) it stays True
+    rho_symmetrizer, kfrac, kw = build_symmetrizer_and_kpoints(
+        grid, cell, kmesh, kshift, sym, mag_sym, time_reversal)
     spheres = [build_gsphere(grid, ecut, k) for k in kfrac]
 
     charges = torch.tensor([upfs[s].z_valence for s in species_of_atom], dtype=RDTYPE)
     n_electrons = float(charges.sum())
     if nbands is None:
-        nocc = int(np.ceil(n_electrons / 2.0))
-        nbands = max(int(np.ceil(nocc * 1.2)), nocc + 4)
+        nbands = default_nbands(n_electrons)
 
-    # local potential tables on the dense box, per species
+    # local potential tables on the dense box, per species (the NC setup
+    # keeps the single-|G|-shell guard — see setup_common.build_vloc_tables)
     g_flat = np.sqrt(grid.g2.reshape(-1).numpy())
     uniq, inverse = _unique_shells(g_flat)
-    vloc_tables = []
-    for upf in upfs:
-        tab = np.empty_like(uniq)
-        tab[0] = alpha_z(upf)
-        if len(uniq) > 1:
-            tab[1:] = vloc_of_g(upf, uniq[1:])
-        vloc_tables.append(tab[inverse].reshape(grid.shape))
-    vloc_tables = torch.as_tensor(np.stack(vloc_tables), dtype=RDTYPE)
+    vloc_tables = build_vloc_tables(upfs, uniq, inverse, grid.shape,
+                                    guard_single_shell=True)
 
     # per-k projector data (scalar path); FR pseudos store raw F tables for
     # the spinor projector builder instead (scalar m-expansion is invalid).
@@ -231,28 +216,8 @@ def setup_system(
         )
 
     # NLCC core density on the grid (frozen; enters XC only)
-    rho_core = None
-    if any(u.core_rho is not None for u in upfs):
-        from gradwave.core.structure import structure_factors
-        from gradwave.pseudo.atomic import core_density_of_q
-
-        core_g = torch.zeros(grid.n_points, dtype=CDTYPE)
-        pos_t = torch.as_tensor(np.asarray(positions), dtype=RDTYPE)
-        for sp_i, upf in enumerate(upfs):
-            tab = torch.as_tensor(core_density_of_q(upf, uniq), dtype=RDTYPE)
-            shell = tab[torch.as_tensor(inverse)]
-            atoms = [a for a, sa in enumerate(species_of_atom) if sa == sp_i]
-            if not atoms:
-                continue
-            sfac = structure_factors(pos_t[atoms], grid.g_cart).sum(dim=0).reshape(-1)
-            core_g += sfac * shell.to(CDTYPE) / grid.volume
-        core_g = torch.where(grid.dens_mask.reshape(-1), core_g, torch.zeros_like(core_g))
-        # NO clamp on the Gibbs oscillations of the sphere-truncated core: QE
-        # keeps them (its XC floors ρ pointwise, as does ours via to_au) and
-        # clamping shifts E_xc by several meV for sharp 3d cores
-        rho_core = torch.fft.ifftn(
-            core_g.reshape(grid.shape) * grid.n_points, dim=(-3, -2, -1)
-        ).real
+    rho_core = build_core_density(upfs, species_of_atom, positions, grid,
+                                  uniq, inverse)
 
     from gradwave.core.batch import build_batched
 
@@ -365,22 +330,8 @@ def _seed_density(system, nspin, start_from, start_mag, grid, vol):
     rescaled so the electron count is conserved), else SAD — spin-split by
     start_mag for nspin=2."""
     if start_from is not None:
-        def _prev(key, default=None):
-            return (start_from.get(key, default)
-                    if isinstance(start_from, dict)
-                    else getattr(start_from, key, default))
-
-        prev_grid = _prev("system").grid
-        if tuple(prev_grid.shape) != tuple(grid.shape):
-            raise ValueError("start_from requires the same FFT grid "
-                             f"({tuple(prev_grid.shape)} vs {tuple(grid.shape)})")
-        if int(_prev("nspin", 1) or 1) != nspin:
-            raise ValueError("start_from nspin mismatch")
-        dev = system.positions.device
-        chg = float(prev_grid.volume) / float(vol)
-        if nspin == 1:
-            return [_prev("rho").detach().to(dev) * chg]
-        return [r.detach().to(dev) * chg for r in _prev("rho_spin")]
+        return warm_start_densities(start_from, nspin, grid, vol,
+                                    system.positions.device)
     if nspin == 1:
         return [sad_density(grid, system.positions, system.species_of_atom,
                             system.upfs, system.n_electrons)]
@@ -491,19 +442,17 @@ def scf(
 
     rho_s = _seed_density(system, nspin, start_from, start_mag, grid, vol)
 
-    mask_flat = grid.dens_mask.reshape(-1)
-    g2_vec = grid.g2.reshape(-1)[mask_flat]
-    # spin mixing runs in the (total, magnetization) basis: Kerker damps
-    # long-wavelength charge sloshing on the TOTAL block only — applying it
-    # to both channels would freeze the per-channel electron counts (the
-    # G=0 Kerker zero forbids charge transfer between spin channels)
-    g2_mix = torch.cat([g2_vec] * nspin)
-    kerker_mask = None
-    if nspin == 2:
-        kerker_mask = torch.cat([torch.ones_like(g2_vec, dtype=torch.bool),
-                                 torch.zeros_like(g2_vec, dtype=torch.bool)])
-    mixer = PulayMixer(g2_mix, alpha=mixing_alpha, history=mixing_history,
-                       kerker=kerker, check_g0=nspin == 1, kerker_mask=kerker_mask)
+    # MixLayout owns the packed-vector structure (density-sphere channels in
+    # the (total, magnetization) basis; no becsum blocks on the NC path).
+    # Spin mixing runs in that basis: Kerker damps long-wavelength charge
+    # sloshing on the TOTAL block only — applying it to both channels would
+    # freeze the per-channel electron counts (the G=0 Kerker zero forbids
+    # charge transfer between spin channels)
+    layout = MixLayout(grid, nspin, [])
+    mixer = PulayMixer(layout.g2_full, alpha=mixing_alpha,
+                       history=mixing_history, kerker=kerker,
+                       check_g0=nspin == 1,
+                       kerker_mask=layout.kerker_mask if nspin == 2 else None)
 
     if precond not in ("kerker", "local_tf"):
         raise ValueError("precond must be 'kerker' or 'local_tf'")
@@ -513,9 +462,10 @@ def scf(
         # the bare-Kerker q0 so a bulk metal is unchanged and only the vacuum is
         # unscreened. set_density() is called with the current n(r) each iter.
         from gradwave.scf.local_tf import LocalTFPrecond
-        tf_precond = LocalTFPrecond(grid.g2, grid.shape, mask_flat, q0_max=mixer.q0)
+        tf_precond = LocalTFPrecond(grid.g2, grid.shape, layout.mask,
+                                    q0_max=mixer.q0)
         mixer.precond_op = tf_precond
-        mixer.precond_slice = slice(0, g2_vec.shape[0]) if nspin == 2 else None
+        mixer.precond_slice = slice(0, layout.ng) if nspin == 2 else None
 
     from gradwave.core.batch import BatchedHamiltonian, becp_b, density_b, projectors_b
     from gradwave.solvers.davidson import davidson_batched
@@ -527,7 +477,7 @@ def scf(
     # systems (e.g. GaAs, 1.45×), but a REGRESSION for fixed-occupation
     # insulators (Si8 0.35×: the fp32 draft inflates SCF iterations ~50%) and
     # neutral for metals / very large grids. Callers enable it per system.
-    mp_crossover = 1e-5  # switch to fp64 once the diago tolerance drops below this
+    mp_crossover = MP_CROSSOVER  # fp64 once the diago tolerance drops below this
 
     # frozen projector matrices (positions fixed during SCF)
     projs_b = projectors_b(bk, system.positions)
@@ -569,23 +519,16 @@ def scf(
             tf_precond.set_density(rho_tot)
         veff_s = effective_potentials(system, xc, rho_s, vloc_r)
 
-        # adaptive diagonalization tolerance (QE-style): loose while the
-        # density is far from self-consistent, tightening QUADRATICALLY with
-        # the residual (QE's ethr ~ dr2/nelec/10). A linear schedule floors
-        # each iteration's density residual at the eigensolver noise, so the
-        # tail converges at the schedule's pace instead of the mixer's.
-        if it == 1:
-            # warm starts skip the loose first solve (it would floor the
-            # density residual at eigensolver noise), but NOT all the way
-            # to diago_tol: after an ionic move the seed orbitals are
-            # stale and one full-precision Davidson against the new H is
-            # slower than letting the schedule tighten from 1e-6
-            # (measured on diamond relax: 61 s tight vs 47 s baseline)
-            tol_eff = max(diago_tol, 1e-3 if start_from is None else 1e-6)
-        else:
-            r_prev = history[-1]["res"]
-            tol_eff = max(diago_tol,
-                          min(1e-3, 0.1 * r_prev * r_prev / system.n_electrons))
+        # adaptive diagonalization tolerance, quadratic schedule (see
+        # common.adaptive_diago_tol). Warm starts skip the loose first solve
+        # (it would floor the density residual at eigensolver noise), but NOT
+        # all the way to diago_tol: after an ionic move the seed orbitals are
+        # stale and one full-precision Davidson against the new H is slower
+        # than letting the schedule tighten from 1e-6 (measured on diamond
+        # relax: 61 s tight vs 47 s baseline)
+        tol_eff = adaptive_diago_tol(
+            it, history, diago_tol, system.n_electrons, schedule="quadratic",
+            first_tol=1e-3 if start_from is None else 1e-6)
         use_low = mixed_precision and tol_eff > mp_crossover
         cdtype = CDTYPE_LOW if use_low else CDTYPE
         t_solve = bk.t.to(RDTYPE_LOW) if use_low else bk.t
@@ -673,40 +616,18 @@ def scf(
             )
             energies.hubbard = e_hub
         else:
-            from gradwave.core.energies.ewald import ewald_energy
-            from gradwave.core.energies.hartree import hartree_energy
-            from gradwave.core.energies.kinetic import kinetic_energy
-            from gradwave.core.energies.local_pp import local_energy
-            from gradwave.core.energies.nl_pp import nonlocal_energy
-
             rho_g_out = r_to_g(rho_tot_out.to(CDTYPE))
-            e_kin = sum(kinetic_energy(coeffs_list_s[sp], occ_s[sp],
-                                       system.kweights, spheres)
-                        for sp in range(nspin))
-            e_h = hartree_energy(rho_g_out, grid.g2, vol)
-            c2 = 0.0 if system.rho_core is None else 0.5 * system.rho_core
-            r_u, r_d = rho_out_s[0] + c2, rho_out_s[1] + c2
-            s_uu, s_dd, s_tt = spin_sigmas(r_u, r_d, xc, grid.g_cart)
-            e_xc = xc.energy(r_u, r_d, vol, s_uu, s_dd, s_tt)
-            e_loc = local_energy(rho_g_out, vloc_g, vol)
-            e_nl = sum(nonlocal_energy(becps_s[sp], _stack_dij(system),
-                                       occ_s[sp], system.kweights)
-                       for sp in range(nspin))
-            e_ew = ewald_energy(system.positions, system.charges, grid.cell)
-            energies = EnergyBreakdown(
-                kinetic=e_kin, hartree=e_h, xc=e_xc, local=e_loc,
-                nonlocal_=e_nl, ewald=e_ew, smearing=entropy_term, hubbard=e_hub,
-            )
+            energies = assemble_pw_energies(
+                coeffs_list_s, occ_s, system.kweights, spheres, grid, vol,
+                rho_g_out,
+                spin_xc_energy(xc, rho_out_s, system.rho_core, vol,
+                               grid.g_cart),
+                vloc_g, becps_s, _stack_dij(system), system.positions,
+                system.charges, entropy_term, nspin, e_hub=e_hub)
         e_free = float(energies.free_energy)
 
-        def to_mix_basis(chans):
-            vecs = [r_to_g(c.to(CDTYPE)).reshape(-1)[mask_flat] for c in chans]
-            if nspin == 1:
-                return vecs[0]
-            return torch.cat([vecs[0] + vecs[1], vecs[0] - vecs[1]])  # (total, mag)
-
-        rho_in_vec = to_mix_basis(rho_s)
-        rho_out_vec = to_mix_basis(rho_out_s)
+        rho_in_vec = layout.pack(rho_s)
+        rho_out_vec = layout.pack(rho_out_s)
         if nspin == 2:  # only the TOTAL is conserved; its G=0 residual must vanish
             tot_res = rho_out_vec[0] - rho_in_vec[0]
             if not torch.isfinite(rho_out_vec).all():
@@ -717,9 +638,7 @@ def scf(
         # keep the real-space total-density residual of the last step for the
         # post-SCF convergence-error estimate (ρ_out − ρ_in at this iteration)
         drho_scf = rho_tot_out - rho_tot
-        de = abs(e_free - e_free_prev) if e_free_prev is not None else float("inf")
-        history.append({"iter": it, "free_energy": e_free, "dE": de,
-                        "res": res_norm, "t": time.perf_counter() - t_it})
+        de = record_iteration(history, it, e_free, e_free_prev, res_norm, t_it)
         if verbose:
             mag = ""
             if nspin == 2:
@@ -728,28 +647,14 @@ def scf(
             print(f"  SCF {it:3d}  F = {e_free:+.10f} eV   dE = {de:.3e}   "
                   f"|drho| = {res_norm:.3e}{mag}")
 
-        if de < etol and res_norm < rhotol and tol_eff <= diago_tol * 1.01:
+        if convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol):
             converged = True
             rho_s = rho_out_s
             break
 
         e_free_prev = e_free
-        mixed = mixer.step(rho_in_vec, rho_out_vec)
-        ng = mixed.shape[0] // nspin
-        if nspin == 1:
-            chan_vecs = [mixed]
-        else:  # back from (total, mag) to channels
-            tot, mag = mixed[:ng], mixed[ng:]
-            chan_vecs = [(tot + mag) / 2.0, (tot - mag) / 2.0]
-        new_rho_s = []
-        for vec in chan_vecs:
-            rho_g_new = torch.zeros(grid.n_points, dtype=CDTYPE, device=device)
-            rho_g_new[mask_flat] = vec
-            new_rho_s.append(
-                (torch.fft.ifftn(rho_g_new.reshape(grid.shape) * grid.n_points,
-                                 dim=(-3, -2, -1))).real
-            )
-        rho_s = new_rho_s
+        # (total, mag) → per-channel r-space densities (MixLayout.unpack)
+        rho_s, _ = layout.unpack(mixer.step(rho_in_vec, rho_out_vec))
 
     rho_tot_final = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
     if nspin == 1:

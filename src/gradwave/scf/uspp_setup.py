@@ -183,52 +183,32 @@ def setup_uspp(
     space group of that moment configuration: magnetic-IBZ k-fold plus
     (ρ, m⃗, becsum) symmetrizers over the full Shubnikov group. Only
     scf_uspp_noncollinear consumes such a system; scf_uspp rejects it."""
-    from gradwave.kpoints import monkhorst_pack
-    from gradwave.pseudo.local import alpha_z, vloc_of_g
-    from gradwave.scf.loop import _unique_shells
+    from gradwave.scf.setup_common import (
+        _unique_shells,
+        build_core_density,
+        build_symmetrizer_and_kpoints,
+        build_vloc_tables,
+        coupled_axes,
+        default_nbands,
+        find_symmetry_groups,
+    )
 
     cell = np.asarray(cell, dtype=np.float64)
     positions = np.asarray(positions, dtype=np.float64)
     if ecutrho is None:
         ecutrho = 4.0 * ecut
-    sym = rho_symmetrizer = mag_sym = None
+    sym = mag_sym = None
     if use_symmetry:
-        from gradwave.symmetry import find_spacegroup
-
-        frac = positions @ np.linalg.inv(cell)
-        sym = find_spacegroup(cell, frac, list(species_of_atom), symprec=symprec)
-        if sym.n_ops <= 1:
-            sym = None
-        elif magmoms is not None:
-            from gradwave.symmetry import magnetic_spacegroup
-
-            mag_sym = magnetic_spacegroup(sym, magmoms, cell)
-            sym = mag_sym.unitary
-    # equalize only symmetry-COUPLED axes (a slab's vacuum axis stays
-    # independent of the in-plane pair); a blanket cubic box would blow the slab
-    # dense grid up by the vacuum-to-in-plane ratio — matches the NC setup path.
-    if sym is not None:
-        from gradwave.symmetry import coupled_axis_groups
-        axis_groups = coupled_axis_groups(
-            mag_sym.combined() if mag_sym is not None else sym)
-    else:
-        axis_groups = False
+        sym, mag_sym = find_symmetry_groups(cell, positions, species_of_atom,
+                                            symprec, magmoms)
+    # equalize only symmetry-COUPLED axes (setup_common.coupled_axes) —
+    # matches the NC setup path; the smooth (dual-grid) box below reuses it
+    axis_groups = coupled_axes(sym, mag_sym)
     # build_fft_grid derives the density sphere as 2·G_max(ecut_arg)
     grid = build_fft_grid(cell, ecutrho / 4.0, shape_override=fft_shape,
                           equal_dims=axis_groups)
-    if mag_sym is not None:
-        from gradwave.symmetry import MagneticSymmetrizer, reduce_mesh_magnetic
-
-        rho_symmetrizer = MagneticSymmetrizer(grid.shape, mag_sym, cell,
-                                              dens_mask=grid.dens_mask)
-        kfrac, kw = reduce_mesh_magnetic(kmesh, (0, 0, 0), mag_sym)
-    elif sym is not None:
-        from gradwave.symmetry import RhoSymmetrizer, reduce_mesh
-
-        rho_symmetrizer = RhoSymmetrizer(grid.shape, sym, dens_mask=grid.dens_mask)
-        kfrac, kw = reduce_mesh(kmesh, (0, 0, 0), sym, time_reversal=True)
-    else:
-        kfrac, kw = monkhorst_pack(kmesh, (0, 0, 0), time_reversal=True)
+    rho_symmetrizer, kfrac, kw = build_symmetrizer_and_kpoints(
+        grid, cell, kmesh, (0, 0, 0), sym, mag_sym, time_reversal=True)
     spheres = [build_gsphere(grid, ecut, k) for k in kfrac]
 
     # dual grid: a smaller box holding only the wavefunction-product sphere
@@ -249,18 +229,14 @@ def setup_uspp(
     charges = torch.tensor([paws[s].z_valence for s in species_of_atom], dtype=RDTYPE)
     n_electrons = float(charges.sum())
     if nbands is None:
-        nocc = int(np.ceil(n_electrons / 2.0))
-        nbands = max(int(np.ceil(nocc * 1.2)), nocc + 4)
+        nbands = default_nbands(n_electrons)
 
+    # (guard_single_shell=False: this path historically dropped the NC
+    # setup's len(uniq) > 1 guard — see setup_common.build_vloc_tables)
     g_flat = np.sqrt(grid.g2.reshape(-1).numpy())
     uniq, inverse = _unique_shells(g_flat)
-    vloc_tables = []
-    for paw in paws:
-        tab = np.empty_like(uniq)
-        tab[0] = alpha_z(paw)
-        tab[1:] = vloc_of_g(paw, uniq[1:])
-        vloc_tables.append(tab[inverse].reshape(grid.shape))
-    vloc_tables = torch.as_tensor(np.stack(vloc_tables), dtype=RDTYPE)
+    vloc_tables = build_vloc_tables(paws, uniq, inverse, grid.shape,
+                                    guard_single_shell=False)
 
     dij_species = [torch.as_tensor(p.dij, dtype=RDTYPE) for p in paws]
     # S weights from the SAME radial integrals as the augmentation tables —
@@ -300,25 +276,8 @@ def setup_uspp(
     g_sphere = grid.g_cart.reshape(-1, 3)[sphere_idx]
     aug = [_aug_tables(p, g_sphere.numpy()) for p in paws]
 
-    rho_core = None
-    if any(p.core_rho is not None for p in paws):
-        from gradwave.core.structure import structure_factors
-        from gradwave.pseudo.atomic import core_density_of_q
-
-        core_g = torch.zeros(grid.n_points, dtype=CDTYPE)
-        pos_t = torch.as_tensor(positions, dtype=RDTYPE)
-        for sp_i, paw in enumerate(paws):
-            tab = torch.as_tensor(core_density_of_q(paw, uniq), dtype=RDTYPE)
-            shell = tab[torch.as_tensor(inverse)]
-            atoms = [a for a, sa in enumerate(species_of_atom) if sa == sp_i]
-            if not atoms:
-                continue
-            sfac = structure_factors(pos_t[atoms], grid.g_cart).sum(dim=0).reshape(-1)
-            core_g += sfac * shell.to(CDTYPE) / grid.volume
-        core_g = torch.where(mask, core_g, torch.zeros_like(core_g))
-        rho_core = torch.fft.ifftn(
-            core_g.reshape(grid.shape) * grid.n_points, dim=(-3, -2, -1)
-        ).real
+    rho_core = build_core_density(paws, species_of_atom, positions, grid,
+                                  uniq, inverse)
 
     # per-atom projector column ranges (atoms in order, matching build order)
     slices, start = [], 0

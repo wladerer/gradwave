@@ -57,15 +57,18 @@ class MixLayout:
     def size(self) -> int:
         return self.ng * self.nspin + self.nbec * self.nspin
 
-    def pack(self, rho_spin, becs) -> torch.Tensor:
+    def pack(self, rho_spin, becs=None) -> torch.Tensor:
         """(per-spin r-space densities, per-spin becsum lists) → flat
-        complex mixing vector, grid channels in the (total, mag) basis."""
+        complex mixing vector, grid channels in the (total, mag) basis.
+        becs is omitted for becsum-free layouts (atom_slices=[] — the
+        norm-conserving driver's density-only vector)."""
         vecs = [r_to_g(c.to(CDTYPE)).reshape(-1)[self.mask]
                 for c in rho_spin]
         if self.nspin == 2:
             vecs = [vecs[0] + vecs[1], vecs[0] - vecs[1]]
-        bec_flat = [torch.cat([m.reshape(-1) for m in becs[isp]])
-                    for isp in range(self.nspin)]
+        bec_flat = [] if not self.nbec else [
+            torch.cat([m.reshape(-1) for m in becs[isp]])
+            for isp in range(self.nspin)]
         return torch.cat(vecs + bec_flat)
 
     def unpack(self, v: torch.Tensor):

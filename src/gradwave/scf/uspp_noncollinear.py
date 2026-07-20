@@ -35,7 +35,6 @@ import time
 
 import torch
 
-from gradwave.core.batch import box_to_sphere_b, g_to_r_b
 from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.hartree import hartree_energy, hartree_potential_g
 from gradwave.core.energies.nl_pp import nonlocal_energy
@@ -44,13 +43,25 @@ from gradwave.core.fftbox import r_to_g
 from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
 from gradwave.core.xc.noncollinear import NoncollinearXC, energy_with_grid, vxc_and_bxc
 from gradwave.dtypes import CDTYPE, RDTYPE
-from gradwave.scf.common import symmetrize_rho
+from gradwave.scf.common import (
+    adaptive_diago_tol,
+    convergence_gate,
+    record_iteration,
+    symmetrize_rho,
+)
 from gradwave.scf.guess import sad_density
 from gradwave.scf.mixing import PulayMixer
 from gradwave.scf.results import USPPNCResult
 from gradwave.scf.paw_noncollinear import (
     onsite_nc_energy_and_ddd,
     spinor_onsite_becsum,
+)
+from gradwave.scf.spinor_common import (
+    apply_local_spinor,
+    pauli_density_accumulate,
+    spinor_band_chunk,
+    spinor_potential_blocks,
+    spinor_pw_seed,
 )
 from gradwave.scf.uspp_loop import _build_iter_ops, _seed_becsum, _species_atoms
 from gradwave.scf.uspp_setup import USPPSystem
@@ -87,11 +98,8 @@ class SpinorBatchedHS:
         self._d_uu = d_n + d_z
         self._d_dd = d_n - d_z
         self._d_ud = d_x - 1j * d_y            # image of v_ud = B_x − iB_y
-        bx, by, bz = b_vec_r[0], b_vec_r[1], b_vec_r[2]
-        self.b_zero = float(b_vec_r.abs().max()) == 0.0
-        self._v_uu = v_r + bz
-        self._v_dd = v_r - bz
-        self._v_ud = torch.complex(bx, -by)
+        self.b_zero, self._v_uu, self._v_dd, self._v_ud = \
+            spinor_potential_blocks(v_r, b_vec_r)
         # dual grid (USPP/PAW): the local 2×2 mix runs on the smaller smooth
         # box — exact for ⟨ψ|V|ψ⟩ since ψ†ψ products live within twice the
         # wavefunction cutoff (same argument as the collinear BatchedHamiltonian;
@@ -107,12 +115,10 @@ class SpinorBatchedHS:
             self._fft_shape = shape_s
 
     def _band_chunk(self, nk: int, device, elem_bytes: int = 16) -> int:
-        """Bands per chunk for the local mix + nonlocal einsums, mirroring
-        SpinorHamiltonian: bound the (nk, 2·nb, grid) FFT temporaries and the
-        (nk, nb, 2·npw) nonlocal temporaries at large k/band counts."""
-        n = self._fft_shape[0] * self._fft_shape[1] * self._fft_shape[2]
-        budget = 2.5e8 if device.type == "cuda" else 4.0e8
-        return max(1, int(budget / (elem_bytes * n * max(nk, 1))))
+        """Bands per chunk for the local mix + nonlocal einsums — the shared
+        spinor heuristic (scf/spinor_common.py), on the smooth box when the
+        dual grid is active."""
+        return spinor_band_chunk(self._fft_shape, nk, device, elem_bytes)
 
     def h(self, c):
         bk, m = self.inner, self.m
@@ -121,25 +127,12 @@ class SpinorBatchedHS:
         out_u = t_r[:, None, :] * cu
         out_d = t_r[:, None, :] * cd
         nk, nb = c.shape[0], c.shape[1]
-        fbk = self._fft_bk
         chunk = self._band_chunk(nk, c.device, c.element_size())
-        for lo in range(0, nb, chunk):
-            hi = min(lo + chunk, nb)
-            nbc = hi - lo
-            # local 2×2 mix — both spinor components in ONE batched FFT pair,
-            # on the smooth box when the dual grid is active
-            psi = g_to_r_b(torch.cat([cu[:, lo:hi], cd[:, lo:hi]], dim=1),
-                           fbk, self._fft_shape)
-            psi_u, psi_d = psi[:, :nbc], psi[:, nbc:]
-            if self.b_zero:
-                h_u = psi_u * self._v_uu
-                h_d = psi_d * self._v_dd
-            else:
-                h_u = psi_u * self._v_uu + psi_d * self._v_ud
-                h_d = psi_u * self._v_ud.conj() + psi_d * self._v_dd
-            hud = box_to_sphere_b(torch.cat([h_u, h_d], dim=1), fbk)
-            out_u[:, lo:hi] += hud[:, :nbc]
-            out_d[:, lo:hi] += hud[:, nbc:]
+        # local 2×2 mix — the shared fused-FFT band-chunked apply, on the
+        # smooth box when the dual grid is active
+        apply_local_spinor(out_u, out_d, cu, cd, self._fft_bk,
+                           self._fft_shape, chunk, self._v_uu, self._v_dd,
+                           self._v_ud, self.b_zero)
         # nonlocal: 2×2 screened D in projector space; one fused becp for
         # both spin components
         p, pc = self.p, self.p_conj
@@ -273,9 +266,7 @@ def scf_uspp_noncollinear(
         return fields[0], torch.stack(fields[1:]), bec
 
     # ---- spinor seeds: alternate up/down lowest plane waves ----
-    coeffs = torch.zeros(nk, nbands, 2 * m_pw, dtype=CDTYPE, device=dev)
-    for b in range(nbands):
-        coeffs[:, b, (b // 2) + (b % 2) * m_pw] = 1.0
+    coeffs = spinor_pw_seed(nk, nbands, m_pw, dev)
 
     scheme = SCHEMES[smearing]
     e_free_prev, converged, history = None, False, []
@@ -329,8 +320,8 @@ def scf_uspp_noncollinear(
                     d_chan[c4][s0:s1, s0:s1] += ddd[c4].to(dev)
 
         # ---- spinor generalized eigensolve + S-normalization ----
-        tol_eff = max(diago_tol, 1e-3) if it == 1 else \
-            max(diago_tol, min(1e-3, 0.03 * history[-1]["res"]))
+        tol_eff = adaptive_diago_tol(it, history, diago_tol,
+                                     system.n_electrons, schedule="linear")
         smooth = None
         if smooth_geom is not None:
             # filter the 2×2 potential fields onto the smooth box (the dense
@@ -371,28 +362,13 @@ def scf_uspp_noncollinear(
         entropy_term = -width * (system.kweights[:, None] * s_ent).sum()
 
         # ---- densities: Pauli grid channels + 2×2 becsum + 4-channel aug ----
-        # k-batched, band-chunked, both spinor components in one batched FFT —
-        # mirrors the H-apply instead of launching nk small FFTs per iteration
-        rho_out = torch.zeros(shape, dtype=RDTYPE, device=dev)
-        m_out = torch.zeros(3, *shape, dtype=RDTYPE, device=dev)
+        # the shared band-chunked, fused-FFT Pauli accumulation
+        # (scf/spinor_common.py) on the DENSE grid (the density needs the
+        # full ecutrho resolution, unlike the H-apply's smooth-box mix)
         w_kb = (system.kweights[:, None] * occ).to(RDTYPE)
-        nbc = max(1, int((2.5e8 if dev.type == "cuda" else 4.0e8)
-                         / (coeffs.element_size() * grid.n_points * nk)))
-        for lo in range(0, nbands, nbc):
-            hi = min(lo + nbc, nbands)
-            nbb = hi - lo
-            cud = torch.cat([coeffs[:, lo:hi, :m_pw], coeffs[:, lo:hi, m_pw:]],
-                            dim=1)
-            psi = g_to_r_b(cud, bk, shape)
-            pu, pd = psi[:, :nbb], psi[:, nbb:]
-            f = w_kb[:, lo:hi]
-            uu = torch.einsum("kb,kbxyz->xyz", f, pu.real ** 2 + pu.imag ** 2)
-            dd = torch.einsum("kb,kbxyz->xyz", f, pd.real ** 2 + pd.imag ** 2)
-            ud = torch.einsum("kb,kbxyz->xyz", f.to(CDTYPE), pu.conj() * pd)
-            rho_out += uu + dd
-            m_out[0] += 2.0 * ud.real
-            m_out[1] += 2.0 * ud.imag
-            m_out[2] += uu - dd
+        nbc = spinor_band_chunk(shape, nk, dev, coeffs.element_size())
+        rho_out, m_out = pauli_density_accumulate(
+            coeffs, w_kb, bk, shape, m_pw, nbands, nbc, dev)
         # becsum from the already-computed S-normalized projections, with k
         # folded into the band axis (the einsums contract over bands anyway)
         bec_out = [[None] * len(system.atom_slices) for _ in range(4)]
@@ -465,15 +441,13 @@ def scf_uspp_noncollinear(
         vin = pack(rho, m, bec_chan)
         vout = pack(rho_out, m_out, bec_out_r)
         res_norm = float(torch.linalg.norm(vout - vin)) * vol
-        de = abs(e_free - e_free_prev) if e_free_prev is not None else float("inf")
-        history.append({"iter": it, "free_energy": e_free, "dE": de,
-                        "res": res_norm, "t": time.perf_counter() - t_it})
+        de = record_iteration(history, it, e_free, e_free_prev, res_norm, t_it)
         if verbose:
             mv = [float(m_out[i].mean()) * vol for i in range(3)]
             print(f"  NC-USPP {it:3d}  F = {e_free:+.8f}  dE = {de:.2e}  "
                   f"|dρ,m,bec| = {res_norm:.2e}  "
                   f"m⃗ = ({mv[0]:+.3f},{mv[1]:+.3f},{mv[2]:+.3f})", flush=True)
-        if de < etol and res_norm < rhotol and tol_eff <= diago_tol * 1.01:
+        if convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol):
             converged = True
             rho, m, bec_chan = rho_out, m_out, bec_out_r
             break
