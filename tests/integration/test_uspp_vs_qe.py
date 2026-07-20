@@ -18,11 +18,10 @@ from gradwave.core.hamiltonian import becp, projectors
 from gradwave.core.xc.pbe import PBE
 from gradwave.pseudo.upf_paw import parse_upf_paw
 from gradwave.scf.uspp import scf_uspp, setup_uspp
+from tests.helpers import RY, si_fcc
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
-SI_CELL = 5.43 / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
-SI_POS = np.array([[0.0, 0, 0], [5.43 / 4] * 3])
+SI_CELL, SI_POS = si_fcc()
 
 
 def test_uspp_internal_identities():

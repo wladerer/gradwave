@@ -22,10 +22,9 @@ from gradwave.core.xc.pbe import PBE
 from gradwave.postscf.stress import _energy_strained, stress, stress_kbar
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
+from tests.helpers import RY
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
-
 SI_CELL = np.array([
     [0.0108600000, 2.7041400000, 2.7285750000],
     [2.7421500000, 0.0162900000, 2.7231450000],

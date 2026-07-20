@@ -15,6 +15,7 @@ nothing cancels by symmetry or by stationarity.
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from gradwave.core.batch import becp_b, density_b, projectors_b
@@ -22,11 +23,14 @@ from gradwave.core.energies.total import total_energy
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import _stack_dij, setup_system
+from tests.helpers import RY
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
 
-torch.set_num_threads(4)
+
+@pytest.fixture(autouse=True)
+def _limit_threads():
+    torch.set_num_threads(4)
 
 
 def _random_unitary(n, gen):

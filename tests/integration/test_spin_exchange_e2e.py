@@ -27,9 +27,9 @@ from gradwave.core.xc.spin import LSDA_PW92
 from gradwave.postscf.spin_exchange import decompose, exchange_from_atom
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import setup_system
+from tests.helpers import RY, pseudo
 
-RY = 13.605693122994
-PSEUDO = "tests/fixtures/qe/pseudos/O_ONCV_PBE-1.2.upf"
+PSEUDO = pseudo("O_ONCV_PBE-1.2.upf")
 
 
 def _o2_system(L=6.0, d=1.21):

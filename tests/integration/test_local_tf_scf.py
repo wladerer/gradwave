@@ -18,9 +18,9 @@ import torch
 from gradwave.core.xc.pbe import PBE
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
+from tests.helpers import RY
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
 AL_A = 4.05
 AL_CELL = AL_A / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 

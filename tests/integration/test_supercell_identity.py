@@ -27,11 +27,14 @@ from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.postscf.forces import forces as compute_forces
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
+from tests.helpers import RY
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
 
-torch.set_num_threads(4)
+
+@pytest.fixture(autouse=True)
+def _limit_threads():
+    torch.set_num_threads(4)
 
 
 def test_supercell_energy_eigs_forces_fold():

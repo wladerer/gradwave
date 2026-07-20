@@ -14,12 +14,10 @@ from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
 from gradwave.solvers.davidson import davidson_batched_ms
+from tests.helpers import RY, si_fcc
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
-A = 5.43
-SI_CELL = A / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
-SI_POS = np.array([[0.0, 0, 0], [A / 4] * 3])
+SI_CELL, SI_POS = si_fcc()
 
 
 def test_scf_mixed_precision_matches_fp64():

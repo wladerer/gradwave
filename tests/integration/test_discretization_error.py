@@ -26,11 +26,11 @@ from gradwave.pseudo.upf_paw import parse_upf_paw
 from gradwave.scf.loop import scf, setup_system
 from gradwave.scf.noncollinear import scf_noncollinear
 from gradwave.scf.uspp import scf_uspp, setup_uspp
+from tests.helpers import RY
 
 pytestmark = pytest.mark.standard
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe" / "pseudos"
-RY = 13.605693122994
 FCC = np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 
 

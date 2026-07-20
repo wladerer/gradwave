@@ -238,27 +238,37 @@ def chebyshev_filtered_batched_ms(
     already low precision, or crossover ≥ tol.
     """
     from gradwave.dtypes import real_of
+    from gradwave.solvers._ms import LOW, mixed_precision_solve
 
-    low = torch.complex64
-    if (not mixed_precision) or x0.dtype == low or crossover >= tol:
+    def full():
         return chebyshev_filtered_batched(
             h_apply, x0, t, mask, tol=tol, max_iter=max_iter,
             degree=degree, n_lanczos=n_lanczos,
         )
-    hi_dtype = x0.dtype
-    # bounds are cheap and precision-insensitive; compute once and reuse for
-    # both the draft and the polish (_lanczos_bounds runs in fp64 internally)
-    lo, hi = _lanczos_bounds(h_apply, mask, steps=n_lanczos)
-    draft = chebyshev_filtered_batched(
-        h_apply, x0.to(low), t.to(real_of(low)), mask,
-        tol=crossover, max_iter=max_iter, degree=degree,
-        bounds=(lo.to(real_of(low)), hi.to(real_of(low))),
-    )
-    x1 = draft.eigenvectors.to(hi_dtype)
-    # renormalize per band: fp32 leaves ‖ψ‖ good only to ~1e-6, and the polish
-    # orthonormalizes anyway, but a clean warm start converges faster
-    x1 = x1 / torch.linalg.norm(x1, dim=-1, keepdim=True).clamp_min(1e-30)
-    return chebyshev_filtered_batched(
-        h_apply, x1, t, mask, tol=tol, max_iter=max_iter,
-        degree=degree, n_lanczos=n_lanczos, bounds=(lo, hi),
-    )
+
+    def make_stages():
+        # bounds are cheap and precision-insensitive; compute once and reuse for
+        # both the draft and the polish (_lanczos_bounds runs in fp64 internally)
+        lo, hi = _lanczos_bounds(h_apply, mask, steps=n_lanczos)
+
+        def draft(xlo):
+            return chebyshev_filtered_batched(
+                h_apply, xlo, t.to(real_of(LOW)), mask,
+                tol=crossover, max_iter=max_iter, degree=degree,
+                bounds=(lo.to(real_of(LOW)), hi.to(real_of(LOW))),
+            )
+
+        def polish(x1):
+            # renormalize per band: fp32 leaves ‖ψ‖ good only to ~1e-6, and the
+            # polish orthonormalizes anyway, but a clean warm start converges
+            # faster
+            x1 = x1 / torch.linalg.norm(x1, dim=-1, keepdim=True).clamp_min(1e-30)
+            return chebyshev_filtered_batched(
+                h_apply, x1, t, mask, tol=tol, max_iter=max_iter,
+                degree=degree, n_lanczos=n_lanczos, bounds=(lo, hi),
+            )
+
+        return draft, polish
+
+    return mixed_precision_solve(
+        x0, tol, crossover, mixed_precision, full=full, make_stages=make_stages)

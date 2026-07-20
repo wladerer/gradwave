@@ -16,11 +16,9 @@ from gradwave.core.xc.spin import SpinPBE
 from gradwave.pseudo.upf_paw import parse_upf_paw
 from gradwave.scf.uspp import scf_uspp, setup_uspp
 from gradwave.scf.uspp_hubbard import HubbardManifold
+from tests.helpers import RY
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
-
-
 @pytest.mark.torture
 def test_paw_hubbard_ni_vs_qe():
     torch.set_num_threads(8)

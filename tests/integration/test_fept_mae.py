@@ -26,19 +26,16 @@ from gradwave.core.xc.spin import LSDA_PW92
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import setup_system
 from gradwave.scf.noncollinear import scf_noncollinear
+from tests.helpers import PSEUDOS, RY, fept_l10
 
-RY = 13.605693122994
-PSE = "tests/fixtures/qe/pseudos"
-
-A, C = 2.723, 3.712                         # L1_0 FePt tetragonal [A]
+PSE = PSEUDOS
 KMESH = (6, 6, 4)
 
 
 def _fept_energy(axis):
     fe = parse_upf(f"{PSE}/Fe_ONCV_PBE_FR-1.0.upf")
     pt = parse_upf(f"{PSE}/Pt_ONCV_PBE_FR-1.0.upf")
-    cell = np.diag([A, A, C])
-    pos = np.array([[0.0, 0, 0], [0.5, 0.5, 0.5]]) @ cell
+    cell, pos = fept_l10()
     ax = np.array(axis, float)
     init = [(3.0 * ax).tolist(), (0.4 * ax).tolist()]   # Fe ~3, Pt induced ~0.4
     system = setup_system(cell, pos, [0, 1], [fe, pt], ecut=70 * RY, kmesh=KMESH,

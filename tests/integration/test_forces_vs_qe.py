@@ -16,10 +16,9 @@ from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.postscf.forces import forces
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
+from tests.helpers import RY
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
-
 A = 5.43
 CELL = A / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 FRAC = np.array([[0.0, 0.0, 0.0], [0.24, 0.26, 0.255]])  # matches si_forces_ci/pw.in

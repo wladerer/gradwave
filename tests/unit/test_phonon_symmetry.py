@@ -9,10 +9,9 @@ import numpy as np
 import pytest
 
 from gradwave.postscf.phonons import HessianSymmetry, gamma_frequencies
+from tests.helpers import si_fcc
 
-A = 5.43
-SI_CELL = A / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
-SI_POS = np.array([[0.0, 0, 0], [A / 4] * 3])
+SI_CELL, SI_POS = si_fcc()
 GE_POS = SI_POS  # zincblende: same sites, different species
 
 

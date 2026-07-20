@@ -7,9 +7,9 @@ from ase import Atoms
 from ase.optimize import FIRE
 
 from gradwave.calculator import GradWave
+from tests.helpers import RY, pseudo
 
-RY = 13.605693122994
-PSEUDO = "tests/fixtures/qe/pseudos/Si_ONCV_PBE-1.2.upf"
+PSEUDO = pseudo("Si_ONCV_PBE-1.2.upf")
 
 
 @pytest.mark.slow

@@ -59,7 +59,12 @@ def davidson(
     res_norms = torch.full((nb,), float("inf"), dtype=torch.float64, device=x0.device)
 
     for it in range(1, max_iter + 1):
-        # Rayleigh–Ritz on the current subspace
+        # Rayleigh–Ritz on the current subspace. Convention here: s conjugates
+        # hv, so s = conj(⟨v_i|H|v_j⟩) — the complex conjugate of the true
+        # subspace matrix (equal to it after Hermitian symmetrization, so the
+        # eigenvalues are unchanged). The eigenvectors u come out conjugated to
+        # match, so the Ritz combination conjugates u below. (davidson_batched
+        # uses the opposite pair: s conjugates v, u is used unconjugated.)
         s = v @ hv.conj().T  # (m, m) — rows of v are the basis
         s = 0.5 * (s + s.conj().T)
         w, u = torch.linalg.eigh(s)
@@ -203,6 +208,11 @@ def davidson_batched(
     rn = torch.full((nk, nb), float("inf"), dtype=rdtype, device=x0.device)
 
     for it in range(1, max_iter + 1):
+        # Convention here is the opposite of single-k davidson()'s: s conjugates
+        # v, so s = ⟨v_i|H|v_j⟩ is the true subspace matrix directly and u is
+        # used UNCONJUGATED in the Ritz combination below. (Single-k conjugates
+        # hv instead and then conjugates u; both are correct — the two just
+        # differ by an overall complex conjugation that cancels.)
         # matmul on the lazy-conj + transpose VIEWS: same contraction as
         # einsum("kig,kjg->kij", v.conj(), hv) without materializing a
         # conj copy of the whole subspace — that transient peaks right
@@ -302,16 +312,17 @@ def davidson_batched_ms(
     regardless of the draft. Skipped (single fp64 solve) when mixed_precision
     is off, x0 is already low precision, or crossover ≥ tol."""
     from gradwave.dtypes import real_of
+    from gradwave.solvers._ms import LOW, mixed_precision_solve
 
-    low = torch.complex64
-    if (not mixed_precision) or x0.dtype == low or crossover >= tol:
-        return davidson_batched(h_apply, x0, t, mask, tol=tol, max_iter=max_iter,
+    def solve(x, t_, tl):
+        return davidson_batched(h_apply, x, t_, mask, tol=tl, max_iter=max_iter,
                                 max_dim_factor=max_dim_factor)
-    hi_dtype = x0.dtype
-    draft = davidson_batched(
-        h_apply, x0.to(low), t.to(real_of(low)), mask,
-        tol=crossover, max_iter=max_iter, max_dim_factor=max_dim_factor,
+
+    return mixed_precision_solve(
+        x0, tol, crossover, mixed_precision,
+        full=lambda: solve(x0, t, tol),
+        make_stages=lambda: (
+            lambda xlo: solve(xlo, t.to(real_of(LOW)), crossover),
+            lambda x1: solve(x1, t, tol),
+        ),
     )
-    x1 = draft.eigenvectors.to(hi_dtype)
-    return davidson_batched(h_apply, x1, t, mask, tol=tol, max_iter=max_iter,
-                            max_dim_factor=max_dim_factor)

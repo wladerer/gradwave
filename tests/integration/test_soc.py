@@ -16,12 +16,10 @@ from gradwave.core.xc.spin import SpinPBE
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
 from gradwave.scf.noncollinear import scf_noncollinear
+from tests.helpers import RY, si_fcc
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
-A = 5.653
-CELL = A / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
-POS = np.array([[0.0, 0, 0], [A / 4] * 3])
+CELL, POS = si_fcc(5.653)
 
 
 def make_system():

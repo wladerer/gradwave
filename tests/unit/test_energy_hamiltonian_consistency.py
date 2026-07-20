@@ -48,11 +48,14 @@ from gradwave.scf.loop import (
     local_potential_r,
     setup_system,
 )
+from tests.helpers import RY
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
 
-torch.set_num_threads(4)
+
+@pytest.fixture(autouse=True)
+def _limit_threads():
+    torch.set_num_threads(4)
 
 
 def _si2_rattled(ecut_ry=12.0, kmesh=(2, 1, 1)):

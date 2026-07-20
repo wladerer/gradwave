@@ -9,19 +9,16 @@ exercises every piece of scf/implicit.py.
 
 from pathlib import Path
 
-import numpy as np
 import torch
 
 from gradwave.core.xc.learnable import LearnableX
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.implicit import density_loss_param_grads
 from gradwave.scf.loop import scf, setup_system
+from tests.helpers import RY, si_fcc
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
-A = 5.43
-CELL = A / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
-POS = np.array([[0.0, 0, 0], [A / 4] * 3])
+CELL, POS = si_fcc()
 
 
 def loss_fn(rho):

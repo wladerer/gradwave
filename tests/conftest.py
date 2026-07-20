@@ -6,6 +6,14 @@ wrapper). Tests stay device-agnostic; CPU runs are unaffected.
 """
 
 import os
+import sys
+from pathlib import Path
+
+# Put the repo root on sys.path so `from tests.helpers import ...` resolves no
+# matter which directory pytest was launched from (tests/ is a package).
+_repo_root = str(Path(__file__).resolve().parent.parent)
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
 _dev = os.environ.get("GRADWAVE_TEST_DEVICE")
 if _dev and _dev != "cpu":

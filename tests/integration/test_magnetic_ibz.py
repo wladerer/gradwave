@@ -29,11 +29,9 @@ from gradwave.scf.loop import setup_system
 from gradwave.scf.noncollinear import scf_noncollinear
 from gradwave.scf.uspp import scf_uspp, setup_uspp
 from gradwave.scf.uspp_noncollinear import scf_uspp_noncollinear
+from tests.helpers import PSEUDOS, RY, fept_l10
 
-RY = 13.605693122994
-PSE = "tests/fixtures/qe/pseudos"
-
-
+PSE = PSEUDOS
 def _fept_energy(cell, pos, kmesh, moms, **setup_kw):
     fe = parse_upf(f"{PSE}/Fe_ONCV_PBE_FR-1.0.upf")
     pt = parse_upf(f"{PSE}/Pt_ONCV_PBE_FR-1.0.upf")
@@ -50,9 +48,7 @@ def _fept_energy(cell, pos, kmesh, moms, **setup_kw):
 
 @pytest.mark.slow
 def test_fept_soc_magnetic_ibz():
-    a, c = 2.723, 3.712
-    cell = np.diag([a, a, c])
-    pos = np.array([[0.0, 0, 0], [0.5, 0.5, 0.5]]) @ cell
+    cell, pos = fept_l10()
     moms = [[0, 0, 3.0], [0, 0, 0.4]]
     f_full, m_full, nk_full = _fept_energy(cell, pos, (2, 2, 2), moms,
                                            use_symmetry=False,

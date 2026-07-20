@@ -18,11 +18,9 @@ from gradwave.core.xc.pbe import PBE
 from gradwave.core.xc.spin import SpinPBE
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
+from tests.helpers import RY
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
-
-
 def test_nonmagnetic_limit_matches_spin_restricted():
     torch.set_num_threads(4)
     FCC = np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])

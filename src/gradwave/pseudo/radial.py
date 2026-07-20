@@ -13,9 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 
-# (2l+1)!! for the small-argument series (l=4 appears in USPP/PAW
-# augmentation channels, L ≤ 2·l_max_beta)
-_DFACT = {0: 1.0, 1: 3.0, 2: 15.0, 3: 105.0, 4: 945.0}
+from gradwave.pseudo._bessel_data import DOUBLE_FACTORIAL, SERIES_TERMS, SERIES_X
 
 
 def _simpson_index_weights(n: int) -> np.ndarray:
@@ -56,22 +54,22 @@ def sph_jl(l: int, x: np.ndarray) -> np.ndarray:
 
     The closed trigonometric forms (j₁ = sin x/x² − cos x/x, ...) suffer
     catastrophic cancellation for small x — worse with rising l (j₃ cancels
-    five digits at x = 0.5). Below x = 2 use the ascending power series,
+    five digits at x = 0.5). Below SERIES_X use the ascending power series,
     converged to machine precision; above, the trig forms are stable.
     (scipy.special.spherical_jn is only ~1e-9 accurate in this regime, so we
     do not use it.)
     """
-    if l not in _DFACT:
+    if not 0 <= l <= 4:
         raise ValueError(f"l={l} out of supported range 0..4")
     x = np.asarray(x, dtype=np.float64)
     out = np.empty_like(x)
 
-    small = np.abs(x) < 2.0
+    small = np.abs(x) < SERIES_X
     xs = x[small]
     x2 = xs * xs
-    term = xs**l / _DFACT[l]
+    term = xs**l / DOUBLE_FACTORIAL[l]
     acc = term.copy()
-    for k in range(1, 30):
+    for k in range(1, SERIES_TERMS):
         term = term * (-0.5 * x2) / (k * (2 * l + 2 * k + 1))
         acc += term
         if np.all(np.abs(term) <= 1e-17 * (np.abs(acc) + 1e-300)):

@@ -14,8 +14,8 @@ from gradwave.core.xc.pbe import PBE
 from gradwave.postscf.irreps import band_irreps
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
+from tests.helpers import RY, pseudo
 
-RY = 13.605693122994
 A = 2.46
 
 
@@ -27,7 +27,7 @@ def graphene():
     torch.set_num_threads(4)
     cell = np.array([[A, 0, 0], [-A / 2, A * np.sqrt(3) / 2, 0], [0, 0, 12.0]])
     frac = np.array([[0, 0, 0.5], [1 / 3, 2 / 3, 0.5]])
-    c = parse_upf("tests/fixtures/qe/pseudos/C_ONCV_PBE-1.2.upf")
+    c = parse_upf(pseudo("C_ONCV_PBE-1.2.upf"))
     system = setup_system(cell, frac @ cell, [0, 0], [c], ecut=20 * RY,
                           kmesh=(6, 6, 1), nbands=10, use_symmetry=True)
     res = scf(system, PBE(), smearing="gaussian", width=0.05,

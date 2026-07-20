@@ -19,6 +19,7 @@ states sit ~100 eV up and the low spectrum is purely one-dimensional.
 """
 
 import numpy as np
+import pytest
 import torch
 
 from gradwave.constants import HBAR2_2M
@@ -27,10 +28,12 @@ from gradwave.core.hamiltonian import ProjectorData
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.grids import build_fft_grid, build_gsphere
 from gradwave.solvers.davidson import davidson_batched
+from tests.helpers import RY
 
-RY = 13.605693122994
 
-torch.set_num_threads(4)
+@pytest.fixture(autouse=True)
+def _limit_threads():
+    torch.set_num_threads(4)
 
 
 def _solve(cell, ecut, k_frac, v_of_grid, nb, seed=0, tol=1e-11):

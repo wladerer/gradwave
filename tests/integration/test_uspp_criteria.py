@@ -15,11 +15,9 @@ import torch
 from gradwave.core.xc.pbe import PBE
 from gradwave.pseudo.upf_paw import parse_upf_paw
 from gradwave.scf.uspp import scf_uspp, setup_uspp
+from tests.helpers import RY
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
-
-
 @pytest.mark.slow
 def test_energy_criterion_matches_drho_fixed_point():
     torch.set_num_threads(8)

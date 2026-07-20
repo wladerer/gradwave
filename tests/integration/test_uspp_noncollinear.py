@@ -27,11 +27,9 @@ from gradwave.core.xc.spin import LSDA_PW92
 from gradwave.pseudo.upf_paw import parse_upf_paw
 from gradwave.scf.uspp import scf_uspp, setup_uspp
 from gradwave.scf.uspp_noncollinear import scf_uspp_noncollinear
+from tests.helpers import PSEUDOS, RY
 
-RY = 13.605693122994
-PSE = "tests/fixtures/qe/pseudos"
-
-
+PSE = PSEUDOS
 @pytest.mark.slow
 def test_spinor_paw_si_collinear_limit():
     torch.set_num_threads(8)

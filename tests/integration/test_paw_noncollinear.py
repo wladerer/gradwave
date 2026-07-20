@@ -18,8 +18,9 @@ from gradwave.scf.paw_noncollinear import (
     spinor_onsite_becsum,
 )
 from gradwave.scf.paw_onsite import OneCenter
+from tests.helpers import pseudo
 
-PSEUDO = "tests/fixtures/qe/pseudos/Si.pbe-n-kjpaw_psl.1.0.0.UPF"
+PSEUDO = pseudo("Si.pbe-n-kjpaw_psl.1.0.0.UPF")
 
 
 def _oc():

@@ -12,11 +12,11 @@ from gradwave.core.xc.spin import LSDA_PW92, SpinPBE
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
 from gradwave.scf.noncollinear import scf_noncollinear
+from tests.helpers import RY, pseudo
 
-RY = 13.605693122994
 A = 2.87
 CELL = A / 2 * np.array([[-1.0, 1, 1], [1, -1, 1], [1, 1, -1]])
-PSEUDO = "tests/fixtures/qe/pseudos/Fe_ONCV_PBE-1.2.upf"
+PSEUDO = pseudo("Fe_ONCV_PBE-1.2.upf")
 AL_CELL = 4.05 / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 
 
@@ -57,7 +57,7 @@ def test_nonmagnetic_spinor_ibz_equals_full_mesh():
     Uses a scalar (non-SOC) pseudo — the symmetry wiring is identical for the
     fully-relativistic case, which only swaps the projector block."""
     torch.set_num_threads(4)
-    al = parse_upf("tests/fixtures/qe/pseudos/Al_ONCV_PBE-1.2.upf")
+    al = parse_upf(pseudo("Al_ONCV_PBE-1.2.upf"))
 
     def run(use_sym):
         system = setup_system(AL_CELL, np.zeros((1, 3)), [0], [al], ecut=18 * RY,

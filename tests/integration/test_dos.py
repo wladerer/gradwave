@@ -11,17 +11,16 @@ from gradwave.postscf.dos import kpm_dos
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
 
+from tests.helpers import RY, pseudo, si_fcc
+
 pytestmark = pytest.mark.standard
 
-RY = 13.605693122994
-A = 5.43
-CELL = A / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
-POS = np.array([[0.0, 0, 0], [A / 4] * 3])
+CELL, POS = si_fcc()
 
 
 def test_kpm_dos_matches_explicit_spectrum():
     torch.set_num_threads(8)
-    upf = parse_upf("tests/fixtures/qe/pseudos/Si_ONCV_PBE-1.2.upf")
+    upf = parse_upf(pseudo("Si_ONCV_PBE-1.2.upf"))
     system = setup_system(CELL, POS, [0, 0], [upf], ecut=15 * RY,
                           kmesh=(2, 2, 2), nbands=12)
     res = scf(system, LDA_PW92(), smearing="none", etol=1e-8, rhotol=1e-7,

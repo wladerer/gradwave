@@ -23,11 +23,9 @@ from gradwave.core.hubbard import (
 )
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import setup_system
+from tests.helpers import RY
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
-
-
 def test_pswfc_parsed_and_normalized():
     se = parse_upf(FIX / "pseudos" / "PD_Se_FR.upf")
     assert len(se.pswfc) == 5

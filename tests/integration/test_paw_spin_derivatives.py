@@ -22,9 +22,9 @@ from gradwave.core.xc.spin import SpinPBE
 from gradwave.postscf.paw_forces import forces_uspp
 from gradwave.postscf.paw_stress import stress_uspp
 from gradwave.scf.uspp import scf_uspp, setup_uspp
+from tests.helpers import RY
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
 SI_CELL = 5.43 / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 SI_POS_DISP = np.array([[0.0, 0.0, 0.0], [1.4075, 1.3175, 1.3775]])
 

@@ -22,11 +22,9 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from gradwave.pseudo._bessel_data import DOUBLE_FACTORIAL, SERIES_TERMS, SERIES_X
 from gradwave.pseudo.radial import _simpson_index_weights
 
-# (2l+1)!! up to l=5 (l=4 = augmentation channels; l=5 only in their derivative)
-_DFACT = [1.0, 3.0, 15.0, 105.0, 945.0, 10395.0]
-_SERIES_X = 4.0
 _CHUNK = 4_000_000  # max elements of one (nq_chunk, nmesh) block
 
 
@@ -41,16 +39,16 @@ def jl_t(l: int, x: torch.Tensor) -> torch.Tensor:
     never needs to be traced)."""
     if not 0 <= l <= 5:
         raise ValueError(f"l={l} out of supported range 0..5")
-    small = x < _SERIES_X
+    small = x < SERIES_X
     xs = torch.where(small, x, torch.full_like(x, 1.0))
     x2 = xs * xs
-    term = xs.pow(l) / _DFACT[l]
+    term = xs.pow(l) / DOUBLE_FACTORIAL[l]
     acc = term
-    for k in range(1, 40):
+    for k in range(1, SERIES_TERMS):
         term = term * (-0.5 * x2) / (k * (2 * l + 2 * k + 1))
         acc = acc + term
 
-    xb = torch.where(small, torch.full_like(x, _SERIES_X), x)
+    xb = torch.where(small, torch.full_like(x, SERIES_X), x)
     s, c = torch.sin(xb), torch.cos(xb)
     u = 1.0 / xb
     u2 = u * u

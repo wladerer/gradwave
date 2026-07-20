@@ -21,11 +21,9 @@ import torch
 from gradwave.postscf import pdos
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
+from tests.helpers import PSEUDOS, RY
 
-RY = 13.605693122994
-FIX = "tests/fixtures/qe/pseudos"
-
-
+FIX = PSEUDOS
 def _integ(y, x):
     return float(np.trapezoid(y, x))
 

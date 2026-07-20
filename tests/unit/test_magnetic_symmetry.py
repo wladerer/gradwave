@@ -21,6 +21,7 @@ from gradwave.symmetry import (
     reduce_mesh,
     reduce_mesh_magnetic,
 )
+from tests.helpers import pseudo
 
 
 def _fept():
@@ -185,7 +186,7 @@ def test_magnetic_becsum_symmetrizer():
     from gradwave.pseudo.upf_paw import parse_upf_paw
     from gradwave.scf.paw_symmetry import MagneticBecsumSymmetrizer
 
-    o = parse_upf_paw("tests/fixtures/qe/pseudos/O.pbe-n-kjpaw_psl.1.0.0.UPF")
+    o = parse_upf_paw(pseudo("O.pbe-n-kjpaw_psl.1.0.0.UPF"))
     a, c = 3.0, 4.1
     cell = np.diag([a, a, c])
     frac = np.array([[0.0, 0, 0], [0.5, 0.5, 0.5]])

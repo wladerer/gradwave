@@ -18,12 +18,10 @@ from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.core.xc.pbe import PBE
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
+from tests.helpers import RY, si_fcc
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
-
-SI_CELL = 5.43 / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
-SI_POS = np.array([[0.0, 0, 0], [5.43 / 4] * 3])
+SI_CELL, SI_POS = si_fcc()
 AL_CELL = 4.05 / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 FCC = np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 C_CELL = 3.567 / 2 * FCC

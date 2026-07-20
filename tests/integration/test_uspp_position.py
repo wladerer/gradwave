@@ -28,9 +28,9 @@ from gradwave.postscf.uspp_position import (
 from gradwave.pseudo.upf_paw import parse_upf_paw
 from gradwave.scf.uspp import scf_uspp, setup_uspp
 from gradwave.scf.uspp_loop import _build_iter_ops, _scf_iteration
+from tests.helpers import RY
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
 CELL = 5.43 / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 POS0 = np.array([[0.0, 0.0, 0.0], [1.3575, 1.3575, 1.3575]])
 

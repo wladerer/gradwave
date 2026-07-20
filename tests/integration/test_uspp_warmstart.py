@@ -17,11 +17,9 @@ from gradwave.core.xc.pbe import PBE
 from gradwave.core.xc.spin import SpinPBE
 from gradwave.pseudo.upf_paw import parse_upf_paw
 from gradwave.scf.uspp import scf_uspp, setup_uspp
+from tests.helpers import RY
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
-
-
 def _si(paw, a, fft_shape=None):
     cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
     pos = np.array([[0.0, 0, 0], [a / 4] * 3])

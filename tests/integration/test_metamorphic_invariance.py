@@ -22,17 +22,21 @@ a bound just above the measured egg-box, not zero.
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.postscf.forces import forces as compute_forces
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
+from tests.helpers import RY
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
 
-torch.set_num_threads(4)
+
+@pytest.fixture(autouse=True)
+def _limit_threads():
+    torch.set_num_threads(4)
 
 SCF_KW = dict(smearing="gaussian", width=0.1,
               etol=1e-10, rhotol=1e-9, diago_tol=1e-12, verbose=False)

@@ -21,11 +21,11 @@ from gradwave.postscf.convergence_error import (
 )
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
+from tests.helpers import RY
 
 pytestmark = pytest.mark.standard
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe" / "pseudos"
-RY = 13.605693122994
 FCC = np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 
 

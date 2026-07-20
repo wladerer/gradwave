@@ -17,11 +17,11 @@ import torch
 from gradwave.core.xc.pbe import PBE
 from gradwave.pseudo.upf_paw import parse_upf_paw
 from gradwave.scf.uspp import scf_uspp, setup_uspp
+from tests.helpers import RY
 
 pytestmark = pytest.mark.standard
 
 FIX = Path(__file__).parents[1] / "fixtures"
-RY = 13.605693122994
 GOLD = json.loads((FIX / "golden" / "scf_golden.json").read_text())
 
 

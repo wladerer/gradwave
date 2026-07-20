@@ -11,12 +11,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from tests.helpers import RY, si_fcc
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
-A = 5.43
-SI_CELL = A / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
-SI_POS = np.array([[0.0, 0, 0], [A / 4] * 3])
+SI_CELL, SI_POS = si_fcc()
 
 
 def _canned_summary():

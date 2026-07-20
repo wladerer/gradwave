@@ -36,10 +36,9 @@ from gradwave.postscf.mae import force_theorem_mae
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import setup_system
 from gradwave.scf.noncollinear import scf_noncollinear
+from tests.helpers import PSEUDOS, RY, fept_l10
 
-RY = 13.605693122994
-PSE = "tests/fixtures/qe/pseudos"
-
+PSE = PSEUDOS
 SQ2 = 1.0 / np.sqrt(2.0)
 
 
@@ -75,9 +74,7 @@ def test_no_soc_band_sum_is_rotation_invariant():
 def _fept_scf(axis, kmesh=(2, 2, 2)):
     fe = parse_upf(f"{PSE}/Fe_ONCV_PBE_FR-1.0.upf")
     pt = parse_upf(f"{PSE}/Pt_ONCV_PBE_FR-1.0.upf")
-    a, c = 2.723, 3.712
-    cell = np.diag([a, a, c])
-    pos = np.array([[0.0, 0, 0], [0.5, 0.5, 0.5]]) @ cell
+    cell, pos = fept_l10()
     ax = np.array(axis, float)
     init = [(3.0 * ax).tolist(), (0.4 * ax).tolist()]
     system = setup_system(cell, pos, [0, 1], [fe, pt], ecut=30 * RY, kmesh=kmesh,

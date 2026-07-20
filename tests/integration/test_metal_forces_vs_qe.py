@@ -17,12 +17,11 @@ from gradwave.core.xc.pbe import PBE
 from gradwave.postscf.forces import forces
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
+from tests.helpers import RY
 
 pytestmark = pytest.mark.standard
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
-
 AL_A = 4.05
 AL_CELL = AL_A * np.eye(3)
 AL_FRAC = np.array(

@@ -1,13 +1,14 @@
 """Γ-point force constants, dynamical matrix, and phonon frequencies (M4).
 
-Current method: central finite differences of ANALYTIC Hellmann–Feynman
-forces — each Hessian column costs two SCF runs but inherits force-level
-(not energy-level) accuracy. The fully-automatic route (torch.func over the
-implicit-diff SCF, one Sternheimer solve per column) plugs in behind the
-same interface once scf/implicit.py lands.
+The finite-difference route: central differences of ANALYTIC Hellmann–Feynman
+forces — each Hessian column costs two SCF runs but inherits force-level (not
+energy-level) accuracy. It needs no response machinery, so it is the reference
+against which the analytic Hessian is checked. The analytic route now lives in
+postscf/phonons.py (symmetry-reduced columns from postscf/uspp_position, built
+on the implicit-diff SCF and Sternheimer solves in scf/implicit.py).
 
 Units: force constants eV/Å²; frequencies via
-ω[cm⁻¹] = 521.47091 · sqrt(λ[eV/(amu·Å²)]).
+ω[cm⁻¹] = SQRT_EV_AMU_ANG2_TO_CM1 · sqrt(λ[eV/(amu·Å²)]).
 """
 
 from __future__ import annotations
@@ -16,7 +17,10 @@ import numpy as np
 
 from gradwave.postscf.forces import forces
 
-SQRT_EV_AMU_ANG2_TO_CM1 = 521.4709116794098
+# Same cm⁻¹ conversion the analytic route uses: reuse phonons.py's single
+# derived value (from gradwave.constants) so the two Γ-frequency paths cannot
+# drift — an earlier hand-typed literal here disagreed at the 8th digit.
+from gradwave.postscf.phonons import _SQRT_EV_AMU_ANG2_TO_CM1 as SQRT_EV_AMU_ANG2_TO_CM1
 
 
 def force_constants_gamma(
