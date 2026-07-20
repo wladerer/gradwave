@@ -48,7 +48,7 @@ means the quantity is dimensionless or a plain count.
 | `ecutrho` | `4 × ecut` | eV | float | Density/augmentation cutoff. USPP/PAW only. Ignored for norm-conserving. |
 | `xc` | `pbe` | — | string | Functional: `lda` or `pbe`. |
 | `nbands` | `auto` | — | int or `auto` | Number of Kohn-Sham bands. `auto` picks from the electron count. |
-| `symmetry` | `true` | — | bool | Reduce k to the IBZ and symmetrize the density each step. |
+| `symmetry` | `true` | — | bool | Reduce k to the IBZ and symmetrize the density each step. Forced off for `noncollinear` runs and the `magnetism` task (symmetry acts on the moment vector); setting it `true` there is an error. |
 | `nspin` | `1` | — | int | `1` unpolarized, `2` collinear spin. |
 | `start_mag` | `null` | — | mapping | Element → initial moment fraction in [-1, 1] (nspin=2). |
 | `task` | `scf` | — | string | `scf`, `relax`, `bands`, or `magnetism`. |

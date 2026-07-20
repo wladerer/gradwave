@@ -66,6 +66,30 @@ def test_value_range_errors(tmp_path, extra, needle):
         load_input(_write(tmp_path, _base(extra)))
 
 
+@pytest.mark.parametrize("mode", ["noncollinear: true\n", "task: magnetism\n"])
+def test_symmetry_true_rejected_for_magnetic_modes(tmp_path, mode):
+    from gradwave.inputs import InputError, load_input
+
+    with pytest.raises(InputError, match="symmetry: true is invalid"):
+        load_input(_write(tmp_path, _base(mode + "symmetry: true\n")))
+
+
+@pytest.mark.parametrize("mode", ["noncollinear: true\n", "task: magnetism\n"])
+def test_symmetry_defaults_off_for_magnetic_modes(tmp_path, mode):
+    from gradwave.inputs import load_input
+
+    # no symmetry key: a magnetic spinor run defaults symmetry off so a minimal
+    # input runs, instead of tripping the SCF driver's guard.
+    inp = load_input(_write(tmp_path, _base(mode)))
+    assert inp.symmetry is False
+
+
+def test_symmetry_default_on_for_plain_scf(tmp_path):
+    from gradwave.inputs import load_input
+
+    assert load_input(_write(tmp_path, _base())).symmetry is True
+
+
 def test_error_message_carries_the_filename(tmp_path):
     from gradwave.inputs import InputError, load_input
 

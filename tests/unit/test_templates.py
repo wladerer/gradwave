@@ -30,6 +30,10 @@ def test_template_parses(name, tmp_path):
     p.write_text(yaml.safe_dump(raw))
     inp = load_input(p)                 # raises InputError on any schema drift
     assert len(inp.atoms) >= 1
+    # a magnetic spinor run cannot use IBZ symmetry reduction; the driver would
+    # raise at runtime, so these templates must resolve symmetry off.
+    if inp.noncollinear or inp.task == "magnetism":
+        assert inp.symmetry is False, f"{name} must set symmetry: false"
 
 
 def test_summaries_cover_every_template():

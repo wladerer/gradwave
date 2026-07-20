@@ -296,6 +296,27 @@ def _load_input(path: Path) -> Input:
     nspin = int(raw.get("nspin", 1))
     if nspin not in (1, 2):
         raise InputError(f"nspin must be 1 or 2, got {nspin}")
+
+    # A magnetic spinor SCF (noncollinear runs, and the magnetism task's
+    # constrained tilt scans) cannot use IBZ symmetry reduction: time reversal
+    # and the space group act on the moment vector, so the driver rejects a
+    # symmetrized density. Default symmetry off for these modes and reject an
+    # explicit `symmetry: true` here, where the message can point at the fix,
+    # rather than letting it surface as a ValueError deep in the SCF.
+    noncollinear = bool(raw.get("noncollinear", False))
+    sym_raw = raw.get("symmetry")
+    if noncollinear or task == "magnetism":
+        if sym_raw is True:
+            mode = "noncollinear" if noncollinear else "magnetism"
+            raise InputError(
+                f"symmetry: true is invalid for a {mode} run — time reversal "
+                f"and the space group act on the moment vector, so IBZ "
+                f"reduction is rejected. Set symmetry: false (the default for "
+                f"these modes).")
+        symmetry = False
+    else:
+        symmetry = True if sym_raw is None else bool(sym_raw)
+
     mesh = tuple(kp.get("mesh", (1, 1, 1)))
     if len(mesh) != 3:
         raise InputError(f"kpoints.mesh must have 3 entries, got {list(mesh)}")
@@ -341,9 +362,9 @@ def _load_input(path: Path) -> Input:
         ),
         smearing=SmearingParams(type=smtype, width=float(sm.get("width", 0.1))),
         nbands=None if nbands == "auto" else int(nbands),
-        symmetry=bool(raw.get("symmetry", True)),
+        symmetry=symmetry,
         nspin=nspin,
-        noncollinear=bool(raw.get("noncollinear", False)),
+        noncollinear=noncollinear,
         start_mag=raw.get("start_mag"),
         scf=SCFParams(
             max_iter=int(scf_raw.get("max_iter", 100)),

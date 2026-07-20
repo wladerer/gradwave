@@ -196,6 +196,8 @@ kpoints:
   mesh: [10, 10, 10]
 
 noncollinear: true               # spinor solver; required for spin-orbit coupling
+symmetry: false                  # required for the spinor solver (symmetry acts
+                                 # on the moment vector); costs speed on this metal
 smearing:
   type: mp1
   width: 0.1
@@ -267,6 +269,8 @@ start_mag:
 smearing:
   type: gaussian
   width: 0.1
+symmetry: false                  # required: the exchange scan tilts a moment
+                                 # (noncollinear), which IBZ reduction cannot do
 
 task: magnetism
 magnetism:
@@ -305,6 +309,8 @@ start_mag:
 smearing:
   type: gaussian
   width: 0.1
+symmetry: false                  # required: a magnetic spinor SCF cannot use IBZ
+                                 # reduction (symmetry acts on the moment vector)
 
 task: scf
 
