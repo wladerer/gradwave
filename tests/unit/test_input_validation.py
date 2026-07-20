@@ -90,6 +90,30 @@ def test_symmetry_default_on_for_plain_scf(tmp_path):
     assert load_input(_write(tmp_path, _base())).symmetry is True
 
 
+def test_nonmagnetic_keeps_symmetry_and_pins_moment(tmp_path):
+    from gradwave.inputs import load_input
+
+    # spin-orbit only: m ≡ 0, so Kramers keeps the full symmetry
+    inp = load_input(_write(tmp_path, _base("noncollinear: true\nnonmagnetic: true\n")))
+    assert inp.nonmagnetic is True
+    assert inp.symmetry is True
+
+
+def test_nonmagnetic_allows_explicit_symmetry_true(tmp_path):
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(
+        tmp_path, _base("noncollinear: true\nnonmagnetic: true\nsymmetry: true\n")))
+    assert inp.symmetry is True
+
+
+def test_nonmagnetic_requires_noncollinear(tmp_path):
+    from gradwave.inputs import InputError, load_input
+
+    with pytest.raises(InputError, match="nonmagnetic requires noncollinear"):
+        load_input(_write(tmp_path, _base("nonmagnetic: true\n")))
+
+
 def test_error_message_carries_the_filename(tmp_path):
     from gradwave.inputs import InputError, load_input
 

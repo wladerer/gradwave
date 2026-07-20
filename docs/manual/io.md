@@ -48,9 +48,11 @@ means the quantity is dimensionless or a plain count.
 | `ecutrho` | `4 × ecut` | eV | float | Density/augmentation cutoff. USPP/PAW only. Ignored for norm-conserving. |
 | `xc` | `pbe` | — | string | Functional: `lda` or `pbe`. |
 | `nbands` | `auto` | — | int or `auto` | Number of Kohn-Sham bands. `auto` picks from the electron count. |
-| `symmetry` | `true` | — | bool | Reduce k to the IBZ and symmetrize the density each step. Forced off for `noncollinear` runs and the `magnetism` task (symmetry acts on the moment vector); setting it `true` there is an error. |
+| `symmetry` | `true` | — | bool | Reduce k to the IBZ and symmetrize the density each step. Forced off for a magnetic `noncollinear` run and the `magnetism` task (symmetry acts on the moment vector); setting it `true` there is an error. A spin-orbit-only run (`nonmagnetic: true`) keeps symmetry. |
 | `nspin` | `1` | — | int | `1` unpolarized, `2` collinear spin. |
-| `start_mag` | `null` | — | mapping | Element → initial moment fraction in [-1, 1] (nspin=2). |
+| `noncollinear` | `false` | — | bool | Spinor (non-collinear) SCF, needed for spin-orbit coupling. Requires a fully-relativistic (FR) pseudopotential. |
+| `nonmagnetic` | `false` | — | bool | With `noncollinear`: pin the moment to zero for a spin-orbit-only run (e.g. a nonmagnetic heavy metal). Keeps the full crystal symmetry via Kramers, so it is the efficient path when there is no magnetism. Requires `noncollinear: true`. |
+| `start_mag` | `null` | — | mapping | Element → initial moment fraction in [-1, 1] (nspin=2 or a magnetic noncollinear seed). |
 | `task` | `scf` | — | string | `scf`, `relax`, `bands`, or `magnetism`. |
 | `device` | `cpu` | — | string | Torch device, e.g. `cpu` or `cuda`. |
 | `verbose` | `true` | — | bool | Per-iteration SCF chatter on stdout. `gradwave run --quiet` silences a run regardless of this key. |

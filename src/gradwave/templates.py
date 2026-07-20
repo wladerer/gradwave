@@ -196,8 +196,8 @@ kpoints:
   mesh: [10, 10, 10]
 
 noncollinear: true               # spinor solver; required for spin-orbit coupling
-symmetry: false                  # required for the spinor solver (symmetry acts
-                                 # on the moment vector); costs speed on this metal
+nonmagnetic: true                # spin-orbit only (m ≡ 0): Pt is nonmagnetic, so
+                                 # this pins the moment to zero and keeps symmetry
 smearing:
   type: mp1
   width: 0.1

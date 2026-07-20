@@ -104,6 +104,7 @@ class Input:
     symmetry: bool = True  # IBZ reduction + density symmetrization
     nspin: int = 1  # 1 | 2 (collinear)
     noncollinear: bool = False  # spinor (non-collinear) SCF for task: scf
+    nonmagnetic: bool = False  # with noncollinear: pin m⃗ ≡ 0 (spin-orbit only, keeps symmetry)
     start_mag: dict | None = None  # element -> initial moment fraction (nspin=2/NC seed)
     task: str = "scf"  # scf | relax | bands | magnetism
     relax: RelaxParams = field(default_factory=RelaxParams)
@@ -234,7 +235,8 @@ def _load_structure(spec, base: Path) -> Atoms:
 # beside the Input fields it feeds so the two do not drift.
 _ALLOWED_TOP = {
     "structure", "pseudopotentials", "ecut", "ecutrho", "xc", "kpoints",
-    "smearing", "nbands", "symmetry", "nspin", "noncollinear", "start_mag",
+    "smearing", "nbands", "symmetry", "nspin", "noncollinear", "nonmagnetic",
+    "start_mag",
     "scf", "task", "relax", "bands", "magnetism", "projections", "device",
     "verbose", "output", "error_estimate", "restart",
 }
@@ -297,22 +299,31 @@ def _load_input(path: Path) -> Input:
     if nspin not in (1, 2):
         raise InputError(f"nspin must be 1 or 2, got {nspin}")
 
-    # A magnetic spinor SCF (noncollinear runs, and the magnetism task's
-    # constrained tilt scans) cannot use IBZ symmetry reduction: time reversal
-    # and the space group act on the moment vector, so the driver rejects a
-    # symmetrized density. Default symmetry off for these modes and reject an
-    # explicit `symmetry: true` here, where the message can point at the fix,
-    # rather than letting it surface as a ValueError deep in the SCF.
+    # A magnetic spinor SCF (a magnetic noncollinear run, and the magnetism
+    # task's constrained tilt scans) cannot use IBZ symmetry reduction: time
+    # reversal and the space group act on the moment vector, so the driver
+    # rejects a symmetrized density. Default symmetry off for these modes and
+    # reject an explicit `symmetry: true` here, where the message can point at
+    # the fix, rather than letting it surface as a ValueError deep in the SCF.
+    # A spin-orbit-only run (nonmagnetic: true) pins m⃗ ≡ 0, so Kramers keeps
+    # the full crystal symmetry and it behaves like a plain SCF for symmetry.
     noncollinear = bool(raw.get("noncollinear", False))
+    nonmagnetic = bool(raw.get("nonmagnetic", False))
+    if nonmagnetic and not noncollinear:
+        raise InputError(
+            "nonmagnetic requires noncollinear: true — it pins the spinor "
+            "moment to zero for a spin-orbit-only run")
+    magnetic_spinor = (noncollinear and not nonmagnetic) or task == "magnetism"
     sym_raw = raw.get("symmetry")
-    if noncollinear or task == "magnetism":
+    if magnetic_spinor:
         if sym_raw is True:
-            mode = "noncollinear" if noncollinear else "magnetism"
+            mode = "magnetism" if task == "magnetism" else "noncollinear"
             raise InputError(
                 f"symmetry: true is invalid for a {mode} run — time reversal "
                 f"and the space group act on the moment vector, so IBZ "
                 f"reduction is rejected. Set symmetry: false (the default for "
-                f"these modes).")
+                f"these modes), or for spin-orbit without magnetism add "
+                f"nonmagnetic: true, which keeps symmetry.")
         symmetry = False
     else:
         symmetry = True if sym_raw is None else bool(sym_raw)
@@ -365,6 +376,7 @@ def _load_input(path: Path) -> Input:
         symmetry=symmetry,
         nspin=nspin,
         noncollinear=noncollinear,
+        nonmagnetic=nonmagnetic,
         start_mag=raw.get("start_mag"),
         scf=SCFParams(
             max_iter=int(scf_raw.get("max_iter", 100)),
