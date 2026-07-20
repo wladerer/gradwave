@@ -185,6 +185,13 @@ routine already work without SOC.
 
 ## Magnetocrystalline anisotropy (MAE maps) and per-atom spin torques
 
+**Status: core landed, one open tail.** The force-theorem evaluator
+(`postscf/mae.py`) and per-direction magnetic-IBZ folding both landed and are
+validated at production scale (the dated LANDED notes below). What remains open
+is **band-resolved anisotropy** — decomposing ΔF into per-k, per-band
+contributions (last subsection). The rest of this section is kept for the
+reasoning.
+
 The constrained-moment work (`postscf/moment_config.py`) already produces one half
 of this for free. `constrained_moment_scf` returns a per-atom transverse torque
 `-dW/de_I`, validated to a finite difference at ratio 1.000 — that *is* the
@@ -211,8 +218,8 @@ fept_mae.py`, 144 k, on the asus CPU). The 48-k mesh gives the WRONG easy axis
 (−1.39 meV/cell toward [100]) — the textbook sampling-error sign flip, measured
 here directly. So the remaining work is exactly the cost problem below: the
 force-theorem evaluator to make dense-k sweeps and full E(theta, phi) maps
-affordable, plus magnetic-space-group reduction (next section) for the ~4-8x
-k-savings.
+affordable, plus magnetic-space-group reduction (now landed, see the Shubnikov
+symmetry section under "Done and resolved") for the ~4-8x k-savings.
 
 Three things are genuinely in the way, and the third is the only real code.
 
@@ -309,65 +316,6 @@ docs: per-k contributions are gauge-sensitive (only the k-sum is physical),
 and band *indices* must be matched through crossings if the decomposition is
 followed along θ. Payoff: hotspot maps on the Fermi surface, and a principled
 handle on how alloying/strain will move the MAE.
-
-## Magnetic space groups (Shubnikov symmetry) for non-collinear k-reduction
-
-Every magnetic non-collinear run today uses the FULL k-mesh — `scf_noncollinear`
-(and the spinor PAW loop) refuse `use_symmetry` for any nonzero m⃗, because the
-existing spglib machinery only knows the paramagnetic group. That is the safe
-choice, not the cheap one: the FePt MAE runs carry 384 unreduced k-points, and the
-k-cost is the whole reason the force-theorem item above matters.
-
-The physics: a finite m⃗ changes the symmetry group itself. Time reversal dies (no
-k ↔ −k Kramers folding — the code already handles the *nonmagnetic* SOC case, where
-TR survives and the IBZ test pins it). And the moment filters the point group,
-because m⃗ is an axial vector (transforms as det(R)·R) locked to the lattice by SOC:
-an operation survives only if it maps the magnetization field onto itself.
-Operations that flip m⃗ survive only *combined with time reversal* — the anti-unitary
-half of the magnetic (Shubnikov) group, which relates band energies at Rk without
-being a unitary symmetry of H. Concretely for L1_0 FePt (paramagnetic D4h, 16 ops
-+ TR): moments along c leave the unitary C4h (8 ops, ~8x k-reduction); moments
-in-plane leave ~C2h (4 ops, ~4x). The easy-axis state is literally more symmetric
-than the hard-axis one — the anisotropy, seen group-theoretically.
-
-What to build, on top of the existing spglib path: (1) filter the space group by the
-axial-vector action on the moment field (and classify the surviving anti-unitary
-R·T elements); (2) symmetrize (ρ, m⃗) with m⃗ transformed as an axial vector — and
-the on-site becsum's four Pauli channels likewise, mirroring `becsum_sym`; (3) fold
-k with the magnetic little groups, using the anti-unitary elements for band-energy
-relations only. spglib ships magnetic space-group (Shubnikov) support since 2.0, so
-the group identification is available off the shelf; the work is the axial-vector
-symmetrization and the k-folding bookkeeping.
-
-**LANDED (2026-07-18).** All four phases are in: (1) `magnetic_spacegroup(sg,
-magmoms, cell)` in symmetry.py — the axial-vector filter det(S)·S·m⃗ classifying
-each paramagnetic op as unitary / anti-unitary (op·T) / dropped, cross-checked
-against spglib.get_magnetic_symmetry; (2) `reduce_mesh_magnetic` — the shared
-orbit fold with unitary {W⁻ᵀ} ∪ anti-unitary {−W⁻ᵀ}, grey group (m⃗=0)
-reproducing the paramagnetic+TR fold bit-for-bit; (3) `MagneticSymmetrizer`
-(grid ρ, m⃗: RhoSymmetrizer maps on the combined op list + per-op axial 3×3 with
-s_T=−1 on the anti set) and `MagneticBecsumSymmetrizer` (BecsumSymmetrizer D^l
-blocks + the same axial across the Pauli channels + conj on anti ops); (4)
-`setup_system`/`setup_uspp` take `magmoms=`, both spinor loops consume the
-magnetic system and re-symmetrize (ρ, m⃗[, becsum]) each iteration, and the
-collinear loops reject magnetic systems. Measured folds: FePt m∥[001] (6,6,4)
-144→30 k (equals the para+TR IBZ — inversion is unitary for axial vectors);
-m∥[100] 144→48; bcc Fe m∥z 64→13. Validation (tests/unit/
-test_magnetic_symmetry.py, tests/integration/test_magnetic_ibz.py): SOC FePt
-magnetic IBZ ≡ full mesh to 5.0e-11 eV; polar (inversion-broken) FePt exercises
-the anti-unitary-only fold (27→6 where unitary ops alone give 9); spinor PAW Si
-grey group ≡ symmetrized collinear scf_uspp to 5.1e-11 eV. The force-theorem
-MAE evaluator on the magnetic IBZ is the natural next stage.
-
-The caveat the original plan carried — "do not reduce each orientation to its
-own IBZ for MAE differences" — turned out to be wrong for this folding: the
-magnetic-IBZ sum is exactly the full-mesh sum re-weighted (measured 5e-11 eV,
-five orders below the meV signal), so each orientation's k-discretization error
-is identical to its full-mesh value and the common-mode cancellation in
-E(hard) − E(easy) survives per-orientation folding untouched. The caveat only
-bites if the two orientations use *different underlying meshes*. Keep the same
-(n1,n2,n3) mesh for both and fold each by its own magnetic group ([001]→30 k,
-[100]→48 k at (6,6,4)): 3.7× on the MAE pair, exactness preserved.
 
 ## Davidson subspace Gram: conj-copy memory spike at large nk
 
@@ -578,20 +526,29 @@ numerical errors are a solved problem in principle, the accuracy that matters is
 the functional, and the differentiable framework's advantage on that term is
 sensitivity and the density-driven half, not an absolute bar.
 
-**Numerical terms LANDED (2026-07-18).** The SCF-convergence, smearing, and
-k-point estimators are in `postscf/convergence_error.py`, validated in
-`tests/integration/test_convergence_error.py`: `estimate_scf_error` (the
-second-order residual energy, screened through `apply_chi0`/`apply_k_hxc` where
-chi0 is available, unscreened overestimate elsewhere, cross-checked against a
-tight-vs-loose run), `estimate_smearing_error` (the scheme-matched
-`E0 = (E+F)/2` extrapolation with per-scheme caveats), and
-`estimate_kpoint_error` (mesh extrapolation `E(N_k) → E_inf`, the
-non-variational term that needs more than one run). Together with the Ecut
-estimate in `discretization_error.py`, the trackable numerical budget is built.
-What remains open from this section is the model-term tooling: the
-fractional-charge self-interaction probe (self-contained, no second functional)
-and the DC-DFT density-sensitivity piece, plus the smaller density-grid
-(`ecutrho`) and finite-size terms.
+**Smearing and k-point terms LANDED (2026-07-18); SCF-convergence term OPEN
+(formula wrong).** `postscf/convergence_error.py` holds three estimators.
+`estimate_smearing_error` (the scheme-matched `E0 = (E+F)/2` extrapolation with
+per-scheme caveats) and `estimate_kpoint_error` (mesh extrapolation
+`E(N_k) → E_inf`, the non-variational term that needs more than one run) are
+validated in `tests/integration/test_convergence_error.py`. Together with the
+Ecut estimate in `discretization_error.py`, those two plus the cutoff term are
+the trackable part of the numerical budget that is built.
+
+`estimate_scf_error` is **not** validated: its formula is wrong. The exact
+second-order residual energy is `1/2<x|(K_Hxc - chi0^-1)|x>` with `x` the
+dielectric-dressed density error, but the code forms
+`1/2<r|K_Hxc (1-chi0 K)^-1|r>`, which omits the `chi0^-1` kinetic-response term.
+The two SCF-error tests are marked `xfail(strict=True)`. Fixing it needs the
+exact Schur coupling, which is the same missing term as the coarse-space Dyson
+refinement of δρ in [todo.md](todo.md) — pin one and both resolve. The
+`chi0^-1` solve is numerically awkward by direct CG (chi0 is only known through
+its forward action), so this is a real piece of work, not a typo.
+
+Also open from this section is the model-term tooling: the fractional-charge
+self-interaction probe (self-contained, no second functional) and the DC-DFT
+density-sensitivity piece, plus the smaller density-grid (`ecutrho`) and
+finite-size terms.
 
 ## Showcase figures: noncollinear magnetism and error estimates
 
@@ -855,6 +812,65 @@ datacenter fp64 GPU.
 
 Kept for the reasoning. Each of these is either landed in the code or settled as a
 measured negative.
+
+## Magnetic space groups (Shubnikov symmetry) for non-collinear k-reduction
+
+Every magnetic non-collinear run today uses the FULL k-mesh — `scf_noncollinear`
+(and the spinor PAW loop) refuse `use_symmetry` for any nonzero m⃗, because the
+existing spglib machinery only knows the paramagnetic group. That is the safe
+choice, not the cheap one: the FePt MAE runs carry 384 unreduced k-points, and the
+k-cost is the whole reason the force-theorem item above matters.
+
+The physics: a finite m⃗ changes the symmetry group itself. Time reversal dies (no
+k ↔ −k Kramers folding — the code already handles the *nonmagnetic* SOC case, where
+TR survives and the IBZ test pins it). And the moment filters the point group,
+because m⃗ is an axial vector (transforms as det(R)·R) locked to the lattice by SOC:
+an operation survives only if it maps the magnetization field onto itself.
+Operations that flip m⃗ survive only *combined with time reversal* — the anti-unitary
+half of the magnetic (Shubnikov) group, which relates band energies at Rk without
+being a unitary symmetry of H. Concretely for L1_0 FePt (paramagnetic D4h, 16 ops
++ TR): moments along c leave the unitary C4h (8 ops, ~8x k-reduction); moments
+in-plane leave ~C2h (4 ops, ~4x). The easy-axis state is literally more symmetric
+than the hard-axis one — the anisotropy, seen group-theoretically.
+
+What to build, on top of the existing spglib path: (1) filter the space group by the
+axial-vector action on the moment field (and classify the surviving anti-unitary
+R·T elements); (2) symmetrize (ρ, m⃗) with m⃗ transformed as an axial vector — and
+the on-site becsum's four Pauli channels likewise, mirroring `becsum_sym`; (3) fold
+k with the magnetic little groups, using the anti-unitary elements for band-energy
+relations only. spglib ships magnetic space-group (Shubnikov) support since 2.0, so
+the group identification is available off the shelf; the work is the axial-vector
+symmetrization and the k-folding bookkeeping.
+
+**LANDED (2026-07-18).** All four phases are in: (1) `magnetic_spacegroup(sg,
+magmoms, cell)` in symmetry.py — the axial-vector filter det(S)·S·m⃗ classifying
+each paramagnetic op as unitary / anti-unitary (op·T) / dropped, cross-checked
+against spglib.get_magnetic_symmetry; (2) `reduce_mesh_magnetic` — the shared
+orbit fold with unitary {W⁻ᵀ} ∪ anti-unitary {−W⁻ᵀ}, grey group (m⃗=0)
+reproducing the paramagnetic+TR fold bit-for-bit; (3) `MagneticSymmetrizer`
+(grid ρ, m⃗: RhoSymmetrizer maps on the combined op list + per-op axial 3×3 with
+s_T=−1 on the anti set) and `MagneticBecsumSymmetrizer` (BecsumSymmetrizer D^l
+blocks + the same axial across the Pauli channels + conj on anti ops); (4)
+`setup_system`/`setup_uspp` take `magmoms=`, both spinor loops consume the
+magnetic system and re-symmetrize (ρ, m⃗[, becsum]) each iteration, and the
+collinear loops reject magnetic systems. Measured folds: FePt m∥[001] (6,6,4)
+144→30 k (equals the para+TR IBZ — inversion is unitary for axial vectors);
+m∥[100] 144→48; bcc Fe m∥z 64→13. Validation (tests/unit/
+test_magnetic_symmetry.py, tests/integration/test_magnetic_ibz.py): SOC FePt
+magnetic IBZ ≡ full mesh to 5.0e-11 eV; polar (inversion-broken) FePt exercises
+the anti-unitary-only fold (27→6 where unitary ops alone give 9); spinor PAW Si
+grey group ≡ symmetrized collinear scf_uspp to 5.1e-11 eV. The force-theorem
+MAE evaluator on the magnetic IBZ is the natural next stage.
+
+The caveat the original plan carried — "do not reduce each orientation to its
+own IBZ for MAE differences" — turned out to be wrong for this folding: the
+magnetic-IBZ sum is exactly the full-mesh sum re-weighted (measured 5e-11 eV,
+five orders below the meV signal), so each orientation's k-discretization error
+is identical to its full-mesh value and the common-mode cancellation in
+E(hard) − E(easy) survives per-orientation folding untouched. The caveat only
+bites if the two orientations use *different underlying meshes*. Keep the same
+(n1,n2,n3) mesh for both and fold each by its own magnetic group ([001]→30 k,
+[100]→48 k at (6,6,4)): 3.7× on the MAE pair, exactness preserved.
 
 ## RMM-DIIS solver and whole-step CUDA graph (both TRIED, measured negatives)
 

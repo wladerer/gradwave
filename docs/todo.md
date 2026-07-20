@@ -5,12 +5,14 @@ list so it survives. The open backlog of larger features lives in
 [ideas.md](ideas.md). This file holds the smaller, already-scoped items that
 were in flight or deferred.
 
-## Deferred behind the performance sprint
+## Application tasks
 
 ### Pt(111) slab and CO adsorption
 
-Two postponed application tasks, both waiting on the acceleration work to land
-first.
+Two application tasks that were parked behind the acceleration work. That work
+has since concluded (dual FFT grid, local-TF preconditioner, and compiled XC
+landed; CheFSI and RMM-DIIS closed as measured negatives), so these are no
+longer blocked.
 
 - Build a minimal Pt(111) slab from the optimized bulk fcc Pt (the EOS lattice
   constant is already fit).
@@ -28,6 +30,12 @@ Schur coupling must be pinned against Cancès JCP 2016 (arXiv 2111.01470) or the
 DFTK source, then validated on a case where the coarse-space error is larger.
 Do not enable by default until validated.
 
+This is the same Dyson machinery, and the same missing term, as the SCF
+convergence-error estimator: `estimate_scf_error` in
+`postscf/convergence_error.py` currently omits the `chi0^-1` kinetic-response
+term and is marked xfail (see `tests/integration/test_convergence_error.py`).
+Pinning the exact Schur coupling here should resolve both.
+
 ### nscf eigenvectors and broadening options
 
 Return eigenvectors from `bands`/`bands_uspp` at a dense k-mesh on the frozen
@@ -35,12 +43,15 @@ potential. Add Methfessel-Paxton and tetrahedron broadening to the DOS binner.
 
 ## Acceleration, remaining tier
 
-### Tier 3: real-space augmentation and fp32-deep GPU draft schedule
+### Tier 3: real-space augmentation
 
-Two independent experiments, keep only what wins on measurement.
+Real-space (localized Q) augmentation as a cheaper alternative to
+reciprocal-space augmentation on the full dense grid. An independent experiment,
+keep only if it wins on measurement.
 
-- Real-space (localized Q) augmentation as a cheaper alternative to
-  reciprocal-space augmentation on the full dense grid.
-- An fp32-dominant Davidson draft schedule that reserves fp64 for a final
-  polish, targeting the GPU fp64 tax. This is hardware-specific to the consumer
-  RTX 3050 and may not transfer.
+The companion fp32-dominant Davidson draft schedule (fp64 reserved for a final
+polish, targeting the GPU fp64 tax) is deferred as effectively pre-answered: the
+acceleration-frontier sweep in [ideas.md](ideas.md) and the CheFSI/RMM-DIIS
+negatives all point to the consumer-RTX-3050 fp64 tax being the wall, with
+fp32-deep schedules hardware-specific and unlikely to transfer. Revisit only on
+a real-fp64 card (A100/H100), where the fp32 gain has room to dominate.
