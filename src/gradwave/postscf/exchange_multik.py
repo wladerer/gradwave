@@ -32,6 +32,8 @@ metallic occupation weighting is a documented extension, not applied here.
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 from gradwave.core.fftbox import g_to_r, r_to_g
@@ -80,6 +82,76 @@ def multik_exchange_energy(
             contrib = ((p_g.abs() ** 2) * kern).sum(dim=(-3, -2, -1))
             total = total + kweights[ka] * kweights[kb] * contrib.sum()
     return -0.5 * total / volume
+
+
+def coulomb_potential_q(sigma_r, q, g_cart, mode: str = "full", omega=None):
+    """Coulomb potential of a co-density of crystal momentum q, periodic part only.
+
+    ``sigma_r`` (..., N_r) is the *periodic* part of a co-density whose crystal
+    momentum q has been factored out (ρ(r) = e^{iq·r} σ(r)); the returned field is
+    likewise the periodic part ṽ(r) of its potential, ∫ρ(r′)K(r−r′)dr′ = e^{iq·r}ṽ(r):
+
+        ṽ(r) = Σ_G K(q+G) σ̃(G) e^{iG·r},   K from ``coulomb_kernel``.
+
+    Same FFT normalization as ``exchange.coulomb_potential`` (its q=0, full-kernel
+    special case), so the operator built from it is consistent with
+    ``multik_exchange_energy``. Differentiable in ``omega``."""
+    shape = tuple(g_cart.shape[:3])
+    qg2 = ((g_cart + q) ** 2).sum(dim=-1)                 # (n1,n2,n3)
+    kern = coulomb_kernel(qg2, mode, omega)               # (n1,n2,n3)
+    batch = sigma_r.shape[:-1]
+    sigma_g = r_to_g(sigma_r.reshape(*batch, *shape))
+    v_g = sigma_g * kern
+    n = qg2.numel()
+    v_r = torch.fft.ifftn(v_g, dim=(-3, -2, -1)) * n
+    return v_r.reshape(*batch, -1)
+
+
+def multik_exchange_operator(
+    psi_per_k, kcart_per_k, kweights, g_cart, volume, *,
+    mode: str = "full", omega=None,
+):
+    """Direct multi-k Fock operator applied to each k's occupied set.
+
+    ``psi_per_k[k]`` is (n_occ_k, N_r), the *physical* periodic orbital parts
+    ψ̂_{ik} = u_{ik}/√Ω (``exchange.physical_orbitals``). Returns ``w_per_k``, a
+    list of (n_occ_k, N_r): W_{tk} = (V_x ψ̂_{tk}) with V_x summing over the whole
+    BZ,
+
+        W_{tk}(r) = −Σ_{k′} w_{k′} Σ_{j∈occ(k′)} ψ̂_{jk′}(r) ṽ_{jk′,tk}(r),
+
+    where ṽ is the periodic potential (``coulomb_potential_q``) of the co-density
+    ψ̂*_{jk′}ψ̂_{tk} at momentum q = k − k′. At a single k-point (q=0, full kernel)
+    this is exactly ``exchange.exchange_operator_direct``; its energy trace
+    ½ Σ_k w_k Σ_t ⟨ψ̂_{tk}|W_{tk}⟩ matches ``multik_exchange_energy``. This is the
+    O(N_k²·N_occ²) reference the per-k ACE compresses. Differentiable in ``omega``."""
+    n_k = len(psi_per_k)
+    w_per_k = [torch.zeros_like(p) for p in psi_per_k]
+    for ka in range(n_k):
+        pa = psi_per_k[ka]                                 # test set at k
+        if pa.shape[0] == 0:
+            continue
+        wa = w_per_k[ka]
+        for kb in range(n_k):
+            pb = psi_per_k[kb]                             # occupied at k′
+            if pb.shape[0] == 0:
+                continue
+            q = kcart_per_k[ka] - kcart_per_k[kb]          # k − k′
+            for t in range(pa.shape[0]):
+                sigma = pb.conj() * pa[t][None, :]         # (n_occ_kb, N_r) ψ̂*_{jk′}ψ̂_{tk}
+                v = coulomb_potential_q(sigma, q, g_cart, mode, omega)
+                wa[t] = wa[t] - kweights[kb] * (pb * v).sum(dim=0)
+    return w_per_k
+
+
+def physical_periodic_orbitals(res, system, occ_tol: float = 1e-6):
+    """Like ``occupied_periodic_orbitals`` but returns the *physical* ψ̂ = u/√Ω.
+
+    Convenience for the operator build, which needs the normalized orbitals
+    (⟨ψ̂|ψ̂⟩ = 1) rather than the bare periodic parts u the energy build uses."""
+    u_per_k, kcart, kw = occupied_periodic_orbitals(res, system, occ_tol)
+    s = math.sqrt(system.grid.volume)
+    return [u / s for u in u_per_k], kcart, kw
 
 
 class HybridExchangeParams(torch.nn.Module):

@@ -14,8 +14,11 @@ operator is orbital-dependent, so it is rebuilt from the current orbitals each
 SCF iteration and lags one step, exactly like the DFT+U occupation matrices; ACE
 (``exchange.build_ace``) makes the frozen operator cheap to re-apply.
 
-Single k-point (Γ) — the ACE operator is Γ-only. A k-mesh hybrid needs the
-per-k / ``exchange_multik`` generalization (see docs/ideas.md).
+Two operators live here. ``GammaFockExchange`` is the single-k (Γ) build. For a
+k-mesh, ``MultiKFockExchange`` compresses a *per-k* ACE operator whose exchange at
+each k sums over the whole BZ through the co-density momentum q = k−k′ and the
+range-separated kernel — completing global (PBE0) and screened (HSE) hybrids on a
+mesh. At a single Γ point (q=0, full kernel) it reduces to ``GammaFockExchange``.
 
 Spin factor. At nspin=1 each spatial orbital holds two electrons, so the physical
 exchange is twice the value ``ACEExchange.energy`` returns for the spatial-orbital
@@ -36,7 +39,13 @@ from gradwave.core.xc.base import to_au
 from gradwave.core.xc.lda_pw92 import eps_c_pw92, eps_x_lda
 from gradwave.core.xc.pbe import PBE
 from gradwave.dtypes import RDTYPE
-from gradwave.postscf.exchange import build_ace, exchange_operator_direct, physical_orbitals
+from gradwave.postscf.exchange import (
+    ACEExchange,
+    build_ace,
+    exchange_operator_direct,
+    physical_orbitals,
+)
+from gradwave.postscf.exchange_multik import multik_exchange_operator
 from gradwave.scf.loop import scf
 
 
@@ -112,12 +121,109 @@ class GammaFockExchange:
         return apply_delta
 
 
-def hybrid_scf(system, alpha: float = 0.25, **scf_kwargs):
-    """Self-consistent PBE0-form global hybrid at Γ, exchange fraction ``alpha``.
+class MultiKFockExchange:
+    """Hybrid Fock exchange on a full-BZ k-mesh, as an SCF ``fock`` hook.
+
+    The k-mesh generalization of ``GammaFockExchange``. ``rebuild`` extracts the
+    occupied orbitals at every k, builds the direct multi-k Fock operator (each
+    k's action summing over the whole BZ via the co-density momentum q = k−k′ and
+    the ``mode``/``omega`` range-separated kernel), and ACE-compresses it *per k*.
+    It returns a per-spin callable that applies α·V_x block-by-block over the k
+    batch, plus the exchange energy α·E_x.
+
+    ``mode`` selects the kernel: ``"full"`` (PBE0), ``"short_range"``,
+    ``"long_range"``. Requires a full-BZ system (built with
+    ``use_symmetry=False, time_reversal=False``) on the dense grid, exactly as
+    ``exchange_multik``. The spin factor matches ``GammaFockExchange``: 2/nspin in
+    the energy, none in the operator.
+
+    Screened caveat. The screened Fock *operator* (short_range) is exact and
+    energy-consistent, but a complete HSE also range-separates the *semilocal*
+    exchange it replaces (keep the long-range PBE exchange, remove only the
+    short-range fraction). ``ScaledExchangePBE`` scales the whole PBE exchange by
+    (1−α) — correct for full-range PBE0, but for a screened hybrid it double-counts
+    the long-range exchange. A proper HSE needs the range-separated (wPBE)
+    enhancement on the semilocal side, which is not implemented here; use
+    ``mode="full"`` for a physically complete SCF (PBE0) until then.
+
+    At a single Γ point with ``mode="full"`` this reproduces ``GammaFockExchange``
+    to machine precision (the reduction gate)."""
+
+    def __init__(self, alpha: float = 0.25, mode: str = "full", omega=None,
+                 occ_tol: float = 1e-6):
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError("alpha must be in [0, 1]")
+        if mode not in ("full", "short_range", "long_range"):
+            raise ValueError(f"unknown Coulomb-kernel mode {mode!r}")
+        if mode != "full" and omega is None:
+            raise ValueError(f"mode {mode!r} needs omega (the range-separation length)")
+        self.alpha = float(alpha)
+        self.mode = mode
+        self.omega = omega
+        self.occ_tol = occ_tol
+
+    def rebuild(self, coeffs_b_s, occ_s, system):
+        nspin = len(coeffs_b_s)
+        spin_factor = 2.0 / nspin  # nspin=1: two electrons per spatial orbital
+        shape, vol = system.grid.shape, system.grid.volume
+        g_cart, bk = system.grid.g_cart, system.batch
+        kweights = system.kweights
+        kcart = [sph.k_cart for sph in system.spheres]
+        n_r = int(shape[0] * shape[1] * shape[2])
+        device = coeffs_b_s[0].device
+
+        apply_s, e_fock = [], torch.zeros((), dtype=RDTYPE, device=device)
+        for sp in range(nspin):
+            psi_per_k = [
+                physical_orbitals(
+                    coeffs_b_s[sp][ik][occ_s[sp][ik] > self.occ_tol, : sph.npw],
+                    sph.flat_idx, shape, vol)
+                for ik, sph in enumerate(system.spheres)
+            ]
+            w_per_k = multik_exchange_operator(
+                psi_per_k, kcart, kweights, g_cart, vol,
+                mode=self.mode, omega=self.omega)
+            ace_per_k, e_sp = [], torch.zeros((), dtype=RDTYPE, device=device)
+            for ik in range(len(psi_per_k)):
+                if psi_per_k[ik].shape[0] == 0:
+                    empty = psi_per_k[ik].new_zeros((n_r, 0))
+                    ace_per_k.append(ACEExchange(xi=empty, volume=vol, n_r=n_r))
+                    continue
+                ace = build_ace(psi_per_k[ik], w_per_k[ik], vol)
+                ace_per_k.append(ace)
+                e_sp = e_sp + kweights[ik] * ace.energy(psi_per_k[ik]).to(RDTYPE)
+            e_fock = e_fock + spin_factor * e_sp
+            apply_s.append(self._apply_for(ace_per_k, bk, shape))
+        return apply_s, self.alpha * e_fock
+
+    def _apply_for(self, ace_per_k, bk, shape):
+        alpha = self.alpha
+
+        def apply_delta(c: torch.Tensor) -> torch.Tensor:
+            nk, nb = c.shape[0], c.shape[1]
+            f = g_to_r_b(c, bk, shape)                    # (nk, nb, *shape) periodic parts
+            wf = torch.empty_like(f)
+            for ik in range(nk):
+                fi = f[ik].reshape(nb, -1)                # (nb, N_r) trial parts at k
+                wf[ik] = ace_per_k[ik].apply(fi).reshape(nb, *shape)
+            return alpha * box_to_sphere_b(wf, bk)
+
+        return apply_delta
+
+
+def hybrid_scf(system, alpha: float = 0.25, *, mode: str = "full", omega=None,
+               **scf_kwargs):
+    """Self-consistent PBE0-form / screened global hybrid, exchange fraction ``alpha``.
 
     Runs the standard SCF with the semilocal exchange scaled by (1−α) and α·Fock
-    exchange added through the ``fock`` hook. At α = 0 this is exactly a PBE SCF.
-    Extra keyword arguments pass through to ``scf`` (smearing, etol, ...)."""
+    exchange added through the ``fock`` hook, via the k-mesh ``MultiKFockExchange``
+    (which reduces to the Γ build at a single k-point). ``mode="full"`` is a
+    physically complete PBE0; the screened modes supply an exact screened Fock
+    operator but not yet the matching range-separated semilocal exchange (see
+    ``MultiKFockExchange`` — the semilocal side would double-count long-range
+    exchange), so treat them as the operator half of a screened hybrid. At α = 0
+    this is exactly a PBE SCF. Extra keyword arguments pass through to ``scf``."""
     xc = ScaledExchangePBE(alpha)
-    fock = GammaFockExchange(alpha) if alpha > 0.0 else None
+    fock = (MultiKFockExchange(alpha, mode=mode, omega=omega)
+            if alpha > 0.0 else None)
     return scf(system, xc, fock=fock, **scf_kwargs)

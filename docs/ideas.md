@@ -145,23 +145,47 @@ direct operator (rel-err 2e-2 → 1e-13 as the rank fills); and ACE reproduces
   saturated rank, with the rank as the accuracy knob and the range-separated
   kernel supported (`tests/integration/test_isdf_k.py`).
 
-What remains, in build order: lift the hybrid SCF from Γ to a k-mesh (per-k ACE
-through the `exchange_multik`/ISDF-K kernel — the Γ loop wiring and the multi-k
-energy both exist, the join is the work); a Gygi–Baldereschi q+G=0 correction to
-complete unscreened `full`/PBE0 (screened HSE is already complete); a truncated
-Coulomb for physically isolated molecules; and the RPA correlation contraction.
+**k-mesh hybrid SCF LANDED (2026-07-20).**
+- `exchange_multik.multik_exchange_operator` — the direct multi-k Fock operator:
+  W_{tk} = V_x ψ̂_{tk} summing over the whole BZ through the co-density momentum
+  q = k−k′ and the range-separated kernel (`coulomb_potential_q`). At one k-point
+  it is exactly `exchange.exchange_operator_direct`, and its energy trace matches
+  `multik_exchange_energy` on a mesh for the full and screened kernels
+  (machine-precision gates in `tests/integration/test_hybrid_kmesh.py`). This is
+  the O(N_k²·N_occ²) reference the per-k ACE compresses.
+- `postscf/hybrid.py::MultiKFockExchange` — the k-mesh `fock` hook. `rebuild`
+  extracts the occupied orbitals at every k, builds that operator, ACE-compresses
+  it *per k*, and returns a per-spin callable applying α·V_x block-by-block over
+  the k batch plus α·E_x. `hybrid_scf` now routes through it (reducing to the Γ
+  build at a single k-point — the existing Γ tests pass unchanged). Validated:
+  α=0 reduces to the PBE SCF on a mesh exactly; PBE0 on a (2,1,1) full-BZ mesh
+  converges, the Fock term equals α·(2/nspin)·`multik_exchange_energy` on the
+  converged orbitals (~1e-13), and the gap opens relative to PBE.
+- Screened caveat. The screened Fock *operator* is exact and energy-consistent,
+  but `ScaledExchangePBE` scales the *whole* PBE exchange by (1−α) — correct for
+  full-range PBE0, but a complete HSE also range-separates the semilocal exchange
+  (keep long-range PBE exchange, remove only the short-range fraction). That needs
+  the range-separated (wPBE) enhancement, still open; use `mode="full"` for a
+  physically complete SCF until then.
+
+What remains, in build order: a Gygi–Baldereschi q+G=0 correction to complete
+unscreened `full`/PBE0 at fine meshes (the divergent q+G=0 cell is dropped today,
+converging slowly in N_k); the range-separated (wPBE) semilocal exchange to
+complete screened HSE; a truncated Coulomb for physically isolated molecules; and
+the RPA correlation contraction.
 
 ## Exact exchange and hybrid functionals
 
-**Status: a self-consistent hybrid SCF runs at Γ; the remaining step is the
-k-mesh.** The energy, operator, ACE, multi-k build, range-separated kernel,
-differentiable hybrid parameters, the ISDF-K compression, and now the
-self-consistent Γ hybrid SCF (α·V_x acting in `BatchedHamiltonian.apply`, α·E_x
-in the total) all landed (see the LANDED notes under the ISDF section above).
-gradwave *self-consistently solves* a PBE0-form hybrid at Γ (gap opening measured);
-the open step is generalizing that loop to a full k-mesh. The paragraphs below are
-the original
-framing, kept for the reasoning.
+**Status: a self-consistent PBE0-form hybrid SCF runs on a k-mesh.** The energy,
+operator, ACE, multi-k build, range-separated kernel, differentiable hybrid
+parameters, the ISDF-K compression, the self-consistent Γ hybrid SCF, and now the
+k-mesh lift (per-k ACE with each k's exchange summed over the whole BZ, α·V_x
+acting in `BatchedHamiltonian.apply` block-by-block) all landed (see the LANDED
+notes under the ISDF section above). gradwave *self-consistently solves* a PBE0
+hybrid on a full-BZ k-mesh (gap opening measured); the remaining physics tails are
+the Gygi–Baldereschi q+G=0 correction (fine-mesh PBE0 convergence) and the wPBE
+semilocal screening (complete HSE). The paragraphs below are the original framing,
+kept for the reasoning.
 
 The biggest single physics gap, and the reason the two scaling items above are
 worth building. Every energy, gap, force, and adsorbate level gradwave produces
