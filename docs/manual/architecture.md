@@ -111,22 +111,33 @@ flowchart TB
         r4["error estimates (basis, SCF, smearing)"]
     end
 
+    subgraph hyb["Exact exchange & hybrids"]
+        direction LR
+        h1["isdf · isdf_k (pair factorization)"]
+        h2["exchange · exchange_multik · coulomb_kernel"]
+        h3["hybrid — self-consistent hybrid SCF"]
+    end
+
     io --> solve
     pp --> solve
     solve --> phys
     solve --> props
     phys --> props
+    phys --> hyb
+    solve --> hyb
 
     classDef ioc fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
     classDef physc fill:#e0f2f1,stroke:#00897b,color:#004d40;
     classDef ppc fill:#eceff1,stroke:#546e7a,color:#263238;
     classDef solvec fill:#fff3e0,stroke:#ef6c00,color:#e65100;
     classDef propsc fill:#f3e5f5,stroke:#8e24aa,color:#4a148c;
+    classDef hybc fill:#fce4ec,stroke:#c2185b,color:#880e4f;
     class i1,i2,i3 ioc;
     class p1,p2,p3,p4 physc;
     class pp1,pp2 ppc;
     class s1,s2,s3 solvec;
     class r1,r2,r3,r4 propsc;
+    class h1,h2,h3 hybc;
 ```
 
 ## Anatomy of a run
@@ -219,6 +230,8 @@ column is the YAML keyword (or API entry point) that turns the feature on; see
 | Symmetry reduction | `symmetry: true` | `symmetry.py`, `scf/paw_symmetry.py` | [Symmetry](symmetry.md) |
 | Smearing (metals) | `smearing:` | `core/occupations.py` | [Cookbook](cookbook.md) |
 | Learnable functionals | API | `core/xc/learnable.py`, `scf/implicit.py` | [Learning XC](learning-xc.md) |
+| Hybrid functionals (exact exchange) | `hybrid_scf` (Python) | `postscf/hybrid.py`, `postscf/isdf.py`, `postscf/exchange.py` | — |
+| Learnable hybrid (α, ω) | Python | `postscf/exchange_multik.py`, `postscf/isdf_k.py`, `postscf/coulomb_kernel.py` | — |
 | Basis / SCF error estimates | `error_estimate: true` | `postscf/convergence_error.py`, `postscf/discretization_error.py` | [Error estimation](error-estimation.md) |
 | Restart / checkpoints | `restart:` | `checkpoint.py` | [Inputs and outputs](io.md) |
 | ASE calculator | Python | `calculator.py` | [Cookbook](cookbook.md) |
@@ -231,6 +244,27 @@ projector modules (`kb.py`, `local.py`, `atomic.py`) build the Kleinman-Bylander
 nonlocal projectors, the local potential, and the atomic-orbital projectors used
 for the projected DOS and Hubbard manifolds. Everything downstream of the parser
 is formalism-agnostic until the SCF driver forks.
+
+## Exact exchange and hybrid functionals
+
+Hybrid functionals add a fraction of exact (Fock) exchange to a semilocal
+functional. The naive Fock build scales as O(N⁴), so this subsystem is built on
+interpolative separable density fitting (ISDF), the plane-wave form of tensor
+hypercontraction, which factorizes the orbital-pair products into a low-rank
+form. `isdf.py` and `isdf_k.py` do that factorization at Γ and across a k-mesh;
+`exchange.py` and `exchange_multik.py` build the Fock operator (and its
+adaptively-compressed ACE form) from it; `coulomb_kernel.py` supplies the
+range-separated kernel that distinguishes full (PBE0-style) from screened
+(HSE-style) exchange. `hybrid.py` ties these into the SCF loop with
+`hybrid_scf`, so gradwave can solve a hybrid self-consistently rather than only
+evaluate exchange on a fixed density. The mixing fraction α and screening length
+ω are differentiable parameters (`HybridExchangeParams`), which makes a
+*learnable* hybrid trainable end to end, the same stationarity argument the
+learnable-XC slot uses.
+
+This subsystem is reached from Python today (`hybrid_scf`,
+`HybridExchangeParams`); it is not yet wired into the YAML input schema, so
+`xc:` accepts `lda` and `pbe` only.
 
 ## Tests and fixtures
 
