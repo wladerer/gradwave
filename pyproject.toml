@@ -13,7 +13,14 @@ dependencies = [
     "ase>=3.23",
     "pyyaml>=6",
     "spglib>=2.4",
+]
+
+[project.optional-dependencies]
+# gradwave.analysis (frames + plotting) imports these lazily; the core
+# package and CLI run without them. Install with: gradwave[analysis]
+analysis = [
     "pandas>=3.0.3",
+    "matplotlib>=3.8",
 ]
 
 [dependency-groups]

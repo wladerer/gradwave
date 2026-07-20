@@ -42,7 +42,7 @@ from gradwave.postscf._anderson import AndersonMixer
 from gradwave.postscf._response import fxc_hvp
 from gradwave.postscf.uspp_frozen import aug_density_from_becsum
 from gradwave.postscf.uspp_implicit import _check_supported, _ConvergedUSPP
-from gradwave.scf.newton import _pack, _unpack
+from gradwave.postscf.newton import _pack, _unpack
 
 
 def _dvloc_r(system, a: int, alpha: int) -> torch.Tensor:

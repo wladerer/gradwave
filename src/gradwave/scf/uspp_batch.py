@@ -19,7 +19,8 @@ import dataclasses
 import torch
 
 from gradwave.core.batch import BatchedHamiltonian, BatchedK, becp_b
-from gradwave.solvers.davidson import _orthonormalize_b, teter_b
+from gradwave.solvers.davidson import _orthonormalize_b
+from gradwave.solvers.precond import teter_b
 
 
 class BatchedHS:

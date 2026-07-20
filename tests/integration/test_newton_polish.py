@@ -16,7 +16,7 @@ import torch
 from gradwave.core.xc.learnable import LearnableX
 from gradwave.core.xc.pbe import PBE
 from gradwave.pseudo.upf_paw import parse_upf_paw
-from gradwave.scf.newton import newton_polish
+from gradwave.postscf.newton import newton_polish
 from gradwave.scf.uspp import scf_uspp, setup_uspp
 from tests.helpers import RY
 

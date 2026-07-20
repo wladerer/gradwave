@@ -1,3 +1,20 @@
-"""gradwave: differentiable plane-wave DFT in PyTorch."""
+"""gradwave: differentiable plane-wave DFT in PyTorch.
+
+Two entry points mirror one another:
+
+- the YAML-driven pipeline: ``load_input`` parses an input file into an
+  ``Input``, ``run`` executes the requested task and returns the summary dict;
+- the ASE-style ``GradWave`` calculator for programmatic use.
+
+``analysis.load`` reads a run's JSON summary back into plain dicts/frames for
+plotting. Submodules (``core``, ``scf``, ``postscf``, ``pseudo``, ``solvers``)
+hold the physics layers and are imported directly when needed.
+"""
+
+from gradwave.api import run
+from gradwave.calculator import GradWave
+from gradwave.inputs import Input, load_input
 
 __version__ = "0.1.0"
+
+__all__ = ["Input", "load_input", "run", "GradWave", "__version__"]
