@@ -30,6 +30,7 @@ Measured (asus CPU, 8 torch threads, batched spinor density path, 2026-07-19):
     the 45-degree point reproduces the unfolded full-mesh +1.3398 exactly.
     Raw output and summary: benchmarks/fept_mae_map/.
 """
+import json
 import time
 
 import numpy as np
@@ -69,14 +70,16 @@ t0 = time.time()
 res = scf_noncollinear(system, xc, mag_vec_init=init, smearing="gaussian",
                        width=0.1, etol=1e-9, rhotol=1e-7, max_iter=300,
                        mixing_alpha=0.3, mixing_history=12, verbose=True)
+t_scf = time.time() - t0
 print(f"[001 reference] conv={res.converged} n_it={res.n_iter} "
-      f"{time.time() - t0:.0f}s  F = {float(res.energies.free_energy):+.8f} eV  "
+      f"{t_scf:.0f}s  F = {float(res.energies.free_energy):+.8f} eV  "
       f"|M| = {np.linalg.norm(np.array(res.mag_vec)):.4f}", flush=True)
 
 dirs = [[np.sin(t), 0.0, np.cos(t)] for t in THETAS]
 t0 = time.time()
 ft = force_theorem_mae(res, xc, dirs, magmoms=init, verbose=True)
-print(f"folded force-theorem solves: {time.time() - t0:.0f}s "
+t_ft = time.time() - t0
+print(f"folded force-theorem solves: {t_ft:.0f}s "
       f"for {len(dirs)} directions, folds {ft.nk}", flush=True)
 
 # K1 sin^2 + K2 sin^4 least-squares fit through the origin
@@ -92,4 +95,28 @@ for t, d, f, nk in zip(np.rad2deg(THETAS), dF, fit, ft.nk, strict=True):
           flush=True)
 print(f"K1 = {k1:+.4f} meV/cell   K2 = {k2:+.4f} meV/cell   "
       f"max fit residual = {np.abs(dF - fit).max():.4f} meV", flush=True)
+
+# machine-readable outputs: a self-contained JSON for plotting and a full
+# checkpoint (per-direction spectra included) for band-resolved analysis
+meta = {
+    "system": "L1_0 FePt", "cell_A": cell.tolist(), "kmesh": list(KMESH),
+    "ecut_eV": ECUT, "xc": "LSDA-PW92", "smearing": "gaussian",
+    "width_eV": 0.1, "device": dev,
+    "reference": {"axis": [0, 0, 1], "n_iter": res.n_iter,
+                  "seconds": round(t_scf, 1),
+                  "free_energy_eV": float(res.energies.free_energy),
+                  "moment_muB": float(np.linalg.norm(np.array(res.mag_vec)))},
+    "solves_seconds": round(t_ft, 1),
+}
+with open("fept_mae_map.json", "w") as fh:
+    json.dump({**meta,
+               "theta_deg": np.rad2deg(THETAS).tolist(),
+               "directions": dirs,
+               "dF_meV": dF.tolist(),
+               "fit_meV": fit.tolist(),
+               "K1_meV": float(k1), "K2_meV": float(k2),
+               "max_fit_residual_meV": float(np.abs(dF - fit).max()),
+               "nk": ft.nk}, fh, indent=1)
+ft.save("fept_mae_map.pt", meta=meta)
+print("wrote fept_mae_map.json, fept_mae_map.pt", flush=True)
 print("FEPT_MAE_MAP_DONE", flush=True)

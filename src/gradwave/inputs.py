@@ -104,6 +104,7 @@ class Input:
     magnetism: MagnetismParams = field(default_factory=MagnetismParams)
     projections: ProjectionsParams = field(default_factory=ProjectionsParams)
     device: str = "cpu"
+    verbose: bool = True  # per-iteration SCF chatter; CLI --quiet overrides
     output_dir: Path = Path("./out")
     output_checkpoint: bool = True  # write checkpoint.pt after SCF tasks
     output_wavefunctions: bool = False  # include coeffs in the checkpoint
@@ -206,6 +207,7 @@ def load_input(path: str | Path) -> Input:
         magnetism=MagnetismParams(**raw.get("magnetism", {})),
         projections=projections,
         device=raw.get("device", "cpu"),
+        verbose=bool(raw.get("verbose", True)),
         output_dir=base / out_raw.get("dir", "./out"),
         output_checkpoint=bool(out_raw.get("checkpoint", True)),
         output_wavefunctions=bool(out_raw.get("wavefunctions", False)),

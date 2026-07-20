@@ -233,6 +233,13 @@ $6\times6\times4$ mesh: $K_1 = +2.697$ meV/cell, $K_2 = -0.036$ meV/cell
 with a fit residual below $0.002$ meV, each folded direction costing about
 2 minutes of CPU on top of the one reference SCF.
 
+**Saving results.** `ft.save("mae.pt", meta={...})` archives the full
+`MAEResult` — band free energies, per-direction Fermi levels, fold counts and
+the complete eigenvalue spectra — and `MAEResult.load("mae.pt")` restores it,
+so band-resolved analysis never requires repeating the reference SCF. The map
+example additionally writes a plotting-ready `fept_mae_map.json` with the
+measured curve, the $K_1$/$K_2$ fit and the run provenance.
+
 Validation: without SOC the band sum is direction-independent to below
 $10^{-6}$ eV (the rotation is then an exact symmetry), and the reference
 direction reproduces the converged SCF spectrum

@@ -38,6 +38,7 @@ means the quantity is dimensionless or a plain count.
 | `start_mag` | `null` | — | mapping | Element → initial moment fraction in [-1, 1] (nspin=2). |
 | `task` | `scf` | — | string | `scf`, `relax`, or `bands`. |
 | `device` | `cpu` | — | string | Torch device, e.g. `cpu` or `cuda`. |
+| `verbose` | `true` | — | bool | Per-iteration SCF chatter on stdout. `gradwave run --quiet` silences a run regardless of this key. |
 | `restart` | `null` | — | path | Checkpoint file to warm-start the density from. |
 
 ### `structure`
