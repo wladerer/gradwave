@@ -120,6 +120,70 @@ def _check_mesh_lengths(path: Path, n: int, arrays: dict[str, np.ndarray]) -> No
             raise ValueError(f"{path}: {name} length {len(arr)} != mesh size {n}")
 
 
+def _header_flag(h: dict, name: str) -> bool:
+    """UPF boolean header attribute: 'T'/'TRUE' (case/space-insensitive) → True,
+    everything else (including a missing attribute) → False. Shared by the NC
+    and PAW/USPP header checks."""
+    return h.get(name, "F").strip().upper() in ("T", "TRUE")
+
+
+def _parse_mesh_vloc(root: ET.Element) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(r, rab, vloc) from PP_MESH/PP_LOCAL: r, rab Bohr→Å and vloc Ry→eV.
+    Identical for the NC and PAW/USPP parsers."""
+    mesh = root.find("PP_MESH")
+    r = _parse_floats(mesh.find("PP_R").text) * BOHR_ANG
+    rab = _parse_floats(mesh.find("PP_RAB").text) * BOHR_ANG
+    vloc = _parse_floats(root.find("PP_LOCAL").text) * RY_EV
+    return r, rab, vloc
+
+
+def _parse_betas(
+    nonlocal_: ET.Element, n_r: int, jjj: dict | None = None
+) -> list[BetaProjector]:
+    """PP_BETA.i projectors in index order: r·β scaled by BOHR^{-1/2} and hard-
+    truncated at cutoff_radius_index (SG15 β are noisy/zero-padded past it).
+    `jjj` maps the 1-based beta index to its total j for fully-relativistic
+    UPFs; None/empty leaves j unset (the ultrasoft/PAW and scalar-relativistic
+    NC cases)."""
+    jjj = jjj or {}
+    betas = []
+    for child in sorted(
+        (c for c in nonlocal_ if c.tag.startswith("PP_BETA.")),
+        key=lambda c: int(c.tag.split(".")[1]),
+    ):
+        l = int(child.attrib["angular_momentum"])
+        kkbeta = int(child.attrib.get("cutoff_radius_index", n_r))
+        vals = _parse_floats(child.text) * BOHR_ANG ** (-0.5)
+        idx = int(child.tag.split(".")[1])  # index attr can be "*" in SG15 FR
+        betas.append(BetaProjector(l=l, rbeta=vals[:kkbeta], cutoff_idx=kkbeta,
+                                   j=jjj.get(idx)))
+    return betas
+
+
+def _parse_pswfc_chi(root: ET.Element, jchi: dict | None = None) -> list[AtomicOrbital]:
+    """PP_PSWFC PP_CHI.i atomic orbitals (the +U/LCAO manifold), r·R_nl scaled
+    by BOHR^{-1/2} so ∫(r·R)² dr = 1 with dr in Å and the r·β SBT form factor is
+    reused. Empty when the dataset carries no PP_PSWFC block. `jchi` maps the
+    1-based chi index to its total j (fully-relativistic UPFs)."""
+    jchi = jchi or {}
+    chi = []
+    pswfc_block = root.find("PP_PSWFC")
+    if pswfc_block is not None:
+        for child in sorted(
+            (c for c in pswfc_block if c.tag.startswith("PP_CHI.")),
+            key=lambda c: int(c.tag.split(".")[1]),
+        ):
+            idx = int(child.tag.split(".")[1])
+            chi.append(AtomicOrbital(
+                l=int(child.attrib["l"]),
+                label=child.attrib.get("label", "").strip(),
+                occupation=float(child.attrib.get("occupation", "0")),
+                rchi=_parse_floats(child.text) * BOHR_ANG ** (-0.5),
+                j=jchi.get(idx),
+            ))
+    return chi
+
+
 def parse_upf(path: str | Path) -> UPFData:
     path = Path(path)
     root = _read_root(path)
@@ -130,22 +194,15 @@ def parse_upf(path: str | Path) -> UPFData:
         raise ValueError(f"{path}: missing PP_HEADER")
     h = header.attrib
 
-    def flag(name: str) -> bool:
-        return h.get(name, "F").strip().upper() in ("T", "TRUE")
-
     pseudo_type = h.get("pseudo_type", "").strip()
-    if pseudo_type != "NC" or flag("is_ultrasoft") or flag("is_paw"):
+    if pseudo_type != "NC" or _header_flag(h, "is_ultrasoft") or _header_flag(h, "is_paw"):
         raise ValueError(
             f"{path}: gradwave supports norm-conserving pseudopotentials only "
             f"(got pseudo_type={pseudo_type!r}). Use PseudoDojo or SG15 ONCV UPF files."
         )
-    has_so = flag("has_so")
+    has_so = _header_flag(h, "has_so")
 
-    mesh = root.find("PP_MESH")
-    r = _parse_floats(mesh.find("PP_R").text) * BOHR_ANG
-    rab = _parse_floats(mesh.find("PP_RAB").text) * BOHR_ANG
-
-    vloc = _parse_floats(root.find("PP_LOCAL").text) * RY_EV
+    r, rab, vloc = _parse_mesh_vloc(root)
 
     nonlocal_ = root.find("PP_NONLOCAL")
     # Fully-relativistic UPFs carry PP_RELBETA (β total-j) and PP_RELWFC (χ
@@ -161,19 +218,7 @@ def parse_upf(path: str | Path) -> UPFData:
                 jjj[int(child.attrib["index"])] = float(child.attrib["jjj"])
             elif child.tag.startswith("PP_RELWFC"):
                 jchi[int(child.attrib["index"])] = float(child.attrib["jchi"])
-    betas = []
-    for child in sorted(
-        (c for c in nonlocal_ if c.tag.startswith("PP_BETA.")),
-        key=lambda c: int(c.tag.split(".")[1]),
-    ):
-        l = int(child.attrib["angular_momentum"])
-        kkbeta = int(child.attrib.get("cutoff_radius_index", len(r)))
-        vals = _parse_floats(child.text) * BOHR_ANG ** (-0.5)
-        idx = int(child.tag.split(".")[1])  # index attr can be "*" in SG15 FR
-        # Respect the hard truncation: SG15 β are exactly zero-padded/noisy
-        # beyond kkbeta; integrating past it adds noise.
-        betas.append(BetaProjector(l=l, rbeta=vals[:kkbeta], cutoff_idx=kkbeta,
-                                   j=jjj.get(idx)))
+    betas = _parse_betas(nonlocal_, len(r), jjj)
 
     nproj = len(betas)
     dij = np.zeros((nproj, nproj))
@@ -183,27 +228,10 @@ def parse_upf(path: str | Path) -> UPFData:
     rhoatom = _parse_floats(root.find("PP_RHOATOM").text) / BOHR_ANG
 
     # PP_PSWFC atomic orbitals (present in PseudoDojo, absent/empty in SG15).
-    # Stored r·R_nl in Bohr; the BOHR^{-1/2} scaling keeps ∫(r·R)² dr = 1 with
-    # dr in Å and matches the r·β convention so the SBT form factor is reused.
-    pswfc = []
-    pswfc_block = root.find("PP_PSWFC")
-    if pswfc_block is not None:
-        for child in sorted(
-            (c for c in pswfc_block if c.tag.startswith("PP_CHI.")),
-            key=lambda c: int(c.tag.split(".")[1]),
-        ):
-            vals = _parse_floats(child.text) * BOHR_ANG ** (-0.5)
-            idx = int(child.tag.split(".")[1])
-            pswfc.append(AtomicOrbital(
-                l=int(child.attrib["l"]),
-                label=child.attrib.get("label", "").strip(),
-                occupation=float(child.attrib.get("occupation", "0")),
-                rchi=vals,
-                j=jchi.get(idx),
-            ))
+    pswfc = _parse_pswfc_chi(root, jchi)
 
     core_rho = None
-    if flag("core_correction"):
+    if _header_flag(h, "core_correction"):
         # PP_NLCC stores ρ_core(r) directly (NOT 4πr²ρ), in bohr⁻³
         core_rho = _parse_floats(root.find("PP_NLCC").text) / BOHR_ANG**3
 

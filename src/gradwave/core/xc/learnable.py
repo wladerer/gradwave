@@ -15,24 +15,23 @@ the DENSITY itself need the implicit-diff SCF backward (scf/implicit.py).
 
 from __future__ import annotations
 
-import math
-
 import torch
 
-from gradwave.constants import BOHR_ANG, HARTREE_EV
-from gradwave.core.xc._pbe_kernels import KAPPA, MU, pbe_enhancement, pbe_h
-from gradwave.core.xc.base import XCFunctional, to_au
-from gradwave.core.xc.lda_pw92 import eps_c_pw92, eps_x_lda
-from gradwave.core.xc.spin import SpinXC, eps_c_pw92_spin
+from gradwave.core.xc._pbe_kernels import KAPPA, MU
+from gradwave.core.xc.base import XCFunctional
+from gradwave.core.xc.pbe import PBE
+from gradwave.core.xc.spin import SpinPBE
 
 # PBE reference values, re-exported for callers that initialize at PBE.
 PBE_KAPPA, PBE_MU = KAPPA, MU
 
 
-class LearnableX(XCFunctional):
-    """PBE-form exchange with learnable (κ, μ); PW92+PBE-H correlation fixed."""
-
-    needs_gradient = True
+class _LearnableKappaMu:
+    """Mixin: softplus-parameterized trainable (κ, μ) exposed as read-only
+    properties, so the inherited PBE/SpinPBE energy_density (which reads
+    self.kappa/self.mu) trains the exchange enhancement with no other change.
+    At the default (PBE) initialization the properties return the PBE values
+    and the functional reproduces its fixed-parameter base class exactly."""
 
     def __init__(self, kappa: float = PBE_KAPPA, mu: float = PBE_MU):
         super().__init__()
@@ -48,76 +47,22 @@ class LearnableX(XCFunctional):
     def mu(self):
         return torch.nn.functional.softplus(self.raw_mu)
 
-    def energy_density(self, rho: torch.Tensor, sigma: torch.Tensor | None = None) -> torch.Tensor:
-        if sigma is None:
-            raise ValueError("LearnableX requires sigma")
-        rho_au = to_au(rho)
-        sigma_au = torch.clamp(sigma * BOHR_ANG**8, min=0.0)
-        grad_au = torch.sqrt(sigma_au + 1e-30)
-        kf = (3.0 * math.pi**2 * rho_au) ** (1.0 / 3.0)
-        s2 = (grad_au / (2.0 * kf * rho_au)) ** 2
 
-        kappa, mu = self.kappa, self.mu
-        eps_x = eps_x_lda(rho_au) * pbe_enhancement(s2, kappa, mu)
-
-        eps_c_lda = eps_c_pw92(rho_au)
-        ks = torch.sqrt(4.0 * kf / math.pi)
-        t2 = sigma_au / (2.0 * ks * rho_au) ** 2
-        h = pbe_h(t2, eps_c_lda)
-        return rho * (eps_x + eps_c_lda + h) * HARTREE_EV
-
-
-class LearnableSpinX(SpinXC):
-    """Spin-PBE with the same learnable (κ, μ) exchange as LearnableX —
-    exact spin scaling per channel, PW92(rs, ζ) + spin-PBE-H correlation
-    fixed. At the PBE initialization this reproduces SpinPBE exactly, and
-    for ζ = 0 it reduces to LearnableX with the same parameters."""
+class LearnableX(_LearnableKappaMu, PBE):
+    """PBE-form exchange with learnable (κ, μ); PW92+PBE-H correlation fixed.
+    Shares PBE.energy_density verbatim — only (κ, μ) become trainable."""
 
     needs_gradient = True
 
-    def __init__(self, kappa: float = PBE_KAPPA, mu: float = PBE_MU):
-        super().__init__()
-        self.raw_kappa = torch.nn.Parameter(_inv_softplus(kappa))
-        self.raw_mu = torch.nn.Parameter(_inv_softplus(mu))
 
-    @property
-    def kappa(self):
-        return torch.nn.functional.softplus(self.raw_kappa)
+class LearnableSpinX(_LearnableKappaMu, SpinPBE):
+    """Spin-PBE with the same learnable (κ, μ) exchange as LearnableX —
+    exact spin scaling per channel, PW92(rs, ζ) + spin-PBE-H correlation
+    fixed. At the PBE initialization this reproduces SpinPBE exactly, and
+    for ζ = 0 it reduces to LearnableX with the same parameters. Shares
+    SpinPBE.energy_density verbatim — only (κ, μ) become trainable."""
 
-    @property
-    def mu(self):
-        return torch.nn.functional.softplus(self.raw_mu)
-
-    def energy_density(self, rho_up, rho_dn, sigma_uu=None, sigma_dd=None,
-                       sigma_tot=None):
-        ru, rd = to_au(rho_up), to_au(rho_dn)
-        rho = ru + rd
-        zeta = (ru - rd) / rho
-        kappa, mu = self.kappa, self.mu
-
-        # exchange: spin scaling, per channel with its own gradient
-        ex_dens = torch.zeros_like(rho)
-        for r_s, sig in ((ru, sigma_uu), (rd, sigma_dd)):
-            r2 = 2.0 * r_s
-            s2au = torch.clamp(4.0 * sig * BOHR_ANG**8, min=0.0)
-            grad = torch.sqrt(s2au + 1e-30)
-            kf = (3.0 * math.pi**2 * r2) ** (1.0 / 3.0)
-            s_red = grad / (2.0 * kf * r2)
-            fx = pbe_enhancement(s_red * s_red, kappa, mu)
-            ex_dens = ex_dens + 0.5 * r2 * eps_x_lda(r2) * fx
-        eps_x = ex_dens / rho
-
-        # correlation: PW92(rs, ζ) + H(rs, ζ, t), fixed (matches SpinPBE)
-        ec_lda = eps_c_pw92_spin(rho, zeta)
-        zc = torch.clamp(zeta, -1.0 + 1e-12, 1.0 - 1e-12)
-        phi = 0.5 * ((1.0 + zc) ** (2.0 / 3.0) + (1.0 - zc) ** (2.0 / 3.0))
-        kf = (3.0 * math.pi**2 * rho) ** (1.0 / 3.0)
-        ks = torch.sqrt(4.0 * kf / math.pi)
-        sig_t = torch.clamp(sigma_tot * BOHR_ANG**8, min=0.0)
-        t2 = sig_t / (2.0 * phi * ks * rho) ** 2
-        h = pbe_h(t2, ec_lda, phi**3)
-
-        return (rho_up + rho_dn) * (eps_x + ec_lda + h) * HARTREE_EV
+    needs_gradient = True
 
 
 def _inv_softplus(y: float) -> torch.Tensor:

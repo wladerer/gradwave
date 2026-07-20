@@ -22,7 +22,7 @@ import math
 import torch
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
-from gradwave.core.xc._pbe_kernels import pbe_enhancement, pbe_h
+from gradwave.core.xc._pbe_kernels import KAPPA, MU, pbe_enhancement, pbe_h
 from gradwave.core.xc.base import CompilableXC
 from gradwave.core.xc.base import to_au as _to_au
 from gradwave.core.xc.lda_pw92 import _EC0, _g_pw92, eps_x_lda
@@ -77,10 +77,17 @@ class LSDA_PW92(SpinXC):
 class SpinPBE(SpinXC):
     needs_gradient = True
 
+    # Exchange enhancement parameters (κ, μ). Fixed at the PBE values here;
+    # LearnableSpinX subclasses this and overrides them with trainable tensors,
+    # so the energy_density body below is shared verbatim between the two.
+    kappa = KAPPA
+    mu = MU
+
     def energy_density(self, rho_up, rho_dn, sigma_uu=None, sigma_dd=None, sigma_tot=None):
         ru, rd = _to_au(rho_up), _to_au(rho_dn)
         rho = ru + rd
         zeta = (ru - rd) / rho
+        kappa, mu = self.kappa, self.mu
 
         # exchange: spin scaling, per channel with its own gradient;
         # accumulate ρ_au·ε_x [Ha·bohr⁻³], divide by ρ_au at the end
@@ -91,7 +98,7 @@ class SpinPBE(SpinXC):
             grad = torch.sqrt(s2au + 1e-30)
             kf = (3.0 * math.pi**2 * r2) ** (1.0 / 3.0)
             s_red = grad / (2.0 * kf * r2)
-            fx = pbe_enhancement(s_red * s_red)
+            fx = pbe_enhancement(s_red * s_red, kappa, mu)
             ex_dens = ex_dens + 0.5 * r2 * eps_x_lda(r2) * fx
         eps_x = ex_dens / rho  # per-electron [Ha]
 

@@ -31,7 +31,11 @@ from gradwave.pseudo.upf import (
     AtomicOrbital,
     BetaProjector,
     _check_mesh_lengths,
+    _header_flag,
+    _parse_betas,
     _parse_floats,
+    _parse_mesh_vloc,
+    _parse_pswfc_chi,
     _qe_msh,
     _read_root,
     _validate_root,
@@ -91,31 +95,16 @@ def parse_upf_paw(path) -> PAWData:
     _validate_root(root, path)
     h = root.find("PP_HEADER").attrib
 
-    def flag(name: str) -> bool:
-        return h.get(name, "F").strip().upper() in ("T", "TRUE")
-
-    is_paw = flag("is_paw")
-    if not flag("is_ultrasoft") and not is_paw:
+    is_paw = _header_flag(h, "is_paw")
+    if not _header_flag(h, "is_ultrasoft") and not is_paw:
         raise ValueError(f"{path}: not an ultrasoft/PAW dataset — use pseudo/upf.py")
-    if flag("has_so"):
+    if _header_flag(h, "has_so"):
         raise ValueError(f"{path}: fully-relativistic PAW not supported")
 
-    mesh = root.find("PP_MESH")
-    r = _parse_floats(mesh.find("PP_R").text) * BOHR_ANG
-    rab = _parse_floats(mesh.find("PP_RAB").text) * BOHR_ANG
-
-    vloc = _parse_floats(root.find("PP_LOCAL").text) * RY_EV
+    r, rab, vloc = _parse_mesh_vloc(root)
 
     nonlocal_ = root.find("PP_NONLOCAL")
-    betas = []
-    for child in sorted(
-        (c for c in nonlocal_ if c.tag.startswith("PP_BETA.")),
-        key=lambda c: int(c.tag.split(".")[1]),
-    ):
-        l = int(child.attrib["angular_momentum"])
-        kkbeta = int(child.attrib.get("cutoff_radius_index", len(r)))
-        vals = _parse_floats(child.text) * BOHR_ANG ** (-0.5)
-        betas.append(BetaProjector(l=l, rbeta=vals[:kkbeta], cutoff_idx=kkbeta))
+    betas = _parse_betas(nonlocal_, len(r))
     nproj = len(betas)
     dij = _parse_floats(nonlocal_.find("PP_DIJ").text).reshape(nproj, nproj) * RY_EV
 
@@ -141,21 +130,8 @@ def parse_upf_paw(path) -> PAWData:
         key = (int(i) - 1, int(j) - 1, int(l))
         qijl[key] = vals[:cutoff_idx]
 
-    # PP_PSWFC atomic orbitals (same conventions as upf.py: r·R scaled
-    # BOHR^{-1/2}, matching r·β so the SBT form factor is reused)
-    chi = []
-    pswfc_block = root.find("PP_PSWFC")
-    if pswfc_block is not None:
-        for child in sorted(
-            (c for c in pswfc_block if c.tag.startswith("PP_CHI.")),
-            key=lambda c: int(c.tag.split(".")[1]),
-        ):
-            chi.append(AtomicOrbital(
-                l=int(child.attrib["l"]),
-                label=child.attrib.get("label", "").strip(),
-                occupation=float(child.attrib.get("occupation", "0")),
-                rchi=_parse_floats(child.text) * BOHR_ANG ** (-0.5),
-            ))
+    # PP_PSWFC atomic orbitals (same conventions as upf.py; shared parser)
+    chi = _parse_pswfc_chi(root)
 
     rhoatom = _parse_floats(root.find("PP_RHOATOM").text) / BOHR_ANG
     core_rho = None

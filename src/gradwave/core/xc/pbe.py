@@ -19,13 +19,19 @@ import math
 import torch
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
-from gradwave.core.xc._pbe_kernels import pbe_enhancement, pbe_h
+from gradwave.core.xc._pbe_kernels import KAPPA, MU, pbe_enhancement, pbe_h
 from gradwave.core.xc.base import XCFunctional, to_au
 from gradwave.core.xc.lda_pw92 import eps_c_pw92, eps_x_lda
 
 
 class PBE(XCFunctional):
     needs_gradient = True
+
+    # Exchange enhancement parameters (κ, μ). Fixed at the PBE values here;
+    # LearnableX subclasses this and overrides them with trainable tensors, so
+    # the energy_density body below is shared verbatim between the two.
+    kappa = KAPPA
+    mu = MU
 
     def energy_density(self, rho: torch.Tensor, sigma: torch.Tensor | None = None) -> torch.Tensor:
         if sigma is None:
@@ -38,7 +44,7 @@ class PBE(XCFunctional):
 
         kf = (3.0 * math.pi**2 * rho_au) ** (1.0 / 3.0)
         s = grad_au / (2.0 * kf * rho_au)
-        eps_x = eps_x_lda(rho_au) * pbe_enhancement(s * s)
+        eps_x = eps_x_lda(rho_au) * pbe_enhancement(s * s, self.kappa, self.mu)
 
         eps_c_lda = eps_c_pw92(rho_au)
         ks = torch.sqrt(4.0 * kf / math.pi)
