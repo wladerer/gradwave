@@ -281,7 +281,14 @@ small FePt system is ~4e-12 eV, far below the force-theorem error
 mesh the folds are [001]→30/144, [100]→48, generic (010)-plane tilt→56,
 compounding with the 7.7× per-direction saving.
 examples/fept_mae_map.py uses this for an E(θ) scan [001]→[100] with a
-K₁sin²θ + K₂sin⁴θ fit.
+K₁sin²θ + K₂sin⁴θ fit. Measured at scale (asus CPU, 2026-07-19, on the
+batched spinor density path): 7 directions in 889 s (~2.1 min each, against
+~11 min unfolded pre-batching), K₁ = +2.6965 meV/cell, K₂ = −0.0358, max fit
+residual 0.0015 meV — FePt is uniaxial to 1%. The 45° point reproduces the
+unfolded full-mesh +1.3398 meV to all printed digits, confirming the fold
+exact at production scale, and [100]−[001] = +2.660 vs the self-consistent
++2.552 (4.2%). The whole 7-point map costs about an hour of CPU: one 2450 s
+reference SCF plus 15 min of folded solves.
 
 ## Magnetic space groups (Shubnikov symmetry) for non-collinear k-reduction
 

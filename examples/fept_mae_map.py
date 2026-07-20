@@ -18,6 +18,16 @@ fits the uniaxial form
 The validation run in fept_mae_force_theorem.py already saw the 45-degree
 direction land at half the [100] value, which is what a dominant K1 sin^2
 term predicts. This script measures the whole curve.
+
+Measured (asus CPU, 8 torch threads, batched spinor density path, 2026-07-19):
+    [001] reference SCF: 26 iterations, 2450 s, |M| = 3.2232 muB
+    (the pre-batching record on the same box was 5048 s at the same
+    iteration count, so the SCF itself gained 2.06x).
+    7 folded solves: 889 s total (~2.1 min each), folds [30,56,...,48] of 144;
+    the unfolded pre-batching solves cost ~11 min each.
+    K1 = +2.6965 meV/cell, K2 = -0.0358 meV/cell, max fit residual 0.0015 meV.
+    MAE [100]-[001] = +2.660 meV/cell vs self-consistent +2.552 (4.2%), and
+    the 45-degree point reproduces the unfolded full-mesh +1.3398 exactly.
 """
 import time
 
