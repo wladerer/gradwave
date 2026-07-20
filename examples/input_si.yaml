@@ -20,6 +20,7 @@ smearing: {type: none, width: 0.1}   # none | fermi-dirac | gaussian | mp1 | col
 symmetry: true        # IBZ reduction + density symmetrization
 nspin: 1              # 2 for collinear spin (+ start_mag per element)
 noncollinear: false   # true: spinor SCF for task: scf (+ start_mag seed; FR pseudos for SOC)
+# nonmagnetic: true    # with noncollinear: SOC-only run, moment pinned to zero (keeps symmetry)
 # start_mag: {Fe: 0.4}   # per-element initial moment fraction (nspin=2 or noncollinear)
 
 scf:

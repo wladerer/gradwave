@@ -95,6 +95,9 @@ def build_system(inp: Input):
         kshift=inp.kpoints.shift,
         nbands=inp.nbands,
         use_symmetry=inp.symmetry,
+        # a magnetic spinor breaks k ≡ −k (TR flips m⃗); a nonmagnetic spinor
+        # (SOC only) keeps Kramers, so TR reduction stays valid there
+        time_reversal=not (inp.noncollinear and not inp.nonmagnetic),
     )
 
 
@@ -163,7 +166,10 @@ def _run_scf_noncollinear(inp: Input, system, verbose: bool):
 
     xc = NoncollinearXC(SPIN_XC_REGISTRY[inp.xc]())
 
-    if inp.restart is not None:
+    if inp.nonmagnetic:
+        # spin-orbit only: pin m⃗ ≡ 0 (no seed, no spurious moment)
+        mag_vec_init = torch.zeros((len(inp.atoms), 3), dtype=torch.float64)
+    elif inp.restart is not None:
         from gradwave.checkpoint import load_checkpoint, nc_mag_seed
 
         mag_vec_init = nc_mag_seed(load_checkpoint(inp.restart), system)
@@ -184,6 +190,7 @@ def _run_scf_noncollinear(inp: Input, system, verbose: bool):
         mixing_alpha=inp.scf.mixing.alpha,
         mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
         diago_tol=inp.scf.diago_tol, verbose=verbose,
+        nonmagnetic=inp.nonmagnetic,
     )
 
 
