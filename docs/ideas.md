@@ -290,6 +290,26 @@ exact at production scale, and [100]−[001] = +2.660 vs the self-consistent
 +2.552 (4.2%). The whole 7-point map costs about an hour of CPU: one 2450 s
 reference SCF plus 15 min of folded solves.
 
+**Band-resolved anisotropy (open).** The MAE is a single number; the
+diagnostic that *explains* it decomposes ΔF into per-k, per-band
+contributions by differencing the spectra of two directions state by state
+(each at its own Fermi level) before summing. The physics: away from ε_F the
+SOC shifts cancel in the difference, so the net anisotropy lives in
+near-degenerate band pairs within ~ξ_SOC of the Fermi level that split
+differently per direction — in FePt the Pt-5d avoided crossings, which is
+also why coarse meshes flip the sign. Everything needed is already persisted:
+MAEResult.save keeps the full (nk, nb) spectra and Fermi levels per
+direction. What to build: (1) a ΔE(k) map over the mesh plus a band-index
+decomposition, occupation-weighted with the entropy term handled explicitly;
+(2) an unfolding step, since per-direction folds put two directions on
+different k-subsets — either re-run the pair of interest unfolded (minutes
+now) or expand folded spectra back to the full mesh through the orbit maps
+the magnetic-symmetry machinery already computes. Caveats to state in the
+docs: per-k contributions are gauge-sensitive (only the k-sum is physical),
+and band *indices* must be matched through crossings if the decomposition is
+followed along θ. Payoff: hotspot maps on the Fermi surface, and a principled
+handle on how alloying/strain will move the MAE.
+
 ## Magnetic space groups (Shubnikov symmetry) for non-collinear k-reduction
 
 Every magnetic non-collinear run today uses the FULL k-mesh — `scf_noncollinear`
