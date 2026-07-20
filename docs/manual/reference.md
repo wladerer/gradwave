@@ -7,6 +7,8 @@ docstrings.
 
 ## CLI
 
+    gradwave init                       # list the starter-input templates
+    gradwave init relax -o input.yaml   # write a starter input for a task
     gradwave input.yaml                 # run, outputs to the YAML's output.dir
     gradwave input.yaml -o results/     # override the output directory
     gradwave validate input.yaml        # parse and check, run nothing

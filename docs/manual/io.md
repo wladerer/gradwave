@@ -6,10 +6,18 @@ has the terse CLI and entry-point tables.
 
 ## Running
 
+    gradwave init relax -o input.yaml   # write a starter input for a task
     gradwave input.yaml                 # outputs to the YAML's output.dir
     gradwave input.yaml -o results/     # override the output directory
     gradwave validate input.yaml        # parse and check, run nothing
     gradwave plot results/scf.json      # figure from a result file
+
+`gradwave init` writes a commented starter input for a kind of calculation.
+`gradwave init` with no name lists the templates: `scf`, `metal`, `relax`,
+`relax-cell`, `bands`, `bands-soc`, `pdos`, `magnetism`, and `noncollinear`.
+Each emits a complete, schema-valid file with an inline example structure and
+placeholder pseudopotential paths; edit those two, then `gradwave validate` it.
+Without `-o` the template goes to stdout (`gradwave init bands > bands.yaml`).
 
 `gradwave validate` parses the input, resolves the structure and
 pseudopotentials, and prints the calculation it would run without starting an

@@ -1,5 +1,6 @@
 """Command-line interface.
 
+    gradwave init relax -o input.yaml  # write a starter input for a task
     gradwave input.yaml                # run, outputs to the YAML's output.dir
     gradwave input.yaml -o results/    # override the output directory
     gradwave validate input.yaml       # parse and check, run nothing
@@ -16,7 +17,7 @@ from pathlib import Path
 
 from gradwave import __version__
 
-_COMMANDS = {"run", "validate", "plot"}
+_COMMANDS = {"init", "run", "validate", "plot"}
 
 
 def _build_parser():
@@ -31,6 +32,15 @@ def _build_parser():
     p_run.add_argument("-o", "--output", metavar="DIR",
                        help="output directory (overrides output.dir)")
     p_run.add_argument("-q", "--quiet", action="store_true")
+
+    p_init = sub.add_parser(
+        "init", help="write a starter input for a task (relax, bands, ...)")
+    p_init.add_argument("template", nargs="?",
+                        help="template name; omit to list the available ones")
+    p_init.add_argument("-o", "--output", metavar="FILE",
+                        help="write here instead of stdout")
+    p_init.add_argument("--force", action="store_true",
+                        help="overwrite an existing --output file")
 
     p_val = sub.add_parser(
         "validate", help="parse and check an input without running it")
@@ -47,6 +57,34 @@ def _build_parser():
     p_plot.add_argument("--width", type=float, default=0.1,
                         help="DOS broadening [eV]")
     return parser
+
+
+def _cmd_init(args) -> int:
+    from gradwave import templates
+
+    if not args.template:
+        print("available templates (gradwave init <name>):")
+        for name, desc in templates.summaries().items():
+            print(f"  {name:14s} {desc}")
+        return 0
+    try:
+        text = templates.render(args.template)
+    except KeyError:
+        print(f"error: unknown template {args.template!r}; choices: "
+              f"{', '.join(templates.names())}", file=sys.stderr)
+        return 1
+    if args.output:
+        out = Path(args.output)
+        if out.exists() and not args.force:
+            print(f"error: {out} exists (use --force to overwrite)",
+                  file=sys.stderr)
+            return 1
+        out.write_text(text)
+        print(f"wrote {out}  —  edit the structure and pseudopotentials, then "
+              f"`gradwave validate {out}`")
+        return 0
+    sys.stdout.write(text)
+    return 0
 
 
 def _load_checked(path):
@@ -152,6 +190,8 @@ def main(argv=None) -> int:
     if argv and argv[0] not in _COMMANDS and not argv[0].startswith("-"):
         argv.insert(0, "run")
     args = _build_parser().parse_args(argv)
+    if args.command == "init":
+        return _cmd_init(args)
     if args.command == "run":
         return _cmd_run(args)
     if args.command == "validate":
