@@ -148,16 +148,25 @@ def estimate_smearing_error(res: SCFResult, *, scheme: str,
 class ScfConvergenceError:
     """Estimated energy error from stopping the SCF at finite tolerance.
 
-    ``denergy`` (>= 0) is the estimated distance of the reported energy above
-    the fully self-consistent value: E_converged ~= free_energy - denergy. It is
-    the screened second-order form when available, else the unscreened
-    overestimate (``screened`` records which). ``residual_norm`` is the L1 norm
-    of the density residual per electron, the same convergence proxy the SCF
-    prints.
+    ``denergy`` estimates the distance of the reported energy above the fully
+    self-consistent value: E_converged ~= free_energy - denergy. It is the
+    screened second-order form when available, else the unscreened one
+    (``screened`` records which). ``residual_norm`` is the L1 norm of the
+    density residual per electron, the same convergence proxy the SCF prints.
+
+    KNOWN LIMITATION (both forms): denergy is NOT sign-definite and can come out
+    negative, so it is unreliable in magnitude and sign. The true second-order
+    energy error is 1/2<x|(K_Hxc - chi0^-1)|x> with x the dielectric-dressed
+    density error, but the code computes 1/2<r|K_Hxc (1-chi0 K)^-1|r>, which
+    omits the chi0^-1 kinetic-response term (and 1/2<r|K_Hxc|r> for the
+    unscreened form is indefinite because f_xc < 0). A correct estimate needs a
+    chi0-inverse solve that is numerically intractable by direct CG (chi0 is
+    near-singular for an insulator). Tracked; see the xfail'd tests in
+    tests/integration/test_convergence_error.py for the full derivation.
     """
 
     denergy: float               # eV, screened if available else unscreened
-    denergy_unscreened: float    # eV, (1/2)<r|K_Hxc|r>, always an overestimate
+    denergy_unscreened: float    # eV, (1/2)<r|K_Hxc|r>; NOT sign-definite (see above)
     residual_norm: float         # int|r| per electron
     screened: bool               # True if the dielectric-screened value is used
     energy_converged_estimate: float  # free_energy - denergy [eV]
