@@ -11,10 +11,11 @@ functional.
 This manual is organized as a wiki. Start with [Installation](installation.md),
 then work through the tutorials. They relax a geometry with exact autograd
 forces, train an exchange-correlation functional back to PBE[[10]](bibliography.md#pbe)
-through the self-consistent density, reduce the Brillouin zone by symmetry,
-estimate the plane-wave basis error, determine the Hubbard U from linear
-response, add spin-orbit coupling, and read spin Hamiltonians out of the magnetic
-ground state. Each tutorial opens with the theory it rests on, then runs a shipped
+through the self-consistent density, solve a hybrid functional with exact
+exchange in the SCF, reduce the Brillouin zone by symmetry, estimate the
+plane-wave basis error, determine the Hubbard U from linear response, add
+spin-orbit coupling, read spin Hamiltonians out of the magnetic ground state, and
+map the magnetocrystalline anisotropy. Each tutorial opens with the theory it rests on, then runs a shipped
 example. For the shortest path to a result without the theory, the
 [Cookbook](cookbook.md) has task recipes. The [Reference](reference.md) page
 collects the CLI, the output files, and the entry points, and the
@@ -32,6 +33,8 @@ collects the CLI, the output files, and the entry points, and the
 - Basis-set (Ecut) error estimation from a single calculation, no cutoff sweep.
 - Exchange-correlation functionals trained by gradient descent through the SCF
   density, each gradient one adjoint solve.
+- Global (PBE0-form) and screened hybrid functionals with exact (Fock) exchange
+  acting in the SCF, the mixing α and screening ω themselves trainable.
 - DFT+U with the Hubbard U determined from linear response and an exact dE/dU.
 - Collinear spin, non-collinear magnetism, and spin-orbit coupling from
   fully-relativistic pseudopotentials.
@@ -95,11 +98,13 @@ tensor is float64 or complex128.
 | [Cookbook](cookbook.md) | task recipes, the shortest path to each quantity |
 | [Geometry optimization](geometry-optimization.md) | relax a structure with autograd forces |
 | [Learning XC by AD](learning-xc.md) | train a functional through the SCF density |
+| [Hybrid functionals](hybrid-functionals.md) | exact exchange in the SCF, trainable α and ω |
 | [Symmetry reduction](symmetry.md) | IBZ k-reduction and density symmetrization |
 | [Basis-set error estimation](error-estimation.md) | estimate the plane-wave (Ecut) error |
 | [Differentiable Hubbard U](hubbard-u.md) | DFT+U and U from linear response |
 | [Non-collinear magnetism and SOC](noncollinear-soc.md) | spinor SCF and spin-orbit coupling |
 | [Magnetic structure and spin Hamiltonians](magnetism.md) | moment configs, spin spirals, J and DMI |
+| [Magnetocrystalline anisotropy](mae.md) | E(θ) maps and easy axes from the force theorem |
 | [Inputs and outputs](io.md) | input schema, output files, checkpoints, analysis |
 | [Reference](reference.md) | CLI and entry points |
 | [Performance](performance.md) | where time goes, what helps, the GPU precision story |

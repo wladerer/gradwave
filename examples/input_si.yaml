@@ -19,16 +19,21 @@ kpoints: {mesh: [4, 4, 4]}
 smearing: {type: none, width: 0.1}   # none | fermi-dirac | gaussian | mp1 | cold
 symmetry: true        # IBZ reduction + density symmetrization
 nspin: 1              # 2 for collinear spin (+ start_mag per element)
+noncollinear: false   # true: spinor SCF for task: scf (+ start_mag seed; FR pseudos for SOC)
+# nonmagnetic: true    # with noncollinear: SOC-only run, moment pinned to zero (keeps symmetry)
+# start_mag: {Fe: 0.4}   # per-element initial moment fraction (nspin=2 or noncollinear)
 
 scf:
   max_iter: 100
   etol: 1.0e-8        # eV
   rhotol: 1.0e-7
-  mixing: {scheme: johnson}   # pulay | broyden | johnson
+  mixing: {scheme: johnson}   # pulay | broyden | johnson | linear
 
-task: scf             # scf | relax | bands
-# relax: {optimizer: bfgs, fmax: 0.01, max_steps: 200}
-# bands: {path: LGXUG, npoints: 120}
+task: scf             # scf | relax | bands | magnetism
+# relax: {optimizer: bfgs, fmax: 0.01, max_steps: 200, cell: false, pressure: 0.0}
+# bands: {path: LGXUG, npoints: 120, irreps: false}
+# projections: {enabled: true, group_by: l, width: 0.1}   # projected DOS (needs PP_PSWFC)
+# magnetism: {exchange: true, lam: 8.0, delta: 0.08}      # for task: magnetism
 
 # restart: out/checkpoint.pt    # warm-start from a previous run's state
 
@@ -36,3 +41,4 @@ output:
   dir: ./out
   checkpoint: true          # write restartable state after SCF
   wavefunctions: false      # keep coeffs out of the checkpoint (large)
+  error_estimate: true      # post-SCF numerical-error estimate (on by default)

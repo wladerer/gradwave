@@ -14,6 +14,7 @@ much control you need.
 | drive the SCF yourself and keep the result object | `scf.loop.scf`, `scf.uspp.scf_uspp` | [SCF engine](scf.md) |
 | compute a property from a converged result | `gradwave.postscf.*` | [Properties](properties.md) |
 | differentiate the energy through the SCF | `core.xc`, `postscf.uspp_implicit` | [Exchange–correlation](xc.md) |
+| solve or train a hybrid (exact exchange) | `postscf.hybrid`, `postscf.exchange_multik` | [Exchange–correlation](xc.md) |
 | read a pseudopotential | `pseudo.upf`, `pseudo.upf_paw` | [Pseudopotentials](pseudopotentials.md) |
 
 ## Layers

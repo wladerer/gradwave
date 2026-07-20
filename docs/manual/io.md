@@ -50,7 +50,7 @@ means the quantity is dimensionless or a plain count.
 | `nbands` | `auto` | — | int or `auto` | Number of Kohn-Sham bands. `auto` picks from the electron count. |
 | `symmetry` | `true` | — | bool | Reduce k to the IBZ and symmetrize the density each step. Forced off for a magnetic `noncollinear` run and the `magnetism` task (symmetry acts on the moment vector); setting it `true` there is an error. A spin-orbit-only run (`nonmagnetic: true`) keeps symmetry. |
 | `nspin` | `1` | — | int | `1` unpolarized, `2` collinear spin. |
-| `noncollinear` | `false` | — | bool | Spinor (non-collinear) SCF, needed for spin-orbit coupling. Requires a fully-relativistic (FR) pseudopotential. |
+| `noncollinear` | `false` | — | bool | Spinor (non-collinear) SCF for `task: scf`, needed for spin-orbit coupling. Requires a fully-relativistic (FR) pseudopotential. |
 | `nonmagnetic` | `false` | — | bool | With `noncollinear`: pin the moment to zero for a spin-orbit-only run (e.g. a nonmagnetic heavy metal). Keeps the full crystal symmetry via Kramers, so it is the efficient path when there is no magnetism. Requires `noncollinear: true`. |
 | `start_mag` | `null` | — | mapping | Element → initial moment fraction in [-1, 1] (nspin=2 or a magnetic noncollinear seed). |
 | `task` | `scf` | — | string | `scf`, `relax`, `bands`, or `magnetism`. |
@@ -243,8 +243,12 @@ force error (`force_error_max_eV_ang` and the rms). It is a first-order indicato
 rigorous bound, so use it to gate convergence, not to quote an uncertainty. When the
 calculation is outside coverage, USPP or PAW with symmetry on for example, the report notes
 that the estimate was skipped and why, rather than failing the calculation. Coverage is
-norm-conserving and USPP/PAW for the energy and density error, norm-conserving
-(nspin=1 or 2) for the force error.
+norm-conserving and USPP/PAW for the energy and density error, including the
+non-collinear/spinor path (`noncollinear: true`), and norm-conserving
+(nspin=1 or 2) for the force error. The `magnetism` task carries no estimate; run
+`task: scf` with `noncollinear: true` to get one on a spinor SCF. The
+[Basis-set error estimation](error-estimation.md#coverage) page has the full
+coverage table.
 
 ## Checkpoints
 

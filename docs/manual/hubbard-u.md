@@ -116,10 +116,11 @@ print(energy_derivative_u(res, [HubbardManifold(species=0, l=2, u=5.0)]))
 !!! note "Learning U vs learning the functional"
     U here is a *determinable and differentiable* input, with an exact
     $\mathrm{d}E/\mathrm{d}U$, the substrate a learning loop would use. The
-    parameter gradwave trains today is the exchange-correlation
-    functional. See [Learning XC by AD](learning-xc.md), whose adjoint carries a
-    +U occupation-response channel so it trains correctly through a +U ground
-    state.
+    parameters gradwave trains today are the exchange-correlation functional
+    (κ, μ) and the hybrid exchange mixing (α, ω). See
+    [Learning XC by AD](learning-xc.md), whose adjoint carries a +U
+    occupation-response channel so it trains correctly through a +U ground state,
+    and [Hybrid functionals](hybrid-functionals.md).
 
 ## Next
 

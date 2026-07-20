@@ -20,8 +20,6 @@ to keep them in memory.
 
 ::: gradwave.api.build_summary
 
-::: gradwave.api.result_summary
-
 ## Input schema
 
 `load_input` parses a YAML file into a frozen `Input`. The nested dataclasses

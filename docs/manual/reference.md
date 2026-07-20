@@ -23,8 +23,8 @@ docstrings.
 | `<task>.out` | human report |
 | `checkpoint.pt` | restartable SCF state, density and becsum by default |
 
-`<task>` is `scf`, `relax`, or `bands`. See [Inputs and outputs](io.md) for the JSON
-key list, the checkpoint API, and the analysis helpers.
+`<task>` is `scf`, `relax`, `bands`, or `magnetism`. See [Inputs and outputs](io.md)
+for the JSON key list, the checkpoint API, and the analysis helpers.
 
 ## Key entry points
 
@@ -32,10 +32,13 @@ key list, the checkpoint API, and the analysis helpers.
 |---|---|
 | `scf`, `setup_system` (`scf.loop`) | norm-conserving SCF |
 | `scf_uspp`, `setup_uspp` (`scf.uspp`) | USPP/PAW SCF |
+| `scf_noncollinear` (`scf.noncollinear`) | spinor (non-collinear/SOC) SCF |
 | `GradWave` (`calculator`) | ASE calculator, energy, forces, stress |
 | `LearnableX`, `LearnableSpinX` (`core.xc.learnable`) | learnable exchange |
 | `energy_param_grads` (`core.xc.learnable`) | dE/dθ at convergence, no extra solve |
 | `uspp_density_loss_param_grads` (`postscf.uspp_implicit`) | density-loss adjoint |
+| `hybrid_scf`, `HybridExchangeParams` (`postscf.hybrid`, `postscf.exchange_multik`) | self-consistent hybrid, trainable α/ω |
+| `characterize_magnetism` (`postscf.magnetism`) | spin Hamiltonian (J, DMI) from the ground state |
 
 The [API reference](api/index.md) expands each of these with full signatures,
 grouped by subsystem.
