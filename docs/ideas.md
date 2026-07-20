@@ -104,15 +104,45 @@ contracted energy build to machine precision; the ISDF operator saturates to the
 direct operator (rel-err 2e-2 → 1e-13 as the rank fills); and ACE reproduces
 `V_x ψ_n` on every occupied n to ~5e-14.
 
+**Multi-k exchange + range-separated kernel + learnable hybrid slot LANDED
+(2026-07-20).** `postscf/coulomb_kernel.py` and `postscf/exchange_multik.py`:
+- `coulomb_kernel` — the range-separated exchange kernel K(q+G) in three modes:
+  bare `full` (PBE0-style), `short_range` (erfc, HSE), `long_range` (erf), ω
+  differentiable. The erfc/erf split satisfies K_sr+K_lr=K_full at q+G≠0; at
+  q+G=0 the screened kernel is *finite* (π e²/ω²) while full/long-range drop the
+  divergence, so **screened (HSE) exchange needs no singularity correction** —
+  the reason to reach for it first (`tests/unit/test_coulomb_kernel.py`).
+- `multik_exchange_energy` — the full exchange over a k-mesh through the
+  co-density crystal momentum q = k′−k, kernel evaluated at |q+G|²; reduces to
+  the Γ direct build at one k-point (measured exact) and gives a finite real
+  exchange on a 2×2×2 full-BZ Si mesh. Requires an unreduced mesh
+  (`use_symmetry=False, time_reversal=False`) and the dense grid, both enforced
+  by convention (`tests/integration/test_exchange_multik.py`).
+- `HybridExchangeParams` / `hybrid_exchange_energy` — the learnable slot: α
+  (sigmoid) and ω (softplus) mirroring `core/xc/learnable.py`, initialized to an
+  HSE-like screened hybrid. The exchange energy is differentiable in both
+  (autograd dE/dω matches finite difference to 1e-9), so a learned hybrid trains
+  the mixing and range end to end.
+
 What remains, in build order: wire the ACE operator into
 `BatchedHamiltonian.apply` and iterate exchange to self-consistency (the outer
-ACE/EXX loop — the operator now exists, it just does not yet act in the SCF);
-multi-k exchange (q = k−k′ phases); a truncated Coulomb / G=0 term for
-physically isolated molecules; then the learnable-hybrid parameters (mixing
-fraction and range separation through `learnable.py`) and the RPA correlation
-contraction.
+ACE/EXX loop — the operator and the differentiable energy now exist, they just
+do not yet act in the SCF); the multi-k *ISDF-K* acceleration (this multi-k
+build is the direct O(N_k² N_occ²) reference the interpolation compression will
+target); a Gygi–Baldereschi q+G=0 correction to complete unscreened `full`/PBE0
+(screened HSE is already complete); a truncated Coulomb for physically isolated
+molecules; and the RPA correlation contraction.
 
 ## Exact exchange and hybrid functionals
+
+**Status: the exchange machinery is built; the remaining step is making it act in
+the SCF.** The energy, the operator, ACE, the multi-k build, the range-separated
+kernel, and the differentiable hybrid parameters all landed (see the LANDED notes
+under the ISDF section above). What is not yet done is wiring the Fock operator
+into `BatchedHamiltonian.apply` and iterating exchange to self-consistency — so
+gradwave can *compute* exact/screened exchange on converged orbitals but does not
+yet *self-consistently* solve a hybrid. The paragraphs below are the original
+framing, kept for the reasoning.
 
 The biggest single physics gap, and the reason the two scaling items above are
 worth building. Every energy, gap, force, and adsorbate level gradwave produces
