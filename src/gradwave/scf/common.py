@@ -38,9 +38,25 @@ def record_iteration(history, it, e_free, e_free_prev, res_norm, t_it):
 
 def convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol):
     """The strict convergence gate shared by all four SCF drivers: energy
-    settled AND density residual down AND the adaptive diago tolerance at its
-    floor (a loose-solve iteration can fake a small dE/res pair)."""
-    return de < etol and res_norm < rhotol and tol_eff <= diago_tol * 1.01
+    settled AND density residual down AND the eigensolve tight relative to the
+    density tolerance (a loose eigensolve can fake a small dE/res pair — the
+    orbitals barely move, so ρ_out ≈ ρ_in for the wrong reason).
+
+    The third clause guards against that stale-solve fake. It must be satisfied
+    by an eigensolver noise floor BELOW the residual we are trusting: if
+    tol_eff <= rhotol, eigensolver slop cannot by itself produce a residual under
+    rhotol, so the small residual is genuine self-consistency. The bound is
+    max(diago_tol, rhotol): normally diago_tol < rhotol, so this reduces to
+    "tol_eff at or below rhotol". Pinning it to diago_tol alone was wrong for the
+    LINEAR adaptive schedule (spinor drivers), where tol_eff = 0.03·res_prev
+    tracks the residual and reaches the absolute diago_tol floor only once
+    res_prev < diago_tol/0.03 ≈ 33·diago_tol — unreachable when the eigensolver
+    noise floors the residual above that (e.g. an isolated open-shell SOC atom),
+    stranding a fully-settled SCF at max_iter. The QUADRATIC schedule (collinear)
+    plunges tol_eff to diago_tol the moment res_prev is small, so both bounds
+    agree there and this change leaves the collinear path's convergence point
+    untouched."""
+    return de < etol and res_norm < rhotol and tol_eff <= max(diago_tol, rhotol) * 1.01
 
 
 def adaptive_diago_tol(it, history, diago_tol, n_electrons, *, schedule,
