@@ -9,6 +9,7 @@ docstrings.
 
     gradwave input.yaml                 # run, outputs to the YAML's output.dir
     gradwave input.yaml -o results/     # override the output directory
+    gradwave validate input.yaml        # parse and check, run nothing
     gradwave plot out/scf.json          # scf convergence, bands, or dos figure
     gradwave run input.yaml             # explicit run form, still valid
 

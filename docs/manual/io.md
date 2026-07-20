@@ -8,7 +8,14 @@ has the terse CLI and entry-point tables.
 
     gradwave input.yaml                 # outputs to the YAML's output.dir
     gradwave input.yaml -o results/     # override the output directory
+    gradwave validate input.yaml        # parse and check, run nothing
     gradwave plot results/scf.json      # figure from a result file
+
+`gradwave validate` parses the input, resolves the structure and
+pseudopotentials, and prints the calculation it would run without starting an
+SCF. It is the fast way to catch a typo: an unknown key is rejected by name
+(with a did-you-mean suggestion) rather than silently ignored, so a misspelled
+`kpoint:` fails loudly instead of quietly running a Γ-only calculation.
 
 `examples/input_si.yaml` documents every key with its default. The formalism is
 detected from the UPF files, so the same input schema drives norm-conserving and
@@ -36,14 +43,39 @@ means the quantity is dimensionless or a plain count.
 | `symmetry` | `true` | — | bool | Reduce k to the IBZ and symmetrize the density each step. |
 | `nspin` | `1` | — | int | `1` unpolarized, `2` collinear spin. |
 | `start_mag` | `null` | — | mapping | Element → initial moment fraction in [-1, 1] (nspin=2). |
-| `task` | `scf` | — | string | `scf`, `relax`, or `bands`. |
+| `task` | `scf` | — | string | `scf`, `relax`, `bands`, or `magnetism`. |
 | `device` | `cpu` | — | string | Torch device, e.g. `cpu` or `cuda`. |
 | `verbose` | `true` | — | bool | Per-iteration SCF chatter on stdout. `gradwave run --quiet` silences a run regardless of this key. |
 | `restart` | `null` | — | path | Checkpoint file to warm-start the density from. |
 
 ### `structure`
 
-Provide either a filename string or the inline block below.
+Three spellings reach the same geometry:
+
+```yaml
+structure: geometry.cif                              # bare filename, any ASE format
+structure: {file: run.traj, format: traj, index: -1} # file with read controls
+structure:                                           # inline block
+  cell: [[...], [...], [...]]
+  positions: {frac: [[...], ...]}
+  species: [Si, Si]
+```
+
+Geometry goes through `ase.io.read`, so any format ASE reads works (cif, POSCAR,
+xyz, extended-xyz, and so on). A structure with no periodic cell (a bare-molecule
+xyz, for instance) is rejected at load time, because a plane-wave calculation
+needs a cell; put the atoms in a box first. The lengths ASE returns are in Å, the
+package convention.
+
+The filename form accepts either a bare string or a mapping with read controls:
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `file` | *required* | — | string | Path to a geometry file, relative to the input. |
+| `format` | *auto* | — | string | ASE format name, overriding the extension guess when it misfires. |
+| `index` | `-1` | — | int | Frame to read from a multi-image file. `-1` is the last frame; a slice like `":"` is an error (pick one frame). |
+
+The inline block:
 
 | keyword | default | unit | type | description |
 |---|---|---|---|---|
@@ -51,6 +83,10 @@ Provide either a filename string or the inline block below.
 | `positions.cart` | *required* | Å | list[list[float]] | Cartesian coordinates. Use this **or** `frac`. |
 | `positions.frac` | *required* | — | list[list[float]] | Fractional coordinates. Use this **or** `cart`. |
 | `species` | *required* | — | list[string] | Chemical symbols, one per atom. |
+
+Reading from an external file means the geometry is no longer self-contained in
+the YAML, so for an archived input either use the inline block or keep the
+geometry file alongside it.
 
 ### `pseudopotentials`
 
