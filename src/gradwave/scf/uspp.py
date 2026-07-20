@@ -6,6 +6,7 @@ through this module — tests/conftest.py patches the setup_uspp
 attribute HERE for device routing, so the name must stay stable.
 """
 
+from gradwave.scf.results import USPPNCResult, USPPResult  # noqa: F401
 from gradwave.scf.uspp_loop import (  # noqa: F401
     _HkS,
     davidson_gen,

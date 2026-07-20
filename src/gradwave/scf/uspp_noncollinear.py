@@ -47,6 +47,7 @@ from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.scf.common import symmetrize_rho
 from gradwave.scf.guess import sad_density
 from gradwave.scf.mixing import PulayMixer
+from gradwave.scf.results import USPPNCResult
 from gradwave.scf.paw_noncollinear import (
     onsite_nc_energy_and_ddd,
     spinor_onsite_becsum,
@@ -182,7 +183,7 @@ def scf_uspp_noncollinear(
     bec_step_scale: float = 0.4,
     diago_tol: float = 1e-9,
     verbose: bool = True,
-) -> dict:
+) -> USPPNCResult:
     if getattr(xc, "needs_gradient", False):
         raise NotImplementedError(
             "non-collinear USPP/PAW is LDA-only (the on-site NC XC is LDA-only)")
@@ -482,7 +483,7 @@ def scf_uspp_noncollinear(
 
     m_int = [float(m[i].mean()) * vol for i in range(3)]
     m_norm = torch.sqrt((m ** 2).sum(dim=0))
-    return dict(
+    return USPPNCResult(
         converged=converged, n_iter=it, energies=energies, fermi=mu,
         mag_vec=tuple(m_int), mag_abs=float(m_norm.mean()) * vol,
         rho=rho, m=m, eigenvalues=eigs, history=history,

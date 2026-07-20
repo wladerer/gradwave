@@ -135,12 +135,11 @@ def _occupied(res: SCFResult, ik: int, sp: int | None = None):
 def _bands_at(res: SCFResult, ik: int, sp: int | None = None):
     """All computed coefficients and eigenvalues at one k (and spin channel).
 
-    Accepts an ``SCFResult`` (norm-conserving) or the ``scf_uspp`` result dict;
-    both carry ``coeffs``/``eigenvalues`` with the same per-k (nspin=1) or
-    [spin][k] (nspin=2) layout.
+    Accepts an ``SCFResult`` (norm-conserving) or a ``USPPResult``; both carry
+    ``coeffs``/``eigenvalues`` with the same per-k (nspin=1) or [spin][k]
+    (nspin=2) layout.
     """
-    coeffs = res["coeffs"] if isinstance(res, dict) else res.coeffs
-    eigs = res["eigenvalues"] if isinstance(res, dict) else res.eigenvalues
+    coeffs, eigs = res.coeffs, res.eigenvalues
     if sp is None:
         return coeffs[ik], eigs[ik]
     return coeffs[sp][ik], eigs[sp][ik]
@@ -212,9 +211,9 @@ def estimate_density_error(
 
     Parameters
     ----------
-    res : SCFResult, dict, or NCResult
+    res : SCFResult, USPPResult, or NCResult
         A converged SCF. An ``SCFResult`` (norm-conserving, nspin=1 or 2;
-        use_symmetry allowed for nspin=1), the dict returned by ``scf_uspp``
+        use_symmetry allowed for nspin=1), a ``USPPResult`` from ``scf_uspp``
         (USPP/PAW, nspin=1 or 2, use_symmetry=False), or an ``NCResult``
         (non-collinear/SOC spinor SCF, use_symmetry=False -- pass ``xc`` as the
         NoncollinearXC and the run's ``smearing``/``width``).
@@ -229,14 +228,19 @@ def estimate_density_error(
         raises ``NotImplementedError`` (the ``dyson_*`` tuning kwargs are inert
         there).
     """
-    if isinstance(res, dict):
+    formalism = _result_formalism(res)
+    if formalism == "uspp_noncollinear":
+        raise NotImplementedError(
+            "discretization error is not implemented for the USPP/PAW spinor "
+            "(scf_uspp_noncollinear) result")
+    if formalism == "uspp":
         if dyson:
             raise NotImplementedError(
                 "Dyson dressing not implemented for the USPP/spinor path")
         return _estimate_density_error_uspp(
             res, ecut_large=ecut_large, factor=factor, xc=xc, verbose=verbose,
         )
-    if _is_ncresult(res):
+    if formalism == "noncollinear":
         if dyson:
             raise NotImplementedError(
                 "Dyson dressing not implemented for the USPP/spinor path")
@@ -868,7 +872,7 @@ def estimate_force_error(
     S-orthogonality constraint (via the eigenvalue error), and the PAW one-center
     ddd response, following ``postscf.uspp_position.hessian_column``.
     """
-    if _is_ncresult(res):
+    if _result_formalism(res) in ("noncollinear", "uspp_noncollinear"):
         raise NotImplementedError(
             "force error estimate is norm-conserving collinear only; the spinor "
             "force terms in P(eps) are not assembled")
@@ -945,16 +949,26 @@ def estimate_force_error(
 # --------------------------------------------------------------------------- #
 
 
-def _is_ncresult(res) -> bool:
-    """True for a non-collinear ``NCResult`` (spinor SCF output).
+def _result_formalism(res) -> str:
+    """The result's ``formalism`` tag, with a duck-typed fallback for legacy
+    shims that predate the tag: a plain dict is the old ``scf_uspp`` result
+    shape, an object carrying the magnetization field ``m`` and the integrated
+    moment ``mag_vec`` but no ``v_eff`` is an ``NCResult`` stand-in, anything
+    else counts as the norm-conserving ``SCFResult``."""
+    formalism = getattr(res, "formalism", None)
+    if formalism is not None:
+        return formalism
+    if isinstance(res, dict):
+        return "uspp"
+    if (hasattr(res, "mag_vec") and hasattr(res, "m")
+            and not hasattr(res, "v_eff")):
+        return "noncollinear"
+    return "nc"
 
-    Duck-typed to avoid importing scf.noncollinear at module load (it would
-    close an import cycle). An NCResult carries the magnetization field ``m``
-    and the integrated moment ``mag_vec`` but no ``v_eff``/``occupations``.
-    """
-    return (not isinstance(res, dict)
-            and hasattr(res, "mag_vec") and hasattr(res, "m")
-            and not hasattr(res, "v_eff"))
+
+def _is_ncresult(res) -> bool:
+    """True for a non-collinear ``NCResult`` (spinor SCF output)."""
+    return _result_formalism(res) == "noncollinear"
 
 
 def _spinor_smearing(smearing, width):
@@ -1244,10 +1258,15 @@ def estimate_eigenvalue_error(
     index list or slice); None uses every band the SCF computed -- keep the
     default for gap analysis, which needs the frontier bands.
     """
-    if isinstance(res, dict):
+    formalism = _result_formalism(res)
+    if formalism == "uspp_noncollinear":
+        raise NotImplementedError(
+            "eigenvalue error is not implemented for the USPP/PAW spinor "
+            "(scf_uspp_noncollinear) result")
+    if formalism == "uspp":
         return _estimate_eigenvalue_error_uspp(
             res, ecut_large=ecut_large, factor=factor, xc=xc, bands=bands)
-    if _is_ncresult(res):
+    if formalism == "noncollinear":
         if xc is None:
             raise ValueError("non-collinear eigenvalue error requires xc (the "
                              "NoncollinearXC used for the run)")
@@ -1302,17 +1321,16 @@ def estimate_gap_error(res: SCFResult, eigerr: EigenvalueError, *,
     (and both spin channels), then reports the base gap, the extrapolated gap
     (eps + δε at each edge), and their difference. The eigenvalue error must
     have been computed with the default ``bands=None`` so the band index lines
-    up with the occupations. Accepts an ``SCFResult`` or the ``scf_uspp`` result
-    dict. Raises ValueError for a metal/semimetal (VBM >= CBM) or when no empty
+    up with the occupations. Accepts an ``SCFResult`` or a ``USPPResult``.
+    Raises ValueError for a metal/semimetal (VBM >= CBM) or when no empty
     band is available to resolve the CBM.
     """
-    is_dict = isinstance(res, dict)
-    system = res["system"] if is_dict else res.system
+    system = res.system
     if occupations is not None:
         occs = occupations                       # NCResult stores no occupations
     else:
-        occs = res["occupations"] if is_dict else res.occupations
-    nspin = int(res.get("nspin", 1)) if is_dict else int(getattr(res, "nspin", 1))
+        occs = res.occupations
+    nspin = int(getattr(res, "nspin", 1))
     full = 2.0 if nspin == 1 else 1.0
     thr = 0.5 * full if occ_threshold is None else occ_threshold
     deig_s = [eigerr.deig] if nspin == 1 else eigerr.deig

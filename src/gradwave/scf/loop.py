@@ -309,6 +309,7 @@ class SCFResult:
     hub_occ: list | None = None  # DFT+U per-spin occupation matrices [σ][site]
     drho_scf: torch.Tensor | None = None  # last self-consistency residual ρ_out−ρ_in
                                           # (total density) for the SCF-error estimate
+    formalism: str = "nc"  # result-type tag shared by all four SCF drivers
 
 
 def vxc_spin_potential(xc, rho_up, rho_dn, grid):

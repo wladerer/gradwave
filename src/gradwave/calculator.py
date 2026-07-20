@@ -151,24 +151,23 @@ class GradWave(Calculator):
         prev = self.last_result
         if prev is None:
             return None
-        is_dict = isinstance(prev, dict)
-        prev_sys = prev["system"] if is_dict else prev.system
+        is_uspp = prev.formalism == "uspp"
+        prev_sys = prev.system
         if tuple(prev_sys.grid.shape) != tuple(system.grid.shape):
             return None
         pos_new = system.positions
         pos_old = prev_sys.positions.to(pos_new.device)
         if float((pos_new - pos_old).abs().max()) < 1e-12:
             return prev
-        tabs = prev_sys.paws if is_dict else prev_sys.upfs
+        tabs = prev_sys.paws if is_uspp else prev_sys.upfs
         soa = prev_sys.species_of_atom
         ne = prev_sys.n_electrons
         delta = (sad_density(system.grid, pos_new, soa, tabs, ne)
                  - sad_density(system.grid, pos_old, soa, tabs, ne))
-        rho = (prev["rho"] if is_dict else prev.rho).detach() + delta
-        if is_dict:
-            out = dict(prev)
-            out["rho"] = rho  # becsum is per-atom and rides along as-is
-            return out
+        rho = prev.rho.detach() + delta
+        if is_uspp:
+            # becsum is per-atom and rides along as-is
+            return dataclasses.replace(prev, rho=rho)
         return {"system": prev_sys, "nspin": 1, "rho": rho,
                 "rho_spin": None, "coeffs": prev.coeffs}
 
@@ -259,12 +258,12 @@ class GradWave(Calculator):
                        mixing_kerker=p["mixing_kerker"], precond=p["precond"],
                        verbose=self._verbose,
                        start_from=self._warm_start(system))
-        if not res["converged"]:
+        if not res.converged:
             raise RuntimeError("gradwave USPP SCF did not converge")
         self.last_result = res
         xc = self._make_xc()
-        self.results["energy"] = float(res["energies"].free_energy)
-        self.results["free_energy"] = float(res["energies"].free_energy)
+        self.results["energy"] = float(res.energies.free_energy)
+        self.results["free_energy"] = float(res.energies.free_energy)
         from gradwave.postscf.paw_forces import forces_uspp
 
         self.results["forces"] = forces_uspp(res, xc).cpu().numpy()

@@ -13,7 +13,6 @@ import datetime
 import json
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 from gradwave.core.xc.base import XCFunctional
 from gradwave.core.xc.lda_pw92 import LDA_PW92
@@ -109,7 +108,7 @@ def _spin_setup(inp: Input):
 
 def run_scf(inp: Input, system=None, verbose: bool = True):
     """Run the SCF for either formalism. Returns the native result
-    (SCFResult for NC, dict for USPP/PAW)."""
+    (SCFResult for NC, USPPResult for USPP/PAW)."""
     _species, upfs, _soa = _species_upfs(inp)
     uspp = _is_uspp(upfs)
     system = system or build_system(inp)
@@ -189,8 +188,9 @@ def _run_scf_noncollinear(inp: Input, system, verbose: bool):
 
 
 def _get(res, key, default=None):
-    return res.get(key, default) if isinstance(res, dict) else getattr(
-        res, key, default)
+    """Attribute read with a default: every SCF driver returns a result
+    dataclass, but the field sets differ (e.g. NCResult has no nspin)."""
+    return getattr(res, key, default)
 
 
 def _gap(eigenvalues, occupations, nspin) -> float | None:
@@ -226,7 +226,7 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
     # occupations (spinor bands each hold one electron); the gap/occupations
     # blocks degrade gracefully below.
     mag_vec = _get(res, "mag_vec")
-    is_ncmag = mag_vec is not None and not isinstance(res, dict)
+    is_ncmag = _get(res, "formalism") == "noncollinear"
 
     import math
 
@@ -555,12 +555,10 @@ def _error_estimate_block(res, inp) -> dict:
         except (NotImplementedError, ValueError):
             pass
     try:
-        # estimate_smearing_error reads res.energies; a USPP/PAW result is a
-        # plain dict, so pass a shim carrying just the energy breakdown it needs
-        sme_res = res if not isinstance(res, dict) else SimpleNamespace(
-            energies=res["energies"])
+        # estimate_smearing_error reads res.energies — an attribute on every
+        # result dataclass, USPP/PAW included
         sme = estimate_smearing_error(
-            sme_res, scheme=nc_scheme if is_nc else inp.smearing.type,
+            res, scheme=nc_scheme if is_nc else inp.smearing.type,
             width=inp.smearing.width)
         block["smearing"] = {
             "scheme": sme.scheme,

@@ -240,7 +240,8 @@ def _group_key(col: AOColumn, group_by: str):
 
 def _unpack_result(res):
     """(system, nspin, eig[None-padded to (nspin,...)], coeffs[spin][k], fermi,
-    device, weight_fn) for a norm-conserving SCFResult or a USPP result dict."""
+    device, weight_fn) for a norm-conserving SCFResult or a USPPResult."""
+    formalism = getattr(res, "formalism", None)
     if isinstance(res, SCFResult):
         system = res.system
         nspin = int(getattr(res, "nspin", 1))
@@ -248,16 +249,16 @@ def _unpack_result(res):
         coeffs = res.coeffs if nspin == 2 else [res.coeffs]
         return (system, nspin, eig, coeffs, res.fermi, res.rho.device,
                 _nc_weights_k)
-    if isinstance(res, dict) and _is_uspp_system(res.get("system")):
-        system = res["system"]
-        nspin = int(res.get("nspin", 1))
-        eig = res["eigenvalues"] if nspin == 2 else res["eigenvalues"][None]
-        coeffs = res["coeffs"] if nspin == 2 else [res["coeffs"]]
-        return (system, nspin, eig, coeffs, res.get("fermi"),
-                res["rho"].device, _uspp_weights_k)
+    if formalism == "uspp":
+        system = res.system
+        nspin = int(res.nspin)
+        eig = res.eigenvalues if nspin == 2 else res.eigenvalues[None]
+        coeffs = res.coeffs if nspin == 2 else [res.coeffs]
+        return (system, nspin, eig, coeffs, res.fermi, res.rho.device,
+                _uspp_weights_k)
     raise NotImplementedError(
         "projected DOS supports the norm-conserving SCFResult and the USPP/PAW "
-        "result dict; noncollinear is a separate path")
+        "USPPResult; noncollinear is a separate path")
 
 
 @torch.no_grad()

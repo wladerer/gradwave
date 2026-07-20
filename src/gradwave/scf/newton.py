@@ -22,10 +22,13 @@ HVP is the same missing piece as the spin adjoint).
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import torch
 
 from gradwave.dtypes import RDTYPE
 from gradwave.postscf.uspp_implicit import _check_supported, _ConvergedUSPP
+from gradwave.scf.results import USPPResult
 from gradwave.scf.uspp_loop import _build_iter_ops, _scf_iteration
 
 
@@ -43,31 +46,31 @@ def _unpack(v, shape, n_pts, nbec):
     return w_r, mats
 
 
-def newton_polish(res: dict, xc, *, tol: float = 1e-10, max_newton: int = 5,
+def newton_polish(res: USPPResult, xc, *, tol: float = 1e-10, max_newton: int = 5,
                   inner_tol: float = 1e-8, max_inner: int = 60,
                   cg_tol: float = 1e-9, cg_max_iter: int = 200,
                   beta: float = 0.3, history: int = 8,
-                  diago_tol: float = 1e-11, verbose: bool = False) -> dict:
+                  diago_tol: float = 1e-11, verbose: bool = False) -> USPPResult:
     """Polish a near-converged scf_uspp result to `tol` in the density
-    residual by exact-Jacobian Newton steps. Returns an updated result
-    dict (fresh orbitals/energies from the final residual evaluation,
-    plus a "newton" list of per-step residual norms)."""
+    residual by exact-Jacobian Newton steps. Returns an updated USPPResult
+    (fresh orbitals/energies from the final residual evaluation, plus a
+    `newton` list of per-step residual norms)."""
     _check_supported(res)
-    if res.get("nspin", 1) != 1:
+    if res.nspin != 1:
         raise NotImplementedError("newton_polish: nspin=2 raw-map plumbing "
                                   "not implemented (adjoint spin machinery "
                                   "exists; the finisher is single-channel)")
-    if "hub_occ" in res:
+    if res.hub_occ is not None:
         raise NotImplementedError("newton_polish: +U raw-map plumbing not "
                                   "implemented (the adjoint's +U response "
                                   "exists; the finisher's packed vector "
                                   "lacks the occupation block)")
-    system = res["system"]
+    system = res.system
     grid = system.grid
     shape, n_pts = tuple(grid.shape), grid.n_points
     nbec = [s1 - s0 for (s0, s1) in system.atom_slices]
-    smearing = res.get("smearing", "none")
-    width = res.get("width", 0.1)
+    smearing = res.smearing
+    width = res.width
     # the raw map is evaluated through _scf_iteration directly (stage 3):
     # operators built once, orbital warm starts carried across Newton steps
     ops = _build_iter_ops(system, xc, nspin=1, smearing=smearing,
@@ -75,8 +78,8 @@ def newton_polish(res: dict, xc, *, tol: float = 1e-10, max_newton: int = 5,
     coeffs = [[None] * ops.nk]
     coeffs_b = [None]
 
-    rho = res["rho"].detach().clone()
-    bec = [m.detach().clone() for m in res["rho_ij_atoms"]]
+    rho = res.rho.detach().clone()
+    bec = [m.detach().clone() for m in res.rho_ij_atoms]
     hist_out = []
     it_out = None
     best = float("inf")
@@ -164,13 +167,9 @@ def newton_polish(res: dict, xc, *, tol: float = 1e-10, max_newton: int = 5,
             d_rho, d_bec = _unpack(d, shape, n_pts, nbec)
             rho = rho + d_rho
             bec = [b + m.to(b.dtype) for b, m in zip(bec, d_bec, strict=True)]
-    out = dict(res)
-    out.update(coeffs=coeffs[0], eigenvalues=it_out["eigs_s"][0],
-               occupations=it_out["occ_s"][0], fermi=it_out["mu"],
-               energies=it_out["energies"], becps=it_out["becps_s"][0],
-               rho_out_spin=it_out["rho_out_s"])
-    out["rho"] = rho
-    out["rho_ij_atoms"] = bec
-    out["newton"] = hist_out
-    out["converged"] = min(hist_out) < tol
-    return out
+    return replace(res, coeffs=coeffs[0], eigenvalues=it_out["eigs_s"][0],
+                   occupations=it_out["occ_s"][0], fermi=it_out["mu"],
+                   energies=it_out["energies"], becps=it_out["becps_s"][0],
+                   rho_out_spin=it_out["rho_out_s"], rho=rho,
+                   rho_ij_atoms=bec, newton=hist_out,
+                   converged=min(hist_out) < tol)

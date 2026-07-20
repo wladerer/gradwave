@@ -50,27 +50,31 @@ def _cpu_tree(obj):
 
 
 def save_checkpoint(res, path, *, wavefunctions: bool = False) -> Path:
-    """Write a checkpoint for an SCF result (USPP/PAW dict or NC
-    SCFResult). Returns the written path."""
+    """Write a checkpoint for an SCF result (SCFResult, NCResult or
+    USPPResult). Returns the written path."""
     import numpy as np
 
     from gradwave import __version__
 
-    is_uspp = isinstance(res, dict)
-    get = (res.get if is_uspp
+    get = (res.get if isinstance(res, dict)
            else lambda k, d=None: getattr(res, k, d))
-    # A non-collinear result (NCResult) is a non-dict carrying the m⃗ field
-    # and the integrated moment vector; the collinear/norm-conserving
-    # SCFResult has neither. Its kind is "noncollinear" (distinct from the
-    # "nc" = norm-conserving collinear kind).
-    is_ncmag = (not is_uspp and get("mag_vec") is not None
-                and get("m") is not None)
-    if is_uspp:
-        kind = "uspp"
-    elif is_ncmag:
-        kind = "noncollinear"
-    else:
-        kind = "nc"
+    # The checkpoint kind is the result's formalism tag ("nc" |
+    # "noncollinear" | "uspp"). Legacy shims (plain dicts / duck-typed
+    # namespaces predating the result dataclasses) carry no tag: a dict is
+    # the old USPP/PAW shape, an object with the m⃗ field and the integrated
+    # moment vector is an NCResult stand-in, anything else is "nc".
+    kind = get("formalism")
+    if kind is None:
+        if isinstance(res, dict):
+            kind = "uspp"
+        elif get("mag_vec") is not None and get("m") is not None:
+            kind = "noncollinear"
+        else:
+            kind = "nc"
+    if kind == "uspp_noncollinear":
+        raise NotImplementedError(
+            "checkpointing a scf_uspp_noncollinear result is not supported "
+            "(no restart path consumes its (ρ, m⃗, 4-channel becsum) state)")
     system = get("system")
     grid = system.grid
     e = get("energies")
@@ -103,15 +107,15 @@ def save_checkpoint(res, path, *, wavefunctions: bool = False) -> Path:
         "rho_spin": _cpu_tree(get("rho_spin")),
         "history": get("history", []),
     }
-    if is_uspp:
-        payload["rho_ij_atoms"] = _cpu_tree(res["rho_ij_atoms"])
-        if "hub_occ" in res:
-            payload["hub_occ"] = _cpu_tree(res["hub_occ"])
-            payload["hub_sites"] = _cpu_tree(res["hub_sites"])
+    if kind == "uspp":
+        payload["rho_ij_atoms"] = _cpu_tree(get("rho_ij_atoms"))
+        if get("hub_occ") is not None:
+            payload["hub_occ"] = _cpu_tree(get("hub_occ"))
+            payload["hub_sites"] = _cpu_tree(get("hub_sites"))
         for key in ("mag_total", "mag_abs"):
-            if key in res:
-                payload[key] = float(res[key])
-    if is_ncmag:
+            if get(key) is not None:
+                payload[key] = float(get(key))
+    if kind == "noncollinear":
         # the full spinor state: total density ρ, magnetization field m⃗
         # (3,*grid) and the integrated moment. Restart re-seeds the atomic
         # moments from m⃗ (see nc_mag_seed), so the field is the load-bearing
@@ -143,6 +147,10 @@ def _allow_numpy_globals() -> None:
 
 
 def load_checkpoint(path) -> dict:
+    """Load a checkpoint payload: a plain dict of CPU tensors + metadata,
+    with payload["kind"] the saved result's formalism tag. This is the
+    archive view, not a live result object — feed it to as_start_from /
+    nc_mag_seed to restart."""
     _allow_numpy_globals()
     payload = torch.load(Path(path), map_location="cpu", weights_only=True)
     if payload.get("format") != FORMAT:

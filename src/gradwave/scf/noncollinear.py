@@ -179,6 +179,7 @@ class NCResult:
     system: System
     history: list = field(default_factory=list)
     coeffs: torch.Tensor | None = None  # (nk, nb, 2·npw_max) spinor coefficients
+    formalism: str = "noncollinear"  # result-type tag shared by all four SCF drivers
 
 
 @torch.no_grad()

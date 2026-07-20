@@ -46,6 +46,7 @@ from gradwave.scf.guess import sad_density
 from gradwave.scf.layout import MixLayout
 from gradwave.scf.loop import vxc_potential
 from gradwave.scf.mixing import BroydenMixer, JohnsonMixer, PulayMixer
+from gradwave.scf.results import USPPResult
 from gradwave.scf.uspp_setup import USPPSystem
 from gradwave.solvers.precond import teter
 
@@ -975,7 +976,15 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                 rho_ij_mix[isp][a] = 0.5 * (m + m.conj().T)
 
     rho_final = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
-    out = dict(
+    extra = {}
+    if hub is not None:
+        extra["hub_occ"] = n_hub_s
+        extra["hub_sites"] = hub.sites
+    if nspin == 2:
+        extra["rho_spin"] = rho_s
+        extra["mag_total"] = float((rho_s[0] - rho_s[1]).sum()) * vol / grid.n_points
+        extra["mag_abs"] = float((rho_s[0] - rho_s[1]).abs().sum()) * vol / grid.n_points
+    return USPPResult(
         converged=converged, n_iter=len(history), energies=energies,
         eigenvalues=eigs_s[0] if nspin == 1 else torch.stack(eigs_s),
         occupations=occ_s[0] if nspin == 1 else torch.stack(occ_s),
@@ -985,12 +994,5 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         fermi=mu, system=system, nspin=nspin, smearing=smearing, width=width,
         mixer_mult=mixer.block_mult,
         rho_out_spin=rho_out_s,  # RAW map output (pre-mixing) — rig/diagnostics
+        **extra,
     )
-    if hub is not None:
-        out["hub_occ"] = n_hub_s
-        out["hub_sites"] = hub.sites
-    if nspin == 2:
-        out["rho_spin"] = rho_s
-        out["mag_total"] = float((rho_s[0] - rho_s[1]).sum()) * vol / grid.n_points
-        out["mag_abs"] = float((rho_s[0] - rho_s[1]).abs().sum()) * vol / grid.n_points
-    return out
