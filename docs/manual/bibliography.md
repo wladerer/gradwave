@@ -27,4 +27,5 @@ the text link here.
 <li id="dalcorso">A. Dal Corso and A. Mosca Conte, "Spin-orbit coupling with ultrasoft pseudopotentials: Application to Au and Pt," Phys. Rev. B <strong>71</strong>, 115106 (2005).</li>
 <li id="bi2se3">H. Zhang, C.-X. Liu, X.-L. Qi, X. Dai, Z. Fang, and S.-C. Zhang, "Topological insulators in Bi2Se3, Bi2Te3 and Sb2Te3 with a single Dirac cone on the surface," Nat. Phys. <strong>5</strong>, 438 (2009).</li>
 <li id="madudarev">P.-W. Ma and S. L. Dudarev, "Constrained density functional theory and its application in long-timescale simulations of magnetic materials," Phys. Rev. B <strong>91</strong>, 054420 (2015).</li>
+<li id="khan">S. A. Khan, P. Blaha, H. Ebert, J. Minár, and O. Šipr, "Magnetocrystalline anisotropy of FePt: A detailed view," Phys. Rev. B <strong>94</strong>, 144436 (2016).</li>
 </ol>
