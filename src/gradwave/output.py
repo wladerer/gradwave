@@ -377,6 +377,8 @@ def format_output(summary: dict) -> str:
         lines += _pdos_lines(summary["pdos"])
     if "relax" in summary:
         lines += _relax_lines(summary["relax"])
+        if "error_estimate" in summary:  # estimated at the final geometry
+            lines += _error_lines(summary["error_estimate"])
     if "bands" in summary:
         lines += _bands_lines(summary["bands"])
     if "magnetism" in summary:

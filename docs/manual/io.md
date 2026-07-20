@@ -152,7 +152,8 @@ Each calculation writes three files into the output directory.
   top-level keys are stable, `code`, `task`, `structure`, `parameters`, `scf` (with
   `energies_eV` and the per-iteration `trace`, each entry carrying its wall time
   `t_s`), `eigenvalues_eV`, `occupations`, a `relax` or `bands` block for those
-  tasks, `runtime_s`, and `provenance`.
+  tasks, `runtime_s`, `provenance`, and (on by default for `scf`/`bands`/
+  `relax` — see [error estimation](error-estimation.md)) `error_estimate`.
 - `<task>.out` is the human-readable report. Structure, parameters, the SCF
   iteration table (with per-iteration times), the energy breakdown, the gap or
   Fermi level and magnetization, eigenvalues for the first eight k-points, and

@@ -603,12 +603,22 @@ def run(inp: Input, verbose: bool = True) -> dict:
             "relax": relax,
             "runtime_s": round(time.time() - t0, 2),
         }
+        # error estimate at the FINAL geometry: the calculator caches its
+        # last converged SCF, so the estimate describes the relaxed state
+        res_final = getattr(_atoms.calc, "last_result", None)
+        if inp.error_estimate and res_final is not None:
+            summary["error_estimate"] = _error_estimate_block(res_final, inp)
     elif inp.task == "bands":
         res = run_scf(inp, verbose=verbose)
         summary = build_summary(res, inp, "bands",
                                 extra=_bands_extra(inp, res, verbose),
                                 runtime_s=time.time() - t0)
+        if inp.error_estimate:
+            summary["error_estimate"] = _error_estimate_block(res, inp)
     elif inp.task == "magnetism":
+        # no error_estimate block here: magnetism runs are spinor SCFs,
+        # outside every estimator's coverage (it would always be
+        # available: false)
         report = run_magnetism(inp, verbose=verbose)
         if verbose:
             print(report.summary())
