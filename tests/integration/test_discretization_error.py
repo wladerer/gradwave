@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 import torch
 
+from gradwave.core.xc.noncollinear import NoncollinearXC
 from gradwave.core.xc.pbe import PBE
 from gradwave.core.xc.spin import SpinPBE
 from gradwave.postscf.discretization_error import (
@@ -23,6 +24,7 @@ from gradwave.postscf.discretization_error import (
 from gradwave.pseudo.upf import parse_upf
 from gradwave.pseudo.upf_paw import parse_upf_paw
 from gradwave.scf.loop import scf, setup_system
+from gradwave.scf.noncollinear import scf_noncollinear
 from gradwave.scf.uspp import scf_uspp, setup_uspp
 
 pytestmark = pytest.mark.standard
@@ -246,3 +248,197 @@ def test_uspp_density_and_energy_error():
     true_de = float(hi["energies"].free_energy) - float(lo["energies"].free_energy)
     assert true_de < 0.0
     assert 0.5 < est.denergy / true_de < 1.5                     # right sign, right scale
+
+
+@pytest.mark.slow
+def test_uspp_eigenvalue_reproduces_energy_error():
+    """USPP/PAW eigenvalue error: every δε <= 0, and the occupation-weighted sum
+    of the occupied generalized shifts reproduces the density-path denergy."""
+    torch.set_num_threads(8)
+    paw = parse_upf_paw(FIX / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
+    a = 5.43
+    res = scf_uspp(setup_uspp(a / 2 * FCC, np.array([[0.0, 0, 0], [a / 4] * 3]),
+                              [0, 0], [paw], ecut=12 * RY, kmesh=(2, 2, 2),
+                              ecutrho=48 * RY),
+                   PBE(), etol=1e-10, rhotol=1e-9, verbose=False, max_iter=80)
+    err = estimate_density_error(res, ecut_large=30 * RY, xc=PBE())
+    eige = estimate_eigenvalue_error(res, ecut_large=30 * RY, xc=PBE())
+
+    assert all(float(de.max()) <= 1e-9 for de in eige.deig)     # definite lowering
+    system = res["system"]
+    de_tot = 0.0
+    for ik in range(len(system.spheres)):
+        occ, de = res["occupations"][ik], eige.deig[ik]
+        de_tot += float(system.kweights[ik]) * float((occ[:de.shape[0]] * de).sum())
+    assert abs(de_tot - err.denergy) < 1e-6 * abs(err.denergy)   # == denergy
+    # Si is an insulator: the gap tool resolves and the correction is finite
+    gap = estimate_gap_error(res, eige)
+    assert gap["gap_eV"] > 0.0
+
+
+def _disp_paw_cell(a=5.43, shift=np.array([0.11, -0.06, 0.04])):
+    cell = a / 2 * FCC
+    pos = np.array([[0.0, 0, 0], [a / 4, a / 4, a / 4]]) + np.array([[0, 0, 0], shift])
+    return cell, pos
+
+
+@pytest.mark.slow
+def test_uspp_force_error_vs_high_cutoff():
+    """USPP/PAW force error on a displaced cell: δF correlates with the true
+    low->high force change and reduces it, with a sane magnitude ratio.
+
+    Exercises the augmentation, S-orthogonality, and one-center ddd channels of
+    the P(eps) propagation against a finite-cutoff force reference."""
+    torch.set_num_threads(8)
+    from gradwave.postscf.paw_forces import forces_uspp
+
+    paw = parse_upf_paw(FIX / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
+    cell, pos = _disp_paw_cell()
+
+    def run(ecut):
+        return scf_uspp(setup_uspp(cell, pos, [0, 0], [paw], ecut=ecut,
+                                   kmesh=(2, 2, 2), ecutrho=4 * ecut),
+                        PBE(), etol=1e-10, rhotol=1e-9, verbose=False, max_iter=80)
+
+    lo, hi = run(12 * RY), run(30 * RY)
+    err = estimate_density_error(lo, ecut_large=30 * RY, xc=PBE())
+    dF = estimate_force_error(lo, err, xc=PBE())
+    true_dF = forces_uspp(hi, PBE()) - forces_uspp(lo, PBE())
+
+    assert float(dF.abs().max()) > 1e-3                 # a real signal
+    assert _corr(dF, true_dF) > 0.9                     # right direction
+    assert 0.4 < float(dF.norm() / true_dF.norm()) < 1.6   # right scale
+    f_lo = forces_uspp(lo, PBE())
+    before = float((f_lo - forces_uspp(hi, PBE())).abs().sum())
+    after = float((f_lo + dF - forces_uspp(hi, PBE())).abs().sum())
+    assert after < before                               # reduces the error
+
+
+@pytest.mark.slow
+def test_uspp_nspin2_force_error_matches_nspin1():
+    """USPP/PAW force error at zero moment: nspin=2 reproduces nspin=1 to
+    round-off (the per-spin loop, per-spin smooth-density and becsum responses,
+    and the one-center HVP all reduce to the single-channel case)."""
+    torch.set_num_threads(8)
+    paw = parse_upf_paw(FIX / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
+    cell, pos = _disp_paw_cell(shift=np.array([0.11, -0.06, 0.04]))
+    kw = dict(smearing="gaussian", width=0.1, etol=1e-10, rhotol=1e-9,
+              verbose=False, max_iter=80)
+
+    def mk(ecut):
+        return setup_uspp(cell, pos, [0, 0], [paw], ecut=ecut, kmesh=(2, 2, 2),
+                          ecutrho=4 * ecut)
+
+    r1 = scf_uspp(mk(12 * RY), PBE(), **kw)
+    f1 = estimate_force_error(r1, estimate_density_error(r1, ecut_large=30 * RY,
+                                                         xc=PBE()), xc=PBE())
+    r2 = scf_uspp(mk(12 * RY), SpinPBE(), nspin=2, start_mag=[0.0, 0.0], **kw)
+    f2 = estimate_force_error(r2, estimate_density_error(r2, ecut_large=30 * RY,
+                                                         xc=SpinPBE()), xc=SpinPBE())
+    assert float(f1.abs().max()) > 1e-3
+    assert float((f1 - f2).abs().max()) < 1e-6
+
+
+# --------------------------------------------------------------------------- #
+#  Non-collinear (spinor) path                                                #
+# --------------------------------------------------------------------------- #
+
+
+def _nc_occ(res, scheme="gaussian", width=0.1):
+    from gradwave.core.occupations import (
+        SCHEMES,
+        find_fermi,
+        occupations_and_entropy,
+    )
+    system = res.system
+    mu = find_fermi(res.eigenvalues, system.kweights, SCHEMES[scheme], width,
+                    system.n_electrons, degeneracy=1.0)
+    occ, _ = occupations_and_entropy(res.eigenvalues, mu, SCHEMES[scheme], width,
+                                     degeneracy=1.0)
+    return occ, system
+
+
+@pytest.mark.slow
+def test_noncollinear_nonmagnetic_matches_collinear():
+    """A nonmagnetic spinor SCF reduces to the collinear run, so the spinor
+    complement correction must reproduce the collinear density/energy error.
+
+    This pins the spinor machinery (doubled up/down axis, rebuilt exchange field,
+    degeneracy-1 occupations) against the tested collinear estimator."""
+    torch.set_num_threads(8)
+    si = parse_upf(FIX / "Si_ONCV_PBE-1.2.upf")
+    a = 5.43
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+
+    def mk():
+        return setup_system(a / 2 * FCC, pos, [0, 0], [si], ecut=15 * RY,
+                            kmesh=(2, 2, 2), use_symmetry=False, time_reversal=False)
+
+    rc = scf(mk(), PBE(), smearing="none", etol=1e-9, rhotol=1e-8, verbose=False)
+    ec = estimate_density_error(rc, ecut_large=35 * RY)
+
+    xc = NoncollinearXC(SpinPBE())
+    rn = scf_noncollinear(mk(), xc, mag_vec_init=[[0, 0, 0], [0, 0, 0]], width=0.1,
+                          etol=1e-9, rhotol=1e-8, verbose=False, nonmagnetic=True)
+    en = estimate_density_error(rn, ecut_large=35 * RY, xc=xc,
+                                smearing="gaussian", width=0.1)
+
+    assert abs(en.denergy - ec.denergy) < 1e-4 * abs(ec.denergy)   # matches collinear
+    assert float((en.drho - ec.drho).abs().max()) < 1e-5
+    vol, n = rn.system.grid.volume, rn.system.grid.n_points
+    assert abs(float(en.drho.sum()) * vol / n) < 1e-6             # charge-conserving
+
+    # eigenvalue error reproduces the spinor denergy (degeneracy-1 occupations)
+    eige = estimate_eigenvalue_error(rn, ecut_large=35 * RY, xc=xc,
+                                     smearing="gaussian", width=0.1)
+    assert all(float(de.max()) <= 1e-9 for de in eige.deig)
+    occ, system = _nc_occ(rn)
+    de_tot = sum(float(system.kweights[ik]) * float((occ[ik] * eige.deig[ik]).sum())
+                 for ik in range(len(system.spheres)))
+    assert abs(de_tot - en.denergy) < 1e-6 * abs(en.denergy)
+
+
+@pytest.mark.slow
+def test_soc_discretization_error_invariants_and_direction():
+    """Fully-relativistic (SOC) spinor error: charge-conserving, definite energy
+    lowering, self-consistent eigenvalue sum, and a density correction that
+    correlates with — and reduces — the true low->high change. Exercises the
+    enlarged spin-orbit projector path."""
+    torch.set_num_threads(8)
+    ga = parse_upf(FIX / "Ga_ONCV_PBE_FR-1.0.upf")
+    as_ = parse_upf(FIX / "As_ONCV_PBE_FR-1.1.upf")
+    a = 5.653
+    cell = a / 2 * FCC
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+    xc = NoncollinearXC(SpinPBE())
+
+    def run(ecut, fft=None):
+        system = setup_system(cell, pos, [0, 1], [ga, as_], ecut=ecut * RY,
+                              kmesh=(2, 2, 2), nbands=13, use_symmetry=False,
+                              time_reversal=False, fft_shape=fft)
+        assert system.is_fr
+        return system, scf_noncollinear(
+            system, xc, mag_vec_init=[[0, 0, 0], [0, 0, 0]], smearing="gaussian",
+            width=0.1, etol=1e-7, rhotol=1e-6, verbose=False)
+
+    slo, lo = run(24)
+    est = estimate_density_error(lo, ecut_large=55 * RY, xc=xc,
+                                 smearing="gaussian", width=0.1)
+    vol, n = slo.grid.volume, slo.grid.n_points
+    assert abs(float(est.drho.sum()) * vol / n) < 1e-6            # charge-conserving
+    assert est.denergy < 0.0                                     # definite lowering
+
+    eige = estimate_eigenvalue_error(lo, ecut_large=55 * RY, xc=xc,
+                                     smearing="gaussian", width=0.1)
+    assert all(float(de.max()) <= 1e-9 for de in eige.deig)
+    occ, system = _nc_occ(lo)
+    de_tot = sum(float(system.kweights[ik]) * float((occ[ik] * eige.deig[ik]).sum())
+                 for ik in range(len(system.spheres)))
+    assert abs(de_tot - est.denergy) < 1e-6 * abs(est.denergy)
+
+    _shi, hi = run(44, fft=tuple(slo.grid.shape))
+    true_err = hi.rho - lo.rho
+    assert _corr(est.drho, true_err) > 0.8                       # right direction
+    before = float((lo.rho - hi.rho).abs().sum())
+    after = float((lo.rho + est.drho - hi.rho).abs().sum())
+    assert after < before                                       # reduces the error
