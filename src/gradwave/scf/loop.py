@@ -646,15 +646,20 @@ def scf(
         ]
         rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
 
-        # energy at (orbitals, rho_out); per-k trimmed views for the assembly
+        # energy at (orbitals, rho_out); per-k trimmed views for the assembly.
+        # npw from the CPU-side spheres (int(bk.npw[ik]) is a host sync per k
+        # per iteration — the probe counted 36/iteration); ONE becp over the
+        # whole batch, then per-k views (calling becp_b inside the per-k
+        # comprehension recomputed the full-batch contraction nk times)
         coeffs_list_s = [
-            [coeffs_b_s[sp][ik, :, : int(bk.npw[ik])] for ik in range(nk)]
+            [coeffs_b_s[sp][ik, :, : system.spheres[ik].npw]
+             for ik in range(nk)]
             for sp in range(nspin)
         ]
-        becps_s = [
-            [becp_b(projs_b, coeffs_b_s[sp])[ik] for ik in range(nk)]
-            for sp in range(nspin)
-        ]
+        becps_s = []
+        for sp in range(nspin):
+            b_all = becp_b(projs_b, coeffs_b_s[sp])
+            becps_s.append([b_all[ik] for ik in range(nk)])
         if nspin == 1:
             energies = total_energy(
                 coeffs_per_k=coeffs_list_s[0], occ=occ_s[0], kweights=system.kweights,

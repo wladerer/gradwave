@@ -117,11 +117,11 @@ def davidson_gen_batched(hs: BatchedHS, x0: torch.Tensor, nbands: int,
         while True:
             h_sub, s_sub = _subspace(v, hv, sv)
             ell, info = torch.linalg.cholesky_ex(s_sub)
-            bad = int(info.max()) > 0
+            bad = int(info.max()) > 0  # one host read per round, reused below
             if not bad or v.shape[1] <= nbands + 1:
                 break
             v, hv, sv = v[:, 1:], hv[:, 1:], sv[:, 1:]
-        if int(info.max()) > 0:
+        if bad:
             eye = torch.eye(s_sub.shape[-1], dtype=s_sub.dtype,
                             device=s_sub.device)
             ell = torch.linalg.cholesky(s_sub + 1e-10 * eye)
