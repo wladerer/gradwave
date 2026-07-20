@@ -310,7 +310,8 @@ class OneCenter:
         """(mesh, l2) torch ρ_lm, differentiable in rho_ij (real (nm, nm))."""
         T = self._rho_lm_maps()[what]
         cut = (T @ rho_ij.reshape(-1)).reshape(self._nf, self.l2)
-        pad = torch.zeros(self.mesh - self._nf, self.l2, dtype=cut.dtype)
+        pad = torch.zeros(self.mesh - self._nf, self.l2, dtype=cut.dtype,
+                          device=cut.device)
         return torch.cat([cut, pad], dim=0)
 
     def hartree_t(self, rho_lm: torch.Tensor):
@@ -390,13 +391,20 @@ class OneCenter:
     def e1c_t(self, rho_ijs: list) -> torch.Tensor:
         """E_1c [eV] as a torch scalar, fully differentiable in the REAL
         (nm, nm) rho_ij tensors AND the XC-functional parameters: dense-T
-        ρ_lm, torch radial Poisson, the exact angular XC quadrature."""
-        e_tot = torch.zeros((), dtype=torch.float64)
+        ρ_lm, torch radial Poisson, the exact angular XC quadrature.
+
+        The per-atom radial work runs on the (CPU) table device; inputs are
+        bridged in and the scalar back out, so a caller on any device gets a
+        device-transparent, autograd-connected result (a CPU run is a no-op)."""
+        tdev = self._torch_tables()["ylm"].device
+        in_dev = rho_ijs[0].device
+        rho_ijs = [r.to(tdev) for r in rho_ijs]
+        e_tot = torch.zeros((), dtype=torch.float64, device=tdev)
         for what, sgn in (("ae", 1.0), ("ps", -1.0)):
             rls = [self.rho_lm_t(r, what) for r in rho_ijs]
             _, e_h = self.hartree_t(sum(rls))
             e_tot = e_tot + sgn * (e_h + self._exc_t(rls, what))
-        return e_tot
+        return e_tot.to(in_dev)
 
     @staticmethod
     def _to_real_t(rho_ij) -> torch.Tensor:
