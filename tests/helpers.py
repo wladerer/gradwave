@@ -16,6 +16,17 @@ import numpy as np
 # Rydberg -> eV (CODATA), the ecut/energy unit used throughout the suite.
 RY = 13.605693122994
 
+
+def system_device(system):
+    """Device a built system's tensors live on.
+
+    Under GRADWAVE_TEST_DEVICE=cuda the conftest moves setup_system output to
+    that device; tests that build their own coeffs/occupations must place them
+    on the same device. Build such tensors on CPU as usual (so seeded RNG stays
+    reproducible and CPU runs are unchanged) then ``.to(system_device(system))``.
+    """
+    return system.grid.g2.device
+
 # tests/fixtures, resolved absolutely from this file's location.
 FIX = Path(__file__).parent / "fixtures"
 PSEUDOS = FIX / "qe" / "pseudos"

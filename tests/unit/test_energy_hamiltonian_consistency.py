@@ -48,7 +48,7 @@ from gradwave.scf.loop import (
     local_potential_r,
     setup_system,
 )
-from tests.helpers import RY
+from tests.helpers import RY, system_device
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
 
@@ -82,7 +82,7 @@ def _random_coeffs(system, nb, seed):
     c = torch.randn(bk.nk, nb, bk.npw_max, generator=gen, dtype=RDTYPE) \
         + 1j * torch.randn(bk.nk, nb, bk.npw_max, generator=gen, dtype=RDTYPE)
     # smooth envelope so the density is well scaled, then normalize per band
-    c = c.to(CDTYPE) / (1.0 + bk.t)[:, None, :]
+    c = c.to(CDTYPE).to(bk.t.device) / (1.0 + bk.t)[:, None, :]
     c = c * bk.mask[:, None, :]
     return c / torch.linalg.norm(c, dim=-1, keepdim=True)
 
@@ -90,7 +90,7 @@ def _random_coeffs(system, nb, seed):
 def _occ(system, nb, values):
     """Fixed fractional occupations, deliberately non-uniform across bands/k."""
     nk = system.batch.nk
-    occ = torch.tensor(values, dtype=RDTYPE)[None, :].repeat(nk, 1)
+    occ = torch.tensor(values, dtype=RDTYPE)[None, :].repeat(nk, 1).to(system_device(system))
     if nk > 1:  # vary across k too
         occ[1:] = occ[1:].flip(dims=(1,))
     return occ
@@ -273,10 +273,11 @@ def _eh_gap_uspp(upf_name, nb, occ_values, ecut_ry=16.0, seed=0, nspin=1):
                         kmesh=(2, 1, 1))
     grid, spheres = system.grid, system.spheres
     nk, vol, shape = len(spheres), grid.volume, grid.shape
+    dev = system_device(system)
     kw = system.kweights
     occ_s = []
     for sp in range(nspin):
-        occ = torch.tensor(occ_values[sp], dtype=RDTYPE)[None, :].repeat(nk, 1)
+        occ = torch.tensor(occ_values[sp], dtype=RDTYPE)[None, :].repeat(nk, 1).to(dev)
         occ[1:] = occ[1:].flip(dims=(1,))
         occ_s.append(occ)
 
@@ -286,7 +287,7 @@ def _eh_gap_uspp(upf_name, nb, occ_values, ecut_ry=16.0, seed=0, nspin=1):
     onec = ([OneCenter(p, xc) for p in system.paws]
             if any(p.is_paw for p in system.paws) else None)
     vloc_g = local_potential_g(system.positions,
-                               torch.tensor(system.species_of_atom),
+                               torch.tensor(system.species_of_atom, device=dev),
                                system.vloc_tables, grid.g_cart, vol)
     vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
 
@@ -298,7 +299,7 @@ def _eh_gap_uspp(upf_name, nb, occ_values, ecut_ry=16.0, seed=0, nspin=1):
             c = (torch.randn(nb, sph.npw, generator=gen, dtype=torch.float64)
                  + 1j * torch.randn(nb, sph.npw, generator=gen,
                                     dtype=torch.float64))
-            c = c.to(CDTYPE) / (1.0 + HBAR2_2M * sph.kpg2)
+            c = c.to(CDTYPE).to(dev) / (1.0 + HBAR2_2M * sph.kpg2)
             c = c / torch.linalg.norm(c, dim=-1, keepdim=True)
             cs.append(c.requires_grad_(True))
         cs_s.append(cs)
@@ -306,9 +307,9 @@ def _eh_gap_uspp(upf_name, nb, occ_values, ecut_ry=16.0, seed=0, nspin=1):
     # ---- E(c), mirroring _scf_iteration's density/energy assembly ----
     rho_s, rho_ij_s, becps_s = [], [], []
     for sp in range(nspin):
-        rho_sm = torch.zeros(shape, dtype=RDTYPE)
+        rho_sm = torch.zeros(shape, dtype=RDTYPE, device=dev)
         becps = []
-        rho_ij = [torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE)
+        rho_ij = [torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
                   for (s0, s1) in system.atom_slices]
         for ik, sph in enumerate(spheres):
             psi = g_to_r(cs_s[sp][ik], sph.flat_idx, shape)
@@ -321,11 +322,11 @@ def _eh_gap_uspp(upf_name, nb, occ_values, ecut_ry=16.0, seed=0, nspin=1):
                 rho_ij[ia] = rho_ij[ia] + torch.einsum(
                     "b,bi,bj->ij", w.to(CDTYPE), ba.conj(), ba)
         rho_ij = [0.5 * (m + m.conj().T) for m in rho_ij]
-        aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE)
+        aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE, device=dev)
         for ia, spc in enumerate(system.species_of_atom):
             aug_sph = aug_sph + phase_pos[:, ia].conj() * torch.einsum(
                 "ij,ijg->g", rho_ij[ia], system.aug[spc].q_g)
-        aug_box = torch.zeros(grid.n_points, dtype=CDTYPE)
+        aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
         aug_box[system.sphere_idx] = aug_sph / vol
         rho_aug = torch.fft.ifftn(aug_box.reshape(shape) * grid.n_points,
                                   dim=(-3, -2, -1)).real
@@ -434,6 +435,7 @@ def test_grad_energy_equals_hamiltonian_soc_spinor():
     assert system.is_fr
     xc = NoncollinearXC(SpinPBE())
     grid, bk = system.grid, system.batch
+    dev = system_device(system)
     nk, vol, shape, m_pw = bk.nk, grid.volume, grid.shape, bk.npw_max
     kw = system.kweights
     nb = 8
@@ -449,7 +451,7 @@ def test_grad_energy_equals_hamiltonian_soc_spinor():
     c = (torch.randn(nk, nb, 2 * m_pw, generator=gen, dtype=RDTYPE)
          + 1j * torch.randn(nk, nb, 2 * m_pw, generator=gen, dtype=RDTYPE))
     t2 = torch.cat([bk.t, bk.t], dim=-1)
-    c = c.to(CDTYPE) / (1.0 + t2)[:, None, :] * mask2[:, None, :]
+    c = c.to(CDTYPE).to(dev) / (1.0 + t2)[:, None, :] * mask2[:, None, :]
     c = (c / torch.linalg.norm(c, dim=-1, keepdim=True)).requires_grad_(True)
 
     # ---- E(c): the Pauli-decomposed density + scf_noncollinear's assembly ----

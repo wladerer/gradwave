@@ -23,7 +23,7 @@ from gradwave.core.hubbard import (
 )
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import setup_system
-from tests.helpers import RY
+from tests.helpers import RY, system_device
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
 def test_pswfc_parsed_and_normalized():
@@ -68,12 +68,13 @@ def test_occupation_matrix_and_energy_algebra():
     U, J = 5.0, 0.8
     hub = build_hubbard_projectors(system, [HubbardManifold(0, l=2, u=U, j=J)])
     q = hubbard_projectors(hub, system.positions)
+    dev = system_device(system)
     npw = system.batch.npw_max
     nk, nb = 1, 6
-    coeffs = torch.randn(nk, nb, npw, dtype=torch.complex128)
+    coeffs = torch.randn(nk, nb, npw, dtype=torch.complex128).to(dev)
     coeffs = coeffs * system.batch.mask[:, None, :]
-    occ = torch.rand(nk, nb, dtype=torch.float64)
-    kw = torch.ones(nk, dtype=torch.float64)
+    occ = torch.rand(nk, nb, dtype=torch.float64).to(dev)
+    kw = torch.ones(nk, dtype=torch.float64).to(dev)
 
     mats = occupation_matrices(q, coeffs, occ, kw, hub.sites)
     n = mats[0]
@@ -90,8 +91,8 @@ def test_occupation_matrix_and_energy_algebra():
     assert abs(float(e) - e_ref) < 1e-10
 
     # D = (U−J)(½I − n), Hermitian
-    d = hubbard_dmatrix(mats, hub.sites, hub.nproj, torch.device("cpu"))
-    eye = torch.eye(5, dtype=torch.complex128)
+    d = hubbard_dmatrix(mats, hub.sites, hub.nproj, dev)
+    eye = torch.eye(5, dtype=torch.complex128, device=dev)
     assert torch.allclose(d, (U - J) * (0.5 * eye - n), atol=1e-12)
     assert torch.allclose(d, d.conj().T, atol=1e-12)
 
@@ -106,10 +107,11 @@ def test_hubbard_force_gradcheck():
     system = setup_system(9.0 * np.eye(3), np.array([[0.0, 0, 0], [2.3, 0.4, 0.0]]),
                           [0, 0], [se], ecut=20 * RY, kmesh=(1, 1, 1))
     hub = build_hubbard_projectors(system, [HubbardManifold(0, l=2, u=5.0, j=0.5)])
+    dev = system_device(system)
     npw = system.batch.npw_max
-    coeffs = torch.randn(1, 4, npw, dtype=torch.complex128) * system.batch.mask[:, None, :]
-    occ = torch.rand(1, 4, dtype=torch.float64)
-    kw = torch.ones(1, dtype=torch.float64)
+    coeffs = torch.randn(1, 4, npw, dtype=torch.complex128).to(dev) * system.batch.mask[:, None, :]
+    occ = torch.rand(1, 4, dtype=torch.float64).to(dev)
+    kw = torch.ones(1, dtype=torch.float64).to(dev)
 
     def e_u(pos):
         q = hubbard_projectors(hub, pos)

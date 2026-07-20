@@ -74,8 +74,9 @@ def test_basis_closure_and_sizes(o2_gamma):
 
 def test_half_full_roundtrip(o2_gamma):
     gb = o2_gamma["gb"]
+    dev = gb.src_half.device
     torch.manual_seed(1)
-    chalf = torch.randn(5, gb.nhalf, dtype=torch.complex128)
+    chalf = torch.randn(5, gb.nhalf, dtype=torch.complex128).to(dev)
     chalf[:, 0] = chalf[:, 0].real.to(torch.complex128)  # G=0 real
     back = full_to_half(gb, half_to_full(gb, chalf))
     assert torch.allclose(back, chalf, atol=1e-15)
@@ -83,8 +84,9 @@ def test_half_full_roundtrip(o2_gamma):
 
 def test_full_sphere_is_hermitian(o2_gamma):
     gb, sphere, grid = o2_gamma["gb"], o2_gamma["sphere"], o2_gamma["grid"]
+    dev = gb.src_half.device
     torch.manual_seed(2)
-    chalf = torch.randn(3, gb.nhalf, dtype=torch.complex128)
+    chalf = torch.randn(3, gb.nhalf, dtype=torch.complex128).to(dev)
     chalf[:, 0] = chalf[:, 0].real.to(torch.complex128)
     cfull = half_to_full(gb, chalf)
     partner = _herm_partner(sphere, grid.shape)
@@ -97,11 +99,12 @@ def test_irfftn_matches_ifftn(o2_gamma):
     gb, sphere, grid = o2_gamma["gb"], o2_gamma["sphere"], o2_gamma["grid"]
     shape = grid.shape
     n = shape[0] * shape[1] * shape[2]
+    dev = gb.src_half.device
     torch.manual_seed(3)
-    chalf = torch.randn(4, gb.nhalf, dtype=torch.complex128)
+    chalf = torch.randn(4, gb.nhalf, dtype=torch.complex128).to(dev)
     chalf[:, 0] = chalf[:, 0].real.to(torch.complex128)
     cfull = half_to_full(gb, chalf)
-    box = torch.zeros(4, n, dtype=torch.complex128)
+    box = torch.zeros(4, n, dtype=torch.complex128, device=dev)
     box.index_add_(1, sphere.flat_idx, cfull)
     box = box.reshape(4, *shape)
     psi_c = torch.fft.ifftn(box, dim=(-3, -2, -1))
@@ -114,8 +117,9 @@ def test_apply_matches_complex(o2_gamma):
     """H-apply equivalence: the whole point of the specialization."""
     d = o2_gamma
     gb, bk, grid = d["gb"], d["bk"], d["grid"]
+    dev = gb.src_half.device
     torch.manual_seed(4)
-    chalf = torch.randn(8, gb.nhalf, dtype=torch.complex128)
+    chalf = torch.randn(8, gb.nhalf, dtype=torch.complex128).to(dev)
     chalf[:, 0] = chalf[:, 0].real.to(torch.complex128)
     cfull = half_to_full(gb, chalf)
 
@@ -133,9 +137,10 @@ def test_apply_matches_complex(o2_gamma):
 def test_embed_roundtrip_and_metric(o2_gamma):
     """The real embedding is invertible and turns the metric into a dot product."""
     gb = o2_gamma["gb"]
+    dev = gb.src_half.device
     torch.manual_seed(5)
-    a = torch.randn(6, gb.nhalf, dtype=torch.complex128)
-    b = torch.randn(6, gb.nhalf, dtype=torch.complex128)
+    a = torch.randn(6, gb.nhalf, dtype=torch.complex128).to(dev)
+    b = torch.randn(6, gb.nhalf, dtype=torch.complex128).to(dev)
     a[:, 0] = a[:, 0].real.to(torch.complex128)
     b[:, 0] = b[:, 0].real.to(torch.complex128)
     assert torch.allclose(unembed_real(gb, embed_real(gb, a)), a, atol=1e-15)
@@ -148,16 +153,17 @@ def test_eigenvalues_match_complex(o2_gamma):
     d = o2_gamma
     gb, bk, grid = d["gb"], d["bk"], d["grid"]
     nb = d["system"].nbands
+    dev = gb.src_half.device
     gh = GammaHamiltonian(gb, d["veff"], d["p_full"], d["dij"])
     hb = BatchedHamiltonian(bk, grid.shape, d["veff"], d["p_full"][None])
 
-    x0h = torch.zeros(nb, gb.nhalf, dtype=torch.complex128)
+    x0h = torch.zeros(nb, gb.nhalf, dtype=torch.complex128, device=dev)
     order = torch.argsort(gb.t_half)
     for i in range(nb):
         x0h[i, order[i]] = 1.0
     gres = davidson_gamma(gh, x0h, tol=1e-9, max_iter=80)
 
-    x0c = torch.zeros(1, nb, bk.npw_max, dtype=torch.complex128)
+    x0c = torch.zeros(1, nb, bk.npw_max, dtype=torch.complex128, device=dev)
     torder = torch.argsort(bk.t[0])
     for i in range(nb):
         x0c[0, i, torder[i]] = 1.0
@@ -165,4 +171,4 @@ def test_eigenvalues_match_complex(o2_gamma):
 
     assert float((gres.eigenvalues - cres.eigenvalues[0]).abs().max()) < 1e-8
     g = metric_inner(gb, gres.eigenvectors, gres.eigenvectors)
-    assert float((g - torch.eye(nb, dtype=g.dtype)).abs().max()) < 1e-10
+    assert float((g - torch.eye(nb, dtype=g.dtype, device=g.device)).abs().max()) < 1e-10

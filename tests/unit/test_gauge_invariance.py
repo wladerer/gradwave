@@ -23,7 +23,7 @@ from gradwave.core.energies.total import total_energy
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import _stack_dij, setup_system
-from tests.helpers import RY
+from tests.helpers import RY, system_device
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
 
@@ -67,19 +67,20 @@ def test_gauge_rotation_invariance():
     system = setup_system(lattice, pos, [0, 0], [si], ecut=12 * RY,
                           kmesh=(2, 1, 1))
     bk = system.batch
+    dev = system_device(system)
     nb, ndeg = 5, 3  # bands 0..2 share f=2.0 — the gauge-degenerate block
     occ = torch.tensor([2.0, 2.0, 2.0, 0.8, 0.3],
-                       dtype=RDTYPE)[None, :].repeat(bk.nk, 1)
+                       dtype=RDTYPE)[None, :].repeat(bk.nk, 1).to(dev)
 
     gen = torch.Generator().manual_seed(11)
     c = (torch.randn(bk.nk, nb, bk.npw_max, generator=gen, dtype=RDTYPE)
          + 1j * torch.randn(bk.nk, nb, bk.npw_max, generator=gen, dtype=RDTYPE))
-    c = c.to(CDTYPE) / (1.0 + bk.t)[:, None, :] * bk.mask[:, None, :]
+    c = c.to(CDTYPE).to(dev) / (1.0 + bk.t)[:, None, :] * bk.mask[:, None, :]
     c = c / torch.linalg.norm(c, dim=-1, keepdim=True)
 
     c_rot = c.clone()
     for ik in range(bk.nk):  # independent gauge per k — it is a per-k freedom
-        u = _random_unitary(ndeg, gen)
+        u = _random_unitary(ndeg, gen).to(dev)
         c_rot[ik, :ndeg] = u @ c[ik, :ndeg]
 
     e_a, rho_a = _energy_and_rho(system, PBE(), c, occ)
@@ -90,7 +91,7 @@ def test_gauge_rotation_invariance():
     # control: rotating across UNEQUAL occupations is not a gauge freedom —
     # the same machinery must see it (the test has teeth)
     c_bad = c.clone()
-    u = _random_unitary(2, gen)
+    u = _random_unitary(2, gen).to(dev)
     c_bad[0, 3:5] = u @ c[0, 3:5]  # f = 0.8 vs 0.3
     e_c, _ = _energy_and_rho(system, PBE(), c_bad, occ)
     assert abs(e_c - e_a) > 1e-3
