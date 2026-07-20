@@ -28,6 +28,7 @@ Measured (asus CPU, 8 torch threads, batched spinor density path, 2026-07-19):
     K1 = +2.6965 meV/cell, K2 = -0.0358 meV/cell, max fit residual 0.0015 meV.
     MAE [100]-[001] = +2.660 meV/cell vs self-consistent +2.552 (4.2%), and
     the 45-degree point reproduces the unfolded full-mesh +1.3398 exactly.
+    Raw output and summary: benchmarks/fept_mae_map/.
 """
 import time
 
