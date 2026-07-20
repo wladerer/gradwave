@@ -27,24 +27,35 @@ This is a post-processing step on a converged SCF. It never enters the SCF hot
 path, so it does not affect solve performance; the cost is a handful of extra
 FFTs per occupied band plus (if requested) one dielectric solve.
 
-Coverage. Density and energy error: norm-conserving and ultrasoft/PAW, nspin=1
-and nspin=2. Force error: norm-conserving nspin=1 and nspin=2 (the nonlocal
-channel sums over spin channels; nspin=2 runs on the full BZ, since a magnetic
-run already requires use_symmetry=False). Symmetry: for norm-conserving
-nspin=1 the estimate runs on the IBZ k-points and folds the density error over
-the star (the same operator the SCF applies to rho), while the force error
-symmetrizes the output dF vector like ground-state forces. USPP/PAW, nspin=2,
-and the Dyson dressing still require use_symmetry=False (a perturbation breaks
-the crystal symmetry, so a genuine response needs the full k-mesh; folding the
-IBZ output only works for a fully symmetric perturbation like the complement
-correction). The USPP/PAW path uses
-the generalized residual R = P_annulus(H - eps S) psi and adds the
-augmentation-charge response, dpsi perturbs the on-site occupations (becsum),
-which feed the augmentation density through the Q functions. For nspin=2 the
-complement correction runs per spin channel (each with its own v_eff and
-eigenvalues) and the density and energy errors sum over the two channels. When
-nspin=2 is used with smearing (required), the estimate on partially occupied
-bands is the leading first-order term only.
+Coverage.
+  Density + energy error: norm-conserving, ultrasoft/PAW, and non-collinear/SOC
+    (spinor); nspin=1 and nspin=2 throughout.
+  Eigenvalue + band-gap error: the same three formalisms, nspin=1 and 2 (the
+    per-band second-order shift the energy error already sums over occupations).
+  Force error: norm-conserving collinear only (nspin=1 and 2). USPP/PAW forces
+    need the augmentation, one-center, and S-orthogonality terms in P(eps)
+    (template: postscf.uspp_position.hessian_column); the NLCC force term and
+    the spinor force are not assembled -- the NLCC one is blocked on the
+    ground-state NLCC force (postscf.forces), which is itself unimplemented.
+
+The USPP/PAW path uses the generalized residual R = P_annulus(H - eps S) psi and
+adds the augmentation-charge response: dpsi perturbs the on-site occupations
+(becsum), which feed the augmentation density through the Q functions. The
+non-collinear path runs the correction on the doubled (up, down) plane-wave
+axis with the spinor Hamiltonian rebuilt from the converged (rho, m); the
+density error sums both spin blocks and occupations use degeneracy 1 (one
+electron per spinor band). For nspin=2 the correction runs per spin channel
+(each with its own v_eff and eigenvalues) and the errors sum over channels.
+
+Symmetry: for norm-conserving nspin=1 the estimate runs on the IBZ k-points and
+folds the density error over the star (the same operator the SCF applies to
+rho), while the force error symmetrizes the output dF vector like ground-state
+forces. USPP/PAW, nspin=2, the non-collinear path, and the Dyson dressing
+require use_symmetry=False (a perturbation breaks the crystal symmetry, so a
+genuine response needs the full k-mesh; folding the IBZ output only works for a
+fully symmetric perturbation like the complement correction). When smearing is
+used (required for nspin=2 and the spinor path), the estimate on partially
+occupied bands is the leading first-order term only.
 """
 
 from __future__ import annotations
@@ -55,9 +66,11 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from gradwave.core.batch import build_batched, g_to_r_b, projectors_b
 from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.energies.nl_pp import nonlocal_energy
 from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g, sphere_to_box
+from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
 from gradwave.core.hamiltonian import (
     HamiltonianK,
     becp,
@@ -117,10 +130,17 @@ def _occupied(res: SCFResult, ik: int, sp: int | None = None):
 
 
 def _bands_at(res: SCFResult, ik: int, sp: int | None = None):
-    """All computed coefficients and eigenvalues at one k (and spin channel)."""
+    """All computed coefficients and eigenvalues at one k (and spin channel).
+
+    Accepts an ``SCFResult`` (norm-conserving) or the ``scf_uspp`` result dict;
+    both carry ``coeffs``/``eigenvalues`` with the same per-k (nspin=1) or
+    [spin][k] (nspin=2) layout.
+    """
+    coeffs = res["coeffs"] if isinstance(res, dict) else res.coeffs
+    eigs = res["eigenvalues"] if isinstance(res, dict) else res.eigenvalues
     if sp is None:
-        return res.coeffs[ik], res.eigenvalues[ik]
-    return res.coeffs[sp][ik], res.eigenvalues[sp][ik]
+        return coeffs[ik], eigs[ik]
+    return coeffs[sp][ik], eigs[sp][ik]
 
 
 def _enlarged_hamiltonian(res: SCFResult, k_frac, ecut_large: float, device,
@@ -181,16 +201,20 @@ def estimate_density_error(
     dyson_beta: float = 0.4,
     dyson_tol: float = 1e-6,
     dyson_max_iter: int = 60,
+    smearing: str | None = None,
+    width: float | None = None,
     verbose: bool = False,
 ) -> DiscretizationError:
     """Estimate the plane-wave discretization error in the converged density.
 
     Parameters
     ----------
-    res : SCFResult or dict
+    res : SCFResult, dict, or NCResult
         A converged SCF. An ``SCFResult`` (norm-conserving, nspin=1 or 2;
-        use_symmetry allowed for nspin=1) or the dict returned by ``scf_uspp``
-        (USPP/PAW, nspin=1, use_symmetry=False).
+        use_symmetry allowed for nspin=1), the dict returned by ``scf_uspp``
+        (USPP/PAW, nspin=1 or 2, use_symmetry=False), or an ``NCResult``
+        (non-collinear/SOC spinor SCF, use_symmetry=False -- pass ``xc`` as the
+        NoncollinearXC and the run's ``smearing``/``width``).
     ecut_large : float, optional
         Cutoff [eV] of the enlarged basis defining the complement annulus. If
         None, uses ``factor * res.system.ecut``. Must satisfy
@@ -203,6 +227,14 @@ def estimate_density_error(
         return _estimate_density_error_uspp(
             res, ecut_large=ecut_large, factor=factor, xc=xc, verbose=verbose,
         )
+    if _is_ncresult(res):
+        if xc is None:
+            raise ValueError("non-collinear density error requires xc (the "
+                             "NoncollinearXC used for the run)")
+        scheme, w = _spinor_smearing(smearing, width)
+        return _estimate_density_error_noncollinear(
+            res, ecut_large=ecut_large, factor=factor, xc=xc,
+            smearing=scheme, width=w)
     system = res.system
     grid = system.grid
     device = res.v_eff.device
@@ -490,6 +522,75 @@ def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
     )
 
 
+@torch.no_grad()
+def _estimate_eigenvalue_error_uspp(res: dict, *, ecut_large, factor, xc, bands):
+    """USPP/PAW eigenvalue error via the generalized complement correction.
+
+    The same per-band second-order shift the USPP density error already sums over
+    occupations, run on every requested band with the generalized metric:
+
+        R = P_annulus (H - eps S) psi,  dpsi = -R / (T_G - eps),
+        deps = <dpsi | R> = -sum_annulus |R|^2 / (T_G - eps) <= 0.
+
+    Reuses the frozen per-spin (v_eff, screened D) operators and the enlarged
+    _HkS the density path builds, so the occupation-weighted sum of the occupied
+    shifts reproduces ``estimate_density_error(res, ...).denergy`` exactly.
+    """
+    if getattr(res["system"], "sym", None) is not None:
+        raise NotImplementedError(
+            "USPP eigenvalue error requires use_symmetry=False: a perturbation "
+            "breaks the crystal symmetry, so the response needs the full k-mesh")
+    if xc is None:
+        raise ValueError("USPP eigenvalue error requires the xc functional (to "
+                         "rebuild v_eff and the one-center ddd)")
+    system = res["system"]
+    grid = system.grid
+    dev = system.positions.device
+    ecut = float(system.ecut)
+    nspin = int(res.get("nspin", 1))
+    if ecut_large is None:
+        ecut_large = factor * ecut
+    if gmax_from_ecut(ecut_large) > 2.0 * gmax_from_ecut(ecut) * (1.0 + 1e-9):
+        raise ValueError(
+            f"ecut_large={ecut_large:.1f} eV exceeds 4*ecut={4 * ecut:.1f} eV; the "
+            "enlarged sphere would not fit the density FFT box. Lower ecut_large."
+        )
+
+    veff_s, dscr_s = _uspp_frozen_operators(res, xc)
+    coeffs, eigs = res["coeffs"], res["eigenvalues"]
+    spins = [None] if nspin == 1 else list(range(nspin))
+    deig_s, eig_s = [], []
+    for isp, sp in enumerate(spins):
+        c_sp = coeffs if sp is None else coeffs[sp]
+        e_sp = eigs if sp is None else eigs[sp]
+        v_eff, dscr_full = veff_s[isp], dscr_s[isp]
+        deig_k, eig_k = [], []
+        for ik, sph0 in enumerate(system.spheres):
+            sel = slice(None) if bands is None else bands
+            c_sel = c_sp[ik][sel]
+            eps_sel = e_sp[ik][sel]
+            sph1, hs, _pd1, _p1 = _uspp_enlarged_hks(
+                system, sph0.k_frac, ecut_large, v_eff, dscr_full, dev)
+            box = sphere_to_box(c_sel, sph0.flat_idx, grid.shape)
+            c1 = box_to_sphere(box, sph1.flat_idx)
+            resid = hs.h(c1) - eps_sel[:, None].to(CDTYPE) * hs.s(c1)
+            annulus = hs.t > ecut * (1.0 + 1e-9)
+            denom = torch.clamp(hs.t[None, :] - eps_sel[:, None], min=1e-3)
+            dpsi = torch.where(annulus[None, :], -resid / denom.to(resid.dtype),
+                               torch.zeros_like(resid))
+            deig_k.append((dpsi.conj() * resid).real.sum(dim=1))
+            eig_k.append(eps_sel.clone())
+        deig_s.append(deig_k)
+        eig_s.append(eig_k)
+
+    if nspin == 1:
+        deig, eig = deig_s[0], eig_s[0]
+    else:
+        deig, eig = deig_s, eig_s
+    return EigenvalueError(deig=deig, eig=eig, ecut=ecut,
+                           ecut_large=ecut_large, nspin=nspin)
+
+
 def _enlarged_projector_data(res: SCFResult, sph, device):
     """ProjectorData on a given (enlarged) sphere for the nonlocal energy."""
     system = res.system
@@ -534,12 +635,19 @@ def estimate_force_error(
     occupations (in [0,1]) — while the local channel already sees the
     spin-summed density error ``drho_first_order``.
     """
+    if _is_ncresult(res):
+        raise NotImplementedError(
+            "force error estimate is norm-conserving collinear only; the spinor "
+            "force terms in P(eps) are not assembled")
     if err.uspp:
         raise NotImplementedError(
             "force error estimate is norm-conserving only; the USPP/PAW force "
-            "needs the augmentation and one-center force terms in P(eps)")
+            "needs the augmentation and one-center force terms in P(eps) "
+            "(template: postscf.uspp_position.hessian_column)")
     if getattr(res.system, "rho_core", None) is not None:
-        raise NotImplementedError("NLCC force term not supported in the error estimate")
+        raise NotImplementedError(
+            "NLCC force term not supported in the error estimate: it is blocked "
+            "on the ground-state NLCC force (postscf.forces), itself unimplemented")
     nspin = int(getattr(res, "nspin", 1))
     system = res.system
     grid = system.grid
@@ -603,6 +711,245 @@ def estimate_force_error(
 
 
 # --------------------------------------------------------------------------- #
+#  Non-collinear (spinor) path                                                #
+# --------------------------------------------------------------------------- #
+
+
+def _is_ncresult(res) -> bool:
+    """True for a non-collinear ``NCResult`` (spinor SCF output).
+
+    Duck-typed to avoid importing scf.noncollinear at module load (it would
+    close an import cycle). An NCResult carries the magnetization field ``m``
+    and the integrated moment ``mag_vec`` but no ``v_eff``/``occupations``.
+    """
+    return (not isinstance(res, dict)
+            and hasattr(res, "mag_vec") and hasattr(res, "m")
+            and not hasattr(res, "v_eff"))
+
+
+def _spinor_smearing(smearing, width):
+    """Resolve the (scheme, width) for recomputing spinor occupations.
+
+    NCResult stores neither the occupations nor the smearing it was run with, so
+    the caller supplies them (the CLI passes ``inp.smearing``). A non-collinear
+    SCF always uses a real scheme -- ``none`` maps to gaussian, exactly as
+    ``api._run_scf_noncollinear`` does when seeding the run.
+    """
+    scheme = "gaussian" if (smearing is None or smearing == "none") else smearing
+    if scheme not in SCHEMES:
+        raise ValueError(f"unknown smearing scheme {scheme!r}")
+    return scheme, (0.1 if width is None else float(width))
+
+
+def _spinor_enlarged_batch(system, ecut_large, device):
+    """Enlarged-sphere BatchedK + spinor projectors at ``ecut_large``.
+
+    Rebuilds the k-batched plane-wave machinery on the complement basis exactly
+    as ``scf.loop.setup_system`` does at the run cutoff: per-k GSphere, scalar
+    KB projector data (empty for fully-relativistic pseudos, whose projectors
+    are the spinor SO set), and -- when ``system.is_fr`` -- the per-k SO radial
+    tables the spinor projector builder consumes. Returns
+    ``(bk_large, spheres_large, so_tables_large)``.
+    """
+    grid = system.grid
+    spheres1 = [build_gsphere(grid, ecut_large, sph0.k_frac, device=device)
+                for sph0 in system.spheres]
+    is_fr = bool(getattr(system, "is_fr", False))
+    npw_max1 = max(s.npw for s in spheres1)
+    dij_species = [torch.as_tensor(u.dij, dtype=RDTYPE, device=device)
+                   for u in system.upfs]
+    proj_data1 = []
+    so_tabs1 = ([torch.zeros(len(spheres1), u.n_proj, npw_max1, dtype=RDTYPE,
+                             device=device) for u in system.upfs]
+                if is_fr else None)
+    for ik, sph in enumerate(spheres1):
+        q = np.sqrt(sph.kpg2.cpu().numpy())
+        beta_tables = [torch.as_tensor(beta_form_factors(u, q), dtype=RDTYPE,
+                                       device=device) for u in system.upfs]
+        if is_fr:
+            for sp_i in range(len(system.upfs)):
+                so_tabs1[sp_i][ik, :, :sph.npw] = beta_tables[sp_i]
+            beta_ls = [[] for _ in system.upfs]
+            beta_tables = [t[:0] for t in beta_tables]
+        else:
+            beta_ls = [[b.l for b in u.betas] for u in system.upfs]
+        proj_data1.append(build_projector_data(
+            sph, system.species_of_atom, beta_tables, beta_ls, dij_species,
+            grid.volume))
+    bk1 = build_batched(spheres1, proj_data1, device)
+    return bk1, spheres1, so_tabs1
+
+
+@torch.no_grad()
+def _spinor_complement(res, *, ecut_large, factor, xc, smearing, width):
+    """Shared spinor complement correction for the density/energy/eigenvalue error.
+
+    Runs the first-order correction  R = P_annulus (H - eps) psi,
+    dpsi = -R/(T_G - eps)  on the enlarged spinor basis for every band, exactly
+    as the collinear path does per band, but with the 2-component (up/down)
+    block structure and the enlarged spinor Hamiltonian rebuilt post-hoc from
+    the converged (rho, m). Returns a dict of the tensors both the density and
+    the eigenvalue estimators consume.
+    """
+    from gradwave.core.energies.hartree import hartree_potential_g
+    from gradwave.core.xc.noncollinear import vxc_and_bxc
+    from gradwave.scf.noncollinear import SpinorHamiltonian
+
+    system = res.system
+    if getattr(system, "sym", None) is not None \
+            or getattr(system, "rho_symmetrizer", None) is not None:
+        raise NotImplementedError(
+            "non-collinear discretization error requires use_symmetry=False: the "
+            "spinor complement fold over the (magnetic) star is not implemented")
+    grid = system.grid
+    device = res.rho.device
+    ecut = float(system.ecut)
+    vol = grid.volume
+    if ecut_large is None:
+        ecut_large = factor * ecut
+    if gmax_from_ecut(ecut_large) > 2.0 * gmax_from_ecut(ecut) * (1.0 + 1e-9):
+        raise ValueError(
+            f"ecut_large={ecut_large:.1f} eV exceeds 4*ecut={4 * ecut:.1f} eV; the "
+            "enlarged sphere would not fit the density FFT box. Lower ecut_large.")
+
+    # frozen spinor potential rebuilt from the converged (rho, m), the same
+    # v_r = v_H + v_xc + v_loc and exchange field b_xc the SCF forms each step.
+    rho_g = r_to_g(res.rho.to(CDTYPE))
+    v_h = (torch.fft.ifftn(hartree_potential_g(rho_g, grid.g2), dim=(-3, -2, -1))
+           * grid.n_points).real
+    v_xc, b_xc, _ = vxc_and_bxc(xc, res.rho, res.m, grid, rho_core=system.rho_core)
+    vloc_g = local_potential_g(system.positions, system.species_index,
+                               system.vloc_tables, grid.g_cart, vol)
+    vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
+    v_r = v_h + v_xc + vloc_r
+    if float(b_xc.abs().max()) == 0.0:
+        b_xc = torch.zeros_like(b_xc)
+
+    bk0 = system.batch
+    m0 = bk0.npw_max
+    bk1, spheres1, so_tabs1 = _spinor_enlarged_batch(system, ecut_large, device)
+    m1 = bk1.npw_max
+    projs_b1 = projectors_b(bk1, system.positions)
+    q_so1 = dij_so1 = None
+    if bool(getattr(system, "is_fr", False)):
+        from gradwave.core.spinor_proj import build_so_projectors
+        q_so1, dij_so1 = build_so_projectors(bk1, system, so_tables=so_tabs1)
+    h1 = SpinorHamiltonian(bk1, grid.shape, v_r, b_xc, projs_b1,
+                           q=q_so1, dij_so=dij_so1)
+
+    # recompute occupations (NCResult stores none): degeneracy 1.0 -- each
+    # spinor band holds one electron.
+    scheme_obj = SCHEMES[smearing]
+    eps = res.eigenvalues.to(device)          # (nk, nb)
+    mu = find_fermi(eps, system.kweights, scheme_obj, width,
+                    system.n_electrons, degeneracy=1.0)
+    occ, _ = occupations_and_entropy(eps, mu.to(device), scheme_obj, width,
+                                     degeneracy=1.0)   # (nk, nb) in [0,1]
+
+    # zero-pad the spinor coefficients from the run sphere onto the enlarged one,
+    # per spin block (both blocks share their k's sphere ordering).
+    coeffs = res.coeffs.to(device)            # (nk, nb, 2*m0)
+    nk, nb, _ = coeffs.shape
+    c1 = torch.zeros(nk, nb, 2 * m1, dtype=CDTYPE, device=device)
+    for ik, (sph0, sph1) in enumerate(zip(system.spheres, spheres1)):
+        n0 = sph0.npw
+        for blk, off in ((0, 0), (1, m1)):
+            src = coeffs[ik, :, blk * m0: blk * m0 + n0]      # (nb, n0)
+            box = sphere_to_box(src, sph0.flat_idx.to(device), grid.shape)
+            c1[ik, :, off: off + sph1.npw] = box_to_sphere(box, sph1.flat_idx.to(device))
+
+    # complement residual and correction on the doubled (2*m1) axis
+    t2 = torch.cat([bk1.t, bk1.t], dim=-1)               # (nk, 2*m1)
+    mask2 = torch.cat([bk1.mask, bk1.mask], dim=-1)      # (nk, 2*m1)
+    hc1 = h1.apply(c1)
+    resid = hc1 - eps[:, :, None] * c1
+    annulus = t2 > ecut * (1.0 + 1e-9)                   # (nk, 2*m1)
+    denom = torch.clamp(t2[:, None, :] - eps[:, :, None], min=1e-3)
+    dpsi = torch.where(annulus[:, None, :], -resid / denom.to(resid.dtype),
+                       torch.zeros_like(resid))
+    dpsi = dpsi * mask2[:, None, :]
+
+    return {
+        "system": system, "grid": grid, "vol": vol, "ecut": ecut,
+        "ecut_large": ecut_large, "bk1": bk1, "m1": m1, "spheres1": spheres1,
+        "c1": c1, "dpsi": dpsi, "resid": resid, "eps": eps, "occ": occ,
+    }
+
+
+@torch.no_grad()
+def _estimate_density_error_noncollinear(res, *, ecut_large, factor, xc,
+                                         smearing, width):
+    """Non-collinear (spinor) plane-wave discretization density/energy error.
+
+    The complement correction of the collinear path, generalized to a 2-component
+    spinor: the residual and dpsi live on the doubled (up, down) plane-wave axis,
+    the density error is the spin-summed  drho = sum_i f_i 2 Re(psi_i^dag dpsi_i)
+    (both blocks), and the energy error is the second-order occupation-weighted
+    sum of <dpsi_i | R_i>. Occupations use degeneracy 1.0 (one electron per
+    spinor band). Norm-conserving spinor pseudopotentials, with or without SOC;
+    use_symmetry=False only.
+    """
+    d = _spinor_complement(res, ecut_large=ecut_large, factor=factor, xc=xc,
+                           smearing=smearing, width=width)
+    system, grid, vol = d["system"], d["grid"], d["vol"]
+    bk1, m1, c1, dpsi = d["bk1"], d["m1"], d["c1"], d["dpsi"]
+    eps, occ, resid = d["eps"], d["occ"], d["resid"]
+    device = c1.device
+    nk, nb, _ = c1.shape
+
+    w_kb = (system.kweights[:, None].to(device) * occ)     # (nk, nb)
+
+    # energy error: second-order occupation-weighted <dpsi|R>, spin summed over
+    # the doubled axis (resid/dpsi already carry both blocks).
+    de_band = (dpsi.conj() * resid).real.sum(dim=-1)       # (nk, nb)
+    denergy = float((w_kb * de_band).sum())
+
+    # density error: 2 Re(psi^dag dpsi) summed over both spin blocks, band
+    # chunked to bound the dense-grid temporaries (mirrors the SCF density).
+    drho = torch.zeros(grid.shape, dtype=RDTYPE, device=device)
+    chunk = 64 if device.type == "cuda" else nb
+    for lo in range(0, nb, chunk):
+        hi = min(lo + chunk, nb)
+        cu, cd = c1[:, lo:hi, :m1], c1[:, lo:hi, m1:]
+        du, dd = dpsi[:, lo:hi, :m1], dpsi[:, lo:hi, m1:]
+        psi_u = g_to_r_b(cu, bk1, grid.shape)
+        psi_d = g_to_r_b(cd, bk1, grid.shape)
+        dps_u = g_to_r_b(du, bk1, grid.shape)
+        dps_d = g_to_r_b(dd, bk1, grid.shape)
+        cross = (psi_u.conj() * dps_u + psi_d.conj() * dps_d).real
+        w = (2.0 * w_kb[:, lo:hi]).to(cross.dtype)
+        drho += torch.einsum("kb,kbxyz->xyz", w, cross)
+    drho = drho / vol
+
+    return DiscretizationError(
+        drho=drho, drho_first_order=drho, denergy=denergy, dpsi=d["dpsi"],
+        psi_large=c1, occ=occ, spheres_large=d["spheres1"], ecut=d["ecut"],
+        ecut_large=d["ecut_large"], dyson=False,
+    )
+
+
+def _estimate_eigenvalue_error_noncollinear(res, *, ecut_large, factor, xc,
+                                            bands, smearing, width):
+    """Non-collinear eigenvalue error: per-band second-order spinor shift.
+
+    Same complement correction as the density path, reporting the per-band
+    deps = <dpsi|R> <= 0 for every spinor band. The occupation-weighted sum over
+    the occupied bands reproduces the density-path ``denergy`` exactly. Returns a
+    per-k list of (nb,) tensors (nspin field set to 1 -- a spinor run is a single
+    combined channel, not two collinear ones). ``bands`` selects a subset.
+    """
+    d = _spinor_complement(res, ecut_large=ecut_large, factor=factor, xc=xc,
+                           smearing=smearing, width=width)
+    dpsi, resid, eps = d["dpsi"], d["resid"], d["eps"]
+    de_all = (dpsi.conj() * resid).real.sum(dim=-1)        # (nk, nb)
+    sel = slice(None) if bands is None else bands
+    deig = [de_all[ik][sel].clone() for ik in range(de_all.shape[0])]
+    eig = [eps[ik][sel].clone() for ik in range(eps.shape[0])]
+    return EigenvalueError(deig=deig, eig=eig, ecut=d["ecut"],
+                           ecut_large=d["ecut_large"], nspin=1)
+
+
+# --------------------------------------------------------------------------- #
 #  Eigenvalue / band-gap error                                                #
 # --------------------------------------------------------------------------- #
 
@@ -650,6 +997,9 @@ def estimate_eigenvalue_error(
     ecut_large: float | None = None,
     factor: float = 2.5,
     bands=None,
+    xc=None,
+    smearing: str | None = None,
+    width: float | None = None,
 ) -> EigenvalueError:
     """Estimate the plane-wave discretization error of the KS eigenvalues.
 
@@ -660,13 +1010,23 @@ def estimate_eigenvalue_error(
     shift is a definite lowering (δε <= 0), so the occupation-weighted sum of
     the occupied-band shifts reproduces ``estimate_density_error(...).denergy``.
 
-    Norm-conserving, nspin=1 or 2. ``bands`` selects a subset (an index list or
-    slice); None uses every band the SCF computed -- keep the default for gap
-    analysis, which needs the frontier bands.
+    Norm-conserving, USPP/PAW, or non-collinear/SOC; nspin=1 or 2. USPP/PAW and
+    the spinor path need ``xc`` (to rebuild the band operator); the spinor path
+    also takes the run's ``smearing``/``width``. ``bands`` selects a subset (an
+    index list or slice); None uses every band the SCF computed -- keep the
+    default for gap analysis, which needs the frontier bands.
     """
     if isinstance(res, dict):
-        raise NotImplementedError(
-            "eigenvalue error is norm-conserving only for now (no USPP/PAW)")
+        return _estimate_eigenvalue_error_uspp(
+            res, ecut_large=ecut_large, factor=factor, xc=xc, bands=bands)
+    if _is_ncresult(res):
+        if xc is None:
+            raise ValueError("non-collinear eigenvalue error requires xc (the "
+                             "NoncollinearXC used for the run)")
+        scheme, w = _spinor_smearing(smearing, width)
+        return _estimate_eigenvalue_error_noncollinear(
+            res, ecut_large=ecut_large, factor=factor, xc=xc, bands=bands,
+            smearing=scheme, width=w)
     system = res.system
     grid = system.grid
     device = res.v_eff.device
@@ -706,17 +1066,25 @@ def estimate_eigenvalue_error(
 
 
 def estimate_gap_error(res: SCFResult, eigerr: EigenvalueError, *,
-                       occ_threshold: float | None = None) -> dict:
+                       occ_threshold: float | None = None,
+                       occupations=None) -> dict:
     """Band-gap discretization error from a full-band ``EigenvalueError``.
 
     Locates the valence-band maximum and conduction-band minimum over the BZ
     (and both spin channels), then reports the base gap, the extrapolated gap
     (eps + δε at each edge), and their difference. The eigenvalue error must
     have been computed with the default ``bands=None`` so the band index lines
-    up with the occupations. Raises ValueError for a metal/semimetal (VBM >=
-    CBM) or when no empty band is available to resolve the CBM.
+    up with the occupations. Accepts an ``SCFResult`` or the ``scf_uspp`` result
+    dict. Raises ValueError for a metal/semimetal (VBM >= CBM) or when no empty
+    band is available to resolve the CBM.
     """
-    nspin = int(getattr(res, "nspin", 1))
+    is_dict = isinstance(res, dict)
+    system = res["system"] if is_dict else res.system
+    if occupations is not None:
+        occs = occupations                       # NCResult stores no occupations
+    else:
+        occs = res["occupations"] if is_dict else res.occupations
+    nspin = int(res.get("nspin", 1)) if is_dict else int(getattr(res, "nspin", 1))
     full = 2.0 if nspin == 1 else 1.0
     thr = 0.5 * full if occ_threshold is None else occ_threshold
     deig_s = [eigerr.deig] if nspin == 1 else eigerr.deig
@@ -726,8 +1094,8 @@ def estimate_gap_error(res: SCFResult, eigerr: EigenvalueError, *,
     dvbm = dcbm = 0.0
     vk = ck = vsp = csp = -1
     for isp, sp in enumerate(spins):
-        for ik in range(len(res.system.spheres)):
-            occ = res.occupations[ik] if sp is None else res.occupations[sp][ik]
+        for ik in range(len(system.spheres)):
+            occ = occs[ik] if sp is None else occs[sp][ik]
             _, eig = _bands_at(res, ik, sp)
             de = deig_s[isp][ik]
             n = de.shape[0]

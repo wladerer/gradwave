@@ -440,14 +440,31 @@ def _bands_extra(inp: Input, res, verbose: bool) -> dict:
     return {"bands": bands}
 
 
+def _error_estimate_xc(inp):
+    """The functional object the post-SCF estimators need to rebuild operators.
+
+    Non-collinear runs need a ``NoncollinearXC`` (the exchange field enters the
+    spinor Hamiltonian); collinear nspin=2 needs the spin functional; nspin=1 the
+    plain one.
+    """
+    if inp.noncollinear:
+        from gradwave.core.xc.noncollinear import NoncollinearXC
+        from gradwave.core.xc.spin import LSDA_PW92, SpinPBE
+
+        return NoncollinearXC({"lda": LSDA_PW92, "pbe": SpinPBE}[inp.xc]())
+    return _spin_setup(inp)[0] if inp.nspin == 2 else XC_REGISTRY[inp.xc]()
+
+
 def _error_estimate_block(res, inp) -> dict:
     """Post-SCF plane-wave (Ecut) discretization-error estimate for the output.
 
     Cheap post-processing (no larger SCF): the first-order complement correction
     of Cancès et al. gives the estimated basis-set error in the energy (a
-    definite lowering), the density, and, for norm-conserving nspin=1 or 2, the
-    Hellmann-Feynman forces. Reported as an indicator, not a rigorous bound.
-    Degrades gracefully when the run's formalism/settings are outside coverage.
+    definite lowering), the density, the Kohn-Sham eigenvalues / band gap, and --
+    for norm-conserving collinear runs -- the Hellmann-Feynman forces. Covers
+    norm-conserving and USPP/PAW (nspin=1, 2) and the non-collinear/SOC spinor
+    formalism. Reported as an indicator, not a rigorous bound. Degrades
+    gracefully when the run's formalism/settings are outside coverage.
     """
     from gradwave.postscf.discretization_error import (
         estimate_density_error,
@@ -458,15 +475,20 @@ def _error_estimate_block(res, inp) -> dict:
 
     _species, upfs, _soa = _species_upfs(inp)
     uspp = _is_uspp(upfs)
-    xc = _spin_setup(inp)[0] if inp.nspin == 2 else XC_REGISTRY[inp.xc]()
+    is_nc = bool(inp.noncollinear)
+    xc = _error_estimate_xc(inp)
     system = _get(res, "system")
     nspin = int(_get(res, "nspin", 1) or 1)
     natom = len(system.positions)
     grid = system.grid
     vol, npts = grid.volume, grid.n_points
     nelec = float(system.n_electrons)
+    # a non-collinear SCF always runs with a real smearing scheme (spinor bands
+    # hold one electron); a "none" request maps to gaussian, as the run does.
+    nc_scheme = ("gaussian" if inp.smearing.type == "none" else inp.smearing.type)
+    dens_kw = dict(smearing=nc_scheme, width=inp.smearing.width) if is_nc else {}
     try:
-        err = estimate_density_error(res, xc=xc)
+        err = estimate_density_error(res, xc=xc, **dens_kw)
     except NotImplementedError as e:
         return {"available": False, "reason": str(e)}
 
@@ -484,7 +506,9 @@ def _error_estimate_block(res, inp) -> dict:
         "int_drho": float(drho.sum()) * vol / npts,
         "note": "first-order estimate, indicative not a rigorous bound",
     }
-    force_ok = (not uspp and nspin in (1, 2)
+    # force error: norm-conserving collinear only (USPP augmentation/one-center
+    # and the spinor force terms in P(eps) are not assembled).
+    force_ok = (not uspp and not is_nc and nspin in (1, 2)
                 and getattr(system, "rho_core", None) is None)
     if force_ok:
         try:
@@ -493,16 +517,24 @@ def _error_estimate_block(res, inp) -> dict:
             block["force_error_rms_eV_ang"] = float((fe ** 2).mean().sqrt())
         except NotImplementedError:
             pass
-    # band-gap error (NC only; skipped for metals/semimetals and USPP/PAW)
-    if not uspp:
-        try:
-            eige = estimate_eigenvalue_error(res, ecut_large=err.ecut_large)
-            gap = estimate_gap_error(res, eige)
-            block["gap_eV"] = gap["gap_eV"]
-            block["gap_extrapolated_eV"] = gap["gap_extrapolated_eV"]
-            block["dgap_eV"] = gap["dgap_eV"]
-        except (NotImplementedError, ValueError):
-            pass
+    # band-gap error (insulators; NC/USPP/PAW now covered, skipped for metals).
+    try:
+        eig_kw = dict(smearing=nc_scheme, width=inp.smearing.width) if is_nc else {}
+        eige = estimate_eigenvalue_error(res, ecut_large=err.ecut_large, xc=xc,
+                                         **eig_kw)
+        gap_kw = {}
+        if is_nc:
+            # NCResult carries no occupations; recompute (degeneracy 1) and set
+            # the metal/insulator threshold to half of one-electron filling.
+            gap_kw = dict(occupations=_nc_occupations(res, nc_scheme,
+                                                      inp.smearing.width),
+                          occ_threshold=0.5)
+        gap = estimate_gap_error(res, eige, **gap_kw)
+        block["gap_eV"] = gap["gap_eV"]
+        block["gap_extrapolated_eV"] = gap["gap_extrapolated_eV"]
+        block["dgap_eV"] = gap["dgap_eV"]
+    except (NotImplementedError, ValueError):
+        pass
     # other numerical convergence errors (SCF self-consistency, smearing). These
     # are separate axes from the basis-set error; k-point sampling needs a mesh
     # sweep (estimate_kpoint_error) and is not reachable from one run.
@@ -510,7 +542,9 @@ def _error_estimate_block(res, inp) -> dict:
         estimate_scf_error,
         estimate_smearing_error,
     )
-    if not uspp:
+    # SCF self-consistency error uses the collinear response kernel (K_Hxc/chi0);
+    # USPP/PAW and the spinor formalism have no such primitive exposed yet.
+    if not uspp and not is_nc:
         try:
             scfe = estimate_scf_error(res, xc)
             block["scf_convergence"] = {
@@ -524,7 +558,8 @@ def _error_estimate_block(res, inp) -> dict:
             pass
     try:
         sme = estimate_smearing_error(
-            res, scheme=inp.smearing.type, width=inp.smearing.width)
+            res, scheme=nc_scheme if is_nc else inp.smearing.type,
+            width=inp.smearing.width)
         block["smearing"] = {
             "scheme": sme.scheme,
             "dsmearing_eV": sme.dsmearing,
@@ -535,6 +570,28 @@ def _error_estimate_block(res, inp) -> dict:
     except (NotImplementedError, ValueError):
         pass
     return block
+
+
+def _nc_occupations(res, scheme: str, width: float):
+    """Per-k occupations of a spinor (NCResult) run, recomputed for the gap tool.
+
+    NCResult stores neither the occupations nor the smearing width, so rebuild
+    them from the stored eigenvalues at degeneracy 1.0 (one electron per spinor
+    band), the same recipe the SCF uses.
+    """
+    from gradwave.core.occupations import (
+        SCHEMES,
+        find_fermi,
+        occupations_and_entropy,
+    )
+
+    system = res.system
+    eps = res.eigenvalues
+    mu = find_fermi(eps, system.kweights, SCHEMES[scheme], width,
+                    system.n_electrons, degeneracy=1.0)
+    occ, _ = occupations_and_entropy(eps, mu, SCHEMES[scheme], width,
+                                     degeneracy=1.0)
+    return [occ[ik] for ik in range(eps.shape[0])]
 
 
 def _pdos_summary_block(res, inp: Input) -> dict:
