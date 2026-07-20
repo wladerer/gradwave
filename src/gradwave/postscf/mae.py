@@ -153,7 +153,9 @@ class MAEResult:
     (reference) direction. ``eigenvalues[i]`` is the (nk, nb) spectrum and
     ``fermi[i]`` the direction's own Fermi level. ``nk[i]`` is the number of
     k-points the direction was evaluated on (its magnetic-IBZ fold when
-    ``magmoms=`` was passed, the full mesh otherwise)."""
+    ``magmoms=`` was passed, the full mesh otherwise). ``meta`` carries
+    caller-supplied provenance (mesh, ecut, machine, ...) through
+    ``save``/``load``."""
 
     directions: list
     band_free_energies: torch.Tensor  # (ndir,) [eV]
@@ -161,6 +163,32 @@ class MAEResult:
     fermi: list
     eigenvalues: list                 # per direction (nk, nb)
     nk: list                          # per direction k-count
+    meta: dict | None = None          # provenance, survives save/load
+
+    def save(self, path, meta: dict | None = None) -> None:
+        """Write the full result (spectra included) to ``path`` via
+        torch.save. A ``meta`` dict passed here replaces the stored one."""
+        torch.save({
+            "format": "gradwave-mae-1",
+            "directions": [[float(x) for x in d] for d in self.directions],
+            "band_free_energies": self.band_free_energies.cpu(),
+            "mae": self.mae.cpu(),
+            "fermi": [float(f) for f in self.fermi],
+            "eigenvalues": [e.cpu() for e in self.eigenvalues],
+            "nk": [int(n) for n in self.nk],
+            "meta": self.meta if meta is None else meta,
+        }, path)
+
+    @classmethod
+    def load(cls, path) -> "MAEResult":
+        d = torch.load(path, map_location="cpu", weights_only=True)
+        if d.get("format") != "gradwave-mae-1":
+            raise ValueError(f"{path}: not a gradwave MAE result file")
+        return cls(directions=d["directions"],
+                   band_free_energies=d["band_free_energies"],
+                   mae=d["mae"], fermi=d["fermi"],
+                   eigenvalues=d["eigenvalues"], nk=d["nk"],
+                   meta=d.get("meta"))
 
 
 @torch.no_grad()

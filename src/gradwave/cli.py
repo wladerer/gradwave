@@ -53,7 +53,7 @@ def _cmd_run(args) -> int:
     inp = load_input(args.input)
     if args.output:
         inp = dataclasses.replace(inp, output_dir=Path(args.output))
-    summary = run(inp, verbose=not args.quiet)
+    summary = run(inp, verbose=inp.verbose and not args.quiet)
     scf = summary.get("scf")
     if scf is not None:
         e = scf["energies_eV"]
