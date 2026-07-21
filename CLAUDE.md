@@ -87,10 +87,11 @@ differentiable/autograd computation across machines: PyTorch autograd graphs are
 process-local and do not serialize.
 
 GPU caveat: the RTX 3050 has crippled fp64 (~1/64 of fp32), so for float64 SCF the
-22 CPU cores usually beat the GPU; it only helps fp32-tolerant kernels. Also confirm
-`ssh asus 'cd ~/github/gradwave && uv run python -c "import torch; print(torch.cuda.is_available())"'`
-first — as of this writing the CUDA build there reports `False` (libcuda not visible
-to the managed torch), so plan on CPU offload until that is fixed.
+22 CPU cores usually beat the GPU; it only helps fp32-tolerant kernels. torch sees
+CUDA on asus only because willnix puts the driver on the nix-ld search path
+(`programs.nix-ld.libraries = [ config.hardware.nvidia.package ]` in hosts/asus);
+if `torch.cuda.is_available()` ever returns False, check that line and rebuild. Verify:
+`ssh asus 'cd ~/github/gradwave && uv run python -c "import torch; print(torch.cuda.is_available())"'`.
 
 For occasional offload, plain SSH (optionally GNU `parallel -S :,asus`) is enough.
 Reach for `dask.distributed` (scheduler local, `dask worker` on each host, GPU
