@@ -1314,7 +1314,14 @@ def estimate_gap_error(res: SCFResult, eigerr: EigenvalueError, *,
 # diamond, capturing ≈ -0.5× the true error). The reason is that σ = ∂E/∂ε and
 # its δP-response is dominated by the STRAIN-response of the orbital correction,
 # the ⟨∂δφ/∂ε | R⟩ term, which a fixed-δφ forward pass omits. Forces avoid this
-# because ⟨δφ | ∂R/∂τ⟩ (the ion moving) dominates there. A correct stress
-# estimate needs a strain-parameterized residual (δφ differentiated through
-# strain), reusing the ``rho``/``coeffs``/``spheres`` overrides now on
-# ``postscf.stress._energy_strained``. Deferred; do not ship the naive form.
+# because ⟨δφ | ∂R/∂τ⟩ (the ion moving) dominates there. The full anisotropic
+# tensor is still deferred; do not ship the naive form.
+#
+# The HYDROSTATIC (pressure) component IS available -- see
+# ``postscf.stress_error.estimate_pressure_error``. It differentiates the
+# frozen-state energy error at a FIXED Miller set (the ecut/s² scaling, so the
+# strained residual responds to the metric without the plane-wave count jumping),
+# giving P_error = -d(dE_error)/dV by a volume finite difference. That flips the
+# sign the naive forms get wrong (correctly signed, ~0.5-0.75× magnitude on Si).
+# The stress error is ~95% hydrostatic on sheared silicon, so this covers the
+# dominant part; the shear/off-diagonal terms need the full strained residual.

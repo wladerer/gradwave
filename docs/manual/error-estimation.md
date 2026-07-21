@@ -43,12 +43,15 @@ $\delta\psi$ and an augmentation part from the change in the on-site occupations
 (becsum), fed through the $Q$ functions, using the generalized residual $R =
 P_\text{annulus}(\hat{H} - \varepsilon \hat{S})\psi$.
 
-!!! note "Not stress, and not a rigorous bound"
-    The same fixed-$\delta P$ recipe does **not** extend to stress: it is
-    *anti*-correlated with the true error, because the stress error is
-    dominated by the strain-response of the orbital correction, which a fixed-$\delta\psi$
-    pass omits. Stress error is deferred. And the estimate is a first-order
-    indicator for gating convergence, not a certified error bar.
+!!! note "Stress: hydrostatic part only, and not a rigorous bound"
+    The same fixed-$\delta P$ recipe does **not** extend to the full stress
+    tensor: it is *anti*-correlated with the true error, because the stress error
+    is dominated by the strain-response of the orbital correction, which a
+    fixed-$\delta\psi$ pass omits. The **hydrostatic (pressure) component** -- the
+    ~95% of the stress error that is the spurious Pulay pressure of a too-small
+    basis -- is available through `estimate_pressure_error` (below); the full
+    anisotropic tensor is still deferred. As everywhere here, the estimate is a
+    first-order indicator for gating convergence, not a certified error bar.
 
 ## Run it from an input file
 
@@ -217,6 +220,33 @@ drags the fit (dropping a 2×2×2 Si point, ~2.5 eV off, is what turns the
 extrapolation monotone). At 4/6/8³ it reports $E_\infty \approx -214.483$ eV with
 the 8×8×8 residual near 7 meV.
 
+**Pressure (hydrostatic stress) error.** The plane-wave error in the stress is
+dominated by its trace, the spurious Pulay pressure of a too-small basis (on
+sheared silicon the shear part of the basis-set stress error is ~1% of the
+hydrostatic part). Estimate it by differentiating the frozen-state energy error
+along a homogeneous strain at a *fixed* Miller set,
+$P_\text{error} = -\,\mathrm{d}(\delta E_\text{error})/\mathrm{d}V$. Holding the
+integer $G$-labels while the metric strains (the $e_\text{cut}\to e_\text{cut}/s^2$
+map for a scale $s$) is what makes this work: differentiating through a basis
+whose plane-wave count *jumps* as $G$-vectors cross $e_\text{cut}$ -- the naive
+volume derivative at fixed cutoff -- is anti-correlated, like the fixed-$\delta P$
+tensor form. This one needs `use_symmetry=False` (the frozen strained rebuild
+reproduces the run's full $k$-point set).
+
+```python
+from gradwave.postscf.stress_error import estimate_pressure_error
+
+pe = estimate_pressure_error(res, PBE())   # res from a (loose) scf(...), no symmetry
+print(pe["pressure_error_kbar"])           # add to the reported pressure toward the large-basis limit
+```
+
+It is correctly signed (the load-bearing property the naive forms get wrong) and
+captures ~0.5–0.75× of the true pressure error over $e_\text{cut}\sim$ 10–18 Ry on
+silicon, the ratio rising toward 1 as the cutoff converges -- a consistent
+under-estimate, so it does not give false confidence. The full anisotropic
+stress-error tensor is deferred (it needs the strain-differentiated orbital
+residual, not just its trace).
+
 ## Coverage
 
 | quantity | norm-conserving | USPP/PAW | non-collinear / SOC |
@@ -225,7 +255,8 @@ the 8×8×8 residual near 7 meV.
 | energy error | nspin=1, nspin=2 | nspin=1, nspin=2 | spinor |
 | force error | nspin=1, nspin=2 (no NLCC) | not available | not available |
 | eigenvalue / gap error | nspin=1, nspin=2 | not available | eigenvalue (spinor) |
-| stress error | not available (deferred) | not available | not available |
+| stress error (pressure) | nspin=1, no symmetry | not available | not available |
+| stress error (full tensor) | not available (deferred) | not available | not available |
 | SCF error (screened) | nspin=1 insulator, no symmetry | not available | not available |
 | SCF error (unscreened bound) | nspin=1, nspin=2 | not available | not available |
 | smearing error | any smeared run (all schemes) | any smeared run | any smeared run |
