@@ -37,7 +37,6 @@ Three terms, each with a different structure:
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import torch
@@ -306,7 +305,7 @@ def estimate_kpoint_error(nkpts, energies, *,
         e_inf = _extrapolate_fit(pts, en, p)
 
     per_mesh = [{"nk": int(n), "energy_eV": e, "error_eV": e - e_inf}
-                for n, e in zip(pts, en)]
+                for n, e in zip(pts, en, strict=True)]
     return {
         "e_infinity_eV": e_inf,
         "error_eV": en[-1] - e_inf,        # residual of the finest mesh
@@ -329,7 +328,7 @@ def _extrapolate_fit(pts, en, p):
     sa = sum(a)
     saa = sum(ai * ai for ai in a)
     se = sum(en)
-    sae = sum(ai * ei for ai, ei in zip(a, en))
+    sae = sum(ai * ei for ai, ei in zip(a, en, strict=True))
     det = m * saa - sa * sa
     if abs(det) < 1e-300:
         return en[-1]

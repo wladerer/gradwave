@@ -714,7 +714,6 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     vol = grid.volume
     dev = system.positions.device
     nk = len(system.spheres)
-    shape = grid.shape
 
     if start_from is not None:
         # shared grid/nspin validation + volume-ratio rescale (electron count

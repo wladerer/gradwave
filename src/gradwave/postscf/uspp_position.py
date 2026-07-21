@@ -40,9 +40,9 @@ from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.postscf._anderson import AndersonMixer
 from gradwave.postscf._response import fxc_hvp
+from gradwave.postscf.newton import _pack, _unpack
 from gradwave.postscf.uspp_frozen import aug_density_from_becsum
 from gradwave.postscf.uspp_implicit import _check_supported, _ConvergedUSPP
-from gradwave.postscf.newton import _pack, _unpack
 
 
 def _dvloc_r(system, a: int, alpha: int) -> torch.Tensor:
@@ -403,7 +403,7 @@ def hessian_column(res: dict, xc, a: int, alpha: int, *,
         raise NotImplementedError("hessian_column: insulators only")
     system = res["system"]
     grid = system.grid
-    vol, shape = grid.volume, grid.shape
+    vol = grid.volume
     kw = system.kweights
     rkw = dict(response_kw or {})
     rkw.setdefault("verbose", verbose)

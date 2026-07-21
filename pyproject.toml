@@ -29,6 +29,7 @@ dev = [
     "pytest-xdist",
     "ruff>=0.6",
     "sympy>=1.12",
+    "pre-commit>=3.5",
     # libxc oracle for the r2SCAN pointwise tests (bundles libxc via its wheel);
     # tests importorskip it, so it is optional — this just enables them in CI.
     "pyscf>=2.4",
@@ -51,6 +52,9 @@ packages = ["src/gradwave"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# -n auto parallelizes across cores via pytest-xdist; pass -n0 to disable when
+# debugging a single test and interleaved output gets in the way.
+addopts = "-q -n auto"
 markers = [
     "standard: seconds-class integration tests, excluded from the fast gate",
     "slow: minutes-class QE-comparison tests, nightly or pre-release",

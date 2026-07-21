@@ -51,11 +51,11 @@ from gradwave.scf.common import (
 )
 from gradwave.scf.guess import sad_density
 from gradwave.scf.mixing import PulayMixer
-from gradwave.scf.results import USPPNCResult
 from gradwave.scf.paw_noncollinear import (
     onsite_nc_energy_and_ddd,
     spinor_onsite_becsum,
 )
+from gradwave.scf.results import USPPNCResult
 from gradwave.scf.spinor_common import (
     apply_local_spinor,
     pauli_density_accumulate,

@@ -8,10 +8,10 @@ state the reference pseudopotential is designed to give.
 Reads results/delta_summary.json. Agg backend (headless); 16 pt.
 """
 import json
-import sys
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
@@ -37,7 +37,7 @@ def main():
     ax.bar(x - 0.21, np.minimum(gw, ycap), 0.42, color=BLUE, label="gradwave")
     ax.bar(x + 0.21, np.minimum(pd, ycap), 0.42, color=GRAY,
            label="PseudoDojo (ABINIT)")
-    for xi, g, p in zip(x, gw, pd):  # numeric labels on bars clipped by the cap
+    for xi, g, p in zip(x, gw, pd, strict=True):  # numeric labels on bars clipped by the cap
         if g > ycap:
             ax.text(xi - 0.21, ycap + 0.02, f"{g:.1f}", ha="center", va="bottom",
                     fontsize=12, color=BLUE)

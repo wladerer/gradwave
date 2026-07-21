@@ -122,7 +122,7 @@ def test_compiled_spin_vxc_matches_eager():
     for cls, needs in [(LSDA_PW92, False), (SpinPBE, True)]:
         eager, comp = cls(), cls().enable_compile()
 
-        def go(xc):
+        def go(xc, needs=needs):
             a = ru.detach().requires_grad_(True)
             b = rd.detach().requires_grad_(True)
             if needs:

@@ -7,16 +7,16 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import torch
 
 SP = Path(__file__).parent
 sys.path.insert(0, str(SP))
-from gap import (differentiable_hybrid_gap, exx_energy_from_diagonal,  # noqa: E402
-                 vbm_cbm)
+from gap import differentiable_hybrid_gap, exx_energy_from_diagonal, vbm_cbm  # noqa: E402
 
-from gradwave.postscf.exchange_multik import (HybridExchangeParams,  # noqa: E402
-                                              multik_exchange_energy,
-                                              occupied_periodic_orbitals)
+from gradwave.postscf.exchange_multik import (  # noqa: E402
+    HybridExchangeParams,
+    multik_exchange_energy,
+    occupied_periodic_orbitals,
+)
 from gradwave.postscf.hybrid import hybrid_scf  # noqa: E402
 from gradwave.pseudo.upf import parse_upf  # noqa: E402
 from gradwave.scf.loop import setup_system  # noqa: E402
@@ -69,7 +69,8 @@ print(f"  gap value: differentiable {float(g):.6f}  vs  converged {gap_of(res):.
 # 3) frozen-orbital dgap/dα, dgap/dω  vs  FD of re-converged hybrids
 params.zero_grad(set_to_none=True)
 differentiable_hybrid_gap(res, params).backward()
-al = float(params.alpha.detach()); om = float(params.omega.detach())
+al = float(params.alpha.detach())
+om = float(params.omega.detach())
 dga_frozen = float(params.raw_alpha.grad) / (al * (1 - al))
 dgo_frozen = float(params.raw_omega.grad) / (1 - np.exp(-om))
 

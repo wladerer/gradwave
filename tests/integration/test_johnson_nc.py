@@ -7,7 +7,6 @@ import pytest
 from gradwave.core.xc.pbe import PBE
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
-
 from tests.helpers import pseudo
 
 RY = 13.605693122994

@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+
 from tests.helpers import RY, si_fcc
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
@@ -125,6 +126,10 @@ magnetism: {{exchange: false, lam: 6.0, ref_atom: 1}}
 
 
 def test_analysis_frames_and_plots(tmp_path):
+    # analysis pulls in pandas/matplotlib (the `analysis` optional extra); skip
+    # rather than fail the fast gate when they are not installed.
+    pytest.importorskip("pandas")
+    pytest.importorskip("matplotlib")
     from gradwave import analysis
 
     s = _canned_summary()

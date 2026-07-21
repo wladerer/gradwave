@@ -3,15 +3,15 @@
 Equation-of-state reproducibility across the cubic elements, gradwave against
 the all-electron WIEN2k reference of the Δ-factor benchmark (Lejaeghere et al.,
 *Science* **351**, aad3000, 2016), using PseudoDojo NC-SR-v0.4 PBE (standard)
-pseudopotentials. This is the breadth companion to `benchmarks/lejaeghere/`,
-which runs a five-element PAW feature-matrix subset; here the goal is coverage —
-alkali, alkaline-earth, simple, refractory, noble, and Pt-group metals plus the
-group-IV semiconductors, spanning s, p, and d valence.
+pseudopotentials. `benchmarks/lejaeghere/` runs a five-element PAW
+feature-matrix subset. This benchmark covers breadth instead: alkali,
+alkaline-earth, simple, refractory, noble, and Pt-group metals plus the group-IV
+semiconductors, spanning s, p, and d valence.
 
 ## What is measured
 
 For each element, E(V) at seven volumes from 94 % to 106 % of the all-electron
-equilibrium volume, a third-order Birch-Murnaghan fit, and the calcDelta-3.0 Δ:
+equilibrium volume, a third-order Birch-Murnaghan fit, and the calcDelta-3.0 Δ,
 the RMS difference of the two fitted curves (each shifted to its own minimum)
 over the ±6 % window around the average equilibrium volume, per atom.
 
@@ -33,14 +33,15 @@ rhombohedral As/Bi, graphite C) are out of scope. Ferromagnetic Fe (bcc) and Ni
 (fcc) run with `mixing_scheme="johnson"` and an energy-tail criterion, which
 holds the moment where the default mixer collapses it to the nonmagnetic branch
 near the Stoner instability (fcc Ni). Cr is antiferromagnetic and needs a 2-atom
-cell — not the 1-atom bcc primitive here — so it stays out.
+cell rather than the 1-atom bcc primitive here, so it stays out.
 
 ## Settings
 
 `ecut` is 2× the PseudoDojo "high" hint per element (a well-converged EOS, so
-the residual Δ is pseudization, not basis truncation); `ecutrho = 4·ecut` for
-norm-conserving. Metals use a 16³ Γ-centred mesh reduced to the irreducible
-wedge and a 0.136 eV gaussian smearing; the group-IV semiconductors use 8³, and
+the residual Δ comes from pseudization rather than basis truncation).
+`ecutrho = 4·ecut` for norm-conserving. Metals use a 16³ Γ-centred mesh reduced
+to the irreducible wedge and a 0.136 eV gaussian smearing; the group-IV
+semiconductors use 8³, and
 Ge/Sn a whisker of smearing because PBE closes their gap. One FFT grid per
 element, the elementwise max over the seven volumes, so E(V) is not stepped by a
 grid change. Volumes warm-start along the chain.
@@ -76,39 +77,40 @@ table is `results/delta_summary.json`.
 The magnetic pair validates the johnson mixer: **Ni sits at V0 +0.35 %, B0
 −0.2 %** (Δ 1.65) with the moment held at 0.70 μB, and **Fe tracks PseudoDojo's
 own dfact (5.42 vs 5.60)** with the moment growing physically from 2.13 μB
-(compressed) to 2.40 μB (expanded). Fe's large Δ is the pseudopotential — both
-codes agree it is a high-Δ element — not a gradwave error.
+(compressed) to 2.40 μB (expanded). Fe's large Δ comes from the pseudopotential
+rather than a gradwave error, and both codes place it as a high-Δ element.
 
 Two features of the data are worth reading correctly.
 
 - **The elevated transition-metal Δ (Pt 2.7, Pd 2.1, Ir 1.9) is the stiff-metal
-  floor of the metric, not error.** The calcDelta Δ scales with B0, so a hard
+  floor of the metric rather than error.** The calcDelta Δ scales with B0, so a hard
   metal inherits a larger Δ for the same fractional accuracy: Ir (B0 = 348 GPa,
   |ΔV0| = 0.17 %) gives Δ 1.9 while Ag (B0 = 90 GPa, |ΔV0| = 0.00 %) gives 0.08.
   Their fractional V0/B0 errors are excellent. PseudoDojo's own dfacts show the
   same B0 ordering.
 
-- **Cu is a defective pseudopotential file, not a gradwave error** — see
-  `results/cu_anomaly.md`. A matched QE run on the same PseudoDojo `Cu.upf`
+- **Cu is a defective pseudopotential file rather than a gradwave error**
+  (see `results/cu_anomaly.md`). A matched QE run on the same PseudoDojo `Cu.upf`
   reproduces gradwave's stiff EOS to 0.08 meV (B0 167 in both codes vs 141
   all-electron), and SG15 Cu in the same harness gives a normal Δ = 1.33. The
   standard-tarball UPF disagrees with all-electron *and* with PseudoDojo's own
-  psp8 dfact (0.53), and it fails identically in QE. This is the two-axis check
-  of `docs/manual/wisdom.md`: bad on the all-electron axis (pseudization),
-  exact on the QE axis (implementation).
+  psp8 dfact (0.53), and it fails identically in QE. The two-axis check of
+  `docs/manual/wisdom.md` applies: Cu is bad on the all-electron axis
+  (pseudization) and exact on the QE axis (implementation).
 
 ### Practical notes recorded during the campaign (`results/timing.json`)
 
 - **Device.** For these norm-conserving many-k cells the RTX 3050 beats the
   22-core CPU 2.6–5.6× (Al/Cu/Si), because 145 irreducible k-points batch into
-  the fp64 units — the opposite of the low-k PAW-metal guidance in
+  the fp64 units, the opposite of the low-k PAW-metal guidance in
   `docs/manual/performance.md`. Energies are bit-identical across devices. An
-  8-core laptop CPU, by contrast, ran Ge at 435 s/vol vs ~8 s/vol on the GPU;
+  8-core laptop CPU, by contrast, ran Ge at 435 s/vol vs ~8 s/vol on the GPU, so
   offload to a slow CPU only when the GPU cannot fit the job.
 - **Memory.** The batched apply holds `n_k^IBZ · n_band · ∏nᵢ` complex128, and
   the grid is `nᵢ ∝ |aᵢ|·√E_cut`, so big-cell low-Z elements (K, 54³) overflow
-  6 GB before compact high-Z ones (Cu, 36³). The fix is k-density scaling: K/Sr
+  6 GB before compact high-Z ones (Cu, 36³). The fix is k-density scaling. K/Sr
   use 12³ (matching the reciprocal-space density of the ~3.6 Å cells at 16³),
   which is both more correct and fits the card.
-- **Cutoff.** `ecut = the PseudoDojo high hint` is EOS-converged here — Cu at
-  140 Ry reproduces 104 Ry to the digit, so the outlier is not basis error.
+- **Cutoff.** `ecut = the PseudoDojo high hint` is EOS-converged here. Cu at
+  140 Ry reproduces 104 Ry to the digit, so the outlier does not come from basis
+  truncation.

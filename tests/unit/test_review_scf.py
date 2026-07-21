@@ -16,7 +16,6 @@ from gradwave.scf import local_tf
 from gradwave.scf.mixing import BroydenMixer, JohnsonMixer, PulayMixer
 from gradwave.scf.uspp_loop import _build_mixer, _resolve_start_mag
 
-
 # ---- fix 10: local_tf uses the shared Bohr radius ------------------------
 
 def test_local_tf_bohr_is_shared_constant():

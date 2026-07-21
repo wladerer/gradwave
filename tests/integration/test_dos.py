@@ -10,7 +10,6 @@ from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.postscf.dos import kpm_dos
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
-
 from tests.helpers import RY, pseudo, si_fcc
 
 pytestmark = pytest.mark.standard
