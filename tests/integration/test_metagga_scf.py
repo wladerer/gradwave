@@ -11,18 +11,25 @@ intrinsic rather than vs-QE:
     (Hellmann–Feynman) identity dE_total/dλ = ∫τ on the converged state. That
     holds only if the τ operator wired into H is exactly ∂E_xc/∂ψ*, i.e. the
     generalized-KS scheme is variationally self-consistent at SCF scale.
-  * nspin=2 meta-GGA is guarded off until the spin path lands.
+  * the same two gates on the nspin=2 spin path (fcc Al), where the per-channel
+    operator −½∇·(v_τσ∇ψ_σ) acts on each spin's orbitals.
 """
 
+from pathlib import Path
+
+import numpy as np
 import pytest
 import torch
 
 from gradwave.core.metagga import tau_b
 from gradwave.core.xc.pbe import PBE
+from gradwave.core.xc.spin import SpinPBE
 from gradwave.dtypes import CDTYPE
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
 from tests.helpers import RY, pseudo, si_fcc
+
+FIX = Path(__file__).parents[1] / "fixtures" / "qe"
 
 
 class _MetaFlat(PBE):
@@ -52,10 +59,44 @@ class _MetaLinearTau(PBE):
         return e
 
 
+class _SpinMetaFlat(SpinPBE):
+    """needs_tau=True SpinXC whose energy ignores τ↑/τ↓ — spin-PBE limit."""
+
+    needs_tau = True
+
+    def energy_density(self, rho_up, rho_dn, sigma_uu=None, sigma_dd=None,
+                       sigma_tot=None, tau_up=None, tau_dn=None):
+        return super().energy_density(rho_up, rho_dn, sigma_uu, sigma_dd, sigma_tot)
+
+
+class _SpinMetaLinearTau(SpinPBE):
+    """Spin-PBE plus λ·(τ↑ + τ↓): a per-channel constant v_τ = λ."""
+
+    needs_tau = True
+
+    def __init__(self, lam: float = 0.0):
+        super().__init__()
+        self.lam = lam
+
+    def energy_density(self, rho_up, rho_dn, sigma_uu=None, sigma_dd=None,
+                       sigma_tot=None, tau_up=None, tau_dn=None):
+        e = super().energy_density(rho_up, rho_dn, sigma_uu, sigma_dd, sigma_tot)
+        if tau_up is not None and self.lam != 0.0:
+            e = e + self.lam * (tau_up + tau_dn)
+        return e
+
+
 def _system():
     cell, pos = si_fcc()
     upf = parse_upf(pseudo("Si_ONCV_PBE-1.2.upf"))
     return setup_system(cell, pos, [0, 0], [upf], ecut=18 * RY, kmesh=(1, 1, 1), nbands=8)
+
+
+def _al_spin_system():
+    FCC = np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    al = parse_upf(FIX / "pseudos" / "Al_ONCV_PBE-1.2.upf")
+    return setup_system(4.05 / 2 * FCC, np.zeros((1, 3)), [0], [al],
+                        ecut=20 * RY, kmesh=(2, 2, 2), nbands=10)
 
 
 def _integrated_tau(res) -> float:
@@ -98,6 +139,7 @@ def test_linear_tau_metagga_converges_and_shifts(pbe_ref):
                - float(pbe_ref.energies.free_energy)) > 1e-3
 
 
+@pytest.mark.slow
 def test_stationary_energy_derivative(pbe_ref):
     """dE_total/dλ = ∫τ on the converged state (stationary-energy theorem).
 
@@ -120,7 +162,31 @@ def test_stationary_energy_derivative(pbe_ref):
     assert abs(fd - int_tau) < 1e-3 * max(abs(int_tau), 1.0)
 
 
-def test_nspin2_metagga_guarded():
-    with pytest.raises(NotImplementedError):
-        scf(_system(), _MetaFlat(), smearing="gaussian", width=0.1, nspin=2,
-            verbose=False, max_iter=1)
+@pytest.fixture(scope="module")
+def spin_pbe_ref():
+    res = scf(_al_spin_system(), SpinPBE(), smearing="gaussian", width=0.1,
+              etol=1e-10, rhotol=1e-9, verbose=False, nspin=2, start_mag=[0.0])
+    assert res.converged
+    return res
+
+
+@pytest.mark.slow
+def test_spin_tau_flat_reduces_to_spin_pbe(spin_pbe_ref):
+    """A τ-flat spin meta-GGA is the spin-PBE nspin=2 SCF bit-for-bit."""
+    res = scf(_al_spin_system(), _SpinMetaFlat(), smearing="gaussian", width=0.1,
+              etol=1e-10, rhotol=1e-9, verbose=False, nspin=2, start_mag=[0.0])
+    assert res.converged
+    assert abs(float(res.energies.free_energy)
+               - float(spin_pbe_ref.energies.free_energy)) < 1e-8
+
+
+@pytest.mark.slow
+def test_spin_linear_tau_converges_and_shifts(spin_pbe_ref):
+    """A genuine per-channel τ term converges on the nspin=2 path and moves the
+    energy — the per-spin generalized-KS operator is acting on both channels."""
+    res = scf(_al_spin_system(), _SpinMetaLinearTau(lam=0.05), smearing="gaussian",
+              width=0.1, etol=1e-10, rhotol=1e-9, verbose=False, nspin=2,
+              start_mag=[0.0], max_iter=100)
+    assert res.converged
+    assert abs(float(res.energies.free_energy)
+               - float(spin_pbe_ref.energies.free_energy)) > 1e-3
