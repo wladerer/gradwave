@@ -8,17 +8,26 @@ model error, which is not reachable from inside a run (see docs/ideas.md).
 
 Three terms, each with a different structure:
 
-  SCF convergence error. Stopping the iteration at finite ``rhotol`` leaves a
-  density residual r = rho_out - rho_in. Because the energy is stationary at the
-  fixed point, the energy error is second order in r,
+  SCF convergence error. Stopping the iteration at finite ``rhotol`` leaves the
+  reported free energy a little above the fully self-consistent value E_inf. The
+  robust estimate reads this distance straight off the recorded energy
+  trajectory (``res.history``): in the convergence basin the tail is geometric,
+  E_i - E_inf ~ q^i, so the unobserved remainder sums to
+  E_inf - E_last ~ dE_last * q / (1 - q) with q the ratio of the last energy
+  steps. This needs one run and no response solve, and -- because it only reads
+  the recorded energies -- it works for every system (metal, spin, symmetry,
+  USPP, noncollinear), reporting a non-negative ``denergy``.
 
-      dE_scf = (1/2) <r | K_Hxc | (1 - chi0 K_Hxc)^-1 r>,
-
-  the Hartree-XC energy of the residual density screened by the SCF dielectric
-  operator. Both operators are the response primitives ``scf/implicit.py``
-  already exposes for the Dyson dressing, so no new SCF is taken. The screened
-  form needs chi0 (insulator, nspin=1, no symmetry); elsewhere the unscreened
-  (1/2)<r | K_Hxc | r> is reported as an overestimate.
+  A second-order response form is also available as a DIAGNOSTIC when ``xc`` and
+  the collinear response primitives are supplied. Because the energy is
+  stationary at the fixed point the error is second order in the density
+  residual r = rho_out - rho_in, and the exact form is
+  (1/2)<x | (K_Hxc - chi0^-1) | x> with x = (1 - chi0 K_Hxc)^-1 r the
+  dielectric-dressed residual. The code can only form the historical
+  (1/2)<r | K_Hxc (1 - chi0 K_Hxc)^-1 | r>, which omits the chi0^-1
+  kinetic-response term (it needs a near-singular chi0^-1 solve; see
+  docs/ideas.md) and is therefore NOT sign-definite. It is kept as a diagnostic
+  and never drives the headline estimate.
 
   Smearing error. A finite electronic temperature sigma reports the free energy
   F = E - sigma*S instead of the sigma->0 energy. The scheme-matched
@@ -38,6 +47,7 @@ Three terms, each with a different structure:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from statistics import median
 
 import torch
 
@@ -56,6 +66,7 @@ __all__ = [
     "SmearingError",
     "estimate_kpoint_error",
     "estimate_scf_error",
+    "estimate_scf_error_bracket",
     "estimate_smearing_error",
 ]
 
@@ -147,87 +158,175 @@ def estimate_smearing_error(res: SCFResult, *, scheme: str,
 class ScfConvergenceError:
     """Estimated energy error from stopping the SCF at finite tolerance.
 
-    ``denergy`` estimates the distance of the reported energy above the fully
-    self-consistent value: E_converged ~= free_energy - denergy. It is the
-    screened second-order form when available, else the unscreened one
-    (``screened`` records which). ``residual_norm`` is the L1 norm of the
-    density residual per electron, the same convergence proxy the SCF prints.
+    ``denergy`` (>= 0) is the robust headline: the magnitude of the distance
+    between the reported free energy and the fully self-consistent value E_inf,
+    extrapolated from the SCF energy trajectory as a geometric tail (see
+    ``_extrapolate_energy_tail``). ``energy_converged_estimate`` is that
+    extrapolated E_inf. Because it reads only the recorded energies it needs no
+    response solve and works for every system. ``reliable`` is False when the
+    tail is too short or not geometrically converging; then ``denergy`` falls
+    back to the last |dF|, a crude upper proxy -- treat it as order-of-magnitude
+    only. ``ratio`` is the fitted geometric ratio and ``n_tail`` the number of
+    energy steps it used.
 
-    KNOWN LIMITATION (both forms): denergy is NOT sign-definite and can come out
-    negative, so it is unreliable in magnitude and sign. The true second-order
-    energy error is 1/2<x|(K_Hxc - chi0^-1)|x> with x the dielectric-dressed
-    density error, but the code computes 1/2<r|K_Hxc (1-chi0 K)^-1|r>, which
-    omits the chi0^-1 kinetic-response term (and 1/2<r|K_Hxc|r> for the
-    unscreened form is indefinite because f_xc < 0). A correct estimate needs a
-    chi0-inverse solve that is numerically intractable by direct CG (chi0 is
-    near-singular for an insulator). Tracked; see the xfail'd tests in
-    tests/integration/test_convergence_error.py for the full derivation.
+    The response-based second-order form is exposed only as a DIAGNOSTIC, and
+    only when ``xc`` (and the collinear response primitives) are supplied:
+    ``denergy_response`` is the historical 1/2<r|K_Hxc (1-chi0 K)^-1|r> (screened
+    if ``screened`` else the unscreened 1/2<r|K_Hxc|r>), and ``denergy_unscreened``
+    the unscreened value. NEITHER is sign-definite: the exact second-order error
+    is 1/2<x|(K_Hxc - chi0^-1)|x> and both diagnostics omit the chi0^-1
+    kinetic-response term, so they can come out negative. They are kept for
+    analysis and never drive ``denergy``; see docs/ideas.md and the module
+    docstring for the derivation.
     """
 
-    denergy: float               # eV, screened if available else unscreened
-    denergy_unscreened: float    # eV, (1/2)<r|K_Hxc|r>; NOT sign-definite (see above)
-    residual_norm: float         # int|r| per electron
-    screened: bool               # True if the dielectric-screened value is used
-    energy_converged_estimate: float  # free_energy - denergy [eV]
-    last_de: float               # last |dF| from the SCF history (bracket cross-check)
+    denergy: float               # eV, robust extrapolated |F - E_inf| (>= 0)
+    energy_converged_estimate: float  # eV, extrapolated E_inf
+    residual_norm: float         # int|r| per electron (nan if no residual stored)
+    reliable: bool               # True if the geometric extrapolation is trustworthy
+    ratio: float                 # fitted geometric ratio q of the energy tail (nan if unused)
+    n_tail: int                  # energy steps used in the extrapolation
+    last_de: float               # last |dF| from the SCF history (crude fallback proxy)
+    screened: bool               # True if the response diagnostic used the screened form
+    denergy_response: float | None    # eV, response diagnostic; NOT sign-definite (None if unset)
+    denergy_unscreened: float | None  # eV, unscreened response diagnostic (None if unset)
+
+
+def _extrapolate_energy_tail(history, *, min_iter: int = 4, max_tail: int = 4):
+    """Estimate (E_inf - E_last, |E_inf - E_last|, q, n_tail, reliable) from the
+    tail of an SCF free-energy trajectory.
+
+    Models the converged tail as geometric, E_i - E_inf ~ q^i, and sums the
+    unobserved remainder: E_inf - E_last ~ dE_last * q / (1 - q), with q the
+    median of the last few consecutive energy steps. A SIGNED q handles both
+    monotone (q > 0) and oscillatory (q < 0) convergence. ``reliable`` is False
+    when the history is shorter than ``min_iter``, when fewer than two step
+    ratios are available, or when the tail is not clearly contracting
+    (|q| >= 0.95); in those cases it returns the last signed step as a crude
+    upper proxy for the remainder.
+    """
+    energies = [float(h["free_energy"]) for h in history]
+    steps = [energies[i] - energies[i - 1] for i in range(1, len(energies))]
+    last = steps[-1] if steps else 0.0
+    if last == 0.0:                                  # already at the energy floor
+        return 0.0, 0.0, float("nan"), 0, True
+    ratios = [steps[i] / steps[i - 1]
+              for i in range(1, len(steps)) if steps[i - 1] != 0.0]
+    if len(ratios) < 2:                              # too short to fit a ratio
+        return last, abs(last), float("nan"), len(steps), False
+    tail = ratios[-max_tail:]
+    q = median(tail)
+    if not abs(q) < 0.999:                           # not contracting: proxy only
+        return last, abs(last), q, len(tail), False
+    remaining = last * q / (1.0 - q)
+    reliable = (len(energies) >= min_iter and abs(q) < 0.95
+                and all(abs(rt) < 1.0 for rt in tail))
+    return remaining, abs(remaining), q, len(tail), reliable
 
 
 @torch.no_grad()
-def estimate_scf_error(res: SCFResult, xc, *,
+def estimate_scf_error(res: SCFResult, xc=None, *,
                        screened: bool | None = None,
                        dyson_beta: float = 0.4,
                        dyson_tol: float = 1e-7,
                        dyson_max_iter: int = 80) -> ScfConvergenceError:
     """Estimate the SCF (self-consistency) energy error of a converged run.
 
-    Uses the stored last-step density residual r = rho_out - rho_in
-    (``res.drho_scf``) and the Hartree-XC kernel K_Hxc. The unscreened estimate
-    (1/2)<r|K_Hxc|r> is always available; the screened estimate divides out the
-    SCF dielectric operator via one Dyson solve x = (1 - chi0 K_Hxc)^-1 r and
-    forms (1/2)<x|K_Hxc|r>, which requires chi0 (insulator, nspin=1, no
-    symmetry). ``screened=None`` tries the screened form and falls back to the
-    unscreened one; ``screened=False`` forces the cheap overestimate.
+    The headline ``denergy`` extrapolates the recorded energy trajectory
+    (``res.history``) as a geometric tail -- see ``_extrapolate_energy_tail``.
+    It needs one run, no response solve, and works for every system, returning a
+    non-negative distance to the fully self-consistent energy.
 
-    Cross-check: run the SCF to a loose and a tight ``rhotol`` and compare the
-    loose ``denergy`` against F_loose - F_tight (the way the eigenvalue error
-    cross-checks against ``denergy``).
+    ``xc`` is optional. When supplied (and the collinear response primitives
+    apply -- insulator, nspin=1, no symmetry), the second-order response
+    DIAGNOSTIC is also computed from the stored residual r = rho_out - rho_in
+    (``res.drho_scf``): the unscreened 1/2<r|K_Hxc|r> and, unless
+    ``screened=False``, the screened 1/2<x|K_Hxc|r> with x = (1 - chi0 K)^-1 r.
+    Both are reported as ``denergy_response``/``denergy_unscreened`` and are NOT
+    sign-definite (they omit the chi0^-1 term); they never drive ``denergy``.
+    ``screened=True`` forces the screened diagnostic (re-raising if chi0 is
+    unavailable); ``screened=None`` tries it and falls back to the unscreened one.
+
+    Cross-check: for a ground-truth number run the SCF to a loose and a tight
+    tolerance and pass both to ``estimate_scf_error_bracket``.
     """
-    if res.drho_scf is None:
+    if not res.history:
         raise ValueError(
-            "no SCF residual stored on this result (drho_scf is None): re-run "
-            "the SCF with the current gradwave to populate it")
-    system = res.system
-    grid = system.grid
-    vol, npts = grid.volume, grid.n_points
-    r = res.drho_scf.to(RDTYPE)
-
-    kr = apply_k_hxc(res, xc, r)                 # physical potential [eV] of r
-    cell = vol / npts
-    denergy_unscreened = 0.5 * float((r * kr).sum()) * cell
-
-    used_screened = False
-    denergy = denergy_unscreened
-    if screened is not False:
-        try:
-            x = _dyson_solve(res, xc, r, beta=dyson_beta, tol=dyson_tol,
-                             max_iter=dyson_max_iter)
-            denergy = 0.5 * float((x * kr).sum()) * cell
-            used_screened = True
-        except (NotImplementedError, DysonNotConverged):
-            if screened is True:
-                raise
-    nelec = float(system.n_electrons)
-    res_norm = float(r.abs().sum()) * cell / nelec
-    last_de = float(res.history[-1]["dE"]) if res.history else float("nan")
+            "no SCF history stored on this result: cannot extrapolate the "
+            "self-consistency energy error")
+    remaining, denergy, q, n_tail, reliable = _extrapolate_energy_tail(res.history)
     free = float(res.energies.free_energy)
+    last_de = float(res.history[-1]["dE"])
+
+    # Optional response diagnostic (not sign-definite; never the headline).
+    denergy_response = None
+    denergy_unscreened = None
+    used_screened = False
+    res_norm = float("nan")
+    if xc is not None and res.drho_scf is not None:
+        grid = res.system.grid
+        cell = grid.volume / grid.n_points
+        r = res.drho_scf.to(RDTYPE)
+        kr = apply_k_hxc(res, xc, r)                 # physical potential [eV] of r
+        denergy_unscreened = 0.5 * float((r * kr).sum()) * cell
+        denergy_response = denergy_unscreened
+        if screened is not False:
+            try:
+                x = _dyson_solve(res, xc, r, beta=dyson_beta, tol=dyson_tol,
+                                 max_iter=dyson_max_iter)
+                denergy_response = 0.5 * float((x * kr).sum()) * cell
+                used_screened = True
+            except (NotImplementedError, DysonNotConverged):
+                if screened is True:
+                    raise
+        nelec = float(res.system.n_electrons)
+        res_norm = float(r.abs().sum()) * cell / nelec
+    elif screened is True:
+        raise ValueError(
+            "screened=True needs xc and a stored residual (res.drho_scf); "
+            "pass xc and re-run the SCF with the current gradwave to populate it")
+
     return ScfConvergenceError(
         denergy=denergy,
-        denergy_unscreened=denergy_unscreened,
+        energy_converged_estimate=free + remaining,
         residual_norm=res_norm,
-        screened=used_screened,
-        energy_converged_estimate=free - denergy,
+        reliable=reliable,
+        ratio=q,
+        n_tail=n_tail,
         last_de=last_de,
+        screened=used_screened,
+        denergy_response=denergy_response,
+        denergy_unscreened=denergy_unscreened,
     )
+
+
+def estimate_scf_error_bracket(res_loose: SCFResult, res_tight: SCFResult) -> dict:
+    """Ground-truth SCF error from a loose/tight pair of runs of the SAME system.
+
+    Returns the measured energy gap F_loose - F_tight (the reported energy's
+    distance above the tighter reference) alongside the loose run's extrapolated
+    estimate, so the single-run extrapolation can be checked against a real
+    second run. ``denergy`` is the measured gap; ``denergy_estimated`` is the
+    loose run's ``estimate_scf_error(res_loose).denergy``; ``ratio`` is their
+    quotient (near 1 when the estimate is on the money).
+
+    Run the tight SCF to a tolerance well below the loose one so F_tight is a
+    faithful stand-in for E_inf; the two runs must share cell, k-mesh, cutoff,
+    and functional.
+    """
+    f_loose = float(res_loose.energies.free_energy)
+    f_tight = float(res_tight.energies.free_energy)
+    measured = f_loose - f_tight
+    est = estimate_scf_error(res_loose)
+    denom = abs(measured) if abs(measured) > 0.0 else float("nan")
+    return {
+        "denergy": measured,
+        "denergy_estimated": est.denergy,
+        "energy_converged_estimate_eV": est.energy_converged_estimate,
+        "free_energy_tight_eV": f_tight,
+        "reliable": est.reliable,
+        "ratio": est.denergy / denom,
+    }
 
 
 @torch.no_grad()

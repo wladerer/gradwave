@@ -737,24 +737,33 @@ numerical errors are a solved problem in principle, the accuracy that matters is
 the functional, and the differentiable framework's advantage on that term is
 sensitivity and the density-driven half, not an absolute bar.
 
-**Smearing and k-point terms LANDED (2026-07-18); SCF-convergence term OPEN
-(formula wrong).** `postscf/convergence_error.py` holds three estimators.
-`estimate_smearing_error` (the scheme-matched `E0 = (E+F)/2` extrapolation with
-per-scheme caveats) and `estimate_kpoint_error` (mesh extrapolation
-`E(N_k) → E_inf`, the non-variational term that needs more than one run) are
-validated in `tests/integration/test_convergence_error.py`. Together with the
-Ecut estimate in `discretization_error.py`, those two plus the cutoff term are
-the trackable part of the numerical budget that is built.
+**Smearing and k-point terms LANDED (2026-07-18); SCF-convergence headline
+LANDED via trajectory extrapolation, exact response form still OPEN.**
+`postscf/convergence_error.py` holds three estimators. `estimate_smearing_error`
+(the scheme-matched `E0 = (E+F)/2` extrapolation with per-scheme caveats) and
+`estimate_kpoint_error` (mesh extrapolation `E(N_k) → E_inf`, the non-variational
+term that needs more than one run) are validated in
+`tests/integration/test_convergence_error.py`. Together with the Ecut estimate in
+`discretization_error.py`, those two plus the cutoff term are the trackable part
+of the numerical budget that is built.
 
-`estimate_scf_error` is **not** validated: its formula is wrong. The exact
-second-order residual energy is `1/2<x|(K_Hxc - chi0^-1)|x>` with `x` the
-dielectric-dressed density error, but the code forms
-`1/2<r|K_Hxc (1-chi0 K)^-1|r>`, which omits the `chi0^-1` kinetic-response term.
-The two SCF-error tests are marked `xfail(strict=True)`. Fixing it needs the
-exact Schur coupling, which is the same missing term as the coarse-space Dyson
-refinement of δρ in [todo.md](todo.md) — pin one and both resolve. The
-`chi0^-1` solve is numerically awkward by direct CG (chi0 is only known through
-its forward action), so this is a real piece of work, not a typo.
+`estimate_scf_error`'s headline is now the robust piece: it extrapolates the
+recorded free-energy trajectory (`res.history`) as a geometric tail,
+`E_inf - E_last ~ dE_last q/(1-q)`, giving a non-negative `denergy` and an
+extrapolated `E_inf` from one run for any system (no χ0 solve). It is validated
+by truncating a converged run's history and recovering the final energy, and by
+`estimate_scf_error_bracket` against a loose/tight pair. This sidesteps, rather
+than solves, the second-order response formula.
+
+That exact response form is **still** open. The exact second-order residual
+energy is `1/2<x|(K_Hxc - chi0^-1)|x>` with `x` the dielectric-dressed density
+error, but the code can only form `1/2<r|K_Hxc (1-chi0 K)^-1|r>`, which omits the
+`chi0^-1` kinetic-response term and is not sign-definite. It is retained only as
+a labelled diagnostic (`denergy_response`), never the headline. Pinning the exact
+Schur coupling is the same missing term as the coarse-space Dyson refinement of
+δρ in [todo.md](todo.md) — resolve one and both resolve. The `chi0^-1` solve is
+numerically awkward by direct CG (chi0 is only known through its forward action),
+so this is a real piece of work, not a typo.
 
 Also open from this section is the model-term tooling: the fractional-charge
 self-interaction probe (self-contained, no second functional) and the DC-DFT
