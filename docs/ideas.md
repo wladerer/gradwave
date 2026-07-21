@@ -274,15 +274,25 @@ space; only ∫e_xc(τ)dr on the grid is not), just larger than GGA — the know
 grid sensitivity. Meta-GGA forces therefore want a denser cutoff than GGA for the
 same accuracy, but are correct as-is (`tests/integration/test_r2scan_scf.py`).
 
-**What remains, in build order:** (1) the meta-GGA *stress* — unlike forces,
-strain scales the plane-wave basis (the G-vectors, hence ∇ψ and τ), so τ has an
-*explicit* strain dependence and the stress genuinely does need a τ term (open,
-being verified); (2) USPP/PAW τ (the one-center augmentation of τ); (3) meta-GGA
-on the non-collinear/SOC spinor path; (4) then a learnable r2SCAN-form functional
-(α, and the enhancement-factor parameters as trained tensors) and the
-`train_xc_paw` recovery test at meta-GGA level — now directly reachable since
-r2SCAN is already a differentiable autograd expression. The paragraphs below are
-the original framing, kept for the reasoning.
+**Meta-GGA stress LANDED (2026-07-21).** Unlike forces, the stress genuinely
+needs a τ term: strain scales the plane-wave basis (the G-vectors), so ∇ψ — and
+hence τ = ½Σf|∇ψ|² — has an *explicit* strain dependence a GGA (a functional of
+ρ, which only scales as 1/Ω) lacks. `stress._tau_strained` rebuilds τ from the
+strained (k+G) and the fixed coefficients on the autograd graph, so `stress()`
+now carries the meta-GGA term (`_energy_strained` passes it to `xc.energy`).
+Validated on Si (asus): the ε=0 strained energy reproduces the SCF total (5e-8);
+autograd stress equals a finite difference of the strained energy (1e-10); and —
+the independent physics check — the τ term is large (~0.57 eV/Å³, flipping the
+sign of the Si stress), and the fixed-basis stress converges to a *re-converged*
+FD (Pulay→0) at high cutoff to ~9e-6 eV/Å³. So the ideas.md prediction that
+stress (not forces) needs the τ term was correct, and it is now built and pinned.
+
+**What remains, in build order:** (1) USPP/PAW τ (the one-center augmentation of
+τ); (2) meta-GGA on the non-collinear/SOC spinor path; (3) then a learnable
+r2SCAN-form functional (α, and the enhancement-factor parameters as trained
+tensors) and the `train_xc_paw` recovery test at meta-GGA level — now directly
+reachable since r2SCAN is already a differentiable autograd expression. The
+paragraphs below are the original framing, kept for the reasoning.
 
 The learnable functional spans GGA form only, the two PBE parameters kappa and mu.
 Every modern accurate semilocal functional (SCAN, r2SCAN) is meta-GGA, which means
