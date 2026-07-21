@@ -1,26 +1,27 @@
 """Learned multi-pole Kerker preconditioner: iterations-to-convergence.
 
-Two parts, run either or both (``uv run python benchmarks/bench_learned_precond.py
-[synthetic|al|both]``, default both):
+Run one or all cases (``uv run python benchmarks/bench_learned_precond.py
+[synthetic|al|cu|fe|pt|both]``, default runs synthetic+al+cu+fe+pt):
 
-1. synthetic — a diagonal response with two length scales, where a single Kerker
-   pole is provably the wrong shape. Fits the multi-pole filter against the model
-   response by differentiating through the unrolled linear-mixing recurrence, and
-   reports the spectral radius and the implied iteration count against the best
-   single-pole Kerker. This isolates the mechanism from any DFT cost.
+- synthetic — a diagonal response with two length scales, where a single Kerker
+  pole is provably the wrong shape. Isolates the mechanism from any DFT cost.
+- al / cu — the full probe→fit→deploy loop on a real solver. A short plain-mixing
+  PROBE captures the residual history through `mixer_hook`, `response_from_
+  residuals` estimates d(G), `fit_multipole` fits the poles (DIIS-aware), and the
+  filter deploys as `scf(..., precond_op=...)`. Al ties (single-scale charge); Cu
+  wins (3s3p semicore → multi-scale charge).
+- fe — bcc Fe, collinear ferromagnet (nspin=2). Charge-channel filter on the total
+  block. The FM convergence bottleneck is the MAGNETIZATION channel, not charge, so
+  this is expected to tie-or-lose; it maps the limit, and motivates a separate mag-
+  channel operator (see docs/ideas.md).
+- pt — fcc Pt, nonmagnetic + spin-orbit (`scf_noncollinear`). Exercises the
+  precond_op wiring on the noncollinear driver; Pt's charge response is single-
+  scale so it ties, at a fixed point identical to Kerker's.
 
-2. al — the full loop on a real solver: a short plain-mixing PROBE run on fcc Al
-   captures the SCF residual history through the `mixer_hook`, `response_from_
-   residuals` estimates the per-shell response d(G), `fit_multipole` fits the
-   poles, and the fitted filter is deployed as `scf(..., precond_op=...)`. Reports
-   n_iter for bare Kerker vs the learned filter, and the energy difference (which
-   is zero to convergence — a preconditioner cannot move the fixed point).
-
-Iteration count, energy-gated for the metal, is the trustworthy metric for a
-solver-logic question (docs/manual/performance.md, and bench_precond.py). On a
-homogeneous bulk metal bare Kerker is already near-optimal (bench_precond.py finds
-local_tf neutral there too), so a radial filter is expected to tie on bulk Al; its
-headroom is systems whose G-space response carries more than one scale.
+Iteration count, energy-gated, is the trustworthy metric for a solver-logic
+question (docs/manual/performance.md, bench_precond.py). The filter's demonstrated
+headroom is systems whose CHARGE response carries more than one G-space scale; it
+does not by construction address a magnetization-channel bottleneck.
 """
 
 import sys
@@ -152,6 +153,122 @@ def run_metal(label, q0=1.1):
     print(f"  dF vs kerker = {f_l-f_ref:+.2e} eV  (same fixed point; only the path differs)")
 
 
+def _fit_charge_filter(res_total, g2_dens, q0=1.1, alpha_probe=0.7):
+    """Probe residuals (density-total block) → estimated d(G) → DIIS-aware fit →
+    deployable filter on the density sphere. Shared by every metal runner."""
+    kfac = g2_dens / (g2_dens + q0**2)
+    g2_shell, d_shell, count = response_from_residuals(
+        res_total, g2_dens, alpha_probe, n_bins=48, skip=2, precond_fac=kfac)
+    print(f"  probe {len(res_total)} residuals → d(G) over {len(d_shell)} shells, "
+          f"d in [{float(d_shell.min()):.2f}, {float(d_shell.max()):.2f}]")
+    P, _ = fit_multipole(g2_shell, d_shell, n_poles=3, alpha=0.7, mixer="diis",
+                         history=8, q0=q0, n_unroll=30, steps=700, weight=count)
+    P = P.rebind(g2_dens).detach_()
+    print(f"  fitted {P.summary()}")
+    return P
+
+
+def _verdict(learned_it, ref_it):
+    return ("win" if learned_it < ref_it else
+            "tie" if learned_it == ref_it else "loss")
+
+
+def run_fe():
+    """bcc Fe, collinear ferromagnet (nspin=2). The hard convergence here is the
+    MAGNETIZATION channel (Stoner mode); this tests only the charge-channel filter
+    on the total block, where Fe's 3s3p semicore gives a multi-scale response."""
+    print("\n=== bcc Fe (nspin=2 FM, johnson, 45 Ry, 6x6x6) ===")
+    from gradwave.core.xc.spin import SpinPBE
+    from gradwave.pseudo.upf import parse_upf
+    from gradwave.scf.loop import scf, setup_system
+    a = 2.87
+    fe = parse_upf(FIX / "Fe_ONCV_PBE-1.2.upf")
+    cell = a / 2 * np.array([[-1.0, 1, 1], [1, -1, 1], [1, 1, -1]])
+
+    def sys_():
+        return setup_system(cell, np.zeros((1, 3)), [0], [fe], ecut=45 * RY,
+                            kmesh=(6, 6, 6), nbands=12, use_symmetry=True)
+
+    common = dict(smearing="gaussian", width=0.1, nspin=2, start_mag=[0.4],
+                  verbose=False, rhotol=1e-5, etol=1e-8)
+    grid = sys_().grid
+    ng = int(grid.dens_mask.sum())
+    g2_dens = grid.g2.reshape(-1)[grid.dens_mask.reshape(-1)].to(RDTYPE)
+
+    t = time.perf_counter()
+    ref = scf(sys_(), SpinPBE(), mixing_alpha=0.7, mixing_scheme="johnson", **common)
+    dt = time.perf_counter() - t
+    print(f"  kerker            {ref.n_iter:3d} iters   m={ref.mag_total:+.3f} muB   {dt:.1f}s")
+
+    res_hist: list[torch.Tensor] = []
+
+    def hook(it, vin, vout):
+        res_hist.append((vout[:ng] - vin[:ng]).detach().clone())  # charge block
+
+    scf(sys_(), SpinPBE(), mixing_alpha=0.5, mixing_history=1, kerker=True,
+        max_iter=12, mixer_hook=hook, **common)
+    P = _fit_charge_filter([r for r in res_hist if len(r) == ng], g2_dens)
+
+    t = time.perf_counter()
+    learned = scf(sys_(), SpinPBE(), mixing_alpha=0.7, mixing_scheme="johnson",
+                  precond_op=P, **common)
+    dm = learned.mag_total - ref.mag_total
+    v = _verdict(learned.n_iter, ref.n_iter)
+    print(f"  learned filter    {learned.n_iter:3d} iters   m={learned.mag_total:+.3f} muB   "
+          f"{time.perf_counter()-t:.1f}s   [{v}]   dm={dm:+.1e}")
+
+
+def run_pt_soc():
+    """fcc Pt, nonmagnetic + spin-orbit (scf_noncollinear, m⃗≡0). No spin problem,
+    so the charge channel is the whole convergence story — a 5d + 5s5p-semicore
+    multi-scale response, the SOC analog of the Cu win, and it exercises the new
+    precond_op wiring on the noncollinear driver."""
+    print("\n=== fcc Pt (nonmagnetic + SOC, 45 Ry, 4x4x4) ===")
+    from gradwave.core.xc.noncollinear import NoncollinearXC
+    from gradwave.core.xc.spin import SpinPBE
+    from gradwave.pseudo.upf import parse_upf
+    from gradwave.scf.loop import setup_system
+    from gradwave.scf.noncollinear import scf_noncollinear
+    a = 3.92
+    pt = parse_upf(FIX / "Pt_ONCV_PBE_FR-1.0.upf")
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+
+    def sys_():
+        return setup_system(cell, np.array([[0.0, 0, 0]]), [0], [pt],
+                            ecut=45 * RY, kmesh=(4, 4, 4), nbands=16,
+                            use_symmetry=True)
+
+    xc = NoncollinearXC(SpinPBE())
+    common = dict(smearing="gaussian", width=0.1, nonmagnetic=True,
+                  mag_vec_init=[[0, 0, 0]], verbose=False, rhotol=1e-6, etol=1e-8)
+    grid = sys_().grid
+    ng = int(grid.dens_mask.sum())
+    g2_dens = grid.g2.reshape(-1)[grid.dens_mask.reshape(-1)].to(RDTYPE)
+
+    t = time.perf_counter()
+    ref = scf_noncollinear(sys_(), xc, mixing_alpha=0.7, **common)
+    f_ref = float(ref.energies.free_energy)
+    dt = time.perf_counter() - t
+    print(f"  kerker            {ref.n_iter:3d} iters   F={f_ref:+.4f} eV   {dt:.1f}s")
+
+    res_hist: list[torch.Tensor] = []
+
+    def hook(it, vin, vout):
+        res_hist.append((vout[:ng] - vin[:ng]).detach().clone())
+
+    scf_noncollinear(sys_(), xc, mixing_alpha=0.5, mixing_history=1,
+                     adaptive=False, max_iter=12, mixer_hook=hook, **common)
+    P = _fit_charge_filter([r for r in res_hist if len(r) == ng], g2_dens)
+
+    t = time.perf_counter()
+    learned = scf_noncollinear(sys_(), xc, mixing_alpha=0.7, precond_op=P, **common)
+    f_l = float(learned.energies.free_energy)
+    v = _verdict(learned.n_iter, ref.n_iter)
+    print(f"  learned filter    {learned.n_iter:3d} iters   F={f_l:+.4f} eV   "
+          f"{time.perf_counter()-t:.1f}s   [{v}]")
+    print(f"  dF vs kerker = {f_l-f_ref:+.2e} eV")
+
+
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "both"
     if which in ("synthetic", "both"):
@@ -160,3 +277,7 @@ if __name__ == "__main__":
         run_metal("al")
     if which in ("cu", "both"):
         run_metal("cu")
+    if which in ("fe", "magnetism", "both"):
+        run_fe()
+    if which in ("pt", "soc", "both"):
+        run_pt_soc()

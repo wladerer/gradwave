@@ -1098,6 +1098,39 @@ K_Hxc), which would make d exact and remove the probe SCF. And the filter is rad
 (G-only); the local-TF operator is spatial (r-only) — a learned operator that is
 both is the general form, and the two current preconditioners are its limits.
 
+Magnetism and SOC, and where the charge-channel filter stops (measured). The
+`precond_op` and `mixer_hook` hooks now reach `scf_noncollinear` too, so the filter
+deploys on the collinear nspin=2 path (total block) and the noncollinear/SOC path
+(charge block, m⃗ blocks keep their own step). Two systems mapped the boundary:
+fcc Pt nonmagnetic + SOC ties Kerker (9 vs 9) at a fixed point identical to 2e-11
+eV — the wiring is correct through the spinor SCF, and Pt's charge response is
+single-scale, so the fit reproduces Kerker, exactly as on Al. bcc Fe (nspin=2
+ferromagnet) loses (12 vs 13): the fit is on the CHARGE (total) block, but the FM
+convergence bottleneck is the MAGNETIZATION channel — the Stoner mode with the
+measured gain near −6 — which a charge-block operator cannot touch, and the noisy
+nspin=2 probe (plain damping wobbles the moment, so d clamps) gives a slightly weak
+charge fit that costs the extra iteration. This is the honest scope: the learned
+filter is a charge-multi-scale tool, and it neither helps nor is meant to help a
+magnetization-channel problem.
+
+That names the real magnetism lever, and it is exactly the operator wisdom.md asks
+for by name (the χ₀-diagonal preconditioner on the spin mode, not a schedule): a
+learned filter on the MAGNETIZATION block. It is a genuinely different object from
+Kerker. Kerker's G²/(G²+q0²) vanishes at G=0, which is correct for charge (the
+pinned total charge must not move) but wrong for magnetization — freezing the mag
+G=0 component pins the total moment and collapses the spin SCF (wisdom.md, spin
+section). The right form keeps G=0 alive but damped: f_mag(G²) = w0 + Σ w_i·G²/
+(G²+q_i²) with 0 < w0 < 1, where w0 damps the near-critical uniform Stoner mode (its
+spin susceptibility is large, so its inverse — the preconditioner — is small)
+without freezing it. Deployment is a `BlockPrecond` composite — Kerker on the total
+block, the learned f_mag on the mag block — over the packed (total, mag) vector, so
+the charge channel is unchanged. The test bed is fcc Ni near the Stoner boundary,
+the case where default damping silently collapses the moment; the risk is that the
+diagonal linear-response probe does not capture the Stoner nonlinearity, in which
+case the exact spin response from `scf/implicit.py` (the same χ₀ path noted above)
+is the fallback. The const-term filter, the block composite, and a mag-block probe
+are the three pieces; the charge infrastructure already carries the rest.
+
 # Done and resolved
 
 Kept for the reasoning. Each of these is either landed in the code or settled as a
