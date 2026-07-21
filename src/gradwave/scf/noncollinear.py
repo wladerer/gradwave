@@ -194,6 +194,9 @@ def scf_noncollinear(
     atom_weights=None,  # (na,*grid) Hirshfeld weights; required when constraining
     constrain_mode: str = "perp",  # "perp" (direction only) or "vector" (+magnitude)
     constrain_target_mag=None,  # per-atom |M| target [μB] for mode="vector"
+    precond_op=None,  # callable r→P·r on the density-total block (charge channel),
+    # overriding constant Kerker there — e.g. a fitted learned_precond filter
+    mixer_hook=None,  # research probe: called (it, vin, vout) each step pre-mix
 ) -> NCResult:
     # A plain RhoSymmetrizer (paramagnetic group) is only valid with m⃗ ≡ 0.
     # A MagneticSymmetrizer (setup_system(..., magmoms=...)) carries the
@@ -260,6 +263,12 @@ def scf_noncollinear(
         mixer = PulayMixer(torch.cat([g2_vec] * 4), alpha=mixing_alpha,
                            history=mixing_history, kerker=True, check_g0=False,
                            kerker_mask=kerker_mask, step_scale=base_step_scale)
+
+    if precond_op is not None:
+        # override constant Kerker on the density-total (charge) block; m⃗ blocks
+        # keep their own step (base_step_scale) and are untouched by this operator.
+        mixer.precond_op = precond_op
+        mixer.precond_slice = slice(0, ng)
 
     projs_b = projectors_b(bk, system.positions)
     q_so = dij_so = None
@@ -419,6 +428,8 @@ def scf_noncollinear(
                 if verbose:
                     print(f"  NC-SCF: residual stalled — mixing step x{adapt_mult:.2f}",
                           flush=True)
+        if mixer_hook is not None:
+            mixer_hook(it, vin, vout)
         mixed = mixer.step(vin, vout)
         fields = []
         for c4 in range(n_chan):
