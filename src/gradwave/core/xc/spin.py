@@ -49,22 +49,31 @@ def eps_c_pw92_spin(rho_au: torch.Tensor, zeta: torch.Tensor) -> torch.Tensor:
 
 
 class SpinXC(CompilableXC, torch.nn.Module):
-    """Base: maps per-spin grid densities (and gradients) to e_xc [eV/Å³]."""
+    """Base: maps per-spin grid densities (and gradients) to e_xc [eV/Å³].
+
+    Meta-GGAs additionally depend on the per-channel kinetic-energy densities
+    τ↑, τ↓ (needs_tau); their generalized-KS potentials v_{τσ} = ∂e/∂τ_σ act as
+    −½∇·(v_{τσ}∇ψ_σ) on each spin channel (see core.metagga)."""
 
     needs_gradient: bool = False
+    needs_tau: bool = False
 
-    def energy_density(self, rho_up, rho_dn, sigma_uu=None, sigma_dd=None, sigma_tot=None):
+    def energy_density(self, rho_up, rho_dn, sigma_uu=None, sigma_dd=None,
+                       sigma_tot=None, tau_up=None, tau_dn=None):
         raise NotImplementedError
 
-    def energy(self, rho_up, rho_dn, volume, sigma_uu=None, sigma_dd=None, sigma_tot=None):
-        e = self.eval_energy_density(rho_up, rho_dn, sigma_uu, sigma_dd, sigma_tot)
+    def energy(self, rho_up, rho_dn, volume, sigma_uu=None, sigma_dd=None,
+               sigma_tot=None, tau_up=None, tau_dn=None):
+        e = self.eval_energy_density(rho_up, rho_dn, sigma_uu, sigma_dd, sigma_tot,
+                                     tau_up, tau_dn)
         return e.sum() * (volume / e.numel())
 
 
 class LSDA_PW92(SpinXC):
     needs_gradient = False
 
-    def energy_density(self, rho_up, rho_dn, sigma_uu=None, sigma_dd=None, sigma_tot=None):
+    def energy_density(self, rho_up, rho_dn, sigma_uu=None, sigma_dd=None,
+                       sigma_tot=None, tau_up=None, tau_dn=None):
         ru, rd = _to_au(rho_up), _to_au(rho_dn)
         rho = ru + rd
         zeta = (ru - rd) / rho
@@ -83,7 +92,8 @@ class SpinPBE(SpinXC):
     kappa = KAPPA
     mu = MU
 
-    def energy_density(self, rho_up, rho_dn, sigma_uu=None, sigma_dd=None, sigma_tot=None):
+    def energy_density(self, rho_up, rho_dn, sigma_uu=None, sigma_dd=None,
+                       sigma_tot=None, tau_up=None, tau_dn=None):
         ru, rd = _to_au(rho_up), _to_au(rho_dn)
         rho = ru + rd
         zeta = (ru - rd) / rho

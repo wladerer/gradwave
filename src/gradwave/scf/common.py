@@ -135,13 +135,15 @@ def warm_start_densities(start_from, nspin, grid, vol, dev):
     return [r.detach().to(dev) * chg for r in _prev("rho_spin")]
 
 
-def spin_xc_energy(xc, rho_out_s, rho_core, vol, g_cart):
+def spin_xc_energy(xc, rho_out_s, rho_core, vol, g_cart, tau_s=None):
     """E_xc for the collinear nspin=2 energy assembly: the NLCC core is split
-    half/half into the spin channels; GGA sigmas via spin_sigmas."""
+    half/half into the spin channels; GGA sigmas via spin_sigmas. tau_s = [τ↑, τ↓]
+    for a meta-GGA (needs_tau), else None."""
     c2 = 0.0 if rho_core is None else 0.5 * rho_core
     r_u, r_d = rho_out_s[0] + c2, rho_out_s[1] + c2
     s_uu, s_dd, s_tt = spin_sigmas(r_u, r_d, xc, g_cart)
-    return xc.energy(r_u, r_d, vol, s_uu, s_dd, s_tt)
+    tu, td = (None, None) if (tau_s is None or not xc.needs_tau) else (tau_s[0], tau_s[1])
+    return xc.energy(r_u, r_d, vol, s_uu, s_dd, s_tt, tu, td)
 
 
 def assemble_pw_energies(coeffs_s, occ_s, kweights, spheres, grid, vol,

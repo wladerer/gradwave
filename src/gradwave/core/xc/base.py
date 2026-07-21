@@ -145,16 +145,33 @@ class XCFunctional(CompilableXC, torch.nn.Module):
     """Base class. Subclasses implement energy_density()."""
 
     needs_gradient: bool = False  # True for GGAs
+    needs_tau: bool = False  # True for meta-GGAs (depend on the kinetic-energy density τ)
 
-    def energy_density(self, rho: torch.Tensor, sigma: torch.Tensor | None = None) -> torch.Tensor:
-        """e_xc [eV/Å³] pointwise. rho [e/Å³]; sigma = |∇ρ|² [e²/Å⁸] for GGAs."""
+    def energy_density(
+        self,
+        rho: torch.Tensor,
+        sigma: torch.Tensor | None = None,
+        tau: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """e_xc [eV/Å³] pointwise. rho [e/Å³]; sigma = |∇ρ|² [e²/Å⁸] for GGAs;
+        tau = ½Σf|∇ψ|² [e/Å⁵] for meta-GGAs.
+
+        τ is an independent orbital field, not a functional of ρ on the grid, so
+        (unlike σ) it does not ride the ρ autograd graph: its potential
+        v_τ = ∂e/∂τ acts as the generalized-KS operator −½∇·(v_τ∇ψ), wired into
+        H separately (see core.metagga). Non-meta functionals ignore the argument.
+        """
         raise NotImplementedError
 
     def energy(
-        self, rho: torch.Tensor, volume: float, sigma: torch.Tensor | None = None
+        self,
+        rho: torch.Tensor,
+        volume: float,
+        sigma: torch.Tensor | None = None,
+        tau: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """E_xc [eV] = (Ω/N)Σ e_xc."""
-        e = self.eval_energy_density(rho, sigma)
+        e = self.eval_energy_density(rho, sigma, tau)
         return e.sum() * (volume / e.numel())
 
 

@@ -21,11 +21,12 @@ from ase.calculators.calculator import Calculator, all_changes
 
 from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.core.xc.pbe import PBE
+from gradwave.core.xc.r2scan import R2SCAN
 from gradwave.dtypes import RDTYPE
 from gradwave.postscf.forces import forces as hf_forces
 from gradwave.scf.loop import scf, setup_system
 
-_XC = {"lda": LDA_PW92, "pbe": PBE}
+_XC = {"lda": LDA_PW92, "pbe": PBE, "r2scan": R2SCAN}
 
 
 class GradWave(Calculator):

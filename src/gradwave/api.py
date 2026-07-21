@@ -17,11 +17,14 @@ from pathlib import Path
 from gradwave.core.xc.base import XCFunctional
 from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.core.xc.pbe import PBE
+from gradwave.core.xc.r2scan import R2SCAN, SpinR2SCAN
 from gradwave.core.xc.spin import LSDA_PW92, SpinPBE
 from gradwave.inputs import Input
 
-XC_REGISTRY: dict[str, type[XCFunctional]] = {"lda": LDA_PW92, "pbe": PBE}
-SPIN_XC_REGISTRY: dict[str, type] = {"lda": LSDA_PW92, "pbe": SpinPBE}
+XC_REGISTRY: dict[str, type[XCFunctional]] = {"lda": LDA_PW92, "pbe": PBE,
+                                              "r2scan": R2SCAN}
+SPIN_XC_REGISTRY: dict[str, type] = {"lda": LSDA_PW92, "pbe": SpinPBE,
+                                     "r2scan": SpinR2SCAN}
 _OCC_TOL = 1e-6
 # the collinear/NC solvers build a fixed-length Pulay history and need an int
 # (None is not accepted, unlike the USPP path); this names the default the api

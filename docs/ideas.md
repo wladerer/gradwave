@@ -220,6 +220,55 @@ finer meshes (Gygi–Baldereschi) and a complete screened form (wPBE).
 
 ## Learned meta-GGA and the kinetic energy density
 
+**Infrastructure LANDED (2026-07-21), nspin=1 and 2.** `core/metagga.py`: the
+kinetic-energy density `tau_b` (τ = ½Σ_k w_k Σ_n f|∇ψ|² on the dense grid, one
+extra i(k+G) factor on the density-build FFT, differentiable in the coefficients)
+and the generalized-KS operator `metagga_tau_operator`
+(V_τψ = −½∇·(v_τ∇ψ) = −½ Σ_d i(k+G)_d·F[v_τ·F⁻¹[i(k+G)_d c]], Hermitian,
+band-chunked). The XC interface gained `needs_tau` plus an optional τ arg on both
+`XCFunctional` and `SpinXC` (backward compatible; every existing GGA/LDA path
+stays bit-identical). The SCF loop builds τ per channel each iteration and lags it
+one step (like the Fock/DFT+U rebuilds), extracting v_τ = ∂e_xc/∂τ by autograd on
+a τ leaf and injecting the operator additively into the H-apply through the same
+wrap the hybrid Fock uses — v_xc is evaluated with τ held fixed, so the
+multiplicative and τ-response pieces stay separated. As the note below predicted,
+τ is one FFT-per-band on the existing g→r path and the new operator is the only
+genuinely new physics; it makes this a generalized-KS scheme touching the H-apply.
+Validated *intrinsically* (no QE reference needed, since none exists yet):
+single-plane-wave τ = ½|k+G|² exactly, τ ≥ τ_W, operator Hermiticity, constant
+v_τ ≡ c gives c·(−½∇²), the defining generalized-KS gate that the operator equals
+the functional derivative ∂E_xc/∂ψ* (dE/dλ = 2Re Σf⟨φ|V_τ|ψ⟩ to 1e-5 vs finite
+difference), and at SCF scale the stationary-energy identity dE_total/dλ = ∫τ
+plus τ-flat reduction to PBE/spin-PBE bit-for-bit
+(`tests/unit/test_metagga.py`, `tests/integration/test_metagga_scf.py`).
+
+**r2SCAN LANDED (2026-07-21).** `core/xc/r2scan.py` — the production meta-GGA,
+spin-unpolarized `R2SCAN` and collinear `SpinR2SCAN`, transcribed from libxc's
+own Maple source so it matches libxc (hence QE's `input_dft='r2scan'`) pointwise.
+Written as a differentiable PyTorch expression, not a libxc binding, so v_xc, the
+meta-GGA v_τ, forces, and the learnable-parameter graph all follow from autograd
+— the whole reason not to route the functional through opaque C. Validated
+against libxc via pyscf to machine precision across α spanning all three branches
+(`tests/unit/test_r2scan.py`): unpolarized e_xc/vρ/vσ/vτ to 1e-11–1e-14, exchange
+and correlation each exact standalone, spin-polarized energy and per-channel vτ
+to 1e-15 vs libxc spin=1. The self-consistent SCF converges (Si, 11 iterations,
+same as PBE) and opens the gap 2.44→2.67 eV (`tests/integration/test_r2scan_scf.py`).
+Wired into the input path: `xc: r2scan` resolves through the registries
+(`api.py`, `calculator.py`, `inputs.py`); guarded off on the non-collinear spinor
+path (no τ there yet). The libxc pointwise match — QE r2SCAN *is* libxc — stands
+in for a `pw.x` fixture, which would only re-confirm the integrated SCF energy the
+pointwise derivatives and the stationary-energy gate already pin; a `si_r2scan_ci`
+QE fixture is a nice-to-have, not a correctness gap.
+
+**What remains, in build order:** (1) the τ terms in the force and stress
+expressions (the τ operator contributes a Pulay-like term absent from the current
+Hellmann–Feynman forces); (2) USPP/PAW τ (the one-center augmentation of τ);
+(3) meta-GGA on the non-collinear/SOC spinor path; (4) then a learnable
+r2SCAN-form functional (α, and the enhancement-factor parameters as trained
+tensors) and the `train_xc_paw` recovery test at meta-GGA level — now directly
+reachable since r2SCAN is already a differentiable autograd expression. The
+paragraphs below are the original framing, kept for the reasoning.
+
 The learnable functional spans GGA form only, the two PBE parameters kappa and mu.
 Every modern accurate semilocal functional (SCAN, r2SCAN) is meta-GGA, which means
 it depends on the kinetic energy density `tau(r) = (1/2) Σ_i f_i |∇ψ_i(r)|²` on
