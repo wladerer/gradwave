@@ -412,12 +412,17 @@ dependencies = [
     { name = "ase" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "pandas" },
     { name = "pyyaml" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "spglib" },
     { name = "torch" },
+]
+
+[package.optional-dependencies]
+analysis = [
+    { name = "matplotlib" },
+    { name = "pandas" },
 ]
 
 [package.dev-dependencies]
@@ -436,13 +441,15 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "ase", specifier = ">=3.23" },
+    { name = "matplotlib", marker = "extra == 'analysis'", specifier = ">=3.8" },
     { name = "numpy", specifier = ">=1.26" },
-    { name = "pandas", specifier = ">=3.0.3" },
+    { name = "pandas", marker = "extra == 'analysis'", specifier = ">=3.0.3" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "scipy", specifier = ">=1.12" },
     { name = "spglib", specifier = ">=2.4" },
     { name = "torch", specifier = ">=2.4" },
 ]
+provides-extras = ["analysis"]
 
 [package.metadata.requires-dev]
 dev = [

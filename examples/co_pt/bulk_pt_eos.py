@@ -124,7 +124,7 @@ def main():
         json.dump(summary, f, indent=2)
     print(f"\nfcc Pt PBE:  a0 = {a0:.4f} Å   B0 = {B0_GPa:.1f} GPa   "
           f"({fit['method']})", flush=True)
-    print(f"experiment ~3.92 Å / 278 GPa; PBE typically ~3.97 Å / ~250 GPa",
+    print("experiment ~3.92 Å / 278 GPa; PBE typically ~3.97 Å / ~250 GPa",
           flush=True)
     print("wrote examples/co_pt/bulk_pt_eos.json", flush=True)
 

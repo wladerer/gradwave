@@ -26,10 +26,7 @@ jobs:
       - name: Sync dependencies
         run: uv sync --all-extras
 
-      # Non-blocking for now: main carries pre-existing findings. Flip to a
-      # hard gate (drop continue-on-error) once they are cleaned up.
       - name: Ruff
-        continue-on-error: true
         run: uv run ruff check
 
       - name: Standard test tier

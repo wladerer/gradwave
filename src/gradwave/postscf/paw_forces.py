@@ -104,7 +104,6 @@ def forces_uspp(res: dict, xc, remove_net: bool = True) -> torch.Tensor:
     system = res["system"]
     grid = system.grid
     vol = grid.volume
-    shape = grid.shape
     nspin, coeffs_s, occ_s, eigs_s, becsum_s, rho_sp = _normalize_spin(res)
     pos = system.positions.detach().clone().requires_grad_(True)
     kw = system.kweights

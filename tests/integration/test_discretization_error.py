@@ -276,7 +276,9 @@ def test_uspp_eigenvalue_reproduces_energy_error():
     assert gap["gap_eV"] > 0.0
 
 
-def _disp_paw_cell(a=5.43, shift=np.array([0.11, -0.06, 0.04])):
+def _disp_paw_cell(a=5.43, shift=None):
+    if shift is None:
+        shift = np.array([0.11, -0.06, 0.04])
     cell = a / 2 * FCC
     pos = np.array([[0.0, 0, 0], [a / 4, a / 4, a / 4]]) + np.array([[0, 0, 0], shift])
     return cell, pos

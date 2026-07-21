@@ -28,14 +28,15 @@ from pathlib import Path
 import numpy as np
 import torch
 
-torch.set_num_threads(int(os.environ.get("GW_THREADS", "22")))
-sys.stdout.reconfigure(line_buffering=True)
 from gradwave.core.xc.noncollinear import NoncollinearXC
 from gradwave.core.xc.spin import LSDA_PW92
 from gradwave.postscf.mae import force_theorem_mae
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import setup_system
 from gradwave.scf.noncollinear import scf_noncollinear
+
+torch.set_num_threads(int(os.environ.get("GW_THREADS", "22")))
+sys.stdout.reconfigure(line_buffering=True)
 
 RY = 13.605693122994
 PSE = Path(os.environ.get("GW_PSE",
@@ -107,7 +108,8 @@ def main():
         rows.append(mae_at(r))
         out.write_text(json.dumps(dict(V0=V0, a0=A0, c0=C0, rows=rows), indent=1))
     # locate the MAE maximum from a quadratic fit (the inverse-design answer)
-    r = np.array([x["ratio"] for x in rows]); mae = np.array([x["mae"] for x in rows])
+    r = np.array([x["ratio"] for x in rows])
+    mae = np.array([x["mae"] for x in rows])
     p = np.polyfit(r, mae, 2)
     r_opt = -p[1] / (2 * p[0]) if p[0] < 0 else r[int(mae.argmax())]
     print(f"\nMAE-maximizing c/a ≈ {float(r_opt):.3f} "

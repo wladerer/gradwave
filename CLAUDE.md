@@ -14,6 +14,10 @@ uv run pytest ...  # run tests in the project environment
 uv run ruff check  # lint
 ```
 
+Prefer the `Makefile` shortcuts over hand-writing the long commands: `make test-fast`,
+`make test-standard`, `make lint`, `make fmt`, `make check` (lint + fast gate), `make lock`.
+They already go through `uv run` and carry the correct tier markers.
+
 This is NixOS. Do not suggest `pip install`, `pip install -e .`, or `python -m venv`.
 Dependencies are declared in `pyproject.toml` and installed with `uv sync`.
 
@@ -50,6 +54,21 @@ ESPRESSO. Regenerate fixtures with `tests/fixtures/qe/regenerate.py` (QE via
 
 Tests live in `tests/{unit,integration,gradcheck}` with shared fixtures in
 `tests/fixtures` and helpers in `tests/helpers.py`.
+
+## Running commands efficiently
+
+Long-lived commands (test runs, SCFs) should be launched in the background writing to a
+log that ends with an `EXIT=$?` marker, then polled by grepping for that marker. Do not
+`tail -f | pipe` a live run: the pipe buffers and hides results until the process exits.
+
+Do not `pkill -f <pattern>` when the pattern also appears in the killing command's own line
+(for example `pkill -f "pytest -m"` matches the shell running it and self-terminates). Kill
+by PID via a self-excluding match instead, e.g. `kill $(pgrep -f '[.]venv/bin/pytest')`, or
+stop the background task by its id.
+
+Keep terminal output small: `git status -s`, `git log --oneline`, `git diff --stat`,
+`ruff check --output-format=concise`, and `pytest --tb=short`. `GIT_PAGER=cat` avoids pager
+stalls.
 
 ## Definition of done
 

@@ -71,13 +71,13 @@ from gradwave.core.batch import build_batched, g_to_r_b, projectors_b
 from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.energies.nl_pp import nonlocal_energy
 from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g, sphere_to_box
-from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
 from gradwave.core.hamiltonian import (
     HamiltonianK,
     becp,
     build_projector_data,
     projectors,
 )
+from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.grids import build_gsphere, gmax_from_ecut
 from gradwave.postscf._response import dyson_fixed_point, spin_sigma_triple
@@ -662,7 +662,7 @@ def _estimate_force_error_uspp(res: dict, err: DiscretizationError, xc, *,
                          "v_eff, the augmentation, and the one-center ddd)")
 
     grid = system.grid
-    vol, shape = grid.volume, grid.shape
+    vol = grid.volume
     kw = system.kweights
     dev = system.positions.device
     nspin = int(res.get("nspin", 1))
@@ -1039,7 +1039,7 @@ def _spinor_complement(res, *, ecut_large, factor, xc, smearing, width):
     coeffs = res.coeffs.to(device)            # (nk, nb, 2*m0)
     nk, nb, _ = coeffs.shape
     c1 = torch.zeros(nk, nb, 2 * m1, dtype=CDTYPE, device=device)
-    for ik, (sph0, sph1) in enumerate(zip(system.spheres, spheres1)):
+    for ik, (sph0, sph1) in enumerate(zip(system.spheres, spheres1, strict=True)):
         n0 = sph0.npw
         for blk, off in ((0, 0), (1, m1)):
             src = coeffs[ik, :, blk * m0: blk * m0 + n0]      # (nb, n0)
@@ -1078,7 +1078,7 @@ def _estimate_density_error_noncollinear(res, *, ecut_large, factor, xc,
                            smearing=smearing, width=width)
     system, grid, vol = d["system"], d["grid"], d["vol"]
     bk1, m1, c1, dpsi = d["bk1"], d["m1"], d["c1"], d["dpsi"]
-    eps, occ, resid = d["eps"], d["occ"], d["resid"]
+    occ, resid = d["occ"], d["resid"]
     device = c1.device
     nk, nb, _ = c1.shape
 

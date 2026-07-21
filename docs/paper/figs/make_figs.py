@@ -52,7 +52,7 @@ for ln in (REPO / "benchmarks/delta_factor/results/eos_qe_energies.txt").read_te
 LABELS = {"si": "Si", "c": "C", "gaas": "GaAs", "mgo": "MgO", "al": "Al", "cu": "Cu"}
 DELTAS = {"si": 0.0001, "c": 0.0002, "gaas": 0.010, "mgo": 0.0007, "al": 0.055, "cu": 0.163}
 fig, axes = plt.subplots(2, 3, figsize=(7.0, 4.0), sharex=True)
-for ax, case in zip(axes.ravel(), ["si", "c", "gaas", "mgo", "al", "cu"]):
+for ax, case in zip(axes.ravel(), ["si", "c", "gaas", "mgo", "al", "cu"], strict=True):
     nat = gw[case]["natoms"]
     vols = np.array([gw[case]["V_A3"][str(s)] for s in SCALES])
     e_g = np.array([gw[case]["E_eV"][str(s)] for s in SCALES])
@@ -117,7 +117,7 @@ for off, vals, col, lab in [(-h, t_qe, QE, "QE 7.5 (8 MPI)"),
                             (0, t_cpu, GWCPU, "gradwave CPU-22"),
                             (h, t_gpu, GW, "gradwave GPU")]:
     ax.barh(y + off, vals, height=h - 0.03, color=col, label=lab)
-    for yi, v in zip(y + off, vals):
+    for yi, v in zip(y + off, vals, strict=True):
         ax.text(v + 0.15, yi, f"{v:.1f}", va="center", fontsize=6.5,
                 color="#52514e")
 ax.set_yticks(y, systems)
