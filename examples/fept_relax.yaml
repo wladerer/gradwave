@@ -1,0 +1,27 @@
+# L1_0 FePt geometry optimization (collinear ferromagnet, PAW).
+# Alternating Fe and Pt layers stacked along c; the relaxation finds the
+# tetragonal c/a. Run with:  gradwave fept_relax.yaml
+structure:
+  cell: [[2.723, 0.0, 0.0], [0.0, 2.723, 0.0], [0.0, 0.0, 3.712]]
+  positions: {frac: [[0.0, 0.0, 0.0], [0.5, 0.5, 0.5]]}
+  species: [Fe, Pt]
+
+pseudopotentials:
+  dir: ../tests/fixtures/qe/pseudos
+  map: {Fe: Fe.pbe-spn-kjpaw_psl.1.0.0.UPF, Pt: Pt.pbe-n-kjpaw_psl.1.0.0.UPF}
+
+ecut: 680.28          # eV (50 Ry)
+ecutrho: 5442.3       # eV (400 Ry); PAW dense-grid cutoff
+xc: pbe
+kpoints: {mesh: [8, 8, 6]}
+smearing: {type: mp1, width: 0.1}   # metal
+nspin: 2
+start_mag: {Fe: 0.4, Pt: 0.1}
+
+scf:
+  mixing: {scheme: johnson}   # ferromagnetic metal near the Stoner instability
+
+task: relax
+relax: {optimizer: bfgs, fmax: 0.02, cell: true, max_steps: 100}
+
+output: {dir: ./out_fept}
