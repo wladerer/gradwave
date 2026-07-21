@@ -62,6 +62,7 @@ occupied bands is the leading first-order term only.
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -372,6 +373,13 @@ def estimate_density_error(
             raise NotImplementedError("Dyson dressing is nspin=1 only")
         if xc is None:
             raise ValueError("dyson=True requires the xc functional")
+        warnings.warn(
+            "dyson=True: the coarse-space Dyson refinement is unvalidated and "
+            "opt-in. It omits the exact chi0^-1 Schur-coupling term (the same "
+            "gap as estimate_scf_error's response diagnostic) and has been "
+            "neutral-to-negative on the one case tested. Use drho_first_order "
+            "for the trusted estimate; see docs/manual/error-estimation.md.",
+            stacklevel=2)
         drho = _dyson_dress(
             res, xc, drho_fo, beta=dyson_beta, tol=dyson_tol,
             max_iter=dyson_max_iter, verbose=verbose,

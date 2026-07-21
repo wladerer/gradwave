@@ -765,24 +765,33 @@ numerical errors are a solved problem in principle, the accuracy that matters is
 the functional, and the differentiable framework's advantage on that term is
 sensitivity and the density-driven half, not an absolute bar.
 
-**Smearing and k-point terms LANDED (2026-07-18); SCF-convergence term OPEN
-(formula wrong).** `postscf/convergence_error.py` holds three estimators.
-`estimate_smearing_error` (the scheme-matched `E0 = (E+F)/2` extrapolation with
-per-scheme caveats) and `estimate_kpoint_error` (mesh extrapolation
-`E(N_k) → E_inf`, the non-variational term that needs more than one run) are
-validated in `tests/integration/test_convergence_error.py`. Together with the
-Ecut estimate in `discretization_error.py`, those two plus the cutoff term are
-the trackable part of the numerical budget that is built.
+**Smearing and k-point terms LANDED (2026-07-18); SCF-convergence headline
+LANDED via trajectory extrapolation, exact response form still OPEN.**
+`postscf/convergence_error.py` holds three estimators. `estimate_smearing_error`
+(the scheme-matched `E0 = (E+F)/2` extrapolation with per-scheme caveats) and
+`estimate_kpoint_error` (mesh extrapolation `E(N_k) → E_inf`, the non-variational
+term that needs more than one run) are validated in
+`tests/integration/test_convergence_error.py`. Together with the Ecut estimate in
+`discretization_error.py`, those two plus the cutoff term are the trackable part
+of the numerical budget that is built.
 
-`estimate_scf_error` is **not** validated: its formula is wrong. The exact
-second-order residual energy is `1/2<x|(K_Hxc - chi0^-1)|x>` with `x` the
-dielectric-dressed density error, but the code forms
-`1/2<r|K_Hxc (1-chi0 K)^-1|r>`, which omits the `chi0^-1` kinetic-response term.
-The two SCF-error tests are marked `xfail(strict=True)`. Fixing it needs the
-exact Schur coupling, which is the same missing term as the coarse-space Dyson
-refinement of δρ in [todo.md](todo.md) — pin one and both resolve. The
-`chi0^-1` solve is numerically awkward by direct CG (chi0 is only known through
-its forward action), so this is a real piece of work, not a typo.
+`estimate_scf_error`'s headline is now the robust piece: it extrapolates the
+recorded free-energy trajectory (`res.history`) as a geometric tail,
+`E_inf - E_last ~ dE_last q/(1-q)`, giving a non-negative `denergy` and an
+extrapolated `E_inf` from one run for any system (no χ0 solve). It is validated
+by truncating a converged run's history and recovering the final energy, and by
+`estimate_scf_error_bracket` against a loose/tight pair. This sidesteps, rather
+than solves, the second-order response formula.
+
+That exact response form is **still** open. The exact second-order residual
+energy is `1/2<x|(K_Hxc - chi0^-1)|x>` with `x` the dielectric-dressed density
+error, but the code can only form `1/2<r|K_Hxc (1-chi0 K)^-1|r>`, which omits the
+`chi0^-1` kinetic-response term and is not sign-definite. It is retained only as
+a labelled diagnostic (`denergy_response`), never the headline. Pinning the exact
+Schur coupling is the same missing term as the coarse-space Dyson refinement of
+δρ in [todo.md](todo.md) — resolve one and both resolve. The `chi0^-1` solve is
+numerically awkward by direct CG (chi0 is only known through its forward action),
+so this is a real piece of work, not a typo.
 
 Also open from this section is the model-term tooling: the fractional-charge
 self-interaction probe (self-contained, no second functional) and the DC-DFT
@@ -1046,6 +1055,135 @@ size so the win is uncertain. The through-line matches the earlier audit: on a s
 small SCF the consumer-GPU fp64 tax is the wall, and the durable levers are throughput
 (batch many small structures), fewer iterations (learned or extrapolated start), and a
 datacenter fp64 GPU.
+
+## Learned multi-pole density-mixing preconditioner (PROTOTYPED, first real win on Cu)
+
+The 2024-2026 sweep above skips "learned preconditioners" on the grounds that they
+need a localized basis and our kinetic preconditioner is already analytic. That
+reason is about *eigensolver* preconditioners. A learned *density-mixing*
+preconditioner is a different object, and this section is the prototype of it. It
+lives entirely in G-space, needs no localized basis, and generalizes the Kerker
+and local-TF filters the code already ships. It is also the lever
+`docs/manual/wisdom.md` points at twice over: prefer a preconditioner to
+step-size control, and the SCF iteration count is set by density mixing, not by
+the initial wavefunction (the reason the atomic-orbital seed in the done section
+saved nothing).
+
+The mechanism (`scf/learned_precond.py`). Bare Kerker, R̃(G) = R(G)·G²/(G²+q0²),
+is the single-pole long-wavelength approximation to the exact response
+preconditioner ε⁻¹ = (1 − v_c χ₀)⁻¹. `MultipoleKerkerPrecond` replaces the one
+pole with a learned sum, f_θ(G²) = Σ_i w_i·G²/(G²+q_i²), applied per density-sphere
+component exactly where the mixer applies Kerker (wired as `scf(..., precond_op=)`
+and `mixer.precond_op`, mirroring local-TF). Two Kerker properties carry over by
+construction and both matter: f_θ(0) = 0, so the pinned G=0 charge is never
+touched, and the fixed point is unchanged, so a bad filter can only cost
+iterations, never accuracy. K=1, w=1 reproduces bare Kerker to round-off, so the
+single pole is always inside the hypothesis class.
+
+The fit is where a differentiable solver does something a non-differentiable one
+cannot. In the diagonal model the error of a mixing step evolves as
+e_{n+1}(G) = [1 − α·f_θ(G²)·d(G)]·ē(G), with d(G) = 1 − j(G) the response
+denominator and ē the mixer's extrapolate. `fit_multipole` unrolls that recurrence
+and backpropagates the residual to the pole weights and positions. It has two
+modes. `mixer="plain"` unrolls damped linear mixing (ē = e_n) and minimizes the
+worst-shell rate; that is the wrong objective when the deployment mixer is Pulay
+DIIS, as the first pass found. `mixer="diis"` (the default the benchmark uses)
+unrolls the *actual* Pulay recurrence — ē = Σ c_i e_i with the DIIS coefficients
+from the same bordered, Kerker-metric, Tikhonov-regularized solve `mixing.Pulay
+Mixer` runs — so the filter is trained to complement the low-G work DIIS already
+does with its history rather than to duplicate it. The coefficients do not depend
+on the filter, but the e-history they extrapolate does, so the gradient flows.
+gradwave can differentiate through the Pulay recurrence; nothing else in the field
+can. `response_from_residuals` estimates d(G) per |G|-shell from a short SCF
+captured through the new `scf` `mixer_hook`; probing a d-band metal with plain
+damping sloshes, so it probes with Kerker ON and divides the Kerker factor back
+out of the residual ratios to recover the bare d(G).
+
+Measured (`benchmarks/bench_learned_precond.py`, `tests/unit/test_learned_precond.py`),
+gaussian 0.1 eV, PBE, energy-gated rhotol 1e-6, all filters reaching the Kerker
+energy to a few 1e-12 eV (fixed point unchanged, as designed):
+
+- synthetic two-scale response — learned three-pole spectral radius 0.82 → 0.50,
+  a 3.5x iteration ratio, and under a DIIS unroll the post-DIIS residual falls from
+  1e-5 to 1e-16. Isolates the mechanism from DFT cost.
+- fcc Al (30 Ry, 6x6x6) — Kerker 7 iters, learned 7 (tie). The DIIS-aware fit
+  clusters all three poles near q ≈ 1.0 A⁻¹, correctly recognizing that a single-
+  scale homogeneous metal has nothing for a radial filter to win, and does no harm.
+  (The plain-fit first pass took 9 here — a loss — which is what named the DIIS fix.)
+- fcc Cu (45 Ry, 6x6x6, 3s3p semicore d-band) — Kerker 10 iters, learned **8**, a
+  20 percent cut. The fit spreads its poles across q ≈ 0.07, 0.22, 0.70 A⁻¹, the
+  multi-scale shape a single Kerker pole cannot take. First real-system win.
+
+The Cu result also settles which objective is right, sharply: its *plain-mixing*
+spectral radius went UP under the fit (0.39 → 0.82) while its DIIS iteration count
+went DOWN (10 → 8). The plain rate is not the deployment rate; only unrolling the
+real mixer predicts the real win, and optimizing the plain rate actively mis-ranks
+filters. That is the load-bearing lesson of this section.
+
+Next, in rough priority. Push to more multi-scale systems (Cu₃Al and other
+intermetallics, PAW semicore, larger cells near the charge-sloshing cliff, FM
+metals near the Stoner boundary where wisdom.md asks for the χ₀-diagonal operator
+by name) to map where the win holds and how big it gets. Amortize the fit: right
+now each system pays a probe SCF and a fit, so the net win is iteration count, not
+wall time on a single point — the payoff is a filter trained once per chemistry
+family (the probe/fit data is the same shape as the learned-XC and ML-density-init
+training sets) and reused across a discovery scan, which is where the iteration cut
+compounds. The probe is still approximate (a diagonal, shell-averaged d from a
+handful of iterations); a cleaner route is to read the response straight from the
+implicit-differentiation machinery (`scf/implicit.py` already applies χ₀ and
+K_Hxc), which would make d exact and remove the probe SCF. And the filter is radial
+(G-only); the local-TF operator is spatial (r-only) — a learned operator that is
+both is the general form, and the two current preconditioners are its limits.
+
+Magnetism and SOC, and where the charge-channel filter stops (measured). The
+`precond_op` and `mixer_hook` hooks now reach `scf_noncollinear` too, so the filter
+deploys on the collinear nspin=2 path (total block) and the noncollinear/SOC path
+(charge block, m⃗ blocks keep their own step). Two systems mapped the boundary:
+fcc Pt nonmagnetic + SOC ties Kerker (9 vs 9) at a fixed point identical to 2e-11
+eV — the wiring is correct through the spinor SCF, and Pt's charge response is
+single-scale, so the fit reproduces Kerker, exactly as on Al. bcc Fe (nspin=2
+ferromagnet) loses (12 vs 13): the fit is on the CHARGE (total) block, but the FM
+convergence bottleneck is the MAGNETIZATION channel — the Stoner mode with the
+measured gain near −6 — which a charge-block operator cannot touch, and the noisy
+nspin=2 probe (plain damping wobbles the moment, so d clamps) gives a slightly weak
+charge fit that costs the extra iteration. This is the honest scope: the learned
+filter is a charge-multi-scale tool, and it neither helps nor is meant to help a
+magnetization-channel problem.
+
+That pointed at what looked like the real magnetism lever — the operator wisdom.md
+asks for by name (the χ₀-diagonal preconditioner on the spin mode) — a learned
+filter on the MAGNETIZATION block. The infrastructure for it is built and tested:
+a G=0-alive filter form f_mag(G²) = w0 + Σ w_i·G²/(G²+q_i²) (the `const` term on
+`MultipoleKerkerPrecond`, since Kerker's G=0 zero would freeze the moment), a
+`BlockPrecond` composite that runs bare Kerker on the charge-total block and f_mag
+on the mag block, and the nspin=2 grid-spanning `precond_op` wiring in `scf`.
+
+The first hypothesis it enabled was WRONG, and the measurement says so cleanly. The
+guess was that the near-critical uniform Stoner mode wants DAMPING (small w0, since
+its spin susceptibility is large so its inverse is small). On fcc Ni near Stoner
+(PD_Ni NC, 45 Ry, 4x4x4, johnson, `benchmarks/bench_learned_precond.py ni`) a w0
+sweep under johnson gives: baseline 12 iters at m = 0.537 μB; w0 = 0.4 → the moment
+COLLAPSES to 0 (23 iters to the wrong nonmagnetic branch); w0 = 0.6 → 16 iters
+(holds the moment but slower); w0 = 0.8 → 12 iters (recovers the baseline). Damping
+the uniform mode is exactly backwards: the moment mode needs VIGOROUS mixing to hold
+the ferromagnetic branch (wisdom.md's moment-collapse warning is the same physics
+seen from the preconditioner side), and reducing it either collapses the moment or
+just slows the run. There is no w0 that wins.
+
+The lesson refines the whole direction. Charge sloshing is a linear, diagonal-in-G
+problem where a filter SHAPE is the right tool, and the Cu win is real. The FM
+convergence bottleneck is not that — it is branch selection, a nonlinear problem
+that vigorous moment mixing plus warm-start chains (johnson) already handle, and a
+linear filter on the mag block does not have the right form to help and can hurt. A
+mag-channel operator, if one helps at all, would have to come from the EXACT spin
+susceptibility (`scf/implicit.py`'s χ₀ path), not a hand-shaped or linearly-probed
+Kerker analog, and even then the headroom over johnson looks thin. Recorded as a
+measured negative; the const-filter and BlockPrecond stay as reusable substrate.
+
+The clear remaining wins are on the CHARGE channel, where the mechanism is proven:
+more multi-scale systems (Cu₃Al and other intermetallics, PAW semicore), and the
+amortized per-chemistry-family fit that turns the per-point iteration cut into a
+wall-time win across a discovery scan.
 
 # Done and resolved
 

@@ -30,11 +30,13 @@ Schur coupling must be pinned against Cancès JCP 2016 (arXiv 2111.01470) or the
 DFTK source, then validated on a case where the coarse-space error is larger.
 Do not enable by default until validated.
 
-This is the same Dyson machinery, and the same missing term, as the SCF
-convergence-error estimator: `estimate_scf_error` in
-`postscf/convergence_error.py` currently omits the `chi0^-1` kinetic-response
-term and is marked xfail (see `tests/integration/test_convergence_error.py`).
-Pinning the exact Schur coupling here should resolve both.
+This is the same Dyson machinery, and the same missing term, as the *response*
+diagnostic in the SCF convergence-error estimator: `estimate_scf_error` in
+`postscf/convergence_error.py` reports its headline from the energy trajectory
+(robust, validated), but its `denergy_response` form still omits the `chi0^-1`
+kinetic-response term and is kept as a labelled diagnostic only. Pinning the
+exact Schur coupling here should validate the Dyson dressing and promote that
+diagnostic to a real second-order estimate.
 
 ### nscf eigenvectors and broadening options
 
