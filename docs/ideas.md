@@ -260,14 +260,29 @@ in for a `pw.x` fixture, which would only re-confirm the integrated SCF energy t
 pointwise derivatives and the stationary-energy gate already pin; a `si_r2scan_ci`
 QE fixture is a nice-to-have, not a correctness gap.
 
-**What remains, in build order:** (1) the τ terms in the force and stress
-expressions (the τ operator contributes a Pulay-like term absent from the current
-Hellmann–Feynman forces); (2) USPP/PAW τ (the one-center augmentation of τ);
-(3) meta-GGA on the non-collinear/SOC spinor path; (4) then a learnable
-r2SCAN-form functional (α, and the enhancement-factor parameters as trained
-tensors) and the `train_xc_paw` recovery test at meta-GGA level — now directly
-reachable since r2SCAN is already a differentiable autograd expression. The
-paragraphs below are the original framing, kept for the reasoning.
+**Forces need NO τ term — verified (2026-07-21).** The original worry that "the τ
+operator contributes a Pulay-like term absent from the HF forces" turned out to be
+unfounded for the plane-wave case. The τ operator affects the *orbitals* (and thus
+the self-consistent density), but at the SCF stationary point the Hellmann–Feynman
+theorem holds exactly as for GGA: the meta-GGA force is the same three explicit-R
+terms (Ewald, local-PP structure factors, NL projectors) the existing `forces()`
+already carries — it is functional-agnostic and needs no change. Measured on Si
+(displaced atom, `forces()` vs finite difference): the gap falls 3.7e-3 (20 Ry) →
+8.6e-5 (45 Ry), i.e. it vanishes with grid density rather than plateauing at a
+constant, so it is real-space XC-grid egg-box (τ = ½Σf|∇ψ|² is exact in reciprocal
+space; only ∫e_xc(τ)dr on the grid is not), just larger than GGA — the known SCAN
+grid sensitivity. Meta-GGA forces therefore want a denser cutoff than GGA for the
+same accuracy, but are correct as-is (`tests/integration/test_r2scan_scf.py`).
+
+**What remains, in build order:** (1) the meta-GGA *stress* — unlike forces,
+strain scales the plane-wave basis (the G-vectors, hence ∇ψ and τ), so τ has an
+*explicit* strain dependence and the stress genuinely does need a τ term (open,
+being verified); (2) USPP/PAW τ (the one-center augmentation of τ); (3) meta-GGA
+on the non-collinear/SOC spinor path; (4) then a learnable r2SCAN-form functional
+(α, and the enhancement-factor parameters as trained tensors) and the
+`train_xc_paw` recovery test at meta-GGA level — now directly reachable since
+r2SCAN is already a differentiable autograd expression. The paragraphs below are
+the original framing, kept for the reasoning.
 
 The learnable functional spans GGA form only, the two PBE parameters kappa and mu.
 Every modern accurate semilocal functional (SCAN, r2SCAN) is meta-GGA, which means
