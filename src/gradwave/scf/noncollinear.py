@@ -449,3 +449,77 @@ def scf_noncollinear(
         rho=rho, m=m, eigenvalues=eigs, system=system, history=history,
         coeffs=coeffs,
     )
+
+
+def band_structure_nc(res: NCResult, xc: NoncollinearXC, kpts_frac,
+                      nbands: int | None = None, diago_tol: float = 1e-8,
+                      chunk: int = 4, verbose: bool = False,
+                      mixed_precision: bool = False):
+    """Spinor band energies along arbitrary k (SOC-aware): rebuilds the
+    converged potential from (ρ, m⃗) and solves per path chunk."""
+    import numpy as np
+
+    from gradwave.core.batch import build_batched
+    from gradwave.core.hamiltonian import build_projector_data
+    from gradwave.core.spinor_proj import build_so_projectors
+    from gradwave.grids import build_gsphere
+    from gradwave.pseudo.kb import beta_form_factors
+    from gradwave.solvers.davidson import davidson_batched_ms
+
+    system = res.system
+    grid = system.grid
+    device = res.rho.device
+    nbands = nbands or 2 * system.nbands
+    kpts = np.asarray(kpts_frac, dtype=float)
+
+    # rebuild converged V, B
+    rho_g_box = r_to_g(res.rho.to(CDTYPE))
+    v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
+                           dim=(-3, -2, -1)) * grid.n_points).real
+    v_xc, b_xc, _ = vxc_and_bxc(xc, res.rho, res.m, grid, rho_core=system.rho_core)
+    if float(res.m.abs().max()) < 1e-12:
+        b_xc = torch.zeros_like(b_xc)
+    vloc_g = local_potential_g(system.positions, system.species_index,
+                               system.vloc_tables, grid.g_cart, grid.volume)
+    vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
+    v_r = v_h + v_xc + vloc_r
+
+    eigs = np.empty((len(kpts), nbands))
+    for lo in range(0, len(kpts), chunk):
+        hi = min(lo + chunk, len(kpts))
+        spheres = [build_gsphere(grid, system.ecut, k, device=device)
+                   for k in kpts[lo:hi]]
+        npw_max = max(sp.npw for sp in spheres)
+        so_tabs = [torch.zeros(hi - lo, u.n_proj, npw_max, dtype=RDTYPE, device=device)
+                   for u in system.upfs]
+        pd_list = []
+        for ic, sph in enumerate(spheres):
+            import numpy as _np
+
+            q = _np.sqrt(sph.kpg2.cpu().numpy())
+            for sp_i, u in enumerate(system.upfs):
+                so_tabs[sp_i][ic, :, : sph.npw] = torch.as_tensor(
+                    beta_form_factors(u, q), dtype=RDTYPE, device=device)
+            pd_list.append(build_projector_data(
+                sph, system.species_of_atom,
+                [t[ic, :0] for t in so_tabs], [[] for _ in system.upfs],
+                [torch.as_tensor(u.dij, dtype=RDTYPE, device=device)
+                 for u in system.upfs], grid.volume))
+        bk = build_batched(spheres, pd_list, device=device)
+        q_so, dij_so = build_so_projectors(bk, system, so_tables=so_tabs)
+        h = SpinorHamiltonian(bk, grid.shape, v_r, torch.zeros_like(b_xc)
+                              if float(res.m.abs().max()) < 1e-12 else b_xc,
+                              projectors_b(bk, system.positions),
+                              q=q_so, dij_so=dij_so)
+        c0 = torch.zeros(hi - lo, nbands, 2 * bk.npw_max, dtype=CDTYPE, device=device)
+        for b_i in range(nbands):
+            c0[:, b_i, (b_i // 2) + (b_i % 2) * bk.npw_max] = 1.0
+        t2 = torch.cat([bk.t, bk.t], dim=-1)
+        mask2 = torch.cat([bk.mask, bk.mask], dim=-1)
+        out = davidson_batched_ms(h.apply, c0, t2, mask2, tol=diago_tol,
+                                  max_iter=100, mixed_precision=mixed_precision)
+        eigs[lo:hi] = out.eigenvalues.cpu().numpy()
+        if verbose:
+            print(f"  nc-band chunk {lo}-{hi - 1}/{len(kpts) - 1} "
+                  f"res={float(out.residual_norms.max()):.1e}", flush=True)
+    return eigs
