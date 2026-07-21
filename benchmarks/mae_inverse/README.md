@@ -1,11 +1,11 @@
 # Inverse design of FePt anisotropy by tetragonal strain
 
-L1₀ FePt is the benchmark high-anisotropy magnet — its magnetocrystalline
+L1₀ FePt is a benchmark high-anisotropy magnet; its magnetocrystalline
 anisotropy energy (MAE) is what lets a nanograin hold its magnetization at room
 temperature. The anisotropy is a spin-orbit effect and depends sharply on the
-tetragonal distortion c/a, so strain is a design knob: this maps MAE(c/a) and
-locates the c/a that maximizes it — the tetragonality a substrate should impose
-to make the hardest magnet.
+tetragonal distortion c/a, so strain is a design knob. The scan maps MAE(c/a) and
+locates the c/a that maximizes it, the tetragonality a substrate would impose for
+maximum anisotropy.
 
 ## Method
 
@@ -13,7 +13,7 @@ Each c/a is one **spinor spin-orbit ground state** (`scf_noncollinear` on
 fully-relativistic Fe/Pt pseudopotentials) followed by the **magnetic force
 theorem** (`postscf/mae.py`): freeze the converged (ρ, m⃗) of the [001] reference,
 rigidly rotate the moment to [100], rebuild the frozen-potential Hamiltonian,
-diagonalize once, and difference the occupied band energies —
+diagonalize once, and difference the occupied band energies,
 
     MAE = F[100] − F[001]   (positive → easy axis along c).
 
@@ -45,13 +45,13 @@ fixed volume, c/a from 1.20 to 1.55:
 The easy axis is c throughout (MAE > 0), and the landscape is **non-monotonic** —
 a shallow dip near c/a = 1.28, then a sharp rise to a **maximum at c/a ≈ 1.45**,
 where the anisotropy is **+4.06 meV/cell, 53 % above the equilibrium L1₀ value**.
-That non-trivial structure is the spin-orbit band physics: the anisotropy is a
-Fermi-surface property and shifts as tetragonality moves bands through E_F, so a
-plausible design target — "just stretch it" — has a genuine optimum, and it is
-one gradwave locates directly.
+That non-trivial structure reflects the spin-orbit band physics. The anisotropy
+is a Fermi-surface property and shifts as tetragonality moves bands through E_F,
+so a plausible design target ("just stretch it") has a real optimum, one gradwave
+locates directly.
 
 ![MAE vs strain](mae_strain.png)
 
 The c/a = 1.363 point reproduces the published force-theorem MAE (+2.67) and
-moment (3.22 μB) of `examples/fept_mae*.py`, which validates the pipeline; the
-self-consistent yardstick there is +2.55 meV/cell.
+moment (3.22 μB) of `examples/fept_mae*.py`, which validates the pipeline. The
+self-consistent reference there is +2.55 meV/cell.
