@@ -1019,7 +1019,7 @@ small SCF the consumer-GPU fp64 tax is the wall, and the durable levers are thro
 (batch many small structures), fewer iterations (learned or extrapolated start), and a
 datacenter fp64 GPU.
 
-## Learned multi-pole density-mixing preconditioner (PROTOTYPED)
+## Learned multi-pole density-mixing preconditioner (PROTOTYPED, first real win on Cu)
 
 The 2024-2026 sweep above skips "learned preconditioners" on the grounds that they
 need a localized basis and our kinetic preconditioner is already analytic. That
@@ -1044,44 +1044,59 @@ iterations, never accuracy. K=1, w=1 reproduces bare Kerker to round-off, so the
 single pole is always inside the hypothesis class.
 
 The fit is where a differentiable solver does something a non-differentiable one
-cannot. The error of preconditioned linear mixing evolves component-wise as
-e_{n+1}(G) = [1 − α·f_θ(G²)·d(G)]·e_n(G), with d(G) = 1 − j(G) the diagonal
-response denominator. `fit_multipole` unrolls that recurrence and backpropagates
-‖e_N‖ to the pole weights and positions, training the preconditioner against the
-solver's own linearized response. `response_from_residuals` estimates d(G) per
-|G|-shell from a short plain-mixing SCF captured through the new `scf` `mixer_hook`,
-so probe, fit, and deploy all run on real solver output.
+cannot. In the diagonal model the error of a mixing step evolves as
+e_{n+1}(G) = [1 − α·f_θ(G²)·d(G)]·ē(G), with d(G) = 1 − j(G) the response
+denominator and ē the mixer's extrapolate. `fit_multipole` unrolls that recurrence
+and backpropagates the residual to the pole weights and positions. It has two
+modes. `mixer="plain"` unrolls damped linear mixing (ē = e_n) and minimizes the
+worst-shell rate; that is the wrong objective when the deployment mixer is Pulay
+DIIS, as the first pass found. `mixer="diis"` (the default the benchmark uses)
+unrolls the *actual* Pulay recurrence — ē = Σ c_i e_i with the DIIS coefficients
+from the same bordered, Kerker-metric, Tikhonov-regularized solve `mixing.Pulay
+Mixer` runs — so the filter is trained to complement the low-G work DIIS already
+does with its history rather than to duplicate it. The coefficients do not depend
+on the filter, but the e-history they extrapolate does, so the gradient flows.
+gradwave can differentiate through the Pulay recurrence; nothing else in the field
+can. `response_from_residuals` estimates d(G) per |G|-shell from a short SCF
+captured through the new `scf` `mixer_hook`; probing a d-band metal with plain
+damping sloshes, so it probes with Kerker ON and divides the Kerker factor back
+out of the residual ratios to recover the bare d(G).
 
-Measured (`benchmarks/bench_learned_precond.py`, `tests/unit/test_learned_precond.py`).
-On a synthetic response with two length scales, where a single pole is provably the
-wrong shape, the fitted three-pole filter drops the spectral radius from 0.82 to
-0.50, a 3.5x iteration ratio. On real fcc Al the end-to-end loop runs and the
-learned filter reaches the Kerker energy to 5e-12 eV (fixed point unchanged, as
-designed), but it takes 9 iterations against Kerker's 7. That is the honest and
-expected result on a homogeneous metal, and it is the same story bench_precond.py
-tells for local-TF on bulk Al: Kerker is already near-optimal there, and there is
-nothing for a radial filter to win.
+Measured (`benchmarks/bench_learned_precond.py`, `tests/unit/test_learned_precond.py`),
+gaussian 0.1 eV, PBE, energy-gated rhotol 1e-6, all filters reaching the Kerker
+energy to a few 1e-12 eV (fixed point unchanged, as designed):
 
-The Al loss is also diagnostic, and names the next step. The fit minimizes the
-*plain-mixing* spectral radius, but deployment runs Pulay DIIS with history 8,
-which already accelerates the low-G modes the filter spent its weight on. So the
-linear-model fit over-invests where DIIS is already strong. The moat's own logic
-says the fix: unroll the *actual* mixer, not the plain-damped linear surrogate, so
-the filter is trained to complement DIIS rather than to duplicate it. gradwave can
-differentiate through the Pulay recurrence; nothing else in the field can.
+- synthetic two-scale response — learned three-pole spectral radius 0.82 → 0.50,
+  a 3.5x iteration ratio, and under a DIIS unroll the post-DIIS residual falls from
+  1e-5 to 1e-16. Isolates the mechanism from DFT cost.
+- fcc Al (30 Ry, 6x6x6) — Kerker 7 iters, learned 7 (tie). The DIIS-aware fit
+  clusters all three poles near q ≈ 1.0 A⁻¹, correctly recognizing that a single-
+  scale homogeneous metal has nothing for a radial filter to win, and does no harm.
+  (The plain-fit first pass took 9 here — a loss — which is what named the DIIS fix.)
+- fcc Cu (45 Ry, 6x6x6, 3s3p semicore d-band) — Kerker 10 iters, learned **8**, a
+  20 percent cut. The fit spreads its poles across q ≈ 0.07, 0.22, 0.70 A⁻¹, the
+  multi-scale shape a single Kerker pole cannot take. First real-system win.
 
-Where the headroom is, and where it is not. Not bulk metals (Kerker plus DIIS is
-near-optimal). The candidates are systems whose G-space response genuinely carries
-more than one scale and whose extra structure survives DIIS: semicore metals
-(Cu 3s3p), intermetallics (Cu₃Al), and the DIIS-limited regimes where history is
-short or reset often (large cells near the charge-sloshing cliff, ferromagnetic
-metals near the Stoner boundary where wisdom.md already asks for the χ₀-diagonal
-operator by name). A cleaner probe would help too: the current d(G) estimate ran
-with Kerker off and picked up values above one, so dividing the response out of a
-converging Kerker run, or unrolling DIIS directly, is the more trustworthy path to
-d(G). The prototype settles that the machinery is correct and safe and that the
-fit-through-linear-model does not transfer under DIIS on easy systems; the open
-question is whether a real multi-scale system plus a DIIS-aware fit clears the bar.
+The Cu result also settles which objective is right, sharply: its *plain-mixing*
+spectral radius went UP under the fit (0.39 → 0.82) while its DIIS iteration count
+went DOWN (10 → 8). The plain rate is not the deployment rate; only unrolling the
+real mixer predicts the real win, and optimizing the plain rate actively mis-ranks
+filters. That is the load-bearing lesson of this section.
+
+Next, in rough priority. Push to more multi-scale systems (Cu₃Al and other
+intermetallics, PAW semicore, larger cells near the charge-sloshing cliff, FM
+metals near the Stoner boundary where wisdom.md asks for the χ₀-diagonal operator
+by name) to map where the win holds and how big it gets. Amortize the fit: right
+now each system pays a probe SCF and a fit, so the net win is iteration count, not
+wall time on a single point — the payoff is a filter trained once per chemistry
+family (the probe/fit data is the same shape as the learned-XC and ML-density-init
+training sets) and reused across a discovery scan, which is where the iteration cut
+compounds. The probe is still approximate (a diagonal, shell-averaged d from a
+handful of iterations); a cleaner route is to read the response straight from the
+implicit-differentiation machinery (`scf/implicit.py` already applies χ₀ and
+K_Hxc), which would make d exact and remove the probe SCF. And the filter is radial
+(G-only); the local-TF operator is spatial (r-only) — a learned operator that is
+both is the general form, and the two current preconditioners are its limits.
 
 # Done and resolved
 

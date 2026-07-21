@@ -155,50 +155,105 @@ def spectral_radius(f_vals: torch.Tensor, d: torch.Tensor,
     return (1.0 - alpha * f_vals * d).abs().max()
 
 
+def _diis_unroll_logres(f: torch.Tensor, d: torch.Tensor, metric: torch.Tensor,
+                        alpha: float, n_unroll: int, history: int) -> torch.Tensor:
+    """log ‖res_N‖ after unrolling Pulay DIIS in the diagonal model, differentiable
+    in the filter values f.
+
+    In the diagonal linear model res_i = d⊙e_i, and a Pulay step is
+    e_new = (1 − α f d) ⊙ ē with ē = Σ c_i e_i the DIIS extrapolation whose
+    coefficients minimize ‖Σ c_i res_i‖²_metric under Σc_i = 1 (the same bordered,
+    diagonal-normalized, Tikhonov-regularized solve mixing.PulayMixer runs). The
+    coefficients do not depend on f, but the e-history they extrapolate does, so f
+    is trained to accelerate the modes DIIS's finite history does NOT already
+    kill — not to duplicate its low-G work."""
+    S = d.shape[0]
+    amp = 1.0 - alpha * f * d                      # (S,) preconditioned step factor
+    wq = metric * d * d                            # residual metric weight ⊙ d²
+    E = [torch.ones(S, dtype=d.dtype, device=d.device)]
+    eye = torch.eye
+    for _ in range(n_unroll):
+        m = len(E)
+        Emat = torch.stack(E)                      # (m, S)
+        if m == 1:
+            ebar = E[0]
+        else:
+            b = (Emat * wq) @ Emat.T               # B_ij = ⟨res_i, res_j⟩_metric
+            diag = b.diagonal().clamp_min(1e-300).sqrt()
+            bn = b / diag[:, None] / diag[None, :]
+            bn = bn + 1e-10 * eye(m, dtype=d.dtype, device=d.device)
+            bordered = torch.zeros(m + 1, m + 1, dtype=d.dtype, device=d.device)
+            bordered[:m, :m] = bn
+            bordered[:m, m] = 1.0 / diag
+            bordered[m, :m] = 1.0 / diag
+            rhs = torch.zeros(m + 1, dtype=d.dtype, device=d.device)
+            rhs[m] = 1.0
+            c = torch.linalg.solve(bordered, rhs)[:m] / diag
+            ebar = (c[:, None] * Emat).sum(0)
+        E.append(amp * ebar)
+        if len(E) > history:
+            E.pop(0)
+    eN = E[-1]
+    return 0.5 * torch.log((wq * eN * eN).sum().clamp_min(1e-300))
+
+
 def fit_multipole(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
                   n_poles: int = 3, alpha: float = 0.7, n_unroll: int = 40,
                   steps: int = 400, lr: float = 0.05,
                   q_min: float = 0.3, q_max: float = 3.0,
                   weight: torch.Tensor | None = None,
+                  mixer: str = "plain", history: int = 8, q0: float = 1.1,
                   verbose: bool = False) -> tuple[MultipoleKerkerPrecond, dict]:
     """Fit multi-pole Kerker poles to a per-shell response denominator d(G).
 
-    Differentiates ‖e_N‖ through the unrolled diagonal mixing recurrence
-    e_{n+1} = (1 − α f_θ d) e_n (broadband seed e_0 = 1), driving the whole G-range
-    toward the fastest common decay. Returns the fitted preconditioner (built on
-    the full ``g2_shell`` grid; rebuild ``.g2`` for a different mixer) and a
+    Differentiates the unrolled mixing residual through the solver's linearized
+    response to the pole weights and positions. Returns the fitted preconditioner
+    (built on ``g2_shell``; rebind to the density sphere for deployment) and a
     history dict with the loss curve and initial/final spectral radius.
 
     Args:
         g2_shell: (S,) representative |G|² per shell [Å⁻²].
         d_shell:  (S,) response denominator d = 1 − j per shell (real).
-        weight:   (S,) optional per-shell importance (e.g. shell multiplicity);
-                  defaults to uniform. Weights the loss, not the recurrence.
+        weight:   (S,) per-shell importance (shell multiplicity); defaults to
+                  uniform. In ``mixer="diis"`` it also enters the Pulay metric.
+        mixer:    ``"plain"`` unrolls damped linear mixing e_{n+1}=(1−αfd)e_n and
+                  minimizes the worst-shell rate (a smooth max over shells). This
+                  is the right target when the deployment mixer is plain damping.
+                  ``"diis"`` unrolls Pulay DIIS (history ``history``, Kerker metric
+                  wavevector ``q0``) so the filter is trained to complement the
+                  DIIS the real ``scf`` runs, not to duplicate its low-G work.
     """
     g2_shell = g2_shell.to(RDTYPE)
     d_shell = d_shell.to(RDTYPE)
-    w_shell = (torch.ones_like(g2_shell) if weight is None
-               else weight.to(RDTYPE)).clamp_min(0.0)
-    w_shell = w_shell / w_shell.sum().clamp_min(1e-30)
+    raw_w = (torch.ones_like(g2_shell) if weight is None
+             else weight.to(RDTYPE)).clamp_min(0.0)
+    w_shell = raw_w / raw_w.sum().clamp_min(1e-30)          # loss weight (plain)
+    metric = raw_w / (g2_shell + q0**2)                     # Pulay metric (diis)
+    if mixer not in ("plain", "diis"):
+        raise ValueError("mixer must be 'plain' or 'diis'")
 
     P = MultipoleKerkerPrecond.init_poles(g2_shell, n_poles, q_min, q_max,
                                           requires_grad=True)
     opt = torch.optim.Adam(P.params, lr=lr)
     e0 = torch.ones_like(g2_shell)
-    f0 = P.filter_vals().detach()
-    rho_init = float(spectral_radius(f0, d_shell, alpha))
+    rho_init = float(spectral_radius(P.filter_vals().detach(), d_shell, alpha))
     loss_hist: list[float] = []
 
     for it in range(steps):
         opt.zero_grad()
         f = P.filter_vals()
-        amp = (1.0 - alpha * f * d_shell)          # (S,) per-shell error factor
-        # unroll the linear solver: e_N = amp**N ⊙ e0. log|amp| avoids under/
-        # overflow and its weighted logsumexp is a smooth surrogate for the
-        # worst-shell rate that the spectral radius takes as a hard max.
-        log_amp = torch.log(amp.abs().clamp_min(1e-12))
-        log_eN = n_unroll * log_amp + torch.log(e0)
-        loss = torch.logsumexp(log_eN + torch.log(w_shell.clamp_min(1e-30)), dim=0)
+        if mixer == "diis":
+            loss = _diis_unroll_logres(f, d_shell, metric, alpha, n_unroll,
+                                       history)
+        else:
+            amp = (1.0 - alpha * f * d_shell)      # (S,) per-shell error factor
+            # e_N = amp**N ⊙ e0; log|amp| avoids under/overflow and the weighted
+            # logsumexp is a smooth surrogate for the worst-shell rate the
+            # spectral radius takes as a hard max.
+            log_amp = torch.log(amp.abs().clamp_min(1e-12))
+            log_eN = n_unroll * log_amp + torch.log(e0)
+            loss = torch.logsumexp(log_eN + torch.log(w_shell.clamp_min(1e-30)),
+                                   dim=0)
         loss.backward()
         opt.step()
         loss_hist.append(float(loss.detach()))
@@ -212,25 +267,32 @@ def fit_multipole(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
 
 
 def response_from_residuals(res_hist: list[torch.Tensor], g2: torch.Tensor,
-                            alpha: float, n_bins: int = 40,
-                            skip: int = 2) -> tuple[torch.Tensor, torch.Tensor,
-                                                    torch.Tensor]:
-    """Estimate the per-shell response denominator d(G) from a plain-mixing
+                            alpha: float, n_bins: int = 40, skip: int = 2,
+                            precond_fac: torch.Tensor | None = None
+                            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Estimate the per-shell response denominator d(G) from a short SCF's
     residual history.
 
-    Under plain damped mixing ρ_in^{n+1} = ρ_in^n + α·res_n, the diagonal model
-    gives res_{n+1}(G)/res_n(G) = 1 − α·d(G). Averaging that complex ratio's real
-    part over consecutive iterations and over |G|-shells recovers d(G). Early
-    iterations are noisy (loose diago tolerance, large steps) so the first
-    ``skip`` residual pairs are dropped.
+    In the diagonal model a mixing step gives res_{n+1}(G)/res_n(G) = 1 − α·P(G)·d(G),
+    where P(G) is whatever preconditioner ran during the probe. With plain damping
+    (``precond_fac=None``, P=1) this inverts directly to d = (1 − ratio)/α. Probing
+    a d-band or semicore metal with plain damping charge-sloshes, so the robust
+    path is to probe with Kerker ON and pass ``precond_fac`` = the Kerker factor
+    G²/(G²+q0²) per component; the estimator divides it back out to recover the
+    bare d(G). Averaging the complex ratio's real part over consecutive iterations
+    and |G|-shells de-noises it; the first ``skip`` pairs are dropped (loose early
+    diago tolerance). Shells where the probe preconditioner is too small to invert
+    reliably (P < 0.05) are excluded.
 
-    Returns (g2_shell, d_shell, count) with one entry per non-empty |G|-shell
-    bin: representative |G|² [Å⁻²], estimated d, and the component count (usable
-    as the fit ``weight``). The G=0 component is excluded (residual pinned there).
+    Returns (g2_shell, d_shell, count): representative |G|² [Å⁻²], estimated d, and
+    the component count per shell (the fit ``weight``). G=0 is excluded (pinned).
     """
     g2 = g2.reshape(-1)
     nz = g2 > 1e-12
-    gmax = float(g2[nz].max())
+    if precond_fac is not None:
+        nz = nz & (precond_fac.reshape(-1) > 0.05)
+        pf = precond_fac.reshape(-1).clamp_min(1e-3)
+    gmax = float(g2[g2 > 1e-12].max())
     edges = torch.linspace(0.0, gmax * (1 + 1e-6), n_bins + 1,
                            dtype=RDTYPE, device=g2.device)
     idx = torch.bucketize(g2, edges) - 1
@@ -239,8 +301,10 @@ def response_from_residuals(res_hist: list[torch.Tensor], g2: torch.Tensor,
     d_acc = torch.zeros(n_bins, dtype=RDTYPE, device=g2.device)
     n_acc = torch.zeros(n_bins, dtype=RDTYPE, device=g2.device)
     for a, b in zip(res_hist[skip:-1], res_hist[skip + 1:], strict=True):
-        ratio = (b / a.masked_fill(a.abs() < 1e-14, 1.0)).real  # 1 − α d per comp
+        ratio = (b / a.masked_fill(a.abs() < 1e-14, 1.0)).real  # 1 − α P d per comp
         d_comp = (1.0 - ratio) / alpha
+        if precond_fac is not None:
+            d_comp = d_comp / pf                    # divide the probe Kerker out
         keep = nz & torch.isfinite(d_comp)
         d_acc.index_add_(0, idx[keep], d_comp[keep].to(RDTYPE))
         n_acc.index_add_(0, idx[keep], torch.ones(int(keep.sum()),

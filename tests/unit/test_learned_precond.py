@@ -6,6 +6,7 @@ import torch
 from gradwave.dtypes import RDTYPE
 from gradwave.scf.learned_precond import (
     MultipoleKerkerPrecond,
+    _diis_unroll_logres,
     fit_multipole,
     response_from_residuals,
     spectral_radius,
@@ -79,6 +80,32 @@ def test_fit_beats_best_single_pole_on_two_scale_response():
                             steps=500, lr=0.05)
     assert info["rho_final"] < info["rho_init"]          # fit made progress
     assert info["rho_final"] < 0.9 * best                # and beats one pole
+
+
+def test_diis_unroll_is_differentiable_and_fit_beats_kerker():
+    """The Pulay-DIIS unroll is differentiable in the pole parameters, and a
+    DIIS-aware fit reaches a smaller post-DIIS residual than bare Kerker on a
+    two-scale response — i.e. the filter finds room DIIS's finite history leaves."""
+    alpha = 0.7
+    g2 = torch.linspace(0.15, 40.0, 150, dtype=RDTYPE)
+    d = 0.5 * g2 / (g2 + 0.3**2) + 0.5 * g2 / (g2 + 2.5**2)
+    metric = torch.ones_like(g2) / (g2 + 1.1**2)
+
+    # differentiable: gradient flows to both pole weights and positions
+    Q = MultipoleKerkerPrecond.init_poles(g2, n_poles=3, requires_grad=True)
+    loss = _diis_unroll_logres(Q.filter_vals(), d, metric, alpha, 20, 8)
+    loss.backward()
+    assert Q.w_raw.grad is not None and float(Q.w_raw.grad.norm()) > 0
+    assert Q.logq2.grad is not None and float(Q.logq2.grad.norm()) > 0
+
+    # DIIS-aware fit beats Kerker's post-DIIS residual
+    kerker = MultipoleKerkerPrecond.kerker(g2, 1.1).filter_vals()
+    res_kerker = float(_diis_unroll_logres(kerker, d, metric, alpha, 25, 8))
+    P, _ = fit_multipole(g2, d, n_poles=3, alpha=alpha, mixer="diis",
+                         history=8, n_unroll=25, steps=500)
+    res_learned = float(_diis_unroll_logres(P.filter_vals(), d, metric, alpha,
+                                            25, 8))
+    assert res_learned < res_kerker - 1.0  # at least e¹× smaller residual
 
 
 def test_response_estimate_recovers_known_denominator():
