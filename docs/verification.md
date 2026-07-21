@@ -182,6 +182,15 @@ compensating errors cannot hide.
 
 ## Tier 3: external anchors that are not QE
 
+- **Periodic-table Δ-gauge vs WIEN2k** (`benchmarks/delta_gauge`, implemented):
+  22 cubic elements across s/p/d valence, PseudoDojo NC-SR PBE, Δ vs the
+  all-electron WIEN2k reference of the Δ-factor benchmark. Median Δ = 0.8
+  meV/atom, 21/22 at V0 < 0.6 % and B0 < 4.4 %. Two lessons confirm the notes
+  below: (1) the elevated transition-metal Δ (Pt 2.7, Ir 1.9) is the metric's
+  **B0 sensitivity**, not error — their fractional V0/B0 are excellent, so the
+  ε/ν metrics are the fairer read; (2) Cu is the two-axis exemplar — bad vs
+  all-electron (Δ 7.9) but gradwave reproduces QE on the *same* UPF to 0.08 meV,
+  isolating the fault to the pseudopotential file (`results/cu_anomaly.md`).
 - **ACWF all-electron reference** (acwf-verification.materialscloud.org):
   960 EOS averaged from two independent all-electron codes, with archived
   per-code pseudopotential datasets. Comparing (gradwave − QE-same-pseudo)

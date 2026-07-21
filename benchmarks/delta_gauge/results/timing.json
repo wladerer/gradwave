@@ -1,0 +1,156 @@
+{
+ "K": {
+  "struct": "bcc",
+  "total_s": 1735.3,
+  "s_per_vol": 247.9,
+  "max_it": 10,
+  "peak_gb": 4.94
+ },
+ "Ca": {
+  "struct": "fcc",
+  "total_s": 864.7,
+  "s_per_vol": 123.52857142857144,
+  "max_it": 10,
+  "peak_gb": 4.47
+ },
+ "Ag": {
+  "struct": "fcc",
+  "total_s": 773.9,
+  "s_per_vol": 110.55714285714285,
+  "max_it": 10,
+  "peak_gb": 4.11
+ },
+ "Sn": {
+  "struct": "diamond",
+  "total_s": 746.1,
+  "s_per_vol": 106.58571428571429,
+  "max_it": 12,
+  "peak_gb": 4.29
+ },
+ "Na": {
+  "struct": "bcc",
+  "total_s": 734.7,
+  "s_per_vol": 104.95714285714287,
+  "max_it": 9,
+  "peak_gb": 3.98
+ },
+ "Pt": {
+  "struct": "fcc",
+  "total_s": 717.6,
+  "s_per_vol": 102.51428571428572,
+  "max_it": 9,
+  "peak_gb": 4.4
+ },
+ "Pd": {
+  "struct": "fcc",
+  "total_s": 717.5,
+  "s_per_vol": 102.5,
+  "max_it": 11,
+  "peak_gb": 3.94
+ },
+ "Au": {
+  "struct": "fcc",
+  "total_s": 685.5,
+  "s_per_vol": 97.92857142857143,
+  "max_it": 10,
+  "peak_gb": 4.11
+ },
+ "Cu": {
+  "struct": "fcc",
+  "total_s": 678.4,
+  "s_per_vol": 96.91428571428571,
+  "max_it": 10,
+  "peak_gb": 3.67
+ },
+ "Rh": {
+  "struct": "fcc",
+  "total_s": 661.1,
+  "s_per_vol": 94.44285714285715,
+  "max_it": 10,
+  "peak_gb": 3.77
+ },
+ "Pb": {
+  "struct": "fcc",
+  "total_s": 628.5,
+  "s_per_vol": 89.78571428571429,
+  "max_it": 9,
+  "peak_gb": 3.6
+ },
+ "Sr": {
+  "struct": "fcc",
+  "total_s": 484.3,
+  "s_per_vol": 69.18571428571428,
+  "max_it": 9,
+  "peak_gb": 4.0
+ },
+ "Ge": {
+  "struct": "diamond",
+  "total_s": 480.6,
+  "s_per_vol": 68.65714285714286,
+  "max_it": 11,
+  "peak_gb": 3.57
+ },
+ "Ir": {
+  "struct": "fcc",
+  "total_s": 471.9,
+  "s_per_vol": 67.41428571428571,
+  "max_it": 9,
+  "peak_gb": 3.48
+ },
+ "Nb": {
+  "struct": "bcc",
+  "total_s": 463.70000000000005,
+  "s_per_vol": 66.24285714285715,
+  "max_it": 9,
+  "peak_gb": 3.92
+ },
+ "Mo": {
+  "struct": "bcc",
+  "total_s": 431.4,
+  "s_per_vol": 61.628571428571426,
+  "max_it": 9,
+  "peak_gb": 3.63
+ },
+ "V": {
+  "struct": "bcc",
+  "total_s": 378.1,
+  "s_per_vol": 54.01428571428572,
+  "max_it": 10,
+  "peak_gb": 3.31
+ },
+ "W": {
+  "struct": "bcc",
+  "total_s": 365.5,
+  "s_per_vol": 52.214285714285715,
+  "max_it": 9,
+  "peak_gb": 3.59
+ },
+ "Si": {
+  "struct": "diamond",
+  "total_s": 320.4,
+  "s_per_vol": 45.771428571428565,
+  "max_it": 9,
+  "peak_gb": 0
+ },
+ "Ta": {
+  "struct": "bcc",
+  "total_s": 272.2,
+  "s_per_vol": 38.885714285714286,
+  "max_it": 9,
+  "peak_gb": 3.32
+ },
+ "Li": {
+  "struct": "bcc",
+  "total_s": 186.9,
+  "s_per_vol": 26.7,
+  "max_it": 8,
+  "peak_gb": 2.98
+ },
+ "Al": {
+  "struct": "fcc",
+  "total_s": 98.2,
+  "s_per_vol": 14.028571428571428,
+  "max_it": 8,
+  "peak_gb": 1.67
+ }
+}

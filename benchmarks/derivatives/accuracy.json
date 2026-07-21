@@ -1,0 +1,192 @@
+[
+ {
+  "q": "Atomic forces \u2212dE/d\u03c4",
+  "method": "autograd Hellmann\u2013Feynman",
+  "ref": "FD of energy",
+  "ref_type": "FD",
+  "agree": "<1e-4 eV/\u00c5",
+  "rel": 0.0001,
+  "sys": "displaced Si",
+  "test": "test_forces_vs_qe.py"
+ },
+ {
+  "q": "Atomic forces \u2212dE/d\u03c4",
+  "method": "autograd Hellmann\u2013Feynman",
+  "ref": "QE pw.x",
+  "ref_type": "QE",
+  "agree": "8.6e-6 eV/\u00c5 (egg-box, 35 Ry)",
+  "rel": 8.6e-06,
+  "sys": "displaced Si",
+  "test": "test_forces_vs_qe.py"
+ },
+ {
+  "q": "Stress dE/d\u03b5",
+  "method": "autograd strain (Nielsen\u2013Martin)",
+  "ref": "FD of energy",
+  "ref_type": "FD",
+  "agree": "<1e-7",
+  "rel": 1e-07,
+  "sys": "Si",
+  "test": "test_stress_vs_qe.py"
+ },
+ {
+  "q": "Stress dE/d\u03b5",
+  "method": "autograd strain",
+  "ref": "QE pw.x",
+  "ref_type": "QE",
+  "agree": "\u22640.006 kbar over 90\u201314000 kbar",
+  "rel": 0.0001,
+  "sys": "Si / Al / MgO / Ni",
+  "test": "test_stress_vs_qe.py"
+ },
+ {
+  "q": "Position response \u2202F/\u2202\u03c4 (PAW Hessian)",
+  "method": "S-metric Sternheimer + SC response",
+  "ref": "FD of forces",
+  "ref_type": "FD",
+  "agree": "2.0e-5",
+  "rel": 2e-05,
+  "sys": "Si kjpaw",
+  "test": "test_uspp_position.py"
+ },
+ {
+  "q": "\u0393 phonon force constants",
+  "method": "FD of analytic forces",
+  "ref": "energy 2nd-difference / ph.x",
+  "ref_type": "QE",
+  "agree": "0.5% (0.003\u20130.15% vs ph.x)",
+  "rel": 0.005,
+  "sys": "Si",
+  "test": "test_phonons.py"
+ },
+ {
+  "q": "XC parameter dE/d\u03bc, dE/d\u03ba",
+  "method": "variational stationarity",
+  "ref": "FD of SCF re-runs",
+  "ref_type": "FD",
+  "agree": "<1e-5 (obs ~1e-8)",
+  "rel": 1e-08,
+  "sys": "Si LearnableX",
+  "test": "test_functional_learning.py"
+ },
+ {
+  "q": "Density-loss adjoint dL/d\u03b8",
+  "method": "implicit-diff (\u03c7\u2080, K_Hxc adjoint)",
+  "ref": "FD of SCF re-runs",
+  "ref_type": "FD",
+  "agree": "<2e-4",
+  "rel": 0.0002,
+  "sys": "Si LearnableX",
+  "test": "test_implicit_scf.py"
+ },
+ {
+  "q": "USPP/PAW density-loss dL/d\u03b8",
+  "method": "composite (\u03c1, becsum) adjoint",
+  "ref": "FD of SCF re-runs",
+  "ref_type": "FD",
+  "agree": "1.2e-6",
+  "rel": 1.2e-06,
+  "sys": "Si kjpaw",
+  "test": "test_uspp_implicit.py"
+ },
+ {
+  "q": "USPP metal dL/d\u03b8 (Fermi surface)",
+  "method": "window-pair + \u03b4\u03bc adjoint",
+  "ref": "FD of smeared SCF",
+  "ref_type": "FD",
+  "agree": "<2e-4",
+  "rel": 0.0002,
+  "sys": "Al kjpaw",
+  "test": "test_uspp_implicit.py"
+ },
+ {
+  "q": "PAW one-center HVP \u2202\u00b2E\u2081c/\u2202becsum\u00b2",
+  "method": "analytic Hessian-vector product",
+  "ref": "FD of ddd",
+  "ref_type": "FD",
+  "agree": "<2e-6",
+  "rel": 2e-06,
+  "sys": "Si kjpaw",
+  "test": "test_paw_onsite_hvp.py"
+ },
+ {
+  "q": "Hybrid dE/d\u03b1 (exchange mixing)",
+  "method": "stationary-energy derivative",
+  "ref": "FD of re-converged hybrid",
+  "ref_type": "FD",
+  "agree": "<1e-3",
+  "rel": 0.001,
+  "sys": "Si PBE0",
+  "test": "test_learned_hybrid.py"
+ },
+ {
+  "q": "Hybrid dE/d\u03c9 (screening)",
+  "method": "stationary-energy derivative",
+  "ref": "FD of re-converged hybrid",
+  "ref_type": "FD",
+  "agree": "<5e-3",
+  "rel": 0.005,
+  "sys": "Si HSE-form",
+  "test": "test_learned_hybrid.py"
+ },
+ {
+  "q": "Hybrid gap dGap/d\u03b1",
+  "method": "frozen-orbital Hellmann\u2013Feynman",
+  "ref": "FD of re-converged hybrid",
+  "ref_type": "FD",
+  "agree": "1% (dGap/d\u03c9 5%)",
+  "rel": 0.01,
+  "sys": "Si",
+  "test": "benchmarks/hybrid_design/validate.py"
+ },
+ {
+  "q": "Hubbard dE/dU",
+  "method": "Hellmann\u2013Feynman \u00bdTr[n(1\u2212n)]",
+  "ref": "FD of SCF re-runs",
+  "ref_type": "FD",
+  "agree": "<1e-4",
+  "rel": 0.0001,
+  "sys": "NiO",
+  "test": "test_hubbard_vs_qe.py"
+ },
+ {
+  "q": "+U force \u2212dE_U/d\u03c4",
+  "method": "autograd through projector phases",
+  "ref": "gradcheck",
+  "ref_type": "FD",
+  "agree": "atol 1e-6",
+  "rel": 1e-06,
+  "sys": "synthetic Se",
+  "test": "test_hubbard.py"
+ },
+ {
+  "q": "Linear-response Hubbard U",
+  "method": "analytic Sternheimer + autograd HVP",
+  "ref": "QE hp.x DFPT",
+  "ref_type": "QE",
+  "agree": "0.3% (6.45 vs 6.43 eV)",
+  "rel": 0.003,
+  "sys": "NiO",
+  "test": "test_hubbard_vs_qe.py"
+ },
+ {
+  "q": "Dielectric \u03b5\u221e",
+  "method": "Sternheimer + autograd K_Hxc HVP",
+  "ref": "QE ph.x (epsil)",
+  "ref_type": "QE",
+  "agree": "0.002% Si, <1% MgO",
+  "rel": 0.0002,
+  "sys": "Si / MgO",
+  "test": "test_dielectric_vs_qe.py"
+ },
+ {
+  "q": "Born charge Z* = \u2202\u00b2E/\u2202E\u2202\u03c4",
+  "method": "Sternheimer + \u03c4-diff pseudo backward",
+  "ref": "QE ph.x (zeu)",
+  "ref_type": "QE",
+  "agree": "<2e-3 Si, <1% MgO",
+  "rel": 0.0017,
+  "sys": "Si / MgO",
+  "test": "test_dielectric_vs_qe.py"
+ }
+]

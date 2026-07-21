@@ -36,6 +36,29 @@ the largest single source of speedup, giving 5 to 14 times depending on the poin
 on by default (`use_symmetry=True`) and gated by tests that check the reduced and
 full-mesh energies agree. Reach for this first.
 
+### Norm-conserving many-k: the GPU wins even on tiny cells
+
+The "small cell runs faster on the CPU" rule below is specific to low-k PAW, where
+the dense-grid FFT and the one-center work on the CPU dominate. A norm-conserving
+Hamiltonian is the opposite regime: pure FFT plus batched `eigh`, batched over the
+whole irreducible wedge. On the delta_gauge EOS campaign (1–2 atom primitives, PBE,
+16³ meshes → 145 irreducible k-points) the RTX 3050 beat the 22-core CPU by 2.6–5.6×
+on Al/Cu/Si with bit-identical energies, because the many batched k-points fill the
+otherwise-idle fp64 units. So the device crossover is about *batch width*
+(`n_k · n_band · grid`), not atom count. An 8-core laptop CPU was ~16× slower still
+(Ge 435 s/vol vs ~8 s on the GPU) — offload to a slow CPU only for a job the GPU
+cannot fit, never for throughput.
+
+The fit is the 6 GB VRAM ceiling. The batched apply holds `n_k^IBZ · n_band · ∏nᵢ`
+complex128, and the real-space grid scales as `nᵢ ∝ |aᵢ|·√E_cut`, so a big-cell
+low-Z element overflows before a compact high-Z one: K (a ≈ 5.3 Å, 54³) OOMs while
+Cu (a ≈ 3.6 Å, 36³) fits, despite Cu's higher cutoff. The fix is to scale the
+k-mesh to cell size rather than fix a uniform N³ — K and Sr used 12³ against 16³ for
+the ~3.6 Å cells, the same reciprocal-space density, which is both more correct and
+fits the card. The still-missing code lever is k-chunking the batched apply
+(`_band_chunk` handles bands, not k); it would let the GPU take every big-grid
+system at full mesh instead of falling back to the CPU.
+
 ### Warm-start SCF
 
 The ASE calculator reuses the previous step's density and orbitals as the next SCF

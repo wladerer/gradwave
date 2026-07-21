@@ -46,6 +46,16 @@ defect, which the [Performance](performance.md) page works through in full.
 - Know your pseudo's contents. SG15 carries no PP_PSWFC, PseudoDojo tarballs do.
   PseudoDojo fully-relativistic pseudos have NLCC and are unsupported on the spin-orbit
   path, while SG15 fully-relativistic works.
+- A UPF can disagree with its own psp8. The PseudoDojo standard-tarball `Cu.upf`
+  (byte-identical across v0.4 and v0.5) gives Cu B0 = 167 GPa, 18 percent above the
+  all-electron 141 and inconsistent with PseudoDojo's published psp8 Δ-factor of
+  0.53. It is not a gradwave bug: `pw.x` on the identical UPF reproduces the stiff
+  EOS to 0.08 meV (both codes read the file the same way), and SG15 Cu in the same
+  harness is normal (Δ 1.33, which is that pseudo's genuine pseudization quality,
+  matching its published value). So the psp8→UPF conversion is the suspect, not the
+  code. When one element's Δ blows up against all-electron, cross-check it against
+  QE at pinned settings and against a second pseudo family before trusting the
+  number. See `benchmarks/delta_gauge/results/cu_anomaly.md`.
 
 ## Grids
 
@@ -154,6 +164,15 @@ defect, which the [Performance](performance.md) page works through in full.
   because early garbage secant pairs poison the inverse Jacobian. Johnson's weights, the
   normalization plus the w0 regularization, are the load-bearing part of QE's mixer, not
   a refinement.
+- Johnson is exposed on the norm-conserving path too, not only USPP/PAW. `scf` takes
+  `mixing_scheme="johnson"` (dispatch alongside pulay/broyden, history default lifted
+  to 12), so the FM 3d metals run without hand-set damping. On nspin=1 it is
+  bit-identical to pulay (same fixed point, different route); bcc Fe converges to
+  m = 2.27 μB. A strong seed plus warm-start keeps even pulay on the FM branch for a
+  robust ferromagnet like bcc Fe — the johnson advantage concentrates near the Stoner
+  boundary (fcc Ni), where default damping silently collapses the moment. Gate FM
+  metals on the energy tail (`rhotol` ~1e-5), since the density residual floors at
+  occupation noise.
 - Do not expect the mixer to select the physical branch. The nonmagnetic state is a
   genuine stationary point tens of meV away, and every code can land on it. Warm-start
   chains across scan points are the practical defense, plus an explicit moment gate as a
