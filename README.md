@@ -70,6 +70,9 @@ Si₈(2×2×2) to 3 µeV/atom — exact supercell folding equivalence.
   range-separated (PBE0/HSE) kernel, self-consistent hybrid SCF on a full-BZ
   k-mesh, and a *learnable* hybrid whose mixing α and screening ω train end to
   end through the stationary-energy derivative (`postscf/hybrid.py`)
+- Meta-GGA (`xc: r2scan`): the kinetic-energy density τ and its generalized-KS
+  operator, a differentiable r2SCAN matched to libxc pointwise to machine
+  precision (nspin=1 and 2)
 - DFT+U with the Hubbard U from linear response and an exact dE/dU
 - IBZ symmetry reduction with density/becsum symmetrization, including magnetic
   (Shubnikov) groups for non-collinear cells (`magmoms=`)
@@ -110,13 +113,12 @@ See `examples/` for input files. Any geometry format ASE can read is accepted.
   Fock build is validated at Γ and on a k-mesh; the remaining physics tails are
   the Gygi–Baldereschi q+G=0 correction for fine-mesh unscreened PBE0 and the
   range-separated (wPBE) semilocal screening for a complete HSE (use
-  `mode="full"` until then). The meta-GGA *infrastructure* is in place — the
+  `mode="full"` until then). Meta-GGA: **r2SCAN** ships (`xc: r2scan`) via the
   kinetic-energy density τ and its generalized-KS operator −½∇·(v_τ∇ψ), with
-  self-consistent SCF at nspin=1 and 2 (`core/metagga.py`, gated by
-  `xc.needs_tau`) — validated intrinsically (the operator equals ∂E_xc/∂ψ* and
-  the stationary-energy identity dE/dλ = ∫τ holds at SCF scale). A production
-  meta-GGA functional (SCAN/r2SCAN) and its vs-QE validation are the remaining
-  step; only LDA/GGA functionals ship today.
+  self-consistent SCF at nspin=1 and 2 — a differentiable implementation matched
+  to libxc pointwise to machine precision (so v_xc, v_τ, forces, and learnable
+  parameters all come from autograd). Not yet on the meta-GGA path: τ force/stress
+  terms, USPP/PAW τ, and the non-collinear/SOC spinor path (all guarded).
 
 ## Development
 

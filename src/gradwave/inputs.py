@@ -289,8 +289,8 @@ def _load_input(path: Path) -> Input:
     _check_keys("scf.diago", diago, {"tol"})
 
     xc = str(raw.get("xc", "pbe")).lower()
-    if xc not in ("lda", "pbe"):
-        raise InputError(f"unknown xc {xc!r} (lda | pbe)")
+    if xc not in ("lda", "pbe", "r2scan"):
+        raise InputError(f"unknown xc {xc!r} (lda | pbe | r2scan)")
     task = raw.get("task", "scf")
     if task not in ("scf", "relax", "bands", "magnetism"):
         raise InputError(

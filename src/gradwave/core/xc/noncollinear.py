@@ -31,6 +31,11 @@ class NoncollinearXC(torch.nn.Module):
 
     def __init__(self, collinear: SpinXC, m_eps: float = 1e-24):
         super().__init__()
+        if getattr(collinear, "needs_tau", False):
+            raise NotImplementedError(
+                "meta-GGA (needs_tau) is not supported on the non-collinear/SOC "
+                "spinor path yet — the spinor SCF does not build τ. Use a "
+                "collinear (nspin=1/2) calculation for r2SCAN.")
         self.collinear = collinear
         self.m_eps = m_eps
 

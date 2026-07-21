@@ -29,6 +29,9 @@ dev = [
     "pytest-xdist",
     "ruff>=0.6",
     "sympy>=1.12",
+    # libxc oracle for the r2SCAN pointwise tests (bundles libxc via its wheel);
+    # tests importorskip it, so it is optional — this just enables them in CI.
+    "pyscf>=2.4",
 ]
 docs = [
     "mkdocs>=1.6",

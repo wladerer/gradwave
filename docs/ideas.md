@@ -242,15 +242,32 @@ difference), and at SCF scale the stationary-energy identity dE_total/dλ = ∫�
 plus τ-flat reduction to PBE/spin-PBE bit-for-bit
 (`tests/unit/test_metagga.py`, `tests/integration/test_metagga_scf.py`).
 
-**What remains, in build order:** (1) a *production* meta-GGA functional —
-r2SCAN in the `XCFunctional`/`SpinXC` `energy_density` with its τ dependence —
-and a `si_r2scan_ci`/`si_scan_ci` QE fixture (`input_dft='r2scan'`) to pin it to
-milli-eV vs `pw.x`, the vs-QE validation the intrinsic gates stand in for today;
-(2) the τ terms in the force and stress expressions (the τ operator contributes a
-Pulay-like term absent from the current Hellmann–Feynman forces); (3) USPP/PAW τ
-(the one-center augmentation of τ); (4) then the learnable r2SCAN-form functional
-and the `train_xc_paw` recovery test at meta-GGA level. The paragraphs below are
-the original framing, kept for the reasoning.
+**r2SCAN LANDED (2026-07-21).** `core/xc/r2scan.py` — the production meta-GGA,
+spin-unpolarized `R2SCAN` and collinear `SpinR2SCAN`, transcribed from libxc's
+own Maple source so it matches libxc (hence QE's `input_dft='r2scan'`) pointwise.
+Written as a differentiable PyTorch expression, not a libxc binding, so v_xc, the
+meta-GGA v_τ, forces, and the learnable-parameter graph all follow from autograd
+— the whole reason not to route the functional through opaque C. Validated
+against libxc via pyscf to machine precision across α spanning all three branches
+(`tests/unit/test_r2scan.py`): unpolarized e_xc/vρ/vσ/vτ to 1e-11–1e-14, exchange
+and correlation each exact standalone, spin-polarized energy and per-channel vτ
+to 1e-15 vs libxc spin=1. The self-consistent SCF converges (Si, 11 iterations,
+same as PBE) and opens the gap 2.44→2.67 eV (`tests/integration/test_r2scan_scf.py`).
+Wired into the input path: `xc: r2scan` resolves through the registries
+(`api.py`, `calculator.py`, `inputs.py`); guarded off on the non-collinear spinor
+path (no τ there yet). The libxc pointwise match — QE r2SCAN *is* libxc — stands
+in for a `pw.x` fixture, which would only re-confirm the integrated SCF energy the
+pointwise derivatives and the stationary-energy gate already pin; a `si_r2scan_ci`
+QE fixture is a nice-to-have, not a correctness gap.
+
+**What remains, in build order:** (1) the τ terms in the force and stress
+expressions (the τ operator contributes a Pulay-like term absent from the current
+Hellmann–Feynman forces); (2) USPP/PAW τ (the one-center augmentation of τ);
+(3) meta-GGA on the non-collinear/SOC spinor path; (4) then a learnable
+r2SCAN-form functional (α, and the enhancement-factor parameters as trained
+tensors) and the `train_xc_paw` recovery test at meta-GGA level — now directly
+reachable since r2SCAN is already a differentiable autograd expression. The
+paragraphs below are the original framing, kept for the reasoning.
 
 The learnable functional spans GGA form only, the two PBE parameters kappa and mu.
 Every modern accurate semilocal functional (SCAN, r2SCAN) is meta-GGA, which means
