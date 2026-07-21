@@ -156,11 +156,19 @@ def _energy_strained(
 
         g_box = (m_box @ b_e).reshape(*shape, 3)
         sigma_xc = sigma_from_rho(rho_xc, g_box)
-    e_xc = xc.energy(rho_xc, omega, sigma_xc)
 
     # ---- kinetic + nonlocal, per k (strained k+G from integer Miller + k_frac)
     occ = res.occupations.detach()
     kw = system.kweights
+
+    # ---- meta-GGA τ: rebuilt on the strain graph, because unlike ρ (which only
+    # scales as 1/Ω) the kinetic-energy density τ = ½Σf|∇ψ|² also picks up the
+    # strained (k+G) in ∇ψ — the explicit strain dependence a GGA has not. This
+    # is what makes the meta-GGA stress genuinely different from forces.
+    tau_xc = None
+    if xc.needs_tau:
+        tau_xc = _tau_strained(coeffs, spheres, b_e, omega, occ, kw, shape)
+    e_xc = xc.energy(rho_xc, omega, sigma_xc, tau_xc)
     e_kin = torch.zeros((), dtype=rdt, device=dev)
     e_nl = torch.zeros((), dtype=rdt, device=dev)
     lmax = max((b.l for u in system.upfs for b in u.betas), default=0)
@@ -186,3 +194,28 @@ def _energy_strained(
     e_ew = ewald_strained(pos_e, system.charges, a_e, b_e, omega, grid.cell)
 
     return e_kin + e_h + e_xc + e_loc + e_nl + e_ew
+
+
+def _tau_strained(coeffs, spheres, b_e, omega, occ, kw, shape):
+    """τ(ε) = ½ Σ_k w_k Σ_n f |∇ψ|² on the strained cell, at fixed coefficients.
+
+    ∇ψ uses the strained (k+G) (strained_kpg), so autograd carries τ's explicit
+    strain dependence — the piece the GGA σ path (a function of ρ, which only
+    scales as 1/Ω) does not have. Reduces to core.metagga.tau_b at ε=0, so the
+    ε=0 strained energy still reproduces the SCF energy for a meta-GGA."""
+    from gradwave.core.fftbox import g_to_r
+
+    tau = None
+    for ik, sph in enumerate(spheres):
+        kpg, _ = strained_kpg(sph, b_e)  # (npw, 3)
+        c = coeffs[ik]  # (nb, npw)
+        w = kw[ik] * occ[ik, : c.shape[0]]  # (nb,)
+        grad2 = None
+        for d in range(3):
+            gd = (1j * kpg[:, d])[None, :] * c  # i(k+G)_d c  → ∂_d ψ
+            psid = g_to_r(gd, sph.flat_idx, shape)  # (nb, n1, n2, n3)
+            term = psid.real ** 2 + psid.imag ** 2
+            grad2 = term if grad2 is None else grad2 + term
+        contrib = 0.5 * torch.einsum("b,bxyz->xyz", w.to(grad2.dtype), grad2)
+        tau = contrib if tau is None else tau + contrib
+    return tau / omega

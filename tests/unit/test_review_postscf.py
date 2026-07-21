@@ -4,6 +4,8 @@ in the fast gate):
 - hubbard_u._assemble_u now guards against inequivalent two-site manifolds
 - magnetism uses the shared KB_EV and a single MOMENT_TOL_MUB constant
 - phonons.gamma_frequencies derives its cm⁻¹ constant from gradwave.constants
+- irreps._chi uses the gauge-coherent class representative (projective zone
+  boundary), not the class mean whose sign is numerical noise
 """
 
 import math
@@ -16,10 +18,32 @@ from gradwave.constants import KB_EV
 from gradwave.postscf import magnetism
 from gradwave.postscf.hessian import SQRT_EV_AMU_ANG2_TO_CM1
 from gradwave.postscf.hubbard_u import _assemble_u
+from gradwave.postscf.irreps import _chi
 from gradwave.postscf.phonons import (
     _SQRT_EV_AMU_ANG2_TO_CM1,
     gamma_frequencies,
 )
+
+
+def test_chi_projective_class_uses_coherent_representative():
+    """A zone-boundary class whose members carry cube-root-of-unity phases
+    (graphene K's C₂′: {1, ω, ω²}) reduces to the coherent ±1, not the ~0 mean
+    whose sign flips with numerical noise. Ordinary (coherent) classes are
+    unchanged, and an empty selection returns None."""
+    w = np.exp(2j * math.pi / 3)
+    c2 = [{"kind": "C", "order": 2}] * 3
+    is_c = lambda o: o["kind"] == "C"          # noqa: E731
+
+    # A1'-type: mean(Re) = (1 - 0.5 - 0.5)/3 = 0, coherent representative = +1
+    assert abs(np.mean(np.real([1.0 + 0j, w, w * w]))) < 1e-9
+    assert abs(_chi([1.0 + 0j, w, w * w], c2, is_c) - 1.0) < 1e-9
+    # A2'-type: {-1, -ω, -ω²} -> coherent -1
+    assert abs(_chi([-1.0 + 0j, -w, -w * w], c2, is_c) + 1.0) < 1e-9
+    # ordinary coherent class: representative == mean
+    assert abs(_chi([1.0 + 0j, 1.0 + 0j], [{"kind": "C", "order": 2}] * 2, is_c)
+               - 1.0) < 1e-9
+    # nothing selected
+    assert _chi([1.0 + 0j], [{"kind": "i"}], is_c) is None
 
 
 def _sites(l0, l1):

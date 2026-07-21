@@ -134,8 +134,21 @@ def _principal(ops):
 
 
 def _chi(clusters_chi, ops, select):
+    """Real class character used as a Mulliken discriminant.
+
+    Not the plain class mean: at a zone-boundary k the members of one class can
+    carry projective phases (e.g. the three C₂′ of graphene's K little group come
+    out as {1, ω, ω²}, the cube roots of unity), so ``mean(Re χ)`` collapses to
+    ~0 and its sign is numerical noise — the label then flips between platforms.
+    The gauge-coherent representative is the class member whose character is real
+    (largest |Re|, imaginary part ~0); its sign is the physical discriminant and
+    is stable. Reduces to the mean for an ordinary class where all members agree.
+    """
     vals = [chi for chi, op in zip(clusters_chi, ops, strict=True) if select(op)]
-    return float(np.mean(np.real(vals))) if vals else None
+    if not vals:
+        return None
+    rep = max(vals, key=lambda x: abs(np.real(x)))
+    return float(np.real(rep))
 
 
 def _mulliken(chis: list, ops: list, dim: int) -> str:
