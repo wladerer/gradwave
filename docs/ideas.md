@@ -258,28 +258,29 @@ a very well-validated second copy of QE.
 The periodic-table Δ-gauge (`benchmarks/delta_gauge`) surfaced a concrete target:
 the PseudoDojo standard UPF for Cu reproduces neither all-electron nor its own
 psp8 (B0 167 vs 141, Δ 7.9 meV/atom), and gradwave matches QE on that same UPF to
-0.08 meV, so the error is pseudization, not implementation. Most transition metals
-carry a smaller version of the same error (the "stiff-metal" Δ floor). One day it
-would be worth using gradwave's differentiability to *address* that error rather
-than only measure it.
+0.08 meV, so the error is pseudization rather than implementation. Most transition
+metals carry a smaller version of the same error (the "stiff-metal" Δ floor). One
+day it would be worth using gradwave's differentiability to *address* that error
+rather than only measure it.
 
-The differentiable angle no mainstream code has: treat a small correction to the
-pseudopotential as a trained parameter and descend it through the self-consistent
-solution against all-electron reference data, exactly the way the learned hybrid
-descends α and ω. Concretely, add a differentiable δv(r) (a few-parameter radial
-form, or a correction to the local channel / a KB coefficient) to the pseudo, and
-minimise a multi-property loss — EOS curve vs WIEN2k, or (better, once the
-all-electron anchor exists) valence eigenvalues and the logarithmic derivatives at
-the reference energies. The gradient dLoss/dθ_pp flows through the same
+The approach is to treat a small correction to the pseudopotential as a trained
+parameter and descend it through the self-consistent solution against
+all-electron reference data, the way the learned hybrid descends α and ω.
+Concretely, add a differentiable δv(r) (a few-parameter radial form, or a
+correction to the local channel / a KB coefficient) to the pseudo, and minimise a
+multi-property loss: the EOS curve vs WIEN2k, or (better, once the all-electron
+anchor exists) valence eigenvalues and the logarithmic derivatives at the
+reference energies. The gradient dLoss/dθ_pp flows through the same
 stationary-energy and Sternheimer machinery already used for dE/dα and the density
-adjoint; the pseudopotential enters the energy through the local potential and the
+adjoint. The pseudopotential enters the energy through the local potential and the
 nonlocal projectors, both already τ-differentiable for forces, so the parameter
 graph is mostly in place. The result would be a *corrected* Cu (and, if it
 generalises, a per-element learned correction that pulls the stiff-metal Δ floor
 down), and a demonstration that differentiable DFT can improve a pseudopotential
-against all-electron data, not just consume one. Care: keep the correction small
-and norm-conserving-preserving, and validate that it does not overfit the EOS at
-the expense of transferability (band structure, a second crystal structure).
+against all-electron data rather than only use a fixed one. Care is needed. Keep
+the correction small and norm-conserving, and validate that it does not overfit
+the EOS at the expense of transferability (band structure, a second crystal
+structure).
 
 ## Differentiable spintronics: spin Hamiltonians, DMI, and inverse design
 
