@@ -153,28 +153,48 @@ in `postscf.convergence_error`, and each has a different structure. None of them
 touch the exchange-correlation model error, which no internal estimate reaches
 (the reasoning is in `docs/ideas.md`).
 
-**SCF convergence error.** Stopping the iteration at a finite density tolerance
-leaves a residual $r = \rho_\text{out} - \rho_\text{in}$. Because the energy is
-stationary at the fixed point, the energy error is second order in $r$,
+**SCF convergence error.** Stopping the iteration at a finite tolerance leaves
+the reported free energy a little above the fully self-consistent value
+$E_\infty$. The headline estimate reads this distance off the recorded energy
+trajectory: in the convergence basin the tail is geometric,
+$E_i - E_\infty \sim q^{\,i}$, so the unobserved remainder sums to
 
-$$ \delta E_\text{scf} = \tfrac{1}{2}\, \langle r \,|\, K_\text{Hxc} \,|\, (1 - \chi_0 K_\text{Hxc})^{-1} r \rangle, $$
+$$ E_\infty - E_\text{last} \approx \delta E_\text{last}\,\frac{q}{1 - q}, $$
 
-the Hartree-XC energy of the residual density screened by the SCF dielectric
-operator. Both operators are the response primitives the Dyson dressing already
-uses, so no new SCF is taken, only the stored last-step residual and one Dyson
-solve. The screened form needs $\chi_0$ (insulator, nspin=1, use_symmetry=False);
-elsewhere the unscreened $\tfrac{1}{2}\langle r | K_\text{Hxc} | r \rangle$ is
-reported as an overestimate. The estimate is a definite raising: the converged
-energy is below the reported one, `energy_converged_estimate_eV = F - δE_scf`.
-The cross-check is a loose-versus-tight pair of runs, the way the eigenvalue
-error cross-checks against `denergy`.
+with $q$ the ratio of the last energy steps. This needs one run and no response
+solve, and because it reads only the recorded energies it works for every system
+(metal, spin, symmetry, USPP, noncollinear), reporting a non-negative `denergy`
+and the extrapolated `energy_converged_estimate`. `reliable` is `False` when the
+tail is too short or not clearly contracting, where `denergy` falls back to the
+last $|\delta F|$ as an order-of-magnitude proxy.
 
 ```python
 from gradwave.postscf.convergence_error import estimate_scf_error
 
-scfe = estimate_scf_error(res, PBE())   # res from a (possibly loose) scf(...)
-print(scfe.denergy, scfe.screened, scfe.energy_converged_estimate)
+scfe = estimate_scf_error(res)          # res from a (possibly loose) scf(...)
+print(scfe.denergy, scfe.reliable, scfe.energy_converged_estimate)
 ```
+
+A second-order *response* form is available as a diagnostic when the functional
+and the collinear response primitives are supplied. Because the energy is
+stationary at the fixed point the error is second order in the residual
+$r = \rho_\text{out} - \rho_\text{in}$, and the exact form is
+$\tfrac{1}{2}\langle x | (K_\text{Hxc} - \chi_0^{-1}) | x\rangle$ with
+$x = (1 - \chi_0 K_\text{Hxc})^{-1} r$. The code can only form
+$\tfrac{1}{2}\langle r | K_\text{Hxc}(1 - \chi_0 K_\text{Hxc})^{-1} | r\rangle$,
+which omits the $\chi_0^{-1}$ kinetic-response term (that term needs a
+near-singular $\chi_0^{-1}$ solve; see `docs/ideas.md`) and is therefore not
+sign-definite. It is reported as `denergy_response`/`denergy_unscreened` for
+analysis and never drives the headline.
+
+```python
+scfe = estimate_scf_error(res, PBE())   # adds the response diagnostic (nspin=1 insulator)
+print(scfe.denergy_response, scfe.screened)   # NOT sign-definite; diagnostic only
+```
+
+For a ground-truth number, run the SCF loose and tight and compare with
+`estimate_scf_error_bracket(res_loose, res_tight)`, which returns the measured
+$F_\text{loose} - F_\text{tight}$ next to the loose run's extrapolated estimate.
 
 **Smearing error.** A finite electronic temperature $\sigma$ reports the free
 energy $F = E - \sigma S$, not the $\sigma\to 0$ energy. The scheme-matched
@@ -226,8 +246,8 @@ the 8×8×8 residual near 7 meV.
 | force error | nspin=1, nspin=2 (no NLCC) | not available | not available |
 | eigenvalue / gap error | nspin=1, nspin=2 | not available | eigenvalue (spinor) |
 | stress error | not available (deferred) | not available | not available |
-| SCF error (screened) | nspin=1 insulator, no symmetry | not available | not available |
-| SCF error (unscreened bound) | nspin=1, nspin=2 | not available | not available |
+| SCF error (trajectory) | any run | any run | any run |
+| SCF error (response diagnostic) | nspin=1 insulator, no symmetry | not available | not available |
 | smearing error | any smeared run (all schemes) | any smeared run | any smeared run |
 | k-point error | mesh sweep (any run) | mesh sweep (any run) | mesh sweep (any run) |
 

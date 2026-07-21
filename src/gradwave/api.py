@@ -550,20 +550,31 @@ def _error_estimate_block(res, inp) -> dict:
         estimate_scf_error,
         estimate_smearing_error,
     )
-    # SCF self-consistency error uses the collinear response kernel (K_Hxc/chi0);
-    # USPP/PAW and the spinor formalism have no such primitive exposed yet.
-    if not uspp and not is_nc:
-        try:
-            scfe = estimate_scf_error(res, xc)
-            block["scf_convergence"] = {
-                "denergy_eV": scfe.denergy,
-                "denergy_meV_per_atom": scfe.denergy / natom * 1e3,
-                "residual_L1_per_electron": scfe.residual_norm,
-                "screened": scfe.screened,
-                "energy_converged_estimate_eV": scfe.energy_converged_estimate,
-            }
-        except (NotImplementedError, ValueError):
-            pass
+    # SCF self-consistency error is extrapolated from the energy trajectory, so
+    # it is available for every system. The collinear response kernel
+    # (K_Hxc/chi0) adds an optional second-order diagnostic where it applies
+    # (norm-conserving collinear); USPP/PAW and the spinor formalism have no such
+    # primitive exposed yet, so xc is only passed on the supported path.
+    scf_xc = xc if (not uspp and not is_nc) else None
+    try:
+        scfe = estimate_scf_error(res, scf_xc)
+        sc = {
+            "denergy_eV": scfe.denergy,
+            "denergy_meV_per_atom": scfe.denergy / natom * 1e3,
+            "residual_L1_per_electron": scfe.residual_norm,
+            "reliable": scfe.reliable,
+            "ratio": scfe.ratio,
+            "energy_converged_estimate_eV": scfe.energy_converged_estimate,
+            "method": "energy-trajectory extrapolation",
+        }
+        if scfe.denergy_response is not None:
+            sc["denergy_response_eV"] = scfe.denergy_response
+            sc["screened"] = scfe.screened
+            sc["note"] = ("response diagnostic is not sign-definite; the "
+                          "headline denergy is the trajectory extrapolation")
+        block["scf_convergence"] = sc
+    except (NotImplementedError, ValueError, AttributeError):
+        pass
     try:
         # estimate_smearing_error reads res.energies — an attribute on every
         # result dataclass, USPP/PAW included
