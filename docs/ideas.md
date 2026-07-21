@@ -1113,23 +1113,40 @@ charge fit that costs the extra iteration. This is the honest scope: the learned
 filter is a charge-multi-scale tool, and it neither helps nor is meant to help a
 magnetization-channel problem.
 
-That names the real magnetism lever, and it is exactly the operator wisdom.md asks
-for by name (the χ₀-diagonal preconditioner on the spin mode, not a schedule): a
-learned filter on the MAGNETIZATION block. It is a genuinely different object from
-Kerker. Kerker's G²/(G²+q0²) vanishes at G=0, which is correct for charge (the
-pinned total charge must not move) but wrong for magnetization — freezing the mag
-G=0 component pins the total moment and collapses the spin SCF (wisdom.md, spin
-section). The right form keeps G=0 alive but damped: f_mag(G²) = w0 + Σ w_i·G²/
-(G²+q_i²) with 0 < w0 < 1, where w0 damps the near-critical uniform Stoner mode (its
-spin susceptibility is large, so its inverse — the preconditioner — is small)
-without freezing it. Deployment is a `BlockPrecond` composite — Kerker on the total
-block, the learned f_mag on the mag block — over the packed (total, mag) vector, so
-the charge channel is unchanged. The test bed is fcc Ni near the Stoner boundary,
-the case where default damping silently collapses the moment; the risk is that the
-diagonal linear-response probe does not capture the Stoner nonlinearity, in which
-case the exact spin response from `scf/implicit.py` (the same χ₀ path noted above)
-is the fallback. The const-term filter, the block composite, and a mag-block probe
-are the three pieces; the charge infrastructure already carries the rest.
+That pointed at what looked like the real magnetism lever — the operator wisdom.md
+asks for by name (the χ₀-diagonal preconditioner on the spin mode) — a learned
+filter on the MAGNETIZATION block. The infrastructure for it is built and tested:
+a G=0-alive filter form f_mag(G²) = w0 + Σ w_i·G²/(G²+q_i²) (the `const` term on
+`MultipoleKerkerPrecond`, since Kerker's G=0 zero would freeze the moment), a
+`BlockPrecond` composite that runs bare Kerker on the charge-total block and f_mag
+on the mag block, and the nspin=2 grid-spanning `precond_op` wiring in `scf`.
+
+The first hypothesis it enabled was WRONG, and the measurement says so cleanly. The
+guess was that the near-critical uniform Stoner mode wants DAMPING (small w0, since
+its spin susceptibility is large so its inverse is small). On fcc Ni near Stoner
+(PD_Ni NC, 45 Ry, 4x4x4, johnson, `benchmarks/bench_learned_precond.py ni`) a w0
+sweep under johnson gives: baseline 12 iters at m = 0.537 μB; w0 = 0.4 → the moment
+COLLAPSES to 0 (23 iters to the wrong nonmagnetic branch); w0 = 0.6 → 16 iters
+(holds the moment but slower); w0 = 0.8 → 12 iters (recovers the baseline). Damping
+the uniform mode is exactly backwards: the moment mode needs VIGOROUS mixing to hold
+the ferromagnetic branch (wisdom.md's moment-collapse warning is the same physics
+seen from the preconditioner side), and reducing it either collapses the moment or
+just slows the run. There is no w0 that wins.
+
+The lesson refines the whole direction. Charge sloshing is a linear, diagonal-in-G
+problem where a filter SHAPE is the right tool, and the Cu win is real. The FM
+convergence bottleneck is not that — it is branch selection, a nonlinear problem
+that vigorous moment mixing plus warm-start chains (johnson) already handle, and a
+linear filter on the mag block does not have the right form to help and can hurt. A
+mag-channel operator, if one helps at all, would have to come from the EXACT spin
+susceptibility (`scf/implicit.py`'s χ₀ path), not a hand-shaped or linearly-probed
+Kerker analog, and even then the headroom over johnson looks thin. Recorded as a
+measured negative; the const-filter and BlockPrecond stay as reusable substrate.
+
+The clear remaining wins are on the CHARGE channel, where the mechanism is proven:
+more multi-scale systems (Cu₃Al and other intermetallics, PAW semicore), and the
+amortized per-chemistry-family fit that turns the per-point iteration cut into a
+wall-time win across a discovery scan.
 
 # Done and resolved
 

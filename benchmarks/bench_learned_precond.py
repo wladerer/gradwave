@@ -36,6 +36,9 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from gradwave.dtypes import RDTYPE  # noqa: E402
 from gradwave.scf.learned_precond import (  # noqa: E402
+    BlockPrecond,
+    MultipoleKerkerPrecond,
+    _inv_softplus,
     fit_multipole,
     response_from_residuals,
     spectral_radius,
@@ -269,6 +272,59 @@ def run_pt_soc():
     print(f"  dF vs kerker = {f_l-f_ref:+.2e} eV")
 
 
+def _mag_filter(g2, w0, q0=1.1):
+    """Hand-set magnetization-channel filter f_mag(G²) = w0 + (1−w0)·G²/(G²+q0²):
+    Kerker's shape rescaled to [w0, 1] so the uniform moment mode (G=0) is damped
+    to w0 (not frozen, as bare Kerker would) while finite-G spin modes mix at ~full
+    rate. w0 → 1 recovers plain mag mixing; w0 → 0 recovers bare Kerker (freezes
+    the moment)."""
+    import math
+    c_raw = torch.tensor(math.log(w0 / (1.0 - w0)), dtype=RDTYPE)
+    w_raw = torch.tensor([_inv_softplus(1.0 - w0)], dtype=RDTYPE)
+    logq2 = torch.tensor([2.0 * math.log(q0)], dtype=RDTYPE)
+    return MultipoleKerkerPrecond(g2, w_raw, logq2, c_raw)
+
+
+def run_ni(q0=1.1):
+    """fcc Ni near the Stoner instability — the adversarial FM convergence case
+    (wisdom.md). Tests a MAGNETIZATION-channel preconditioner: bare Kerker on the
+    charge block, f_mag on the spin block, via BlockPrecond, under johnson mixing.
+    Sweeps the uniform-mode damping w0; reports iterations AND the converged moment
+    (a collapsed moment is a failure, not a win)."""
+    print("\n=== fcc Ni (nspin=2, near Stoner, johnson, 45 Ry, 4x4x4) ===")
+    from gradwave.core.xc.spin import SpinPBE
+    from gradwave.pseudo.upf import parse_upf
+    from gradwave.scf.loop import scf, setup_system
+    a = 3.52
+    ni = parse_upf(FIX / "PD_Ni_PBE.upf")
+    cell = 0.5 * a * np.array([[0, 1, 1.0], [1, 0, 1], [1, 1, 0]])
+
+    def sys_():
+        return setup_system(cell, np.zeros((1, 3)), [0], [ni], ecut=45 * RY,
+                            kmesh=(4, 4, 4), nbands=14, use_symmetry=True)
+
+    common = dict(smearing="gaussian", width=0.1, nspin=2, start_mag=[0.5],
+                  mixing_scheme="johnson", verbose=False, rhotol=1e-5, etol=1e-8)
+    grid = sys_().grid
+    g2_dens = grid.g2.reshape(-1)[grid.dens_mask.reshape(-1)].to(RDTYPE)
+    kerker_tot = MultipoleKerkerPrecond.kerker(g2_dens, q0)
+
+    t = time.perf_counter()
+    ref = scf(sys_(), SpinPBE(), mixing_alpha=0.7, **common)
+    print(f"  johnson (Kerker charge, plain mag)   {ref.n_iter:3d} iters   "
+          f"m={ref.mag_total:+.3f} muB   {time.perf_counter()-t:.1f}s")
+
+    for w0 in (0.4, 0.6, 0.8):
+        block = BlockPrecond([(len(g2_dens), kerker_tot),
+                              (len(g2_dens), _mag_filter(g2_dens, w0, q0))])
+        t = time.perf_counter()
+        r = scf(sys_(), SpinPBE(), mixing_alpha=0.7, precond_op=block, **common)
+        collapsed = abs(r.mag_total) < 0.3 and abs(ref.mag_total) > 0.3
+        v = _verdict(r.n_iter, ref.n_iter) if not collapsed else "COLLAPSE"
+        print(f"  + mag filter w0={w0:.1f}                {r.n_iter:3d} iters   "
+              f"m={r.mag_total:+.3f} muB   {time.perf_counter()-t:.1f}s   [{v}]")
+
+
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "both"
     if which in ("synthetic", "both"):
@@ -281,3 +337,5 @@ if __name__ == "__main__":
         run_fe()
     if which in ("pt", "soc", "both"):
         run_pt_soc()
+    if which in ("ni", "stoner"):
+        run_ni()

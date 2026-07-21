@@ -5,6 +5,7 @@ import torch
 
 from gradwave.dtypes import RDTYPE
 from gradwave.scf.learned_precond import (
+    BlockPrecond,
     MultipoleKerkerPrecond,
     _diis_unroll_logres,
     fit_multipole,
@@ -106,6 +107,51 @@ def test_diis_unroll_is_differentiable_and_fit_beats_kerker():
     res_learned = float(_diis_unroll_logres(P.filter_vals(), d, metric, alpha,
                                             25, 8))
     assert res_learned < res_kerker - 1.0  # at least e¹× smaller residual
+
+
+def test_const_term_keeps_g0_alive():
+    """The magnetization-channel form f = w0 + Σ wᵢ g²/(g²+qᵢ²) has f(0) = w0 ∈
+    (0,1), so the uniform moment mode can move, unlike the charge form's f(0)=0."""
+    g2 = _g2_grid()
+    P = MultipoleKerkerPrecond.init_poles(g2, n_poles=3, const=True,
+                                          const_init=0.4, requires_grad=True)
+    w0 = float(P.const_val())
+    assert 0.0 < w0 < 1.0
+    assert abs(float(P.filter_vals()[0]) - w0) < 1e-12   # g2[0]==0 → f(0)=w0
+    # the const is a learnable parameter and the loss differentiates through it
+    assert any(p is P.c_raw for p in P.params)
+    loss = P.filter_vals().sum()
+    loss.backward()
+    assert P.c_raw.grad is not None and float(P.c_raw.grad.abs()) > 0
+    # charge form (no const) still pins G=0
+    Q = MultipoleKerkerPrecond.init_poles(g2, n_poles=3, requires_grad=False)
+    assert float(Q.filter_vals()[0].abs()) < 1e-14
+
+
+def test_block_precond_applies_per_block():
+    """BlockPrecond routes each contiguous segment to its own operator: Kerker on
+    the total block, a learned filter on the magnetization block, identity where
+    the operator is None."""
+    ng = 64
+    g2 = torch.linspace(0.0, 30.0, ng, dtype=RDTYPE)
+    kerker = MultipoleKerkerPrecond.kerker(g2, 1.1)
+    mag = MultipoleKerkerPrecond.init_poles(g2, n_poles=2, const=True,
+                                            requires_grad=False)
+    block = BlockPrecond([(ng, kerker), (ng, mag)])
+    assert block.acts_on == "grid"
+
+    r = torch.randn(2 * ng, dtype=torch.complex128)
+    r[0] = 0.0                                     # pinned total G=0
+    out = block(r)
+    assert torch.allclose(out[:ng], kerker(r[:ng]), atol=1e-12)
+    assert torch.allclose(out[ng:], mag(r[ng:]), atol=1e-12)
+    # total G=0 stays pinned; mag G=0 is alive (w0·r ≠ 0 for r≠0)
+    assert float(out[0].abs()) < 1e-14
+    assert float(out[ng].abs()) > 0.0
+
+    # a None block is identity (plain damping passthrough)
+    ident = BlockPrecond([(ng, kerker), (ng, None)])
+    assert torch.allclose(ident(r)[ng:], r[ng:], atol=1e-14)
 
 
 def test_response_estimate_recovers_known_denominator():

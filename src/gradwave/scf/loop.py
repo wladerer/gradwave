@@ -546,11 +546,18 @@ def scf(
         raise ValueError("precond must be 'kerker' or 'local_tf'")
     tf_precond = None
     if precond_op is not None:
-        # a caller-supplied operator on the density-total block (learned radial
-        # filter). Static across iterations, so unlike local_tf it needs no
-        # per-step set_density; slice to the total block on the spin path.
+        # a caller-supplied operator (learned radial filter). Static across
+        # iterations, so unlike local_tf it needs no per-step set_density. By
+        # default it acts on the density-total block; an operator declaring
+        # acts_on="grid" (BlockPrecond) spans every nspin grid block, so a
+        # magnetization-channel filter reaches the (total, mag) pair.
         mixer.precond_op = precond_op
-        mixer.precond_slice = slice(0, layout.ng) if nspin == 2 else None
+        if nspin == 2:
+            spans_grid = getattr(precond_op, "acts_on", "total") == "grid"
+            mixer.precond_slice = slice(0, nspin * layout.ng if spans_grid
+                                        else layout.ng)
+        else:
+            mixer.precond_slice = None
     elif precond == "local_tf":
         # position-dependent TF screening on the density-total block; capped at
         # the bare-Kerker q0 so a bulk metal is unchanged and only the vacuum is

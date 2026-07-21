@@ -71,11 +71,17 @@ class MultipoleKerkerPrecond:
     tensors) for an optimizer; call :meth:`detach_` before deploying in a solve so
     no autograd graph is retained through the SCF."""
 
-    def __init__(self, g2: torch.Tensor, w_raw: torch.Tensor, logq2: torch.Tensor):
+    def __init__(self, g2: torch.Tensor, w_raw: torch.Tensor, logq2: torch.Tensor,
+                 c_raw: torch.Tensor | None = None):
         # g2: (n,) |G|² per component the filter acts on [Å⁻²]; buffer, no grad.
         self.g2 = g2.detach()
         self.w_raw = w_raw          # (K,) softplus⁻¹ weights (leaf, may need grad)
         self.logq2 = logq2          # (K,) log pole positions log(q_i²) (leaf)
+        # optional G=0-alive constant w0 = sigmoid(c_raw) ∈ (0,1). None → f(0)=0,
+        # the charge form (pinned total charge untouched). A nonzero w0 is for the
+        # MAGNETIZATION channel: the uniform moment must move (so f(0)≠0) but the
+        # near-critical Stoner mode must be damped (so w0<1) — see fit_multipole.
+        self.c_raw = c_raw
 
     # -- construction ---------------------------------------------------------
     @classmethod
@@ -90,22 +96,35 @@ class MultipoleKerkerPrecond:
     @classmethod
     def init_poles(cls, g2: torch.Tensor, n_poles: int = 3,
                    q_min: float = 0.3, q_max: float = 3.0,
-                   requires_grad: bool = True) -> "MultipoleKerkerPrecond":
-        """K poles log-spaced over [q_min, q_max] Å⁻¹, unit total weight seed."""
+                   requires_grad: bool = True,
+                   const: bool = False, const_init: float = 0.5
+                   ) -> "MultipoleKerkerPrecond":
+        """K poles log-spaced over [q_min, q_max] Å⁻¹, unit total weight seed.
+        ``const=True`` adds the learnable G=0-alive term w0 seeded at ``const_init``
+        (the magnetization-channel form)."""
+        import math
         q = torch.logspace(float(torch.log10(torch.tensor(q_min))),
                            float(torch.log10(torch.tensor(q_max))),
                            n_poles, dtype=RDTYPE, device=g2.device)
         logq2 = (2.0 * torch.log(q)).clone()
         w_raw = torch.full((n_poles,), _inv_softplus(1.0 / n_poles),
                            dtype=RDTYPE, device=g2.device)
+        c_raw = None
+        if const:
+            logit = math.log(const_init / (1.0 - const_init))
+            c_raw = torch.tensor(logit, dtype=RDTYPE, device=g2.device)
+            c_raw.requires_grad_(requires_grad)
         w_raw.requires_grad_(requires_grad)
         logq2.requires_grad_(requires_grad)
-        return cls(g2, w_raw, logq2)
+        return cls(g2, w_raw, logq2, c_raw)
 
     # -- parametrization ------------------------------------------------------
     @property
     def params(self) -> list[torch.Tensor]:
-        return [self.w_raw, self.logq2]
+        p = [self.w_raw, self.logq2]
+        if self.c_raw is not None:
+            p.append(self.c_raw)
+        return p
 
     def weights(self) -> torch.Tensor:
         return torch.nn.functional.softplus(self.w_raw)
@@ -113,13 +132,22 @@ class MultipoleKerkerPrecond:
     def q2(self) -> torch.Tensor:
         return torch.exp(self.logq2)
 
+    def const_val(self) -> torch.Tensor:
+        """The G=0-alive constant w0 ∈ (0,1), or 0 when disabled."""
+        if self.c_raw is None:
+            return torch.zeros((), dtype=RDTYPE, device=self.g2.device)
+        return torch.sigmoid(self.c_raw)
+
     def filter_vals(self, g2: torch.Tensor | None = None) -> torch.Tensor:
-        """f_θ(g²) per component (real, in [0, Σw))."""
+        """f_θ(g²) per component. Without a const term g²=0 → 0 exactly (pinned
+        charge preserved); with it, f(0) = w0 ∈ (0,1) (magnetization channel)."""
         g2 = self.g2 if g2 is None else g2
         w, q2 = self.weights(), self.q2()
-        # Σ_i w_i g²/(g²+q_i²); g²=0 → 0 exactly (pinned charge preserved)
         gg = g2[:, None]
-        return (w * gg / (gg + q2)).sum(dim=-1)
+        base = (w * gg / (gg + q2)).sum(dim=-1)          # Σ_i w_i g²/(g²+q_i²)
+        if self.c_raw is not None:
+            base = base + self.const_val()
+        return base
 
     def __call__(self, r: torch.Tensor) -> torch.Tensor:
         """P·r = f_θ(g²)·r on the density sphere (matches Kerker's fac·r)."""
@@ -130,12 +158,14 @@ class MultipoleKerkerPrecond:
         """Same learned poles on a new |G|² grid (fit on shell centers, deploy on
         the per-component density sphere). The poles are analytic in G², so this
         is exact, not a resampling."""
-        return MultipoleKerkerPrecond(g2, self.w_raw, self.logq2)
+        return MultipoleKerkerPrecond(g2, self.w_raw, self.logq2, self.c_raw)
 
     def detach_(self) -> "MultipoleKerkerPrecond":
         """Drop autograd tracking on the poles for use inside a solve."""
         self.w_raw = self.w_raw.detach()
         self.logq2 = self.logq2.detach()
+        if self.c_raw is not None:
+            self.c_raw = self.c_raw.detach()
         return self
 
     def summary(self) -> str:
@@ -143,7 +173,34 @@ class MultipoleKerkerPrecond:
         q = self.q2().detach().sqrt().tolist()
         poles = ", ".join(f"w={wi:.3f}@q={qi:.3f}Å⁻¹"
                           for wi, qi in zip(w, q, strict=True))
-        return f"MultipoleKerkerPrecond[{poles}]"
+        w0 = "" if self.c_raw is None else f"w0={float(self.const_val()):.3f} + "
+        return f"MultipoleKerkerPrecond[{w0}{poles}]"
+
+
+class BlockPrecond:
+    """Composite preconditioner over a packed multi-block mixing vector: apply a
+    separate operator to each contiguous block.
+
+    Used on the collinear nspin=2 (total, magnetization) vector — bare Kerker on
+    the charge-total block, a learned G=0-alive filter on the magnetization block —
+    so the charge channel is untouched while the spin channel gets its own operator.
+    ``acts_on = "grid"`` tells the driver to slice the whole grid part (every nspin
+    block) to this op rather than the total block alone."""
+
+    acts_on = "grid"
+
+    def __init__(self, blocks):
+        # blocks: list of (n_components, callable | None). None → identity (plain
+        # damping) on that block. Segment lengths must sum to the sliced vector.
+        self.blocks = list(blocks)
+
+    def __call__(self, r: torch.Tensor) -> torch.Tensor:
+        out, i = [], 0
+        for n, op in self.blocks:
+            seg = r[i:i + n]
+            out.append(op(seg) if op is not None else seg)
+            i += n
+        return torch.cat(out) if len(out) > 1 else out[0]
 
 
 def spectral_radius(f_vals: torch.Tensor, d: torch.Tensor,
