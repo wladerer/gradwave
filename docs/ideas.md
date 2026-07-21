@@ -272,7 +272,10 @@ already carries — it is functional-agnostic and needs no change. Measured on S
 constant, so it is real-space XC-grid egg-box (τ = ½Σf|∇ψ|² is exact in reciprocal
 space; only ∫e_xc(τ)dr on the grid is not), just larger than GGA — the known SCAN
 grid sensitivity. Meta-GGA forces therefore want a denser cutoff than GGA for the
-same accuracy, but are correct as-is (`tests/integration/test_r2scan_scf.py`).
+same accuracy, but are correct as-is (`tests/integration/test_r2scan_scf.py`). The
+reusable diagnostic — three knobs (SCF tolerance, FD step, grid) to tell a missing
+analytic term from egg-box/lag/FD noise — is recorded in `docs/manual/wisdom.md`
+under "Meta-GGA forces and stress".
 
 **Meta-GGA stress LANDED (2026-07-21).** Unlike forces, the stress genuinely
 needs a τ term: strain scales the plane-wave basis (the G-vectors), so ∇ψ — and
