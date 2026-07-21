@@ -29,6 +29,7 @@ dev = [
     "pytest-xdist",
     "ruff>=0.6",
     "sympy>=1.12",
+    "pre-commit>=3.5",
 ]
 docs = [
     "mkdocs>=1.6",

@@ -2,7 +2,7 @@
 # pytest marker strings (shorter to type, impossible to get the markers wrong).
 # Everything goes through `uv run` so the project env is used, not the base venv.
 
-.PHONY: help test test-fast test-standard test-nightly lint fmt lock check
+.PHONY: help test test-fast test-standard test-nightly lint fmt lock check hooks
 
 help:
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/'
@@ -29,3 +29,7 @@ lock: ## refresh uv.lock after a dependency change
 	uv lock
 
 check: lint test-fast ## pre-push gate: lint + fast tests
+
+hooks: ## install git hooks (ruff on commit, fast gate on push)
+	uv run pre-commit install
+	uv run pre-commit install --hook-type pre-push

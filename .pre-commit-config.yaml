@@ -1,0 +1,31 @@
+# Install once: `make hooks` (or `uv run pre-commit install &&
+# uv run pre-commit install --hook-type pre-push`).
+#
+# ruff runs on every commit; the fast test gate runs on push (too slow for a
+# per-commit hook). ruff uses the project's pinned version via `uv run` so it
+# never drifts from pyproject.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=2048]
+
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: fast-gate
+        name: fast test gate
+        entry: uv run pytest -m "not standard and not slow and not torture and not gpu"
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

@@ -72,7 +72,8 @@ stalls.
 
 ## Definition of done
 
-Before opening a PR, from the worktree:
+Run `make hooks` once per clone to install the pre-commit hooks (ruff on commit,
+fast gate on push). Before opening a PR, from the worktree:
 
 1. `uv run ruff check` is clean.
 2. `uv run pytest -m "not standard and not slow and not torture and not gpu"` passes.
