@@ -66,6 +66,10 @@ Si₈(2×2×2) to 3 µeV/atom — exact supercell folding equivalence.
   from fully-relativistic pseudopotentials
 - Constrained non-collinear moments with autograd-exact torques, spin spirals,
   magnetocrystalline anisotropy, and Heisenberg/DMI exchange constants
+- Exact exchange and hybrid functionals: an ISDF/ACE-accelerated Fock build, a
+  range-separated (PBE0/HSE) kernel, self-consistent hybrid SCF on a full-BZ
+  k-mesh, and a *learnable* hybrid whose mixing α and screening ω train end to
+  end through the stationary-energy derivative (`postscf/hybrid.py`)
 - DFT+U with the Hubbard U from linear response and an exact dE/dU
 - IBZ symmetry reduction with density/becsum symmetrization, including magnetic
   (Shubnikov) groups for non-collinear cells (`magmoms=`)
@@ -101,8 +105,13 @@ See `examples/` for input files. Any geometry format ASE can read is accepted.
   Old-style USPPs with polynomial augmentation refits (nqf > 0, e.g. GBRV)
   are rejected at parse time.
 - `dielectric_born` (ε∞, Born charges, IR) is nspin=1 scalar-relativistic
-  insulators only. Hybrids/exact exchange and meta-GGA functionals are not
-  implemented (semilocal LDA/GGA only).
+  insulators only.
+- Semilocal XC (LDA/GGA) plus PBE0/HSE-form hybrid exact exchange. The hybrid
+  Fock build is validated at Γ and on a k-mesh; the remaining physics tails are
+  the Gygi–Baldereschi q+G=0 correction for fine-mesh unscreened PBE0 and the
+  range-separated (wPBE) semilocal screening for a complete HSE (use
+  `mode="full"` until then). Meta-GGA functionals (SCAN/r2SCAN, τ-dependent) are
+  not implemented.
 
 ## Development
 
