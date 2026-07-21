@@ -44,10 +44,16 @@ def bm3(v, e0, v0, b0, b0p):
     return e0 + 9 * v0 * b0 / 16 * ((x - 1) ** 3 * b0p + (x - 1) ** 2 * (6 - 4 * x))
 
 
+KOV = os.environ.get("GW_KMESH")  # e.g. "20" -> 20^3, override the case mesh
+WOV = os.environ.get("GW_WIDTH_RY")  # smearing width in Ry, override the case
+_kmesh = (int(KOV),) * 3 if KOV else c["kmesh"]
+_width = (float(WOV) if WOV else c["width"]) * RY
+
+
 def build(scale, ecut_ry, fft=None):
     cell, pos, elems = geometry(el, scale)
     return setup_system(cell, pos, [0] * len(elems), [upf], ecut=ecut_ry * RY,
-                        kmesh=c["kmesh"], nbands=nbands(el), use_symmetry=True,
+                        kmesh=_kmesh, nbands=nbands(el), use_symmetry=True,
                         fft_shape=fft)
 
 
@@ -61,7 +67,7 @@ for ec in ecuts:
         if DEV != "cpu":
             sysd = sysd.to(torch.device(DEV))
         t0 = time.time()
-        r = scf(sysd, PBE(), smearing=c["smear"], width=c["width"] * RY,
+        r = scf(sysd, PBE(), smearing=c["smear"], width=_width,
                 etol=1e-8, rhotol=1e-7, max_iter=200, verbose=False, start_from=prev)
         prev = r
         es.append(float(r.energies.total) / nat)

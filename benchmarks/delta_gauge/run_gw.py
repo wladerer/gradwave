@@ -85,11 +85,14 @@ def run_eos(els):
             if DEV != "cpu":
                 sysd = sysd.to(torch.device(DEV))
                 torch.cuda.reset_peak_memory_stats()
+            mag = c["nspin"] == 2
             t0 = time.time()
             r = scf(sysd, xc, nspin=c["nspin"], start_mag=c["start_mag"],
                     smearing=c["smear"], width=c["width"] * RY,
-                    etol=1e-8, rhotol=1e-7, max_iter=200, verbose=False,
-                    start_from=prev)
+                    mixing_scheme="johnson" if mag else "pulay",
+                    mixing_history=12 if mag else 8,
+                    etol=1e-8, rhotol=1e-5 if mag else 1e-7,  # metals: energy-gated
+                    max_iter=250, verbose=False, start_from=prev)
             dt = time.time() - t0
             gb = (torch.cuda.max_memory_allocated() / 1e9
                   if DEV == "cuda" else 0.0)

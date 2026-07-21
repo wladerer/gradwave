@@ -113,10 +113,13 @@ CASES = {
     "Rh": _case("fcc", 17, 100, 16, dfact=2.564),
     # post-transition (fcc)
     "Pb": _case("fcc", 14, 68, 16, dfact=0.063),
-    # magnetic (phase 2): Fe/Ni ferromagnetic, Cr antiferromagnetic (2-atom bcc)
-    "Fe": _case("bcc", 16, 106, 12, nspin=2, start_mag=[0.4], dfact=5.599),
-    "Ni": _case("fcc", 18, 110, 12, nspin=2, start_mag=[0.3], dfact=1.065),
-    "Cr": _case("bcc", 14, 110, 12, nspin=2, start_mag=[0.5], dfact=10.499),
+    # magnetic: Fe/Ni ferromagnetic (johnson mixer, energy-gated). Seed high and
+    # let the moment relax down (weak seeds collapse to the NM branch). Cr is
+    # antiferromagnetic and needs a 2-atom cell — not the 1-atom bcc primitive
+    # here — so it is left out of the FM path.
+    "Fe": _case("bcc", 16, 106, 12, nspin=2, start_mag=[0.7], dfact=5.599),
+    "Ni": _case("fcc", 18, 110, 12, nspin=2, start_mag=[0.5], dfact=1.065),
+    "Cr": _case("bcc", 14, 110, 12, nspin=2, start_mag=[0.7], dfact=10.499),
 }
 
 # nonmagnetic set that phase 1 runs; magnetic set gated behind johnson-mixer work

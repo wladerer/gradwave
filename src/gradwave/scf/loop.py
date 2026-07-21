@@ -44,7 +44,7 @@ from gradwave.scf.common import (
 )
 from gradwave.scf.guess import sad_density
 from gradwave.scf.layout import MixLayout
-from gradwave.scf.mixing import PulayMixer
+from gradwave.scf.mixing import BroydenMixer, JohnsonMixer, PulayMixer
 from gradwave.scf.setup_common import (
     _unique_shells,
     build_core_density,
@@ -402,6 +402,8 @@ def scf(
     rhotol: float = 1e-7,
     mixing_alpha: float = 0.7,
     mixing_history: int = 8,
+    mixing_scheme: str = "pulay",  # pulay | broyden | johnson (QE-class, best
+    # for ferromagnetic metals near the Stoner instability — see mixing.py)
     kerker: bool | None = None,
     diago_tol: float = 1e-9,
     verbose: bool = True,
@@ -457,10 +459,17 @@ def scf(
     # freeze the per-channel electron counts (the G=0 Kerker zero forbids
     # charge transfer between spin channels)
     layout = MixLayout(grid, nspin, [])
-    mixer = PulayMixer(layout.g2_full, alpha=mixing_alpha,
-                       history=mixing_history, kerker=kerker,
-                       check_g0=nspin == 1,
-                       kerker_mask=layout.kerker_mask if nspin == 2 else None)
+    if mixing_scheme not in ("pulay", "broyden", "johnson"):
+        raise ValueError("mixing_scheme must be 'pulay', 'broyden', or 'johnson'")
+    _MixerCls = {"pulay": PulayMixer, "broyden": BroydenMixer,
+                 "johnson": JohnsonMixer}[mixing_scheme]
+    # Johnson saturates at history 12 on FM Ni (mixing.py); honour an explicit
+    # override but lift the default-8 up to 12 for it.
+    hist = (12 if mixing_scheme == "johnson" and mixing_history == 8
+            else mixing_history)
+    mixer = _MixerCls(layout.g2_full, alpha=mixing_alpha, history=hist,
+                      kerker=kerker, check_g0=nspin == 1,
+                      kerker_mask=layout.kerker_mask if nspin == 2 else None)
 
     if precond not in ("kerker", "local_tf"):
         raise ValueError("precond must be 'kerker' or 'local_tf'")

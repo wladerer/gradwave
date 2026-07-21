@@ -27,12 +27,19 @@ mesh, smearing) gives V0 = 11.994 (AE 11.951), B0 = 139.1 (AE 141.3), B1 = 5.10,
 **Δ = 1.33 meV/atom** — normal. So the fault is specific to the PseudoDojo
 `Cu.upf` from the `nc-sr-04_pbe_standard_upf` tarball.
 
+## 3. It is not a version bug — v0.4 and v0.5 are byte-identical
+
+The `Cu.upf` in the v0.4 and v0.5 standard-UPF tarballs have the same md5
+(`5fe87f3b4a9befbfed2d60ad3362dad9`), so the discrepancy is persistent across
+PseudoDojo releases, not a stale-conversion artifact fixed downstream.
+
 ## Conclusion
 
 PseudoDojo's published Δ-factor for Cu is 0.53 meV/atom, computed on the psp8
-`Cu-sp` pseudo. The UPF in the standard-UPF tarball reproduces neither that
-value nor the all-electron EOS, and it fails identically in QE and gradwave, so
-the UPF conversion (or the packaged variant) is inconsistent with the psp8.
+`Cu-sp` pseudo. The UPF in the standard-UPF tarball (identical in v0.4 and v0.5)
+reproduces neither that value nor the all-electron EOS, and it fails identically
+in QE and gradwave, so the psp8→UPF conversion (or the packaged variant) is
+inconsistent with the psp8. Reported upstream candidate: the UPF for Cu.
 This is the two-axis validation working as intended (see
 `docs/manual/wisdom.md`, "Use two comparison axes"): Cu is bad on the
 all-electron axis (pseudization) and exact on the QE axis (implementation).

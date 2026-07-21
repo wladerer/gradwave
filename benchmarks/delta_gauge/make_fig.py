@@ -37,12 +37,13 @@ def main():
     ax.bar(x - 0.21, np.minimum(gw, ycap), 0.42, color=BLUE, label="gradwave")
     ax.bar(x + 0.21, np.minimum(pd, ycap), 0.42, color=GRAY,
            label="PseudoDojo (ABINIT)")
-    for xi, g in zip(x, gw):  # annotate any bar clipped by the cap
+    for xi, g, p in zip(x, gw, pd):  # numeric labels on bars clipped by the cap
         if g > ycap:
-            ax.annotate(f"{g:.1f}\n(defective\nCu UPF;\ngw=QE)", (xi - 0.21, ycap),
-                        textcoords="offset points", xytext=(0, 4), ha="center",
-                        va="bottom", fontsize=11, color=BLUE,
-                        arrowprops=None)
+            ax.text(xi - 0.21, ycap + 0.02, f"{g:.1f}", ha="center", va="bottom",
+                    fontsize=12, color=BLUE)
+        if p > ycap:
+            ax.text(xi + 0.21, ycap + 0.02, f"{p:.1f}", ha="center", va="bottom",
+                    fontsize=12, color="0.5")
     ax.set_xticks(x)
     ax.set_xticklabels(els)
     ax.set_ylabel("Δ vs WIEN2k  (meV/atom)")

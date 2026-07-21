@@ -29,10 +29,11 @@ Two reference axes (see `docs/manual/wisdom.md`, "Process and validation"):
 Cubic ground states only, because the reference V0 alone fixes the geometry:
 `fcc` (noble/Pt-group, fcc alkaline-earth, Al), `bcc` (alkali, group-5/6
 refractory), and `diamond` (group IV). Non-cubic ground states (hcp Mg/Zn/Ti,
-rhombohedral As/Bi, graphite C) are out of scope. Magnetic Fe/Ni (ferromagnetic)
-and Cr (antiferromagnetic) are defined in `cases.py` but gated behind the
-`johnson`-mixer work — the norm-conserving `scf` mixer risks a moment collapse to
-the nonmagnetic branch on the itinerant 3d metals.
+rhombohedral As/Bi, graphite C) are out of scope. Ferromagnetic Fe (bcc) and Ni
+(fcc) run with `mixing_scheme="johnson"` and an energy-tail criterion, which
+holds the moment where the default mixer collapses it to the nonmagnetic branch
+near the Stoner instability (fcc Ni). Cr is antiferromagnetic and needs a 2-atom
+cell — not the 1-atom bcc primitive here — so it stays out.
 
 ## Settings
 
@@ -64,12 +65,19 @@ whatever subset is present and writes `results/delta_summary.json`.
 
 ## Results
 
-22 cubic elements (spanning s, p, d valence), Δ vs the WIEN2k all-electron
-reference. **Median Δ = 0.8 meV/atom, and 21 of 22 sit at V0 to <0.6 % and B0 to
-<4.4 % of all-electron** — inside the mature-code reproducibility range, and
-below PseudoDojo's own published Δ on roughly a third of the set (Nb 0.45 vs
-1.29, Mo 0.62 vs 1.41, Ag 0.08 vs 0.32, Rh 1.35 vs 2.56). The figure is
-`results/delta_gauge.png`; the table is `results/delta_summary.json`.
+24 cubic elements (spanning s, p, d valence, including ferromagnetic Fe and Ni),
+Δ vs the WIEN2k all-electron reference. **Median Δ = 0.8 meV/atom, and the
+nonmagnetic 21 of 22 sit at V0 to <0.6 % and B0 to <4.4 % of all-electron** —
+inside the mature-code reproducibility range, and below PseudoDojo's own
+published Δ on roughly a third of the set (Nb 0.45 vs 1.29, Mo 0.62 vs 1.41, Ag
+0.08 vs 0.32, Rh 1.35 vs 2.56). The figure is `results/delta_gauge.png`; the
+table is `results/delta_summary.json`.
+
+The magnetic pair validates the johnson mixer: **Ni sits at V0 +0.35 %, B0
+−0.2 %** (Δ 1.65) with the moment held at 0.70 μB, and **Fe tracks PseudoDojo's
+own dfact (5.42 vs 5.60)** with the moment growing physically from 2.13 μB
+(compressed) to 2.40 μB (expanded). Fe's large Δ is the pseudopotential — both
+codes agree it is a high-Δ element — not a gradwave error.
 
 Two features of the data are worth reading correctly.
 
