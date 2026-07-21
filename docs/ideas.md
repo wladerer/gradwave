@@ -220,6 +220,38 @@ finer meshes (Gygi–Baldereschi) and a complete screened form (wPBE).
 
 ## Learned meta-GGA and the kinetic energy density
 
+**Infrastructure LANDED (2026-07-21), nspin=1 and 2.** `core/metagga.py`: the
+kinetic-energy density `tau_b` (τ = ½Σ_k w_k Σ_n f|∇ψ|² on the dense grid, one
+extra i(k+G) factor on the density-build FFT, differentiable in the coefficients)
+and the generalized-KS operator `metagga_tau_operator`
+(V_τψ = −½∇·(v_τ∇ψ) = −½ Σ_d i(k+G)_d·F[v_τ·F⁻¹[i(k+G)_d c]], Hermitian,
+band-chunked). The XC interface gained `needs_tau` plus an optional τ arg on both
+`XCFunctional` and `SpinXC` (backward compatible; every existing GGA/LDA path
+stays bit-identical). The SCF loop builds τ per channel each iteration and lags it
+one step (like the Fock/DFT+U rebuilds), extracting v_τ = ∂e_xc/∂τ by autograd on
+a τ leaf and injecting the operator additively into the H-apply through the same
+wrap the hybrid Fock uses — v_xc is evaluated with τ held fixed, so the
+multiplicative and τ-response pieces stay separated. As the note below predicted,
+τ is one FFT-per-band on the existing g→r path and the new operator is the only
+genuinely new physics; it makes this a generalized-KS scheme touching the H-apply.
+Validated *intrinsically* (no QE reference needed, since none exists yet):
+single-plane-wave τ = ½|k+G|² exactly, τ ≥ τ_W, operator Hermiticity, constant
+v_τ ≡ c gives c·(−½∇²), the defining generalized-KS gate that the operator equals
+the functional derivative ∂E_xc/∂ψ* (dE/dλ = 2Re Σf⟨φ|V_τ|ψ⟩ to 1e-5 vs finite
+difference), and at SCF scale the stationary-energy identity dE_total/dλ = ∫τ
+plus τ-flat reduction to PBE/spin-PBE bit-for-bit
+(`tests/unit/test_metagga.py`, `tests/integration/test_metagga_scf.py`).
+
+**What remains, in build order:** (1) a *production* meta-GGA functional —
+r2SCAN in the `XCFunctional`/`SpinXC` `energy_density` with its τ dependence —
+and a `si_r2scan_ci`/`si_scan_ci` QE fixture (`input_dft='r2scan'`) to pin it to
+milli-eV vs `pw.x`, the vs-QE validation the intrinsic gates stand in for today;
+(2) the τ terms in the force and stress expressions (the τ operator contributes a
+Pulay-like term absent from the current Hellmann–Feynman forces); (3) USPP/PAW τ
+(the one-center augmentation of τ); (4) then the learnable r2SCAN-form functional
+and the `train_xc_paw` recovery test at meta-GGA level. The paragraphs below are
+the original framing, kept for the reasoning.
+
 The learnable functional spans GGA form only, the two PBE parameters kappa and mu.
 Every modern accurate semilocal functional (SCAN, r2SCAN) is meta-GGA, which means
 it depends on the kinetic energy density `tau(r) = (1/2) Σ_i f_i |∇ψ_i(r)|²` on

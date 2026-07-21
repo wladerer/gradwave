@@ -110,8 +110,13 @@ See `examples/` for input files. Any geometry format ASE can read is accepted.
   Fock build is validated at Γ and on a k-mesh; the remaining physics tails are
   the Gygi–Baldereschi q+G=0 correction for fine-mesh unscreened PBE0 and the
   range-separated (wPBE) semilocal screening for a complete HSE (use
-  `mode="full"` until then). Meta-GGA functionals (SCAN/r2SCAN, τ-dependent) are
-  not implemented.
+  `mode="full"` until then). The meta-GGA *infrastructure* is in place — the
+  kinetic-energy density τ and its generalized-KS operator −½∇·(v_τ∇ψ), with
+  self-consistent SCF at nspin=1 and 2 (`core/metagga.py`, gated by
+  `xc.needs_tau`) — validated intrinsically (the operator equals ∂E_xc/∂ψ* and
+  the stationary-energy identity dE/dλ = ∫τ holds at SCF scale). A production
+  meta-GGA functional (SCAN/r2SCAN) and its vs-QE validation are the remaining
+  step; only LDA/GGA functionals ship today.
 
 ## Development
 
