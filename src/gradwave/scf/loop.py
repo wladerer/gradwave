@@ -244,14 +244,45 @@ def setup_system(
     )
 
 
-def vxc_potential(xc: XCFunctional, rho: torch.Tensor, grid) -> tuple[torch.Tensor, torch.Tensor]:
-    """(v_xc(r) [eV], E_xc [eV]) via autograd — GGA divergence term included."""
+def vxc_potential(
+    xc: XCFunctional, rho: torch.Tensor, grid, tau: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """(v_xc(r) [eV], E_xc [eV]) via autograd — GGA divergence term included.
+
+    For a meta-GGA, τ is passed as a held-fixed constant so this returns the
+    multiplicative part v_xc = ∂e_xc/∂ρ|_{σ,τ}; the τ-response ∂e_xc/∂τ is a
+    separate generalized-KS operator (see vtau_potential / core.metagga)."""
     rho_leaf = rho.detach().clone().requires_grad_(True)
+    tau_c = None if tau is None else tau.detach()
     with torch.enable_grad():
         sigma = sigma_from_rho(rho_leaf, grid.g_cart) if xc.needs_gradient else None
-        e_xc = xc.energy(rho_leaf, grid.volume, sigma)
+        e_xc = xc.energy(rho_leaf, grid.volume, sigma, tau_c if xc.needs_tau else None)
         (v,) = torch.autograd.grad(e_xc, rho_leaf)
     return v * (grid.n_points / grid.volume), e_xc.detach()
+
+
+def vtau_potential(
+    xc: XCFunctional, rho: torch.Tensor, tau: torch.Tensor, grid
+) -> torch.Tensor:
+    """v_τ(r) = ∂e_xc/∂τ|_{ρ,σ} [scaled], via autograd on a τ leaf.
+
+    The scale (n_points/volume) undoes the (Ω/N) that `energy()` folds in, so
+    the result is the pointwise energy-density derivative — exactly the field
+    `core.metagga.metagga_tau_operator` consumes for −½∇·(v_τ∇ψ)."""
+    rho_c = rho.detach()
+    tau_leaf = tau.detach().clone().requires_grad_(True)
+    with torch.enable_grad():
+        sigma = sigma_from_rho(rho_c, grid.g_cart) if xc.needs_gradient else None
+        e_xc = xc.energy(rho_c, grid.volume, sigma, tau_leaf)
+        # A needs_tau functional whose energy happens not to depend on τ (a τ-flat
+        # limit) gives ∂e/∂τ = 0: e_xc then carries no grad_fn, so short-circuit to
+        # a zero v_τ (inert operator) rather than letting grad() raise.
+        if not e_xc.requires_grad:
+            return torch.zeros_like(tau_leaf)
+        (v,) = torch.autograd.grad(e_xc, tau_leaf, allow_unused=True)
+    if v is None:
+        return torch.zeros_like(tau_leaf)
+    return v * (grid.n_points / grid.volume)
 
 
 @dataclass
@@ -298,11 +329,17 @@ def local_potential_r(system, vloc_g: torch.Tensor | None = None) -> torch.Tenso
     return (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
 
 
-def effective_potentials(system, xc, rho_s: list, vloc_r: torch.Tensor) -> list:
+def effective_potentials(
+    system, xc, rho_s: list, vloc_r: torch.Tensor, tau: torch.Tensor | None = None
+) -> list:
     """Per-spin v_eff(r) from per-channel densities — THE assembly the SCF
     iterates with. A standalone function (not inlined in the loop) so the
     off-stationarity E↔H consistency gate can test the exact potential the
-    solver applies (tests/unit/test_energy_hamiltonian_consistency.py)."""
+    solver applies (tests/unit/test_energy_hamiltonian_consistency.py).
+
+    `tau` (meta-GGA only) is the current kinetic-energy density; it is passed to
+    the local v_xc as a held-fixed constant. The τ-response operator −½∇·(v_τ∇ψ)
+    is NOT part of v_eff — it is applied separately in the H-apply."""
     grid = system.grid
     nspin = len(rho_s)
     rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
@@ -313,7 +350,8 @@ def effective_potentials(system, xc, rho_s: list, vloc_r: torch.Tensor) -> list:
     ).real
     core = system.rho_core
     if nspin == 1:
-        v_xc_r, _ = vxc_potential(xc, rho_tot if core is None else rho_tot + core, grid)
+        v_xc_r, _ = vxc_potential(
+            xc, rho_tot if core is None else rho_tot + core, grid, tau=tau)
         return [v_h_r + v_xc_r + vloc_r]
     cu2 = None if core is None else 0.5 * core
     v_up, v_dn, _ = vxc_spin_potential(
@@ -437,6 +475,10 @@ def scf(
     if system.is_fr:
         raise ValueError("fully-relativistic pseudos require the spinor SCF "
                          "(scf_noncollinear) — SOC has no collinear representation")
+    if xc.needs_tau and nspin == 2:
+        raise NotImplementedError(
+            "meta-GGA (needs_tau) is nspin=1 only for now — the spin path needs a "
+            "SpinXC with τ↑/τ↓ and a per-channel generalized-KS operator")
     if hasattr(system.rho_symmetrizer, "apply_m"):
         raise ValueError("system was built with magnetic symmetry (magmoms=...) — "
                          "only scf_noncollinear consumes it (anti-unitary ops would "
@@ -531,6 +573,19 @@ def scf(
     fock_apply_s = None
     e_fock = torch.zeros((), dtype=RDTYPE, device=device)
 
+    # meta-GGA: the kinetic-energy density τ and its generalized-KS operator
+    # −½∇·(v_τ∇ψ). Like Fock/DFT+U, τ is rebuilt from the orbitals each
+    # iteration and lags one step. Bootstrap τ from the seed orbitals (rough,
+    # refined immediately) so iteration 1 has a valid τ for the τ-dependent
+    # v_xc; the energy each iteration uses the current orbitals' τ.
+    tau_cur = None
+    if xc.needs_tau:
+        from gradwave.core.metagga import metagga_tau_operator, tau_b
+        nocc = int(round(system.n_electrons / 2))
+        occ0 = torch.zeros(nk, nb, dtype=RDTYPE, device=device)
+        occ0[:, :max(nocc, 1)] = 2.0
+        tau_cur = tau_b(coeffs_b_s[0], occ0, system.kweights, bk, grid.shape, vol)
+
     def symmetrize(r_out):
         return symmetrize_rho(system.rho_symmetrizer, r_out, grid)
 
@@ -539,7 +594,16 @@ def scf(
         rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
         if tf_precond is not None:
             tf_precond.set_density(rho_tot)
-        veff_s = effective_potentials(system, xc, rho_s, vloc_r)
+        veff_s = effective_potentials(system, xc, rho_s, vloc_r, tau=tau_cur)
+
+        # meta-GGA generalized-KS operator (nspin=1): v_τ = ∂e_xc/∂τ from the
+        # current (ρ, τ), applied additively as −½∇·(v_τ∇ψ) in the H-apply.
+        metagga_apply_s = None
+        if xc.needs_tau:
+            rho_for_xc = rho_tot if system.rho_core is None else rho_tot + system.rho_core
+            v_tau_r = vtau_potential(xc, rho_for_xc, tau_cur, grid)
+            metagga_apply_s = [
+                lambda c, _v=v_tau_r: metagga_tau_operator(c, _v, bk, grid.shape)]
 
         # adaptive diagonalization tolerance, quadratic schedule (see
         # common.adaptive_diago_tol). Warm starts skip the loose first solve
@@ -573,6 +637,10 @@ def scf(
                 _fa = fock_apply_s[sp]
                 def apply(c, _base=h.apply, _f=_fa):
                     return _base(c) + _f(c)
+            if metagga_apply_s is not None and metagga_apply_s[sp] is not None:
+                _ma = metagga_apply_s[sp]
+                def apply(c, _base=apply, _m=_ma):
+                    return _base(c) + _m(c)
             if eigensolver == "chebyshev":
                 from gradwave.solvers.chebyshev import chebyshev_filtered_batched
                 dav = chebyshev_filtered_batched(
@@ -623,6 +691,14 @@ def scf(
         ]
         rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
 
+        # meta-GGA (nspin=1): rebuild τ from the fresh orbitals — this iteration's
+        # energy uses it, and it lags into next iteration's v_τ (like the Fock and
+        # DFT+U rebuilds above). No symmetrization: τ is a scalar orbital field
+        # that inherits the crystal symmetry through the density path.
+        if xc.needs_tau:
+            tau_cur = tau_b(coeffs_b_s[0], occ_s[0], system.kweights,
+                            bk, grid.shape, vol)
+
         # energy at (orbitals, rho_out); per-k trimmed views for the assembly.
         # npw from the CPU-side spheres (int(bk.npw[ik]) is a host sync per k
         # per iteration — the probe counted 36/iteration); ONE becp over the
@@ -644,7 +720,7 @@ def scf(
                 charges=system.charges, species_index=system.species_index,
                 vloc_tables=system.vloc_tables, becp_per_k=becps_s[0],
                 dij_full=_stack_dij(system), xc=xc, entropy_term=entropy_term,
-                rho_core=system.rho_core,
+                rho_core=system.rho_core, tau=tau_cur,
             )
             energies.hubbard = e_hub
             energies.fock = e_fock

@@ -92,6 +92,7 @@ def total_energy(
     xc: XCFunctional,
     entropy_term: torch.Tensor | None = None,  # −σS, precomputed by SCF layer
     rho_core: torch.Tensor | None = None,  # NLCC: shifts the XC argument ONLY
+    tau: torch.Tensor | None = None,  # meta-GGA kinetic-energy density (needs_tau)
 ) -> EnergyBreakdown:
     volume = grid.volume
     rho_g = r_to_g(rho.to(torch.complex128))
@@ -100,7 +101,7 @@ def total_energy(
     e_h = hartree_energy(rho_g, grid.g2, volume)
     rho_xc = rho if rho_core is None else rho + rho_core
     sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
-    e_xc = xc.energy(rho_xc, volume, sigma)
+    e_xc = xc.energy(rho_xc, volume, sigma, tau if xc.needs_tau else None)
     vloc_g = local_potential_g(positions, species_index, vloc_tables, grid.g_cart, volume)
     e_loc = local_energy(rho_g, vloc_g, volume)
     e_nl = nonlocal_energy(becp_per_k, dij_full, occ, kweights)
