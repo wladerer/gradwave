@@ -68,7 +68,9 @@ class ScaledExchangePBE(PBE):
             raise ValueError("exx_fraction must be in [0, 1]")
         self.exx_fraction = float(exx_fraction)
 
-    def energy_density(self, rho: torch.Tensor, sigma: torch.Tensor | None = None) -> torch.Tensor:
+    def energy_density(
+        self, rho: torch.Tensor, sigma: torch.Tensor | None = None, tau=None
+    ) -> torch.Tensor:
         if sigma is None:
             raise ValueError("PBE requires sigma = |grad rho|^2")
         rho_au = to_au(rho)
