@@ -287,6 +287,43 @@ defect, which the [Performance](performance.md) page works through in full.
   two analytic routes disagree at 3e-7, energy-space Richardson finite differencing
   arbitrates.
 
+## Meta-GGA forces and stress (the $\tau$ term)
+
+A meta-GGA depends on the kinetic-energy density $\tau = \tfrac12\sum_i f_i|\nabla\psi_i|^2$,
+which enters $H$ as the generalized-KS operator $-\tfrac12\nabla\cdot(v_\tau\nabla\psi)$
+(`core/metagga.py`). Forces and stress treat that dependence very differently, and it is
+worth writing down why, because the intuition ("$\tau$ is a new field, so both need a new
+term") is wrong for one of them.
+
+- **Forces need NO $\tau$ term.** At the SCF stationary point the Hellmann–Feynman
+  theorem holds exactly as for a GGA: the $\tau$ operator changes the *orbitals* (and thus
+  the self-consistent density), but $E_{xc}[\rho,\sigma,\tau]$ has no *explicit* atomic-
+  position dependence at fixed detached orbitals, so the force is still the same three
+  terms — Ewald, local-PP structure factors, NL projector phases. `forces()` is
+  functional-agnostic and already correct; do not add a "$\tau$ Pulay term."
+- **Stress DOES need a $\tau$ term.** Strain scales the plane-wave basis (the reciprocal
+  vectors $G$), so $\nabla\psi$ — and hence $\tau$ — has an *explicit* strain dependence a
+  GGA (a functional of $\rho$, which only scales as $1/\Omega$) lacks. Rebuild $\tau$ from
+  the strained $(k+G)$ and the fixed coefficients on the autograd graph
+  (`stress._tau_strained`) and pass it to `xc.energy`; the fixed-basis (Nielsen–Martin)
+  stress then carries $\partial E_{xc}/\partial\tau\cdot\partial\tau/\partial\varepsilon$
+  automatically. The term is *large* — for Si it is $\sim0.57$ eV/Å³ and flips the sign of
+  the stress — so omitting it is not a small error.
+- **The forces()-vs-FD residual for a meta-GGA is XC-grid egg-box, not a missing term.**
+  $\tau$ is *exact* in reciprocal space ($\nabla\psi = i(k+G)\,c$); only the real-space
+  integral $\int e_{xc}(\tau)\,dr$ has grid error, and it is larger than a GGA's (the known
+  SCAN grid sensitivity). It vanishes with grid density — measured 3.7e-3 (20 Ry) → 8.6e-5
+  (45 Ry) for Si — rather than plateauing. Meta-GGA forces therefore want a denser cutoff
+  than a GGA for the same accuracy.
+- **To tell a missing analytic term from noise, turn three knobs independently.** A
+  genuinely missing force/stress term is constant in the SCF tolerance, the FD step, *and*
+  the grid. An operator lag vanishes with `rhotol`; FD discretization error vanishes with
+  $h$; egg-box vanishes with the grid. The meta-GGA force gap was constant in `rhotol` and
+  $h$ but fell with the grid — that pattern alone identified it as egg-box, before any
+  derivation. (The eigenvalue residual with a $\tau$ rebuilt from the *final* orbitals,
+  $\sim$4e-10, separately confirmed the state was stationary, and `energies.xc` equaling an
+  independent $\int e_{r2scan}$ ruled out an energy bias.)
+
 ## Discretization error estimation
 
 The `postscf/discretization_error.py` estimator perturbs the converged solution
