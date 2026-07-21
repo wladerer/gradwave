@@ -70,6 +70,33 @@ Keep terminal output small: `git status -s`, `git log --oneline`, `git diff --st
 `ruff check --output-format=concise`, and `pytest --tb=short`. `GIT_PAGER=cat` avoids pager
 stalls.
 
+## Remote compute (asus)
+
+A second NixOS box is reachable at `ssh asus` (Tailscale + LAN): 22 cores and an
+RTX 3050 (6 GB). It is a synced peer — `uv` is installed and gradwave lives at the
+same path (`~/github/gradwave`) — so offloading a job is just:
+
+```bash
+ssh asus 'cd ~/github/gradwave && git pull && uv sync && uv run <cmd>'
+```
+
+Use it for embarrassingly-parallel, self-contained work: benchmark sweeps
+(`benchmarks/`), inverse-design and delta-gauge scans, fixture regeneration — each
+worker runs a full SCF and returns numbers. Do not split a single
+differentiable/autograd computation across machines: PyTorch autograd graphs are
+process-local and do not serialize.
+
+GPU caveat: the RTX 3050 has crippled fp64 (~1/64 of fp32), so for float64 SCF the
+22 CPU cores usually beat the GPU; it only helps fp32-tolerant kernels. Also confirm
+`ssh asus 'cd ~/github/gradwave && uv run python -c "import torch; print(torch.cuda.is_available())"'`
+first — as of this writing the CUDA build there reports `False` (libcuda not visible
+to the managed torch), so plan on CPU offload until that is fixed.
+
+For occasional offload, plain SSH (optionally GNU `parallel -S :,asus`) is enough.
+Reach for `dask.distributed` (scheduler local, `dask worker` on each host, GPU
+workers tagged `--resources GPU=1`) only when sweeps get large enough to want a
+dashboard, retries, and automatic placement.
+
 ## Definition of done
 
 Run `make hooks` once per clone to install the pre-commit hooks (ruff on commit,
