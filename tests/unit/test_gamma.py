@@ -14,11 +14,11 @@ import torch
 
 from gradwave.core.batch import BatchedHamiltonian, projectors_b
 from gradwave.core.gamma import (
+    GammaHamiltonian,
     build_gamma_basis,
     davidson_gamma,
     embed_real,
     full_to_half,
-    GammaHamiltonian,
     half_to_full,
     metric_inner,
     unembed_real,

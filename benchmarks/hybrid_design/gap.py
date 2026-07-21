@@ -21,7 +21,6 @@ import torch
 
 from gradwave.core.density import sigma_from_rho
 from gradwave.core.fftbox import g_to_r, r_to_g
-from gradwave.core.xc.pbe import PBE
 from gradwave.postscf.coulomb_kernel import coulomb_kernel
 from gradwave.postscf.exchange_multik import occupied_periodic_orbitals
 from gradwave.postscf.hybrid import ScaledExchangePBE

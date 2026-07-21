@@ -33,7 +33,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
 from ase.build import fcc100
 
 ROOT = Path(__file__).parents[1]
