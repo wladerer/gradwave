@@ -1,0 +1,252 @@
+"""Learned radial density preconditioner (multi-pole Kerker).
+
+The bare Kerker filter R̃(G) = R(G)·G²/(G²+q0²) is the long-wavelength, single-
+pole approximation to the exact linear-response preconditioner P = ε⁻¹, with
+ε(G) = 1 − v_c(G)·χ₀(G) the (shell-averaged) dielectric function. One pole q0 is
+the right shape when the SCF residual map is diagonal in G with a single response
+length, i.e. a homogeneous metal; it is the wrong shape when the response carries
+more than one length scale (two-component intermetallics, semicore + valence
+screening, inhomogeneous cells whose G-space response profile is not a single
+Lorentzian). `docs/manual/wisdom.md` records the design stance this module acts
+on: prefer a preconditioner (an operator on the residual) to step-size control,
+and the principled operator is the χ₀-diagonal one Kerker crudely approximates.
+
+This module replaces the single pole with a learned sum of poles,
+
+    f_θ(G²) = Σ_i w_i · G²/(G² + q_i²),   w_i ≥ 0,  q_i² ≥ 0,
+
+applied per density-sphere component exactly where the mixer applies Kerker (as
+`mixer.precond_op`; the driver multiplies by the mixing step α). Two properties
+carry over from Kerker for free and are load-bearing, not incidental:
+
+- f_θ(0) = 0, so the pinned G=0 charge is untouched (every term has a G²
+  numerator). A learned preconditioner cannot leak charge into the conserved
+  mode by construction.
+- The fixed point is unchanged. A preconditioner reshapes the *path* to self-
+  consistency, never the solution; convergence is still gated on the true
+  residual (`scf` checks |ρ_out − ρ_in|). So the accuracy risk of a bad learned
+  filter is zero — only the iteration count moves.
+
+K=1 with w=1, q1=q0 reproduces bare Kerker to round-off, so the learned filter is
+a strict generalization and the single-pole result is always in its hypothesis
+class.
+
+Fitting (`fit_multipole`) is where the differentiable solver earns its keep. The
+error of preconditioned linear mixing evolves, component-wise in the diagonal-in-G
+model, as
+
+    e_{n+1}(G) = [1 − α·f_θ(G²)·d(G)]·e_n(G),   d(G) = 1 − j(G),
+
+with j(G) the SCF residual map's diagonal gain and d(G) its response denominator
+(d → 1/f is the one-step-optimal filter). `fit_multipole` unrolls this recurrence
+for a fixed number of steps and backpropagates ‖e_N‖ through it to the pole
+weights and positions — training the preconditioner against the solver's own
+linearized response, which no non-differentiable DFT code can do without finite
+differences. `response_from_residuals` estimates d(G) per |G|-shell from a short
+plain-mixing SCF's residual history (res_{n+1}/res_n = 1 − α·d in the same model),
+so the whole loop — probe, fit, deploy — runs on real solver output.
+"""
+
+from __future__ import annotations
+
+import torch
+
+from gradwave.dtypes import RDTYPE
+
+
+def _inv_softplus(y: float) -> float:
+    """x such that softplus(x) = y, for seeding a parameter at a target value."""
+    import math
+    return math.log(math.expm1(y)) if y < 20 else y
+
+
+class MultipoleKerkerPrecond:
+    """A learned radial density preconditioner f_θ(G²)·R over the density sphere.
+
+    Construct with :meth:`kerker` (single-pole, matches the bare filter) or
+    :meth:`init_poles` (K poles, log-spaced seed), fit the poles with
+    :func:`fit_multipole`, then hand the instance to ``scf(..., precond_op=P)`` or
+    assign it to ``mixer.precond_op``. Callable: ``P(r)`` returns f_θ(g²)·r on the
+    same layout as ``r``. The parameters live in ``P.params`` (a list of leaf
+    tensors) for an optimizer; call :meth:`detach_` before deploying in a solve so
+    no autograd graph is retained through the SCF."""
+
+    def __init__(self, g2: torch.Tensor, w_raw: torch.Tensor, logq2: torch.Tensor):
+        # g2: (n,) |G|² per component the filter acts on [Å⁻²]; buffer, no grad.
+        self.g2 = g2.detach()
+        self.w_raw = w_raw          # (K,) softplus⁻¹ weights (leaf, may need grad)
+        self.logq2 = logq2          # (K,) log pole positions log(q_i²) (leaf)
+
+    # -- construction ---------------------------------------------------------
+    @classmethod
+    def kerker(cls, g2: torch.Tensor, q0: float = 1.1) -> "MultipoleKerkerPrecond":
+        """Single pole reproducing the bare Kerker filter G²/(G²+q0²)."""
+        import math
+        w_raw = torch.tensor([_inv_softplus(1.0)], dtype=RDTYPE, device=g2.device)
+        logq2 = torch.tensor([2.0 * math.log(float(q0))],
+                             dtype=RDTYPE, device=g2.device)
+        return cls(g2, w_raw, logq2)
+
+    @classmethod
+    def init_poles(cls, g2: torch.Tensor, n_poles: int = 3,
+                   q_min: float = 0.3, q_max: float = 3.0,
+                   requires_grad: bool = True) -> "MultipoleKerkerPrecond":
+        """K poles log-spaced over [q_min, q_max] Å⁻¹, unit total weight seed."""
+        q = torch.logspace(float(torch.log10(torch.tensor(q_min))),
+                           float(torch.log10(torch.tensor(q_max))),
+                           n_poles, dtype=RDTYPE, device=g2.device)
+        logq2 = (2.0 * torch.log(q)).clone()
+        w_raw = torch.full((n_poles,), _inv_softplus(1.0 / n_poles),
+                           dtype=RDTYPE, device=g2.device)
+        w_raw.requires_grad_(requires_grad)
+        logq2.requires_grad_(requires_grad)
+        return cls(g2, w_raw, logq2)
+
+    # -- parametrization ------------------------------------------------------
+    @property
+    def params(self) -> list[torch.Tensor]:
+        return [self.w_raw, self.logq2]
+
+    def weights(self) -> torch.Tensor:
+        return torch.nn.functional.softplus(self.w_raw)
+
+    def q2(self) -> torch.Tensor:
+        return torch.exp(self.logq2)
+
+    def filter_vals(self, g2: torch.Tensor | None = None) -> torch.Tensor:
+        """f_θ(g²) per component (real, in [0, Σw))."""
+        g2 = self.g2 if g2 is None else g2
+        w, q2 = self.weights(), self.q2()
+        # Σ_i w_i g²/(g²+q_i²); g²=0 → 0 exactly (pinned charge preserved)
+        gg = g2[:, None]
+        return (w * gg / (gg + q2)).sum(dim=-1)
+
+    def __call__(self, r: torch.Tensor) -> torch.Tensor:
+        """P·r = f_θ(g²)·r on the density sphere (matches Kerker's fac·r)."""
+        fac = self.filter_vals().to(r.real.dtype if r.is_complex() else r.dtype)
+        return fac * r
+
+    def rebind(self, g2: torch.Tensor) -> "MultipoleKerkerPrecond":
+        """Same learned poles on a new |G|² grid (fit on shell centers, deploy on
+        the per-component density sphere). The poles are analytic in G², so this
+        is exact, not a resampling."""
+        return MultipoleKerkerPrecond(g2, self.w_raw, self.logq2)
+
+    def detach_(self) -> "MultipoleKerkerPrecond":
+        """Drop autograd tracking on the poles for use inside a solve."""
+        self.w_raw = self.w_raw.detach()
+        self.logq2 = self.logq2.detach()
+        return self
+
+    def summary(self) -> str:
+        w = self.weights().detach().tolist()
+        q = self.q2().detach().sqrt().tolist()
+        poles = ", ".join(f"w={wi:.3f}@q={qi:.3f}Å⁻¹"
+                          for wi, qi in zip(w, q, strict=True))
+        return f"MultipoleKerkerPrecond[{poles}]"
+
+
+def spectral_radius(f_vals: torch.Tensor, d: torch.Tensor,
+                    alpha: float) -> torch.Tensor:
+    """Worst-component amplification max_G |1 − α·f(G²)·d(G)| of the diagonal
+    preconditioned-mixing iteration matrix. The asymptotic convergence rate:
+    residual falls by this factor per SCF step, so iterations-to-tol scale as
+    log(tol)/log(ρ). Reported by the benchmarks alongside real n_iter."""
+    return (1.0 - alpha * f_vals * d).abs().max()
+
+
+def fit_multipole(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
+                  n_poles: int = 3, alpha: float = 0.7, n_unroll: int = 40,
+                  steps: int = 400, lr: float = 0.05,
+                  q_min: float = 0.3, q_max: float = 3.0,
+                  weight: torch.Tensor | None = None,
+                  verbose: bool = False) -> tuple[MultipoleKerkerPrecond, dict]:
+    """Fit multi-pole Kerker poles to a per-shell response denominator d(G).
+
+    Differentiates ‖e_N‖ through the unrolled diagonal mixing recurrence
+    e_{n+1} = (1 − α f_θ d) e_n (broadband seed e_0 = 1), driving the whole G-range
+    toward the fastest common decay. Returns the fitted preconditioner (built on
+    the full ``g2_shell`` grid; rebuild ``.g2`` for a different mixer) and a
+    history dict with the loss curve and initial/final spectral radius.
+
+    Args:
+        g2_shell: (S,) representative |G|² per shell [Å⁻²].
+        d_shell:  (S,) response denominator d = 1 − j per shell (real).
+        weight:   (S,) optional per-shell importance (e.g. shell multiplicity);
+                  defaults to uniform. Weights the loss, not the recurrence.
+    """
+    g2_shell = g2_shell.to(RDTYPE)
+    d_shell = d_shell.to(RDTYPE)
+    w_shell = (torch.ones_like(g2_shell) if weight is None
+               else weight.to(RDTYPE)).clamp_min(0.0)
+    w_shell = w_shell / w_shell.sum().clamp_min(1e-30)
+
+    P = MultipoleKerkerPrecond.init_poles(g2_shell, n_poles, q_min, q_max,
+                                          requires_grad=True)
+    opt = torch.optim.Adam(P.params, lr=lr)
+    e0 = torch.ones_like(g2_shell)
+    f0 = P.filter_vals().detach()
+    rho_init = float(spectral_radius(f0, d_shell, alpha))
+    loss_hist: list[float] = []
+
+    for it in range(steps):
+        opt.zero_grad()
+        f = P.filter_vals()
+        amp = (1.0 - alpha * f * d_shell)          # (S,) per-shell error factor
+        # unroll the linear solver: e_N = amp**N ⊙ e0. log|amp| avoids under/
+        # overflow and its weighted logsumexp is a smooth surrogate for the
+        # worst-shell rate that the spectral radius takes as a hard max.
+        log_amp = torch.log(amp.abs().clamp_min(1e-12))
+        log_eN = n_unroll * log_amp + torch.log(e0)
+        loss = torch.logsumexp(log_eN + torch.log(w_shell.clamp_min(1e-30)), dim=0)
+        loss.backward()
+        opt.step()
+        loss_hist.append(float(loss.detach()))
+        if verbose and (it % max(1, steps // 10) == 0):
+            print(f"  fit {it:4d}  loss={float(loss):+.4f}  "
+                  f"rho={float(spectral_radius(P.filter_vals().detach(), d_shell, alpha)):.4f}")
+
+    P.detach_()
+    rho_final = float(spectral_radius(P.filter_vals(), d_shell, alpha))
+    return P, {"loss": loss_hist, "rho_init": rho_init, "rho_final": rho_final}
+
+
+def response_from_residuals(res_hist: list[torch.Tensor], g2: torch.Tensor,
+                            alpha: float, n_bins: int = 40,
+                            skip: int = 2) -> tuple[torch.Tensor, torch.Tensor,
+                                                    torch.Tensor]:
+    """Estimate the per-shell response denominator d(G) from a plain-mixing
+    residual history.
+
+    Under plain damped mixing ρ_in^{n+1} = ρ_in^n + α·res_n, the diagonal model
+    gives res_{n+1}(G)/res_n(G) = 1 − α·d(G). Averaging that complex ratio's real
+    part over consecutive iterations and over |G|-shells recovers d(G). Early
+    iterations are noisy (loose diago tolerance, large steps) so the first
+    ``skip`` residual pairs are dropped.
+
+    Returns (g2_shell, d_shell, count) with one entry per non-empty |G|-shell
+    bin: representative |G|² [Å⁻²], estimated d, and the component count (usable
+    as the fit ``weight``). The G=0 component is excluded (residual pinned there).
+    """
+    g2 = g2.reshape(-1)
+    nz = g2 > 1e-12
+    gmax = float(g2[nz].max())
+    edges = torch.linspace(0.0, gmax * (1 + 1e-6), n_bins + 1,
+                           dtype=RDTYPE, device=g2.device)
+    idx = torch.bucketize(g2, edges) - 1
+    idx = idx.clamp(0, n_bins - 1)
+
+    d_acc = torch.zeros(n_bins, dtype=RDTYPE, device=g2.device)
+    n_acc = torch.zeros(n_bins, dtype=RDTYPE, device=g2.device)
+    for a, b in zip(res_hist[skip:-1], res_hist[skip + 1:], strict=True):
+        ratio = (b / a.masked_fill(a.abs() < 1e-14, 1.0)).real  # 1 − α d per comp
+        d_comp = (1.0 - ratio) / alpha
+        keep = nz & torch.isfinite(d_comp)
+        d_acc.index_add_(0, idx[keep], d_comp[keep].to(RDTYPE))
+        n_acc.index_add_(0, idx[keep], torch.ones(int(keep.sum()),
+                         dtype=RDTYPE, device=g2.device))
+
+    full = n_acc > 0
+    d_shell = (d_acc[full] / n_acc[full]).clamp(0.0, 2.0)  # stable-mode range
+    centers = 0.5 * (edges[:-1] + edges[1:])[full]
+    return centers, d_shell, n_acc[full]

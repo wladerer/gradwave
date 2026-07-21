@@ -477,6 +477,12 @@ def scf(
     mixed_precision: bool = False,  # opt-in fp32 draft (see note at resolution below)
     eigensolver: str = "davidson",  # davidson | chebyshev (NC standard problem only)
     precond: str = "kerker",  # kerker | local_tf (position-dependent TF screening)
+    precond_op=None,  # callable r→P·r on the density-total block, overriding
+    # kerker/local_tf (e.g. a fitted scf.learned_precond.MultipoleKerkerPrecond);
+    # must leave the G=0 component untouched and needs no per-iteration state
+    mixer_hook=None,  # research probe: called (it, rho_in_vec, rho_out_vec) each
+    # step before mixing, e.g. to capture the residual history a preconditioner
+    # fit consumes (see scf.learned_precond.response_from_residuals)
     hubbard=None,  # list[core.hubbard.HubbardManifold] — Dudarev DFT+U corrections
     hub_alpha=None,  # per-site rigid manifold potential α [eV] — linear-response probe
     start_from=None,  # previous SCFResult (or checkpoint view) on the SAME FFT grid
@@ -539,7 +545,13 @@ def scf(
     if precond not in ("kerker", "local_tf"):
         raise ValueError("precond must be 'kerker' or 'local_tf'")
     tf_precond = None
-    if precond == "local_tf":
+    if precond_op is not None:
+        # a caller-supplied operator on the density-total block (learned radial
+        # filter). Static across iterations, so unlike local_tf it needs no
+        # per-step set_density; slice to the total block on the spin path.
+        mixer.precond_op = precond_op
+        mixer.precond_slice = slice(0, layout.ng) if nspin == 2 else None
+    elif precond == "local_tf":
         # position-dependent TF screening on the density-total block; capped at
         # the bare-Kerker q0 so a bulk metal is unchanged and only the vacuum is
         # unscreened. set_density() is called with the current n(r) each iter.
@@ -776,6 +788,8 @@ def scf(
 
         rho_in_vec = layout.pack(rho_s)
         rho_out_vec = layout.pack(rho_out_s)
+        if mixer_hook is not None:
+            mixer_hook(it, rho_in_vec, rho_out_vec)
         if nspin == 2:  # only the TOTAL is conserved; its G=0 residual must vanish
             tot_res = rho_out_vec[0] - rho_in_vec[0]
             if not torch.isfinite(rho_out_vec).all():

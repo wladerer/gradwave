@@ -1019,6 +1019,70 @@ small SCF the consumer-GPU fp64 tax is the wall, and the durable levers are thro
 (batch many small structures), fewer iterations (learned or extrapolated start), and a
 datacenter fp64 GPU.
 
+## Learned multi-pole density-mixing preconditioner (PROTOTYPED)
+
+The 2024-2026 sweep above skips "learned preconditioners" on the grounds that they
+need a localized basis and our kinetic preconditioner is already analytic. That
+reason is about *eigensolver* preconditioners. A learned *density-mixing*
+preconditioner is a different object, and this section is the prototype of it. It
+lives entirely in G-space, needs no localized basis, and generalizes the Kerker
+and local-TF filters the code already ships. It is also the lever
+`docs/manual/wisdom.md` points at twice over: prefer a preconditioner to
+step-size control, and the SCF iteration count is set by density mixing, not by
+the initial wavefunction (the reason the atomic-orbital seed in the done section
+saved nothing).
+
+The mechanism (`scf/learned_precond.py`). Bare Kerker, R̃(G) = R(G)·G²/(G²+q0²),
+is the single-pole long-wavelength approximation to the exact response
+preconditioner ε⁻¹ = (1 − v_c χ₀)⁻¹. `MultipoleKerkerPrecond` replaces the one
+pole with a learned sum, f_θ(G²) = Σ_i w_i·G²/(G²+q_i²), applied per density-sphere
+component exactly where the mixer applies Kerker (wired as `scf(..., precond_op=)`
+and `mixer.precond_op`, mirroring local-TF). Two Kerker properties carry over by
+construction and both matter: f_θ(0) = 0, so the pinned G=0 charge is never
+touched, and the fixed point is unchanged, so a bad filter can only cost
+iterations, never accuracy. K=1, w=1 reproduces bare Kerker to round-off, so the
+single pole is always inside the hypothesis class.
+
+The fit is where a differentiable solver does something a non-differentiable one
+cannot. The error of preconditioned linear mixing evolves component-wise as
+e_{n+1}(G) = [1 − α·f_θ(G²)·d(G)]·e_n(G), with d(G) = 1 − j(G) the diagonal
+response denominator. `fit_multipole` unrolls that recurrence and backpropagates
+‖e_N‖ to the pole weights and positions, training the preconditioner against the
+solver's own linearized response. `response_from_residuals` estimates d(G) per
+|G|-shell from a short plain-mixing SCF captured through the new `scf` `mixer_hook`,
+so probe, fit, and deploy all run on real solver output.
+
+Measured (`benchmarks/bench_learned_precond.py`, `tests/unit/test_learned_precond.py`).
+On a synthetic response with two length scales, where a single pole is provably the
+wrong shape, the fitted three-pole filter drops the spectral radius from 0.82 to
+0.50, a 3.5x iteration ratio. On real fcc Al the end-to-end loop runs and the
+learned filter reaches the Kerker energy to 5e-12 eV (fixed point unchanged, as
+designed), but it takes 9 iterations against Kerker's 7. That is the honest and
+expected result on a homogeneous metal, and it is the same story bench_precond.py
+tells for local-TF on bulk Al: Kerker is already near-optimal there, and there is
+nothing for a radial filter to win.
+
+The Al loss is also diagnostic, and names the next step. The fit minimizes the
+*plain-mixing* spectral radius, but deployment runs Pulay DIIS with history 8,
+which already accelerates the low-G modes the filter spent its weight on. So the
+linear-model fit over-invests where DIIS is already strong. The moat's own logic
+says the fix: unroll the *actual* mixer, not the plain-damped linear surrogate, so
+the filter is trained to complement DIIS rather than to duplicate it. gradwave can
+differentiate through the Pulay recurrence; nothing else in the field can.
+
+Where the headroom is, and where it is not. Not bulk metals (Kerker plus DIIS is
+near-optimal). The candidates are systems whose G-space response genuinely carries
+more than one scale and whose extra structure survives DIIS: semicore metals
+(Cu 3s3p), intermetallics (Cu₃Al), and the DIIS-limited regimes where history is
+short or reset often (large cells near the charge-sloshing cliff, ferromagnetic
+metals near the Stoner boundary where wisdom.md already asks for the χ₀-diagonal
+operator by name). A cleaner probe would help too: the current d(G) estimate ran
+with Kerker off and picked up values above one, so dividing the response out of a
+converging Kerker run, or unrolling DIIS directly, is the more trustworthy path to
+d(G). The prototype settles that the machinery is correct and safe and that the
+fit-through-linear-model does not transfer under DIIS on easy systems; the open
+question is whether a real multi-scale system plus a DIIS-aware fit clears the bar.
+
 # Done and resolved
 
 Kept for the reasoning. Each of these is either landed in the code or settled as a
