@@ -122,6 +122,16 @@ def _broaden(grid, energies, per_state, width):
             * inv * per_state[None, :]).sum(axis=1)
 
 
+def spectral_grid(all_e, width, npoints, window=None):
+    """(window, energy grid) for DOS/COHP broadening. When `window` is None it
+    defaults to the eigenvalue range padded by 10*width on each side — far enough
+    that a Gaussian of that width has decayed. Shared by the DOS functions here
+    and cohp._finalize so the padding rule lives in one place."""
+    if window is None:
+        window = (all_e.min() - 10 * width, all_e.max() + 10 * width)
+    return window, np.linspace(window[0], window[1], npoints)
+
+
 def _is_uspp_system(system) -> bool:
     """USPP/PAW systems carry the augmentation weights; NC systems carry .upfs."""
     return hasattr(system, "paws") and hasattr(system, "q_full")
@@ -305,9 +315,7 @@ def projected_dos(res, *, width: float = 0.1, npoints: int = 800, window=None,
     spilling = float(1.0 - captured / kweight_state.sum())
 
     # energy grid + gaussian broadening
-    if window is None:
-        window = (all_e.min() - 10 * width, all_e.max() + 10 * width)
-    grid = np.linspace(window[0], window[1], npoints)
+    window, grid = spectral_grid(all_e, width, npoints, window)
 
     def broaden(state_weight, isp):
         return _broaden(grid, all_e[isp],
@@ -382,9 +390,7 @@ def projected_dos_noncollinear(res, *, width: float = 0.1, npoints: int = 800,
     captured = (n_pop.sum(axis=1) * kweight_state).sum()
     spilling = float(1.0 - captured / kweight_state.sum())
 
-    if window is None:
-        window = (all_e.min() - 10 * width, all_e.max() + 10 * width)
-    grid = np.linspace(window[0], window[1], npoints)
+    window, grid = spectral_grid(all_e, width, npoints, window)
 
     def chan(pop, mask):
         return _broaden(grid, all_e, kweight_state * pop[:, mask].sum(axis=1), width)
@@ -538,9 +544,7 @@ def projected_dos_soc(res, *, width: float = 0.1, npoints: int = 800, window=Non
 
     captured = (weights.sum(axis=1) * kweight_state).sum()
     spilling = float(1.0 - captured / kweight_state.sum())
-    if window is None:
-        window = (all_e.min() - 10 * width, all_e.max() + 10 * width)
-    grid = np.linspace(window[0], window[1], npoints)
+    window, grid = spectral_grid(all_e, width, npoints, window)
 
     def chan(mask):
         return _broaden(grid, all_e, kweight_state * weights[:, mask].sum(axis=1),

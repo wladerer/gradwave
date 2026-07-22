@@ -80,6 +80,7 @@ from gradwave.postscf.pdos import (
     _lowdin_project,
     _unpack_result,
     o_inv_sqrt,
+    spectral_grid,
 )
 
 
@@ -362,9 +363,7 @@ def _finalize(block_e, raw, icohp, pair_list, kw, kpts, nspin, nk, width,
     band_energies = np.stack(block_e) if block_e else np.zeros((0, 0))
     kw = np.asarray(kw, dtype=float)
     all_e = band_energies.ravel() if band_energies.size else np.array([0.0])
-    if window is None:
-        window = (all_e.min() - 10 * width, all_e.max() + 10 * width)
-    grid = np.linspace(window[0], window[1], npoints)
+    window, grid = spectral_grid(all_e, width, npoints, window)
 
     pair_cohp, pair_icohp, band_cohp = {}, {}, {}
     total = np.zeros(npoints)
