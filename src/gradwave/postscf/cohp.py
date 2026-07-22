@@ -70,6 +70,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from gradwave.dtypes import CDTYPE
 from gradwave.postscf.pdos import (
     _ao_projectors_k,
     _ao_spinor_projectors_k,
@@ -119,6 +120,9 @@ class COHP:
     block_kweights: np.ndarray = None   # (nblocks,)
     band_energies: np.ndarray = None    # (nblocks, nb) [eV]
     band_cohp: dict = None              # "i-j" -> (nblocks, nb) [eV], bonding < 0
+    bond_images: dict = None            # "i-j" -> (n1,n2,n3), set by resolve_images
+    basis: str = "pswfc"                # projector basis: "pswfc" or "iao"
+    rmsp: float = None                  # LOBSTER G-space projection residual [0,1]
 
     def cohp_at_k(self, label: str, block: int, *, width: float = 0.1, grid=None):
         """Re-broaden the COHP of one (spin, k) block for a pair into a curve.
@@ -154,6 +158,10 @@ class COHP:
             "block_kweights": _col(self.block_kweights),
             "band_energies": _col(self.band_energies),
             "band_cohp": {k: _col(v) for k, v in (self.band_cohp or {}).items()},
+            "bond_images": (None if self.bond_images is None else
+                            {k: list(map(int, v)) for k, v in self.bond_images.items()}),
+            "basis": self.basis,
+            "rmsp": self.rmsp,
         }
 
 
@@ -167,6 +175,68 @@ def _min_image_dist(system, i: int, j: int) -> float:
     return float(np.linalg.norm(frac @ cell))
 
 
+def _nearest_image_R(system, i: int, j: int) -> np.ndarray:
+    """Integer lattice vector R of the image of atom j nearest atom i, i.e. the
+    single bond the min-image distance picks out. The COHP off-site block sums the
+    whole j sublattice; this R selects one image for a per-bond resolution."""
+    cell = np.asarray(system.grid.cell, dtype=float)
+    pos = system.positions.detach().cpu().numpy()
+    frac = (pos[i] - pos[j]) @ np.linalg.inv(cell)
+    return np.round(frac).astype(int)
+
+
+def _accumulate_images(proj_per_k, htilde_per_k, eig_per_k, kw, kpts, atom_of,
+                       pair_list, images, nspin, nk, g_spin, fermi):
+    """Per-bond COHP: restrict each pair to a single image R of atom j.
+
+    The Bloch AO Hamiltonian H~_pq(k) is the interaction of orbital p (home cell)
+    with the whole atom-j sublattice. Its real-space transform along the bond,
+
+        h_pq(R) = sum_k w_k e^{-2 pi i k.R} H~_pq(k),
+
+    is the hopping to the single image R, and the matching density term carries the
+    conjugate phase e^{+2 pi i k.R}, so the per-state weight for bond (i, j, R) is
+
+        w_b^R = 2 g_spin Re[ e^{2 pi i k.R} sum_{p in i, q in j}
+                             conj(proj_bp) h_pq(R) proj_bq ].
+
+    Summing w_b^R over the Born-von-Karman image shell reconstructs the sublattice
+    weight `_accumulate` returns (validated in the tests); at Gamma R=0 and the two
+    are identical. h_pq(R) is only the true hopping on a full (unreduced) k-mesh, so
+    per-image resolution needs time_reversal=False / use_symmetry=False for R != 0."""
+    raw = {p[:2]: [None] * len(proj_per_k) for p in pair_list}
+    icohp = {p[:2]: 0.0 for p in pair_list}
+    fermi = -np.inf if fermi is None else float(fermi)
+    for (i, j) in ((p[0], p[1]) for p in pair_list):
+        R = np.asarray(images[(i, j)], dtype=float)
+        mi = torch.as_tensor(atom_of == i, device=proj_per_k[0].device)
+        mj = torch.as_tensor(atom_of == j, device=proj_per_k[0].device)
+        # real-space hopping h_pq(R) per spin channel (blocks are spin-major)
+        hR = []
+        for s in range(nspin):
+            acc = None
+            for ik in range(nk):
+                b = s * nk + ik
+                ph = np.exp(-2j * np.pi * float(np.dot(kpts[b], R)))
+                cs = torch.as_tensor(float(kw[b]) * ph, dtype=CDTYPE,
+                                     device=htilde_per_k[b].device)
+                blk = htilde_per_k[b][mi][:, mj] * cs
+                acc = blk if acc is None else acc + blk
+            hR.append(acc)
+        for s in range(nspin):
+            for ik in range(nk):
+                b = s * nk + ik
+                proj = proj_per_k[b]
+                ph = np.exp(2j * np.pi * float(np.dot(kpts[b], R)))
+                tmp = proj[:, mi].conj() @ hR[s]          # (nb, nj)
+                wc = (tmp * proj[:, mj]).sum(dim=1).cpu().numpy()  # (nb,) complex
+                w = 2.0 * g_spin * np.real(wc * ph)
+                raw[(i, j)][b] = w
+                occ = eig_per_k[b].cpu().numpy() < fermi
+                icohp[(i, j)] += float((w[occ] * float(kw[b])).sum())
+    return raw, icohp
+
+
 def _select_pairs(system, pairs, rcut: float):
     """Resolve the requested atom pairs to [(i, j, dist)] with i < j. An explicit
     `pairs` list wins; otherwise every distinct atom pair within `rcut`."""
@@ -178,6 +248,40 @@ def _select_pairs(system, pairs, rcut: float):
                   if _min_image_dist(system, i, j) <= rcut}
     out = [(i, j, _min_image_dist(system, i, j)) for i, j in sorted(chosen)]
     return out
+
+
+def _iao_projectors_k(phi, psi_occ, floor=1e-8):
+    """Intrinsic Atomic Orbitals in the plane-wave basis (Knizia, JCTC 2013),
+    norm-conserving metric <a|b> = sum_G conj(a_G) b_G.
+
+    `phi` (nproj, npw) is the free-atom minimal AO basis (the PP_PSWFC projectors)
+    and `psi_occ` (nocc, npw) the occupied KS states (orthonormal). Returns the
+    IAOs A (nproj, npw):
+
+        A = [ O O~ + (1-O)(1-O~) ] phi = phi - O phi - O~ phi + 2 O O~ phi,
+
+    with O = |psi><psi| the occupied projector and O~ = |psi~><psi~| the projector
+    onto the occupied MOs *depolarised* into the minimal basis and reorthonormalised
+    (psi~ = orthonormalise(phi S^{-1} <phi|psi>), S = <phi|phi>). By construction the
+    IAOs span the occupied manifold exactly, so the occupied-state projection has
+    zero spilling — the contracted/localised basis the COHP docstring calls for,
+    built with no external tables (Knizia 2013; periodic form arXiv:2407.00852)."""
+    Phi, Psi = phi, psi_occ
+    eye = torch.eye(Phi.shape[0], dtype=Phi.dtype, device=Phi.device)
+    B = torch.einsum("pg,ng->pn", Phi.conj(), Psi)          # <phi_p|psi_n>
+    S = torch.einsum("pg,qg->pq", Phi.conj(), Phi)          # <phi_p|phi_q>
+    coeff = torch.linalg.solve(S + floor * eye, B)          # S^{-1} <phi|psi>
+    psi_t = torch.einsum("pn,pg->ng", coeff, Phi)           # P^{B2} psi (nocc, npw)
+    T = torch.einsum("ng,mg->nm", psi_t.conj(), psi_t)      # <psi~|psi~>
+    w, v = torch.linalg.eigh(T)
+    tis = (v * w.clamp_min(floor).rsqrt()) @ v.conj().T     # T^{-1/2}
+    psi_o = torch.einsum("mn,ng->mg", tis, psi_t)           # orthonormal psi~
+    o_phi = torch.einsum("pn,ng->pg", B.conj(), Psi)        # O phi
+    bt = torch.einsum("pg,ng->pn", Phi.conj(), psi_o)       # <phi_p|psi~_n>
+    ot_phi = torch.einsum("pn,ng->pg", bt.conj(), psi_o)    # O~ phi
+    u = torch.einsum("ng,pg->np", Psi.conj(), ot_phi)       # <psi_n|O~ phi_p>
+    oot_phi = torch.einsum("np,ng->pg", u, Psi)             # O O~ phi
+    return Phi - o_phi - ot_phi + 2.0 * oot_phi
 
 
 def _o_inv_sqrt(overlap, floor=1e-8):
@@ -323,7 +427,8 @@ def _step_occupations(eig_per_k, fermi):
 
 @torch.no_grad()
 def cohp(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
-         npoints: int = 800, window=None, method: str = "operator"):
+         npoints: int = 800, window=None, method: str = "operator",
+         resolve_images: bool = False, basis: str = "pswfc"):
     """Atom-pair COHP of a converged collinear SCF (norm-conserving, nspin 1/2).
 
     `pairs` selects atom index tuples (0-based); the default is every atom pair
@@ -334,12 +439,28 @@ def cohp(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
     invariant, the correct route for solids); "eigenvalue" uses the band-limited
     P^dagger diag(eps) P (cheaper, but carries the plane-wave energy zero). The
     operator route needs the norm-conserving KS Hamiltonian, so a USPP/PAW result
-    falls back to the eigenvalue route. Returns a `COHP`.
+    falls back to the eigenvalue route.
+
+    `resolve_images` restricts each pair to the single nearest image of atom j (the
+    min-image bond) instead of the whole j sublattice, for a per-bond number
+    comparable to LOBSTER. The image lattice vectors land in `bond_images`. Needs a
+    full (unreduced) k-mesh for bonds that cross a cell boundary; exact at Gamma.
+
+    `basis` selects the projector local basis: "pswfc" (default) the pseudo-atomic
+    PP_PSWFC orbitals, or "iao" the Intrinsic Atomic Orbitals that span the occupied
+    manifold exactly (zero occupied-state spilling, more localised off-site
+    elements). "iao" needs the norm-conserving operator route. Returns a `COHP`.
     """
     from gradwave.scf.loop import SCFResult
     system, nspin, eig, coeffs, fermi, device, _ = _unpack_result(res)
     use_op = method == "operator" and isinstance(res, SCFResult)
     method = "operator" if use_op else "eigenvalue"
+    if basis not in ("pswfc", "iao"):
+        raise ValueError(f"basis must be 'pswfc' or 'iao', got {basis!r}")
+    if basis == "iao" and not use_op:
+        raise NotImplementedError(
+            "basis='iao' needs the norm-conserving operator route "
+            "(method='operator' on an SCFResult)")
     if use_op:
         from gradwave.core.hamiltonian import HamiltonianK, projectors
         shape = system.grid.shape
@@ -360,13 +481,17 @@ def cohp(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
         veff = res.v_eff if nspin == 1 else res.v_eff[isp]
         for ik, sph in enumerate(system.spheres):
             c = coeffs[isp][ik].to(device)                       # (nb, npw)
+            e = eig[isp, ik].to(device)
             q = _ao_projectors_k(system, sph, cols, device)      # (nproj, npw)
+            if basis == "iao":
+                occ_mask = (e < fermi) if fermi is not None \
+                    else torch.ones_like(e, dtype=torch.bool)
+                q = _iao_projectors_k(q, c[occ_mask])            # occupied-span IAOs
             overlap = torch.einsum("ig,jg->ij", q.conj(), q)
             ois = _o_inv_sqrt(overlap)                           # O^{-1/2}
             # <phi~_p|psi> = becp @ O^{-1/2 T}; conj() matters for complex O off Gamma
             becp = torch.einsum("bg,pg->bp", c, q.conj())
             proj = becp @ ois.conj()                             # (nb, nproj)
-            e = eig[isp, ik].to(device)
             if use_op:
                 pd = system.proj_data[ik]
                 p = projectors(pd, system.positions).to(device)
@@ -388,12 +513,71 @@ def cohp(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
     block_e, raw, icohp, tot = _accumulate(
         proj_per_k, htilde_per_k, eig_per_k, kw_flat, atom_of, pair_list,
         g_spin, fermi)
+    images = None
+    if resolve_images:
+        images = {(p[0], p[1]): _nearest_image_R(system, p[0], p[1])
+                  for p in pair_list}
+        raw, icohp = _accumulate_images(
+            proj_per_k, htilde_per_k, eig_per_k, kw_flat, kpts, atom_of,
+            pair_list, images, nspin, len(system.spheres), g_spin, fermi)
     out, _tot = _finalize(block_e, raw, icohp, pair_list, kw_flat, kpts, nspin,
                           len(system.spheres), width, npoints, window, spilling,
                           charge_spilling, fermi, "collinear", band_window, tot,
                           method=method)
-    out._sumrule_icohp = _tot  # all-pairs incl on-site, for validation
+    out._sumrule_icohp = tot  # all-pairs incl on-site, for validation
+    out.basis = basis
+    # RMSp: G-space projection residual. For the Loewdin reconstruction
+    # X_n = P^{B2} psi_n, ||psi_n - X_n||^2 = 1 - captured_n, so the k-weighted RMS
+    # equals sqrt(total spilling) (LOBSTER's model-independent metric).
+    out.rmsp = float(np.sqrt(max(spilling, 0.0)))
+    if images is not None:
+        out.bond_images = {f"{i + 1}-{j + 1}": tuple(int(x) for x in R)
+                           for (i, j), R in images.items()}
     return out
+
+
+def projection_rmsp(res, *, basis: str = "pswfc", occupied_only: bool = False):
+    """LOBSTER-style reciprocal-space projection residual RMSp, as a torch scalar.
+
+        RMSp^2 = sum_{k,n} w_k || psi_n - P^{B2} psi_n ||^2 / sum_{k,n} w_k
+               = sum_{k,n} w_k (1 - captured_n) / sum_{k,n} w_k,
+
+    the k-weighted mean state spilling, computed directly from the projections. It
+    is left DIFFERENTIABLE (no torch.no_grad): once the projector radial is built on
+    the torch spherical-Bessel path (pseudo/radial_torch.py) rather than the numpy
+    `sbt`, this is the objective a parameterised / contracted basis is optimised
+    against. Caveat (see docs/plans/cohp-contracted-basis.md): minimising RMSp is the
+    Sanchez-Portal spilling objective and favours a MORE diffuse/complete basis —
+    right for band-energy fidelity, wrong for localised COHP, where IAO or a fitted
+    minimal basis is the target. `occupied_only` restricts the sum to states below
+    E_F (the charge RMSp). Norm-conserving collinear only."""
+    from gradwave.scf.loop import SCFResult
+    if not isinstance(res, SCFResult):
+        raise NotImplementedError("projection_rmsp: norm-conserving SCFResult only")
+    system, nspin, eig, coeffs, fermi, device, _ = _unpack_result(res)
+    cols = _atomic_columns(system)
+    kw = system.kweights.to(device)
+    num = den = None
+    for isp in range(nspin):
+        for ik, sph in enumerate(system.spheres):
+            c = coeffs[isp][ik].to(device)
+            e = eig[isp, ik].to(device)
+            q = _ao_projectors_k(system, sph, cols, device)
+            if basis == "iao":
+                occ_mask = (e < fermi) if fermi is not None \
+                    else torch.ones_like(e, dtype=torch.bool)
+                q = _iao_projectors_k(q, c[occ_mask])
+            overlap = torch.einsum("ig,jg->ij", q.conj(), q)
+            proj = torch.einsum("bg,pg->bp", c, q.conj()) @ _o_inv_sqrt(overlap).conj()
+            cap = (proj.real ** 2 + proj.imag ** 2).sum(1)       # captured per band
+            keep = (e < fermi) if (occupied_only and fermi is not None) \
+                else torch.ones_like(e, dtype=torch.bool)
+            wk = float(kw[ik])
+            n = wk * (1.0 - cap[keep]).sum()
+            d = wk * float(keep.sum())
+            num = n if num is None else num + n
+            den = d if den is None else den + d
+    return (num / den).clamp_min(0.0).sqrt()
 
 
 def _spinor_proj_per_k(res, cols, spinor, device):
