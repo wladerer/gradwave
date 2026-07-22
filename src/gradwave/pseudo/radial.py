@@ -22,8 +22,11 @@ from gradwave.pseudo._bessel_data import DOUBLE_FACTORIAL, SERIES_TERMS, SERIES_
 # the GIL, so a large sbt splits across threads for a near-linear speedup. Small
 # transforms (per-atom PDOS/Hubbard qmag, few-shell cells) keep the serial path:
 # the pool spin-up would cost more than it saves.
-_SBT_THREADS = max(1, min(int(os.environ.get("GRADWAVE_SBT_THREADS", "8")),
-                          (os.cpu_count() or 1)))
+_ncpu = os.cpu_count() or 1
+# default: use the cores, capped at 16 (setup is a one-time burst while torch's
+# own pool is idle, so oversubscription isn't a concern); override via env.
+_SBT_THREADS = max(1, min(int(os.environ.get("GRADWAVE_SBT_THREADS", "0"))
+                          or min(_ncpu, 16), _ncpu))
 _SBT_CHUNK_MIN = 2048  # min |q| per chunk; below one chunk's worth, stay serial
 
 
