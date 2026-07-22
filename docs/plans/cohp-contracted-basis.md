@@ -84,6 +84,20 @@ cannot.
    evaluated last; needs shippable basis tables and a real oracle, so likely
    staged as follow-up rather than landed here.
 
+### Decision on step 4 (contracted STOs)
+
+**Deferred to a follow-up.** Fitting per-element contracted Slater basis tables
+(Bunge / pbeVaspFit2015 style) buys one thing IAO does not: a *literal* LOBSTER
+number match, because the projection basis would be the same family. But it costs
+a per-element data set to ship and maintain, a fitting pipeline, and — to be worth
+anything — an external LOBSTER or QE oracle fixture, of which the tree has none for
+COHP. IAO (step 2) already fixes the diffuseness cause with no external data and is
+the natural differentiable-code choice. So the ordering is: land steps 1–3 (image
+resolution, IAO, RMSp) now; open a follow-up that (a) adds a diamond LOBSTER
+IpCOHP fixture and (b) only then decides whether IAO already matches −9.64 eV/bond
+closely enough to make STO fitting unnecessary. Committing to STO tables before we
+have the oracle would be building the expensive half first.
+
 ## Validation
 
 No external COHP oracle exists in-tree yet (only the internal sum rule + sign).
