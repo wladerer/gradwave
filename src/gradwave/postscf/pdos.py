@@ -192,7 +192,11 @@ def _lowdin_project(becp, overlap, floor=1e-8):
     w, v = torch.linalg.eigh(overlap)
     w = w.clamp_min(floor)
     o_inv_sqrt = (v * w.rsqrt()) @ v.conj().T          # O^{-1/2}, Hermitian
-    return becp @ o_inv_sqrt                            # (nb, nproj), complex
+    # <phi~_p|psi> = sum_q (O^{-1/2})_pq <phi_q|psi> = (becp @ O^{-1/2 T}). Since
+    # O^{-1/2} is Hermitian, O^{-1/2 T} = conj(O^{-1/2}); the conjugate matters
+    # whenever the AO overlap is complex (general k with Bloch phases) — without
+    # it the captured weight exceeds 1 (negative spilling) off Gamma.
+    return becp @ o_inv_sqrt.conj()                    # (nb, nproj), complex
 
 
 def _lowdin_weights(becp, overlap, floor=1e-8):

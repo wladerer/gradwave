@@ -33,24 +33,34 @@ Sum rule (used as the internal validation, since QE carries no COHP reference):
 summing COHP over EVERY atom pair including the on-site blocks and integrating to
 E_F reproduces the band-structure energy sum_n f_n eps_n, up to the spilling.
 
-SCOPE / KNOWN LIMITATION (validated on molecules, NOT yet on solids). The
-band-limited reconstruction is reliable for well-separated atoms (the O2 and Bi2
-sum rule and bonding sign check out), but reproducing the canonical solid-state
-pCOHP (Deringer 2011: diamond, GaAs, CsCl, Na) surfaced two problems for short
-covalent bonds:
-  1. Energy-zero contamination. H~ built from raw eigenvalues carries the
-     arbitrary plane-wave energy zero; with an incomplete band set that zero
-     leaks into the OFF-site COHP (diamond: ~65 eV of ICOHP per eV of shift),
-     inflating magnitudes. An operator-route H~ = <phi~|H^|phi~> is offset-
-     invariant and is the fix.
-  2. Basis pathology. Even offset-free, a Loewdin-orthonormalized *pseudo-atomic*
-     orbital basis develops large off-site Hamiltonian elements at short bond
-     lengths (diamond C-C overlap eigenvalues span 0.16..4.45), so absolute
-     ICOHP is not comparable to LOBSTER's contracted-basis numbers. A properly
-     contracted / projected local basis is needed for quantitative solid COHP.
-Qualitatively the bonding/antibonding shape is still correct (diamond: COHP<0
-across the valence band, COHP>0 in the conduction band). Treat solid-state
-absolute ICOHP as not-yet-validated.
+Two routes build the AO Hamiltonian H~ (the `method` argument):
+  operator   (default, collinear)  H~ = <phi~|H^|phi~>, the converged Kohn-Sham
+             operator applied to the AO projectors. A constant potential shift
+             adds C·1 in the orthonormal basis, so off-site COHP is energy-zero
+             invariant. This is the correct route for solids; on diamond it gives
+             the right bonding/antibonding shape and a bonding (negative) ICOHP.
+  eigenvalue (band-limited)  H~ = P^dagger diag(eps) P. Cheap, needs only the
+             projections + eigenvalues, and is what the spinor (noncollinear/SOC)
+             paths use for now (the spinor operator route is a follow-up). But it
+             carries the plane-wave energy zero, which leaks into off-site COHP
+             through the incomplete band set (diamond: ~65 eV of ICOHP per eV of
+             shift), so it is only reliable for well-separated atoms (O2, Bi2).
+
+QUANTITATIVE STATUS (NOT yet calibrated to LOBSTER — do not ship as such). On
+diamond (PBE) LOBSTER reports IpCOHP ~= -9.64 eV per C-C bond. Two gaps remain:
+  1. Bond resolution. This atom-pair COHP uses Bloch AO projectors, so pair
+     (i, j) is the interaction of atom i with the WHOLE atom-j sublattice (all
+     periodic images), not a single bond — for diamond ~4 nearest bonds. A
+     per-bond (per-image R) resolution is needed to compare to LOBSTER directly.
+  2. Basis. A Loewdin-orthonormalized *pseudo-atomic* basis is more diffuse than
+     LOBSTER's contracted local orbitals and develops larger off-site elements,
+     so the operator-route per-bond magnitude overshoots (~2x) and the band-
+     limited eigenvalue route undershoots (~2x); the true value is bracketed
+     between them. A contracted / projected local basis is needed for a
+     quantitative match.
+Sign and bonding/antibonding shape are correct (diamond: COHP<0 valence, >0
+conduction; spilling physical after the projection-conjugation fix in
+core/pdos.py). Treat absolute solid-state ICOHP as not-yet-validated.
 """
 
 from __future__ import annotations
@@ -102,6 +112,7 @@ class COHP:
     kind: str                           # "collinear" | "noncollinear" | "soc"
     band_window_eV: float
     pairs: list                         # [(i, j, distance_A)]
+    method: str = "operator"            # "operator" (<phi~|H^|phi~>) or "eigenvalue"
     nspin: int = 1
     nk: int = 0
     block_kpts: np.ndarray = None       # (nblocks, 3) fractional
@@ -136,6 +147,7 @@ class COHP:
             "kind": self.kind,
             "band_window_eV": self.band_window_eV,
             "pairs": [[int(i), int(j), float(d)] for i, j, d in self.pairs],
+            "method": self.method,
             "nspin": self.nspin,
             "nk": self.nk,
             "block_kpts": _col(self.block_kpts),
@@ -168,61 +180,87 @@ def _select_pairs(system, pairs, rcut: float):
     return out
 
 
-def _pair_block_weights(proj, eig, atom_of, i, j, factor):
-    """Per-band COHP weight w_b for the (i, j) atom block, given one k-point's
-    Loewdin amplitudes proj (nb, nbasis) and eigenvalues eig (nb,).
+def _o_inv_sqrt(overlap, floor=1e-8):
+    """O^{-1/2} (Hermitian) of the AO overlap, near-singular modes clamped."""
+    w, v = torch.linalg.eigh(overlap)
+    w = w.clamp_min(floor)
+    return (v * w.rsqrt()) @ v.conj().T
 
-    H~ = proj^dagger diag(eig) proj is the band-limited AO Hamiltonian; the block
-    contribution to <psi_b|H~|psi_b> is
+
+def _htilde_eig(proj, eig):
+    """Band-limited AO Hamiltonian H~ = P^dagger diag(eps) P (nbasis, nbasis).
+    Cheap (needs only projections + eigenvalues) but carries the plane-wave
+    energy zero, which leaks into off-site elements when the band set is
+    incomplete — see the module docstring."""
+    return (proj.conj() * eig[:, None]).transpose(0, 1) @ proj
+
+
+def _htilde_operator(q, o_inv_sqrt, h_apply):
+    """Operator-route AO Hamiltonian H~ = O^{-1/2} <phi|H^|phi> O^{-1/2}.
+
+    `q` (nbasis, npw) are the RAW (non-orthonormal) AO projectors, `o_inv_sqrt`
+    the Loewdin factor of their overlap, and `h_apply(q) -> (nbasis, npw)` applies
+    the converged Kohn-Sham Hamiltonian. A constant potential shift adds C·1 in
+    the orthonormal basis, so the off-site elements are energy-zero invariant —
+    the fix for the eigenvalue route's offset contamination."""
+    hraw = torch.einsum("pg,qg->pq", q.conj(), h_apply(q))     # <phi_p|H^|phi_q>
+    return o_inv_sqrt @ hraw @ o_inv_sqrt
+
+
+def _pair_block_weights(proj, htilde, atom_of, i, j, factor):
+    """Per-band COHP weight w_b for the (i, j) atom block from one k-point's
+    Loewdin amplitudes proj (nb, nbasis) and AO Hamiltonian htilde (nbasis,
+    nbasis). The block contribution to <psi_b|H~|psi_b> is
         w_b = factor * Re sum_{p in i, q in j} conj(proj_bp) H~_pq proj_bq,
-    with factor 2 for an off-site pair (i != j, the block plus its Hermitian
-    conjugate) and 1 for an on-site block."""
+    with factor 2 for an off-site pair (the block plus its Hermitian conjugate)
+    and 1 for an on-site block."""
     mi = torch.as_tensor(atom_of == i, device=proj.device)
     mj = torch.as_tensor(atom_of == j, device=proj.device)
     ai = proj[:, mi]                                  # (nb, ni)
     aj = proj[:, mj]                                  # (nb, nj)
-    # H~ restricted to the (i, j) block: (proj_i)^dagger diag(eig) proj_j
-    hij = (ai.conj() * eig[:, None]).transpose(0, 1) @ aj   # (ni, nj)
-    tmp = ai.conj() @ hij                              # (nb, nj)
-    w = factor * (tmp * aj).real.sum(dim=1)            # (nb,)
+    tmp = ai.conj() @ htilde[mi][:, mj]               # (nb, nj)
+    w = factor * (tmp * aj).real.sum(dim=1)           # (nb,)
     return w.cpu().numpy()
 
 
-def _accumulate(proj_per_k, eig_per_k, kw, atom_of, pair_list, g_spin, fermi):
+def _accumulate(proj_per_k, htilde_per_k, eig_per_k, kw, atom_of, pair_list,
+                g_spin, fermi):
     """Core spectral accumulation shared by every formalism. Keeps the per-block
     (i.e. per-(spin,k)) resolution: `block_e[b]` and `raw[pair][b]` are the
     eigenvalues and the per-eigenstate COHP weight w_{kn} (g_spin folded in, no
-    k-weight) for block b, the unbroadened k/band-resolved COHP. Also returns the
-    direct (step-occupation) ICOHP and the all-pairs sum-rule ICOHP."""
+    k-weight) for block b, the unbroadened k/band-resolved COHP. `htilde_per_k[b]`
+    is the AO Hamiltonian for block b (eigenvalue- or operator-route). Also
+    returns the direct (step-occupation) ICOHP and the all-pairs sum-rule ICOHP."""
     block_e = []
     raw = {p[:2]: [] for p in pair_list}
     icohp = {p[:2]: 0.0 for p in pair_list}
     na = int(atom_of.max()) + 1 if len(atom_of) else 0
     total_all_icohp = 0.0
     fermi = -np.inf if fermi is None else float(fermi)
-    for ik, (proj, eig) in enumerate(zip(proj_per_k, eig_per_k, strict=True)):
+    for ik, (proj, htilde, eig) in enumerate(
+            zip(proj_per_k, htilde_per_k, eig_per_k, strict=True)):
         w_k = float(kw[ik])
         e_np = eig.cpu().numpy()
         block_e.append(e_np)
         occ_mask = e_np < fermi                        # step occupation to E_F
         for (i, j) in ((p[0], p[1]) for p in pair_list):
-            w = _pair_block_weights(proj, eig, atom_of, i, j, 2.0) * g_spin
+            w = _pair_block_weights(proj, htilde, atom_of, i, j, 2.0) * g_spin
             raw[(i, j)].append(w)
             icohp[(i, j)] += float((w[occ_mask] * w_k).sum())
         # sum rule: every atom pair including the on-site diagonal
         for a in range(na):
-            wa = _pair_block_weights(proj, eig, atom_of, a, a, 1.0) * g_spin
+            wa = _pair_block_weights(proj, htilde, atom_of, a, a, 1.0) * g_spin
             total_all_icohp += float((wa[occ_mask] * w_k).sum())
         for a in range(na):
             for b in range(a + 1, na):
-                wab = _pair_block_weights(proj, eig, atom_of, a, b, 2.0) * g_spin
+                wab = _pair_block_weights(proj, htilde, atom_of, a, b, 2.0) * g_spin
                 total_all_icohp += float((wab[occ_mask] * w_k).sum())
     return block_e, raw, icohp, total_all_icohp
 
 
 def _finalize(block_e, raw, icohp, pair_list, kw, kpts, nspin, nk, width,
               npoints, window, spilling, charge_spilling, fermi, kind,
-              band_window, total_all_icohp):
+              band_window, total_all_icohp, method="operator"):
     band_energies = np.stack(block_e) if block_e else np.zeros((0, 0))
     kw = np.asarray(kw, dtype=float)
     all_e = band_energies.ravel() if band_energies.size else np.array([0.0])
@@ -247,6 +285,7 @@ def _finalize(block_e, raw, icohp, pair_list, kw, kpts, nspin, nk, width,
         spilling=spilling, charge_spilling=charge_spilling,
         fermi_eV=None if fermi is None else float(fermi),
         kind=kind, band_window_eV=float(band_window), pairs=pair_list,
+        method=method,
         nspin=nspin, nk=nk, block_kpts=np.asarray(kpts, dtype=float),
         block_kweights=kw, band_energies=band_energies, band_cohp=band_cohp,
     ), total_all_icohp
@@ -284,13 +323,27 @@ def _step_occupations(eig_per_k, fermi):
 
 @torch.no_grad()
 def cohp(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
-         npoints: int = 800, window=None):
+         npoints: int = 800, window=None, method: str = "operator"):
     """Atom-pair COHP of a converged collinear SCF (norm-conserving, nspin 1/2).
 
     `pairs` selects atom index tuples (0-based); the default is every atom pair
-    within `rcut` angstrom. Spin channels are summed. Returns a `COHP`.
+    within `rcut` angstrom. Spin channels are summed.
+
+    `method` selects the AO Hamiltonian: "operator" (default) evaluates
+    H~ = <phi~|H^|phi~> with the converged Kohn-Sham operator (energy-zero
+    invariant, the correct route for solids); "eigenvalue" uses the band-limited
+    P^dagger diag(eps) P (cheaper, but carries the plane-wave energy zero). The
+    operator route needs the norm-conserving KS Hamiltonian, so a USPP/PAW result
+    falls back to the eigenvalue route. Returns a `COHP`.
     """
+    from gradwave.scf.loop import SCFResult
     system, nspin, eig, coeffs, fermi, device, _ = _unpack_result(res)
+    use_op = method == "operator" and isinstance(res, SCFResult)
+    method = "operator" if use_op else "eigenvalue"
+    if use_op:
+        from gradwave.core.hamiltonian import HamiltonianK, projectors
+        shape = system.grid.shape
+
     cols = _atomic_columns(system)
     atom_of = np.array([c.atom for c in cols])
     pair_list = _select_pairs(system, pairs, rcut)
@@ -300,18 +353,29 @@ def cohp(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
     # actual occupations normalized to [0, 1] per state (in [0,2] for nspin=1)
     occ_all = res.occupations
     # Loewdin amplitudes P_{np} = <phi~_p|psi_n> per (spin, k), flattened over spin
-    proj_per_k, eig_per_k, kw_flat, kpts = [], [], [], []
+    proj_per_k, htilde_per_k, eig_per_k, kw_flat, kpts = [], [], [], [], []
     cap_blocks, occ_blocks = [], []
     band_window = -np.inf
     for isp in range(nspin):
+        veff = res.v_eff if nspin == 1 else res.v_eff[isp]
         for ik, sph in enumerate(system.spheres):
             c = coeffs[isp][ik].to(device)                       # (nb, npw)
             q = _ao_projectors_k(system, sph, cols, device)      # (nproj, npw)
-            becp = torch.einsum("bg,pg->bp", c, q.conj())
             overlap = torch.einsum("ig,jg->ij", q.conj(), q)
-            proj = _lowdin_project(becp, overlap)                # (nb, nproj)
+            ois = _o_inv_sqrt(overlap)                           # O^{-1/2}
+            # <phi~_p|psi> = becp @ O^{-1/2 T}; conj() matters for complex O off Gamma
+            becp = torch.einsum("bg,pg->bp", c, q.conj())
+            proj = becp @ ois.conj()                             # (nb, nproj)
             e = eig[isp, ik].to(device)
+            if use_op:
+                pd = system.proj_data[ik]
+                p = projectors(pd, system.positions).to(device)
+                h = HamiltonianK(sph, shape, veff, pd, p)
+                htilde = _htilde_operator(q, ois, h.apply)
+            else:
+                htilde = _htilde_eig(proj, e)
             proj_per_k.append(proj)
+            htilde_per_k.append(htilde)
             eig_per_k.append(e)
             kw_flat.append(float(kw[ik]))
             kpts.append(np.asarray(sph.k_frac, dtype=float))
@@ -322,10 +386,12 @@ def cohp(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
     spilling, charge_spilling = _spilling_metrics(cap_blocks, occ_blocks, kw_flat)
 
     block_e, raw, icohp, tot = _accumulate(
-        proj_per_k, eig_per_k, kw_flat, atom_of, pair_list, g_spin, fermi)
+        proj_per_k, htilde_per_k, eig_per_k, kw_flat, atom_of, pair_list,
+        g_spin, fermi)
     out, _tot = _finalize(block_e, raw, icohp, pair_list, kw_flat, kpts, nspin,
                           len(system.spheres), width, npoints, window, spilling,
-                          charge_spilling, fermi, "collinear", band_window, tot)
+                          charge_spilling, fermi, "collinear", band_window, tot,
+                          method=method)
     out._sumrule_icohp = _tot  # all-pairs incl on-site, for validation
     return out
 
@@ -400,12 +466,18 @@ def cohp_noncollinear(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
     kw = [float(w) for w in system.kweights]
     occ_blocks = _step_occupations(eig_per_k, res.fermi)
     _, charge_spilling = _spilling_metrics(cap_blocks, occ_blocks, kw)
+    # spinor operator-route H~ needs the reconstructed SpinorHamiltonian (a
+    # follow-up); the eigenvalue route is used here (fine for well-separated
+    # atoms, energy-zero contaminated for short bonds — see the module docstring)
+    htilde_per_k = [_htilde_eig(p, e) for p, e in zip(proj_per_k, eig_per_k,
+                                                      strict=True)]
     block_e, raw, icohp, tot = _accumulate(
-        proj_per_k, eig_per_k, kw, atom_of, pair_list, 1.0, res.fermi)
+        proj_per_k, htilde_per_k, eig_per_k, kw, atom_of, pair_list, 1.0,
+        res.fermi)
     out, _tot = _finalize(block_e, raw, icohp, pair_list, kw, kpts, 1,
                           len(system.spheres), width, npoints, window, spilling,
                           charge_spilling, res.fermi, "noncollinear",
-                          band_window, tot)
+                          band_window, tot, method="eigenvalue")
     out._sumrule_icohp = _tot
     return out
 
@@ -437,10 +509,14 @@ def cohp_soc(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
     kw = [float(w) for w in system.kweights]
     occ_blocks = _step_occupations(eig_per_k, res.fermi)
     _, charge_spilling = _spilling_metrics(cap_blocks, occ_blocks, kw)
+    htilde_per_k = [_htilde_eig(p, e) for p, e in zip(proj_per_k, eig_per_k,
+                                                      strict=True)]
     block_e, raw, icohp, tot = _accumulate(
-        proj_per_k, eig_per_k, kw, atom_of, pair_list, 1.0, res.fermi)
+        proj_per_k, htilde_per_k, eig_per_k, kw, atom_of, pair_list, 1.0,
+        res.fermi)
     out, _tot = _finalize(block_e, raw, icohp, pair_list, kw, kpts, 1,
                           len(system.spheres), width, npoints, window, spilling,
-                          charge_spilling, res.fermi, "soc", band_window, tot)
+                          charge_spilling, res.fermi, "soc", band_window, tot,
+                          method="eigenvalue")
     out._sumrule_icohp = _tot
     return out
