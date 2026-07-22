@@ -79,6 +79,7 @@ from gradwave.postscf.pdos import (
     _broaden,
     _lowdin_project,
     _unpack_result,
+    o_inv_sqrt,
 )
 
 
@@ -284,13 +285,6 @@ def _iao_projectors_k(phi, psi_occ, floor=1e-8):
     return Phi - o_phi - ot_phi + 2.0 * oot_phi
 
 
-def _o_inv_sqrt(overlap, floor=1e-8):
-    """O^{-1/2} (Hermitian) of the AO overlap, near-singular modes clamped."""
-    w, v = torch.linalg.eigh(overlap)
-    w = w.clamp_min(floor)
-    return (v * w.rsqrt()) @ v.conj().T
-
-
 def _htilde_eig(proj, eig):
     """Band-limited AO Hamiltonian H~ = P^dagger diag(eps) P (nbasis, nbasis).
     Cheap (needs only projections + eigenvalues) but carries the plane-wave
@@ -488,11 +482,10 @@ def cohp(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
                     else torch.ones_like(e, dtype=torch.bool)
                 q = _iao_projectors_k(q, c[occ_mask])            # occupied-span IAOs
             overlap = torch.einsum("ig,jg->ij", q.conj(), q)
-            ois = _o_inv_sqrt(overlap)                           # O^{-1/2}
-            # <phi~_p|psi> = becp @ O^{-1/2 T}; conj() matters for complex O off Gamma
             becp = torch.einsum("bg,pg->bp", c, q.conj())
-            proj = becp @ ois.conj()                             # (nb, nproj)
+            proj = _lowdin_project(becp, overlap)                # (nb, nproj)
             if use_op:
+                ois = o_inv_sqrt(overlap)                        # O^{-1/2} for the operator route
                 pd = system.proj_data[ik]
                 p = projectors(pd, system.positions).to(device)
                 h = HamiltonianK(sph, shape, veff, pd, p)
@@ -568,7 +561,7 @@ def projection_rmsp(res, *, basis: str = "pswfc", occupied_only: bool = False):
                     else torch.ones_like(e, dtype=torch.bool)
                 q = _iao_projectors_k(q, c[occ_mask])
             overlap = torch.einsum("ig,jg->ij", q.conj(), q)
-            proj = torch.einsum("bg,pg->bp", c, q.conj()) @ _o_inv_sqrt(overlap).conj()
+            proj = _lowdin_project(torch.einsum("bg,pg->bp", c, q.conj()), overlap)
             cap = (proj.real ** 2 + proj.imag ** 2).sum(1)       # captured per band
             keep = (e < fermi) if (occupied_only and fermi is not None) \
                 else torch.ones_like(e, dtype=torch.bool)
@@ -584,14 +577,14 @@ def _spinor_proj_per_k(res, cols, spinor, device):
     """Per-k Loewdin amplitudes for a spinor SCF. `spinor=True` uses the (j, mj)
     spin-angular AO projectors (SOC); `spinor=False` uses scalar AOs replicated on
     the two spin components (scalar-relativistic noncollinear). Returns
-    (proj_per_k, eig_per_k, kpts, cap_blocks, spilling, band_window), where
-    cap_blocks[k] is the per-state AO-captured weight used for charge spilling."""
+    (proj_per_k, eig_per_k, kpts, cap_blocks, band_window), where cap_blocks[k]
+    is the per-state AO-captured weight. Both the total and charge spilling are
+    derived from cap_blocks by the caller via _spilling_metrics, so there is a
+    single spilling definition shared with the collinear path."""
     system = res.system
     m_pw = system.batch.npw_max
-    kw = system.kweights.to(device)
     eig = res.eigenvalues
     proj_per_k, eig_per_k, kpts, cap_blocks = [], [], [], []
-    captured_kw = total_kw = 0.0
     band_window = -np.inf
     for ik, sph in enumerate(system.spheres):
         npw = sph.npw
@@ -616,14 +609,10 @@ def _spinor_proj_per_k(res, cols, spinor, device):
         proj_per_k.append(proj)
         eig_per_k.append(e)
         kpts.append(np.asarray(sph.k_frac, dtype=float))
-        w = float(kw[ik])
         cap = (proj.real ** 2 + proj.imag ** 2).sum(1).cpu().numpy()
         cap_blocks.append(cap)
-        captured_kw += float(cap.sum()) * w
-        total_kw += proj.shape[0] * w
         band_window = max(band_window, float(e.max()))
-    spilling = 1.0 - captured_kw / total_kw if total_kw else 0.0
-    return proj_per_k, eig_per_k, kpts, cap_blocks, float(spilling), band_window
+    return proj_per_k, eig_per_k, kpts, cap_blocks, band_window
 
 
 @torch.no_grad()
@@ -645,11 +634,11 @@ def cohp_noncollinear(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
     atom_of = np.tile([c.atom for c in cols], 2)      # up-block then down-block
     pair_list = _select_pairs(system, pairs, rcut)
 
-    proj_per_k, eig_per_k, kpts, cap_blocks, spilling, band_window = \
+    proj_per_k, eig_per_k, kpts, cap_blocks, band_window = \
         _spinor_proj_per_k(res, cols, spinor=False, device=device)
     kw = [float(w) for w in system.kweights]
     occ_blocks = _step_occupations(eig_per_k, res.fermi)
-    _, charge_spilling = _spilling_metrics(cap_blocks, occ_blocks, kw)
+    spilling, charge_spilling = _spilling_metrics(cap_blocks, occ_blocks, kw)
     # spinor operator-route H~ needs the reconstructed SpinorHamiltonian (a
     # follow-up); the eigenvalue route is used here (fine for well-separated
     # atoms, energy-zero contaminated for short bonds — see the module docstring)
@@ -688,11 +677,11 @@ def cohp_soc(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
     atom_of = np.array([c.atom for c in cols])
     pair_list = _select_pairs(system, pairs, rcut)
 
-    proj_per_k, eig_per_k, kpts, cap_blocks, spilling, band_window = \
+    proj_per_k, eig_per_k, kpts, cap_blocks, band_window = \
         _spinor_proj_per_k(res, cols, spinor=True, device=device)
     kw = [float(w) for w in system.kweights]
     occ_blocks = _step_occupations(eig_per_k, res.fermi)
-    _, charge_spilling = _spilling_metrics(cap_blocks, occ_blocks, kw)
+    spilling, charge_spilling = _spilling_metrics(cap_blocks, occ_blocks, kw)
     htilde_per_k = [_htilde_eig(p, e) for p, e in zip(proj_per_k, eig_per_k,
                                                       strict=True)]
     block_e, raw, icohp, tot = _accumulate(

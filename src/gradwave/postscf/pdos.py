@@ -184,19 +184,25 @@ def _ao_projectors_k(system, sph, cols, device):
     return q
 
 
+def o_inv_sqrt(overlap, floor=1e-8):
+    """O^{-1/2} (Hermitian) of an AO overlap O, near-singular modes clamped to
+    `floor`. The single definition shared by the Loewdin projection here and the
+    COHP operator route in cohp.py, so the two cannot drift."""
+    w, v = torch.linalg.eigh(overlap)
+    w = w.clamp_min(floor)
+    return (v * w.rsqrt()) @ v.conj().T                # O^{-1/2}, Hermitian
+
+
 def _lowdin_project(becp, overlap, floor=1e-8):
     """Loewdin-orthonormalized amplitudes <phi~_p|psi_b> = (<phi_p|psi_b> O^{-1/2})
     from raw becp (nb, nproj) and the AO overlap O = <phi_i|phi_j> (nproj, nproj).
     Returns the complex amplitudes so a caller can form |.|^2 (populations) or the
     cross terms proj_up* proj_dn (the noncollinear spin texture)."""
-    w, v = torch.linalg.eigh(overlap)
-    w = w.clamp_min(floor)
-    o_inv_sqrt = (v * w.rsqrt()) @ v.conj().T          # O^{-1/2}, Hermitian
     # <phi~_p|psi> = sum_q (O^{-1/2})_pq <phi_q|psi> = (becp @ O^{-1/2 T}). Since
     # O^{-1/2} is Hermitian, O^{-1/2 T} = conj(O^{-1/2}); the conjugate matters
     # whenever the AO overlap is complex (general k with Bloch phases) — without
     # it the captured weight exceeds 1 (negative spilling) off Gamma.
-    return becp @ o_inv_sqrt.conj()                    # (nb, nproj), complex
+    return becp @ o_inv_sqrt(overlap, floor).conj()    # (nb, nproj), complex
 
 
 def _lowdin_weights(becp, overlap, floor=1e-8):
