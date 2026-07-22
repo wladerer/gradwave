@@ -235,6 +235,7 @@ def plot_material(data: dict, outdir: Path, window=(-18, 12)):
     from matplotlib.colors import TwoSlopeNorm
 
     name = data["material"]
+    title = data.get("title", name)
     ref = data["reference_eV"]
     x = np.asarray(data["x"])
     eig = np.asarray(data["eigenvalues_eV"]) - ref
@@ -299,7 +300,7 @@ def plot_material(data: dict, outdir: Path, window=(-18, 12)):
     axb.set_ylim(*window)
     axb.set_ylabel("E − E$_{ref}$ (eV)")
     bi, bj = data["bond"]
-    axb.set_title(f"{name}: COHP fat bands (bond {bi + 1}–{bj + 1})",
+    axb.set_title(f"{title}: COHP fat bands (bond {bi + 1}–{bj + 1})",
                   fontsize=11)
 
     # right: -COHP(E) curve (bonding to the right), shared energy axis
@@ -323,7 +324,7 @@ def plot_material(data: dict, outdir: Path, window=(-18, 12)):
     cb.ax.tick_params(labelsize=6)
 
     fig.suptitle(
-        f"{name} — k/band-decomposed COHP  "
+        f"{title} — k/band-decomposed COHP  "
         f"(spilling {data['spilling']:.2f}, charge {data['charge_spilling']:.2f}; "
         "magnitude qualitative)", fontsize=8)
     ppath = outdir / f"{name}_cohp_fatbands.png"
