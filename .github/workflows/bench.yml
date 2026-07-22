@@ -1,0 +1,46 @@
+name: Benchmarks
+
+# Perf checks run entirely on GitHub's runners so they never load a laptop.
+# Trigger manually from the Actions tab ("Run workflow"), or automatically when
+# a PR is labelled `benchmark`. Results land in the run's job summary.
+on:
+  workflow_dispatch:
+    inputs:
+      benches:
+        description: "Space-separated benchmark names (blank = default quick set)"
+        required: false
+        default: ""
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  group: bench-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    # only run the PR path when the added label is `benchmark`
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.label.name == 'benchmark'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --all-extras
+
+      - name: Run benchmarks
+        env:
+          THREADS: "2"          # GitHub-hosted runners are 2-4 vCPU
+          BENCH_TIMEOUT: "900"
+        run: uv run python benchmarks/ci_bench.py ${{ github.event.inputs.benches }}
