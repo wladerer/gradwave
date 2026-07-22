@@ -21,6 +21,9 @@ test-nightly: ## nightly tier (hours): pre-release
 lint: ## ruff, concise output
 	uv run ruff check --output-format=concise
 
+imports: ## enforce package-boundary contracts (import-linter)
+	uv run lint-imports
+
 fmt: ## ruff autofix + format
 	uv run ruff check --fix
 	uv run ruff format
@@ -28,7 +31,7 @@ fmt: ## ruff autofix + format
 lock: ## refresh uv.lock after a dependency change
 	uv lock
 
-check: lint test-fast ## pre-push gate: lint + fast tests
+check: lint imports test-fast ## pre-push gate: lint + import contracts + fast tests
 
 hooks: ## install git hooks (ruff on commit, fast gate on push)
 	uv run pre-commit install
