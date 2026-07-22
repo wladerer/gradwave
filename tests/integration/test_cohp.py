@@ -52,6 +52,9 @@ def test_cohp_collinear_o2_sum_rule():
     c = cohp.cohp(res, width=0.2)
     assert c.kind == "collinear"
     assert 0.0 < c.spilling < 1.0
+    # charge spilling is over the occupied manifold only: the valence states are
+    # well described by the atomic orbitals, so it is smaller than total spilling
+    assert 0.0 < c.charge_spilling < c.spilling
     # exactly the one nearest-neighbour pair is picked within rcut
     assert [p[:2] for p in c.pairs] == [(0, 1)]
     # the O-O bond is bonding: negative ICOHP
@@ -102,6 +105,8 @@ def test_cohp_soc_bi2():
     assert 0.95 < cs._sumrule_icohp / band_e <= 1.001
     assert 0.95 < cn._sumrule_icohp / band_e <= 1.001
     assert 0.0 < cs.spilling < 1.0
+    assert 0.0 < cs.charge_spilling < 1.0
+    assert 0.0 < cn.charge_spilling < 1.0
 
 
 @pytest.mark.standard

@@ -32,6 +32,25 @@ computed eigenvalue. Both are reported so a caller can judge convergence.
 Sum rule (used as the internal validation, since QE carries no COHP reference):
 summing COHP over EVERY atom pair including the on-site blocks and integrating to
 E_F reproduces the band-structure energy sum_n f_n eps_n, up to the spilling.
+
+SCOPE / KNOWN LIMITATION (validated on molecules, NOT yet on solids). The
+band-limited reconstruction is reliable for well-separated atoms (the O2 and Bi2
+sum rule and bonding sign check out), but reproducing the canonical solid-state
+pCOHP (Deringer 2011: diamond, GaAs, CsCl, Na) surfaced two problems for short
+covalent bonds:
+  1. Energy-zero contamination. H~ built from raw eigenvalues carries the
+     arbitrary plane-wave energy zero; with an incomplete band set that zero
+     leaks into the OFF-site COHP (diamond: ~65 eV of ICOHP per eV of shift),
+     inflating magnitudes. An operator-route H~ = <phi~|H^|phi~> is offset-
+     invariant and is the fix.
+  2. Basis pathology. Even offset-free, a Loewdin-orthonormalized *pseudo-atomic*
+     orbital basis develops large off-site Hamiltonian elements at short bond
+     lengths (diamond C-C overlap eigenvalues span 0.16..4.45), so absolute
+     ICOHP is not comparable to LOBSTER's contracted-basis numbers. A properly
+     contracted / projected local basis is needed for quantitative solid COHP.
+Qualitatively the bonding/antibonding shape is still correct (diamond: COHP<0
+across the valence band, COHP>0 in the conduction band). Treat solid-state
+absolute ICOHP as not-yet-validated.
 """
 
 from __future__ import annotations
@@ -58,7 +77,10 @@ class COHP:
     integral to E_F is `pair_icohp[label]`. `total`/`total_icohp` sum the selected
     off-site pairs. `spilling` is the plane-wave-truncation weight lost by the AO
     projection; `band_window_eV` is the highest computed eigenvalue (states above
-    it are absent from the band-limited Hamiltonian).
+    it are absent from the band-limited Hamiltonian). Two spilling metrics are
+    reported: `spilling` over every band (total spilling) and `charge_spilling`
+    over the occupied manifold — the latter bounds how well the AO span captures
+    the real electron density, and hence how much to trust the occupied ICOHP.
 
     The k-point- and band-resolved COHP is exposed unbroadened: `band_cohp[label]`
     is (nblocks, nb), the Hamilton population of each eigenstate (k, n) on that
@@ -74,7 +96,8 @@ class COHP:
     pair_icohp: dict                    # "i-j" -> float [eV]
     total: np.ndarray                   # (npoints,)
     total_icohp: float
-    spilling: float
+    spilling: float                     # total spilling, over every band
+    charge_spilling: float              # over the occupied manifold
     fermi_eV: float | None
     kind: str                           # "collinear" | "noncollinear" | "soc"
     band_window_eV: float
@@ -108,6 +131,7 @@ class COHP:
             "total": _col(self.total),
             "total_icohp": self.total_icohp,
             "spilling": self.spilling,
+            "charge_spilling": self.charge_spilling,
             "fermi_eV": self.fermi_eV,
             "kind": self.kind,
             "band_window_eV": self.band_window_eV,
@@ -197,8 +221,8 @@ def _accumulate(proj_per_k, eig_per_k, kw, atom_of, pair_list, g_spin, fermi):
 
 
 def _finalize(block_e, raw, icohp, pair_list, kw, kpts, nspin, nk, width,
-              npoints, window, spilling, fermi, kind, band_window,
-              total_all_icohp):
+              npoints, window, spilling, charge_spilling, fermi, kind,
+              band_window, total_all_icohp):
     band_energies = np.stack(block_e) if block_e else np.zeros((0, 0))
     kw = np.asarray(kw, dtype=float)
     all_e = band_energies.ravel() if band_energies.size else np.array([0.0])
@@ -220,15 +244,42 @@ def _finalize(block_e, raw, icohp, pair_list, kw, kpts, nspin, nk, width,
     return COHP(
         energy_eV=grid, pair_cohp=pair_cohp, pair_icohp=pair_icohp,
         total=total, total_icohp=float(sum(pair_icohp.values())),
-        spilling=spilling, fermi_eV=None if fermi is None else float(fermi),
+        spilling=spilling, charge_spilling=charge_spilling,
+        fermi_eV=None if fermi is None else float(fermi),
         kind=kind, band_window_eV=float(band_window), pairs=pair_list,
         nspin=nspin, nk=nk, block_kpts=np.asarray(kpts, dtype=float),
         block_kweights=kw, band_energies=band_energies, band_cohp=band_cohp,
     ), total_all_icohp
 
 
-def _spilling_from_weights(captured_kw, total_kw):
-    return float(1.0 - captured_kw / total_kw) if total_kw else 0.0
+def _spilling_metrics(cap_blocks, occ_blocks, kw):
+    """(total, charge) spilling from per-block captured weight and occupation.
+
+    `cap_blocks[b]` (nb,) is the AO-captured weight of each state in [0, 1];
+    `occ_blocks[b]` (nb,) its occupation in [0, 1]; `kw[b]` the k-weight.
+
+    total  = 1 - <captured> over every band (the LOBSTER "total spilling")
+    charge = 1 - <captured> over the OCCUPIED manifold (the "charge spilling"):
+             the fraction of the real electron density the AO span misses, which
+             is what bounds the reliability of the occupied-state ICOHP.
+    """
+    tot_cap = tot_w = ch_cap = ch_w = 0.0
+    for cap, occ, w in zip(cap_blocks, occ_blocks, kw, strict=True):
+        tot_cap += w * float(cap.sum())
+        tot_w += w * cap.shape[0]
+        ch_cap += w * float((occ * cap).sum())
+        ch_w += w * float(occ.sum())
+    total = 1.0 - tot_cap / tot_w if tot_w else 0.0
+    charge = 1.0 - ch_cap / ch_w if ch_w else 0.0
+    return float(total), float(charge)
+
+
+def _step_occupations(eig_per_k, fermi):
+    """Step occupations in [0, 1] at E_F per block. Used where the SCF result
+    carries no stored occupations (the spinor NCResult); each spinor band holds
+    one electron, so the step is 1 below E_F and 0 above."""
+    f = -np.inf if fermi is None else float(fermi)
+    return [(e.cpu().numpy() < f).astype(float) for e in eig_per_k]
 
 
 @torch.no_grad()
@@ -246,9 +297,11 @@ def cohp(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
     kw = system.kweights.to(device)
     g_spin = 2.0 if nspin == 1 else 1.0
 
+    # actual occupations normalized to [0, 1] per state (in [0,2] for nspin=1)
+    occ_all = res.occupations
     # Loewdin amplitudes P_{np} = <phi~_p|psi_n> per (spin, k), flattened over spin
     proj_per_k, eig_per_k, kw_flat, kpts = [], [], [], []
-    captured_kw = total_kw = 0.0
+    cap_blocks, occ_blocks = [], []
     band_window = -np.inf
     for isp in range(nspin):
         for ik, sph in enumerate(system.spheres):
@@ -262,17 +315,17 @@ def cohp(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
             eig_per_k.append(e)
             kw_flat.append(float(kw[ik]))
             kpts.append(np.asarray(sph.k_frac, dtype=float))
-            w = float(kw[ik])
-            captured_kw += (proj.real ** 2 + proj.imag ** 2).sum(1).cpu().numpy().sum() * w
-            total_kw += proj.shape[0] * w
+            cap_blocks.append((proj.real ** 2 + proj.imag ** 2).sum(1).cpu().numpy())
+            occ_k = occ_all[ik] if nspin == 1 else occ_all[isp, ik]
+            occ_blocks.append(occ_k.cpu().numpy() / g_spin)      # -> [0, 1]
             band_window = max(band_window, float(e.max()))
-    spilling = _spilling_from_weights(captured_kw, total_kw)
+    spilling, charge_spilling = _spilling_metrics(cap_blocks, occ_blocks, kw_flat)
 
     block_e, raw, icohp, tot = _accumulate(
         proj_per_k, eig_per_k, kw_flat, atom_of, pair_list, g_spin, fermi)
     out, _tot = _finalize(block_e, raw, icohp, pair_list, kw_flat, kpts, nspin,
                           len(system.spheres), width, npoints, window, spilling,
-                          fermi, "collinear", band_window, tot)
+                          charge_spilling, fermi, "collinear", band_window, tot)
     out._sumrule_icohp = _tot  # all-pairs incl on-site, for validation
     return out
 
@@ -281,12 +334,13 @@ def _spinor_proj_per_k(res, cols, spinor, device):
     """Per-k Loewdin amplitudes for a spinor SCF. `spinor=True` uses the (j, mj)
     spin-angular AO projectors (SOC); `spinor=False` uses scalar AOs replicated on
     the two spin components (scalar-relativistic noncollinear). Returns
-    (proj_per_k, eig_per_k, kpts, spilling, band_window)."""
+    (proj_per_k, eig_per_k, kpts, cap_blocks, spilling, band_window), where
+    cap_blocks[k] is the per-state AO-captured weight used for charge spilling."""
     system = res.system
     m_pw = system.batch.npw_max
     kw = system.kweights.to(device)
     eig = res.eigenvalues
-    proj_per_k, eig_per_k, kpts = [], [], []
+    proj_per_k, eig_per_k, kpts, cap_blocks = [], [], [], []
     captured_kw = total_kw = 0.0
     band_window = -np.inf
     for ik, sph in enumerate(system.spheres):
@@ -313,12 +367,13 @@ def _spinor_proj_per_k(res, cols, spinor, device):
         eig_per_k.append(e)
         kpts.append(np.asarray(sph.k_frac, dtype=float))
         w = float(kw[ik])
-        cap = (proj.real ** 2 + proj.imag ** 2).sum(1).cpu().numpy().sum()
-        captured_kw += cap * w
+        cap = (proj.real ** 2 + proj.imag ** 2).sum(1).cpu().numpy()
+        cap_blocks.append(cap)
+        captured_kw += float(cap.sum()) * w
         total_kw += proj.shape[0] * w
         band_window = max(band_window, float(e.max()))
-    spilling = _spilling_from_weights(captured_kw, total_kw)
-    return proj_per_k, eig_per_k, kpts, spilling, band_window
+    spilling = 1.0 - captured_kw / total_kw if total_kw else 0.0
+    return proj_per_k, eig_per_k, kpts, cap_blocks, float(spilling), band_window
 
 
 @torch.no_grad()
@@ -340,14 +395,17 @@ def cohp_noncollinear(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
     atom_of = np.tile([c.atom for c in cols], 2)      # up-block then down-block
     pair_list = _select_pairs(system, pairs, rcut)
 
-    proj_per_k, eig_per_k, kpts, spilling, band_window = _spinor_proj_per_k(
-        res, cols, spinor=False, device=device)
+    proj_per_k, eig_per_k, kpts, cap_blocks, spilling, band_window = \
+        _spinor_proj_per_k(res, cols, spinor=False, device=device)
     kw = [float(w) for w in system.kweights]
+    occ_blocks = _step_occupations(eig_per_k, res.fermi)
+    _, charge_spilling = _spilling_metrics(cap_blocks, occ_blocks, kw)
     block_e, raw, icohp, tot = _accumulate(
         proj_per_k, eig_per_k, kw, atom_of, pair_list, 1.0, res.fermi)
     out, _tot = _finalize(block_e, raw, icohp, pair_list, kw, kpts, 1,
                           len(system.spheres), width, npoints, window, spilling,
-                          res.fermi, "noncollinear", band_window, tot)
+                          charge_spilling, res.fermi, "noncollinear",
+                          band_window, tot)
     out._sumrule_icohp = _tot
     return out
 
@@ -374,13 +432,15 @@ def cohp_soc(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
     atom_of = np.array([c.atom for c in cols])
     pair_list = _select_pairs(system, pairs, rcut)
 
-    proj_per_k, eig_per_k, kpts, spilling, band_window = _spinor_proj_per_k(
-        res, cols, spinor=True, device=device)
+    proj_per_k, eig_per_k, kpts, cap_blocks, spilling, band_window = \
+        _spinor_proj_per_k(res, cols, spinor=True, device=device)
     kw = [float(w) for w in system.kweights]
+    occ_blocks = _step_occupations(eig_per_k, res.fermi)
+    _, charge_spilling = _spilling_metrics(cap_blocks, occ_blocks, kw)
     block_e, raw, icohp, tot = _accumulate(
         proj_per_k, eig_per_k, kw, atom_of, pair_list, 1.0, res.fermi)
     out, _tot = _finalize(block_e, raw, icohp, pair_list, kw, kpts, 1,
                           len(system.spheres), width, npoints, window, spilling,
-                          res.fermi, "soc", band_window, tot)
+                          charge_spilling, res.fermi, "soc", band_window, tot)
     out._sumrule_icohp = _tot
     return out
