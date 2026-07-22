@@ -27,7 +27,12 @@ _ncpu = os.cpu_count() or 1
 # own pool is idle, so oversubscription isn't a concern); override via env.
 _SBT_THREADS = max(1, min(int(os.environ.get("GRADWAVE_SBT_THREADS", "0"))
                           or min(_ncpu, 16), _ncpu))
-_SBT_CHUNK_MIN = 2048  # min |q| per chunk; below one chunk's worth, stay serial
+# |q| per chunk: small enough that _SBT_THREADS chunks live at once stay cheap
+# (each chunk is a (chunk, n_radial) transform with ~10 sph_jl temporaries, so
+# peak ≈ threads × chunk × n_radial); large enough that numpy vectorization and
+# GIL-release dominate the pool dispatch overhead. 512 keeps the threaded slab
+# setup near the serial memory footprint.
+_SBT_CHUNK_MIN = 512
 
 
 def _simpson_index_weights(n: int) -> np.ndarray:
