@@ -105,6 +105,44 @@ def test_cohp_soc_bi2():
 
 
 @pytest.mark.standard
+def test_cohp_k_band_resolved():
+    """The k- and band-resolved COHP reconstructs the broadened curve and the
+    ICOHP exactly. O2 on a 2-k mesh gives two blocks, so the per-(k, band) weights
+    and the k-weighted reconstruction are genuinely exercised."""
+    torch.set_num_threads(8)
+    from gradwave.core.xc.pbe import PBE
+    upf = parse_upf(f"{FIX}/PD_O_PBE.upf")
+    L, d = 7.0, 1.21
+    cell = L * np.eye(3)
+    pos = np.array([[L / 2, L / 2, L / 2 - d / 2], [L / 2, L / 2, L / 2 + d / 2]])
+    system = setup_system(cell, pos, [0, 0], [upf], ecut=40 * RY, kmesh=(2, 1, 1))
+    res = scf(system, PBE(), smearing="gaussian", width=0.1, etol=1e-7,
+              rhotol=1e-6, verbose=False, kerker=True)
+    assert res.converged
+
+    width = 0.2
+    c = cohp.cohp(res, width=width)
+    nblocks = c.band_cohp["1-2"].shape[0]
+    assert nblocks == c.nspin * c.nk and nblocks >= 2
+    assert c.band_energies.shape == c.band_cohp["1-2"].shape
+    assert c.block_kpts.shape == (nblocks, 3)
+    assert c.block_kweights.shape == (nblocks,)
+
+    # the broadened pair curve is exactly the k-weighted sum of the per-block curves
+    recon = np.zeros_like(c.energy_eV)
+    for b in range(nblocks):
+        recon += c.cohp_at_k("1-2", b, width=width)[1]
+    assert np.abs(recon - c.pair_cohp["1-2"]).max() < 1e-9
+
+    # ICOHP is the occupied, k-weighted sum of the per-eigenstate weights
+    occ = c.band_energies < c.fermi_eV
+    recon_icohp = float((c.band_cohp["1-2"] * c.block_kweights[:, None])[occ].sum())
+    assert abs(recon_icohp - c.pair_icohp["1-2"]) < 1e-9
+    # reshape helper round-trips the block layout
+    assert c.bands_reshaped("1-2").shape == (c.nspin, c.nk, c.band_energies.shape[1])
+
+
+@pytest.mark.standard
 def test_cohp_explicit_pairs_and_rcut():
     """Pair selection: an explicit `pairs` list overrides rcut, and a tight rcut
     that excludes the bond yields no pairs."""

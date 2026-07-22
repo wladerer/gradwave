@@ -58,7 +58,16 @@ class COHP:
     integral to E_F is `pair_icohp[label]`. `total`/`total_icohp` sum the selected
     off-site pairs. `spilling` is the plane-wave-truncation weight lost by the AO
     projection; `band_window_eV` is the highest computed eigenvalue (states above
-    it are absent from the band-limited Hamiltonian)."""
+    it are absent from the band-limited Hamiltonian).
+
+    The k-point- and band-resolved COHP is exposed unbroadened: `band_cohp[label]`
+    is (nblocks, nb), the Hamilton population of each eigenstate (k, n) on that
+    bond (bonding < 0), with `band_energies` (nblocks, nb) the matching eps_n(k)
+    and `block_kpts`/`block_kweights` the k-points and weights. A "block" is one
+    (spin, k) for a collinear nspin=2 run and one k otherwise; blocks are ordered
+    spin-major, so a collinear nspin=2 array reshapes to (nspin, nk, nb). The
+    energy curve is exactly sum over blocks of a k-weighted Gaussian sum of these;
+    `cohp_at_k` re-broadens a single block."""
 
     energy_eV: np.ndarray               # (npoints,)
     pair_cohp: dict                     # "i-j" -> (npoints,)
@@ -70,10 +79,28 @@ class COHP:
     kind: str                           # "collinear" | "noncollinear" | "soc"
     band_window_eV: float
     pairs: list                         # [(i, j, distance_A)]
+    nspin: int = 1
+    nk: int = 0
+    block_kpts: np.ndarray = None       # (nblocks, 3) fractional
+    block_kweights: np.ndarray = None   # (nblocks,)
+    band_energies: np.ndarray = None    # (nblocks, nb) [eV]
+    band_cohp: dict = None              # "i-j" -> (nblocks, nb) [eV], bonding < 0
+
+    def cohp_at_k(self, label: str, block: int, *, width: float = 0.1, grid=None):
+        """Re-broaden the COHP of one (spin, k) block for a pair into a curve.
+        Returns (energy_grid, cohp). `grid` defaults to `self.energy_eV`."""
+        grid = self.energy_eV if grid is None else np.asarray(grid)
+        e = self.band_energies[block]
+        w = self.band_cohp[label][block] * float(self.block_kweights[block])
+        return grid, _broaden(grid, e, w, width)
+
+    def bands_reshaped(self, label: str) -> np.ndarray:
+        """`band_cohp[label]` reshaped to (nspin, nk, nb)."""
+        return self.band_cohp[label].reshape(self.nspin, self.nk, -1)
 
     def to_dict(self) -> dict:
         def _col(a):
-            return np.asarray(a).tolist()
+            return None if a is None else np.asarray(a).tolist()
         return {
             "energy_eV": _col(self.energy_eV),
             "pair_cohp": {k: _col(v) for k, v in self.pair_cohp.items()},
@@ -85,6 +112,12 @@ class COHP:
             "kind": self.kind,
             "band_window_eV": self.band_window_eV,
             "pairs": [[int(i), int(j), float(d)] for i, j, d in self.pairs],
+            "nspin": self.nspin,
+            "nk": self.nk,
+            "block_kpts": _col(self.block_kpts),
+            "block_kweights": _col(self.block_kweights),
+            "band_energies": _col(self.band_energies),
+            "band_cohp": {k: _col(v) for k, v in (self.band_cohp or {}).items()},
         }
 
 
@@ -132,11 +165,13 @@ def _pair_block_weights(proj, eig, atom_of, i, j, factor):
 
 
 def _accumulate(proj_per_k, eig_per_k, kw, atom_of, pair_list, g_spin, fermi):
-    """Core spectral accumulation shared by every formalism. Returns per-pair
-    (energies, weights) samples, the direct (step-occupation) ICOHP, and the
-    all-pairs total ICOHP used for the sum-rule check."""
-    energies = {p[:2]: [] for p in pair_list}
-    weights = {p[:2]: [] for p in pair_list}
+    """Core spectral accumulation shared by every formalism. Keeps the per-block
+    (i.e. per-(spin,k)) resolution: `block_e[b]` and `raw[pair][b]` are the
+    eigenvalues and the per-eigenstate COHP weight w_{kn} (g_spin folded in, no
+    k-weight) for block b, the unbroadened k/band-resolved COHP. Also returns the
+    direct (step-occupation) ICOHP and the all-pairs sum-rule ICOHP."""
+    block_e = []
+    raw = {p[:2]: [] for p in pair_list}
     icohp = {p[:2]: 0.0 for p in pair_list}
     na = int(atom_of.max()) + 1 if len(atom_of) else 0
     total_all_icohp = 0.0
@@ -144,11 +179,11 @@ def _accumulate(proj_per_k, eig_per_k, kw, atom_of, pair_list, g_spin, fermi):
     for ik, (proj, eig) in enumerate(zip(proj_per_k, eig_per_k, strict=True)):
         w_k = float(kw[ik])
         e_np = eig.cpu().numpy()
+        block_e.append(e_np)
         occ_mask = e_np < fermi                        # step occupation to E_F
         for (i, j) in ((p[0], p[1]) for p in pair_list):
             w = _pair_block_weights(proj, eig, atom_of, i, j, 2.0) * g_spin
-            energies[(i, j)].append(e_np)
-            weights[(i, j)].append(w * w_k)
+            raw[(i, j)].append(w)
             icohp[(i, j)] += float((w[occ_mask] * w_k).sum())
         # sum rule: every atom pair including the on-site diagonal
         for a in range(na):
@@ -158,24 +193,27 @@ def _accumulate(proj_per_k, eig_per_k, kw, atom_of, pair_list, g_spin, fermi):
             for b in range(a + 1, na):
                 wab = _pair_block_weights(proj, eig, atom_of, a, b, 2.0) * g_spin
                 total_all_icohp += float((wab[occ_mask] * w_k).sum())
-    return energies, weights, icohp, total_all_icohp
+    return block_e, raw, icohp, total_all_icohp
 
 
-def _finalize(energies, weights, icohp, pair_list, width, npoints, window,
-              spilling, fermi, kind, band_window, total_all_icohp):
-    all_e = np.concatenate([np.concatenate(v) for v in energies.values()]) \
-        if energies else np.array([0.0])
+def _finalize(block_e, raw, icohp, pair_list, kw, kpts, nspin, nk, width,
+              npoints, window, spilling, fermi, kind, band_window,
+              total_all_icohp):
+    band_energies = np.stack(block_e) if block_e else np.zeros((0, 0))
+    kw = np.asarray(kw, dtype=float)
+    all_e = band_energies.ravel() if band_energies.size else np.array([0.0])
     if window is None:
         window = (all_e.min() - 10 * width, all_e.max() + 10 * width)
     grid = np.linspace(window[0], window[1], npoints)
 
-    pair_cohp, pair_icohp = {}, {}
+    pair_cohp, pair_icohp, band_cohp = {}, {}, {}
     total = np.zeros(npoints)
     for (i, j, _dist) in pair_list:
         lab = f"{i + 1}-{j + 1}"
-        e = np.concatenate(energies[(i, j)])
-        w = np.concatenate(weights[(i, j)])
-        curve = _broaden(grid, e, w, width)
+        rawstack = np.stack(raw[(i, j)])               # (nblocks, nb), per state
+        band_cohp[lab] = rawstack
+        w = (rawstack * kw[:, None]).ravel()           # k-weight for the curve
+        curve = _broaden(grid, band_energies.ravel(), w, width)
         pair_cohp[lab] = curve
         pair_icohp[lab] = icohp[(i, j)]
         total += curve
@@ -184,6 +222,8 @@ def _finalize(energies, weights, icohp, pair_list, width, npoints, window,
         total=total, total_icohp=float(sum(pair_icohp.values())),
         spilling=spilling, fermi_eV=None if fermi is None else float(fermi),
         kind=kind, band_window_eV=float(band_window), pairs=pair_list,
+        nspin=nspin, nk=nk, block_kpts=np.asarray(kpts, dtype=float),
+        block_kweights=kw, band_energies=band_energies, band_cohp=band_cohp,
     ), total_all_icohp
 
 
@@ -207,7 +247,7 @@ def cohp(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
     g_spin = 2.0 if nspin == 1 else 1.0
 
     # Loewdin amplitudes P_{np} = <phi~_p|psi_n> per (spin, k), flattened over spin
-    proj_per_k, eig_per_k, kw_flat = [], [], []
+    proj_per_k, eig_per_k, kw_flat, kpts = [], [], [], []
     captured_kw = total_kw = 0.0
     band_window = -np.inf
     for isp in range(nspin):
@@ -221,16 +261,18 @@ def cohp(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
             proj_per_k.append(proj)
             eig_per_k.append(e)
             kw_flat.append(float(kw[ik]))
+            kpts.append(np.asarray(sph.k_frac, dtype=float))
             w = float(kw[ik])
             captured_kw += (proj.real ** 2 + proj.imag ** 2).sum(1).cpu().numpy().sum() * w
             total_kw += proj.shape[0] * w
             band_window = max(band_window, float(e.max()))
     spilling = _spilling_from_weights(captured_kw, total_kw)
 
-    energies, weights, icohp, tot = _accumulate(
+    block_e, raw, icohp, tot = _accumulate(
         proj_per_k, eig_per_k, kw_flat, atom_of, pair_list, g_spin, fermi)
-    out, _tot = _finalize(energies, weights, icohp, pair_list, width, npoints,
-                          window, spilling, fermi, "collinear", band_window, tot)
+    out, _tot = _finalize(block_e, raw, icohp, pair_list, kw_flat, kpts, nspin,
+                          len(system.spheres), width, npoints, window, spilling,
+                          fermi, "collinear", band_window, tot)
     out._sumrule_icohp = _tot  # all-pairs incl on-site, for validation
     return out
 
@@ -239,12 +281,12 @@ def _spinor_proj_per_k(res, cols, spinor, device):
     """Per-k Loewdin amplitudes for a spinor SCF. `spinor=True` uses the (j, mj)
     spin-angular AO projectors (SOC); `spinor=False` uses scalar AOs replicated on
     the two spin components (scalar-relativistic noncollinear). Returns
-    (proj_per_k, eig_per_k, spilling, band_window)."""
+    (proj_per_k, eig_per_k, kpts, spilling, band_window)."""
     system = res.system
     m_pw = system.batch.npw_max
     kw = system.kweights.to(device)
     eig = res.eigenvalues
-    proj_per_k, eig_per_k = [], []
+    proj_per_k, eig_per_k, kpts = [], [], []
     captured_kw = total_kw = 0.0
     band_window = -np.inf
     for ik, sph in enumerate(system.spheres):
@@ -269,13 +311,14 @@ def _spinor_proj_per_k(res, cols, spinor, device):
         e = eig[ik].to(device)
         proj_per_k.append(proj)
         eig_per_k.append(e)
+        kpts.append(np.asarray(sph.k_frac, dtype=float))
         w = float(kw[ik])
         cap = (proj.real ** 2 + proj.imag ** 2).sum(1).cpu().numpy().sum()
         captured_kw += cap * w
         total_kw += proj.shape[0] * w
         band_window = max(band_window, float(e.max()))
     spilling = _spilling_from_weights(captured_kw, total_kw)
-    return proj_per_k, eig_per_k, spilling, band_window
+    return proj_per_k, eig_per_k, kpts, spilling, band_window
 
 
 @torch.no_grad()
@@ -297,14 +340,14 @@ def cohp_noncollinear(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
     atom_of = np.tile([c.atom for c in cols], 2)      # up-block then down-block
     pair_list = _select_pairs(system, pairs, rcut)
 
-    proj_per_k, eig_per_k, spilling, band_window = _spinor_proj_per_k(
+    proj_per_k, eig_per_k, kpts, spilling, band_window = _spinor_proj_per_k(
         res, cols, spinor=False, device=device)
     kw = [float(w) for w in system.kweights]
-    energies, weights, icohp, tot = _accumulate(
+    block_e, raw, icohp, tot = _accumulate(
         proj_per_k, eig_per_k, kw, atom_of, pair_list, 1.0, res.fermi)
-    out, _tot = _finalize(energies, weights, icohp, pair_list, width, npoints,
-                          window, spilling, res.fermi, "noncollinear",
-                          band_window, tot)
+    out, _tot = _finalize(block_e, raw, icohp, pair_list, kw, kpts, 1,
+                          len(system.spheres), width, npoints, window, spilling,
+                          res.fermi, "noncollinear", band_window, tot)
     out._sumrule_icohp = _tot
     return out
 
@@ -331,12 +374,13 @@ def cohp_soc(res, *, pairs=None, rcut: float = 3.0, width: float = 0.1,
     atom_of = np.array([c.atom for c in cols])
     pair_list = _select_pairs(system, pairs, rcut)
 
-    proj_per_k, eig_per_k, spilling, band_window = _spinor_proj_per_k(
+    proj_per_k, eig_per_k, kpts, spilling, band_window = _spinor_proj_per_k(
         res, cols, spinor=True, device=device)
     kw = [float(w) for w in system.kweights]
-    energies, weights, icohp, tot = _accumulate(
+    block_e, raw, icohp, tot = _accumulate(
         proj_per_k, eig_per_k, kw, atom_of, pair_list, 1.0, res.fermi)
-    out, _tot = _finalize(energies, weights, icohp, pair_list, width, npoints,
-                          window, spilling, res.fermi, "soc", band_window, tot)
+    out, _tot = _finalize(block_e, raw, icohp, pair_list, kw, kpts, 1,
+                          len(system.spheres), width, npoints, window, spilling,
+                          res.fermi, "soc", band_window, tot)
     out._sumrule_icohp = _tot
     return out
