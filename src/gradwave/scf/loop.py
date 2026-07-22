@@ -20,6 +20,7 @@ import numpy as np
 import torch
 
 from gradwave.core.density import sigma_from_rho
+from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.hartree import hartree_potential_g
 from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.energies.total import EnergyBreakdown, total_energy
@@ -601,6 +602,12 @@ def scf(
     )
     vloc_r = local_potential_r(system, vloc_g)
 
+    # E_ewald depends only on the (frozen) ionic positions — constant across the
+    # SCF loop, so build it once here and thread it into the per-iteration energy
+    # assembly instead of rebuilding the image/G lists and the (na,na,nR) pair
+    # tensor every step.
+    e_ewald = ewald_energy(system.positions, system.charges, grid.cell)
+
     # initial orbitals: lowest-kinetic plane waves, reusing previous orbitals
     # (QE wfc-extrapolation analogue) when start_from carries compatible ones
     coeffs_b_s = _seed_orbitals(nk, nb, bk, nspin, device, start_from)
@@ -787,6 +794,7 @@ def scf(
                 vloc_tables=system.vloc_tables, becp_per_k=becps_s[0],
                 dij_full=_stack_dij(system), xc=xc, entropy_term=entropy_term,
                 rho_core=system.rho_core, tau=(tau_list[0] if tau_list else None),
+                e_ewald=e_ewald, vloc_g=vloc_g,
             )
             energies.hubbard = e_hub
             energies.fock = e_fock
@@ -798,7 +806,8 @@ def scf(
                 spin_xc_energy(xc, rho_out_s, system.rho_core, vol,
                                grid.g_cart, tau_s=tau_list),
                 vloc_g, becps_s, _stack_dij(system), system.positions,
-                system.charges, entropy_term, nspin, e_hub=e_hub)
+                system.charges, entropy_term, nspin, e_hub=e_hub,
+                e_ewald=e_ewald)
             energies.fock = e_fock
         e_free = float(energies.free_energy)
 
