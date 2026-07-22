@@ -34,6 +34,7 @@ dev = [
     # tests importorskip it, so it is optional — this just enables them in CI.
     "pyscf>=2.4",
     "import-linter>=2.13",
+    "hypothesis>=6.160.0",
 ]
 docs = [
     "mkdocs>=1.6",
