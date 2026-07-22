@@ -11,9 +11,28 @@ here may be called from Layer A.
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 
 from gradwave.pseudo._bessel_data import DOUBLE_FACTORIAL, SERIES_TERMS, SERIES_X
+
+# sph_jl / simpson are element-wise numpy over the (nq, n) transform and release
+# the GIL, so a large sbt splits across threads for a near-linear speedup. Small
+# transforms (per-atom PDOS/Hubbard qmag, few-shell cells) keep the serial path:
+# the pool spin-up would cost more than it saves.
+_ncpu = os.cpu_count() or 1
+# default: use the cores, capped at 16 (setup is a one-time burst while torch's
+# own pool is idle, so oversubscription isn't a concern); override via env.
+_SBT_THREADS = max(1, min(int(os.environ.get("GRADWAVE_SBT_THREADS", "0"))
+                          or min(_ncpu, 16), _ncpu))
+# |q| per chunk: small enough that _SBT_THREADS chunks live at once stay cheap
+# (each chunk is a (chunk, n_radial) transform with ~10 sph_jl temporaries, so
+# peak ≈ threads × chunk × n_radial); large enough that numpy vectorization and
+# GIL-release dominate the pool dispatch overhead. 512 keeps the threaded slab
+# setup near the serial memory footprint.
+_SBT_CHUNK_MIN = 512
 
 
 def _simpson_index_weights(n: int) -> np.ndarray:
@@ -104,5 +123,20 @@ def sbt(l: int, g: np.ndarray, r: np.ndarray, rab: np.ndarray, q: np.ndarray) ->
     q: (nq,) in Å⁻¹; g, r, rab: (n,) on the UPF mesh. Returns (nq,).
     """
     q = np.atleast_1d(np.asarray(q, dtype=np.float64))
-    jl = sph_jl(l, np.outer(q, r))  # (nq, n)
-    return simpson(jl * g, rab)
+
+    def _kernel(qc: np.ndarray) -> np.ndarray:
+        jl = sph_jl(l, np.outer(qc, r))  # (nq, n)
+        return simpson(jl * g, rab)
+
+    if _SBT_THREADS <= 1 or q.size < 2 * _SBT_CHUNK_MIN:
+        return _kernel(q)
+    # FIXED-size chunks (not a fixed count): each holds ~_SBT_CHUNK_MIN transforms,
+    # and the pool runs at most _SBT_THREADS at once, so peak memory is bounded by
+    # _SBT_THREADS × chunk regardless of how large q gets. A fixed *count* would
+    # make each chunk q/N — huge for a dense high-ecutrho grid — and N of them live
+    # at once blows up memory. np.array_split preserves order, so concatenation is
+    # bit-identical to the serial transform (pure parallelization, not an approx).
+    nchunks = -(-q.size // _SBT_CHUNK_MIN)  # ceil(q.size / chunk)
+    chunks = np.array_split(q, nchunks)
+    with ThreadPoolExecutor(max_workers=_SBT_THREADS) as ex:
+        return np.concatenate(list(ex.map(_kernel, chunks)))
