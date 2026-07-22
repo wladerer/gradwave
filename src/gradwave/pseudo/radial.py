@@ -123,11 +123,15 @@ def sbt(l: int, g: np.ndarray, r: np.ndarray, rab: np.ndarray, q: np.ndarray) ->
         jl = sph_jl(l, np.outer(qc, r))  # (nq, n)
         return simpson(jl * g, rab)
 
-    nchunks = min(_SBT_THREADS, q.size // _SBT_CHUNK_MIN)
-    if nchunks <= 1:
+    if _SBT_THREADS <= 1 or q.size < 2 * _SBT_CHUNK_MIN:
         return _kernel(q)
-    # np.array_split preserves order, so concatenation is bit-identical to the
-    # serial transform — the chunking is a pure parallelization, not an approx.
+    # FIXED-size chunks (not a fixed count): each holds ~_SBT_CHUNK_MIN transforms,
+    # and the pool runs at most _SBT_THREADS at once, so peak memory is bounded by
+    # _SBT_THREADS × chunk regardless of how large q gets. A fixed *count* would
+    # make each chunk q/N — huge for a dense high-ecutrho grid — and N of them live
+    # at once blows up memory. np.array_split preserves order, so concatenation is
+    # bit-identical to the serial transform (pure parallelization, not an approx).
+    nchunks = -(-q.size // _SBT_CHUNK_MIN)  # ceil(q.size / chunk)
     chunks = np.array_split(q, nchunks)
-    with ThreadPoolExecutor(max_workers=nchunks) as ex:
+    with ThreadPoolExecutor(max_workers=_SBT_THREADS) as ex:
         return np.concatenate(list(ex.map(_kernel, chunks)))
