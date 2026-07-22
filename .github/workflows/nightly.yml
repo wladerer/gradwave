@@ -6,7 +6,7 @@ name: Nightly
 # (workflow_dispatch) to trigger it on a branch.
 on:
   schedule:
-    - cron: "0 9 * * *"   # 09:00 UTC daily (~02:00 US/Pacific)
+    - cron: "0 9 * * 1"   # 09:00 UTC Mondays (~02:00 US/Pacific) — weekly to bound Actions minutes
   workflow_dispatch:
 
 concurrency:
