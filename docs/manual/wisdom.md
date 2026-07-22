@@ -53,8 +53,8 @@ defect, which the [Performance](performance.md) page works through in full.
   EOS to 0.08 meV (both codes read the file the same way), and SG15 Cu in the same
   harness is normal (Δ 1.33, which is that pseudo's genuine pseudization quality,
   matching its published value). So the psp8→UPF conversion is the suspect, not the
-  code. When one element's Δ blows up against all-electron, cross-check it against
-  QE at pinned settings and against a second pseudo family before trusting the
+  code. When one element's Δ is anomalously large against all-electron, cross-check it
+  against QE at pinned settings and against a second pseudo family before trusting the
   number. See `benchmarks/delta_gauge/results/cu_anomaly.md`.
 
 ## Grids
@@ -155,7 +155,8 @@ defect, which the [Performance](performance.md) page works through in full.
   error scales as the residual squared, so a density threshold 100 to 1000 times tighter
   explains most of an apparent iteration gap before any mixer difference. For smeared
   metals the density residual floors at occupation noise while the free energy is long
-  settled, and the flag should say so honestly.
+  settled, and the convergence flag should report that state rather than the density
+  residual.
 - Treat ferromagnetic metals near the Stoner instability as the adversarial case. The
   map has a measured gain near $-6$ on the spin mode, and its consequences were each
   learned separately. Default damping collapses the moment to the nonmagnetic branch
@@ -167,9 +168,9 @@ defect, which the [Performance](performance.md) page works through in full.
 - Johnson is exposed on the norm-conserving path too, not only USPP/PAW. `scf` takes
   `mixing_scheme="johnson"` (dispatch alongside pulay/broyden, history default lifted
   to 12), so the FM 3d metals run without hand-set damping. On nspin=1 it is
-  bit-identical to pulay (same fixed point, different route); bcc Fe converges to
+  bit-identical to pulay (same fixed point, different route), and bcc Fe converges to
   m = 2.27 μB. A strong seed plus warm-start keeps even pulay on the FM branch for a
-  robust ferromagnet like bcc Fe — the johnson advantage concentrates near the Stoner
+  robust ferromagnet like bcc Fe. The johnson advantage concentrates near the Stoner
   boundary (fcc Ni), where default damping silently collapses the moment. Gate FM
   metals on the energy tail (`rhotol` ~1e-5), since the density residual floors at
   occupation noise.
@@ -291,35 +292,34 @@ defect, which the [Performance](performance.md) page works through in full.
 
 A meta-GGA depends on the kinetic-energy density $\tau = \tfrac12\sum_i f_i|\nabla\psi_i|^2$,
 which enters $H$ as the generalized-KS operator $-\tfrac12\nabla\cdot(v_\tau\nabla\psi)$
-(`core/metagga.py`). Forces and stress treat that dependence very differently, and it is
-worth writing down why, because the intuition ("$\tau$ is a new field, so both need a new
-term") is wrong for one of them.
+(`core/metagga.py`). Forces and stress treat that dependence differently. The intuition
+("$\tau$ is a new field, so both need a new term") is wrong for one of them.
 
-- **Forces need NO $\tau$ term.** At the SCF stationary point the Hellmann–Feynman
+- **Forces need no $\tau$ term.** At the SCF stationary point the Hellmann–Feynman
   theorem holds exactly as for a GGA: the $\tau$ operator changes the *orbitals* (and thus
   the self-consistent density), but $E_{xc}[\rho,\sigma,\tau]$ has no *explicit* atomic-
   position dependence at fixed detached orbitals, so the force is still the same three
-  terms — Ewald, local-PP structure factors, NL projector phases. `forces()` is
-  functional-agnostic and already correct; do not add a "$\tau$ Pulay term."
-- **Stress DOES need a $\tau$ term.** Strain scales the plane-wave basis (the reciprocal
-  vectors $G$), so $\nabla\psi$ — and hence $\tau$ — has an *explicit* strain dependence a
+  terms, namely Ewald, local-PP structure factors, and NL projector phases. `forces()` is
+  functional-agnostic and already correct. Do not add a "$\tau$ Pulay term."
+- **Stress does need a $\tau$ term.** Strain scales the plane-wave basis (the reciprocal
+  vectors $G$), so $\nabla\psi$ (and hence $\tau$) has an *explicit* strain dependence a
   GGA (a functional of $\rho$, which only scales as $1/\Omega$) lacks. Rebuild $\tau$ from
   the strained $(k+G)$ and the fixed coefficients on the autograd graph
-  (`stress._tau_strained`) and pass it to `xc.energy`; the fixed-basis (Nielsen–Martin)
+  (`stress._tau_strained`) and pass it to `xc.energy`. The fixed-basis (Nielsen–Martin)
   stress then carries $\partial E_{xc}/\partial\tau\cdot\partial\tau/\partial\varepsilon$
-  automatically. The term is *large* — for Si it is $\sim0.57$ eV/Å³ and flips the sign of
-  the stress — so omitting it is not a small error.
+  automatically. The term is large. For Si it is $\sim0.57$ eV/Å³ and flips the sign of
+  the stress, so it cannot be omitted.
 - **The forces()-vs-FD residual for a meta-GGA is XC-grid egg-box, not a missing term.**
-  $\tau$ is *exact* in reciprocal space ($\nabla\psi = i(k+G)\,c$); only the real-space
-  integral $\int e_{xc}(\tau)\,dr$ has grid error, and it is larger than a GGA's (the known
-  SCAN grid sensitivity). It vanishes with grid density — measured 3.7e-3 (20 Ry) → 8.6e-5
-  (45 Ry) for Si — rather than plateauing. Meta-GGA forces therefore want a denser cutoff
+  $\tau$ is *exact* in reciprocal space ($\nabla\psi = i(k+G)\,c$), and only the real-space
+  integral $\int e_{xc}(\tau)\,dr$ has grid error, larger than a GGA's (the known
+  SCAN grid sensitivity). It vanishes with grid density (measured 3.7e-3 at 20 Ry, 8.6e-5
+  at 45 Ry for Si) rather than plateauing. Meta-GGA forces therefore want a denser cutoff
   than a GGA for the same accuracy.
 - **To tell a missing analytic term from noise, turn three knobs independently.** A
   genuinely missing force/stress term is constant in the SCF tolerance, the FD step, *and*
-  the grid. An operator lag vanishes with `rhotol`; FD discretization error vanishes with
-  $h$; egg-box vanishes with the grid. The meta-GGA force gap was constant in `rhotol` and
-  $h$ but fell with the grid — that pattern alone identified it as egg-box, before any
+  the grid. An operator lag vanishes with `rhotol`, FD discretization error vanishes with
+  $h$, and egg-box vanishes with the grid. The meta-GGA force gap was constant in `rhotol`
+  and $h$ but fell with the grid. That pattern alone identified it as egg-box, before any
   derivation. (The eigenvalue residual with a $\tau$ rebuilt from the *final* orbitals,
   $\sim$4e-10, separately confirmed the state was stationary, and `energies.xc` equaling an
   independent $\int e_{r2scan}$ ruled out an energy bias.)
@@ -345,7 +345,7 @@ differentiable-DFT coupling of arXiv:2509.07785. A few things are not obvious.
   Σ f 2Re⟨δφ|R⟩ is halved by the second-order term at the variational optimum, so
   the correct estimate is δE = Σ f ⟨δφ|R⟩ with factor 1, not 2. A factor-2 form
   overshoots by 2x. It is a definite energy lowering.
-- The naive force recipe does NOT extend to stress. Propagating a fixed δP through
+- The naive force recipe does not extend to stress. Propagating a fixed δP through
   the fixed-basis stress gives a cleanly anti-correlated estimate (correlation near
   −1, about −0.5x the true error). The reason is that σ = ∂E/∂ε and its δP-response
   is dominated by the strain-response of the orbital correction, the ⟨∂δφ/∂ε|R⟩
@@ -360,8 +360,8 @@ differentiable-DFT coupling of arXiv:2509.07785. A few things are not obvious.
   the generalized metric, R = P_annulus(H − εS)ψ, and the density change is the smooth
   part from δψ PLUS an augmentation part from the on-site occupation (becsum) change,
   δbecsum fed through the Q functions. On Si2 the augmentation channel lifts the density
-  correlation from 0.51 (smooth only) to 0.74. ∫δρ is no longer exactly zero: the smooth
-  part cancels but the augmentation carries a small S-orthogonality residual (~3e-5 per
+  correlation from 0.51 (smooth only) to 0.74. ∫δρ is no longer exactly zero. The smooth
+  part cancels, but the augmentation carries a small S-orthogonality residual (~3e-5 per
   electron on Si), which is negligible. The USPP energy ratio (0.99 on Si) was tighter than the NC diamond case (0.73), but that is the system, not the method, so do
   not read it as a general improvement.
 - The nspin=2 path runs the correction per spin channel, each with its own v_eff and
