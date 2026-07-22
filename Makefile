@@ -2,7 +2,10 @@
 # pytest marker strings (shorter to type, impossible to get the markers wrong).
 # Everything goes through `uv run` so the project env is used, not the base venv.
 
-.PHONY: help test test-fast test-standard test-nightly lint fmt lock check hooks
+.PHONY: help test test-fast test-standard test-nightly lint imports fmt lock check hooks profile
+
+BENCH ?= bench_scf
+ARGS  ?= cpu 8 nosym
 
 help:
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/'
@@ -23,6 +26,11 @@ lint: ## ruff, concise output
 
 imports: ## enforce package-boundary contracts (import-linter)
 	uv run lint-imports
+
+profile: ## sample-profile a benchmark -> speedscope json (BENCH=bench_scf ARGS="cpu 8 nosym"); open at speedscope.app
+	uv run --with py-spy py-spy record --rate 200 --format speedscope \
+	  --output profile.speedscope.json -- \
+	  $$(uv run python -c "import sys; print(sys.executable)") benchmarks/$(BENCH).py $(ARGS)
 
 fmt: ## ruff autofix + format
 	uv run ruff check --fix
