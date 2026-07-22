@@ -284,6 +284,9 @@ def scf_uspp_noncollinear(
                      * system.smooth_shape[2])
         smooth_geom = (system.smooth_shape, system.smooth_flat_idx)
 
+    # E_ewald is constant across the loop (positions frozen) — build it once.
+    e_ew = ewald_energy(system.positions, system.charges, grid.cell)
+
     for it in range(1, max_iter + 1):
         t_it = time.perf_counter()
         # ---- potentials ----
@@ -431,7 +434,7 @@ def scf_uspp_noncollinear(
                                 rho_core=system.rho_core),
             local=_local_energy(rho_g_out, ops.vloc_g, vol),
             nonlocal_=e_nl,
-            ewald=ewald_energy(system.positions, system.charges, grid.cell),
+            ewald=e_ew,
             smearing=entropy_term,
             onecenter=e_onec,
         )

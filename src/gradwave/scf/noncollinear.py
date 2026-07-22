@@ -280,6 +280,9 @@ def scf_noncollinear(
                                system.vloc_tables, grid.g_cart, vol)
     vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
 
+    # E_ewald is constant across the loop (positions frozen) — build it once.
+    e_ew = ewald_energy(system.positions, system.charges, grid.cell)
+
     # initial spinors: alternate up/down lowest plane waves
     coeffs = spinor_pw_seed(nk, nbands, m_pw, device)
     t2 = torch.cat([bk.t, bk.t], dim=-1)
@@ -387,7 +390,6 @@ def scf_noncollinear(
                                    system.kweights) \
                 + nonlocal_energy([bd[ik] for ik in range(nk)], dij, occ,
                                   system.kweights)
-        e_ew = ewald_energy(system.positions, system.charges, grid.cell)
         energies = EnergyBreakdown(kinetic=e_kin, hartree=e_h, xc=e_xc, local=e_loc,
                                    nonlocal_=e_nl, ewald=e_ew, smearing=entropy_term)
         e_free = float(energies.free_energy)

@@ -29,6 +29,7 @@ from dataclasses import dataclass
 import torch
 
 from gradwave.constants import HBAR2_2M
+from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.hartree import hartree_potential_g
 from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
@@ -170,6 +171,7 @@ class _IterOps:
     hub: object
     vloc_g: torch.Tensor
     vloc_r: torch.Tensor
+    e_ewald: torch.Tensor  # constant E_ewald (frozen positions), built once
     phase_pos: torch.Tensor
     is_paw: bool
     onec: list | None
@@ -302,6 +304,8 @@ def _build_iter_ops(system: USPPSystem, xc, *, nspin=1, smearing="none",
                                torch.tensor(system.species_of_atom, device=dev),
                                system.vloc_tables, grid.g_cart, vol)
     vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
+    # E_ewald depends only on the (frozen) positions — build once, reuse each step.
+    e_ewald = ewald_energy(system.positions, system.charges, grid.cell)
     phase_arg = system.g_sphere @ system.positions.T  # (nGm, na)
     phase_pos = torch.exp(torch.complex(torch.zeros_like(phase_arg), phase_arg))
     is_paw = any(p.is_paw for p in system.paws)
@@ -312,7 +316,8 @@ def _build_iter_ops(system: USPPSystem, xc, *, nspin=1, smearing="none",
         onec = [OneCenter(p, xc) for p in system.paws]
     return _IterOps(system=system, xc=xc, nspin=nspin, smearing=smearing,
                     width=width, batched=batched, projs=projs, bk=bk, p_b=p_b,
-                    hub=hub, vloc_g=vloc_g, vloc_r=vloc_r, phase_pos=phase_pos,
+                    hub=hub, vloc_g=vloc_g, vloc_r=vloc_r, e_ewald=e_ewald,
+                    phase_pos=phase_pos,
                     is_paw=is_paw, onec=onec, grid=grid, vol=vol, dev=dev,
                     shape=grid.shape, mask_flat=grid.dens_mask.reshape(-1),
                     g_spin=2 if nspin == 1 else 1, nk=len(system.spheres),
@@ -333,6 +338,7 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
     smearing, width, batched = ops.smearing, ops.width, ops.batched
     projs, bk, p_b, hub = ops.projs, ops.bk, ops.p_b, ops.hub
     vloc_g, vloc_r, phase_pos = ops.vloc_g, ops.vloc_r, ops.phase_pos
+    e_ewald = ops.e_ewald
     is_paw, onec = ops.is_paw, ops.onec
     grid, vol, dev, shape = ops.grid, ops.vol, ops.dev, ops.shape
     nk, nb = ops.nk, ops.nb
@@ -542,7 +548,7 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
         coeffs, occ_s, system.kweights, system.spheres, grid, vol, rho_g_out,
         e_xc, vloc_g, becps_s, system.proj_data[0].dij_full, system.positions,
         system.charges, entropy_term, nspin,
-        e_hub=e_hub if hub is not None else 0.0, e_onec=e_onec)
+        e_hub=e_hub if hub is not None else 0.0, e_onec=e_onec, e_ewald=e_ewald)
     return dict(eigs_s=eigs_s, occ_s=occ_s, mu=mu, n_hub_s=n_hub_s,
                 rho_out_s=rho_out_s, rho_ij_s=rho_ij_s, becps_s=becps_s,
                 energies=energies)
