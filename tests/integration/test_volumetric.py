@@ -88,3 +88,67 @@ def test_writers_roundtrip(si_res, tmp_path, ext):
 def test_unknown_extension_rejected(si_res, tmp_path):
     with pytest.raises(ValueError, match="unknown volumetric extension"):
         V.write_density(si_res, tmp_path / "chg.chgcar")
+
+
+def test_run_wiring_writes_requested_fields(si_res, tmp_path):
+    """The api.run() call site (_write_volumetric) honors the spec and records
+    filenames; an unsupported field is skipped, not fatal."""
+    from gradwave.api import _write_volumetric
+    from gradwave.inputs import VolumetricParams
+
+    spec = VolumetricParams(density=True, elf=True, bands=((0, 0),), format="cube")
+    written = _write_volumetric(si_res, spec, tmp_path, verbose=False)
+    assert written == {
+        "density": "density.cube",
+        "elf": "elf.cube",
+        "parchg_b0_k0": "parchg_b0_k0.cube",
+    }
+    for name in written.values():
+        assert (tmp_path / name).exists()
+
+    # magnetization is unavailable for a collinear result — skipped, run survives
+    skip = _write_volumetric(si_res, VolumetricParams(magnetization=True), tmp_path,
+                             verbose=False)
+    assert skip == {}
+
+
+# --- noncollinear / SOC ----------------------------------------------------
+
+@pytest.mark.standard  # full SOC SCF; not a fast-gate test
+def test_noncollinear_spinor_export():
+    """PARCHG sums the two spinor components (∫=1), density is the total, and
+    the magnetization density integrates to res.mag_vec. ELF is guarded."""
+    import torch
+
+    from gradwave.core.xc.noncollinear import NoncollinearXC
+    from gradwave.core.xc.spin import SpinPBE
+    from gradwave.scf.noncollinear import scf_noncollinear
+    from tests.helpers import FIX
+
+    torch.set_num_threads(4)
+    cell, pos = si_fcc(5.653)
+    ga = parse_upf(FIX / "qe" / "pseudos" / "Ga_ONCV_PBE_FR-1.0.upf")
+    as_ = parse_upf(FIX / "qe" / "pseudos" / "As_ONCV_PBE_FR-1.1.upf")
+    system = setup_system(cell, pos, [0, 1], [ga, as_], ecut=20 * RY,
+                          kmesh=(1, 1, 1), nbands=13, time_reversal=False)
+    # the reconstruction identities are grid-exact at any state, so a few SCF
+    # steps suffice — this tests the export path, not convergence.
+    res = scf_noncollinear(system, NoncollinearXC(SpinPBE()),
+                           mag_vec_init=[[0, 0, 1.0], [0, 0, 0]], smearing="gaussian",
+                           width=0.1, etol=1e-7, rhotol=1e-6, verbose=False, max_iter=6)
+    assert res.formalism == "noncollinear"
+
+    dv = float(system.grid.volume) / system.grid.n_points
+    assert V.density(res).sum() * dv == pytest.approx(system.n_electrons, rel=1e-5)
+    # |ψ↑|² + |ψ↓|² integrates to 1
+    assert V.band_density(res, band=0, kpoint=0).sum() * dv == pytest.approx(1.0, abs=1e-5)
+    # magnetization components integrate to res.mag_vec
+    for axis, i in (("x", 0), ("y", 1), ("z", 2)):
+        assert V.magnetization(res, axis).sum() * dv == pytest.approx(
+            float(res.mag_vec[i]), abs=1e-3)
+    assert (V.magnetization(res, "abs") >= 0.0).all()
+
+    with pytest.raises(NotImplementedError):
+        V.elf(res)
+    with pytest.raises(ValueError, match="noncollinear"):
+        V.density(res, spin=0)

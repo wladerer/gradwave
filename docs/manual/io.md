@@ -190,6 +190,7 @@ Plot it with `gradwave plot <scf.json> --kind pdos`.
 | `dir` | `./out` | — | path | Output directory, relative to the input file. |
 | `checkpoint` | `true` | — | bool | Write `checkpoint.pt` after SCF tasks. |
 | `wavefunctions` | `false` | — | bool | Include the wavefunction coefficients in the checkpoint (large). |
+| `volumetric` | `false` | — | bool or table | Export real-space fields as `.cube`/`.xsf`. See [Volumetric export](#volumetric-export). |
 
 ## Output files
 
@@ -212,7 +213,9 @@ Each calculation writes three files into the output directory.
 
 `<task>` is `scf`, `relax`, or `bands`. A relax task additionally writes the
 `relax.xyz` extended-xyz trajectory described above, referenced from the JSON
-as `outputs.trajectory`.
+as `outputs.trajectory`. Setting `output.volumetric` adds `.cube`/`.xsf` field
+files, described under [Volumetric export](#volumetric-export) and referenced
+from the JSON under `outputs`.
 
 Every output carries a `provenance` block (`gradwave/runinfo.py`) recording the
 context a timing needs to be trusted months later: timestamp with timezone,
@@ -249,6 +252,59 @@ non-collinear/spinor path (`noncollinear: true`), and norm-conserving
 `task: scf` with `noncollinear: true` to get one on a spinor SCF. The
 [Basis-set error estimation](error-estimation.md#coverage) page has the full
 coverage table.
+
+## Volumetric export
+
+Setting `output.volumetric` writes real-space fields to `.cube`/`.xsf` files that
+VESTA and Ovito read. These are the CHGCAR, PARCHG and ELF analogs. The density and
+the plane-wave coefficients are already in memory at the end of an SCF, so no rerun is
+needed. The file encoding (units, voxel order, the periodic wrap plane) is handled by
+ASE.
+
+`output.volumetric: true` is shorthand for the density alone. The mapping form selects
+fields and the file format:
+
+```yaml
+output:
+  volumetric:
+    density: true          # ρ(r), the CHGCAR analog
+    elf: true              # electron localization function ELF(r)
+    magnetization: true    # |m(r)|, noncollinear runs only
+    bands: [[3, 0], [4, 0]]  # PARCHG |ψ_nk(r)|² for [band, kpoint] pairs
+    format: cube           # cube (default) or xsf
+```
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `density` | `false` | — | bool | Total density ρ(r) [e/Å³]. |
+| `elf` | `false` | — | bool | Electron localization function, a value in [0,1]. |
+| `magnetization` | `false` | — | bool | Magnetization density \|m(r)\| [μ_B/Å³] for noncollinear runs. |
+| `bands` | `[]` | — | list | `[band, kpoint]` pairs; each writes one PARCHG file, `parchg_b{band}_k{kpoint}`. |
+| `format` | `cube` | — | string | `cube` or `xsf`. |
+
+Files land in the output directory named by field (`density.cube`, `elf.cube`,
+`magnetization.cube`, `parchg_b3_k0.cube`) and are listed under `outputs` in the JSON
+summary. A single-state PARCHG density integrates to 1 over the cell; the total
+density integrates to the electron count; the occupation-weighted sum of the PARCHG
+densities reproduces the total density.
+
+Coverage follows the result type. The total density is available for every SCF. PARCHG
+covers collinear and noncollinear runs (the two spinor components are summed for the
+latter). For USPP/PAW it is the soft pseudo-density, without the augmentation charge,
+as in VASP. ELF is available for collinear norm-conserving results. Magnetization needs
+a noncollinear run (`noncollinear: true`). A requested field that the result type does
+not support is skipped with a note, and the rest of the run still writes.
+
+The same fields are reachable from Python through
+[`gradwave.postscf.volumetric`](api/properties.md#volumetric-export):
+
+```python
+from gradwave.postscf import volumetric as vol
+
+vol.write_density(res, "density.cube")            # ρ(r)
+vol.write_band_density(res, "homo.cube", band=3)  # |ψ_nk(r)|²
+vol.write_elf(res, "elf.xsf")                     # ELF(r)
+```
 
 ## Checkpoints
 

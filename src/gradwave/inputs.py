@@ -81,6 +81,20 @@ class ProjectionsParams:
 
 
 @dataclass(frozen=True)
+class VolumetricParams:
+    """Volumetric fields to export after an SCF, as .cube/.xsf for VESTA/Ovito."""
+
+    density: bool = False        # ρ(r), the CHGCAR analog
+    elf: bool = False            # electron localization function ELF(r)
+    magnetization: bool = False  # |m(r)|, noncollinear/SOC runs only
+    bands: tuple = ()            # (band, kpoint) pairs → PARCHG |ψ_nk(r)|²
+    format: str = "cube"         # "cube" or "xsf"
+
+    def any(self) -> bool:
+        return bool(self.density or self.elf or self.magnetization or self.bands)
+
+
+@dataclass(frozen=True)
 class MagnetismParams:
     exchange: bool = True      # extract J/D from the torque (adds ~3 constrained SCFs)
     lam: float = 8.0           # constraint penalty strength [eV/μB²]
@@ -116,6 +130,7 @@ class Input:
     output_dir: Path = Path("./out")
     output_checkpoint: bool = True  # write checkpoint.pt after SCF tasks
     output_wavefunctions: bool = False  # include coeffs in the checkpoint
+    output_volumetric: VolumetricParams = field(default_factory=VolumetricParams)
     # post-SCF numerical-error estimates (basis set, SCF, smearing) in the
     # output — on by default; every estimate is derived from the finished
     # run (no extra SCF) and out-of-coverage runs degrade to available: false
@@ -149,6 +164,30 @@ def _build(cls, raw, label):
     rather than raising a bare TypeError from the constructor."""
     _check_keys(label, raw, {f.name for f in dataclasses.fields(cls)})
     return cls(**raw)
+
+
+def _build_volumetric(raw) -> VolumetricParams:
+    """Parse the `output.volumetric` block. `true` is shorthand for the density
+    alone; a mapping selects fields and the file format."""
+    if isinstance(raw, bool):
+        return VolumetricParams(density=raw)
+    _check_keys("output.volumetric", raw,
+                {"density", "elf", "magnetization", "bands", "format"})
+    fmt = str(raw.get("format", "cube"))
+    if fmt not in ("cube", "xsf"):
+        raise InputError(f"output.volumetric.format must be 'cube' or 'xsf', got {fmt!r}")
+    try:
+        bands = tuple((int(b), int(k)) for b, k in raw.get("bands", ()))
+    except (TypeError, ValueError) as exc:
+        raise InputError(
+            "output.volumetric.bands must be a list of [band, kpoint] pairs") from exc
+    return VolumetricParams(
+        density=bool(raw.get("density", False)),
+        elf=bool(raw.get("elf", False)),
+        magnetization=bool(raw.get("magnetization", False)),
+        bands=bands,
+        format=fmt,
+    )
 
 
 def _read_atoms(path: Path, fmt=None, index=-1) -> Atoms:
@@ -344,7 +383,8 @@ def _load_input(path: Path) -> Input:
 
     out_raw = raw.get("output", {})
     _check_keys("output", out_raw,
-                {"dir", "checkpoint", "wavefunctions", "error_estimate"})
+                {"dir", "checkpoint", "wavefunctions", "error_estimate", "volumetric"})
+    volumetric = _build_volumetric(out_raw.get("volumetric", False))
     restart = raw.get("restart")
 
     nbands = raw.get("nbands", "auto")
@@ -395,6 +435,7 @@ def _load_input(path: Path) -> Input:
         output_dir=base / out_raw.get("dir", "./out"),
         output_checkpoint=bool(out_raw.get("checkpoint", True)),
         output_wavefunctions=bool(out_raw.get("wavefunctions", False)),
+        output_volumetric=volumetric,
         error_estimate=bool(out_raw.get("error_estimate",
                                         raw.get("error_estimate", True))),
         restart=None if restart is None else (base / restart),

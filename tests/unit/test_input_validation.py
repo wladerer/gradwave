@@ -74,6 +74,37 @@ def test_symmetry_true_rejected_for_magnetic_modes(tmp_path, mode):
         load_input(_write(tmp_path, _base(mode + "symmetry: true\n")))
 
 
+def test_volumetric_shorthand_and_mapping(tmp_path):
+    from gradwave.inputs import load_input
+
+    short = load_input(_write(tmp_path, _base("output: {volumetric: true}\n")))
+    assert short.output_volumetric.density is True
+    assert short.output_volumetric.any()
+
+    full = load_input(_write(tmp_path, _base(
+        "output:\n"
+        "  volumetric:\n"
+        "    density: true\n"
+        "    elf: true\n"
+        "    bands: [[3, 0], [4, 1]]\n"
+        "    format: xsf\n")))
+    v = full.output_volumetric
+    assert (v.density, v.elf, v.format) == (True, True, "xsf")
+    assert v.bands == ((3, 0), (4, 1))
+
+
+@pytest.mark.parametrize("block, needle", [
+    ("output: {volumetric: {densty: true}}\n", "did you mean"),   # field typo
+    ("output: {volumetric: {format: chgcar}}\n", "cube' or 'xsf"),  # bad format
+    ("output: {volumetric: {bands: [3, 0]}}\n", "band, kpoint"),   # not pairs
+])
+def test_volumetric_errors(tmp_path, block, needle):
+    from gradwave.inputs import InputError, load_input
+
+    with pytest.raises(InputError, match=needle):
+        load_input(_write(tmp_path, _base(block)))
+
+
 @pytest.mark.parametrize("mode", ["noncollinear: true\n", "task: magnetism\n"])
 def test_symmetry_defaults_off_for_magnetic_modes(tmp_path, mode):
     from gradwave.inputs import load_input
