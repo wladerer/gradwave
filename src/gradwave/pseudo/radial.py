@@ -11,9 +11,20 @@ here may be called from Layer A.
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 
 from gradwave.pseudo._bessel_data import DOUBLE_FACTORIAL, SERIES_TERMS, SERIES_X
+
+# sph_jl / simpson are element-wise numpy over the (nq, n) transform and release
+# the GIL, so a large sbt splits across threads for a near-linear speedup. Small
+# transforms (per-atom PDOS/Hubbard qmag, few-shell cells) keep the serial path:
+# the pool spin-up would cost more than it saves.
+_SBT_THREADS = max(1, min(int(os.environ.get("GRADWAVE_SBT_THREADS", "8")),
+                          (os.cpu_count() or 1)))
+_SBT_CHUNK_MIN = 2048  # min |q| per chunk; below one chunk's worth, stay serial
 
 
 def _simpson_index_weights(n: int) -> np.ndarray:
@@ -104,5 +115,16 @@ def sbt(l: int, g: np.ndarray, r: np.ndarray, rab: np.ndarray, q: np.ndarray) ->
     q: (nq,) in Å⁻¹; g, r, rab: (n,) on the UPF mesh. Returns (nq,).
     """
     q = np.atleast_1d(np.asarray(q, dtype=np.float64))
-    jl = sph_jl(l, np.outer(q, r))  # (nq, n)
-    return simpson(jl * g, rab)
+
+    def _kernel(qc: np.ndarray) -> np.ndarray:
+        jl = sph_jl(l, np.outer(qc, r))  # (nq, n)
+        return simpson(jl * g, rab)
+
+    nchunks = min(_SBT_THREADS, q.size // _SBT_CHUNK_MIN)
+    if nchunks <= 1:
+        return _kernel(q)
+    # np.array_split preserves order, so concatenation is bit-identical to the
+    # serial transform — the chunking is a pure parallelization, not an approx.
+    chunks = np.array_split(q, nchunks)
+    with ThreadPoolExecutor(max_workers=nchunks) as ex:
+        return np.concatenate(list(ex.map(_kernel, chunks)))
