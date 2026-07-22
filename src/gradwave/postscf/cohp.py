@@ -73,7 +73,6 @@ import torch
 from gradwave.dtypes import CDTYPE
 from gradwave.postscf.pdos import (
     _ao_projectors_k,
-    _ao_spinor_projectors_k,
     _atomic_columns,
     _atomic_columns_so,
     _broaden,
@@ -81,6 +80,9 @@ from gradwave.postscf.pdos import (
     _unpack_result,
     o_inv_sqrt,
     spectral_grid,
+    spinor_jmj_amplitudes,
+    spinor_scalar_amplitudes,
+    split_spinor,
 )
 
 
@@ -588,21 +590,13 @@ def _spinor_proj_per_k(res, cols, spinor, device):
     for ik, sph in enumerate(system.spheres):
         npw = sph.npw
         c = res.coeffs[ik].to(device)                            # (nb, 2*m_pw)
-        cu, cd = c[:, :npw], c[:, m_pw:m_pw + npw]
+        cu, cd = split_spinor(c, npw, m_pw)
         if spinor:
-            qu, qd = _ao_spinor_projectors_k(system, sph, cols, device)
-            becp = (torch.einsum("bg,pg->bp", cu, qu.conj())
-                    + torch.einsum("bg,pg->bp", cd, qd.conj()))
-            overlap = (torch.einsum("pg,qg->pq", qu.conj(), qu)
-                       + torch.einsum("pg,qg->pq", qd.conj(), qd))
-            proj = _lowdin_project(becp, overlap)                # (nb, nproj)
+            proj = spinor_jmj_amplitudes(system, sph, cols, cu, cd, device)
         else:
-            q = _ao_projectors_k(system, sph, cols, device)
-            overlap = torch.einsum("ig,jg->ij", q.conj(), q)
-            pu = _lowdin_project(torch.einsum("bg,pg->bp", cu, q.conj()), overlap)
-            pd = _lowdin_project(torch.einsum("bg,pg->bp", cd, q.conj()), overlap)
-            # spin-summed charge COHP: stack the two components side by side so the
-            # band-limited H~ carries the full spinor character of psi_n
+            # spin-summed charge COHP: stack the up/down scalar-AO amplitudes side
+            # by side so the band-limited H~ carries the full spinor character
+            pu, pd = spinor_scalar_amplitudes(system, sph, cols, cu, cd, device)
             proj = torch.cat([pu, pd], dim=1)                    # (nb, 2*nproj)
         e = eig[ik].to(device)
         proj_per_k.append(proj)

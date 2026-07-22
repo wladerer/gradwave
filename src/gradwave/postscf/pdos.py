@@ -221,6 +221,39 @@ def _lowdin_weights(becp, overlap, floor=1e-8):
     return proj.real ** 2 + proj.imag ** 2
 
 
+def split_spinor(c, npw, m_pw):
+    """Up/down plane-wave blocks (cu, cd) of a spinor coefficient block
+    c (nb, 2*m_pw): the up component occupies [:npw], the down component starts
+    at the fixed padding offset m_pw. Shared by the noncollinear/SOC PDOS and
+    COHP projection loops."""
+    return c[:, :npw], c[:, m_pw:m_pw + npw]
+
+
+def spinor_scalar_amplitudes(system, sph, cols, cu, cd, device):
+    """Loewdin amplitudes (pu, pd) of a spinor state's up/down components on the
+    SCALAR AO set, sharing one spatial overlap. Complex (nb, nproj) each — the
+    caller forms |.|^2 populations or the pu* pd cross term (spin texture).
+    Setup only (no autograd path)."""
+    q = _ao_projectors_k(system, sph, cols, device)
+    overlap = torch.einsum("ig,jg->ij", q.conj(), q)
+    pu = _lowdin_project(torch.einsum("bg,pg->bp", cu, q.conj()), overlap)
+    pd = _lowdin_project(torch.einsum("bg,pg->bp", cd, q.conj()), overlap)
+    return pu, pd
+
+
+def spinor_jmj_amplitudes(system, sph, cols, cu, cd, device):
+    """Loewdin amplitudes (nb, nproj) on the |l j mj> spin-angular AO set; the
+    becp and AO overlap are spin-summed over the two spinor components. Complex —
+    the caller forms |.|^2 (SOC populations) or uses the amplitudes directly (the
+    band-limited COHP). Setup only (no autograd path)."""
+    qu, qd = _ao_spinor_projectors_k(system, sph, cols, device)
+    becp = (torch.einsum("bg,pg->bp", cu, qu.conj())
+            + torch.einsum("bg,pg->bp", cd, qd.conj()))
+    overlap = (torch.einsum("pg,qg->pq", qu.conj(), qu)
+               + torch.einsum("pg,qg->pq", qd.conj(), qd))
+    return _lowdin_project(becp, overlap)
+
+
 def _nc_weights_k(system, sph, ik, c, cols, device):
     """Norm-conserving Löwdin weights (nb, nproj); overlap is the bare AO Gram."""
     q = _ao_projectors_k(system, sph, cols, device)     # (nproj, npw)
@@ -372,11 +405,8 @@ def projected_dos_noncollinear(res, *, width: float = 0.1, npoints: int = 800,
     for ik, sph in enumerate(system.spheres):
         npw = sph.npw
         c = res.coeffs[ik].to(device)                       # (nb, 2·m_pw)
-        cu, cd = c[:, :npw], c[:, m_pw:m_pw + npw]           # up / down components
-        q = _ao_projectors_k(system, sph, cols, device)     # (nproj, npw)
-        overlap = torch.einsum("ig,jg->ij", q.conj(), q)     # spatial AO overlap
-        pu = _lowdin_project(torch.einsum("bg,pg->bp", cu, q.conj()), overlap)
-        pd = _lowdin_project(torch.einsum("bg,pg->bp", cd, q.conj()), overlap)
+        cu, cd = split_spinor(c, npw, m_pw)                  # up / down components
+        pu, pd = spinor_scalar_amplitudes(system, sph, cols, cu, cd, device)
         au, ad = (pu.real ** 2 + pu.imag ** 2), (pd.real ** 2 + pd.imag ** 2)
         cross = pu.conj() * pd                               # <phi~|up>* <phi~|down>
         sl = slice(ik * nb, (ik + 1) * nb)
@@ -531,13 +561,9 @@ def projected_dos_soc(res, *, width: float = 0.1, npoints: int = 800, window=Non
     for ik, sph in enumerate(system.spheres):
         npw = sph.npw
         c = res.coeffs[ik].to(device)                       # (nb, 2·m_pw)
-        cu, cd = c[:, :npw], c[:, m_pw:m_pw + npw]
-        qu, qd = _ao_spinor_projectors_k(system, sph, cols, device)
-        becp = (torch.einsum("bg,pg->bp", cu, qu.conj())
-                + torch.einsum("bg,pg->bp", cd, qd.conj()))  # <Phi_p|psi_b>
-        overlap = (torch.einsum("pg,qg->pq", qu.conj(), qu)
-                   + torch.einsum("pg,qg->pq", qd.conj(), qd))  # <Phi_p|Phi_q>
-        wgt = _lowdin_weights(becp, overlap).cpu().numpy()
+        cu, cd = split_spinor(c, npw, m_pw)
+        proj = spinor_jmj_amplitudes(system, sph, cols, cu, cd, device)
+        wgt = (proj.real ** 2 + proj.imag ** 2).cpu().numpy()
         sl = slice(ik * nb, (ik + 1) * nb)
         weights[sl] = wgt
         kweight_state[sl] = float(kw[ik])
