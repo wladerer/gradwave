@@ -53,7 +53,7 @@ class SCFOptions:
     mixer: MixerOptions = field(default_factory=MixerOptions)
 
     @classmethod
-    def from_kwargs(cls, **kw) -> "SCFOptions":
+    def from_kwargs(cls, **kw) -> SCFOptions:
         """Build from flat legacy kwargs (mixing_alpha=..., etc.).
         Unknown keys raise, misspelled tolerances must not pass silently."""
         rename = {

@@ -90,7 +90,7 @@ class MagneticBecsumSymmetrizer:
         self.axial = torch.as_tensor(np.stack(ax), dtype=torch.float64)
         self.n_unitary = mg.n_unitary
 
-    def to(self, device) -> "MagneticBecsumSymmetrizer":
+    def to(self, device) -> MagneticBecsumSymmetrizer:
         self._bec.to(device)
         self.axial = self.axial.to(device)
         return self
@@ -143,7 +143,7 @@ class BecsumSymmetrizer:
             self.d_full.append(per_sp)
         self.species_of_atom = list(species_of_atom)
 
-    def to(self, device) -> "BecsumSymmetrizer":
+    def to(self, device) -> BecsumSymmetrizer:
         self.d_full = [[d.to(device) for d in per_sp] for per_sp in self.d_full]
         return self
 

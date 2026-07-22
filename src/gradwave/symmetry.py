@@ -322,7 +322,7 @@ class RhoSymmetrizer:
         else:
             self.mask = torch.ones(n1 * n2 * n3, dtype=torch.bool)
 
-    def to(self, device) -> "RhoSymmetrizer":
+    def to(self, device) -> RhoSymmetrizer:
         new = object.__new__(RhoSymmetrizer)
         new.idx = self.idx.to(device)
         new.phase = self.phase.to(device)
@@ -365,7 +365,7 @@ class MagneticSymmetrizer:
         self.axial = torch.as_tensor(np.stack(ax), dtype=torch.float64)
         self.shape = tuple(shape)
 
-    def to(self, device) -> "MagneticSymmetrizer":
+    def to(self, device) -> MagneticSymmetrizer:
         new = object.__new__(MagneticSymmetrizer)
         new.rho_sym = self.rho_sym.to(device)
         new.axial = self.axial.to(device)

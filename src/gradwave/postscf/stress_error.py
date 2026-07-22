@@ -61,7 +61,7 @@ def _infer_kmesh(system) -> tuple[int, int, int]:
     strained system reproduces the run's k-point ordering.
     """
     kf = np.array([np.asarray(sph.k_frac, dtype=float) for sph in system.spheres])
-    return tuple(int(len(np.unique(np.round(kf[:, i] % 1.0, 6)))) for i in range(3))
+    return tuple(len(np.unique(np.round(kf[:, i] % 1.0, 6))) for i in range(3))
 
 
 @torch.no_grad()

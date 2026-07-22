@@ -78,7 +78,7 @@ class USPPSystem:
     smooth_flat_idx: torch.Tensor = None  # (nk, npw_max) into the smooth box
     smooth2dense: torch.Tensor = None  # (n_smooth,) smooth→dense flat, by Miller
 
-    def to(self, device) -> "USPPSystem":
+    def to(self, device) -> USPPSystem:
         """Copy with every tensor moved to `device` (mirrors System.to; the
         paws' numpy radial tables and the one-center machinery stay CPU)."""
 

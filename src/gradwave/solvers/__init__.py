@@ -19,13 +19,13 @@ from gradwave.solvers.davidson import (
 from gradwave.solvers.precond import teter, teter_b
 
 __all__ = [
+    "BatchedDavidsonResult",
+    "DavidsonResult",
+    "chebyshev_filtered_batched",
+    "chebyshev_filtered_batched_ms",
     "davidson",
     "davidson_batched",
     "davidson_batched_ms",
-    "DavidsonResult",
-    "BatchedDavidsonResult",
-    "chebyshev_filtered_batched",
-    "chebyshev_filtered_batched_ms",
     "teter",
     "teter_b",
 ]
