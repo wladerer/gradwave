@@ -651,6 +651,38 @@ def run_magnetism(inp: Input, verbose: bool = True):
         rhotol=inp.scf.rhotol, mixing_alpha=inp.scf.mixing.alpha, verbose=verbose)
 
 
+def _write_volumetric(res, spec, outdir, verbose) -> dict:
+    """Write the requested volumetric fields (.cube/.xsf) and return an
+    {label: filename} map for summary["outputs"]. A field that the result type
+    does not support (e.g. ELF on a noncollinear run) is skipped with a warning
+    rather than losing the finished run."""
+    from gradwave.postscf import volumetric as vol
+
+    ext = "." + spec.format
+    jobs = []
+    if spec.density:
+        jobs.append(("density", f"density{ext}", lambda p: vol.write_density(res, p)))
+    if spec.elf:
+        jobs.append(("elf", f"elf{ext}", lambda p: vol.write_elf(res, p)))
+    if spec.magnetization:
+        jobs.append(("magnetization", f"magnetization{ext}",
+                     lambda p: vol.write_magnetization(res, p)))
+    for band, kpt in spec.bands:
+        label = f"parchg_b{band}_k{kpt}"
+        jobs.append((label, f"{label}{ext}",
+                     lambda p, b=band, k=kpt: vol.write_band_density(res, p, band=b, kpoint=k)))
+
+    written = {}
+    for label, name, write in jobs:
+        try:
+            write(outdir / name)
+            written[label] = name
+        except (NotImplementedError, ValueError) as exc:
+            if verbose:
+                print(f"skipped {label}: {exc}")
+    return written
+
+
 def run(inp: Input, verbose: bool = True) -> dict:
     """Execute inp.task and write <task>.json, <task>.out and (for SCF
     state) checkpoint.pt into inp.output_dir."""
@@ -743,6 +775,8 @@ def run(inp: Input, verbose: bool = True) -> dict:
 
         ase_write(str(outdir / "relax.xyz"), _frames, format="extxyz")
         outputs["trajectory"] = "relax.xyz"
+    if res is not None and inp.output_volumetric.any():
+        outputs.update(_write_volumetric(res, inp.output_volumetric, outdir, verbose))
     summary["provenance"] = provenance_block(snap, meter)
     summary["outputs"] = {**outputs, "json": f"{inp.task}.json",
                           "report": f"{inp.task}.out"}

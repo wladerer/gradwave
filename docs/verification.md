@@ -92,6 +92,27 @@ every new energy term lands with one):
 - becsum-FD of the one-center energy vs `ddd` (5e-9, post-rewrite)
 - dE/dU by Hellmann-Feynman vs FD SCF re-runs (7.4e-7)
 - gradcheck on unit-level autograd paths
+- volumetric export identities (`tests/integration/test_volumetric.py`)
+
+**PARCHG↔CHGCAR sum identity**
+(`tests/integration/test_volumetric.py`). The band-decomposed density and the
+total density come from the same coefficients, so their occupation-weighted sum
+is an identity of the discretized functional, not converged physics:
+
+    Σ_k w_k Σ_n f_nk |ψ_nk(r)|²  ==  ρ(r)        (< 1e-10, elementwise on the grid)
+
+The test reconstructs each |ψ_nk(r)|² through the export path (`g_to_r` on the
+stored coefficients) and compares against `res.rho` from the SCF's own `density_b`.
+It held at 5e-16 on a Si mesh. The companion normalizations — ∫ρ dr = n_electrons and
+∫|ψ_nk|² dr = 1 — are the same class, and ELF is bounded to [0,1] by construction.
+The identity catches a wrong G-sphere index, a spinor up/down mixup, or a missing
+1/Ω in the export before any file reaches VESTA.
+
+The charge-response field carries its own identity: ∫ ∂n(r)/∂R_I dr = 0, because
+moving an atom conserves the electron count. The finite-difference response
+(`density_response_fd`) returns this residual with the field and it lands at 1e-11 on
+a rattled Si cell, an end-to-end check that the two displaced SCFs converged to the
+same electron count on the same grid.
 
 Rules learned the hard way, now policy:
 

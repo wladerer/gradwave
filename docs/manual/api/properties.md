@@ -155,3 +155,38 @@ mean-field Curie temperature — the important quantities and qualities in one c
 ::: gradwave.postscf.magnetism.characterize_magnetism
 
 ::: gradwave.postscf.magnetism.MagneticReport
+
+## Volumetric export
+
+Real-space fields written to `.cube`/`.xsf` for VESTA and Ovito: the density
+(CHGCAR analog), the band-decomposed density (PARCHG analog), the electron
+localization function, and the noncollinear magnetization density. The `write_*`
+helpers take a converged result and a path, choosing the format from the extension.
+The `output.volumetric` input block calls these after a run; see
+[Inputs and outputs](../io.md#volumetric-export) for the coverage by result type.
+
+::: gradwave.postscf.volumetric.write_density
+
+::: gradwave.postscf.volumetric.write_band_density
+
+::: gradwave.postscf.volumetric.write_elf
+
+::: gradwave.postscf.volumetric.write_magnetization
+
+::: gradwave.postscf.volumetric.density
+
+::: gradwave.postscf.volumetric.band_density
+
+::: gradwave.postscf.volumetric.elf
+
+::: gradwave.postscf.volumetric.magnetization
+
+### Charge-response field
+
+∂n(r)/∂R_I, the density change when an atom moves, by central finite difference of
+two displaced SCFs. Covers every formalism and returns the ∫ = 0 charge-conservation
+residual with the field.
+
+::: gradwave.postscf.response.write_density_response
+
+::: gradwave.postscf.response.density_response_fd
