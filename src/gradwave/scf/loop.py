@@ -306,6 +306,7 @@ class SCFResult:
     drho_scf: torch.Tensor | None = None  # last self-consistency residual ρ_out−ρ_in
                                           # (total density) for the SCF-error estimate
     formalism: str = "nc"  # result-type tag shared by all four SCF drivers
+    kerker_used: bool | None = None  # resolved Kerker on/off (auto → concrete)
 
 
 def vxc_spin_potential(xc, rho_up, rho_dn, grid, tau_s=None):
@@ -636,6 +637,14 @@ def scf(
     def symmetrize(r_out):
         return symmetrize_rho(system.rho_symmetrizer, r_out, grid)
 
+    if verbose:
+        _ec = getattr(system, "ecut", None)
+        _ecs = f"ecut {_ec / 13.605693122994:.0f} Ry · " if _ec else ""
+        print(f"SCF  {len(system.positions)} atoms · {len(system.kweights)} k(IBZ)"
+              f" · {system.nbands} bands · {_ecs}grid "
+              f"{'×'.join(str(n) for n in grid.shape)} · nspin {nspin}"
+              f" · {system.kweights.device}", flush=True)
+
     for it in range(1, max_iter + 1):
         t_it = time.perf_counter()
         rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
@@ -825,13 +834,23 @@ def scf(
         # (total, mag) → per-channel r-space densities (MixLayout.unpack)
         rho_s, _ = layout.unpack(mixer.step(rho_in_vec, rho_out_vec))
 
+    if verbose:
+        _tag = "converged" if converged else "NOT CONVERGED"
+        _extra = ""
+        if nspin == 2:
+            _md = rho_s[0] - rho_s[1]
+            _extra = f" · m = {float(_md.mean()) * vol:+.4f} muB"
+        _fm = "" if mu is None else f" · Fermi = {mu:.4f} eV"
+        print(f"SCF {_tag} in {it} iterations · F = {e_free:+.10f} eV"
+              f"{_fm}{_extra}", flush=True)
+
     rho_tot_final = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
     if nspin == 1:
         return SCFResult(
             converged=converged, n_iter=it, energies=energies, fermi=mu,
             eigenvalues=eigs_s[0], occupations=occ_s[0], coeffs=coeffs_list_s[0],
             rho=rho_tot_final, v_eff=veff_s[0], system=system, history=history,
-            hub_occ=n_hub_s, drho_scf=drho_scf,
+            hub_occ=n_hub_s, drho_scf=drho_scf, kerker_used=bool(kerker),
         )
     m_density = rho_s[0] - rho_s[1]
     return SCFResult(
@@ -841,7 +860,7 @@ def scf(
         system=system, history=history, nspin=2, rho_spin=rho_s,
         mag_total=float(m_density.mean()) * vol,
         mag_abs=float(m_density.abs().mean()) * vol,
-        hub_occ=n_hub_s, drho_scf=drho_scf,
+        hub_occ=n_hub_s, drho_scf=drho_scf, kerker_used=bool(kerker),
     )
 
 

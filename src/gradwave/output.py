@@ -37,12 +37,21 @@ def _structure_lines(struct):
         label = "cell [Å]" if i == 0 else ""
         lines.append(f"   {label:<12s}" + "".join(f"{x:12.6f}" for x in row))
     facts = []
+    if struct.get("n_atoms"):
+        facts.append(f"{struct['n_atoms']} atoms")
     if struct.get("volume_ang3"):
         facts.append(f"volume {struct['volume_ang3']:.3f} Å³")
-    if struct.get("spacegroup"):
-        facts.append(f"space group {struct['spacegroup']}")
+    if struct.get("density_g_cm3"):
+        facts.append(f"density {struct['density_g_cm3']:.3f} g/cm³")
     if facts:
         lines.append("   " + " · ".join(facts))
+    if struct.get("spacegroup"):
+        sg = f"space group {struct['spacegroup']}"
+        if struct.get("pointgroup"):
+            sg += f" · point group {struct['pointgroup']}"
+        if struct.get("n_symops"):
+            sg += f" · {struct['n_symops']} symmetry operations"
+        lines.append("   " + sg)
     lines.append("")
     for sym, pos in zip(struct["species"], struct["positions_ang"],
                         strict=True):
@@ -53,8 +62,13 @@ def _structure_lines(struct):
 def _parameters_lines(par):
     lines = [_sec("parameters")]
     mesh = "×".join(str(n) for n in par["kmesh"])
-    if par.get("nk"):
-        mesh += f" → {par['nk']} k"
+    total, nk = par.get("nk_total"), par.get("nk")
+    if total and nk:
+        mesh += f" = {total} k ({nk} IBZ)"
+    elif total:
+        mesh += f" = {total} k"
+    elif nk:
+        mesh += f" → {nk} k"
     pairs = [
         ("formalism", par["formalism"]),
         ("xc", par["xc"].upper()),
@@ -77,6 +91,20 @@ def _parameters_lines(par):
     if par.get("npw"):
         pairs.append(("plane waves", f"{par['npw']} (k 1)"))
     lines += _cols(pairs)
+    mix = par.get("mixing")
+    if mix:
+        bits = [mix["scheme"]]
+        if mix.get("alpha") is not None:
+            bits.append(f"α {mix['alpha']:g}")
+        if mix.get("history"):
+            bits.append(f"history {mix['history']}")
+        ku = mix.get("kerker_used")
+        if ku is not None:
+            auto = " (auto)" if mix.get("kerker") == "auto" else ""
+            bits.append(f"Kerker {'on' if ku else 'off'}{auto}")
+        elif mix.get("kerker") is not None:
+            bits.append(f"Kerker {mix['kerker']}")
+        lines.append(f"   {'mixing':<12s}" + " · ".join(bits))
     for sym, fname in par["pseudos"].items():
         lines.append(f"   {'pseudo ' + sym:<12s}{fname}")
     return lines
@@ -104,6 +132,20 @@ def _scf_lines(scf, runtime=None):
     if runtime is not None:
         tail += f" · {runtime:.1f} s"
     lines += ["", tail]
+    conv = scf.get("convergence")
+    if conv:
+        bits = []
+        if conv.get("final_dE_eV") is not None:
+            bits.append(f"final ΔE {abs(conv['final_dE_eV']):.1e} eV "
+                        f"(etol {conv['etol_eV']:.0e})")
+        if conv.get("final_drho") is not None:
+            bits.append(f"|Δρ| {conv['final_drho']:.1e} (rhotol {conv['rhotol']:.0e})")
+        if conv.get("ratio_q") is not None:
+            bits.append(f"ratio q ≈ {conv['ratio_q']:.2f}")
+        if conv.get("warm_started"):
+            bits.append("warm-started")
+        if bits:
+            lines.append("   " + " · ".join(bits))
     return lines
 
 
@@ -123,6 +165,9 @@ def _energy_lines(scf):
     lines.append(f"   {'':<18s}{'─' * 20:>20s}")
     lines.append(f"   {'total E':<18s}{e['total']:>20.10f}")
     lines.append(f"   {'free energy F':<18s}{e['free_energy']:>20.10f}")
+    if scf.get("free_energy_per_atom_eV") is not None:
+        lines.append(f"   {'F / atom':<18s}"
+                     f"{scf['free_energy_per_atom_eV']:>20.10f}")
     facts = []
     if scf.get("fermi_eV") is not None:
         facts.append(f"Fermi {scf['fermi_eV']:.4f} eV")
@@ -172,6 +217,12 @@ def _error_lines(err):
                      f"{scf['energy_converged_estimate_eV']:.8f} eV")
     if sm is not None and sm.get("note"):
         lines.append(f"   smearing: {sm['note']}")
+    tot = err.get("numerical_energy_error")
+    if tot is not None:
+        parts = ", ".join(f"{k} {v:.2e}" for k, v in tot["terms_eV"].items())
+        lines.append(f"   numerical total ≈ {tot['total_eV']:.3e} eV "
+                     f"({tot['total_meV_per_atom']:.3f} meV/atom) = {parts}")
+        lines.append(f"   {tot['note']}")
     return lines
 
 
@@ -208,14 +259,30 @@ def _relax_lines(relax):
     lines.append(f"   optimizer {relax.get('optimizer', '?')} · "
                  f"target fmax {relax.get('fmax_target_eV_ang', '?')} eV/Å")
     lines.append("")
-    lines.append(f"   {'step':>4s}   {'E [eV]':>18s}   {'fmax [eV/Å]':>12s}")
-    for step in relax.get("trajectory", []):
-        lines.append(f"   {step['step']:>4d}   "
-                     f"{step['energy_eV']:>18.10f}   "
-                     f"{step['fmax_eV_ang']:>12.6f}")
+    traj = relax.get("trajectory", [])
+    has_scf = any("scf_iter" in s for s in traj)
+    head = f"   {'step':>4s}   {'E [eV]':>18s}   {'fmax [eV/Å]':>12s}"
+    if has_scf:
+        head += f"   {'SCF it':>7s}"
+    lines.append(head)
+    for step in traj:
+        row = (f"   {step['step']:>4d}   {step['energy_eV']:>18.10f}   "
+               f"{step['fmax_eV_ang']:>12.6f}")
+        if has_scf and "scf_iter" in step:
+            mark = "" if step.get("scf_converged", True) else "!"
+            row += f"   {str(step['scf_iter']) + mark:>7s}"
+        lines.append(row)
     tag = "converged" if relax["converged"] else "NOT CONVERGED"
     lines += ["", f"   {tag} after {relax['n_steps']} steps · "
               f"fmax {relax['fmax_eV_ang']:.6f} eV/Å"]
+    if relax.get("scf_total_iter") is not None:
+        conv = ("all SCFs converged" if relax.get("scf_all_converged", True)
+                else "some SCFs NOT converged")
+        lines.append(f"   {relax['scf_total_iter']} SCF iterations total · {conv}")
+    if relax.get("energy_change_eV") is not None:
+        extra = (f" · ΔV {relax['volume_change_ang3']:+.3f} Å³"
+                 if relax.get("volume_change_ang3") is not None else "")
+        lines.append(f"   ΔE from start {relax['energy_change_eV']:+.6f} eV{extra}")
     if relax.get("max_displacement_ang") is not None:
         lines.append(f"   max displacement from start: "
                      f"{relax['max_displacement_ang']:.4f} Å")

@@ -2,7 +2,7 @@
  "code": {
   "name": "gradwave",
   "version": "0.1.0",
-  "created": "2026-07-16T17:51:41"
+  "created": "2026-07-21T18:57:56"
  },
  "task": "relax",
  "structure": {
@@ -39,8 +39,12 @@
    "C",
    "C"
   ],
+  "n_atoms": 2,
   "volume_ang3": 11.34617131575,
-  "spacegroup": "P-1 (2)"
+  "density_g_cm3": 3.515676640850054,
+  "spacegroup": "P-1 (2)",
+  "pointgroup": "-1",
+  "n_symops": 2
  },
  "parameters": {
   "formalism": "nc",
@@ -53,11 +57,19 @@
    4
   ],
   "nk": null,
+  "nk_total": 64,
   "kweights": null,
   "nspin": 1,
   "smearing": "none",
   "width_eV": 0.1,
   "symmetry": true,
+  "mixing": {
+   "scheme": "pulay",
+   "alpha": 0.7,
+   "history": null,
+   "kerker": "auto",
+   "kerker_used": null
+  },
   "pseudos": {
    "C": "C_ONCV_PBE-1.2.upf"
   }
@@ -68,23 +80,23 @@
   "optimizer": "bfgs",
   "cell_relaxed": false,
   "fmax_target_eV_ang": 0.01,
-  "energy_eV": -309.6887744673172,
-  "fmax_eV_ang": 0.004747826378686493,
-  "max_displacement_ang": 0.038980945865679656,
+  "energy_eV": -309.68877446731744,
+  "fmax_eV_ang": 0.004747826378757044,
+  "max_displacement_ang": 0.03898094586567936,
   "species": [
    "C",
    "C"
   ],
   "positions_ang": [
    [
-    0.029960076087496495,
-    -0.014932408595774667,
-    0.019973260999228436
+    0.029960076087496505,
+    -0.01493240859577422,
+    0.01997326099922827
    ],
    [
     0.9218399239125035,
-    0.8767324085957747,
-    0.9118267390007715
+    0.8767324085957742,
+    0.9118267390007718
    ]
   ],
   "cell_ang": [
@@ -108,8 +120,8 @@
   "trajectory": [
    {
     "step": 0,
-    "energy_eV": -309.5591761678071,
-    "fmax_eV_ang": 3.431507364046522,
+    "energy_eV": -309.55917616780715,
+    "fmax_eV_ang": 3.431507364046504,
     "positions_ang": [
      [
       0.0,
@@ -138,22 +150,24 @@
       1.7835,
       0.0
      ]
-    ]
+    ],
+    "scf_iter": 9,
+    "scf_converged": true
    },
    {
     "step": 1,
-    "energy_eV": -309.68047248309256,
-    "fmax_eV_ang": 0.7860378320805611,
+    "energy_eV": -309.6804724830925,
+    "fmax_eV_ang": 0.7860378320805267,
     "positions_ang": [
      [
-      0.03573403235464511,
-      -0.02138422124703948,
-      0.025863193667900207
+      0.035734032354644896,
+      -0.021384221247039266,
+      0.02586319366790018
      ],
      [
-      0.9160659676453549,
-      0.8831842212470395,
-      0.9059368063320997
+      0.9160659676453551,
+      0.8831842212470393,
+      0.9059368063320998
      ]
     ],
     "cell_ang": [
@@ -172,22 +186,24 @@
       1.7835,
       0.0
      ]
-    ]
+    ],
+    "scf_iter": 8,
+    "scf_converged": true
    },
    {
     "step": 2,
     "energy_eV": -309.6886355199851,
-    "fmax_eV_ang": 0.1043190135702545,
+    "fmax_eV_ang": 0.10431901357028227,
     "positions_ang": [
      [
-      0.03077889596377726,
-      -0.01572840132638413,
-      0.0207674851771818
+      0.030778895963777315,
+      -0.01572840132638399,
+      0.02076748517718205
      ],
      [
-      0.9210211040362227,
-      0.8775284013263842,
-      0.9110325148228181
+      0.9210211040362226,
+      0.877528401326384,
+      0.911032514822818
      ]
     ],
     "cell_ang": [
@@ -206,22 +222,24 @@
       1.7835,
       0.0
      ]
-    ]
+    ],
+    "scf_iter": 7,
+    "scf_converged": true
    },
    {
     "step": 3,
-    "energy_eV": -309.6887744673172,
-    "fmax_eV_ang": 0.004747826378686493,
+    "energy_eV": -309.68877446731744,
+    "fmax_eV_ang": 0.004747826378757044,
     "positions_ang": [
      [
-      0.029960076087496495,
-      -0.014932408595774667,
-      0.019973260999228436
+      0.029960076087496505,
+      -0.01493240859577422,
+      0.01997326099922827
      ],
      [
       0.9218399239125035,
-      0.8767324085957747,
-      0.9118267390007715
+      0.8767324085957742,
+      0.9118267390007718
      ]
     ],
     "cell_ang": [
@@ -240,11 +258,172 @@
       1.7835,
       0.0
      ]
-    ]
+    ],
+    "scf_iter": 6,
+    "scf_converged": true
    }
-  ]
+  ],
+  "scf_iter_per_step": [
+   9,
+   8,
+   7,
+   6
+  ],
+  "scf_total_iter": 30,
+  "scf_all_converged": true,
+  "energy_change_eV": -0.12959829951029178,
+  "volume_change_ang3": 0.0,
+  "nk_ibz": 36
  },
- "runtime_s": 35.57,
+ "runtime_s": 380.11,
+ "error_estimate": {
+  "available": true,
+  "method": "Cances first-order complement (post-SCF)",
+  "ecut_eV": 680.28,
+  "ecut_large_eV": 1700.6999999999998,
+  "denergy_eV": -0.19970472976071646,
+  "denergy_meV_per_atom": -99.85236488035822,
+  "free_energy_extrapolated_eV": -309.88847919707814,
+  "drho_L1_per_electron": 0.006123946912744845,
+  "int_drho": 9.521376142167164e-19,
+  "note": "first-order estimate, indicative not a rigorous bound",
+  "force_error_max_eV_ang": 0.0003187161042761261,
+  "force_error_rms_eV_ang": 0.0003187161042761261,
+  "gap_eV": 4.439388001869808,
+  "gap_extrapolated_eV": 4.467188956953037,
+  "dgap_eV": 0.027800955083228225,
+  "scf_convergence": {
+   "denergy_eV": 5.21276924480799e-15,
+   "denergy_meV_per_atom": 2.6063846224039953e-12,
+   "residual_L1_per_electron": 5.900445953500792e-09,
+   "reliable": true,
+   "ratio": 0.022412179917878243,
+   "energy_converged_estimate_eV": -309.68877446731744,
+   "method": "energy-trajectory extrapolation",
+   "denergy_response_eV": -2.3916445690707577e-15,
+   "screened": false,
+   "note": "response diagnostic is not sign-definite; the headline denergy is the trajectory extrapolation"
+  },
+  "smearing_error": {
+   "available": false,
+   "reason": "no smearing (fixed occupations): no smearing error"
+  },
+  "numerical_energy_error": {
+   "total_eV": 0.19970472976072168,
+   "total_meV_per_atom": 99.85236488036084,
+   "terms_eV": {
+    "ecut": 0.19970472976071646,
+    "scf": 5.21276924480799e-15
+   },
+   "note": "leading-order sum of the reachable terms; k-point sampling excluded"
+  }
+ },
+ "provenance": {
+  "timestamp": "2026-07-21T18:51:36-07:00",
+  "host": {
+   "hostname": "thinkpad",
+   "os": "Linux 6.18.33",
+   "arch": "x86_64"
+  },
+  "code": {
+   "gradwave": "0.1.0",
+   "git": "0025c49",
+   "python": "3.12.13",
+   "torch": "2.12.1+cu130"
+  },
+  "cpu": {
+   "model": "Intel(R) Core(TM) i5-10210U CPU @ 1.60GHz",
+   "logical_cores": 8,
+   "torch_threads": 4
+  },
+  "memory": {
+   "total_gb": 23.26,
+   "available_gb": 12.53
+  },
+  "gpu": null,
+  "load": {
+   "load_1m": 36.31005859375,
+   "load_5m": 32.34765625,
+   "load_15m": 29.62548828125,
+   "busy_other_processes": [
+    {
+     "comm": "python",
+     "pcpu": 90.6
+    },
+    {
+     "comm": "python",
+     "pcpu": 89.8
+    },
+    {
+     "comm": "python",
+     "pcpu": 87.9
+    },
+    {
+     "comm": "python",
+     "pcpu": 87.9
+    },
+    {
+     "comm": "python",
+     "pcpu": 86.9
+    }
+   ]
+  },
+  "thermal": {
+   "zones_c": {
+    "pch_cannonlake": 68.0,
+    "INT3400 Thermal": 20.0,
+    "B0D4": 79.0,
+    "SEN1": 1.1,
+    "SEN2": 44.0,
+    "acpitz": 79.0,
+    "x86_pkg_temp": 80.0,
+    "iwlwifi_1": 72.0
+   },
+   "max_c": 80.0
+  },
+  "load_end": {
+   "load_1m": 18.634765625,
+   "load_5m": 29.41650390625,
+   "load_15m": 29.87255859375,
+   "busy_other_processes": [
+    {
+     "comm": "python",
+     "pcpu": 112.0
+    },
+    {
+     "comm": "python",
+     "pcpu": 99.4
+    },
+    {
+     "comm": "python",
+     "pcpu": 94.6
+    },
+    {
+     "comm": "python",
+     "pcpu": 90.5
+    }
+   ]
+  },
+  "thermal_end": {
+   "zones_c": {
+    "pch_cannonlake": 69.0,
+    "INT3400 Thermal": 20.0,
+    "B0D4": 78.0,
+    "SEN1": 1.1,
+    "SEN2": 44.0,
+    "acpitz": 78.0,
+    "x86_pkg_temp": 80.0,
+    "iwlwifi_1": 72.0
+   },
+   "max_c": 80.0
+  },
+  "process": {
+   "wall_s": 390.41,
+   "cpu_s": 446.5,
+   "effective_threads": 1.14,
+   "peak_rss_gb": 0.8
+  }
+ },
  "outputs": {
   "trajectory": "relax.xyz",
   "json": "relax.json",

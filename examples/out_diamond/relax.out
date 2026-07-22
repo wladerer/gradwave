@@ -1,11 +1,12 @@
-gradwave 0.1.0 · relax run · 2026-07-16 17:51:41
+gradwave 0.1.0 · relax run · 2026-07-21 18:57:56
 ────────────────────────────────────────────────
 
 ── structure ───────────────────────────────────────────────────────────
    cell [Å]        0.000000    1.783500    1.783500
                    1.783500    0.000000    1.783500
                    1.783500    1.783500    0.000000
-   volume 11.346 Å³ · space group P-1 (2)
+   2 atoms · volume 11.346 Å³ · density 3.516 g/cm³
+   space group P-1 (2) · point group -1 · 2 symmetry operations
 
    C       0.000000    0.000000    0.000000
    C       0.951800    0.861800    0.931800
@@ -13,25 +14,52 @@ gradwave 0.1.0 · relax run · 2026-07-16 17:51:41
 ── parameters ──────────────────────────────────────────────────────────
    formalism   nc                    xc          PBE
    ecut        680.28 eV             ecutrho     —
-   k-mesh      4×4×4                 spin        1
+   k-mesh      4×4×4 = 64 k          spin        1
    smearing    none                  symmetry    on
+   mixing      pulay · α 0.7 · Kerker auto
    pseudo C    C_ONCV_PBE-1.2.upf
 
 ── relaxation ──────────────────────────────────────────────────────────
    optimizer bfgs · target fmax 0.01 eV/Å
 
-   step               E [eV]    fmax [eV/Å]
-      0      -309.5591761678       3.431507
-      1      -309.6804724831       0.786038
-      2      -309.6886355200       0.104319
-      3      -309.6887744673       0.004748
+   step               E [eV]    fmax [eV/Å]    SCF it
+      0      -309.5591761678       3.431507         9
+      1      -309.6804724831       0.786038         8
+      2      -309.6886355200       0.104319         7
+      3      -309.6887744673       0.004748         6
 
    converged after 3 steps · fmax 0.004748 eV/Å
+   30 SCF iterations total · all SCFs converged
+   ΔE from start -0.129598 eV · ΔV +0.000 Å³
    max displacement from start: 0.0390 Å
 
    final positions [Å]:
    C       0.029960   -0.014932    0.019973
    C       0.921840    0.876732    0.911827
 
-   wall time 35.6 s  |  files relax.xyz · relax.json · relax.out
+── basis-set error estimate ────────────────────────────────────────────
+   Ecut        680.3 eV              Ecut large  1700.7 eV
+   δE          -1.9970e-01 eV        δE/atom     -99.852 meV
+   F → limit   -309.8884791971 eV    ∫|δρ|/e⁻    6.124e-03
+   δF max      3.187e-04 eV/Å        δF rms      3.187e-04 eV/Å
+   gap         4.4394 eV             gap → limit 4.4672 eV
+   δgap        2.7801e-02 eV         δE scf      5.213e-15 eV
+   ∫|δρscf|/e⁻ 5.90e-09
+   first-order estimate, indicative not a rigorous bound
+   SCF error: unscreened upper bound; converged energy ≈ -309.68877447 eV
+   numerical total ≈ 1.997e-01 eV (99.852 meV/atom) = ecut 2.00e-01, scf 5.21e-15
+   leading-order sum of the reachable terms; k-point sampling excluded
+
+── machine ─────────────────────────────────────────────────────────────
+   host    thinkpad
+   os      Linux 6.18.33
+   cpu     Intel(R) Core(TM) i5-10210U CPU @ 1.60GHz
+   cores   8 (torch 4 threads)
+   ram     23.3 GB (12.5 free at start)
+   code    gradwave 0.1.0 @ 0025c49 · torch 2.12.1+cu130
+   start   load 36.31 · busy: python 91%, python 90%, python 88% · 80 °C
+   end     load 18.63 · busy: python 112%, python 99%, python 95% · 80 °C
+   process wall 390.4 s · cpu 446.5 s (≈1.1 threads) · peak rss 0.80 GB
+
+   wall time 380.1 s  |  files relax.xyz · relax.json · relax.out
 

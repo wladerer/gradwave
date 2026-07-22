@@ -261,6 +261,7 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
             **energies_eV_dict(e),
             "e0": float(0.5 * (e.total + e.free_energy)),
         },
+        "free_energy_per_atom_eV": float(e.free_energy) / len(system.positions),
         "trace": trace,
     }
     if nspin == 2:
@@ -271,6 +272,26 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
         scf_block["magnetization_vector_muB"] = mv
         scf_block["total_magnetization_muB"] = float((sum(x * x for x in mv)) ** 0.5)
         scf_block["absolute_magnetization_muB"] = float(_get(res, "mag_abs", 0.0))
+
+    # convergence diagnostics: final residuals against the thresholds, the
+    # geometric decay rate q of the energy residual (small q = fast, clean
+    # convergence), and whether the run warm-started from a checkpoint
+    _des = [abs(h["dE_eV"]) for h in trace
+            if h.get("dE_eV") is not None and h["dE_eV"] != 0.0]
+    _ratios = [_des[i] / _des[i - 1] for i in range(1, len(_des)) if _des[i - 1] > 0]
+    q = None
+    if _ratios:
+        _tail = sorted(_ratios[-4:])
+        q = float(_tail[len(_tail) // 2])  # median of the last few ratios
+    _final = trace[-1] if trace else {}
+    scf_block["convergence"] = {
+        "final_dE_eV": _final.get("dE_eV"),
+        "final_drho": _final.get("drho"),
+        "etol_eV": float(inp.scf.etol),
+        "rhotol": float(inp.scf.rhotol),
+        "ratio_q": q,
+        "warm_started": inp.restart is not None,
+    }
 
     summary = {
         "code": {"name": "gradwave", "version": __version__,
@@ -285,11 +306,19 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
             "ecutrho_eV": float(inp.ecutrho) if (uspp and inp.ecutrho) else None,
             "kmesh": list(inp.kpoints.mesh),
             "nk": len(system.kweights),
+            "nk_total": int(math.prod(inp.kpoints.mesh)),
             "kweights": [float(w) for w in system.kweights],
             "nspin": nspin,
             "smearing": inp.smearing.type,
             "width_eV": float(inp.smearing.width),
             "symmetry": bool(inp.symmetry),
+            "mixing": {
+                "scheme": inp.scf.mixing.scheme,
+                "alpha": float(inp.scf.mixing.alpha),
+                "history": inp.scf.mixing.history,
+                "kerker": inp.scf.mixing.kerker,
+                "kerker_used": _get(res, "kerker_used"),
+            },
             "n_electrons": float(system.n_electrons),
             "nbands": int(system.nbands),
             "fft_grid": list(system.grid.shape),
@@ -354,7 +383,7 @@ def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object, list]:
         gpa_to_ev_a3 = 1.0 / 160.21766208
         target = FrechetCellFilter(
             atoms, scalar_pressure=inp.relax.pressure * gpa_to_ev_a3)
-    opt = opt_cls(target, logfile="-" if verbose else None)
+    opt = opt_cls(target, logfile=None)  # we print our own richer per-step line
     trajectory = []
     frames = []  # ASE Atoms per step, energy+forces frozen for extxyz output
 
@@ -364,13 +393,27 @@ def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object, list]:
 
         forces = atoms.get_forces()
         energy = float(atoms.get_potential_energy())
-        trajectory.append({
+        fmax = float(np.linalg.norm(forces, axis=1).max())
+        entry = {
             "step": opt.nsteps,
             "energy_eV": energy,
-            "fmax_eV_ang": float(np.linalg.norm(forces, axis=1).max()),
+            "fmax_eV_ang": fmax,
             "positions_ang": atoms.get_positions().tolist(),
             "cell_ang": atoms.cell.array.tolist(),
-        })
+        }
+        # the calculator caches its last SCF, so each relax step records how
+        # many SCF iterations it took and whether it converged
+        scf_res = getattr(atoms.calc, "last_result", None)
+        if scf_res is not None:
+            entry["scf_iter"] = int(getattr(scf_res, "n_iter", 0))
+            entry["scf_converged"] = bool(getattr(scf_res, "converged", True))
+        trajectory.append(entry)
+        if verbose:
+            sc = ((f" · SCF {entry['scf_iter']} it"
+                   + ("" if entry.get("scf_converged", True) else " (NOT conv.)"))
+                  if "scf_iter" in entry else "")
+            print(f"  relax step {opt.nsteps:>3d} · E = {energy:+.8f} eV"
+                  f" · fmax = {fmax:.5f} eV/Å{sc}", flush=True)
         frame = atoms.copy()
         sp_kw = {"energy": energy, "forces": forces}
         if inp.relax.cell:
@@ -401,6 +444,21 @@ def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object, list]:
         "volume_ang3": float(atoms.get_volume()),
         "trajectory": trajectory,
     }
+    scf_iters = [s["scf_iter"] for s in trajectory if "scf_iter" in s]
+    if scf_iters:
+        relax["scf_iter_per_step"] = scf_iters
+        relax["scf_total_iter"] = int(sum(scf_iters))
+        relax["scf_all_converged"] = all(
+            s.get("scf_converged", True) for s in trajectory)
+    if trajectory:
+        relax["energy_change_eV"] = (
+            float(atoms.get_potential_energy()) - trajectory[0]["energy_eV"])
+        relax["volume_change_ang3"] = (
+            float(atoms.get_volume()) - float(abs(np.linalg.det(
+                np.asarray(trajectory[0]["cell_ang"])))))
+    last = getattr(atoms.calc, "last_result", None)
+    if last is not None and getattr(last, "system", None) is not None:
+        relax["nk_ibz"] = len(last.system.kweights)
     if inp.relax.cell:
         relax["max_stress_eV_ang3"] = float(np.abs(atoms.get_stress()).max())
         relax["pressure_GPa"] = inp.relax.pressure
@@ -593,6 +651,22 @@ def _error_estimate_block(res, inp) -> dict:
         # block["smearing"] eagerly, so an available:False entry there would
         # break it (a fixed-occupation run raises here every time)
         block["smearing_error"] = {"available": False, "reason": str(exc)}
+    # rolled-up numerical-energy error: the reachable terms (basis-set Ecut, SCF
+    # self-consistency, smearing) add only to leading order because the axes
+    # couple, so this is an indicative sum rather than a rigorous total. k-point
+    # sampling is not reachable from a single run and is excluded.
+    terms = {"ecut": abs(float(block["denergy_eV"]))}
+    if isinstance(block.get("scf_convergence"), dict):
+        terms["scf"] = abs(float(block["scf_convergence"]["denergy_eV"]))
+    if isinstance(block.get("smearing"), dict):
+        terms["smearing"] = abs(float(block["smearing"]["dsmearing_eV"]))
+    total = sum(terms.values())
+    block["numerical_energy_error"] = {
+        "total_eV": total,
+        "total_meV_per_atom": total / natom * 1e3,
+        "terms_eV": terms,
+        "note": "leading-order sum of the reachable terms; k-point sampling excluded",
+    }
     return block
 
 
@@ -757,11 +831,15 @@ def run(inp: Input, verbose: bool = True) -> dict:
 def _structure_block(inp: Input) -> dict:
     import numpy as np
 
+    vol = float(abs(np.linalg.det(inp.atoms.cell.array)))
     block = {
         "cell_ang": inp.atoms.cell.array.tolist(),
         "positions_ang": inp.atoms.get_positions().tolist(),
         "species": inp.atoms.get_chemical_symbols(),
-        "volume_ang3": float(abs(np.linalg.det(inp.atoms.cell.array))),
+        "n_atoms": len(inp.atoms),
+        "volume_ang3": vol,
+        # 1 amu/Å³ = 1.66053906660 g/cm³
+        "density_g_cm3": float(inp.atoms.get_masses().sum() * 1.66053906660 / vol),
     }
     try:
         import spglib
@@ -772,6 +850,8 @@ def _structure_block(inp: Input) -> dict:
             (inp.atoms.cell.array, inp.atoms.get_scaled_positions(),
              inp.atoms.get_atomic_numbers()), symprec=1e-5)
         block["spacegroup"] = f"{ds.international} ({ds.number})"
+        block["pointgroup"] = ds.pointgroup
+        block["n_symops"] = len(ds.rotations)
     except (TypeError, AttributeError, spglib.SpglibError):
         # a degenerate/near-singular cell makes spglib raise or return None
         # (AttributeError on the None dataset); drop the field, don't swallow
@@ -785,6 +865,8 @@ def _parameters_block(inp: Input) -> dict:
     (relax, magnetism). The magnetism run is always the non-collinear/spinor
     formalism (matching build_summary's convention); relax follows the
     pseudopotential family."""
+    import math
+
     species, upfs, _soa = _species_upfs(inp)
     if inp.task == "magnetism":
         formalism = "noncollinear"
@@ -797,10 +879,18 @@ def _parameters_block(inp: Input) -> dict:
         "ecutrho_eV": None,
         "kmesh": list(inp.kpoints.mesh),
         "nk": None,
+        "nk_total": int(math.prod(inp.kpoints.mesh)),
         "kweights": None,
         "nspin": inp.nspin,
         "smearing": inp.smearing.type,
         "width_eV": float(inp.smearing.width),
         "symmetry": bool(inp.symmetry),
+        "mixing": {
+            "scheme": inp.scf.mixing.scheme,
+            "alpha": float(inp.scf.mixing.alpha),
+            "history": inp.scf.mixing.history,
+            "kerker": inp.scf.mixing.kerker,
+            "kerker_used": None,
+        },
         "pseudos": {s: inp.pseudo_map[s] for s in species},
     }

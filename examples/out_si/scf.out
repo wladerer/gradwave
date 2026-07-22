@@ -1,0 +1,89 @@
+gradwave 0.1.0 · scf run · 2026-07-21 18:58:26
+──────────────────────────────────────────────
+
+── structure ───────────────────────────────────────────────────────────
+   cell [Å]        0.000000    2.715000    2.715000
+                   2.715000    0.000000    2.715000
+                   2.715000    2.715000    0.000000
+   2 atoms · volume 40.026 Å³ · density 2.330 g/cm³
+   space group Fd-3m (227) · point group m-3m · 48 symmetry operations
+
+   Si      0.000000    0.000000    0.000000
+   Si      1.357500    1.357500    1.357500
+
+── parameters ──────────────────────────────────────────────────────────
+   formalism   nc                    xc          PBE
+   ecut        300.00 eV             ecutrho     —
+   k-mesh      2×2×2 = 8 k (3 IBZ)   spin        1
+   smearing    none                  symmetry    on
+   electrons   8                     bands       8
+   FFT grid    21×21×21              plane waves 459 (k 1)
+   mixing      pulay · α 0.7 · Kerker off (auto)
+   pseudo Si   Si_ONCV_PBE-1.2.upf
+
+── self-consistency ────────────────────────────────────────────────────
+     it               F [eV]      ΔE [eV]         |Δρ|      t [s]
+      1      -211.8011811518            —     2.40e+00       0.15
+      2      -211.8990249002     9.78e-02     5.33e-01       0.08
+      3      -211.9008695203     1.84e-03     8.22e-02       0.06
+      4      -211.9009686777     9.92e-05     5.42e-03       0.07
+      5      -211.9009708263     2.15e-06     3.71e-04       0.09
+      6      -211.9009708438     1.75e-08     1.12e-04       0.10
+      7      -211.9009708442     4.12e-10     2.52e-06       0.09
+      8      -211.9009708442     2.56e-13     6.74e-07       0.07
+      9      -211.9009708442     8.53e-14     3.34e-08       0.06
+
+   converged in 9 iterations · 1.0 s
+   final ΔE 8.5e-14 eV (etol 1e-08) · |Δρ| 3.3e-08 (rhotol 1e-07) · ratio q ≈ 0.02
+
+── energy [eV] ─────────────────────────────────────────────────────────
+   kinetic                  89.4416388777
+   hartree                  17.2643017337
+   xc                      -66.5593448837
+   local pp                -73.5009898725
+   nonlocal pp              50.0146965226
+   ewald                  -228.5612732219
+                     ────────────────────
+   total E                -211.9009708442
+   free energy F          -211.9009708442
+   F / atom               -105.9504854221
+
+   Fermi 6.5442 eV · gap 0.5902 eV
+
+── basis-set error estimate ────────────────────────────────────────────
+   Ecut        300.0 eV              Ecut large  750.0 eV
+   δE          -3.2942e-02 eV        δE/atom     -16.471 meV
+   F → limit   -211.9339133186 eV    ∫|δρ|/e⁻    1.533e-03
+   δF max      0.000e+00 eV/Å        δF rms      0.000e+00 eV/Å
+   gap         0.5902 eV             gap → limit 0.5853 eV
+   δgap        -4.9386e-03 eV        δE scf      1.375e-15 eV
+   ∫|δρscf|/e⁻ 3.29e-09
+   first-order estimate, indicative not a rigorous bound
+   SCF error: unscreened upper bound; converged energy ≈ -211.90097084 eV
+   numerical total ≈ 3.294e-02 eV (16.471 meV/atom) = ecut 3.29e-02, scf 1.37e-15
+   leading-order sum of the reachable terms; k-point sampling excluded
+
+── eigenvalues [eV] (occupation) ───────────────────────────────────────
+   k 1 · weight 0.125000
+       -5.4915 (2.000)     6.5442 (2.000)     6.5442 (2.000)     6.5442 (2.000)
+        8.9916 (0.000)     8.9916 (0.000)     8.9916 (0.000)     9.8911 (0.000)
+   k 2 · weight 0.500000
+       -3.1401 (2.000)    -0.5103 (2.000)     5.3120 (2.000)     5.3120 (2.000)
+        8.0237 (0.000)     9.7549 (0.000)     9.7549 (0.000)    14.1715 (0.000)
+   k 3 · weight 0.375000
+       -1.3238 (2.000)    -1.3238 (2.000)     3.6197 (2.000)     3.6197 (2.000)
+        7.1344 (0.000)     7.1344 (0.000)    16.6090 (0.000)    16.6090 (0.000)
+
+── machine ─────────────────────────────────────────────────────────────
+   host    thinkpad
+   os      Linux 6.18.33
+   cpu     Intel(R) Core(TM) i5-10210U CPU @ 1.60GHz
+   cores   8 (torch 4 threads)
+   ram     23.3 GB (15.8 free at start)
+   code    gradwave 0.1.0 @ 0025c49 · torch 2.12.1+cu130
+   start   load 13.82 · busy: .claude-unwrapp 13%, .claude-unwrapp 11% · 75 °C
+   end     load 12.79 · busy: .claude-unwrapp 13%, .claude-unwrapp 11% · 70 °C
+   process wall 3.0 s · cpu 5.9 s (≈2.0 threads) · peak rss 0.59 GB
+
+   files checkpoint.pt · scf.json · scf.out
+
