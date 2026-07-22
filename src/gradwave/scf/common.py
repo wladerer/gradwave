@@ -149,11 +149,15 @@ def spin_xc_energy(xc, rho_out_s, rho_core, vol, g_cart, tau_s=None):
 def assemble_pw_energies(coeffs_s, occ_s, kweights, spheres, grid, vol,
                          rho_g_out, e_xc, vloc_g, becps_s, dij_full,
                          positions, charges, entropy_term, nspin,
-                         e_hub=0.0, e_onec=None):
+                         e_hub=0.0, e_onec=None, e_ewald=None):
     """The plane-wave EnergyBreakdown assembly shared by the collinear
     drivers: per-spin kinetic and nonlocal sums (with the BARE D for
     USPP/PAW), total-density Hartree/local, caller-supplied E_xc. e_onec=None
-    leaves the PAW one-center field at its (zero) default for the NC path."""
+    leaves the PAW one-center field at its (zero) default for the NC path.
+
+    E_ewald depends only on the (frozen) ionic positions; pass e_ewald to reuse
+    the once-per-run value and skip the per-iteration rebuild. When None it is
+    recomputed here."""
     from gradwave.core.energies.ewald import ewald_energy
     from gradwave.core.energies.hartree import hartree_energy
     from gradwave.core.energies.kinetic import kinetic_energy
@@ -162,6 +166,7 @@ def assemble_pw_energies(coeffs_s, occ_s, kweights, spheres, grid, vol,
     from gradwave.core.energies.total import EnergyBreakdown
 
     extra = {} if e_onec is None else {"onecenter": e_onec}
+    e_ew = ewald_energy(positions, charges, grid.cell) if e_ewald is None else e_ewald
     return EnergyBreakdown(
         kinetic=sum(kinetic_energy(coeffs_s[sp], occ_s[sp], kweights, spheres)
                     for sp in range(nspin)),
@@ -171,7 +176,7 @@ def assemble_pw_energies(coeffs_s, occ_s, kweights, spheres, grid, vol,
         nonlocal_=sum(nonlocal_energy(becps_s[sp], dij_full, occ_s[sp],
                                       kweights)
                       for sp in range(nspin)),
-        ewald=ewald_energy(positions, charges, grid.cell),
+        ewald=e_ew,
         smearing=entropy_term,
         hubbard=e_hub,
         **extra,

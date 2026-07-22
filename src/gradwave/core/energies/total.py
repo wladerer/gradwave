@@ -93,7 +93,15 @@ def total_energy(
     entropy_term: torch.Tensor | None = None,  # −σS, precomputed by SCF layer
     rho_core: torch.Tensor | None = None,  # NLCC: shifts the XC argument ONLY
     tau: torch.Tensor | None = None,  # meta-GGA kinetic-energy density (needs_tau)
+    e_ewald: torch.Tensor | None = None,  # precomputed E_ewald (see below)
+    vloc_g: torch.Tensor | None = None,  # precomputed V_loc(G) (see below)
 ) -> EnergyBreakdown:
+    # E_ewald and V_loc(G) depend ONLY on the ionic positions. During SCF the
+    # positions are frozen, so the caller may compute them once before the loop
+    # and pass them in here (e_ewald / vloc_g) to skip the per-iteration rebuild.
+    # When they are None (the force/Hessian path, which differentiates THIS
+    # function w.r.t. positions) they are recomputed so both terms stay on the
+    # autograd graph — do not cache them unconditionally.
     volume = grid.volume
     rho_g = r_to_g(rho.to(torch.complex128))
 
@@ -102,10 +110,11 @@ def total_energy(
     rho_xc = rho if rho_core is None else rho + rho_core
     sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
     e_xc = xc.energy(rho_xc, volume, sigma, tau if xc.needs_tau else None)
-    vloc_g = local_potential_g(positions, species_index, vloc_tables, grid.g_cart, volume)
+    if vloc_g is None:
+        vloc_g = local_potential_g(positions, species_index, vloc_tables, grid.g_cart, volume)
     e_loc = local_energy(rho_g, vloc_g, volume)
     e_nl = nonlocal_energy(becp_per_k, dij_full, occ, kweights)
-    e_ew = ewald_energy(positions, charges, grid.cell)
+    e_ew = ewald_energy(positions, charges, grid.cell) if e_ewald is None else e_ewald
 
     zero = torch.zeros((), dtype=e_kin.dtype, device=e_kin.device)
     return EnergyBreakdown(
