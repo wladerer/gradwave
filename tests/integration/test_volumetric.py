@@ -10,6 +10,8 @@ Plus a round-trip through ASE's .cube/.xsf writers.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -152,3 +154,38 @@ def test_noncollinear_spinor_export():
         V.elf(res)
     with pytest.raises(ValueError, match="noncollinear"):
         V.density(res, spin=0)
+
+
+# --- charge-response field ∂n(r)/∂R ---------------------------------------
+
+@pytest.mark.standard  # two SCFs; not a fast-gate test
+def test_density_response_conserves_charge(tmp_path):
+    """∂n(r)/∂R by central difference: the field is nontrivial and integrates
+    to zero (moving an atom conserves the electron count)."""
+    from ase import Atoms
+
+    from gradwave.inputs import Input, KPointsParams, MixingParams, SCFParams, SmearingParams
+    from gradwave.postscf import response as Rsp
+
+    cell, pos = si_fcc()
+    pos = pos.copy()
+    pos[1, 0] += 0.05  # rattle to a low-symmetry reference state
+    inp = Input(
+        atoms=Atoms("Si2", positions=pos, cell=cell, pbc=True),
+        pseudo_dir=Path(pseudo("Si_ONCV_PBE-1.2.upf")).parent,
+        pseudo_map={"Si": "Si_ONCV_PBE-1.2.upf"},
+        ecut=16 * RY, xc="pbe",
+        kpoints=KPointsParams(mesh=(1, 1, 1)),
+        smearing=SmearingParams(type="gaussian", width=0.05),
+        scf=SCFParams(etol=1e-8, rhotol=1e-7, mixing=MixingParams()),
+        symmetry=False, task="scf",
+    )
+    field, drift = Rsp.density_response_fd(inp, atom=0, direction=0, delta=0.03)
+    assert field.ndim == 3             # a scalar field on the FFT grid
+    assert field.std() > 1e-3          # a real, structured field
+    assert abs(drift) < 1e-6           # ∫ ∂n/∂R dr = 0 (charge conservation)
+
+    out, drift2 = Rsp.write_density_response(inp, tmp_path / "resp.cube",
+                                             atom=0, direction=0, delta=0.03)
+    assert Path(out).exists()
+    assert abs(drift2) < 1e-6

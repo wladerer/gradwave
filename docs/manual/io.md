@@ -306,6 +306,28 @@ vol.write_band_density(res, "homo.cube", band=3)  # |ψ_nk(r)|²
 vol.write_elf(res, "elf.xsf")                     # ELF(r)
 ```
 
+### Charge-response field
+
+`gradwave.postscf.response` writes ∂n(r)/∂R_I, the change in the density when an atom
+moves. Rendered as an isosurface it shows where charge flows as the atom is nudged, a
+positive lobe ahead of the motion and a negative one behind, which is the
+force-constant physics made spatial.
+
+```python
+from gradwave.postscf import response
+
+# ∂n(r)/∂R for atom 0 along x, by central finite difference (two SCFs)
+path, drift = response.write_density_response(inp, "dn_dx.cube", atom=0, direction=0)
+```
+
+The reference implementation is a central finite difference of two displaced SCFs, so
+it covers every formalism. It returns the ∫ ∂n/∂R dr residual alongside the field.
+Charge conservation puts it at zero, and a nonzero value flags an unconverged SCF or
+too large a step. The 3N displacements are independent, so a full response set
+parallelizes across the [remote workers](performance.md). For USPP insulators the
+analytic `postscf.uspp_position.position_density_response` gives the same field from
+the converged state in a single response solve, no re-runs.
+
 ## Checkpoints
 
 ```python

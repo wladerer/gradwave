@@ -180,3 +180,13 @@ The `output.volumetric` input block calls these after a run; see
 ::: gradwave.postscf.volumetric.elf
 
 ::: gradwave.postscf.volumetric.magnetization
+
+### Charge-response field
+
+∂n(r)/∂R_I, the density change when an atom moves, by central finite difference of
+two displaced SCFs. Covers every formalism and returns the ∫ = 0 charge-conservation
+residual with the field.
+
+::: gradwave.postscf.response.write_density_response
+
+::: gradwave.postscf.response.density_response_fd

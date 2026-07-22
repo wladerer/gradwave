@@ -108,6 +108,12 @@ It held at 5e-16 on a Si mesh. The companion normalizations — ∫ρ dr = n_ele
 The identity catches a wrong G-sphere index, a spinor up/down mixup, or a missing
 1/Ω in the export before any file reaches VESTA.
 
+The charge-response field carries its own identity: ∫ ∂n(r)/∂R_I dr = 0, because
+moving an atom conserves the electron count. The finite-difference response
+(`density_response_fd`) returns this residual with the field and it lands at 1e-11 on
+a rattled Si cell, an end-to-end check that the two displaced SCFs converged to the
+same electron count on the same grid.
+
 Rules learned the hard way, now policy:
 
 - Gate on **low-symmetry, rattled, mixed-occupation** states. Symmetric
