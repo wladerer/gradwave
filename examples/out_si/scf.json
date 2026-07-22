@@ -1,0 +1,381 @@
+{
+ "code": {
+  "name": "gradwave",
+  "version": "0.1.0",
+  "created": "2026-07-21T18:58:26"
+ },
+ "task": "scf",
+ "structure": {
+  "cell_ang": [
+   [
+    0.0,
+    2.715,
+    2.715
+   ],
+   [
+    2.715,
+    0.0,
+    2.715
+   ],
+   [
+    2.715,
+    2.715,
+    0.0
+   ]
+  ],
+  "positions_ang": [
+   [
+    0.0,
+    0.0,
+    0.0
+   ],
+   [
+    1.3575,
+    1.3575,
+    1.3575
+   ]
+  ],
+  "species": [
+   "Si",
+   "Si"
+  ],
+  "n_atoms": 2,
+  "volume_ang3": 40.02575174999998,
+  "density_g_cm3": 2.3303117441366243,
+  "spacegroup": "Fd-3m (227)",
+  "pointgroup": "m-3m",
+  "n_symops": 48
+ },
+ "parameters": {
+  "formalism": "nc",
+  "xc": "pbe",
+  "ecut_eV": 300.0,
+  "ecutrho_eV": null,
+  "kmesh": [
+   2,
+   2,
+   2
+  ],
+  "nk": 3,
+  "nk_total": 8,
+  "kweights": [
+   0.125,
+   0.5,
+   0.375
+  ],
+  "nspin": 1,
+  "smearing": "none",
+  "width_eV": 0.1,
+  "symmetry": true,
+  "mixing": {
+   "scheme": "pulay",
+   "alpha": 0.7,
+   "history": null,
+   "kerker": "auto",
+   "kerker_used": false
+  },
+  "n_electrons": 8.0,
+  "nbands": 8,
+  "fft_grid": [
+   21,
+   21,
+   21
+  ],
+  "npw": 459,
+  "pseudos": {
+   "Si": "Si_ONCV_PBE-1.2.upf"
+  }
+ },
+ "scf": {
+  "converged": true,
+  "n_iter": 9,
+  "fermi_eV": 6.544187850284681,
+  "gap_eV": 0.590210387362089,
+  "energies_eV": {
+   "kinetic": 89.44163887770075,
+   "hartree": 17.264301733676575,
+   "xc": -66.55934488371274,
+   "local": -73.50098987252485,
+   "nonlocal": 50.014696522558566,
+   "ewald": -228.56127322190338,
+   "smearing": 0.0,
+   "hubbard": 0.0,
+   "onecenter": 0.0,
+   "total": -211.90097084420506,
+   "free_energy": -211.90097084420506,
+   "e0": -211.90097084420506
+  },
+  "free_energy_per_atom_eV": -105.95048542210253,
+  "trace": [
+   {
+    "iter": 1,
+    "free_energy_eV": -211.80118115175895,
+    "dE_eV": null,
+    "drho": 2.398962993318478,
+    "t_s": 0.153
+   },
+   {
+    "iter": 2,
+    "free_energy_eV": -211.899024900173,
+    "dE_eV": 0.09784374841404997,
+    "drho": 0.5333478644543351,
+    "t_s": 0.084
+   },
+   {
+    "iter": 3,
+    "free_energy_eV": -211.90086952026525,
+    "dE_eV": 0.0018446200922426215,
+    "drho": 0.08220840732833887,
+    "t_s": 0.063
+   },
+   {
+    "iter": 4,
+    "free_energy_eV": -211.90096867773286,
+    "dE_eV": 9.915746761635091e-05,
+    "drho": 0.00542476403324959,
+    "t_s": 0.07
+   },
+   {
+    "iter": 5,
+    "free_energy_eV": -211.90097082633275,
+    "dE_eV": 2.148599890006153e-06,
+    "drho": 0.00037063454961371885,
+    "t_s": 0.085
+   },
+   {
+    "iter": 6,
+    "free_energy_eV": -211.9009708437925,
+    "dE_eV": 1.7459740320191486e-08,
+    "drho": 0.00011176605102691379,
+    "t_s": 0.095
+   },
+   {
+    "iter": 7,
+    "free_energy_eV": -211.90097084420472,
+    "dE_eV": 4.122284735785797e-10,
+    "drho": 2.5246063178507725e-06,
+    "t_s": 0.086
+   },
+   {
+    "iter": 8,
+    "free_energy_eV": -211.90097084420498,
+    "dE_eV": 2.5579538487363607e-13,
+    "drho": 6.736570528948686e-07,
+    "t_s": 0.073
+   },
+   {
+    "iter": 9,
+    "free_energy_eV": -211.90097084420506,
+    "dE_eV": 8.526512829121202e-14,
+    "drho": 3.33904777832956e-08,
+    "t_s": 0.058
+   }
+  ],
+  "convergence": {
+   "final_dE_eV": 8.526512829121202e-14,
+   "final_drho": 3.33904777832956e-08,
+   "etol_eV": 1e-08,
+   "rhotol": 1e-07,
+   "ratio_q": 0.023610229363025183,
+   "warm_started": false
+  }
+ },
+ "eigenvalues_eV": [
+  [
+   -5.491475820681667,
+   6.544187850284644,
+   6.544187850284673,
+   6.544187850284681,
+   8.99164246074444,
+   8.991642460744455,
+   8.991642460744469,
+   9.891055629927548
+  ],
+  [
+   -3.1401377666686248,
+   -0.5102546764685525,
+   5.312036445521307,
+   5.312036445521317,
+   8.023657026754426,
+   9.754853628432535,
+   9.754853628432553,
+   14.171525791635094
+  ],
+  [
+   -1.3238009110624898,
+   -1.3237753329562427,
+   3.619735366992087,
+   3.619735366992102,
+   7.13439823764677,
+   7.134404010527325,
+   16.609026051539864,
+   16.609026051539878
+  ]
+ ],
+ "occupations": [
+  [
+   2.0,
+   2.0,
+   2.0,
+   2.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0
+  ],
+  [
+   2.0,
+   2.0,
+   2.0,
+   2.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0
+  ],
+  [
+   2.0,
+   2.0,
+   2.0,
+   2.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0
+  ]
+ ],
+ "runtime_s": 0.96,
+ "error_estimate": {
+  "available": true,
+  "method": "Cances first-order complement (post-SCF)",
+  "ecut_eV": 300.0,
+  "ecut_large_eV": 750.0,
+  "denergy_eV": -0.0329424743906422,
+  "denergy_meV_per_atom": -16.4712371953211,
+  "free_energy_extrapolated_eV": -211.9339133185957,
+  "drho_L1_per_electron": 0.0015326468875020403,
+  "int_drho": 1.199587279202587e-19,
+  "note": "first-order estimate, indicative not a rigorous bound",
+  "force_error_max_eV_ang": 0.0,
+  "force_error_rms_eV_ang": 0.0,
+  "gap_eV": 0.590210387362089,
+  "gap_extrapolated_eV": 0.5852717675925138,
+  "dgap_eV": -0.004938619769575225,
+  "scf_convergence": {
+   "denergy_eV": 1.3748169750078887e-15,
+   "denergy_meV_per_atom": 6.874084875039444e-13,
+   "residual_L1_per_electron": 3.288836024172608e-09,
+   "reliable": true,
+   "ratio": 0.015868165322397966,
+   "energy_converged_estimate_eV": -211.90097084420506,
+   "method": "energy-trajectory extrapolation",
+   "denergy_response_eV": -7.333143013613924e-16,
+   "screened": false,
+   "note": "response diagnostic is not sign-definite; the headline denergy is the trajectory extrapolation"
+  },
+  "smearing_error": {
+   "available": false,
+   "reason": "no smearing (fixed occupations): no smearing error"
+  },
+  "numerical_energy_error": {
+   "total_eV": 0.03294247439064357,
+   "total_meV_per_atom": 16.471237195321788,
+   "terms_eV": {
+    "ecut": 0.0329424743906422,
+    "scf": 1.3748169750078887e-15
+   },
+   "note": "leading-order sum of the reachable terms; k-point sampling excluded"
+  }
+ },
+ "provenance": {
+  "timestamp": "2026-07-21T18:58:25-07:00",
+  "host": {
+   "hostname": "thinkpad",
+   "os": "Linux 6.18.33",
+   "arch": "x86_64"
+  },
+  "code": {
+   "gradwave": "0.1.0",
+   "git": "0025c49",
+   "python": "3.12.13",
+   "torch": "2.12.1+cu130"
+  },
+  "cpu": {
+   "model": "Intel(R) Core(TM) i5-10210U CPU @ 1.60GHz",
+   "logical_cores": 8,
+   "torch_threads": 4
+  },
+  "memory": {
+   "total_gb": 23.26,
+   "available_gb": 15.75
+  },
+  "gpu": null,
+  "load": {
+   "load_1m": 13.8212890625,
+   "load_5m": 27.62255859375,
+   "load_15m": 29.27197265625,
+   "busy_other_processes": [
+    {
+     "comm": ".claude-unwrapp",
+     "pcpu": 12.8
+    },
+    {
+     "comm": ".claude-unwrapp",
+     "pcpu": 11.3
+    }
+   ]
+  },
+  "thermal": {
+   "zones_c": {
+    "pch_cannonlake": 62.0,
+    "INT3400 Thermal": 20.0,
+    "B0D4": 63.0,
+    "SEN1": 1.1,
+    "SEN2": 44.0,
+    "acpitz": 63.0,
+    "x86_pkg_temp": 75.0,
+    "iwlwifi_1": 70.0
+   },
+   "max_c": 75.0
+  },
+  "load_end": {
+   "load_1m": 12.79443359375,
+   "load_5m": 27.18017578125,
+   "load_15m": 29.1201171875,
+   "busy_other_processes": [
+    {
+     "comm": ".claude-unwrapp",
+     "pcpu": 12.8
+    },
+    {
+     "comm": ".claude-unwrapp",
+     "pcpu": 11.3
+    }
+   ]
+  },
+  "thermal_end": {
+   "zones_c": {
+    "pch_cannonlake": 63.0,
+    "INT3400 Thermal": 20.0,
+    "B0D4": 70.0,
+    "SEN1": 1.1,
+    "SEN2": 43.0,
+    "acpitz": 70.0,
+    "x86_pkg_temp": 70.0,
+    "iwlwifi_1": 70.0
+   },
+   "max_c": 70.0
+  },
+  "process": {
+   "wall_s": 2.96,
+   "cpu_s": 5.91,
+   "effective_threads": 2.0,
+   "peak_rss_gb": 0.59
+  }
+ },
+ "outputs": {
+  "checkpoint": "checkpoint.pt",
+  "json": "scf.json",
+  "report": "scf.out"
+ }
+}
