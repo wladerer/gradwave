@@ -13,10 +13,9 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from gradwave.core.hamiltonian import build_projector_data
-from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.dtypes import CDTYPE
 from gradwave.grids import build_gsphere
-from gradwave.pseudo.kb import beta_form_factors
+from gradwave.postscf._kb import projector_data_at_k, species_projector_tables
 from gradwave.scf.loop import SCFResult
 
 # A state counts as partially occupied (⇒ metal) when its occupation lands
@@ -51,8 +50,7 @@ def band_structure(
     v_eff = res.v_eff
     device = v_eff.device
 
-    beta_ls = [[b.l for b in upf.betas] for upf in system.upfs]
-    dij_species = [torch.as_tensor(upf.dij, dtype=RDTYPE, device=device) for upf in system.upfs]
+    beta_ls, dij_species = species_projector_tables(system.upfs, device)
 
     kpts = np.asarray(kpts_frac, dtype=float)
     eigs = np.empty((len(kpts), nbands))
@@ -69,16 +67,11 @@ def band_structure(
     for lo in range(0, len(kpts), chunk):
         hi = min(lo + chunk, len(kpts))
         spheres = [build_gsphere(grid, system.ecut, k, device=device) for k in kpts[lo:hi]]
-        pd_list = []
-        for sph in spheres:
-            q = np.sqrt(sph.kpg2.cpu().numpy())
-            beta_tables = [
-                torch.as_tensor(beta_form_factors(upf, q), dtype=RDTYPE, device=device)
-                for upf in system.upfs
-            ]
-            pd_list.append(build_projector_data(
-                sph, system.species_of_atom, beta_tables, beta_ls, dij_species,
-                grid.volume))
+        pd_list = [
+            projector_data_at_k(sph, system.species_of_atom, system.upfs,
+                                beta_ls, dij_species, grid.volume, device)
+            for sph in spheres
+        ]
         bk = build_batched(spheres, pd_list, device=device)
         p_b = projectors_b(bk, system.positions)
         h = BatchedHamiltonian(bk, grid.shape, v_eff, p_b)
