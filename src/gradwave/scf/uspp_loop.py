@@ -569,13 +569,9 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
     those belong to the driver (or to newton/the rig, which call this
     directly)."""
     system, xc, nspin = ops.system, ops.xc, ops.nspin
-    smearing, width, batched = ops.smearing, ops.width, ops.batched
-    projs, bk, p_b, hub = ops.projs, ops.bk, ops.p_b, ops.hub
-    vloc_g, vloc_r, phase_pos = ops.vloc_g, ops.vloc_r, ops.phase_pos
-    e_ewald = ops.e_ewald
-    is_paw, onec = ops.is_paw, ops.onec
-    grid, vol, dev, shape = ops.grid, ops.vol, ops.dev, ops.shape
-    nk, nb = ops.nk, ops.nb
+    smearing, width, hub = ops.smearing, ops.width, ops.hub
+    vloc_r, phase_pos = ops.vloc_r, ops.phase_pos
+    is_paw, onec, dev = ops.is_paw, ops.onec, ops.dev
     veff_s, dscr_s, e_onec = uspp_potentials_dscr(
         system, xc, rho_s, rho_ij_mix, vloc_r, phase_pos,
         onec if is_paw else None)
