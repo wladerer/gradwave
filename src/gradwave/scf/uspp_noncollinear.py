@@ -443,12 +443,19 @@ def scf_uspp_noncollinear(
         # ---- residual, convergence, mixing ----
         vin = pack(rho, m, bec_chan)
         vout = pack(rho_out, m_out, bec_out_r)
-        res_norm = float(torch.linalg.norm(vout - vin)) * vol
+        # Convergence residual is the (ρ, m⃗) density change only — the first
+        # 4·ng grid channels, excluding the 4·nbec becsum tail. This matches
+        # the canonical convention in the collinear USPP loop (residual on
+        # rho_*_vec[: ng*nspin]) and the norm-conserving loops. Including the
+        # stiff on-site becsum mode over-tightens the gate: a PAW magnet whose
+        # becsum residual floors above rhotol while ρ and m⃗ are settled would
+        # otherwise never satisfy convergence_gate and burn to max_iter.
+        res_norm = float(torch.linalg.norm((vout - vin)[: 4 * ng])) * vol
         de = record_iteration(history, it, e_free, e_free_prev, res_norm, t_it)
         if verbose:
             mv = [float(m_out[i].mean()) * vol for i in range(3)]
             print(f"  NC-USPP {it:3d}  F = {e_free:+.8f}  dE = {de:.2e}  "
-                  f"|dρ,m,bec| = {res_norm:.2e}  "
+                  f"|dρ,m| = {res_norm:.2e}  "
                   f"m⃗ = ({mv[0]:+.3f},{mv[1]:+.3f},{mv[2]:+.3f})", flush=True)
         if convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol):
             converged = True

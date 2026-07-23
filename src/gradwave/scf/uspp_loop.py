@@ -1014,6 +1014,15 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                 rho_ij_mix[isp][a] = 0.5 * (m + m.conj().T)
 
     rho_final = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
+    # Return the becsum that PAIRS with the returned density. At convergence
+    # rho_s was set to the fresh map output (rho_out_s), so the fresh output
+    # becsum (rho_ij_s) is the consistent partner. On non-convergence rho_s is
+    # the mixer's output (the next-iteration input), so the mixed becsum
+    # (rho_ij_mix) is the match — it also tracks the energies (the one-center
+    # ddd is built from rho_ij_mix) and avoids a poisoned solver-blowup output.
+    # Consumers that read ρ and becsum as one state (paw_forces/paw_stress via
+    # _normalize_spin) then see a self-consistent pair regardless of convergence.
+    rho_ij_final = rho_ij_s if converged else rho_ij_mix
     extra = {}
     if hub is not None:
         extra["hub_occ"] = n_hub_s
@@ -1027,7 +1036,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         eigenvalues=eigs_s[0] if nspin == 1 else torch.stack(eigs_s),
         occupations=occ_s[0] if nspin == 1 else torch.stack(occ_s),
         coeffs=coeffs[0] if nspin == 1 else coeffs, rho=rho_final,
-        rho_ij_atoms=rho_ij_s[0] if nspin == 1 else rho_ij_s,
+        rho_ij_atoms=rho_ij_final[0] if nspin == 1 else rho_ij_final,
         becps=becps_s[0] if nspin == 1 else becps_s, history=history,
         fermi=mu, system=system, nspin=nspin, smearing=smearing, width=width,
         mixer_mult=mixer.block_mult,
