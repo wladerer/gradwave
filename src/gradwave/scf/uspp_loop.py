@@ -324,39 +324,157 @@ def _build_iter_ops(system: USPPSystem, xc, *, nspin=1, smearing="none",
                     nb=system.nbands, mixed_precision=mixed_precision)
 
 
-@torch.no_grad()
-def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
-                   n_hub_s, tol_eff, seed_salt):
-    """ONE evaluation of the SCF map at (rho_s, rho_ij_mix): potentials →
-    screened D (+ one-center ddd from the MIXER-side becsum) → generalized
-    Davidson (warm-started via coeffs/coeffs_b, mutated in place) →
-    shared-Fermi occupations (+U matrices) → fresh densities/becsum →
-    energy assembly. No mixing, no convergence judgment, no rescue —
-    those belong to the driver (or to newton/the rig, which call this
-    directly)."""
+def _assemble_iter_energies(ops, coeffs, occ_s, becps_s, rho_out_s, rho_tot_out,
+                            entropy_term, e_hub, e_onec):
+    """Total-energy breakdown for one SCF-map evaluation: charge-conservation
+    check, XC energy (nspin 1/2), and assemble_pw_energies. Pure function of the
+    already-computed densities/occupations."""
     system, xc, nspin = ops.system, ops.xc, ops.nspin
-    smearing, width, batched = ops.smearing, ops.width, ops.batched
-    projs, bk, p_b, hub = ops.projs, ops.bk, ops.p_b, ops.hub
-    vloc_g, vloc_r, phase_pos = ops.vloc_g, ops.vloc_r, ops.phase_pos
-    e_ewald = ops.e_ewald
-    is_paw, onec = ops.is_paw, ops.onec
-    grid, vol, dev, shape = ops.grid, ops.vol, ops.dev, ops.shape
-    nk, nb = ops.nk, ops.nb
+    grid, vol, vloc_g = ops.grid, ops.vol, ops.vloc_g
+    hub, e_ewald = ops.hub, ops.e_ewald
+    core = system.rho_core
+
+    n_tot = float(rho_tot_out.sum()) * vol / grid.n_points
+    if abs(n_tot - system.n_electrons) >= 1e-5:
+        raise ValueError(
+            f"charge not conserved: {n_tot:.8f} vs {system.n_electrons}"
+        )
+
+    rho_g_out = r_to_g(rho_tot_out.to(CDTYPE))
+    from gradwave.core.density import sigma_from_rho
+
+    if nspin == 1:
+        rho_xc_out = rho_tot_out if core is None else rho_tot_out + core
+        sigma = sigma_from_rho(rho_xc_out, grid.g_cart) if xc.needs_gradient else None
+        e_xc = xc.energy(rho_xc_out, vol, sigma)
+    else:
+        e_xc = spin_xc_energy(xc, rho_out_s, core, vol, grid.g_cart)
+    return assemble_pw_energies(
+        coeffs, occ_s, system.kweights, system.spheres, grid, vol, rho_g_out,
+        e_xc, vloc_g, becps_s, system.proj_data[0].dij_full, system.positions,
+        system.charges, entropy_term, nspin,
+        e_hub=e_hub if hub is not None else 0.0, e_onec=e_onec, e_ewald=e_ewald)
+
+
+def _hubbard_occ_update(ops, hub, coeffs, coeffs_b, occ_s, n_hub_s):
+    """Refresh the DFT+U per-spin occupation matrices from the fresh orbitals and
+    return (n_hub_s, e_hub). No Hubbard manifold → (n_hub_s, 0). The
+    _padded_coeffs closure captures coeffs_b by default argument (per-k pads the
+    trimmed orbitals back to npw_max)."""
+    system, nspin, batched = ops.system, ops.nspin, ops.batched
+    bk, dev, nk, nb = ops.bk, ops.dev, ops.nk, ops.nb
+    e_hub = torch.zeros((), dtype=RDTYPE, device=dev)
+    if hub is None:
+        return n_hub_s, e_hub
+    from gradwave.core.hubbard import hubbard_energy, occupation_matrices
+
+    def _padded_coeffs(isp, _cb=coeffs_b):
+        if batched:
+            return _cb[isp]
+        cp = torch.zeros(nk, nb, bk.npw_max, dtype=CDTYPE, device=dev)
+        for ik, sph in enumerate(system.spheres):
+            cp[ik, :, :sph.npw] = coeffs[isp][ik]
+        return cp
+
+    if nspin == 2:
+        for isp in range(nspin):
+            n_hub_s[isp] = occupation_matrices(
+                hub.sphi, _padded_coeffs(isp), occ_s[isp],
+                system.kweights, hub.sites)
+        e_hub = sum(hubbard_energy(n_hub_s[isp], hub.sites)
+                    for isp in range(nspin))
+    else:
+        n_half = occupation_matrices(
+            hub.sphi, _padded_coeffs(0), 0.5 * occ_s[0],
+            system.kweights, hub.sites)
+        n_hub_s = [n_half]
+        e_hub = 2.0 * hubbard_energy(n_half, hub.sites)
+    return n_hub_s, e_hub
+
+
+def _build_output_density(ops, coeffs, coeffs_b, occ_s):
+    """Smooth densities + per-spin becsum (Hermitized, becsum-symmetrized) +
+    augmentation charge for one SCF-map evaluation. Returns (rho_out_s, rho_ij_s,
+    becps_s). Accumulation order and conj placement are load-bearing at the 1e-8
+    identity floor the tests assert — keep them byte-for-byte."""
+    system, nspin, batched = ops.system, ops.nspin, ops.batched
+    bk, shape, vol, dev = ops.bk, ops.shape, ops.vol, ops.dev
+    nk, nb, p_b, projs = ops.nk, ops.nb, ops.p_b, ops.projs
+    phase_pos, grid = ops.phase_pos, ops.grid
+    sp_atoms = _species_atoms(system)
+    rho_out_s, becps_s = [], []
+    rho_ij_s = [[torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
+                 for (s0, s1) in system.atom_slices] for _ in range(nspin)]
+    for isp in range(nspin):
+        if batched:
+            # k-batched: one band-chunked batched FFT stack for the density,
+            # one becp einsum over all k, and the becsum contracted with k
+            # folded into the band axis — instead of nk small FFTs plus
+            # nk·na tiny einsums per iteration
+            from gradwave.core.batch import becp_b, density_b
+
+            x_b = coeffs_b[isp]
+            rho_sp = density_b(x_b, occ_s[isp], system.kweights, bk, shape, vol)
+            b_all = becp_b(p_b, x_b)
+            becps = [b_all[ik] for ik in range(nk)]
+            w_all = (system.kweights[:, None] * occ_s[isp]).reshape(-1).to(CDTYPE)
+            b_flat = b_all.reshape(nk * nb, -1)
+            for a, (s0, s1) in enumerate(system.atom_slices):
+                ba = b_flat[:, s0:s1]
+                rho_ij_s[isp][a] = torch.einsum("b,bi,bj->ij", w_all,
+                                                ba.conj(), ba)
+        else:
+            rho_sp = torch.zeros(shape, dtype=RDTYPE, device=dev)
+            becps = []
+            for ik, sph in enumerate(system.spheres):
+                c = coeffs[isp][ik]
+                psi_r = g_to_r(c, sph.flat_idx, shape)
+                w = system.kweights[ik] * occ_s[isp][ik]
+                rho_sp = rho_sp + torch.einsum("b,bxyz->xyz", w,
+                                               (psi_r.abs() ** 2)) / vol
+                b = becp(projs[ik], c)
+                becps.append(b)
+                for a, (s0, s1) in enumerate(system.atom_slices):
+                    ba = b[:, s0:s1]
+                    rho_ij_s[isp][a] = rho_ij_s[isp][a] + torch.einsum(
+                        "b,bi,bj->ij", w.to(CDTYPE), ba.conj(), ba
+                    )
+        rho_ij_s[isp] = [0.5 * (m + m.conj().T) for m in rho_ij_s[isp]]
+        if system.becsum_sym is not None:
+            rho_ij_s[isp] = system.becsum_sym.apply(rho_ij_s[isp])
+        becps_s.append(becps)
+
+        # augmentation charge: all atoms of a species in one einsum
+        aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE, device=dev)
+        for sp, atoms in sp_atoms.items():
+            bec_sp = torch.stack([rho_ij_s[isp][a] for a in atoms])
+            aug_sph = aug_sph + torch.einsum(
+                "aij,ijg,ga->g", bec_sp, system.aug[sp].q_g,
+                phase_pos[:, atoms].conj())
+        aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
+        aug_box[system.sphere_idx] = aug_sph / vol
+        rho_aug = (torch.fft.ifftn(aug_box.reshape(shape) * grid.n_points,
+                                   dim=(-3, -2, -1))).real
+        rho_out_sp = rho_sp + rho_aug
+        rho_out_sp = symmetrize_rho(system.rho_symmetrizer, rho_out_sp, grid)
+        rho_out_s.append(rho_out_sp)
+    return rho_out_s, rho_ij_s, becps_s
+
+
+def _solve_bands_uspp(ops, veff_s, dscr_s, n_hub_s, coeffs, coeffs_b, tol_eff,
+                      seed_salt):
+    """Generalized eigensolve H x = ε S x per spin (batched or per-k). Warm-starts
+    from and MUTATES coeffs/coeffs_b IN PLACE — the frozen warm-start contract
+    newton.py relies on. The S-normalization is fp64 always (even under mixed
+    precision), and x_b is cast to CDTYPE before it. Returns eigs_s."""
+    system, nspin, batched = ops.system, ops.nspin, ops.batched
+    bk, shape, dev = ops.bk, ops.shape, ops.dev
+    nk, nb, p_b, projs, hub = ops.nk, ops.nb, ops.p_b, ops.projs, ops.hub
     if batched:
         from gradwave.core.batch import becp_b
         from gradwave.scf.uspp_batch import BatchedHS, davidson_gen_batched
     if hub is not None:
-        from gradwave.core.hubbard import (
-            hubbard_dmatrix,
-            hubbard_energy,
-            occupation_matrices,
-        )
-
-    veff_s, dscr_s, e_onec = uspp_potentials_dscr(
-        system, xc, rho_s, rho_ij_mix, vloc_r, phase_pos,
-        onec if is_paw else None)
-    core = system.rho_core
-
+        from gradwave.core.hubbard import hubbard_dmatrix
     eigs_s = []
     for isp in range(nspin):
         hub_d = None
@@ -437,6 +555,29 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
             coeffs[isp][ik] = c_k
             eigs_l.append(e_k)
         eigs_s.append(torch.stack(eigs_l))
+    return eigs_s
+
+
+@torch.no_grad()
+def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
+                   n_hub_s, tol_eff, seed_salt):
+    """ONE evaluation of the SCF map at (rho_s, rho_ij_mix): potentials →
+    screened D (+ one-center ddd from the MIXER-side becsum) → generalized
+    Davidson (warm-started via coeffs/coeffs_b, mutated in place) →
+    shared-Fermi occupations (+U matrices) → fresh densities/becsum →
+    energy assembly. No mixing, no convergence judgment, no rescue —
+    those belong to the driver (or to newton/the rig, which call this
+    directly)."""
+    system, xc, nspin = ops.system, ops.xc, ops.nspin
+    smearing, width, hub = ops.smearing, ops.width, ops.hub
+    vloc_r, phase_pos = ops.vloc_r, ops.phase_pos
+    is_paw, onec, dev = ops.is_paw, ops.onec, ops.dev
+    veff_s, dscr_s, e_onec = uspp_potentials_dscr(
+        system, xc, rho_s, rho_ij_mix, vloc_r, phase_pos,
+        onec if is_paw else None)
+
+    eigs_s = _solve_bands_uspp(ops, veff_s, dscr_s, n_hub_s, coeffs, coeffs_b,
+                               tol_eff, seed_salt)
 
     occ_s, mu, entropy_term = shared_fermi_occupations(
         eigs_s, system.kweights, smearing, width, system.n_electrons,
@@ -445,110 +586,14 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
     # DFT+U: fresh S-metric occupation matrices + Dudarev E_U (lags one
     # step into V_U like the NC path; nspin=1 splits [0,2] occupations
     # into two equal channels)
-    e_hub = torch.zeros((), dtype=RDTYPE, device=dev)
-    if hub is not None:
-        def _padded_coeffs(isp, _cb=coeffs_b):
-            if batched:
-                return _cb[isp]
-            cp = torch.zeros(nk, nb, bk.npw_max, dtype=CDTYPE, device=dev)
-            for ik, sph in enumerate(system.spheres):
-                cp[ik, :, :sph.npw] = coeffs[isp][ik]
-            return cp
+    n_hub_s, e_hub = _hubbard_occ_update(ops, hub, coeffs, coeffs_b, occ_s, n_hub_s)
 
-        if nspin == 2:
-            for isp in range(nspin):
-                n_hub_s[isp] = occupation_matrices(
-                    hub.sphi, _padded_coeffs(isp), occ_s[isp],
-                    system.kweights, hub.sites)
-            e_hub = sum(hubbard_energy(n_hub_s[isp], hub.sites)
-                        for isp in range(nspin))
-        else:
-            n_half = occupation_matrices(
-                hub.sphi, _padded_coeffs(0), 0.5 * occ_s[0],
-                system.kweights, hub.sites)
-            n_hub_s = [n_half]
-            e_hub = 2.0 * hubbard_energy(n_half, hub.sites)
-
-    # smooth densities + per-spin becsum + augmentation
-    sp_atoms = _species_atoms(system)
-    rho_out_s, becps_s = [], []
-    rho_ij_s = [[torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
-                 for (s0, s1) in system.atom_slices] for _ in range(nspin)]
-    for isp in range(nspin):
-        if batched:
-            # k-batched: one band-chunked batched FFT stack for the density,
-            # one becp einsum over all k, and the becsum contracted with k
-            # folded into the band axis — instead of nk small FFTs plus
-            # nk·na tiny einsums per iteration
-            from gradwave.core.batch import density_b
-
-            x_b = coeffs_b[isp]
-            rho_sp = density_b(x_b, occ_s[isp], system.kweights, bk, shape, vol)
-            b_all = becp_b(p_b, x_b)
-            becps = [b_all[ik] for ik in range(nk)]
-            w_all = (system.kweights[:, None] * occ_s[isp]).reshape(-1).to(CDTYPE)
-            b_flat = b_all.reshape(nk * nb, -1)
-            for a, (s0, s1) in enumerate(system.atom_slices):
-                ba = b_flat[:, s0:s1]
-                rho_ij_s[isp][a] = torch.einsum("b,bi,bj->ij", w_all,
-                                                ba.conj(), ba)
-        else:
-            rho_sp = torch.zeros(shape, dtype=RDTYPE, device=dev)
-            becps = []
-            for ik, sph in enumerate(system.spheres):
-                c = coeffs[isp][ik]
-                psi_r = g_to_r(c, sph.flat_idx, shape)
-                w = system.kweights[ik] * occ_s[isp][ik]
-                rho_sp = rho_sp + torch.einsum("b,bxyz->xyz", w,
-                                               (psi_r.abs() ** 2)) / vol
-                b = becp(projs[ik], c)
-                becps.append(b)
-                for a, (s0, s1) in enumerate(system.atom_slices):
-                    ba = b[:, s0:s1]
-                    rho_ij_s[isp][a] = rho_ij_s[isp][a] + torch.einsum(
-                        "b,bi,bj->ij", w.to(CDTYPE), ba.conj(), ba
-                    )
-        rho_ij_s[isp] = [0.5 * (m + m.conj().T) for m in rho_ij_s[isp]]
-        if system.becsum_sym is not None:
-            rho_ij_s[isp] = system.becsum_sym.apply(rho_ij_s[isp])
-        becps_s.append(becps)
-
-        # augmentation charge: all atoms of a species in one einsum
-        aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE, device=dev)
-        for sp, atoms in sp_atoms.items():
-            bec_sp = torch.stack([rho_ij_s[isp][a] for a in atoms])
-            aug_sph = aug_sph + torch.einsum(
-                "aij,ijg,ga->g", bec_sp, system.aug[sp].q_g,
-                phase_pos[:, atoms].conj())
-        aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
-        aug_box[system.sphere_idx] = aug_sph / vol
-        rho_aug = (torch.fft.ifftn(aug_box.reshape(shape) * grid.n_points,
-                                   dim=(-3, -2, -1))).real
-        rho_out_sp = rho_sp + rho_aug
-        rho_out_sp = symmetrize_rho(system.rho_symmetrizer, rho_out_sp, grid)
-        rho_out_s.append(rho_out_sp)
+    rho_out_s, rho_ij_s, becps_s = _build_output_density(ops, coeffs, coeffs_b, occ_s)
     rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
 
-    n_tot = float(rho_tot_out.sum()) * vol / grid.n_points
-    if abs(n_tot - system.n_electrons) >= 1e-5:
-        raise ValueError(
-            f"charge not conserved: {n_tot:.8f} vs {system.n_electrons}"
-        )
-
-    rho_g_out = r_to_g(rho_tot_out.to(CDTYPE))
-    from gradwave.core.density import sigma_from_rho
-
-    if nspin == 1:
-        rho_xc_out = rho_tot_out if core is None else rho_tot_out + core
-        sigma = sigma_from_rho(rho_xc_out, grid.g_cart) if xc.needs_gradient else None
-        e_xc = xc.energy(rho_xc_out, vol, sigma)
-    else:
-        e_xc = spin_xc_energy(xc, rho_out_s, core, vol, grid.g_cart)
-    energies = assemble_pw_energies(
-        coeffs, occ_s, system.kweights, system.spheres, grid, vol, rho_g_out,
-        e_xc, vloc_g, becps_s, system.proj_data[0].dij_full, system.positions,
-        system.charges, entropy_term, nspin,
-        e_hub=e_hub if hub is not None else 0.0, e_onec=e_onec, e_ewald=e_ewald)
+    energies = _assemble_iter_energies(
+        ops, coeffs, occ_s, becps_s, rho_out_s, rho_tot_out, entropy_term,
+        e_hub, e_onec)
     return dict(eigs_s=eigs_s, occ_s=occ_s, mu=mu, n_hub_s=n_hub_s,
                 rho_out_s=rho_out_s, rho_ij_s=rho_ij_s, becps_s=becps_s,
                 energies=energies)
@@ -601,6 +646,42 @@ def _seed_becsum(system, nspin, start_from, spin_frac, dev):
                         col += 1
             rho_ij_s[isp].append(m0)
     return rho_ij_s
+
+
+def _seed_scf_density(system, grid, vol, dev, nspin, start_from, start_mag):
+    """Seed (rho_s, spin_frac): warm-start rescale from a prior result, or a SAD
+    density (nspin=1), or per-atom spin-split SAD (nspin=2). spin_frac carries the
+    per-atom up/down fractions (or [None]) used later to seed becsum."""
+    if start_from is not None:
+        # shared grid/nspin validation + volume-ratio rescale (electron count
+        # exactly conserved on the new cell) — common.warm_start_densities
+        rho_s = warm_start_densities(start_from, nspin, grid, vol, dev)
+        if nspin == 1:
+            return rho_s, [None]
+        mags = _resolve_start_mag(start_mag, system.species_of_atom,
+                                  len(system.paws))
+        return rho_s, [[(1.0 + m) / 2.0 for m in mags],
+                       [(1.0 - m) / 2.0 for m in mags]]
+    if nspin == 1:
+        return [sad_density(grid, system.positions, system.species_of_atom,
+                            system.paws, system.n_electrons)], [None]
+    # per-ATOM moment fractions (AFM/ferrimagnetic seeds pass one entry per atom;
+    # a per-species list is broadcast). sad_density's atom_scale seeds each atom
+    # directly — identical to the old species_scale path when the moments are
+    # uniform within a species.
+    mags = _resolve_start_mag(start_mag, system.species_of_atom,
+                              len(system.paws))
+    up = [(1.0 + m) / 2.0 for m in mags]
+    dn = [(1.0 - m) / 2.0 for m in mags]
+    n_up = sum(float(system.charges[a]) * up[a]
+               for a in range(len(system.species_of_atom)))
+    rho_s = [
+        sad_density(grid, system.positions, system.species_of_atom,
+                    system.paws, n_up, atom_scale=up),
+        sad_density(grid, system.positions, system.species_of_atom,
+                    system.paws, system.n_electrons - n_up, atom_scale=dn),
+    ]
+    return rho_s, [up, dn]
 
 
 @torch.no_grad()
@@ -721,39 +802,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     dev = system.positions.device
     nk = len(system.spheres)
 
-    if start_from is not None:
-        # shared grid/nspin validation + volume-ratio rescale (electron count
-        # exactly conserved on the new cell) — common.warm_start_densities
-        rho_s = warm_start_densities(start_from, nspin, grid, vol, dev)
-        if nspin == 1:
-            spin_frac = [None]
-        else:
-            mags = _resolve_start_mag(start_mag, system.species_of_atom,
-                                      len(system.paws))
-            spin_frac = [[(1.0 + m) / 2.0 for m in mags],
-                         [(1.0 - m) / 2.0 for m in mags]]
-    elif nspin == 1:
-        rho_s = [sad_density(grid, system.positions, system.species_of_atom,
-                             system.paws, system.n_electrons)]
-        spin_frac = [None]
-    else:
-        # per-ATOM moment fractions (AFM/ferrimagnetic seeds pass one entry per
-        # atom; a per-species list is broadcast). sad_density's atom_scale seeds
-        # each atom directly — identical to the old species_scale path when the
-        # moments are uniform within a species.
-        mags = _resolve_start_mag(start_mag, system.species_of_atom,
-                                  len(system.paws))
-        up = [(1.0 + m) / 2.0 for m in mags]
-        dn = [(1.0 - m) / 2.0 for m in mags]
-        n_up = sum(float(system.charges[a]) * up[a]
-                   for a in range(len(system.species_of_atom)))
-        rho_s = [
-            sad_density(grid, system.positions, system.species_of_atom,
-                        system.paws, n_up, atom_scale=up),
-            sad_density(grid, system.positions, system.species_of_atom,
-                        system.paws, system.n_electrons - n_up, atom_scale=dn),
-        ]
-        spin_frac = [up, dn]
+    rho_s, spin_frac = _seed_scf_density(system, grid, vol, dev, nspin,
+                                         start_from, start_mag)
 
     ops = _build_iter_ops(system, xc, nspin=nspin, smearing=smearing,
                           width=width, batched=batched, hubbard=hubbard,
