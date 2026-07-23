@@ -34,16 +34,16 @@ from gradwave.constants import E2, HBAR2_2M
 from gradwave.core.batch import g_to_r_b, projectors_b
 from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.fftbox import r_to_g
-from gradwave.core.hamiltonian import build_projector_data, projectors
+from gradwave.core.hamiltonian import projectors
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.postscf._anderson import AndersonMixer
+from gradwave.postscf._kb import projector_data_at_k, species_projector_tables
 from gradwave.postscf._response import (
     cg_sternheimer,
     insulator_window,
     pad_coeffs,
     sternheimer_shift,
 )
-from gradwave.pseudo.kb import beta_form_factors
 from gradwave.scf.implicit import apply_k_hxc
 
 
@@ -52,20 +52,15 @@ def _shifted_projectors(system, dkvec: torch.Tensor) -> torch.Tensor:
     — radial form factors re-evaluated by SBT at the shifted |k+G|, Ylm and
     the e^{−i(k+G)τ} phases at the shifted vectors."""
     bk = system.batch
-    beta_ls = [[b.l for b in upf.betas] for upf in system.upfs]
-    dij_species = [torch.as_tensor(upf.dij, dtype=RDTYPE) for upf in system.upfs]
+    beta_ls, dij_species = species_projector_tables(system.upfs)
     nproj = bk.proj_phase_free.shape[1]
     out = torch.zeros(len(system.spheres), nproj, bk.npw_max, dtype=CDTYPE,
                       device=bk.kpg.device)
     for ik, sph in enumerate(system.spheres):
-        kpg_s = sph.kpg + dkvec
-        q = torch.linalg.norm(kpg_s, dim=1).cpu().numpy()
-        beta_tables = [torch.as_tensor(beta_form_factors(upf, q), dtype=RDTYPE,
-                                       device=kpg_s.device)
-                       for upf in system.upfs]
-        shim = SimpleNamespace(kpg=kpg_s, npw=sph.npw)
-        pd = build_projector_data(shim, system.species_of_atom, beta_tables,
-                                  beta_ls, dij_species, system.grid.volume)
+        shim = SimpleNamespace(kpg=sph.kpg + dkvec, npw=sph.npw)
+        pd = projector_data_at_k(shim, system.species_of_atom, system.upfs,
+                                 beta_ls, dij_species, system.grid.volume,
+                                 device=shim.kpg.device)
         out[ik, :, : sph.npw] = projectors(pd, system.positions)
     return out
 

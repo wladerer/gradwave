@@ -14,3 +14,7 @@ site/
 
 # stray editor/tool temp input
 input_tmp.in
+
+# py-spy / profiling artifacts
+profile.speedscope.json
+*.speedscope.json

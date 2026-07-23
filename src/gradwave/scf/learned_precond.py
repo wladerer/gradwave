@@ -85,7 +85,7 @@ class MultipoleKerkerPrecond:
 
     # -- construction ---------------------------------------------------------
     @classmethod
-    def kerker(cls, g2: torch.Tensor, q0: float = 1.1) -> "MultipoleKerkerPrecond":
+    def kerker(cls, g2: torch.Tensor, q0: float = 1.1) -> MultipoleKerkerPrecond:
         """Single pole reproducing the bare Kerker filter G²/(G²+q0²)."""
         import math
         w_raw = torch.tensor([_inv_softplus(1.0)], dtype=RDTYPE, device=g2.device)
@@ -98,7 +98,7 @@ class MultipoleKerkerPrecond:
                    q_min: float = 0.3, q_max: float = 3.0,
                    requires_grad: bool = True,
                    const: bool = False, const_init: float = 0.5
-                   ) -> "MultipoleKerkerPrecond":
+                   ) -> MultipoleKerkerPrecond:
         """K poles log-spaced over [q_min, q_max] Å⁻¹, unit total weight seed.
         ``const=True`` adds the learnable G=0-alive term w0 seeded at ``const_init``
         (the magnetization-channel form)."""
@@ -154,13 +154,13 @@ class MultipoleKerkerPrecond:
         fac = self.filter_vals().to(r.real.dtype if r.is_complex() else r.dtype)
         return fac * r
 
-    def rebind(self, g2: torch.Tensor) -> "MultipoleKerkerPrecond":
+    def rebind(self, g2: torch.Tensor) -> MultipoleKerkerPrecond:
         """Same learned poles on a new |G|² grid (fit on shell centers, deploy on
         the per-component density sphere). The poles are analytic in G², so this
         is exact, not a resampling."""
         return MultipoleKerkerPrecond(g2, self.w_raw, self.logq2, self.c_raw)
 
-    def detach_(self) -> "MultipoleKerkerPrecond":
+    def detach_(self) -> MultipoleKerkerPrecond:
         """Drop autograd tracking on the poles for use inside a solve."""
         self.w_raw = self.w_raw.detach()
         self.logq2 = self.logq2.detach()

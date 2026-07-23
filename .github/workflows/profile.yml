@@ -1,0 +1,81 @@
+name: Profile
+
+# Sampling profile of a benchmark, captured entirely on GitHub's runners so it
+# never loads a laptop. Trigger manually from the Actions tab ("Run workflow",
+# pick a benchmark + args) or by labelling a PR `profile`. The result is a
+# speedscope JSON uploaded as an artifact — download it and drop it on
+# https://www.speedscope.app for an interactive flamegraph of the hot path.
+on:
+  workflow_dispatch:
+    inputs:
+      bench:
+        description: "Benchmark script name in benchmarks/ (without .py)"
+        required: false
+        default: "bench_scf"
+      args:
+        description: "Args passed to the benchmark"
+        required: false
+        default: "cpu 2 nosym"
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  group: profile-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  profile:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.label.name == 'profile'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --all-extras
+
+      - name: Allow py-spy to sample (ptrace)
+        run: sudo sysctl kernel.yama.ptrace_scope=0
+
+      - name: Profile
+        env:
+          BENCH: ${{ github.event.inputs.bench || 'bench_scf' }}
+          ARGS: ${{ github.event.inputs.args || 'cpu 2 nosym' }}
+        run: |
+          PYBIN=$(uv run python -c "import sys; print(sys.executable)")
+          # profile the venv python directly (no uv-launcher indirection) so the
+          # samples land in the benchmark process, not the wrapper
+          uv run --with py-spy py-spy record --rate 200 \
+            --format speedscope --output profile.speedscope.json \
+            -- "$PYBIN" "benchmarks/${BENCH}.py" ${ARGS}
+
+      - name: Summary
+        if: always()
+        env:
+          BENCH: ${{ github.event.inputs.bench || 'bench_scf' }}
+          ARGS: ${{ github.event.inputs.args || 'cpu 2 nosym' }}
+        run: |
+          {
+            echo "## Profile: \`${BENCH}.py ${ARGS}\`"
+            echo ""
+            echo "Download the **speedscope-profile** artifact below and drop the JSON on"
+            echo "<https://www.speedscope.app> for an interactive flamegraph of the hot path."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: speedscope-profile
+          path: profile.speedscope.json
+          if-no-files-found: warn

@@ -17,4 +17,4 @@ from gradwave.inputs import Input, InputError, load_input
 
 __version__ = "0.1.0"
 
-__all__ = ["Input", "InputError", "load_input", "run", "GradWave", "__version__"]
+__all__ = ["GradWave", "Input", "InputError", "__version__", "load_input", "run"]

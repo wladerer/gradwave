@@ -33,6 +33,8 @@ dev = [
     # libxc oracle for the r2SCAN pointwise tests (bundles libxc via its wheel);
     # tests importorskip it, so it is optional — this just enables them in CI.
     "pyscf>=2.4",
+    "import-linter>=2.13",
+    "hypothesis>=6.160.0",
 ]
 docs = [
     "mkdocs>=1.6",
@@ -75,3 +77,33 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "NPY", "B"]
 ignore = ["E741"]  # l is a perfectly good angular momentum variable
+
+[tool.importlinter]
+root_package = "gradwave"
+
+# Architecture boundaries, encoded from the layering the modules document in
+# prose. Run with: uv run lint-imports
+[[tool.importlinter.contracts]]
+name = "core stays independent of the SCF and analysis layers"
+type = "forbidden"
+source_modules = ["gradwave.core"]
+forbidden_modules = ["gradwave.scf", "gradwave.postscf"]
+
+[[tool.importlinter.contracts]]
+name = "pseudo is a leaf package"
+type = "forbidden"
+source_modules = ["gradwave.pseudo"]
+forbidden_modules = ["gradwave.core", "gradwave.scf", "gradwave.postscf", "gradwave.solvers"]
+
+[[tool.importlinter.contracts]]
+name = "solvers stay low-level (no SCF/analysis deps)"
+type = "forbidden"
+source_modules = ["gradwave.solvers"]
+forbidden_modules = ["gradwave.scf", "gradwave.postscf"]
+
+[[tool.importlinter.contracts]]
+name = "scf does not depend on the analysis layer, except the shared response kernels"
+type = "forbidden"
+source_modules = ["gradwave.scf"]
+forbidden_modules = ["gradwave.postscf"]
+ignore_imports = ["gradwave.scf.implicit -> gradwave.postscf._response"]

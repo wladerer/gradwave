@@ -11,11 +11,11 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from gradwave.core.hamiltonian import build_projector_data, projectors
-from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.core.hamiltonian import projectors
+from gradwave.dtypes import CDTYPE
 from gradwave.grids import build_gsphere
+from gradwave.postscf._kb import projector_data_at_k, species_projector_tables
 from gradwave.postscf.uspp_frozen import frozen_veff, screened_dscr
-from gradwave.pseudo.kb import beta_form_factors
 from gradwave.scf.uspp import _HkS, davidson_gen
 
 
@@ -39,19 +39,13 @@ def bands_uspp(res: dict, xc, k_frac_list, nbands: int | None = None,
     v_eff = frozen_veff(res, xc)[0]
     dscr_full = screened_dscr(res, xc, [v_eff])[0]
 
-    dij_species = [torch.as_tensor(p.dij, dtype=RDTYPE, device=dev)
-                   for p in system.paws]
-    beta_ls = [[b.l for b in p.betas] for p in system.paws]
+    beta_ls, dij_species = species_projector_tables(system.paws, dev)
     out = []
     for k in k_frac_list:
         sph = build_gsphere(grid, system.ecut, np.asarray(k, dtype=float),
                             device=dev)
-        q_of_k = np.sqrt(sph.kpg2.cpu().numpy())
-        beta_tables = [torch.as_tensor(beta_form_factors(p, q_of_k),
-                                       dtype=RDTYPE, device=dev)
-                       for p in system.paws]
-        pd = build_projector_data(sph, system.species_of_atom, beta_tables,
-                                  beta_ls, dij_species, vol)
+        pd = projector_data_at_k(sph, system.species_of_atom, system.paws,
+                                 beta_ls, dij_species, vol, dev)
         p = projectors(pd, system.positions)
         hs = _HkS(sph, grid.shape, v_eff, pd, p, dscr_full, system.q_full)
         # seed on CPU (device-independent determinism), then move

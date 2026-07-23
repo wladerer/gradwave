@@ -122,6 +122,16 @@ def _broaden(grid, energies, per_state, width):
             * inv * per_state[None, :]).sum(axis=1)
 
 
+def spectral_grid(all_e, width, npoints, window=None):
+    """(window, energy grid) for DOS/COHP broadening. When `window` is None it
+    defaults to the eigenvalue range padded by 10*width on each side — far enough
+    that a Gaussian of that width has decayed. Shared by the DOS functions here
+    and cohp._finalize so the padding rule lives in one place."""
+    if window is None:
+        window = (all_e.min() - 10 * width, all_e.max() + 10 * width)
+    return window, np.linspace(window[0], window[1], npoints)
+
+
 def _is_uspp_system(system) -> bool:
     """USPP/PAW systems carry the augmentation weights; NC systems carry .upfs."""
     return hasattr(system, "paws") and hasattr(system, "q_full")
@@ -184,25 +194,64 @@ def _ao_projectors_k(system, sph, cols, device):
     return q
 
 
+def o_inv_sqrt(overlap, floor=1e-8):
+    """O^{-1/2} (Hermitian) of an AO overlap O, near-singular modes clamped to
+    `floor`. The single definition shared by the Loewdin projection here and the
+    COHP operator route in cohp.py, so the two cannot drift."""
+    w, v = torch.linalg.eigh(overlap)
+    w = w.clamp_min(floor)
+    return (v * w.rsqrt()) @ v.conj().T                # O^{-1/2}, Hermitian
+
+
 def _lowdin_project(becp, overlap, floor=1e-8):
     """Loewdin-orthonormalized amplitudes <phi~_p|psi_b> = (<phi_p|psi_b> O^{-1/2})
     from raw becp (nb, nproj) and the AO overlap O = <phi_i|phi_j> (nproj, nproj).
     Returns the complex amplitudes so a caller can form |.|^2 (populations) or the
     cross terms proj_up* proj_dn (the noncollinear spin texture)."""
-    w, v = torch.linalg.eigh(overlap)
-    w = w.clamp_min(floor)
-    o_inv_sqrt = (v * w.rsqrt()) @ v.conj().T          # O^{-1/2}, Hermitian
     # <phi~_p|psi> = sum_q (O^{-1/2})_pq <phi_q|psi> = (becp @ O^{-1/2 T}). Since
     # O^{-1/2} is Hermitian, O^{-1/2 T} = conj(O^{-1/2}); the conjugate matters
     # whenever the AO overlap is complex (general k with Bloch phases) — without
     # it the captured weight exceeds 1 (negative spilling) off Gamma.
-    return becp @ o_inv_sqrt.conj()                    # (nb, nproj), complex
+    return becp @ o_inv_sqrt(overlap, floor).conj()    # (nb, nproj), complex
 
 
 def _lowdin_weights(becp, overlap, floor=1e-8):
     """Loewdin-orthonormalized populations |<phi~_p|psi_b>|^2 (nb, nproj)."""
     proj = _lowdin_project(becp, overlap, floor)
     return proj.real ** 2 + proj.imag ** 2
+
+
+def split_spinor(c, npw, m_pw):
+    """Up/down plane-wave blocks (cu, cd) of a spinor coefficient block
+    c (nb, 2*m_pw): the up component occupies [:npw], the down component starts
+    at the fixed padding offset m_pw. Shared by the noncollinear/SOC PDOS and
+    COHP projection loops."""
+    return c[:, :npw], c[:, m_pw:m_pw + npw]
+
+
+def spinor_scalar_amplitudes(system, sph, cols, cu, cd, device):
+    """Loewdin amplitudes (pu, pd) of a spinor state's up/down components on the
+    SCALAR AO set, sharing one spatial overlap. Complex (nb, nproj) each — the
+    caller forms |.|^2 populations or the pu* pd cross term (spin texture).
+    Setup only (no autograd path)."""
+    q = _ao_projectors_k(system, sph, cols, device)
+    overlap = torch.einsum("ig,jg->ij", q.conj(), q)
+    pu = _lowdin_project(torch.einsum("bg,pg->bp", cu, q.conj()), overlap)
+    pd = _lowdin_project(torch.einsum("bg,pg->bp", cd, q.conj()), overlap)
+    return pu, pd
+
+
+def spinor_jmj_amplitudes(system, sph, cols, cu, cd, device):
+    """Loewdin amplitudes (nb, nproj) on the |l j mj> spin-angular AO set; the
+    becp and AO overlap are spin-summed over the two spinor components. Complex —
+    the caller forms |.|^2 (SOC populations) or uses the amplitudes directly (the
+    band-limited COHP). Setup only (no autograd path)."""
+    qu, qd = _ao_spinor_projectors_k(system, sph, cols, device)
+    becp = (torch.einsum("bg,pg->bp", cu, qu.conj())
+            + torch.einsum("bg,pg->bp", cd, qd.conj()))
+    overlap = (torch.einsum("pg,qg->pq", qu.conj(), qu)
+               + torch.einsum("pg,qg->pq", qd.conj(), qd))
+    return _lowdin_project(becp, overlap)
 
 
 def _nc_weights_k(system, sph, ik, c, cols, device):
@@ -299,9 +348,7 @@ def projected_dos(res, *, width: float = 0.1, npoints: int = 800, window=None,
     spilling = float(1.0 - captured / kweight_state.sum())
 
     # energy grid + gaussian broadening
-    if window is None:
-        window = (all_e.min() - 10 * width, all_e.max() + 10 * width)
-    grid = np.linspace(window[0], window[1], npoints)
+    window, grid = spectral_grid(all_e, width, npoints, window)
 
     def broaden(state_weight, isp):
         return _broaden(grid, all_e[isp],
@@ -358,11 +405,8 @@ def projected_dos_noncollinear(res, *, width: float = 0.1, npoints: int = 800,
     for ik, sph in enumerate(system.spheres):
         npw = sph.npw
         c = res.coeffs[ik].to(device)                       # (nb, 2·m_pw)
-        cu, cd = c[:, :npw], c[:, m_pw:m_pw + npw]           # up / down components
-        q = _ao_projectors_k(system, sph, cols, device)     # (nproj, npw)
-        overlap = torch.einsum("ig,jg->ij", q.conj(), q)     # spatial AO overlap
-        pu = _lowdin_project(torch.einsum("bg,pg->bp", cu, q.conj()), overlap)
-        pd = _lowdin_project(torch.einsum("bg,pg->bp", cd, q.conj()), overlap)
+        cu, cd = split_spinor(c, npw, m_pw)                  # up / down components
+        pu, pd = spinor_scalar_amplitudes(system, sph, cols, cu, cd, device)
         au, ad = (pu.real ** 2 + pu.imag ** 2), (pd.real ** 2 + pd.imag ** 2)
         cross = pu.conj() * pd                               # <phi~|up>* <phi~|down>
         sl = slice(ik * nb, (ik + 1) * nb)
@@ -376,9 +420,7 @@ def projected_dos_noncollinear(res, *, width: float = 0.1, npoints: int = 800,
     captured = (n_pop.sum(axis=1) * kweight_state).sum()
     spilling = float(1.0 - captured / kweight_state.sum())
 
-    if window is None:
-        window = (all_e.min() - 10 * width, all_e.max() + 10 * width)
-    grid = np.linspace(window[0], window[1], npoints)
+    window, grid = spectral_grid(all_e, width, npoints, window)
 
     def chan(pop, mask):
         return _broaden(grid, all_e, kweight_state * pop[:, mask].sum(axis=1), width)
@@ -519,22 +561,16 @@ def projected_dos_soc(res, *, width: float = 0.1, npoints: int = 800, window=Non
     for ik, sph in enumerate(system.spheres):
         npw = sph.npw
         c = res.coeffs[ik].to(device)                       # (nb, 2·m_pw)
-        cu, cd = c[:, :npw], c[:, m_pw:m_pw + npw]
-        qu, qd = _ao_spinor_projectors_k(system, sph, cols, device)
-        becp = (torch.einsum("bg,pg->bp", cu, qu.conj())
-                + torch.einsum("bg,pg->bp", cd, qd.conj()))  # <Phi_p|psi_b>
-        overlap = (torch.einsum("pg,qg->pq", qu.conj(), qu)
-                   + torch.einsum("pg,qg->pq", qd.conj(), qd))  # <Phi_p|Phi_q>
-        wgt = _lowdin_weights(becp, overlap).cpu().numpy()
+        cu, cd = split_spinor(c, npw, m_pw)
+        proj = spinor_jmj_amplitudes(system, sph, cols, cu, cd, device)
+        wgt = (proj.real ** 2 + proj.imag ** 2).cpu().numpy()
         sl = slice(ik * nb, (ik + 1) * nb)
         weights[sl] = wgt
         kweight_state[sl] = float(kw[ik])
 
     captured = (weights.sum(axis=1) * kweight_state).sum()
     spilling = float(1.0 - captured / kweight_state.sum())
-    if window is None:
-        window = (all_e.min() - 10 * width, all_e.max() + 10 * width)
-    grid = np.linspace(window[0], window[1], npoints)
+    window, grid = spectral_grid(all_e, width, npoints, window)
 
     def chan(mask):
         return _broaden(grid, all_e, kweight_state * weights[:, mask].sum(axis=1),

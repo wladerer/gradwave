@@ -199,7 +199,7 @@ class OneCenter:
                 cy = self.gaunt[:, lmi, lmj]  # (l2,)
                 nz = np.nonzero(np.abs(cy) > 1e-12)[0]
                 for lm in nz:
-                    ll = int(math.isqrt(lm))
+                    ll = math.isqrt(lm)
                     if what == "ae":
                         f = self.pfunc_ae[key]
                     else:
@@ -213,7 +213,7 @@ class OneCenter:
         v = np.zeros_like(rho_lm)
         r = self.r
         for lm in range(self.l2):
-            ll = int(math.isqrt(lm))
+            ll = math.isqrt(lm)
             f = rho_lm[:, lm]
             if not np.any(f):
                 continue
@@ -294,7 +294,7 @@ class OneCenter:
                     cy = self.gaunt[:, lmi, lmj]
                     nz = np.nonzero(np.abs(cy) > 1e-12)[0]
                     for lm in nz:
-                        ll = int(math.isqrt(lm))
+                        ll = math.isqrt(lm)
                         if what == "ae":
                             f = self.pfunc_ae[key]
                         else:
@@ -319,7 +319,7 @@ class OneCenter:
         tt = self._torch_tables()
         cols = []
         for lm in range(self.l2):
-            ll = int(math.isqrt(lm))
+            ll = math.isqrt(lm)
             f = rho_lm[:, lm]
             a_in = _cumint_t(f * tt["h_a"][ll])
             b_all = _cumint_t(f * tt["h_b"][ll])

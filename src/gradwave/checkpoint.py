@@ -162,7 +162,7 @@ def load_checkpoint(path) -> dict:
     return payload
 
 
-def nc_mag_seed(payload: dict, system) -> "torch.Tensor":
+def nc_mag_seed(payload: dict, system) -> torch.Tensor:
     """Per-atom moment seed (na, 3) [μB] for warm-starting a non-collinear
     SCF from a checkpoint.
 

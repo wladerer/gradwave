@@ -76,6 +76,45 @@ def _hamiltonians(res: SCFResult) -> list[HamiltonianK]:
     return hs
 
 
+def projected_cg(a_apply, precond, x, r, tol: float, max_iter: int):
+    """Projected preconditioned CG with a per-band breakdown guard.
+
+    Solves ``A x = rhs`` in batched (per-band) form given the initial guess
+    ``x`` and residual ``r = rhs − A x``. ``a_apply`` is the SPD operator on the
+    conduction space; ``precond(r)`` applies the preconditioner — the USPP twin
+    folds the S-projector into it, the norm-conserving path passes a plain Teter
+    preconditioner. Bands whose curvature goes non-positive or non-finite are
+    frozen (their search direction is zeroed); the operator is positive definite
+    on the conduction space, so this only fires at the round-off floor after a
+    band has already converged, where an unguarded ``pap ≤ 0`` would give a
+    1e300 step → Inf → NaN.
+
+    No autograd path — the callers are the no-grad inner solves of implicit
+    differentiation. Returns ``x``; any final projection is the caller's.
+    """
+    z = precond(r)
+    p = z
+    rz = torch.einsum("bg,bg->b", r.conj(), z).real
+    for _ in range(max_iter):
+        ap = a_apply(p)
+        pap = torch.einsum("bg,bg->b", p.conj(), ap).real
+        p2 = torch.einsum("bg,bg->b", p.conj(), p).real
+        ok = torch.isfinite(pap) & (pap > 1e-30 * p2.clamp_min(1e-300))
+        if not bool(ok.any()):
+            break
+        a_cg = torch.where(ok, rz / pap.clamp_min(1e-300), torch.zeros_like(rz))
+        x = x + a_cg[:, None] * p
+        r = r - a_cg[:, None] * ap
+        if float(torch.linalg.norm(r, dim=1).max()) < tol:
+            break
+        z = precond(r)
+        rz_new = torch.einsum("bg,bg->b", r.conj(), z).real
+        beta = torch.where(ok, rz_new / rz.clamp_min(1e-300), torch.zeros_like(rz))
+        p = torch.where(ok[:, None], z + beta[:, None] * p, torch.zeros_like(p))
+        rz = rz_new
+    return x
+
+
 def _sternheimer(h: HamiltonianK, c_occ, eps_occ, w_r, alpha: float, tol: float, max_iter: int):
     """Solve (H − ε_n + α P_occ) δψ_n = −P_c w ψ_n for all occupied n at one k.
 
@@ -100,32 +139,7 @@ def _sternheimer(h: HamiltonianK, c_occ, eps_occ, w_r, alpha: float, tol: float,
     t_band = torch.clamp(
         torch.einsum("bg,g,bg->b", c_occ.conj(), t_g.to(c_occ.dtype), c_occ).real, min=1e-6
     )
-    z = teter(r, t_g, t_band)
-    p = z
-    rz = torch.einsum("bg,bg->b", r.conj(), z).real
-    for _ in range(max_iter):
-        ap = a_apply(p)
-        pap = torch.einsum("bg,bg->b", p.conj(), ap).real
-        p2 = torch.einsum("bg,bg->b", p.conj(), p).real
-        # per-band breakdown guard (mirrors the USPP twin in
-        # postscf/uspp_implicit.py): freeze bands whose curvature is
-        # non-positive or non-finite — their p is zeroed, so they stay
-        # frozen. The projected operator is positive definite on the
-        # conduction space, so this only fires at the round-off floor after
-        # stagnation, where an unguarded pap ≤ 0 gives a 1e300 step → Inf → NaN.
-        ok = torch.isfinite(pap) & (pap > 1e-30 * p2.clamp_min(1e-300))
-        if not bool(ok.any()):
-            break
-        alpha_cg = torch.where(ok, rz / pap.clamp_min(1e-300), torch.zeros_like(rz))
-        x = x + alpha_cg[:, None] * p
-        r = r - alpha_cg[:, None] * ap
-        if float(torch.linalg.norm(r, dim=1).max()) < tol:
-            break
-        z = teter(r, t_g, t_band)
-        rz_new = torch.einsum("bg,bg->b", r.conj(), z).real
-        beta = torch.where(ok, rz_new / rz.clamp_min(1e-300), torch.zeros_like(rz))
-        p = torch.where(ok[:, None], z + beta[:, None] * p, torch.zeros_like(p))
-        rz = rz_new
+    x = projected_cg(a_apply, lambda rr: teter(rr, t_g, t_band), x, r, tol, max_iter)
     return p_c(x)
 
 

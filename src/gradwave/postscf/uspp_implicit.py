@@ -115,6 +115,7 @@ from gradwave.postscf.uspp_frozen import (
     screen_phase,
     screened_dscr,
 )
+from gradwave.scf.implicit import projected_cg
 from gradwave.solvers.precond import teter
 
 
@@ -373,33 +374,13 @@ class _ConvergedUSPP:
         # round-off after stagnation → 1e300 step → Inf → NaN; observed on
         # FM Ni dn-channel solves with warm starts)
         tol_eff = max(tol, 1e-12 * float(torch.linalg.norm(rhs, dim=1).max()))
-        z = pc(teter(r, hk.t, self.t_band[isp][ik]))
-        p = z
-        rz = torch.einsum("bg,bg->b", r.conj(), z).real
-        for _ in range(max_iter):
-            ap = a_apply(p)
-            pap = torch.einsum("bg,bg->b", p.conj(), ap).real
-            p2 = torch.einsum("bg,bg->b", p.conj(), p).real
-            # per-band breakdown guard: freeze bands whose curvature is
-            # non-positive or non-finite (their p is zeroed, so they stay
-            # frozen); the operator is PD, so this only fires at the
-            # round-off floor where the band is already converged
-            ok = torch.isfinite(pap) & (pap > 1e-30 * p2.clamp_min(1e-300))
-            if not bool(ok.any()):
-                break
-            a_cg = torch.where(ok, rz / pap.clamp_min(1e-300),
-                               torch.zeros_like(rz))
-            x = x + a_cg[:, None] * p
-            r = r - a_cg[:, None] * ap
-            if float(torch.linalg.norm(r, dim=1).max()) < tol_eff:
-                break
-            z = pc(teter(r, hk.t, self.t_band[isp][ik]))
-            rz_new = torch.einsum("bg,bg->b", r.conj(), z).real
-            beta = torch.where(ok, rz_new / rz.clamp_min(1e-300),
-                               torch.zeros_like(rz))
-            p = torch.where(ok[:, None], z + beta[:, None] * p,
-                            torch.zeros_like(p))
-            rz = rz_new
+        # S-projected Teter preconditioner: pc folds in the conduction
+        # projector so z stays in the solve subspace
+        x = projected_cg(
+            a_apply,
+            lambda rr: pc(teter(rr, hk.t, self.t_band[isp][ik])),
+            x, r, tol_eff, max_iter,
+        )
         return pc(x)
 
     def apply_chi0(self, w_sp: list, d_bare_sp: list, dpsi_warm: list,

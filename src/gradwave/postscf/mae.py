@@ -180,7 +180,7 @@ class MAEResult:
         }, path)
 
     @classmethod
-    def load(cls, path) -> "MAEResult":
+    def load(cls, path) -> MAEResult:
         d = torch.load(path, map_location="cpu", weights_only=True)
         if d.get("format") != "gradwave-mae-1":
             raise ValueError(f"{path}: not a gradwave MAE result file")
