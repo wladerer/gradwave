@@ -461,38 +461,20 @@ def _build_output_density(ops, coeffs, coeffs_b, occ_s):
     return rho_out_s, rho_ij_s, becps_s
 
 
-@torch.no_grad()
-def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
-                   n_hub_s, tol_eff, seed_salt):
-    """ONE evaluation of the SCF map at (rho_s, rho_ij_mix): potentials →
-    screened D (+ one-center ddd from the MIXER-side becsum) → generalized
-    Davidson (warm-started via coeffs/coeffs_b, mutated in place) →
-    shared-Fermi occupations (+U matrices) → fresh densities/becsum →
-    energy assembly. No mixing, no convergence judgment, no rescue —
-    those belong to the driver (or to newton/the rig, which call this
-    directly)."""
-    system, xc, nspin = ops.system, ops.xc, ops.nspin
-    smearing, width, batched = ops.smearing, ops.width, ops.batched
-    projs, bk, p_b, hub = ops.projs, ops.bk, ops.p_b, ops.hub
-    vloc_g, vloc_r, phase_pos = ops.vloc_g, ops.vloc_r, ops.phase_pos
-    e_ewald = ops.e_ewald
-    is_paw, onec = ops.is_paw, ops.onec
-    grid, vol, dev, shape = ops.grid, ops.vol, ops.dev, ops.shape
-    nk, nb = ops.nk, ops.nb
+def _solve_bands_uspp(ops, veff_s, dscr_s, n_hub_s, coeffs, coeffs_b, tol_eff,
+                      seed_salt):
+    """Generalized eigensolve H x = ε S x per spin (batched or per-k). Warm-starts
+    from and MUTATES coeffs/coeffs_b IN PLACE — the frozen warm-start contract
+    newton.py relies on. The S-normalization is fp64 always (even under mixed
+    precision), and x_b is cast to CDTYPE before it. Returns eigs_s."""
+    system, nspin, batched = ops.system, ops.nspin, ops.batched
+    bk, shape, dev = ops.bk, ops.shape, ops.dev
+    nk, nb, p_b, projs, hub = ops.nk, ops.nb, ops.p_b, ops.projs, ops.hub
     if batched:
         from gradwave.core.batch import becp_b
         from gradwave.scf.uspp_batch import BatchedHS, davidson_gen_batched
     if hub is not None:
-        from gradwave.core.hubbard import (
-            hubbard_dmatrix,
-            hubbard_energy,
-            occupation_matrices,
-        )
-
-    veff_s, dscr_s, e_onec = uspp_potentials_dscr(
-        system, xc, rho_s, rho_ij_mix, vloc_r, phase_pos,
-        onec if is_paw else None)
-
+        from gradwave.core.hubbard import hubbard_dmatrix
     eigs_s = []
     for isp in range(nspin):
         hub_d = None
@@ -573,6 +555,33 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
             coeffs[isp][ik] = c_k
             eigs_l.append(e_k)
         eigs_s.append(torch.stack(eigs_l))
+    return eigs_s
+
+
+@torch.no_grad()
+def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
+                   n_hub_s, tol_eff, seed_salt):
+    """ONE evaluation of the SCF map at (rho_s, rho_ij_mix): potentials →
+    screened D (+ one-center ddd from the MIXER-side becsum) → generalized
+    Davidson (warm-started via coeffs/coeffs_b, mutated in place) →
+    shared-Fermi occupations (+U matrices) → fresh densities/becsum →
+    energy assembly. No mixing, no convergence judgment, no rescue —
+    those belong to the driver (or to newton/the rig, which call this
+    directly)."""
+    system, xc, nspin = ops.system, ops.xc, ops.nspin
+    smearing, width, batched = ops.smearing, ops.width, ops.batched
+    projs, bk, p_b, hub = ops.projs, ops.bk, ops.p_b, ops.hub
+    vloc_g, vloc_r, phase_pos = ops.vloc_g, ops.vloc_r, ops.phase_pos
+    e_ewald = ops.e_ewald
+    is_paw, onec = ops.is_paw, ops.onec
+    grid, vol, dev, shape = ops.grid, ops.vol, ops.dev, ops.shape
+    nk, nb = ops.nk, ops.nb
+    veff_s, dscr_s, e_onec = uspp_potentials_dscr(
+        system, xc, rho_s, rho_ij_mix, vloc_r, phase_pos,
+        onec if is_paw else None)
+
+    eigs_s = _solve_bands_uspp(ops, veff_s, dscr_s, n_hub_s, coeffs, coeffs_b,
+                               tol_eff, seed_salt)
 
     occ_s, mu, entropy_term = shared_fermi_occupations(
         eigs_s, system.kweights, smearing, width, system.n_electrons,
