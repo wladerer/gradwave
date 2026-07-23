@@ -171,6 +171,165 @@ class NCResult:
     formalism: str = "noncollinear"  # result-type tag shared by all four SCF drivers
 
 
+def _build_nc_mixer(g2_vec, ng, nonmagnetic, mixing_alpha, mag_mixing_alpha,
+                    mixing_history, precond_op, m, device):
+    """Build the (ρ, m⃗) mixer. Nonmagnetic: single ρ block with Kerker and
+    check_g0, and m is zeroed. Magnetic: 4 blocks with Kerker on the ρ block only
+    (kerker_mask, check_g0=False) and a decoupled m⃗ step (base_step_scale) to hold
+    the magnetic branch against moment collapse. Returns (mixer, base_step_scale, m)."""
+    base_step_scale = None
+    if nonmagnetic:
+        m = torch.zeros_like(m)
+        mixer = PulayMixer(g2_vec, alpha=mixing_alpha, history=mixing_history,
+                           kerker=True, check_g0=True)
+    else:
+        kerker_mask = torch.cat([torch.ones(ng, dtype=torch.bool, device=device),
+                                 torch.zeros(3 * ng, dtype=torch.bool, device=device)])
+        ratio = mag_mixing_alpha / mixing_alpha if mixing_alpha > 0 else 1.0
+        base_step_scale = torch.cat([
+            torch.ones(ng, dtype=RDTYPE, device=device),
+            torch.full((3 * ng,), float(ratio), dtype=RDTYPE, device=device)])
+        mixer = PulayMixer(torch.cat([g2_vec] * 4), alpha=mixing_alpha,
+                           history=mixing_history, kerker=True, check_g0=False,
+                           kerker_mask=kerker_mask, step_scale=base_step_scale)
+    if precond_op is not None:
+        # override constant Kerker on the density-total (charge) block; m⃗ blocks
+        # keep their own step (base_step_scale) and are untouched by this operator.
+        mixer.precond_op = precond_op
+        mixer.precond_slice = slice(0, ng)
+    return mixer, base_step_scale, m
+
+
+def _solve_spinor_bands(bk, grid, v_r, b_xc, projs_b, q_so, dij_so, coeffs, t2,
+                        mask2, tol_eff, mixed_precision, mp_crossover):
+    """Diagonalize the spinor Hamiltonian for one iteration at diagonalization
+    tolerance tol_eff (optional fp32 draft with an fp64 spinor renorm over the
+    doubled 2·npw axis so the electron count stays conserved through mixing).
+    Returns (eigs, coeffs, h); h is reused for the band-chunk size in the Pauli
+    density accumulation."""
+    use_low = mixed_precision and tol_eff > mp_crossover
+    cdtype = CDTYPE_LOW if use_low else CDTYPE
+    t2_solve = t2.to(RDTYPE_LOW) if use_low else t2
+    h = SpinorHamiltonian(bk, grid.shape, v_r, b_xc, projs_b, q=q_so, dij_so=dij_so)
+    dav = davidson_batched(h.apply, coeffs.to(cdtype), t2_solve, mask2, tol=tol_eff)
+    eigs = dav.eigenvalues.to(RDTYPE)
+    coeffs = dav.eigenvectors.to(CDTYPE)
+    if use_low:
+        # fp32 draft: renormalize spinors in fp64 so the electron count
+        # (ρ at G=0) stays conserved through mixing (see collinear scf)
+        coeffs = coeffs / torch.linalg.norm(
+            coeffs, dim=-1, keepdim=True).clamp_min(1e-30)
+    return eigs, coeffs, h
+
+
+def _nc_adaptive_backoff(adaptive, it, last_backoff, stall_window, adapt_mult,
+                         history, mixer, base_step_scale, verbose):
+    """When the residual stalls or bounces over a window (a limit cycle at a
+    frustrated moment / SOC), halve the global mixing step multiplier and drop the
+    DIIS history — MUTATES mixer (step_scale, reset) — so the pre-stall vectors
+    stop fighting the recovery. Returns (adapt_mult, last_backoff)."""
+    if not (adaptive and it - last_backoff >= stall_window
+            and it > 2 * stall_window and adapt_mult > 0.1):
+        return adapt_mult, last_backoff
+    recent = min(h["res"] for h in history[-stall_window:])
+    before = min(h["res"] for h in history[-2 * stall_window:-stall_window])
+    if recent > 0.9 * before:
+        adapt_mult = max(0.5 * adapt_mult, 0.1)
+        mixer.step_scale = (adapt_mult if base_step_scale is None
+                            else base_step_scale * adapt_mult)
+        mixer.reset()
+        last_backoff = it
+        if verbose:
+            print(f"  NC-SCF: residual stalled — mixing step x{adapt_mult:.2f}",
+                  flush=True)
+    return adapt_mult, last_backoff
+
+
+def _nc_energy_breakdown(coeffs, occ, t2, entropy_term, rho_out, m_out, q_so,
+                         dij_so, projs_b, m_pw, vloc_g, e_ew, system, grid, xc,
+                         vol, nk):
+    """Per-iteration energy breakdown. The nonlocal term takes the SOC path
+    (q_so becp) or the scalar-relativistic per-spin (up/down) path. Returns
+    EnergyBreakdown."""
+    rho_g_out = r_to_g(rho_out.to(CDTYPE))
+    t_occ = (system.kweights[:, None] * occ).to(coeffs.real.dtype)
+    e_kin = torch.einsum("kb,kbg,kg->", t_occ,
+                         coeffs.real**2 + coeffs.imag**2, t2)
+    e_h = hartree_energy(rho_g_out, grid.g2, vol)
+    from gradwave.core.xc.noncollinear import energy_with_grid
+
+    e_xc = energy_with_grid(xc, rho_out, m_out, grid, rho_core=system.rho_core)
+    e_loc = local_energy(rho_g_out, vloc_g, vol)
+    if q_so is not None:
+        b_so = torch.einsum("kpg,kbg->kbp", q_so.conj(), coeffs)
+        e_nl = nonlocal_energy([b_so[ik] for ik in range(nk)], dij_so, occ,
+                               system.kweights)
+    else:
+        bu = becp_b(projs_b, coeffs[..., :m_pw])
+        bd = becp_b(projs_b, coeffs[..., m_pw:])
+        dij = _stack_dij(system)
+        e_nl = nonlocal_energy([bu[ik] for ik in range(nk)], dij, occ,
+                               system.kweights) \
+            + nonlocal_energy([bd[ik] for ik in range(nk)], dij, occ,
+                              system.kweights)
+    return EnergyBreakdown(kinetic=e_kin, hartree=e_h, xc=e_xc, local=e_loc,
+                           nonlocal_=e_nl, ewald=e_ew, smearing=entropy_term)
+
+
+def _nc_effective_potential(xc, rho, m, grid, system, vloc_r, nonmagnetic,
+                            constrain_dirs, constrain_lambda, constrain_mode,
+                            constrain_target_mag, atom_weights, vol):
+    """Per-iteration effective potential v_r and exchange field b_xc. Nonmagnetic
+    zeros b_xc; otherwise an optional Ma-Dudarev constraining field is ADDED to
+    b_xc after (never before) the nonmagnetic zeroing. One vxc_and_bxc autograd
+    call, unchanged. Returns (v_r, b_xc)."""
+    rho_g_box = r_to_g(rho.to(CDTYPE))
+    v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
+                           dim=(-3, -2, -1)) * grid.n_points).real
+    v_xc, b_xc, _ = vxc_and_bxc(xc, rho, m, grid, rho_core=system.rho_core)
+    if nonmagnetic:
+        b_xc = torch.zeros_like(b_xc)
+    elif constrain_dirs is not None:
+        # Constraining field B_c(r) = Σ_I (∂E_p/∂M_I) w_I(r) pins each atomic
+        # moment M_I = ∫ w_I m⃗ dr toward its target ê_I. ∂E_p/∂M_I comes from
+        # autograd on penalty_energy (gradwave.scf.moment_penalty), so the
+        # direction-only "perp" and magnitude-robust "vector" penalties share
+        # one definition. It adds to the exchange field b_xc (= δE/δm⃗).
+        cf = vol / grid.n_points
+        m_at = torch.einsum("axyz,ixyz->ai", atom_weights, m) * cf   # M_I (na,3)
+        g = field_coeff(m_at, constrain_dirs, constrain_lambda,
+                        constrain_mode, constrain_target_mag)
+        b_xc = b_xc + torch.einsum("ai,axyz->ixyz", g, atom_weights)
+    v_r = v_h + v_xc + vloc_r
+    return v_r, b_xc
+
+
+def _seed_nc_density(grid, system, mag_vec_init, device):
+    """Initial (ρ, m⃗): SAD total density plus atom-directed magnetization
+    channels seeded from mag_vec_init (per-atom moment fraction·direction)."""
+    rho = sad_density(grid, system.positions, system.species_of_atom, system.upfs,
+                      system.n_electrons)
+    m_chan = [
+        sad_density(grid, system.positions, system.species_of_atom, system.upfs,
+                    None, atom_scale=[float(mag_vec_init[a, i])
+                                      for a in range(len(system.species_of_atom))])
+        for i in range(3)
+    ]
+    return rho.to(device), torch.stack(m_chan).to(device)
+
+
+def _unpack_mixed_fields(mixed, n_chan, ng, mask_flat, grid, device):
+    """Inverse-FFT the mixed (ρ, m⃗) vector back to per-channel real-space fields:
+    [rho] when nonmagnetic (n_chan=1), else [rho, m_x, m_y, m_z]."""
+    fields = []
+    for c4 in range(n_chan):
+        gnew = torch.zeros(grid.n_points, dtype=CDTYPE, device=device)
+        gnew[mask_flat] = mixed[c4 * ng:(c4 + 1) * ng]
+        fields.append((torch.fft.ifftn(gnew.reshape(grid.shape) * grid.n_points,
+                                       dim=(-3, -2, -1))).real)
+    return fields
+
+
 @torch.no_grad()
 def scf_noncollinear(
     system: System,
@@ -221,16 +380,7 @@ def scf_noncollinear(
     mag_vec_init = torch.as_tensor(mag_vec_init, dtype=RDTYPE)
 
     # initial (ρ, m⃗): SAD total + atom-directed magnetization channels
-    rho = sad_density(grid, system.positions, system.species_of_atom, system.upfs,
-                      system.n_electrons)
-    m_chan = [
-        sad_density(grid, system.positions, system.species_of_atom, system.upfs,
-                    None, atom_scale=[float(mag_vec_init[a, i])
-                                      for a in range(len(system.species_of_atom))])
-        for i in range(3)
-    ]
-    m = torch.stack(m_chan).to(device)
-    rho = rho.to(device)
+    rho, m = _seed_nc_density(grid, system, mag_vec_init, device)
 
     mask_flat = grid.dens_mask.reshape(-1)
     g2_vec = grid.g2.reshape(-1)[mask_flat]
@@ -248,27 +398,9 @@ def scf_noncollinear(
     # step; the adaptive backoff below is the counterweight against overshoot.
     if mag_mixing_alpha is None:
         mag_mixing_alpha = max(mixing_alpha, 0.6)
-    base_step_scale = None
-    if nonmagnetic:
-        m = torch.zeros_like(m)
-        mixer = PulayMixer(g2_vec, alpha=mixing_alpha, history=mixing_history,
-                           kerker=True, check_g0=True)
-    else:
-        kerker_mask = torch.cat([torch.ones(ng, dtype=torch.bool, device=device),
-                                 torch.zeros(3 * ng, dtype=torch.bool, device=device)])
-        ratio = mag_mixing_alpha / mixing_alpha if mixing_alpha > 0 else 1.0
-        base_step_scale = torch.cat([
-            torch.ones(ng, dtype=RDTYPE, device=device),
-            torch.full((3 * ng,), float(ratio), dtype=RDTYPE, device=device)])
-        mixer = PulayMixer(torch.cat([g2_vec] * 4), alpha=mixing_alpha,
-                           history=mixing_history, kerker=True, check_g0=False,
-                           kerker_mask=kerker_mask, step_scale=base_step_scale)
-
-    if precond_op is not None:
-        # override constant Kerker on the density-total (charge) block; m⃗ blocks
-        # keep their own step (base_step_scale) and are untouched by this operator.
-        mixer.precond_op = precond_op
-        mixer.precond_slice = slice(0, ng)
+    mixer, base_step_scale, m = _build_nc_mixer(
+        g2_vec, ng, nonmagnetic, mixing_alpha, mag_mixing_alpha, mixing_history,
+        precond_op, m, device)
 
     projs_b = projectors_b(bk, system.positions)
     q_so = dij_so = None
@@ -314,39 +446,16 @@ def scf_noncollinear(
 
     for it in range(1, max_iter + 1):
         t_it = time.perf_counter()
-        rho_g_box = r_to_g(rho.to(CDTYPE))
-        v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
-                               dim=(-3, -2, -1)) * grid.n_points).real
-        v_xc, b_xc, _ = vxc_and_bxc(xc, rho, m, grid, rho_core=system.rho_core)
-        if nonmagnetic:
-            b_xc = torch.zeros_like(b_xc)
-        elif constrain_dirs is not None:
-            # Constraining field B_c(r) = Σ_I (∂E_p/∂M_I) w_I(r) pins each atomic
-            # moment M_I = ∫ w_I m⃗ dr toward its target ê_I. ∂E_p/∂M_I comes from
-            # autograd on penalty_energy (gradwave.scf.moment_penalty), so the
-            # direction-only "perp" and magnitude-robust "vector" penalties share
-            # one definition. It adds to the exchange field b_xc (= δE/δm⃗).
-            cf = vol / grid.n_points
-            m_at = torch.einsum("axyz,ixyz->ai", atom_weights, m) * cf   # M_I (na,3)
-            g = field_coeff(m_at, constrain_dirs, constrain_lambda,
-                            constrain_mode, constrain_target_mag)
-            b_xc = b_xc + torch.einsum("ai,axyz->ixyz", g, atom_weights)
-        v_r = v_h + v_xc + vloc_r
+        v_r, b_xc = _nc_effective_potential(
+            xc, rho, m, grid, system, vloc_r, nonmagnetic, constrain_dirs,
+            constrain_lambda, constrain_mode, constrain_target_mag, atom_weights,
+            vol)
 
         tol_eff = adaptive_diago_tol(it, history, diago_tol,
                                      system.n_electrons, schedule="linear")
-        use_low = mixed_precision and tol_eff > mp_crossover
-        cdtype = CDTYPE_LOW if use_low else CDTYPE
-        t2_solve = t2.to(RDTYPE_LOW) if use_low else t2
-        h = SpinorHamiltonian(bk, grid.shape, v_r, b_xc, projs_b, q=q_so, dij_so=dij_so)
-        dav = davidson_batched(h.apply, coeffs.to(cdtype), t2_solve, mask2, tol=tol_eff)
-        eigs = dav.eigenvalues.to(RDTYPE)
-        coeffs = dav.eigenvectors.to(CDTYPE)
-        if use_low:
-            # fp32 draft: renormalize spinors in fp64 so the electron count
-            # (ρ at G=0) stays conserved through mixing (see collinear scf)
-            coeffs = coeffs / torch.linalg.norm(
-                coeffs, dim=-1, keepdim=True).clamp_min(1e-30)
+        eigs, coeffs, h = _solve_spinor_bands(
+            bk, grid, v_r, b_xc, projs_b, q_so, dij_so, coeffs, t2, mask2,
+            tol_eff, mixed_precision, mp_crossover)
 
         mu = float(find_fermi(eigs, system.kweights, scheme, width,
                               system.n_electrons, degeneracy=1.0))
@@ -369,29 +478,9 @@ def scf_noncollinear(
             m_out = torch.zeros_like(m_out)
 
         # energies
-        rho_g_out = r_to_g(rho_out.to(CDTYPE))
-        t_occ = (system.kweights[:, None] * occ).to(coeffs.real.dtype)
-        e_kin = torch.einsum("kb,kbg,kg->", t_occ,
-                             coeffs.real**2 + coeffs.imag**2, t2)
-        e_h = hartree_energy(rho_g_out, grid.g2, vol)
-        from gradwave.core.xc.noncollinear import energy_with_grid
-
-        e_xc = energy_with_grid(xc, rho_out, m_out, grid, rho_core=system.rho_core)
-        e_loc = local_energy(rho_g_out, vloc_g, vol)
-        if q_so is not None:
-            b_so = torch.einsum("kpg,kbg->kbp", q_so.conj(), coeffs)
-            e_nl = nonlocal_energy([b_so[ik] for ik in range(nk)], dij_so, occ,
-                                   system.kweights)
-        else:
-            bu = becp_b(projs_b, coeffs[..., :m_pw])
-            bd = becp_b(projs_b, coeffs[..., m_pw:])
-            dij = _stack_dij(system)
-            e_nl = nonlocal_energy([bu[ik] for ik in range(nk)], dij, occ,
-                                   system.kweights) \
-                + nonlocal_energy([bd[ik] for ik in range(nk)], dij, occ,
-                                  system.kweights)
-        energies = EnergyBreakdown(kinetic=e_kin, hartree=e_h, xc=e_xc, local=e_loc,
-                                   nonlocal_=e_nl, ewald=e_ew, smearing=entropy_term)
+        energies = _nc_energy_breakdown(
+            coeffs, occ, t2, entropy_term, rho_out, m_out, q_so, dij_so, projs_b,
+            m_pw, vloc_g, e_ew, system, grid, xc, vol, nk)
         e_free = float(energies.free_energy)
 
         if nonmagnetic:  # m_out already pinned to 0 above (before E_xc)
@@ -412,33 +501,15 @@ def scf_noncollinear(
             break
 
         e_free_prev = e_free
-        # adaptive fallback: a residual that stops decreasing over a window
-        # (stall) or bounces (limit cycle at a frustrated moment / SOC) means
-        # the step is too aggressive for the local Jacobian. Halve the global
-        # step multiplier and drop the DIIS history so the pre-stall vectors
-        # stop fighting the recovery, instead of silently running to max_iter.
-        if (adaptive and it - last_backoff >= stall_window
-                and it > 2 * stall_window and adapt_mult > 0.1):
-            recent = min(h["res"] for h in history[-stall_window:])
-            before = min(h["res"] for h in history[-2 * stall_window:-stall_window])
-            if recent > 0.9 * before:
-                adapt_mult = max(0.5 * adapt_mult, 0.1)
-                mixer.step_scale = (adapt_mult if base_step_scale is None
-                                    else base_step_scale * adapt_mult)
-                mixer.reset()
-                last_backoff = it
-                if verbose:
-                    print(f"  NC-SCF: residual stalled — mixing step x{adapt_mult:.2f}",
-                          flush=True)
+        # adaptive fallback against a stalled/oscillating residual (halve the
+        # global mixing step and drop the DIIS history) — see _nc_adaptive_backoff
+        adapt_mult, last_backoff = _nc_adaptive_backoff(
+            adaptive, it, last_backoff, stall_window, adapt_mult, history, mixer,
+            base_step_scale, verbose)
         if mixer_hook is not None:
             mixer_hook(it, vin, vout)
         mixed = mixer.step(vin, vout)
-        fields = []
-        for c4 in range(n_chan):
-            gnew = torch.zeros(grid.n_points, dtype=CDTYPE, device=device)
-            gnew[mask_flat] = mixed[c4 * ng:(c4 + 1) * ng]
-            fields.append((torch.fft.ifftn(gnew.reshape(grid.shape) * grid.n_points,
-                                           dim=(-3, -2, -1))).real)
+        fields = _unpack_mixed_fields(mixed, n_chan, ng, mask_flat, grid, device)
         rho = fields[0]
         if not nonmagnetic:
             m = torch.stack(fields[1:])
