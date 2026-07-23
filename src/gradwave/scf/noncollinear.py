@@ -222,6 +222,29 @@ def _solve_spinor_bands(bk, grid, v_r, b_xc, projs_b, q_so, dij_so, coeffs, t2,
     return eigs, coeffs, h
 
 
+def _nc_adaptive_backoff(adaptive, it, last_backoff, stall_window, adapt_mult,
+                         history, mixer, base_step_scale, verbose):
+    """When the residual stalls or bounces over a window (a limit cycle at a
+    frustrated moment / SOC), halve the global mixing step multiplier and drop the
+    DIIS history — MUTATES mixer (step_scale, reset) — so the pre-stall vectors
+    stop fighting the recovery. Returns (adapt_mult, last_backoff)."""
+    if not (adaptive and it - last_backoff >= stall_window
+            and it > 2 * stall_window and adapt_mult > 0.1):
+        return adapt_mult, last_backoff
+    recent = min(h["res"] for h in history[-stall_window:])
+    before = min(h["res"] for h in history[-2 * stall_window:-stall_window])
+    if recent > 0.9 * before:
+        adapt_mult = max(0.5 * adapt_mult, 0.1)
+        mixer.step_scale = (adapt_mult if base_step_scale is None
+                            else base_step_scale * adapt_mult)
+        mixer.reset()
+        last_backoff = it
+        if verbose:
+            print(f"  NC-SCF: residual stalled — mixing step x{adapt_mult:.2f}",
+                  flush=True)
+    return adapt_mult, last_backoff
+
+
 def _nc_energy_breakdown(coeffs, occ, t2, entropy_term, rho_out, m_out, q_so,
                          dij_so, projs_b, m_pw, vloc_g, e_ew, system, grid, xc,
                          vol, nk):
@@ -478,24 +501,11 @@ def scf_noncollinear(
             break
 
         e_free_prev = e_free
-        # adaptive fallback: a residual that stops decreasing over a window
-        # (stall) or bounces (limit cycle at a frustrated moment / SOC) means
-        # the step is too aggressive for the local Jacobian. Halve the global
-        # step multiplier and drop the DIIS history so the pre-stall vectors
-        # stop fighting the recovery, instead of silently running to max_iter.
-        if (adaptive and it - last_backoff >= stall_window
-                and it > 2 * stall_window and adapt_mult > 0.1):
-            recent = min(h["res"] for h in history[-stall_window:])
-            before = min(h["res"] for h in history[-2 * stall_window:-stall_window])
-            if recent > 0.9 * before:
-                adapt_mult = max(0.5 * adapt_mult, 0.1)
-                mixer.step_scale = (adapt_mult if base_step_scale is None
-                                    else base_step_scale * adapt_mult)
-                mixer.reset()
-                last_backoff = it
-                if verbose:
-                    print(f"  NC-SCF: residual stalled — mixing step x{adapt_mult:.2f}",
-                          flush=True)
+        # adaptive fallback against a stalled/oscillating residual (halve the
+        # global mixing step and drop the DIIS history) — see _nc_adaptive_backoff
+        adapt_mult, last_backoff = _nc_adaptive_backoff(
+            adaptive, it, last_backoff, stall_window, adapt_mult, history, mixer,
+            base_step_scale, verbose)
         if mixer_hook is not None:
             mixer_hook(it, vin, vout)
         mixed = mixer.step(vin, vout)
