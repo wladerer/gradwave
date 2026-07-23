@@ -11,14 +11,13 @@ import torch
 from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.postscf import exchange_multik as xk
 from gradwave.postscf import isdf, isdf_k
-from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
-from tests.helpers import RY, pseudo, si_fcc
+from tests.helpers import RY, si_fcc, si_upf
 
 
 def _run(kmesh):
     cell, pos = si_fcc()
-    upf = parse_upf(pseudo("Si_ONCV_PBE-1.2.upf"))
+    upf = si_upf()
     system = setup_system(cell, pos, [0, 0], [upf], ecut=14 * RY, kmesh=kmesh,
                           use_symmetry=False, time_reversal=False, nbands=8)
     res = scf(system, LDA_PW92(), smearing="none", etol=1e-9, rhotol=1e-8, verbose=False)

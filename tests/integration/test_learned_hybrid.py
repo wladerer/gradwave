@@ -22,14 +22,13 @@ from gradwave.postscf.hybrid import (
     hybrid_energy_gradient,
     hybrid_scf,
 )
-from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import setup_system
-from tests.helpers import RY, pseudo, si_fcc
+from tests.helpers import RY, si_fcc, si_upf
 
 
 def _system():
     cell, pos = si_fcc()
-    upf = parse_upf(pseudo("Si_ONCV_PBE-1.2.upf"))
+    upf = si_upf()
     return setup_system(cell, pos, [0, 0], [upf], ecut=14 * RY, kmesh=(2, 1, 1),
                         use_symmetry=False, time_reversal=False, nbands=8)
 

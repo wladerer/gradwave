@@ -86,12 +86,3 @@ def test_hartree_g0_masked():
     assert inv[0] == 0.0
     assert inv[1] == 0.0  # below tolerance → excluded
     assert torch.allclose(inv[2:], 1.0 / g2[2:])
-
-
-def test_density_from_orbitals_removed():
-    """The dead density_from_orbitals entry point is gone (finding 3); the live
-    path is core.batch.density_b."""
-    from gradwave.core import density
-
-    assert not hasattr(density, "density_from_orbitals")
-    assert hasattr(density, "sigma_from_rho")

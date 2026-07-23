@@ -37,6 +37,22 @@ def pseudo(name: str) -> str:
     return str(PSEUDOS / name)
 
 
+# The Si ONCV PBE norm-conserving pseudo is the workhorse fixture: ~20 call
+# sites across the suite parse it inline. This is the one place that names it.
+SI_ONCV = "Si_ONCV_PBE-1.2.upf"
+
+
+def si_upf():
+    """Parsed Si ONCV PBE pseudopotential (the default Si fixture).
+
+    Parsing is cheap, so this returns a fresh object each call rather than a
+    shared (mutable) cached one — callers may attach tables to it.
+    """
+    from gradwave.pseudo.upf import parse_upf
+
+    return parse_upf(pseudo(SI_ONCV))
+
+
 # FCC primitive-cell matrix; scale by a/2 for a conventional lattice constant a.
 _FCC = np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 

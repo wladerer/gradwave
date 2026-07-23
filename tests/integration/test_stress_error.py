@@ -17,9 +17,8 @@ import torch
 from gradwave.core.xc.pbe import PBE
 from gradwave.postscf.stress import stress
 from gradwave.postscf.stress_error import estimate_pressure_error
-from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
-from tests.helpers import RY, pseudo
+from tests.helpers import RY, si_upf
 
 pytestmark = pytest.mark.standard
 
@@ -33,7 +32,7 @@ POS = np.array([[0.0, 0.0, 0.0], [1.426505, 1.3275, 1.3842875]])
 
 
 def _run(ecut, sym=False):
-    upf = parse_upf(pseudo("Si_ONCV_PBE-1.2.upf"))
+    upf = si_upf()
     system = setup_system(CELL, POS, [0, 0], [upf], ecut=ecut, kmesh=(2, 2, 2),
                           use_symmetry=sym)
     res = scf(system, PBE(), smearing="none", etol=1e-10, rhotol=1e-9,
