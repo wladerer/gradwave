@@ -55,12 +55,14 @@ from gradwave.scf.mixing import PulayMixer
 from gradwave.scf.moment_penalty import field_coeff
 from gradwave.scf.spinor_common import (
     apply_local_spinor,
+    pack_grid_channels,
     pauli_density_accumulate,
     spinor_band_chunk,
     spinor_kinetic_energy,
     spinor_potential_blocks,
     spinor_pw_seed,
     spinor_scalar_nonlocal_energy,
+    unpack_grid_channels,
 )
 from gradwave.solvers.davidson import davidson_batched
 
@@ -319,12 +321,8 @@ def _seed_nc_density(grid, system, mag_vec_init, device):
 def _unpack_mixed_fields(mixed, n_chan, ng, mask_flat, grid, device):
     """Inverse-FFT the mixed (ρ, m⃗) vector back to per-channel real-space fields:
     [rho] when nonmagnetic (n_chan=1), else [rho, m_x, m_y, m_z]."""
-    fields = []
-    for c4 in range(n_chan):
-        gnew = torch.zeros(grid.n_points, dtype=CDTYPE, device=device)
-        gnew[mask_flat] = mixed[c4 * ng:(c4 + 1) * ng]
-        fields.append(g_to_r_box(gnew.reshape(grid.shape), real=True))
-    return fields
+    return unpack_grid_channels(mixed, n_chan, ng, mask_flat, grid.shape,
+                                grid.n_points, device)
 
 
 @torch.no_grad()
@@ -439,7 +437,7 @@ def scf_noncollinear(
         return g_to_r_box(m_g, real=True)
 
     def vec_of(fields):
-        return torch.cat([r_to_g(f.to(CDTYPE)).reshape(-1)[mask_flat] for f in fields])
+        return pack_grid_channels(fields, mask_flat)
 
     for it in range(1, max_iter + 1):
         t_it = time.perf_counter()

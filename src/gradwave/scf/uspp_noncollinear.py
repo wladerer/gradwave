@@ -58,12 +58,14 @@ from gradwave.scf.paw_noncollinear import (
 from gradwave.scf.results import USPPNCResult
 from gradwave.scf.spinor_common import (
     apply_local_spinor,
+    pack_grid_channels,
     pauli_density_accumulate,
     spinor_band_chunk,
     spinor_kinetic_energy,
     spinor_potential_blocks,
     spinor_pw_seed,
     spinor_scalar_nonlocal_energy,
+    unpack_grid_channels,
 )
 from gradwave.scf.uspp_loop import _build_iter_ops, _seed_becsum, _species_atoms
 from gradwave.scf.uspp_setup import USPPSystem
@@ -245,18 +247,14 @@ def scf_uspp_noncollinear(
                        check_g0=False, kerker_mask=kerker_mask, step_scale=step_scale)
 
     def pack(rho_, m_, bec_):
-        gvecs = [r_to_g(f.to(CDTYPE)).reshape(-1)[mask_flat]
-                 for f in (rho_, m_[0], m_[1], m_[2])]
+        gvecs = pack_grid_channels((rho_, m_[0], m_[1], m_[2]), mask_flat)
         bflat = [torch.cat([c.reshape(-1).to(CDTYPE) for c in bec_[i]])
                  for i in range(4)]
-        return torch.cat(gvecs + bflat)
+        return torch.cat([gvecs] + bflat)
 
     def unpack(v):
-        fields = []
-        for c4 in range(4):
-            box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
-            box[mask_flat] = v[c4 * ng:(c4 + 1) * ng]
-            fields.append(g_to_r_box(box.reshape(shape), real=True))
+        fields = unpack_grid_channels(v, 4, ng, mask_flat, shape,
+                                      grid.n_points, dev)
         bec = [[] for _ in range(4)]
         off = 4 * ng
         for i in range(4):
