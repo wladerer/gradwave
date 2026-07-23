@@ -345,6 +345,27 @@ def _bands_lines(bands):
     return lines
 
 
+def _eos_lines(eos):
+    lines = [_sec("equation of state")]
+    tag = "" if eos.get("all_converged", True) else "  (some SCFs NOT converged)"
+    lines += _cols([
+        ("V0", f"{eos['v0_ang3_per_atom']:.4f} Å³/atom"),
+        ("B0", f"{eos['b0_GPa']:.2f} GPa"),
+        ("B0'", f"{eos['b0_prime']:.3f}"),
+        ("fit", f"3rd-order Birch-Murnaghan on {eos['energy_kind']}"
+                f" ({len(eos['scales'])} volumes){tag}"),
+        ("residual", f"{eos['rms_residual_eV_per_atom'] * 1000:.3f} meV/atom RMS"),
+    ])
+    lines.append("")
+    head = (f"   {'scale':>6s}   {'V [Å³/at]':>12s}   {'E [eV/at]':>16s}")
+    lines.append(head)
+    for s, v, e in zip(eos["scales"], eos["volumes_ang3_per_atom"],
+                       eos["energies_eV_per_atom"], strict=True):
+        lines.append(f"   {s:>6.3f}   {v:>12.4f}   {e:>16.8f}")
+    lines.append("")
+    return lines
+
+
 def _pdos_lines(pdos):
     """Projected-DOS summary: spilling and the integrated Löwdin weight per group
     (electrons per group, summed over the spectrum). Spin-resolved for nspin=2."""
@@ -496,6 +517,8 @@ def format_output(summary: dict) -> str:
         lines += _bands_lines(summary["bands"])
     if "magnetism" in summary:
         lines += _magnetism_lines(summary["magnetism"])
+    if "eos" in summary:
+        lines += _eos_lines(summary["eos"])
     if "provenance" in summary:
         lines += _provenance_lines(summary["provenance"])
     lines += _tail_lines(summary)

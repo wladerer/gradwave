@@ -5,25 +5,19 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from scipy.optimize import curve_fit
 
 SP = Path(__file__).parent
 sys.path.insert(0, str(SP))
 from eos_cases import CASES, RY, SCALES  # noqa: E402
 
-EV_A3_TO_GPA = 160.2176634
-
-
-def bm3(v, e0, v0, b0, b0p):
-    x = (v0 / v) ** (2.0 / 3.0)
-    return e0 + 9 * v0 * b0 / 16 * ((x - 1) ** 3 * b0p + (x - 1) ** 2 * (6 - 4 * x))
+# the Birch-Murnaghan fit ships in the library (postscf.eos)
+from gradwave.postscf.eos import EV_A3_TO_GPA, fit_bm3  # noqa: E402
+from gradwave.postscf.eos import birch_murnaghan as bm3  # noqa: E402
 
 
 def fit(v, e):
-    i = int(np.argmin(e))
-    p0 = [e[i], v[i], 0.6, 4.0]
-    popt, _ = curve_fit(bm3, v, e, p0=p0, maxfev=20000)
-    return popt  # e0, v0, b0 (eV/A^3), b0p
+    f = fit_bm3(v, e)
+    return (f.e0, f.v0, f.b0, f.b0_prime)  # e0, v0, b0 (eV/A^3), b0p
 
 
 # gradwave energies

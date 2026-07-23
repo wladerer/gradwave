@@ -318,6 +318,40 @@ output:
   dir: ./out
 """
 
+_EOS = """\
+# Equation of state: isotropic volume scan + Birch-Murnaghan fit (V0, B0, B0').
+# Run:  gradwave input.yaml -o out/   ->  reports V0 [Å³/atom], B0 [GPa], B0'
+# Start from the RELAXED cell: the fit is only meaningful when V0 sits inside
+# the scanned window.
+
+structure:
+  # EDIT: your (ideally relaxed) cell and atoms.
+  cell: [[0.0, 2.715, 2.715], [2.715, 0.0, 2.715], [2.715, 2.715, 0.0]]
+  positions:
+    frac: [[0.0, 0.0, 0.0], [0.25, 0.25, 0.25]]
+  species: [Si, Si]
+
+pseudopotentials:
+  dir: ./pseudos                 # EDIT: folder holding your UPF files
+  map:
+    Si: Si_ONCV_PBE-1.2.upf      # EDIT: element -> UPF filename
+
+ecut: 500.0                      # eV, plane-wave cutoff (converge this)
+xc: pbe                          # lda | pbe
+kpoints:
+  mesh: [8, 8, 8]                # denser than a single SCF: B0 needs a smooth E(V)
+
+task: eos
+eos:
+  # volume factors relative to the input cell; the default is the calcDelta
+  # seven-point 94-106% window. Needs >=4 points for the four-parameter fit.
+  scales: [0.94, 0.96, 0.98, 1.00, 1.02, 1.04, 1.06]
+  energy: free_energy            # free_energy | total | e0 (quantity fitted vs V)
+
+output:
+  dir: ./out
+"""
+
 # name -> (one-line description, template body). Order is the listing order.
 _TEMPLATES: dict[str, tuple[str, str]] = {
     "scf": ("Single-point SCF of an insulator.", _SCF),
@@ -329,6 +363,7 @@ _TEMPLATES: dict[str, tuple[str, str]] = {
     "pdos": ("Projected density of states.", _PDOS),
     "magnetism": ("Collinear magnetism + exchange couplings.", _MAGNETISM),
     "noncollinear": ("Noncollinear SCF with spin-orbit coupling.", _NONCOLLINEAR),
+    "eos": ("Equation of state (bulk modulus via Birch-Murnaghan).", _EOS),
 }
 
 
