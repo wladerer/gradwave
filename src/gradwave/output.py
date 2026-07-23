@@ -59,23 +59,44 @@ def _structure_lines(struct):
     return lines
 
 
-def _parameters_lines(par):
-    lines = [_sec("parameters")]
+def _mesh_label(par):
+    """k-mesh string, annotated with total / IBZ k-point counts when known."""
     mesh = "×".join(str(n) for n in par["kmesh"])
     total, nk = par.get("nk_total"), par.get("nk")
     if total and nk:
-        mesh += f" = {total} k ({nk} IBZ)"
-    elif total:
-        mesh += f" = {total} k"
-    elif nk:
-        mesh += f" → {nk} k"
+        return mesh + f" = {total} k ({nk} IBZ)"
+    if total:
+        return mesh + f" = {total} k"
+    if nk:
+        return mesh + f" → {nk} k"
+    return mesh
+
+
+def _mixing_line(mix):
+    """One-line mixer summary: scheme · α · history · Kerker."""
+    bits = [mix["scheme"]]
+    if mix.get("alpha") is not None:
+        bits.append(f"α {mix['alpha']:g}")
+    if mix.get("history"):
+        bits.append(f"history {mix['history']}")
+    ku = mix.get("kerker_used")
+    if ku is not None:
+        auto = " (auto)" if mix.get("kerker") == "auto" else ""
+        bits.append(f"Kerker {'on' if ku else 'off'}{auto}")
+    elif mix.get("kerker") is not None:
+        bits.append(f"Kerker {mix['kerker']}")
+    return f"   {'mixing':<12s}" + " · ".join(bits)
+
+
+def _parameters_lines(par):
+    lines = [_sec("parameters")]
     pairs = [
         ("formalism", par["formalism"]),
         ("xc", par["xc"].upper()),
         ("ecut", f"{par['ecut_eV']:.2f} eV"),
         ("ecutrho", f"{par['ecutrho_eV']:.2f} eV"
          if par.get("ecutrho_eV") else "—"),
-        ("k-mesh", mesh),
+        ("k-mesh", _mesh_label(par)),
         ("spin", str(par["nspin"])),
         ("smearing", par["smearing"] if par["smearing"] == "none"
          else f"{par['smearing']} ({par['width_eV']} eV)"),
@@ -91,61 +112,58 @@ def _parameters_lines(par):
     if par.get("npw"):
         pairs.append(("plane waves", f"{par['npw']} (k 1)"))
     lines += _cols(pairs)
-    mix = par.get("mixing")
-    if mix:
-        bits = [mix["scheme"]]
-        if mix.get("alpha") is not None:
-            bits.append(f"α {mix['alpha']:g}")
-        if mix.get("history"):
-            bits.append(f"history {mix['history']}")
-        ku = mix.get("kerker_used")
-        if ku is not None:
-            auto = " (auto)" if mix.get("kerker") == "auto" else ""
-            bits.append(f"Kerker {'on' if ku else 'off'}{auto}")
-        elif mix.get("kerker") is not None:
-            bits.append(f"Kerker {mix['kerker']}")
-        lines.append(f"   {'mixing':<12s}" + " · ".join(bits))
+    if par.get("mixing"):
+        lines.append(_mixing_line(par["mixing"]))
     for sym, fname in par["pseudos"].items():
         lines.append(f"   {'pseudo ' + sym:<12s}{fname}")
     return lines
 
 
+def _scf_trace_lines(trace):
+    """Per-iteration table (F, ΔE, |Δρ|, and t when the trace was timed)."""
+    timed = any("t_s" in h for h in trace)
+    head = (f"   {'it':>4s}   {'F [eV]':>18s}   {'ΔE [eV]':>10s}"
+            f"   {'|Δρ|':>10s}")
+    lines = [head + (f"   {'t [s]':>8s}" if timed else "")]
+    for h in trace:
+        de = h.get("dE_eV")
+        de_s = "—" if de is None else f"{abs(de):10.2e}"
+        row = (f"   {h['iter']:>4d}   {h['free_energy_eV']:>18.10f}"
+               f"   {de_s:>10s}   {h['drho']:>10.2e}")
+        if timed:
+            t = h.get("t_s")
+            row += f"   {t:>8.2f}" if t is not None else f"   {'—':>8s}"
+        lines.append(row)
+    return lines
+
+
+def _convergence_line(conv):
+    """Final-residual summary line, or None when nothing to report."""
+    bits = []
+    if conv.get("final_dE_eV") is not None:
+        bits.append(f"final ΔE {abs(conv['final_dE_eV']):.1e} eV "
+                    f"(etol {conv['etol_eV']:.0e})")
+    if conv.get("final_drho") is not None:
+        bits.append(f"|Δρ| {conv['final_drho']:.1e} (rhotol {conv['rhotol']:.0e})")
+    if conv.get("ratio_q") is not None:
+        bits.append(f"ratio q ≈ {conv['ratio_q']:.2f}")
+    if conv.get("warm_started"):
+        bits.append("warm-started")
+    return "   " + " · ".join(bits) if bits else None
+
+
 def _scf_lines(scf, runtime=None):
     lines = [_sec("self-consistency")]
-    trace = scf.get("trace", [])
-    if trace:
-        timed = any("t_s" in h for h in trace)
-        head = (f"   {'it':>4s}   {'F [eV]':>18s}   {'ΔE [eV]':>10s}"
-                f"   {'|Δρ|':>10s}")
-        lines.append(head + (f"   {'t [s]':>8s}" if timed else ""))
-        for h in trace:
-            de = h.get("dE_eV")
-            de_s = "—" if de is None else f"{abs(de):10.2e}"
-            row = (f"   {h['iter']:>4d}   {h['free_energy_eV']:>18.10f}"
-                   f"   {de_s:>10s}   {h['drho']:>10.2e}")
-            if timed:
-                t = h.get("t_s")
-                row += f"   {t:>8.2f}" if t is not None else f"   {'—':>8s}"
-            lines.append(row)
+    if scf.get("trace"):
+        lines += _scf_trace_lines(scf["trace"])
     tag = "converged" if scf["converged"] else "NOT CONVERGED"
     tail = f"   {tag} in {scf['n_iter']} iterations"
     if runtime is not None:
         tail += f" · {runtime:.1f} s"
     lines += ["", tail]
-    conv = scf.get("convergence")
-    if conv:
-        bits = []
-        if conv.get("final_dE_eV") is not None:
-            bits.append(f"final ΔE {abs(conv['final_dE_eV']):.1e} eV "
-                        f"(etol {conv['etol_eV']:.0e})")
-        if conv.get("final_drho") is not None:
-            bits.append(f"|Δρ| {conv['final_drho']:.1e} (rhotol {conv['rhotol']:.0e})")
-        if conv.get("ratio_q") is not None:
-            bits.append(f"ratio q ≈ {conv['ratio_q']:.2f}")
-        if conv.get("warm_started"):
-            bits.append("warm-started")
-        if bits:
-            lines.append("   " + " · ".join(bits))
+    conv_line = _convergence_line(scf["convergence"]) if scf.get("convergence") else None
+    if conv_line:
+        lines.append(conv_line)
     return lines
 
 
@@ -358,11 +376,9 @@ def _pdos_lines(pdos):
     return lines
 
 
-def _provenance_lines(prov):
-    """Machine/process context: was this box contested, how hot, what did
-    the run actually consume. Everything degrades gracefully — the block
-    renders whatever fields the recording platform could read."""
-    lines = [_sec("machine")]
+def _provenance_pairs(prov):
+    """(label, value) rows for the machine block; optional fields are omitted
+    when the recording platform could not read them."""
     host = prov.get("host", {})
     cpu = prov.get("cpu", {})
     mem = prov.get("memory", {})
@@ -386,7 +402,15 @@ def _provenance_lines(prov):
         commit = f" @ {code['git']}" if code.get("git") else ""
         pairs.append(("code", f"gradwave {code.get('gradwave', '?')}{commit} · "
                               f"torch {code.get('torch', '?')}"))
-    for lab, val in pairs:
+    return pairs
+
+
+def _provenance_lines(prov):
+    """Machine/process context: was this box contested, how hot, what did
+    the run actually consume. Everything degrades gracefully — the block
+    renders whatever fields the recording platform could read."""
+    lines = [_sec("machine")]
+    for lab, val in _provenance_pairs(prov):
         lines.append(f"   {lab:<8s}{val}")
 
     def _load_str(ld):
@@ -426,6 +450,34 @@ def _provenance_lines(prov):
     return lines
 
 
+def _scf_report(summary):
+    """SCF block: iterations, energy breakdown, error estimate, eigenvalues."""
+    lines = _scf_lines(summary["scf"], summary.get("runtime_s"))
+    lines += _energy_lines(summary["scf"])
+    if "error_estimate" in summary:
+        lines += _error_lines(summary["error_estimate"])
+    lines += _eigenvalue_lines(summary)
+    return lines
+
+
+def _relax_report(summary):
+    """Relaxation block, plus the error estimate at the final geometry."""
+    lines = _relax_lines(summary["relax"])
+    if "error_estimate" in summary:
+        lines += _error_lines(summary["error_estimate"])
+    return lines
+
+
+def _tail_lines(summary):
+    """Footer: wall time (non-SCF runs) and written output files."""
+    tail = []
+    if "runtime_s" in summary and "scf" not in summary:
+        tail.append(f"wall time {summary['runtime_s']:.1f} s")
+    if "outputs" in summary:
+        tail.append("files " + " · ".join(summary["outputs"].values()))
+    return ["", "   " + "  |  ".join(tail)] if tail else []
+
+
 def format_output(summary: dict) -> str:
     """The full human-readable report for a task summary dict."""
     code = summary["code"]
@@ -435,30 +487,18 @@ def format_output(summary: dict) -> str:
     lines += _structure_lines(summary["structure"])
     lines += _parameters_lines(summary["parameters"])
     if "scf" in summary:
-        lines += _scf_lines(summary["scf"], summary.get("runtime_s"))
-        lines += _energy_lines(summary["scf"])
-        if "error_estimate" in summary:
-            lines += _error_lines(summary["error_estimate"])
-        lines += _eigenvalue_lines(summary)
+        lines += _scf_report(summary)
     if "pdos" in summary:
         lines += _pdos_lines(summary["pdos"])
     if "relax" in summary:
-        lines += _relax_lines(summary["relax"])
-        if "error_estimate" in summary:  # estimated at the final geometry
-            lines += _error_lines(summary["error_estimate"])
+        lines += _relax_report(summary)
     if "bands" in summary:
         lines += _bands_lines(summary["bands"])
     if "magnetism" in summary:
         lines += _magnetism_lines(summary["magnetism"])
     if "provenance" in summary:
         lines += _provenance_lines(summary["provenance"])
-    tail = []
-    if "runtime_s" in summary and "scf" not in summary:
-        tail.append(f"wall time {summary['runtime_s']:.1f} s")
-    if "outputs" in summary:
-        tail.append("files " + " · ".join(summary["outputs"].values()))
-    if tail:
-        lines += ["", "   " + "  |  ".join(tail)]
+    lines += _tail_lines(summary)
     lines.append("")
     return "\n".join(lines) + "\n"
 

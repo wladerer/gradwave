@@ -1,0 +1,74 @@
+name: Nightly
+
+# Runs the heavier nightly test tier and captures profiles on a schedule, all
+# on GitHub's runners. NOTE: scheduled workflows only fire from the *default
+# branch* (main) — until this file is merged, use the "Run workflow" button
+# (workflow_dispatch) to trigger it on a branch.
+on:
+  schedule:
+    - cron: "0 9 * * 1"   # 09:00 UTC Mondays (~02:00 US/Pacific) — weekly to bound Actions minutes
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false   # let a long nightly finish; don't cancel on re-trigger
+
+jobs:
+  nightly-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350       # under the 360-min hosted-runner ceiling
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Sync dependencies
+        run: uv sync --all-extras
+      - name: Nightly test tier
+        # everything except the >10-min torture monsters and GPU-only tests;
+        # --durations surfaces the slowest tests for triage
+        run: uv run pytest -m "not torture and not gpu" --durations=25
+
+  nightly-profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bench: bench_scf
+            args: "cpu 2 nosym"
+          - bench: bench_uspp
+            args: "cpu batched nosym 2"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Sync dependencies
+        run: uv sync --all-extras
+      - name: Allow py-spy to sample (ptrace)
+        run: sudo sysctl kernel.yama.ptrace_scope=0
+      - name: Profile ${{ matrix.bench }}
+        env:
+          BENCH: ${{ matrix.bench }}
+          ARGS: ${{ matrix.args }}
+        run: |
+          PYBIN=$(uv run python -c "import sys; print(sys.executable)")
+          uv run --with py-spy py-spy record --rate 200 \
+            --format speedscope --output "${BENCH}.speedscope.json" \
+            -- "$PYBIN" "benchmarks/${BENCH}.py" ${ARGS}
+      - name: Upload profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-profile-${{ matrix.bench }}
+          path: ${{ matrix.bench }}.speedscope.json
+          retention-days: 30
+          if-no-files-found: warn

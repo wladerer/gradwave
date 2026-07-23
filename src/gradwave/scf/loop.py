@@ -81,7 +81,7 @@ class System:
     is_fr: bool = False  # fully-relativistic pseudos (spinor SCF only)
     rho_core: torch.Tensor | None = None  # NLCC core density on the grid [e/Å³]
 
-    def to(self, device) -> "System":
+    def to(self, device) -> System:
         """Copy with every tensor moved to `device` (setup stays CPU/numpy-built)."""
 
         def mv(obj, fields):

@@ -33,10 +33,10 @@ import numpy as np
 import torch
 
 from gradwave.constants import HBAR2_2M
-from gradwave.core.hamiltonian import HamiltonianK, build_projector_data, projectors
-from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.core.hamiltonian import HamiltonianK, projectors
+from gradwave.dtypes import CDTYPE
 from gradwave.grids import build_gsphere
-from gradwave.pseudo.kb import beta_form_factors
+from gradwave.postscf._kb import projector_data_at_k, species_projector_tables
 from gradwave.solvers.davidson import davidson
 from gradwave.symmetry import find_spacegroup
 
@@ -198,9 +198,7 @@ def _mulliken(chis: list, ops: list, dim: int) -> str:
         elif dim == 1:
             base = "A" if (chi_cn is None or chi_cn > 0) else "B"
             disc = chi_c2p if chi_c2p is not None else chi_sv
-            if disc is not None and n > 2:
-                base += "1" if disc > 0 else "2"
-            elif disc is not None and n == 2:
+            if disc is not None and n > 2 or disc is not None and n == 2:
                 base += "1" if disc > 0 else "2"
         elif dim == 2:
             base = "E"
@@ -241,13 +239,9 @@ def band_irreps(res, k_frac, nbands: int | None = None, cluster_tol: float = 1e-
     ops = little_group(k_frac, sg, cell)
 
     sph = build_gsphere(grid, system.ecut, k_frac, device=device)
-    q = np.sqrt(sph.kpg2.cpu().numpy())
-    beta_tables = [torch.as_tensor(beta_form_factors(u, q), dtype=RDTYPE, device=device)
-                   for u in system.upfs]
-    beta_ls = [[b.l for b in u.betas] for u in system.upfs]
-    dij_species = [torch.as_tensor(u.dij, dtype=RDTYPE, device=device) for u in system.upfs]
-    pd = build_projector_data(sph, system.species_of_atom, beta_tables, beta_ls,
-                              dij_species, grid.volume)
+    beta_ls, dij_species = species_projector_tables(system.upfs, device)
+    pd = projector_data_at_k(sph, system.species_of_atom, system.upfs, beta_ls,
+                             dij_species, grid.volume, device)
     p = projectors(pd, system.positions)
     h = HamiltonianK(sph, grid.shape, res.v_eff, pd, p)
     c0 = torch.zeros(nbands, sph.npw, dtype=CDTYPE, device=device)

@@ -243,7 +243,7 @@ class PulayMixer(_DampedMixerBase):
         if adapt_blocks is not None:
             ids = torch.unique(adapt_blocks).tolist()
             self._block_masks = [(b, adapt_blocks == b) for b in ids]
-            self._block_mult = {b: 1.0 for b in ids}
+            self._block_mult = dict.fromkeys(ids, 1.0)
         self._rho_in: list[torch.Tensor] = []
         self._res: list[torch.Tensor] = []
 

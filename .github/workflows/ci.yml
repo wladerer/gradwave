@@ -29,5 +29,8 @@ jobs:
       - name: Ruff
         run: uv run ruff check
 
+      - name: Import contracts
+        run: uv run lint-imports
+
       - name: Standard test tier
         run: uv run pytest -m "not slow and not torture and not gpu"
