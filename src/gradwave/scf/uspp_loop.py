@@ -324,6 +324,38 @@ def _build_iter_ops(system: USPPSystem, xc, *, nspin=1, smearing="none",
                     nb=system.nbands, mixed_precision=mixed_precision)
 
 
+def _assemble_iter_energies(ops, coeffs, occ_s, becps_s, rho_out_s, rho_tot_out,
+                            entropy_term, e_hub, e_onec):
+    """Total-energy breakdown for one SCF-map evaluation: charge-conservation
+    check, XC energy (nspin 1/2), and assemble_pw_energies. Pure function of the
+    already-computed densities/occupations."""
+    system, xc, nspin = ops.system, ops.xc, ops.nspin
+    grid, vol, vloc_g = ops.grid, ops.vol, ops.vloc_g
+    hub, e_ewald = ops.hub, ops.e_ewald
+    core = system.rho_core
+
+    n_tot = float(rho_tot_out.sum()) * vol / grid.n_points
+    if abs(n_tot - system.n_electrons) >= 1e-5:
+        raise ValueError(
+            f"charge not conserved: {n_tot:.8f} vs {system.n_electrons}"
+        )
+
+    rho_g_out = r_to_g(rho_tot_out.to(CDTYPE))
+    from gradwave.core.density import sigma_from_rho
+
+    if nspin == 1:
+        rho_xc_out = rho_tot_out if core is None else rho_tot_out + core
+        sigma = sigma_from_rho(rho_xc_out, grid.g_cart) if xc.needs_gradient else None
+        e_xc = xc.energy(rho_xc_out, vol, sigma)
+    else:
+        e_xc = spin_xc_energy(xc, rho_out_s, core, vol, grid.g_cart)
+    return assemble_pw_energies(
+        coeffs, occ_s, system.kweights, system.spheres, grid, vol, rho_g_out,
+        e_xc, vloc_g, becps_s, system.proj_data[0].dij_full, system.positions,
+        system.charges, entropy_term, nspin,
+        e_hub=e_hub if hub is not None else 0.0, e_onec=e_onec, e_ewald=e_ewald)
+
+
 @torch.no_grad()
 def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
                    n_hub_s, tol_eff, seed_salt):
@@ -355,7 +387,6 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
     veff_s, dscr_s, e_onec = uspp_potentials_dscr(
         system, xc, rho_s, rho_ij_mix, vloc_r, phase_pos,
         onec if is_paw else None)
-    core = system.rho_core
 
     eigs_s = []
     for isp in range(nspin):
@@ -529,26 +560,9 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
         rho_out_s.append(rho_out_sp)
     rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
 
-    n_tot = float(rho_tot_out.sum()) * vol / grid.n_points
-    if abs(n_tot - system.n_electrons) >= 1e-5:
-        raise ValueError(
-            f"charge not conserved: {n_tot:.8f} vs {system.n_electrons}"
-        )
-
-    rho_g_out = r_to_g(rho_tot_out.to(CDTYPE))
-    from gradwave.core.density import sigma_from_rho
-
-    if nspin == 1:
-        rho_xc_out = rho_tot_out if core is None else rho_tot_out + core
-        sigma = sigma_from_rho(rho_xc_out, grid.g_cart) if xc.needs_gradient else None
-        e_xc = xc.energy(rho_xc_out, vol, sigma)
-    else:
-        e_xc = spin_xc_energy(xc, rho_out_s, core, vol, grid.g_cart)
-    energies = assemble_pw_energies(
-        coeffs, occ_s, system.kweights, system.spheres, grid, vol, rho_g_out,
-        e_xc, vloc_g, becps_s, system.proj_data[0].dij_full, system.positions,
-        system.charges, entropy_term, nspin,
-        e_hub=e_hub if hub is not None else 0.0, e_onec=e_onec, e_ewald=e_ewald)
+    energies = _assemble_iter_energies(
+        ops, coeffs, occ_s, becps_s, rho_out_s, rho_tot_out, entropy_term,
+        e_hub, e_onec)
     return dict(eigs_s=eigs_s, occ_s=occ_s, mu=mu, n_hub_s=n_hub_s,
                 rho_out_s=rho_out_s, rho_ij_s=rho_ij_s, becps_s=becps_s,
                 energies=energies)
