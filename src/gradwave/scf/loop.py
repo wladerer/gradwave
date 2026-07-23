@@ -458,6 +458,40 @@ def _seed_orbitals(nk, nb, bk, nspin, device, start_from):
     return coeffs_b_s
 
 
+def _validate_scf_args(system, nspin, eigensolver, smearing, mixing_scheme, precond):
+    """Reject unsupported argument combinations up front, before any work."""
+    if nspin not in (1, 2):
+        raise ValueError("nspin must be 1 or 2 (noncollinear spin uses "
+                         "scf_noncollinear, the spinor SCF)")
+    if eigensolver not in ("davidson", "chebyshev"):
+        raise ValueError("eigensolver must be 'davidson' or 'chebyshev'")
+    if nspin == 2 and smearing == "none":
+        raise ValueError("nspin=2 requires smearing (fixed magnetic occupations ambiguous)")
+    if system.is_fr:
+        raise ValueError("fully-relativistic pseudos require the spinor SCF "
+                         "(scf_noncollinear) — SOC has no collinear representation")
+    if hasattr(system.rho_symmetrizer, "apply_m"):
+        raise ValueError("system was built with magnetic symmetry (magmoms=...) — "
+                         "only scf_noncollinear consumes it (anti-unitary ops would "
+                         "mis-fold collinear spin channels); rebuild without magmoms")
+    if mixing_scheme not in ("pulay", "broyden", "johnson"):
+        raise ValueError("mixing_scheme must be 'pulay', 'broyden', or 'johnson'")
+    if precond not in ("kerker", "local_tf"):
+        raise ValueError("precond must be 'kerker' or 'local_tf'")
+
+
+def _resolve_kerker(kerker, smearing, grid):
+    """Kerker on/off. An explicit setting wins; otherwise the auto policy turns
+    it on for metals always and for insulators once the smallest nonzero |G|
+    drops below ~0.8 Å⁻¹ (cell ≳ 8 Å), where long-wavelength charge sloshing —
+    amplified like 4πe²χ/G²_min — starts to dominate mixing."""
+    if kerker is not None:
+        return kerker
+    g2_nonzero = grid.g2.reshape(-1)
+    g2_min = float(g2_nonzero[g2_nonzero > 1e-12].min())
+    return (smearing != "none") or (g2_min < 0.64)
+
+
 @torch.no_grad()
 def scf(
     system: System,
@@ -500,28 +534,8 @@ def scf(
     grid, spheres = system.grid, system.spheres
     vol = grid.volume
     nk, nb = len(spheres), system.nbands
-    if nspin not in (1, 2):
-        raise ValueError("nspin must be 1 or 2 (noncollinear spin uses "
-                         "scf_noncollinear, the spinor SCF)")
-    if eigensolver not in ("davidson", "chebyshev"):
-        raise ValueError("eigensolver must be 'davidson' or 'chebyshev'")
-    if nspin == 2 and smearing == "none":
-        raise ValueError("nspin=2 requires smearing (fixed magnetic occupations ambiguous)")
-    if system.is_fr:
-        raise ValueError("fully-relativistic pseudos require the spinor SCF "
-                         "(scf_noncollinear) — SOC has no collinear representation")
-    if hasattr(system.rho_symmetrizer, "apply_m"):
-        raise ValueError("system was built with magnetic symmetry (magmoms=...) — "
-                         "only scf_noncollinear consumes it (anti-unitary ops would "
-                         "mis-fold collinear spin channels); rebuild without magmoms")
-    if kerker is None:
-        # auto policy: metals always; insulators once the cell is large
-        # enough that long-wavelength charge sloshing dominates mixing —
-        # the sloshing amplification goes like 4πe²χ/G²_min, so switch on
-        # when the smallest nonzero |G| drops below ~0.8 Å⁻¹ (L ≳ 8 Å).
-        g2_nonzero = grid.g2.reshape(-1)
-        g2_min = float(g2_nonzero[g2_nonzero > 1e-12].min())
-        kerker = (smearing != "none") or (g2_min < 0.64)
+    _validate_scf_args(system, nspin, eigensolver, smearing, mixing_scheme, precond)
+    kerker = _resolve_kerker(kerker, smearing, grid)
 
     rho_s = _seed_density(system, nspin, start_from, start_mag, grid, vol)
 
@@ -532,8 +546,6 @@ def scf(
     # freeze the per-channel electron counts (the G=0 Kerker zero forbids
     # charge transfer between spin channels)
     layout = MixLayout(grid, nspin, [])
-    if mixing_scheme not in ("pulay", "broyden", "johnson"):
-        raise ValueError("mixing_scheme must be 'pulay', 'broyden', or 'johnson'")
     _MixerCls = {"pulay": PulayMixer, "broyden": BroydenMixer,
                  "johnson": JohnsonMixer}[mixing_scheme]
     # Johnson saturates at history 12 on FM Ni (mixing.py); honour an explicit
@@ -544,8 +556,6 @@ def scf(
                       kerker=kerker, check_g0=nspin == 1,
                       kerker_mask=layout.kerker_mask if nspin == 2 else None)
 
-    if precond not in ("kerker", "local_tf"):
-        raise ValueError("precond must be 'kerker' or 'local_tf'")
     tf_precond = None
     if precond_op is not None:
         # a caller-supplied operator (learned radial filter). Static across
