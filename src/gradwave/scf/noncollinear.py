@@ -171,6 +171,49 @@ class NCResult:
     formalism: str = "noncollinear"  # result-type tag shared by all four SCF drivers
 
 
+def _build_nc_mixer(g2_vec, ng, nonmagnetic, mixing_alpha, mag_mixing_alpha,
+                    mixing_history, precond_op, m, device):
+    """Build the (ρ, m⃗) mixer. Nonmagnetic: single ρ block with Kerker and
+    check_g0, and m is zeroed. Magnetic: 4 blocks with Kerker on the ρ block only
+    (kerker_mask, check_g0=False) and a decoupled m⃗ step (base_step_scale) to hold
+    the magnetic branch against moment collapse. Returns (mixer, base_step_scale, m)."""
+    base_step_scale = None
+    if nonmagnetic:
+        m = torch.zeros_like(m)
+        mixer = PulayMixer(g2_vec, alpha=mixing_alpha, history=mixing_history,
+                           kerker=True, check_g0=True)
+    else:
+        kerker_mask = torch.cat([torch.ones(ng, dtype=torch.bool, device=device),
+                                 torch.zeros(3 * ng, dtype=torch.bool, device=device)])
+        ratio = mag_mixing_alpha / mixing_alpha if mixing_alpha > 0 else 1.0
+        base_step_scale = torch.cat([
+            torch.ones(ng, dtype=RDTYPE, device=device),
+            torch.full((3 * ng,), float(ratio), dtype=RDTYPE, device=device)])
+        mixer = PulayMixer(torch.cat([g2_vec] * 4), alpha=mixing_alpha,
+                           history=mixing_history, kerker=True, check_g0=False,
+                           kerker_mask=kerker_mask, step_scale=base_step_scale)
+    if precond_op is not None:
+        # override constant Kerker on the density-total (charge) block; m⃗ blocks
+        # keep their own step (base_step_scale) and are untouched by this operator.
+        mixer.precond_op = precond_op
+        mixer.precond_slice = slice(0, ng)
+    return mixer, base_step_scale, m
+
+
+def _seed_nc_density(grid, system, mag_vec_init, device):
+    """Initial (ρ, m⃗): SAD total density plus atom-directed magnetization
+    channels seeded from mag_vec_init (per-atom moment fraction·direction)."""
+    rho = sad_density(grid, system.positions, system.species_of_atom, system.upfs,
+                      system.n_electrons)
+    m_chan = [
+        sad_density(grid, system.positions, system.species_of_atom, system.upfs,
+                    None, atom_scale=[float(mag_vec_init[a, i])
+                                      for a in range(len(system.species_of_atom))])
+        for i in range(3)
+    ]
+    return rho.to(device), torch.stack(m_chan).to(device)
+
+
 def _unpack_mixed_fields(mixed, n_chan, ng, mask_flat, grid, device):
     """Inverse-FFT the mixed (ρ, m⃗) vector back to per-channel real-space fields:
     [rho] when nonmagnetic (n_chan=1), else [rho, m_x, m_y, m_z]."""
@@ -233,16 +276,7 @@ def scf_noncollinear(
     mag_vec_init = torch.as_tensor(mag_vec_init, dtype=RDTYPE)
 
     # initial (ρ, m⃗): SAD total + atom-directed magnetization channels
-    rho = sad_density(grid, system.positions, system.species_of_atom, system.upfs,
-                      system.n_electrons)
-    m_chan = [
-        sad_density(grid, system.positions, system.species_of_atom, system.upfs,
-                    None, atom_scale=[float(mag_vec_init[a, i])
-                                      for a in range(len(system.species_of_atom))])
-        for i in range(3)
-    ]
-    m = torch.stack(m_chan).to(device)
-    rho = rho.to(device)
+    rho, m = _seed_nc_density(grid, system, mag_vec_init, device)
 
     mask_flat = grid.dens_mask.reshape(-1)
     g2_vec = grid.g2.reshape(-1)[mask_flat]
@@ -260,27 +294,9 @@ def scf_noncollinear(
     # step; the adaptive backoff below is the counterweight against overshoot.
     if mag_mixing_alpha is None:
         mag_mixing_alpha = max(mixing_alpha, 0.6)
-    base_step_scale = None
-    if nonmagnetic:
-        m = torch.zeros_like(m)
-        mixer = PulayMixer(g2_vec, alpha=mixing_alpha, history=mixing_history,
-                           kerker=True, check_g0=True)
-    else:
-        kerker_mask = torch.cat([torch.ones(ng, dtype=torch.bool, device=device),
-                                 torch.zeros(3 * ng, dtype=torch.bool, device=device)])
-        ratio = mag_mixing_alpha / mixing_alpha if mixing_alpha > 0 else 1.0
-        base_step_scale = torch.cat([
-            torch.ones(ng, dtype=RDTYPE, device=device),
-            torch.full((3 * ng,), float(ratio), dtype=RDTYPE, device=device)])
-        mixer = PulayMixer(torch.cat([g2_vec] * 4), alpha=mixing_alpha,
-                           history=mixing_history, kerker=True, check_g0=False,
-                           kerker_mask=kerker_mask, step_scale=base_step_scale)
-
-    if precond_op is not None:
-        # override constant Kerker on the density-total (charge) block; m⃗ blocks
-        # keep their own step (base_step_scale) and are untouched by this operator.
-        mixer.precond_op = precond_op
-        mixer.precond_slice = slice(0, ng)
+    mixer, base_step_scale, m = _build_nc_mixer(
+        g2_vec, ng, nonmagnetic, mixing_alpha, mag_mixing_alpha, mixing_history,
+        precond_op, m, device)
 
     projs_b = projectors_b(bk, system.positions)
     q_so = dij_so = None
