@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import torch
 
-from gradwave.core.energies.hartree import hartree_potential_g
 from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.dtypes import CDTYPE
@@ -68,33 +67,20 @@ def frozen_veff(res: dict, xc) -> list[torch.Tensor]:
     system = res["system"]
     grid = system.grid
     dev = system.positions.device
-    core = system.rho_core
     nspin = int(res.get("nspin", 1))
 
-    rho = res["rho"].detach()
-    rho_g_box = r_to_g(rho.to(CDTYPE))
-    v_h = g_to_r_box(hartree_potential_g(rho_g_box, grid.g2), real=True)
     vloc_g = local_potential_g(
         system.positions, torch.as_tensor(system.species_of_atom, device=dev),
         system.vloc_tables, grid.g_cart, grid.volume)
     vloc_r = g_to_r_box(vloc_g, real=True)
 
-    if nspin == 1:
-        from gradwave.scf.loop import vxc_potential
+    # same per-spin v_eff the SCF iterates (loop.effective_potentials), on the
+    # detached converged densities.
+    from gradwave.scf.loop import effective_potentials
 
-        v_xc, _ = vxc_potential(xc, rho if core is None else rho + core, grid)
-        return [v_h + v_xc + vloc_r]
-
-    from gradwave.scf.loop import vxc_spin_potential
-
-    rho_s = [r.detach() for r in res["rho_spin"]]
-    c2 = None if core is None else 0.5 * core
-    v_up, v_dn, _ = vxc_spin_potential(
-        xc,
-        rho_s[0] if core is None else rho_s[0] + c2,
-        rho_s[1] if core is None else rho_s[1] + c2,
-        grid)
-    return [v_h + v_up + vloc_r, v_h + v_dn + vloc_r]
+    rho_s = ([res["rho"].detach()] if nspin == 1
+             else [r.detach() for r in res["rho_spin"]])
+    return effective_potentials(system, xc, rho_s, vloc_r)
 
 
 def screened_dscr(res: dict, xc, veff_s: list[torch.Tensor]) -> list[torch.Tensor]:

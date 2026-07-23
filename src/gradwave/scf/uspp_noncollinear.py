@@ -37,6 +37,7 @@ import torch
 
 from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.hartree import hartree_energy, hartree_potential_g
+from gradwave.core.energies.local_pp import local_energy
 from gradwave.core.energies.nl_pp import nonlocal_energy
 from gradwave.core.energies.total import EnergyBreakdown
 from gradwave.core.fftbox import g_to_r_box, r_to_g
@@ -426,7 +427,7 @@ def scf_uspp_noncollinear(
             hartree=hartree_energy(rho_g_out, grid.g2, vol),
             xc=energy_with_grid(ncxc, rho_out, m_out, grid,
                                 rho_core=system.rho_core),
-            local=_local_energy(rho_g_out, ops.vloc_g, vol),
+            local=local_energy(rho_g_out, ops.vloc_g, vol),
             nonlocal_=e_nl,
             ewald=e_ew,
             smearing=entropy_term,
@@ -469,7 +470,3 @@ def scf_uspp_noncollinear(
     )
 
 
-def _local_energy(rho_g_box, vloc_g, vol):
-    from gradwave.core.energies.local_pp import local_energy
-
-    return local_energy(rho_g_box, vloc_g, vol)
