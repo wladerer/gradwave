@@ -492,6 +492,50 @@ def _resolve_kerker(kerker, smearing, grid):
     return (smearing != "none") or (g2_min < 0.64)
 
 
+def _build_mixer_precond(grid, nspin, layout, mixing_scheme, mixing_alpha,
+                         mixing_history, kerker, precond, precond_op):
+    """Construct the density mixer and resolve its preconditioner.
+
+    Returns (mixer, tf_precond); tf_precond is the LocalTFPrecond needing a
+    per-iteration set_density(), or None. Kerker and any grid-block precond act
+    on the density-total block only for nspin=2, preserving per-channel counts.
+    """
+    _MixerCls = {"pulay": PulayMixer, "broyden": BroydenMixer,
+                 "johnson": JohnsonMixer}[mixing_scheme]
+    # Johnson saturates at history 12 on FM Ni (mixing.py); honour an explicit
+    # override but lift the default-8 up to 12 for it.
+    hist = (12 if mixing_scheme == "johnson" and mixing_history == 8
+            else mixing_history)
+    mixer = _MixerCls(layout.g2_full, alpha=mixing_alpha, history=hist,
+                      kerker=kerker, check_g0=nspin == 1,
+                      kerker_mask=layout.kerker_mask if nspin == 2 else None)
+
+    tf_precond = None
+    if precond_op is not None:
+        # a caller-supplied operator (learned radial filter). Static across
+        # iterations, so unlike local_tf it needs no per-step set_density. By
+        # default it acts on the density-total block; an operator declaring
+        # acts_on="grid" (BlockPrecond) spans every nspin grid block, so a
+        # magnetization-channel filter reaches the (total, mag) pair.
+        mixer.precond_op = precond_op
+        if nspin == 2:
+            spans_grid = getattr(precond_op, "acts_on", "total") == "grid"
+            mixer.precond_slice = slice(0, nspin * layout.ng if spans_grid
+                                        else layout.ng)
+        else:
+            mixer.precond_slice = None
+    elif precond == "local_tf":
+        # position-dependent TF screening on the density-total block; capped at
+        # the bare-Kerker q0 so a bulk metal is unchanged and only the vacuum is
+        # unscreened. set_density() is called with the current n(r) each iter.
+        from gradwave.scf.local_tf import LocalTFPrecond
+        tf_precond = LocalTFPrecond(grid.g2, grid.shape, layout.mask,
+                                    q0_max=mixer.q0)
+        mixer.precond_op = tf_precond
+        mixer.precond_slice = slice(0, layout.ng) if nspin == 2 else None
+    return mixer, tf_precond
+
+
 @torch.no_grad()
 def scf(
     system: System,
@@ -546,39 +590,9 @@ def scf(
     # freeze the per-channel electron counts (the G=0 Kerker zero forbids
     # charge transfer between spin channels)
     layout = MixLayout(grid, nspin, [])
-    _MixerCls = {"pulay": PulayMixer, "broyden": BroydenMixer,
-                 "johnson": JohnsonMixer}[mixing_scheme]
-    # Johnson saturates at history 12 on FM Ni (mixing.py); honour an explicit
-    # override but lift the default-8 up to 12 for it.
-    hist = (12 if mixing_scheme == "johnson" and mixing_history == 8
-            else mixing_history)
-    mixer = _MixerCls(layout.g2_full, alpha=mixing_alpha, history=hist,
-                      kerker=kerker, check_g0=nspin == 1,
-                      kerker_mask=layout.kerker_mask if nspin == 2 else None)
-
-    tf_precond = None
-    if precond_op is not None:
-        # a caller-supplied operator (learned radial filter). Static across
-        # iterations, so unlike local_tf it needs no per-step set_density. By
-        # default it acts on the density-total block; an operator declaring
-        # acts_on="grid" (BlockPrecond) spans every nspin grid block, so a
-        # magnetization-channel filter reaches the (total, mag) pair.
-        mixer.precond_op = precond_op
-        if nspin == 2:
-            spans_grid = getattr(precond_op, "acts_on", "total") == "grid"
-            mixer.precond_slice = slice(0, nspin * layout.ng if spans_grid
-                                        else layout.ng)
-        else:
-            mixer.precond_slice = None
-    elif precond == "local_tf":
-        # position-dependent TF screening on the density-total block; capped at
-        # the bare-Kerker q0 so a bulk metal is unchanged and only the vacuum is
-        # unscreened. set_density() is called with the current n(r) each iter.
-        from gradwave.scf.local_tf import LocalTFPrecond
-        tf_precond = LocalTFPrecond(grid.g2, grid.shape, layout.mask,
-                                    q0_max=mixer.q0)
-        mixer.precond_op = tf_precond
-        mixer.precond_slice = slice(0, layout.ng) if nspin == 2 else None
+    mixer, tf_precond = _build_mixer_precond(
+        grid, nspin, layout, mixing_scheme, mixing_alpha, mixing_history,
+        kerker, precond, precond_op)
 
     from gradwave.core.batch import BatchedHamiltonian, becp_b, density_b, projectors_b
     from gradwave.solvers.davidson import davidson_batched
