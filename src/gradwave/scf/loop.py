@@ -675,6 +675,56 @@ def _assemble_scf_energies(system, xc, grid, vol, spheres, nk, nspin, coeffs_b_s
     return energies, coeffs_list_s
 
 
+def _hubbard_occ_update(hub, hub_q, coeffs_b_s, occ_s, system, nspin, device):
+    """Refresh the DFT+U per-spin occupation matrices from the fresh orbitals and
+    return (n_hub_s, e_hub). No Hubbard manifold → (None, 0). For nspin=1 the
+    [0,2] occupation splits into two equal spin channels."""
+    e_hub = torch.zeros((), dtype=RDTYPE, device=device)
+    if hub is None:
+        return None, e_hub
+    from gradwave.core.hubbard import hubbard_energy, occupation_matrices
+    if nspin == 2:
+        n_hub_s = [occupation_matrices(hub_q, coeffs_b_s[sp], occ_s[sp],
+                                       system.kweights, hub.sites)
+                   for sp in range(nspin)]
+        e_hub = sum(hubbard_energy(n_hub_s[sp], hub.sites) for sp in range(nspin))
+    else:
+        n_half = occupation_matrices(hub_q, coeffs_b_s[0], 0.5 * occ_s[0],
+                                     system.kweights, hub.sites)
+        n_hub_s = [n_half, n_half]
+        e_hub = 2.0 * hubbard_energy(n_half, hub.sites)
+    return n_hub_s, e_hub
+
+
+def _scf_residual_and_record(layout, rho_s, rho_out_s, rho_tot, rho_tot_out,
+                             mixer_hook, it, e_free, e_free_prev, t_it, history,
+                             nspin, vol, verbose):
+    """Pack the in/out densities, run the mixer_hook probe, validate nspin=2
+    total-charge conservation, and record the iteration. Returns (rho_in_vec,
+    rho_out_vec, res_norm, drho_scf, de). drho_scf is the PRE-mixing real-space
+    total residual kept for the post-SCF convergence-error estimate."""
+    rho_in_vec = layout.pack(rho_s)
+    rho_out_vec = layout.pack(rho_out_s)
+    if mixer_hook is not None:
+        mixer_hook(it, rho_in_vec, rho_out_vec)
+    if nspin == 2:  # only the TOTAL is conserved; its G=0 residual must vanish
+        if not torch.isfinite(rho_out_vec).all():
+            raise RuntimeError("density diverged (NaN/Inf)")
+        if (rho_out_vec[0] - rho_in_vec[0]).abs() >= 1e-8:
+            raise ValueError("total G=0 residual nonzero")
+    res_norm = float(torch.linalg.norm(rho_out_vec - rho_in_vec)) * vol
+    drho_scf = rho_tot_out - rho_tot
+    de = record_iteration(history, it, e_free, e_free_prev, res_norm, t_it)
+    if verbose:
+        mag = ""
+        if nspin == 2:
+            m = float((rho_out_s[0] - rho_out_s[1]).mean()) * vol
+            mag = f"   m = {m:+.4f} muB"
+        print(f"  SCF {it:3d}  F = {e_free:+.10f} eV   dE = {de:.3e}   "
+              f"|drho| = {res_norm:.3e}{mag}")
+    return rho_in_vec, rho_out_vec, res_norm, drho_scf, de
+
+
 @torch.no_grad()
 def scf(
     system: System,
@@ -851,21 +901,8 @@ def scf(
             fock_apply_s, e_fock = fock.rebuild(coeffs_b_s, occ_s, system)
 
         # DFT+U occupation matrices from the fresh orbitals; E_U (Dudarev).
-        # occ_s is per-spin f∈[0,1] when nspin=2; for nspin=1 the [0,2]
-        # occupation splits into two equal spin channels.
-        e_hub = torch.zeros((), dtype=RDTYPE, device=device)
-        if hub is not None:
-            from gradwave.core.hubbard import hubbard_energy, occupation_matrices
-            if nspin == 2:
-                for sp in range(nspin):
-                    n_hub_s[sp] = occupation_matrices(
-                        hub_q, coeffs_b_s[sp], occ_s[sp], system.kweights, hub.sites)
-                e_hub = sum(hubbard_energy(n_hub_s[sp], hub.sites) for sp in range(nspin))
-            else:
-                n_half = occupation_matrices(
-                    hub_q, coeffs_b_s[0], 0.5 * occ_s[0], system.kweights, hub.sites)
-                n_hub_s = [n_half, n_half]
-                e_hub = 2.0 * hubbard_energy(n_half, hub.sites)
+        n_hub_s, e_hub = _hubbard_occ_update(hub, hub_q, coeffs_b_s, occ_s,
+                                             system, nspin, device)
 
         rho_out_s = [
             symmetrize(density_b(coeffs_b_s[sp], occ_s[sp], system.kweights,
@@ -891,28 +928,9 @@ def scf(
             e_hub, e_fock, projs_b)
         e_free = float(energies.free_energy)
 
-        rho_in_vec = layout.pack(rho_s)
-        rho_out_vec = layout.pack(rho_out_s)
-        if mixer_hook is not None:
-            mixer_hook(it, rho_in_vec, rho_out_vec)
-        if nspin == 2:  # only the TOTAL is conserved; its G=0 residual must vanish
-            tot_res = rho_out_vec[0] - rho_in_vec[0]
-            if not torch.isfinite(rho_out_vec).all():
-                raise RuntimeError("density diverged (NaN/Inf)")
-            if tot_res.abs() >= 1e-8:
-                raise ValueError("total G=0 residual nonzero")
-        res_norm = float(torch.linalg.norm(rho_out_vec - rho_in_vec)) * vol
-        # keep the real-space total-density residual of the last step for the
-        # post-SCF convergence-error estimate (ρ_out − ρ_in at this iteration)
-        drho_scf = rho_tot_out - rho_tot
-        de = record_iteration(history, it, e_free, e_free_prev, res_norm, t_it)
-        if verbose:
-            mag = ""
-            if nspin == 2:
-                m = float((rho_out_s[0] - rho_out_s[1]).mean()) * vol
-                mag = f"   m = {m:+.4f} muB"
-            print(f"  SCF {it:3d}  F = {e_free:+.10f} eV   dE = {de:.3e}   "
-                  f"|drho| = {res_norm:.3e}{mag}")
+        rho_in_vec, rho_out_vec, res_norm, drho_scf, de = _scf_residual_and_record(
+            layout, rho_s, rho_out_s, rho_tot, rho_tot_out, mixer_hook, it,
+            e_free, e_free_prev, t_it, history, nspin, vol, verbose)
 
         if convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol):
             converged = True
