@@ -200,6 +200,65 @@ def _build_nc_mixer(g2_vec, ng, nonmagnetic, mixing_alpha, mag_mixing_alpha,
     return mixer, base_step_scale, m
 
 
+def _nc_energy_breakdown(coeffs, occ, t2, entropy_term, rho_out, m_out, q_so,
+                         dij_so, projs_b, m_pw, vloc_g, e_ew, system, grid, xc,
+                         vol, nk):
+    """Per-iteration energy breakdown. The nonlocal term takes the SOC path
+    (q_so becp) or the scalar-relativistic per-spin (up/down) path. Returns
+    EnergyBreakdown."""
+    rho_g_out = r_to_g(rho_out.to(CDTYPE))
+    t_occ = (system.kweights[:, None] * occ).to(coeffs.real.dtype)
+    e_kin = torch.einsum("kb,kbg,kg->", t_occ,
+                         coeffs.real**2 + coeffs.imag**2, t2)
+    e_h = hartree_energy(rho_g_out, grid.g2, vol)
+    from gradwave.core.xc.noncollinear import energy_with_grid
+
+    e_xc = energy_with_grid(xc, rho_out, m_out, grid, rho_core=system.rho_core)
+    e_loc = local_energy(rho_g_out, vloc_g, vol)
+    if q_so is not None:
+        b_so = torch.einsum("kpg,kbg->kbp", q_so.conj(), coeffs)
+        e_nl = nonlocal_energy([b_so[ik] for ik in range(nk)], dij_so, occ,
+                               system.kweights)
+    else:
+        bu = becp_b(projs_b, coeffs[..., :m_pw])
+        bd = becp_b(projs_b, coeffs[..., m_pw:])
+        dij = _stack_dij(system)
+        e_nl = nonlocal_energy([bu[ik] for ik in range(nk)], dij, occ,
+                               system.kweights) \
+            + nonlocal_energy([bd[ik] for ik in range(nk)], dij, occ,
+                              system.kweights)
+    return EnergyBreakdown(kinetic=e_kin, hartree=e_h, xc=e_xc, local=e_loc,
+                           nonlocal_=e_nl, ewald=e_ew, smearing=entropy_term)
+
+
+def _nc_effective_potential(xc, rho, m, grid, system, vloc_r, nonmagnetic,
+                            constrain_dirs, constrain_lambda, constrain_mode,
+                            constrain_target_mag, atom_weights, vol):
+    """Per-iteration effective potential v_r and exchange field b_xc. Nonmagnetic
+    zeros b_xc; otherwise an optional Ma-Dudarev constraining field is ADDED to
+    b_xc after (never before) the nonmagnetic zeroing. One vxc_and_bxc autograd
+    call, unchanged. Returns (v_r, b_xc)."""
+    rho_g_box = r_to_g(rho.to(CDTYPE))
+    v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
+                           dim=(-3, -2, -1)) * grid.n_points).real
+    v_xc, b_xc, _ = vxc_and_bxc(xc, rho, m, grid, rho_core=system.rho_core)
+    if nonmagnetic:
+        b_xc = torch.zeros_like(b_xc)
+    elif constrain_dirs is not None:
+        # Constraining field B_c(r) = Σ_I (∂E_p/∂M_I) w_I(r) pins each atomic
+        # moment M_I = ∫ w_I m⃗ dr toward its target ê_I. ∂E_p/∂M_I comes from
+        # autograd on penalty_energy (gradwave.scf.moment_penalty), so the
+        # direction-only "perp" and magnitude-robust "vector" penalties share
+        # one definition. It adds to the exchange field b_xc (= δE/δm⃗).
+        cf = vol / grid.n_points
+        m_at = torch.einsum("axyz,ixyz->ai", atom_weights, m) * cf   # M_I (na,3)
+        g = field_coeff(m_at, constrain_dirs, constrain_lambda,
+                        constrain_mode, constrain_target_mag)
+        b_xc = b_xc + torch.einsum("ai,axyz->ixyz", g, atom_weights)
+    v_r = v_h + v_xc + vloc_r
+    return v_r, b_xc
+
+
 def _seed_nc_density(grid, system, mag_vec_init, device):
     """Initial (ρ, m⃗): SAD total density plus atom-directed magnetization
     channels seeded from mag_vec_init (per-atom moment fraction·direction)."""
@@ -342,24 +401,10 @@ def scf_noncollinear(
 
     for it in range(1, max_iter + 1):
         t_it = time.perf_counter()
-        rho_g_box = r_to_g(rho.to(CDTYPE))
-        v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
-                               dim=(-3, -2, -1)) * grid.n_points).real
-        v_xc, b_xc, _ = vxc_and_bxc(xc, rho, m, grid, rho_core=system.rho_core)
-        if nonmagnetic:
-            b_xc = torch.zeros_like(b_xc)
-        elif constrain_dirs is not None:
-            # Constraining field B_c(r) = Σ_I (∂E_p/∂M_I) w_I(r) pins each atomic
-            # moment M_I = ∫ w_I m⃗ dr toward its target ê_I. ∂E_p/∂M_I comes from
-            # autograd on penalty_energy (gradwave.scf.moment_penalty), so the
-            # direction-only "perp" and magnitude-robust "vector" penalties share
-            # one definition. It adds to the exchange field b_xc (= δE/δm⃗).
-            cf = vol / grid.n_points
-            m_at = torch.einsum("axyz,ixyz->ai", atom_weights, m) * cf   # M_I (na,3)
-            g = field_coeff(m_at, constrain_dirs, constrain_lambda,
-                            constrain_mode, constrain_target_mag)
-            b_xc = b_xc + torch.einsum("ai,axyz->ixyz", g, atom_weights)
-        v_r = v_h + v_xc + vloc_r
+        v_r, b_xc = _nc_effective_potential(
+            xc, rho, m, grid, system, vloc_r, nonmagnetic, constrain_dirs,
+            constrain_lambda, constrain_mode, constrain_target_mag, atom_weights,
+            vol)
 
         tol_eff = adaptive_diago_tol(it, history, diago_tol,
                                      system.n_electrons, schedule="linear")
@@ -397,29 +442,9 @@ def scf_noncollinear(
             m_out = torch.zeros_like(m_out)
 
         # energies
-        rho_g_out = r_to_g(rho_out.to(CDTYPE))
-        t_occ = (system.kweights[:, None] * occ).to(coeffs.real.dtype)
-        e_kin = torch.einsum("kb,kbg,kg->", t_occ,
-                             coeffs.real**2 + coeffs.imag**2, t2)
-        e_h = hartree_energy(rho_g_out, grid.g2, vol)
-        from gradwave.core.xc.noncollinear import energy_with_grid
-
-        e_xc = energy_with_grid(xc, rho_out, m_out, grid, rho_core=system.rho_core)
-        e_loc = local_energy(rho_g_out, vloc_g, vol)
-        if q_so is not None:
-            b_so = torch.einsum("kpg,kbg->kbp", q_so.conj(), coeffs)
-            e_nl = nonlocal_energy([b_so[ik] for ik in range(nk)], dij_so, occ,
-                                   system.kweights)
-        else:
-            bu = becp_b(projs_b, coeffs[..., :m_pw])
-            bd = becp_b(projs_b, coeffs[..., m_pw:])
-            dij = _stack_dij(system)
-            e_nl = nonlocal_energy([bu[ik] for ik in range(nk)], dij, occ,
-                                   system.kweights) \
-                + nonlocal_energy([bd[ik] for ik in range(nk)], dij, occ,
-                                  system.kweights)
-        energies = EnergyBreakdown(kinetic=e_kin, hartree=e_h, xc=e_xc, local=e_loc,
-                                   nonlocal_=e_nl, ewald=e_ew, smearing=entropy_term)
+        energies = _nc_energy_breakdown(
+            coeffs, occ, t2, entropy_term, rho_out, m_out, q_so, dij_so, projs_b,
+            m_pw, vloc_g, e_ew, system, grid, xc, vol, nk)
         e_free = float(energies.free_energy)
 
         if nonmagnetic:  # m_out already pinned to 0 above (before E_xc)
