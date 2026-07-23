@@ -389,6 +389,21 @@ def effective_potentials(
     return [v_h_r + v_up + vloc_r, v_h_r + v_dn + vloc_r]
 
 
+def resolve_atom_moments(start_mag, species_of_atom, n_species, *, default):
+    """Per-atom moment fractions from start_mag: one entry per atom
+    (AFM/ferrimagnetic) or one per species (broadcast to its atoms); `default`
+    seeds None. Raise on a length matching neither. (Canonical rule: a length
+    matching the atom count is read per-atom.)"""
+    na = len(species_of_atom)
+    if start_mag is None:
+        return [default] * na
+    if len(start_mag) == na:
+        return [float(m) for m in start_mag]
+    if len(start_mag) == n_species:
+        return [float(start_mag[sp]) for sp in species_of_atom]
+    raise ValueError("start_mag must have one entry per atom or per species")
+
+
 def _seed_density(system, nspin, start_from, start_mag, grid, vol):
     """Initial per-spin density: warm-start from a previous state (volume-
     rescaled so the electron count is conserved), else SAD — spin-split by
@@ -401,14 +416,8 @@ def _seed_density(system, nspin, start_from, start_mag, grid, vol):
                             system.upfs, system.n_electrons)]
     na = len(system.species_of_atom)
     nspecies = len(system.upfs)
-    if start_mag is None:
-        mags_at = [0.5] * na
-    elif len(start_mag) == na:
-        mags_at = [float(m) for m in start_mag]
-    elif len(start_mag) == nspecies:
-        mags_at = [float(start_mag[sp]) for sp in system.species_of_atom]
-    else:
-        raise ValueError("start_mag must have one entry per atom or per species")
+    mags_at = resolve_atom_moments(start_mag, system.species_of_atom, nspecies,
+                                   default=0.5)
     mags_by_sp = {}
     for a, sp in enumerate(system.species_of_atom):
         mags_by_sp.setdefault(sp, set()).add(round(mags_at[a], 12))
@@ -679,17 +688,13 @@ def _hubbard_occ_update(hub, hub_q, coeffs_b_s, occ_s, system, nspin, device):
     e_hub = torch.zeros((), dtype=RDTYPE, device=device)
     if hub is None:
         return None, e_hub
-    from gradwave.core.hubbard import hubbard_energy, occupation_matrices
-    if nspin == 2:
-        n_hub_s = [occupation_matrices(hub_q, coeffs_b_s[sp], occ_s[sp],
-                                       system.kweights, hub.sites)
-                   for sp in range(nspin)]
-        e_hub = sum(hubbard_energy(n_hub_s[sp], hub.sites) for sp in range(nspin))
-    else:
-        n_half = occupation_matrices(hub_q, coeffs_b_s[0], 0.5 * occ_s[0],
-                                     system.kweights, hub.sites)
-        n_hub_s = [n_half, n_half]
-        e_hub = 2.0 * hubbard_energy(n_half, hub.sites)
+    from gradwave.core.hubbard import hubbard_occ_and_energy, occupation_matrices
+    n_hub_s, e_hub = hubbard_occ_and_energy(
+        lambda isp, w: occupation_matrices(hub_q, coeffs_b_s[isp], w,
+                                           system.kweights, hub.sites),
+        occ_s, hub.sites, nspin)
+    if nspin == 1:
+        n_hub_s = [n_hub_s[0], n_hub_s[0]]   # loop returns BOTH spin channels
     return n_hub_s, e_hub
 
 

@@ -30,7 +30,6 @@ import torch
 
 from gradwave.constants import HBAR2_2M
 from gradwave.core.energies.ewald import ewald_energy
-from gradwave.core.energies.hartree import hartree_potential_g
 from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.fftbox import box_to_sphere, g_to_r, g_to_r_box, r_to_g
 from gradwave.core.hamiltonian import ProjectorData, becp, projectors
@@ -51,7 +50,7 @@ from gradwave.scf.common import (
 )
 from gradwave.scf.guess import sad_density
 from gradwave.scf.layout import MixLayout
-from gradwave.scf.loop import vxc_potential
+from gradwave.scf.loop import effective_potentials, resolve_atom_moments
 from gradwave.scf.mixing import BroydenMixer, JohnsonMixer, PulayMixer
 from gradwave.scf.results import USPPResult
 from gradwave.scf.uspp_setup import USPPSystem
@@ -193,14 +192,8 @@ def _resolve_start_mag(start_mag, species_of_atom, n_species) -> list[float]:
     """Per-ATOM moment fractions from start_mag, mirroring loop._seed_density:
     accept one entry per atom (AFM/ferrimagnetic seeds) or one per species
     (broadcast to that species' atoms); raise on a length matching neither."""
-    na = len(species_of_atom)
-    if start_mag is None:
-        return [0.0] * na
-    if len(start_mag) == na and na != n_species:
-        return [float(m) for m in start_mag]
-    if len(start_mag) == n_species:
-        return [float(start_mag[sp]) for sp in species_of_atom]
-    raise ValueError("start_mag must have one entry per atom or per species")
+    return resolve_atom_moments(start_mag, species_of_atom, n_species,
+                                default=0.0)
 
 
 def _species_atoms(system) -> dict[int, list[int]]:
@@ -226,25 +219,11 @@ def uspp_potentials_dscr(system, xc, rho_s, rho_ij_s, vloc_r, phase_pos, onec):
     grid = system.grid
     dev = system.positions.device
     nspin = len(rho_s)
-    rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
-    rho_g_box = r_to_g(rho_tot.to(CDTYPE))
-    v_h = g_to_r_box(hartree_potential_g(rho_g_box, grid.g2), real=True)
-    core = system.rho_core
-    if nspin == 1:
-        v_xc, _ = vxc_potential(xc, rho_tot if core is None else rho_tot + core,
-                                grid)
-        veff_s = [v_h + v_xc + vloc_r]
-    else:
-        from gradwave.scf.loop import vxc_spin_potential
-
-        c2 = None if core is None else 0.5 * core
-        v_up, v_dn, _ = vxc_spin_potential(
-            xc,
-            rho_s[0] if core is None else rho_s[0] + c2,
-            rho_s[1] if core is None else rho_s[1] + c2,
-            grid,
-        )
-        veff_s = [v_h + v_up + vloc_r, v_h + v_dn + vloc_r]
+    # v_eff = v_H + v_xc(+½ core fold) + v_loc — the identical per-spin assembly
+    # the norm-conserving loop iterates (loop.effective_potentials); USPP passes
+    # the FULL (smooth + aug) densities and its own vloc_r. No meta-GGA on the
+    # USPP path yet, so tau stays None.
+    veff_s = effective_potentials(system, xc, rho_s, vloc_r)
 
     # screened D per spin/atom: D_ij + Σ_G ṽ_σ(G) e^{iGτ} Q̃_ij(G)* —
     # batched over the atoms of each species (one einsum per species, one
@@ -365,7 +344,7 @@ def _hubbard_occ_update(ops, hub, coeffs, coeffs_b, occ_s, n_hub_s):
     e_hub = torch.zeros((), dtype=RDTYPE, device=dev)
     if hub is None:
         return n_hub_s, e_hub
-    from gradwave.core.hubbard import hubbard_energy, occupation_matrices
+    from gradwave.core.hubbard import hubbard_occ_and_energy, occupation_matrices
 
     def _padded_coeffs(isp, _cb=coeffs_b):
         if batched:
@@ -375,19 +354,10 @@ def _hubbard_occ_update(ops, hub, coeffs, coeffs_b, occ_s, n_hub_s):
             cp[ik, :, :sph.npw] = coeffs[isp][ik]
         return cp
 
-    if nspin == 2:
-        for isp in range(nspin):
-            n_hub_s[isp] = occupation_matrices(
-                hub.sphi, _padded_coeffs(isp), occ_s[isp],
-                system.kweights, hub.sites)
-        e_hub = sum(hubbard_energy(n_hub_s[isp], hub.sites)
-                    for isp in range(nspin))
-    else:
-        n_half = occupation_matrices(
-            hub.sphi, _padded_coeffs(0), 0.5 * occ_s[0],
-            system.kweights, hub.sites)
-        n_hub_s = [n_half]
-        e_hub = 2.0 * hubbard_energy(n_half, hub.sites)
+    n_hub_s, e_hub = hubbard_occ_and_energy(
+        lambda isp, w: occupation_matrices(hub.sphi, _padded_coeffs(isp), w,
+                                           system.kweights, hub.sites),
+        occ_s, hub.sites, nspin)
     return n_hub_s, e_hub
 
 

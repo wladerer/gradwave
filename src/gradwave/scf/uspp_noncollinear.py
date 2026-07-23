@@ -37,7 +37,7 @@ import torch
 
 from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.hartree import hartree_energy, hartree_potential_g
-from gradwave.core.energies.nl_pp import nonlocal_energy
+from gradwave.core.energies.local_pp import local_energy
 from gradwave.core.energies.total import EnergyBreakdown
 from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
@@ -58,10 +58,14 @@ from gradwave.scf.paw_noncollinear import (
 from gradwave.scf.results import USPPNCResult
 from gradwave.scf.spinor_common import (
     apply_local_spinor,
+    pack_grid_channels,
     pauli_density_accumulate,
     spinor_band_chunk,
+    spinor_kinetic_energy,
     spinor_potential_blocks,
     spinor_pw_seed,
+    spinor_scalar_nonlocal_energy,
+    unpack_grid_channels,
 )
 from gradwave.scf.uspp_loop import _build_iter_ops, _seed_becsum, _species_atoms
 from gradwave.scf.uspp_setup import USPPSystem
@@ -243,18 +247,14 @@ def scf_uspp_noncollinear(
                        check_g0=False, kerker_mask=kerker_mask, step_scale=step_scale)
 
     def pack(rho_, m_, bec_):
-        gvecs = [r_to_g(f.to(CDTYPE)).reshape(-1)[mask_flat]
-                 for f in (rho_, m_[0], m_[1], m_[2])]
+        gvecs = pack_grid_channels((rho_, m_[0], m_[1], m_[2]), mask_flat)
         bflat = [torch.cat([c.reshape(-1).to(CDTYPE) for c in bec_[i]])
                  for i in range(4)]
-        return torch.cat(gvecs + bflat)
+        return torch.cat([gvecs] + bflat)
 
     def unpack(v):
-        fields = []
-        for c4 in range(4):
-            box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
-            box[mask_flat] = v[c4 * ng:(c4 + 1) * ng]
-            fields.append(g_to_r_box(box.reshape(shape), real=True))
+        fields = unpack_grid_channels(v, 4, ng, mask_flat, shape,
+                                      grid.n_points, dev)
         bec = [[] for _ in range(4)]
         off = 4 * ng
         for i in range(4):
@@ -415,18 +415,15 @@ def scf_uspp_noncollinear(
         # ---- energies ----
         rho_g_out = r_to_g(rho_out.to(CDTYPE))
         t_occ = (system.kweights[:, None] * occ).to(RDTYPE)
-        e_kin = torch.einsum("kb,kbg,kg->", t_occ,
-                             coeffs.real ** 2 + coeffs.imag ** 2, hs.t)
-        e_nl = nonlocal_energy([bu[ik] for ik in range(nk)], dij_bare, occ,
-                               system.kweights) \
-            + nonlocal_energy([bd[ik] for ik in range(nk)], dij_bare, occ,
-                              system.kweights)
+        e_kin = spinor_kinetic_energy(t_occ, coeffs, hs.t)
+        e_nl = spinor_scalar_nonlocal_energy(bu, bd, dij_bare, occ,
+                                             system.kweights, nk)
         energies = EnergyBreakdown(
             kinetic=e_kin,
             hartree=hartree_energy(rho_g_out, grid.g2, vol),
             xc=energy_with_grid(ncxc, rho_out, m_out, grid,
                                 rho_core=system.rho_core),
-            local=_local_energy(rho_g_out, ops.vloc_g, vol),
+            local=local_energy(rho_g_out, ops.vloc_g, vol),
             nonlocal_=e_nl,
             ewald=e_ew,
             smearing=entropy_term,
@@ -469,7 +466,3 @@ def scf_uspp_noncollinear(
     )
 
 
-def _local_energy(rho_g_box, vloc_g, vol):
-    from gradwave.core.energies.local_pp import local_energy
-
-    return local_energy(rho_g_box, vloc_g, vol)

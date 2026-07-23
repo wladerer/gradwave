@@ -106,3 +106,37 @@ def spinor_pw_seed(nk: int, nbands: int, m_pw: int, device) -> torch.Tensor:
     for b in range(nbands):
         c0[:, b, (b // 2) + (b % 2) * m_pw] = 1.0
     return c0
+
+
+def pack_grid_channels(fields, mask_flat):
+    """Flatten real grid fields to their masked G-space coefficients and
+    concatenate — the (ρ, m⃗) grid half of the non-collinear mixer vector."""
+    from gradwave.core.fftbox import r_to_g
+    return torch.cat([r_to_g(f.to(CDTYPE)).reshape(-1)[mask_flat] for f in fields])
+
+
+def unpack_grid_channels(v, n_chan, ng, mask_flat, shape, n_points, device):
+    """Inverse of pack_grid_channels: scatter each masked G-block back onto the
+    box and transform to a real field. Returns a list of n_chan real fields
+    ([ρ] when nonmagnetic, else [ρ, m_x, m_y, m_z])."""
+    from gradwave.core.fftbox import g_to_r_box
+    fields = []
+    for c4 in range(n_chan):
+        box = torch.zeros(n_points, dtype=CDTYPE, device=device)
+        box[mask_flat] = v[c4 * ng:(c4 + 1) * ng]
+        fields.append(g_to_r_box(box.reshape(shape), real=True))
+    return fields
+
+
+def spinor_kinetic_energy(t_occ, coeffs, t):
+    """Σ_kb w_k f_kb |c_kb(G)|² weighted by the per-(k,G) kinetic factor t —
+    the spinor kinetic energy (both spin components share the G-grid)."""
+    return torch.einsum("kb,kbg,kg->", t_occ, coeffs.real ** 2 + coeffs.imag ** 2, t)
+
+
+def spinor_scalar_nonlocal_energy(bu, bd, dij, occ, kweights, nk):
+    """Scalar-relativistic (no-SOC) spinor E_NL: up + down projector-space
+    nonlocal energies. bu/bd per-k becp arrays, dij the D matrix."""
+    from gradwave.core.energies.nl_pp import nonlocal_energy
+    return nonlocal_energy([bu[ik] for ik in range(nk)], dij, occ, kweights) \
+        + nonlocal_energy([bd[ik] for ik in range(nk)], dij, occ, kweights)
