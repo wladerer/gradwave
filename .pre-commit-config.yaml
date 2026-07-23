@@ -25,7 +25,9 @@ repos:
 
       - id: fast-gate
         name: fast test gate
-        entry: uv run pytest -m "not standard and not slow and not torture and not gpu"
+        # -n4 (not the addopts `-n auto`): the pre-push gate runs on the dev's
+        # own machine, where one worker per core OOMs memory-tight laptops.
+        entry: uv run pytest -n4 -m "not standard and not slow and not torture and not gpu"
         language: system
         pass_filenames: false
         stages: [pre-push]

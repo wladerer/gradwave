@@ -7,11 +7,17 @@
 BENCH ?= bench_scf
 ARGS  ?= cpu 8 nosym
 
+# Local fast-gate parallelism. `addopts = -n auto` in pyproject spawns one
+# worker per core, which OOMs memory-tight laptops (8 concurrent fp64 SCFs).
+# Cap the local fast gate to a safe worker count; override with `make test-fast
+# FAST_JOBS=8`. CI and the standard/nightly tiers keep `-n auto`.
+FAST_JOBS ?= 4
+
 help:
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/'
 
-test-fast: ## fast gate (~80 s): run on every commit
-	uv run pytest -m "not standard and not slow and not torture and not gpu"
+test-fast: ## fast gate (~80 s): run on every commit (local -n$(FAST_JOBS); override FAST_JOBS=)
+	uv run pytest -n$(FAST_JOBS) -m "not standard and not slow and not torture and not gpu"
 
 test: test-fast ## alias for the fast gate
 
