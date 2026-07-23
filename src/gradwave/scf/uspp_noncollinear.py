@@ -67,7 +67,12 @@ from gradwave.scf.spinor_common import (
     spinor_scalar_nonlocal_energy,
     unpack_grid_channels,
 )
-from gradwave.scf.uspp_loop import _build_iter_ops, _seed_becsum, _species_atoms
+from gradwave.scf.uspp_loop import (
+    _build_iter_ops,
+    _seed_becsum,
+    _species_atoms,
+    aug_dmat_batched,
+)
 from gradwave.scf.uspp_setup import USPPSystem
 
 
@@ -298,16 +303,8 @@ def scf_uspp_noncollinear(
         # re-materialized 4·na times per iteration
         pots = torch.stack([v_r, b_xc[0], b_xc[1], b_xc[2]])
         pots_g_box = r_to_g(pots.to(CDTYPE)).reshape(4, -1)
-        pot_g = pots_g_box[:, mask_flat]
-        d_chan = [torch.zeros_like(system.q_full) for _ in range(4)]
-        for sp, atoms in sp_atoms.items():
-            contr = torch.einsum("ijg,cg,ga->caij", system.aug[sp].q_g.conj(),
-                                 pot_g, ops.phase_pos[:, atoms])
-            herm = (0.5 * (contr + contr.conj().transpose(-2, -1))).real
-            for i, a in enumerate(atoms):
-                s0, s1 = system.atom_slices[a]
-                for c4 in range(4):
-                    d_chan[c4][s0:s1, s0:s1] = herm[c4, i]
+        d_chan = list(aug_dmat_batched(system, pots_g_box[:, mask_flat],
+                                       ops.phase_pos))
         d_chan[0] = d_chan[0] + dij_bare
         e_onec = torch.zeros((), dtype=RDTYPE, device=dev)
         if ops.is_paw:
