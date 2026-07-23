@@ -33,9 +33,13 @@ Runs entirely under torch.no_grad() — autograd must never see this.
 
 from __future__ import annotations
 
+import logging
+
 import torch
 
 from gradwave.solvers.davidson import BatchedDavidsonResult, _orthonormalize_b
+
+logger = logging.getLogger(__name__)
 
 
 @torch.no_grad()
@@ -209,6 +213,11 @@ def chebyshev_filtered_batched(
         v = _orthonormalize_b(y, mask)
         hv = h_apply(v)
 
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "CheFSI hit max_iter=%d (degree=%d, no residual-driven exit): "
+            "max res=%.3e vs tol=%.1e", max_iter, degree,
+            float(rn[:, :nb].max()), tol)
     return BatchedDavidsonResult(eig[:, :nb], x[:, :nb], max_iter, rn[:, :nb])
 
 

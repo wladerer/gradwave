@@ -31,6 +31,7 @@ use_symmetry=False, exactly like the norm-conserving spinor loop.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import time
 
 import torch
@@ -69,6 +70,8 @@ from gradwave.scf.spinor_common import (
 )
 from gradwave.scf.uspp_loop import _build_iter_ops, _seed_becsum, _species_atoms
 from gradwave.scf.uspp_setup import USPPSystem
+
+logger = logging.getLogger(__name__)
 
 
 class _SpinorBK:
@@ -456,6 +459,10 @@ def scf_uspp_noncollinear(
         rho, m, bec_chan = unpack(mixer.step(vin, vout))
         bec_chan = [[0.5 * (c + c.T) for c in bec_chan[c4]] for c4 in range(4)]
 
+    if not converged:
+        logger.warning(
+            "NC-USPP SCF did NOT converge in %d iterations: F=%+.8f eV, "
+            "|drho|=%.3e", it, e_free, res_norm)
     m_int = [float(m[i].mean()) * vol for i in range(3)]
     m_norm = torch.sqrt((m ** 2).sum(dim=0))
     return USPPNCResult(

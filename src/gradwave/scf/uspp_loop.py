@@ -23,6 +23,7 @@ can absorb it later.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 
@@ -55,6 +56,8 @@ from gradwave.scf.mixing import BroydenMixer, JohnsonMixer, PulayMixer
 from gradwave.scf.results import USPPResult
 from gradwave.scf.uspp_setup import USPPSystem
 from gradwave.solvers.precond import teter
+
+logger = logging.getLogger(__name__)
 
 
 class _HkS:
@@ -880,6 +883,11 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                 and history[-1]["res"] < 1e-2 and rescue_count < 2):
             rescue_count += 1
             seed_salt = 104729 * rescue_count
+            logger.debug(
+                "USPP iter %d solver blowup: dE=%.3e eV from residual %.1e "
+                "(rescue %d/2), discarding warm starts and reseeding with "
+                "salt=%d", it, abs(e_free - e_free_prev), history[-1]["res"],
+                rescue_count, seed_salt)
             coeffs_b = [None] * nspin
             for isp in range(nspin):
                 coeffs[isp] = [None] * nk
@@ -944,6 +952,9 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         best_res = min(h["res"] for h in history[-10:])
         if (it > 1 and res_norm > trust_factor * best_res
                 and it - last_reset_it >= 5):
+            logger.debug(
+                "USPP iter %d trust-region mixer reset: residual %.2e > %gx "
+                "windowed best %.2e", it, res_norm, trust_factor, best_res)
             mixer.reset()
             last_reset_it = it
             if verbose:
@@ -978,6 +989,10 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                 m = bec_mixed[isp][a]
                 rho_ij_mix[isp][a] = 0.5 * (m + m.conj().T)
 
+    if not converged:
+        logger.warning(
+            "USPP/PAW SCF did NOT converge in %d iterations: F=%+.10f eV, "
+            "|drho|=%.3e", it, e_free, res_norm)
     rho_final = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
     # Return the becsum that PAIRS with the returned density. At convergence
     # rho_s was set to the fresh map output (rho_out_s), so the fresh output

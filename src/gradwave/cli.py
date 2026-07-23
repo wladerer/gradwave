@@ -32,6 +32,10 @@ def _build_parser():
     p_run.add_argument("-o", "--output", metavar="DIR",
                        help="output directory (overrides output.dir)")
     p_run.add_argument("-q", "--quiet", action="store_true")
+    p_run.add_argument("--log-level", metavar="LEVEL",
+                       choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+                       help="stream gradwave.* diagnostics to stderr at this "
+                            "level (DEBUG shows SCF/solver/mixer branch tracing)")
 
     p_init = sub.add_parser(
         "init", help="write a starter input for a task (relax, bands, ...)")
@@ -129,8 +133,11 @@ def _cmd_validate(args) -> int:
 def _cmd_run(args) -> int:
     import dataclasses
 
+    from gradwave import configure_logging
     from gradwave.api import run
 
+    if args.log_level:
+        configure_logging(args.log_level)
     inp, rc = _load_checked(args.input)
     if inp is None:
         return rc

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import time
 from pathlib import Path
 
@@ -34,6 +35,8 @@ _DEFAULT_MIXING_HISTORY = 8
 # _error_estimate_block / _parameters_block parse each pseudo once, not 3-4×
 _UPF_CACHE: dict[str, object] = {}
 
+logger = logging.getLogger(__name__)
+
 
 def _load_upf(path):
     """Parse a UPF of either family (NC via upf.py, USPP/PAW via
@@ -52,6 +55,17 @@ def _load_upf(path):
         from gradwave.pseudo.upf_paw import parse_upf_paw
 
         upf = parse_upf_paw(path)
+    if logger.isEnabledFor(logging.DEBUG):
+        # projection orbitals (NC: pswfc, US/PAW: chi) gate COHP/PDOS analysis —
+        # SG15 ONCV fixtures ship none, PseudoDojo/PAW do
+        orbitals = getattr(upf, "pswfc", None)
+        if orbitals is None:
+            orbitals = getattr(upf, "chi", [])
+        logger.debug(
+            "loaded pseudo %s: %s element=%s, n_proj=%s, projection_orbitals=%d, "
+            "core_correction=%s", key, type(upf).__name__,
+            getattr(upf, "element", "?"), getattr(upf, "n_proj", "?"),
+            len(orbitals), getattr(upf, "core_correction", "?"))
     _UPF_CACHE[key] = upf
     return upf
 
@@ -631,8 +645,8 @@ def _error_estimate_block(res, inp) -> dict:
             sc["note"] = ("response diagnostic is not sign-definite; the "
                           "headline denergy is the trajectory extrapolation")
         block["scf_convergence"] = sc
-    except (NotImplementedError, ValueError, AttributeError):
-        pass
+    except (NotImplementedError, ValueError, AttributeError) as exc:
+        logger.debug("scf_convergence estimate skipped: %r", exc)
     try:
         # estimate_smearing_error reads res.energies — an attribute on every
         # result dataclass, USPP/PAW included
