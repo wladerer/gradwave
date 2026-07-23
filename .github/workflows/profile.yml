@@ -20,8 +20,8 @@ on:
     types: [labeled]
 
 concurrency:
-  group: profile-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: profile-${{ github.workflow }}-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   profile:
