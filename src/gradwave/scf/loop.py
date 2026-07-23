@@ -626,6 +626,55 @@ def _build_metagga_apply(xc, rho_s, rho_tot, tau_list, system, nspin, bk, grid):
         for sp in range(nspin)]
 
 
+def _assemble_scf_energies(system, xc, grid, vol, spheres, nk, nspin, coeffs_b_s,
+                           occ_s, rho_tot_out, rho_out_s, tau_list, entropy_term,
+                           e_ewald, vloc_g, e_hub, e_fock, projs_b):
+    """Total-energy breakdown at (current orbitals, mixed-out density), plus the
+    per-k trimmed coeff views that flow to SCFResult. Returns (energies,
+    coeffs_list_s). Under no_grad — the energies are detached scalars (the
+    differentiable energy is rebuilt in postscf/forces.py), so no autograd graph
+    is threaded here.
+
+    npw from the CPU-side spheres (int(bk.npw[ik]) is a host sync per k); ONE
+    becp over the whole batch, then per-k views (calling becp_b inside the per-k
+    comprehension recomputed the full-batch contraction nk times).
+    """
+    from gradwave.core.batch import becp_b
+    coeffs_list_s = [
+        [coeffs_b_s[sp][ik, :, : system.spheres[ik].npw]
+         for ik in range(nk)]
+        for sp in range(nspin)
+    ]
+    becps_s = []
+    for sp in range(nspin):
+        b_all = becp_b(projs_b, coeffs_b_s[sp])
+        becps_s.append([b_all[ik] for ik in range(nk)])
+    if nspin == 1:
+        energies = total_energy(
+            coeffs_per_k=coeffs_list_s[0], occ=occ_s[0], kweights=system.kweights,
+            spheres=spheres, grid=grid, rho=rho_tot_out, positions=system.positions,
+            charges=system.charges, species_index=system.species_index,
+            vloc_tables=system.vloc_tables, becp_per_k=becps_s[0],
+            dij_full=_stack_dij(system), xc=xc, entropy_term=entropy_term,
+            rho_core=system.rho_core, tau=(tau_list[0] if tau_list else None),
+            e_ewald=e_ewald, vloc_g=vloc_g,
+        )
+        energies.hubbard = e_hub
+        energies.fock = e_fock
+    else:
+        rho_g_out = r_to_g(rho_tot_out.to(CDTYPE))
+        energies = assemble_pw_energies(
+            coeffs_list_s, occ_s, system.kweights, spheres, grid, vol,
+            rho_g_out,
+            spin_xc_energy(xc, rho_out_s, system.rho_core, vol,
+                           grid.g_cart, tau_s=tau_list),
+            vloc_g, becps_s, _stack_dij(system), system.positions,
+            system.charges, entropy_term, nspin, e_hub=e_hub,
+            e_ewald=e_ewald)
+        energies.fock = e_fock
+    return energies, coeffs_list_s
+
+
 @torch.no_grad()
 def scf(
     system: System,
@@ -684,7 +733,7 @@ def scf(
         grid, nspin, layout, mixing_scheme, mixing_alpha, mixing_history,
         kerker, precond, precond_op)
 
-    from gradwave.core.batch import becp_b, density_b, projectors_b
+    from gradwave.core.batch import density_b, projectors_b
 
     device = system.positions.device
     bk = system.batch
@@ -834,43 +883,12 @@ def scf(
             tau_list = [tau_b(coeffs_b_s[sp], occ_s[sp], system.kweights,
                               bk, grid.shape, vol) for sp in range(nspin)]
 
-        # energy at (orbitals, rho_out); per-k trimmed views for the assembly.
-        # npw from the CPU-side spheres (int(bk.npw[ik]) is a host sync per k
-        # per iteration — the probe counted 36/iteration); ONE becp over the
-        # whole batch, then per-k views (calling becp_b inside the per-k
-        # comprehension recomputed the full-batch contraction nk times)
-        coeffs_list_s = [
-            [coeffs_b_s[sp][ik, :, : system.spheres[ik].npw]
-             for ik in range(nk)]
-            for sp in range(nspin)
-        ]
-        becps_s = []
-        for sp in range(nspin):
-            b_all = becp_b(projs_b, coeffs_b_s[sp])
-            becps_s.append([b_all[ik] for ik in range(nk)])
-        if nspin == 1:
-            energies = total_energy(
-                coeffs_per_k=coeffs_list_s[0], occ=occ_s[0], kweights=system.kweights,
-                spheres=spheres, grid=grid, rho=rho_tot_out, positions=system.positions,
-                charges=system.charges, species_index=system.species_index,
-                vloc_tables=system.vloc_tables, becp_per_k=becps_s[0],
-                dij_full=_stack_dij(system), xc=xc, entropy_term=entropy_term,
-                rho_core=system.rho_core, tau=(tau_list[0] if tau_list else None),
-                e_ewald=e_ewald, vloc_g=vloc_g,
-            )
-            energies.hubbard = e_hub
-            energies.fock = e_fock
-        else:
-            rho_g_out = r_to_g(rho_tot_out.to(CDTYPE))
-            energies = assemble_pw_energies(
-                coeffs_list_s, occ_s, system.kweights, spheres, grid, vol,
-                rho_g_out,
-                spin_xc_energy(xc, rho_out_s, system.rho_core, vol,
-                               grid.g_cart, tau_s=tau_list),
-                vloc_g, becps_s, _stack_dij(system), system.positions,
-                system.charges, entropy_term, nspin, e_hub=e_hub,
-                e_ewald=e_ewald)
-            energies.fock = e_fock
+        # energy at (orbitals, rho_out); the per-k trimmed coeff views are reused
+        # for the SCFResult on the final iteration.
+        energies, coeffs_list_s = _assemble_scf_energies(
+            system, xc, grid, vol, spheres, nk, nspin, coeffs_b_s, occ_s,
+            rho_tot_out, rho_out_s, tau_list, entropy_term, e_ewald, vloc_g,
+            e_hub, e_fock, projs_b)
         e_free = float(energies.free_energy)
 
         rho_in_vec = layout.pack(rho_s)
