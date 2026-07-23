@@ -392,6 +392,75 @@ def _hubbard_occ_update(ops, hub, coeffs, coeffs_b, occ_s, n_hub_s):
     return n_hub_s, e_hub
 
 
+def _build_output_density(ops, coeffs, coeffs_b, occ_s):
+    """Smooth densities + per-spin becsum (Hermitized, becsum-symmetrized) +
+    augmentation charge for one SCF-map evaluation. Returns (rho_out_s, rho_ij_s,
+    becps_s). Accumulation order and conj placement are load-bearing at the 1e-8
+    identity floor the tests assert — keep them byte-for-byte."""
+    system, nspin, batched = ops.system, ops.nspin, ops.batched
+    bk, shape, vol, dev = ops.bk, ops.shape, ops.vol, ops.dev
+    nk, nb, p_b, projs = ops.nk, ops.nb, ops.p_b, ops.projs
+    phase_pos, grid = ops.phase_pos, ops.grid
+    sp_atoms = _species_atoms(system)
+    rho_out_s, becps_s = [], []
+    rho_ij_s = [[torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
+                 for (s0, s1) in system.atom_slices] for _ in range(nspin)]
+    for isp in range(nspin):
+        if batched:
+            # k-batched: one band-chunked batched FFT stack for the density,
+            # one becp einsum over all k, and the becsum contracted with k
+            # folded into the band axis — instead of nk small FFTs plus
+            # nk·na tiny einsums per iteration
+            from gradwave.core.batch import becp_b, density_b
+
+            x_b = coeffs_b[isp]
+            rho_sp = density_b(x_b, occ_s[isp], system.kweights, bk, shape, vol)
+            b_all = becp_b(p_b, x_b)
+            becps = [b_all[ik] for ik in range(nk)]
+            w_all = (system.kweights[:, None] * occ_s[isp]).reshape(-1).to(CDTYPE)
+            b_flat = b_all.reshape(nk * nb, -1)
+            for a, (s0, s1) in enumerate(system.atom_slices):
+                ba = b_flat[:, s0:s1]
+                rho_ij_s[isp][a] = torch.einsum("b,bi,bj->ij", w_all,
+                                                ba.conj(), ba)
+        else:
+            rho_sp = torch.zeros(shape, dtype=RDTYPE, device=dev)
+            becps = []
+            for ik, sph in enumerate(system.spheres):
+                c = coeffs[isp][ik]
+                psi_r = g_to_r(c, sph.flat_idx, shape)
+                w = system.kweights[ik] * occ_s[isp][ik]
+                rho_sp = rho_sp + torch.einsum("b,bxyz->xyz", w,
+                                               (psi_r.abs() ** 2)) / vol
+                b = becp(projs[ik], c)
+                becps.append(b)
+                for a, (s0, s1) in enumerate(system.atom_slices):
+                    ba = b[:, s0:s1]
+                    rho_ij_s[isp][a] = rho_ij_s[isp][a] + torch.einsum(
+                        "b,bi,bj->ij", w.to(CDTYPE), ba.conj(), ba
+                    )
+        rho_ij_s[isp] = [0.5 * (m + m.conj().T) for m in rho_ij_s[isp]]
+        if system.becsum_sym is not None:
+            rho_ij_s[isp] = system.becsum_sym.apply(rho_ij_s[isp])
+        becps_s.append(becps)
+
+        # augmentation charge: all atoms of a species in one einsum
+        aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE, device=dev)
+        for sp, atoms in sp_atoms.items():
+            bec_sp = torch.stack([rho_ij_s[isp][a] for a in atoms])
+            aug_sph = aug_sph + torch.einsum(
+                "aij,ijg,ga->g", bec_sp, system.aug[sp].q_g,
+                phase_pos[:, atoms].conj())
+        aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
+        aug_box[system.sphere_idx] = aug_sph / vol
+        rho_aug = (torch.fft.ifftn(aug_box.reshape(shape) * grid.n_points,
+                                   dim=(-3, -2, -1))).real
+        rho_out_sp = rho_sp + rho_aug
+        rho_out_sp = symmetrize_rho(system.rho_symmetrizer, rho_out_sp, grid)
+        rho_out_s.append(rho_out_sp)
+    return rho_out_s, rho_ij_s, becps_s
+
+
 @torch.no_grad()
 def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
                    n_hub_s, tol_eff, seed_salt):
@@ -514,64 +583,7 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
     # into two equal channels)
     n_hub_s, e_hub = _hubbard_occ_update(ops, hub, coeffs, coeffs_b, occ_s, n_hub_s)
 
-    # smooth densities + per-spin becsum + augmentation
-    sp_atoms = _species_atoms(system)
-    rho_out_s, becps_s = [], []
-    rho_ij_s = [[torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
-                 for (s0, s1) in system.atom_slices] for _ in range(nspin)]
-    for isp in range(nspin):
-        if batched:
-            # k-batched: one band-chunked batched FFT stack for the density,
-            # one becp einsum over all k, and the becsum contracted with k
-            # folded into the band axis — instead of nk small FFTs plus
-            # nk·na tiny einsums per iteration
-            from gradwave.core.batch import density_b
-
-            x_b = coeffs_b[isp]
-            rho_sp = density_b(x_b, occ_s[isp], system.kweights, bk, shape, vol)
-            b_all = becp_b(p_b, x_b)
-            becps = [b_all[ik] for ik in range(nk)]
-            w_all = (system.kweights[:, None] * occ_s[isp]).reshape(-1).to(CDTYPE)
-            b_flat = b_all.reshape(nk * nb, -1)
-            for a, (s0, s1) in enumerate(system.atom_slices):
-                ba = b_flat[:, s0:s1]
-                rho_ij_s[isp][a] = torch.einsum("b,bi,bj->ij", w_all,
-                                                ba.conj(), ba)
-        else:
-            rho_sp = torch.zeros(shape, dtype=RDTYPE, device=dev)
-            becps = []
-            for ik, sph in enumerate(system.spheres):
-                c = coeffs[isp][ik]
-                psi_r = g_to_r(c, sph.flat_idx, shape)
-                w = system.kweights[ik] * occ_s[isp][ik]
-                rho_sp = rho_sp + torch.einsum("b,bxyz->xyz", w,
-                                               (psi_r.abs() ** 2)) / vol
-                b = becp(projs[ik], c)
-                becps.append(b)
-                for a, (s0, s1) in enumerate(system.atom_slices):
-                    ba = b[:, s0:s1]
-                    rho_ij_s[isp][a] = rho_ij_s[isp][a] + torch.einsum(
-                        "b,bi,bj->ij", w.to(CDTYPE), ba.conj(), ba
-                    )
-        rho_ij_s[isp] = [0.5 * (m + m.conj().T) for m in rho_ij_s[isp]]
-        if system.becsum_sym is not None:
-            rho_ij_s[isp] = system.becsum_sym.apply(rho_ij_s[isp])
-        becps_s.append(becps)
-
-        # augmentation charge: all atoms of a species in one einsum
-        aug_sph = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE, device=dev)
-        for sp, atoms in sp_atoms.items():
-            bec_sp = torch.stack([rho_ij_s[isp][a] for a in atoms])
-            aug_sph = aug_sph + torch.einsum(
-                "aij,ijg,ga->g", bec_sp, system.aug[sp].q_g,
-                phase_pos[:, atoms].conj())
-        aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
-        aug_box[system.sphere_idx] = aug_sph / vol
-        rho_aug = (torch.fft.ifftn(aug_box.reshape(shape) * grid.n_points,
-                                   dim=(-3, -2, -1))).real
-        rho_out_sp = rho_sp + rho_aug
-        rho_out_sp = symmetrize_rho(system.rho_symmetrizer, rho_out_sp, grid)
-        rho_out_s.append(rho_out_sp)
+    rho_out_s, rho_ij_s, becps_s = _build_output_density(ops, coeffs, coeffs_b, occ_s)
     rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
 
     energies = _assemble_iter_energies(
