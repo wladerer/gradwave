@@ -165,6 +165,24 @@ def _aug_tables(paw: PAWData, g_sphere: np.ndarray) -> AugSpecies:
     )
 
 
+def _build_smooth_grid(cell, ecut, axis_groups, spheres, kfrac, grid):
+    """Dual (smooth) box holding only the wavefunction-product sphere
+    (2·G_max(ecut)). The Davidson H-apply local term runs there rather than on
+    the dense ecutrho box — exact for ⟨ψ|V|ψ⟩ because two wavefunction G-vectors
+    differ by at most 2·G_max(ecut). Norm-conserving already has ecutrho =
+    4·ecutwfc, so its box is this box and the smooth path is a no-op there.
+    Returns (smooth_shape, smooth_flat_idx, smooth2dense)."""
+    smooth_grid = build_fft_grid(cell, ecut, equal_dims=axis_groups)
+    smooth_shape = tuple(int(n) for n in smooth_grid.shape)
+    npw_max_s = max(s.miller.shape[0] for s in spheres)
+    smooth_flat_idx = torch.zeros(len(spheres), npw_max_s, dtype=torch.int64)
+    for ik, k in enumerate(kfrac):
+        ss = build_gsphere(smooth_grid, ecut, k)  # same Miller order as dense
+        smooth_flat_idx[ik, : ss.flat_idx.shape[0]] = ss.flat_idx
+    smooth2dense = _smooth_to_dense_map(smooth_shape, tuple(grid.shape))
+    return smooth_shape, smooth_flat_idx, smooth2dense
+
+
 def setup_uspp(
     cell,
     positions,
@@ -211,20 +229,8 @@ def setup_uspp(
         grid, cell, kmesh, (0, 0, 0), sym, mag_sym, time_reversal=True)
     spheres = [build_gsphere(grid, ecut, k) for k in kfrac]
 
-    # dual grid: a smaller box holding only the wavefunction-product sphere
-    # (2·G_max(ecut)). The Davidson H-apply local term runs there rather than
-    # on the dense ecutrho box. Exact for ⟨ψ|V|ψ⟩ because two wavefunction
-    # G-vectors differ by at most 2·G_max(ecut), so V truncated to this sphere
-    # reproduces the matrix elements. Norm-conserving already has ecutrho =
-    # 4·ecutwfc, so its box is this box and the smooth path is a no-op there.
-    smooth_grid = build_fft_grid(cell, ecut, equal_dims=axis_groups)
-    smooth_shape = tuple(int(n) for n in smooth_grid.shape)
-    npw_max_s = max(s.miller.shape[0] for s in spheres)
-    smooth_flat_idx = torch.zeros(len(spheres), npw_max_s, dtype=torch.int64)
-    for ik, k in enumerate(kfrac):
-        ss = build_gsphere(smooth_grid, ecut, k)  # same Miller order as dense
-        smooth_flat_idx[ik, : ss.flat_idx.shape[0]] = ss.flat_idx
-    smooth2dense = _smooth_to_dense_map(smooth_shape, tuple(grid.shape))
+    smooth_shape, smooth_flat_idx, smooth2dense = _build_smooth_grid(
+        cell, ecut, axis_groups, spheres, kfrac, grid)
 
     charges = torch.tensor([paws[s].z_valence for s in species_of_atom], dtype=RDTYPE)
     n_electrons = float(charges.sum())
