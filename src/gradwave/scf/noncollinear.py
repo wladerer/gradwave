@@ -200,6 +200,28 @@ def _build_nc_mixer(g2_vec, ng, nonmagnetic, mixing_alpha, mag_mixing_alpha,
     return mixer, base_step_scale, m
 
 
+def _solve_spinor_bands(bk, grid, v_r, b_xc, projs_b, q_so, dij_so, coeffs, t2,
+                        mask2, tol_eff, mixed_precision, mp_crossover):
+    """Diagonalize the spinor Hamiltonian for one iteration at diagonalization
+    tolerance tol_eff (optional fp32 draft with an fp64 spinor renorm over the
+    doubled 2·npw axis so the electron count stays conserved through mixing).
+    Returns (eigs, coeffs, h); h is reused for the band-chunk size in the Pauli
+    density accumulation."""
+    use_low = mixed_precision and tol_eff > mp_crossover
+    cdtype = CDTYPE_LOW if use_low else CDTYPE
+    t2_solve = t2.to(RDTYPE_LOW) if use_low else t2
+    h = SpinorHamiltonian(bk, grid.shape, v_r, b_xc, projs_b, q=q_so, dij_so=dij_so)
+    dav = davidson_batched(h.apply, coeffs.to(cdtype), t2_solve, mask2, tol=tol_eff)
+    eigs = dav.eigenvalues.to(RDTYPE)
+    coeffs = dav.eigenvectors.to(CDTYPE)
+    if use_low:
+        # fp32 draft: renormalize spinors in fp64 so the electron count
+        # (ρ at G=0) stays conserved through mixing (see collinear scf)
+        coeffs = coeffs / torch.linalg.norm(
+            coeffs, dim=-1, keepdim=True).clamp_min(1e-30)
+    return eigs, coeffs, h
+
+
 def _nc_energy_breakdown(coeffs, occ, t2, entropy_term, rho_out, m_out, q_so,
                          dij_so, projs_b, m_pw, vloc_g, e_ew, system, grid, xc,
                          vol, nk):
@@ -408,18 +430,9 @@ def scf_noncollinear(
 
         tol_eff = adaptive_diago_tol(it, history, diago_tol,
                                      system.n_electrons, schedule="linear")
-        use_low = mixed_precision and tol_eff > mp_crossover
-        cdtype = CDTYPE_LOW if use_low else CDTYPE
-        t2_solve = t2.to(RDTYPE_LOW) if use_low else t2
-        h = SpinorHamiltonian(bk, grid.shape, v_r, b_xc, projs_b, q=q_so, dij_so=dij_so)
-        dav = davidson_batched(h.apply, coeffs.to(cdtype), t2_solve, mask2, tol=tol_eff)
-        eigs = dav.eigenvalues.to(RDTYPE)
-        coeffs = dav.eigenvectors.to(CDTYPE)
-        if use_low:
-            # fp32 draft: renormalize spinors in fp64 so the electron count
-            # (ρ at G=0) stays conserved through mixing (see collinear scf)
-            coeffs = coeffs / torch.linalg.norm(
-                coeffs, dim=-1, keepdim=True).clamp_min(1e-30)
+        eigs, coeffs, h = _solve_spinor_bands(
+            bk, grid, v_r, b_xc, projs_b, q_so, dij_so, coeffs, t2, mask2,
+            tol_eff, mixed_precision, mp_crossover)
 
         mu = float(find_fermi(eigs, system.kweights, scheme, width,
                               system.n_electrons, degeneracy=1.0))
