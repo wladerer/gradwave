@@ -156,6 +156,19 @@ def hubbard_energy(mats: list[torch.Tensor], sites: list) -> torch.Tensor:
     return e
 
 
+def hubbard_occ_and_energy(occ_matrix, occ_s, sites, nspin):
+    """DFT+U per-spin occupation matrices + Dudarev E_U. `occ_matrix(isp,
+    occ_weights)` returns the spin-isp occupation matrix for the given
+    per-band occupation weights (each SCF loop supplies its own projector,
+    coeffs and any padding). Returns (n_hub_list, e_hub): a per-spin list for
+    nspin=2, or [n_half] for nspin=1 (half-filled, energy doubled)."""
+    if nspin == 2:
+        n_hub = [occ_matrix(isp, occ_s[isp]) for isp in range(nspin)]
+        return n_hub, sum(hubbard_energy(n, sites) for n in n_hub)
+    n_half = occ_matrix(0, 0.5 * occ_s[0])
+    return [n_half], 2.0 * hubbard_energy(n_half, sites)
+
+
 def hubbard_dmatrix(mats: list[torch.Tensor], sites: list, nproj: int,
                     device) -> torch.Tensor:
     """Block-diagonal D^I_{mm'} = (U−J)(½δ − n^I) over all correlated sites,

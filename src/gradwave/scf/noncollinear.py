@@ -57,8 +57,10 @@ from gradwave.scf.spinor_common import (
     apply_local_spinor,
     pauli_density_accumulate,
     spinor_band_chunk,
+    spinor_kinetic_energy,
     spinor_potential_blocks,
     spinor_pw_seed,
+    spinor_scalar_nonlocal_energy,
 )
 from gradwave.solvers.davidson import davidson_batched
 
@@ -253,8 +255,7 @@ def _nc_energy_breakdown(coeffs, occ, t2, entropy_term, rho_out, m_out, q_so,
     EnergyBreakdown."""
     rho_g_out = r_to_g(rho_out.to(CDTYPE))
     t_occ = (system.kweights[:, None] * occ).to(coeffs.real.dtype)
-    e_kin = torch.einsum("kb,kbg,kg->", t_occ,
-                         coeffs.real**2 + coeffs.imag**2, t2)
+    e_kin = spinor_kinetic_energy(t_occ, coeffs, t2)
     e_h = hartree_energy(rho_g_out, grid.g2, vol)
     from gradwave.core.xc.noncollinear import energy_with_grid
 
@@ -268,10 +269,8 @@ def _nc_energy_breakdown(coeffs, occ, t2, entropy_term, rho_out, m_out, q_so,
         bu = becp_b(projs_b, coeffs[..., :m_pw])
         bd = becp_b(projs_b, coeffs[..., m_pw:])
         dij = _stack_dij(system)
-        e_nl = nonlocal_energy([bu[ik] for ik in range(nk)], dij, occ,
-                               system.kweights) \
-            + nonlocal_energy([bd[ik] for ik in range(nk)], dij, occ,
-                              system.kweights)
+        e_nl = spinor_scalar_nonlocal_energy(bu, bd, dij, occ,
+                                             system.kweights, nk)
     return EnergyBreakdown(kinetic=e_kin, hartree=e_h, xc=e_xc, local=e_loc,
                            nonlocal_=e_nl, ewald=e_ew, smearing=entropy_term)
 

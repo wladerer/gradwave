@@ -50,7 +50,7 @@ from gradwave.scf.common import (
 )
 from gradwave.scf.guess import sad_density
 from gradwave.scf.layout import MixLayout
-from gradwave.scf.loop import effective_potentials
+from gradwave.scf.loop import effective_potentials, resolve_atom_moments
 from gradwave.scf.mixing import BroydenMixer, JohnsonMixer, PulayMixer
 from gradwave.scf.results import USPPResult
 from gradwave.scf.uspp_setup import USPPSystem
@@ -192,14 +192,8 @@ def _resolve_start_mag(start_mag, species_of_atom, n_species) -> list[float]:
     """Per-ATOM moment fractions from start_mag, mirroring loop._seed_density:
     accept one entry per atom (AFM/ferrimagnetic seeds) or one per species
     (broadcast to that species' atoms); raise on a length matching neither."""
-    na = len(species_of_atom)
-    if start_mag is None:
-        return [0.0] * na
-    if len(start_mag) == na and na != n_species:
-        return [float(m) for m in start_mag]
-    if len(start_mag) == n_species:
-        return [float(start_mag[sp]) for sp in species_of_atom]
-    raise ValueError("start_mag must have one entry per atom or per species")
+    return resolve_atom_moments(start_mag, species_of_atom, n_species,
+                                default=0.0)
 
 
 def _species_atoms(system) -> dict[int, list[int]]:
@@ -350,7 +344,7 @@ def _hubbard_occ_update(ops, hub, coeffs, coeffs_b, occ_s, n_hub_s):
     e_hub = torch.zeros((), dtype=RDTYPE, device=dev)
     if hub is None:
         return n_hub_s, e_hub
-    from gradwave.core.hubbard import hubbard_energy, occupation_matrices
+    from gradwave.core.hubbard import hubbard_occ_and_energy, occupation_matrices
 
     def _padded_coeffs(isp, _cb=coeffs_b):
         if batched:
@@ -360,19 +354,10 @@ def _hubbard_occ_update(ops, hub, coeffs, coeffs_b, occ_s, n_hub_s):
             cp[ik, :, :sph.npw] = coeffs[isp][ik]
         return cp
 
-    if nspin == 2:
-        for isp in range(nspin):
-            n_hub_s[isp] = occupation_matrices(
-                hub.sphi, _padded_coeffs(isp), occ_s[isp],
-                system.kweights, hub.sites)
-        e_hub = sum(hubbard_energy(n_hub_s[isp], hub.sites)
-                    for isp in range(nspin))
-    else:
-        n_half = occupation_matrices(
-            hub.sphi, _padded_coeffs(0), 0.5 * occ_s[0],
-            system.kweights, hub.sites)
-        n_hub_s = [n_half]
-        e_hub = 2.0 * hubbard_energy(n_half, hub.sites)
+    n_hub_s, e_hub = hubbard_occ_and_energy(
+        lambda isp, w: occupation_matrices(hub.sphi, _padded_coeffs(isp), w,
+                                           system.kweights, hub.sites),
+        occ_s, hub.sites, nspin)
     return n_hub_s, e_hub
 
 

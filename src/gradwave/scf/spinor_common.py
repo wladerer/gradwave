@@ -106,3 +106,17 @@ def spinor_pw_seed(nk: int, nbands: int, m_pw: int, device) -> torch.Tensor:
     for b in range(nbands):
         c0[:, b, (b // 2) + (b % 2) * m_pw] = 1.0
     return c0
+
+
+def spinor_kinetic_energy(t_occ, coeffs, t):
+    """Σ_kb w_k f_kb |c_kb(G)|² weighted by the per-(k,G) kinetic factor t —
+    the spinor kinetic energy (both spin components share the G-grid)."""
+    return torch.einsum("kb,kbg,kg->", t_occ, coeffs.real ** 2 + coeffs.imag ** 2, t)
+
+
+def spinor_scalar_nonlocal_energy(bu, bd, dij, occ, kweights, nk):
+    """Scalar-relativistic (no-SOC) spinor E_NL: up + down projector-space
+    nonlocal energies. bu/bd per-k becp arrays, dij the D matrix."""
+    from gradwave.core.energies.nl_pp import nonlocal_energy
+    return nonlocal_energy([bu[ik] for ik in range(nk)], dij, occ, kweights) \
+        + nonlocal_energy([bd[ik] for ik in range(nk)], dij, occ, kweights)

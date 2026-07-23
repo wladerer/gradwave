@@ -38,7 +38,6 @@ import torch
 from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.hartree import hartree_energy, hartree_potential_g
 from gradwave.core.energies.local_pp import local_energy
-from gradwave.core.energies.nl_pp import nonlocal_energy
 from gradwave.core.energies.total import EnergyBreakdown
 from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
@@ -61,8 +60,10 @@ from gradwave.scf.spinor_common import (
     apply_local_spinor,
     pauli_density_accumulate,
     spinor_band_chunk,
+    spinor_kinetic_energy,
     spinor_potential_blocks,
     spinor_pw_seed,
+    spinor_scalar_nonlocal_energy,
 )
 from gradwave.scf.uspp_loop import _build_iter_ops, _seed_becsum, _species_atoms
 from gradwave.scf.uspp_setup import USPPSystem
@@ -416,12 +417,9 @@ def scf_uspp_noncollinear(
         # ---- energies ----
         rho_g_out = r_to_g(rho_out.to(CDTYPE))
         t_occ = (system.kweights[:, None] * occ).to(RDTYPE)
-        e_kin = torch.einsum("kb,kbg,kg->", t_occ,
-                             coeffs.real ** 2 + coeffs.imag ** 2, hs.t)
-        e_nl = nonlocal_energy([bu[ik] for ik in range(nk)], dij_bare, occ,
-                               system.kweights) \
-            + nonlocal_energy([bd[ik] for ik in range(nk)], dij_bare, occ,
-                              system.kweights)
+        e_kin = spinor_kinetic_energy(t_occ, coeffs, hs.t)
+        e_nl = spinor_scalar_nonlocal_energy(bu, bd, dij_bare, occ,
+                                             system.kweights, nk)
         energies = EnergyBreakdown(
             kinetic=e_kin,
             hartree=hartree_energy(rho_g_out, grid.g2, vol),
