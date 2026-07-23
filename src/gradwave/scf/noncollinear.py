@@ -171,6 +171,18 @@ class NCResult:
     formalism: str = "noncollinear"  # result-type tag shared by all four SCF drivers
 
 
+def _unpack_mixed_fields(mixed, n_chan, ng, mask_flat, grid, device):
+    """Inverse-FFT the mixed (ρ, m⃗) vector back to per-channel real-space fields:
+    [rho] when nonmagnetic (n_chan=1), else [rho, m_x, m_y, m_z]."""
+    fields = []
+    for c4 in range(n_chan):
+        gnew = torch.zeros(grid.n_points, dtype=CDTYPE, device=device)
+        gnew[mask_flat] = mixed[c4 * ng:(c4 + 1) * ng]
+        fields.append((torch.fft.ifftn(gnew.reshape(grid.shape) * grid.n_points,
+                                       dim=(-3, -2, -1))).real)
+    return fields
+
+
 @torch.no_grad()
 def scf_noncollinear(
     system: System,
@@ -433,12 +445,7 @@ def scf_noncollinear(
         if mixer_hook is not None:
             mixer_hook(it, vin, vout)
         mixed = mixer.step(vin, vout)
-        fields = []
-        for c4 in range(n_chan):
-            gnew = torch.zeros(grid.n_points, dtype=CDTYPE, device=device)
-            gnew[mask_flat] = mixed[c4 * ng:(c4 + 1) * ng]
-            fields.append((torch.fft.ifftn(gnew.reshape(grid.shape) * grid.n_points,
-                                           dim=(-3, -2, -1))).real)
+        fields = _unpack_mixed_fields(mixed, n_chan, ng, mask_flat, grid, device)
         rho = fields[0]
         if not nonmagnetic:
             m = torch.stack(fields[1:])
