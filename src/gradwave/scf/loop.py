@@ -587,6 +587,45 @@ def _solve_bands(veff_sp, coeffs_sp, bk, grid_shape, projs_b, hub, hub_q,
     return eigenvalues, c
 
 
+def _bootstrap_tau(xc, coeffs_b_s, system, nspin, nk, nb, bk, grid, vol, device):
+    """Seed the per-spin kinetic-energy density τ from the initial orbitals so
+    iteration 1 has a valid τ for the τ-dependent v_xc (refined immediately).
+    Returns the per-spin tau_list, or None for non-meta-GGA functionals."""
+    if not xc.needs_tau:
+        return None
+    from gradwave.core.metagga import tau_b
+    # bootstrap occupations: nspin=1 fills 2 e⁻/band, nspin=2 fills 1 e⁻/band
+    f0 = 2.0 if nspin == 1 else 1.0
+    nocc = max(int(round(system.n_electrons / (2 if nspin == 1 else nspin))), 1)
+    occ0 = torch.zeros(nk, nb, dtype=RDTYPE, device=device)
+    occ0[:, :nocc] = f0
+    return [tau_b(coeffs_b_s[sp], occ0, system.kweights, bk, grid.shape, vol)
+            for sp in range(nspin)]
+
+
+def _build_metagga_apply(xc, rho_s, rho_tot, tau_list, system, nspin, bk, grid):
+    """Per-spin meta-GGA generalized-KS operator −½∇·(v_τσ∇ψ_σ), or None when the
+    functional is not τ-dependent. v_τσ = ∂e_xc/∂τ_σ from the current (ρ, τ); each
+    spin's operator is captured by DEFAULT ARGUMENT so the spin solve binds this
+    v_τ, not a later one."""
+    if not xc.needs_tau:
+        return None
+    from gradwave.core.metagga import metagga_tau_operator
+    if nspin == 1:
+        rho_for_xc = (rho_tot if system.rho_core is None
+                      else rho_tot + system.rho_core)
+        v_tau_s = [vtau_potential(xc, rho_for_xc, tau_list[0], grid)]
+    else:
+        cu2 = None if system.rho_core is None else 0.5 * system.rho_core
+        r_u = rho_s[0] if cu2 is None else rho_s[0] + cu2
+        r_d = rho_s[1] if cu2 is None else rho_s[1] + cu2
+        v_tau_s = list(vtau_spin_potential(
+            xc, r_u, r_d, tau_list[0], tau_list[1], grid))
+    return [
+        (lambda c, _v=v_tau_s[sp]: metagga_tau_operator(c, _v, bk, grid.shape))
+        for sp in range(nspin)]
+
+
 @torch.no_grad()
 def scf(
     system: System,
@@ -704,16 +743,8 @@ def scf(
     # τ-dependent v_xc; the energy each iteration uses the current orbitals' τ.
     # tau_list is per-spin (length nspin); the nspin=1 potential/energy sites
     # take tau_list[0], the nspin=2 sites take the whole list.
-    tau_list = None
-    if xc.needs_tau:
-        from gradwave.core.metagga import metagga_tau_operator, tau_b
-        # bootstrap occupations: nspin=1 fills 2 e⁻/band, nspin=2 fills 1 e⁻/band
-        f0 = 2.0 if nspin == 1 else 1.0
-        nocc = max(int(round(system.n_electrons / (2 if nspin == 1 else nspin))), 1)
-        occ0 = torch.zeros(nk, nb, dtype=RDTYPE, device=device)
-        occ0[:, :nocc] = f0
-        tau_list = [tau_b(coeffs_b_s[sp], occ0, system.kweights, bk, grid.shape, vol)
-                    for sp in range(nspin)]
+    tau_list = _bootstrap_tau(xc, coeffs_b_s, system, nspin, nk, nb, bk, grid,
+                              vol, device)
 
     def symmetrize(r_out):
         return symmetrize_rho(system.rho_symmetrizer, r_out, grid)
@@ -736,21 +767,8 @@ def scf(
 
         # meta-GGA generalized-KS operator: v_τσ = ∂e_xc/∂τ_σ from the current
         # (ρ, τ), applied additively as −½∇·(v_τσ∇ψ_σ) per spin in the H-apply.
-        metagga_apply_s = None
-        if xc.needs_tau:
-            if nspin == 1:
-                rho_for_xc = (rho_tot if system.rho_core is None
-                              else rho_tot + system.rho_core)
-                v_tau_s = [vtau_potential(xc, rho_for_xc, tau_list[0], grid)]
-            else:
-                cu2 = None if system.rho_core is None else 0.5 * system.rho_core
-                r_u = rho_s[0] if cu2 is None else rho_s[0] + cu2
-                r_d = rho_s[1] if cu2 is None else rho_s[1] + cu2
-                v_tau_s = list(vtau_spin_potential(
-                    xc, r_u, r_d, tau_list[0], tau_list[1], grid))
-            metagga_apply_s = [
-                (lambda c, _v=v_tau_s[sp]: metagga_tau_operator(c, _v, bk, grid.shape))
-                for sp in range(nspin)]
+        metagga_apply_s = _build_metagga_apply(xc, rho_s, rho_tot, tau_list,
+                                               system, nspin, bk, grid)
 
         # adaptive diagonalization tolerance, quadratic schedule (see
         # common.adaptive_diago_tol). Warm starts skip the loose first solve
@@ -812,6 +830,7 @@ def scf(
         # rebuilds above). No symmetrization: τ is a scalar orbital field that
         # inherits the crystal symmetry through the density path.
         if xc.needs_tau:
+            from gradwave.core.metagga import tau_b
             tau_list = [tau_b(coeffs_b_s[sp], occ_s[sp], system.kweights,
                               bk, grid.shape, vol) for sp in range(nspin)]
 
