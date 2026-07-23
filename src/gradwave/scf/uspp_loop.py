@@ -652,6 +652,42 @@ def _seed_becsum(system, nspin, start_from, spin_frac, dev):
     return rho_ij_s
 
 
+def _seed_scf_density(system, grid, vol, dev, nspin, start_from, start_mag):
+    """Seed (rho_s, spin_frac): warm-start rescale from a prior result, or a SAD
+    density (nspin=1), or per-atom spin-split SAD (nspin=2). spin_frac carries the
+    per-atom up/down fractions (or [None]) used later to seed becsum."""
+    if start_from is not None:
+        # shared grid/nspin validation + volume-ratio rescale (electron count
+        # exactly conserved on the new cell) — common.warm_start_densities
+        rho_s = warm_start_densities(start_from, nspin, grid, vol, dev)
+        if nspin == 1:
+            return rho_s, [None]
+        mags = _resolve_start_mag(start_mag, system.species_of_atom,
+                                  len(system.paws))
+        return rho_s, [[(1.0 + m) / 2.0 for m in mags],
+                       [(1.0 - m) / 2.0 for m in mags]]
+    if nspin == 1:
+        return [sad_density(grid, system.positions, system.species_of_atom,
+                            system.paws, system.n_electrons)], [None]
+    # per-ATOM moment fractions (AFM/ferrimagnetic seeds pass one entry per atom;
+    # a per-species list is broadcast). sad_density's atom_scale seeds each atom
+    # directly — identical to the old species_scale path when the moments are
+    # uniform within a species.
+    mags = _resolve_start_mag(start_mag, system.species_of_atom,
+                              len(system.paws))
+    up = [(1.0 + m) / 2.0 for m in mags]
+    dn = [(1.0 - m) / 2.0 for m in mags]
+    n_up = sum(float(system.charges[a]) * up[a]
+               for a in range(len(system.species_of_atom)))
+    rho_s = [
+        sad_density(grid, system.positions, system.species_of_atom,
+                    system.paws, n_up, atom_scale=up),
+        sad_density(grid, system.positions, system.species_of_atom,
+                    system.paws, system.n_electrons - n_up, atom_scale=dn),
+    ]
+    return rho_s, [up, dn]
+
+
 @torch.no_grad()
 def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
              smearing="none", width=0.1, max_iter=60, etol=1e-8, rhotol=1e-7,
@@ -770,39 +806,8 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     dev = system.positions.device
     nk = len(system.spheres)
 
-    if start_from is not None:
-        # shared grid/nspin validation + volume-ratio rescale (electron count
-        # exactly conserved on the new cell) — common.warm_start_densities
-        rho_s = warm_start_densities(start_from, nspin, grid, vol, dev)
-        if nspin == 1:
-            spin_frac = [None]
-        else:
-            mags = _resolve_start_mag(start_mag, system.species_of_atom,
-                                      len(system.paws))
-            spin_frac = [[(1.0 + m) / 2.0 for m in mags],
-                         [(1.0 - m) / 2.0 for m in mags]]
-    elif nspin == 1:
-        rho_s = [sad_density(grid, system.positions, system.species_of_atom,
-                             system.paws, system.n_electrons)]
-        spin_frac = [None]
-    else:
-        # per-ATOM moment fractions (AFM/ferrimagnetic seeds pass one entry per
-        # atom; a per-species list is broadcast). sad_density's atom_scale seeds
-        # each atom directly — identical to the old species_scale path when the
-        # moments are uniform within a species.
-        mags = _resolve_start_mag(start_mag, system.species_of_atom,
-                                  len(system.paws))
-        up = [(1.0 + m) / 2.0 for m in mags]
-        dn = [(1.0 - m) / 2.0 for m in mags]
-        n_up = sum(float(system.charges[a]) * up[a]
-                   for a in range(len(system.species_of_atom)))
-        rho_s = [
-            sad_density(grid, system.positions, system.species_of_atom,
-                        system.paws, n_up, atom_scale=up),
-            sad_density(grid, system.positions, system.species_of_atom,
-                        system.paws, system.n_electrons - n_up, atom_scale=dn),
-        ]
-        spin_frac = [up, dn]
+    rho_s, spin_frac = _seed_scf_density(system, grid, vol, dev, nspin,
+                                         start_from, start_mag)
 
     ops = _build_iter_ops(system, xc, nspin=nspin, smearing=smearing,
                           width=width, batched=batched, hubbard=hubbard,
