@@ -43,6 +43,7 @@ from __future__ import annotations
 import torch
 
 from gradwave.constants import BOHR_ANG as _BOHR  # shared CODATA Bohr radius [Å]
+from gradwave.core.fftbox import g_to_r_box
 
 
 class LocalTFPrecond:
@@ -80,7 +81,7 @@ class LocalTFPrecond:
     def _apply_operator(self, u_box: torch.Tensor) -> torch.Tensor:
         """(-∇² + Q̂) u in box G-space.  u_box, out: (n_points,) complex."""
         lap = self.g2 * u_box
-        u_r = torch.fft.ifftn(u_box.reshape(self.shape), dim=(-3, -2, -1)) * self.n_points
+        u_r = g_to_r_box(u_box.reshape(self.shape))
         qu = torch.fft.fftn(self.q2_r * u_r, dim=(-3, -2, -1)).reshape(-1) / self.n_points
         return lap + qu
 
@@ -131,7 +132,7 @@ class LocalTFPrecond:
         self._u_warm = u
 
         # P·R = R − Q̂u, evaluated on the box then gathered back to the sphere
-        u_r = torch.fft.ifftn(u.reshape(self.shape), dim=(-3, -2, -1)) * self.n_points
+        u_r = g_to_r_box(u.reshape(self.shape))
         qu = torch.fft.fftn(self.q2_r * u_r, dim=(-3, -2, -1)).reshape(-1) / self.n_points
         pr_box = rhs - qu
         pr_box[0] = 0.0  # pin G=0 (preserved analytically; guard CG round-off)

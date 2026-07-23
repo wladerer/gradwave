@@ -15,7 +15,7 @@ import torch
 
 from gradwave.core.energies.hartree import hartree_potential_g
 from gradwave.core.energies.local_pp import local_potential_g
-from gradwave.core.fftbox import r_to_g
+from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.dtypes import CDTYPE
 
 
@@ -57,8 +57,7 @@ def aug_density_from_becsum(system, becsum, phases) -> torch.Tensor:
             "ij,ijg->g", becsum[a], system.aug[sp].q_g)
     aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
     aug_box[system.sphere_idx] = aug_sph / grid.volume
-    return torch.fft.ifftn(aug_box.reshape(grid.shape) * grid.n_points,
-                           dim=(-3, -2, -1)).real
+    return g_to_r_box(aug_box.reshape(grid.shape), real=True)
 
 
 def frozen_veff(res: dict, xc) -> list[torch.Tensor]:
@@ -74,12 +73,11 @@ def frozen_veff(res: dict, xc) -> list[torch.Tensor]:
 
     rho = res["rho"].detach()
     rho_g_box = r_to_g(rho.to(CDTYPE))
-    v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
-                           dim=(-3, -2, -1)) * grid.n_points).real
+    v_h = g_to_r_box(hartree_potential_g(rho_g_box, grid.g2), real=True)
     vloc_g = local_potential_g(
         system.positions, torch.as_tensor(system.species_of_atom, device=dev),
         system.vloc_tables, grid.g_cart, grid.volume)
-    vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
+    vloc_r = g_to_r_box(vloc_g, real=True)
 
     if nspin == 1:
         from gradwave.scf.loop import vxc_potential

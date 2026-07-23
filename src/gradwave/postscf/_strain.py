@@ -24,6 +24,7 @@ import torch
 
 from gradwave.constants import E2, HBAR2_2M
 from gradwave.constants import MINUS_I_POW as _MINUS_I_POW
+from gradwave.core.fftbox import g_to_r_box
 from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE, RDTYPE
 
@@ -129,8 +130,7 @@ def nlcc_core_strained(tabs, species_of_atom, phases, q_sph, omega, grid,
         core = core + phases[:, atoms].sum(dim=1) * f_core.to(CDTYPE) / omega.to(CDTYPE)
     core_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
     core_box[scatter] = core
-    return torch.fft.ifftn(core_box.reshape(grid.shape) * grid.n_points,
-                           dim=(-3, -2, -1)).real
+    return g_to_r_box(core_box.reshape(grid.shape), real=True)
 
 
 def strained_projector_cols(tabs, species_of_atom, atom_index, lmax,

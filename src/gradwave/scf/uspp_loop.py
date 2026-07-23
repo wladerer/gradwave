@@ -32,7 +32,7 @@ from gradwave.constants import HBAR2_2M
 from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.hartree import hartree_potential_g
 from gradwave.core.energies.local_pp import local_potential_g
-from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
+from gradwave.core.fftbox import box_to_sphere, g_to_r, g_to_r_box, r_to_g
 from gradwave.core.hamiltonian import ProjectorData, becp, projectors
 from gradwave.core.occupations import (
     SCHEMES,
@@ -228,8 +228,7 @@ def uspp_potentials_dscr(system, xc, rho_s, rho_ij_s, vloc_r, phase_pos, onec):
     nspin = len(rho_s)
     rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
     rho_g_box = r_to_g(rho_tot.to(CDTYPE))
-    v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
-                           dim=(-3, -2, -1)) * grid.n_points).real
+    v_h = g_to_r_box(hartree_potential_g(rho_g_box, grid.g2), real=True)
     core = system.rho_core
     if nspin == 1:
         v_xc, _ = vxc_potential(xc, rho_tot if core is None else rho_tot + core,
@@ -303,7 +302,7 @@ def _build_iter_ops(system: USPPSystem, xc, *, nspin=1, smearing="none",
     vloc_g = local_potential_g(system.positions,
                                torch.tensor(system.species_of_atom, device=dev),
                                system.vloc_tables, grid.g_cart, vol)
-    vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
+    vloc_r = g_to_r_box(vloc_g, real=True)
     # E_ewald depends only on the (frozen) positions — build once, reuse each step.
     e_ewald = ewald_energy(system.positions, system.charges, grid.cell)
     phase_arg = system.g_sphere @ system.positions.T  # (nGm, na)
@@ -453,8 +452,7 @@ def _build_output_density(ops, coeffs, coeffs_b, occ_s):
                 phase_pos[:, atoms].conj())
         aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
         aug_box[system.sphere_idx] = aug_sph / vol
-        rho_aug = (torch.fft.ifftn(aug_box.reshape(shape) * grid.n_points,
-                                   dim=(-3, -2, -1))).real
+        rho_aug = g_to_r_box(aug_box.reshape(shape), real=True)
         rho_out_sp = rho_sp + rho_aug
         rho_out_sp = symmetrize_rho(system.rho_symmetrizer, rho_out_sp, grid)
         rho_out_s.append(rho_out_sp)
@@ -486,11 +484,8 @@ def _solve_bands_uspp(ops, veff_s, dscr_s, n_hub_s, coeffs, coeffs_b, tol_eff,
             if system.smooth_shape is not None:
                 # filter v_eff onto the smooth box (dense G-coeffs restricted to
                 # the smooth sphere by Miller), for the dual-grid H-apply
-                ns = system.smooth_shape[0] * system.smooth_shape[1] \
-                    * system.smooth_shape[2]
                 vg = r_to_g(veff_s[isp].to(CDTYPE)).reshape(-1)[system.smooth2dense]
-                v_s = (torch.fft.ifftn(vg.reshape(system.smooth_shape),
-                                       dim=(-3, -2, -1)) * ns).real
+                v_s = g_to_r_box(vg.reshape(system.smooth_shape), real=True)
                 smooth = (system.smooth_shape, system.smooth_flat_idx, v_s)
             hs_b = BatchedHS(bk, shape, veff_s[isp], p_b, dscr_s[isp],
                              system.q_full, hub_sphi=hub.sphi if hub else None,

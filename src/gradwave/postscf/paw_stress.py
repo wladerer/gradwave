@@ -22,7 +22,7 @@ import torch
 
 from gradwave.constants import E2, HBAR2_2M
 from gradwave.constants import MINUS_I_POW as _MINUS_I_POW
-from gradwave.core.fftbox import r_to_g
+from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.postscf.paw_forces import _aug_at_fixed, _normalize_spin
@@ -196,8 +196,7 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
         n_pts = grid.n_points
         rho_box = torch.zeros(n_pts, dtype=cdt, device=dev)
         rho_box[sphere_idx] = rho_sph_sp
-        rho_r_chans.append(torch.fft.ifftn(
-            rho_box.reshape(shape) * n_pts, dim=(-3, -2, -1)).real)
+        rho_r_chans.append(g_to_r_box(rho_box.reshape(shape), real=True))
 
     rho_sph_tot = sum(rho_sph_chans)
     g2_safe = torch.where(is_g0, torch.ones_like(g2_sph), g2_sph)
@@ -230,8 +229,7 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
             core = core + phases[:, atoms].sum(dim=1) * f_core.to(cdt) / omega.to(cdt)
         core_box = torch.zeros(grid.n_points, dtype=cdt, device=dev)
         core_box[sphere_idx] = core
-        rho_core_e = torch.fft.ifftn(
-            core_box.reshape(shape) * grid.n_points, dim=(-3, -2, -1)).real
+        rho_core_e = g_to_r_box(core_box.reshape(shape), real=True)
     from gradwave.core.density import sigma_from_rho
 
     g_box = None

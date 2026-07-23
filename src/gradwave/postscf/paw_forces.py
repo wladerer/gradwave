@@ -29,7 +29,7 @@ from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.hartree import hartree_energy
 from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.energies.nl_pp import nonlocal_energy
-from gradwave.core.fftbox import r_to_g
+from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.hamiltonian import becp, projectors
 from gradwave.dtypes import CDTYPE
 from gradwave.postscf._response import spin_sigma_triple
@@ -80,8 +80,7 @@ def rho_core_on_graph(system, phases) -> torch.Tensor | None:
         core = core + phases[:, atoms].conj().sum(dim=1) * f_core.to(CDTYPE) / vol
     core_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
     core_box[system.sphere_idx] = core
-    return torch.fft.ifftn(core_box.reshape(grid.shape) * grid.n_points,
-                           dim=(-3, -2, -1)).real
+    return g_to_r_box(core_box.reshape(grid.shape), real=True)
 
 
 def _aug_at_fixed(res: dict, system, isp: int | None = None) -> torch.Tensor:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from gradwave.core.fftbox import g_to_r_box
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.kpoints import monkhorst_pack
 
@@ -124,6 +125,4 @@ def build_core_density(pseudos, species_of_atom, positions, grid, uniq,
         core_g += sfac * shell.to(CDTYPE) / grid.volume
     core_g = torch.where(grid.dens_mask.reshape(-1), core_g,
                          torch.zeros_like(core_g))
-    return torch.fft.ifftn(
-        core_g.reshape(grid.shape) * grid.n_points, dim=(-3, -2, -1)
-    ).real
+    return g_to_r_box(core_g.reshape(grid.shape), real=True)

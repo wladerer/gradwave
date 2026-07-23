@@ -27,7 +27,7 @@ import torch
 
 from gradwave.constants import E2
 from gradwave.core.density import sigma_from_rho
-from gradwave.core.fftbox import r_to_g
+from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE
 from gradwave.solvers.precond import teter_b
@@ -83,8 +83,7 @@ def hartree_kernel(grid, w_r: torch.Tensor) -> torch.Tensor:
     inv_g2 = torch.where(
         grid.g2 > 1e-12, 1.0 / torch.clamp(grid.g2, min=1e-12),
         torch.zeros_like(grid.g2))
-    return (torch.fft.ifftn(4.0 * math.pi * E2 * w_g * inv_g2,
-                            dim=(-3, -2, -1)) * grid.n_points).real
+    return g_to_r_box(4.0 * math.pi * E2 * w_g * inv_g2, real=True)
 
 
 def fxc_hvp(xc, rho0: torch.Tensor, grid, w_r: torch.Tensor) -> torch.Tensor:

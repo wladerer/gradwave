@@ -10,7 +10,7 @@ import time
 import torch
 
 from gradwave.core.density import sigma_from_rho
-from gradwave.core.fftbox import r_to_g
+from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.occupations import (
     SCHEMES,
     find_fermi,
@@ -94,7 +94,7 @@ def symmetrize_rho(rho_symmetrizer, r_out, grid):
     if rho_symmetrizer is None:
         return r_out
     sym_g = rho_symmetrizer.apply(r_to_g(r_out.to(CDTYPE)))
-    return torch.fft.ifftn(sym_g * grid.n_points, dim=(-3, -2, -1)).real
+    return g_to_r_box(sym_g, real=True)
 
 
 def spin_sigmas(r_u, r_d, xc, g_cart):

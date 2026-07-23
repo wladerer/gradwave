@@ -34,7 +34,7 @@ from __future__ import annotations
 import torch
 
 from gradwave.core.energies.local_pp import local_potential_g
-from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
+from gradwave.core.fftbox import box_to_sphere, g_to_r, g_to_r_box, r_to_g
 from gradwave.core.hamiltonian import becp
 from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE, RDTYPE
@@ -57,7 +57,7 @@ def _dvloc_r(system, a: int, alpha: int) -> torch.Tensor:
                                torch.tensor(system.species_of_atom,
                                             device=dev),
                                system.vloc_tables, grid.g_cart, grid.volume)
-        return (torch.fft.ifftn(vg, dim=(-3, -2, -1)) * grid.n_points).real
+        return g_to_r_box(vg, real=True)
 
     _, dv = torch.func.jvp(f, (system.positions,), (tang,))
     return dv
@@ -93,8 +93,7 @@ def _drho_core_r(system, a: int, alpha: int) -> torch.Tensor:
     dcore_g = (-1j * gc[:, alpha].to(CDTYPE)) * phase         * shell.to(CDTYPE) / grid.volume
     mask = grid.dens_mask.reshape(-1).to(dev)
     dcore_g = torch.where(mask, dcore_g, torch.zeros_like(dcore_g))
-    return torch.fft.ifftn(dcore_g.reshape(grid.shape) * grid.n_points,
-                           dim=(-3, -2, -1)).real
+    return g_to_r_box(dcore_g.reshape(grid.shape), real=True)
 
 
 def _fxc_apply(cs, w: torch.Tensor) -> torch.Tensor:
@@ -249,8 +248,7 @@ class PositionPerturbation:
                            system.aug[sp_a].q_g)
         aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
         aug_box[system.sphere_idx] = aug_sph / cs.vol
-        drho_aug = drho_aug + torch.fft.ifftn(
-            aug_box.reshape(cs.shape) * grid.n_points, dim=(-3, -2, -1)).real
+        drho_aug = drho_aug + g_to_r_box(aug_box.reshape(cs.shape), real=True)
         return drho_sm / cs.vol + drho_aug, dbec
 
 

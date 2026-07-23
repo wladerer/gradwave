@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import torch
 
 from gradwave.constants import HBAR2_2M
+from gradwave.core.fftbox import g_to_r_box
 from gradwave.dtypes import CDTYPE, RDTYPE
 
 # GPU dense-grid temporary budget [bytes]: bands are chunked so the ~4 dense-box
@@ -91,7 +92,7 @@ def g_to_r_b(coeffs: torch.Tensor, bk: BatchedK, shape) -> torch.Tensor:
     idx = bk.flat_idx[:, None, :].expand(nk, nb, m)
     box = box.scatter_add(2, idx, coeffs)
     box = box.reshape(nk, nb, *shape)
-    return torch.fft.ifftn(box, dim=(-3, -2, -1)) * n
+    return g_to_r_box(box)
 
 
 def box_to_sphere_b(box: torch.Tensor, bk: BatchedK) -> torch.Tensor:

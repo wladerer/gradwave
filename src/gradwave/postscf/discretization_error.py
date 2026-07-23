@@ -71,7 +71,13 @@ import torch
 from gradwave.core.batch import build_batched, g_to_r_b, projectors_b
 from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.energies.nl_pp import nonlocal_energy
-from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g, sphere_to_box
+from gradwave.core.fftbox import (
+    box_to_sphere,
+    g_to_r,
+    g_to_r_box,
+    r_to_g,
+    sphere_to_box,
+)
 from gradwave.core.hamiltonian import (
     HamiltonianK,
     becp,
@@ -365,7 +371,7 @@ def estimate_density_error(
     if sym is not None:
         # fold the IBZ complement over the star, same operator the SCF uses on rho
         sym_g = system.rho_symmetrizer.apply(r_to_g(drho.to(CDTYPE)))
-        drho = (torch.fft.ifftn(sym_g * grid.n_points, dim=(-3, -2, -1))).real
+        drho = g_to_r_box(sym_g, real=True)
     drho_fo = drho.clone()
 
     if dyson:
@@ -1013,12 +1019,11 @@ def _spinor_complement(res, *, ecut_large, factor, xc, smearing, width):
     # frozen spinor potential rebuilt from the converged (rho, m), the same
     # v_r = v_H + v_xc + v_loc and exchange field b_xc the SCF forms each step.
     rho_g = r_to_g(res.rho.to(CDTYPE))
-    v_h = (torch.fft.ifftn(hartree_potential_g(rho_g, grid.g2), dim=(-3, -2, -1))
-           * grid.n_points).real
+    v_h = g_to_r_box(hartree_potential_g(rho_g, grid.g2), real=True)
     v_xc, b_xc, _ = vxc_and_bxc(xc, res.rho, res.m, grid, rho_core=system.rho_core)
     vloc_g = local_potential_g(system.positions, system.species_index,
                                system.vloc_tables, grid.g_cart, vol)
-    vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
+    vloc_r = g_to_r_box(vloc_g, real=True)
     v_r = v_h + v_xc + vloc_r
 
     bk0 = system.batch

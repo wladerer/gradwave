@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import torch
 
-from gradwave.core.fftbox import r_to_g
+from gradwave.core.fftbox import g_to_r_box, r_to_g
 
 
 def sigma_from_rho(rho: torch.Tensor, g_cart: torch.Tensor) -> torch.Tensor:
@@ -26,9 +26,6 @@ def sigma_from_rho(rho: torch.Tensor, g_cart: torch.Tensor) -> torch.Tensor:
     g_cart: (n1,n2,n3,3) Cartesian G of the box (grids.FFTGrid.g_cart).
     """
     rho_g = r_to_g(rho.to(torch.complex128))
-    grad = torch.fft.ifftn(
-        1j * g_cart.permute(3, 0, 1, 2) * rho_g[None], dim=(-3, -2, -1)
-    ) * rho.numel()
-    # ifftn already includes 1/N; multiply back the N our r_to_g removed
+    grad = g_to_r_box(1j * g_cart.permute(3, 0, 1, 2) * rho_g[None])
     grad_r = grad.real
     return (grad_r**2).sum(dim=0)
