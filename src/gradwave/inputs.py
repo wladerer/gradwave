@@ -376,7 +376,7 @@ def _load_input(path: Path) -> Input:
 
     _check_keys("scf.mixing", mix_raw, {f.name for f in dataclasses.fields(MixingParams)})
     mix_scheme = str(mix_raw.get("scheme", "pulay"))
-    if mix_scheme not in ("pulay", "broyden", "johnson", "linear"):
+    if mix_scheme not in ("pulay", "broyden", "johnson"):
         raise InputError(f"unknown mixing scheme {mix_scheme!r}")
     if "kerker" in mix_raw:
         mix_raw["kerker"] = _normalize_kerker(mix_raw["kerker"])

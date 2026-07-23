@@ -20,23 +20,3 @@ RDTYPE_LOW = torch.float32
 def real_of(cdtype: torch.dtype) -> torch.dtype:
     """Real dtype paired with a complex dtype (complex64→float32, else float64)."""
     return torch.float32 if cdtype == torch.complex64 else torch.float64
-
-
-def as_real(x, device=None):
-    """Tensor in the real working dtype (accepts array-likes)."""
-    return torch.as_tensor(x, dtype=RDTYPE, device=device)
-
-
-def as_complex(x, device=None):
-    """Tensor in the complex working dtype (accepts array-likes)."""
-    return torch.as_tensor(x, dtype=CDTYPE, device=device)
-
-
-def resolve_device(spec: str | torch.device | None) -> torch.device:
-    """Resolve a user device spec ('cpu' | 'cuda' | 'cuda:N' | None) to a torch.device."""
-    if spec is None:
-        return torch.device("cpu")
-    dev = torch.device(spec)
-    if dev.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("device: cuda requested but torch.cuda.is_available() is False")
-    return dev

@@ -58,6 +58,9 @@ def test_unknown_key_suggests_the_right_one(tmp_path, extra, needle):
     ("task: bandz\n", "unknown task"),
     ("kpoints: {mesh: [4, 4]}\n", "3 entries"),
     ("xc: b3lyp\n", "unknown xc"),
+    # 'linear' parses but no mixer implements it — reject at parse time, not
+    # deep in the SCF where the mixer builder raises a bare ValueError.
+    ("scf: {mixing: {scheme: linear}}\n", "unknown mixing scheme"),
 ])
 def test_value_range_errors(tmp_path, extra, needle):
     from gradwave.inputs import InputError, load_input
