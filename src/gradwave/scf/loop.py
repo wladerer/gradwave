@@ -536,6 +536,57 @@ def _build_mixer_precond(grid, nspin, layout, mixing_scheme, mixing_alpha,
     return mixer, tf_precond
 
 
+def _solve_bands(veff_sp, coeffs_sp, bk, grid_shape, projs_b, hub, hub_q,
+                 n_hub_sp, hub_alpha, fock_apply_sp, metagga_apply_sp,
+                 eigensolver, tol_eff, use_low, cdtype, t_solve, device):
+    """Eigensolve one spin channel of the NC standard problem H x = ε x.
+
+    Builds H (KB nonlocal + optional Hubbard V_U), composes the additive Fock
+    and meta-GGA operators onto the H-apply, diagonalizes, and returns
+    (eigenvalues [RDTYPE], coeffs [CDTYPE]). fock_apply_sp / metagga_apply_sp are
+    this spin's already-indexed operators (or None); each is captured by DEFAULT
+    ARGUMENT so the composed closure binds this operator, not a later one.
+    """
+    from gradwave.core.batch import BatchedHamiltonian
+    from gradwave.solvers.davidson import davidson_batched
+
+    hub_dij = None
+    if hub is not None:
+        from gradwave.core.hubbard import hubbard_dmatrix
+        dij = hubbard_dmatrix(n_hub_sp, hub.sites, hub.nproj, device)
+        if hub_alpha is not None:  # rigid manifold probe α·I (linear response)
+            for si, s in enumerate(hub.sites):
+                st, dim = s["start"], s["dim"]
+                dij[st:st + dim, st:st + dim] += hub_alpha[si] * torch.eye(
+                    dim, dtype=CDTYPE, device=device)
+        # apply convention wants D^T; D is Hermitian so D^T = conj(D)
+        hub_dij = dij.conj()
+    h = BatchedHamiltonian(bk, grid_shape, veff_sp, projs_b,
+                           hub_q=hub_q, hub_dij=hub_dij)
+    apply = h.apply
+    if fock_apply_sp is not None:
+        def apply(c, _base=h.apply, _f=fock_apply_sp):
+            return _base(c) + _f(c)
+    if metagga_apply_sp is not None:
+        def apply(c, _base=apply, _m=metagga_apply_sp):
+            return _base(c) + _m(c)
+    if eigensolver == "chebyshev":
+        from gradwave.solvers.chebyshev import chebyshev_filtered_batched
+        dav = chebyshev_filtered_batched(
+            apply, coeffs_sp.to(cdtype), t_solve, bk.mask, tol=tol_eff)
+    else:
+        dav = davidson_batched(apply, coeffs_sp.to(cdtype),
+                               t_solve, bk.mask, tol=tol_eff)
+    eigenvalues = dav.eigenvalues.to(RDTYPE)
+    c = dav.eigenvectors.to(CDTYPE)
+    if use_low:
+        # fp32 leaves ‖ψ‖ accurate only to ~1e-6; renormalize in fp64 so the
+        # density's electron count (ρ at G=0) is conserved to the mixer's
+        # tolerance (off-diagonal overlaps don't touch G=0)
+        c = c / torch.linalg.norm(c, dim=-1, keepdim=True).clamp_min(1e-30)
+    return eigenvalues, c
+
+
 @torch.no_grad()
 def scf(
     system: System,
@@ -594,8 +645,7 @@ def scf(
         grid, nspin, layout, mixing_scheme, mixing_alpha, mixing_history,
         kerker, precond, precond_op)
 
-    from gradwave.core.batch import BatchedHamiltonian, becp_b, density_b, projectors_b
-    from gradwave.solvers.davidson import davidson_batched
+    from gradwave.core.batch import becp_b, density_b, projectors_b
 
     device = system.positions.device
     bk = system.batch
@@ -716,44 +766,13 @@ def scf(
         cdtype = CDTYPE_LOW if use_low else CDTYPE
         t_solve = bk.t.to(RDTYPE_LOW) if use_low else bk.t
         for sp in range(nspin):
-            hub_dij = None
-            if hub is not None:
-                from gradwave.core.hubbard import hubbard_dmatrix
-                dij = hubbard_dmatrix(n_hub_s[sp], hub.sites, hub.nproj, device)
-                if hub_alpha is not None:  # rigid manifold probe α·I (linear response)
-                    for si, s in enumerate(hub.sites):
-                        st, dim = s["start"], s["dim"]
-                        dij[st:st + dim, st:st + dim] += hub_alpha[si] * torch.eye(
-                            dim, dtype=CDTYPE, device=device)
-                # apply convention wants D^T; D is Hermitian so D^T = conj(D)
-                hub_dij = dij.conj()
-            h = BatchedHamiltonian(bk, grid.shape, veff_s[sp], projs_b,
-                                   hub_q=hub_q, hub_dij=hub_dij)
-            apply = h.apply
-            if fock_apply_s is not None and fock_apply_s[sp] is not None:
-                _fa = fock_apply_s[sp]
-                def apply(c, _base=h.apply, _f=_fa):
-                    return _base(c) + _f(c)
-            if metagga_apply_s is not None and metagga_apply_s[sp] is not None:
-                _ma = metagga_apply_s[sp]
-                def apply(c, _base=apply, _m=_ma):
-                    return _base(c) + _m(c)
-            if eigensolver == "chebyshev":
-                from gradwave.solvers.chebyshev import chebyshev_filtered_batched
-                dav = chebyshev_filtered_batched(
-                    apply, coeffs_b_s[sp].to(cdtype), t_solve, bk.mask,
-                    tol=tol_eff)
-            else:
-                dav = davidson_batched(apply, coeffs_b_s[sp].to(cdtype),
-                                       t_solve, bk.mask, tol=tol_eff)
-            eigs_s[sp] = dav.eigenvalues.to(RDTYPE)
-            c = dav.eigenvectors.to(CDTYPE)
-            if use_low:
-                # fp32 leaves ‖ψ‖ accurate only to ~1e-6; renormalize in fp64
-                # so the density's electron count (ρ at G=0) is conserved to
-                # the mixer's tolerance (off-diagonal overlaps don't touch G=0)
-                c = c / torch.linalg.norm(c, dim=-1, keepdim=True).clamp_min(1e-30)
-            coeffs_b_s[sp] = c
+            fock_sp = fock_apply_s[sp] if fock_apply_s is not None else None
+            mgga_sp = metagga_apply_s[sp] if metagga_apply_s is not None else None
+            n_hub_sp = n_hub_s[sp] if hub is not None else None
+            eigs_s[sp], coeffs_b_s[sp] = _solve_bands(
+                veff_s[sp], coeffs_b_s[sp], bk, grid.shape, projs_b, hub, hub_q,
+                n_hub_sp, hub_alpha, fock_sp, mgga_sp, eigensolver, tol_eff,
+                use_low, cdtype, t_solve, device)
 
         occ_s, mu, entropy_term = shared_fermi_occupations(
             eigs_s, system.kweights, smearing, width, system.n_electrons,
