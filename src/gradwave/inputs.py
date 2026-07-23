@@ -292,6 +292,85 @@ def load_input(path: str | Path) -> Input:
         raise InputError(f"{path}: {e}") from None
 
 
+def _resolve_pseudopotentials(pp, base: Path, symbols) -> tuple[Path, dict]:
+    """Validate the pseudopotentials block, resolve its directory and per-element
+    map, and check every element in ``symbols`` has an existing UPF file."""
+    _check_keys("pseudopotentials", pp, {"dir", "map"})
+    for req in ("dir", "map"):
+        if req not in pp:
+            raise InputError(f"pseudopotentials is missing required key {req!r}")
+    pseudo_dir = (base / pp["dir"]).resolve()
+    pseudo_map = dict(pp["map"])
+    for sym in set(symbols):
+        if sym not in pseudo_map:
+            raise InputError(f"no pseudopotential mapped for element {sym}")
+        if not (pseudo_dir / pseudo_map[sym]).exists():
+            raise FileNotFoundError(pseudo_dir / pseudo_map[sym])
+    return pseudo_dir, pseudo_map
+
+
+def _resolve_symmetry(raw, task: str) -> tuple[bool, bool, bool]:
+    """Resolve (noncollinear, nonmagnetic, symmetry) from the raw input.
+
+    A magnetic spinor SCF (a magnetic noncollinear run, and the magnetism
+    task's constrained tilt scans) cannot use IBZ symmetry reduction: time
+    reversal and the space group act on the moment vector, so the driver
+    rejects a symmetrized density. Default symmetry off for these modes and
+    reject an explicit ``symmetry: true`` here, where the message can point at
+    the fix, rather than letting it surface as a ValueError deep in the SCF.
+    A spin-orbit-only run (nonmagnetic: true) pins m⃗ ≡ 0, so Kramers keeps
+    the full crystal symmetry and it behaves like a plain SCF for symmetry.
+    """
+    noncollinear = bool(raw.get("noncollinear", False))
+    nonmagnetic = bool(raw.get("nonmagnetic", False))
+    if nonmagnetic and not noncollinear:
+        raise InputError(
+            "nonmagnetic requires noncollinear: true — it pins the spinor "
+            "moment to zero for a spin-orbit-only run")
+    magnetic_spinor = (noncollinear and not nonmagnetic) or task == "magnetism"
+    sym_raw = raw.get("symmetry")
+    if magnetic_spinor:
+        if sym_raw is True:
+            mode = "magnetism" if task == "magnetism" else "noncollinear"
+            raise InputError(
+                f"symmetry: true is invalid for a {mode} run — time reversal "
+                f"and the space group act on the moment vector, so IBZ "
+                f"reduction is rejected. Set symmetry: false (the default for "
+                f"these modes), or for spin-orbit without magnetism add "
+                f"nonmagnetic: true, which keeps symmetry.")
+        symmetry = False
+    else:
+        symmetry = True if sym_raw is None else bool(sym_raw)
+    return noncollinear, nonmagnetic, symmetry
+
+
+def _validate_mixing(mix_raw: dict) -> None:
+    """Validate the `scf.mixing` block in place: reject unknown keys and unknown
+    schemes, and normalize the `kerker` shorthand. Mutates `mix_raw['kerker']`."""
+    _check_keys("scf.mixing", mix_raw,
+                {f.name for f in dataclasses.fields(MixingParams)})
+    mix_scheme = str(mix_raw.get("scheme", "pulay"))
+    if mix_scheme not in ("pulay", "broyden", "johnson"):
+        raise InputError(f"unknown mixing scheme {mix_scheme!r}")
+    if "kerker" in mix_raw:
+        mix_raw["kerker"] = _normalize_kerker(mix_raw["kerker"])
+
+
+def _build_projections(proj_raw) -> ProjectionsParams:
+    """Parse the `projections` block. `true`/`false` is the enabled shorthand;
+    a mapping selects the grouping and broadening."""
+    if isinstance(proj_raw, bool):
+        return ProjectionsParams(enabled=proj_raw)
+    _check_keys("projections", proj_raw,
+                {"enabled", "group_by", "width", "npoints"})
+    return ProjectionsParams(
+        enabled=bool(proj_raw.get("enabled", True)),
+        group_by=str(proj_raw.get("group_by", "l")),
+        width=float(proj_raw.get("width", 0.1)),
+        npoints=int(proj_raw.get("npoints", 800)),
+    )
+
+
 def _load_input(path: Path) -> Input:
     raw = yaml.safe_load(path.read_text())
     base = path.parent
@@ -304,18 +383,8 @@ def _load_input(path: Path) -> Input:
             raise InputError(f"missing required key {req!r}")
 
     atoms = _load_structure(raw["structure"], base)
-    pp = raw["pseudopotentials"]
-    _check_keys("pseudopotentials", pp, {"dir", "map"})
-    for req in ("dir", "map"):
-        if req not in pp:
-            raise InputError(f"pseudopotentials is missing required key {req!r}")
-    pseudo_dir = (base / pp["dir"]).resolve()
-    pseudo_map = dict(pp["map"])
-    for sym in set(atoms.get_chemical_symbols()):
-        if sym not in pseudo_map:
-            raise InputError(f"no pseudopotential mapped for element {sym}")
-        if not (pseudo_dir / pseudo_map[sym]).exists():
-            raise FileNotFoundError(pseudo_dir / pseudo_map[sym])
+    pseudo_dir, pseudo_map = _resolve_pseudopotentials(
+        raw["pseudopotentials"], base, atoms.get_chemical_symbols())
 
     kp = raw.get("kpoints", {})
     _check_keys("kpoints", kp, {"mesh", "shift"})
@@ -338,34 +407,7 @@ def _load_input(path: Path) -> Input:
     if nspin not in (1, 2):
         raise InputError(f"nspin must be 1 or 2, got {nspin}")
 
-    # A magnetic spinor SCF (a magnetic noncollinear run, and the magnetism
-    # task's constrained tilt scans) cannot use IBZ symmetry reduction: time
-    # reversal and the space group act on the moment vector, so the driver
-    # rejects a symmetrized density. Default symmetry off for these modes and
-    # reject an explicit `symmetry: true` here, where the message can point at
-    # the fix, rather than letting it surface as a ValueError deep in the SCF.
-    # A spin-orbit-only run (nonmagnetic: true) pins m⃗ ≡ 0, so Kramers keeps
-    # the full crystal symmetry and it behaves like a plain SCF for symmetry.
-    noncollinear = bool(raw.get("noncollinear", False))
-    nonmagnetic = bool(raw.get("nonmagnetic", False))
-    if nonmagnetic and not noncollinear:
-        raise InputError(
-            "nonmagnetic requires noncollinear: true — it pins the spinor "
-            "moment to zero for a spin-orbit-only run")
-    magnetic_spinor = (noncollinear and not nonmagnetic) or task == "magnetism"
-    sym_raw = raw.get("symmetry")
-    if magnetic_spinor:
-        if sym_raw is True:
-            mode = "magnetism" if task == "magnetism" else "noncollinear"
-            raise InputError(
-                f"symmetry: true is invalid for a {mode} run — time reversal "
-                f"and the space group act on the moment vector, so IBZ "
-                f"reduction is rejected. Set symmetry: false (the default for "
-                f"these modes), or for spin-orbit without magnetism add "
-                f"nonmagnetic: true, which keeps symmetry.")
-        symmetry = False
-    else:
-        symmetry = True if sym_raw is None else bool(sym_raw)
+    noncollinear, nonmagnetic, symmetry = _resolve_symmetry(raw, task)
 
     mesh = tuple(kp.get("mesh", (1, 1, 1)))
     if len(mesh) != 3:
@@ -374,12 +416,7 @@ def _load_input(path: Path) -> Input:
     if smtype not in ("none", "fermi-dirac", "gaussian", "mp1", "cold"):
         raise InputError(f"unknown smearing type {smtype!r}")
 
-    _check_keys("scf.mixing", mix_raw, {f.name for f in dataclasses.fields(MixingParams)})
-    mix_scheme = str(mix_raw.get("scheme", "pulay"))
-    if mix_scheme not in ("pulay", "broyden", "johnson"):
-        raise InputError(f"unknown mixing scheme {mix_scheme!r}")
-    if "kerker" in mix_raw:
-        mix_raw["kerker"] = _normalize_kerker(mix_raw["kerker"])
+    _validate_mixing(mix_raw)
 
     out_raw = raw.get("output", {})
     _check_keys("output", out_raw,
@@ -389,18 +426,7 @@ def _load_input(path: Path) -> Input:
 
     nbands = raw.get("nbands", "auto")
     ecutrho = raw.get("ecutrho")
-    proj_raw = raw.get("projections", False)
-    if isinstance(proj_raw, bool):
-        projections = ProjectionsParams(enabled=proj_raw)
-    else:
-        _check_keys("projections", proj_raw,
-                    {"enabled", "group_by", "width", "npoints"})
-        projections = ProjectionsParams(
-            enabled=bool(proj_raw.get("enabled", True)),
-            group_by=str(proj_raw.get("group_by", "l")),
-            width=float(proj_raw.get("width", 0.1)),
-            npoints=int(proj_raw.get("npoints", 800)),
-        )
+    projections = _build_projections(raw.get("projections", False))
     return Input(
         atoms=atoms,
         pseudo_dir=pseudo_dir,
