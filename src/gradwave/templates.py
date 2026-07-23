@@ -352,6 +352,40 @@ output:
   dir: ./out
 """
 
+_ELASTIC = """\
+# Elastic constants: FD of the analytic stress over the six Voigt strains ->
+# the 6x6 stiffness C plus Voigt-Reuss-Hill bulk/shear/Young/Poisson moduli.
+# Run:  gradwave input.yaml -o out/
+# Clamped-ion: the cell is strained with fractional coordinates fixed. This is
+# exact for the bulk modulus and for rocksalt (MgO, NaCl); for the SHEAR
+# constants of diamond/zincblende (Si, C, GaAs) it overestimates C44 (no
+# internal sublattice relaxation). Start from the RELAXED cell (residual stress
+# is reported).
+
+structure:
+  cell: [[0.0, 2.715, 2.715], [2.715, 0.0, 2.715], [2.715, 2.715, 0.0]]
+  positions:
+    frac: [[0.0, 0.0, 0.0], [0.25, 0.25, 0.25]]
+  species: [Si, Si]
+
+pseudopotentials:
+  dir: ./pseudos                 # EDIT: folder holding your UPF files
+  map:
+    Si: Si_ONCV_PBE-1.2.upf      # EDIT: element -> UPF filename
+
+ecut: 500.0                      # eV, plane-wave cutoff (converge this)
+xc: pbe                          # lda | pbe
+kpoints:
+  mesh: [8, 8, 8]                # elastic constants need a well-converged stress
+
+task: elastic
+elastic:
+  strain: 0.005                  # Voigt strain magnitude for the central difference
+
+output:
+  dir: ./out
+"""
+
 # name -> (one-line description, template body). Order is the listing order.
 _TEMPLATES: dict[str, tuple[str, str]] = {
     "scf": ("Single-point SCF of an insulator.", _SCF),
@@ -364,6 +398,7 @@ _TEMPLATES: dict[str, tuple[str, str]] = {
     "magnetism": ("Collinear magnetism + exchange couplings.", _MAGNETISM),
     "noncollinear": ("Noncollinear SCF with spin-orbit coupling.", _NONCOLLINEAR),
     "eos": ("Equation of state (bulk modulus via Birch-Murnaghan).", _EOS),
+    "elastic": ("Elastic constants (6×6 stiffness + VRH moduli).", _ELASTIC),
 }
 
 

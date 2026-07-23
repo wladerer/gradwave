@@ -366,6 +366,35 @@ def _eos_lines(eos):
     return lines
 
 
+def _elastic_lines(el):
+    stab = "stable" if el["mechanically_stable"] else "UNSTABLE (Born criteria)"
+    k, g = el["bulk_modulus_GPa"], el["shear_modulus_GPa"]
+    lines = [_sec("elastic constants"),
+             f"   clamped-ion 6×6 stiffness from ±{el['strain']} Voigt strain"
+             f" ({el['formalism']})",
+             "   shear constants overestimate the relaxed value for "
+             "diamond/zincblende (no internal-strain relaxation)",
+             ""]
+    lines.append(f"   bulk K      {k['hill']:7.1f} GPa   "
+                 f"(Voigt {k['voigt']:.1f} / Reuss {k['reuss']:.1f})")
+    lines.append(f"   shear G     {g['hill']:7.1f} GPa   "
+                 f"(Voigt {g['voigt']:.1f} / Reuss {g['reuss']:.1f})")
+    lines.append(f"   Young E     {el['young_modulus_GPa']:7.1f} GPa")
+    lines.append(f"   Poisson ν   {el['poisson_ratio']:7.3f}")
+    lines.append(f"   stability   {stab}")
+    if el.get("residual_stress_GPa", 0.0) > 0.5:
+        lines.append(f"   note: residual stress {el['residual_stress_GPa']:.2f} GPa"
+                     f" — cell not at equilibrium, C is about the current state")
+    if not el.get("all_converged", True):
+        lines.append("   note: some strained SCFs did NOT converge")
+    lines.append("")
+    lines.append("   stiffness matrix C [GPa] (Voigt order xx,yy,zz,yz,xz,xy):")
+    for row in el["c_GPa"]:
+        lines.append("   " + " ".join(f"{v:9.2f}" for v in row))
+    lines.append("")
+    return lines
+
+
 def _pdos_lines(pdos):
     """Projected-DOS summary: spilling and the integrated Löwdin weight per group
     (electrons per group, summed over the spectrum). Spin-resolved for nspin=2."""
@@ -519,6 +548,8 @@ def format_output(summary: dict) -> str:
         lines += _magnetism_lines(summary["magnetism"])
     if "eos" in summary:
         lines += _eos_lines(summary["eos"])
+    if "elastic" in summary:
+        lines += _elastic_lines(summary["elastic"])
     if "provenance" in summary:
         lines += _provenance_lines(summary["provenance"])
     lines += _tail_lines(summary)

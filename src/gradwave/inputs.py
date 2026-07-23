@@ -117,6 +117,19 @@ class EOSParams:
 
 
 @dataclass(frozen=True)
+class ElasticParams:
+    """Clamped-ion elastic constants: FD of the analytic stress over the six
+    Voigt strains → the 6×6 stiffness C (and Voigt–Reuss–Hill moduli)."""
+
+    strain: float = 0.005  # Voigt strain magnitude h for the central difference
+
+    def __post_init__(self):
+        if not 0.0 < self.strain < 0.1:
+            raise InputError(
+                f"elastic.strain must be in (0, 0.1), got {self.strain}")
+
+
+@dataclass(frozen=True)
 class MagnetismParams:
     exchange: bool = True      # extract J/D from the torque (adds ~3 constrained SCFs)
     lam: float = 8.0           # constraint penalty strength [eV/μB²]
@@ -142,11 +155,12 @@ class Input:
     noncollinear: bool = False  # spinor (non-collinear) SCF for task: scf
     nonmagnetic: bool = False  # with noncollinear: pin m⃗ ≡ 0 (spin-orbit only, keeps symmetry)
     start_mag: dict | None = None  # element -> initial moment fraction (nspin=2/NC seed)
-    task: str = "scf"  # scf | relax | bands | magnetism | eos
+    task: str = "scf"  # scf | relax | bands | magnetism | eos | elastic
     relax: RelaxParams = field(default_factory=RelaxParams)
     bands: BandsParams = field(default_factory=BandsParams)
     magnetism: MagnetismParams = field(default_factory=MagnetismParams)
     eos: EOSParams = field(default_factory=EOSParams)
+    elastic: ElasticParams = field(default_factory=ElasticParams)
     projections: ProjectionsParams = field(default_factory=ProjectionsParams)
     device: str = "cpu"
     verbose: bool = True  # per-iteration SCF chatter; CLI --quiet overrides
@@ -299,7 +313,8 @@ _ALLOWED_TOP = {
     "structure", "pseudopotentials", "ecut", "ecutrho", "xc", "kpoints",
     "smearing", "nbands", "symmetry", "nspin", "noncollinear", "nonmagnetic",
     "start_mag",
-    "scf", "task", "relax", "bands", "magnetism", "eos", "projections", "device",
+    "scf", "task", "relax", "bands", "magnetism", "eos", "elastic",
+    "projections", "device",
     "verbose", "output", "error_estimate", "restart",
 }
 
@@ -423,9 +438,10 @@ def _load_input(path: Path) -> Input:
     if xc not in ("lda", "pbe", "r2scan"):
         raise InputError(f"unknown xc {xc!r} (lda | pbe | r2scan)")
     task = raw.get("task", "scf")
-    if task not in ("scf", "relax", "bands", "magnetism", "eos"):
+    if task not in ("scf", "relax", "bands", "magnetism", "eos", "elastic"):
         raise InputError(
-            f"unknown task {task!r} (scf | relax | bands | magnetism | eos)")
+            f"unknown task {task!r} "
+            f"(scf | relax | bands | magnetism | eos | elastic)")
     nspin = int(raw.get("nspin", 1))
     if nspin not in (1, 2):
         raise InputError(f"nspin must be 1 or 2, got {nspin}")
@@ -479,6 +495,7 @@ def _load_input(path: Path) -> Input:
         bands=_build(BandsParams, raw.get("bands", {}), "bands"),
         magnetism=_build(MagnetismParams, raw.get("magnetism", {}), "magnetism"),
         eos=_build(EOSParams, raw.get("eos", {}), "eos"),
+        elastic=_build(ElasticParams, raw.get("elastic", {}), "elastic"),
         projections=projections,
         device=raw.get("device", "cpu"),
         verbose=bool(raw.get("verbose", True)),
