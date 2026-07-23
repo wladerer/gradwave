@@ -39,7 +39,7 @@ from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.hartree import hartree_energy, hartree_potential_g
 from gradwave.core.energies.nl_pp import nonlocal_energy
 from gradwave.core.energies.total import EnergyBreakdown
-from gradwave.core.fftbox import r_to_g
+from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
 from gradwave.core.xc.noncollinear import NoncollinearXC, energy_with_grid, vxc_and_bxc
 from gradwave.dtypes import CDTYPE, RDTYPE
@@ -254,8 +254,7 @@ def scf_uspp_noncollinear(
         for c4 in range(4):
             box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
             box[mask_flat] = v[c4 * ng:(c4 + 1) * ng]
-            fields.append(torch.fft.ifftn(box.reshape(shape) * grid.n_points,
-                                          dim=(-3, -2, -1)).real)
+            fields.append(g_to_r_box(box.reshape(shape), real=True))
         bec = [[] for _ in range(4)]
         off = 4 * ng
         for i in range(4):
@@ -280,8 +279,6 @@ def scf_uspp_noncollinear(
     sp_atoms = _species_atoms(system)
     smooth_geom = None
     if system.smooth_shape is not None:
-        ns_smooth = (system.smooth_shape[0] * system.smooth_shape[1]
-                     * system.smooth_shape[2])
         smooth_geom = (system.smooth_shape, system.smooth_flat_idx)
 
     # E_ewald is constant across the loop (positions frozen) — build it once.
@@ -290,8 +287,8 @@ def scf_uspp_noncollinear(
     for it in range(1, max_iter + 1):
         t_it = time.perf_counter()
         # ---- potentials ----
-        v_h = (torch.fft.ifftn(hartree_potential_g(r_to_g(rho.to(CDTYPE)), grid.g2),
-                               dim=(-3, -2, -1)) * grid.n_points).real
+        v_h = g_to_r_box(
+            hartree_potential_g(r_to_g(rho.to(CDTYPE)), grid.g2), real=True)
         v_xc, b_xc, _ = vxc_and_bxc(ncxc, rho, m, grid, rho_core=system.rho_core)
         v_r = v_h + v_xc + ops.vloc_r
 
@@ -331,10 +328,9 @@ def scf_uspp_noncollinear(
             # G-coeffs above restricted to the smooth sphere by shared Miller)
             # for the dual-grid H-apply; filtering is linear, so filtering the
             # (v, B⃗) fields and combining into the 2×2 blocks commutes
-            vb_s = (torch.fft.ifftn(
+            vb_s = g_to_r_box(
                 pots_g_box[:, system.smooth2dense].reshape(
-                    4, *system.smooth_shape),
-                dim=(-3, -2, -1)) * ns_smooth).real
+                    4, *system.smooth_shape), real=True)
             v_r_h, b_xc_h = vb_s[0], vb_s[1:]
             smooth = smooth_geom
         else:
@@ -403,15 +399,13 @@ def scf_uspp_noncollinear(
                                      ops.phase_pos[:, atoms].conj())
         aug_box = torch.zeros(4, grid.n_points, dtype=CDTYPE, device=dev)
         aug_box[:, system.sphere_idx] = aug_sph4 / vol
-        aug_fields = torch.fft.ifftn(aug_box.reshape(4, *shape) * grid.n_points,
-                                     dim=(-3, -2, -1)).real
+        aug_fields = g_to_r_box(aug_box.reshape(4, *shape), real=True)
         rho_out = rho_out + aug_fields[0]
         m_out = m_out + aug_fields[1:]
         if mag_sym_active:
             rho_out = symmetrize_rho(system.rho_symmetrizer, rho_out, grid)
             m_g = torch.stack([r_to_g(m_out[i].to(CDTYPE)) for i in range(3)])
-            m_out = torch.fft.ifftn(system.rho_symmetrizer.apply_m(m_g)
-                                    * grid.n_points, dim=(-3, -2, -1)).real
+            m_out = g_to_r_box(system.rho_symmetrizer.apply_m(m_g), real=True)
 
         n_tot = float(rho_out.sum()) * vol / grid.n_points
         if abs(n_tot - system.n_electrons) >= 1e-5:

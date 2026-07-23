@@ -34,7 +34,7 @@ import torch
 
 from gradwave.constants import E2
 from gradwave.core.energies.hartree import _inv_g2_masked
-from gradwave.core.fftbox import g_to_r, r_to_g
+from gradwave.core.fftbox import g_to_r, g_to_r_box, r_to_g
 from gradwave.dtypes import CDTYPE
 from gradwave.postscf.isdf import build_isdf, select_interpolation_points
 
@@ -58,8 +58,7 @@ def coulomb_potential(sigma_r: torch.Tensor, shape, g2: torch.Tensor) -> torch.T
     batch = sigma_r.shape[:-1]
     sigma_g = r_to_g(sigma_r.reshape(*batch, *shape))
     v_g = 4.0 * math.pi * E2 * sigma_g * _inv_g2_masked(g2)
-    n = g2.numel()
-    v_r = torch.fft.ifftn(v_g, dim=(-3, -2, -1)) * n
+    v_r = g_to_r_box(v_g)
     return v_r.reshape(*batch, -1)
 
 

@@ -38,7 +38,7 @@ from gradwave.core.energies.hartree import hartree_energy, hartree_potential_g
 from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.energies.nl_pp import nonlocal_energy
 from gradwave.core.energies.total import EnergyBreakdown
-from gradwave.core.fftbox import r_to_g
+from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
 from gradwave.core.xc.noncollinear import NoncollinearXC, vxc_and_bxc
 from gradwave.dtypes import CDTYPE, CDTYPE_LOW, RDTYPE, RDTYPE_LOW
@@ -284,8 +284,7 @@ def _nc_effective_potential(xc, rho, m, grid, system, vloc_r, nonmagnetic,
     b_xc after (never before) the nonmagnetic zeroing. One vxc_and_bxc autograd
     call, unchanged. Returns (v_r, b_xc)."""
     rho_g_box = r_to_g(rho.to(CDTYPE))
-    v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
-                           dim=(-3, -2, -1)) * grid.n_points).real
+    v_h = g_to_r_box(hartree_potential_g(rho_g_box, grid.g2), real=True)
     v_xc, b_xc, _ = vxc_and_bxc(xc, rho, m, grid, rho_core=system.rho_core)
     if nonmagnetic:
         b_xc = torch.zeros_like(b_xc)
@@ -325,8 +324,7 @@ def _unpack_mixed_fields(mixed, n_chan, ng, mask_flat, grid, device):
     for c4 in range(n_chan):
         gnew = torch.zeros(grid.n_points, dtype=CDTYPE, device=device)
         gnew[mask_flat] = mixed[c4 * ng:(c4 + 1) * ng]
-        fields.append((torch.fft.ifftn(gnew.reshape(grid.shape) * grid.n_points,
-                                       dim=(-3, -2, -1))).real)
+        fields.append(g_to_r_box(gnew.reshape(grid.shape), real=True))
     return fields
 
 
@@ -410,7 +408,7 @@ def scf_noncollinear(
         q_so, dij_so = build_so_projectors(bk, system)
     vloc_g = local_potential_g(system.positions, system.species_index,
                                system.vloc_tables, grid.g_cart, vol)
-    vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
+    vloc_r = g_to_r_box(vloc_g, real=True)
 
     # E_ewald is constant across the loop (positions frozen) — build it once.
     e_ew = ewald_energy(system.positions, system.charges, grid.cell)
@@ -439,7 +437,7 @@ def scf_noncollinear(
             return m_r
         m_g = torch.stack([r_to_g(m_r[i].to(CDTYPE)) for i in range(3)])
         m_g = system.rho_symmetrizer.apply_m(m_g)
-        return torch.fft.ifftn(m_g * grid.n_points, dim=(-3, -2, -1)).real
+        return g_to_r_box(m_g, real=True)
 
     def vec_of(fields):
         return torch.cat([r_to_g(f.to(CDTYPE)).reshape(-1)[mask_flat] for f in fields])
@@ -547,14 +545,13 @@ def band_structure_nc(res: NCResult, xc: NoncollinearXC, kpts_frac,
 
     # rebuild converged V, B
     rho_g_box = r_to_g(res.rho.to(CDTYPE))
-    v_h = (torch.fft.ifftn(hartree_potential_g(rho_g_box, grid.g2),
-                           dim=(-3, -2, -1)) * grid.n_points).real
+    v_h = g_to_r_box(hartree_potential_g(rho_g_box, grid.g2), real=True)
     v_xc, b_xc, _ = vxc_and_bxc(xc, res.rho, res.m, grid, rho_core=system.rho_core)
     if float(res.m.abs().max()) < 1e-12:
         b_xc = torch.zeros_like(b_xc)
     vloc_g = local_potential_g(system.positions, system.species_index,
                                system.vloc_tables, grid.g_cart, grid.volume)
-    vloc_r = (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
+    vloc_r = g_to_r_box(vloc_g, real=True)
     v_r = v_h + v_xc + vloc_r
 
     eigs = np.empty((len(kpts), nbands))

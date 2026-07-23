@@ -24,7 +24,7 @@ from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.hartree import hartree_potential_g
 from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.energies.total import EnergyBreakdown, total_energy
-from gradwave.core.fftbox import r_to_g
+from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.hamiltonian import build_projector_data
 from gradwave.core.xc.base import XCFunctional
 from gradwave.dtypes import CDTYPE, CDTYPE_LOW, RDTYPE, RDTYPE_LOW
@@ -353,7 +353,7 @@ def local_potential_r(system, vloc_g: torch.Tensor | None = None) -> torch.Tenso
     if vloc_g is None:
         vloc_g = local_potential_g(system.positions, system.species_index,
                                    system.vloc_tables, grid.g_cart, grid.volume)
-    return (torch.fft.ifftn(vloc_g, dim=(-3, -2, -1)) * grid.n_points).real
+    return g_to_r_box(vloc_g, real=True)
 
 
 def effective_potentials(
@@ -371,11 +371,8 @@ def effective_potentials(
     grid = system.grid
     nspin = len(rho_s)
     rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
-    v_h_r = (
-        torch.fft.ifftn(hartree_potential_g(r_to_g(rho_tot.to(CDTYPE)), grid.g2),
-                        dim=(-3, -2, -1))
-        * grid.n_points
-    ).real
+    v_h_r = g_to_r_box(
+        hartree_potential_g(r_to_g(rho_tot.to(CDTYPE)), grid.g2), real=True)
     core = system.rho_core
     if nspin == 1:
         v_xc_r, _ = vxc_potential(

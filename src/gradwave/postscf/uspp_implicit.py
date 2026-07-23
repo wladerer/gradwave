@@ -96,7 +96,7 @@ from __future__ import annotations
 import torch
 
 from gradwave.core.density import sigma_from_rho
-from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
+from gradwave.core.fftbox import box_to_sphere, g_to_r, g_to_r_box, r_to_g
 from gradwave.core.hamiltonian import becp, projectors
 from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE, RDTYPE
@@ -722,9 +722,9 @@ def uspp_density_loss_param_grads(
             per spin channel."""
             if system.rho_symmetrizer is not None:
                 w_sp = [
-                    (torch.fft.ifftn(
-                        system.rho_symmetrizer.apply(r_to_g(w.to(CDTYPE)))
-                        * n_pts, dim=(-3, -2, -1))).real
+                    g_to_r_box(
+                        system.rho_symmetrizer.apply(r_to_g(w.to(CDTYPE))),
+                        real=True)
                     for w in w_sp]
             if system.becsum_sym is not None:
                 d_bare_sp = [
@@ -745,8 +745,7 @@ def uspp_density_loss_param_grads(
                 return r
             w_sp, mats_sp, hub_sp = split(r)
             w_sp = [
-                torch.fft.ifftn(r_to_g(w.to(CDTYPE)) * kfac * n_pts,
-                                dim=(-3, -2, -1)).real
+                g_to_r_box(r_to_g(w.to(CDTYPE)) * kfac, real=True)
                 for w in w_sp]
             return join(w_sp, mats_sp, hub_sp)
 

@@ -36,7 +36,7 @@ import math
 
 import torch
 
-from gradwave.core.fftbox import g_to_r, r_to_g
+from gradwave.core.fftbox import g_to_r, g_to_r_box, r_to_g
 from gradwave.postscf.coulomb_kernel import coulomb_kernel
 
 
@@ -102,8 +102,7 @@ def coulomb_potential_q(sigma_r, q, g_cart, mode: str = "full", omega=None):
     batch = sigma_r.shape[:-1]
     sigma_g = r_to_g(sigma_r.reshape(*batch, *shape))
     v_g = sigma_g * kern
-    n = qg2.numel()
-    v_r = torch.fft.ifftn(v_g, dim=(-3, -2, -1)) * n
+    v_r = g_to_r_box(v_g)
     return v_r.reshape(*batch, -1)
 
 

@@ -39,14 +39,28 @@ def box_to_sphere(box: torch.Tensor, flat_idx: torch.Tensor) -> torch.Tensor:
     return flat.index_select(-1, flat_idx)
 
 
+def g_to_r_box(f_g: torch.Tensor, *, real: bool = False) -> torch.Tensor:
+    """Box Fourier coefficients f̃(G) → periodic function values on the r-grid.
+
+    The inverse of :func:`r_to_g` for a field already on the dense box:
+    f(r_j) = Σ_G f̃(G) e^{iG·r_j} = N·ifftn(f̃), over the last three (box) axes
+    with N their product. ``f_g`` must be a dense box (..., n1, n2, n3) — scatter
+    a masked/flat G-vector with :func:`sphere_to_box` (or ``box[mask] = vec;
+    box.reshape(shape)``) first. Pass ``real=True`` to return the real part, for
+    a field known to describe a real function (density, local/Hartree potential,
+    augmentation charge). Out-of-place; stays autograd- and torch.func-traceable.
+    """
+    n = f_g.shape[-3] * f_g.shape[-2] * f_g.shape[-1]
+    out = torch.fft.ifftn(f_g, dim=(-3, -2, -1)) * n
+    return out.real if real else out
+
+
 def g_to_r(coeffs: torch.Tensor, flat_idx: torch.Tensor, shape) -> torch.Tensor:
     """Sphere coefficients → periodic function values on the r-grid.
 
     Returns f(r_j) = Σ_G c(G) e^{iG·r_j}, shape (..., n1, n2, n3), complex.
     """
-    box = sphere_to_box(coeffs, flat_idx, shape)
-    n = box.shape[-3] * box.shape[-2] * box.shape[-1]
-    return torch.fft.ifftn(box, dim=(-3, -2, -1)) * n
+    return g_to_r_box(sphere_to_box(coeffs, flat_idx, shape))
 
 
 def r_to_g(f: torch.Tensor) -> torch.Tensor:

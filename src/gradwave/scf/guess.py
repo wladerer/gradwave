@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from gradwave.core.fftbox import g_to_r_box
 from gradwave.dtypes import CDTYPE
 from gradwave.pseudo.atomic import rhoatom_of_q
 
@@ -54,7 +55,7 @@ def sad_density(
         rho_g = rho_g * (n_electrons / (vol * rho_g[0].real))
     rho_g = torch.where(grid.dens_mask.reshape(-1), rho_g, torch.zeros_like(rho_g))
 
-    rho_r = torch.fft.ifftn(rho_g.reshape(grid.shape) * grid.n_points, dim=(-3, -2, -1)).real
+    rho_r = g_to_r_box(rho_g.reshape(grid.shape), real=True)
     if n_electrons is None or not clamp_positive:
         return rho_r
     # SAD can dip slightly negative between atoms; floor tiny negatives, then

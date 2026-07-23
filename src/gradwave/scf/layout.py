@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import torch
 
-from gradwave.core.fftbox import r_to_g
+from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.dtypes import CDTYPE
 
 
@@ -84,9 +84,7 @@ class MixLayout:
         for c in chans:
             box = torch.zeros(self.n_pts, dtype=CDTYPE, device=v.device)
             box[self.mask] = c
-            rho_spin.append(torch.fft.ifftn(
-                box.reshape(self.shape) * self.n_pts,
-                dim=(-3, -2, -1)).real)
+            rho_spin.append(g_to_r_box(box.reshape(self.shape), real=True))
         becs = [[] for _ in range(self.nspin)]
         off = ng * self.nspin
         for isp in range(self.nspin):
