@@ -356,6 +356,42 @@ def _assemble_iter_energies(ops, coeffs, occ_s, becps_s, rho_out_s, rho_tot_out,
         e_hub=e_hub if hub is not None else 0.0, e_onec=e_onec, e_ewald=e_ewald)
 
 
+def _hubbard_occ_update(ops, hub, coeffs, coeffs_b, occ_s, n_hub_s):
+    """Refresh the DFT+U per-spin occupation matrices from the fresh orbitals and
+    return (n_hub_s, e_hub). No Hubbard manifold → (n_hub_s, 0). The
+    _padded_coeffs closure captures coeffs_b by default argument (per-k pads the
+    trimmed orbitals back to npw_max)."""
+    system, nspin, batched = ops.system, ops.nspin, ops.batched
+    bk, dev, nk, nb = ops.bk, ops.dev, ops.nk, ops.nb
+    e_hub = torch.zeros((), dtype=RDTYPE, device=dev)
+    if hub is None:
+        return n_hub_s, e_hub
+    from gradwave.core.hubbard import hubbard_energy, occupation_matrices
+
+    def _padded_coeffs(isp, _cb=coeffs_b):
+        if batched:
+            return _cb[isp]
+        cp = torch.zeros(nk, nb, bk.npw_max, dtype=CDTYPE, device=dev)
+        for ik, sph in enumerate(system.spheres):
+            cp[ik, :, :sph.npw] = coeffs[isp][ik]
+        return cp
+
+    if nspin == 2:
+        for isp in range(nspin):
+            n_hub_s[isp] = occupation_matrices(
+                hub.sphi, _padded_coeffs(isp), occ_s[isp],
+                system.kweights, hub.sites)
+        e_hub = sum(hubbard_energy(n_hub_s[isp], hub.sites)
+                    for isp in range(nspin))
+    else:
+        n_half = occupation_matrices(
+            hub.sphi, _padded_coeffs(0), 0.5 * occ_s[0],
+            system.kweights, hub.sites)
+        n_hub_s = [n_half]
+        e_hub = 2.0 * hubbard_energy(n_half, hub.sites)
+    return n_hub_s, e_hub
+
+
 @torch.no_grad()
 def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
                    n_hub_s, tol_eff, seed_salt):
@@ -476,29 +512,7 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
     # DFT+U: fresh S-metric occupation matrices + Dudarev E_U (lags one
     # step into V_U like the NC path; nspin=1 splits [0,2] occupations
     # into two equal channels)
-    e_hub = torch.zeros((), dtype=RDTYPE, device=dev)
-    if hub is not None:
-        def _padded_coeffs(isp, _cb=coeffs_b):
-            if batched:
-                return _cb[isp]
-            cp = torch.zeros(nk, nb, bk.npw_max, dtype=CDTYPE, device=dev)
-            for ik, sph in enumerate(system.spheres):
-                cp[ik, :, :sph.npw] = coeffs[isp][ik]
-            return cp
-
-        if nspin == 2:
-            for isp in range(nspin):
-                n_hub_s[isp] = occupation_matrices(
-                    hub.sphi, _padded_coeffs(isp), occ_s[isp],
-                    system.kweights, hub.sites)
-            e_hub = sum(hubbard_energy(n_hub_s[isp], hub.sites)
-                        for isp in range(nspin))
-        else:
-            n_half = occupation_matrices(
-                hub.sphi, _padded_coeffs(0), 0.5 * occ_s[0],
-                system.kweights, hub.sites)
-            n_hub_s = [n_half]
-            e_hub = 2.0 * hubbard_energy(n_half, hub.sites)
+    n_hub_s, e_hub = _hubbard_occ_update(ops, hub, coeffs, coeffs_b, occ_s, n_hub_s)
 
     # smooth densities + per-spin becsum + augmentation
     sp_atoms = _species_atoms(system)
