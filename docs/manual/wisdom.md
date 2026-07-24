@@ -243,9 +243,9 @@ defect, which the [Performance](performance.md) page works through in full.
   tensor is the site-to-site derivative of the autograd torque, $\mathcal{J}_{IJ} =
   \partial T_I/\partial\hat e_J$. Tilt one moment, read the induced torque on the
   others. Because the torque is already an analytic gradient this is *one* finite-
-  difference order, not the two of energy mapping, so it is lower-noise. bcc Fe
-  validates: $J_1 \approx 22$ meV (LKAG ~15-19), DMI zero by centrosymmetry, mean-field
-  $T_c$ 1388 K matching Pajda's MFA. A small cell folds periodic images, so it yields the
+  difference order, not the two of energy mapping, so it is lower-noise. bcc Fe:
+  $J_1 \approx 22$ meV, just above the LKAG range ~15-19, DMI zero by centrosymmetry,
+  mean-field $T_c$ 1388 K near Pajda's MFA. A small cell folds periodic images, so it yields the
   shell-summed $J(q=0)$ (hence $J_1 \approx J_{01}/8$, a slight overcount). Per-shell
   $J_n$ needs a supercell or the reciprocal-space $J(q)$ route.
 - Seed non-collinear references high-spin. The bare unconstrained non-collinear SCF is

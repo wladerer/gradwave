@@ -62,16 +62,17 @@ the UPF file).
 Because a plane-wave cutoff is a variational truncation, the distance to the
 converged-basis energy is second order and reachable from one calculation. gradwave
 estimates the discretization (Ecut) error from a single converged run rather than a
-cutoff sweep, and reports it alongside the result. The same single-run budget covers
-the SCF-convergence, smearing, and k-point-sampling terms, each of which the
-differentiable structure exposes without a separate calculation. Coverage is broadest
+cutoff sweep, and reports it alongside the result. The SCF-convergence and smearing
+terms come from the same single run. The k-point-sampling term is a quadrature rather
+than a variational truncation, so it is reached by a mesh sweep instead: run a few
+rising meshes and extrapolate (`examples/kmesh_error.py`). Coverage is broadest
 for the energy and density error across the norm-conserving and PAW paths, and the
 force and stress error terms carry narrower coverage.
 
 ## Validation
 
-Every capability is checked against a reference, and the two axes are kept separate
-because they measure different things. Against Quantum ESPRESSO `pw.x` at identical
+Capabilities are checked against a reference where one exists, and the two axes are
+kept separate because they measure different things. Against Quantum ESPRESSO `pw.x` at identical
 pseudopotential, cutoff, k-mesh, and FFT grid, the comparison isolates the
 implementation, since both codes read the same UPF and the settings are pinned. Against
 an all-electron reference it also carries the pseudopotential's own error. gradwave

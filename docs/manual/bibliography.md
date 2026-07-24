@@ -32,4 +32,18 @@ the text link here.
 <li id="hse">J. Heyd, G. E. Scuseria, and M. Ernzerhof, "Hybrid functionals based on a screened Coulomb potential," J. Chem. Phys. <strong>118</strong>, 8207 (2003).</li>
 <li id="isdf">J. Lu and L. Ying, "Compression of the electron repulsion integral tensor in tensor hypercontraction format with cubic scaling cost," J. Comput. Phys. <strong>302</strong>, 329 (2015).</li>
 <li id="ace">L. Lin, "Adaptively Compressed Exchange Operator," J. Chem. Theory Comput. <strong>12</strong>, 2242 (2016).</li>
+<li id="henkelman">G. Henkelman, A. Arnaldsson, and H. Jónsson, "A fast and robust algorithm for Bader decomposition of charge density," Comput. Mater. Sci. <strong>36</strong>, 354 (2006).</li>
+<li id="cohp">R. Dronskowski and P. E. Blöchl, "Crystal orbital Hamilton populations (COHP): Energy-resolved visualization of chemical bonding in solids based on density-functional calculations," J. Phys. Chem. <strong>97</strong>, 8617 (1993).</li>
+<li id="lobster">S. Maintz, V. L. Deringer, A. L. Tchougréeff, and R. Dronskowski, "LOBSTER: A tool to extract chemical bonding from plane-wave based DFT," J. Comput. Chem. <strong>37</strong>, 1030 (2016).</li>
+<li id="elf">A. D. Becke and K. E. Edgecombe, "A simple measure of electron localization in atomic and molecular systems," J. Chem. Phys. <strong>92</strong>, 5397 (1990).</li>
+<li id="birch">F. Birch, "Finite Elastic Strain of Cubic Crystals," Phys. Rev. <strong>71</strong>, 809 (1947).</li>
+<li id="delta">K. Lejaeghere et al., "Reproducibility in density functional theory calculations of solids," Science <strong>351</strong>, aad3000 (2016).</li>
+<li id="mp">M. Methfessel and A. T. Paxton, "High-precision sampling for Brillouin-zone integration in metals," Phys. Rev. B <strong>40</strong>, 3616 (1989).</li>
+<li id="cold">N. Marzari, D. Vanderbilt, A. De Vita, and M. C. Payne, "Thermal Contraction and Disordering of the Al(110) Surface," Phys. Rev. Lett. <strong>82</strong>, 3296 (1999).</li>
+<li id="mpack">H. J. Monkhorst and J. D. Pack, "Special points for Brillouin-zone integrations," Phys. Rev. B <strong>13</strong>, 5188 (1976).</li>
+<li id="pulay">P. Pulay, "Convergence acceleration of iterative sequences. The case of SCF iteration," Chem. Phys. Lett. <strong>73</strong>, 393 (1980).</li>
+<li id="johnson">D. D. Johnson, "Modified Broyden's method for accelerating convergence in self-consistent calculations," Phys. Rev. B <strong>38</strong>, 12807 (1988).</li>
+<li id="davidson">E. R. Davidson, "The iterative calculation of a few of the lowest eigenvalues and corresponding eigenvectors of large real-symmetric matrices," J. Comput. Phys. <strong>17</strong>, 87 (1975).</li>
+<li id="weinert">M. Weinert, R. E. Watson, and J. W. Davenport, "Total-energy differences and eigenvalue sums," Phys. Rev. B <strong>32</strong>, 2115 (1985).</li>
+<li id="pajda">M. Pajda, J. Kudrnovský, I. Turek, V. Drchal, and P. Bruno, "Ab initio calculations of exchange interactions, spin-wave stiffness constants, and Curie temperatures of Fe, Co, and Ni," Phys. Rev. B <strong>64</strong>, 174402 (2001).</li>
 </ol>

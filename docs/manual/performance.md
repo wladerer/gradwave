@@ -303,7 +303,7 @@ Sweeping fcc Pt, `johnson` converges in 13 iterations against `pulay` 17 and `br
 20, and gaussian, cold, and mp1 agree to within one iteration at fixed scheme. The converged
 free energy is bit-identical, so johnson gives 1.3 times on a smeared metal at no accuracy cost (now the
 metal-campaign default). It does not reach QE's 7 iterations, which is a starting-density
-and preconditioner-quality gap. For the per-iteration 16 times, the largest single contributor
+and preconditioner-quality gap. For the per-iteration 9 times, the largest single contributor
 is the dense-grid wavefunction FFT (34 percent). The dual grid now runs the batched
 H-apply local term on the smooth `ecutwfc` box instead of the dense `ecutrho` box, exact
 by the bandwidth argument (see the wisdom notes) and verified two ways, the batched path

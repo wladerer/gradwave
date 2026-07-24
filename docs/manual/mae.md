@@ -2,9 +2,9 @@
 
 With spin-orbit coupling the total energy depends on the direction of the
 magnetization relative to the lattice. The difference between directions is
-the magnetocrystalline anisotropy energy (MAE) — meV-per-cell physics that
-decides easy axes, coercivity, and whether a material is any good as a
-permanent magnet. This tutorial walks the FePt L1₀ case from one SCF to a
+the magnetocrystalline anisotropy energy (MAE), the meV-per-cell physics that
+sets easy axes, coercivity, and permanent-magnet performance. This tutorial
+walks the FePt L1₀ case from one SCF to a
 fitted $E(\theta)$ curve and a plot. The compact reference for the same
 machinery lives in
 [Magnetic structure and spin Hamiltonians](magnetism.md#magnetocrystalline-anisotropy).
@@ -22,7 +22,8 @@ $c$. It costs a full SCF per direction, and it carries a trap: the 48-point
 mesh gives the *wrong* easy axis ($-1.39$ meV/cell). Never trust an
 anisotropy sign from a coarse mesh.
 
-The force theorem replaces every SCF after the first. Freeze the converged
+The force theorem[[47]](bibliography.md#weinert) replaces every SCF after the
+first. Freeze the converged
 $(\rho, \mathbf{m})$ of a reference direction, rotate the magnetization
 rigidly, rebuild the frozen-potential Hamiltonian, diagonalize once, and
 difference the occupied band free energies

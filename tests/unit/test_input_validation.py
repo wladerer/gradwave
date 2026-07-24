@@ -95,10 +95,14 @@ def test_volumetric_shorthand_and_mapping(tmp_path):
     assert (v.density, v.elf, v.format) == (True, True, "xsf")
     assert v.bands == ((3, 0), (4, 1))
 
+    chg = load_input(_write(tmp_path, _base(
+        "output: {volumetric: {density: true, format: chgcar}}\n")))
+    assert chg.output_volumetric.format == "chgcar"
+
 
 @pytest.mark.parametrize("block, needle", [
     ("output: {volumetric: {densty: true}}\n", "did you mean"),   # field typo
-    ("output: {volumetric: {format: chgcar}}\n", "cube' or 'xsf"),  # bad format
+    ("output: {volumetric: {format: vtk}}\n", "cube', 'xsf' or 'chgcar"),  # bad format
     ("output: {volumetric: {bands: [3, 0]}}\n", "band, kpoint"),   # not pairs
 ])
 def test_volumetric_errors(tmp_path, block, needle):

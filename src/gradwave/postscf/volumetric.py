@@ -2,9 +2,10 @@
 
 After an SCF gradwave holds ρ(r) and the plane-wave coefficients c_nk(G) in
 memory; this module turns them into the standard volumetric formats (.cube,
-.xsf) that crystallography viewers read. The file encoding — units, voxel
-order, the periodic wrap-around plane — is delegated to ASE (a core
-dependency), so this module only does the physics: reading ρ(r) off a result,
+.xsf, VASP CHGCAR) that crystallography viewers read. The file encoding —
+units, voxel order, the periodic wrap-around plane — is delegated to ASE (a
+core dependency), so this module only does the physics: reading ρ(r) off a
+result,
 reconstructing |ψ_nk(r)|² from the stored coefficients, assembling ELF(r) from
 τ, ρ and |∇ρ|², and (for noncollinear runs) the magnetization density m(r).
 
@@ -34,7 +35,7 @@ from gradwave.core.fftbox import g_to_r
 from gradwave.core.metagga import tau_b
 from gradwave.postscf._response import pad_coeffs
 
-_WRITERS = {".cube": "cube", ".xsf": "xsf"}
+_WRITERS = {".cube": "cube", ".xsf": "xsf", ".chgcar": "chgcar"}
 
 
 def _is_spinor(res) -> bool:
@@ -59,7 +60,13 @@ def _atoms_from_system(system):
 
 
 def _infer_fmt(path) -> str:
-    ext = Path(path).suffix.lower()
+    p = Path(path)
+    # CHGCAR/PARCHG conventionally carry no extension; key off the basename,
+    # allowing a descriptive prefix (diamond_CHGCAR) as VASP tooling does.
+    stem = p.name.upper()
+    if "CHGCAR" in stem or "PARCHG" in stem:
+        return "chgcar"
+    ext = p.suffix.lower()
     if ext not in _WRITERS:
         raise ValueError(
             f"unknown volumetric extension {ext!r}; use one of {sorted(_WRITERS)}"
@@ -70,15 +77,27 @@ def _infer_fmt(path) -> str:
 def write_volumetric(path, data, atoms, fmt: str | None = None) -> str:
     """Write a scalar field `data` (n1,n2,n3) on `atoms`' cell to .cube/.xsf.
 
-    The format is taken from the extension unless `fmt` ("cube"/"xsf") is given.
-    Returns the path written. ASE fixes the units (Bohr for .cube, Å for .xsf)
-    and the voxel ordering; the array must be indexed [i,j,k] along the cell
-    rows a₁,a₂,a₃, which is exactly how gradwave stores its grids.
+    The format is taken from the extension unless `fmt` ("cube"/"xsf"/"chgcar")
+    is given; a file named CHGCAR or PARCHG is recognized as VASP CHGCAR without
+    an extension. Returns the path written. ASE fixes the units (Bohr for .cube,
+    Å for .xsf) and the voxel ordering; the array must be indexed [i,j,k] along
+    the cell rows a₁,a₂,a₃, which is exactly how gradwave stores its grids.
+
+    The CHGCAR writer stores ρ·Ω following the VASP convention, so ASE's
+    VaspChargeDensity reader (and tools built on it) recover ρ(r) in e/Å³.
     """
     fmt = fmt or _infer_fmt(path)
     arr = np.ascontiguousarray(np.asarray(data, dtype=float))
     if arr.ndim != 3:
         raise ValueError(f"volumetric data must be 3-D, got shape {arr.shape}")
+    if fmt == "chgcar":
+        from ase.calculators.vasp import VaspChargeDensity
+
+        vcd = VaspChargeDensity(filename=None)
+        vcd.atoms = [atoms]
+        vcd.chg = [arr]
+        vcd.write(str(path))
+        return str(path)
     with open(path, "w") as fh:
         if fmt == "cube":
             from ase.io.cube import write_cube
@@ -89,7 +108,7 @@ def write_volumetric(path, data, atoms, fmt: str | None = None) -> str:
 
             write_xsf(fh, [atoms], data=arr)
         else:
-            raise ValueError(f"unknown format {fmt!r}; use 'cube' or 'xsf'")
+            raise ValueError(f"unknown format {fmt!r}; use 'cube', 'xsf' or 'chgcar'")
     return str(path)
 
 

@@ -46,7 +46,7 @@ means the quantity is dimensionless or a plain count.
 | `pseudopotentials` | *required* | — | mapping | `dir` and `map`; see below. |
 | `ecut` | *required* | eV | float | Plane-wave kinetic-energy cutoff for the wavefunctions. |
 | `ecutrho` | `4 × ecut` | eV | float | Density/augmentation cutoff. USPP/PAW only. Ignored for norm-conserving. |
-| `xc` | `pbe` | — | string | Functional: `lda` or `pbe`. |
+| `xc` | `pbe` | — | string | Functional: `lda`, `pbe`, or `r2scan`. |
 | `nbands` | `auto` | — | int or `auto` | Number of Kohn-Sham bands. `auto` picks from the electron count. |
 | `symmetry` | `true` | — | bool | Reduce k to the IBZ and symmetrize the density each step. Forced off for a magnetic `noncollinear` run and the `magnetism` task (symmetry acts on the moment vector); setting it `true` there is an error. A spin-orbit-only run (`nonmagnetic: true`) keeps symmetry. |
 | `nspin` | `1` | — | int | `1` unpolarized, `2` collinear spin. |
@@ -255,8 +255,9 @@ coverage table.
 
 ## Volumetric export
 
-Setting `output.volumetric` writes real-space fields to `.cube`/`.xsf` files that
-VESTA and Ovito read. These are the CHGCAR, PARCHG and ELF analogs. The density and
+Setting `output.volumetric` writes real-space fields to `.cube`, `.xsf`, or VASP
+CHGCAR files that VESTA, Ovito, and tinykit read. These are the CHGCAR, PARCHG
+and ELF analogs. The density and
 the plane-wave coefficients are already in memory at the end of an SCF, so no rerun is
 needed. The file encoding (units, voxel order, the periodic wrap plane) is handled by
 ASE.
@@ -271,8 +272,15 @@ output:
     elf: true              # electron localization function ELF(r)
     magnetization: true    # |m(r)|, noncollinear runs only
     bands: [[3, 0], [4, 0]]  # PARCHG |ψ_nk(r)|² for [band, kpoint] pairs
-    format: cube           # cube (default) or xsf
+    format: cube           # cube (default), xsf, or chgcar
 ```
+
+The `chgcar` format writes a VASP CHGCAR (ρ·Ω, so ASE's `VaspChargeDensity`
+reader recovers ρ in e/Å³), which the POV-Ray front end
+[tinykit](https://github.com/wladerer/tinykit) renders as an isosurface:
+`tk viz density.chgcar --supercell 2 2 2 --isovalue 0.5`. The
+[Post-SCF analysis](postscf-analysis.md) tutorial shows the density and ELF of
+diamond rendered this way.
 
 | keyword | default | unit | type | description |
 |---|---|---|---|---|
@@ -280,7 +288,7 @@ output:
 | `elf` | `false` | — | bool | Electron localization function, a value in [0,1]. |
 | `magnetization` | `false` | — | bool | Magnetization density \|m(r)\| [μ_B/Å³] for noncollinear runs. |
 | `bands` | `[]` | — | list | `[band, kpoint]` pairs; each writes one PARCHG file, `parchg_b{band}_k{kpoint}`. |
-| `format` | `cube` | — | string | `cube` or `xsf`. |
+| `format` | `cube` | — | string | `cube`, `xsf`, or `chgcar`. |
 
 Files land in the output directory named by field (`density.cube`, `elf.cube`,
 `magnetization.cube`, `parchg_b3_k0.cube`) and are listed under `outputs` in the JSON
@@ -291,7 +299,8 @@ densities reproduces the total density.
 Coverage follows the result type. The total density is available for every SCF. PARCHG
 covers collinear and noncollinear runs (the two spinor components are summed for the
 latter). For USPP/PAW it is the soft pseudo-density, without the augmentation charge,
-as in VASP. ELF is available for collinear norm-conserving results. Magnetization needs
+as in VASP. ELF[[38]](bibliography.md#elf) is available for collinear norm-conserving
+results. Magnetization needs
 a noncollinear run (`noncollinear: true`). A requested field that the result type does
 not support is skipped with a note, and the rest of the run still writes.
 

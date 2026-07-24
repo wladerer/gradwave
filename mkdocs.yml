@@ -46,6 +46,8 @@ nav:
       - Convergence and error control:
           - Symmetry reduction: symmetry.md
           - Basis-set error estimation: error-estimation.md
+      - Post-SCF analysis:
+          - Densities, bonding, and the equation of state: postscf-analysis.md
   - Inputs and outputs: io.md
   - Reference: reference.md
   - API reference:

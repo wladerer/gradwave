@@ -4,7 +4,8 @@ gradwave is a differentiable plane-wave density functional theory code written
 in PyTorch. It solves the Kohn-Sham equations[[1]](bibliography.md#ks) in a
 plane-wave basis with norm-conserving or ultrasoft/PAW pseudopotentials. Every
 energy term is differentiable, so one reverse-mode pass through the total energy
-gives the forces and a second the Hessian. An implicit-differentiation wrapper
+gives the forces, and differentiating the forces again gives the Hessian (one
+Hessian-vector product per column). An implicit-differentiation wrapper
 returns the response of the self-consistent density to any parameter of the
 functional.
 
@@ -14,8 +15,9 @@ forces, train an exchange-correlation functional back to PBE[[10]](bibliography.
 through the self-consistent density, solve a hybrid functional with exact
 exchange in the SCF, reduce the Brillouin zone by symmetry, estimate the
 plane-wave basis error, determine the Hubbard U from linear response, add
-spin-orbit coupling, read spin Hamiltonians out of the magnetic ground state, and
-map the magnetocrystalline anisotropy. Each tutorial opens with the theory it rests on, then runs a shipped
+spin-orbit coupling, read spin Hamiltonians out of the magnetic ground state,
+map the magnetocrystalline anisotropy, and analyze the charge density, bonding,
+and equation of state. Each tutorial opens with the theory it rests on, then runs a shipped
 example. For the shortest path to a result without the theory, the
 [Cookbook](cookbook.md) has task recipes. The [Reference](reference.md) page
 collects the CLI, the output files, and the entry points, and the
@@ -23,8 +25,9 @@ collects the CLI, the output files, and the entry points, and the
 
 ## What it computes
 
-- Total energies and free energies, with Fermi-Dirac, Gaussian, Methfessel-Paxton,
-  and cold smearing for metals.
+- Total energies and free energies, with Fermi-Dirac, Gaussian,
+  Methfessel-Paxton[[41]](bibliography.md#mp), and
+  cold[[42]](bibliography.md#cold) smearing for metals.
 - Exact Hellmann-Feynman forces and the stress tensor from autograd, geometry and
   variable-cell relaxation through any ASE optimizer.
 - Band structures with point-group irrep labels, total and projected (l, m, j)
@@ -42,12 +45,15 @@ collects the CLI, the output files, and the entry points, and the
   spirals, magnetocrystalline anisotropy, and the exchange constants (J, DMI) of a
   Heisenberg model.
 - Γ-point phonons from the analytic self-consistent position response.
+- Charge density, ELF, and PARCHG export (`.cube`, `.xsf`, VASP CHGCAR), Bader
+  charges, k-resolved COHP bonding analysis, and the Birch-Murnaghan equation of
+  state with the Δ gauge.
 - Norm-conserving (ONCV) and ultrasoft/PAW pseudopotentials, detected from the UPF
   file, on CPU and GPU in float64/complex128.
 
 ## Validation vs Quantum ESPRESSO
 
-Every capability is checked against Quantum ESPRESSO `pw.x`[[5]](bibliography.md#qe)
+The core capabilities are checked against Quantum ESPRESSO `pw.x`[[5]](bibliography.md#qe)
 at identical cutoff, k-mesh, and pseudopotential. A representative set:
 
 | quantity | agreement |
