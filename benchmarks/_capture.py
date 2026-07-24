@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Run a benchmark script and persist a structured result record.
 
 `gwq bench <name> <args...>` submits `uv run python benchmarks/_capture.py
