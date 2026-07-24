@@ -1103,6 +1103,30 @@ def _write_volumetric(res, spec, outdir, verbose) -> dict:
     return written
 
 
+def _base_summary(inp: Input, task: str) -> dict:
+    """The lightweight summary scaffold shared by tasks that carry no
+    SCFResult (relax, magnetism, eos, elastic, phonons). SCF-derived tasks
+    use build_summary() instead. Callers append their per-task result block
+    and a trailing "runtime_s" so the serialized key order stays
+    code/task/structure/parameters/<block>/runtime_s."""
+    from gradwave import __version__
+
+    return {
+        "code": {"name": "gradwave", "version": __version__,
+                 "created": datetime.datetime.now().isoformat(
+                     timespec="seconds")},
+        "task": task,
+        "structure": _structure_block(inp),
+        "parameters": _parameters_block(inp),
+    }
+
+
+# post-SCF tasks whose run() branch is a bare "run it, wrap the result" —
+# collapsed into one data-driven branch below
+_POSTSCF_RUNNERS = {"eos": run_eos, "elastic": run_elastic,
+                    "phonons": run_phonons}
+
+
 def run(inp: Input, verbose: bool = True) -> dict:
     """Execute inp.task and write <task>.json, <task>.out and (for SCF
     state) checkpoint.pt into inp.output_dir."""
@@ -1126,18 +1150,9 @@ def run(inp: Input, verbose: bool = True) -> dict:
             summary["pdos"] = _pdos_summary_block(res, inp)
     elif inp.task == "relax":
         relax, _atoms, _frames = run_relax(inp, verbose=verbose)
-        from gradwave import __version__
-
-        summary = {
-            "code": {"name": "gradwave", "version": __version__,
-                     "created": datetime.datetime.now().isoformat(
-                         timespec="seconds")},
-            "task": "relax",
-            "structure": _structure_block(inp),
-            "parameters": _parameters_block(inp),
-            "relax": relax,
-            "runtime_s": round(time.time() - t0, 2),
-        }
+        summary = _base_summary(inp, "relax")
+        summary["relax"] = relax
+        summary["runtime_s"] = round(time.time() - t0, 2)
         # error estimate at the FINAL geometry: the calculator caches its
         # last converged SCF, so the estimate describes the relaxed state
         res_final = getattr(_atoms.calc, "last_result", None)
@@ -1157,71 +1172,25 @@ def run(inp: Input, verbose: bool = True) -> dict:
         report = run_magnetism(inp, verbose=verbose)
         if verbose:
             print(report.summary())
-        from gradwave import __version__
-
-        summary = {
-            "code": {"name": "gradwave", "version": __version__,
-                     "created": datetime.datetime.now().isoformat(
-                         timespec="seconds")},
-            "task": "magnetism",
-            "structure": _structure_block(inp),
-            "parameters": _parameters_block(inp),
-            "magnetism": {
-                "ordering": report.ordering,
-                "total_moment_muB": round(report.total_moment, 4),
-                "atomic_moments_muB": report.moment_magnitudes,
-                "moment_vectors_muB": report.moment_vectors,
-                "exchange_J_meV": None if report.exchange_J is None else
-                {str(i): round(J * 1000, 3) for i, J in report.exchange_J.items()},
-                "dmi_meV": None if report.dmi is None else
-                {str(i): round(d * 1000, 4) for i, d in report.dmi.items()},
-                "curie_temperature_mfa_K": None if report.curie_temperature_mfa is None
-                else round(report.curie_temperature_mfa),
-            },
-            "runtime_s": round(time.time() - t0, 2),
+        summary = _base_summary(inp, "magnetism")
+        summary["magnetism"] = {
+            "ordering": report.ordering,
+            "total_moment_muB": round(report.total_moment, 4),
+            "atomic_moments_muB": report.moment_magnitudes,
+            "moment_vectors_muB": report.moment_vectors,
+            "exchange_J_meV": None if report.exchange_J is None else
+            {str(i): round(J * 1000, 3) for i, J in report.exchange_J.items()},
+            "dmi_meV": None if report.dmi is None else
+            {str(i): round(d * 1000, 4) for i, d in report.dmi.items()},
+            "curie_temperature_mfa_K": None if report.curie_temperature_mfa is None
+            else round(report.curie_temperature_mfa),
         }
-    elif inp.task == "eos":
-        eos = run_eos(inp, verbose=verbose)
-        from gradwave import __version__
-
-        summary = {
-            "code": {"name": "gradwave", "version": __version__,
-                     "created": datetime.datetime.now().isoformat(
-                         timespec="seconds")},
-            "task": "eos",
-            "structure": _structure_block(inp),
-            "parameters": _parameters_block(inp),
-            "eos": eos,
-            "runtime_s": round(time.time() - t0, 2),
-        }
-    elif inp.task == "elastic":
-        elastic = run_elastic(inp, verbose=verbose)
-        from gradwave import __version__
-
-        summary = {
-            "code": {"name": "gradwave", "version": __version__,
-                     "created": datetime.datetime.now().isoformat(
-                         timespec="seconds")},
-            "task": "elastic",
-            "structure": _structure_block(inp),
-            "parameters": _parameters_block(inp),
-            "elastic": elastic,
-            "runtime_s": round(time.time() - t0, 2),
-        }
-    elif inp.task == "phonons":
-        phonons = run_phonons(inp, verbose=verbose)
-        from gradwave import __version__
-
-        summary = {
-            "code": {"name": "gradwave", "version": __version__,
-                     "created": datetime.datetime.now().isoformat(
-                         timespec="seconds")},
-            "task": "phonons",
-            "structure": _structure_block(inp),
-            "parameters": _parameters_block(inp),
-            "phonons": phonons,
-            "runtime_s": round(time.time() - t0, 2),
-        }
+        summary["runtime_s"] = round(time.time() - t0, 2)
+    elif inp.task in _POSTSCF_RUNNERS:
+        block = _POSTSCF_RUNNERS[inp.task](inp, verbose=verbose)
+        summary = _base_summary(inp, inp.task)
+        summary[inp.task] = block
+        summary["runtime_s"] = round(time.time() - t0, 2)
     else:
         raise ValueError(
             f"unknown task {inp.task!r} "
