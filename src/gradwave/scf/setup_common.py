@@ -101,28 +101,55 @@ def build_vloc_tables(pseudos, uniq, inverse, shape, *, guard_single_shell):
     return torch.as_tensor(np.stack(tabs), dtype=RDTYPE)
 
 
-def build_core_density(pseudos, species_of_atom, positions, grid, uniq,
-                       inverse):
-    """NLCC core density on the dense grid [e/Å³] (frozen; enters XC only),
-    or None when no species carries one. NO clamp on the Gibbs oscillations
-    of the sphere-truncated core: QE keeps them (its XC floors ρ pointwise,
-    as does ours via to_au) and clamping shifts E_xc by several meV for
-    sharp 3d cores."""
-    if not any(p.core_rho is not None for p in pseudos):
-        return None
-    from gradwave.core.structure import structure_factors
+def core_shell_tables(pseudos, uniq, inverse):
+    """Per-species NLCC core form factor n_core(|G|) gathered onto the grid's
+    |G| shells [e·Å³], or None for a species without a core charge. Position-
+    independent — the structure factor supplies the τ dependence downstream, so
+    these are shared by the frozen-SCF build and the differentiable force path."""
     from gradwave.pseudo.atomic import core_density_of_q
 
-    core_g = torch.zeros(grid.n_points, dtype=CDTYPE)
-    pos_t = torch.as_tensor(np.asarray(positions), dtype=RDTYPE)
-    for sp_i, p in enumerate(pseudos):
-        tab = torch.as_tensor(core_density_of_q(p, uniq), dtype=RDTYPE)
-        shell = tab[torch.as_tensor(inverse)]
+    inv = torch.as_tensor(inverse)
+    shells = []
+    for p in pseudos:
+        if p.core_rho is None:
+            shells.append(None)
+        else:
+            tab = torch.as_tensor(core_density_of_q(p, uniq), dtype=RDTYPE)
+            shells.append(tab[inv])
+    return shells
+
+
+def assemble_core_density(shells, species_of_atom, pos_t, grid):
+    """ρ_core(r) [e/Å³] from precomputed per-species |G| shells and an atomic
+    position tensor. Differentiable in pos_t through the structure factor: the
+    frozen-SCF build passes a detached pos_t, the Hellmann–Feynman force path
+    passes one that requires grad so autograd of E_xc(ρ+ρ_core) yields the NLCC
+    force −∫ v_xc ∂ρ_core/∂τ. NO clamp on the Gibbs oscillations of the
+    sphere-truncated core: QE keeps them (its XC floors ρ pointwise, as does
+    ours via to_au) and clamping shifts E_xc by several meV for sharp 3d cores."""
+    dev = pos_t.device
+    core_g = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
+    from gradwave.core.structure import structure_factors
+
+    for sp_i, shell in enumerate(shells):
+        if shell is None:
+            continue
         atoms = [a for a, sa in enumerate(species_of_atom) if sa == sp_i]
         if not atoms:
             continue
         sfac = structure_factors(pos_t[atoms], grid.g_cart).sum(dim=0).reshape(-1)
-        core_g += sfac * shell.to(CDTYPE) / grid.volume
+        core_g = core_g + sfac * shell.to(CDTYPE).to(dev) / grid.volume
     core_g = torch.where(grid.dens_mask.reshape(-1), core_g,
                          torch.zeros_like(core_g))
     return g_to_r_box(core_g.reshape(grid.shape), real=True)
+
+
+def build_core_density(pseudos, species_of_atom, positions, grid, uniq,
+                       inverse):
+    """NLCC core density on the dense grid [e/Å³] (frozen; enters XC only),
+    or None when no species carries one."""
+    if not any(p.core_rho is not None for p in pseudos):
+        return None
+    shells = core_shell_tables(pseudos, uniq, inverse)
+    pos_t = torch.as_tensor(np.asarray(positions), dtype=RDTYPE)
+    return assemble_core_density(shells, species_of_atom, pos_t, grid)

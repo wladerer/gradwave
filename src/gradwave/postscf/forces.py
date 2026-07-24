@@ -11,6 +11,7 @@ Pulay forces at fixed cell.
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 
 from gradwave.core.energies.ewald import ewald_energy
@@ -18,23 +19,73 @@ from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.energies.nl_pp import nonlocal_energy
 from gradwave.core.fftbox import r_to_g
 from gradwave.core.hamiltonian import becp, projectors
+from gradwave.core.xc.base import XCFunctional
 from gradwave.postscf._response import pad_coeffs
 from gradwave.scf.loop import SCFResult, _stack_dij
 
 
-def forces(res: SCFResult, remove_net: bool = True) -> torch.Tensor:
+def _core_correction_energy(res, xc, pos):
+    """E_xc(ρ + ρ_core(pos)) with the SCF density detached — the ONLY position
+    dependence is the NLCC core charge's structure factor, so autograd of this
+    over pos gives −F_cc = ∫ v_xc ∂ρ_core/∂τ (v_xc = δE_xc/δρ_xc, so the full
+    LDA/GGA gradient correction is carried automatically). Returns a scalar to
+    add to the position-dependent energy assembled in forces()."""
+    from gradwave.core.density import sigma_from_rho
+    from gradwave.scf.common import spin_xc_energy
+    from gradwave.scf.setup_common import (
+        _unique_shells,
+        assemble_core_density,
+        core_shell_tables,
+    )
+
+    system = res.system
+    grid = system.grid
+    nspin = getattr(res, "nspin", 1)
+    if xc.needs_tau:
+        # τ (kinetic-energy density) is not stored on SCFResult; the meta-GGA
+        # NLCC-force path would need to rebuild it. Not assembled yet.
+        raise NotImplementedError(
+            "NLCC force for meta-GGA (needs_tau) functionals not implemented"
+        )
+    # |G| shells reproduced from the same g2 the frozen build used, so the
+    # differentiable ρ_core matches system.rho_core at the converged geometry.
+    g_flat = np.sqrt(grid.g2.detach().cpu().reshape(-1).numpy())
+    uniq, inverse = _unique_shells(g_flat)
+    shells = core_shell_tables(system.upfs, uniq, inverse)
+    core = assemble_core_density(shells, system.species_of_atom, pos, grid)
+
+    if nspin == 2:
+        rho_s = [r.detach() for r in res.rho_spin]
+        return spin_xc_energy(xc, rho_s, core, grid.volume, grid.g_cart)
+    rho_xc = res.rho.detach() + core
+    sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
+    return xc.energy(rho_xc, grid.volume, sigma)
+
+
+def forces(
+    res: SCFResult, remove_net: bool = True, xc: XCFunctional | None = None
+) -> torch.Tensor:
     """F_a = −dE/dτ_a, (na, 3) [eV/Å], at the converged SCF point.
 
     remove_net subtracts the mean force (default). The net component is
     unphysical XC-grid egg-box noise — large for semicore species (~0.01
     eV/Å for Al at 20 Ry vs ~1e-5 for valence-only Si) — and QE/VASP remove
     it the same way; with it removed, forces match QE to ~1e-5 eV/Å.
+
+    xc is required only when the system carries an NLCC core charge: the
+    core-correction force −∫ v_xc ∂ρ_core/∂τ is the autograd gradient of
+    E_xc(ρ + ρ_core(τ)) and needs the functional to evaluate v_xc. Pass the
+    same XCFunctional the SCF ran with; it is ignored for valence-only species.
     """
-    if getattr(res.system, "rho_core", None) is not None:
-        raise NotImplementedError("NLCC force term (force_cc) not implemented yet")
     system = res.system
     grid = system.grid
     nspin = getattr(res, "nspin", 1)
+    has_core = getattr(system, "rho_core", None) is not None
+    if has_core and xc is None:
+        raise ValueError(
+            "system has an NLCC core charge; pass the XCFunctional to forces() "
+            "so the core-correction force term can be evaluated"
+        )
     pos = system.positions.detach().clone().requires_grad_(True)
 
     # Local (total density) and Ewald terms are spin-agnostic; only E_NL sees
@@ -63,6 +114,11 @@ def forces(res: SCFResult, remove_net: bool = True) -> torch.Tensor:
         + e_nl
         + ewald_energy(pos, system.charges, grid.cell)
     )
+    if has_core:
+        # XC carries no τ-dependence at fixed ρ EXCEPT through the core charge;
+        # the valence-only part of E_xc has zero gradient here (ρ detached), so
+        # this contributes exactly the NLCC force term.
+        e_pos = e_pos + _core_correction_energy(res, xc, pos)
     (grad,) = torch.autograd.grad(e_pos, pos)
     f = -grad
     if remove_net:

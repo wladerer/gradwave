@@ -198,7 +198,9 @@ class GradWave(Calculator):
         self.last_result = res
         self.results["energy"] = float(res.energies.free_energy)  # consistent forces
         self.results["free_energy"] = float(res.energies.free_energy)
-        self.results["forces"] = hf_forces(res).cpu().numpy()
+        # xc is used only when the system carries an NLCC core charge (the
+        # core-correction force term); ignored for valence-only species.
+        self.results["forces"] = hf_forces(res, xc=self._make_xc()).cpu().numpy()
         if "stress" in properties:
             from gradwave.postscf.stress import stress as hf_stress
 
