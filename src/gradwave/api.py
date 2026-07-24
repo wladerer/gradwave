@@ -658,6 +658,108 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict:
     return block
 
 
+def run_elastic(inp: Input, verbose: bool = True) -> dict:
+    """Clamped-ion elastic constants: FD of the analytic stress over the six
+    Voigt strains → the 6×6 stiffness C and Voigt–Reuss–Hill moduli.
+
+    Each strain deforms the cell (fractional coordinates fixed) on one FFT grid
+    pinned across the scan; every strained SCF warm-starts from the unstrained
+    reference. Norm-conserving (``postscf.stress``) and USPP/PAW
+    (``postscf.paw_stress``) are both handled; nspin=2 needs PAW (the
+    norm-conserving stress is nspin=1 only)."""
+    import numpy as np
+
+    from gradwave.postscf.elastic import (
+        elastic_tensor,
+        is_mechanically_stable,
+        moduli_from_cij,
+    )
+
+    if inp.noncollinear:
+        raise NotImplementedError(
+            "elastic constants for noncollinear/spin-orbit runs are not supported")
+    _species, upfs, species_of_atom = _species_upfs(inp)
+    uspp = _is_uspp(upfs)
+    if inp.nspin != 1 and not uspp:
+        raise NotImplementedError(
+            "elastic constants for nspin=2 need PAW/USPP pseudos "
+            "(norm-conserving stress is nspin=1 only)")
+
+    xc = SPIN_XC_REGISTRY[inp.xc]() if inp.nspin == 2 else XC_REGISTRY[inp.xc]()
+    if uspp:
+        from gradwave.postscf.paw_stress import stress_uspp as _stress
+    else:
+        from gradwave.postscf.stress import stress as _stress
+
+    cell0 = np.asarray(inp.atoms.cell.array, dtype=float)
+    frac = inp.atoms.get_scaled_positions()
+    natoms = len(inp.atoms)
+    h = inp.elastic.strain
+
+    def _build(cell, fft_shape):
+        pos = frac @ cell
+        if uspp:
+            from gradwave.scf.uspp import setup_uspp
+
+            return setup_uspp(
+                cell, pos, species_of_atom, upfs, ecut=inp.ecut,
+                kmesh=inp.kpoints.mesh, ecutrho=inp.ecutrho, nbands=inp.nbands,
+                use_symmetry=inp.symmetry, fft_shape=fft_shape)
+        from gradwave.scf.loop import setup_system
+
+        return setup_system(
+            cell=cell, positions=pos, species_of_atom=species_of_atom,
+            upfs=upfs, ecut=inp.ecut, kmesh=inp.kpoints.mesh,
+            kshift=inp.kpoints.shift, nbands=inp.nbands,
+            use_symmetry=inp.symmetry, fft_shape=fft_shape)
+
+    # pin one FFT grid: the +h strains give the largest cells / finest grids
+    from gradwave.postscf.elastic import voigt_strain_tensor
+
+    probe = [cell0] + [cell0 @ (np.eye(3) + voigt_strain_tensor(j, h)).T
+                       for j in range(6)]
+    fixed = tuple(max(int(_build(c, None).grid.shape[i]) for c in probe)
+                  for i in range(3))
+    if verbose:
+        print(f"elastic: strain h={h}, fixed FFT grid {fixed}", flush=True)
+
+    # reference SCF once — warm-start seed and residual-stress readout
+    ref = run_scf(inp, system=_build(cell0, fixed), verbose=False)
+    converged = [bool(getattr(ref, "converged", True))]
+    sigma_ref = _stress(ref, xc).detach().cpu().numpy()
+
+    def _stress_at(eps):
+        cell = cell0 @ (np.eye(3) + eps).T
+        res = run_scf(inp, system=_build(cell, fixed), verbose=False,
+                      start_from=ref)
+        converged.append(bool(getattr(res, "converged", True)))
+        return _stress(res, xc).detach().cpu().numpy()
+
+    c = elastic_tensor(_stress_at, h=h)
+    mod = moduli_from_cij(c)
+    resid_gpa = float(np.abs(sigma_ref).max()) * 160.2176634
+    block = {
+        "strain": h,
+        "n_atoms": natoms,
+        "formalism": "uspp/paw" if uspp else "nc",
+        "c_GPa": c.tolist(),
+        "bulk_modulus_GPa": {"voigt": mod.bulk_voigt, "reuss": mod.bulk_reuss,
+                             "hill": mod.bulk_hill},
+        "shear_modulus_GPa": {"voigt": mod.shear_voigt, "reuss": mod.shear_reuss,
+                              "hill": mod.shear_hill},
+        "young_modulus_GPa": mod.young,
+        "poisson_ratio": mod.poisson,
+        "mechanically_stable": is_mechanically_stable(c),
+        "residual_stress_GPa": resid_gpa,
+        "all_converged": all(converged),
+    }
+    if verbose:
+        print(f"elastic: K={mod.bulk_hill:.1f}  G={mod.shear_hill:.1f}  "
+              f"E={mod.young:.1f} GPa  ν={mod.poisson:.3f}  "
+              f"stable={block['mechanically_stable']}", flush=True)
+    return block
+
+
 def _bands_extra(inp: Input, res, verbose: bool) -> dict:
     from gradwave.postscf.bands import bands_along_ase_path
 
@@ -885,6 +987,54 @@ def _nc_occupations(res, scheme: str, width: float):
     return [occ[ik] for ik in range(eps.shape[0])]
 
 
+def _apply_dispersion(res, inp: Input) -> dict:
+    """Compute the D3(BJ) correction, fold its energy into ``res.energies`` (so
+    the reported total/free energy include it), and return the summary block
+    (energy, forces, stress, resolved damping). Degrades to
+    ``{'available': False}`` when the element set is uncovered or no BJ preset
+    exists for the functional."""
+    import numpy as np
+    import torch
+
+    from gradwave.postscf.dispersion import (
+        D3Config,
+        dispersion_energy,
+        dispersion_forces,
+        dispersion_stress,
+    )
+
+    dp = inp.dispersion
+    system = _get(res, "system")
+    positions = system.positions.detach().to(torch.float64)
+    cell = np.asarray(system.grid.cell, dtype=np.float64)
+    z = [int(v) for v in inp.atoms.get_atomic_numbers()]
+    try:
+        cfg = D3Config.resolve(
+            dp.functional or inp.xc,
+            cutoff_ang=dp.cutoff, cn_cutoff_ang=dp.cn_cutoff,
+            s6=dp.s6, s8=dp.s8, a1=dp.a1, a2=dp.a2,
+        )
+        cell_t = torch.as_tensor(cell, dtype=torch.float64, device=positions.device)
+        e = dispersion_energy(positions, cell_t, z, cfg)
+        forces = dispersion_forces(positions, cell, z, cfg)
+        stress = dispersion_stress(positions, cell, z, cfg)
+    except (ValueError, NotImplementedError) as err:
+        return {"available": False, "reason": str(err)}
+
+    # fold the energy into the breakdown; total/free_energy pick it up
+    res.energies.dispersion = e.detach().to(positions.device)
+    return {
+        "available": True,
+        "method": "d3-bj",
+        "functional": (dp.functional or inp.xc).lower(),
+        "damping": {"s6": cfg.s6, "s8": cfg.s8, "a1": cfg.a1, "a2_bohr": cfg.a2},
+        "energy_eV": float(e),
+        "energy_per_atom_eV": float(e) / len(z),
+        "forces_eV_ang": forces.detach().cpu().tolist(),
+        "stress_eV_ang3": stress.detach().cpu().tolist(),
+    }
+
+
 def _pdos_summary_block(res, inp: Input) -> dict:
     """Löwdin projected-DOS block for the summary JSON. Returns a graceful
     ``{'available': False, ...}`` when the pseudopotentials omit PP_PSWFC."""
@@ -942,8 +1092,11 @@ def _write_volumetric(res, spec, outdir, verbose) -> dict:
     written = {}
     for label, name, write in jobs:
         try:
-            write(outdir / name)
-            written[label] = name
+            produced = write(outdir / name)
+            # a writer may emit several files (e.g. spin-resolved ELF → up/dn);
+            # record their actual names, else the single fixed name
+            written[label] = ([Path(p).name for p in produced]
+                              if isinstance(produced, (list, tuple)) else name)
         except (NotImplementedError, ValueError) as exc:
             if verbose:
                 print(f"skipped {label}: {exc}")
@@ -963,7 +1116,10 @@ def run(inp: Input, verbose: bool = True) -> dict:
     _frames = None
     if inp.task == "scf":
         res = run_scf(inp, verbose=verbose)
+        disp_block = _apply_dispersion(res, inp) if inp.dispersion.enabled else None
         summary = build_summary(res, inp, "scf", runtime_s=time.time() - t0)
+        if disp_block is not None:
+            summary["dispersion"] = disp_block
         if inp.error_estimate:
             summary["error_estimate"] = _error_estimate_block(res, inp)
         if inp.projections.enabled:
@@ -1052,10 +1208,24 @@ def run(inp: Input, verbose: bool = True) -> dict:
             "phonons": phonons,
             "runtime_s": round(time.time() - t0, 2),
         }
+    elif inp.task == "elastic":
+        elastic = run_elastic(inp, verbose=verbose)
+        from gradwave import __version__
+
+        summary = {
+            "code": {"name": "gradwave", "version": __version__,
+                     "created": datetime.datetime.now().isoformat(
+                         timespec="seconds")},
+            "task": "elastic",
+            "structure": _structure_block(inp),
+            "parameters": _parameters_block(inp),
+            "elastic": elastic,
+            "runtime_s": round(time.time() - t0, 2),
+        }
     else:
         raise ValueError(
             f"unknown task {inp.task!r} "
-            f"(scf | relax | bands | magnetism | eos | phonons)")
+            f"(scf | relax | bands | magnetism | eos | elastic | phonons)")
 
     outdir = Path(inp.output_dir)
     outdir.mkdir(parents=True, exist_ok=True)

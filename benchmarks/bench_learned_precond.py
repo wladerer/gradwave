@@ -1,7 +1,7 @@
 """Learned multi-pole Kerker preconditioner: iterations-to-convergence.
 
 Run one or all cases (``uv run python benchmarks/bench_learned_precond.py
-[synthetic|al|cu|fe|pt|both]``, default runs synthetic+al+cu+fe+pt):
+[synthetic|al|cu|cu3al|fe|pt|both]``, default runs synthetic+al+cu+fe+pt+cu3al):
 
 - synthetic — a diagonal response with two length scales, where a single Kerker
   pole is provably the wrong shape. Isolates the mechanism from any DFT cost.
@@ -10,6 +10,9 @@ Run one or all cases (``uv run python benchmarks/bench_learned_precond.py
   residuals` estimates d(G), `fit_multipole` fits the poles (DIIS-aware), and the
   filter deploys as `scf(..., precond_op=...)`. Al ties (single-scale charge); Cu
   wins (3s3p semicore → multi-scale charge).
+- cu3al — L1₂ Cu₃Al intermetallic (two chemical species → two screening scales).
+  Extends the Cu win to a two-component cell and probes whether a wider pole-seed
+  range (4 poles over [0.05, 4.0] Å⁻¹) beats the default 3-pole [0.3, 3.0] fit.
 - fe — bcc Fe, collinear ferromagnet (nspin=2). Charge-channel filter on the total
   block. The FM convergence bottleneck is the MAGNETIZATION channel, not charge, so
   this is expected to tie-or-lose; it maps the limit, and motivates a separate mag-
@@ -154,6 +157,91 @@ def run_metal(label, q0=1.1):
     print(f"  learned filter    {learned.n_iter:3d} iters   F={f_l:+.6f} eV   "
           f"{dt:.1f}s   [{verdict}]")
     print(f"  dF vs kerker = {f_l-f_ref:+.2e} eV  (same fixed point; only the path differs)")
+
+
+CU3AL_CELL = 3.70 * np.eye(3)
+CU3AL_FRAC = np.array([[0, 0, 0], [0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0.5, 0]])
+
+
+def run_cu3al():
+    """L1₂ Cu₃Al intermetallic — a genuinely two-scale CHARGE response.
+
+    Two chemical species screen at different lengths (Cu's 3s3p semicore d-band
+    is a short scale, Al's spread valence a longer one), so a single Kerker pole
+    cannot match both — the multi-scale regime the docs name as the next frontier
+    after the fcc Cu win (docs/ideas.md, "more multi-scale systems ... Cu₃Al").
+    Same cell/pseudos as the QE-validated tests/integration/test_metal_forces_vs_qe
+    :test_cu3al_vs_qe, so the fixed point is a known-correct reference.
+
+    Compares three preconditioners at a fixed point identical to a few 1e-12 eV:
+      - bare Kerker (single pole q0=1.1);
+      - the DEFAULT DIIS-aware 3-pole fit over the [0.3, 3.0] Å⁻¹ seed range;
+      - a WIDER 4-pole fit over [0.05, 4.0] Å⁻¹. Cu's winning fit already placed a
+        pole at q≈0.07 (below the default 0.3 seed), so a two-species cell whose
+        response spans an even wider band is the case where the seed range matters:
+        the wider fit can seed a long-wavelength pole directly instead of relying
+        on the optimizer to walk one down four-fold in q.
+    """
+    print("\n=== L1₂ Cu₃Al (Al+3Cu, gaussian 0.1 eV, 40 Ry, 2x2x2) ===")
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.pseudo.upf import parse_upf
+    from gradwave.scf.loop import scf
+    al = parse_upf(FIX / "Al_ONCV_PBE-1.2.upf")
+    cu = parse_upf(FIX / "Cu_ONCV_PBE-1.2.upf")
+    xc = PBE()
+    q0 = 1.1
+    common = dict(smearing="gaussian", width=0.1, nspin=1, verbose=False,
+                  rhotol=1e-6, etol=1e-8)
+
+    def sys_():
+        from gradwave.scf.loop import setup_system
+        return setup_system(CU3AL_CELL, CU3AL_FRAC @ CU3AL_CELL, [0, 1, 1, 1],
+                            [al, cu], ecut=40 * RY, kmesh=(2, 2, 2), nbands=45,
+                            use_symmetry=True)
+
+    grid = sys_().grid
+    g2_dens = grid.g2.reshape(-1)[grid.dens_mask.reshape(-1)].to(RDTYPE)
+
+    # reference: bare Kerker
+    t = time.perf_counter()
+    ref = scf(sys_(), xc, mixing_alpha=0.7, **common)
+    f_ref = float(ref.energies.free_energy)
+    print(f"  kerker                {ref.n_iter:3d} iters   F={f_ref:+.6f} eV   "
+          f"{time.perf_counter()-t:.1f}s")
+
+    # probe: Kerker-on plain damping (history=1) — stable on the d-band metal.
+    res_hist: list[torch.Tensor] = []
+
+    def hook(it, rho_in, rho_out):
+        res_hist.append((rho_out - rho_in).detach().clone())
+
+    alpha_probe = 0.7
+    scf(sys_(), xc, mixing_alpha=alpha_probe, mixing_history=1, kerker=True,
+        max_iter=14, mixer_hook=hook, **common)
+    kfac = g2_dens / (g2_dens + q0**2)
+    g2_shell, d_shell, count = response_from_residuals(
+        res_hist, g2_dens, alpha_probe, n_bins=48, skip=2, precond_fac=kfac)
+    print(f"  probe {len(res_hist)} residuals → d(G) over {len(d_shell)} shells, "
+          f"d in [{float(d_shell.min()):.2f}, {float(d_shell.max()):.2f}]")
+
+    # two DIIS-aware fits: the default seed range, and a wider/more-poled seed.
+    variants = [
+        ("learned 3-pole [0.3,3.0]", dict(n_poles=3, q_min=0.3, q_max=3.0)),
+        ("learned 4-pole [0.05,4.0]", dict(n_poles=4, q_min=0.05, q_max=4.0)),
+    ]
+    for label, fit_kw in variants:
+        P, info = fit_multipole(g2_shell, d_shell, alpha=0.7, mixer="diis",
+                                history=8, q0=q0, n_unroll=30, steps=700,
+                                weight=count, **fit_kw)
+        P = P.rebind(g2_dens).detach_()
+        t = time.perf_counter()
+        learned = scf(sys_(), xc, mixing_alpha=0.7, precond_op=P, **common)
+        f_l = float(learned.energies.free_energy)
+        v = _verdict(learned.n_iter, ref.n_iter)
+        print(f"  {label:26s} {learned.n_iter:3d} iters   F={f_l:+.6f} eV   "
+              f"{time.perf_counter()-t:.1f}s   [{v}]")
+        print(f"    {P.summary()}  (plain rho {info['rho_init']:.3f}"
+              f"→{info['rho_final']:.3f})  dF={f_l-f_ref:+.2e} eV")
 
 
 def _fit_charge_filter(res_total, g2_dens, q0=1.1, alpha_probe=0.7):
@@ -337,5 +425,7 @@ if __name__ == "__main__":
         run_fe()
     if which in ("pt", "soc", "both"):
         run_pt_soc()
+    if which in ("cu3al", "intermetallic", "both"):
+        run_cu3al()
     if which in ("ni", "stoner"):
         run_ni()

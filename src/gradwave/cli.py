@@ -164,6 +164,14 @@ def _cmd_run(args) -> int:
         print(f"V0 = {eos['v0_ang3_per_atom']:.4f} Å³/atom, "
               f"B0 = {eos['b0_GPa']:.2f} GPa, B0' = {eos['b0_prime']:.3f}")
         return 0 if eos.get("all_converged", True) else 1
+    elastic = summary.get("elastic")
+    if elastic is not None:
+        print(f"K = {elastic['bulk_modulus_GPa']['hill']:.1f} GPa, "
+              f"G = {elastic['shear_modulus_GPa']['hill']:.1f} GPa, "
+              f"E = {elastic['young_modulus_GPa']:.1f} GPa, "
+              f"ν = {elastic['poisson_ratio']:.3f} "
+              f"({'stable' if elastic['mechanically_stable'] else 'UNSTABLE'})")
+        return 0 if elastic.get("all_converged", True) else 1
     phonons = summary.get("phonons")
     if phonons is not None:
         fmin = phonons["min_frequency_cm1"]

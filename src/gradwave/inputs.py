@@ -106,6 +106,31 @@ class ProjectionsParams:
 
 
 @dataclass(frozen=True)
+class DispersionParams:
+    """Opt-in Grimme D3(BJ) dispersion correction (energy + forces + stress).
+
+    A geometric, SCF-independent pairwise correction. ``functional`` selects the
+    BJ damping preset (defaults to the SCF ``xc``); s6/s8/a1/a2 override it. The
+    cutoffs are the real-space image radii for the dispersion and coordination-
+    number sums, in Å."""
+
+    enabled: bool = False
+    functional: str | None = None  # None → use the SCF xc functional
+    cutoff: float = 21.2       # Å, dispersion real-space image radius (~40 a0)
+    cn_cutoff: float = 10.6    # Å, coordination-number image radius (~20 a0)
+    s6: float | None = None
+    s8: float | None = None
+    a1: float | None = None
+    a2: float | None = None    # Å for the a2 BJ radius override (converted at use)
+
+    def __post_init__(self):
+        if self.cutoff <= 0 or self.cn_cutoff <= 0:
+            raise InputError("dispersion cutoffs must be positive")
+        if self.cn_cutoff > self.cutoff:
+            raise InputError("dispersion.cn_cutoff must not exceed dispersion.cutoff")
+
+
+@dataclass(frozen=True)
 class VolumetricParams:
     """Volumetric fields to export after an SCF, as .cube/.xsf for VESTA/Ovito."""
 
@@ -142,6 +167,19 @@ class EOSParams:
 
 
 @dataclass(frozen=True)
+class ElasticParams:
+    """Clamped-ion elastic constants: FD of the analytic stress over the six
+    Voigt strains → the 6×6 stiffness C (and Voigt–Reuss–Hill moduli)."""
+
+    strain: float = 0.005  # Voigt strain magnitude h for the central difference
+
+    def __post_init__(self):
+        if not 0.0 < self.strain < 0.1:
+            raise InputError(
+                f"elastic.strain must be in (0, 0.1), got {self.strain}")
+
+
+@dataclass(frozen=True)
 class MagnetismParams:
     exchange: bool = True      # extract J/D from the torque (adds ~3 constrained SCFs)
     lam: float = 8.0           # constraint penalty strength [eV/μB²]
@@ -167,13 +205,15 @@ class Input:
     noncollinear: bool = False  # spinor (non-collinear) SCF for task: scf
     nonmagnetic: bool = False  # with noncollinear: pin m⃗ ≡ 0 (spin-orbit only, keeps symmetry)
     start_mag: dict | None = None  # element -> initial moment fraction (nspin=2/NC seed)
-    task: str = "scf"  # scf | relax | bands | magnetism | eos | phonons
+    task: str = "scf"  # scf | relax | bands | magnetism | eos | elastic | phonons
     relax: RelaxParams = field(default_factory=RelaxParams)
     bands: BandsParams = field(default_factory=BandsParams)
     magnetism: MagnetismParams = field(default_factory=MagnetismParams)
     eos: EOSParams = field(default_factory=EOSParams)
+    elastic: ElasticParams = field(default_factory=ElasticParams)
     phonons: PhononParams = field(default_factory=PhononParams)
     projections: ProjectionsParams = field(default_factory=ProjectionsParams)
+    dispersion: DispersionParams = field(default_factory=DispersionParams)
     device: str = "cpu"
     verbose: bool = True  # per-iteration SCF chatter; CLI --quiet overrides
     output_dir: Path = Path("./out")
@@ -326,8 +366,8 @@ _ALLOWED_TOP = {
     "structure", "pseudopotentials", "ecut", "ecutrho", "xc", "kpoints",
     "smearing", "nbands", "symmetry", "nspin", "noncollinear", "nonmagnetic",
     "start_mag",
-    "scf", "task", "relax", "bands", "magnetism", "eos", "phonons",
-    "projections", "device",
+    "scf", "task", "relax", "bands", "magnetism", "eos", "elastic", "phonons",
+    "projections", "dispersion", "device",
     "verbose", "output", "error_estimate", "restart",
 }
 
@@ -422,6 +462,27 @@ def _build_projections(proj_raw) -> ProjectionsParams:
     )
 
 
+def _build_dispersion(disp_raw) -> DispersionParams:
+    """Parse the `dispersion` block. `true`/`false` is the enabled shorthand
+    (BJ damping then taken from the SCF functional); a mapping overrides the
+    functional, cutoffs, and the four damping constants."""
+    if isinstance(disp_raw, bool):
+        return DispersionParams(enabled=disp_raw)
+    _check_keys("dispersion", disp_raw,
+                {"enabled", "functional", "cutoff", "cn_cutoff",
+                 "s6", "s8", "a1", "a2"})
+    def _optf(key):
+        v = disp_raw.get(key)
+        return None if v is None else float(v)
+    return DispersionParams(
+        enabled=bool(disp_raw.get("enabled", True)),
+        functional=disp_raw.get("functional"),
+        cutoff=float(disp_raw.get("cutoff", 21.2)),
+        cn_cutoff=float(disp_raw.get("cn_cutoff", 10.6)),
+        s6=_optf("s6"), s8=_optf("s8"), a1=_optf("a1"), a2=_optf("a2"),
+    )
+
+
 def _load_input(path: Path) -> Input:
     raw = yaml.safe_load(path.read_text())
     base = path.parent
@@ -451,10 +512,10 @@ def _load_input(path: Path) -> Input:
     if xc not in ("lda", "pbe", "r2scan"):
         raise InputError(f"unknown xc {xc!r} (lda | pbe | r2scan)")
     task = raw.get("task", "scf")
-    if task not in ("scf", "relax", "bands", "magnetism", "eos", "phonons"):
+    if task not in ("scf", "relax", "bands", "magnetism", "eos", "elastic", "phonons"):
         raise InputError(
             f"unknown task {task!r} "
-            f"(scf | relax | bands | magnetism | eos | phonons)")
+            f"(scf | relax | bands | magnetism | eos | elastic | phonons)")
     nspin = int(raw.get("nspin", 1))
     if nspin not in (1, 2):
         raise InputError(f"nspin must be 1 or 2, got {nspin}")
@@ -479,6 +540,7 @@ def _load_input(path: Path) -> Input:
     nbands = raw.get("nbands", "auto")
     ecutrho = raw.get("ecutrho")
     projections = _build_projections(raw.get("projections", False))
+    dispersion = _build_dispersion(raw.get("dispersion", False))
     return Input(
         atoms=atoms,
         pseudo_dir=pseudo_dir,
@@ -508,8 +570,10 @@ def _load_input(path: Path) -> Input:
         bands=_build(BandsParams, raw.get("bands", {}), "bands"),
         magnetism=_build(MagnetismParams, raw.get("magnetism", {}), "magnetism"),
         eos=_build(EOSParams, raw.get("eos", {}), "eos"),
+        elastic=_build(ElasticParams, raw.get("elastic", {}), "elastic"),
         phonons=_build(PhononParams, raw.get("phonons", {}), "phonons"),
         projections=projections,
+        dispersion=dispersion,
         device=raw.get("device", "cpu"),
         verbose=bool(raw.get("verbose", True)),
         output_dir=base / out_raw.get("dir", "./out"),

@@ -86,13 +86,25 @@ every new energy term lands with one):
 
 - forces vs FD of our own energy (M2 gates; PAW `hubbard_force` 4.85e-8;
   O₂ PAW spin 5e-4)
-- stress vs strain-FD and vs QE (0.006 kbar NC, 0.13 kbar PAW)
+- stress vs strain-FD and vs QE (0.006 kbar NC, 0.13 kbar PAW); collinear
+  nspin=2 NC stress vs strain-FD of its own energy on a rattled FM bcc-Fe
+  cell, with the nonmagnetic (start_mag=0) limit reproducing the nspin=1
+  tensor to ~1e-8 for both LDA and PBE
 - NVE drift (secular ~1 µeV/atom: the force is the exact gradient of the
   SCF surface)
 - becsum-FD of the one-center energy vs `ddd` (5e-9, post-rewrite)
 - dE/dU by Hellmann-Feynman vs FD SCF re-runs (7.4e-7)
 - gradcheck on unit-level autograd paths
 - volumetric export identities (`tests/integration/test_volumetric.py`)
+- D3(BJ) dispersion (`tests/unit/test_dispersion.py`): forces and stress vs
+  FD of the dispersion energy itself on a rattled, low-symmetry, mixed-element
+  (H/C/N/O) cell (both at the 1e-6-relative FD floor), plus an independent
+  scalar-loop transcription of the reference D3(BJ) expression (matches the
+  vectorized+autograd energy to 1e-10), a positions gradcheck, and the
+  Σ F = 0 / translation-invariance sum rules. The one external anchor is the
+  simple-dftd3 tutorial water–peptide dimer (PBE0-D3(BJ), two-body):
+  reproduced to 4e-11 Ha — Tier-3 cross-code, but here it is machine-level
+  because both read the same published reference C6 tables.
 
 **PARCHG↔CHGCAR sum identity**
 (`tests/integration/test_volumetric.py`). The band-decomposed density and the

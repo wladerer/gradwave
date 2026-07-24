@@ -2,7 +2,7 @@
 # pytest marker strings (shorter to type, impossible to get the markers wrong).
 # Everything goes through `uv run` so the project env is used, not the base venv.
 
-.PHONY: help test test-fast test-standard test-nightly lint imports fmt lock check hooks profile
+.PHONY: help test test-fast test-standard test-nightly lint imports fmt lock check hooks symbols profile queue-init q-test q-status dashboard dashboard-push worktrees worktrees-prune
 
 BENCH ?= bench_scf
 ARGS  ?= cpu 8 nosym
@@ -50,3 +50,37 @@ check: lint imports test-fast ## pre-push gate: lint + import contracts + fast t
 hooks: ## install git hooks (ruff on commit, fast gate on push)
 	uv run pre-commit install
 	uv run pre-commit install --hook-type pre-push
+
+symbols: ## regenerate docs/symbols.txt — greppable public-API index for agents
+	uv run --group docs python scripts/gen_symbols.py
+
+# --- job queue (pueue) — see docs/queue.md ---------------------------------
+# Route heavy runs through the shared per-host queue so multiple agents don't
+# thrash the laptop. `gwq` is a plain-python wrapper over pueue (no uv needed).
+
+queue-init: ## create pueue groups with this host's slot budget (once per box)
+	./scripts/gwq init
+
+q-test: ## queue the fast gate on this host (throttled by the `test` group)
+	./scripts/gwq test-fast
+
+q-status: ## live queue view across the fleet (thinkpad + asus)
+	./scripts/gwq status
+
+DASH_HOST ?= homelab
+
+dashboard: ## generate the fleet dashboard -> dashboard.html (open it in a browser)
+	./scripts/dashboard.py --collect
+
+worktrees: ## fleet worktree overview — drift, stale branches, cross-worktree file overlap
+	./scripts/worktrees.py
+
+worktrees-prune: ## remove stale (merged) + clean + idle worktrees under .claude/worktrees/
+	./scripts/worktrees.py --prune
+
+dashboard-push: ## generate and push the dashboard to $(DASH_HOST) for tailscale-serve
+	./scripts/dashboard.py --collect --out /tmp/gwdash.html
+	ssh $(DASH_HOST) 'mkdir -p ~/gwdash'
+	rsync -az /tmp/gwdash.html $(DASH_HOST):gwdash/index.html
+	@echo "pushed to $(DASH_HOST):~/gwdash/index.html — serve once with (absolute path: \$$HOME is /root under sudo):"
+	@echo "  ssh $(DASH_HOST) 'sudo tailscale serve --bg /home/wladerer/gwdash'"

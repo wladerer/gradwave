@@ -173,7 +173,8 @@ def _energy_lines(scf):
     shown = [("kinetic", "kinetic"), ("hartree", "hartree"), ("xc", "xc"),
              ("local", "local pp"), ("nonlocal", "nonlocal pp"),
              ("ewald", "ewald"), ("onecenter", "one-center (PAW)"),
-             ("hubbard", "hubbard U"), ("smearing", "smearing −σS")]
+             ("hubbard", "hubbard U"), ("dispersion", "D3(BJ) disp"),
+             ("smearing", "smearing −σS")]
     for key, label in shown:
         val = e.get(key, 0.0)
         core = key in ("kinetic", "hartree", "xc", "local", "nonlocal",
@@ -387,6 +388,53 @@ def _eos_lines(eos):
     return lines
 
 
+def _elastic_lines(el):
+    stab = "stable" if el["mechanically_stable"] else "UNSTABLE (Born criteria)"
+    k, g = el["bulk_modulus_GPa"], el["shear_modulus_GPa"]
+    lines = [_sec("elastic constants"),
+             f"   clamped-ion 6×6 stiffness from ±{el['strain']} Voigt strain"
+             f" ({el['formalism']})",
+             "   shear constants overestimate the relaxed value for "
+             "diamond/zincblende (no internal-strain relaxation)",
+             ""]
+    lines.append(f"   bulk K      {k['hill']:7.1f} GPa   "
+                 f"(Voigt {k['voigt']:.1f} / Reuss {k['reuss']:.1f})")
+    lines.append(f"   shear G     {g['hill']:7.1f} GPa   "
+                 f"(Voigt {g['voigt']:.1f} / Reuss {g['reuss']:.1f})")
+    lines.append(f"   Young E     {el['young_modulus_GPa']:7.1f} GPa")
+    lines.append(f"   Poisson ν   {el['poisson_ratio']:7.3f}")
+    lines.append(f"   stability   {stab}")
+    if el.get("residual_stress_GPa", 0.0) > 0.5:
+        lines.append(f"   note: residual stress {el['residual_stress_GPa']:.2f} GPa"
+                     f" — cell not at equilibrium, C is about the current state")
+    if not el.get("all_converged", True):
+        lines.append("   note: some strained SCFs did NOT converge")
+    lines.append("")
+    lines.append("   stiffness matrix C [GPa] (Voigt order xx,yy,zz,yz,xz,xy):")
+    for row in el["c_GPa"]:
+        lines.append("   " + " ".join(f"{v:9.2f}" for v in row))
+    lines.append("")
+    return lines
+
+
+def _dispersion_lines(disp):
+    lines = [_sec("D3(BJ) dispersion")]
+    if not disp.get("available", False):
+        lines.append(f"   unavailable: {disp.get('reason', 'n/a')}")
+        return lines
+    d = disp["damping"]
+    lines.append(f"   {disp['functional']} · s6={d['s6']} s8={d['s8']} "
+                 f"a1={d['a1']} a2={d['a2_bohr']} a0")
+    lines.append(f"   {'E_disp':<18s}{disp['energy_eV']:>20.10f}  eV")
+    lines.append(f"   {'E_disp / atom':<18s}{disp['energy_per_atom_eV']:>20.10f}  eV")
+    if disp.get("stress_eV_ang3") is not None:
+        import numpy as np
+
+        p = -np.trace(np.asarray(disp["stress_eV_ang3"])) / 3.0 * 1602.176634
+        lines.append(f"   {'pressure':<18s}{p:>20.6f}  kbar")
+    return lines
+
+
 def _pdos_lines(pdos):
     """Projected-DOS summary: spilling and the integrated Löwdin weight per group
     (electrons per group, summed over the spectrum). Spin-resolved for nspin=2."""
@@ -530,6 +578,8 @@ def format_output(summary: dict) -> str:
     lines += _parameters_lines(summary["parameters"])
     if "scf" in summary:
         lines += _scf_report(summary)
+    if "dispersion" in summary:
+        lines += _dispersion_lines(summary["dispersion"])
     if "pdos" in summary:
         lines += _pdos_lines(summary["pdos"])
     if "relax" in summary:
@@ -540,6 +590,8 @@ def format_output(summary: dict) -> str:
         lines += _magnetism_lines(summary["magnetism"])
     if "eos" in summary:
         lines += _eos_lines(summary["eos"])
+    if "elastic" in summary:
+        lines += _elastic_lines(summary["elastic"])
     if "phonons" in summary:
         lines += _phonon_lines(summary["phonons"])
     if "provenance" in summary:

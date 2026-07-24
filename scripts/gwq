@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""gwq — gradwave job queue.
+
+A thin wrapper over `pueue` that gives every agent (and you) one shared,
+load-limited way to run tests and benchmarks across the thinkpad + asus fleet.
+The point is admission control: no matter how many agents submit at once, the
+per-host `pueued` daemon enforces a fixed slot budget per group, so the boxes
+never thrash. See docs/queue.md for the full picture.
+
+Design rules (keep these true so a future Dask sweep layer drops in cleanly):
+  * pueue stays COARSE: one job == one whole test run or one whole sweep.
+    Never enqueue 60 per-element jobs; fan-out lives *inside* a job (xdist
+    today, Dask tomorrow).
+  * Queued jobs run against the canonical checkout (~/github/gradwave), NOT the
+    ephemeral worktree the submitting agent happens to sit in — so results are
+    reproducible and independent of who submitted them.
+
+Usage:
+  gwq init                     # create groups w/ per-host slot budgets (run once per box)
+  gwq test-fast                # queue the fast gate on this host
+  gwq test-standard
+  gwq lint
+  gwq bench bench_scf cpu 8 nosym          # captured bench -> benchmarks/results/<host>/
+  gwq --host asus bench bench_scf cpu 8 nosym
+  gwq run --group bench -- uv run python benchmarks/mixer_rig.py
+  gwq sweep -- uv run python benchmarks/delta_gauge/run.py   # exclusive: pauses test/light
+  gwq status                   # live queue across both hosts
+  gwq log <id>                 # tail a job's output (forwards to pueue log)
+
+Notes:
+  * `--host asus` (or thinkpad) routes the submission to that box over ssh.
+  * Benches submitted on the thinkpad default to asus (keep perf off the laptop);
+    force local with `--host thinkpad`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shlex
+import socket
+import subprocess
+import sys
+
+# Set GWQ_DRY=1 to print the pueue/ssh command that *would* run and skip it —
+# handy for previewing a submission (and for testing without pueue installed).
+DRY = os.environ.get("GWQ_DRY")
+
+# Canonical checkout. Expanded to an absolute path because pueue's
+# --working-directory is passed to chdir() directly (no shell), so a literal
+# "~" would not expand. Both boxes are wladerer@/home/wladerer at the same path.
+REPO = os.path.expanduser("~/github/gradwave")
+
+# Per-host slot budgets. A job is one slot regardless of how many cores/threads
+# it spawns internally (pueue has no core-weighting) — the numbers below encode
+# the *real* limits: the fast gate already forks -n4 xdist workers, so one at a
+# time on the laptop; asus (22 cores) tolerates more.
+HOST_GROUPS: dict[str, dict[str, int]] = {
+    "thinkpad": {"default": 2, "test": 1, "bench": 1, "sweep": 1},
+    "asus": {"default": 4, "test": 2, "bench": 1, "sweep": 1, "gpu": 1},
+}
+# Fallback for an unrecognised host: conservative, laptop-like.
+DEFAULT_GROUPS = {"default": 2, "test": 1, "bench": 1, "sweep": 1}
+
+# Map a box's OS hostname to its logical name (also its ssh alias). asus's
+# hostName is "nixos" — without this it would fall through to DEFAULT_GROUPS and
+# miss the larger asus budget + the gpu group.
+HOST_ALIASES = {"nixos": "asus"}
+
+# Pytest tier selections. We spell these out (rather than `make test-fast`) and
+# use `python -m pytest` so queued/non-interactive jobs don't hit the bare
+# `uv run pytest` collection failure.
+FAST_SEL = '-m "not standard and not slow and not torture and not gpu"'
+STANDARD_SEL = '-m "not slow and not torture and not gpu"'
+
+
+def this_host() -> str:
+    raw = socket.gethostname()
+    return HOST_ALIASES.get(raw, raw)
+
+
+def groups_for(host: str) -> dict[str, int]:
+    return HOST_GROUPS.get(host, DEFAULT_GROUPS)
+
+
+def have_pueue() -> bool:
+    from shutil import which
+
+    return which("pueue") is not None
+
+
+def _run(argv: list[str]) -> int:
+    """Run a command locally, streaming its output. Returns exit code."""
+    return subprocess.run(argv).returncode
+
+
+def _pueue(host: str, pueue_args: list[str], *, capture: bool = False):
+    """Invoke `pueue <args>` on `host` (local or over ssh).
+
+    Returns the CompletedProcess when capture=True, else the exit code."""
+    local = host == this_host()
+    if local:
+        argv = ["pueue", *pueue_args]
+    else:
+        # Build one shell string for the remote side; ssh runs it via $SHELL -c.
+        remote = "pueue " + " ".join(shlex.quote(a) for a in pueue_args)
+        argv = ["ssh", host, remote]
+    if DRY and not capture:
+        print("[dry] " + " ".join(shlex.quote(a) for a in argv))
+        return 0
+    if capture:
+        return subprocess.run(argv, capture_output=True, text=True)
+    return subprocess.run(argv).returncode
+
+
+def submit(host: str, group: str, command: str, *, label: str | None = None,
+           workdir: str = REPO) -> int:
+    """Enqueue `command` (a shell string) into `group` on `host`."""
+    if not DRY and not host_has_pueue(host):
+        print(f"error: pueue not found on {host}. Install it (see docs/queue.md) "
+              f"and run `gwq init` there first.", file=sys.stderr)
+        return 127
+    args = ["add", "--group", group, "--working-directory", workdir]
+    if label:
+        args += ["--label", label]
+    # pueue joins everything after `--` into one string and runs it via its own
+    # shell (`sh -c`), so pass the command as a SINGLE argument. Passing
+    # `bash -lc <cmd>` as separate tokens made pueue space-join them and lose the
+    # grouping, so `bash -lc` ran only the first word (e.g. just `uv`). uv and the
+    # rest are on pueued's PATH, so `sh -c "<command>"` resolves them directly.
+    args += ["--", command]
+    print(f"[gwq] {host}:{group}  {command}")
+    return _pueue(host, args)
+
+
+def host_has_pueue(host: str) -> bool:
+    if host == this_host():
+        return have_pueue()
+    r = _pueue(host, ["--version"], capture=True)
+    return r.returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# subcommands
+# ---------------------------------------------------------------------------
+
+def cmd_init(host: str) -> int:
+    if host == this_host() and not have_pueue():
+        print("error: pueue is not installed on this host.\n"
+              "  Add `pueue` to home.packages and enable the pueued user service\n"
+              "  (snippet in docs/queue.md), then rerun `gwq init`.", file=sys.stderr)
+        return 127
+    wanted = groups_for(host)
+    # existing groups (substring test is safe — group names don't collide)
+    r = _pueue(host, ["group"], capture=True)
+    existing = r.stdout if r and r.returncode == 0 else ""
+    rc = 0
+    for name, par in wanted.items():
+        # `group add` then `parallel` set separately — works across pueue 3/4
+        # without depending on `group add --parallel`.
+        if name != "default" and name not in existing:
+            rc |= _pueue(host, ["group", "add", name])
+        rc |= _pueue(host, ["parallel", str(par), "--group", name])
+    print(f"[gwq] {host}: groups configured -> "
+          + ", ".join(f"{k}={v}" for k, v in wanted.items()))
+    return rc
+
+
+def cmd_test(host: str, tier: str) -> int:
+    sel = FAST_SEL if tier == "fast" else STANDARD_SEL
+    jobs = "-n4" if tier == "fast" else "-n auto"
+    cmd = f'uv run python -m pytest {jobs} {sel}'
+    return submit(host, "test", cmd, label=f"test-{tier}")
+
+
+def cmd_lint(host: str) -> int:
+    return submit(host, "default", "uv run ruff check --output-format=concise",
+                  label="lint")
+
+
+def cmd_bench(host: str, name: str, args: list[str]) -> int:
+    argstr = " ".join(shlex.quote(a) for a in args)
+    cmd = f"uv run python benchmarks/_capture.py {shlex.quote(name)} {argstr}".strip()
+    return submit(host, "bench", cmd, label=f"bench:{name}")
+
+
+def cmd_run(host: str, group: str, command: list[str]) -> int:
+    return submit(host, group, " ".join(command), label=command[0] if command else None)
+
+
+def cmd_sweep(host: str, command: list[str]) -> int:
+    """Exclusive sweep: pause the test/light groups, run in the sweep group.
+    The Dask hook lives here — a sweep command may spin up a cluster internally
+    and it will hold the box without co-scheduling the test gate."""
+    grp = groups_for(host)
+    for g in ("test", "default"):
+        if g in grp:
+            _pueue(host, ["pause", "--group", g])
+    print(f"[gwq] {host}: paused test/default for exclusive sweep "
+          f"(resume with: gwq resume --host {host})")
+    return submit(host, "sweep", " ".join(command), label="sweep")
+
+
+def cmd_resume(host: str) -> int:
+    grp = groups_for(host)
+    rc = 0
+    for g in ("test", "default"):
+        if g in grp:
+            rc |= _pueue(host, ["start", "--group", g])
+    print(f"[gwq] {host}: test/default resumed")
+    return rc
+
+
+def cmd_status(hosts: list[str]) -> int:
+    # Delegate rendering to the status helper (handles both hosts + JSON).
+    from pathlib import Path
+    helper = Path(__file__).resolve().parent / "gwq_status.py"
+    return _run([sys.executable, str(helper), *hosts])
+
+
+def cmd_passthrough(host: str, pueue_args: list[str]) -> int:
+    """Forward arbitrary args straight to pueue on `host` (e.g. log, follow, kill)."""
+    return _pueue(host, pueue_args)
+
+
+# ---------------------------------------------------------------------------
+
+
+def main(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="gwq", description="gradwave job queue (pueue wrapper)")
+    p.add_argument("--host", default=None,
+                   help="target host (default: this host; benches default to asus)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("init", help="create groups with per-host slot budgets")
+    sub.add_parser("test-fast", help="queue the fast gate")
+    sub.add_parser("test-standard", help="queue the standard tier")
+    sub.add_parser("lint", help="queue ruff")
+    sub.add_parser("resume", help="resume test/default groups after a sweep")
+
+    sp = sub.add_parser("bench", help="queue a captured benchmark run")
+    sp.add_argument("name")
+    sp.add_argument("args", nargs=argparse.REMAINDER)
+
+    sp = sub.add_parser("run", help="queue an arbitrary command")
+    sp.add_argument("--group", default="default")
+    sp.add_argument("command", nargs=argparse.REMAINDER)
+
+    sp = sub.add_parser("sweep", help="queue an exclusive sweep (pauses test/default)")
+    sp.add_argument("command", nargs=argparse.REMAINDER)
+
+    sp = sub.add_parser("status", help="live queue across hosts")
+    sp.add_argument("hosts", nargs="*")
+
+    sp = sub.add_parser("log", help="tail a job's output (forwards to pueue log)")
+    sp.add_argument("pueue_args", nargs=argparse.REMAINDER)
+    sp = sub.add_parser("pueue", help="forward raw args to pueue on --host")
+    sp.add_argument("pueue_args", nargs=argparse.REMAINDER)
+
+    a = p.parse_args(argv)
+    local = this_host()
+
+    # host defaulting: benches/sweeps from the laptop go to asus.
+    host = a.host
+    if host is None:
+        if a.cmd in ("bench", "sweep") and local == "thinkpad":
+            host = "asus"
+        else:
+            host = local
+
+    if a.cmd == "init":
+        return cmd_init(host)
+    if a.cmd == "test-fast":
+        return cmd_test(host, "fast")
+    if a.cmd == "test-standard":
+        return cmd_test(host, "standard")
+    if a.cmd == "lint":
+        return cmd_lint(host)
+    if a.cmd == "resume":
+        return cmd_resume(host)
+    if a.cmd == "bench":
+        return cmd_bench(host, a.name, a.args)
+    if a.cmd == "run":
+        cmd = a.command[1:] if a.command and a.command[0] == "--" else a.command
+        if not cmd:
+            print("error: `gwq run --group G -- <command>` needs a command", file=sys.stderr)
+            return 2
+        return cmd_run(host, a.group, cmd)
+    if a.cmd == "sweep":
+        cmd = a.command[1:] if a.command and a.command[0] == "--" else a.command
+        if not cmd:
+            print("error: `gwq sweep -- <command>` needs a command", file=sys.stderr)
+            return 2
+        return cmd_sweep(host, cmd)
+    if a.cmd == "status":
+        return cmd_status(a.hosts or list(HOST_GROUPS))
+    if a.cmd == "log":
+        return cmd_passthrough(host, ["log", *a.pueue_args])
+    if a.cmd == "pueue":
+        return cmd_passthrough(host, a.pueue_args)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

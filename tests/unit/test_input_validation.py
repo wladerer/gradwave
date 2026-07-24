@@ -237,3 +237,37 @@ def test_validate_command_reports_error(tmp_path, capsys):
     err = capsys.readouterr().err
     assert rc == 1
     assert "nspin must be 1 or 2" in err
+
+
+def test_dispersion_shorthand_enables(tmp_path):
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _base("dispersion: true\n")))
+    assert inp.dispersion.enabled is True
+    assert inp.dispersion.functional is None  # defaults to the SCF xc at run time
+
+
+def test_dispersion_block_overrides(tmp_path):
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _base(
+        "dispersion:\n  functional: pbe0\n  cutoff: 18.0\n  a2: 4.9\n")))
+    assert inp.dispersion.enabled is True
+    assert inp.dispersion.functional == "pbe0"
+    assert inp.dispersion.cutoff == pytest.approx(18.0)
+    assert inp.dispersion.a2 == pytest.approx(4.9)
+
+
+def test_dispersion_cutoff_ordering_rejected(tmp_path):
+    from gradwave.inputs import InputError, load_input
+
+    with pytest.raises(InputError, match="cn_cutoff"):
+        load_input(_write(tmp_path, _base(
+            "dispersion:\n  cutoff: 5.0\n  cn_cutoff: 9.0\n")))
+
+
+def test_dispersion_unknown_subkey_suggests(tmp_path):
+    from gradwave.inputs import InputError, load_input
+
+    with pytest.raises(InputError, match="did you mean"):
+        load_input(_write(tmp_path, _base("dispersion:\n  cutof: 20.0\n")))

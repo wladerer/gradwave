@@ -157,14 +157,19 @@ def occupations_and_entropy(
     return degeneracy * smearing.occupation(x), smearing.entropy(x)
 
 
-def fixed_occupations(eigs: torch.Tensor, n_electrons: float) -> torch.Tensor:
-    """Insulator: fill the lowest N_e/2 bands at every k with f = 2."""
+def fixed_occupations(eigs: torch.Tensor, n_electrons: float,
+                      degeneracy: float = 2.0) -> torch.Tensor:
+    """Insulator: fill the lowest n_electrons/degeneracy bands at f = degeneracy.
+
+    degeneracy=2 is the spin-restricted (nspin=1) case; a single collinear spin
+    channel in a fixed-moment run fills n_σ bands at f=1 (degeneracy=1)."""
     nk, nb = eigs.shape
-    nocc = int(round(n_electrons / 2.0))
-    if abs(n_electrons / 2.0 - nocc) > 1e-8:
-        raise ValueError("odd electron count needs smearing (spin-restricted code)")
+    nocc = int(round(n_electrons / degeneracy))
+    if abs(n_electrons / degeneracy - nocc) > 1e-8:
+        raise ValueError("fractional band filling needs smearing "
+                         "(odd electron count, or a non-integer fixed moment)")
     if nocc > nb:
         raise ValueError(f"need at least {nocc} bands, have {nb}")
     f = torch.zeros_like(eigs)
-    f[:, :nocc] = 2.0
+    f[:, :nocc] = degeneracy
     return f
