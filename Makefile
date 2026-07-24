@@ -73,5 +73,5 @@ dashboard-push: ## generate and push the dashboard to $(DASH_HOST) for tailscale
 	./scripts/dashboard.py --collect --out /tmp/gwdash.html
 	ssh $(DASH_HOST) 'mkdir -p ~/gwdash'
 	rsync -az /tmp/gwdash.html $(DASH_HOST):gwdash/index.html
-	@echo "pushed to $(DASH_HOST):~/gwdash/index.html — serve once with:"
-	@echo "  ssh $(DASH_HOST) 'sudo tailscale serve --bg --set-path / \$$HOME/gwdash'"
+	@echo "pushed to $(DASH_HOST):~/gwdash/index.html — serve once with (absolute path: \$$HOME is /root under sudo):"
+	@echo "  ssh $(DASH_HOST) 'sudo tailscale serve --bg /home/wladerer/gwdash'"
