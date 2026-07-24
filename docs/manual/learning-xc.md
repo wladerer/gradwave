@@ -2,9 +2,10 @@
 
 The learnable functional is a PBE-form exchange enhancement with the shape of PBE
 but trainable parameters. Initialized at the PBE values it reproduces PBE exactly.
-At any positive $\kappa$ and $\mu$ it keeps the uniform-gas limit and the
-Lieb-Oxford bound, so a partly trained functional is still a valid
-generalized-gradient approximation.
+At any positive $\kappa$ and $\mu$ it keeps the uniform-gas limit and stays
+smooth and bounded, so a partly trained functional is still a valid
+generalized-gradient approximation; the Lieb-Oxford bound holds as long as
+$\kappa \le 0.804$, the PBE value.
 
 Training recovers PBE from a perturbed start.
 
@@ -25,9 +26,10 @@ factor[[10]](bibliography.md#pbe) carries two parameters $\kappa$ and $\mu$,
 
 $$ F_x(s) = 1 + \kappa - \frac{\kappa}{1 + \mu s^2 / \kappa}. $$
 
-The uniform-gas limit $F_x(0) = 1$ and the Lieb-Oxford
-bound[[11]](bibliography.md#lo) $F_x < 1 + \kappa$ hold for any positive $\kappa$,
-$\mu$. gradwave makes $(\kappa, \mu)$ the learnable parameters $\theta$,
+The uniform-gas limit $F_x(0) = 1$ holds for any positive $\kappa$, $\mu$, and
+$F_x$ is capped at its large-$s$ asymptote $1 + \kappa$. That asymptote respects
+the Lieb-Oxford bound[[11]](bibliography.md#lo) $F_x \le 1.804$ when
+$\kappa \le 0.804$, which is why PBE fixes $\kappa = 0.804$. gradwave makes $(\kappa, \mu)$ the learnable parameters $\theta$,
 correlation stays fixed at PW92[[12]](bibliography.md#pw92) plus the PBE gradient
 correction, and the parameters are stored through a softplus so they remain
 positive under unconstrained training. At the PBE values $\kappa = 0.804$,

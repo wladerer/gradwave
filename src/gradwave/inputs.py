@@ -197,8 +197,9 @@ def _build_volumetric(raw) -> VolumetricParams:
     _check_keys("output.volumetric", raw,
                 {"density", "elf", "magnetization", "bands", "format"})
     fmt = str(raw.get("format", "cube"))
-    if fmt not in ("cube", "xsf"):
-        raise InputError(f"output.volumetric.format must be 'cube' or 'xsf', got {fmt!r}")
+    if fmt not in ("cube", "xsf", "chgcar"):
+        raise InputError(
+            f"output.volumetric.format must be 'cube', 'xsf' or 'chgcar', got {fmt!r}")
     try:
         bands = tuple((int(b), int(k)) for b, k in raw.get("bands", ()))
     except (TypeError, ValueError) as exc:

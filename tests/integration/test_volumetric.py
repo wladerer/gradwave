@@ -87,9 +87,20 @@ def test_writers_roundtrip(si_res, tmp_path, ext):
         assert np.abs(data - rho).max() < 1e-6
 
 
+def test_chgcar_roundtrips_through_ase(si_res, tmp_path):
+    """The CHGCAR writer stores ρ·Ω, so ASE's VaspChargeDensity recovers ρ [e/Å³]."""
+    from ase.calculators.vasp import VaspChargeDensity
+
+    rho = V.density(si_res)
+    out = V.write_density(si_res, tmp_path / "diamond_CHGCAR")  # extensionless, prefixed
+    vcd = VaspChargeDensity(out)
+    assert len(vcd.atoms[-1]) == len(si_res.system.species_of_atom)
+    assert np.abs(vcd.chg[-1] - rho).max() < 1e-6
+
+
 def test_unknown_extension_rejected(si_res, tmp_path):
     with pytest.raises(ValueError, match="unknown volumetric extension"):
-        V.write_density(si_res, tmp_path / "chg.chgcar")
+        V.write_density(si_res, tmp_path / "chg.foo")
 
 
 def test_run_wiring_writes_requested_fields(si_res, tmp_path):

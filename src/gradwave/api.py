@@ -831,7 +831,7 @@ def run_magnetism(inp: Input, verbose: bool = True):
 
 
 def _write_volumetric(res, spec, outdir, verbose) -> dict:
-    """Write the requested volumetric fields (.cube/.xsf) and return an
+    """Write the requested volumetric fields (.cube/.xsf/CHGCAR) and return an
     {label: filename} map for summary["outputs"]. A field that the result type
     does not support (e.g. ELF on a noncollinear run) is skipped with a warning
     rather than losing the finished run."""

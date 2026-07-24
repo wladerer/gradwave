@@ -50,8 +50,9 @@ in-place mutation, everything traceable by autograd. The Hamiltonian apply, the
 density, the exchange-correlation functionals, the structure factors, and the
 per-term energy assembly live here; `core/energies/total.py` is the single
 function autograd differentiates. This is the only layer the tape ever sees, so
-a reverse-mode pass through the total energy yields the forces and a second pass
-the Hessian.
+a reverse-mode pass through the total energy yields the forces, and
+differentiating the forces again yields the Hessian, one Hessian-vector product
+per column.
 
 **Layer B — iterative solvers (`scf/`, `solvers/`).** The self-consistency loop
 and the eigensolvers run under `torch.no_grad`. Autograd must never trace
@@ -263,8 +264,8 @@ evaluate exchange on a fixed density. The mixing fraction α and screening lengt
 learnable-XC slot uses.
 
 This subsystem is reached from Python today (`hybrid_scf`,
-`HybridExchangeParams`); it is not yet wired into the YAML input schema, so
-`xc:` accepts `lda` and `pbe` only.
+`HybridExchangeParams`); it is not yet wired into the YAML input schema. The
+`xc:` key accepts `lda`, `pbe`, and `r2scan`; the hybrids stay Python-only.
 
 ## Tests and fixtures
 

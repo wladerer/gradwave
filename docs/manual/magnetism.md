@@ -120,6 +120,18 @@ $E(\theta)$ at fixed moment (`examples/fe_spin_spiral.py`, run on CPU).
 
 ![bcc Fe spin-spiral dispersion](img/fe_spin_spiral.png)
 
+The spiral itself is the moment direction advancing along the propagation axis
+while the magnitude stays fixed. `examples/spin_spiral_render.py` lays that
+texture on a bcc-Fe stack and draws the moments as arrows with
+[tinykit](https://github.com/wladerer/tinykit):
+
+<figure markdown>
+  ![bcc Fe spin spiral, moment arrows](img/fe_spin_spiral_moments.png){ width="240" }
+  <figcaption>A frozen spin spiral on bcc Fe: the 2.22 μB moment held at full
+  magnitude while its direction turns a fixed angle per layer, the $\theta$ the
+  dispersion above scans.</figcaption>
+</figure>
+
 $E(\theta)$ rises monotonically from the ferromagnetic ground state ($\theta=0$) to the
 antiparallel state, and the `vector` moment holds ~2.2 μB across the whole spiral. The
 `perp` penalty behaves differently at the two ends of the sweep. At the *collinear*
@@ -167,9 +179,11 @@ print(report.summary())
 The exchange tensor is the site-to-site derivative of the autograd torque,
 $\mathcal{J}_{IJ} = \partial T_I/\partial\hat{\mathbf{e}}_J$. Tilting one moment and
 reading the induced torque on the others is one finite-difference order, not the two
-of energy mapping, so it is lower-noise. bcc Fe gives $J_1 \approx 22$ meV (LKAG
-reports 15 to 19), DMI zero by centrosymmetry, and a mean-field $T_c$ of 1388 K
-matching Pajda's mean-field value. The DMI and single-ion anisotropy channels are
+of energy mapping, so it is lower-noise. bcc Fe gives $J_1 \approx 22$ meV, just
+above the LKAG range of 15 to 19[[48]](bibliography.md#pajda), because the 2-atom
+cell folds the outer shells into $J_{01}/8$; the DMI is zero by centrosymmetry,
+and the mean-field $T_c$ of 1388 K sits near Pajda's mean-field value (both
+overshoot the 1043 K experiment by the usual mean-field margin). The DMI and single-ion anisotropy channels are
 reported as ~0 without spin-orbit coupling, as symmetry requires. They become
 nonzero once a fully-relativistic magnetic pseudopotential is supplied. See the
 anisotropy notes in `docs/ideas.md`.

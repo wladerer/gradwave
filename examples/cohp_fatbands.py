@@ -45,9 +45,9 @@ from gradwave.grids import build_gsphere
 from gradwave.postscf.bands import bands_along_ase_path
 from gradwave.postscf.cohp import (
     _htilde_operator,
-    _o_inv_sqrt,
     _pair_block_weights,
     cohp,
+    o_inv_sqrt,
 )
 from gradwave.postscf.irreps import band_irreps
 from gradwave.postscf.pdos import _ao_projectors_k, _atomic_columns
@@ -146,7 +146,7 @@ def cohp_fatbands(res, kpts_frac, bond, nbands):
         # operator-route AO-basis Hamiltonian and Loewdin amplitudes at this k
         qao = _ao_projectors_k(system, sph, cols, device)      # (nproj, npw)
         overlap = torch.einsum("ig,jg->ij", qao.conj(), qao)
-        ois = _o_inv_sqrt(overlap)
+        ois = o_inv_sqrt(overlap)
         becp = torch.einsum("bg,pg->bp", c, qao.conj())
         proj = becp @ ois.conj()                               # (nb, nproj)
         htilde = _htilde_operator(qao, ois, h.apply)
