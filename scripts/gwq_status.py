@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Render a compact, fleet-wide view of the pueue queues.
 
 `gwq status [hosts...]` calls this. For each host it runs `pueue status --json`

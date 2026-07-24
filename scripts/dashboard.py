@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Generate a self-contained HTML dashboard for the gradwave fleet.
 
 Two panels, no JavaScript, no external assets — a single static file you can
