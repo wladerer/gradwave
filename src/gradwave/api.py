@@ -899,6 +899,54 @@ def _nc_occupations(res, scheme: str, width: float):
     return [occ[ik] for ik in range(eps.shape[0])]
 
 
+def _apply_dispersion(res, inp: Input) -> dict:
+    """Compute the D3(BJ) correction, fold its energy into ``res.energies`` (so
+    the reported total/free energy include it), and return the summary block
+    (energy, forces, stress, resolved damping). Degrades to
+    ``{'available': False}`` when the element set is uncovered or no BJ preset
+    exists for the functional."""
+    import numpy as np
+    import torch
+
+    from gradwave.postscf.dispersion import (
+        D3Config,
+        dispersion_energy,
+        dispersion_forces,
+        dispersion_stress,
+    )
+
+    dp = inp.dispersion
+    system = _get(res, "system")
+    positions = system.positions.detach().to(torch.float64)
+    cell = np.asarray(system.grid.cell, dtype=np.float64)
+    z = [int(v) for v in inp.atoms.get_atomic_numbers()]
+    try:
+        cfg = D3Config.resolve(
+            dp.functional or inp.xc,
+            cutoff_ang=dp.cutoff, cn_cutoff_ang=dp.cn_cutoff,
+            s6=dp.s6, s8=dp.s8, a1=dp.a1, a2=dp.a2,
+        )
+        cell_t = torch.as_tensor(cell, dtype=torch.float64, device=positions.device)
+        e = dispersion_energy(positions, cell_t, z, cfg)
+        forces = dispersion_forces(positions, cell, z, cfg)
+        stress = dispersion_stress(positions, cell, z, cfg)
+    except (ValueError, NotImplementedError) as err:
+        return {"available": False, "reason": str(err)}
+
+    # fold the energy into the breakdown; total/free_energy pick it up
+    res.energies.dispersion = e.detach().to(positions.device)
+    return {
+        "available": True,
+        "method": "d3-bj",
+        "functional": (dp.functional or inp.xc).lower(),
+        "damping": {"s6": cfg.s6, "s8": cfg.s8, "a1": cfg.a1, "a2_bohr": cfg.a2},
+        "energy_eV": float(e),
+        "energy_per_atom_eV": float(e) / len(z),
+        "forces_eV_ang": forces.detach().cpu().tolist(),
+        "stress_eV_ang3": stress.detach().cpu().tolist(),
+    }
+
+
 def _pdos_summary_block(res, inp: Input) -> dict:
     """Löwdin projected-DOS block for the summary JSON. Returns a graceful
     ``{'available': False, ...}`` when the pseudopotentials omit PP_PSWFC."""
@@ -980,7 +1028,10 @@ def run(inp: Input, verbose: bool = True) -> dict:
     _frames = None
     if inp.task == "scf":
         res = run_scf(inp, verbose=verbose)
+        disp_block = _apply_dispersion(res, inp) if inp.dispersion.enabled else None
         summary = build_summary(res, inp, "scf", runtime_s=time.time() - t0)
+        if disp_block is not None:
+            summary["dispersion"] = disp_block
         if inp.error_estimate:
             summary["error_estimate"] = _error_estimate_block(res, inp)
         if inp.projections.enabled:

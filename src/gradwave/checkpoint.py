@@ -31,6 +31,7 @@ def energies_eV_dict(e) -> dict:
         "nonlocal": float(e.nonlocal_), "ewald": float(e.ewald),
         "smearing": float(e.smearing), "hubbard": float(e.hubbard),
         "onecenter": float(e.onecenter),
+        "dispersion": float(getattr(e, "dispersion", 0.0)),
         "total": float(e.total), "free_energy": float(e.free_energy),
     }
 

@@ -173,7 +173,8 @@ def _energy_lines(scf):
     shown = [("kinetic", "kinetic"), ("hartree", "hartree"), ("xc", "xc"),
              ("local", "local pp"), ("nonlocal", "nonlocal pp"),
              ("ewald", "ewald"), ("onecenter", "one-center (PAW)"),
-             ("hubbard", "hubbard U"), ("smearing", "smearing −σS")]
+             ("hubbard", "hubbard U"), ("dispersion", "D3(BJ) disp"),
+             ("smearing", "smearing −σS")]
     for key, label in shown:
         val = e.get(key, 0.0)
         core = key in ("kinetic", "hartree", "xc", "local", "nonlocal",
@@ -395,6 +396,24 @@ def _elastic_lines(el):
     return lines
 
 
+def _dispersion_lines(disp):
+    lines = [_sec("D3(BJ) dispersion")]
+    if not disp.get("available", False):
+        lines.append(f"   unavailable: {disp.get('reason', 'n/a')}")
+        return lines
+    d = disp["damping"]
+    lines.append(f"   {disp['functional']} · s6={d['s6']} s8={d['s8']} "
+                 f"a1={d['a1']} a2={d['a2_bohr']} a0")
+    lines.append(f"   {'E_disp':<18s}{disp['energy_eV']:>20.10f}  eV")
+    lines.append(f"   {'E_disp / atom':<18s}{disp['energy_per_atom_eV']:>20.10f}  eV")
+    if disp.get("stress_eV_ang3") is not None:
+        import numpy as np
+
+        p = -np.trace(np.asarray(disp["stress_eV_ang3"])) / 3.0 * 1602.176634
+        lines.append(f"   {'pressure':<18s}{p:>20.6f}  kbar")
+    return lines
+
+
 def _pdos_lines(pdos):
     """Projected-DOS summary: spilling and the integrated Löwdin weight per group
     (electrons per group, summed over the spectrum). Spin-resolved for nspin=2."""
@@ -538,6 +557,8 @@ def format_output(summary: dict) -> str:
     lines += _parameters_lines(summary["parameters"])
     if "scf" in summary:
         lines += _scf_report(summary)
+    if "dispersion" in summary:
+        lines += _dispersion_lines(summary["dispersion"])
     if "pdos" in summary:
         lines += _pdos_lines(summary["pdos"])
     if "relax" in summary:

@@ -93,6 +93,15 @@ every new energy term lands with one):
 - dE/dU by Hellmann-Feynman vs FD SCF re-runs (7.4e-7)
 - gradcheck on unit-level autograd paths
 - volumetric export identities (`tests/integration/test_volumetric.py`)
+- D3(BJ) dispersion (`tests/unit/test_dispersion.py`): forces and stress vs
+  FD of the dispersion energy itself on a rattled, low-symmetry, mixed-element
+  (H/C/N/O) cell (both at the 1e-6-relative FD floor), plus an independent
+  scalar-loop transcription of the reference D3(BJ) expression (matches the
+  vectorized+autograd energy to 1e-10), a positions gradcheck, and the
+  Σ F = 0 / translation-invariance sum rules. The one external anchor is the
+  simple-dftd3 tutorial water–peptide dimer (PBE0-D3(BJ), two-body):
+  reproduced to 4e-11 Ha — Tier-3 cross-code, but here it is machine-level
+  because both read the same published reference C6 tables.
 
 **PARCHG↔CHGCAR sum identity**
 (`tests/integration/test_volumetric.py`). The band-decomposed density and the
