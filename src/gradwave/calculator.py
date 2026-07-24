@@ -58,6 +58,7 @@ class GradWave(Calculator):
         compile_xc: bool = False,
         eigensolver: str = "davidson",  # davidson | chebyshev (NC path only)
         precond: str = "kerker",  # kerker | local_tf (NC and USPP/PAW paths)
+        dispersion=None,  # opt-in D3(BJ): True/False, or a dict of overrides
         verbose: bool = False,
         **kwargs,
     ):
@@ -80,6 +81,21 @@ class GradWave(Calculator):
                  mixing_kerker=mixing_kerker, eigensolver=eigensolver,
                  precond=precond)
         )
+        # Opt-in D3(BJ) dispersion, mirroring inputs.DispersionParams: True →
+        # enabled with defaults (functional = the SCF xc); a dict overrides any
+        # of functional/cutoff/cn_cutoff/s6/s8/a1/a2; None/False → off. Stored on
+        # self.parameters so toggling it invalidates ASE's cached results.
+        if dispersion in (None, False):
+            self._dispersion = None
+        elif dispersion is True:
+            self._dispersion = {}
+        elif isinstance(dispersion, dict):
+            self._dispersion = dict(dispersion)
+        else:
+            raise ValueError(
+                "dispersion must be True/False or a dict of D3(BJ) overrides "
+                "(functional, cutoff, cn_cutoff, s6, s8, a1, a2)")
+        self.parameters["dispersion"] = self._dispersion
         self._pseudo_paths = dict(pseudopotentials)
         self._upf_cache: dict[str, object] = {}
         self._system = None
@@ -113,6 +129,55 @@ class GradWave(Calculator):
         from gradwave.api import _is_uspp
 
         return _is_uspp([self._upf(s) for s in species])
+
+    def _apply_dispersion(self, system, properties):
+        """Fold the opt-in D3(BJ) correction into the reported energy, forces,
+        and stress — the calculator analog of ``api._apply_dispersion``.
+
+        The energy is folded into ``res.energies.dispersion`` so ``free_energy``
+        (which the calculator reports) carries it; the D3 forces/stress are added
+        on top of the SCF Hellmann–Feynman terms. Both are geometric, autograd
+        contributions from ``postscf/dispersion.py`` (no reimplementation here).
+        Degrades to a no-op when the element set is uncovered or no BJ preset
+        exists for the functional, matching the api's ``{'available': False}``."""
+        if self._dispersion is None:
+            return
+        from gradwave.postscf.dispersion import (
+            D3Config,
+            dispersion_energy,
+            dispersion_forces,
+            dispersion_stress,
+        )
+
+        d = self._dispersion
+        positions = system.positions.detach().to(RDTYPE)
+        cell = np.asarray(system.grid.cell, dtype=np.float64)
+        z = [int(v) for v in self.atoms.get_atomic_numbers()]
+        try:
+            cfg = D3Config.resolve(
+                d.get("functional") or self.parameters["xc"],
+                cutoff_ang=d.get("cutoff", 21.2),
+                cn_cutoff_ang=d.get("cn_cutoff", 10.6),
+                s6=d.get("s6"), s8=d.get("s8"), a1=d.get("a1"), a2=d.get("a2"),
+            )
+            cell_t = torch.as_tensor(cell, dtype=RDTYPE, device=positions.device)
+            e = dispersion_energy(positions, cell_t, z, cfg)
+            f = dispersion_forces(positions, cell, z, cfg)
+            sig = (dispersion_stress(positions, cell, z, cfg)
+                   if "stress" in properties else None)
+        except (ValueError, NotImplementedError):
+            return
+
+        res = self.last_result
+        res.energies.dispersion = (
+            res.energies.dispersion + e.detach().to(positions.device))
+        self.results["energy"] = float(res.energies.free_energy)
+        self.results["free_energy"] = float(res.energies.free_energy)
+        self.results["forces"] = self.results["forces"] + f.cpu().numpy()
+        if sig is not None and "stress" in self.results:
+            s = sig.cpu().numpy()
+            self.results["stress"] = self.results["stress"] + np.array([
+                s[0, 0], s[1, 1], s[2, 2], s[1, 2], s[0, 2], s[0, 1]])
 
     def _get_system(self, atoms):
         symbols = atoms.get_chemical_symbols()
@@ -210,6 +275,7 @@ class GradWave(Calculator):
             self.results["stress"] = np.array([
                 sig[0, 0], sig[1, 1], sig[2, 2], sig[1, 2], sig[0, 2], sig[0, 1],
             ])
+        self._apply_dispersion(system, properties)
 
     def _get_uspp_system(self, atoms):
         """With use_symmetry off, positions-only updates reuse the cached
@@ -277,3 +343,4 @@ class GradWave(Calculator):
             self.results["stress"] = np.array([
                 sig[0, 0], sig[1, 1], sig[2, 2], sig[1, 2], sig[0, 2], sig[0, 1],
             ])
+        self._apply_dispersion(system, properties)
