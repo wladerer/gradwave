@@ -30,27 +30,37 @@ def forces(res: SCFResult, remove_net: bool = True) -> torch.Tensor:
     eV/Å for Al at 20 Ry vs ~1e-5 for valence-only Si) — and QE/VASP remove
     it the same way; with it removed, forces match QE to ~1e-5 eV/Å.
     """
-    if getattr(res, "nspin", 1) != 1:
-        raise NotImplementedError("forces for nspin=2 land next — SCF/magnetization only for now")
     if getattr(res.system, "rho_core", None) is not None:
         raise NotImplementedError("NLCC force term (force_cc) not implemented yet")
     system = res.system
     grid = system.grid
+    nspin = getattr(res, "nspin", 1)
     pos = system.positions.detach().clone().requires_grad_(True)
 
-    coeffs = [c.detach() for c in res.coeffs]
-    occ = res.occupations.detach()
-    rho_g = r_to_g(res.rho.detach().to(torch.complex128))
+    # Local (total density) and Ewald terms are spin-agnostic; only E_NL sees
+    # per-spin orbitals/occupations. Normalize coeffs to [spin][k] and occ to a
+    # leading spin axis so the single loop below covers both nspin values —
+    # exactly the spin sum assemble_pw_energies uses for the SCF energy, so the
+    # analytic force matches that energy's derivative by construction.
+    rho_g = r_to_g(res.rho.detach().to(torch.complex128))  # total ρ↑+ρ↓
+    projs = [projectors(pd, pos) for pd in system.proj_data]  # spin-independent
+    dij, kw = _stack_dij(system), system.kweights
 
-    projs = [projectors(pd, pos) for pd in system.proj_data]
-    becps = [becp(projs[ik], coeffs[ik]) for ik in range(len(coeffs))]
+    coeffs_s = res.coeffs if nspin == 2 else [res.coeffs]
+    occ_s = res.occupations.detach()
+    occ_s = occ_s if nspin == 2 else occ_s[None]
+    e_nl = 0.0
+    for sp in range(nspin):
+        cs = [c.detach() for c in coeffs_s[sp]]
+        becps = [becp(projs[ik], cs[ik]) for ik in range(len(cs))]
+        e_nl = e_nl + nonlocal_energy(becps, dij, occ_s[sp], kw)
 
     vloc_g = local_potential_g(
         pos, system.species_index, system.vloc_tables, grid.g_cart, grid.volume
     )
     e_pos = (
         local_energy(rho_g, vloc_g, grid.volume)
-        + nonlocal_energy(becps, _stack_dij(system), occ, system.kweights)
+        + e_nl
         + ewald_energy(pos, system.charges, grid.cell)
     )
     (grad,) = torch.autograd.grad(e_pos, pos)

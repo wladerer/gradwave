@@ -467,15 +467,17 @@ def _seed_orbitals(nk, nb, bk, nspin, device, start_from):
     return coeffs_b_s
 
 
-def _validate_scf_args(system, nspin, eigensolver, smearing, mixing_scheme, precond):
+def _validate_scf_args(system, nspin, eigensolver, smearing, mixing_scheme,
+                       precond, tot_magnetization=None):
     """Reject unsupported argument combinations up front, before any work."""
     if nspin not in (1, 2):
         raise ValueError("nspin must be 1 or 2 (noncollinear spin uses "
                          "scf_noncollinear, the spinor SCF)")
     if eigensolver not in ("davidson", "chebyshev"):
         raise ValueError("eigensolver must be 'davidson' or 'chebyshev'")
-    if nspin == 2 and smearing == "none":
-        raise ValueError("nspin=2 requires smearing (fixed magnetic occupations ambiguous)")
+    if nspin == 2 and smearing == "none" and tot_magnetization is None:
+        raise ValueError("nspin=2 without smearing requires tot_magnetization "
+                         "(fixed spin moment); otherwise pass a smearing")
     if system.is_fr:
         raise ValueError("fully-relativistic pseudos require the spinor SCF "
                          "(scf_noncollinear) — SOC has no collinear representation")
@@ -750,6 +752,9 @@ def scf(
     verbose: bool = True,
     nspin: int = 1,
     start_mag=None,  # initial moment fractions: per-species OR per-atom (nspin=2)
+    tot_magnetization=None,  # fix the spin moment M=N↑−N↓ (nspin=2, no smearing);
+    # per-channel integer occupations instead of a shared-μ fill — see
+    # shared_fermi_occupations. None (default) uses smearing to find the moment.
     mixed_precision: bool = False,  # opt-in fp32 draft (see note at resolution below)
     eigensolver: str = "davidson",  # davidson | chebyshev (NC standard problem only)
     precond: str = "kerker",  # kerker | local_tf (position-dependent TF screening)
@@ -774,7 +779,8 @@ def scf(
     grid, spheres = system.grid, system.spheres
     vol = grid.volume
     nk, nb = len(spheres), system.nbands
-    _validate_scf_args(system, nspin, eigensolver, smearing, mixing_scheme, precond)
+    _validate_scf_args(system, nspin, eigensolver, smearing, mixing_scheme,
+                       precond, tot_magnetization)
     kerker = _resolve_kerker(kerker, smearing, grid)
 
     rho_s = _seed_density(system, nspin, start_from, start_mag, grid, vol)
@@ -900,7 +906,7 @@ def scf(
 
         occ_s, mu, entropy_term = shared_fermi_occupations(
             eigs_s, system.kweights, smearing, width, system.n_electrons,
-            nspin, device)
+            nspin, device, tot_magnetization=tot_magnetization)
 
         # hybrid Fock: rebuild the exchange operator from the fresh orbitals
         # (used next iteration) and its energy (used in this iteration's total).

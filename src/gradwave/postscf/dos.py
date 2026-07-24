@@ -61,44 +61,15 @@ def _spectral_bounds(h, bk, n_iter: int = 40):
     return lmin - 0.025 * span, lmax + 0.025 * span
 
 
-@torch.no_grad()
-def kpm_dos(
-    res,
-    n_moments: int = 2000,
-    n_random: int = 8,
-    energies=None,
-    n_energies: int = 800,
-    seed: int = 0,
-):
-    """(energies [eV], DOS [states/eV/cell]) from the converged SCF potential.
-
-    Scalar path only (nspin=1, scalar-relativistic pseudos); spin factor 2.
-    """
-    if getattr(res, "nspin", 1) != 1:
-        raise NotImplementedError("KPM-DOS: spinor version pending")
-    system = res.system
-    bk, grid = system.batch, system.grid
-    device = res.v_eff.device
-    kw = system.kweights.to(device)
-
-    p_b = projectors_b(bk, system.positions)
-    h = BatchedHamiltonian(bk, grid.shape, res.v_eff, p_b)
-
-    lmin, lmax = _spectral_bounds(h, bk)
-    a = (lmax - lmin) / 2.0
-    b = (lmax + lmin) / 2.0
-
+def _kpm_moments(h, a, b, chi, n_pairs, kw, n_random):
+    """Jackson-undamped Chebyshev moments μ_m = Σ_k w_k Tr T_m(H̃) for one
+    Hamiltonian, estimated by Hutchinson over the shared random block `chi`.
+    Returns μ on [0, 2·n_pairs), k-summed and normalized by n_random (the spin
+    degeneracy factor is applied by the caller)."""
     def h_scaled(v):
         return (h.apply(v) - b * v) / a
 
-    gen = torch.Generator(device="cpu").manual_seed(seed)
-    phases = torch.rand(bk.nk, n_random, bk.npw_max, generator=gen, dtype=torch.float64)
-    chi = torch.exp(2j * math.pi * phases).to(device=device, dtype=CDTYPE)
-    chi = chi * bk.mask[:, None, :]
-
-    # Chebyshev recurrence with moment doubling: M applies → 2M moments
-    n_pairs = n_moments // 2
-    mu = torch.zeros(2 * n_pairs, dtype=RDTYPE, device=device)
+    mu = torch.zeros(2 * n_pairs, dtype=RDTYPE, device=chi.device)
     t_prev = chi
     t_cur = h_scaled(chi)
     mu0_k = torch.einsum("krg,krg->k", chi.conj(), chi).real
@@ -114,21 +85,81 @@ def kpm_dos(
             2.0 * torch.einsum("krg,krg->k", t_next.conj(), t_cur).real - mu1_k
         )).sum()
         t_prev, t_cur = t_cur, t_next
-    mu = (mu / n_random).cpu().numpy() * 2.0  # spin degeneracy
+    return (mu / n_random).cpu().numpy()
 
-    # Jackson kernel
+
+def _eval_dos(mu, a, b, energies, n_pairs):
+    """Jackson-damped reconstruction of DOS(E) from moments μ for one channel,
+    with the spectrum mapped by (a, b). Evaluated on the shared `energies`
+    grid; energies outside this channel's [b−a, b+a] clip to ~0."""
     m_idx = np.arange(2 * n_pairs)
     big_n = 2 * n_pairs + 1
     jackson = ((big_n - m_idx) * np.cos(np.pi * m_idx / big_n)
                + np.sin(np.pi * m_idx / big_n) / np.tan(np.pi / big_n)) / big_n
-
-    if energies is None:
-        energies = np.linspace(lmin + 0.01 * a, lmax - 0.01 * a, n_energies)
     e_t = np.clip((np.asarray(energies) - b) / a, -0.999999, 0.999999)
     theta = np.arccos(e_t)
     cheb = np.cos(np.outer(m_idx, theta))  # T_m(Ẽ)
     weights = np.where(m_idx == 0, 1.0, 2.0) * jackson * mu
-    dos = (weights @ cheb) / (np.pi * np.sqrt(1.0 - e_t**2)) / a
-    info = {"lmin": lmin, "lmax": lmax,
-            "resolution_eV": math.pi * a / (2 * n_pairs)}
-    return np.asarray(energies), dos, info
+    return (weights @ cheb) / (np.pi * np.sqrt(1.0 - e_t**2)) / a
+
+
+@torch.no_grad()
+def kpm_dos(
+    res,
+    n_moments: int = 2000,
+    n_random: int = 8,
+    energies=None,
+    n_energies: int = 800,
+    seed: int = 0,
+):
+    """(energies [eV], DOS [states/eV/cell], info) from the converged potential.
+
+    Collinear path (scalar-relativistic pseudos). For nspin=1 DOS is a 1-D
+    array with spin factor 2; for nspin=2 it is (2, n_energies) — spin-up and
+    spin-down channels, each with degeneracy 1 — on a shared energy grid, and
+    info["nspin"] records which. Spinor (noncollinear) results are a separate
+    2-component path and are not handled here.
+    """
+    nspin = getattr(res, "nspin", 1)
+    system = res.system
+    bk, grid = system.batch, system.grid
+    device = res.v_eff.device
+    kw = system.kweights.to(device)
+
+    p_b = projectors_b(bk, system.positions)
+    # collinear channels share projectors; only the local potential splits
+    veff_s = res.v_eff if nspin == 2 else res.v_eff[None]
+    g_spin = 2.0 / nspin  # electrons per state: 2 (nspin=1), 1 per channel (nspin=2)
+
+    # one random block, reused across channels (same basis) for correlated noise
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    phases = torch.rand(bk.nk, n_random, bk.npw_max, generator=gen, dtype=torch.float64)
+    chi = torch.exp(2j * math.pi * phases).to(device=device, dtype=CDTYPE)
+    chi = chi * bk.mask[:, None, :]
+    n_pairs = n_moments // 2  # moment doubling: M applies → 2M moments
+
+    bounds, mus, ab = [], [], []
+    for sp in range(nspin):
+        h = BatchedHamiltonian(bk, grid.shape, veff_s[sp], p_b)
+        lmin, lmax = _spectral_bounds(h, bk)
+        a = (lmax - lmin) / 2.0
+        b = (lmax + lmin) / 2.0
+        mu = _kpm_moments(h, a, b, chi, n_pairs, kw, n_random) * g_spin
+        bounds.append((lmin, lmax))
+        mus.append(mu)
+        ab.append((a, b))
+
+    # one energy grid spanning both channels; each channel's series is
+    # evaluated on it (out-of-band energies clip to ~0 DOS for that channel).
+    lmin_g = min(lo for lo, _ in bounds)
+    lmax_g = max(hi for _, hi in bounds)
+    if energies is None:
+        a_g = (lmax_g - lmin_g) / 2.0
+        energies = np.linspace(lmin_g + 0.01 * a_g, lmax_g - 0.01 * a_g, n_energies)
+    energies = np.asarray(energies)
+    dos_s = [_eval_dos(mus[sp], ab[sp][0], ab[sp][1], energies, n_pairs)
+             for sp in range(nspin)]
+    dos = dos_s[0] if nspin == 1 else np.stack(dos_s, axis=0)
+    info = {"nspin": nspin, "lmin": lmin_g, "lmax": lmax_g,
+            "resolution_eV": math.pi * max(a for a, _ in ab) / (2 * n_pairs)}
+    return energies, dos, info
