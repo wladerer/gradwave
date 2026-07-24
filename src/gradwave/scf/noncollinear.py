@@ -193,27 +193,36 @@ class NCResult:
     formalism: str = "noncollinear"  # result-type tag shared by all four SCF drivers
 
 
+_MAG_MIXERS = {"pulay": "PulayMixer", "johnson": "JohnsonMixer",
+               "broyden": "BroydenMixer"}
+
+
 def _build_nc_mixer(g2_vec, ng, nonmagnetic, mixing_alpha, mag_mixing_alpha,
-                    mixing_history, precond_op, m, device):
+                    mixing_history, precond_op, m, device, mag_mixer="pulay"):
     """Build the (ρ, m⃗) mixer. Nonmagnetic: single ρ block with Kerker and
     check_g0, and m is zeroed. Magnetic: 4 blocks with Kerker on the ρ block only
     (kerker_mask, check_g0=False) and a decoupled m⃗ step (base_step_scale) to hold
-    the magnetic branch against moment collapse. Returns (mixer, base_step_scale, m)."""
+    the magnetic branch against moment collapse. ``mag_mixer`` selects the
+    magnetic-path mixer class (pulay/johnson/broyden). Returns
+    (mixer, base_step_scale, m)."""
     base_step_scale = None
     if nonmagnetic:
         m = torch.zeros_like(m)
         mixer = PulayMixer(g2_vec, alpha=mixing_alpha, history=mixing_history,
                            kerker=True, check_g0=True)
     else:
+        import gradwave.scf.mixing as _mixmod
         kerker_mask = torch.cat([torch.ones(ng, dtype=torch.bool, device=device),
                                  torch.zeros(3 * ng, dtype=torch.bool, device=device)])
         ratio = mag_mixing_alpha / mixing_alpha if mixing_alpha > 0 else 1.0
         base_step_scale = torch.cat([
             torch.ones(ng, dtype=RDTYPE, device=device),
             torch.full((3 * ng,), float(ratio), dtype=RDTYPE, device=device)])
-        mixer = PulayMixer(torch.cat([g2_vec] * 4), alpha=mixing_alpha,
-                           history=mixing_history, kerker=True, check_g0=False,
-                           kerker_mask=kerker_mask, step_scale=base_step_scale)
+        cls = getattr(_mixmod, _MAG_MIXERS[mag_mixer])
+        kw = dict(alpha=mixing_alpha, history=mixing_history, kerker=True,
+                  check_g0=False, kerker_mask=kerker_mask,
+                  step_scale=base_step_scale)
+        mixer = cls(torch.cat([g2_vec] * 4), **kw)
     if precond_op is not None:
         # override constant Kerker on the density-total (charge) block; m⃗ blocks
         # keep their own step (base_step_scale) and are untouched by this operator.
@@ -408,6 +417,9 @@ def scf_noncollinear(
     mixing_alpha: float = 0.5,
     mixing_history: int = 8,
     mag_mixing_alpha: float | None = None,  # separate step for m⃗ (None → max(mixing_alpha,0.6))
+    spin_precond: bool = False,  # opt-in Stoner precond on the (longitudinal) m⃗ channel
+    mag_mixer: str = "pulay",  # magnetic-path mixer: pulay/johnson/broyden
+    mag_diago_schedule: str = "linear",  # adaptive diago tol schedule for magnetic runs
     adaptive: bool = True,  # back off mixing on a stalled/oscillating residual
     diago_tol: float = 1e-9,
     verbose: bool = True,
@@ -465,7 +477,11 @@ def scf_noncollinear(
         mag_mixing_alpha = max(mixing_alpha, 0.6)
     mixer, base_step_scale, m = _build_nc_mixer(
         g2_vec, ng, nonmagnetic, mixing_alpha, mag_mixing_alpha, mixing_history,
-        precond_op, m, device)
+        precond_op, m, device, mag_mixer=mag_mixer)
+    # diago schedule: nonmagnetic keeps the spinor-family "linear" default; a
+    # magnetic run may opt into the collinear "quadratic" schedule, which drives
+    # the eigensolve tolerance down with the residual instead of flooring it.
+    diago_schedule = "linear" if nonmagnetic else mag_diago_schedule
 
     projs_b = projectors_b(bk, system.positions)
     q_so = dij_so = None
@@ -528,7 +544,7 @@ def scf_noncollinear(
             vol, tau_up=tau_up, tau_dn=tau_dn)
 
         tol_eff = adaptive_diago_tol(it, history, diago_tol,
-                                     system.n_electrons, schedule="linear")
+                                     system.n_electrons, schedule=diago_schedule)
         eigs, coeffs, h = _solve_spinor_bands(
             bk, grid, v_r, b_xc, projs_b, q_so, dij_so, coeffs, t2, mask2,
             tol_eff, mixed_precision, mp_crossover, metagga_op=metagga_op)
@@ -589,6 +605,31 @@ def scf_noncollinear(
             break
 
         e_free_prev = e_free
+        # Stoner preconditioner on the (longitudinal) magnetization channel:
+        # near a FM solution the m ∥ moment-axis mode carries a Stoner-enhanced
+        # gain that stalls history mixing (fcc Ni + SOC: the m_z residual
+        # limit-cycles at ~1e-4 while ρ/m_x/m_y sit three orders lower). The
+        # collinear cure (scf/spin_precond.py) applied to the non-collinear
+        # moment channel: build the Newton model (I − χ₀^diag K_mm)⁻¹ from the
+        # current spinor states + longitudinal kernel and apply it to each
+        # Cartesian m-block (transverse blocks are in the operator's identity
+        # regime near collinearity). Rebuilt each iteration like the collinear
+        # path; None in the insulating limit.
+        if spin_precond and not nonmagnetic:
+            from gradwave.scf.spin_precond import build_stoner_precond_nc
+            sp = build_stoner_precond_nc(
+                system, coeffs, eigs, mu, scheme, width, rho_out, m_out, xc,
+                m_pw)
+            if sp is None:
+                mixer.extra_precond = None
+            else:
+                def _spin_pc(rvec, _sp=sp, _ng=ng):
+                    out = rvec.clone()
+                    for c in (1, 2, 3):  # m_x, m_y, m_z channels
+                        out[c * _ng:(c + 1) * _ng] = _sp.apply(
+                            rvec[c * _ng:(c + 1) * _ng])
+                    return out
+                mixer.extra_precond = _spin_pc
         # adaptive fallback against a stalled/oscillating residual (halve the
         # global mixing step and drop the DIIS history) — see _nc_adaptive_backoff
         adapt_mult, last_backoff = _nc_adaptive_backoff(

@@ -94,25 +94,8 @@ def build_stoner_precond(system, coeffs_s, eigs_s, mu, scheme,
     picks.sort(key=lambda t: -abs(t[3]))
     picks = picks[:max_bands]
 
-    # local m-m kernel diagonal K_mm(r) = ∂v_m/∂m at the current (ρ, m):
-    # for a local kernel, (K·1)(r) IS the diagonal — one double backward
-    from gradwave.scf.common import spin_sigmas
-
-    rho_leaf = rho_tot.detach().clone()
-    m_leaf = m_r.detach().clone().requires_grad_(True)
-    # Double backward through E_xc for the Stoner kernel, so force eager.
-    with torch.enable_grad(), xc_eager():
-        up = 0.5 * (rho_leaf + m_leaf)
-        dn = 0.5 * (rho_leaf - m_leaf)
-        if system.rho_core is not None:
-            up = up + 0.5 * system.rho_core
-            dn = dn + 0.5 * system.rho_core
-        s_uu, s_dd, s_tot = spin_sigmas(up, dn, xc, grid.g_cart)
-        e_xc = xc.energy(up, dn, vol, s_uu, s_dd, s_tot)
-        (v_m,) = torch.autograd.grad(e_xc, m_leaf, create_graph=True)
-        (fmm,) = torch.autograd.grad(v_m.sum(), m_leaf)
-    # grid second gradient Σ_j' ∂²E/∂m_j∂m_j' = (Ω/N)·(K·1)(r_j)
-    fmm = fmm * (grid.n_points / vol)
+    # local m-m kernel diagonal K_mm(r) = ∂v_m/∂m at the current (ρ, m)
+    fmm = _stoner_kernel_diag(rho_tot, m_r, xc, grid, vol, system.rho_core)
 
     u_rows, w_rows, cvals = [], [], []
     for isp, ik, n, c in picks:
@@ -125,4 +108,100 @@ def build_stoner_precond(system, coeffs_s, eigs_s, mu, scheme,
     return StonerSpinPrecond(
         torch.stack(u_rows), torch.stack(w_rows),
         torch.tensor(cvals, dtype=torch.float64, device=u_rows[0].device),
+        float(vol))
+
+
+def _stoner_kernel_diag(rho_tot, m_r, xc, grid, vol, rho_core):
+    """Local m-m kernel diagonal K_mm(r) = ∂v_m/∂m at the current (ρ, m).
+
+    For a local (LDA/GGA-diagonal) kernel, (K·1)(r) IS the diagonal — one
+    double backward through E_xc^collinear(ρ±m). ``xc`` is a collinear SpinXC
+    (the non-collinear path passes NoncollinearXC.collinear and m_r = |m⃗|,
+    the locally-collinear longitudinal magnetization)."""
+    from gradwave.scf.common import spin_sigmas
+
+    rho_leaf = rho_tot.detach().clone()
+    m_leaf = m_r.detach().clone().requires_grad_(True)
+    # Double backward through E_xc for the Stoner kernel, so force eager.
+    with torch.enable_grad(), xc_eager():
+        up = 0.5 * (rho_leaf + m_leaf)
+        dn = 0.5 * (rho_leaf - m_leaf)
+        if rho_core is not None:
+            up = up + 0.5 * rho_core
+            dn = dn + 0.5 * rho_core
+        s_uu, s_dd, s_tot = spin_sigmas(up, dn, xc, grid.g_cart)
+        e_xc = xc.energy(up, dn, vol, s_uu, s_dd, s_tot)
+        (v_m,) = torch.autograd.grad(e_xc, m_leaf, create_graph=True)
+        (fmm,) = torch.autograd.grad(v_m.sum(), m_leaf)
+    # grid second gradient Σ_j' ∂²E/∂m_j∂m_j' = (Ω/N)·(K·1)(r_j)
+    return fmm * (grid.n_points / vol)
+
+
+def build_stoner_precond_nc(system, coeffs, eigs, mu, scheme, width,
+                            rho_tot, m_vec, nc_xc, m_pw, fp_cut=1e-8,
+                            max_bands=96):
+    """Stoner preconditioner for the NON-COLLINEAR moment channel.
+
+    The non-collinear analogue of ``build_stoner_precond``. Near a
+    ferromagnetic solution the LONGITUDINAL magnetization mode (m ∥ the local
+    moment axis) carries the same Stoner-enhanced gain that stalls the
+    collinear FM metal — here it is the m_z channel of the (ρ, m⃗) mixing
+    vector (measured on fcc Ni + SOC: |m_z| residual floors at ~1e-4 while ρ
+    and the transverse m_x/m_y run three orders lower). In the locally-
+    collinear XC (``NoncollinearXC``, ρ± = (ρ ± |m⃗|)/2) the longitudinal
+    kernel K_mm IS the collinear one evaluated at m = |m⃗|, so the same
+    Woodbury-inverted Newton model (I − χ₀^diag K_mm)⁻¹ applies.
+
+    Differences from the collinear builder: the susceptibility codensities come
+    from SPINOR bands (one Fermi-degeneracy g=1 list, ρ_α = |ψ_α↑|² + |ψ_α↓|²
+    summed over both spinor components) and the kernel uses the locally-
+    collinear longitudinal magnitude m = |m⃗|. The returned operator is applied
+    to each Cartesian m-channel; near a collinear FM state the transverse
+    channels are in the identity regime of the operator and it does no harm.
+
+    coeffs: (nk, nbands, 2·m_pw) spinor coefficients (up = [:m_pw], down =
+    [m_pw:]). eigs: (nk, nbands). Returns None in the insulating limit (no
+    Fermi-surface weight)."""
+    from gradwave.core.fftbox import g_to_r, r_to_g
+
+    grid = system.grid
+    shape, vol = grid.shape, grid.volume
+    mask_flat = grid.dens_mask.reshape(-1)
+    device = coeffs.device
+
+    # f' per spinor band by autograd through the smearing scheme (g=1)
+    x = ((eigs - mu) / width).detach().requires_grad_(True)
+    with torch.enable_grad():
+        f = scheme.occupation(x)
+        (dfdx,) = torch.autograd.grad(f.sum(), x)
+    fp = dfdx / width  # (nk, nb), ≤ 0
+    picks = []  # (ik, band index, c = w_k f')
+    for ik in range(eigs.shape[0]):
+        wk = float(system.kweights[ik])
+        for n in torch.nonzero(fp[ik].abs() > fp_cut).flatten().tolist():
+            picks.append((ik, n, wk * float(fp[ik][n])))
+    if not picks:
+        return None
+    picks.sort(key=lambda t: -abs(t[2]))
+    picks = picks[:max_bands]
+
+    # longitudinal kernel diagonal from the locally-collinear magnitude |m⃗|
+    m_mag = torch.sqrt((m_vec.detach() ** 2).sum(dim=0) + nc_xc.m_eps)
+    fmm = _stoner_kernel_diag(rho_tot, m_mag, nc_xc.collinear, grid, vol,
+                              system.rho_core)
+
+    u_rows, w_rows, cvals = [], [], []
+    for ik, n, c in picks:
+        sph = system.spheres[ik]
+        npw = sph.npw
+        psi_up = g_to_r(coeffs[ik, n, :npw], sph.flat_idx, shape)
+        psi_dn = g_to_r(coeffs[ik, n, m_pw:m_pw + npw], sph.flat_idx, shape)
+        dens = ((psi_up.conj() * psi_up).real
+                + (psi_dn.conj() * psi_dn).real) / vol  # ∫ρ_α = 1 (spinor norm)
+        u_rows.append(r_to_g(dens.to(CDTYPE)).reshape(-1)[mask_flat])
+        w_rows.append(r_to_g((fmm * dens).to(CDTYPE)).reshape(-1)[mask_flat])
+        cvals.append(c)
+    return StonerSpinPrecond(
+        torch.stack(u_rows), torch.stack(w_rows),
+        torch.tensor(cvals, dtype=torch.float64, device=device),
         float(vol))
