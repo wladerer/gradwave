@@ -86,7 +86,10 @@ every new energy term lands with one):
 
 - forces vs FD of our own energy (M2 gates; PAW `hubbard_force` 4.85e-8;
   O₂ PAW spin 5e-4)
-- stress vs strain-FD and vs QE (0.006 kbar NC, 0.13 kbar PAW)
+- stress vs strain-FD and vs QE (0.006 kbar NC, 0.13 kbar PAW); collinear
+  nspin=2 NC stress vs strain-FD of its own energy on a rattled FM bcc-Fe
+  cell, with the nonmagnetic (start_mag=0) limit reproducing the nspin=1
+  tensor to ~1e-8 for both LDA and PBE
 - NVE drift (secular ~1 µeV/atom: the force is the exact gradient of the
   SCF surface)
 - becsum-FD of the one-center energy vs `ddd` (5e-9, post-rewrite)
