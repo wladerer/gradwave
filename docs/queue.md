@@ -96,6 +96,33 @@ has to be undone to adopt Dask — it nests under one slot.
 
 ## Dashboard
 
-`gwq status` is the live view. Historical benchmark trends (wall time and the
-reported metric vs git sha) accumulate in `benchmarks/results/<host>/` and get a
-static HTML trend view in a follow-up once enough records exist.
+`gwq status` is the quick terminal view. For a shareable page, `scripts/dashboard.py`
+renders a single self-contained `dashboard.html` (no JavaScript, no external assets):
+a live queue panel per host, and a benchmark-history panel built from the JSON records
+in `benchmarks/results/<host>/` (recent runs per benchmark + a wall-time sparkline).
+
+```bash
+make dashboard          # -> dashboard.html; open it in a browser
+# or, targeting specific hosts / output:
+python scripts/dashboard.py --hosts thinkpad asus --collect --out /tmp/dash.html
+```
+
+`--collect` rsyncs each remote host's `benchmarks/results/` into the local tree first,
+so the history panel covers the whole fleet. Generate on a box that can reach the
+others (the thinkpad already has ssh to asus).
+
+### Hosting on homelab (always-on, over Tailscale)
+
+homelab has no outbound ssh to the laptops, but the laptops can already ssh *to* it,
+so the dashboard is **pushed**, not pulled. It's a static file, so `tailscale serve`
+hosts it with real HTTPS on the tailnet — no web server, no firewall changes, no rebuild:
+
+```bash
+make dashboard-push     # generates + rsyncs to homelab:~/gwdash/index.html
+# once, on homelab (persists in tailscaled state across reboots):
+ssh homelab 'sudo tailscale serve --bg --set-path / $HOME/gwdash'
+```
+
+The page is then at `https://homelab.<tailnet>.ts.net`. Re-run `make dashboard-push`
+(manually, from a `/loop`, or a user systemd timer) to refresh it; a sleeping laptop
+just means its panel shows the last data pushed, timestamped in the header.

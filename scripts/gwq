@@ -62,6 +62,11 @@ HOST_GROUPS: dict[str, dict[str, int]] = {
 # Fallback for an unrecognised host: conservative, laptop-like.
 DEFAULT_GROUPS = {"default": 2, "test": 1, "bench": 1, "sweep": 1}
 
+# Map a box's OS hostname to its logical name (also its ssh alias). asus's
+# hostName is "nixos" — without this it would fall through to DEFAULT_GROUPS and
+# miss the larger asus budget + the gpu group.
+HOST_ALIASES = {"nixos": "asus"}
+
 # Pytest tier selections. We spell these out (rather than `make test-fast`) and
 # use `python -m pytest` so queued/non-interactive jobs don't hit the bare
 # `uv run pytest` collection failure.
@@ -70,7 +75,8 @@ STANDARD_SEL = '-m "not slow and not torture and not gpu"'
 
 
 def this_host() -> str:
-    return socket.gethostname()
+    raw = socket.gethostname()
+    return HOST_ALIASES.get(raw, raw)
 
 
 def groups_for(host: str) -> dict[str, int]:
