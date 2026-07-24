@@ -107,14 +107,17 @@ class ProjectionsParams:
 
 @dataclass(frozen=True)
 class DispersionParams:
-    """Opt-in Grimme D3(BJ) dispersion correction (energy + forces + stress).
+    """Opt-in Grimme D3(BJ)/D4(BJ) dispersion correction (energy+forces+stress).
 
-    A geometric, SCF-independent pairwise correction. ``functional`` selects the
-    BJ damping preset (defaults to the SCF ``xc``); s6/s8/a1/a2 override it. The
-    cutoffs are the real-space image radii for the dispersion and coordination-
-    number sums, in Å."""
+    A geometric, SCF-independent pairwise correction. ``method`` selects ``'d3'``
+    (default) or ``'d4'`` (charge-dependent EEQ C6, with a periodic Ewald charge
+    model). ``functional`` selects the BJ damping preset (defaults to the SCF
+    ``xc``); s6/s8/a1/a2 override it. The cutoffs are the real-space image radii
+    for the dispersion and coordination-number sums, in Å. ``charge`` is the
+    total cell charge fed to the D4 EEQ model (ignored for D3)."""
 
     enabled: bool = False
+    method: str = "d3"             # 'd3' | 'd4'
     functional: str | None = None  # None → use the SCF xc functional
     cutoff: float = 21.2       # Å, dispersion real-space image radius (~40 a0)
     cn_cutoff: float = 10.6    # Å, coordination-number image radius (~20 a0)
@@ -122,8 +125,11 @@ class DispersionParams:
     s8: float | None = None
     a1: float | None = None
     a2: float | None = None    # Å for the a2 BJ radius override (converted at use)
+    charge: float = 0.0        # D4 EEQ total charge (ignored for D3)
 
     def __post_init__(self):
+        if self.method.lower() not in ("d3", "d4"):
+            raise InputError("dispersion.method must be 'd3' or 'd4'")
         if self.cutoff <= 0 or self.cn_cutoff <= 0:
             raise InputError("dispersion cutoffs must be positive")
         if self.cn_cutoff > self.cutoff:
@@ -469,17 +475,19 @@ def _build_dispersion(disp_raw) -> DispersionParams:
     if isinstance(disp_raw, bool):
         return DispersionParams(enabled=disp_raw)
     _check_keys("dispersion", disp_raw,
-                {"enabled", "functional", "cutoff", "cn_cutoff",
-                 "s6", "s8", "a1", "a2"})
+                {"enabled", "method", "functional", "cutoff", "cn_cutoff",
+                 "s6", "s8", "a1", "a2", "charge"})
     def _optf(key):
         v = disp_raw.get(key)
         return None if v is None else float(v)
     return DispersionParams(
         enabled=bool(disp_raw.get("enabled", True)),
+        method=str(disp_raw.get("method", "d3")),
         functional=disp_raw.get("functional"),
         cutoff=float(disp_raw.get("cutoff", 21.2)),
         cn_cutoff=float(disp_raw.get("cn_cutoff", 10.6)),
         s6=_optf("s6"), s8=_optf("s8"), a1=_optf("a1"), a2=_optf("a2"),
+        charge=float(disp_raw.get("charge", 0.0)),
     )
 
 

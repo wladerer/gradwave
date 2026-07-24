@@ -1,4 +1,4 @@
-"""Grimme DFT-D4 dispersion with Becke–Johnson damping — D4(BJ) (molecular).
+"""Grimme DFT-D4 dispersion with Becke–Johnson damping — D4(BJ).
 
 D4 extends D3(BJ) with *charge-dependent* C6 coefficients: the reference
 dynamic polarizabilities are reweighted by a classical electronegativity-
@@ -30,19 +30,39 @@ The two-body BJ energy is then identical in form to D3:
     E_disp = −½ Σ'_{A,B} [ s6 C6_AB/(r⁶+R0⁶) + s8 C8_AB/(r⁸+R0⁸) ],
     C8_AB = 3 C6_AB √(Q_A Q_B),  R0_AB = a1 √(C8_AB/C6_AB) + a2.
 
-Everything is a differentiable function of the Cartesian positions, so forces
-(−∂E/∂τ) come straight from autograd. **Scope:** this module implements the
-*molecular* (non-periodic) case only. A periodic EEQ needs an Ewald treatment
-of the long-range erf-Coulomb charge matrix (the erf(γr)/r tail is ~1/r); that,
-and the resulting stress, are deferred (see the D4 PR / dispersion notebook).
+Everything is a differentiable function of the Cartesian positions **and the
+cell**, so forces (−∂E/∂τ) and stress ((1/Ω)∂E/∂ε) come straight from autograd.
 
-Units: positions in Å, energy in eV. Reference tables (``_d4_params``) are
+**Periodic EEQ (Ewald of the erf-Coulomb hardness matrix).** The off-diagonal
+kernel erf(γ_AB r)/r has the bare-Coulomb 1/r tail, so its lattice sum is only
+conditionally convergent and needs an Ewald split. With a splitting parameter κ
+(fixed off the cell volume, exactly like ``energies/ewald.py``),
+
+    erf(γr)/r = [erf(γr) − erf(κr)]/r  (short-ranged, real space)
+              +  erf(κr)/r             (smooth tail, reciprocal space).
+
+The reciprocal part is *identical* to the bare-Coulomb Ewald reciprocal sum
+because the screening only touches short range — the 1/r tail is the same:
+
+    A_AB^rec = (4π/Ω) Σ_{G≠0} e^{−G²/4κ²}/G² cos(G·r_AB).
+
+The self (A=B, L=0) real-space term is the finite limit 2(γ_AA−κ)/√π; combined
+with the reciprocal on-site value 2κ/√π it reconstructs √(2/π)/α_A + the atom's
+own periodic-image self-interaction. A uniform-background constant −π/(κ²Ω) is
+added to every A_AB; because it is a rank-1 constant on the charge block it is
+absorbed by the total-charge Lagrange multiplier and leaves the charges q
+invariant (so it never affects the D4 energy, which only reads q). As Ω → ∞ the
+reciprocal sum and background vanish and A → erf(γ_AB r)/r: the molecular limit.
+
+Units: positions/cell in Å, energy in eV. Reference tables (``_d4_params``) are
 atomic (Bohr, Hartree); conversion happens at this boundary only. Reference:
-Caldeweyher, Bannwarth, Grimme, J. Chem. Phys. 150, 154122 (2019).
+Caldeweyher, Bannwarth, Grimme, J. Chem. Phys. 150, 154122 (2019). The periodic
+EEQ Ewald mirrors the multicharge convention (Caldeweyher et al.).
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -50,7 +70,13 @@ import torch
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
 from gradwave.dtypes import RDTYPE
+from gradwave.grids import reciprocal_cell
 from gradwave.postscf import _d4_params as P
+
+# Ewald splitting accuracy for the periodic EEQ Coulomb matrix: erfc(_EEQ_ACC)
+# and e^{−_EEQ_ACC²} bound the last shell (6.0 → ~1e-16, machine converged and
+# cheap for unit-cell systems). Mirrors ``energies/ewald._ACC``.
+_EEQ_ACC = 6.0
 
 
 @dataclass(frozen=True)
@@ -58,8 +84,10 @@ class D4Config:
     """Resolved D4(BJ) damping constants (atomic units) and total charge.
 
     Build from a functional name with :meth:`from_functional`, or pass the four
-    damping constants directly. ``charge`` is the total molecular charge fed to
-    the EEQ model.
+    damping constants directly. ``charge`` is the total molecular/cell charge fed
+    to the EEQ model. ``cutoff``/``cn_cutoff`` are real-space image radii (Bohr)
+    for the periodic dispersion and coordination-number sums (ignored for
+    molecules).
     """
 
     s6: float
@@ -67,9 +95,13 @@ class D4Config:
     a1: float
     a2: float  # Bohr
     charge: float = 0.0
+    cutoff: float = 40.0  # Bohr (~21 Å): dispersion real-space image radius
+    cn_cutoff: float = 20.0  # Bohr (~10.6 Å): coordination-number image radius
 
     @classmethod
     def from_functional(cls, functional: str, *, charge: float = 0.0,
+                        cutoff_ang: float | None = None,
+                        cn_cutoff_ang: float | None = None,
                         **overrides: float) -> D4Config:
         key = functional.lower().replace("_", "-")
         if key not in P.BJ_PARAMS:
@@ -79,8 +111,50 @@ class D4Config:
             )
         s6, s8, a1, a2 = P.BJ_PARAMS[key]
         kw = dict(s6=s6, s8=s8, a1=a1, a2=a2, charge=charge)
+        if cutoff_ang is not None:
+            kw["cutoff"] = cutoff_ang / BOHR_ANG
+        if cn_cutoff_ang is not None:
+            kw["cn_cutoff"] = cn_cutoff_ang / BOHR_ANG
         kw.update(overrides)
         return cls(**kw)
+
+    @classmethod
+    def resolve(
+        cls,
+        functional: str,
+        *,
+        charge: float = 0.0,
+        cutoff_ang: float,
+        cn_cutoff_ang: float,
+        s6: float | None = None,
+        s8: float | None = None,
+        a1: float | None = None,
+        a2: float | None = None,
+    ) -> D4Config:
+        """Build from a functional preset with optional per-constant overrides.
+
+        Overrides use the published D4(BJ) units (a2 in Bohr). If no preset
+        exists for ``functional`` all four constants must be supplied. Mirrors
+        :meth:`dispersion.D3Config.resolve` so the calculator/api wiring is
+        symmetric.
+        """
+        overrides = {"s6": s6, "s8": s8, "a1": a1, "a2": a2}
+        given = {k: v for k, v in overrides.items() if v is not None}
+        key = functional.lower().replace("_", "-")
+        if key in P.BJ_PARAMS:
+            return cls.from_functional(
+                key, charge=charge, cutoff_ang=cutoff_ang,
+                cn_cutoff_ang=cn_cutoff_ang, **given
+            )
+        if len(given) != 4:
+            raise ValueError(
+                f"no D4(BJ) preset for functional {functional!r}; supply all of "
+                f"s6, s8, a1, a2 explicitly (given: {sorted(given)})"
+            )
+        return cls(
+            charge=charge, cutoff=cutoff_ang / BOHR_ANG,
+            cn_cutoff=cn_cutoff_ang / BOHR_ANG, **given
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -145,69 +219,180 @@ def _element_tensors(atomic_numbers, dtype, device):
 
 
 # ---------------------------------------------------------------------------
-# coordination numbers (molecular, all pairs; differentiable in positions)
+# real-space image enumeration (integer labels off a detached cell)
 # ---------------------------------------------------------------------------
 
-def _distances(pos_bohr: torch.Tensor):
-    """(na,na) distances with the diagonal shifted off zero (kept finite)."""
-    na = pos_bohr.shape[0]
-    d = pos_bohr[:, None, :] - pos_bohr[None, :, :]
-    eye = torch.eye(na, dtype=torch.bool, device=pos_bohr.device)
-    offset = torch.zeros(3, dtype=pos_bohr.dtype, device=pos_bohr.device)
-    offset[0] = 1.0
-    d = d + eye[..., None].to(pos_bohr.dtype) * offset
-    return torch.linalg.norm(d, dim=-1), eye
+def _image_labels(cell_ang: np.ndarray | None, rcut_bohr: float) -> np.ndarray:
+    """Integer lattice labels n with |n·cell| ≤ rcut (incl. n=0). (nR, 3).
 
+    Mirrors ``dispersion._image_labels``: integer labels so the Cartesian
+    images can be rebuilt on the autograd cell (the stress path); a molecule
+    (cell is None) has only the n=0 image.
+    """
+    if cell_ang is None:
+        return np.zeros((1, 3), dtype=np.int64)
+    cell = np.asarray(cell_ang, dtype=np.float64) / BOHR_ANG  # Bohr
+    binv = reciprocal_cell(cell) / (2.0 * math.pi)  # rows b_i/2π
+    bounds = [int(np.ceil(rcut_bohr * np.linalg.norm(binv[i]))) + 1 for i in range(3)]
+    axes = [np.arange(-n, n + 1) for n in bounds]
+    n = np.stack(np.meshgrid(*axes, indexing="ij"), -1).reshape(-1, 3)
+    r = n @ cell
+    return n[np.linalg.norm(r, axis=1) <= rcut_bohr + 1e-9].astype(np.int64)
+
+
+def _g_labels(cell_ang: np.ndarray, gcut_bohr: float) -> np.ndarray:
+    """Integer reciprocal labels m with 0 < |m·B| ≤ gcut. (nG, 3), off a detached cell.
+
+    B = reciprocal_cell(cell) has rows b_i (Bohr⁻¹); G = m·B. The Cartesian G are
+    rebuilt on the autograd cell in :func:`_eeq_amat_periodic` so the reciprocal
+    sum rides the strain graph.
+    """
+    cell = np.asarray(cell_ang, dtype=np.float64) / BOHR_ANG  # Bohr
+    b = reciprocal_cell(cell)  # rows b_i, Bohr⁻¹
+    bounds = [
+        int(np.ceil(gcut_bohr * np.linalg.norm(cell[i]) / (2.0 * math.pi))) + 1
+        for i in range(3)
+    ]
+    axes = [np.arange(-n, n + 1) for n in bounds]
+    m = np.stack(np.meshgrid(*axes, indexing="ij"), -1).reshape(-1, 3)
+    g = m @ b
+    g2 = np.einsum("ij,ij->i", g, g)
+    keep = (g2 > 1e-12) & (g2 <= gcut_bohr**2 + 1e-9)
+    return m[keep].astype(np.int64)
+
+
+def _pair_distances(pos_bohr: torch.Tensor, images_bohr: torch.Tensor):
+    """(na,na,nR) distances |τ_a − τ_b + L| and the self-pair (A=B, L=0) mask.
+
+    The masked self separation is shifted off zero *before* the norm so the dead
+    branch keeps finite second derivatives (the Ewald double-backward guard);
+    callers must still exclude/replace self pairs via the returned mask.
+    """
+    na = pos_bohr.shape[0]
+    d = (
+        pos_bohr[:, None, None, :]
+        - pos_bohr[None, :, None, :]
+        + images_bohr[None, None, :, :]
+    )
+    dev, dt = pos_bohr.device, pos_bohr.dtype
+    img0 = torch.linalg.norm(images_bohr, dim=-1) < 1e-12
+    self_mask = torch.eye(na, dtype=torch.bool, device=dev)[:, :, None] & img0[None, None, :]
+    offset = torch.zeros(3, dtype=dt, device=dev)
+    offset[0] = 1.0
+    d = d + self_mask[..., None].to(dt) * offset
+    r = torch.linalg.norm(d, dim=-1)
+    return r, self_mask
+
+
+# ---------------------------------------------------------------------------
+# coordination numbers (image sums; differentiable in positions and cell)
+# ---------------------------------------------------------------------------
 
 def _erf_count(r, r0, kcn):
     return 0.5 * (1.0 + torch.erf(-kcn * (r / r0 - 1.0)))
 
 
-def _cn_d4(pos_bohr, rcov, en, eye):
+def _cn_d4(pos_bohr, rcov, en, images_bohr, cutoff):
     """D4 covalent CN: erf counting with the |EN_A−EN_B| pair weighting."""
-    r, _ = _distances(pos_bohr)
-    r0 = rcov[:, None] + rcov[None, :]
-    endiff = torch.abs(en[:, None] - en[None, :])
+    r, self_mask = _pair_distances(pos_bohr, images_bohr)
+    r0 = (rcov[:, None] + rcov[None, :])[:, :, None]
+    endiff = torch.abs(en[:, None] - en[None, :])[:, :, None]
     weight = P.D4_K4 * torch.exp(-((endiff + P.D4_K5) ** 2) / P.D4_K6)
     contrib = weight * _erf_count(r, r0, P.KCN_D4)
-    contrib = contrib.masked_fill(eye, 0.0)
-    return contrib.sum(dim=1)
+    drop = self_mask | (r > cutoff)
+    contrib = torch.where(drop, torch.zeros_like(contrib), contrib)
+    return contrib.sum(dim=(1, 2))
 
 
-def _cn_eeq(pos_bohr, rcov, eye):
+def _cn_eeq(pos_bohr, rcov, images_bohr, cutoff):
     """EEQ CN: plain erf counting, smoothly capped at ``CN_EEQ_MAX``."""
-    r, _ = _distances(pos_bohr)
-    r0 = rcov[:, None] + rcov[None, :]
-    contrib = _erf_count(r, r0, P.KCN_EEQ).masked_fill(eye, 0.0)
-    cn = contrib.sum(dim=1)
+    r, self_mask = _pair_distances(pos_bohr, images_bohr)
+    r0 = (rcov[:, None] + rcov[None, :])[:, :, None]
+    contrib = _erf_count(r, r0, P.KCN_EEQ)
+    drop = self_mask | (r > cutoff)
+    contrib = torch.where(drop, torch.zeros_like(contrib), contrib)
+    cn = contrib.sum(dim=(1, 2))
     cnmax = torch.tensor(P.CN_EEQ_MAX, dtype=cn.dtype, device=cn.device)
     return torch.log1p(torch.exp(cnmax)) - torch.log1p(torch.exp(cnmax - cn))
 
 
 # ---------------------------------------------------------------------------
-# EEQ partial charges (bordered linear solve; differentiable in positions)
+# EEQ hardness matrix (molecular and periodic) + bordered solve
 # ---------------------------------------------------------------------------
 
-def _eeq_charges(pos_bohr, T, cn_eeq, total_charge):
-    """Solve the constrained EEQ system for partial charges q (na,)."""
+def _eeq_amat_molecular(pos_bohr, T):
+    """Molecular EEQ Coulomb matrix A (na,na): erf(γ r)/r, diag η + √(2/π)/α."""
     na = pos_bohr.shape[0]
     dt, dev = pos_bohr.dtype, pos_bohr.device
-    r, eye = _distances(pos_bohr)
+    d = pos_bohr[:, None, :] - pos_bohr[None, :, :]
+    eye = torch.eye(na, dtype=torch.bool, device=dev)
+    offset = torch.zeros(3, dtype=dt, device=dev)
+    offset[0] = 1.0
+    d = d + eye[..., None].to(dt) * offset
+    r = torch.linalg.norm(d, dim=-1)
 
     rad = T["rad"]
     gamma = 1.0 / torch.sqrt(rad[:, None] ** 2 + rad[None, :] ** 2)
     off = torch.erf(gamma * r) / r
     diag = T["eta"] + P.SQRT_2_OVER_PI / rad
-    A = torch.where(eye, diag.diag_embed(), off)
+    return torch.where(eye, diag.diag_embed(), off)
 
-    # bordered system with the total-charge Lagrange constraint
+
+def _eeq_amat_periodic(pos_bohr, T, cell_bohr, real_images_bohr, g_labels_int, kappa):
+    """Periodic EEQ Coulomb matrix A (na,na) via Ewald of erf(γ r)/r.
+
+    ``cell_bohr`` (3,3, on the autograd graph, rows a_i, Bohr) and ``pos_bohr``
+    carry positions/cell derivatives; ``real_images_bohr`` are Cartesian lattice
+    vectors rebuilt on that cell; ``g_labels_int`` are integer reciprocal labels
+    (detached); ``kappa`` is the fixed Ewald splitting parameter (Bohr⁻¹).
+    """
+    dt, dev = pos_bohr.dtype, pos_bohr.device
+    rad = T["rad"]
+    gamma = 1.0 / torch.sqrt(rad[:, None] ** 2 + rad[None, :] ** 2)  # (na,na)
+    omega = torch.abs(torch.linalg.det(cell_bohr))
+    sqrt_pi = math.sqrt(math.pi)
+
+    # --- real space: [erf(γr) − erf(κr)]/r, short-ranged and smooth at r→0 ---
+    r, self_mask = _pair_distances(pos_bohr, real_images_bohr)  # (na,na,nR)
+    ga = gamma[:, :, None]
+    kernel = (torch.erf(ga * r) - torch.erf(kappa * r)) / r
+    # A=B, L=0 finite limit 2(γ_AA − κ)/√π (r was shifted off 0; override it)
+    self_val = (2.0 / sqrt_pi) * (gamma - kappa)  # (na,na); diagonal used only
+    kernel = torch.where(self_mask, self_val[:, :, None].expand_as(kernel), kernel)
+    a_real = kernel.sum(dim=2)  # (na,na)
+
+    # --- reciprocal space: (4π/Ω) Σ_{G≠0} e^{−G²/4κ²}/G² cos(G·r_AB) ---
+    b = 2.0 * math.pi * torch.linalg.inv(cell_bohr).transpose(-2, -1)  # rows b_i
+    g_lab = torch.as_tensor(g_labels_int, dtype=dt, device=dev)
+    gvec = g_lab @ b  # (nG,3), on graph
+    g2 = (gvec * gvec).sum(-1)  # (nG,)
+    rij = pos_bohr[:, None, :] - pos_bohr[None, :, :]  # (na,na,3)
+    phase = rij @ gvec.T  # (na,na,nG)
+    pref = torch.exp(-g2 / (4.0 * kappa * kappa)) / g2  # (nG,)
+    a_recip = (4.0 * math.pi / omega) * (pref[None, None, :] * torch.cos(phase)).sum(-1)
+
+    # --- neutralizing background (rank-1 constant; leaves charges invariant) ---
+    a_bg = -math.pi / (kappa * kappa * omega)
+
+    a = a_real + a_recip + a_bg
+    a = a + torch.diag_embed(T["eta"])  # atomic hardness on the diagonal
+    return a
+
+
+def _eeq_solve(A, T, cn_eeq, total_charge):
+    """Solve the charge-constrained bordered EEQ system for partial charges q."""
+    na = A.shape[0]
+    dt, dev = A.dtype, A.device
     A_full = torch.zeros((na + 1, na + 1), dtype=dt, device=dev)
     A_full[:na, :na] = A
     A_full[:na, na] = 1.0
     A_full[na, :na] = 1.0
-
-    x = torch.empty(na + 1, dtype=dt, device=dev)
-    rhs = -T["chi"] + T["kcn"] * torch.sqrt(cn_eeq)
+    # floor CN inside the sqrt: √(CN) has a divergent derivative at CN→0 (an
+    # isolated/low-coordination atom), so a bare sqrt(0) poisons the backward
+    # pass with a 0·∞ NaN. The clamp is forward-inert for any bonded atom
+    # (CN≫1e-14, so the molecular references stay bit-for-bit) and sends the
+    # dead-branch gradient to 0, which is the correct CN→0 limit.
+    rhs = -T["chi"] + T["kcn"] * torch.sqrt(cn_eeq.clamp_min(1e-14))
     x = torch.cat([rhs, torch.tensor([total_charge], dtype=dt, device=dev)])
     sol = torch.linalg.solve(A_full, x)
     return sol[:na]
@@ -261,6 +446,26 @@ def _atomic_c6(weights, c6ref):
 
 
 # ---------------------------------------------------------------------------
+# periodic setup helper (image labels + Ewald parameter, off a detached cell)
+# ---------------------------------------------------------------------------
+
+def _periodic_setup(ref_cell_ang, cfg, dtype, device):
+    """Image/G labels and the Ewald κ (all fixed off the detached ``ref_cell``)."""
+    rc = np.asarray(ref_cell_ang, dtype=np.float64)
+    omega_bohr = abs(np.linalg.det(rc / BOHR_ANG))
+    kappa = math.pi / omega_bohr ** (1.0 / 3.0)  # Ewald splitting param, Bohr⁻¹
+    rcut = _EEQ_ACC / kappa
+    gcut = 2.0 * kappa * _EEQ_ACC
+    return {
+        "cn_lab": _image_labels(rc, cfg.cn_cutoff),
+        "e_lab": _image_labels(rc, cfg.cutoff),
+        "eeq_real_lab": _image_labels(rc, rcut),
+        "g_lab": _g_labels(rc, gcut),
+        "kappa": kappa,
+    }
+
+
+# ---------------------------------------------------------------------------
 # energy (the differentiable core)
 # ---------------------------------------------------------------------------
 
@@ -269,63 +474,132 @@ def dispersion_energy(
     cell,
     atomic_numbers,
     cfg: D4Config,
+    *,
+    ref_cell: np.ndarray | None = None,
 ) -> torch.Tensor:
-    """D4(BJ) dispersion energy [eV], differentiable in ``positions``.
+    """D4(BJ) dispersion energy [eV], differentiable in ``positions`` and ``cell``.
 
-    positions (na,3) Å. ``cell`` must be ``None`` (molecular): the periodic EEQ
-    (Ewald) is out of scope.
+    positions (na,3) Å. ``cell`` (3,3) Å tensor or ``None`` (molecule). For the
+    periodic case the EEQ charges come from an Ewald sum of the erf-Coulomb
+    hardness matrix (see the module docstring). ``ref_cell`` (Å, detached numpy)
+    fixes the integer image/G labels and the Ewald κ; defaults to ``cell`` and is
+    passed by the stress path so the cell can ride the ε-graph.
     """
-    if cell is not None:
-        raise NotImplementedError(
-            "D4(BJ) currently supports molecules only (cell=None); the periodic "
-            "EEQ charge model requires an Ewald sum of the erf-Coulomb matrix."
-        )
     dev, dt = positions.device, positions.dtype
     pos_b = positions / BOHR_ANG
 
     T = _element_tensors(atomic_numbers, dt, dev)
-    _, eye = _distances(pos_b)
 
-    cn_eeq = _cn_eeq(pos_b, T["rcov"], eye)
-    q = _eeq_charges(pos_b, T, cn_eeq, cfg.charge)
-    covcn = _cn_d4(pos_b, T["rcov"], T["en"], eye)
+    if cell is None:
+        zero_img = torch.zeros((1, 3), dtype=dt, device=dev)
+        inf = math.inf
+        cn_eeq = _cn_eeq(pos_b, T["rcov"], zero_img, inf)
+        A = _eeq_amat_molecular(pos_b, T)
+        q = _eeq_solve(A, T, cn_eeq, cfg.charge)
+        covcn = _cn_d4(pos_b, T["rcov"], T["en"], zero_img, inf)
+        e_images = zero_img
+        e_cutoff = inf
+    else:
+        rc = np.asarray(ref_cell if ref_cell is not None else cell.detach().cpu().numpy())
+        S = _periodic_setup(rc, cfg, dt, dev)
+        cell_b = cell / BOHR_ANG  # (3,3) Bohr, rows a_i, on the autograd graph
+
+        def cart(labels):
+            lab = torch.as_tensor(labels, dtype=dt, device=dev)
+            return lab @ cell_b
+
+        cn_eeq = _cn_eeq(pos_b, T["rcov"], cart(S["cn_lab"]), cfg.cn_cutoff)
+        A = _eeq_amat_periodic(pos_b, T, cell_b, cart(S["eeq_real_lab"]),
+                               S["g_lab"], S["kappa"])
+        q = _eeq_solve(A, T, cn_eeq, cfg.charge)
+        covcn = _cn_d4(pos_b, T["rcov"], T["en"], cart(S["cn_lab"]), cfg.cn_cutoff)
+        e_images = cart(S["e_lab"])
+        e_cutoff = cfg.cutoff
 
     weights = _reference_weights(covcn, q, T)
     c6 = _atomic_c6(weights, T["c6ref"])  # (na,na)
     c8 = 3.0 * c6 * T["r4r2"][:, None] * T["r4r2"][None, :]
     r0 = cfg.a1 * torch.sqrt(c8 / c6) + cfg.a2
 
-    r, _ = _distances(pos_b)
-    r6 = r ** 6
-    r8 = r6 * r * r
-    e6 = c6 / (r6 + r0 ** 6)
-    e8 = c8 / (r8 + r0 ** 8)
-    term = (cfg.s6 * e6 + cfg.s8 * e8).masked_fill(eye, 0.0)
+    r, self_mask = _pair_distances(pos_b, e_images)  # (na,na,nR)
+    r2 = r * r
+    r6 = r2 ** 3
+    r8 = r6 * r2
+    e6 = c6[:, :, None] / (r6 + (r0 ** 6)[:, :, None])
+    e8 = c8[:, :, None] / (r8 + (r0 ** 8)[:, :, None])
+    term = cfg.s6 * e6 + cfg.s8 * e8
+    drop = self_mask | (r > e_cutoff)
+    term = torch.where(drop, torch.zeros_like(term), term)
     e_hartree = -0.5 * term.sum()
     return e_hartree * HARTREE_EV
 
 
-def eeq_charges(positions, cell, atomic_numbers, charge: float = 0.0) -> torch.Tensor:
-    """EEQ partial charges (na,) [e], differentiable in ``positions`` (molecular)."""
-    if cell is not None:
-        raise NotImplementedError("EEQ charges: molecular (cell=None) only for now.")
+def eeq_charges(positions, cell, atomic_numbers, charge: float = 0.0,
+                *, cfg: D4Config | None = None) -> torch.Tensor:
+    """EEQ partial charges (na,) [e], differentiable in ``positions`` and ``cell``.
+
+    Molecular (``cell=None``) or periodic. For the periodic case a ``cfg`` may be
+    given to control the CN image radius; otherwise defaults are used.
+    """
     dt, dev = positions.dtype, positions.device
     pos_b = positions / BOHR_ANG
     T = _element_tensors(atomic_numbers, dt, dev)
-    _, eye = _distances(pos_b)
-    cn_eeq = _cn_eeq(pos_b, T["rcov"], eye)
-    return _eeq_charges(pos_b, T, cn_eeq, charge)
+    if cell is None:
+        zero_img = torch.zeros((1, 3), dtype=dt, device=dev)
+        cn_eeq = _cn_eeq(pos_b, T["rcov"], zero_img, math.inf)
+        A = _eeq_amat_molecular(pos_b, T)
+        return _eeq_solve(A, T, cn_eeq, charge)
+    cfg = cfg if cfg is not None else D4Config(s6=1.0, s8=0.0, a1=0.0, a2=0.0,
+                                               charge=charge)
+    rc = np.asarray(cell.detach().cpu().numpy())
+    S = _periodic_setup(rc, cfg, dt, dev)
+    cell_b = cell / BOHR_ANG
+    lab = lambda x: torch.as_tensor(x, dtype=dt, device=dev) @ cell_b  # noqa: E731
+    cn_eeq = _cn_eeq(pos_b, T["rcov"], lab(S["cn_lab"]), cfg.cn_cutoff)
+    A = _eeq_amat_periodic(pos_b, T, cell_b, lab(S["eeq_real_lab"]),
+                           S["g_lab"], S["kappa"])
+    return _eeq_solve(A, T, cn_eeq, charge)
 
 
 # ---------------------------------------------------------------------------
-# forces (autograd wrapper — mirrors postscf/dispersion.py)
+# forces & stress (autograd wrappers — mirror postscf/forces.py, stress.py)
 # ---------------------------------------------------------------------------
+
+def _cell_tensor(cell, dtype, device):
+    if cell is None:
+        return None
+    return torch.as_tensor(np.asarray(cell, dtype=np.float64), dtype=dtype, device=device)
+
 
 def dispersion_forces(positions, cell, atomic_numbers, cfg: D4Config) -> torch.Tensor:
-    """F_A = −∂E_disp/∂τ_A, (na,3) [eV/Å], via autograd (molecular)."""
-    if cell is not None:
-        raise NotImplementedError("D4(BJ) forces: molecular (cell=None) only for now.")
+    """F_A = −∂E_disp/∂τ_A, (na,3) [eV/Å], via autograd (molecular or periodic)."""
+    dev = positions.device
     pos = positions.detach().clone().to(RDTYPE).requires_grad_(True)
-    e = dispersion_energy(pos, None, atomic_numbers, cfg)
+    cell_t = _cell_tensor(cell, RDTYPE, dev)
+    e = dispersion_energy(pos, cell_t, atomic_numbers, cfg)
     (grad,) = torch.autograd.grad(e, pos)
     return -grad
+
+
+def dispersion_stress(positions, cell, atomic_numbers, cfg: D4Config) -> torch.Tensor:
+    """σ_αβ = (1/Ω) ∂E_disp/∂ε_αβ, (3,3) [eV/Å³] (tension-positive), via autograd.
+
+    Symmetric strain ε with r→(1+ε)r, a_i→(1+ε)a_i, τ→(1+ε)τ, exactly the
+    ``postscf/stress.py`` convention; integer image/G labels and the Ewald κ stay
+    fixed at ε=0 (passed via ``ref_cell``).
+    """
+    if cell is None:
+        raise ValueError("dispersion stress requires a periodic cell")
+    dev = positions.device
+    cell0 = np.asarray(cell, dtype=np.float64)
+    omega0 = abs(np.linalg.det(cell0))
+    pos0 = positions.detach().to(RDTYPE)
+    a0 = torch.as_tensor(cell0, dtype=RDTYPE, device=dev)
+
+    eps = torch.zeros(3, 3, dtype=RDTYPE, device=dev, requires_grad=True)
+    f_map = torch.eye(3, dtype=RDTYPE, device=dev) + eps
+    pos_e = pos0 @ f_map.T
+    cell_e = a0 @ f_map.T
+    e = dispersion_energy(pos_e, cell_e, atomic_numbers, cfg, ref_cell=cell0)
+    (grad,) = torch.autograd.grad(e, eps)
+    return 0.5 * (grad + grad.T) / omega0

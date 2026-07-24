@@ -988,32 +988,46 @@ def _nc_occupations(res, scheme: str, width: float):
 
 
 def _apply_dispersion(res, inp: Input) -> dict:
-    """Compute the D3(BJ) correction, fold its energy into ``res.energies`` (so
-    the reported total/free energy include it), and return the summary block
-    (energy, forces, stress, resolved damping). Degrades to
-    ``{'available': False}`` when the element set is uncovered or no BJ preset
-    exists for the functional."""
+    """Compute the D3(BJ)/D4(BJ) correction, fold its energy into ``res.energies``
+    (so the reported total/free energy include it), and return the summary block
+    (energy, forces, stress, resolved damping). ``dispersion.method`` selects
+    ``'d3'`` (default) or ``'d4'`` (charge-dependent EEQ C6, periodic Ewald charge
+    model). Degrades to ``{'available': False}`` when the element set is uncovered
+    or no BJ preset exists for the functional."""
     import numpy as np
     import torch
 
-    from gradwave.postscf.dispersion import (
-        D3Config,
-        dispersion_energy,
-        dispersion_forces,
-        dispersion_stress,
-    )
-
     dp = inp.dispersion
+    method = dp.method.lower()
     system = _get(res, "system")
     positions = system.positions.detach().to(torch.float64)
     cell = np.asarray(system.grid.cell, dtype=np.float64)
     z = [int(v) for v in inp.atoms.get_atomic_numbers()]
     try:
-        cfg = D3Config.resolve(
-            dp.functional or inp.xc,
-            cutoff_ang=dp.cutoff, cn_cutoff_ang=dp.cn_cutoff,
-            s6=dp.s6, s8=dp.s8, a1=dp.a1, a2=dp.a2,
-        )
+        if method == "d4":
+            from gradwave.postscf.dispersion_d4 import (
+                D4Config,
+                dispersion_energy,
+                dispersion_forces,
+                dispersion_stress,
+            )
+            cfg = D4Config.resolve(
+                dp.functional or inp.xc, charge=dp.charge,
+                cutoff_ang=dp.cutoff, cn_cutoff_ang=dp.cn_cutoff,
+                s6=dp.s6, s8=dp.s8, a1=dp.a1, a2=dp.a2,
+            )
+        else:
+            from gradwave.postscf.dispersion import (
+                D3Config,
+                dispersion_energy,
+                dispersion_forces,
+                dispersion_stress,
+            )
+            cfg = D3Config.resolve(
+                dp.functional or inp.xc,
+                cutoff_ang=dp.cutoff, cn_cutoff_ang=dp.cn_cutoff,
+                s6=dp.s6, s8=dp.s8, a1=dp.a1, a2=dp.a2,
+            )
         cell_t = torch.as_tensor(cell, dtype=torch.float64, device=positions.device)
         e = dispersion_energy(positions, cell_t, z, cfg)
         forces = dispersion_forces(positions, cell, z, cfg)
@@ -1025,7 +1039,7 @@ def _apply_dispersion(res, inp: Input) -> dict:
     res.energies.dispersion = e.detach().to(positions.device)
     return {
         "available": True,
-        "method": "d3-bj",
+        "method": f"{method}-bj",
         "functional": (dp.functional or inp.xc).lower(),
         "damping": {"s6": cfg.s6, "s8": cfg.s8, "a1": cfg.a1, "a2_bohr": cfg.a2},
         "energy_eV": float(e),
