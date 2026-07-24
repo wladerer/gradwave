@@ -568,6 +568,25 @@ def _tail_lines(summary):
     return ["", "   " + "  |  ".join(tail)] if tail else []
 
 
+# Optional report sections, in output order. Each entry is (summary key,
+# renderer, needs_full_summary): renderers flagged True receive the whole
+# summary because they read sibling keys (e.g. "error_estimate"); the rest
+# receive just summary[key]. structure/parameters render unconditionally and
+# stay out of the table.
+_SECTIONS = (
+    ("scf", _scf_report, True),
+    ("dispersion", _dispersion_lines, False),
+    ("pdos", _pdos_lines, False),
+    ("relax", _relax_report, True),
+    ("bands", _bands_lines, False),
+    ("magnetism", _magnetism_lines, False),
+    ("eos", _eos_lines, False),
+    ("elastic", _elastic_lines, False),
+    ("phonons", _phonon_lines, False),
+    ("provenance", _provenance_lines, False),
+)
+
+
 def format_output(summary: dict) -> str:
     """The full human-readable report for a task summary dict."""
     code = summary["code"]
@@ -576,26 +595,9 @@ def format_output(summary: dict) -> str:
     lines = [head, "─" * min(len(head), _W)]
     lines += _structure_lines(summary["structure"])
     lines += _parameters_lines(summary["parameters"])
-    if "scf" in summary:
-        lines += _scf_report(summary)
-    if "dispersion" in summary:
-        lines += _dispersion_lines(summary["dispersion"])
-    if "pdos" in summary:
-        lines += _pdos_lines(summary["pdos"])
-    if "relax" in summary:
-        lines += _relax_report(summary)
-    if "bands" in summary:
-        lines += _bands_lines(summary["bands"])
-    if "magnetism" in summary:
-        lines += _magnetism_lines(summary["magnetism"])
-    if "eos" in summary:
-        lines += _eos_lines(summary["eos"])
-    if "elastic" in summary:
-        lines += _elastic_lines(summary["elastic"])
-    if "phonons" in summary:
-        lines += _phonon_lines(summary["phonons"])
-    if "provenance" in summary:
-        lines += _provenance_lines(summary["provenance"])
+    for key, render, needs_full in _SECTIONS:
+        if key in summary:
+            lines += render(summary if needs_full else summary[key])
     lines += _tail_lines(summary)
     lines.append("")
     return "\n".join(lines) + "\n"
