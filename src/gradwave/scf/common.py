@@ -184,20 +184,41 @@ def assemble_pw_energies(coeffs_s, occ_s, kweights, spheres, grid, vol,
 
 
 def shared_fermi_occupations(eigs_s, kweights, smearing, width, n_electrons,
-                             nspin, device):
+                             nspin, device, tot_magnetization=None):
     """Occupations, Fermi level, and entropy term for per-spin eigenvalue
     stacks with a SHARED Fermi level (both spin channels fill from one μ;
     the spin degeneracy g = 2 for nspin=1, 1 per channel otherwise).
 
-    Returns (occ_s per spin, mu float, entropy_term tensor). smearing
-    "none" gives fixed occupations (nspin=1 only — a spin system needs a
-    shared Fermi level to exchange charge between channels)."""
+    Returns (occ_s per spin, mu float, entropy_term tensor). smearing "none"
+    gives fixed occupations: for nspin=1 the lowest N_e/2 bands; for nspin=2 a
+    fixed spin moment (FSM) run — the per-channel electron counts come from
+    tot_magnetization M via N↑=(N_e+M)/2, N↓=(N_e−M)/2, so the moment is held
+    fixed instead of found from a shared μ (which smearing would need)."""
     g_spin = 2 if nspin == 1 else 1
     if smearing == "none":
-        if nspin != 1:
-            raise ValueError("nspin=2 requires smearing (shared Fermi level)")
-        occ_s = [fixed_occupations(eigs_s[0], n_electrons)]
-        mu = float(eigs_s[0][:, int(n_electrons // 2) - 1].max())
+        if nspin == 1:
+            occ_s = [fixed_occupations(eigs_s[0], n_electrons)]
+            mu = float(eigs_s[0][:, int(n_electrons // 2) - 1].max())
+            entropy_term = torch.zeros((), dtype=RDTYPE, device=device)
+            return occ_s, mu, entropy_term
+        # nspin=2 fixed spin moment: integer per-channel filling from M
+        if tot_magnetization is None:
+            raise ValueError(
+                "nspin=2 without smearing requires tot_magnetization (fixed "
+                "spin moment); otherwise pass a smearing for a shared Fermi level")
+        n_up = (n_electrons + tot_magnetization) / 2.0
+        n_dn = (n_electrons - tot_magnetization) / 2.0
+        if n_up < 0 or n_dn < 0:
+            raise ValueError(
+                f"tot_magnetization={tot_magnetization} exceeds n_electrons="
+                f"{n_electrons} (would give a negative channel count)")
+        occ_s = [fixed_occupations(eigs_s[0], n_up, degeneracy=1.0),
+                 fixed_occupations(eigs_s[1], n_dn, degeneracy=1.0)]
+        # nominal Fermi level: the higher of the two channels' VBMs (gap-centred
+        # reporting like the nspin=1 branch); a channel with no electrons is skipped
+        vbms = [float(eigs_s[sp][:, int(round(n)) - 1].max())
+                for sp, n in ((0, n_up), (1, n_dn)) if round(n) > 0]
+        mu = max(vbms) if vbms else float(eigs_s[0].min())
         entropy_term = torch.zeros((), dtype=RDTYPE, device=device)
         return occ_s, mu, entropy_term
     scheme = SCHEMES[smearing]
