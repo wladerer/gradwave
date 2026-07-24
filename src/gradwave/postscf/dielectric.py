@@ -40,6 +40,8 @@ from gradwave.postscf._anderson import AndersonMixer
 from gradwave.postscf._kb import projector_data_at_k, species_projector_tables
 from gradwave.postscf._response import (
     cg_sternheimer,
+    fxc_hvp_spin,
+    hartree_kernel,
     insulator_window,
     pad_coeffs,
     sternheimer_shift,
@@ -91,14 +93,27 @@ def dielectric_born(res, xc, *, dk: float = 1e-3, cg_tol: float = 1e-9,
                     beta: float = 0.5, outer_tol: float = 1e-7,
                     max_outer: int = 80, history: int = 8,
                     verbose: bool = False) -> dict:
-    """ε∞ (3,3) and Born effective charges Z* (na,3,3) from E-field DFPT."""
+    """ε∞ (3,3) and Born effective charges Z* (na,3,3) from E-field DFPT.
+
+    Collinear spin (nspin=2) is threaded per channel: the Sternheimer solve runs
+    independently for each spin (H is block-diagonal in spin), and the screening
+    field u^σ couples the two channels through the spin Hxc kernel K_Hxc^{σσ'}
+    (Hartree on the total Δρ + f_xc^{σσ'}), exactly as the linear-response Hubbard
+    U does. In the nonmagnetic limit the two channels are identical and the result
+    reduces to the nspin=1 value.
+    """
     system = res.system
-    if getattr(res, "nspin", 1) != 1:
-        raise NotImplementedError("dielectric response: nspin=1 insulators only")
+    nspin = int(getattr(res, "nspin", 1))
+    if nspin not in (1, 2):
+        raise NotImplementedError("dielectric response: nspin must be 1 or 2")
     if system.is_fr:
         raise NotImplementedError("dielectric response: scalar-relativistic only")
     if system.sym is not None:
         raise NotImplementedError("dielectric response requires use_symmetry=False")
+    if nspin == 2:
+        return _dielectric_born_spin(
+            res, xc, dk=dk, cg_tol=cg_tol, beta=beta, outer_tol=outer_tol,
+            max_outer=max_outer, history=history, verbose=verbose)
     bk, grid = system.batch, system.grid
     kw = system.kweights
     vol = grid.volume
@@ -179,6 +194,138 @@ def dielectric_born(res, xc, *, dk: float = 1e-3, cg_tol: float = 1e-9,
             b_d = torch.einsum("kpg,kbg->kbp", p.conj(), dpsi_all[a])
             t_nl = 4.0 * torch.einsum("k,kbp,pq,kbq->", kw.to(CDTYPE),
                                       b_d.conj(), dij_c, b_c).real
+            (grad,) = torch.autograd.grad(t_loc + t_nl, pos)
+        for s in range(na):
+            born[s, a] = -grad[s]
+            born[s, a, a] += float(system.charges[s])
+    asr = born.sum(dim=0)
+    return {"eps": eps_mat, "born": born, "asr": asr,
+            "eps_iso": float(torch.diagonal(eps_mat).mean())}
+
+
+def _k_hxc_spin(res, xc, dru, drd):
+    """(Δv↑, Δv↓) = K_Hxc^{σσ'} Δρ^{σ'}: Hartree kernel on the total Δρ (G=0
+    excluded) plus the spin f_xc Hessian-vector product at the SCF spin densities
+    (NLCC core split half/half per channel, exactly as the SCF potential built
+    it). The shared postscf._response primitives, matching hubbard_u._k_hxc_spin."""
+    core = res.system.rho_core
+    cu2 = 0.0 if core is None else 0.5 * core
+    kh = hartree_kernel(res.system.grid, dru + drd)
+    fu, fd = fxc_hvp_spin(xc, res.rho_spin[0] + cu2, res.rho_spin[1] + cu2,
+                          res.system.grid, dru, drd)
+    return kh + fu, kh + fd
+
+
+@torch.no_grad()
+def _dielectric_born_spin(res, xc, *, dk, cg_tol, beta, outer_tol, max_outer,
+                          history, verbose) -> dict:
+    """ε∞ and Born charges for a collinear spin-polarized insulator (nspin=2).
+
+    Mirrors ``dielectric_born`` per spin channel: the ∂H/∂k RHS and the
+    conduction-projected Sternheimer solve run independently for each spin (H is
+    block-diagonal in spin), while the self-consistent screening field u^σ folds
+    the two channels together through K_Hxc^{σσ'}. Each channel carries one
+    electron (f=1), so the prefactors halve per channel and sum over spin — 8π
+    instead of 16π on ε, 2 instead of 4 on the density/Born terms — reducing to
+    the nspin=1 value in the nonmagnetic limit."""
+    from gradwave.core.batch import BatchedHamiltonian, box_to_sphere_b
+
+    system = res.system
+    bk, grid = system.batch, system.grid
+    kw = system.kweights
+    vol = grid.volume
+
+    # per-spin occupied window, Hamiltonian, Sternheimer shift, conduction proj
+    projs_b = projectors_b(bk, system.positions)
+    c_occ, eps_occ, hs, shift = [], [], [], []
+    for sp in range(2):
+        nocc = insulator_window(res.occupations[sp], 1.0,
+                                "insulating occupations (f=1 per spin) required")
+        c_occ.append(pad_coeffs(res.coeffs[sp], bk.npw_max)[:, :nocc])
+        eps_occ.append(res.eigenvalues[sp][:, :nocc].to(RDTYPE))
+        hs.append(BatchedHamiltonian(bk, grid.shape, res.v_eff[sp], projs_b))
+        shift.append(sternheimer_shift(eps_occ[sp]))
+
+    def p_c(x, sp):
+        ov = torch.einsum("kng,kbg->kbn", c_occ[sp].conj(), x)
+        return x - torch.einsum("kbn,kng->kbg", ov, c_occ[sp])
+
+    # ξ^α_σ = P_c r_α ψ_σ per spin channel (∂H/∂k is spin-independent)
+    xi = [[None, None, None] for _ in range(2)]
+    for sp in range(2):
+        for a in range(3):
+            rhs = -1j * p_c(_dhdk_psi(system, c_occ[sp], a, dk), sp)
+            xi[sp][a] = cg_sternheimer(hs[sp], bk, c_occ[sp], eps_occ[sp], rhs,
+                                       torch.zeros_like(rhs), shift[sp], tol=cg_tol)
+
+    psi_r = [g_to_r_b(c_occ[sp], bk, grid.shape) for sp in range(2)]
+    n_pts = grid.n_points
+    eps_mat = torch.zeros(3, 3, dtype=RDTYPE)
+    dpsi_all = [[], []]          # dpsi_all[sp] -> per field direction
+    drho_tot_all = []            # total Δρ per field direction (Born local part)
+    for b_dir in range(3):
+        # Anderson fixed point on the two-channel screening field u = (u↑, u↓)
+        u_flat = torch.zeros(2 * n_pts, dtype=RDTYPE, device=c_occ[0].device)
+        mixer = AndersonMixer(history, beta)
+        dpsi = [torch.zeros_like(c_occ[sp]) for sp in range(2)]
+        col_prev = None
+        for it in range(1, max_outer + 1):
+            drho = []
+            for sp in range(2):
+                rhs = -xi[sp][b_dir]
+                if it > 1:
+                    u_r = u_flat[sp * n_pts:(sp + 1) * n_pts].reshape(grid.shape)
+                    rhs = rhs - p_c(
+                        box_to_sphere_b(psi_r[sp] * u_r.to(psi_r[sp].dtype), bk), sp)
+                dpsi[sp] = cg_sternheimer(hs[sp], bk, c_occ[sp], eps_occ[sp], rhs,
+                                          dpsi[sp], shift[sp], tol=cg_tol)
+                dpsi_r = g_to_r_b(dpsi[sp], bk, grid.shape)
+                drho.append(2.0 * (kw[:, None, None, None, None]
+                                   * (psi_r[sp].conj() * dpsi_r).real).sum(dim=(0, 1))
+                            / vol)
+            # ε column (summed over spin): f=1 per channel, so 8π not 16π below
+            col = torch.tensor([
+                float(sum(
+                    (kw[:, None] * torch.einsum(
+                        "kbg,kbg->kb", xi[sp][a].conj(), dpsi[sp]).real).sum()
+                    for sp in range(2)))
+                for a in range(3)])
+            if verbose:
+                print(f"  E{b_dir} it {it:3d}: eps col = "
+                      f"{[round(1 - 8 * math.pi * E2 / vol * c, 6) for c in col.tolist()]}")
+            if col_prev is not None and float((col - col_prev).abs().max()) < outer_tol:
+                break
+            col_prev = col
+            du, dd = _k_hxc_spin(res, xc, drho[0], drho[1])
+            r_vec = torch.cat([du.reshape(-1), dd.reshape(-1)]) - u_flat
+            u_flat = mixer.step(u_flat, r_vec)
+        else:
+            raise RuntimeError(f"E-field response ({b_dir}) not converged")
+        for sp in range(2):
+            dpsi_all[sp].append(dpsi[sp])
+        drho_tot_all.append(drho[0] + drho[1])
+        eps_mat[:, b_dir] = 1.0 * torch.eye(3)[:, b_dir] \
+            - (8.0 * math.pi * E2 / vol) * col
+
+    # Born charges: mixed derivative ∂²E/∂E_α∂τ via one autograd backward per
+    # field direction. Local part sees the total Δρ; the nonlocal part sums the
+    # two spin channels (factor 2 per channel = f·c.c.).
+    na = len(system.species_of_atom)
+    born = torch.zeros(na, 3, 3, dtype=RDTYPE)
+    dij_c = bk.dij_full.to(CDTYPE)
+    for a in range(3):
+        pos = system.positions.detach().clone().requires_grad_(True)
+        with torch.enable_grad():
+            vloc_g = local_potential_g(pos, system.species_index,
+                                       system.vloc_tables, grid.g_cart, vol)
+            t_loc = local_energy(r_to_g(drho_tot_all[a].to(CDTYPE)), vloc_g, vol)
+            p = projectors_b(bk, pos)
+            t_nl = 0.0
+            for sp in range(2):
+                b_c = torch.einsum("kpg,kbg->kbp", p.conj(), c_occ[sp])
+                b_d = torch.einsum("kpg,kbg->kbp", p.conj(), dpsi_all[sp][a])
+                t_nl = t_nl + 2.0 * torch.einsum(
+                    "k,kbp,pq,kbq->", kw.to(CDTYPE), b_d.conj(), dij_c, b_c).real
             (grad,) = torch.autograd.grad(t_loc + t_nl, pos)
         for s in range(na):
             born[s, a] = -grad[s]
