@@ -51,7 +51,7 @@ def band_structure(
     # so the nspin=1 (v_eff shape (n1,n2,n3)) and nspin=2 ((2,n1,n2,n3)) paths
     # share one loop body.
     nspin = getattr(res, "nspin", 1)
-    v_eff_s = res.v_eff[None] if nspin == 1 else res.v_eff
+    v_eff_s = res.v_eff if nspin == 2 else res.v_eff[None]
     device = v_eff_s.device
 
     beta_ls, dij_species = species_projector_tables(system.upfs, device)
