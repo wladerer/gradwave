@@ -28,19 +28,19 @@ holes inside it.
 
 | Feature | Effort | Value | Why / reusable substrate |
 |---|---|---|---|
-| nspin=2 forces / stress / bands | Low–Med | High | Plumbing — the nspin=1 autograd force/stress path and the noncollinear path both exist; thread the spin channel. Unblocks routine magnetic relaxation and bands. A coverage hole, not new physics. See "Full nspin=2 and PAW coverage". |
-| D3/D4 dispersion | Low | High | Geometry-only pairwise sum plus damping, no SCF change, trivially differentiable. Directly enables the layered / adsorption / 2D-magnet applications. |
+| nspin=2 forces / stress / bands | Low–Med | High | Plumbing — the nspin=1 autograd force/stress path and the noncollinear path both exist; thread the spin channel. Unblocks routine magnetic relaxation and bands. A coverage hole, not new physics. See "Full nspin=2 and PAW coverage". **LANDED (2026-07-24)** — nspin=2 forces (#45), stress (#58), NC and USPP/PAW bands (#45), KPM-DOS and ELF, and the dielectric/Born response (#65), plus fixed-spin-moment SCF (#45). |
+| D3/D4 dispersion | Low | High | Geometry-only pairwise sum plus damping, no SCF change, trivially differentiable. Directly enables the layered / adsorption / 2D-magnet applications. **LANDED (2026-07-24)** — D3(BJ) energy, forces, and stress, wired through the CLI and the ASE calculator (#59, #69); D4 not attempted. |
 | Elastic constants | Low–Med | High | `stress()` is already autodiff-through-strain; apply strain patterns and fit. The Phase-2 mechanical buildout. |
 | Stress with DFT+U / fully-relativistic | Low–Med | Med | Removes two `NotImplementedError` guards; enables variable-cell for correlated and SOC systems. |
-| NLCC force term | Low | Med | Small missing analytic term; correctness for NLCC-pseudo forces. |
+| NLCC force term | Low | Med | Small missing analytic term; correctness for NLCC-pseudo forces. **LANDED (2026-07-24)** — the core-correction force for LDA/GGA (#64) and meta-GGA (#68); the USPP / noncollinear meta-GGA NLCC edge stays gated. |
 | Dipole correction + external E-field | Med | High | Sawtooth potential plus energy term. Unblocks slabs, RAIRS, and charged defects — an entire application class. See "RAIRS and a slab dipole moment". |
 | Tetrahedron (Blöchl) BZ integration | Med | Med | Non-smooth weights need care against autograd, but smearing already covers metals; the win is insulator DOS/optics accuracy. |
 | RPA correlation energy | Med–High | High | The ISDF/ACE substrate is already built for exact exchange; a differentiable RPA is novel and is physics GGA cannot do. See the RI/THC section. |
 | Berry-phase polarization (modern theory) | Med | Med–High | Berry phase over k-strings; an independent route to Born charges, enables ferroelectrics, and is the precursor to topology. |
 | Real-time / linear-response TDDFT | Med–High | Med–High | RT-TDDFT fits the differentiable design naturally and gives optical spectra far cheaper than BSE. |
 | Meta-GGA under non-collinear / SOC | Med–High | Med | Wire the τ operator onto the spinor H-apply so r2SCAN meets magnetism+SOC. Narrower payoff. See "Learned meta-GGA". |
-| Finite-q phonons / dispersion | High (DFPT) / Med (supercell) | High | No arbitrary-q DFPT today. The supercell frozen-phonon route is cheaper and unlocks thermodynamics and stability. See "Phonon band structures". |
-| Dielectric / Born for metals and nspin=2 | Med | Med | Generalize the current nspin=1-insulator-only path; needed for RAIRS and magnetic IR. |
+| Finite-q phonons / dispersion | High (DFPT) / Med (supercell) | High | No arbitrary-q DFPT today. The supercell frozen-phonon route is cheaper and unlocks thermodynamics and stability. See "Phonon band structures". **Supercell route LANDED (2026-07-24)** — dispersion + phonon DOS, norm-conserving nspin=1 (#61); arbitrary-q DFPT, the LO-TO nonanalytic term, and harmonic thermodynamics remain open. |
+| Dielectric / Born for metals and nspin=2 | Med | Med | Generalize the current nspin=1-insulator-only path; needed for RAIRS and magnetic IR. **nspin=2 LANDED (2026-07-24)** — collinear spin-polarized ε∞ and Born charges through the E-field DFPT (#65); the metals (partial-occupation) path remains open. |
 | Wannier functions / Wannier90 interface | Med | Med | Export overlaps (Med) or build MLWFs internally (higher); enables interpolation, transport hand-off, and topology. |
 | Topological invariants (Z₂ / Chern) | Med (given Berry / Wannier) | Med | On-brand given the Bi₂Se₃ band-inversion demo, but niche; depends on the two rows above. |
 | libxc binding / more functionals | Med (per functional if transcribed) | Med | Breadth (PBEsol, SCAN, B3LYP …), but a C binding breaks the pure-autodiff design and hand-transcription is Med each. A real tension with the ethos. |
@@ -53,7 +53,8 @@ holes inside it.
 The four quadrants:
 
 - **Quick wins** (high value, low effort — do first): nspin=2 derivatives, D3
-  dispersion, elastic constants, DFT+U/FR stress.
+  dispersion, and elastic constants have since landed (elastic constants #41,
+  the rest 2026-07-24); DFT+U and fully-relativistic stress remain.
 - **Big bets** (high value, high effort): RPA → GW → BSE built in that order on
   the ISDF substrate, finite-q phonons, and the dipole/field boundary conditions.
 - **On-brand niche** (differentiability showcase, moderate value): Berry-phase
@@ -63,9 +64,10 @@ The four quadrants:
 
 The largest genuinely-absent physics is the excited-state / many-body tier (GW,
 BSE, TDDFT, RPA): every gap, level alignment, and spectrum today comes from
-semilocal or hybrid DFT with its self-interaction error. The cheapest missing
-physics is dispersion. The most mechanical missing coverage is nspin=2
-derivatives.
+semilocal or hybrid DFT with its self-interaction error. The two cheapest gaps
+this survey named — dispersion and the nspin=2 derivatives — both landed on
+2026-07-24 (see the LANDED tags above); the many-body tier is what is left at the
+top of the return ranking.
 
 ## Scaling up: RI and tensor hypercontraction
 
@@ -700,25 +702,43 @@ drivers.
 
 `gamma_hessian` is Gamma-only. Extend to finite q to get dispersions.
 
-- Real-space force constants from finite displacements in a supercell, or an
-  analytic force response at q with a q-dependent perturbation. The supercell route
-  is simpler to land first.
-- Fourier interpolate `D(q)` onto a band path. Reuse the electronic bands path
-  builder for the q-path and labels.
-- Acoustic sum rule, and for polar insulators the nonanalytic LO-TO term at q to
-  Gamma, which needs Born charges and epsilon-infinity. Both already exist in
-  `dielectric.py`, so the polar correction is reachable.
+**Supercell route LANDED (2026-07-24)** (#61). `postscf/phonons_supercell.py`: a
+native `phonons` task builds a supercell, displaces only the primitive home-cell
+atoms (the Born–von-Kármán translational reduction, so the SCF count is 6·N_prim
+regardless of supercell size), symmetrizes the force constants and applies the
+acoustic sum rule, then Fourier-folds `D(q)=Σ_R Φ/√(MμMν)·e^{iq·R}` onto the ASE
+bandpath for the dispersion and onto an MP q-mesh for the phonon DOS. It reuses the
+electronic bands-path builder and the PDOS broadener. Norm-conserving, nspin=1 (the
+forces path). The 1×1×1 fold reproduces the analytic Γ route exactly (Si optical
+521.46 cm⁻¹, acoustic within ~1 cm⁻¹ of zero). Wired through inputs (`PhononParams`),
+the api dispatch, the output report, and `gradwave plot --kind phonons`.
 
-With a q-mesh this also gives the phonon DOS and the harmonic thermodynamics (free
-energy, entropy, heat capacity), which pairs well with the EOS work for a full
-thermal equation of state.
+Still open below this:
+
+- The analytic force response at q with a q-dependent perturbation (arbitrary-q
+  DFPT) — the supercell route only reaches the commensurate q of its supercell.
+- For polar insulators the nonanalytic LO-TO term at q to Gamma, which needs Born
+  charges and epsilon-infinity. Both already exist in `dielectric.py`, so the polar
+  correction is reachable.
+- The harmonic thermodynamics from the q-mesh DOS (free energy, entropy, heat
+  capacity), which pairs well with the EOS work for a full thermal equation of state.
 
 ## Full nspin=2 and PAW coverage for every feature
 
 Coverage is uneven across the postscf features. Several are nspin=1 or NC only.
-`dielectric_born` is nspin=1 insulators, the discretization-error force path
-is NC (nspin=1 or 2, no USPP/PAW), and the noncollinear and SOC PDOS paths have their
-own constraints.
+The discretization-error force path is NC (nspin=1 or 2, no USPP/PAW), and the
+noncollinear and SOC PDOS paths have their own constraints.
+
+**Collinear nspin=2 post-SCF LANDED (2026-07-24).** The nspin=2 gates came off the
+main post-SCF properties, since the per-spin machinery already existed and only the
+spin loop was missing: band structures on the norm-conserving and USPP/PAW paths and
+atomic forces (#45), the Nielsen-Martin stress (#58), KPM-DOS and ELF, and the
+dielectric/Born E-field DFPT (`_dielectric_born_spin`, #65), each pinned by a
+nonmagnetic-limit or strain-FD self-oracle. Fixed-spin-moment SCF (a fixed
+`tot_magnetization = N↑ − N↓`) landed alongside (#45). What remains gated is real
+physics gaps rather than spin threading: the DFT+U and fully-relativistic stress, the
+metals (partial-occupation) dielectric path, and the USPP / noncollinear meta-GGA NLCC
+force. The rest of the matrix below is the residual.
 
 Make an explicit matrix of feature x {NC, USPP/PAW} x {nspin=1, 2} and close the
 gaps. Most of the per-channel machinery exists, so the work is threading the spin
@@ -1173,6 +1193,22 @@ went down (10 → 8). The plain rate is not the deployment rate; only unrolling 
 real mixer predicts the real win, and optimizing the plain rate actively mis-ranks
 filters. That is the load-bearing lesson of this section.
 
+**Cu₃Al harness + SCF oracle LANDED (2026-07-24)** (#60). `benchmarks/bench_learned_precond.py`
+gains `run_cu3al`, an L1₂ Cu₃Al intermetallic (the same QE-validated cell and
+pseudos as `test_metal_forces_vs_qe`) where two chemical species screen at two
+different lengths — the multi-scale-charge frontier this section named after the Cu
+win. It compares bare Kerker against the default DIIS-aware 3-pole fit and a wider
+4-pole fit. The companion `tests/integration/test_learned_precond_scf.py` is the
+end-to-end oracle that was missing: it deploys a genuinely multi-pole filter through
+the real SCF driver and asserts the converged free energy and eigenvalues match bare
+Kerker to solver precision, with f_θ(G=0)=0 — a preconditioner reshapes the path,
+never the fixed point. The honest scope is unchanged: the filter earns iterations
+only on a genuinely multi-scale charge response (the Cu d-band win, 10→8 iters), and
+on a single-scale homogeneous metal like Al it clusters its poles and ties Kerker
+within an iteration. The benchmark's iteration counts are measured at run time, not
+committed as fixtures, so the record here is the mechanism and its scope rather than a
+pinned number.
+
 Next, in rough priority. Push to more multi-scale systems (Cu₃Al and other
 intermetallics, PAW semicore, larger cells near the charge-sloshing cliff, FM
 metals near the Stoner boundary where wisdom.md asks for the χ₀-diagonal operator
@@ -1242,6 +1278,47 @@ wall-time win across a discovery scan.
 
 Kept for the reasoning. Each of these is either landed in the code or settled as a
 measured negative.
+
+## D3(BJ) dispersion correction (DONE)
+
+Landed as an opt-in, SCF-independent Grimme D3(BJ) correction (#59, #69),
+`postscf/dispersion.py`. A real-space image sum over a cutoff (reusing the Ewald
+image enumeration and the shift-before-norm double-backward guard) with exponential
+coordination numbers, CN-interpolated C6, C8 = 3 C6 √(Q_A Q_B), and Becke–Johnson
+damping; positions and cell in Å, energy in eV. Forces are autograd on positions and
+stress is autograd on strain, so the correction matches the suite's
+differentiable-energy ethos rather than reimplementing analytic derivatives. The BJ
+damping presets for 13 functionals are vendored in `postscf/_d3_params.py`
+(regenerated from Grimme's reference data by `scripts/gen_d3_params.py`). Wired opt-in
+through `inputs.py` (`DispersionParams`, a `dispersion:` block accepting `true`/`false`
+or an override dict), `api.py` (folds E_disp into the reported total and emits a
+dispersion summary), the checkpoint energy dict, and the ASE calculator (#69), so
+ASE-driven relaxations and MD carry it. It degrades to a no-op on elements without C6
+coverage or a missing preset. Self-oracle tests (`tests/unit/test_dispersion.py`,
+`tests/unit/test_calculator_dispersion.py`): forces and stress vs finite differences
+of the dispersion energy on a rattled low-symmetry cell, an independent scalar-loop
+transcription of the energy, a positions gradcheck, the ΣF=0 sum rule, and the
+calculator's on-minus-off shift matching the raw dispersion term. D4 was not
+attempted.
+
+## NLCC core-correction forces, including meta-GGA (DONE)
+
+Ungated the nonlinear-core-correction force term in `forces()` (#64, then #68 for
+meta-GGA). An NLCC pseudo adds a frozen pseudo-core charge ρ_core(r−R_I) to the XC
+argument, whose force is −∫ v_xc dρ_core/dR_I. Because the suite is autograd-based
+this is the gradient of E_xc(ρ + ρ_core(pos)) w.r.t. atomic positions with the SCF
+density detached — Hellmann-Feynman, stationary at convergence, so v_xc carries the
+full LDA/GGA gradient correction automatically. `setup_common` factors the core
+density into a position-independent |G| form factor plus a differentiable-in-positions
+assembly through the structure factor, reused by both the frozen-SCF build and the
+force path. The meta-GGA extension (#68) rebuilds τ_valence from the converged
+coefficients (τ_core = 0, matching the SCF's E_xc assembly) and threads it through
+`xc.energy` and `spin_xc_energy`; the LDA/GGA path is byte-for-byte unchanged since
+`needs_tau=False` leaves τ as `None`. Self-oracle tests match central finite
+differences of the total energy to ~1e-8 eV/Å (`test_forces_nlcc`,
+`test_forces_nlcc_metagga`), the latter also guarding the τ argument against being
+silently dropped. The USPP / noncollinear meta-GGA NLCC edge stays gated (τ is not
+stored on the batched-k / USPP results).
 
 ## Magnetic space groups (Shubnikov symmetry) for non-collinear k-reduction
 
