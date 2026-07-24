@@ -169,9 +169,20 @@ def apply_k_hxc(res: SCFResult, xc, w_r: torch.Tensor) -> torch.Tensor:
 
     Both kernels are the shared response primitives in postscf._response
     (``fxc_hvp`` carries the per-grid-cell → physical n_points/Ω conversion).
+
+    f_xc = ∂v_xc/∂ρ is evaluated at the SCF density INCLUDING the NLCC partial
+    core, ρ + ρ_core, because the SCF builds v_xc at exactly that point
+    (scf/loop.py: ``rho_for_xc = rho + rho_core``). Omitting the core would
+    evaluate the response kernel at the wrong density (~1% off for NLCC
+    pseudos), making the implicit-diff SCF adjoint subtly wrong. Matches the
+    collinear ``_k_hxc_spin`` (which adds 0.5·ρ_core per channel) and the USPP
+    ``k_hxc_grid``. For a valence-only pseudo (rho_core is None) this reduces
+    exactly to the plain valence kernel — byte-identical.
     """
     grid = res.system.grid
-    return hartree_kernel(grid, w_r) + fxc_hvp(xc, res.rho, grid, w_r)
+    core = res.system.rho_core
+    rho_xc = res.rho if core is None else res.rho + core
+    return hartree_kernel(grid, w_r) + fxc_hvp(xc, rho_xc, grid, w_r)
 
 
 @torch.no_grad()
@@ -209,7 +220,12 @@ def density_loss_param_grads(res: SCFResult, xc, loss_fn) -> tuple[torch.Tensor,
 
     # dL/dθ = ⟨χ₀u, ∂v_xc/∂θ⟩, differentiate ⟨χ₀u, v_xc(ρ; θ)⟩ w.r.t. θ at fixed ρ.
     # Double backward through E_xc, so force eager with xc_eager().
-    rho_fixed = res.rho.detach().clone().requires_grad_(True)
+    # v_xc (hence ∂v_xc/∂θ) is evaluated at ρ + ρ_core, matching the SCF and
+    # apply_k_hxc above; for valence-only pseudos (rho_core is None) this is
+    # byte-identical to res.rho.
+    core = res.system.rho_core
+    rho_xc = res.rho if core is None else res.rho + core
+    rho_fixed = rho_xc.detach().clone().requires_grad_(True)
     with torch.enable_grad(), xc_eager():
         sigma = sigma_from_rho(rho_fixed, grid.g_cart) if xc.needs_gradient else None
         e_xc = xc.energy(rho_fixed, grid.volume, sigma)
