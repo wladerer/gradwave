@@ -78,7 +78,8 @@ def test_energies_eV_dict_keys():
                         nonlocal_=0.1, ewald=-3.0, smearing=0.0)
     d = energies_eV_dict(e)
     assert set(d) == {"kinetic", "hartree", "xc", "local", "nonlocal", "ewald",
-                      "smearing", "hubbard", "onecenter", "total", "free_energy"}
+                      "smearing", "hubbard", "onecenter", "dispersion",
+                      "total", "free_energy"}
 
 
 # --------------------------------------------------------------------------- #

@@ -81,6 +81,31 @@ class ProjectionsParams:
 
 
 @dataclass(frozen=True)
+class DispersionParams:
+    """Opt-in Grimme D3(BJ) dispersion correction (energy + forces + stress).
+
+    A geometric, SCF-independent pairwise correction. ``functional`` selects the
+    BJ damping preset (defaults to the SCF ``xc``); s6/s8/a1/a2 override it. The
+    cutoffs are the real-space image radii for the dispersion and coordination-
+    number sums, in Å."""
+
+    enabled: bool = False
+    functional: str | None = None  # None → use the SCF xc functional
+    cutoff: float = 21.2       # Å, dispersion real-space image radius (~40 a0)
+    cn_cutoff: float = 10.6    # Å, coordination-number image radius (~20 a0)
+    s6: float | None = None
+    s8: float | None = None
+    a1: float | None = None
+    a2: float | None = None    # Å for the a2 BJ radius override (converted at use)
+
+    def __post_init__(self):
+        if self.cutoff <= 0 or self.cn_cutoff <= 0:
+            raise InputError("dispersion cutoffs must be positive")
+        if self.cn_cutoff > self.cutoff:
+            raise InputError("dispersion.cn_cutoff must not exceed dispersion.cutoff")
+
+
+@dataclass(frozen=True)
 class VolumetricParams:
     """Volumetric fields to export after an SCF, as .cube/.xsf for VESTA/Ovito."""
 
@@ -162,6 +187,7 @@ class Input:
     eos: EOSParams = field(default_factory=EOSParams)
     elastic: ElasticParams = field(default_factory=ElasticParams)
     projections: ProjectionsParams = field(default_factory=ProjectionsParams)
+    dispersion: DispersionParams = field(default_factory=DispersionParams)
     device: str = "cpu"
     verbose: bool = True  # per-iteration SCF chatter; CLI --quiet overrides
     output_dir: Path = Path("./out")
@@ -315,7 +341,7 @@ _ALLOWED_TOP = {
     "smearing", "nbands", "symmetry", "nspin", "noncollinear", "nonmagnetic",
     "start_mag",
     "scf", "task", "relax", "bands", "magnetism", "eos", "elastic",
-    "projections", "device",
+    "projections", "dispersion", "device",
     "verbose", "output", "error_estimate", "restart",
 }
 
@@ -410,6 +436,27 @@ def _build_projections(proj_raw) -> ProjectionsParams:
     )
 
 
+def _build_dispersion(disp_raw) -> DispersionParams:
+    """Parse the `dispersion` block. `true`/`false` is the enabled shorthand
+    (BJ damping then taken from the SCF functional); a mapping overrides the
+    functional, cutoffs, and the four damping constants."""
+    if isinstance(disp_raw, bool):
+        return DispersionParams(enabled=disp_raw)
+    _check_keys("dispersion", disp_raw,
+                {"enabled", "functional", "cutoff", "cn_cutoff",
+                 "s6", "s8", "a1", "a2"})
+    def _optf(key):
+        v = disp_raw.get(key)
+        return None if v is None else float(v)
+    return DispersionParams(
+        enabled=bool(disp_raw.get("enabled", True)),
+        functional=disp_raw.get("functional"),
+        cutoff=float(disp_raw.get("cutoff", 21.2)),
+        cn_cutoff=float(disp_raw.get("cn_cutoff", 10.6)),
+        s6=_optf("s6"), s8=_optf("s8"), a1=_optf("a1"), a2=_optf("a2"),
+    )
+
+
 def _load_input(path: Path) -> Input:
     raw = yaml.safe_load(path.read_text())
     base = path.parent
@@ -467,6 +514,7 @@ def _load_input(path: Path) -> Input:
     nbands = raw.get("nbands", "auto")
     ecutrho = raw.get("ecutrho")
     projections = _build_projections(raw.get("projections", False))
+    dispersion = _build_dispersion(raw.get("dispersion", False))
     return Input(
         atoms=atoms,
         pseudo_dir=pseudo_dir,
@@ -498,6 +546,7 @@ def _load_input(path: Path) -> Input:
         eos=_build(EOSParams, raw.get("eos", {}), "eos"),
         elastic=_build(ElasticParams, raw.get("elastic", {}), "elastic"),
         projections=projections,
+        dispersion=dispersion,
         device=raw.get("device", "cpu"),
         verbose=bool(raw.get("verbose", True)),
         output_dir=base / out_raw.get("dir", "./out"),
