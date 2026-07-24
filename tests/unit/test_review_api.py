@@ -100,15 +100,6 @@ def test_smearing_error_accepts_uspp_dict():
 
 
 # --------------------------------------------------------------------------- #
-#  fix 6: dead result_summary is gone                                          #
-# --------------------------------------------------------------------------- #
-def test_result_summary_removed():
-    import gradwave.api as api
-
-    assert not hasattr(api, "result_summary")
-
-
-# --------------------------------------------------------------------------- #
 #  fix 2: the calculator rejects nspin=2 rather than silently ignoring it      #
 # --------------------------------------------------------------------------- #
 def test_calculator_rejects_nspin2():

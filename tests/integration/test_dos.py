@@ -8,9 +8,8 @@ import torch
 
 from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.postscf.dos import kpm_dos
-from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
-from tests.helpers import RY, pseudo, si_fcc
+from tests.helpers import RY, si_fcc, si_upf
 
 pytestmark = pytest.mark.standard
 
@@ -19,7 +18,7 @@ CELL, POS = si_fcc()
 
 def test_kpm_dos_matches_explicit_spectrum():
     torch.set_num_threads(8)
-    upf = parse_upf(pseudo("Si_ONCV_PBE-1.2.upf"))
+    upf = si_upf()
     system = setup_system(CELL, POS, [0, 0], [upf], ecut=15 * RY,
                           kmesh=(2, 2, 2), nbands=12)
     res = scf(system, LDA_PW92(), smearing="none", etol=1e-8, rhotol=1e-7,

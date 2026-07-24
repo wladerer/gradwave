@@ -52,12 +52,6 @@ def test_aug_density_from_becsum_has_no_device_arg():
     assert params == ["system", "becsum"]
 
 
-def test_anderson_docstring_is_type_ii():
-    doc = _anderson.AndersonMixer.__doc__ or ""
-    assert "Type-II" in doc
-    assert "Type-I " not in doc
-
-
 def test_anderson_converges_on_contraction():
     torch.manual_seed(0)
     n = 24

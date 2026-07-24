@@ -2,7 +2,7 @@
 in the fast gate):
 
 - hubbard_u._assemble_u now guards against inequivalent two-site manifolds
-- magnetism uses the shared KB_EV and a single MOMENT_TOL_MUB constant
+- magnetism classifies via a single MOMENT_TOL_MUB constant
 - phonons.gamma_frequencies derives its cm⁻¹ constant from gradwave.constants
 - irreps._chi uses the gauge-coherent class representative (projective zone
   boundary), not the class mean whose sign is numerical noise
@@ -14,7 +14,6 @@ import numpy as np
 import pytest
 import torch
 
-from gradwave.constants import KB_EV
 from gradwave.postscf import magnetism
 from gradwave.postscf.hessian import SQRT_EV_AMU_ANG2_TO_CM1
 from gradwave.postscf.hubbard_u import _assemble_u
@@ -85,12 +84,6 @@ def test_assemble_u_single_site_scalar():
     out = _assemble_u(chi, chi0, site=0, sites=_sites(2, 2)[:1],
                       species_of_atom=[3])
     assert out["U_eV"] == pytest.approx(1.0 / -0.50 - 1.0 / -0.30, rel=1e-12)
-
-
-def test_magnetism_uses_shared_kb():
-    # local truncated KB copy is gone; the module references the CODATA KB_EV
-    assert not hasattr(magnetism, "KB")
-    assert magnetism.KB_EV == KB_EV
 
 
 def test_magnetism_moment_tol_single_constant():

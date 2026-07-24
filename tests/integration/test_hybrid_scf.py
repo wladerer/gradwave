@@ -11,14 +11,13 @@ import pytest
 from gradwave.core.xc.pbe import PBE
 from gradwave.postscf import exchange
 from gradwave.postscf.hybrid import hybrid_scf
-from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
-from tests.helpers import RY, pseudo, si_fcc
+from tests.helpers import RY, si_fcc, si_upf
 
 
 def _system():
     cell, pos = si_fcc()
-    upf = parse_upf(pseudo("Si_ONCV_PBE-1.2.upf"))
+    upf = si_upf()
     return setup_system(cell, pos, [0, 0], [upf], ecut=18 * RY, kmesh=(1, 1, 1), nbands=8)
 
 

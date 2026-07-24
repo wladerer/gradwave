@@ -54,6 +54,9 @@ def test_provenance_block_renders_in_report():
 
 
 def test_collectors_never_raise():
-    # each collector must degrade to None/absent fields, not throw
+    # each collector must degrade to a (possibly empty/None-valued) mapping or
+    # None on unsupported platforms — never throw — and stay JSON-serializable
     for fn in (cpu_info, memory_info, load_info, thermal_info):
-        json.dumps(fn())
+        out = fn()
+        assert out is None or isinstance(out, dict)
+        json.dumps(out)

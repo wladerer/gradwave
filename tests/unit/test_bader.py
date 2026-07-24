@@ -13,9 +13,9 @@ import pytest
 import torch
 
 from gradwave.postscf.bader import bader
+from tests.helpers import RY, si_upf
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
-RY = 13.605693122994
 
 
 def _grid_frac(shape):
@@ -149,13 +149,12 @@ def test_bader_on_real_si_scf():
     density (you would add the core / use PAW for that), and this test pins that
     behaviour so a future change to the maxima search is caught."""
     from gradwave.core.xc.lda_pw92 import LDA_PW92
-    from gradwave.pseudo.upf import parse_upf
     from gradwave.scf.loop import scf, setup_system
 
     a = 5.43
     cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
     pos = np.array([[0.0, 0, 0], [a / 4] * 3])
-    upf = parse_upf(FIX / "pseudos" / "Si_ONCV_PBE-1.2.upf")
+    upf = si_upf()
     system = setup_system(cell, pos, [0, 0], [upf], ecut=15 * RY, kmesh=(2, 2, 2))
     res = scf(system, LDA_PW92(), smearing="none", etol=1e-9, rhotol=1e-8, verbose=False)
     assert res.converged

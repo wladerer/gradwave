@@ -7,9 +7,8 @@ import pytest
 from gradwave.core.xc.pbe import PBE
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
-from tests.helpers import pseudo
+from tests.helpers import RY, pseudo
 
-RY = 13.605693122994
 FCC = np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 
 
