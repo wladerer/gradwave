@@ -70,6 +70,29 @@ Keep terminal output small: `git status -s`, `git log --oneline`, `git diff --st
 `ruff check --output-format=concise`, and `pytest --tb=short`. `GIT_PAGER=cat` avoids pager
 stalls.
 
+## Job queue (pueue) — route heavy runs through it
+
+When multiple agents run at once, don't launch heavy test/benchmark runs as raw
+background jobs — they thrash the laptop (three `make test-fast` = 12 xdist workers
+on 8 cores). Submit through the shared per-host queue instead, so the `pueued`
+daemon enforces a fixed slot budget per group no matter how many agents submit:
+
+```bash
+./scripts/gwq test-fast            # queued; the `test` group caps concurrency
+./scripts/gwq bench bench_scf cpu 8 nosym   # captured -> benchmarks/results/<host>/
+./scripts/gwq --host asus bench bench_scf cpu 8 nosym
+./scripts/gwq status               # live queue across thinkpad + asus
+./scripts/gwq log <id>             # tail a job's output
+```
+
+Benches from the thinkpad default to asus (keep perf off the laptop). Queued jobs
+run against the canonical `~/github/gradwave`, not your worktree — pull it first if
+you need a specific revision. Keep pueue coarse (one job = one whole run/sweep); a
+future Dask sweep nests inside a single `gwq sweep` slot. Full reference and the
+home-manager install snippet: **`docs/queue.md`**. If `gwq` reports pueue missing,
+it isn't installed on that box yet — point the user at `docs/queue.md` (needs a
+willnix rebuild), don't fall back to raw runs silently.
+
 ## Remote compute (asus)
 
 A second NixOS box is reachable at `ssh asus` (Tailscale + LAN): 22 cores and an
