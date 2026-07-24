@@ -2,7 +2,7 @@
 # pytest marker strings (shorter to type, impossible to get the markers wrong).
 # Everything goes through `uv run` so the project env is used, not the base venv.
 
-.PHONY: help test test-fast test-standard test-nightly lint imports fmt lock check hooks profile queue-init q-test q-status
+.PHONY: help test test-fast test-standard test-nightly lint imports fmt lock check hooks profile queue-init q-test q-status dashboard dashboard-push
 
 BENCH ?= bench_scf
 ARGS  ?= cpu 8 nosym
@@ -63,3 +63,15 @@ q-test: ## queue the fast gate on this host (throttled by the `test` group)
 
 q-status: ## live queue view across the fleet (thinkpad + asus)
 	./scripts/gwq status
+
+DASH_HOST ?= homelab
+
+dashboard: ## generate the fleet dashboard -> dashboard.html (open it in a browser)
+	./scripts/dashboard.py --collect
+
+dashboard-push: ## generate and push the dashboard to $(DASH_HOST) for tailscale-serve
+	./scripts/dashboard.py --collect --out /tmp/gwdash.html
+	ssh $(DASH_HOST) 'mkdir -p ~/gwdash'
+	rsync -az /tmp/gwdash.html $(DASH_HOST):gwdash/index.html
+	@echo "pushed to $(DASH_HOST):~/gwdash/index.html — serve once with:"
+	@echo "  ssh $(DASH_HOST) 'sudo tailscale serve --bg --set-path / \$$HOME/gwdash'"
