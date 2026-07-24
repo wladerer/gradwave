@@ -55,6 +55,36 @@ ESPRESSO. Regenerate fixtures with `tests/fixtures/qe/regenerate.py` (QE via
 Tests live in `tests/{unit,integration,gradcheck}` with shared fixtures in
 `tests/fixtures` and helpers in `tests/helpers.py`.
 
+## Capability map — reach for these, don't reimplement
+
+Before writing a helper, check whether one of these canonical symbols already
+does it. This table is the judgement layer (which symbol is right, what not to
+touch); for a full greppable list of every public symbol with its signature,
+see **`docs/symbols.txt`** (`grep stress docs/symbols.txt`), regenerated with
+`make symbols`. Import from the leaf module — the subpackage `__init__.py` files
+are empty; underscore-prefixed names are internal.
+
+| If you need to… | Use | Not |
+|---|---|---|
+| Run a task from an `Input` (dispatches scf/relax/eos/…) | `api.run` (or `api.run_scf`/`run_relax`/`run_eos`) | drive `scf/` internals by hand |
+| Build the right system (auto NC vs USPP/PAW) | `api.build_system` | call `scf.loop.setup_system` / `scf.uspp_setup.setup_uspp` directly unless you need the specific formalism |
+| Use gradwave as an ASE calculator | `calculator.GradWave` | wrap `api.run` yourself |
+| Parse / validate an input file | `inputs.load_input` → `inputs.Input` | hand-parse TOML/YAML |
+| Unit conversions (Ha→eV, Ry→eV, Bohr→Å, ℏ²/2m, e²) | `constants.*` (`HARTREE_EV`, `RY_EV`, `BOHR_ANG`, `HBAR2_2M`, `E2`, `KB_EV`) | hardcode a conversion factor anywhere |
+| Working precision / paired real dtype | `dtypes.RDTYPE`/`CDTYPE`, `dtypes.real_of(cdtype)` | write `torch.float64` inline |
+| FFT real↔G transforms | `core.fftbox.{r_to_g, g_to_r, g_to_r_box}` (batched: `core.batch.g_to_r_b`) | roll your own `fftn`/`ifftn` (fftbox is normative for sign/normalization) |
+| Build the FFT grid / plane-wave G-sphere | `grids.build_fft_grid`, `grids.build_gsphere` | re-derive good FFT sizes or the ecut sphere |
+| Monkhorst-Pack k-mesh; reduce to the IBZ | `kpoints.monkhorst_pack`; `symmetry.reduce_mesh` | reimplement MP folding or symmetry reduction |
+| Space group / symmetrize density / forces | `symmetry.find_spacegroup`, `symmetry.RhoSymmetrizer`, `symmetry.symmetrize_forces` | call spglib directly |
+| The SCF loop (pick the formalism explicitly) | `scf.loop.scf` (NC), `scf.uspp_loop.scf_uspp` (USPP/PAW), `scf.noncollinear.scf_noncollinear` (spinor/SOC) | write a mixing/diagonalization loop |
+| Eigensolver | `solvers.davidson_batched` (workhorse), `solvers.chebyshev_filtered_batched` | hand-code Davidson |
+| Forces / stress | `postscf.forces.forces`, `postscf.stress.stress` (`stress_kbar` to convert) | recompute Hellmann-Feynman/Pulay terms |
+| Bands / DOS / PDOS / phonons / EOS | `postscf.{bands.band_structure, dos.kpm_dos, pdos.projected_dos, phonons, eos.fit_bm3}` | |
+| Load a pseudopotential (NC or PAW) | `pseudo.upf.parse_upf`, `pseudo.upf_paw.parse_upf_paw` (unified: `api._load_upf`, path-cached) | re-parse UPF XML; re-implement the radial FT (`pseudo.radial.sbt`) |
+| Build the result summary / serialize / render | `api.build_summary`, `checkpoint.save_checkpoint`, `output.format_output` | hand-roll the summary-dict schema |
+| Warm-start an SCF from a checkpoint | `checkpoint.load_checkpoint` → `checkpoint.as_start_from` (pass as `scf(..., start_from=)`) | |
+| Load results into pandas frames / plot | `analysis.{load, scf_frame, bands_frame, plot_bands, …}` (needs the `analysis` extra) | parse the JSON by hand |
+
 ## Running commands efficiently
 
 Long-lived commands (test runs, SCFs) should be launched in the background writing to a

@@ -2,7 +2,7 @@
 # pytest marker strings (shorter to type, impossible to get the markers wrong).
 # Everything goes through `uv run` so the project env is used, not the base venv.
 
-.PHONY: help test test-fast test-standard test-nightly lint imports fmt lock check hooks profile queue-init q-test q-status dashboard dashboard-push worktrees worktrees-prune
+.PHONY: help test test-fast test-standard test-nightly lint imports fmt lock check hooks symbols profile queue-init q-test q-status dashboard dashboard-push worktrees worktrees-prune
 
 BENCH ?= bench_scf
 ARGS  ?= cpu 8 nosym
@@ -50,6 +50,9 @@ check: lint imports test-fast ## pre-push gate: lint + import contracts + fast t
 hooks: ## install git hooks (ruff on commit, fast gate on push)
 	uv run pre-commit install
 	uv run pre-commit install --hook-type pre-push
+
+symbols: ## regenerate docs/symbols.txt — greppable public-API index for agents
+	uv run --group docs python scripts/gen_symbols.py
 
 # --- job queue (pueue) — see docs/queue.md ---------------------------------
 # Route heavy runs through the shared per-host queue so multiple agents don't
