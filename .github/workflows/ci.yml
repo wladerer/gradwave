@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint-and-test:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,5 +32,43 @@ jobs:
       - name: Import contracts
         run: uv run lint-imports
 
-      - name: Standard test tier
-        run: uv run pytest -m "not slow and not torture and not gpu"
+  test:
+    # The standard tier is fp64/CPU-bound; on the free public `ubuntu-latest`
+    # runner a single job takes ~90 min. Shard it across parallel runners
+    # (public repos get generous free concurrency) so wall-clock is ~1/N.
+    # pytest-split balances by test count (or by .test_durations if present);
+    # -n auto still parallelizes within each shard.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --all-extras
+
+      - name: Standard test tier (shard ${{ matrix.group }}/4)
+        run: >-
+          uv run pytest -m "not slow and not torture and not gpu"
+          --splits 4 --group ${{ matrix.group }}
+
+  # Single required-status gate: green iff lint and every test shard passed.
+  ci-ok:
+    if: always()
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify lint and all test shards succeeded
+        run: |
+          [ "${{ needs.lint.result }}" = "success" ] \
+            && [ "${{ needs.test.result }}" = "success" ]
