@@ -40,13 +40,13 @@ from gradwave.postscf._anderson import AndersonMixer
 from gradwave.postscf._kb import projector_data_at_k, species_projector_tables
 from gradwave.postscf._response import (
     cg_sternheimer,
+    fxc_hvp,
     fxc_hvp_spin,
     hartree_kernel,
     insulator_window,
     pad_coeffs,
     sternheimer_shift,
 )
-from gradwave.scf.implicit import apply_k_hxc
 
 
 def _shifted_projectors(system, dkvec: torch.Tensor) -> torch.Tensor:
@@ -169,7 +169,7 @@ def dielectric_born(res, xc, *, dk: float = 1e-3, cg_tol: float = 1e-9,
             if col_prev is not None and float((col - col_prev).abs().max()) < outer_tol:
                 break
             col_prev = col
-            r_vec = apply_k_hxc(res, xc, drho).reshape(-1).to(u_flat.device) - u_flat
+            r_vec = _k_hxc(res, xc, drho).reshape(-1).to(u_flat.device) - u_flat
             u_flat = mixer.step(u_flat, r_vec)
         else:
             raise RuntimeError(f"E-field response ({b_dir}) not converged")
@@ -201,6 +201,23 @@ def dielectric_born(res, xc, *, dk: float = 1e-3, cg_tol: float = 1e-9,
     asr = born.sum(dim=0)
     return {"eps": eps_mat, "born": born, "asr": asr,
             "eps_iso": float(torch.diagonal(eps_mat).mean())}
+
+
+def _k_hxc(res, xc, drho):
+    """(K_Hxc Δρ)(r) = Hartree kernel on Δρ (G=0 excluded) + f_xc·Δρ evaluated at
+    the SCF density INCLUDING the NLCC core.
+
+    The SCF builds v_xc at ρ + ρ_core (scf/loop.py: ``rho_for_xc = rho + rho_core``),
+    so the screening kernel f_xc = ∂v_xc/∂ρ must be evaluated at the same point —
+    otherwise an NLCC pseudo screens with an f_xc taken at the wrong density. The
+    shared ``scf.implicit.apply_k_hxc`` omits the core; this local copy folds it in
+    so the nspin=1 dielectric response matches the collinear ``_k_hxc_spin`` path
+    (which already adds 0.5·ρ_core per channel). For a valence-only pseudo
+    (rho_core is None) this reduces exactly to the plain valence kernel."""
+    core = res.system.rho_core
+    rho_xc = res.rho if core is None else res.rho + core
+    grid = res.system.grid
+    return hartree_kernel(grid, drho) + fxc_hvp(xc, rho_xc, grid, drho)
 
 
 def _k_hxc_spin(res, xc, dru, drd):
