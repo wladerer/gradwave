@@ -570,6 +570,94 @@ def run_eos(inp: Input, verbose: bool = True) -> dict:
     return block
 
 
+def run_phonons(inp: Input, verbose: bool = True) -> dict:
+    """Supercell finite-displacement phonons: dispersion along a q-path + a
+    phonon DOS on a q-mesh.
+
+    Builds the diagonal supercell, displaces only the primitive home-cell atoms
+    (the translational reduction — 6·N_prim SCFs regardless of supercell size,
+    each warm-started from the undisplaced reference), folds the force constants
+    to D(q) and diagonalizes. Norm-conserving, nspin=1 (the forces path)."""
+    import numpy as np
+
+    from gradwave.postscf.phonons_supercell import (
+        build_supercell,
+        dispersion,
+        force_constants_home,
+        phonon_dos,
+    )
+
+    if inp.noncollinear or inp.nspin != 1:
+        raise NotImplementedError(
+            "supercell phonons are norm-conserving, nspin=1 only "
+            "(the forces path does not support nspin=2 / spinors)")
+    _species, upfs, species_of_atom = _species_upfs(inp)
+    if _is_uspp(upfs):
+        raise NotImplementedError(
+            "supercell phonons need norm-conserving pseudopotentials (NC forces)")
+
+    xc = XC_REGISTRY[inp.xc]()
+    cell = np.asarray(inp.atoms.cell.array, dtype=float)
+    positions = inp.atoms.get_positions()
+    masses = inp.atoms.get_masses()  # primitive-atom masses [amu]
+    n = inp.phonons.supercell
+    scmap = build_supercell(cell, positions, species_of_atom, n)
+    # fold the primitive k-mesh by the supercell size (equivalent BZ sampling)
+    ksuper = tuple(max(1, inp.kpoints.mesh[i] // n[i]) for i in range(3))
+
+    def make_scf(pos_sc, start_from=None):
+        from gradwave.scf.loop import scf, setup_system
+
+        system = setup_system(
+            scmap.cell_super, pos_sc, scmap.species_super, upfs,
+            ecut=inp.ecut, kmesh=ksuper, kshift=inp.kpoints.shift,
+            use_symmetry=False)
+        if inp.device != "cpu":
+            system = system.to(inp.device)
+        return scf(system, xc, smearing=inp.smearing.type, width=inp.smearing.width,
+                   etol=inp.scf.etol, rhotol=inp.scf.rhotol,
+                   mixing_alpha=inp.scf.mixing.alpha,
+                   mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
+                   diago_tol=inp.scf.diago_tol, start_from=start_from, verbose=False)
+
+    if verbose:
+        print(f"phonons: {tuple(n)} supercell ({scmap.n_sc} atoms), displacing "
+              f"{scmap.n_prim} home atoms → {6 * scmap.n_prim} SCFs, k-mesh {ksuper}",
+              flush=True)
+    phi = force_constants_home(make_scf, scmap, h=inp.phonons.displacement,
+                               verbose=verbose)
+
+    bp = inp.atoms.cell.bandpath(path=inp.phonons.path or None,
+                                 npoints=inp.phonons.npoints)
+    qpts = np.asarray(bp.kpts)
+    x, xticks, xlabels = bp.get_linear_kpoint_axis()
+    freqs = dispersion(phi, scmap, masses, qpts)  # (nq, 3·N_prim) [cm⁻¹]
+    block = {
+        "supercell": list(n),
+        "n_atoms_supercell": scmap.n_sc,
+        "displacement_ang": inp.phonons.displacement,
+        "kmesh_supercell": list(ksuper),
+        "qpts_frac": qpts.tolist(),
+        "x": np.asarray(x).tolist(),
+        "labels": list(zip(xticks.tolist(), list(xlabels), strict=True)),
+        "frequencies_cm1": freqs.tolist(),
+        "min_frequency_cm1": float(freqs.min()),
+    }
+    if min(inp.phonons.dos_mesh) > 0:
+        from gradwave.kpoints import monkhorst_pack
+
+        qmesh, weights = monkhorst_pack(inp.phonons.dos_mesh)
+        grid, dos = phonon_dos(phi, scmap, masses, qmesh, weights,
+                               width=inp.phonons.dos_width)
+        block["dos"] = {"frequency_cm1": grid.tolist(), "dos": dos.tolist(),
+                        "mesh": list(inp.phonons.dos_mesh)}
+    if verbose:
+        print(f"phonons: min frequency {freqs.min():.1f} cm⁻¹ "
+              f"({'has imaginary modes' if freqs.min() < -1.0 else 'all real'})",
+              flush=True)
+    return block
+
+
 def _bands_extra(inp: Input, res, verbose: bool) -> dict:
     from gradwave.postscf.bands import bands_along_ase_path
 
@@ -950,10 +1038,24 @@ def run(inp: Input, verbose: bool = True) -> dict:
             "eos": eos,
             "runtime_s": round(time.time() - t0, 2),
         }
+    elif inp.task == "phonons":
+        phonons = run_phonons(inp, verbose=verbose)
+        from gradwave import __version__
+
+        summary = {
+            "code": {"name": "gradwave", "version": __version__,
+                     "created": datetime.datetime.now().isoformat(
+                         timespec="seconds")},
+            "task": "phonons",
+            "structure": _structure_block(inp),
+            "parameters": _parameters_block(inp),
+            "phonons": phonons,
+            "runtime_s": round(time.time() - t0, 2),
+        }
     else:
         raise ValueError(
             f"unknown task {inp.task!r} "
-            f"(scf | relax | bands | magnetism | eos)")
+            f"(scf | relax | bands | magnetism | eos | phonons)")
 
     outdir = Path(inp.output_dir)
     outdir.mkdir(parents=True, exist_ok=True)

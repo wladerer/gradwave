@@ -345,6 +345,27 @@ def _bands_lines(bands):
     return lines
 
 
+def _phonon_lines(ph):
+    lines = [_sec("phonons")]
+    labels = " – ".join(lab for _x, lab in ph["labels"])
+    fmin = ph["min_frequency_cm1"]
+    stab = "all real" if fmin > -1.0 else f"IMAGINARY modes ({fmin:.1f} cm⁻¹)"
+    pairs = [
+        ("method", f"supercell FD {tuple(ph['supercell'])} "
+                   f"({ph['n_atoms_supercell']} atoms, ±{ph['displacement_ang']} Å)"),
+        ("q-path", labels),
+        ("q-points", str(len(ph["x"]))),
+        ("branches", str(len(ph["frequencies_cm1"][0]))),
+        ("min ω", f"{fmin:.1f} cm⁻¹ · {stab}"),
+    ]
+    if "dos" in ph:
+        pairs.append(("DOS mesh", "×".join(str(m) for m in ph["dos"]["mesh"])))
+    lines += _cols(pairs)
+    lines.append("   dispersion + DOS in the JSON · "
+                 "plot with `gradwave plot phonons.json`")
+    return lines
+
+
 def _eos_lines(eos):
     lines = [_sec("equation of state")]
     tag = "" if eos.get("all_converged", True) else "  (some SCFs NOT converged)"
@@ -519,6 +540,8 @@ def format_output(summary: dict) -> str:
         lines += _magnetism_lines(summary["magnetism"])
     if "eos" in summary:
         lines += _eos_lines(summary["eos"])
+    if "phonons" in summary:
+        lines += _phonon_lines(summary["phonons"])
     if "provenance" in summary:
         lines += _provenance_lines(summary["provenance"])
     lines += _tail_lines(summary)

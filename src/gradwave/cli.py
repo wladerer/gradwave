@@ -56,7 +56,7 @@ def _build_parser():
     p_plot.add_argument("-o", "--output", metavar="FILE",
                         help="figure file (default: alongside the JSON)")
     p_plot.add_argument("--kind",
-                        choices=("auto", "scf", "bands", "dos", "pdos"),
+                        choices=("auto", "scf", "bands", "dos", "pdos", "phonons"),
                         default="auto")
     p_plot.add_argument("--width", type=float, default=0.1,
                         help="DOS broadening [eV]")
@@ -164,6 +164,13 @@ def _cmd_run(args) -> int:
         print(f"V0 = {eos['v0_ang3_per_atom']:.4f} Å³/atom, "
               f"B0 = {eos['b0_GPa']:.2f} GPa, B0' = {eos['b0_prime']:.3f}")
         return 0 if eos.get("all_converged", True) else 1
+    phonons = summary.get("phonons")
+    if phonons is not None:
+        fmin = phonons["min_frequency_cm1"]
+        print(f"phonons: {tuple(phonons['supercell'])} supercell, "
+              f"min ω = {fmin:.1f} cm⁻¹ "
+              f"({'all real' if fmin > -1.0 else 'IMAGINARY modes'})")
+        return 0 if fmin > -1.0 else 1
     return 0
 
 
@@ -173,7 +180,9 @@ def _cmd_plot(args) -> int:
     summary = analysis.load(args.result)
     kind = args.kind
     if kind == "auto":
-        if "bands" in summary:
+        if "phonons" in summary:
+            kind = "phonons"
+        elif "bands" in summary:
             kind = "bands"
         elif "pdos" in summary:
             kind = "pdos"
@@ -190,6 +199,8 @@ def _cmd_plot(args) -> int:
             analysis.plot_spin_texture(summary, path=out)
         else:
             analysis.plot_pdos(summary, path=out)
+    elif kind == "phonons":
+        analysis.plot_phonons(summary, path=out)
     else:
         analysis.plot_dos(summary, path=out, width=args.width)
     print(f"wrote {out}")

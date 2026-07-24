@@ -353,6 +353,41 @@ output:
 """
 
 # name -> (one-line description, template body). Order is the listing order.
+_PHONONS = """\
+# Supercell finite-displacement phonons: dispersion along a q-path + phonon DOS.
+# Run:  gradwave input.yaml -o out/  &&  gradwave plot out/phonons.json
+# Norm-conserving, nspin=1. Displaces only the primitive home-cell atoms, so the
+# cost is 6·N_prim SCFs regardless of supercell size. Start from a RELAXED cell
+# (residual stress/forces shift the frequencies).
+
+structure:
+  cell: [[0.0, 2.715, 2.715], [2.715, 0.0, 2.715], [2.715, 2.715, 0.0]]
+  positions:
+    frac: [[0.0, 0.0, 0.0], [0.25, 0.25, 0.25]]
+  species: [Si, Si]
+
+pseudopotentials:
+  dir: ./pseudos                 # EDIT: folder holding your UPF files
+  map:
+    Si: Si_ONCV_PBE-1.2.upf      # EDIT: element -> UPF filename
+
+ecut: 500.0                      # eV, plane-wave cutoff (converge this)
+xc: pbe
+kpoints:
+  mesh: [8, 8, 8]                # primitive k-mesh; folded by the supercell size
+
+task: phonons
+phonons:
+  supercell: [2, 2, 2]           # diagonal supercell for the force constants
+  displacement: 0.01             # atomic displacement h [Å] for the central FD
+  path: ""                       # ASE bandpath string (e.g. GXWKGL); "" = default
+  npoints: 120                   # q-points along the dispersion
+  dos_mesh: [8, 8, 8]            # MP q-mesh for the DOS ([0,0,0] to skip)
+
+output:
+  dir: ./out
+"""
+
 _TEMPLATES: dict[str, tuple[str, str]] = {
     "scf": ("Single-point SCF of an insulator.", _SCF),
     "metal": ("SCF of a metal (smearing + dense k-mesh).", _METAL),
@@ -364,6 +399,7 @@ _TEMPLATES: dict[str, tuple[str, str]] = {
     "magnetism": ("Collinear magnetism + exchange couplings.", _MAGNETISM),
     "noncollinear": ("Noncollinear SCF with spin-orbit coupling.", _NONCOLLINEAR),
     "eos": ("Equation of state (bulk modulus via Birch-Murnaghan).", _EOS),
+    "phonons": ("Supercell phonon dispersion + DOS.", _PHONONS),
 }
 
 

@@ -254,6 +254,42 @@ def plot_bands(source, path=None, ax=None, window=None):
     return _finish(ax.figure, ax, path)
 
 
+def plot_phonons(source, path=None):
+    """Phonon dispersion (with a DOS side panel when present) from a
+    phonons.json: branches along the q-path, high-symmetry labels on the x
+    axis, ω = 0 marked (imaginary modes plot as negative)."""
+    plt = _plt()
+    s = load(source)
+    ph = s["phonons"] if "phonons" in s else s
+    x = np.asarray(ph["x"], dtype=float)
+    freqs = np.asarray(ph["frequencies_cm1"], dtype=float)  # (nq, nbranch)
+    labels = ph["labels"]
+    has_dos = "dos" in ph
+    if has_dos:
+        fig, (ax, axd) = plt.subplots(
+            1, 2, figsize=(6.8, 4.2), sharey=True,
+            gridspec_kw={"width_ratios": [3, 1], "wspace": 0.05})
+    else:
+        fig, ax = plt.subplots(figsize=(5.4, 4.2))
+    for j in range(freqs.shape[1]):
+        ax.plot(x, freqs[:, j], color="#2a78d6", lw=1.1)
+    for xt, _lab in labels:
+        ax.axvline(xt, color="#52514e", lw=0.5, alpha=0.5)
+    ax.axhline(0.0, color="#52514e", lw=0.5, ls="--", alpha=0.7)
+    ax.set_xticks([xt for xt, _ in labels])
+    ax.set_xticklabels([lab.replace("G", "Γ") for _, lab in labels])
+    ax.set_ylabel("ω [cm⁻¹]")
+    ax.set_xlim(x.min(), x.max())
+    if has_dos:
+        g = np.asarray(ph["dos"]["frequency_cm1"], dtype=float)
+        d = np.asarray(ph["dos"]["dos"], dtype=float)
+        axd.plot(d, g, color="#2a78d6", lw=1.1)
+        axd.axhline(0.0, color="#52514e", lw=0.5, ls="--", alpha=0.7)
+        axd.set_xlabel("DOS")
+        axd.set_xticks([])
+    return _finish(fig, ax, path)
+
+
 def plot_dos(source, path=None, ax=None, width: float = 0.1):
     """Broadened DOS; spin-down plotted negative for nspin=2."""
     plt = _plt()
