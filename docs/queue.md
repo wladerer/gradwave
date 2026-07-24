@@ -119,8 +119,9 @@ hosts it with real HTTPS on the tailnet — no web server, no firewall changes, 
 
 ```bash
 make dashboard-push     # generates + rsyncs to homelab:~/gwdash/index.html
-# once, on homelab (persists in tailscaled state across reboots):
-ssh homelab 'sudo tailscale serve --bg --set-path / $HOME/gwdash'
+# once, on homelab (persists in tailscaled state across reboots). Use the
+# absolute path — $HOME resolves to /root under sudo:
+ssh homelab 'sudo tailscale serve --bg /home/wladerer/gwdash'
 ```
 
 The page is then at `https://homelab.<tailnet>.ts.net`. Re-run `make dashboard-push`
