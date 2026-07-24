@@ -27,6 +27,7 @@ analysis = [
 dev = [
     "pytest>=8",
     "pytest-xdist",
+    "pytest-split>=0.8",  # shard the CI standard tier across parallel runners
     "ruff>=0.6",
     "sympy>=1.12",
     "pre-commit>=3.5",
