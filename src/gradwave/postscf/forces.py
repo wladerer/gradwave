@@ -24,12 +24,52 @@ from gradwave.postscf._response import pad_coeffs
 from gradwave.scf.loop import SCFResult, _stack_dij
 
 
+def _core_correction_tau(res, system, grid, nspin):
+    """Valence τ_σ(r) rebuilt from the converged orbitals, DETACHED.
+
+    τ is a fixed orbital field at the SCF point — the only position dependence in
+    the core-correction energy flows through ρ_core's structure factor, so τ
+    carries no pos gradient (the HF stationarity argument: dE/dτ_pos is taken at
+    fixed ψ). The core charge has no orbitals, so τ_core = 0 and the meta-GGA XC
+    energy is E_xc(ρ+ρ_core, σ(ρ+ρ_core), τ_valence) — exactly the SCF assembly.
+    Rebuilt via the same pad_coeffs → tau_b path ELF/stress use; returns a
+    per-spin list (length nspin)."""
+    from gradwave.core.metagga import tau_b
+    from gradwave.postscf._response import pad_coeffs
+
+    bk = getattr(system, "batch", None)
+    if bk is None:
+        raise NotImplementedError(
+            "meta-GGA NLCC force needs the batched-k geometry (system.batch); "
+            "only collinear norm-conserving results are supported"
+        )
+    shape, vol = grid.shape, grid.volume
+    occ = res.occupations
+    if nspin == 2:
+        return [
+            tau_b(
+                pad_coeffs(res.coeffs[sp], bk.npw_max), occ[sp],
+                system.kweights, bk, shape, vol,
+            ).detach()
+            for sp in range(2)
+        ]
+    return [
+        tau_b(
+            pad_coeffs(res.coeffs, bk.npw_max), occ,
+            system.kweights, bk, shape, vol,
+        ).detach()
+    ]
+
+
 def _core_correction_energy(res, xc, pos):
     """E_xc(ρ + ρ_core(pos)) with the SCF density detached — the ONLY position
     dependence is the NLCC core charge's structure factor, so autograd of this
     over pos gives −F_cc = ∫ v_xc ∂ρ_core/∂τ (v_xc = δE_xc/δρ_xc, so the full
-    LDA/GGA gradient correction is carried automatically). Returns a scalar to
-    add to the position-dependent energy assembled in forces()."""
+    LDA/GGA gradient correction is carried automatically). For meta-GGA the
+    valence τ is rebuilt (detached) and passed alongside the core-augmented ρ/σ,
+    so E_xc picks up the τ-dependent XC energy without adding any τ→pos path.
+    Returns a scalar to add to the position-dependent energy assembled in
+    forces()."""
     from gradwave.core.density import sigma_from_rho
     from gradwave.scf.common import spin_xc_energy
     from gradwave.scf.setup_common import (
@@ -41,12 +81,6 @@ def _core_correction_energy(res, xc, pos):
     system = res.system
     grid = system.grid
     nspin = getattr(res, "nspin", 1)
-    if xc.needs_tau:
-        # τ (kinetic-energy density) is not stored on SCFResult; the meta-GGA
-        # NLCC-force path would need to rebuild it. Not assembled yet.
-        raise NotImplementedError(
-            "NLCC force for meta-GGA (needs_tau) functionals not implemented"
-        )
     # |G| shells reproduced from the same g2 the frozen build used, so the
     # differentiable ρ_core matches system.rho_core at the converged geometry.
     g_flat = np.sqrt(grid.g2.detach().cpu().reshape(-1).numpy())
@@ -54,12 +88,19 @@ def _core_correction_energy(res, xc, pos):
     shells = core_shell_tables(system.upfs, uniq, inverse)
     core = assemble_core_density(shells, system.species_of_atom, pos, grid)
 
+    # Meta-GGA (needs_tau): valence τ_σ rebuilt from the converged orbitals and
+    # detached (τ carries no position dependence — see _core_correction_tau).
+    tau_s = _core_correction_tau(res, system, grid, nspin) if xc.needs_tau else None
+
     if nspin == 2:
         rho_s = [r.detach() for r in res.rho_spin]
-        return spin_xc_energy(xc, rho_s, core, grid.volume, grid.g_cart)
+        return spin_xc_energy(
+            xc, rho_s, core, grid.volume, grid.g_cart, tau_s=tau_s
+        )
     rho_xc = res.rho.detach() + core
     sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
-    return xc.energy(rho_xc, grid.volume, sigma)
+    tau = tau_s[0] if tau_s is not None else None
+    return xc.energy(rho_xc, grid.volume, sigma, tau)
 
 
 def forces(
