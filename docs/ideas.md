@@ -7,6 +7,66 @@ for items already built or settled.
 
 # Open backlog
 
+## Capability gaps: effort vs value (2026-07-23 survey)
+
+A whole-code survey of the electronic-structure methods gradwave does *not* yet
+have, ranked by return. Effort and value are calibrated to this codebase: what
+substrate already exists (the differentiable-by-construction design, the ISDF/ACE
+Fock build, the nspin=1 autograd force/stress machinery) and the difficulty
+framing the sections below already carry. Scale is Low / Med / High / V.High.
+Several rows have a dedicated section further down that holds the real reasoning;
+this table is the map over them, not a replacement. It is a snapshot — as items
+land, move them to "Done and resolved" and re-rank the rest.
+
+For context, the ground-state semilocal-plus-hybrid-plus-magnetism surface is
+already broad: LDA/PBE/r2SCAN, a self-consistent PBE0/HSE hybrid on a k-mesh,
+DFT+U from linear response, the full spin-unpolarized → collinear → non-collinear
+→ SOC ladder, norm-conserving and USPP/PAW pseudos, forces/stress/bands/DOS/
+PDOS/COHP/Bader/Γ-phonons/EOS, four smearing schemes, and Davidson plus CheFSI.
+The gaps are mostly *beyond* ground-state GGA/hybrid DFT, plus a few coverage
+holes inside it.
+
+| Feature | Effort | Value | Why / reusable substrate |
+|---|---|---|---|
+| nspin=2 forces / stress / bands | Low–Med | High | Plumbing — the nspin=1 autograd force/stress path and the noncollinear path both exist; thread the spin channel. Unblocks routine magnetic relaxation and bands. A coverage hole, not new physics. See "Full nspin=2 and PAW coverage". |
+| D3/D4 dispersion | Low | High | Geometry-only pairwise sum plus damping, no SCF change, trivially differentiable. Directly enables the layered / adsorption / 2D-magnet applications. |
+| Elastic constants | Low–Med | High | `stress()` is already autodiff-through-strain; apply strain patterns and fit. The Phase-2 mechanical buildout. |
+| Stress with DFT+U / fully-relativistic | Low–Med | Med | Removes two `NotImplementedError` guards; enables variable-cell for correlated and SOC systems. |
+| NLCC force term | Low | Med | Small missing analytic term; correctness for NLCC-pseudo forces. |
+| Dipole correction + external E-field | Med | High | Sawtooth potential plus energy term. Unblocks slabs, RAIRS, and charged defects — an entire application class. See "RAIRS and a slab dipole moment". |
+| Tetrahedron (Blöchl) BZ integration | Med | Med | Non-smooth weights need care against autograd, but smearing already covers metals; the win is insulator DOS/optics accuracy. |
+| RPA correlation energy | Med–High | High | The ISDF/ACE substrate is already built for exact exchange; a differentiable RPA is novel and is physics GGA cannot do. See the RI/THC section. |
+| Berry-phase polarization (modern theory) | Med | Med–High | Berry phase over k-strings; an independent route to Born charges, enables ferroelectrics, and is the precursor to topology. |
+| Real-time / linear-response TDDFT | Med–High | Med–High | RT-TDDFT fits the differentiable design naturally and gives optical spectra far cheaper than BSE. |
+| Meta-GGA under non-collinear / SOC | Med–High | Med | Wire the τ operator onto the spinor H-apply so r2SCAN meets magnetism+SOC. Narrower payoff. See "Learned meta-GGA". |
+| Finite-q phonons / dispersion | High (DFPT) / Med (supercell) | High | No arbitrary-q DFPT today. The supercell frozen-phonon route is cheaper and unlocks thermodynamics and stability. See "Phonon band structures". |
+| Dielectric / Born for metals and nspin=2 | Med | Med | Generalize the current nspin=1-insulator-only path; needed for RAIRS and magnetic IR. |
+| Wannier functions / Wannier90 interface | Med | Med | Export overlaps (Med) or build MLWFs internally (higher); enables interpolation, transport hand-off, and topology. |
+| Topological invariants (Z₂ / Chern) | Med (given Berry / Wannier) | Med | On-brand given the Bi₂Se₃ band-inversion demo, but niche; depends on the two rows above. |
+| libxc binding / more functionals | Med (per functional if transcribed) | Med | Breadth (PBEsol, SCAN, B3LYP …), but a C binding breaks the pure-autodiff design and hand-transcription is Med each. A real tension with the ethos. |
+| Higher-order MP smearing | Low | Low | Only MP-1 today; marginal accuracy gain. |
+| Standalone Hartree–Fock | Low | Low | The Fock operator already exists inside the hybrids; rarely wanted for solids. |
+| Extra PP formats (GTH / HGH / psp8) | Med | Low–Med | UPF already covers PseudoDojo / SG15 / PAW; mostly convenience. |
+| GW quasiparticle | V.High | High | The standard ask for real gaps; ISDF helps but frequency integration plus the self-energy is a major build. |
+| BSE (excitons / optical) | V.High | High | Needs GW first plus the electron–hole kernel; the highest-effort item here. |
+
+The four quadrants:
+
+- **Quick wins** (high value, low effort — do first): nspin=2 derivatives, D3
+  dispersion, elastic constants, DFT+U/FR stress.
+- **Big bets** (high value, high effort): RPA → GW → BSE built in that order on
+  the ISDF substrate, finite-q phonons, and the dipole/field boundary conditions.
+- **On-brand niche** (differentiability showcase, moderate value): Berry-phase
+  polarization, RT-TDDFT, topological invariants.
+- **Low priority**: extra PP formats, higher-order MP smearing, standalone HF,
+  libxc breadth.
+
+The largest genuinely-absent physics is the excited-state / many-body tier (GW,
+BSE, TDDFT, RPA): every gap, level alignment, and spectrum today comes from
+semilocal or hybrid DFT with its self-interaction error. The cheapest missing
+physics is dispersion. The most mechanical missing coverage is nspin=2
+derivatives.
+
 ## Scaling up: RI and tensor hypercontraction
 
 The
