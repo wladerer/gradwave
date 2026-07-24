@@ -93,6 +93,30 @@ home-manager install snippet: **`docs/queue.md`**. If `gwq` reports pueue missin
 it isn't installed on that box yet — point the user at `docs/queue.md` (needs a
 willnix rebuild), don't fall back to raw runs silently.
 
+## Parallel agents & worktrees
+
+Several agents run at once, each in its own worktree under `.claude/worktrees/`.
+Worktrees isolate tracked files (you cannot clobber another agent's code), so the
+real hazards are drift, stale clutter, and two agents editing the same module.
+Rules that keep the fleet from tangling:
+
+- **One worktree = one branch = one task**, and name the worktree after the branch.
+  Never run two agents in the same worktree; never reuse a worktree for a new task
+  (make a fresh one).
+- **Branch from fresh `origin/main`.** Never stack a branch on another *unmerged*
+  branch — main is squash-merged, so stacking guarantees conflicts on merge.
+- **Keep branches short-lived and rebase on `origin/main` before opening/merging**
+  the PR, so conflicts surface locally. Long-lived branches drift and rot.
+- **Check for collisions before and during work:** `make worktrees` shows every
+  worktree's drift, flags stale (merged) branches, and — the part that's otherwise
+  invisible — lists files edited in more than one active worktree. If your file
+  shows up there, coordinate before both sides diverge further.
+- **Prune merged worktrees** with `make worktrees-prune` (removes only stale, clean,
+  idle worktrees under `.claude/worktrees/`; never the primary checkout or a busy one).
+- **Shared state is NOT worktree-isolated** — the git stash stack (never bare
+  `git stash`; use a WIP commit), the primary `~/github/gradwave` checkout, and the
+  `willnix` config repo (treat as single-writer; two agents editing it *will* clobber).
+
 ## Remote compute (asus)
 
 A second NixOS box is reachable at `ssh asus` (Tailscale + LAN): 22 cores and an
