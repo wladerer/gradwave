@@ -109,7 +109,7 @@ def procs_in(path: str) -> list[str]:
     return hits
 
 
-def gather(mref: str) -> list[dict]:
+def gather(mref: str, use_gh: bool = True) -> list[dict]:
     rows = []
     primary_common = git("rev-parse", "--path-format=absolute", "--git-common-dir")
     for wt in list_worktrees():
@@ -119,11 +119,12 @@ def gather(mref: str) -> list[dict]:
         behind, ahead = (lr.split() + ["?", "?"])[:2]
         dirty = len(git("status", "--porcelain", cwd=path).splitlines())
         is_wt = "/.claude/worktrees/" in path
-        stale = (ahead == "0" and behind not in ("0", "?")) or pr_merged(branch)
+        stale = (ahead == "0" and behind not in ("0", "?")) or (use_gh and pr_merged(branch))
         rows.append({
             "path": path, "name": os.path.basename(path), "branch": branch,
             "behind": behind, "ahead": ahead, "dirty": dirty,
             "base": base[:8], "is_wt": is_wt, "stale": stale,
+            "has_agent": bool(procs_in(path)) if is_wt else False,
             "files": changed_files(path, base) if is_wt else set(),
         })
     _ = primary_common
@@ -213,14 +214,21 @@ def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(description="fleet worktree overview")
     p.add_argument("--prune", action="store_true",
                    help="remove stale + clean + idle worktrees under .claude/worktrees/")
+    p.add_argument("--json", action="store_true",
+                   help="machine-readable dump (fast: skips the gh merged-PR check)")
     p.add_argument("--no-fetch", action="store_true", help="skip the origin/main fetch")
     a = p.parse_args(argv)
 
-    if not a.no_fetch:
+    if not a.no_fetch and not a.json:
         subprocess.run(["git", "fetch", "origin", "main", "-q"],
                        capture_output=True, timeout=30)
     mref = main_ref()
-    rows = gather(mref)
+    rows = gather(mref, use_gh=not a.json)
+    if a.json:
+        import json
+        out = [{**r, "files": sorted(r["files"])} for r in rows]
+        print(json.dumps(out))
+        return 0
     if a.prune:
         return prune(rows)
     report(rows, mref)

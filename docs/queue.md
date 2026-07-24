@@ -97,9 +97,18 @@ has to be undone to adopt Dask — it nests under one slot.
 ## Dashboard
 
 `gwq status` is the quick terminal view. For a shareable page, `scripts/dashboard.py`
-renders a single self-contained `dashboard.html` (no JavaScript, no external assets):
-a live queue panel per host, and a benchmark-history panel built from the JSON records
-in `benchmarks/results/<host>/` (recent runs per benchmark + a wall-time sparkline).
+renders a single self-contained `dashboard.html` (no JavaScript, no external assets;
+60s meta-refresh; validated light/dark palette) with four panels:
+
+- **Hosts** — load vs cores, memory, GPU (asus), uptime, disk per box: the contention view.
+- **Queue** — live pueue tasks per host + 24h throughput (done/failed).
+- **Agents & worktrees** — active worktrees per host, which have a live agent parked
+  inside, drift vs main, and files edited in >1 worktree (conflict incoming). Pulls
+  `scripts/worktrees.py --json` from each host.
+- **Benchmarks** — recent runs per benchmark with a wall-time sparkline + regression flag.
+
+All panels are best-effort — an unreachable host or missing tool degrades that panel,
+never the page.
 
 ```bash
 make dashboard          # -> dashboard.html; open it in a browser
