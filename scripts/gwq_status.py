@@ -17,9 +17,17 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
+# asus's OS hostname is "nixos"; map it to the logical name used by callers.
+HOST_ALIASES = {"nixos": "asus"}
+
+
+def this_host() -> str:
+    raw = socket.gethostname()
+    return HOST_ALIASES.get(raw, raw)
+
 
 def fetch(host: str) -> dict | None:
-    local = host == socket.gethostname()
+    local = host == this_host()
     argv = ["pueue", "status", "--json"] if local else \
         ["ssh", host, "pueue status --json"]
     try:
