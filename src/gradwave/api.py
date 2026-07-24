@@ -112,9 +112,13 @@ def _spin_setup(inp: Input):
     return xc, mags
 
 
-def run_scf(inp: Input, system=None, verbose: bool = True):
+def run_scf(inp: Input, system=None, verbose: bool = True, start_from=None):
     """Run the SCF for either formalism. Returns the native result
-    (SCFResult for NC, USPPResult for USPP/PAW)."""
+    (SCFResult for NC, USPPResult for USPP/PAW).
+
+    ``start_from`` warm-starts the density from a previous converged result
+    (the volume-scan chain in ``run_eos`` uses it); when None the checkpoint in
+    ``inp.restart`` is used instead, if any."""
     _species, upfs, _soa = _species_upfs(inp)
     uspp = _is_uspp(upfs)
     system = system or build_system(inp)
@@ -128,8 +132,7 @@ def run_scf(inp: Input, system=None, verbose: bool = True):
         xc = XC_REGISTRY[inp.xc]()
         mags = None
 
-    start_from = None
-    if inp.restart is not None:
+    if start_from is None and inp.restart is not None:
         from gradwave.checkpoint import as_start_from, load_checkpoint
 
         start_from = as_start_from(load_checkpoint(inp.restart))
@@ -463,6 +466,94 @@ def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object, list]:
         relax["max_stress_eV_ang3"] = float(np.abs(atoms.get_stress()).max())
         relax["pressure_GPa"] = inp.relax.pressure
     return relax, atoms, frames
+
+
+def run_eos(inp: Input, verbose: bool = True) -> dict:
+    """Isotropic volume scan + 3rd-order Birch-Murnaghan fit → V0, B0, B0'.
+
+    For each factor in ``inp.eos.scales`` the cell is scaled isotropically
+    (a → a·s^(1/3), fractional coordinates fixed) and the SCF re-converged. All
+    volumes share ONE FFT grid, pinned to the elementwise max over the scan, so
+    E(V) carries no grid-discontinuity steps; each volume warm-starts from the
+    previous converged density (the cheap, branch-stable EOS chain). Returns the
+    ``eos`` summary block."""
+    import numpy as np
+
+    from gradwave.postscf.eos import EV_A3_TO_GPA, fit_bm3
+
+    _species, upfs, species_of_atom = _species_upfs(inp)
+    uspp = _is_uspp(upfs)
+    scales = list(inp.eos.scales)
+    cell0 = np.asarray(inp.atoms.cell.array, dtype=float)
+    frac = inp.atoms.get_scaled_positions()
+    natoms = len(inp.atoms)
+
+    def _build_at(scale, fft_shape):
+        cell = cell0 * scale ** (1.0 / 3.0)
+        pos = frac @ cell
+        if uspp:
+            from gradwave.scf.uspp import setup_uspp
+
+            return setup_uspp(
+                cell, pos, species_of_atom, upfs, ecut=inp.ecut,
+                kmesh=inp.kpoints.mesh, ecutrho=inp.ecutrho, nbands=inp.nbands,
+                use_symmetry=inp.symmetry, fft_shape=fft_shape), cell
+        from gradwave.scf.loop import setup_system
+
+        return setup_system(
+            cell=cell, positions=pos, species_of_atom=species_of_atom,
+            upfs=upfs, ecut=inp.ecut, kmesh=inp.kpoints.mesh,
+            kshift=inp.kpoints.shift, nbands=inp.nbands,
+            use_symmetry=inp.symmetry, fft_shape=fft_shape), cell
+
+    # pass 1: natural FFT grid per volume, then pin the elementwise max so
+    # every volume shares one grid (larger cells otherwise pick a finer grid)
+    dims = [tuple(_build_at(s, None)[0].grid.shape) for s in scales]
+    fixed = tuple(max(d[i] for d in dims) for i in range(3))
+    if verbose:
+        print(f"eos: {len(scales)} volumes on fixed FFT grid {fixed}", flush=True)
+
+    prev = None
+    volumes, energies, converged = [], [], []
+    ekind = inp.eos.energy
+    for s in scales:
+        sysd, cell = _build_at(s, fixed)
+        res = run_scf(inp, system=sysd, verbose=False, start_from=prev)
+        prev = res
+        e = float(getattr(res.energies, ekind))
+        vol = float(abs(np.linalg.det(cell)))
+        conv = bool(getattr(res, "converged", True))
+        volumes.append(vol)
+        energies.append(e)
+        converged.append(conv)
+        if verbose:
+            tag = "" if conv else "  (NOT converged)"
+            print(f"  s={s:.3f}  V={vol / natoms:8.4f} Å³/at  "
+                  f"E={e / natoms:+.6f} eV/at{tag}", flush=True)
+
+    v_at = np.array(volumes) / natoms
+    e_at = np.array(energies) / natoms
+    fit = fit_bm3(v_at, e_at)
+    block = {
+        "scales": scales,
+        "energy_kind": ekind,
+        "n_atoms": natoms,
+        "volumes_ang3_per_atom": v_at.tolist(),
+        "energies_eV_per_atom": e_at.tolist(),
+        "fft_grid": list(fixed),
+        "v0_ang3_per_atom": fit.v0,
+        "b0_GPa": fit.b0_GPa,
+        "b0_prime": fit.b0_prime,
+        "e0_eV_per_atom": fit.e0,
+        "rms_residual_eV_per_atom": fit.rms_residual_eV,
+        "b0_eV_ang3": fit.b0,
+        "ev_a3_to_gpa": EV_A3_TO_GPA,
+        "all_converged": all(converged),
+    }
+    if verbose:
+        print(f"eos: V0={fit.v0:.4f} Å³/at  B0={fit.b0_GPa:.2f} GPa  "
+              f"B0'={fit.b0_prime:.3f}", flush=True)
+    return block
 
 
 def _bands_extra(inp: Input, res, verbose: bool) -> dict:
@@ -831,9 +922,24 @@ def run(inp: Input, verbose: bool = True) -> dict:
             },
             "runtime_s": round(time.time() - t0, 2),
         }
+    elif inp.task == "eos":
+        eos = run_eos(inp, verbose=verbose)
+        from gradwave import __version__
+
+        summary = {
+            "code": {"name": "gradwave", "version": __version__,
+                     "created": datetime.datetime.now().isoformat(
+                         timespec="seconds")},
+            "task": "eos",
+            "structure": _structure_block(inp),
+            "parameters": _parameters_block(inp),
+            "eos": eos,
+            "runtime_s": round(time.time() - t0, 2),
+        }
     else:
         raise ValueError(
-            f"unknown task {inp.task!r} (scf | relax | bands | magnetism)")
+            f"unknown task {inp.task!r} "
+            f"(scf | relax | bands | magnetism | eos)")
 
     outdir = Path(inp.output_dir)
     outdir.mkdir(parents=True, exist_ok=True)

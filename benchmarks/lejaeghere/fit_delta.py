@@ -10,35 +10,18 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from scipy.optimize import curve_fit
 
 SP = Path(__file__).parent
 sys.path.insert(0, str(SP))
 from cases import CASES, RY, SCALES, WIEN2K  # noqa: E402
 
-EV_A3_TO_GPA = 160.2176634
-
-
-def bm3(v, e0, v0, b0, b0p):
-    x = (v0 / v) ** (2.0 / 3.0)
-    return e0 + 9 * v0 * b0 / 16 * ((x - 1) ** 3 * b0p + (x - 1) ** 2 * (6 - 4 * x))
+# the Birch-Murnaghan fit + calcDelta math ships in the library (postscf.eos)
+from gradwave.postscf.eos import EV_A3_TO_GPA, delta_value, fit_bm3  # noqa: E402
 
 
 def fit_points(vols, es):
-    i = int(np.argmin(es))
-    popt, _ = curve_fit(bm3, vols, es, p0=[es[i], vols[i], 0.6, 4.0],
-                        maxfev=20000)
-    return popt  # e0, v0, b0 (eV/Å^3/atom), b1
-
-
-def delta_value(p1, p2):
-    """calcDelta: RMS of the shifted-curve difference over the +/-6% window
-    around the average equilibrium volume, in meV/atom."""
-    v0av = 0.5 * (p1[1] + p2[1])
-    vv = np.linspace(0.94 * v0av, 1.06 * v0av, 1000)
-    d1 = bm3(vv, 0.0, *p1[1:])
-    d2 = bm3(vv, 0.0, *p2[1:])
-    return np.sqrt(np.trapezoid((d1 - d2) ** 2, vv) / (vv[-1] - vv[0])) * 1000
+    f = fit_bm3(vols, es)
+    return (f.e0, f.v0, f.b0, f.b0_prime)  # e0, v0, b0 (eV/Å^3/atom), b1
 
 
 gw = json.loads((SP / "results" / "eos_gw.json").read_text())

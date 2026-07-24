@@ -152,6 +152,11 @@ def _cmd_run(args) -> int:
               f"E = {relax['energy_eV']:.8f} eV, fmax = "
               f"{relax['fmax_eV_ang']:.4f} eV/Å ({relax['n_steps']} steps)")
         return 0
+    eos = summary.get("eos")
+    if eos is not None:
+        print(f"V0 = {eos['v0_ang3_per_atom']:.4f} Å³/atom, "
+              f"B0 = {eos['b0_GPa']:.2f} GPa, B0' = {eos['b0_prime']:.3f}")
+        return 0 if eos.get("all_converged", True) else 1
     return 0
 
 
