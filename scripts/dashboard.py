@@ -27,6 +27,8 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -80,7 +82,50 @@ def remote(host: str, script: str, timeout: int = 20) -> str | None:
     return run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, script], timeout)
 
 
+def local_metrics() -> dict | None:
+    """Local host metrics straight from /proc + os — no shell tools, so it works
+    under a restricted systemd-service PATH (where nproc/awk/df may be absent)."""
+    m: dict[str, str] = {}
+    try:
+        m["ncpu"] = str(os.cpu_count() or 1)
+    except OSError:
+        pass
+    try:
+        m["load"] = f"{os.getloadavg()[0]:.2f}"
+    except OSError:
+        pass
+    try:
+        info = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            parts = line.replace(":", "").split()
+            if len(parts) >= 2:
+                info[parts[0]] = parts[1]
+        m["memtotal"], m["memavail"] = info.get("MemTotal", "0"), info.get("MemAvailable", "0")
+    except OSError:
+        pass
+    try:
+        m["uptime"] = str(int(float(Path("/proc/uptime").read_text().split()[0])))
+    except (OSError, ValueError):
+        pass
+    try:
+        s = os.statvfs("/")
+        m["diskpct"] = str(int(100 * (s.f_blocks - s.f_bfree) / s.f_blocks)) if s.f_blocks else "?"
+    except OSError:
+        pass
+    smi = shutil.which("nvidia-smi")
+    if smi:
+        out = run([smi, "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+                   "--format=csv,noheader,nounits"], timeout=6)
+        if out and out.strip():
+            p = [x.strip() for x in out.strip().splitlines()[0].split(",")]
+            if len(p) >= 4:
+                m.update(gpu_util=p[0], gpu_memused=p[1], gpu_memtotal=p[2], gpu_temp=p[3])
+    return m or None
+
+
 def host_metrics(host: str) -> dict | None:
+    if host == qs.this_host():
+        return local_metrics()
     out = remote(host, METRICS_SH, timeout=15)
     if out is None:
         return None
