@@ -161,6 +161,98 @@ def strained_projector_cols(tabs, species_of_atom, atom_index, lmax,
     return p * ph[:, atom_index].T
 
 
+def hubbard_energy_strained(system, manifolds, b_e, pos_e, omega, spheres,
+                            coeffs_s, occ_s, nspin, kw) -> torch.Tensor:
+    """Dudarev E_U on the strain graph: Σ_{I,σ} (U−J)/2 Tr[n^{Iσ}(1−n^{Iσ})].
+
+    The strain enters through the atomic-orbital projectors exactly as it does
+    for the KB betas in ``strained_projector_cols``: the radial form factor
+    F(|k+G|) via the differentiable SBT (``sbt_t``), Y_lm at the strained
+    (k+G) direction, the 1/√Ω(ε) normalization, and the e^{−i(k+G)·τ(ε)}
+    phases. The occupation matrices n^{Iσ} = Σ_{kv} f ⟨φ_m|ψ⟩⟨ψ|φ_{m'}⟩ are
+    rebuilt from those strained projectors and the (detached) SCF orbitals, so
+    the whole +U energy is on the same ε-graph #58's stress uses. At ε=0 this
+    reproduces core.hubbard.hubbard_occ_and_energy bit-for-bit (``sbt_t`` and
+    ``sbt`` share the same Simpson quadrature), so the ε=0 strained energy
+    still matches the SCF total.
+
+    ``coeffs_s``/``occ_s`` are the per-spin (detached) coefficients on each
+    k-sphere and occupations (as prepared in ``_energy_strained``): nspin=1 is
+    the half-filled, energy-doubled convention (occ in [0,2], weight ½·occ);
+    nspin=2 uses per-channel occ in [0,1].
+    """
+    from gradwave.core.hubbard import hubbard_energy, manifold_radial
+    from gradwave.pseudo.radial_torch import sbt_t, simpson_weights
+
+    dev = pos_e.device
+    man_by_sp = {m.species: m for m in manifolds}
+    correlated = [(a, s) for a, s in enumerate(system.species_of_atom)
+                  if s in man_by_sp]
+    if not correlated:
+        raise ValueError("no atoms match the requested Hubbard manifolds")
+
+    # per-species differentiable radial data (r·R renormalized, as in
+    # core.hubbard.build_hubbard_projectors; g = (r·R)·r so ∫ g j_l dr = F(q))
+    rad = {}
+    for sp, m in man_by_sp.items():
+        upf = system.upfs[sp]
+        rchi = manifold_radial(upf, m.l)
+        rad[sp] = (
+            m.l,
+            torch.as_tensor(rchi * upf.r, dtype=RDTYPE, device=dev),
+            torch.as_tensor(upf.r, dtype=RDTYPE, device=dev),
+            torch.as_tensor(simpson_weights(upf.rab), dtype=RDTYPE, device=dev),
+        )
+
+    sites, col = [], 0
+    for a, s in correlated:
+        m = man_by_sp[s]
+        sites.append({"atom": a, "l": m.l, "u": m.u, "j": m.j,
+                      "start": col, "dim": 2 * m.l + 1})
+        col += 2 * m.l + 1
+    nproj = col
+    l_max = max(m.l for m in manifolds)
+
+    n_full = [torch.zeros(nproj, nproj, dtype=CDTYPE, device=dev)
+              for _ in range(nspin)]
+    for ik, sph in enumerate(spheres):
+        kpg, kpg2 = strained_kpg(sph, b_e)  # (npw, 3), (npw,)
+        q_k = torch.sqrt(kpg2.clamp_min(1e-30))
+        q_k = torch.where(kpg2.detach() < 1e-24, torch.zeros_like(q_k), q_k)
+        y = ylm_all(l_max, kpg)
+        f_by_sp = {sp: sbt_t(rad[sp][0], rad[sp][1], rad[sp][2], rad[sp][3], q_k)
+                   for sp in man_by_sp}
+        parg = kpg @ pos_e.T  # (npw, na)
+        ph = torch.exp(torch.complex(torch.zeros_like(parg), -parg))
+        pref = 4.0 * math.pi / torch.sqrt(omega)
+        cols = []
+        for site in sites:
+            a, ell = site["atom"], site["l"]
+            f = f_by_sp[system.species_of_atom[a]]
+            for mm in range(2 * ell + 1):
+                cols.append(
+                    (pref * f * y[:, ell * ell + mm]).to(CDTYPE)
+                    * _MINUS_I_POW[ell] * ph[:, a]
+                )
+        q = torch.stack(cols, dim=0)  # (nproj, npw), site-block ordering
+        for spn in range(nspin):
+            c = coeffs_s[spn][ik]  # (nb, npw)
+            nb = c.shape[0]
+            f_occ = occ_s[spn][ik, :nb]
+            w_b = kw[ik] * (0.5 * f_occ if nspin == 1 else f_occ)
+            becp = torch.einsum("pg,bg->bp", q.conj(), c)  # (nb, nproj)
+            n_full[spn] = n_full[spn] + torch.einsum(
+                "b,bp,bq->pq", w_b.to(RDTYPE), becp, becp.conj())
+
+    def _mats(nf):
+        return [nf[s["start"]:s["start"] + s["dim"],
+                   s["start"]:s["start"] + s["dim"]] for s in sites]
+
+    if nspin == 1:
+        return 2.0 * hubbard_energy(_mats(n_full[0]), sites)
+    return sum(hubbard_energy(_mats(n_full[spn]), sites) for spn in range(nspin))
+
+
 def ewald_strained(pos_e, charges, a_e, b_e, omega, cell0) -> torch.Tensor:
     """ewald_energy with the cell on the autograd graph. η and the integer
     image/G-vector sets come from the unstrained cell (the excluded boundary
