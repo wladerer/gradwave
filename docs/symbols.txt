@@ -1,4 +1,4 @@
-# gradwave public API index — 501 symbols. Regenerate with `make symbols`.
+# gradwave public API index — 528 symbols. Regenerate with `make symbols`.
 # Format: dotted.path<TAB>signature<TAB>summary. Grep this before reimplementing; see the capability table in CLAUDE.md.
 gradwave.analysis.bands_frame	bands_frame(source)	Tidy band path: one row per (k, band) with the path coordinate x
 gradwave.analysis.dos_frame	dos_frame(source, width, npoints, window)	Gaussian-broadened density of states from the SCF eigenvalues and
@@ -9,14 +9,17 @@ gradwave.analysis.pdos_frame	pdos_frame(source)	Tidy projected-DOS frame. One co
 gradwave.analysis.plot_bands	plot_bands(source, path, ax, window)	Band structure along the stored path, labels on the x axis, the
 gradwave.analysis.plot_dos	plot_dos(source, path, ax, width)	Broadened DOS; spin-down plotted negative for nspin=2.
 gradwave.analysis.plot_pdos	plot_pdos(source, path, ax, total)	Projected DOS, one curve per group, the total behind them. Spin-down is
+gradwave.analysis.plot_phonons	plot_phonons(source, path)	Phonon dispersion (with a DOS side panel when present) from a
 gradwave.analysis.plot_scf	plot_scf(source, path, ax)	Convergence plot: |F − F_final| and |Δρ| per iteration, log scale.
 gradwave.analysis.plot_spin_texture	plot_spin_texture(source, path, ax, group, component)	Noncollinear PDOS: the charge n(E) filled in grey with the chosen spin
 gradwave.analysis.scf_frame	scf_frame(source)	Per-iteration SCF convergence: iter, free_energy_eV, dE_eV, drho,
 gradwave.api.build_summary	build_summary(res, inp, task, runtime_s, extra)	The unified machine-readable summary for a task run.
 gradwave.api.build_system	build_system(inp)	The Layer-B system for this input, NC or USPP/PAW by UPF kind.
 gradwave.api.run	run(inp, verbose)	Execute inp.task and write <task>.json, <task>.out and (for SCF
+gradwave.api.run_elastic	run_elastic(inp, verbose)	Clamped-ion elastic constants: FD of the analytic stress over the six
 gradwave.api.run_eos	run_eos(inp, verbose)	Isotropic volume scan + 3rd-order Birch-Murnaghan fit → V0, B0, B0'.
 gradwave.api.run_magnetism	run_magnetism(inp, verbose)	Characterize the magnetism of the input system (task: magnetism). Builds a
+gradwave.api.run_phonons	run_phonons(inp, verbose)	Supercell finite-displacement phonons: dispersion along a q-path + a
 gradwave.api.run_relax	run_relax(inp, verbose)	Relax with ASE, returning (relax block, final atoms, per-step ASE frames).
 gradwave.api.run_scf	run_scf(inp, system, verbose, start_from)	Run the SCF for either formalism. Returns the native result
 gradwave.calculator.GradWave	GradWave(ecut, pseudopotentials, xc, ecutrho, kpts, kshift, smearing, width, nbands, use_symmetry, nspin, max_iter, etol, rhotol, diago_tol, mixing_scheme, mixing_alpha, mixing_history, mixing_kerker, device, compile_xc, eigensolver, precond, verbose, kwargs)	
@@ -44,7 +47,7 @@ gradwave.core.energies.kinetic.kinetic_energy	kinetic_energy(coeffs_per_k, occ, 
 gradwave.core.energies.local_pp.local_energy	local_energy(rho_g, vloc_g, volume)	E_loc = Ω Σ_G ρ*(G) V_loc(G) [eV].
 gradwave.core.energies.local_pp.local_potential_g	local_potential_g(positions, species_index, vloc_tables, g_cart, volume)	V_loc(G) on the dense box [eV], complex.
 gradwave.core.energies.nl_pp.nonlocal_energy	nonlocal_energy(becp_per_k, dij, occ, kweights)	
-gradwave.core.energies.total.EnergyBreakdown	EnergyBreakdown(kinetic, hartree, xc, local, nonlocal_, ewald, smearing, hubbard, onecenter, fock)	
+gradwave.core.energies.total.EnergyBreakdown	EnergyBreakdown(kinetic, hartree, xc, local, nonlocal_, ewald, smearing, hubbard, onecenter, fock, dispersion)	
 gradwave.core.energies.total.total_energy	total_energy(coeffs_per_k, occ, kweights, spheres, grid, rho, positions, charges, species_index, vloc_tables, becp_per_k, dij_full, xc, entropy_term, rho_core, tau, e_ewald, vloc_g)	
 gradwave.core.fftbox.box_to_sphere	box_to_sphere(box, flat_idx)	Gather sphere coefficients (..., npw) from dense boxes (..., n1, n2, n3).
 gradwave.core.fftbox.g_to_r	g_to_r(coeffs, flat_idx, shape)	Sphere coefficients → periodic function values on the r-grid.
@@ -98,7 +101,7 @@ gradwave.core.occupations.Smearing	Smearing()
 gradwave.core.occupations.Smearing.entropy	entropy(x)	s(x) ≥ 0 such that E_smear = −σ · Σ 2·w·s.
 gradwave.core.occupations.Smearing.occupation	occupation(x)	
 gradwave.core.occupations.find_fermi	find_fermi(eigs, kweights, smearing, width, n_electrons, tol, max_iter, degeneracy)	Bisection for μ such that Σ_k w_k Σ_n g·f((ε−μ)/σ) = N_e
-gradwave.core.occupations.fixed_occupations	fixed_occupations(eigs, n_electrons)	Insulator: fill the lowest N_e/2 bands at every k with f = 2.
+gradwave.core.occupations.fixed_occupations	fixed_occupations(eigs, n_electrons, degeneracy)	Insulator: fill the lowest n_electrons/degeneracy bands at f = degeneracy.
 gradwave.core.occupations.occupations_and_entropy	occupations_and_entropy(eigs, mu, smearing, width, degeneracy)	f_nk ∈ [0, g] and s_nk per state; E_smear = −σ Σ w_k Σ_n g·s_nk.
 gradwave.core.spinor_proj.build_so_projectors	build_so_projectors(bk, system, so_tables)	(q (nk, nproj_so, 2·npw_max), dij_so) for fully-relativistic pseudos.
 gradwave.core.spinor_proj.complex_ylm	complex_ylm(lmax, g)	Y_l^m (Condon–Shortley) for l ≤ lmax; index l² + (m + l). (..., (lmax+1)²).
@@ -148,12 +151,15 @@ gradwave.grids.gmax_from_ecut	gmax_from_ecut(ecut)
 gradwave.grids.good_fft_size	good_fft_size(n)	Smallest size ≥ n whose prime factors are all ≤ 7.
 gradwave.grids.reciprocal_cell	reciprocal_cell(cell)	Rows b_i [Å⁻¹] with a_i·b_j = 2π δ_ij; cell rows a_i in Å.
 gradwave.inputs.BandsParams	BandsParams(path, npoints, nbands, irreps)	
+gradwave.inputs.DispersionParams	DispersionParams(enabled, functional, cutoff, cn_cutoff, s6, s8, a1, a2)	Opt-in Grimme D3(BJ) dispersion correction (energy + forces + stress).
 gradwave.inputs.EOSParams	EOSParams(scales, energy)	Isotropic volume scan → 3rd-order Birch-Murnaghan fit (V0, B0, B0').
-gradwave.inputs.Input	Input(atoms, pseudo_dir, pseudo_map, ecut, ecutrho, xc, kpoints, smearing, nbands, scf, symmetry, nspin, noncollinear, nonmagnetic, start_mag, task, relax, bands, magnetism, eos, projections, device, verbose, output_dir, output_checkpoint, output_wavefunctions, output_volumetric, error_estimate, restart)	
+gradwave.inputs.ElasticParams	ElasticParams(strain)	Clamped-ion elastic constants: FD of the analytic stress over the six
+gradwave.inputs.Input	Input(atoms, pseudo_dir, pseudo_map, ecut, ecutrho, xc, kpoints, smearing, nbands, scf, symmetry, nspin, noncollinear, nonmagnetic, start_mag, task, relax, bands, magnetism, eos, elastic, phonons, projections, dispersion, device, verbose, output_dir, output_checkpoint, output_wavefunctions, output_volumetric, error_estimate, restart)	
 gradwave.inputs.InputError	InputError()	A malformed input file. Carries the input path (prepended by
 gradwave.inputs.KPointsParams	KPointsParams(mesh, shift)	
 gradwave.inputs.MagnetismParams	MagnetismParams(exchange, lam, delta, seed_scale, ref_atom)	
 gradwave.inputs.MixingParams	MixingParams(scheme, alpha, history, kerker)	
+gradwave.inputs.PhononParams	PhononParams(supercell, displacement, path, npoints, dos_mesh, dos_width)	Supercell finite-displacement phonons: dispersion along a q-path + DOS.
 gradwave.inputs.ProjectionsParams	ProjectionsParams(enabled, group_by, width, npoints)	
 gradwave.inputs.RelaxParams	RelaxParams(optimizer, fmax, max_steps, cell, pressure)	
 gradwave.inputs.SCFParams	SCFParams(max_iter, etol, rhotol, mixing, diago_tol)	
@@ -191,7 +197,19 @@ gradwave.postscf.discretization_error.estimate_density_error	estimate_density_er
 gradwave.postscf.discretization_error.estimate_eigenvalue_error	estimate_eigenvalue_error(res, ecut_large, factor, bands, xc, smearing, width)	Estimate the plane-wave discretization error of the KS eigenvalues.
 gradwave.postscf.discretization_error.estimate_force_error	estimate_force_error(res, err, xc, remove_net)	Discretization error in the Hellmann-Feynman forces, δF ≈ (∂F/∂P) δP.
 gradwave.postscf.discretization_error.estimate_gap_error	estimate_gap_error(res, eigerr, occ_threshold, occupations)	Band-gap discretization error from a full-band ``EigenvalueError``.
-gradwave.postscf.dos.kpm_dos	kpm_dos(res, n_moments, n_random, energies, n_energies, seed)	(energies [eV], DOS [states/eV/cell]) from the converged SCF potential.
+gradwave.postscf.dispersion.D3Config	D3Config(s6, s8, a1, a2, cutoff, cn_cutoff)	Resolved D3(BJ) damping + cutoffs, all in atomic units (Bohr).
+gradwave.postscf.dispersion.D3Config.from_functional	from_functional(functional, cutoff_ang, cn_cutoff_ang, overrides)	
+gradwave.postscf.dispersion.D3Config.resolve	resolve(functional, cutoff_ang, cn_cutoff_ang, s6, s8, a1, a2)	Build from a functional preset with optional per-constant overrides.
+gradwave.postscf.dispersion.dispersion_energy	dispersion_energy(positions, cell, atomic_numbers, cfg, ref_cell)	D3(BJ) dispersion energy [eV]. Differentiable in ``positions`` and ``cell``.
+gradwave.postscf.dispersion.dispersion_forces	dispersion_forces(positions, cell, atomic_numbers, cfg)	F_A = −∂E_disp/∂τ_A, (na,3) [eV/Å], via autograd.
+gradwave.postscf.dispersion.dispersion_stress	dispersion_stress(positions, cell, atomic_numbers, cfg)	σ_αβ = (1/Ω) ∂E_disp/∂ε_αβ, (3,3) [eV/Å³] (tension-positive), via autograd.
+gradwave.postscf.dos.kpm_dos	kpm_dos(res, n_moments, n_random, energies, n_energies, seed)	(energies [eV], DOS [states/eV/cell], info) from the converged potential.
+gradwave.postscf.elastic.Moduli	Moduli(bulk_voigt, bulk_reuss, bulk_hill, shear_voigt, shear_reuss, shear_hill, young, poisson)	Voigt–Reuss–Hill polycrystalline averages [GPa] (Poisson dimensionless).
+gradwave.postscf.elastic.elastic_tensor	elastic_tensor(stress_at_strain, h)	Clamped-ion stiffness C (6×6) [GPa] by central FD of the stress.
+gradwave.postscf.elastic.is_mechanically_stable	is_mechanically_stable(c)	Born stability: the 6×6 stiffness is positive-definite (all eigenvalues
+gradwave.postscf.elastic.moduli_from_cij	moduli_from_cij(c)	Voigt–Reuss–Hill averages from a 6×6 stiffness [GPa].
+gradwave.postscf.elastic.stress_to_voigt	stress_to_voigt(sigma)	(3,3) stress → 6-vector [xx, yy, zz, yz, xz, xy].
+gradwave.postscf.elastic.voigt_strain_tensor	voigt_strain_tensor(j, h)	Symmetric 3×3 strain for a unit Voigt perturbation ``h`` in direction j.
 gradwave.postscf.eos.BM3Fit	BM3Fit(e0, v0, b0, b0_prime, rms_residual_eV)	A fitted 3rd-order Birch-Murnaghan curve. ``v0``/``e0`` inherit the
 gradwave.postscf.eos.birch_murnaghan	birch_murnaghan(v, e0, v0, b0, b0p)	3rd-order Birch-Murnaghan energy-volume curve E(V).
 gradwave.postscf.eos.delta_value	delta_value(fit_a, fit_b, window, npoints)	Lejaeghere Δ (meV) between two BM3 fits.
@@ -275,6 +293,15 @@ gradwave.postscf.phonons.HessianSymmetry	HessianSymmetry(cell, positions, specie
 gradwave.postscf.phonons.HessianSymmetry.reconstruct	reconstruct(cols)	Full (na, 3, na, 3) Hessian from the computed columns.
 gradwave.postscf.phonons.gamma_frequencies	gamma_frequencies(hess, masses_amu)	Frequencies [cm⁻¹] (negative = imaginary) from an (na,3,na,3)
 gradwave.postscf.phonons.gamma_hessian	gamma_hessian(res, xc, response_kw, verbose)	(na, 3, na, 3) analytic Γ Hessian [eV/Å²]: irreducible columns via
+gradwave.postscf.phonons_supercell.SupercellMap	SupercellMap(supercell, cell_prim, cell_super, positions_super, species_super, mu_of_site, rint_of_site, n_prim, n_sc)	Deterministic primitive→supercell layout and the (μ, R) label of each
+gradwave.postscf.phonons_supercell.apply_acoustic_sum_rule	apply_acoustic_sum_rule(phi_home)	Enforce Σ_{s} Φ_home[μ,i,s,j] = 0 by correcting each μ's self block
+gradwave.postscf.phonons_supercell.build_supercell	build_supercell(cell, positions, species_of_atom, supercell)	Tile a primitive cell into a diagonal (n1,n2,n3) supercell, tracking the
+gradwave.postscf.phonons_supercell.dispersion	dispersion(phi_home, scmap, masses_amu, q_frac_list)	Frequencies [cm⁻¹] along a list of q-points → (n_q, 3N_prim).
+gradwave.postscf.phonons_supercell.dynamical_matrix	dynamical_matrix(phi_home, scmap, masses_amu, q_frac)	Mass-weighted dynamical matrix D(q) (3N_prim, 3N_prim) complex-Hermitian.
+gradwave.postscf.phonons_supercell.force_constants_home	force_constants_home(make_scf, scmap, h, acoustic_sum_rule, warm_start, verbose)	FD force constants Φ_home (N_prim, 3, N_sc, 3) [eV/Å²].
+gradwave.postscf.phonons_supercell.frequencies_at_q	frequencies_at_q(phi_home, scmap, masses_amu, q_frac)	Phonon frequencies at one q [cm⁻¹], sorted; negative = imaginary.
+gradwave.postscf.phonons_supercell.phonon_dos	phonon_dos(phi_home, scmap, masses_amu, q_mesh, weights, width, npoints)	Gaussian-broadened phonon DOS over a q-mesh. `width` in cm⁻¹. Returns
+gradwave.postscf.phonons_supercell.symmetrize_force_constants	symmetrize_force_constants(phi_home, scmap)	Enforce the physical symmetry Φ_μν(R) = Φ_νμ(−R)ᵀ, broken slightly by
 gradwave.postscf.response.density_response_fd	density_response_fd(inp, atom, direction, delta, spin, verbose)	∂n(r)/∂R_{atom,direction} [e/Å³/Å] by central finite difference.
 gradwave.postscf.response.write_density_response	write_density_response(inp, path, atom, direction, delta, spin, fmt, verbose)	Write ∂n(r)/∂R_{atom,direction} to a .cube/.xsf file.
 gradwave.postscf.spin_exchange.decompose	decompose(J_tensor)	Split a 2×2 transverse exchange tensor 𝒥_IJ into (J_heisenberg, D_ref, Γ):
@@ -284,7 +311,7 @@ gradwave.postscf.stress.stress	stress(res, xc, symmetrize)	σ_αβ = (1/Ω) ∂E
 gradwave.postscf.stress.stress_kbar	stress_kbar(sigma)	
 gradwave.postscf.stress.symmetrize_stress	symmetrize_stress(sigma, sg, cell)	σ ← (1/N) Σ_op S σ Sᵀ with S the Cartesian rotation of each op.
 gradwave.postscf.stress_error.estimate_pressure_error	estimate_pressure_error(res, xc, ecut_large, factor, strain)	Estimate the hydrostatic (pressure) plane-wave stress error of a run.
-gradwave.postscf.uspp_bands.bands_uspp	bands_uspp(res, xc, k_frac_list, nbands, tol)	Eigenvalues (nk, nbands) [eV] at the given fractional k-points.
+gradwave.postscf.uspp_bands.bands_uspp	bands_uspp(res, xc, k_frac_list, nbands, tol)	Eigenvalues at the given fractional k-points: (nk, nbands) [eV] for
 gradwave.postscf.uspp_frozen.aug_density_from_becsum	aug_density_from_becsum(system, becsum, phases)	ρ_aug(r) on the real grid from a per-atom becsum list and e^{+iG·τ} phases.
 gradwave.postscf.uspp_frozen.aug_dmat	aug_dmat(system, w_r, phase_pos)	Block-diagonal ∫ w(r) Q_ij(r−τ_a) d³r: how a real grid field screens D.
 gradwave.postscf.uspp_frozen.frozen_veff	frozen_veff(res, xc)	Per-spin v_eff = v_H + v_loc + v_xc [eV] of a converged state.
@@ -346,7 +373,7 @@ gradwave.scf.common.adaptive_diago_tol	adaptive_diago_tol(it, history, diago_tol
 gradwave.scf.common.assemble_pw_energies	assemble_pw_energies(coeffs_s, occ_s, kweights, spheres, grid, vol, rho_g_out, e_xc, vloc_g, becps_s, dij_full, positions, charges, entropy_term, nspin, e_hub, e_onec, e_ewald)	The plane-wave EnergyBreakdown assembly shared by the collinear
 gradwave.scf.common.convergence_gate	convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol)	The strict convergence gate shared by all four SCF drivers: energy
 gradwave.scf.common.record_iteration	record_iteration(history, it, e_free, e_free_prev, res_norm, t_it)	Append the per-iteration record shared by all four SCF drivers and
-gradwave.scf.common.shared_fermi_occupations	shared_fermi_occupations(eigs_s, kweights, smearing, width, n_electrons, nspin, device)	Occupations, Fermi level, and entropy term for per-spin eigenvalue
+gradwave.scf.common.shared_fermi_occupations	shared_fermi_occupations(eigs_s, kweights, smearing, width, n_electrons, nspin, device, tot_magnetization)	Occupations, Fermi level, and entropy term for per-spin eigenvalue
 gradwave.scf.common.spin_sigmas	spin_sigmas(r_u, r_d, xc, g_cart)	(σ_uu, σ_dd, σ_tot) for a GGA, or (None, None, None) for an LDA.
 gradwave.scf.common.spin_xc_energy	spin_xc_energy(xc, rho_out_s, rho_core, vol, g_cart, tau_s)	E_xc for the collinear nspin=2 energy assembly: the NLCC core is split
 gradwave.scf.common.symmetrize_rho	symmetrize_rho(rho_symmetrizer, r_out, grid)	Round-trip a real-space density through the symmetry averager (via G).
@@ -383,7 +410,7 @@ gradwave.scf.loop.System.to	to(device)	Copy with every tensor moved to `device` 
 gradwave.scf.loop.effective_potentials	effective_potentials(system, xc, rho_s, vloc_r, tau)	Per-spin v_eff(r) from per-channel densities — THE assembly the SCF
 gradwave.scf.loop.local_potential_r	local_potential_r(system, vloc_g)	v_loc(r) on the dense grid [eV] — the SCF's local-potential path.
 gradwave.scf.loop.resolve_atom_moments	resolve_atom_moments(start_mag, species_of_atom, n_species, default)	Per-atom moment fractions from start_mag: one entry per atom
-gradwave.scf.loop.scf	scf(system, xc, smearing, width, max_iter, etol, rhotol, mixing_alpha, mixing_history, mixing_scheme, kerker, diago_tol, verbose, nspin, start_mag, mixed_precision, eigensolver, precond, precond_op, mixer_hook, hubbard, hub_alpha, start_from, fock)	
+gradwave.scf.loop.scf	scf(system, xc, smearing, width, max_iter, etol, rhotol, mixing_alpha, mixing_history, mixing_scheme, kerker, diago_tol, verbose, nspin, start_mag, tot_magnetization, mixed_precision, eigensolver, precond, precond_op, mixer_hook, hubbard, hub_alpha, start_from, fock)	
 gradwave.scf.loop.setup_system	setup_system(cell, positions, species_of_atom, upfs, ecut, kmesh, kshift, nbands, use_symmetry, symprec, fft_shape, time_reversal, magmoms)	use_symmetry: reduce k to the IBZ and symmetrize ρ each SCF step.
 gradwave.scf.loop.vtau_potential	vtau_potential(xc, rho, tau, grid)	v_τ(r) = ∂e_xc/∂τ|_{ρ,σ} [scaled], via autograd on a τ leaf.
 gradwave.scf.loop.vtau_spin_potential	vtau_spin_potential(xc, rho_up, rho_dn, tau_up, tau_dn, grid)	(v_τ↑, v_τ↓) [scaled] via autograd on the per-channel τ leaves — the
