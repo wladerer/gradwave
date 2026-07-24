@@ -73,6 +73,31 @@ class BandsParams:
 
 
 @dataclass(frozen=True)
+class PhononParams:
+    """Supercell finite-displacement phonons: dispersion along a q-path + DOS."""
+
+    supercell: tuple = (2, 2, 2)   # diagonal (n1,n2,n3) supercell for the FD FC
+    displacement: float = 0.01     # atomic displacement h [Å] for the central FD
+    path: str = ""                 # ASE bandpath string (e.g. "GXWKGL"); "" = default
+    npoints: int = 120             # q-points along the dispersion path
+    dos_mesh: tuple = (8, 8, 8)    # MP q-mesh for the phonon DOS ((0,0,0) = skip)
+    dos_width: float = 6.0         # Gaussian broadening for the DOS [cm⁻¹]
+
+    def __post_init__(self):
+        object.__setattr__(self, "supercell", tuple(int(n) for n in self.supercell))
+        object.__setattr__(self, "dos_mesh", tuple(int(n) for n in self.dos_mesh))
+        if len(self.supercell) != 3 or min(self.supercell) < 1:
+            raise InputError(
+                f"phonons.supercell must be 3 positive ints, got {self.supercell}")
+        if not 0.0 < self.displacement < 0.5:
+            raise InputError(
+                f"phonons.displacement must be in (0, 0.5) Å, got {self.displacement}")
+        if len(self.dos_mesh) != 3 or min(self.dos_mesh) < 0:
+            raise InputError(
+                f"phonons.dos_mesh must be 3 non-negative ints, got {self.dos_mesh}")
+
+
+@dataclass(frozen=True)
 class ProjectionsParams:
     enabled: bool = False
     group_by: str = "l"      # atom | l | lm | total (j | jmj for FR)
@@ -180,12 +205,13 @@ class Input:
     noncollinear: bool = False  # spinor (non-collinear) SCF for task: scf
     nonmagnetic: bool = False  # with noncollinear: pin m⃗ ≡ 0 (spin-orbit only, keeps symmetry)
     start_mag: dict | None = None  # element -> initial moment fraction (nspin=2/NC seed)
-    task: str = "scf"  # scf | relax | bands | magnetism | eos | elastic
+    task: str = "scf"  # scf | relax | bands | magnetism | eos | elastic | phonons
     relax: RelaxParams = field(default_factory=RelaxParams)
     bands: BandsParams = field(default_factory=BandsParams)
     magnetism: MagnetismParams = field(default_factory=MagnetismParams)
     eos: EOSParams = field(default_factory=EOSParams)
     elastic: ElasticParams = field(default_factory=ElasticParams)
+    phonons: PhononParams = field(default_factory=PhononParams)
     projections: ProjectionsParams = field(default_factory=ProjectionsParams)
     dispersion: DispersionParams = field(default_factory=DispersionParams)
     device: str = "cpu"
@@ -340,7 +366,7 @@ _ALLOWED_TOP = {
     "structure", "pseudopotentials", "ecut", "ecutrho", "xc", "kpoints",
     "smearing", "nbands", "symmetry", "nspin", "noncollinear", "nonmagnetic",
     "start_mag",
-    "scf", "task", "relax", "bands", "magnetism", "eos", "elastic",
+    "scf", "task", "relax", "bands", "magnetism", "eos", "elastic", "phonons",
     "projections", "dispersion", "device",
     "verbose", "output", "error_estimate", "restart",
 }
@@ -486,10 +512,11 @@ def _load_input(path: Path) -> Input:
     if xc not in ("lda", "pbe", "r2scan"):
         raise InputError(f"unknown xc {xc!r} (lda | pbe | r2scan)")
     task = raw.get("task", "scf")
-    if task not in ("scf", "relax", "bands", "magnetism", "eos", "elastic"):
+    if task not in ("scf", "relax", "bands", "magnetism", "eos", "elastic",
+                    "phonons"):
         raise InputError(
             f"unknown task {task!r} "
-            f"(scf | relax | bands | magnetism | eos | elastic)")
+            f"(scf | relax | bands | magnetism | eos | elastic | phonons)")
     nspin = int(raw.get("nspin", 1))
     if nspin not in (1, 2):
         raise InputError(f"nspin must be 1 or 2, got {nspin}")
@@ -545,6 +572,7 @@ def _load_input(path: Path) -> Input:
         magnetism=_build(MagnetismParams, raw.get("magnetism", {}), "magnetism"),
         eos=_build(EOSParams, raw.get("eos", {}), "eos"),
         elastic=_build(ElasticParams, raw.get("elastic", {}), "elastic"),
+        phonons=_build(PhononParams, raw.get("phonons", {}), "phonons"),
         projections=projections,
         dispersion=dispersion,
         device=raw.get("device", "cpu"),
