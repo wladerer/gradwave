@@ -46,11 +46,18 @@ the UPF file).
 - **Structure and response.** Total and free energies, Hellmann-Feynman forces, the
   stress tensor, geometry and variable-cell relaxation through any ASE optimizer, band
   structures with point-group irrep labels, total and projected (l, m, j) DOS, and
-  Γ-point phonons.
+  phonons: the Γ-point analytic response and a supercell finite-displacement route for
+  the full dispersion and phonon DOS.
+- **Dispersion.** Grimme D3(BJ) as an opt-in, SCF-independent correction with analytic
+  forces and stress, folded into the reported total through the CLI and the ASE
+  calculator.
 - **Magnetism.** Collinear spin, non-collinear magnetism, and spin-orbit coupling from
   fully-relativistic pseudopotentials. Constrained non-collinear moments with
   autograd-exact torques, spin spirals, magnetocrystalline anisotropy, and the exchange
-  constants (J, DMI) of a Heisenberg model.
+  constants (J, DMI) of a Heisenberg model. The collinear spin-polarized (nspin=2) path
+  carries the post-SCF properties — forces, stress, band structures (norm-conserving and
+  USPP/PAW), KPM-DOS, ELF, and the dielectric/Born E-field response — along with
+  fixed-spin-moment SCF.
 - **Brillouin zone.** Symmetry reduction to the irreducible wedge with density and
   becsum symmetrization, including magnetic (Shubnikov) groups for non-collinear cells,
   and Fermi-Dirac, Gaussian, Methfessel-Paxton, and cold smearing for metals.
