@@ -2,7 +2,7 @@
 # pytest marker strings (shorter to type, impossible to get the markers wrong).
 # Everything goes through `uv run` so the project env is used, not the base venv.
 
-.PHONY: help test test-fast test-standard test-nightly lint imports fmt lock check hooks profile queue-init q-test q-status dashboard dashboard-push
+.PHONY: help test test-fast test-standard test-nightly lint imports fmt lock check hooks profile queue-init q-test q-status dashboard dashboard-push worktrees worktrees-prune
 
 BENCH ?= bench_scf
 ARGS  ?= cpu 8 nosym
@@ -68,6 +68,12 @@ DASH_HOST ?= homelab
 
 dashboard: ## generate the fleet dashboard -> dashboard.html (open it in a browser)
 	./scripts/dashboard.py --collect
+
+worktrees: ## fleet worktree overview — drift, stale branches, cross-worktree file overlap
+	./scripts/worktrees.py
+
+worktrees-prune: ## remove stale (merged) + clean + idle worktrees under .claude/worktrees/
+	./scripts/worktrees.py --prune
 
 dashboard-push: ## generate and push the dashboard to $(DASH_HOST) for tailscale-serve
 	./scripts/dashboard.py --collect --out /tmp/gwdash.html
