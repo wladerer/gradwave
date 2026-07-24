@@ -38,6 +38,7 @@ from gradwave.dtypes import RDTYPE
 from gradwave.postscf._strain import (
     box_millers,
     ewald_strained,
+    hubbard_energy_strained,
     kinetic_band,
     local_pp_energy,
     nlcc_core_strained,
@@ -68,23 +69,33 @@ def _sigma(rho_box: torch.Tensor, g_box: torch.Tensor) -> torch.Tensor:
     return sigma_from_rho(rho_box, g_box)
 
 
-def stress(res, xc, symmetrize: bool = True) -> torch.Tensor:
+def stress(res, xc, symmetrize: bool = True, manifolds=None) -> torch.Tensor:
     """σ_αβ = (1/Ω) ∂E/∂ε_αβ at the converged SCF point, (3,3) [eV/Å³].
 
     Collinear nspin=2 is supported (the kinetic/nonlocal sums run per spin
     channel and E_xc uses the per-spin densities, mirroring the SCF energy's
-    spin assembly). Scalar-relativistic, no +U (the Hubbard strain term is not
-    implemented). NLCC is handled (the core density is rebuilt on the graph).
+    spin assembly). Scalar-relativistic. NLCC is handled (the core density is
+    rebuilt on the graph).
+
+    DFT+U: pass the same ``manifolds`` list used for the SCF and the Hubbard
+    strain term (the strain derivative of the Dudarev E_U, via the strained
+    atomic-orbital projectors) is added to the stress. A +U result without
+    ``manifolds`` is an error, since the occupation matrices alone do not carry
+    the projectors' strain dependence.
     """
     system = res.system
     if getattr(system, "is_fr", False):
         raise NotImplementedError("stress for fully-relativistic pseudos not implemented yet")
-    if getattr(res, "hub_occ", None) is not None:
-        raise NotImplementedError("stress with DFT+U not implemented yet")
+    if getattr(res, "hub_occ", None) is not None and manifolds is None:
+        raise ValueError(
+            "stress with DFT+U requires the Hubbard manifolds: call "
+            "stress(res, xc, manifolds=[HubbardManifold(...)]) with the same "
+            "list passed to scf() — the +U occupation matrices do not carry "
+            "the projectors' strain dependence on their own")
 
     dev = system.positions.device
     eps = torch.zeros(3, 3, dtype=torch.float64, device=dev, requires_grad=True)
-    e = _energy_strained(res, xc, eps)
+    e = _energy_strained(res, xc, eps, manifolds=manifolds)
     (grad,) = torch.autograd.grad(e, eps)
 
     omega0 = system.grid.volume
@@ -107,7 +118,8 @@ def symmetrize_stress(sigma: torch.Tensor, sg, cell: np.ndarray) -> torch.Tensor
 
 
 def _energy_strained(
-    res, xc, eps: torch.Tensor, *, rho=None, coeffs=None, spheres=None
+    res, xc, eps: torch.Tensor, *, rho=None, coeffs=None, spheres=None,
+    manifolds=None,
 ) -> torch.Tensor:
     """The KS energy as a function of strain at fixed coefficients/occupations.
 
@@ -240,7 +252,17 @@ def _energy_strained(
     # ---- Ewald (integer image/G sets fixed at ε=0, vectors strained)
     e_ew = ewald_strained(pos_e, system.charges, a_e, b_e, omega, grid.cell)
 
-    return e_kin + e_h + e_xc + e_loc + e_nl + e_ew
+    e_tot = e_kin + e_h + e_xc + e_loc + e_nl + e_ew
+
+    # ---- DFT+U (Dudarev): strain derivative of E_U through the strained
+    # atomic-orbital projectors. Detached coeffs/occupations, so only the
+    # projector/cell strain dependence contributes — the analytic +U stress.
+    if manifolds is not None:
+        e_tot = e_tot + hubbard_energy_strained(
+            system, manifolds, b_e, pos_e, omega, spheres, coeffs_s, occ_s,
+            nspin, kw)
+
+    return e_tot
 
 
 def _tau_strained(coeffs, spheres, b_e, omega, occ, kw, shape):
