@@ -29,6 +29,29 @@ or avoids redoing it.
 
 ## What helps
 
+### A sane CPU thread default
+
+gradwave caps intra-op CPU threads at `min(cores, 8)` on import instead of
+inheriting the caller's `nproc`. The SCF is latency-bound small linear algebra
+and FFTs, so fork-join BLAS across every core stalls fast cores behind slow ones
+and the per-op sync cost dominates. A profile on a 22-logical-core hybrid CPU
+(Core Ultra 7 155H) measured all-core execution 2 to 3 times slower than about 8
+threads, with 22 threads slower than a single thread. Peak was near 8. This is a
+zero-effort gain applied to every CPU run.
+
+It is a default, applied only when you have expressed no preference, and is
+overridable three ways:
+
+- `GRADWAVE_NUM_THREADS=<n>` in the environment sets the count directly and wins
+  over everything below.
+- Setting `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, or `OPENBLAS_NUM_THREADS`
+  yourself tells gradwave to keep its hands off; it leaves torch at whatever the
+  stack configured and does not clobber your choice.
+- `gradwave.set_num_threads(n)` retunes at runtime from Python.
+
+Otherwise the auto-default stands. Reach for a higher count only if a benchmark
+on your own hardware shows the crossover sits above 8 for your systems.
+
 ### IBZ symmetry
 
 Reducing the k-mesh to the irreducible wedge with G-space density symmetrization is
