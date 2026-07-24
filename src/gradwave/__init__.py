@@ -11,10 +11,16 @@ plotting. Submodules (``core``, ``scf``, ``postscf``, ``pseudo``, ``solvers``)
 hold the physics layers and are imported directly when needed.
 """
 
+from gradwave._logging import _install_null_handler, configure_logging
 from gradwave.api import run
 from gradwave.calculator import GradWave
 from gradwave.inputs import Input, InputError, load_input
 
+# library convention: emit through gradwave.* loggers, silent until the caller
+# opts in (configure_logging or their own logging config). See gradwave._logging.
+_install_null_handler()
+
 __version__ = "0.1.0"
 
-__all__ = ["GradWave", "Input", "InputError", "__version__", "load_input", "run"]
+__all__ = ["GradWave", "Input", "InputError", "__version__", "configure_logging",
+           "load_input", "run"]

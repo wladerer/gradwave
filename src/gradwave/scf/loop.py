@@ -13,6 +13,7 @@ residual ‖ρ_out − ρ_in‖·Ω/N_G < rhotol (electrons-scale measure).
 from __future__ import annotations
 
 import dataclasses
+import logging
 import time
 from dataclasses import dataclass, field
 
@@ -55,6 +56,8 @@ from gradwave.scf.setup_common import (
     default_nbands,
     find_symmetry_groups,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -717,6 +720,8 @@ def _scf_residual_and_record(layout, rho_s, rho_out_s, rho_tot, rho_tot_out,
     res_norm = float(torch.linalg.norm(rho_out_vec - rho_in_vec)) * vol
     drho_scf = rho_tot_out - rho_tot
     de = record_iteration(history, it, e_free, e_free_prev, res_norm, t_it)
+    logger.debug("SCF iter %d: F=%+.10f eV  dE=%.3e  |drho|=%.3e",
+                 it, e_free, de, res_norm)
     if verbose:
         mag = ""
         if nspin == 2:
@@ -943,6 +948,11 @@ def scf(
         # (total, mag) → per-channel r-space densities (MixLayout.unpack)
         rho_s, _ = layout.unpack(mixer.step(rho_in_vec, rho_out_vec))
 
+    if not converged:
+        logger.warning(
+            "SCF did NOT converge in %d iterations: F=%+.10f eV, dE=%.3e, "
+            "|drho|=%.3e (etol=%.1e, rhotol=%.1e)",
+            it, e_free, de, res_norm, etol, rhotol)
     if verbose:
         _tag = "converged" if converged else "NOT CONVERGED"
         _extra = ""

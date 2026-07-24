@@ -16,7 +16,11 @@ ill-conditioning.
 
 from __future__ import annotations
 
+import logging
+
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 class _DampedMixerBase:
@@ -394,6 +398,9 @@ class PulayMixer(_DampedMixerBase):
             # not swallowed as ill-conditioning.
             cond = torch.linalg.cond(bn)
             if not torch.isfinite(cond) or cond > 1e14:
+                logger.debug(
+                    "Pulay: cond(B)=%.3e > 1e14, dropping oldest of %d history "
+                    "entries and retrying", float(cond), m)
                 self._rho_in.pop(0)
                 self._res.pop(0)
                 continue
@@ -409,6 +416,10 @@ class PulayMixer(_DampedMixerBase):
         cnorm = coeff.abs().sum()
         if self.coeff_cap is not None and cnorm > self.coeff_cap:
             theta = (self.coeff_cap - 1.0) / (cnorm - 1.0)
+            logger.debug(
+                "Pulay coeff-cap: |c|_1=%.3g > cap=%.3g, blending toward the "
+                "newest-point step (theta=%.3g)", float(cnorm), self.coeff_cap,
+                float(theta))
             e_last = torch.zeros_like(coeff)
             e_last[-1] = 1.0
             coeff = theta * coeff + (1.0 - theta) * e_last
@@ -429,5 +440,8 @@ class PulayMixer(_DampedMixerBase):
             lim = self.step_cap * torch.linalg.norm(self._damped(res))
             snorm = torch.linalg.norm(step)
             if snorm > lim:
+                logger.debug(
+                    "Pulay step-cap: |step|=%.3e > trust limit=%.3e, scaling "
+                    "into the linear-response region", float(snorm), float(lim))
                 rho_new = rho_in + step * (lim / snorm)
         return rho_new

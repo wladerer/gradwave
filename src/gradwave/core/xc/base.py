@@ -23,11 +23,14 @@ fractional powers/logs; test densities sit far above the floor.
 from __future__ import annotations
 
 import contextlib
+import logging
 import threading
 
 import torch
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
+
+logger = logging.getLogger(__name__)
 
 RHO_FLOOR_AU = 1e-14  # a.u.; well below any physical grid density
 
@@ -134,6 +137,8 @@ class CompilableXC:
 
         self._xc_compile_dead = True
         self._xc_compile_error = repr(exc)
+        logger.debug("XC compile latched to eager for %s: %r",
+                     type(self).__name__, exc)
         warnings.warn(
             f"XC compile disabled, falling back to the eager energy_density path "
             f"for the rest of this run: {self._xc_compile_error}",

@@ -8,11 +8,14 @@ Runs entirely under torch.no_grad() — autograd must never see this.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import torch
 
 from gradwave.solvers.precond import teter, teter_b
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -93,6 +96,11 @@ def davidson(
             v = torch.cat([v, t])
             hv = torch.cat([hv, h_apply(t)])
 
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "Davidson hit max_iter=%d with %d/%d bands unconverged "
+            "(max res=%.3e > tol=%.1e)", max_iter, int(unconverged.sum()),
+            eig.shape[0], float(res_norms.max()), tol)
     return DavidsonResult(eig, x, max_iter, res_norms)
 
 
@@ -287,6 +295,11 @@ def davidson_batched(
             v = torch.cat([v, d], dim=1)
             hv = torch.cat([hv, h_apply(d)], dim=1)
 
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "batched Davidson hit max_iter=%d: %d band·k unconverged "
+            "(max res=%.3e > tol=%.1e)", max_iter, int((rn > tol).sum()),
+            float(rn.max()), tol)
     return BatchedDavidsonResult(eig, x, max_iter, rn)
 
 

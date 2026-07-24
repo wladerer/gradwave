@@ -27,6 +27,7 @@ MAGNETIC IBZ of the Shubnikov group (anti-unitary g·T ops act as −W⁻ᵀ) an
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 
@@ -65,6 +66,8 @@ from gradwave.scf.spinor_common import (
     unpack_grid_channels,
 )
 from gradwave.solvers.davidson import davidson_batched
+
+logger = logging.getLogger(__name__)
 
 
 class SpinorHamiltonian:
@@ -509,6 +512,10 @@ def scf_noncollinear(
         if not nonmagnetic:
             m = torch.stack(fields[1:])
 
+    if not converged:
+        logger.warning(
+            "NC-SCF did NOT converge in %d iterations: F=%+.8f eV, |drho|=%.3e",
+            it, e_free, res_norm)
     m_int = [float(m[i].mean()) * vol for i in range(3)]
     m_norm = torch.sqrt((m**2).sum(dim=0))
     return NCResult(
