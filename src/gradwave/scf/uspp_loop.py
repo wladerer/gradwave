@@ -205,6 +205,31 @@ def _species_atoms(system) -> dict[int, list[int]]:
     return groups
 
 
+def aug_dmat_batched(system, fields_g: torch.Tensor,
+                     phase_pos: torch.Tensor) -> torch.Tensor:
+    """Block-diagonal ∫ w_c(r) Q_ij(r−τ_a) d³r for C grid fields at once — the
+    augmentation screening of D.
+
+    ``fields_g`` (C, nG) is the masked-G coefficients of the C real fields
+    (``r_to_g(w).reshape(-1)[dens_mask]``); ``phase_pos`` is e^{+iG·τ} on the
+    density sphere (nG, na). Returns (C, nproj, nproj) [q_full dtype]: the
+    Hermitized augmentation D per channel — callers add dij_full and the PAW
+    one-center ddd. Species-batched (one einsum per species over channel×atom),
+    and pure einsum, so it stays autograd-safe for the force/stress graph and
+    gives block placement identical to the per-atom form (placed by atom index).
+    """
+    out = torch.zeros((fields_g.shape[0], *system.q_full.shape),
+                      dtype=system.q_full.dtype, device=fields_g.device)
+    for sp, atoms in _species_atoms(system).items():
+        contr = torch.einsum("ijg,cg,ga->caij", system.aug[sp].q_g.conj(),
+                             fields_g, phase_pos[:, atoms])
+        herm = (0.5 * (contr + contr.conj().transpose(-2, -1))).real
+        for i, a in enumerate(atoms):
+            s0, s1 = system.atom_slices[a]
+            out[:, s0:s1, s0:s1] = herm[:, i]
+    return out
+
+
 def uspp_potentials_dscr(system, xc, rho_s, rho_ij_s, vloc_r, phase_pos, onec):
     """(veff_s, dscr_s, e_onec) from the per-channel FULL densities (smooth +
     aug) and per-atom becsums — THE assembly the USPP/PAW SCF iterates with.
@@ -230,18 +255,10 @@ def uspp_potentials_dscr(system, xc, rho_s, rho_ij_s, vloc_r, phase_pos, onec):
     # q_g.conj() per species, instead of a Python loop of small kernels
     # re-materializing the conjugate per atom)
     mask_flat = grid.dens_mask.reshape(-1)
-    dscr_s = []
-    for isp in range(nspin):
-        v_eff_g = r_to_g(veff_s[isp].to(CDTYPE)).reshape(-1)[mask_flat]
-        dscr = torch.zeros_like(system.q_full)
-        for sp, atoms in _species_atoms(system).items():
-            contr = torch.einsum("ijg,g,ga->aij", system.aug[sp].q_g.conj(),
-                                 v_eff_g, phase_pos[:, atoms])
-            herm = (0.5 * (contr + contr.conj().transpose(-2, -1))).real
-            for i, a in enumerate(atoms):
-                s0, s1 = system.atom_slices[a]
-                dscr[s0:s1, s0:s1] = herm[i]
-        dscr_s.append(dscr + system.proj_data[0].dij_full)
+    fields_g = torch.stack([r_to_g(veff_s[isp].to(CDTYPE)).reshape(-1)[mask_flat]
+                            for isp in range(nspin)])
+    d_aug = aug_dmat_batched(system, fields_g, phase_pos)
+    dscr_s = [d_aug[isp] + system.proj_data[0].dij_full for isp in range(nspin)]
     e_onec = torch.zeros((), dtype=RDTYPE, device=dev)
     if onec is not None:
         dscr_s = [d.clone() for d in dscr_s]

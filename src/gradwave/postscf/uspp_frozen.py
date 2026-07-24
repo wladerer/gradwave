@@ -30,16 +30,14 @@ def aug_dmat(system, w_r: torch.Tensor, phase_pos: torch.Tensor) -> torch.Tensor
     Returns the (nproj, nproj) real, Hermitized augmentation contribution only —
     callers add dij_full and the PAW one-center ddd. This is the exact pairing
     the SCF uses to fold v_eff into D, so it also serves grid perturbations.
+    The single-field wrapper over the shared species-batched screening kernel
+    (stays autograd-safe for the force/stress graph).
     """
+    from gradwave.scf.uspp_loop import aug_dmat_batched
+
     mask_flat = system.grid.dens_mask.reshape(-1)
     w_g = r_to_g(w_r.to(CDTYPE)).reshape(-1)[mask_flat]
-    out = torch.zeros_like(system.q_full)
-    for a, sp in enumerate(system.species_of_atom):
-        s0, s1 = system.atom_slices[a]
-        contr = torch.einsum("ijg,g->ij", system.aug[sp].q_g.conj(),
-                             w_g * phase_pos[:, a])
-        out[s0:s1, s0:s1] = (0.5 * (contr + contr.conj().T)).real
-    return out
+    return aug_dmat_batched(system, w_g[None], phase_pos)[0]
 
 
 def aug_density_from_becsum(system, becsum, phases) -> torch.Tensor:
