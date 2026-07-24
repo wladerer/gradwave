@@ -93,8 +93,14 @@ class GradWave(Calculator):
             self._dispersion = dict(dispersion)
         else:
             raise ValueError(
-                "dispersion must be True/False or a dict of D3(BJ) overrides "
-                "(functional, cutoff, cn_cutoff, s6, s8, a1, a2)")
+                "dispersion must be True/False or a dict of D3(BJ)/D4(BJ) "
+                "overrides (method, functional, cutoff, cn_cutoff, s6, s8, a1, "
+                "a2; D4 also accepts charge)")
+        if self._dispersion is not None:
+            method = str(self._dispersion.get("method", "d3")).lower()
+            if method not in ("d3", "d4"):
+                raise ValueError(
+                    f"dispersion method must be 'd3' or 'd4', got {method!r}")
         self.parameters["dispersion"] = self._dispersion
         self._pseudo_paths = dict(pseudopotentials)
         self._upf_cache: dict[str, object] = {}
@@ -131,35 +137,53 @@ class GradWave(Calculator):
         return _is_uspp([self._upf(s) for s in species])
 
     def _apply_dispersion(self, system, properties):
-        """Fold the opt-in D3(BJ) correction into the reported energy, forces,
-        and stress — the calculator analog of ``api._apply_dispersion``.
+        """Fold the opt-in D3(BJ)/D4(BJ) correction into the reported energy,
+        forces, and stress — the calculator analog of ``api._apply_dispersion``.
 
         The energy is folded into ``res.energies.dispersion`` so ``free_energy``
-        (which the calculator reports) carries it; the D3 forces/stress are added
-        on top of the SCF Hellmann–Feynman terms. Both are geometric, autograd
-        contributions from ``postscf/dispersion.py`` (no reimplementation here).
+        (which the calculator reports) carries it; the dispersion forces/stress
+        are added on top of the SCF Hellmann–Feynman terms. Both are geometric,
+        autograd contributions from ``postscf/dispersion.py`` (D3) or
+        ``postscf/dispersion_d4.py`` (D4, charge-dependent EEQ C6 with a periodic
+        Ewald charge model); no reimplementation here. ``method`` (``'d3'`` by
+        default, or ``'d4'``) selects the model; D4 also reads a ``charge`` knob.
         Degrades to a no-op when the element set is uncovered or no BJ preset
         exists for the functional, matching the api's ``{'available': False}``."""
         if self._dispersion is None:
             return
-        from gradwave.postscf.dispersion import (
-            D3Config,
-            dispersion_energy,
-            dispersion_forces,
-            dispersion_stress,
-        )
-
         d = self._dispersion
+        method = str(d.get("method", "d3")).lower()
+        functional = d.get("functional") or self.parameters["xc"]
         positions = system.positions.detach().to(RDTYPE)
         cell = np.asarray(system.grid.cell, dtype=np.float64)
         z = [int(v) for v in self.atoms.get_atomic_numbers()]
         try:
-            cfg = D3Config.resolve(
-                d.get("functional") or self.parameters["xc"],
-                cutoff_ang=d.get("cutoff", 21.2),
-                cn_cutoff_ang=d.get("cn_cutoff", 10.6),
-                s6=d.get("s6"), s8=d.get("s8"), a1=d.get("a1"), a2=d.get("a2"),
-            )
+            if method == "d4":
+                from gradwave.postscf.dispersion_d4 import (
+                    D4Config,
+                    dispersion_energy,
+                    dispersion_forces,
+                    dispersion_stress,
+                )
+                cfg = D4Config.resolve(
+                    functional, charge=float(d.get("charge", 0.0)),
+                    cutoff_ang=d.get("cutoff", 21.2),
+                    cn_cutoff_ang=d.get("cn_cutoff", 10.6),
+                    s6=d.get("s6"), s8=d.get("s8"), a1=d.get("a1"), a2=d.get("a2"),
+                )
+            else:
+                from gradwave.postscf.dispersion import (
+                    D3Config,
+                    dispersion_energy,
+                    dispersion_forces,
+                    dispersion_stress,
+                )
+                cfg = D3Config.resolve(
+                    functional,
+                    cutoff_ang=d.get("cutoff", 21.2),
+                    cn_cutoff_ang=d.get("cn_cutoff", 10.6),
+                    s6=d.get("s6"), s8=d.get("s8"), a1=d.get("a1"), a2=d.get("a2"),
+                )
             cell_t = torch.as_tensor(cell, dtype=RDTYPE, device=positions.device)
             e = dispersion_energy(positions, cell_t, z, cfg)
             f = dispersion_forces(positions, cell, z, cfg)

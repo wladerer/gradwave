@@ -24,6 +24,7 @@ from gradwave.postscf.dispersion_d4 import (
     D4Config,
     dispersion_energy,
     dispersion_forces,
+    dispersion_stress,
     eeq_charges,
 )
 
@@ -195,11 +196,108 @@ def test_unknown_element_raises():
                           [1, 3], cfg)  # Li (Z=3) not in subset
 
 
-def test_periodic_raises_not_implemented():
-    cfg = D4Config.from_functional("pbe")
-    cell = torch.eye(3, dtype=torch.float64) * 5.0
-    with pytest.raises(NotImplementedError, match="molecules only"):
-        dispersion_energy(_tensor(_WATER_XYZ), cell, _WATER_Z, cfg)
+# --------------------------------------------------------------------------
+# periodic self-oracle: Ewald-EEQ charges, forces vs FD, stress vs FD,
+# and the large-vacuum reduction to the molecular result
+# --------------------------------------------------------------------------
+
+def _rattled_mgo():
+    """Rattled triclinic rock-salt MgO (Z=12/8, both vendored): a bonded, ionic
+    periodic cell — CN>0 everywhere and meaningful EEQ charges."""
+    rng = np.random.default_rng(3)
+    a = 4.2
+    cell = np.array([[a, 0.0, 0.0], [0.15, a, 0.0], [-0.1, 0.2, a]])
+    base = np.array([[0, 0, 0], [0.5, 0.5, 0], [0.5, 0, 0.5], [0, 0.5, 0.5],  # Mg
+                     [0.5, 0, 0], [0, 0.5, 0], [0, 0, 0.5], [0.5, 0.5, 0.5]])  # O
+    Z = [12, 12, 12, 12, 8, 8, 8, 8]
+    frac = base + 0.03 * rng.standard_normal(base.shape)
+    pos = torch.tensor(frac @ cell, dtype=torch.float64)
+    return pos, torch.tensor(cell, dtype=torch.float64), cell, Z
+
+
+def test_periodic_eeq_charge_neutrality_and_sign():
+    pos, cell, _, Z = _rattled_mgo()
+    cfg = D4Config.from_functional("pbe0", cn_cutoff_ang=12.0)
+    q = eeq_charges(pos, cell, Z, cfg=cfg)
+    assert abs(q.sum().item()) < 1e-10  # Lagrange constraint (neutral cell)
+    assert (q[:4] > 0).all() and (q[4:] < 0).all()  # Mg cations, O anions
+
+
+def test_periodic_forces_match_finite_differences():
+    pos, cell, _, Z = _rattled_mgo()
+    cfg = D4Config.from_functional("pbe0", cutoff_ang=18.0, cn_cutoff_ang=12.0)
+    f = dispersion_forces(pos, cell, Z, cfg)
+    h = 1e-5
+    scale = f.abs().max().item()
+    for i in range(len(Z)):
+        for c in range(3):
+            dp = torch.zeros_like(pos)
+            dp[i, c] = h
+            ep = dispersion_energy(pos + dp, cell, Z, cfg).item()
+            em = dispersion_energy(pos - dp, cell, Z, cfg).item()
+            fd = -(ep - em) / (2 * h)
+            assert abs(fd - f[i, c].item()) <= 1e-6 * scale + 1e-10
+    assert f.sum(dim=0).abs().max().item() < 1e-9  # Σ_a F_a = 0
+
+
+def test_periodic_stress_matches_finite_differences():
+    pos, cell, cell_np, Z = _rattled_mgo()
+    cfg = D4Config.from_functional("pbe0", cutoff_ang=18.0, cn_cutoff_ang=12.0)
+    sig = dispersion_stress(pos, cell, Z, cfg).detach().numpy()
+    omega0 = abs(np.linalg.det(cell_np))
+    h = 1e-6
+
+    def e_strain(eps):
+        fmap = np.eye(3) + eps
+        return dispersion_energy(
+            torch.tensor(pos.numpy() @ fmap.T), torch.tensor(cell_np @ fmap.T),
+            Z, cfg, ref_cell=cell_np).item()
+
+    fd = np.zeros((3, 3))
+    for i in range(3):
+        for j in range(3):
+            e = np.zeros((3, 3))
+            e[i, j] = h
+            fd[i, j] = (e_strain(e) - e_strain(-e)) / (2 * h) / omega0
+    fd = 0.5 * (fd + fd.T)
+    scale = np.abs(sig).max()
+    assert np.allclose(sig, fd, atol=1e-6 * scale + 1e-10)
+
+
+def test_periodic_reduces_to_molecular_in_large_box():
+    # a molecule in a large vacuum box → periodic EEQ charges and D4 energy must
+    # converge to the molecular result (the Ewald sum's isolated limit)
+    Z, cfg = _WATER_Z, D4Config.from_functional("pbe0", cn_cutoff_ang=12.0)
+    mol = _tensor(_WATER_XYZ)
+    q_mol = eeq_charges(mol, None, Z).numpy()
+    e_mol = dispersion_energy(mol, None, Z, cfg).item()
+
+    L = 30.0
+    cell = torch.eye(3, dtype=torch.float64) * L
+    pos = mol - mol.mean(0) + L / 2  # center it in the box
+    q_p = eeq_charges(pos, cell, Z, cfg=cfg).numpy()
+    e_p = dispersion_energy(pos, cell, Z, cfg).item()
+    assert np.abs(q_p - q_mol).max() < 5e-5   # dipole-tail finite-box residual
+    assert abs(e_p - e_mol) < 5e-7
+
+
+def test_periodic_translation_invariance():
+    pos, cell, _, Z = _rattled_mgo()
+    cfg = D4Config.from_functional("pbe0", cn_cutoff_ang=12.0)
+    shift = torch.tensor([0.31, -0.22, 0.47], dtype=torch.float64)
+    e1 = dispersion_energy(pos, cell, Z, cfg).item()
+    e2 = dispersion_energy(pos + shift, cell, Z, cfg).item()
+    assert abs(e1 - e2) <= 1e-9 * abs(e1)
+
+
+def test_periodic_resolve_matches_from_functional():
+    # the calculator/api-facing resolve() must agree with from_functional
+    pos, cell, _, Z = _rattled_mgo()
+    a = D4Config.resolve("pbe0", cutoff_ang=18.0, cn_cutoff_ang=12.0)
+    b = D4Config.from_functional("pbe0", cutoff_ang=18.0, cn_cutoff_ang=12.0)
+    ea = dispersion_energy(pos, cell, Z, a).item()
+    eb = dispersion_energy(pos, cell, Z, b).item()
+    assert ea == eb
 
 
 def test_unknown_functional_raises():
