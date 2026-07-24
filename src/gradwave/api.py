@@ -956,8 +956,11 @@ def _write_volumetric(res, spec, outdir, verbose) -> dict:
     written = {}
     for label, name, write in jobs:
         try:
-            write(outdir / name)
-            written[label] = name
+            produced = write(outdir / name)
+            # a writer may emit several files (e.g. spin-resolved ELF → up/dn);
+            # record their actual names, else the single fixed name
+            written[label] = ([Path(p).name for p in produced]
+                              if isinstance(produced, (list, tuple)) else name)
         except (NotImplementedError, ValueError) as exc:
             if verbose:
                 print(f"skipped {label}: {exc}")

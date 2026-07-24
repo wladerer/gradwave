@@ -231,6 +231,16 @@ def write_magnetization(
 _C_F = 0.3 * (3.0 * np.pi**2) ** (2.0 / 3.0)  # Thomas–Fermi kinetic constant
 
 
+def _elf_field(tau, rho, g_cart, c_F, eps) -> np.ndarray:
+    """ELF(r) = 1/(1+(D/D_h)²) for one (τ, ρ) channel with TF constant c_F."""
+    sigma = sigma_from_rho(rho, g_cart)  # |∇ρ|²(r)
+    rho_c = rho.clamp_min(eps)
+    d = tau - sigma / (8.0 * rho_c)
+    d_h = c_F * rho_c ** (5.0 / 3.0)
+    chi = d / (d_h + eps)
+    return (1.0 / (1.0 + chi * chi)).detach().cpu().numpy()
+
+
 def elf(res, eps: float = 1e-10) -> np.ndarray:
     """Becke–Edgecombe electron localization function ELF(r) ∈ [0,1].
 
@@ -240,7 +250,10 @@ def elf(res, eps: float = 1e-10) -> np.ndarray:
     the homogeneous-gas value. τ(r) comes straight from the coefficients (the
     existing meta-GGA tau_b), so no meta-GGA run is needed to produce it.
 
-    Collinear norm-conserving, spin-unpolarized results only for now.
+    Collinear norm-conserving results. For nspin=2 the ELF is spin-resolved:
+    each channel uses its own (τ_σ, ρ_σ) and the spin-scaled TF reference
+    D_h,σ = c_F·2^{2/3}·ρ_σ^{5/3}, and the return gains a leading spin axis
+    (2, n1, n2, n3). Noncollinear/USPP still raise below.
     """
     system, shape, vol = _grid_info(res)
     if getattr(res, "occupations", None) is None or getattr(system, "batch", None) is None:
@@ -248,20 +261,36 @@ def elf(res, eps: float = 1e-10) -> np.ndarray:
             "ELF is implemented for collinear norm-conserving results; "
             "noncollinear and USPP/PAW support lands later"
         )
-    if getattr(res, "nspin", 1) != 1:
-        raise NotImplementedError("ELF for nspin=2 lands next — spin-unpolarized only for now")
-    coeffs = pad_coeffs(res.coeffs, system.batch.npw_max)
-    tau = tau_b(coeffs, res.occupations, system.kweights, system.batch, shape, vol)
-    rho = res.rho
-    sigma = sigma_from_rho(rho, system.grid.g_cart)  # |∇ρ|²(r)
+    nspin = getattr(res, "nspin", 1)
+    if nspin == 1:
+        coeffs = pad_coeffs(res.coeffs, system.batch.npw_max)
+        tau = tau_b(coeffs, res.occupations, system.kweights, system.batch, shape, vol)
+        return _elf_field(tau, res.rho, system.grid.g_cart, _C_F, eps)
 
-    rho_c = rho.clamp_min(eps)
-    d = tau - sigma / (8.0 * rho_c)
-    d_h = _C_F * rho_c ** (5.0 / 3.0)
-    chi = d / (d_h + eps)
-    return (1.0 / (1.0 + chi * chi)).detach().cpu().numpy()
+    # nspin=2: per-channel ELF. The uniform-gas reference for a single spin
+    # channel carries the 2^{2/3} factor (each channel is its own fully spin-
+    # polarized gas), the only change beyond running the loop per spin.
+    c_F_spin = _C_F * 2.0 ** (2.0 / 3.0)
+    fields = []
+    for sp in range(nspin):
+        coeffs = pad_coeffs(res.coeffs[sp], system.batch.npw_max)
+        tau = tau_b(coeffs, res.occupations[sp], system.kweights, system.batch, shape, vol)
+        fields.append(_elf_field(tau, res.rho_spin[sp], system.grid.g_cart, c_F_spin, eps))
+    return np.stack(fields)
 
 
-def write_elf(res, path, fmt: str | None = None) -> str:
-    """Write the electron localization function ELF(r) to .cube/.xsf."""
-    return write_volumetric(path, elf(res), _atoms_from_system(res.system), fmt)
+def write_elf(res, path, fmt: str | None = None):
+    """Write the electron localization function ELF(r) to .cube/.xsf.
+
+    For nspin=2 the two spin channels are written to `<stem>_up` and `<stem>_dn`
+    files and the list of paths is returned; nspin=1 writes one file."""
+    field = elf(res)
+    atoms = _atoms_from_system(res.system)
+    if field.ndim == 3:
+        return write_volumetric(path, field, atoms, fmt)
+    p = Path(path)
+    written = []
+    for sp, tag in enumerate(("up", "dn")):
+        chan = p.with_name(f"{p.stem}_{tag}{p.suffix}")
+        written.append(write_volumetric(chan, field[sp], atoms, fmt))
+    return written
