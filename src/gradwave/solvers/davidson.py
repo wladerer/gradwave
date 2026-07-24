@@ -107,8 +107,9 @@ def davidson(
 # ---------------------------------------------------------------------------
 # k-batched variant: all k-points advance together with uniform subspace size,
 # so every step is one batched tensor op (batched FFT H-applies, batched QR,
-# batched eigh). No locking — converged bands ride along; the cost of a step
-# is set by the batch anyway, and uniformity is what buys the throughput.
+# batched eigh). Uniform leading-band locking (see davidson_batched docstring)
+# deflates converged low bands at restarts with a k-uniform count, so the eigh
+# shrinks while every k keeps the same subspace size that buys the throughput.
 # ---------------------------------------------------------------------------
 
 
@@ -175,8 +176,27 @@ def davidson_batched(
     max_iter: int = 40,
     max_dim_factor: int = 4,
     sync_free: bool = False,
+    lock: bool = True,
 ) -> BatchedDavidsonResult:
-    """sync_free removes every per-round host readback: convergence stats
+    """LOCKING (lock=True, default): at each subspace restart the lowest L
+    bands whose residual is below `tol` at EVERY k-point are deflated out of the
+    Rayleigh–Ritz eigh — frozen as an (nk, L, npw) block kept only to
+    orthogonalize new directions. The eigh then runs on the (nb−L)+expansion
+    active block instead of the full subspace, shrinking the #1 SCF kernel
+    (dense batched `eigh`, 21–29% of runtime, worst under SOC). L is uniform
+    across k (min over k of the leading contiguous converged count) so every k
+    keeps the SAME subspace size and the batching that buys the throughput.
+    Locking is gated to the natural (max_dim) restart, so restart frequency and
+    the trajectory up to the first restart are exactly the baseline's;
+    deflation only makes later eighs smaller. A band locks only after the driver
+    would already call it converged, so the converged eigenvalues are unchanged
+    (see PR: a locked Ritz pair has eigenvalue error ≤ ρ²/gap ≤ tol²/gap, and
+    deflating it perturbs the remaining Ritz values by the same order — ~1e-18
+    at tol=1e-9). Disabled on the sync_free path (which deliberately avoids the
+    per-round host sync locking needs); set lock=False to recover the exact
+    pre-locking numerics.
+
+    sync_free removes every per-round host readback: convergence stats
     travel through a non-blocking copy into pinned memory and are judged
     one round late via a CUDA event query that never blocks; worst case
     is one extra expansion round whose Rayleigh–Ritz solution is strictly
@@ -209,13 +229,26 @@ def davidson_batched(
     n_add_cur = nb
     pending = False
 
+    use_lock = lock and not sync_free
+
     v = _orthonormalize_b(x0, mask, jitter=jitter)
     hv = h_apply(v)
     eig = torch.zeros(nk, nb, dtype=rdtype, device=x0.device)
     x = v[:, :nb]
     rn = torch.full((nk, nb), float("inf"), dtype=rdtype, device=x0.device)
 
+    # Deflated ("locked") leading block: bands whose residual fell below tol at
+    # every k. Frozen and excluded from the active eigh but retained to keep new
+    # directions orthogonal to them. Empty (L=0) unless use_lock; when L stays 0
+    # every operation below reduces exactly to the pre-locking code path.
+    x_lock = x0.new_zeros(nk, 0, m)
+    hx_lock = x0.new_zeros(nk, 0, m)
+    eig_lock = torch.zeros(nk, 0, dtype=rdtype, device=x0.device)
+    rn_lock = torch.zeros(nk, 0, dtype=rdtype, device=x0.device)
+    L = 0
+
     for it in range(1, max_iter + 1):
+        na = nb - L  # active bands sought from the deflated subspace
         # Convention here is the opposite of single-k davidson()'s: s conjugates
         # v, so s = ⟨v_i|H|v_j⟩ is the true subspace matrix directly and u is
         # used UNCONJUGATED in the Ritz combination below. (Single-k conjugates
@@ -225,22 +258,32 @@ def davidson_batched(
         # einsum("kig,kjg->kij", v.conj(), hv) without materializing a
         # conj copy of the whole subspace — that transient peaks right
         # before restart and was the A100 large-nk memory spike
+        # Rayleigh–Ritz on the ACTIVE (deflated) subspace only. With L==0 this
+        # is the full subspace, identical to the pre-locking path.
         s = torch.matmul(v.conj(), hv.mT)
         s = 0.5 * (s + s.conj().transpose(-1, -2))
         w, u = torch.linalg.eigh(s)
-        eig = w[:, :nb].real
-        x = torch.einsum("kja,kjg->kag", u[:, :, :nb], v)
-        hx = torch.einsum("kja,kjg->kag", u[:, :, :nb], hv)
+        eig_act = w[:, :na].real
+        x_act = torch.einsum("kja,kjg->kag", u[:, :, :na], v)
+        hx_act = torch.einsum("kja,kjg->kag", u[:, :, :na], hv)
 
-        r = hx - eig[..., None] * x
-        rn = torch.linalg.norm(r, dim=-1).real
+        r = hx_act - eig_act[..., None] * x_act
+        rn_act = torch.linalg.norm(r, dim=-1).real
+
+        # Full nb-band result = locked block (lowest, already <tol) ++ active.
+        # Ascending by construction: locked bands are the lowest converged
+        # bands and the active eigh targets the next-lowest above them.
+        eig = torch.cat([eig_lock, eig_act], dim=1)
+        x = torch.cat([x_lock, x_act], dim=1)
+        rn = torch.cat([rn_lock, rn_act], dim=1)
+
         if not sync_free:
-            if float(rn.max()) < tol:
+            if float(rn_act.max()) < tol:
                 return BatchedDavidsonResult(eig, x, it, rn)
             # expand with the worst unconverged residuals only — uniform
             # count across k (max over k of the per-k unconverged tally)
             # keeps batching
-            n_add = int((rn > tol).sum(dim=1).max())
+            n_add = int((rn_act > tol).sum(dim=1).max())
         else:
             # judge the stats copy launched in an earlier round; query()
             # never blocks, and the returned (eig, x) are the CURRENT
@@ -252,17 +295,20 @@ def davidson_batched(
                 pending = False
             if not pending:
                 pending_stats = torch.stack(
-                    [rn.max().to(torch.float64),
-                     (rn > tol).sum(dim=1).max().to(torch.float64)])
+                    [rn_act.max().to(torch.float64),
+                     (rn_act > tol).sum(dim=1).max().to(torch.float64)])
                 flag_host.copy_(pending_stats, non_blocking=use_event)
                 if use_event:
                     ev.record()
                 pending = True
             n_add = n_add_cur
-        sel = torch.argsort(rn, dim=1, descending=True)[:, :n_add]  # (nk, n_add)
+        # Expansion selects among ACTIVE bands; locked bands (residual <tol) have
+        # the smallest residuals and are never picked by the descending sort.
+        sel = torch.argsort(rn_act, dim=1, descending=True)[:, :n_add]
         r_sel = torch.gather(r, 1, sel[..., None].expand(-1, -1, m))
 
-        t_band = torch.einsum("kbg,kg,kbg->kb", x.conj(), t.to(x.dtype), x).real
+        t_band = torch.einsum(
+            "kbg,kg,kbg->kb", x_act.conj(), t.to(x_act.dtype), x_act).real
         tb_sel = torch.gather(t_band, 1, sel)
         d = teter_b(r_sel, t, tb_sel)
         # unit-normalize rows BEFORE ortho: near-converged residuals are
@@ -276,22 +322,55 @@ def davidson_batched(
         d = torch.where(dn > 1e-300, d / dn.clamp_min(1e-300), d)
 
         if v.shape[1] + n_add > max_dim:
+            # Restart. Locking is gated to this natural (max_dim) restart so the
+            # restart frequency and the pre-first-restart trajectory are exactly
+            # the baseline's — deflation only makes the POST-restart subspace
+            # (and thus every later eigh) smaller. Lock the leading contiguous
+            # converged active bands, uniform across k (min over k) so every k
+            # keeps the same subspace size: cumprod of the 0/1 converged mask
+            # along bands is 1 over the leading all-converged prefix and 0
+            # after, so its sum is that prefix length. We already returned above
+            # if EVERY active band converged, so new_lock < na and na stays ≥1.
+            new_lock = 0
+            if use_lock:
+                conv = (rn_act < tol).to(torch.int8)
+                new_lock = int(torch.cumprod(conv, dim=1).sum(dim=1).min().item())
+            x_rem, hx_rem = x_act, hx_act
+            if new_lock > 0:
+                x_lock = torch.cat([x_lock, x_act[:, :new_lock]], dim=1)
+                hx_lock = torch.cat([hx_lock, hx_act[:, :new_lock]], dim=1)
+                eig_lock = torch.cat([eig_lock, eig_act[:, :new_lock]], dim=1)
+                rn_lock = torch.cat([rn_lock, rn_act[:, :new_lock]], dim=1)
+                L += new_lock
+                x_rem, hx_rem = x_act[:, new_lock:], hx_act[:, new_lock:]
+
             # Restart reusing hx (no H re-application) — but the Ritz block
             # accumulates orthonormality drift across restarts, which at tight
             # tolerances corrupts the Rayleigh–Ritz projection (observed as a
             # ~1 eV energy jump on CUDA). Kill the drift with a QR of x and
             # transform hx by the same triangular factor: x_old = Rᵀ·x_new ⇒
             # hx_new = (Rᵀ)⁻¹·hx_old. Cost: one (nb × nb) triangular solve.
-            q, rmat = torch.linalg.qr(x.transpose(-1, -2), mode="reduced")
+            # When bands are locked, first project the remaining Ritz block off
+            # the locked block; applying the SAME linear map to hx keeps
+            # hx = H·x with no re-application, so orthogonality to the deflated
+            # space is exact going into the next eigh.
+            if L > 0:
+                for _ in range(2):
+                    c = torch.matmul(x_rem, x_lock.conj().mT)
+                    x_rem = x_rem - torch.matmul(c, x_lock)
+                    hx_rem = hx_rem - torch.matmul(c, hx_lock)
+            q, rmat = torch.linalg.qr(x_rem.transpose(-1, -2), mode="reduced")
             x_orth = q.transpose(-1, -2)
             hx_orth = torch.linalg.solve_triangular(
-                rmat.transpose(-1, -2), hx, upper=False
+                rmat.transpose(-1, -2), hx_rem, upper=False
             )
-            d = _orthonormalize_b(d, mask, against=x_orth, jitter=jitter)
+            against = torch.cat([x_lock, x_orth], dim=1) if L > 0 else x_orth
+            d = _orthonormalize_b(d, mask, against=against, jitter=jitter)
             v = torch.cat([x_orth, d], dim=1)
             hv = torch.cat([hx_orth, h_apply(d)], dim=1)
         else:
-            d = _orthonormalize_b(d, mask, against=v, jitter=jitter)
+            against = torch.cat([x_lock, v], dim=1) if L > 0 else v
+            d = _orthonormalize_b(d, mask, against=against, jitter=jitter)
             v = torch.cat([v, d], dim=1)
             hv = torch.cat([hv, h_apply(d)], dim=1)
 
