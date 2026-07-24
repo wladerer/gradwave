@@ -3,7 +3,7 @@
 No SCF: these check the (μ,R) supercell map, the D(q) Fourier folding against
 direct Γ diagonalization, Hermiticity, and the sum-rule / symmetrization
 bookkeeping. The physics (Si dispersion, acoustic modes) is exercised in
-tests/integration/test_phonons_supercell.py.
+tests/integration/test_phonons_supercell_task.py.
 """
 
 import numpy as np
