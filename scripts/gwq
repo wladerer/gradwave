@@ -123,8 +123,12 @@ def submit(host: str, group: str, command: str, *, label: str | None = None,
     args = ["add", "--group", group, "--working-directory", workdir]
     if label:
         args += ["--label", label]
-    # pueue add -- <command>: everything after -- is the command line, run by a shell.
-    args += ["--", "bash", "-lc", command]
+    # pueue joins everything after `--` into one string and runs it via its own
+    # shell (`sh -c`), so pass the command as a SINGLE argument. Passing
+    # `bash -lc <cmd>` as separate tokens made pueue space-join them and lose the
+    # grouping, so `bash -lc` ran only the first word (e.g. just `uv`). uv and the
+    # rest are on pueued's PATH, so `sh -c "<command>"` resolves them directly.
+    args += ["--", command]
     print(f"[gwq] {host}:{group}  {command}")
     return _pueue(host, args)
 
