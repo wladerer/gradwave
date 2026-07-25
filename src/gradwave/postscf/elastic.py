@@ -117,6 +117,89 @@ def moduli_from_cij(c) -> Moduli:
                   young=young, poisson=poisson)
 
 
+def compliance_tensor(c) -> np.ndarray:
+    """Full 4-index compliance S_ijkl (3,3,3,3) from a 6×6 stiffness [any unit].
+
+    Invert C to the Voigt compliance S = C⁻¹, then unfold with the compliance
+    factor convention. Engineering shear strains carry a factor 2, so the
+    off-diagonal Voigt compliances absorb it: S_ijkl = s[m,n]·f with f = 1 for
+    two normal Voigt indices, 1/2 when exactly one index is a shear (3,4,5), and
+    1/4 when both are. The unfolded tensor is symmetric under i↔j, k↔l and
+    pair↔pair so all equivalent (i,j,k,l) slots get the same value."""
+    s = np.linalg.inv(np.asarray(c, dtype=float))
+    st = np.zeros((3, 3, 3, 3))
+    fac = lambda m: 1.0 if m < 3 else 0.5  # noqa: E731
+    for m, (i, j) in enumerate(_VOIGT):
+        for n, (k, l) in enumerate(_VOIGT):
+            val = s[m, n] * fac(m) * fac(n)
+            for a, b in {(i, j), (j, i)}:
+                for p, q in {(k, l), (l, k)}:
+                    st[a, b, p, q] = val
+    return st
+
+
+def _unit(v) -> np.ndarray:
+    v = np.asarray(v, dtype=float)
+    return v / np.linalg.norm(v)
+
+
+def directional_poisson(c, n, m) -> float:
+    """Poisson ratio for uniaxial stress along ``n``, transverse strain along ``m``.
+
+    Pull along unit vector n and read the strain along a perpendicular unit
+    vector m. ν(n,m) = −(S_ijkl n_i n_j m_k m_l)/(S_pqrs n_p n_q n_r n_s). A
+    negative value is auxetic (the solid widens transverse to a pull). n and m
+    are normalized here and should be orthogonal."""
+    st = compliance_tensor(c)
+    return _poisson_from_tensor(st, _unit(n), _unit(m))
+
+
+def _poisson_from_tensor(st, n, m) -> float:
+    num = np.einsum("ijkl,i,j,k,l->", st, n, n, m, m)
+    den = np.einsum("ijkl,i,j,k,l->", st, n, n, n, n)
+    return float(-num / den)
+
+
+def _fibonacci_sphere(n_dir: int) -> np.ndarray:
+    """``n_dir`` roughly-equidistant unit vectors on the sphere (N,3)."""
+    i = np.arange(n_dir) + 0.5
+    z = 1.0 - 2.0 * i / n_dir
+    r = np.sqrt(np.clip(1.0 - z * z, 0.0, None))
+    theta = np.pi * (3.0 - np.sqrt(5.0)) * i
+    return np.column_stack((r * np.cos(theta), r * np.sin(theta), z))
+
+
+def min_directional_poisson(c, n_dir: int = 2000, n_trans: int = 180):
+    """Minimum directional Poisson ratio over loading/transverse directions.
+
+    Scan ``n_dir`` loading directions on the unit sphere and, for each, ``n_trans``
+    transverse directions in the plane ⟂ n. The global minimum below zero is the
+    auxetic indicator. Returns ``(nu_min, n_hat, m_hat)`` with the achieving unit
+    vectors."""
+    st = compliance_tensor(c)
+    ndirs = _fibonacci_sphere(n_dir)  # (N,3)
+
+    # per-loading orthonormal basis of the transverse plane
+    ref = np.tile(np.array([1.0, 0.0, 0.0]), (n_dir, 1))
+    near_x = np.abs(ndirs[:, 0]) > 0.9
+    ref[near_x] = np.array([0.0, 1.0, 0.0])
+    e1 = np.cross(ndirs, ref)
+    e1 /= np.linalg.norm(e1, axis=1, keepdims=True)
+    e2 = np.cross(ndirs, e1)
+
+    phi = np.linspace(0.0, np.pi, n_trans, endpoint=False)
+    # M[a,p,:] = cos φ_p e1[a] + sin φ_p e2[a]
+    mdirs = np.cos(phi)[None, :, None] * e1[:, None, :] \
+        + np.sin(phi)[None, :, None] * e2[:, None, :]
+
+    den = np.einsum("ijkl,ai,aj,ak,al->a", st, ndirs, ndirs, ndirs, ndirs)
+    num = np.einsum("ijkl,ai,aj,apk,apl->ap", st, ndirs, ndirs, mdirs, mdirs)
+    nu = -num / den[:, None]
+
+    a, p = np.unravel_index(np.argmin(nu), nu.shape)
+    return float(nu[a, p]), ndirs[a].copy(), mdirs[a, p].copy()
+
+
 def is_mechanically_stable(c) -> bool:
     """Born stability: the 6×6 stiffness is positive-definite (all eigenvalues
     > 0). A symmetric, weakly-negative eigenvalue from FD noise is treated as
