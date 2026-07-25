@@ -36,6 +36,62 @@ def test_rotational_invariance():
     assert torch.allclose(e1, e2, rtol=1e-12)
 
 
+def _mgga_fields():
+    gen = torch.Generator().manual_seed(3)
+    rho = 0.05 + 0.3 * torch.rand(6, generator=gen, dtype=torch.float64)
+    mz = 0.5 * rho * (torch.rand(6, generator=gen, dtype=torch.float64) - 0.1)
+    # a KE-density matrix consistent with |m| ∥ ẑ: τ↑↑, τ↓↓ per channel, τ↑↓ = 0
+    tau_uu = 0.2 + 0.4 * torch.rand(6, generator=gen, dtype=torch.float64)
+    tau_dd = 0.2 + 0.4 * torch.rand(6, generator=gen, dtype=torch.float64)
+    return rho, mz, tau_uu, tau_dd
+
+
+def test_metagga_collinear_limit_functional():
+    """Non-collinear r2SCAN with every moment along ẑ reproduces the collinear
+    (nspin=2) r2SCAN energy density evaluated on (ρ±, τ±) — the same functional
+    two ways. τ⃗ ∥ ẑ ⇒ local_frame_tau gives (τ↑↑, τ↓↓)."""
+    from gradwave.core.xc.noncollinear import local_frame_tau
+    from gradwave.core.xc.r2scan import SpinR2SCAN
+
+    rho, mz, tau_uu, tau_dd = _mgga_fields()
+    nc = NoncollinearXC(SpinR2SCAN())
+    assert nc.needs_tau and nc.needs_gradient
+    m_vec = torch.stack([torch.zeros_like(mz), torch.zeros_like(mz), mz])
+    tau_scalar = tau_uu + tau_dd
+    tau_vec = torch.stack([torch.zeros_like(mz), torch.zeros_like(mz),
+                           tau_uu - tau_dd])
+    tau_up, tau_dn = local_frame_tau(m_vec, tau_scalar, tau_vec)
+    assert torch.allclose(tau_up, tau_uu, rtol=1e-12)
+    assert torch.allclose(tau_dn, tau_dd, rtol=1e-12)
+
+    r_up = 0.5 * (rho + mz.abs())
+    r_dn = 0.5 * (rho - mz.abs())
+    # sigmas: locally-collinear channels along ẑ (gradients parallel here just
+    # to exercise the full signature — zero is a valid consistent choice)
+    z = torch.zeros_like(rho)
+    e_nc = nc.energy(rho, m_vec, 1.0, z, z, z, tau_up=tau_up, tau_dn=tau_dn)
+    e_col = SpinR2SCAN().energy(r_up, r_dn, 1.0, z, z, z, tau_uu, tau_dd)
+    assert torch.allclose(e_nc, e_col, rtol=1e-12)
+
+
+def test_tau_operator_fields_collinear():
+    """tau_operator_fields with m⃗ ∥ ẑ makes v_τ⃗ ∥ ẑ with v_τz = (v↑−v↓)/2 and
+    v_τ0 = (v↑+v↓)/2 — a diagonal 2×2 τ operator."""
+    from gradwave.core.xc.noncollinear import tau_operator_fields
+
+    rho, mz, _, _ = _mgga_fields()
+    m_vec = torch.stack([torch.zeros_like(mz), torch.zeros_like(mz), mz])
+    vu = 0.3 + 0.2 * torch.rand(6, dtype=torch.float64)
+    vd = 0.1 + 0.2 * torch.rand(6, dtype=torch.float64)
+    v0, vvec = tau_operator_fields(vu, vd, m_vec)
+    # sign(mz) folds into m̂, so compare against v_τz·sign(mz)
+    sgn = torch.sign(mz)
+    assert torch.allclose(v0, 0.5 * (vu + vd), rtol=1e-12)
+    assert torch.allclose(vvec[2], 0.5 * (vu - vd) * sgn, rtol=1e-12)
+    assert float(vvec[0].abs().max()) < 1e-13
+    assert float(vvec[1].abs().max()) < 1e-13
+
+
 def test_bxc_parallel_to_m():
     from gradwave.core.xc.noncollinear import vxc_and_bxc
 

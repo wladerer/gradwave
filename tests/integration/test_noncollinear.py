@@ -51,6 +51,45 @@ def test_spinor_scf_ladder():
     assert abs(m[0]) > 2.5 and abs(m[1]) < 1e-3 and abs(m[2]) < 1e-3
 
 
+@pytest.mark.slow
+def test_spinor_metagga_collinear_limit_and_rotation():
+    """Meta-GGA (r2SCAN) on the spinor path, end to end:
+
+    1. COLLINEAR LIMIT — a non-collinear r2SCAN run with the moment along ẑ
+       reproduces the collinear nspin=2 r2SCAN free energy (the whole τ build +
+       2×2 v_τ operator collapses to the proven collinear per-spin machinery);
+    2. ROTATIONAL INVARIANCE — rotating the moment to x̂ (a pure SU(2) spin
+       rotation, same real-space grid) leaves the free energy invariant.
+
+    Tolerances match the LSDA ladder above: the two SCF drivers differ in
+    mixing/occupation bookkeeping, so the collinear-limit floor is ~µeV, while
+    the z→x rotation (one driver, one grid) is tighter."""
+    from gradwave.core.xc.r2scan import SpinR2SCAN
+
+    torch.set_num_threads(8)
+    col = scf(make_system(), SpinR2SCAN(), smearing="gaussian", width=0.1,
+              etol=1e-9, rhotol=1e-8, verbose=False, nspin=2, start_mag=[0.4],
+              max_iter=200)
+    assert col.converged
+
+    nc_z = scf_noncollinear(make_system(), NoncollinearXC(SpinR2SCAN()),
+                            mag_vec_init=[[0, 0, 0.4]], width=0.1,
+                            etol=1e-9, rhotol=1e-8, verbose=False, max_iter=200)
+    assert nc_z.converged
+    f_col, f_z = float(col.energies.free_energy), float(nc_z.energies.free_energy)
+    assert abs(f_z - f_col) < 5e-6  # eV — collinear limit (same functional)
+    assert abs(nc_z.mag_vec[2] - col.mag_total) < 1e-3
+    assert abs(nc_z.mag_vec[0]) < 1e-3 and abs(nc_z.mag_vec[1]) < 1e-3
+
+    nc_x = scf_noncollinear(make_system(), NoncollinearXC(SpinR2SCAN()),
+                            mag_vec_init=[[0.4, 0, 0]], width=0.1,
+                            etol=1e-9, rhotol=1e-8, verbose=False, max_iter=200)
+    assert nc_x.converged
+    assert abs(float(nc_x.energies.free_energy) - f_z) < 5e-6  # rotation invariance
+    m = np.array(nc_x.mag_vec)
+    assert abs(m[0]) > 2.5 and abs(m[1]) < 1e-3 and abs(m[2]) < 1e-3
+
+
 def test_nonmagnetic_spinor_ibz_equals_full_mesh():
     """A nonmagnetic (m⃗ ≡ 0) spinor SCF keeps the full crystal symmetry, so
     IBZ reduction + ρ-symmetrization must equal the full-mesh spinor energy.

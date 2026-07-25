@@ -40,8 +40,15 @@ from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.energies.nl_pp import nonlocal_energy
 from gradwave.core.energies.total import EnergyBreakdown
 from gradwave.core.fftbox import g_to_r_box, r_to_g
+from gradwave.core.metagga import spinor_metagga_tau_operator, spinor_tau_matrix_b
 from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
-from gradwave.core.xc.noncollinear import NoncollinearXC, vxc_and_bxc
+from gradwave.core.xc.noncollinear import (
+    NoncollinearXC,
+    local_frame_tau,
+    tau_operator_fields,
+    vtau_up_dn,
+    vxc_and_bxc,
+)
 from gradwave.dtypes import CDTYPE, CDTYPE_LOW, RDTYPE, RDTYPE_LOW
 from gradwave.scf.common import (
     MP_CROSSOVER,
@@ -77,12 +84,17 @@ class SpinorHamiltonian:
     fully-relativistic pseudos use spinor projectors q on the DOUBLED axis
     (j-resolved SOC — see core/spinor_proj.py)."""
 
-    def __init__(self, bk: BatchedK, shape, v_r, b_vec_r, p, q=None, dij_so=None):
+    def __init__(self, bk: BatchedK, shape, v_r, b_vec_r, p, q=None, dij_so=None,
+                 metagga_op=None):
         self.bk = bk
         self.shape = shape
         self.p = p  # (nk, nproj, npw_max) scalar projectors
         self.q = q  # (nk, nproj_so, 2·npw_max) spinor projectors (FR)
         self.dij_so = dij_so
+        # meta-GGA: a callable c → V_τ c (the 2×2 generalized-KS τ operator,
+        # core.metagga.spinor_metagga_tau_operator with the current v_τ fields),
+        # or None for LDA/GGA. Hermitian, so it adds straight into H·c.
+        self.metagga_op = metagga_op
         self.m = bk.npw_max
         # Precompute the 2×2 potential blocks once (fixed per H): v_uu/v_dd
         # are ⟨↑|V̂|↑⟩/⟨↓|V̂|↓⟩ (real), v_ud is ⟨↑|V̂|↓⟩ (complex); nonmagnetic
@@ -158,6 +170,8 @@ class SpinorHamiltonian:
                 bd = torch.einsum("kpg,kbg->kbp", pc, cd[:, lo:hi])
                 out[:, lo:hi, :m] += torch.einsum("kbp,pq,kqg->kbg", bu, dij, p) * mask
                 out[:, lo:hi, m:] += torch.einsum("kbp,pq,kqg->kbg", bd, dij, p) * mask
+        if self.metagga_op is not None:  # meta-GGA −½∇·(M∇) generalized-KS term
+            out = out + self.metagga_op(c)
         return out
 
 
@@ -208,16 +222,18 @@ def _build_nc_mixer(g2_vec, ng, nonmagnetic, mixing_alpha, mag_mixing_alpha,
 
 
 def _solve_spinor_bands(bk, grid, v_r, b_xc, projs_b, q_so, dij_so, coeffs, t2,
-                        mask2, tol_eff, mixed_precision, mp_crossover):
+                        mask2, tol_eff, mixed_precision, mp_crossover,
+                        metagga_op=None):
     """Diagonalize the spinor Hamiltonian for one iteration at diagonalization
     tolerance tol_eff (optional fp32 draft with an fp64 spinor renorm over the
     doubled 2·npw axis so the electron count stays conserved through mixing).
     Returns (eigs, coeffs, h); h is reused for the band-chunk size in the Pauli
-    density accumulation."""
+    density accumulation. metagga_op (meta-GGA) is the current v_τ operator."""
     use_low = mixed_precision and tol_eff > mp_crossover
     cdtype = CDTYPE_LOW if use_low else CDTYPE
     t2_solve = t2.to(RDTYPE_LOW) if use_low else t2
-    h = SpinorHamiltonian(bk, grid.shape, v_r, b_xc, projs_b, q=q_so, dij_so=dij_so)
+    h = SpinorHamiltonian(bk, grid.shape, v_r, b_xc, projs_b, q=q_so, dij_so=dij_so,
+                          metagga_op=metagga_op)
     dav = davidson_batched(h.apply, coeffs.to(cdtype), t2_solve, mask2, tol=tol_eff)
     eigs = dav.eigenvalues.to(RDTYPE)
     coeffs = dav.eigenvectors.to(CDTYPE)
@@ -254,9 +270,10 @@ def _nc_adaptive_backoff(adaptive, it, last_backoff, stall_window, adapt_mult,
 
 def _nc_energy_breakdown(coeffs, occ, t2, entropy_term, rho_out, m_out, q_so,
                          dij_so, projs_b, m_pw, vloc_g, e_ew, system, grid, xc,
-                         vol, nk):
+                         vol, nk, tau_up=None, tau_dn=None):
     """Per-iteration energy breakdown. The nonlocal term takes the SOC path
-    (q_so becp) or the scalar-relativistic per-spin (up/down) path. Returns
+    (q_so becp) or the scalar-relativistic per-spin (up/down) path. tau_up/tau_dn
+    (meta-GGA) are the local-frame per-spin τ from the current orbitals. Returns
     EnergyBreakdown."""
     rho_g_out = r_to_g(rho_out.to(CDTYPE))
     t_occ = (system.kweights[:, None] * occ).to(coeffs.real.dtype)
@@ -264,7 +281,8 @@ def _nc_energy_breakdown(coeffs, occ, t2, entropy_term, rho_out, m_out, q_so,
     e_h = hartree_energy(rho_g_out, grid.g2, vol)
     from gradwave.core.xc.noncollinear import energy_with_grid
 
-    e_xc = energy_with_grid(xc, rho_out, m_out, grid, rho_core=system.rho_core)
+    e_xc = energy_with_grid(xc, rho_out, m_out, grid, rho_core=system.rho_core,
+                            tau_up=tau_up, tau_dn=tau_dn)
     e_loc = local_energy(rho_g_out, vloc_g, vol)
     if q_so is not None:
         b_so = torch.einsum("kpg,kbg->kbp", q_so.conj(), coeffs)
@@ -282,14 +300,17 @@ def _nc_energy_breakdown(coeffs, occ, t2, entropy_term, rho_out, m_out, q_so,
 
 def _nc_effective_potential(xc, rho, m, grid, system, vloc_r, nonmagnetic,
                             constrain_dirs, constrain_lambda, constrain_mode,
-                            constrain_target_mag, atom_weights, vol):
+                            constrain_target_mag, atom_weights, vol,
+                            tau_up=None, tau_dn=None):
     """Per-iteration effective potential v_r and exchange field b_xc. Nonmagnetic
     zeros b_xc; otherwise an optional Ma-Dudarev constraining field is ADDED to
     b_xc after (never before) the nonmagnetic zeroing. One vxc_and_bxc autograd
-    call, unchanged. Returns (v_r, b_xc)."""
+    call, unchanged. tau_up/tau_dn (meta-GGA) are held fixed in that call — the
+    τ response is the separate 2×2 operator. Returns (v_r, b_xc)."""
     rho_g_box = r_to_g(rho.to(CDTYPE))
     v_h = g_to_r_box(hartree_potential_g(rho_g_box, grid.g2), real=True)
-    v_xc, b_xc, _ = vxc_and_bxc(xc, rho, m, grid, rho_core=system.rho_core)
+    v_xc, b_xc, _ = vxc_and_bxc(xc, rho, m, grid, rho_core=system.rho_core,
+                                tau_up=tau_up, tau_dn=tau_dn)
     if nonmagnetic:
         b_xc = torch.zeros_like(b_xc)
     elif constrain_dirs is not None:
@@ -305,6 +326,51 @@ def _nc_effective_potential(xc, rho, m, grid, system, vloc_r, nonmagnetic,
         b_xc = b_xc + torch.einsum("ai,axyz->ixyz", g, atom_weights)
     v_r = v_h + v_xc + vloc_r
     return v_r, b_xc
+
+
+def _bootstrap_spinor_tau(xc, coeffs, system, nbands, nk, bk, grid, vol, m_pw,
+                          device):
+    """Seed the KE-density-matrix (τ_0, τ⃗) from the initial spinors so iteration
+    1 has a valid τ for the τ-dependent v_xc and operator (refined immediately
+    from the diagonalized orbitals). (None, None) for non-meta-GGA — mirrors
+    scf.loop._bootstrap_tau on the doubled spinor axis."""
+    if not xc.needs_tau:
+        return None, None
+    nocc = max(int(round(system.n_electrons)), 1)  # spinor bands hold 1 e⁻ each
+    occ0 = torch.zeros(nk, nbands, dtype=RDTYPE, device=device)
+    occ0[:, :nocc] = 1.0
+    return spinor_tau_matrix_b(coeffs, occ0, system.kweights, bk, grid.shape,
+                               vol, m_pw)
+
+
+def _nc_metagga_step(xc, rho, m, grid, system, tau_scalar, tau_vec, nonmagnetic,
+                     bk, m_pw):
+    """Meta-GGA per-iteration τ machinery for the spinor loop, or (None,None),None
+    for LDA/GGA. From the stored KE-density-matrix (τ_0, τ⃗) — built from the
+    previous iteration's orbitals — and the current (ρ, m⃗):
+
+      * project τ into the local frame → (τ_up, τ_dn), held fixed in the
+        energy and v_xc/B⃗_xc autograd;
+      * form v_τ↑, v_τ↓ = ∂E_xc/∂τ_± and rotate them back to the 2×2 operator
+        fields (v_τ0, v_τ⃗); a nonmagnetic (m⃗ ≡ 0) run keeps only the scalar
+        block v_τ0 (mirroring the b_xc zeroing).
+
+    Returns ((τ_up, τ_dn), metagga_op)."""
+    if not xc.needs_tau:
+        return (None, None), None
+    tau_up, tau_dn = local_frame_tau(m, tau_scalar, tau_vec, xc.m_eps)
+    vtu, vtd = vtau_up_dn(xc, rho, m, grid, tau_up, tau_dn,
+                          rho_core=system.rho_core)
+    if nonmagnetic:
+        v0 = 0.5 * (vtu + vtd)
+        vvec = torch.zeros(3, *rho.shape, dtype=RDTYPE, device=rho.device)
+    else:
+        v0, vvec = tau_operator_fields(vtu, vtd, m, xc.m_eps)
+
+    def op(c, _v0=v0, _vv=vvec):
+        return spinor_metagga_tau_operator(c, _v0, _vv, bk, grid.shape, m_pw)
+
+    return (tau_up, tau_dn), op
 
 
 def _seed_nc_density(grid, system, mag_vec_init, device):
@@ -418,6 +484,13 @@ def scf_noncollinear(
     t2 = torch.cat([bk.t, bk.t], dim=-1)
     mask2 = torch.cat([bk.mask, bk.mask], dim=-1)
 
+    # meta-GGA (needs_tau): the KE-density matrix (τ_0, τ⃗) is an orbital field,
+    # NOT mixed — it is rebuilt each iteration from the current spinors and
+    # projected into the local frame at point of use. Bootstrap it from the seed
+    # so iteration 1 has a valid τ for the τ-dependent H (refined immediately).
+    tau_scalar, tau_vec = _bootstrap_spinor_tau(
+        xc, coeffs, system, nbands, nk, bk, grid, vol, m_pw, device)
+
     scheme = SCHEMES[smearing]
     e_free_prev, converged, history = None, False, []
     mu = 0.0
@@ -444,16 +517,20 @@ def scf_noncollinear(
 
     for it in range(1, max_iter + 1):
         t_it = time.perf_counter()
+        # meta-GGA: local-frame τ_± (held fixed in v_xc/B_xc) and the 2×2 v_τ
+        # operator, both from the stored (τ_0, τ⃗) and the current (ρ, m⃗).
+        (tau_up, tau_dn), metagga_op = _nc_metagga_step(
+            xc, rho, m, grid, system, tau_scalar, tau_vec, nonmagnetic, bk, m_pw)
         v_r, b_xc = _nc_effective_potential(
             xc, rho, m, grid, system, vloc_r, nonmagnetic, constrain_dirs,
             constrain_lambda, constrain_mode, constrain_target_mag, atom_weights,
-            vol)
+            vol, tau_up=tau_up, tau_dn=tau_dn)
 
         tol_eff = adaptive_diago_tol(it, history, diago_tol,
                                      system.n_electrons, schedule="linear")
         eigs, coeffs, h = _solve_spinor_bands(
             bk, grid, v_r, b_xc, projs_b, q_so, dij_so, coeffs, t2, mask2,
-            tol_eff, mixed_precision, mp_crossover)
+            tol_eff, mixed_precision, mp_crossover, metagga_op=metagga_op)
 
         mu = float(find_fermi(eigs, system.kweights, scheme, width,
                               system.n_electrons, degeneracy=1.0))
@@ -475,10 +552,22 @@ def scf_noncollinear(
             # eigensolver noise in m_out (mirror the b_xc zeroing above)
             m_out = torch.zeros_like(m_out)
 
+        # meta-GGA: rebuild the KE-density matrix (τ_0, τ⃗) from the NEW spinors
+        # (consistent with rho_out/m_out) for the energy, and carry it to the
+        # next iteration's H. τ rides the orbitals; it is never mixed.
+        if xc.needs_tau:
+            tau_scalar, tau_vec = spinor_tau_matrix_b(
+                coeffs, occ, system.kweights, bk, grid.shape, vol, m_pw)
+            tau_up_e, tau_dn_e = local_frame_tau(m_out, tau_scalar, tau_vec,
+                                                 xc.m_eps)
+        else:
+            tau_up_e = tau_dn_e = None
+
         # energies
         energies = _nc_energy_breakdown(
             coeffs, occ, t2, entropy_term, rho_out, m_out, q_so, dij_so, projs_b,
-            m_pw, vloc_g, e_ew, system, grid, xc, vol, nk)
+            m_pw, vloc_g, e_ew, system, grid, xc, vol, nk,
+            tau_up=tau_up_e, tau_dn=tau_dn_e)
         e_free = float(energies.free_energy)
 
         if nonmagnetic:  # m_out already pinned to 0 above (before E_xc)
@@ -541,6 +630,14 @@ def band_structure_nc(res: NCResult, xc: NoncollinearXC, kpts_frac,
     from gradwave.pseudo.kb import beta_form_factors
     from gradwave.solvers.davidson import davidson_batched_ms
 
+    if getattr(xc, "needs_tau", False):
+        # The spinor τ operator needs the converged orbitals AND their
+        # occupations to rebuild v_τ along an arbitrary k-path; NCResult carries
+        # coeffs but not occupations, so meta-GGA spinor bands are not wired here
+        # yet. The SCF itself (scf_noncollinear) is fully τ-aware.
+        raise NotImplementedError(
+            "non-collinear meta-GGA band structure is not wired yet (the τ "
+            "operator needs the converged occupations); the SCF supports it.")
     system = res.system
     grid = system.grid
     device = res.rho.device
