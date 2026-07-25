@@ -10,42 +10,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Detect whether this change can affect test/lint outcomes. Docs-, benchmark-,
+  # Decide whether this change can affect test/lint outcomes. Docs-, benchmark-,
   # and notebook-only PRs execute no product code, so the ~50-min standard tier
-  # is pure waste on them. `inert_only` is true iff EVERY changed file matches an
-  # inert pattern below (predicate-quantifier: every). It fails safe: any file
-  # outside the inert set — a new top-level file, a workflow edit, pyproject,
-  # src/, tests/ — flips inert_only to false and runs the full suite. The `ci-ok`
-  # gate still always runs and reports, so the required check is never left
-  # pending on a skipped PR.
+  # is pure waste on them. `run_tests` is 'true' unless EVERY changed file is
+  # inert (matches one of the inert path globs). Fails safe: any file outside the
+  # inert set — a new top-level file, a workflow edit, pyproject, src/, tests/ —
+  # sets run_tests=true and runs the full suite. The `ci-ok` gate still always
+  # runs and reports, so the required check is never left pending on a skip.
   #
-  # NB: an only-negated filter (`!docs/**`, `!benchmarks/**`, ...) does NOT work
-  # here — a benchmarks/ file matches `!docs/**` (it is "not in docs"), so ORing
-  # the negations makes every path match. The `every` quantifier over positive
-  # inert globs is the correct idiom.
+  # Done in plain bash rather than dorny/paths-filter: an only-negated filter
+  # (`!docs/**`...) matches everything (a benchmarks file is "not in docs"), and
+  # its `predicate-quantifier: every` requires a file to match ALL patterns at
+  # once (impossible across disjoint dirs) — both silently never skip. An
+  # explicit "is every changed file inert?" loop is unambiguous and testable.
   changes:
     runs-on: ubuntu-latest
     outputs:
-      inert_only: ${{ steps.filter.outputs.inert }}
+      run_tests: ${{ steps.decide.outputs.run_tests }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
         with:
-          predicate-quantifier: 'every'
-          filters: |
-            inert:
-              - 'docs/**'
-              - 'benchmarks/**'
-              - 'ideas/**'
-              - '.claude/**'
-              - '**/*.md'
-              - 'LICENSE'
-              - '.gitignore'
+          fetch-depth: 0
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            files=$(git diff --name-only "$BASE_SHA...HEAD")
+          elif [ -n "$BEFORE_SHA" ] && git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
+            files=$(git diff --name-only "$BEFORE_SHA" HEAD)
+          else
+            files="__run_all__"   # first push / unknown base: fail safe
+          fi
+          run=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              docs/*|benchmarks/*|ideas/*|.claude/*|*.md|LICENSE|.gitignore) ;;
+              *) run=true; break ;;
+            esac
+          done <<< "$files"
+          echo "changed files:"; echo "$files"
+          echo "run_tests=$run"
+          echo "run_tests=$run" >> "$GITHUB_OUTPUT"
 
   lint:
     needs: changes
-    if: ${{ needs.changes.outputs.inert_only != 'true' }}
+    if: ${{ needs.changes.outputs.run_tests == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -69,7 +82,7 @@ jobs:
 
   test:
     needs: changes
-    if: ${{ needs.changes.outputs.inert_only != 'true' }}
+    if: ${{ needs.changes.outputs.run_tests == 'true' }}
     # The standard tier is fp64/CPU-bound; on the free public `ubuntu-latest`
     # runner a single job takes ~90 min. Shard it across parallel runners
     # (public repos get generous free concurrency) so wall-clock is ~1/N.
@@ -112,7 +125,7 @@ jobs:
         run: |
           lint='${{ needs.lint.result }}'
           test='${{ needs.test.result }}'
-          echo "inert_only=${{ needs.changes.outputs.inert_only }}  lint=$lint  test=$test"
+          echo "run_tests=${{ needs.changes.outputs.run_tests }}  lint=$lint  test=$test"
           for result in "$lint" "$test"; do
             case "$result" in
               success|skipped) ;;
