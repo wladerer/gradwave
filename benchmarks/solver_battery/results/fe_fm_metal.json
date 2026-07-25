@@ -1,0 +1,62 @@
+{
+  "system": "fe_fm_metal",
+  "cls": "ferromagnetic metal",
+  "formula": "Fe",
+  "baseline_solver": "davidson",
+  "solvers": {
+    "davidson": {
+      "converged": true,
+      "scf_iters": 14,
+      "wall_s": 48.1,
+      "eigh_s": 2.491,
+      "eigh_share": 0.0518,
+      "eigh_calls": 336,
+      "final_res": 8.526730272828175e-09,
+      "energy_eV": -3209.665270433443,
+      "dE_vs_baseline_eV": 0.0,
+      "energy_match": true,
+      "mag_total": 3.295982413760172,
+      "error": null
+    },
+    "chebyshev": {
+      "converged": true,
+      "scf_iters": 14,
+      "wall_s": 1703.924,
+      "eigh_s": 1.81,
+      "eigh_share": 0.0011,
+      "eigh_calls": 1032,
+      "final_res": 2.7584355098871977e-09,
+      "energy_eV": -3209.665270433423,
+      "dE_vs_baseline_eV": 2.000888343900442e-11,
+      "energy_match": true,
+      "mag_total": 3.295982413761656,
+      "error": null
+    }
+  },
+  "stats": {
+    "nk": 63,
+    "nbands": 16,
+    "npw_max": 822,
+    "n_electrons": 16.0
+  },
+  "meta": {
+    "timestamp": "2026-07-25 01:53 UTC",
+    "host": "nixos",
+    "torch": "2.12.1+cu130",
+    "threads": 8,
+    "solvers": [
+      "davidson",
+      "chebyshev"
+    ],
+    "systems": [
+      "si_insulator",
+      "mgo_insulator",
+      "al_metal",
+      "cu_metal",
+      "fe_fm_metal",
+      "cr_afm_metal",
+      "bi_heavy"
+    ],
+    "E_match_tol_eV": 1e-06
+  }
+}

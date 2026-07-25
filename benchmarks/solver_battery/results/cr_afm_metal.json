@@ -1,0 +1,62 @@
+{
+  "system": "cr_afm_metal",
+  "cls": "antiferromagnet",
+  "formula": "Cr2",
+  "baseline_solver": "davidson",
+  "solvers": {
+    "davidson": {
+      "converged": true,
+      "scf_iters": 20,
+      "wall_s": 65.093,
+      "eigh_s": 4.658,
+      "eigh_share": 0.0716,
+      "eigh_calls": 537,
+      "final_res": 7.2145303059336614e-09,
+      "energy_eV": -4552.537726313649,
+      "dE_vs_baseline_eV": 0.0,
+      "energy_match": true,
+      "mag_total": 2.431236652000735e-13,
+      "error": null
+    },
+    "chebyshev": {
+      "converged": true,
+      "scf_iters": 20,
+      "wall_s": 787.805,
+      "eigh_s": 1.284,
+      "eigh_share": 0.0016,
+      "eigh_calls": 638,
+      "final_res": 8.496682365495424e-09,
+      "energy_eV": -4552.53772631365,
+      "dE_vs_baseline_eV": 9.094947017729282e-13,
+      "energy_match": true,
+      "mag_total": 3.574283269358603e-14,
+      "error": null
+    }
+  },
+  "stats": {
+    "nk": 36,
+    "nbands": 24,
+    "npw_max": 840,
+    "n_electrons": 28.0
+  },
+  "meta": {
+    "timestamp": "2026-07-25 01:53 UTC",
+    "host": "nixos",
+    "torch": "2.12.1+cu130",
+    "threads": 8,
+    "solvers": [
+      "davidson",
+      "chebyshev"
+    ],
+    "systems": [
+      "si_insulator",
+      "mgo_insulator",
+      "al_metal",
+      "cu_metal",
+      "fe_fm_metal",
+      "cr_afm_metal",
+      "bi_heavy"
+    ],
+    "E_match_tol_eV": 1e-06
+  }
+}
