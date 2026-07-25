@@ -21,16 +21,21 @@ from ase.calculators.calculator import Calculator, all_changes
 
 from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.core.xc.pbe import PBE
-from gradwave.core.xc.r2scan import R2SCAN
+from gradwave.core.xc.r2scan import R2SCAN, SpinR2SCAN
+from gradwave.core.xc.spin import LSDA_PW92, SpinPBE
 from gradwave.dtypes import RDTYPE
 from gradwave.postscf.forces import forces as hf_forces
 from gradwave.scf.loop import scf, setup_system
 
 _XC = {"lda": LDA_PW92, "pbe": PBE, "r2scan": R2SCAN}
+# Spin-polarized (nspin=2) counterparts, keyed identically — same registry the
+# api's _spin_setup uses, so the calculator's collinear path matches task: scf.
+_SPIN_XC = {"lda": LSDA_PW92, "pbe": SpinPBE, "r2scan": SpinR2SCAN}
 
 
 class GradWave(Calculator):
-    implemented_properties = ["energy", "free_energy", "forces", "stress"]
+    implemented_properties = ["energy", "free_energy", "forces", "stress",
+                              "magmom"]
 
     def __init__(
         self,
@@ -45,7 +50,11 @@ class GradWave(Calculator):
         width: float = 0.1,
         nbands: int | None = None,
         use_symmetry: bool = True,
-        nspin: int = 1,  # 1 only: nspin=2 forces are not implemented (see below)
+        nspin: int = 1,  # 1 (restricted) or 2 (collinear); auto-bumps to 2 when
+        # the atoms carry nonzero initial magnetic moments (see _resolve_spin)
+        tot_magnetization: float | None = None,  # fix M=N↑−N↓ for a no-smearing
+        # nspin=2 run; None → derive from the initial moments (smearing="none")
+        # or let the shared Fermi level find it when a smearing is set
         max_iter: int = 100,
         etol: float = 1e-8,
         rhotol: float = 1e-7,
@@ -63,18 +72,18 @@ class GradWave(Calculator):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        if nspin != 1:
-            # forces/stress (the reason this calculator exists — relaxation)
-            # have no collinear-spin implementation yet, so honoring nspin=2
-            # here would silently fall over inside hf_forces
+        if nspin not in (1, 2):
+            # collinear spin (nspin=2) threads through the norm-conserving SCF,
+            # forces, and stress below; noncollinear/SOC has no calculator path
             raise ValueError(
-                "GradWave calculator supports nspin=1 only; collinear-spin "
-                "forces are not implemented (run task: scf via the api for a "
-                "single-point nspin=2 energy)")
+                "GradWave supports nspin=1 (spin-restricted) and nspin=2 "
+                "(collinear spin); noncollinear/spin-orbit has no calculator "
+                "path yet (use task: magnetism via the api)")
         self.parameters.update(
             dict(ecut=ecut, ecutrho=ecutrho, xc=xc, kpts=tuple(kpts),
                  kshift=tuple(kshift), smearing=smearing, width=width,
                  nbands=nbands, use_symmetry=use_symmetry, nspin=nspin,
+                 tot_magnetization=tot_magnetization,
                  max_iter=max_iter, etol=etol, rhotol=rhotol,
                  diago_tol=diago_tol, mixing_scheme=mixing_scheme,
                  mixing_alpha=mixing_alpha, mixing_history=mixing_history,
@@ -111,16 +120,36 @@ class GradWave(Calculator):
         self._verbose = verbose
         self.last_result = None
 
-    def _make_xc(self):
+    def _make_xc(self, nspin: int = 1):
         """Instantiate the XC functional, opting into the compiled real-valued
-        energy_density path when compile_xc is set.
+        energy_density path when compile_xc is set. nspin=2 selects the
+        spin-polarized (LSDA / SpinPBE / SpinR2SCAN) variant so the collinear
+        SCF, forces, and stress all see (ρ↑, ρ↓).
         The functional degrades to eager on any toolchain gap, so this is safe
         to leave on. It pays only for XC-heavy, CPU-bound work (PAW one-center
         loop, response HVPs, learned-XC training), not a plain FFT-bound SCF."""
-        xc = _XC[self.parameters["xc"]]()
+        xc = (_SPIN_XC if nspin == 2 else _XC)[self.parameters["xc"]]()
         if self._compile_xc:
             xc.enable_compile()
         return xc
+
+    def _resolve_spin(self, atoms, system):
+        """Effective (nspin, start_mag, tot_magnetization) from ASE's initial
+        magnetic moments. nspin=2 whenever the user asked for it (nspin=2) or an
+        atom carries a nonzero initial moment; the per-atom μ_B moments become
+        the polarization fractions scf's start_mag expects (m = μ / Z_valence),
+        and their sum fixes the spin moment for a no-smearing (fixed-spin-moment)
+        run — with a smearing the shared Fermi level finds the moment instead."""
+        magmoms = np.asarray(atoms.get_initial_magnetic_moments(), dtype=float)
+        if self.parameters["nspin"] != 2 and not np.any(magmoms != 0.0):
+            return 1, None, None
+        z_val = system.charges.detach().cpu().numpy().astype(float)
+        start_mag = [m / z if z > 0 else 0.0
+                     for m, z in zip(magmoms, z_val, strict=True)]
+        tot_mag = self.parameters["tot_magnetization"]
+        if tot_mag is None and self.parameters["smearing"] == "none":
+            tot_mag = float(magmoms.sum())
+        return 2, start_mag, None if tot_mag is None else float(tot_mag)
 
     def _upf(self, symbol):
         # shared loader (NC / USPP-PAW detection) lives in api; keep the
@@ -227,7 +256,7 @@ class GradWave(Calculator):
         self._system, self._system_key = system, key
         return system
 
-    def _warm_start(self, system):
+    def _warm_start(self, system, nspin=1):
         """Seed the next solve from the previous converged state (same
         FFT grid — positions-only moves during a relaxation/MD qualify),
         with QE-style atomic extrapolation when the atoms moved: the
@@ -235,11 +264,15 @@ class GradWave(Calculator):
         bonding remainder is reused. Plain reuse is nearly worthless
         under motion (measured: 8 vs 9 iterations for a 6 mÅ move —
         the seed error is first-order in displacement) while the
-        extrapolated seed keeps the ~2-iteration warm restart."""
+        extrapolated seed keeps the ~2-iteration warm restart.
+
+        Restricted to nspin=1: the extrapolated seed below builds a single
+        (total-density) channel, so a collinear-spin run cold-starts rather
+        than reuse a mismatched seed."""
         from gradwave.scf.guess import sad_density
 
         prev = self.last_result
-        if prev is None:
+        if prev is None or nspin != 1 or getattr(prev, "nspin", 1) != 1:
             return None
         is_uspp = prev.formalism == "uspp"
         prev_sys = prev.system
@@ -269,31 +302,40 @@ class GradWave(Calculator):
             self._calculate_uspp(properties)
             return
         system = self._get_system(self.atoms)
+        # collinear-spin channel from the atoms' initial moments (nspin=1 when
+        # unmagnetized); start_mag/tot_magnetization seed and (optionally) pin M
+        nspin, start_mag, tot_mag = self._resolve_spin(self.atoms, system)
+        xc = self._make_xc(nspin)
         # NC scf takes an int mixing_history (None isn't accepted); omit it so
         # the solver's own default stands when the user left it unset
         mix_kw = ({} if p["mixing_history"] is None
                   else {"mixing_history": p["mixing_history"]})
         res = scf(
-            system, self._make_xc(),
+            system, xc,
             smearing=p["smearing"], width=p["width"],
             max_iter=p["max_iter"], etol=p["etol"], rhotol=p["rhotol"],
             mixing_alpha=p["mixing_alpha"], kerker=p["mixing_kerker"],
             diago_tol=p["diago_tol"], verbose=self._verbose,
             eigensolver=p["eigensolver"], precond=p["precond"],
-            start_from=self._warm_start(system), **mix_kw,
+            nspin=nspin, start_mag=start_mag, tot_magnetization=tot_mag,
+            start_from=self._warm_start(system, nspin), **mix_kw,
         )
         if not res.converged:
             raise RuntimeError("gradwave SCF did not converge")
         self.last_result = res
         self.results["energy"] = float(res.energies.free_energy)  # consistent forces
         self.results["free_energy"] = float(res.energies.free_energy)
+        if nspin == 2:
+            # total spin moment M = N↑−N↓ (μ_B); cheap scalar off the result
+            self.results["magmom"] = float(res.mag_total)
         # xc is used only when the system carries an NLCC core charge (the
-        # core-correction force term); ignored for valence-only species.
-        self.results["forces"] = hf_forces(res, xc=self._make_xc()).cpu().numpy()
+        # core-correction force term, spin-resolved for nspin=2); ignored for
+        # valence-only species. Reuse the (spin-matched) functional above.
+        self.results["forces"] = hf_forces(res, xc=xc).cpu().numpy()
         if "stress" in properties:
             from gradwave.postscf.stress import stress as hf_stress
 
-            sig = hf_stress(res, self._make_xc()).cpu().numpy()
+            sig = hf_stress(res, xc).cpu().numpy()
             # ASE Voigt order (xx, yy, zz, yz, xz, xy); ASE's convention is
             # +(1/Ω)∂E/∂ε, same as ours
             self.results["stress"] = np.array([
@@ -336,6 +378,17 @@ class GradWave(Calculator):
         from gradwave.scf.uspp import scf_uspp
 
         p = self.parameters
+        if p["nspin"] == 2 or np.any(
+                self.atoms.get_initial_magnetic_moments() != 0.0):
+            # collinear spin through the calculator is norm-conserving only for
+            # now; the USPP/PAW spin SCF + PAW spin forces/stress exist (api
+            # task: scf) but are not wired here or covered by a same-commit
+            # oracle, so keep this narrowly gated rather than silently wrong.
+            raise NotImplementedError(
+                "nspin=2 through the GradWave calculator is norm-conserving "
+                "only; USPP/PAW collinear spin is not wired to the calculator "
+                "yet (run task: scf via the api for a single-point nspin=2 "
+                "USPP/PAW energy)")
         if p["eigensolver"] != "davidson":
             raise ValueError(
                 "eigensolver='chebyshev' is norm-conserving only; the USPP/PAW "
