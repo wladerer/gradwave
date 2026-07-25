@@ -29,7 +29,32 @@ from gradwave.grids import reciprocal_cell
 # error is the sum over all excluded shells — 4.8 leaves ~1e-3 eV errors in
 # ionic crystals. 8.0 is machine-precision converged (verified vs Madelung
 # constants for all η in [0.3, 1.5]) and still cheap for unit-cell systems.
+# The single-term bound is only meaningful once the real-space sphere is padded
+# by the largest pair separation (see _max_pair_offset): the sum decays in the
+# pair distance |d|, not the lattice-vector length |R|, so on large/anisotropic
+# cells an unpadded |R|≤rcut cutoff drops near pairs and leaks η-dependence.
 _ACC = 8.0
+
+
+def _max_pair_offset(positions: np.ndarray) -> float:
+    """Largest raw separation max_{a,b} |τ_a − τ_b| [Å].
+
+    The real-space sum decays with the *pair* distance |d| = |τ_a − τ_b + R|,
+    not the lattice-vector length |R|. To include every pair with |d| ≤ rcut we
+    need every image with |R| ≤ |d| + |τ_a − τ_b| ≤ rcut + max|τ_a − τ_b|,
+    otherwise an image with |R| just over rcut but |d| < rcut (which happens on
+    large, anisotropic cells whose separations rival rcut) is silently dropped
+    and its erfc(√η·|d|) — far from the intended erfc(√η·rcut)=erfc(_ACC) — leaks
+    an η-dependent error. The raw (un-wrapped) offset is a valid pad for any
+    input; for in-cell positions it is at most the cell diagonal, so the image
+    list grows by only a handful of shells. This is plain-number setup off the
+    autograd graph.
+    """
+    p = np.asarray(positions, dtype=np.float64)
+    if p.shape[0] < 2:
+        return 0.0
+    d = p[:, None, :] - p[None, :, :]
+    return float(np.sqrt(np.einsum("ijk,ijk->ij", d, d)).max())
 
 
 def _image_vectors(cell: np.ndarray, rcut: float) -> np.ndarray:
@@ -72,18 +97,22 @@ def ewald_energy(
     rcut = _ACC / sqrt_eta
     gcut = 2.0 * sqrt_eta * _ACC
 
+    # Real-space images are filtered by |R|, but the sum decays with the pair
+    # distance |d| = |τ_a − τ_b + R|; pad the sphere by the largest separation
+    # so every pair with |d| ≤ rcut is captured (see _max_pair_offset).
+    r_offset = _max_pair_offset(positions.detach().cpu().numpy())
+
     dev = positions.device
-    images = torch.as_tensor(_image_vectors(cell, rcut), dtype=RDTYPE, device=dev)
+    images = torch.as_tensor(_image_vectors(cell, rcut + r_offset), dtype=RDTYPE, device=dev)
     gvecs = torch.as_tensor(_g_vectors(cell, gcut), dtype=RDTYPE, device=dev)
     z = charges.to(RDTYPE)
 
     # real space: pair separations (na, na, nR, 3)
     d = positions[:, None, None, :] - positions[None, :, None, :] + images[None, None, :, :]
     na = positions.shape[0]
-    self_pair = (
-        (torch.eye(na, dtype=torch.bool, device=dev))[:, :, None]
-        & (torch.linalg.norm(images, dim=-1) < 1e-12)[None, None, :]
-    )
+    self_pair = (torch.eye(na, dtype=torch.bool, device=dev))[:, :, None] & (
+        torch.linalg.norm(images, dim=-1) < 1e-12
+    )[None, None, :]
     # shift the (masked-out) self pairs to |d| = 1 BEFORE the norm: the
     # norm at d = 0 has NaN second derivatives even when the entries are
     # masked afterward (the dead branch poisons double backward — the
@@ -102,10 +131,9 @@ def ewald_energy(
     phase = positions @ gvecs.T  # (na, ng)
     s_re = (z[:, None] * torch.cos(phase)).sum(0)
     s_im = (z[:, None] * torch.sin(phase)).sum(0)
-    e_recip = (
-        (2.0 * math.pi * E2 / omega)
-        * ((s_re**2 + s_im**2) * torch.exp(-g2 / (4.0 * eta)) / g2).sum()
-    )
+    e_recip = (2.0 * math.pi * E2 / omega) * (
+        (s_re**2 + s_im**2) * torch.exp(-g2 / (4.0 * eta)) / g2
+    ).sum()
 
     e_self = -E2 * sqrt_eta / math.sqrt(math.pi) * (z**2).sum()
     e_bg = -math.pi * E2 / (2.0 * eta * omega) * z.sum() ** 2
