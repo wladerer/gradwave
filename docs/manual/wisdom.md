@@ -280,12 +280,15 @@ defect, which the [Performance](performance.md) page works through in full.
   smearing widths 0.02 to 0.05 eV and start moments up to 0.8 μB. A magnetic-IBZ comparison
   then degenerates to nonmagnetic and validates while testing nothing. SpinPBE on the same
   PBE pseudo holds 3.1 μB.
-- The collinear-magnetic (Shubnikov) fold reaches QE's magnetic-symmetry k-count exactly
-  on real AFM minerals. NiO type-II folds 112 k to 32 (3.5x), hematite 36 to 20, and
-  Cr₂O₃ 36 to 16. It engages only with `magmoms` set and `collinear_magnetic` on an
-  unshifted mesh. Plain `use_symmetry` on an AFM drops to the time-reversal-only reduction
-  and keeps a near-full mesh, because the sublattice swap is a symmetry of the crystal but
-  not of either spin channel.
+- The collinear-magnetic (Shubnikov) fold reduces the k-mesh on real AFM minerals, and how
+  far it folds tracks the magnetic space group. NiO type-II folds 112 k to 32, which is QE's
+  magnetic-symmetry count exactly. On the corundum R-3c antiferromagnets gradwave folds less
+  than QE, hematite 36 to 20 against QE's 13 and Cr₂O₃ 36 to 16 against 13. The energies still
+  agree with QE to 0.02 meV/atom, so this is a less complete fold rather than a wrong one, and
+  the missing operations are a k-count reduction gradwave does not yet capture. The fold engages only
+  with `magmoms` set and `collinear_magnetic` on an unshifted mesh. Plain `use_symmetry` on an
+  AFM drops to the time-reversal-only reduction and keeps a near-full mesh, because the
+  sublattice swap is a symmetry of the crystal but not of either spin channel.
 
 ## Response, adjoints, and autograd
 
