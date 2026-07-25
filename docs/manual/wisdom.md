@@ -105,6 +105,15 @@ defect, which the [Performance](performance.md) page works through in full.
   The path is correct to machine precision and stands as the substrate for a GPU (cuFFT)
   re-measure and for the memory-ceiling angle, where the real-space fields are half the
   size, but it is not a CPU speedup as built.
+- Cut the Ewald real-space sum on the pair distance, not the lattice-vector length. The
+  erfc decay is governed by $|d| = |\tau_a - \tau_b + R|$, so filtering images by $|R| \le
+  r_\text{cut}$ drops pairs whose $|d| < r_\text{cut}$ while $|R|$ slightly exceeds it, and
+  their erfc is nowhere near the intended $\text{erfc}(\text{\_ACC})$. On a low-symmetry
+  cell the auto-$\eta$ is small and $r_\text{cut}$ shrinks to the scale of the intra-cell
+  separations, so the dropped shells leave the real and reciprocal sums $\eta$-dependent.
+  Gather images to $|R| \le r_\text{cut} + \max|\tau_a - \tau_b|$. A cubic cell has tiny
+  separations ($r_\text{cut} \approx |d|$) and hides it, which is why the NaCl and CsCl
+  tests passed while a triclinic cell drifted 4e-5 eV/atom across $\eta$ before the fix.
 
 ## Eigensolvers
 
@@ -135,6 +144,16 @@ defect, which the [Performance](performance.md) page works through in full.
   energy jumps and a frozen residual that mixer resets do not touch. The rescue is
   discarding the warm start and re-solving from salted seeds without feeding the garbage
   to the mixer.
+- Davidson is the only CPU-worthy block solver. On the seven-system fp64 battery, at
+  identical SCF iteration counts and bit-identical energies, CheFSI runs 10 to 35 times
+  slower than batched Davidson and LOBPCG 4 to 8, worst on the metals (CheFSI 35x on FM
+  Fe, LOBPCG 8.2x on Cu). Both carry a lower eigh share than Davidson, near 2 percent
+  against Davidson's 4 to 13, which is the signature. They trade the Rayleigh-Ritz eigh
+  for many more Hamiltonian applies, and the FFT-bound H-apply is about 90 percent of the
+  SCF, so the trade loses. eigh never exceeds 13 percent of wall time and drops to 5 to 7
+  on the magnetic and heavy cases, so the eigensolver does not set CPU wall time. A block
+  solver only pays off where the eigh share is large, which is not the CPU regime.
+  LOBPCG's $[X, W, P]$ block applies H to three times the vectors each iteration.
 
 ## SCF and mixing
 
@@ -256,6 +275,17 @@ defect, which the [Performance](performance.md) page works through in full.
   small residual rather than converge tightly, though the moment values stay stable. Raise
   the penalty $\lambda$. A collinear axis (parallel or antiparallel) converges far more
   easily than an oblique one.
+- Match the XC functional to the pseudopotential, or the moment quenches without warning.
+  Driving bcc Cr with LSDA against a PBE pseudo collapses the moment to zero, confirmed for
+  smearing widths 0.02 to 0.05 eV and start moments up to 0.8 μB. A magnetic-IBZ comparison
+  then degenerates to nonmagnetic and validates while testing nothing. SpinPBE on the same
+  PBE pseudo holds 3.1 μB.
+- The collinear-magnetic (Shubnikov) fold reaches QE's magnetic-symmetry k-count exactly
+  on real AFM minerals. NiO type-II folds 112 k to 32 (3.5x), hematite 36 to 20, and
+  Cr₂O₃ 36 to 16. It engages only with `magmoms` set and `collinear_magnetic` on an
+  unshifted mesh. Plain `use_symmetry` on an AFM drops to the time-reversal-only reduction
+  and keeps a near-full mesh, because the sublattice swap is a symmetry of the crystal but
+  not of either spin channel.
 
 ## Response, adjoints, and autograd
 
