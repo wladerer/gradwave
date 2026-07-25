@@ -22,7 +22,7 @@ import torch
 
 from gradwave.core.density import sigma_from_rho
 from gradwave.core.energies.ewald import ewald_energy
-from gradwave.core.energies.hartree import hartree_potential_g
+from gradwave.core.energies.hartree import hartree_potential_r
 from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.energies.total import EnergyBreakdown, total_energy
 from gradwave.core.fftbox import g_to_r_box, r_to_g
@@ -383,8 +383,9 @@ def effective_potentials(
     grid = system.grid
     nspin = len(rho_s)
     rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
-    v_h_r = g_to_r_box(
-        hartree_potential_g(r_to_g(rho_tot.to(CDTYPE)), grid.g2), real=True)
+    # Real density → real Hartree potential in one rfft round trip (half the
+    # transform work of the full-complex fftn/ifftn; bit-exact to it).
+    v_h_r = hartree_potential_r(rho_tot, grid.g2)
     core = system.rho_core
     if nspin == 1:
         v_xc_r, _ = vxc_potential(
