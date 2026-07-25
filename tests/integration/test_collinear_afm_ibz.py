@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 import torch
 
-from gradwave.core.xc.spin import LSDA_PW92
+from gradwave.core.xc.spin import SpinPBE
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
 from tests.helpers import PSEUDOS, RY
@@ -34,8 +34,11 @@ def _cr_afm_run(mesh, ecut, **setup_kw):
     pos = np.array([[0.0, 0, 0], [0.5, 0.5, 0.5]]) @ cell
     system = setup_system(cell, pos, [0, 0], [cr], ecut=ecut, kmesh=mesh,
                           nbands=22, **setup_kw)
-    res = scf(system, LSDA_PW92(), smearing="gaussian", width=0.1, nspin=2,
-              start_mag=[0.4, -0.4], etol=1e-10, rhotol=1e-9, max_iter=250,
+    # PBE (matching the PBE pseudo) sustains bcc Cr's itinerant AFM moment;
+    # LDA quenches it here (m→0), which would silently degrade the fold to the
+    # ordinary non-magnetic one (ρ↑=ρ↓) and never exercise the spin swap.
+    res = scf(system, SpinPBE(), smearing="gaussian", width=0.1, nspin=2,
+              start_mag=[0.6, -0.6], etol=1e-10, rhotol=1e-9, max_iter=250,
               verbose=False)
     assert res.converged
     return (float(res.energies.free_energy), float(res.mag_abs),
@@ -58,7 +61,8 @@ def test_cr_afm_collinear_magnetic_ibz():
     # (b) energy per atom and the AFM order parameter match the full mesh
     assert abs(e_full - e_mag) / 2 < 1e-6, f"|dE/atom| = {abs(e_full-e_mag)/2:.2e} eV"
     assert abs(m_full - m_mag) < 1e-4, f"|dM| = {abs(m_full-m_mag):.2e} µB"
-    # genuinely magnetic (Cr AFM ~ 1 µB/atom), not a spurious null result
+    # genuinely magnetic (PBE bcc Cr AFM sustains a large itinerant moment),
+    # not a spurious null result that would trivialize the spin-swap fold
     assert m_mag > 0.5
 
 
