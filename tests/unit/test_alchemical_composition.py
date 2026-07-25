@@ -17,11 +17,14 @@ import torch
 
 from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.local_pp import local_energy, local_potential_g
+from gradwave.core.energies.nl_pp import nonlocal_energy
+from gradwave.core.hamiltonian import becp, projectors
 from gradwave.dtypes import RDTYPE
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.alchemical import (
     alchemical_charges,
     blend_local_table,
+    blend_projector_data,
     endpoint_local_tables,
     per_atom_local_tables,
 )
@@ -126,3 +129,57 @@ def test_local_potential_gradient_vs_fd():
     g_fd = (e_loc(torch.tensor(lam0 + h, dtype=RDTYPE)).item()
             - e_loc(torch.tensor(lam0 - h, dtype=RDTYPE)).item()) / (2 * h)
     assert abs(g_ad - g_fd) < 1e-5 * max(1.0, abs(g_fd)), (g_ad, g_fd)
+
+
+# --------------------------------------------------------------------------- #
+#  phase 2: the nonlocal (KB) projector channel                               #
+# --------------------------------------------------------------------------- #
+def _one_atom_pd(element: str):
+    """Gamma-point ProjectorData and Bloch coeffs for a single `element` atom in
+    a fixed cubic cell, so Si and Ge share the same k-sphere."""
+    cell = 5.0 * np.eye(3)
+    pos = np.zeros((1, 3))
+    upf = parse_upf(DG / f"{element}.upf")
+    system = setup_system(cell, pos, [0], [upf], ecut=16 * RY, kmesh=(1, 1, 1))
+    return system.proj_data[0], system.positions
+
+
+def _e_nl(pd, pos, c):
+    p = projectors(pd, pos)
+    b = becp(p, c)
+    occ = torch.ones(1, c.shape[0], dtype=RDTYPE)
+    return nonlocal_energy([b], pd.dij_full, occ, torch.ones(1, dtype=RDTYPE))
+
+
+def test_nonlocal_blend_endpoints_are_exact():
+    pd_si, pos = _one_atom_pd("Si")
+    pd_ge, _ = _one_atom_pd("Ge")
+    torch.manual_seed(1)
+    c = torch.randn(4, pd_si.kpg.shape[0], dtype=torch.complex128)
+    e_si, e_ge = _e_nl(pd_si, pos, c), _e_nl(pd_ge, pos, c)
+    e0 = _e_nl(blend_projector_data(pd_si, pd_ge, torch.tensor(0.0, dtype=RDTYPE)), pos, c)
+    e1 = _e_nl(blend_projector_data(pd_si, pd_ge, torch.tensor(1.0, dtype=RDTYPE)), pos, c)
+    assert abs(e0.item() - e_si.item()) < 1e-9 * max(1.0, abs(e_si.item()))
+    assert abs(e1.item() - e_ge.item()) < 1e-9 * max(1.0, abs(e_ge.item()))
+
+
+def test_nonlocal_blend_gradient_vs_fd():
+    pd_si, pos = _one_atom_pd("Si")
+    pd_ge, _ = _one_atom_pd("Ge")
+    torch.manual_seed(2)
+    c = torch.randn(4, pd_si.kpg.shape[0], dtype=torch.complex128)
+
+    def e(x):
+        return _e_nl(blend_projector_data(pd_si, pd_ge, x), pos, c)
+
+    lam0 = 0.4
+    lam = torch.tensor(lam0, dtype=RDTYPE, requires_grad=True)
+    e(lam).backward()
+    g_ad = lam.grad.item()
+    h = 1e-5
+    g_fd = (e(torch.tensor(lam0 + h, dtype=RDTYPE)).item()
+            - e(torch.tensor(lam0 - h, dtype=RDTYPE)).item()) / (2 * h)
+    assert abs(g_ad - g_fd) < 1e-6 * max(1.0, abs(g_fd)), (g_ad, g_fd)
+    # the alchemical nonlocal derivative is E_nl(B) - E_nl(A) by linearity in D
+    e_si, e_ge = _e_nl(pd_si, pos, c), _e_nl(pd_ge, pos, c)
+    assert abs(g_ad - (e_ge.item() - e_si.item())) < 1e-7 * max(1.0, abs(g_ad))

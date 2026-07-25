@@ -48,6 +48,29 @@ def blend_local_table(tab_a: torch.Tensor, tab_b: torch.Tensor,
     return (1.0 - lam) * tab_a + lam * tab_b
 
 
+def blend_projector_data(pd_a, pd_b, lam: torch.Tensor):
+    """Blend two single-atom ProjectorData for the same atom into one alchemical
+    atom (phase 2, the nonlocal channel).
+
+    The nonlocal operator V_nl = sum_i |beta_i> D_i <beta_i| is linear in the KB
+    energies D, so (1-lambda) V_nl^A + lambda V_nl^B is realized by carrying both
+    endpoints' projector columns and the block-diagonal matrix
+    diag((1-lambda) D_A, lambda D_B). The projector columns are the fixed
+    endpoint form factors, so lambda enters through D alone. At lambda=0 the B
+    block is zero and only A acts, at lambda=1 only B acts, and the existing
+    apply consumes the result unchanged. The two must share the k-sphere and
+    refer to the same atom, and no angular-momentum channels need to match.
+    """
+    from gradwave.core.hamiltonian import ProjectorData
+
+    lam = torch.as_tensor(lam, dtype=RDTYPE)
+    f = torch.cat([pd_a.f_ylm_phase_free, pd_b.f_ylm_phase_free], dim=0)
+    atom_index = torch.cat([pd_a.atom_index, pd_b.atom_index])
+    dij = torch.block_diag((1.0 - lam) * pd_a.dij_full, lam * pd_b.dij_full)
+    return ProjectorData(atom_index=atom_index, f_ylm_phase_free=f,
+                         kpg=pd_a.kpg, dij_full=dij)
+
+
 def per_atom_local_tables(base_tables: torch.Tensor, species_index: torch.Tensor,
                           alchemical: dict) -> torch.Tensor:
     """Assemble the full (na, n1, n2, n3) per-atom local table that
