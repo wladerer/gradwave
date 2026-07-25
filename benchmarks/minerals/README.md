@@ -73,6 +73,33 @@ current strict-XML path, so the run aborts at pseudopotential load before any QE
 or gradwave SCF. This is a pseudopotential-parsing gap, not an SCF or physics
 failure. Unsupported until the PAW UPF reader handles this header.
 
+### GPU (asus, RTX 3050 6GB, fp64)
+
+The wall times above are gradwave on CPU (8 torch threads). The same three SCFs
+also run on the GPU with `--device cuda`, which moves the assembled system to the
+card before the SCF (`system.to("cuda")`, setup stays on CPU). QE stays on CPU
+MPI, so the GPU wall ratio compares CPU QE against GPU gradwave.
+
+| mineral | GPU SCF (iters) | CPU SCF (iters) | GPU IBZ k | CPU IBZ k | ΔE_elec (meV/atom) |
+|---------|:---------------:|:---------------:|:---------:|:---------:|:------------------:|
+| NiO | 283.0 s (18) | 559.1 s (18) | 32 | 32 | −0.0155 |
+| α-Fe₂O₃ hematite | 593.9 s (17) | 2274.9 s (17) | 13 | 20 | −0.0129 |
+| Cr₂O₃ eskolaite | 670.2 s (16) | 1128.5 s (16) | 13 | 16 | −0.0110 |
+
+NiO is the clean comparison, because its irreducible k-count is 32 in both runs.
+The GPU SCF is 1.97 times faster than the 22-core CPU at the same 18 iterations,
+and the total energy is unchanged to sub-0.001 meV/atom. The corundum runs fold
+to 13 irreducible k-points, fewer than the 20 and 16 in the CPU table above,
+because they postdate the #105 magnetic-fold fix. Their raw GPU walls are not a
+like-for-like speedup, and normalizing by k-count the GPU gain is roughly 2.5×
+(hematite) and 1.4× (eskolaite). A fair GPU column for those two needs the CPU
+baseline re-run on current main.
+
+fp64 runs at about 1/64 of fp32 on this consumer card, and the plane-wave SCF is
+FFT-bound, so the GPU still beats 22 CPU cores by 1.4 to 2.5 times. Memory peaked
+at 5.0 of 6.1 GB on the 10-atom cells with no out-of-memory, and the energies are
+device-invariant, so the GPU path is a drop-in speedup for the forward SCF.
+
 ## Findings
 
 The three antiferromagnetic oxides reproduce Quantum ESPRESSO's electronic total
