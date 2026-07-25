@@ -473,8 +473,10 @@ def _validate_scf_args(system, nspin, eigensolver, smearing, mixing_scheme,
     if nspin not in (1, 2):
         raise ValueError("nspin must be 1 or 2 (noncollinear spin uses "
                          "scf_noncollinear, the spinor SCF)")
-    if eigensolver not in ("davidson", "chebyshev"):
-        raise ValueError("eigensolver must be 'davidson' or 'chebyshev'")
+    from gradwave.solvers.registry import available, is_registered
+    if not is_registered(eigensolver):
+        raise ValueError(
+            f"unknown eigensolver {eigensolver!r}; registered: {available()}")
     if nspin == 2 and smearing == "none" and tot_magnetization is None:
         raise ValueError("nspin=2 without smearing requires tot_magnetization "
                          "(fixed spin moment); otherwise pass a smearing")
@@ -559,7 +561,7 @@ def _solve_bands(veff_sp, coeffs_sp, bk, grid_shape, projs_b, hub, hub_q,
     ARGUMENT so the composed closure binds this operator, not a later one.
     """
     from gradwave.core.batch import BatchedHamiltonian
-    from gradwave.solvers.davidson import davidson_batched
+    from gradwave.solvers.registry import get as get_solver
 
     hub_dij = None
     if hub is not None:
@@ -581,13 +583,9 @@ def _solve_bands(veff_sp, coeffs_sp, bk, grid_shape, projs_b, hub, hub_q,
     if metagga_apply_sp is not None:
         def apply(c, _base=apply, _m=metagga_apply_sp):
             return _base(c) + _m(c)
-    if eigensolver == "chebyshev":
-        from gradwave.solvers.chebyshev import chebyshev_filtered_batched
-        dav = chebyshev_filtered_batched(
-            apply, coeffs_sp.to(cdtype), t_solve, bk.mask, tol=tol_eff)
-    else:
-        dav = davidson_batched(apply, coeffs_sp.to(cdtype),
-                               t_solve, bk.mask, tol=tol_eff)
+    dav = get_solver(eigensolver)(
+        apply, coeffs_sp.to(cdtype), t_solve, bk.mask,
+        tol=tol_eff, nbands=coeffs_sp.shape[1])
     eigenvalues = dav.eigenvalues.to(RDTYPE)
     c = dav.eigenvectors.to(CDTYPE)
     if use_low:
