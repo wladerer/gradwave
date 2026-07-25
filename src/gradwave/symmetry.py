@@ -265,12 +265,33 @@ def magnetic_spacegroup(
     )
 
 
-def reduce_mesh_magnetic(mesh, shift, mg: MagneticGroup):
+def reduce_mesh_magnetic(mesh, shift, mg: MagneticGroup, time_reversal: bool = False):
     """Magnetic-IBZ reduction of a Γ-centered MP mesh under a Shubnikov group.
 
-    Unitary ops act on k as W⁻ᵀ; anti-unitary ops (g·T) as −W⁻ᵀ (time reversal
-    sends k → −k). Zero moments (grey group) reproduce
+    Unitary ops act on k as W⁻ᵀ; anti-unitary ops (g·T) as −W⁻ᵀ (the g·T time
+    reversal sends k → −k). Zero moments (grey group) reproduce
     reduce_mesh(..., time_reversal=True) exactly. Returns (k_frac, weights).
+
+    ``time_reversal`` adds the PLAIN k → −k fold on top of the magnetic group.
+    This is the ORDINARY (non-spin-flipping) time reversal of a COLLINEAR
+    (ρ↑, ρ↓) system: each spin channel has a real Hamiltonian H_σ(−k) = H_σ(k)*,
+    so ε_σ(−k) = ε_σ(k) and n_σ(−k) = n_σ(k) per channel — folding −k onto k
+    just doubles its weight, with no spin swap, so the collinear moment is
+    preserved. It is NOT valid for the spinor (ρ, m⃗) path, where time reversal
+    flips m⃗ (that reversal is already carried by the anti-unitary g·T ops), so
+    it defaults off and only the collinear caller (collinear_magnetic=True)
+    turns it on.
+
+    Why it matters: the magnetic group only encodes k → −k when some op's
+    ROTATION part already inverts k. bcc-Cr AFM gets it for free — its
+    sublattice-swap anti-op is a pure LATTICE TRANSLATION (W = I, so −W⁻ᵀ = −I).
+    Corundum R-3̄c AFMs (hematite, eskolaite) do NOT: their swap op is
+    INVERSION·T (W = −I, so −W⁻ᵀ = +I, a trivial k-action), so the −k fold is
+    absent from the magnetic group and must be added here. Without it hematite
+    folds a 4×4×4 mesh to 20 and eskolaite to 16; with it both reach 13, the
+    Quantum ESPRESSO count, and the folded SCF still matches the full-mesh free
+    energy because the plain-TR reference (monkhorst_pack time_reversal=True)
+    already assumes the same per-channel k → −k.
     """
     if np.any(shift):
         raise NotImplementedError(
@@ -278,6 +299,8 @@ def reduce_mesh_magnetic(mesh, shift, mg: MagneticGroup):
         )
     ops_t = _k_ops(mg.unitary.rotations)
     ops_t += [-w for w in _k_ops(mg.anti_rotations)]
+    if time_reversal:
+        ops_t += [-w for w in ops_t]  # plain per-channel k → −k (collinear)
     return _orbit_reduce(mesh, ops_t)
 
 

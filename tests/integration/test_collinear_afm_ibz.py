@@ -66,6 +66,65 @@ def test_cr_afm_collinear_magnetic_ibz():
     assert m_mag > 0.5
 
 
+def _rhomb_cell(a_hex, c_hex):
+    """Rhombohedral primitive from hexagonal (a, c) — the corundum lattice
+    class, so its inversion centre swaps the two 3-fold-axis sublattices."""
+    ax, cz = a_hex, c_hex
+    return np.array([[ax / 2, -ax / (2 * np.sqrt(3)), cz / 3],
+                     [0, ax / np.sqrt(3), cz / 3],
+                     [-ax / 2, -ax / (2 * np.sqrt(3)), cz / 3]])
+
+
+def _rhomb_fe_afm_run(mesh, ecut, **setup_kw):
+    # Two well-separated Fe on the corundum (R-3̄c) rhombohedral lattice: the two
+    # 3-fold-axis sites are an inversion·T sublattice pair (the corundum swap),
+    # and the wide Fe-Fe spacing (~3.5 Å) localises an atomic-like moment so the
+    # staggered AFM order is a STABLE SCF fixed point that survives the dense
+    # 4×4×4 mesh — not the marginal itinerant moment a compact 2-metal cell
+    # carries, which a coarse mesh over-stabilises and a dense one quenches.
+    fe = parse_upf(PSEUDOS / "Fe_ONCV_PBE-1.2.upf")
+    cell = _rhomb_cell(3.7, 8.4)
+    frac = np.array([[0.2, 0.2, 0.2], [-0.2, -0.2, -0.2]]) % 1.0
+    pos = frac @ cell
+    system = setup_system(cell, pos, [0, 0], [fe], ecut=ecut, kmesh=mesh,
+                          nbands=24, **setup_kw)
+    # SG15 Fe (Z=16, 3s3p semicore) needs ~60 Ry to sustain its moment: at 45 Ry
+    # even QE collapses to a spurious nonmagnetic state (see test_spin_vs_qe).
+    # That under-converged ecut — not the k-fold — is what silently demagnetised
+    # this oracle before, degrading it to a ρ↑=ρ↓ comparison that validated
+    # while testing nothing. A high-spin seed pins the staggered moment.
+    res = scf(system, SpinPBE(), smearing="gaussian", width=0.1, nspin=2,
+              start_mag=[2.0, -2.0], etol=1e-8, rhotol=1e-7, max_iter=200,
+              verbose=False)
+    assert res.converged
+    return (float(res.energies.free_energy), float(res.mag_abs),
+            len(system.spheres))
+
+
+@pytest.mark.slow
+def test_corundum_class_afm_collinear_time_reversal_ibz():
+    """A rhombohedral (corundum-class) 2-Fe AFM: the sublattice swap is
+    INVERSION·T, not a translation, so the magnetic group alone omits k → −k
+    and folds a 4×4×4 mesh to 16. The collinear per-channel time reversal
+    (H_σ real ⇒ no spin swap) restores the −k fold to 13 AND must still
+    reproduce the full-mesh free energy and the staggered moment exactly — the
+    correctness statement behind reaching QE's corundum k-count."""
+    torch.set_num_threads(8)
+    mesh, ecut = (4, 4, 4), 60 * RY
+    e_full, m_full, nk_full = _rhomb_fe_afm_run(mesh, ecut, use_symmetry=False)
+    e_mag, m_mag, nk_mag = _rhomb_fe_afm_run(
+        mesh, ecut, use_symmetry=True,
+        magmoms=[[0, 0, 1.0], [0, 0, -1.0]], collinear_magnetic=True)
+
+    # the collinear fold now captures k → −k that the magnetic group omits
+    assert (nk_full, nk_mag) == (36, 13)
+    # folded free energy per atom and the AFM moment match the full mesh
+    assert abs(e_full - e_mag) / 2 < 1e-6, f"|dE/atom| = {abs(e_full-e_mag)/2:.2e} eV"
+    assert abs(m_full - m_mag) < 1e-4, f"|dM| = {abs(m_full-m_mag):.2e} µB"
+    # genuinely magnetic — the swap fold is not trivialised by a null moment
+    assert m_mag > 0.4
+
+
 @pytest.mark.slow
 def test_nonmagnetic_symmetry_unchanged():
     """A non-magnetic run built without magmoms is untouched: the ordinary

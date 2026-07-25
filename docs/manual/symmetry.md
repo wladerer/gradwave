@@ -123,13 +123,28 @@ res = scf(system, SpinPBE(), nspin=2, start_mag=[0.6, -0.6],
 ```
 
 The moments must be collinear (all parallel to one axis) or the constructor
-rejects them. The k-fold (`reduce_mesh_magnetic`) is the same one the spinor
-path uses, and only the density symmetrizer differs, swapping the spin channels
-under the anti-unitary operations. The fold reproduces the unreduced collinear
-SCF exactly and introduces no approximation. bcc Cr AFM at $4\times4\times4$ folds the
+rejects them. The k-fold (`reduce_mesh_magnetic`) shares the magnetic group with
+the spinor path, and the density symmetrizer differs, swapping the spin channels
+under the anti-unitary operations. The collinear path adds one thing the spinor
+path cannot: the plain $k \to -k$ time reversal. Each spin channel has a real
+Hamiltonian, $H_\sigma(-k) = H_\sigma(k)^*$, so $n_\sigma(-k) = n_\sigma(k)$ with
+no spin swap — folding $-k$ onto $k$ only doubles its weight and leaves the
+moment untouched. The fold reproduces the unreduced collinear SCF exactly and
+introduces no approximation. bcc Cr AFM at $4\times4\times4$ folds the
 time-reversal-only 36 k-points to 18 and reproduces the full-mesh free energy per
 atom to $10^{-6}$ eV and the moment to $10^{-4}$ μB. The $8\times8\times8$ mesh
 reclaims more, 260 to 75.
+
+The plain $k \to -k$ fold is what a magnetic group leaves out when its
+sublattice-swap operation carries no $k$-inversion. bcc Cr gets $k \to -k$ for
+free: its swap is a pure lattice translation ($W = I$, so the anti-unitary
+$-W^{-\top} = -I$ already inverts $k$). The corundum antiferromagnets (hematite
+$\alpha$-Fe$_2$O$_3$ and eskolaite Cr$_2$O$_3$, R-$\bar{3}$c, #167) do not: their
+swap is inversion$\cdot T$ ($W = -I$, so $-W^{-\top} = +I$, a trivial
+$k$-action). Without the added time reversal their $4\times4\times4$ mesh folds
+only to 20 and 16; with it both reach 13, matching Quantum ESPRESSO, and the
+folded free energy still equals the full-mesh value because the reference mesh
+assumes the same per-channel $k \to -k$.
 
 ## Use it in a calculation
 

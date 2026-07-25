@@ -496,7 +496,7 @@ gradwave.symmetry.coupled_axis_groups	coupled_axis_groups(sg)	Group the three la
 gradwave.symmetry.find_spacegroup	find_spacegroup(cell, frac_positions, species_of_atom, symprec)	
 gradwave.symmetry.magnetic_spacegroup	magnetic_spacegroup(sg, magmoms, cell, tol)	Filter the paramagnetic group by its action on the atomic moments.
 gradwave.symmetry.reduce_mesh	reduce_mesh(mesh, shift, sg, time_reversal)	IBZ reduction of a Γ-centered MP mesh. Returns (k_frac (nk,3), weights).
-gradwave.symmetry.reduce_mesh_magnetic	reduce_mesh_magnetic(mesh, shift, mg)	Magnetic-IBZ reduction of a Γ-centered MP mesh under a Shubnikov group.
+gradwave.symmetry.reduce_mesh_magnetic	reduce_mesh_magnetic(mesh, shift, mg, time_reversal=False)	Magnetic-IBZ reduction of a Γ-centered MP mesh under a Shubnikov group.
 gradwave.symmetry.symmetrize_forces	symmetrize_forces(forces, sg, cell)	Project forces onto the symmetry-invariant subspace.
 gradwave.templates.names	names()	Template names in listing order.
 gradwave.templates.render	render(name)	The template body for `name`. Raises KeyError if there is no such template.
