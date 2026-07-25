@@ -97,6 +97,20 @@ def symmetrize_rho(rho_symmetrizer, r_out, grid):
     return g_to_r_box(sym_g, real=True)
 
 
+def symmetrize_rho_pair(rho_symmetrizer, r_up, r_dn, grid):
+    """Round-trip a collinear (ρ↑, ρ↓) pair through a CollinearMagneticSymmetrizer
+    (via G), coupling the channels: anti-unitary ops fold with a spin swap.
+
+    Returns the pair unchanged when there is no symmetrizer. Used by the
+    collinear nspin=2 loop when the system carries a magnetic (Shubnikov) group
+    — the FM/AFM analogue of symmetrize_rho, which folds each channel alone."""
+    if rho_symmetrizer is None:
+        return r_up, r_dn
+    up_g, dn_g = rho_symmetrizer.apply_pair(
+        r_to_g(r_up.to(CDTYPE)), r_to_g(r_dn.to(CDTYPE)))
+    return g_to_r_box(up_g, real=True), g_to_r_box(dn_g, real=True)
+
+
 def spin_sigmas(r_u, r_d, xc, g_cart):
     """(σ_uu, σ_dd, σ_tot) for a GGA, or (None, None, None) for an LDA.
 

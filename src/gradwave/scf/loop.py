@@ -139,6 +139,7 @@ def setup_system(
     fft_shape=None,
     time_reversal: bool = True,  # False for noncollinear/SOC (TR flips m)
     magmoms=None,  # (na, 3) moment directions → magnetic (Shubnikov) symmetry
+    collinear_magnetic: bool = False,  # collinear nspin=2 FM/AFM Shubnikov fold
 ) -> System:
     """use_symmetry: reduce k to the IBZ and symmetrize ρ each SCF step.
     Requires an unshifted (Γ-centered) mesh — shifted meshes fall back to
@@ -148,10 +149,17 @@ def setup_system(
     magmoms (with use_symmetry=True) switches to the MAGNETIC space group of
     that moment configuration: k folds into the magnetic IBZ (unitary ops as
     W⁻ᵀ, anti-unitary g·T ops as −W⁻ᵀ — time_reversal is ignored, the group
-    decides) and (ρ, m⃗) are symmetrized over the full Shubnikov group each
-    step. Only scf_noncollinear consumes such a system; the collinear loops
-    reject it. Directions are what matter — magnitudes only distinguish
-    zero from nonzero and same from different.
+    decides). Directions are what matter — magnitudes only distinguish zero
+    from nonzero and same from different.
+
+    Two magnetic representations share that k-fold:
+    - the spinor (ρ, m⃗) symmetrizer (default) — only scf_noncollinear consumes it;
+    - the collinear (ρ↑, ρ↓) symmetrizer (collinear_magnetic=True) — the nspin=2
+      FM/AFM path, consumed by scf. This reclaims the magnetic-group k-reduction
+      for collinear antiferromagnets, which otherwise forfeit it and drop to a
+      near-full time-reversal-only mesh. magmoms then carry the collinear
+      sublattice pattern (e.g. [[0,0,+1],[0,0,-1]] for a 2-atom AFM); they must
+      be collinear (all ∥ one axis) or the constructor rejects them.
     """
     cell = np.asarray(cell, dtype=np.float64)
     positions = np.asarray(positions, dtype=np.float64)
@@ -167,7 +175,8 @@ def setup_system(
     # time_reversal=False for magnetic systems (k≢−k); for nonmagnetic runs
     # (incl. nonmagnetic + SOC, where Kramers keeps k≡−k) it stays True
     rho_symmetrizer, kfrac, kw = build_symmetrizer_and_kpoints(
-        grid, cell, kmesh, kshift, sym, mag_sym, time_reversal)
+        grid, cell, kmesh, kshift, sym, mag_sym, time_reversal,
+        collinear_magnetic=collinear_magnetic, magmoms=magmoms)
     spheres = [build_gsphere(grid, ecut, k) for k in kfrac]
 
     charges = torch.tensor([upfs[s].z_valence for s in species_of_atom], dtype=RDTYPE)
@@ -425,11 +434,18 @@ def _seed_density(system, nspin, start_from, start_mag, grid, vol):
     for a, sp in enumerate(system.species_of_atom):
         mags_by_sp.setdefault(sp, set()).add(round(mags_at[a], 12))
     uniform_per_species = all(len(v) == 1 for v in mags_by_sp.values())
-    if system.rho_symmetrizer is not None and not uniform_per_species:
+    # A CollinearMagneticSymmetrizer is BUILT for exactly this case (its magnetic
+    # group already encodes the sublattice pattern), so it is exempt: the plain
+    # RhoSymmetrizer is not — it would fold the two spin sublattices together.
+    from gradwave.symmetry import CollinearMagneticSymmetrizer
+    if (system.rho_symmetrizer is not None and not uniform_per_species
+            and not isinstance(system.rho_symmetrizer,
+                               CollinearMagneticSymmetrizer)):
         raise ValueError(
             "non-uniform per-atom moments break the chemical space group "
             "(magnetic group is smaller) — build the system with "
-            "use_symmetry=False for AFM/ferrimagnetic configurations"
+            "use_symmetry=False, or collinear_magnetic=True + magmoms for the "
+            "magnetic (Shubnikov) k-fold, for AFM/ferrimagnetic configurations"
         )
     n_up = sum(float(system.charges[a]) * (1 + mags_at[a]) / 2 for a in range(na))
     n_dn = system.n_electrons - n_up
@@ -484,9 +500,14 @@ def _validate_scf_args(system, nspin, eigensolver, smearing, mixing_scheme,
         raise ValueError("fully-relativistic pseudos require the spinor SCF "
                          "(scf_noncollinear) — SOC has no collinear representation")
     if hasattr(system.rho_symmetrizer, "apply_m"):
-        raise ValueError("system was built with magnetic symmetry (magmoms=...) — "
-                         "only scf_noncollinear consumes it (anti-unitary ops would "
-                         "mis-fold collinear spin channels); rebuild without magmoms")
+        raise ValueError("system was built with SPINOR magnetic symmetry "
+                         "(magmoms without collinear_magnetic) — only "
+                         "scf_noncollinear consumes it; for collinear nspin=2 "
+                         "rebuild with collinear_magnetic=True")
+    from gradwave.symmetry import CollinearMagneticSymmetrizer
+    if isinstance(system.rho_symmetrizer, CollinearMagneticSymmetrizer) and nspin != 2:
+        raise ValueError("a collinear magnetic (Shubnikov) system folds the two "
+                         "spin channels — it requires nspin=2")
     if mixing_scheme not in ("pulay", "broyden", "johnson"):
         raise ValueError("mixing_scheme must be 'pulay', 'broyden', or 'johnson'")
     if precond not in ("kerker", "local_tf"):
@@ -859,6 +880,12 @@ def scf(
     def symmetrize(r_out):
         return symmetrize_rho(system.rho_symmetrizer, r_out, grid)
 
+    # A collinear magnetic (Shubnikov) system folds ρ↑/ρ↓ JOINTLY: anti-unitary
+    # ops swap the two spin channels, so they cannot be symmetrized separately.
+    from gradwave.scf.common import symmetrize_rho_pair
+    from gradwave.symmetry import CollinearMagneticSymmetrizer
+    collinear_mag = isinstance(system.rho_symmetrizer, CollinearMagneticSymmetrizer)
+
     if verbose:
         _ec = getattr(system, "ecut", None)
         _ecs = f"ecut {_ec / 13.605693122994:.0f} Ry · " if _ec else ""
@@ -915,11 +942,16 @@ def scf(
         n_hub_s, e_hub = _hubbard_occ_update(hub, hub_q, coeffs_b_s, occ_s,
                                              system, nspin, device)
 
-        rho_out_s = [
-            symmetrize(density_b(coeffs_b_s[sp], occ_s[sp], system.kweights,
-                                 bk, grid.shape, vol))
+        rho_raw_s = [
+            density_b(coeffs_b_s[sp], occ_s[sp], system.kweights, bk,
+                      grid.shape, vol)
             for sp in range(nspin)
         ]
+        if collinear_mag:
+            rho_out_s = list(symmetrize_rho_pair(
+                system.rho_symmetrizer, rho_raw_s[0], rho_raw_s[1], grid))
+        else:
+            rho_out_s = [symmetrize(r) for r in rho_raw_s]
         rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
 
         # meta-GGA: rebuild τ_σ from the fresh orbitals — this iteration's energy
