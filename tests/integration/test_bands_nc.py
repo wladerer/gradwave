@@ -7,7 +7,6 @@ guards the SOC band-structure path (examples/bi2se3_bands_compare.py) against
 silent removal, which is how band_structure_nc was lost once already.
 """
 
-import json
 from pathlib import Path
 
 import numpy as np
@@ -31,10 +30,13 @@ def test_bands_nc_reproduces_scf_spectrum_on_mesh():
     torch.set_num_threads(4)
     ga = parse_upf(FIX / "pseudos" / "Ga_ONCV_PBE_FR-1.0.upf")
     as_ = parse_upf(FIX / "pseudos" / "As_ONCV_PBE_FR-1.1.upf")
-    ref = json.loads((FIX / "gaas_so_ci" / "reference.json").read_text())
-    system = setup_system(CELL, POS, [0, 1], [ga, as_], ecut=40 * RY,
-                          kmesh=(2, 2, 2), nbands=13, fft_shape=ref["fft_dims"],
-                          time_reversal=False)
+    # This is a purely INTERNAL reproduction check: band_structure_nc must
+    # return the SCF eigenvalues at the SCF mesh k-points. It never compares to
+    # QE (the gaas_so_ci fixture is unused here), so the identity holds at any
+    # cutoff — we run it at a reduced ecut to keep the guard cheap. The QE-grid
+    # fft pin is dropped with it (auto grid is correct for this ecut).
+    system = setup_system(CELL, POS, [0, 1], [ga, as_], ecut=28 * RY,
+                          kmesh=(2, 2, 2), nbands=13, time_reversal=False)
     xc = NoncollinearXC(SpinPBE())
     res = scf_noncollinear(system, xc, mag_vec_init=[[0, 0, 0], [0, 0, 0]],
                            smearing="gaussian", width=0.1, etol=1e-7,

@@ -78,11 +78,15 @@ def test_cohp_image_reconstruction():
     assert abs(ici[(0, 1)] - ic_g[(0, 1)]) < 1e-12
 
 
-@pytest.mark.standard
-def test_cohp_collinear_o2_sum_rule():
-    """Norm-conserving O2 (nspin=1): the single O-O bond is bonding (ICOHP < 0),
-    and the all-pairs COHP integrated to E_F reproduces the band energy up to the
-    spilling."""
+@pytest.fixture(scope="module")
+def o2_gamma():
+    """Converged Γ-only O2 PBE SCF shared by the collinear COHP tests.
+
+    The three tests below build the byte-identical 7 Å box at ecut=40 Ry and run
+    the same SCF, so one converged state serves all three (module scope) instead
+    of re-solving it per test. Consumers only READ `res`, so this is a pure
+    setup-sharing win — the per-test oracle assertions are unchanged.
+    """
     torch.set_num_threads(8)
     from gradwave.core.xc.pbe import PBE
     upf = parse_upf(f"{FIX}/PD_O_PBE.upf")
@@ -93,6 +97,15 @@ def test_cohp_collinear_o2_sum_rule():
     res = scf(system, PBE(), smearing="gaussian", width=0.1, etol=1e-7,
               rhotol=1e-6, verbose=False, kerker=True)
     assert res.converged
+    return res, system
+
+
+@pytest.mark.standard
+def test_cohp_collinear_o2_sum_rule(o2_gamma):
+    """Norm-conserving O2 (nspin=1): the single O-O bond is bonding (ICOHP < 0),
+    and the all-pairs COHP integrated to E_F reproduces the band energy up to the
+    spilling."""
+    res, system = o2_gamma
 
     c = cohp.cohp(res, width=0.2)
     assert c.kind == "collinear"
@@ -155,21 +168,12 @@ def test_cohp_soc_bi2():
 
 
 @pytest.mark.standard
-def test_cohp_resolve_images_and_iao_o2():
+def test_cohp_resolve_images_and_iao_o2(o2_gamma):
     """On Gamma-only O2 the per-bond (resolve_images) COHP equals the sublattice
     COHP exactly (R=0), and the IAO basis spans the occupied manifold far better
     than the pseudo-atomic basis (much smaller charge spilling / RMSp) while still
     giving a bonding bond and satisfying the band-energy sum rule."""
-    torch.set_num_threads(8)
-    from gradwave.core.xc.pbe import PBE
-    upf = parse_upf(f"{FIX}/PD_O_PBE.upf")
-    L, d = 7.0, 1.21
-    cell = L * np.eye(3)
-    pos = np.array([[L / 2, L / 2, L / 2 - d / 2], [L / 2, L / 2, L / 2 + d / 2]])
-    system = setup_system(cell, pos, [0, 0], [upf], ecut=40 * RY, kmesh=(1, 1, 1))
-    res = scf(system, PBE(), smearing="gaussian", width=0.1, etol=1e-7,
-              rhotol=1e-6, verbose=False, kerker=True)
-    assert res.converged
+    res, system = o2_gamma
 
     base = cohp.cohp(res, width=0.2)
     # --- per-image bond resolution: R=0 at Gamma, so one bond == the sublattice ---
@@ -236,19 +240,10 @@ def test_cohp_k_band_resolved():
 
 
 @pytest.mark.standard
-def test_cohp_explicit_pairs_and_rcut():
+def test_cohp_explicit_pairs_and_rcut(o2_gamma):
     """Pair selection: an explicit `pairs` list overrides rcut, and a tight rcut
     that excludes the bond yields no pairs."""
-    torch.set_num_threads(8)
-    from gradwave.core.xc.pbe import PBE
-    upf = parse_upf(f"{FIX}/PD_O_PBE.upf")
-    L, d = 7.0, 1.21
-    cell = L * np.eye(3)
-    pos = np.array([[L / 2, L / 2, L / 2 - d / 2], [L / 2, L / 2, L / 2 + d / 2]])
-    system = setup_system(cell, pos, [0, 0], [upf], ecut=40 * RY, kmesh=(1, 1, 1))
-    res = scf(system, PBE(), smearing="gaussian", width=0.1, etol=1e-7,
-              rhotol=1e-6, verbose=False, kerker=True)
-    assert res.converged
+    res, _ = o2_gamma
     # explicit pair wins regardless of order
     c = cohp.cohp(res, pairs=[(1, 0)], width=0.2)
     assert [p[:2] for p in c.pairs] == [(0, 1)]

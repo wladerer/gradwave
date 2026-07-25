@@ -52,34 +52,39 @@ def test_smeared_metal_forces_vs_qe():
     assert np.abs(f_us.sum(axis=0)).max() < 1e-10  # exact by construction
 
 
+# Committed finite-difference reference for the free-energy FD check below.
+# It holds the ±h-displaced free energies (the *reference* the analytic force
+# is compared against), NOT the analytic force itself. Caching it turns each
+# scheme from 5 SCFs (1 base + 4 displaced) into 1 live SCF. Regenerate after
+# any change to the free-energy model or the Al test cell with:
+#   uv run python scripts/gen_al_forces_fd.py
+FD_FIX = FIX / "al_forces_fd" / "fd_reference.json"
+
+
 @pytest.mark.parametrize("smearing", ["mp1", "cold"])
 def test_smeared_forces_match_free_energy_fd(smearing):
     # The rigorous per-scheme check: F_a = −dF/dτ_a of that scheme's OWN
     # free energy (fixed-occupation Hellmann–Feynman is exact because F is
     # stationary in the occupations for a consistent (f, s) pair).
     # Raw forces here (remove_net=False): the FD probes the same raw dF/dτ.
+    # The analytic force is computed LIVE; only the FD reference free energies
+    # are read from the committed fixture (see gen_al_forces_fd.py).
     torch.set_num_threads(4)
     upf = parse_upf(FIX / "pseudos" / "Al_ONCV_PBE-1.2.upf")
 
-    def run(pos):
-        system = setup_system(AL_CELL, pos, [0] * 4, [upf],
-                              ecut=20 * RY, kmesh=(2, 2, 2), nbands=32)
-        res = scf(system, PBE(), smearing=smearing, width=0.1,
-                  etol=1e-11, rhotol=1e-10, verbose=False)
-        assert res.converged
-        return res
-
     base = AL_FRAC @ AL_CELL
-    res = run(base)
+    system = setup_system(AL_CELL, base, [0] * 4, [upf],
+                          ecut=20 * RY, kmesh=(2, 2, 2), nbands=32)
+    res = scf(system, PBE(), smearing=smearing, width=0.1,
+              etol=1e-11, rhotol=1e-10, verbose=False)
+    assert res.converged
     f = forces(res, remove_net=False)
 
-    h = 1e-4
+    fd_ref = json.loads(FD_FIX.read_text())[smearing]
+    h = fd_ref["h"]
     for comp in (0, 1):
-        dp = np.zeros((4, 3))
-        dp[0, comp] = h
-        fp = float(run(base + dp).energies.free_energy)
-        fm = float(run(base - dp).energies.free_energy)
-        fd = -(fp - fm) / (2 * h)
+        c = fd_ref[str(comp)]
+        fd = -(c["fp"] - c["fm"]) / (2 * h)
         assert abs(fd - float(f[0, comp])) < 2e-4, (smearing, comp, fd, float(f[0, comp]))
 
 
