@@ -152,5 +152,26 @@ def chebyshev_adapter(
     )
 
 
+def lobpcg_adapter(
+    apply_H, X0, precond, mask, *, tol, nbands=None, max_iter=60, n_buffer=None,
+    **kw,
+) -> EigResult:
+    """Block LOBPCG — fixed ~3*nw subspace [X, W, P]. `precond` is the kinetic
+    diagonal T the Teter preconditioner uses; `n_buffer` extra bands (gated out
+    of the returned nb) keep the top band off the block edge. Reports the buffer
+    width in diagnostics for the battery/scheduler."""
+    from gradwave.solvers.lobpcg import lobpcg_batched
+
+    r = lobpcg_batched(
+        apply_H, X0, precond, mask, tol=tol, max_iter=max_iter, n_buffer=n_buffer,
+    )
+    return EigResult(
+        r.eigenvalues, r.eigenvectors, r.n_iter, r.residual_norms,
+        {"solver": "lobpcg", "n_buffer": n_buffer, "max_iter": max_iter,
+         "hit_max_iter": r.n_iter >= max_iter},
+    )
+
+
 register("davidson", davidson_adapter)
 register("chebyshev", chebyshev_adapter)
+register("lobpcg", lobpcg_adapter)
