@@ -40,12 +40,16 @@ import torch
 from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.core.xc.spin import LSDA_PW92
 from gradwave.pseudo.upf import parse_upf
+from gradwave.scf.common import MP_CROSSOVER
 from gradwave.scf.loop import scf, setup_system
-from gradwave.solvers.registry import available
+from gradwave.solvers.registry import available, is_registered
 
 ROOT = Path(__file__).resolve().parents[2]
 PSEUDOS = ROOT / "tests" / "fixtures" / "qe" / "pseudos"
 RESULTS = Path(__file__).resolve().parent / "results"
+# Mixed-precision sweep writes here so it never clobbers the round-1 fp64 JSONs
+# in results/ (owned by PR #86's knowledge base).
+RESULTS_MP = RESULTS / "mixed_precision"
 RESEARCH = Path(__file__).resolve().parent / "RESEARCH.md"
 RY = 13.605693122994
 FCC = np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
@@ -54,6 +58,10 @@ FCC = np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 # this absolute tolerance (eV). Recorded exactly regardless; anything above is
 # flagged as a finding.
 E_MATCH_TOL = 1e-6
+
+# Mixed-precision accuracy gate: |E_mixed − E_fp64| per atom must stay at or
+# below this (eV/atom) or the fp32 draft is flagged as corrupting the answer.
+MP_E_TOL_PER_ATOM = 1e-6
 
 # ---------------------------------------------------------------------------
 # eigh (Rayleigh-Ritz) timer: wrap torch.linalg.eigh with a resettable
@@ -213,6 +221,147 @@ def run_system(name, spec, solvers):
 
 
 # ---------------------------------------------------------------------------
+# Mixed-precision axis
+# ---------------------------------------------------------------------------
+# The battery's round 1 ran mixed_precision=False, so the fp32-draft payoff is
+# unmeasured. Here each system runs a solver TWICE — fp64 baseline and
+# scf(..., mixed_precision=True) — and we record wall/iters/energy/|Δρ| for each
+# plus the derived speedup, iters delta, and energy error. Written to
+# results/mixed_precision/ (never touches results/ or RESEARCH.md).
+#
+# fp32 draft H-applies attack the ~90% of SCF wall time that is per-iteration
+# FFTs + nonlocal projectors (the solver battery proved eigh is ≤13%); the loop
+# crosses back to fp64 once the diago tolerance drops below MP_CROSSOVER=1e-5.
+# CheFSI is skipped (proven 10–35× too slow to be worth the runtime); lobpcg is
+# included automatically if a later worker has registered it.
+# ---------------------------------------------------------------------------
+def _mp_solvers(requested):
+    """Which solvers to sweep in the mixed-precision axis. Davidson always;
+    lobpcg if registered; chebyshev is intentionally excluded (too slow)."""
+    if requested:
+        sv = [s for s in requested if s != "chebyshev"]
+    else:
+        sv = ["davidson"] + (["lobpcg"] if is_registered("lobpcg") else [])
+    if "davidson" in sv:  # baseline first, stable order
+        sv = ["davidson"] + [s for s in sv if s != "davidson"]
+    return sv
+
+
+def _scf_once(spec, solver, mixed):
+    """One full SCF solve; returns a per-run record (wall/iters/energy/|Δρ|)."""
+    common = dict(etol=1e-9, rhotol=1e-8, verbose=False)
+    kw = dict(common)
+    kw.update(spec["scf"])
+    xc = kw.pop("xc")
+    system = spec["build"]()
+    natoms = len(system.positions)
+    _EIGH["t"] = 0.0
+    _EIGH["n"] = 0
+    t0 = time.perf_counter()
+    res = scf(system, xc, eigensolver=solver, mixed_precision=mixed, **kw)
+    wall = time.perf_counter() - t0
+    E = float(res.energies.total)
+    final_res = float(res.history[-1]["res"]) if res.history else None
+    return dict(
+        mixed_precision=mixed, natoms=natoms,
+        converged=bool(res.converged), scf_iters=int(res.n_iter),
+        wall_s=round(wall, 3), eigh_s=round(_EIGH["t"], 3),
+        eigh_share=round(_EIGH["t"] / wall, 4) if wall > 0 else None,
+        eigh_calls=_EIGH["n"], final_res=final_res, energy_eV=E, error=None,
+    )
+
+
+def _mp_compare(fp64, mixed):
+    """Derived metrics: speedup, iters delta, energy error, accuracy gate."""
+    if fp64.get("error") or mixed.get("error"):
+        return dict(error="one or both runs failed")
+    speedup = (fp64["wall_s"] / mixed["wall_s"]) if mixed["wall_s"] > 0 else None
+    e_err = abs(mixed["energy_eV"] - fp64["energy_eV"])
+    natoms = fp64["natoms"] or 1
+    e_err_per_atom = e_err / natoms
+    return dict(
+        speedup=(None if speedup is None else round(speedup, 3)),
+        iters_delta=mixed["scf_iters"] - fp64["scf_iters"],
+        energy_error_eV=e_err,
+        energy_error_eV_per_atom=e_err_per_atom,
+        energy_ok=bool(e_err_per_atom <= MP_E_TOL_PER_ATOM),
+        # a regression = mixed is slower than fp64 (extra fp32-noise SCF steps
+        # outweighing the per-iteration speedup)
+        regresses=bool(speedup is not None and speedup < 1.0),
+    )
+
+
+def run_system_mp(name, spec, solvers):
+    """Run each solver at fp64 and mixed precision on one system; return the
+    per-system record with derived comparison metrics."""
+    rec = dict(system=name, cls=spec["cls"], formula=spec["formula"],
+               solvers={})
+    for solver in solvers:
+        print(f"  [{name}] {solver}: fp64 vs mixed", flush=True)
+        runs = {}
+        for mixed in (False, True):
+            tag = "mixed" if mixed else "fp64"
+            try:
+                r = _scf_once(spec, solver, mixed)
+                print(f"      {tag:5s} iters={r['scf_iters']} "
+                      f"conv={r['converged']} wall={r['wall_s']:.1f}s "
+                      f"|Δρ|={_fmt(r['final_res'], '{:.1e}')} "
+                      f"E={r['energy_eV']:.9f}", flush=True)
+            except Exception as exc:  # noqa: BLE001 - record and continue
+                r = dict(mixed_precision=mixed, error=f"{type(exc).__name__}: {exc}")
+                print(f"      {tag:5s} ERROR: {r['error']}", flush=True)
+            runs[tag] = r
+        comp = _mp_compare(runs["fp64"], runs["mixed"])
+        if not comp.get("error"):
+            flag = "" if comp["energy_ok"] else (
+                f"  !! E err {comp['energy_error_eV_per_atom']:.2e} eV/atom "
+                f"> {MP_E_TOL_PER_ATOM:.0e}")
+            reg = "  REGRESSES" if comp["regresses"] else ""
+            print(f"      -> speedup={comp['speedup']}x "
+                  f"iters_delta={comp['iters_delta']:+d}{reg}{flag}", flush=True)
+        rec["solvers"][solver] = dict(fp64=runs["fp64"], mixed=runs["mixed"],
+                                      comparison=comp)
+    return rec
+
+
+def render_mp_table(records):
+    """Plain-text summary table for the log (NOT written to RESEARCH.md)."""
+    hdr = (f"{'System':<26} {'Solver':<9} {'fp64 s':>8} {'mixed s':>8} "
+           f"{'speedup':>8} {'fp64 it':>8} {'mix it':>7} {'E err/at eV':>13} "
+           f"{'gate':>5}")
+    lines = [hdr, "-" * len(hdr)]
+    for rec in records:
+        for solver, e in rec["solvers"].items():
+            f, m, c = e["fp64"], e["mixed"], e["comparison"]
+            sysc = f"{rec['formula']} {rec['system']}"
+            if c.get("error"):
+                lines.append(f"{sysc:<26} {solver:<9} ERROR")
+                continue
+            gate = "ok" if c["energy_ok"] else "FLAG"
+            lines.append(
+                f"{sysc:<26} {solver:<9} {f['wall_s']:>8.1f} {m['wall_s']:>8.1f} "
+                f"{c['speedup']:>7.2f}x {f['scf_iters']:>8d} {m['scf_iters']:>7d} "
+                f"{c['energy_error_eV_per_atom']:>13.2e} {gate:>5}")
+    return "\n".join(lines)
+
+
+def run_mixed_precision(names, solvers, meta):
+    RESULTS_MP.mkdir(parents=True, exist_ok=True)
+    records = []
+    for name in names:
+        print(f"[{name}]", flush=True)
+        rec = run_system_mp(name, SYSTEMS[name], solvers)
+        rec["meta"] = meta
+        records.append(rec)
+        (RESULTS_MP / f"{name}.json").write_text(json.dumps(rec, indent=2))
+    (RESULTS_MP / "summary.json").write_text(
+        json.dumps(dict(meta=meta, records=records), indent=2))
+    print("\n" + render_mp_table(records))
+    print(f"\nwrote {len(records)} mixed-precision results to {RESULTS_MP}/ "
+          f"(RESEARCH.md untouched)")
+
+
+# ---------------------------------------------------------------------------
 # RESEARCH.md auto-table regeneration (between markers; prose is preserved)
 # ---------------------------------------------------------------------------
 TABLE_START = "<!-- RESULTS TABLE START -->"
@@ -271,12 +420,32 @@ def main():
                     help="subset of system names to run")
     ap.add_argument("--solvers", nargs="*", default=None,
                     help="subset of registered solvers (default: all)")
+    ap.add_argument("--mixed-precision", action="store_true",
+                    help="run the mixed-precision axis instead: each solver at "
+                         "fp64 and mixed_precision=True; writes to "
+                         "results/mixed_precision/ and leaves RESEARCH.md alone")
     args = ap.parse_args()
+
+    names = args.only or list(SYSTEMS)
+
+    if args.mixed_precision:
+        solvers = _mp_solvers(args.solvers)
+        meta = dict(
+            timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            host=platform.node(), torch=torch.__version__,
+            threads=torch.get_num_threads(), solvers=solvers, systems=names,
+            mode="mixed_precision", mp_crossover=MP_CROSSOVER,
+            mp_e_tol_eV_per_atom=MP_E_TOL_PER_ATOM)
+        print(f"mixed-precision axis: {len(names)} systems x {len(solvers)} "
+              f"solvers ({', '.join(solvers)}) x [fp64, mixed] on {meta['host']} "
+              f"[{meta['threads']} threads, torch {meta['torch']}, "
+              f"crossover {MP_CROSSOVER:.0e}]")
+        run_mixed_precision(names, solvers, meta)
+        return
 
     solvers = args.solvers or available()
     if "davidson" in solvers:  # baseline first, for the correctness gate
         solvers = ["davidson"] + [s for s in solvers if s != "davidson"]
-    names = args.only or list(SYSTEMS)
 
     RESULTS.mkdir(parents=True, exist_ok=True)
     meta = dict(
