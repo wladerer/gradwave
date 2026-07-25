@@ -285,11 +285,11 @@ defect, which the [Performance](performance.md) page works through in full.
   type-II folds 112 k to 32, QE's count exactly. The corundum R-3c antiferromagnets used to
   fold less than QE (hematite 36 to 20, Cr₂O₃ 36 to 16, both against QE's 13) because the
   magnetic group only encodes k → −k when its sublattice-swap op inverts k. NiO and bcc Cr get
-  that for free — their swap is a lattice translation (W = I, so the anti-unitary −W⁻ᵀ = −I).
+  that for free, because their swap is a lattice translation (W = I, so the anti-unitary −W⁻ᵀ = −I).
   The corundum swap is inversion·T (W = −I, so −W⁻ᵀ = +I, a trivial k-action), so the −k fold
   is absent from the magnetic group. Adding the plain per-channel k → −k (valid because each
   collinear spin channel has a real Hamiltonian, H_σ(−k) = H_σ(k)*, so n_σ(−k) = n_σ(k) with no
-  spin swap — the moment is untouched) folds both corundum AFMs to 13, matching QE, with the
+  spin swap and the moment untouched) folds both corundum AFMs to 13, matching QE, with the
   folded free energy still equal to the full mesh. The fold engages only with `magmoms` set and
   `collinear_magnetic` on an unshifted mesh. Plain `use_symmetry` on an AFM drops to the
   time-reversal-only reduction and keeps a near-full mesh, because the sublattice swap is a
