@@ -39,9 +39,14 @@ def build_structures(a_a, a_b, a_ab, sym_a, sym_b):
     return {"A": a4, "B": b4, "AB": ab}
 
 
-def relaxed_energy(atoms, upfs, sym_to_species, ecut, kmesh, scales, kw):
+def relaxed_energy(atoms, upfs, sym_to_species, ecut, kmesh, scales, kw,
+                   device="cpu"):
     """Volume-scan energy per atom. Scale the cell isotropically, SCF each point,
-    and fit a parabola in volume for the minimum."""
+    and fit a parabola in volume for the minimum. device="cuda" moves each system
+    to the GPU before the SCF (one structure at a time; a single 76-electron cell
+    already nears the 6 GB card, so the structures are not batched)."""
+    import torch
+
     from gradwave.core.xc.pbe import PBE
     from gradwave.scf.loop import scf, setup_system
 
@@ -53,7 +58,11 @@ def relaxed_energy(atoms, upfs, sym_to_species, ecut, kmesh, scales, kw):
         pos = atoms.get_positions() * s
         system = setup_system(cell, pos, species, upfs, ecut=ecut, kmesh=kmesh,
                               use_symmetry=True)
+        if device != "cpu":
+            system = system.to(device)
         r = scf(system, PBE(), **kw)
+        if device != "cpu":
+            torch.cuda.synchronize()
         vols.append(float(abs(np.linalg.det(cell))) / nat)
         energies.append(float(r.energies.free_energy) / nat)
     c = np.polyfit(vols, energies, 2)  # E(V) parabola per atom
@@ -72,6 +81,9 @@ def main():
                     help="estimated FCC lattice constants for A, B, and the alloy")
     ap.add_argument("--ecut-ry", type=float, default=55.0)
     ap.add_argument("--kmesh", type=int, nargs=3, default=[8, 8, 8])
+    ap.add_argument("--device", default="cpu",
+                    help="cpu or cuda; cuda runs one structure at a time on the "
+                         "GPU (~2x faster per SCF, not batched)")
     ap.add_argument("--exp-tc", type=float, default=None,
                     help="experimental critical temperature [K] for comparison")
     a = ap.parse_args()
@@ -91,7 +103,7 @@ def main():
     t0 = time.perf_counter()
     for key in ("A", "B", "AB"):
         res = relaxed_energy(structs[key], upfs, sym_to_species, a.ecut_ry * RY,
-                             tuple(a.kmesh), scales, kw)
+                             tuple(a.kmesh), scales, kw, device=a.device)
         out[key] = res
         print(f"{key}: e0={res['e0']:.5f} eV/atom  v0={res['v0']:.3f} A^3/atom")
 
