@@ -101,13 +101,17 @@ def test_smearing_error_accepts_uspp_dict():
 
 
 # --------------------------------------------------------------------------- #
-#  fix 2: the calculator rejects nspin=2 rather than silently ignoring it      #
+#  the calculator now supports collinear spin (nspin=2); it still rejects      #
+#  noncollinear/SOC (nspin=4), which has no calculator path                    #
 # --------------------------------------------------------------------------- #
-def test_calculator_rejects_nspin2():
+def test_calculator_accepts_nspin2_rejects_noncollinear():
     from gradwave.calculator import GradWave
 
-    with pytest.raises(ValueError, match="nspin=1 only"):
-        GradWave(ecut=200.0, pseudopotentials={}, nspin=2)
+    # collinear spin constructs (the SCF/forces/stress spin path is wired)
+    GradWave(ecut=200.0, pseudopotentials={}, nspin=2)
+    # noncollinear/spin-orbit remains gated
+    with pytest.raises(ValueError, match="collinear"):
+        GradWave(ecut=200.0, pseudopotentials={}, nspin=4)
 
 
 def test_calculator_accepts_new_settings():
