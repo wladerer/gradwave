@@ -86,6 +86,8 @@ class System:
     vloc_atom: torch.Tensor | None = None  # (na,n1,n2,n3) per-atom local table;
     # the alchemical composition channel sets a lambda-blended table here so
     # V_loc stays differentiable in composition (scf/alchemical.py)
+    alchemical: object = None  # endpoint spec for the composition gradient
+    # (scf/alchemical.setup_alchemical_system / alchemical_energy_gradient)
 
     def to(self, device) -> System:
         """Copy with every tensor moved to `device` (setup stays CPU/numpy-built)."""
@@ -126,6 +128,7 @@ class System:
             ),
             rho_core=self.rho_core.to(device) if self.rho_core is not None else None,
             vloc_atom=self.vloc_atom.to(device) if self.vloc_atom is not None else None,
+            alchemical=self.alchemical,  # endpoint spec stays on the build device
         )
 
 

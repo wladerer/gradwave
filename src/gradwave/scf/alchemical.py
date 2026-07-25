@@ -116,9 +116,67 @@ def setup_alchemical_system(cell, positions, upf_a, upf_b, lam, ecut,
 
     if nbands is None:
         nbands = default_nbands(max(na * z_a, na * z_b))
+    spec = {"pd_a": sys_a.proj_data, "pd_b": sys_b.proj_data,
+            "z_a": z_a, "z_b": z_b, "tab_a": tab_a, "tab_b": tab_b}
     return dataclasses.replace(sys_a, charges=charges, n_electrons=n_electrons,
                                vloc_atom=vloc_atom, proj_data=proj_data,
-                               batch=batch, nbands=nbands)
+                               batch=batch, nbands=nbands, alchemical=spec)
+
+
+def alchemical_energy_gradient(res, lam) -> float:
+    """dE/dlambda through the converged SCF by Hellmann-Feynman (phase 3b).
+
+    At the self-consistent density only the ionic terms depend on lambda, so
+    dE/dlambda = d(E_local + E_nl + E_ewald)/dlambda evaluated at the converged
+    (detached) density and orbitals. The XC, Hartree, and kinetic terms are
+    stationary in the density, so their lambda-derivative vanishes at convergence
+    (the envelope theorem), and the derivative is the transmutation energy. Needs
+    a system built by setup_alchemical_system, which stashes the endpoint spec.
+    """
+    from gradwave.core.energies.ewald import ewald_energy
+    from gradwave.core.energies.local_pp import local_energy, local_potential_g
+    from gradwave.core.energies.nl_pp import nonlocal_energy
+    from gradwave.core.fftbox import r_to_g
+    from gradwave.core.hamiltonian import becp, projectors
+
+    system = res.system
+    spec = system.alchemical
+    if spec is None:
+        raise ValueError("res.system was not built by setup_alchemical_system")
+    grid = system.grid
+    nspin = getattr(res, "nspin", 1)
+    na = len(system.positions)
+    lam = torch.as_tensor(lam, dtype=RDTYPE).detach().clone().requires_grad_(True)
+
+    charges = ((1.0 - lam) * spec["z_a"] + lam * spec["z_b"]).reshape(()).repeat(na)
+    blended = blend_local_table(spec["tab_a"], spec["tab_b"], lam)
+    vloc_atom = blended.unsqueeze(0).expand(na, *grid.shape)
+
+    rho_g = r_to_g(res.rho.detach().to(torch.complex128))
+    vloc_g = local_potential_g(system.positions, system.species_index,
+                               system.vloc_tables, grid.g_cart, grid.volume,
+                               vloc_atom=vloc_atom)
+    e_local = local_energy(rho_g, vloc_g, grid.volume)
+    e_ewald = ewald_energy(system.positions, charges, grid.cell)
+
+    # the blended KB matrix is k-independent (D_A, D_B do not depend on k), so one
+    # dij serves every k, exactly as the force path stacks a single dij
+    proj_lam = [blend_projector_data(spec["pd_a"][k], spec["pd_b"][k], lam)
+                for k in range(len(system.proj_data))]
+    projs = [projectors(pd, system.positions) for pd in proj_lam]
+    dij_lam = proj_lam[0].dij_full
+    coeffs_s = res.coeffs if nspin == 2 else [res.coeffs]
+    occ_s = res.occupations.detach()
+    occ_s = occ_s if nspin == 2 else occ_s[None]
+    e_nl = torch.zeros((), dtype=RDTYPE)
+    for sp in range(nspin):
+        cs = [c.detach() for c in coeffs_s[sp]]
+        becps = [becp(projs[ik], cs[ik]) for ik in range(len(cs))]
+        e_nl = e_nl + nonlocal_energy(becps, dij_lam, occ_s[sp], system.kweights)
+
+    e_ion = e_local + e_nl + e_ewald
+    (grad,) = torch.autograd.grad(e_ion, lam)
+    return float(grad)
 
 
 def per_atom_local_tables(base_tables: torch.Tensor, species_index: torch.Tensor,

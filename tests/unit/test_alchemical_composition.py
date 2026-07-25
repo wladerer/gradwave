@@ -13,6 +13,7 @@ factors) and the charge (4 vs 14 valence) vary with lambda.
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from gradwave.core.energies.ewald import ewald_energy
@@ -222,3 +223,32 @@ def test_alchemical_scf_endpoints_match_pure():
     r_c = pure(c_upf, alc0.nbands)
     assert abs(float(r0.energies.total) - float(r_c.energies.total)) < 1e-5, \
         (float(r0.energies.total), float(r_c.energies.total))
+
+
+@pytest.mark.standard
+def test_alchemical_scf_gradient_hellmann_feynman():
+    # dE/dlambda through the converged SCF vs a full-SCF finite difference
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.scf.alchemical import alchemical_energy_gradient, setup_alchemical_system
+    from gradwave.scf.loop import scf
+
+    c_upf = parse_upf(FIX / "C_ONCV_PBE-1.2.upf")
+    si_upf = parse_upf(FIX / "Si_ONCV_PBE-1.2.upf")
+    a = 5.43
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+    ecut = 20 * RY
+    kw = dict(smearing="gaussian", width=0.2, etol=1e-9, rhotol=1e-8,
+              max_iter=300, verbose=False)
+
+    def e(lam):
+        s = setup_alchemical_system(cell, pos, c_upf, si_upf, lam, ecut=ecut)
+        return float(scf(s, PBE(), **kw).energies.free_energy)
+
+    lam0 = 0.5
+    res = scf(setup_alchemical_system(cell, pos, c_upf, si_upf, lam0, ecut=ecut),
+              PBE(), **kw)
+    g_hf = alchemical_energy_gradient(res, lam0)
+    h = 2e-3
+    g_fd = (e(lam0 + h) - e(lam0 - h)) / (2 * h)
+    assert abs(g_hf - g_fd) < 0.02, (g_hf, g_fd)
