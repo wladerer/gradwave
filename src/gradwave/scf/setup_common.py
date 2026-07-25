@@ -54,16 +54,28 @@ def coupled_axes(sym, mag_sym):
 
 
 def build_symmetrizer_and_kpoints(grid, cell, kmesh, kshift, sym, mag_sym,
-                                  time_reversal):
+                                  time_reversal, collinear_magnetic=False,
+                                  magmoms=None):
     """(rho_symmetrizer, kfrac, kw): the magnetic group folds k into the
-    magnetic IBZ (anti-unitary g·T ops as −W⁻ᵀ) with a MagneticSymmetrizer;
-    a plain space group uses RhoSymmetrizer + reduce_mesh; no symmetry falls
-    back to the Monkhorst-Pack mesh."""
+    magnetic IBZ (anti-unitary g·T ops as −W⁻ᵀ) — with a MagneticSymmetrizer
+    for the spinor (ρ, m⃗) path, or a CollinearMagneticSymmetrizer for the
+    collinear (ρ↑, ρ↓) nspin=2 path (collinear_magnetic=True). A plain space
+    group uses RhoSymmetrizer + reduce_mesh; no symmetry falls back to the
+    Monkhorst-Pack mesh. The k-fold (reduce_mesh_magnetic) is identical for
+    both magnetic representations — only the density symmetrizer differs."""
     if mag_sym is not None:
-        from gradwave.symmetry import MagneticSymmetrizer, reduce_mesh_magnetic
+        from gradwave.symmetry import reduce_mesh_magnetic
 
-        rho_symmetrizer = MagneticSymmetrizer(grid.shape, mag_sym, cell,
-                                              dens_mask=grid.dens_mask)
+        if collinear_magnetic:
+            from gradwave.symmetry import CollinearMagneticSymmetrizer
+
+            rho_symmetrizer = CollinearMagneticSymmetrizer(
+                grid.shape, mag_sym, cell, magmoms, dens_mask=grid.dens_mask)
+        else:
+            from gradwave.symmetry import MagneticSymmetrizer
+
+            rho_symmetrizer = MagneticSymmetrizer(grid.shape, mag_sym, cell,
+                                                  dens_mask=grid.dens_mask)
         kfrac, kw = reduce_mesh_magnetic(kmesh, kshift, mag_sym)
     elif sym is not None:
         from gradwave.symmetry import RhoSymmetrizer, reduce_mesh

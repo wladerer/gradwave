@@ -389,6 +389,95 @@ class MagneticSymmetrizer:
         return acc.reshape(3, *self.shape)
 
 
+class CollinearMagneticSymmetrizer:
+    """G-space symmetrization of a collinear (ρ↑, ρ↓) pair under a magnetic
+    (Shubnikov) group — the nspin=2 FM/AFM analogue of MagneticSymmetrizer.
+
+    A collinear spin density is a T-EVEN charge ρ = ρ↑+ρ↓ plus a T-ODD scalar
+    magnetization m = ρ↑−ρ↓ (aligned on the magnetic axis). Under a UNITARY op
+    both channels fold with the bare spatial op (RhoSymmetrizer); under an
+    ANTI-UNITARY op g·T the spatial fold carries a SPIN-CHANNEL SWAP, because T
+    reverses m (ρ↑ ↔ ρ↓). Equivalently:
+
+        ρ_sym = combined_group.average(ρ↑+ρ↓)          (all ops, sign +1)
+        m_sym = combined_group.average(ρ↑−ρ↓)  with −1 on every anti-unitary op
+
+    and ρ↑,↓ = (ρ_sym ± m_sym)/2. This reconstructs the full-BZ collinear density
+    from the magnetic-IBZ (reduce_mesh_magnetic) representatives, so the folded
+    SCF converges to the same fixed point as the unreduced use_symmetry=False run.
+
+    The ±1 axial sign is exact only for a genuinely COLLINEAR moment set (every
+    op's Cartesian axial action sends the magnetic axis n̂ to ±n̂); the
+    constructor asserts this — a non-collinear set must use MagneticSymmetrizer
+    (scf_noncollinear) instead. The grey group (m ≡ 0) makes every op both
+    unitary and anti-unitary; the swap then averages ρ↑ and ρ↓ together, which is
+    correct for a non-spin-polarized cell.
+    """
+
+    def __init__(self, shape, mg: MagneticGroup, cell: np.ndarray, magmoms,
+                 dens_mask=None):
+        combined = mg.combined()
+        self.rho_sym = RhoSymmetrizer(shape, combined, dens_mask=dens_mask)
+        # collinear magnetic axis n̂ from the moment set (first nonzero moment)
+        m = np.atleast_2d(np.asarray(magmoms, dtype=float))
+        norms = np.linalg.norm(m, axis=1)
+        nz = np.flatnonzero(norms > 1e-8)
+        axis = m[nz[0]] / norms[nz[0]] if len(nz) else np.array([0.0, 0.0, 1.0])
+        # every moment must be parallel/antiparallel to n̂ (collinearity)
+        if len(nz) and np.abs(np.cross(m[nz], axis)).max() > 1e-6 * norms[nz].max():
+            raise ValueError(
+                "CollinearMagneticSymmetrizer requires collinear moments; use "
+                "MagneticSymmetrizer (scf_noncollinear) for a non-collinear set")
+        a_t = np.asarray(cell, dtype=float).T
+        a_t_inv = np.linalg.inv(a_t)
+        signs = []
+        for iop, w_mat in enumerate(combined.rotations):
+            s = a_t @ w_mat @ a_t_inv
+            r_ax = np.linalg.det(s) * s  # axial (pseudo-vector) spatial action
+            # the m-field sign is s_T · (axial action on n̂): s_T = −1 on the
+            # anti-unitary half (T reverses m), and the SPATIAL op must send n̂
+            # to ±n̂ (else the moment set is non-collinear). The sublattice swap
+            # that makes an op anti-unitary is carried by the spatial fold's
+            # atom permutation + phase, not by this scalar sign.
+            v = r_ax @ axis
+            proj = float(v @ axis)
+            if not np.allclose(v, proj * axis, atol=1e-8) or abs(abs(proj) - 1) > 1e-6:
+                raise ValueError(
+                    "magnetic op does not map the moment axis to ±itself — the "
+                    "moment set is non-collinear; use MagneticSymmetrizer instead")
+            s_t = -1.0 if iop >= mg.n_unitary else 1.0
+            signs.append(s_t * round(proj))
+        self.sign = torch.as_tensor(signs, dtype=torch.float64)
+        self.shape = tuple(shape)
+
+    def to(self, device) -> CollinearMagneticSymmetrizer:
+        new = object.__new__(CollinearMagneticSymmetrizer)
+        new.rho_sym = self.rho_sym.to(device)
+        new.sign = self.sign.to(device)
+        new.shape = self.shape
+        return new
+
+    def apply(self, rho_g_box: torch.Tensor) -> torch.Tensor:
+        """Charge-only symmetrization (T-even) over the full magnetic group.
+
+        A convenience for callers that symmetrize a single scalar (e.g. the
+        total density); the spin channels use apply_pair."""
+        return self.rho_sym.apply(rho_g_box)
+
+    def apply_pair(self, rho_up_box: torch.Tensor, rho_dn_box: torch.Tensor):
+        """Symmetrize a collinear (ρ↑, ρ↓) pair on the dense box: each
+        (n1,n2,n3) complex → same. Anti-unitary ops swap the two channels."""
+        rs = self.rho_sym
+        tot = (rho_up_box + rho_dn_box).reshape(-1) * rs.mask
+        mag = (rho_up_box - rho_dn_box).reshape(-1) * rs.mask
+        tot_s = (rs.phase * tot[rs.idx]).mean(dim=0) * rs.mask
+        sgn = self.sign.to(mag.dtype).reshape(-1, 1)
+        mag_s = (rs.phase * sgn * mag[rs.idx]).mean(dim=0) * rs.mask
+        up = (0.5 * (tot_s + mag_s)).reshape(self.shape)
+        dn = (0.5 * (tot_s - mag_s)).reshape(self.shape)
+        return up, dn
+
+
 def symmetrize_forces(forces: torch.Tensor, sg: SpaceGroup, cell: np.ndarray) -> torch.Tensor:
     """Project forces onto the symmetry-invariant subspace.
 
