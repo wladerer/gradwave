@@ -7,6 +7,49 @@ density-functional theory, the exchange constants from the constraint torque, an
 single input task rolls both into a Heisenberg model with a mean-field Curie
 temperature.
 
+## Collinear spin-polarized calculations (nspin=2)
+
+When the moments lie along a single axis the spinor solve is unnecessary. The
+collinear `scf` with `nspin=2` carries two densities (ρ↑, ρ↓), one Hamiltonian
+per spin channel from `res.v_eff[sp]`, and a `start_mag` seed. The
+[Non-collinear magnetism and SOC](noncollinear-soc.md#collinear-spin-with-numbers)
+page covers the SCF itself. This section collects the post-SCF coverage that
+opened for the collinear path.
+
+The property modules loop over the two spin channels wherever a spinless routine
+ran before, so forces, stress, band structure (norm-conserving and USPP/PAW),
+the KPM density of states, and the ELF all run for `nspin=2`. The forces sum the
+nonlocal projector term over both channels and match a bcc-Fe finite difference
+to $1.4\times10^{-5}$ eV/Å. The stress adds the per-spin kinetic and nonlocal
+sums, and the ELF returns a spin-resolved field, so `write_elf` emits a `_up`
+and a `_dn` file. The exception is the ASE `GradWave` calculator, which stays
+`nspin=1` only, since its `calculate()` does not thread the spin channel through.
+
+The default mixing scheme is magnetic-aware. `mixing_scheme=None` resolves to
+`johnson` for `nspin=2` and `pulay` otherwise, because the spin channel near the
+Fermi level drives a stiff response that the normalized multisecant update of
+Johnson mixing handles more robustly. Pass `mixing_scheme="pulay"` to override.
+
+**Fixed spin moment.** A smeared `nspin=2` run finds the moment from a shared
+Fermi level. To hold the moment instead, pass `tot_magnetization=M` with
+`smearing="none"`, and gradwave fixes the per-channel electron counts by $M$
+through $N_\uparrow = (N_e + M)/2$ and $N_\downarrow = (N_e - M)/2$, filling each
+channel to its integer count (QE's `occupations='fixed'` mode). A forced $M = 2$
+run converges to the excited state with `mag_total` held at exactly 2 μB, and
+$M = 0$ reproduces the spin-restricted energy.
+
+```python
+res = scf(system, SpinPBE(), nspin=2, smearing="none", tot_magnetization=2.0)
+res.mag_total       # held at 2.0 μB
+```
+
+**Antiferromagnetic k-folding.** A collinear FM or AFM cell can reclaim the
+magnetic-group k-reduction it would otherwise forfeit. Pass `collinear_magnetic=True`
+with the sublattice moment pattern in `magmoms=` on an unshifted mesh, and the
+mesh folds into the collinear magnetic (Shubnikov) IBZ. bcc Cr AFM at
+$4\times4\times4$ folds 36 k-points to 18, exact against the full mesh. See
+[Magnetic symmetry](symmetry.md#collinear-fmafm-meshes) for the mechanism.
+
 ## Optimizing the magnetic configuration
 
 The moment *directions* are themselves degrees of freedom, and gradwave finds the

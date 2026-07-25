@@ -62,6 +62,23 @@ The manifold applies to *every* atom of that species. For USPP/PAW use `scf_uspp
 and `from gradwave.scf.uspp_hubbard import HubbardManifold` (same fields, $S$-dressed
 projectors).
 
+## Forces and stress with +U
+
+The +U energy is a differentiable function of the positions and the cell through
+the atomic-orbital projectors, so its force and stress contributions come from
+the same autograd pass the plain terms use. The stress adds the Hubbard strain
+term when the manifolds are supplied. The occupation matrices do not carry the
+strain derivative on their own, so the same `manifolds` list passed to the SCF
+must be passed to `stress`.
+
+```python
+from gradwave.postscf.stress import stress
+sig = stress(res, SpinPBE(), manifolds=[HubbardManifold(species=0, l=2, u=5.0)])
+```
+
+A +U result handed to `stress` without its manifolds is rejected rather than
+silently dropping the term. Fully-relativistic stress is not yet available.
+
 ## Determine U, and its gradient
 
 `linear_response_u` runs the finite-difference probe (one base plus two perturbed

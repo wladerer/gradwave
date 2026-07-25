@@ -1,13 +1,16 @@
-# Post-SCF analysis: densities, bonding, and the equation of state
+# Post-SCF properties and analysis
 
 A converged SCF holds the real-space density ρ(r) and the plane-wave
 coefficients c_nk(G) in memory. The post-SCF modules read them back to produce
-the quantities a plane-wave calculation is usually run for: the charge density
-and its localization, the ionic charges, the bonding analysis, and the equation
-of state. None of these needs a second SCF. This page walks through four of them
-with shipped examples, and renders the volumetric fields with
-[tinykit](https://github.com/wladerer/tinykit), a POV-Ray front end that reads
-the VASP CHGCAR files gradwave writes.
+the quantities a plane-wave calculation is usually run for. The first group
+reads straight off one converged density, the charge density and its
+localization, the ionic charges, and the bonding analysis. The second group
+re-converges the SCF under a perturbation for the mechanical and response
+properties, the equation of state, the Grimme dispersion correction, the phonon
+dispersion, the elastic constants, and the dielectric tensor with the Born
+charges. This page walks through them with shipped examples, and renders the
+volumetric fields with [tinykit](https://github.com/wladerer/tinykit), a POV-Ray
+front end that reads the VASP CHGCAR files gradwave writes.
 
 ## Volumetric export and rendering
 
@@ -156,3 +159,128 @@ Delta against WIEN2k is 2.3 meV/atom; all-electron codes agree with each other t
 about 1 meV, and a good pseudopotential lands within a few. Only the third-order
 Birch-Murnaghan form is fit. The module also exposes `delta_value` for comparing
 any two fits.
+
+## Grimme dispersion (D3 and D4)
+
+A semilocal functional misses the long-range correlation that binds layered and
+molecular solids. gradwave adds it back as an opt-in Grimme correction, D3(BJ)
+by default and the charge-dependent D4(BJ) on request. Both are geometric
+pairwise sums over ordered atom pairs and lattice images, so the energy, the
+forces, and the stress come from one autograd pass through the same position-
+and cell-differentiable expression the Ewald sum uses.
+
+The D3(BJ) energy sums $s_6 C_6/(r^6 + f^6) + s_8 C_8/(r^8 + f^8)$ over the
+pairs, with $C_6^{AB}$ interpolated from coordination-number-resolved reference
+tables by a Gaussian weighting in the fractional coordination numbers and the
+Becke-Johnson radius $f_{AB}$ damping the short-range divergence. D4(BJ)
+reweights the reference polarizabilities by a classical
+electronegativity-equilibration (EEQ) partial charge, so the $C_6$ responds to
+the local charge state. The periodic EEQ solve carries the bare-Coulomb $1/r$
+tail, and gradwave splits it with the same Ewald parameter the electrostatic
+sum uses (`postscf.dispersion`, `postscf.dispersion_d4`).
+
+The correction is a `dispersion` block on any task, added to the reported total
+energy, forces, and stress. `method` selects the model.
+
+```yaml
+dispersion:
+  method: d4          # d3 (default) | d4
+  charge: 0.0         # D4 EEQ total cell charge (ignored for D3)
+```
+
+The shorthand `dispersion: true` turns on D3(BJ) with the functional-resolved
+default parameters. The ASE calculator takes the same switch through its
+`dispersion=` argument.
+
+Validation: the D3(BJ) energy matches an independent loop-based transcription of
+the reference dftd3 expression to $10^{-10}$ relative, and the periodic and
+molecular sums both agree. D4(BJ) matches the tad-dftd4 0.8.0 two-body reference
+energies across a rattled multi-element set and passes an autograd gradcheck
+through the whole EEQ → ζ → C6 → BJ chain.
+
+## Supercell phonons
+
+Density-functional perturbation theory builds the dynamical matrix from a
+linear-response solve at each q. Instead, gradwave takes the frozen-phonon
+route. It builds an $N\times N\times N$ supercell, displaces atoms, and collects
+the real-space force constants $\Phi_{\mu\nu}(R) = \partial^2 E / \partial
+\tau_{0\mu}\partial\tau_{R\nu}$ from the ground-state forces. Because the force
+constants have the periodicity of the primitive lattice, only the primitive
+home-cell atoms are displaced, so the SCF count is $6 N_\text{prim}$ and
+independent of supercell size (Si $2\times2\times2$ costs 12 SCFs, not 96).
+
+Fourier interpolation of the force constants gives the dynamical matrix at any q,
+so one set of supercell forces yields the full dispersion along a q-path and the
+phonon density of states (`postscf.phonons_supercell`). The analytic Γ-point
+response (`postscf.phonons`) stays available for the zone center. The supercell
+route runs for any q on a plain norm-conserving SCF.
+
+```yaml
+task: phonons
+phonons:
+  supercell: [2, 2, 2]      # diagonal supercell for the force constants
+  displacement: 0.01        # atomic displacement h [Å] for the central FD
+  path: ""                  # ASE bandpath string; "" = default
+  dos_mesh: [8, 8, 8]       # MP q-mesh for the DOS
+```
+
+Start from a relaxed cell, since residual stress or forces shift the
+frequencies. Validation: the Si $2\times2\times2$ dispersion gives a Γ optical
+phonon near 521 cm⁻¹ against the ~520 experiment, three acoustic branches at
+zero, and no imaginary branch along the path.
+
+## Elastic constants
+
+The elastic tensor $C_{ij} = \partial\sigma_i/\partial\varepsilon_j$ (Voigt
+$6\times6$) is obtained by straining the cell along each of the six symmetric
+Voigt directions by $\pm h$, re-converging the SCF, and central-differencing
+gradwave's analytic stress (`postscf.stress` norm-conserving,
+`postscf.paw_stress` USPP/PAW). Each strained SCF is warm-started from the
+reference density and pinned to one FFT grid, so the 13 solves (a reference plus
+six strains at two signs) share a clean stress baseline. The Voigt-Reuss-Hill
+averages give the polycrystalline bulk and shear moduli.
+
+The tensor is the clamped-ion one. The cell is strained with fractional
+coordinates held fixed and only the electrons re-relax. This is exact for any
+constant with no symmetry-allowed internal displacement, the bulk modulus of any
+crystal and every constant of rocksalt, but the diamond and zincblende shear
+constants pick up an internal sublattice shift the clamped tensor omits (PBE Si
+clamped-ion $C_{44} \approx 98$ GPa against the relaxed $\approx 76$). $C_{11}$,
+$C_{12}$, and the bulk modulus are unaffected, and the elastic-tensor bulk
+modulus matches the equation-of-state value from the same PBE setup.
+
+```yaml
+task: elastic
+elastic:
+  strain: 0.005             # Voigt strain magnitude for the central difference
+```
+
+## Dielectric tensor and Born effective charges
+
+The macroscopic dielectric tensor $\varepsilon_\infty$ and the Born effective
+charges usually come from a hand-coded electric-field DFPT calculus. Instead,
+gradwave assembles them from autograd. The position operator on Bloch states
+comes from a Sternheimer solve with $\partial H/\partial k$ on the right-hand
+side, the self-consistent screening runs through the Hartree-XC kernel as an
+autograd Hessian-vector product of $E_\text{Hxc}$ so no $f_\text{xc}$ is written
+by hand, and the Born charges are the mixed position-field derivative from one
+backward pass through the position-differentiable pseudopotential
+(`postscf.dielectric`).
+
+The response runs for insulators with scalar-relativistic pseudopotentials and
+`use_symmetry=False`, where the time-reversal fold stays valid because the
+response quantities fold evenly. Collinear spin is threaded per channel. The
+Sternheimer solve runs independently for each spin, the screening field couples
+the two channels through the spin Hxc kernel, and the nonmagnetic limit
+reproduces the nspin=1 tensor to $2\times10^{-4}$.
+
+## Core-correction (NLCC) forces
+
+A pseudopotential with a nonlinear core correction carries a partial core charge
+that enters the exchange-correlation energy. gradwave includes its contribution
+to the atomic forces. The core density rides its atom's structure factor, so its
+position dependence enters the one autograd pass the Hellmann-Feynman forces
+already use (`postscf.forces`). The term is validated against a finite difference
+of the total energy to below $10^{-6}$ eV/Å on a low-symmetry carbon cell, for
+both GGA and meta-GGA functionals, where the meta-GGA $v_\text{xc}$ additionally
+sees the kinetic-energy density.
