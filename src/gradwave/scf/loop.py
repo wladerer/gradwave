@@ -83,6 +83,9 @@ class System:
     so_beta_tables: list | None = None  # FR pseudos: per-species (nk, nchan, npw_max)
     is_fr: bool = False  # fully-relativistic pseudos (spinor SCF only)
     rho_core: torch.Tensor | None = None  # NLCC core density on the grid [e/Å³]
+    vloc_atom: torch.Tensor | None = None  # (na,n1,n2,n3) per-atom local table;
+    # the alchemical composition channel sets a lambda-blended table here so
+    # V_loc stays differentiable in composition (scf/alchemical.py)
 
     def to(self, device) -> System:
         """Copy with every tensor moved to `device` (setup stays CPU/numpy-built)."""
@@ -122,6 +125,7 @@ class System:
                 if self.so_beta_tables is not None else None
             ),
             rho_core=self.rho_core.to(device) if self.rho_core is not None else None,
+            vloc_atom=self.vloc_atom.to(device) if self.vloc_atom is not None else None,
         )
 
 
@@ -368,7 +372,8 @@ def local_potential_r(system, vloc_g: torch.Tensor | None = None) -> torch.Tenso
     grid = system.grid
     if vloc_g is None:
         vloc_g = local_potential_g(system.positions, system.species_index,
-                                   system.vloc_tables, grid.g_cart, grid.volume)
+                                   system.vloc_tables, grid.g_cart, grid.volume,
+                                   vloc_atom=system.vloc_atom)
     return g_to_r_box(vloc_g, real=True)
 
 
@@ -865,7 +870,8 @@ def scf(
                     for s in hub.sites] for _ in range(nspin)]
 
     vloc_g = local_potential_g(
-        system.positions, system.species_index, system.vloc_tables, grid.g_cart, vol
+        system.positions, system.species_index, system.vloc_tables, grid.g_cart, vol,
+        vloc_atom=system.vloc_atom,
     )
     vloc_r = local_potential_r(system, vloc_g)
 

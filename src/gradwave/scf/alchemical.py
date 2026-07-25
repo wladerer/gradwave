@@ -71,6 +71,56 @@ def blend_projector_data(pd_a, pd_b, lam: torch.Tensor):
                          kpg=pd_a.kpg, dij_full=dij)
 
 
+def setup_alchemical_system(cell, positions, upf_a, upf_b, lam, ecut,
+                            kmesh=(1, 1, 1), nbands=None, **setup_kw):
+    """A System whose atoms uniformly blend two endpoint species A and B with a
+    scalar weight lam, phase 3. It runs a full SCF at any lam. lam=0 is species
+    A, lam=1 is species B. The ionic charge and local potential blend per atom
+    and the nonlocal operator blends per k, so the total energy is differentiable
+    in lam through charges, the local table, and dij_full.
+
+    The blend carries both endpoints' projectors, so at lam=0 the B projectors
+    are zero-coupled (inert) and the SCF reproduces pure A, and at lam=1 the A
+    projectors are inert and it reproduces pure B. This is not the virtual
+    crystal approximation, since the endpoints are real and the derivative is
+    taken there.
+    """
+    import dataclasses
+
+    import numpy as np
+
+    from gradwave.core.batch import build_batched
+    from gradwave.scf.loop import setup_system
+    from gradwave.scf.setup_common import _unique_shells, default_nbands
+
+    na = len(positions)
+    lam = torch.as_tensor(lam, dtype=RDTYPE)
+    species = [0] * na
+    sys_a = setup_system(cell, positions, species, [upf_a], ecut, kmesh, **setup_kw)
+    sys_b = setup_system(cell, positions, species, [upf_b], ecut, kmesh, **setup_kw)
+    grid = sys_a.grid
+
+    z_a, z_b = float(upf_a.z_valence), float(upf_b.z_valence)
+    charges = ((1.0 - lam) * z_a + lam * z_b).reshape(()).repeat(na)  # (na,), grad-carrying
+    n_electrons = float(charges.detach().sum())
+
+    g_flat = np.sqrt(grid.g2.reshape(-1).numpy())
+    uniq, inverse = _unique_shells(g_flat)
+    tab_a, tab_b = endpoint_local_tables(upf_a, upf_b, uniq, inverse, grid.shape)
+    blended = blend_local_table(tab_a, tab_b, lam)  # (n1,n2,n3)
+    vloc_atom = blended.unsqueeze(0).expand(na, *grid.shape)
+
+    proj_data = [blend_projector_data(sys_a.proj_data[k], sys_b.proj_data[k], lam)
+                 for k in range(len(sys_a.spheres))]
+    batch = build_batched(sys_a.spheres, proj_data)
+
+    if nbands is None:
+        nbands = default_nbands(max(na * z_a, na * z_b))
+    return dataclasses.replace(sys_a, charges=charges, n_electrons=n_electrons,
+                               vloc_atom=vloc_atom, proj_data=proj_data,
+                               batch=batch, nbands=nbands)
+
+
 def per_atom_local_tables(base_tables: torch.Tensor, species_index: torch.Tensor,
                           alchemical: dict) -> torch.Tensor:
     """Assemble the full (na, n1, n2, n3) per-atom local table that

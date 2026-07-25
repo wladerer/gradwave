@@ -33,6 +33,7 @@ from gradwave.scf.setup_common import _unique_shells
 
 RY = 13.605693122994
 DG = Path(__file__).resolve().parents[2] / "benchmarks" / "delta_gauge" / "pseudos"
+FIX = Path(__file__).resolve().parents[1] / "fixtures" / "qe" / "pseudos"
 
 
 def _si_cell():
@@ -183,3 +184,41 @@ def test_nonlocal_blend_gradient_vs_fd():
     # the alchemical nonlocal derivative is E_nl(B) - E_nl(A) by linearity in D
     e_si, e_ge = _e_nl(pd_si, pos, c), _e_nl(pd_ge, pos, c)
     assert abs(g_ad - (e_ge.item() - e_si.item())) < 1e-7 * max(1.0, abs(g_ad))
+
+
+# --------------------------------------------------------------------------- #
+#  phase 3: a full alchemical SCF, endpoint exactness through convergence      #
+# --------------------------------------------------------------------------- #
+def test_alchemical_scf_endpoints_match_pure():
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.scf.alchemical import setup_alchemical_system
+    from gradwave.scf.loop import scf
+
+    # C <-> Si (both 4 valence, so the electron count is fixed across lambda)
+    c_upf = parse_upf(FIX / "C_ONCV_PBE-1.2.upf")
+    si_upf = parse_upf(FIX / "Si_ONCV_PBE-1.2.upf")
+    a = 5.43
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+    ecut = 20 * RY
+    kw = dict(smearing="gaussian", width=0.2, etol=1e-8, rhotol=1e-7,
+              max_iter=200, verbose=False)
+
+    def pure(upf, nb):
+        return scf(setup_system(cell, pos, [0, 0], [upf], ecut=ecut,
+                                kmesh=(1, 1, 1), nbands=nb), PBE(), **kw)
+
+    # lambda = 1 reproduces pure Si
+    alc1 = setup_alchemical_system(cell, pos, c_upf, si_upf, 1.0, ecut=ecut)
+    r1 = scf(alc1, PBE(), **kw)
+    r_si = pure(si_upf, alc1.nbands)
+    assert r1.converged and r_si.converged
+    assert abs(float(r1.energies.total) - float(r_si.energies.total)) < 1e-5, \
+        (float(r1.energies.total), float(r_si.energies.total))
+
+    # lambda = 0 reproduces pure C (same cell)
+    alc0 = setup_alchemical_system(cell, pos, c_upf, si_upf, 0.0, ecut=ecut)
+    r0 = scf(alc0, PBE(), **kw)
+    r_c = pure(c_upf, alc0.nbands)
+    assert abs(float(r0.energies.total) - float(r_c.energies.total)) < 1e-5, \
+        (float(r0.energies.total), float(r_c.energies.total))
