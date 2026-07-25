@@ -1,3 +1,4 @@
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -8,8 +9,10 @@ from gradwave.pseudo.atomic import rhoatom_of_q
 from gradwave.pseudo.kb import beta_form_factors
 from gradwave.pseudo.local import alpha_z, vloc_of_g
 from gradwave.pseudo.upf import parse_upf
+from gradwave.pseudo.upf_paw import parse_upf_paw
 
 PSEUDO_DIR = Path(__file__).parents[1] / "fixtures" / "qe" / "pseudos"
+FE_KJPAW = PSEUDO_DIR / "Fe.pbe-spn-kjpaw_psl.1.0.0.UPF"
 
 
 @pytest.fixture(scope="module")
@@ -30,6 +33,56 @@ def test_header_and_units(si):
     # dij is diagonal for ONCV Si (checked by eye in the file)
     off = si.dij - np.diag(np.diag(si.dij))
     assert np.abs(off).max() == 0.0
+
+
+def test_read_root_recovers_junk_after_document_element(tmp_path):
+    """Real-world PSlibrary UPF v2 files carry content outside the single
+    <UPF>…</UPF> root — a generator banner before it or a log/stray element
+    after </UPF>. The standard ElementTree.parse rejects the latter with
+    "junk after document element". The reader must carve out the root span and
+    still return a correct pseudopotential (regression for the FeS2/pyrite
+    kjpaw benchmark)."""
+    clean = parse_upf_paw(FE_KJPAW)  # baseline: fixture is well-formed
+
+    raw = FE_KJPAW.read_text()
+    trailing = "\n<PP_LOG>generation succeeded</PP_LOG>\ntrailing junk & <garbage\n"
+    # sanity: content after </UPF> is exactly the failure mode we are fixing —
+    # ElementTree rejects it with "junk after document element".
+    with pytest.raises(ET.ParseError, match="junk after document element"):
+        ET.fromstring(raw + trailing)
+
+    # the reader must also survive a leading generator banner before <UPF>
+    junked = "Generated using 'atomic' code by A. Dal Corso  v.6.3\n" + raw + trailing
+
+    path = tmp_path / "Fe.pbe-spn-kjpaw_psl.1.0.0.UPF"
+    path.write_text(junked)
+    d = parse_upf_paw(path)
+
+    # right element / valence / angular momenta
+    assert d.element == "Fe"
+    assert d.z_valence == clean.z_valence
+    assert d.l_max == clean.l_max
+    assert [b.l for b in d.betas] == [b.l for b in clean.betas]
+    assert d.n_proj == clean.n_proj and d.n_proj > 0
+    # PAW one-center dataset present and intact
+    assert d.is_paw
+    assert d.paw_occ is not None and len(d.aewfc) > 0 and len(d.pswfc) > 0
+    # radial grid length sane and unchanged by the carve-out
+    assert len(d.r) == len(clean.r) and len(d.r) > 100
+    assert np.array_equal(d.r, clean.r)
+    assert np.array_equal(d.dij, clean.dij)
+
+
+def test_read_root_rejects_truncated_root(tmp_path):
+    """A file whose <UPF> root is not closed is a broken/truncated pseudo, not
+    recoverable junk — the reader must still raise rather than silently accept
+    partial data."""
+    raw = FE_KJPAW.read_text()
+    truncated = raw[: len(raw) // 2]  # no </UPF>
+    path = tmp_path / "truncated.UPF"
+    path.write_text(truncated)
+    with pytest.raises(ET.ParseError):
+        parse_upf_paw(path)
 
 
 def test_al_parses():
