@@ -19,8 +19,13 @@ objects are obtained without hand-coding any of the classic DFPT calculus:
 
 ε∞_αβ = δ_αβ − (16π e²/Ω) Σ_kv w_k Re⟨ξ^α_v|Δψ^β_v⟩       (f = 2 folded in)
 
-Insulators, nspin=1, scalar-relativistic pseudos, no symmetry reduction
-(time-reversal reduction is fine — the response quantities fold evenly).
+Insulators, scalar-relativistic pseudos. IBZ symmetry reduction is supported
+for nspin=1: the E-field density response is a polar vector field, so the three
+field directions are folded together through the point group each screening
+iteration (VectorFieldSymmetrizer) and the ε/Born tensors are star-summed
+after convergence (symmetrize_tensor / symmetrize_atom_tensor) — a naive scalar
+fold that treated Δρ_α as totally symmetric would be wrong. nspin=2 with
+symmetry (magnetic-group vector fold) is not yet implemented.
 """
 
 from __future__ import annotations
@@ -33,7 +38,7 @@ import torch
 from gradwave.constants import E2, HBAR2_2M
 from gradwave.core.batch import g_to_r_b, projectors_b
 from gradwave.core.energies.local_pp import local_energy, local_potential_g
-from gradwave.core.fftbox import r_to_g
+from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.hamiltonian import projectors
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.postscf._anderson import AndersonMixer
@@ -108,9 +113,14 @@ def dielectric_born(res, xc, *, dk: float = 1e-3, cg_tol: float = 1e-9,
         raise NotImplementedError("dielectric response: nspin must be 1 or 2")
     if system.is_fr:
         raise NotImplementedError("dielectric response: scalar-relativistic only")
-    if system.sym is not None:
-        raise NotImplementedError("dielectric response requires use_symmetry=False")
     if nspin == 2:
+        if system.sym is not None:
+            # The collinear (ρ↑,ρ↓) E-field fold needs the magnetic-group vector
+            # symmetrization (anti-unitary g·T spin swap); only the nspin=1
+            # space-group fold is implemented + oracle-tested here.
+            raise NotImplementedError(
+                "dielectric response with IBZ symmetry: nspin=1 only "
+                "(nspin=2 magnetic-group vector fold not implemented)")
         return _dielectric_born_spin(
             res, xc, dk=dk, cg_tol=cg_tol, beta=beta, outer_tol=outer_tol,
             max_outer=max_outer, history=history, verbose=verbose)
@@ -141,46 +151,80 @@ def dielectric_born(res, xc, *, dk: float = 1e-3, cg_tol: float = 1e-9,
 
     psi_r = g_to_r_b(c_occ, bk, grid.shape)
     n_pts = grid.n_points
+    na = len(system.species_of_atom)
+
+    # IBZ symmetry: the E-field density response Δρ_α is a POLAR vector field
+    # (the perturbation transforms as a vector), so the three field directions
+    # mix under the point group and must be folded together — a naive per-
+    # component scalar symmetrization would wrongly treat Δρ_α as totally
+    # symmetric. VectorFieldSymmetrizer folds the screening density each
+    # iteration; the ε and Born tensors are star-summed after convergence.
+    vsym = None
+    if system.sym is not None:
+        from gradwave.symmetry import VectorFieldSymmetrizer
+
+        vsym = VectorFieldSymmetrizer(
+            grid.shape, system.sym, grid.cell, dens_mask=grid.dens_mask
+        ).to(c_occ.device)
+
     eps_mat = torch.zeros(3, 3, dtype=RDTYPE)
-    dpsi_all, drho_all = [], []
-    for b_dir in range(3):
-        # Anderson-accelerated fixed point on u = K_Hxc[Δρ(E-probe + u)]
-        u_flat = torch.zeros(n_pts, dtype=RDTYPE, device=c_occ.device)
-        mixer = AndersonMixer(history, beta)
-        dpsi = torch.zeros_like(c_occ)
-        col_prev = None
-        for it in range(1, max_outer + 1):
-            rhs = -xi[b_dir]
-            if it > 1:
-                u_r = u_flat.reshape(grid.shape)
-                rhs = rhs - p_c(box_to_sphere_b(psi_r * u_r.to(psi_r.dtype), bk))
-            dpsi = cg_sternheimer(h, bk, c_occ, eps_occ, rhs, dpsi, shift,
-                                  tol=cg_tol)
-            dpsi_r = g_to_r_b(dpsi, bk, grid.shape)
-            drho = 4.0 * (kw[:, None, None, None, None]
-                          * (psi_r.conj() * dpsi_r).real).sum(dim=(0, 1)) / vol
-            col = torch.tensor([
-                float((kw[:, None] * torch.einsum(
-                    "kbg,kbg->kb", xi[a].conj(), dpsi).real).sum())
-                for a in range(3)])
-            if verbose:
-                print(f"  E{b_dir} it {it:3d}: eps col = "
-                      f"{[round(1 - 16 * math.pi * E2 / vol * c, 6) for c in col.tolist()]}")
-            if col_prev is not None and float((col - col_prev).abs().max()) < outer_tol:
-                break
-            col_prev = col
-            r_vec = _k_hxc(res, xc, drho).reshape(-1).to(u_flat.device) - u_flat
-            u_flat = mixer.step(u_flat, r_vec)
-        else:
-            raise RuntimeError(f"E-field response ({b_dir}) not converged")
-        dpsi_all.append(dpsi)
-        drho_all.append(drho)
-        eps_mat[:, b_dir] = 1.0 * torch.eye(3)[:, b_dir] \
-            - (16.0 * math.pi * E2 / vol) * col
+    if vsym is None:
+        # Full mesh (no IBZ fold): the three field directions decouple, each a
+        # self-consistent screening solve on its own.
+        dpsi_all, drho_all = [], []
+        for b_dir in range(3):
+            # Anderson-accelerated fixed point on u = K_Hxc[Δρ(E-probe + u)]
+            u_flat = torch.zeros(n_pts, dtype=RDTYPE, device=c_occ.device)
+            mixer = AndersonMixer(history, beta)
+            dpsi = torch.zeros_like(c_occ)
+            col_prev = None
+            for it in range(1, max_outer + 1):
+                rhs = -xi[b_dir]
+                if it > 1:
+                    u_r = u_flat.reshape(grid.shape)
+                    rhs = rhs - p_c(box_to_sphere_b(psi_r * u_r.to(psi_r.dtype), bk))
+                dpsi = cg_sternheimer(h, bk, c_occ, eps_occ, rhs, dpsi, shift,
+                                      tol=cg_tol)
+                dpsi_r = g_to_r_b(dpsi, bk, grid.shape)
+                drho = 4.0 * (kw[:, None, None, None, None]
+                              * (psi_r.conj() * dpsi_r).real).sum(dim=(0, 1)) / vol
+                col = torch.tensor([
+                    float((kw[:, None] * torch.einsum(
+                        "kbg,kbg->kb", xi[a].conj(), dpsi).real).sum())
+                    for a in range(3)])
+                if verbose:
+                    print(f"  E{b_dir} it {it:3d}: eps col = "
+                          f"{[round(1 - 16 * math.pi * E2 / vol * c, 6) for c in col.tolist()]}")
+                if col_prev is not None and float((col - col_prev).abs().max()) < outer_tol:
+                    break
+                col_prev = col
+                r_vec = _k_hxc(res, xc, drho).reshape(-1).to(u_flat.device) - u_flat
+                u_flat = mixer.step(u_flat, r_vec)
+            else:
+                raise RuntimeError(f"E-field response ({b_dir}) not converged")
+            dpsi_all.append(dpsi)
+            drho_all.append(drho)
+            eps_mat[:, b_dir] = 1.0 * torch.eye(3)[:, b_dir] \
+                - (16.0 * math.pi * E2 / vol) * col
+    else:
+        # IBZ-reduced: joint 3-direction solve with the polar vector fold on the
+        # screening density; ε/Born reconstructed by the point-group star sum.
+        from gradwave.symmetry import symmetrize_tensor
+
+        dpsi_all, drho_all, col_mat = _field_response_symmetrized(
+            h, bk, grid, c_occ, eps_occ, shift, psi_r, xi, p_c, kw, vol,
+            vsym, res, xc, n_pts, beta=beta, history=history,
+            outer_tol=outer_tol, max_outer=max_outer, cg_tol=cg_tol,
+            verbose=verbose)
+        eps_mat = symmetrize_tensor(
+            torch.eye(3, dtype=RDTYPE) - (16.0 * math.pi * E2 / vol) * col_mat,
+            system.sym, grid.cell)
 
     # Born charges: mixed derivative via autograd over the τ-differentiable
-    # pseudopotential, one backward per field direction.
-    na = len(system.species_of_atom)
+    # pseudopotential, one backward per field direction. drho_all/dpsi_all are
+    # the raw (IBZ-representative) responses; the tensor's point-group star sum
+    # is taken by symmetrize_atom_tensor below (consistently reconstructing the
+    # local part from Δρ and the nonlocal part from the IBZ k-sum).
     born = torch.zeros(na, 3, 3, dtype=RDTYPE)
     dij_c = bk.dij_full.to(CDTYPE)
     for a in range(3):
@@ -198,9 +242,77 @@ def dielectric_born(res, xc, *, dk: float = 1e-3, cg_tol: float = 1e-9,
         for s in range(na):
             born[s, a] = -grad[s]
             born[s, a, a] += float(system.charges[s])
+    if vsym is not None:
+        from gradwave.symmetry import symmetrize_atom_tensor
+
+        born = symmetrize_atom_tensor(born, system.sym, grid.cell)
     asr = born.sum(dim=0)
     return {"eps": eps_mat, "born": born, "asr": asr,
             "eps_iso": float(torch.diagonal(eps_mat).mean())}
+
+
+def _symmetrize_drho_vec(vsym, comps):
+    """Round-trip a real-space (Δρ_x, Δρ_y, Δρ_z) response through the polar
+    vector symmetrizer (via G), mirroring scf.common.symmetrize_rho for the
+    scalar density. Returns the three symmetrized real-space components."""
+    vg = torch.stack([r_to_g(c.to(CDTYPE)) for c in comps])
+    sg = vsym.apply(vg)
+    return [g_to_r_box(sg[a], real=True) for a in range(3)]
+
+
+@torch.no_grad()
+def _field_response_symmetrized(h, bk, grid, c_occ, eps_occ, shift, psi_r, xi,
+                                p_c, kw, vol, vsym, res, xc, n_pts, *, beta,
+                                history, outer_tol, max_outer, cg_tol, verbose):
+    """Joint 3-direction self-consistent E-field response on the IBZ.
+
+    Because the density response Δρ_α is a polar vector field, the three field
+    directions couple through the point group and are solved together: a single
+    Anderson fixed point on the stacked screening field u = (u_x, u_y, u_z),
+    where each iteration folds the (Δρ_x, Δρ_y, Δρ_z) response with
+    VectorFieldSymmetrizer before building K_Hxc — reconstructing the full-BZ
+    screening potential from the IBZ representatives. Returns (dpsi_all,
+    drho_raw_all, col_mat); the raw (pre-fold) IBZ responses feed the ε/Born
+    tensor sums, whose star reconstruction the caller applies."""
+    from gradwave.core.batch import box_to_sphere_b
+
+    u_flat = torch.zeros(3 * n_pts, dtype=RDTYPE, device=c_occ.device)
+    mixer = AndersonMixer(history, beta)
+    dpsi = [torch.zeros_like(c_occ) for _ in range(3)]
+    drho_raw = [None, None, None]
+    col_mat = torch.zeros(3, 3, dtype=RDTYPE)
+    col_prev = None
+    for it in range(1, max_outer + 1):
+        for b in range(3):
+            rhs = -xi[b]
+            if it > 1:
+                u_r = u_flat[b * n_pts:(b + 1) * n_pts].reshape(grid.shape)
+                rhs = rhs - p_c(box_to_sphere_b(psi_r * u_r.to(psi_r.dtype), bk))
+            dpsi[b] = cg_sternheimer(h, bk, c_occ, eps_occ, rhs, dpsi[b], shift,
+                                     tol=cg_tol)
+            dpsi_r = g_to_r_b(dpsi[b], bk, grid.shape)
+            drho_raw[b] = 4.0 * (kw[:, None, None, None, None]
+                                 * (psi_r.conj() * dpsi_r).real).sum(dim=(0, 1)) / vol
+        # raw IBZ ε columns col_mat[a, b] = Σ_k w_k Re⟨ξ^a|Δψ^b⟩
+        for b in range(3):
+            for a in range(3):
+                col_mat[a, b] = float((kw[:, None] * torch.einsum(
+                    "kbg,kbg->kb", xi[a].conj(), dpsi[b]).real).sum())
+        if verbose:
+            diag = [round(1 - 16 * math.pi * E2 / vol * float(col_mat[a, a]), 6)
+                    for a in range(3)]
+            print(f"  sym it {it:3d}: raw eps diag = {diag}")
+        if col_prev is not None and float((col_mat - col_prev).abs().max()) < outer_tol:
+            break
+        col_prev = col_mat.clone()
+        # full-BZ screening: fold the polar vector response, then K_Hxc per dir
+        drho_sym = _symmetrize_drho_vec(vsym, drho_raw)
+        u_new = torch.cat([_k_hxc(res, xc, drho_sym[b]).reshape(-1)
+                           for b in range(3)]).to(u_flat.device)
+        u_flat = mixer.step(u_flat, u_new - u_flat)
+    else:
+        raise RuntimeError("E-field response (symmetrized) not converged")
+    return dpsi, drho_raw, col_mat
 
 
 def _k_hxc(res, xc, drho):

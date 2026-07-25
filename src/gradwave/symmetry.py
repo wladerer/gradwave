@@ -478,6 +478,92 @@ class CollinearMagneticSymmetrizer:
         return up, dn
 
 
+class VectorFieldSymmetrizer:
+    """G-space symmetrization of a real POLAR vector field V_α(r) (α=x,y,z).
+
+    The response of a scalar (the density) to a Cartesian perturbation that
+    transforms as a vector — Δρ_α(r) under an applied E-field E_α — is a polar
+    vector field: the three components mix through the Cartesian rotation
+    S = Aᵀ W A⁻ᵀ of each space-group operation, exactly as MagneticSymmetrizer
+    folds the axial m⃗ EXCEPT there is no det(S) factor (Δρ is a proper vector,
+    m⃗ a pseudovector). The scalar G-fold (Miller map W⁻ᵀ, the non-symmorphic
+    phase e^{−2πi m·w}, and the density-sphere mask) is reused verbatim from a
+    RhoSymmetrizer built on the same group and box:
+
+        V_sym,α(G) = (1/N_op) Σ_op S_op[α,β] · e^{−2πi m·w_op} · V_β(W_opᵀ G).
+
+    Averaging the group-transform g·V over the closed group projects V onto the
+    field-symmetric subspace; folding the E-field density response this way (in
+    place of a naive per-component scalar symmetrization, which would wrongly
+    treat the response as totally symmetric) reconstructs the full-BZ vector
+    response from the IBZ representatives — the correctness statement behind
+    running the dielectric/Born DFPT with IBZ symmetry reduction.
+    """
+
+    def __init__(self, shape, sg: SpaceGroup, cell: np.ndarray, dens_mask=None):
+        self.rho_sym = RhoSymmetrizer(shape, sg, dens_mask=dens_mask)
+        a_t = np.asarray(cell, dtype=float).T
+        a_t_inv = np.linalg.inv(a_t)
+        rot = np.stack([a_t @ np.asarray(w, dtype=float) @ a_t_inv
+                        for w in sg.rotations])  # polar Cartesian S per op
+        self.rot = torch.as_tensor(rot, dtype=torch.float64)
+        self.shape = tuple(shape)
+
+    def to(self, device) -> VectorFieldSymmetrizer:
+        new = object.__new__(VectorFieldSymmetrizer)
+        new.rho_sym = self.rho_sym.to(device)
+        new.rot = self.rot.to(device)
+        new.shape = self.shape
+        return new
+
+    def apply(self, v_g_box: torch.Tensor) -> torch.Tensor:
+        """Symmetrize V(G) on the dense box: (3, n1,n2,n3) complex → same."""
+        rs = self.rho_sym
+        flat = v_g_box.reshape(3, -1) * rs.mask
+        gathered = flat[:, rs.idx]  # (3, nops, N)
+        mixed = torch.einsum("oab,bon->aon", self.rot.to(flat.dtype), gathered)
+        acc = (rs.phase * mixed).mean(dim=1) * rs.mask
+        return acc.reshape(3, *self.shape)
+
+
+def symmetrize_tensor(t: torch.Tensor, sg: SpaceGroup, cell: np.ndarray) -> torch.Tensor:
+    """Project a Cartesian rank-2 tensor onto the point-group-invariant subspace.
+
+    T ← (1/N_op) Σ_op S_op T S_opᵀ, with S = Aᵀ W A⁻ᵀ. Used to symmetrize the
+    dielectric tensor ε∞ accumulated over the IBZ: the star sum of the per-k
+    contributions ⟨ξ^α|Δψ^β⟩ (each rotating as S·M·Sᵀ) is exactly this average
+    scaled by the IBZ weights (closed group ⇒ Sᵀ...S gives the same result)."""
+    a_t = np.asarray(cell, dtype=float).T
+    a_t_inv = np.linalg.inv(a_t)
+    dev = t.device
+    acc = torch.zeros_like(t)
+    for w in sg.rotations:
+        s = torch.as_tensor(a_t @ np.asarray(w, dtype=float) @ a_t_inv,
+                            dtype=t.dtype, device=dev)
+        acc = acc + s @ t @ s.T
+    return acc / sg.n_ops
+
+
+def symmetrize_atom_tensor(z: torch.Tensor, sg: SpaceGroup, cell: np.ndarray) -> torch.Tensor:
+    """Project a per-atom Cartesian rank-2 tensor (e.g. Born charges Z*_{s,αβ})
+    onto the symmetric subspace, permuting atoms by the space-group action.
+
+    Z[s] ← (1/N_op) Σ_op S_opᵀ Z[atom_map[op,s]] S_op — the two-index analogue
+    of symmetrize_forces (same S = Aᵀ W A⁻ᵀ, same Sᵀ + atom_map convention), so
+    the IBZ star sum of the Born tensor is reconstructed consistently with the
+    force symmetrization already used by the code."""
+    a_t = np.asarray(cell, dtype=float).T
+    a_t_inv = np.linalg.inv(a_t)
+    dev = z.device
+    acc = torch.zeros_like(z)
+    for w, amap in zip(sg.rotations, sg.atom_map, strict=True):
+        s = torch.as_tensor(a_t @ np.asarray(w, dtype=float) @ a_t_inv,
+                            dtype=z.dtype, device=dev)
+        zt = z[torch.as_tensor(amap.copy(), device=dev)]  # (na,3,3) permuted
+        acc = acc + torch.einsum("ij,ajk,kl->ail", s.T, zt, s)
+    return acc / sg.n_ops
+
+
 def symmetrize_forces(forces: torch.Tensor, sg: SpaceGroup, cell: np.ndarray) -> torch.Tensor:
     """Project forces onto the symmetry-invariant subspace.
 
