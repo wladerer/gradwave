@@ -99,6 +99,46 @@ def run_gradwave(m, upfs, nbands, fft_shape, threads) -> dict:
     return res
 
 
+def run_gradwave_uspp(m, paws, nbands, fft_shape, threads) -> dict:
+    """USPP/PAW forward SCF (nspin=1 here, diamagnetic)."""
+    import torch
+
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.scf.uspp import scf_uspp, setup_uspp
+    torch.set_num_threads(threads)
+
+    ecut_ev = m.ecut_ry * RY
+    ecutrho_ev = m.rho_factor * m.ecut_ry * RY
+    width_ev = m.degauss_ry * RY
+
+    sys_full = setup_uspp(m.cell, m.positions, m.species, paws, ecut=10 * RY,
+                          kmesh=m.kmesh, use_symmetry=False)
+    nk_tr = len(sys_full.spheres)
+
+    t0 = time.perf_counter()
+    system = setup_uspp(m.cell, m.positions, m.species, paws, ecut=ecut_ev,
+                        ecutrho=ecutrho_ev, kmesh=m.kmesh, nbands=nbands,
+                        use_symmetry=True, fft_shape=fft_shape)
+    t_setup = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    r = scf_uspp(system, PBE(), smearing="gaussian", width=width_ev,
+                 etol=1e-8, rhotol=1e-7, max_iter=120, verbose=False)
+    t_scf = time.perf_counter() - t0
+
+    e = r["energies"]
+    one_elec = float(e.kinetic) + float(e.local) + float(e.nonlocal_)
+    return dict(
+        nk_tr_only=nk_tr, nk_irr=len(system.spheres),
+        converged=bool(r["converged"]), n_iter=int(r["n_iter"]),
+        etot_eV=float(e.free_energy), fermi_eV=float(r["fermi"] or 0.0),
+        setup_s=t_setup, scf_s=t_scf, wall_s=t_setup + t_scf, threads=threads,
+        fft_shape=list(system.grid.shape),
+        e_one_electron_eV=one_elec, e_hartree_eV=float(e.hartree),
+        e_xc_eV=float(e.xc), e_ewald_eV=float(e.ewald),
+        e_onecenter_eV=float(e.onecenter),
+    )
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mineral")
@@ -112,14 +152,17 @@ def main():
     import qe as QE
     import structures as S
 
-    from gradwave.pseudo.upf import parse_upf
-
     pdir = os.path.expanduser(a.pseudo_dir)
     outdir = Path(os.path.expanduser(a.outdir)) / a.mineral
     outdir.mkdir(parents=True, exist_ok=True)
 
     m = S.build(a.mineral)
-    upfs = [parse_upf(Path(pdir) / p) for p in m.pseudos]
+    if m.pseudo_kind == "USPP":
+        from gradwave.pseudo.upf_paw import parse_upf_paw
+        upfs = [parse_upf_paw(Path(pdir) / p) for p in m.pseudos]
+    else:
+        from gradwave.pseudo.upf import parse_upf
+        upfs = [parse_upf(Path(pdir) / p) for p in m.pseudos]
     nbands, nelec = compute_nbands(upfs, m.species)
 
     row: dict = {
@@ -142,7 +185,10 @@ def main():
 
     # ---- gradwave (pinned to QE's FFT grid if available) ----
     try:
-        row["gradwave"] = run_gradwave(m, upfs, nbands, fft_shape, a.threads)
+        if m.pseudo_kind == "USPP":
+            row["gradwave"] = run_gradwave_uspp(m, upfs, nbands, fft_shape, a.threads)
+        else:
+            row["gradwave"] = run_gradwave(m, upfs, nbands, fft_shape, a.threads)
     except Exception as e:  # noqa: BLE001
         import traceback
         row["gradwave"] = {"error": repr(e), "trace": traceback.format_exc()[-2000:]}

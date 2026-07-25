@@ -194,7 +194,35 @@ def eskolaite(ecut_ry: float = 70.0, degauss_ry: float = 0.01,
         kmesh=kmesh)
 
 
-REGISTRY = {"nio": nio, "hematite": hematite, "eskolaite": eskolaite}
+def pyrite(ecut_ry: float = 45.0, degauss_ry: float = 0.01,
+           kmesh=(4, 4, 4)) -> Mineral:
+    """FeS2 pyrite (Pa-3, #205), diamagnetic low-spin -> nspin=1. Primitive
+    cubic cell already holds 4 Fe + 8 S = 12 atoms. USPP/PAW path: Fe PAW +
+    S ultrasoft (the S pseudo exists only as USPP)."""
+    from ase.spacegroup import crystal
+
+    a, x = 5.416, 0.3847
+    at = crystal(symbols=["Fe", "S"], basis=[(0.0, 0.0, 0.0), (x, x, x)],
+                 spacegroup=205, cellpar=[a, a, a, 90, 90, 90],
+                 primitive_cell=True)
+    cell = np.asarray(at.get_cell())
+    positions = at.get_positions()
+    chem = at.get_chemical_symbols()
+    species = [0 if s == "Fe" else 1 for s in chem]
+    symbols = ["Fe", "S"]
+    pseudos = ["Fe.pbe-spn-kjpaw_psl.1.0.0.UPF", "s_pbe_v1.4.uspp.F.UPF"]
+    magmoms = np.zeros((len(species), 3))
+    start_mag = [0.0] * len(species)
+    return Mineral(
+        name="FeS2", cell=cell, positions=positions, species=species,
+        symbols=symbols, pseudos=pseudos, magmoms=magmoms, start_mag=start_mag,
+        kmesh=kmesh, ecut_ry=ecut_ry, degauss_ry=degauss_ry, nspin=1,
+        pseudo_kind="USPP", afm=False, rho_factor=10.0,
+        note="pyrite Pa-3 a=%.3f, diamagnetic (nspin=1), Fe PAW + S USPP" % a)
+
+
+REGISTRY = {"nio": nio, "hematite": hematite, "eskolaite": eskolaite,
+            "pyrite": pyrite}
 
 
 def build(name: str) -> Mineral:
