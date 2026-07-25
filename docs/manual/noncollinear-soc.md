@@ -96,7 +96,13 @@ res.mag_total    # ∫ (ρ↑ − ρ↓) dr [μB]
 This path is QE-validated. bcc Fe converges within 0.02 $\mu_B$ of QE's moment and
 under 1 meV/atom, and the triplet O₂ molecule reproduces the $m = 2\,\mu_B$ moment to
 $10^{-3}$. The USPP/PAW spin path (`scf_uspp`, `nspin=2`) carries the same
-`start_mag` and `mag_total`.
+`start_mag` and `mag_total`. The default mixing scheme resolves to `johnson` for
+`nspin=2`, the more robust choice for the stiff spin-channel response.
+
+The post-SCF properties run for the collinear path as well, the forces, stress,
+bands, KPM density of states, ELF, and the dielectric response, alongside a
+fixed-spin-moment mode and the antiferromagnetic k-fold. See
+[Collinear spin-polarized calculations](magnetism.md#collinear-spin-polarized-calculations-nspin2).
 
 ## Gotchas
 

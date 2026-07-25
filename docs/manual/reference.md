@@ -23,8 +23,9 @@ docstrings.
 | `<task>.out` | human report |
 | `checkpoint.pt` | restartable SCF state, density and becsum by default |
 
-`<task>` is `scf`, `relax`, `bands`, or `magnetism`. See [Inputs and outputs](io.md)
-for the JSON key list, the checkpoint API, and the analysis helpers.
+`<task>` is `scf`, `relax`, `bands`, `magnetism`, `eos`, `elastic`, or
+`phonons`. See [Inputs and outputs](io.md) for the JSON key list, the checkpoint
+API, and the analysis helpers.
 
 ## Key entry points
 
@@ -39,6 +40,7 @@ for the JSON key list, the checkpoint API, and the analysis helpers.
 | `uspp_density_loss_param_grads` (`postscf.uspp_implicit`) | density-loss adjoint |
 | `hybrid_scf`, `HybridExchangeParams` (`postscf.hybrid`, `postscf.exchange_multik`) | self-consistent hybrid, trainable α/ω |
 | `characterize_magnetism` (`postscf.magnetism`) | spin Hamiltonian (J, DMI) from the ground state |
+| `register`, `get`, `available` (`solvers.registry`) | block-eigensolver registry (davidson, chebyshev, lobpcg) |
 
 The [API reference](api/index.md) expands each of these with full signatures,
 grouped by subsystem.

@@ -25,7 +25,7 @@ flowchart TB
     subgraph B["Layer B · iterative solvers (torch.no_grad)"]
         direction LR
         scf["scf/ — SCF drivers"]
-        solvers["solvers/ — Davidson, Chebyshev"]
+        solvers["solvers/ — registry: Davidson, Chebyshev, LOBPCG"]
     end
     subgraph A["Layer A · differentiable physics"]
         direction LR
@@ -99,7 +99,7 @@ flowchart TB
 
     subgraph solve["Solvers & SCF · Layer B"]
         direction LR
-        s1["davidson · chebyshev · precond"]
+        s1["registry · davidson · chebyshev · lobpcg · precond"]
         s2["loop · mixing · guess"]
         s3["uspp (USPP/PAW) · noncollinear · implicit"]
     end
@@ -207,6 +207,33 @@ flowchart LR
     class forces grad;
 ```
 
+## Eigensolvers
+
+The diagonalization step solves the standard problem $Hx = \varepsilon x$ once
+per spin channel per iteration. The block eigensolvers sit behind a uniform
+adapter, so the SCF selects one by name and the choice never touches the loop
+body. Every registered solver has the signature
+
+    solve(apply_H, X0, precond, mask, *, tol, nbands) -> EigResult
+
+where `apply_H` is the batched Hamiltonian apply, `X0` the initial band block,
+`precond` the kinetic diagonal the Teter preconditioner is built from, and the
+returned `EigResult` carries the eigenpairs, the iteration count, the residual
+norms, and a `diagnostics` dict the benchmark battery reads. `registry.register`
+adds a solver under a name, `registry.get` and `registry.available` retrieve
+them, and `scf(..., eigensolver=name)` picks one. Three solvers register at
+import (`solvers/registry.py`):
+
+| name | solver | notes |
+|---|---|---|
+| `davidson` | batched block Davidson | the default |
+| `chebyshev` | Chebyshev-filtered subspace (CheFSI) | no preconditioner, reports its filter degree |
+| `lobpcg` | block LOBPCG | fixed $\sim 3 n_w$ subspace $[X, W, P]$ |
+
+The registry stays in Layer B and imports only sibling solver modules, so the
+adapter boundary keeps the loop free of any per-solver branching. See
+[Performance](performance.md) for how the three compare across system sizes.
+
 ## Where each feature lives
 
 If you are trying to find the module behind a capability, start here. The input
@@ -226,8 +253,11 @@ column is the YAML keyword (or API entry point) that turns the feature on; see
 | Exchange couplings (J) | `task: magnetism` | `postscf/magnetism.py`, `postscf/spin_exchange.py` | [Magnetism](magnetism.md) |
 | Magnetic anisotropy | API | `postscf/mae.py` | [MAE](mae.md) |
 | Hubbard U (+U and its response) | API | `core/hubbard.py`, `postscf/hubbard_u.py` | [Hubbard U](hubbard-u.md) |
-| Phonons | API | `postscf/phonons.py`, `postscf/hessian.py` | [Cookbook](cookbook.md) |
-| Dielectric / Born charges | API | `postscf/dielectric.py` | [Cookbook](cookbook.md) |
+| Phonons (Γ analytic, supercell dispersion) | `task: phonons` | `postscf/phonons.py`, `postscf/phonons_supercell.py`, `postscf/hessian.py` | [Post-SCF analysis](postscf-analysis.md#supercell-phonons) |
+| Elastic constants | `task: elastic` | `postscf/elastic.py`, `postscf/stress.py` | [Post-SCF analysis](postscf-analysis.md#elastic-constants) |
+| Dielectric / Born charges | API | `postscf/dielectric.py` | [Post-SCF analysis](postscf-analysis.md#dielectric-tensor-and-born-effective-charges) |
+| Grimme dispersion (D3 / D4) | `dispersion:` | `postscf/dispersion.py`, `postscf/dispersion_d4.py` | [Post-SCF analysis](postscf-analysis.md#grimme-dispersion-d3-and-d4) |
+| Eigensolver selection | `eigensolver:` | `solvers/registry.py`, `solvers/{davidson,chebyshev,lobpcg}.py` | — |
 | Symmetry reduction | `symmetry: true` | `symmetry.py`, `scf/paw_symmetry.py` | [Symmetry](symmetry.md) |
 | Smearing (metals) | `smearing:` | `core/occupations.py` | [Cookbook](cookbook.md) |
 | Learnable functionals | API | `core/xc/learnable.py`, `scf/implicit.py` | [Learning XC](learning-xc.md) |

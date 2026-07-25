@@ -99,9 +99,37 @@ the same idea per evaluation: `force_theorem_mae(..., magmoms=...)` folds each
 one-shot solve into its direction's own magnetic IBZ
 ([Magnetocrystalline anisotropy](magnetism.md#magnetocrystalline-anisotropy)).
 
-The collinear `scf`/`scf_uspp` loops reject a system built with `magmoms=` —
-the magnetic fold is for the spinor paths, and a collinear calculation would
-mis-fold the spin channels.
+### Collinear FM/AFM meshes
+
+A collinear antiferromagnet forfeits the ordinary space-group reduction. The
+operation that swaps the two spin sublattices is a symmetry of the crystal but
+not of either spin channel, so a per-channel density symmetrizer would fold ρ↑
+and ρ↓ together. Such a system drops to a near-full time-reversal-only mesh (bcc
+Cr AFM, a 2-atom cell at $8\times8\times8$, runs 260 k-points). The magnetic
+group keeps that swap as an anti-unitary operation $g\cdot T$, which folds k as
+$-W^{-\top}$ and, in the density, folds the spatial operation together with a
+spin-channel swap.
+
+`collinear_magnetic=True` engages that fold for the collinear (ρ↑, ρ↓) `nspin=2`
+path. Pass it with the collinear sublattice pattern in `magmoms=` on an unshifted
+mesh, and the collinear `scf` consumes the resulting `CollinearMagneticSymmetrizer`.
+
+```python
+system = setup_system(cell, pos, species, pseudos, ecut=ecut, kmesh=(4, 4, 4),
+                      use_symmetry=True, collinear_magnetic=True,
+                      magmoms=[[0, 0, 1.0], [0, 0, -1.0]])   # 2-atom AFM
+res = scf(system, SpinPBE(), nspin=2, start_mag=[0.6, -0.6],
+          smearing="gaussian", width=0.1)
+```
+
+The moments must be collinear (all parallel to one axis) or the constructor
+rejects them. The k-fold (`reduce_mesh_magnetic`) is the same one the spinor
+path uses, and only the density symmetrizer differs, swapping the spin channels
+under the anti-unitary operations. The fold reproduces the unreduced collinear
+SCF exactly and introduces no approximation. bcc Cr AFM at $4\times4\times4$ folds the
+time-reversal-only 36 k-points to 18 and reproduces the full-mesh free energy per
+atom to $10^{-6}$ eV and the moment to $10^{-4}$ μB. The $8\times8\times8$ mesh
+reclaims more, 260 to 75.
 
 ## Use it in a calculation
 
@@ -146,8 +174,10 @@ See [Performance](performance.md) for how the 5-to-14× speedup breaks down by s
   discretization-error estimates, the Dyson dressing) needs `use_symmetry=False`,
   because the perturbation lowers the crystal symmetry. For a magnetic ordering
   the right tool is the magnetic group above: pass `magmoms=` instead of turning
-  symmetry off, and gradwave raises a clear error when a collinear path is asked
-  to consume a magnetic system.
+  symmetry off. The spinor paths take it directly, and the collinear `nspin=2`
+  path takes it with `collinear_magnetic=True`. A collinear system built with
+  `magmoms=` but without that flag is rejected, since the plain per-channel
+  symmetrizer would mis-fold the spin channels.
 - **Time reversal** ($k \to -k$) is on by default and shrinks the IBZ further.
   A net moment breaks it as a standalone symmetry, but operations that reverse
   the moment survive combined with it as the anti-unitary half of the magnetic
