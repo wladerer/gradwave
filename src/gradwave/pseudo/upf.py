@@ -89,18 +89,54 @@ def _parse_floats(text: str) -> np.ndarray:
     return np.array(text.split(), dtype=np.float64)
 
 
+# Matches the root open tag <UPF> or <UPF version="2.0.1"> but not <UPFX>:
+# "UPF" must be followed immediately by '>' or whitespace-introduced attrs.
+_UPF_OPEN_RE = re.compile(r"<UPF(?:\s[^>]*)?>")
+_UPF_CLOSE = "</UPF>"
+
+
+def _extract_upf_span(text: str) -> str | None:
+    """Carve out exactly the ``<UPF …>…</UPF>`` root element, discarding any
+    content before the open tag or after the close tag. Returns None when there
+    is no complete root (missing open or close tag) so the caller can re-raise
+    the original parse error rather than accept a truncated pseudopotential."""
+    open_match = _UPF_OPEN_RE.search(text)
+    if open_match is None:
+        return None
+    close_idx = text.rfind(_UPF_CLOSE)  # last close tag: ignores trailing junk
+    if close_idx < open_match.start():
+        return None
+    return text[open_match.start() : close_idx + len(_UPF_CLOSE)]
+
+
 def _read_root(path: Path) -> ET.Element:
     text = path.read_text()
     try:
         return ET.fromstring(text)
     except ET.ParseError:
-        # Some UPF generators emit stray '&' or '<'-adjacent junk inside
-        # PP_INFO free text. Drop PP_INFO (metadata only) and retry.
-        cleaned = re.sub(r"<PP_INFO>.*?</PP_INFO>", "<PP_INFO></PP_INFO>", text, flags=re.DOTALL)
-        # Escape only bare '&' — leave already-valid entities (&amp; &lt; &gt;
-        # &quot; &apos; &#nn;) untouched so we don't double-escape.
-        cleaned = re.sub(r"&(?!amp;|lt;|gt;|quot;|apos;|#)", "&amp;", cleaned)
-        return ET.fromstring(cleaned)
+        # Real-world UPF v2 files are frequently not well-formed XML. The common
+        # offenders, in the order handled here:
+        #   1. Content OUTSIDE the single <UPF>…</UPF> root — a generator banner
+        #      before it, or a second stray element / log after </UPF>. This is
+        #      the "junk after document element" ElementTree.parse rejects. We
+        #      carve out just the root span and drop everything around it.
+        #   2. Stray bare '&' or '<'-adjacent junk inside PP_INFO free text. We
+        #      drop PP_INFO (metadata only) and escape bare '&'.
+        # If there is no complete root element the file is genuinely broken, so
+        # re-raise the original error instead of accepting a truncated pseudo.
+        span = _extract_upf_span(text)
+        if span is None:
+            raise
+        try:
+            return ET.fromstring(span)
+        except ET.ParseError:
+            cleaned = re.sub(
+                r"<PP_INFO>.*?</PP_INFO>", "<PP_INFO></PP_INFO>", span, flags=re.DOTALL
+            )
+            # Escape only bare '&' — leave already-valid entities (&amp; &lt;
+            # &gt; &quot; &apos; &#nn;) untouched so we don't double-escape.
+            cleaned = re.sub(r"&(?!amp;|lt;|gt;|quot;|apos;|#)", "&amp;", cleaned)
+            return ET.fromstring(cleaned)
 
 
 def _validate_root(root: ET.Element, path: Path) -> None:
