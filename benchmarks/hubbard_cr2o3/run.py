@@ -47,9 +47,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pseudo-dir", required=True)
     ap.add_argument("--outdir", required=True)
-    ap.add_argument("--ecut-ry", type=float, default=50.0)
+    ap.add_argument("--ecut-ry", type=float, default=60.0)
     ap.add_argument("--kmesh", type=int, nargs=3, default=[2, 2, 2])
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--cr-upf", default=None,
+                    help="Cr pseudo with atomic orbitals (PP_CHI); the minerals "
+                         "SG15 ONCV Cr has an empty PP_PSWFC so it cannot build "
+                         "the 3d +U projector")
     ap.add_argument("--skip-conventional", action="store_true")
     a = ap.parse_args()
 
@@ -64,6 +68,10 @@ def main():
     m = S.eskolaite(ecut_ry=a.ecut_ry, kmesh=tuple(a.kmesh))
     pdir = Path(a.pseudo_dir).expanduser()
     upfs = [parse_upf(pdir / p) for p in m.pseudos]  # [Cr, O]
+    cr_pseudo = m.pseudos[0]
+    if a.cr_upf:  # swap in a Cr pseudo that carries the 3d atomic orbital
+        upfs[0] = parse_upf(Path(a.cr_upf).expanduser())
+        cr_pseudo = Path(a.cr_upf).name
 
     nelec = float(sum(upfs[s].z_valence for s in m.species))
     nocc = int(np.ceil(nelec / 2))
@@ -81,7 +89,7 @@ def main():
     out = {"material": "Cr2O3", "afm": "Cr +-+- along c", "ecut_ry": a.ecut_ry,
            "kmesh": a.kmesh, "nbands": nbands, "nelec": nelec,
            "device": a.device, "start_mag": list(m.start_mag),
-           "manifold": "Cr 3d (l=2, species=0)",
+           "manifold": "Cr 3d (l=2, species=0)", "cr_pseudo": cr_pseudo,
            "literature_U_eV": "3 to 4 (Cococcioni/HP linear response)"}
 
     # --- autograd U: one SCF, Sternheimer response, no finite differences ---
