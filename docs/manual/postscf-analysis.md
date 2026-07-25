@@ -7,8 +7,8 @@ reads straight off one converged density, the charge density and its
 localization, the ionic charges, and the bonding analysis. The second group
 re-converges the SCF under a perturbation for the mechanical and response
 properties, the equation of state, the Grimme dispersion correction, the phonon
-dispersion, the elastic constants, and the dielectric tensor with the Born
-charges. This page walks through them with shipped examples, and renders the
+dispersion and its harmonic thermodynamics, the elastic constants and the
+directional Poisson response, and the dielectric tensor with the Born charges. This page walks through them with shipped examples, and renders the
 volumetric fields with [tinykit](https://github.com/wladerer/tinykit), a POV-Ray
 front end that reads the VASP CHGCAR files gradwave writes.
 
@@ -229,6 +229,33 @@ frequencies. Validation: the Si $2\times2\times2$ dispersion gives a Γ optical
 phonon near 521 cm⁻¹ against the ~520 experiment, three acoustic branches at
 zero, and no imaginary branch along the path.
 
+## Thermodynamics from the phonon DOS
+
+The vibrational free energy, entropy, and heat capacity of a harmonic crystal
+follow from its phonon density of states. Typically these come from a separate
+thermodynamics pass over a stored frequency file. Instead, gradwave integrates
+the phonon DOS it already produced, so the same supercell force constants that
+gave the dispersion also give the temperature-dependent thermodynamics
+(`postscf.thermo`).
+
+The heat capacity is $C_V(T) = k_B \int g(\omega)\, x^2 e^x/(e^x-1)^2\,
+d\omega$ with $x = \hbar\omega/k_B T$, and the entropy, internal energy, and
+Helmholtz free energy come from the same Bose integral. The zero-point energy is
+$\tfrac{1}{2}\int \hbar\omega\, g(\omega)\, d\omega$, and a Debye temperature is
+estimated from the second moment of the DOS. `heat_capacity_in_kB` reports $C_V$
+in units of $k_B$, so the Dulong-Petit plateau reads directly as
+$3N_\text{atoms}$.
+
+For a metal the electronic states near the Fermi level add a linear term.
+`electronic_heat_capacity` gives the Sommerfeld $C_V^\text{el} =
+\tfrac{\pi^2}{3} k_B^2 T\, g(E_F)$ from the electronic DOS at $E_F$. This term
+dominates the total as $T\to0$, where the phonon contribution vanishes as $T^3$.
+
+The integrals satisfy the harmonic limits by construction. $C_V$ rises to the
+$3N_\text{atoms}\,k_B$ Dulong-Petit plateau at high temperature and falls to zero
+as $T\to0$, the zero-point energy is positive, and the free energy stays
+consistent with $F = U - TS$.
+
 ## Elastic constants
 
 The elastic tensor $C_{ij} = \partial\sigma_i/\partial\varepsilon_j$ (Voigt
@@ -254,6 +281,20 @@ task: elastic
 elastic:
   strain: 0.005             # Voigt strain magnitude for the central difference
 ```
+
+The Voigt-Reuss-Hill Poisson ratio is the isotropic polycrystalline average,
+which is positive for nearly every material. A single crystal can still be
+auxetic along particular directions, and that response comes from the full
+compliance tensor $S = C^{-1}$. `directional_poisson` gives the ratio
+$\nu(\mathbf{n}, \mathbf{m})$ for a uniaxial load along $\mathbf{n}$ with the
+transverse strain read along $\mathbf{m}\perp\mathbf{n}$, and
+`min_directional_poisson` scans a Fibonacci grid of loading directions to return
+the minimum $\nu$ and the axes that reach it. A negative minimum is the auxetic
+signature. For cubic Cu the scan returns $\nu_\text{min} \approx -0.13$ along
+$\langle110\rangle$ while the Hill average stays near $+0.35$, the known result
+that most cubic metals are auxetic along $\langle110\rangle$ even though their
+polycrystalline average is not. `is_mechanically_stable` checks the Born
+stability criteria on $C$ before either average is trusted.
 
 ## Dielectric tensor and Born effective charges
 

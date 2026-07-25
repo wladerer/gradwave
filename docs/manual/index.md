@@ -48,13 +48,16 @@ collects the CLI, the output files, and the entry points, and the
   (norm-conserving and USPP/PAW), KPM-DOS, ELF, and the dielectric/Born E-field
   response, plus fixed-spin-moment SCF.
 - Phonons: the Γ-point analytic self-consistent position response, and a supercell
-  finite-displacement route for the full dispersion along a q-path and the phonon DOS.
+  finite-displacement route for the full dispersion along a q-path and the phonon DOS,
+  with the harmonic thermodynamics (heat capacity, entropy, free energy, zero-point
+  energy, Debye temperature) integrated from that DOS.
 - Grimme D3(BJ) and charge-dependent D4(BJ) dispersion as an opt-in correction
   with analytic forces and stress, folded into the reported total through the CLI
   and the ASE calculator.
 - Charge density, ELF, and PARCHG export (`.cube`, `.xsf`, VASP CHGCAR), Bader
-  charges, k-resolved COHP bonding analysis, clamped-ion elastic constants, and
-  the Birch-Murnaghan equation of state with the Δ gauge.
+  charges, k-resolved COHP bonding analysis, clamped-ion elastic constants with the
+  directional Poisson response for auxetic materials, and the Birch-Murnaghan
+  equation of state with the Δ gauge.
 - Norm-conserving (ONCV) and ultrasoft/PAW pseudopotentials, detected from the UPF
   file, on CPU and GPU in float64/complex128.
 
