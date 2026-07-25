@@ -44,17 +44,58 @@ Runs on **asus** (Intel + 22 core), QE 7.5, PBE ONCV (SG15) pseudos.
 gradwave = 8 torch threads; QE = 8 MPI ranks. Wall = full program (gradwave:
 setup + SCF; QE: PWSCF WALL).
 
-| mineral | atoms | k-grid | pseudo | IBZ k (gw mag / QE / gw TR-only) | gradwave wall (iters) | QE wall (ranks) | ratio QE:gw | ΔE_elec (meV/atom) | ΔE_total | status |
-|---------|------:|:------:|:------:|:--------------------------------:|:---------------------:|:---------------:|:-----------:|:------------------:|:--------:|:------:|
-| NiO (rocksalt, type-II AFM) | 4 | 6×6×6 | Ni+O ONCV (NC) | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| α-Fe₂O₃ hematite (corundum, ++−−) | 10 | 4×4×4 | Fe+O ONCV (NC) | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| Cr₂O₃ eskolaite (corundum, +−+−) | 10 | 4×4×4 | Cr+O ONCV (NC) | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+IBZ k is reported as `no-sym (TR-only) → Shubnikov-folded (gradwave) / QE`, so
+the magnetic reduction is visible and the two codes' irreducible counts sit side
+by side. ΔE_elec is the Ewald-removed electronic agreement (the validated
+number); ΔE_total is the raw total-energy difference, both in meV/atom. The wall
+ratio is `gradwave wall ÷ QE wall`, so 12.3× means QE finished 12.3 times faster.
 
-Attempted (USPP/PAW path): _TBD_.
+| mineral | atoms | k-grid | pseudo | IBZ k: no-sym → gw / QE | gradwave wall (iters) | QE wall (ranks) | wall ratio (gw÷QE) | ΔE_elec (meV/atom) | ΔE_total (meV/atom) | status |
+|---------|------:|:------:|:------:|:-----------------------:|:---------------------:|:---------------:|:------------------:|:------------------:|:-------------------:|:------:|
+| NiO (rocksalt, type-II AFM) | 4 | 6×6×6 | Ni+O ONCV (NC) | 112 → 32 / 32 | 559.1 s (18) | 45.5 s (8) | 12.3× | −0.016 | −2969 † | converged ✓ |
+| α-Fe₂O₃ hematite (corundum, ++−−) | 10 | 4×4×4 | Fe+O ONCV (NC) | 36 → 20 / 13 | 2274.9 s (17) | 87.1 s (8) | 26.1× | −0.013 | −13.2 | converged ✓ |
+| Cr₂O₃ eskolaite (corundum, +−+−) | 10 | 4×4×4 | Cr+O ONCV (NC) | 36 → 16 / 13 | 1128.5 s (16) | 52.8 s (8) | 21.4× | −0.011 | −4.0 | converged ✓ |
+| FeS₂ pyrite (Pa-3, diamagnetic) | 12 | 4×4×4 | Fe PAW + S USPP | — | — | — | — | — | — | unsupported ✗ |
+
+† NiO's raw total carries the pre-#93 low-symmetry Ewald offset (dE_ewald =
+−11.877 eV for this cell); the Ewald-removed ΔE_elec of −0.016 meV/atom is the
+physics. The corundum cells trigger the same bug only weakly (dE_ewald = −0.132
+eV hematite, −0.040 eV eskolaite), so their raw totals already sit at −13.2 and
+−4.0 meV/atom. These SCF runs predate the #93 Ewald fix, so ΔE_elec is the
+number to read across all three.
+
+Attempted (USPP/PAW path): **FeS₂ pyrite** did not run. gradwave's UPF v2 reader
+(`pseudo/upf.py::_read_root`, reused by `parse_upf_paw`) raises
+`xml.etree.ElementTree.ParseError: junk after document element` on the Fe PAW
+pseudopotential `Fe.pbe-spn-kjpaw_psl.1.0.0.UPF`, and the PP_INFO-stripping
+fallback does not recover it. The PAW free-text header is not parseable by the
+current strict-XML path, so the run aborts at pseudopotential load before any QE
+or gradwave SCF. This is a pseudopotential-parsing gap, not an SCF or physics
+failure. Unsupported until the PAW UPF reader handles this header.
 
 ## Findings
 
-_TBD after runs._
+The three antiferromagnetic oxides reproduce Quantum ESPRESSO's electronic total
+energy to better than 0.02 meV/atom on the identical magnetic-primitive cell,
+plane-wave cutoff, k-grid, smearing and PBE functional (NiO −0.016, hematite
+−0.013, eskolaite −0.011 meV/atom). The agreement holds on the same FFT grid QE
+reports, so the Kohn-Sham energy gradwave computes matches the mature Fortran
+reference at the level the benchmark was built to test.
+
+Quantum ESPRESSO runs the forward SCF 12.3× to 26.1× faster than gradwave on
+these cells, which is the expected outcome for optimised Fortran plus MPI against
+differentiable PyTorch. gradwave's value is exact gradients and inverse design on
+top of a correct SCF, not raw forward-SCF speed, and the correctness is what this
+benchmark establishes.
+
+The collinear-magnetic (Shubnikov) fold cuts the irreducible k-count on every
+real ordering here. NiO folds 112 unshifted mesh points to 32, matching QE's
+magnetic-symmetry count of 32 exactly. On the corundum antiferromagnets gradwave
+folds 36 points to 20 (hematite) and 16 (eskolaite) where QE reaches 13 in both,
+so gradwave's magnetic IBZ is larger than QE's and gradwave integrates a few more
+irreducible k-points. The total energies still agree to 0.013 meV/atom, so both
+codes converge to the same physics on the same cell and gradwave's fold is
+correct but less aggressive than QE's on the R-3c magnetic space group.
 
 ### Ewald note (a real gradwave bug this benchmark surfaced)
 
