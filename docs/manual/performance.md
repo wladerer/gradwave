@@ -78,7 +78,7 @@ low-Z element overflows before a compact high-Z one: K (a ≈ 5.3 Å, 54³) OOMs
 Cu (a ≈ 3.6 Å, 36³) fits, despite Cu's higher cutoff. The fix is to scale the
 k-mesh to cell size rather than fix a uniform N³ — K and Sr used 12³ against 16³ for
 the ~3.6 Å cells, the same reciprocal-space density, which is both more correct and
-fits the card. The still-missing code lever is k-chunking the batched apply
+fits the card. The still-missing code path is k-chunking the batched apply
 (`_band_chunk` handles bands, not k); it would let the GPU take every big-grid
 system at full mesh instead of falling back to the CPU.
 
@@ -131,14 +131,15 @@ the fixed-occupation insulators, on both this CPU and the RTX 3050 (Si 1.06 and 
 times, MgO 1.10 and 1.30), and regresses every metal and magnetic case (Cu 0.78 and
 0.77, Al 0.77 and 0.94, FM Fe 0.79 and 0.74, AFM Cr 0.65 and 0.90). The fp32 draft
 adds two SCF iterations on Fe and Cr, device-independent, landing hardest where the
-systems are already the most expensive. On a consumer GPU whose fp64 runs at a
-fraction of fp32 rate the option is nearly neutral on small insulators, for the reason
-in the GPU section below. Measure it on your workload rather than assuming it helps,
+systems are already the most expensive. On the consumer GPU, whose fp64 runs at a
+fraction of the fp32 rate, the fp32 draft relieves more of the per-iteration cost than
+it does on the CPU. The insulator wins therefore run larger on the RTX 3050 than on the
+CPU, for the reason in the GPU section below. Measure it on your workload rather than assuming it helps,
 and expect a metal or magnetic cell with few k-points to regress.
 
 The metal-versus-insulator axis sets the sign, and size sets the magnitude once the
 sign is positive. Among the fixed-occupation systems, where it wins, the RTX 3050
-speedup grows with the cell, from 1.14 times on 2-atom Si through 1.28 times on 16
+speedup grows with the cell, from 1.18 times on 2-atom Si through 1.28 times on 16
 atoms to 1.39 times on 54, because the fp32 draft only pays once the dense subspace
 eigensolve and the big-sphere Hamiltonian applies dominate the per-iteration cost. The
 moderate-grid USPP/PAW cases with many k-points or spin-orbit reach about 1.45 times,
@@ -237,9 +238,12 @@ time again.
   to the FFTs. It was tried and removed for the complex apply. The real-valued XC
   layer is a separate live gain and is not covered by this line, see "Compiled XC
   layer" below.
-- **fp32 drafting on a CPU insulator.** The cast overhead beats pocketfft's fp32
-  gain, so the draft is slower for that case. The mixed-precision gains are on GPU
-  many-k and smeared workloads, not here.
+- **fp32 drafting on a small metal or magnetic cell.** The fp32 draft noise perturbs
+  the self-consistent density on a smeared or spin-polarized system and adds SCF
+  iterations, so every metal and magnetic case in the seven-system battery regressed on
+  both the CPU and the RTX 3050. The mixed-precision wins are on the fixed-occupation
+  insulators and on the moderate-grid USPP/PAW many-k and spin-orbit cases. See "Mixed
+  precision" above.
 - **Γ-point real wavefunctions.** Half-basis real algebra at Γ can at best halve the
   Hamiltonian-apply share, which caps the end-to-end gain at roughly 1.3 to 1.5
   times, for the most invasive change in the stack. Mixed precision already gives
@@ -366,7 +370,7 @@ The reason is arithmetic. A double-precision Hamiltonian apply is two c128 FFTs 
 fp64 einsums, running on a GeForce card whose fp64 executes at 1/64 the fp32 rate.
 The single-precision twin kernels are 6 to 12 times faster on the same device, so
 the gap is precision, not structure. The fp32 draft window, the first few SCF
-iterations above diagonalizer tolerance 1e-5, is too short to matter at 9-iteration
+iterations above diagonalizer tolerance 1e-5, is too short to close the deficit at 9-iteration
 solves, and everything after runs in crippled fp64.
 
 Direct evidence the bound is arithmetic and not clocks or power: on AC an fcc-Pt SCF
