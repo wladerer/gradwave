@@ -1,0 +1,64 @@
+{
+  "system": "si_insulator",
+  "cls": "insulator",
+  "formula": "Si2",
+  "solvers": {
+    "davidson": {
+      "fp64": {
+        "mixed_precision": false,
+        "natoms": 2,
+        "converged": true,
+        "scf_iters": 9,
+        "wall_s": 4.092,
+        "eigh_s": 0.197,
+        "eigh_share": 0.0482,
+        "eigh_calls": 139,
+        "final_res": 5.146611309364792e-09,
+        "energy_eV": -213.93343314517043,
+        "error": null
+      },
+      "mixed": {
+        "mixed_precision": true,
+        "natoms": 2,
+        "converged": true,
+        "scf_iters": 10,
+        "wall_s": 3.859,
+        "eigh_s": 0.221,
+        "eigh_share": 0.0572,
+        "eigh_calls": 162,
+        "final_res": 2.684120472441614e-09,
+        "energy_eV": -213.93343314517048,
+        "error": null
+      },
+      "comparison": {
+        "speedup": 1.06,
+        "iters_delta": 1,
+        "energy_error_eV": 5.684341886080802e-14,
+        "energy_error_eV_per_atom": 2.842170943040401e-14,
+        "energy_ok": true,
+        "regresses": false
+      }
+    }
+  },
+  "meta": {
+    "timestamp": "2026-07-25 03:54 UTC",
+    "host": "nixos",
+    "torch": "2.12.1+cu130",
+    "threads": 8,
+    "solvers": [
+      "davidson"
+    ],
+    "systems": [
+      "si_insulator",
+      "mgo_insulator",
+      "al_metal",
+      "cu_metal",
+      "fe_fm_metal",
+      "cr_afm_metal",
+      "bi_heavy"
+    ],
+    "mode": "mixed_precision",
+    "mp_crossover": 1e-05,
+    "mp_e_tol_eV_per_atom": 1e-06
+  }
+}
