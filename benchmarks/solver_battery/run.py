@@ -84,6 +84,12 @@ def _timed_eigh(*args, **kwargs):
 torch.linalg.eigh = _timed_eigh
 
 
+def _sync(device):
+    """Barrier so wall-clock timing is honest on cuda (ops are async there)."""
+    if device != "cpu" and torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
 def _upf(name):
     return parse_upf(PSEUDOS / name)
 
@@ -167,11 +173,11 @@ def _system_stats(system):
                 npw_max=max(npw), n_electrons=float(sum(system.charges).item()))
 
 
-def run_system(name, spec, solvers):
+def run_system(name, spec, solvers, device="cpu"):
     """Run every solver on one system; return the per-system result record."""
     common = dict(etol=1e-9, rhotol=1e-8, verbose=False)
     rec = dict(system=name, cls=spec["cls"], formula=spec["formula"],
-               baseline_solver="davidson", solvers={})
+               baseline_solver="davidson", device=device, solvers={})
     baseline_E = None
     stats = None
     for solver in solvers:
@@ -183,10 +189,14 @@ def run_system(name, spec, solvers):
             system = spec["build"]()
             if stats is None:
                 stats = _system_stats(system)
+            if device != "cpu":
+                system = system.to(device)
             _EIGH["t"] = 0.0
             _EIGH["n"] = 0
+            _sync(device)
             t0 = time.perf_counter()
             res = scf(system, xc, eigensolver=solver, **kw)
+            _sync(device)
             wall = time.perf_counter() - t0
             eigh_t = _EIGH["t"]
             E = float(res.energies.total)
@@ -247,23 +257,33 @@ def _mp_solvers(requested):
     return sv
 
 
-def _scf_once(spec, solver, mixed):
-    """One full SCF solve; returns a per-run record (wall/iters/energy/|Δρ|)."""
+def _scf_once(spec, solver, mixed, device="cpu"):
+    """One full SCF solve; returns a per-run record (wall/iters/energy/|Δρ|).
+
+    device: "cpu" (default) or "cuda" — the freshly built System is moved to the
+    chosen device before the solve so the whole SCF runs there. On cuda we
+    synchronize around the timer so wall time reflects real kernel execution
+    (torch cuda ops are async; without the sync the wall would only clock launch
+    overhead)."""
     common = dict(etol=1e-9, rhotol=1e-8, verbose=False)
     kw = dict(common)
     kw.update(spec["scf"])
     xc = kw.pop("xc")
     system = spec["build"]()
     natoms = len(system.positions)
+    if device != "cpu":
+        system = system.to(device)
     _EIGH["t"] = 0.0
     _EIGH["n"] = 0
+    _sync(device)
     t0 = time.perf_counter()
     res = scf(system, xc, eigensolver=solver, mixed_precision=mixed, **kw)
+    _sync(device)
     wall = time.perf_counter() - t0
     E = float(res.energies.total)
     final_res = float(res.history[-1]["res"]) if res.history else None
     return dict(
-        mixed_precision=mixed, natoms=natoms,
+        mixed_precision=mixed, device=device, natoms=natoms,
         converged=bool(res.converged), scf_iters=int(res.n_iter),
         wall_s=round(wall, 3), eigh_s=round(_EIGH["t"], 3),
         eigh_share=round(_EIGH["t"] / wall, 4) if wall > 0 else None,
@@ -291,25 +311,33 @@ def _mp_compare(fp64, mixed):
     )
 
 
-def run_system_mp(name, spec, solvers):
+def run_system_mp(name, spec, solvers, device="cpu"):
     """Run each solver at fp64 and mixed precision on one system; return the
     per-system record with derived comparison metrics."""
     rec = dict(system=name, cls=spec["cls"], formula=spec["formula"],
-               solvers={})
+               device=device, solvers={})
     for solver in solvers:
         print(f"  [{name}] {solver}: fp64 vs mixed", flush=True)
         runs = {}
         for mixed in (False, True):
             tag = "mixed" if mixed else "fp64"
             try:
-                r = _scf_once(spec, solver, mixed)
+                r = _scf_once(spec, solver, mixed, device=device)
                 print(f"      {tag:5s} iters={r['scf_iters']} "
                       f"conv={r['converged']} wall={r['wall_s']:.1f}s "
                       f"|Δρ|={_fmt(r['final_res'], '{:.1e}')} "
                       f"E={r['energy_eV']:.9f}", flush=True)
             except Exception as exc:  # noqa: BLE001 - record and continue
-                r = dict(mixed_precision=mixed, error=f"{type(exc).__name__}: {exc}")
-                print(f"      {tag:5s} ERROR: {r['error']}", flush=True)
+                # OOM is expected on a 6 GB GPU for the larger k-meshes (fp64
+                # doubles memory). Record "OOM" and free the cache so the next
+                # system starts from a clean allocator instead of cascading.
+                is_oom = "out of memory" in str(exc).lower()
+                r = dict(mixed_precision=mixed, device=device,
+                         oom=is_oom, error=f"{type(exc).__name__}: {exc}")
+                if device != "cpu" and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                tag_msg = "OOM" if is_oom else "ERROR"
+                print(f"      {tag:5s} {tag_msg}: {r['error']}", flush=True)
             runs[tag] = r
         comp = _mp_compare(runs["fp64"], runs["mixed"])
         if not comp.get("error"):
@@ -345,19 +373,23 @@ def render_mp_table(records):
     return "\n".join(lines)
 
 
-def run_mixed_precision(names, solvers, meta):
-    RESULTS_MP.mkdir(parents=True, exist_ok=True)
+def run_mixed_precision(names, solvers, meta, device="cpu"):
+    # cpu keeps writing flat into results/mixed_precision/ (identical to before);
+    # cuda writes to results/mixed_precision/cuda/ so the GPU sweep never
+    # clobbers the committed CPU baseline it is meant to be contrasted against.
+    out_dir = RESULTS_MP if device == "cpu" else RESULTS_MP / device
+    out_dir.mkdir(parents=True, exist_ok=True)
     records = []
     for name in names:
         print(f"[{name}]", flush=True)
-        rec = run_system_mp(name, SYSTEMS[name], solvers)
+        rec = run_system_mp(name, SYSTEMS[name], solvers, device=device)
         rec["meta"] = meta
         records.append(rec)
-        (RESULTS_MP / f"{name}.json").write_text(json.dumps(rec, indent=2))
-    (RESULTS_MP / "summary.json").write_text(
+        (out_dir / f"{name}.json").write_text(json.dumps(rec, indent=2))
+    (out_dir / "summary.json").write_text(
         json.dumps(dict(meta=meta, records=records), indent=2))
     print("\n" + render_mp_table(records))
-    print(f"\nwrote {len(records)} mixed-precision results to {RESULTS_MP}/ "
+    print(f"\nwrote {len(records)} mixed-precision results to {out_dir}/ "
           f"(RESEARCH.md untouched)")
 
 
@@ -424,7 +456,19 @@ def main():
                     help="run the mixed-precision axis instead: each solver at "
                          "fp64 and mixed_precision=True; writes to "
                          "results/mixed_precision/ and leaves RESEARCH.md alone")
+    ap.add_argument("--device", default="cpu", choices=("cpu", "cuda"),
+                    help="device the SCF runs on. cpu (default) is unchanged; "
+                         "cuda moves each System to the GPU before every solve "
+                         "(consumer NVIDIA fp64 is ~1/32-1/64 of fp32, so this "
+                         "is where fp32-draft mixed precision should pay off). "
+                         "GPU mixed-precision results write to "
+                         "results/mixed_precision/cuda/.")
     args = ap.parse_args()
+
+    device = args.device
+    if device == "cuda" and not torch.cuda.is_available():
+        raise SystemExit("--device cuda requested but torch.cuda.is_available() "
+                         "is False (no CUDA build / no visible GPU).")
 
     names = args.only or list(SYSTEMS)
 
@@ -432,15 +476,16 @@ def main():
         solvers = _mp_solvers(args.solvers)
         meta = dict(
             timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-            host=platform.node(), torch=torch.__version__,
+            host=platform.node(), torch=torch.__version__, device=device,
+            gpu=(torch.cuda.get_device_name(0) if device == "cuda" else None),
             threads=torch.get_num_threads(), solvers=solvers, systems=names,
             mode="mixed_precision", mp_crossover=MP_CROSSOVER,
             mp_e_tol_eV_per_atom=MP_E_TOL_PER_ATOM)
         print(f"mixed-precision axis: {len(names)} systems x {len(solvers)} "
               f"solvers ({', '.join(solvers)}) x [fp64, mixed] on {meta['host']} "
-              f"[{meta['threads']} threads, torch {meta['torch']}, "
-              f"crossover {MP_CROSSOVER:.0e}]")
-        run_mixed_precision(names, solvers, meta)
+              f"[device={device}, {meta['threads']} threads, "
+              f"torch {meta['torch']}, crossover {MP_CROSSOVER:.0e}]")
+        run_mixed_precision(names, solvers, meta, device=device)
         return
 
     solvers = args.solvers or available()
@@ -450,17 +495,18 @@ def main():
     RESULTS.mkdir(parents=True, exist_ok=True)
     meta = dict(
         timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-        host=platform.node(), torch=torch.__version__,
+        host=platform.node(), torch=torch.__version__, device=device,
+        gpu=(torch.cuda.get_device_name(0) if device == "cuda" else None),
         threads=torch.get_num_threads(), solvers=solvers, systems=names,
         E_match_tol_eV=E_MATCH_TOL)
     print(f"battery: {len(names)} systems x {len(solvers)} solvers "
           f"({', '.join(solvers)}) on {meta['host']} "
-          f"[{meta['threads']} threads, torch {meta['torch']}]")
+          f"[device={device}, {meta['threads']} threads, torch {meta['torch']}]")
 
     records = []
     for name in names:
         print(f"[{name}]", flush=True)
-        rec = run_system(name, SYSTEMS[name], solvers)
+        rec = run_system(name, SYSTEMS[name], solvers, device=device)
         rec["meta"] = meta
         records.append(rec)
         (RESULTS / f"{name}.json").write_text(json.dumps(rec, indent=2))
