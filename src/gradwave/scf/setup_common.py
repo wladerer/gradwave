@@ -61,8 +61,10 @@ def build_symmetrizer_and_kpoints(grid, cell, kmesh, kshift, sym, mag_sym,
     for the spinor (ρ, m⃗) path, or a CollinearMagneticSymmetrizer for the
     collinear (ρ↑, ρ↓) nspin=2 path (collinear_magnetic=True). A plain space
     group uses RhoSymmetrizer + reduce_mesh; no symmetry falls back to the
-    Monkhorst-Pack mesh. The k-fold (reduce_mesh_magnetic) is identical for
-    both magnetic representations — only the density symmetrizer differs."""
+    Monkhorst-Pack mesh. The k-fold (reduce_mesh_magnetic) shares the magnetic
+    group across both representations; the collinear path additionally folds the
+    plain per-channel k → −k time reversal (valid for a real per-spin
+    Hamiltonian), which the spinor path omits."""
     if mag_sym is not None:
         from gradwave.symmetry import reduce_mesh_magnetic
 
@@ -76,7 +78,15 @@ def build_symmetrizer_and_kpoints(grid, cell, kmesh, kshift, sym, mag_sym,
 
             rho_symmetrizer = MagneticSymmetrizer(grid.shape, mag_sym, cell,
                                                   dens_mask=grid.dens_mask)
-        kfrac, kw = reduce_mesh_magnetic(kmesh, kshift, mag_sym)
+        # Plain k → −k time reversal is an ordinary per-channel symmetry of the
+        # collinear (ρ↑, ρ↓) Hamiltonian (H_σ real ⇒ n_σ(−k) = n_σ(k), no spin
+        # swap), so the collinear fold adds it — this is what lets the corundum
+        # R-3̄c AFMs reach QE's k-count (their inversion·T swap op leaves k → −k
+        # out of the magnetic group). The spinor (ρ, m⃗) path must NOT add it (TR
+        # flips m⃗ there; the anti-unitary g·T ops already carry that reversal).
+        kfrac, kw = reduce_mesh_magnetic(
+            kmesh, kshift, mag_sym,
+            time_reversal=(collinear_magnetic and time_reversal))
     elif sym is not None:
         from gradwave.symmetry import RhoSymmetrizer, reduce_mesh
 

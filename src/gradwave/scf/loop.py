@@ -148,9 +148,13 @@ def setup_system(
 
     magmoms (with use_symmetry=True) switches to the MAGNETIC space group of
     that moment configuration: k folds into the magnetic IBZ (unitary ops as
-    W⁻ᵀ, anti-unitary g·T ops as −W⁻ᵀ — time_reversal is ignored, the group
-    decides). Directions are what matter — magnitudes only distinguish zero
-    from nonzero and same from different.
+    W⁻ᵀ, anti-unitary g·T ops as −W⁻ᵀ). For the collinear (ρ↑, ρ↓) path the
+    plain per-channel k → −k time reversal is added on top (H_σ real ⇒ no spin
+    swap), reclaiming the −k fold that the magnetic group omits when its
+    sublattice-swap op is inversion·T (corundum R-3̄c) rather than a translation
+    (bcc Cr); the spinor path leaves it out (TR flips m⃗ there). Directions are
+    what matter — magnitudes only distinguish zero from nonzero and same from
+    different.
 
     Two magnetic representations share that k-fold:
     - the spinor (ρ, m⃗) symmetrizer (default) — only scf_noncollinear consumes it;

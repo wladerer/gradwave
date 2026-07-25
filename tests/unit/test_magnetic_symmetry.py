@@ -122,6 +122,58 @@ def test_bcc_fe_moment_along_z():
     assert abs(w_mag.sum() - 1.0) < 1e-12
 
 
+def _corundum(spin_pattern, a_hex=5.0, c_hex=13.7, z_M=0.35, x_O=0.306):
+    """Corundum R-3̄c (#167) primitive: 4 M + 6 O, M spins set by their order
+    along the 3-fold axis. Returns (cell, magmoms, SpaceGroup)."""
+    from ase.spacegroup import crystal
+
+    at = crystal(symbols=["Fe", "O"],
+                 basis=[(0.0, 0.0, z_M), (x_O, 0.0, 0.25)],
+                 spacegroup=167, cellpar=[a_hex, a_hex, c_hex, 90, 90, 120],
+                 primitive_cell=True)
+    cell = np.asarray(at.get_cell())
+    pos = at.get_positions()
+    chem = at.get_chemical_symbols()
+    species = [0 if s == "Fe" else 1 for s in chem]
+    axis = cell.sum(0)
+    axis = axis / np.linalg.norm(axis)
+    m_idx = [i for i, s in enumerate(chem) if s == "Fe"]
+    order = sorted(m_idx, key=lambda i: float(pos[i] @ axis))
+    sign = {i: spin_pattern[r] for r, i in enumerate(order)}
+    magmoms = np.zeros((len(chem), 3))
+    for i in m_idx:
+        magmoms[i, 2] = sign[i]
+    sg = find_spacegroup(cell, pos @ np.linalg.inv(cell), species)
+    return cell, magmoms, sg
+
+
+def test_corundum_afm_time_reversal_fold():
+    """Corundum R-3̄c AFMs (hematite ++−−, eskolaite +−+−): the sublattice-swap
+    op is inversion·T, whose k-action is trivial (−W⁻ᵀ = +I), so the magnetic
+    group ALONE leaves the plain k → −k fold out — a 4×4×4 mesh folds only to
+    20 (hematite) / 16 (eskolaite). The collinear per-channel time reversal
+    (H_σ real ⇒ n_σ(−k) = n_σ(k), no spin swap) restores it, and both reach 13,
+    the QuantumESPRESSO count. Inversion is the anti-unitary op that makes it
+    matter."""
+    for pattern, n_mag in ([1, 1, -1, -1], 20), ([1, -1, 1, -1], 16):
+        cell, magmoms, sg = _corundum(pattern)
+        assert sg.international == "R-3c" and sg.n_ops == 12
+        mg = magnetic_spacegroup(sg, magmoms, cell)
+        assert (mg.n_unitary, mg.n_anti) == (6, 6)  # nothing dropped
+        # inversion is anti-unitary (the AFM sublattice swap), so its k-action
+        # −W⁻ᵀ = +I contributes no k → −k
+        inv = next(w for w in sg.rotations
+                   if np.array_equal(w, -np.eye(3, dtype=int)))
+        assert any(np.array_equal(w, inv) for w in mg.anti_rotations)
+
+        k_mag, _ = reduce_mesh_magnetic((4, 4, 4), (0, 0, 0), mg)
+        k_tr, w_tr = reduce_mesh_magnetic((4, 4, 4), (0, 0, 0), mg,
+                                          time_reversal=True)
+        assert len(k_mag) == n_mag           # magnetic group alone
+        assert len(k_tr) == 13               # + plain k → −k == QE
+        assert abs(w_tr.sum() - 1.0) < 1e-12
+
+
 def _mag_symmetrizer(shape=(12, 12, 10)):
     """FePt m∥[001] symmetrizer on a small box with a safe sub-Nyquist mask."""
     cell, frac, species, sg = _fept()
