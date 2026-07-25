@@ -121,19 +121,31 @@ tolerance is above 1e-5, with the subspace reduction and the S-normalization alw
 in fp64. The generalized subspace reduction must stay fp64 because an fp32 Cholesky
 of the near-singular USPP overlap produces invalid rotations.
 
-This does not help in general. It helps moderate-grid, many-k, smeared or spin-orbit
-cases by up to about 1.45 times. It regresses fixed-occupation insulators, where
-the fp32 drafts inflate the iteration count. On a consumer GPU whose fp64 runs at a
-fraction of fp32 rate the option is nearly neutral on small systems, for the reason
-in the GPU section below. Measure it on your workload rather than assuming it helps.
+This does not help in general, and whether it helps is a competition between two
+effects. The fp32 draft speeds the Hamiltonian applies and the early subspace
+eigensolves, a gain that grows with the cell, the band count, and the k-point count.
+Against that, fp32 draft noise perturbs the self-consistent density on a smeared or
+spin-polarized system and inflates the iteration count. On the seven-system battery,
+few-k and small, the second effect dominates the metals. Mixed precision wins only on
+the fixed-occupation insulators, on both this CPU and the RTX 3050 (Si 1.06 and 1.18
+times, MgO 1.10 and 1.30), and regresses every metal and magnetic case (Cu 0.78 and
+0.77, Al 0.77 and 0.94, FM Fe 0.79 and 0.74, AFM Cr 0.65 and 0.90). The fp32 draft
+adds two SCF iterations on Fe and Cr, device-independent, landing hardest where the
+systems are already the most expensive. On a consumer GPU whose fp64 runs at a
+fraction of fp32 rate the option is nearly neutral on small insulators, for the reason
+in the GPU section below. Measure it on your workload rather than assuming it helps,
+and expect a metal or magnetic cell with few k-points to regress.
 
-The clearest single predictor is system size, not the metal-versus-insulator axis.
-On the RTX 3050 the end-to-end speedup grows monotonically with the cell, from 1.14
-times on 2-atom Si through 1.28 times on 16 atoms to 1.39 times on 54, because the
-fp32 draft only helps once the dense subspace eigensolve and the big-sphere
-Hamiltonian applies dominate the per-iteration cost. A 2-atom cell is the wrong
-regime to judge it. There the eigensolve is negligible and the density-build FFTs,
-which stay fp64 for charge conservation, set the floor. The draft costs nothing in
+The metal-versus-insulator axis sets the sign, and size sets the magnitude once the
+sign is positive. Among the fixed-occupation systems, where it wins, the RTX 3050
+speedup grows with the cell, from 1.14 times on 2-atom Si through 1.28 times on 16
+atoms to 1.39 times on 54, because the fp32 draft only pays once the dense subspace
+eigensolve and the big-sphere Hamiltonian applies dominate the per-iteration cost. The
+moderate-grid USPP/PAW cases with many k-points or spin-orbit reach about 1.45 times,
+where the per-k eigensolve is the large share. Size scales the win but does not flip a
+regression, so a large metal still loses. A 2-atom cell is the wrong regime to judge
+it. There the eigensolve is negligible and the density-build FFTs, which stay fp64 for
+charge conservation, set the floor. The draft costs nothing in
 accuracy at any size. On a frozen geometry the mixed and fp64 free energies agree to
 1e-9 meV at every convergence threshold from 1e-7 to 1e-10, with identical iteration
 counts, so the fp64 polish removes the draft error whether or not the calculation stops
