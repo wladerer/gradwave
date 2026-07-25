@@ -87,6 +87,120 @@ def tau_b(
     return tau / volume
 
 
+def spinor_tau_matrix_b(
+    coeffs: torch.Tensor,  # (nk, nb, 2·npw_max) doubled spinor coefficients
+    occ: torch.Tensor,  # (nk, nb)
+    kweights: torch.Tensor,  # (nk,)
+    bk: BatchedK,
+    shape,
+    volume: float,
+    m_pw: int,  # npw_max (the per-component plane-wave count)
+):
+    """2×2 kinetic-energy-density-matrix Pauli components (τ_0, τ⃗) [e/Å⁵].
+
+    The spinor generalization of `tau_b`: the KE-density matrix is
+
+        τ_{αβ}(r) = ½ Σ_k w_k Σ_n f_nk Σ_d (∂_d ψ_{nα})* (∂_d ψ_{nβ}),
+
+    Hermitian 2×2 at each grid point, decomposed exactly like the (ρ, m⃗) spin
+    density in `scf.spinor_common.pauli_density_accumulate` but with the extra
+    i(k+G) gradient factor of `tau_b`. Returns
+
+        τ_0 = τ_↑↑ + τ_↓↓                         (total KE density, = plain τ)
+        τ⃗  = (2 Re τ_↑↓, 2 Im τ_↑↓, τ_↑↑ − τ_↓↓)  (KE-density magnetization)
+
+    The locally-collinear meta-GGA takes the local-frame per-spin
+    τ_± = (τ_0 ± τ⃗·m̂)/2 (the diagonal of τ rotated into the frame that
+    diagonalizes the spin density — see `core.xc.noncollinear.local_frame_tau`).
+    With every moment along ẑ, τ_↑↓ → 0 and (τ_+, τ_-) → (τ_↑↑, τ_↓↓), the
+    collinear per-spin τ. Differentiable in ``coeffs``; band-chunked like `tau_b`.
+    """
+    nk, nb, _ = coeffs.shape
+    n = shape[0] * shape[1] * shape[2]
+    chunk = _band_chunk(nk, n, coeffs.element_size(), coeffs.device) if \
+        coeffs.device.type == "cuda" else nb
+    w = kweights[:, None] * occ
+    kpg = bk.kpg  # (nk, npw_max, 3), Å⁻¹, zero in padding
+    tau_uu = tau_dd = tau_ud = None
+    for lo in range(0, nb, chunk):
+        hi = min(lo + chunk, nb)
+        cu = coeffs[:, lo:hi, :m_pw]
+        cd = coeffs[:, lo:hi, m_pw:]
+        guu = gdd = gud = None  # Σ_d over gradient components
+        for d in range(3):
+            ikg = 1j * kpg[:, None, :, d]
+            du = g_to_r_b(ikg * cu, bk, shape)  # ∂_d ψ↑
+            dv = g_to_r_b(ikg * cd, bk, shape)  # ∂_d ψ↓
+            uu = du.real ** 2 + du.imag ** 2
+            dd = dv.real ** 2 + dv.imag ** 2
+            ud = du.conj() * dv
+            guu = uu if guu is None else guu + uu
+            gdd = dd if gdd is None else gdd + dd
+            gud = ud if gud is None else gud + ud
+        wr = w[:, lo:hi].to(guu.dtype)
+        wc = w[:, lo:hi].to(gud.dtype)
+        cuu = 0.5 * torch.einsum("kb,kbxyz->xyz", wr, guu)
+        cdd = 0.5 * torch.einsum("kb,kbxyz->xyz", wr, gdd)
+        cud = 0.5 * torch.einsum("kb,kbxyz->xyz", wc, gud)
+        tau_uu = cuu if tau_uu is None else tau_uu + cuu
+        tau_dd = cdd if tau_dd is None else tau_dd + cdd
+        tau_ud = cud if tau_ud is None else tau_ud + cud
+    tau_uu, tau_dd, tau_ud = tau_uu / volume, tau_dd / volume, tau_ud / volume
+    tau_scalar = tau_uu + tau_dd
+    tau_vec = torch.stack([2.0 * tau_ud.real, 2.0 * tau_ud.imag, tau_uu - tau_dd])
+    return tau_scalar, tau_vec
+
+
+def spinor_metagga_tau_operator(
+    c: torch.Tensor,  # (nk, nb, 2·npw_max)
+    v0_r: torch.Tensor,  # (n1,n2,n3) real, scalar τ-potential v_τ0
+    vvec_r: torch.Tensor,  # (3,n1,n2,n3) real, vector τ-potential v_τ⃗
+    bk: BatchedK,
+    shape,
+    m_pw: int,
+) -> torch.Tensor:
+    """2×2 generalized-KS meta-GGA τ operator on doubled spinor coefficients:
+
+        (V_τ ψ)_α = −½ Σ_d i(k+G)_d · F[ M_{αβ}(r) · F⁻¹[ i(k+G)_d c_β ] ],
+        M(r) = v_τ0·𝟙 + v_τ⃗·σ⃗   (Hermitian 2×2),
+
+    the τ analogue of the local potential V = v·𝟙 + B⃗·σ⃗ (same diagonal
+    v_τ0 ± v_τz / spin-flip v_τx − i v_τy blocks) carried inside the −½∇·(M∇)
+    kinetic form. Hermitian by construction; band-chunked to bound the
+    dense-grid temporaries. When v_τ⃗ ∥ ẑ (collinear limit) M is diagonal and
+    this reduces to `metagga_tau_operator` applied per spin component with
+    v_τ↑ = v_τ0 + v_τz, v_τ↓ = v_τ0 − v_τz.
+    """
+    nk, nb, _ = c.shape
+    n = shape[0] * shape[1] * shape[2]
+    kpg = bk.kpg
+    m_uu = (v0_r + vvec_r[2]).to(c.real.dtype)
+    m_dd = (v0_r - vvec_r[2]).to(c.real.dtype)
+    m_ud = torch.complex(vvec_r[0], -vvec_r[1]).to(c.dtype)  # ⟨↑|M|↓⟩
+    chunk = _band_chunk(nk, n, c.element_size(), c.device) if \
+        c.device.type == "cuda" else nb
+    mask = bk.mask[:, None, :]
+    out = torch.zeros_like(c)
+    for lo in range(0, nb, chunk):
+        hi = min(lo + chunk, nb)
+        cu = c[:, lo:hi, :m_pw]
+        cd = c[:, lo:hi, m_pw:]
+        acc_u = acc_d = None
+        for d in range(3):
+            ikg = 1j * kpg[:, None, :, d]
+            gu = g_to_r_b(ikg * cu, bk, shape)  # ∂_d ψ↑
+            gv = g_to_r_b(ikg * cd, bk, shape)  # ∂_d ψ↓
+            hu = m_uu * gu + m_ud * gv          # (M ∂_d ψ)↑
+            hv = m_ud.conj() * gu + m_dd * gv   # (M ∂_d ψ)↓
+            wu = ikg * box_to_sphere_b(hu, bk)
+            wv = ikg * box_to_sphere_b(hv, bk)
+            acc_u = wu if acc_u is None else acc_u + wu
+            acc_d = wv if acc_d is None else acc_d + wv
+        out[:, lo:hi, :m_pw] = -0.5 * acc_u * mask
+        out[:, lo:hi, m_pw:] = -0.5 * acc_d * mask
+    return out
+
+
 def metagga_tau_operator(
     c: torch.Tensor,  # (nk, nb, npw_max)
     v_tau_r: torch.Tensor,  # (n1, n2, n3) real, the scaled v_τ = ∂E_xc/∂τ potential

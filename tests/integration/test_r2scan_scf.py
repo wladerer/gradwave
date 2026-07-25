@@ -131,8 +131,13 @@ def test_r2scan_resolves_through_registries():
     assert isinstance(SPIN_XC_REGISTRY["r2scan"](), SpinR2SCAN)
 
 
-def test_metagga_rejected_on_noncollinear():
+def test_metagga_wraps_on_noncollinear():
+    """Meta-GGA is now supported on the non-collinear spinor path: wrapping a
+    SpinR2SCAN in NoncollinearXC advertises needs_tau/needs_gradient so the
+    spinor SCF builds τ and applies the 2×2 v_τ operator (collinear-limit and
+    rotational-invariance oracles in tests/integration/test_noncollinear.py and
+    tests/unit/test_metagga_noncollinear.py)."""
     from gradwave.core.xc.noncollinear import NoncollinearXC
 
-    with pytest.raises(NotImplementedError):
-        NoncollinearXC(SpinR2SCAN())
+    nc = NoncollinearXC(SpinR2SCAN())
+    assert nc.needs_tau and nc.needs_gradient
