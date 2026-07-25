@@ -34,6 +34,11 @@ import numpy as np
 import torch
 
 from gradwave.constants import E2
+from gradwave.core.spinor_proj import (
+    so_dij,
+    so_projector_channels,
+    strained_so_projector_cols,
+)
 from gradwave.dtypes import RDTYPE
 from gradwave.postscf._strain import (
     box_millers,
@@ -82,10 +87,14 @@ def stress(res, xc, symmetrize: bool = True, manifolds=None) -> torch.Tensor:
     atomic-orbital projectors) is added to the stress. A +U result without
     ``manifolds`` is an error, since the occupation matrices alone do not carry
     the projectors' strain dependence.
+
+    Fully-relativistic (spin-orbit) spinor results (``scf_noncollinear`` on an
+    ``is_fr`` system) are supported: the kinetic/Hartree/XC/local/Ewald strain
+    derivatives are formally unchanged (operating on the total spinor density
+    ρ and magnetization m⃗), and the nonlocal term uses the j-resolved spinor
+    projectors summed over both spinor components (see ``_energy_strained_fr``).
     """
     system = res.system
-    if getattr(system, "is_fr", False):
-        raise NotImplementedError("stress for fully-relativistic pseudos not implemented yet")
     if getattr(res, "hub_occ", None) is not None and manifolds is None:
         raise ValueError(
             "stress with DFT+U requires the Hubbard manifolds: call "
@@ -132,6 +141,11 @@ def _energy_strained(
     When omitted the converged detached state is used, i.e. the plain stress.
     """
     system = res.system
+    if getattr(system, "is_fr", False):
+        if manifolds is not None:
+            raise NotImplementedError("DFT+U stress on the spin-orbit path")
+        return _energy_strained_fr(
+            res, xc, eps, rho=rho, coeffs=coeffs, spheres=spheres)
     grid = system.grid
     dev = system.positions.device
     rdt = RDTYPE
@@ -288,3 +302,114 @@ def _tau_strained(coeffs, spheres, b_e, omega, occ, kw, shape):
         contrib = 0.5 * torch.einsum("b,bxyz->xyz", w.to(grad2.dtype), grad2)
         tau = contrib if tau is None else tau + contrib
     return tau / omega
+
+
+def _energy_strained_fr(
+    res, xc, eps: torch.Tensor, *, rho=None, coeffs=None, spheres=None,
+) -> torch.Tensor:
+    """KS energy vs strain for a fully-relativistic (spin-orbit) spinor result.
+
+    The kinetic/Hartree/XC/local/Ewald pieces are the same strain expressions
+    as the scalar path, evaluated on the total spinor density ρ (Hartree/local)
+    and (ρ, m⃗) for the non-collinear XC (both scale as 1/detJ under strain, the
+    GGA gradient picking up the strained G). The nonlocal term is the only
+    genuinely different piece: the projectors are the j-resolved spinor
+    projectors (core.spinor_proj) rebuilt on the strain graph, and the
+    projector overlap runs over the DOUBLED plane-wave axis, i.e. it sums both
+    spinor components — mirroring the SCF's ``build_so_projectors`` /
+    ``nonlocal_energy`` assembly in scf.noncollinear. At ε=0 this reproduces the
+    NC-SCF total energy, so the analytic stress (autograd in ε) matches a finite
+    difference of this expression.
+
+    ``xc`` is the ``NoncollinearXC`` the spinor SCF ran (meta-GGA is rejected
+    there, so there is no τ term). ``rho``/``coeffs``/``spheres`` override the
+    detached converged state for the discretization-error path, as on the scalar
+    ``_energy_strained``.
+    """
+    system = res.system
+    grid = system.grid
+    dev = system.positions.device
+    shape = grid.shape
+
+    rho = res.rho.detach() if rho is None else rho  # total ρ↑+ρ↓
+    m_vec = res.m.detach()  # magnetization (3, *grid)
+    spheres = system.spheres if spheres is None else spheres
+    coeffs = res.coeffs.detach() if coeffs is None else coeffs  # (nk,nb,2·npw_max)
+    occ = res.occupations.detach()  # (nk, nb), spinor degeneracy g=1
+    kw = system.kweights
+
+    _f_map, a_e, b_e, omega0, omega, pos_e = strain_cell(
+        grid, system.positions, eps)
+
+    mask, m_box, g_sph, _g2_sph, is_g0, q_sph, inv_g2 = strained_dens_sphere(
+        grid, b_e, dev)
+
+    from gradwave.core.fftbox import r_to_g
+
+    rho_t = (r_to_g(rho.to(torch.complex128)) * omega0).reshape(-1)[mask]
+    rho_g = rho_t / omega.to(rho_t.dtype)
+
+    # ---- Hartree (couples to the total charge only; G=0 excluded)
+    e_h = 0.5 * 4.0 * math.pi * E2 / omega * ((rho_t.abs() ** 2) * inv_g2).sum()
+
+    # ---- local pseudopotential (G=0 carries alpha-Z)
+    tabs = [RadialTables(u, device=dev) for u in system.upfs]
+    phases = strained_phases(g_sph, pos_e)
+    e_loc = local_pp_energy(tabs, system.species_of_atom, phases, rho_g,
+                            q_sph, is_g0)
+
+    # ---- non-collinear XC: ρ and m⃗ scale as 1/detJ; the locally-collinear
+    # channels ρ± and their GGA σ's are built on the strained grid, then the
+    # wrapped collinear functional evaluates E_xc (NLCC core folded into ρ only,
+    # exactly as core.xc.noncollinear.energy_with_grid does at ε=0).
+    core_e = None
+    if system.rho_core is not None:
+        core_e = nlcc_core_strained(tabs, system.species_of_atom,
+                                    phases, q_sph, omega, grid, mask)
+    scale = omega0 / omega
+    rho_xc = rho * scale
+    m_xc = m_vec * scale
+    if xc.needs_gradient:
+        g_box = (m_box @ b_e).reshape(*shape, 3)
+        rho_tot = rho_xc if core_e is None else rho_xc + core_e
+        m_norm = torch.sqrt((m_xc ** 2).sum(dim=0) + xc.m_eps)
+        r_up = 0.5 * (rho_tot + m_norm)
+        r_dn = 0.5 * (rho_tot - m_norm)
+        s_uu = _sigma(r_up, g_box)
+        s_dd = _sigma(r_dn, g_box)
+        s_tt = _sigma(rho_tot, g_box)
+    else:
+        s_uu = s_dd = s_tt = None
+    e_xc = xc.energy(rho_xc, m_xc, omega, s_uu, s_dd, s_tt, rho_core=core_e)
+
+    # ---- kinetic + nonlocal, per k. The spinor coefficients live on a doubled
+    # plane-wave axis [↑ (npw_max), ↓ (npw_max)]; slice each half to the
+    # sphere's own npw. Kinetic sums both components (spinor_kinetic_energy);
+    # the SOC nonlocal builds the strained j-resolved projectors and contracts
+    # the doubled-axis overlap through the (strain-independent) D matrix.
+    col_meta, lmax = so_projector_channels(system)
+    dij_so = so_dij(system, col_meta, dev)
+    m_pw = coeffs.shape[-1] // 2
+    e_kin = torch.zeros((), dtype=RDTYPE, device=dev)
+    e_nl = torch.zeros((), dtype=RDTYPE, device=dev)
+    for ik, sph in enumerate(spheres):
+        kpg, kpg2 = strained_kpg(sph, b_e)
+        npw = kpg.shape[0]
+        cu = coeffs[ik][:, :npw]
+        cd = coeffs[ik][:, m_pw:m_pw + npw]
+        nb = cu.shape[0]
+        band = kinetic_band(cu, kpg2) + kinetic_band(cd, kpg2)
+        e_kin = e_kin + (kw[ik] * occ[ik, :nb] * band).sum()
+
+        q_so = strained_so_projector_cols(
+            tabs, kpg, kpg2, omega, pos_e, col_meta, lmax)  # (nproj, 2·npw)
+        c_spinor = torch.cat([cu, cd], dim=-1)  # (nb, 2·npw)
+        b_ovl = c_spinor @ q_so.conj().T  # (nb, nproj)
+        quad = torch.einsum(
+            "bi,ij,bj->b", b_ovl.conj(), dij_so.to(b_ovl.dtype), b_ovl).real
+        e_nl = e_nl + (kw[ik] * occ[ik, :nb] * quad).sum()
+
+    # ---- Ewald (integer image/G sets fixed at ε=0, vectors strained)
+    e_ew = ewald_strained(pos_e, system.charges, a_e, b_e, omega, grid.cell)
+
+    return e_kin + e_h + e_xc + e_loc + e_nl + e_ew

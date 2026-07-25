@@ -256,7 +256,13 @@ def elf(res, eps: float = 1e-10) -> np.ndarray:
     (2, n1, n2, n3). Noncollinear/USPP still raise below.
     """
     system, shape, vol = _grid_info(res)
-    if getattr(res, "occupations", None) is None or getattr(system, "batch", None) is None:
+    # collinear norm-conserving only: spinor (NC/SOC) coeffs live on a doubled
+    # plane-wave axis the collinear tau_b/pad_coeffs path cannot consume, and
+    # USPP/PAW results carry no ``batch``. (NC results now carry occupations, so
+    # the spinor check must be explicit — occupations being present no longer
+    # implies a collinear result.)
+    if (_is_spinor(res) or getattr(res, "occupations", None) is None
+            or getattr(system, "batch", None) is None):
         raise NotImplementedError(
             "ELF is implemented for collinear norm-conserving results; "
             "noncollinear and USPP/PAW support lands later"

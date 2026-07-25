@@ -189,6 +189,7 @@ class NCResult:
     system: System
     history: list = field(default_factory=list)
     coeffs: torch.Tensor | None = None  # (nk, nb, 2·npw_max) spinor coefficients
+    occupations: torch.Tensor | None = None  # (nk, nb) spinor occupations (g=1)
     formalism: str = "noncollinear"  # result-type tag shared by all four SCF drivers
 
 
@@ -611,7 +612,7 @@ def scf_noncollinear(
         converged=converged, n_iter=it, energies=energies, fermi=mu,
         mag_vec=tuple(m_int), mag_abs=float(m_norm.mean()) * vol,
         rho=rho, m=m, eigenvalues=eigs, system=system, history=history,
-        coeffs=coeffs,
+        coeffs=coeffs, occupations=occ,
     )
 
 
