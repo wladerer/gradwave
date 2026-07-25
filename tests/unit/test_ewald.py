@@ -39,6 +39,53 @@ def test_eta_independence():
     assert abs(e1.item() - e2.item()) < 1e-9 * abs(e1.item())
 
 
+def test_eta_independence_low_symmetry():
+    """A converged Ewald sum is η-independent for ANY cell. Low-symmetry
+    (large, anisotropic) cells are the regression that a cubic-only η test
+    masks: the auto-η is small, rcut = _ACC/√η rivals the intra-cell
+    separations, and an unpadded |R|≤rcut real-space cutoff drops near pairs
+    whose |d| = |τ_a − τ_b + R| < rcut — leaking an η-dependent error. Target:
+    η-flat to well under 0.1 meV/atom across η ∈ [0.2, 2.0]."""
+    cell = np.array([[9.2, 0.0, 0.0], [1.3, 6.1, 0.0], [0.8, 1.1, 4.7]])  # triclinic
+    pos = torch.tensor(
+        [[0.0, 0.0, 0.0], [3.1, 2.2, 1.0], [6.0, 4.5, 3.3], [1.5, 5.0, 2.0]],
+        dtype=torch.float64,
+    )
+    q = torch.tensor([2.0, -1.0, 2.0, -3.0], dtype=torch.float64)
+    na = pos.shape[0]
+    etas = (0.2, 0.3, 0.5, 0.9, 1.5, 2.0)
+    vals = [ewald_energy(pos, q, cell, eta=eta).item() / na for eta in etas]
+    assert max(vals) - min(vals) < 1e-4  # eV/atom, i.e. < 0.1 meV/atom
+
+
+def test_nio_mineral_ewald_vs_qe_convention():
+    """Non-cubic (rhombohedral AFM-primitive) NiO ion–ion Ewald, formal
+    charges Ni²⁺/O²⁻, anchored to an independent QE-convention point-charge
+    Ewald (pymatgen's EwaldSummation, acc_factor=16). Guards the low-symmetry
+    fix against silent regression and confirms the absolute constant, not just
+    η-flatness."""
+    cell = np.array(
+        [
+            [1.4743176388, 0.8511976856, 4.815101245],
+            [-1.4743176388, 0.8511976856, 4.815101245],
+            [0.0, -1.7023953712, 4.815101245],
+        ]
+    )
+    pos = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 7.2226518676],
+            [0.0, 0.0, 10.8339778013],
+            [0.0, 0.0, 3.6113259338],
+        ],
+        dtype=torch.float64,
+    )
+    q = torch.tensor([2.0, 2.0, -2.0, -2.0], dtype=torch.float64)  # Ni, Ni, O, O
+    ref = -96.55370972206813  # eV, pymatgen EwaldSummation (independent, QE convention)
+    e = ewald_energy(pos, q, cell)
+    assert abs(e.item() - ref) < 4e-4  # < 0.1 meV/atom over 4 atoms
+
+
 def test_translation_invariance_and_force_sum_rule():
     a = 5.43
     cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])

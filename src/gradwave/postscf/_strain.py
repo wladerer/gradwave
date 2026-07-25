@@ -110,8 +110,7 @@ def local_pp_energy(tabs, species_of_atom, phases, rho_sph, q_sph, is_g0):
     return e_loc
 
 
-def nlcc_core_strained(tabs, species_of_atom, phases, q_sph, omega, grid,
-                       scatter) -> torch.Tensor:
+def nlcc_core_strained(tabs, species_of_atom, phases, q_sph, omega, grid, scatter) -> torch.Tensor:
     """Strained NLCC core density on the real grid.
 
     ``scatter`` indexes the flat FFT box for the sphere entries (a boolean
@@ -133,8 +132,9 @@ def nlcc_core_strained(tabs, species_of_atom, phases, q_sph, omega, grid,
     return g_to_r_box(core_box.reshape(grid.shape), real=True)
 
 
-def strained_projector_cols(tabs, species_of_atom, atom_index, lmax,
-                            kpg, kpg2, omega, pos_e) -> torch.Tensor:
+def strained_projector_cols(
+    tabs, species_of_atom, atom_index, lmax, kpg, kpg2, omega, pos_e
+) -> torch.Tensor:
     """Strained KB/USPP projector matrix (nproj_tot, npw) at one k.
 
     Radial form factors through the differentiable SBT at the strained
@@ -151,18 +151,16 @@ def strained_projector_cols(tabs, species_of_atom, atom_index, lmax,
         for i, ell in enumerate(tab.beta_l):
             f = tab.beta_of_g(i, q_k)
             for m_col in range(2 * ell + 1):
-                cols.append(
-                    (pref * f * y[:, ell * ell + m_col]).to(CDTYPE)
-                    * _MINUS_I_POW[ell]
-                )
+                cols.append((pref * f * y[:, ell * ell + m_col]).to(CDTYPE) * _MINUS_I_POW[ell])
     p = torch.stack(cols, dim=0)  # (nproj_tot, npw), matches pd ordering
     parg = kpg @ pos_e.T  # (npw, na)
     ph = torch.exp(torch.complex(torch.zeros_like(parg), -parg))
     return p * ph[:, atom_index].T
 
 
-def hubbard_energy_strained(system, manifolds, b_e, pos_e, omega, spheres,
-                            coeffs_s, occ_s, nspin, kw) -> torch.Tensor:
+def hubbard_energy_strained(
+    system, manifolds, b_e, pos_e, omega, spheres, coeffs_s, occ_s, nspin, kw
+) -> torch.Tensor:
     """Dudarev E_U on the strain graph: Σ_{I,σ} (U−J)/2 Tr[n^{Iσ}(1−n^{Iσ})].
 
     The strain enters through the atomic-orbital projectors exactly as it does
@@ -186,8 +184,7 @@ def hubbard_energy_strained(system, manifolds, b_e, pos_e, omega, spheres,
 
     dev = pos_e.device
     man_by_sp = {m.species: m for m in manifolds}
-    correlated = [(a, s) for a, s in enumerate(system.species_of_atom)
-                  if s in man_by_sp]
+    correlated = [(a, s) for a, s in enumerate(system.species_of_atom) if s in man_by_sp]
     if not correlated:
         raise ValueError("no atoms match the requested Hubbard manifolds")
 
@@ -207,21 +204,20 @@ def hubbard_energy_strained(system, manifolds, b_e, pos_e, omega, spheres,
     sites, col = [], 0
     for a, s in correlated:
         m = man_by_sp[s]
-        sites.append({"atom": a, "l": m.l, "u": m.u, "j": m.j,
-                      "start": col, "dim": 2 * m.l + 1})
+        sites.append({"atom": a, "l": m.l, "u": m.u, "j": m.j, "start": col, "dim": 2 * m.l + 1})
         col += 2 * m.l + 1
     nproj = col
     l_max = max(m.l for m in manifolds)
 
-    n_full = [torch.zeros(nproj, nproj, dtype=CDTYPE, device=dev)
-              for _ in range(nspin)]
+    n_full = [torch.zeros(nproj, nproj, dtype=CDTYPE, device=dev) for _ in range(nspin)]
     for ik, sph in enumerate(spheres):
         kpg, kpg2 = strained_kpg(sph, b_e)  # (npw, 3), (npw,)
         q_k = torch.sqrt(kpg2.clamp_min(1e-30))
         q_k = torch.where(kpg2.detach() < 1e-24, torch.zeros_like(q_k), q_k)
         y = ylm_all(l_max, kpg)
-        f_by_sp = {sp: sbt_t(rad[sp][0], rad[sp][1], rad[sp][2], rad[sp][3], q_k)
-                   for sp in man_by_sp}
+        f_by_sp = {
+            sp: sbt_t(rad[sp][0], rad[sp][1], rad[sp][2], rad[sp][3], q_k) for sp in man_by_sp
+        }
         parg = kpg @ pos_e.T  # (npw, na)
         ph = torch.exp(torch.complex(torch.zeros_like(parg), -parg))
         pref = 4.0 * math.pi / torch.sqrt(omega)
@@ -231,8 +227,7 @@ def hubbard_energy_strained(system, manifolds, b_e, pos_e, omega, spheres,
             f = f_by_sp[system.species_of_atom[a]]
             for mm in range(2 * ell + 1):
                 cols.append(
-                    (pref * f * y[:, ell * ell + mm]).to(CDTYPE)
-                    * _MINUS_I_POW[ell] * ph[:, a]
+                    (pref * f * y[:, ell * ell + mm]).to(CDTYPE) * _MINUS_I_POW[ell] * ph[:, a]
                 )
         q = torch.stack(cols, dim=0)  # (nproj, npw), site-block ordering
         for spn in range(nspin):
@@ -242,11 +237,14 @@ def hubbard_energy_strained(system, manifolds, b_e, pos_e, omega, spheres,
             w_b = kw[ik] * (0.5 * f_occ if nspin == 1 else f_occ)
             becp = torch.einsum("pg,bg->bp", q.conj(), c)  # (nb, nproj)
             n_full[spn] = n_full[spn] + torch.einsum(
-                "b,bp,bq->pq", w_b.to(RDTYPE), becp, becp.conj())
+                "b,bp,bq->pq", w_b.to(RDTYPE), becp, becp.conj()
+            )
 
     def _mats(nf):
-        return [nf[s["start"]:s["start"] + s["dim"],
-                   s["start"]:s["start"] + s["dim"]] for s in sites]
+        return [
+            nf[s["start"] : s["start"] + s["dim"], s["start"] : s["start"] + s["dim"]]
+            for s in sites
+        ]
 
     if nspin == 1:
         return 2.0 * hubbard_energy(_mats(n_full[0]), sites)
@@ -257,7 +255,12 @@ def ewald_strained(pos_e, charges, a_e, b_e, omega, cell0) -> torch.Tensor:
     """ewald_energy with the cell on the autograd graph. η and the integer
     image/G-vector sets come from the unstrained cell (the excluded boundary
     terms are erfc(8)-suppressed, so their ε-derivative is negligible)."""
-    from gradwave.core.energies.ewald import _ACC, _g_vectors, _image_vectors
+    from gradwave.core.energies.ewald import (
+        _ACC,
+        _g_vectors,
+        _image_vectors,
+        _max_pair_offset,
+    )
 
     cell0 = np.asarray(cell0, dtype=np.float64)
     omega0 = abs(np.linalg.det(cell0))
@@ -268,8 +271,11 @@ def ewald_strained(pos_e, charges, a_e, b_e, omega, cell0) -> torch.Tensor:
 
     dev = pos_e.device
     rdt = torch.float64
+    # pad the real-space sphere by the largest pair separation: the sum decays
+    # with |d| = |τ_a − τ_b + R|, not |R| (see ewald._max_pair_offset).
+    r_offset = _max_pair_offset(pos_e.detach().cpu().numpy())
     # integer labels of the ε=0 sets
-    n_img = np.round(_image_vectors(cell0, rcut) @ np.linalg.inv(cell0)).astype(np.int64)
+    n_img = np.round(_image_vectors(cell0, rcut + r_offset) @ np.linalg.inv(cell0)).astype(np.int64)
     b0 = 2.0 * math.pi * np.linalg.inv(cell0).T
     m_g = np.round(_g_vectors(cell0, gcut) @ np.linalg.inv(b0)).astype(np.int64)
 
