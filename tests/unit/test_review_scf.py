@@ -13,8 +13,22 @@ import torch
 
 from gradwave import constants
 from gradwave.scf import local_tf
+from gradwave.scf.loop import _resolve_mixing_scheme
 from gradwave.scf.mixing import BroydenMixer, JohnsonMixer, PulayMixer
 from gradwave.scf.uspp_loop import _build_mixer, _resolve_start_mag
+
+# ---- magnetic-aware mixing-scheme default --------------------------------
+
+def test_mixing_scheme_default_is_johnson_for_collinear_spin():
+    # nspin==2 (magnetic) auto-selects johnson; nspin==1 stays on pulay
+    assert _resolve_mixing_scheme(None, nspin=2) == "johnson"
+    assert _resolve_mixing_scheme(None, nspin=1) == "pulay"
+
+
+def test_mixing_scheme_explicit_wins():
+    # an explicit scheme is never overridden by the magnetic-aware default
+    assert _resolve_mixing_scheme("pulay", nspin=2) == "pulay"
+    assert _resolve_mixing_scheme("broyden", nspin=1) == "broyden"
 
 # ---- fix 10: local_tf uses the shared Bohr radius ------------------------
 

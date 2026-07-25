@@ -514,6 +514,20 @@ def _validate_scf_args(system, nspin, eigensolver, smearing, mixing_scheme,
         raise ValueError("precond must be 'kerker' or 'local_tf'")
 
 
+def _resolve_mixing_scheme(mixing_scheme, nspin):
+    """Magnetic-aware mixing-scheme default. None → johnson for collinear-spin
+    (nspin==2) systems, pulay otherwise; an explicit scheme always wins.
+
+    The magnetization channel near the Stoner instability — not charge sloshing
+    — limits convergence on magnetic metals (Phase-2 residual instrumentation),
+    and johnson's normalized multisecant update is the robust scheme there
+    (Fe FM 15→14 vs pulay; never worse than pulay on the Si/Al non-magnetic
+    anchors). Gating on nspin==2 keeps non-magnetic systems on pulay."""
+    if mixing_scheme is not None:
+        return mixing_scheme
+    return "johnson" if nspin == 2 else "pulay"
+
+
 def _resolve_kerker(kerker, smearing, grid):
     """Kerker on/off. An explicit setting wins; otherwise the auto policy turns
     it on for metals always and for insulators once the smallest nonzero |G|
@@ -764,8 +778,11 @@ def scf(
     rhotol: float = 1e-7,
     mixing_alpha: float = 0.7,
     mixing_history: int = 8,
-    mixing_scheme: str = "pulay",  # pulay | broyden | johnson (QE-class, best
-    # for ferromagnetic metals near the Stoner instability — see mixing.py)
+    mixing_scheme: str | None = None,  # pulay | broyden | johnson. None →
+    # magnetic-aware auto: johnson for nspin==2 (the spin channel near the
+    # Stoner instability limits magnetic convergence — Fe FM 15→14, and johnson
+    # is the robust scheme there; see mixing.py + the Phase-2 sweep), pulay
+    # otherwise. An explicit scheme always wins.
     kerker: bool | None = None,
     diago_tol: float = 1e-9,
     verbose: bool = True,
@@ -798,6 +815,7 @@ def scf(
     grid, spheres = system.grid, system.spheres
     vol = grid.volume
     nk, nb = len(spheres), system.nbands
+    mixing_scheme = _resolve_mixing_scheme(mixing_scheme, nspin)
     _validate_scf_args(system, nspin, eigensolver, smearing, mixing_scheme,
                        precond, tot_magnetization)
     kerker = _resolve_kerker(kerker, smearing, grid)
