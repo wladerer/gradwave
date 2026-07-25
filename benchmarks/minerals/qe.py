@@ -110,6 +110,15 @@ def run(m: Mineral, nbands: int, pseudo_dir: str, workdir: Path,
                  "job_done": "JOB DONE" in out}
     et = re.findall(r"!\s+total energy\s*=\s*([-\d.]+)\s*Ry", out)
     res["etot_eV"] = float(et[-1]) * RY_EV if et else None
+    # energy breakdown (Ry -> eV); QE "one-electron" == kin + local + nonlocal
+    for key, pat in (
+        ("e_one_electron_eV", r"one-electron contribution\s*=\s*([-\d.]+)\s*Ry"),
+        ("e_hartree_eV", r"hartree contribution\s*=\s*([-\d.]+)\s*Ry"),
+        ("e_xc_eV", r"xc contribution\s*=\s*([-\d.]+)\s*Ry"),
+        ("e_ewald_eV", r"ewald contribution\s*=\s*([-\d.]+)\s*Ry"),
+    ):
+        mm = re.search(pat, out)
+        res[key] = float(mm.group(1)) * RY_EV if mm else None
     res["wall_s"] = _wall_seconds(out)
     nk = re.search(r"number of k points\s*=\s*(\d+)", out)
     res["nk_irr"] = int(nk.group(1)) if nk else None

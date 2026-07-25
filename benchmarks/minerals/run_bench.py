@@ -84,12 +84,17 @@ def run_gradwave(m, upfs, nbands, fft_shape, threads) -> dict:
     r = scf(system, xc, **kwargs)
     t_scf = time.perf_counter() - t0
 
+    e = r.energies
+    one_elec = float(e.kinetic) + float(e.local) + float(e.nonlocal_)
     res.update(
         converged=bool(r.converged), n_iter=int(r.n_iter),
         etot_eV=float(r.energies.free_energy), fermi_eV=float(r.fermi),
         tot_mag=float(r.mag_total), abs_mag=float(r.mag_abs),
         setup_s=t_setup, scf_s=t_scf, wall_s=t_setup + t_scf, threads=threads,
         fft_shape=list(system.grid.shape),
+        e_one_electron_eV=one_elec, e_hartree_eV=float(e.hartree),
+        e_xc_eV=float(e.xc), e_ewald_eV=float(e.ewald),
+        e_smearing_eV=float(e.smearing),
     )
     return res
 
@@ -146,8 +151,17 @@ def main():
     gw, qeo = row.get("gradwave", {}), qe or {}
     if gw.get("etot_eV") is not None and qeo.get("etot_eV") is not None:
         dE = gw["etot_eV"] - qeo["etot_eV"]
-        row["dE_eV"] = dE
-        row["dE_meV_per_atom"] = dE / m.nat * 1000
+        row["dE_total_eV"] = dE
+        row["dE_total_meV_per_atom"] = dE / m.nat * 1000
+        # split off the position-independent Ewald constant: the ELECTRONIC
+        # (KS) energy agreement is the real validation, unaffected by the
+        # ion-ion Ewald term. dE_electronic == what dE_total would be if the
+        # two codes' Ewald constants agreed.
+        if gw.get("e_ewald_eV") is not None and qeo.get("e_ewald_eV") is not None:
+            row["dE_ewald_eV"] = gw["e_ewald_eV"] - qeo["e_ewald_eV"]
+            dE_el = dE - row["dE_ewald_eV"]
+            row["dE_electronic_eV"] = dE_el
+            row["dE_electronic_meV_per_atom"] = dE_el / m.nat * 1000
     if gw.get("wall_s") and qeo.get("wall_s"):
         row["speed_ratio_qe_over_gw"] = gw["wall_s"] / qeo["wall_s"]
 
