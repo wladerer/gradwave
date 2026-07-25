@@ -25,10 +25,16 @@ def local_potential_g(
     vloc_tables: torch.Tensor,  # (nspecies, n1, n2, n3) [eV·Å³], G=0 entry = alpha-Z
     g_cart: torch.Tensor,  # (n1, n2, n3, 3)
     volume: float,
+    vloc_atom: torch.Tensor | None = None,  # (na, n1,n2,n3) per-atom override
 ) -> torch.Tensor:
-    """V_loc(G) on the dense box [eV], complex."""
+    """V_loc(G) on the dense box [eV], complex.
+
+    vloc_atom overrides the per-species gather with a per-atom table. The
+    alchemical composition channel passes a lambda-blended table there, so
+    V_loc stays differentiable in composition (scf/alchemical.py)."""
     s = structure_factors(positions, g_cart)  # (na, n1,n2,n3)
-    v = torch.einsum("axyz,axyz->xyz", s, vloc_tables[species_index].to(s.dtype))
+    tab = vloc_atom if vloc_atom is not None else vloc_tables[species_index]
+    v = torch.einsum("axyz,axyz->xyz", s, tab.to(s.dtype))
     return v / volume
 
 
