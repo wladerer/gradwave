@@ -12,35 +12,40 @@ concurrency:
 jobs:
   # Detect whether this change can affect test/lint outcomes. Docs-, benchmark-,
   # and notebook-only PRs execute no product code, so the ~50-min standard tier
-  # is pure waste on them. `code` is true iff at least one changed file falls
-  # OUTSIDE the ignore set below — i.e. it fails safe: anything not explicitly
-  # known-inert (a new top-level file, a workflow edit, pyproject) runs the full
-  # suite. The `ci-ok` gate still always runs and reports, so the required check
-  # is never left pending on a skipped PR.
+  # is pure waste on them. `inert_only` is true iff EVERY changed file matches an
+  # inert pattern below (predicate-quantifier: every). It fails safe: any file
+  # outside the inert set — a new top-level file, a workflow edit, pyproject,
+  # src/, tests/ — flips inert_only to false and runs the full suite. The `ci-ok`
+  # gate still always runs and reports, so the required check is never left
+  # pending on a skipped PR.
+  #
+  # NB: an only-negated filter (`!docs/**`, `!benchmarks/**`, ...) does NOT work
+  # here — a benchmarks/ file matches `!docs/**` (it is "not in docs"), so ORing
+  # the negations makes every path match. The `every` quantifier over positive
+  # inert globs is the correct idiom.
   changes:
     runs-on: ubuntu-latest
     outputs:
-      code: ${{ steps.filter.outputs.code }}
+      inert_only: ${{ steps.filter.outputs.inert }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
         id: filter
         with:
-          # Only-negated filter: a path matches `code` when it matches NONE of
-          # these, so `code` is true unless every changed file is inert.
+          predicate-quantifier: 'every'
           filters: |
-            code:
-              - '!docs/**'
-              - '!benchmarks/**'
-              - '!ideas/**'
-              - '!.claude/**'
-              - '!**/*.md'
-              - '!LICENSE'
-              - '!.gitignore'
+            inert:
+              - 'docs/**'
+              - 'benchmarks/**'
+              - 'ideas/**'
+              - '.claude/**'
+              - '**/*.md'
+              - 'LICENSE'
+              - '.gitignore'
 
   lint:
     needs: changes
-    if: ${{ needs.changes.outputs.code == 'true' }}
+    if: ${{ needs.changes.outputs.inert_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -64,7 +69,7 @@ jobs:
 
   test:
     needs: changes
-    if: ${{ needs.changes.outputs.code == 'true' }}
+    if: ${{ needs.changes.outputs.inert_only != 'true' }}
     # The standard tier is fp64/CPU-bound; on the free public `ubuntu-latest`
     # runner a single job takes ~90 min. Shard it across parallel runners
     # (public repos get generous free concurrency) so wall-clock is ~1/N.
@@ -107,7 +112,7 @@ jobs:
         run: |
           lint='${{ needs.lint.result }}'
           test='${{ needs.test.result }}'
-          echo "code=${{ needs.changes.outputs.code }}  lint=$lint  test=$test"
+          echo "inert_only=${{ needs.changes.outputs.inert_only }}  lint=$lint  test=$test"
           for result in "$lint" "$test"; do
             case "$result" in
               success|skipped) ;;
