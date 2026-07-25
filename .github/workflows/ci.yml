@@ -10,7 +10,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Detect whether this change can affect test/lint outcomes. Docs-, benchmark-,
+  # and notebook-only PRs execute no product code, so the ~50-min standard tier
+  # is pure waste on them. `code` is true iff at least one changed file falls
+  # OUTSIDE the ignore set below — i.e. it fails safe: anything not explicitly
+  # known-inert (a new top-level file, a workflow edit, pyproject) runs the full
+  # suite. The `ci-ok` gate still always runs and reports, so the required check
+  # is never left pending on a skipped PR.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          # Only-negated filter: a path matches `code` when it matches NONE of
+          # these, so `code` is true unless every changed file is inert.
+          filters: |
+            code:
+              - '!docs/**'
+              - '!benchmarks/**'
+              - '!ideas/**'
+              - '!.claude/**'
+              - '!**/*.md'
+              - '!LICENSE'
+              - '!.gitignore'
+
   lint:
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +63,8 @@ jobs:
         run: uv run lint-imports
 
   test:
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     # The standard tier is fp64/CPU-bound; on the free public `ubuntu-latest`
     # runner a single job takes ~90 min. Shard it across parallel runners
     # (public repos get generous free concurrency) so wall-clock is ~1/N.
@@ -62,13 +94,24 @@ jobs:
           uv run pytest -m "not slow and not torture and not gpu"
           --splits 4 --group ${{ matrix.group }}
 
-  # Single required-status gate: green iff lint and every test shard passed.
+  # Single required-status gate. Always runs (so the required check is reported
+  # even when lint/test are skipped), and is green iff neither lint nor test
+  # FAILED — a `skipped` result (docs/benchmark-only PR, no code touched) counts
+  # as OK. Failure or cancellation of either fails the gate.
   ci-ok:
     if: always()
-    needs: [lint, test]
+    needs: [changes, lint, test]
     runs-on: ubuntu-latest
     steps:
-      - name: Verify lint and all test shards succeeded
+      - name: Verify lint and all test shards succeeded (or were skipped)
         run: |
-          [ "${{ needs.lint.result }}" = "success" ] \
-            && [ "${{ needs.test.result }}" = "success" ]
+          lint='${{ needs.lint.result }}'
+          test='${{ needs.test.result }}'
+          echo "code=${{ needs.changes.outputs.code }}  lint=$lint  test=$test"
+          for result in "$lint" "$test"; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "::error::CI gate failed (lint=$lint test=$test)"; exit 1 ;;
+            esac
+          done
+          echo "CI gate passed."
