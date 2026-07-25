@@ -54,31 +54,16 @@ import logging
 
 import torch
 
-from gradwave.solvers.davidson import BatchedDavidsonResult, _orthonormalize_b
+from gradwave.solvers.davidson import (
+    BatchedDavidsonResult,
+    _buffered_block,
+    _combine,
+    _orthonormalize_b,
+    _rr,
+)
 from gradwave.solvers.precond import teter_b
 
 logger = logging.getLogger(__name__)
-
-
-def _rr(q: torch.Tensor, hq: torch.Tensor, nw: int):
-    """Rayleigh-Ritz on an orthonormal basis `q` with precomputed images `hq`.
-
-    q, hq: (nk, dim, m). davidson_batched convention: s = <q_i|H|q_j> built with
-    the conjugate on the bra, u used UNCONJUGATED in the combination. Returns the
-    nw lowest Ritz values (nk, nw) and the (nk, dim, nw) coefficient block c whose
-    columns combine `q` (or `hq`) into the Ritz vectors (or their images) via
-    einsum("kja,kjg->kag", c, q).
-    """
-    s = torch.einsum("kig,kjg->kij", q.conj(), hq)
-    s = 0.5 * (s + s.conj().transpose(-1, -2))
-    w, u = torch.linalg.eigh(s)
-    c = u[:, :, :nw]
-    return w[:, :nw].real, c
-
-
-def _combine(c: torch.Tensor, block: torch.Tensor) -> torch.Tensor:
-    """Ritz combination: (nk, dim, nw) coeffs @ (nk, dim, m) basis -> (nk, nw, m)."""
-    return torch.einsum("kja,kjg->kag", c, block)
 
 
 @torch.no_grad()
@@ -105,18 +90,8 @@ def lobpcg_batched(
     """
     nk, nb, m = x0.shape
     rdtype = x0.real.dtype
-    if n_buffer is None:
-        n_buffer = min(max(2, (nb + 7) // 8), m - nb)
-    nw = nb + n_buffer  # working block width (gated set is the lowest nb of these)
     tc = t.to(x0.dtype)  # complex kinetic diagonal for the t_band contraction
-
-    x0w = x0
-    if n_buffer:
-        gen = torch.Generator(device="cpu").manual_seed(nb + 104729)
-        pad = torch.view_as_complex(
-            torch.randn(nk, n_buffer, m, 2, generator=gen, dtype=torch.float64)
-        ).to(x0.device).to(x0.dtype)
-        x0w = torch.cat([x0, pad], dim=1)
+    x0w, n_buffer, nw = _buffered_block(x0, n_buffer)
 
     # X orthonormal + its image; rotate to the Ritz basis of its own span so the
     # first residual is well defined (per-band Ritz values, not raw guesses).

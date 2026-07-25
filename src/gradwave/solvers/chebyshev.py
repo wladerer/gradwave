@@ -37,7 +37,13 @@ import logging
 
 import torch
 
-from gradwave.solvers.davidson import BatchedDavidsonResult, _orthonormalize_b
+from gradwave.solvers.davidson import (
+    BatchedDavidsonResult,
+    _buffered_block,
+    _combine,
+    _orthonormalize_b,
+    _rr,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -164,9 +170,7 @@ def chebyshev_filtered_batched(
     """
     nk, nb, m = x0.shape
     rdtype = x0.real.dtype
-    if n_buffer is None:
-        n_buffer = min(max(2, (nb + 7) // 8), m - nb)
-    nw = nb + n_buffer  # working block width
+    x0w, n_buffer, nw = _buffered_block(x0, n_buffer)
 
     if bounds is None:
         lo, hi = _lanczos_bounds(h_apply, mask, steps=n_lanczos)
@@ -175,14 +179,6 @@ def chebyshev_filtered_batched(
     lo = lo.to(x0.device)
     hi = hi.to(x0.device)
 
-    x0w = x0
-    if n_buffer:
-        gen = torch.Generator(device="cpu").manual_seed(nb + 104729)
-        pad = torch.view_as_complex(
-            torch.randn(nk, n_buffer, m, 2, generator=gen, dtype=torch.float64)
-        ).to(x0.device).to(x0.dtype)
-        x0w = torch.cat([x0, pad], dim=1)
-
     v = _orthonormalize_b(x0w, mask)
     hv = h_apply(v)
     eig = torch.zeros(nk, nw, dtype=rdtype, device=x0.device)
@@ -190,12 +186,9 @@ def chebyshev_filtered_batched(
     rn = torch.full((nk, nw), float("inf"), dtype=rdtype, device=x0.device)
 
     for it in range(1, max_iter + 1):
-        s = torch.einsum("kig,kjg->kij", v.conj(), hv)
-        s = 0.5 * (s + s.conj().transpose(-1, -2))
-        w, u = torch.linalg.eigh(s)
-        eig = w[:, :nw].real
-        x = torch.einsum("kja,kjg->kag", u[:, :, :nw], v)
-        hx = torch.einsum("kja,kjg->kag", u[:, :, :nw], hv)
+        eig, c = _rr(v, hv, nw)
+        x = _combine(c, v)
+        hx = _combine(c, hv)
 
         r = hx - eig[..., None] * x
         rn = torch.linalg.norm(r, dim=-1).real

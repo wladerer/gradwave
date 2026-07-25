@@ -157,6 +157,50 @@ def _orthonormalize_b(
     return q.transpose(-1, -2)
 
 
+def _rr(q: torch.Tensor, hq: torch.Tensor, nw: int):
+    """Rayleigh-Ritz on an orthonormal basis `q` with precomputed images `hq`.
+
+    q, hq: (nk, dim, m). davidson_batched convention: s = <q_i|H|q_j> built with
+    the conjugate on the bra, u used UNCONJUGATED in the combination. Returns the
+    nw lowest Ritz values (nk, nw) and the (nk, dim, nw) coefficient block c whose
+    columns combine `q` (or `hq`) into the Ritz vectors (or their images) via
+    ``_combine(c, q)``. Shared by CheFSI and LOBPCG (davidson_batched keeps its
+    own s built from lazy-conj views to avoid a large-nk memory spike).
+    """
+    s = torch.einsum("kig,kjg->kij", q.conj(), hq)
+    s = 0.5 * (s + s.conj().transpose(-1, -2))
+    w, u = torch.linalg.eigh(s)
+    return w[:, :nw].real, u[:, :, :nw]
+
+
+def _combine(c: torch.Tensor, block: torch.Tensor) -> torch.Tensor:
+    """Ritz combination: (nk, dim, nw) coeffs @ (nk, dim, m) basis -> (nk, nw, m)."""
+    return torch.einsum("kja,kjg->kag", c, block)
+
+
+def _buffered_block(x0: torch.Tensor, n_buffer: int | None):
+    """Widen the initial block with `n_buffer` random buffer bands.
+
+    CheFSI and LOBPCG both carry extra bands above the requested nb so the top
+    wanted band does not stall on the block/filter edge (a real failure mode,
+    not a bug); only the lowest nb are gated and returned. Returns
+    (x0w, n_buffer, nw): `n_buffer` resolved from its default when None,
+    nw = nb + n_buffer, and x0w = x0 padded with deterministic random bands
+    (bit-identical to the former inline copies — same seed, same construction).
+    """
+    nk, nb, m = x0.shape
+    if n_buffer is None:
+        n_buffer = min(max(2, (nb + 7) // 8), m - nb)
+    nw = nb + n_buffer  # working block width (gated set is the lowest nb of these)
+    if not n_buffer:
+        return x0, n_buffer, nw
+    gen = torch.Generator(device="cpu").manual_seed(nb + 104729)
+    pad = torch.view_as_complex(
+        torch.randn(nk, n_buffer, m, 2, generator=gen, dtype=torch.float64)
+    ).to(x0.device).to(x0.dtype)
+    return torch.cat([x0, pad], dim=1), n_buffer, nw
+
+
 @dataclass
 class BatchedDavidsonResult:
     eigenvalues: torch.Tensor  # (nk, nb) ascending
