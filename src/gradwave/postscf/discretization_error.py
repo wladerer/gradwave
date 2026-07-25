@@ -1273,7 +1273,7 @@ def estimate_gap_error(res: SCFResult, eigerr: EigenvalueError, *,
     """
     system = res.system
     if occupations is not None:
-        occs = occupations                       # NCResult stores no occupations
+        occs = occupations                       # explicit override (band-aligned)
     else:
         occs = res.occupations
     nspin = int(getattr(res, "nspin", 1))
