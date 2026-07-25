@@ -1,0 +1,62 @@
+{
+  "system": "bi_heavy",
+  "cls": "heavy (scalar-rel)",
+  "formula": "Bi",
+  "baseline_solver": "davidson",
+  "solvers": {
+    "davidson": {
+      "converged": true,
+      "scf_iters": 11,
+      "wall_s": 27.465,
+      "eigh_s": 2.025,
+      "eigh_share": 0.0737,
+      "eigh_calls": 231,
+      "final_res": 2.9255135933999955e-09,
+      "energy_eV": -2210.7327468844373,
+      "dE_vs_baseline_eV": 0.0,
+      "energy_match": true,
+      "mag_total": null,
+      "error": null
+    },
+    "chebyshev": {
+      "converged": true,
+      "scf_iters": 11,
+      "wall_s": 603.252,
+      "eigh_s": 0.509,
+      "eigh_share": 0.0008,
+      "eigh_calls": 253,
+      "final_res": 2.22676250535685e-09,
+      "energy_eV": -2210.7327468844396,
+      "dE_vs_baseline_eV": 2.2737367544323206e-12,
+      "energy_match": true,
+      "mag_total": null,
+      "error": null
+    }
+  },
+  "stats": {
+    "nk": 112,
+    "nbands": 12,
+    "npw_max": 620,
+    "n_electrons": 15.0
+  },
+  "meta": {
+    "timestamp": "2026-07-25 01:53 UTC",
+    "host": "nixos",
+    "torch": "2.12.1+cu130",
+    "threads": 8,
+    "solvers": [
+      "davidson",
+      "chebyshev"
+    ],
+    "systems": [
+      "si_insulator",
+      "mgo_insulator",
+      "al_metal",
+      "cu_metal",
+      "fe_fm_metal",
+      "cr_afm_metal",
+      "bi_heavy"
+    ],
+    "E_match_tol_eV": 1e-06
+  }
+}
