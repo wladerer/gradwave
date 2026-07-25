@@ -248,7 +248,98 @@ def test_alchemical_scf_gradient_hellmann_feynman():
     lam0 = 0.5
     res = scf(setup_alchemical_system(cell, pos, c_upf, si_upf, lam0, ecut=ecut),
               PBE(), **kw)
-    g_hf = alchemical_energy_gradient(res, lam0)
+    g_hf = float(alchemical_energy_gradient(res, lam0))
     h = 2e-3
     g_fd = (e(lam0 + h) - e(lam0 - h)) / (2 * h)
     assert abs(g_hf - g_fd) < 0.02, (g_hf, g_fd)
+
+
+@pytest.mark.standard
+def test_per_site_alchemical_heterovalent_endpoint():
+    # per-site lambda = [1, 0] on a Si/Ge cell must reproduce the real ordered
+    # Ge/Si cell (heterovalent, Z 14 and 4, neutral integer electron count)
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.scf.alchemical import setup_alchemical_system
+    from gradwave.scf.loop import scf
+
+    si = parse_upf(DG / "Si.upf")
+    ge = parse_upf(DG / "Ge.upf")
+    a = 5.5
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+    ecut = 30 * RY
+    kw = dict(smearing="gaussian", width=0.2, etol=1e-8, rhotol=1e-7,
+              max_iter=300, verbose=False)
+
+    alc = setup_alchemical_system(cell, pos, si, ge, [1.0, 0.0], ecut=ecut)
+    r_alc = scf(alc, PBE(), **kw)
+    # real ordered cell: atom 0 = Ge (species 1), atom 1 = Si (species 0)
+    real = setup_system(cell, pos, [1, 0], [si, ge], ecut=ecut, kmesh=(1, 1, 1),
+                        nbands=alc.nbands)
+    r_real = scf(real, PBE(), **kw)
+    assert r_alc.converged and r_real.converged
+    assert abs(float(r_alc.energies.total) - float(r_real.energies.total)) < 1e-5, \
+        (float(r_alc.energies.total), float(r_real.energies.total))
+
+
+@pytest.mark.standard
+def test_per_site_alchemical_gradient():
+    # per-site dE/dlambda_i vs finite difference on each site (C <-> Si)
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.scf.alchemical import alchemical_energy_gradient, setup_alchemical_system
+    from gradwave.scf.loop import scf
+
+    c_upf = parse_upf(FIX / "C_ONCV_PBE-1.2.upf")
+    si_upf = parse_upf(FIX / "Si_ONCV_PBE-1.2.upf")
+    a = 5.43
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+    ecut = 20 * RY
+    kw = dict(smearing="gaussian", width=0.2, etol=1e-9, rhotol=1e-8,
+              max_iter=300, verbose=False)
+    lam0 = np.array([0.5, 0.3])
+
+    def e(vec):
+        s = setup_alchemical_system(cell, pos, c_upf, si_upf, vec, ecut=ecut)
+        return float(scf(s, PBE(), **kw).energies.free_energy)
+
+    res = scf(setup_alchemical_system(cell, pos, c_upf, si_upf, lam0, ecut=ecut),
+              PBE(), **kw)
+    g_hf = alchemical_energy_gradient(res, lam0).numpy()
+    h = 2e-3
+    for i in range(2):
+        up, dn = lam0.copy(), lam0.copy()
+        up[i] += h
+        dn[i] -= h
+        g_fd = (e(up) - e(dn)) / (2 * h)
+        assert abs(g_hf[i] - g_fd) < 0.02, (i, g_hf[i], g_fd)
+
+
+@pytest.mark.standard
+def test_heterovalent_gradient_core_and_janak():
+    # Si -> Ge (Z 4 -> 14, NLCC semicore): the gradient needs both the core-
+    # correction XC term and the Janak chemical-potential term mu*dN/dlambda
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.scf.alchemical import alchemical_energy_gradient, setup_alchemical_system
+    from gradwave.scf.loop import scf
+
+    si = parse_upf(DG / "Si.upf")
+    ge = parse_upf(DG / "Ge.upf")
+    a = 5.5
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+    ecut = 30 * RY
+    kw = dict(smearing="gaussian", width=0.2, etol=1e-9, rhotol=1e-8,
+              max_iter=300, verbose=False)
+
+    def e(lam):
+        s = setup_alchemical_system(cell, pos, si, ge, lam, ecut=ecut)
+        return float(scf(s, PBE(), **kw).energies.free_energy)
+
+    lam0 = 0.5
+    res = scf(setup_alchemical_system(cell, pos, si, ge, lam0, ecut=ecut),
+              PBE(), **kw)
+    g_hf = float(alchemical_energy_gradient(res, lam0, xc=PBE()))
+    h = 2e-3
+    g_fd = (e(lam0 + h) - e(lam0 - h)) / (2 * h)
+    assert abs(g_hf - g_fd) < 0.05, (g_hf, g_fd)
