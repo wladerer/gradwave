@@ -341,10 +341,22 @@ class GradWave(Calculator):
                 s[0, 0], s[1, 1], s[2, 2], s[1, 2], s[0, 2], s[0, 1]])
 
     def _get_system(self, atoms):
+        """With use_symmetry off, positions-only updates reuse the cached
+        System (its tables are phase-free; positions enter through structure
+        factors built per solve). With use_symmetry on the IBZ k-mesh and the
+        density symmetrizer are position-dependent — a moved atom can break a
+        spacegroup op — so the system is rebuilt every call, letting spglib
+        re-detect the current configuration's group. The expensive rebuilds
+        (RhoSymmetrizer index/phase maps) are memoized inside the setup layer
+        keyed on (grid shape, op set) and reused whenever the op set is
+        unchanged (the #121 memoization). Reusing the position-swapped cache
+        here instead would keep the previous geometry's IBZ, shifting warm-start
+        energies by up to ~0.3 eV once a move breaks a symmetry op (#128)."""
         symbols = atoms.get_chemical_symbols()
         species = sorted(set(symbols))
         key = (tuple(np.round(atoms.cell.array, 12).ravel()), tuple(symbols))
-        if self._system is not None and key == self._system_key:
+        if (not self.parameters["use_symmetry"] and self._system is not None
+                and key == self._system_key):
             return dataclasses.replace(
                 self._system,
                 positions=torch.as_tensor(atoms.get_positions(), dtype=RDTYPE).to(
