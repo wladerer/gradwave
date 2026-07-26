@@ -62,18 +62,19 @@ def rho_core_on_graph(system, phases) -> torch.Tensor | None:
     """
     if system.rho_core is None:
         return None
-    from gradwave.pseudo.radial_torch import RadialTables
+    from gradwave.pseudo.radial_torch import radial_tables
 
     grid = system.grid
     vol = grid.volume
     dev = phases.device
     q_sph = torch.linalg.norm(system.g_sphere, dim=1)
     core = torch.zeros(system.sphere_idx.shape[0], dtype=CDTYPE, device=dev)
+    tabs = radial_tables(system, device=dev)  # cached on the system
     for sp in set(system.species_of_atom):
         paw = system.paws[sp]
         if paw.core_rho is None:
             continue
-        tab = RadialTables(paw, device=dev)
+        tab = tabs[sp]
         with torch.no_grad():
             f_core = tab.core_of_g(q_sph)
         atoms = [a for a, sa in enumerate(system.species_of_atom) if sa == sp]
@@ -111,15 +112,14 @@ def forces_uspp(res: dict, xc, remove_net: bool = True) -> torch.Tensor:
     is_paw = any(p.is_paw for p in system.paws)
     ddd_atoms = []
     if is_paw:
-        from gradwave.scf.paw_onsite import OneCenter
+        from gradwave.scf.paw_onsite import onecenters
 
-        onec = {sp: OneCenter(system.paws[sp], xc)
-                for sp in set(system.species_of_atom)}
         dev0 = system.positions.device
+        onec = onecenters(system, xc, device=dev0)  # cached from the SCF
         for a, sp in enumerate(system.species_of_atom):
             bec = (becsum_s[0][a] if nspin == 1
                    else [becsum_s[0][a], becsum_s[1][a]])
-            _, ddd = onec[sp].energy_and_ddd(bec)  # one-center is CPU-side
+            _, ddd = onec[sp].energy_and_ddd(bec)
             ddd_atoms.append([ddd.to(dev0)] if nspin == 1
                              else [d.to(dev0) for d in ddd])
 

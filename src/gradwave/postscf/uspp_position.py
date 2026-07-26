@@ -429,10 +429,10 @@ def hessian_column(res: dict, xc, a: int, alpha: int, *,
     is_paw = any(p.is_paw for p in system.paws)
     ddd_leaves = []
     if is_paw:
-        from gradwave.scf.paw_onsite import OneCenter
+        from gradwave.scf.paw_onsite import onecenters
 
-        onec = {sp: OneCenter(system.paws[sp], xc)
-                for sp in set(system.species_of_atom)}
+        onec = onecenters(system, xc,
+                          device=system.positions.device)  # cached
         for at, sp in enumerate(system.species_of_atom):
             _, ddd = onec[sp].energy_and_ddd(res["rho_ij_atoms"][at].detach())
             ddd_leaves.append(ddd.detach().clone().requires_grad_(True))

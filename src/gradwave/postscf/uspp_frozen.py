@@ -91,10 +91,9 @@ def screened_dscr(res: dict, xc, veff_s: list[torch.Tensor]) -> list[torch.Tenso
               for v in veff_s]
 
     if any(p.is_paw for p in system.paws):
-        from gradwave.scf.paw_onsite import OneCenter
+        from gradwave.scf.paw_onsite import onecenters
 
-        onec = {sp: OneCenter(system.paws[sp], xc)
-                for sp in set(system.species_of_atom)}
+        onec = onecenters(system, xc, device=dev)  # cached from the SCF
         dscr_s = [d.clone() for d in dscr_s]
         bec = res["rho_ij_atoms"]
         for a, sp in enumerate(system.species_of_atom):

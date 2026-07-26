@@ -27,7 +27,7 @@ from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.postscf.paw_forces import _aug_at_fixed, _normalize_spin
 from gradwave.postscf.stress import _box_millers, _ewald_strained
-from gradwave.pseudo.radial_torch import RadialTables, sbt_t, simpson_weights
+from gradwave.pseudo.radial_torch import radial_tables, sbt_t, simpson_weights
 
 
 def stress_uspp(res: dict, xc, symmetrize: bool = True) -> torch.Tensor:
@@ -112,7 +112,7 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
     sphere_idx = system.sphere_idx
 
     kw = system.kweights
-    tabs = [RadialTables(p, device=dev) for p in system.paws]
+    tabs = radial_tables(system, device=dev)  # cached on the system
     lmax_b = max(b.l for p in system.paws for b in p.betas)
 
     from gradwave.core.gaunt import real_gaunt_table
@@ -125,10 +125,9 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
     is_paw = any(p.is_paw for p in system.paws)
     onec = None
     if is_paw:
-        from gradwave.scf.paw_onsite import OneCenter
+        from gradwave.scf.paw_onsite import onecenters
 
-        onec = {sp: OneCenter(system.paws[sp], xc)
-                for sp in set(system.species_of_atom)}
+        onec = onecenters(system, xc, device=dev)  # cached from the SCF
 
     e_total = _ewald_strained(pos_e, system.charges, a_e, b_e, omega, grid.cell)
     q_full = system.q_full.to(cdt)
@@ -182,7 +181,7 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
             for a, sp in enumerate(system.species_of_atom):
                 bec = (becsum_s[0][a] if nspin == 1
                        else [becsum_s[0][a], becsum_s[1][a]])
-                _, ddd = onec[sp].energy_and_ddd(bec)  # one-center is CPU-side
+                _, ddd = onec[sp].energy_and_ddd(bec)
                 ddd_isp = ddd if nspin == 1 else ddd[isp]
                 e_total = e_total + (ddd_isp.to(cdt).to(dev) * rho_ij[a]).sum().real
 

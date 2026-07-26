@@ -80,7 +80,9 @@ class USPPSystem:
 
     def to(self, device) -> USPPSystem:
         """Copy with every tensor moved to `device` (mirrors System.to; the
-        paws' numpy radial tables and the one-center machinery stay CPU)."""
+        paws' numpy radial tables stay CPU, and the per-device OneCenter/
+        RadialTables caches are not carried over — they rebuild lazily on
+        the new copy)."""
 
         def mv(obj, fields):
             return dataclasses.replace(

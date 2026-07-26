@@ -141,10 +141,10 @@ def uspp_energy_param_grads(res: dict, xc) -> dict[str, torch.Tensor]:
         e_theta = xc.energy(ru, rd, grid.volume, s_uu, s_dd, s_tot)
 
     if any(p.is_paw for p in system.paws):
-        from gradwave.scf.paw_onsite import OneCenter
+        from gradwave.scf.paw_onsite import onecenters
 
-        onec = {sp: OneCenter(system.paws[sp], xc)
-                for sp in set(system.species_of_atom)}
+        onec = onecenters(system, xc,
+                          device=system.positions.device)  # cached
         for a, sp in enumerate(system.species_of_atom):
             bec = (res["rho_ij_atoms"][a] if nspin == 1
                    else [res["rho_ij_atoms"][0][a], res["rho_ij_atoms"][1][a]])
@@ -229,10 +229,10 @@ class _ConvergedUSPP:
             else [[m.detach() for m in ch] for ch in res["rho_ij_atoms"]])
         self.hvp_at = None
         if self.is_paw:
-            from gradwave.scf.paw_onsite import OneCenter
+            from gradwave.scf.paw_onsite import onecenters
 
-            self.onec = {sp: OneCenter(system.paws[sp], xc)
-                         for sp in set(system.species_of_atom)}
+            self.onec = onecenters(system, xc,
+                                   device=system.positions.device)  # cached
             # HVPs are all taken at the frozen converged becsum — build
             # each atom's first-order graph once, pay one backward per call
             self.hvp_at = [self.onec[sp].hvp_factory(self._bec_at(a))
@@ -599,7 +599,7 @@ class _ConvergedUSPP:
                 for isp in range(self.nspin):
                     out[isp].append(torch.zeros_like(ms[isp]))
             elif self.nspin == 1:
-                # one-center quadrature is CPU-anchored (_to_real_t);
+                # one-center quadrature runs on the OneCenter table device;
                 # bridge back to the composite vector's device
                 out[0].append(self.hvp_at[a](ms[0]).to(dev))
             else:
@@ -827,9 +827,10 @@ def uspp_density_loss_param_grads(
                     g1s = torch.autograd.grad(e1, leaves, create_graph=True)
                     for isp in range(nsp):
                         db = 0.5 * (dbec[isp][a] + dbec[isp][a].conj().T)
-                        # g1s lives on the CPU one-center graph; pair there
-                        # and let .to() carry the graph across devices
-                        pair = (g1s[isp] * db.real.detach().cpu()).sum()
+                        # g1s lives on the one-center table device; pair
+                        # there and let .to() carry the graph across devices
+                        pair = (g1s[isp] * db.real.detach()
+                                .to(g1s[isp].device)).sum()
                         inner = inner + pair.to(inner.device)
             # ONE shared n_pts/Ω: u was seeded with the grid-gradient v̄
             # (= (Ω/n_pts)·physical δL/δρ), so the whole response Cu carries

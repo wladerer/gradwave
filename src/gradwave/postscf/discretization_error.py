@@ -711,8 +711,8 @@ def _estimate_force_error_uspp(res: dict, err: DiscretizationError, xc, *,
             cs = _ConvergedUSPP(res, xc)
             dddd_s = cs.hvp_onecenter(
                 [[m.to(CDTYPE) for m in dbec_s[isp]] for isp in range(nspin)])
-        from gradwave.scf.paw_onsite import OneCenter
-        onec = {sp: OneCenter(system.paws[sp], xc) for sp in set(species)}
+        from gradwave.scf.paw_onsite import onecenters
+        onec = onecenters(system, xc, device=dev)  # cached from the SCF
         becsum = res["rho_ij_atoms"]
         for at, sp in enumerate(species):
             bec = becsum[at] if nspin == 1 else [becsum[0][at], becsum[1][at]]
