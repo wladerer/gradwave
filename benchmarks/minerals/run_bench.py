@@ -4,6 +4,11 @@ a JSON result row. Heavy: intended to run on asus via gwq, never on the laptop.
   uv run python benchmarks/minerals/run_bench.py nio \
       --pseudo-dir ~/mineral_pseudos --outdir ~/mineral_bench/out --ranks 8
 
+The gradwave SCF runs on CPU by default. Pass --device cuda to build the
+system on CPU (setup stays numpy) and move it to the GPU before the SCF, so
+the reported gradwave wall is the GPU forward-SCF time. QE always runs on CPU
+MPI, so the wall ratio then compares CPU QE against GPU gradwave.
+
 For the AFM minerals gradwave uses the collinear-magnetic (Shubnikov) k-fold
 (setup_system(magmoms=..., collinear_magnetic=True), unshifted mesh) and the
 johnson mixer; QE uses per-sublattice starting_magnetization so it detects the
@@ -47,7 +52,7 @@ def gradwave_kcount(m, ecut_ev, upfs, magnetic: bool) -> int:
     return len(sysm.spheres)
 
 
-def run_gradwave(m, upfs, nbands, fft_shape, threads) -> dict:
+def run_gradwave(m, upfs, nbands, fft_shape, threads, device="cpu") -> dict:
     import torch
 
     from gradwave.core.xc.pbe import PBE
@@ -72,6 +77,8 @@ def run_gradwave(m, upfs, nbands, fft_shape, threads) -> dict:
         system = setup_system(m.cell, m.positions, m.species, upfs, ecut=ecut_ev,
                               kmesh=m.kmesh, nbands=nbands, use_symmetry=True,
                               fft_shape=fft_shape)
+    if device != "cpu":
+        system = system.to(device)
     t_setup = time.perf_counter() - t0
     res["nk_irr"] = len(system.spheres)
 
@@ -82,6 +89,8 @@ def run_gradwave(m, upfs, nbands, fft_shape, threads) -> dict:
         kwargs.update(nspin=2, start_mag=m.start_mag)
     t0 = time.perf_counter()
     r = scf(system, xc, **kwargs)
+    if device != "cpu":
+        torch.cuda.synchronize()
     t_scf = time.perf_counter() - t0
 
     e = r.energies
@@ -91,6 +100,7 @@ def run_gradwave(m, upfs, nbands, fft_shape, threads) -> dict:
         etot_eV=float(r.energies.free_energy), fermi_eV=float(r.fermi),
         tot_mag=float(r.mag_total), abs_mag=float(r.mag_abs),
         setup_s=t_setup, scf_s=t_scf, wall_s=t_setup + t_scf, threads=threads,
+        device=device,
         fft_shape=list(system.grid.shape),
         e_one_electron_eV=one_elec, e_hartree_eV=float(e.hartree),
         e_xc_eV=float(e.xc), e_ewald_eV=float(e.ewald),
@@ -99,7 +109,7 @@ def run_gradwave(m, upfs, nbands, fft_shape, threads) -> dict:
     return res
 
 
-def run_gradwave_uspp(m, paws, nbands, fft_shape, threads) -> dict:
+def run_gradwave_uspp(m, paws, nbands, fft_shape, threads, device="cpu") -> dict:
     """USPP/PAW forward SCF (nspin=1 here, diamagnetic)."""
     import torch
 
@@ -119,10 +129,14 @@ def run_gradwave_uspp(m, paws, nbands, fft_shape, threads) -> dict:
     system = setup_uspp(m.cell, m.positions, m.species, paws, ecut=ecut_ev,
                         ecutrho=ecutrho_ev, kmesh=m.kmesh, nbands=nbands,
                         use_symmetry=True, fft_shape=fft_shape)
+    if device != "cpu":
+        system = system.to(device)
     t_setup = time.perf_counter() - t0
     t0 = time.perf_counter()
     r = scf_uspp(system, PBE(), smearing="gaussian", width=width_ev,
                  etol=1e-8, rhotol=1e-7, max_iter=120, verbose=False)
+    if device != "cpu":
+        torch.cuda.synchronize()
     t_scf = time.perf_counter() - t0
 
     e = r["energies"]
@@ -132,6 +146,7 @@ def run_gradwave_uspp(m, paws, nbands, fft_shape, threads) -> dict:
         converged=bool(r["converged"]), n_iter=int(r["n_iter"]),
         etot_eV=float(e.free_energy), fermi_eV=float(r["fermi"] or 0.0),
         setup_s=t_setup, scf_s=t_scf, wall_s=t_setup + t_scf, threads=threads,
+        device=device,
         fft_shape=list(system.grid.shape),
         e_one_electron_eV=one_elec, e_hartree_eV=float(e.hartree),
         e_xc_eV=float(e.xc), e_ewald_eV=float(e.ewald),
@@ -146,6 +161,8 @@ def main():
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--ranks", type=int, default=8)
     ap.add_argument("--threads", type=int, default=8)
+    ap.add_argument("--device", default="cpu",
+                    help="gradwave compute device (cpu or cuda); QE stays CPU MPI")
     ap.add_argument("--skip-qe", action="store_true")
     a = ap.parse_args()
 
@@ -170,7 +187,7 @@ def main():
         "kmesh": list(m.kmesh), "ecut_ry": m.ecut_ry,
         "ecutrho_ry": m.rho_factor * m.ecut_ry, "degauss_ry": m.degauss_ry,
         "nspin": m.nspin, "pseudo_kind": m.pseudo_kind, "pseudos": m.pseudos,
-        "nbands": nbands, "nelec": nelec, "note": m.note,
+        "nbands": nbands, "nelec": nelec, "note": m.note, "device": a.device,
     }
 
     # ---- QE first (pins the shared FFT grid) ----
@@ -186,9 +203,11 @@ def main():
     # ---- gradwave (pinned to QE's FFT grid if available) ----
     try:
         if m.pseudo_kind == "USPP":
-            row["gradwave"] = run_gradwave_uspp(m, upfs, nbands, fft_shape, a.threads)
+            row["gradwave"] = run_gradwave_uspp(m, upfs, nbands, fft_shape,
+                                                a.threads, a.device)
         else:
-            row["gradwave"] = run_gradwave(m, upfs, nbands, fft_shape, a.threads)
+            row["gradwave"] = run_gradwave(m, upfs, nbands, fft_shape,
+                                           a.threads, a.device)
     except Exception as e:  # noqa: BLE001
         import traceback
         row["gradwave"] = {"error": repr(e), "trace": traceback.format_exc()[-2000:]}
