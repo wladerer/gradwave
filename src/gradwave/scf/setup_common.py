@@ -20,6 +20,26 @@ def _unique_shells(vals: np.ndarray):
     return uniq, inverse
 
 
+def sym_ops_key(sym) -> tuple:
+    """Content key for a space group's operation set. Rotations are integer
+    matrices; translations are rounded so spglib jitter far below symprec
+    cannot split a cache on a symmetry-preserving geometry step (+0.0
+    normalizes the −0.0 the rounding can produce — its bytes differ)."""
+    return (sym.rotations.tobytes(),
+            (np.round(sym.translations, 10) + 0.0).tobytes())
+
+
+# RhoSymmetrizer memo: the index/phase maps are ~n_ops serial NumPy passes
+# over the dense box and depend only on (shape, ops). During a relaxation the
+# spglib search re-runs every ionic step (cheap, and it must — a move can
+# break the group) but most steps preserve both the op set and the grid
+# shape, so the maps are rebuilt only on a genuine change. Entries hold the
+# CPU-built maps (with_mask/to never mutate them); the cap is small because
+# one entry is the size of a symmetrizer already alive inside a System.
+_RHO_SYM_CACHE: dict[tuple, object] = {}
+_RHO_SYM_CACHE_MAX = 2
+
+
 def find_symmetry_groups(cell, positions, species_of_atom, symprec, magmoms):
     """(sym, mag_sym) for the structure: the space group (None when P1 —
     nothing to gain, keep the plain path), and with magmoms the magnetic
@@ -90,8 +110,16 @@ def build_symmetrizer_and_kpoints(grid, cell, kmesh, kshift, sym, mag_sym,
     elif sym is not None:
         from gradwave.symmetry import RhoSymmetrizer, reduce_mesh
 
-        rho_symmetrizer = RhoSymmetrizer(grid.shape, sym,
-                                         dens_mask=grid.dens_mask)
+        key = (tuple(int(n) for n in grid.shape), sym_ops_key(sym))
+        base = _RHO_SYM_CACHE.get(key)
+        if base is None:
+            base = RhoSymmetrizer(grid.shape, sym, dens_mask=grid.dens_mask)
+            while len(_RHO_SYM_CACHE) >= _RHO_SYM_CACHE_MAX:
+                _RHO_SYM_CACHE.pop(next(iter(_RHO_SYM_CACHE)))
+            _RHO_SYM_CACHE[key] = base
+        # always hand out a copy dressed with the CURRENT grid's mask: the
+        # cached maps are cell-independent, the density sphere is not
+        rho_symmetrizer = base.with_mask(grid.dens_mask)
         kfrac, kw = reduce_mesh(kmesh, kshift, sym,
                                 time_reversal=time_reversal)
     else:

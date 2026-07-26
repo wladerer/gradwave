@@ -353,6 +353,23 @@ class RhoSymmetrizer:
         new.shape = self.shape
         return new
 
+    def with_mask(self, dens_mask) -> RhoSymmetrizer:
+        """Shallow copy sharing the idx/phase maps with a fresh density-sphere
+        mask. The maps are the expensive part (n_ops serial passes over the
+        dense box) and depend only on (shape, ops); the mask is the one
+        cell-dependent piece (strain moves the ecutrho sphere), so a memoized
+        instance is re-dressed with the current grid's mask on reuse."""
+        new = object.__new__(RhoSymmetrizer)
+        new.idx = self.idx
+        new.phase = self.phase
+        new.shape = self.shape
+        if dens_mask is not None:
+            new.mask = dens_mask.reshape(-1).clone()
+        else:
+            n1, n2, n3 = self.shape
+            new.mask = torch.ones(n1 * n2 * n3, dtype=torch.bool)
+        return new
+
     def apply(self, rho_g_box: torch.Tensor) -> torch.Tensor:
         """Symmetrize ρ(G) on the dense box: (n1,n2,n3) complex → same."""
         flat = rho_g_box.reshape(-1) * self.mask
