@@ -36,6 +36,16 @@ def _si_system(ecut=12 * RY, kmesh=(1, 1, 1), pos=None, cell=None):
         ecut=ecut, kmesh=kmesh, use_symmetry=False)
 
 
+@pytest.fixture(scope="module")
+def si_scf():
+    """One Γ-only Si SCF shared by the consistency tests (with H-count)."""
+    cell, pos, system = _si_system()
+    xc = LDA_PW92()
+    with count_h_applies() as ctr:
+        res = scf(system, xc, verbose=False)
+    return cell, pos, system, xc, res, ctr.count
+
+
 def test_lowdin_orthonormalizes():
     g = torch.Generator().manual_seed(7)
     z = torch.randn(4, 50, 2, generator=g, dtype=RDTYPE)
@@ -44,13 +54,10 @@ def test_lowdin_orthonormalizes():
     assert torch.allclose(s, torch.eye(4, dtype=s.dtype), atol=1e-12)
 
 
-def test_joint_energy_matches_scf_total():
-    cell, pos, system = _si_system()
-    xc = LDA_PW92()
-    with count_h_applies() as ctr:
-        res = scf(system, xc, verbose=False)
+def test_joint_energy_matches_scf_total(si_scf):
+    cell, pos, system, xc, res, h_count = si_scf
     assert res.converged
-    assert ctr.count > 0  # the counter saw Davidson's H-applies
+    assert h_count > 0  # the counter saw Davidson's H-applies
 
     nocc = 4
     coeffs = [c[:nocc] for c in res.coeffs]
@@ -62,13 +69,11 @@ def test_joint_energy_matches_scf_total():
     assert float(e) == pytest.approx(float(res.energies.total), abs=1e-6)
 
 
-def test_joint_energy_strain_gradient_matches_stress():
+def test_joint_energy_strain_gradient_matches_stress(si_scf):
     """dE/dε of the joint functional at the SCF point = Ω·σ (fixed basis)."""
     from gradwave.postscf.stress import stress
 
-    cell, pos, system = _si_system()
-    xc = LDA_PW92()
-    res = scf(system, xc, verbose=False)
+    cell, pos, system, xc, res, _ = si_scf
     nocc = 4
     coeffs = [c[:nocc].detach() for c in res.coeffs]
     occ = torch.full((len(system.spheres), nocc), 2.0, dtype=RDTYPE)

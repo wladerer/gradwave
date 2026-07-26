@@ -100,17 +100,23 @@ def count_h_applies():
 
 # ------------------------------------------------------------- orbital param
 def lowdin(z: torch.Tensor) -> torch.Tensor:
-    """Löwdin-orthonormalize the rows of z: C = (Z Zᴴ)^{-1/2} Z.
+    """Orthonormalize the rows of z via Cholesky: C = L⁻¹Z with ZZᴴ = LLᴴ.
 
-    Smooth in Z (unlike QR's sign/pivot choices) and symmetric — the closest
-    orthonormal frame to Z — so autograd through it is well conditioned as
-    long as Z keeps full row rank (eigenvalues clamped for safety).
+    NOT the symmetric (eigh-based) Löwdin frame — deliberately. The energy is
+    invariant under which orthonormal frame of span(Z) is returned, but
+    autograd through ``eigh`` carries 1/(λᵢ−λⱼ) factors that go NaN the moment
+    ZZᴴ has (near-)repeated eigenvalues — which symmetry-degenerate bands
+    produce *exactly*, killing the first backward pass (observed on Si at the
+    2×2×2 zone-boundary k-points). Cholesky's backward is smooth for any SPD
+    matrix regardless of its spectrum; a trace-scaled jitter keeps it SPD when
+    a line-search trial drives Z toward rank deficiency.
     """
     s = z @ z.conj().transpose(-2, -1)
-    evals, evecs = torch.linalg.eigh(s)
-    inv_sqrt = (evecs * evals.clamp_min(1e-14).rsqrt().to(evecs.dtype)) \
-        @ evecs.conj().transpose(-2, -1)
-    return inv_sqrt @ z
+    n = s.shape[-1]
+    jitter = 1e-13 * torch.diagonal(s.detach(), dim1=-2, dim2=-1).mean().real
+    eye = torch.eye(n, dtype=s.dtype, device=s.device)
+    ell = torch.linalg.cholesky(s + jitter * eye)
+    return torch.linalg.solve_triangular(ell, z, upper=False)
 
 
 def teter_precond(kpg2: torch.Tensor, ekin_ref: float) -> torch.Tensor:
@@ -393,8 +399,18 @@ def joint_relax(
                     _tabs=tabs, _eps=eps_p, _frac=frac_p, _occ=occ):
             nonlocal n_closures
             _opt.zero_grad()
-            coeffs = _coeffs_from_z(_z, _p, _n)
-            e = joint_energy(_sys, xc, _tabs, _eps, _frac, coeffs, _occ)
+            # volume-collapse guard: a strong-Wolfe trial step along strain is
+            # unbounded and det(1+ε) → 0 sends 1/Ω terms to overflow → NaN
+            # grads → permanently NaN parameters. Return a finite penalty that
+            # pushes ε back instead; the line search backtracks off it.
+            eps_s = 0.5 * (_eps + _eps.transpose(-2, -1))
+            detj = torch.linalg.det(
+                torch.eye(3, dtype=RDTYPE, device=_eps.device) + eps_s)
+            if float(detj.detach()) < 0.2 or float(detj.detach()) > 5.0:
+                e = 1e3 * ((detj - 1.0) ** 2 + (eps_s ** 2).sum() + 1.0)
+            else:
+                coeffs = _coeffs_from_z(_z, _p, _n)
+                e = joint_energy(_sys, xc, _tabs, _eps, _frac, coeffs, _occ)
             e.backward()
             n_closures += 1
             history.append((n_closures, float(e.detach())))
@@ -402,14 +418,15 @@ def joint_relax(
 
         converged_inner = False
         while n_closures < max_closures:
-            e = opt.step(closure)
+            opt.step(closure)
+            e_now = history[-1][1]
             a_e_np = a0_np @ (np.eye(3)
                               + eps_p.detach().cpu().numpy()).T
             f_now, s_now, c_now = _grad_metrics(
                 eps_p, frac_p, z_params, a_e_np, system.grid.volume)
             if verbose:
                 print(f"  joint cycle {cycle} closures {n_closures:4d}  "
-                      f"E = {float(e):+.8f} eV  fmax {f_now:.2e}  "
+                      f"E = {e_now:+.8f} eV  fmax {f_now:.2e}  "
                       f"smax {s_now:.2e}  cmax {c_now:.2e}", flush=True)
             if (f_now < fmax and c_now < ctol
                     and (fix_cell or s_now < smax)):
