@@ -13,6 +13,7 @@ factors) and the charge (4 vs 14 valence) vary with lambda.
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from gradwave.core.energies.ewald import ewald_energy
@@ -33,6 +34,7 @@ from gradwave.scf.setup_common import _unique_shells
 
 RY = 13.605693122994
 DG = Path(__file__).resolve().parents[2] / "benchmarks" / "delta_gauge" / "pseudos"
+FIX = Path(__file__).resolve().parents[1] / "fixtures" / "qe" / "pseudos"
 
 
 def _si_cell():
@@ -183,3 +185,161 @@ def test_nonlocal_blend_gradient_vs_fd():
     # the alchemical nonlocal derivative is E_nl(B) - E_nl(A) by linearity in D
     e_si, e_ge = _e_nl(pd_si, pos, c), _e_nl(pd_ge, pos, c)
     assert abs(g_ad - (e_ge.item() - e_si.item())) < 1e-7 * max(1.0, abs(g_ad))
+
+
+# --------------------------------------------------------------------------- #
+#  phase 3: a full alchemical SCF, endpoint exactness through convergence      #
+# --------------------------------------------------------------------------- #
+def test_alchemical_scf_endpoints_match_pure():
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.scf.alchemical import setup_alchemical_system
+    from gradwave.scf.loop import scf
+
+    # C <-> Si (both 4 valence, so the electron count is fixed across lambda)
+    c_upf = parse_upf(FIX / "C_ONCV_PBE-1.2.upf")
+    si_upf = parse_upf(FIX / "Si_ONCV_PBE-1.2.upf")
+    a = 5.43
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+    ecut = 20 * RY
+    kw = dict(smearing="gaussian", width=0.2, etol=1e-8, rhotol=1e-7,
+              max_iter=200, verbose=False)
+
+    def pure(upf, nb):
+        return scf(setup_system(cell, pos, [0, 0], [upf], ecut=ecut,
+                                kmesh=(1, 1, 1), nbands=nb), PBE(), **kw)
+
+    # lambda = 1 reproduces pure Si
+    alc1 = setup_alchemical_system(cell, pos, c_upf, si_upf, 1.0, ecut=ecut)
+    r1 = scf(alc1, PBE(), **kw)
+    r_si = pure(si_upf, alc1.nbands)
+    assert r1.converged and r_si.converged
+    assert abs(float(r1.energies.total) - float(r_si.energies.total)) < 1e-5, \
+        (float(r1.energies.total), float(r_si.energies.total))
+
+    # lambda = 0 reproduces pure C (same cell)
+    alc0 = setup_alchemical_system(cell, pos, c_upf, si_upf, 0.0, ecut=ecut)
+    r0 = scf(alc0, PBE(), **kw)
+    r_c = pure(c_upf, alc0.nbands)
+    assert abs(float(r0.energies.total) - float(r_c.energies.total)) < 1e-5, \
+        (float(r0.energies.total), float(r_c.energies.total))
+
+
+@pytest.mark.standard
+def test_alchemical_scf_gradient_hellmann_feynman():
+    # dE/dlambda through the converged SCF vs a full-SCF finite difference
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.scf.alchemical import alchemical_energy_gradient, setup_alchemical_system
+    from gradwave.scf.loop import scf
+
+    c_upf = parse_upf(FIX / "C_ONCV_PBE-1.2.upf")
+    si_upf = parse_upf(FIX / "Si_ONCV_PBE-1.2.upf")
+    a = 5.43
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+    ecut = 20 * RY
+    kw = dict(smearing="gaussian", width=0.2, etol=1e-9, rhotol=1e-8,
+              max_iter=300, verbose=False)
+
+    def e(lam):
+        s = setup_alchemical_system(cell, pos, c_upf, si_upf, lam, ecut=ecut)
+        return float(scf(s, PBE(), **kw).energies.free_energy)
+
+    lam0 = 0.5
+    res = scf(setup_alchemical_system(cell, pos, c_upf, si_upf, lam0, ecut=ecut),
+              PBE(), **kw)
+    g_hf = float(alchemical_energy_gradient(res, lam0))
+    h = 2e-3
+    g_fd = (e(lam0 + h) - e(lam0 - h)) / (2 * h)
+    assert abs(g_hf - g_fd) < 0.02, (g_hf, g_fd)
+
+
+@pytest.mark.standard
+def test_per_site_alchemical_heterovalent_endpoint():
+    # per-site lambda = [1, 0] on a Si/Ge cell must reproduce the real ordered
+    # Ge/Si cell (heterovalent, Z 14 and 4, neutral integer electron count)
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.scf.alchemical import setup_alchemical_system
+    from gradwave.scf.loop import scf
+
+    si = parse_upf(DG / "Si.upf")
+    ge = parse_upf(DG / "Ge.upf")
+    a = 5.5
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+    ecut = 30 * RY
+    kw = dict(smearing="gaussian", width=0.2, etol=1e-8, rhotol=1e-7,
+              max_iter=300, verbose=False)
+
+    alc = setup_alchemical_system(cell, pos, si, ge, [1.0, 0.0], ecut=ecut)
+    r_alc = scf(alc, PBE(), **kw)
+    # real ordered cell: atom 0 = Ge (species 1), atom 1 = Si (species 0)
+    real = setup_system(cell, pos, [1, 0], [si, ge], ecut=ecut, kmesh=(1, 1, 1),
+                        nbands=alc.nbands)
+    r_real = scf(real, PBE(), **kw)
+    assert r_alc.converged and r_real.converged
+    assert abs(float(r_alc.energies.total) - float(r_real.energies.total)) < 1e-5, \
+        (float(r_alc.energies.total), float(r_real.energies.total))
+
+
+@pytest.mark.standard
+def test_per_site_alchemical_gradient():
+    # per-site dE/dlambda_i vs finite difference on each site (C <-> Si)
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.scf.alchemical import alchemical_energy_gradient, setup_alchemical_system
+    from gradwave.scf.loop import scf
+
+    c_upf = parse_upf(FIX / "C_ONCV_PBE-1.2.upf")
+    si_upf = parse_upf(FIX / "Si_ONCV_PBE-1.2.upf")
+    a = 5.43
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+    ecut = 20 * RY
+    kw = dict(smearing="gaussian", width=0.2, etol=1e-9, rhotol=1e-8,
+              max_iter=300, verbose=False)
+    lam0 = np.array([0.5, 0.3])
+
+    def e(vec):
+        s = setup_alchemical_system(cell, pos, c_upf, si_upf, vec, ecut=ecut)
+        return float(scf(s, PBE(), **kw).energies.free_energy)
+
+    res = scf(setup_alchemical_system(cell, pos, c_upf, si_upf, lam0, ecut=ecut),
+              PBE(), **kw)
+    g_hf = alchemical_energy_gradient(res, lam0).numpy()
+    h = 2e-3
+    for i in range(2):
+        up, dn = lam0.copy(), lam0.copy()
+        up[i] += h
+        dn[i] -= h
+        g_fd = (e(up) - e(dn)) / (2 * h)
+        assert abs(g_hf[i] - g_fd) < 0.02, (i, g_hf[i], g_fd)
+
+
+@pytest.mark.standard
+def test_heterovalent_gradient_core_and_janak():
+    # Si -> Ge (Z 4 -> 14, NLCC semicore): the gradient needs both the core-
+    # correction XC term and the Janak chemical-potential term mu*dN/dlambda
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.scf.alchemical import alchemical_energy_gradient, setup_alchemical_system
+    from gradwave.scf.loop import scf
+
+    si = parse_upf(DG / "Si.upf")
+    ge = parse_upf(DG / "Ge.upf")
+    a = 5.5
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+    ecut = 30 * RY
+    kw = dict(smearing="gaussian", width=0.2, etol=1e-9, rhotol=1e-8,
+              max_iter=300, verbose=False)
+
+    def e(lam):
+        s = setup_alchemical_system(cell, pos, si, ge, lam, ecut=ecut)
+        return float(scf(s, PBE(), **kw).energies.free_energy)
+
+    lam0 = 0.5
+    res = scf(setup_alchemical_system(cell, pos, si, ge, lam0, ecut=ecut),
+              PBE(), **kw)
+    g_hf = float(alchemical_energy_gradient(res, lam0, xc=PBE()))
+    h = 2e-3
+    g_fd = (e(lam0 + h) - e(lam0 - h)) / (2 * h)
+    assert abs(g_hf - g_fd) < 0.05, (g_hf, g_fd)
