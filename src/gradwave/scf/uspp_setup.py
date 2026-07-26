@@ -165,6 +165,30 @@ def _aug_tables(paw: PAWData, g_sphere: np.ndarray) -> AugSpecies:
     )
 
 
+# _aug_tables memo: the tables depend only on (pseudo, density-sphere G set),
+# so fixed-cell position steps of a relaxation reuse them and only a cell/grid
+# change (new G set) recomputes. Keyed by id(paw) with a weakref finalizer so
+# a dead pseudo cannot alias a recycled id; the G set is a content digest.
+# Values stay CPU-pristine — USPPSystem.to copies via dataclasses.replace.
+_AUG_CACHE: dict[int, tuple] = {}
+
+
+def _aug_tables_cached(paw: PAWData, g_sphere: np.ndarray) -> AugSpecies:
+    import hashlib
+    import weakref
+
+    digest = hashlib.sha1(np.ascontiguousarray(g_sphere).tobytes()).digest()
+    key = id(paw)
+    hit = _AUG_CACHE.get(key)
+    if hit is not None and hit[0] == digest:
+        return hit[1]
+    aug = _aug_tables(paw, g_sphere)
+    if key not in _AUG_CACHE:
+        weakref.finalize(paw, _AUG_CACHE.pop, key, None)
+    _AUG_CACHE[key] = (digest, aug)
+    return aug
+
+
 def _build_smooth_grid(cell, ecut, axis_groups, spheres, kfrac, grid):
     """Dual (smooth) box holding only the wavefunction-product sphere
     (2·G_max(ecut)). The Davidson H-apply local term runs there rather than on
@@ -280,7 +304,8 @@ def setup_uspp(
     mask = grid.dens_mask.reshape(-1)
     sphere_idx = torch.nonzero(mask, as_tuple=False).reshape(-1)
     g_sphere = grid.g_cart.reshape(-1, 3)[sphere_idx]
-    aug = [_aug_tables(p, g_sphere.numpy()) for p in paws]
+    g_sphere_np = g_sphere.numpy()
+    aug = [_aug_tables_cached(p, g_sphere_np) for p in paws]
 
     rho_core = build_core_density(paws, species_of_atom, positions, grid,
                                   uniq, inverse)
@@ -310,10 +335,40 @@ def setup_uspp(
     )
 
 
+# BecsumSymmetrizer memo (plain space groups; the magnetic path stays
+# uncached). The D^l blocks depend on the ops only through their Cartesian
+# rotations S = AᵀWA⁻ᵀ plus the per-species beta-l layout, so the key uses the
+# rounded S stack rather than the raw cell — a symmetry-preserving strain or
+# position step leaves S unchanged and reuses the blocks. Cached entries stay
+# pristine (callers get a shallow copy; ``.to`` rebinds, never mutates them).
+_BECSUM_SYM_CACHE: dict[tuple, object] = {}
+_BECSUM_SYM_CACHE_MAX = 8
+
+
 def _make_becsum_sym(sym, cell, paws, species_of_atom, slices):
     from gradwave.scf.paw_symmetry import BecsumSymmetrizer, MagneticBecsumSymmetrizer
     from gradwave.symmetry import MagneticGroup
 
     if isinstance(sym, MagneticGroup):
         return MagneticBecsumSymmetrizer(sym, cell, paws, species_of_atom, slices)
-    return BecsumSymmetrizer(sym, cell, paws, species_of_atom, slices)
+    a_t = np.asarray(cell, dtype=np.float64).T
+    a_t_inv = np.linalg.inv(a_t)
+    s_ops = np.stack([a_t @ w @ a_t_inv for w in sym.rotations])
+    # +0.0 normalizes −0.0 from the rounding (its bytes differ from +0.0)
+    key = ((np.round(s_ops, 10) + 0.0).tobytes(), sym.atom_map.tobytes(),
+           tuple(tuple(b.l for b in p.betas) for p in paws),
+           tuple(species_of_atom), tuple(slices))
+    base = _BECSUM_SYM_CACHE.get(key)
+    if base is None:
+        base = BecsumSymmetrizer(sym, cell, paws, species_of_atom, slices)
+        while len(_BECSUM_SYM_CACHE) >= _BECSUM_SYM_CACHE_MAX:
+            _BECSUM_SYM_CACHE.pop(next(iter(_BECSUM_SYM_CACHE)))
+        _BECSUM_SYM_CACHE[key] = base
+    # shallow copy carrying the CURRENT SpaceGroup (same rotations/atom_map by
+    # key — apply() reads n_ops and atom_map off it) and sharing the D blocks
+    new = object.__new__(BecsumSymmetrizer)
+    new.sg = sym
+    new.atom_slices = slices
+    new.d_full = base.d_full
+    new.species_of_atom = list(species_of_atom)
+    return new

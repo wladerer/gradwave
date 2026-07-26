@@ -9,6 +9,14 @@ pressure — converge ecut or re-relax at the new cell.
 Geometry setup (grids, form-factor tables) is cached and reused when only
 positions change, which is the common case during a relaxation; any cell
 change triggers a full re-setup.
+
+Every calculate() computes energy, forces, AND stress in one pass off the
+converged SCF state (the stress is one extra autograd backward — far cheaper
+than a second calculate), and a geometry guard skips the SCF outright when
+the incoming atoms match the state the stored result was computed at. ASE's
+FrechetCellFilter asks for forces and stress as two separate get_property
+calls; without both pieces every variable-cell BFGS step would pay a second
+warm SCF plus a full forces evaluation just to append the stress.
 """
 
 from __future__ import annotations
@@ -119,6 +127,8 @@ class GradWave(Calculator):
         self._compile_xc = compile_xc
         self._verbose = verbose
         self.last_result = None
+        self._scf_state = None  # _state_key the stored SCF state was built at
+        self._cached_results = {}  # full results dict paired with _scf_state
 
     def _make_xc(self, nspin: int = 1):
         """Instantiate the XC functional, opting into the compiled real-valued
@@ -165,7 +175,7 @@ class GradWave(Calculator):
 
         return _is_uspp([self._upf(s) for s in species])
 
-    def _apply_dispersion(self, system, properties):
+    def _apply_dispersion(self, system):
         """Fold the opt-in D3(BJ)/D4(BJ) correction into the reported energy,
         forces, and stress — the calculator analog of ``api._apply_dispersion``.
 
@@ -217,7 +227,7 @@ class GradWave(Calculator):
             e = dispersion_energy(positions, cell_t, z, cfg)
             f = dispersion_forces(positions, cell, z, cfg)
             sig = (dispersion_stress(positions, cell, z, cfg)
-                   if "stress" in properties else None)
+                   if "stress" in self.results else None)
         except (ValueError, NotImplementedError):
             return
 
@@ -294,13 +304,45 @@ class GradWave(Calculator):
         return {"system": prev_sys, "nspin": 1, "rho": rho,
                 "rho_spin": None, "coeffs": prev.coeffs}
 
+    def _state_key(self, atoms):
+        """Exact-match key for the (geometry, parameters) state an SCF result
+        is valid at: positions/cell/pbc/symbols/initial moments plus every
+        calculator parameter (dispersion rides on self.parameters) and the
+        device. Exact bytes — any genuine move changes them."""
+        return (
+            atoms.get_positions().tobytes(),
+            atoms.cell.array.tobytes(),
+            atoms.get_pbc().tobytes(),
+            tuple(atoms.get_chemical_symbols()),
+            np.asarray(atoms.get_initial_magnetic_moments(),
+                       dtype=float).tobytes(),
+            repr(sorted(self.parameters.items(), key=lambda kv: kv[0])),
+            self._device,
+        )
+
     def calculate(self, atoms=None, properties=("energy",), system_changes=all_changes):
         super().calculate(atoms, properties, system_changes)
-        p = self.parameters
+        key = self._state_key(self.atoms)
+        if self.last_result is not None and key == self._scf_state:
+            # Unchanged geometry/parameters: the stored SCF state is still
+            # valid. ASE re-enters calculate() only when a property is missing
+            # from self.results (its reset() clears them); the single pass
+            # below populates every property, so restoring the paired dict
+            # answers any request without re-running the SCF.
+            self.results.update(self._cached_results)
+            return
         symbols = self.atoms.get_chemical_symbols()
         if self._is_uspp(sorted(set(symbols))):
-            self._calculate_uspp(properties)
-            return
+            self._calculate_uspp()
+        else:
+            self._calculate_nc()
+        self._scf_state = key
+        self._cached_results = dict(self.results)
+
+    def _calculate_nc(self):
+        """Norm-conserving route: one SCF, then energy, forces, and (for a
+        periodic cell) stress in the same pass."""
+        p = self.parameters
         system = self._get_system(self.atoms)
         # collinear-spin channel from the atoms' initial moments (nspin=1 when
         # unmagnetized); start_mag/tot_magnetization seed and (optionally) pin M
@@ -332,7 +374,10 @@ class GradWave(Calculator):
         # core-correction force term, spin-resolved for nspin=2); ignored for
         # valence-only species. Reuse the (spin-matched) functional above.
         self.results["forces"] = hf_forces(res, xc=xc).cpu().numpy()
-        if "stress" in properties:
+        if self.atoms.pbc.all():
+            # unconditional (not gated on the requested properties): one
+            # autograd backward over the stored SCF state, far cheaper than
+            # the warm SCF + forces a re-entrant stress request used to cost
             from gradwave.postscf.stress import stress as hf_stress
 
             sig = hf_stress(res, xc).cpu().numpy()
@@ -341,7 +386,7 @@ class GradWave(Calculator):
             self.results["stress"] = np.array([
                 sig[0, 0], sig[1, 1], sig[2, 2], sig[1, 2], sig[0, 2], sig[0, 1],
             ])
-        self._apply_dispersion(system, properties)
+        self._apply_dispersion(system)
 
     def _get_uspp_system(self, atoms):
         """With use_symmetry off, positions-only updates reuse the cached
@@ -349,7 +394,10 @@ class GradWave(Calculator):
         structure factors built per solve). With use_symmetry on the density
         symmetrizer and the IBZ k-mesh are position-dependent, so the system
         is rebuilt every call — spglib then finds the current configuration's
-        group (dropping to time-reversal-only when a move breaks it)."""
+        group (dropping to time-reversal-only when a move breaks it). The
+        expensive per-step pieces of that rebuild (RhoSymmetrizer maps,
+        becsum D blocks, aug form-factor tables) are memoized inside the
+        setup layer and reused whenever the op set / G set is unchanged."""
         from gradwave.scf.uspp import setup_uspp
 
         p = self.parameters
@@ -373,8 +421,9 @@ class GradWave(Calculator):
         self._system, self._system_key = system, key
         return system
 
-    def _calculate_uspp(self, properties):
-        """USPP/PAW route (nspin=1)."""
+    def _calculate_uspp(self):
+        """USPP/PAW route (nspin=1): one SCF, then energy, forces, and (for a
+        periodic cell) stress in the same pass."""
         from gradwave.scf.uspp import scf_uspp
 
         p = self.parameters
@@ -413,11 +462,11 @@ class GradWave(Calculator):
         from gradwave.postscf.paw_forces import forces_uspp
 
         self.results["forces"] = forces_uspp(res, xc).cpu().numpy()
-        if "stress" in properties:
+        if self.atoms.pbc.all():
             from gradwave.postscf.paw_stress import stress_uspp
 
             sig = stress_uspp(res, xc).cpu().numpy()
             self.results["stress"] = np.array([
                 sig[0, 0], sig[1, 1], sig[2, 2], sig[1, 2], sig[0, 2], sig[0, 1],
             ])
-        self._apply_dispersion(system, properties)
+        self._apply_dispersion(system)
