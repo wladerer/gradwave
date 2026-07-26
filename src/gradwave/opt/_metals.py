@@ -45,7 +45,10 @@ import math
 import torch
 
 from gradwave.constants import HBAR2_2M
-from gradwave.core.fftbox import g_to_r
+from gradwave.core.density import sigma_from_rho
+from gradwave.core.energies.hartree import hartree_potential_r
+from gradwave.core.energies.local_pp import local_potential_g
+from gradwave.core.fftbox import g_to_r, g_to_r_box
 from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.postscf._strain import strained_kpg, strained_projector_cols
@@ -54,6 +57,62 @@ from gradwave.scf.loop import (
     effective_potentials,
     local_potential_r,
 )
+
+
+class RobustEigh(torch.autograd.Function):
+    """``torch.linalg.eigh`` with a degeneracy-robust backward.
+
+    Forward is the EXACT Hermitian eigendecomposition ``A = V diag(λ) Vᴴ``. The
+    backward replaces the eigenvector-response denominators ``1/(λ_i−λ_j)`` —
+    which diverge as two levels approach and are NaN at exact degeneracy — with
+    the Lorentzian-broadened
+
+        F_ij = (λ_i − λ_j) / ((λ_i − λ_j)² + ε²),   F_ii = 0,
+
+    which stays finite (→ 0 at exact degeneracy) and reduces to the exact
+    ``1/(λ_i−λ_j)`` when ``|λ_i−λ_j| ≫ ε``. Tying ``ε`` to the smearing width σ
+    is the physically motivated choice: two levels within σ of each other have
+    near-equal Fermi occupations, so their mutual ensemble is smeared out and
+    the broadened (finite) gradient is exactly the smeared-ensemble limit rather
+    than an artefact.
+
+    Gauge note: for complex-Hermitian ``A`` the eigenvectors carry an arbitrary
+    per-column phase, so a bare cotangent ``gV`` is gauge dependent; callers
+    must contract ``V`` only into gauge-invariant quantities (occupations depend
+    on λ alone; the Ritz density ``Σ f_i |Σ_a V_{ai}ψ_a|²`` is phase-invariant),
+    which the free-energy descent does.
+    """
+
+    @staticmethod
+    def forward(ctx, a, eps):
+        w, v = torch.linalg.eigh(a)
+        ctx.save_for_backward(w, v)
+        ctx.eps = float(eps)
+        return w, v
+
+    @staticmethod
+    def backward(ctx, gw, gv):
+        w, v = ctx.saved_tensors
+        eps = ctx.eps
+        vh = v.conj().transpose(-2, -1)
+        # F_{ij} = (λ_j − λ_i)/((λ_i − λ_j)² + ε²); the diagonal (λ diff 0) is 0.
+        # (Sign matches torch.linalg.eigh's backward convention for gV; verified
+        # against autograd in tests/unit/test_metals_eigh.py.)
+        wd = w.unsqueeze(-2) - w.unsqueeze(-1)  # (..., i, j) = λ_j − λ_i
+        f_broad = wd / (wd * wd + eps * eps)
+        inner = torch.zeros_like(v)
+        if gv is not None:
+            inner = f_broad.to(v.dtype) * (vh @ gv)
+        if gw is not None:
+            inner = inner + torch.diag_embed(gw.to(v.dtype))
+        ga = v @ inner @ vh
+        ga = 0.5 * (ga + ga.conj().transpose(-2, -1))
+        return ga, None
+
+
+def robust_eigh(a, eps):
+    """Degeneracy-robust Hermitian eigendecomposition (see ``RobustEigh``)."""
+    return RobustEigh.apply(a, eps)
 
 
 def _static_blocks(system, tabs, coeffs, lmax):
@@ -248,3 +307,199 @@ def subspace_occupations(
         occ = torch.stack(occ_rows)
         entropy = ent
     return rot, occ.detach(), entropy.detach(), eigs.detach(), mu
+
+
+def robust_subspace_occupations(
+    system: System,
+    xc,
+    tabs,
+    coeffs,
+    frac,
+    smearing: str,
+    width: float,
+    n_electrons: float,
+    *,
+    lmax: int,
+    n_inner: int = 5,
+    broaden: float | None = None,
+):
+    """Subspace occupations with a LIVE, degeneracy-robust subspace rotation.
+
+    Closes the frozen-occupation force bias (#129). Two stages:
+
+    1. A short DETACHED self-consistent inner loop (identical to
+       ``subspace_occupations``) converges (ρ, V_eff, μ) at the current orbitals
+       — cheap, no autograd graph.
+
+    2. ONE LIVE pass rebuilds the subspace Hamiltonian ``H_sub`` on the graph
+       from the live ``coeffs`` and live fractional positions ``frac``,
+       diagonalises it with the Lorentzian-broadened :class:`RobustEigh`, and
+       returns the resulting rotation, Fermi occupations and entropy — all
+       LIVE. Rotating the live orbitals onto this Ritz basis (``C' = rotᵀ·C``)
+       makes the subspace rotation and occupation response part of the
+       objective's gradient, so the force is the full Mermin free-energy force
+       instead of the biased frozen-occupation one.
+
+    Consistency is what makes the gradient trustworthy: every channel of the
+    λ-response carries the prefactor ``(λ_i − ε_i^true)``, where ``ε_i^true`` is
+    the band derivative ``∂E/∂f_i`` of the LIVE ``joint_energy``. If ``H_sub``
+    were built with the frozen inner-loop potential, that prefactor would
+    vanish only AT the inner fixed point and enter linearly in the orbital
+    error away from it — drowning the ~0.3 eV/Å physical force in noise along a
+    descent trajectory (observed on Al). So stage 2 rebuilds the ENTIRE local
+    potential LIVE:
+
+    - ``v_H + v_xc`` from the live density of the stage-1-rotated orbitals
+      (the XC functional derivative is taken with ``create_graph`` so the
+      kernel response rides the graph too),
+    - the local pseudopotential and the nonlocal projectors from the live
+      ``frac``,
+
+    making ``λ_i`` and ``ε_i`` refer to the same Hamiltonian up to one
+    (converged) occupation update — the prefactor is at the inner-loop residual
+    level at EVERY point of the trajectory, not just the fixed point. The inner
+    loop iterates to an occupation tolerance (1e-10, capped at
+    ``max(n_inner, 30)`` sweeps) for the same reason.
+
+    The strain ε is deliberately NOT threaded into ``H_sub`` (it is built on the
+    base-cell reciprocal lattice): at fixed occupations dF/dε has no explicit
+    strain term (matching ``postscf/stress.py``), and the occupation/rotation
+    response to ε vanishes at self-consistency by the envelope theorem — so this
+    keeps ``dF/dε = Ω·stress`` bit-identical to the detached scheme while adding
+    the position/orbital response that the force needs. ``ε`` (``broaden``)
+    defaults to the smearing width ``width``.
+
+    Returns ``(rot, occ, entropy, eigs, mu)`` with ``rot``/``occ``/``entropy``
+    LIVE (``eigs`` detached, for reporting).
+    """
+    kw = system.kweights
+    dev = coeffs[0].device
+    nk = len(coeffs)
+    nb = coeffs[0].shape[0]
+    scheme = SCHEMES[smearing]
+    if broaden is None:
+        broaden = width
+    grid = system.grid
+    shape = grid.shape
+    n_grid = shape[0] * shape[1] * shape[2]
+    a0 = torch.as_tensor(grid.cell, dtype=RDTYPE, device=dev)
+    b_e = 2.0 * math.pi * torch.linalg.inv(a0).T  # base-cell reciprocal lattice
+    omega = torch.linalg.det(a0)
+    pos_live = frac @ a0  # live Cartesian positions on the base cell
+
+    # ---- stage 1: detached self-consistent (ρ, V_eff, μ, occ) fixed point.
+    # v_loc is built at the LIVE (detached) positions so the frozen screening
+    # v_H + v_xc and the live-in-frac stage-2 v_loc add up to the potential this
+    # loop actually converged.
+    with torch.no_grad():
+        vloc_g_d = local_potential_g(
+            frac.detach() @ a0, system.species_index, system.vloc_tables,
+            system.grid.g_cart, float(omega), vloc_atom=system.vloc_atom)
+        vloc_r = g_to_r_box(vloc_g_d, real=True)
+    hkin_d, hnl_d, psis_d, _, _ = _static_blocks(system, tabs, coeffs, lmax)
+    occ = torch.full((nk, nb), n_electrons / nb, dtype=RDTYPE, device=dev).clamp(max=2.0)
+    rot = [torch.eye(nb, dtype=CDTYPE, device=dev) for _ in range(nk)]
+    mu = 0.0
+    veff = None
+    # Damped fixed point: the raw occupation/potential iteration charge-sloshes
+    # (oscillates without converging) when the Fermi shell is near-degenerate —
+    # observed on 2×2×2 Al, where the undamped loop stalls at |Δocc| ~ 7e-3 and
+    # the leftover (λ−ε) prefactor puts a ~0.07 eV/Å bias on the live force.
+    # Linear mixing (β = 0.5) makes it contract; the residual gate is on the RAW
+    # update so the reported convergence is of the true fixed point.
+    beta = 0.5
+    n_sweeps = max(n_inner, 60)
+    for _ in range(n_sweeps):
+        occ_prev = occ
+        rho = None
+        for ik in range(nk):
+            psir = torch.einsum("ai,axyz->ixyz", rot[ik], psis_d[ik])
+            w = (kw[ik] * occ[ik]).to(RDTYPE)
+            contrib = torch.einsum("b,bxyz->xyz", w, psir.real**2 + psir.imag**2)
+            rho = contrib if rho is None else rho + contrib
+        rho = rho / omega
+        veff = effective_potentials(system, xc, [rho], vloc_r)[0]
+        new_eigs = []
+        for ik in range(nk):
+            psi = psis_d[ik]
+            hloc = torch.einsum("bxyz,cxyz->bc", psi.conj(), psi * veff[None]) / n_grid
+            h = hkin_d[ik] + hloc + hnl_d[ik]
+            h = 0.5 * (h + h.conj().T)
+            lam, vec = torch.linalg.eigh(h)
+            new_eigs.append(lam)
+            rot[ik] = vec
+        eigs = torch.stack(new_eigs)
+        mu = float(find_fermi(eigs, kw, scheme, width, n_electrons, degeneracy=2.0))
+        mu_t = torch.tensor(mu, dtype=RDTYPE, device=dev)
+        occ_raw = torch.stack([
+            occupations_and_entropy(eigs[ik], mu_t, scheme, width, degeneracy=2.0)[0]
+            for ik in range(nk)])
+        resid = float((occ_raw - occ_prev).abs().max())
+        occ = occ_prev + beta * (occ_raw - occ_prev)
+        if resid < 1e-10:
+            occ = occ_raw
+            break
+    mu_t = torch.tensor(mu, dtype=RDTYPE, device=dev)
+
+    # ---- stage 2: one LIVE pass — rebuild H_sub on the graph, robust eigh.
+    # The whole local potential is LIVE (see docstring): v_H + v_xc from the
+    # live density at the converged stage-1 rotation/occupations (detached
+    # weights — their response channels carry the ~zero (λ−ε) prefactor), and
+    # v_loc from the live positions.
+    psis_live = [g_to_r(coeffs[ik].to(CDTYPE), sph.flat_idx, shape)
+                 for ik, sph in enumerate(system.spheres)]
+    rho_live = None
+    for ik in range(nk):
+        psir = torch.einsum("ai,axyz->ixyz", rot[ik], psis_live[ik])
+        w = (kw[ik] * occ[ik]).to(RDTYPE)
+        contrib = torch.einsum("b,bxyz->xyz", w, psir.real**2 + psir.imag**2)
+        rho_live = contrib if rho_live is None else rho_live + contrib
+    rho_live = rho_live / omega
+    live_graph = rho_live.requires_grad
+    if not live_graph:  # detached callers (anchor tests) still get a potential
+        rho_live = rho_live.detach().requires_grad_(True)
+    v_h = hartree_potential_r(rho_live, grid.g2)
+    rho_xc = rho_live if system.rho_core is None else rho_live + system.rho_core
+    with torch.enable_grad():
+        sig = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
+        e_xc = xc.energy(rho_xc, grid.volume, sig, None)
+        (v_xc,) = torch.autograd.grad(e_xc, rho_live, create_graph=live_graph)
+    v_xc = v_xc * (grid.n_points / grid.volume)
+    vloc_g_live = local_potential_g(
+        pos_live, system.species_index, system.vloc_tables,
+        system.grid.g_cart, float(omega), vloc_atom=system.vloc_atom)
+    v_stage2 = v_h + v_xc + g_to_r_box(vloc_g_live, real=True)  # fully LIVE
+    rot_live, occ_live, eigs_out = [], [], []
+    entropy = torch.zeros((), dtype=RDTYPE, device=dev)
+    for ik, sph in enumerate(system.spheres):
+        c = coeffs[ik].to(CDTYPE)  # LIVE orbital coefficients
+        kpg2 = sph.kpg2.to(RDTYPE)
+        hkin = (c.conj() * (HBAR2_2M * kpg2)[None, :]) @ c.T
+        psi = psis_live[ik]
+        hloc = torch.einsum("bxyz,cxyz->bc", psi.conj(),
+                            psi * v_stage2[None]) / n_grid
+        pd = system.proj_data[ik]
+        if pd.dij_full.shape[0] == 0:
+            hnl = torch.zeros(nb, nb, dtype=CDTYPE, device=dev)
+        else:
+            kpg_vec, kpg2_v = strained_kpg(sph, b_e)
+            p = strained_projector_cols(
+                tabs, system.species_of_atom, pd.atom_index, lmax,
+                kpg_vec, kpg2_v, omega, pos_live)  # LIVE in frac
+            bov = c @ p.conj().T
+            hnl = bov.conj() @ pd.dij_full.to(CDTYPE) @ bov.T
+        h = hkin + hloc + hnl
+        h = 0.5 * (h + h.conj().T)
+        lam, vec = robust_eigh(h, broaden)  # LIVE, degeneracy-robust backward
+        rot_live.append(vec)
+        eigs_out.append(lam)
+        x = (lam - mu_t) / width
+        occ_live.append(2.0 * scheme.occupation(x))
+        entropy = entropy - width * (2.0 * kw[ik] * scheme.entropy(x)).sum()
+    occ_out = torch.stack(occ_live)
+    if not live_graph:  # detached callers get detached outputs back
+        rot_live = [r.detach() for r in rot_live]
+        occ_out = occ_out.detach()
+        entropy = entropy.detach()
+    return (rot_live, occ_out, entropy,
+            torch.stack(eigs_out).detach(), mu)

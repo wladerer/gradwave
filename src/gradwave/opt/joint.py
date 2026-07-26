@@ -249,27 +249,41 @@ def joint_free_energy(
     *,
     lmax: int,
     n_inner: int = 5,
+    broaden: float | None = None,
 ):
     """Mermin free energy F = E − σS on the joint (ε, s, C) graph, with
     occupations from a subspace diagonalisation (metals; see opt/_metals.py).
 
-    The occupation solve (Fermi level, entropy, subspace rotation) is DETACHED
-    and re-run every call, so ``eigh`` never appears on the autograd graph and
-    the degenerate-Fermi-surface backward is avoided by construction. The live
-    gradient flows through the orbitals (rotated onto the Ritz basis) and the
-    geometry at fixed occupations — which is exact for dF/dε (fixed occupations
-    have no explicit strain dependence). Returns ``(F, occ, mu, eigs)``.
+    The occupation solve converges (ρ, V_eff, μ) in a short DETACHED
+    self-consistent loop, then rebuilds the subspace Hamiltonian ONCE on the
+    LIVE (coeffs, frac) graph and diagonalises it with the degeneracy-robust
+    ``eigh`` (:class:`~gradwave.opt._metals.RobustEigh`, Lorentzian-broadened
+    ``1/(λ_i−λ_j)`` with ε = smearing width). Keeping the subspace rotation and
+    Fermi occupations LIVE makes the force the full Mermin free-energy force,
+    closing the frozen-occupation bias (#129), while the base-cell H_sub keeps
+    ``dF/dε = Ω·stress`` exact (fixed occupations, no explicit strain term).
+    Returns ``(F, occ, mu, eigs)``.
     """
-    from gradwave.opt._metals import subspace_occupations
+    from gradwave.opt._metals import robust_subspace_occupations
 
-    rot, occ, entropy, eigs, mu = subspace_occupations(
-        system, xc, tabs, coeffs, smearing, width, system.n_electrons,
-        lmax=lmax, n_inner=n_inner)
-    # rotate the live orbitals onto the (detached) Ritz basis: C' = rotᵀ · C
+    rot, occ, entropy, eigs, mu = robust_subspace_occupations(
+        system, xc, tabs, coeffs, frac, smearing, width, system.n_electrons,
+        lmax=lmax, n_inner=n_inner, broaden=broaden)
+    # rotate the live orbitals onto the (live) Ritz basis: C' = rotᵀ · C
     coeffs_rot = [torch.einsum("ai,ag->ig", rot[ik], coeffs[ik])
                   for ik in range(len(coeffs))]
     e = joint_energy(system, xc, tabs, eps, frac, coeffs_rot, occ)
-    return e + entropy, occ, mu, eigs
+    # Grand-potential form: with the occupations LIVE in λ, E − σS alone carries
+    # the residual ∂(E−σS)/∂f_i = μ per state, and the live electron count
+    # N = Σ_k w_k Σ_i f_i(λ_i) is unconstrained — a spurious particle-number
+    # force μ·∂N/∂(positions, orbitals) would contaminate the gradient. The
+    # Legendre term −μ(N − N_e) is zero in VALUE at the Fermi solution (Σf = N_e
+    # by construction of μ) but its gradient exactly cancels that drift — the
+    # actual Mermin variational principle is stationary in this form.
+    ne_live = (occ * system.kweights[:, None]).sum()
+    mu_t = torch.tensor(mu, dtype=ne_live.dtype, device=ne_live.device)
+    f = e + entropy - mu_t * (ne_live - system.n_electrons)
+    return f, occ.detach(), mu, eigs
 
 
 # ------------------------------------------------------------ orbital seeds
@@ -344,7 +358,8 @@ def joint_relax(
     smearing: str = "none",    # "none" (insulator) | gaussian | fermi-dirac | mp1 | cold
     width: float = 0.1,        # smearing width σ [eV] (metals only)
     n_bands: int | None = None,  # bands carried for metals (default: SCF nbands)
-    n_inner: int = 6,          # occupation fixed-point iters per chunk (metals)
+    n_inner: int = 6,          # detached occupation fixed-point iters (metals)
+    broaden: float | None = None,  # robust-eigh Lorentzian ε [eV]; default = width
     fmax: float = 0.005,       # eV/Å
     smax: float = 5e-4,        # eV/Å³ (≈ 0.08 GPa)
     ctol: float = 5e-4,        # max |dE/dZ| [eV]
@@ -374,8 +389,13 @@ def joint_relax(
     path. ``n_bands ≥ N_e/2`` orbitals are carried, occupations come from a
     subspace diagonalisation fed to the same Fermi/entropy machinery the SCF
     uses (opt/_metals.py), and the object minimised is the Mermin free energy
-    ``F = E − σS``. The occupation solve is detached, so the degenerate
-    Fermi-surface ``eigh`` backward never runs. Works with LDA or PBE ``xc``.
+    ``F = E − σS`` via ``joint_free_energy`` — a SINGLE consistent objective
+    over (ε, positions, orbitals) descended by one persistent L-BFGS, exactly
+    like the insulator path. The subspace rotation and Fermi occupations stay
+    LIVE through the degeneracy-robust ``eigh`` backend
+    (:class:`~gradwave.opt._metals.RobustEigh`), so the gradient is the full
+    Mermin free-energy gradient — closing the frozen-occupation force bias
+    (#129). Works with LDA or PBE ``xc``.
     """
     metal = smearing != "none"
     cell = np.asarray(cell, dtype=np.float64)
@@ -441,31 +461,30 @@ def joint_relax(
         npws = [sph.npw for sph in system.spheres]
 
         leaves = ([frac_p] if fix_cell else [eps_p, frac_p]) + z_params
-        # metals re-solve occupations between chunks (block coordinate); keep the
-        # chunk short enough that the frozen occupations stay fresh
-        chunk = min(lbfgs_chunk, 12) if metal else lbfgs_chunk
-        opt = torch.optim.LBFGS(
-            leaves, lr=1.0, max_iter=chunk,
-            history_size=history_size, line_search_fn="strong_wolfe",
-            tolerance_grad=0.0, tolerance_change=0.0)
-        opt_holder = [opt]  # rebound per chunk for metals (fresh L-BFGS memory)
+        chunk = lbfgs_chunk
 
-        # Metal occupations are DIAGONAL-ensemble and FROZEN per L-BFGS chunk
-        # (opt/_metals.diagonal_occupations). Recomputing them inside every
-        # line-search trial hands L-BFGS a gradient inconsistent with the moving
-        # objective and strong-Wolfe stalls; freezing them per chunk restores a
-        # smooth E(Z, ε) with a matching gradient. Unlike the full-subspace
-        # scheme there is no per-chunk rotation, so nothing drifts. The L-BFGS
-        # curvature memory is also reset each chunk — pairs from the previous
-        # chunk's (different-occupation) objective are stale and, reused, drive
-        # the oscillation this block-coordinate scheme otherwise shows on metals.
-        # mstate holds the frozen (occ, entropy) and warm-starts the next solve.
-        mstate: dict = {"occ": None, "entropy": None}
+        def make_opt(_leaves=leaves, _chunk=chunk):
+            return torch.optim.LBFGS(
+                _leaves, lr=1.0, max_iter=_chunk,
+                history_size=history_size, line_search_fn="strong_wolfe",
+                tolerance_grad=0.0, tolerance_change=0.0)
+
+        opt_holder = [make_opt()]
 
         # loop-scoped state bound by DEFAULT ARGUMENT (each cycle's closure
-        # must see its own system/leaves, and B023 flags late binding)
+        # must see its own system/leaves, and B023 flags late binding).
+        #
+        # The metal objective is the Mermin free energy from ``joint_free_energy``
+        # with the subspace rotation/occupations LIVE through the degeneracy-robust
+        # eigh (opt/_metals.RobustEigh): a single consistent function of
+        # (ε, positions, orbitals), so — unlike the earlier frozen-occupation
+        # block-coordinate scheme — one L-BFGS descends it exactly as the
+        # insulator path descends E, and the force is bias-free (#129). The
+        # curvature memory is kept while chunks make progress and reset when one
+        # stalls (metal curvature turns over as the Fermi ensemble shifts; stale
+        # pairs then poison strong-Wolfe and freeze the step at zero).
         def closure(_oh=opt_holder, _z=z_params, _p=precond, _n=npws, _sys=system,
-                    _tabs=tabs, _eps=eps_p, _frac=frac_p, _occ=occ, _ms=mstate):
+                    _tabs=tabs, _eps=eps_p, _frac=frac_p, _occ=occ, _lmax=lmax):
             nonlocal n_closures
             _oh[0].zero_grad()
             # volume-collapse guard: a strong-Wolfe trial step along strain is
@@ -479,8 +498,9 @@ def joint_relax(
                 e = 1e3 * ((detj - 1.0) ** 2 + (eps_s ** 2).sum() + 1.0)
             elif metal:
                 coeffs = _coeffs_from_z(_z, _p, _n)
-                e = joint_energy(_sys, xc, _tabs, _eps, _frac, coeffs,
-                                 _ms["occ"]) + _ms["entropy"]
+                e = joint_free_energy(_sys, xc, _tabs, _eps, _frac, coeffs,
+                                      smearing, width, lmax=_lmax,
+                                      n_inner=n_inner, broaden=broaden)[0]
             else:
                 coeffs = _coeffs_from_z(_z, _p, _n)
                 e = joint_energy(_sys, xc, _tabs, _eps, _frac, coeffs, _occ)
@@ -490,30 +510,20 @@ def joint_relax(
             return e
 
         converged_inner = False
+        e_prev = float("inf")
+        stalled_once = False
         while n_closures < max_closures:
-            if metal:  # refresh the frozen diagonal occupations for this chunk
-                from gradwave.opt._metals import diagonal_occupations
-                with torch.no_grad():
-                    coeffs_now = _coeffs_from_z(z_params, precond, npws)
-                occ_f, ent, _, _ = diagonal_occupations(
-                    system, xc, tabs, coeffs_now, smearing, width,
-                    system.n_electrons, lmax=lmax, n_inner=n_inner,
-                    occ_init=mstate["occ"])
-                mstate.update(occ=occ_f, entropy=ent)
-                opt_holder[0] = torch.optim.LBFGS(  # fresh memory each chunk
-                    leaves, lr=1.0, max_iter=chunk, history_size=history_size,
-                    line_search_fn="strong_wolfe", tolerance_grad=0.0,
-                    tolerance_change=0.0)
             opt_holder[0].step(closure)
             e_now = history[-1][1]
             a_e_np = a0_np @ (np.eye(3)
                               + eps_p.detach().cpu().numpy()).T
             f_now, s_now, c_now = _grad_metrics(
                 eps_p, frac_p, z_params, a_e_np, system.grid.volume)
-            # metals refresh the frozen occupations each chunk, which perturbs
-            # the orbital block at the ~1e-3 level — so the orbital-gradient gate
-            # is relaxed for metals (the physical convergence is carried by fmax
-            # and smax, which are unaffected). The insulator gate is unchanged.
+            # the metal orbital gradient carries the occupation/rotation response
+            # channels, whose broadened-eigh backward and detached inner solve
+            # leave a small residual near stationarity; relax the orbital-gradient
+            # gate for metals (physical convergence is carried by fmax/smax,
+            # which are unaffected). Insulator gate unchanged.
             ctol_eff = max(ctol, 2.5e-3) if metal else ctol
             if verbose:
                 print(f"  joint cycle {cycle} closures {n_closures:4d}  "
@@ -523,6 +533,36 @@ def joint_relax(
                     and (fix_cell or s_now < smax)):
                 converged_inner = True
                 break
+            # stall recovery: a chunk that lowers E by < 1e-9 eV means the
+            # strong-Wolfe search rejected every trial step — on metals the
+            # curvature pairs go stale as the Fermi ensemble turns over, and a
+            # poisoned direction freezes the step at zero. Recovery mirrors what
+            # a basis-rebuild cycle does (which observably un-sticks the run)
+            # without the re-setup: re-canonicalize the orbital leaves
+            # (Z ← C/p with a fresh Teter reference — L-BFGS steps let Z drift
+            # in Löwdin's null directions, whose flat/noisy curvature poisons
+            # the memory) and start a fresh optimizer. Two stalls in a row —
+            # a full recovery that still cannot move — means the residual
+            # gradient is at the noise floor of the occupation solve: stop.
+            if abs(e_now - e_prev) < 1e-9:
+                if stalled_once:
+                    break
+                stalled_once = True
+                with torch.no_grad():
+                    coeffs_now = _coeffs_from_z(z_params, precond, npws)
+                    ekin_now = float(np.mean([
+                        kinetic_band(coeffs_now[ik], system.spheres[ik].kpg2)
+                        .mean().item() for ik in range(nk)]))
+                    for ik in range(nk):
+                        precond[ik] = teter_precond(
+                            system.spheres[ik].kpg2, ekin_now).to(RDTYPE)
+                        z_new = coeffs_now[ik] / precond[ik][None, :].to(CDTYPE)
+                        z_params[ik].copy_(torch.view_as_real(
+                            z_new.contiguous()))
+                opt_holder[0] = make_opt()
+            else:
+                stalled_once = False
+            e_prev = e_now
 
         # ---- apply the relaxed strain/positions; decide on a rebuild
         eps_np = 0.5 * (eps_p.detach().cpu().numpy()

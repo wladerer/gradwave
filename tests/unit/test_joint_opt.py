@@ -219,6 +219,45 @@ def test_joint_free_energy_strain_gradient_matches_stress(al_scf):
 
 
 @pytest.mark.standard
+def test_joint_free_energy_position_gradient_matches_forces():
+    """−dF/dτ from the LIVE metal free-energy functional (robust-eigh subspace
+    rotation, live occupations, #129) equals the Hellmann–Feynman forces at a
+    converged smeared point with NONZERO forces (displaced 2-atom Al). At
+    self-consistency the occupation/rotation response channels carry zero
+    prefactor, so the live gradient must reduce to postscf.forces exactly —
+    the anchor the frozen-occupation trajectory bias motivated."""
+    from gradwave.postscf.forces import forces
+
+    cell = AL_A * np.eye(3)
+    pos = np.array([[0.0, 0, 0], [0.5, 0.5, 0.5]]) * AL_A
+    pos[1] += [0.10, -0.06, 0.04]
+    upf = parse_upf(pseudo(AL_ONCV))
+    system = setup_system(cell=cell, positions=pos, species_of_atom=[0, 0],
+                          upfs=[upf], ecut=12 * RY, kmesh=(2, 2, 2),
+                          use_symmetry=False)
+    xc = LDA_PW92()
+    res = scf(system, xc, smearing="gaussian", width=0.3, verbose=False)
+    assert res.converged
+    tabs = [RadialTables(u) for u in system.upfs]
+    lmax = max((b.l for u in system.upfs for b in u.betas), default=0)
+    eps = torch.zeros(3, 3, dtype=RDTYPE)
+    frac = torch.tensor(pos @ np.linalg.inv(cell), dtype=RDTYPE,
+                        requires_grad=True)
+    coeffs = [lowdin(c.detach()) for c in res.coeffs]
+    # n_inner=200: this 2×2×2 Fermi shell charge-sloshes, and every response
+    # channel of the live gradient carries a (λ−ε) prefactor that only vanishes
+    # at the inner fixed point — 60 damped sweeps leave a 4e-4 eV/Å residual,
+    # 200 reach ~1e-7 (the force error is a direct readout of that residual).
+    f, *_ = joint_free_energy(system, xc, tabs, eps, frac, coeffs,
+                              "gaussian", 0.3, lmax=lmax, n_inner=200)
+    (g,) = torch.autograd.grad(f, frac)
+    de_dpos = g.numpy() @ np.linalg.inv(cell).T
+    de_dpos = de_dpos - de_dpos.mean(axis=0, keepdims=True)
+    f_ref = forces(res, xc=xc).numpy()
+    assert np.abs(-de_dpos - f_ref).max() < 1e-5
+
+
+@pytest.mark.standard
 def test_joint_relax_fixed_cell_recovers_si_bond():
     """Positions-only joint descent pulls a displaced Si atom back to the
     ideal bond, matching the SCF+forces answer without any nested SCF."""

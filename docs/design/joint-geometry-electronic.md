@@ -180,25 +180,24 @@ optimizer variables:
    (`C' = Rᵀ C`), i.e. the density matrix `γ = R diag(f) Rᵀ` in the coefficient
    basis.
 
-The circularity ρ → V_eff → H_sub → λ → f → ρ is closed by a short **detached**
-fixed-point at the base cell (orbitals held fixed, only occupations/potential
-iterate — 5-6 iterations reach the SCF occupations). Because the whole
-occupation solve is detached, the notorious `torch.linalg.eigh` backward — whose
-`1/(λ_i−λ_j)` factors blow up at the *maximally* degenerate Fermi surface —
-**never runs**: the live gradient reaches the free energy only through the
-diagonal weights `f` (detached) and the rotation `R` (detached), plus the
-orbitals and geometry at fixed occupations. This is the block-coordinate
-(alternating orbital / occupation) reading of ensemble DFT; the occupation block
-is re-solved every closure so both blocks reach stationarity together. It is
-exact at the SCF fixed point — there `C` already diagonalises `H_sub` (`R = I`)
-and `f` is the self-consistent Fermi filling — so:
+The circularity ρ → V_eff → H_sub → λ → f → ρ is closed by a **detached**,
+damped fixed-point at the base cell (orbitals held fixed, only
+occupations/potential iterate). Since #129 the solve is then made **LIVE** in a
+single final pass through the degeneracy-robust `RobustEigh` (see "The live
+occupation solve" below): the rotation `R` and the Fermi weights `f` carry
+gradient, and the objective takes the grand-potential form
+`F = E − σS − μ(N − N_e)`. It is exact at the SCF fixed point — there `C`
+already diagonalises `H_sub` (`R = I`) and `f` is the self-consistent Fermi
+filling — so:
 
-- **F(ε = 0) = SCF free energy** to ~1e-7 eV (LDA and PBE), and
-- **dF/dε = Ω·stress()** to ~1e-4 eV/Å³ with occupations detached (fixed
-  occupations have no explicit ε-dependence, matching `postscf/stress.py`).
+- **F(ε = 0) = SCF free energy** to ~1e-7 eV (LDA and PBE),
+- **dF/dε = Ω·stress()** to ~1e-4 eV/Å³ (fixed occupations have no explicit
+  ε-dependence, matching `postscf/stress.py`), and
+- **−dF/dτ = postscf.forces()** to ~4e-7 eV/Å (live occupation/rotation
+  response — the #129 anchor).
 
-Both are asserted in `test_joint_free_energy_*` / `test_metal_stress_*` on a
-small smeared Al cell.
+All are asserted in `test_joint_free_energy_*` / `test_metal_stress_*` on
+small smeared Al cells.
 
 ### The bug that hides behind every energy test
 
@@ -235,45 +234,103 @@ optimizer, and three schemes were tried before one held:
    oscillation). The orbital-gradient gate is relaxed to ~2.5e-3 (the per-chunk
    occupation refresh perturbs the orbital block at that level).
 
-Head-to-head (positions-only, 2-atom bcc-like Al, LDA, 13 Ry, 3×3×3, gaussian
-σ=0.3), joint vs nested BFGS+SCF, both to fmax = 0.02 eV/Å:
+The original draft reported a head-to-head for scheme 3 (frozen occupations,
+both methods to fmax = 0.02) claiming "same basin, 0.065 Å apart, 3.1× fewer
+H-applies". **That table was an artifact** — see the correction below.
 
-| quantity | nested BFGS+SCF | joint | agreement |
-|---|---|---|---|
-| E(SCF @ final) [eV] | −3362.5694 | −3362.5372 | 1.2e-3 Ha |
-| Al–Al pair sep [Å] | 3.5104 | 3.5753 | 0.065 Å |
-| H-applies | 43 442 | 13 930 | **3.1× fewer** |
+### The live occupation solve (#129) — degeneracy-robust eigh, exact force
 
-So the free-energy *functional* is exact (the ε=0 anchors), and the descent is
-real and cheaper in Hamiltonian work, but it is a **partial** result: the
-frozen-occupation (diagonal-ensemble) force carries a bias that floors the
-attainable fmax at ~0.02 eV/Å — tightening to 0.008 does not converge — so on
-this soft mode the geometry agrees only to ~0.07 Å and the energy to ~1.5e-3 Ha,
-not the insulator's 1e-3 Å / 1e-7 Ha. The bias vanishes only at exact
-self-consistency (where the diagonal quotients are the eigenvalues and the
-Hellmann–Feynman force is complete); closing it needs the occupation *response*
-force, i.e. the eigenvector-sensitivity the detached scheme deliberately drops.
+`opt/_metals.RobustEigh` is a custom `autograd.Function`: forward is the exact
+Hermitian `eigh`; backward replaces the eigenvector-response denominators
+`1/(λ_i−λ_j)` with the Lorentzian-broadened
+`F_ij = (λ_j−λ_i)/((λ_i−λ_j)² + ε²)` — finite at exact degeneracy, exact when
+`|λ_i−λ_j| ≫ ε`. Verified against `torch.linalg.eigh`'s own backward, against
+`gradcheck`, and NaN-free at exact degeneracy where the bare backward is not
+(`tests/unit/test_metals_eigh.py`).
+
+`robust_subspace_occupations` uses it to keep the subspace rotation and the
+Fermi occupations LIVE on the joint graph: a detached, damped (β = 0.5 — the
+raw occupation/potential iteration charge-sloshes on near-degenerate Fermi
+shells) inner loop converges (ρ, μ, f); then ONE live pass rebuilds `H_sub` on
+the graph and re-derives (rotation, f, −σS) through `robust_eigh`. Getting the
+gradient right required three consistency conditions, each found via a
+concrete failure:
+
+1. **Grand-potential form.** With `f` live in λ, `E − σS` alone carries
+   `∂F/∂f_i = μ ≠ 0` and the live electron count is unconstrained — a spurious
+   particle-number force `μ·∂N/∂(τ, C)` swamps the real one (observed:
+   reported fmax 4e-2 while the true force was 0.35 eV/Å). The Legendre term
+   `−μ(N − N_e)` is zero in value at the Fermi solution and exactly cancels
+   the drift.
+2. **The entire `H_sub` potential must be LIVE.** Every response channel of
+   the live gradient carries the prefactor `(λ_i − ε_i^true)`, `ε_i^true` the
+   band derivative of the live `joint_energy`. With a frozen inner-loop
+   potential that prefactor vanishes only AT the inner fixed point and is
+   first-order in the orbital error away from it — the trajectory force is
+   then noise (spurious near-zeros at ~1e-3 reported fmax with 0.35 eV/Å of
+   true force). The live pass therefore rebuilds `v_H + v_xc` from the live
+   density (XC functional derivative taken with `create_graph`, so the kernel
+   response rides the graph) and `v_loc`/projectors from the live positions.
+3. **The inner loop must actually converge.** The force error is a direct
+   readout of the leftover `(λ−ε)` residual: on a charge-sloshing 2×2×2 Al
+   shell, 60 damped sweeps leave 4e-4 eV/Å, 200 sweeps reach ~1e-7.
+
+With all three: at electronic self-consistency the live functional reproduces
+the SCF free energy to ~5e-10 eV and `−dF/dτ` equals `postscf.forces` to
+**~4e-7 eV/Å** (`test_joint_free_energy_position_gradient_matches_forces`) —
+the frozen-occupation force bias is closed at the functional level.
+`dF/dε = Ω·stress` is unchanged (`H_sub` lives on the base-cell reciprocal
+lattice; fixed occupations have no explicit ε term).
+
+### Descent — corrected head-to-head, honest status
+
+**Correction.** The frozen-occupation head-to-head reported `joint 3.5753 Å vs
+ref 3.5104 Å` — but the STARTING pair separation is 3.5754 Å: the old metal
+descent **never moved the atoms**. Its "converged, fmax < 0.02" was a spurious
+zero of the biased frozen-occupation force field at the start geometry (the
+true force there is 0.35 eV/Å), and the reference itself was only converged to
+fmax = 0.02. The tight (fmax = 0.005) reference relaxes to 3.5078 Å,
+E(SCF) = −3362.5695 eV. The rewritten slow test asserts the displacement
+actually happens.
+
+With the live scheme the descent is real: monotone free-energy decrease, atoms
+move 3.5754 → 3.528 Å (ε = σ/10, 609 closures), E(SCF@final) within 1.2e-4 Ha
+of the tight nested minimum. Two optimizer pathologies and their mitigations:
+
+- **Stall recovery.** Metal curvature turns over as the Fermi ensemble shifts;
+  stale L-BFGS pairs freeze strong-Wolfe at zero step. On a stall (< 1e-9 eV
+  per chunk) the driver re-canonicalizes the orbital leaves (`Z ← C/p`, fresh
+  Teter reference — Z drifts in Löwdin's null directions, whose flat curvature
+  poisons the memory) and restarts the optimizer; two stalls in a row end the
+  cycle.
+- **Broadening bias along the trajectory.** At ε = σ = 0.3 eV the Lorentzian
+  suppresses the Fermi-surface rotation response by `δ²/(δ²+ε²)` (97 % of a
+  δ = 0.05 eV pair), creating fake force zeros: that run "converges" at
+  fmax = 1.2e-3 but 0.031 Å from the true minimum. ε = σ/10 shrinks the miss
+  to 0.02 Å; the fixed-point anchors are ε-independent because the rotation
+  cotangent is diagonal there.
+
+**Negative result against the #129 success bar.** Insulator-grade agreement
+(fmax < 0.005 at ~1e-3 Å) is NOT reached: away from self-consistency the
+detached inner solve and the broadened backward still leave a trajectory-level
+force bias of order the orbital residual, the stiff ensemble modes (curvature
+~ f'/σ, untouched by the Teter preconditioner) stretch L-BFGS to 450-600+
+closures, and the H-apply advantage inverts (h_equiv ≈ 133 k vs tight-ref
+h_ref ≈ 50 k — **~0.4×**, vs the insulator's 7.8×). The live scheme is kept —
+it is exact where the old one was silently wrong, and the descent genuinely
+descends — the slow test asserts what is true, and the PR stays a draft.
 
 ## Next steps
 
-- **Close the metal force bias.** The clean route is a degeneracy-robust
-  `eigh` backward (custom `autograd.Function`, Lorentzian-broadened
-  `1/(λ_i−λ_j)`) so the rotation/occupation response can stay LIVE without NaNs
-  at the Fermi surface — then the full subspace scheme (attempt 1) becomes a
-  single consistent objective and the frozen-occupation bias disappears.
-- **Precondition the MV occupation block** (attempt 2) so occupation and
-  coefficient variables share a metric — the other way to a consistent joint
-  descent.
-- **Warm-start the occupation solve across closures** (carry ρ / f) to drop the
-  per-closure inner fixed-point from ~5 iterations to 1-2.
-- Momentum/trust-region alternatives to L-BFGS for the coefficient block
-  (OMM/exponential-map with explicit Riemannian gradient).
-
-- **Warm-start the occupation solve across closures** (carry ρ / f) to drop the
-  per-closure inner fixed-point from ~6 iterations to 1-2.
-- **Marzari–Vanderbilt occupation *variables*** as an alternative to the
-  subspace route if line-search behaviour degrades on harder metals (occupation
-  levels as extra L-BFGS leaves; smearing keeps F smooth, no `eigh` at all).
+- **Preconditioned Marzari–Vanderbilt occupation block** (the remaining scoped
+  route in #129): occupation levels as explicit leaves with a metric matched
+  to the coefficient block — no `eigh` on the graph, no inner fixed point, and
+  the ensemble stiffness lands in a block that can be preconditioned
+  analytically (`∂²F/∂η² ≈ 2w·δ̃/σ`).
+- **Warm-start the inner occupation solve across closures** (carry ρ / f / μ);
+  the cold uniform start pays 10-60 damped sweeps per closure.
+- Curvature-aware treatment of the near-Fermi rotation modes (their stiffness
+  ~ f'/σ is what stretches the closure count).
 - Momentum/trust-region alternatives to L-BFGS for the coefficient block
   (OMM/exponential-map with explicit Riemannian gradient).
 - Share the seed with the calculator's warm-start machinery so MD-style
