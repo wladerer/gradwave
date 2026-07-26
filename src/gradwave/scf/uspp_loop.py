@@ -27,6 +27,7 @@ import logging
 import time
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 
 from gradwave.constants import HBAR2_2M
@@ -638,6 +639,57 @@ def _seed_becsum(system, nspin, start_from, spin_frac, dev):
     return rho_ij_s
 
 
+def _seed_orbitals_uspp(system, nspin, nk, nb, batched, start_from, dev):
+    """Seed the generalized Davidson from a previous result's eigenvectors — the
+    ionic-step analogue of the density/becsum warm start — instead of the random
+    atomic-scale start. Returns ``(coeffs, coeffs_b)``: per-spin, per-k blocks
+    ``[(nb, npw_k)]`` and, for the batched solver, a padded ``(nk, nb, npw_max)``
+    block; both None-filled (cold start) when ``start_from`` carries no orbitals.
+
+    Reuse requires the previous orbitals to live on THIS system's G-spheres: same
+    plane-wave count per k and matching fractional k (``scf_uspp`` already pins
+    start_from to the same FFT grid via the density seed, so a same-grid ionic
+    move qualifies directly; the calculator remaps orbitals onto the new spheres
+    for grid-shape changes before passing them here). Anything else — a k-set
+    reshaped by a symmetry-group change, a band-count change — bails to the cold
+    start, keeping the density warm start intact."""
+    coeffs = [[None] * nk for _ in range(nspin)]
+    coeffs_b = [None] * nspin
+    prev_c = None
+    if start_from is not None:
+        prev_c = (start_from.get("coeffs") if isinstance(start_from, dict)
+                  else getattr(start_from, "coeffs", None))
+    if prev_c is None:
+        return coeffs, coeffs_b
+    prev_sys = (start_from.get("system") if isinstance(start_from, dict)
+                else getattr(start_from, "system", None))
+    prev_sph = getattr(prev_sys, "spheres", None)
+    chans = [prev_c] if nspin == 1 else list(prev_c)
+    compat = len(chans) == nspin and all(
+        ch is not None and len(ch) == nk and all(
+            ch[ik] is not None
+            and ch[ik].shape[0] >= nb
+            and ch[ik].shape[1] == system.spheres[ik].npw
+            and (prev_sph is None or np.allclose(
+                np.asarray(prev_sph[ik].k_frac, dtype=float),
+                np.asarray(system.spheres[ik].k_frac, dtype=float)))
+            for ik in range(nk))
+        for ch in chans)
+    if not compat:
+        return coeffs, coeffs_b
+    npw_max = max(s.npw for s in system.spheres)
+    for isp, ch in enumerate(chans):
+        for ik in range(nk):
+            coeffs[isp][ik] = ch[ik][:nb].detach().to(
+                device=dev, dtype=CDTYPE).clone()
+        if batched:
+            xb = torch.zeros(nk, nb, npw_max, dtype=CDTYPE, device=dev)
+            for ik in range(nk):
+                xb[ik, :, : system.spheres[ik].npw] = coeffs[isp][ik]
+            coeffs_b[isp] = xb
+    return coeffs, coeffs_b
+
+
 def _seed_scf_density(system, grid, vol, dev, nspin, start_from, start_mag):
     """Seed (rho_s, spin_frac): warm-start rescale from a prior result, or a SAD
     density (nspin=1), or per-atom spin-split SAD (nspin=2). spin_frac carries the
@@ -858,8 +910,12 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
                                     q0_max=mixer.q0)
         mixer.precond_op = tf_precond
         mixer.precond_slice = slice(0, ng)
-    coeffs = [[None] * nk for _ in range(nspin)]
-    coeffs_b = [None] * nspin
+    # warm-start the eigensolver from a previous result's orbitals when they fit
+    # this grid's G-spheres (same-grid ionic move, or calculator-remapped for a
+    # grid-shape change); else a cold random start. coeffs/coeffs_b are then
+    # mutated in place by _scf_iteration each cycle.
+    coeffs, coeffs_b = _seed_orbitals_uspp(system, nspin, nk, ops.nb, batched,
+                                           start_from, dev)
     e_free_prev, history, converged = None, [], False
     rescue_count, seed_salt = 0, 0  # solver-blowup rescue state (task #55)
     last_reset_it = -10  # trust-region reset cooldown (task #55)
