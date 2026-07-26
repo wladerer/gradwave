@@ -236,6 +236,42 @@ def joint_energy(
     return e_kin + e_h + e_xc + e_loc + e_nl + e_ew
 
 
+# --------------------------------------------------------- metal free energy
+def joint_free_energy(
+    system: System,
+    xc: XCFunctional,
+    tabs: list[RadialTables],
+    eps: torch.Tensor,
+    frac: torch.Tensor,
+    coeffs: list[torch.Tensor],   # per-k (n_bands, npw_k), orthonormal rows
+    smearing: str,
+    width: float,
+    *,
+    lmax: int,
+    n_inner: int = 5,
+):
+    """Mermin free energy F = E − σS on the joint (ε, s, C) graph, with
+    occupations from a subspace diagonalisation (metals; see opt/_metals.py).
+
+    The occupation solve (Fermi level, entropy, subspace rotation) is DETACHED
+    and re-run every call, so ``eigh`` never appears on the autograd graph and
+    the degenerate-Fermi-surface backward is avoided by construction. The live
+    gradient flows through the orbitals (rotated onto the Ritz basis) and the
+    geometry at fixed occupations — which is exact for dF/dε (fixed occupations
+    have no explicit strain dependence). Returns ``(F, occ, mu, eigs)``.
+    """
+    from gradwave.opt._metals import subspace_occupations
+
+    rot, occ, entropy, eigs, mu = subspace_occupations(
+        system, xc, tabs, coeffs, smearing, width, system.n_electrons,
+        lmax=lmax, n_inner=n_inner)
+    # rotate the live orbitals onto the (detached) Ritz basis: C' = rotᵀ · C
+    coeffs_rot = [torch.einsum("ai,ag->ig", rot[ik], coeffs[ik])
+                  for ik in range(len(coeffs))]
+    e = joint_energy(system, xc, tabs, eps, frac, coeffs_rot, occ)
+    return e + entropy, occ, mu, eigs
+
+
 # ------------------------------------------------------------ orbital seeds
 def _transfer_coeffs(old_spheres, new_spheres, coeffs):
     """Map per-k coefficients between G-spheres by matching Miller indices.
@@ -305,6 +341,10 @@ def joint_relax(
     ecut: float,
     kmesh=(1, 1, 1),
     n_occ: int | None = None,
+    smearing: str = "none",    # "none" (insulator) | gaussian | fermi-dirac | mp1 | cold
+    width: float = 0.1,        # smearing width σ [eV] (metals only)
+    n_bands: int | None = None,  # bands carried for metals (default: SCF nbands)
+    n_inner: int = 6,          # occupation fixed-point iters per chunk (metals)
     fmax: float = 0.005,       # eV/Å
     smax: float = 5e-4,        # eV/Å³ (≈ 0.08 GPa)
     ctol: float = 5e-4,        # max |dE/dZ| [eV]
@@ -318,7 +358,7 @@ def joint_relax(
     device: str = "cpu",
     verbose: bool = False,
 ) -> JointResult:
-    """Jointly relax (cell, positions, orbitals) of an NC insulator.
+    """Jointly relax (cell, positions, orbitals) of an NC insulator or metal.
 
     Outer loop: freeze the G-sphere at the current cell, L-BFGS the joint
     energy over (ε, fractional positions, preconditioned orbital variables),
@@ -327,11 +367,17 @@ def joint_relax(
     Miller-index transfer; the first cycle seeds them with ``seed_scf_iters``
     loose SCF iterations (counted, exactly, in ``h_seed``).
 
-    Fixed occupations (2 e⁻/band, ``n_occ`` = N_e/2 by default): insulators
-    only. Metals need smeared Aufbau occupations from current Ritz values,
-    which reintroduces the level-crossing discontinuities this prototype
-    deliberately avoids (see docs/design/joint-geometry-electronic.md).
+    ``smearing="none"`` (default): fixed 2 e⁻/band occupations, ``n_occ`` =
+    N_e/2, minimising the KS total energy — insulators only.
+
+    ``smearing`` set to a scheme (gaussian, fermi-dirac, mp1, cold): the METAL
+    path. ``n_bands ≥ N_e/2`` orbitals are carried, occupations come from a
+    subspace diagonalisation fed to the same Fermi/entropy machinery the SCF
+    uses (opt/_metals.py), and the object minimised is the Mermin free energy
+    ``F = E − σS``. The occupation solve is detached, so the degenerate
+    Fermi-surface ``eigh`` backward never runs. Works with LDA or PBE ``xc``.
     """
+    metal = smearing != "none"
     cell = np.asarray(cell, dtype=np.float64)
     positions = np.asarray(positions, dtype=np.float64)
     coeffs_init = None
@@ -346,21 +392,28 @@ def joint_relax(
             upfs=upfs, ecut=ecut, kmesh=kmesh, use_symmetry=False,
         ).to(device)
         nk = len(system.spheres)
-        if n_occ is None:
-            if abs(system.n_electrons / 2 - round(system.n_electrons / 2)) > 1e-9:
-                raise ValueError("odd electron count — not an insulator at "
-                                 "fixed occupations; pass n_occ explicitly")
-            n_occ = int(round(system.n_electrons / 2))
-        occ = torch.full((nk, n_occ), 2.0, dtype=RDTYPE, device=device)
+        lmax = max((b.l for u in system.upfs for b in u.betas), default=0)
+        if metal:
+            n_carry = n_bands if n_bands is not None else int(system.nbands)
+            occ = None  # occupations are variational (computed each closure)
+        else:
+            if n_occ is None:
+                if abs(system.n_electrons / 2 - round(system.n_electrons / 2)) > 1e-9:
+                    raise ValueError("odd electron count — not an insulator at "
+                                     "fixed occupations; pass n_occ explicitly")
+                n_occ = int(round(system.n_electrons / 2))
+            n_carry = n_occ
+            occ = torch.full((nk, n_occ), 2.0, dtype=RDTYPE, device=device)
         tabs = [RadialTables(u, device=device) for u in system.upfs]
 
         # ---- orbital seed: loose SCF on cycle 0, Miller transfer afterwards
         if coeffs_init is None:
             with count_h_applies() as counter:
-                res = scf(system, xc, max_iter=seed_scf_iters, verbose=False,
+                res = scf(system, xc, smearing=smearing, width=width,
+                          max_iter=seed_scf_iters, verbose=False,
                           etol=0.0, rhotol=0.0, diago_tol=1e-4)
             h_seed += counter.count
-            coeffs_init = [lowdin(c[:n_occ].to(CDTYPE)) for c in res.coeffs]
+            coeffs_init = [lowdin(c[:n_carry].to(CDTYPE)) for c in res.coeffs]
         else:
             coeffs_init = [lowdin(c) for c in
                            _transfer_coeffs(prev_spheres, system.spheres,
@@ -388,17 +441,33 @@ def joint_relax(
         npws = [sph.npw for sph in system.spheres]
 
         leaves = ([frac_p] if fix_cell else [eps_p, frac_p]) + z_params
+        # metals re-solve occupations between chunks (block coordinate); keep the
+        # chunk short enough that the frozen occupations stay fresh
+        chunk = min(lbfgs_chunk, 12) if metal else lbfgs_chunk
         opt = torch.optim.LBFGS(
-            leaves, lr=1.0, max_iter=lbfgs_chunk,
+            leaves, lr=1.0, max_iter=chunk,
             history_size=history_size, line_search_fn="strong_wolfe",
             tolerance_grad=0.0, tolerance_change=0.0)
+        opt_holder = [opt]  # rebound per chunk for metals (fresh L-BFGS memory)
+
+        # Metal occupations are DIAGONAL-ensemble and FROZEN per L-BFGS chunk
+        # (opt/_metals.diagonal_occupations). Recomputing them inside every
+        # line-search trial hands L-BFGS a gradient inconsistent with the moving
+        # objective and strong-Wolfe stalls; freezing them per chunk restores a
+        # smooth E(Z, ε) with a matching gradient. Unlike the full-subspace
+        # scheme there is no per-chunk rotation, so nothing drifts. The L-BFGS
+        # curvature memory is also reset each chunk — pairs from the previous
+        # chunk's (different-occupation) objective are stale and, reused, drive
+        # the oscillation this block-coordinate scheme otherwise shows on metals.
+        # mstate holds the frozen (occ, entropy) and warm-starts the next solve.
+        mstate: dict = {"occ": None, "entropy": None}
 
         # loop-scoped state bound by DEFAULT ARGUMENT (each cycle's closure
         # must see its own system/leaves, and B023 flags late binding)
-        def closure(_opt=opt, _z=z_params, _p=precond, _n=npws, _sys=system,
-                    _tabs=tabs, _eps=eps_p, _frac=frac_p, _occ=occ):
+        def closure(_oh=opt_holder, _z=z_params, _p=precond, _n=npws, _sys=system,
+                    _tabs=tabs, _eps=eps_p, _frac=frac_p, _occ=occ, _ms=mstate):
             nonlocal n_closures
-            _opt.zero_grad()
+            _oh[0].zero_grad()
             # volume-collapse guard: a strong-Wolfe trial step along strain is
             # unbounded and det(1+ε) → 0 sends 1/Ω terms to overflow → NaN
             # grads → permanently NaN parameters. Return a finite penalty that
@@ -408,6 +477,10 @@ def joint_relax(
                 torch.eye(3, dtype=RDTYPE, device=_eps.device) + eps_s)
             if float(detj.detach()) < 0.2 or float(detj.detach()) > 5.0:
                 e = 1e3 * ((detj - 1.0) ** 2 + (eps_s ** 2).sum() + 1.0)
+            elif metal:
+                coeffs = _coeffs_from_z(_z, _p, _n)
+                e = joint_energy(_sys, xc, _tabs, _eps, _frac, coeffs,
+                                 _ms["occ"]) + _ms["entropy"]
             else:
                 coeffs = _coeffs_from_z(_z, _p, _n)
                 e = joint_energy(_sys, xc, _tabs, _eps, _frac, coeffs, _occ)
@@ -418,17 +491,35 @@ def joint_relax(
 
         converged_inner = False
         while n_closures < max_closures:
-            opt.step(closure)
+            if metal:  # refresh the frozen diagonal occupations for this chunk
+                from gradwave.opt._metals import diagonal_occupations
+                with torch.no_grad():
+                    coeffs_now = _coeffs_from_z(z_params, precond, npws)
+                occ_f, ent, _, _ = diagonal_occupations(
+                    system, xc, tabs, coeffs_now, smearing, width,
+                    system.n_electrons, lmax=lmax, n_inner=n_inner,
+                    occ_init=mstate["occ"])
+                mstate.update(occ=occ_f, entropy=ent)
+                opt_holder[0] = torch.optim.LBFGS(  # fresh memory each chunk
+                    leaves, lr=1.0, max_iter=chunk, history_size=history_size,
+                    line_search_fn="strong_wolfe", tolerance_grad=0.0,
+                    tolerance_change=0.0)
+            opt_holder[0].step(closure)
             e_now = history[-1][1]
             a_e_np = a0_np @ (np.eye(3)
                               + eps_p.detach().cpu().numpy()).T
             f_now, s_now, c_now = _grad_metrics(
                 eps_p, frac_p, z_params, a_e_np, system.grid.volume)
+            # metals refresh the frozen occupations each chunk, which perturbs
+            # the orbital block at the ~1e-3 level — so the orbital-gradient gate
+            # is relaxed for metals (the physical convergence is carried by fmax
+            # and smax, which are unaffected). The insulator gate is unchanged.
+            ctol_eff = max(ctol, 2.5e-3) if metal else ctol
             if verbose:
                 print(f"  joint cycle {cycle} closures {n_closures:4d}  "
                       f"E = {e_now:+.8f} eV  fmax {f_now:.2e}  "
                       f"smax {s_now:.2e}  cmax {c_now:.2e}", flush=True)
-            if (f_now < fmax and c_now < ctol
+            if (f_now < fmax and c_now < ctol_eff
                     and (fix_cell or s_now < smax)):
                 converged_inner = True
                 break
@@ -458,6 +549,6 @@ def joint_relax(
         energy=float(history[-1][1]) if history else float("nan"),
         cell=cell, positions=positions, coeffs=coeffs_init, system=system,
         n_closures=n_closures, h_seed=h_seed,
-        h_equiv=h_seed + n_closures * nk * n_occ,
+        h_equiv=h_seed + n_closures * nk * n_carry,
         n_cycles=cycle + 1, fmax=f_final, smax=s_final, history=history,
     )

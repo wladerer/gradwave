@@ -97,3 +97,83 @@ def test_joint_relax_matches_nested_bfgs_scf():
     assert abs(bond_joint - bond_ref) < 1e-3
     assert abs(a_joint - a_ref) < 2e-3
     assert abs(e_joint - e_ref) < 1e-5 * HA
+
+
+# --------------------------------------------------------------- metal (Al)
+AL_A = 4.05
+AL_ONCV = "Al_ONCV_PBE-1.2.upf"
+AL_ECUT = 13 * RY
+AL_KPTS = (3, 3, 3)
+SMEAR, WIDTH = "gaussian", 0.3
+
+
+def _perturbed_al2():
+    """2-atom bcc-like Al (simple-cubic cell, atoms at corner + body centre),
+    one atom displaced — a metal, relaxed at fixed cell (positions only)."""
+    cell = AL_A * np.eye(3)
+    pos = np.array([[0.0, 0, 0], [0.5, 0.5, 0.5]]) * AL_A
+    pos[1] += [0.15, -0.10, 0.06]
+    return cell, pos
+
+
+def _al_scf_free(cell, pos):
+    upf = parse_upf(pseudo(AL_ONCV))
+    system = setup_system(cell=cell, positions=pos, species_of_atom=[0, 0],
+                          upfs=[upf], ecut=AL_ECUT, kmesh=AL_KPTS,
+                          use_symmetry=False)
+    res = scf(system, LDA_PW92(), smearing=SMEAR, width=WIDTH, verbose=False)
+    assert res.converged
+    return float(res.energies.free_energy)
+
+
+@pytest.mark.slow
+def test_joint_relax_metal_vs_nested_bfgs_scf():
+    """Metal head-to-head (mirrors the Si test): free-energy joint descent with
+    variational occupations vs nested BFGS+SCF, positions only.
+
+    PARTIAL result (see docs/design/joint-geometry-electronic.md): the joint
+    descent reaches the same basin with markedly fewer H-applications (~3× on
+    this cell), but the block-coordinate (frozen-occupation) force carries a
+    bias that floors the achievable fmax at ~0.02 eV/Å, so on this soft Al mode
+    the relaxed geometry lands within ~0.07 Å (not the insulator's 1e-3 Å) and
+    the energy within ~1.5e-3 Ha of the nested minimum. The test asserts the
+    robust facts — converged, same basin, fewer H-applications — and the tighter
+    numbers are reported in the PR body. The free-energy FUNCTIONAL itself is
+    exact (see the ε=0 anchors in tests/unit/test_joint_opt.py)."""
+    torch.set_num_threads(8)
+    cell, pos0 = _perturbed_al2()
+
+    # ---- reference: nested SCF-inside-BFGS at fixed cell
+    atoms = Atoms("Al2", positions=pos0.copy(), cell=cell.copy(), pbc=True)
+    atoms.calc = GradWave(ecut=AL_ECUT, pseudopotentials={"Al": pseudo(AL_ONCV)},
+                          xc="lda", kpts=AL_KPTS, use_symmetry=False,
+                          smearing=SMEAR, width=WIDTH)
+    with count_h_applies() as ref_counter:
+        opt = BFGS(atoms, logfile=None)
+        assert opt.run(fmax=0.02, steps=40)
+    h_ref = ref_counter.count
+    pos_ref = atoms.get_positions().copy()
+
+    # ---- joint free-energy descent (metal path)
+    res = joint_relax(cell, pos0, [0, 0], [parse_upf(pseudo(AL_ONCV))],
+                      LDA_PW92(), ecut=AL_ECUT, kmesh=AL_KPTS,
+                      smearing=SMEAR, width=WIDTH, fix_cell=True, fmax=0.02,
+                      n_inner=4, max_closures=250, lbfgs_chunk=12)
+    assert res.converged
+
+    d_ref = np.linalg.norm(pos_ref[1] - pos_ref[0])
+    d_joint = np.linalg.norm(res.positions[1] - res.positions[0])
+    e_ref = _al_scf_free(cell, pos_ref)
+    e_joint = _al_scf_free(cell, res.positions)
+
+    print(f"\nmetal pair sep: joint {d_joint:.5f} vs ref {d_ref:.5f} A")
+    print(f"metal E(SCF@final): joint {e_joint:.6f} vs ref {e_ref:.6f} eV "
+          f"(diff {abs(e_joint - e_ref) / HA:.2e} Ha)")
+    print(f"metal H-applies: ref {h_ref}, joint {res.h_equiv} "
+          f"(seed {res.h_seed} + {res.n_closures} closures), "
+          f"ratio {h_ref / max(res.h_equiv, 1):.2f}x")
+
+    # same basin (loose — see the force-bias caveat in the docstring) and cheaper
+    assert abs(d_joint - d_ref) < 0.1        # Å
+    assert abs(e_joint - e_ref) < 3e-3 * HA  # ~same free-energy minimum
+    assert res.h_equiv < h_ref               # fewer H-applications than nested

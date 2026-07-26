@@ -1,6 +1,8 @@
 # Joint geometry + electronic optimization (prototype, #122)
 
-Status: prototype, norm-conserving insulators only. Code: `gradwave/opt/joint.py`;
+Status: prototype, norm-conserving. Insulators (fixed occupations) and metals
+(variational occupations, free-energy descent) are both supported, with LDA or
+PBE. Code: `gradwave/opt/joint.py`, `gradwave/opt/_metals.py`;
 tests: `tests/unit/test_joint_opt.py` (fast + standard),
 `tests/integration/test_joint_vs_bfgs.py` (slow, the head-to-head).
 
@@ -30,10 +32,11 @@ Minimize the KS total energy over three blocks of variables:
   on Z into a TPA-preconditioned metric on C — without it the coefficient
   block's conditioning is ~ecut/gap and first-order descent crawls.
 
-Only the `N_e/2` occupied bands are carried, with fixed occupations f = 2.
-The occupied-subspace energy is invariant under band rotations, so occupied
-near-degeneracies are harmless; the *gap* is what protects the subspace.
-This is deliberately insulator-only — see "Metals" below.
+For an insulator only the `N_e/2` occupied bands are carried, with fixed
+occupations f = 2. The occupied-subspace energy is invariant under band
+rotations, so occupied near-degeneracies are harmless; the *gap* is what
+protects the subspace. For a metal the occupations become variational and the
+object minimised is the Mermin free energy — see "Metals" below.
 
 The energy assembly (`joint_energy`) mirrors `postscf.stress._energy_strained`
 term by term (strained density sphere from Miller labels, differentiable SBT
@@ -136,24 +139,141 @@ Other modes watched for:
   are unbounded; det(1+ε) → 0 overflows the 1/Ω energy terms into NaN. The
   closure short-circuits det(1+ε) ∉ [0.2, 5] to a finite quadratic penalty
   and the line search backtracks off it.
-- **Level crossings** — avoided by construction (insulator, occupied subspace
-  only, rotation-invariant energy). Smeared occupations from current Ritz
-  values would make E(Z) non-smooth exactly at Aufbau-frontier crossings;
-  that is the metal extension's real problem, not a bug of this prototype.
+- **Level crossings** — for insulators avoided by construction (occupied
+  subspace only, rotation-invariant energy). For metals the smearing entropy
+  makes F smooth through Aufbau-frontier crossings (occupation weights change
+  continuously), which is exactly why the free-energy functional — not the bare
+  energy — is the object to minimise; see "Metals" below.
 - **Cell-dependent basis** — handled by the rebuild loop; a single frozen
   sphere biases the lattice constant at 15 Ry by more than the 1e-3 Å bar.
 
-## Metals (not attempted, by design)
+## GGA / PBE
 
-Smeared Aufbau occupations from the current Ritz values make the objective
-only piecewise-smooth in Z (occupation weights reshuffle at crossings), and
-L-BFGS assumes smoothness. The clean formulations are free-energy functionals
-over an *extended* set of bands with occupations as variables (Marzari–
-Vanderbilt ensemble DFT) — a different prototype.
+The joint functional is agnostic to the semilocal functional: `joint_energy`
+already rebuilds `σ = |∇ρ|²` on the strained grid whenever `xc.needs_gradient`,
+so passing a `PBE()` (or any GGA) `xc` to `joint_energy` / `joint_relax` "just
+works". At ε = 0 with the converged PBE orbitals the functional reproduces the
+PBE SCF total to ~1e-5 eV and its ε-gradient reproduces `stress()` with the PBE
+sigma term — both asserted in the fast tests
+(`test_joint_energy_pbe_*`). meta-GGA (`needs_tau`) is still refused (the τ
+rebuild on the coefficient graph is not wired).
+
+## Metals — free-energy descent with variational occupations
+
+`gradwave/opt/_metals.py` + `joint_free_energy`. When `joint_relax` is given a
+`smearing` scheme it carries `n_bands ≥ N_e/2` orbitals and minimises the
+**Mermin free energy** `F = E − σS` instead of `E`. Occupations are made a
+function of the orbitals by reusing the SCF's own machinery, not by adding
+optimizer variables:
+
+1. Build the **subspace Hamiltonian** `H_sub[k] = C_k^† Ĥ[ρ] C_k`
+   (`n_bands × n_bands`) term by term from the SAME ingredients `joint_energy`
+   already assembles — per-band kinetic on `(k+G)²`, the real-space ψ grids for
+   the local `V_eff` matrix elements, the projector overlaps for the nonlocal
+   block. It adds **no** sphere↔grid FFTs beyond the ψ grids the density build
+   already pays for, so the H-apply accounting stays ≈ 1 per (band, k) per
+   closure (now with `n_bands` instead of `N_e/2` bands).
+2. Diagonalise `H_sub` → Ritz values `λ_i`; feed them to the shared Fermi
+   search / entropy (`core.occupations`, exactly the SCF path) → occupations
+   `f_i` and `−σS`.
+3. Rebuild ρ (and the energy) from the occupation-weighted **Ritz** orbitals
+   (`C' = Rᵀ C`), i.e. the density matrix `γ = R diag(f) Rᵀ` in the coefficient
+   basis.
+
+The circularity ρ → V_eff → H_sub → λ → f → ρ is closed by a short **detached**
+fixed-point at the base cell (orbitals held fixed, only occupations/potential
+iterate — 5-6 iterations reach the SCF occupations). Because the whole
+occupation solve is detached, the notorious `torch.linalg.eigh` backward — whose
+`1/(λ_i−λ_j)` factors blow up at the *maximally* degenerate Fermi surface —
+**never runs**: the live gradient reaches the free energy only through the
+diagonal weights `f` (detached) and the rotation `R` (detached), plus the
+orbitals and geometry at fixed occupations. This is the block-coordinate
+(alternating orbital / occupation) reading of ensemble DFT; the occupation block
+is re-solved every closure so both blocks reach stationarity together. It is
+exact at the SCF fixed point — there `C` already diagonalises `H_sub` (`R = I`)
+and `f` is the self-consistent Fermi filling — so:
+
+- **F(ε = 0) = SCF free energy** to ~1e-7 eV (LDA and PBE), and
+- **dF/dε = Ω·stress()** to ~1e-4 eV/Å³ with occupations detached (fixed
+  occupations have no explicit ε-dependence, matching `postscf/stress.py`).
+
+Both are asserted in `test_joint_free_energy_*` / `test_metal_stress_*` on a
+small smeared Al cell.
+
+### The bug that hides behind every energy test
+
+`H_sub` must be assembled with a **consistent bra/ket conjugation** across all
+three blocks: `H[a,b] = Σ c_a*(G) … c_b(G)` (first index conjugated). Writing
+the per-band Rayleigh quotient naively — conjugating the *ket* for kinetic and
+nonlocal but the *bra* for the local term — leaves the (real) diagonal
+untouched, so it passes every total-energy and stress test, yet
+transpose-conjugates the off-diagonal and corrupts **every** eigenvalue by
+electron-volts (on Al a spurious ~1 eV Fermi-level shift and a metal that looks
+insulating, `S ≈ 0`). Caught only by diffing `eigh(H_sub)` against
+`BatchedHamiltonian`; the fixed convention is asserted implicitly by the
+free-energy anchor.
+
+### Descent — what works, and the honest limitation
+
+The metal *relaxation* (`joint_relax(smearing=…)`) is where the theory meets the
+optimizer, and three schemes were tried before one held:
+
+1. **Full subspace rotation, occupations recomputed every closure — stalls.**
+   Recomputing (rotation `R`, occupations `f`) inside each line-search trial
+   hands L-BFGS a gradient inconsistent with the moving objective; strong-Wolfe
+   makes no progress (Al: E frozen, `‖∇‖` constant across dozens of closures).
+2. **Marzari–Vanderbilt occupation *variables* (η as extra L-BFGS leaves) —
+   stalls.** The occupation block (eV-scale) and the preconditioned coefficient
+   block (O(1)) live on wildly different scales; the single L-BFGS metric is so
+   ill-conditioned the line search dies with `|∂F/∂η| ≈ 3` unresolved.
+3. **Block-coordinate DIAGONAL ensemble — converges (with two fixes).** Each
+   orbital is occupied by its own Rayleigh quotient `e_i = ⟨ψ_i|Ĥ|ψ_i⟩`
+   (`_metals.diagonal_occupations`, no rotation, so nothing drifts), FROZEN per
+   L-BFGS chunk (so the objective and gradient are consistent), and — the second
+   fix — the L-BFGS **memory is reset each chunk** (curvature pairs from the
+   previous chunk's different-occupation objective otherwise drive a persistent
+   oscillation). The orbital-gradient gate is relaxed to ~2.5e-3 (the per-chunk
+   occupation refresh perturbs the orbital block at that level).
+
+Head-to-head (positions-only, 2-atom bcc-like Al, LDA, 13 Ry, 3×3×3, gaussian
+σ=0.3), joint vs nested BFGS+SCF, both to fmax = 0.02 eV/Å:
+
+| quantity | nested BFGS+SCF | joint | agreement |
+|---|---|---|---|
+| E(SCF @ final) [eV] | −3362.5694 | −3362.5372 | 1.2e-3 Ha |
+| Al–Al pair sep [Å] | 3.5104 | 3.5753 | 0.065 Å |
+| H-applies | 43 442 | 13 930 | **3.1× fewer** |
+
+So the free-energy *functional* is exact (the ε=0 anchors), and the descent is
+real and cheaper in Hamiltonian work, but it is a **partial** result: the
+frozen-occupation (diagonal-ensemble) force carries a bias that floors the
+attainable fmax at ~0.02 eV/Å — tightening to 0.008 does not converge — so on
+this soft mode the geometry agrees only to ~0.07 Å and the energy to ~1.5e-3 Ha,
+not the insulator's 1e-3 Å / 1e-7 Ha. The bias vanishes only at exact
+self-consistency (where the diagonal quotients are the eigenvalues and the
+Hellmann–Feynman force is complete); closing it needs the occupation *response*
+force, i.e. the eigenvector-sensitivity the detached scheme deliberately drops.
 
 ## Next steps
 
-- Metals via ensemble-DFT occupations (see above) on the Al fixture.
+- **Close the metal force bias.** The clean route is a degeneracy-robust
+  `eigh` backward (custom `autograd.Function`, Lorentzian-broadened
+  `1/(λ_i−λ_j)`) so the rotation/occupation response can stay LIVE without NaNs
+  at the Fermi surface — then the full subspace scheme (attempt 1) becomes a
+  single consistent objective and the frozen-occupation bias disappears.
+- **Precondition the MV occupation block** (attempt 2) so occupation and
+  coefficient variables share a metric — the other way to a consistent joint
+  descent.
+- **Warm-start the occupation solve across closures** (carry ρ / f) to drop the
+  per-closure inner fixed-point from ~5 iterations to 1-2.
+- Momentum/trust-region alternatives to L-BFGS for the coefficient block
+  (OMM/exponential-map with explicit Riemannian gradient).
+
+- **Warm-start the occupation solve across closures** (carry ρ / f) to drop the
+  per-closure inner fixed-point from ~6 iterations to 1-2.
+- **Marzari–Vanderbilt occupation *variables*** as an alternative to the
+  subspace route if line-search behaviour degrades on harder metals (occupation
+  levels as extra L-BFGS leaves; smearing keeps F smooth, no `eigh` at all).
 - Momentum/trust-region alternatives to L-BFGS for the coefficient block
   (OMM/exponential-map with explicit Riemannian gradient).
 - Share the seed with the calculator's warm-start machinery so MD-style
