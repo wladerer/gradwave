@@ -94,6 +94,47 @@ def _remap_density_to_grid(rho_old, old_grid, new_grid, n_electrons):
     return rho_new * (float(n_electrons) / (rho_new.mean() * vol))
 
 
+def _remap_coeffs_to_spheres(coeffs_old, spheres_old, spheres_new):
+    """Remap per-k band plane-wave coefficients from one G-sphere set onto
+    another by integer Miller-index matching, so the previous ionic step's
+    eigenvectors survive an ecut-fixed G-sphere resize (variable-cell relaxation
+    strains the cell; the set of |k+G|² ≤ ecut plane waves changes per k). Each
+    band's coefficient at Miller index m moves to that index's slot in the new
+    sphere; new components (no old counterpart) are zero-filled, old ones that no
+    longer fit are dropped — the plane-wave analogue of ``_remap_density_to_grid``.
+
+    Returns a new list-per-k of ``(nb, npw_new)`` coefficient blocks, or None
+    when the k-point sets are structurally incompatible (different k count, or a
+    per-k fractional-k mismatch, e.g. a symmetry-group change reshaped the IBZ) —
+    the caller then bails to a fresh orbital start."""
+    if coeffs_old is None or len(coeffs_old) != len(spheres_new) \
+            or len(spheres_old) != len(spheres_new):
+        return None
+    out = []
+    for ck, sph_o, sph_n in zip(coeffs_old, spheres_old, spheres_new,
+                                strict=True):
+        if ck is None or not np.allclose(np.asarray(sph_o.k_frac, dtype=float),
+                                         np.asarray(sph_n.k_frac, dtype=float)):
+            return None
+        m_o = sph_o.miller.detach().cpu().numpy()
+        m_n = sph_n.miller.detach().cpu().numpy()
+        pos_of = {(int(a), int(b), int(c)): i for i, (a, b, c) in enumerate(m_o)}
+        src, dst = [], []
+        for j, (a, b, c) in enumerate(m_n):
+            i = pos_of.get((int(a), int(b), int(c)))
+            if i is not None:
+                src.append(i)
+                dst.append(j)
+        nb = ck.shape[0]
+        new_c = torch.zeros(nb, m_n.shape[0], dtype=ck.dtype, device=ck.device)
+        if src:
+            src_t = torch.as_tensor(src, dtype=torch.long, device=ck.device)
+            dst_t = torch.as_tensor(dst, dtype=torch.long, device=ck.device)
+            new_c.index_copy_(1, dst_t, ck.detach().index_select(1, src_t))
+        out.append(new_c)
+    return out
+
+
 class GradWave(Calculator):
     implemented_properties = ["energy", "free_energy", "forces", "stress",
                               "magmom"]
@@ -128,6 +169,9 @@ class GradWave(Calculator):
         compile_xc: bool = False,
         eigensolver: str = "davidson",  # davidson | chebyshev (NC path only)
         precond: str = "kerker",  # kerker | local_tf (NC and USPP/PAW paths)
+        reuse_wavefunctions: bool = True,  # seed the Davidson eigensolver from the
+        # previous ionic step's eigenvectors (alongside the density warm start);
+        # False falls back to a density-only warm start (cold orbital seed)
         dispersion=None,  # opt-in D3(BJ): True/False, or a dict of overrides
         verbose: bool = False,
         **kwargs,
@@ -149,7 +193,7 @@ class GradWave(Calculator):
                  diago_tol=diago_tol, mixing_scheme=mixing_scheme,
                  mixing_alpha=mixing_alpha, mixing_history=mixing_history,
                  mixing_kerker=mixing_kerker, eigensolver=eigensolver,
-                 precond=precond)
+                 precond=precond, reuse_wavefunctions=reuse_wavefunctions)
         )
         # Opt-in D3(BJ) dispersion, mirroring inputs.DispersionParams: True →
         # enabled with defaults (functional = the SCF xc); a dict overrides any
@@ -344,6 +388,10 @@ class GradWave(Calculator):
         prev = self.last_result
         if prev is None or nspin != 1 or getattr(prev, "nspin", 1) != 1:
             return None
+        # reuse_wavefunctions gates ONLY the orbital seed; the density (and USPP
+        # becsum) warm start is unconditional. False → density-only warm start
+        # (cold orbital seed), the pre-reuse behavior.
+        reuse = self.parameters["reuse_wavefunctions"]
         is_uspp = prev.formalism == "uspp"
         prev_sys = prev.system
         if tuple(prev_sys.grid.shape) != tuple(system.grid.shape):
@@ -351,17 +399,24 @@ class GradWave(Calculator):
             rho = _remap_density_to_grid(
                 prev.rho.detach(), prev_sys.grid, system.grid,
                 system.n_electrons)
+            # remap the eigenvectors onto the new G-spheres too (Miller-index
+            # match, zero-fill new high-G components) so the Davidson seed
+            # survives the grid change; None if the k-set is incompatible.
+            coeffs = (_remap_coeffs_to_spheres(
+                prev.coeffs, prev_sys.spheres, system.spheres)
+                if reuse else None)
             if is_uspp:
                 # becsum (rho_ij_atoms) is per-atom and grid-independent, so it
                 # rides along; swap in the new system so warm_start_densities
-                # sees a matching grid. Orbitals are dropped (npw changed).
-                return dataclasses.replace(prev, rho=rho, system=system)
+                # sees a matching grid, and carry the remapped orbitals.
+                return dataclasses.replace(prev, rho=rho, system=system,
+                                           coeffs=coeffs)
             return {"system": system, "nspin": 1, "rho": rho,
-                    "rho_spin": None, "coeffs": None}
+                    "rho_spin": None, "coeffs": coeffs}
         pos_new = system.positions
         pos_old = prev_sys.positions.to(pos_new.device)
         if float((pos_new - pos_old).abs().max()) < 1e-12:
-            return prev
+            return prev if reuse else dataclasses.replace(prev, coeffs=None)
         tabs = prev_sys.paws if is_uspp else prev_sys.upfs
         soa = prev_sys.species_of_atom
         ne = prev_sys.n_electrons
@@ -369,10 +424,12 @@ class GradWave(Calculator):
                  - sad_density(system.grid, pos_old, soa, tabs, ne))
         rho = prev.rho.detach() + delta
         if is_uspp:
-            # becsum is per-atom and rides along as-is
-            return dataclasses.replace(prev, rho=rho)
-        return {"system": prev_sys, "nspin": 1, "rho": rho,
-                "rho_spin": None, "coeffs": prev.coeffs}
+            # becsum is per-atom and rides along as-is; orbitals live on the same
+            # G-spheres (positions-only move), so they seed the Davidson directly
+            return dataclasses.replace(prev, rho=rho,
+                                       coeffs=prev.coeffs if reuse else None)
+        return {"system": prev_sys, "nspin": 1, "rho": rho, "rho_spin": None,
+                "coeffs": prev.coeffs if reuse else None}
 
     def _state_key(self, atoms):
         """Exact-match key for the (geometry, parameters) state an SCF result

@@ -28,6 +28,25 @@ from gradwave.dtypes import CDTYPE, RDTYPE
 # band chunk as budget / (elem_bytes · n_grid · nk). CPU paths do not chunk.
 _GPU_DENSE_BUDGET_BYTES = 4e8
 
+# Optional H-application instrumentation. BatchedHamiltonian.apply is the single
+# chokepoint every batched Davidson round (NC and USPP/PAW) funnels its H|ψ⟩
+# through, so tallying band·k applies here counts the eigensolver work a warm
+# start saves. Disabled by default (one dict read per apply); a test enables it,
+# resets, runs an SCF, then reads the accumulated count.
+_HAPPLY_TALLY = {"on": False, "count": 0}
+
+
+def reset_happly_tally() -> None:
+    """Zero and enable the band·k H-application counter (see
+    ``BatchedHamiltonian.apply``)."""
+    _HAPPLY_TALLY["on"] = True
+    _HAPPLY_TALLY["count"] = 0
+
+
+def happly_tally() -> int:
+    """Total band·k H-applications tallied since the last ``reset_happly_tally``."""
+    return _HAPPLY_TALLY["count"]
+
 
 @dataclass
 class BatchedK:
@@ -203,6 +222,8 @@ class BatchedHamiltonian:
         bound peak memory on the dense grid (math identical)."""
         bk = self.bk
         nk, nb, m = c.shape
+        if _HAPPLY_TALLY["on"]:
+            _HAPPLY_TALLY["count"] += nk * nb
         t_r, v_eff, p, p_conj, dij = self._tables(c.dtype)
         out = t_r[:, None, :] * c
 
