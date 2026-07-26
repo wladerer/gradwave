@@ -24,12 +24,11 @@ Minimize the KS total energy over three blocks of variables:
 - **positions** as fractional coordinates `s` (they ride the strained cell:
   `τ = s·a(ε)`).
 - **orbitals**: unconstrained complex variables `Z_k` per k-point,
-  orthonormalized *inside* the energy by Löwdin, `C_k = (Z_k Z_kᴴ)^{-1/2} Z_k`,
-  after a diagonal Teter-style preconditioner `p(G) = 1/(1+T_G/T_ref)`
-  (`C_k = Löwdin(Z_k · p)`). Löwdin is smooth (no QR sign/pivot kinks) and the
-  preconditioner turns L-BFGS's identity metric on Z into a TPA-preconditioned
-  metric on C — without it the coefficient block's conditioning is ~ecut/gap
-  and first-order descent crawls.
+  orthonormalized *inside* the energy by Cholesky, `C_k = L⁻¹(Z_k·p)` with
+  `Z Zᴴ = L Lᴴ`, after a diagonal Teter-style preconditioner
+  `p(G) = 1/(1+T_G/T_ref)`. The preconditioner turns L-BFGS's identity metric
+  on Z into a TPA-preconditioned metric on C — without it the coefficient
+  block's conditioning is ~ecut/gap and first-order descent crawls.
 
 Only the `N_e/2` occupied bands are carried, with fixed occupations f = 2.
 The occupied-subspace energy is invariant under band rotations, so occupied
@@ -84,7 +83,18 @@ The comparison is FFT-work-based and slightly generous to the *reference*
 (its density builds, mixing, and stress/force autograd passes are not
 charged; the joint side's equivalent overheads are the same dense-box terms).
 
-## Results (Si, 2-atom primitive cell, LDA, 15 Ry, 2×2×2, no symmetry)
+## Results
+
+### Fixed cell (Si2, LDA, 12 Ry, 2×2×2, atom displaced 0.1 Å)
+
+Joint descent (positions + orbitals, `fix_cell=True`): converged to
+fmax < 0.005 eV/Å in **80 closures**, bond 2.35124 Å vs ideal 2.35126 Å
+(2e-5 Å). Cost: h_seed 1432 (3 loose SCF iterations) + 80·8k·4b = 2560,
+**h_equiv 3992 — less than ONE fully converged SCF at the same settings**
+(a single cold SCF here is ~4000–4500 H-applies). Every nested-relaxation
+scheme pays ≥ n_steps such SCFs.
+
+### Variable cell head-to-head (Si, 2-atom primitive cell, LDA, 15 Ry, 2×2×2, no symmetry)
 
 Start: atom 1 displaced 0.08–0.05–0.03 Å, cell strained ~1.5% (normal + shear).
 Both relaxed to fmax = 0.005 eV/Å (reference: BFGS + FrechetCellFilter).
@@ -93,26 +103,45 @@ geometry (removes either method's own energy-accounting bias).
 
 | quantity | nested BFGS+SCF | joint | agreement |
 |---|---|---|---|
-| bond length [Å] | TBD | TBD | TBD |
-| a₁ length [Å] | TBD | TBD | TBD |
-| E(SCF @ final) [eV] | TBD | TBD | TBD Ha |
-| H-applies | TBD | TBD (seed TBD + closures TBD) | ratio TBD× |
+| bond length [Å] | 2.41596 | 2.41604 | 8e-5 Å |
+| a₁ length [Å] | 3.94585 | 3.94535 | 5e-4 Å |
+| E(SCF @ final) [eV] | −211.460329 | −211.460332 | 1.2e-7 Ha |
+| H-applies | 74 920 | 9 632 (seed 1 664 + 249 closures) | **7.8× fewer** |
 
-(Fill from `pytest tests/integration/test_joint_vs_bfgs.py -m slow -n0 -s`.)
+Joint used 4 basis-rebuild cycles and 249 total closures. Success bar
+(energy within 1e-5 Ha, geometry within 1e-3 Å, fewer H-applications): met.
+Run on asus via `pytest tests/integration/test_joint_vs_bfgs.py -n0 -s -m ""`.
 
-## Failure modes observed / avoided
+## Failure modes hit (attempt log)
 
-- **Coefficient conditioning** — dominant issue. Unpreconditioned L-BFGS on Z
-  needs many × more closures; the diagonal Teter scaling recovers most of it.
-- **Level crossings** — avoided by construction here (insulator, occupied
-  subspace only, rotation-invariant energy). Attempting smeared occupations
-  from current Ritz values would make E(Z) non-smooth exactly at crossings of
-  the Aufbau frontier; that is the metal extension's real problem, not a bug
-  of this prototype.
+1. **Attempt 1 — symmetric Löwdin (eigh) orthonormalization: FAILED.**
+   `eigh`'s backward carries 1/(λᵢ−λⱼ) factors; symmetry-degenerate Si bands
+   at the 2×2×2 zone-boundary k-points make Z Zᴴ have *exactly* repeated
+   eigenvalues, so the very first backward pass returned NaN grads, the first
+   L-BFGS update wrote NaN into every leaf, and the next Cholesky/eigh call
+   crashed. Γ-only runs (accidentally non-degenerate) hid the bug. The energy
+   is invariant to which orthonormal frame is returned, so the fix is free:
+2. **Attempt 2 — Cholesky orthonormalization (C = L⁻¹Z): WORKS.**
+   Cholesky's backward is spectrum-independent; a trace-scaled jitter
+   (1e-13·tr S/n) keeps S SPD when a line-search trial approaches rank
+   deficiency. All results below are attempt 2.
+   (A 3rd attempt — Adam warmup or exponential-map/OMM — was not needed; kept
+   in "next steps" as optimizer work, not correctness work.)
+
+Other modes watched for:
+
+- **Coefficient conditioning** — the diagonal Teter scaling is what makes
+  L-BFGS viable; the un-preconditioned metric has condition ~ecut/gap.
+- **Volume collapse under line search** — strong-Wolfe trial steps along ε
+  are unbounded; det(1+ε) → 0 overflows the 1/Ω energy terms into NaN. The
+  closure short-circuits det(1+ε) ∉ [0.2, 5] to a finite quadratic penalty
+  and the line search backtracks off it.
+- **Level crossings** — avoided by construction (insulator, occupied subspace
+  only, rotation-invariant energy). Smeared occupations from current Ritz
+  values would make E(Z) non-smooth exactly at Aufbau-frontier crossings;
+  that is the metal extension's real problem, not a bug of this prototype.
 - **Cell-dependent basis** — handled by the rebuild loop; a single frozen
   sphere biases the lattice constant at 15 Ry by more than the 1e-3 Å bar.
-- **Löwdin rank** — if a line-search step makes Z nearly rank-deficient the
-  S^{-1/2} clamps (1e-14); never triggered in the Si runs.
 
 ## Metals (not attempted, by design)
 
