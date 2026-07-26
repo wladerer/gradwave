@@ -176,7 +176,7 @@ class _IterOps:
     e_ewald: torch.Tensor  # constant E_ewald (frozen positions), built once
     phase_pos: torch.Tensor
     is_paw: bool
-    onec: list | None
+    onec: dict | None  # per-species OneCenter ({sp: oc}; list also indexes)
     grid: object
     vol: float
     dev: object
@@ -265,18 +265,21 @@ def uspp_potentials_dscr(system, xc, rho_s, rho_ij_s, vloc_r, phase_pos, onec):
     e_onec = torch.zeros((), dtype=RDTYPE, device=dev)
     if onec is not None:
         dscr_s = [d.clone() for d in dscr_s]
-        for a, sp in enumerate(system.species_of_atom):
-            s0, s1 = system.atom_slices[a]
-            # one-center runs on CPU (per-atom radial work); ddd crosses back
-            bec_a = (rho_ij_s[0][a] if nspin == 1
-                     else [rho_ij_s[0][a], rho_ij_s[1][a]])
-            e1c, ddd = onec[sp].energy_and_ddd(bec_a)
-            e_onec = e_onec + e1c
-            if nspin == 1:
-                dscr_s[0][s0:s1, s0:s1] += ddd.to(dev)
-            else:
-                for isp in range(nspin):
-                    dscr_s[isp][s0:s1, s0:s1] += ddd[isp].to(dev)
+        # one-center per species: ONE batched energy_and_ddd over that
+        # species' atoms (a single autograd graph on the table device)
+        # instead of a per-atom Python loop with per-atom device syncs
+        for sp, atoms in _species_atoms(system).items():
+            bec_b = [torch.stack([rho_ij_s[isp][a] for a in atoms])
+                     for isp in range(nspin)]
+            e_at, ddd = onec[sp].energy_and_ddd_batch(
+                bec_b[0] if nspin == 1 else bec_b)
+            e_onec = e_onec + e_at.sum().to(dev)
+            ddd_s = [ddd] if nspin == 1 else ddd
+            for isp in range(nspin):
+                dd = ddd_s[isp].to(dev)
+                for i, a in enumerate(atoms):
+                    s0, s1 = system.atom_slices[a]
+                    dscr_s[isp][s0:s1, s0:s1] += dd[i]
     return veff_s, dscr_s, e_onec
 
 
@@ -309,9 +312,11 @@ def _build_iter_ops(system: USPPSystem, xc, *, nspin=1, smearing="none",
     is_paw = any(p.is_paw for p in system.paws)
     onec = None
     if is_paw:
-        from gradwave.scf.paw_onsite import OneCenter
+        from gradwave.scf.paw_onsite import onecenters
 
-        onec = [OneCenter(p, xc) for p in system.paws]
+        # tables on the SCF device, cached on the system so forces/stress/
+        # response reuse them instead of reconstructing per call
+        onec = onecenters(system, xc, device=dev)
     return _IterOps(system=system, xc=xc, nspin=nspin, smearing=smearing,
                     width=width, batched=batched, projs=projs, bk=bk, p_b=p_b,
                     hub=hub, vloc_g=vloc_g, vloc_r=vloc_r, e_ewald=e_ewald,
@@ -946,11 +951,11 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
             rho_s = rho_out_s
             if is_paw:  # report the one-center energy at the FINAL fresh becsum
                 e_onec = torch.zeros((), dtype=RDTYPE, device=dev)
-                for a, sp in enumerate(system.species_of_atom):
-                    fresh = (rho_ij_s[0][a] if nspin == 1
-                             else [rho_ij_s[0][a], rho_ij_s[1][a]])
-                    e1c, _ = onec[sp].energy_and_ddd(fresh)
-                    e_onec = e_onec + e1c
+                for sp, atoms in _species_atoms(system).items():
+                    fresh = [onec[sp]._to_real_t(
+                        torch.stack([rho_ij_s[isp][a] for a in atoms]))
+                        for isp in range(nspin)]
+                    e_onec = e_onec + onec[sp].e1c_t(fresh).sum().to(dev)
                 energies.onecenter = e_onec
             break
         e_free_prev = e_free

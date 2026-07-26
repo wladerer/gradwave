@@ -99,12 +99,15 @@ def e1c_nc_t(oc, comps):
     (n_ij = ρ↑↑+ρ↓↓, mz_ij = ρ↑↑−ρ↓↓, mx_ij = ρ↑↓+ρ↓↑, my_ij = i(ρ↑↓−ρ↓↑); all
     Hermitian → real-representable). The on-site Hartree is spin-independent, so it
     couples to n only."""
-    e = torch.zeros((), dtype=torch.float64)
+    tdev = oc._torch_tables()["ylm"].device
+    in_dev = comps[0].device
+    comps = [c.to(tdev) for c in comps]  # graph-connected device bridge
+    e = torch.zeros((), dtype=torch.float64, device=tdev)
     for what, sgn in (("ae", 1.0), ("ps", -1.0)):
         lms = [oc.rho_lm_t(c, what) for c in comps]      # [n_lm, mx_lm, my_lm, mz_lm]
         _, e_h = oc.hartree_t(lms[0])                     # Hartree on n only
         e = e + sgn * (e_h + onsite_nc_exc(oc, lms, what))
-    return e
+    return e.to(in_dev)
 
 
 def onsite_nc_energy_and_ddd(oc, comps):

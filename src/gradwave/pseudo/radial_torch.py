@@ -118,6 +118,24 @@ def sbt_t(l: int, gvals: torch.Tensor, r: torch.Tensor, w: torch.Tensor,
     return _SBT.apply(q, gvals * w, r, l)
 
 
+def radial_tables(system, device=None) -> list:
+    """Per-species RadialTables aligned with ``system.paws``, cached on the
+    system object per device so repeated forces/stress calls reuse the
+    frozen mesh data instead of rebuilding it."""
+    key = str(torch.device(device) if device is not None
+              else torch.device("cpu"))
+    cache = getattr(system, "_radial_tables_cache", None)
+    if cache is None:
+        cache = {}
+        try:
+            system._radial_tables_cache = cache
+        except AttributeError:  # slotted/frozen container: build uncached
+            return [RadialTables(p, device=device) for p in system.paws]
+    if key not in cache:
+        cache[key] = [RadialTables(p, device=device) for p in system.paws]
+    return cache[key]
+
+
 class RadialTables:
     """Per-species mesh data frozen to torch once, for strain-differentiable
     form-factor evaluation (used by postscf/stress.py)."""

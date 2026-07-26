@@ -81,12 +81,40 @@ def _cumint_t(g: torch.Tensor) -> torch.Tensor:
     return out
 
 
-class OneCenter:
-    """Per-species one-center integrator. Call energy_and_ddd per atom."""
+def onecenters(system, xc, device=None) -> dict:
+    """Per-species {sp: OneCenter} for every species with atoms, cached on
+    the system object per (xc, device) so the SCF, forces, stress and
+    response paths share one set of radial tables and dense ρ_lm maps
+    instead of rebuilding them on every call."""
+    dev = torch.device(device) if device is not None else torch.device("cpu")
+    key = (id(xc), str(dev))
+    cache = getattr(system, "_onecenter_cache", None)
+    if cache is None:
+        cache = {}
+        try:
+            system._onecenter_cache = cache
+        except AttributeError:  # slotted/frozen container: build uncached
+            return {sp: OneCenter(system.paws[sp], xc, device=dev)
+                    for sp in set(system.species_of_atom)}
+    if key not in cache:
+        # hold xc in the value so id(xc) cannot be recycled while cached
+        cache[key] = (xc, {sp: OneCenter(system.paws[sp], xc, device=dev)
+                           for sp in set(system.species_of_atom)})
+    return cache[key][1]
 
-    def __init__(self, paw: PAWData, xc):
+
+class OneCenter:
+    """Per-species one-center integrator. Call energy_and_ddd per atom, or
+    energy_and_ddd_batch for all atoms of the species at once (leading atom
+    axis through the whole torch chain — one autograd graph per species).
+    ``device`` places the radial/angular tables (and hence the whole
+    quadrature) where the SCF runs; default CPU."""
+
+    def __init__(self, paw: PAWData, xc, device=None):
         self.paw = paw
         self.xc = xc
+        self.device = (torch.device(device) if device is not None
+                       else torch.device("cpu"))
         self.lmax_beta = max(b.l for b in paw.betas)
         self.lmax_rho = 2 * self.lmax_beta
         self.l2 = (self.lmax_rho + 1) ** 2
@@ -240,10 +268,13 @@ class OneCenter:
         if not hasattr(self, "_tt"):
             def t(a):
                 return torch.as_tensor(np.ascontiguousarray(a),
-                                       dtype=torch.float64)
+                                       dtype=torch.float64,
+                                       device=self.device)
 
             r = self.r
-            lls = np.arange(self.lmax_rho + 1)[:, None]  # (nl, 1)
+            # radial-Poisson tables per lm CHANNEL (rows repeat the l row for
+            # every m) so hartree_t runs all l² channels in one _cumint_t
+            lls = np.array([math.isqrt(lm) for lm in range(self.l2)])[:, None]
             rl_neg = np.where(r > 0, r[None, :] ** -(lls + 1), 0.0)
             self._tt = dict(
                 ylm=t(self.ylm[:, : self.l2]),
@@ -258,11 +289,12 @@ class OneCenter:
                 c0=(r[0] - r[1]) / (r[2] - r[1]),
                 core_ae=t(self.core_ae),
                 core_ps=t(self.core_ps),
-                # radial-Poisson tables per l: integrands and prefactor powers
+                # radial-Poisson tables per lm: integrands, prefactor powers
                 h_a=t(r[None, :] ** lls * self.rab[None, :]),
                 h_b=t(rl_neg * self.rab[None, :]),
                 h_vn=t(rl_neg),
                 h_vp=t(r[None, :] ** lls),
+                h_pref=t(4.0 * math.pi * E2 / (2 * lls + 1)),  # (l2, 1)
                 wsimp=t(self.w_simp),
             )
         return self._tt
@@ -302,42 +334,45 @@ class OneCenter:
                             f = per_l.get(ll, base)
                         mat[:, lm, a, b] += cy[lm] * f[:nf]
             T[what] = torch.as_tensor(
-                mat.reshape(nf * self.l2, self.nm * self.nm))
+                mat.reshape(nf * self.l2, self.nm * self.nm)).to(self.device)
         self._T = T
         return T
 
     def rho_lm_t(self, rho_ij: torch.Tensor, what: str) -> torch.Tensor:
-        """(mesh, l2) torch ρ_lm, differentiable in rho_ij (real (nm, nm))."""
+        """(..., mesh, l2) torch ρ_lm, differentiable in rho_ij (real
+        (..., nm, nm) — leading dims batch over atoms/spins)."""
         T = self._rho_lm_maps()[what]
-        cut = (T @ rho_ij.reshape(-1)).reshape(self._nf, self.l2)
-        pad = torch.zeros(self.mesh - self._nf, self.l2, dtype=cut.dtype,
-                          device=cut.device)
-        return torch.cat([cut, pad], dim=0)
+        lead = rho_ij.shape[:-2]
+        cut = (rho_ij.reshape(*lead, self.nm * self.nm) @ T.transpose(0, 1)
+               ).reshape(*lead, self._nf, self.l2)
+        pad = torch.zeros(*lead, self.mesh - self._nf, self.l2,
+                          dtype=cut.dtype, device=cut.device)
+        return torch.cat([cut, pad], dim=-2)
 
     def hartree_t(self, rho_lm: torch.Tensor):
-        """Torch twin of hartree(): (v_lm (mesh, l2) [eV], E_H [eV])."""
+        """Torch twin of hartree(): (v_lm (..., mesh, l2) [eV], E_H [eV],
+        shaped like the leading dims). All l² channels (and any leading atom
+        batch) run through ONE _cumint_t instead of a per-lm Python loop."""
         tt = self._torch_tables()
-        cols = []
-        for lm in range(self.l2):
-            ll = math.isqrt(lm)
-            f = rho_lm[:, lm]
-            a_in = _cumint_t(f * tt["h_a"][ll])
-            b_all = _cumint_t(f * tt["h_b"][ll])
-            b_out = b_all[-1] - b_all
-            pref = 4.0 * math.pi * E2 / (2 * ll + 1)
-            cols.append(pref * (tt["h_vn"][ll] * a_in + tt["h_vp"][ll] * b_out))
-        v = torch.stack(cols, dim=1)
-        e = 0.5 * (tt["wsimp"][:, None] * v * rho_lm).sum()
+        f = rho_lm.transpose(-1, -2)  # (..., l2, mesh)
+        a_in = _cumint_t(f * tt["h_a"])
+        b_all = _cumint_t(f * tt["h_b"])
+        b_out = b_all[..., -1:] - b_all
+        v = (tt["h_pref"] * (tt["h_vn"] * a_in + tt["h_vp"] * b_out)
+             ).transpose(-1, -2)
+        e = 0.5 * (tt["wsimp"][:, None] * v * rho_lm).sum(dim=(-2, -1))
         return v, e
 
     def _rgrad_t(self, f: torch.Tensor, tt) -> torch.Tensor:
-        """QE radial_gradient iflag=0 stencil, torch, f (mesh, nx)."""
+        """QE radial_gradient iflag=0 stencil, torch, f (..., mesh, nx)."""
         rp = tt["rp"][:, None]
         rm = tt["rm_"][:, None]
-        mid = (rp**2 * (f[:-2] - f[1:-1]) - rm**2 * (f[2:] - f[1:-1])) / (
+        mid = (rp**2 * (f[..., :-2, :] - f[..., 1:-1, :])
+               - rm**2 * (f[..., 2:, :] - f[..., 1:-1, :])) / (
             rp * rm * (rp - rm))
-        g0 = mid[0] + (mid[1] - mid[0]) * tt["c0"]
-        return torch.cat([g0[None], mid, torch.zeros_like(f[:1])], dim=0)
+        g0 = (mid[..., 0, :]
+              + (mid[..., 1, :] - mid[..., 0, :]) * tt["c0"]).unsqueeze(-2)
+        return torch.cat([g0, mid, torch.zeros_like(f[..., :1, :])], dim=-2)
 
     def _xc_exact(self, rho_lms: list, what: str):
         """(E_xc [eV], [dE_xc/dρ_lm (mesh, l2) numpy] per spin) with the
@@ -346,15 +381,17 @@ class OneCenter:
         form of v_xc is only δE/δρ up to lm-truncation error; using it as ddd
         broke force↔energy consistency at 1e-2 eV/Å on spin O₂.)"""
         with torch.enable_grad():  # callable under a no_grad SCF driver
-            leaves = [torch.as_tensor(rl_np, dtype=torch.float64).requires_grad_(True)
+            leaves = [torch.as_tensor(rl_np, dtype=torch.float64,
+                                      device=self.device).requires_grad_(True)
                       for rl_np in rho_lms]
             e_xc = self._exc_t(leaves, what)
             gs = torch.autograd.grad(e_xc, leaves)
-        return float(e_xc.detach()), [g.numpy() for g in gs]
+        return float(e_xc.detach()), [g.cpu().numpy() for g in gs]
 
     def _exc_t(self, rls: list, what: str) -> torch.Tensor:
-        """E_xc [eV] as a torch scalar from (mesh, l2) torch ρ_lm tensors —
-        the quadrature body shared by _xc_exact, e1c_t and energy_theta."""
+        """E_xc [eV] from (..., mesh, l2) torch ρ_lm tensors, shaped like the
+        leading (atom-batch) dims — a scalar for a single atom. The
+        quadrature body shared by _xc_exact, e1c_t and energy_theta."""
         tt = self._torch_tables()
         spin = len(rls) == 2
         core = tt["core_ae"] if what == "ae" else tt["core_ps"]
@@ -362,7 +399,7 @@ class OneCenter:
         gga = getattr(self.xc, "needs_gradient", False)
         dens, grads = [], []
         for rl in rls:
-            rho_rad = rl @ tt["ylm"].T  # (mesh, nx), r² included
+            rho_rad = rl @ tt["ylm"].T  # (..., mesh, nx), r² included
             dens.append(rho_rad * tt["rm2"][:, None] + cfrac * core[:, None])
             if gga:
                 dr = self._rgrad_t(dens[-1], tt)
@@ -383,35 +420,39 @@ class OneCenter:
         else:
             sig = (grads[0] ** 2).sum(0).reshape(-1) if gga else None
             e = self.xc.eval_energy_density(dens[0].reshape(-1), sig)
-        return (e.reshape(self.mesh, self.nx) * tt["wq"][:, None]
-                * tt["ww"][None, :]).sum()
+        lead = rls[0].shape[:-2]
+        return (e.reshape(*lead, self.mesh, self.nx) * tt["wq"][:, None]
+                * tt["ww"]).sum(dim=(-2, -1))
 
     # ---------- fully in-graph one-center chain (torch) ----------
 
     def e1c_t(self, rho_ijs: list) -> torch.Tensor:
-        """E_1c [eV] as a torch scalar, fully differentiable in the REAL
-        (nm, nm) rho_ij tensors AND the XC-functional parameters: dense-T
-        ρ_lm, torch radial Poisson, the exact angular XC quadrature.
+        """E_1c [eV] as a torch tensor shaped like the leading (atom-batch)
+        dims of the REAL (..., nm, nm) rho_ij tensors — a scalar for one
+        atom — fully differentiable in rho_ij AND the XC-functional
+        parameters: dense-T ρ_lm, torch radial Poisson, the exact angular XC
+        quadrature.
 
-        The per-atom radial work runs on the (CPU) table device; inputs are
-        bridged in and the scalar back out, so a caller on any device gets a
-        device-transparent, autograd-connected result (a CPU run is a no-op)."""
+        The radial work runs on the table device (self.device); inputs are
+        bridged in and the result back out, so a caller on any device gets a
+        device-transparent, autograd-connected result (same-device is a
+        no-op)."""
         tdev = self._torch_tables()["ylm"].device
         in_dev = rho_ijs[0].device
         rho_ijs = [r.to(tdev) for r in rho_ijs]
-        e_tot = torch.zeros((), dtype=torch.float64, device=tdev)
+        e_tot = None
         for what, sgn in (("ae", 1.0), ("ps", -1.0)):
             rls = [self.rho_lm_t(r, what) for r in rho_ijs]
             _, e_h = self.hartree_t(sum(rls))
-            e_tot = e_tot + sgn * (e_h + self._exc_t(rls, what))
+            term = sgn * (e_h + self._exc_t(rls, what))
+            e_tot = term if e_tot is None else e_tot + term
         return e_tot.to(in_dev)
 
-    @staticmethod
-    def _to_real_t(rho_ij) -> torch.Tensor:
+    def _to_real_t(self, rho_ij) -> torch.Tensor:
         m = rho_ij.detach()
         if m.is_complex():
             m = m.real
-        return m.cpu().to(torch.float64)
+        return m.to(device=self.device, dtype=torch.float64)
 
     def hvp_becsum(self, rho_ij, vec):
         """One-center Hessian-vector product ∂²E_1c/∂ρ_ij² · vec.
@@ -487,3 +528,25 @@ class OneCenter:
         e_tot = float(e.detach())
         ddds = [g.detach() for g in gs]
         return (e_tot, ddds) if spin else (e_tot, ddds[0])
+
+    def energy_and_ddd_batch(self, rho_ij_b):
+        """One-center energies [eV] and ddd [eV] for ALL atoms of this
+        species at once — the batched twin of energy_and_ddd.
+
+        rho_ij_b: (na, nm, nm) tensor (nspin=1) → (e_atoms (na,), ddd
+        (na, nm, nm)); or [ρ↑ (na, nm, nm), ρ↓ …] → (e_atoms, [ddd↑, ddd↓]).
+
+        One vectorized forward + ONE autograd graph replaces the per-atom
+        loop; per-atom blocks are independent, so ∂(Σ_a E_a)/∂ρ_a is exactly
+        atom a's ddd. Results stay tensors on the table device — no per-atom
+        float()/.cpu() syncs (tests/unit/test_paw_onecenter_batch.py pins
+        agreement with the per-atom path to ≤1e-10 per element)."""
+        spin = isinstance(rho_ij_b, (list, tuple))
+        rhos = [self._to_real_t(m) for m in (rho_ij_b if spin else [rho_ij_b])]
+        with torch.enable_grad():
+            leaves = [m.clone().requires_grad_(True) for m in rhos]
+            e = self.e1c_t(leaves)  # (na,)
+            gs = torch.autograd.grad(e.sum(), leaves)
+        e_atoms = e.detach()
+        ddds = [g.detach() for g in gs]
+        return (e_atoms, ddds) if spin else (e_atoms, ddds[0])
