@@ -36,6 +36,23 @@ $$ \sigma_{\alpha\beta} = \frac{1}{\Omega} \frac{\partial E}{\partial \varepsilo
 which gradwave also obtains by autograd through the differentiable radial
 transforms.
 
+### Stress convergence in the plane-wave cutoff
+
+The stress converges more slowly in the plane-wave cutoff than the total energy.
+The energy is variational, so its basis-set error is second order in the cutoff,
+while the stress is a first derivative and its error is first order. A cutoff
+that converges the energy can therefore leave the stress far from converged, and
+a variable-cell relaxation that follows an unconverged stress relaxes to the
+wrong cell, sometimes collapsing it.
+
+The gap is worst for hard pseudopotentials with deep semicore states. A
+norm-conserving semicore pseudopotential can need more than 100 Ry for a
+converged stress where the energy is already converged near 50 Ry, and the
+unconverged stress carries the wrong sign and several times the right magnitude.
+Converge the stress against the cutoff before trusting a cell relaxation. A
+softer ultrasoft or PAW pseudopotential is the practical remedy, since it
+converges the stress at a much lower cutoff, often near the energy's.
+
 ## Write the input
 
 `examples/input_diamond_relax.yaml`:
