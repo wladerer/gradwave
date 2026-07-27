@@ -18,6 +18,35 @@ from gradwave.solvers.precond import teter, teter_b
 logger = logging.getLogger(__name__)
 
 
+# Square subspace dim at/below which a CUDA subspace eigensolve is offloaded to
+# CPU LAPACK (issue #133). The batched Davidson Rayleigh-Ritz reductions are
+# tiny (nk, n, n) Hermitian solves, but on CUDA each cuSOLVER call reads a
+# factorization `info` back to the host, serializing the stream; the GPU SCF is
+# latency-bound on ~135 such syncs/iteration. Shipping the few-MB subspace
+# matrices to the CPU, solving in LAPACK (no stream syncs), and shipping only
+# the wanted eigenvectors back trades ~N host syncs for one D2H + one H2D per
+# round. Measured on an RTX 3050 (issue #133): CPU+transfer eigh is break-even
+# with cuSOLVER for these shapes, so the sync elimination is pure win. Capped so
+# a genuinely large subspace (n^3 CPU cost) stays on the GPU.
+_SUBSPACE_CPU_MAX = 256
+
+
+def _offload_subspace(is_cuda: bool, n: int) -> bool:
+    """Whether to run an (nk, n, n) subspace solve on CPU instead of CUDA."""
+    return is_cuda and n <= _SUBSPACE_CPU_MAX
+
+
+def _eigh_subspace(s: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """torch.linalg.eigh on a small subspace matrix, CPU-offloaded on CUDA.
+
+    Returns (w, u) on s.device. Physics-neutral: LAPACK and cuSOLVER agree to
+    fp64 round-off, well inside the batched-solver eigenpair contract."""
+    if _offload_subspace(s.is_cuda, s.shape[-1]):
+        w, u = torch.linalg.eigh(s.cpu())
+        return w.to(s.device), u.to(s.device)
+    return torch.linalg.eigh(s)
+
+
 @dataclass
 class DavidsonResult:
     eigenvalues: torch.Tensor  # (nb,) ascending [eV]
@@ -169,7 +198,7 @@ def _rr(q: torch.Tensor, hq: torch.Tensor, nw: int):
     """
     s = torch.einsum("kig,kjg->kij", q.conj(), hq)
     s = 0.5 * (s + s.conj().transpose(-1, -2))
-    w, u = torch.linalg.eigh(s)
+    w, u = _eigh_subspace(s)
     return w[:, :nw].real, u[:, :, :nw]
 
 
@@ -271,7 +300,7 @@ def davidson_batched(
         # before restart and was the A100 large-nk memory spike
         s = torch.matmul(v.conj(), hv.mT)
         s = 0.5 * (s + s.conj().transpose(-1, -2))
-        w, u = torch.linalg.eigh(s)
+        w, u = _eigh_subspace(s)
         eig = w[:, :nb].real
         x = torch.einsum("kja,kjg->kag", u[:, :, :nb], v)
         hx = torch.einsum("kja,kjg->kag", u[:, :, :nb], hv)

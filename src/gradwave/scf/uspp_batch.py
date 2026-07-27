@@ -19,7 +19,7 @@ import dataclasses
 import torch
 
 from gradwave.core.batch import BatchedHamiltonian, BatchedK, becp_b
-from gradwave.solvers.davidson import _orthonormalize_b
+from gradwave.solvers.davidson import _offload_subspace, _orthonormalize_b
 from gradwave.solvers.precond import teter_b
 
 
@@ -115,8 +115,22 @@ def davidson_gen_batched(hs: BatchedHS, x0: torch.Tensor, nbands: int,
         # number nears the 1e14 trip (max observed ~9e7), so the cond SVD never
         # fired independently. The factorization catch is the whole guard, as
         # in the per-k path.
+        # The generalized reduction (Cholesky of S, two triangular solves for
+        # L⁻¹HL⁻†, eigh, and a back-solve for the eigenvectors) runs on the tiny
+        # (nk, nsub, nsub) subspace matrices. On CUDA each of these cuSOLVER
+        # calls reads a factorization `info` back to the host, serializing the
+        # stream — the GPU SCF is latency-bound on those syncs (issue #133). For
+        # our nsub (~50-130) the matrices are a few MB, so ship h_sub/s_sub to
+        # the CPU once, do the whole reduction in LAPACK (no stream syncs, and
+        # the Cholesky retry's `int(info.max())` is then a free host read), and
+        # ship only the wanted eigenvectors back — one D2H + one H2D per round in
+        # place of ~6 host syncs. Physics-neutral: LAPACK matches cuSOLVER to
+        # fp64 round-off, inside the per-k eigenpair contract (guarded by
+        # test_uspp_batched_equality). CPU device / large nsub: no-op offload.
         while True:
             h_sub, s_sub = _subspace(v, hv, sv)
+            if _offload_subspace(s_sub.is_cuda, s_sub.shape[-1]):
+                h_sub, s_sub = h_sub.cpu(), s_sub.cpu()
             ell, info = torch.linalg.cholesky_ex(s_sub)
             bad = int(info.max()) > 0  # one host read per round, reused below
             if not bad or v.shape[1] <= nbands + 1:
@@ -133,8 +147,10 @@ def davidson_gen_batched(hs: BatchedHS, x0: torch.Tensor, nbands: int,
         w, u = torch.linalg.eigh(0.5 * (a + a.conj().transpose(-1, -2)))
         u = torch.linalg.solve_triangular(ell.conj().transpose(-1, -2), u,
                                           upper=True)
-        eig = w[:, :nbands].real
-        u_r = u[:, :, :nbands].transpose(-1, -2).to(x0.dtype)  # (nk, nb, nsub)
+        eig = w[:, :nbands].real.to(x0.device)
+        # downcast on the (CPU) solve device before H2D so only the wanted
+        # eigenvectors cross the bus, and at the block's precision
+        u_r = u[:, :, :nbands].transpose(-1, -2).to(x0.dtype).to(x0.device)
         x = torch.einsum("kbj,kjg->kbg", u_r, v)
         hx = torch.einsum("kbj,kjg->kbg", u_r, hv)
         sx = torch.einsum("kbj,kjg->kbg", u_r, sv)
