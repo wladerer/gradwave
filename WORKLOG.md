@@ -42,5 +42,30 @@ Submit via gwq run --group bench, write to /tmp/*.log, poll gwq status.
   - si_paw (USPP insulator): pulay=18, broyden=21 (johnson pending).
 - Next: collect metals (johnson-vs-pulay is the PR crux), learned verdicts,
   then medium confirm on the winner.
+
+## RESUME (worker 2, 2026-07-27)
+- gwq status: jobs 46/47/48 (nc_small/uspp/learned) + 49/50 all Done:Success.
+  Harvested all JSON+logs from asus /tmp. No resubmits needed.
+- HEADLINE: on USPP/PAW, johnson CRUSHES pulay (the scf_uspp default), nspin=1:
+    si_paw 18->12 (-33%), cu_paw 19->13 (-32%), pt_paw 21->12 (-43%).
+    E/atom identical (<5e-9 eV/atom). Broyden worse everywhere. This is the win.
+- NC (nspin=1) sweep: NO lever. si 9=9, cu 11=11, al 10=10 across pulay/johnson;
+    mgo 11->10 & si_m 17->16 johnson (marginal, <10%). Broyden worse on metals
+    (cu 11->13). history h8/h12/h16 irrelevant. q0 kerker flat at optimum, q0=2.0
+    hurts. kerker==local_tf on bulk. diago 3 variants flat on count (no lever,
+    as predicted). alpha=0.9 johnson: al 10->8, cu 11->10 (aggressive, single-class,
+    not pursued). fe_fm (nspin=2) baseline already johnson (14).
+- NC medium: si_m johnson 16 vs pulay 17; cu_m 22=22. Confirms NC has no default lever.
+- Learned MultipoleKerkerPrecond (bench_learned_precond both): TIES tuned Kerker on
+    every real cell (al/cu/Fe/Pt 7/10/12/9 iters, same fixed point), LOSES on
+    Cu3Al (11 kerker -> 12-13 learned). Synthetic 2-scale toy shows 3.5x but does
+    not transfer. Honest negative -> no deploy.
+- PR wiring: scf_uspp default lives in TWO spots: uspp_loop.py:735 kwarg
+    mixing_scheme="pulay" (+ _flat_defaults:798 guard) AND options.py
+    MixerOptions.scheme="pulay". NC scf() ignores MixerOptions (own None default +
+    _resolve_mixing_scheme, johnson iff nspin==2). So flip is PAW-only, safe for NC.
+- De-risk before unconditional flip: nspin=2 PAW must not regress. Submitting
+    scf_cycle_uspp_confirm.py: fe_fm_paw + ni_fm_paw (nspin=2) + si_paw_m (8-atom
+    medium insulator), pulay vs johnson each. -> /tmp/scf_uspp_confirm.json.
 </content>
 </invoke>
