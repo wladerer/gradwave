@@ -50,9 +50,18 @@ def ylm_all(lmax: int, g: torch.Tensor, eps: float = 1e-14) -> torch.Tensor:
     """
     if lmax > 4:
         raise ValueError("ylm_all supports lmax <= 4")
-    norm = torch.linalg.norm(g, dim=-1, keepdim=True)
-    unit = g / torch.clamp(norm, min=eps)
-    zero = (norm < eps).squeeze(-1)
+    # torch.linalg.norm's backward divides by the norm, so at the zero vector
+    # (the Γ / G=0 row an l>0 projector Hessian needs for an Hvp) it feeds
+    # 0/0 = NaN into the SECOND derivative — harmless at first order (that row is
+    # masked below) but fatal for double-backward. Take the norm of a
+    # zero-row-substituted copy so the division is never by zero; every real
+    # direction keeps ``torch.linalg.norm(g)`` bit-for-bit (so downstream SCF
+    # trajectories are unchanged), and the zero rows are masked out anyway.
+    n2 = (g * g).sum(dim=-1, keepdim=True)
+    zero = (n2 < eps * eps).squeeze(-1)
+    g_safe = torch.where(zero.unsqueeze(-1), torch.ones_like(g), g)
+    norm = torch.linalg.norm(g_safe, dim=-1, keepdim=True)
+    unit = g / norm
     x, y, z = unit[..., 0], unit[..., 1], unit[..., 2]
     x = torch.where(zero, torch.zeros_like(x), x)
     y = torch.where(zero, torch.zeros_like(y), y)

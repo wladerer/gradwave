@@ -67,12 +67,15 @@ class RelaxParams:
     # (strain, positions, orbitals) at once via opt/joint.py — far fewer H-applies
     # but NC insulators only, and it falls back to "nested" on non-convergence or
     # an unsupported system (USPP/PAW, metal, odd electron count).
-    method: str = "nested"  # nested | joint
+    # "newton" is the exact-Hvp Steihaug trust-region Newton-CG engine
+    # (opt/newton.py); same NC-insulator contract and nested fallback as "joint".
+    method: str = "nested"  # nested | joint | newton
 
     def __post_init__(self):
-        if self.method not in ("nested", "joint"):
+        if self.method not in ("nested", "joint", "newton"):
             raise InputError(
-                f"relax.method must be 'nested' or 'joint', got {self.method!r}")
+                "relax.method must be 'nested', 'joint', or 'newton', got "
+                f"{self.method!r}")
 
 
 @dataclass(frozen=True)

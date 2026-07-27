@@ -399,13 +399,14 @@ def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object, list]:
     nested engine on an unsupported system (USPP/PAW, spin, smearing) or if the
     joint descent does not converge. The frames carry energy and forces
     (SinglePointCalculator) so the caller can write an extxyz trajectory."""
-    if inp.relax.method == "joint":
-        out = _relax_joint(inp, verbose)
+    if inp.relax.method in ("joint", "newton"):
+        out = (_relax_newton(inp, verbose) if inp.relax.method == "newton"
+               else _relax_joint(inp, verbose))
         if out is not None:
             return out
         if verbose:
-            print("  relax: joint engine unavailable or non-converged — "
-                  "falling back to nested SCF+BFGS", flush=True)
+            print(f"  relax: {inp.relax.method} engine unavailable or "
+                  "non-converged — falling back to nested SCF+BFGS", flush=True)
     return _relax_nested(inp, verbose)
 
 
@@ -618,6 +619,96 @@ def _relax_joint(inp: Input, verbose: bool = True):
         print(f"  relax: joint engine converged — E = {energy:+.8f} eV · "
               f"fmax = {fmax_final:.5f} eV/Å · {res.n_cycles} cycles / "
               f"{res.n_closures} closures · {res.h_equiv} H-applies", flush=True)
+    return relax, atoms, [frame]
+
+
+def _relax_newton(inp: Input, verbose: bool = True):
+    """Exact-Hvp Steihaug trust-region Newton-CG as a relax engine.
+
+    Same contract, guard, and nested fallback as ``_relax_joint`` (returns
+    ``None`` to fall back); the only difference is the inner optimizer
+    (``opt.newton.newton_cg_relax``) and the H-apply provenance it reports
+    (grad/Hvp/trial counts instead of L-BFGS closures). Final energy/forces/
+    stress are recomputed with one calculator SCF at the relaxed geometry so
+    the reported numbers are ASE-consistent."""
+    import numpy as np
+    from ase.calculators.singlepoint import SinglePointCalculator
+
+    from gradwave.opt.newton import newton_cg_relax
+
+    species, upfs, species_of_atom = _species_upfs(inp)
+    reason = _joint_supported(inp, upfs)
+    if reason is not None:
+        logger.info("relax method=newton not applicable: %s", reason)
+        return None
+
+    cell0 = inp.atoms.cell.array.copy()
+    pos0 = inp.atoms.get_positions().copy()
+    fix_cell = not inp.relax.cell
+    omega = float(abs(np.linalg.det(cell0)))
+    smax = inp.relax.fmax / omega
+    try:
+        res = newton_cg_relax(
+            cell0, pos0, species_of_atom, upfs, XC_REGISTRY[inp.xc](),
+            ecut=inp.ecut, kmesh=inp.kpoints.mesh, fmax=inp.relax.fmax,
+            smax=smax, max_newton=inp.relax.max_steps, fix_cell=fix_cell,
+            device=inp.device, verbose=verbose,
+        )
+    except (ValueError, RuntimeError) as exc:  # torch LinAlgError ⊂ RuntimeError
+        logger.warning("newton relax failed (%s); falling back to nested", exc)
+        return None
+    if not res.converged:
+        logger.info("newton relax did not converge (%d Newton steps); falling "
+                    "back", res.n_newton)
+        return None
+
+    atoms = inp.atoms.copy()
+    atoms.set_cell(res.cell, scale_atoms=False)
+    atoms.set_positions(res.positions)
+    atoms.calc = _build_relax_calc(inp)
+    energy = float(atoms.get_potential_energy())
+    forces = atoms.get_forces()
+    fmax_final = float(np.linalg.norm(forces, axis=1).max())
+    sp_kw = {"energy": energy, "forces": forces}
+    if inp.relax.cell:
+        sp_kw["stress"] = atoms.get_stress()
+    frame = atoms.copy()
+    frame.calc = SinglePointCalculator(frame, **sp_kw)
+    frame.info["step"] = res.n_newton
+    last = getattr(atoms.calc, "last_result", None)
+
+    relax = {
+        "converged": True,
+        "method": "newton",
+        "n_steps": res.n_cycles,
+        "n_newton": res.n_newton,
+        "n_grad": res.n_grad,
+        "n_hvp": res.n_hvp,
+        "optimizer": "steihaug-newton-cg",
+        "cell_relaxed": bool(inp.relax.cell),
+        "fmax_target_eV_ang": inp.relax.fmax,
+        "energy_eV": energy,
+        "fmax_eV_ang": fmax_final,
+        "max_displacement_ang": float(np.linalg.norm(
+            atoms.get_positions() - inp.atoms.get_positions(), axis=1).max()),
+        "species": atoms.get_chemical_symbols(),
+        "positions_ang": atoms.get_positions().tolist(),
+        "cell_ang": atoms.cell.array.tolist(),
+        "volume_ang3": float(atoms.get_volume()),
+        "h_applies": int(res.h_equiv),
+        "h_seed": int(res.h_seed),
+    }
+    if last is not None:
+        relax["scf_iter_final"] = int(getattr(last, "n_iter", 0))
+        if getattr(last, "system", None) is not None:
+            relax["nk_ibz"] = len(last.system.kweights)
+    if inp.relax.cell:
+        relax["max_stress_eV_ang3"] = float(np.abs(atoms.get_stress()).max())
+        relax["pressure_GPa"] = inp.relax.pressure
+    if verbose:
+        print(f"  relax: newton-cg engine converged — E = {energy:+.8f} eV · "
+              f"fmax = {fmax_final:.5f} eV/Å · {res.n_newton} steps · "
+              f"{res.n_hvp} Hvp · {res.h_equiv} H-applies", flush=True)
     return relax, atoms, [frame]
 
 

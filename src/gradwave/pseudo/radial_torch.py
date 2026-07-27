@@ -91,7 +91,44 @@ def _contract(l: int, q: torch.Tensor, r: torch.Tensor, gw: torch.Tensor,
     return out
 
 
+def _contract_graph(l: int, q: torch.Tensor, r: torch.Tensor,
+                    gw: torch.Tensor, deriv: bool) -> torch.Tensor:
+    """Autograd-tracked twin of ``_contract`` for the double-backward path.
+
+    ``jl_t``/``_djl_t`` are plain differentiable torch math (torch.where on
+    safe-shifted arguments, so no 1/x NaN grads leak from the masked branch),
+    so this contraction is differentiable in ``q`` to all orders torch can
+    reach. It replaces ``_contract``'s in-place slice assignment (not
+    autograd-safe) with a concatenation of per-chunk blocks, keeping the same
+    O(nq_chunk · nmesh) memory ceiling while retaining the graph. Only used
+    inside ``_SBT.backward`` when a second derivative is being built
+    (create_graph); the ordinary first-order path never touches it.
+    """
+    step = max(1, _CHUNK // max(1, r.numel()))
+    weights = gw * r if deriv else gw
+    parts = []
+    for i0 in range(0, q.numel(), step):
+        x = q[i0 : i0 + step, None] * r[None, :]
+        kern = _djl_t(l, x) if deriv else jl_t(l, x)
+        parts.append(kern @ weights)
+    return parts[0] if len(parts) == 1 else torch.cat(parts)
+
+
 class _SBT(torch.autograd.Function):
+    """Spherical Bessel transform F(q) = Σ_r gw_r j_l(q r), differentiable in q.
+
+    Double-backward-able (exact-Hvp Newton-CG needs the strain Hessian, and q =
+    |k+G|(ε) rides the strain graph). The forward stays under ``no_grad`` — the
+    O(nq·nmesh) kernel is never retained — and the vjp is the analytic
+    derivative ``grad_out · Σ gw r j_l'(qr)``. The backward is written with
+    autograd-tracked ops (``_contract_graph``) rather than ``once_differentiable``,
+    so when it runs under ``create_graph`` (an Hvp) autograd differentiates it
+    once more to give the second derivative ``Σ gw r² j_l''(qr)`` — j_l'' via
+    autograd through the closed j_l forms, no j_{l+2} table needed. When
+    ``create_graph`` is False (ordinary forces/stress) no graph is built, so the
+    first-order path keeps its flat memory profile.
+    """
+
     @staticmethod
     def forward(ctx, q, gw, r, l):
         ctx.l = l
@@ -100,11 +137,14 @@ class _SBT(torch.autograd.Function):
             return _contract(l, q, r, gw, deriv=False)
 
     @staticmethod
-    @torch.autograd.function.once_differentiable
     def backward(ctx, grad_out):
         q, gw, r = ctx.saved_tensors
-        with torch.no_grad():
-            d = _contract(ctx.l, q, r, gw, deriv=True)
+        if torch.is_grad_enabled() and q.requires_grad:
+            # second-order pass (Hvp): keep the contraction on the graph
+            d = _contract_graph(ctx.l, q, r, gw, deriv=True)
+        else:
+            with torch.no_grad():
+                d = _contract(ctx.l, q, r, gw, deriv=True)
         return grad_out * d, None, None, None
 
 
