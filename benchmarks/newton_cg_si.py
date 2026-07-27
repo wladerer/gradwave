@@ -28,11 +28,15 @@ RY = 13.605693122994
 
 
 def _build_si(size: int, disp: float, seed: int):
-    """Diamond-Si supercell (16 or 64 atoms), one snapshot randomly displaced."""
+    """Diamond-Si cell (2 primitive, or 16/64-atom supercell), one snapshot
+    randomly displaced."""
     from ase.build import bulk
 
-    n = {16: (2, 1, 1), 64: (2, 2, 2)}[size]
-    atoms = bulk("Si", "diamond", a=5.43, cubic=True) * n
+    if size == 2:
+        atoms = bulk("Si", "diamond", a=5.43)          # 2-atom primitive
+    else:
+        n = {16: (2, 1, 1), 64: (2, 2, 2)}[size]
+        atoms = bulk("Si", "diamond", a=5.43, cubic=True) * n
     cell = np.asarray(atoms.cell.array, dtype=np.float64)
     pos = atoms.get_positions().astype(np.float64)
     rng = np.random.default_rng(seed)
@@ -58,6 +62,71 @@ def _scf_energy_fmax(cell, pos, species, upf, ecut, kmesh, device):
     res = scf(system, LDA_PW92(), verbose=False)
     f = float(np.abs(hf_forces(res, xc=LDA_PW92()).cpu().numpy()).max())
     return float(res.energies.free_energy), f
+
+
+def mem_probe(size, ecut, kmesh, device, seed):
+    """Peak memory for one gradient + one Hessian-vector product on the joint
+    energy, checkpointing on vs off — the concrete deliverable-3 result
+    (checkpointing is what lets the 64-atom Hvp fit a 6 GB card)."""
+    import torch as _t
+
+    from gradwave.core.xc.lda_pw92 import LDA_PW92
+    from gradwave.dtypes import CDTYPE, RDTYPE
+    from gradwave.opt.joint import (
+        _coeffs_from_z,
+        joint_energy,
+        lowdin,
+        teter_precond,
+    )
+    from gradwave.pseudo.radial_torch import RadialTables
+    from gradwave.scf.loop import scf, setup_system
+
+    upf = _pseudo()
+    cell, pos0, _, natom = _build_si(size, 0.0, seed)
+    species = [0] * natom
+    km = (kmesh, kmesh, kmesh)
+    system = setup_system(cell=cell, positions=pos0, species_of_atom=species,
+                          upfs=[upf], ecut=ecut, kmesh=km,
+                          use_symmetry=False).to(device)
+    xc = LDA_PW92()
+    n_occ = int(round(system.n_electrons / 2))
+    res = scf(system, xc, max_iter=3, verbose=False, etol=0.0, rhotol=0.0,
+              diago_tol=1e-4)
+    coeffs0 = [lowdin(c[:n_occ].to(CDTYPE)) for c in res.coeffs]
+    precond = [teter_precond(sph.kpg2, 1.0).to(RDTYPE) for sph in system.spheres]
+    npws = [sph.npw for sph in system.spheres]
+    tabs = [RadialTables(u, device=device) for u in system.upfs]
+    occ = _t.full((len(system.spheres), n_occ), 2.0, dtype=RDTYPE, device=device)
+    a0 = np.asarray(system.grid.cell)
+    print(f"# Si-{natom} mem probe  ecut={ecut/RY:.0f} Ry  kmesh={km}  "
+          f"n_occ={n_occ}  npw~{npws[0]}", flush=True)
+
+    for ckpt in (True, False):
+        eps = _t.zeros(3, 3, dtype=RDTYPE, device=device)
+        frac = _t.tensor(pos0 @ np.linalg.inv(a0), dtype=RDTYPE, device=device,
+                         requires_grad=True)
+        zs = [_t.view_as_real((coeffs0[ik] / precond[ik][None, :].to(CDTYPE))
+              .contiguous()).clone().requires_grad_(True)
+              for ik in range(len(system.spheres))]
+        leaves = [frac, *zs]
+        if device == "cuda":
+            _t.cuda.empty_cache()
+            _t.cuda.reset_peak_memory_stats()
+        try:
+            e = joint_energy(system, xc, tabs, eps, frac,
+                             _coeffs_from_z(zs, precond, npws), occ,
+                             checkpoint=ckpt)
+            g = _t.autograd.grad(e, leaves, create_graph=True)
+            v = [_t.randn_like(t) for t in leaves]
+            _ = _t.autograd.grad(sum((gi * vi).sum() for gi, vi
+                                     in zip(g, v, strict=True)), leaves)
+            peak = (_t.cuda.max_memory_allocated() / 1e9
+                    if device == "cuda" else float("nan"))
+            print(f"  checkpoint={ckpt!s:5s}  Hvp OK   peak={peak:.2f} GB",
+                  flush=True)
+        except RuntimeError as exc:
+            print(f"  checkpoint={ckpt!s:5s}  FAILED   {str(exc)[:80]}",
+                  flush=True)
 
 
 def run(size, ecut, kmesh, device, methods, fmax, disp, seed):
@@ -136,7 +205,7 @@ def run(size, ecut, kmesh, device, methods, fmax, disp, seed):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--size", type=int, default=16, choices=[16, 64])
+    ap.add_argument("--size", type=int, default=16, choices=[2, 16, 64])
     ap.add_argument("--ecut", type=float, default=12.0, help="Ry")
     ap.add_argument("--kmesh", type=int, default=2)
     ap.add_argument("--device", default="cpu")
@@ -145,7 +214,12 @@ if __name__ == "__main__":
     ap.add_argument("--disp", type=float, default=0.08)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--threads", type=int, default=8)
+    ap.add_argument("--mem-probe", action="store_true",
+                    help="measure peak grad+Hvp memory (checkpoint on/off) and exit")
     a = ap.parse_args()
     torch.set_num_threads(a.threads)
-    run(a.size, a.ecut * RY, a.kmesh, a.device, a.methods.split(","),
-        a.fmax, a.disp, a.seed)
+    if a.mem_probe:
+        mem_probe(a.size, a.ecut * RY, a.kmesh, a.device, a.seed)
+    else:
+        run(a.size, a.ecut * RY, a.kmesh, a.device, a.methods.split(","),
+            a.fmax, a.disp, a.seed)
