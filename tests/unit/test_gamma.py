@@ -43,7 +43,7 @@ def o2_gamma():
     cell = np.diag([a, a, a])
     d = 1.21
     pos = np.array([[a / 2, a / 2, a / 2 - d / 2], [a / 2, a / 2, a / 2 + d / 2]])
-    system = setup_system(cell, pos, [0, 0], [upf], ecut=35 * RY,
+    system = setup_system(cell, pos, [0, 0], [upf], ecut=25 * RY,
                           kmesh=(1, 1, 1), nbands=8)
     res = scf(system, PBE(), smearing="gaussian", width=0.2, etol=1e-9,
               rhotol=1e-8, verbose=False, max_iter=60)

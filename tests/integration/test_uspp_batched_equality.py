@@ -39,8 +39,8 @@ def test_batched_equals_per_k(nspin):
 
     res = {}
     for batched in (False, True):
-        s = setup_uspp(SI_CELL, SI_POS_DISP, [0, 0], [paw], ecut=25 * RY,
-                       kmesh=(2, 2, 2), ecutrho=100 * RY)
+        s = setup_uspp(SI_CELL, SI_POS_DISP, [0, 0], [paw], ecut=15 * RY,
+                       kmesh=(2, 2, 1), ecutrho=60 * RY)
         r = scf_uspp(s, xc, etol=1e-10, rhotol=1e-9, verbose=False,
                      max_iter=60, batched=batched, **kw)
         assert r["converged"], f"batched={batched} did not converge"

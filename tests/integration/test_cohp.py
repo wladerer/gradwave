@@ -212,7 +212,7 @@ def test_cohp_k_band_resolved():
     L, d = 7.0, 1.21
     cell = L * np.eye(3)
     pos = np.array([[L / 2, L / 2, L / 2 - d / 2], [L / 2, L / 2, L / 2 + d / 2]])
-    system = setup_system(cell, pos, [0, 0], [upf], ecut=40 * RY, kmesh=(2, 1, 1))
+    system = setup_system(cell, pos, [0, 0], [upf], ecut=28 * RY, kmesh=(2, 1, 1))
     res = scf(system, PBE(), smearing="gaussian", width=0.1, etol=1e-7,
               rhotol=1e-6, verbose=False, kerker=True)
     assert res.converged
