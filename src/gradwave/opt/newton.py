@@ -287,8 +287,12 @@ def newton_cg_relax(
     max_newton: int = 40,
     cg_max_iter: int = 40,
     cg_tol: float = 0.1,          # relative-residual (Steihaug forcing) target
-    trust_radius: float = 0.3,
-    trust_max: float = 2.0,
+    # Trust radius on the combined (positions ⊕ orbital) block-vector norm. Kept
+    # small: the two blocks carry different units, so an over-large radius lets a
+    # step overshoot geometry into force oscillation. 0.1 / 0.3 keeps every step
+    # physical (≲0.1 Å equivalent) at the cost of hitting the boundary more often.
+    trust_radius: float = 0.1,
+    trust_max: float = 0.3,
     eta_accept: float = 0.1,      # accept step if actual/predicted ≥ η
     seed_scf_iters: int = 3,
     max_rebuilds: int = 3,

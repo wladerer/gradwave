@@ -142,7 +142,7 @@ if __name__ == "__main__":
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--methods", default="newton,joint,nested")
     ap.add_argument("--fmax", type=float, default=0.02)
-    ap.add_argument("--disp", type=float, default=0.12)
+    ap.add_argument("--disp", type=float, default=0.08)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--threads", type=int, default=8)
     a = ap.parse_args()
