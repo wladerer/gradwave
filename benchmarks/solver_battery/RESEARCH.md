@@ -45,6 +45,31 @@ Hamiltonian, so cutoffs/k-meshes only need to give a well-conditioned H.
 | `fe_fm_metal` | ferromagnet | bcc Fe, collinear nspin=2 | Stoner metal; Johnson mixing |
 | `cr_afm_metal` | antiferromagnet | 2-atom bcc Cr | opposite start moments |
 | `bi_heavy` | heavy (scalar-rel) | Bi fcc | heavy element, dense spectrum |
+| `si_insulator_m` | insulator (medium) | Si 2×2×2 supercell, 16 atoms | 25 Ry, 2×2×2 k, symmetry on |
+| `cu_metal_m` | noble metal (medium) | Cu 2×2×2 supercell, 8 atoms | 40 Ry, 2×2×2 k, nbands=96 (152 e⁻), symmetry on |
+
+The `_m` **medium** systems form a small/medium size axis (2×2×2 fcc
+supercells of the `si_insulator` / `cu_metal` primitives). Cutoffs stay at the
+small end — this is solver-relative timing, not physics — and the sizes were
+probed to fit fp64 on a 6 GB RTX 3050 (wfc blocks ~20–35 MB, npw_max ≲ 3.3k,
+nk=8); no shrink was needed. They run in the `--matrix` mode, not the committed
+round-1 table above.
+
+**Axes beyond the solver sweep** (matrix mode, `results/matrix/…`, not this
+table): **mixed precision** on/off (`--mixed`), **CPU/GPU** (`--device`), and a
+**warm-start** axis — after a converged cold SCF, every atom is nudged ~0.05 Å
+and the second SCF is run cold vs warm-started (`scf(start_from=…)` reuses the
+converged density *and* orbitals, as `calculator.py` does between ionic steps),
+recording second-SCF wall + iterations for both. Warm-start is restricted to the
+small 2-atom nspin=1 insulators (single-atom metals give a trivial translational
+perturbation; nspin=2 falls outside the reuse path).
+
+**Dropped axis — learned preconditioner:** the multi-pole Kerker filter
+(`scf/learned_precond.py`) has no committed trained artifact — it is fit
+per-system at runtime (probe → `fit_multipole` → deploy, see
+`bench_learned_precond.py`). That is training work, so per the harness's
+"runs without training or skip" rule it is **not included**; all runs use the
+production `kerker`/Teter preconditioner.
 
 **Known gap — true SOC:** spin-orbit coupling has no collinear representation;
 it lives in the spinor SCF (`scf/noncollinear.py`), which is a *separate* solver

@@ -98,17 +98,45 @@ def _upf(name):
 # System battery. Each entry: build() -> fresh System, scf kwargs, and metadata.
 # A fresh System is built per solver run so nothing leaks between solves.
 # ---------------------------------------------------------------------------
-def _fcc(a, frac, elems, ecut, kmesh, **kw):
+def _fcc(a, frac, elems, ecut, kmesh, disp=None, **kw):
     cell = a / 2.0 * FCC
     pos = np.asarray(frac, dtype=np.float64) @ cell
+    if disp is not None:  # Cartesian Å per-atom displacement (warm-start axis)
+        pos = pos + np.asarray(disp, dtype=np.float64)
     return setup_system(cell, pos, list(range(len(frac))), elems,
                         ecut=ecut, kmesh=kmesh, **kw)
 
 
-def _cubic(a, frac, species, elems, ecut, kmesh, **kw):
+def _cubic(a, frac, species, elems, ecut, kmesh, disp=None, **kw):
     cell = a * np.eye(3)
     pos = np.asarray(frac, dtype=np.float64) @ cell
+    if disp is not None:
+        pos = pos + np.asarray(disp, dtype=np.float64)
     return setup_system(cell, pos, species, elems, ecut=ecut, kmesh=kmesh, **kw)
+
+
+def _fcc_supercell(a, frac, elems_basis, ecut, kmesh, reps=(2, 2, 2),
+                   disp=None, **kw):
+    """Replicate the fcc-primitive basis (rows of a/2·FCC are the lattice
+    vectors) into a reps supercell — MEDIUM systems for the small/medium axis.
+    `elems_basis` is the per-basis-atom UPF list; every image reuses it."""
+    prim = a / 2.0 * FCC
+    base = np.asarray(frac, dtype=np.float64) @ prim
+    nx, ny, nz = reps
+    pos, elems = [], []
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                shift = i * prim[0] + j * prim[1] + k * prim[2]
+                for b, p in enumerate(base):
+                    pos.append(p + shift)
+                    elems.append(elems_basis[b])
+    pos = np.asarray(pos, dtype=np.float64)
+    if disp is not None:
+        pos = pos + np.asarray(disp, dtype=np.float64)
+    cell = np.asarray([nx * prim[0], ny * prim[1], nz * prim[2]])
+    return setup_system(cell, pos, list(range(len(pos))), elems,
+                        ecut=ecut, kmesh=kmesh, **kw)
 
 
 SYSTEMS = {
@@ -117,6 +145,11 @@ SYSTEMS = {
         cls="insulator", formula="Si2",
         build=lambda: _fcc(5.43, [[0, 0, 0], [0.25, 0.25, 0.25]],
                            [_upf("Si_ONCV_PBE-1.2.upf")] * 2, 25 * RY, (4, 4, 4)),
+        # warm_build(disp): same cell/grid, atoms nudged by `disp` (Å) — the
+        # perturbed geometry the warm-start axis reuses density+orbitals into.
+        warm_build=lambda disp: _fcc(
+            5.43, [[0, 0, 0], [0.25, 0.25, 0.25]],
+            [_upf("Si_ONCV_PBE-1.2.upf")] * 2, 25 * RY, (4, 4, 4), disp=disp),
         scf=dict(xc=LDA_PW92(), smearing="none"),
     ),
     "mgo_insulator": dict(
@@ -124,6 +157,10 @@ SYSTEMS = {
         build=lambda: _fcc(4.21, [[0, 0, 0], [0.5, 0.5, 0.5]],
                            [_upf("Mg_ONCV_PBE-1.2.upf"), _upf("O_ONCV_PBE-1.2.upf")],
                            45 * RY, (4, 4, 4)),
+        warm_build=lambda disp: _fcc(
+            4.21, [[0, 0, 0], [0.5, 0.5, 0.5]],
+            [_upf("Mg_ONCV_PBE-1.2.upf"), _upf("O_ONCV_PBE-1.2.upf")],
+            45 * RY, (4, 4, 4), disp=disp),
         scf=dict(xc=LDA_PW92(), smearing="none"),
     ),
     # --- simple / noble metals (smeared, shared Fermi level) ---
@@ -164,7 +201,35 @@ SYSTEMS = {
                            30 * RY, (6, 6, 6)),
         scf=dict(xc=LDA_PW92(), smearing="gaussian", width=0.1),
     ),
+    # --- MEDIUM systems (small/medium axis) — 2×2×2 fcc supercells, sized so
+    #     the fp64 GPU sweep fits a 6 GB RTX 3050 (probed: wfc blocks ~20-35 MB,
+    #     npw_max ≲ 3.3k, nk=8). Symmetry ON keeps the irreducible k-set small;
+    #     cutoffs stay at the small end (solver-relative timing, not physics). ---
+    "si_insulator_m": dict(
+        cls="insulator (medium)", formula="Si16",
+        build=lambda: _fcc_supercell(
+            5.43, [[0, 0, 0], [0.25, 0.25, 0.25]],
+            [_upf("Si_ONCV_PBE-1.2.upf")] * 2, 25 * RY, (2, 2, 2),
+            reps=(2, 2, 2), use_symmetry=True),
+        scf=dict(xc=LDA_PW92(), smearing="none"),
+    ),
+    "cu_metal_m": dict(
+        # Cu ONCV carries 19 valence e⁻/atom → 8 atoms = 152 e⁻ (76 occupied
+        # bands); nbands=96 leaves a ~20-band smearing buffer. ecut 40 Ry / k222
+        # keeps npw_max ≈ 2.7k so the fp64 subspace stays well under 6 GB.
+        cls="noble metal (medium)", formula="Cu8",
+        build=lambda: _fcc_supercell(
+            3.61, [[0, 0, 0]], [_upf("Cu_ONCV_PBE-1.2.upf")], 40 * RY, (2, 2, 2),
+            reps=(2, 2, 2), nbands=96, use_symmetry=True),
+        scf=dict(xc=LDA_PW92(), smearing="gaussian", width=0.1),
+    ),
 }
+
+# Systems used for the warm-start axis (positions-only perturbation → same FFT
+# grid → density+orbital reuse via scf(start_from=...)). Restricted to the small
+# 2-atom nspin=1 insulators: single-atom metals give a trivial (translational)
+# perturbation, and nspin=2 cells fall outside the calculator's warm-start path.
+WARM_SYSTEMS = ["si_insulator", "mgo_insulator"]
 
 
 def _system_stats(system):
@@ -173,11 +238,17 @@ def _system_stats(system):
                 npw_max=max(npw), n_electrons=float(sum(system.charges).item()))
 
 
-def run_system(name, spec, solvers, device="cpu"):
-    """Run every solver on one system; return the per-system result record."""
+def run_system(name, spec, solvers, device="cpu", mixed=False):
+    """Run every solver on one system; return the per-system record.
+
+    `mixed` toggles scf(mixed_precision=...) for the whole slice — the matrix
+    mode runs one (host, device, mp) slice per invocation, so every solver here
+    shares the same precision and the Davidson correctness baseline is the
+    same-precision Davidson run."""
     common = dict(etol=1e-9, rhotol=1e-8, verbose=False)
     rec = dict(system=name, cls=spec["cls"], formula=spec["formula"],
-               baseline_solver="davidson", device=device, solvers={})
+               baseline_solver="davidson", device=device, mixed_precision=mixed,
+               solvers={})
     baseline_E = None
     stats = None
     for solver in solvers:
@@ -195,7 +266,7 @@ def run_system(name, spec, solvers, device="cpu"):
             _EIGH["n"] = 0
             _sync(device)
             t0 = time.perf_counter()
-            res = scf(system, xc, eigensolver=solver, **kw)
+            res = scf(system, xc, eigensolver=solver, mixed_precision=mixed, **kw)
             _sync(device)
             wall = time.perf_counter() - t0
             eigh_t = _EIGH["t"]
@@ -394,6 +465,170 @@ def run_mixed_precision(names, solvers, meta, device="cpu"):
 
 
 # ---------------------------------------------------------------------------
+# Warm-start axis
+# ---------------------------------------------------------------------------
+# Question: how much of a second SCF does density + wavefunction reuse buy after
+# a small ionic move? For each small nspin=1 system we converge a COLD reference
+# SCF, nudge every atom by ~0.05 Å (positions-only → the FFT grid is unchanged),
+# then run the perturbed geometry twice: (a) cold and (b) warm-started via
+# scf(start_from=res0). start_from carries the reference density AND orbitals, so
+# loop.py's _seed_density/_seed_orbitals reuse both — the same mechanism
+# calculator.py rides between ionic/relaxation steps (minus the atomic-ρ
+# extrapolation, which is a further optimization on top of plain reuse). We
+# record the perturbed-SCF wall + iteration count for cold vs warm.
+# ---------------------------------------------------------------------------
+def _perturb(natoms, amp=0.05, seed=0):
+    """Deterministic per-atom Cartesian displacement whose largest single
+    component is `amp` Å (reproducible across runs and hosts)."""
+    rng = np.random.default_rng(seed)
+    d = rng.standard_normal((natoms, 3))
+    return d * (amp / np.abs(d).max())
+
+
+def _warm_seed(res0, new_system):
+    """Calculator-style extrapolated warm-start seed for a same-grid ionic move.
+
+    Mirrors calculator._warm_start's norm-conserving, same-FFT-grid branch: the
+    superposition-of-atoms part of ρ travels with the atoms to their NEW
+    positions (the sad_density delta) while the bonding remainder of the
+    converged reference density is reused, and the reference orbitals ride along
+    (QE wfc-extrapolation analogue). Plain reuse (start_from=res0) instead leaves
+    the atomic charge at the OLD positions — for a ~50 mÅ move that stale seed
+    can lose to a fresh SAD guess, which is why the extrapolated form is what
+    calculator.py actually uses between ionic steps."""
+    from gradwave.scf.guess import sad_density
+
+    prev_sys = res0.system
+    pos_new = new_system.positions
+    pos_old = prev_sys.positions.to(pos_new.device)
+    soa, ne, tabs = (prev_sys.species_of_atom, prev_sys.n_electrons,
+                     prev_sys.upfs)
+    delta = (sad_density(new_system.grid, pos_new, soa, tabs, ne)
+             - sad_density(prev_sys.grid, pos_old, soa, tabs, ne))
+    return {"system": prev_sys, "nspin": 1, "rho": res0.rho.detach() + delta,
+            "rho_spin": None, "coeffs": res0.coeffs}
+
+
+def run_warm_start(names, meta, device="cpu", mixed=False, solver="davidson"):
+    """Cold reference → perturb → {cold, warm} second SCF, per system."""
+    common = dict(etol=1e-9, rhotol=1e-8, verbose=False)
+    records = []
+    for name in names:
+        spec = SYSTEMS[name]
+        if "warm_build" not in spec:
+            print(f"  [{name}] no warm_build — skipped", flush=True)
+            continue
+        kw = dict(common)
+        kw.update(spec["scf"])
+        xc = kw.pop("xc")
+        print(f"[warm:{name}]", flush=True)
+
+        def _solve(system, start_from, _xc=xc, _kw=kw):
+            if device != "cpu":
+                system = system.to(device)
+            _sync(device)
+            t0 = time.perf_counter()
+            res = scf(system, _xc, eigensolver=solver, mixed_precision=mixed,
+                      start_from=start_from, **_kw)
+            _sync(device)
+            return res, time.perf_counter() - t0
+
+        try:
+            res0, w0 = _solve(spec["warm_build"](None), None)  # cold reference
+            natoms = int(res0.system.positions.shape[0])
+            disp = _perturb(natoms, amp=0.05, seed=0)
+            res_c, wc = _solve(spec["warm_build"](disp), None)       # cold restart
+            warm_sys = spec["warm_build"](disp)
+            if device != "cpu":
+                warm_sys = warm_sys.to(device)
+            # calculator-style density-extrapolated + orbital reuse warm start
+            res_w, ww = _solve(warm_sys, _warm_seed(res0, warm_sys))
+            de = abs(float(res_w.energies.total) - float(res_c.energies.total))
+            rec = dict(
+                system=name, cls=spec["cls"], formula=spec["formula"],
+                device=device, mixed_precision=mixed, solver=solver,
+                natoms=natoms, disp_amp_A=0.05,
+                reference=dict(scf_iters=int(res0.n_iter), wall_s=round(w0, 3),
+                               converged=bool(res0.converged),
+                               energy_eV=float(res0.energies.total)),
+                cold=dict(scf_iters=int(res_c.n_iter), wall_s=round(wc, 3),
+                          converged=bool(res_c.converged),
+                          energy_eV=float(res_c.energies.total)),
+                warm=dict(scf_iters=int(res_w.n_iter), wall_s=round(ww, 3),
+                          converged=bool(res_w.converged),
+                          energy_eV=float(res_w.energies.total)),
+                iters_saved=int(res_c.n_iter) - int(res_w.n_iter),
+                speedup=round(wc / ww, 3) if ww > 0 else None,
+                warm_cold_energy_diff_eV=de,
+            )
+            print(f"      cold iters={rec['cold']['scf_iters']} wall={wc:.1f}s | "
+                  f"warm iters={rec['warm']['scf_iters']} wall={ww:.1f}s | "
+                  f"saved={rec['iters_saved']} speedup={rec['speedup']}x | "
+                  f"ΔE(warm−cold)={de:.2e} eV", flush=True)
+        except Exception as exc:  # noqa: BLE001 - record and continue
+            rec = dict(system=name, error=f"{type(exc).__name__}: {exc}")
+            print(f"      ERROR: {rec['error']}", flush=True)
+        rec["meta"] = meta
+        records.append(rec)
+    return records
+
+
+def render_warm_table(records):
+    """Plain-text warm-start summary for the log."""
+    hdr = (f"{'System':<24} {'cold it':>7} {'warm it':>7} {'saved':>6} "
+           f"{'cold s':>8} {'warm s':>8} {'speedup':>8} {'ΔE eV':>10}")
+    lines = [hdr, "-" * len(hdr)]
+    for r in records:
+        if r.get("error"):
+            lines.append(f"{r['system']:<24} ERROR: {r['error']}")
+            continue
+        sysc = f"{r['formula']} {r['system']}"
+        spd = _fmt(r["speedup"], "{:.2f}") + "x"
+        lines.append(
+            f"{sysc:<24} {r['cold']['scf_iters']:>7d} {r['warm']['scf_iters']:>7d} "
+            f"{r['iters_saved']:>6d} {r['cold']['wall_s']:>8.1f} "
+            f"{r['warm']['wall_s']:>8.1f} {spd:>8} "
+            f"{r['warm_cold_energy_diff_eV']:>10.1e}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Matrix mode — one coarse (host, device, mp) slice per invocation
+# ---------------------------------------------------------------------------
+# Runs the full solver battery (correctness gate + timing) at a FIXED precision
+# plus the warm-start axis, writing JSON + a printed summary table into
+# results/matrix/<host>_<device>_<mp>/. Never edits RESEARCH.md — this is sweep
+# output, contrasted across slices, not the committed round-1 knowledge base.
+# The sweep fans several of these out inside one gwq job (small mp-off, small
+# mp-on, medium both, all on one --device).
+# ---------------------------------------------------------------------------
+def run_matrix(names, solvers, warm_names, meta, device, mixed, out_dir,
+               do_warm=True):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    records = []
+    for name in names:
+        print(f"[{name}]", flush=True)
+        rec = run_system(name, SYSTEMS[name], solvers, device=device, mixed=mixed)
+        rec["meta"] = meta
+        records.append(rec)
+        (out_dir / f"{name}.json").write_text(json.dumps(rec, indent=2))
+    warm_records = []
+    if do_warm and warm_names:
+        print("\n[warm-start axis]", flush=True)
+        warm_records = run_warm_start(warm_names, meta, device=device, mixed=mixed)
+        (out_dir / "warm_start.json").write_text(
+            json.dumps(dict(meta=meta, records=warm_records), indent=2))
+    (out_dir / "summary.json").write_text(json.dumps(
+        dict(meta=meta, records=records, warm_start=warm_records), indent=2))
+    print("\n" + render_table(records, meta))
+    if warm_records:
+        print("\nwarm-start axis:\n" + render_warm_table(warm_records))
+    print(f"\nwrote matrix slice ({len(records)} systems"
+          f"{', + warm-start' if warm_records else ''}) to {out_dir}/ "
+          f"(RESEARCH.md untouched)")
+
+
+# ---------------------------------------------------------------------------
 # RESEARCH.md auto-table regeneration (between markers; prose is preserved)
 # ---------------------------------------------------------------------------
 TABLE_START = "<!-- RESULTS TABLE START -->"
@@ -456,6 +691,20 @@ def main():
                     help="run the mixed-precision axis instead: each solver at "
                          "fp64 and mixed_precision=True; writes to "
                          "results/mixed_precision/ and leaves RESEARCH.md alone")
+    ap.add_argument("--matrix", action="store_true",
+                    help="run one coarse (host, device, mp) matrix slice: the "
+                         "full solver battery at a FIXED precision (--mixed) plus "
+                         "the warm-start axis, into "
+                         "results/matrix/<host>_<device>_<mp>/. RESEARCH.md "
+                         "untouched. Fan several of these out per gwq job.")
+    ap.add_argument("--mixed", choices=("on", "off"), default="off",
+                    help="matrix mode precision: 'on' runs every SCF with "
+                         "mixed_precision=True, 'off' (default) fp64.")
+    ap.add_argument("--warm-systems", nargs="*", default=None,
+                    help="matrix mode: warm-start systems (default: the small "
+                         "nspin=1 insulators). Empty list / --no-warm skips it.")
+    ap.add_argument("--no-warm", action="store_true",
+                    help="matrix mode: skip the warm-start axis.")
     ap.add_argument("--device", default="cpu", choices=("cpu", "cuda"),
                     help="device the SCF runs on. cpu (default) is unchanged; "
                          "cuda moves each System to the GPU before every solve "
@@ -471,6 +720,31 @@ def main():
                          "is False (no CUDA build / no visible GPU).")
 
     names = args.only or list(SYSTEMS)
+
+    if args.matrix:
+        mixed = args.mixed == "on"
+        mp_tag = "mp-on" if mixed else "mp-off"
+        solvers = args.solvers or available()
+        if "davidson" in solvers:  # baseline first for the correctness gate
+            solvers = ["davidson"] + [s for s in solvers if s != "davidson"]
+        warm_names = ([] if args.no_warm else
+                      (args.warm_systems if args.warm_systems is not None
+                       else [n for n in WARM_SYSTEMS if n in names]))
+        out_dir = RESULTS / "matrix" / f"{platform.node()}_{device}_{mp_tag}"
+        meta = dict(
+            timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            host=platform.node(), torch=torch.__version__, device=device,
+            gpu=(torch.cuda.get_device_name(0) if device == "cuda" else None),
+            threads=torch.get_num_threads(), solvers=solvers, systems=names,
+            warm_systems=warm_names, mode="matrix", mixed_precision=mixed,
+            E_match_tol_eV=E_MATCH_TOL, mp_crossover=MP_CROSSOVER)
+        print(f"matrix slice: {len(names)} systems x {len(solvers)} solvers "
+              f"({', '.join(solvers)}) [{mp_tag}] on {meta['host']} "
+              f"[device={device}, {meta['threads']} threads, torch {meta['torch']}]"
+              f" -> {out_dir}/")
+        run_matrix(names, solvers, warm_names, meta, device, mixed, out_dir,
+                   do_warm=not args.no_warm)
+        return
 
     if args.mixed_precision:
         solvers = _mp_solvers(args.solvers)
