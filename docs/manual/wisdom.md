@@ -242,6 +242,17 @@ defect, which the [Performance](performance.md) page works through in full.
   boundary (fcc Ni), where default damping silently collapses the moment. Gate FM
   metals on the energy tail (`rhotol` ~1e-5), since the density residual floors at
   occupation noise.
+- The PAW mixing default mirror-inverts the norm-conserving one, johnson for
+  nspin=1 and pulay for nspin=2, because the composite (density, becsum) vector
+  carries the on-site augmentation-charge mode whose response stays stiff even in
+  a gapped insulator, so Kerker-preconditioned johnson cuts iteration counts across
+  non-magnetic PAW insulators and metals alike where the norm-conserving nspin=1
+  johnson is only iteration-identical to pulay (Si 18 to 12, Cu 19 to 13, Pt 21 to
+  12, 8-atom Si 20 to 13, converged free energy bit-identical). Keep nspin=2 PAW on
+  pulay, because johnson wins near the Stoner boundary (fcc Ni 27 to 18) but on a
+  robust ferromagnet it discards the becsum step-damping that pulay leans on and
+  blows up (bcc Fe 29 to 93 at the same moment and energy), so pulay is the safe
+  magnetic default.
 - Do not expect the mixer to select the physical branch. The nonmagnetic state is a
   genuine stationary point tens of meV away, and every code can land on it. Warm-start
   chains across scan points are the practical defense, plus an explicit moment gate as a

@@ -590,6 +590,26 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
                 energies=energies)
 
 
+def _resolve_uspp_mixing_scheme(mixing_scheme, nspin):
+    """PAW/USPP mixing-scheme default. None → johnson for nspin==1, pulay for
+    nspin==2; an explicit scheme always wins.
+
+    The composite (density, becsum) mixing vector carries the on-site
+    augmentation-charge mode, whose response is stiff even in a gapped
+    insulator, so Kerker-preconditioned Johnson beats plain Pulay across
+    non-magnetic PAW insulators AND metals (measured, same fixed point:
+    Si 18→12, Cu 19→13, Pt 21→12, 8-atom Si 20→13). This is the mirror image
+    of the norm-conserving default (johnson iff nspin==2): NC nspin==1 johnson
+    is iteration-identical to pulay because there is no augmentation mode to
+    fix. nspin==2 PAW stays on pulay: johnson swings from a win near the Stoner
+    boundary (fcc Ni 27→18) to a large loss on a robust ferromagnet (bcc Fe
+    29→93) once it discards the becsum step-damping crutch pulay leans on, so
+    pulay is the safe magnetic default."""
+    if mixing_scheme is not None:
+        return mixing_scheme
+    return "pulay" if nspin == 2 else "johnson"
+
+
 def _build_mixer(scheme, g2_full, *, alpha, history, kerker, kerker_mask,
                  step_scale, metric_w, w0, adapt_ids):
     """Construct the charge mixer for the requested scheme over the composite
@@ -732,7 +752,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
              diago_tol=1e-9, mixing_alpha=0.7, mixing_history=None,
              trust_factor=20.0, batched=True, hubbard=None, start_from=None,
              criterion="drho", rho_safety=1e-2, adapt_step=False,
-             mixing_scheme="pulay", mixing_kerker=None, mixing_metric="plain",
+             mixing_scheme=None, mixing_kerker=None, mixing_metric="plain",
              spin_precond=False, mixed_precision=False, precond="kerker",
              opts=None, verbose=True):
     """USPP/PAW SCF. nspin=2 takes a SpinXC functional and start_mag (list,
@@ -766,11 +786,15 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     |dρ| 2e-3 where adaptive stalls at 2e-2 with the ρ-block floored).
     Use it as a stabilizer for exploratory runs at unknown damping; for
     production FM metals keep hand-set mixing_alpha (0.3 for Ni).
-    mixing_scheme: "pulay" (default) or "broyden" — limited-memory
+    mixing_scheme: None (default) resolves per nspin — "johnson" for
+    nspin==1 (Kerker-preconditioned Broyden; the augmentation-charge mode
+    in the composite (density, becsum) vector makes it beat pulay across
+    PAW insulators and metals alike), "pulay" for nspin==2 (johnson is a
+    coin flip on magnetic PAW once it drops the becsum step-damping crutch).
+    Override with "pulay", "broyden", or "johnson"; broyden is limited-memory
     Broyden-II, whose sequential secant updates keep directional gain
     estimates that Pulay's residual-span extrapolation loses (the QE
-    default scheme; candidate replacement for hand-set damping on FM
-    metals).
+    default scheme; candidate for hand-set damping on FM metals).
     spin_precond: Stoner preconditioner on the magnetization channel
     (smeared nspin=2 only; scf/spin_precond.py) — the physics-informed
     treatment of the Stoner-expansive mode, applied to residuals before
@@ -795,7 +819,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
             "rhotol": 1e-7, "diago_tol": 1e-9, "mixing_alpha": 0.7,
             "mixing_history": None, "trust_factor": 20.0, "batched": True,
             "criterion": "drho", "rho_safety": 1e-2, "adapt_step": False,
-            "mixing_scheme": "pulay", "mixing_kerker": None,
+            "mixing_scheme": None, "mixing_kerker": None,
             "mixing_metric": "plain", "spin_precond": False,
             "mixed_precision": False, "precond": "kerker", "verbose": True,
         }
@@ -830,6 +854,7 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         adapt_step, spin_precond = mx.adapt_step, mx.spin_precond
         mixing_w0, bec_step_scale = mx.w0, mx.bec_step_scale
         precond = mx.precond
+    mixing_scheme = _resolve_uspp_mixing_scheme(mixing_scheme, nspin)
     if criterion not in ("drho", "energy"):
         raise ValueError("criterion must be 'drho' or 'energy'")
     if mixing_metric not in ("plain", "coulomb"):
