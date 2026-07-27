@@ -15,7 +15,11 @@ from gradwave import constants
 from gradwave.scf import local_tf
 from gradwave.scf.loop import _resolve_mixing_scheme
 from gradwave.scf.mixing import BroydenMixer, JohnsonMixer, PulayMixer
-from gradwave.scf.uspp_loop import _build_mixer, _resolve_start_mag
+from gradwave.scf.uspp_loop import (
+    _build_mixer,
+    _resolve_start_mag,
+    _resolve_uspp_mixing_scheme,
+)
 
 # ---- magnetic-aware mixing-scheme default --------------------------------
 
@@ -29,6 +33,20 @@ def test_mixing_scheme_explicit_wins():
     # an explicit scheme is never overridden by the magnetic-aware default
     assert _resolve_mixing_scheme("pulay", nspin=2) == "pulay"
     assert _resolve_mixing_scheme("broyden", nspin=1) == "broyden"
+
+
+def test_uspp_mixing_scheme_default_is_johnson_for_nspin1():
+    # PAW/USPP mirror-inverts the NC default: the composite (density, becsum)
+    # augmentation mode makes johnson beat pulay on non-magnetic PAW
+    # (insulators AND metals), so nspin==1 defaults to johnson; nspin==2 stays
+    # on pulay because johnson is a coin flip on magnetic PAW (bcc Fe 29→93).
+    assert _resolve_uspp_mixing_scheme(None, nspin=1) == "johnson"
+    assert _resolve_uspp_mixing_scheme(None, nspin=2) == "pulay"
+
+
+def test_uspp_mixing_scheme_explicit_wins():
+    assert _resolve_uspp_mixing_scheme("pulay", nspin=1) == "pulay"
+    assert _resolve_uspp_mixing_scheme("broyden", nspin=2) == "broyden"
 
 # ---- fix 10: local_tf uses the shared Bohr radius ------------------------
 
