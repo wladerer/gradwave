@@ -298,12 +298,21 @@ def davidson_batched(
         # einsum("kig,kjg->kij", v.conj(), hv) without materializing a
         # conj copy of the whole subspace — that transient peaks right
         # before restart and was the A100 large-nk memory spike
+        # Rayleigh-Ritz subspace reduction ALWAYS in fp64 (issue #136): the
+        # (nk, m, m) matrix and its eigh are tiny, but an fp32 eigh of a
+        # supercell insulator block — whose orbital condition number can outrun
+        # the ~1e7 fp32 budget (Higham & Mary 2022) — yields inaccurate Ritz
+        # rotations in the complex64 draft. Upcast only the small matrix and the
+        # eigensolve; the long v/hv basis and the Ritz combination stay
+        # complex64. A no-op in the fp64 polish, mirroring the generalized
+        # reduction in scf/uspp_batch.py.
         s = torch.matmul(v.conj(), hv.mT)
-        s = 0.5 * (s + s.conj().transpose(-1, -2))
+        s = (0.5 * (s + s.conj().transpose(-1, -2))).to(torch.complex128)
         w, u = _eigh_subspace(s)
-        eig = w[:, :nb].real
-        x = torch.einsum("kja,kjg->kag", u[:, :, :nb], v)
-        hx = torch.einsum("kja,kjg->kag", u[:, :, :nb], hv)
+        u = u[:, :, :nb].to(v.dtype)  # rotation back to the block dtype
+        eig = w[:, :nb].real.to(rdtype)
+        x = torch.einsum("kja,kjg->kag", u, v)
+        hx = torch.einsum("kja,kjg->kag", u, hv)
 
         r = hx - eig[..., None] * x
         rn = torch.linalg.norm(r, dim=-1).real
