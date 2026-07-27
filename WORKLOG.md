@@ -67,5 +67,21 @@ Submit via gwq run --group bench, write to /tmp/*.log, poll gwq status.
 - De-risk before unconditional flip: nspin=2 PAW must not regress. Submitting
     scf_cycle_uspp_confirm.py: fe_fm_paw + ni_fm_paw (nspin=2) + si_paw_m (8-atom
     medium insulator), pulay vs johnson each. -> /tmp/scf_uspp_confirm.json.
+- CONFIRM RESULTS (job 51):
+    si_paw_m (8-atom insulator, nspin=1): pulay 20 -> johnson 13 (-35%), E/at
+      identical. The nspin=1 win HOLDS + strengthens at medium size.
+    fe_fm_paw (nspin=2): pulay 29 -> johnson 93 (+221% LOSS!), same m=+2.0, same E.
+    ni_fm_paw (nspin=2): pulay 27 -> johnson 18 (-33% win), same |m|=0.594, same E.
+    => nspin=2 PAW: johnson is a COIN FLIP (Fe blows up, Ni wins). Matches wisdom
+      "johnson advantage concentrates near the Stoner boundary (fcc Ni)"; robust
+      ferromagnet Fe leans on the 0.4 becsum step-damping crutch johnson discards.
+- DECISION: gate the PAW default nspin-aware, MIRROR-INVERSE of NC:
+    johnson for nspin==1 (robust win: si/si_m/cu/pt, insulator+metal, -32..-43%,
+    zero regression), pulay for nspin==2 (untouched status quo, safe).
+- IMPLEMENTED: _resolve_uspp_mixing_scheme in uspp_loop.py; scf_uspp default
+    mixing_scheme None->resolved; options.py MixerOptions.scheme None; 2 unit
+    tests in test_review_scf.py (pass); wisdom.md entry. Local unit tests green.
+- Learned-precond verdict: honest negative, no deploy (ties Kerker on 4 real
+    cells, loses on Cu3Al). adaptive_diago_tol: no lever (confirmed).
 </content>
 </invoke>

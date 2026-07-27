@@ -16,7 +16,8 @@ from dataclasses import dataclass, field, fields
 
 @dataclass(frozen=True)
 class MixerOptions:
-    scheme: str = "pulay"  # pulay | broyden | johnson
+    scheme: str | None = None  # None → per-nspin default (johnson nspin=1,
+    # pulay nspin=2, resolved in scf_uspp); or pulay | broyden | johnson
     alpha: float = 0.7
     history: int | None = None  # None → per-scheme default (johnson 12, else 8)
     kerker: bool | None = None  # None → on for smeared systems
