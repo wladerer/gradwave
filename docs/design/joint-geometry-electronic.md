@@ -244,9 +244,12 @@ is harmless at first order and NaN at second):
   first-order forces/stress path keeps its flat memory profile.
 - `postscf/_strain.py::ewald_strained` and `core/ylm.py::ylm_all` both took
   `torch.linalg.norm` of a vector that is zero at a self-pair / at the Γ,G=0 row;
-  norm's backward divides by that zero. Replaced with `sqrt` of a `clamp_min`ed
-  sum-of-squares — bit-identical values and first-order gradients, finite second
-  derivative. (18 shared-path regression tests unchanged.)
+  norm's backward divides by that zero, injecting 0/0 = NaN into the second
+  derivative (the row is masked, so first order is fine). Fixed by taking the
+  norm of a zero-row-substituted copy, so every real direction keeps
+  `torch.linalg.norm` **bit-for-bit** (SCF trajectories, including a
+  delicately-converging fixed-moment magnet, are unchanged) while the masked zero
+  rows no longer divide by zero.
 
 **Band-chunk checkpointing (step 3).** `joint_energy`'s density build wraps each
 band chunk's FFT sandwich (`g_to_r` → |ψ|²) in `torch.utils.checkpoint`
