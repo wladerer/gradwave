@@ -30,6 +30,17 @@ Submit via gwq run --group bench, write to /tmp/*.log, poll gwq status.
 
 ## Log
 - (setup) worktree perf/scf-cycle-study from origin/main @0c367dd. Read all owned
-  files + infra. Wrote drivers. Next: push, clone on asus, launch sweeps.
+  files + infra. Wrote drivers. Pushed. Cloned to asus /tmp/gw-scfcycles (from
+  github; asus canonical lacked branch). Drivers import OK.
+- GOTCHA: `gwq run -- bash -c "cmd > log"` breaks — gwq space-joins argv, so
+  `bash -c bash /tmp/x.sh > log` runs `bash -c bash` (nothing) and log is 0 bytes.
+  FIX: put `exec > /tmp/x.log 2>&1` inside each launcher, submit `bash /tmp/x.sh`.
+- Launched jobs 46 (nc_small: scheme+alpha+q0+precond+diago), 47 (uspp), 48
+  (learned) on asus default group.
+- EARLY DATA (streaming):
+  - si_insulator (NC): baseline=pulay/h8=pulay/h12 = 9 iters, E/at bit-identical.
+  - si_paw (USPP insulator): pulay=18, broyden=21 (johnson pending).
+- Next: collect metals (johnson-vs-pulay is the PR crux), learned verdicts,
+  then medium confirm on the winner.
 </content>
 </invoke>
