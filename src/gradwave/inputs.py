@@ -109,11 +109,40 @@ class PhononParams:
 
 
 @dataclass(frozen=True)
+class CohpParams:
+    """Crystal Orbital Hamilton Population, computed alongside the PDOS.
+
+    Mirrors ``postscf.cohp.cohp``: ``pairs`` selects 0-based atom index tuples
+    (``None`` → every pair within ``rcut`` Å); ``rcut`` is the neighbour cutoff,
+    ``width``/``npoints`` the energy-grid broadening. Off by default; enable it
+    under ``projections.cohp``."""
+
+    enabled: bool = False
+    pairs: tuple | None = None   # ((i, j), ...) 0-based; None → all within rcut
+    rcut: float = 3.0            # Å neighbour cutoff for the default pair list
+    width: float = 0.1           # eV gaussian broadening
+    npoints: int = 800
+
+    def __post_init__(self):
+        if self.pairs is not None:
+            try:
+                pairs = tuple((int(i), int(j)) for i, j in self.pairs)
+            except (TypeError, ValueError) as exc:
+                raise InputError(
+                    "projections.cohp.pairs must be a list of [i, j] atom "
+                    "index pairs") from exc
+            object.__setattr__(self, "pairs", pairs)
+        if self.rcut <= 0:
+            raise InputError("projections.cohp.rcut must be positive")
+
+
+@dataclass(frozen=True)
 class ProjectionsParams:
     enabled: bool = False
     group_by: str = "l"      # atom | l | lm | total (j | jmj for FR)
     width: float = 0.1       # gaussian broadening [eV]
     npoints: int = 800
+    cohp: CohpParams = field(default_factory=CohpParams)
 
 
 @dataclass(frozen=True)
@@ -206,13 +235,44 @@ class MagnetismParams:
 
 
 @dataclass(frozen=True)
+class HybridParams:
+    """Self-consistent PBE0-form / screened hybrid exchange (norm-conserving,
+    nspin=1). Enabled by ``xc: pbe0`` (full PBE0, mode ``full``) or ``xc: hse``
+    (screened, mode ``short_range``); the ``hybrid`` block overrides the mixing
+    fraction ``alpha`` and the range-separation length ``omega`` [Å⁻¹]. Dispatches
+    through ``postscf.hybrid.hybrid_scf``. ``name`` records the requested
+    functional for the report; ``base`` is the semilocal functional the exact
+    exchange is mixed into (PBE)."""
+
+    enabled: bool = False
+    name: str = "pbe0"         # requested hybrid label (display only)
+    mode: str = "full"         # full (PBE0) | short_range (HSE) | long_range
+    alpha: float = 0.25        # exact-exchange mixing fraction
+    omega: float = 0.2         # range-separation length [Å⁻¹] (screened modes)
+    base: str = "pbe"          # semilocal base functional
+
+    def __post_init__(self):
+        if self.mode not in ("full", "short_range", "long_range"):
+            raise InputError(
+                f"hybrid.mode must be full | short_range | long_range, "
+                f"got {self.mode!r}")
+        if not 0.0 <= self.alpha <= 1.0:
+            raise InputError("hybrid.alpha must be in [0, 1]")
+        if self.mode != "full" and self.omega <= 0.0:
+            raise InputError(
+                "hybrid.omega (range-separation length [Å⁻¹]) must be positive "
+                "for a screened hybrid")
+
+
+@dataclass(frozen=True)
 class Input:
     atoms: Atoms
     pseudo_dir: Path
     pseudo_map: dict[str, str]
     ecut: float
     ecutrho: float | None = None  # USPP/PAW density cutoff; None → 4×ecut
-    xc: str = "pbe"  # lda | pbe
+    xc: str = "pbe"  # lda | pbe | r2scan (semilocal base for a hybrid xc)
+    hybrid: HybridParams = field(default_factory=HybridParams)  # pbe0 | hse
     kpoints: KPointsParams = field(default_factory=KPointsParams)
     smearing: SmearingParams = field(default_factory=SmearingParams)
     nbands: int | None = None
@@ -222,6 +282,7 @@ class Input:
     noncollinear: bool = False  # spinor (non-collinear) SCF for task: scf
     nonmagnetic: bool = False  # with noncollinear: pin m⃗ ≡ 0 (spin-orbit only, keeps symmetry)
     start_mag: dict | None = None  # element -> initial moment fraction (nspin=2/NC seed)
+    tot_magnetization: float | None = None  # fix M=N↑−N↓ (nspin=2, no smearing)
     task: str = "scf"  # scf | relax | bands | magnetism | eos | elastic | phonons
     relax: RelaxParams = field(default_factory=RelaxParams)
     bands: BandsParams = field(default_factory=BandsParams)
@@ -380,9 +441,9 @@ def _load_structure(spec, base: Path) -> Atoms:
 # Every top-level key the schema understands; anything else is a typo. Kept
 # beside the Input fields it feeds so the two do not drift.
 _ALLOWED_TOP = {
-    "structure", "pseudopotentials", "ecut", "ecutrho", "xc", "kpoints",
+    "structure", "pseudopotentials", "ecut", "ecutrho", "xc", "hybrid", "kpoints",
     "smearing", "nbands", "symmetry", "nspin", "noncollinear", "nonmagnetic",
-    "start_mag",
+    "start_mag", "tot_magnetization",
     "scf", "task", "relax", "bands", "magnetism", "eos", "elastic", "phonons",
     "projections", "dispersion", "device",
     "verbose", "output", "error_estimate", "restart",
@@ -464,18 +525,38 @@ def _validate_mixing(mix_raw: dict) -> None:
         mix_raw["kerker"] = _normalize_kerker(mix_raw["kerker"])
 
 
+def _build_cohp(cohp_raw) -> CohpParams:
+    """Parse the `projections.cohp` sub-block. `true`/`false` is the enabled
+    shorthand; a mapping selects the atom pairs, cutoff and broadening."""
+    if isinstance(cohp_raw, bool):
+        return CohpParams(enabled=cohp_raw)
+    _check_keys("projections.cohp", cohp_raw,
+                {"enabled", "pairs", "rcut", "width", "npoints"})
+    # pairs is passed through raw; CohpParams.__post_init__ coerces and validates
+    # it (so a malformed pair reports the InputError, not a bare TypeError here).
+    return CohpParams(
+        enabled=bool(cohp_raw.get("enabled", True)),
+        pairs=cohp_raw.get("pairs"),
+        rcut=float(cohp_raw.get("rcut", 3.0)),
+        width=float(cohp_raw.get("width", 0.1)),
+        npoints=int(cohp_raw.get("npoints", 800)),
+    )
+
+
 def _build_projections(proj_raw) -> ProjectionsParams:
     """Parse the `projections` block. `true`/`false` is the enabled shorthand;
-    a mapping selects the grouping and broadening."""
+    a mapping selects the grouping and broadening, plus an optional `cohp`
+    sub-block computed alongside the PDOS."""
     if isinstance(proj_raw, bool):
         return ProjectionsParams(enabled=proj_raw)
     _check_keys("projections", proj_raw,
-                {"enabled", "group_by", "width", "npoints"})
+                {"enabled", "group_by", "width", "npoints", "cohp"})
     return ProjectionsParams(
         enabled=bool(proj_raw.get("enabled", True)),
         group_by=str(proj_raw.get("group_by", "l")),
         width=float(proj_raw.get("width", 0.1)),
         npoints=int(proj_raw.get("npoints", 800)),
+        cohp=_build_cohp(proj_raw.get("cohp", False)),
     )
 
 
@@ -499,6 +580,40 @@ def _build_dispersion(disp_raw) -> DispersionParams:
         cn_cutoff=float(disp_raw.get("cn_cutoff", 10.6)),
         s6=_optf("s6"), s8=_optf("s8"), a1=_optf("a1"), a2=_optf("a2"),
         charge=float(disp_raw.get("charge", 0.0)),
+    )
+
+
+# xc: pbe0 / hse select a hybrid; the value is (mode, default omega). The
+# semilocal base is always PBE (the hybrid machinery scales PBE exchange).
+_HYBRID_PRESETS = {
+    "pbe0": ("full", None),
+    "hse": ("short_range", 0.2),
+}
+
+
+def _resolve_xc(raw) -> tuple[str, HybridParams]:
+    """Resolve (semilocal base xc, HybridParams) from the raw `xc` value and an
+    optional `hybrid` override block. A plain functional (lda|pbe|r2scan) returns
+    a disabled HybridParams and rejects a stray `hybrid` block; a hybrid label
+    (pbe0|hse) sets the base to PBE and folds the preset with any overrides."""
+    xc = str(raw.get("xc", "pbe")).lower()
+    hyb_raw = raw.get("hybrid", {})
+    if xc not in _HYBRID_PRESETS:
+        if xc not in ("lda", "pbe", "r2scan"):
+            raise InputError(
+                f"unknown xc {xc!r} (lda | pbe | r2scan | pbe0 | hse)")
+        if hyb_raw:
+            raise InputError(
+                "a hybrid block needs a hybrid functional (xc: pbe0 or hse)")
+        return xc, HybridParams()
+    mode, omega_def = _HYBRID_PRESETS[xc]
+    _check_keys("hybrid", hyb_raw, {"alpha", "omega", "mode"})
+    return "pbe", HybridParams(
+        enabled=True, name=xc,
+        mode=str(hyb_raw.get("mode", mode)),
+        alpha=float(hyb_raw.get("alpha", 0.25)),
+        omega=float(hyb_raw.get("omega", omega_def if omega_def is not None else 0.2)),
+        base="pbe",
     )
 
 
@@ -527,9 +642,7 @@ def _load_input(path: Path) -> Input:
     diago = scf_raw.pop("diago", {})
     _check_keys("scf.diago", diago, {"tol"})
 
-    xc = str(raw.get("xc", "pbe")).lower()
-    if xc not in ("lda", "pbe", "r2scan"):
-        raise InputError(f"unknown xc {xc!r} (lda | pbe | r2scan)")
+    xc, hybrid = _resolve_xc(raw)
     task = raw.get("task", "scf")
     if task not in ("scf", "relax", "bands", "magnetism", "eos", "elastic",
                     "phonons"):
@@ -541,6 +654,24 @@ def _load_input(path: Path) -> Input:
         raise InputError(f"nspin must be 1 or 2, got {nspin}")
 
     noncollinear, nonmagnetic, symmetry = _resolve_symmetry(raw, task)
+
+    # a hybrid SCF is norm-conserving and spin-unpolarized (the Fock hook builds
+    # on PBE exchange, nspin=1); reject the combinations the driver cannot run
+    # here, where the message points at the fix rather than deep in the SCF.
+    if hybrid.enabled and (nspin != 1 or noncollinear):
+        raise InputError(
+            f"hybrid functionals (xc: {hybrid.name}) are spin-unpolarized "
+            f"(nspin=1, collinear) only")
+
+    # fixed spin moment: an integer-occupation pin, so only a collinear nspin=2
+    # run without smearing consumes it (the calculator/SCF requirement).
+    tot_mag = raw.get("tot_magnetization")
+    if tot_mag is not None:
+        tot_mag = float(tot_mag)
+        if nspin != 2:
+            raise InputError(
+                "tot_magnetization (fixed spin moment M=N↑−N↓) applies only to "
+                "a collinear spin run (nspin: 2)")
 
     mesh = tuple(kp.get("mesh", (1, 1, 1)))
     if len(mesh) != 3:
@@ -568,6 +699,7 @@ def _load_input(path: Path) -> Input:
         ecut=float(raw["ecut"]),
         ecutrho=None if ecutrho is None else float(ecutrho),
         xc=xc,
+        hybrid=hybrid,
         kpoints=KPointsParams(
             mesh=mesh, shift=tuple(kp.get("shift", (0, 0, 0)))
         ),
@@ -578,6 +710,7 @@ def _load_input(path: Path) -> Input:
         noncollinear=noncollinear,
         nonmagnetic=nonmagnetic,
         start_mag=raw.get("start_mag"),
+        tot_magnetization=tot_mag,
         scf=SCFParams(
             max_iter=int(scf_raw.get("max_iter", 100)),
             etol=float(scf_raw.get("etol", 1e-8)),

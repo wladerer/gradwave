@@ -102,6 +102,11 @@ def build_system(inp: Input):
         )
     from gradwave.scf.loop import setup_system
 
+    # a hybrid's multi-k Fock sum runs over the WHOLE BZ (q = k−k′), so a
+    # symmetry-folded or time-reversal-reduced mesh is an invalid quadrature —
+    # force the full BZ (at Γ this is a no-op). Otherwise: a magnetic spinor
+    # breaks k ≡ −k (TR flips m⃗); a nonmagnetic spinor (SOC only) keeps Kramers.
+    hybrid = inp.hybrid.enabled
     return setup_system(
         cell=inp.atoms.cell.array,
         positions=inp.atoms.get_positions(),
@@ -111,10 +116,9 @@ def build_system(inp: Input):
         kmesh=inp.kpoints.mesh,
         kshift=inp.kpoints.shift,
         nbands=inp.nbands,
-        use_symmetry=inp.symmetry,
-        # a magnetic spinor breaks k ≡ −k (TR flips m⃗); a nonmagnetic spinor
-        # (SOC only) keeps Kramers, so TR reduction stays valid there
-        time_reversal=not (inp.noncollinear and not inp.nonmagnetic),
+        use_symmetry=inp.symmetry and not hybrid,
+        time_reversal=(not hybrid
+                       and not (inp.noncollinear and not inp.nonmagnetic)),
     )
 
 
@@ -138,6 +142,8 @@ def run_scf(inp: Input, system=None, verbose: bool = True, start_from=None):
     system = system or build_system(inp)
     if inp.device != "cpu":
         system = system.to(inp.device)
+    if inp.hybrid.enabled:
+        return _run_scf_hybrid(inp, system, verbose, start_from, uspp)
     if inp.noncollinear:
         return _run_scf_noncollinear(inp, system, verbose)
     if inp.nspin == 2:
@@ -160,6 +166,10 @@ def run_scf(inp: Input, system=None, verbose: bool = True, start_from=None):
         mixing_alpha=inp.scf.mixing.alpha,
         diago_tol=inp.scf.diago_tol, verbose=verbose,
     )
+    if inp.tot_magnetization is not None and not uspp:
+        # fixed spin moment: a collinear nspin=2, no-smearing pin (see
+        # scf/loop.py:_check_scf_args). The USPP path has no such argument.
+        common["tot_magnetization"] = inp.tot_magnetization
     if uspp:
         from gradwave.scf.uspp import scf_uspp
 
@@ -214,6 +224,39 @@ def _run_scf_noncollinear(inp: Input, system, verbose: bool):
     )
 
 
+def _run_scf_hybrid(inp: Input, system, verbose: bool, start_from, uspp: bool):
+    """Self-consistent PBE0-form / screened hybrid SCF (xc: pbe0 | hse).
+
+    Dispatches to ``postscf.hybrid.hybrid_scf``, which scales the semilocal PBE
+    exchange by (1−α) and adds α·E_x^Fock through the SCF ``fock`` hook (the
+    multi-k build, full BZ). Norm-conserving, nspin=1 (the input layer already
+    rejected the other combinations); the system was built full-BZ in
+    ``build_system``. Returns the same SCFResult as a plain NC run."""
+    if uspp:
+        raise NotImplementedError(
+            "hybrid functionals need norm-conserving pseudopotentials "
+            "(the Fock hook builds on the norm-conserving exchange path)")
+    from gradwave.postscf.hybrid import hybrid_scf
+
+    if start_from is None and inp.restart is not None:
+        from gradwave.checkpoint import as_start_from, load_checkpoint
+
+        start_from = as_start_from(load_checkpoint(inp.restart))
+
+    hy = inp.hybrid
+    kerker = inp.scf.mixing.kerker
+    kerker = None if kerker == "auto" else bool(kerker)
+    omega = hy.omega if hy.mode != "full" else None
+    return hybrid_scf(
+        system, alpha=hy.alpha, mode=hy.mode, omega=omega,
+        smearing=inp.smearing.type, width=inp.smearing.width,
+        max_iter=inp.scf.max_iter, etol=inp.scf.etol, rhotol=inp.scf.rhotol,
+        mixing_alpha=inp.scf.mixing.alpha,
+        mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
+        kerker=kerker, diago_tol=inp.scf.diago_tol,
+        start_from=start_from, verbose=verbose)
+
+
 def _get(res, key, default=None):
     """Attribute read with a default: every SCF driver returns a result
     dataclass, but the field sets differ (e.g. NCResult has no nspin)."""
@@ -234,6 +277,12 @@ def _gap(eigenvalues, occupations, nspin) -> float | None:
     homo = e[f > _OCC_TOL].max()
     lumo = e[f <= _OCC_TOL].min()
     return float(lumo - homo) if lumo > homo else 0.0
+
+
+def _xc_label(inp: Input) -> str:
+    """The functional name for the report: the hybrid label (pbe0/hse) when a
+    hybrid is enabled, else the plain semilocal xc."""
+    return inp.hybrid.name if inp.hybrid.enabled else inp.xc
 
 
 def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
@@ -276,6 +325,7 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
         "gap_eV": None if occ is None else _gap(eig.tolist(), occ.tolist(), nspin),
         "energies_eV": {
             **energies_eV_dict(e),
+            "fock": float(getattr(e, "fock", 0.0)),
             "e0": float(0.5 * (e.total + e.free_energy)),
         },
         "free_energy_per_atom_eV": float(e.free_energy) / len(system.positions),
@@ -318,7 +368,7 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
         "parameters": {
             "formalism": "noncollinear" if is_ncmag else (
                 "uspp/paw" if uspp else "nc"),
-            "xc": inp.xc,
+            "xc": _xc_label(inp),
             "ecut_eV": float(inp.ecut),
             "ecutrho_eV": float(inp.ecutrho) if (uspp and inp.ecutrho) else None,
             "kmesh": list(inp.kpoints.mesh),
@@ -375,6 +425,7 @@ def _build_relax_calc(inp: Input):
         nbands=inp.nbands,
         use_symmetry=inp.symmetry,
         nspin=inp.nspin,
+        tot_magnetization=inp.tot_magnetization,
         max_iter=inp.scf.max_iter,
         etol=inp.scf.etol,
         rhotol=inp.scf.rhotol,
@@ -899,8 +950,56 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict:
     return block
 
 
+def _bands_reference(res) -> float:
+    """Band-plot energy zero: the Fermi level for a metal (any partially filled
+    state), else the valence-band maximum. Mirrors postscf.bands.band_structure
+    so the USPP path reports the same reference the NC path does."""
+    import numpy as np
+
+    occ = np.asarray(_get(res, "occupations"), dtype=float)
+    eig = np.asarray(_get(res, "eigenvalues"), dtype=float)
+    nspin = int(_get(res, "nspin", 1) or 1)
+    g = 2.0 if nspin == 1 else 1.0
+    is_metal = bool(((occ > _OCC_TOL) & (occ < g - _OCC_TOL)).any())
+    if is_metal:
+        return float(_get(res, "fermi"))
+    return float(eig[occ > _OCC_TOL].max())
+
+
+def _bands_uspp_block(inp: Input, res, verbose: bool) -> dict:
+    """USPP/PAW band structure along an ASE k-path via postscf.uspp_bands. The NC
+    ``bands_along_ase_path`` builds the path and returns a BandStructure; the
+    USPP solver instead takes an explicit k-list and returns bare eigenvalues, so
+    the ASE path (k-points, axis, special-point labels) and the energy reference
+    are assembled here to match the NC bands block shape."""
+    import numpy as np
+
+    from gradwave.postscf.uspp_bands import bands_uspp
+
+    bp = inp.atoms.cell.bandpath(path=inp.bands.path or None,
+                                 npoints=inp.bands.npoints)
+    kpts = np.asarray(bp.kpts, dtype=float)
+    x, xticks, xlabels = bp.get_linear_kpoint_axis()
+    xc = SPIN_XC_REGISTRY[inp.xc]() if inp.nspin == 2 else XC_REGISTRY[inp.xc]()
+    if verbose:
+        print(f"bands (USPP/PAW): {len(kpts)} k-points along the path", flush=True)
+    eig = bands_uspp(res, xc, kpts, nbands=inp.bands.nbands).detach().cpu().numpy()
+    bands = {
+        "kpts_frac": kpts.tolist(),
+        "x": np.asarray(x).tolist(),
+        "labels": list(zip(xticks.tolist(), list(xlabels), strict=True)),
+        "eigenvalues_eV": eig.tolist(),
+        "reference_eV": _bands_reference(res),
+    }
+    return {"bands": bands}
+
+
 def _bands_extra(inp: Input, res, verbose: bool) -> dict:
     from gradwave.postscf.bands import bands_along_ase_path
+
+    _species, upfs, _soa = _species_upfs(inp)
+    if _is_uspp(upfs):
+        return _bands_uspp_block(inp, res, verbose)
 
     bs = bands_along_ase_path(
         res, inp.atoms, path=inp.bands.path, npoints=inp.bands.npoints,
@@ -1201,6 +1300,23 @@ def _pdos_summary_block(res, inp: Input) -> dict:
         return {"available": False, "reason": str(err)}
 
 
+def _cohp_summary_block(res, inp: Input) -> dict:
+    """Crystal Orbital Hamilton Population block for the summary JSON, computed
+    alongside the PDOS when ``projections.cohp`` is enabled. Returns a graceful
+    ``{'available': False, ...}`` when the pseudopotentials omit PP_PSWFC or the
+    formalism is out of coverage."""
+    from gradwave.postscf.cohp import cohp
+    c = inp.projections.cohp
+    pairs = None if c.pairs is None else [tuple(p) for p in c.pairs]
+    try:
+        block = cohp(res, pairs=pairs, rcut=c.rcut, width=c.width,
+                     npoints=c.npoints).to_dict()
+        block["available"] = True
+        return block
+    except (ValueError, NotImplementedError) as err:
+        return {"available": False, "reason": str(err)}
+
+
 def run_magnetism(inp: Input, verbose: bool = True):
     """Characterize the magnetism of the input system (task: magnetism). Builds a
     non-collinear XC from inp.xc, runs `characterize_magnetism`, and returns the
@@ -1301,6 +1417,8 @@ def run(inp: Input, verbose: bool = True) -> dict:
             summary["error_estimate"] = _error_estimate_block(res, inp)
         if inp.projections.enabled:
             summary["pdos"] = _pdos_summary_block(res, inp)
+        if inp.projections.cohp.enabled:
+            summary["cohp"] = _cohp_summary_block(res, inp)
     elif inp.task == "relax":
         relax, _atoms, _frames = run_relax(inp, verbose=verbose)
         summary = _base_summary(inp, "relax")
@@ -1422,7 +1540,7 @@ def _parameters_block(inp: Input) -> dict:
         formalism = "uspp/paw" if _is_uspp(upfs) else "nc"
     return {
         "formalism": formalism,
-        "xc": inp.xc,
+        "xc": _xc_label(inp),
         "ecut_eV": float(inp.ecut),
         "ecutrho_eV": None,
         "kmesh": list(inp.kpoints.mesh),

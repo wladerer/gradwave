@@ -15,9 +15,23 @@ density, and because the whole exchange energy is a differentiable tensor
 function of the mixing, the fraction $\alpha$ and the screening length $\omega$
 are themselves trainable.
 
-Everything here runs through the Python API. The YAML `xc` key stays restricted
-to `lda` and `pbe`; hybrids are reached with `hybrid_scf` and the classes in
-`gradwave.postscf.hybrid`.
+A self-consistent hybrid is reachable from the YAML input: `xc: pbe0` runs a
+full PBE0, `xc: hse` a screened hybrid, and an optional `hybrid` block overrides
+the mixing fraction `alpha` and the range-separation length `omega`.
+
+```yaml
+xc: pbe0            # or hse for the screened operator
+hybrid:
+  alpha: 0.25      # exact-exchange mixing fraction
+  # omega: 0.2     # range-separation length [1/Å] (screened xc: hse)
+kpoints:
+  mesh: [1, 1, 1]  # exact exchange runs on the full BZ — keep the mesh small
+```
+
+Hybrids are norm-conserving and spin-unpolarized (nspin=1), and the input layer
+builds the mesh on the full Brillouin zone (symmetry off) since the Fock sum
+requires it. The learnable-parameter and lower-level entry points below stay on
+the Python API: `hybrid_scf` and the classes in `gradwave.postscf.hybrid`.
 
 ## Why exact exchange is expensive, and how it is made cheap
 

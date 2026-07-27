@@ -167,13 +167,21 @@ def _scf_lines(scf, runtime=None):
     return lines
 
 
-def _energy_lines(scf):
+def _disp_label(disp) -> str:
+    """'D3(BJ)' or 'D4(BJ)' from a dispersion block's `method` tag ('d3-bj' /
+    'd4-bj'). Defaults to D3(BJ) when the block is absent (older JSONs)."""
+    method = (disp or {}).get("method", "d3-bj")
+    return f"{str(method).split('-')[0].upper()}(BJ)"
+
+
+def _energy_lines(scf, disp_label="D3(BJ)"):
     e = scf["energies_eV"]
     lines = [_sec("energy [eV]")]
     shown = [("kinetic", "kinetic"), ("hartree", "hartree"), ("xc", "xc"),
              ("local", "local pp"), ("nonlocal", "nonlocal pp"),
              ("ewald", "ewald"), ("onecenter", "one-center (PAW)"),
-             ("hubbard", "hubbard U"), ("dispersion", "D3(BJ) disp"),
+             ("fock", "Fock exchange"),
+             ("hubbard", "hubbard U"), ("dispersion", f"{disp_label} disp"),
              ("smearing", "smearing −σS")]
     for key, label in shown:
         val = e.get(key, 0.0)
@@ -418,7 +426,8 @@ def _elastic_lines(el):
 
 
 def _dispersion_lines(disp):
-    lines = [_sec("D3(BJ) dispersion")]
+    label = _disp_label(disp)
+    lines = [_sec(f"{label} dispersion")]
     if not disp.get("available", False):
         lines.append(f"   unavailable: {disp.get('reason', 'n/a')}")
         return lines
@@ -427,6 +436,12 @@ def _dispersion_lines(disp):
                  f"a1={d['a1']} a2={d['a2_bohr']} a0")
     lines.append(f"   {'E_disp':<18s}{disp['energy_eV']:>20.10f}  eV")
     lines.append(f"   {'E_disp / atom':<18s}{disp['energy_per_atom_eV']:>20.10f}  eV")
+    forces = disp.get("forces_eV_ang")
+    if forces:
+        import numpy as np
+
+        fmax = float(np.linalg.norm(np.asarray(forces, dtype=float), axis=1).max())
+        lines.append(f"   {'max |F_disp|':<18s}{fmax:>20.6f}  eV/Å")
     if disp.get("stress_eV_ang3") is not None:
         import numpy as np
 
@@ -463,6 +478,33 @@ def _pdos_lines(pdos):
         lines.append(f"   {'group':<28s}{'weight':>12s}")
         for lab, arr in sorted(pdos["groups"].items()):
             lines.append(f"   {lab:<28s}{float(integ(arr)):>12.4f}")
+    return lines
+
+
+def _cohp_lines(cohp):
+    """COHP summary: per-atom-pair ICOHP integrated to E_F (bonding < 0) plus the
+    projection spilling. Computed alongside the PDOS when `projections.cohp` is
+    on. The energy-resolved curves live in the JSON."""
+    lines = ["", "   COHP (crystal orbital Hamilton population)"]
+    if not cohp.get("available", True):
+        lines.append(f"   unavailable · {cohp.get('reason', '')}")
+        return lines
+    lines.append(f"   basis {cohp.get('basis', 'pswfc')} · "
+                 f"method {cohp.get('method', 'operator')} · "
+                 f"spilling {cohp.get('spilling', 0.0):.4f} · "
+                 f"ICOHP to E_F [eV] (bonding < 0)")
+    dist = {(int(i) + 1, int(j) + 1): float(d) for i, j, d in cohp.get("pairs", [])}
+    lines.append(f"   {'pair':<10s}{'d [Å]':>9s}{'ICOHP [eV]':>14s}")
+    for lab, ic in cohp.get("pair_icohp", {}).items():
+        try:
+            i, j = (int(x) for x in lab.split("-"))
+            d = f"{dist[(i, j)]:>9.3f}"
+        except (ValueError, KeyError):
+            d = f"{'—':>9s}"
+        lines.append(f"   {lab:<10s}{d}{float(ic):>14.4f}")
+    total = cohp.get("total_icohp")
+    if total is not None:
+        lines.append(f"   {'total':<10s}{'':>9s}{float(total):>14.4f}")
     return lines
 
 
@@ -543,7 +585,7 @@ def _provenance_lines(prov):
 def _scf_report(summary):
     """SCF block: iterations, energy breakdown, error estimate, eigenvalues."""
     lines = _scf_lines(summary["scf"], summary.get("runtime_s"))
-    lines += _energy_lines(summary["scf"])
+    lines += _energy_lines(summary["scf"], _disp_label(summary.get("dispersion")))
     if "error_estimate" in summary:
         lines += _error_lines(summary["error_estimate"])
     lines += _eigenvalue_lines(summary)
@@ -577,6 +619,7 @@ _SECTIONS = (
     ("scf", _scf_report, True),
     ("dispersion", _dispersion_lines, False),
     ("pdos", _pdos_lines, False),
+    ("cohp", _cohp_lines, False),
     ("relax", _relax_report, True),
     ("bands", _bands_lines, False),
     ("magnetism", _magnetism_lines, False),
