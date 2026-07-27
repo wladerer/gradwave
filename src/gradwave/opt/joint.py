@@ -99,7 +99,7 @@ def count_h_applies():
 
 
 # ------------------------------------------------------------- orbital param
-def lowdin(z: torch.Tensor) -> torch.Tensor:
+def lowdin(z: torch.Tensor, zs: torch.Tensor | None = None) -> torch.Tensor:
     """Orthonormalize the rows of z via Cholesky: C = L⁻¹Z with ZZᴴ = LLᴴ.
 
     NOT the symmetric (eigh-based) Löwdin frame — deliberately. The energy is
@@ -110,8 +110,18 @@ def lowdin(z: torch.Tensor) -> torch.Tensor:
     2×2×2 zone-boundary k-points). Cholesky's backward is smooth for any SPD
     matrix regardless of its spectrum; a trace-scaled jitter keeps it SPD when
     a line-search trial drives Z toward rank deficiency.
+
+    Generalized (USPP/PAW) overlap. Pass ``zs`` = Z·S, the raw rows with the
+    Hermitian overlap S applied along the plane-wave index (for USPP,
+    S = 1 + Σ_ij q_ij |βᵢ⟩⟨βⱼ|, so Z·S = Z + (Z βᴴ) Q β — the projector
+    augmentation). The Gram matrix becomes Z S Zᴴ = L Lᴴ and the returned rows
+    are S-orthonormal, C S Cᴴ = I, exactly the metric the generalized joint
+    functional needs. ``zs=None`` is the norm-conserving S=I case (plain Z Zᴴ),
+    kept bit-identical to the prototype.
     """
-    s = z @ z.conj().transpose(-2, -1)
+    s = (z if zs is None else zs) @ z.conj().transpose(-2, -1)
+    if zs is not None:  # Z S Zᴴ is Hermitian in exact arithmetic; kill roundoff
+        s = 0.5 * (s + s.conj().transpose(-2, -1))
     n = s.shape[-1]
     jitter = 1e-13 * torch.diagonal(s.detach(), dim1=-2, dim2=-1).mean().real
     eye = torch.eye(n, dtype=s.dtype, device=s.device)

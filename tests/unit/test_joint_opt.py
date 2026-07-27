@@ -87,6 +87,56 @@ def test_joint_energy_strain_gradient_matches_stress(si_scf):
     assert torch.allclose(sigma_joint, sigma_ref, atol=1e-8)
 
 
+def test_lowdin_s_metric_orthonormalizes():
+    """Generalized (USPP/PAW) overlap: lowdin(z, z·S) returns S-orthonormal
+    rows, C S Cᴴ = I — the metric the generalized joint functional needs."""
+    from gradwave.dtypes import CDTYPE
+
+    g = torch.Generator().manual_seed(11)
+    npw, nb = 24, 5
+    z = torch.view_as_complex(torch.randn(nb, npw, 2, generator=g, dtype=RDTYPE))
+    m = torch.randn(npw, npw, generator=g, dtype=RDTYPE)
+    s = m @ m.T + npw * torch.eye(npw, dtype=RDTYPE)  # symmetric positive-definite
+    c = lowdin(z, z @ s.to(CDTYPE))
+    csc = c @ s.to(CDTYPE) @ c.conj().T
+    assert torch.allclose(csc, torch.eye(nb, dtype=csc.dtype), atol=1e-10)
+    # S=None branch must stay bit-identical to the plain Z Zᴴ Cholesky
+    c0 = lowdin(z)
+    assert torch.allclose(c0 @ c0.conj().T, torch.eye(nb, dtype=c0.dtype),
+                          atol=1e-12)
+
+
+def test_relax_method_validation_and_dispatch_guard():
+    """relax.method is validated, and the joint engine's applicability guard
+    routes unsupported systems (USPP/spin/smearing/pressure) to nested."""
+    from types import SimpleNamespace
+
+    import pytest as _pytest
+
+    from gradwave.api import _joint_supported
+    from gradwave.inputs import InputError, RelaxParams
+
+    assert RelaxParams(method="joint").method == "joint"
+    with _pytest.raises(InputError):
+        RelaxParams(method="conjugate-gradient")
+
+    nc_upfs = [si_upf()]  # NC (not PAWData) → the joint-eligible case
+
+    def _inp(**kw):
+        base = dict(nspin=1, noncollinear=False,
+                    smearing=SimpleNamespace(type="none"),
+                    relax=SimpleNamespace(pressure=0.0))
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    assert _joint_supported(_inp(), nc_upfs) is None  # NC insulator: supported
+    assert _joint_supported(_inp(nspin=2), nc_upfs)  # reason string (truthy)
+    assert _joint_supported(
+        _inp(smearing=SimpleNamespace(type="gauss")), nc_upfs)
+    assert _joint_supported(
+        _inp(relax=SimpleNamespace(pressure=2.0)), nc_upfs)
+
+
 def test_teter_precond_range():
     kpg2 = torch.tensor([0.0, 1.0, 100.0], dtype=RDTYPE)
     p = teter_precond(kpg2, 10.0)

@@ -62,6 +62,17 @@ class RelaxParams:
     max_steps: int = 200
     cell: bool = False  # variable-cell: relax the lattice with the atoms (stress)
     pressure: float = 0.0  # external hydrostatic pressure [GPa]; cell relaxation only
+    # relaxation engine: "nested" runs a full SCF inside every ASE geometry step
+    # (the robust default, all formalisms/spin/metals); "joint" descends on
+    # (strain, positions, orbitals) at once via opt/joint.py — far fewer H-applies
+    # but NC insulators only, and it falls back to "nested" on non-convergence or
+    # an unsupported system (USPP/PAW, metal, odd electron count).
+    method: str = "nested"  # nested | joint
+
+    def __post_init__(self):
+        if self.method not in ("nested", "joint"):
+            raise InputError(
+                f"relax.method must be 'nested' or 'joint', got {self.method!r}")
 
 
 @dataclass(frozen=True)
