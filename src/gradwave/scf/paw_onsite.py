@@ -254,14 +254,6 @@ class OneCenter:
         e = 0.5 * float((self.w_simp[:, None] * v * rho_lm).sum())
         return v, e
 
-    def _lm2rad(self, f_lm: np.ndarray) -> np.ndarray:
-        """(mesh, l2) → (mesh, nx) values along directions."""
-        return f_lm @ self.ylm[:, : f_lm.shape[1]].T
-
-    def _rad2lm(self, f_rad: np.ndarray, nlm: int) -> np.ndarray:
-        """(mesh, nx) → (mesh, nlm) projection with the angular weights."""
-        return f_rad @ (self.ww[:, None] * self.ylm[:, :nlm])
-
     # ---------- exact XC (autograd through the quadrature) ----------
 
     def _torch_tables(self):

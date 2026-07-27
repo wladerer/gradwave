@@ -38,15 +38,21 @@ class CompositionSurrogate:
         return self.b + 2.0 * (self.A @ lam)
 
 
+def _symmetric_from_upper(upper, na, iu):
+    """Symmetric (na, na) matrix from its upper-triangle entries `upper` laid out
+    on the index pair `iu = np.triu_indices(na)`."""
+    A = np.zeros((na, na))
+    A[iu] = upper
+    return A + A.T - np.diag(np.diag(A))
+
+
 def _model(params, lam, na, iu):
     """Evaluate the quadratic model and its per-site gradient for a flat
     parameter vector [c0, b(na), A_upper]. Linear in params, so the same routine
     with unit parameter vectors builds the least-squares design matrix."""
     c0 = params[0]
     b = params[1:1 + na]
-    A = np.zeros((na, na))
-    A[iu] = params[1 + na:]
-    A = A + A.T - np.diag(np.diag(A))
+    A = _symmetric_from_upper(params[1 + na:], na, iu)
     e = c0 + b @ lam + lam @ A @ lam
     g = b + 2.0 * (A @ lam)
     return e, g
@@ -80,9 +86,7 @@ def fit_surrogate(lams, energies, grads=None) -> CompositionSurrogate:
                 rhs.append(g_arr[s, k])
 
     params, *_ = np.linalg.lstsq(np.asarray(design), np.asarray(rhs), rcond=None)
-    A = np.zeros((na, na))
-    A[iu] = params[1 + na:]
-    A = A + A.T - np.diag(np.diag(A))
+    A = _symmetric_from_upper(params[1 + na:], na, iu)
     return CompositionSurrogate(params[0], params[1:1 + na], A)
 
 
