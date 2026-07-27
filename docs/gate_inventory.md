@@ -74,6 +74,20 @@ gaps) — see the last section. So **66 real capability gates** remain.
 | postscf/stress_error.py:86 | symmetry | pressure error requires `use_symmetry=False` |
 | postscf/uspp_bands.py:28 | +U | USPP bands with DFT+U (V_U missing from frozen band H) |
 
+**Γ-point Hvp-phonons cross-validated (#141 step 2).** The Γ dynamical
+matrix built on `hessian_column` (`postscf.phonons.gamma_hessian`) is now
+cross-validated against the finite-displacement path
+(`postscf.phonons_supercell` folding of `paw_forces.forces_uspp`) on one PAW
+diamond-Si cell — `tests/integration/test_gamma_phonons_self_oracle.py`. The
+gates above are unchanged (still nspin=1 / no +U / insulators). Finding logged
+for follow-up: at the high-symmetry (band-degenerate) ideal geometry the
+analytic Hessian runs ~0.5 % (≈1.6 cm⁻¹ optical) high vs BOTH the
+FD-of-forces Hessian and the total-energy second difference (the exact
+BO-surface curvature, which agree with each other to 1e-4); the gap is h- and
+ecut-independent and vanishes at the low-symmetry P1 geometry the column check
+uses — consistent with an incomplete degenerate-subspace term in the position
+response, not a convergence artifact.
+
 ## Open — PAW/NC stress & +U
 
 | file:line | axis | operation blocked |
