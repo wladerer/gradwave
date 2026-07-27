@@ -110,6 +110,13 @@ class PositionPerturbation:
         system = cs.system
         self.cs, self.a, self.alpha = cs, a, alpha
         self.s0, self.s1 = system.atom_slices[a]
+        # window off-diagonal degenerate gauge (see ``window_response``).
+        # False (default) → −½⟨m|δS|n⟩, the S-normalization limit that
+        # reproduces the density/becsum response. True → the full metric
+        # coupling −⟨m|δS|n⟩, the continuous ε_n→ε_m limit of the
+        # non-degenerate coefficient that keeps the SECOND-derivative
+        # assembly (``hessian_column``) continuous across a band degeneracy.
+        self.deg_full = False
         self.dv_r = _dvloc_r(system, a, alpha)
         # NLCC: the atom-centered core density moves too, and its motion
         # perturbs v_xc as f_xc·∂ρ_core/∂τ — a bare LOCAL term (no
@@ -185,10 +192,30 @@ class PositionPerturbation:
         num = hmat - smat * eps[None, :].to(CDTYPE)
         safe = de.abs() > 1e-8
         de_safe = torch.where(safe, de, torch.ones_like(de))
-        # m ≠ n: c_mn = ⟨m|δH − ε_n δS|n⟩/(ε_n − ε_m); degenerate and
-        # diagonal entries take the S-orthonormality gauge −½⟨m|δS|n⟩
-        # (equal-f degenerate rotations cancel in every invariant sum)
+        # Non-degenerate m ≠ n: c_mn = ⟨m|δH − ε_n δS|n⟩/(ε_n − ε_m). The
+        # ε_n ≈ ε_m entries (diagonal m = n and degenerate off-diagonal
+        # m ≠ n) divide by ~0, so they take the S-orthonormality gauge. The
+        # m = n normalization is exactly −½⟨n|δS|n⟩.
+        #
+        # For an OFF-diagonal degenerate pair the correct value depends on
+        # which invariant the response feeds — the two limits of c_mn/c_nm
+        # differ because the anti-Hermitian half of num/de diverges as
+        # ε_n → ε_m while its Hermitian half stays −½⟨m|δS|n⟩:
+        #   * density / becsum / normalization see only the Hermitian half,
+        #     so −½⟨m|δS|n⟩ is the continuous limit (self.deg_full=False);
+        #   * the SECOND-derivative assembly in ``hessian_column`` pairs δψ
+        #     against the (non-stationary) ∂E/∂c gradient, which picks up the
+        #     diverging anti-Hermitian half through its ∂/∂τ′; its continuous
+        #     limit is the FULL metric coupling −⟨m|δS|n⟩ (self.deg_full=True).
+        # The −½ substitution used for both is right for the density but
+        # introduces a spurious discontinuity in the Hessian at exact
+        # degeneracy (a ~0.5 % high optical Γ-phonon frequency on diamond Si);
+        # −⟨m|δS|n⟩ restores continuity with the ε_n≠ε_m column (issue #141).
         cmn = torch.where(safe, num / de_safe, -0.5 * smat)
+        if self.deg_full:
+            band = torch.arange(cmn.shape[0], device=cmn.device)
+            offdiag = band[:, None] != band[None, :]
+            cmn = torch.where((~safe) & offdiag, -smat, cmn)
         dpsi_win = cmn.mT @ c  # δψ_n(win) = Σ_m c_mn ψ_m, rows n
 
         # complement: (H − ε_n S) δψ⊥ = −P_c†(δH − ε_n δS)|ψ_n⟩, occ n
@@ -409,6 +436,11 @@ def hessian_column(res: dict, xc, a: int, alpha: int, *,
     with torch.no_grad():
         cs = _ConvergedUSPP(res, xc)
         pert = PositionPerturbation(cs, a, alpha)
+        # the mixed second derivative needs the FULL metric coupling in the
+        # degenerate window off-diagonal (−⟨m|δS|n⟩), the continuous limit of
+        # the non-degenerate coefficient; the −½ density limit would leave a
+        # spurious discontinuity in the Hessian at a band degeneracy (#141).
+        pert.deg_full = True
         warm = [torch.zeros_like(c[:n_sv]) for c, n_sv in
                 zip(cs.c_win[0], cs.n_solve[0], strict=True)]
         bare_rho, bare_bec = pert.bare_map_derivative(warm)
