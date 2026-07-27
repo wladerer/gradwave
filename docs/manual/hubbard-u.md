@@ -62,6 +62,34 @@ The manifold applies to *every* atom of that species. For USPP/PAW use `scf_uspp
 and `from gradwave.scf.uspp_hubbard import HubbardManifold` (same fields, $S$-dressed
 projectors).
 
+## From an input file
+
+A `hubbard` block turns +U on from a `gradwave` input, one manifold per
+correlated species. It threads through `scf`, `relax`, `eos`, and `elastic` on
+the norm-conserving path (forces and stress included), and the SCF occupation
+correction also runs on USPP/PAW. `gradwave init hubbard` writes a starter.
+
+```yaml
+xc: pbe
+nspin: 2
+start_mag: {Ni: 0.5}
+smearing: {type: gaussian, width: 0.05}
+hubbard:
+  - {species: Ni, l: 2, u: 5.0}      # U = 5 eV on the Ni 3d shell (l=2)
+  # - {species: O, l: 1, u: 0.0, j: 0.0}   # a second manifold, per species
+```
+
+`species` is an element symbol (the correction hits every atom of it), `l` the
+shell (2 = d, 3 = f), `u`/`j` the Hubbard and Hund parameters in eV. +U is
+collinear only (`nspin: 1` or `2`) and always runs on the full spatial Brillouin
+zone: an IBZ-folded mesh under-counts the occupation matrix, so `symmetry` is
+forced off whenever a `hubbard` block is present (time reversal is kept, since
+$n$ at $-k$ is $n^*$ and $|n_{mm'}|^2$ is invariant). Setting `u: 0` everywhere
+is inert, reproducing the plain-functional run to the last bit.
+
+Combining `hubbard` with a noncollinear/spin-orbit run or a hybrid `xc` is
+rejected at load: neither +U path is wired for those yet.
+
 ## Forces and stress with +U
 
 The +U energy is a differentiable function of the positions and the cell through
@@ -78,6 +106,14 @@ sig = stress(res, SpinPBE(), manifolds=[HubbardManifold(species=0, l=2, u=5.0)])
 
 A +U result handed to `stress` without its manifolds is rejected rather than
 silently dropping the term. Fully-relativistic stress is not yet available.
+
+From an input file (or the `GradWave` ASE calculator) the +U force and stress are
+folded in automatically: `relax`/`eos`/`elastic` with a `hubbard` block descend
+on the +U-corrected forces and stress. This is norm-conserving through the
+calculator — USPP/PAW +U forces exist (`forces_uspp` reads them off the result),
+but +U stress on the $S$-dressed projectors is not implemented, so a USPP/PAW +U
+run through the calculator is gated; use `task: scf` for a single-point USPP/PAW
++U energy and forces.
 
 ## Determine U, and its gradient
 

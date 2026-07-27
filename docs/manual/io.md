@@ -14,8 +14,8 @@ has the terse CLI and entry-point tables.
 
 `gradwave init` writes a commented starter input for a kind of calculation.
 `gradwave init` with no name lists the templates: `scf`, `metal`, `relax`,
-`relax-cell`, `bands`, `bands-soc`, `pdos`, `cohp`, `hybrid`, `magnetism`, and
-`noncollinear` (plus `eos`, `elastic`, `phonons`).
+`relax-cell`, `bands`, `bands-soc`, `pdos`, `cohp`, `hybrid`, `hubbard`,
+`magnetism`, and `noncollinear` (plus `eos`, `elastic`, `phonons`).
 Each emits a complete, schema-valid file with an inline example structure and
 placeholder pseudopotential paths; edit those two, then `gradwave validate` it.
 Without `-o` the template goes to stdout (`gradwave init bands > bands.yaml`).
@@ -49,6 +49,7 @@ means the quantity is dimensionless or a plain count.
 | `ecutrho` | `4 × ecut` | eV | float | Density/augmentation cutoff. USPP/PAW only. Ignored for norm-conserving. |
 | `xc` | `pbe` | — | string | Functional: `lda`, `pbe`, `r2scan`, or a hybrid `pbe0` / `hse` (see [`hybrid`](#hybrid) and [Hybrid functionals](hybrid-functionals.md)). |
 | `hybrid` | *see below* | — | mapping | Hybrid-exchange overrides (`alpha`, `omega`); only with a hybrid `xc`. |
+| `hubbard` | `null` | — | list | DFT+U (Dudarev) manifolds, one per correlated species (see [`hubbard`](#hubbard)). |
 | `nbands` | `auto` | — | int or `auto` | Number of Kohn-Sham bands. `auto` picks from the electron count. |
 | `symmetry` | `true` | — | bool | Reduce k to the IBZ and symmetrize the density each step. Forced off for a magnetic `noncollinear` run and the `magnetism` task (symmetry acts on the moment vector); setting it `true` there is an error. A spin-orbit-only run (`nonmagnetic: true`) keeps symmetry. |
 | `nspin` | `1` | — | int | `1` unpolarized, `2` collinear spin. |
@@ -185,6 +186,30 @@ functional. See [Hybrid functionals](hybrid-functionals.md). Norm-conserving,
 | `alpha` | `0.25` | — | float | Exact-exchange mixing fraction. |
 | `omega` | `0.2` | Å⁻¹ | float | Range-separation length (screened `hse` only). |
 | `mode` | *from xc* | — | string | `full` (PBE0), `short_range` (HSE), or `long_range`; defaults from the `xc` label. |
+
+### `hubbard`
+
+Rotationally-invariant DFT+U (Dudarev), one manifold per correlated species,
+applied inside the SCF. The +U forces and stress are added on the
+norm-conserving path; the occupation correction also runs on USPP/PAW.
+Collinear only (`nspin: 1` or `2`), and the mesh is built on the full spatial BZ
+(symmetry off — an IBZ-folded mesh under-counts the occupation matrix). See
+[Differentiable Hubbard U](hubbard-u.md). The pseudopotential must carry the
+manifold's atomic orbital (`PP_PSWFC`; PseudoDojo and psl sets do, SG15/ONCV
+generally do not).
+
+```yaml
+hubbard:
+  - {species: Ni, l: 2, u: 5.0}      # U = 5 eV on the Ni 3d shell
+  - {species: O,  l: 1, u: 0.0, j: 0.0}
+```
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `species` | *required* | — | string | Element symbol; the manifold applies to every atom of it. Must be in the structure, once per species. |
+| `l` | *required* | — | int | Correlated shell: `0` (s), `1` (p), `2` (d), `3` (f). |
+| `u` | *required* | eV | float | Hubbard U. |
+| `j` | `0.0` | eV | float | Hund J; enters Dudarev only as `U_eff = U − J`. |
 
 ### `projections`
 

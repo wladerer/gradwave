@@ -457,6 +457,44 @@ output:
   dir: ./out
 """
 
+_HUBBARD = """\
+# DFT+U (Dudarev, rotationally invariant): a Hubbard U on the correlated shell of
+# each listed species, applied inside the SCF so the localized d/f states shift.
+# NiO (rocksalt) with U on the Ni 3d shell. Needs a pseudo that carries the
+# manifold's atomic orbital (PP_PSWFC — PseudoDojo / psl do; SG15 does not).
+# Collinear only (nspin 1 or 2). Run:  gradwave input.yaml -o out/
+
+structure:
+  cell: [[4.17, 2.085, 2.085], [2.085, 4.17, 2.085], [2.085, 2.085, 4.17]]
+  positions:
+    frac: [[0.0, 0.0, 0.0], [0.5, 0.5, 0.5], [0.25, 0.25, 0.25], [0.75, 0.75, 0.75]]
+  species: [Ni, Ni, O, O]
+
+pseudopotentials:
+  dir: ./pseudos                 # EDIT: folder holding your UPF files
+  map:
+    Ni: PD_Ni_PBE.upf            # EDIT: must carry PP_PSWFC for the 3d manifold
+    O: PD_O_PBE.upf
+
+ecut: 800.0                      # eV, plane-wave cutoff (converge this)
+xc: pbe
+nspin: 2                         # collinear spin (a +U d-shell is spin-polarized)
+start_mag: {Ni: 0.5}            # seed the Ni moment; the SCF finds the ground state
+kpoints:
+  mesh: [4, 4, 4]
+
+smearing:
+  type: gaussian
+  width: 0.05
+
+hubbard:
+  - {species: Ni, l: 2, u: 5.0}  # U on the Ni 3d shell (l=2); optional `j:` Hund
+  # - {species: O, l: 1, u: 0.0} # a second manifold (per species) goes here
+
+output:
+  dir: ./out
+"""
+
 # name -> (one-line description, template body). Order is the listing order.
 _PHONONS = """\
 # Supercell finite-displacement phonons: dispersion along a q-path + phonon DOS.
@@ -503,6 +541,7 @@ _TEMPLATES: dict[str, tuple[str, str]] = {
     "pdos": ("Projected density of states.", _PDOS),
     "cohp": ("Crystal orbital Hamilton population (bonding analysis).", _COHP),
     "hybrid": ("Self-consistent hybrid functional (PBE0/HSE).", _HYBRID),
+    "hubbard": ("DFT+U (Dudarev) on a correlated d/f shell.", _HUBBARD),
     "magnetism": ("Collinear magnetism + exchange couplings.", _MAGNETISM),
     "noncollinear": ("Noncollinear SCF with spin-orbit coupling.", _NONCOLLINEAR),
     "eos": ("Equation of state (bulk modulus via Birch-Murnaghan).", _EOS),

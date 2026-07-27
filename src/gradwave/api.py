@@ -78,6 +78,21 @@ def _species_upfs(inp: Input):
     return species, upfs, species_of_atom
 
 
+def _hubbard_manifolds(inp: Input):
+    """The input's `hubbard` block as a list of ``core.hubbard.HubbardManifold``
+    (species RESOLVED to the setup's integer index), or None when +U is off. The
+    index is ``sorted(set(symbols)).index(element)`` — the same species ordering
+    ``build_system`` / ``_species_upfs`` use, so the manifolds line up with the
+    system's ``species_of_atom``/``upfs``."""
+    if not inp.hubbard.enabled:
+        return None
+    from gradwave.core.hubbard import HubbardManifold
+
+    species = sorted(set(inp.atoms.get_chemical_symbols()))
+    return [HubbardManifold(species=species.index(m.species), l=m.l, u=m.u, j=m.j)
+            for m in inp.hubbard.manifolds]
+
+
 def _is_uspp(upfs) -> bool:
     from gradwave.pseudo.upf_paw import PAWData
 
@@ -91,6 +106,15 @@ def _is_uspp(upfs) -> bool:
 def build_system(inp: Input):
     """The Layer-B system for this input, NC or USPP/PAW by UPF kind."""
     species, upfs, species_of_atom = _species_upfs(inp)
+    # DFT+U builds the correlated occupation matrix n^I_{mm'} from only the
+    # k-points in the mesh. An IBZ-folded mesh under-counts it: the manifold
+    # projector's m-components mix under the star's rotations, so a single IBZ
+    # representative is not the star-averaged matrix and Tr[n(1−n)] (the Dudarev
+    # energy) comes out wrong. The occupation matrix would need star-symmetrizing;
+    # until then +U runs on the full spatial BZ (the regime the +U machinery is
+    # validated in — the NiO/Si references use no IBZ reduction). Time reversal
+    # is kept (n at −k is n*, and |n_{mm'}|² is TR-invariant, so E_U is exact).
+    hubbard = inp.hubbard.enabled
     if _is_uspp(upfs):
         from gradwave.scf.uspp import setup_uspp
 
@@ -98,7 +122,7 @@ def build_system(inp: Input):
             inp.atoms.cell.array, inp.atoms.get_positions(), species_of_atom,
             upfs, ecut=inp.ecut, kmesh=inp.kpoints.mesh,
             ecutrho=inp.ecutrho, nbands=inp.nbands,
-            use_symmetry=inp.symmetry,
+            use_symmetry=inp.symmetry and not hubbard,
         )
     from gradwave.scf.loop import setup_system
 
@@ -116,7 +140,7 @@ def build_system(inp: Input):
         kmesh=inp.kpoints.mesh,
         kshift=inp.kpoints.shift,
         nbands=inp.nbands,
-        use_symmetry=inp.symmetry and not hybrid,
+        use_symmetry=inp.symmetry and not hybrid and not hubbard,
         time_reversal=(not hybrid
                        and not (inp.noncollinear and not inp.nonmagnetic)),
     )
@@ -166,6 +190,11 @@ def run_scf(inp: Input, system=None, verbose: bool = True, start_from=None):
         mixing_alpha=inp.scf.mixing.alpha,
         diago_tol=inp.scf.diago_tol, verbose=verbose,
     )
+    # DFT+U: the same manifold list feeds the NC and USPP/PAW SCF (both take a
+    # `hubbard=` kwarg); species already resolved to the setup's integer index.
+    manifolds = _hubbard_manifolds(inp)
+    if manifolds is not None:
+        common["hubbard"] = manifolds
     if inp.tot_magnetization is not None and not uspp:
         # fixed spin moment: a collinear nspin=2, no-smearing pin (see
         # scf/loop.py:_check_scf_args). The USPP path has no such argument.
@@ -391,6 +420,9 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
             "fft_grid": list(system.grid.shape),
             "npw": int(system.spheres[0].npw),
             "pseudos": {s: inp.pseudo_map[s] for s in species},
+            **({"hubbard": [
+                {"species": m.species, "l": m.l, "U_eV": m.u, "J_eV": m.j}
+                for m in inp.hubbard.manifolds]} if inp.hubbard.enabled else {}),
         },
         "scf": scf_block,
         "eigenvalues_eV": eig.tolist(),
@@ -434,6 +466,7 @@ def _build_relax_calc(inp: Input):
         mixing_alpha=inp.scf.mixing.alpha,
         mixing_history=inp.scf.mixing.history,
         mixing_kerker=kerker,
+        hubbard=list(inp.hubbard.manifolds) if inp.hubbard.enabled else None,
         device=inp.device,
         verbose=False,
     )
