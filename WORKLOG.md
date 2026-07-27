@@ -3,9 +3,11 @@
 Branch: perf/test-runtime. Goal: cut standard-tier runtime, no weakened assertions.
 
 ## STATUS
-- All test-code + config edits DONE and committed (WIP d34a44b, pushed to origin as backup).
-- Combined -n2 loadscope run in progress (b3a3uu4i1 -> /tmp/final_combined.out, durations -> /tmp/after.json).
-- PENDING: (1) merge changed-test durations into .test_durations, (2) fast-gate before/after via `make check FAST_JOBS=2`, (3) delete this WORKLOG, (4) final commit+push, (5) open ONE PR.
+- All test-code + config edits DONE. .test_durations patched (10 changed keys, format preserved).
+- Serial -n0 combined run COMPLETED: 1264.93s (21:04), all pass after cohp fix. Used for durations + step-7 total.
+- -n2 loadscope combined run: KILLED twice under other-agent contention (resource pressure). Excluded; report serial 21:04 instead with caveat.
+- fast-gate `make check FAST_JOBS=2` running (bd6c7dy16 -> /tmp/check_after.out).
+- PENDING: fast-gate before (marker-revert A/B or estimate), delete WORKLOG, final commit+push, open ONE PR.
 
 ## CHANGES MADE (final state)
 1. CI (.github/workflows/ci.yml) + Makefile test-standard: add `--dist loadscope`. Fast gate kept default `load` (surgical, not via pyproject addopts). No separate fast-gate CI job exists.
