@@ -219,3 +219,53 @@ back to nested. What is and is not done:
   Scoped as a follow-up (track under a `joint-uspp` issue): the NC path ships
   now; USPP joint is not blocked by orthonormalization but by the augmented
   energy assembly.
+
+## Exact-Hvp Newton-CG (#123 follow-on, ideas.md steps 2-5)
+
+The first-order engine descends with L-BFGS. Because `E(ε, s, Z)` is an explicit
+function of all its variables, autograd also supplies exact Hessian-vector
+products by double-backward (no Sternheimer solve), which a second-order
+optimizer can exploit. Code: `opt/newton.py` (`newton_cg_relax`), entry point
+`api.run_relax` with `relax.method="newton"` (same guard + nested fallback as
+`joint`). Tests: `tests/unit/test_joint_hvp.py`.
+
+**Double-differentiability audit (step 2).** `gradgradcheck` on the strain-graph
+form factors plus an Hvp-vs-central-FD-of-gradients check on the whole
+`joint_energy` (fixed *and* variable cell), all fp64. Three graph ops were
+first-order-only and had to be fixed for exact `Hv`; all three were the same
+pattern (a value patched with `torch.where`, but the *derivative* left a 0/0 that
+is harmless at first order and NaN at second):
+
+- `pseudo/radial_torch.py::_SBT` (the spherical Bessel transform, `q = |k+G|(ε)`,
+  the one custom `autograd.Function` on the strain graph) was
+  `once_differentiable`. Its backward is now written with autograd-tracked ops so
+  torch differentiates it once more into `Σ gw r² j_l''(qr)` (j_l'' via autograd
+  through the closed j_l forms); the forward stays under `no_grad`, so the
+  first-order forces/stress path keeps its flat memory profile.
+- `postscf/_strain.py::ewald_strained` and `core/ylm.py::ylm_all` both took
+  `torch.linalg.norm` of a vector that is zero at a self-pair / at the Γ,G=0 row;
+  norm's backward divides by that zero. Replaced with `sqrt` of a `clamp_min`ed
+  sum-of-squares — bit-identical values and first-order gradients, finite second
+  derivative. (18 shared-path regression tests unchanged.)
+
+**Band-chunk checkpointing (step 3).** `joint_energy`'s density build wraps each
+band chunk's FFT sandwich (`g_to_r` → |ψ|²) in `torch.utils.checkpoint`
+(`use_reentrant=False`, so it composes with the double-backward). Auto-on for
+CUDA; energies are unchanged (bitwise at fixed chunking, tested) and the retained
+ψ activations scale with one chunk instead of all bands — the prerequisite for
+64-atom Hvp on a 6 GB card.
+
+**Optimizer (step 4).** Steihaug truncated-CG trust region on `Hv` products, with
+negative-curvature and trust-boundary exits, and a preconditioner hook
+(`_identity_precond` default: the Teter-like electronic metric is already folded
+into the `C = Löwdin(Z·p)` parametrization, ionic block identity). Same outer
+basis-rebuild loop, loose-SCF seed, convergence gates (`fmax`/`smax`/`ctol`), and
+nested fallback as the first-order engine. A trial step that drives Z
+rank-deficient (Löwdin Cholesky throws) is caught and rejected, shrinking the
+trust radius — the second-order analogue of the L-BFGS line-search backtrack.
+
+**H-apply accounting.** One unit = one band·k H|ψ⟩ (as in `JointResult`): a
+gradient eval is 1, an Hvp (a second backward) is charged 2 (the low end of
+double-backward's 2-3× gradient cost), a trial energy is 0.5;
+`h_equiv = h_seed + round((n_grad + 2·n_hvp + 0.5·n_trial)·nk·n_occ)`. Wall time
+is reported alongside (`benchmarks/newton_cg_si.py`) as the ultimate arbiter.

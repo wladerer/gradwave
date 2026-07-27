@@ -284,11 +284,17 @@ def ewald_strained(pos_e, charges, a_e, b_e, omega, cell0) -> torch.Tensor:
     z = charges.to(rdt)
 
     d = pos_e[:, None, None, :] - pos_e[None, :, None, :] + images[None, None, :, :]
-    r = torch.linalg.norm(d, dim=-1)
-    na = r.shape[0]
+    na = d.shape[0]
     img0 = torch.as_tensor((np.abs(n_img).sum(axis=1) == 0), device=dev)
     self_pair = torch.eye(na, dtype=torch.bool, device=dev)[:, :, None] & img0[None, None, :]
-    r_safe = torch.where(self_pair, torch.ones_like(r), r)
+    # r_safe from a masked sum-of-squares, NOT torch.linalg.norm: norm's backward
+    # divides by r, so at the r=0 self-pairs it feeds 0/0 = NaN into the SECOND
+    # derivative (harmless at first order, fatal for the position Hessian an Hvp
+    # needs). Squaring→masking→sqrt keeps the self entry a smooth constant (√1)
+    # and leaves every real-pair value and first-order gradient bit-identical.
+    d2 = (d * d).sum(-1)
+    d2_safe = torch.where(self_pair, torch.ones_like(d2), d2)
+    r_safe = torch.sqrt(d2_safe)
     pair = torch.erfc(sqrt_eta * r_safe) / r_safe
     pair = torch.where(self_pair, torch.zeros_like(pair), pair)
     e_real = 0.5 * E2 * torch.einsum("a,b,abr->", z, z, pair)

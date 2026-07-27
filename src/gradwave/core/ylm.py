@@ -50,9 +50,15 @@ def ylm_all(lmax: int, g: torch.Tensor, eps: float = 1e-14) -> torch.Tensor:
     """
     if lmax > 4:
         raise ValueError("ylm_all supports lmax <= 4")
-    norm = torch.linalg.norm(g, dim=-1, keepdim=True)
-    unit = g / torch.clamp(norm, min=eps)
-    zero = (norm < eps).squeeze(-1)
+    # norm from a clamped sum-of-squares, NOT torch.linalg.norm: the latter's
+    # backward divides by the norm, feeding 0/0 = NaN into the SECOND derivative
+    # at the zero vector (the Γ / G=0 row an l>0 projector Hessian needs for an
+    # Hvp). clamp_min flattens the gradient there; real directions and their
+    # first-order gradients are bit-identical (both are √Σgᵢ²).
+    n2 = (g * g).sum(dim=-1, keepdim=True)
+    zero = (n2 < eps * eps).squeeze(-1)
+    norm = torch.sqrt(n2.clamp_min(eps * eps))
+    unit = g / norm
     x, y, z = unit[..., 0], unit[..., 1], unit[..., 2]
     x = torch.where(zero, torch.zeros_like(x), x)
     y = torch.where(zero, torch.zeros_like(y), y)

@@ -45,8 +45,10 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import torch
+from torch.utils.checkpoint import checkpoint as _torch_checkpoint
 
 from gradwave.constants import E2, HBAR2_2M
+from gradwave.core.batch import _GPU_DENSE_BUDGET_BYTES
 from gradwave.core.fftbox import g_to_r, r_to_g
 from gradwave.core.xc.base import XCFunctional
 from gradwave.dtypes import CDTYPE, RDTYPE
@@ -149,6 +151,59 @@ def _coeffs_from_z(z_params, precond, npws):
     return out
 
 
+# ------------------------------------------------------ checkpointed density
+def _band_density_chunk(c_chunk, flat_idx, shape, w_chunk):
+    """|ψ|²-weighted density of one band chunk on the r-grid (unnormalized).
+
+    The checkpoint unit: ``g_to_r`` inflates (nb_chunk, npw) coefficients to
+    (nb_chunk, n_grid) ψ values — the dense activation the memory table blows up
+    on. Isolating it here lets ``torch.utils.checkpoint`` drop those ψ between
+    forward and backward and recompute the FFT sandwich, so retained activations
+    scale with one chunk instead of all bands (module doc / ideas.md step 3).
+    """
+    psi = g_to_r(c_chunk, flat_idx, shape)
+    return torch.einsum("b,bxyz->xyz", w_chunk, psi.real ** 2 + psi.imag ** 2)
+
+
+def _density_band_chunk(n_grid: int, device, elem_bytes: int = 16) -> int:
+    """Bands per checkpoint chunk so one chunk's dense ψ block stays under the
+    GPU dense-grid budget. CPU: no chunking (return a huge number)."""
+    if device.type != "cuda":
+        return 1_000_000
+    return max(1, int(_GPU_DENSE_BUDGET_BYTES / (elem_bytes * max(n_grid, 1))))
+
+
+def _build_rho0(system, coeffs, occ, kw, shape, omega0, *,
+                checkpoint: bool, band_chunk: int | None):
+    """ρ(r) [e/Å³] at the reference cell from the live orbitals.
+
+    ``checkpoint=True`` wraps each band chunk's FFT sandwich in
+    ``torch.utils.checkpoint`` (``use_reentrant=False`` so it composes with the
+    double-backward an Hvp needs); energies are unchanged to the last bit
+    because the recomputed forward is the identical op sequence.
+    """
+    n_grid = shape[0] * shape[1] * shape[2]
+    rho0 = None
+    for ik, sph in enumerate(system.spheres):
+        c = coeffs[ik]
+        flat_idx = sph.flat_idx
+        w = (kw[ik] * occ[ik]).to(RDTYPE)
+        nb = c.shape[0]
+        chunk = band_chunk or (
+            _density_band_chunk(n_grid, c.device, c.element_size())
+            if checkpoint else nb)
+        for lo in range(0, nb, chunk):
+            hi = min(lo + chunk, nb)
+            if checkpoint and c.requires_grad:
+                contrib = _torch_checkpoint(
+                    _band_density_chunk, c[lo:hi], flat_idx, shape, w[lo:hi],
+                    use_reentrant=False)
+            else:
+                contrib = _band_density_chunk(c[lo:hi], flat_idx, shape, w[lo:hi])
+            rho0 = contrib if rho0 is None else rho0 + contrib
+    return rho0 / omega0
+
+
 # --------------------------------------------------------------- energy fn
 def joint_energy(
     system: System,
@@ -158,6 +213,9 @@ def joint_energy(
     frac: torch.Tensor,      # (na,3) fractional positions
     coeffs: list[torch.Tensor],  # per-k (n_occ, npw_k), orthonormal rows
     occ: torch.Tensor,       # (nk, n_occ) fixed occupations
+    *,
+    checkpoint: bool | None = None,  # None → auto-on for CUDA
+    band_chunk: int | None = None,
 ) -> torch.Tensor:
     """KS total energy [eV] on the joint (ε, s, C) autograd graph.
 
@@ -187,14 +245,13 @@ def joint_energy(
         grid, b_e, dev)
 
     # density from the live orbitals, in the fixed-coefficient normalization
-    # ρ̃(G)·Ω₀ (electron counts — strain enters only through the 1/Ω scaling)
-    rho0 = None
-    for ik, sph in enumerate(system.spheres):
-        psi = g_to_r(coeffs[ik], sph.flat_idx, shape)  # (nb, n1,n2,n3)
-        w = (kw[ik] * occ[ik]).to(RDTYPE)
-        contrib = torch.einsum("b,bxyz->xyz", w, psi.real**2 + psi.imag**2)
-        rho0 = contrib if rho0 is None else rho0 + contrib
-    rho0 = rho0 / omega0  # e/Å³ at the reference cell
+    # ρ̃(G)·Ω₀ (electron counts — strain enters only through the 1/Ω scaling).
+    # Band-chunk gradient checkpointing (ideas.md step 3): auto-on for CUDA so
+    # the retained ψ activations scale with one chunk, not all bands.
+    if checkpoint is None:
+        checkpoint = dev.type == "cuda"
+    rho0 = _build_rho0(system, coeffs, occ, kw, shape, omega0,
+                       checkpoint=checkpoint, band_chunk=band_chunk)  # e/Å³
 
     rho_t = (r_to_g(rho0.to(CDTYPE)) * omega0).reshape(-1)[mask]
 
