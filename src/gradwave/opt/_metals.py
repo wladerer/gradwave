@@ -236,6 +236,46 @@ def mv_occupations(eta, kweights, smearing, width, n_electrons):
     return f, entropy, mu
 
 
+def mv_curvature(eta, mu, kweights, smearing, width):
+    """Diagonal η-block curvature ``∂²F/∂η_i² = 2 w_k δ̃(x_i)/σ`` (detached).
+
+    The Marzari–Vanderbilt occupation gradient is ``∂F/∂η_i =
+    (2 w_k δ̃_i/σ)(η_i − ε_i)`` with ``ε_i`` the Rayleigh quotient (Janak) and
+    ``δ̃ = −f′`` the smeared delta of the scheme — so the diagonal Hessian at the
+    stationary point ``η_i = ε_i`` is exactly the prefactor ``2 w_k δ̃_i/σ``. It
+    is peaked at the Fermi surface (where ``δ̃`` is O(1)) and vanishes deep in the
+    occupied/empty tails, which is the ill-conditioning the block preconditioner
+    below removes. ``δ̃`` is taken by autograd through the scheme's own occupation
+    (``f = 2·occ(x)``) so it is consistent with the SCF entropy for every
+    scheme.
+    """
+    scheme = SCHEMES[smearing]
+    x = ((eta.detach() - mu) / width).clone().requires_grad_(True)
+    f = 2.0 * scheme.occupation(x)
+    (df,) = torch.autograd.grad(f.sum(), x)  # df/dx = −2 δ̃(x) (≤ 0)
+    delta2 = (-df).clamp(min=0.0)  # 2 δ̃(x) ≥ 0
+    return kweights[:, None] * delta2 / width
+
+
+def mv_precond(eta, mu, kweights, smearing, width, *, floor_frac=1e-2, scale=1.0):
+    """Per-orbital √-metric preconditioner for the MV occupation leaves.
+
+    Returns ``p`` (nk, n_bands) such that the change of variables
+    ``η = p ⊙ η_leaf`` gives the η-block an ``O(scale)`` curvature in the leaf
+    (``p² · ∂²F/∂η² ≈ scale``): the single L-BFGS metric then sees the occupation
+    and (Teter-preconditioned, ``O(1)``) coefficient blocks on the SAME scale,
+    which is exactly what the earlier un-preconditioned MV-variable attempt
+    lacked (the eV-scale occupation block against the O(1) coefficient block left
+    strong-Wolfe unable to make progress — design-doc attempt 2). ``floor_frac``
+    caps ``p`` in the flat tails (``δ̃ → 0``) where the curvature underflows and a
+    bare ``1/√curv`` would blow up — harmless there because the gradient vanishes
+    with the curvature.
+    """
+    curv = mv_curvature(eta, mu, kweights, smearing, width)
+    floor = floor_frac * float(curv.max().clamp(min=1e-30))
+    return torch.sqrt(scale / (curv + floor))
+
+
 def subspace_occupations(
     system: System,
     xc,

@@ -2,7 +2,11 @@
 
 Status: prototype, norm-conserving. Insulators (fixed occupations) and metals
 (variational occupations, free-energy descent) are both supported, with LDA or
-PBE. Code: `gradwave/opt/joint.py`, `gradwave/opt/_metals.py`;
+PBE. Metal occupations have TWO interchangeable routes: the live degeneracy-robust
+subspace diagonalisation (`RobustEigh`) and the Marzari–Vanderbilt
+occupation-variable block (`mv_electronic_relax`, no `eigh` on the graph); both
+are exact at the electronic minimum. Code: `gradwave/opt/joint.py`,
+`gradwave/opt/_metals.py`;
 tests: `tests/unit/test_joint_opt.py` (fast + standard),
 `tests/integration/test_joint_vs_bfgs.py` (slow, the head-to-head).
 
@@ -222,9 +226,15 @@ optimizer, and three schemes were tried before one held:
    hands L-BFGS a gradient inconsistent with the moving objective; strong-Wolfe
    makes no progress (Al: E frozen, `‖∇‖` constant across dozens of closures).
 2. **Marzari–Vanderbilt occupation *variables* (η as extra L-BFGS leaves) —
-   stalls.** The occupation block (eV-scale) and the preconditioned coefficient
-   block (O(1)) live on wildly different scales; the single L-BFGS metric is so
-   ill-conditioned the line search dies with `|∂F/∂η| ≈ 3` unresolved.
+   stalls UNPRECONDITIONED, works PRECONDITIONED (#129).** The occupation block
+   (eV-scale) and the preconditioned coefficient block (O(1)) live on wildly
+   different scales; the single L-BFGS metric is so ill-conditioned the line
+   search dies with `|∂F/∂η| ≈ 3` unresolved. The fix is a √-metric occupation
+   preconditioner — the occupation-block Hessian is analytic
+   (`∂²F/∂η_i² = 2 w_k δ̃_i/σ`), so a per-orbital change of variables
+   `η = p_η ⊙ η_leaf` with `p_η = √(scale/(2 w_k δ̃_i/σ))` puts both blocks on one
+   L-BFGS metric. This is the route this PR lands as the electronic-block
+   minimiser; see "The MV occupation-variable block" below.
 3. **Block-coordinate DIAGONAL ensemble — converges (with two fixes).** Each
    orbital is occupied by its own Rayleigh quotient `e_i = ⟨ψ_i|Ĥ|ψ_i⟩`
    (`_metals.diagonal_occupations`, no rotation, so nothing drifts), FROZEN per
@@ -320,13 +330,78 @@ h_ref ≈ 50 k — **~0.4×**, vs the insulator's 7.8×). The live scheme is kep
 it is exact where the old one was silently wrong, and the descent genuinely
 descends — the slow test asserts what is true, and the PR stays a draft.
 
+### The MV occupation-variable block (#129) — the second scoped route
+
+`opt/_metals.mv_occupations` + `mv_precond`, `opt/joint.joint_free_energy_mv` +
+`mv_electronic_relax`. This is the route the issue named as an alternative to the
+robust-eigh solve, and it lands here as an **exact electronic-ensemble minimiser
+with NO `eigh` on the descent graph**. Occupations are an explicit smooth
+function of per-orbital occupation-level leaves `η`:
+
+    f_i = 2·f((η_i − μ)/σ),   μ = Fermi bisection enforcing Σf = N_e (detached),
+    F  = E[ρ] − σS(η) − μ(N − N_e),   ρ = Σ_k w_k f_i |ψ_i|²   (ψ = C, not rotated)
+
+and one L-BFGS descends `F` over `(C, η)` jointly. The Marzari–Vanderbilt
+stationarity is what makes it exact: `∂F/∂η_i = (2 w_k δ̃_i/σ)(η_i − ε_i)` with
+`ε_i = ⟨ψ_i|Ĥ[ρ]|ψ_i⟩` (Janak), so at the minimum `η → ` the band eigenvalues;
+`∂F/∂ψ_i = 0` forces the occupied-weighted Hamiltonian diagonal in the ψ basis,
+i.e. the ψ become eigenstates. The grand-potential `−μ(N−N_e)` term (zero in
+value, nonzero in gradient) removes the same particle-number drift the eigh route
+handles. Two things make it actually work:
+
+- **√-metric occupation preconditioner** (`mv_precond`). The block Hessian is
+  analytic, `∂²F/∂η_i² = 2 w_k δ̃(x_i)/σ` (peaked at the Fermi surface, → 0 in the
+  tails), so `η = p_η ⊙ η_leaf` with `p_η = √(scale/(2 w_k δ̃_i/σ))` (floored in
+  the flat tails) gives the occupation block an O(scale) curvature in the leaf —
+  the fix the un-preconditioned attempt 2 lacked.
+- **Gauge fix for the reported (η, μ).** `F` is invariant under a global shift
+  `η → η + c, μ → μ + c` (occupations depend only on `η − μ`), so the descent
+  leaves the ABSOLUTE level undetermined — `F` and the occupations are pinned but
+  the reported `μ` floats. A single DETACHED subspace diagonalisation at the
+  converged density recovers the physical spectrum and Fermi level (a reporting
+  diagnostic — not on the descent graph, not in the H-apply count).
+
+**Electronic correctness gate (fixed geometry) — PASS.** Small smeared Al (fcc
+primitive, 12 Ry, 2×2×2, gaussian σ = 0.3), seeded from a 2-iteration loose SCF,
+converges in **27 closures** to: free energy within **1.2e-7 eV** of the SCF
+reference, occupations matching state-for-state to **1e-10**, Σf = N_e exact, and
+Fermi level within **3.8 meV** — with no `eigh` on the descent graph.
+Asserted in `test_mv_electronic_relax_matches_scf`.
+
+**Joint (positions + orbitals + η) descent — documented NEGATIVE.**
+`joint_relax(smearing=…, occ_variables=True)` wires the same objective into the
+full driver (η becomes an extra leaf block, √-metric preconditioned, re-metricked
+on stall alongside the orbital re-canonicalisation). On the positions-only Al
+head-to-head (2-atom simple-cubic Al, 13 Ry, 3×3×3, gaussian σ = 0.3, atom
+displaced 0.15/−0.10/0.06 Å; tight nested reference relaxes 3.5754 → 3.5078 Å,
+E(SCF) = −3362.5695 eV, 55 342 H-applies) the MV co-descent **does not leave the
+seed geometry**: seeded from a 3-iteration loose SCF it reports "converged"
+(fmax = 2.4e-3, 56 closures) at d = 3.5753 Å — the START separation — reproducing
+exactly the start-geometry spurious-force-zero the original frozen-occupation
+scheme showed. The cause is the same, now in the joint co-optimisation: away from
+electronic self-consistency the MV free-energy gradient w.r.t. positions is
+biased small (the `(λ−ε)`/`(η−ε)` residual again), and because the loose seed's
+orbital and η gradients are ALSO small there, the single L-BFGS declares a joint
+stationary point before the electronic state converges enough to expose the true
+0.35 eV/Å force. The fixed-geometry `mv_electronic_relax` avoids this precisely
+because it converges the electronic block first; the co-descent does not, so
+`occ_variables=True` is provided but the eigh route (which at least MOVES the
+atoms, 3.5754 → 3.528 Å) remains the better joint-descent option.
+
+The occupation-block fix is therefore a clean positive at the
+*electronic-structure* level (an exact, eigh-free metal SCF by direct
+minimisation — the #129 correctness gate) and a documented negative at the
+*joint-relaxation* level. The obstacle is the same one the eigh route hits: the
+force is only trustworthy at (near) electronic self-consistency, which a single
+L-BFGS co-descending ions and electrons from a loose seed does not maintain.
+
 ## Next steps
 
-- **Preconditioned Marzari–Vanderbilt occupation block** (the remaining scoped
-  route in #129): occupation levels as explicit leaves with a metric matched
-  to the coefficient block — no `eigh` on the graph, no inner fixed point, and
-  the ensemble stiffness lands in a block that can be preconditioned
-  analytically (`∂²F/∂η² ≈ 2w·δ̃/σ`).
+- **Curvature-aware near-Fermi modes.** Both occupation routes now reach the
+  electronic minimum; the joint-descent floor is the ensemble/ionic stiffness
+  (~ f′/σ) that neither the Teter (coefficient) nor the √-metric (occupation)
+  preconditioner captures — a coupled ionic–electronic preconditioner (Pfrommer
+  / Newton-CG over the joint block, the #138 direction) is the scoped next fix.
 - **Warm-start the inner occupation solve across closures** (carry ρ / f / μ);
   the cold uniform start pays 10-60 damped sweeps per closure.
 - Curvature-aware treatment of the near-Fermi rotation modes (their stiffness

@@ -18,13 +18,14 @@ import torch
 
 from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.core.xc.pbe import PBE
-from gradwave.dtypes import RDTYPE
+from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.opt.joint import (
     count_h_applies,
     joint_energy,
     joint_free_energy,
     joint_relax,
     lowdin,
+    mv_electronic_relax,
     teter_precond,
 )
 from gradwave.pseudo.radial_torch import RadialTables
@@ -255,6 +256,42 @@ def test_joint_free_energy_position_gradient_matches_forces():
     de_dpos = de_dpos - de_dpos.mean(axis=0, keepdims=True)
     f_ref = forces(res, xc=xc).numpy()
     assert np.abs(-de_dpos - f_ref).max() < 1e-5
+
+
+@pytest.mark.standard
+def test_mv_electronic_relax_matches_scf(al_scf):
+    """Marzari–Vanderbilt occupation-variable descent (#129, the second scoped
+    route): minimising the Mermin free energy jointly over the orbitals AND the
+    occupation-level variables η at FIXED geometry reproduces the SCF+smearing
+    free energy, occupations and Fermi level — the metal electronic-ensemble
+    correctness gate.
+
+    Unlike the subspace-diagonalisation route (``joint_free_energy``), the
+    occupations here are an explicit smooth function of preconditioned optimizer
+    leaves, so there is NO ``eigh`` on the descent graph — the earlier
+    un-preconditioned MV attempt stalled on the occupation/coefficient scale
+    mismatch; the √-metric occupation preconditioner (``_metals.mv_precond``)
+    puts both blocks on one L-BFGS metric. Seeded from a LOOSE (2-iteration) SCF,
+    it converges in a few tens of closures."""
+    cell, pos, system, xc, res = al_scf
+    tabs = [RadialTables(u) for u in system.upfs]
+    nb = int(system.nbands)
+    seed = scf(system, xc, smearing="gaussian", width=0.3, max_iter=2,
+               etol=0.0, rhotol=0.0, diago_tol=1e-4, verbose=False)
+    coeffs0 = [lowdin(c[:nb].to(CDTYPE)) for c in seed.coeffs]
+    eta0 = seed.eigenvalues[:, :nb].clone()
+    r = mv_electronic_relax(system, xc, tabs, coeffs0, eta0, "gaussian", 0.3,
+                            max_closures=200, ctol=1e-4, etol=1e-4)
+    assert r.converged
+    assert r.free_energy == pytest.approx(float(res.energies.free_energy), abs=1e-4)
+    assert r.mu == pytest.approx(res.fermi, abs=2e-2)
+    ne = float((r.occ * system.kweights[:, None]).sum())
+    assert ne == pytest.approx(system.n_electrons, abs=1e-6)
+    # occupations agree state-for-state (sorted — the frame within an
+    # equal-occupation subspace is gauge-free)
+    o_mv = np.sort(r.occ.detach().cpu().numpy().ravel())
+    o_ref = np.sort(res.occupations.detach().cpu().numpy().ravel())
+    assert np.abs(o_mv - o_ref).max() < 1e-3
 
 
 @pytest.mark.standard

@@ -286,6 +286,49 @@ def joint_free_energy(
     return f, occ.detach(), mu, eigs
 
 
+def joint_free_energy_mv(
+    system: System,
+    xc: XCFunctional,
+    tabs: list[RadialTables],
+    eps: torch.Tensor,
+    frac: torch.Tensor,
+    coeffs: list[torch.Tensor],   # per-k (n_bands, npw_k), orthonormal rows
+    eta: torch.Tensor,            # (nk, n_bands) occupation-level variables [eV]
+    smearing: str,
+    width: float,
+) -> tuple[torch.Tensor, torch.Tensor, float]:
+    """Mermin free energy with **Marzari–Vanderbilt occupation variables**.
+
+    The occupations are NOT obtained by diagonalising a subspace Hamiltonian
+    (``joint_free_energy``) — they are an explicit smooth function of the
+    optimizer leaves ``eta``: ``f_i = 2·f((η_i−μ)/σ)`` with ``μ`` a detached
+    Fermi bisection enforcing ``Σ f = N_e`` (Lagrange multiplier). The density is
+    ``ρ = Σ_k w_k f_i |ψ_i|²`` at the current orbitals ``ψ`` (the ``coeffs``,
+    NOT rotated), so ``F = E[ρ] − σS(η) − μ(N − N_e)`` is an ordinary
+    differentiable function of ``(ε, frac, C, η)`` with NO ``eigh`` on the graph.
+
+    Ensemble stationarity (Marzari–Vanderbilt): ``∂F/∂η_i = (2w_kδ̃_i/σ)(η_i−ε_i)``
+    with ``ε_i = ⟨ψ_i|Ĥ[ρ]|ψ_i⟩`` (Janak), so at the minimum ``η → `` the band
+    eigenvalues; ``∂F/∂ψ_i = 0`` forces the occupied-weighted Hamiltonian
+    diagonal in the ψ basis, i.e. the ψ become eigenstates — the SCF Mermin
+    solution, reached by descent over ``(C, η)`` jointly instead of a nested
+    self-consistent occupation solve. The grand-potential ``−μ(N−N_e)`` term is
+    zero in value (``μ`` fixes ``Σf = N_e``) but its gradient removes the
+    spurious particle-number drift (same argument as ``joint_free_energy``).
+
+    Returns ``(F, occ.detach(), mu)``.
+    """
+    from gradwave.opt._metals import mv_occupations
+
+    f_occ, entropy, mu = mv_occupations(
+        eta, system.kweights, smearing, width, system.n_electrons)
+    e = joint_energy(system, xc, tabs, eps, frac, coeffs, f_occ)
+    ne_live = (f_occ * system.kweights[:, None]).sum()
+    mu_t = torch.tensor(mu, dtype=ne_live.dtype, device=ne_live.device)
+    free = e + entropy - mu_t * (ne_live - system.n_electrons)
+    return free, f_occ.detach(), mu
+
+
 # ------------------------------------------------------------ orbital seeds
 def _transfer_coeffs(old_spheres, new_spheres, coeffs):
     """Map per-k coefficients between G-spheres by matching Miller indices.
@@ -308,6 +351,145 @@ def _transfer_coeffs(old_spheres, new_spheres, coeffs):
         c_new[:, idx_new] = c[:, idx_old]
         out.append(c_new)
     return out
+
+
+# ------------------------------------------ MV electronic ensemble minimiser
+@dataclass
+class MVElectronicResult:
+    converged: bool
+    free_energy: float          # eV — Mermin free energy at the minimum
+    mu: float                   # Fermi level [eV]
+    occ: torch.Tensor           # (nk, n_bands) occupations in [0, 2]
+    eta: torch.Tensor           # (nk, n_bands) occupation-level variables [eV]
+    coeffs: list                # per-k orthonormal orbitals (n_bands rows)
+    n_closures: int
+    cmax: float                 # max |dF/dZ| at exit
+    emax: float                 # max |dF/dη| at exit [eV]
+    history: list = field(default_factory=list)
+
+
+def mv_electronic_relax(
+    system: System,
+    xc: XCFunctional,
+    tabs: list[RadialTables],
+    coeffs0: list[torch.Tensor],   # per-k (n_bands, npw) orthonormal seed orbitals
+    eta0: torch.Tensor,            # (nk, n_bands) seed occupation levels [eV]
+    smearing: str,
+    width: float,
+    *,
+    max_closures: int = 400,
+    lbfgs_chunk: int = 25,
+    history_size: int = 120,
+    eta_scale: float = 1.0,
+    eta_floor_frac: float = 1e-2,
+    ctol: float = 1e-4,            # max |dF/dZ| gate
+    etol: float = 1e-4,           # max |dF/dη| gate [eV]
+    verbose: bool = False,
+) -> MVElectronicResult:
+    """Fixed-geometry metal electronic minimisation via MV occupation variables.
+
+    The metal analogue of a single SCF, but by DIRECT joint descent instead of a
+    nested self-consistent occupation solve: one L-BFGS minimises the Mermin free
+    energy ``F = E − σS − μ(N − N_e)`` over the orbital coefficients (Teter-
+    preconditioned, Cholesky-orthonormalised, as the insulator path) AND the
+    Marzari–Vanderbilt occupation levels ``η`` (per-orbital √-metric
+    preconditioned so the two blocks share one L-BFGS metric — the fix the
+    earlier un-preconditioned MV attempt lacked). At the minimum the orbitals are
+    eigenstates and ``η`` are their eigenvalues, so ``F``, the occupations and
+    ``μ`` reproduce the SCF+smearing reference (the correctness gate, #129).
+
+    Geometry is fixed (ε = 0, positions frozen). Returns an
+    :class:`MVElectronicResult`.
+    """
+    from gradwave.opt._metals import mv_precond
+
+    dev = coeffs0[0].device
+    nk = len(coeffs0)
+    kw = system.kweights
+    npws = [sph.npw for sph in system.spheres]
+    frac0 = torch.tensor(
+        np.asarray(system.positions.detach().cpu())
+        @ np.linalg.inv(np.asarray(system.grid.cell, dtype=np.float64)),
+        dtype=RDTYPE, device=dev)
+    eps0 = torch.zeros(3, 3, dtype=RDTYPE, device=dev)
+
+    # coefficient preconditioner + raw leaves (identical to joint_relax)
+    ekin_ref = float(np.mean([
+        kinetic_band(coeffs0[ik], system.spheres[ik].kpg2).mean().item()
+        for ik in range(nk)]))
+    precond = [teter_precond(sph.kpg2, ekin_ref).to(RDTYPE)
+               for sph in system.spheres]
+    z_params = []
+    for ik in range(nk):
+        z0 = coeffs0[ik].to(CDTYPE) / precond[ik][None, :].to(CDTYPE)
+        z_params.append(torch.view_as_real(z0.contiguous()).clone()
+                        .requires_grad_(True))
+
+    # occupation √-metric preconditioner (frozen from the seed): η = p_eta ⊙ leaf
+    from gradwave.core.occupations import SCHEMES, find_fermi
+    mu0 = float(find_fermi(eta0.detach(), kw, SCHEMES[smearing], width,
+                           system.n_electrons, degeneracy=2.0))
+    p_eta = mv_precond(eta0, mu0, kw, smearing, width,
+                       floor_frac=eta_floor_frac, scale=eta_scale).to(RDTYPE)
+    eta_leaf = (eta0.detach().to(RDTYPE) / p_eta).clone().requires_grad_(True)
+
+    leaves = [eta_leaf, *z_params]
+    opt = torch.optim.LBFGS(
+        leaves, lr=1.0, max_iter=lbfgs_chunk, history_size=history_size,
+        line_search_fn="strong_wolfe", tolerance_grad=0.0, tolerance_change=0.0)
+
+    n_closures = 0
+    history: list = []
+    last = {}
+
+    def closure():
+        nonlocal n_closures
+        opt.zero_grad()
+        coeffs = _coeffs_from_z(z_params, precond, npws)
+        eta = eta_leaf * p_eta
+        free, occ, mu = joint_free_energy_mv(
+            system, xc, tabs, eps0, frac0, coeffs, eta, smearing, width)
+        free.backward()
+        n_closures += 1
+        history.append((n_closures, float(free.detach())))
+        last["occ"], last["mu"] = occ, mu
+        return free
+
+    converged = False
+    cmax = emax = float("inf")
+    while n_closures < max_closures:
+        opt.step(closure)
+        cmax = max(float(z.grad.detach().abs().max()) for z in z_params)
+        # physical η-gradient: η = p_eta·leaf ⟹ dF/dη = leaf.grad / p_eta
+        emax = float((eta_leaf.grad.detach() / p_eta).abs().max())
+        if verbose:
+            print(f"  mv-elec closures {n_closures:4d}  "
+                  f"F = {history[-1][1]:+.8f} eV  cmax {cmax:.2e}  "
+                  f"emax {emax:.2e}", flush=True)
+        if cmax < ctol and emax < etol:
+            converged = True
+            break
+
+    # Gauge-fix the reported (η, μ). The MV free energy is invariant under a
+    # global shift η_i → η_i + c, μ → μ + c (occupations depend only on η−μ), so
+    # the descent leaves the ABSOLUTE level of (η, μ) undetermined — F and the
+    # occupations are correct but the reported μ floats off the physical Fermi
+    # level. Recover the physical spectrum with a single DETACHED subspace
+    # diagonalisation at the converged density (a reporting diagnostic — NOT part
+    # of the descent, its gradient, or the H-apply count; it also fixes the frame
+    # inside equal-occupation subspaces, which a bare Rayleigh quotient cannot).
+    from gradwave.opt._metals import subspace_occupations
+    lmax = max((b.l for u in system.upfs for b in u.betas), default=0)
+    with torch.no_grad():
+        coeffs_final = _coeffs_from_z(z_params, precond, npws)
+        _, occ_phys, _, eta_phys, mu_phys = subspace_occupations(
+            system, xc, tabs, coeffs_final, smearing, width,
+            system.n_electrons, lmax=lmax, n_inner=6)
+    return MVElectronicResult(
+        converged=converged, free_energy=history[-1][1] if history else float("nan"),
+        mu=mu_phys, occ=occ_phys, eta=eta_phys,
+        coeffs=[c.detach() for c in coeffs_final], n_closures=n_closures,
+        cmax=cmax, emax=emax, history=history)
 
 
 # ------------------------------------------------------------------ driver
@@ -360,6 +542,8 @@ def joint_relax(
     n_bands: int | None = None,  # bands carried for metals (default: SCF nbands)
     n_inner: int = 6,          # detached occupation fixed-point iters (metals)
     broaden: float | None = None,  # robust-eigh Lorentzian ε [eV]; default = width
+    occ_variables: bool = False,   # metal: Marzari–Vanderbilt occupation leaves
+    eta_scale: float = 1.0,        # MV occupation-block preconditioner scale
     fmax: float = 0.005,       # eV/Å
     smax: float = 5e-4,        # eV/Å³ (≈ 0.08 GPa)
     ctol: float = 5e-4,        # max |dE/dZ| [eV]
@@ -396,8 +580,17 @@ def joint_relax(
     (:class:`~gradwave.opt._metals.RobustEigh`), so the gradient is the full
     Mermin free-energy gradient — closing the frozen-occupation force bias
     (#129). Works with LDA or PBE ``xc``.
+
+    ``occ_variables=True`` (metal only) switches the occupation model to the
+    Marzari–Vanderbilt route: occupation-level variables ``η`` become explicit
+    L-BFGS leaves (``joint_free_energy_mv``), √-metric preconditioned
+    (``eta_scale``) onto the coefficient block's scale, so there is NO ``eigh``
+    on the descent graph. The two routes minimise the same Mermin free energy;
+    this one trades the detached inner occupation solve for extra leaves.
     """
     metal = smearing != "none"
+    mv = metal and occ_variables
+    eta_carry = None
     cell = np.asarray(cell, dtype=np.float64)
     positions = np.asarray(positions, dtype=np.float64)
     coeffs_init = None
@@ -434,6 +627,8 @@ def joint_relax(
                           etol=0.0, rhotol=0.0, diago_tol=1e-4)
             h_seed += counter.count
             coeffs_init = [lowdin(c[:n_carry].to(CDTYPE)) for c in res.coeffs]
+            if mv:
+                eta_carry = res.eigenvalues[:, :n_carry].detach().clone()
         else:
             coeffs_init = [lowdin(c) for c in
                            _transfer_coeffs(prev_spheres, system.spheres,
@@ -460,7 +655,20 @@ def joint_relax(
                             .clone().requires_grad_(True))
         npws = [sph.npw for sph in system.spheres]
 
+        # ---- MV occupation leaves: η = p_eta ⊙ η_leaf (√-metric preconditioned)
+        eta_leaf = p_eta = None
+        if mv:
+            from gradwave.core.occupations import SCHEMES, find_fermi
+            from gradwave.opt._metals import mv_precond
+            mu0 = float(find_fermi(eta_carry, system.kweights, SCHEMES[smearing],
+                                   width, system.n_electrons, degeneracy=2.0))
+            p_eta = mv_precond(eta_carry, mu0, system.kweights, smearing, width,
+                               scale=eta_scale).to(RDTYPE)
+            eta_leaf = (eta_carry.to(RDTYPE) / p_eta).clone().requires_grad_(True)
+
         leaves = ([frac_p] if fix_cell else [eps_p, frac_p]) + z_params
+        if mv:
+            leaves = leaves + [eta_leaf]
         chunk = lbfgs_chunk
 
         def make_opt(_leaves=leaves, _chunk=chunk):
@@ -484,7 +692,8 @@ def joint_relax(
         # stalls (metal curvature turns over as the Fermi ensemble shifts; stale
         # pairs then poison strong-Wolfe and freeze the step at zero).
         def closure(_oh=opt_holder, _z=z_params, _p=precond, _n=npws, _sys=system,
-                    _tabs=tabs, _eps=eps_p, _frac=frac_p, _occ=occ, _lmax=lmax):
+                    _tabs=tabs, _eps=eps_p, _frac=frac_p, _occ=occ, _lmax=lmax,
+                    _eta=eta_leaf, _peta=p_eta):
             nonlocal n_closures
             _oh[0].zero_grad()
             # volume-collapse guard: a strong-Wolfe trial step along strain is
@@ -496,6 +705,10 @@ def joint_relax(
                 torch.eye(3, dtype=RDTYPE, device=_eps.device) + eps_s)
             if float(detj.detach()) < 0.2 or float(detj.detach()) > 5.0:
                 e = 1e3 * ((detj - 1.0) ** 2 + (eps_s ** 2).sum() + 1.0)
+            elif mv:  # Marzari–Vanderbilt occupation variables (no eigh on graph)
+                coeffs = _coeffs_from_z(_z, _p, _n)
+                e = joint_free_energy_mv(_sys, xc, _tabs, _eps, _frac, coeffs,
+                                         _eta * _peta, smearing, width)[0]
             elif metal:
                 coeffs = _coeffs_from_z(_z, _p, _n)
                 e = joint_free_energy(_sys, xc, _tabs, _eps, _frac, coeffs,
@@ -525,12 +738,17 @@ def joint_relax(
             # gate for metals (physical convergence is carried by fmax/smax,
             # which are unaffected). Insulator gate unchanged.
             ctol_eff = max(ctol, 2.5e-3) if metal else ctol
+            # MV occupation-block gate: physical η-gradient dF/dη = η_leaf.grad/p_eta
+            e_now_grad = (float((eta_leaf.grad.detach() / p_eta).abs().max())
+                          if mv and eta_leaf.grad is not None else 0.0)
             if verbose:
                 print(f"  joint cycle {cycle} closures {n_closures:4d}  "
                       f"E = {e_now:+.8f} eV  fmax {f_now:.2e}  "
-                      f"smax {s_now:.2e}  cmax {c_now:.2e}", flush=True)
+                      f"smax {s_now:.2e}  cmax {c_now:.2e}"
+                      + (f"  emax {e_now_grad:.2e}" if mv else ""), flush=True)
             if (f_now < fmax and c_now < ctol_eff
-                    and (fix_cell or s_now < smax)):
+                    and (fix_cell or s_now < smax)
+                    and (not mv or e_now_grad < max(ctol, 1e-3))):
                 converged_inner = True
                 break
             # stall recovery: a chunk that lowers E by < 1e-9 eV means the
@@ -559,6 +777,20 @@ def joint_relax(
                         z_new = coeffs_now[ik] / precond[ik][None, :].to(CDTYPE)
                         z_params[ik].copy_(torch.view_as_real(
                             z_new.contiguous()))
+                    if mv:  # refresh the occupation preconditioner at current η
+                        # (in-place on p_eta so the closure's bound reference and
+                        # the convergence-gate reader see the new metric)
+                        from gradwave.core.occupations import SCHEMES, find_fermi
+                        from gradwave.opt._metals import mv_precond
+                        eta_phys = (eta_leaf * p_eta).detach()
+                        mu_now = float(find_fermi(
+                            eta_phys, system.kweights, SCHEMES[smearing], width,
+                            system.n_electrons, degeneracy=2.0))
+                        p_new = mv_precond(eta_phys, mu_now, system.kweights,
+                                           smearing, width,
+                                           scale=eta_scale).to(RDTYPE)
+                        eta_leaf.copy_(eta_phys / p_new)
+                        p_eta.copy_(p_new)
                 opt_holder[0] = make_opt()
             else:
                 stalled_once = False
@@ -572,6 +804,8 @@ def joint_relax(
         positions = frac_np @ cell
         coeffs_init = [c.detach() for c in
                        _coeffs_from_z(z_params, precond, npws)]
+        if mv:  # carry the occupation levels into the next basis-rebuild cycle
+            eta_carry = (eta_leaf * p_eta).detach().clone()
         prev_spheres = system.spheres
         strain_step = float(np.abs(eps_np).max())
         logger.info("joint cycle %d: %d closures, max|eps|=%.2e, "
