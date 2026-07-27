@@ -173,6 +173,10 @@ class GradWave(Calculator):
         # previous ionic step's eigenvectors (alongside the density warm start);
         # False falls back to a density-only warm start (cold orbital seed)
         dispersion=None,  # opt-in D3(BJ): True/False, or a dict of overrides
+        hubbard=None,  # DFT+U: list of per-species manifolds, each an object/dict
+        # with .species (element symbol) / .l / .u [eV] / optional .j; None → off.
+        # Norm-conserving only through the calculator (USPP/PAW +U stress is not
+        # implemented and the calculator always evaluates stress for a cell).
         verbose: bool = False,
         **kwargs,
     ):
@@ -216,6 +220,18 @@ class GradWave(Calculator):
                 raise ValueError(
                     f"dispersion method must be 'd3' or 'd4', got {method!r}")
         self.parameters["dispersion"] = self._dispersion
+        # DFT+U manifolds normalized to (element, l, U, J) tuples and kept
+        # element-keyed; resolved to species indices per calculate() (where the
+        # current atoms' symbol ordering is known). Accepts objects with
+        # .species/.l/.u/.j (inputs.HubbardManifoldSpec) or plain dicts.
+        def _norm(m):
+            g = (lambda k, d=None: m.get(k, d)) if isinstance(m, dict) else (
+                lambda k, d=None: getattr(m, k, d))
+            return (str(g("species")), int(g("l")), float(g("u")),
+                    float(g("j", 0.0)))
+        self._hubbard = None if not hubbard else [_norm(m) for m in hubbard]
+        self.parameters["hubbard"] = (None if self._hubbard is None
+                                      else tuple(self._hubbard))
         self._pseudo_paths = dict(pseudopotentials)
         self._upf_cache: dict[str, object] = {}
         self._system = None
@@ -258,6 +274,23 @@ class GradWave(Calculator):
         if tot_mag is None and self.parameters["smearing"] == "none":
             tot_mag = float(magmoms.sum())
         return 2, start_mag, None if tot_mag is None else float(tot_mag)
+
+    def _resolve_hubbard(self, atoms):
+        """DFT+U manifolds as ``core.hubbard.HubbardManifold`` with the element
+        symbols resolved to species indices for the current atoms, or None. The
+        index matches the SCF setup's ``sorted(set(symbols))`` species ordering."""
+        if self._hubbard is None:
+            return None
+        from gradwave.core.hubbard import HubbardManifold
+
+        species = sorted(set(atoms.get_chemical_symbols()))
+        out = []
+        for sp, l, u, j in self._hubbard:
+            if sp not in species:
+                raise ValueError(
+                    f"DFT+U manifold species {sp!r} is not in the structure")
+            out.append(HubbardManifold(species=species.index(sp), l=l, u=u, j=j))
+        return out
 
     def _upf(self, symbol):
         # shared loader (NC / USPP-PAW detection) lives in api; keep the
@@ -354,8 +387,12 @@ class GradWave(Calculator):
         energies by up to ~0.3 eV once a move breaks a symmetry op (#128)."""
         symbols = atoms.get_chemical_symbols()
         species = sorted(set(symbols))
+        # DFT+U needs the full spatial BZ: an IBZ-folded mesh under-counts the
+        # correlated occupation matrix (see api.build_system). Force symmetry off
+        # whenever +U is on, matching the api path and the validated regime.
+        use_sym = self.parameters["use_symmetry"] and self._hubbard is None
         key = (tuple(np.round(atoms.cell.array, 12).ravel()), tuple(symbols))
-        if (not self.parameters["use_symmetry"] and self._system is not None
+        if (not use_sym and self._system is not None
                 and key == self._system_key):
             return dataclasses.replace(
                 self._system,
@@ -371,7 +408,7 @@ class GradWave(Calculator):
             kmesh=self.parameters["kpts"],
             kshift=self.parameters["kshift"],
             nbands=self.parameters["nbands"],
-            use_symmetry=self.parameters["use_symmetry"],
+            use_symmetry=use_sym,
         ).to(self._device)
         self._system, self._system_key = system, key
         return system
@@ -491,6 +528,7 @@ class GradWave(Calculator):
         # the solver's own default stands when the user left it unset
         mix_kw = ({} if p["mixing_history"] is None
                   else {"mixing_history": p["mixing_history"]})
+        manifolds = self._resolve_hubbard(self.atoms)
         res = scf(
             system, xc,
             smearing=p["smearing"], width=p["width"],
@@ -499,6 +537,7 @@ class GradWave(Calculator):
             diago_tol=p["diago_tol"], verbose=self._verbose,
             eigensolver=p["eigensolver"], precond=p["precond"],
             nspin=nspin, start_mag=start_mag, tot_magnetization=tot_mag,
+            hubbard=manifolds,
             start_from=self._warm_start(system, nspin), **mix_kw,
         )
         if not res.converged:
@@ -512,14 +551,21 @@ class GradWave(Calculator):
         # xc is used only when the system carries an NLCC core charge (the
         # core-correction force term, spin-resolved for nspin=2); ignored for
         # valence-only species. Reuse the (spin-matched) functional above.
-        self.results["forces"] = hf_forces(res, xc=xc).cpu().numpy()
+        f = hf_forces(res, xc=xc)
+        if manifolds is not None:
+            # +U Hellmann-Feynman force through the atomic-orbital projector
+            # phases, additive to the KB/local/Ewald force (nspin 1 and 2).
+            from gradwave.postscf.forces import hubbard_force
+
+            f = f + hubbard_force(res, manifolds)
+        self.results["forces"] = f.cpu().numpy()
         if self.atoms.pbc.all():
             # unconditional (not gated on the requested properties): one
             # autograd backward over the stored SCF state, far cheaper than
             # the warm SCF + forces a re-entrant stress request used to cost
             from gradwave.postscf.stress import stress as hf_stress
 
-            sig = hf_stress(res, xc).cpu().numpy()
+            sig = hf_stress(res, xc, manifolds=manifolds).cpu().numpy()
             # ASE Voigt order (xx, yy, zz, yz, xz, xy); ASE's convention is
             # +(1/Ω)∂E/∂ε, same as ours
             self.results["stress"] = np.array([
@@ -581,6 +627,16 @@ class GradWave(Calculator):
             raise ValueError(
                 "eigensolver='chebyshev' is norm-conserving only; the USPP/PAW "
                 "generalized S-metric problem is not supported yet")
+        if self._hubbard is not None:
+            # USPP/PAW +U forces exist (forces_uspp reads them off the result),
+            # but +U stress on the S-dressed projectors is not implemented, and
+            # the calculator evaluates stress for every periodic cell — so a +U
+            # relaxation/EOS here would fail in stress. Keep the calculator +U
+            # path norm-conserving; USPP/PAW +U single points run via task: scf.
+            raise NotImplementedError(
+                "DFT+U through the GradWave calculator is norm-conserving only; "
+                "USPP/PAW +U stress is not implemented (run task: scf via the "
+                "api for a single-point USPP/PAW +U energy and forces)")
         system = self._get_uspp_system(self.atoms)
         # scf_uspp takes mixing_history=None natively (per-scheme default)
         res = scf_uspp(system, self._make_xc(), smearing=p["smearing"],

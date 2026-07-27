@@ -268,6 +268,36 @@ class HybridParams:
 
 
 @dataclass(frozen=True)
+class HubbardManifoldSpec:
+    """One DFT+U (Dudarev) correction: U (and Hund J) on the ``l`` shell of every
+    atom of element ``species``. ``l`` picks the correlated manifold (2 = d,
+    3 = f, 1 = p, 0 = s); the pseudopotential must carry that atomic orbital
+    (``PP_PSWFC``). Energies in eV. ``U_eff = U − J`` is what enters Dudarev."""
+
+    species: str            # element symbol (must appear in the structure)
+    l: int                  # angular momentum of the correlated shell
+    u: float                # Hubbard U [eV]
+    j: float = 0.0          # Hund J [eV]; enters Dudarev only as U_eff = U − J
+
+    def __post_init__(self):
+        if self.l not in (0, 1, 2, 3):
+            raise InputError(
+                f"hubbard.l must be 0 (s) | 1 (p) | 2 (d) | 3 (f), got {self.l}")
+
+
+@dataclass(frozen=True)
+class HubbardParams:
+    """Rotationally-invariant DFT+U (Dudarev) applied in the SCF. Off by default;
+    a ``hubbard`` block is a list of per-species manifolds. The +U occupation
+    correction threads through the norm-conserving and USPP/PAW SCF, and its
+    force/stress terms are added on those paths (USPP/PAW +U stress stays gated).
+    Collinear only (nspin 1 or 2); noncollinear/SOC +U is not wired."""
+
+    enabled: bool = False
+    manifolds: tuple = ()   # tuple[HubbardManifoldSpec, ...]
+
+
+@dataclass(frozen=True)
 class Input:
     atoms: Atoms
     pseudo_dir: Path
@@ -276,6 +306,7 @@ class Input:
     ecutrho: float | None = None  # USPP/PAW density cutoff; None → 4×ecut
     xc: str = "pbe"  # lda | pbe | r2scan (semilocal base for a hybrid xc)
     hybrid: HybridParams = field(default_factory=HybridParams)  # pbe0 | hse
+    hubbard: HubbardParams = field(default_factory=HubbardParams)  # DFT+U
     kpoints: KPointsParams = field(default_factory=KPointsParams)
     smearing: SmearingParams = field(default_factory=SmearingParams)
     nbands: int | None = None
@@ -444,9 +475,9 @@ def _load_structure(spec, base: Path) -> Atoms:
 # Every top-level key the schema understands; anything else is a typo. Kept
 # beside the Input fields it feeds so the two do not drift.
 _ALLOWED_TOP = {
-    "structure", "pseudopotentials", "ecut", "ecutrho", "xc", "hybrid", "kpoints",
-    "smearing", "nbands", "symmetry", "nspin", "noncollinear", "nonmagnetic",
-    "start_mag", "tot_magnetization",
+    "structure", "pseudopotentials", "ecut", "ecutrho", "xc", "hybrid", "hubbard",
+    "kpoints", "smearing", "nbands", "symmetry", "nspin", "noncollinear",
+    "nonmagnetic", "start_mag", "tot_magnetization",
     "scf", "task", "relax", "bands", "magnetism", "eos", "elastic", "phonons",
     "projections", "dispersion", "device",
     "verbose", "output", "error_estimate", "restart",
@@ -620,6 +651,41 @@ def _resolve_xc(raw) -> tuple[str, HybridParams]:
     )
 
 
+def _build_hubbard(hub_raw, symbols: list[str]) -> HubbardParams:
+    """Parse the `hubbard` block: a list of per-species +U manifolds. Each entry
+    names an element `species` present in the structure, the correlated shell
+    `l`, and `u` (+ optional `j`) in eV. One manifold per species (Dudarev is a
+    per-species correction); a species absent from the cell is a typo, not a
+    silent no-op, so it is rejected."""
+    if hub_raw is None:
+        return HubbardParams()
+    if not isinstance(hub_raw, (list, tuple)):
+        raise InputError(
+            "hubbard must be a list of {species, l, u[, j]} manifolds")
+    present = set(symbols)
+    seen = set()
+    manifolds = []
+    for i, entry in enumerate(hub_raw):
+        _check_keys(f"hubbard[{i}]", entry, {"species", "l", "u", "j"})
+        if "species" not in entry or "l" not in entry or "u" not in entry:
+            raise InputError(
+                f"hubbard[{i}] needs species, l and u (u in eV; l the shell)")
+        sp = str(entry["species"])
+        if sp not in present:
+            raise InputError(
+                f"hubbard[{i}]: species {sp!r} is not in the structure "
+                f"(elements present: {', '.join(sorted(present))})")
+        if sp in seen:
+            raise InputError(
+                f"hubbard: species {sp!r} appears twice (one manifold per "
+                f"species — Dudarev +U applies to every atom of the element)")
+        seen.add(sp)
+        manifolds.append(HubbardManifoldSpec(
+            species=sp, l=int(entry["l"]), u=float(entry["u"]),
+            j=float(entry.get("j", 0.0))))
+    return HubbardParams(enabled=bool(manifolds), manifolds=tuple(manifolds))
+
+
 def _load_input(path: Path) -> Input:
     raw = yaml.safe_load(path.read_text())
     base = path.parent
@@ -676,6 +742,19 @@ def _load_input(path: Path) -> Input:
                 "tot_magnetization (fixed spin moment M=N↑−N↓) applies only to "
                 "a collinear spin run (nspin: 2)")
 
+    # DFT+U: a per-species Dudarev correction inside the SCF, collinear only.
+    # noncollinear/SOC +U occupation matrices are not wired, and a hybrid's Fock
+    # SCF has no +U hook, so reject those combinations at load.
+    hubbard = _build_hubbard(raw.get("hubbard"), atoms.get_chemical_symbols())
+    if hubbard.enabled and noncollinear:
+        raise InputError(
+            "DFT+U (hubbard) is collinear only (nspin 1 or 2); noncollinear/"
+            "spin-orbit +U is not implemented")
+    if hubbard.enabled and hybrid.enabled:
+        raise InputError(
+            "DFT+U (hubbard) and a hybrid functional (xc: pbe0/hse) cannot be "
+            "combined; the hybrid Fock SCF has no +U hook")
+
     mesh = tuple(kp.get("mesh", (1, 1, 1)))
     if len(mesh) != 3:
         raise InputError(f"kpoints.mesh must have 3 entries, got {list(mesh)}")
@@ -703,6 +782,7 @@ def _load_input(path: Path) -> Input:
         ecutrho=None if ecutrho is None else float(ecutrho),
         xc=xc,
         hybrid=hybrid,
+        hubbard=hubbard,
         kpoints=KPointsParams(
             mesh=mesh, shift=tuple(kp.get("shift", (0, 0, 0)))
         ),
