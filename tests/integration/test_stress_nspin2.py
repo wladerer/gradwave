@@ -17,9 +17,12 @@ scf.common.assemble_pw_energies / spin_xc_energy. Two checks:
   kinetic/nonlocal sums and the spin-resolved XC strain derivative.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
+from ase import Atoms
 
 from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.core.xc.pbe import PBE
@@ -122,3 +125,49 @@ def test_stress_nspin2_matches_spin_restricted_pbe():
     s1 = stress(r1, PBE()).cpu().numpy()
     s2 = stress(r2, SpinPBE()).cpu().numpy()
     assert np.abs(s2 - s1).max() < 1e-8, f"\nnspin1:\n{s1}\nnspin2:\n{s2}"
+
+
+@pytest.mark.standard
+def test_run_elastic_nspin2_nc_matches_nspin1():
+    """Driver-level ungate: run_elastic now accepts collinear nspin=2 with
+    norm-conserving pseudos (was gated to PAW/USPP-only). Decisive self-oracle:
+    in the nonmagnetic limit the full 6×6 clamped-ion stiffness from the nspin=2
+    (start_mag=0) elastic driver must reproduce the nspin=1 tensor computed with
+    identical settings — the whole strain scan (reference + 12 warm-started
+    strained SCFs) runs through the newly-reachable spin-resolved stress path.
+    Coarse Si (ecut 12 Ry, 2×2×2 k) keeps this a self-consistency check where
+    the absolute C is irrelevant, only nspin=2 == nspin=1."""
+    from gradwave.api import run_elastic
+    from gradwave.inputs import (
+        ElasticParams,
+        Input,
+        KPointsParams,
+        SmearingParams,
+    )
+
+    torch.set_num_threads(4)
+    a = 5.47
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+    atoms = Atoms("Si2", positions=pos, cell=cell, pbc=True)
+
+    def _inp(nspin):
+        return Input(
+            atoms=atoms, pseudo_dir=Path(PSEUDOS),
+            pseudo_map={"Si": "Si_ONCV_PBE-1.2.upf"}, ecut=12 * RY, xc="pbe",
+            kpoints=KPointsParams(mesh=(2, 2, 2)),
+            smearing=SmearingParams(type="none"),
+            elastic=ElasticParams(strain=0.01),
+            nspin=nspin,
+            start_mag=({"Si": 0.0} if nspin == 2 else None),
+            tot_magnetization=(0.0 if nspin == 2 else None))
+
+    e2 = run_elastic(_inp(2), verbose=False)
+    assert e2["formalism"] == "nc" and e2["all_converged"]
+    e1 = run_elastic(_inp(1), verbose=False)
+    c1 = np.array(e1["c_GPa"])
+    c2 = np.array(e2["c_GPa"])
+    # identical basis/k/grid → the two tensors agree to SCF-convergence level;
+    # 0.2 GPa is a generous band over the warm-start residual differences.
+    assert np.abs(c2 - c1).max() < 0.2, (
+        f"\nmax|C2-C1|={np.abs(c2 - c1).max():.4f} GPa\nnspin1:\n{c1}\nnspin2:\n{c2}")

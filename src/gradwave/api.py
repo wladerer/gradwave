@@ -858,8 +858,8 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict:
     Each strain deforms the cell (fractional coordinates fixed) on one FFT grid
     pinned across the scan; every strained SCF warm-starts from the unstrained
     reference. Norm-conserving (``postscf.stress``) and USPP/PAW
-    (``postscf.paw_stress``) are both handled; nspin=2 needs PAW (the
-    norm-conserving stress is nspin=1 only)."""
+    (``postscf.paw_stress``) are both handled, for nspin=1 and collinear nspin=2
+    (the fixed-basis stress sums per spin channel — see postscf.stress)."""
     import numpy as np
 
     from gradwave.postscf.elastic import (
@@ -873,10 +873,6 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict:
             "elastic constants for noncollinear/spin-orbit runs are not supported")
     _species, upfs, species_of_atom = _species_upfs(inp)
     uspp = _is_uspp(upfs)
-    if inp.nspin != 1 and not uspp:
-        raise NotImplementedError(
-            "elastic constants for nspin=2 need PAW/USPP pseudos "
-            "(norm-conserving stress is nspin=1 only)")
 
     xc = SPIN_XC_REGISTRY[inp.xc]() if inp.nspin == 2 else XC_REGISTRY[inp.xc]()
     if uspp:
