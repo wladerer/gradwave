@@ -25,6 +25,8 @@ from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
 from tests.helpers import RY, pseudo, si_fcc
 
+pytestmark = pytest.mark.standard
+
 
 def _system(kmesh):
     cell, pos = si_fcc()

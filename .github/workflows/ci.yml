@@ -110,7 +110,7 @@ jobs:
       - name: Standard test tier (shard ${{ matrix.group }}/4)
         run: >-
           uv run pytest -m "not slow and not torture and not gpu"
-          --splits 4 --group ${{ matrix.group }}
+          --dist loadscope --splits 4 --group ${{ matrix.group }}
 
   # Single required-status gate. Always runs (so the required check is reported
   # even when lint/test are skipped), and is green iff neither lint nor test

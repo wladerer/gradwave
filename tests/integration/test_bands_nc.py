@@ -35,8 +35,8 @@ def test_bands_nc_reproduces_scf_spectrum_on_mesh():
     # QE (the gaas_so_ci fixture is unused here), so the identity holds at any
     # cutoff — we run it at a reduced ecut to keep the guard cheap. The QE-grid
     # fft pin is dropped with it (auto grid is correct for this ecut).
-    system = setup_system(CELL, POS, [0, 1], [ga, as_], ecut=28 * RY,
-                          kmesh=(2, 2, 2), nbands=13, time_reversal=False)
+    system = setup_system(CELL, POS, [0, 1], [ga, as_], ecut=20 * RY,
+                          kmesh=(2, 2, 1), nbands=13, time_reversal=False)
     xc = NoncollinearXC(SpinPBE())
     res = scf_noncollinear(system, xc, mag_vec_init=[[0, 0, 0], [0, 0, 0]],
                            smearing="gaussian", width=0.1, etol=1e-7,

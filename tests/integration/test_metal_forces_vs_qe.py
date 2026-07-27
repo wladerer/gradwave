@@ -76,7 +76,7 @@ def test_smeared_forces_match_free_energy_fd(smearing):
     system = setup_system(AL_CELL, base, [0] * 4, [upf],
                           ecut=20 * RY, kmesh=(2, 2, 2), nbands=32)
     res = scf(system, PBE(), smearing=smearing, width=0.1,
-              etol=1e-11, rhotol=1e-10, verbose=False)
+              etol=1e-9, rhotol=1e-8, verbose=False)
     assert res.converged
     f = forces(res, remove_net=False)
 

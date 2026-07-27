@@ -47,7 +47,7 @@ def free_energy(upf, smearing, pos) -> float:
     system = setup_system(AL_CELL, pos, [0] * 4, [upf],
                           ecut=20 * RY, kmesh=(2, 2, 2), nbands=32)
     res = scf(system, PBE(), smearing=smearing, width=0.1,
-              etol=1e-11, rhotol=1e-10, verbose=False)
+              etol=1e-9, rhotol=1e-8, verbose=False)
     assert res.converged
     return float(res.energies.free_energy)
 

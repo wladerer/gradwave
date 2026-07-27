@@ -22,7 +22,7 @@ test-fast: ## fast gate (~80 s): run on every commit (local -n$(FAST_JOBS); over
 test: test-fast ## alias for the fast gate
 
 test-standard: ## standard tier (~10 min): what CI runs
-	uv run pytest -m "not slow and not torture and not gpu"
+	uv run pytest --dist loadscope -m "not slow and not torture and not gpu"
 
 test-nightly: ## nightly tier (hours): pre-release
 	uv run pytest -m "not torture and not gpu"

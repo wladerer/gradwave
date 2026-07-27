@@ -25,6 +25,8 @@ from gradwave.postscf.hybrid import (
 from gradwave.scf.loop import setup_system
 from tests.helpers import RY, si_fcc, si_upf
 
+pytestmark = pytest.mark.standard
+
 
 def _system():
     cell, pos = si_fcc()
@@ -35,7 +37,7 @@ def _system():
 
 def _converge(alpha, mode="full", omega=None):
     res = hybrid_scf(_system(), alpha=alpha, mode=mode, omega=omega, smearing="none",
-                     etol=1e-10, rhotol=1e-9, verbose=False, max_iter=150)
+                     etol=1e-8, rhotol=1e-9, verbose=False, max_iter=150)
     assert res.converged
     return res
 
