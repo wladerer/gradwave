@@ -1,8 +1,42 @@
-# Joint geometry + electronic optimization (prototype, #122)
+# Joint geometry + electronic optimization (#122, productionized #123)
 
-Status: prototype, norm-conserving insulators only. Code: `gradwave/opt/joint.py`;
-tests: `tests/unit/test_joint_opt.py` (fast + standard),
+Status: **opt-in production for norm-conserving insulators**; every other system
+falls back to the nested engine. Code: `gradwave/opt/joint.py`; entry point
+`api.run_relax(inp)` with `relax.method="joint"` (dispatch + fallback in
+`api._relax_joint`); tests: `tests/unit/test_joint_opt.py` (fast + standard),
 `tests/integration/test_joint_vs_bfgs.py` (slow, the head-to-head).
+
+## Production status & coverage
+
+Joint descent is exposed through the normal relax path as an **opt-in engine**,
+never a silent default. `relax.method` defaults to `"nested"` (a full SCF inside
+every BFGS/FIRE step — the robust, all-formalisms route). Setting
+`relax.method="joint"` routes norm-conserving insulators through `joint_relax`
+and **transparently falls back to nested** on any unsupported system or on
+non-convergence, so a user can always call it and trust the result.
+
+| system | joint engine | notes |
+|---|---|---|
+| NC insulator, fixed cell (positions) | **works** | positions + orbitals; `fix_cell=True` |
+| NC insulator, variable cell (stress) | **works** | strain + positions + orbitals; outer basis-rebuild loop |
+| NC insulator, external pressure | falls back | joint minimizes E, not the enthalpy E+pV |
+| USPP / PAW | falls back | generalized S-overlap not yet on the energy graph (see below) |
+| spin-polarized / noncollinear | falls back | prototype is nspin=1 |
+| metal / any smearing ≠ `none` | falls back | smeared Aufbau occupations reintroduce level-crossing discontinuities |
+| odd electron count | falls back | not an insulator at fixed occupations |
+
+The applicability guard is `api._joint_supported`; the fallback is logged (and
+printed under `verbose`). The joint relax reports `method`, `h_applies`,
+`h_seed`, `n_closures`, and basis-rebuild `n_steps` in the relax block.
+
+**Convergence criteria match the calculator.** The force gate is `relax.fmax`
+(eV/Å); under variable cell the stress gate is `fmax/Ω` [eV/Å³], because ASE's
+`FrechetCellFilter` treats σ·Ω as a generalized cell force gated by the same
+scalar `fmax`. The final energy/forces/stress are recomputed with one calculator
+SCF at the relaxed geometry, so the reported numbers are ASE-consistent (not the
+joint functional's fixed-basis value) and `last_result` is populated for
+downstream error estimates. On non-convergence within `40·max_steps` closures
+the engine returns to nested rather than shipping a half-relaxed geometry.
 
 ## Problem
 
@@ -158,5 +192,30 @@ Vanderbilt ensemble DFT) — a different prototype.
   (OMM/exponential-map with explicit Riemannian gradient).
 - Share the seed with the calculator's warm-start machinery so MD-style
   trajectories amortize the seed entirely.
-- PAW/USPP: needs the S-metric in the Löwdin step and the augmentation
-  channels on the strain graph (`paw_stress` already has the latter).
+
+## USPP/PAW gap (precise, deferred — follow-up issue)
+
+Generalizing the joint functional to USPP/PAW is a **documented gap**, not a
+half-shipped feature: `relax.method="joint"` detects a PAW/USPP pseudo and falls
+back to nested. What is and is not done:
+
+- **Done — S-orthonormalization.** `lowdin(z, zs)` takes the generalized overlap
+  applied to the raw rows (`zs = Z·S`, where for USPP `S = 1 + Σ_ij q_ij
+  |βᵢ⟩⟨βⱼ|`), Choleskys the Gram `Z S Zᴴ = L Lᴴ`, and returns `C = L⁻¹Z` with
+  `C S Cᴴ = I` — the S-metric the generalized functional needs, spectrum-safe
+  backward (unit-tested). This is the piece the prototype was missing in its
+  Löwdin step.
+- **Remaining (genuinely large, deferred).** `joint_energy` still assembles the
+  *norm-conserving* density (`ρ = Σ |ψ|²`) and the bare kinetic+nonlocal terms.
+  The generalized functional additionally needs, all live on the strain graph:
+  (1) the **augmentation charge** `Σ_ij Q_ij(r) ⟨ψ|βᵢ⟩⟨βⱼ|ψ⟩` added to ρ (the
+  `becsum` density, whose form factors `paw_stress` already differentiates
+  w.r.t. strain — reuse that), (2) the **bare vs screened `D_ij`** split (the
+  screened `D` depends on the live potential, so the nonlocal energy is no longer
+  a fixed quadratic form), and (3) for PAW, the **one-center** `E_onecenter`
+  contribution on the graph. That is a term-by-term re-derivation of the USPP SCF
+  energy assembly (`scf/uspp_loop.py` + `postscf/paw_stress.py`) as one autograd
+  closure, plus the `Z·S` projector contraction wired into `_coeffs_from_z`.
+  Scoped as a follow-up (track under a `joint-uspp` issue): the NC path ships
+  now; USPP joint is not blocked by orthonormalization but by the augmented
+  energy assembly.
