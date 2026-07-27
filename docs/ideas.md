@@ -1274,6 +1274,79 @@ more multi-scale systems (Cu₃Al and other intermetallics, PAW semicore), and t
 amortized per-chemistry-family fit that turns the per-point iteration cut into a
 wall-time win across a discovery scan.
 
+## Second-order joint descent: exact Hvp Newton-CG (2026-07-27)
+
+The July performance campaign established that the remaining software gains are in
+iteration counts, not kernel speed (see wisdom.md, "GPU latency and precision").
+This section holds the largest iteration-count idea, second-order geometry
+optimization through exact Hessian-vector products, with the memory math and the
+application argument attached so it can be picked up cold.
+
+**The mechanism.** BFGS spends its early ionic steps learning curvature from
+rank-two updates, so every step is partly a probing move. A trust-region Newton-CG
+optimizer (Steihaug) needs the Hessian only through products $Hv$, and autograd
+supplies exact products by double-backward at 2 to 3 gradient-cost each. The trap
+in nested relaxation is that second derivatives of the SCF-converged energy contain
+the orbital response $d\psi/dR$, which is a Sternheimer solve per product. The
+joint functional from #123 dissolves the trap, since $E(\text{strain}, R, Z)$ is an
+explicit function of all its variables and double-backward on it is plain autograd.
+The CG loop then carries the electron-ion coupling that BFGS-on-ions has to learn
+the hard way. No plane-wave code has this combination, because none of them can
+afford exact $Hv$. Expected regime, 3 to 6 Newton steps at 5 to 15 CG products
+each against 15 to 50 quasi-Newton steps, which pays on soft-mode systems and
+loses on 4-atom cells that relax in 2 steps.
+
+**Memory envelope (the one hard requirement).** Retained activations for one
+gradient pass scale as roughly $3 n_{bk} N_{grid} \times 16$ B, and double-backward
+holds 2 to 3 times that. For 64-atom Si at 45 Ry ($n_{pw} \approx 44$k, grid
+$\approx 88^3$, $\approx 290$ band-k pairs) that is about 9 GB for the gradient
+graph and 20 to 27 GB for an $Hv$, and a 128-atom cell reaches 150 GB. Naive
+double-backward therefore fits nothing we own. Band-chunk gradient checkpointing
+(recompute the FFT sandwiches inside backward, retain per-chunk summaries) drops
+the 64-atom footprint to 1 to 2 GB at 1.5 to 2x flops per product, and the
+chunking to hang it on already exists in `core/batch.py`. Checkpointing is a
+prerequisite, not an optimization.
+
+**Why glassy insulators are the launch application.** Low-thermal-conductivity
+glasses and anisotropic heat conduction are phonon-engineering problems on large,
+gapped, soft-mode cells. Those cells are simultaneously the worst case for BFGS,
+the best case for exact curvature, and inside the insulator coverage the current
+joint machinery already has. Two byproducts land on the same graph. The converged
+joint Hessian projected onto the ionic block is the dynamical matrix, so Hvp plus
+Lanczos gives matrix-free phonons with the supercell-phonons module as the
+self-oracle. And a second application of the same trick ($Hv$ of $Hv$) gives
+third-order anharmonic force constants without displacement combinatorics, which
+is the expensive ingredient of thermal-conductivity design.
+
+**Metals.** The restriction to insulators is a sequencing artifact. What breaks at
+a Fermi surface is frozen occupations (#129), not the differentiation. With the
+Marzari-Vanderbilt occupation block, the Mermin free energy is again an explicit
+smooth functional and the same double-backward goes through. Metallic relaxations
+are the ill-conditioned ones, so exact curvature plausibly pays more there, not
+less.
+
+**What remains, in order.**
+
+1. The production joint substrate (in flight, `feat/joint-descent-production`).
+2. A double-differentiability audit of the joint energy graph, `gradgradcheck` on
+   a tiny cell. FFTs are linear and free, Cholesky is doubly differentiable in
+   torch, and the known blocker is any custom `autograd.Function` without a
+   double-backward, RobustEigh in particular. The insulator path avoids eigh via
+   Cholesky orthonormalization, so the audit likely passes there as-is.
+3. Band-chunk checkpointing through the density build (the memory table above).
+4. The optimizer itself, Steihaug trust-region Newton-CG over the joint variables,
+   with a preconditioned CG loop (Pfrommer-style ionic block, Teter-like
+   electronic block) and the Cholesky parametrization handling gauge.
+5. The validation ladder with one honest go/no-go number, total H-applies against
+   nested BFGS and first-order joint descent on perturbed Si-16, then Si-64, then
+   an amorphous cell near 100 atoms. The method earns default status only if the
+   H-apply count drops on the amorphous cell.
+6. The phonon byproduct check, Hvp-Lanczos dynamical matrix against
+   `postscf/phonons_supercell.py`.
+7. Metals, gated solely on #129.
+8. The third-derivative pipeline toward $\kappa$ as the follow-on application,
+   once 1 through 5 hold.
+
 # Done and resolved
 
 Kept for the reasoning. Each of these is either landed in the code or settled as a
