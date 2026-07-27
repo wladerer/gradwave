@@ -29,7 +29,7 @@ from gradwave.postscf.discretization_error import (
 
 
 class _FakeNCResult:
-    """Duck-typed NCResult: carries mag_vec/m but no v_eff (see _is_ncresult)."""
+    """Duck-typed NCResult: carries mag_vec/m but no v_eff (see _result_formalism)."""
 
     def __init__(self):
         self.mag_vec = torch.zeros(3)

@@ -931,11 +931,6 @@ def _result_formalism(res) -> str:
     return "nc"
 
 
-def _is_ncresult(res) -> bool:
-    """True for a non-collinear ``NCResult`` (spinor SCF output)."""
-    return _result_formalism(res) == "noncollinear"
-
-
 def _spinor_smearing(smearing, width):
     """Resolve the (scheme, width) for recomputing spinor occupations.
 

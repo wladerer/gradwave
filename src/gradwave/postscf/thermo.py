@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import numpy as np
 
-# Boltzmann constant in eV/K.
-K_B = 8.617333262e-5
+from gradwave.constants import KB_EV as K_B
+
 # One cm⁻¹ expressed in eV, so ħω[eV] = freq[cm⁻¹]·CM1_TO_EV.
 CM1_TO_EV = 1.239841984e-4
 

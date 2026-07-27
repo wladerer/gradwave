@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 
+from gradwave.constants import RY_EV
 from gradwave.core.density import sigma_from_rho
 from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.hartree import hartree_potential_r
@@ -920,7 +921,7 @@ def scf(
 
     if verbose:
         _ec = getattr(system, "ecut", None)
-        _ecs = f"ecut {_ec / 13.605693122994:.0f} Ry · " if _ec else ""
+        _ecs = f"ecut {_ec / RY_EV:.0f} Ry · " if _ec else ""
         print(f"SCF  {len(system.positions)} atoms · {len(system.kweights)} k(IBZ)"
               f" · {system.nbands} bands · {_ecs}grid "
               f"{'×'.join(str(n) for n in grid.shape)} · nspin {nspin}"
