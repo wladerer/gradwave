@@ -31,11 +31,15 @@ from gradwave.pseudo.radial_torch import radial_tables, sbt_t, simpson_weights
 
 
 def stress_uspp(res: dict, xc, symmetrize: bool = True) -> torch.Tensor:
-    """σ (3,3) [eV/Å³] for a converged scf_uspp result (nspin 1 or 2)."""
-    if res.get("hub_sites") is not None:
-        raise NotImplementedError(
-            "stress with DFT+U on USPP/PAW not implemented (the strained "
-            "S-dressed orbital projections are missing)")
+    """σ (3,3) [eV/Å³] for a converged scf_uspp result (nspin 1 or 2).
+
+    DFT+U (Dudarev): if the SCF was run with a Hubbard manifold (``res`` carries
+    ``hub_sites``), the strain derivative of E_U is added. Unlike the NC +U
+    stress, the atomic-orbital projections are S-dressed (Sφ = φ + Σ|β⟩q⟨β|φ⟩),
+    so both the φ and the β strain dependence enter the occupation matrices —
+    see ``_hub_sproj_strained``. The site descriptors (l, U, J) travel with the
+    result, so no separate ``manifolds`` argument is needed.
+    """
     system = res["system"]
     eps = torch.zeros(3, 3, dtype=RDTYPE, requires_grad=True,
                       device=system.positions.device)
@@ -81,6 +85,58 @@ def _strained_aug(system, rho_ij, gaunt, y_aug, q_sph, phases, omega):
             acc_a = acc_a + _MINUS_I_POW[ll] * fq.to(cdt) * ang
         aug_sph = aug_sph + phases[:, a] * 4.0 * math.pi * acc_a
     return aug_sph / omega.to(cdt)
+
+
+def _hub_radial(system, hub_sites, dev):
+    """Per-species differentiable radial data for the +U orbitals.
+
+    Mirrors scf.uspp_hubbard.phi_free_per_k: the RAW PP_PSWFC orbital r·R (a PAW
+    pseudo-orbital's plain norm is deliberately ≠ 1 — the S metric supplies the
+    rest), truncated at the QE 10-bohr msh, with g = (r·R)·r so ∫ g j_l dr = F(q)
+    through the differentiable SBT."""
+    l_by_sp = {}
+    for site in hub_sites:
+        l_by_sp[system.species_of_atom[site["atom"]]] = site["l"]
+    rad = {}
+    for sp, ll in l_by_sp.items():
+        paw = system.paws[sp]
+        n = paw.msh
+        orbs = paw.hubbard_orbitals(ll)
+        if not orbs:
+            raise ValueError(f"species {sp}: no PP_PSWFC orbital with l={ll}")
+        rchi = orbs[0].rchi
+        rad[sp] = (
+            ll,
+            torch.as_tensor((rchi * paw.r)[:n], dtype=RDTYPE, device=dev),
+            torch.as_tensor(paw.r[:n], dtype=RDTYPE, device=dev),
+            torch.as_tensor(simpson_weights(paw.rab[:n]), dtype=RDTYPE,
+                            device=dev),
+        )
+    return rad
+
+
+def _hub_sproj_strained(system, hub_sites, hub_rad, hub_lmax, kpg, q_k, ph,
+                        p, c, b_ovl, pref, q_full):
+    """⟨Sφ_m|ψ_b⟩ (nb, nprojU) at one strained k for the +U occupations.
+
+    φ_m(k+G(ε)) is built like the KB betas in the base PAW stress — radial
+    F(|k+G|) via the differentiable SBT, Y_lm at the strained direction, the
+    1/√Ω(ε) normalization (in ``pref``), the e^{−i(k+G)·τ(ε)} phase (in ``ph``)
+    — then S-dressed with the strained β projectors ``p``:
+    Sφ = φ + Σ_ij |β_i⟩ q_ij ⟨β_j|φ⟩. That S-dressing is the piece the NC +U
+    stress (postscf/_strain.hubbard_energy_strained) does not carry."""
+    y_u = ylm_all(hub_lmax, kpg)
+    cols = []
+    for site in hub_sites:
+        ll, a = site["l"], site["atom"]
+        f = sbt_t(*hub_rad[system.species_of_atom[a]], q_k)
+        for mm in range(2 * ll + 1):
+            cols.append((pref * f * y_u[:, ll * ll + mm]).to(CDTYPE)
+                        * _MINUS_I_POW[ll] * ph[:, a])
+    phik = torch.stack(cols, dim=0)  # (nprojU, npw) — S-free φ
+    povl = torch.einsum("bg,mg->bm", c, phik.conj())   # ⟨φ_m|ψ_b⟩
+    bphi = torch.einsum("mg,ig->im", phik.conj(), p)   # ⟨φ_m|β_i⟩
+    return povl + torch.einsum("im,ij,bj->bm", bphi, q_full, b_ovl)
 
 
 def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
@@ -131,6 +187,17 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
 
     e_total = _ewald_strained(pos_e, system.charges, a_e, b_e, omega, grid.cell)
     q_full = system.q_full.to(cdt)
+
+    # DFT+U (Dudarev): setup for the strained S-dressed occupation matrices.
+    hub_sites = res.get("hub_sites")
+    hub_rad = hub_lmax = hub_nproj = None
+    hub_scale = 0.5 if nspin == 1 else 1.0
+    hub_mult = 2.0 if nspin == 1 else 1.0
+    if hub_sites is not None:
+        hub_rad = _hub_radial(system, hub_sites, dev)
+        hub_lmax = max(site["l"] for site in hub_sites)
+        hub_nproj = sum(site["dim"] for site in hub_sites)
+
     rho_sph_chans, rho_r_chans = [], []
     for isp in range(nspin):
         coeffs = [c.detach() for c in coeffs_s[isp]]
@@ -138,6 +205,8 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
         eigs = eigs_s[isp].detach()
         rho_ij = [torch.zeros(s1 - s0, s1 - s0, dtype=cdt, device=dev)
                   for (s0, s1) in system.atom_slices]
+        n_hub = (torch.zeros(hub_nproj, hub_nproj, dtype=cdt, device=dev)
+                 if hub_sites is not None else None)
         for ik, sph in enumerate(system.spheres):
             kfrac = torch.as_tensor(sph.k_frac, dtype=rdt, device=dev)
             kpg = (sph.miller.to(rdt) + kfrac) @ b_e
@@ -166,6 +235,13 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
             pd = system.proj_data[ik]
             p = p * ph[:, pd.atom_index].T
             b_ovl = c @ p.conj().T
+            if hub_sites is not None:
+                sproj = _hub_sproj_strained(
+                    system, hub_sites, hub_rad, hub_lmax, kpg, q_k, ph, p, c,
+                    b_ovl, pref, q_full)
+                w_h = (kw[ik] * occ[ik][:c.shape[0]] * hub_scale).to(rdt)
+                n_hub = n_hub + torch.einsum(
+                    "b,bm,bn->mn", w_h, sproj, sproj.conj())
             quad_d = torch.einsum(
                 "bi,ij,bj->b", b_ovl.conj(), pd.dij_full.to(cdt), b_ovl).real
             e_total = e_total + (kw[ik] * occ[ik] * quad_d).sum()
@@ -184,6 +260,15 @@ def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
                 _, ddd = onec[sp].energy_and_ddd(bec)
                 ddd_isp = ddd if nspin == 1 else ddd[isp]
                 e_total = e_total + (ddd_isp.to(cdt).to(dev) * rho_ij[a]).sum().real
+
+        if hub_sites is not None:  # Dudarev E_U from the S-dressed occupations
+            from gradwave.core.hubbard import hubbard_energy
+
+            n_hub = 0.5 * (n_hub + n_hub.conj().T)
+            mats = [n_hub[site["start"]:site["start"] + site["dim"],
+                          site["start"]:site["start"] + site["dim"]]
+                    for site in hub_sites]
+            e_total = e_total + hub_mult * hubbard_energy(mats, hub_sites)
 
         aug_sph = _strained_aug(system, rho_ij, gaunt, y_aug, q_sph,
                                 phases, omega)

@@ -20,9 +20,9 @@ Regenerate the raw list with:
 grep -rn "raise NotImplementedError" src/gradwave --include=*.py
 ```
 
-Current count: **70** `raise NotImplementedError` sites, of which **4 are
+Current count: **69** `raise NotImplementedError` sites, of which **4 are
 abstract-method stubs** (interface contracts on base classes, not capability
-gaps) — see the last section. So **66 real capability gates** remain.
+gaps) — see the last section. So **65 real capability gates** remain.
 
 ## Axis legend
 
@@ -45,6 +45,7 @@ gaps) — see the last section. So **66 real capability gates** remain.
 |---|---|---|---|
 | ~~api.py:876~~ | nspin2 / NC | elastic constants (`run_elastic`) for nspin=2 needed PAW/USPP | **removed, this PR** — NC stress already sums per spin channel (`postscf.stress`, PR #58); the driver gate was stale. Oracle: `test_run_elastic_nspin2_nc_matches_nspin1` (nonmag-limit == nspin=1) |
 | ~~postscf/stress.py~~ (nspin=2 sum) | nspin2 | fixed-basis stress tensor | already ungated in PR #58 (per-spin kinetic/nonlocal + spin-resolved E_xc) |
+| ~~postscf/paw_stress.py:36~~ | USPP/PAW +U | stress with DFT+U on USPP/PAW (strained S-dressed projections) | **removed, this PR** — added the Dudarev E_U strain term to `_energy_strained_uspp`: the atomic-orbital projectors go on the strain graph like the base PAW augmentation, then S-dressed (Sφ = φ + Σ\|β⟩q⟨β\|φ⟩) so both the φ and the β strain enter n^{Iσ} (`_hub_sproj_strained`). Also ungated the USPP/PAW +U path through `calculator._calculate_uspp` (and forced symmetry off there, matching the NC +U path). Oracle: `test_paw_stress_hubbard_autograd_vs_fd` (autograd σ == central FD of the strained +U energy; ε=0 == SCF total) + a U=0 inertness bit-for-bit check |
 
 ## Open — nspin=2 (next tranches)
 
@@ -78,7 +79,6 @@ gaps) — see the last section. So **66 real capability gates** remain.
 
 | file:line | axis | operation blocked |
 |---|---|---|
-| postscf/paw_stress.py:36 | USPP/PAW +U | stress with DFT+U on USPP/PAW (strained S-dressed projections missing) |
 | postscf/stress.py:146 | SOC + +U | DFT+U stress on the spin-orbit path (**feature boundary, #142**) |
 | postscf/stress_error.py:92 | SOC | pressure error for fully-relativistic pseudos |
 | postscf/stress_error.py:95 | +U | pressure error with DFT+U |
