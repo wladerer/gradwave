@@ -154,6 +154,55 @@ defect, which the [Performance](performance.md) page works through in full.
   on the magnetic and heavy cases, so the eigensolver does not set CPU wall time. A block
   solver only pays off where the eigh share is large, which is not the CPU regime.
   LOBPCG's $[X, W, P]$ block applies H to three times the vectors each iteration.
+- Davidson wins on the GPU by the same margin, for a worse reason. On the July 2026
+  matrix sweep (RTX 3050, nine systems including 16-atom Si and 8-atom Cu supercells),
+  CheFSI ran 3 to 20 times slower than batched Davidson and LOBPCG 2 to 8, with energies
+  agreeing to 3.6e-11 eV. On CPU the losing trade is eigh for FFT-bound applies. On a
+  consumer GPU every H-apply also carries complex-double projector GEMMs at 1/64 rate,
+  so a filter method pays the fp64 penalty once per apply and needs several times more
+  applies. Do not expect the solver ranking to change with the device, only the reason.
+- Run the mixed-precision draft on medium systems and skip it on small ones. The draft
+  needs enough fp32 iterations to amortize its casts and its fp64 polish, which the
+  matrix sweep located near ten atoms. cu_metal_m (8 atoms) improved from 183 to 155 s
+  on the 3050 and from 335 to 179 s on CPU, while every small metal lost 20 to 45
+  percent (Cu 17 to 25 s). A blanket `mixed_precision=True` is a net slowdown on a
+  workstation-scale test set.
+- Keep the draft's orthonormalization out of fp32 once blocks reach supercell size.
+  Orthonormalizing through the Gram matrix squares the orbital-block condition number,
+  and a 16-atom Si block that is comfortable in fp64 exhausts the seven fp32 digits.
+  The failure is deterministic on both devices, an SVD non-convergence on CPU and a nan
+  residual on CUDA for the same system (si_insulator_m), which rules out a driver
+  problem. Tracked in #136, and the fix direction is an fp64 subspace step inside the
+  fp32 draft, mirroring the #134 offload structure.
+- Do not warm-start small insulators through a geometry displacement. Seeding the
+  perturbed SCF with the converged density and orbitals saved -1 to 0 iterations and ran
+  at 0.67 to 0.77 of the cold wall on 2-atom Si and MgO, because the SAD guess is
+  already near-optimal there and the seeding path has real overhead. Wavefunction reuse
+  earns its keep on large PAW metals across ionic steps, where it is part of the
+  measured 1.37x relaxation speedup, not on small cells after a nudge.
+
+## GPU latency and precision
+
+- Profile with sync accounting before believing any bottleneck story. The FFT sandwich
+  was assumed to be the plane-wave wall, and the measured Cu PAW profile on the 3050
+  put FFT at 11 percent of GPU time against 59 for complex-double GEMM. The same
+  numbers refute real-space DFT as a rescue, since a real-space basis lengthens the
+  vectors feeding the dominant GEMMs by roughly 15x and trades an 11 percent cost for
+  egg-box force noise.
+- When a kernel-speed change does nothing, count synchronizations before blaming the
+  kernels. The GPU SCF spent 17 of 28 wall seconds in `cudaStreamSynchronize` (135
+  syncs per iteration from cuSOLVER subspace factorizations), which made an fp32 draft
+  benchmark timing-neutral and nearly sank the idea. Offloading the small batched
+  subspace solves to CPU LAPACK (#134) cut sync time 3x with physics identical to
+  2e-10 eV. The wall barely moved because the GEMM roof is next, so treat #134 as
+  removing a mask, not as a speedup, and expect end-to-end deltas within a few percent
+  (minerals +1 to 2, CuAg +4 under CPU contention).
+- The consumer-GPU wall is the fp64 rate, not the architecture. GA107 runs
+  complex-double GEMM at 1/64 of fp32 rate, and a 2080 Ti shows the same bucket shape
+  (57 percent linalg, 10 FFT) at only 1.2x the 3050, so a bigger crippled die does not
+  escape. Datacenter parts run fp64 at half rate, a factor near 100 on the dominant
+  bucket, which is why hardware outranks every remaining software optimization on this
+  workload.
 
 ## SCF and mixing
 
