@@ -56,7 +56,8 @@ def _build_parser():
     p_plot.add_argument("-o", "--output", metavar="FILE",
                         help="figure file (default: alongside the JSON)")
     p_plot.add_argument("--kind",
-                        choices=("auto", "scf", "bands", "dos", "pdos", "phonons"),
+                        choices=("auto", "scf", "bands", "dos", "pdos", "cohp",
+                                 "phonons"),
                         default="auto")
     p_plot.add_argument("--width", type=float, default=0.1,
                         help="DOS broadening [eV]")
@@ -207,6 +208,8 @@ def _cmd_plot(args) -> int:
             analysis.plot_spin_texture(summary, path=out)
         else:
             analysis.plot_pdos(summary, path=out)
+    elif kind == "cohp":
+        analysis.plot_cohp(summary, path=out)
     elif kind == "phonons":
         analysis.plot_phonons(summary, path=out)
     else:

@@ -386,6 +386,77 @@ output:
   dir: ./out
 """
 
+_HYBRID = """\
+# Self-consistent hybrid functional (PBE0-form) at Gamma. Exact (Fock) exchange
+# acts IN the SCF loop, so the gap opens relative to PBE. Norm-conserving,
+# spin-unpolarized (nspin=1). Screened HSE: set `xc: hse` (adds `omega`).
+# Run:  gradwave input.yaml -o out/
+# Note: the multi-k Fock sum needs the FULL Brillouin zone, so a hybrid always
+# runs symmetry-off on the unfolded mesh — keep this small (Gamma here).
+
+structure:
+  cell: [[0.0, 2.715, 2.715], [2.715, 0.0, 2.715], [2.715, 2.715, 0.0]]
+  positions:
+    frac: [[0.0, 0.0, 0.0], [0.25, 0.25, 0.25]]
+  species: [Si, Si]
+
+pseudopotentials:
+  dir: ./pseudos
+  map:
+    Si: Si_ONCV_PBE-1.2.upf
+
+ecut: 500.0
+xc: pbe0                          # pbe0 (full PBE0) | hse (screened) | lda | pbe | r2scan
+hybrid:
+  alpha: 0.25                    # exact-exchange mixing fraction
+  # omega: 0.2                   # range-separation length [1/Å] (screened xc: hse only)
+kpoints:
+  mesh: [1, 1, 1]                # Gamma only: exact exchange scales steeply with k
+
+scf:
+  etol: 1.0e-8
+  rhotol: 1.0e-7
+
+output:
+  dir: ./out
+"""
+
+_COHP = """\
+# Crystal Orbital Hamilton Population: an SCF with atomic-orbital projections,
+# then the atom-pair bonding analysis (bonding states give ICOHP < 0). Needs a
+# pseudopotential that carries atomic orbitals (PP_PSWFC).
+# Run:  gradwave input.yaml -o out/
+# Plot: gradwave plot out/scf.json --kind cohp
+
+structure:
+  cell: [[0.0, 2.715, 2.715], [2.715, 0.0, 2.715], [2.715, 2.715, 0.0]]
+  positions:
+    frac: [[0.0, 0.0, 0.0], [0.25, 0.25, 0.25]]
+  species: [Si, Si]
+
+pseudopotentials:
+  dir: ./pseudos
+  map:
+    Si: Si_ONCV_PBE-1.2.upf
+
+ecut: 500.0
+xc: pbe
+kpoints:
+  mesh: [8, 8, 8]
+
+projections:
+  enabled: true                  # COHP reuses the PDOS projections
+  group_by: l
+  cohp:
+    enabled: true
+    pairs: [[0, 1]]              # 0-based atom index pairs; omit for all within rcut
+    rcut: 3.0                    # Å neighbour cutoff when `pairs` is omitted
+    width: 0.1                   # eV gaussian broadening
+
+output:
+  dir: ./out
+"""
+
 # name -> (one-line description, template body). Order is the listing order.
 _PHONONS = """\
 # Supercell finite-displacement phonons: dispersion along a q-path + phonon DOS.
@@ -430,6 +501,8 @@ _TEMPLATES: dict[str, tuple[str, str]] = {
     "bands": ("Band structure along a k-path.", _BANDS),
     "bands-soc": ("Spin-orbit band structure (noncollinear, FR pseudo).", _BANDS_SOC),
     "pdos": ("Projected density of states.", _PDOS),
+    "cohp": ("Crystal orbital Hamilton population (bonding analysis).", _COHP),
+    "hybrid": ("Self-consistent hybrid functional (PBE0/HSE).", _HYBRID),
     "magnetism": ("Collinear magnetism + exchange couplings.", _MAGNETISM),
     "noncollinear": ("Noncollinear SCF with spin-orbit coupling.", _NONCOLLINEAR),
     "eos": ("Equation of state (bulk modulus via Birch-Murnaghan).", _EOS),

@@ -14,7 +14,8 @@ has the terse CLI and entry-point tables.
 
 `gradwave init` writes a commented starter input for a kind of calculation.
 `gradwave init` with no name lists the templates: `scf`, `metal`, `relax`,
-`relax-cell`, `bands`, `bands-soc`, `pdos`, `magnetism`, and `noncollinear`.
+`relax-cell`, `bands`, `bands-soc`, `pdos`, `cohp`, `hybrid`, `magnetism`, and
+`noncollinear` (plus `eos`, `elastic`, `phonons`).
 Each emits a complete, schema-valid file with an inline example structure and
 placeholder pseudopotential paths; edit those two, then `gradwave validate` it.
 Without `-o` the template goes to stdout (`gradwave init bands > bands.yaml`).
@@ -46,14 +47,16 @@ means the quantity is dimensionless or a plain count.
 | `pseudopotentials` | *required* | — | mapping | `dir` and `map`; see below. |
 | `ecut` | *required* | eV | float | Plane-wave kinetic-energy cutoff for the wavefunctions. |
 | `ecutrho` | `4 × ecut` | eV | float | Density/augmentation cutoff. USPP/PAW only. Ignored for norm-conserving. |
-| `xc` | `pbe` | — | string | Functional: `lda`, `pbe`, or `r2scan`. |
+| `xc` | `pbe` | — | string | Functional: `lda`, `pbe`, `r2scan`, or a hybrid `pbe0` / `hse` (see [`hybrid`](#hybrid) and [Hybrid functionals](hybrid-functionals.md)). |
+| `hybrid` | *see below* | — | mapping | Hybrid-exchange overrides (`alpha`, `omega`); only with a hybrid `xc`. |
 | `nbands` | `auto` | — | int or `auto` | Number of Kohn-Sham bands. `auto` picks from the electron count. |
 | `symmetry` | `true` | — | bool | Reduce k to the IBZ and symmetrize the density each step. Forced off for a magnetic `noncollinear` run and the `magnetism` task (symmetry acts on the moment vector); setting it `true` there is an error. A spin-orbit-only run (`nonmagnetic: true`) keeps symmetry. |
 | `nspin` | `1` | — | int | `1` unpolarized, `2` collinear spin. |
 | `noncollinear` | `false` | — | bool | Spinor (non-collinear) SCF for `task: scf`, needed for spin-orbit coupling. Requires a fully-relativistic (FR) pseudopotential. |
 | `nonmagnetic` | `false` | — | bool | With `noncollinear`: pin the moment to zero for a spin-orbit-only run (e.g. a nonmagnetic heavy metal). Keeps the full crystal symmetry via Kramers, so it is the efficient path when there is no magnetism. Requires `noncollinear: true`. |
 | `start_mag` | `null` | — | mapping | Element → initial moment fraction in [-1, 1] (nspin=2 or a magnetic noncollinear seed). |
-| `task` | `scf` | — | string | `scf`, `relax`, `bands`, or `magnetism`. |
+| `tot_magnetization` | `null` | μB | float | Fix the spin moment M = N↑ − N↓ (integer-occupation pin). Collinear `nspin: 2` only; pair with `smearing: {type: none}`. |
+| `task` | `scf` | — | string | `scf`, `relax`, `bands`, `magnetism`, `eos`, `elastic`, or `phonons`. |
 | `device` | `cpu` | — | string | Torch device, e.g. `cpu` or `cuda`. |
 | `verbose` | `true` | — | bool | Per-iteration SCF chatter on stdout. `gradwave run --quiet` silences a run regardless of this key. |
 | `restart` | `null` | — | path | Checkpoint file to warm-start the density from. |
@@ -166,7 +169,22 @@ Used when `task: bands`.
 | `path` | `""` | — | string | ASE bandpath string, e.g. `LGXUG`. Empty uses the lattice default. |
 | `npoints` | `120` | — | int | Number of k-points along the path. |
 | `nbands` | `null` | — | int | Bands to solve. `null` reuses the SCF count. |
-| `irreps` | `false` | — | bool | Label bands at special points with Mulliken symbols. |
+| `irreps` | `false` | — | bool | Label bands at special points with Mulliken symbols (norm-conserving path). |
+
+USPP/PAW runs dispatch to the frozen-potential generalized band solver
+automatically; the block is the same.
+
+### `hybrid`
+
+Overrides for a hybrid `xc` (`pbe0` or `hse`); ignored (and rejected) for a plain
+functional. See [Hybrid functionals](hybrid-functionals.md). Norm-conserving,
+`nspin: 1` only, and the mesh is built on the full BZ (symmetry off).
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `alpha` | `0.25` | — | float | Exact-exchange mixing fraction. |
+| `omega` | `0.2` | Å⁻¹ | float | Range-separation length (screened `hse` only). |
+| `mode` | *from xc* | — | string | `full` (PBE0), `short_range` (HSE), or `long_range`; defaults from the `xc` label. |
 
 ### `projections`
 
@@ -180,8 +198,25 @@ Requires a pseudopotential with atomic orbitals (`PP_PSWFC`).
 | `group_by` | `l` | — | string | Aggregate by `atom`, `l`, `lm`, or `total` (`j`, `jmj` for fully-relativistic). |
 | `width` | `0.1` | eV | float | Gaussian broadening. |
 | `npoints` | `800` | — | int | Energy grid points. |
+| `cohp` | `false` | — | mapping | Crystal Orbital Hamilton Population sub-block (see below). |
 
 Plot it with `gradwave plot <scf.json> --kind pdos`.
+
+#### `projections.cohp`
+
+Adds an atom-pair COHP bonding analysis alongside the PDOS, written to the `cohp`
+block of the JSON (bonding states integrate to ICOHP < 0). `cohp: true` enables it
+with defaults.
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `enabled` | `false` | — | bool | Compute the COHP; `cohp: true` is shorthand. |
+| `pairs` | `null` | — | list | 0-based `[i, j]` atom-index pairs; `null` uses every pair within `rcut`. |
+| `rcut` | `3.0` | Å | float | Neighbour cutoff for the default pair list. |
+| `width` | `0.1` | eV | float | Gaussian broadening. |
+| `npoints` | `800` | — | int | Energy grid points. |
+
+Plot it with `gradwave plot <scf.json> --kind cohp`.
 
 ### `output`
 

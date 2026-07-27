@@ -355,6 +355,46 @@ def plot_pdos(source, path=None, ax=None, total=True):
     return _finish(ax.figure, ax, path)
 
 
+def _cohp_block(source) -> dict:
+    """The COHP dict from a COHP (`.to_dict()`), a raw block, or a JSON summary
+    carrying a top-level ``cohp`` key."""
+    if hasattr(source, "to_dict") and hasattr(source, "pair_cohp"):
+        return source.to_dict()
+    if isinstance(source, dict) and "pair_cohp" in source and "energy_eV" in source:
+        return source
+    s = load(source)
+    block = s.get("cohp")
+    if not block or not block.get("available", True) or "pair_cohp" not in block:
+        raise ValueError("no COHP in this result "
+                         "(run with projections.cohp enabled)")
+    return block
+
+
+def plot_cohp(source, path=None, ax=None):
+    """Atom-pair COHP curves plotted as −COHP(E) (bonding to the right, the
+    LOBSTER convention), one line per pair, the total behind them. A vertical
+    dashed line marks E_F."""
+    plt = _plt()
+    block = _cohp_block(source)
+    e = block["energy_eV"]
+    if ax is None:
+        _fig, ax = plt.subplots(figsize=(5.8, 3.8))
+    total = block.get("total")
+    if total is not None:
+        neg_total = [-v for v in total]
+        ax.fill_between(e, neg_total, color="#c9c9c9", label="total")
+    for i, (lab, curve) in enumerate(block["pair_cohp"].items()):
+        ax.plot(e, [-v for v in curve], color=_PDOS_COLORS[i % len(_PDOS_COLORS)],
+                lw=1.2, label=lab)
+    if block.get("fermi_eV") is not None:
+        ax.axvline(block["fermi_eV"], color="#52514e", lw=0.7, ls="--")
+    ax.axhline(0.0, color="#52514e", lw=0.5)
+    ax.set_xlabel("E [eV]")
+    ax.set_ylabel("−COHP [1/eV]  (bonding > 0)")
+    ax.legend(frameon=False, fontsize=8, ncol=2)
+    return _finish(ax.figure, ax, path)
+
+
 def plot_spin_texture(source, path=None, ax=None, group="total", component="z"):
     """Noncollinear PDOS: the charge n(E) filled in grey with the chosen spin
     texture component m_x/m_y/m_z(E) overlaid (positive above, negative below).
