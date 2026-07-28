@@ -32,12 +32,16 @@ Coverage.
     (spinor); nspin=1 and nspin=2 throughout.
   Eigenvalue + band-gap error: the same three formalisms, nspin=1 and 2 (the
     per-band second-order shift the energy error already sums over occupations).
-  Force error: norm-conserving collinear (nspin=1 and 2, no NLCC) and USPP/PAW
-    (nspin=1 and 2, including NLCC). The USPP/PAW path propagates delta-P through
-    the augmentation density, the S-orthogonality constraint, and the PAW
-    one-center ddd response (following postscf.uspp_position.hessian_column). Not
-    assembled: the norm-conserving NLCC force term (blocked on the ground-state
-    NLCC force in postscf.forces, itself unimplemented) and the spinor force.
+  Force error: norm-conserving collinear (nspin=1, including NLCC; nspin=2
+    without NLCC) and USPP/PAW (nspin=1 and 2, including NLCC). The
+    norm-conserving NLCC term rebuilds E_xc[rho_val(eps)+rho_core(tau)] on the
+    same (eps, tau) leaves the local/nonlocal channels already use, mirroring
+    the ground-state core-correction force in postscf.forces
+    (_core_correction_energy); nspin=2 + NLCC is not assembled (needs a
+    per-spin density-error split the estimator does not produce). The USPP/PAW
+    path propagates delta-P through the augmentation density, the
+    S-orthogonality constraint, and the PAW one-center ddd response (following
+    postscf.uspp_position.hessian_column). Not assembled: the spinor force.
 
 The USPP/PAW path uses the generalized residual R = P_annulus(H - eps S) psi and
 adds the augmentation-charge response: dpsi perturbs the on-site occupations
@@ -920,13 +924,23 @@ def estimate_force_error(
     channels stay consistent; a Dyson-dressed δρ would need the matching dressed
     δφ, which is future work.
 
-    Norm-conserving (nspin=1 or 2, no NLCC) or USPP/PAW (nspin=1 or 2, needs
-    ``xc``). For nspin=2 the nonlocal channel sums over the two spin channels --
-    each with its own orbital corrections and occupations (in [0,1]) -- while the
-    local channel already sees the spin-summed density error. The USPP/PAW path
-    additionally propagates δP through the augmentation density (δbecsum), the
-    S-orthogonality constraint (via the eigenvalue error), and the PAW one-center
-    ddd response, following ``postscf.uspp_position.hessian_column``.
+    Norm-conserving (nspin=1 or 2; nspin=1 including NLCC) or USPP/PAW (nspin=1
+    or 2, needs ``xc``). For nspin=2 the nonlocal channel sums over the two spin
+    channels -- each with its own orbital corrections and occupations (in
+    [0,1]) -- while the local channel already sees the spin-summed density
+    error. The USPP/PAW path additionally propagates δP through the
+    augmentation density (δbecsum), the S-orthogonality constraint (via the
+    eigenvalue error), and the PAW one-center ddd response, following
+    ``postscf.uspp_position.hessian_column``.
+
+    NLCC (nspin=1 only, needs ``xc``): the pseudo-core charge ρ_core(r-τ) makes
+    E_xc[ρ_val(ε)+ρ_core(τ)] a genuine bivariate function of (ε, τ), so its
+    mixed second derivative is nonzero -- exactly the missing term the plain
+    (no-core) path skips because Hartree/XC there have zero EXPLICIT τ
+    dependence at fixed ρ (their contribution to δF is otherwise the ordinary
+    Hellmann-Feynman cancellation). nspin=2 + NLCC is not implemented: only the
+    spin-summed δρ is available (``err.drho_first_order``), not the per-spin
+    split the spin-resolved XC kernel needs.
     """
     if _result_formalism(res) in ("noncollinear", "uspp_noncollinear"):
         raise NotImplementedError(
@@ -934,14 +948,26 @@ def estimate_force_error(
             "force terms in P(eps) are not assembled")
     if err.uspp:
         return _estimate_force_error_uspp(res, err, xc, remove_net=remove_net)
-    if getattr(res.system, "rho_core", None) is not None:
-        raise NotImplementedError(
-            "NLCC force term not supported in the error estimate: it is blocked "
-            "on the ground-state NLCC force (postscf.forces), itself unimplemented")
     nspin = int(getattr(res, "nspin", 1))
     system = res.system
     grid = system.grid
     device = res.v_eff.device
+    has_core = getattr(system, "rho_core", None) is not None
+    if has_core and nspin == 2:
+        raise NotImplementedError(
+            "NLCC force-error term needs the per-spin density perturbation "
+            "(only the spin-summed drho_first_order is available); nspin=2 + "
+            "NLCC is unsupported")
+    if has_core:
+        if xc is None:
+            raise ValueError(
+                "system has an NLCC core charge; pass the XCFunctional to "
+                "estimate_force_error() so the core XC-kernel term can be "
+                "evaluated")
+        if getattr(xc, "needs_tau", False):
+            raise NotImplementedError(
+                "NLCC force-error term does not support meta-GGA functionals "
+                "(the valence τ response is not threaded into this estimator)")
 
     drho = err.drho_first_order  # consistent with err.dpsi; total (spin-summed) drho
     rho0 = res.rho.detach()      # total density for nspin=1 and 2
@@ -950,11 +976,34 @@ def estimate_force_error(
     eps = torch.zeros((), dtype=RDTYPE, device=device, requires_grad=True)
 
     # local channel: total density enters through rho_g
-    rho_e_g = r_to_g((rho0 + eps * drho).to(CDTYPE))
+    rho_e = rho0 + eps * drho
+    rho_e_g = r_to_g(rho_e.to(CDTYPE))
     vloc_g = local_potential_g(
         pos, system.species_index, system.vloc_tables, grid.g_cart, grid.volume
     )
     energy = local_energy(rho_e_g, vloc_g, grid.volume)
+
+    if has_core:
+        # E_xc[rho_val(eps) + rho_core(pos)] on the SAME (eps, pos) leaves: the
+        # only new physics vs. the no-core path, since rho_core rides the
+        # structure factor e^{+iG.tau} exactly like postscf.forces's ground-
+        # state core-correction term (_core_correction_energy) -- differencing
+        # twice here (d/deps then d/dpos) picks up the XC-kernel cross term
+        # d(v_xc)/drho * drho_core/dtau * drho that a fixed core misses.
+        from gradwave.core.density import sigma_from_rho
+        from gradwave.scf.setup_common import (
+            _unique_shells,
+            assemble_core_density,
+            core_shell_tables,
+        )
+
+        g_flat = np.sqrt(grid.g2.detach().cpu().reshape(-1).numpy())
+        uniq, inverse = _unique_shells(g_flat)
+        shells = core_shell_tables(system.upfs, uniq, inverse)
+        core = assemble_core_density(shells, system.species_of_atom, pos, grid)
+        rho_xc = rho_e + core
+        sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
+        energy = energy + xc.energy(rho_xc, grid.volume, sigma, None)
 
     # nonlocal channel: orbital corrections enter through becp on the enlarged
     # sphere, summed over spin channels. For nspin=1 the estimator returns flat

@@ -7,8 +7,12 @@ density of gates means the feature matrix has holes off the happy path. This
 table enumerates every gate so the holes are visible and progress is measurable.
 
 **Metric of success is the number and user-impact of gates removed, not zero
-gates.** Some gates are permanent feature boundaries (e.g. fully-relativistic
-DFT+U stress, #142), not gaps — they stay, documented as such.
+gates.** Some gates are permanent feature boundaries, not gaps — they stay,
+documented as such. Fully-relativistic DFT+U stress (#142) was originally
+filed as one such boundary but turned out not to be: see the Done row below —
++U and the SOC nonlocal term are orthogonal, so the collinear +U stress term
+generalizes directly. Treat "#142" tags elsewhere in this doc as a hint to
+re-audit, not a guarantee of permanence.
 
 An ungating = remove the `raise`, thread the missing (nspin / formalism) index
 through the real computation, and land a Tier-0/Tier-1 self-oracle test **in the
@@ -20,9 +24,9 @@ Regenerate the raw list with:
 grep -rn "raise NotImplementedError" src/gradwave --include=*.py
 ```
 
-Current count: **67** `raise NotImplementedError` sites, of which **4 are
+Current count: **66** `raise NotImplementedError` sites, of which **4 are
 abstract-method stubs** (interface contracts on base classes, not capability
-gaps) — see the last section. So **63 real capability gates** remain.
+gaps) — see the last section. So **62 real capability gates** remain.
 
 ## Axis legend
 
@@ -55,6 +59,9 @@ gaps) — see the last section. So **63 real capability gates** remain.
 | ~~postscf/volumetric.py:266~~ | NC-only (spinor) | ELF for a noncollinear/SOC spinor result | **removed, this PR** — the ELF is the closed-shell form of the CHARGE density (`res.rho`, the trace of the spin-density matrix) and the total kinetic-energy density τ_0 = τ_↑↑ + τ_↓↓ (the trace of the 2×2 KE-density matrix `core.metagga.spinor_tau_matrix_b` already assembles). τ_0 ≥ \|∇ρ\|²/(8ρ) (von Weizsäcker bound on the total density), so D ≥ 0 and ELF ∈ [0, 1] just as collinear; no spin split, so no 2^{2/3} TF factor. Works with or without SOC. USPP/PAW still raises (no `batch`; the soft KE density needs the augmentation). Oracle: `test_elf_noncollinear_nonmagnetic_limit_matches_collinear` (nonmagnetic scalar-relativistic NC ELF == nspin=1 collinear ELF, ~2e-3) + the boundedness check folded into `test_noncollinear_spinor_export` (SOC GaAs, ELF ∈ [0, 1]) |
 | ~~postscf/hubbard_u.py:227~~ | nspin2 | Sternheimer linear-response U was nspin=2 only (reverse gap — the simpler nspin=1 case was missing) | **removed, this PR** — `_response_columns` now loops `range(nspin)` with the spin degeneracy g=2/nspin folded into the occupation response (dN_I ×g) and the total Δρ that drives the Hxc kernel; nspin=1 solves the single spin-restricted Sternheimer channel (u↑=u↓ for the spin-symmetric probe) and screens with the non-spin `fxc_hvp` at ρ+ρ_core (matching the nspin=1 dielectric kernel), while nspin=2 keeps the collinear `_k_hxc_spin`. Oracle: `test_diamond_c_linear_response_u_nspin1_matches_nspin2` (nspin=1 PBE == nspin=2 SpinPBE nonmagnetic limit: U to <1e-4, χ/χ0 to <1e-6, using the working nspin=2 path as ground truth) |
 | ~~postscf/hubbard_u.py:183~~ | +U | linear-response U for two Hubbard sites of different species or l | **removed, this PR** — the drivers now detect inequivalent sites (`_use_full_matrix`/`_all_sites_equivalent`, the existing species/l check) and build the full response matrix χ_IJ by perturbing each site independently (one Sternheimer solve / FD probe per site), inverting (χ0⁻¹ − χ⁻¹) as a general matrix (`_assemble_u_matrix`, Cococcioni–de Gironcoli general case); the cheap symmetric [[a,b],[b,a]] single-column shortcut is kept as a fast path for a lone site or two equivalent sites. The single-column `_assemble_u` keeps its guard (a single column can't reconstruct an asymmetric χ_IJ) as an internal precondition. Oracle: `test_diamond_c_linear_response_u_full_matrix_matches_shortcut` (full χ_IJ path == shortcut on the two equivalent C sites, U to <1e-4) + pure-logic `test_assemble_u_matrix_reduces_to_equivalent_shortcut` / `test_assemble_u_matrix_inequivalent_asymmetric` |
+| ~~postscf/discretization_error.py:847~~ | NLCC | NLCC force term in the error estimate — blocked (stale) on the g.s. NLCC force in postscf.forces | **removed (nspin=1), this PR** — the blocker was stale: postscf.forces has carried the ground-state NLCC force term since PR #64 (`_core_correction_energy`, gated on `has_core`). `estimate_force_error` now rebuilds E_xc[ρ_val(ε)+ρ_core(τ)] on the SAME (ε, τ) leaves the local/nonlocal channels already differentiate (`scf.setup_common.assemble_core_density`, mirroring `_core_correction_energy`'s core-density build exactly, including the shared species/\|G\|-shell tables), so its mixed second derivative ∂²E_xc/∂ε∂τ — the XC-kernel cross term a fixed core misses (Hartree/XC otherwise have zero EXPLICIT τ-dependence at fixed ρ, which is why the no-core path never needed this term) — now falls out of the same eps-then-pos double-backward the estimator already ran. nspin=2 + NLCC stays gated (only the spin-summed `drho_first_order` is available, not the per-spin split the spin-resolved XC kernel needs — a new, narrower raise). Oracle: `test_nc_nlcc_force_error_vs_high_cutoff` (δF correlates with (0.97) and reduces the true low→high-cutoff force change on the low-symmetry NLCC carbon cell of `test_forces_nlcc.py`, mirroring the established `test_uspp_force_error_vs_high_cutoff` pattern — Gamma-only and a 35→70 Ry span, since carbon's hard ONCV core needs a wider cutoff span than the non-NLCC Si estimator elsewhere in this file to sit in the annulus correction's linear regime) + `test_nc_nlcc_force_error_requires_xc` / `test_nc_nlcc_force_error_nspin2_not_implemented` guard tests |
+| ~~postscf/stress.py:146~~ | SOC + +U | DFT+U stress on the spin-orbit path — filed as a permanent feature boundary (#142), turned out stale | **removed, this PR** — +U and the SOC nonlocal term are orthogonal (the same statement PR #159 made for the SCF/energy path), so the collinear +U stress term generalizes directly onto `_energy_strained_fr`. `hubbard_energy_strained_nc` (postscf/_strain.py) builds the 2×2 spin-block composite occupation matrix N^I_{(σm),(σ'm')} (`core.hubbard.occupation_matrices_noncollinear`/`hubbard_dmatrix_noncollinear`, PR #159) from the SAME strained atomic-orbital projectors the collinear path already builds (`_hubbard_strain_setup`/`_hubbard_strain_q`, factored out of `hubbard_energy_strained` so the two paths cannot drift), contracted against BOTH spinor components; `hubbard_energy` (UNCHANGED) sums Tr[N(1−N)] over the bigger composite matrix, reducing exactly to the collinear per-spin sum in the z-polarized limit and to an exact zero at U=0 (D = (U−J)(½−N) vanishes identically). Oracle: `test_stress_soc_hubbard_autograd_vs_fd` (ε=0 strained expression reproduces the NC-SCF +U total to ~5e-8 eV; analytic stress == central FD of that energy to ~1e-10 eV/Å³ on the tested components) + `test_stress_soc_hubbard_u0_matches_plain_soc_stress` (U=0 == the pre-existing plain SOC stress of the SAME converged state, <1e-10, plus the no-manifolds ValueError guard) |
+| ~~scf/noncollinear.py:639~~ | SOC/NC-spinor + metaGGA | noncollinear meta-GGA band structure (τ operator) — blocked (stale) on `NCResult` not carrying occupations | **removed, this PR** — the blocker was already half-resolved: `NCResult` has carried `occupations` since PR #103 (added for the SOC stress), so "NCResult carries coeffs but not occupations" no longer held. `band_structure_nc` now rebuilds the converged KE-density matrix (τ_0, τ⃗) from `res.coeffs`/`res.occupations` at the SCF's own k-mesh (`system.batch`, `core.metagga.spinor_tau_matrix_b`), projects to the local-frame per-spin τ_± (`core.xc.noncollinear.local_frame_tau`), evaluates v_xc at the converged τ (mirroring the SCF's `_nc_effective_potential`), and forms the fixed v_τ operator fields (v_τ0, v_τ⃗) (`vtau_up_dn` + `tau_operator_fields`/the nonmagnetic branch, mirroring `_nc_metagga_step`) — then applies `spinor_metagga_tau_operator` per k-path chunk through `SpinorHamiltonian`'s existing `metagga_op` slot (already used by the SCF, so no new Hamiltonian machinery). Oracle: `test_bands_nc_metagga_reproduces_scf_spectrum_on_mesh` (r2SCAN on a nonmagnetic fully-relativistic Si run; band structure recomputed at the SCF's own k-mesh reproduces the SCF eigenvalues to 1e-3 eV, mirroring `test_bands_nc.py`'s SOC reproduction pattern — an FR pseudo is used because `band_structure_nc`'s projector rebuild is unconditionally j-resolved, independent of this gate) |
 
 ## Open — nspin=2 (next tranches)
 
@@ -108,7 +115,6 @@ keep the −½ limit (their own continuous limit), so their gates are unchanged.
 
 | file:line | axis | operation blocked |
 |---|---|---|
-| postscf/stress.py:146 | SOC + +U | DFT+U stress on the spin-orbit path (**feature boundary, #142**) |
 | postscf/stress_error.py:92 | SOC | pressure error for fully-relativistic pseudos |
 | postscf/stress_error.py:95 | +U | pressure error with DFT+U |
 
@@ -142,15 +148,13 @@ this slice.
 
 | file:line | axis | operation blocked |
 |---|---|---|
-| scf/noncollinear.py:639 | SOC/NC-spinor + metaGGA | noncollinear meta-GGA band structure (τ operator) |
 | scf/paw_noncollinear.py:49 | SOC/NC-spinor | noncollinear one-center XC is LDA-only (GGA rejected) |
 | scf/uspp_noncollinear.py:193 | SOC/NC-spinor | noncollinear USPP/PAW is LDA-only |
 | scf/uspp_noncollinear.py:200 | SOC/NC-spinor + U | DFT+U on the noncollinear USPP/PAW path (the norm-conserving spinor path has it — see Done above) |
-| postscf/forces.py, postscf/stress.py | SOC/NC-spinor + U | +U forces/stress on the (now +U-capable) noncollinear spinor SCF — SCF/energy path only so far |
+| postscf/forces.py | SOC/NC-spinor + U | +U forces on the (now +U-capable) noncollinear spinor SCF — SCF/energy path and now the fully-relativistic STRESS path have it (see Done above); forces are the remaining piece |
 | checkpoint.py:76 | SOC/NC-spinor | checkpointing a `scf_uspp_noncollinear` result (no restart consumer) |
 | postscf/dielectric.py:115 | SOC | dielectric response scalar-relativistic only |
 | postscf/discretization_error.py:841 | SOC/NC-spinor | force-error estimate NC-collinear only (spinor force terms unassembled) |
-| postscf/discretization_error.py:847 | NLCC | NLCC force term in the error estimate (blocked on the g.s. NLCC force) |
 | postscf/discretization_error.py:1010 | SOC/NC-spinor + symmetry | noncollinear disc. error requires `use_symmetry=False` |
 
 **Noncollinear / SOC COHP and PDOS — NOT gaps, confirmed validation/routing

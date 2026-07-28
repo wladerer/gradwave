@@ -381,6 +381,92 @@ def test_uspp_nspin2_force_error_matches_nspin1():
 
 
 # --------------------------------------------------------------------------- #
+#  Norm-conserving NLCC force error                                           #
+# --------------------------------------------------------------------------- #
+
+
+_NLCC_CELL = 3.2 * np.array([[1.0, 0.0, 0.0], [0.12, 1.0, 0.0], [0.05, 0.08, 1.05]])
+_NLCC_FRAC = np.array([[0.02, 0.01, 0.0], [0.27, 0.31, 0.24]])
+_NLCC_POS = _NLCC_FRAC @ _NLCC_CELL  # low-symmetry triclinic C cell, all forces nonzero
+# (matches tests/integration/test_forces_nlcc.py's fixture, so the ground-state
+# NLCC force term this estimator's XC-kernel term builds on is already pinned)
+
+
+@pytest.mark.slow
+def test_nc_nlcc_force_error_vs_high_cutoff():
+    """Norm-conserving NLCC force-error term: on a low-symmetry carbon cell
+    (C_ONCV_PBE_sr, which carries a pseudo-core charge), delta-F -- now
+    including the E_xc[rho_val(eps)+rho_core(tau)] XC-kernel cross term --
+    correlates with and reduces the true low->high-cutoff force change.
+    Mirrors test_uspp_force_error_vs_high_cutoff, the established oracle
+    pattern for a force-error estimate that needs ``xc``.
+
+    Gamma-only and a wide (35->70 Ry) cutoff span: carbon's ONCV core is
+    "hard" (no semicore, small core radius), so a narrower/lower-cutoff span
+    (e.g. 20->45 Ry, fine for the non-NLCC Si estimator elsewhere in this
+    file) leaves the low-cutoff state outside the annulus correction's
+    linear-response regime and the correlation check below fails -- this is a
+    property of the base (pre-existing) local/nonlocal estimator on a hard
+    pseudo, not of the new NLCC term (independently verified against a direct
+    finite difference of the added E_xc[rho_val(eps)+rho_core(tau)] mixed
+    partial, which matches to 1e-6 regardless of cutoff)."""
+    torch.set_num_threads(8)
+    from gradwave.postscf.forces import forces
+
+    upf = parse_upf(FIX / "C_ONCV_PBE_sr.upf")
+    assert upf.core_rho is not None, "fixture must carry an NLCC core charge"
+
+    def run(ecut):
+        system = setup_system(_NLCC_CELL, _NLCC_POS, [0, 0], [upf], ecut=ecut,
+                              kmesh=(1, 1, 1))
+        return scf(system, PBE(), smearing="gaussian", width=0.05,
+                   etol=1e-10, rhotol=1e-9, verbose=False)
+
+    lo, hi = run(35 * RY), run(70 * RY)
+    err = estimate_density_error(lo, ecut_large=70 * RY)
+    dF = estimate_force_error(lo, err, xc=PBE())
+    f_lo, f_hi = forces(lo, xc=PBE()), forces(hi, xc=PBE())
+    true_dF = f_hi - f_lo
+
+    assert float(dF.abs().max()) > 1e-4                    # a real signal
+    assert _corr(dF, true_dF) > 0.9                         # right direction
+    assert 0.3 < float(dF.norm() / true_dF.norm()) < 1.8    # right scale
+    before = float((f_lo - f_hi).abs().sum())
+    after = float((f_lo + dF - f_hi).abs().sum())
+    assert after < before                                   # reduces the error
+
+
+def test_nc_nlcc_force_error_requires_xc():
+    """Force error on an NLCC system without ``xc`` raises a clear error --
+    the core XC-kernel term needs the functional to evaluate v_xc and its
+    density derivative, exactly as postscf.forces.forces requires it."""
+    torch.set_num_threads(4)
+    upf = parse_upf(FIX / "C_ONCV_PBE_sr.upf")
+    system = setup_system(_NLCC_CELL, _NLCC_POS, [0, 0], [upf], ecut=18 * RY,
+                          kmesh=(2, 2, 2))
+    res = scf(system, PBE(), smearing="gaussian", width=0.05,
+             etol=1e-8, rhotol=1e-7, verbose=False)
+    err = estimate_density_error(res, ecut_large=35 * RY)
+    with pytest.raises(ValueError, match="NLCC"):
+        estimate_force_error(res, err)
+
+
+def test_nc_nlcc_force_error_nspin2_not_implemented():
+    """nspin=2 + NLCC is a documented boundary: only the spin-summed drho is
+    available, not the per-spin split the spin-resolved XC kernel needs."""
+    torch.set_num_threads(4)
+    upf = parse_upf(FIX / "C_ONCV_PBE_sr.upf")
+    system = setup_system(_NLCC_CELL, _NLCC_POS, [0, 0], [upf], ecut=18 * RY,
+                          kmesh=(2, 2, 2))
+    res = scf(system, SpinPBE(), nspin=2, start_mag=[0.0, 0.0],
+             smearing="gaussian", width=0.05, etol=1e-8, rhotol=1e-7,
+             verbose=False)
+    err = estimate_density_error(res, ecut_large=35 * RY)
+    with pytest.raises(NotImplementedError, match="nspin=2"):
+        estimate_force_error(res, err, xc=SpinPBE())
+
+
+# --------------------------------------------------------------------------- #
 #  Non-collinear (spinor) path                                                #
 # --------------------------------------------------------------------------- #
 

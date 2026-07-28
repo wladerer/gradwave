@@ -158,38 +158,22 @@ def strained_projector_cols(
     return p * ph[:, atom_index].T
 
 
-def hubbard_energy_strained(
-    system, manifolds, b_e, pos_e, omega, spheres, coeffs_s, occ_s, nspin, kw
-) -> torch.Tensor:
-    """Dudarev E_U on the strain graph: Σ_{I,σ} (U−J)/2 Tr[n^{Iσ}(1−n^{Iσ})].
+def _hubbard_strain_setup(system, manifolds):
+    """Shared per-species/per-site setup for the strained Hubbard energy: the
+    differentiable radial projector data (r·R renormalized, as in
+    core.hubbard.build_hubbard_projectors), the correlated-site table, and
+    (nproj, l_max). Shared by the collinear (``hubbard_energy_strained``) and
+    spinor (``hubbard_energy_strained_nc``) strained +U energy — the atomic-
+    orbital projector geometry is spin-independent on both paths."""
+    from gradwave.core.hubbard import manifold_radial
+    from gradwave.pseudo.radial_torch import simpson_weights
 
-    The strain enters through the atomic-orbital projectors exactly as it does
-    for the KB betas in ``strained_projector_cols``: the radial form factor
-    F(|k+G|) via the differentiable SBT (``sbt_t``), Y_lm at the strained
-    (k+G) direction, the 1/√Ω(ε) normalization, and the e^{−i(k+G)·τ(ε)}
-    phases. The occupation matrices n^{Iσ} = Σ_{kv} f ⟨φ_m|ψ⟩⟨ψ|φ_{m'}⟩ are
-    rebuilt from those strained projectors and the (detached) SCF orbitals, so
-    the whole +U energy is on the same ε-graph #58's stress uses. At ε=0 this
-    reproduces core.hubbard.hubbard_occ_and_energy bit-for-bit (``sbt_t`` and
-    ``sbt`` share the same Simpson quadrature), so the ε=0 strained energy
-    still matches the SCF total.
-
-    ``coeffs_s``/``occ_s`` are the per-spin (detached) coefficients on each
-    k-sphere and occupations (as prepared in ``_energy_strained``): nspin=1 is
-    the half-filled, energy-doubled convention (occ in [0,2], weight ½·occ);
-    nspin=2 uses per-channel occ in [0,1].
-    """
-    from gradwave.core.hubbard import hubbard_energy, manifold_radial
-    from gradwave.pseudo.radial_torch import sbt_t, simpson_weights
-
-    dev = pos_e.device
+    dev = system.positions.device
     man_by_sp = {m.species: m for m in manifolds}
     correlated = [(a, s) for a, s in enumerate(system.species_of_atom) if s in man_by_sp]
     if not correlated:
         raise ValueError("no atoms match the requested Hubbard manifolds")
 
-    # per-species differentiable radial data (r·R renormalized, as in
-    # core.hubbard.build_hubbard_projectors; g = (r·R)·r so ∫ g j_l dr = F(q))
     rad = {}
     for sp, m in man_by_sp.items():
         upf = system.upfs[sp]
@@ -208,28 +192,69 @@ def hubbard_energy_strained(
         col += 2 * m.l + 1
     nproj = col
     l_max = max(m.l for m in manifolds)
+    return man_by_sp, sites, rad, nproj, l_max
+
+
+def _hubbard_strain_q(sph, b_e, pos_e, omega, system, man_by_sp, sites, rad, l_max):
+    """Strained atomic-orbital projector columns q(nproj, npw) at one k —
+    spin-independent (the same projector acts on both spinor components on
+    the spinor/SOC path, since +U and the SOC nonlocal term are orthogonal).
+    The strain enters exactly as it does for the KB betas in
+    ``strained_projector_cols``: the radial form factor F(|k+G|) via the
+    differentiable SBT (``sbt_t``), Y_lm at the strained (k+G) direction, the
+    1/√Ω(ε) normalization, and the e^{−i(k+G)·τ(ε)} phases. Returns
+    (q, kpg, kpg2)."""
+    from gradwave.pseudo.radial_torch import sbt_t
+
+    kpg, kpg2 = strained_kpg(sph, b_e)  # (npw, 3), (npw,)
+    q_k = torch.sqrt(kpg2.clamp_min(1e-30))
+    q_k = torch.where(kpg2.detach() < 1e-24, torch.zeros_like(q_k), q_k)
+    y = ylm_all(l_max, kpg)
+    f_by_sp = {
+        sp: sbt_t(rad[sp][0], rad[sp][1], rad[sp][2], rad[sp][3], q_k) for sp in man_by_sp
+    }
+    parg = kpg @ pos_e.T  # (npw, na)
+    ph = torch.exp(torch.complex(torch.zeros_like(parg), -parg))
+    pref = 4.0 * math.pi / torch.sqrt(omega)
+    cols = []
+    for site in sites:
+        a, ell = site["atom"], site["l"]
+        f = f_by_sp[system.species_of_atom[a]]
+        for mm in range(2 * ell + 1):
+            cols.append(
+                (pref * f * y[:, ell * ell + mm]).to(CDTYPE) * _MINUS_I_POW[ell] * ph[:, a]
+            )
+    q = torch.stack(cols, dim=0)  # (nproj, npw), site-block ordering
+    return q, kpg, kpg2
+
+
+def hubbard_energy_strained(
+    system, manifolds, b_e, pos_e, omega, spheres, coeffs_s, occ_s, nspin, kw
+) -> torch.Tensor:
+    """Dudarev E_U on the strain graph: Σ_{I,σ} (U−J)/2 Tr[n^{Iσ}(1−n^{Iσ})].
+
+    The occupation matrices n^{Iσ} = Σ_{kv} f ⟨φ_m|ψ⟩⟨ψ|φ_{m'}⟩ are rebuilt
+    from the strained atomic-orbital projectors (``_hubbard_strain_q``) and
+    the (detached) SCF orbitals, so the whole +U energy is on the same
+    ε-graph #58's stress uses. At ε=0 this reproduces
+    core.hubbard.hubbard_occ_and_energy bit-for-bit (``sbt_t`` and ``sbt``
+    share the same Simpson quadrature), so the ε=0 strained energy still
+    matches the SCF total.
+
+    ``coeffs_s``/``occ_s`` are the per-spin (detached) coefficients on each
+    k-sphere and occupations (as prepared in ``_energy_strained``): nspin=1 is
+    the half-filled, energy-doubled convention (occ in [0,2], weight ½·occ);
+    nspin=2 uses per-channel occ in [0,1].
+    """
+    from gradwave.core.hubbard import hubbard_energy
+
+    dev = pos_e.device
+    man_by_sp, sites, rad, nproj, l_max = _hubbard_strain_setup(system, manifolds)
 
     n_full = [torch.zeros(nproj, nproj, dtype=CDTYPE, device=dev) for _ in range(nspin)]
     for ik, sph in enumerate(spheres):
-        kpg, kpg2 = strained_kpg(sph, b_e)  # (npw, 3), (npw,)
-        q_k = torch.sqrt(kpg2.clamp_min(1e-30))
-        q_k = torch.where(kpg2.detach() < 1e-24, torch.zeros_like(q_k), q_k)
-        y = ylm_all(l_max, kpg)
-        f_by_sp = {
-            sp: sbt_t(rad[sp][0], rad[sp][1], rad[sp][2], rad[sp][3], q_k) for sp in man_by_sp
-        }
-        parg = kpg @ pos_e.T  # (npw, na)
-        ph = torch.exp(torch.complex(torch.zeros_like(parg), -parg))
-        pref = 4.0 * math.pi / torch.sqrt(omega)
-        cols = []
-        for site in sites:
-            a, ell = site["atom"], site["l"]
-            f = f_by_sp[system.species_of_atom[a]]
-            for mm in range(2 * ell + 1):
-                cols.append(
-                    (pref * f * y[:, ell * ell + mm]).to(CDTYPE) * _MINUS_I_POW[ell] * ph[:, a]
-                )
-        q = torch.stack(cols, dim=0)  # (nproj, npw), site-block ordering
+        q, _kpg, _kpg2 = _hubbard_strain_q(
+            sph, b_e, pos_e, omega, system, man_by_sp, sites, rad, l_max)
         for spn in range(nspin):
             c = coeffs_s[spn][ik]  # (nb, npw)
             nb = c.shape[0]
@@ -249,6 +274,55 @@ def hubbard_energy_strained(
     if nspin == 1:
         return 2.0 * hubbard_energy(_mats(n_full[0]), sites)
     return sum(hubbard_energy(_mats(n_full[spn]), sites) for spn in range(nspin))
+
+
+def hubbard_energy_strained_nc(
+    system, manifolds, b_e, pos_e, omega, spheres, coeffs, occ, kw, m_pw
+) -> torch.Tensor:
+    """Dudarev E_U on the strain graph for a fully-relativistic (spinor/SOC)
+    result — the spin-orbit generalization of ``hubbard_energy_strained``.
+
+    Generalizes the per-spin scalar occupation matrix n^{Iσ}_{mm'} to the
+    2×2 spin-block composite matrix N^I_{(σm),(σ'm')}
+    (core.hubbard.occupation_matrices_noncollinear / hubbard_dmatrix_
+    noncollinear, PR #159's SCF/energy-path generalization): the SAME strained
+    atomic-orbital projector q (spin-independent — +U and the SOC nonlocal
+    term are orthogonal, so the projector geometry is unaffected by j-resolved
+    SOC) contracts against BOTH spinor components, and ``hubbard_energy``
+    (UNCHANGED) sums Tr[N(1−N)] over the bigger composite matrix — reducing
+    exactly to the collinear sum in the z-polarized (no-canting) limit, and to
+    zero at U=0 (D = (U−J)(½−N) vanishes identically), so the SOC stress with
+    manifolds=None or U=0 reproduces the plain ``_energy_strained_fr`` result.
+
+    ``coeffs`` is the spinor (nk, nb, 2·npw_max) tensor and ``occ`` (nk, nb)
+    the spinor occupations (degeneracy g=1 — no half-filled doubling, unlike
+    the collinear nspin=1 convention). ``m_pw`` is the per-component
+    plane-wave count (``coeffs.shape[-1] // 2``)."""
+    from gradwave.core.hubbard import hubbard_energy
+
+    dev = pos_e.device
+    man_by_sp, sites, rad, nproj, l_max = _hubbard_strain_setup(system, manifolds)
+
+    n_full = torch.zeros(2, nproj, 2, nproj, dtype=CDTYPE, device=dev)
+    for ik, sph in enumerate(spheres):
+        q, kpg, _kpg2 = _hubbard_strain_q(
+            sph, b_e, pos_e, omega, system, man_by_sp, sites, rad, l_max)
+        npw = kpg.shape[0]
+        cu = coeffs[ik][:, :npw]
+        cd = coeffs[ik][:, m_pw : m_pw + npw]
+        nb = cu.shape[0]
+        w_b = (kw[ik] * occ[ik, :nb]).to(RDTYPE)
+        becp_u = torch.einsum("pg,bg->bp", q.conj(), cu)  # (nb, nproj)
+        becp_d = torch.einsum("pg,bg->bp", q.conj(), cd)
+        becp = torch.stack([becp_u, becp_d], dim=1)  # (nb, 2, nproj)
+        n_full = n_full + torch.einsum("b,bsp,btq->sptq", w_b, becp, becp.conj())
+
+    mats = [
+        n_full[:, s["start"] : s["start"] + s["dim"], :, s["start"] : s["start"] + s["dim"]]
+        .reshape(2 * s["dim"], 2 * s["dim"])
+        for s in sites
+    ]
+    return hubbard_energy(mats, sites)
 
 
 def ewald_strained(pos_e, charges, a_e, b_e, omega, cell0) -> torch.Tensor:
