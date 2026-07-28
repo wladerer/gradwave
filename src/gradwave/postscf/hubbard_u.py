@@ -50,6 +50,7 @@ from gradwave.postscf._response import (
     cg_sternheimer as _cg_sternheimer_b,
 )
 from gradwave.postscf._response import (
+    fxc_hvp,
     fxc_hvp_spin,
     hartree_kernel,
     insulator_window,
@@ -135,14 +136,40 @@ def _bare_response_occ(system, base_res, hub, hub_q, alpha_vec, smearing, width)
     return n * (2.0 if nspin == 1 else 1.0)
 
 
+def _fd_response_column(system, xc, base, hub, hub_q, j, alpha, man,
+                        smearing, width, scf_kwargs) -> tuple:
+    """Central-difference response column (χ_col, χ0_col) [1/eV] from perturbing
+    the single site `j`: dN_I/dα_j for all sites I (interacting and bare)."""
+    ns = hub.n_sites
+    chi_cols, chi0_cols = [], []
+    for sgn in (+1.0, -1.0):
+        av = [0.0] * ns
+        av[j] = sgn * alpha
+        # interacting: full SCF re-converged with the probe
+        r = scf(system, xc, smearing=smearing, width=width, hubbard=man,
+                hub_alpha=av, **scf_kwargs)
+        chi_cols.append(_site_occupations(r, hub, hub_q))
+        # bare: one diagonalization at the base self-consistent potential
+        chi0_cols.append(_bare_response_occ(system, base, hub, hub_q,
+                                            torch.tensor(av), smearing, width))
+    chi_col = (chi_cols[0] - chi_cols[1]) / (2 * alpha)   # (ns,)
+    chi0_col = (chi0_cols[0] - chi0_cols[1]) / (2 * alpha)
+    return chi_col, chi0_col
+
+
 def linear_response_u(system, xc, l: int, species: int, *, site: int = 0,
                       alpha: float = 0.1, smearing="gaussian", width=0.05,
                       scf_kwargs=None) -> dict:
     """Compute the linear-response Hubbard U [eV] for a manifold.
 
-    Perturbs one correlated `site`, measures the on-site occupation response,
-    and returns χ0, χ, and U = (χ0^{-1} − χ^{-1})_{site,site}. Runs one base +
-    two perturbed SCFs (interacting χ) and cheap one-shot solves (bare χ0)."""
+    Measures the on-site occupation response to a rigid projector probe and
+    returns χ0, χ, and U = (χ0^{-1} − χ^{-1})_{site,site}. For a lone site or
+    two symmetry-equivalent sites the symmetric [[a,b],[b,a]] matrix is known
+    from perturbing `site` alone (one probe direction, cheapest). For
+    inequivalent sites (different species or l) or ≥3 sites χ_IJ is genuinely
+    asymmetric, so each site is perturbed independently to build the full
+    response matrix, then inverted as (χ0^{-1} − χ^{-1}) (Cococcioni–de
+    Gironcoli, general case)."""
     scf_kwargs = dict(scf_kwargs or {})
     man = [HubbardManifold(species=species, l=l, u=0.0, j=0.0)]  # U computed at U=0
     hub = build_hubbard_projectors(system, man)
@@ -151,40 +178,64 @@ def linear_response_u(system, xc, l: int, species: int, *, site: int = 0,
 
     base = scf(system, xc, smearing=smearing, width=width, hubbard=man, **scf_kwargs)
 
-    chi_cols, chi0_cols = [], []  # response of all sites to perturbing `site`
-    for sgn in (+1.0, -1.0):
-        av = [0.0] * ns
-        av[site] = sgn * alpha
-        # interacting: full SCF re-converged with the probe
-        r = scf(system, xc, smearing=smearing, width=width, hubbard=man,
-                hub_alpha=av, **scf_kwargs)
-        chi_cols.append(_site_occupations(r, hub, hub_q))
-        # bare: one diagonalization at the base self-consistent potential
-        chi0_cols.append(_bare_response_occ(system, base, hub, hub_q,
-                                            torch.tensor(av), smearing, width))
+    if _use_full_matrix(hub.sites, system.species_of_atom):
+        chi_cols, chi0_cols = [], []  # column j = response to perturbing site j
+        for j in range(ns):
+            cj, c0j = _fd_response_column(system, xc, base, hub, hub_q, j, alpha,
+                                          man, smearing, width, scf_kwargs)
+            chi_cols.append(cj)
+            chi0_cols.append(c0j)
+        chi_mat = torch.stack(chi_cols, dim=1)   # χ_IJ = dN_I/dα_J
+        chi0_mat = torch.stack(chi0_cols, dim=1)
+        return _assemble_u_matrix(chi_mat, chi0_mat, site)
 
-    # central difference dN_I/dα_site
-    chi_col = (chi_cols[0] - chi_cols[1]) / (2 * alpha)   # (ns,)
-    chi0_col = (chi0_cols[0] - chi0_cols[1]) / (2 * alpha)
+    chi_col, chi0_col = _fd_response_column(system, xc, base, hub, hub_q, site,
+                                            alpha, man, smearing, width, scf_kwargs)
     return _assemble_u(chi_col, chi0_col, site, hub.sites, system.species_of_atom)
+
+
+def _all_sites_equivalent(sites: list, species_of_atom) -> bool:
+    """True if every Hubbard site shares the first site's species and l — the
+    symmetry-equivalent case where the symmetric single-column shortcut holds."""
+    if len(sites) <= 1:
+        return True
+    sp0, l0 = species_of_atom[sites[0]["atom"]], sites[0]["l"]
+    return all(species_of_atom[s["atom"]] == sp0 and s["l"] == l0 for s in sites)
+
+
+def _use_full_matrix(sites: list, species_of_atom) -> bool:
+    """Whether the general per-site response matrix is needed. The cheap
+    single-column shortcut only covers a lone site (scalar) or exactly two
+    symmetry-equivalent sites ([[a,b],[b,a]]); anything else — an inequivalent
+    pair or ≥3 sites — needs the full χ_IJ built by perturbing each site."""
+    ns = len(sites)
+    if ns == 1:
+        return False
+    if ns == 2 and _all_sites_equivalent(sites, species_of_atom):
+        return False
+    return True
 
 
 def _assemble_u(chi_col: torch.Tensor, chi0_col: torch.Tensor, site: int,
                 sites: list, species_of_atom) -> dict:
     """U = (χ0^{-1} − χ^{-1})_II from one response column.
 
-    Two equivalent sites: the symmetric [[a,b],[b,a]] matrix is known from
-    perturbing one site; otherwise the single-site scalar estimate."""
+    The cheap single-perturbed-site path: a lone site gives the scalar estimate;
+    two symmetry-equivalent sites give the symmetric [[a,b],[b,a]] matrix. A
+    single column cannot reconstruct an inequivalent pair (χ_IJ ≠ χ_JI there),
+    so that case raises — the drivers route it to the full-matrix path
+    (`_assemble_u_matrix`) instead of calling this."""
     ns = chi_col.shape[0]
     if ns == 2:
         s0, s1 = sites[site], sites[1 - site]
         if (species_of_atom[s0["atom"]] != species_of_atom[s1["atom"]]
                 or s0["l"] != s1["l"]):
             raise NotImplementedError(
-                "linear-response U for two Hubbard sites of different species "
-                "or l is not implemented: the [[a,b],[b,a]] symmetric-response "
-                "reconstruction from a single perturbed site assumes the two "
-                "sites are symmetry-equivalent")
+                "single-column linear-response U for two Hubbard sites of "
+                "different species or l is not defined: the [[a,b],[b,a]] "
+                "symmetric reconstruction from one perturbed site assumes the "
+                "sites are symmetry-equivalent — perturb each site for the full "
+                "response matrix (linear_response_u does this automatically)")
         chi = torch.tensor([[chi_col[site], chi_col[1 - site]],
                             [chi_col[1 - site], chi_col[site]]])
         chi0 = torch.tensor([[chi0_col[site], chi0_col[1 - site]],
@@ -194,6 +245,20 @@ def _assemble_u(chi_col: torch.Tensor, chi0_col: torch.Tensor, site: int,
         u = float(1.0 / chi0_col[site] - 1.0 / chi_col[site])
     return {"U_eV": u, "chi": chi_col[site].item(), "chi0": chi0_col[site].item(),
             "chi_col": chi_col.tolist(), "chi0_col": chi0_col.tolist()}
+
+
+def _assemble_u_matrix(chi_mat: torch.Tensor, chi0_mat: torch.Tensor,
+                       site: int) -> dict:
+    """U = (χ0^{-1} − χ^{-1})_{site,site} from the full response matrix χ_IJ
+    (column J = response to perturbing site J), built by perturbing every
+    correlated site independently — the general inequivalent/multi-site path."""
+    inv = torch.linalg.inv(chi0_mat) - torch.linalg.inv(chi_mat)
+    u = float(inv[site, site])
+    return {"U_eV": u, "chi": float(chi_mat[site, site]),
+            "chi0": float(chi0_mat[site, site]),
+            "chi_col": chi_mat[:, site].tolist(),
+            "chi0_col": chi0_mat[:, site].tolist(),
+            "chi_mat": chi_mat.tolist(), "chi0_mat": chi0_mat.tolist()}
 
 
 def _k_hxc_spin(res, xc, dru, drd):
@@ -209,13 +274,38 @@ def _k_hxc_spin(res, xc, dru, drd):
     return kh + fu, kh + fd
 
 
+def _k_hxc_channels(res, xc, drho):
+    """Per-spin-channel Hxc potential response [Δv^σ] from the per-channel
+    density response [Δρ^σ] (one entry per computed spin channel).
+
+    nspin=2: the collinear spin kernel `_k_hxc_spin` on (Δρ↑, Δρ↓), with `xc` a
+    spin functional. nspin=1: the spin-restricted limit — the projector probe is
+    spin-symmetric on a closed-shell ground state, so Δρ↑=Δρ↓=drho[0], Δv↑=Δv↓
+    and only one channel is returned. `xc` is then a non-spin functional (as for
+    the nspin=1 SCF), so the closed-shell f_xc·Δρ_tot is the non-spin `fxc_hvp`
+    at the full ρ+ρ_core, exactly matching the nspin=1 dielectric kernel."""
+    if res.nspin == 2:
+        du, dd = _k_hxc_spin(res, xc, drho[0], drho[1])
+        return [du, dd]
+    core = res.system.rho_core
+    rho_xc = res.rho if core is None else res.rho + core
+    drho_tot = 2.0 * drho[0]  # Δρ_tot = Δρ↑ + Δρ↓, spin degeneracy of the one channel
+    grid = res.system.grid
+    return [hartree_kernel(grid, drho_tot) + fxc_hvp(xc, rho_xc, grid, drho_tot)]
+
+
 @torch.no_grad()
 def _response_columns(res, xc, hub, hub_q, site, *, beta=0.2, outer_tol=1e-6,
                       max_outer=200, cg_tol=1e-8, history=8, verbose=False):
     """(χ0_col, χ_col, n_outer): analytic dN_I/dα_site by Sternheimer response.
 
     Bare column = first pass (frozen Hxc potential); interacting column = the
-    damped fixed point of the response potential u^σ = K_Hxc Δρ(P + u)."""
+    damped fixed point of the response potential u^σ = K_Hxc Δρ(P + u).
+
+    Both nspin: nspin=2 solves one Sternheimer channel per spin; nspin=1 solves
+    the single spin-restricted channel and folds the ×2 spin degeneracy into the
+    occupation response and the total Δρ that drives the Hxc kernel (the probe
+    is spin-symmetric, so u↑=u↓ and only one channel is tracked)."""
     from gradwave.core.batch import (
         BatchedHamiltonian,
         box_to_sphere_b,
@@ -223,26 +313,33 @@ def _response_columns(res, xc, hub, hub_q, site, *, beta=0.2, outer_tol=1e-6,
         projectors_b,
     )
 
-    if res.nspin != 2:
-        raise NotImplementedError("Sternheimer linear-response U: nspin=2 only for now")
     system = res.system
     bk, grid = system.batch, system.grid
     kw = system.kweights
+    nspin = res.nspin
+    # g = spin degeneracy folded into each computed channel and the full band
+    # filling per channel: 2 for nspin=1 (doubly-occupied spatial orbitals),
+    # 1 for nspin=2 (one electron per spin channel).
+    g = 2.0 / nspin
     ns = hub.n_sites
     st, dim = hub.sites[site]["start"], hub.sites[site]["dim"]
     qj = hub_q[:, st:st + dim, :]
     projs_b = projectors_b(bk, system.positions)
 
+    # Per-spin-channel views of the (possibly spin-agnostic, nspin=1) result.
+    def _ch(x, sp):
+        return x if nspin == 1 else x[sp]
+
     c_occ, eps_occ, hs, shifts, probe_psi = [], [], [], [], []
-    for sp in range(2):
+    for sp in range(nspin):
         nocc = insulator_window(
-            res.occupations[sp], 1.0,
+            _ch(res.occupations, sp), g,
             "Sternheimer response needs insulating occupations (gap ≫ width)")
-        c = _pad(res.coeffs[sp], bk.npw_max)[:, :nocc]
-        e = res.eigenvalues[sp][:, :nocc].to(RDTYPE)
+        c = _pad(_ch(res.coeffs, sp), bk.npw_max)[:, :nocc]
+        e = _ch(res.eigenvalues, sp)[:, :nocc].to(RDTYPE)
         c_occ.append(c)
         eps_occ.append(e)
-        hs.append(BatchedHamiltonian(bk, grid.shape, res.v_eff[sp], projs_b))
+        hs.append(BatchedHamiltonian(bk, grid.shape, _ch(res.v_eff, sp), projs_b))
         shifts.append(sternheimer_shift(e))
         b = torch.einsum("kpg,kbg->kbp", qj.conj(), c)
         probe_psi.append(torch.einsum("kbp,kpg->kbg", b, qj))
@@ -251,10 +348,12 @@ def _response_columns(res, xc, hub, hub_q, site, *, beta=0.2, outer_tol=1e-6,
         col = torch.zeros(ns, dtype=RDTYPE)
         for i, s in enumerate(hub.sites):
             qi = hub_q[:, s["start"]:s["start"] + s["dim"], :]
-            for sp in range(2):
+            for sp in range(nspin):
                 b_c = torch.einsum("kpg,kbg->kbp", qi.conj(), c_occ[sp])
                 b_d = torch.einsum("kpg,kbg->kbp", qi.conj(), dpsi_s[sp])
-                col[i] += 2.0 * float(
+                # dN_I^σ = 2 Re Σ_n ⟨ψ_n|φ^I⟩⟨φ^I|dψ_n⟩; ×g folds the spin
+                # degeneracy of the single nspin=1 channel (no-op for nspin=2).
+                col[i] += g * 2.0 * float(
                     (kw[:, None, None] * (b_c.conj() * b_d).real).sum())
         return col
 
@@ -263,14 +362,15 @@ def _response_columns(res, xc, hub, hub_q, site, *, beta=0.2, outer_tol=1e-6,
     # eigenvalues well below −1 (NiO: ≈ −6) — an antisymmetric Δm mode on the
     # two Ni that plain Richardson iteration amplifies.
     n_pts = grid.n_points
-    u_flat = torch.zeros(2 * n_pts, dtype=RDTYPE, device=hub_q.device)
+    u_flat = torch.zeros(nspin * n_pts, dtype=RDTYPE, device=hub_q.device)
     mixer = AndersonMixer(history, beta)
-    dpsi = [torch.zeros_like(c_occ[sp]) for sp in range(2)]
+    dpsi = [torch.zeros_like(c_occ[sp]) for sp in range(nspin)]
     chi0_col, chi_prev = None, None
     for it in range(1, max_outer + 1):
-        u_r = [u_flat[:n_pts].reshape(grid.shape), u_flat[n_pts:].reshape(grid.shape)]
+        u_r = [u_flat[sp * n_pts:(sp + 1) * n_pts].reshape(grid.shape)
+               for sp in range(nspin)]
         drho = []
-        for sp in range(2):
+        for sp in range(nspin):
             psi_r = g_to_r_b(c_occ[sp], bk, grid.shape)
             rhs = probe_psi[sp]
             if it > 1:
@@ -280,6 +380,8 @@ def _response_columns(res, xc, hub, hub_q, site, *, beta=0.2, outer_tol=1e-6,
             dpsi[sp] = _cg_sternheimer_b(hs[sp], bk, c_occ[sp], eps_occ[sp], rhs,
                                          dpsi[sp], shifts[sp], tol=cg_tol)
             dpsi_r = g_to_r_b(dpsi[sp], bk, grid.shape)
+            # per-channel Δρ^σ = 2 Re Σ_n ψ_n* dψ_n (one electron per orbital);
+            # _k_hxc_channels folds the nspin=1 spin factor into the total.
             dr = 2.0 * (kw[:, None, None, None, None]
                         * (psi_r.conj() * dpsi_r).real).sum(dim=(0, 1)) / grid.volume
             drho.append(dr)
@@ -291,8 +393,8 @@ def _response_columns(res, xc, hub, hub_q, site, *, beta=0.2, outer_tol=1e-6,
         if chi_prev is not None and float((chi_col - chi_prev).abs().max()) < outer_tol:
             return chi0_col, chi_col, it
         chi_prev = chi_col
-        du, dd = _k_hxc_spin(res, xc, drho[0], drho[1])
-        r_vec = torch.cat([du.reshape(-1), dd.reshape(-1)]) - u_flat
+        dv = _k_hxc_channels(res, xc, drho)
+        r_vec = torch.cat([dv[sp].reshape(-1) for sp in range(nspin)]) - u_flat
         u_flat = mixer.step(u_flat, r_vec)
     raise RuntimeError(f"response fixed point not converged in {max_outer} iterations")
 
@@ -315,9 +417,26 @@ def linear_response_u_autodiff(system, xc, l: int, species: int, *, site: int = 
     base = scf(system, xc, smearing=smearing, width=width, hubbard=man, **scf_kwargs)
     if not base.converged:
         raise RuntimeError("base SCF did not converge")
-    chi0_col, chi_col, n_outer = _response_columns(
-        base, xc, hub, hub_q, site, beta=beta, outer_tol=outer_tol,
-        max_outer=max_outer, cg_tol=cg_tol, history=history, verbose=verbose)
+
+    def _column(j):
+        return _response_columns(
+            base, xc, hub, hub_q, j, beta=beta, outer_tol=outer_tol,
+            max_outer=max_outer, cg_tol=cg_tol, history=history, verbose=verbose)
+
+    if _use_full_matrix(hub.sites, system.species_of_atom):
+        chi_cols, chi0_cols, n_outers = [], [], []
+        for j in range(hub.n_sites):
+            c0j, cj, no = _column(j)
+            chi_cols.append(cj)
+            chi0_cols.append(c0j)
+            n_outers.append(no)
+        chi_mat = torch.stack(chi_cols, dim=1)   # χ_IJ = dN_I/dα_J
+        chi0_mat = torch.stack(chi0_cols, dim=1)
+        out = _assemble_u_matrix(chi_mat, chi0_mat, site)
+        out["n_outer"] = max(n_outers)
+        return out
+
+    chi0_col, chi_col, n_outer = _column(site)
     out = _assemble_u(chi_col, chi0_col, site, hub.sites, system.species_of_atom)
     out["n_outer"] = n_outer
     return out
