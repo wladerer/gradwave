@@ -25,8 +25,16 @@ Every phase derivative is analytic: KB/atomic projectors carry
 e^{−i(k+G)·τ} (∂ = −i(k+G)_α on the atom's columns), the augmentation
 pairing carries e^{+iG·τ} (∂ = +iG_α), and the augmentation density
 carries the conjugate (∂ = −iG_α). δv_loc comes from a jvp through the
-τ-differentiable local potential. Coverage: nspin=1, no +U, Γ-phonon
-scope (q = 0).
+τ-differentiable local potential.
+
+DFT+U (Dudarev): the S-dressed atomic-orbital projectors Sφ move with their
+atom too, so the position perturbation gains a bare V_U motion
+δH_U = |∂(Sφ)⟩D_U⟨Sφ| + h.c. (∂(Sφ) built by a jvp through the same
+build_uspp_hubbard S-dressing the SCF uses), the SCF map's composite state
+gains the occupation-matrix channel n^{Iσ}, and the self-consistent response
+threads its Dudarev kernel δD_U = −(U−J)·herm(δn) through the same
+apply_chi0/k_hub machinery the density-loss adjoint already carries. Coverage:
+nspin=1, ±U, insulators, Γ-phonon scope (q = 0).
 """
 
 from __future__ import annotations
@@ -138,6 +146,44 @@ class PositionPerturbation:
         # ∫δv_loc Q for EVERY atom (the local motion also re-screens D)
         self.d_dscr = self.d_dscr + cs._aug_dmat(self.dv_r)
 
+        # DFT+U: ∂(Sφ)/∂τ_{aα}, the moving S-dressed atomic-orbital projectors
+        # (both the φ phase and the β phases inside S carry atom a's motion).
+        # Built by a jvp through the same build_uspp_hubbard S-dressing the SCF
+        # froze into hk.hub_sphi, so the bare V_U motion stays convention-exact.
+        self.dsphi = None
+        if cs.hub is not None:
+            self.dsphi = self._build_dsphi()
+
+    def _build_dsphi(self):
+        """Per-k ∂(Sφ)/∂τ_{aα} (nprojU, npw) for the +U projectors."""
+        from gradwave.core.hamiltonian import projectors
+        from gradwave.scf.uspp_hubbard import atom_of_col, phi_free_per_k
+
+        cs = self.cs
+        system = cs.system
+        sites = cs.hub.sites
+        phi_free = phi_free_per_k(system, sites)  # per-k phase-free φ
+        acol = atom_of_col(sites).to(system.positions.device)
+        q = system.q_full.to(CDTYPE)
+        tang = torch.zeros_like(system.positions)
+        tang[self.a, self.alpha] = 1.0
+        out = []
+        for ik, sph in enumerate(system.spheres):
+            pf = phi_free[ik]
+            pd = system.proj_data[ik]
+
+            def build(pos, pf=pf, sph=sph, pd=pd):
+                pharg = sph.kpg @ pos.T  # (npw, na)
+                ph = torch.exp(torch.complex(torch.zeros_like(pharg), -pharg))
+                phik = pf * ph[:, acol].T  # (nprojU, npw), φ phased
+                p = projectors(pd, pos)  # (nprojβ, npw) KB projectors
+                bphi = torch.einsum("jg,mg->mj", p.conj(), phik)  # ⟨β_j|φ_m⟩
+                return phik + torch.einsum("mj,ij,ig->mg", bphi, q, p)
+
+            _, d = torch.func.jvp(build, (system.positions,), (tang,))
+            out.append(d)
+        return out
+
     def dproj(self, hk, sph):
         """∂p rows for atom a's columns: −i(k+G)_α ⊙ p (zero elsewhere)."""
         kpga = sph.kpg[:, self.alpha].to(CDTYPE)
@@ -145,11 +191,14 @@ class PositionPerturbation:
         dp[self.s0:self.s1] = -1j * kpga[None, :] * hk.p[self.s0:self.s1]
         return dp
 
-    def dh_ds_psi(self, isp: int, ik: int, w_extra=None, d_extra=None):
+    def dh_ds_psi(self, isp: int, ik: int, w_extra=None, d_extra=None,
+                  hub_extra=None):
         """(δH|ψ⟩, δS|ψ⟩) over the window at k. Bare perturbation by
         default (local δv_loc, D re-screening, moving projectors); pass
         w_extra (grid) and d_extra (full D matrix) to add the converged
-        self-consistent potential change for total-δψ reconstruction."""
+        self-consistent potential change for total-δψ reconstruction.
+        hub_extra (nprojU, nprojU, apply convention) adds the converged
+        Dudarev δD_U for the +U total response; δS carries no +U."""
         cs = self.cs
         hk = cs.hks[isp][ik]
         c = cs.c_win[isp][ik]
@@ -166,10 +215,20 @@ class PositionPerturbation:
         dh = dh + (b @ dd.to(CDTYPE)) @ hk.p
         dh = dh + (b @ dscr) @ dp + (db @ dscr) @ hk.p
         ds = (b @ qf) @ dp + (db @ qf) @ hk.p
+        if cs.hub is not None:
+            # V_U = |Sφ⟩D_U⟨Sφ|; atom a's motion moves Sφ (bare), and the
+            # self-consistent δn feeds hub_extra = δD_U (total response).
+            sphi = hk.hub_sphi
+            dsphi = self.dsphi[ik]
+            hub_d = hk.hub_d
+            bh = becp(sphi, c)
+            dh = dh + (becp(dsphi, c) @ hub_d) @ sphi + (bh @ hub_d) @ dsphi
+            if hub_extra is not None:
+                dh = dh + (bh @ hub_extra) @ sphi
         return dh, ds, dp, db
 
     def window_response(self, isp, ik, warm, cg_tol, cg_max_iter,
-                        w_extra=None, d_extra=None):
+                        w_extra=None, d_extra=None, hub_extra=None):
         """Window S-metric perturbation theory + complement Sternheimer at
         one k. Returns (dpsi, hmat, smat, db): the occupied-band orbital
         response (window part + Sternheimer complement), the window matrices
@@ -183,7 +242,7 @@ class PositionPerturbation:
         ns = cs.n_solve[isp][ik]
         eps = cs.eps_win[isp][ik]
         dh, ds, dp, db = self.dh_ds_psi(isp, ik, w_extra=w_extra,
-                                        d_extra=d_extra)
+                                        d_extra=d_extra, hub_extra=hub_extra)
 
         # window coefficients c_mn (m any window state, n occupied)
         hmat = torch.einsum("mg,ng->mn", c.conj(), dh)
@@ -226,11 +285,12 @@ class PositionPerturbation:
         return dpsi_win[:ns] + dperp, hmat, smat, db
 
     def bare_map_derivative(self, dpsi_warm, cg_tol=1e-10, cg_max_iter=400):
-        """∂F/∂τ_{aα} at fixed input x: (δρ_out, δbec_out per atom).
+        """∂F/∂τ_{aα} at fixed input x: (δρ_out, δbec_out per atom, δn_hub).
 
         Window part from S-metric perturbation theory, complement part
         from the projected Sternheimer solve, plus the explicit motion of
-        the becsum projectors and the augmentation phases."""
+        the becsum projectors and the augmentation phases. δn_hub is the
+        bare occupation-matrix response (per hub channel; None without +U)."""
         cs = self.cs
         system, grid = cs.system, cs.grid
         dev = system.positions.device
@@ -239,6 +299,12 @@ class PositionPerturbation:
         drho_sm = torch.zeros(cs.shape, dtype=RDTYPE, device=dev)
         dbec = [torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
                 for (s0, s1) in system.atom_slices]
+        # DFT+U: the bare position derivative of the occupation matrix n^I_pq
+        # (one hub channel for nspin=1, at the SCF's half-occupancy weight)
+        dnh = None
+        if cs.hub is not None:
+            dnh = [[torch.zeros(st["dim"], st["dim"], dtype=CDTYPE, device=dev)
+                    for st in cs.hub.sites]]
         for ik, sph in enumerate(system.spheres):
             hk, c = cs.hks[isp][ik], cs.c_win[isp][ik]
             ns = cs.n_solve[isp][ik]
@@ -261,7 +327,20 @@ class PositionPerturbation:
                 m1 = torch.einsum("b,bi,bj->ij", fw.to(CDTYPE),
                                   bd.conj(), bo)
                 dbec[at] += wk * (m1 + m1.conj().T)
+
+            # +U occupations: n_pq = Σ wf ⟨Sφ_p|ψ⟩⟨ψ|Sφ_q⟩; the derivative gets
+            # the orbital response ⟨Sφ|δψ⟩ and the explicit Sφ motion ⟨∂Sφ|ψ⟩
+            if cs.hub is not None:
+                bh = cs.bh_win[isp][ik]  # ⟨Sφ|ψ⟩ over the window
+                dbh = becp(hk.hub_sphi, dpsi) + becp(self.dsphi[ik], c)[:ns]
+                for si, st in enumerate(cs.hub.sites):
+                    s0, d = st["start"], st["dim"]
+                    m1 = torch.einsum("b,bp,bq->pq", fw.to(CDTYPE),
+                                      dbh[:, s0:s0 + d], bh[:ns, s0:s0 + d].conj())
+                    dnh[0][si] += cs.hub_w * wk * (m1 + m1.conj().T)
         dbec = [0.5 * (m + m.conj().T) for m in dbec]
+        if cs.hub is not None:
+            dnh = [[0.5 * (m + m.conj().T) for m in dnh[0]]]
 
         # augmentation density: response becsum at fixed phases (the shared
         # becsum→ρ_aug builder) plus the explicit phase motion of atom a with
@@ -276,17 +355,17 @@ class PositionPerturbation:
         aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
         aug_box[system.sphere_idx] = aug_sph / cs.vol
         drho_aug = drho_aug + g_to_r_box(aug_box.reshape(cs.shape), real=True)
-        return drho_sm / cs.vol + drho_aug, dbec
+        return drho_sm / cs.vol + drho_aug, dbec, dnh
 
 
 def bare_position_derivative(res: dict, xc, a: int, alpha: int,
                              cg_tol: float = 1e-10,
                              cg_max_iter: int = 400):
     """∂F_map/∂τ_{aα} at the converged state (fixed input x*). Returns
-    (δρ_out, δbec_out per atom). Insulators, nspin=1, no +U."""
+    (δρ_out, δbec_out per atom). Insulators, nspin=1, ±U."""
     _check_supported(res)
-    if res.get("nspin", 1) != 1 or "hub_occ" in res:
-        raise NotImplementedError("position response: nspin=1, no +U")
+    if res.get("nspin", 1) != 1:
+        raise NotImplementedError("position response: nspin=1 only")
     if res.get("smearing", "none") != "none":
         raise NotImplementedError("position response: fixed occupations "
                                   "only (insulators)")
@@ -295,34 +374,65 @@ def bare_position_derivative(res: dict, xc, a: int, alpha: int,
         pert = PositionPerturbation(cs, a, alpha)
         warm = [torch.zeros_like(c[:n_sv]) for c, n_sv in
                 zip(cs.c_win[0], cs.n_solve[0], strict=True)]
-        return pert.bare_map_derivative(warm, cg_tol, cg_max_iter)
+        drho, dbec, _dnh = pert.bare_map_derivative(warm, cg_tol, cg_max_iter)
+        return drho, dbec
 
 
-def _self_consistent_response(cs, bare_rho, bare_bec, *, beta=0.3,
-                              history=12, inner_tol=1e-9, max_inner=80,
-                              cg_tol=1e-10, cg_max_iter=300, verbose=False):
+def _self_consistent_response(cs, bare_rho, bare_bec, bare_nh=None, *,
+                              beta=0.3, history=12, inner_tol=1e-9,
+                              max_inner=80, cg_tol=1e-10, cg_max_iter=300,
+                              verbose=False):
     """δx = (1 − χ̃K)⁻¹ δx_bare — the forward fixed point of the Newton
     finisher with the bare position derivative as the source. Returns the
-    self-consistent (δρ*, δbec*, w_total) where w_total = K δx is the
-    self-consistent potential change (needed to rebuild δψ later)."""
+    self-consistent (δρ*, δbec*, w_total) where w_total = (K δx) is the
+    self-consistent potential change (needed to rebuild δψ later).
+
+    With DFT+U the composite state x gains the occupation-matrix channel δn
+    (packed as Re/Im tail, one channel for nspin=1); K maps it to the Dudarev
+    δD_U = −(U−J)·herm(δn) through cs.k_hub, and w_total gains that δD_U."""
     system = cs.system
     shape, n_pts = tuple(cs.shape), cs.grid.n_points
     nbec = [s1 - s0 for (s0, s1) in system.atom_slices]
-    r_vec = _pack(bare_rho.to(RDTYPE),
-                  [m.real.to(RDTYPE) for m in bare_bec])
+    has_hub = cs.hub is not None and bare_nh is not None
+    hub_dims = [st["dim"] for st in cs.hub.sites] if has_hub else []
+    base_len = n_pts + sum(n * n for n in nbec)
+
+    def _pack_all(rho, bec, nh):
+        v = _pack(rho.to(RDTYPE), [m.real.to(RDTYPE) for m in bec])
+        if not has_hub:
+            return v
+        tail = []
+        for m in nh[0]:
+            tail.append(m.real.reshape(-1).to(RDTYPE))
+            tail.append(m.imag.reshape(-1).to(RDTYPE))
+        return torch.cat([v] + tail)
+
+    def _unpack_all(vec):
+        d_rho, d_bec = _unpack(vec[:base_len], shape, n_pts, nbec)
+        if not has_hub:
+            return d_rho, d_bec, None
+        nh, off = [], base_len
+        for d in hub_dims:
+            re = vec[off:off + d * d].reshape(d, d)
+            off += d * d
+            im = vec[off:off + d * d].reshape(d, d)
+            off += d * d
+            nh.append(torch.complex(re, im))
+        return d_rho, d_bec, [nh]
+
+    r_vec = _pack_all(bare_rho, bare_bec, bare_nh)
     dpsi_warm = [[torch.zeros_like(c[:n_sv]) for c, n_sv in
                   zip(cs.c_win[0], cs.n_solve[0], strict=True)]]
     d = r_vec.clone()
     mixer = AndersonMixer(history, beta)
-    w_sp = None
     for it in range(1, max_inner + 1):
-        d_rho, d_bec = _unpack(d, shape, n_pts, nbec)
+        d_rho, d_bec, d_nh = _unpack_all(d)
         w_sp = cs.k_hxc_grid([d_rho])
         d_ddd = cs.hvp_onecenter([[m.to(torch.complex128) for m in d_bec]])
-        chi_rho, chi_bec, _ = cs.apply_chi0(w_sp, d_ddd, dpsi_warm,
-                                            cg_tol, cg_max_iter)
-        g_vec = r_vec + _pack(chi_rho[0].to(RDTYPE),
-                              [m.real.to(RDTYPE) for m in chi_bec[0]])
+        d_hub = cs.k_hub(d_nh) if has_hub else None
+        chi_rho, chi_bec, chi_nh = cs.apply_chi0(
+            w_sp, d_ddd, dpsi_warm, cg_tol, cg_max_iter, d_hub_sp=d_hub)
+        g_vec = r_vec + _pack_all(chi_rho[0], chi_bec[0], chi_nh)
         g_res = g_vec - d
         gn = float(torch.linalg.norm(g_res)) / max(
             1.0, float(torch.linalg.norm(d)))
@@ -335,10 +445,11 @@ def _self_consistent_response(cs, bare_rho, bare_bec, *, beta=0.3,
     else:
         raise RuntimeError(f"position response not converged ({gn:.2e} "
                            f"after {max_inner} iterations)")
-    d_rho, d_bec = _unpack(d, shape, n_pts, nbec)
+    d_rho, d_bec, d_nh = _unpack_all(d)
     w_sp = cs.k_hxc_grid([d_rho])
     d_ddd = cs.hvp_onecenter([[m.to(torch.complex128) for m in d_bec]])
-    return d_rho, d_bec, (w_sp[0], d_ddd[0])
+    d_hub = cs.k_hub(d_nh) if has_hub else None
+    return d_rho, d_bec, (w_sp[0], d_ddd[0], d_hub)
 
 
 def position_density_response(res: dict, xc, a: int, alpha: int, *,
@@ -347,10 +458,10 @@ def position_density_response(res: dict, xc, a: int, alpha: int, *,
                               cg_tol: float = 1e-10, cg_max_iter: int = 300,
                               verbose: bool = False):
     """Self-consistent dρ*/dτ_{aα} and dbecsum*/dτ_{aα} at the converged
-    SCF point (analytic — no SCF re-runs). Insulators, nspin=1, no +U."""
+    SCF point (analytic — no SCF re-runs). Insulators, nspin=1, ±U."""
     _check_supported(res)
-    if res.get("nspin", 1) != 1 or "hub_occ" in res:
-        raise NotImplementedError("position response: nspin=1, no +U")
+    if res.get("nspin", 1) != 1:
+        raise NotImplementedError("position response: nspin=1 only")
     if res.get("smearing", "none") != "none":
         raise NotImplementedError("position response: fixed occupations "
                                   "only (insulators)")
@@ -359,25 +470,38 @@ def position_density_response(res: dict, xc, a: int, alpha: int, *,
         pert = PositionPerturbation(cs, a, alpha)
         warm = [torch.zeros_like(c[:n_sv]) for c, n_sv in
                 zip(cs.c_win[0], cs.n_solve[0], strict=True)]
-        bare_rho, bare_bec = pert.bare_map_derivative(warm, cg_tol,
-                                                      cg_max_iter)
+        bare_rho, bare_bec, bare_nh = pert.bare_map_derivative(
+            warm, cg_tol, cg_max_iter)
         d_rho, d_bec, w_tot = _self_consistent_response(
-            cs, bare_rho, bare_bec, beta=beta, history=history,
+            cs, bare_rho, bare_bec, bare_nh, beta=beta, history=history,
             inner_tol=inner_tol, max_inner=max_inner, cg_tol=cg_tol,
             cg_max_iter=cg_max_iter, verbose=verbose)
     return d_rho, d_bec, w_tot
 
 
-def _total_orbital_response(cs, pert, w_grid, d_ddd, cg_tol=1e-10,
+def _total_orbital_response(cs, pert, w_grid, d_ddd, d_hub=None, cg_tol=1e-10,
                             cg_max_iter=400):
     """δψ_n, δε_n, and the SMOOTH density derivative at the TOTAL
     perturbation (bare position motion + converged self-consistent
-    potential change). One window-PT + Sternheimer pass per k."""
+    potential change). One window-PT + Sternheimer pass per k.
+
+    d_hub (per hub channel, per site δD_U from k_hub) adds the converged
+    Dudarev V_U change to the total perturbation."""
     system = cs.system
     isp = 0
     d_extra = cs._aug_dmat(w_grid)
     for a, (s0, s1) in enumerate(system.atom_slices):
         d_extra[s0:s1, s0:s1] += d_ddd[a].real
+    hub_extra = None
+    if d_hub is not None:
+        # assemble the block-diagonal δD_U in the apply convention (D^T), the
+        # same one apply_chi0 uses for the hub V_U perturbation
+        hub_extra = torch.zeros(cs.hub.nproj, cs.hub.nproj, dtype=CDTYPE,
+                                device=system.positions.device)
+        for m, st in zip(d_hub[0], cs.hub.sites, strict=True):
+            s0, d = st["start"], st["dim"]
+            hub_extra[s0:s0 + d, s0:s0 + d] = 0.5 * (m + m.conj().T)
+        hub_extra = hub_extra.conj()
     dpsi_all, deps_all = [], []
     drho_sm = torch.zeros(cs.shape, dtype=RDTYPE)
     warm = [torch.zeros_like(c[:n_sv]) for c, n_sv in
@@ -389,7 +513,7 @@ def _total_orbital_response(cs, pert, w_grid, d_ddd, cg_tol=1e-10,
         wk = float(system.kweights[ik])
         dpsi, hmat, smat, _db = pert.window_response(
             isp, ik, warm, cg_tol, cg_max_iter, w_extra=w_grid,
-            d_extra=d_extra)
+            d_extra=d_extra, hub_extra=hub_extra)
         deps = (hmat.diagonal().real - eps * smat.diagonal().real)[:ns]
         dpsi_all.append(dpsi)
         deps_all.append(deps)
@@ -408,7 +532,13 @@ def hessian_column(res: dict, xc, a: int, alpha: int, *,
     more along the direction (e_{aα}, δstate/δτ_{aα}): the scalar
     s = dE'/dλ (one create_graph backward plus real pairings with the
     state response) has ∂s/∂τ equal to the full mixed column, explicit
-    ∂²E/∂τ∂τ' included. Insulators, nspin=1, no +U."""
+    ∂²E/∂τ∂τ' included. Insulators, nspin=1, ±U.
+
+    With DFT+U the force-energy graph gains the Dudarev E_U(c, τ) term (the
+    same in-graph n(τ) expression forces_uspp differentiates for the +U
+    force), so g_c and g_pos pick up ∂E_U/∂c and ∂E_U/∂τ; the +U-total
+    orbital response (V_U feedback threaded through _self_consistent_response
+    / _total_orbital_response) then makes ∂s/∂τ' the full +U mixed column."""
     from gradwave.core.density import sigma_from_rho
     from gradwave.core.energies.ewald import ewald_energy
     from gradwave.core.energies.hartree import hartree_energy
@@ -422,8 +552,8 @@ def hessian_column(res: dict, xc, a: int, alpha: int, *,
     )
 
     _check_supported(res)
-    if res.get("nspin", 1) != 1 or "hub_occ" in res:
-        raise NotImplementedError("hessian_column: nspin=1, no +U")
+    if res.get("nspin", 1) != 1:
+        raise NotImplementedError("hessian_column: nspin=1 only")
     if res.get("smearing", "none") != "none":
         raise NotImplementedError("hessian_column: insulators only")
     system = res["system"]
@@ -443,11 +573,11 @@ def hessian_column(res: dict, xc, a: int, alpha: int, *,
         pert.deg_full = True
         warm = [torch.zeros_like(c[:n_sv]) for c, n_sv in
                 zip(cs.c_win[0], cs.n_solve[0], strict=True)]
-        bare_rho, bare_bec = pert.bare_map_derivative(warm)
-        d_rho, d_bec, (w_grid, d_ddd) = _self_consistent_response(
-            cs, bare_rho, bare_bec, **rkw)
+        bare_rho, bare_bec, bare_nh = pert.bare_map_derivative(warm)
+        d_rho, d_bec, (w_grid, d_ddd, d_hub) = _self_consistent_response(
+            cs, bare_rho, bare_bec, bare_nh, **rkw)
         dpsi_all, deps_all, drho_sm = _total_orbital_response(
-            cs, pert, w_grid, d_ddd)
+            cs, pert, w_grid, d_ddd, d_hub=d_hub)
         dbec_tot = d_bec  # self-consistent becsum response (Hermitian)
         # ddd response at the converged becsum response
         dddd = cs.hvp_onecenter([[m.to(torch.complex128)
@@ -508,6 +638,17 @@ def hessian_column(res: dict, xc, a: int, alpha: int, *,
     if is_paw:
         for at in range(len(system.atom_slices)):
             e = e + (ddd_leaves[at].to(CDTYPE) * rho_ij[at]).sum().real
+    # DFT+U: E_U(c, τ) as the in-graph n(τ) expression (the same term
+    # forces_uspp adds for the +U force). g_c/g_pos then carry ∂E_U/∂c and
+    # ∂E_U/∂τ, so the mixed column picks up the full +U second derivative.
+    hub_sites = res.get("hub_sites")
+    if hub_sites is not None:
+        from gradwave.scf.uspp_hubbard import hubbard_e_channel, phi_free_per_k
+
+        hub_phi_free = phi_free_per_k(system, hub_sites)
+        e = e + 2.0 * hubbard_e_channel(
+            hub_sites, hub_phi_free, system.q_full, pos, system.spheres,
+            projs, c_leaves, becps_full, occ[:, :ns0], kw, occ_scale=0.5)
     rho_g = r_to_g(rho_tot.to(CDTYPE))
     rho_core = rho_core_on_graph(system, phases)
     rho_xc = rho_tot if rho_core is None else rho_tot + rho_core
