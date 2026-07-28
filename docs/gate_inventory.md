@@ -25,6 +25,7 @@ grep -rn "raise NotImplementedError" src/gradwave --include=*.py
 ```
 
 Current count: **66** `raise NotImplementedError` sites, of which **4 are
+Current count: **64** `raise NotImplementedError` sites, of which **4 are
 abstract-method stubs** (interface contracts on base classes, not capability
 gaps) — see the last section. So **62 real capability gates** remain. (The
 noncollinear/SOC forces PR added a brand-new code path, `postscf/forces.py`,
@@ -32,6 +33,11 @@ previously absent entirely, gaining one narrower NLCC gate of its own; this PR
 then ungated the fully-relativistic dielectric/Born-charge path but added its
 own narrower magnetic-SOC and SOC+symmetry gates in its place — see Done/Open
 below for both.)
+gaps) — see the last section. So **60 real capability gates** remain. (This PR
+removed two: `checkpoint.py`'s `scf_uspp_noncollinear` restart gate and
+`postscf/uspp_bands.py`'s USPP+U bands gate; see Done below. The pressure-error
+SOC/+U axes in `postscf/stress_error.py` were investigated but NOT closed this
+PR — see the note under Open — PAW/NC stress & +U.)
 
 ## Axis legend
 
@@ -75,6 +81,8 @@ below for both.)
 | ~~calculator.py:575~~ | USPP/PAW nspin2 | nspin=2 through the ASE calculator on the USPP/PAW route | **removed, this PR** — a stale driver gate: `scf_uspp`, `paw_forces.forces_uspp`, and `paw_stress.stress_uspp` all thread nspin=2 (benchmarked in #150). `_calculate_uspp` now resolves the spin channel via `_resolve_spin` (exactly as the NC path does), passes nspin/start_mag through, uses the spin-matched `_make_xc(nspin)`, and reports `magmom`. Oracle: `test_calculator_uspp_nspin2_matches_direct_scf` (FM O2 PAW: calculator == direct `scf_uspp`, energy + moment bit-for-bit) |
 | ~~api.py:970~~ (nspin=2) | nspin2 | supercell phonons (`run_phonons`) for collinear nspin=2 | **removed, this PR** — a stale driver gate: the FD force fold calls `postscf.forces.forces`, which already sums per spin channel (#45); the driver hardcoded the nspin=1 SCF. `run_phonons` now threads nspin/start_mag/tot_magnetization into the per-displacement SCF and the NLCC-aware `xc` into `force_constants_home`. Noncollinear/spinor supercell phonons stay rejected; the USPP/PAW fold (api.py:975) is still open. Oracle: `test_run_phonons_nspin2_matches_nspin1` (nonmagnetic Si: nspin=2 frequencies == nspin=1, <1 cm⁻¹) |
 | ~~postscf/dielectric.py:115~~ | SOC/NC-spinor | dielectric response / Born effective charges were scalar-relativistic only | **removed, this PR** — `_dielectric_born_soc` covers the fully-relativistic (spin-orbit, `system.is_fr`) spinor path in the NONMAGNETIC manifold (m⃗ ≡ 0). Structurally it is ONE channel of the existing `_dielectric_born_spin` (spinor bands hold f=1 each, and a single Sternheimer loop already sums the full electron count, so the same f=1 prefactors — 8π not 16π on ε, factor 2 not 4 on the density/Born nonlocal terms — apply directly with no extra channel sum). Two genuinely new pieces: (1) ∂H/∂k on a spinor (`_dhdk_psi_soc`) — the kinetic term acts on each doubled-axis component independently, and the nonlocal FD-in-k rebuilds the j-resolved SOC projectors at k±dk via `_so_projectors_at`, which reuses `core.spinor_proj.strained_so_projector_cols` (the strain-graph primitive `postscf.stress` already has) as a plain per-k/position evaluator — for both the FD-in-k RHS (dkvec≠0, pos fixed) and the position-differentiable Born-charge nonlocal term (dkvec=0, pos requiring grad), avoiding any new projector-assembly code; (2) the screening kernel `_k_hxc_soc`, built from a new shared primitive `postscf._response.fxc_hvp_noncollinear_nonmagnetic` — the noncollinear (locally-collinear) XC's f_xc Hessian-vector product pinned at m⃗ ≡ 0, which reduces exactly to the spin-restricted `fxc_hvp` there. `cg_sternheimer` needed NO changes — it only reads `bk.t`, so a `SimpleNamespace(t=torch.cat([bk.t, bk.t]))` shim is the only "generalization" required, confirming the task's premise that the Sternheimer machinery is already reusable. Magnetic SOC (m⃗ ≠ 0, needing the full coupled (ρ, m⃗) K_Hxc HVP) and IBZ symmetry (the magnetic-group polar-vector fold) remain gated with their own explicit raises inside `_dielectric_born_soc`. Oracle: `test_dielectric_soc_zero_splitting_matches_scalar` — a SYNTHETIC fully-relativistic pseudopotential built by duplicating each l≥1 scalar-relativistic beta into degenerate j=l±1/2 channels with identical radial data/D (a standard spin-angular completeness identity then makes the FR nonlocal operator EXACTLY the doubled scalar operator, zero SOC splitting by construction, verified independently to ~1e-13 on the SCF total energy) reproduces the scalar-relativistic ε∞/Z* to ~1e-9 (solver precision, not merely "small SOC") + `test_dielectric_soc_rejects_magnetic` |
+| ~~checkpoint.py:76~~ | SOC/NC-spinor | checkpointing a `scf_uspp_noncollinear` result (no restart consumer) | **removed, this PR** — `save_checkpoint`/`as_start_from` gained a `uspp_noncollinear` branch archiving both halves of the spinor USPP/PAW state at once: the magnetization field m⃗ (the same field the `noncollinear` branch already archives) AND the 4-channel (n, mx, my, mz) one-center becsum (`rho_ij_chan`, the spinor analogue of `uspp`'s `rho_ij_atoms`). Unlike the norm-conserving spinor path (whose only warm-start hook is the atomic `mag_vec_init` seed via `nc_mag_seed`, since it has no density-level restart at all), `scf_uspp_noncollinear` gained a genuine `start_from=` parameter: m⃗ is already a full-grid field internal to the loop (unlike the atomic seed the collinear spinor path takes), so it restarts directly — rescaled by the cell-volume ratio, mirroring ρ — and the becsum restarts the same way `uspp_loop._seed_becsum`'s warm-start branch does. `USPPNCResult` also gained a `system` field (it carried none before, unlike every other result dataclass, which is why the checkpoint's grid/geometry metadata had nowhere to come from). Oracle: `test_uspp_noncollinear_checkpoint_roundtrip_and_restart` (bit-for-bit round trip of ρ/m⃗/becsum through save+load; a restart from the checkpoint reproduces the same converged free energy in far fewer SCF iterations) |
+| ~~postscf/uspp_bands.py:28~~ | +U | USPP bands with DFT+U (V_U missing from frozen band H) | **removed, this PR** — `scf.uspp._HkS` (the per-k Hamiltonian `bands_uspp` diagonalizes) already applies a Hubbard term V_U = Σ\|Sφ_m⟩D_mm'⟨Sφ_m'\| whenever handed `hub_sphi`/`hub_d` — the exact pair the SCF loop's own `_solve_bands_uspp` already builds once per SCF k. `bands_uspp` now builds that same pair at each REQUESTED band k (which need not lie on the SCF mesh) from the converged `hub_occ`/`hub_sites` the result carries, reusing `scf.uspp_hubbard.build_uspp_hubbard`'s per-k body — factored out into `phi_free_at_sphere` (the position-independent radial/Y_lm setup computed once, phased and S-dressed per k) — instead of re-deriving the S-dressed atomic-orbital projector from scratch. Oracle: `test_uspp_bands_hubbard_reproduces_scf_spectrum` (bands at the SCF's own Γ point == the SCF eigenvalues, <5e-3 eV) + `test_uspp_bands_hubbard_u0_is_inert` (a U=0 manifold on the SAME converged state runs the whole S-dressed Hubbard band path but D_U vanishes identically, so the bands are bit-for-bit the pre-existing no-+U bands) |
 
 ## Open — nspin=2 (next tranches)
 
@@ -96,7 +104,6 @@ below for both.)
 | postscf/discretization_error.py:467,598,669 | symmetry | USPP density/eig/force error requires `use_symmetry=False` |
 | postscf/discretization_error.py:465,673 | +U | USPP density/force error with DFT+U |
 | postscf/stress_error.py:86 | symmetry | pressure error requires `use_symmetry=False` |
-| postscf/uspp_bands.py:28 | +U | USPP bands with DFT+U (V_U missing from frozen band H) |
 | postscf/volumetric.py:266 | USPP/PAW | ELF for USPP/PAW (no `batch`; the soft KE density needs the augmentation) — the NC-spinor part of this site was ungated this PR, USPP remains |
 
 **Γ-point Hvp-phonons cross-validated (#141 step 2).** The Γ dynamical
@@ -129,6 +136,43 @@ keep the −½ limit (their own continuous limit), so their gates are unchanged.
 |---|---|---|
 | postscf/stress_error.py:92 | SOC | pressure error for fully-relativistic pseudos |
 | postscf/stress_error.py:95 | +U | pressure error with DFT+U |
+
+**Pressure-error SOC/+U axes — investigated, NOT closed this PR.**
+`estimate_pressure_error`'s `_denergy_at` measures `err.denergy`, the
+Cances-Dusson-Maday-Stamm-Vohralik ANNULUS-COMPLEMENT correction
+`estimate_density_error` already computes at each probe cutoff — a
+second-order energy-lowering estimate from the missing high-G plane waves,
+not the SCF total energy itself. Naively adding the REAL analytic +U/SOC
+strain energy (`postscf._strain.hubbard_energy_strained`/`_nc`,
+`postscf.stress._energy_strained_fr`, all landed earlier in this same
+session) into that number would conflate an exact physical energy with a
+basis-incompleteness error estimate; it would pass the required "U=0 / no-SOC
+reduces to the existing result" reduction test trivially (both terms vanish
+at U=0 by construction) without actually representing a discretization
+*error*, which risks a silently-plausible-looking but physically meaningless
+number in a scientific-computing codebase. The two axes need genuinely
+different, larger pieces of new machinery:
+  - **SOC**: `estimate_pressure_error` only ever dispatches through the plain
+    collinear `effective_potentials`/`scf.loop.setup_system` path — it has no
+    "noncollinear" formalism branch at all (unlike `discretization_error.
+    estimate_density_error`, which already dispatches a `formalism ==
+    "noncollinear"` result to `_estimate_density_error_noncollinear`). Closing
+    this axis means building a parallel frozen-rebuild `_denergy_at` variant
+    that reconstructs the strained spinor system, rebuilds the 2×2 (v, B⃗)
+    potential from the frozen (ρ, m⃗) the way `_spinor_complement` already
+    does, and calls the existing noncollinear density-error dispatch — real
+    work, not a guard removal.
+  - **+U**: `discretization_error._enlarged_hamiltonian` (the complement
+    Hamiltonian `estimate_density_error`'s plain path builds) has ZERO
+    Hubbard awareness — no mention of `hub_occ` anywhere in that module. A
+    physically-correct +U pressure error needs the Hubbard nonlocal term
+    threaded into THAT Hamiltonian (its own atomic-orbital projector set, built
+    on the enlarged complement sphere — the analogue of this PR's
+    `postscf/uspp_bands.py` fix, but for a shared helper several other
+    formalisms' estimators also call, raising the regression surface well
+    beyond `stress_error.py` alone).
+  Both are real, tractable follow-ups, just bigger than "thread an existing
+  building block" — flagged here rather than forced into this PR.
 
 ## Open — NC-only / formalism routing
 
@@ -164,6 +208,7 @@ this slice.
 | postscf/forces.py:229 (`_forces_noncollinear`) | NLCC | NLCC core-correction force on the noncollinear/SOC path (new gate — forces themselves are now supported, see Done above, and PR #165 already closed the analogous +U SOC stress gate; no NLCC-free Hubbard-eligible fully-relativistic pseudo exists in the fixture set either, which is why the Stage-2 +U force test also stays clear of this) |
 | checkpoint.py:76 | SOC/NC-spinor | checkpointing a `scf_uspp_noncollinear` result (no restart consumer) |
 | postscf/dielectric.py:631 | SOC/NC-spinor | magnetic (m⃗ ≠ 0) fully-relativistic dielectric response — needs the coupled (ρ, m⃗) K_Hxc Hessian-vector product; the nonmagnetic case was ungated this PR (see Done above) |
+| postscf/dielectric.py:115 | SOC | dielectric response scalar-relativistic only |
 | postscf/discretization_error.py:841 | SOC/NC-spinor | force-error estimate NC-collinear only (spinor force terms unassembled) |
 | postscf/discretization_error.py:1010 | SOC/NC-spinor + symmetry | noncollinear disc. error requires `use_symmetry=False` |
 

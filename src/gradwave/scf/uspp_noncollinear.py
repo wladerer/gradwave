@@ -49,6 +49,7 @@ from gradwave.scf.common import (
     convergence_gate,
     record_iteration,
     symmetrize_rho,
+    warm_start_densities,
 )
 from gradwave.scf.guess import sad_density
 from gradwave.scf.mixing import PulayMixer
@@ -172,6 +173,51 @@ class SpinorBatchedHS:
         return torch.cat(outs, dim=-1)
 
 
+def _nc_uspp_warm_m(start_from, grid, vol, dev):
+    """Warm-start the magnetization field m⃗ (3, *grid) from a previous
+    ``scf_uspp_noncollinear`` result or checkpoint ``as_start_from()`` view.
+
+    Unlike the norm-conserving spinor path (whose only seed hook is the
+    per-atom moment fraction ``mag_vec_init`` — see ``checkpoint.nc_mag_seed``,
+    which has to reconstruct an atomic seed from the stored field via Hirshfeld
+    weights), ``scf_uspp_noncollinear`` already carries m⃗ as an explicit
+    (3, *grid) field internal to the loop, so it can be restarted directly on
+    the SAME FFT grid — rescaled by the cell-volume ratio exactly like ρ, to
+    conserve the integrated moment on a cell that only changed size."""
+    prev_sys = (start_from.get("system") if isinstance(start_from, dict)
+                else getattr(start_from, "system", None))
+    prev_m = (start_from.get("m") if isinstance(start_from, dict)
+              else getattr(start_from, "m", None))
+    if prev_sys is None or prev_m is None:
+        raise ValueError(
+            "start_from carries no m (magnetization field) to warm-start the "
+            "non-collinear USPP/PAW magnetization")
+    prev_grid = prev_sys.grid
+    if tuple(prev_grid.shape) != tuple(grid.shape):
+        raise ValueError("start_from requires the same FFT grid "
+                         f"({tuple(prev_grid.shape)} vs {tuple(grid.shape)})")
+    chg = float(prev_grid.volume) / float(vol)
+    return prev_m.detach().to(dev) * chg
+
+
+def _nc_uspp_warm_becsum(start_from, dev):
+    """Warm-start the 4-channel (n, mx, my, mz) becsum from a previous
+    ``scf_uspp_noncollinear`` result or checkpoint ``as_start_from()`` view,
+    on the same atom ordering — the spinor/USPP analogue of the collinear
+    ``uspp_loop._seed_becsum`` warm-start branch."""
+    prev = (start_from.get("rho_ij_chan") if isinstance(start_from, dict)
+            else getattr(start_from, "rho_ij_chan", None))
+    if prev is None:
+        raise ValueError(
+            "start_from carries no rho_ij_chan (4-channel becsum) to "
+            "warm-start the non-collinear USPP/PAW becsum")
+    # bec_chan is real throughout the loop (the mixer's unpack() takes .real,
+    # and the converged/returned rho_ij_chan is real) — match that dtype
+    # rather than the complex dtype the mixer's flattened packing uses.
+    return [[c.detach().to(device=dev, dtype=RDTYPE).clone() for c in prev[c4]]
+            for c4 in range(4)]
+
+
 @torch.no_grad()
 def scf_uspp_noncollinear(
     system: USPPSystem,
@@ -188,6 +234,9 @@ def scf_uspp_noncollinear(
     bec_step_scale: float = 0.4,
     diago_tol: float = 1e-9,
     verbose: bool = True,
+    start_from=None,  # previous scf_uspp_noncollinear result (or checkpoint
+    # as_start_from() view) on the SAME FFT grid: warm-starts ρ, m⃗ and the
+    # 4-channel becsum in place of the SAD/directed-moment cold seeds below.
     hubbard=None,  # list[core.hubbard.HubbardManifold] — NOT YET WIRED here;
     # see the NotImplementedError below. The norm-conserving spinor path
     # (scf.noncollinear.scf_noncollinear) has the 2×2 spin-block +U machinery;
@@ -225,26 +274,34 @@ def scf_uspp_noncollinear(
     na = len(system.species_of_atom)
     from gradwave.scf.uspp_batch import davidson_gen_batched
 
-    # ---- seeds: grid (SAD + directed m⃗), 2×2 becsum (atomic occ + directed m) ----
-    rho = sad_density(grid, system.positions, system.species_of_atom, system.paws,
-                      system.n_electrons).to(dev)
-    m = torch.stack([
-        sad_density(grid, system.positions, system.species_of_atom, system.paws,
-                    None, atom_scale=[float(mag_vec_init[a, i]) for a in range(na)])
-        for i in range(3)]).to(dev)
-    bec_chan = [[] for _ in range(4)]      # [n, mx, my, mz] per atom, real (nm, nm)
-    # the n-channel is the same reference atomic-occupation diagonal the
-    # collinear USPP path seeds (spin-summed, i.e. the nspin=1 becsum); reuse
-    # _seed_becsum for it and direct the moment onto the m-channels
-    n_seed = _seed_becsum(system, 1, None, [None], dev)[0]
-    for a in range(na):
-        n0 = n_seed[a].real
-        d = mag_vec_init[a]
-        scale = min(float(d.norm()), 0.9)
-        dirv = d / d.norm() if float(d.norm()) > 1e-12 else torch.zeros(3)
-        bec_chan[0].append(n0)
-        for i in range(3):
-            bec_chan[i + 1].append(scale * float(dirv[i]) * n0)
+    if start_from is not None:
+        # ---- warm-start seeds: ρ, m⃗ and becsum from a converged prior state,
+        # on the SAME FFT grid (mag_vec_init is ignored, exactly like start_mag
+        # under start_from in the collinear USPP loop) ----
+        rho = warm_start_densities(start_from, 1, grid, vol, dev)[0]
+        m = _nc_uspp_warm_m(start_from, grid, vol, dev)
+        bec_chan = _nc_uspp_warm_becsum(start_from, dev)
+    else:
+        # ---- seeds: grid (SAD + directed m⃗), 2×2 becsum (atomic occ + directed m) ----
+        rho = sad_density(grid, system.positions, system.species_of_atom, system.paws,
+                          system.n_electrons).to(dev)
+        m = torch.stack([
+            sad_density(grid, system.positions, system.species_of_atom, system.paws,
+                        None, atom_scale=[float(mag_vec_init[a, i]) for a in range(na)])
+            for i in range(3)]).to(dev)
+        bec_chan = [[] for _ in range(4)]  # [n, mx, my, mz] per atom, real (nm, nm)
+        # the n-channel is the same reference atomic-occupation diagonal the
+        # collinear USPP path seeds (spin-summed, i.e. the nspin=1 becsum); reuse
+        # _seed_becsum for it and direct the moment onto the m-channels
+        n_seed = _seed_becsum(system, 1, None, [None], dev)[0]
+        for a in range(na):
+            n0 = n_seed[a].real
+            d = mag_vec_init[a]
+            scale = min(float(d.norm()), 0.9)
+            dirv = d / d.norm() if float(d.norm()) > 1e-12 else torch.zeros(3)
+            bec_chan[0].append(n0)
+            for i in range(3):
+                bec_chan[i + 1].append(scale * float(dirv[i]) * n0)
 
     # ---- mixer: 4 grid channels (Kerker/step on ρ vs m⃗) + 4 becsum channels ----
     g2_vec = grid.g2.reshape(-1)[mask_flat]
@@ -475,7 +532,7 @@ def scf_uspp_noncollinear(
     return USPPNCResult(
         converged=converged, n_iter=it, energies=energies, fermi=mu,
         mag_vec=tuple(m_int), mag_abs=float(m_norm.mean()) * vol,
-        rho=rho, m=m, eigenvalues=eigs, history=history,
+        rho=rho, m=m, eigenvalues=eigs, system=system, history=history,
         rho_ij_chan=bec_chan, coeffs=coeffs,
     )
 

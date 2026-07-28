@@ -27,7 +27,7 @@ from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.pseudo.radial import sbt
 
-__all__ = ["HubbardManifold", "build_uspp_hubbard"]
+__all__ = ["HubbardManifold", "build_uspp_hubbard", "phi_free_at_sphere"]
 
 
 @dataclass
@@ -55,20 +55,9 @@ def hubbard_sites(system, manifolds: list[HubbardManifold]) -> list:
     return sites
 
 
-@torch.no_grad()
-def phi_free_per_k(system, sites: list) -> list[torch.Tensor]:
-    """Per-k PHASE-FREE atomic-orbital projector factors (nprojU, npw_k) —
-    the position-independent product; multiply by e^{−i(k+G)·τ} per column
-    atom for the full projector (the same split as the KB ProjectorData).
-
-    Conventions (each ~100 meV when wrong, both from QE): RAW PP_PSWFC
-    orbitals (a PAW pseudo-orbital's PLAIN norm is deliberately ≠ 1 — Ni 3d:
-    0.588 — the S metric supplies the rest; renormalizing corrupts the
-    amplitude), and radial integrals truncated at msh = 10 bohr
-    (init_tab_atwfc; psl meshes run to 53 Å and the oscillating SBT tail
-    pollutes the form factors at finite q)."""
-    device = system.positions.device
-    vol = system.grid.volume
+def _hubbard_radial_setup(system, sites: list):
+    """Shared per-species radial atomic-orbital data, independent of any
+    particular k/G-sphere: ``(rchi_by_sp, l_by_sp, l_max, nproj)``."""
     site_by_atom = {s["atom"]: s for s in sites}
     species_used = sorted({system.species_of_atom[a] for a in site_by_atom})
     l_by_sp = {sp: next(s["l"] for s in sites
@@ -85,28 +74,56 @@ def phi_free_per_k(system, sites: list) -> list[torch.Tensor]:
     rchi_by_sp = {sp: _raw_rchi(sp) for sp in species_used}
     l_max = max(s["l"] for s in sites)
     nproj = sum(s["dim"] for s in sites)
+    return rchi_by_sp, l_by_sp, l_max, nproj
 
-    out = []
-    for sph in system.spheres:
-        qmag = np.sqrt(sph.kpg2.cpu().numpy())
-        y = ylm_all(l_max, sph.kpg)
-        f_by_sp = {}
-        for sp, rchi in rchi_by_sp.items():
-            p = system.paws[sp]
-            n = p.msh
-            f_by_sp[sp] = torch.as_tensor(
-                sbt(l_by_sp[sp], (rchi * p.r)[:n], p.r[:n], p.rab[:n], qmag),
-                dtype=RDTYPE, device=device)
-        phi_k = torch.zeros(nproj, sph.npw, dtype=CDTYPE, device=device)
-        for site in sites:
-            ll = site["l"]
-            sp = system.species_of_atom[site["atom"]]
-            pref = (4.0 * math.pi / math.sqrt(vol)) * _MINUS_I_POW[ll]
-            for mm in range(2 * ll + 1):
-                phi_k[site["start"] + mm] = pref * (
-                    f_by_sp[sp] * y[:, ll * ll + mm]).to(CDTYPE)
-        out.append(phi_k)
-    return out
+
+@torch.no_grad()
+def phi_free_at_sphere(system, sites: list, sph, radial=None) -> torch.Tensor:
+    """PHASE-FREE atomic-orbital projector factors (nprojU, npw) at ONE
+    arbitrary G-sphere — the per-k body of ``phi_free_per_k``, reusable at a
+    band k-point that need not belong to ``system.spheres`` (frozen-potential
+    band structure, postscf.uspp_bands). ``radial`` is the shared, k-independent
+    setup from ``_hubbard_radial_setup``; recomputed if omitted.
+
+    Conventions (each ~100 meV when wrong, both from QE): RAW PP_PSWFC
+    orbitals (a PAW pseudo-orbital's PLAIN norm is deliberately ≠ 1 — Ni 3d:
+    0.588 — the S metric supplies the rest; renormalizing corrupts the
+    amplitude), and radial integrals truncated at msh = 10 bohr
+    (init_tab_atwfc; psl meshes run to 53 Å and the oscillating SBT tail
+    pollutes the form factors at finite q)."""
+    device = system.positions.device
+    vol = system.grid.volume
+    if radial is None:
+        radial = _hubbard_radial_setup(system, sites)
+    rchi_by_sp, l_by_sp, l_max, nproj = radial
+    qmag = np.sqrt(sph.kpg2.cpu().numpy())
+    y = ylm_all(l_max, sph.kpg)
+    f_by_sp = {}
+    for sp, rchi in rchi_by_sp.items():
+        p = system.paws[sp]
+        n = p.msh
+        f_by_sp[sp] = torch.as_tensor(
+            sbt(l_by_sp[sp], (rchi * p.r)[:n], p.r[:n], p.rab[:n], qmag),
+            dtype=RDTYPE, device=device)
+    phi_k = torch.zeros(nproj, sph.npw, dtype=CDTYPE, device=device)
+    for site in sites:
+        ll = site["l"]
+        sp = system.species_of_atom[site["atom"]]
+        pref = (4.0 * math.pi / math.sqrt(vol)) * _MINUS_I_POW[ll]
+        for mm in range(2 * ll + 1):
+            phi_k[site["start"] + mm] = pref * (
+                f_by_sp[sp] * y[:, ll * ll + mm]).to(CDTYPE)
+    return phi_k
+
+
+@torch.no_grad()
+def phi_free_per_k(system, sites: list) -> list[torch.Tensor]:
+    """Per-k PHASE-FREE atomic-orbital projector factors (nprojU, npw_k) —
+    the position-independent product; multiply by e^{−i(k+G)·τ} per column
+    atom for the full projector (the same split as the KB ProjectorData)."""
+    radial = _hubbard_radial_setup(system, sites)
+    return [phi_free_at_sphere(system, sites, sph, radial=radial)
+           for sph in system.spheres]
 
 
 def atom_of_col(sites: list) -> torch.Tensor:

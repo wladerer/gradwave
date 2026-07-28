@@ -115,6 +115,7 @@ class USPPNCResult(_DictBridge):
     rho: torch.Tensor
     m: torch.Tensor  # (3, *grid)
     eigenvalues: torch.Tensor  # (nk, nb)
+    system: object  # USPPSystem
     history: list = field(default_factory=list)
     rho_ij_chan: list | None = None  # becsum in the 4 (n, m⃗) channels
     coeffs: torch.Tensor | None = None  # (nk, nb, 2·npw_max) spinors
