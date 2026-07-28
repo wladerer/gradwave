@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import torch
 
+from gradwave.core._anderson import AndersonMixer
 from gradwave.core.hubbard import (
     HubbardManifold,
     build_hubbard_projectors,
@@ -41,7 +42,6 @@ from gradwave.core.hubbard import (
     occupation_matrices,
 )
 from gradwave.dtypes import CDTYPE, RDTYPE
-from gradwave.postscf._anderson import AndersonMixer
 
 # The batched Sternheimer CG and the coefficient padding moved to
 # postscf._response under public names; the private aliases stay importable
