@@ -896,7 +896,14 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict:
     pinned across the scan; every strained SCF warm-starts from the unstrained
     reference. Norm-conserving (``postscf.stress``) and USPP/PAW
     (``postscf.paw_stress``) are both handled, for nspin=1 and collinear nspin=2
-    (the fixed-basis stress sums per spin channel — see postscf.stress)."""
+    (the fixed-basis stress sums per spin channel — see postscf.stress).
+
+    Fully-relativistic (spin-orbit) spinor runs (``noncollinear: true`` with
+    j-resolved pseudos) are handled on the norm-conserving path:
+    ``postscf.stress.stress`` differentiates the spinor strained energy
+    (``_energy_strained_fr``), so the same FD-of-analytic-stress driver folds it
+    into C. DFT+U on that path is a feature boundary (#142), and the USPP/PAW
+    spinor stress has no path yet, so both are rejected below."""
     import numpy as np
 
     from gradwave.postscf.elastic import (
@@ -905,13 +912,31 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict:
         moduli_from_cij,
     )
 
-    if inp.noncollinear:
-        raise NotImplementedError(
-            "elastic constants for noncollinear/spin-orbit runs are not supported")
     _species, upfs, species_of_atom = _species_upfs(inp)
     uspp = _is_uspp(upfs)
+    is_fr = any(b.j is not None for u in upfs for b in u.betas)
+    if inp.noncollinear:
+        if uspp:
+            raise NotImplementedError(
+                "elastic constants for noncollinear USPP/PAW runs are not "
+                "supported (no spinor USPP/PAW stress path)")
+        if not is_fr:
+            raise NotImplementedError(
+                "elastic constants for a magnetic non-collinear run without "
+                "spin-orbit need fully-relativistic (j-resolved) pseudos — the "
+                "scalar stress path has no magnetic-spinor route")
+        if inp.hubbard.enabled:
+            raise NotImplementedError(
+                "DFT+U elastic constants on the spin-orbit path (feature "
+                "boundary, #142)")
 
-    xc = SPIN_XC_REGISTRY[inp.xc]() if inp.nspin == 2 else XC_REGISTRY[inp.xc]()
+    if inp.noncollinear:
+        from gradwave.core.xc.noncollinear import NoncollinearXC
+        xc = NoncollinearXC(SPIN_XC_REGISTRY[inp.xc]())
+    elif inp.nspin == 2:
+        xc = SPIN_XC_REGISTRY[inp.xc]()
+    else:
+        xc = XC_REGISTRY[inp.xc]()
     if uspp:
         from gradwave.postscf.paw_stress import stress_uspp as _stress
     else:
@@ -921,6 +946,10 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict:
     frac = inp.atoms.get_scaled_positions()
     natoms = len(inp.atoms)
     h = inp.elastic.strain
+
+    # a magnetic spinor breaks k ≡ −k (TR flips m⃗); a nonmagnetic spinor
+    # (SOC only) keeps Kramers, matching build_system's time-reversal logic.
+    time_reversal = not (inp.noncollinear and not inp.nonmagnetic)
 
     def _build(cell, fft_shape):
         pos = frac @ cell
@@ -937,7 +966,8 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict:
             cell=cell, positions=pos, species_of_atom=species_of_atom,
             upfs=upfs, ecut=inp.ecut, kmesh=inp.kpoints.mesh,
             kshift=inp.kpoints.shift, nbands=inp.nbands,
-            use_symmetry=inp.symmetry, fft_shape=fft_shape)
+            use_symmetry=inp.symmetry, time_reversal=time_reversal,
+            fft_shape=fft_shape)
 
     # pin one FFT grid: the +h strains give the largest cells / finest grids
     from gradwave.postscf.elastic import voigt_strain_tensor
@@ -993,7 +1023,8 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict:
     Builds the diagonal supercell, displaces only the primitive home-cell atoms
     (the translational reduction — 6·N_prim SCFs regardless of supercell size,
     each warm-started from the undisplaced reference), folds the force constants
-    to D(q) and diagonalizes. Norm-conserving, nspin=1 (the forces path)."""
+    to D(q) and diagonalizes. Norm-conserving, nspin ∈ {1, 2} (the analytic
+    forces sum per spin channel — see postscf.forces)."""
     import numpy as np
 
     from gradwave.postscf.phonons_supercell import (
@@ -1003,16 +1034,21 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict:
         phonon_dos,
     )
 
-    if inp.noncollinear or inp.nspin != 1:
+    if inp.noncollinear:
         raise NotImplementedError(
-            "supercell phonons are norm-conserving, nspin=1 only "
-            "(the forces path does not support nspin=2 / spinors)")
+            "supercell phonons do not support noncollinear/spinor runs "
+            "(the finite-displacement force fold uses the collinear force path)")
     _species, upfs, species_of_atom = _species_upfs(inp)
     if _is_uspp(upfs):
         raise NotImplementedError(
-            "supercell phonons need norm-conserving pseudopotentials (NC forces)")
+            "supercell phonons need norm-conserving pseudopotentials (the "
+            "finite-displacement force fold uses the NC postscf.forces path; "
+            "the USPP/PAW paw_forces route is not wired into the fold yet)")
 
-    xc = XC_REGISTRY[inp.xc]()
+    if inp.nspin == 2:
+        xc, mags = _spin_setup(inp)
+    else:
+        xc, mags = XC_REGISTRY[inp.xc](), None
     cell = np.asarray(inp.atoms.cell.array, dtype=float)
     positions = inp.atoms.get_positions()
     masses = inp.atoms.get_masses()  # primitive-atom masses [amu]
@@ -1030,18 +1066,25 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict:
             use_symmetry=False)
         if inp.device != "cpu":
             system = system.to(inp.device)
-        return scf(system, xc, smearing=inp.smearing.type, width=inp.smearing.width,
+        # fixed spin moment: a collinear nspin=2, no-smearing pin (see run_scf)
+        spin_kw = ({"tot_magnetization": inp.tot_magnetization}
+                   if inp.nspin == 2 and inp.tot_magnetization is not None else {})
+        return scf(system, xc, nspin=inp.nspin, start_mag=mags,
+                   smearing=inp.smearing.type, width=inp.smearing.width,
                    etol=inp.scf.etol, rhotol=inp.scf.rhotol,
                    mixing_alpha=inp.scf.mixing.alpha,
                    mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
-                   diago_tol=inp.scf.diago_tol, start_from=start_from, verbose=False)
+                   diago_tol=inp.scf.diago_tol, start_from=start_from, verbose=False,
+                   **spin_kw)
 
     if verbose:
         print(f"phonons: {tuple(n)} supercell ({scmap.n_sc} atoms), displacing "
               f"{scmap.n_prim} home atoms → {6 * scmap.n_prim} SCFs, k-mesh {ksuper}",
               flush=True)
+    # xc is needed by the force path only for NLCC species (spin-resolved for
+    # nspin=2); it is ignored for valence-only pseudos.
     phi = force_constants_home(make_scf, scmap, h=inp.phonons.displacement,
-                               verbose=verbose)
+                               xc=xc, verbose=verbose)
 
     bp = inp.atoms.cell.bandpath(path=inp.phonons.path or None,
                                  npoints=inp.phonons.npoints)
