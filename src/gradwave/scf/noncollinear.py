@@ -751,30 +751,53 @@ def band_structure_nc(res: NCResult, xc: NoncollinearXC, kpts_frac,
     from gradwave.pseudo.kb import beta_form_factors
     from gradwave.solvers.davidson import davidson_batched_ms
 
-    if getattr(xc, "needs_tau", False):
-        # The spinor τ operator needs the converged orbitals AND their
-        # occupations to rebuild v_τ along an arbitrary k-path; NCResult carries
-        # coeffs but not occupations, so meta-GGA spinor bands are not wired here
-        # yet. The SCF itself (scf_noncollinear) is fully τ-aware.
-        raise NotImplementedError(
-            "non-collinear meta-GGA band structure is not wired yet (the τ "
-            "operator needs the converged occupations); the SCF supports it.")
     system = res.system
     grid = system.grid
     device = res.rho.device
     nbands = nbands or 2 * system.nbands
     kpts = np.asarray(kpts_frac, dtype=float)
+    nonmagnetic = float(res.m.abs().max()) < 1e-12
 
-    # rebuild converged V, B
+    # meta-GGA (needs_tau): rebuild the KE-density-matrix (τ_0, τ⃗) from the
+    # CONVERGED spinor orbitals + occupations at the SCF's own k-mesh
+    # (system.batch — NCResult now carries both res.coeffs and res.occupations,
+    # PR #103's occupations field originally added for the SOC stress), project
+    # to the local-frame per-spin τ_±, and form the fixed real-space v_τ
+    # operator fields (v_τ0, v_τ⃗) exactly as the SCF's _nc_metagga_step does.
+    # These fields are k-independent (like v_r/b_xc below); only the operator
+    # itself (spinor_metagga_tau_operator) needs the PATH k-point's own bk.
+    tau_up = tau_dn = None
+    if getattr(xc, "needs_tau", False):
+        bk0 = system.batch
+        tau_scalar, tau_vec = spinor_tau_matrix_b(
+            res.coeffs, res.occupations, system.kweights, bk0, grid.shape,
+            grid.volume, bk0.npw_max)
+        tau_up, tau_dn = local_frame_tau(res.m, tau_scalar, tau_vec, xc.m_eps)
+
+    # rebuild converged V, B (meta-GGA: v_xc is evaluated at the converged τ_±,
+    # held fixed exactly as the SCF's _nc_effective_potential does)
     rho_g_box = r_to_g(res.rho.to(CDTYPE))
     v_h = g_to_r_box(hartree_potential_g(rho_g_box, grid.g2), real=True)
-    v_xc, b_xc, _ = vxc_and_bxc(xc, res.rho, res.m, grid, rho_core=system.rho_core)
-    if float(res.m.abs().max()) < 1e-12:
+    v_xc, b_xc, _ = vxc_and_bxc(xc, res.rho, res.m, grid, rho_core=system.rho_core,
+                                tau_up=tau_up, tau_dn=tau_dn)
+    if nonmagnetic:
         b_xc = torch.zeros_like(b_xc)
     vloc_g = local_potential_g(system.positions, system.species_index,
                                system.vloc_tables, grid.g_cart, grid.volume)
     vloc_r = g_to_r_box(vloc_g, real=True)
     v_r = v_h + v_xc + vloc_r
+
+    # meta-GGA v_τ operator fields (v_τ0, v_τ⃗), fixed at the converged state —
+    # None for LDA/GGA, in which case metagga_op stays None per path chunk.
+    v0 = vvec = None
+    if tau_up is not None:
+        vtu, vtd = vtau_up_dn(xc, res.rho, res.m, grid, tau_up, tau_dn,
+                              rho_core=system.rho_core)
+        if nonmagnetic:
+            v0 = 0.5 * (vtu + vtd)
+            vvec = torch.zeros(3, *res.rho.shape, dtype=RDTYPE, device=device)
+        else:
+            v0, vvec = tau_operator_fields(vtu, vtd, res.m, xc.m_eps)
 
     eigs = np.empty((len(kpts), nbands))
     for lo in range(0, len(kpts), chunk):
@@ -799,10 +822,14 @@ def band_structure_nc(res: NCResult, xc: NoncollinearXC, kpts_frac,
                  for u in system.upfs], grid.volume))
         bk = build_batched(spheres, pd_list, device=device)
         q_so, dij_so = build_so_projectors(bk, system, so_tables=so_tabs)
+        metagga_op = None
+        if v0 is not None:
+            def metagga_op(c, _v0=v0, _vv=vvec, _bk=bk, _mpw=bk.npw_max):
+                return spinor_metagga_tau_operator(c, _v0, _vv, _bk, grid.shape, _mpw)
         h = SpinorHamiltonian(bk, grid.shape, v_r, torch.zeros_like(b_xc)
-                              if float(res.m.abs().max()) < 1e-12 else b_xc,
+                              if nonmagnetic else b_xc,
                               projectors_b(bk, system.positions),
-                              q=q_so, dij_so=dij_so)
+                              q=q_so, dij_so=dij_so, metagga_op=metagga_op)
         c0 = torch.zeros(hi - lo, nbands, 2 * bk.npw_max, dtype=CDTYPE, device=device)
         for b_i in range(nbands):
             c0[:, b_i, (b_i // 2) + (b_i % 2) * bk.npw_max] = 1.0

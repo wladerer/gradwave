@@ -44,6 +44,7 @@ from gradwave.postscf._strain import (
     box_millers,
     ewald_strained,
     hubbard_energy_strained,
+    hubbard_energy_strained_nc,
     kinetic_band,
     local_pp_energy,
     nlcc_core_strained,
@@ -93,6 +94,10 @@ def stress(res, xc, symmetrize: bool = True, manifolds=None) -> torch.Tensor:
     derivatives are formally unchanged (operating on the total spinor density
     ρ and magnetization m⃗), and the nonlocal term uses the j-resolved spinor
     projectors summed over both spinor components (see ``_energy_strained_fr``).
+    DFT+U on this path is also supported: pass ``manifolds`` as on the
+    collinear path — the composite 2×2 spin-block occupation matrix (PR #159)
+    threads through the SAME strained atomic-orbital projectors, since +U and
+    the SOC nonlocal term are orthogonal (see ``hubbard_energy_strained_nc``).
     """
     system = res.system
     if getattr(res, "hub_occ", None) is not None and manifolds is None:
@@ -142,10 +147,9 @@ def _energy_strained(
     """
     system = res.system
     if getattr(system, "is_fr", False):
-        if manifolds is not None:
-            raise NotImplementedError("DFT+U stress on the spin-orbit path")
         return _energy_strained_fr(
-            res, xc, eps, rho=rho, coeffs=coeffs, spheres=spheres)
+            res, xc, eps, rho=rho, coeffs=coeffs, spheres=spheres,
+            manifolds=manifolds)
     grid = system.grid
     dev = system.positions.device
     rdt = RDTYPE
@@ -306,6 +310,7 @@ def _tau_strained(coeffs, spheres, b_e, omega, occ, kw, shape):
 
 def _energy_strained_fr(
     res, xc, eps: torch.Tensor, *, rho=None, coeffs=None, spheres=None,
+    manifolds=None,
 ) -> torch.Tensor:
     """KS energy vs strain for a fully-relativistic (spin-orbit) spinor result.
 
@@ -324,7 +329,10 @@ def _energy_strained_fr(
     ``xc`` is the ``NoncollinearXC`` the spinor SCF ran (meta-GGA is rejected
     there, so there is no τ term). ``rho``/``coeffs``/``spheres`` override the
     detached converged state for the discretization-error path, as on the scalar
-    ``_energy_strained``.
+    ``_energy_strained``. ``manifolds`` (DFT+U): the strain derivative of the
+    Dudarev E_U built from the 2×2 spin-block occupation matrix, added through
+    ``hubbard_energy_strained_nc`` — the SOC nonlocal term above is untouched
+    (+U and SOC are orthogonal), so this is a pure addition to e_tot.
     """
     system = res.system
     grid = system.grid
@@ -412,4 +420,15 @@ def _energy_strained_fr(
     # ---- Ewald (integer image/G sets fixed at ε=0, vectors strained)
     e_ew = ewald_strained(pos_e, system.charges, a_e, b_e, omega, grid.cell)
 
-    return e_kin + e_h + e_xc + e_loc + e_nl + e_ew
+    e_tot = e_kin + e_h + e_xc + e_loc + e_nl + e_ew
+
+    # ---- DFT+U (Dudarev) on the spinor path: strain derivative of E_U through
+    # the strained atomic-orbital projectors, contracted against BOTH spinor
+    # components into the composite 2×2 spin-block occupation matrix. Detached
+    # coeffs/occupations, so only the projector/cell strain dependence
+    # contributes — orthogonal to the SOC nonlocal term above.
+    if manifolds is not None:
+        e_tot = e_tot + hubbard_energy_strained_nc(
+            system, manifolds, b_e, pos_e, omega, spheres, coeffs, occ, kw, m_pw)
+
+    return e_tot
