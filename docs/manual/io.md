@@ -136,7 +136,7 @@ geometry file alongside it.
 
 | keyword | default | unit | type | description |
 |---|---|---|---|---|
-| `scheme` | `pulay` | — | string | `pulay`, `broyden`, `johnson`, or `linear`. |
+| `scheme` | `pulay` | — | string | `pulay`, `broyden`, or `johnson`. |
 | `alpha` | `0.7` | — | float | Linear mixing fraction. |
 | `history` | `null` | — | int | Mixing history depth. `null` uses the per-scheme default (johnson 12, else 8). |
 | `kerker` | `auto` | — | string or bool | Kerker preconditioner: `auto` (on when smearing is enabled), `true`, or `false`. |
@@ -152,6 +152,7 @@ Used when `task: relax`.
 | `max_steps` | `200` | — | int | Maximum ionic steps. |
 | `cell` | `false` | — | bool | Variable-cell relaxation: relax the lattice with the atoms via `FrechetCellFilter` (stress). |
 | `pressure` | `0.0` | GPa | float | External hydrostatic pressure, applied during cell relaxation. |
+| `method` | `nested` | — | string | `nested` (full SCF per ASE step, every formalism/spin/metal), `joint` (descends on strain+positions+orbitals at once, norm-conserving insulators only), or `newton` (exact-Hvp Steihaug trust-region Newton-CG, same scope as `joint`). `joint`/`newton` fall back to `nested` on non-convergence or an unsupported system. |
 
 With `cell: true` the `relax.json` also reports `volume_ang3` and `max_stress_eV_ang3`. Relaxing a cell at fixed `ecut` carries Pulay (basis-incompleteness) stress, so converge `ecut` first or re-relax at the new cell. The plain filter does not constrain symmetry.
 
@@ -271,7 +272,8 @@ Each calculation writes three files into the output directory.
   dominate the file size and a restart consumes only the density and becsum. Set
   `output.wavefunctions: true` to archive them.
 
-`<task>` is `scf`, `relax`, or `bands`. A relax task additionally writes the
+`<task>` is the input's `task` value (`scf`, `relax`, `bands`, `magnetism`, `eos`,
+`elastic`, or `phonons`). A relax task additionally writes the
 `relax.xyz` extended-xyz trajectory described above, referenced from the JSON
 as `outputs.trajectory`. Setting `output.volumetric` adds `.cube`/`.xsf` field
 files, described under [Volumetric export](#volumetric-export) and referenced

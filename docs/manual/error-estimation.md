@@ -9,7 +9,8 @@ Cancès et al.[[18]](bibliography.md#cances)
 
 Turn it on and the calculation reports how far the energy still has to fall, the
 extrapolated energy, the density error, the band-gap error, and (for a
-norm-conserving calculation, spin-unpolarized or spin-polarized) the force error.
+norm-conserving or USPP/PAW calculation, spin-unpolarized or spin-polarized) the
+force error.
 
 ## Theory
 
@@ -111,11 +112,12 @@ converged `scf` result (norm-conserving) or a `scf_uspp` dict (USPP/PAW).
 errors.
 
 ```python
+from gradwave.constants import RY_EV
 from gradwave.postscf.discretization_error import (
     estimate_density_error, estimate_force_error)
 
 # res from scf(...) at a loose ecut
-err = estimate_density_error(res, ecut_large=35 * RY)
+err = estimate_density_error(res, ecut_large=35 * RY_EV)
 print(err.denergy)                 # eV, < 0
 print(err.drho.abs().sum())        # density-error magnitude
 dF = estimate_force_error(res, err)   # (na, 3) eV/Å; add to F to approach the limit
@@ -134,10 +136,11 @@ $i$-th Kohn-Sham eigenvalue toward the infinite-basis limit ($\delta\varepsilon
 estimator into a band-structure and band-gap error tool at no extra SCF cost.
 
 ```python
+from gradwave.constants import RY_EV
 from gradwave.postscf.discretization_error import (
     estimate_eigenvalue_error, estimate_gap_error)
 
-eige = estimate_eigenvalue_error(res, ecut_large=35 * RY)  # per-band δε [eV]
+eige = estimate_eigenvalue_error(res, ecut_large=35 * RY_EV)  # per-band δε [eV]
 gap = estimate_gap_error(res, eige)     # dict: gap, extrapolated gap, δgap, VBM/CBM
 print(gap["gap_eV"], gap["gap_extrapolated_eV"], gap["dgap_eV"])
 ```
@@ -273,8 +276,8 @@ residual, not just its trace).
 |---|---|---|---|
 | density error | nspin=1, nspin=2 | nspin=1, nspin=2 | spinor |
 | energy error | nspin=1, nspin=2 | nspin=1, nspin=2 | spinor |
-| force error | nspin=1, nspin=2 (no NLCC) | not available | not available |
-| eigenvalue / gap error | nspin=1, nspin=2 | not available | eigenvalue (spinor) |
+| force error | nspin=1, nspin=2 (no NLCC) | nspin=1, nspin=2 (incl. NLCC, no +U) | not available |
+| eigenvalue / gap error | nspin=1, nspin=2 | nspin=1, nspin=2 | eigenvalue (spinor) |
 | stress error (pressure) | nspin=1, no symmetry | not available | not available |
 | stress error (full tensor) | not available (deferred) | not available | not available |
 | SCF error (trajectory) | any run | any run | any run |

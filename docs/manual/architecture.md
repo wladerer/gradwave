@@ -257,12 +257,12 @@ column is the YAML keyword (or API entry point) that turns the feature on; see
 | Elastic constants | `task: elastic` | `postscf/elastic.py`, `postscf/stress.py` | [Post-SCF analysis](postscf-analysis.md#elastic-constants) |
 | Dielectric / Born charges | API | `postscf/dielectric.py` | [Post-SCF analysis](postscf-analysis.md#dielectric-tensor-and-born-effective-charges) |
 | Grimme dispersion (D3 / D4) | `dispersion:` | `postscf/dispersion.py`, `postscf/dispersion_d4.py` | [Post-SCF analysis](postscf-analysis.md#grimme-dispersion-d3-and-d4) |
-| Eigensolver selection | `eigensolver:` | `solvers/registry.py`, `solvers/{davidson,chebyshev,lobpcg}.py` | — |
+| Eigensolver selection | API (`scf(..., eigensolver=name)`) | `solvers/registry.py`, `solvers/{davidson,chebyshev,lobpcg}.py` | — |
 | Symmetry reduction | `symmetry: true` | `symmetry.py`, `scf/paw_symmetry.py` | [Symmetry](symmetry.md) |
 | Smearing (metals) | `smearing:` | `core/occupations.py` | [Cookbook](cookbook.md) |
 | Learnable functionals | API | `core/xc/learnable.py`, `scf/implicit.py` | [Learning XC](learning-xc.md) |
-| Hybrid functionals (exact exchange) | `hybrid_scf` (Python) | `postscf/hybrid.py`, `postscf/isdf.py`, `postscf/exchange.py` | — |
-| Learnable hybrid (α, ω) | Python | `postscf/exchange_multik.py`, `postscf/isdf_k.py`, `postscf/coulomb_kernel.py` | — |
+| Hybrid functionals (exact exchange) | `xc: pbe0 \| hse` | `postscf/hybrid.py`, `postscf/isdf.py`, `postscf/exchange.py` | [Hybrid functionals](hybrid-functionals.md) |
+| Learnable hybrid (α, ω) | Python | `postscf/exchange_multik.py`, `postscf/isdf_k.py`, `postscf/coulomb_kernel.py` | [Hybrid functionals](hybrid-functionals.md#a-learnable-hybrid) |
 | Basis / SCF error estimates | `error_estimate: true` | `postscf/convergence_error.py`, `postscf/discretization_error.py` | [Error estimation](error-estimation.md) |
 | Restart / checkpoints | `restart:` | `checkpoint.py` | [Inputs and outputs](io.md) |
 | ASE calculator | Python | `calculator.py` | [Cookbook](cookbook.md) |
@@ -293,9 +293,12 @@ evaluate exchange on a fixed density. The mixing fraction α and screening lengt
 *learnable* hybrid trainable end to end, the same stationarity argument the
 learnable-XC slot uses.
 
-This subsystem is reached from Python today (`hybrid_scf`,
-`HybridExchangeParams`); it is not yet wired into the YAML input schema. The
-`xc:` key accepts `lda`, `pbe`, and `r2scan`; the hybrids stay Python-only.
+This subsystem is reached from the YAML input schema too: `xc: pbe0` or
+`xc: hse` selects a fixed-α/ω hybrid and dispatches through `hybrid_scf` in the
+SCF driver (see [`hybrid`](io.md#hybrid) and
+[Hybrid functionals](hybrid-functionals.md)). Only the *learnable* hybrid —
+training α and ω as differentiable parameters via `HybridExchangeParams` —
+stays Python-only; the YAML schema exposes fixed values for those two knobs.
 
 ## Tests and fixtures
 
