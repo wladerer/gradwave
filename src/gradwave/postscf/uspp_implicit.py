@@ -95,12 +95,12 @@ from __future__ import annotations
 
 import torch
 
+from gradwave.core._anderson import AndersonMixer
 from gradwave.core.density import sigma_from_rho
 from gradwave.core.fftbox import box_to_sphere, g_to_r, g_to_r_box, r_to_g
 from gradwave.core.hamiltonian import becp, projectors
 from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE, RDTYPE
-from gradwave.postscf._anderson import AndersonMixer
 from gradwave.postscf._response import (
     fxc_hvp,
     fxc_hvp_spin,

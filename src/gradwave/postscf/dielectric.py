@@ -36,12 +36,12 @@ from types import SimpleNamespace
 import torch
 
 from gradwave.constants import E2, HBAR2_2M
+from gradwave.core._anderson import AndersonMixer
 from gradwave.core.batch import g_to_r_b, projectors_b
 from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.hamiltonian import projectors
 from gradwave.dtypes import CDTYPE, RDTYPE
-from gradwave.postscf._anderson import AndersonMixer
 from gradwave.postscf._kb import projector_data_at_k, species_projector_tables
 from gradwave.postscf._response import (
     cg_sternheimer,

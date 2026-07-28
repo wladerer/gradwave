@@ -20,7 +20,8 @@ import inspect
 import pytest
 import torch
 
-from gradwave.postscf import _anderson, uspp_implicit
+from gradwave.core import _anderson
+from gradwave.postscf import uspp_implicit
 from gradwave.postscf.convergence_error import DysonNotConverged
 from gradwave.postscf.discretization_error import (
     _aug_density_from_becsum,

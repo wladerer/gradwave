@@ -41,12 +41,12 @@ from __future__ import annotations
 
 import torch
 
+from gradwave.core._anderson import AndersonMixer
 from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.fftbox import box_to_sphere, g_to_r, g_to_r_box, r_to_g
 from gradwave.core.hamiltonian import becp
 from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE, RDTYPE
-from gradwave.postscf._anderson import AndersonMixer
 from gradwave.postscf._response import fxc_hvp
 from gradwave.postscf.newton import _pack, _unpack
 from gradwave.postscf.uspp_frozen import aug_density_from_becsum
