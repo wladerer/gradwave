@@ -130,7 +130,8 @@ def test_run_wiring_writes_requested_fields(si_res, tmp_path):
 @pytest.mark.standard  # full SOC SCF; not a fast-gate test
 def test_noncollinear_spinor_export():
     """PARCHG sums the two spinor components (∫=1), density is the total, and
-    the magnetization density integrates to res.mag_vec. ELF is guarded."""
+    the magnetization density integrates to res.mag_vec. ELF is the closed-shell
+    charge-density field, bounded in [0, 1]."""
     import torch
 
     from gradwave.core.xc.noncollinear import NoncollinearXC
@@ -161,10 +162,51 @@ def test_noncollinear_spinor_export():
             float(res.mag_vec[i]), abs=1e-3)
     assert (V.magnetization(res, "abs") >= 0.0).all()
 
-    with pytest.raises(NotImplementedError):
-        V.elf(res)
+    # ELF from the charge density (trace of the KE-density matrix); a single field
+    # for a spinor result, bounded in [0, 1].
+    e = V.elf(res)
+    assert e.ndim == 3 and e.shape == tuple(system.grid.shape)
+    assert np.isfinite(e).all()
+    assert e.min() >= 0.0 and e.max() <= 1.0 + 1e-9
     with pytest.raises(ValueError, match="noncollinear"):
         V.density(res, spin=0)
+
+
+@pytest.mark.standard  # two SCFs (collinear + noncollinear); not a fast-gate test
+def test_elf_noncollinear_nonmagnetic_limit_matches_collinear():
+    """A nonmagnetic (magmom=0, scalar-relativistic) noncollinear SCF must give the
+    SAME closed-shell ELF as the collinear nspin=1 run: the spinor charge density
+    and trace KE density reduce to ρ and τ, so the ELF field coincides. Pins down
+    the τ_0 = τ_↑↑ + τ_↓↓ trace and the no-2^{2/3} charge-density convention."""
+    import torch
+
+    from gradwave.core.xc.lda_pw92 import LDA_PW92
+    from gradwave.core.xc.noncollinear import NoncollinearXC
+    from gradwave.core.xc.spin import LSDA_PW92
+    from gradwave.scf.noncollinear import scf_noncollinear
+
+    torch.set_num_threads(4)
+    cell, pos = si_fcc()
+    upf = parse_upf(pseudo("Si_ONCV_PBE-1.2.upf"))
+
+    def mk():
+        # identical (full) k-mesh for both so the densities are directly comparable
+        return setup_system(cell, pos, [0, 0], [upf], ecut=15 * RY,
+                            kmesh=(2, 2, 2), nbands=12, time_reversal=False)
+
+    r1 = scf(mk(), LDA_PW92(), smearing="gaussian", width=0.05,
+             etol=1e-9, rhotol=1e-8, verbose=False)
+    nc = scf_noncollinear(mk(), NoncollinearXC(LSDA_PW92()),
+                          mag_vec_init=[[0, 0, 0], [0, 0, 0]], nonmagnetic=True,
+                          smearing="gaussian", width=0.05, etol=1e-9, rhotol=1e-8,
+                          verbose=False)
+    assert r1.converged and nc.converged and abs(nc.mag_abs) < 1e-4
+
+    e1 = V.elf(r1)
+    enc = V.elf(nc)
+    assert enc.ndim == 3 and e1.ndim == 3
+    assert enc.min() >= 0.0 and enc.max() <= 1.0 + 1e-9
+    assert np.abs(enc - e1).max() < 2e-3
 
 
 # --- charge-response field ∂n(r)/∂R ---------------------------------------
