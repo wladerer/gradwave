@@ -79,14 +79,24 @@ matrix built on `hessian_column` (`postscf.phonons.gamma_hessian`) is now
 cross-validated against the finite-displacement path
 (`postscf.phonons_supercell` folding of `paw_forces.forces_uspp`) on one PAW
 diamond-Si cell — `tests/integration/test_gamma_phonons_self_oracle.py`. The
-gates above are unchanged (still nspin=1 / no +U / insulators). Finding logged
-for follow-up: at the high-symmetry (band-degenerate) ideal geometry the
-analytic Hessian runs ~0.5 % (≈1.6 cm⁻¹ optical) high vs BOTH the
-FD-of-forces Hessian and the total-energy second difference (the exact
-BO-surface curvature, which agree with each other to 1e-4); the gap is h- and
-ecut-independent and vanishes at the low-symmetry P1 geometry the column check
-uses — consistent with an incomplete degenerate-subspace term in the position
-response, not a convergence artifact.
+gates above are unchanged (still nspin=1 / no +U / insulators). The two paths
+agree to ~0.01 cm⁻¹ (~1e-5), matching the low-symmetry P1 column check and the
+total-energy second difference (the exact BO-surface curvature).
+
+*Degenerate-window systematic — FIXED (#141 follow-up).* As first landed the
+analytic Hessian ran ~0.5 % (≈1.6 cm⁻¹ optical) high at the high-symmetry
+(band-degenerate) ideal geometry vs BOTH the FD-of-forces Hessian and the
+energy second difference (which agreed to 1e-4); the gap was h- and
+ecut-independent and vanished at P1. Root cause: at a band degeneracy
+`uspp_position.window_response` substituted the off-diagonal S-metric
+coefficient with the −½⟨m|δS|n⟩ density limit. That limit is right for the
+density/normalization response but leaves a spurious DISCONTINUITY in the
+second-derivative assembly — as the degeneracy is lifted by any ε_n≠ε_m the
+non-degenerate coefficient `⟨m|δH−ε_nδS|n⟩/(ε_n−ε_m)` gives the exact Hessian
+(2e-5), so its continuous limit, the full metric coupling −⟨m|δS|n⟩, is the
+correct exactly-degenerate value. `hessian_column` now sets that limit
+(`PositionPerturbation.deg_full=True`); the density-response public functions
+keep the −½ limit (their own continuous limit), so their gates are unchanged.
 
 ## Open — PAW/NC stress & +U
 

@@ -19,26 +19,25 @@ physical ~520 cm⁻¹) and is NOT compared to experiment — only the two method
 each other. Diamond glide (¼,¼,¼) forces the 20³ FFT grid (18³ breaks the group
 invariance the reconstruction relies on — see ``gamma_hessian``'s guard).
 
-Known systematic (issue #141, characterized in this PR): the two paths agree only
-to ~1.6 cm⁻¹ (optical FC ~0.5%), NOT to the ~1e-5 the analytic-vs-FD *column*
-check hits at a low-symmetry P1 geometry (``test_uspp_position``). The gap is:
+History (issue #141): as first landed, the two paths agreed only to ~1.6 cm⁻¹
+(optical FC ~0.5 %), NOT to the ~1e-5 the analytic-vs-FD *column* check hits at a
+low-symmetry P1 geometry (``test_uspp_position``). That gap was h-INDEPENDENT
+(not FD truncation), ecut-INDEPENDENT (not basis incompleteness), and pinned by a
+THIRD route — the total-ENERGY second difference of the optical pattern (the exact
+BO-surface curvature) — which matched the FD-of-forces Hessian to 1e-4 and sat
+~0.5 % below the analytic Hessian. It was root-caused to the degenerate-window
+gauge in ``uspp_position.window_response``: at a band degeneracy the off-diagonal
+S-metric coefficient was substituted with the −½⟨m|δS|n⟩ density limit, which is
+correct for the density/normalization response but leaves a spurious
+DISCONTINUITY in the second-derivative assembly. ``hessian_column`` now uses the
+full metric coupling −⟨m|δS|n⟩ there (the continuous ε_n≠ε_m limit), which closes
+the gap: the two paths agree to ~0.01 cm⁻¹ (~1e-5), matching the P1 column check
+and the energy-second-difference oracle.
 
-* h-INDEPENDENT (1.551/1.551/1.554 cm⁻¹ at h=1/2/4e-3) → not FD truncation;
-* ecut-INDEPENDENT (0.54/0.46/0.52 % at 15/25/35 Ry) → not basis incompleteness;
-* only mildly k-dependent (0.54 % at 2×2×2 → 0.36 % at 4×4×4);
-* pinned by a THIRD independent route — the total-ENERGY second difference of the
-  optical displacement pattern (variational, so the exact BO-surface curvature):
-  it matches the FD-of-forces Hessian to 1e-4 and sits ~0.5 % BELOW the analytic
-  Hessian. So the FD path is exact here and ``hessian_column`` runs ~0.5 % high at
-  this high-symmetry / band-degenerate geometry (the P1 column check has no
-  degeneracies, hence its 1e-5).
-
-The analytic path is otherwise QE-validated (SiGe ph.x DFPT, 4×4×4/45 Ry:
-gradwave 419.4 vs QE 419.14, +0.06 %). Root-causing / fixing the high-symmetry
-~0.5 % in ``hessian_column`` is left as #141 follow-up (out of this PR's scope).
-The 2.5 cm⁻¹ optical tolerance brackets the characterized 1.6 cm⁻¹ systematic
-with margin; it is a regression guard on the two paths tracking each other (it
-still catches sign/factor/unit/solver breakage), not a claim of sub-cm⁻¹ parity.
+The analytic path is also QE-validated (SiGe ph.x DFPT, 4×4×4/45 Ry: gradwave
+419.4 vs QE 419.14, +0.06 %). The 0.2 cm⁻¹ optical tolerance guards the two paths
+tracking each other (catching sign/factor/unit/solver breakage) with margin over
+the observed ~0.01 cm⁻¹.
 """
 
 from pathlib import Path
@@ -113,10 +112,9 @@ def test_gamma_phonons_hvp_matches_finite_displacement():
     # gross-error catch (NOT a physical-accuracy claim — k-under-converged here)
     assert 400.0 < f_hvp[3:].mean() < 700.0
     assert 400.0 < f_fd[3:].mean() < 700.0
-    # the cross-validation: two independent methods track each other to the
-    # characterized ~1.6 cm⁻¹ high-symmetry systematic (see module docstring)
-    assert np.abs(f_hvp[3:] - f_fd[3:]).max() < 2.5, (
+    # the cross-validation: the two independent methods now track each other to
+    # ~0.01 cm⁻¹ (~1e-5) — the degenerate-window systematic is fixed (#141, see
+    # module docstring). 0.2 cm⁻¹ leaves margin for platform BLAS/FFT noise
+    # while still catching any sign/factor/unit/solver regression in either path
+    assert np.abs(f_hvp[3:] - f_fd[3:]).max() < 0.2, (
         f"optical mismatch Hvp={f_hvp[3:]} FD={f_fd[3:]}")
-    # ...and the analytic side is the HIGH one (locks the sign of the systematic
-    # so a future hessian_column fix that closes the gap will flag here)
-    assert f_hvp[3:].mean() > f_fd[3:].mean()
