@@ -190,3 +190,78 @@ def test_occupation_matrix_noncollinear_reduces_to_collinear_limit():
     uj = U - J
     assert torch.allclose(d_dd, uj * 0.5 * torch.eye(dim, dtype=torch.complex128,
                                                       device=dev), atol=1e-12)
+
+
+def test_hubbard_force_noncollinear_gradcheck():
+    """The noncollinear (spinor) +U force, ``postscf.forces.
+    hubbard_force_noncollinear`` — the generalization of ``hubbard_force``
+    onto the 2×2 spin-block occupation matrix (``occupation_matrices_
+    noncollinear``, PR #159's SCF/energy-path machinery) — via
+    ``torch.autograd.gradcheck`` on frozen synthetic spinor orbitals, mirroring
+    ``test_hubbard_force_gradcheck`` exactly (no SCF needed: the
+    Hellmann–Feynman argument only needs the projector-phase differentiability
+    at FIXED orbitals/occupation-matrix, which this checks directly against a
+    finite difference of the same E_U(pos) expression)."""
+    torch.manual_seed(1)
+    se = parse_upf(FIX / "pseudos" / "PD_Se_FR.upf")
+    # two atoms so a phase gradient is nonzero
+    system = setup_system(9.0 * np.eye(3), np.array([[0.0, 0, 0], [2.3, 0.4, 0.0]]),
+                          [0, 0], [se], ecut=20 * RY, kmesh=(1, 1, 1))
+    manifolds = [HubbardManifold(0, l=2, u=5.0, j=0.5)]
+    hub = build_hubbard_projectors(system, manifolds)
+    dev = system_device(system)
+    npw = system.batch.npw_max
+    nk, nb = 1, 4
+    coeffs = torch.randn(nk, nb, 2 * npw, dtype=torch.complex128).to(dev)
+    coeffs[..., :npw] *= system.batch.mask[:, None, :]
+    coeffs[..., npw:] *= system.batch.mask[:, None, :]
+    occ = torch.rand(nk, nb, dtype=torch.float64).to(dev)
+
+    def e_u(pos):
+        q = hubbard_projectors(hub, pos)
+        mats = occupation_matrices_noncollinear(
+            q, coeffs[..., :npw], coeffs[..., npw:], occ, system.kweights, hub.sites)
+        return hubbard_energy(mats, hub.sites)
+
+    pos = system.positions.clone().requires_grad_(True)
+    assert torch.autograd.gradcheck(e_u, (pos,), atol=1e-6, rtol=1e-4)
+
+    # hubbard_force_noncollinear (a fresh build_hubbard_projectors + the same
+    # occupation-matrix/energy chain) must equal -grad of e_u exactly.
+    from types import SimpleNamespace
+
+    from gradwave.postscf.forces import hubbard_force_noncollinear
+
+    fake_res = SimpleNamespace(system=system, coeffs=coeffs, occupations=occ)
+    f = hubbard_force_noncollinear(fake_res, manifolds)
+    (g,) = torch.autograd.grad(e_u(pos), pos)
+    assert torch.allclose(f, -g, atol=1e-10)
+
+
+def test_hubbard_force_noncollinear_u_zero_is_exact_zero():
+    """U=J=0: the Dudarev E_U = ½(U−J)Tr[N(1−N)] is identically zero for ANY
+    occupation matrix N (an exact algebraic identity, not a numerical limit —
+    mirrors ``test_spinor_hubbard_u_zero_bit_for_bit``'s SCF-level argument
+    applied at the force level), so ``hubbard_force_noncollinear`` returns an
+    exact-zero tensor regardless of the (random, non-self-consistent) orbitals
+    fed in — this is the Stage-2 "+U forces reduce to Stage 1" oracle: with
+    U=0 the noncollinear +U force contributes nothing, so the total force is
+    exactly the plain spinor Hellmann–Feynman force."""
+    from types import SimpleNamespace
+
+    from gradwave.postscf.forces import hubbard_force_noncollinear
+
+    torch.manual_seed(3)
+    se = parse_upf(FIX / "pseudos" / "PD_Se_FR.upf")
+    system = setup_system(9.0 * np.eye(3), np.array([[0.0, 0, 0], [2.3, 0.4, 0.0]]),
+                          [0, 0], [se], ecut=20 * RY, kmesh=(1, 1, 1))
+    manifolds = [HubbardManifold(0, l=2, u=0.0, j=0.0)]
+    npw = system.batch.npw_max
+    coeffs = torch.randn(1, 4, 2 * npw, dtype=torch.complex128)
+    coeffs[..., :npw] *= system.batch.mask[:, None, :]
+    coeffs[..., npw:] *= system.batch.mask[:, None, :]
+    occ = torch.rand(1, 4, dtype=torch.float64)
+
+    fake_res = SimpleNamespace(system=system, coeffs=coeffs, occupations=occ)
+    f = hubbard_force_noncollinear(fake_res, manifolds)
+    assert torch.equal(f, torch.zeros_like(f))
