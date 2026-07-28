@@ -92,7 +92,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2, 3, 4]
+        group: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
 
@@ -107,10 +107,10 @@ jobs:
       - name: Sync dependencies
         run: uv sync --all-extras
 
-      - name: Standard test tier (shard ${{ matrix.group }}/4)
+      - name: Standard test tier (shard ${{ matrix.group }}/6)
         run: >-
           uv run pytest -m "not slow and not torture and not gpu"
-          --dist loadscope --splits 4 --group ${{ matrix.group }}
+          --dist loadscope --splits 6 --group ${{ matrix.group }}
 
   # Single required-status gate. Always runs (so the required check is reported
   # even when lint/test are skipped), and is green iff neither lint nor test
