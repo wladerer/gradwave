@@ -165,9 +165,13 @@ def test_u_positive_forces_and_stress_via_calculator(tmp_path):
 
 
 @pytest.mark.standard
-def test_uspp_paw_hubbard_stress_gated_in_calculator(tmp_path):
-    """USPP/PAW +U through the calculator is gated (its +U stress is not
-    implemented and the calculator always evaluates stress for a cell)."""
+def test_uspp_paw_hubbard_stress_through_calculator(tmp_path):
+    """USPP/PAW +U through the calculator: no longer gated (gradwave#156 added
+    the +U stress term), so energy/forces/stress all run to completion. The
+    physics (autograd vs. FD, U=0 inert) is self-oracled directly against
+    ``postscf.paw_stress`` in ``test_paw_stress_hubbard.py``; this is the
+    calculator-wiring regression guard for the ``_calculate_uspp`` gate that
+    used to reject this combination outright."""
     from ase import Atoms
 
     from gradwave.calculator import GradWave
@@ -181,5 +185,9 @@ def test_uspp_paw_hubbard_stress_gated_in_calculator(tmp_path):
         pseudopotentials={"Si": str(PSEUDOS / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")},
         kpts=(1, 1, 1), smearing="none",
         hubbard=[{"species": "Si", "l": 1, "u": 2.0}], verbose=False)
-    with pytest.raises(NotImplementedError, match="norm-conserving only"):
-        atoms.get_potential_energy()
+    e = atoms.get_potential_energy()
+    f = atoms.get_forces()
+    s = atoms.get_stress()
+    assert np.isfinite(e)
+    assert np.isfinite(f).all()
+    assert np.isfinite(s).all() and s.shape == (6,)

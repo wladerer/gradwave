@@ -588,8 +588,12 @@ class GradWave(Calculator):
         p = self.parameters
         symbols = atoms.get_chemical_symbols()
         species = sorted(set(symbols))
+        # DFT+U needs the full spatial BZ (an IBZ-folded mesh under-counts the
+        # correlated occupation matrix), so force symmetry off when +U is on —
+        # matching the NC ground-state path and api.build_system.
+        use_sym = p["use_symmetry"] and self._hubbard is None
         key = (tuple(np.round(atoms.cell.array, 12).ravel()), tuple(symbols))
-        if (not p["use_symmetry"] and self._system is not None
+        if (not use_sym and self._system is not None
                 and key == self._system_key):
             return dataclasses.replace(
                 self._system,
@@ -601,7 +605,7 @@ class GradWave(Calculator):
             [species.index(s) for s in symbols],
             [self._upf(s) for s in species],
             ecut=p["ecut"], kmesh=p["kpts"], nbands=p["nbands"],
-            ecutrho=p.get("ecutrho"), use_symmetry=p["use_symmetry"],
+            ecutrho=p.get("ecutrho"), use_symmetry=use_sym,
         ).to(self._device)
         self._system, self._system_key = system, key
         return system
@@ -627,16 +631,11 @@ class GradWave(Calculator):
             raise ValueError(
                 "eigensolver='chebyshev' is norm-conserving only; the USPP/PAW "
                 "generalized S-metric problem is not supported yet")
-        if self._hubbard is not None:
-            # USPP/PAW +U forces exist (forces_uspp reads them off the result),
-            # but +U stress on the S-dressed projectors is not implemented, and
-            # the calculator evaluates stress for every periodic cell — so a +U
-            # relaxation/EOS here would fail in stress. Keep the calculator +U
-            # path norm-conserving; USPP/PAW +U single points run via task: scf.
-            raise NotImplementedError(
-                "DFT+U through the GradWave calculator is norm-conserving only; "
-                "USPP/PAW +U stress is not implemented (run task: scf via the "
-                "api for a single-point USPP/PAW +U energy and forces)")
+        # DFT+U (Dudarev) is wired end-to-end for USPP/PAW: the S-metric SCF
+        # (scf_uspp), the +U force (forces_uspp reads it off the result), and
+        # now the +U stress (stress_uspp adds the strained S-dressed occupation
+        # term), so relaxation / EOS / elastic constants run here too.
+        manifolds = self._resolve_hubbard(self.atoms)
         system = self._get_uspp_system(self.atoms)
         # scf_uspp takes mixing_history=None natively (per-scheme default)
         res = scf_uspp(system, self._make_xc(), smearing=p["smearing"],
@@ -646,7 +645,7 @@ class GradWave(Calculator):
                        mixing_alpha=p["mixing_alpha"],
                        mixing_history=p["mixing_history"],
                        mixing_kerker=p["mixing_kerker"], precond=p["precond"],
-                       verbose=self._verbose,
+                       hubbard=manifolds, verbose=self._verbose,
                        start_from=self._warm_start(system))
         if not res.converged:
             raise RuntimeError("gradwave USPP SCF did not converge")
