@@ -46,6 +46,8 @@ gaps) — see the last section. So **65 real capability gates** remain.
 | ~~api.py:876~~ | nspin2 / NC | elastic constants (`run_elastic`) for nspin=2 needed PAW/USPP | **removed, this PR** — NC stress already sums per spin channel (`postscf.stress`, PR #58); the driver gate was stale. Oracle: `test_run_elastic_nspin2_nc_matches_nspin1` (nonmag-limit == nspin=1) |
 | ~~postscf/stress.py~~ (nspin=2 sum) | nspin2 | fixed-basis stress tensor | already ungated in PR #58 (per-spin kinetic/nonlocal + spin-resolved E_xc) |
 | ~~postscf/paw_stress.py:36~~ | USPP/PAW +U | stress with DFT+U on USPP/PAW (strained S-dressed projections) | **removed, this PR** — added the Dudarev E_U strain term to `_energy_strained_uspp`: the atomic-orbital projectors go on the strain graph like the base PAW augmentation, then S-dressed (Sφ = φ + Σ\|β⟩q⟨β\|φ⟩) so both the φ and the β strain enter n^{Iσ} (`_hub_sproj_strained`). Also ungated the USPP/PAW +U path through `calculator._calculate_uspp` (and forced symmetry off there, matching the NC +U path). Oracle: `test_paw_stress_hubbard_autograd_vs_fd` (autograd σ == central FD of the strained +U energy; ε=0 == SCF total) + a U=0 inertness bit-for-bit check |
+| ~~postscf/uspp_position.py:262,326~~ | USPP/PAW +U | position (Berry) response with DFT+U | **removed, this PR** — threaded the occupation-matrix channel n^{Iσ} through the position (displacement) response, the S-dressed analogue of #156's strain path (Sφ = φ + Σ\|β⟩q⟨β\|φ⟩ now moves with its atom): the bare perturbation gains δH_U = \|∂(Sφ)⟩D_U⟨Sφ\| + h.c. (∂(Sφ) via a jvp through the same `build_uspp_hubbard` S-dressing — `PositionPerturbation._build_dsphi`), `bare_map_derivative` returns the bare δn, and `_self_consistent_response` carries the Dudarev kernel δD_U = −(U−J)·herm(δn) through the existing `apply_chi0`/`k_hub` adjoint machinery. Oracle: `test_position_density_response_hubbard_vs_scf_fd` (analytic dρ*/dτ, dbecsum*/dτ == central FD of +U SCF re-runs, ~3e-5) |
+| ~~postscf/uspp_position.py:399~~ | USPP/PAW +U | `hessian_column` (Γ-phonon mixed second derivative) with DFT+U | **removed, this PR** — added the in-graph Dudarev E_U(c, τ) term (the same `hubbard_e_channel` expression `forces_uspp` differentiates for the +U force) so the double backward picks up ∂²E_U/∂τ∂τ′, fed by the +U-total orbital response (V_U feedback threaded through `_self_consistent_response`/`_total_orbital_response`). Oracle: `test_hessian_column_hubbard_vs_fd_of_forces` (analytic +U column == central FD of the +U-aware `forces_uspp`, ~3e-6) + `test_hessian_column_u0_is_inert` (U=0 == non-+U column, ~1e-13) |
 
 ## Open — nspin=2 (next tranches)
 
@@ -62,10 +64,8 @@ gaps) — see the last section. So **65 real capability gates** remain.
 
 | file:line | axis | operation blocked |
 |---|---|---|
-| postscf/uspp_position.py:262,326 | USPP/PAW +U | position (Berry) response: nspin=1, no +U |
-| postscf/uspp_position.py:264,328 | insulator | position response: fixed occupations only |
-| postscf/uspp_position.py:399 | USPP/PAW +U | `hessian_column`: nspin=1, no +U |
-| postscf/uspp_position.py:401 | insulator | `hessian_column`: insulators only |
+| postscf/uspp_position.py | insulator | position response: fixed occupations only (metals need occupation derivatives) |
+| postscf/uspp_position.py | insulator | `hessian_column`: insulators only |
 | postscf/uspp_implicit.py:166 | validation | USPP adjoint: nspin must be 1 or 2 |
 | postscf/uspp_implicit.py:193 | insulator | USPP adjoint: non-prefix band occupations |
 | postscf/discretization_error.py:278,1215 | USPP/PAW SOC-spinor | disc. error / eigenvalue error for USPP/PAW spinor result |
