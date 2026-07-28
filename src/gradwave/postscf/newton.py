@@ -16,8 +16,13 @@ worth it only to land 1e-10 from a 1e-3..1e-5 start in 2-3 steps, or to
 polish states for derivative work (the adjoint assumes a tightly
 converged fixed point).
 
-Coverage follows the response machinery: nspin=1, no +U (the spin kernel
-HVP is the same missing piece as the spin adjoint).
+Coverage follows the response machinery: nspin 1 or 2 (the composite mixing
+vector doubles to the per-spin (δρ↑, δρ↓, δbec↑, δbec↓), and χ̃/K_Hxc reuse
+the spin-resolved operators already in uspp_implicit._ConvergedUSPP), no +U
+(the +U raw-map still lacks the occupation block; the adjoint's +U response
+exists). nspin=2 follows the USPP/PAW formalism itself — smeared occupations
+(a shared Fermi level per iteration, magnetic insulators via a small width),
+so the Fermi-surface χ̃ channel carries the response.
 """
 
 from __future__ import annotations
@@ -32,18 +37,29 @@ from gradwave.scf.results import USPPResult
 from gradwave.scf.uspp_loop import _build_iter_ops, _scf_iteration
 
 
-def _pack(w_r, mats):
-    return torch.cat([w_r.reshape(-1)]
-                     + [m.reshape(-1) for m in mats])
+def _pack(w_sp, mats_sp):
+    """Composite residual/state vector: per-spin grid fields first, then the
+    per-spin, per-atom becsum blocks (same layout the USPP adjoint's join uses,
+    minus the hub block). ``w_sp`` and ``mats_sp`` are per-spin lists."""
+    return torch.cat([w.reshape(-1) for w in w_sp]
+                     + [m.reshape(-1) for mats in mats_sp for m in mats])
 
 
-def _unpack(v, shape, n_pts, nbec):
-    w_r = v[:n_pts].reshape(shape)
-    mats, off = [], n_pts
-    for n in nbec:
-        mats.append(v[off:off + n * n].reshape(n, n))
-        off += n * n
-    return w_r, mats
+def _unpack(v, shape, n_pts, nbec, nspin):
+    """Inverse of :func:`_pack`: flat v → (per-spin grid fields, per-spin
+    per-atom becsum matrices)."""
+    w_sp, off = [], 0
+    for _ in range(nspin):
+        w_sp.append(v[off:off + n_pts].reshape(shape))
+        off += n_pts
+    mats_sp = []
+    for _ in range(nspin):
+        mats = []
+        for n in nbec:
+            mats.append(v[off:off + n * n].reshape(n, n))
+            off += n * n
+        mats_sp.append(mats)
+    return w_sp, mats_sp
 
 
 def newton_polish(res: USPPResult, xc, *, tol: float = 1e-10, max_newton: int = 5,
@@ -54,17 +70,19 @@ def newton_polish(res: USPPResult, xc, *, tol: float = 1e-10, max_newton: int = 
     """Polish a near-converged scf_uspp result to `tol` in the density
     residual by exact-Jacobian Newton steps. Returns an updated USPPResult
     (fresh orbitals/energies from the final residual evaluation, plus a
-    `newton` list of per-step residual norms)."""
+    `newton` list of per-step residual norms).
+
+    nspin=1 or 2: for spin the composite residual/state vector is the per-spin
+    (δρ↑, δρ↓, δbec↑, δbec↓), and the exact Jacobian reuses the spin-resolved
+    χ̃ / K_Hxc / one-center operators already in _ConvergedUSPP (χ̃ block-
+    diagonal over spin except the shared-Fermi δμ; K_Hxc cross-spin)."""
     _check_supported(res)
-    if res.nspin != 1:
-        raise NotImplementedError("newton_polish: nspin=2 raw-map plumbing "
-                                  "not implemented (adjoint spin machinery "
-                                  "exists; the finisher is single-channel)")
     if res.hub_occ is not None:
         raise NotImplementedError("newton_polish: +U raw-map plumbing not "
                                   "implemented (the adjoint's +U response "
                                   "exists; the finisher's packed vector "
                                   "lacks the occupation block)")
+    nspin = res.nspin
     system = res.system
     grid = system.grid
     shape, n_pts = tuple(grid.shape), grid.n_points
@@ -73,27 +91,31 @@ def newton_polish(res: USPPResult, xc, *, tol: float = 1e-10, max_newton: int = 
     width = res.width
     # the raw map is evaluated through _scf_iteration directly (stage 3):
     # operators built once, orbital warm starts carried across Newton steps
-    ops = _build_iter_ops(system, xc, nspin=1, smearing=smearing,
+    ops = _build_iter_ops(system, xc, nspin=nspin, smearing=smearing,
                           width=width, batched=True)
-    coeffs = [[None] * ops.nk]
-    coeffs_b = [None]
+    coeffs = [[None] * ops.nk for _ in range(nspin)]
+    coeffs_b = [None] * nspin
 
-    rho = res.rho.detach().clone()
-    bec = [m.detach().clone() for m in res.rho_ij_atoms]
+    # per-spin state (nspin=1: a length-1 list; nspin=2: [↑, ↓])
+    rho_s = ([res.rho.detach().clone()] if nspin == 1
+             else [r.detach().clone() for r in res.rho_spin])
+    bec_s = ([[m.detach().clone() for m in res.rho_ij_atoms]] if nspin == 1
+             else [[m.detach().clone() for m in ch] for ch in res.rho_ij_atoms])
     hist_out = []
     it_out = None
     best = float("inf")
     stalls = 0
     with torch.no_grad():
         for step in range(1, max_newton + 1):
-            it_out = _scf_iteration(ops, [rho], [bec], coeffs, coeffs_b,
+            it_out = _scf_iteration(ops, rho_s, bec_s, coeffs, coeffs_b,
                                     None, diago_tol, 0)
-            f_rho = it_out["rho_out_s"][0]
-            f_bec = it_out["rho_ij_s"][0]
-            r_rho = (f_rho - rho).to(RDTYPE)
-            r_bec = [(a - b).real.to(RDTYPE) for a, b in
-                     zip(f_bec, bec, strict=True)]
-            r_vec = _pack(r_rho, r_bec)
+            r_rho_s = [(f - r).to(RDTYPE) for f, r in
+                       zip(it_out["rho_out_s"], rho_s, strict=True)]
+            r_bec_s = [[(a - b).real.to(RDTYPE) for a, b in
+                        zip(fbec, bec, strict=True)]
+                       for fbec, bec in
+                       zip(it_out["rho_ij_s"], bec_s, strict=True)]
+            r_vec = _pack(r_rho_s, r_bec_s)
             rn = float(torch.linalg.norm(r_vec))
             hist_out.append(rn)
             if verbose:
@@ -114,15 +136,25 @@ def newton_polish(res: USPPResult, xc, *, tol: float = 1e-10, max_newton: int = 
             best = min(best, rn)
 
             # Jacobian frozen at the CURRENT x: the iteration's orbitals
-            # diagonalize H[x], so they define χ̃ at x exactly
-            jac_res = dict(system=system, nspin=1, smearing=smearing,
-                           width=width, coeffs=coeffs[0],
-                           eigenvalues=it_out["eigs_s"][0],
-                           occupations=it_out["occ_s"][0],
-                           fermi=it_out["mu"], rho=rho, rho_ij_atoms=bec)
+            # diagonalize H[x], so they define χ̃ at x exactly. The frozen-state
+            # dict follows the shape _ConvergedUSPP / _window_uspp expect per
+            # nspin (flat per-k for nspin=1, per-spin, per-k for nspin=2).
+            rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
+            jac_res = dict(
+                system=system, nspin=nspin, smearing=smearing, width=width,
+                fermi=it_out["mu"], rho=rho_tot,
+                coeffs=(coeffs[0] if nspin == 1 else coeffs),
+                eigenvalues=(it_out["eigs_s"][0] if nspin == 1
+                             else it_out["eigs_s"]),
+                occupations=(it_out["occ_s"][0] if nspin == 1
+                             else it_out["occ_s"]),
+                rho_ij_atoms=(bec_s[0] if nspin == 1 else bec_s))
+            if nspin == 2:
+                jac_res["rho_spin"] = rho_s
             cs = _ConvergedUSPP(jac_res, xc)
             dpsi_warm = [[torch.zeros_like(c[:ns]) for c, ns in
-                          zip(cs.c_win[0], cs.n_solve[0], strict=True)]]
+                          zip(cs.c_win[isp], cs.n_solve[isp], strict=True)]
+                         for isp in range(nspin)]
 
             # inner solve: δ = r + χ̃(K δ), Anderson-accelerated — the
             # same fixed-point shape as the adjoint, on the forward side
@@ -130,15 +162,15 @@ def newton_polish(res: USPPResult, xc, *, tol: float = 1e-10, max_newton: int = 
             prev_d = prev_g = None
             hist_dd, hist_dg = [], []
             for _it in range(1, max_inner + 1):
-                d_rho, d_bec = _unpack(d, shape, n_pts, nbec)
-                v_sp = cs.k_hxc_grid([d_rho])
+                d_rho_s, d_bec_s = _unpack(d, shape, n_pts, nbec, nspin)
+                v_sp = cs.k_hxc_grid(d_rho_s)
                 d_ddd = cs.hvp_onecenter([[m.to(torch.complex128)
-                                           for m in d_bec]])
+                                           for m in ch] for ch in d_bec_s])
                 chi_rho, chi_bec, _ = cs.apply_chi0(
                     v_sp, d_ddd, dpsi_warm, cg_tol, cg_max_iter)
-                g_vec = r_vec + _pack(chi_rho[0].to(RDTYPE),
-                                      [m.real.to(RDTYPE)
-                                       for m in chi_bec[0]])
+                g_vec = r_vec + _pack(
+                    [cr.to(RDTYPE) for cr in chi_rho],
+                    [[m.real.to(RDTYPE) for m in ch] for ch in chi_bec])
                 g_res = g_vec - d
                 gn = float(torch.linalg.norm(g_res)) / max(
                     1.0, float(torch.linalg.norm(d)))
@@ -164,12 +196,25 @@ def newton_polish(res: USPPResult, xc, *, tol: float = 1e-10, max_newton: int = 
                     f"Newton inner solve stalled ({gn:.2e} after "
                     f"{max_inner} iterations)")
 
-            d_rho, d_bec = _unpack(d, shape, n_pts, nbec)
-            rho = rho + d_rho
-            bec = [b + m.to(b.dtype) for b, m in zip(bec, d_bec, strict=True)]
-    return replace(res, coeffs=coeffs[0], eigenvalues=it_out["eigs_s"][0],
-                   occupations=it_out["occ_s"][0], fermi=it_out["mu"],
-                   energies=it_out["energies"], becps=it_out["becps_s"][0],
-                   rho_out_spin=it_out["rho_out_s"], rho=rho,
-                   rho_ij_atoms=bec, newton=hist_out,
-                   converged=min(hist_out) < tol)
+            d_rho_s, d_bec_s = _unpack(d, shape, n_pts, nbec, nspin)
+            rho_s = [r + dr for r, dr in zip(rho_s, d_rho_s, strict=True)]
+            bec_s = [[b + m.to(b.dtype) for b, m in zip(bec, dbec, strict=True)]
+                     for bec, dbec in zip(bec_s, d_bec_s, strict=True)]
+
+    rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
+    out = dict(
+        coeffs=(coeffs[0] if nspin == 1 else coeffs),
+        eigenvalues=(it_out["eigs_s"][0] if nspin == 1 else it_out["eigs_s"]),
+        occupations=(it_out["occ_s"][0] if nspin == 1 else it_out["occ_s"]),
+        becps=(it_out["becps_s"][0] if nspin == 1 else it_out["becps_s"]),
+        fermi=it_out["mu"], energies=it_out["energies"],
+        rho_out_spin=it_out["rho_out_s"], rho=rho_tot,
+        rho_ij_atoms=(bec_s[0] if nspin == 1 else bec_s),
+        newton=hist_out, converged=min(hist_out) < tol)
+    if nspin == 2:
+        dvol = grid.volume / n_pts
+        dmag = rho_s[0] - rho_s[1]
+        out["rho_spin"] = rho_s
+        out["mag_total"] = float(dmag.sum() * dvol)
+        out["mag_abs"] = float(dmag.abs().sum() * dvol)
+    return replace(res, **out)
