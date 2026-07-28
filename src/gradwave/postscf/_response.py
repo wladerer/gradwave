@@ -5,7 +5,8 @@ re-implementing:
 
 - the damped (1 − χ₀K)⁻¹ Dyson fixed point (``dyson_fixed_point``),
 - the Hartree kernel and the f_xc Hessian-vector products of E_xc
-  (``hartree_kernel``, ``fxc_hvp``, ``fxc_hvp_spin``),
+  (``hartree_kernel``, ``fxc_hvp``, ``fxc_hvp_spin``,
+  ``fxc_hvp_noncollinear_nonmagnetic``),
 - the batched conduction-projected Sternheimer CG and its helpers
   (``cg_sternheimer``, ``pad_coeffs``, ``insulator_window``,
   ``sternheimer_shift``),
@@ -121,6 +122,33 @@ def fxc_hvp_spin(xc, ru0: torch.Tensor, rd0: torch.Tensor, grid,
         fu, fd = torch.autograd.grad(inner, (ru, rd))
     scale = grid.n_points / grid.volume
     return fu * scale, fd * scale
+
+
+def fxc_hvp_noncollinear_nonmagnetic(xc, rho0: torch.Tensor, grid,
+                                     w_r: torch.Tensor) -> torch.Tensor:
+    """f_xc·w at m⃗ ≡ 0 for a ``core.xc.noncollinear.NoncollinearXC``, in
+    physical units [eV]. ``rho0`` already includes any NLCC core (the same
+    caller convention as ``fxc_hvp``).
+
+    At the pinned nonmagnetic manifold the locally-collinear energy
+    (``core.xc.noncollinear.energy_with_grid``) reduces exactly to the
+    spin-restricted functional ``xc.collinear`` wraps (ρ± = ρ/2, up to the
+    O(m_eps) regularization), so this is the (ρ,ρ)-block-only noncollinear/SOC
+    counterpart of ``fxc_hvp`` — the screening kernel the fully-relativistic
+    dielectric response uses at m⃗ ≡ 0 (postscf.dielectric._dielectric_born_soc,
+    _k_hxc_soc). A nonzero moment needs the coupled (ρ, m⃗) Hessian-vector
+    product, which this does not provide.
+    """
+    from gradwave.core.xc.noncollinear import energy_with_grid
+
+    rho = rho0.detach().clone().requires_grad_(True)
+    m_zero = torch.zeros(3, *rho.shape, dtype=rho.dtype, device=rho.device)
+    with torch.enable_grad(), xc_eager():
+        e_xc = energy_with_grid(xc, rho, m_zero, grid)
+        (v_xc,) = torch.autograd.grad(e_xc, rho, create_graph=True)
+        inner = (v_xc * w_r.detach()).sum()
+        (fxc_w,) = torch.autograd.grad(inner, rho)
+    return fxc_w * (grid.n_points / grid.volume)
 
 
 def spin_sigma_triple(xc, r_u: torch.Tensor, r_d: torch.Tensor, g_cart):

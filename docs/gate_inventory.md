@@ -24,13 +24,14 @@ Regenerate the raw list with:
 grep -rn "raise NotImplementedError" src/gradwave --include=*.py
 ```
 
-Current count: **67** `raise NotImplementedError` sites, of which **4 are
+Current count: **66** `raise NotImplementedError` sites, of which **4 are
 abstract-method stubs** (interface contracts on base classes, not capability
-gaps) — see the last section. So **63 real capability gates** remain. (This PR
-added a brand-new code path — noncollinear/SOC forces, `postscf/forces.py`,
-previously absent entirely — which is why the site count doesn't simply drop
-by one even though a gap closed: the new path also gained one narrower,
-explicitly documented NLCC gate of its own; see Done/Open below.)
+gaps) — see the last section. So **62 real capability gates** remain. (The
+noncollinear/SOC forces PR added a brand-new code path, `postscf/forces.py`,
+previously absent entirely, gaining one narrower NLCC gate of its own; this PR
+then ungated the fully-relativistic dielectric/Born-charge path but added its
+own narrower magnetic-SOC and SOC+symmetry gates in its place — see Done/Open
+below for both.)
 
 ## Axis legend
 
@@ -73,12 +74,14 @@ explicitly documented NLCC gate of its own; see Done/Open below.)
 | ~~api.py:872~~ | SOC / NC | elastic constants (`run_elastic`) for noncollinear/spin-orbit runs | **removed, this PR** — a stale driver gate (the #152 pattern): `postscf.stress.stress` already differentiates the spinor strained energy (`_energy_strained_fr`, ungated in #103), the driver just never routed the SOC result to it. `run_elastic` now builds `NoncollinearXC`, sets the full-BZ / time-reversal per the magnetism rule, and folds C over the six strains. USPP/PAW spinor stress and DFT+U on the SOC path (#142) stay rejected. Oracle: `test_run_elastic_soc_matches_scalar` (fully-relativistic Si C == scalar-relativistic Si C to <3 GPa — the zero-SOC Si-valence limit) |
 | ~~calculator.py:575~~ | USPP/PAW nspin2 | nspin=2 through the ASE calculator on the USPP/PAW route | **removed, this PR** — a stale driver gate: `scf_uspp`, `paw_forces.forces_uspp`, and `paw_stress.stress_uspp` all thread nspin=2 (benchmarked in #150). `_calculate_uspp` now resolves the spin channel via `_resolve_spin` (exactly as the NC path does), passes nspin/start_mag through, uses the spin-matched `_make_xc(nspin)`, and reports `magmom`. Oracle: `test_calculator_uspp_nspin2_matches_direct_scf` (FM O2 PAW: calculator == direct `scf_uspp`, energy + moment bit-for-bit) |
 | ~~api.py:970~~ (nspin=2) | nspin2 | supercell phonons (`run_phonons`) for collinear nspin=2 | **removed, this PR** — a stale driver gate: the FD force fold calls `postscf.forces.forces`, which already sums per spin channel (#45); the driver hardcoded the nspin=1 SCF. `run_phonons` now threads nspin/start_mag/tot_magnetization into the per-displacement SCF and the NLCC-aware `xc` into `force_constants_home`. Noncollinear/spinor supercell phonons stay rejected; the USPP/PAW fold (api.py:975) is still open. Oracle: `test_run_phonons_nspin2_matches_nspin1` (nonmagnetic Si: nspin=2 frequencies == nspin=1, <1 cm⁻¹) |
+| ~~postscf/dielectric.py:115~~ | SOC/NC-spinor | dielectric response / Born effective charges were scalar-relativistic only | **removed, this PR** — `_dielectric_born_soc` covers the fully-relativistic (spin-orbit, `system.is_fr`) spinor path in the NONMAGNETIC manifold (m⃗ ≡ 0). Structurally it is ONE channel of the existing `_dielectric_born_spin` (spinor bands hold f=1 each, and a single Sternheimer loop already sums the full electron count, so the same f=1 prefactors — 8π not 16π on ε, factor 2 not 4 on the density/Born nonlocal terms — apply directly with no extra channel sum). Two genuinely new pieces: (1) ∂H/∂k on a spinor (`_dhdk_psi_soc`) — the kinetic term acts on each doubled-axis component independently, and the nonlocal FD-in-k rebuilds the j-resolved SOC projectors at k±dk via `_so_projectors_at`, which reuses `core.spinor_proj.strained_so_projector_cols` (the strain-graph primitive `postscf.stress` already has) as a plain per-k/position evaluator — for both the FD-in-k RHS (dkvec≠0, pos fixed) and the position-differentiable Born-charge nonlocal term (dkvec=0, pos requiring grad), avoiding any new projector-assembly code; (2) the screening kernel `_k_hxc_soc`, built from a new shared primitive `postscf._response.fxc_hvp_noncollinear_nonmagnetic` — the noncollinear (locally-collinear) XC's f_xc Hessian-vector product pinned at m⃗ ≡ 0, which reduces exactly to the spin-restricted `fxc_hvp` there. `cg_sternheimer` needed NO changes — it only reads `bk.t`, so a `SimpleNamespace(t=torch.cat([bk.t, bk.t]))` shim is the only "generalization" required, confirming the task's premise that the Sternheimer machinery is already reusable. Magnetic SOC (m⃗ ≠ 0, needing the full coupled (ρ, m⃗) K_Hxc HVP) and IBZ symmetry (the magnetic-group polar-vector fold) remain gated with their own explicit raises inside `_dielectric_born_soc`. Oracle: `test_dielectric_soc_zero_splitting_matches_scalar` — a SYNTHETIC fully-relativistic pseudopotential built by duplicating each l≥1 scalar-relativistic beta into degenerate j=l±1/2 channels with identical radial data/D (a standard spin-angular completeness identity then makes the FR nonlocal operator EXACTLY the doubled scalar operator, zero SOC splitting by construction, verified independently to ~1e-13 on the SCF total energy) reproduces the scalar-relativistic ε∞/Z* to ~1e-9 (solver precision, not merely "small SOC") + `test_dielectric_soc_rejects_magnetic` |
 
 ## Open — nspin=2 (next tranches)
 
 | file:line | axis | operation blocked |
 |---|---|---|
-| postscf/dielectric.py:121 | nspin2 + symmetry | dielectric response with IBZ symmetry (nspin=2 magnetic-group vector fold) |
+| postscf/dielectric.py:169 | nspin2 + symmetry | dielectric response with IBZ symmetry (nspin=2 magnetic-group vector fold) |
+| postscf/dielectric.py:627 | SOC/NC-spinor + symmetry | dielectric response with IBZ symmetry (spin-orbit magnetic-group polar-vector fold) |
 
 ## Open — USPP/PAW response & error operators (lower-priority tranche)
 
@@ -160,7 +163,7 @@ this slice.
 | scf/uspp_noncollinear.py:200 | SOC/NC-spinor + U | DFT+U on the noncollinear USPP/PAW path (the norm-conserving spinor path has it — see Done above) |
 | postscf/forces.py:229 (`_forces_noncollinear`) | NLCC | NLCC core-correction force on the noncollinear/SOC path (new gate — forces themselves are now supported, see Done above, and PR #165 already closed the analogous +U SOC stress gate; no NLCC-free Hubbard-eligible fully-relativistic pseudo exists in the fixture set either, which is why the Stage-2 +U force test also stays clear of this) |
 | checkpoint.py:76 | SOC/NC-spinor | checkpointing a `scf_uspp_noncollinear` result (no restart consumer) |
-| postscf/dielectric.py:115 | SOC | dielectric response scalar-relativistic only |
+| postscf/dielectric.py:631 | SOC/NC-spinor | magnetic (m⃗ ≠ 0) fully-relativistic dielectric response — needs the coupled (ρ, m⃗) K_Hxc Hessian-vector product; the nonmagnetic case was ungated this PR (see Done above) |
 | postscf/discretization_error.py:841 | SOC/NC-spinor | force-error estimate NC-collinear only (spinor force terms unassembled) |
 | postscf/discretization_error.py:1010 | SOC/NC-spinor + symmetry | noncollinear disc. error requires `use_symmetry=False` |
 
@@ -189,7 +192,7 @@ guards or entry-point routing, not capability gaps:
 | symmetry.py:180,297 | symmetry | shifted meshes not reduced here (caller reduces unshifted) |
 | postscf/dispersion.py:134 | data | D3(BJ) reference C6 not vendored for requested element(s) |
 | postscf/dispersion_d4.py:171 | data | D4(BJ) reference data not vendored for requested element(s) |
-| postscf/dielectric.py:113 | validation | dielectric response: nspin must be 1 or 2 |
+| postscf/dielectric.py:163 | validation | dielectric response: nspin must be 1 or 2 |
 
 ## Not gates — abstract-method stubs (interface contracts)
 
