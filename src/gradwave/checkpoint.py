@@ -8,7 +8,11 @@ and becsum); pass wavefunctions=True to archive them.
 
 Restart consumes exactly what the solvers' start_from reads — the FFT
 grid shape and volume, ρ (per spin), and for USPP/PAW the becsum — so a
-checkpoint restarts either formalism on the same grid.
+checkpoint restarts either formalism on the same grid. The non-collinear
+USPP/PAW spinor path (scf_uspp_noncollinear) carries both halves at once —
+the magnetization field m⃗ and the 4-channel becsum — and restarts through
+its own start_from= (unlike the norm-conserving spinor path, which has no
+density-level warm start and only re-seeds atomic moments via nc_mag_seed).
 """
 
 from __future__ import annotations
@@ -72,10 +76,6 @@ def save_checkpoint(res, path, *, wavefunctions: bool = False) -> Path:
             kind = "noncollinear"
         else:
             kind = "nc"
-    if kind == "uspp_noncollinear":
-        raise NotImplementedError(
-            "checkpointing a scf_uspp_noncollinear result is not supported "
-            "(no restart path consumes its (ρ, m⃗, 4-channel becsum) state)")
     system = get("system")
     grid = system.grid
     e = get("energies")
@@ -124,6 +124,18 @@ def save_checkpoint(res, path, *, wavefunctions: bool = False) -> Path:
         payload["m"] = _cpu(get("m"))
         payload["mag_vec"] = [float(x) for x in get("mag_vec")]
         payload["mag_abs"] = float(get("mag_abs", 0.0) or 0.0)
+    if kind == "uspp_noncollinear":
+        # both halves at once: the spinor magnetization field (same as the
+        # "noncollinear" branch above) AND the 4-channel (n, mx, my, mz)
+        # one-center becsum (the USPP/PAW analogue of "uspp"'s rho_ij_atoms).
+        # Restart consumes both directly (scf_uspp_noncollinear's own
+        # start_from=, not nc_mag_seed) since m⃗ is already a full-grid field
+        # here rather than the atomic mag_vec_init seed the norm-conserving
+        # spinor loop takes.
+        payload["m"] = _cpu(get("m"))
+        payload["mag_vec"] = [float(x) for x in get("mag_vec")]
+        payload["mag_abs"] = float(get("mag_abs", 0.0) or 0.0)
+        payload["rho_ij_chan"] = _cpu_tree(get("rho_ij_chan"))
     if wavefunctions:
         payload["coeffs"] = _cpu_tree(get("coeffs"))
 
@@ -212,6 +224,12 @@ def as_start_from(payload: dict) -> dict:
     }
     if payload["kind"] == "uspp":
         out["rho_ij_atoms"] = payload["rho_ij_atoms"]
+    elif payload["kind"] == "uspp_noncollinear":
+        # feeds scf_uspp_noncollinear's own start_from= (not nc_mag_seed —
+        # unlike the norm-conserving spinor loop, m⃗ is already a full-grid
+        # field here so it restarts directly, same as rho above)
+        out["m"] = payload["m"]
+        out["rho_ij_chan"] = payload["rho_ij_chan"]
     elif payload.get("coeffs") is not None:
         out["coeffs"] = payload["coeffs"]  # NC orbital reuse when archived
     return out

@@ -227,6 +227,63 @@ def test_paw_checkpoint_roundtrip_and_restart(tmp_path):
     assert res2["n_iter"] < res["n_iter"]
 
 
+@pytest.mark.slow
+def test_uspp_noncollinear_checkpoint_roundtrip_and_restart(tmp_path):
+    """Checkpoint round trip + restart for scf_uspp_noncollinear (USPP/PAW
+    spinor): both halves of its state — the magnetization field m⃗ and the
+    4-channel (n, mx, my, mz) becsum — must archive and restart together,
+    mirroring test_paw_checkpoint_roundtrip_and_restart's collinear USPP
+    pattern above."""
+    from gradwave.checkpoint import (
+        as_start_from,
+        load_checkpoint,
+        save_checkpoint,
+    )
+    from gradwave.core.xc.spin import LSDA_PW92
+    from gradwave.pseudo.upf_paw import parse_upf_paw
+    from gradwave.scf.uspp import setup_uspp
+    from gradwave.scf.uspp_noncollinear import scf_uspp_noncollinear
+
+    torch.set_num_threads(8)
+    paw = parse_upf_paw(FIX / "pseudos" / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
+
+    def build():
+        return setup_uspp(SI_CELL, SI_POS, [0, 0], [paw], ecut=20 * RY,
+                          kmesh=(2, 2, 2), nbands=8, use_symmetry=False)
+
+    mag_seed = [[0.0, 0.0, 0.3], [0.0, 0.0, 0.3]]
+    res = scf_uspp_noncollinear(build(), LSDA_PW92(), mag_seed,
+                                smearing="gaussian", width=0.05,
+                                etol=1e-8, rhotol=1e-7, verbose=False)
+    assert res.converged
+    f_ref = float(res.energies.free_energy)
+
+    ck = tmp_path / "checkpoint.pt"
+    save_checkpoint(res, ck)  # default: no wavefunctions
+    payload = load_checkpoint(ck)
+    assert payload["kind"] == "uspp_noncollinear"
+    assert "coeffs" not in payload
+    assert abs(payload["energies_eV"]["free_energy"] - f_ref) < 1e-10
+
+    # the (ρ, m⃗, becsum) state round-trips bit-for-bit through save/load
+    assert torch.equal(payload["rho"], res.rho.cpu())
+    assert torch.equal(payload["m"], res.m.cpu())
+    for c4 in range(4):
+        for a in range(len(res.rho_ij_chan[c4])):
+            assert torch.equal(payload["rho_ij_chan"][c4][a],
+                               res.rho_ij_chan[c4][a].cpu())
+    assert payload["mag_vec"] == [pytest.approx(x) for x in res.mag_vec]
+
+    # restart: reproduces the same converged free energy, far fewer iterations
+    res2 = scf_uspp_noncollinear(build(), LSDA_PW92(), mag_seed,
+                                 smearing="gaussian", width=0.05,
+                                 etol=1e-8, rhotol=1e-7, verbose=False,
+                                 start_from=as_start_from(payload))
+    assert res2.converged
+    assert abs(float(res2.energies.free_energy) - f_ref) < 1e-6
+    assert res2.n_iter < res.n_iter
+
+
 @pytest.mark.standard
 def test_cli_end_to_end_nc(tmp_path):
     from gradwave.cli import main
