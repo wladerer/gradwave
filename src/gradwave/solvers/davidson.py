@@ -47,6 +47,40 @@ def _eigh_subspace(s: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.linalg.eigh(s)
 
 
+# Column count at/below which a CUDA batched tall-skinny QR (the (nk, npw,
+# cols) reduced QR that orthonormalizes new Davidson directions, and, on
+# restart, re-orthonormalizes the Ritz block) is offloaded to CPU LAPACK. Found
+# while investigating whether CUDA-graph capture could speed up a Davidson
+# round (docs/manual/performance.md, "What does not help"): a graphed replay
+# of the round's Rayleigh-Ritz/expansion math is bit-identical to eager at
+# 1.0x -- no launch-overhead gap anywhere in the round, apply included -- but
+# this QR call, isolated, was the single biggest cost in the round on an RTX
+# 3050, BIGGER than the two-FFT Hamiltonian apply next to it (measured: ~3.9 ms
+# vs ~2.3 ms for a diamond-C, 50 Ry, nk=8, npw=465, cols=8 round). A D2H + CPU
+# LAPACK QR + H2D round trip runs that same shape in ~0.3 ms, a >10x win, for
+# the same reason issue #133 CPU-offloaded eigh: cuSOLVER's batched
+# geqrf/orgqr pays a fixed per-call tax that swamps a tiny problem, and the
+# tensors here are a few MB. A parameter sweep (nk in 8..112, npw in
+# 465..2500, cols in 8..64) shows CPU offload is a clear-to-break-even win at
+# cols<=16 (worst case measured ratio 0.98x, typically 2-12x) and mixed
+# (sometimes GPU-favored) above that -- capped here at the safe boundary.
+# Davidson's own n_add is bounded by nb, comfortably under 16 for the systems
+# in this repo's benchmark battery; wider blocks (LOBPCG's stacked [X,W,P],
+# CheFSI's buffered block) fall through to the GPU unchanged, same as today.
+_QR_CPU_MAX_COLS = 16
+
+
+def _qr_offload(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reduced QR of x (..., rows, cols), CPU-offloaded on CUDA for small cols.
+
+    Returns (q, r) on x.device. Physics-neutral: LAPACK and cuSOLVER QR agree
+    to fp64 round-off, well inside the orthonormalization's own tolerance."""
+    if x.is_cuda and x.shape[-1] <= _QR_CPU_MAX_COLS:
+        q, r = torch.linalg.qr(x.cpu(), mode="reduced")
+        return q.to(x.device), r.to(x.device)
+    return torch.linalg.qr(x, mode="reduced")
+
+
 @dataclass
 class DavidsonResult:
     eigenvalues: torch.Tensor  # (nb,) ascending [eV]
@@ -173,7 +207,7 @@ def _orthonormalize_b(
         v = v + 1e-10 * jitter[:, : v.shape[1]]
     v = project(v * mask[:, None, :])
     if jitter is not None:
-        q, _ = torch.linalg.qr(v.transpose(-1, -2), mode="reduced")
+        q, _ = _qr_offload(v.transpose(-1, -2))
         return q.transpose(-1, -2)
     row_norm = torch.linalg.norm(v, dim=-1, keepdim=True).real
     degenerate = row_norm < 1e-8
@@ -182,7 +216,7 @@ def _orthonormalize_b(
         noise = torch.randn(*v.shape, 2, generator=gen, dtype=torch.float64)
         jit = torch.view_as_complex(noise).to(v.device).to(v.dtype)
         v = project((v + degenerate * jit) * mask[:, None, :])
-    q, _ = torch.linalg.qr(v.transpose(-1, -2), mode="reduced")
+    q, _ = _qr_offload(v.transpose(-1, -2))
     return q.transpose(-1, -2)
 
 
@@ -258,8 +292,23 @@ def davidson_batched(
     2.37 vs 2.16) — the binding constraint at these sizes is the eager-
     mode host ISSUING dozens of small kernels per round, not the syncs
     riding on it, and the delayed expansion count does extra H-apply
-    work. Default off; the path is kept as the substrate for a CUDA-
-    graphs round capture, which is the real fix."""
+    work. Default off.
+
+    UPDATE (2026-07-28): the CUDA-graphs round capture this docstring used to
+    recommend as "the real fix" was tried and does NOT help — see
+    docs/manual/performance.md, "What does not help". A graphed replay of a
+    whole round's post-eigh math (this sync_free skeleton is exactly the
+    branch-free substrate a capture needs) reproduced eager output bit-for-bit
+    but ran at 1.0x eager speed; isolating the pure-GPU remainder (eigh and QR
+    excluded) still showed no gap. Kernels in this loop are already
+    back-to-back on this hardware, extending the same finding an earlier probe
+    made for the Hamiltonian apply alone. The actual outlier the same
+    investigation surfaced was `torch.linalg.qr` on the (nk, npw, cols)
+    expansion-direction shape, which cuSOLVER runs ~10x slower than a CPU
+    LAPACK round trip for cols this small — bigger than the apply itself. That
+    is fixed directly (`_qr_offload`, used by `_orthonormalize_b`), the same
+    CPU-offload pattern issue #133 used for the subspace eigh; it needs no
+    flag and is not conditioned on sync_free."""
     nk, nb, m = x0.shape
     max_dim = min(max_dim_factor * nb, int(mask.sum(dim=1).min()))
     rdtype = x0.real.dtype  # float32 in the mixed-precision draft phase, else float64
@@ -364,7 +413,7 @@ def davidson_batched(
             # ~1 eV energy jump on CUDA). Kill the drift with a QR of x and
             # transform hx by the same triangular factor: x_old = Rᵀ·x_new ⇒
             # hx_new = (Rᵀ)⁻¹·hx_old. Cost: one (nb × nb) triangular solve.
-            q, rmat = torch.linalg.qr(x.transpose(-1, -2), mode="reduced")
+            q, rmat = _qr_offload(x.transpose(-1, -2))
             x_orth = q.transpose(-1, -2)
             hx_orth = torch.linalg.solve_triangular(
                 rmat.transpose(-1, -2), hx, upper=False
