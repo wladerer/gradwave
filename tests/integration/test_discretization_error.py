@@ -135,6 +135,45 @@ def test_nspin2_nonmagnetic_limit_matches_nspin1():
     assert abs(e1.denergy - e2.denergy) < 1e-8
 
 
+def test_nspin2_dyson_nonmagnetic_limit_matches_nspin1():
+    """nspin=2 Dyson dressing at zero moment reproduces the nspin=1 dressing.
+
+    The coarse-space Dyson refinement runs a spin-resolved fixed point (per-spin
+    χ₀ coupled through K_Hxc^{σσ'}); a nonmagnetic insulator splits into two
+    identical half-filled channels, so the spin-summed dressed density error must
+    match the single-channel dressing. Pins the spin χ₀/K_Hxc plumbing against
+    the tested nspin=1 path (the two use different χ₀ solvers -- batched vs per-k
+    Sternheimer -- so they agree to the CG/fixed-point tolerance, not round-off).
+    Si is an insulator (occ = 2 / 1-per-spin), which the χ₀ solve requires.
+    """
+    torch.set_num_threads(4)
+    upf = parse_upf(FIX / "Si_ONCV_PBE-1.2.upf")
+    cell, pos = _si_cell()
+
+    def make():
+        return setup_system(cell, pos, [0, 0], [upf], ecut=12 * RY,
+                            kmesh=(2, 2, 2), use_symmetry=False)
+
+    kw = dict(smearing="none", etol=1e-9, rhotol=1e-8, verbose=False)
+    r1 = scf(make(), PBE(), **kw)
+    r2 = scf(make(), SpinPBE(), nspin=2, start_mag=[0.0, 0.0],
+             tot_magnetization=0.0, **kw)
+
+    with pytest.warns(UserWarning, match="unvalidated"):
+        e1 = estimate_density_error(r1, ecut_large=30 * RY, dyson=True, xc=PBE())
+        e2 = estimate_density_error(r2, ecut_large=30 * RY, dyson=True,
+                                    xc=SpinPBE())
+
+    # the dressing actually moved the density (a real signal to match)
+    assert float((e1.drho - e1.drho_first_order).abs().max()) > 1e-5
+    scale = float(e1.drho.abs().max())
+    # agreement is at the shared Dyson fixed-point tolerance (dyson_tol=1e-6),
+    # since the two paths use different χ₀ solvers (batched vs per-k Sternheimer)
+    assert float((e2.drho - e1.drho).abs().max()) < 1e-5 * scale   # spin path == nspin=1
+    # first-order channel is unchanged and identical (already spin-summed exact)
+    assert float((e2.drho_first_order - e1.drho_first_order).abs().max()) < 1e-8
+
+
 def test_symmetric_force_error_matches_full_bz():
     """IBZ + symmetrize reproduces the full-BZ force error and is invariant."""
     torch.set_num_threads(4)
