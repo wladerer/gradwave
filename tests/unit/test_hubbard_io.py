@@ -73,6 +73,19 @@ def test_hubbard_j_defaults_to_zero(tmp_path):
     assert inp.hubbard.manifolds[0].j == 0.0
 
 
+def test_noncollinear_hubbard_parses(tmp_path):
+    """DFT+U on the noncollinear (spinor) path — the collinear-only gate was
+    removed once the 2×2 spin-block occupation matrix was wired
+    (core.hubbard.occupation_matrices_noncollinear); this is the schema-level
+    ungate check (the SCF-level oracle is below)."""
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _base(
+        "noncollinear: true\nnonmagnetic: true\n"
+        "hubbard:\n  - {species: C, l: 1, u: 4.0}\n")))
+    assert inp.hubbard.enabled and inp.noncollinear
+
+
 @pytest.mark.parametrize("extra, needle", [
     ("hubbard:\n  - {species: Ni, l: 2, u: 4.0}\n", "not in the structure"),
     ("hubbard:\n  - {species: C, l: 5, u: 4.0}\n", "hubbard.l must be"),
@@ -82,8 +95,6 @@ def test_hubbard_j_defaults_to_zero(tmp_path):
     ("hubbard:\n  - {species: C, l: 1}\n", "needs species, l and u"),
     ("hubbard: {species: C, l: 1, u: 4.0}\n", "must be a list"),
     ("xc: pbe0\nhubbard:\n  - {species: C, l: 1, u: 4.0}\n", "cannot be combined"),
-    ("noncollinear: true\nhubbard:\n  - {species: C, l: 1, u: 4.0}\n",
-     "collinear only"),
 ])
 def test_hubbard_validation_errors(tmp_path, extra, needle):
     from gradwave.inputs import InputError, load_input
@@ -108,6 +119,41 @@ def test_u_zero_reproduces_plain_pbe_bit_for_bit(tmp_path):
     (tmp_path / "in.yaml").unlink()
     u0 = api.run_scf(load_input(_write(
         tmp_path, _base("hubbard:\n  - {species: C, l: 1, u: 0.0}\n"))),
+        verbose=False)
+
+    assert float(u0.energies.hubbard) == 0.0
+    assert float(plain.energies.total) == float(u0.energies.total)
+    assert float(plain.energies.free_energy) == float(u0.energies.free_energy)
+    assert torch.equal(plain.eigenvalues, u0.eigenvalues)
+
+
+def test_noncollinear_u_zero_reproduces_plain_bit_for_bit(tmp_path):
+    """The noncollinear (spinor) +U wiring end to end through the input
+    surface: at U=0 the D-matrix is exactly zero at every iteration (uj=0
+    multiplies out the occupation matrix identically), so the whole SpinorH
+    +U term adds an exact zero and the trajectory is bit-for-bit identical to
+    the plain noncollinear SCF — mirrors the collinear oracle above.
+
+    Like the collinear oracle, the reference run needs `symmetry: false`
+    explicitly: for a nonmagnetic (m≡0) noncollinear run `symmetry` otherwise
+    DEFAULTS to true (Kramers keeps the full crystal symmetry), but +U forces
+    it off regardless of the input (build_system's `not hubbard` term) so the
+    occupation matrix isn't built from a star-averaged IBZ mesh. Comparing a
+    3-k-point IBZ-reduced `plain` against an 8-k-point full-mesh `u0` (an
+    earlier version of this test did exactly that) is not a U=0 oracle at
+    all — it is two different k-point treatments of the same crystal, which
+    do agree physically but not to the last bit (~1e-8 eV, a different
+    floating-point summation order, not a wiring bug)."""
+    import torch
+
+    from gradwave import api
+    from gradwave.inputs import load_input
+
+    nc = "noncollinear: true\nnonmagnetic: true\nsymmetry: false\n"
+    plain = api.run_scf(load_input(_write(tmp_path, _base(nc))), verbose=False)
+    (tmp_path / "in.yaml").unlink()
+    u0 = api.run_scf(load_input(_write(
+        tmp_path, _base(nc + "hubbard:\n  - {species: C, l: 1, u: 0.0}\n"))),
         verbose=False)
 
     assert float(u0.energies.hubbard) == 0.0

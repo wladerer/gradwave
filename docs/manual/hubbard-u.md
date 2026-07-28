@@ -80,15 +80,36 @@ hubbard:
 ```
 
 `species` is an element symbol (the correction hits every atom of it), `l` the
-shell (2 = d, 3 = f), `u`/`j` the Hubbard and Hund parameters in eV. +U is
-collinear only (`nspin: 1` or `2`) and always runs on the full spatial Brillouin
-zone: an IBZ-folded mesh under-counts the occupation matrix, so `symmetry` is
-forced off whenever a `hubbard` block is present (time reversal is kept, since
-$n$ at $-k$ is $n^*$ and $|n_{mm'}|^2$ is invariant). Setting `u: 0` everywhere
-is inert, reproducing the plain-functional run to the last bit.
+shell (2 = d, 3 = f), `u`/`j` the Hubbard and Hund parameters in eV. +U always
+runs on the full spatial Brillouin zone: an IBZ-folded mesh under-counts the
+occupation matrix, so `symmetry` is forced off whenever a `hubbard` block is
+present (time reversal is kept, since $n$ at $-k$ is $n^*$ and $|n_{mm'}|^2$ is
+invariant). Setting `u: 0` everywhere is inert, reproducing the plain-functional
+run to the last bit.
 
-Combining `hubbard` with a noncollinear/spin-orbit run or a hybrid `xc` is
-rejected at load: neither +U path is wired for those yet.
++U also runs on the norm-conserving **noncollinear/spin-orbit** spinor path
+(`noncollinear: true`, with or without `nonmagnetic: true` — fully-relativistic
+pseudos included, since the +U term is orthogonal to the SOC nonlocal term).
+There the per-orbital occupation "matrix" generalizes to a 2×2 spin block
+$N^{I}_{(\sigma m),(\sigma' m')} = \sum_{kv} w_{kv} \langle\phi^I_m|\psi_{kv}^\sigma\rangle
+\langle\psi_{kv}^{\sigma'}|\phi^I_{m'}\rangle$ (stack the composite $(\sigma, m)$
+index into one $2n_\text{orb}$-dimensional matrix per site), and the Dudarev
+trace $E_U = \sum_I \frac{U_\text{eff}}{2}\operatorname{Tr}[N(1-N)]$ carries over
+unchanged — it reduces exactly to the plain collinear formula above when the
+spinor is purely up- or down-polarized with no spin canting.
+`core.hubbard.occupation_matrices_noncollinear`/`hubbard_dmatrix_noncollinear`
+build $N$/$D$; `scf.noncollinear.scf_noncollinear` takes the same `hubbard=`
+kwarg as the collinear `scf`. This is the SCF/energy path only — +U forces and
+stress on the noncollinear path are not implemented yet (they stay gated;
+see `postscf/forces.py`/`stress.py`).
+
+The noncollinear **USPP/PAW** SCF (`scf.uspp_noncollinear.scf_uspp_noncollinear`)
+does not have +U wired at all yet (a `hubbard=` argument there raises
+`NotImplementedError`); use the norm-conserving noncollinear path above, or the
+collinear USPP/PAW path for a +U ultrasoft/PAW run.
+
+Combining `hubbard` with a hybrid `xc` is rejected at load: the hybrid Fock SCF
+has no +U hook.
 
 ## Forces and stress with +U
 

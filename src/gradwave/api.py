@@ -242,6 +242,9 @@ def _run_scf_noncollinear(inp: Input, system, verbose: bool):
 
     # NC SCF requires a real smearing scheme (spinor bands hold one electron)
     smtype = inp.smearing.type if inp.smearing.type != "none" else "gaussian"
+    # DFT+U: noncollinear/spin-orbit +U (the 2×2 spin-block occupation matrix,
+    # core.hubbard) — same manifold list the collinear/USPP paths take.
+    manifolds = _hubbard_manifolds(inp)
     return scf_noncollinear(
         system, xc, mag_vec_init=mag_vec_init,
         smearing=smtype, width=inp.smearing.width,
@@ -250,6 +253,7 @@ def _run_scf_noncollinear(inp: Input, system, verbose: bool):
         mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
         diago_tol=inp.scf.diago_tol, verbose=verbose,
         nonmagnetic=inp.nonmagnetic,
+        hubbard=manifolds,
     )
 
 

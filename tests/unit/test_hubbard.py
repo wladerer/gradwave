@@ -16,10 +16,12 @@ from gradwave.core.hubbard import (
     HubbardManifold,
     build_hubbard_projectors,
     hubbard_dmatrix,
+    hubbard_dmatrix_noncollinear,
     hubbard_energy,
     hubbard_projectors,
     manifold_radial,
     occupation_matrices,
+    occupation_matrices_noncollinear,
 )
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import setup_system
@@ -120,3 +122,71 @@ def test_hubbard_force_gradcheck():
 
     pos = system.positions.clone().requires_grad_(True)
     assert torch.autograd.gradcheck(e_u, (pos,), atol=1e-6, rtol=1e-4)
+
+
+def test_occupation_matrix_noncollinear_reduces_to_collinear_limit():
+    """The 2×2 spin-block noncollinear occupation matrix N — with the down
+    spinor component identically zero (the collinear limit: purely up-polarized,
+    no spin canting) — must reduce EXACTLY to the plain collinear n^up_mm':
+    N↑↑ = n^up, N↓↓ = N↑↓ = N↓↑ = 0. This is the primary self-oracle for the
+    noncollinear +U generalization (core/hubbard.py's noncollinear docstring)."""
+    torch.manual_seed(2)
+    se = parse_upf(FIX / "pseudos" / "PD_Se_FR.upf")
+    system = setup_system(9.0 * np.eye(3), np.zeros((1, 3)), [0], [se],
+                          ecut=25 * RY, kmesh=(1, 1, 1))
+    U, J = 5.0, 0.8
+    hub = build_hubbard_projectors(system, [HubbardManifold(0, l=2, u=U, j=J)])
+    q = hubbard_projectors(hub, system.positions)
+    dev = system_device(system)
+    npw = system.batch.npw_max
+    nk, nb = 1, 6
+    coeffs_up = torch.randn(nk, nb, npw, dtype=torch.complex128).to(dev)
+    coeffs_up = coeffs_up * system.batch.mask[:, None, :]
+    coeffs_dn = torch.zeros_like(coeffs_up)  # collinear limit: no down component
+    occ = torch.rand(nk, nb, dtype=torch.float64).to(dev)
+    kw = torch.ones(nk, dtype=torch.float64).to(dev)
+
+    mats_up = occupation_matrices(q, coeffs_up, occ, kw, hub.sites)
+    mats_nc = occupation_matrices_noncollinear(q, coeffs_up, coeffs_dn, occ, kw,
+                                               hub.sites)
+    n_up, n_nc = mats_up[0], mats_nc[0]
+    dim = n_up.shape[0]
+    assert n_nc.shape == (2 * dim, 2 * dim)
+    assert torch.allclose(n_nc, n_nc.conj().T, atol=1e-12)  # Hermitian
+
+    n_uu = n_nc[:dim, :dim]
+    n_ud = n_nc[:dim, dim:]
+    n_du = n_nc[dim:, :dim]
+    n_dd = n_nc[dim:, dim:]
+    assert torch.allclose(n_uu, n_up, atol=1e-12)  # up-up block == collinear n^up
+    assert torch.allclose(n_ud, torch.zeros_like(n_ud), atol=1e-12)
+    assert torch.allclose(n_du, torch.zeros_like(n_du), atol=1e-12)
+    assert torch.allclose(n_dd, torch.zeros_like(n_dd), atol=1e-12)
+
+    # Dudarev E_U: the empty down block contributes Tr[0·(1−0)] = 0, so the
+    # noncollinear trace collapses to the single occupied (up) channel — the
+    # SAME hubbard_energy() function, unmodified, computes both.
+    e_up = hubbard_energy(mats_up, hub.sites)
+    e_nc = hubbard_energy(mats_nc, hub.sites)
+    assert abs(float(e_nc) - float(e_up)) < 1e-12
+
+    # D-matrix: the up-up block reduces to the collinear D; the down-down
+    # block is uj·½I (nonzero even though N_dd=0 — the Dudarev "empty
+    # manifold" shift is part of the potential, not the energy); the
+    # off-diagonal spin blocks vanish (no spin-mixing potential when N is
+    # block-diagonal).
+    d_up = hubbard_dmatrix([n_up], hub.sites, hub.nproj, dev)
+    d_nc = hubbard_dmatrix_noncollinear(mats_nc, hub.sites, hub.nproj, dev)
+    d_nc_blk = d_nc.reshape(2 * hub.nproj, 2 * hub.nproj)
+    st = 0  # single site starting at column 0
+    d_uu = d_nc_blk[st:st + dim, st:st + dim]
+    d_ud = d_nc_blk[st:st + dim, hub.nproj + st:hub.nproj + st + dim]
+    d_du = d_nc_blk[hub.nproj + st:hub.nproj + st + dim, st:st + dim]
+    d_dd = d_nc_blk[hub.nproj + st:hub.nproj + st + dim,
+                    hub.nproj + st:hub.nproj + st + dim]
+    assert torch.allclose(d_uu, d_up, atol=1e-12)
+    assert torch.allclose(d_ud, torch.zeros_like(d_ud), atol=1e-12)
+    assert torch.allclose(d_du, torch.zeros_like(d_du), atol=1e-12)
+    uj = U - J
+    assert torch.allclose(d_dd, uj * 0.5 * torch.eye(dim, dtype=torch.complex128,
+                                                      device=dev), atol=1e-12)

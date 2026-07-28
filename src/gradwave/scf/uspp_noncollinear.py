@@ -188,10 +188,20 @@ def scf_uspp_noncollinear(
     bec_step_scale: float = 0.4,
     diago_tol: float = 1e-9,
     verbose: bool = True,
+    hubbard=None,  # list[core.hubbard.HubbardManifold] — NOT YET WIRED here;
+    # see the NotImplementedError below. The norm-conserving spinor path
+    # (scf.noncollinear.scf_noncollinear) has the 2×2 spin-block +U machinery;
+    # USPP/PAW noncollinear +U (the generalized eigenproblem + S-metric becp,
+    # and the PAW on-site 2×2 becsum) is a separate follow-up.
 ) -> USPPNCResult:
     if getattr(xc, "needs_gradient", False):
         raise NotImplementedError(
             "non-collinear USPP/PAW is LDA-only (the on-site NC XC is LDA-only)")
+    if hubbard:
+        raise NotImplementedError(
+            "DFT+U (hubbard) on the non-collinear USPP/PAW path is not "
+            "implemented; the norm-conserving noncollinear path "
+            "(scf.noncollinear.scf_noncollinear) supports it")
     # Magnetic-symmetry systems (setup_uspp(..., magmoms=...)) carry a
     # MagneticSymmetrizer + MagneticBecsumSymmetrizer pair and fold k into the
     # magnetic IBZ; (ρ, m⃗, becsum) are re-symmetrized over the full Shubnikov

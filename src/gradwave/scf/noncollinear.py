@@ -85,7 +85,7 @@ class SpinorHamiltonian:
     (j-resolved SOC — see core/spinor_proj.py)."""
 
     def __init__(self, bk: BatchedK, shape, v_r, b_vec_r, p, q=None, dij_so=None,
-                 metagga_op=None):
+                 metagga_op=None, hub_q=None, hub_dij=None):
         self.bk = bk
         self.shape = shape
         self.p = p  # (nk, nproj, npw_max) scalar projectors
@@ -95,6 +95,14 @@ class SpinorHamiltonian:
         # core.metagga.spinor_metagga_tau_operator with the current v_τ fields),
         # or None for LDA/GGA. Hermitian, so it adds straight into H·c.
         self.metagga_op = metagga_op
+        # DFT+U: atomic-orbital projectors (spin-independent — the same
+        # projector acts on both spinor components) + the 2×2 spin-block
+        # D-matrix (core.hubbard.hubbard_dmatrix_noncollinear), shape
+        # (2, nproj_U, 2, nproj_U). Orthogonal to the SOC/scalar-relativistic
+        # KB nonlocal term above — added unconditionally when present, so the
+        # spin-orbit (is_fr) path gets +U through the same apply.
+        self.hub_q = hub_q  # (nk, nproj_U, npw_max)
+        self.hub_dij = hub_dij  # (2, nproj_U, 2, nproj_U)
         self.m = bk.npw_max
         # Precompute the 2×2 potential blocks once (fixed per H): v_uu/v_dd
         # are ⟨↑|V̂|↑⟩/⟨↓|V̂|↓⟩ (real), v_ud is ⟨↑|V̂|↓⟩ (complex); nonmagnetic
@@ -102,6 +110,7 @@ class SpinorHamiltonian:
         self.b_zero, self._v_uu, self._v_dd, self._v_ud = \
             spinor_potential_blocks(v_r, b_vec_r)
         self._cache: dict = {}
+        self._hub_cache: dict = {}  # cdtype → cast (hub_q, hub_q_conj, hub_dij)
 
     def _tables(self, cdtype):
         """Working-precision copies of the fixed tensors (cached per dtype)."""
@@ -127,6 +136,14 @@ class SpinorHamiltonian:
                 "dij": self.bk.dij_full.to(cdtype),
             }
             self._cache[cdtype] = cached
+        return cached
+
+    def _hub_tables(self, cdtype):
+        cached = self._hub_cache.get(cdtype)
+        if cached is None:
+            hq = self.hub_q.to(cdtype)
+            cached = (hq, hq.conj().resolve_conj(), self.hub_dij.to(cdtype))
+            self._hub_cache[cdtype] = cached
         return cached
 
     def _band_chunk(self, nk: int, device, elem_bytes: int = 16) -> int:
@@ -170,6 +187,20 @@ class SpinorHamiltonian:
                 bd = torch.einsum("kpg,kbg->kbp", pc, cd[:, lo:hi])
                 out[:, lo:hi, :m] += torch.einsum("kbp,pq,kqg->kbg", bu, dij, p) * mask
                 out[:, lo:hi, m:] += torch.einsum("kbp,pq,kqg->kbg", bd, dij, p) * mask
+        if self.hub_q is not None and self.hub_dij is not None:  # DFT+U (Dudarev)
+            hq, hqc, hd = self._hub_tables(c.dtype)
+            for lo in range(0, nb, chunk):
+                hi = min(lo + chunk, nb)
+                bu = torch.einsum("kpg,kbg->kbp", hqc, cu[:, lo:hi])
+                bd = torch.einsum("kpg,kbg->kbp", hqc, cd[:, lo:hi])
+                b = torch.stack([bu, bd], dim=2)  # (nk, nbc, 2, nproj_U)
+                # proj[k,b,σ,m] = Σ_{σ'm'} D_{(σm),(σ'm')} b[k,b,σ',m'] — direct
+                # matrix-vector contraction (no transpose; see hubbard_dmatrix_noncollinear)
+                proj = torch.einsum("sptq,kbtq->kbsp", hd, b)
+                out[:, lo:hi, :m] += torch.einsum(
+                    "kbp,kpg->kbg", proj[:, :, 0], hq) * mask
+                out[:, lo:hi, m:] += torch.einsum(
+                    "kbp,kpg->kbg", proj[:, :, 1], hq) * mask
         if self.metagga_op is not None:  # meta-GGA −½∇·(M∇) generalized-KS term
             out = out + self.metagga_op(c)
         return out
@@ -191,6 +222,7 @@ class NCResult:
     coeffs: torch.Tensor | None = None  # (nk, nb, 2·npw_max) spinor coefficients
     occupations: torch.Tensor | None = None  # (nk, nb) spinor occupations (g=1)
     formalism: str = "noncollinear"  # result-type tag shared by all four SCF drivers
+    hub_occ: list | None = None  # DFT+U per-site 2×2 spin-block occupation matrices N^I
 
 
 _MAG_MIXERS = {"pulay": "PulayMixer", "johnson": "JohnsonMixer",
@@ -233,17 +265,19 @@ def _build_nc_mixer(g2_vec, ng, nonmagnetic, mixing_alpha, mag_mixing_alpha,
 
 def _solve_spinor_bands(bk, grid, v_r, b_xc, projs_b, q_so, dij_so, coeffs, t2,
                         mask2, tol_eff, mixed_precision, mp_crossover,
-                        metagga_op=None):
+                        metagga_op=None, hub_q=None, hub_dij=None):
     """Diagonalize the spinor Hamiltonian for one iteration at diagonalization
     tolerance tol_eff (optional fp32 draft with an fp64 spinor renorm over the
     doubled 2·npw axis so the electron count stays conserved through mixing).
     Returns (eigs, coeffs, h); h is reused for the band-chunk size in the Pauli
-    density accumulation. metagga_op (meta-GGA) is the current v_τ operator."""
+    density accumulation. metagga_op (meta-GGA) is the current v_τ operator.
+    hub_q/hub_dij (DFT+U) are the atomic-orbital projectors and the current
+    (lagged one iteration, like V_eff) 2×2 spin-block D-matrix, or None."""
     use_low = mixed_precision and tol_eff > mp_crossover
     cdtype = CDTYPE_LOW if use_low else CDTYPE
     t2_solve = t2.to(RDTYPE_LOW) if use_low else t2
     h = SpinorHamiltonian(bk, grid.shape, v_r, b_xc, projs_b, q=q_so, dij_so=dij_so,
-                          metagga_op=metagga_op)
+                          metagga_op=metagga_op, hub_q=hub_q, hub_dij=hub_dij)
     dav = davidson_batched(h.apply, coeffs.to(cdtype), t2_solve, mask2, tol=tol_eff)
     eigs = dav.eigenvalues.to(RDTYPE)
     coeffs = dav.eigenvectors.to(CDTYPE)
@@ -433,6 +467,11 @@ def scf_noncollinear(
     precond_op=None,  # callable r→P·r on the density-total block (charge channel),
     # overriding constant Kerker there — e.g. a fitted learned_precond filter
     mixer_hook=None,  # research probe: called (it, vin, vout) each step pre-mix
+    hubbard=None,  # list[core.hubbard.HubbardManifold] — noncollinear DFT+U
+    # (Dudarev); the 2×2 spin-block generalization of the collinear occupation
+    # matrix (core.hubbard.occupation_matrices_noncollinear). Shared with SOC
+    # (is_fr): the +U term is orthogonal to the SOC nonlocal term, so a
+    # fully-relativistic pseudo gets +U through the same SpinorHamiltonian apply.
 ) -> NCResult:
     # A plain RhoSymmetrizer (paramagnetic group) is only valid with m⃗ ≡ 0.
     # A MagneticSymmetrizer (setup_system(..., magmoms=...)) carries the
@@ -489,6 +528,20 @@ def scf_noncollinear(
         from gradwave.core.spinor_proj import build_so_projectors
 
         q_so, dij_so = build_so_projectors(bk, system)
+
+    # DFT+U: frozen atomic-orbital projectors (positions fixed); the per-site
+    # 2×2 spin-block occupation matrix N^I is recomputed from the fresh
+    # spinors each iteration (like the density) and lags one step into V_U —
+    # mirrors the collinear scf() bookkeeping (scf/loop.py).
+    hub = hub_q = None
+    n_hub_nc = None
+    if hubbard:
+        from gradwave.core.hubbard import build_hubbard_projectors, hubbard_projectors
+        hub = build_hubbard_projectors(system, hubbard)
+        hub_q = hubbard_projectors(hub, system.positions)
+        n_hub_nc = [torch.zeros(2 * s["dim"], 2 * s["dim"], dtype=CDTYPE, device=device)
+                    for s in hub.sites]
+
     vloc_g = local_potential_g(system.positions, system.species_index,
                                system.vloc_tables, grid.g_cart, vol)
     vloc_r = g_to_r_box(vloc_g, real=True)
@@ -543,17 +596,41 @@ def scf_noncollinear(
             constrain_lambda, constrain_mode, constrain_target_mag, atom_weights,
             vol, tau_up=tau_up, tau_dn=tau_dn)
 
+        # DFT+U: the 2×2 spin-block D-matrix from the PREVIOUS iteration's
+        # occupation matrix (zero on the first iteration) — lags one step
+        # into V_U exactly like v_r/b_xc lag one step into the density.
+        hub_dij_nc = None
+        if hub is not None:
+            from gradwave.core.hubbard import hubbard_dmatrix_noncollinear
+            hub_dij_nc = hubbard_dmatrix_noncollinear(
+                n_hub_nc, hub.sites, hub.nproj, device)
+
         tol_eff = adaptive_diago_tol(it, history, diago_tol,
                                      system.n_electrons, schedule=diago_schedule)
         eigs, coeffs, h = _solve_spinor_bands(
             bk, grid, v_r, b_xc, projs_b, q_so, dij_so, coeffs, t2, mask2,
-            tol_eff, mixed_precision, mp_crossover, metagga_op=metagga_op)
+            tol_eff, mixed_precision, mp_crossover, metagga_op=metagga_op,
+            hub_q=hub_q, hub_dij=hub_dij_nc)
 
         mu = float(find_fermi(eigs, system.kweights, scheme, width,
                               system.n_electrons, degeneracy=1.0))
         mu_t = torch.tensor(mu, dtype=RDTYPE, device=device)
         occ, s_ent = occupations_and_entropy(eigs, mu_t, scheme, width, degeneracy=1.0)
         entropy_term = -width * (system.kweights[:, None] * s_ent).sum()
+
+        # DFT+U occupation matrices from the fresh spinors; E_U (Dudarev),
+        # evaluated at self-consistency with this iteration's orbitals/occ
+        # (like the rest of the energy breakdown below).
+        e_hub = torch.zeros((), dtype=RDTYPE, device=device)
+        if hub is not None:
+            from gradwave.core.hubbard import (
+                hubbard_energy,
+                occupation_matrices_noncollinear,
+            )
+            n_hub_nc = occupation_matrices_noncollinear(
+                hub_q, coeffs[..., :m_pw], coeffs[..., m_pw:], occ,
+                system.kweights, hub.sites)
+            e_hub = hubbard_energy(n_hub_nc, hub.sites)
 
         # Pauli-decomposed density matrix — the shared band-chunked, fused-FFT
         # accumulation (scf/spinor_common.py)
@@ -585,6 +662,8 @@ def scf_noncollinear(
             coeffs, occ, t2, entropy_term, rho_out, m_out, q_so, dij_so, projs_b,
             m_pw, vloc_g, e_ew, system, grid, xc, vol, nk,
             tau_up=tau_up_e, tau_dn=tau_dn_e)
+        if hub is not None:
+            energies.hubbard = e_hub
         e_free = float(energies.free_energy)
 
         if nonmagnetic:  # m_out already pinned to 0 above (before E_xc)
@@ -653,7 +732,7 @@ def scf_noncollinear(
         converged=converged, n_iter=it, energies=energies, fermi=mu,
         mag_vec=tuple(m_int), mag_abs=float(m_norm.mean()) * vol,
         rho=rho, m=m, eigenvalues=eigs, system=system, history=history,
-        coeffs=coeffs, occupations=occ,
+        coeffs=coeffs, occupations=occ, hub_occ=n_hub_nc,
     )
 
 

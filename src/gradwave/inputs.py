@@ -289,9 +289,11 @@ class HubbardManifoldSpec:
 class HubbardParams:
     """Rotationally-invariant DFT+U (Dudarev) applied in the SCF. Off by default;
     a ``hubbard`` block is a list of per-species manifolds. The +U occupation
-    correction threads through the norm-conserving and USPP/PAW SCF, and its
-    force/stress terms are added on those paths (USPP/PAW +U stress stays gated).
-    Collinear only (nspin 1 or 2); noncollinear/SOC +U is not wired."""
+    correction threads through the norm-conserving (collinear AND noncollinear/
+    spin-orbit — the 2×2 spin-block occupation matrix) and USPP/PAW-collinear
+    SCF; its force/stress terms are added on the collinear paths (USPP/PAW +U
+    stress stays gated for the noncollinear USPP/PAW SCF, which does not yet
+    have +U wired at all — see scf.uspp_noncollinear.scf_uspp_noncollinear)."""
 
     enabled: bool = False
     manifolds: tuple = ()   # tuple[HubbardManifoldSpec, ...]
@@ -742,14 +744,20 @@ def _load_input(path: Path) -> Input:
                 "tot_magnetization (fixed spin moment M=N↑−N↓) applies only to "
                 "a collinear spin run (nspin: 2)")
 
-    # DFT+U: a per-species Dudarev correction inside the SCF, collinear only.
-    # noncollinear/SOC +U occupation matrices are not wired, and a hybrid's Fock
-    # SCF has no +U hook, so reject those combinations at load.
+    # DFT+U: a per-species Dudarev correction inside the SCF. The collinear
+    # (nspin 1/2) and noncollinear/spin-orbit norm-conserving spinor paths are
+    # both wired (the latter via the 2×2 spin-block occupation matrix,
+    # core.hubbard.occupation_matrices_noncollinear) — note this input layer
+    # cannot distinguish NC from USPP/PAW pseudopotentials (that requires
+    # parsing the UPF files, done later in api.build_system), but `api.run_scf`
+    # only ever routes `noncollinear: true` to the norm-conserving driver
+    # regardless of pseudopotential kind, so no combination reachable through
+    # this Input/api.run path is left silently wrong; the USPP/PAW-noncollinear
+    # SCF (reached only by calling scf.uspp_noncollinear.scf_uspp_noncollinear
+    # directly, not through Input) rejects a hubbard argument explicitly there.
+    # A hybrid's Fock SCF has no +U hook, so that combination is still rejected
+    # at load.
     hubbard = _build_hubbard(raw.get("hubbard"), atoms.get_chemical_symbols())
-    if hubbard.enabled and noncollinear:
-        raise InputError(
-            "DFT+U (hubbard) is collinear only (nspin 1 or 2); noncollinear/"
-            "spin-orbit +U is not implemented")
     if hubbard.enabled and hybrid.enabled:
         raise InputError(
             "DFT+U (hubbard) and a hybrid functional (xc: pbe0/hse) cannot be "

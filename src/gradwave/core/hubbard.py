@@ -180,3 +180,73 @@ def hubbard_dmatrix(mats: list[torch.Tensor], sites: list, nproj: int,
         eye = torch.eye(dim, dtype=CDTYPE, device=device)
         d[st:st + dim, st:st + dim] = uj * (0.5 * eye - n)
     return d
+
+
+# ---------------------------------------------------------------------------
+# Noncollinear (spinor) generalization
+#
+# The atomic-orbital projector φ_m carries no spin index; the spinor
+# wavefunction ψ_b = (ψ_b↑, ψ_b↓) does. The occupation "matrix" per orbital
+# pair generalizes from two separate scalars n^↑_mm', n^↓_mm' to a single
+# 2×2 spin-block matrix
+#
+#   N^I_{(σm),(σ'm')} = Σ_{kb} w_kb ⟨φ_m|ψ_b^σ⟩⟨ψ_b^σ'|φ_m'⟩,
+#
+# i.e. stack the composite (σ, m) index into one 2·dim-dimensional matrix per
+# site, ordered as the 2×2 block matrix [[N↑↑, N↑↓], [N↓↑, N↓↓]] (each block
+# dim×dim). hubbard_energy(mats, sites) — UNCHANGED — already computes the
+# Dudarev trace Σ_I (U−J)/2 Tr[N(1−N)] generically over whatever square matrix
+# it is given, so it applies to these bigger composite matrices as-is: in the
+# collinear limit (down component ≡ 0, no spin canting) N is block-diagonal
+# with N↑↓ = N↓↑ = 0, so Tr[N(1−N)] = Tr[N↑↑(1−N↑↑)] + Tr[N↓↓(1−N↓↓)],
+# recovering exactly the sum over the two separate collinear channels.
+# ---------------------------------------------------------------------------
+
+
+def occupation_matrices_noncollinear(q: torch.Tensor, coeffs_up: torch.Tensor,
+                                     coeffs_dn: torch.Tensor, occ: torch.Tensor,
+                                     kweights: torch.Tensor,
+                                     sites: list) -> list[torch.Tensor]:
+    """Per-site 2×2 spin-block occupation matrices N^I (Hermitian) for a
+    noncollinear (spinor) wavefunction.
+
+    q (nk, nproj, npw_max) phased atomic-orbital projectors (spin-independent
+    — the same projector acts on both spinor components); coeffs_up/coeffs_dn
+    (nk, nb, npw_max) the spinor up/down plane-wave components; occ (nk, nb)
+    the spinor band occupations (g=1 degeneracy). Returns a list of
+    (2·dim, 2·dim) Hermitian matrices, one per correlated site, laid out as
+    the [[N↑↑, N↑↓], [N↓↑, N↓↓]] block matrix — reduces exactly to
+    `occupation_matrices`' separate n^↑_mm', n^↓_mm' in the collinear limit."""
+    becp_u = torch.einsum("kpg,kbg->kbp", q.conj(), coeffs_up)  # (nk, nb, nproj)
+    becp_d = torch.einsum("kpg,kbg->kbp", q.conj(), coeffs_dn)
+    becp = torch.stack([becp_u, becp_d], dim=2)  # (nk, nb, 2, nproj)
+    w = (kweights[:, None] * occ).to(RDTYPE)
+    # N[s,p,t,q] = Σ_kb w becp[k,b,s,p] · conj(becp[k,b,t,q])
+    n_full = torch.einsum("kb,kbsp,kbtq->sptq", w, becp, becp.conj())
+    out = []
+    for s in sites:
+        st, dim = s["start"], s["dim"]
+        blk = n_full[:, st:st + dim, :, st:st + dim].reshape(2 * dim, 2 * dim)
+        out.append(blk)
+    return out
+
+
+def hubbard_dmatrix_noncollinear(mats: list[torch.Tensor], sites: list,
+                                 nproj: int, device) -> torch.Tensor:
+    """2×2 spin-block D^I_{(σm),(σ'm')} = (U−J)(½δ − N^I), block-diagonal in
+    site, shape (2, nproj, 2, nproj) complex Hermitian.
+
+    Built directly (no transpose): the physical operator is
+    V_U = Σ_{(σm),(σ'm')} |φ_m,σ⟩ D_{(σm),(σ'm')} ⟨φ_m',σ'|, and the spinor
+    Hamiltonian applies D as a direct row/column matrix-vector contraction
+    against the stacked (up, down) becp — unlike the collinear/KB nonlocal
+    convention (core/batch.py), this needs no `.conj()` transpose trick
+    because the apply contracts D in its natural index order."""
+    d = torch.zeros(2, nproj, 2, nproj, dtype=CDTYPE, device=device)
+    for n, s in zip(mats, sites, strict=True):
+        uj = s["u"] - s["j"]
+        dim, st = s["dim"], s["start"]
+        eye = torch.eye(2 * dim, dtype=CDTYPE, device=device)
+        block = (uj * (0.5 * eye - n)).reshape(2, dim, 2, dim)
+        d[:, st:st + dim, :, st:st + dim] = block
+    return d
