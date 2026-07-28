@@ -17,8 +17,8 @@ Summing w_k f_nk |ψ_nk(r)|² over occupied states reproduces res.rho.
 Result coverage (see the manual, "Volumetric export"):
   * collinear norm-conserving  — density, band_density, elf all supported.
   * noncollinear / SOC         — density (total), band_density (spinor, the
-                                 up/down components summed), and magnetization;
-                                 elf is not yet implemented for spinors.
+                                 up/down components summed), magnetization, and
+                                 elf (the closed-shell ELF of the charge density).
   * USPP / PAW                 — density (the full augmented ρ); band_density is
                                  the SOFT pseudo-density (no augmentation, as in
                                  VASP's PARCHG); elf is not yet supported.
@@ -250,23 +250,38 @@ def elf(res, eps: float = 1e-10) -> np.ndarray:
     the homogeneous-gas value. τ(r) comes straight from the coefficients (the
     existing meta-GGA tau_b), so no meta-GGA run is needed to produce it.
 
-    Collinear norm-conserving results. For nspin=2 the ELF is spin-resolved:
-    each channel uses its own (τ_σ, ρ_σ) and the spin-scaled TF reference
-    D_h,σ = c_F·2^{2/3}·ρ_σ^{5/3}, and the return gains a leading spin axis
-    (2, n1, n2, n3). Noncollinear/USPP still raise below.
+    Norm-conserving results (collinear and noncollinear). For collinear nspin=2
+    the ELF is spin-resolved: each channel uses its own (τ_σ, ρ_σ) and the
+    spin-scaled TF reference D_h,σ = c_F·2^{2/3}·ρ_σ^{5/3}, and the return gains a
+    leading spin axis (2, n1, n2, n3). For a noncollinear/SOC spinor result the ELF
+    is the closed-shell form of the CHARGE density (the trace of the spin-density
+    matrix, res.rho) and the total kinetic-energy density τ_0 = τ_↑↑ + τ_↓↓ (the
+    trace of the 2×2 KE-density matrix) — no spin split, so no 2^{2/3} factor;
+    a single (n1, n2, n3) field, with or without spin-orbit coupling. USPP/PAW
+    still raise below.
     """
     system, shape, vol = _grid_info(res)
-    # collinear norm-conserving only: spinor (NC/SOC) coeffs live on a doubled
-    # plane-wave axis the collinear tau_b/pad_coeffs path cannot consume, and
-    # USPP/PAW results carry no ``batch``. (NC results now carry occupations, so
-    # the spinor check must be explicit — occupations being present no longer
-    # implies a collinear result.)
-    if (_is_spinor(res) or getattr(res, "occupations", None) is None
-            or getattr(system, "batch", None) is None):
+    # USPP/PAW results carry no ``batch`` (the soft KE density would need the
+    # augmentation), and a result without occupations (e.g. a bands-only NCResult)
+    # cannot form τ. Everything else — collinear NC and the noncollinear spinor
+    # path below — is supported.
+    batch = getattr(system, "batch", None)
+    occ = getattr(res, "occupations", None)
+    if batch is None or occ is None:
         raise NotImplementedError(
-            "ELF is implemented for collinear norm-conserving results; "
-            "noncollinear and USPP/PAW support lands later"
+            "ELF is implemented for norm-conserving results (collinear and "
+            "noncollinear); USPP/PAW support lands later"
         )
+    if _is_spinor(res):
+        # Noncollinear/SOC: spinor coeffs live on a doubled plane-wave axis. The
+        # ELF uses the CHARGE density res.rho and the total (trace) KE density
+        # τ_0 = τ_↑↑ + τ_↓↓ from the 2×2 KE-density matrix (spinor_tau_matrix_b),
+        # i.e. the closed-shell ELF. τ_0 ≥ |∇ρ|²/(8ρ) (von Weizsäcker bound on the
+        # total density) so D ≥ 0 and ELF ∈ [0, 1], as in the collinear case.
+        from gradwave.core.metagga import spinor_tau_matrix_b
+        tau_scalar, _ = spinor_tau_matrix_b(
+            res.coeffs, occ, system.kweights, batch, shape, vol, batch.npw_max)
+        return _elf_field(tau_scalar, res.rho, system.grid.g_cart, _C_F, eps)
     nspin = getattr(res, "nspin", 1)
     if nspin == 1:
         coeffs = pad_coeffs(res.coeffs, system.batch.npw_max)

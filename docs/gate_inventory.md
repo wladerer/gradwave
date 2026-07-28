@@ -52,6 +52,7 @@ gaps) — see the last section. So **63 real capability gates** remain.
 | ~~postscf/discretization_error.py:312~~ | nspin2 / symmetry | symmetric disc. error nspin=1 only | **resolved, this PR** — the density/energy error already threaded nspin=2 per spin channel (`use_symmetry=False`); with the Dyson dressing now spin-resolved too, nspin=2 is complete for this module. The remaining raise (now :392) only guards nspin=2 **with** crystal symmetry (the magnetic/AFM IBZ fold), a documented boundary — not a gap. Oracle: `test_nspin2_nonmagnetic_limit_matches_nspin1` (+ the dyson and force-error nspin=2 nonmag variants) |
 | ~~postscf/stress_error.py:90~~ | nspin2 | pressure (stress) disc.-error estimate nspin=1 only | **removed, this PR** — the frozen strained rebuild now builds a per-spin v_eff from the per-spin densities (`effective_potentials` on `[ρ↑,ρ↓]`, stacked into `res_s.v_eff`) and `estimate_density_error` sums both channels' energy error, exactly as the fixed-basis stress does. `use_symmetry=False` still required (frozen rebuild needs the full k-set, permanent). Oracle: `test_pressure_error_nspin2_nonmagnetic_limit_matches_nspin1` (nonmag == nspin=1 to ~1e-11 rel) |
 | ~~inputs.py~~ (`hubbard.enabled and noncollinear` `InputError`) | SOC/NC-spinor + U | DFT+U on the noncollinear/spin-orbit spinor path | **removed, this PR** — not in the grep'd `NotImplementedError` list above (it was an `inputs.py`-level `InputError` combination guard, not a `NotImplementedError`, so the regen script would not have caught it). Generalized the occupation matrix to a 2×2 spin block per orbital pair, `N^{Iσσ'}_{mm'}` (`core.hubbard.occupation_matrices_noncollinear`/`hubbard_dmatrix_noncollinear`); `hubbard_energy`'s Dudarev trace is unmodified — it operates on the bigger composite matrix as-is and reduces exactly to the collinear sum in the z-polarized (no-canting) limit. Wired into `scf.noncollinear.scf_noncollinear`'s `SpinorHamiltonian` (the +U term is orthogonal to the SOC nonlocal term, so fully-relativistic pseudos get +U through the same apply — no separate SOC gate needed). SCF/energy path only; noncollinear +U forces/stress remain a follow-up (see the new Open row below). The noncollinear **USPP/PAW** SCF (`scf.uspp_noncollinear.scf_uspp_noncollinear`) does NOT get +U in this PR — it explicitly raises `NotImplementedError` on a `hubbard=` argument (see the Open table). Oracle: `test_occupation_matrix_noncollinear_reduces_to_collinear_limit` (exact algebraic reduction, 1e-12) + U=0 bit-for-bit SCF oracles (both a nonmagnetic diamond-C run through the input surface and a real ferromagnetic-Ni SCF through the driver directly) |
+| ~~postscf/volumetric.py:266~~ | NC-only (spinor) | ELF for a noncollinear/SOC spinor result | **removed, this PR** — the ELF is the closed-shell form of the CHARGE density (`res.rho`, the trace of the spin-density matrix) and the total kinetic-energy density τ_0 = τ_↑↑ + τ_↓↓ (the trace of the 2×2 KE-density matrix `core.metagga.spinor_tau_matrix_b` already assembles). τ_0 ≥ \|∇ρ\|²/(8ρ) (von Weizsäcker bound on the total density), so D ≥ 0 and ELF ∈ [0, 1] just as collinear; no spin split, so no 2^{2/3} TF factor. Works with or without SOC. USPP/PAW still raises (no `batch`; the soft KE density needs the augmentation). Oracle: `test_elf_noncollinear_nonmagnetic_limit_matches_collinear` (nonmagnetic scalar-relativistic NC ELF == nspin=1 collinear ELF, ~2e-3) + the boundedness check folded into `test_noncollinear_spinor_export` (SOC GaAs, ELF ∈ [0, 1]) |
 
 ## Open — nspin=2 (next tranches)
 
@@ -76,6 +77,7 @@ gaps) — see the last section. So **63 real capability gates** remain.
 | postscf/discretization_error.py:465,673 | +U | USPP density/force error with DFT+U |
 | postscf/stress_error.py:86 | symmetry | pressure error requires `use_symmetry=False` |
 | postscf/uspp_bands.py:28 | +U | USPP bands with DFT+U (V_U missing from frozen band H) |
+| postscf/volumetric.py:266 | USPP/PAW | ELF for USPP/PAW (no `batch`; the soft KE density needs the augmentation) — the NC-spinor part of this site was ungated this PR, USPP remains |
 
 **Γ-point Hvp-phonons cross-validated (#141 step 2).** The Γ dynamical
 matrix built on `hessian_column` (`postscf.phonons.gamma_hessian`) is now
@@ -119,12 +121,22 @@ keep the −½ limit (their own continuous limit), so their gates are unchanged.
 | api.py:970 | nspin2 / SOC | supercell phonons (forces path is NC, nspin=1) |
 | api.py:975 | NC-only | supercell phonons need norm-conserving pseudos |
 | calculator.py:575 | USPP/PAW nspin2 | nspin=2 through the ASE calculator is NC-only (USPP/PAW collinear spin not wired) |
-| postscf/cohp.py:456 | NC-only | COHP `basis='iao'` needs the NC operator route |
-| postscf/cohp.py:550 | NC-only | `projection_rmsp`: NC SCFResult only |
-| postscf/pdos.py:312 | SOC/NC-spinor | projected DOS: NC + USPP only, noncollinear is a separate path |
-| postscf/volumetric.py:266 | NC-only | ELF: collinear NC only (noncollinear/USPP later) |
+| postscf/cohp.py:456 | NC-only | COHP `basis='iao'` needs the NC operator route (USPP/spinor absent) |
+| postscf/cohp.py:550 | NC-only | `projection_rmsp`: NC SCFResult only (USPP/spinor absent) |
 | postscf/forces.py:42 | metaGGA / NC | meta-GGA NLCC force needs the batched-k geometry (collinear NC only) |
 | opt/joint.py:278 | metaGGA | meta-GGA joint (strain+orbital) minimization (τ rebuild) |
+
+**COHP `basis='iao'` / `projection_rmsp` (cohp.py:456, :550) — genuine gaps,
+deferred (audited this PR).** Both are real: `basis='iao'` and `projection_rmsp`
+work on the norm-conserving collinear `SCFResult` (tested: `test_cohp_resolve_images_and_iao_o2`)
+and raise for USPP/PAW and spinor results. Unlike the ELF wire-through, neither is
+a mechanical extension — the IAO construction and the RMSp spilling both need the
+S-metric (`⟨φ|S|φ⟩`, `⟨φ|S|ψ⟩`) for USPP/PAW and, for the operator route,
+`_htilde_operator` has no USPP/spinor Hamiltonian analogue yet (the spinor COHP
+uses the band-limited eigenvalue route, `cohp.py` docstring). `projection_rmsp` is
+additionally a *differentiable* objective (no `torch.no_grad`), so its S-dressing
+must stay on the autograd path. Left as a focused follow-up rather than forced into
+this slice.
 
 ## Open — noncollinear / SOC (mostly feature boundaries, #142)
 
@@ -140,10 +152,19 @@ keep the −½ limit (their own continuous limit), so their gates are unchanged.
 | postscf/discretization_error.py:841 | SOC/NC-spinor | force-error estimate NC-collinear only (spinor force terms unassembled) |
 | postscf/discretization_error.py:847 | NLCC | NLCC force term in the error estimate (blocked on the g.s. NLCC force) |
 | postscf/discretization_error.py:1010 | SOC/NC-spinor + symmetry | noncollinear disc. error requires `use_symmetry=False` |
-| postscf/cohp.py:623 | validation | `cohp_noncollinear` expects a noncollinear NCResult |
-| postscf/cohp.py:662,665 | validation | `cohp_soc` expects a fully-relativistic (SOC) NCResult/pseudo |
-| postscf/pdos.py:387 | validation | `projected_dos_noncollinear` expects a noncollinear NCResult |
-| postscf/pdos.py:543,547 | validation | `projected_dos_soc` expects a fully-relativistic NCResult/pseudo |
+
+**Noncollinear / SOC COHP and PDOS — NOT gaps, confirmed validation/routing
+(audited this PR).** The spinor post-SCF analysis for COHP and PDOS is fully
+implemented and tested; the `raise NotImplementedError` sites below are argument
+guards or entry-point routing, not capability gaps:
+
+| file:line | classification | what it actually is |
+|---|---|---|
+| postscf/cohp.py:623 | validation | `cohp_noncollinear` rejects a non-`NCResult`; the noncollinear (charge, spin-summed) COHP is fully implemented (`test_cohp_soc_bi2`) |
+| postscf/cohp.py:662,665 | validation | `cohp_soc` rejects a non-`NCResult` / non-FR pseudo; the j-resolved SOC COHP is fully implemented (`test_cohp_soc_bi2`) |
+| postscf/pdos.py:312 | routing | inside the COLLINEAR unpacker `_unpack_result`; a spinor result is served by the dedicated `projected_dos_noncollinear` / `projected_dos_soc` (both fully implemented and tested), so this raise only routes a spinor result away from the collinear entry point |
+| postscf/pdos.py:387 | validation | `projected_dos_noncollinear` rejects a non-`NCResult`; the charge + spin-texture (m_x/m_y/m_z) projected DOS is fully implemented (`test_pdos_noncollinear_spin_texture`) |
+| postscf/pdos.py:543,547 | validation | `projected_dos_soc` rejects a non-`NCResult` / non-FR pseudo; the j-resolved projected DOS is fully implemented (`test_pdos_soc_j_resolved`) |
 
 ## Open — symmetry / occupations / data / validation
 
