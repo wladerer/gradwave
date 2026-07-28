@@ -1,0 +1,10 @@
+# docs/gate_inventory.md is a shared landing zone for every capability-gate PR
+# (issue #147): each one appends a new row to the same table, so concurrent PRs
+# routinely conflict on merge/rebase even though neither side actually disagrees
+# with the other -- it's pure non-overlapping concatenation every time. `merge=union`
+# auto-resolves that case (each side's added lines are kept, order doesn't matter
+# for this file). It will NOT catch the rarer case where a row needs outright
+# removal (a genuinely stale reference two PRs both touch) -- that still needs a
+# human/agent glance, but won't block a merge; it just leaves a duplicate to clean
+# up in a follow-up pass.
+docs/gate_inventory.md merge=union
