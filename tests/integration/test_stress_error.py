@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from gradwave.core.xc.pbe import PBE
+from gradwave.core.xc.spin import SpinPBE
 from gradwave.postscf.stress import stress
 from gradwave.postscf.stress_error import estimate_pressure_error
 from gradwave.scf.loop import scf, setup_system
@@ -68,6 +69,33 @@ def test_pressure_error_matches_true_basis_error():
     # finite-difference half-step is not load-bearing: flat from 0.005 to 0.02
     out2 = estimate_pressure_error(res, PBE(), ecut_large=45 * RY, strain=0.005)
     assert abs(out2["pressure_error_kbar"] - p_est) < 0.05 * abs(p_est)
+
+
+def test_pressure_error_nspin2_nonmagnetic_limit_matches_nspin1():
+    """nspin=2 pressure error at zero moment reproduces the nspin=1 estimate.
+
+    The nspin=2 path rebuilds a per-spin frozen v_eff from the per-spin densities
+    and the energy error sums both channels; a nonmagnetic run splits into two
+    identical half-filled channels, so the estimate must match nspin=1 exactly.
+    """
+    torch.set_num_threads(4)
+    upf = si_upf()
+
+    def run(nspin):
+        system = setup_system(CELL, POS, [0, 0], [upf], ecut=12 * RY,
+                              kmesh=(2, 2, 2), use_symmetry=False)
+        if nspin == 1:
+            return scf(system, PBE(), smearing="none", etol=1e-10, rhotol=1e-9,
+                       verbose=False)
+        return scf(system, SpinPBE(), nspin=2, start_mag=[0.0, 0.0],
+                   tot_magnetization=0.0, smearing="none", etol=1e-10,
+                   rhotol=1e-9, verbose=False)
+
+    o1 = estimate_pressure_error(run(1), PBE(), ecut_large=45 * RY)
+    o2 = estimate_pressure_error(run(2), SpinPBE(), ecut_large=45 * RY)
+    p1 = o1["pressure_error_kbar"]
+    assert abs(p1) > 1.0                                       # a real signal
+    assert abs(o2["pressure_error_kbar"] - p1) < 1e-6 * abs(p1)
 
 
 @pytest.mark.slow

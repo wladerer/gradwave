@@ -75,8 +75,10 @@ def estimate_pressure_error(res, xc, *, ecut_large: float | None = None,
     the usual Pulay under-pressure of a too-small basis). Also returns the two
     ``denergy`` samples and the cell volume for transparency.
 
-    Norm-conserving, nspin=1, scalar-relativistic, ``use_symmetry=False`` (the
-    frozen strained rebuild must reproduce the run's k-points). ``ecut_large``
+    Norm-conserving, nspin=1 or 2, scalar-relativistic, ``use_symmetry=False``
+    (the frozen strained rebuild must reproduce the run's k-points). For nspin=2
+    the per-spin frozen densities rebuild the per-spin v_eff and the energy error
+    sums both spin channels. ``ecut_large``
     defaults to ``factor*ecut`` and sets the complement annulus, exactly as in
     ``estimate_density_error``. ``strain`` is the finite-difference half-step in
     the linear scale ``s`` (the estimate is flat in it from ~0.005 to ~0.02).
@@ -86,8 +88,7 @@ def estimate_pressure_error(res, xc, *, ecut_large: float | None = None,
         raise NotImplementedError(
             "pressure error requires use_symmetry=False: the frozen strained "
             "rebuild reproduces the run's full k-point set")
-    if int(getattr(res, "nspin", 1)) != 1:
-        raise NotImplementedError("pressure error is nspin=1 only")
+    nspin = int(getattr(res, "nspin", 1))
     if getattr(system, "is_fr", False):
         raise NotImplementedError(
             "pressure error not implemented for fully-relativistic pseudos")
@@ -106,11 +107,20 @@ def estimate_pressure_error(res, xc, *, ecut_large: float | None = None,
         # fixed Miller set: ecut/s**2 on the s-scaled cell strains only the metric
         ss = setup_system(s * cell0, s * pos0, system.species_of_atom, system.upfs,
                           ecut=ecut / s ** 2, kmesh=kmesh, fft_shape=grid.shape)
-        rho_s = res.rho * (vol0 / float(ss.grid.volume))   # conserve electron count
+        scale = vol0 / float(ss.grid.volume)               # conserve electron count
         vloc_g = local_potential_g(ss.positions, ss.species_index, ss.vloc_tables,
                                    ss.grid.g_cart, ss.grid.volume)
-        veff = effective_potentials(ss, xc, [rho_s], local_potential_r(ss, vloc_g))
-        res_s = dataclasses.replace(res, system=ss, v_eff=veff[0])
+        vloc_r = local_potential_r(ss, vloc_g)
+        # per-spin frozen density -> per-spin v_eff (nspin=2 sums both channels'
+        # errors in estimate_density_error, exactly as the fixed-basis stress does)
+        rho_list = ([res.rho * scale] if nspin == 1
+                    else [rsp * scale for rsp in res.rho_spin])
+        veff = effective_potentials(ss, xc, rho_list, vloc_r)
+        if nspin == 1:
+            res_s = dataclasses.replace(res, system=ss, v_eff=veff[0])
+        else:
+            res_s = dataclasses.replace(res, system=ss, v_eff=torch.stack(veff),
+                                        rho_spin=rho_list)
         err = estimate_density_error(res_s, ecut_large=ecl / s ** 2)
         return float(err.denergy), float(ss.grid.volume)
 

@@ -20,9 +20,9 @@ Regenerate the raw list with:
 grep -rn "raise NotImplementedError" src/gradwave --include=*.py
 ```
 
-Current count: **69** `raise NotImplementedError` sites, of which **4 are
+Current count: **67** `raise NotImplementedError` sites, of which **4 are
 abstract-method stubs** (interface contracts on base classes, not capability
-gaps) — see the last section. So **65 real capability gates** remain.
+gaps) — see the last section. So **63 real capability gates** remain.
 
 ## Axis legend
 
@@ -48,6 +48,9 @@ gaps) — see the last section. So **65 real capability gates** remain.
 | ~~postscf/paw_stress.py:36~~ | USPP/PAW +U | stress with DFT+U on USPP/PAW (strained S-dressed projections) | **removed, this PR** — added the Dudarev E_U strain term to `_energy_strained_uspp`: the atomic-orbital projectors go on the strain graph like the base PAW augmentation, then S-dressed (Sφ = φ + Σ\|β⟩q⟨β\|φ⟩) so both the φ and the β strain enter n^{Iσ} (`_hub_sproj_strained`). Also ungated the USPP/PAW +U path through `calculator._calculate_uspp` (and forced symmetry off there, matching the NC +U path). Oracle: `test_paw_stress_hubbard_autograd_vs_fd` (autograd σ == central FD of the strained +U energy; ε=0 == SCF total) + a U=0 inertness bit-for-bit check |
 | ~~postscf/uspp_position.py:262,326~~ | USPP/PAW +U | position (Berry) response with DFT+U | **removed, this PR** — threaded the occupation-matrix channel n^{Iσ} through the position (displacement) response, the S-dressed analogue of #156's strain path (Sφ = φ + Σ\|β⟩q⟨β\|φ⟩ now moves with its atom): the bare perturbation gains δH_U = \|∂(Sφ)⟩D_U⟨Sφ\| + h.c. (∂(Sφ) via a jvp through the same `build_uspp_hubbard` S-dressing — `PositionPerturbation._build_dsphi`), `bare_map_derivative` returns the bare δn, and `_self_consistent_response` carries the Dudarev kernel δD_U = −(U−J)·herm(δn) through the existing `apply_chi0`/`k_hub` adjoint machinery. Oracle: `test_position_density_response_hubbard_vs_scf_fd` (analytic dρ*/dτ, dbecsum*/dτ == central FD of +U SCF re-runs, ~3e-5) |
 | ~~postscf/uspp_position.py:399~~ | USPP/PAW +U | `hessian_column` (Γ-phonon mixed second derivative) with DFT+U | **removed, this PR** — added the in-graph Dudarev E_U(c, τ) term (the same `hubbard_e_channel` expression `forces_uspp` differentiates for the +U force) so the double backward picks up ∂²E_U/∂τ∂τ′, fed by the +U-total orbital response (V_U feedback threaded through `_self_consistent_response`/`_total_orbital_response`). Oracle: `test_hessian_column_hubbard_vs_fd_of_forces` (analytic +U column == central FD of the +U-aware `forces_uspp`, ~3e-6) + `test_hessian_column_u0_is_inert` (U=0 == non-+U column, ~1e-13) |
+| ~~postscf/discretization_error.py:379~~ | nspin2 | Dyson-dressed disc. density error for nspin=2 | **removed, this PR** — spin-resolved coarse-space Dyson (`_dyson_dress_spin`): per-spin χ₀ (conduction-projected Sternheimer, block-diagonal in spin, `_apply_chi0_spin`) dressed through the spin Hxc kernel K_Hxc^{σσ'} (Hartree on total δρ + spin f_xc HVP), reusing `dielectric._k_hxc_spin` and the `_response` primitives (`cg_sternheimer`, `insulator_window`, `sternheimer_shift`). The density loop now keeps the per-spin first-order δρ so the dressing has both channels. Still `use_symmetry=False` + insulating occupations (the χ₀ solve is conduction-projected — same requirement as nspin=1). Oracle: `test_nspin2_dyson_nonmagnetic_limit_matches_nspin1` (nonmag insulator: spin-summed dressed δρ == the nspin=1 dressing to the shared fixed-point tol, ~1e-6 rel) |
+| ~~postscf/discretization_error.py:312~~ | nspin2 / symmetry | symmetric disc. error nspin=1 only | **resolved, this PR** — the density/energy error already threaded nspin=2 per spin channel (`use_symmetry=False`); with the Dyson dressing now spin-resolved too, nspin=2 is complete for this module. The remaining raise (now :392) only guards nspin=2 **with** crystal symmetry (the magnetic/AFM IBZ fold), a documented boundary — not a gap. Oracle: `test_nspin2_nonmagnetic_limit_matches_nspin1` (+ the dyson and force-error nspin=2 nonmag variants) |
+| ~~postscf/stress_error.py:90~~ | nspin2 | pressure (stress) disc.-error estimate nspin=1 only | **removed, this PR** — the frozen strained rebuild now builds a per-spin v_eff from the per-spin densities (`effective_potentials` on `[ρ↑,ρ↓]`, stacked into `res_s.v_eff`) and `estimate_density_error` sums both channels' energy error, exactly as the fixed-basis stress does. `use_symmetry=False` still required (frozen rebuild needs the full k-set, permanent). Oracle: `test_pressure_error_nspin2_nonmagnetic_limit_matches_nspin1` (nonmag == nspin=1 to ~1e-11 rel) |
 
 ## Open — nspin=2 (next tranches)
 
@@ -56,8 +59,6 @@ gaps) — see the last section. So **65 real capability gates** remain.
 | scf/implicit.py:53 | nspin2 | implicit (adjoint) SCF backward for nspin=2 |
 | postscf/newton.py:60 | nspin2 | `newton_polish` raw-map plumbing for nspin=2 |
 | postscf/dielectric.py:121 | nspin2 + symmetry | dielectric response with IBZ symmetry (nspin=2 magnetic-group vector fold) |
-| postscf/discretization_error.py:379 | nspin2 | Dyson dressing is nspin=1 only |
-| postscf/stress_error.py:90 | nspin2 | pressure (stress) discretization-error estimate nspin=1 only |
 | postscf/hubbard_u.py:227 | nspin2 | Sternheimer linear-response U is implemented for nspin=2 only; nspin=1 raises (reverse gap) |
 
 ## Open — USPP/PAW response & error operators (lower-priority tranche)
@@ -148,8 +149,7 @@ keep the −½ limit (their own continuous limit), so their gates are unchanged.
 | scf/implicit.py:55 | symmetry | implicit SCF backward requires `use_symmetry=False` |
 | scf/implicit.py:66 | insulator | implicit SCF backward supports insulators only (occ = 2) |
 | postscf/_response.py:168 | insulator | response builder rejects metallic (partial) occupations |
-| postscf/discretization_error.py:312 | nspin2 / symmetry | symmetric disc. error nspin=1 only (`use_symmetry=False` for nspin=2) |
-| postscf/discretization_error.py:316 | symmetry | Dyson dressing requires `use_symmetry=False` |
+| postscf/discretization_error.py:396 | symmetry | Dyson dressing requires `use_symmetry=False` (permanent — response solve needs the full k-mesh, both nspin) |
 | postscf/newton.py:64 | +U | `newton_polish` +U raw-map plumbing |
 | symmetry.py:180,297 | symmetry | shifted meshes not reduced here (caller reduces unshifted) |
 | postscf/dispersion.py:134 | data | D3(BJ) reference C6 not vendored for requested element(s) |

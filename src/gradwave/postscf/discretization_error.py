@@ -87,7 +87,14 @@ from gradwave.core.hamiltonian import (
 from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.grids import build_gsphere, gmax_from_ecut
-from gradwave.postscf._response import dyson_fixed_point, spin_sigma_triple
+from gradwave.postscf._response import (
+    cg_sternheimer,
+    dyson_fixed_point,
+    insulator_window,
+    pad_coeffs,
+    spin_sigma_triple,
+    sternheimer_shift,
+)
 from gradwave.postscf.uspp_frozen import (
     aug_density_from_becsum,
     frozen_veff,
@@ -238,6 +245,77 @@ def _dyson_dress(res, xc, drho0, *, beta, tol, max_iter, verbose):
 
 
 @torch.no_grad()
+def _apply_chi0_spin(res, w_r):
+    """[χ₀↑ w↑, χ₀↓ w↓]: per-spin independent-particle density response to the
+    per-spin real local fields ``w_r = [w↑, w↓]`` (collinear insulator, f=1 per
+    spin channel). The Hamiltonian is block-diagonal in spin, so each channel is
+    its own conduction-projected Sternheimer solve on the batched k-mesh (the
+    ``scf.implicit.apply_chi0`` twin, per spin — nspin=1 uses that copy). Returns
+    the per-spin δρ list. use_symmetry=False (enforced by the caller)."""
+    from gradwave.core.batch import BatchedHamiltonian, box_to_sphere_b
+
+    system = res.system
+    bk, grid = system.batch, system.grid
+    vol = grid.volume
+    projs_b = projectors_b(bk, system.positions)
+    dr_sp = []
+    for sp in range(2):
+        nocc = insulator_window(
+            res.occupations[sp], 1.0,
+            "Dyson dressing (nspin=2) needs insulating occupations (f=1 per "
+            "spin); the coarse-space χ₀ is a conduction-projected solve")
+        c_occ = pad_coeffs(res.coeffs[sp], bk.npw_max)[:, :nocc]
+        eps_occ = res.eigenvalues[sp][:, :nocc].to(RDTYPE)
+        shift = sternheimer_shift(eps_occ)
+        h = BatchedHamiltonian(bk, grid.shape, res.v_eff[sp], projs_b)
+        psi_r = g_to_r_b(c_occ, bk, grid.shape)
+
+        def p_c(x, c_occ=c_occ):
+            ov = torch.einsum("kng,kbg->kbn", c_occ.conj(), x)
+            return x - torch.einsum("kbn,kng->kbg", ov, c_occ)
+
+        w_sp = w_r[sp].to(psi_r.dtype)
+        rhs = -p_c(box_to_sphere_b(psi_r * w_sp, bk))
+        dpsi = cg_sternheimer(h, bk, c_occ, eps_occ, rhs,
+                              torch.zeros_like(rhs), shift, tol=1e-8)
+        dpsi_r = g_to_r_b(dpsi, bk, grid.shape)
+        # f=1 per channel, factor 2 from the c.c. pair (ψ*δψ + δψ*ψ)
+        dr = 2.0 * (system.kweights[:, None, None, None, None]
+                    * (psi_r.conj() * dpsi_r).real).sum(dim=(0, 1)) / vol
+        dr_sp.append(dr)
+    return dr_sp
+
+
+@torch.no_grad()
+def _dyson_dress_spin(res, xc, drho0_sp, *, beta, tol, max_iter, verbose):
+    """Spin-resolved coarse-space Dyson dressing (nspin=2).
+
+    Solves the two-channel fixed point
+        (δρ↑, δρ↓) = (δρ0↑, δρ0↓) + [χ₀↑, χ₀↓] ∘ K_Hxc^{σσ'}[δρ↑, δρ↓]
+    and returns the spin-summed dressed density error. K_Hxc couples the channels
+    (Hartree on the total δρ + the spin f_xc Hessian-vector product); χ₀ is
+    block-diagonal in spin (``_apply_chi0_spin``). In the nonmagnetic limit the
+    two channels are identical and this reduces to ``_dyson_dress``. Same
+    historical loop tuning as the nspin=1 dressing (|x_new| step denominator,
+    silent return of the unconverged iterate)."""
+    from gradwave.postscf.dielectric import _k_hxc_spin
+
+    shape = drho0_sp[0].shape
+    n = drho0_sp[0].numel()
+    rhs = torch.cat([drho0_sp[0].reshape(-1), drho0_sp[1].reshape(-1)])
+
+    def op(x):
+        du, dd = x[:n].reshape(shape), x[n:].reshape(shape)
+        ku, kd = _k_hxc_spin(res, xc, du, dd)
+        cu, cd = _apply_chi0_spin(res, [ku, kd])
+        return torch.cat([cu.reshape(-1), cd.reshape(-1)])
+
+    x = dyson_fixed_point(op, rhs, beta=beta, tol=tol, max_iter=max_iter,
+                          on_fail=None, denom_new=True, verbose=verbose)
+    return x[:n].reshape(shape) + x[n:].reshape(shape)
+
+
+@torch.no_grad()
 def estimate_density_error(
     res: SCFResult,
     *,
@@ -268,10 +346,12 @@ def estimate_density_error(
         ecut_large <= 4*ecut so the enlarged sphere fits the density FFT box.
     dyson : bool
         If True, dress the first-order estimate with the coarse-space dielectric
-        response (needs ``xc``). Only implemented on the norm-conserving
-        (``SCFResult``) path; requesting it on the USPP/PAW or spinor paths
-        raises ``NotImplementedError`` (the ``dyson_*`` tuning kwargs are inert
-        there).
+        response (needs ``xc``). Norm-conserving (``SCFResult``) only, nspin=1 or
+        2 -- nspin=2 dresses the two channels jointly through the spin Hxc kernel
+        K_Hxc^{σσ'} (``_dyson_dress_spin``); both require use_symmetry=False and
+        insulating occupations (the coarse-space χ₀ is a conduction-projected
+        solve). Requesting it on the USPP/PAW or spinor paths raises
+        ``NotImplementedError`` (the ``dyson_*`` tuning kwargs are inert there).
     """
     formalism = _result_formalism(res)
     if formalism == "uspp_noncollinear":
@@ -316,13 +396,14 @@ def estimate_density_error(
         raise NotImplementedError("Dyson dressing requires use_symmetry=False")
     ecut_large = _resolve_ecut_large(system, ecut_large, factor)
 
-    drho = torch.zeros(grid.shape, dtype=RDTYPE, device=device)
     denergy = 0.0
     # per-spin lists (single spin channel when nspin=1)
     spins = [None] if nspin == 1 else list(range(nspin))
+    drho_sp = [torch.zeros(grid.shape, dtype=RDTYPE, device=device)
+               for _ in spins]
     dpsi_s, psi_large_s, occ_s, sph_s = [], [], [], []
 
-    for sp in spins:
+    for isp, sp in enumerate(spins):
         v_eff_sp = res.v_eff if sp is None else res.v_eff[sp]
         dpsi_k, psi_large_k, occ_k, sph_k = [], [], [], []
         for ik, sph0 in enumerate(system.spheres):
@@ -343,7 +424,8 @@ def estimate_density_error(
             psi_r = g_to_r(c_occ, sph0.flat_idx, grid.shape)
             dpsi_r = g_to_r(dpsi, sph1.flat_idx, grid.shape)
             w = 2.0 * float(system.kweights[ik])
-            drho += w * (occ.view(-1, 1, 1, 1) * (psi_r.conj() * dpsi_r).real).sum(dim=0)
+            drho_sp[isp] += w * (occ.view(-1, 1, 1, 1)
+                                 * (psi_r.conj() * dpsi_r).real).sum(dim=0)
 
             # energy error contribution: dE = sum_i f_i <dpsi_i | R_i> (2nd order,
             # < 0); dpsi is annulus-only, so this picks the complement residual
@@ -367,16 +449,16 @@ def estimate_density_error(
         dpsi_all, psi_large_all, occ_all, sph_all = (
             dpsi_s, psi_large_s, occ_s, sph_s)
 
-    drho = drho / grid.volume
+    drho_sp = [d / grid.volume for d in drho_sp]
+    drho = drho_sp[0] if nspin == 1 else drho_sp[0] + drho_sp[1]
     if sym is not None:
-        # fold the IBZ complement over the star, same operator the SCF uses on rho
+        # fold the IBZ complement over the star, same operator the SCF uses on
+        # rho (nspin=1 only; nspin=2 + symmetry is gated above)
         sym_g = system.rho_symmetrizer.apply(r_to_g(drho.to(CDTYPE)))
         drho = g_to_r_box(sym_g, real=True)
     drho_fo = drho.clone()
 
     if dyson:
-        if nspin != 1:
-            raise NotImplementedError("Dyson dressing is nspin=1 only")
         if xc is None:
             raise ValueError("dyson=True requires the xc functional")
         warnings.warn(
@@ -386,10 +468,19 @@ def estimate_density_error(
             "neutral-to-negative on the one case tested. Use drho_first_order "
             "for the trusted estimate; see docs/manual/error-estimation.md.",
             stacklevel=2)
-        drho = _dyson_dress(
-            res, xc, drho_fo, beta=dyson_beta, tol=dyson_tol,
-            max_iter=dyson_max_iter, verbose=verbose,
-        )
+        if nspin == 1:
+            drho = _dyson_dress(
+                res, xc, drho_fo, beta=dyson_beta, tol=dyson_tol,
+                max_iter=dyson_max_iter, verbose=verbose,
+            )
+        else:
+            # spin-resolved coarse-space Dyson: per-channel χ₀ dressed through
+            # the spin Hxc kernel K_Hxc^{σσ'}. Symmetry is off here (gated
+            # above), so the per-spin first-order errors are already unfolded.
+            drho = _dyson_dress_spin(
+                res, xc, drho_sp, beta=dyson_beta, tol=dyson_tol,
+                max_iter=dyson_max_iter, verbose=verbose,
+            )
 
     return DiscretizationError(
         drho=drho, drho_first_order=drho_fo, denergy=denergy, dpsi=dpsi_all,
