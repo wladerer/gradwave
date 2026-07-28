@@ -94,18 +94,29 @@ def so_dij(system, col_meta, device=None) -> torch.Tensor:
     return dij_so
 
 
-def build_so_projectors(bk, system, so_tables=None) -> tuple[torch.Tensor, torch.Tensor]:
+def build_so_projectors(
+    bk, system, so_tables=None, positions=None
+) -> tuple[torch.Tensor, torch.Tensor]:
     """(q (nk, nproj_so, 2·npw_max), dij_so) for fully-relativistic pseudos.
 
     so_tables: per-species (nk, nchan, npw_max) F_i(|k+G|); defaults to
     system.so_beta_tables (the SCF mesh). Pass fresh tables for band paths.
+
+    positions: overrides ``system.positions`` in the e^{−i(k+G)·τ} phase ONLY
+    (the radial form factor and Ylm are position-independent). Passing a
+    ``requires_grad_(True)`` leaf here makes ``q`` differentiable in position —
+    the spinor analogue of ``core.hamiltonian.projectors(pd, positions)`` —
+    which is what ``postscf.forces``'s noncollinear/SOC branch uses to build
+    the nonlocal position-force term. Defaults to ``system.positions`` (the
+    plain SCF build), so existing callers (``scf_noncollinear``,
+    ``band_structure_nc``) are unaffected.
     """
     if so_tables is None:
         so_tables = system.so_beta_tables
     device = bk.mask.device
     nk, m_pw = bk.nk, bk.npw_max
     col_meta, lmax = so_projector_channels(system)
-    pos = system.positions
+    pos = system.positions if positions is None else positions
 
     # phases per atom: e^{−i(k+G)·τ_a}, (nk, npw, na)
     phase_arg = torch.einsum("kgi,ai->kga", bk.kpg, pos)

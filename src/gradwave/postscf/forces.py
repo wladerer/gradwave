@@ -7,6 +7,22 @@ structure factors in E_loc, and the projector phases in E_NL; only those
 three terms are rebuilt on the autograd graph (kinetic/Hartree/XC carry no
 τ-dependence at fixed ρ and would only add FFT cost). Plane waves ⇒ no
 Pulay forces at fixed cell.
+
+``forces()`` dispatches on ``res.formalism``: a plain collinear ``SCFResult``
+("nc") runs the code below; a noncollinear/SOC ``NCResult`` ("noncollinear")
+runs ``_forces_noncollinear`` — the same three-term (Ewald / E_loc structure
+factor / E_NL projector-phase) argument, generalized onto the spinor
+Hamiltonian the way ``postscf.stress``'s ``is_fr`` branch already generalized
+stress. That branch further splits on ``system.is_fr``: fully-relativistic
+(spin-orbit) pseudos use the j-resolved spinor projectors
+(``core.spinor_proj.build_so_projectors``, DOUBLED plane-wave axis), while a
+scalar-relativistic pseudo run through the noncollinear code path uses plain
+KB projectors acting on the up/down spinor halves separately (mirroring
+``scf.noncollinear``'s ``SpinorHamiltonian`` split and
+``spinor_scalar_nonlocal_energy``) — so it reduces to the ordinary collinear
+force in the z-collinear (no-canting) limit. ``hubbard_force_noncollinear`` is
+the +U analogue of ``hubbard_force`` on the noncollinear occupation-matrix
+machinery (``core.hubbard.occupation_matrices_noncollinear``, PR #159).
 """
 
 from __future__ import annotations
@@ -117,7 +133,12 @@ def forces(
     core-correction force −∫ v_xc ∂ρ_core/∂τ is the autograd gradient of
     E_xc(ρ + ρ_core(τ)) and needs the functional to evaluate v_xc. Pass the
     same XCFunctional the SCF ran with; it is ignored for valence-only species.
+
+    A noncollinear/SOC ``NCResult`` (``res.formalism == "noncollinear"``) is
+    dispatched to ``_forces_noncollinear`` — see the module docstring.
     """
+    if getattr(res, "formalism", None) == "noncollinear":
+        return _forces_noncollinear(res, remove_net=remove_net, xc=xc)
     system = res.system
     grid = system.grid
     nspin = getattr(res, "nspin", 1)
@@ -169,6 +190,136 @@ def forces(
 
         f = symmetrize_forces(f, system.sym, grid.cell)
     return f
+
+
+def _forces_noncollinear(
+    res, remove_net: bool = True, xc: XCFunctional | None = None
+) -> torch.Tensor:
+    """F_a = −dE/dτ_a for a noncollinear/SOC (spinor) ``NCResult``, (na, 3) [eV/Å].
+
+    Positions enter through exactly the same three terms as the collinear
+    path (module docstring): Ewald, the local-potential structure factor (on
+    the TOTAL spinor density ρ↑+ρ↓ — Hartree/XC/kinetic are frozen at fixed,
+    detached ρ/m⃗/coeffs and carry no τ-dependence), and the nonlocal
+    projector phases. Only the nonlocal term differs by pseudopotential kind:
+
+    - fully-relativistic (``system.is_fr``): j-resolved spinor projectors
+      built on the position-autograd graph (``core.spinor_proj.
+      build_so_projectors(..., positions=pos)``), contracted against the
+      spinor coefficients on the DOUBLED plane-wave axis — mirroring
+      ``scf.noncollinear``'s SCF assembly (``build_so_projectors`` /
+      ``nonlocal_energy``) and ``postscf.stress``'s ``_energy_strained_fr``
+      strain analogue.
+    - scalar-relativistic (plain noncollinear, no SOC): ordinary KB
+      projectors (``core.batch.projectors_b``) act on the up/down spinor
+      halves SEPARATELY and are summed, mirroring
+      ``scf.spinor_common.spinor_scalar_nonlocal_energy`` — so this branch
+      reduces exactly to the collinear force in the z-collinear (no-canting)
+      limit (the reduction oracle in ``tests/integration/
+      test_forces_noncollinear.py``).
+
+    NLCC is not yet supported here (see docs/gate_inventory.md): the core
+    charge's structure-factor force term would need the noncollinear (ρ, m⃗)
+    generalization of ``_core_correction_energy``, left as a follow-up.
+    """
+    from gradwave.core.batch import becp_b, projectors_b
+
+    system = res.system
+    if getattr(system, "rho_core", None) is not None:
+        raise NotImplementedError(
+            "NLCC core-correction force is not yet available on the "
+            "noncollinear/SOC path (system carries an NLCC core charge); "
+            "this needs the (ρ, m⃗) generalization of the collinear "
+            "_core_correction_energy — left as a follow-up"
+        )
+    grid = system.grid
+    bk = system.batch
+    pos = system.positions.detach().clone().requires_grad_(True)
+
+    rho_g = r_to_g(res.rho.detach().to(torch.complex128))  # total ρ↑+ρ↓
+    vloc_g = local_potential_g(
+        pos, system.species_index, system.vloc_tables, grid.g_cart, grid.volume
+    )
+    e_pos = local_energy(rho_g, vloc_g, grid.volume) + ewald_energy(
+        pos, system.charges, grid.cell
+    )
+
+    coeffs = res.coeffs.detach()  # (nk, nb, 2·npw_max)
+    occ = res.occupations.detach()  # (nk, nb), spinor degeneracy g=1
+    kw = system.kweights
+    nk = bk.nk
+    m_pw = coeffs.shape[-1] // 2
+
+    if system.is_fr:
+        from gradwave.core.spinor_proj import build_so_projectors
+
+        q_so, dij_so = build_so_projectors(bk, system, positions=pos)
+        b_so = torch.einsum("kpg,kbg->kbp", q_so.conj(), coeffs)
+        e_nl = nonlocal_energy([b_so[ik] for ik in range(nk)], dij_so, occ, kw)
+    else:
+        p = projectors_b(bk, pos)  # (nk, nproj, npw_max)
+        if p.shape[1]:
+            bu = becp_b(p, coeffs[..., :m_pw])
+            bd = becp_b(p, coeffs[..., m_pw:])
+            dij = bk.dij_full
+            e_nl = (
+                nonlocal_energy([bu[ik] for ik in range(nk)], dij, occ, kw)
+                + nonlocal_energy([bd[ik] for ik in range(nk)], dij, occ, kw)
+            )
+        else:
+            e_nl = torch.zeros((), dtype=e_pos.dtype, device=e_pos.device)
+    e_pos = e_pos + e_nl
+
+    (grad,) = torch.autograd.grad(e_pos, pos)
+    f = -grad
+    if remove_net:
+        f = f - f.mean(dim=0, keepdim=True)
+    if system.sym is not None:
+        from gradwave.symmetry import symmetrize_forces
+
+        f = symmetrize_forces(f, system.sym, grid.cell)
+    return f
+
+
+def hubbard_force_noncollinear(res, manifolds) -> torch.Tensor:
+    """+U contribution to the noncollinear/SOC Hellmann–Feynman force,
+    −dE_U/dτ, (na, 3) [eV/Å].
+
+    The noncollinear generalization of ``hubbard_force``: E_U enters through
+    the same atomic-orbital projector phases e^{−i(k+G)·τ}
+    (``core.hubbard.hubbard_projectors``), now feeding the 2×2 spin-block
+    occupation matrix N^I (``occupation_matrices_noncollinear``, PR #159) that
+    the noncollinear +U SCF/energy path already uses — reduces exactly to the
+    collinear ``hubbard_force`` in the z-collinear (no down component) limit
+    since the occupation matrix itself does (``test_occupation_matrix_
+    noncollinear_reduces_to_collinear_limit``). Unlike the collinear nspin=1
+    branch of ``hubbard_force``, no ×2 factor is needed: spinor occupations
+    already carry the full electron count at g=1 degeneracy. Additive to
+    ``forces()``'s noncollinear KB/local/Ewald force, same convention as the
+    collinear ``hubbard_force``.
+    """
+    from gradwave.core.hubbard import (
+        build_hubbard_projectors,
+        hubbard_energy,
+        hubbard_projectors,
+        occupation_matrices_noncollinear,
+    )
+
+    system = res.system
+    pos = system.positions.detach().clone().requires_grad_(True)
+    hub = build_hubbard_projectors(system, manifolds)
+    q = hubbard_projectors(hub, pos)  # differentiable in pos
+
+    coeffs = res.coeffs.detach()  # (nk, nb, 2·npw_max)
+    occ = res.occupations.detach()  # (nk, nb), spinor degeneracy g=1
+    m_pw = coeffs.shape[-1] // 2
+    mats = occupation_matrices_noncollinear(
+        q, coeffs[..., :m_pw], coeffs[..., m_pw:], occ, system.kweights, hub.sites
+    )
+    e_u = hubbard_energy(mats, hub.sites)
+
+    (grad,) = torch.autograd.grad(e_u, pos)
+    return -grad
 
 
 def hubbard_force(res: SCFResult, manifolds) -> torch.Tensor:
