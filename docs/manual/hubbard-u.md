@@ -99,9 +99,10 @@ unchanged — it reduces exactly to the plain collinear formula above when the
 spinor is purely up- or down-polarized with no spin canting.
 `core.hubbard.occupation_matrices_noncollinear`/`hubbard_dmatrix_noncollinear`
 build $N$/$D$; `scf.noncollinear.scf_noncollinear` takes the same `hubbard=`
-kwarg as the collinear `scf`. This is the SCF/energy path only — +U forces and
-stress on the noncollinear path are not implemented yet (they stay gated;
-see `postscf/forces.py`/`stress.py`).
+kwarg as the collinear `scf`. The +U force and stress are wired on this path
+too (`postscf.forces.hubbard_force_noncollinear`,
+`postscf.stress`'s fully-relativistic branch), the noncollinear generalization
+of the collinear `hubbard_force`/Hubbard strain term below.
 
 The noncollinear **USPP/PAW** SCF (`scf.uspp_noncollinear.scf_uspp_noncollinear`)
 does not have +U wired at all yet (a `hubbard=` argument there raises
@@ -126,15 +127,17 @@ sig = stress(res, SpinPBE(), manifolds=[HubbardManifold(species=0, l=2, u=5.0)])
 ```
 
 A +U result handed to `stress` without its manifolds is rejected rather than
-silently dropping the term. Fully-relativistic stress is not yet available.
+silently dropping the term. `stress` also carries the fully-relativistic
+(spin-orbit) +U strain term, so the same call works on a `scf_noncollinear`
+result with a fully-relativistic pseudopotential.
 
 From an input file (or the `GradWave` ASE calculator) the +U force and stress are
 folded in automatically: `relax`/`eos`/`elastic` with a `hubbard` block descend
-on the +U-corrected forces and stress. This is norm-conserving through the
-calculator — USPP/PAW +U forces exist (`forces_uspp` reads them off the result),
-but +U stress on the $S$-dressed projectors is not implemented, so a USPP/PAW +U
-run through the calculator is gated; use `task: scf` for a single-point USPP/PAW
-+U energy and forces.
+on the +U-corrected forces and stress. This runs on both the norm-conserving and
+the USPP/PAW path through the calculator — USPP/PAW +U forces (`forces_uspp`)
+and stress (`stress_uspp`, the strained $S$-dressed occupation term) both exist,
+so USPP/PAW +U relaxation, EOS, and elastic-constant runs work end to end, not
+just single-point `task: scf`.
 
 ## Determine U, and its gradient
 

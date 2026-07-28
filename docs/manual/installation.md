@@ -3,7 +3,7 @@
 The project is uv-managed. On NixOS the managed CPython loads wheel C libraries
 through nix-ld, so no system pip is involved.
 
-    cd QSuite
+    cd gradwave
     uv venv && uv sync
     uv run gradwave --version
 
