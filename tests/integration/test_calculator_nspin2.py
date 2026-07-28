@@ -79,3 +79,51 @@ def test_calculator_rejects_noncollinear_nspin():
     with pytest.raises(ValueError):
         GradWave(ecut=ECUT, pseudopotentials={"O": pseudo("O_ONCV_PBE-1.2.upf")},
                  nspin=4)
+
+
+@pytest.mark.slow
+def test_calculator_uspp_nspin2_matches_direct_scf():
+    """Self-oracle for the ASE calculator's USPP/PAW collinear-spin (nspin=2)
+    path (issue #147). The gate in _calculate_uspp was stale — scf_uspp,
+    paw_forces.forces_uspp, and paw_stress.stress_uspp already thread nspin=2
+    (validated in #150) — the calculator just never resolved the spin channel
+    and passed it through. Same oracle shape as the NC test above: a
+    ferromagnetic O2 triplet through the PAW ASE calculator vs a direct scf_uspp
+    call mirroring the calculator's setup, energy + moment bit-for-bit.
+    """
+    from gradwave.pseudo.upf_paw import parse_upf_paw
+    from gradwave.scf.uspp import scf_uspp, setup_uspp
+
+    torch.set_num_threads(8)
+    pse = pseudo("O.pbe-n-kjpaw_psl.1.0.0.UPF")
+
+    # --- ASE calculator route (nspin auto from the initial moments; a gaussian
+    # smearing lets the shared Fermi level find the moment, no FSM pin) ---
+    atoms = Atoms("O2", positions=POS, cell=[BOX, BOX, BOX], pbc=True)
+    atoms.set_initial_magnetic_moments([1.0, 1.0])
+    atoms.calc = GradWave(
+        ecut=ECUT, pseudopotentials={"O": pse}, xc="lda", kpts=(1, 1, 1),
+        smearing="gaussian", width=0.1, use_symmetry=False)
+    e_calc = atoms.get_potential_energy()
+    m_calc = atoms.get_magnetic_moment()
+
+    # --- direct scf_uspp route mirroring the calculator's build + defaults ---
+    system = setup_uspp(np.diag([BOX, BOX, BOX]), POS, [0, 0],
+                        [parse_upf_paw(pse)], ecut=ECUT, kmesh=(1, 1, 1),
+                        use_symmetry=False)
+    z_val = system.charges.detach().cpu().numpy().astype(float)
+    start_mag = [1.0 / z_val[0], 1.0 / z_val[1]]  # μ/Z, as _resolve_spin computes
+    res = scf_uspp(system, LSDA_PW92(), nspin=2, start_mag=start_mag,
+                   smearing="gaussian", width=0.1, max_iter=100, etol=1e-8,
+                   rhotol=1e-7, diago_tol=1e-9, mixing_scheme="pulay",
+                   mixing_alpha=0.7, mixing_history=None, mixing_kerker=None,
+                   precond="kerker", verbose=False)
+    assert res.converged
+
+    # genuinely magnetic: a live spin channel (not collapsed to nspin=1); the
+    # sign of the moment is the arbitrary spontaneous choice of the seed branch
+    assert abs(m_calc) > 1.0, m_calc
+    # same scf_uspp underneath → bit-identical (tol is generous slack)
+    assert abs(e_calc - float(res.energies.free_energy)) < 1e-8
+    assert abs(m_calc - float(res.mag_total)) < 1e-8
+    assert "magmom" in atoms.calc.results

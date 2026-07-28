@@ -22,6 +22,11 @@ from gradwave.api import run_elastic
 from gradwave.inputs import ElasticParams, Input, KPointsParams, SmearingParams
 from tests.helpers import PSEUDOS, RY, pseudo
 
+# fully-relativistic / scalar-relativistic Si pair (same ONCV generation): the
+# elastic-tensor difference between them is the spin-orbit contribution, which is
+# negligible in the Si valence — the zero-SOC-limit cross-check for the ungated
+# noncollinear/SOC run_elastic driver path (issue #147).
+
 # WIEN2k all-electron PBE bulk modulus (Lejaeghere et al., Science 351, 2016).
 WIEN2K_SI_B0 = 88.545
 
@@ -106,3 +111,55 @@ def test_elastic_stress_matches_ase_calculator():
     sig_voigt = np.array([sig[0, 0], sig[1, 1], sig[2, 2],
                           sig[1, 2], sig[0, 2], sig[0, 1]])
     assert np.allclose(sig_voigt, stress_ase, atol=1e-5)
+
+
+def _si_soc_input(fr: bool):
+    """Diamond Si, coarse settings shared between the FR and SR runs so the only
+    physical difference is spin-orbit. FR is a spin-orbit-only (nonmagnetic)
+    spinor run; SR is a plain scalar-relativistic nspin=1 run."""
+    a = 5.43
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+    atoms = Atoms("Si2", positions=pos, cell=cell, pbc=True)
+    pmap = {"Si": "Si_ONCV_PBE_fr.upf" if fr else "Si_ONCV_PBE_sr.upf"}
+    return Input(
+        atoms=atoms, pseudo_dir=Path(PSEUDOS), pseudo_map=pmap,
+        ecut=16 * RY, xc="pbe", kpoints=KPointsParams(mesh=(3, 3, 3)),
+        smearing=SmearingParams(type="gaussian", width=0.1),
+        noncollinear=fr, nonmagnetic=fr,
+        elastic=ElasticParams(strain=0.008))
+
+
+@pytest.mark.slow
+def test_run_elastic_soc_matches_scalar():
+    """The ungated noncollinear/spin-orbit run_elastic path (issue #147): the
+    fully-relativistic (SOC) elastic tensor of diamond Si equals the scalar-
+    relativistic one to within the (tiny) Si valence spin-orbit contribution.
+
+    Proves the api.py gate was stale: run_elastic already dispatches the SOC
+    spinor result to postscf.stress.stress, whose is_fr branch
+    (_energy_strained_fr) was ungated in #103 — the driver just never routed to
+    it. Both runs share cell/ecut/k-mesh, so the only difference is SOC."""
+    torch.set_num_threads(8)
+    c_fr = np.array(run_elastic(_si_soc_input(fr=True), verbose=False)["c_GPa"])
+    c_sr = np.array(run_elastic(_si_soc_input(fr=False), verbose=False)["c_GPa"])
+    # SOC shifts the Si elastic constants by well under 1 GPa; the band is loose
+    # against the coarse-setting numerical floor, tight enough to catch a broken
+    # (e.g. dropped-nonlocal or wrong-XC) SOC stress.
+    assert np.allclose(c_fr, c_sr, atol=3.0), np.abs(c_fr - c_sr).max()
+
+
+def test_run_elastic_rejects_soc_uspp(tmp_path):
+    """USPP/PAW spin-orbit elastic stays gated (no spinor USPP stress path)."""
+    a = 5.43
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+    atoms = Atoms("Si2", positions=pos, cell=cell, pbc=True)
+    inp = Input(
+        atoms=atoms, pseudo_dir=Path(PSEUDOS),
+        pseudo_map={"Si": "Si.pbe-n-kjpaw_psl.1.0.0.UPF"}, ecut=20 * RY,
+        xc="pbe", kpoints=KPointsParams(mesh=(2, 2, 2)),
+        smearing=SmearingParams(type="gaussian", width=0.1),
+        noncollinear=True, nonmagnetic=True)
+    with pytest.raises(NotImplementedError, match="noncollinear USPP"):
+        run_elastic(inp, verbose=False)

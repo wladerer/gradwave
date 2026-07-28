@@ -64,3 +64,39 @@ def test_phonon_dos_present(si_phonons):
     assert d.sum() > 0.0
     # spectral weight extends up to the optical band, none far above it
     assert g[d > d.max() * 0.01].max() < 600.0
+
+
+def _si_phonon_input(nspin: int):
+    """Diamond Si supercell phonons, coarse and shared between nspin 1 and 2.
+    A 1×1×1 supercell keeps the SCF count small (Γ dynamical matrix only); the
+    nspin=2 seed is pinned to zero moment so it is the nonmagnetic limit of
+    nspin=1 — the two force paths must agree."""
+    a = 5.43
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+    atoms = Atoms("Si2", positions=pos, cell=cell, pbc=True)
+    return Input(
+        atoms=atoms, pseudo_dir=Path(PSEUDOS),
+        pseudo_map={"Si": "Si_ONCV_PBE-1.2.upf"}, ecut=14 * RY, xc="pbe",
+        kpoints=KPointsParams(mesh=(2, 2, 2)),
+        smearing=SmearingParams(type="none"), nspin=nspin,
+        start_mag={"Si": 0.0},
+        tot_magnetization=0.0 if nspin == 2 else None,
+        phonons=PhononParams(supercell=(1, 1, 1), displacement=0.01,
+                             npoints=8, dos_mesh=(0, 0, 0)))
+
+
+@pytest.mark.slow
+def test_run_phonons_nspin2_matches_nspin1():
+    """The ungated nspin=2 supercell-phonon path (issue #147): a nonmagnetic Si
+    run through the nspin=2 driver folds the same force constants as nspin=1, so
+    the frequencies are identical. Proves the api.py gate was stale — the FD
+    force fold calls postscf.forces.forces, which already sums per spin channel
+    (#45); the driver just hardcoded the nspin=1 SCF call."""
+    torch.set_num_threads(8)
+    f1 = np.array(run_phonons(_si_phonon_input(1), verbose=False)["frequencies_cm1"])
+    f2 = np.array(run_phonons(_si_phonon_input(2), verbose=False)["frequencies_cm1"])
+    assert f2.shape == f1.shape
+    # nonmagnetic limit: the nspin=2 forces equal the nspin=1 forces to SCF
+    # convergence, so the folded frequencies agree to well under 1 cm⁻¹
+    assert np.allclose(f1, f2, atol=1.0), np.abs(f1 - f2).max()

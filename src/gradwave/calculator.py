@@ -611,22 +611,17 @@ class GradWave(Calculator):
         return system
 
     def _calculate_uspp(self):
-        """USPP/PAW route (nspin=1): one SCF, then energy, forces, and (for a
-        periodic cell) stress in the same pass."""
+        """USPP/PAW route (nspin 1 or 2): one SCF, then energy, forces, and (for
+        a periodic cell) stress in the same pass."""
         from gradwave.scf.uspp import scf_uspp
 
         p = self.parameters
-        if p["nspin"] == 2 or np.any(
-                self.atoms.get_initial_magnetic_moments() != 0.0):
-            # collinear spin through the calculator is norm-conserving only for
-            # now; the USPP/PAW spin SCF + PAW spin forces/stress exist (api
-            # task: scf) but are not wired here or covered by a same-commit
-            # oracle, so keep this narrowly gated rather than silently wrong.
-            raise NotImplementedError(
-                "nspin=2 through the GradWave calculator is norm-conserving "
-                "only; USPP/PAW collinear spin is not wired to the calculator "
-                "yet (run task: scf via the api for a single-point nspin=2 "
-                "USPP/PAW energy)")
+        system = self._get_uspp_system(self.atoms)
+        # collinear-spin channel from the atoms' initial moments (nspin=1 when
+        # unmagnetized), exactly as the NC path resolves it. scf_uspp,
+        # forces_uspp, and stress_uspp all thread nspin=2 (per-spin becsum /
+        # rho / occupation channels), so the calculator just passes it through.
+        nspin, start_mag, _tot_mag = self._resolve_spin(self.atoms, system)
         if p["eigensolver"] != "davidson":
             raise ValueError(
                 "eigensolver='chebyshev' is norm-conserving only; the USPP/PAW "
@@ -636,9 +631,12 @@ class GradWave(Calculator):
         # now the +U stress (stress_uspp adds the strained S-dressed occupation
         # term), so relaxation / EOS / elastic constants run here too.
         manifolds = self._resolve_hubbard(self.atoms)
-        system = self._get_uspp_system(self.atoms)
+        xc = self._make_xc(nspin)
+        # scf_uspp has no tot_magnetization pin (no fixed-spin-moment mode); the
+        # start_mag seed and a shared Fermi level find the moment.
         # scf_uspp takes mixing_history=None natively (per-scheme default)
-        res = scf_uspp(system, self._make_xc(), smearing=p["smearing"],
+        res = scf_uspp(system, xc, nspin=nspin, start_mag=start_mag,
+                       smearing=p["smearing"],
                        width=p["width"], max_iter=p["max_iter"],
                        etol=p["etol"], rhotol=p["rhotol"],
                        diago_tol=p["diago_tol"], mixing_scheme=p["mixing_scheme"],
@@ -646,13 +644,14 @@ class GradWave(Calculator):
                        mixing_history=p["mixing_history"],
                        mixing_kerker=p["mixing_kerker"], precond=p["precond"],
                        hubbard=manifolds, verbose=self._verbose,
-                       start_from=self._warm_start(system))
+                       start_from=self._warm_start(system, nspin))
         if not res.converged:
             raise RuntimeError("gradwave USPP SCF did not converge")
         self.last_result = res
-        xc = self._make_xc()
         self.results["energy"] = float(res.energies.free_energy)
         self.results["free_energy"] = float(res.energies.free_energy)
+        if nspin == 2:
+            self.results["magmom"] = float(res.mag_total)
         from gradwave.postscf.paw_forces import forces_uspp
 
         self.results["forces"] = forces_uspp(res, xc).cpu().numpy()
