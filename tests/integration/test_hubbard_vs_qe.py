@@ -141,3 +141,82 @@ def test_nio_linear_response_u_autodiff():
     assert abs(out["chi"] - (-0.08733)) < 2e-3
     assert abs(out["U_eV"] - ref["hubbard_U_eV"]) < 0.15, out["U_eV"]  # vs hp.x
     assert out["n_outer"] < 50  # Anderson-accelerated fixed point
+
+
+def _diamond_c_system():
+    """Two-atom diamond-carbon cell (a wide-gap, nonmagnetic, two-equivalent-site
+    insulator with p pswfc) — the light self-oracle bed for linear-response U."""
+    from gradwave.scf.loop import setup_system
+    from tests.helpers import pseudo
+
+    a = 3.567
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+    c = parse_upf(pseudo("PD_C_PBE_std.upf"))
+    return setup_system(cell, pos, [0, 0], [c], ecut=30 * RY, kmesh=(2, 2, 2),
+                        nbands=12)
+
+
+@pytest.mark.standard
+def test_diamond_c_linear_response_u_nspin1_matches_nspin2():
+    """Sternheimer linear-response U on the C 2p manifold: the newly-ungated
+    nspin=1 path must reproduce, to numerical precision, the established nspin=2
+    path in its nonmagnetic limit (start_mag=0) — the decisive cross-check with
+    the working code as ground truth. Diamond C is nonmagnetic, so the spin
+    channels are degenerate and the two estimators are the same quantity."""
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.postscf.hubbard_u import linear_response_u_autodiff
+
+    torch.set_num_threads(4)
+    system = _diamond_c_system()
+    kw = dict(l=1, species=0, site=0, smearing="gaussian", width=0.02)
+    out1 = linear_response_u_autodiff(
+        system, PBE(), scf_kwargs=dict(etol=1e-8, rhotol=1e-7, verbose=False,
+                                       nspin=1, max_iter=120), **kw)
+    out2 = linear_response_u_autodiff(
+        system, SpinPBE(), scf_kwargs=dict(etol=1e-8, rhotol=1e-7, verbose=False,
+                                           nspin=2, start_mag=[0.0, 0.0],
+                                           max_iter=120), **kw)
+    assert out1["chi0"] < out1["chi"] < 0.0            # localizing response
+    assert abs(out1["chi"] - out2["chi"]) < 1e-6
+    assert abs(out1["chi0"] - out2["chi0"]) < 1e-6
+    assert abs(out1["U_eV"] - out2["U_eV"]) < 1e-4, (out1["U_eV"], out2["U_eV"])
+
+
+@pytest.mark.standard
+def test_diamond_c_linear_response_u_full_matrix_matches_shortcut():
+    """The general per-site response-matrix path (perturb every correlated site,
+    invert the full χ_IJ) must reduce to the cheap [[a,b],[b,a]] single-column
+    shortcut on symmetry-equivalent sites — the reduction oracle for the
+    inequivalent-site generalization, on the two equivalent diamond-C atoms."""
+    from gradwave.core.hubbard import (
+        HubbardManifold,
+        build_hubbard_projectors,
+        hubbard_projectors,
+    )
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.postscf.hubbard_u import (
+        _assemble_u,
+        _assemble_u_matrix,
+        _response_columns,
+    )
+    from gradwave.scf.loop import scf
+
+    torch.set_num_threads(4)
+    system = _diamond_c_system()
+    man = [HubbardManifold(species=0, l=1, u=0.0, j=0.0)]
+    hub = build_hubbard_projectors(system, man)
+    hub_q = hubbard_projectors(hub, system.positions)
+    base = scf(system, PBE(), smearing="gaussian", width=0.02, hubbard=man,
+               etol=1e-8, rhotol=1e-7, verbose=False, nspin=1, max_iter=120)
+    assert base.converged and hub.n_sites == 2
+
+    cols = [_response_columns(base, PBE(), hub, hub_q, j) for j in range(2)]
+    chi_mat = torch.stack([c[1] for c in cols], dim=1)   # χ_IJ = dN_I/dα_J
+    chi0_mat = torch.stack([c[0] for c in cols], dim=1)
+    full = _assemble_u_matrix(chi_mat, chi0_mat, site=0)
+    short = _assemble_u(cols[0][1], cols[0][0], 0, hub.sites,
+                        system.species_of_atom)
+    # equivalent sites: χ_IJ is symmetric to numerical noise, so both agree
+    assert abs(chi_mat[0, 1] - chi_mat[1, 0]) < 1e-6
+    assert abs(full["U_eV"] - short["U_eV"]) < 1e-4, (full["U_eV"], short["U_eV"])

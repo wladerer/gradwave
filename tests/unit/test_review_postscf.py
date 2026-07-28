@@ -16,7 +16,12 @@ import torch
 
 from gradwave.postscf import magnetism
 from gradwave.postscf.hessian import SQRT_EV_AMU_ANG2_TO_CM1
-from gradwave.postscf.hubbard_u import _assemble_u
+from gradwave.postscf.hubbard_u import (
+    _all_sites_equivalent,
+    _assemble_u,
+    _assemble_u_matrix,
+    _use_full_matrix,
+)
 from gradwave.postscf.irreps import _chi
 from gradwave.postscf.phonons import (
     _SQRT_EV_AMU_ANG2_TO_CM1,
@@ -84,6 +89,59 @@ def test_assemble_u_single_site_scalar():
     out = _assemble_u(chi, chi0, site=0, sites=_sites(2, 2)[:1],
                       species_of_atom=[3])
     assert out["U_eV"] == pytest.approx(1.0 / -0.50 - 1.0 / -0.30, rel=1e-12)
+
+
+def _sites3(l=2):
+    dim = 2 * l + 1
+    return [{"atom": i, "l": l, "start": i * dim, "dim": dim} for i in range(3)]
+
+
+def test_all_sites_equivalent():
+    # lone site is trivially "equivalent"; identical species+l pair is equivalent
+    assert _all_sites_equivalent(_sites(2, 2)[:1], [3])
+    assert _all_sites_equivalent(_sites(2, 2), [3, 3])
+    assert _all_sites_equivalent(_sites3(2), [3, 3, 3])
+    # a different l or a different species breaks equivalence
+    assert not _all_sites_equivalent(_sites(2, 1), [3, 3])
+    assert not _all_sites_equivalent(_sites(2, 2), [3, 4])
+
+
+def test_use_full_matrix_routing():
+    # cheap single-column shortcut: lone site, or exactly two equivalent sites
+    assert not _use_full_matrix(_sites(2, 2)[:1], [3])
+    assert not _use_full_matrix(_sites(2, 2), [3, 3])
+    # inequivalent pair (different l or species) or ≥3 sites needs the full χ_IJ
+    assert _use_full_matrix(_sites(2, 1), [3, 3])
+    assert _use_full_matrix(_sites(2, 2), [3, 4])
+    assert _use_full_matrix(_sites3(2), [3, 3, 3])
+
+
+def test_assemble_u_matrix_reduces_to_equivalent_shortcut():
+    """On symmetry-equivalent sites the general per-site matrix path gives the
+    same U as the cheap [[a,b],[b,a]] single-column shortcut — the decisive
+    reduction check for the inequivalent-site generalization."""
+    chi_col = torch.tensor([-0.30, -0.05], dtype=torch.float64)
+    chi0_col = torch.tensor([-0.50, -0.02], dtype=torch.float64)
+    short = _assemble_u(chi_col, chi0_col, site=0, sites=_sites(2, 2),
+                        species_of_atom=[3, 3])
+    # the symmetric matrix the shortcut implicitly builds, fed to the full path
+    chi_mat = torch.tensor([[-0.30, -0.05], [-0.05, -0.30]], dtype=torch.float64)
+    chi0_mat = torch.tensor([[-0.50, -0.02], [-0.02, -0.50]], dtype=torch.float64)
+    full = _assemble_u_matrix(chi_mat, chi0_mat, site=0)
+    assert full["U_eV"] == pytest.approx(short["U_eV"], rel=1e-12)
+
+
+def test_assemble_u_matrix_inequivalent_asymmetric():
+    """The genuine inequivalent path: an asymmetric χ_IJ (χ_IJ ≠ χ_JI, as for
+    two different species/l) inverts as (χ0⁻¹ − χ⁻¹)_{site,site}."""
+    chi_mat = torch.tensor([[-0.30, -0.05], [-0.02, -0.28]], dtype=torch.float64)
+    chi0_mat = torch.tensor([[-0.50, -0.02], [-0.03, -0.48]], dtype=torch.float64)
+    out = _assemble_u_matrix(chi_mat, chi0_mat, site=1)
+    expect = (np.linalg.inv(chi0_mat.numpy())
+              - np.linalg.inv(chi_mat.numpy()))[1, 1]
+    assert out["U_eV"] == pytest.approx(expect, rel=1e-12)
+    assert out["chi"] == pytest.approx(-0.28, rel=1e-12)
+    assert out["chi0"] == pytest.approx(-0.48, rel=1e-12)
 
 
 def test_magnetism_moment_tol_single_constant():
