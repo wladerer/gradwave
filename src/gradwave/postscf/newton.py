@@ -102,8 +102,12 @@ def newton_polish(res: USPPResult, xc: XCFunctional | SpinXC, *, tol: float = 1e
     coeffs_b = [None] * nspin
 
     # per-spin state (nspin=1: a length-1 list; nspin=2: [↑, ↓])
-    rho_s = ([res.rho.detach().clone()] if nspin == 1
-             else [r.detach().clone() for r in res.rho_spin])
+    if nspin == 1:
+        rho_s = [res.rho.detach().clone()]
+    else:
+        # scf_uspp always sets rho_spin when nspin=2 (see results.py).
+        assert res.rho_spin is not None
+        rho_s = [r.detach().clone() for r in res.rho_spin]
     bec_s = ([[m.detach().clone() for m in res.rho_ij_atoms]] if nspin == 1
              else [[m.detach().clone() for m in ch] for ch in res.rho_ij_atoms])
     hist_out = []

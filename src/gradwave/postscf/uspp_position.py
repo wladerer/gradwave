@@ -69,11 +69,15 @@ def _dvloc_r(system, a: int, alpha: int) -> torch.Tensor:
                                system.vloc_tables, grid.g_cart, grid.volume)
         return g_to_r_box(vg, real=True)
 
-    _, dv = torch.func.jvp(f, (system.positions,), (tang,))
-    return dv
+    # `torch.func.jvp`'s stub return type is `tuple[Any, Any] |
+    # tuple[Any, Any, Any]` (the 3-tuple variant is only real when
+    # has_aux=True, not passed here) -- ty can't narrow the arity from the
+    # default `bool` parameter type, so index instead of destructuring.
+    jvp_out = torch.func.jvp(f, (system.positions,), (tang,))
+    return jvp_out[1]
 
 
-def _drho_core_r(system, a: int, alpha: int) -> torch.Tensor:
+def _drho_core_r(system, a: int, alpha: int) -> torch.Tensor | None:
     """∂ρ_core(r)/∂τ_{aα} — the NLCC core density is atom-centered and
     moves with its atom (analytic phase derivative of the setup product).
     Returns None when the species carries no core."""
@@ -163,6 +167,8 @@ class PositionPerturbation:
 
         cs = self.cs
         system = cs.system
+        # only ever called from __init__ under `if cs.hub is not None:`.
+        assert cs.hub is not None
         sites = cs.hub.sites
         phi_free = phi_free_per_k(system, sites)  # per-k phase-free φ
         acol = atom_of_col(sites).to(system.positions.device)
@@ -182,8 +188,8 @@ class PositionPerturbation:
                 bphi = torch.einsum("jg,mg->mj", p.conj(), phik)  # ⟨β_j|φ_m⟩
                 return phik + torch.einsum("mj,ij,ig->mg", bphi, q, p)
 
-            _, d = torch.func.jvp(build, (system.positions,), (tang,))
-            out.append(d)
+            jvp_out = torch.func.jvp(build, (system.positions,), (tang,))
+            out.append(jvp_out[1])
         return out
 
     def dproj(self, hk, sph):
@@ -220,6 +226,9 @@ class PositionPerturbation:
         if cs.hub is not None:
             # V_U = |Sφ⟩D_U⟨Sφ|; atom a's motion moves Sφ (bare), and the
             # self-consistent δn feeds hub_extra = δD_U (total response).
+            # self.dsphi is built in __init__ under the same `cs.hub is not
+            # None` condition on the same cs, so it's real here too.
+            assert self.dsphi is not None
             sphi = hk.hub_sphi
             dsphi = self.dsphi[ik]
             hub_d = hk.hub_d
@@ -333,6 +342,9 @@ class PositionPerturbation:
             # +U occupations: n_pq = Σ wf ⟨Sφ_p|ψ⟩⟨ψ|Sφ_q⟩; the derivative gets
             # the orbital response ⟨Sφ|δψ⟩ and the explicit Sφ motion ⟨∂Sφ|ψ⟩
             if cs.hub is not None:
+                # dnh is built above under the same `cs.hub is not None`
+                # (same cs), and self.dsphi likewise from __init__.
+                assert dnh is not None and self.dsphi is not None
                 bh = cs.bh_win[isp][ik]  # ⟨Sφ|ψ⟩ over the window
                 dbh = becp(hk.hub_sphi, dpsi) + becp(self.dsphi[ik], c)[:ns]
                 for si, st in enumerate(cs.hub.sites):
@@ -342,6 +354,7 @@ class PositionPerturbation:
                     dnh[0][si] += cs.hub_w * wk * (m1 + m1.conj().T)
         dbec = [0.5 * (m + m.conj().T) for m in dbec]
         if cs.hub is not None:
+            assert dnh is not None
             dnh = [[0.5 * (m + m.conj().T) for m in dnh[0]]]
 
         # augmentation density: response becsum at fixed phases (the shared
@@ -400,7 +413,15 @@ def _self_consistent_response(cs, bare_rho, bare_bec, bare_nh=None, *,
     base_len = n_pts + sum(n * n for n in nbec)
 
     def _pack_all(rho, bec, nh):
-        v = _pack(rho.to(RDTYPE), [m.real.to(RDTYPE) for m in bec])
+        # newton.py's _pack/_unpack always operate on per-spin lists (even
+        # nspin=1 wraps its single channel in a length-1 list -- see
+        # newton_polish's `[res.rho.detach().clone()]`); this module is
+        # nspin=1-only scope, so wrap/unwrap the single channel explicitly
+        # rather than passing the bare Tensor/flat list `_pack` expects a
+        # list-of/list-of-lists for (previously "worked" only by the
+        # accidental equivalence of concatenated row-major reshapes to a
+        # single whole-tensor reshape -- correct by luck, not by contract).
+        v = _pack([rho.to(RDTYPE)], [[m.real.to(RDTYPE) for m in bec]])
         if not has_hub:
             return v
         tail = []
@@ -410,7 +431,8 @@ def _self_consistent_response(cs, bare_rho, bare_bec, bare_nh=None, *,
         return torch.cat([v] + tail)
 
     def _unpack_all(vec):
-        d_rho, d_bec = _unpack(vec[:base_len], shape, n_pts, nbec)
+        d_rho_s, d_bec_s = _unpack(vec[:base_len], shape, n_pts, nbec, nspin=1)
+        d_rho, d_bec = d_rho_s[0], d_bec_s[0]
         if not has_hub:
             return d_rho, d_bec, None
         nh, off = [], base_len
@@ -427,6 +449,11 @@ def _self_consistent_response(cs, bare_rho, bare_bec, bare_nh=None, *,
                   zip(cs.c_win[0], cs.n_solve[0], strict=True)]]
     d = r_vec.clone()
     mixer = AndersonMixer(history, beta)
+    # Bound before the loop purely so ty can see `gn` as always assigned in
+    # the `else` clause below (max_inner is always >= 1 in practice, same
+    # "runs >=1 iteration" pattern as scf/loop.py/uspp_loop.py) -- overwritten
+    # every real iteration.
+    gn = float("inf")
     for it in range(1, max_inner + 1):
         d_rho, d_bec, d_nh = _unpack_all(d)
         w_sp = cs.k_hxc_grid([d_rho])
@@ -655,6 +682,10 @@ def hessian_column(res: USPPResult, xc: XCFunctional | SpinXC, a: int, alpha: in
     rho_core = rho_core_on_graph(system, phases)
     rho_xc = rho_tot if rho_core is None else rho_tot + rho_core
     sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
+    # hessian_column asserts nspin=1 above, so xc is always the collinear
+    # functional here (the SpinXC/nspin=2 pairing is enforced by this
+    # module's own callers, same convention as scf/uspp_loop.py's dispatch).
+    assert isinstance(xc, XCFunctional)
     # grads below take create_graph=True (a second backward follows), so keep
     # this E_xc eager, compiled aot_autograd cannot double-backward.
     with xc_eager():

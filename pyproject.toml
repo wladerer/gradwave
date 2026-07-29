@@ -159,6 +159,23 @@ include = [
     "src/gradwave/postscf/thermo.py",
     "src/gradwave/postscf/uspp_bands.py",
     "src/gradwave/postscf/uspp_frozen.py",
+    "src/gradwave/postscf/cohp.py",
+    "src/gradwave/postscf/dielectric.py",
+    "src/gradwave/postscf/discretization_error.py",
+    "src/gradwave/postscf/forces.py",
+    "src/gradwave/postscf/hubbard_u.py",
+    "src/gradwave/postscf/irreps.py",
+    "src/gradwave/postscf/mae.py",
+    "src/gradwave/postscf/newton.py",
+    "src/gradwave/postscf/paw_forces.py",
+    "src/gradwave/postscf/paw_stress.py",
+    "src/gradwave/postscf/pdos.py",
+    "src/gradwave/scf/results.py",
+    "src/gradwave/postscf/stress.py",
+    "src/gradwave/postscf/_strain.py",
+    "src/gradwave/postscf/uspp_implicit.py",
+    "src/gradwave/postscf/uspp_position.py",
+    "src/gradwave/postscf/volumetric.py",
     #
     # Phase 5: autotyping + MonkeyType over solvers/ (the eigensolver
     # workhorses -- all 7 files, verified genuinely clean by actually

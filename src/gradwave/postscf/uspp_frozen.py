@@ -11,6 +11,8 @@ res["rho_spin"] (per-spin, nspin=2), res["rho_ij_atoms"] (becsum), res["nspin"].
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 
 from gradwave.core.energies.local_pp import local_potential_g
@@ -20,6 +22,13 @@ from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import CDTYPE
 from gradwave.scf.results import USPPResult
 from gradwave.scf.uspp_setup import USPPSystem
+
+# A converged-state view: either a real USPPResult, or the synthetic
+# dict-shaped Jacobian snapshot postscf.newton's Newton finisher builds each
+# step (same fields read through __getitem__/.get() either way -- USPPResult
+# supports the dict interface via its _DictBridge mixin, so this is a real
+# shared "res-like" contract, not just a type-checker escape hatch).
+_ResLike = USPPResult | dict[str, Any]
 
 
 def screen_phase(system: USPPSystem) -> torch.Tensor:
@@ -63,7 +72,7 @@ def aug_density_from_becsum(
     return g_to_r_box(aug_box.reshape(grid.shape), real=True)
 
 
-def frozen_veff(res: USPPResult, xc: XCFunctional | SpinXC) -> list[torch.Tensor]:
+def frozen_veff(res: _ResLike, xc: XCFunctional | SpinXC) -> list[torch.Tensor]:
     """Per-spin v_eff = v_H + v_loc + v_xc [eV] of a converged state.
 
     Length-nspin list; the NLCC core density is folded into v_xc.
@@ -88,7 +97,7 @@ def frozen_veff(res: USPPResult, xc: XCFunctional | SpinXC) -> list[torch.Tensor
 
 
 def screened_dscr(
-    res: USPPResult, xc: XCFunctional | SpinXC, veff_s: list[torch.Tensor]
+    res: _ResLike, xc: XCFunctional | SpinXC, veff_s: list[torch.Tensor]
 ) -> list[torch.Tensor]:
     """dij_full + ∫ v_eff^σ Q + PAW one-center ddd, per spin. len == len(veff_s)."""
     system = res["system"]

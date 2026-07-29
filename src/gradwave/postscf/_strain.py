@@ -18,6 +18,7 @@ the sum at ~1 ulp for multi-species cells.
 from __future__ import annotations
 
 import math
+from typing import TypedDict
 
 import numpy as np
 import torch
@@ -31,6 +32,29 @@ from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.grids import FFTGrid, GSphere
 from gradwave.pseudo.radial_torch import RadialTables
 from gradwave.scf.loop import System
+
+
+class _HubbardSite(TypedDict):
+    """One correlated-atom entry as built by ``_hubbard_strain_setup`` --
+    same shape as ``scf.uspp_hubbard.hubbard_sites``/``core.hubbard``'s own
+    site records (``{atom, l, u, j, start, dim}``), but given real per-key
+    types here instead of the flattened ``dict[str, int | float]`` a plain
+    dict-literal annotation would give every key (which made ``start``/
+    ``dim`` -- always int -- read back as ``int | float`` at every use).
+
+    NOTE (follow-up): ``core.hubbard``'s own in-progress typing pass
+    (concurrent, not yet merged as of this writing) independently defines a
+    public ``HubbardSite`` TypedDict with this exact shape. Once that lands,
+    this private copy should be dropped in favor of importing the shared
+    one -- kept separate here only because that module was mid-flight and
+    uncommitted, not a stable thing to import from yet."""
+
+    atom: int
+    l: int
+    u: float
+    j: float
+    start: int
+    dim: int
 
 
 def box_millers(shape: tuple[int, int, int], device: torch.device) -> torch.Tensor:
@@ -197,7 +221,7 @@ def _hubbard_strain_setup(
     system: System, manifolds: list[HubbardManifold],
 ) -> tuple[
     dict[int, HubbardManifold],
-    list[dict[str, int | float]],
+    list[_HubbardSite],
     dict[int, tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]],
     int,
     int,
@@ -228,7 +252,8 @@ def _hubbard_strain_setup(
             torch.as_tensor(simpson_weights(upf.rab), dtype=RDTYPE, device=dev),
         )
 
-    sites, col = [], 0
+    sites: list[_HubbardSite] = []
+    col = 0
     for a, s in correlated:
         m = man_by_sp[s]
         sites.append({"atom": a, "l": m.l, "u": m.u, "j": m.j, "start": col, "dim": 2 * m.l + 1})
@@ -240,7 +265,7 @@ def _hubbard_strain_setup(
 
 def _hubbard_strain_q(
     sph: GSphere, b_e: torch.Tensor, pos_e: torch.Tensor, omega: torch.Tensor, system: System,
-    man_by_sp: dict[int, HubbardManifold], sites: list[dict[str, int | float]],
+    man_by_sp: dict[int, HubbardManifold], sites: list[_HubbardSite],
     rad: dict[int, tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]], l_max: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Strained atomic-orbital projector columns q(nproj, npw) at one k —
@@ -322,7 +347,14 @@ def hubbard_energy_strained(
 
     if nspin == 1:
         return 2.0 * hubbard_energy(_mats(n_full[0]), sites)
-    return sum(hubbard_energy(_mats(n_full[spn]), sites) for spn in range(nspin))
+    # Not `sum(...)`: its int `0` default start (for the empty-iterable case)
+    # makes the inferred return type `Tensor | int` even though nspin >= 1
+    # always holds in practice (same "runs >=1 iteration" pattern flagged in
+    # loop.py/uspp_loop.py) -- accumulate into a real Tensor instead.
+    total = torch.zeros((), dtype=RDTYPE, device=dev)
+    for spn in range(nspin):
+        total = total + hubbard_energy(_mats(n_full[spn]), sites)
+    return total
 
 
 def hubbard_energy_strained_nc(
