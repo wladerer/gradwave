@@ -100,6 +100,34 @@ FFT-bound, so the GPU still beats 22 CPU cores by 1.4 to 2.5 times. Memory peake
 at 5.0 of 6.1 GB on the 10-atom cells with no out-of-memory, and the energies are
 device-invariant, so the GPU path is a drop-in speedup for the forward SCF.
 
+**Re-run after the Davidson batched-QR CPU-offload fix** (`_qr_offload` /
+`_QR_CPU_MAX_COLS`, `solvers/davidson.py`, docs/manual/performance.md): hematite
+GPU, same k-grid/cutoff/pseudo, `--device cuda --ranks 8 --threads 8`, converged
+17 iterations, `ΔE_elec` −0.0129 meV/atom (unchanged):
+
+| run | wall (iters) | QE wall (ranks) | wall ratio (gw÷QE) |
+|---|:---:|:---:|:---:|
+| pre-QR-fix (table above) | 593.9 s (17) | — | — |
+| post-QR-fix | 586.8 s (17) | 76.3 s (8) | 7.69× |
+
+Only a ~1% end-to-end gain, far short of the 1.5–1.7× the same fix gave the
+diamond-C benchmark it was found on. A follow-up profiling pass
+(`docs/manual/performance.md`, "Large-nb magnetic mineral: where GPU time
+actually goes") explains why: hematite's Davidson rounds run at `nb=60`,
+`npw≈6746`, well outside the `cols≤16`, `npw≤2500` regime the fix's own sweep
+covered, and most of its QR calls land at `cols≈60` — above the safe
+CPU-offload threshold, correctly, since a fresh sweep at hematite's actual
+`npw` shows the offload is neutral-to-harmful there. The eigensolver's
+per-round linear algebra (Rayleigh–Ritz subspace build and combination, plain
+batched GEMM rather than a `cuSOLVER` factorization) is itself measurably
+*slower* on this GPU than on the 22-core CPU at hematite's `nb`-driven subspace
+width — a new, larger-scale expression of the same fp64-throughput limit the
+QR/eigh overhead was one instance of, not a bug in the fix. The end-to-end GPU
+run is still 3.9× faster than the unaffected CPU baseline (586.8 s vs
+2274.9 s), because the FFT-heavy Hamiltonian apply and the moderate-subspace
+`eigh` calls still favor the GPU; the win is just concentrated elsewhere than
+this particular QR call for a system this size.
+
 ## Findings
 
 The three antiferromagnetic oxides reproduce Quantum ESPRESSO's electronic total
