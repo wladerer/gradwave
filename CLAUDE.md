@@ -234,3 +234,10 @@ a hot inner loop (Davidson, the SCF step) where dispatch overhead has proven to
 matter, and not forced onto a signature where jaxtyping's shape-consistency model
 doesn't actually fit (e.g. a `list[Tensor]` whose elements are legitimately
 different shapes — see `calculator._remap_coeffs_to_spheres`).
+
+Going forward, put `@override` (PEP 698, `typing_extensions.override` on py<3.12,
+`typing.override` from 3.12) on any subclass method that overrides a base class
+method (e.g. `Smearing`/`XCFunctional`/`SpinXC` subclasses) — it catches a typo'd
+signature or a renamed base method as a type error instead of a silent no-op
+override. This was not consistently applied before the gradual typing rollout;
+add it whenever you touch a subclass method, don't do a repo-wide sweep for it.
