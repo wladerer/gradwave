@@ -43,8 +43,63 @@ Two routes build the AO Hamiltonian H~ (the `method` argument):
              projections + eigenvalues, and is what the spinor (noncollinear/SOC)
              paths use for now (the spinor operator route is a follow-up). But it
              carries the plane-wave energy zero, which leaks into off-site COHP
-             through the incomplete band set (diamond: ~65 eV of ICOHP per eV of
-             shift), so it is only reliable for well-separated atoms (O2, Bi2).
+             through the incomplete band set, so it is only reliable for
+             well-separated atoms (O2, Bi2) or a generously wide band window.
+
+REFERENCE-ENERGY LEAK, QUANTIFIED (diamond C, PD_C_PBE_std, ecut 45 Ry, 2x2x2
+k-mesh, nearest-neighbour pair; measured by shifting eig and fermi by the same
++1 eV and re-evaluating ICOHP -- both routes use the identical AO projections,
+only H~ differs). The operator route is invariant to numerical noise (< 1e-9
+eV shift in ICOHP) at every band count tested, confirming the C.1-invariance
+argument above. The eigenvalue route leaks at a rate that falls off with the
+retained band count and converges toward the operator-route value:
+
+    nbands   ICOHP_eigenvalue   d(ICOHP)/d(shift)   vs. ICOHP_operator=-83.5 eV
+    4 (=nocc)      +20.3 eV          3.93 eV/eV      wrong sign
+    6              -15.2 eV          2.20 eV/eV
+    8              -62.2 eV          0.48 eV/eV
+    16             -78.8 eV          0.046 eV/eV
+    24             -81.5 eV          0.008 eV/eV      1.03x
+    48             -81.7 eV          0.006 eV/eV      1.02x
+
+i.e. the previously-cited "~65 eV of ICOHP per eV of shift" was an overestimate
+of the leak rate at any band count that gives a physically sane (bonding, right
+order of magnitude) ICOHP in the first place -- the leak is real but ~2-4 eV/eV
+at worst (near nocc, where the sign is already wrong for other reasons) and
+falls below 0.01 eV/eV once nbands is a few x nocc. The SAME convergence holds
+on the real periodic solid this module is used on: bulk Bi2Se3 (PD_Bi_FR/
+PD_Se_FR, ecut 35 Ry, Gamma, cohp_soc on the Bi-Se bond) goes from ICOHP =
+-3.45 eV at NBANDS=44 (2.2x below the matched operator-route baseline, -7.7 eV)
+to -6.40 eV at NBANDS=80-100 (1.2x, plateaued) -- NBANDS=44 (the value
+examples/bi2se3_cohp_fatbands.py's SOC branch used, only ~5 unoccupied bands'
+worth of buffer over the 39 occupied) is thin; NBANDS >~ 2x the occupied count
+is a reasonable rule of thumb before trusting an eigenvalue-route ICOHP.
+
+A SEPARATE, NOT band-count-driven sensitivity: on the same diamond system, the
+eigenvalue-route ICOHP also depends materially on the k-mesh REDUCTION SCHEME
+(use_symmetry=True, few IBZ k weighted, vs use_symmetry=False, the full/TR-
+reduced mesh) -- a ~13 eV difference (on a ~80-90 eV sublattice-summed ICOHP)
+that does NOT shrink between nbands=16 and nbands=48, unlike the reference-
+shift leak above. The operator route matches between the two schemes to numerical
+noise (<1e-9 eV) using the SAME AO projections the eigenvalue route uses, which
+rules out a projector-rotation bug at symmetry-reduced k-points as the cause;
+it is instead the eigenvalue route's incomplete-basis H~ itself that is
+non-smooth across the BZ near the truncation boundary. Practically, this means
+comparing an eigenvalue-route number computed under one k-reduction scheme
+against an operator-route (or another eigenvalue-route) number computed under a
+DIFFERENT scheme adds error beyond the band-count leak above -- and SOC/
+noncollinear runs structurally cannot use use_symmetry=True (time_reversal=False
+is required once m may be nonzero or SOC breaks k=-k), so a SOC eigenvalue-route
+ICOHP is never evaluated on the same k-scheme as a collinear operator-route
+bracket it might be compared to. This combination (thin NBANDS=44 AND a
+scheme mismatch against the no-SOC branch's use_symmetry=True) is why
+examples/bi2se3_cohp_fatbands.py's reported no-SOC/SOC ICOHP ratio (~6.8x) runs
+above the ~2x this module's operator/eigenvalue bracket predicts elsewhere: a
+matched-scheme, matched-NBANDS=44 comparison on the same Bi2Se3 bond gives only
+2.2x (in line with the bracket); the extra inflation is the scheme mismatch, not
+a new bug. Until the spinor operator route lands (see the follow-up note above),
+raise NBANDS and treat the SOC ICOHP's absolute value as bracketed within a
+factor of ~2, not exact.
 
 QUANTITATIVE STATUS (NOT yet calibrated to LOBSTER — do not ship as such). On
 diamond (PBE) LOBSTER reports IpCOHP ~= -9.64 eV per C-C bond. Two gaps remain:
