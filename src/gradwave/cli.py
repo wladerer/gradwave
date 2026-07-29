@@ -14,13 +14,17 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from gradwave import __version__
+
+if TYPE_CHECKING:
+    from gradwave.inputs import Input
 
 _COMMANDS = {"init", "run", "validate", "plot"}
 
 
-def _build_parser():
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gradwave", description="Differentiable plane-wave DFT")
     parser.add_argument("--version", action="version",
@@ -64,7 +68,7 @@ def _build_parser():
     return parser
 
 
-def _cmd_init(args) -> int:
+def _cmd_init(args: argparse.Namespace) -> int:
     from gradwave import templates
 
     if not args.template:
@@ -92,7 +96,7 @@ def _cmd_init(args) -> int:
     return 0
 
 
-def _load_checked(path):
+def _load_checked(path: str) -> tuple[Input | None, int | None]:
     """Load an input, turning the schema errors into a one-line message and a
     non-zero exit rather than a traceback. Returns (Input, None) or (None, rc)."""
     from gradwave.inputs import InputError, load_input
@@ -104,12 +108,13 @@ def _load_checked(path):
         return None, 1
 
 
-def _cmd_validate(args) -> int:
+def _cmd_validate(args: argparse.Namespace) -> int:
     import numpy as np
 
     inp, rc = _load_checked(args.input)
-    if inp is None:
+    if rc is not None:
         return rc
+    assert inp is not None
     a = inp.atoms
     formula = a.get_chemical_formula()
     print(f"ok: {args.input}")
@@ -131,7 +136,7 @@ def _cmd_validate(args) -> int:
     return 0
 
 
-def _cmd_run(args) -> int:
+def _cmd_run(args: argparse.Namespace) -> int:
     import dataclasses
 
     from gradwave import configure_logging
@@ -140,8 +145,9 @@ def _cmd_run(args) -> int:
     if args.log_level:
         configure_logging(args.log_level)
     inp, rc = _load_checked(args.input)
-    if inp is None:
+    if rc is not None:
         return rc
+    assert inp is not None
     if args.output:
         inp = dataclasses.replace(inp, output_dir=Path(args.output))
     summary = run(inp, verbose=inp.verbose and not args.quiet)
@@ -183,7 +189,7 @@ def _cmd_run(args) -> int:
     return 0
 
 
-def _cmd_plot(args) -> int:
+def _cmd_plot(args: argparse.Namespace) -> int:
     from gradwave import analysis
 
     summary = analysis.load(args.result)
@@ -218,7 +224,7 @@ def _cmd_plot(args) -> int:
     return 0
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # bare `gradwave input.yaml [...]` is a run
     if argv and argv[0] not in _COMMANDS and not argv[0].startswith("-"):

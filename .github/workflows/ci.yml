@@ -80,6 +80,9 @@ jobs:
       - name: Import contracts
         run: uv run lint-imports
 
+      - name: ty (error on the typed file list, warn-only elsewhere)
+        run: uv run ty check
+
   test:
     needs: changes
     if: ${{ needs.changes.outputs.run_tests == 'true' }}

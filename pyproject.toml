@@ -13,6 +13,9 @@ dependencies = [
     "ase>=3.23",
     "pyyaml>=6",
     "spglib>=2.4",
+    "jaxtyping>=0.3.11",
+    "beartype>=0.22.9",
+    "typing-extensions>=4.16.0",
 ]
 
 [project.optional-dependencies]
@@ -36,6 +39,7 @@ dev = [
     "pyscf>=2.4",
     "import-linter>=2.13",
     "hypothesis>=6.160.0",
+    "ty>=0.0.64",
 ]
 docs = [
     "mkdocs>=1.6",
@@ -71,13 +75,48 @@ markers = [
 #   nightly:             pytest -m "not torture and not gpu"
 #   torture (manual):    pytest -m torture
 
+[tool.ty.environment]
+python = ".venv"
+
+[tool.ty.terminal]
+# Findings in the untyped bulk of the codebase are demoted to warnings below,
+# not silenced; don't let those (expected, pre-existing) warnings fail the
+# exit code the way an actual error still does.
+error-on-warning = false
+
+[tool.ty.rules]
+# Gradual typing rollout (see CLAUDE.md): "warn" everywhere by default so the
+# many pre-existing findings across the untyped bulk of the codebase stay
+# visible (not silenced) without failing CI — this rollout does not (yet) ask
+# anyone to clean those up. The override below raises the same rules back to
+# "error" for the growing, explicitly-typed file list, so a regression THERE
+# still fails the build. A single override block is the obviously-editable
+# spot to grow as more files get typed in later phases.
+all = "warn"
+
+[[tool.ty.overrides]]
+include = [
+    "src/gradwave/api.py",
+    "src/gradwave/calculator.py",
+    "src/gradwave/inputs.py",
+    "src/gradwave/cli.py",
+]
+
+[tool.ty.overrides.rules]
+all = "error"
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "NPY", "B"]
-ignore = ["E741"]  # l is a perfectly good angular momentum variable
+ignore = [
+    "E741",  # l is a perfectly good angular momentum variable
+    # jaxtyping shape annotations ("n1 n2 n3") are a DSL, not Python
+    # expressions — ruff's forward-annotation parser always flags them.
+    "F722",
+]
 
 [tool.importlinter]
 root_package = "gradwave"
