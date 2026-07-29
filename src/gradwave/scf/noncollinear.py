@@ -461,6 +461,10 @@ def _nc_metagga_step(
     Returns ((τ_up, τ_dn), metagga_op)."""
     if not xc.needs_tau:
         return (None, None), None
+    # tau_scalar/tau_vec are seeded by _bootstrap_spinor_tau and thereafter
+    # only reassigned under the same `xc.needs_tau` guard (see the main loop
+    # below), so both are real Tensors whenever we reach here.
+    assert tau_scalar is not None and tau_vec is not None
     tau_up, tau_dn = local_frame_tau(m, tau_scalar, tau_vec, xc.m_eps)
     vtu, vtd = vtau_up_dn(xc, rho, m, grid, tau_up, tau_dn,
                           rho_core=system.rho_core)
@@ -634,6 +638,17 @@ def scf_noncollinear(
     scheme = SCHEMES[smearing]
     e_free_prev, converged, history = None, False, []
     mu = 0.0
+    # Bound before the loop purely so ty can see these names as always
+    # defined after it (the loop runs `for it in range(1, max_iter + 1)`,
+    # and max_iter is always >= 1 in practice -- never surfaced as a user
+    # knob below 1, see SCFParams/api.run callers); the placeholders are
+    # overwritten on the loop's first pass every real invocation.
+    it = 0
+    e_free = 0.0
+    res_norm = float("nan")
+    energies: EnergyBreakdown | None = None
+    eigs: torch.Tensor | None = None
+    occ: torch.Tensor | None = None
     # adaptive mixing-backoff state: a global step multiplier layered on top of
     # base_step_scale, cut when the residual stops falling (see the loop below).
     adapt_mult, last_backoff, stall_window = 1.0, 0, 6
@@ -804,6 +819,10 @@ def scf_noncollinear(
             it, e_free, res_norm)
     m_int = [float(m[i].mean()) * vol for i in range(3)]
     m_norm = torch.sqrt((m**2).sum(dim=0))
+    # The loop above always runs (max_iter >= 1 in practice) so these are
+    # real values from the last iteration by the time we get here, never
+    # the pre-loop placeholders.
+    assert energies is not None and eigs is not None and occ is not None
     return NCResult(
         converged=converged, n_iter=it, energies=energies, fermi=mu,
         mag_vec=(m_int[0], m_int[1], m_int[2]), mag_abs=float(m_norm.mean()) * vol,

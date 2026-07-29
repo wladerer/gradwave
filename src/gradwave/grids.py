@@ -70,7 +70,12 @@ def build_fft_grid(
     ecut: float,
     device: torch.device | None = None,
     equal_dims: bool | Sequence[Sequence[int]] = False,
-    shape_override: tuple[int, int, int] | list[int] | None = None,
+    # tuple[int, ...] (not just the tighter tuple[int, int, int]) because
+    # callers often build this via a length-3 generator expression (e.g.
+    # scf/loop.py's own fft_shape param, forwarded here), which a type
+    # checker can't statically narrow to a fixed-length tuple even though
+    # it always is one; the body below unpacks any 3-length iterable.
+    shape_override: tuple[int, ...] | list[int] | None = None,
 ) -> FFTGrid:
     """equal_dims: True forces a cubic box; an iterable of axis-index groups
     (e.g. [(0, 1)] for a slab) instead equalizes only the coupled axes within

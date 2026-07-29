@@ -17,7 +17,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -30,11 +30,10 @@ from gradwave.core.energies.hartree import hartree_potential_r
 from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.energies.total import EnergyBreakdown, total_energy
 from gradwave.core.fftbox import g_to_r_box, r_to_g
-from gradwave.core.hamiltonian import build_projector_data
+from gradwave.core.hamiltonian import ProjectorData, build_projector_data
 from gradwave.core.hubbard import HubbardData, HubbardManifold
-from gradwave.core.xc.base import CompilableXC, XCFunctional
-from gradwave.core.xc.learnable import LearnableSpinX
-from gradwave.core.xc.spin import LSDA_PW92, SpinPBE
+from gradwave.core.xc.base import XCFunctional
+from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import CDTYPE, CDTYPE_LOW, RDTYPE, RDTYPE_LOW
 from gradwave.grids import FFTGrid, GSphere, build_fft_grid, build_gsphere
 from gradwave.pseudo.kb import beta_form_factors
@@ -94,7 +93,7 @@ class System:
     """Frozen per-geometry setup (Layer B product)."""
 
     grid: FFTGrid
-    spheres: list
+    spheres: list[GSphere]
     kweights: torch.Tensor
     positions: torch.Tensor  # (na,3) Å, detached
     species_of_atom: list[int]
@@ -102,7 +101,7 @@ class System:
     charges: torch.Tensor  # (na,) Z_val
     species_index: torch.Tensor
     vloc_tables: torch.Tensor  # (nspecies, n1,n2,n3) [eV·Å³], G=0 = alpha-Z
-    proj_data: list  # per-k ProjectorData
+    proj_data: list[ProjectorData]  # per-k ProjectorData
     n_electrons: float
     nbands: int
     ecut: float = 0.0  # eV — needed to build additional G-spheres (band paths)
@@ -111,7 +110,7 @@ class System:
     rho_symmetrizer: RhoSymmetrizer | CollinearMagneticSymmetrizer | MagneticSymmetrizer | None = (
         None  # paired with sym; the magnetic variants only when magmoms is set
     )
-    so_beta_tables: list | None = None  # FR pseudos: per-species (nk, nchan, npw_max)
+    so_beta_tables: list[torch.Tensor] | None = None  # FR pseudos: per-species (nk, nchan, npw_max)
     is_fr: bool = False  # fully-relativistic pseudos (spinor SCF only)
     rho_core: torch.Tensor | None = None  # NLCC core density on the grid [e/Å³]
     vloc_atom: torch.Tensor | None = None  # (na,n1,n2,n3) per-atom local table;
@@ -276,6 +275,9 @@ def setup_system(
         inv_k = inv_q[offs[ik] : offs[ik + 1]]
         beta_tables = [torch.as_tensor(ff[:, inv_k], dtype=RDTYPE) for ff in ff_species]
         if is_fr:
+            # so_tabs is built as a real list exactly when is_fr (see the
+            # ternary above); the two are set together, so it's never None here.
+            assert so_tabs is not None
             for sp_i in range(len(upfs)):
                 so_tabs[sp_i][ik, :, : sph.npw] = beta_tables[sp_i]
             beta_ls = [[] for _ in upfs]
@@ -365,16 +367,17 @@ class SCFResult:
     fermi: float
     eigenvalues: torch.Tensor  # (nk, nb) [eV]; (nspin, nk, nb) when nspin=2
     occupations: torch.Tensor  # (nk, nb) in [0,2]; (nspin, nk, nb) in [0,1] for spin
-    coeffs: list  # [(nb, npw_k)] per k; list-of-lists [spin][k] when nspin=2
+    coeffs: list[torch.Tensor] | list[list[torch.Tensor]]  # [(nb, npw_k)] per k;
+    # list-of-lists [spin][k] when nspin=2
     rho: torch.Tensor  # TOTAL density (n1,n2,n3) [e/Å³]
     v_eff: torch.Tensor  # (n1,n2,n3) [eV]; (nspin,n1,n2,n3) when nspin=2
     system: System
-    history: list = field(default_factory=list)
+    history: list[dict[str, int | float]] = field(default_factory=list)
     nspin: int = 1
-    rho_spin: list | None = None  # [ρ↑, ρ↓] when nspin=2
+    rho_spin: list[torch.Tensor] | None = None  # [ρ↑, ρ↓] when nspin=2
     mag_total: float = 0.0  # ∫(ρ↑−ρ↓) dr [μB]
     mag_abs: float = 0.0  # ∫|ρ↑−ρ↓| dr [μB]
-    hub_occ: list | None = None  # DFT+U per-spin occupation matrices [σ][site]
+    hub_occ: list[list[torch.Tensor]] | None = None  # DFT+U per-spin occupation matrices [σ][site]
     drho_scf: torch.Tensor | None = None  # last self-consistency residual ρ_out−ρ_in
     # (total density) for the SCF-error estimate
     formalism: str = "nc"  # result-type tag shared by all four SCF drivers
@@ -393,7 +396,7 @@ _StartFrom = (
 
 
 def vxc_spin_potential(
-    xc: LSDA_PW92 | LearnableSpinX | SpinPBE,
+    xc: SpinXC,
     rho_up: torch.Tensor,
     rho_dn: torch.Tensor,
     grid: FFTGrid,
@@ -460,11 +463,11 @@ def local_potential_r(system: System, vloc_g: torch.Tensor | None = None) -> tor
 
 def effective_potentials(
     system: System | USPPSystem,
-    xc: CompilableXC,
-    rho_s: list,
+    xc: XCFunctional | SpinXC,
+    rho_s: list[torch.Tensor],
     vloc_r: torch.Tensor,
-    tau: torch.Tensor | None = None,
-) -> list:
+    tau: torch.Tensor | list[torch.Tensor] | None = None,
+) -> list[torch.Tensor]:
     """Per-spin v_eff(r) from per-channel densities — THE assembly the SCF
     iterates with. A standalone function (not inlined in the loop) so the
     off-stationarity E↔H consistency gate can test the exact potential the
@@ -482,15 +485,32 @@ def effective_potentials(
     v_h_r = hartree_potential_r(rho_tot, grid.g2)
     core = system.rho_core
     if nspin == 1:
+        # nspin=1 is always dispatched with a collinear XCFunctional (the
+        # spin-family classes are only ever used on the nspin=2 branch below,
+        # via vxc_spin_potential) and tau, if given, is the single grid field.
+        assert isinstance(xc, XCFunctional)
+        assert tau is None or isinstance(tau, torch.Tensor)
         v_xc_r, _ = vxc_potential(xc, rho_tot if core is None else rho_tot + core, grid, tau=tau)
         return [v_h_r + v_xc_r + vloc_r]
+    # Any SpinXC subclass is valid here (LSDA_PW92/SpinPBE/LearnableSpinX/
+    # SpinR2SCAN/...) -- vxc_spin_potential is fully generic over the base
+    # class (duck-typed on .energy()/.needs_tau), so narrowing to specific
+    # concrete classes would wrongly reject real, registered functionals
+    # (e.g. SPIN_XC_REGISTRY["r2scan"] -> SpinR2SCAN).
+    assert isinstance(xc, SpinXC)
+    # tau is a per-spin [τ↑, τ↓] list on this (nspin=2) branch -- never the
+    # bare grid Tensor the nspin=1 branch above takes. isinstance narrowing
+    # against `list` doesn't cleanly separate the Tensor arm of tau's static
+    # union (a Tensor is not provably disjoint from `list` to the checker),
+    # so state the real contract with a cast instead of an isinstance assert.
+    tau_s = cast("list[torch.Tensor] | None", tau)
     cu2 = None if core is None else 0.5 * core
     v_up, v_dn, _ = vxc_spin_potential(
         xc,
-        rho_s[0] if core is None else rho_s[0] + cu2,
-        rho_s[1] if core is None else rho_s[1] + cu2,
+        rho_s[0] if cu2 is None else rho_s[0] + cu2,
+        rho_s[1] if cu2 is None else rho_s[1] + cu2,
         grid,
-        tau_s=tau,
+        tau_s=tau_s,
     )
     return [v_h_r + v_up + vloc_r, v_h_r + v_dn + vloc_r]
 
@@ -595,10 +615,18 @@ def _seed_orbitals(
     c0[:, torch.arange(nb), torch.arange(nb)] = 1.0
     coeffs_b_s = [c0.clone() for _ in range(nspin)]
     if start_from is not None:
-        prev_c = (
+        # _StartFrom's dict variants type "coeffs" as (at most) a flat
+        # list[Tensor], but a warm-started nspin=2 run actually stores a
+        # list-of-lists [spin][k] (see SCFResult.coeffs) -- a real gap in
+        # _StartFrom's value union (same shared debt as the dict-literal
+        # "site" records flagged elsewhere), not something to paper over with
+        # a narrower annotation here. cast past it, like postscf/_kb.py does
+        # for its own untypeable dict payload.
+        prev_c = cast(
+            "list[Any] | None",
             start_from.get("coeffs")
             if isinstance(start_from, dict)
-            else getattr(start_from, "coeffs", None)
+            else getattr(start_from, "coeffs", None),
         )
         if prev_c is not None:
             chans = [prev_c] if nspin == 1 else list(prev_c)
@@ -702,13 +730,15 @@ def _build_mixer_precond(
     kerker: bool,
     precond: str,
     precond_op: MultipoleKerkerPrecond | None,
-) -> (
-    tuple[JohnsonMixer, None]
-    | tuple[PulayMixer, LocalTFPrecond]
-    | tuple[BroydenMixer, None]
-    | tuple[PulayMixer, None]
-):
+) -> tuple[PulayMixer | BroydenMixer | JohnsonMixer, LocalTFPrecond | None]:
     """Construct the density mixer and resolve its preconditioner.
+
+    (mixer, tf_precond) genuinely range over all 6 combinations here --
+    `mixing_scheme` (pulay/broyden/johnson) and `precond` (kerker/local_tf) are
+    independent knobs, so e.g. (JohnsonMixer, LocalTFPrecond) is reachable too,
+    not just the 4 pairings a previous, narrower return-type annotation
+    enumerated (an inaccuracy in the annotation, not the mixer/precond
+    construction logic below, which has always allowed any combination).
 
     Returns (mixer, tf_precond); tf_precond is the LocalTFPrecond needing a
     per-iteration set_density(), or None. Kerker and any grid-block precond act
@@ -764,8 +794,8 @@ def _solve_bands(
     hub_q: torch.Tensor | None,
     n_hub_sp: list[torch.Tensor] | None,
     hub_alpha: list[float] | None,
-    fock_apply_sp: Callable | None,
-    metagga_apply_sp: Callable | None,
+    fock_apply_sp: Callable[[torch.Tensor], torch.Tensor] | None,
+    metagga_apply_sp: Callable[[torch.Tensor], torch.Tensor] | None,
     eigensolver: str,
     tol_eff: float,
     use_low: bool,
@@ -788,6 +818,9 @@ def _solve_bands(
     if hub is not None:
         from gradwave.core.hubbard import hubbard_dmatrix
 
+        # n_hub_sp is passed as None only when hub is None (see the call site
+        # in scf()'s main loop), so it's always real here.
+        assert n_hub_sp is not None
         dij = hubbard_dmatrix(n_hub_sp, hub.sites, hub.nproj, device)
         if hub_alpha is not None:  # rigid manifold probe α·I (linear response)
             for si, s in enumerate(hub.sites):
@@ -823,7 +856,7 @@ def _solve_bands(
 
 
 def _bootstrap_tau(
-    xc: CompilableXC,
+    xc: XCFunctional | SpinXC,
     coeffs_b_s: list[torch.Tensor],
     system: System,
     nspin: int,
@@ -833,7 +866,7 @@ def _bootstrap_tau(
     grid: FFTGrid,
     vol: float,
     device: torch.device,
-) -> list[torch.Tensor]:
+) -> list[torch.Tensor] | None:
     """Seed the per-spin kinetic-energy density τ from the initial orbitals so
     iteration 1 has a valid τ for the τ-dependent v_xc (refined immediately).
     Returns the per-spin tau_list, or None for non-meta-GGA functionals."""
@@ -852,7 +885,7 @@ def _bootstrap_tau(
 
 
 def _build_metagga_apply(
-    xc: CompilableXC,
+    xc: XCFunctional | SpinXC,
     rho_s: list[torch.Tensor],
     rho_tot: torch.Tensor,
     tau_list: list[torch.Tensor] | None,
@@ -860,7 +893,7 @@ def _build_metagga_apply(
     nspin: int,
     bk: BatchedK,
     grid: FFTGrid,
-) -> list[Callable]:
+) -> list[Callable[[torch.Tensor], torch.Tensor]] | None:
     """Per-spin meta-GGA generalized-KS operator −½∇·(v_τσ∇ψ_σ), or None when the
     functional is not τ-dependent. v_τσ = ∂e_xc/∂τ_σ from the current (ρ, τ); each
     spin's operator is captured by DEFAULT ARGUMENT so the spin solve binds this
@@ -869,7 +902,12 @@ def _build_metagga_apply(
         return None
     from gradwave.core.metagga import metagga_tau_operator
 
+    # tau_list is bootstrapped/rebuilt in lockstep with xc.needs_tau by the
+    # caller (_bootstrap_tau before the loop, then the `if xc.needs_tau:`
+    # rebuild each iteration — see scf()) so it's never None here.
+    assert tau_list is not None
     if nspin == 1:
+        assert isinstance(xc, XCFunctional)
         rho_for_xc = rho_tot if system.rho_core is None else rho_tot + system.rho_core
         v_tau_s = [vtau_potential(xc, rho_for_xc, tau_list[0], grid)]
     else:
@@ -885,7 +923,7 @@ def _build_metagga_apply(
 
 def _assemble_scf_energies(
     system: System,
-    xc: CompilableXC,
+    xc: XCFunctional | SpinXC,
     grid: FFTGrid,
     vol: float,
     spheres: list[GSphere],
@@ -923,6 +961,9 @@ def _assemble_scf_energies(
         b_all = becp_b(projs_b, coeffs_b_s[sp])
         becps_s.append([b_all[ik] for ik in range(nk)])
     if nspin == 1:
+        # nspin=1 is always dispatched with a collinear XCFunctional (mirrors
+        # effective_potentials' own nspin-based dispatch above in this file).
+        assert isinstance(xc, XCFunctional)
         energies = total_energy(
             coeffs_per_k=coeffs_list_s[0],
             occ=occ_s[0],
@@ -963,7 +1004,7 @@ def _assemble_scf_energies(
             system.charges,
             entropy_term,
             nspin,
-            e_hub=e_hub,
+            e_hub=float(e_hub),
             e_ewald=e_ewald,
         )
         energies.fock = e_fock
@@ -987,6 +1028,7 @@ def _hubbard_occ_update(
         return None, e_hub
     from gradwave.core.hubbard import hubbard_occ_and_energy, occupation_matrices
 
+    assert hub_q is not None  # set together with hub (scf()'s `if hubbard:` block)
     n_hub_s, e_hub = hubbard_occ_and_energy(
         lambda isp, w: occupation_matrices(hub_q, coeffs_b_s[isp], w, system.kweights, hub.sites),
         occ_s,
@@ -1121,6 +1163,10 @@ def scf(
 
     device = system.positions.device
     bk = system.batch
+    # System.batch is Optional only to let System.to()/tests build a partial
+    # instance; every System that reaches scf() came from setup_system(),
+    # which always fills it via build_batched() (never returns None).
+    assert bk is not None
     # Opt-in, NOT auto: benchmarking (RTX 3050) showed the fp32 draft is
     # situational — a clear win only for moderate-grid, many-k, smeared/SOC
     # systems (e.g. GaAs, 1.45×), but a REGRESSION for fixed-occupation
@@ -1167,6 +1213,18 @@ def scf(
     coeffs_b_s = _seed_orbitals(nk, nb, bk, nspin, device, start_from)
 
     e_free_prev, converged, history = None, False, []
+    # Bound before the loop purely so ty can see these names as always defined
+    # after it (the loop runs `for it in range(1, max_iter + 1)`, and max_iter
+    # is always >= 1 in practice -- never surfaced as a user knob below 1, see
+    # SCFParams/scf() callers); the placeholders are overwritten on the loop's
+    # first pass every real invocation.
+    it = 0
+    e_free = 0.0
+    de = float("nan")
+    res_norm = float("nan")
+    drho_scf: torch.Tensor | None = None
+    energies: EnergyBreakdown | None = None
+    coeffs_list_s: list[list[torch.Tensor]] | None = None
     eigs_s = [torch.zeros(nk, nb, dtype=RDTYPE, device=device) for _ in range(nspin)]
     occ_s = [torch.zeros(nk, nb, dtype=RDTYPE, device=device) for _ in range(nspin)]
     mu, entropy_term = 0.0, torch.zeros((), dtype=RDTYPE, device=device)
@@ -1242,7 +1300,13 @@ def scf(
         for sp in range(nspin):
             fock_sp = fock_apply_s[sp] if fock_apply_s is not None else None
             mgga_sp = metagga_apply_s[sp] if metagga_apply_s is not None else None
-            n_hub_sp = n_hub_s[sp] if hub is not None else None
+            n_hub_sp = None
+            if hub is not None:
+                # n_hub_s is set together with hub (the `if hubbard:` block
+                # above, and refreshed in lockstep by _hubbard_occ_update
+                # below), so it's never None when hub isn't.
+                assert n_hub_s is not None
+                n_hub_sp = n_hub_s[sp]
             eigs_s[sp], coeffs_b_s[sp] = _solve_bands(
                 veff_s[sp],
                 coeffs_b_s[sp],
@@ -1377,6 +1441,10 @@ def scf(
         print(f"SCF {_tag} in {it} iterations · F = {e_free:+.10f} eV{_fm}{_extra}", flush=True)
 
     rho_tot_final = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
+    # The loop above always runs (max_iter >= 1 in practice) so these are real
+    # values from the last iteration by the time we get here, never the
+    # pre-loop placeholders.
+    assert energies is not None and coeffs_list_s is not None
     if nspin == 1:
         return SCFResult(
             converged=converged,

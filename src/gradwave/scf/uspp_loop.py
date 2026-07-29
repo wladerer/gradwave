@@ -27,11 +27,13 @@ import logging
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any, TypedDict, cast
 
 import numpy as np
 import torch
 
 from gradwave.constants import HBAR2_2M
+from gradwave.core.batch import BatchedK
 from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.energies.total import EnergyBreakdown
@@ -69,6 +71,22 @@ from gradwave.solvers.precond import teter
 
 logger = logging.getLogger(__name__)
 
+# A warm-start source for scf_uspp(): either a converged USPPResult, or the
+# plainer dict/SimpleNamespace-like checkpoint view checkpoint.as_start_from()
+# hands back (mirrors scf/loop.py's own _StartFrom for the NC driver). The
+# `dict[str, USPPSystem | int]` shape a previous, mechanically-inferred
+# annotation carried here was never actually constructed anywhere in this
+# codebase (every real dict-shaped caller uses the SimpleNamespace/Tensor/list
+# shape below; every other caller passes a real USPPResult, e.g.
+# tests/integration/test_uspp_warmstart.py, or opts out via `cast(Any, ...)`
+# at the call site in calculator.py) -- dropped in favor of the member that's
+# actually exercised.
+_USPPStartFrom = (
+    dict[str, "SimpleNamespace | int | torch.Tensor | list[torch.Tensor] | None"]
+    | USPPResult
+    | None
+)
+
 
 class _HkS:
     """H and S applies at one k for fixed v_eff and screened D."""
@@ -103,6 +121,10 @@ class _HkS:
         b = becp(self.p, c)
         out = out + (b @ self.dscr) @ self.p
         if self.hub_sphi is not None:
+            # both call sites (_solve_bands_uspp's batched and per-k paths)
+            # only ever pass hub_sphi/hub_d together, gated by the same
+            # `hub is not None` check.
+            assert self.hub_d is not None
             bh = becp(self.hub_sphi, c)
             out = out + (bh @ self.hub_d) @ self.hub_sphi
         return out
@@ -139,7 +161,14 @@ def davidson_gen(
 
     v_sub = ortho_block(x0, None)
     hv, sv = hs.h(v_sub), hs.s(v_sub)
-    eps = x = hx = sx = None
+    # Bound before the loop purely so ty can see eps/x as always real Tensors
+    # after it (max_iter is always >= 1 in practice, same as
+    # solvers/davidson.py's identical precedent); overwritten on the loop's
+    # first pass every real invocation. hx/sx are always reassigned earlier in
+    # each iteration than any use, so they don't need this treatment.
+    eps = torch.zeros(nbands, dtype=RDTYPE, device=x0.device)
+    x = v_sub[:nbands]
+    hx = sx = None
     for _ in range(max_iter):
         h_sub = v_sub.conj() @ hv.T
         s_sub = v_sub.conj() @ sv.T
@@ -187,25 +216,25 @@ class _IterOps:
     evaluate the raw map without the driver."""
 
     system: USPPSystem
-    xc: object
+    xc: XCFunctional | SpinXC
     nspin: int
     smearing: str
     width: float
     batched: bool
-    projs: list
-    bk: object
-    p_b: object
-    hub: object
+    projs: list[torch.Tensor]
+    bk: BatchedK | None
+    p_b: torch.Tensor | None
+    hub: USPPHubbardData | None
     vloc_g: torch.Tensor
     vloc_r: torch.Tensor
     e_ewald: torch.Tensor  # constant E_ewald (frozen positions), built once
     phase_pos: torch.Tensor
     is_paw: bool
-    onec: dict | None  # per-species OneCenter ({sp: oc}; list also indexes)
-    grid: object
+    onec: dict[int, OneCenter] | None  # per-species OneCenter ({sp: oc}; list also indexes)
+    grid: FFTGrid
     vol: float
-    dev: object
-    shape: tuple
+    dev: torch.device
+    shape: tuple[int, int, int]
     mask_flat: torch.Tensor
     g_spin: int
     nk: int
@@ -344,6 +373,9 @@ def _build_iter_ops(
     if hubbard:
         from gradwave.scf.uspp_hubbard import build_uspp_hubbard
 
+        # bk/p_b are built above whenever `batched or hubbard`; hubbard is
+        # truthy here so that condition already held.
+        assert p_b is not None
         hub = build_uspp_hubbard(system, hubbard, bk, p_b)
     vloc_g = local_potential_g(
         system.positions,
@@ -421,6 +453,9 @@ def _assemble_iter_energies(
     from gradwave.core.density import sigma_from_rho
 
     if nspin == 1:
+        # nspin=1 is always dispatched with a collinear XCFunctional (mirrors
+        # scf/loop.py's own nspin-based xc dispatch).
+        assert isinstance(xc, XCFunctional)
         rho_xc_out = rho_tot_out if core is None else rho_tot_out + core
         sigma = sigma_from_rho(rho_xc_out, grid.g_cart) if xc.needs_gradient else None
         e_xc = xc.energy(rho_xc_out, vol, sigma)
@@ -442,7 +477,7 @@ def _assemble_iter_energies(
         system.charges,
         entropy_term,
         nspin,
-        e_hub=e_hub if hub is not None else 0.0,
+        e_hub=float(e_hub) if hub is not None else 0.0,
         e_onec=e_onec,
         e_ewald=e_ewald,
     )
@@ -464,8 +499,16 @@ def _hubbard_occ_update(
     bk, dev, nk, nb = ops.bk, ops.dev, ops.nk, ops.nb
     e_hub = torch.zeros((), dtype=RDTYPE, device=dev)
     if hub is None:
+        # n_hub_s is set together with hub at scf_uspp's setup (`n_hub_s =
+        # None; if hubbard: n_hub_s = [...]`), so it's None here too.
+        assert n_hub_s is None
         return n_hub_s, e_hub
     from gradwave.core.hubbard import hubbard_occ_and_energy, occupation_matrices
+
+    # _build_iter_ops only ever builds bk/p_b when `batched or hubbard` was
+    # true; hub is not None here means hubbard was, so bk is real regardless
+    # of this call's own `batched` value.
+    assert bk is not None
 
     def _padded_coeffs(isp, _cb=coeffs_b):
         if batched:
@@ -475,7 +518,7 @@ def _hubbard_occ_update(
             cp[ik, :, : sph.npw] = coeffs[isp][ik]
         return cp
 
-    n_hub_s, e_hub = hubbard_occ_and_energy(
+    n_hub_new, e_hub = hubbard_occ_and_energy(
         lambda isp, w: occupation_matrices(
             hub.sphi, _padded_coeffs(isp), w, system.kweights, hub.sites
         ),
@@ -483,7 +526,7 @@ def _hubbard_occ_update(
         hub.sites,
         nspin,
     )
-    return n_hub_s, e_hub
+    return n_hub_new, e_hub
 
 
 def _build_output_density(
@@ -514,7 +557,14 @@ def _build_output_density(
             # nk·na tiny einsums per iteration
             from gradwave.core.batch import becp_b, density_b
 
+            # _build_iter_ops always builds bk/p_b when ops.batched (the `if
+            # batched or hubbard:` guard there), and _solve_bands_uspp always
+            # runs before this and fills coeffs_b[isp] with a real Tensor in
+            # its own `if batched:` branch (the in-place mutation its
+            # docstring calls out) -- so all three are real here.
+            assert bk is not None and p_b is not None
             x_b = coeffs_b[isp]
+            assert x_b is not None
             rho_sp = density_b(x_b, occ_s[isp], system.kweights, bk, shape, vol)
             b_all = becp_b(p_b, x_b)
             becps = [b_all[ik] for ik in range(nk)]
@@ -576,19 +626,25 @@ def _solve_bands_uspp(
     system, nspin, batched = ops.system, ops.nspin, ops.batched
     bk, shape, dev = ops.bk, ops.shape, ops.dev
     nk, nb, p_b, projs, hub = ops.nk, ops.nb, ops.p_b, ops.projs, ops.hub
-    if batched:
-        from gradwave.core.batch import becp_b
-        from gradwave.scf.uspp_batch import BatchedHS, davidson_gen_batched
-    if hub is not None:
-        from gradwave.core.hubbard import hubbard_dmatrix
     eigs_s = []
     for isp in range(nspin):
         hub_d = None
         if hub is not None:
+            from gradwave.core.hubbard import hubbard_dmatrix
+
+            # n_hub_s is set together with hub at scf_uspp's setup and only
+            # ever refreshed (never reset to None) while hub stays set.
+            assert n_hub_s is not None
             hub_d = hubbard_dmatrix(
                 n_hub_s[isp], hub.sites, hub.nproj, dev
             ).conj()  # apply wants D^T
         if batched:
+            from gradwave.core.batch import becp_b
+            from gradwave.scf.uspp_batch import BatchedHS, davidson_gen_batched
+
+            # _build_iter_ops always builds bk/p_b when ops.batched (the `if
+            # batched or hubbard:` guard there).
+            assert bk is not None and p_b is not None
             smooth = None
             if system.smooth_shape is not None:
                 # filter v_eff onto the smooth box (dense G-coeffs restricted to
@@ -607,7 +663,8 @@ def _solve_bands_uspp(
                 hub_d=hub_d,
                 smooth=smooth,
             )
-            if coeffs_b[isp] is None:
+            cb_isp = coeffs_b[isp]
+            if cb_isp is None:
                 # per-k CPU seeds (identical to the per-k path), padded
                 x0 = torch.zeros(nk, nb + 4, bk.npw_max, dtype=CDTYPE, device=dev)
                 for ik, sph in enumerate(system.spheres):
@@ -618,7 +675,7 @@ def _solve_bands_uspp(
                     xk = xk.to(dev) * torch.exp(-0.5 * HBAR2_2M * sph.kpg2 / system.ecut * 4.0)
                     x0[ik, :, : sph.npw] = xk.to(CDTYPE)
             else:
-                x0 = coeffs_b[isp]
+                x0 = cb_isp
             # fp32 draft while the diago tolerance is loose; the subspace
             # reduction inside stays fp64 and the S-normalization below is
             # fp64 always, so the fp64 finish is bit-identical physics
@@ -650,7 +707,8 @@ def _solve_bands_uspp(
                 hub_sphi=(hub.sphi[ik, :, : sph.npw] if hub else None),
                 hub_d=hub_d,
             )
-            if coeffs[isp][ik] is None:
+            c_isp_ik = coeffs[isp][ik]
+            if c_isp_ik is None:
                 # seed on CPU (device-independent determinism), then move
                 gen = torch.Generator().manual_seed(1234 + ik + 7777 * isp + seed_salt)
                 x0 = torch.randn(
@@ -659,7 +717,7 @@ def _solve_bands_uspp(
                 x0 = x0.to(dev) * torch.exp(-0.5 * HBAR2_2M * sph.kpg2 / system.ecut * 4.0)
                 x0 = x0.to(CDTYPE)
             else:
-                x0 = coeffs[isp][ik]
+                x0 = c_isp_ik
             e_k, c_k = davidson_gen(hs, x0, nb, tol=tol_eff)
             b = becp(projs[ik], c_k)
             snorm = (c_k.abs() ** 2).sum(dim=1).real + torch.einsum(
@@ -672,6 +730,21 @@ def _solve_bands_uspp(
     return eigs_s
 
 
+class _IterStep(TypedDict):
+    """One `_scf_iteration` evaluation's result -- each key its own real type
+    (not the flattened value-union a plain `dict[str, ...]` return would give
+    every key), mirroring noncollinear.py's `_WorkingTables` TypedDict."""
+
+    eigs_s: list[torch.Tensor]
+    occ_s: list[torch.Tensor]
+    mu: float
+    n_hub_s: list[list[torch.Tensor]] | None
+    rho_out_s: list[torch.Tensor]
+    rho_ij_s: list[list[torch.Tensor]]
+    becps_s: list[list[torch.Tensor]]
+    energies: EnergyBreakdown
+
+
 @torch.no_grad()
 def _scf_iteration(
     ops: _IterOps,
@@ -682,9 +755,7 @@ def _scf_iteration(
     n_hub_s: list[list[torch.Tensor]] | None,
     tol_eff: float,
     seed_salt: int,
-) -> dict[
-    str, list[torch.Tensor] | float | list[list[torch.Tensor]] | EnergyBreakdown | None
-]:
+) -> _IterStep:
     """ONE evaluation of the SCF map at (rho_s, rho_ij_mix): potentials →
     screened D (+ one-center ddd from the MIXER-side becsum) → generalized
     Davidson (warm-started via coeffs/coeffs_b, mutated in place) →
@@ -706,18 +777,25 @@ def _scf_iteration(
         eigs_s, system.kweights, smearing, width, system.n_electrons, nspin, dev
     )
 
+    # _solve_bands_uspp mutates coeffs[isp][ik] in place for every (isp, ik)
+    # (both its batched and per-k branches loop over the full nk/nspin range
+    # unconditionally), so every element is now a real Tensor -- narrower than
+    # the cold-start-compatible `Tensor | None` these downstream helpers'
+    # coeffs parameter carries for the seed/warm-start path.
+    coeffs_full = cast("list[list[torch.Tensor]]", coeffs)
+
     # DFT+U: fresh S-metric occupation matrices + Dudarev E_U (lags one
     # step into V_U like the NC path; nspin=1 splits [0,2] occupations
     # into two equal channels)
-    n_hub_s, e_hub = _hubbard_occ_update(ops, hub, coeffs, coeffs_b, occ_s, n_hub_s)
+    n_hub_s, e_hub = _hubbard_occ_update(ops, hub, coeffs_full, coeffs_b, occ_s, n_hub_s)
 
-    rho_out_s, rho_ij_s, becps_s = _build_output_density(ops, coeffs, coeffs_b, occ_s)
+    rho_out_s, rho_ij_s, becps_s = _build_output_density(ops, coeffs_full, coeffs_b, occ_s)
     rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
 
     energies = _assemble_iter_energies(
-        ops, coeffs, occ_s, becps_s, rho_out_s, rho_tot_out, entropy_term, e_hub, e_onec
+        ops, coeffs_full, occ_s, becps_s, rho_out_s, rho_tot_out, entropy_term, e_hub, e_onec
     )
-    return dict(
+    return _IterStep(
         eigs_s=eigs_s,
         occ_s=occ_s,
         mu=mu,
@@ -804,16 +882,29 @@ def _build_mixer(
 def _seed_becsum(
     system: USPPSystem,
     nspin: int,
-    start_from: dict[str, SimpleNamespace | int | torch.Tensor | list[torch.Tensor] | None] | None,
-    spin_frac: list[list[float] | None],
+    start_from: _USPPStartFrom,
+    # _seed_scf_density (the sole caller's source) returns spin_frac as either
+    # ALL-real (nspin=2, `[up, dn]`) or ALL-None (nspin=1, `[None]`) -- never a
+    # per-element mix -- so this matches that shape (`list[X] | list[None]`,
+    # not the per-element-Optional `list[X | None]`, which `list`'s
+    # invariance would make a distinct, non-assignable type from either).
+    spin_frac: list[list[float]] | list[None],
     dev: torch.device,
 ) -> list[list[torch.Tensor]]:
     """Per-spin becsum seed: from a warm-start state, else the reference atomic
     PAW occupations (spin-split by start_mag); zeros for bare USPP without
     PP_OCCUPATIONS."""
-    rho_ij_s = [[] for _ in range(nspin)]
+    rho_ij_s: list[list[torch.Tensor]] = [[] for _ in range(nspin)]
     if start_from is not None:
-        prev_bec = start_from["rho_ij_atoms"]
+        # rho_ij_atoms is a flat list[Tensor] per atom for nspin=1, else a
+        # list[Tensor] per spin -- _USPPStartFrom's dict variant (and
+        # _DictBridge's untyped getattr passthrough for a USPPResult) can't
+        # express that per-nspin shape difference (a single static type can't
+        # be both `list[Tensor]` and `list[list[Tensor]]` and still let `m in
+        # src` type as Tensor in both branches), so this one is cast to Any
+        # rather than forcing a union that would just push the ambiguity onto
+        # `m.detach()` below.
+        prev_bec = cast(Any, start_from["rho_ij_atoms"])
         for isp in range(nspin):
             src = prev_bec if nspin == 1 else prev_bec[isp]
             rho_ij_s[isp] = [m.detach().to(device=dev, dtype=CDTYPE).clone() for m in src]
@@ -824,7 +915,15 @@ def _seed_becsum(
         for isp in range(nspin):
             m0 = torch.zeros(nm, nm, dtype=CDTYPE, device=dev)
             if paw.paw_occ is not None:
-                frac = 0.5 if nspin == 1 else spin_frac[isp][a]
+                if nspin == 1:
+                    frac = 0.5
+                else:
+                    # spin_frac is [None] only for nspin=1 (the branch above);
+                    # nspin=2 always seeds it with two real per-atom lists
+                    # (_seed_scf_density's `[[up...], [dn...]]` return).
+                    sf_isp = spin_frac[isp]
+                    assert sf_isp is not None
+                    frac = sf_isp[a]
                 col = 0
                 for i, b in enumerate(paw.betas):
                     for _m in range(2 * b.l + 1):
@@ -842,9 +941,9 @@ def _seed_orbitals_uspp(
     nk: int,
     nb: int,
     batched: bool,
-    start_from: dict[str, SimpleNamespace | int | torch.Tensor | list[torch.Tensor] | None] | None,
+    start_from: _USPPStartFrom,
     dev: torch.device,
-) -> tuple[list[list[None]], list[None]]:
+) -> tuple[list[list[torch.Tensor | None]], list[torch.Tensor | None]]:
     """Seed the generalized Davidson from a previous result's eigenvectors — the
     ionic-step analogue of the density/becsum warm start — instead of the random
     atomic-scale start. Returns ``(coeffs, coeffs_b)``: per-spin, per-k blocks
@@ -858,14 +957,19 @@ def _seed_orbitals_uspp(
     for grid-shape changes before passing them here). Anything else — a k-set
     reshaped by a symmetry-group change, a band-count change — bails to the cold
     start, keeping the density warm start intact."""
-    coeffs = [[None] * nk for _ in range(nspin)]
-    coeffs_b = [None] * nspin
+    coeffs: list[list[torch.Tensor | None]] = [[None] * nk for _ in range(nspin)]
+    coeffs_b: list[torch.Tensor | None] = [None] * nspin
     prev_c = None
     if start_from is not None:
-        prev_c = (
+        # _USPPStartFrom's dict variant types "coeffs" as (at most) a flat
+        # list[Tensor], but the nspin=2 shape is really a list-of-lists
+        # [spin][k] (same _StartFrom-shaped debt as scf/loop.py's own
+        # _seed_orbitals -- cast past it there too, same reasoning).
+        prev_c = cast(
+            "list[Any] | None",
             start_from.get("coeffs")
             if isinstance(start_from, dict)
-            else getattr(start_from, "coeffs", None)
+            else getattr(start_from, "coeffs", None),
         )
     if prev_c is None:
         return coeffs, coeffs_b
@@ -903,7 +1007,9 @@ def _seed_orbitals_uspp(
         if batched:
             xb = torch.zeros(nk, nb, npw_max, dtype=CDTYPE, device=dev)
             for ik in range(nk):
-                xb[ik, :, : system.spheres[ik].npw] = coeffs[isp][ik]
+                ck = coeffs[isp][ik]
+                assert ck is not None  # just assigned two lines above
+                xb[ik, :, : system.spheres[ik].npw] = ck
             coeffs_b[isp] = xb
     return coeffs, coeffs_b
 
@@ -914,11 +1020,7 @@ def _seed_scf_density(
     vol: float,
     dev: torch.device,
     nspin: int,
-    start_from: (
-        dict[str, USPPSystem | int]
-        | dict[str, SimpleNamespace | int | torch.Tensor | list[torch.Tensor] | None]
-        | None
-    ),
+    start_from: _USPPStartFrom,
     start_mag: list[float] | None,
 ) -> tuple[list[torch.Tensor], list[list[float]]] | tuple[list[torch.Tensor], list[None]]:
     """Seed (rho_s, spin_frac): warm-start rescale from a prior result, or a SAD
@@ -980,11 +1082,7 @@ def scf_uspp(
     trust_factor: float = 20.0,
     batched: bool = True,
     hubbard: list[HubbardManifold] | None = None,
-    start_from: (
-        dict[str, USPPSystem | int]
-        | dict[str, SimpleNamespace | int | torch.Tensor | list[torch.Tensor] | None]
-        | None
-    ) = None,
+    start_from: _USPPStartFrom = None,
     criterion: str = "drho",
     rho_safety: float = 1e-2,
     adapt_step: bool = False,
@@ -1226,7 +1324,16 @@ def scf_uspp(
     rescue_count, seed_salt = 0, 0  # solver-blowup rescue state (task #55)
     last_reset_it = -10  # trust-region reset cooldown (task #55)
     occ_s = eigs_s = mu = None
-    energies = None
+    energies: EnergyBreakdown | None = None
+    # Bound before the loop purely so ty can see these names as always
+    # defined after it (the loop runs `for it in range(1, max_iter + 1)`, and
+    # max_iter is always >= 1 in practice); overwritten on the loop's first
+    # pass every real invocation.
+    it = 0
+    e_free = 0.0
+    res_norm = float("nan")
+    rho_out_s: list[torch.Tensor] = []
+    becps_s: list[list[torch.Tensor]] = []
 
     # PAW one-center machinery; becsum seeded from the reference atomic
     # occupations (spin-split by start_mag; zeros for bare USPP where the UPF
@@ -1331,6 +1438,8 @@ def scf_uspp(
             converged = True
             rho_s = rho_out_s
             if is_paw:  # report the one-center energy at the FINAL fresh becsum
+                # onec is set together with is_paw in _build_iter_ops.
+                assert onec is not None
                 e_onec = torch.zeros((), dtype=RDTYPE, device=dev)
                 for sp, atoms in _species_atoms(system).items():
                     fresh = [
@@ -1425,14 +1534,27 @@ def scf_uspp(
     # Consumers that read ρ and becsum as one state (paw_forces/paw_stress via
     # _normalize_spin) then see a self-consistent pair regardless of convergence.
     rho_ij_final = rho_ij_s if converged else rho_ij_mix
-    extra = {}
-    if hub is not None:
-        extra["hub_occ"] = n_hub_s
-        extra["hub_sites"] = hub.sites
-    if nspin == 2:
-        extra["rho_spin"] = rho_s
-        extra["mag_total"] = float((rho_s[0] - rho_s[1]).sum()) * vol / grid.n_points
-        extra["mag_abs"] = float((rho_s[0] - rho_s[1]).abs().sum()) * vol / grid.n_points
+    # Explicit keyword args (each already None-default on USPPResult) instead
+    # of building a heterogeneous dict and splatting it with **extra: a plain
+    # `dict[str, ...]` can't carry a different value type per key, so **extra
+    # forced every one of these fields to accept the union of ALL of them
+    # (hub_occ/hub_sites/rho_spin/mag_total/mag_abs all showing up as
+    # "expected `int | float | None`, found `None | list[list[Tensor]] |
+    # ...`" and the like) -- passing None directly for the not-applicable
+    # case is behaviorally identical (same field default).
+    hub_occ = n_hub_s if hub is not None else None
+    hub_sites = hub.sites if hub is not None else None
+    rho_spin = rho_s if nspin == 2 else None
+    mag_total = (
+        float((rho_s[0] - rho_s[1]).sum()) * vol / grid.n_points if nspin == 2 else None
+    )
+    mag_abs = (
+        float((rho_s[0] - rho_s[1]).abs().sum()) * vol / grid.n_points if nspin == 2 else None
+    )
+    # The loop above always runs (max_iter >= 1 in practice) so these are real
+    # values from the last iteration by the time we get here, never the
+    # pre-loop placeholders.
+    assert energies is not None and eigs_s is not None and occ_s is not None
     return USPPResult(
         converged=converged,
         n_iter=len(history),
@@ -1451,5 +1573,9 @@ def scf_uspp(
         width=width,
         mixer_mult=mixer.block_mult,
         rho_out_spin=rho_out_s,  # RAW map output (pre-mixing) — rig/diagnostics
-        **extra,
+        hub_occ=hub_occ,
+        hub_sites=hub_sites,
+        rho_spin=rho_spin,
+        mag_total=mag_total,
+        mag_abs=mag_abs,
     )
