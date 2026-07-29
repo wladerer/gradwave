@@ -72,7 +72,7 @@ class MultipoleKerkerPrecond:
     no autograd graph is retained through the SCF."""
 
     def __init__(self, g2: torch.Tensor, w_raw: torch.Tensor, logq2: torch.Tensor,
-                 c_raw: torch.Tensor | None = None):
+                 c_raw: torch.Tensor | None = None) -> None:
         # g2: (n,) |G|² per component the filter acts on [Å⁻²]; buffer, no grad.
         self.g2 = g2.detach()
         self.w_raw = w_raw          # (K,) softplus⁻¹ weights (leaf, may need grad)
@@ -189,7 +189,7 @@ class BlockPrecond:
 
     acts_on = "grid"
 
-    def __init__(self, blocks):
+    def __init__(self, blocks) -> None:
         # blocks: list of (n_components, callable | None). None → identity (plain
         # damping) on that block. Segment lengths must sum to the sliced vector.
         self.blocks = list(blocks)

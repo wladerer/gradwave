@@ -54,7 +54,7 @@ class LocalTFPrecond:
     ``precond_op``: ``P·r`` for a residual ``r`` over the density sphere."""
 
     def __init__(self, g2_box: torch.Tensor, shape, mask_flat: torch.Tensor,
-                 q0_max: float = 1.1, cg_iters: int = 12, cg_tol: float = 1e-3):
+                 q0_max: float = 1.1, cg_iters: int = 12, cg_tol: float = 1e-3) -> None:
         # g2_box: (n_points,) |G|² over the FULL box [Å⁻²]; shape: box dims;
         # mask_flat: bool (n_points,) selecting the density sphere.
         self.g2 = g2_box.reshape(-1)

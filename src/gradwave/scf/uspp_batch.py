@@ -29,7 +29,7 @@ class BatchedHS:
     Dudarev D, already conj-transposed for the apply convention)."""
 
     def __init__(self, bk: BatchedK, shape, v_eff_r, p, dscr, q_full,
-                 hub_sphi=None, hub_d=None, smooth=None):
+                 hub_sphi=None, hub_d=None, smooth=None) -> None:
         self.bk = bk
         self.p = p  # (nk, nproj, npw_max)
         self.q = q_full.to(p.dtype)

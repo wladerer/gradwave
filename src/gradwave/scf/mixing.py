@@ -37,9 +37,9 @@ class _DampedMixerBase:
         kerker: bool = False,
         q0: float = 1.1,
         check_g0: bool = True,
-        kerker_mask=None,  # per-component bool; None → kerker on all
-        step_scale=None,  # per-component multiplier on the damped step
-    ):
+        kerker_mask: torch.Tensor | None = None,  # per-component bool; None → kerker on all
+        step_scale: torch.Tensor | None = None,  # per-component multiplier on the damped step
+    ) -> None:
         self.g2 = g2
         self.alpha = alpha
         self.history = history
@@ -77,7 +77,7 @@ class _DampedMixerBase:
         return out
 
     @property
-    def block_mult(self):
+    def block_mult(self) -> None:
         """Per-block adaptive-damping multipliers {block_id: multiplier} for
         the driver's result dict, or None when this mixer has no per-block
         adaptation (only PulayMixer with adapt_blocks tracks them)."""
@@ -103,20 +103,22 @@ class BroydenMixer(_DampedMixerBase):
     sequentially each step, so dropping the oldest pair is exact
     limited-memory Broyden on the window (m² dot products per step)."""
 
-    def __init__(self, g2, **kw):
+    def __init__(self, g2: torch.Tensor, **kw) -> None:
         super().__init__(g2, **kw)
         self._pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
         self._prev_in = None
         self._prev_res = None
 
-    def _apply_b(self, v, us, ys):
+    def _apply_b(
+        self, v: torch.Tensor, us: list[torch.Tensor], ys: list[torch.Tensor]
+    ) -> torch.Tensor:
         """B v with B = −αP + Σ u_i ⟨y_i|·⟩ (rank-one secant corrections)."""
         out = -self._damped(v)
         for u, y in zip(us, ys, strict=True):
             out = out + u * (y.conj() @ v)
         return out
 
-    def reset(self):
+    def reset(self) -> None:
         self._pairs.clear()
         self._prev_in = None
         self._prev_res = None
@@ -169,8 +171,8 @@ class JohnsonMixer(_DampedMixerBase):
     default (saturation); Kerker ON beats OFF (44 vs 58); the Coulomb
     metric option does not converge this system and stays non-default."""
 
-    def __init__(self, g2, history: int = 12, w0: float = 0.01,
-                 metric_w=None, **kw):
+    def __init__(self, g2: torch.Tensor, history: int = 12, w0: float = 0.01,
+                 metric_w: torch.Tensor | None = None, **kw) -> None:
         # metric_w: per-component inner-product weights (QE rho_ddot uses
         # the Coulomb metric; None → plain l2)
         super().__init__(g2, history=history, **kw)
@@ -181,7 +183,7 @@ class JohnsonMixer(_DampedMixerBase):
         self._prev_in = None
         self._prev_f = None
 
-    def reset(self):
+    def reset(self) -> None:
         self._df.clear()
         self._u.clear()
         self._prev_in = None
@@ -229,10 +231,10 @@ class PulayMixer(_DampedMixerBase):
         g2: torch.Tensor,
         coeff_cap: float | None = None,  # ℓ₁ bound on DIIS coefficients (see step())
         step_cap: float | None = None,  # ‖Δρ‖ bound in damped-step units (see step())
-        adapt_blocks=None,  # (n,) int block ids → per-block adaptive damping
+        adapt_blocks: torch.Tensor | None = None,  # (n,) int block ids → per-block adaptive damp
         adapt_floor: float = 0.05,  # smallest adaptive multiplier
         **kw,
-    ):
+    ) -> None:
         super().__init__(g2, **kw)
         self.coeff_cap = coeff_cap
         self.step_cap = step_cap
@@ -258,10 +260,10 @@ class PulayMixer(_DampedMixerBase):
         return out
 
     @property
-    def block_mult(self):
+    def block_mult(self) -> dict[int, float] | None:
         return dict(self._block_mult) if self._block_mult else None
 
-    def _adapt(self, res: torch.Tensor):
+    def _adapt(self, res: torch.Tensor) -> None:
         """Per-block gain tracking. A block whose residual grows across
         iterations is locally expansive under the current step (FM metals:
         the magnetization channel near a wrong moment — Stoner curvature);
@@ -333,7 +335,7 @@ class PulayMixer(_DampedMixerBase):
         w = 1.0 / (self.g2 + self.q0**2)
         return (a.conj() * b * w).sum().real
 
-    def reset(self):
+    def reset(self) -> None:
         self._rho_in.clear()
         self._res.clear()
         self._prev_bnorm = None  # block multipliers survive (see _adapt)

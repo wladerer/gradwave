@@ -647,7 +647,11 @@ class GradWave(Calculator):
             eigensolver=p["eigensolver"], precond=p["precond"],
             nspin=nspin, start_mag=start_mag, tot_magnetization=tot_mag,
             hubbard=manifolds,
-            start_from=self._warm_start(system, nspin), **mix_kw,
+            # _warm_start is shared with the USPP path, so its declared return
+            # spans both; scf() only ever receives the NC-shaped subset here
+            # (is_uspp gates it internally) — the cast documents that, not a
+            # workaround.
+            start_from=cast(Any, self._warm_start(system, nspin)), **mix_kw,
         )
         if not res.converged:
             raise RuntimeError("gradwave SCF did not converge")
@@ -759,21 +763,30 @@ class GradWave(Calculator):
                        mixing_history=p["mixing_history"],
                        mixing_kerker=p["mixing_kerker"], precond=p["precond"],
                        hubbard=manifolds, verbose=self._verbose,
-                       start_from=self._warm_start(system, nspin))
+                       # _warm_start is shared with the NC path; scf_uspp only
+                       # ever receives the USPP-shaped subset here (is_uspp
+                       # gates it internally) — the cast documents that.
+                       start_from=cast(Any, self._warm_start(system, nspin)))
         if not res.converged:
             raise RuntimeError("gradwave USPP SCF did not converge")
         self.last_result = res
         self.results["energy"] = float(res.energies.free_energy)
         self.results["free_energy"] = float(res.energies.free_energy)
         if nspin == 2:
-            self.results["magmom"] = float(res.mag_total)
+            # always set (never None) on the nspin=2 path; results.py keeps
+            # the field Optional for the shared nspin=1 default.
+            self.results["magmom"] = float(cast(float, res.mag_total))
         from gradwave.postscf.paw_forces import forces_uspp
 
-        self.results["forces"] = forces_uspp(res, xc).cpu().numpy()
+        # forces_uspp/stress_uspp declare res: dict (postscf/paw_forces.py,
+        # paw_stress.py keep those modules import-light) but actually consume
+        # USPPResult via the _DictBridge duck-typing (scf/results.py) — same
+        # established pattern as the hf_forces cast above, not a workaround.
+        self.results["forces"] = forces_uspp(cast("dict[str, Any]", res), xc).cpu().numpy()
         if self.atoms.pbc.all():
             from gradwave.postscf.paw_stress import stress_uspp
 
-            sig = stress_uspp(res, xc).cpu().numpy()
+            sig = stress_uspp(cast("dict[str, Any]", res), xc).cpu().numpy()
             self.results["stress"] = np.array([
                 sig[0, 0], sig[1, 1], sig[2, 2], sig[1, 2], sig[0, 2], sig[0, 1],
             ])

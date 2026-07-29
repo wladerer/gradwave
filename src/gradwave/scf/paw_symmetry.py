@@ -75,7 +75,7 @@ class MagneticBecsumSymmetrizer:
     keeps, retained for correctness).
     """
 
-    def __init__(self, mg, cell, paws, species_of_atom, atom_slices):
+    def __init__(self, mg, cell, paws, species_of_atom, atom_slices) -> None:
         self._bec = BecsumSymmetrizer(mg.combined(), cell, paws,
                                       species_of_atom, atom_slices)
         a_t = np.asarray(cell, dtype=float).T
@@ -127,7 +127,7 @@ class MagneticBecsumSymmetrizer:
 class BecsumSymmetrizer:
     """Precomputed per-op rotation blocks expanded to the projector columns."""
 
-    def __init__(self, sg, cell, paws, species_of_atom, atom_slices):
+    def __init__(self, sg, cell, paws, species_of_atom, atom_slices) -> None:
         self.sg = sg
         self.atom_slices = atom_slices
         lmax = max(b.l for p in paws for b in p.betas)

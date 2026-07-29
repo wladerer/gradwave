@@ -60,7 +60,7 @@ def convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol):
 
 
 def adaptive_diago_tol(it, history, diago_tol, n_electrons, *, schedule,
-                       first_tol=1e-3):
+                       first_tol: float=1e-3):
     """Adaptive diagonalization tolerance (QE-style): loose while the density
     is far from self-consistent, tightening with the previous residual.
 
@@ -163,7 +163,7 @@ def spin_xc_energy(xc, rho_out_s, rho_core, vol, g_cart, tau_s=None):
 def assemble_pw_energies(coeffs_s, occ_s, kweights, spheres, grid, vol,
                          rho_g_out, e_xc, vloc_g, becps_s, dij_full,
                          positions, charges, entropy_term, nspin,
-                         e_hub=0.0, e_onec=None, e_ewald=None):
+                         e_hub: float=0.0, e_onec=None, e_ewald=None):
     """The plane-wave EnergyBreakdown assembly shared by the collinear
     drivers: per-spin kinetic and nonlocal sums (with the BARE D for
     USPP/PAW), total-density Hartree/local, caller-supplied E_xc. e_onec=None

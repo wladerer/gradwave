@@ -110,7 +110,7 @@ class OneCenter:
     ``device`` places the radial/angular tables (and hence the whole
     quadrature) where the SCF runs; default CPU."""
 
-    def __init__(self, paw: PAWData, xc, device=None):
+    def __init__(self, paw: PAWData, xc, device=None) -> None:
         self.paw = paw
         self.xc = xc
         self.device = (torch.device(device) if device is not None
