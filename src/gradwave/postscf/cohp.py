@@ -133,7 +133,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -156,6 +156,7 @@ from gradwave.postscf.pdos import (
 )
 from gradwave.scf.loop import SCFResult, System
 from gradwave.scf.results import USPPResult
+from gradwave.scf.uspp_setup import USPPSystem
 
 if TYPE_CHECKING:
     from gradwave.scf.noncollinear import NCResult
@@ -212,21 +213,29 @@ class COHP:
     bond_images: dict[str, tuple[int, int, int]] | None = None  # "i-j" -> (n1,n2,n3)
     basis: str = "pswfc"                # projector basis: "pswfc" or "iao"
     rmsp: float | None = None           # LOBSTER G-space projection residual [0,1]
+    # Sum-rule ICOHP over EVERY atom pair (incl. on-site), for validation against
+    # the band-structure energy sum -- read by tests/integration/test_cohp.py,
+    # so a first-class (if internal, underscore-named) field rather than a
+    # duck-typed extra attribute the dataclass schema doesn't know about.
+    _sumrule_icohp: float | None = None
 
     def cohp_at_k(self, label: str, block: int, *, width: float = 0.1,
                   grid: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
         """Re-broaden the COHP of one (spin, k) block for a pair into a curve.
         Returns (energy_grid, cohp). `grid` defaults to `self.energy_eV`."""
         grid = self.energy_eV if grid is None else np.asarray(grid)
+        assert self.band_energies is not None and self.band_cohp is not None
+        assert self.block_kweights is not None
         e = self.band_energies[block]
         w = self.band_cohp[label][block] * float(self.block_kweights[block])
         return grid, _broaden(grid, e, w, width)
 
     def bands_reshaped(self, label: str) -> np.ndarray:
         """`band_cohp[label]` reshaped to (nspin, nk, nb)."""
+        assert self.band_cohp is not None
         return self.band_cohp[label].reshape(self.nspin, self.nk, -1)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         def _col(a):
             return None if a is None else np.asarray(a).tolist()
         return {
@@ -255,7 +264,7 @@ class COHP:
         }
 
 
-def _min_image_dist(system: System, i: int, j: int) -> float:
+def _min_image_dist(system: System | USPPSystem, i: int, j: int) -> float:
     """Nearest-image |tau_i - tau_j| [A] under the periodic cell."""
     cell = np.asarray(system.grid.cell, dtype=float)
     pos = system.positions.detach().cpu().numpy()
@@ -265,7 +274,7 @@ def _min_image_dist(system: System, i: int, j: int) -> float:
     return float(np.linalg.norm(frac @ cell))
 
 
-def _nearest_image_R(system: System, i: int, j: int) -> np.ndarray:
+def _nearest_image_R(system: System | USPPSystem, i: int, j: int) -> np.ndarray:
     """Integer lattice vector R of the image of atom j nearest atom i, i.e. the
     single bond the min-image distance picks out. The COHP off-site block sums the
     whole j sublattice; this R selects one image for a per-bond resolution."""
@@ -279,7 +288,8 @@ def _accumulate_images(
     proj_per_k: list[torch.Tensor], htilde_per_k: list[torch.Tensor], eig_per_k: list[torch.Tensor],
     kw: list[float], kpts: list[np.ndarray], atom_of: np.ndarray,
     pair_list: list[tuple[int, int, float]],
-    images: dict[tuple[int, int], np.ndarray], nspin: int, nk: int, g_spin: float, fermi: float,
+    images: dict[tuple[int, int], np.ndarray], nspin: int, nk: int, g_spin: float,
+    fermi: float | None,
 ) -> tuple[dict[tuple[int, int], list[np.ndarray]], dict[tuple[int, int], float]]:
     """Per-bond COHP: restrict each pair to a single image R of atom j.
 
@@ -306,7 +316,7 @@ def _accumulate_images(
         mi = torch.as_tensor(atom_of == i, device=proj_per_k[0].device)
         mj = torch.as_tensor(atom_of == j, device=proj_per_k[0].device)
         # real-space hopping h_pq(R) per spin channel (blocks are spin-major)
-        hR = []
+        hR: list[torch.Tensor] = []
         for s in range(nspin):
             acc = None
             for ik in range(nk):
@@ -316,6 +326,8 @@ def _accumulate_images(
                                      device=htilde_per_k[b].device)
                 blk = htilde_per_k[b][mi][:, mj] * cs
                 acc = blk if acc is None else acc + blk
+            # nk (the number of k-points) is always >= 1 in practice.
+            assert acc is not None
             hR.append(acc)
         for s in range(nspin):
             for ik in range(nk):
@@ -328,10 +340,13 @@ def _accumulate_images(
                 raw[(i, j)][b] = w
                 occ = eig_per_k[b].cpu().numpy() < fermi
                 icohp[(i, j)] += float((w[occ] * float(kw[b])).sum())
-    return raw, icohp
+    # every (i, j, b) triple was assigned above (the `for ik in range(nk)`
+    # loop over every pair covers every block), so no `None` placeholder
+    # survives to the return.
+    return cast("dict[tuple[int, int], list[np.ndarray]]", raw), icohp
 
 
-def _select_pairs(system: System, pairs: list[tuple[int, int]] | None,
+def _select_pairs(system: System | USPPSystem, pairs: list[tuple[int, int]] | None,
                   rcut: float) -> list[tuple[int, int, float]]:
     """Resolve the requested atom pairs to [(i, j, dist)] with i < j. An explicit
     `pairs` list wins; otherwise every distinct atom pair within `rcut`."""
@@ -387,7 +402,10 @@ def _htilde_eig(proj: torch.Tensor, eig: torch.Tensor) -> torch.Tensor:
     return (proj.conj() * eig[:, None]).transpose(0, 1) @ proj
 
 
-def _htilde_operator(q: torch.Tensor, o_inv_sqrt: torch.Tensor, h_apply: Callable) -> torch.Tensor:
+def _htilde_operator(
+    q: torch.Tensor, o_inv_sqrt: torch.Tensor,
+    h_apply: Callable[[torch.Tensor], torch.Tensor],
+) -> torch.Tensor:
     """Operator-route AO Hamiltonian H~ = O^{-1/2} <phi|H^|phi> O^{-1/2}.
 
     `q` (nbasis, npw) are the RAW (non-orthonormal) AO projectors, `o_inv_sqrt`
@@ -419,7 +437,7 @@ def _pair_block_weights(proj: torch.Tensor, htilde: torch.Tensor, atom_of: np.nd
 def _accumulate(
     proj_per_k: list[torch.Tensor], htilde_per_k: list[torch.Tensor], eig_per_k: list[torch.Tensor],
     kw: list[float], atom_of: np.ndarray, pair_list: list[tuple[int, int, float]],
-    g_spin: float, fermi: float,
+    g_spin: float, fermi: float | None,
 ) -> tuple[
     list[np.ndarray], dict[tuple[int, int], list[np.ndarray]], dict[tuple[int, int], float], float,
 ]:
@@ -461,10 +479,11 @@ def _finalize(block_e: list[np.ndarray], raw: dict[tuple[int, int], list[np.ndar
               pair_list: list[tuple[int, int, float]], kw: list[float],
               kpts: list[np.ndarray], nspin: int, nk: int, width: float, npoints: int,
               window: tuple[float, float] | None,
-              spilling: float, charge_spilling: float, fermi: float, kind: str, band_window: float,
+              spilling: float, charge_spilling: float, fermi: float | None, kind: str,
+              band_window: float,
               total_all_icohp: float, method: str = "operator") -> tuple[COHP, float]:
     band_energies = np.stack(block_e) if block_e else np.zeros((0, 0))
-    kw = np.asarray(kw, dtype=float)
+    kw_arr = np.asarray(kw, dtype=float)
     all_e = band_energies.ravel() if band_energies.size else np.array([0.0])
     window, grid = spectral_grid(all_e, width, npoints, window)
 
@@ -474,7 +493,7 @@ def _finalize(block_e: list[np.ndarray], raw: dict[tuple[int, int], list[np.ndar
         lab = f"{i + 1}-{j + 1}"
         rawstack = np.stack(raw[(i, j)])               # (nblocks, nb), per state
         band_cohp[lab] = rawstack
-        w = (rawstack * kw[:, None]).ravel()           # k-weight for the curve
+        w = (rawstack * kw_arr[:, None]).ravel()       # k-weight for the curve
         curve = _broaden(grid, band_energies.ravel(), w, width)
         pair_cohp[lab] = curve
         pair_icohp[lab] = icohp[(i, j)]
@@ -487,7 +506,7 @@ def _finalize(block_e: list[np.ndarray], raw: dict[tuple[int, int], list[np.ndar
         kind=kind, band_window_eV=float(band_window), pairs=pair_list,
         method=method,
         nspin=nspin, nk=nk, block_kpts=np.asarray(kpts, dtype=float),
-        block_kweights=kw, band_energies=band_energies, band_cohp=band_cohp,
+        block_kweights=kw_arr, band_energies=band_energies, band_cohp=band_cohp,
     ), total_all_icohp
 
 
@@ -561,10 +580,6 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
         raise NotImplementedError(
             "basis='iao' needs the norm-conserving operator route "
             "(method='operator' on an SCFResult)")
-    if use_op:
-        from gradwave.core.hamiltonian import HamiltonianK, projectors
-        shape = system.grid.shape
-
     cols = _atomic_columns(system)
     atom_of = np.array([c.atom for c in cols])
     pair_list = _select_pairs(system, pairs, rcut)
@@ -578,7 +593,15 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
     cap_blocks, occ_blocks = [], []
     band_window = -np.inf
     for isp in range(nspin):
-        veff = res.v_eff if nspin == 1 else res.v_eff[isp]
+        veff = None
+        if use_op:
+            # use_op implies isinstance(res, SCFResult) above -- only
+            # SCFResult carries v_eff (USPPResult has no such field, so
+            # this must stay inside `if use_op:`, not run unconditionally
+            # for every res regardless of route -- see the module's
+            # eigenvalue-route USPP/PAW fallback, which never touches v_eff).
+            assert isinstance(res, SCFResult)
+            veff = res.v_eff if nspin == 1 else res.v_eff[isp]
         for ik, sph in enumerate(system.spheres):
             c = coeffs[isp][ik].to(device)                       # (nb, npw)
             e = eig[isp, ik].to(device)
@@ -591,10 +614,12 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
             becp = torch.einsum("bg,pg->bp", c, q.conj())
             proj = _lowdin_project(becp, overlap)                # (nb, nproj)
             if use_op:
+                from gradwave.core.hamiltonian import HamiltonianK, projectors
+                assert veff is not None
                 ois = o_inv_sqrt(overlap)                        # O^{-1/2} for the operator route
                 pd = system.proj_data[ik]
                 p = projectors(pd, system.positions).to(device)
-                h = HamiltonianK(sph, shape, veff, pd, p)
+                h = HamiltonianK(sph, system.grid.shape, veff, pd, p)
                 htilde = _htilde_operator(q, ois, h.apply)
             else:
                 htilde = _htilde_eig(proj, e)
@@ -630,7 +655,7 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
     # equals sqrt(total spilling) (LOBSTER's model-independent metric).
     out.rmsp = float(np.sqrt(max(spilling, 0.0)))
     if images is not None:
-        out.bond_images = {f"{i + 1}-{j + 1}": tuple(int(x) for x in R)
+        out.bond_images = {f"{i + 1}-{j + 1}": (int(R[0]), int(R[1]), int(R[2]))
                            for (i, j), R in images.items()}
     return out
 
@@ -677,6 +702,8 @@ def projection_rmsp(res: SCFResult, *, basis: str = "pswfc",
             d = wk * float(keep.sum())
             num = n if num is None else num + n
             den = d if den is None else den + d
+    # nspin and system.spheres are always >= 1 in practice.
+    assert num is not None and den is not None
     return (num / den).clamp_min(0.0).sqrt()
 
 
@@ -691,8 +718,10 @@ def _spinor_proj_per_k(
     derived from cap_blocks by the caller via _spilling_metrics, so there is a
     single spilling definition shared with the collinear path."""
     system = res.system
+    assert system.batch is not None
     m_pw = system.batch.npw_max
     eig = res.eigenvalues
+    assert res.coeffs is not None, "res carries no spinor coefficients"
     proj_per_k, eig_per_k, kpts, cap_blocks = [], [], [], []
     band_window = -np.inf
     for ik, sph in enumerate(system.spheres):
@@ -700,11 +729,15 @@ def _spinor_proj_per_k(
         c = res.coeffs[ik].to(device)                            # (nb, 2*m_pw)
         cu, cd = split_spinor(c, npw, m_pw)
         if spinor:
-            proj = spinor_jmj_amplitudes(system, sph, cols, cu, cd, device)
+            # spinor=True is only ever called (by cohp_soc) with SOColumns.
+            cols_so = cast("list[SOColumn]", cols)
+            proj = spinor_jmj_amplitudes(system, sph, cols_so, cu, cd, device)
         else:
             # spin-summed charge COHP: stack the up/down scalar-AO amplitudes side
-            # by side so the band-limited H~ carries the full spinor character
-            pu, pd = spinor_scalar_amplitudes(system, sph, cols, cu, cd, device)
+            # by side so the band-limited H~ carries the full spinor character;
+            # spinor=False is only ever called (by cohp_noncollinear) with AOColumns.
+            cols_ao = cast("list[AOColumn]", cols)
+            pu, pd = spinor_scalar_amplitudes(system, sph, cols_ao, cu, cd, device)
             proj = torch.cat([pu, pd], dim=1)                    # (nb, 2*nproj)
         e = eig[ik].to(device)
         proj_per_k.append(proj)
@@ -732,6 +765,7 @@ def cohp_noncollinear(
     if not isinstance(res, NCResult):
         raise NotImplementedError("cohp_noncollinear expects a noncollinear NCResult")
     system = res.system
+    assert res.coeffs is not None, "res carries no spinor coefficients"
     device = res.coeffs.device
     cols = _atomic_columns(system)
     atom_of = np.tile([c.atom for c in cols], 2)      # up-block then down-block
@@ -777,6 +811,7 @@ def cohp_soc(
         raise NotImplementedError(
             "cohp_soc needs a fully-relativistic (SOC) pseudo; use "
             "cohp_noncollinear for scalar-relativistic noncollinear SCF")
+    assert res.coeffs is not None, "res carries no spinor coefficients"
     device = res.coeffs.device
     cols = _atomic_columns_so(system)
     atom_of = np.array([c.atom for c in cols])
