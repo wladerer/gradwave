@@ -160,6 +160,26 @@ include = [
     "src/gradwave/postscf/uspp_bands.py",
     "src/gradwave/postscf/uspp_frozen.py",
     #
+    # Phase 5: autotyping + MonkeyType over solvers/ (the eigensolver
+    # workhorses -- all 7 files, verified genuinely clean by actually
+    # adding each to this list and checking, same discipline as above.
+    # davidson.py needed two real fixes, not just annotations: the
+    # single-k davidson()'s debug log referenced a loop-local `unconverged`
+    # ty could not prove defined (same "runs >=1 iteration" pattern as
+    # scf/loop.py) -- recomputed from `res_norms` instead; and the
+    # experimental (default-off, measured-not-faster) sync_free path in
+    # davidson_batched() carries ev/flag_host as `T | None` that are only
+    # None when sync_free is False -- narrowed with `assert x is not None`
+    # at each use, not a new runtime-checked wrapper, and only inside the
+    # sync_free branch the hot default (non-sync_free) path never takes.
+    "src/gradwave/solvers/__init__.py",
+    "src/gradwave/solvers/_ms.py",
+    "src/gradwave/solvers/precond.py",
+    "src/gradwave/solvers/registry.py",
+    "src/gradwave/solvers/davidson.py",
+    "src/gradwave/solvers/chebyshev.py",
+    "src/gradwave/solvers/lobpcg.py",
+    #
     # Deliberately left off (individually verified NOT clean — hundreds of
     # real errors between them, not just the untyped-bulk warning noise):
     # cohp.py, dielectric.py, discretization_error.py, forces.py,

@@ -51,6 +51,7 @@ Runs entirely under torch.no_grad() — autograd must never see this.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 import torch
 
@@ -68,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 @torch.no_grad()
 def lobpcg_batched(
-    h_apply,
+    h_apply: Callable[[torch.Tensor], torch.Tensor],
     x0: torch.Tensor,  # (nk, nb, npw_max), padded slots zero
     t: torch.Tensor,  # (nk, npw_max) kinetic diagonal, 0 in padding
     mask: torch.Tensor,  # (nk, npw_max) bool
@@ -143,7 +144,7 @@ def lobpcg_batched(
 
 @torch.no_grad()
 def lobpcg_batched_ms(
-    h_apply,
+    h_apply: Callable[[torch.Tensor], torch.Tensor],
     x0: torch.Tensor,
     t: torch.Tensor,
     mask: torch.Tensor,

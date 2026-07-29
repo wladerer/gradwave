@@ -113,8 +113,16 @@ def is_registered(name: str) -> bool:
 
 
 def davidson_adapter(
-    apply_H, X0, precond, mask, *, tol, nbands=None, max_iter=40,
-    max_dim_factor=4, **kw,
+    apply_H: Callable[[torch.Tensor], torch.Tensor],
+    X0: torch.Tensor,
+    precond: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    tol: float,
+    nbands: int | None = None,
+    max_iter: int = 40,
+    max_dim_factor: int = 4,
+    **kw: Any,
 ) -> EigResult:
     """Batched block Davidson — the baseline. `precond` is the kinetic diagonal
     T the Teter preconditioner uses; `nbands` is implied by X0 (kept for
@@ -133,8 +141,19 @@ def davidson_adapter(
 
 
 def chebyshev_adapter(
-    apply_H, X0, precond, mask, *, tol, nbands=None, max_iter=40, degree=10,
-    n_lanczos=6, n_buffer=None, bounds=None, **kw,
+    apply_H: Callable[[torch.Tensor], torch.Tensor],
+    X0: torch.Tensor,
+    precond: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    tol: float,
+    nbands: int | None = None,
+    max_iter: int = 40,
+    degree: int = 10,
+    n_lanczos: int = 6,
+    n_buffer: int | None = None,
+    bounds: tuple[torch.Tensor, torch.Tensor] | None = None,
+    **kw: Any,
 ) -> EigResult:
     """Chebyshev-filtered subspace iteration (CheFSI). Ignores `precond` (the
     filter needs no preconditioner); reports its degree/buffer in diagnostics."""
@@ -153,8 +172,16 @@ def chebyshev_adapter(
 
 
 def lobpcg_adapter(
-    apply_H, X0, precond, mask, *, tol, nbands=None, max_iter=60, n_buffer=None,
-    **kw,
+    apply_H: Callable[[torch.Tensor], torch.Tensor],
+    X0: torch.Tensor,
+    precond: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    tol: float,
+    nbands: int | None = None,
+    max_iter: int = 60,
+    n_buffer: int | None = None,
+    **kw: Any,
 ) -> EigResult:
     """Block LOBPCG — fixed ~3*nw subspace [X, W, P]. `precond` is the kinetic
     diagonal T the Teter preconditioner uses; `n_buffer` extra bands (gated out
