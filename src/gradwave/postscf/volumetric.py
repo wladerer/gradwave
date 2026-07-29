@@ -26,25 +26,36 @@ Result coverage (see the manual, "Volumetric export"):
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PosixPath
 
+import ase.atoms
 import numpy as np
+from torch import Tensor
 
 from gradwave.core.density import sigma_from_rho
 from gradwave.core.fftbox import g_to_r
 from gradwave.core.metagga import tau_b
 from gradwave.postscf._response import pad_coeffs
+from gradwave.scf.loop import SCFResult, System
+from gradwave.scf.noncollinear import NCResult
+from gradwave.scf.results import USPPNCResult, USPPResult
+from gradwave.scf.uspp_setup import USPPSystem
+
+# The four SCF drivers' result shapes; see gradwave.scf.results.AnyResult for
+# the TYPE_CHECKING-only alias this mirrors. Spelled out here (rather than
+# importing AnyResult) so ty's error messages name the concrete types.
+AnyResult = SCFResult | NCResult | USPPResult | USPPNCResult
 
 _WRITERS = {".cube": "cube", ".xsf": "xsf", ".chgcar": "chgcar"}
 
 
-def _is_spinor(res) -> bool:
+def _is_spinor(res: AnyResult) -> bool:
     """NC/SOC results store spinor coeffs as one (nk,nb,2·npw_max) tensor;
     collinear results store a per-k list."""
     return res.coeffs is not None and not isinstance(res.coeffs, list)
 
 
-def _atoms_from_system(system):
+def _atoms_from_system(system: System | USPPSystem) -> ase.atoms.Atoms:
     """ASE Atoms (cell rows a_i [Å], Cartesian positions, true Z) from a System."""
     from ase import Atoms
     from ase.data import atomic_numbers
@@ -59,7 +70,7 @@ def _atoms_from_system(system):
     return Atoms(numbers=numbers, positions=pos, cell=cell, pbc=True)
 
 
-def _infer_fmt(path) -> str:
+def _infer_fmt(path: PosixPath) -> str:
     p = Path(path)
     # CHGCAR/PARCHG conventionally carry no extension; key off the basename,
     # allowing a descriptive prefix (diamond_CHGCAR) as VASP tooling does.
@@ -74,7 +85,9 @@ def _infer_fmt(path) -> str:
     return _WRITERS[ext]
 
 
-def write_volumetric(path, data, atoms, fmt: str | None = None) -> str:
+def write_volumetric(
+    path: PosixPath, data: np.ndarray, atoms: ase.atoms.Atoms, fmt: str | None = None
+) -> str:
     """Write a scalar field `data` (n1,n2,n3) on `atoms`' cell to .cube/.xsf.
 
     The format is taken from the extension unless `fmt` ("cube"/"xsf"/"chgcar")
@@ -112,14 +125,16 @@ def write_volumetric(path, data, atoms, fmt: str | None = None) -> str:
     return str(path)
 
 
-def _grid_info(res):
+def _grid_info(
+    res: AnyResult,
+) -> tuple[System | USPPSystem, tuple[int, int, int], float]:
     system = res.system
     return system, system.grid.shape, float(system.grid.volume)
 
 
 # --- CHGCAR analog: total / spin density ----------------------------------
 
-def density(res, spin: int | None = None) -> np.ndarray:
+def density(res: AnyResult, spin: int | None = None) -> np.ndarray:
     """ρ(r) [e/Å³] as a numpy array (the CHGCAR analog).
 
     spin=0/1 selects the ↑/↓ channel of a collinear spin-polarized result; the
@@ -140,14 +155,18 @@ def density(res, spin: int | None = None) -> np.ndarray:
     return rho.detach().cpu().numpy()
 
 
-def write_density(res, path, spin: int | None = None, fmt: str | None = None) -> str:
+def write_density(
+    res: AnyResult, path: PosixPath, spin: int | None = None, fmt: str | None = None
+) -> str:
     """Write the SCF density ρ(r) to a .cube/.xsf file (CHGCAR analog)."""
     return write_volumetric(path, density(res, spin), _atoms_from_system(res.system), fmt)
 
 
 # --- PARCHG analog: band/k-decomposed density -----------------------------
 
-def band_density(res, band: int, kpoint: int = 0, spin: int | None = None) -> np.ndarray:
+def band_density(
+    res: AnyResult, band: int, kpoint: int = 0, spin: int | None = None
+) -> np.ndarray:
     """|ψ_{n,k}(r)|² [Å⁻³] for one band and k-point (the PARCHG analog).
 
     The single-state density integrates to 1 over the cell. `band` and
@@ -184,7 +203,8 @@ def band_density(res, band: int, kpoint: int = 0, spin: int | None = None) -> np
 
 
 def write_band_density(
-    res, path, band: int, kpoint: int = 0, spin: int | None = None, fmt: str | None = None
+    res: AnyResult, path: PosixPath, band: int, kpoint: int = 0, spin: int | None = None,
+    fmt: str | None = None,
 ) -> str:
     """Write |ψ_{n,k}(r)|² for a chosen band/k to .cube/.xsf (PARCHG analog)."""
     return write_volumetric(
@@ -194,7 +214,7 @@ def write_band_density(
 
 # --- Magnetization density (noncollinear) ---------------------------------
 
-def magnetization(res, component: str = "abs") -> np.ndarray:
+def magnetization(res: AnyResult, component: str = "abs") -> np.ndarray:
     """Spin magnetization density m(r) [μ_B/Å³] — noncollinear/SOC results only.
 
     component: 'x'/'y'/'z' for a Cartesian channel, 'abs' for the magnitude
@@ -218,7 +238,7 @@ def magnetization(res, component: str = "abs") -> np.ndarray:
 
 
 def write_magnetization(
-    res, path, component: str = "abs", fmt: str | None = None
+    res: AnyResult, path: PosixPath, component: str = "abs", fmt: str | None = None
 ) -> str:
     """Write the noncollinear magnetization density m(r) to .cube/.xsf."""
     return write_volumetric(
@@ -231,7 +251,7 @@ def write_magnetization(
 _C_F = 0.3 * (3.0 * np.pi**2) ** (2.0 / 3.0)  # Thomas–Fermi kinetic constant
 
 
-def _elf_field(tau, rho, g_cart, c_F, eps) -> np.ndarray:
+def _elf_field(tau: Tensor, rho: Tensor, g_cart: Tensor, c_F: float, eps: float) -> np.ndarray:
     """ELF(r) = 1/(1+(D/D_h)²) for one (τ, ρ) channel with TF constant c_F."""
     sigma = sigma_from_rho(rho, g_cart)  # |∇ρ|²(r)
     rho_c = rho.clamp_min(eps)
@@ -241,7 +261,7 @@ def _elf_field(tau, rho, g_cart, c_F, eps) -> np.ndarray:
     return (1.0 / (1.0 + chi * chi)).detach().cpu().numpy()
 
 
-def elf(res, eps: float = 1e-10) -> np.ndarray:
+def elf(res: AnyResult, eps: float = 1e-10) -> np.ndarray:
     """Becke–Edgecombe electron localization function ELF(r) ∈ [0,1].
 
     ELF = 1 / (1 + (D/D_h)²) with the Pauli kinetic-energy density
@@ -300,7 +320,7 @@ def elf(res, eps: float = 1e-10) -> np.ndarray:
     return np.stack(fields)
 
 
-def write_elf(res, path, fmt: str | None = None):
+def write_elf(res: AnyResult, path: PosixPath, fmt: str | None = None) -> str:
     """Write the electron localization function ELF(r) to .cube/.xsf.
 
     For nspin=2 the two spin channels are written to `<stem>_up` and `<stem>_dn`

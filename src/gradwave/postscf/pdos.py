@@ -25,7 +25,9 @@ projwfc.x.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -33,8 +35,16 @@ import torch
 from gradwave.constants import MINUS_I_POW as _MINUS_I_POW
 from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.grids import GSphere
 from gradwave.pseudo.radial import sbt
-from gradwave.scf.loop import SCFResult
+from gradwave.pseudo.upf import AtomicOrbital, UPFData
+from gradwave.pseudo.upf_paw import PAWData
+from gradwave.scf.loop import SCFResult, System
+from gradwave.scf.results import USPPResult
+from gradwave.scf.uspp_setup import USPPSystem
+
+if TYPE_CHECKING:
+    from gradwave.scf.noncollinear import NCResult
 
 _M_LABELS = {0: [""], 1: ["z", "x", "y"],  # real-harmonic order of ylm_all
              2: ["z2", "xz", "yz", "x2-y2", "xy"],
@@ -56,7 +66,7 @@ class AOColumn:
 class ProjectedDOS:
     energy_eV: np.ndarray            # (npoints,)
     total: np.ndarray                # (npoints,) or (2, npoints) for nspin=2
-    groups: dict                     # group label -> same shape as total
+    groups: dict[str, np.ndarray]    # group label -> same shape as total
     spilling: float                  # fraction of KS weight outside the AO span
     fermi_eV: float | None
     nspin: int
@@ -88,10 +98,10 @@ class NoncollinearPDOS:
 
     energy_eV: np.ndarray            # (npoints,)
     total_charge: np.ndarray         # (npoints,)
-    charge: dict                     # group label -> (npoints,)
-    m_x: dict                        # group label -> (npoints,)
-    m_y: dict
-    m_z: dict
+    charge: dict[str, np.ndarray]    # group label -> (npoints,)
+    m_x: dict[str, np.ndarray]       # group label -> (npoints,)
+    m_y: dict[str, np.ndarray]
+    m_z: dict[str, np.ndarray]
     spilling: float
     fermi_eV: float | None
     group_by: str
@@ -114,7 +124,9 @@ class NoncollinearPDOS:
         }
 
 
-def _broaden(grid, energies, per_state, width):
+def _broaden(
+    grid: np.ndarray, energies: np.ndarray, per_state: np.ndarray, width: float,
+) -> np.ndarray:
     """Gaussian-broadened spectral sum. energies (nstate,), per_state (nstate,)
     already carries the k-weight, spin degeneracy, and orbital weight."""
     inv = 1.0 / (width * math.sqrt(2 * math.pi))
@@ -122,7 +134,10 @@ def _broaden(grid, energies, per_state, width):
             * inv * per_state[None, :]).sum(axis=1)
 
 
-def spectral_grid(all_e, width, npoints, window=None):
+def spectral_grid(
+    all_e: np.ndarray, width: float, npoints: int,
+    window: tuple[float, float] | None = None,
+) -> tuple[tuple[float, float], np.ndarray]:
     """(window, energy grid) for DOS/COHP broadening. When `window` is None it
     defaults to the eigenvalue range padded by 10*width on each side — far enough
     that a Gaussian of that width has decayed. Shared by the DOS functions here
@@ -132,12 +147,17 @@ def spectral_grid(all_e, width, npoints, window=None):
     return window, np.linspace(window[0], window[1], npoints)
 
 
-def _is_uspp_system(system) -> bool:
+def _is_uspp_system(system: System | USPPSystem) -> bool:
     """USPP/PAW systems carry the augmentation weights; NC systems carry .upfs."""
     return hasattr(system, "paws") and hasattr(system, "q_full")
 
 
-def _species_orbitals(system, sp):
+def _species_orbitals(
+    system: System | USPPSystem, sp: int
+) -> (
+    tuple[PAWData, tuple[AtomicOrbital, AtomicOrbital]]
+    | tuple[UPFData, tuple[AtomicOrbital, AtomicOrbital]]
+):
     """(pseudopotential, PP_PSWFC atomic orbitals) for species `sp`. The radial
     tables live on .pswfc for norm-conserving UPFData and on .chi for PAWData,
     but both are AtomicOrbital(l, label, rchi=r·R_nl) with matching .r/.rab."""
@@ -148,7 +168,7 @@ def _species_orbitals(system, sp):
     return pp, getattr(pp, "pswfc", ())
 
 
-def _atomic_columns(system) -> list[AOColumn]:
+def _atomic_columns(system: System | USPPSystem) -> list[AOColumn]:
     """Every PP_PSWFC orbital of every atom, expanded over m."""
     cols = []
     for a, sp in enumerate(system.species_of_atom):
@@ -164,7 +184,9 @@ def _atomic_columns(system) -> list[AOColumn]:
     return cols
 
 
-def _ao_projectors_k(system, sph, cols, device):
+def _ao_projectors_k(
+    system: System | USPPSystem, sph: GSphere, cols: list[AOColumn], device: torch.device
+) -> torch.Tensor:
     """AO projectors q (nproj, npw) on one G-sphere, phased at the positions."""
     vol = system.grid.volume
     kpg = sph.kpg.to(device)
@@ -194,7 +216,7 @@ def _ao_projectors_k(system, sph, cols, device):
     return q
 
 
-def o_inv_sqrt(overlap, floor=1e-8):
+def o_inv_sqrt(overlap: torch.Tensor, floor: float=1e-8) -> torch.Tensor:
     """O^{-1/2} (Hermitian) of an AO overlap O, near-singular modes clamped to
     `floor`. The single definition shared by the Loewdin projection here and the
     COHP operator route in cohp.py, so the two cannot drift."""
@@ -203,7 +225,7 @@ def o_inv_sqrt(overlap, floor=1e-8):
     return (v * w.rsqrt()) @ v.conj().T                # O^{-1/2}, Hermitian
 
 
-def _lowdin_project(becp, overlap, floor=1e-8):
+def _lowdin_project(becp: torch.Tensor, overlap: torch.Tensor, floor: float=1e-8) -> torch.Tensor:
     """Loewdin-orthonormalized amplitudes <phi~_p|psi_b> = (<phi_p|psi_b> O^{-1/2})
     from raw becp (nb, nproj) and the AO overlap O = <phi_i|phi_j> (nproj, nproj).
     Returns the complex amplitudes so a caller can form |.|^2 (populations) or the
@@ -215,13 +237,13 @@ def _lowdin_project(becp, overlap, floor=1e-8):
     return becp @ o_inv_sqrt(overlap, floor).conj()    # (nb, nproj), complex
 
 
-def _lowdin_weights(becp, overlap, floor=1e-8):
+def _lowdin_weights(becp: torch.Tensor, overlap: torch.Tensor, floor: float=1e-8) -> torch.Tensor:
     """Loewdin-orthonormalized populations |<phi~_p|psi_b>|^2 (nb, nproj)."""
     proj = _lowdin_project(becp, overlap, floor)
     return proj.real ** 2 + proj.imag ** 2
 
 
-def split_spinor(c, npw, m_pw):
+def split_spinor(c: torch.Tensor, npw: int, m_pw: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Up/down plane-wave blocks (cu, cd) of a spinor coefficient block
     c (nb, 2*m_pw): the up component occupies [:npw], the down component starts
     at the fixed padding offset m_pw. Shared by the noncollinear/SOC PDOS and
@@ -229,7 +251,10 @@ def split_spinor(c, npw, m_pw):
     return c[:, :npw], c[:, m_pw:m_pw + npw]
 
 
-def spinor_scalar_amplitudes(system, sph, cols, cu, cd, device):
+def spinor_scalar_amplitudes(
+    system: System, sph: GSphere, cols: list[AOColumn], cu: torch.Tensor, cd: torch.Tensor,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Loewdin amplitudes (pu, pd) of a spinor state's up/down components on the
     SCALAR AO set, sharing one spatial overlap. Complex (nb, nproj) each — the
     caller forms |.|^2 populations or the pu* pd cross term (spin texture).
@@ -241,7 +266,10 @@ def spinor_scalar_amplitudes(system, sph, cols, cu, cd, device):
     return pu, pd
 
 
-def spinor_jmj_amplitudes(system, sph, cols, cu, cd, device):
+def spinor_jmj_amplitudes(
+    system: System, sph: GSphere, cols: list[SOColumn], cu: torch.Tensor, cd: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
     """Loewdin amplitudes (nb, nproj) on the |l j mj> spin-angular AO set; the
     becp and AO overlap are spin-summed over the two spinor components. Complex —
     the caller forms |.|^2 (SOC populations) or uses the amplitudes directly (the
@@ -254,7 +282,10 @@ def spinor_jmj_amplitudes(system, sph, cols, cu, cd, device):
     return _lowdin_project(becp, overlap)
 
 
-def _nc_weights_k(system, sph, ik, c, cols, device):
+def _nc_weights_k(
+    system: System | USPPSystem, sph: GSphere, ik: int, c: torch.Tensor, cols: list[AOColumn],
+    device: torch.device,
+) -> np.ndarray:
     """Norm-conserving Löwdin weights (nb, nproj); overlap is the bare AO Gram."""
     q = _ao_projectors_k(system, sph, cols, device)     # (nproj, npw)
     becp = torch.einsum("bg,pg->bp", c, q.conj())        # <phi_p|psi_b>
@@ -262,7 +293,10 @@ def _nc_weights_k(system, sph, ik, c, cols, device):
     return _lowdin_weights(becp, overlap).cpu().numpy()
 
 
-def _uspp_weights_k(system, sph, ik, c, cols, device):
+def _uspp_weights_k(
+    system: USPPSystem, sph: GSphere, ik: int, c: torch.Tensor, cols: list[AOColumn],
+    device: torch.device,
+) -> np.ndarray:
     """USPP/PAW Löwdin weights with the S-metric. becp = <phi|S|psi> and the
     overlap = <phi|S|phi>, where the augmentation S = 1 + sum_ij |beta_i> q_ij
     <beta_j| reuses the SCF's m-expanded beta projectors and charges q_full."""
@@ -279,7 +313,7 @@ def _uspp_weights_k(system, sph, ik, c, cols, device):
     return _lowdin_weights(becp, overlap).cpu().numpy()
 
 
-def _group_key(col: AOColumn, group_by: str):
+def _group_key(col: AOColumn, group_by: str) -> str:
     if group_by == "total":
         return "total"
     if group_by == "atom":
@@ -291,7 +325,12 @@ def _group_key(col: AOColumn, group_by: str):
     return f"atom{col.atom + 1}:{col.label}{('_' + suffix) if suffix else ''}"
 
 
-def _unpack_result(res):
+def _unpack_result(
+    res: SCFResult | USPPResult,
+) -> (
+    tuple[System, int, torch.Tensor, list[list[torch.Tensor]], float, torch.device, Callable]
+    | tuple[USPPSystem, int, torch.Tensor, list[list[torch.Tensor]], float, torch.device, Callable]
+):
     """(system, nspin, eig[None-padded to (nspin,...)], coeffs[spin][k], fermi,
     device, weight_fn) for a norm-conserving SCFResult or a USPPResult."""
     formalism = getattr(res, "formalism", None)
@@ -315,8 +354,10 @@ def _unpack_result(res):
 
 
 @torch.no_grad()
-def projected_dos(res, *, width: float = 0.1, npoints: int = 800, window=None,
-                  group_by: str = "l") -> ProjectedDOS:
+def projected_dos(
+    res: SCFResult | USPPResult, *, width: float = 0.1, npoints: int = 800,
+    window: tuple[float, float] | None = None, group_by: str = "l",
+) -> ProjectedDOS:
     """Löwdin-projected DOS of a converged norm-conserving or USPP/PAW SCF.
 
     group_by is one of 'atom', 'l' (atom + orbital), 'lm' (adds m), or 'total'.
@@ -372,8 +413,10 @@ def projected_dos(res, *, width: float = 0.1, npoints: int = 800, window=None,
 
 
 @torch.no_grad()
-def projected_dos_noncollinear(res, *, width: float = 0.1, npoints: int = 800,
-                               window=None, group_by: str = "l") -> NoncollinearPDOS:
+def projected_dos_noncollinear(
+    res: NCResult, *, width: float = 0.1, npoints: int = 800,
+    window: tuple[float, float] | None = None, group_by: str = "l",
+) -> NoncollinearPDOS:
     """Charge and spin-texture projected DOS of a noncollinear spinor SCF.
 
     Each spinor band is projected onto the pseudo-atomic orbitals per spin
@@ -455,7 +498,7 @@ class SOColumn:
     mj: float         # -j .. j
 
 
-def _atomic_columns_so(system) -> list[SOColumn]:
+def _atomic_columns_so(system: System) -> list[SOColumn]:
     """Every PP_PSWFC orbital expanded over (j, mj); j comes from the FR pseudo."""
     cols = []
     for a, sp in enumerate(system.species_of_atom):
@@ -477,7 +520,9 @@ def _atomic_columns_so(system) -> list[SOColumn]:
     return cols
 
 
-def _ao_spinor_projectors_k(system, sph, cols, device):
+def _ao_spinor_projectors_k(
+    system: System, sph: GSphere, cols: list[SOColumn], device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Spin-angular AO projectors on one G-sphere, returned as separate up/down
     components qu, qd (each nproj, npw). Each |l, j, mj> is the Clebsch-Gordan
     combination c_up Y_l^{mj-1/2} chi_up + c_dn Y_l^{mj+1/2} chi_dn, the same
@@ -515,7 +560,7 @@ def _ao_spinor_projectors_k(system, sph, cols, device):
     return qu, qd
 
 
-def _group_key_so(col: SOColumn, group_by: str):
+def _group_key_so(col: SOColumn, group_by: str) -> str:
     if group_by == "total":
         return "total"
     if group_by == "atom":
@@ -529,8 +574,10 @@ def _group_key_so(col: SOColumn, group_by: str):
 
 
 @torch.no_grad()
-def projected_dos_soc(res, *, width: float = 0.1, npoints: int = 800, window=None,
-                      group_by: str = "j") -> ProjectedDOS:
+def projected_dos_soc(
+    res: NCResult, *, width: float = 0.1, npoints: int = 800,
+    window: tuple[float, float] | None = None, group_by: str = "j",
+) -> ProjectedDOS:
     """j-resolved projected DOS of a fully-relativistic spinor SCF.
 
     Projects the spinor states onto spin-angular atomic orbitals |n l j mj> built

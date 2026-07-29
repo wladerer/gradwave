@@ -84,13 +84,17 @@ from gradwave.core.fftbox import (
 )
 from gradwave.core.hamiltonian import (
     HamiltonianK,
+    ProjectorData,
     becp,
     build_projector_data,
     projectors,
 )
 from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
+from gradwave.core.xc.base import XCFunctional
+from gradwave.core.xc.noncollinear import NoncollinearXC
+from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import CDTYPE, RDTYPE
-from gradwave.grids import build_gsphere, gmax_from_ecut
+from gradwave.grids import GSphere, build_gsphere, gmax_from_ecut
 from gradwave.postscf._response import (
     cg_sternheimer,
     dyson_fixed_point,
@@ -106,8 +110,11 @@ from gradwave.postscf.uspp_frozen import (
     screened_dscr,
 )
 from gradwave.pseudo.kb import beta_form_factors
+from gradwave.pseudo.upf import UPFData
 from gradwave.scf.implicit import apply_chi0, apply_k_hxc
-from gradwave.scf.loop import SCFResult
+from gradwave.scf.loop import SCFResult, System
+from gradwave.scf.noncollinear import NCResult
+from gradwave.scf.results import USPPResult
 
 
 @dataclass
@@ -121,21 +128,32 @@ class DiscretizationError:
     drho: torch.Tensor           # (n1,n2,n3) real, estimated density error
     drho_first_order: torch.Tensor   # pre-Dyson drho (== drho on USPP/spinor, no dressing there)
     denergy: float               # estimated total-energy error [eV] (2nd order, < 0)
-    dpsi: list                   # per-k (n_occ, npw_large) complex, orbital correction
-    psi_large: list              # per-k (n_occ, npw_large) complex, occ orbitals on large sphere
-    occ: list                    # per-k (n_occ,) occupations
-    spheres_large: list          # per-k enlarged GSphere
+    # per-k (n_occ, npw_large) complex, orbital correction; nested [spin][k] for
+    # nspin=2, a single batched (nk, nb, 2*npw_large) tensor on the spinor path
+    dpsi: list[torch.Tensor] | list[list[torch.Tensor]] | torch.Tensor
+    # per-k (n_occ, npw_large) complex, occ orbitals on the large sphere; same
+    # nspin=2/spinor layout variance as ``dpsi``
+    psi_large: list[torch.Tensor] | list[list[torch.Tensor]] | torch.Tensor
+    # per-k (n_occ,) occupations; same nspin=2/spinor layout variance as ``dpsi``
+    occ: list[torch.Tensor] | list[list[torch.Tensor]] | torch.Tensor
+    # per-k enlarged GSphere; nested [spin][k] for nspin=2
+    spheres_large: list[GSphere] | list[list[GSphere]]
     ecut: float                  # eV
     ecut_large: float            # eV
     dyson: bool
     uspp: bool = False           # USPP/PAW generalized-metric path
-    dbecsum: list | None = None  # USPP: per-atom (nproj_a, nproj_a) on-site becsum change
+    # USPP: per-atom (nproj_a, nproj_a) on-site becsum change; nested [spin][atom]
+    # for nspin=2
+    dbecsum: list[torch.Tensor] | list[list[torch.Tensor]] | None = None
     drho_smooth: torch.Tensor | None = None  # USPP: smooth part of drho (aug excluded, spin-summed)
-    deig: list | None = None     # USPP: per-k (n_occ,) occupied eigenvalue error (S-term response)
-    drho_smooth_spin: list | None = None  # USPP: per-spin smooth drho (force error XC channel)
+    # USPP: per-k (n_occ,) occupied eigenvalue error (S-term response); nested
+    # [spin][k] for nspin=2
+    deig: list[torch.Tensor] | list[list[torch.Tensor]] | None = None
+    drho_smooth_spin: list[torch.Tensor] | None = None  # USPP: per-spin smooth drho (force err XC)
 
 
-def _occupied(res: SCFResult, ik: int, sp: int | None = None):
+def _occupied(res: SCFResult, ik: int,
+              sp: int | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Occupied coefficients, eigenvalues, occupations at one k.
 
     ``sp`` selects the spin channel for nspin=2 (occupations then in [0,1]);
@@ -151,7 +169,8 @@ def _occupied(res: SCFResult, ik: int, sp: int | None = None):
     return coeffs[:n_occ], eig[:n_occ], occ[:n_occ]
 
 
-def _bands_at(res: SCFResult, ik: int, sp: int | None = None):
+def _bands_at(res: SCFResult | USPPResult, ik: int,
+              sp: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """All computed coefficients and eigenvalues at one k (and spin channel).
 
     Accepts an ``SCFResult`` (norm-conserving) or a ``USPPResult``; both carry
@@ -164,7 +183,7 @@ def _bands_at(res: SCFResult, ik: int, sp: int | None = None):
     return coeffs[sp][ik], eigs[sp][ik]
 
 
-def _resolve_ecut_large(system, ecut_large, factor):
+def _resolve_ecut_large(system: System, ecut_large: float | None, factor: float) -> float:
     """Default ``ecut_large`` to factor*ecut and validate it fits the box.
 
     The enlarged sphere must satisfy gmax(ecut_large) <= 2*gmax(ecut), i.e.
@@ -181,7 +200,8 @@ def _resolve_ecut_large(system, ecut_large, factor):
     return ecut_large
 
 
-def _projdata_on_sphere(system, sph, device, pseudos):
+def _projdata_on_sphere(system: System, sph: GSphere, device: torch.device,
+                        pseudos: list[UPFData]) -> ProjectorData:
     """ProjectorData on a given (enlarged) sphere for the ``pseudos`` list —
     ``system.upfs`` on the norm-conserving path, ``system.paws`` for USPP/PAW
     (the two carry the same betas/dij interface)."""
@@ -195,13 +215,15 @@ def _projdata_on_sphere(system, sph, device, pseudos):
                                 beta_ls, dij_species, system.grid.volume)
 
 
-def _pad_to_sphere(coeffs, sph0, sph1, grid_shape):
+def _pad_to_sphere(coeffs: torch.Tensor, sph0: GSphere, sph1: GSphere,
+                   grid_shape: tuple[int, int, int]) -> torch.Tensor:
     """Zero-pad coefficients from the run sphere onto the enlarged one."""
     box = sphere_to_box(coeffs, sph0.flat_idx, grid_shape)
     return box_to_sphere(box, sph1.flat_idx)
 
 
-def _complement_correction(resid, t, eps, ecut):
+def _complement_correction(resid: torch.Tensor, t: torch.Tensor, eps: torch.Tensor,
+                           ecut: float) -> torch.Tensor:
     """δψ = −P_annulus R / (T_G − ε): the diagonal complement correction.
 
     ``resid`` is the (possibly generalized) residual R = P(H − εS)ψ; ``t`` the
@@ -215,8 +237,9 @@ def _complement_correction(resid, t, eps, ecut):
     return torch.where(annulus.unsqueeze(-2), corr, torch.zeros_like(resid))
 
 
-def _enlarged_hamiltonian(res: SCFResult, k_frac, ecut_large: float, device,
-                          v_eff=None):
+def _enlarged_hamiltonian(res: SCFResult, k_frac: np.ndarray, ecut_large: float,
+                          device: torch.device,
+                          v_eff: torch.Tensor | None=None) -> tuple[GSphere, HamiltonianK]:
     """Build a HamiltonianK on the enlarged G-sphere at ecut_large for one k.
 
     ``v_eff`` overrides ``res.v_eff`` (the per-spin potential for nspin=2).
@@ -231,7 +254,8 @@ def _enlarged_hamiltonian(res: SCFResult, k_frac, ecut_large: float, device,
 
 
 @torch.no_grad()
-def _dyson_dress(res, xc, drho0, *, beta, tol, max_iter, verbose):
+def _dyson_dress(res: SCFResult, xc: XCFunctional, drho0: torch.Tensor, *, beta, tol,
+                 max_iter, verbose) -> torch.Tensor:
     """Dress the first-order density error by the SCF dielectric operator.
 
     Solves the fixed point  drho = drho0 + chi0[ K_Hxc[ drho ] ], i.e. applies
@@ -249,7 +273,7 @@ def _dyson_dress(res, xc, drho0, *, beta, tol, max_iter, verbose):
 
 
 @torch.no_grad()
-def _apply_chi0_spin(res, w_r):
+def _apply_chi0_spin(res: SCFResult, w_r: list[torch.Tensor]) -> list[torch.Tensor]:
     """[χ₀↑ w↑, χ₀↓ w↓]: per-spin independent-particle density response to the
     per-spin real local fields ``w_r = [w↑, w↓]`` (collinear insulator, f=1 per
     spin channel). The Hamiltonian is block-diagonal in spin, so each channel is
@@ -291,7 +315,8 @@ def _apply_chi0_spin(res, w_r):
 
 
 @torch.no_grad()
-def _dyson_dress_spin(res, xc, drho0_sp, *, beta, tol, max_iter, verbose):
+def _dyson_dress_spin(res: SCFResult, xc: SpinXC, drho0_sp: list[torch.Tensor], *, beta,
+                      tol, max_iter, verbose) -> torch.Tensor:
     """Spin-resolved coarse-space Dyson dressing (nspin=2).
 
     Solves the two-channel fixed point
@@ -321,12 +346,12 @@ def _dyson_dress_spin(res, xc, drho0_sp, *, beta, tol, max_iter, verbose):
 
 @torch.no_grad()
 def estimate_density_error(
-    res: SCFResult,
+    res: SCFResult | USPPResult | NCResult,
     *,
     ecut_large: float | None = None,
     factor: float = 2.5,
     dyson: bool = False,
-    xc=None,
+    xc: XCFunctional | SpinXC | NoncollinearXC | None = None,
     dyson_beta: float = 0.4,
     dyson_tol: float = 1e-6,
     dyson_max_iter: int = 60,
@@ -498,7 +523,7 @@ def estimate_density_error(
 # --------------------------------------------------------------------------- #
 
 
-def _uspp_frozen_operators(res: dict, xc):
+def _uspp_frozen_operators(res: USPPResult, xc: XCFunctional | SpinXC):
     """Frozen per-spin v_eff and screened D of a converged USPP/PAW SCF.
 
     Rebuilt from the converged density and becsum exactly as the USPP SCF map
@@ -544,7 +569,8 @@ def _aug_density_from_becsum(system, becsum):
 
 
 @torch.no_grad()
-def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
+def _estimate_density_error_uspp(res: USPPResult, *, ecut_large, factor,
+                                 xc: XCFunctional | SpinXC, verbose):
     """USPP/PAW discretization density error (nspin=1 or 2, use_symmetry=False).
 
     Adds two things to the NC recipe. The complement residual uses the
@@ -676,7 +702,8 @@ def _estimate_density_error_uspp(res: dict, *, ecut_large, factor, xc, verbose):
 
 
 @torch.no_grad()
-def _estimate_eigenvalue_error_uspp(res: dict, *, ecut_large, factor, xc, bands):
+def _estimate_eigenvalue_error_uspp(res: USPPResult, *, ecut_large, factor,
+                                    xc: XCFunctional | SpinXC, bands):
     """USPP/PAW eigenvalue error via the generalized complement correction.
 
     The same per-band second-order shift the USPP density error already sums over
@@ -733,7 +760,8 @@ def _estimate_eigenvalue_error_uspp(res: dict, *, ecut_large, factor, xc, bands)
                            ecut_large=ecut_large, nspin=nspin)
 
 
-def _estimate_force_error_uspp(res: dict, err: DiscretizationError, xc, *,
+def _estimate_force_error_uspp(res: USPPResult, err: DiscretizationError,
+                               xc: XCFunctional | SpinXC, *,
                                remove_net: bool = True) -> torch.Tensor:
     """USPP/PAW discretization force error, δF ≈ ∂²E/∂τ∂ε along the estimator's δP.
 
@@ -901,10 +929,10 @@ def _estimate_force_error_uspp(res: dict, err: DiscretizationError, xc, *,
 
 
 def estimate_force_error(
-    res: SCFResult,
+    res: SCFResult | USPPResult,
     err: DiscretizationError,
     *,
-    xc=None,
+    xc: XCFunctional | SpinXC | None = None,
     remove_net: bool = True,
 ) -> torch.Tensor:
     """Discretization error in the Hellmann-Feynman forces, δF ≈ (∂F/∂P) δP.
@@ -1054,7 +1082,7 @@ def estimate_force_error(
 # --------------------------------------------------------------------------- #
 
 
-def _result_formalism(res) -> str:
+def _result_formalism(res: SCFResult | USPPResult | NCResult | dict[str, int]) -> str:
     """The result's ``formalism`` tag, with a duck-typed fallback for legacy
     shims that predate the tag: a plain dict is the old ``scf_uspp`` result
     shape, an object carrying the magnetization field ``m`` and the integrated
@@ -1298,14 +1326,16 @@ class EigenvalueError:
     nspin=2. ``eig`` carries the matching base eigenvalues [eV].
     """
 
-    deig: list
-    eig: list
+    deig: list[torch.Tensor] | list[list[torch.Tensor]]
+    eig: list[torch.Tensor] | list[list[torch.Tensor]]
     ecut: float
     ecut_large: float
     nspin: int = 1
 
 
-def _band_eig_error(h1, sph0, sph1, coeffs, eig, grid_shape, ecut):
+def _band_eig_error(h1: HamiltonianK, sph0: GSphere, sph1: GSphere, coeffs: torch.Tensor,
+                    eig: torch.Tensor, grid_shape: tuple[int, int, int],
+                    ecut: float) -> torch.Tensor:
     """Per-band δε on one k/spin from the enlarged Hamiltonian ``h1``.
 
     The same complement correction as the density estimate, run on every band:
@@ -1321,12 +1351,12 @@ def _band_eig_error(h1, sph0, sph1, coeffs, eig, grid_shape, ecut):
 
 @torch.no_grad()
 def estimate_eigenvalue_error(
-    res: SCFResult,
+    res: SCFResult | USPPResult | NCResult,
     *,
     ecut_large: float | None = None,
     factor: float = 2.5,
     bands=None,
-    xc=None,
+    xc: XCFunctional | SpinXC | NoncollinearXC | None = None,
     smearing: str | None = None,
     width: float | None = None,
 ) -> EigenvalueError:
@@ -1393,7 +1423,7 @@ def estimate_eigenvalue_error(
                            ecut_large=ecut_large, nspin=nspin)
 
 
-def estimate_gap_error(res: SCFResult, eigerr: EigenvalueError, *,
+def estimate_gap_error(res: SCFResult | USPPResult, eigerr: EigenvalueError, *,
                        occ_threshold: float | None = None,
                        occupations=None) -> dict:
     """Band-gap discretization error from a full-band ``EigenvalueError``.

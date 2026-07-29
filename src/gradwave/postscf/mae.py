@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from pathlib import PosixPath
 
 import numpy as np
 import torch
@@ -157,15 +158,15 @@ class MAEResult:
     caller-supplied provenance (mesh, ecut, machine, ...) through
     ``save``/``load``."""
 
-    directions: list
+    directions: list[list[float]]
     band_free_energies: torch.Tensor  # (ndir,) [eV]
     mae: torch.Tensor                 # (ndir,) F - F[0] [eV]
-    fermi: list
-    eigenvalues: list                 # per direction (nk, nb)
-    nk: list                          # per direction k-count
-    meta: dict | None = None          # provenance, survives save/load
+    fermi: list[float]
+    eigenvalues: list[torch.Tensor]   # per direction (nk, nb)
+    nk: list[int]                     # per direction k-count
+    meta: dict[str, object] | None = None  # provenance, survives save/load
 
-    def save(self, path, meta: dict | None = None) -> None:
+    def save(self, path: PosixPath, meta: dict[str, object] | None = None) -> None:
         """Write the full result (spectra included) to ``path`` via
         torch.save. A ``meta`` dict passed here replaces the stored one."""
         torch.save({
@@ -180,7 +181,7 @@ class MAEResult:
         }, path)
 
     @classmethod
-    def load(cls, path) -> MAEResult:
+    def load(cls, path: PosixPath) -> MAEResult:
         d = torch.load(path, map_location="cpu", weights_only=True)
         if d.get("format") != "gradwave-mae-1":
             raise ValueError(f"{path}: not a gradwave MAE result file")

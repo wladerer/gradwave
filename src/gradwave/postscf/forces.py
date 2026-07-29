@@ -35,12 +35,18 @@ from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.energies.nl_pp import nonlocal_energy
 from gradwave.core.fftbox import r_to_g
 from gradwave.core.hamiltonian import becp, projectors
+from gradwave.core.hubbard import HubbardManifold
 from gradwave.core.xc.base import XCFunctional
+from gradwave.core.xc.spin import SpinXC
+from gradwave.grids import FFTGrid
 from gradwave.postscf._response import pad_coeffs
-from gradwave.scf.loop import SCFResult, _stack_dij
+from gradwave.scf.loop import SCFResult, System, _stack_dij
+from gradwave.scf.noncollinear import NCResult
 
 
-def _core_correction_tau(res, system, grid, nspin):
+def _core_correction_tau(
+    res: SCFResult, system: System, grid: FFTGrid, nspin: int
+) -> list[torch.Tensor]:
     """Valence τ_σ(r) rebuilt from the converged orbitals, DETACHED.
 
     τ is a fixed orbital field at the SCF point — the only position dependence in
@@ -77,7 +83,9 @@ def _core_correction_tau(res, system, grid, nspin):
     ]
 
 
-def _core_correction_energy(res, xc, pos):
+def _core_correction_energy(
+    res: SCFResult, xc: XCFunctional | SpinXC, pos: torch.Tensor
+) -> torch.Tensor:
     """E_xc(ρ + ρ_core(pos)) with the SCF density detached — the ONLY position
     dependence is the NLCC core charge's structure factor, so autograd of this
     over pos gives −F_cc = ∫ v_xc ∂ρ_core/∂τ (v_xc = δE_xc/δρ_xc, so the full
@@ -120,7 +128,8 @@ def _core_correction_energy(res, xc, pos):
 
 
 def forces(
-    res: SCFResult, remove_net: bool = True, xc: XCFunctional | None = None
+    res: SCFResult | NCResult, remove_net: bool = True,
+    xc: XCFunctional | SpinXC | None = None,
 ) -> torch.Tensor:
     """F_a = −dE/dτ_a, (na, 3) [eV/Å], at the converged SCF point.
 
@@ -193,7 +202,7 @@ def forces(
 
 
 def _forces_noncollinear(
-    res, remove_net: bool = True, xc: XCFunctional | None = None
+    res: NCResult, remove_net: bool = True, xc: XCFunctional | None = None
 ) -> torch.Tensor:
     """F_a = −dE/dτ_a for a noncollinear/SOC (spinor) ``NCResult``, (na, 3) [eV/Å].
 
@@ -281,7 +290,9 @@ def _forces_noncollinear(
     return f
 
 
-def hubbard_force_noncollinear(res, manifolds) -> torch.Tensor:
+def hubbard_force_noncollinear(
+    res: NCResult, manifolds: list[HubbardManifold]
+) -> torch.Tensor:
     """+U contribution to the noncollinear/SOC Hellmann–Feynman force,
     −dE_U/dτ, (na, 3) [eV/Å].
 
@@ -322,7 +333,7 @@ def hubbard_force_noncollinear(res, manifolds) -> torch.Tensor:
     return -grad
 
 
-def hubbard_force(res: SCFResult, manifolds) -> torch.Tensor:
+def hubbard_force(res: SCFResult, manifolds: list[HubbardManifold]) -> torch.Tensor:
     """+U contribution to the Hellmann–Feynman force, −dE_U/dτ, (na, 3) [eV/Å].
 
     E_U enters through the atomic-orbital projector phases e^{−i(k+G)·τ}; with

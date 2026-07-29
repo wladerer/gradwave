@@ -128,7 +128,7 @@ def _covered_elements() -> set[int]:
     return set(MXC)
 
 
-def _check_coverage(atomic_numbers) -> None:
+def _check_coverage(atomic_numbers: list[int]) -> None:
     missing = sorted({int(z) for z in atomic_numbers} - _covered_elements())
     if missing:
         raise NotImplementedError(
@@ -138,7 +138,9 @@ def _check_coverage(atomic_numbers) -> None:
         )
 
 
-def _reference_tensors(atomic_numbers, dtype, device):
+def _reference_tensors(
+    atomic_numbers: list[int], dtype: torch.dtype, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Per-atom-pair reference grids for the CN interpolation.
 
     Returns C6R, CN1, CN2, VALID each (na, na, MAXC, MAXC) plus per-atom rcov,
@@ -194,7 +196,9 @@ def _image_labels(cell_ang: np.ndarray | None, rcut_bohr: float) -> np.ndarray:
     return n[np.linalg.norm(r, axis=1) <= rcut_bohr + 1e-9].astype(np.int64)
 
 
-def _pair_distances(pos_bohr: torch.Tensor, images_bohr: torch.Tensor):
+def _pair_distances(
+    pos_bohr: torch.Tensor, images_bohr: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
     """(na,na,nR) distances |τ_a − τ_b + L| and the self-pair mask.
 
     The masked A=B, L=0 separation is shifted off zero *before* the norm so the
@@ -217,7 +221,9 @@ def _pair_distances(pos_bohr: torch.Tensor, images_bohr: torch.Tensor):
     return r, self_mask
 
 
-def _coordination_numbers(pos_bohr, rcov, images_bohr, cn_cutoff):
+def _coordination_numbers(
+    pos_bohr: torch.Tensor, rcov: torch.Tensor, images_bohr: torch.Tensor, cn_cutoff: float
+) -> torch.Tensor:
     """CN_A = Σ'_{B,L} 1/(1+exp(−k1(rco_AB/r − 1))), differentiable in positions."""
     r, self_mask = _pair_distances(pos_bohr, images_bohr)
     rco = (rcov[:, None] + rcov[None, :])[:, :, None]  # (na,na,1)
@@ -227,7 +233,9 @@ def _coordination_numbers(pos_bohr, rcov, images_bohr, cn_cutoff):
     return damp.sum(dim=(1, 2))
 
 
-def _c6_from_cn(cn, C6R, CN1, CN2, VALID):
+def _c6_from_cn(
+    cn: torch.Tensor, C6R: torch.Tensor, CN1: torch.Tensor, CN2: torch.Tensor, VALID: torch.Tensor
+) -> torch.Tensor:
     """CN-interpolated C6_AB (na,na) = Σ_ij w_ij C6ref_ij / Σ_ij w_ij,
     w_ij = exp(k3[(CN1−CN_A)² + (CN2−CN_B)²]); log-shifted for stability."""
     dcn = (CN1 - cn[:, None, None, None]) ** 2 + (CN2 - cn[None, :, None, None]) ** 2
@@ -245,8 +253,8 @@ def _c6_from_cn(cn, C6R, CN1, CN2, VALID):
 
 def dispersion_energy(
     positions: torch.Tensor,
-    cell,
-    atomic_numbers,
+    cell: torch.Tensor | None,
+    atomic_numbers: list[int],
     cfg: D3Config,
     *,
     ref_cell: np.ndarray | None = None,
@@ -304,13 +312,17 @@ def dispersion_energy(
 # forces & stress (autograd wrappers — mirror postscf/forces.py, stress.py)
 # ---------------------------------------------------------------------------
 
-def _cell_tensor(cell, dtype, device):
+def _cell_tensor(
+    cell: np.ndarray | None, dtype: torch.dtype, device: torch.device
+) -> torch.Tensor | None:
     if cell is None:
         return None
     return torch.as_tensor(np.asarray(cell, dtype=np.float64), dtype=dtype, device=device)
 
 
-def dispersion_forces(positions, cell, atomic_numbers, cfg: D3Config) -> torch.Tensor:
+def dispersion_forces(
+    positions: torch.Tensor, cell: np.ndarray | None, atomic_numbers: list[int], cfg: D3Config
+) -> torch.Tensor:
     """F_A = −∂E_disp/∂τ_A, (na,3) [eV/Å], via autograd."""
     dev = positions.device
     pos = positions.detach().clone().to(RDTYPE).requires_grad_(True)
@@ -320,7 +332,9 @@ def dispersion_forces(positions, cell, atomic_numbers, cfg: D3Config) -> torch.T
     return -grad
 
 
-def dispersion_stress(positions, cell, atomic_numbers, cfg: D3Config) -> torch.Tensor:
+def dispersion_stress(
+    positions: torch.Tensor, cell: np.ndarray | None, atomic_numbers: list[int], cfg: D3Config
+) -> torch.Tensor:
     """σ_αβ = (1/Ω) ∂E_disp/∂ε_αβ, (3,3) [eV/Å³] (tension-positive), via autograd.
 
     Symmetric strain ε with r→(1+ε)r, a_i→(1+ε)a_i, τ→(1+ε)τ, exactly the

@@ -42,13 +42,14 @@ that function's docstring and the gate in ``dielectric_born``).
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import torch
 
 from gradwave.constants import E2, HBAR2_2M
 from gradwave.core._anderson import AndersonMixer
-from gradwave.core.batch import g_to_r_b, projectors_b
+from gradwave.core.batch import BatchedHamiltonian, BatchedK, g_to_r_b, projectors_b
 from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.hamiltonian import projectors
@@ -57,7 +58,11 @@ from gradwave.core.spinor_proj import (
     so_projector_channels,
     strained_so_projector_cols,
 )
+from gradwave.core.xc.base import XCFunctional
+from gradwave.core.xc.noncollinear import NoncollinearXC
+from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.grids import FFTGrid
 from gradwave.postscf._kb import projector_data_at_k, species_projector_tables
 from gradwave.postscf._response import (
     cg_sternheimer,
@@ -70,9 +75,12 @@ from gradwave.postscf._response import (
     sternheimer_shift,
 )
 from gradwave.pseudo.radial_torch import RadialTables
+from gradwave.scf.loop import SCFResult, System
+from gradwave.scf.noncollinear import NCResult
+from gradwave.symmetry import VectorFieldSymmetrizer
 
 
-def _shifted_projectors(system, dkvec: torch.Tensor) -> torch.Tensor:
+def _shifted_projectors(system: System, dkvec: torch.Tensor) -> torch.Tensor:
     """Full KB projectors (nk, nproj, npw_max) rebuilt at k+G shifted by dkvec
     — radial form factors re-evaluated by SBT at the shifted |k+G|, Ylm and
     the e^{−i(k+G)τ} phases at the shifted vectors."""
@@ -120,7 +128,7 @@ def _spinor_box_to_sphere(f_ud_r: torch.Tensor, bk) -> torch.Tensor:
 
 
 @torch.no_grad()
-def _dhdk_psi(system, c_occ: torch.Tensor, alpha: int, dk: float) -> torch.Tensor:
+def _dhdk_psi(system: System, c_occ: torch.Tensor, alpha: int, dk: float) -> torch.Tensor:
     """(∂H/∂k_α)|ψ⟩: analytic kinetic derivative + FD-in-k of the nonlocal."""
     bk = system.batch
     kin = (2.0 * HBAR2_2M) * bk.kpg[:, None, :, alpha] * c_occ
@@ -136,7 +144,8 @@ def _dhdk_psi(system, c_occ: torch.Tensor, alpha: int, dk: float) -> torch.Tenso
 
 
 @torch.no_grad()
-def dielectric_born(res, xc, *, dk: float = 1e-3, cg_tol: float = 1e-9,
+def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | NoncollinearXC, *,
+                    dk: float = 1e-3, cg_tol: float = 1e-9,
                     beta: float = 0.5, outer_tol: float = 1e-7,
                     max_outer: int = 80, history: int = 8,
                     verbose: bool = False) -> dict:
@@ -299,7 +308,8 @@ def dielectric_born(res, xc, *, dk: float = 1e-3, cg_tol: float = 1e-9,
             "eps_iso": float(torch.diagonal(eps_mat).mean())}
 
 
-def _symmetrize_drho_vec(vsym, comps):
+def _symmetrize_drho_vec(vsym: VectorFieldSymmetrizer,
+                         comps: list[torch.Tensor]) -> list[torch.Tensor]:
     """Round-trip a real-space (Δρ_x, Δρ_y, Δρ_z) response through the polar
     vector symmetrizer (via G), mirroring scf.common.symmetrize_rho for the
     scalar density. Returns the three symmetrized real-space components."""
@@ -309,9 +319,13 @@ def _symmetrize_drho_vec(vsym, comps):
 
 
 @torch.no_grad()
-def _field_response_symmetrized(h, bk, grid, c_occ, eps_occ, shift, psi_r, xi,
-                                p_c, kw, vol, vsym, res, xc, n_pts, *, beta,
-                                history, outer_tol, max_outer, cg_tol, verbose):
+def _field_response_symmetrized(h: BatchedHamiltonian, bk: BatchedK, grid: FFTGrid,
+                                c_occ: torch.Tensor, eps_occ: torch.Tensor, shift: float,
+                                psi_r: torch.Tensor, xi: list[torch.Tensor], p_c: Callable,
+                                kw: torch.Tensor, vol: float, vsym: VectorFieldSymmetrizer,
+                                res: SCFResult, xc: XCFunctional, n_pts: int, *, beta, history,
+                                outer_tol, max_outer, cg_tol, verbose,
+                                ) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
     """Joint 3-direction self-consistent E-field response on the IBZ.
 
     Because the density response Δρ_α is a polar vector field, the three field
@@ -363,7 +377,7 @@ def _field_response_symmetrized(h, bk, grid, c_occ, eps_occ, shift, psi_r, xi,
     return dpsi, drho_raw, col_mat
 
 
-def _k_hxc(res, xc, drho):
+def _k_hxc(res: SCFResult, xc: XCFunctional, drho: torch.Tensor) -> torch.Tensor:
     """(K_Hxc Δρ)(r) = Hartree kernel on Δρ (G=0 excluded) + f_xc·Δρ evaluated at
     the SCF density INCLUDING the NLCC core.
 
@@ -380,7 +394,8 @@ def _k_hxc(res, xc, drho):
     return hartree_kernel(grid, drho) + fxc_hvp(xc, rho_xc, grid, drho)
 
 
-def _k_hxc_spin(res, xc, dru, drd):
+def _k_hxc_spin(res: SCFResult, xc: SpinXC, dru: torch.Tensor,
+                drd: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """(Δv↑, Δv↓) = K_Hxc^{σσ'} Δρ^{σ'}: Hartree kernel on the total Δρ (G=0
     excluded) plus the spin f_xc Hessian-vector product at the SCF spin densities
     (NLCC core split half/half per channel, exactly as the SCF potential built
@@ -394,7 +409,7 @@ def _k_hxc_spin(res, xc, dru, drd):
 
 
 @torch.no_grad()
-def _dielectric_born_spin(res, xc, *, dk, cg_tol, beta, outer_tol, max_outer,
+def _dielectric_born_spin(res: SCFResult, xc: SpinXC, *, dk, cg_tol, beta, outer_tol, max_outer,
                           history, verbose) -> dict:
     """ε∞ and Born charges for a collinear spin-polarized insulator (nspin=2).
 
@@ -567,7 +582,7 @@ def _dhdk_psi_soc(system, tabs, col_meta, lmax, dij_c, c_occ: torch.Tensor,
     return kin + dnl
 
 
-def _k_hxc_soc(res, xc, drho: torch.Tensor) -> torch.Tensor:
+def _k_hxc_soc(res: NCResult, xc: NoncollinearXC, drho: torch.Tensor) -> torch.Tensor:
     """(K_Hxc Δρ)(r) for the nonmagnetic fully-relativistic (SOC) path:
     Hartree kernel on Δρ (G=0 excluded) + the noncollinear f_xc HVP pinned at
     m⃗ ≡ 0 (``postscf._response.fxc_hvp_noncollinear_nonmagnetic``), evaluated
@@ -582,8 +597,8 @@ def _k_hxc_soc(res, xc, drho: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def _dielectric_born_soc(res, xc, *, dk, cg_tol, beta, outer_tol, max_outer,
-                         history, verbose) -> dict:
+def _dielectric_born_soc(res: NCResult, xc: NoncollinearXC, *, dk, cg_tol, beta, outer_tol,
+                         max_outer, history, verbose) -> dict:
     """ε∞ and Born charges for a NONMAGNETIC fully-relativistic (spin-orbit)
     spinor result (``scf_noncollinear`` on an ``is_fr`` system with m⃗ ≡ 0).
 

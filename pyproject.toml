@@ -121,6 +121,63 @@ include = [
     # argument-type mismatches) and are deliberately left off.
     "src/gradwave/scf/mixing.py",
     "src/gradwave/scf/spin_precond.py",
+    #
+    # Phase 4: autotyping + MonkeyType over postscf/ (2x scf/'s size, the
+    # largest untyped subpackage), same recipe as the scf/ pilot. 32 of the
+    # 49 touched postscf/ files verified genuinely clean this round (added
+    # to this list one at a time, per the same "an unlisted file never
+    # shows an error[...]" discipline as the note above):
+    "src/gradwave/postscf/bader.py",
+    "src/gradwave/postscf/bands.py",
+    "src/gradwave/postscf/composition_design.py",
+    "src/gradwave/postscf/convergence_error.py",
+    "src/gradwave/postscf/convex_hull.py",
+    "src/gradwave/postscf/coulomb_kernel.py",
+    "src/gradwave/postscf/dispersion_d4.py",
+    "src/gradwave/postscf/dispersion.py",
+    "src/gradwave/postscf/dos.py",
+    "src/gradwave/postscf/elastic.py",
+    "src/gradwave/postscf/eos.py",
+    "src/gradwave/postscf/exchange_multik.py",
+    "src/gradwave/postscf/exchange.py",
+    "src/gradwave/postscf/hessian.py",
+    "src/gradwave/postscf/hybrid.py",
+    "src/gradwave/postscf/isdf_k.py",
+    "src/gradwave/postscf/isdf.py",
+    "src/gradwave/postscf/_kb.py",
+    "src/gradwave/postscf/lattice_mc.py",
+    "src/gradwave/postscf/magnetism.py",
+    "src/gradwave/postscf/moment_config.py",
+    "src/gradwave/postscf/phase_diagram.py",
+    "src/gradwave/postscf/phonons.py",
+    "src/gradwave/postscf/phonons_supercell.py",
+    "src/gradwave/postscf/qha.py",
+    "src/gradwave/postscf/_response.py",
+    "src/gradwave/postscf/response.py",
+    "src/gradwave/postscf/spin_exchange.py",
+    "src/gradwave/postscf/stress_error.py",
+    "src/gradwave/postscf/thermo.py",
+    "src/gradwave/postscf/uspp_bands.py",
+    "src/gradwave/postscf/uspp_frozen.py",
+    #
+    # Deliberately left off (individually verified NOT clean — hundreds of
+    # real errors between them, not just the untyped-bulk warning noise):
+    # cohp.py, dielectric.py, discretization_error.py, forces.py,
+    # hubbard_u.py, irreps.py, mae.py, newton.py, paw_forces.py,
+    # paw_stress.py, pdos.py, scf/results.py, stress.py, _strain.py,
+    # uspp_implicit.py, uspp_position.py, volumetric.py. The common root
+    # causes: (a) a handful of shared dict-literal "site" records
+    # (sites.append({"atom":.., "l":.., "dim":..}), int/float mixed per
+    # key) that need a TypedDict, not a plain dict[str, int | float]
+    # (_strain.py, paw_forces.py, uspp_position.py); (b) XC-union dispatch
+    # — calling xc.energy(...) generically over XCFunctional | SpinXC fails
+    # because the two classes' energy() signatures genuinely differ in
+    # arity/shape, so the call needs an isinstance branch first, not a
+    # wider parameter type (paw_forces.py, hubbard_u.py, dielectric.py);
+    # (c) discretization_error.py/newton.py/uspp_implicit.py's own
+    # DiscretizationError/USPPResult-adjacent dataclasses carry the same
+    # bare-list/tuple-invariance debt loop.py/uspp_loop.py have above. Real
+    # follow-up work, not a quick fix — left off rather than forced.
 ]
 
 [tool.ty.overrides.rules]

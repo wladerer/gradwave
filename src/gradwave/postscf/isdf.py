@@ -59,7 +59,9 @@ from gradwave.dtypes import CDTYPE, RDTYPE
 _QR_RTOL = 1e-12
 
 
-def orbitals_on_grid(coeffs: torch.Tensor, flat_idx: torch.Tensor, shape) -> torch.Tensor:
+def orbitals_on_grid(
+    coeffs: torch.Tensor, flat_idx: torch.Tensor, shape: tuple[int, int, int]
+) -> torch.Tensor:
     """Occupied-orbital coefficients → flattened real-space values.
 
     coeffs: (n_orb, npw) sphere coefficients at one k-point (e.g.
@@ -144,7 +146,9 @@ def build_isdf(phi_r: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
     return zeta.contiguous()
 
 
-def _coulomb_coupling(zeta: torch.Tensor, shape, g2: torch.Tensor, volume: float) -> torch.Tensor:
+def _coulomb_coupling(
+    zeta: torch.Tensor, shape: tuple[int, int, int], g2: torch.Tensor, volume: float
+) -> torch.Tensor:
     """W_μν = (4π e²/Ω) Σ_{G≠0} ζ_μ*(G) ζ_ν(G)/G²  [eV], the interpolation-vector
     Coulomb matrix. zeta: (N_r, n_mu) real; g2: dense box |G|². Returns (n_mu, n_mu)."""
     n_mu = zeta.shape[1]
@@ -182,7 +186,7 @@ class ISDFExchange:
 
 
 def build_exchange(
-    phi_r: torch.Tensor, shape, g2: torch.Tensor, volume: float, n_mu: int,
+    phi_r: torch.Tensor, shape: tuple[int, int, int], g2: torch.Tensor, volume: float, n_mu: int,
     *, generator: torch.Generator | None = None, sketch: int | None = None,
 ) -> ISDFExchange:
     """Build the ISDF exchange factorization for orbitals ``phi_r`` at one k.
@@ -205,7 +209,7 @@ def build_exchange(
 
 
 def exchange_energy_direct(
-    phi_r: torch.Tensor, shape, g2: torch.Tensor, volume: float,
+    phi_r: torch.Tensor, shape: tuple[int, int, int], g2: torch.Tensor, volume: float,
 ) -> torch.Tensor:
     """Reference plane-wave Fock exchange, O(n_orb²) pair FFTs.
 

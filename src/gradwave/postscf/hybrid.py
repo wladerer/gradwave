@@ -29,11 +29,13 @@ out of the eigenvalue equation), so energy and operator stay derivative-consiste
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 import torch
+from typing_extensions import override
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
-from gradwave.core.batch import box_to_sphere_b, g_to_r_b
+from gradwave.core.batch import BatchedK, box_to_sphere_b, g_to_r_b
 from gradwave.core.density import sigma_from_rho
 from gradwave.core.xc._pbe_kernels import pbe_enhancement, pbe_h
 from gradwave.core.xc.base import to_au
@@ -52,7 +54,7 @@ from gradwave.postscf.exchange_multik import (
     multik_exchange_operator,
     occupied_periodic_orbitals,
 )
-from gradwave.scf.loop import scf
+from gradwave.scf.loop import SCFResult, System, scf
 
 
 class ScaledExchangePBE(PBE):
@@ -62,14 +64,15 @@ class ScaledExchangePBE(PBE):
     hook, giving a PBE0-form global hybrid. At exx_fraction = 0 this is plain PBE
     (a reduction gate); correlation is untouched."""
 
-    def __init__(self, exx_fraction: float = 0.25):
+    def __init__(self, exx_fraction: float = 0.25) -> None:
         super().__init__()
         if not 0.0 <= exx_fraction <= 1.0:
             raise ValueError("exx_fraction must be in [0, 1]")
         self.exx_fraction = float(exx_fraction)
 
+    @override
     def energy_density(
-        self, rho: torch.Tensor, sigma: torch.Tensor | None = None, tau=None
+        self, rho: torch.Tensor, sigma: torch.Tensor | None = None, tau: torch.Tensor | None = None
     ) -> torch.Tensor:
         if sigma is None:
             raise ValueError("PBE requires sigma = |grad rho|^2")
@@ -94,7 +97,7 @@ class GammaFockExchange:
     that applies α·V_x to batched sphere coefficients, and the exchange energy
     α·E_x added to the total. Built to be passed as ``scf(..., fock=...)``."""
 
-    def __init__(self, alpha: float = 0.25, occ_tol: float = 1e-6):
+    def __init__(self, alpha: float = 0.25, occ_tol: float = 1e-6) -> None:
         if not 0.0 <= alpha <= 1.0:
             raise ValueError("alpha must be in [0, 1]")
         self.alpha = float(alpha)
@@ -157,8 +160,8 @@ class MultiKFockExchange:
     At a single Γ point with ``mode="full"`` this reproduces ``GammaFockExchange``
     to machine precision (the reduction gate)."""
 
-    def __init__(self, alpha: float = 0.25, mode: str = "full", omega=None,
-                 occ_tol: float = 1e-6):
+    def __init__(self, alpha: float = 0.25, mode: str = "full", omega: float | None = None,
+                 occ_tol: float = 1e-6) -> None:
         if not 0.0 <= alpha <= 1.0:
             raise ValueError("alpha must be in [0, 1]")
         if mode not in ("full", "short_range", "long_range"):
@@ -170,11 +173,14 @@ class MultiKFockExchange:
         self.omega = omega
         self.occ_tol = occ_tol
 
-    def rebuild(self, coeffs_b_s, occ_s, system):
+    def rebuild(
+        self, coeffs_b_s: list[torch.Tensor], occ_s: list[torch.Tensor], system: System
+    ) -> tuple[list[Callable[[torch.Tensor], torch.Tensor]], torch.Tensor]:
         nspin = len(coeffs_b_s)
         spin_factor = 2.0 / nspin  # nspin=1: two electrons per spatial orbital
         shape, vol = system.grid.shape, system.grid.volume
         g_cart, bk = system.grid.g_cart, system.batch
+        assert bk is not None, "MultiKFockExchange needs the batched-k geometry"
         kweights = system.kweights
         kcart = [sph.k_cart for sph in system.spheres]
         n_r = int(shape[0] * shape[1] * shape[2])
@@ -204,7 +210,9 @@ class MultiKFockExchange:
             apply_s.append(self._apply_for(ace_per_k, bk, shape))
         return apply_s, self.alpha * e_fock
 
-    def _apply_for(self, ace_per_k, bk, shape):
+    def _apply_for(
+        self, ace_per_k: list[ACEExchange], bk: BatchedK, shape: tuple[int, int, int]
+    ) -> Callable[[torch.Tensor], torch.Tensor]:
         alpha = self.alpha
 
         def apply_delta(c: torch.Tensor) -> torch.Tensor:
@@ -219,8 +227,9 @@ class MultiKFockExchange:
         return apply_delta
 
 
-def hybrid_scf(system, alpha: float = 0.25, *, mode: str = "full", omega=None,
-               params: HybridExchangeParams | None = None, **scf_kwargs):
+def hybrid_scf(system: System, alpha: float = 0.25, *, mode: str = "full",
+               omega: float | None = None,
+               params: HybridExchangeParams | None = None, **scf_kwargs) -> SCFResult:
     """Self-consistent PBE0-form / screened global hybrid, exchange fraction ``alpha``.
 
     Runs the standard SCF with the semilocal exchange scaled by (1−α) and α·Fock
@@ -245,7 +254,7 @@ def hybrid_scf(system, alpha: float = 0.25, *, mode: str = "full", omega=None,
     return scf(system, xc, fock=fock, **scf_kwargs)
 
 
-def _pbe_exchange_energy(res) -> float:
+def _pbe_exchange_energy(res: SCFResult) -> float:
     """∫ρ ε_x^PBE on the converged density [eV] — the exchange ``ScaledExchangePBE``
     scales by (1−α). Computed as (full PBE XC) − (PBE with exchange removed), so it
     matches the SCF's semilocal-exchange bookkeeping exactly. θ-independent."""
@@ -258,7 +267,7 @@ def _pbe_exchange_energy(res) -> float:
     return float(e_full - e_no_x)
 
 
-def differentiable_hybrid_energy(res, params: HybridExchangeParams, *,
+def differentiable_hybrid_energy(res: SCFResult, params: HybridExchangeParams, *,
                                  occ_tol: float = 1e-6) -> torch.Tensor:
     """Converged hybrid total energy as a differentiable function of (α, ω).
 
@@ -292,8 +301,8 @@ def differentiable_hybrid_energy(res, params: HybridExchangeParams, *,
     return e_const + e_theta
 
 
-def hybrid_energy_gradient(res, params: HybridExchangeParams, *,
-                           occ_tol: float = 1e-6):
+def hybrid_energy_gradient(res: SCFResult, params: HybridExchangeParams, *,
+                           occ_tol: float = 1e-6) -> tuple[float, float | None]:
     """Exact stationary (dE_total/dα, dE_total/dω) at the converged hybrid [eV].
 
     Convenience/verification wrapper over ``differentiable_hybrid_energy``: runs
@@ -303,9 +312,11 @@ def hybrid_energy_gradient(res, params: HybridExchangeParams, *,
     params.zero_grad(set_to_none=True)
     e.backward()
     alpha = float(params.alpha.detach())
+    assert params.raw_alpha.grad is not None  # populated by the backward above
     d_alpha = float(params.raw_alpha.grad) / (alpha * (1.0 - alpha))
     if params.mode == "full":
         return d_alpha, None
     omega = float(params.omega.detach())
+    assert params.raw_omega.grad is not None  # populated by the backward above
     d_omega = float(params.raw_omega.grad) / (1.0 - math.exp(-omega))
     return d_alpha, d_omega

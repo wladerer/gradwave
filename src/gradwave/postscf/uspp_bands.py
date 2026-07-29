@@ -21,19 +21,27 @@ import torch
 
 from gradwave.core.hamiltonian import projectors
 from gradwave.core.hubbard import hubbard_dmatrix
+from gradwave.core.xc.base import XCFunctional
+from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import CDTYPE
-from gradwave.grids import build_gsphere
+from gradwave.grids import GSphere, build_gsphere
 from gradwave.postscf._kb import projector_data_at_k, species_projector_tables
 from gradwave.postscf.uspp_frozen import frozen_veff, screened_dscr
+from gradwave.scf.results import USPPResult
 from gradwave.scf.uspp import _HkS, davidson_gen
 from gradwave.scf.uspp_hubbard import (
     _hubbard_radial_setup,
     atom_of_col,
     phi_free_at_sphere,
 )
+from gradwave.scf.uspp_setup import USPPSystem
 
 
-def _hubbard_sphi_at_k(system, sites, radial, sph, p, dev):
+def _hubbard_sphi_at_k(
+    system: USPPSystem, sites: list[dict[str, int | float]],
+    radial: tuple[dict[int, np.ndarray], dict[int, int], int, int], sph: GSphere, p: torch.Tensor,
+    dev: torch.device,
+) -> torch.Tensor:
     """S-dressed Hubbard atomic-orbital projectors Sφ = φ + Σ|β⟩q⟨β|φ⟩ at one
     band k, mirroring ``scf.uspp_hubbard.build_uspp_hubbard`` (batched over the
     fixed SCF k-mesh) with the k axis dropped."""
@@ -47,8 +55,11 @@ def _hubbard_sphi_at_k(system, sites, radial, sph, p, dev):
     return phi + torch.einsum("mj,ij,ig->mg", bphi, q, p)
 
 
-def bands_uspp(res: dict, xc, k_frac_list, nbands: int | None = None,
-               tol: float = 1e-9) -> torch.Tensor:
+def bands_uspp(
+    res: USPPResult, xc: XCFunctional | SpinXC,
+    k_frac_list: list[list[int | float]] | np.ndarray | list[list[float]],
+    nbands: int | None = None, tol: float = 1e-9,
+) -> torch.Tensor:
     """Eigenvalues at the given fractional k-points: (nk, nbands) [eV] for
     nspin=1, (2, nk, nbands) for nspin=2."""
     system = res["system"]
@@ -86,6 +97,8 @@ def bands_uspp(res: dict, xc, k_frac_list, nbands: int | None = None,
         p = projectors(pd, system.positions)
         hub_sphi = None
         if hub_sites is not None:
+            # hub_radial is set in lockstep with hub_sites above (same guard).
+            assert hub_radial is not None
             hub_sphi = _hubbard_sphi_at_k(system, hub_sites, hub_radial, sph, p, dev)
         for sp in range(nspin):
             hd = hub_d_s[sp] if hub_d_s is not None else None

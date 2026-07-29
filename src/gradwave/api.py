@@ -348,8 +348,9 @@ def _run_scf_hybrid(
     kerker = inp.scf.mixing.kerker
     kerker = None if kerker == "auto" else bool(kerker)
     omega = hy.omega if hy.mode != "full" else None
+    # the uspp guard above rules out USPPSystem; hybrid_scf is norm-conserving only.
     return hybrid_scf(
-        system, alpha=hy.alpha, mode=hy.mode, omega=omega,
+        cast("System", system), alpha=hy.alpha, mode=hy.mode, omega=omega,
         smearing=inp.smearing.type, width=inp.smearing.width,
         max_iter=inp.scf.max_iter, etol=inp.scf.etol, rhotol=inp.scf.rhotol,
         mixing_alpha=inp.scf.mixing.alpha,
@@ -1067,18 +1068,21 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
     # reference SCF once — warm-start seed and residual-stress readout
     ref = run_scf(inp, system=_build(cell0, fixed), verbose=False)
     converged = [bool(getattr(ref, "converged", True))]
-    # _stress is stress_uspp (res: dict, via the _DictBridge duck-typed
-    # dict view every SCF result carries — see scf/results.py) or stress
-    # (res: untyped) depending on the branch above; the cast satisfies
-    # both without duplicating this whole helper per formalism.
-    sigma_ref = _stress(cast("dict[str, Any]", ref), xc).detach().cpu().numpy()
+    # _stress is stress_uspp (res: USPPResult, xc: XCFunctional | SpinXC) or
+    # stress (res: SCFResult | NCResult, xc: XCFunctional | SpinXC |
+    # NoncollinearXC) depending on the branch above; ty can't correlate which
+    # member of that function union is bound with which result/xc value this
+    # call actually has (the uspp/noncollinear guards above are runtime, not
+    # visible to the type checker across the import-time branch), so the seam
+    # needs Any on both arguments, not a specific cast.
+    sigma_ref = _stress(cast(Any, ref), cast(Any, xc)).detach().cpu().numpy()
 
     def _stress_at(eps: Any) -> Any:
         cell = cell0 @ (np.eye(3) + eps).T
         res = run_scf(inp, system=_build(cell, fixed), verbose=False,
                       start_from=ref)
         converged.append(bool(getattr(res, "converged", True)))
-        return _stress(cast("dict[str, Any]", res), xc).detach().cpu().numpy()
+        return _stress(cast(Any, res), cast(Any, xc)).detach().cpu().numpy()
 
     c = elastic_tensor(_stress_at, h=h)
     mod = moduli_from_cij(c)
@@ -1241,9 +1245,9 @@ def _bands_uspp_block(inp: Input, res: SCFLike, verbose: bool) -> dict[str, Any]
     xc = SPIN_XC_REGISTRY[inp.xc]() if inp.nspin == 2 else XC_REGISTRY[inp.xc]()
     if verbose:
         print(f"bands (USPP/PAW): {len(kpts)} k-points along the path", flush=True)
-    # bands_uspp declares res: dict — every SCF result's _DictBridge view
-    # (scf/results.py) satisfies that duck-typed contract at runtime.
-    eig = bands_uspp(cast("dict[str, Any]", res), xc, kpts,
+    # this block only ever runs for a USPP/PAW result (see _bands_uspp_block's
+    # caller); res's static SCFLike type is wider than what's true here.
+    eig = bands_uspp(cast("USPPResult", res), xc, kpts,
                      nbands=inp.bands.nbands).detach().cpu().numpy()
     bands: dict[str, Any] = {
         "kpts_frac": kpts.tolist(),
@@ -1295,7 +1299,10 @@ def _bands_extra(inp: Input, res: SCFLike, verbose: bool) -> dict[str, Any]:
             # shrinks the little group at threshold (1/3 vs 0.33333333)
             key = tuple(np.round(kf_exact, 8))
             if key not in cache:
-                cache[key] = band_irreps(res, kf_exact, nbands=inp.bands.nbands)
+                # same "reached only for the norm-conserving SCFResult" guard
+                # as the bands_along_ase_path call above.
+                cache[key] = band_irreps(
+                    cast("SCFResult", res), kf_exact, nbands=inp.bands.nbands)
             ann.append({
                 "x": float(xt), "name": lab,
                 "clusters": [
@@ -1388,7 +1395,12 @@ def _error_estimate_block(res: SCFLike, inp: Input) -> dict[str, Any]:
                     and getattr(system, "rho_core", None) is None)
     if force_ok:
         try:
-            fe = estimate_force_error(res_nc, err, xc=xc).norm(dim=1)
+            # force_ok is False whenever is_nc, so xc is never a NoncollinearXC
+            # here — same "narrower annotation than the force_ok-guarded
+            # runtime contract" seam as res_nc above.
+            fe = estimate_force_error(
+                res_nc, err, xc=cast("XCFunctional | SpinXC | None", xc)
+            ).norm(dim=1)
             block["force_error_max_eV_ang"] = float(fe.max())
             block["force_error_rms_eV_ang"] = float((fe ** 2).mean().sqrt())
         except NotImplementedError as exc:
@@ -1427,7 +1439,9 @@ def _error_estimate_block(res: SCFLike, inp: Input) -> dict[str, Any]:
     # primitive exposed yet, so xc is only passed on the supported path.
     scf_xc = xc if (not uspp and not is_nc) else None
     try:
-        scfe = estimate_scf_error(res_nc, scf_xc)
+        # scf_xc is never a NoncollinearXC (it's None whenever is_nc) —
+        # narrower annotation than the guarded runtime contract, as above.
+        scfe = estimate_scf_error(res_nc, cast("XCFunctional | None", scf_xc))
         sc: dict[str, Any] = {
             "denergy_eV": scfe.denergy,
             "denergy_meV_per_atom": scfe.denergy / natom * 1e3,
@@ -1582,7 +1596,12 @@ def _pdos_summary_block(res: SCFLike, inp: Input) -> dict[str, Any]:
     from gradwave.postscf.pdos import projected_dos
     p = inp.projections
     try:
-        block = projected_dos(res, group_by=p.group_by, width=p.width,
+        # projected_dos declares SCFResult | USPPResult and raises
+        # NotImplementedError for anything else (NCResult/USPPNCResult) via
+        # its own _unpack_result — caught below, so the wider SCFLike here
+        # is a safe runtime seam, not a real type mismatch.
+        block = projected_dos(cast("SCFResult | USPPResult", res),
+                              group_by=p.group_by, width=p.width,
                               npoints=p.npoints).to_dict()
         return block
     except (ValueError, NotImplementedError) as err:
@@ -1598,8 +1617,13 @@ def _cohp_summary_block(res: SCFLike, inp: Input) -> dict[str, Any]:
     c = inp.projections.cohp
     pairs = None if c.pairs is None else [tuple(p) for p in c.pairs]
     try:
-        block = cohp(res, pairs=pairs, rcut=c.rcut, width=c.width,
-                     npoints=c.npoints).to_dict()
+        # cohp declares SCFResult | USPPResult and raises NotImplementedError
+        # for anything else via its own _unpack_result — caught below (the
+        # noncollinear/SOC cohp_noncollinear/cohp_soc entry points aren't
+        # wired into this summary path yet), so the wider SCFLike here is a
+        # safe runtime seam, not a real type mismatch.
+        block = cohp(cast("SCFResult | USPPResult", res), pairs=pairs,
+                     rcut=c.rcut, width=c.width, npoints=c.npoints).to_dict()
         block["available"] = True
         return block
     except (ValueError, NotImplementedError) as err:

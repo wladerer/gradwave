@@ -48,10 +48,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from statistics import median
+from typing import Any
 
 import torch
 
 from gradwave.core.occupations import SCHEMES
+from gradwave.core.xc.base import XCFunctional
 from gradwave.dtypes import RDTYPE
 
 # DysonNotConverged moved to postscf._response with the shared Dyson solver;
@@ -192,7 +194,8 @@ class ScfConvergenceError:
     denergy_unscreened: float | None  # eV, unscreened response diagnostic (None if unset)
 
 
-def _extrapolate_energy_tail(history, *, min_iter: int = 4, max_tail: int = 4):
+def _extrapolate_energy_tail(history: list[dict[str, int | float]], *, min_iter: int = 4,
+                             max_tail: int = 4) -> tuple[float, float, float, int, bool]:
     """Estimate (E_inf - E_last, |E_inf - E_last|, q, n_tail, reliable) from the
     tail of an SCF free-energy trajectory.
 
@@ -225,7 +228,7 @@ def _extrapolate_energy_tail(history, *, min_iter: int = 4, max_tail: int = 4):
 
 
 @torch.no_grad()
-def estimate_scf_error(res: SCFResult, xc=None, *,
+def estimate_scf_error(res: SCFResult, xc: XCFunctional | None = None, *,
                        screened: bool | None = None,
                        dyson_beta: float = 0.4,
                        dyson_tol: float = 1e-7,
@@ -300,7 +303,9 @@ def estimate_scf_error(res: SCFResult, xc=None, *,
     )
 
 
-def estimate_scf_error_bracket(res_loose: SCFResult, res_tight: SCFResult) -> dict:
+def estimate_scf_error_bracket(
+    res_loose: SCFResult, res_tight: SCFResult
+) -> dict[str, float]:
     """Ground-truth SCF error from a loose/tight pair of runs of the SAME system.
 
     Returns the measured energy gap F_loose - F_tight (the reported energy's
@@ -330,7 +335,7 @@ def estimate_scf_error_bracket(res_loose: SCFResult, res_tight: SCFResult) -> di
 
 
 @torch.no_grad()
-def _dyson_solve(res, xc, r, *, beta, tol, max_iter):
+def _dyson_solve(res: SCFResult, xc: XCFunctional, r: torch.Tensor, *, beta, tol, max_iter):
     """x = (1 - chi0 K_Hxc)^-1 r by damped fixed-point iteration.
 
     Solves x = r + chi0[K_Hxc[x]], the same operator ``discretization_error``'s
@@ -355,8 +360,8 @@ def _dyson_solve(res, xc, r, *, beta, tol, max_iter):
 # --------------------------------------------------------------------------- #
 
 
-def estimate_kpoint_error(nkpts, energies, *,
-                          exponent: float | None = None) -> dict:
+def estimate_kpoint_error(nkpts: list[int], energies: list[float], *,
+                          exponent: float | None = None) -> dict[str, Any]:
     """Extrapolate a BZ-quadrature (k-point) error from a mesh sweep.
 
     Fits E(N_k) = E_inf + c * N_k^-p to energies at increasing k-meshes and
@@ -414,13 +419,13 @@ def estimate_kpoint_error(nkpts, energies, *,
     }
 
 
-def _extrapolate_two(pts, en, p):
+def _extrapolate_two(pts: list[float], en: list[float], p: float) -> float:
     a0, a1 = pts[0] ** (-p), pts[1] ** (-p)
     c = (en[0] - en[1]) / (a0 - a1)
     return en[1] - c * a1
 
 
-def _extrapolate_fit(pts, en, p):
+def _extrapolate_fit(pts: list[float], en: list[float], p: float) -> float:
     # least-squares E_i = E_inf + c * a_i with a_i = N_i^-p (linear in E_inf, c)
     a = [n ** (-p) for n in pts]
     m = len(pts)
@@ -435,7 +440,7 @@ def _extrapolate_fit(pts, en, p):
     return e_inf
 
 
-def _fit_exponent(pts, en):
+def _fit_exponent(pts: list[float], en: list[float]) -> float:
     """Estimate p from the three finest points by matching difference ratios.
 
     E_i = E_inf + c N_i^-p gives (E1-E2)/(E2-E3) = (N1^-p - N2^-p)/(N2^-p - N3^-p),

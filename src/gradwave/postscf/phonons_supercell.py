@@ -21,10 +21,13 @@ cannot drift.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
 
+from gradwave.core.xc.base import XCFunctional
+from gradwave.core.xc.spin import SpinXC
 from gradwave.postscf.phonons import _SQRT_EV_AMU_ANG2_TO_CM1
 
 
@@ -35,11 +38,11 @@ class SupercellMap:
     the translation cell (0,0,0) first, so the home-cell atoms are sites
     0…N_prim-1."""
 
-    supercell: tuple            # (n1, n2, n3)
+    supercell: tuple[int, int, int]  # (n1, n2, n3)
     cell_prim: np.ndarray       # (3,3) primitive cell, rows = lattice vectors [Å]
     cell_super: np.ndarray      # (3,3) supercell cell [Å]
     positions_super: np.ndarray  # (N_sc, 3) Cartesian [Å]
-    species_super: list         # (N_sc,) species-of-atom indices
+    species_super: list[int]    # (N_sc,) species-of-atom indices
     mu_of_site: np.ndarray      # (N_sc,) int — primitive basis atom of each site
     rint_of_site: np.ndarray    # (N_sc, 3) int — integer lattice translation R
     n_prim: int
@@ -51,7 +54,10 @@ class SupercellMap:
         return np.arange(self.n_prim)
 
 
-def build_supercell(cell, positions, species_of_atom, supercell) -> SupercellMap:
+def build_supercell(
+    cell: np.ndarray, positions: np.ndarray, species_of_atom: list[int],
+    supercell: tuple[int, int, int],
+) -> SupercellMap:
     """Tile a primitive cell into a diagonal (n1,n2,n3) supercell, tracking the
     (primitive-atom μ, lattice-translation R) label of every supercell site.
 
@@ -83,7 +89,7 @@ def build_supercell(cell, positions, species_of_atom, supercell) -> SupercellMap
         n_prim=n_prim, n_sc=n_prim * n1 * n2 * n3)
 
 
-def _site_lookup(scmap: SupercellMap) -> dict:
+def _site_lookup(scmap: SupercellMap) -> dict[tuple[tuple[int, int, int], int], int]:
     """(integer R, primitive atom μ) → supercell site index."""
     return {(tuple(scmap.rint_of_site[s]), int(scmap.mu_of_site[s])): s
             for s in range(scmap.n_sc)}
@@ -122,7 +128,8 @@ def apply_acoustic_sum_rule(phi_home: np.ndarray) -> np.ndarray:
 
 def force_constants_home(make_scf, scmap: SupercellMap, h: float = 0.01,
                          acoustic_sum_rule: bool = True, warm_start: bool = True,
-                         xc=None, verbose: bool = False) -> np.ndarray:
+                         xc: XCFunctional | SpinXC | None = None,
+                         verbose: bool = False) -> np.ndarray:
     """FD force constants Φ_home (N_prim, 3, N_sc, 3) [eV/Å²].
 
     Displaces ONLY the N_prim home-cell atoms (±h) and reads the analytic force
@@ -172,7 +179,7 @@ def phonon_dos(phi_home, scmap, masses_amu, q_mesh, weights,
 
 
 def dynamical_matrix(phi_home: np.ndarray, scmap: SupercellMap,
-                     masses_amu, q_frac) -> np.ndarray:
+                     masses_amu: np.ndarray, q_frac: Sequence[int | float]) -> np.ndarray:
     """Mass-weighted dynamical matrix D(q) (3N_prim, 3N_prim) complex-Hermitian.
 
     D_{μi,νj}(q) = (1/√(M_μ M_ν)) Σ_R Φ_{μν}(R)[i,j] e^{2πi q·R}, with the sum
@@ -193,7 +200,10 @@ def dynamical_matrix(phi_home: np.ndarray, scmap: SupercellMap,
     return 0.5 * (d + d.conj().T)
 
 
-def frequencies_at_q(phi_home, scmap, masses_amu, q_frac) -> np.ndarray:
+def frequencies_at_q(
+    phi_home: np.ndarray, scmap: SupercellMap, masses_amu: np.ndarray,
+    q_frac: Sequence[int | float],
+) -> np.ndarray:
     """Phonon frequencies at one q [cm⁻¹], sorted; negative = imaginary."""
     d = dynamical_matrix(phi_home, scmap, masses_amu, q_frac)
     w2 = np.linalg.eigvalsh(d)  # real (Hermitian), ascending

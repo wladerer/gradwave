@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+from ase.atoms import Atoms
 
 from gradwave.dtypes import CDTYPE
 from gradwave.grids import build_gsphere
@@ -30,7 +31,7 @@ class BandStructure:
     kpts_frac: np.ndarray  # (nkpath, 3)
     eigenvalues: np.ndarray  # (nkpath, nbands) [eV]; leading spin axis if nspin=2; NOT referenced
     reference: float  # Fermi level or VBM [eV]
-    labels: list | None = None  # (index, label) special-point markers
+    labels: list[tuple[int, str]] | None = None  # (index, label) special-point markers
     x: np.ndarray | None = None  # path coordinate for plotting
 
 
@@ -109,7 +110,7 @@ def band_structure(
         kpts_frac=np.asarray(kpts_frac), eigenvalues=eigenvalues, reference=reference)
 
 
-def bands_along_ase_path(res: SCFResult, atoms, path: str = "", npoints: int = 120,
+def bands_along_ase_path(res: SCFResult, atoms: Atoms, path: str = "", npoints: int = 120,
                          nbands: int | None = None, verbose: bool = False) -> BandStructure:
     """Band structure along an ASE bandpath (special-point string or lattice default)."""
     bp = atoms.cell.bandpath(path=path or None, npoints=npoints)

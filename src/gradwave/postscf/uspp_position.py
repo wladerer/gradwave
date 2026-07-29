@@ -45,12 +45,14 @@ from gradwave.core._anderson import AndersonMixer
 from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.fftbox import box_to_sphere, g_to_r, g_to_r_box, r_to_g
 from gradwave.core.hamiltonian import becp
-from gradwave.core.xc.base import xc_eager
+from gradwave.core.xc.base import XCFunctional, xc_eager
+from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.postscf._response import fxc_hvp
 from gradwave.postscf.newton import _pack, _unpack
 from gradwave.postscf.uspp_frozen import aug_density_from_becsum
 from gradwave.postscf.uspp_implicit import _check_supported, _ConvergedUSPP
+from gradwave.scf.results import USPPResult
 
 
 def _dvloc_r(system, a: int, alpha: int) -> torch.Tensor:
@@ -114,7 +116,7 @@ def _fxc_apply(cs, w: torch.Tensor) -> torch.Tensor:
 class PositionPerturbation:
     """Frozen ingredients of ∂F/∂τ_{aα} at one displacement."""
 
-    def __init__(self, cs: _ConvergedUSPP, a: int, alpha: int):
+    def __init__(self, cs: _ConvergedUSPP, a: int, alpha: int) -> None:
         system = cs.system
         self.cs, self.a, self.alpha = cs, a, alpha
         self.s0, self.s1 = system.atom_slices[a]
@@ -284,7 +286,7 @@ class PositionPerturbation:
         warm[ik] = dperp
         return dpsi_win[:ns] + dperp, hmat, smat, db
 
-    def bare_map_derivative(self, dpsi_warm, cg_tol=1e-10, cg_max_iter=400):
+    def bare_map_derivative(self, dpsi_warm, cg_tol: float=1e-10, cg_max_iter: int=400):
         """∂F/∂τ_{aα} at fixed input x: (δρ_out, δbec_out per atom, δn_hub).
 
         Window part from S-metric perturbation theory, complement part
@@ -358,7 +360,7 @@ class PositionPerturbation:
         return drho_sm / cs.vol + drho_aug, dbec, dnh
 
 
-def bare_position_derivative(res: dict, xc, a: int, alpha: int,
+def bare_position_derivative(res: USPPResult, xc: XCFunctional | SpinXC, a: int, alpha: int,
                              cg_tol: float = 1e-10,
                              cg_max_iter: int = 400):
     """∂F_map/∂τ_{aα} at the converged state (fixed input x*). Returns
@@ -379,9 +381,9 @@ def bare_position_derivative(res: dict, xc, a: int, alpha: int,
 
 
 def _self_consistent_response(cs, bare_rho, bare_bec, bare_nh=None, *,
-                              beta=0.3, history=12, inner_tol=1e-9,
-                              max_inner=80, cg_tol=1e-10, cg_max_iter=300,
-                              verbose=False):
+                              beta: float=0.3, history: int=12, inner_tol: float=1e-9,
+                              max_inner: int=80, cg_tol: float=1e-10, cg_max_iter: int=300,
+                              verbose: bool=False):
     """δx = (1 − χ̃K)⁻¹ δx_bare — the forward fixed point of the Newton
     finisher with the bare position derivative as the source. Returns the
     self-consistent (δρ*, δbec*, w_total) where w_total = (K δx) is the
@@ -452,7 +454,7 @@ def _self_consistent_response(cs, bare_rho, bare_bec, bare_nh=None, *,
     return d_rho, d_bec, (w_sp[0], d_ddd[0], d_hub)
 
 
-def position_density_response(res: dict, xc, a: int, alpha: int, *,
+def position_density_response(res: USPPResult, xc: XCFunctional | SpinXC, a: int, alpha: int, *,
                               beta: float = 0.3, history: int = 12,
                               inner_tol: float = 1e-9, max_inner: int = 80,
                               cg_tol: float = 1e-10, cg_max_iter: int = 300,
@@ -479,8 +481,8 @@ def position_density_response(res: dict, xc, a: int, alpha: int, *,
     return d_rho, d_bec, w_tot
 
 
-def _total_orbital_response(cs, pert, w_grid, d_ddd, d_hub=None, cg_tol=1e-10,
-                            cg_max_iter=400):
+def _total_orbital_response(cs, pert, w_grid, d_ddd, d_hub=None, cg_tol: float=1e-10,
+                            cg_max_iter: int=400):
     """δψ_n, δε_n, and the SMOOTH density derivative at the TOTAL
     perturbation (bare position motion + converged self-consistent
     potential change). One window-PT + Sternheimer pass per k.
@@ -525,7 +527,7 @@ def _total_orbital_response(cs, pert, w_grid, d_ddd, d_hub=None, cg_tol=1e-10,
     return dpsi_all, deps_all, drho_sm / cs.vol
 
 
-def hessian_column(res: dict, xc, a: int, alpha: int, *,
+def hessian_column(res: USPPResult, xc: XCFunctional | SpinXC, a: int, alpha: int, *,
                    response_kw=None, verbose: bool = False):
     """d²E/dτ dτ_{aα} — one analytic Hessian column (na, 3), no SCF
     re-runs. The τ-graph of the force expression is differentiated once

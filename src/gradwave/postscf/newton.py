@@ -31,13 +31,15 @@ from dataclasses import replace
 
 import torch
 
+from gradwave.core.xc.base import XCFunctional
+from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import RDTYPE
 from gradwave.postscf.uspp_implicit import _check_supported, _ConvergedUSPP
 from gradwave.scf.results import USPPResult
 from gradwave.scf.uspp_loop import _build_iter_ops, _scf_iteration
 
 
-def _pack(w_sp, mats_sp):
+def _pack(w_sp: list[torch.Tensor], mats_sp: list[list[torch.Tensor]]) -> torch.Tensor:
     """Composite residual/state vector: per-spin grid fields first, then the
     per-spin, per-atom becsum blocks (same layout the USPP adjoint's join uses,
     minus the hub block). ``w_sp`` and ``mats_sp`` are per-spin lists."""
@@ -45,7 +47,9 @@ def _pack(w_sp, mats_sp):
                      + [m.reshape(-1) for mats in mats_sp for m in mats])
 
 
-def _unpack(v, shape, n_pts, nbec, nspin):
+def _unpack(
+    v: torch.Tensor, shape: tuple[int, int, int], n_pts: int, nbec: list[int], nspin: int
+) -> tuple[list[torch.Tensor], list[list[torch.Tensor]]]:
     """Inverse of :func:`_pack`: flat v → (per-spin grid fields, per-spin
     per-atom becsum matrices)."""
     w_sp, off = [], 0
@@ -62,7 +66,8 @@ def _unpack(v, shape, n_pts, nbec, nspin):
     return w_sp, mats_sp
 
 
-def newton_polish(res: USPPResult, xc, *, tol: float = 1e-10, max_newton: int = 5,
+def newton_polish(res: USPPResult, xc: XCFunctional | SpinXC, *, tol: float = 1e-10,
+                  max_newton: int = 5,
                   inner_tol: float = 1e-8, max_inner: int = 60,
                   cg_tol: float = 1e-9, cg_max_iter: int = 200,
                   beta: float = 0.3, history: int = 8,

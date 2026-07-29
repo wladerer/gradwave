@@ -21,13 +21,18 @@ embarrassingly parallel.
 from __future__ import annotations
 
 import dataclasses
+from pathlib import PosixPath
 
+import ase.atoms
 import numpy as np
 
+from gradwave.inputs import Input
 from gradwave.postscf.volumetric import _infer_fmt, write_volumetric
 
 
-def _displaced_density(inp, atom: int, direction: int, shift: float, spin, verbose):
+def _displaced_density(
+    inp: Input, atom: int, direction: int, shift: float, spin: int | None, verbose: bool,
+) -> np.ndarray:
     """Converged ρ(r) [e/Å³] with `atom` moved by `shift` Å along `direction`."""
     from gradwave.api import run_scf
 
@@ -42,14 +47,20 @@ def _displaced_density(inp, atom: int, direction: int, shift: float, spin, verbo
     if spin is None:
         rho = res.rho
     else:
-        rho = res.rho_spin[spin]
+        rho_spin = getattr(res, "rho_spin", None)
+        if rho_spin is None:
+            raise ValueError(
+                "spin channel requested but the result has no per-spin density "
+                "(not a collinear nspin=2 result)"
+            )
+        rho = rho_spin[spin]
     return rho.detach().cpu().numpy()
 
 
 def density_response_fd(
-    inp, atom: int, direction: int, delta: float = 0.02,
+    inp: Input, atom: int, direction: int, delta: float = 0.02,
     spin: int | None = None, verbose: bool = False,
-):
+) -> tuple[np.ndarray, float]:
     """∂n(r)/∂R_{atom,direction} [e/Å³/Å] by central finite difference.
 
     Runs two SCFs at ±`delta` Å displacement of `atom` along Cartesian
@@ -71,7 +82,7 @@ def density_response_fd(
     return field, drift
 
 
-def _atoms_from_input(inp):
+def _atoms_from_input(inp: Input) -> ase.atoms.Atoms:
     from ase import Atoms
 
     return Atoms(
@@ -83,9 +94,9 @@ def _atoms_from_input(inp):
 
 
 def write_density_response(
-    inp, path, atom: int, direction: int, delta: float = 0.02,
+    inp: Input, path: PosixPath, atom: int, direction: int, delta: float = 0.02,
     spin: int | None = None, fmt: str | None = None, verbose: bool = False,
-):
+) -> tuple[str, float]:
     """Write ∂n(r)/∂R_{atom,direction} to a .cube/.xsf file.
 
     Returns (path, drift); `drift` is the ∫ = 0 charge-conservation residual

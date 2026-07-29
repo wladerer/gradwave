@@ -57,13 +57,14 @@ import torch
 
 from gradwave.core.xc.noncollinear import NoncollinearXC
 from gradwave.postscf.moment_config import atomic_weights, constrained_moment_scf
+from gradwave.scf.loop import System
 
 
-def _unit(v):
+def _unit(v: torch.Tensor) -> torch.Tensor:
     return v / torch.linalg.norm(v)
 
 
-def _transverse_basis(ref):
+def _transverse_basis(ref: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Two orthonormal vectors (u, v) spanning the plane ⊥ ref, with u×v = ref, so a
     small tilt lives in span(u, v) and the antisymmetric response maps to D·ref."""
     ref = _unit(ref)
@@ -75,9 +76,11 @@ def _transverse_basis(ref):
     return u, v
 
 
-def exchange_from_atom(system, xc: NoncollinearXC, j: int, *, m0,
-                       ref_dir=(0.0, 0.0, 1.0), delta: float = 0.08, lam: float = 8.0,
-                       weights=None, mode: str = "vector", **scf_kwargs):
+def exchange_from_atom(
+    system: System, xc: NoncollinearXC, j: int, *, m0: float | torch.Tensor,
+    ref_dir: tuple[float, float, float] = (0.0, 0.0, 1.0), delta: float = 0.08, lam: float = 8.0,
+    weights: torch.Tensor | None = None, mode: str = "vector", **scf_kwargs,
+) -> tuple[dict[int, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
     """Site-to-site exchange tensors from tilting one moment.
 
     Hold every moment collinear along `ref_dir`, then tilt moment `j` by `delta`
@@ -130,7 +133,7 @@ def exchange_from_atom(system, xc: NoncollinearXC, j: int, *, m0,
     return out, (u, v)
 
 
-def decompose(J_tensor):
+def decompose(J_tensor: torch.Tensor) -> tuple[float, float, torch.Tensor]:
     """Split a 2×2 transverse exchange tensor 𝒥_IJ into (J_heisenberg, D_ref, Γ):
     the isotropic Heisenberg scalar [eV], the DMI component along the reference axis
     [eV] (the full vector needs three references), and the 2×2 symmetric-traceless
@@ -143,7 +146,9 @@ def decompose(J_tensor):
     return J_iso, D_ref, gamma
 
 
-def heisenberg_couplings(system, xc: NoncollinearXC, j: int, *, m0, **kwargs):
+def heisenberg_couplings(
+    system: System, xc: NoncollinearXC, j: int, *, m0: float | torch.Tensor, **kwargs
+) -> dict[int, float]:
     """Convenience: isotropic Heisenberg J_ij [eV] to every other atom, from one
     tilt of atom `j`. Sign convention of eq. (1): J > 0 is ferromagnetic. To compare
     with references quoted as J·S² or in mRy, apply the matching magnitude/unit

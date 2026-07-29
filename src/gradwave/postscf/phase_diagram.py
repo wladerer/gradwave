@@ -15,12 +15,16 @@ binodal of a miscibility gap that closes at the critical temperature.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 
 from gradwave.postscf.convex_hull import lower_convex_hull
 
 
-def two_phase_regions(x, g, gap_factor: float = 1.5):
+def two_phase_regions(
+    x: np.ndarray, g: np.ndarray, gap_factor: float = 1.5
+) -> list[tuple[float, float]]:
     """Two-phase composition intervals at one temperature. A lower-hull edge that
     spans more than gap_factor times the local grid spacing is a tie-line, so its
     endpoints bound a two-phase region. Returns a list of (x_left, x_right)."""
@@ -38,7 +42,11 @@ def two_phase_regions(x, g, gap_factor: float = 1.5):
     return regions
 
 
-def binodal(temperatures, x_grid, g_of_x_t):
+def binodal(
+    temperatures: np.ndarray,
+    x_grid: np.ndarray,
+    g_of_x_t: Callable[[np.ndarray, float], np.ndarray],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Trace the widest two-phase region across temperature. g_of_x_t(x, T)
     returns the free energy per atom on the composition grid at temperature T.
     Returns temperatures, and the left and right boundary compositions, with NaN
@@ -55,7 +63,7 @@ def binodal(temperatures, x_grid, g_of_x_t):
     return temperatures, left, right
 
 
-def critical_temperature(temperatures, left, right):
+def critical_temperature(temperatures: np.ndarray, left: np.ndarray, right: np.ndarray) -> float:
     """Highest temperature that still shows a two-phase region, the estimated
     critical temperature where the miscibility gap closes."""
     has_gap = ~np.isnan(left)

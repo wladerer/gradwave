@@ -34,12 +34,17 @@ import numpy as np
 import torch
 
 from gradwave.constants import E2
+from gradwave.core.hubbard import HubbardManifold
 from gradwave.core.spinor_proj import (
     so_dij,
     so_projector_channels,
     strained_so_projector_cols,
 )
+from gradwave.core.xc.base import XCFunctional
+from gradwave.core.xc.noncollinear import NoncollinearXC
+from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import RDTYPE
+from gradwave.grids import GSphere
 from gradwave.postscf._strain import (
     box_millers,
     ewald_strained,
@@ -55,6 +60,9 @@ from gradwave.postscf._strain import (
     strained_projector_cols,
 )
 from gradwave.pseudo.radial_torch import RadialTables
+from gradwave.scf.loop import SCFResult
+from gradwave.scf.noncollinear import NCResult
+from gradwave.symmetry import SpaceGroup
 
 # Backward-compatible private aliases (paw_stress historically imported these
 # from here; the implementations now live in postscf._strain).
@@ -75,7 +83,12 @@ def _sigma(rho_box: torch.Tensor, g_box: torch.Tensor) -> torch.Tensor:
     return sigma_from_rho(rho_box, g_box)
 
 
-def stress(res, xc, symmetrize: bool = True, manifolds=None) -> torch.Tensor:
+def stress(
+    res: SCFResult | NCResult,
+    xc: XCFunctional | SpinXC | NoncollinearXC,
+    symmetrize: bool = True,
+    manifolds: list[HubbardManifold] | None = None,
+) -> torch.Tensor:
     """σ_αβ = (1/Ω) ∂E/∂ε_αβ at the converged SCF point, (3,3) [eV/Å³].
 
     Collinear nspin=2 is supported (the kinetic/nonlocal sums run per spin
@@ -119,7 +132,7 @@ def stress(res, xc, symmetrize: bool = True, manifolds=None) -> torch.Tensor:
     return sigma
 
 
-def symmetrize_stress(sigma: torch.Tensor, sg, cell: np.ndarray) -> torch.Tensor:
+def symmetrize_stress(sigma: torch.Tensor, sg: SpaceGroup, cell: np.ndarray) -> torch.Tensor:
     """σ ← (1/N) Σ_op S σ Sᵀ with S the Cartesian rotation of each op."""
     a_t = np.asarray(cell, dtype=float).T
     acc = torch.zeros_like(sigma)
@@ -132,8 +145,12 @@ def symmetrize_stress(sigma: torch.Tensor, sg, cell: np.ndarray) -> torch.Tensor
 
 
 def _energy_strained(
-    res, xc, eps: torch.Tensor, *, rho=None, coeffs=None, spheres=None,
-    manifolds=None,
+    res: SCFResult | NCResult,
+    xc: XCFunctional | SpinXC | NoncollinearXC,
+    eps: torch.Tensor,
+    *,
+    rho=None, coeffs=None, spheres=None,
+    manifolds: list[HubbardManifold] | None = None,
 ) -> torch.Tensor:
     """The KS energy as a function of strain at fixed coefficients/occupations.
 
@@ -283,7 +300,10 @@ def _energy_strained(
     return e_tot
 
 
-def _tau_strained(coeffs, spheres, b_e, omega, occ, kw, shape):
+def _tau_strained(
+    coeffs: list[torch.Tensor], spheres: list[GSphere], b_e: torch.Tensor,
+    omega: torch.Tensor, occ: torch.Tensor, kw: torch.Tensor, shape: tuple[int, int, int],
+) -> torch.Tensor:
     """τ(ε) = ½ Σ_k w_k Σ_n f |∇ψ|² on the strained cell, at fixed coefficients.
 
     ∇ψ uses the strained (k+G) (strained_kpg), so autograd carries τ's explicit
@@ -309,8 +329,12 @@ def _tau_strained(coeffs, spheres, b_e, omega, occ, kw, shape):
 
 
 def _energy_strained_fr(
-    res, xc, eps: torch.Tensor, *, rho=None, coeffs=None, spheres=None,
-    manifolds=None,
+    res: NCResult,
+    xc: NoncollinearXC,
+    eps: torch.Tensor,
+    *,
+    rho=None, coeffs=None, spheres=None,
+    manifolds: list[HubbardManifold] | None = None,
 ) -> torch.Tensor:
     """KS energy vs strain for a fully-relativistic (spin-orbit) spinor result.
 
