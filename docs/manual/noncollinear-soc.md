@@ -75,6 +75,39 @@ The scalar-relativistic and fully-relativistic bands are overlaid on the same pa
 Spin-orbit coupling opens and inverts the gap at Γ, and the valence-band maximum
 moves off Γ into a camelback.
 
+### COHP fat bands, with and without SOC
+
+`examples/bi2se3_cohp_fatbands.py` draws the same [LOBSTER-style COHP fat-band
+figure](postscf-analysis.md#crystal-orbital-hamilton-populations-cohp) used for
+diamond and GaAs, but for both Bi₂Se₃ branches — so the Bi-Se bonding character
+of the inverted states is visible alongside the parity labels at Γ. The no-SOC
+branch projects onto the operator-route collinear COHP; the SOC branch keeps
+the eigenvectors from a per-path-k spinor solve and feeds them through the
+eigenvalue-route spinor COHP (`cohp_soc`), so the fat-band weights are
+genuinely k-dependent spin-orbit COHP, not a Γ-only slice.
+
+```bash
+uv run python examples/bi2se3_cohp_fatbands.py --outdir examples
+```
+
+<figure markdown>
+  ![Bi₂Se₃ COHP fat bands, no SOC](img/bi2se3_nosoc_cohp_fatbands.png){ width="720" }
+  <figcaption>Without spin-orbit coupling: the Bi-Se bond along Γ-Z-F-Γ, each
+  (k, band) colored by its COHP weight (bonding blue, antibonding red), with
+  Mulliken irrep + g/u parity labels at the special points. ICOHP = −10.94 eV.</figcaption>
+</figure>
+
+<figure markdown>
+  ![Bi₂Se₃ COHP fat bands, with SOC](img/bi2se3_soc_cohp_fatbands.png){ width="720" }
+  <figcaption>With spin-orbit coupling: the same bond, same path, spinor COHP.
+  The Γ-point parities near the gap swap relative to the no-SOC case (the same
+  inversion `bi2se3_inversion.py` reports), and the bonding/antibonding
+  character reorganizes around it. ICOHP = −1.60 eV — spin-orbit coupling
+  redistributes the bonding weight rather than simply weakening it; read the
+  magnitude qualitatively (see the COHP page's calibration note) and the sign/
+  shape quantitatively.</figcaption>
+</figure>
+
 The SOC machinery is validated quantitatively on the GaAs valence split-off. The
 $\Gamma_8$ (four-fold) lies above $\Gamma_7$ (two-fold) with a spin-orbit gap
 $\Delta_0 = 0.336$ eV against QE's fully-relativistic reference (experiment 0.34 eV),
