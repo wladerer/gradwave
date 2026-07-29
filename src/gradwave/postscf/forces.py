@@ -27,6 +27,8 @@ machinery (``core.hubbard.occupation_matrices_noncollinear``, PR #159).
 
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 import torch
 
@@ -68,16 +70,18 @@ def _core_correction_tau(
     shape, vol = grid.shape, grid.volume
     occ = res.occupations
     if nspin == 2:
+        coeffs_sp = cast("list[list[torch.Tensor]]", res.coeffs)
         return [
             tau_b(
-                pad_coeffs(res.coeffs[sp], bk.npw_max), occ[sp],
+                pad_coeffs(coeffs_sp[sp], bk.npw_max), occ[sp],
                 system.kweights, bk, shape, vol,
             ).detach()
             for sp in range(2)
         ]
+    coeffs_flat = cast("list[torch.Tensor]", res.coeffs)
     return [
         tau_b(
-            pad_coeffs(res.coeffs, bk.npw_max), occ,
+            pad_coeffs(coeffs_flat, bk.npw_max), occ,
             system.kweights, bk, shape, vol,
         ).detach()
     ]
@@ -117,10 +121,14 @@ def _core_correction_energy(
     tau_s = _core_correction_tau(res, system, grid, nspin) if xc.needs_tau else None
 
     if nspin == 2:
+        assert res.rho_spin is not None  # scf() always sets rho_spin at nspin=2
         rho_s = [r.detach() for r in res.rho_spin]
         return spin_xc_energy(
             xc, rho_s, core, grid.volume, grid.g_cart, tau_s=tau_s
         )
+    # nspin=1 is always paired with a collinear XCFunctional (same convention
+    # as scf/uspp_loop.py's own xc dispatch).
+    assert isinstance(xc, XCFunctional)
     rho_xc = res.rho.detach() + core
     sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
     tau = tau_s[0] if tau_s is not None else None
@@ -146,7 +154,7 @@ def forces(
     A noncollinear/SOC ``NCResult`` (``res.formalism == "noncollinear"``) is
     dispatched to ``_forces_noncollinear`` — see the module docstring.
     """
-    if getattr(res, "formalism", None) == "noncollinear":
+    if isinstance(res, NCResult):
         return _forces_noncollinear(res, remove_net=remove_net, xc=xc)
     system = res.system
     grid = system.grid
@@ -168,7 +176,10 @@ def forces(
     projs = [projectors(pd, pos) for pd in system.proj_data]  # spin-independent
     dij, kw = _stack_dij(system), system.kweights
 
-    coeffs_s = res.coeffs if nspin == 2 else [res.coeffs]
+    if nspin == 2:
+        coeffs_s = cast("list[list[torch.Tensor]]", res.coeffs)
+    else:
+        coeffs_s = [cast("list[torch.Tensor]", res.coeffs)]
     occ_s = res.occupations.detach()
     occ_s = occ_s if nspin == 2 else occ_s[None]
     e_nl = 0.0
@@ -188,7 +199,9 @@ def forces(
     if has_core:
         # XC carries no τ-dependence at fixed ρ EXCEPT through the core charge;
         # the valence-only part of E_xc has zero gradient here (ρ detached), so
-        # this contributes exactly the NLCC force term.
+        # this contributes exactly the NLCC force term. The `has_core and xc
+        # is None` guard above already raised if xc were missing here.
+        assert xc is not None
         e_pos = e_pos + _core_correction_energy(res, xc, pos)
     (grad,) = torch.autograd.grad(e_pos, pos)
     f = -grad
@@ -202,7 +215,7 @@ def forces(
 
 
 def _forces_noncollinear(
-    res: NCResult, remove_net: bool = True, xc: XCFunctional | None = None
+    res: NCResult, remove_net: bool = True, xc: XCFunctional | SpinXC | None = None
 ) -> torch.Tensor:
     """F_a = −dE/dτ_a for a noncollinear/SOC (spinor) ``NCResult``, (na, 3) [eV/Å].
 
@@ -243,6 +256,7 @@ def _forces_noncollinear(
         )
     grid = system.grid
     bk = system.batch
+    assert bk is not None
     pos = system.positions.detach().clone().requires_grad_(True)
 
     rho_g = r_to_g(res.rho.detach().to(torch.complex128))  # total ρ↑+ρ↓
@@ -253,6 +267,8 @@ def _forces_noncollinear(
         pos, system.charges, grid.cell
     )
 
+    assert res.coeffs is not None, "res carries no spinor coefficients"
+    assert res.occupations is not None
     coeffs = res.coeffs.detach()  # (nk, nb, 2·npw_max)
     occ = res.occupations.detach()  # (nk, nb), spinor degeneracy g=1
     kw = system.kweights
@@ -321,6 +337,8 @@ def hubbard_force_noncollinear(
     hub = build_hubbard_projectors(system, manifolds)
     q = hubbard_projectors(hub, pos)  # differentiable in pos
 
+    assert res.coeffs is not None, "res carries no spinor coefficients"
+    assert res.occupations is not None
     coeffs = res.coeffs.detach()  # (nk, nb, 2·npw_max)
     occ = res.occupations.detach()  # (nk, nb), spinor degeneracy g=1
     m_pw = coeffs.shape[-1] // 2
@@ -359,14 +377,16 @@ def hubbard_force(res: SCFResult, manifolds: list[HubbardManifold]) -> torch.Ten
     if nspin == 2:
         occ = res.occupations.detach()  # (2, nk, nb) in [0,1]
         # res.coeffs is [spin][k] ragged; rebuild padded (nk, nb, npw_max)
+        coeffs_sp = cast("list[list[torch.Tensor]]", res.coeffs)
         e_u = 0.0
         for sp in range(2):
-            cpad = pad_coeffs(res.coeffs[sp], hub.q_free.shape[-1], q.device)
+            cpad = pad_coeffs(coeffs_sp[sp], hub.q_free.shape[-1], q.device)
             mats = occupation_matrices(q, cpad, occ[sp], kw, hub.sites)
             e_u = e_u + hubbard_energy(mats, hub.sites)
     else:
         occ = res.occupations.detach()
-        cpad = pad_coeffs(res.coeffs, hub.q_free.shape[-1], q.device)
+        coeffs_flat = cast("list[torch.Tensor]", res.coeffs)
+        cpad = pad_coeffs(coeffs_flat, hub.q_free.shape[-1], q.device)
         mats = occupation_matrices(q, cpad, 0.5 * occ, kw, hub.sites)
         e_u = 2.0 * hubbard_energy(mats, hub.sites)
 
