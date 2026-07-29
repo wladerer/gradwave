@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 
 import torch
+from typing_extensions import override
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ class _DampedMixerBase:
         q0: float = 1.1,
         check_g0: bool = True,
         kerker_mask: torch.Tensor | None = None,  # per-component bool; None → kerker on all
-        step_scale: torch.Tensor | None = None,  # per-component multiplier on the damped step
+        step_scale: torch.Tensor | float | None = None,  # per-component or global multiplier
     ) -> None:
         self.g2 = g2
         self.alpha = alpha
@@ -106,8 +107,8 @@ class BroydenMixer(_DampedMixerBase):
     def __init__(self, g2: torch.Tensor, **kw) -> None:
         super().__init__(g2, **kw)
         self._pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
-        self._prev_in = None
-        self._prev_res = None
+        self._prev_in: torch.Tensor | None = None
+        self._prev_res: torch.Tensor | None = None
 
     def _apply_b(
         self, v: torch.Tensor, us: list[torch.Tensor], ys: list[torch.Tensor]
@@ -128,6 +129,9 @@ class BroydenMixer(_DampedMixerBase):
         if self.check_g0 and res[0].abs() >= 1e-8:
             raise ValueError("G=0 residual nonzero")
         if self._prev_in is not None:
+            # invariant: _prev_in and _prev_res are always set together
+            # (reset()/__init__ clear both, step()'s tail sets both)
+            assert self._prev_res is not None
             s = rho_in - self._prev_in
             y = res - self._prev_res
             yy = float((y.conj() @ y).real)
@@ -180,8 +184,8 @@ class JohnsonMixer(_DampedMixerBase):
         self.metric_w = metric_w
         self._df: list[torch.Tensor] = []
         self._u: list[torch.Tensor] = []
-        self._prev_in = None
-        self._prev_f = None
+        self._prev_in: torch.Tensor | None = None
+        self._prev_f: torch.Tensor | None = None
 
     def reset(self) -> None:
         self._df.clear()
@@ -194,6 +198,9 @@ class JohnsonMixer(_DampedMixerBase):
         if self.check_g0 and f[0].abs() >= 1e-8:
             raise ValueError("G=0 residual nonzero")
         if self._prev_in is not None:
+            # invariant: _prev_in and _prev_f are always set together
+            # (reset()/__init__ clear both, step()'s tail sets both)
+            assert self._prev_f is not None
             df = f - self._prev_f
             nrm = float(torch.linalg.norm(df))
             if nrm > 1e-14:
@@ -240,10 +247,10 @@ class PulayMixer(_DampedMixerBase):
         self.step_cap = step_cap
         self.adapt_blocks = adapt_blocks
         self.adapt_floor = adapt_floor
-        self._block_masks = None
-        self._block_mult = None
-        self._mult_vec = None
-        self._prev_bnorm = None
+        self._block_masks: list[tuple[int, torch.Tensor]] | None = None
+        self._block_mult: dict[int, float] | None = None
+        self._mult_vec: torch.Tensor | None = None
+        self._prev_bnorm: dict[int, float] | None = None
         self._global_mult = 1.0
         self._gnorm_hist: list[float] = []
         if adapt_blocks is not None:
@@ -253,6 +260,7 @@ class PulayMixer(_DampedMixerBase):
         self._rho_in: list[torch.Tensor] = []
         self._res: list[torch.Tensor] = []
 
+    @override
     def _damped(self, r: torch.Tensor) -> torch.Tensor:
         out = super()._damped(r)
         if self._mult_vec is not None:
@@ -260,6 +268,7 @@ class PulayMixer(_DampedMixerBase):
         return out
 
     @property
+    @override
     def block_mult(self) -> dict[int, float] | None:
         return dict(self._block_mult) if self._block_mult else None
 
@@ -278,8 +287,13 @@ class PulayMixer(_DampedMixerBase):
         tight convergence (recovery rules were tried and ride the
         stability boundary instead; a Broyden-class update that learns the
         actual Jacobian is the principled successor)."""
+        # invariant: only called from step() under `if self._block_masks is
+        # not None`, and _block_masks/_block_mult are always set together
+        # (__init__'s adapt_blocks branch sets both, neither is ever cleared)
+        assert self._block_masks is not None and self._block_mult is not None
         w = 1.0 / (self.g2 + self.q0**2)
-        bnorm, changed = {}, False
+        bnorm: dict[int, float] = {}
+        changed = False
         for b, mask in self._block_masks:
             r = res[mask]
             bnorm[b] = float((r.conj() * r * w[mask]).sum().real) ** 0.5

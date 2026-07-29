@@ -15,9 +15,31 @@ against finite difference.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, TypedDict
+
 import torch
 
 from gradwave.dtypes import RDTYPE
+
+if TYPE_CHECKING:
+    from gradwave.core.hamiltonian import ProjectorData
+
+
+class AlchemicalSpec(TypedDict):
+    """Endpoint spec stashed on ``System.alchemical`` by
+    ``setup_alchemical_system``, and read back by ``alchemical_energy_gradient``
+    (see both below). Both endpoints' per-k projector data, valence charges,
+    and local-potential tables, plus the optional NLCC core-density form
+    factors carried only when an endpoint has a core charge."""
+
+    pd_a: list[ProjectorData]  # per-k, endpoint A
+    pd_b: list[ProjectorData]  # per-k, endpoint B
+    z_a: float
+    z_b: float
+    tab_a: torch.Tensor  # (n1,n2,n3) endpoint A local table [eV·Å³]
+    tab_b: torch.Tensor  # (n1,n2,n3) endpoint B local table [eV·Å³]
+    core_a: torch.Tensor | None  # endpoint A NLCC |G| shells, or None
+    core_b: torch.Tensor | None  # endpoint B NLCC |G| shells, or None
 
 
 def alchemical_charges(z_a: float, z_b: float, lam: torch.Tensor) -> torch.Tensor:
@@ -172,7 +194,7 @@ def setup_alchemical_system(cell, positions, upf_a, upf_b, lam, ecut,
 
     if nbands is None:
         nbands = default_nbands(max(na * z_a, na * z_b))
-    spec = {"pd_a": sys_a.proj_data, "pd_b": sys_b.proj_data,
+    spec: AlchemicalSpec = {"pd_a": sys_a.proj_data, "pd_b": sys_b.proj_data,
             "z_a": z_a, "z_b": z_b, "tab_a": tab_a, "tab_b": tab_b,
             "core_a": core_a, "core_b": core_b}
     return dataclasses.replace(sys_a, charges=charges, n_electrons=n_electrons,

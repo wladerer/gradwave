@@ -24,10 +24,17 @@ drivers can import it without cycles.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
+from typing import TYPE_CHECKING
 
 import torch
 
 from gradwave.core.energies.total import EnergyBreakdown
+
+if TYPE_CHECKING:
+    # Annotation-only: keeps this module import-light at runtime (see module
+    # docstring) even though there is no actual cycle (scf/uspp_setup.py's own
+    # top-level imports never reach back into this module).
+    from gradwave.scf.uspp_setup import USPPSystem
 
 
 class _DictBridge:
@@ -80,11 +87,11 @@ class USPPResult(_DictBridge):
     becps: list  # ⟨β|ψ⟩ per k; [spin][k] when nspin=2
     history: list
     fermi: float | None
-    system: object  # USPPSystem
+    system: USPPSystem
     nspin: int
     smearing: str
     width: float
-    mixer_mult: object  # mixer block multipliers (diagnostics)
+    mixer_mult: dict[int, float] | None  # mixer block multipliers (diagnostics)
     rho_out_spin: list  # RAW map output (pre-mixing) — rig/diagnostics
     hub_occ: list | None = None  # DFT+U per-spin occupation matrices [σ][site]
     hub_sites: list | None = None  # DFT+U site definitions
@@ -115,7 +122,7 @@ class USPPNCResult(_DictBridge):
     rho: torch.Tensor
     m: torch.Tensor  # (3, *grid)
     eigenvalues: torch.Tensor  # (nk, nb)
-    system: object  # USPPSystem
+    system: USPPSystem
     history: list = field(default_factory=list)
     rho_ij_chan: list | None = None  # becsum in the 4 (n, m⃗) channels
     coeffs: torch.Tensor | None = None  # (nk, nb, 2·npw_max) spinors

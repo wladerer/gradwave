@@ -102,6 +102,25 @@ include = [
     "src/gradwave/calculator.py",
     "src/gradwave/inputs.py",
     "src/gradwave/cli.py",
+    # Phase 3: System/USPPSystem's object-typed fields (grid, batch, sym,
+    # rho_symmetrizer, becsum_sym, alchemical) are now precisely typed. That
+    # unblocked mixing.py (the smallest Phase-2-typed scf/ driver — cleaned up
+    # for real: paired-Optional narrowing via assert, @override decorators, a
+    # Tensor|float widening on step_scale) and spin_precond.py (mechanical
+    # autotyping only, verified clean by actually adding it to this list and
+    # checking — do not infer cleanliness from a file's absence here, since an
+    # unlisted file never shows an `error[...]`, clean or not).
+    #
+    # loop.py, uspp_loop.py, noncollinear.py, and the other 9 mechanically
+    # autotyped scf/ files (common.py, layout.py, learned_precond.py,
+    # local_tf.py, paw_onsite.py, paw_symmetry.py, setup_common.py,
+    # uspp_batch.py, uspp_noncollinear.py) were each individually verified NOT
+    # clean this round (1-31 real errors apiece: bare list/dict generics, the
+    # SCF loop's "runs >=1 iteration" possibly-unresolved-reference pattern,
+    # and — uspp_loop.py/uspp_noncollinear.py especially — deeper
+    # argument-type mismatches) and are deliberately left off.
+    "src/gradwave/scf/mixing.py",
+    "src/gradwave/scf/spin_precond.py",
 ]
 
 [tool.ty.overrides.rules]
