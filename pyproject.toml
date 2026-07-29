@@ -243,24 +243,60 @@ include = [
     "src/gradwave/scf/uspp_loop.py",
     "src/gradwave/scf/noncollinear.py",
     #
-    # Deliberately left off (individually verified NOT clean — hundreds of
-    # real errors between them, not just the untyped-bulk warning noise):
-    # cohp.py, dielectric.py, discretization_error.py, forces.py,
-    # hubbard_u.py, irreps.py, mae.py, newton.py, paw_forces.py,
-    # paw_stress.py, pdos.py, scf/results.py, stress.py, _strain.py,
-    # uspp_implicit.py, uspp_position.py, volumetric.py. The common root
-    # causes: (a) a handful of shared dict-literal "site" records
-    # (sites.append({"atom":.., "l":.., "dim":..}), int/float mixed per
-    # key) that need a TypedDict, not a plain dict[str, int | float]
-    # (_strain.py, paw_forces.py, uspp_position.py); (b) XC-union dispatch
-    # — calling xc.energy(...) generically over XCFunctional | SpinXC fails
-    # because the two classes' energy() signatures genuinely differ in
-    # arity/shape, so the call needs an isinstance branch first, not a
-    # wider parameter type (paw_forces.py, hubbard_u.py, dielectric.py);
-    # (c) discretization_error.py/newton.py/uspp_implicit.py's own
-    # DiscretizationError/USPPResult-adjacent dataclasses carry the same
-    # bare-list/tuple-invariance debt loop.py/uspp_loop.py have above. Real
-    # follow-up work, not a quick fix — left off rather than forced.
+    # Phase 10: the 16 postscf/ files (+ scf/results.py) left off in the
+    # Phase-4 postscf/ pass -- all 17 cleaned up for real (400+ real errors
+    # -> 0 across them, verified individually), not just annotated around:
+    #   * (a) the shared dict-literal "site" record (sites.append({"atom":..,
+    #     "l":.., "dim":..}), int/float mixed per key) got ONE shared
+    #     `_HubbardSite` TypedDict in _strain.py, imported by paw_stress.py/
+    #     hubbard_u.py -- not three ad-hoc fixes. paw_forces.py/
+    #     uspp_position.py, also flagged for this pattern in the Phase-4
+    #     note, turned out on inspection to need different fixes (None-
+    #     narrowing, XC dispatch) once actually diagnosed -- the pattern
+    #     doesn't universally apply, so it wasn't forced there;
+    #   * (b) XC-union dispatch (XCFunctional | SpinXC | NoncollinearXC,
+    #     energy() signatures genuinely differ in arity/shape) fixed with an
+    #     isinstance branch at each nspin==1/2 (or is_fr) call site, matching
+    #     the scf/ Phase-9 precedent, across paw_forces.py, hubbard_u.py,
+    #     dielectric.py, discretization_error.py, uspp_implicit.py, stress.py,
+    #     paw_stress.py;
+    #   * (c) discretization_error.py/newton.py/uspp_implicit.py's own
+    #     dataclasses had the same bare-list/tuple-invariance debt
+    #     loop.py/uspp_loop.py had (Phase 9's `_IterStep`-style fix): cast()
+    #     at each ambiguous coeffs/rho_ij_atoms extraction rather than a new
+    #     TypedDict, since the ambiguity is a flattened `list[Tensor] |
+    #     list[list[Tensor]]` union (nspin=1 vs 2), not a dict-shape one;
+    #   * two real (not just untyped) bugs surfaced by making the types
+    #     precise, not by looking for bugs: uspp_position.py's
+    #     `_pack_all`/`_unpack_all` called newton.py's `_pack`/`_unpack` with
+    #     the PRE-nspin-generalization flat-argument convention (a bare
+    #     Tensor/list instead of the per-spin list/list-of-lists those
+    #     functions now require) -- silently "worked" only because torch's
+    #     row-major reshape makes concatenated per-slab flattens equal a
+    #     whole-tensor flatten, not because the call was actually correct;
+    #     and cohp.py's `cohp()` dereferenced `res.v_eff` unconditionally for
+    #     every nspin channel before checking `use_op`, so calling it on any
+    #     USPPResult (the documented eigenvalue-route fallback) crashed with
+    #     an AttributeError (USPPResult has no v_eff) regardless of
+    #     `method=` -- moved the read inside `if use_op:`, both fixed to
+    #     match the actually-intended contract, not papered over with casts;
+    #   * stress.py's `_energy_strained`/dielectric.py's `dielectric_born`
+    #     each had an implicit, never-enforced restriction to SCFResult on
+    #     their post-is_fr-dispatch fallthrough path -- a scalar-relativistic
+    #     (non-SOC) NCResult reaching it would hit `res.rho_spin`
+    #     (AttributeError, NCResult has no such field) or nspin defaulting to
+    #     1 with a NoncollinearXC instance called through XCFunctional's
+    #     positional signature (wrong energy, not even an error). Both now
+    #     raise a clear NotImplementedError instead of silently mis-computing;
+    #   * postscf._response.cg_sternheimer's `h`/`bk` params were the
+    #     concrete `BatchedHamiltonian`/`BatchedK` classes, but
+    #     dielectric.py's spinor Sternheimer solves already (by design, per
+    #     that file's own comment) pass a `SpinorHamiltonian` and a
+    #     `SimpleNamespace(t=...)` shim that only duck-type the two attributes
+    #     (`.apply`, `.t`) the function actually reads -- widened to two
+    #     minimal Protocols (`_AppliesH`, `_HasKineticTable`) in
+    #     _response.py itself (already-strict, no regression) rather than
+    #     casting past a real, already-working, intentional pattern.
     #
     # Phase 6: autotyping + MonkeyType over core/ (30 files, the most-
     # imported subpackage). 15 of the 27 non-empty touched files (+3
