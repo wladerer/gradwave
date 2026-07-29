@@ -68,6 +68,7 @@ from __future__ import annotations
 import math
 import warnings
 from dataclasses import dataclass
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -160,10 +161,12 @@ def _occupied(res: SCFResult, ik: int,
     None is the nspin=1 path (occupations in [0,2]).
     """
     if sp is None:
-        occ, coeffs, eig = res.occupations[ik], res.coeffs[ik], res.eigenvalues[ik]
+        coeffs_flat = cast("list[torch.Tensor]", res.coeffs)
+        occ, coeffs, eig = res.occupations[ik], coeffs_flat[ik], res.eigenvalues[ik]
     else:
+        coeffs_sp = cast("list[list[torch.Tensor]]", res.coeffs)
         occ = res.occupations[sp][ik]
-        coeffs = res.coeffs[sp][ik]
+        coeffs = coeffs_sp[sp][ik]
         eig = res.eigenvalues[sp][ik]
     n_occ = int((occ > 1e-8).sum())
     return coeffs[:n_occ], eig[:n_occ], occ[:n_occ]
@@ -179,8 +182,10 @@ def _bands_at(res: SCFResult | USPPResult, ik: int,
     """
     coeffs, eigs = res.coeffs, res.eigenvalues
     if sp is None:
-        return coeffs[ik], eigs[ik]
-    return coeffs[sp][ik], eigs[sp][ik]
+        coeffs_flat = cast("list[torch.Tensor]", coeffs)
+        return coeffs_flat[ik], eigs[ik]
+    coeffs_sp = cast("list[list[torch.Tensor]]", coeffs)
+    return coeffs_sp[sp][ik], eigs[sp][ik]
 
 
 def _resolve_ecut_large(system: System, ecut_large: float | None, factor: float) -> float:
@@ -284,15 +289,17 @@ def _apply_chi0_spin(res: SCFResult, w_r: list[torch.Tensor]) -> list[torch.Tens
 
     system = res.system
     bk, grid = system.batch, system.grid
+    assert bk is not None
     vol = grid.volume
     projs_b = projectors_b(bk, system.positions)
+    coeffs_sp = cast("list[list[torch.Tensor]]", res.coeffs)
     dr_sp = []
     for sp in range(2):
         nocc = insulator_window(
             res.occupations[sp], 1.0,
             "Dyson dressing (nspin=2) needs insulating occupations (f=1 per "
             "spin); the coarse-space χ₀ is a conduction-projected solve")
-        c_occ = pad_coeffs(res.coeffs[sp], bk.npw_max)[:, :nocc]
+        c_occ = pad_coeffs(coeffs_sp[sp], bk.npw_max)[:, :nocc]
         eps_occ = res.eigenvalues[sp][:, :nocc].to(RDTYPE)
         shift = sternheimer_shift(eps_occ)
         h = BatchedHamiltonian(bk, grid.shape, res.v_eff[sp], projs_b)
@@ -391,6 +398,10 @@ def estimate_density_error(
         if dyson:
             raise NotImplementedError(
                 "Dyson dressing not implemented for the USPP/spinor path")
+        assert isinstance(res, USPPResult)
+        if xc is None:
+            raise ValueError("USPP/PAW density error requires xc")
+        assert isinstance(xc, XCFunctional | SpinXC)
         return _estimate_density_error_uspp(
             res, ecut_large=ecut_large, factor=factor, xc=xc, verbose=verbose,
         )
@@ -405,6 +416,12 @@ def estimate_density_error(
         return _estimate_density_error_noncollinear(
             res, ecut_large=ecut_large, factor=factor, xc=xc,
             smearing=scheme, width=w)
+    # every other formalism tag ("uspp", "uspp_noncollinear", "noncollinear")
+    # is handled (raised or delegated) above; the only one that falls through
+    # to the norm-conserving path below is "nc" -- a plain SCFResult.
+    assert isinstance(res, SCFResult)
+    if xc is not None:
+        assert isinstance(xc, XCFunctional | SpinXC)
     system = res.system
     grid = system.grid
     device = res.v_eff.device
@@ -482,7 +499,9 @@ def estimate_density_error(
     drho = drho_sp[0] if nspin == 1 else drho_sp[0] + drho_sp[1]
     if sym is not None:
         # fold the IBZ complement over the star, same operator the SCF uses on
-        # rho (nspin=1 only; nspin=2 + symmetry is gated above)
+        # rho (nspin=1 only; nspin=2 + symmetry is gated above). sym and
+        # rho_symmetrizer are built together off the same system.sym check.
+        assert system.rho_symmetrizer is not None
         sym_g = system.rho_symmetrizer.apply(r_to_g(drho.to(CDTYPE)))
         drho = g_to_r_box(sym_g, real=True)
     drho_fo = drho.clone()
@@ -498,6 +517,7 @@ def estimate_density_error(
             "for the trusted estimate; see docs/manual/error-estimation.md.",
             stacklevel=2)
         if nspin == 1:
+            assert isinstance(xc, XCFunctional)
             drho = _dyson_dress(
                 res, xc, drho_fo, beta=dyson_beta, tol=dyson_tol,
                 max_iter=dyson_max_iter, verbose=verbose,
@@ -506,6 +526,7 @@ def estimate_density_error(
             # spin-resolved coarse-space Dyson: per-channel χ₀ dressed through
             # the spin Hxc kernel K_Hxc^{σσ'}. Symmetry is off here (gated
             # above), so the per-spin first-order errors are already unfolded.
+            assert isinstance(xc, SpinXC)
             drho = _dyson_dress_spin(
                 res, xc, drho_sp, beta=dyson_beta, tol=dyson_tol,
                 max_iter=dyson_max_iter, verbose=verbose,
@@ -807,6 +828,13 @@ def _estimate_force_error_uspp(res: USPPResult, err: DiscretizationError,
     def _s(x):
         return [x] if nspin == 1 else list(x)
 
+    # deig/dbecsum/drho_smooth_spin are only None for a DiscretizationError
+    # from the norm-conserving estimator; this function is only ever called
+    # with the USPP density-error estimator's own output
+    # (_estimate_density_error_uspp always sets all three), so they're real
+    # here.
+    assert (err.deig is not None and err.dbecsum is not None
+            and err.drho_smooth_spin is not None)
     psi_s, dpsi_s, occ_s = _s(err.psi_large), _s(err.dpsi), _s(err.occ)
     deig_s, dbec_s, sph_s = _s(err.deig), _s(err.dbecsum), _s(err.spheres_large)
     drho_sm_s = err.drho_smooth_spin
@@ -828,7 +856,8 @@ def _estimate_force_error_uspp(res: USPPResult, err: DiscretizationError,
     # ddd response to the becsum perturbation (PAW one-center Hessian-vector
     # product); ddd leaves frozen at the converged becsum.
     dddd_s = None
-    ddd_leaves = [[None] * len(system.atom_slices) for _ in range(nspin)]
+    ddd_leaves_raw: list[list[torch.Tensor | None]] = [
+        [None] * len(system.atom_slices) for _ in range(nspin)]
     if is_paw:
         with torch.no_grad():
             cs = _ConvergedUSPP(res, xc)
@@ -842,8 +871,12 @@ def _estimate_force_error_uspp(res: USPPResult, err: DiscretizationError,
             _, ddd = onec[sp].energy_and_ddd(bec)
             ddd_ch = [ddd] if nspin == 1 else list(ddd)
             for isp in range(nspin):
-                ddd_leaves[isp][at] = (ddd_ch[isp].detach().clone().to(dev)
-                                       .requires_grad_(True))
+                ddd_leaves_raw[isp][at] = (ddd_ch[isp].detach().clone().to(dev)
+                                          .requires_grad_(True))
+    # every ddd_leaves_raw[isp][at] was filled above whenever is_paw (the
+    # nested loop covers every index unconditionally); both usage sites below
+    # are themselves gated by `if is_paw:`.
+    ddd_leaves = cast("list[list[torch.Tensor]]", ddd_leaves_raw)
 
     leaves, responses = [], []      # matched (leaf, δstate) pairs for the s scalar
 
@@ -886,6 +919,9 @@ def _estimate_force_error_uspp(res: USPPResult, err: DiscretizationError,
             e = e - (kw[ik] * occ_s[isp][ik] * eps_leaf * so).sum()
         rho_ij = [0.5 * (m + m.conj().T) for m in rho_ij]
         if is_paw:
+            # dddd_s/ddd_leaves are built together, under the same `if
+            # is_paw:` guard, earlier in this function.
+            assert dddd_s is not None
             for a in range(len(system.atom_slices)):
                 e = e + (ddd_leaves[isp][a].to(CDTYPE) * rho_ij[a]).sum().real
                 leaves.append(ddd_leaves[isp][a])
@@ -896,11 +932,15 @@ def _estimate_force_error_uspp(res: USPPResult, err: DiscretizationError,
     rho_tot = sum(rho_chans)
     rho_core = rho_core_on_graph(system, phases)
     if nspin == 1:
+        # nspin=1 is always paired with a collinear XCFunctional (same
+        # convention as scf/uspp_loop.py's own xc dispatch).
+        assert isinstance(xc, XCFunctional)
         rho_xc = rho_tot if rho_core is None else rho_tot + rho_core
         sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
         with xc_eager():
             e = e + xc.energy(rho_xc, vol, sigma)
     else:
+        assert isinstance(xc, SpinXC)
         c2 = 0.0 if rho_core is None else 0.5 * rho_core
         r_u, r_d = rho_chans[0] + c2, rho_chans[1] + c2
         s_uu, s_dd, s_tt = spin_sigma_triple(xc, r_u, r_d, grid.g_cart)
@@ -975,7 +1015,13 @@ def estimate_force_error(
             "force error estimate is norm-conserving collinear only; the spinor "
             "force terms in P(eps) are not assembled")
     if err.uspp:
+        # err.uspp is only ever set by _estimate_density_error_uspp, whose
+        # own res param is a USPPResult.
+        assert isinstance(res, USPPResult)
+        if xc is None:
+            raise ValueError("USPP/PAW force error requires the xc functional")
         return _estimate_force_error_uspp(res, err, xc, remove_net=remove_net)
+    assert isinstance(res, SCFResult)
     nspin = int(getattr(res, "nspin", 1))
     system = res.system
     grid = system.grid
@@ -1030,6 +1076,11 @@ def estimate_force_error(
         shells = core_shell_tables(system.upfs, uniq, inverse)
         core = assemble_core_density(shells, system.species_of_atom, pos, grid)
         rho_xc = rho_e + core
+        # xc is checked non-None under the earlier (separate) `if has_core:`
+        # block above; nspin=2 + has_core already raised, so nspin=1 here
+        # always pairs with a collinear XCFunctional.
+        assert xc is not None
+        assert isinstance(xc, XCFunctional)
         sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
         energy = energy + xc.energy(rho_xc, grid.volume, sigma, None)
 
@@ -1038,12 +1089,20 @@ def estimate_force_error(
     # per-k lists; for nspin=2 they are nested [spin][k], so normalize to a
     # per-spin layout here. Each spin channel carries its own occupations
     # (in [0,1]) and its own δφ.
+    # err.dpsi/psi_large/occ are `list[Tensor] | list[list[Tensor]] | Tensor`
+    # on the dataclass (the third variant is the spinor path's batched
+    # tensor); this norm-conserving function never sees that variant (the
+    # spinor/noncollinear formalism already raised above).
     if nspin == 1:
-        dpsi_s, psi_large_s, occ_s, sph_s = (
-            [err.dpsi], [err.psi_large], [err.occ], [err.spheres_large])
+        dpsi_s = [cast("list[torch.Tensor]", err.dpsi)]
+        psi_large_s = [cast("list[torch.Tensor]", err.psi_large)]
+        occ_s = [cast("list[torch.Tensor]", err.occ)]
+        sph_s = [cast("list[GSphere]", err.spheres_large)]
     else:
-        dpsi_s, psi_large_s, occ_s, sph_s = (
-            err.dpsi, err.psi_large, err.occ, err.spheres_large)
+        dpsi_s = cast("list[list[torch.Tensor]]", err.dpsi)
+        psi_large_s = cast("list[list[torch.Tensor]]", err.psi_large)
+        occ_s = cast("list[list[torch.Tensor]]", err.occ)
+        sph_s = cast("list[list[GSphere]]", err.spheres_large)
 
     nk = len(sph_s[0])
     nocc_max = max(o.shape[0] for occ_k in occ_s for o in occ_k)
@@ -1060,6 +1119,9 @@ def estimate_force_error(
             c1_e = psi_large_s[isp][ik] + eps * dpsi_s[isp][ik]
             becps.append(becp(p1, c1_e))
             occ_t[ik, : occ_s[isp][ik].shape[0]] = occ_s[isp][ik]
+        # dij_enl is set on the very first (isp, ik) pass (nspin, nk >= 1
+        # always in practice).
+        assert dij_enl is not None
         energy = energy + nonlocal_energy(becps, dij_enl, occ_t, system.kweights)
     # Ewald has no δP dependence, so it drops out of ∂/∂ε.
 
@@ -1139,6 +1201,8 @@ def _spinor_enlarged_batch(system, ecut_large, device):
         beta_tables = [torch.as_tensor(beta_form_factors(u, q), dtype=RDTYPE,
                                        device=device) for u in system.upfs]
         if is_fr:
+            # so_tabs1 is built from the same `is_fr` check above.
+            assert so_tabs1 is not None
             for sp_i in range(len(system.upfs)):
                 so_tabs1[sp_i][ik, :, :sph.npw] = beta_tables[sp_i]
             beta_ls = [[] for _ in system.upfs]
@@ -1381,6 +1445,10 @@ def estimate_eigenvalue_error(
             "eigenvalue error is not implemented for the USPP/PAW spinor "
             "(scf_uspp_noncollinear) result")
     if formalism == "uspp":
+        assert isinstance(res, USPPResult)
+        if xc is None:
+            raise ValueError("USPP/PAW eigenvalue error requires xc")
+        assert isinstance(xc, XCFunctional | SpinXC)
         return _estimate_eigenvalue_error_uspp(
             res, ecut_large=ecut_large, factor=factor, xc=xc, bands=bands)
     if formalism == "noncollinear":
@@ -1391,6 +1459,9 @@ def estimate_eigenvalue_error(
         return _estimate_eigenvalue_error_noncollinear(
             res, ecut_large=ecut_large, factor=factor, xc=xc, bands=bands,
             smearing=scheme, width=w)
+    # every other formalism tag is handled (raised or delegated) above; the
+    # only one that falls through to the norm-conserving path below is "nc".
+    assert isinstance(res, SCFResult)
     system = res.system
     grid = system.grid
     device = res.v_eff.device
@@ -1425,7 +1496,7 @@ def estimate_eigenvalue_error(
 
 def estimate_gap_error(res: SCFResult | USPPResult, eigerr: EigenvalueError, *,
                        occ_threshold: float | None = None,
-                       occupations=None) -> dict:
+                       occupations=None) -> dict[str, Any]:
     """Band-gap discretization error from a full-band ``EigenvalueError``.
 
     Locates the valence-band maximum and conduction-band minimum over the BZ
@@ -1444,7 +1515,10 @@ def estimate_gap_error(res: SCFResult | USPPResult, eigerr: EigenvalueError, *,
     nspin = int(getattr(res, "nspin", 1))
     full = 2.0 if nspin == 1 else 1.0
     thr = 0.5 * full if occ_threshold is None else occ_threshold
-    deig_s = [eigerr.deig] if nspin == 1 else eigerr.deig
+    if nspin == 1:
+        deig_s = [cast("list[torch.Tensor]", eigerr.deig)]
+    else:
+        deig_s = cast("list[list[torch.Tensor]]", eigerr.deig)
     spins = [None] if nspin == 1 else list(range(nspin))
 
     vbm, cbm = -math.inf, math.inf
