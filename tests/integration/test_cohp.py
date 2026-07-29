@@ -8,6 +8,8 @@ to the plane-wave spilling. Alongside it, the physical sign is fixed — a bound
 dimer (O2, Bi2) must give a bonding (negative) ICOHP on its one bond.
 """
 
+import dataclasses
+
 import numpy as np
 import pytest
 import torch
@@ -15,7 +17,7 @@ import torch
 from gradwave.postscf import cohp
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
-from tests.helpers import PSEUDOS, RY
+from tests.helpers import PSEUDOS, RY, si_fcc
 
 FIX = PSEUDOS
 
@@ -251,3 +253,101 @@ def test_cohp_explicit_pairs_and_rcut(o2_gamma):
     c0 = cohp.cohp(res, rcut=1.0, width=0.2)
     assert c0.pairs == []
     assert c0.pair_icohp == {}
+
+
+@pytest.fixture(scope="module")
+def diamond_c():
+    """Converged diamond-carbon PBE SCF (PseudoDojo std, has PP_PSWFC) shared by
+    the reference-leak / cross-route COHP hardening tests below. nbands=24 sits
+    well past the diamond nbands-convergence sweep's knee (see the cohp.py module
+    docstring): the eigenvalue route is within ~3% of the operator route there,
+    so this is a fair, non-flaky point to regression-test the bracket at."""
+    torch.set_num_threads(8)
+    from gradwave.core.xc.pbe import PBE
+    upf = parse_upf(f"{FIX}/PD_C_PBE_std.upf")
+    cell, pos = si_fcc(a=3.567)
+    system = setup_system(cell, pos, [0, 0], [upf], ecut=45 * RY, kmesh=(2, 2, 2),
+                          nbands=24, use_symmetry=False)
+    res = scf(system, PBE(), smearing="gaussian", width=0.05, etol=1e-8,
+              rhotol=1e-7, verbose=False, kerker=True)
+    assert res.converged
+    return res, system
+
+
+@pytest.mark.standard
+def test_cohp_operator_vs_eigenvalue_cross_route(diamond_c):
+    """Operator route vs. eigenvalue route on the SAME periodic solid (diamond
+    C), the comparison test_cohp_soc_bi2 was missing: both a numeric bracket
+    (not just a sign check) and a direct measurement of the reference-energy
+    leak the module docstring warns about, on the SAME converged SCF.
+
+    The bracket (0.7-1.4x) and the leak ceiling (0.5 eV/eV) are set from the
+    diamond nbands-convergence sweep in the module docstring (nbands=24 gives
+    ICOHP_operator/ICOHP_eigenvalue = 1.03x and a shift-slope of 0.008 eV/eV);
+    both bounds carry a wide safety margin so this catches a REGRESSION (the
+    ratio drifting materially further from 1, or the leak growing back toward
+    the diamond sweep's near-nocc values of a few eV/eV) without being flaky.
+    """
+    res, system = diamond_c
+
+    c_op = cohp.cohp(res, pairs=[(0, 1)], method="operator", width=0.2)
+    c_eig = cohp.cohp(res, pairs=[(0, 1)], method="eigenvalue", width=0.2)
+    icohp_op, icohp_eig = c_op.pair_icohp["1-2"], c_eig.pair_icohp["1-2"]
+
+    # both routes agree on the physical sign (bonding) ...
+    assert icohp_op < 0.0
+    assert icohp_eig < 0.0
+    # ... and, at a generous band count, on the magnitude to within a bracket
+    # far tighter than the raw operator/eigenvalue overshoot/undershoot (~2x
+    # each per the module docstring) because nbands=24 is well past the knee.
+    ratio = icohp_op / icohp_eig
+    assert 0.7 < ratio < 1.4, (icohp_op, icohp_eig, ratio)
+
+    # reference-energy leak, measured directly (module docstring's diagnostic):
+    # shifting eig and fermi by the same delta must leave the operator-route
+    # ICOHP exactly invariant (H~ = <phi|H^|phi> never touches eig) ...
+    DELTA = 1.0
+    res_shift = dataclasses.replace(
+        res, eigenvalues=res.eigenvalues + DELTA, fermi=res.fermi + DELTA)
+    c_op_shift = cohp.cohp(res_shift, pairs=[(0, 1)], method="operator", width=0.2)
+    assert abs(c_op_shift.pair_icohp["1-2"] - icohp_op) < 1e-6
+
+    # ... while the eigenvalue route leaks, but only slightly at this band count
+    c_eig_shift = cohp.cohp(res_shift, pairs=[(0, 1)], method="eigenvalue",
+                            width=0.2)
+    slope = c_eig_shift.pair_icohp["1-2"] - icohp_eig  # /DELTA=1.0
+    assert abs(slope) < 0.5, slope
+
+
+@pytest.mark.standard
+def test_cohp_symmetry_scheme_consistency():
+    """use_symmetry=True (IBZ + weights) vs. False (full/TR-reduced mesh) must
+    give the SAME operator-route ICOHP on the same system to numerical noise --
+    diamond C on a 3x3x3 mesh, which (unlike a pure time-reversal reduction)
+    actually engages the cubic point group, so this exercises AO-projector
+    handling at k-points that are symmetry- but not literally mesh-identical
+    between the two runs. A mismatch here would mean the AO projectors (shared
+    by both the operator and eigenvalue COHP routes) are not being evaluated
+    correctly at symmetry-reduced k-points -- a bug independent of, and more
+    serious than, the eigenvalue route's band-completeness leak, since it would
+    also corrupt the already-"validated" diamond/GaAs operator-route numbers.
+    (The eigenvalue route is NOT asserted here: it is measurably scheme-
+    sensitive even at generous nbands -- see the module docstring -- which is a
+    separate, expected symptom of its incomplete-basis H~, not a rotation bug.)
+    """
+    torch.set_num_threads(8)
+    from gradwave.core.xc.pbe import PBE
+    upf = parse_upf(f"{FIX}/PD_C_PBE_std.upf")
+    cell, pos = si_fcc(a=3.567)
+
+    icohp_by_scheme = {}
+    for use_sym in (False, True):
+        system = setup_system(cell, pos, [0, 0], [upf], ecut=45 * RY,
+                              kmesh=(3, 3, 3), nbands=16, use_symmetry=use_sym)
+        res = scf(system, PBE(), smearing="gaussian", width=0.05, etol=1e-8,
+                  rhotol=1e-7, verbose=False, kerker=True)
+        assert res.converged
+        c_op = cohp.cohp(res, pairs=[(0, 1)], method="operator", width=0.2)
+        icohp_by_scheme[use_sym] = c_op.pair_icohp["1-2"]
+
+    assert abs(icohp_by_scheme[True] - icohp_by_scheme[False]) < 1e-6, icohp_by_scheme
