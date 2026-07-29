@@ -27,6 +27,7 @@ Result coverage (see the manual, "Volumetric export"):
 from __future__ import annotations
 
 from pathlib import Path, PosixPath
+from typing import cast
 
 import ase.atoms
 import numpy as np
@@ -63,9 +64,7 @@ def _atoms_from_system(system: System | USPPSystem) -> ase.atoms.Atoms:
     cell = np.asarray(system.grid.cell, dtype=float)
     pos = system.positions.detach().cpu().numpy()
     # norm-conserving systems carry `upfs`; USPP/PAW systems carry `paws`.
-    pseudos = getattr(system, "upfs", None)
-    if pseudos is None:
-        pseudos = system.paws
+    pseudos = system.paws if isinstance(system, USPPSystem) else system.upfs
     numbers = [atomic_numbers[pseudos[s].element] for s in system.species_of_atom]
     return Atoms(numbers=numbers, positions=pos, cell=cell, pbc=True)
 
@@ -185,18 +184,22 @@ def band_density(
         )
     idx = system.spheres[kpoint].flat_idx
     npw_k = idx.shape[0]
-    if _is_spinor(res):
-        m_pw = res.coeffs.shape[-1] // 2  # up = [:m_pw], down = [m_pw:]
-        row = res.coeffs[kpoint, band]
+    coeffs_raw = res.coeffs
+    if isinstance(coeffs_raw, Tensor):
+        # noncollinear/SOC: one (nk, nb, 2·npw_max) spinor tensor.
+        m_pw = coeffs_raw.shape[-1] // 2  # up = [:m_pw], down = [m_pw:]
+        row = coeffs_raw[kpoint, band]
         pu = g_to_r(row[:npw_k], idx, shape)
         pd = g_to_r(row[m_pw : m_pw + npw_k], idx, shape)
         dens = pu.real**2 + pu.imag**2 + pd.real**2 + pd.imag**2
     else:
-        coeffs = res.coeffs
+        # collinear: [k] per k (nspin=1) or [spin][k] (nspin=2).
         if getattr(res, "nspin", 1) == 2:
-            ck = coeffs[0 if spin is None else spin][kpoint][band]
+            coeffs_sp = cast("list[list[Tensor]]", coeffs_raw)
+            ck = coeffs_sp[0 if spin is None else spin][kpoint][band]
         else:
-            ck = coeffs[kpoint][band]
+            coeffs_flat = cast("list[Tensor]", coeffs_raw)
+            ck = coeffs_flat[kpoint][band]
         psi = g_to_r(ck[:npw_k], idx, shape)
         dens = psi.real**2 + psi.imag**2
     return (dens / vol).detach().cpu().numpy()
@@ -292,35 +295,43 @@ def elf(res: AnyResult, eps: float = 1e-10) -> np.ndarray:
             "ELF is implemented for norm-conserving results (collinear and "
             "noncollinear); USPP/PAW support lands later"
         )
-    if _is_spinor(res):
+    # Only System (not USPPSystem) carries `.batch`, so the check above
+    # already excludes USPPResult/USPPNCResult (whose `.system` is always a
+    # USPPSystem) -- make that narrowing explicit on `res`/`system` so the
+    # rest of this function can use their norm-conserving-only fields.
+    assert isinstance(res, SCFResult | NCResult) and isinstance(system, System)
+    if isinstance(res, NCResult):
         # Noncollinear/SOC: spinor coeffs live on a doubled plane-wave axis. The
         # ELF uses the CHARGE density res.rho and the total (trace) KE density
         # τ_0 = τ_↑↑ + τ_↓↓ from the 2×2 KE-density matrix (spinor_tau_matrix_b),
         # i.e. the closed-shell ELF. τ_0 ≥ |∇ρ|²/(8ρ) (von Weizsäcker bound on the
         # total density) so D ≥ 0 and ELF ∈ [0, 1], as in the collinear case.
         from gradwave.core.metagga import spinor_tau_matrix_b
+        assert res.coeffs is not None  # already checked (occ) not None above; coeffs pairs with it
         tau_scalar, _ = spinor_tau_matrix_b(
             res.coeffs, occ, system.kweights, batch, shape, vol, batch.npw_max)
         return _elf_field(tau_scalar, res.rho, system.grid.g_cart, _C_F, eps)
     nspin = getattr(res, "nspin", 1)
     if nspin == 1:
-        coeffs = pad_coeffs(res.coeffs, system.batch.npw_max)
-        tau = tau_b(coeffs, res.occupations, system.kweights, system.batch, shape, vol)
+        coeffs = pad_coeffs(cast("list[Tensor]", res.coeffs), batch.npw_max)
+        tau = tau_b(coeffs, occ, system.kweights, batch, shape, vol)
         return _elf_field(tau, res.rho, system.grid.g_cart, _C_F, eps)
 
     # nspin=2: per-channel ELF. The uniform-gas reference for a single spin
     # channel carries the 2^{2/3} factor (each channel is its own fully spin-
     # polarized gas), the only change beyond running the loop per spin.
+    assert res.rho_spin is not None  # scf() always sets rho_spin at nspin=2
     c_F_spin = _C_F * 2.0 ** (2.0 / 3.0)
+    coeffs_sp = cast("list[list[Tensor]]", res.coeffs)
     fields = []
     for sp in range(nspin):
-        coeffs = pad_coeffs(res.coeffs[sp], system.batch.npw_max)
-        tau = tau_b(coeffs, res.occupations[sp], system.kweights, system.batch, shape, vol)
+        coeffs = pad_coeffs(coeffs_sp[sp], batch.npw_max)
+        tau = tau_b(coeffs, occ[sp], system.kweights, batch, shape, vol)
         fields.append(_elf_field(tau, res.rho_spin[sp], system.grid.g_cart, c_F_spin, eps))
     return np.stack(fields)
 
 
-def write_elf(res: AnyResult, path: PosixPath, fmt: str | None = None) -> str:
+def write_elf(res: AnyResult, path: PosixPath, fmt: str | None = None) -> str | list[str]:
     """Write the electron localization function ELF(r) to .cube/.xsf.
 
     For nspin=2 the two spin channels are written to `<stem>_up` and `<stem>_dn`
@@ -332,6 +343,10 @@ def write_elf(res: AnyResult, path: PosixPath, fmt: str | None = None) -> str:
     p = Path(path)
     written = []
     for sp, tag in enumerate(("up", "dn")):
-        chan = p.with_name(f"{p.stem}_{tag}{p.suffix}")
+        # Path.with_name()'s stub return type is the base `Path`, not the
+        # `PosixPath` write_volumetric (matching this codebase's path-like
+        # convention) declares -- on this project's target platform (Linux)
+        # Path(...) always constructs a real PosixPath at runtime.
+        chan = cast(PosixPath, p.with_name(f"{p.stem}_{tag}{p.suffix}"))
         written.append(write_volumetric(chan, field[sp], atoms, fmt))
     return written
