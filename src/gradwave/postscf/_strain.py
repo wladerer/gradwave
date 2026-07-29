@@ -140,16 +140,33 @@ def strained_projector_cols(
     Radial form factors through the differentiable SBT at the strained
     |k+G|, Ylm at the strained directions, the 1/√Ω(ε) normalization, and
     the e^{−i(k+G)·τ(ε)} phases; column ordering matches ProjectorData.
+
+    ``f = tab.beta_of_g(i, q_k)`` depends only on the species/channel, not
+    the atom — ``q_k`` is the same |k+G| grid for every atom at this k. The
+    frozen-cell path (``core.hamiltonian.build_projector_data``) exploits
+    this by precomputing ``beta_tables`` once per species outside its atom
+    loop; here the SBT must stay on the strain graph so it is recomputed per
+    call, but it still only needs recomputing once per (species, channel),
+    not once per ATOM. Caching it turns an O(n_atoms) blowup in differentiable
+    SBT evaluations into O(n_species) — a no-op for one-atom-per-species
+    cells but a large, exact (bit-identical, same deterministic op replayed
+    from a cached tensor) win for supercells with several atoms per species,
+    e.g. the joint (geometry + electronic) descent's per-closure cost.
     """
     q_k = torch.sqrt(kpg2.clamp_min(1e-30))
     q_k = torch.where(kpg2.detach() < 1e-24, torch.zeros_like(q_k), q_k)
     y = ylm_all(lmax, kpg)
     pref = 4.0 * math.pi / torch.sqrt(omega)
+    f_cache: dict[tuple[int, int], torch.Tensor] = {}
     cols = []
     for sp in species_of_atom:
         tab = tabs[sp]
         for i, ell in enumerate(tab.beta_l):
-            f = tab.beta_of_g(i, q_k)
+            key = (sp, i)
+            f = f_cache.get(key)
+            if f is None:
+                f = tab.beta_of_g(i, q_k)
+                f_cache[key] = f
             for m_col in range(2 * ell + 1):
                 cols.append((pref * f * y[:, ell * ell + m_col]).to(CDTYPE) * _MINUS_I_POW[ell])
     p = torch.stack(cols, dim=0)  # (nproj_tot, npw), matches pd ordering
