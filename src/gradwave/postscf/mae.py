@@ -60,6 +60,7 @@ from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
 from gradwave.core.xc.noncollinear import NoncollinearXC, vxc_and_bxc
 from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.scf.loop import System
 from gradwave.scf.noncollinear import NCResult, SpinorHamiltonian
 from gradwave.solvers.davidson import davidson_batched
 
@@ -201,7 +202,7 @@ def force_theorem_mae(
     smearing: str = "gaussian",
     width: float = 0.1,
     diago_tol: float = 1e-10,
-    system=None,           # optional full-mesh evaluation system (same box)
+    system: System | None = None,  # optional full-mesh evaluation system (same box)
     magmoms=None,          # (na,3) reference per-atom moments → per-direction fold
     verbose: bool = True,
 ) -> MAEResult:
@@ -241,6 +242,8 @@ def force_theorem_mae(
             "the same cell and ecut")
 
     grid, bk = eval_system.grid, eval_system.batch
+    # force_theorem_mae's whole batched-spinor path needs system.batch built.
+    assert bk is not None
     device = eval_system.positions.device
     vol = grid.volume
     m_pw = bk.npw_max
@@ -271,6 +274,13 @@ def force_theorem_mae(
     c_all = res.coeffs.to(device)
 
     fold = magmoms is not None
+    # Pre-bound (rather than left conditionally-defined) so the SECOND
+    # `if fold:` re-check inside the per-direction loop below can see these
+    # as defined-but-possibly-None instead of possibly-unbound names -- ty
+    # does not track that the same `fold` value guards both blocks across
+    # the intervening loop.
+    magnetic_spacegroup = reduce_mesh_magnetic = None
+    magmoms_np = sg0 = cell = mesh = full_index = None
     if fold:
         from gradwave.symmetry import magnetic_spacegroup, reduce_mesh_magnetic
 
@@ -291,9 +301,15 @@ def force_theorem_mae(
             # this direction's Shubnikov group folds the mesh; every
             # representative is a stored full-mesh point, so the solve runs
             # on a subset of the reference spheres and seeds
+            # all set together in the `if fold:` block above this loop.
+            assert (magnetic_spacegroup is not None
+                    and reduce_mesh_magnetic is not None
+                    and magmoms_np is not None and sg0 is not None
+                    and cell is not None and mesh is not None
+                    and full_index is not None)
             mg = magnetic_spacegroup(sg0, magmoms_np @ r_mat.numpy().T, cell)
-            kfrac_d, kw_np = reduce_mesh_magnetic(
-                tuple(int(x) for x in mesh), (0, 0, 0), mg)
+            mesh3 = (int(mesh[0]), int(mesh[1]), int(mesh[2]))
+            kfrac_d, kw_np = reduce_mesh_magnetic(mesh3, (0, 0, 0), mg)
             idx = [full_index[_mesh_key(k, mesh)] for k in kfrac_d]
             bk_d = build_batched([eval_system.spheres[i] for i in idx],
                                  [eval_system.proj_data[i] for i in idx],
@@ -306,6 +322,8 @@ def force_theorem_mae(
             if eval_system.is_fr:
                 from gradwave.core.spinor_proj import build_so_projectors
 
+                # a fully-relativistic system always populates so_beta_tables.
+                assert eval_system.so_beta_tables is not None
                 tabs = [t[idx][:, :, :m_d] for t in eval_system.so_beta_tables]
                 q_d, dij_d = build_so_projectors(bk_d, eval_system,
                                                  so_tables=tabs)
