@@ -13,19 +13,41 @@ import datetime
 import json
 import logging
 import time
+from collections.abc import Iterable
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 from gradwave.core.xc.base import XCFunctional
 from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.core.xc.pbe import PBE
 from gradwave.core.xc.r2scan import R2SCAN, SpinR2SCAN
-from gradwave.core.xc.spin import LSDA_PW92, SpinPBE
-from gradwave.inputs import Input
+from gradwave.core.xc.spin import LSDA_PW92, SpinPBE, SpinXC
+from gradwave.inputs import Input, VolumetricParams
+
+if TYPE_CHECKING:
+    from ase import Atoms
+
+    from gradwave.calculator import GradWave
+    from gradwave.core.hubbard import HubbardManifold
+    from gradwave.core.xc.noncollinear import NoncollinearXC
+    from gradwave.grids import FFTGrid
+    from gradwave.postscf.magnetism import MagneticReport
+    from gradwave.pseudo.upf import UPFData
+    from gradwave.pseudo.upf_paw import PAWData
+    from gradwave.scf.loop import SCFResult, System
+    from gradwave.scf.noncollinear import NCResult
+    from gradwave.scf.results import USPPNCResult, USPPResult
+    from gradwave.scf.uspp_setup import USPPSystem
+
+    # every SCF driver's converged-state result, the type `_get()`/
+    # `build_summary()` duck-type over via getattr (field sets differ; see
+    # `_get`'s docstring) rather than isinstance branching.
+    SCFLike = SCFResult | NCResult | USPPResult | USPPNCResult
 
 XC_REGISTRY: dict[str, type[XCFunctional]] = {"lda": LDA_PW92, "pbe": PBE,
                                               "r2scan": R2SCAN}
-SPIN_XC_REGISTRY: dict[str, type] = {"lda": LSDA_PW92, "pbe": SpinPBE,
-                                     "r2scan": SpinR2SCAN}
+SPIN_XC_REGISTRY: dict[str, type[SpinXC]] = {"lda": LSDA_PW92, "pbe": SpinPBE,
+                                             "r2scan": SpinR2SCAN}
 _OCC_TOL = 1e-6
 # the collinear/NC solvers build a fixed-length Pulay history and need an int
 # (None is not accepted, unlike the USPP path); this names the default the api
@@ -33,12 +55,12 @@ _OCC_TOL = 1e-6
 _DEFAULT_MIXING_HISTORY = 8
 # UPFs are static for a run; cache by path so build_summary / run_scf /
 # _error_estimate_block / _parameters_block parse each pseudo once, not 3-4×
-_UPF_CACHE: dict[str, object] = {}
+_UPF_CACHE: dict[str, UPFData | PAWData] = {}
 
 logger = logging.getLogger(__name__)
 
 
-def _load_upf(path):
+def _load_upf(path: str | Path) -> UPFData | PAWData:
     """Parse a UPF of either family (NC via upf.py, USPP/PAW via
     upf_paw.py — same detection the ASE calculator uses), cached by path."""
     key = str(path)
@@ -70,7 +92,9 @@ def _load_upf(path):
     return upf
 
 
-def _species_upfs(inp: Input):
+def _species_upfs(
+    inp: Input,
+) -> tuple[list[str], list[UPFData | PAWData], list[int]]:
     symbols = inp.atoms.get_chemical_symbols()
     species = sorted(set(symbols))
     upfs = [_load_upf(inp.pseudo_dir / inp.pseudo_map[s]) for s in species]
@@ -78,7 +102,7 @@ def _species_upfs(inp: Input):
     return species, upfs, species_of_atom
 
 
-def _hubbard_manifolds(inp: Input):
+def _hubbard_manifolds(inp: Input) -> list[HubbardManifold] | None:
     """The input's `hubbard` block as a list of ``core.hubbard.HubbardManifold``
     (species RESOLVED to the setup's integer index), or None when +U is off. The
     index is ``sorted(set(symbols)).index(element)`` — the same species ordering
@@ -93,7 +117,7 @@ def _hubbard_manifolds(inp: Input):
             for m in inp.hubbard.manifolds]
 
 
-def _is_uspp(upfs) -> bool:
+def _is_uspp(upfs: Iterable[UPFData | PAWData]) -> bool:
     from gradwave.pseudo.upf_paw import PAWData
 
     kinds = {isinstance(u, PAWData) for u in upfs}
@@ -103,7 +127,27 @@ def _is_uspp(upfs) -> bool:
     return kinds.pop()
 
 
-def build_system(inp: Input):
+def _as_paws(upfs: list[UPFData | PAWData]) -> list[PAWData]:
+    """`_is_uspp(upfs)` already guarantees every element is a `PAWData` (it
+    raises on a mixed NC/USPP set); this documents that fact for the type
+    checker at each USPP-branch call into `setup_uspp`."""
+    return cast("list[PAWData]", upfs)
+
+
+def _as_upfs(upfs: list[UPFData | PAWData]) -> list[UPFData]:
+    """The norm-conserving analogue of `_as_paws`."""
+    return cast("list[UPFData]", upfs)
+
+
+def _fft_grid(system: System | USPPSystem) -> FFTGrid:
+    """`System`/`USPPSystem` both declare `grid` as bare `object` (their
+    modules stay import-light with respect to grids.py); every actual
+    instance is an `FFTGrid` — this names that fact for the type checker
+    instead of re-asserting it at each access site."""
+    return cast("FFTGrid", system.grid)
+
+
+def build_system(inp: Input) -> System | USPPSystem:
     """The Layer-B system for this input, NC or USPP/PAW by UPF kind."""
     species, upfs, species_of_atom = _species_upfs(inp)
     # DFT+U builds the correlated occupation matrix n^I_{mm'} from only the
@@ -120,7 +164,7 @@ def build_system(inp: Input):
 
         return setup_uspp(
             inp.atoms.cell.array, inp.atoms.get_positions(), species_of_atom,
-            upfs, ecut=inp.ecut, kmesh=inp.kpoints.mesh,
+            _as_paws(upfs), ecut=inp.ecut, kmesh=inp.kpoints.mesh,
             ecutrho=inp.ecutrho, nbands=inp.nbands,
             use_symmetry=inp.symmetry and not hubbard,
         )
@@ -135,7 +179,7 @@ def build_system(inp: Input):
         cell=inp.atoms.cell.array,
         positions=inp.atoms.get_positions(),
         species_of_atom=species_of_atom,
-        upfs=upfs,
+        upfs=_as_upfs(upfs),
         ecut=inp.ecut,
         kmesh=inp.kpoints.mesh,
         kshift=inp.kpoints.shift,
@@ -146,7 +190,7 @@ def build_system(inp: Input):
     )
 
 
-def _spin_setup(inp: Input):
+def _spin_setup(inp: Input) -> tuple[SpinXC, list[float]]:
     xc = SPIN_XC_REGISTRY[inp.xc]()
     symbols = inp.atoms.get_chemical_symbols()
     species = sorted(set(symbols))
@@ -154,7 +198,12 @@ def _spin_setup(inp: Input):
     return xc, mags
 
 
-def run_scf(inp: Input, system=None, verbose: bool = True, start_from=None):
+def run_scf(
+    inp: Input,
+    system: System | USPPSystem | None = None,
+    verbose: bool = True,
+    start_from: Any = None,
+) -> SCFResult | NCResult | USPPResult:
     """Run the SCF for either formalism. Returns the native result
     (SCFResult for NC, USPPResult for USPP/PAW).
 
@@ -183,7 +232,12 @@ def run_scf(inp: Input, system=None, verbose: bool = True, start_from=None):
 
     kerker = inp.scf.mixing.kerker
     kerker = None if kerker == "auto" else bool(kerker)
-    common = dict(
+    # dict(...) infers a value type from this mixed bag of kwargs (int | str |
+    # float | bool | list[float] | None); explicit dict[str, Any] avoids that
+    # union being checked, key-blind, against scf()/scf_uspp()'s **kwargs
+    # below (the whole point of merging these here is to share one literal
+    # between both call sites without duplicating every argument name twice).
+    common: dict[str, Any] = dict(
         nspin=inp.nspin, start_mag=mags,
         smearing=inp.smearing.type, width=inp.smearing.width,
         max_iter=inp.scf.max_iter, etol=inp.scf.etol, rhotol=inp.scf.rhotol,
@@ -199,21 +253,27 @@ def run_scf(inp: Input, system=None, verbose: bool = True, start_from=None):
         # fixed spin moment: a collinear nspin=2, no-smearing pin (see
         # scf/loop.py:_check_scf_args). The USPP path has no such argument.
         common["tot_magnetization"] = inp.tot_magnetization
+    # uspp (from _is_uspp(upfs) above) already tells us which concrete type
+    # `system` is — the two branches below just name that for the checker.
     if uspp:
         from gradwave.scf.uspp import scf_uspp
 
         # history=None keeps the per-scheme default (johnson 12, else 8)
-        return scf_uspp(system, xc, mixing_scheme=inp.scf.mixing.scheme,
+        return scf_uspp(cast("USPPSystem", system), xc,
+                        mixing_scheme=inp.scf.mixing.scheme,
                         mixing_history=inp.scf.mixing.history,
                         mixing_kerker=kerker, start_from=start_from, **common)
     from gradwave.scf.loop import scf
 
-    return scf(system, xc, kerker=kerker, start_from=start_from,
+    return scf(cast("System", system), cast("XCFunctional", xc),
+               kerker=kerker, start_from=start_from,
                mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
                **common)
 
 
-def _run_scf_noncollinear(inp: Input, system, verbose: bool):
+def _run_scf_noncollinear(
+    inp: Input, system: System | USPPSystem, verbose: bool
+) -> NCResult:
     """A plain non-collinear (spinor) SCF for task: scf with
     noncollinear: true. Builds a NoncollinearXC from inp.xc (as run_magnetism
     does), seeds the atomic moments along +z from start_mag (or warm-starts
@@ -245,8 +305,12 @@ def _run_scf_noncollinear(inp: Input, system, verbose: bool):
     # DFT+U: noncollinear/spin-orbit +U (the 2×2 spin-block occupation matrix,
     # core.hubbard) — same manifold list the collinear/USPP paths take.
     manifolds = _hubbard_manifolds(inp)
+    # run_scf routes noncollinear: true to this (norm-conserving) driver
+    # regardless of pseudopotential kind (see inputs.py's HubbardParams
+    # docstring) — scf_noncollinear's own System-only annotation is the
+    # narrow spot, not this call.
     return scf_noncollinear(
-        system, xc, mag_vec_init=mag_vec_init,
+        cast("System", system), xc, mag_vec_init=mag_vec_init,
         smearing=smtype, width=inp.smearing.width,
         max_iter=inp.scf.max_iter, etol=inp.scf.etol, rhotol=inp.scf.rhotol,
         mixing_alpha=inp.scf.mixing.alpha,
@@ -257,7 +321,13 @@ def _run_scf_noncollinear(inp: Input, system, verbose: bool):
     )
 
 
-def _run_scf_hybrid(inp: Input, system, verbose: bool, start_from, uspp: bool):
+def _run_scf_hybrid(
+    inp: Input,
+    system: System | USPPSystem,
+    verbose: bool,
+    start_from: Any,
+    uspp: bool,
+) -> SCFResult:
     """Self-consistent PBE0-form / screened hybrid SCF (xc: pbe0 | hse).
 
     Dispatches to ``postscf.hybrid.hybrid_scf``, which scales the semilocal PBE
@@ -290,13 +360,13 @@ def _run_scf_hybrid(inp: Input, system, verbose: bool, start_from, uspp: bool):
         start_from=start_from, verbose=verbose)
 
 
-def _get(res, key, default=None):
+def _get(res: SCFLike, key: str, default: Any = None) -> Any:
     """Attribute read with a default: every SCF driver returns a result
     dataclass, but the field sets differ (e.g. NCResult has no nspin)."""
     return getattr(res, key, default)
 
 
-def _gap(eigenvalues, occupations, nspin) -> float | None:
+def _gap(eigenvalues: Any, occupations: Any, nspin: int) -> float | None:
     """HOMO-LUMO gap over all k and spins, None when any occupation is
     fractional (metals/smeared systems have no meaningful scalar gap)."""
     import numpy as np
@@ -318,8 +388,9 @@ def _xc_label(inp: Input) -> str:
     return inp.hybrid.name if inp.hybrid.enabled else inp.xc
 
 
-def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
-                  extra: dict | None = None) -> dict:
+def build_summary(res: SCFLike, inp: Input, task: str,
+                  runtime_s: float | None = None,
+                  extra: dict[str, Any] | None = None) -> dict[str, Any]:
     """The unified machine-readable summary for a task run."""
     from gradwave import __version__
     from gradwave.checkpoint import energies_eV_dict
@@ -339,18 +410,18 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
 
     import math
 
-    def _finite(x):
+    def _finite(x: Any) -> float | None:
         # the first iteration records dE = inf; bare Infinity is not
         # valid strict JSON, so non-finite maps to null
         return None if x is None or not math.isfinite(x) else float(x)
 
-    trace = [
+    trace: list[dict[str, Any]] = [
         {"iter": h["iter"], "free_energy_eV": float(h["free_energy"]),
          "dE_eV": _finite(h["dE"]), "drho": float(h["res"]),
          **({"t_s": round(float(h["t"]), 3)} if "t" in h else {})}
         for h in (_get(res, "history") or [])
     ]
-    scf_block = {
+    scf_block: dict[str, Any] = {
         "converged": bool(_get(res, "converged")),
         "n_iter": int(_get(res, "n_iter")),
         "fermi_eV": None if _get(res, "fermi") is None
@@ -439,7 +510,7 @@ def build_summary(res, inp: Input, task: str, runtime_s: float | None = None,
     return summary
 
 
-def _build_relax_calc(inp: Input):
+def _build_relax_calc(inp: Input) -> GradWave:
     """The GradWave calculator a relaxation drives — shared by the nested
     engine and by ``joint``'s final consistent-energy/forces/stress SCF at the
     relaxed geometry (so both report ASE-calculator numbers, not the joint
@@ -476,7 +547,9 @@ def _build_relax_calc(inp: Input):
     )
 
 
-def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object, list]:
+def run_relax(
+    inp: Input, verbose: bool = True
+) -> tuple[dict[str, Any], Atoms, list[Atoms]]:
     """Relax with ASE, returning (relax block, final atoms, per-step ASE frames).
 
     ``relax.method`` selects the engine. ``"nested"`` (default) runs a full SCF
@@ -498,13 +571,15 @@ def run_relax(inp: Input, verbose: bool = True) -> tuple[dict, object, list]:
     return _relax_nested(inp, verbose)
 
 
-def _relax_nested(inp: Input, verbose: bool = True) -> tuple[dict, object, list]:
+def _relax_nested(
+    inp: Input, verbose: bool = True
+) -> tuple[dict[str, Any], Atoms, list[Atoms]]:
     from ase.optimize import BFGS, FIRE
 
     atoms = inp.atoms.copy()
     atoms.calc = _build_relax_calc(inp)
     opt_cls = {"fire": FIRE, "bfgs": BFGS}[inp.relax.optimizer]
-    target = atoms
+    target: Atoms | FrechetCellFilter = atoms
     if inp.relax.cell:
         from ase.filters import FrechetCellFilter
 
@@ -514,18 +589,22 @@ def _relax_nested(inp: Input, verbose: bool = True) -> tuple[dict, object, list]
         gpa_to_ev_a3 = 1.0 / 160.21766208
         target = FrechetCellFilter(
             atoms, scalar_pressure=inp.relax.pressure * gpa_to_ev_a3)
-    opt = opt_cls(target, logfile=None)  # we print our own richer per-step line
-    trajectory = []
-    frames = []  # ASE Atoms per step, energy+forces frozen for extxyz output
+    # ASE's Optimizer.__init__ declares atoms: Atoms, but at runtime accepts
+    # any Atoms-like object implementing get_positions/get_forces/etc. —
+    # every ase.filters wrapper (FrechetCellFilter included) is meant to be
+    # passed here; the stub just doesn't spell out that duck-typed contract.
+    opt = opt_cls(cast("Atoms", target), logfile=None)  # our own per-step line below
+    trajectory: list[dict[str, Any]] = []
+    frames: list[Atoms] = []  # ASE Atoms per step, energy+forces frozen for extxyz output
 
-    def _record():
+    def _record() -> None:
         import numpy as np
         from ase.calculators.singlepoint import SinglePointCalculator
 
         forces = atoms.get_forces()
         energy = float(atoms.get_potential_energy())
         fmax = float(np.linalg.norm(forces, axis=1).max())
-        entry = {
+        entry: dict[str, Any] = {
             "step": opt.nsteps,
             "energy_eV": energy,
             "fmax_eV_ang": fmax,
@@ -546,7 +625,7 @@ def _relax_nested(inp: Input, verbose: bool = True) -> tuple[dict, object, list]
             print(f"  relax step {opt.nsteps:>3d} · E = {energy:+.8f} eV"
                   f" · fmax = {fmax:.5f} eV/Å{sc}", flush=True)
         frame = atoms.copy()
-        sp_kw = {"energy": energy, "forces": forces}
+        sp_kw: dict[str, Any] = {"energy": energy, "forces": forces}
         if inp.relax.cell:
             sp_kw["stress"] = atoms.get_stress()
         frame.calc = SinglePointCalculator(frame, **sp_kw)
@@ -557,7 +636,7 @@ def _relax_nested(inp: Input, verbose: bool = True) -> tuple[dict, object, list]
     converged = opt.run(fmax=inp.relax.fmax, steps=inp.relax.max_steps)
     import numpy as np
 
-    relax = {
+    relax: dict[str, Any] = {
         "converged": bool(converged),
         "method": "nested",
         "n_steps": opt.nsteps,
@@ -597,7 +676,7 @@ def _relax_nested(inp: Input, verbose: bool = True) -> tuple[dict, object, list]
     return relax, atoms, frames
 
 
-def _joint_supported(inp: Input, upfs) -> str | None:
+def _joint_supported(inp: Input, upfs: list[UPFData | PAWData]) -> str | None:
     """Reason the joint engine cannot run this input, or None if it can.
 
     Joint descent (opt/joint.py) is the norm-conserving, nspin=1, fixed-integer-
@@ -616,7 +695,9 @@ def _joint_supported(inp: Input, upfs) -> str | None:
     return None
 
 
-def _relax_joint(inp: Input, verbose: bool = True):
+def _relax_joint(
+    inp: Input, verbose: bool = True
+) -> tuple[dict[str, Any], Atoms, list[Atoms]] | None:
     """Joint (strain, positions, orbitals) descent as a relax engine.
 
     Returns the same ``(relax, atoms, frames)`` tuple as the nested engine, or
@@ -668,7 +749,7 @@ def _relax_joint(inp: Input, verbose: bool = True):
     energy = float(atoms.get_potential_energy())
     forces = atoms.get_forces()
     fmax_final = float(np.linalg.norm(forces, axis=1).max())
-    sp_kw = {"energy": energy, "forces": forces}
+    sp_kw: dict[str, Any] = {"energy": energy, "forces": forces}
     if inp.relax.cell:
         sp_kw["stress"] = atoms.get_stress()
     frame = atoms.copy()
@@ -676,7 +757,7 @@ def _relax_joint(inp: Input, verbose: bool = True):
     frame.info["step"] = res.n_closures
     last = getattr(atoms.calc, "last_result", None)
 
-    relax = {
+    relax: dict[str, Any] = {
         "converged": True,
         "method": "joint",
         "n_steps": res.n_cycles,             # basis-rebuild cycles (outer loop)
@@ -710,7 +791,9 @@ def _relax_joint(inp: Input, verbose: bool = True):
     return relax, atoms, [frame]
 
 
-def _relax_newton(inp: Input, verbose: bool = True):
+def _relax_newton(
+    inp: Input, verbose: bool = True
+) -> tuple[dict[str, Any], Atoms, list[Atoms]] | None:
     """Exact-Hvp Steihaug trust-region Newton-CG as a relax engine.
 
     Same contract, guard, and nested fallback as ``_relax_joint`` (returns
@@ -757,7 +840,7 @@ def _relax_newton(inp: Input, verbose: bool = True):
     energy = float(atoms.get_potential_energy())
     forces = atoms.get_forces()
     fmax_final = float(np.linalg.norm(forces, axis=1).max())
-    sp_kw = {"energy": energy, "forces": forces}
+    sp_kw: dict[str, Any] = {"energy": energy, "forces": forces}
     if inp.relax.cell:
         sp_kw["stress"] = atoms.get_stress()
     frame = atoms.copy()
@@ -765,7 +848,7 @@ def _relax_newton(inp: Input, verbose: bool = True):
     frame.info["step"] = res.n_newton
     last = getattr(atoms.calc, "last_result", None)
 
-    relax = {
+    relax: dict[str, Any] = {
         "converged": True,
         "method": "newton",
         "n_steps": res.n_cycles,
@@ -800,7 +883,7 @@ def _relax_newton(inp: Input, verbose: bool = True):
     return relax, atoms, [frame]
 
 
-def run_eos(inp: Input, verbose: bool = True) -> dict:
+def run_eos(inp: Input, verbose: bool = True) -> dict[str, Any]:
     """Isotropic volume scan + 3rd-order Birch-Murnaghan fit → V0, B0, B0'.
 
     For each factor in ``inp.eos.scales`` the cell is scaled isotropically
@@ -820,27 +903,29 @@ def run_eos(inp: Input, verbose: bool = True) -> dict:
     frac = inp.atoms.get_scaled_positions()
     natoms = len(inp.atoms)
 
-    def _build_at(scale, fft_shape):
+    def _build_at(
+        scale: float, fft_shape: tuple[int, ...] | None
+    ) -> tuple[System | USPPSystem, Any]:
         cell = cell0 * scale ** (1.0 / 3.0)
         pos = frac @ cell
         if uspp:
             from gradwave.scf.uspp import setup_uspp
 
             return setup_uspp(
-                cell, pos, species_of_atom, upfs, ecut=inp.ecut,
+                cell, pos, species_of_atom, _as_paws(upfs), ecut=inp.ecut,
                 kmesh=inp.kpoints.mesh, ecutrho=inp.ecutrho, nbands=inp.nbands,
                 use_symmetry=inp.symmetry, fft_shape=fft_shape), cell
         from gradwave.scf.loop import setup_system
 
         return setup_system(
             cell=cell, positions=pos, species_of_atom=species_of_atom,
-            upfs=upfs, ecut=inp.ecut, kmesh=inp.kpoints.mesh,
+            upfs=_as_upfs(upfs), ecut=inp.ecut, kmesh=inp.kpoints.mesh,
             kshift=inp.kpoints.shift, nbands=inp.nbands,
             use_symmetry=inp.symmetry, fft_shape=fft_shape), cell
 
     # pass 1: natural FFT grid per volume, then pin the elementwise max so
     # every volume shares one grid (larger cells otherwise pick a finer grid)
-    dims = [tuple(_build_at(s, None)[0].grid.shape) for s in scales]
+    dims = [tuple(_fft_grid(_build_at(s, None)[0]).shape) for s in scales]
     fixed = tuple(max(d[i] for d in dims) for i in range(3))
     if verbose:
         print(f"eos: {len(scales)} volumes on fixed FFT grid {fixed}", flush=True)
@@ -866,7 +951,7 @@ def run_eos(inp: Input, verbose: bool = True) -> dict:
     v_at = np.array(volumes) / natoms
     e_at = np.array(energies) / natoms
     fit = fit_bm3(v_at, e_at)
-    block = {
+    block: dict[str, Any] = {
         "scales": scales,
         "energy_kind": ekind,
         "n_atoms": natoms,
@@ -888,7 +973,7 @@ def run_eos(inp: Input, verbose: bool = True) -> dict:
     return block
 
 
-def run_elastic(inp: Input, verbose: bool = True) -> dict:
+def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
     """Clamped-ion elastic constants: FD of the analytic stress over the six
     Voigt strains → the 6×6 stiffness C and Voigt–Reuss–Hill moduli.
 
@@ -951,20 +1036,22 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict:
     # (SOC only) keeps Kramers, matching build_system's time-reversal logic.
     time_reversal = not (inp.noncollinear and not inp.nonmagnetic)
 
-    def _build(cell, fft_shape):
+    def _build(
+        cell: Any, fft_shape: tuple[int, ...] | None
+    ) -> System | USPPSystem:
         pos = frac @ cell
         if uspp:
             from gradwave.scf.uspp import setup_uspp
 
             return setup_uspp(
-                cell, pos, species_of_atom, upfs, ecut=inp.ecut,
+                cell, pos, species_of_atom, _as_paws(upfs), ecut=inp.ecut,
                 kmesh=inp.kpoints.mesh, ecutrho=inp.ecutrho, nbands=inp.nbands,
                 use_symmetry=inp.symmetry, fft_shape=fft_shape)
         from gradwave.scf.loop import setup_system
 
         return setup_system(
             cell=cell, positions=pos, species_of_atom=species_of_atom,
-            upfs=upfs, ecut=inp.ecut, kmesh=inp.kpoints.mesh,
+            upfs=_as_upfs(upfs), ecut=inp.ecut, kmesh=inp.kpoints.mesh,
             kshift=inp.kpoints.shift, nbands=inp.nbands,
             use_symmetry=inp.symmetry, time_reversal=time_reversal,
             fft_shape=fft_shape)
@@ -974,7 +1061,7 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict:
 
     probe = [cell0] + [cell0 @ (np.eye(3) + voigt_strain_tensor(j, h)).T
                        for j in range(6)]
-    fixed = tuple(max(int(_build(c, None).grid.shape[i]) for c in probe)
+    fixed = tuple(max(int(_fft_grid(_build(c, None)).shape[i]) for c in probe)
                   for i in range(3))
     if verbose:
         print(f"elastic: strain h={h}, fixed FFT grid {fixed}", flush=True)
@@ -982,19 +1069,23 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict:
     # reference SCF once — warm-start seed and residual-stress readout
     ref = run_scf(inp, system=_build(cell0, fixed), verbose=False)
     converged = [bool(getattr(ref, "converged", True))]
-    sigma_ref = _stress(ref, xc).detach().cpu().numpy()
+    # _stress is stress_uspp (res: dict, via the _DictBridge duck-typed
+    # dict view every SCF result carries — see scf/results.py) or stress
+    # (res: untyped) depending on the branch above; the cast satisfies
+    # both without duplicating this whole helper per formalism.
+    sigma_ref = _stress(cast("dict[str, Any]", ref), xc).detach().cpu().numpy()
 
-    def _stress_at(eps):
+    def _stress_at(eps: Any) -> Any:
         cell = cell0 @ (np.eye(3) + eps).T
         res = run_scf(inp, system=_build(cell, fixed), verbose=False,
                       start_from=ref)
         converged.append(bool(getattr(res, "converged", True)))
-        return _stress(res, xc).detach().cpu().numpy()
+        return _stress(cast("dict[str, Any]", res), xc).detach().cpu().numpy()
 
     c = elastic_tensor(_stress_at, h=h)
     mod = moduli_from_cij(c)
     resid_gpa = float(np.abs(sigma_ref).max()) * 160.2176634
-    block = {
+    block: dict[str, Any] = {
         "strain": h,
         "n_atoms": natoms,
         "formalism": "uspp/paw" if uspp else "nc",
@@ -1016,7 +1107,7 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict:
     return block
 
 
-def run_phonons(inp: Input, verbose: bool = True) -> dict:
+def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
     """Supercell finite-displacement phonons: dispersion along a q-path + a
     phonon DOS on a q-mesh.
 
@@ -1057,19 +1148,21 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict:
     # fold the primitive k-mesh by the supercell size (equivalent BZ sampling)
     ksuper = tuple(max(1, inp.kpoints.mesh[i] // n[i]) for i in range(3))
 
-    def make_scf(pos_sc, start_from=None):
+    def make_scf(pos_sc: Any, start_from: Any = None) -> SCFResult:
         from gradwave.scf.loop import scf, setup_system
 
         system = setup_system(
-            scmap.cell_super, pos_sc, scmap.species_super, upfs,
+            scmap.cell_super, pos_sc, scmap.species_super, _as_upfs(upfs),
             ecut=inp.ecut, kmesh=ksuper, kshift=inp.kpoints.shift,
             use_symmetry=False)
         if inp.device != "cpu":
             system = system.to(inp.device)
         # fixed spin moment: a collinear nspin=2, no-smearing pin (see run_scf)
-        spin_kw = ({"tot_magnetization": inp.tot_magnetization}
-                   if inp.nspin == 2 and inp.tot_magnetization is not None else {})
-        return scf(system, xc, nspin=inp.nspin, start_mag=mags,
+        spin_kw: dict[str, Any] = (
+            {"tot_magnetization": inp.tot_magnetization}
+            if inp.nspin == 2 and inp.tot_magnetization is not None else {})
+        return scf(system, cast("XCFunctional", xc), nspin=inp.nspin,
+                   start_mag=mags,
                    smearing=inp.smearing.type, width=inp.smearing.width,
                    etol=inp.scf.etol, rhotol=inp.scf.rhotol,
                    mixing_alpha=inp.scf.mixing.alpha,
@@ -1117,7 +1210,7 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict:
     return block
 
 
-def _bands_reference(res) -> float:
+def _bands_reference(res: SCFLike) -> float:
     """Band-plot energy zero: the Fermi level for a metal (any partially filled
     state), else the valence-band maximum. Mirrors postscf.bands.band_structure
     so the USPP path reports the same reference the NC path does."""
@@ -1133,7 +1226,7 @@ def _bands_reference(res) -> float:
     return float(eig[occ > _OCC_TOL].max())
 
 
-def _bands_uspp_block(inp: Input, res, verbose: bool) -> dict:
+def _bands_uspp_block(inp: Input, res: SCFLike, verbose: bool) -> dict[str, Any]:
     """USPP/PAW band structure along an ASE k-path via postscf.uspp_bands. The NC
     ``bands_along_ase_path`` builds the path and returns a BandStructure; the
     USPP solver instead takes an explicit k-list and returns bare eigenvalues, so
@@ -1150,8 +1243,11 @@ def _bands_uspp_block(inp: Input, res, verbose: bool) -> dict:
     xc = SPIN_XC_REGISTRY[inp.xc]() if inp.nspin == 2 else XC_REGISTRY[inp.xc]()
     if verbose:
         print(f"bands (USPP/PAW): {len(kpts)} k-points along the path", flush=True)
-    eig = bands_uspp(res, xc, kpts, nbands=inp.bands.nbands).detach().cpu().numpy()
-    bands = {
+    # bands_uspp declares res: dict — every SCF result's _DictBridge view
+    # (scf/results.py) satisfies that duck-typed contract at runtime.
+    eig = bands_uspp(cast("dict[str, Any]", res), xc, kpts,
+                     nbands=inp.bands.nbands).detach().cpu().numpy()
+    bands: dict[str, Any] = {
         "kpts_frac": kpts.tolist(),
         "x": np.asarray(x).tolist(),
         "labels": list(zip(xticks.tolist(), list(xlabels), strict=True)),
@@ -1161,18 +1257,27 @@ def _bands_uspp_block(inp: Input, res, verbose: bool) -> dict:
     return {"bands": bands}
 
 
-def _bands_extra(inp: Input, res, verbose: bool) -> dict:
+def _bands_extra(inp: Input, res: SCFLike, verbose: bool) -> dict[str, Any]:
     from gradwave.postscf.bands import bands_along_ase_path
 
     _species, upfs, _soa = _species_upfs(inp)
     if _is_uspp(upfs):
         return _bands_uspp_block(inp, res, verbose)
 
+    # bands_along_ase_path declares res: SCFResult; this branch is reached
+    # only when _is_uspp(upfs) is False above, so res is the norm-conserving
+    # SCFResult (the USPP/PAW and noncollinear formalisms route to
+    # _bands_uspp_block / a different task entirely).
     bs = bands_along_ase_path(
-        res, inp.atoms, path=inp.bands.path, npoints=inp.bands.npoints,
-        nbands=inp.bands.nbands, verbose=verbose,
+        cast("SCFResult", res), inp.atoms, path=inp.bands.path,
+        npoints=inp.bands.npoints, nbands=inp.bands.nbands, verbose=verbose,
     )
-    bands = {
+    # bands_along_ase_path always populates x/labels (the BandStructure
+    # dataclass is shared with the lower-level band_structure(), which
+    # leaves them unset — see postscf/bands.py).
+    assert bs.x is not None
+    assert bs.labels is not None
+    bands: dict[str, Any] = {
         "kpts_frac": bs.kpts_frac.tolist(),
         "x": bs.x.tolist(),
         "labels": bs.labels,
@@ -1184,7 +1289,8 @@ def _bands_extra(inp: Input, res, verbose: bool) -> dict:
 
         from gradwave.postscf.irreps import band_irreps
 
-        cache, ann = {}, []
+        cache: dict[Any, Any] = {}
+        ann: list[dict[str, Any]] = []
         for xt, lab in bs.labels:
             idx = int(np.argmin(np.abs(np.asarray(bs.x) - xt)))
             kf_exact = bs.kpts_frac[idx]  # full precision — rounding here
@@ -1204,7 +1310,7 @@ def _bands_extra(inp: Input, res, verbose: bool) -> dict:
     return {"bands": bands}
 
 
-def _error_estimate_xc(inp):
+def _error_estimate_xc(inp: Input) -> NoncollinearXC | SpinXC | XCFunctional:
     """The functional object the post-SCF estimators need to rebuild operators.
 
     Non-collinear runs need a ``NoncollinearXC`` (the exchange field enters the
@@ -1218,7 +1324,7 @@ def _error_estimate_xc(inp):
     return _spin_setup(inp)[0] if inp.nspin == 2 else XC_REGISTRY[inp.xc]()
 
 
-def _error_estimate_block(res, inp) -> dict:
+def _error_estimate_block(res: SCFLike, inp: Input) -> dict[str, Any]:
     """Post-SCF plane-wave (Ecut) discretization-error estimate for the output.
 
     Cheap post-processing (no larger SCF): the first-order complement correction
@@ -1246,18 +1352,24 @@ def _error_estimate_block(res, inp) -> dict:
     grid = system.grid
     vol, npts = grid.volume, grid.n_points
     nelec = float(system.n_electrons)
+    # postscf.discretization_error / convergence_error declare `res:
+    # SCFResult`, but (per this function's own docstring) duck-type over
+    # every formalism via getattr, exactly like `_get` above — the
+    # annotations there are simply narrower than the runtime contract.
+    res_nc = cast("SCFResult", res)
     # a non-collinear SCF always runs with a real smearing scheme (spinor bands
     # hold one electron); a "none" request maps to gaussian, as the run does.
     nc_scheme = ("gaussian" if inp.smearing.type == "none" else inp.smearing.type)
-    dens_kw = dict(smearing=nc_scheme, width=inp.smearing.width) if is_nc else {}
+    dens_kw: dict[str, Any] = (
+        dict(smearing=nc_scheme, width=inp.smearing.width) if is_nc else {})
     try:
-        err = estimate_density_error(res, xc=xc, **dens_kw)
+        err = estimate_density_error(res_nc, xc=xc, **dens_kw)
     except NotImplementedError as e:
         return {"available": False, "reason": str(e)}
 
     drho = err.drho
     free_e = float(_get(res, "energies").free_energy)
-    block = {
+    block: dict[str, Any] = {
         "available": True,
         "method": "Cances first-order complement (post-SCF)",
         "ecut_eV": err.ecut,
@@ -1278,24 +1390,26 @@ def _error_estimate_block(res, inp) -> dict:
                     and getattr(system, "rho_core", None) is None)
     if force_ok:
         try:
-            fe = estimate_force_error(res, err, xc=xc).norm(dim=1)
+            fe = estimate_force_error(res_nc, err, xc=xc).norm(dim=1)
             block["force_error_max_eV_ang"] = float(fe.max())
             block["force_error_rms_eV_ang"] = float((fe ** 2).mean().sqrt())
         except NotImplementedError as exc:
             block["force_error"] = {"available": False, "reason": str(exc)}
     # band-gap error (insulators; NC/USPP/PAW now covered, skipped for metals).
     try:
-        eig_kw = dict(smearing=nc_scheme, width=inp.smearing.width) if is_nc else {}
-        eige = estimate_eigenvalue_error(res, ecut_large=err.ecut_large, xc=xc,
+        eig_kw: dict[str, Any] = (
+            dict(smearing=nc_scheme, width=inp.smearing.width) if is_nc else {})
+        eige = estimate_eigenvalue_error(res_nc, ecut_large=err.ecut_large, xc=xc,
                                          **eig_kw)
-        gap_kw = {}
+        gap_kw: dict[str, Any] = {}
         if is_nc:
             # NCResult carries no occupations; recompute (degeneracy 1) and set
             # the metal/insulator threshold to half of one-electron filling.
-            gap_kw = dict(occupations=_nc_occupations(res, nc_scheme,
+            gap_kw = dict(occupations=_nc_occupations(cast("NCResult", res),
+                                                      nc_scheme,
                                                       inp.smearing.width),
                           occ_threshold=0.5)
-        gap = estimate_gap_error(res, eige, **gap_kw)
+        gap = estimate_gap_error(res_nc, eige, **gap_kw)
         block["gap_eV"] = gap["gap_eV"]
         block["gap_extrapolated_eV"] = gap["gap_extrapolated_eV"]
         block["dgap_eV"] = gap["dgap_eV"]
@@ -1315,8 +1429,8 @@ def _error_estimate_block(res, inp) -> dict:
     # primitive exposed yet, so xc is only passed on the supported path.
     scf_xc = xc if (not uspp and not is_nc) else None
     try:
-        scfe = estimate_scf_error(res, scf_xc)
-        sc = {
+        scfe = estimate_scf_error(res_nc, scf_xc)
+        sc: dict[str, Any] = {
             "denergy_eV": scfe.denergy,
             "denergy_meV_per_atom": scfe.denergy / natom * 1e3,
             "residual_L1_per_electron": scfe.residual_norm,
@@ -1337,7 +1451,7 @@ def _error_estimate_block(res, inp) -> dict:
         # estimate_smearing_error reads res.energies — an attribute on every
         # result dataclass, USPP/PAW included
         sme = estimate_smearing_error(
-            res, scheme=nc_scheme if is_nc else inp.smearing.type,
+            res_nc, scheme=nc_scheme if is_nc else inp.smearing.type,
             width=inp.smearing.width)
         block["smearing"] = {
             "scheme": sme.scheme,
@@ -1370,7 +1484,7 @@ def _error_estimate_block(res, inp) -> dict:
     return block
 
 
-def _nc_occupations(res, scheme: str, width: float):
+def _nc_occupations(res: NCResult, scheme: str, width: float) -> list[Any]:
     """Per-k occupations of a spinor (NCResult) run, recomputed for the gap tool.
 
     NCResult stores neither the occupations nor the smearing width, so rebuild
@@ -1392,7 +1506,7 @@ def _nc_occupations(res, scheme: str, width: float):
     return [occ[ik] for ik in range(eps.shape[0])]
 
 
-def _apply_dispersion(res, inp: Input) -> dict:
+def _apply_dispersion(res: SCFLike, inp: Input) -> dict[str, Any]:
     """Compute the D3(BJ)/D4(BJ) correction, fold its energy into ``res.energies``
     (so the reported total/free energy include it), and return the summary block
     (energy, forces, stress, resolved damping). ``dispersion.method`` selects
@@ -1408,6 +1522,10 @@ def _apply_dispersion(res, inp: Input) -> dict:
     positions = system.positions.detach().to(torch.float64)
     cell = np.asarray(system.grid.cell, dtype=np.float64)
     z = [int(v) for v in inp.atoms.get_atomic_numbers()]
+    # each branch calls its OWN energy/forces/stress trio right after
+    # building the matching Config type (rather than joining afterward,
+    # which would leave a same-named-but-different-signature callable
+    # unioned with an incompatible D3Config | D4Config argument type).
     try:
         if method == "d4":
             from gradwave.postscf.dispersion_d4 import (
@@ -1416,11 +1534,16 @@ def _apply_dispersion(res, inp: Input) -> dict:
                 dispersion_forces,
                 dispersion_stress,
             )
-            cfg = D4Config.resolve(
+            cfg_d4 = D4Config.resolve(
                 dp.functional or inp.xc, charge=dp.charge,
                 cutoff_ang=dp.cutoff, cn_cutoff_ang=dp.cn_cutoff,
                 s6=dp.s6, s8=dp.s8, a1=dp.a1, a2=dp.a2,
             )
+            cell_t = torch.as_tensor(cell, dtype=torch.float64, device=positions.device)
+            e = dispersion_energy(positions, cell_t, z, cfg_d4)
+            forces = dispersion_forces(positions, cell, z, cfg_d4)
+            stress = dispersion_stress(positions, cell, z, cfg_d4)
+            cfg = cfg_d4
         else:
             from gradwave.postscf.dispersion import (
                 D3Config,
@@ -1428,15 +1551,16 @@ def _apply_dispersion(res, inp: Input) -> dict:
                 dispersion_forces,
                 dispersion_stress,
             )
-            cfg = D3Config.resolve(
+            cfg_d3 = D3Config.resolve(
                 dp.functional or inp.xc,
                 cutoff_ang=dp.cutoff, cn_cutoff_ang=dp.cn_cutoff,
                 s6=dp.s6, s8=dp.s8, a1=dp.a1, a2=dp.a2,
             )
-        cell_t = torch.as_tensor(cell, dtype=torch.float64, device=positions.device)
-        e = dispersion_energy(positions, cell_t, z, cfg)
-        forces = dispersion_forces(positions, cell, z, cfg)
-        stress = dispersion_stress(positions, cell, z, cfg)
+            cell_t = torch.as_tensor(cell, dtype=torch.float64, device=positions.device)
+            e = dispersion_energy(positions, cell_t, z, cfg_d3)
+            forces = dispersion_forces(positions, cell, z, cfg_d3)
+            stress = dispersion_stress(positions, cell, z, cfg_d3)
+            cfg = cfg_d3
     except (ValueError, NotImplementedError) as err:
         return {"available": False, "reason": str(err)}
 
@@ -1454,7 +1578,7 @@ def _apply_dispersion(res, inp: Input) -> dict:
     }
 
 
-def _pdos_summary_block(res, inp: Input) -> dict:
+def _pdos_summary_block(res: SCFLike, inp: Input) -> dict[str, Any]:
     """Löwdin projected-DOS block for the summary JSON. Returns a graceful
     ``{'available': False, ...}`` when the pseudopotentials omit PP_PSWFC."""
     from gradwave.postscf.pdos import projected_dos
@@ -1467,7 +1591,7 @@ def _pdos_summary_block(res, inp: Input) -> dict:
         return {"available": False, "reason": str(err)}
 
 
-def _cohp_summary_block(res, inp: Input) -> dict:
+def _cohp_summary_block(res: SCFLike, inp: Input) -> dict[str, Any]:
     """Crystal Orbital Hamilton Population block for the summary JSON, computed
     alongside the PDOS when ``projections.cohp`` is enabled. Returns a graceful
     ``{'available': False, ...}`` when the pseudopotentials omit PP_PSWFC or the
@@ -1484,7 +1608,7 @@ def _cohp_summary_block(res, inp: Input) -> dict:
         return {"available": False, "reason": str(err)}
 
 
-def run_magnetism(inp: Input, verbose: bool = True):
+def run_magnetism(inp: Input, verbose: bool = True) -> MagneticReport:
     """Characterize the magnetism of the input system (task: magnetism). Builds a
     non-collinear XC from inp.xc, runs `characterize_magnetism`, and returns the
     MagneticReport."""
@@ -1504,7 +1628,9 @@ def run_magnetism(inp: Input, verbose: bool = True):
         rhotol=inp.scf.rhotol, mixing_alpha=inp.scf.mixing.alpha, verbose=verbose)
 
 
-def _write_volumetric(res, spec, outdir, verbose) -> dict:
+def _write_volumetric(
+    res: SCFLike, spec: VolumetricParams, outdir: Path, verbose: bool
+) -> dict[str, Any]:
     """Write the requested volumetric fields (.cube/.xsf/CHGCAR) and return an
     {label: filename} map for summary["outputs"]. A field that the result type
     does not support (e.g. ELF on a noncollinear run) is skipped with a warning
@@ -1539,7 +1665,7 @@ def _write_volumetric(res, spec, outdir, verbose) -> dict:
     return written
 
 
-def _base_summary(inp: Input, task: str) -> dict:
+def _base_summary(inp: Input, task: str) -> dict[str, Any]:
     """The lightweight summary scaffold shared by tasks that carry no
     SCFResult (relax, magnetism, eos, elastic, phonons). SCF-derived tasks
     use build_summary() instead. Callers append their per-task result block
@@ -1563,7 +1689,7 @@ _POSTSCF_RUNNERS = {"eos": run_eos, "elastic": run_elastic,
                     "phonons": run_phonons}
 
 
-def run(inp: Input, verbose: bool = True) -> dict:
+def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
     """Execute inp.task and write <task>.json, <task>.out and (for SCF
     state) checkpoint.pt into inp.output_dir."""
     from gradwave.output import write_output
@@ -1661,7 +1787,7 @@ def run(inp: Input, verbose: bool = True) -> dict:
     return summary
 
 
-def _structure_block(inp: Input) -> dict:
+def _structure_block(inp: Input) -> dict[str, Any]:
     import numpy as np
 
     vol = float(abs(np.linalg.det(inp.atoms.cell.array)))
@@ -1682,18 +1808,19 @@ def _structure_block(inp: Input) -> dict:
         ds = spglib.get_symmetry_dataset(
             (inp.atoms.cell.array, inp.atoms.get_scaled_positions(),
              inp.atoms.get_atomic_numbers()), symprec=1e-5)
+        if ds is None:
+            # a degenerate/near-singular cell; drop the field rather than
+            # swallow an unrelated bug below
+            return block
         block["spacegroup"] = f"{ds.international} ({ds.number})"
         block["pointgroup"] = ds.pointgroup
         block["n_symops"] = len(ds.rotations)
-    except (TypeError, AttributeError, spglib.SpglibError):
-        # a degenerate/near-singular cell makes spglib raise or return None
-        # (AttributeError on the None dataset); drop the field, don't swallow
-        # unrelated bugs
+    except (TypeError, spglib.SpglibError):
         pass
     return block
 
 
-def _parameters_block(inp: Input) -> dict:
+def _parameters_block(inp: Input) -> dict[str, Any]:
     """Parameters block for the tasks written without a materialized System
     (relax, magnetism). The magnetism run is always the non-collinear/spinor
     formalism (matching build_summary's convention); relax follows the

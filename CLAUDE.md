@@ -207,9 +207,30 @@ Run `make hooks` once per clone to install the pre-commit hooks (ruff on commit,
 fast gate on push). Before opening a PR, from the worktree:
 
 1. `uv run ruff check` is clean.
-2. `uv run pytest -m "not standard and not slow and not torture and not gpu"` passes.
-3. The branch is rebased on `main` so conflicts surface locally rather than at merge.
-4. Regenerate `uv.lock` (`uv lock`) only if dependencies changed, and commit it last.
+2. `uv run ty check` is clean (error-level gate on the growing typed-file list in
+   `pyproject.toml`'s `[[tool.ty.overrides]]`; warn-only (non-blocking) everywhere
+   else — see "Typing" below).
+3. `uv run pytest -m "not standard and not slow and not torture and not gpu"` passes.
+4. The branch is rebased on `main` so conflicts surface locally rather than at merge.
+5. Regenerate `uv.lock` (`uv lock`) only if dependencies changed, and commit it last.
 
-CI runs ruff and the standard tier on every PR, so let the green check stand in for
-re-running the standard suite by hand.
+CI runs ruff, ty, and the standard tier on every PR, so let the green check
+stand in for re-running the standard suite by hand.
+
+## Typing
+
+Gradual rollout, not a flag day: `ty` (Astral's type checker) runs with every rule
+demoted to `warn` by default (`[tool.ty.rules] all = "warn"`, plus
+`[tool.ty.terminal] error-on-warning = false`), so the untyped bulk of
+`src/gradwave` stays visible but never fails CI, and at `error` severity over an
+explicit, growing file list (`[[tool.ty.overrides]]`). Only add a file to that list
+once it is fully, cleanly typed — never let a listed file regress. `jaxtyping`
+annotates tensor shape/dtype where it is meaningful (e.g.
+`Complex[Tensor, "nk nb npw_max"]`), replacing shape-in-a-comment conventions;
+static shape strings are not checked by `ty` (shapes are runtime data here), so
+pair a `jaxtyped`-annotated function with `@jaxtyped(typechecker=beartype)` where
+the runtime check is worth its (small, O(1)) cost — not blanket-applied, never on
+a hot inner loop (Davidson, the SCF step) where dispatch overhead has proven to
+matter, and not forced onto a signature where jaxtyping's shape-consistency model
+doesn't actually fit (e.g. a `list[Tensor]` whose elements are legitimately
+different shapes — see `calculator._remap_coeffs_to_spheres`).

@@ -9,13 +9,20 @@ from __future__ import annotations
 
 import dataclasses
 import difflib
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
 import yaml
 from ase import Atoms
 from ase.io import read as ase_read
+
+if TYPE_CHECKING:
+    from _typeshed import DataclassInstance
+
+_T = TypeVar("_T", bound="DataclassInstance")
 
 
 class InputError(ValueError):
@@ -90,11 +97,11 @@ class BandsParams:
 class PhononParams:
     """Supercell finite-displacement phonons: dispersion along a q-path + DOS."""
 
-    supercell: tuple = (2, 2, 2)   # diagonal (n1,n2,n3) supercell for the FD FC
+    supercell: tuple[int, int, int] = (2, 2, 2)   # diagonal (n1,n2,n3) supercell for the FD FC
     displacement: float = 0.01     # atomic displacement h [Å] for the central FD
     path: str = ""                 # ASE bandpath string (e.g. "GXWKGL"); "" = default
     npoints: int = 120             # q-points along the dispersion path
-    dos_mesh: tuple = (8, 8, 8)    # MP q-mesh for the phonon DOS ((0,0,0) = skip)
+    dos_mesh: tuple[int, int, int] = (8, 8, 8)    # MP q-mesh for the phonon DOS ((0,0,0) = skip)
     dos_width: float = 6.0         # Gaussian broadening for the DOS [cm⁻¹]
 
     def __post_init__(self):
@@ -121,7 +128,8 @@ class CohpParams:
     under ``projections.cohp``."""
 
     enabled: bool = False
-    pairs: tuple | None = None   # ((i, j), ...) 0-based; None → all within rcut
+    # ((i, j), ...) 0-based; None → all within rcut
+    pairs: tuple[tuple[int, int], ...] | None = None
     rcut: float = 3.0            # Å neighbour cutoff for the default pair list
     width: float = 0.1           # eV gaussian broadening
     npoints: int = 800
@@ -186,7 +194,7 @@ class VolumetricParams:
     density: bool = False        # ρ(r), the CHGCAR analog
     elf: bool = False            # electron localization function ELF(r)
     magnetization: bool = False  # |m(r)|, noncollinear/SOC runs only
-    bands: tuple = ()            # (band, kpoint) pairs → PARCHG |ψ_nk(r)|²
+    bands: tuple[tuple[int, int], ...] = ()            # (band, kpoint) pairs → PARCHG |ψ_nk(r)|²
     format: str = "cube"         # "cube" or "xsf"
 
     def any(self) -> bool:
@@ -199,7 +207,7 @@ class EOSParams:
 
     # volume factors relative to the input cell; the default is the calcDelta /
     # Lejaeghere seven-point window (94–106% of V0). Needs ≥4 points to fit.
-    scales: tuple = (0.94, 0.96, 0.98, 1.00, 1.02, 1.04, 1.06)
+    scales: tuple[float, ...] = (0.94, 0.96, 0.98, 1.00, 1.02, 1.04, 1.06)
     energy: str = "free_energy"  # free_energy | total | e0 — quantity fitted vs V
 
     def __post_init__(self):
@@ -296,7 +304,7 @@ class HubbardParams:
     have +U wired at all — see scf.uspp_noncollinear.scf_uspp_noncollinear)."""
 
     enabled: bool = False
-    manifolds: tuple = ()   # tuple[HubbardManifoldSpec, ...]
+    manifolds: tuple[HubbardManifoldSpec, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -317,7 +325,8 @@ class Input:
     nspin: int = 1  # 1 | 2 (collinear)
     noncollinear: bool = False  # spinor (non-collinear) SCF for task: scf
     nonmagnetic: bool = False  # with noncollinear: pin m⃗ ≡ 0 (spin-orbit only, keeps symmetry)
-    start_mag: dict | None = None  # element -> initial moment fraction (nspin=2/NC seed)
+    # element -> initial moment fraction (nspin=2/NC seed)
+    start_mag: dict[str, float] | None = None
     tot_magnetization: float | None = None  # fix M=N↑−N↓ (nspin=2, no smearing)
     task: str = "scf"  # scf | relax | bands | magnetism | eos | elastic | phonons
     relax: RelaxParams = field(default_factory=RelaxParams)
@@ -341,7 +350,7 @@ class Input:
     restart: Path | None = None  # checkpoint.pt to warm-start from (USPP/PAW)
 
 
-def _check_keys(label: str, got, allowed) -> None:
+def _check_keys(label: str, got: object, allowed: Iterable[str]) -> None:
     """Reject unknown keys in a mapping with a did-you-mean hint, so a typo
     like `optimzer:` fails loudly at parse time instead of being silently
     dropped (a dropped key means the default is used and the result is quietly
@@ -361,7 +370,7 @@ def _check_keys(label: str, got, allowed) -> None:
         f"valid keys: {', '.join(sorted(str(a) for a in allowed))}")
 
 
-def _build(cls, raw, label):
+def _build(cls: type[_T], raw: dict[str, Any], label: str) -> _T:
     """Construct a frozen params dataclass from a mapping, rejecting unknown
     keys first so `RelaxParams(**{'optimzer': ...})` reports the typo by name
     rather than raising a bare TypeError from the constructor."""
@@ -369,7 +378,7 @@ def _build(cls, raw, label):
     return cls(**raw)
 
 
-def _build_volumetric(raw) -> VolumetricParams:
+def _build_volumetric(raw: bool | dict[str, Any]) -> VolumetricParams:
     """Parse the `output.volumetric` block. `true` is shorthand for the density
     alone; a mapping selects fields and the file format."""
     if isinstance(raw, bool):
@@ -394,7 +403,7 @@ def _build_volumetric(raw) -> VolumetricParams:
     )
 
 
-def _read_atoms(path: Path, fmt=None, index=-1) -> Atoms:
+def _read_atoms(path: Path, fmt: str | None = None, index: int = -1) -> Atoms:
     """Read a geometry through ASE and enforce the plane-wave prerequisites.
 
     ASE guesses the format from the extension/content; `fmt` overrides that
@@ -423,11 +432,13 @@ def _read_atoms(path: Path, fmt=None, index=-1) -> Atoms:
     return atoms
 
 
-def _normalize_kerker(value):
+def _normalize_kerker(value: object) -> str | bool:
     """MixingParams.kerker accepts "auto", a bool, or the on/off/true/false
     string spellings (a bare `kerker: off` is already a YAML bool); anything
     else is a user error rather than a silent truthy string."""
-    if value == "auto" or isinstance(value, bool):
+    if value == "auto":
+        return "auto"
+    if isinstance(value, bool):
         return value
     if isinstance(value, str):
         s = value.strip().lower()
@@ -441,7 +452,7 @@ def _normalize_kerker(value):
         f"invalid mixing.kerker {value!r} (auto | on | off | true | false)")
 
 
-def _load_structure(spec, base: Path) -> Atoms:
+def _load_structure(spec: str | dict[str, Any], base: Path) -> Atoms:
     """Three spellings, all reaching the same Atoms:
 
       structure: geometry.cif                     # bare filename (any ASE format)
@@ -497,7 +508,9 @@ def load_input(path: str | Path) -> Input:
         raise InputError(f"{path}: {e}") from None
 
 
-def _resolve_pseudopotentials(pp, base: Path, symbols) -> tuple[Path, dict]:
+def _resolve_pseudopotentials(
+    pp: dict[str, Any], base: Path, symbols: Iterable[str]
+) -> tuple[Path, dict[str, str]]:
     """Validate the pseudopotentials block, resolve its directory and per-element
     map, and check every element in ``symbols`` has an existing UPF file."""
     _check_keys("pseudopotentials", pp, {"dir", "map"})
@@ -514,7 +527,7 @@ def _resolve_pseudopotentials(pp, base: Path, symbols) -> tuple[Path, dict]:
     return pseudo_dir, pseudo_map
 
 
-def _resolve_symmetry(raw, task: str) -> tuple[bool, bool, bool]:
+def _resolve_symmetry(raw: dict[str, Any], task: str) -> tuple[bool, bool, bool]:
     """Resolve (noncollinear, nonmagnetic, symmetry) from the raw input.
 
     A magnetic spinor SCF (a magnetic noncollinear run, and the magnetism
@@ -549,7 +562,7 @@ def _resolve_symmetry(raw, task: str) -> tuple[bool, bool, bool]:
     return noncollinear, nonmagnetic, symmetry
 
 
-def _validate_mixing(mix_raw: dict) -> None:
+def _validate_mixing(mix_raw: dict[str, Any]) -> None:
     """Validate the `scf.mixing` block in place: reject unknown keys and unknown
     schemes, and normalize the `kerker` shorthand. Mutates `mix_raw['kerker']`."""
     _check_keys("scf.mixing", mix_raw,
@@ -561,7 +574,7 @@ def _validate_mixing(mix_raw: dict) -> None:
         mix_raw["kerker"] = _normalize_kerker(mix_raw["kerker"])
 
 
-def _build_cohp(cohp_raw) -> CohpParams:
+def _build_cohp(cohp_raw: bool | dict[str, Any]) -> CohpParams:
     """Parse the `projections.cohp` sub-block. `true`/`false` is the enabled
     shorthand; a mapping selects the atom pairs, cutoff and broadening."""
     if isinstance(cohp_raw, bool):
@@ -579,7 +592,7 @@ def _build_cohp(cohp_raw) -> CohpParams:
     )
 
 
-def _build_projections(proj_raw) -> ProjectionsParams:
+def _build_projections(proj_raw: bool | dict[str, Any]) -> ProjectionsParams:
     """Parse the `projections` block. `true`/`false` is the enabled shorthand;
     a mapping selects the grouping and broadening, plus an optional `cohp`
     sub-block computed alongside the PDOS."""
@@ -596,7 +609,7 @@ def _build_projections(proj_raw) -> ProjectionsParams:
     )
 
 
-def _build_dispersion(disp_raw) -> DispersionParams:
+def _build_dispersion(disp_raw: bool | dict[str, Any]) -> DispersionParams:
     """Parse the `dispersion` block. `true`/`false` is the enabled shorthand
     (BJ damping then taken from the SCF functional); a mapping overrides the
     functional, cutoffs, and the four damping constants."""
@@ -605,7 +618,7 @@ def _build_dispersion(disp_raw) -> DispersionParams:
     _check_keys("dispersion", disp_raw,
                 {"enabled", "method", "functional", "cutoff", "cn_cutoff",
                  "s6", "s8", "a1", "a2", "charge"})
-    def _optf(key):
+    def _optf(key: str) -> float | None:
         v = disp_raw.get(key)
         return None if v is None else float(v)
     return DispersionParams(
@@ -627,7 +640,7 @@ _HYBRID_PRESETS = {
 }
 
 
-def _resolve_xc(raw) -> tuple[str, HybridParams]:
+def _resolve_xc(raw: dict[str, Any]) -> tuple[str, HybridParams]:
     """Resolve (semilocal base xc, HybridParams) from the raw `xc` value and an
     optional `hybrid` override block. A plain functional (lda|pbe|r2scan) returns
     a disabled HybridParams and rejects a stray `hybrid` block; a hybrid label
@@ -653,7 +666,10 @@ def _resolve_xc(raw) -> tuple[str, HybridParams]:
     )
 
 
-def _build_hubbard(hub_raw, symbols: list[str]) -> HubbardParams:
+def _build_hubbard(
+    hub_raw: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+    symbols: list[str],
+) -> HubbardParams:
     """Parse the `hubbard` block: a list of per-species +U manifolds. Each entry
     names an element `species` present in the structure, the correlated shell
     `l`, and `u` (+ optional `j`) in eV. One manifold per species (Dudarev is a
@@ -665,8 +681,8 @@ def _build_hubbard(hub_raw, symbols: list[str]) -> HubbardParams:
         raise InputError(
             "hubbard must be a list of {species, l, u[, j]} manifolds")
     present = set(symbols)
-    seen = set()
-    manifolds = []
+    seen: set[str] = set()
+    manifolds: list[HubbardManifoldSpec] = []
     for i, entry in enumerate(hub_raw):
         _check_keys(f"hubbard[{i}]", entry, {"species", "l", "u", "j"})
         if "species" not in entry or "l" not in entry or "u" not in entry:
@@ -689,11 +705,12 @@ def _build_hubbard(hub_raw, symbols: list[str]) -> HubbardParams:
 
 
 def _load_input(path: Path) -> Input:
-    raw = yaml.safe_load(path.read_text())
+    raw_yaml: Any = yaml.safe_load(path.read_text())
     base = path.parent
 
-    if not isinstance(raw, dict):
+    if not isinstance(raw_yaml, dict):
         raise InputError("input must be a YAML mapping of keywords")
+    raw: dict[str, Any] = raw_yaml
     _check_keys("input", raw, _ALLOWED_TOP)
     for req in ("structure", "pseudopotentials", "ecut"):
         if req not in raw:
