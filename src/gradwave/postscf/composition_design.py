@@ -24,21 +24,22 @@ class CompositionSurrogate:
     """Quadratic pair-cluster surrogate E(lam) = c0 + b . lam + lam . A . lam,
     differentiable in the per-site weights lam."""
 
-    def __init__(self, c0, b, A):
+    def __init__(self, c0: float | np.float64, b: np.ndarray, A: np.ndarray) -> None:
         self.c0 = torch.as_tensor(c0, dtype=RDTYPE)
         self.b = torch.as_tensor(b, dtype=RDTYPE)
         self.A = torch.as_tensor(A, dtype=RDTYPE)  # symmetric (na, na)
 
-    def energy(self, lam):
+    def energy(self, lam: torch.Tensor | np.ndarray) -> torch.Tensor:
         lam = torch.as_tensor(lam, dtype=RDTYPE)
         return self.c0 + self.b @ lam + lam @ self.A @ lam
 
-    def gradient(self, lam):
-        lam = torch.as_tensor(lam, dtype=RDTYPE)
-        return self.b + 2.0 * (self.A @ lam)
+    def gradient(self, lam: np.ndarray) -> torch.Tensor:
+        lam_t = torch.as_tensor(lam, dtype=RDTYPE)
+        return self.b + 2.0 * (self.A @ lam_t)
 
 
-def _symmetric_from_upper(upper, na, iu):
+def _symmetric_from_upper(upper: np.ndarray, na: int,
+                          iu: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
     """Symmetric (na, na) matrix from its upper-triangle entries `upper` laid out
     on the index pair `iu = np.triu_indices(na)`."""
     A = np.zeros((na, na))
@@ -46,7 +47,8 @@ def _symmetric_from_upper(upper, na, iu):
     return A + A.T - np.diag(np.diag(A))
 
 
-def _model(params, lam, na, iu):
+def _model(params: np.ndarray, lam: np.ndarray, na: int,
+           iu: tuple[np.ndarray, np.ndarray]) -> tuple[np.float64, np.ndarray]:
     """Evaluate the quadratic model and its per-site gradient for a flat
     parameter vector [c0, b(na), A_upper]. Linear in params, so the same routine
     with unit parameter vectors builds the least-squares design matrix."""
@@ -58,12 +60,13 @@ def _model(params, lam, na, iu):
     return e, g
 
 
-def fit_surrogate(lams, energies, grads=None) -> CompositionSurrogate:
+def fit_surrogate(lams: np.ndarray, energies: list[float],
+                  grads: list[np.ndarray] | None=None) -> CompositionSurrogate:
     """Least-squares fit of the quadratic surrogate. lams is (m, na), energies is
     (m,), and grads is an optional (m, na) of per-site dE/dlambda. Gradient rows
     add na equations per sample, so a couple of samples pin the model."""
     lams = np.asarray(lams, dtype=float)
-    energies = np.asarray(energies, dtype=float)
+    en = np.asarray(energies, dtype=float)
     m, na = lams.shape
     iu = np.triu_indices(na)
     n_par = 1 + na + len(iu[0])
@@ -78,7 +81,7 @@ def fit_surrogate(lams, energies, grads=None) -> CompositionSurrogate:
             e_cols.append(e_p)
             g_cols.append(g_p)
         design.append(e_cols)
-        rhs.append(energies[s])
+        rhs.append(en[s])
         if grads is not None:
             g_arr = np.asarray(grads, dtype=float)
             for k in range(na):
@@ -90,8 +93,9 @@ def fit_surrogate(lams, energies, grads=None) -> CompositionSurrogate:
     return CompositionSurrogate(params[0], params[1:1 + na], A)
 
 
-def optimize_composition(surrogate, x0, target=None, bounds=(0.0, 1.0),
-                         steps=400, lr=0.05):
+def optimize_composition(surrogate: CompositionSurrogate, x0: np.ndarray,
+                         target: float | None=None, bounds: tuple[float, float]=(0.0, 1.0),
+                         steps: int=400, lr: float=0.05) -> torch.Tensor:
     """Optimize the per-site composition on the surrogate. With target=None the
     energy is minimized, otherwise (E - target)^2 is minimized. lam is projected
     to the bounds each step. Returns the optimal per-site weights."""

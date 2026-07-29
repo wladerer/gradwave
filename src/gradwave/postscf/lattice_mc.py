@@ -23,14 +23,16 @@ import numpy as np
 _LN2 = float(np.log(2.0))  # two-state disordered entropy per site
 
 
-def _energy_per_site(s, j, h):
+def _energy_per_site(s: np.ndarray, j: float, h: float) -> float:
     """Total energy divided by the number of sites. Each bond is counted once by
     rolling only in the positive direction along each axis."""
     bonds = sum((s * np.roll(s, 1, axis=ax)).sum() for ax in range(s.ndim))
     return (-j * bonds - h * s.sum()) / s.size
 
 
-def _sweep(s, j, h, temp, rng):
+def _sweep(
+    s: np.ndarray, j: float, h: float, temp: float, rng: np.random.Generator
+) -> np.ndarray:
     """One checkerboard Metropolis sweep, both sublattices."""
     coords = np.indices(s.shape).sum(axis=0)
     for parity in (0, 1):
@@ -43,8 +45,8 @@ def _sweep(s, j, h, temp, rng):
     return s
 
 
-def simulate(shape, temp, j=1.0, h=0.0, n_equil=1500, n_sample=2500,
-             seed=0) -> dict:
+def simulate(shape: tuple[int, ...], temp: float, j: float=1.0, h: float=0.0,
+             n_equil: int=1500, n_sample: int=2500, seed: int=0) -> dict[str, float]:
     """Metropolis Monte Carlo at one temperature. Returns per-site averages, the
     energy, the absolute order parameter |m|, the specific heat, and the
     susceptibility."""
@@ -71,7 +73,7 @@ def simulate(shape, temp, j=1.0, h=0.0, n_equil=1500, n_sample=2500,
     }
 
 
-def scan_temperature(shape, temps, **kwargs) -> dict:
+def scan_temperature(shape: tuple[int, ...], temps, **kwargs) -> dict[str, np.ndarray]:
     """Run `simulate` across a temperature grid. Returns arrays keyed by
     observable, so the specific-heat peak and the order parameter can be read
     off directly."""
@@ -79,12 +81,14 @@ def scan_temperature(shape, temps, **kwargs) -> dict:
     return {k: np.array([r[k] for r in rows]) for k in rows[0]}
 
 
-def order_disorder_temperature(temps, cv) -> float:
+def order_disorder_temperature(temps: np.ndarray, cv: np.ndarray) -> float:
     """The transition temperature estimated from the specific-heat peak."""
     return float(np.asarray(temps)[int(np.argmax(cv))])
 
 
-def configurational_entropy(temps, cv, s_infinity=_LN2):
+def configurational_entropy(
+    temps: np.ndarray, cv: np.ndarray, s_infinity: float = _LN2
+) -> np.ndarray:
     """Configurational entropy per site, integrated down from the high-
     temperature limit, S(T) = S_inf - integral_T^Tmax Cv/T' dT'. s_infinity
     defaults to the two-state disordered value ln 2, so the temperature grid must
@@ -102,7 +106,9 @@ def configurational_entropy(temps, cv, s_infinity=_LN2):
     return s[np.argsort(order)]  # restore the caller's temperature order
 
 
-def configurational_free_energy(temps, energies, cv, s_infinity=_LN2):
+def configurational_free_energy(
+    temps: np.ndarray, energies: np.ndarray, cv: np.ndarray, s_infinity: float = _LN2
+) -> np.ndarray:
     """Configurational free energy per site F(T) = E(T) - T S(T), with S from the
     high-temperature entropy integration."""
     s = configurational_entropy(temps, cv, s_infinity)

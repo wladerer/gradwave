@@ -40,7 +40,7 @@ from gradwave.postscf.isdf import build_isdf, select_interpolation_points
 
 
 def physical_orbitals(
-    coeffs: torch.Tensor, flat_idx: torch.Tensor, shape, volume: float,
+    coeffs: torch.Tensor, flat_idx: torch.Tensor, shape: tuple[int, int, int], volume: float,
 ) -> torch.Tensor:
     """Occupied-orbital coefficients → normalized ψ on the grid, (n_orb, N_r).
 
@@ -50,7 +50,9 @@ def physical_orbitals(
     return f / math.sqrt(volume)
 
 
-def coulomb_potential(sigma_r: torch.Tensor, shape, g2: torch.Tensor) -> torch.Tensor:
+def coulomb_potential(
+    sigma_r: torch.Tensor, shape: tuple[int, int, int], g2: torch.Tensor
+) -> torch.Tensor:
     """Coulomb potential field v[σ](r) = ∫ σ(r′) e²/|r−r′| dr′ of a density σ(r).
 
     sigma_r: (..., N_r) real-space co-densities (flattened). Returns the same
@@ -63,7 +65,7 @@ def coulomb_potential(sigma_r: torch.Tensor, shape, g2: torch.Tensor) -> torch.T
 
 
 def exchange_operator_direct(
-    psi_occ: torch.Tensor, psi_test: torch.Tensor, shape, g2: torch.Tensor,
+    psi_occ: torch.Tensor, psi_test: torch.Tensor, shape: tuple[int, int, int], g2: torch.Tensor,
 ) -> torch.Tensor:
     """(V_x ψ_t)(r) = −Σ_j ψ_j(r) v[ψ_j* ψ_t](r), the direct O(N_occ · N_test)
     pair-FFT Fock build. psi_occ (n_occ, N_r), psi_test (n_test, N_r), both
@@ -79,7 +81,7 @@ def exchange_operator_direct(
 
 def exchange_operator_isdf(
     psi_occ: torch.Tensor, psi_test: torch.Tensor, points: torch.Tensor,
-    zeta: torch.Tensor, shape, g2: torch.Tensor,
+    zeta: torch.Tensor, shape: tuple[int, int, int], g2: torch.Tensor,
 ) -> torch.Tensor:
     """ISDF-accelerated exchange operator on the occupied set.
 
@@ -99,7 +101,15 @@ def exchange_operator_isdf(
     return -(g @ psi_mu_test.transpose(0, 1)).transpose(0, 1)
 
 
-def build_exchange_operator_isdf(psi_occ, shape, g2, n_mu, *, generator=None, sketch=None):
+def build_exchange_operator_isdf(
+    psi_occ: torch.Tensor,
+    shape: tuple[int, int, int],
+    g2: torch.Tensor,
+    n_mu: int,
+    *,
+    generator: torch.Generator | None = None,
+    sketch: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Convenience: pick points + fit ζ on psi_occ, return (points, zeta) for
     ``exchange_operator_isdf``."""
     points = select_interpolation_points(psi_occ, n_mu, generator=generator, sketch=sketch)

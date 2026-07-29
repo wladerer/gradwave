@@ -13,6 +13,8 @@ Units: force constants eV/Å²; frequencies via
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 
 from gradwave.postscf.forces import forces
@@ -21,10 +23,11 @@ from gradwave.postscf.forces import forces
 # derived value (from gradwave.constants) so the two Γ-frequency paths cannot
 # drift — an earlier hand-typed literal here disagreed at the 8th digit.
 from gradwave.postscf.phonons import _SQRT_EV_AMU_ANG2_TO_CM1 as SQRT_EV_AMU_ANG2_TO_CM1
+from gradwave.scf.loop import SCFResult
 
 
 def force_constants_gamma(
-    make_scf,  # callable positions(na,3)->SCFResult (converged)
+    make_scf: Callable[[np.ndarray], SCFResult],  # positions(na,3)->SCFResult (converged)
     positions: np.ndarray,
     h: float = 5e-3,
     acoustic_sum_rule: bool = True,

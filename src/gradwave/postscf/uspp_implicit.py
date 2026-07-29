@@ -99,7 +99,8 @@ from gradwave.core._anderson import AndersonMixer
 from gradwave.core.density import sigma_from_rho
 from gradwave.core.fftbox import box_to_sphere, g_to_r, g_to_r_box, r_to_g
 from gradwave.core.hamiltonian import becp, projectors
-from gradwave.core.xc.base import xc_eager
+from gradwave.core.xc.base import XCFunctional, xc_eager
+from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.postscf._response import (
     fxc_hvp,
@@ -116,10 +117,13 @@ from gradwave.postscf.uspp_frozen import (
     screened_dscr,
 )
 from gradwave.scf.implicit import projected_cg
+from gradwave.scf.results import USPPResult
 from gradwave.solvers.precond import teter
 
 
-def uspp_energy_param_grads(res: dict, xc) -> dict[str, torch.Tensor]:
+def uspp_energy_param_grads(
+    res: USPPResult, xc: XCFunctional | SpinXC
+) -> dict[str, torch.Tensor]:
     """dE_total/dθ for every parameter of `xc` at a converged scf_uspp point
     (nspin=1 or 2). Includes the one-center term."""
     nspin = res.get("nspin", 1)
@@ -161,7 +165,7 @@ def uspp_energy_param_grads(res: dict, xc) -> dict[str, torch.Tensor]:
 # ---------------------------------------------------------------------------
 
 
-def _check_supported(res: dict):
+def _check_supported(res: USPPResult) -> None:
     if res.get("nspin", 1) not in (1, 2):
         raise NotImplementedError("USPP adjoint: nspin must be 1 or 2")
     occ = res["occupations"]
@@ -176,7 +180,9 @@ _F_CUT = 1e-8  # bands above this occupation get Sternheimer solves
 _F_FULL_TOL = 1e-8  # |occ - f_full| below this counts as fully filled (not fractional)
 
 
-def _window_uspp(res: dict, isp: int, ik: int):
+def _window_uspp(
+    res: USPPResult, isp: int, ik: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """The full computed-band window at (spin, k) — coeffs, ε, f — plus the
     number of occupation-carrying bands to solve for. Bands are ε-sorted;
     the solved set must be a prefix (mp1/cold non-monotonicity lives at
@@ -198,7 +204,7 @@ class _ConvergedUSPP:
     """Frozen converged-state operators: per-k (H, S), occupied blocks,
     augmentation pairing and the one-center machinery."""
 
-    def __init__(self, res: dict, xc):
+    def __init__(self, res: USPPResult, xc: XCFunctional | SpinXC) -> None:
         from gradwave.scf.uspp import _HkS
 
         system = res["system"]
@@ -622,7 +628,7 @@ class _ConvergedUSPP:
 
 
 def uspp_density_loss_param_grads(
-    res: dict, xc, loss_fn, *, beta: float = 0.2, history: int = 8,
+    res: USPPResult, xc: XCFunctional | SpinXC, loss_fn, *, beta: float = 0.2, history: int = 8,
     outer_tol: float = 1e-9, max_outer: int = 100, cg_tol: float = 1e-8,
     cg_max_iter: int = 200, floor_tol: float | None = None,
     kerker_q0: float | None = None, verbose: bool = False,

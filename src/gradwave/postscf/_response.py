@@ -23,14 +23,19 @@ Import direction: this module depends only on ``gradwave.core``/
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 import torch
 
 from gradwave.constants import E2
+from gradwave.core.batch import BatchedHamiltonian, BatchedK
 from gradwave.core.density import sigma_from_rho
 from gradwave.core.fftbox import g_to_r_box, r_to_g
-from gradwave.core.xc.base import xc_eager
+from gradwave.core.xc.base import XCFunctional, xc_eager
+from gradwave.core.xc.noncollinear import NoncollinearXC
+from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import CDTYPE
+from gradwave.grids import FFTGrid
 from gradwave.solvers.precond import teter_b
 
 
@@ -39,8 +44,10 @@ class DysonNotConverged(RuntimeError):
 
 
 @torch.no_grad()
-def dyson_fixed_point(op, rhs: torch.Tensor, *, beta: float, tol: float,
-                      max_iter: int, on_fail=None, denom_new: bool = False,
+def dyson_fixed_point(op: Callable[[torch.Tensor], torch.Tensor], rhs: torch.Tensor, *,
+                      beta: float, tol: float, max_iter: int,
+                      on_fail: Callable[[float], None] | None = None,
+                      denom_new: bool = False,
                       verbose: bool = False) -> torch.Tensor:
     """Solve x = rhs + op(x) by damped fixed-point iteration.
 
@@ -77,7 +84,7 @@ def dyson_fixed_point(op, rhs: torch.Tensor, *, beta: float, tol: float,
 # --------------------------------------------------------------------------- #
 
 
-def hartree_kernel(grid, w_r: torch.Tensor) -> torch.Tensor:
+def hartree_kernel(grid: FFTGrid, w_r: torch.Tensor) -> torch.Tensor:
     """(K_H w)(r): the Hartree kernel 4πe²/G² applied to a real grid field
     (G=0 excluded)."""
     w_g = r_to_g(w_r.to(CDTYPE))
@@ -87,7 +94,8 @@ def hartree_kernel(grid, w_r: torch.Tensor) -> torch.Tensor:
     return g_to_r_box(4.0 * math.pi * E2 * w_g * inv_g2, real=True)
 
 
-def fxc_hvp(xc, rho0: torch.Tensor, grid, w_r: torch.Tensor) -> torch.Tensor:
+def fxc_hvp(xc: XCFunctional, rho0: torch.Tensor, grid: FFTGrid,
+            w_r: torch.Tensor) -> torch.Tensor:
     """f_xc·w at the density ``rho0`` in physical units [eV].
 
     d/dρ ⟨v_xc(ρ), w⟩ by double backward through E_xc; xc_eager() forces
@@ -105,8 +113,9 @@ def fxc_hvp(xc, rho0: torch.Tensor, grid, w_r: torch.Tensor) -> torch.Tensor:
     return fxc_w * (grid.n_points / grid.volume)
 
 
-def fxc_hvp_spin(xc, ru0: torch.Tensor, rd0: torch.Tensor, grid,
-                 wu: torch.Tensor, wd: torch.Tensor):
+def fxc_hvp_spin(xc: SpinXC, ru0: torch.Tensor, rd0: torch.Tensor,
+                 grid: FFTGrid, wu: torch.Tensor,
+                 wd: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """(f_xc^{σσ'} w^{σ'})↑, ↓ at the spin densities (ru0, rd0) [eV].
 
     The spin Hessian-vector product of the grid E_xc (double backward, eager
@@ -124,7 +133,7 @@ def fxc_hvp_spin(xc, ru0: torch.Tensor, rd0: torch.Tensor, grid,
     return fu * scale, fd * scale
 
 
-def fxc_hvp_noncollinear_nonmagnetic(xc, rho0: torch.Tensor, grid,
+def fxc_hvp_noncollinear_nonmagnetic(xc: NoncollinearXC, rho0: torch.Tensor, grid: FFTGrid,
                                      w_r: torch.Tensor) -> torch.Tensor:
     """f_xc·w at m⃗ ≡ 0 for a ``core.xc.noncollinear.NoncollinearXC``, in
     physical units [eV]. ``rho0`` already includes any NLCC core (the same
@@ -151,7 +160,9 @@ def fxc_hvp_noncollinear_nonmagnetic(xc, rho0: torch.Tensor, grid,
     return fxc_w * (grid.n_points / grid.volume)
 
 
-def spin_sigma_triple(xc, r_u: torch.Tensor, r_d: torch.Tensor, g_cart):
+def spin_sigma_triple(
+    xc: SpinXC, r_u: torch.Tensor, r_d: torch.Tensor, g_cart: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[None, None, None]:
     """(σ_uu, σ_dd, σ_tt) for a spin GGA call, or (None,)*3 for an LDA-type
     functional. σ_tt is the gradient invariant of the total density."""
     if not xc.needs_gradient:
@@ -197,7 +208,8 @@ def insulator_window(occ: torch.Tensor, f_full: float, err_msg: str) -> int:
     return nocc
 
 
-def pad_coeffs(coeffs_per_k, npw_max, device=None):
+def pad_coeffs(coeffs_per_k: list[torch.Tensor], npw_max: int,
+               device: torch.device | None=None) -> torch.Tensor:
     """[(nb, npw_k)] per k → padded (nk, nb, npw_max), detached. `device`
     defaults to the coeffs' own device (a no-op move in that case)."""
     nk = len(coeffs_per_k)
@@ -209,8 +221,9 @@ def pad_coeffs(coeffs_per_k, npw_max, device=None):
     return out
 
 
-def cg_sternheimer(h, bk, c_occ, eps_occ, rhs, x0, shift, tol=1e-8,
-                   max_iter=400):
+def cg_sternheimer(h: BatchedHamiltonian, bk: BatchedK, c_occ: torch.Tensor, eps_occ: torch.Tensor,
+                   rhs: torch.Tensor, x0: torch.Tensor, shift: float, tol: float=1e-8,
+                   max_iter: int=400) -> torch.Tensor:
     """Batched conduction-projected Sternheimer: (H − ε_n + s·P_occ)δψ = rhs,
     for all occupied bands of all k at once ((nk, nocc, npw_max), masked).
     rhs must already lie in the conduction space; positive definite there

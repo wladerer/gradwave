@@ -33,7 +33,10 @@ from gradwave.core.energies.total import EnergyBreakdown
 if TYPE_CHECKING:
     # Annotation-only: keeps this module import-light at runtime (see module
     # docstring) even though there is no actual cycle (scf/uspp_setup.py's own
-    # top-level imports never reach back into this module).
+    # top-level imports never reach back into this module, nor do scf/loop.py's
+    # or scf/noncollinear.py's).
+    from gradwave.scf.loop import SCFResult
+    from gradwave.scf.noncollinear import NCResult
     from gradwave.scf.uspp_setup import USPPSystem
 
 
@@ -127,3 +130,15 @@ class USPPNCResult(_DictBridge):
     rho_ij_chan: list | None = None  # becsum in the 4 (n, m⃗) channels
     coeffs: torch.Tensor | None = None  # (nk, nb, 2·npw_max) spinors
     formalism: str = "uspp_noncollinear"
+
+
+if TYPE_CHECKING:
+    # The four SCF drivers' result shapes, as accepted by postscf/ entry points
+    # that dispatch on `res.formalism`/`isinstance` across all of them (forces,
+    # stress, discretization_error, pdos, cohp, bader, ...) rather than being
+    # tied to one formalism. Not every "res"-taking postscf function accepts
+    # every member of this union (e.g. forces() is SCFResult | NCResult only,
+    # no USPP path) — this is the maximal shared vocabulary, not a claim that
+    # every function takes all four. TYPE_CHECKING-only like SCFResult/NCResult
+    # above, for the same import-lightness reason.
+    AnyResult = SCFResult | USPPResult | NCResult | USPPNCResult

@@ -33,6 +33,10 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+from typing_extensions import override
+
+from gradwave.scf.loop import SCFResult
+from gradwave.scf.results import USPPResult
 
 # 26 nearest-neighbour offsets on the grid (all of {-1,0,1}^3 minus the origin).
 _OFFSETS = np.array(
@@ -75,6 +79,7 @@ class BaderResult:
     attractor_charge: np.ndarray
     nonnuclear: np.ndarray
 
+    @override
     def __repr__(self) -> str:  # concise, atom-by-atom
         lines = ["BaderResult(", "  atom   Z_val   electrons    charge     volume"]
         for a in range(len(self.charges)):
@@ -140,7 +145,7 @@ def _basins(parent: torch.Tensor, max_iter: int = 64) -> torch.Tensor:
 
 
 def bader(
-    res,
+    res: SCFResult | USPPResult,
     add_core: bool = False,
     nna_tol: float = 0.5,
     vacuum_threshold: float | None = None,
@@ -174,8 +179,9 @@ def bader(
     if rho.shape != shape:
         rho = rho.reshape(shape)
     rho_for_ascent = rho
-    if add_core and getattr(system, "rho_core", None) is not None:
-        rho_for_ascent = rho + system.rho_core.detach().to(torch.float64).reshape(shape)
+    rho_core = getattr(system, "rho_core", None)
+    if add_core and rho_core is not None:
+        rho_for_ascent = rho + rho_core.detach().to(torch.float64).reshape(shape)
 
     # 1) steepest-ascent forest → 2) basin roots by pointer jumping.
     parent = _ascent_map(rho_for_ascent, cell)
@@ -239,6 +245,7 @@ def bader(
         electrons[a] += charge_np[b]
         volumes[a] += volume_np[b]
         if moments is not None:
+            assert moment_np is not None  # moments is set iff moment_np is
             moments[a] += moment_np[b]
 
     valence = system.charges.detach().cpu().numpy().astype(np.float64)

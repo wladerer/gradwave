@@ -24,7 +24,7 @@ from gradwave.constants import KB_EV as K_B
 CM1_TO_EV = 1.239841984e-4
 
 
-def _positive_grid(freqs_cm, dos):
+def _positive_grid(freqs_cm: np.ndarray, dos: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Frequency grid and DOS with imaginary (negative) branches removed.
 
     A supercell DOS can carry negative frequencies where the dynamical matrix has
@@ -38,7 +38,7 @@ def _positive_grid(freqs_cm, dos):
     return freqs_cm, g
 
 
-def mode_count(freqs_cm, dos) -> float:
+def mode_count(freqs_cm: np.ndarray, dos: np.ndarray) -> float:
     """Total number of modes ∫ g(ω) dω over the real branches.
 
     This is the mode budget every other quantity assumes, and for a clean DOS it
@@ -49,7 +49,7 @@ def mode_count(freqs_cm, dos) -> float:
     return float(np.trapezoid(g, freqs_cm))
 
 
-def zero_point_energy(freqs_cm, dos) -> float:
+def zero_point_energy(freqs_cm: np.ndarray, dos: np.ndarray) -> float:
     """Zero-point energy ½ ∫ ħω g(ω) dω in eV per cell.
 
     Each oscillator contributes ½ħω at T=0, so the cell ZPE is the first moment
@@ -61,7 +61,7 @@ def zero_point_energy(freqs_cm, dos) -> float:
     return float(0.5 * np.trapezoid(hbar_omega * g, freqs_cm))
 
 
-def _cv_integrand(x):
+def _cv_integrand(x: np.ndarray) -> np.ndarray:
     """Einstein specific-heat kernel x²eˣ/(eˣ−1)² evaluated as (x/2)²/sinh²(x/2).
 
     The sinh form is the same function with the overflow-prone eˣ moved inside a
@@ -80,7 +80,7 @@ def _cv_integrand(x):
     return out
 
 
-def heat_capacity(freqs_cm, dos, T) -> float:
+def heat_capacity(freqs_cm: np.ndarray, dos: np.ndarray, T: float) -> float:
     """Vibrational heat capacity Cv in eV/K per cell at temperature T [K].
 
     Cv = k_B ∫ g(ω) x²eˣ/(eˣ−1)² dω with x = ħω/k_B T, the sum of Einstein terms
@@ -94,7 +94,7 @@ def heat_capacity(freqs_cm, dos, T) -> float:
     return float(K_B * np.trapezoid(g * _cv_integrand(x), freqs_cm))
 
 
-def heat_capacity_in_kB(freqs_cm, dos, T) -> float:
+def heat_capacity_in_kB(freqs_cm: np.ndarray, dos: np.ndarray, T: float) -> float:
     """Heat capacity in units of k_B, so the Dulong-Petit limit reads 3·N_atoms.
 
     This is ``heat_capacity`` divided by k_B. Use it to read Cv directly against
@@ -103,7 +103,9 @@ def heat_capacity_in_kB(freqs_cm, dos, T) -> float:
     return heat_capacity(freqs_cm, dos, T) / K_B
 
 
-def _bose_terms(freqs_cm, dos, T):
+def _bose_terms(
+    freqs_cm: np.ndarray, dos: np.ndarray, T: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Positive-branch grid, DOS, and x = ħω/k_B T for the finite-T integrals.
 
     Shared by entropy, internal energy, and free energy so all three trapezoid
@@ -115,7 +117,7 @@ def _bose_terms(freqs_cm, dos, T):
     return freqs_cm, g, x
 
 
-def internal_energy_vib(freqs_cm, dos, T) -> float:
+def internal_energy_vib(freqs_cm: np.ndarray, dos: np.ndarray, T: float) -> float:
     """Vibrational internal energy U in eV per cell at temperature T [K].
 
     U = ZPE + k_B T ∫ g(ω) x/(eˣ−1) dω, the zero-point energy plus the thermal
@@ -133,7 +135,7 @@ def internal_energy_vib(freqs_cm, dos, T) -> float:
     return float(zpe + K_B * T * np.trapezoid(g * occ, freqs_cm))
 
 
-def entropy(freqs_cm, dos, T) -> float:
+def entropy(freqs_cm: np.ndarray, dos: np.ndarray, T: float) -> float:
     """Vibrational entropy S in eV/K per cell at temperature T [K].
 
     S = k_B ∫ g(ω) [ x/(eˣ−1) − ln(1−e⁻ˣ) ] dω, the Legendre partner of U and F.
@@ -151,7 +153,7 @@ def entropy(freqs_cm, dos, T) -> float:
     return float(K_B * np.trapezoid(integrand, freqs_cm))
 
 
-def free_energy_vib(freqs_cm, dos, T) -> float:
+def free_energy_vib(freqs_cm: np.ndarray, dos: np.ndarray, T: float) -> float:
     """Vibrational Helmholtz free energy F in eV per cell at temperature T [K].
 
     F = ZPE + k_B T ∫ g(ω) ln(1−e⁻ˣ) dω, which equals U − T·S by construction
@@ -167,7 +169,7 @@ def free_energy_vib(freqs_cm, dos, T) -> float:
     return float(zpe + K_B * T * np.trapezoid(g * log_term, freqs_cm))
 
 
-def debye_temperature(freqs_cm, dos) -> float:
+def debye_temperature(freqs_cm: np.ndarray, dos: np.ndarray) -> float:
     """Debye temperature θ_D in K from the second moment of the phonon DOS.
 
     A Debye DOS g∝ω² on [0, ω_D] has ⟨ω²⟩ = (3/5)ω_D², so matching the actual
@@ -183,7 +185,9 @@ def debye_temperature(freqs_cm, dos) -> float:
     return float(omega_d_cm * CM1_TO_EV / K_B)
 
 
-def electronic_heat_capacity(dos_energy_eV, dos_states, e_fermi, T) -> float:
+def electronic_heat_capacity(
+    dos_energy_eV: np.ndarray, dos_states: np.ndarray, e_fermi: float, T: float
+) -> float:
     """Sommerfeld electronic heat capacity in eV/K per cell at temperature T [K].
 
     Cel = (π²/3) k_B² T · g(E_F), the leading low-temperature term for a metal

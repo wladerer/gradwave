@@ -20,11 +20,15 @@ spglib finds at symprec.
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import numpy as np
 import torch
 
 from gradwave.constants import HBAR2_2M
+from gradwave.core.xc.base import XCFunctional
+from gradwave.core.xc.spin import SpinXC
+from gradwave.scf.results import USPPResult
 from gradwave.symmetry import SpaceGroup, find_spacegroup
 
 _RANK_TOL = 1e-8
@@ -44,7 +48,10 @@ class HessianSymmetry:
     """Irreducible (atom, axis) displacements for a Γ Hessian and the
     reconstruction of the full matrix from their computed columns."""
 
-    def __init__(self, cell, positions, species_of_atom, symprec: float = 1e-6):
+    def __init__(
+        self, cell: np.ndarray, positions: np.ndarray, species_of_atom: list[int],
+        symprec: float = 1e-6,
+    ) -> None:
         cell = np.asarray(cell, dtype=float)
         pos = np.asarray(positions, dtype=float)
         frac = pos @ np.linalg.inv(cell)
@@ -56,7 +63,7 @@ class HessianSymmetry:
             [a_t @ w @ np.linalg.inv(a_t) for w in self.sg.rotations])
         self.displacements = self._select()
 
-    def _spread(self, disp):
+    def _spread(self, disp: list[Any | tuple[int, int]]) -> list[list[np.ndarray | Any]]:
         """Per-atom accumulated (direction, column-source) sets implied by
         the displacement list under the group. Returns dirs[a] = list of
         (3,) unit directions reachable at atom a."""
@@ -68,7 +75,7 @@ class HessianSymmetry:
                 dirs[amap[a]].append(s @ e)
         return dirs
 
-    def _select(self):
+    def _select(self) -> list[tuple[int, int]]:
         disp: list[tuple[int, int]] = []
         for a in range(self.na):
             for alpha in range(3):
@@ -90,7 +97,7 @@ class HessianSymmetry:
                 raise RuntimeError(f"displacement selection failed at atom {a}")
         return disp
 
-    def reconstruct(self, cols) -> np.ndarray:
+    def reconstruct(self, cols: list[np.ndarray]) -> np.ndarray:
         """Full (na, 3, na, 3) Hessian from the computed columns.
 
         cols: sequence matching self.displacements; cols[i] is the (na, 3)
@@ -121,7 +128,7 @@ class HessianSymmetry:
         return h_full
 
 
-def gamma_hessian(res: dict, xc, *, response_kw=None,
+def gamma_hessian(res: USPPResult, xc: XCFunctional | SpinXC, *, response_kw=None,
                   verbose: bool = False) -> np.ndarray:
     """(na, 3, na, 3) analytic Γ Hessian [eV/Å²]: irreducible columns via
     hessian_column, symmetry reconstruction, transpose symmetrization and
@@ -165,7 +172,7 @@ def gamma_hessian(res: dict, xc, *, response_kw=None,
     return (0.5 * (h2 + h2.T)).reshape(na, 3, na, 3)
 
 
-def gamma_frequencies(hess: np.ndarray, masses_amu) -> np.ndarray:
+def gamma_frequencies(hess: np.ndarray, masses_amu: np.ndarray | list[float]) -> np.ndarray:
     """Frequencies [cm⁻¹] (negative = imaginary) from an (na,3,na,3)
     Hessian [eV/Å²] and per-atom masses [amu]."""
     m = np.asarray(masses_amu, dtype=float)

@@ -27,6 +27,7 @@ Units: stress in eV/Å³, so C is eV/Å³ internally and reported in GPa.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -52,13 +53,15 @@ def voigt_strain_tensor(j: int, h: float) -> np.ndarray:
     return eps
 
 
-def stress_to_voigt(sigma) -> np.ndarray:
+def stress_to_voigt(sigma: np.ndarray) -> np.ndarray:
     """(3,3) stress → 6-vector [xx, yy, zz, yz, xz, xy]."""
     s = np.asarray(sigma, dtype=float)
     return np.array([s[i, j] for i, j in _VOIGT])
 
 
-def elastic_tensor(stress_at_strain, h: float = 0.005) -> np.ndarray:
+def elastic_tensor(
+    stress_at_strain: Callable[[np.ndarray], np.ndarray], h: float = 0.005
+) -> np.ndarray:
     """Clamped-ion stiffness C (6×6) [GPa] by central FD of the stress.
 
     ``stress_at_strain(eps)`` takes a symmetric 3×3 strain tensor, applies it to
@@ -89,7 +92,7 @@ class Moduli:
     poisson: float        # Hill Poisson ratio
 
 
-def moduli_from_cij(c) -> Moduli:
+def moduli_from_cij(c: np.ndarray) -> Moduli:
     """Voigt–Reuss–Hill averages from a 6×6 stiffness [GPa].
 
     Voigt (uniform strain) and Reuss (uniform stress, via the compliance
@@ -117,7 +120,7 @@ def moduli_from_cij(c) -> Moduli:
                   young=young, poisson=poisson)
 
 
-def compliance_tensor(c) -> np.ndarray:
+def compliance_tensor(c: np.ndarray) -> np.ndarray:
     """Full 4-index compliance S_ijkl (3,3,3,3) from a 6×6 stiffness [any unit].
 
     Invert C to the Voigt compliance S = C⁻¹, then unfold with the compliance
@@ -138,12 +141,12 @@ def compliance_tensor(c) -> np.ndarray:
     return st
 
 
-def _unit(v) -> np.ndarray:
+def _unit(v: np.ndarray) -> np.ndarray:
     v = np.asarray(v, dtype=float)
     return v / np.linalg.norm(v)
 
 
-def directional_poisson(c, n, m) -> float:
+def directional_poisson(c: np.ndarray, n: np.ndarray, m: np.ndarray) -> float:
     """Poisson ratio for uniaxial stress along ``n``, transverse strain along ``m``.
 
     Pull along unit vector n and read the strain along a perpendicular unit
@@ -154,7 +157,7 @@ def directional_poisson(c, n, m) -> float:
     return _poisson_from_tensor(st, _unit(n), _unit(m))
 
 
-def _poisson_from_tensor(st, n, m) -> float:
+def _poisson_from_tensor(st: np.ndarray, n: np.ndarray, m: np.ndarray) -> float:
     num = np.einsum("ijkl,i,j,k,l->", st, n, n, m, m)
     den = np.einsum("ijkl,i,j,k,l->", st, n, n, n, n)
     return float(-num / den)
@@ -169,7 +172,9 @@ def _fibonacci_sphere(n_dir: int) -> np.ndarray:
     return np.column_stack((r * np.cos(theta), r * np.sin(theta), z))
 
 
-def min_directional_poisson(c, n_dir: int = 2000, n_trans: int = 180):
+def min_directional_poisson(
+    c: np.ndarray, n_dir: int = 2000, n_trans: int = 180
+) -> tuple[float, np.ndarray, np.ndarray]:
     """Minimum directional Poisson ratio over loading/transverse directions.
 
     Scan ``n_dir`` loading directions on the unit sphere and, for each, ``n_trans``
@@ -200,7 +205,7 @@ def min_directional_poisson(c, n_dir: int = 2000, n_trans: int = 180):
     return float(nu[a, p]), ndirs[a].copy(), mdirs[a, p].copy()
 
 
-def is_mechanically_stable(c) -> bool:
+def is_mechanically_stable(c: np.ndarray) -> bool:
     """Born stability: the 6×6 stiffness is positive-definite (all eigenvalues
     > 0). A symmetric, weakly-negative eigenvalue from FD noise is treated as
     unstable — tighten the SCF/strain if a stable crystal trips this."""

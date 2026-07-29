@@ -25,18 +25,24 @@ import torch
 from gradwave.constants import E2, HBAR2_2M
 from gradwave.constants import MINUS_I_POW as _MINUS_I_POW
 from gradwave.core.fftbox import g_to_r_box
+from gradwave.core.hubbard import HubbardManifold
 from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.grids import FFTGrid, GSphere
+from gradwave.pseudo.radial_torch import RadialTables
+from gradwave.scf.loop import System
 
 
-def box_millers(shape, device) -> torch.Tensor:
+def box_millers(shape: tuple[int, int, int], device: torch.device) -> torch.Tensor:
     """(N, 3) float64 integer Miller labels of the dense FFT box."""
     axes = [np.fft.fftfreq(n, d=1.0 / n).astype(np.float64) for n in shape]
     m = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, 3)
     return torch.as_tensor(m, dtype=torch.float64, device=device)
 
 
-def strain_cell(grid, positions: torch.Tensor, eps: torch.Tensor):
+def strain_cell(
+    grid: FFTGrid, positions: torch.Tensor, eps: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float, torch.Tensor, torch.Tensor]:
     """The strained-cell geometry: (f_map, a_e, b_e, omega0, omega, pos_e).
 
     r → (1+ε)r, a_i → (1+ε)a_i, τ → (1+ε)τ, with Ω(ε) = |det a_e| kept
@@ -53,7 +59,12 @@ def strain_cell(grid, positions: torch.Tensor, eps: torch.Tensor):
     return f_map, a_e, b_e, grid.volume, omega, pos_e
 
 
-def strained_dens_sphere(grid, b_e: torch.Tensor, device):
+def strained_dens_sphere(
+    grid: FFTGrid, b_e: torch.Tensor, device: torch.device,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+    torch.Tensor,
+]:
     """Density-sphere G-vectors rebuilt from integer Miller labels.
 
     Returns (mask, m_box, g_sph, g2_sph, is_g0, q_sph, inv_g2): the flat
@@ -79,7 +90,7 @@ def strained_phases(g_sph: torch.Tensor, pos_e: torch.Tensor) -> torch.Tensor:
     return torch.exp(torch.complex(torch.zeros_like(phase_arg), -phase_arg))
 
 
-def strained_kpg(sph, b_e: torch.Tensor):
+def strained_kpg(sph: GSphere, b_e: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Strained (k+G) vectors of one k-sphere from integer Miller + k_frac."""
     kfrac = torch.as_tensor(sph.k_frac, dtype=RDTYPE, device=b_e.device)
     kpg = (sph.miller.to(RDTYPE) + kfrac) @ b_e  # (npw, 3)
@@ -91,7 +102,10 @@ def kinetic_band(c: torch.Tensor, kpg2: torch.Tensor) -> torch.Tensor:
     return torch.einsum("bg,g->b", (c.real**2 + c.imag**2), HBAR2_2M * kpg2)
 
 
-def local_pp_energy(tabs, species_of_atom, phases, rho_sph, q_sph, is_g0):
+def local_pp_energy(
+    tabs: list[RadialTables], species_of_atom: list[int], phases: torch.Tensor,
+    rho_sph: torch.Tensor, q_sph: torch.Tensor, is_g0: torch.Tensor,
+) -> torch.Tensor:
     """Strained local-pseudopotential energy Σ_G ρ*(G) S_sp(G) v_sp(G).
 
     ``rho_sph`` is the density on the sphere in the 1/Ω(ε) normalization
@@ -110,7 +124,10 @@ def local_pp_energy(tabs, species_of_atom, phases, rho_sph, q_sph, is_g0):
     return e_loc
 
 
-def nlcc_core_strained(tabs, species_of_atom, phases, q_sph, omega, grid, scatter) -> torch.Tensor:
+def nlcc_core_strained(
+    tabs: list[RadialTables], species_of_atom: list[int], phases: torch.Tensor, q_sph: torch.Tensor,
+    omega: torch.Tensor, grid: FFTGrid, scatter: torch.Tensor,
+) -> torch.Tensor:
     """Strained NLCC core density on the real grid.
 
     ``scatter`` indexes the flat FFT box for the sphere entries (a boolean
@@ -133,7 +150,8 @@ def nlcc_core_strained(tabs, species_of_atom, phases, q_sph, omega, grid, scatte
 
 
 def strained_projector_cols(
-    tabs, species_of_atom, atom_index, lmax, kpg, kpg2, omega, pos_e
+    tabs: list[RadialTables], species_of_atom: list[int], atom_index: torch.Tensor, lmax: int,
+    kpg: torch.Tensor, kpg2: torch.Tensor, omega: torch.Tensor, pos_e: torch.Tensor,
 ) -> torch.Tensor:
     """Strained KB/USPP projector matrix (nproj_tot, npw) at one k.
 
@@ -175,7 +193,15 @@ def strained_projector_cols(
     return p * ph[:, atom_index].T
 
 
-def _hubbard_strain_setup(system, manifolds):
+def _hubbard_strain_setup(
+    system: System, manifolds: list[HubbardManifold],
+) -> tuple[
+    dict[int, HubbardManifold],
+    list[dict[str, int | float]],
+    dict[int, tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]],
+    int,
+    int,
+]:
     """Shared per-species/per-site setup for the strained Hubbard energy: the
     differentiable radial projector data (r·R renormalized, as in
     core.hubbard.build_hubbard_projectors), the correlated-site table, and
@@ -212,7 +238,11 @@ def _hubbard_strain_setup(system, manifolds):
     return man_by_sp, sites, rad, nproj, l_max
 
 
-def _hubbard_strain_q(sph, b_e, pos_e, omega, system, man_by_sp, sites, rad, l_max):
+def _hubbard_strain_q(
+    sph: GSphere, b_e: torch.Tensor, pos_e: torch.Tensor, omega: torch.Tensor, system: System,
+    man_by_sp: dict[int, HubbardManifold], sites: list[dict[str, int | float]],
+    rad: dict[int, tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]], l_max: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Strained atomic-orbital projector columns q(nproj, npw) at one k —
     spin-independent (the same projector acts on both spinor components on
     the spinor/SOC path, since +U and the SOC nonlocal term are orthogonal).
@@ -246,7 +276,9 @@ def _hubbard_strain_q(sph, b_e, pos_e, omega, system, man_by_sp, sites, rad, l_m
 
 
 def hubbard_energy_strained(
-    system, manifolds, b_e, pos_e, omega, spheres, coeffs_s, occ_s, nspin, kw
+    system: System, manifolds: list[HubbardManifold], b_e: torch.Tensor, pos_e: torch.Tensor,
+    omega: torch.Tensor, spheres: list[GSphere], coeffs_s: list[list[torch.Tensor]],
+    occ_s: torch.Tensor, nspin: int, kw: torch.Tensor,
 ) -> torch.Tensor:
     """Dudarev E_U on the strain graph: Σ_{I,σ} (U−J)/2 Tr[n^{Iσ}(1−n^{Iσ})].
 
@@ -294,7 +326,9 @@ def hubbard_energy_strained(
 
 
 def hubbard_energy_strained_nc(
-    system, manifolds, b_e, pos_e, omega, spheres, coeffs, occ, kw, m_pw
+    system: System, manifolds: list[HubbardManifold], b_e: torch.Tensor, pos_e: torch.Tensor,
+    omega: torch.Tensor, spheres: list[GSphere], coeffs: torch.Tensor, occ: torch.Tensor,
+    kw: torch.Tensor, m_pw: int,
 ) -> torch.Tensor:
     """Dudarev E_U on the strain graph for a fully-relativistic (spinor/SOC)
     result — the spin-orbit generalization of ``hubbard_energy_strained``.
@@ -342,7 +376,10 @@ def hubbard_energy_strained_nc(
     return hubbard_energy(mats, sites)
 
 
-def ewald_strained(pos_e, charges, a_e, b_e, omega, cell0) -> torch.Tensor:
+def ewald_strained(
+    pos_e: torch.Tensor, charges: torch.Tensor, a_e: torch.Tensor, b_e: torch.Tensor,
+    omega: torch.Tensor, cell0: np.ndarray,
+) -> torch.Tensor:
     """ewald_energy with the cell on the autograd graph. η and the integer
     image/G-vector sets come from the unstrained cell (the excluded boundary
     terms are erfc(8)-suppressed, so their ε-derivative is negligible)."""

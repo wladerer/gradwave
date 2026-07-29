@@ -28,11 +28,14 @@ import math
 import numpy as np
 import torch
 
-from gradwave.core.batch import BatchedHamiltonian, projectors_b
+from gradwave.core.batch import BatchedHamiltonian, BatchedK, projectors_b
 from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.scf.loop import SCFResult
 
 
-def _spectral_bounds(h, bk, n_iter: int = 40):
+def _spectral_bounds(
+    h: BatchedHamiltonian, bk: BatchedK, n_iter: int = 40
+) -> tuple[float, float]:
     """(λ_min, λ_max) across all k by power iteration (5% safety margin)."""
     device = bk.mask.device
     gen = torch.Generator(device="cpu").manual_seed(7)
@@ -52,6 +55,7 @@ def _spectral_bounds(h, bk, n_iter: int = 40):
     lmax = float(lam_max.max())
 
     v = rand_vec()
+    lam = torch.zeros(bk.nk, dtype=RDTYPE, device=device)
     for _ in range(n_iter):
         hv = lmax * v - h.apply(v)  # power iteration on (λ_max·I − H)
         lam = torch.einsum("kbg,kbg->k", v.conj(), hv).real
@@ -61,7 +65,10 @@ def _spectral_bounds(h, bk, n_iter: int = 40):
     return lmin - 0.025 * span, lmax + 0.025 * span
 
 
-def _kpm_moments(h, a, b, chi, n_pairs, kw, n_random):
+def _kpm_moments(
+    h: BatchedHamiltonian, a: float, b: float, chi: torch.Tensor, n_pairs: int,
+    kw: torch.Tensor, n_random: int,
+) -> np.ndarray:
     """Jackson-undamped Chebyshev moments μ_m = Σ_k w_k Tr T_m(H̃) for one
     Hamiltonian, estimated by Hutchinson over the shared random block `chi`.
     Returns μ on [0, 2·n_pairs), k-summed and normalized by n_random (the spin
@@ -88,7 +95,9 @@ def _kpm_moments(h, a, b, chi, n_pairs, kw, n_random):
     return (mu / n_random).cpu().numpy()
 
 
-def _eval_dos(mu, a, b, energies, n_pairs):
+def _eval_dos(
+    mu: np.ndarray, a: float, b: float, energies: np.ndarray, n_pairs: int
+) -> np.ndarray:
     """Jackson-damped reconstruction of DOS(E) from moments μ for one channel,
     with the spectrum mapped by (a, b). Evaluated on the shared `energies`
     grid; energies outside this channel's [b−a, b+a] clip to ~0."""
@@ -105,13 +114,13 @@ def _eval_dos(mu, a, b, energies, n_pairs):
 
 @torch.no_grad()
 def kpm_dos(
-    res,
+    res: SCFResult,
     n_moments: int = 2000,
     n_random: int = 8,
-    energies=None,
+    energies: np.ndarray | None = None,
     n_energies: int = 800,
     seed: int = 0,
-):
+) -> tuple[np.ndarray, np.ndarray, dict[str, int | float]]:
     """(energies [eV], DOS [states/eV/cell], info) from the converged potential.
 
     Collinear path (scalar-relativistic pseudos). For nspin=1 DOS is a 1-D
@@ -123,6 +132,7 @@ def kpm_dos(
     nspin = getattr(res, "nspin", 1)
     system = res.system
     bk, grid = system.batch, system.grid
+    assert bk is not None, "kpm_dos needs the batched-k geometry (system.batch)"
     device = res.v_eff.device
     kw = system.kweights.to(device)
 

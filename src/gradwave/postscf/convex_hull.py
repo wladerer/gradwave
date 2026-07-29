@@ -12,18 +12,21 @@ finite-temperature construction generalizes.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 
 
-def formation_energy(energy_per_atom, x, e_a, e_b):
+def formation_energy(energy_per_atom: list[float], x: list[float], e_a: float,
+                     e_b: float) -> np.ndarray:
     """Formation energy per atom relative to the pure endpoints, E - (1-x) E_A -
     x E_B. energy_per_atom and x may be arrays. e_a and e_b are the per-atom
     energies of pure A (x=0) and pure B (x=1)."""
-    x = np.asarray(x, dtype=float)
-    return np.asarray(energy_per_atom, dtype=float) - (1.0 - x) * e_a - x * e_b
+    x_arr = np.asarray(x, dtype=float)
+    return np.asarray(energy_per_atom, dtype=float) - (1.0 - x_arr) * e_a - x_arr * e_b
 
 
-def lower_convex_hull(x, e):
+def lower_convex_hull(x: np.ndarray, e: np.ndarray) -> list[int]:
     """Indices of the points on the lower convex hull of (x, e), sorted by x.
     Monotone chain keeping only left turns, so the result is the lower envelope
     that minimizes energy at every composition."""
@@ -43,7 +46,7 @@ def lower_convex_hull(x, e):
     return hull
 
 
-def hull_distance(x, e):
+def hull_distance(x: np.ndarray, e: np.ndarray) -> np.ndarray:
     """Energy of each point above the lower hull [eV/atom]. Zero on the hull,
     positive above it. The positive value is the energy released by decomposing
     into the two bracketing ground states."""
@@ -56,13 +59,17 @@ def hull_distance(x, e):
     return e - e_on_hull
 
 
-def ground_states(x, e, tol=1e-9):
+def ground_states(x: np.ndarray, e: np.ndarray, tol: float = 1e-9) -> list[int]:
     """Indices of the stable structures, the ones on the hull to within tol."""
     d = hull_distance(x, e)
     return [i for i in range(len(x)) if d[i] <= tol]
 
 
-def leave_one_out_rmse(x, energies, fit_predict):
+def leave_one_out_rmse(
+    x: np.ndarray,
+    energies: np.ndarray,
+    fit_predict: Callable[[np.ndarray, np.ndarray, float], float],
+) -> float:
     """Leave-one-out cross-validation RMSE [eV/atom] for an energy model.
     fit_predict(train_x, train_e, test_x) fits on the training subset and
     returns the predicted energy at the held-out composition, so any model (a

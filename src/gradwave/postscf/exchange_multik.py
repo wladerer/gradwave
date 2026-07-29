@@ -38,9 +38,12 @@ import torch
 
 from gradwave.core.fftbox import g_to_r, g_to_r_box, r_to_g
 from gradwave.postscf.coulomb_kernel import coulomb_kernel
+from gradwave.scf.loop import SCFResult, System
 
 
-def occupied_periodic_orbitals(res, system, occ_tol: float = 1e-6):
+def occupied_periodic_orbitals(
+    res: SCFResult, system: System, occ_tol: float = 1e-6
+) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
     """Periodic parts u_{ik}(r) = Σ_G c_{ik}(G) e^{iG·r} of the occupied orbitals.
 
     Returns (u_per_k, kcart_per_k, kweights): u_per_k[ik] is (n_occ_k, N_r) on
@@ -57,8 +60,14 @@ def occupied_periodic_orbitals(res, system, occ_tol: float = 1e-6):
 
 
 def multik_exchange_energy(
-    u_per_k, kcart_per_k, kweights, g_cart, volume, *,
-    mode: str = "full", omega=None,
+    u_per_k: list[torch.Tensor],
+    kcart_per_k: list[torch.Tensor],
+    kweights: torch.Tensor,
+    g_cart: torch.Tensor,
+    volume: float,
+    *,
+    mode: str = "full",
+    omega: torch.Tensor | float | None = None,
 ) -> torch.Tensor:
     """E_x over a full-BZ k-mesh with the range-separated kernel ``mode``.
 
@@ -84,7 +93,13 @@ def multik_exchange_energy(
     return -0.5 * total / volume
 
 
-def coulomb_potential_q(sigma_r, q, g_cart, mode: str = "full", omega=None):
+def coulomb_potential_q(
+    sigma_r: torch.Tensor,
+    q: torch.Tensor,
+    g_cart: torch.Tensor,
+    mode: str = "full",
+    omega: torch.Tensor | float | None = None,
+) -> torch.Tensor:
     """Coulomb potential of a co-density of crystal momentum q, periodic part only.
 
     ``sigma_r`` (..., N_r) is the *periodic* part of a co-density whose crystal
@@ -107,9 +122,15 @@ def coulomb_potential_q(sigma_r, q, g_cart, mode: str = "full", omega=None):
 
 
 def multik_exchange_operator(
-    psi_per_k, kcart_per_k, kweights, g_cart, volume, *,
-    mode: str = "full", omega=None,
-):
+    psi_per_k: list[torch.Tensor],
+    kcart_per_k: list[torch.Tensor],
+    kweights: torch.Tensor,
+    g_cart: torch.Tensor,
+    volume: float,
+    *,
+    mode: str = "full",
+    omega: torch.Tensor | float | None = None,
+) -> list[torch.Tensor]:
     """Direct multi-k Fock operator applied to each k's occupied set.
 
     ``psi_per_k[k]`` is (n_occ_k, N_r), the *physical* periodic orbital parts
@@ -143,7 +164,9 @@ def multik_exchange_operator(
     return w_per_k
 
 
-def physical_periodic_orbitals(res, system, occ_tol: float = 1e-6):
+def physical_periodic_orbitals(
+    res: SCFResult, system: System, occ_tol: float = 1e-6
+) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
     """Like ``occupied_periodic_orbitals`` but returns the *physical* ψ̂ = u/√Ω.
 
     Convenience for the operator build, which needs the normalized orbitals
@@ -164,7 +187,7 @@ class HybridExchangeParams(torch.nn.Module):
     dE/dθ at SCF convergence is the same argument the learnable-XC slot uses.
     """
 
-    def __init__(self, alpha: float = 0.25, omega: float = 0.2, mode: str = "short_range"):
+    def __init__(self, alpha: float = 0.25, omega: float = 0.2, mode: str = "short_range") -> None:
         super().__init__()
         if mode not in ("full", "short_range", "long_range"):
             raise ValueError(f"unknown mode {mode!r}")
@@ -181,8 +204,14 @@ class HybridExchangeParams(torch.nn.Module):
         return torch.nn.functional.softplus(self.raw_omega)
 
 
-def hybrid_exchange_energy(u_per_k, kcart_per_k, kweights, g_cart, volume,
-                           params: HybridExchangeParams) -> torch.Tensor:
+def hybrid_exchange_energy(
+    u_per_k: list[torch.Tensor],
+    kcart_per_k: list[torch.Tensor],
+    kweights: torch.Tensor,
+    g_cart: torch.Tensor,
+    volume: float,
+    params: HybridExchangeParams,
+) -> torch.Tensor:
     """α · E_x[K_mode(ω)] — the hybrid Fock-exchange contribution, differentiable
     in the ``params`` (α, ω). The full hybrid XC energy adds this to the scaled
     semilocal exchange and the correlation; that assembly is the SCF-wiring step
@@ -194,10 +223,10 @@ def hybrid_exchange_energy(u_per_k, kcart_per_k, kweights, g_cart, volume,
 
 
 def _inv_sigmoid(y: float) -> torch.Tensor:
-    y = torch.tensor(float(y), dtype=torch.float64)
-    return torch.log(y) - torch.log1p(-y)
+    yt = torch.tensor(float(y), dtype=torch.float64)
+    return torch.log(yt) - torch.log1p(-yt)
 
 
 def _inv_softplus(y: float) -> torch.Tensor:
-    y = torch.tensor(float(y), dtype=torch.float64)
-    return y + torch.log(-torch.expm1(-y))
+    yt = torch.tensor(float(y), dtype=torch.float64)
+    return yt + torch.log(-torch.expm1(-yt))

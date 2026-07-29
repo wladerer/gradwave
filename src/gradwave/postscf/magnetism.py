@@ -39,12 +39,12 @@ class MagneticReport:
     temperature in K. `exchange_J`/`dmi` are keyed by neighbor atom index and are
     None when the exchange step was skipped."""
 
-    moment_magnitudes: list       # |M_I| per atom
-    moment_vectors: list          # M_I = (Mx, My, Mz) per atom
+    moment_magnitudes: list[float]       # |M_I| per atom
+    moment_vectors: list[list[float]]    # M_I = (Mx, My, Mz) per atom
     total_moment: float           # |Σ_I M_I|
     ordering: str
-    exchange_J: dict | None       # {i: J_0i}  isotropic Heisenberg [eV], from ref atom
-    dmi: dict | None              # {i: D_0i·n̂}  DMI along the reference axis [eV]
+    exchange_J: dict[int, float] | None  # {i: J_0i}  isotropic Heisenberg [eV], from ref atom
+    dmi: dict[int, float] | None         # {i: D_0i·n̂}  DMI along the reference axis [eV]
     curie_temperature_mfa: float | None
     ref_atom: int
 
@@ -57,7 +57,7 @@ class MagneticReport:
             js = ", ".join(f"J_{self.ref_atom}{i} = {J*1000:+.1f}"
                            for i, J in self.exchange_J.items())
             lines.append(f"Exchange [meV]    : {js}")
-            if any(abs(d) > 1e-6 for d in (self.dmi or {}).values()):
+            if self.dmi is not None and any(abs(d) > 1e-6 for d in self.dmi.values()):
                 ds = ", ".join(f"D_{self.ref_atom}{i}·n̂ = {d*1000:+.3f}"
                                for i, d in self.dmi.items())
                 lines.append(f"DMI [meV]         : {ds}")
@@ -71,7 +71,12 @@ def _atomic_moment_vectors(system, m, weights):
     return torch.einsum("axyz,ixyz->ai", weights, m) * cf     # (na, 3) [μB]
 
 
-def _classify(moment_vectors, mags, exchange_J, mag_tol=MOMENT_TOL_MUB):
+def _classify(
+    moment_vectors: torch.Tensor,
+    mags: torch.Tensor,
+    exchange_J: dict[int, float] | None,
+    mag_tol: float = MOMENT_TOL_MUB,
+) -> str:
     if float(max(mags)) < mag_tol:
         return "nonmagnetic"
     if exchange_J is not None and len(exchange_J):

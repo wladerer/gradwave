@@ -36,7 +36,13 @@ from gradwave.postscf.coulomb_kernel import coulomb_kernel
 from gradwave.postscf.isdf import build_isdf, select_interpolation_points
 
 
-def build_isdf_k(u_per_k, n_mu, *, generator=None, sketch=None):
+def build_isdf_k(
+    u_per_k: list[torch.Tensor],
+    n_mu: int,
+    *,
+    generator: torch.Generator | None = None,
+    sketch: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Shared interpolation points + vectors for the whole occupied k-set.
 
     u_per_k: list of (n_occ_k, N_r) periodic orbitals per k. Stacks them into one
@@ -49,8 +55,16 @@ def build_isdf_k(u_per_k, n_mu, *, generator=None, sketch=None):
 
 
 def isdf_k_exchange_energy(
-    u_per_k, kcart_per_k, kweights, points, zeta, g_cart, volume, *,
-    mode: str = "full", omega=None,
+    u_per_k: list[torch.Tensor],
+    kcart_per_k: list[torch.Tensor],
+    kweights: torch.Tensor,
+    points: torch.Tensor,
+    zeta: torch.Tensor,
+    g_cart: torch.Tensor,
+    volume: float,
+    *,
+    mode: str = "full",
+    omega: torch.Tensor | float | None = None,
 ) -> torch.Tensor:
     """Compressed multi-k exchange through the ISDF-K factorization.
 

@@ -36,11 +36,14 @@ import torch
 
 from gradwave.core._anderson import AndersonMixer
 from gradwave.core.hubbard import (
+    HubbardData,
     HubbardManifold,
     build_hubbard_projectors,
     hubbard_projectors,
     occupation_matrices,
 )
+from gradwave.core.xc.base import XCFunctional
+from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import CDTYPE, RDTYPE
 
 # The batched Sternheimer CG and the coefficient padding moved to
@@ -59,7 +62,7 @@ from gradwave.postscf._response import (
 from gradwave.postscf._response import (
     pad_coeffs as _pad,
 )
-from gradwave.scf.loop import scf
+from gradwave.scf.loop import SCFResult, System, scf
 
 
 def energy_derivative_u(res, manifolds: list[HubbardManifold]) -> float:
@@ -157,9 +160,9 @@ def _fd_response_column(system, xc, base, hub, hub_q, j, alpha, man,
     return chi_col, chi0_col
 
 
-def linear_response_u(system, xc, l: int, species: int, *, site: int = 0,
-                      alpha: float = 0.1, smearing="gaussian", width=0.05,
-                      scf_kwargs=None) -> dict:
+def linear_response_u(system: System, xc: XCFunctional | SpinXC, l: int, species: int, *,
+                      site: int = 0, alpha: float = 0.1, smearing: str="gaussian",
+                      width: float=0.05, scf_kwargs=None) -> dict:
     """Compute the linear-response Hubbard U [eV] for a manifold.
 
     Measures the on-site occupation response to a rigid projector probe and
@@ -194,7 +197,7 @@ def linear_response_u(system, xc, l: int, species: int, *, site: int = 0,
     return _assemble_u(chi_col, chi0_col, site, hub.sites, system.species_of_atom)
 
 
-def _all_sites_equivalent(sites: list, species_of_atom) -> bool:
+def _all_sites_equivalent(sites: list, species_of_atom: list[int]) -> bool:
     """True if every Hubbard site shares the first site's species and l — the
     symmetry-equivalent case where the symmetric single-column shortcut holds."""
     if len(sites) <= 1:
@@ -203,7 +206,7 @@ def _all_sites_equivalent(sites: list, species_of_atom) -> bool:
     return all(species_of_atom[s["atom"]] == sp0 and s["l"] == l0 for s in sites)
 
 
-def _use_full_matrix(sites: list, species_of_atom) -> bool:
+def _use_full_matrix(sites: list, species_of_atom: list[int]) -> bool:
     """Whether the general per-site response matrix is needed. The cheap
     single-column shortcut only covers a lone site (scalar) or exactly two
     symmetry-equivalent sites ([[a,b],[b,a]]); anything else — an inequivalent
@@ -217,7 +220,7 @@ def _use_full_matrix(sites: list, species_of_atom) -> bool:
 
 
 def _assemble_u(chi_col: torch.Tensor, chi0_col: torch.Tensor, site: int,
-                sites: list, species_of_atom) -> dict:
+                sites: list, species_of_atom: list[int]) -> dict:
     """U = (χ0^{-1} − χ^{-1})_II from one response column.
 
     The cheap single-perturbed-site path: a lone site gives the scalar estimate;
@@ -261,7 +264,9 @@ def _assemble_u_matrix(chi_mat: torch.Tensor, chi0_mat: torch.Tensor,
             "chi_mat": chi_mat.tolist(), "chi0_mat": chi0_mat.tolist()}
 
 
-def _k_hxc_spin(res, xc, dru, drd):
+def _k_hxc_spin(
+    res: SCFResult, xc: SpinXC, dru: torch.Tensor, drd: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
     """(Δv↑, Δv↓) = K_Hxc^{σσ'} Δρ^{σ'}: Hartree kernel on Δρ_tot (G=0 excluded)
     plus f_xc^{σσ'} as an autograd HVP of E_xc at the SCF density (NLCC core
     split half/half per channel, exactly as the SCF potential was built).
@@ -274,7 +279,9 @@ def _k_hxc_spin(res, xc, dru, drd):
     return kh + fu, kh + fd
 
 
-def _k_hxc_channels(res, xc, drho):
+def _k_hxc_channels(
+    res: SCFResult, xc: XCFunctional | SpinXC, drho: list[torch.Tensor]
+) -> list[torch.Tensor]:
     """Per-spin-channel Hxc potential response [Δv^σ] from the per-channel
     density response [Δρ^σ] (one entry per computed spin channel).
 
@@ -295,8 +302,20 @@ def _k_hxc_channels(res, xc, drho):
 
 
 @torch.no_grad()
-def _response_columns(res, xc, hub, hub_q, site, *, beta=0.2, outer_tol=1e-6,
-                      max_outer=200, cg_tol=1e-8, history=8, verbose=False):
+def _response_columns(
+    res: SCFResult,
+    xc: XCFunctional | SpinXC,
+    hub: HubbardData,
+    hub_q: torch.Tensor,
+    site: int,
+    *,
+    beta: float = 0.2,
+    outer_tol: float = 1e-6,
+    max_outer: int = 200,
+    cg_tol: float = 1e-8,
+    history: int = 8,
+    verbose: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
     """(χ0_col, χ_col, n_outer): analytic dN_I/dα_site by Sternheimer response.
 
     Bare column = first pass (frozen Hxc potential); interacting column = the
@@ -399,10 +418,23 @@ def _response_columns(res, xc, hub, hub_q, site, *, beta=0.2, outer_tol=1e-6,
     raise RuntimeError(f"response fixed point not converged in {max_outer} iterations")
 
 
-def linear_response_u_autodiff(system, xc, l: int, species: int, *, site: int = 0,
-                               smearing="gaussian", width=0.05, scf_kwargs=None,
-                               beta=0.2, outer_tol=1e-6, max_outer=200,
-                               cg_tol=1e-8, history=8, verbose=False) -> dict:
+def linear_response_u_autodiff(
+    system: System,
+    xc: XCFunctional | SpinXC,
+    l: int,
+    species: int,
+    *,
+    site: int = 0,
+    smearing: str = "gaussian",
+    width: float = 0.05,
+    scf_kwargs=None,
+    beta: float = 0.2,
+    outer_tol: float = 1e-6,
+    max_outer: int = 200,
+    cg_tol: float = 1e-8,
+    history: int = 8,
+    verbose: bool = False,
+) -> dict:
     """Linear-response Hubbard U [eV] with analytic (Sternheimer) response —
     no finite differences, no probe SCF re-runs; ONE ground-state SCF total.
 

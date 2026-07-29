@@ -51,8 +51,13 @@ class QHAResult:
         return out
 
 
-def qha(volumes, energies, dos_per_volume, temperatures,
-        pressure: float = 0.0) -> QHAResult:
+def qha(
+    volumes: np.ndarray,
+    energies: np.ndarray,
+    dos_per_volume: list[tuple[np.ndarray, np.ndarray]],
+    temperatures: np.ndarray,
+    pressure: float = 0.0,
+) -> QHAResult:
     """Quasi-harmonic Gibbs free energy over a temperature grid.
 
     volumes (nv,) Å³, energies (nv,) eV static, dos_per_volume a list of

@@ -534,9 +534,9 @@ class GradWave(Calculator):
         # (cold orbital seed), the pre-reuse behavior.
         reuse = self.parameters["reuse_wavefunctions"]
         is_uspp = prev.formalism == "uspp"
-        # USPPResult.system is declared `object` (scf/results.py keeps that
-        # module import-light); is_uspp above already reflects exactly this
-        # runtime fact, so the narrowing here is not a new assumption.
+        # prev: SCFResult | USPPResult already narrows prev.system to
+        # System | USPPSystem statically; the assert below is a runtime
+        # cross-check, not new information (is_uspp reflects the same fact).
         prev_sys = prev.system
         assert isinstance(prev_sys, (System, USPPSystem))
         if tuple(_fft_grid(prev_sys).shape) != tuple(_fft_grid(system).shape):
@@ -776,15 +776,11 @@ class GradWave(Calculator):
             self.results["magmom"] = float(cast(float, res.mag_total))
         from gradwave.postscf.paw_forces import forces_uspp
 
-        # forces_uspp/stress_uspp declare res: dict (postscf/paw_forces.py,
-        # paw_stress.py keep those modules import-light) but actually consume
-        # USPPResult via the _DictBridge duck-typing (scf/results.py) — same
-        # established pattern as the hf_forces cast above, not a workaround.
-        self.results["forces"] = forces_uspp(cast("dict[str, Any]", res), xc).cpu().numpy()
+        self.results["forces"] = forces_uspp(res, xc).cpu().numpy()
         if self.atoms.pbc.all():
             from gradwave.postscf.paw_stress import stress_uspp
 
-            sig = stress_uspp(cast("dict[str, Any]", res), xc).cpu().numpy()
+            sig = stress_uspp(res, xc).cpu().numpy()
             self.results["stress"] = np.array([
                 sig[0, 0], sig[1, 1], sig[2, 2], sig[1, 2], sig[0, 2], sig[0, 1],
             ])

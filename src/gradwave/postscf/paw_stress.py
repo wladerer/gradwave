@@ -23,14 +23,20 @@ import torch
 from gradwave.constants import E2, HBAR2_2M
 from gradwave.constants import MINUS_I_POW as _MINUS_I_POW
 from gradwave.core.fftbox import g_to_r_box, r_to_g
+from gradwave.core.xc.base import XCFunctional
+from gradwave.core.xc.spin import SpinXC
 from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.postscf.paw_forces import _aug_at_fixed, _normalize_spin
 from gradwave.postscf.stress import _box_millers, _ewald_strained
 from gradwave.pseudo.radial_torch import radial_tables, sbt_t, simpson_weights
+from gradwave.scf.results import USPPResult
+from gradwave.scf.uspp_setup import USPPSystem
 
 
-def stress_uspp(res: dict, xc, symmetrize: bool = True) -> torch.Tensor:
+def stress_uspp(
+    res: USPPResult, xc: XCFunctional | SpinXC, symmetrize: bool = True
+) -> torch.Tensor:
     """σ (3,3) [eV/Å³] for a converged scf_uspp result (nspin 1 or 2).
 
     DFT+U (Dudarev): if the SCF was run with a Hubbard manifold (``res`` carries
@@ -53,7 +59,10 @@ def stress_uspp(res: dict, xc, symmetrize: bool = True) -> torch.Tensor:
     return sigma
 
 
-def _strained_aug(system, rho_ij, gaunt, y_aug, q_sph, phases, omega):
+def _strained_aug(
+    system: USPPSystem, rho_ij: list[torch.Tensor], gaunt: torch.Tensor, y_aug: torch.Tensor,
+    q_sph: torch.Tensor, phases: torch.Tensor, omega: torch.Tensor,
+) -> torch.Tensor:
     """ρ_aug(G(ε)) on the sphere from one spin channel's strained becsum."""
     cdt = CDTYPE
     dev = q_sph.device
@@ -87,7 +96,9 @@ def _strained_aug(system, rho_ij, gaunt, y_aug, q_sph, phases, omega):
     return aug_sph / omega.to(cdt)
 
 
-def _hub_radial(system, hub_sites, dev):
+def _hub_radial(
+    system: USPPSystem, hub_sites: list[dict[str, int | float]], dev: torch.device
+) -> dict[int, tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Per-species differentiable radial data for the +U orbitals.
 
     Mirrors scf.uspp_hubbard.phi_free_per_k: the RAW PP_PSWFC orbital r·R (a PAW
@@ -115,8 +126,12 @@ def _hub_radial(system, hub_sites, dev):
     return rad
 
 
-def _hub_sproj_strained(system, hub_sites, hub_rad, hub_lmax, kpg, q_k, ph,
-                        p, c, b_ovl, pref, q_full):
+def _hub_sproj_strained(
+    system: USPPSystem, hub_sites: list[dict[str, int | float]],
+    hub_rad: dict[int, tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]], hub_lmax: int,
+    kpg: torch.Tensor, q_k: torch.Tensor, ph: torch.Tensor, p: torch.Tensor, c: torch.Tensor,
+    b_ovl: torch.Tensor, pref: torch.Tensor, q_full: torch.Tensor,
+) -> torch.Tensor:
     """⟨Sφ_m|ψ_b⟩ (nb, nprojU) at one strained k for the +U occupations.
 
     φ_m(k+G(ε)) is built like the KB betas in the base PAW stress — radial
@@ -139,7 +154,9 @@ def _hub_sproj_strained(system, hub_sites, hub_rad, hub_lmax, kpg, q_k, ph,
     return povl + torch.einsum("im,ij,bj->bm", bphi, q_full, b_ovl)
 
 
-def _energy_strained_uspp(res: dict, xc, eps: torch.Tensor) -> torch.Tensor:
+def _energy_strained_uspp(
+    res: USPPResult, xc: XCFunctional | SpinXC, eps: torch.Tensor
+) -> torch.Tensor:
     system = res["system"]
     grid = system.grid
     shape = grid.shape

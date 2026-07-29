@@ -27,6 +27,7 @@ Caveats (reported, not hidden):
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -37,16 +38,17 @@ from gradwave.core.hamiltonian import HamiltonianK, projectors
 from gradwave.dtypes import CDTYPE
 from gradwave.grids import build_gsphere
 from gradwave.postscf._kb import projector_data_at_k, species_projector_tables
+from gradwave.scf.loop import SCFResult
 from gradwave.solvers.davidson import davidson
-from gradwave.symmetry import find_spacegroup
+from gradwave.symmetry import SpaceGroup, find_spacegroup
 
 
 @dataclass
 class IrrepCluster:
-    energies: list
+    energies: list[float]
     dim: int
     label: str
-    characters: dict  # class name -> character (real part shown)
+    characters: dict[str, float]  # class name -> character (real part shown)
     warning: str = ""
 
 
@@ -54,9 +56,9 @@ class IrrepCluster:
 class KPointIrreps:
     k_frac: np.ndarray
     n_ops: int
-    clusters: list = field(default_factory=list)
+    clusters: list[IrrepCluster] = field(default_factory=list)
 
-    def __str__(self):
+    def __str__(self) -> str:
         lines = [f"k = {np.round(self.k_frac, 6)}  (little group: {self.n_ops} ops)"]
         for c in self.clusters:
             e = ", ".join(f"{x:9.4f}" for x in c.energies)
@@ -70,7 +72,7 @@ def _cartesian_rotation(w_mat: np.ndarray, cell: np.ndarray) -> np.ndarray:
     return a_t @ w_mat @ np.linalg.inv(a_t)
 
 
-def _classify_op(s: np.ndarray):
+def _classify_op(s: np.ndarray) -> tuple[str, int, None] | tuple[str, int, np.ndarray]:
     """(kind, order, axis): kind ∈ E, i, C (proper), sigma, S (other improper)."""
     det = float(np.linalg.det(s))
     r = s * np.sign(det)
@@ -88,7 +90,7 @@ def _classify_op(s: np.ndarray):
     return "S", order, axis
 
 
-def little_group(k_frac: np.ndarray, sg, cell: np.ndarray) -> list[dict]:
+def little_group(k_frac: np.ndarray, sg: SpaceGroup, cell: np.ndarray) -> list[dict]:
     """Operations with W⁻ᵀk ≡ k (mod 1), with Cartesian classification."""
     k_frac = np.asarray(k_frac, dtype=float)
     ops = []
@@ -105,7 +107,12 @@ def little_group(k_frac: np.ndarray, sg, cell: np.ndarray) -> list[dict]:
     return ops
 
 
-def _rep_matrix(c: np.ndarray, miller: np.ndarray, k_frac: np.ndarray, op) -> np.ndarray:
+def _rep_matrix(
+    c: np.ndarray,
+    miller: np.ndarray,
+    k_frac: np.ndarray,
+    op: dict[str, np.ndarray | str | int | None],
+) -> np.ndarray:
     """D_mn = ⟨ψ_m|O_g|ψ_n⟩ for a band block c (nb, npw)."""
     index = {tuple(m): i for i, m in enumerate(miller)}
     mprime = miller @ op["Winv_t"].T + op["g0"]
@@ -116,7 +123,9 @@ def _rep_matrix(c: np.ndarray, miller: np.ndarray, k_frac: np.ndarray, op) -> np
     return np.conj(c) @ c_rot.T
 
 
-def _principal(ops):
+def _principal(
+    ops: list[dict[str, np.ndarray | str | int | None]],
+) -> tuple[int, np.ndarray, bool]:
     """(n, axis) of the principal rotation; n=1 if no proper rotations."""
     best = (1, None)
     axes = {}
@@ -133,7 +142,11 @@ def _principal(ops):
     return best[0], best[1], cubic
 
 
-def _chi(clusters_chi, ops, select):
+def _chi(
+    clusters_chi: list[complex | np.complex128],
+    ops: list[dict[str, np.ndarray | str | int | None]],
+    select: Callable,
+) -> float:
     """Real class character used as a Mulliken discriminant.
 
     Not the plain class mean: at a zone-boundary k the members of one class can
@@ -216,7 +229,7 @@ def _mulliken(chis: list, ops: list, dim: int) -> str:
     return base
 
 
-def _class_name(op) -> str:
+def _class_name(op: dict[str, np.ndarray | str | int | None]) -> str:
     if op["kind"] in ("E", "i"):
         return op["kind"]
     if op["kind"] == "sigma":
@@ -224,8 +237,13 @@ def _class_name(op) -> str:
     return f"{op['kind']}{op['order']}"
 
 
-def band_irreps(res, k_frac, nbands: int | None = None, cluster_tol: float = 1e-3,
-                diago_tol: float = 1e-10) -> KPointIrreps:
+def band_irreps(
+    res: SCFResult,
+    k_frac: list[int | float],
+    nbands: int | None = None,
+    cluster_tol: float = 1e-3,
+    diago_tol: float = 1e-10,
+) -> KPointIrreps:
     """Solve at k on the converged potential and label bands by irrep."""
     system = res.system
     grid = system.grid

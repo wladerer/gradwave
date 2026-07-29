@@ -15,16 +15,20 @@ import torch
 
 from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.fftbox import g_to_r_box, r_to_g
+from gradwave.core.xc.base import XCFunctional
+from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import CDTYPE
+from gradwave.scf.results import USPPResult
+from gradwave.scf.uspp_setup import USPPSystem
 
 
-def screen_phase(system) -> torch.Tensor:
+def screen_phase(system: USPPSystem) -> torch.Tensor:
     """e^{+i G·τ_a} on the density sphere, (nGm, na)."""
     phase_arg = system.g_sphere @ system.positions.T
     return torch.exp(torch.complex(torch.zeros_like(phase_arg), phase_arg))
 
 
-def aug_dmat(system, w_r: torch.Tensor, phase_pos: torch.Tensor) -> torch.Tensor:
+def aug_dmat(system: USPPSystem, w_r: torch.Tensor, phase_pos: torch.Tensor) -> torch.Tensor:
     """Block-diagonal ∫ w(r) Q_ij(r−τ_a) d³r: how a real grid field screens D.
 
     Returns the (nproj, nproj) real, Hermitized augmentation contribution only —
@@ -40,7 +44,9 @@ def aug_dmat(system, w_r: torch.Tensor, phase_pos: torch.Tensor) -> torch.Tensor
     return aug_dmat_batched(system, w_g[None], phase_pos)[0]
 
 
-def aug_density_from_becsum(system, becsum, phases) -> torch.Tensor:
+def aug_density_from_becsum(
+    system: USPPSystem, becsum: list[torch.Tensor], phases: torch.Tensor
+) -> torch.Tensor:
     """ρ_aug(r) on the real grid from a per-atom becsum list and e^{+iG·τ} phases.
 
     Σ_a e^{-iG·τ_a} Σ_ij becsum_a[ij] Q_ij(G), scattered onto the dense sphere,
@@ -57,7 +63,7 @@ def aug_density_from_becsum(system, becsum, phases) -> torch.Tensor:
     return g_to_r_box(aug_box.reshape(grid.shape), real=True)
 
 
-def frozen_veff(res: dict, xc) -> list[torch.Tensor]:
+def frozen_veff(res: USPPResult, xc: XCFunctional | SpinXC) -> list[torch.Tensor]:
     """Per-spin v_eff = v_H + v_loc + v_xc [eV] of a converged state.
 
     Length-nspin list; the NLCC core density is folded into v_xc.
@@ -81,7 +87,9 @@ def frozen_veff(res: dict, xc) -> list[torch.Tensor]:
     return effective_potentials(system, xc, rho_s, vloc_r)
 
 
-def screened_dscr(res: dict, xc, veff_s: list[torch.Tensor]) -> list[torch.Tensor]:
+def screened_dscr(
+    res: USPPResult, xc: XCFunctional | SpinXC, veff_s: list[torch.Tensor]
+) -> list[torch.Tensor]:
     """dij_full + ∫ v_eff^σ Q + PAW one-center ddd, per spin. len == len(veff_s)."""
     system = res["system"]
     dev = system.positions.device

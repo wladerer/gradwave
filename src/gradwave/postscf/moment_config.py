@@ -41,19 +41,22 @@ construction. All of it is validated against a finite difference of W.
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 
 from gradwave.core.xc.noncollinear import NoncollinearXC
 from gradwave.scf.guess import sad_density
+from gradwave.scf.loop import System
 from gradwave.scf.moment_penalty import (
     direction_gradient,
     field_coeff,
     penalty_energy,
 )
-from gradwave.scf.noncollinear import scf_noncollinear
+from gradwave.scf.noncollinear import NCResult, scf_noncollinear
 
 
-def atomic_weights(system, floor: float = 1e-6) -> torch.Tensor:
+def atomic_weights(system: System, floor: float = 1e-6) -> torch.Tensor:
     """Hirshfeld partition weights w_I(r), shape (na, *grid). Σ_I w_I ≈ 1 where
     any atomic density exists, → 0 in vacuum. Built from the neutral-atom (SAD)
     densities, so w_I localizes on atom I.
@@ -77,19 +80,22 @@ def atomic_weights(system, floor: float = 1e-6) -> torch.Tensor:
     return rho_at / tot.clamp_min(floor)
 
 
-def _atomic_moments(m, weights, cell_factor):
+def _atomic_moments(
+    m: torch.Tensor, weights: torch.Tensor, cell_factor: float
+) -> torch.Tensor:
     """M_I = ∫ w_I(r) m⃗(r) dr, shape (na, 3) [μB]. m is (3,*grid); weights
     (na,*grid); cell_factor = volume / n_points."""
     return torch.einsum("axyz,ixyz->ai", weights, m) * cell_factor
 
 
-def _unit(v, eps: float = 1e-30):
+def _unit(v: torch.Tensor, eps: float = 1e-30) -> torch.Tensor:
     return v / torch.linalg.norm(v, dim=-1, keepdim=True).clamp_min(eps)
 
 
-def reference_moment_magnitudes(system, xc: NoncollinearXC, directions, *,
-                                weights=None, mag_init_scale: float = 1.5,
-                                **scf_kwargs):
+def reference_moment_magnitudes(system: System, xc: NoncollinearXC, directions, *,
+                                weights: torch.Tensor | None = None,
+                                mag_init_scale: float = 1.5,
+                                **scf_kwargs) -> torch.Tensor:
     """|M_I| [μB] of each atom from one *unconstrained* non-collinear SCF seeded
     along `directions`. Used as the target magnitude for the "vector" penalty so
     the constraint holds each moment at its natural self-consistent size.
@@ -110,9 +116,11 @@ def reference_moment_magnitudes(system, xc: NoncollinearXC, directions, *,
     return torch.linalg.norm(M, dim=-1)                  # (na,)
 
 
-def constrained_moment_scf(system, xc: NoncollinearXC, directions, *, lam: float,
-                           weights=None, mode: str = "perp", target_mag=None,
-                           mag_init_scale: float = 0.6, **scf_kwargs):
+def constrained_moment_scf(system: System, xc: NoncollinearXC, directions, *, lam: float,
+                           weights: torch.Tensor | None = None, mode: str = "perp",
+                           target_mag: torch.Tensor | None = None,
+                           mag_init_scale: float = 0.6,
+                           **scf_kwargs) -> tuple[NCResult, dict[str, Any]]:
     """Constrained non-collinear SCF pinning each atomic moment M_I toward the
     unit direction directions[I] with penalty strength lam. Returns
 
@@ -166,10 +174,13 @@ def constrained_moment_scf(system, xc: NoncollinearXC, directions, *, lam: float
     return res, info
 
 
-def relax_moment_directions(system, xc: NoncollinearXC, directions0, *,
+def relax_moment_directions(system: System, xc: NoncollinearXC, directions0, *,
                             lam: float, step: float = 0.5, tol: float = 1e-2,
-                            max_sweeps: int = 40, weights=None, mode: str = "perp",
-                            target_mag=None, verbose: bool = True, **scf_kwargs):
+                            max_sweeps: int = 40, weights: torch.Tensor | None = None,
+                            mode: str = "perp",
+                            target_mag: torch.Tensor | None = None,
+                            verbose: bool = True,
+                            **scf_kwargs) -> tuple[torch.Tensor, list[dict[str, Any]]]:
     """Gradient-descend the moment directions to the ground-state configuration.
 
     Each sweep runs a constrained SCF at the current targets, reads the descent

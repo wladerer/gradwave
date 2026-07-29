@@ -31,12 +31,25 @@ from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.energies.nl_pp import nonlocal_energy
 from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.hamiltonian import becp, projectors
+from gradwave.core.xc.base import XCFunctional
+from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import CDTYPE
 from gradwave.postscf._response import spin_sigma_triple
 from gradwave.postscf.uspp_frozen import aug_density_from_becsum
+from gradwave.scf.results import USPPResult
+from gradwave.scf.uspp_setup import USPPSystem
 
 
-def _normalize_spin(res: dict):
+def _normalize_spin(
+    res: USPPResult,
+) -> tuple[
+    int,
+    list[list[torch.Tensor]],
+    torch.Tensor,
+    torch.Tensor,
+    list[list[torch.Tensor]],
+    list[torch.Tensor],
+]:
     """Uniform per-spin lists regardless of nspin."""
     nspin = res.get("nspin", 1)
     if nspin == 1:
@@ -46,12 +59,14 @@ def _normalize_spin(res: dict):
             res["rho_ij_atoms"], res["rho_spin"])
 
 
-def _aug_from_becsum(system, rho_ij, phases):
+def _aug_from_becsum(
+    system: USPPSystem, rho_ij: list[torch.Tensor], phases: torch.Tensor
+) -> torch.Tensor:
     """ρ_aug(r) from one spin channel's becsum with given e^{+iGτ} phases."""
     return aug_density_from_becsum(system, rho_ij, phases)
 
 
-def rho_core_on_graph(system, phases) -> torch.Tensor | None:
+def rho_core_on_graph(system: USPPSystem, phases: torch.Tensor) -> torch.Tensor | None:
     """NLCC core density on the τ-graph, or None when the system has no core.
 
     The core rides the same e^{+iGτ} phases as the augmentation (pass the
@@ -84,7 +99,7 @@ def rho_core_on_graph(system, phases) -> torch.Tensor | None:
     return g_to_r_box(core_box.reshape(grid.shape), real=True)
 
 
-def _aug_at_fixed(res: dict, system, isp: int | None = None) -> torch.Tensor:
+def _aug_at_fixed(res: USPPResult, system: USPPSystem, isp: int | None = None) -> torch.Tensor:
     """ρ_aug at the converged positions/becsum (isolates the smooth part).
     isp selects one spin channel; None sums all."""
     with torch.no_grad():
@@ -99,7 +114,9 @@ def _aug_at_fixed(res: dict, system, isp: int | None = None) -> torch.Tensor:
         return out
 
 
-def forces_uspp(res: dict, xc, remove_net: bool = True) -> torch.Tensor:
+def forces_uspp(
+    res: USPPResult, xc: XCFunctional | SpinXC, remove_net: bool = True
+) -> torch.Tensor:
     """F_a = −dE/dτ_a (na, 3) [eV/Å] for a converged scf_uspp result."""
     system = res["system"]
     grid = system.grid

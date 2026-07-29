@@ -27,7 +27,13 @@ import numpy as np
 EV_A3_TO_GPA = 160.2176634
 
 
-def birch_murnaghan(v, e0, v0, b0, b0p):
+def birch_murnaghan(
+    v: np.ndarray,
+    e0: float,
+    v0: float,
+    b0: float,
+    b0p: float,
+) -> np.ndarray:
     """3rd-order Birch-Murnaghan energy-volume curve E(V).
 
     ``b0`` carries the same energy/volume units as ``e0``/``v`` (eV/Å³ here);
@@ -55,7 +61,7 @@ class BM3Fit:
         return self.b0 * EV_A3_TO_GPA
 
 
-def fit_bm3(volumes, energies) -> BM3Fit:
+def fit_bm3(volumes: np.ndarray | list[float], energies: np.ndarray | list[float]) -> BM3Fit:
     """Least-squares 3rd-order Birch-Murnaghan fit of E(V).
 
     Needs at least four points (the form has four parameters). The initial
@@ -81,14 +87,22 @@ def fit_bm3(volumes, energies) -> BM3Fit:
                   rms_residual_eV=float(np.sqrt(np.mean(resid ** 2))))
 
 
-def _as_params(fit):
+def _as_params(
+    fit: BM3Fit | tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
     """Coerce a BM3Fit or a raw (e0, v0, b0, b0p) tuple to a params tuple."""
     if isinstance(fit, BM3Fit):
         return (fit.e0, fit.v0, fit.b0, fit.b0_prime)
-    return tuple(float(x) for x in fit)
+    e0, v0, b0, b0p = fit
+    return (float(e0), float(v0), float(b0), float(b0p))
 
 
-def delta_value(fit_a, fit_b, window: float = 0.06, npoints: int = 1000) -> float:
+def delta_value(
+    fit_a: BM3Fit,
+    fit_b: BM3Fit | tuple[float, float, float, float],
+    window: float = 0.06,
+    npoints: int = 1000,
+) -> float:
     """Lejaeghere Δ (meV) between two BM3 fits.
 
     RMS of the energy difference over [1-window, 1+window]·V0_avg with each

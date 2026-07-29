@@ -40,8 +40,12 @@ import numpy as np
 import torch
 
 from gradwave.core.energies.local_pp import local_potential_g
+from gradwave.core.xc.base import XCFunctional
+from gradwave.core.xc.spin import SpinXC
 from gradwave.postscf.discretization_error import estimate_density_error
 from gradwave.scf.loop import (
+    SCFResult,
+    System,
     effective_potentials,
     local_potential_r,
     setup_system,
@@ -52,7 +56,7 @@ EV_A3_TO_KBAR = 1602.176634  # 1 eV/Å³ = 160.2176634 GPa
 __all__ = ["estimate_pressure_error"]
 
 
-def _infer_kmesh(system) -> tuple[int, int, int]:
+def _infer_kmesh(system: System) -> tuple[int, int, int]:
     """Monkhorst-Pack mesh dimensions from a full (unreduced) k-point set.
 
     Each axis carries ``N`` distinct fractional values for an ``N``-fold mesh,
@@ -61,12 +65,14 @@ def _infer_kmesh(system) -> tuple[int, int, int]:
     strained system reproduces the run's k-point ordering.
     """
     kf = np.array([np.asarray(sph.k_frac, dtype=float) for sph in system.spheres])
-    return tuple(len(np.unique(np.round(kf[:, i] % 1.0, 6))) for i in range(3))
+    n0, n1, n2 = (len(np.unique(np.round(kf[:, i] % 1.0, 6))) for i in range(3))
+    return n0, n1, n2
 
 
 @torch.no_grad()
-def estimate_pressure_error(res, xc, *, ecut_large: float | None = None,
-                            factor: float = 2.5, strain: float = 0.01) -> dict:
+def estimate_pressure_error(res: SCFResult, xc: XCFunctional | SpinXC, *,
+                            ecut_large: float | None = None, factor: float = 2.5,
+                            strain: float = 0.01) -> dict[str, float | str]:
     """Estimate the hydrostatic (pressure) plane-wave stress error of a run.
 
     Returns a dict with ``pressure_error_kbar`` and ``pressure_error_eV_A3``:
@@ -113,8 +119,11 @@ def estimate_pressure_error(res, xc, *, ecut_large: float | None = None,
         vloc_r = local_potential_r(ss, vloc_g)
         # per-spin frozen density -> per-spin v_eff (nspin=2 sums both channels'
         # errors in estimate_density_error, exactly as the fixed-basis stress does)
-        rho_list = ([res.rho * scale] if nspin == 1
-                    else [rsp * scale for rsp in res.rho_spin])
+        if nspin == 1:
+            rho_list = [res.rho * scale]
+        else:
+            assert res.rho_spin is not None  # guaranteed by nspin == 2
+            rho_list = [rsp * scale for rsp in res.rho_spin]
         veff = effective_potentials(ss, xc, rho_list, vloc_r)
         if nspin == 1:
             res_s = dataclasses.replace(res, system=ss, v_eff=veff[0])
