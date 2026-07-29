@@ -45,7 +45,10 @@ class _AppliesH(Protocol):
     ``scf.noncollinear.SpinorHamiltonian`` (postscf.dielectric's spinor
     Sternheimer solves reuse this same CG unchanged)."""
 
-    def apply(self, x: torch.Tensor) -> torch.Tensor: ...
+    # positional-only (`/`): BatchedHamiltonian/SpinorHamiltonian both name
+    # this parameter `c`, not `x` -- Protocol method matching cares about
+    # parameter names unless marked positional-only.
+    def apply(self, x: torch.Tensor, /) -> torch.Tensor: ...
 
 
 class _HasKineticTable(Protocol):
