@@ -180,6 +180,52 @@ include = [
     "src/gradwave/solvers/chebyshev.py",
     "src/gradwave/solvers/lobpcg.py",
     #
+    # Phase 9: the three central SCF drivers left off in the scf/ pilot --
+    # loop.py (NC), uspp_loop.py (USPP/PAW), noncollinear.py (spinor/SOC) --
+    # each cleaned up for real (250 real errors -> 0 across the three,
+    # verified by actually adding them here and running ty check), not just
+    # annotated around:
+    #   * the "runs >=1 iteration" possibly-unresolved-reference pattern
+    #     (it/e_free/res_norm/energies/... after each driver's main `for it
+    #     in range(1, max_iter+1)` loop) fixed the same way as davidson.py's
+    #     Phase-5 precedent: bind real placeholders before the loop, assert
+    #     non-None right before the final return, rather than weakening the
+    #     loop's actual guarantee;
+    #   * a real Liskov gap between CompilableXC (the compile-only mixin) and
+    #     XCFunctional/SpinXC (the two sibling classes that actually declare
+    #     needs_tau/energy_density) -- loop.py/uspp_loop.py's internal
+    #     nspin-dispatch helpers were typed `xc: CompilableXC`, too narrow
+    #     for what they actually call; retyped to `XCFunctional | SpinXC`
+    #     with an `isinstance` narrow at each nspin==1/2 branch. A first
+    #     pass narrowed the nspin==2 branch to `LSDA_PW92 | LearnableSpinX |
+    #     SpinPBE` by name and shipped clean under ty -- but that's a real
+    #     runtime bug, not just an annotation nicety: SPIN_XC_REGISTRY also
+    #     registers SpinR2SCAN (a direct SpinXC subclass), which the
+    #     isinstance tuple silently excluded, so a real nspin=2 r2scan run
+    #     would raise. Caught by re-auditing the assert against the actual
+    #     registries rather than trusting a green ty check; fixed by
+    #     widening to the true base class (SpinXC), matching what the
+    #     called functions (vxc_spin_potential et al.) already handle
+    #     generically;
+    #   * uspp_loop.py's `_scf_iteration` returned a flat
+    #     `dict[str, list[Tensor] | float | list[list[Tensor]] |
+    #     EnergyBreakdown | None]` -- every key collapsed to that one union,
+    #     so every read looked wrong-typed. Replaced with a `_IterStep`
+    #     TypedDict (mirroring noncollinear.py's own pre-existing
+    #     `_WorkingTables` TypedDict) giving each key its real type;
+    #   * `_USPPStartFrom`/loop.py's own `_StartFrom` warm-start union types
+    #     carried a `dict[str, USPPSystem | int]` shape that was never
+    #     actually constructed anywhere (every real caller either passes a
+    #     genuine USPPResult/SCFResult, per tests/integration/
+    #     test_uspp_warmstart.py, or opts out via `cast(Any, ...)` at the
+    #     call site in calculator.py) -- dropped in favor of the member
+    #     that's actually exercised, with `cast` at the few remaining
+    #     genuinely-ambiguous dict-value extraction points (same idiom, not
+    #     a new pattern).
+    "src/gradwave/scf/loop.py",
+    "src/gradwave/scf/uspp_loop.py",
+    "src/gradwave/scf/noncollinear.py",
+    #
     # Deliberately left off (individually verified NOT clean — hundreds of
     # real errors between them, not just the untyped-bulk warning noise):
     # cohp.py, dielectric.py, discretization_error.py, forces.py,

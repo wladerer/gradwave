@@ -547,8 +547,11 @@ class GradWave(Calculator):
             # remap the eigenvectors onto the new G-spheres too (Miller-index
             # match, zero-fill new high-G components) so the Davidson seed
             # survives the grid change; None if the k-set is incompatible.
+            # prev.nspin == 1 is already checked above (the early return), so
+            # prev.coeffs is the flat per-k list (never the nspin=2
+            # list-of-lists SCFResult.coeffs also allows).
             coeffs = (_remap_coeffs_to_spheres(
-                prev.coeffs, prev_sys.spheres, system.spheres)
+                cast("list[torch.Tensor] | None", prev.coeffs), prev_sys.spheres, system.spheres)
                 if reuse else None)
             if is_uspp:
                 # becsum (rho_ij_atoms) is per-atom and grid-independent, so it
