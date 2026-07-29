@@ -296,6 +296,13 @@ time again.
   times, for the most invasive change in the stack. Mixed precision already gives
   1.2 times on the same system at a fraction of the risk. This is deferred, not
   rejected, and worth revisiting only if Γ-only molecular workloads dominate.
+- **Widening `_QR_CPU_MAX_COLS` past 16 for large-`nb` systems.** Measured directly
+  (not assumed) at a large-`nb` magnetic mineral's actual shape (`nk=13`,
+  `npw=6746`, `cols` up to 64, "Case study, a large-nb magnetic mineral on GPU"
+  below): CPU-offload is a clear win only through `cols=16`, already a loss by
+  `cols=24`, and mixed-to-negative through `cols=60-64`. The existing cap is
+  correctly conservative, not overly so, at this larger `npw` than the diamond-C
+  sweep that set it covered.
 
 ## Case study, geometry relaxation vs QE
 
@@ -396,6 +403,89 @@ by the bandwidth argument (see the wisdom notes) and verified two ways, the batc
 matches the dense per-k reference to 2e-13 eV and the Pt free energy is unchanged. It
 halves the FFT time on Pt for about 1.2 times, and the gain grows with `ecutrho/ecutwfc`.
 The density-build FFT is still dense, a further increment.
+
+## Case study, a large-nb magnetic mineral on GPU
+
+The Davidson batched-QR CPU-offload fix above (diamond-C, 50 Ry, `nb` a few
+bands) gave 1.55-1.67x per iteration. Re-running it on
+`benchmarks/minerals` hematite (α-Fe₂O₃, 10 atoms, nspin=2, Johnson mixing,
+Shubnikov-folded 4x4x4 k-mesh, `nb=60`, `npw≈6746`, RTX 3050) gave only ~1%
+(593.9 -> 586.8 s over 17 iterations, `benchmarks/minerals/README.md`
+"GPU" section) -- asking why is what this section answers, and it changes
+the picture: the diamond-C shapes (`nk` 8-112, `npw` 465-2500, `cols` 8-64)
+the fix's own sweep covered do not reach hematite's regime, and a large `nb`
+changes which op dominates.
+
+Instrumenting `davidson_batched` directly (stage-level wall-clock timing,
+`torch.cuda.synchronize()`-bracketed, 3 representative SCF iterations,
+`nk_irr=13`, `nspin=2` so both spin channels' Davidson calls are summed):
+
+| stage | share of `davidson_batched` | note |
+|---|---:|---|
+| Hamiltonian apply (`h_apply`, two FFTs + nonlocal projector) | 32.5% | legitimate FFT/GEMM work |
+| `_orthonormalize_b` (incl. its own QR) | 22.8% | mostly the QR below |
+| subspace `eigh` (`_eigh_subspace`, CPU-offloaded, `n` up to 240) | 3.3% | correctly offloaded (`n <= 256`) |
+| `teter_b` preconditioner | 0.6% | negligible |
+| Rayleigh-Ritz subspace build + combination (`s`/`x`/`hx`, plain batched `matmul`/`einsum`, not a `cuSOLVER` factorization) | 40.8% | **new finding, see below** |
+
+`davidson_batched` itself is 97.7% of total SCF wall time (h_apply, mixing,
+XC, and the magnetic symmetrizer combined are the other 2.3%) -- consistent
+with the earlier finding that the eigensolver dominates, but at a much
+higher share than the small-system O₂/diamond benchmarks in this file, where
+FFTs and XC are each a double-digit percentage.
+
+**Why the QR fix barely moves the needle here.** `_orthonormalize_b`'s QR
+runs at `cols = n_add`, the round's unconverged-band count, which for
+`nb=60` reaches `cols=60` in early rounds -- above `_QR_CPU_MAX_COLS=16`, so
+those calls correctly stay on GPU. A fresh sweep at hematite's *actual*
+shape (`nk=13`, `npw=6746`, the diamond-C sweep only went up to `npw=2500`)
+confirms the cap is not just conservative but right: CPU-offload is a clear
+win at `cols=8` (2.96x) and a real one at `cols=16` (1.13x), but by
+`cols=24` it is already a **loss** (0.69x), and stays mixed-to-negative
+through `cols=60-64` (0.84-0.87x). Extending the cap to cover hematite's
+`cols=60` rounds would make this system slower, not faster -- the transfer
+cost of the larger `(nk, npw, cols)` tensor at this bigger `npw` erodes the
+win the small-`npw` sweep found. Only the tail of a Davidson call, once most
+bands have converged and `n_add` drops below 16, gets the fix's benefit,
+which is why the end-to-end gain on hematite is ~1% instead of diamond-C's
+55-67%.
+
+**A new instance of the fp64-throughput limit, not a new bug.** The 40.8%
+"Rayleigh-Ritz" bucket -- `s = matmul(v.conj(), hv.mT)` (the subspace-matrix
+build) and the `x`/`hx` Ritz combination -- is plain batched `cuBLAS` GEMM,
+not a `cuSOLVER` factorization with the host `info`-readback tax that made
+QR/eigh CPU-offload a win. Isolating it at hematite's worst-case subspace
+width (`nk=13`, `dim=240` -- `max_dim = 4*nb` just before a restart,
+`npw=6746`) shows the RTX 3050 is *slower* than the 22-core CPU for this
+shape: 0.53x on the subspace build, 0.67x on the Ritz combination. This is
+the same fp64-crippled-GPU story the "GPU limit is precision, not
+structure" section below documents for `eigh`/FFT kernels, just showing up
+in a different op family because `nb=60` (vs. a few bands for diamond-C or
+one-atom Pt) makes the subspace wide enough for its GEMMs, not just its
+factorizations, to become throughput-bound rather than launch-bound.
+
+**Why this is not a small targeted fix (and is not attempted here).**
+Unlike the QR/eigh offload, which round-trips only the small `(dim, dim)` or
+`(nk, npw, cols)` piece being factorized, `s`, `x`, and `hx` all read the
+FULL basis `v`/`hv` (~336 MB each at this shape), which stays resident on
+GPU across the whole round for `h_apply` and the next round's
+`_orthonormalize_b(..., against=v)` projection. Offloading just the
+subspace build would mean shipping `v`/`hv` to CPU and back on top of every
+other op in the round that also needs them there -- a device-residency
+redesign of the round, not a one-call swap, and its net benefit after real
+transfer cost is unverified. Flagged here as a candidate for a future
+investigation with its own controlled measurement, matching this file's
+existing rule not to build machinery a targeted probe has not first shown
+pays for itself.
+
+Despite both findings, the GPU SCF is still 3.9x faster than the (fix-unaffected,
+CPU offload is CUDA-only) CPU baseline end to end (586.8 s vs. 2274.9 s) --
+the FFT-heavy `h_apply` and the correctly-offloaded moderate-width `eigh`
+calls still favor the GPU enough to outweigh the large-subspace GEMM
+slowdown at this system's size. The lesson generalizes the existing
+"GPU limit is precision, not structure" finding rather than overturning it:
+a bigger `nb` moves *which* op pays the fp64 tax (GEMM alongside
+factorization), not whether the tax exists.
 
 ## The GPU limit is precision, not structure
 
