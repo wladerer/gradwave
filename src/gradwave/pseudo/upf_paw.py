@@ -23,6 +23,7 @@ r·β carry BOHR^{-1/2}; densities e/Å³; q^l_ij like PP_RHOATOM scale 1/BOHR).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -31,6 +32,8 @@ from gradwave.pseudo.upf import (
     AtomicOrbital,
     BetaProjector,
     _check_mesh_lengths,
+    _find,
+    _find_text,
     _header_flag,
     _parse_betas,
     _parse_floats,
@@ -38,6 +41,7 @@ from gradwave.pseudo.upf import (
     _parse_pswfc_chi,
     _qe_msh,
     _read_root,
+    _text,
     _validate_root,
 )
 
@@ -63,7 +67,7 @@ class PAWData:
     betas: tuple[BetaProjector, ...]
     dij: np.ndarray  # (nproj, nproj) [eV]
     q: np.ndarray  # (nproj, nproj) augmentation charges ∫Q_ij d³r [e]
-    qijl: dict  # (i, j, l) → radial q^l_ij(r) [Å⁻¹], truncated at aug cutoff
+    qijl: dict[tuple[int, int, int], np.ndarray]  # (i,j,l) -> q^l_ij(r) [Å⁻¹], aug-cutoff truncated
     aug_cutoff_idx: int
     rhoatom: np.ndarray  # 4πr²ρ_atom [Å⁻¹]
     core_rho: np.ndarray | None  # NLCC ρ̃_core(r) [e/Å³] (smooth part)
@@ -87,13 +91,11 @@ class PAWData:
         return [w for w in self.chi if w.l == l]
 
 
-def parse_upf_paw(path) -> PAWData:
-    from pathlib import Path
-
+def parse_upf_paw(path: str | Path) -> PAWData:
     path = Path(path)
     root = _read_root(path)
     _validate_root(root, path)
-    h = root.find("PP_HEADER").attrib
+    h = _find(root, "PP_HEADER").attrib
 
     is_paw = _header_flag(h, "is_paw")
     if not _header_flag(h, "is_ultrasoft") and not is_paw:
@@ -103,12 +105,12 @@ def parse_upf_paw(path) -> PAWData:
 
     r, rab, vloc = _parse_mesh_vloc(root)
 
-    nonlocal_ = root.find("PP_NONLOCAL")
+    nonlocal_ = _find(root, "PP_NONLOCAL")
     betas = _parse_betas(nonlocal_, len(r))
     nproj = len(betas)
-    dij = _parse_floats(nonlocal_.find("PP_DIJ").text).reshape(nproj, nproj) * RY_EV
+    dij = _parse_floats(_find_text(nonlocal_, "PP_DIJ")).reshape(nproj, nproj) * RY_EV
 
-    aug = nonlocal_.find("PP_AUGMENTATION")
+    aug = _find(nonlocal_, "PP_AUGMENTATION")
     a = aug.attrib
     if a.get("q_with_l", "F").strip().upper() not in ("T", "TRUE"):
         raise ValueError(f"{path}: only q_with_l datasets supported (psl PAW)")
@@ -120,44 +122,47 @@ def parse_upf_paw(path) -> PAWData:
     else:
         l_max_aug = int(a["nqlc"]) - 1
     cutoff_idx = int(a.get("cutoff_r_index", len(r)))
-    q = _parse_floats(aug.find("PP_Q").text).reshape(nproj, nproj)
-    qijl = {}
+    q = _parse_floats(_find_text(aug, "PP_Q")).reshape(nproj, nproj)
+    qijl: dict[tuple[int, int, int], np.ndarray] = {}
     for child in aug:
         if not child.tag.startswith("PP_QIJL."):
             continue
         _, i, j, l = child.tag.split(".")
-        vals = _parse_floats(child.text) / BOHR_ANG  # like PP_RHOATOM
+        vals = _parse_floats(_text(child)) / BOHR_ANG  # like PP_RHOATOM
         key = (int(i) - 1, int(j) - 1, int(l))
         qijl[key] = vals[:cutoff_idx]
 
     # PP_PSWFC atomic orbitals (same conventions as upf.py; shared parser)
     chi = _parse_pswfc_chi(root)
 
-    rhoatom = _parse_floats(root.find("PP_RHOATOM").text) / BOHR_ANG
+    rhoatom = _parse_floats(_find_text(root, "PP_RHOATOM")) / BOHR_ANG
     core_rho = None
     nlcc = root.find("PP_NLCC")
     if nlcc is not None:
-        core_rho = _parse_floats(nlcc.text) / BOHR_ANG**3
+        core_rho = _parse_floats(_text(nlcc)) / BOHR_ANG**3
 
     _check_mesh_lengths(path, len(r), {"PP_RAB": rab, "PP_LOCAL": vloc, "PP_RHOATOM": rhoatom})
 
-    aewfc, pswfc = [], []
-    paw_occ = ae_core = ae_vloc = None
+    aewfc: list[PartialWave] = []
+    pswfc: list[PartialWave] = []
+    paw_occ: np.ndarray | None = None
+    ae_core: np.ndarray | None = None
+    ae_vloc: np.ndarray | None = None
     core_energy = 0.0
     if is_paw:
-        full = root.find("PP_FULL_WFC")
+        full = _find(root, "PP_FULL_WFC")
         for child in full:
             pw = PartialWave(
                 l=int(child.attrib["l"]),
                 label=child.attrib.get("label", "").strip(),
-                rphi=_parse_floats(child.text) * BOHR_ANG ** (-0.5),
+                rphi=_parse_floats(_text(child)) * BOHR_ANG ** (-0.5),
             )
             (aewfc if child.tag.startswith("PP_AEWFC") else pswfc).append(pw)
-        paw = root.find("PP_PAW")
+        paw = _find(root, "PP_PAW")
         core_energy = float(paw.attrib.get("core_energy", "0")) * RY_EV
-        paw_occ = _parse_floats(paw.find("PP_OCCUPATIONS").text)
-        ae_core = _parse_floats(paw.find("PP_AE_NLCC").text) / BOHR_ANG**3
-        ae_vloc = _parse_floats(paw.find("PP_AE_VLOC").text) * RY_EV
+        paw_occ = _parse_floats(_find_text(paw, "PP_OCCUPATIONS"))
+        ae_core = _parse_floats(_find_text(paw, "PP_AE_NLCC")) / BOHR_ANG**3
+        ae_vloc = _parse_floats(_find_text(paw, "PP_AE_VLOC")) * RY_EV
 
     return PAWData(
         element=h["element"].strip(),

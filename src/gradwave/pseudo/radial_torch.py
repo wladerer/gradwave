@@ -19,11 +19,15 @@ Quadrature weights are radial.simpson's, frozen to torch once per mesh.
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import numpy as np
 import torch
 
 from gradwave.pseudo._bessel_data import DOUBLE_FACTORIAL, SERIES_TERMS, SERIES_X
 from gradwave.pseudo.radial import _simpson_index_weights
+from gradwave.pseudo.upf import UPFData
+from gradwave.pseudo.upf_paw import PAWData
 
 _CHUNK = 4_000_000  # max elements of one (nq_chunk, nmesh) block
 
@@ -129,6 +133,13 @@ class _SBT(torch.autograd.Function):
     first-order path keeps its flat memory profile.
     """
 
+    # forward/backward are intentionally left without parameter annotations:
+    # torch.autograd.Function's own base-class stub types both as
+    # (ctx, *args: Any, **kwargs: Any) -> Any, so a concrete signature here
+    # (ctx: FunctionCtx, q: Tensor, ...) trips invalid-method-override —
+    # FunctionCtx's dynamic ctx.l/ctx.saved_tensors attributes are real at
+    # runtime (the documented save_for_backward/saved_tensors contract) but
+    # not part of the stub, a genuine base-class typing gap, not a quick fix.
     @staticmethod
     def forward(ctx, q, gw, r, l):
         ctx.l = l
@@ -158,10 +169,17 @@ def sbt_t(l: int, gvals: torch.Tensor, r: torch.Tensor, w: torch.Tensor,
     return _SBT.apply(q, gvals * w, r, l)
 
 
-def radial_tables(system, device=None) -> list:
+def radial_tables(system: Any, device: torch.device | str | None = None) -> list[RadialTables]:
     """Per-species RadialTables aligned with ``system.paws``, cached on the
     system object per device so repeated forces/stress calls reuse the
-    frozen mesh data instead of rebuilding it."""
+    frozen mesh data instead of rebuilding it.
+
+    ``system`` is deliberately untyped (``Any``): this is a structural/duck-typed
+    contract (any object exposing ``.paws`` and, optionally, a settable
+    ``._radial_tables_cache``) rather than a nominal one — pseudo/ is a leaf
+    package (see the import-linter contract in pyproject.toml) and must not
+    import System/USPPSystem from scf/ just to name this parameter's real type.
+    """
     key = str(torch.device(device) if device is not None
               else torch.device("cpu"))
     cache = getattr(system, "_radial_tables_cache", None)
@@ -180,18 +198,23 @@ class RadialTables:
     """Per-species mesh data frozen to torch once, for strain-differentiable
     form-factor evaluation (used by postscf/stress.py)."""
 
-    def __init__(self, upf, device=None):
+    def __init__(self, upf: UPFData | PAWData, device: torch.device | str | None = None) -> None:
         from gradwave.constants import E2
         from gradwave.pseudo.local import RC_DEFAULT, _msh, _v_short_range, alpha_z
 
+        # pseudo.local's _msh/_v_short_range/alpha_z declare upf: UPFData, but
+        # only read r/rab/msh/z_valence/vloc, which PAWData shares — duck-type
+        # compatible, not a real type mismatch (same cast precedent as
+        # postscf/_kb.py's beta_form_factors(cast(UPFData, p), ...)).
+        upf_nc = cast(UPFData, upf)
         dt = torch.float64
-        n = _msh(upf)  # QE truncates local-channel integrals at 10 bohr
+        n = _msh(upf_nc)  # QE truncates local-channel integrals at 10 bohr
         self.r = torch.as_tensor(upf.r[:n], dtype=dt, device=device)
         self.w = torch.as_tensor(simpson_weights(upf.rab[:n]), dtype=dt, device=device)
         self.zval = upf.z_valence
         self.rc = RC_DEFAULT
-        self.alpha = alpha_z(upf)
-        vsr = _v_short_range(upf, RC_DEFAULT)
+        self.alpha = alpha_z(upf_nc)
+        vsr = _v_short_range(upf_nc, RC_DEFAULT)
         self.vsr_r2 = torch.as_tensor(vsr * upf.r[:n] ** 2, dtype=dt, device=device)
         self.e2 = E2
         self.beta_l = [b.l for b in upf.betas]
