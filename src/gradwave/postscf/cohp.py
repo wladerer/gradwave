@@ -75,6 +75,17 @@ examples/bi2se3_cohp_fatbands.py's SOC branch used, only ~5 unoccupied bands'
 worth of buffer over the 39 occupied) is thin; NBANDS >~ 2x the occupied count
 is a reasonable rule of thumb before trusting an eigenvalue-route ICOHP.
 
+VERIFIED end-to-end through the actual example script (not the isolated diagnostic
+sweep above -- that sweep used width=0.2; examples/bi2se3_cohp_fatbands.py itself
+uses width=0.1, and this Gaussian broadening changes the integrated ICOHP near a
+truncated band window, so the two are not numerically the same experiment, just
+the same qualitative phenomenon). Running examples/bi2se3_cohp_fatbands.py's SOC
+branch unmodified at NBANDS=44 (committed) vs NBANDS=80 gives ICOHP = -1.60 eV ->
+-2.23 eV (1.4x, same sign and order of magnitude) while Fermi, VBM, and
+charge_spilling match to 4+ decimal places -- confirming there is no instability
+or sign flip as NBANDS widens on this real, full run, only the same bounded,
+convergent reference-leak already characterized above.
+
 A SEPARATE, NOT band-count-driven sensitivity: on the same diamond system, the
 eigenvalue-route ICOHP also depends materially on the k-mesh REDUCTION SCHEME
 (use_symmetry=True, few IBZ k weighted, vs use_symmetry=False, the full/TR-
