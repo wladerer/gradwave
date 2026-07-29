@@ -34,6 +34,7 @@ Runs entirely under torch.no_grad() — autograd must never see this.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 import torch
 
@@ -50,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 @torch.no_grad()
 def _lanczos_bounds(
-    h_apply,
+    h_apply: Callable[[torch.Tensor], torch.Tensor],
     mask: torch.Tensor,  # (nk, npw_max) bool
     steps: int = 6,
     seed: int = 2024,
@@ -102,7 +103,7 @@ def _lanczos_bounds(
 
 @torch.no_grad()
 def _cheby_filter(
-    h_apply,
+    h_apply: Callable[[torch.Tensor], torch.Tensor],
     x: torch.Tensor,  # (nk, nb, npw_max)
     degree: int,
     a: torch.Tensor,  # (nk,) lower edge of the damp interval (largest wanted Ritz value)
@@ -134,7 +135,7 @@ def _cheby_filter(
 
 @torch.no_grad()
 def chebyshev_filtered_batched(
-    h_apply,
+    h_apply: Callable[[torch.Tensor], torch.Tensor],
     x0: torch.Tensor,  # (nk, nb, npw_max), padded slots zero
     t: torch.Tensor,  # (nk, npw_max) kinetic diagonal, 0 in padding (unused; signature parity)
     mask: torch.Tensor,  # (nk, npw_max) bool
@@ -216,7 +217,7 @@ def chebyshev_filtered_batched(
 
 @torch.no_grad()
 def chebyshev_filtered_batched_ms(
-    h_apply,
+    h_apply: Callable[[torch.Tensor], torch.Tensor],
     x0: torch.Tensor,
     t: torch.Tensor,
     mask: torch.Tensor,

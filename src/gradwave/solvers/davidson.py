@@ -9,6 +9,7 @@ Runs entirely under torch.no_grad() — autograd must never see this.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -101,7 +102,7 @@ def _orthonormalize(v: torch.Tensor, against: torch.Tensor | None = None) -> tor
 
 @torch.no_grad()
 def davidson(
-    h_apply,
+    h_apply: Callable[[torch.Tensor], torch.Tensor],
     x0: torch.Tensor,  # (nb, npw) initial guess, rows ~orthonormal
     t_g: torch.Tensor,  # (npw,) kinetic diagonal for the preconditioner
     tol: float = 1e-9,
@@ -162,7 +163,7 @@ def davidson(
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "Davidson hit max_iter=%d with %d/%d bands unconverged "
-            "(max res=%.3e > tol=%.1e)", max_iter, int(unconverged.sum()),
+            "(max res=%.3e > tol=%.1e)", max_iter, int((res_norms > tol).sum()),
             eig.shape[0], float(res_norms.max()), tol)
     return DavidsonResult(eig, x, max_iter, res_norms)
 
@@ -220,7 +221,7 @@ def _orthonormalize_b(
     return q.transpose(-1, -2)
 
 
-def _rr(q: torch.Tensor, hq: torch.Tensor, nw: int):
+def _rr(q: torch.Tensor, hq: torch.Tensor, nw: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Rayleigh-Ritz on an orthonormal basis `q` with precomputed images `hq`.
 
     q, hq: (nk, dim, m). davidson_batched convention: s = <q_i|H|q_j> built with
@@ -241,7 +242,7 @@ def _combine(c: torch.Tensor, block: torch.Tensor) -> torch.Tensor:
     return torch.einsum("kja,kjg->kag", c, block)
 
 
-def _buffered_block(x0: torch.Tensor, n_buffer: int | None):
+def _buffered_block(x0: torch.Tensor, n_buffer: int | None) -> tuple[torch.Tensor, int, int]:
     """Widen the initial block with `n_buffer` random buffer bands.
 
     CheFSI and LOBPCG both carry extra bands above the requested nb so the top
@@ -274,7 +275,7 @@ class BatchedDavidsonResult:
 
 @torch.no_grad()
 def davidson_batched(
-    h_apply,
+    h_apply: Callable[[torch.Tensor], torch.Tensor],
     x0: torch.Tensor,  # (nk, nb, npw_max), padded slots zero
     t: torch.Tensor,  # (nk, npw_max) kinetic diagonal, 0 in padding
     mask: torch.Tensor,  # (nk, npw_max) bool
@@ -375,18 +376,29 @@ def davidson_batched(
         else:
             # judge the stats copy launched in an earlier round; query()
             # never blocks, and the returned (eig, x) are the CURRENT
-            # round's — at least one refinement past the converged one
-            if pending and (not use_event or ev.query()):
+            # round's — at least one refinement past the converged one.
+            # ev/flag_host are only None when sync_free is False (the
+            # `else` branch we are in implies sync_free, which is what set
+            # them); the asserts are pure type narrowing for ty, not new
+            # runtime checks on the default (non-sync_free) hot path.
+            ready = not use_event
+            if pending and use_event:
+                assert ev is not None
+                ready = ev.query()
+            if pending and ready:
+                assert flag_host is not None
                 if float(flag_host[0]) < tol:
                     return BatchedDavidsonResult(eig, x, it, rn)
                 n_add_cur = max(1, min(nb, int(flag_host[1])))
                 pending = False
             if not pending:
+                assert flag_host is not None
                 pending_stats = torch.stack(
                     [rn.max().to(torch.float64),
                      (rn > tol).sum(dim=1).max().to(torch.float64)])
                 flag_host.copy_(pending_stats, non_blocking=use_event)
                 if use_event:
+                    assert ev is not None
                     ev.record()
                 pending = True
             n_add = n_add_cur
@@ -436,7 +448,7 @@ def davidson_batched(
 
 @torch.no_grad()
 def davidson_batched_ms(
-    h_apply,
+    h_apply: Callable[[torch.Tensor], torch.Tensor],
     x0: torch.Tensor,
     t: torch.Tensor,
     mask: torch.Tensor,
