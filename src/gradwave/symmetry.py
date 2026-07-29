@@ -28,10 +28,12 @@ is on and the check fails.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
 
 import numpy as np
 import spglib
 import torch
+from spglib import SpgCell
 
 
 @dataclass(frozen=True)
@@ -56,7 +58,11 @@ def find_spacegroup(
     cell = np.asarray(cell, dtype=float)
     frac = np.asarray(frac_positions, dtype=float) % 1.0
     numbers = np.asarray(species_of_atom, dtype=int)
-    ds = spglib.get_symmetry_dataset((cell, frac, numbers), symprec=symprec)
+    # spglib's own SpgCell type alias is a tuple[Lattice, Positions, Numbers] of
+    # plain Sequences; spglib itself casts at this exact seam internally (spg.py)
+    # rather than widen the stub, since the numpy arrays built just above satisfy
+    # the runtime contract (row-iterable) but not the stub's nested-Sequence shape.
+    ds = spglib.get_symmetry_dataset(cast(SpgCell, (cell, frac, numbers)), symprec=symprec)
     if ds is None:
         raise ValueError(
             f"spglib.get_symmetry_dataset returned None (symprec={symprec}); "
@@ -131,23 +137,25 @@ def coupled_axis_groups(sg: SpaceGroup) -> list[tuple[int, ...]]:
     return groups
 
 
-def _k_ops(rotations) -> list[np.ndarray]:
+def _k_ops(rotations: np.ndarray) -> list[np.ndarray]:
     """Reciprocal-space integer action of fractional rotations: k' = W⁻ᵀ k."""
     return [np.round(np.linalg.inv(w).T).astype(np.int64) for w in rotations]
 
 
-def _orbit_reduce(mesh, ops_t):
+def _orbit_reduce(
+    mesh: tuple[int, int, int], ops_t: list[np.ndarray]
+) -> tuple[np.ndarray, np.ndarray]:
     """Fold a Γ-centered MP mesh into orbits under integer k-space ops.
 
     ops_t is a list of (3,3) integer matrices acting on the mesh integers m
     (k = m/n). Returns (k_frac (nk,3) in (-1/2,1/2], weights summing to 1).
     """
-    mesh = np.asarray(mesh, dtype=np.int64)
-    grids = [np.arange(n) for n in mesh]
+    mesh_arr = np.asarray(mesh, dtype=np.int64)
+    grids = [np.arange(n) for n in mesh_arr]
     mm = np.stack(np.meshgrid(*grids, indexing="ij"), -1).reshape(-1, 3)  # integer m, k=m/n
 
-    def key_of(m_int):
-        return tuple(m_int % mesh)
+    def key_of(m_int: np.ndarray) -> tuple[int, ...]:
+        return tuple(m_int % mesh_arr)
 
     index = {key_of(m): i for i, m in enumerate(mm)}
     n_full = len(mm)
@@ -163,14 +171,19 @@ def _orbit_reduce(mesh, ops_t):
         reps.append(i)
         weights.append(len(orbit) / n_full)
 
-    kfrac = mm[reps] / mesh
+    kfrac = mm[reps] / mesh_arr
     kfrac = -((-kfrac + 0.5) % 1.0 - 0.5)  # fold to (-1/2, 1/2]
     w = np.array(weights)
     assert abs(w.sum() - 1.0) < 1e-12
     return kfrac, w
 
 
-def reduce_mesh(mesh, shift, sg: SpaceGroup, time_reversal: bool = True):
+def reduce_mesh(
+    mesh: tuple[int, int, int],
+    shift: tuple[int, int, int],
+    sg: SpaceGroup,
+    time_reversal: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
     """IBZ reduction of a Γ-centered MP mesh. Returns (k_frac (nk,3), weights).
 
     Only valid for unshifted meshes; orbits are taken under {W⁻ᵀ} and
@@ -224,7 +237,10 @@ class MagneticGroup:
 
 
 def magnetic_spacegroup(
-    sg: SpaceGroup, magmoms, cell: np.ndarray, tol: float = 1e-5
+    sg: SpaceGroup,
+    magmoms: list[list[float | int]] | np.ndarray,
+    cell: np.ndarray,
+    tol: float = 1e-5,
 ) -> MagneticGroup:
     """Filter the paramagnetic group by its action on the atomic moments.
 
@@ -265,7 +281,12 @@ def magnetic_spacegroup(
     )
 
 
-def reduce_mesh_magnetic(mesh, shift, mg: MagneticGroup, time_reversal: bool = False):
+def reduce_mesh_magnetic(
+    mesh: tuple[int, int, int],
+    shift: tuple[int, int, int],
+    mg: MagneticGroup,
+    time_reversal: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
     """Magnetic-IBZ reduction of a Γ-centered MP mesh under a Shubnikov group.
 
     Unitary ops act on k as W⁻ᵀ; anti-unitary ops (g·T) as −W⁻ᵀ (the g·T time
@@ -313,7 +334,9 @@ class RhoSymmetrizer:
     are zero there; masking makes the operator exactly idempotent.
     """
 
-    def __init__(self, shape, sg: SpaceGroup, dens_mask=None) -> None:
+    def __init__(
+        self, shape: tuple[int, int, int], sg: SpaceGroup, dens_mask: torch.Tensor | None = None
+    ) -> None:
         n1, n2, n3 = shape
         dims = np.array([n1, n2, n3])
         millers = np.stack(
@@ -345,7 +368,7 @@ class RhoSymmetrizer:
         else:
             self.mask = torch.ones(n1 * n2 * n3, dtype=torch.bool)
 
-    def to(self, device) -> RhoSymmetrizer:
+    def to(self, device: torch.device | str) -> RhoSymmetrizer:
         new = object.__new__(RhoSymmetrizer)
         new.idx = self.idx.to(device)
         new.phase = self.phase.to(device)
@@ -353,7 +376,7 @@ class RhoSymmetrizer:
         new.shape = self.shape
         return new
 
-    def with_mask(self, dens_mask) -> RhoSymmetrizer:
+    def with_mask(self, dens_mask: torch.Tensor) -> RhoSymmetrizer:
         """Shallow copy sharing the idx/phase maps with a fresh density-sphere
         mask. The maps are the expensive part (n_ops serial passes over the
         dense box) and depend only on (shape, ops); the mask is the one
@@ -390,7 +413,13 @@ class MagneticSymmetrizer:
     magnetic IBZ of reduce_mesh_magnetic.
     """
 
-    def __init__(self, shape, mg: MagneticGroup, cell: np.ndarray, dens_mask=None) -> None:
+    def __init__(
+        self,
+        shape: tuple[int, int, int],
+        mg: MagneticGroup,
+        cell: np.ndarray,
+        dens_mask: torch.Tensor | None = None,
+    ) -> None:
         combined = mg.combined()
         self.rho_sym = RhoSymmetrizer(shape, combined, dens_mask=dens_mask)
         a_t = np.asarray(cell, dtype=float).T
@@ -405,7 +434,7 @@ class MagneticSymmetrizer:
         self.axial = torch.as_tensor(np.stack(ax), dtype=torch.float64)
         self.shape = tuple(shape)
 
-    def to(self, device) -> MagneticSymmetrizer:
+    def to(self, device: torch.device | str) -> MagneticSymmetrizer:
         new = object.__new__(MagneticSymmetrizer)
         new.rho_sym = self.rho_sym.to(device)
         new.axial = self.axial.to(device)
@@ -454,8 +483,14 @@ class CollinearMagneticSymmetrizer:
     correct for a non-spin-polarized cell.
     """
 
-    def __init__(self, shape, mg: MagneticGroup, cell: np.ndarray, magmoms,
-                 dens_mask=None) -> None:
+    def __init__(
+        self,
+        shape: tuple[int, int, int],
+        mg: MagneticGroup,
+        cell: np.ndarray,
+        magmoms: list[list[float | int]] | np.ndarray,
+        dens_mask: torch.Tensor | None = None,
+    ) -> None:
         combined = mg.combined()
         self.rho_sym = RhoSymmetrizer(shape, combined, dens_mask=dens_mask)
         # collinear magnetic axis n̂ from the moment set (first nonzero moment)
@@ -490,7 +525,7 @@ class CollinearMagneticSymmetrizer:
         self.sign = torch.as_tensor(signs, dtype=torch.float64)
         self.shape = tuple(shape)
 
-    def to(self, device) -> CollinearMagneticSymmetrizer:
+    def to(self, device: torch.device | str) -> CollinearMagneticSymmetrizer:
         new = object.__new__(CollinearMagneticSymmetrizer)
         new.rho_sym = self.rho_sym.to(device)
         new.sign = self.sign.to(device)
@@ -504,7 +539,9 @@ class CollinearMagneticSymmetrizer:
         total density); the spin channels use apply_pair."""
         return self.rho_sym.apply(rho_g_box)
 
-    def apply_pair(self, rho_up_box: torch.Tensor, rho_dn_box: torch.Tensor):
+    def apply_pair(
+        self, rho_up_box: torch.Tensor, rho_dn_box: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Symmetrize a collinear (ρ↑, ρ↓) pair on the dense box: each
         (n1,n2,n3) complex → same. Anti-unitary ops swap the two channels."""
         rs = self.rho_sym
@@ -540,7 +577,13 @@ class VectorFieldSymmetrizer:
     running the dielectric/Born DFPT with IBZ symmetry reduction.
     """
 
-    def __init__(self, shape, sg: SpaceGroup, cell: np.ndarray, dens_mask=None) -> None:
+    def __init__(
+        self,
+        shape: tuple[int, int, int],
+        sg: SpaceGroup,
+        cell: np.ndarray,
+        dens_mask: torch.Tensor | None = None,
+    ) -> None:
         self.rho_sym = RhoSymmetrizer(shape, sg, dens_mask=dens_mask)
         a_t = np.asarray(cell, dtype=float).T
         a_t_inv = np.linalg.inv(a_t)
@@ -549,7 +592,7 @@ class VectorFieldSymmetrizer:
         self.rot = torch.as_tensor(rot, dtype=torch.float64)
         self.shape = tuple(shape)
 
-    def to(self, device) -> VectorFieldSymmetrizer:
+    def to(self, device: torch.device) -> VectorFieldSymmetrizer:
         new = object.__new__(VectorFieldSymmetrizer)
         new.rho_sym = self.rho_sym.to(device)
         new.rot = self.rot.to(device)

@@ -236,6 +236,13 @@ include = [
     # (softplus-parameterized kappa/mu returns Tensor where the PBE base
     # expects float). Real follow-up work, not a quick fix -- left off
     # rather than forced.
+    #
+    # Phase 7: autotyping + MonkeyType over the three most-imported
+    # top-level modules (symmetry.py, grids.py, kpoints.py) -- verified
+    # individually, real ty check exit code, one file at a time:
+    "src/gradwave/kpoints.py",
+    "src/gradwave/grids.py",
+    "src/gradwave/symmetry.py",
 ]
 
 [tool.ty.overrides.rules]
