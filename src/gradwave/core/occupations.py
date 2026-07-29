@@ -35,6 +35,7 @@ from __future__ import annotations
 import math
 
 import torch
+from typing_extensions import override
 
 
 class Smearing:
@@ -51,9 +52,11 @@ class Smearing:
 class FermiDirac(Smearing):
     name = "fermi-dirac"
 
+    @override
     def occupation(self, x: torch.Tensor) -> torch.Tensor:
         return torch.sigmoid(-x)
 
+    @override
     def entropy(self, x: torch.Tensor) -> torch.Tensor:
         # −[f ln f + (1−f) ln(1−f)], computed stably via softplus:
         # s = softplus(−|x|) + |x|·f(|x|)  (symmetric in x)
@@ -64,9 +67,11 @@ class FermiDirac(Smearing):
 class Gaussian(Smearing):
     name = "gaussian"
 
+    @override
     def occupation(self, x: torch.Tensor) -> torch.Tensor:
         return 0.5 * torch.erfc(x)
 
+    @override
     def entropy(self, x: torch.Tensor) -> torch.Tensor:
         return torch.exp(-x * x) / (2.0 * math.sqrt(math.pi))
 
@@ -76,9 +81,11 @@ class MethfesselPaxton1(Smearing):
 
     name = "mp1"
 
+    @override
     def occupation(self, x: torch.Tensor) -> torch.Tensor:
         return 0.5 * torch.erfc(x) - x * torch.exp(-x * x) / (2.0 * math.sqrt(math.pi))
 
+    @override
     def entropy(self, x: torch.Tensor) -> torch.Tensor:
         return (1.0 - 2.0 * x * x) * torch.exp(-x * x) / (4.0 * math.sqrt(math.pi))
 
@@ -88,10 +95,12 @@ class MarzariVanderbilt(Smearing):
 
     name = "cold"
 
+    @override
     def occupation(self, x: torch.Tensor) -> torch.Tensor:
         u = x + 1.0 / math.sqrt(2.0)
         return 0.5 * torch.erfc(u) + torch.exp(-u * u) / math.sqrt(2.0 * math.pi)
 
+    @override
     def entropy(self, x: torch.Tensor) -> torch.Tensor:
         u = x + 1.0 / math.sqrt(2.0)
         return u * torch.exp(-u * u) / math.sqrt(2.0 * math.pi)

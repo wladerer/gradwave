@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 
 import torch
+from typing_extensions import override
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
 from gradwave.core.xc._pbe_kernels import KAPPA, MU, pbe_enhancement, pbe_h
@@ -33,6 +34,7 @@ class PBE(XCFunctional):
     kappa = KAPPA
     mu = MU
 
+    @override
     def energy_density(
         self, rho: torch.Tensor, sigma: torch.Tensor | None = None, tau: torch.Tensor | None = None
     ) -> torch.Tensor:

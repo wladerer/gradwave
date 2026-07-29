@@ -26,10 +26,26 @@ import contextlib
 import logging
 import threading
 from collections.abc import Iterator
+from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
+
+if TYPE_CHECKING:
+
+    class _HasEnergyDensity(Protocol):
+        """Structural contract eval_energy_density's ``self`` needs: whatever
+        concrete signature the real subclass (XCFunctional's (rho, sigma, tau)
+        or SpinXC's per-spin equivalent) gives energy_density, it is callable
+        with eval_energy_density's *args and returns a Tensor. A type-checking-
+        only Protocol (see typing's mixin-class guidance) rather than a method
+        on CompilableXC itself, so it does not create a real MRO override
+        relationship — CompilableXC has no subclasses of its own signature to
+        be compatible with; XCFunctional/SpinXC's energy_density only need to
+        satisfy this Protocol, not literally override a same-named method."""
+
+        def energy_density(self, *args: object) -> torch.Tensor: ...
 
 logger = logging.getLogger(__name__)
 
@@ -111,23 +127,32 @@ class CompilableXC:
         still raises. Only compile-layer failures are swallowed, and they latch
         _xc_compile_dead with the message on _xc_compile_error.
         """
+        # CompilableXC is a mixin with no energy_density of its own — only the
+        # concrete XCFunctional/SpinXC subclasses (mixed in alongside this one)
+        # supply it. `self` here is genuinely CompilableXC-typed for every
+        # other attribute on this line (_xc_compile_on etc.), so a full
+        # self-type override isn't right either; cast is purely a type-checker
+        # hint (no runtime effect) narrowing just this one call, real subclass
+        # providing energy_density stays a compile-time contract, not a shape
+        # or dtype check that would warrant a jaxtyped wrapper.
+        self_ed = cast("_HasEnergyDensity", self)
         if not self._xc_compile_on or self._xc_compile_dead or _force_eager():
-            return self.energy_density(*args)
+            return self_ed.energy_density(*args)
         if self._xc_compiled is None:
             try:
                 self._xc_compiled = torch.compile(
-                    self.energy_density,
+                    self_ed.energy_density,
                     dynamic=self._xc_compile_dynamic,
                     **(self._xc_compile_kwargs or {}),
                 )
             except Exception as exc:  # toolchain absent, degrade to eager
                 self._latch_eager(exc)
-                return self.energy_density(*args)
+                return self_ed.energy_density(*args)
         try:
             return self._xc_compiled(*args)
         except Exception as exc:  # first-call compile failure (toolchain gap)
             self._latch_eager(exc)
-            return self.energy_density(*args)
+            return self_ed.energy_density(*args)
 
     def _latch_eager(self, exc: Exception) -> None:
         """Permanently fall back to the eager path and warn once. The latch runs

@@ -74,8 +74,8 @@ class LearnableSpinX(_LearnableKappaMu, SpinPBE):
 
 
 def _inv_softplus(y: float) -> torch.Tensor:
-    y = torch.tensor(float(y), dtype=torch.float64)
-    return y + torch.log(-torch.expm1(-y))
+    yt = torch.tensor(float(y), dtype=torch.float64)
+    return yt + torch.log(-torch.expm1(-yt))
 
 
 def energy_param_grads(res: SCFResult, xc: XCFunctional) -> dict[str, torch.Tensor]:

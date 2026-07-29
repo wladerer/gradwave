@@ -69,21 +69,25 @@ def tau_b(
         coeffs.device.type == "cuda" else nb
     w = kweights[:, None] * occ
     kpg = bk.kpg  # (nk, npw_max, 3), Å⁻¹, zero in padding
-    tau = None
+    tau: torch.Tensor | None = None
     for lo in range(0, nb, chunk):
         hi = min(lo + chunk, nb)
         cc = coeffs[:, lo:hi]  # (nk, nbc, npw_max)
-        grad2 = None  # Σ_d |∂_d ψ|²
+        grad2: torch.Tensor | None = None  # Σ_d |∂_d ψ|²
         for d in range(3):
             # ∂_d ψ = Σ_G i(k+G)_d c e^{iGr} = g_to_r_b(i(k+G)_d c)
             gd = (1j * kpg[:, None, :, d]) * cc
             psid = g_to_r_b(gd, bk, shape)
             term = psid.real ** 2 + psid.imag ** 2
             grad2 = term if grad2 is None else grad2 + term
+        assert grad2 is not None  # inner loop over range(3) always runs
         contrib = 0.5 * torch.einsum(
             "kb,kbxyz->xyz", w[:, lo:hi].to(grad2.dtype), grad2
         )
         tau = contrib if tau is None else tau + contrib
+    # nb >= 1 always (an SCF needs at least one band), so the outer loop runs
+    # at least once and tau is always set here.
+    assert tau is not None
     return tau / volume
 
 
@@ -121,12 +125,16 @@ def spinor_tau_matrix_b(
         coeffs.device.type == "cuda" else nb
     w = kweights[:, None] * occ
     kpg = bk.kpg  # (nk, npw_max, 3), Å⁻¹, zero in padding
-    tau_uu = tau_dd = tau_ud = None
+    tau_uu: torch.Tensor | None = None
+    tau_dd: torch.Tensor | None = None
+    tau_ud: torch.Tensor | None = None
     for lo in range(0, nb, chunk):
         hi = min(lo + chunk, nb)
         cu = coeffs[:, lo:hi, :m_pw]
         cd = coeffs[:, lo:hi, m_pw:]
-        guu = gdd = gud = None  # Σ_d over gradient components
+        guu: torch.Tensor | None = None
+        gdd: torch.Tensor | None = None
+        gud: torch.Tensor | None = None  # Σ_d over gradient components
         for d in range(3):
             ikg = 1j * kpg[:, None, :, d]
             du = g_to_r_b(ikg * cu, bk, shape)  # ∂_d ψ↑
@@ -137,6 +145,7 @@ def spinor_tau_matrix_b(
             guu = uu if guu is None else guu + uu
             gdd = dd if gdd is None else gdd + dd
             gud = ud if gud is None else gud + ud
+        assert guu is not None and gdd is not None and gud is not None
         wr = w[:, lo:hi].to(guu.dtype)
         wc = w[:, lo:hi].to(gud.dtype)
         cuu = 0.5 * torch.einsum("kb,kbxyz->xyz", wr, guu)
@@ -145,6 +154,7 @@ def spinor_tau_matrix_b(
         tau_uu = cuu if tau_uu is None else tau_uu + cuu
         tau_dd = cdd if tau_dd is None else tau_dd + cdd
         tau_ud = cud if tau_ud is None else tau_ud + cud
+    assert tau_uu is not None and tau_dd is not None and tau_ud is not None
     tau_uu, tau_dd, tau_ud = tau_uu / volume, tau_dd / volume, tau_ud / volume
     tau_scalar = tau_uu + tau_dd
     tau_vec = torch.stack([2.0 * tau_ud.real, 2.0 * tau_ud.imag, tau_uu - tau_dd])

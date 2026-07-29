@@ -24,7 +24,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 import numpy as np
 import torch
@@ -53,6 +53,17 @@ class HubbardManifold:
     j: float = 0.0  # Hund J [eV]; enters Dudarev only as U_eff = U − J
 
 
+class HubbardSite(TypedDict):
+    """One correlated-atom record: manifold physics + projector-column layout."""
+
+    atom: int
+    l: int
+    u: float
+    j: float
+    start: int
+    dim: int
+
+
 @dataclass
 class HubbardData:
     """Position-independent Hubbard projector factors (setup product).
@@ -64,7 +75,7 @@ class HubbardData:
     q_free: torch.Tensor  # (nk, nproj, npw_max) — (4π/√Ω)(−i)^l Y_lm F, no phase
     atom_of_col: torch.Tensor  # (nproj,) int64 — atom index per projector column
     kpg: torch.Tensor  # (nk, npw_max, 3) k+G for the phase
-    sites: list  # per correlated atom: {atom, l, u, j, start, dim}
+    sites: list[HubbardSite]  # per correlated atom: {atom, l, u, j, start, dim}
     nproj: int
 
     @property
@@ -89,7 +100,14 @@ def manifold_radial(upf: UPFData, l: int) -> np.ndarray:
     if len(orbs) == 1 or orbs[0].j is None:
         rchi = orbs[0].rchi.copy()
     else:
-        w = np.array([2 * o.j + 1 for o in orbs], dtype=np.float64)
+        # Fully-relativistic manifold: every orbital in the l-manifold carries
+        # j (they were split from the same non-relativistic l by SOC), so
+        # orbs[0].j is not None implies the rest aren't either.
+        js: list[float] = []
+        for o in orbs:
+            assert o.j is not None, "mixed j=None/not-None within one Hubbard l-manifold"
+            js.append(o.j)
+        w = np.array([2.0 * j + 1.0 for j in js], dtype=np.float64)
         w /= w.sum()
         rchi = sum(wi * o.rchi for wi, o in zip(w, orbs, strict=True))
     norm = np.sqrt(np.sum(rchi**2 * upf.rab))
@@ -101,6 +119,10 @@ def build_hubbard_projectors(system: System, manifolds: list[HubbardManifold]) -
     """Assemble batched atomic-orbital projectors (phases at system.positions)."""
     device = system.positions.device
     bk = system.batch
+    # DFT+U always runs on the batched (k+G)-padded path — only band-structure
+    # (non-batched, single-k) code skips building system.batch, and that path
+    # never calls into +U setup.
+    assert bk is not None
     npw_max = bk.npw_max
     vol = system.grid.volume
     man_by_sp = {m.species: m for m in manifolds}
@@ -110,7 +132,8 @@ def build_hubbard_projectors(system: System, manifolds: list[HubbardManifold]) -
     rchi_by_sp = {sp: manifold_radial(system.upfs[sp], man_by_sp[sp].l) for sp in man_by_sp}
     l_max = max(m.l for m in manifolds)
 
-    sites, col = [], 0
+    sites: list[HubbardSite] = []
+    col = 0
     for a, s in correlated:
         m = man_by_sp[s]
         sites.append({"atom": a, "l": m.l, "u": m.u, "j": m.j,
@@ -145,7 +168,7 @@ def build_hubbard_projectors(system: System, manifolds: list[HubbardManifold]) -
 
 
 def occupation_matrices(q: torch.Tensor, coeffs: torch.Tensor, occ: torch.Tensor,
-                        kweights: torch.Tensor, sites: list) -> list[torch.Tensor]:
+                        kweights: torch.Tensor, sites: list[HubbardSite]) -> list[torch.Tensor]:
     """Per-site occupation matrices n^I_{mm'} (Hermitian) for one spin channel.
 
     q (nk, nproj, npw_max) phased projectors, coeffs (nk, nb, npw_max), occ
@@ -157,7 +180,7 @@ def occupation_matrices(q: torch.Tensor, coeffs: torch.Tensor, occ: torch.Tensor
                    s["start"]:s["start"] + s["dim"]] for s in sites]
 
 
-def hubbard_energy(mats: list[torch.Tensor], sites: list) -> torch.Tensor:
+def hubbard_energy(mats: list[torch.Tensor], sites: list[HubbardSite]) -> torch.Tensor:
     """Dudarev E_U for one spin channel: Σ_I (U−J)/2 Tr[n(1−n)]."""
     e = torch.zeros((), dtype=RDTYPE, device=mats[0].device)
     for n, s in zip(mats, sites, strict=True):
@@ -167,22 +190,31 @@ def hubbard_energy(mats: list[torch.Tensor], sites: list) -> torch.Tensor:
 
 
 def hubbard_occ_and_energy(
-    occ_matrix: Callable, occ_s: list[torch.Tensor], sites: list[dict[str, int | float]],
+    occ_matrix: Callable[[int, torch.Tensor], list[torch.Tensor]],
+    occ_s: list[torch.Tensor],
+    sites: list[HubbardSite],
     nspin: int,
 ) -> tuple[list[list[torch.Tensor]], torch.Tensor]:
     """DFT+U per-spin occupation matrices + Dudarev E_U. `occ_matrix(isp,
-    occ_weights)` returns the spin-isp occupation matrix for the given
-    per-band occupation weights (each SCF loop supplies its own projector,
-    coeffs and any padding). Returns (n_hub_list, e_hub): a per-spin list for
-    nspin=2, or [n_half] for nspin=1 (half-filled, energy doubled)."""
+    occ_weights)` returns the spin-isp PER-SITE occupation matrices (one
+    Tensor per correlated site, i.e. occupation_matrices' return shape) for
+    the given per-band occupation weights (each SCF loop supplies its own
+    projector, coeffs and any padding). Returns (n_hub_list, e_hub): a
+    per-spin list of per-site-matrix lists for nspin=2, or [n_half] for
+    nspin=1 (half-filled, energy doubled)."""
     if nspin == 2:
         n_hub = [occ_matrix(isp, occ_s[isp]) for isp in range(nspin)]
-        return n_hub, sum(hubbard_energy(n, sites) for n in n_hub)
+        # not sum(...): the builtin's default start=0 makes ty infer
+        # Tensor | Literal[0], even though n_hub always has nspin=2 elements.
+        e = torch.zeros((), dtype=RDTYPE, device=occ_s[0].device)
+        for n in n_hub:
+            e = e + hubbard_energy(n, sites)
+        return n_hub, e
     n_half = occ_matrix(0, 0.5 * occ_s[0])
     return [n_half], 2.0 * hubbard_energy(n_half, sites)
 
 
-def hubbard_dmatrix(mats: list[torch.Tensor], sites: list, nproj: int,
+def hubbard_dmatrix(mats: list[torch.Tensor], sites: list[HubbardSite], nproj: int,
                     device: torch.device) -> torch.Tensor:
     """Block-diagonal D^I_{mm'} = (U−J)(½δ − n^I) over all correlated sites,
     shape (nproj, nproj) complex Hermitian (one spin channel)."""
@@ -219,7 +251,7 @@ def hubbard_dmatrix(mats: list[torch.Tensor], sites: list, nproj: int,
 def occupation_matrices_noncollinear(q: torch.Tensor, coeffs_up: torch.Tensor,
                                      coeffs_dn: torch.Tensor, occ: torch.Tensor,
                                      kweights: torch.Tensor,
-                                     sites: list) -> list[torch.Tensor]:
+                                     sites: list[HubbardSite]) -> list[torch.Tensor]:
     """Per-site 2×2 spin-block occupation matrices N^I (Hermitian) for a
     noncollinear (spinor) wavefunction.
 
@@ -244,7 +276,7 @@ def occupation_matrices_noncollinear(q: torch.Tensor, coeffs_up: torch.Tensor,
     return out
 
 
-def hubbard_dmatrix_noncollinear(mats: list[torch.Tensor], sites: list,
+def hubbard_dmatrix_noncollinear(mats: list[torch.Tensor], sites: list[HubbardSite],
                                  nproj: int, device: torch.device) -> torch.Tensor:
     """2×2 spin-block D^I_{(σm),(σ'm')} = (U−J)(½δ − N^I), block-diagonal in
     site, shape (2, nproj, 2, nproj) complex Hermitian.

@@ -24,14 +24,18 @@ class AndersonMixer:
     def __init__(self, history: int, beta: float) -> None:
         self.history = history
         self.beta = beta
-        self.prev_u = None
-        self.prev_r = None
+        self.prev_u: torch.Tensor | None = None
+        self.prev_r: torch.Tensor | None = None
         self.hist_du: list[torch.Tensor] = []
         self.hist_dr: list[torch.Tensor] = []
 
     def step(self, u: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
         """Advance the fixed point given the iterate u and its residual r."""
         if self.prev_r is not None:
+            # prev_u and prev_r are always set together (both assigned below,
+            # both None only before the first step() call), so prev_r's
+            # narrowing implies prev_u is set too.
+            assert self.prev_u is not None
             self.hist_du.append(u - self.prev_u)
             self.hist_dr.append(r - self.prev_r)
             if len(self.hist_dr) > self.history:

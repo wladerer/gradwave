@@ -178,9 +178,13 @@ class BatchedHamiltonian:
         self.idx_scatter = torch.where(
             bk.mask, flat_idx, torch.full_like(flat_idx, self.n)
         )
-        self._box = None
-        self._tab_cache: dict = {}  # cdtype → cast (t, v_eff, p, p_conj, dij)
-        self._hub_cache: dict = {}  # cdtype → cast (hub_q, hub_q_conj, hub_dij)
+        self._box: torch.Tensor | None = None
+        # cdtype → cast (t, v_eff, p, p_conj, dij)
+        self._tab_cache: dict[
+            torch.dtype, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        ] = {}
+        # cdtype → cast (hub_q, hub_q_conj, hub_dij)
+        self._hub_cache: dict[torch.dtype, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
     def _tables(
         self, cdtype: torch.dtype
@@ -268,6 +272,10 @@ class BatchedHamiltonian:
     def _hub_tables(self, cdtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         cached = self._hub_cache.get(cdtype)
         if cached is None:
+            # only called from apply()'s `self.hub_q is not None and self.hub_dij
+            # is not None` branch, so both are guaranteed set here.
+            assert self.hub_q is not None
+            assert self.hub_dij is not None
             hq = self.hub_q.to(cdtype)
             cached = (hq, hq.conj().resolve_conj(), self.hub_dij.to(cdtype))
             self._hub_cache[cdtype] = cached
@@ -290,7 +298,7 @@ def density_b(
     else:
         chunk = nb
     w = kweights[:, None] * occ
-    rho = None
+    rho: torch.Tensor | None = None
     for lo in range(0, nb, chunk):
         hi = min(lo + chunk, nb)
         psi = g_to_r_b(coeffs[:, lo:hi], bk, shape)
@@ -298,6 +306,10 @@ def density_b(
             "kb,kbxyz->xyz", w[:, lo:hi].to(psi.real.dtype), psi.real**2 + psi.imag**2
         )
         rho = contrib if rho is None else rho + contrib
+    # nb >= 1 always (an SCF needs at least one band), so the loop runs at
+    # least once and rho is always set here — same pattern as scf/loop.py's
+    # own "runs >=1 iteration" narrowing (PR #182).
+    assert rho is not None
     return rho / volume
 
 

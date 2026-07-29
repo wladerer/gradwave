@@ -23,6 +23,7 @@ from __future__ import annotations
 import math
 
 import torch
+from typing_extensions import override
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
 from gradwave.core.xc.base import RHO_FLOOR_AU, XCFunctional, to_au
@@ -236,6 +237,7 @@ class R2SCAN(XCFunctional):
     needs_gradient = True
     needs_tau = True
 
+    @override
     def energy_density(
         self, rho: torch.Tensor, sigma: torch.Tensor | None = None, tau: torch.Tensor | None = None
     ) -> torch.Tensor:
@@ -257,6 +259,7 @@ class SpinR2SCAN(SpinXC):
     needs_gradient = True
     needs_tau = True
 
+    @override
     def energy_density(
         self,
         rho_up: torch.Tensor,
@@ -267,7 +270,11 @@ class SpinR2SCAN(SpinXC):
         tau_up: torch.Tensor | None = None,
         tau_dn: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if sigma_uu is None or tau_up is None:
+        # needs_gradient/needs_tau = True means the SCF always supplies all
+        # five; the body below uses sigma_dd/sigma_tot/tau_dn too (not just
+        # sigma_uu/tau_up), so the guard has to cover all of them.
+        if (sigma_uu is None or sigma_dd is None or sigma_tot is None
+                or tau_up is None or tau_dn is None):
             raise ValueError("spin r2SCAN requires per-spin sigma and tau")
         nu, nd = to_au(rho_up), to_au(rho_dn)
         s_uu = sigma_uu * BOHR_ANG**8
