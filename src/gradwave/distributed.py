@@ -1,0 +1,222 @@
+"""Distributed k-point parallelism (torch.distributed / Gloo) — opt-in.
+
+k-points are embarrassingly parallel except at the mixing step, where the
+per-k density contributions must be summed over the WHOLE k-mesh.
+``core/batch.py``'s ``density_b`` already performs that reduction *within* one
+rank's batched k (its own docstring: batching "saturates BLAS/GPU instead of
+looping small problems in Python"). This module extends the SAME reduction
+ACROSS ranks/machines: each rank diagonalizes a disjoint, contiguous shard of
+k-points and the results are stitched back together at three small collective
+points, all handled by :func:`shard_system` plus a few call sites in
+``scf.loop.scf``:
+
+1. **Occupations.** A metal's Fermi level depends on the eigenvalues of EVERY
+   k-point, not just this rank's shard, so eigenvalues are ``all_gather``-ed
+   into a global array before ``scf.common.shared_fermi_occupations`` runs;
+   each rank then keeps only its own slice of the resulting occupations.
+2. **Density.** Each rank's local ``core.batch.density_b`` call already sums
+   over its own k-shard (weighted by kweights); an ``all_reduce`` SUM across
+   ranks completes the sum over the full mesh.
+3. **Energy.** Of the ``EnergyBreakdown`` terms, kinetic and nonlocal
+   (projector) energy are sums over k — computed per rank on the local shard,
+   then ``all_reduce``-summed. Every other term (Hartree, XC, local
+   pseudopotential, Ewald, entropy) is a function of the ALREADY-global
+   density/eigenvalues and so comes out identical on every rank without
+   further communication.
+
+Opt in via ``Input.distributed: true`` (``api.run_scf``/``api.run``) or by
+calling :func:`init_from_env` and :func:`shard_system` directly and passing
+the resulting context to ``scf.loop.scf(..., dist_ctx=...)``.
+
+Launch with ``torchrun`` (see ``docs/manual/distributed.md`` and
+``scripts/gradwave_distributed.sh``) — RANK/WORLD_SIZE/MASTER_ADDR/MASTER_PORT
+are read from the environment by :func:`init_from_env`, same as any other
+torchrun job. The backend is Gloo (CPU collectives); a cross-machine launch
+over Tailscale additionally needs ``GLOO_SOCKET_IFNAME=tailscale0`` set in the
+environment of every rank (see docs).
+
+Scope (v1): the norm-conserving collinear SCF (``scf.loop.scf``) only — no
+IBZ symmetry reduction (``use_symmetry=False`` is required), no fully
+relativistic (SOC) pseudopotentials, no DFT+U, no hybrid Fock exchange, and no
+warm start across a shard boundary. USPP/PAW, the noncollinear/spinor SCF, and
+Hubbard/hybrid-under-distribution are documented follow-ups (see
+``docs/manual/distributed.md``), not implemented here.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import os
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, TypeVar, cast
+
+import torch
+
+if TYPE_CHECKING:
+    from gradwave.scf.loop import System
+
+_T = TypeVar("_T")
+
+
+@dataclass
+class DistKContext:
+    """One rank's view of a k-point-sharded distributed SCF.
+
+    Built by :func:`shard_system`; threaded through ``scf.loop.scf`` as the
+    ``dist_ctx`` argument. ``full_system`` is the ORIGINAL, unsharded system
+    this rank was given — kept around so the converged ``SCFResult`` can be
+    reassembled with a normal, full-mesh ``system``/``eigenvalues``/
+    ``occupations``/``coeffs`` (as if it had been an ordinary, single-process
+    run), rather than leaking the local shard to callers.
+    """
+
+    rank: int
+    world_size: int
+    group: Any  # torch.distributed.ProcessGroup, or None for the default group
+    k_start: int  # this rank's slice into the GLOBAL k-ordered arrays
+    k_end: int
+    nk_global: int
+    full_system: "System"
+
+
+def current_rank() -> int:
+    """This process's rank under torchrun (``0`` outside any distributed
+    launch, so file-writing code can gate on it unconditionally)."""
+    return int(os.environ.get("RANK", "0"))
+
+
+def is_distributed_env() -> bool:
+    """True when torchrun-style launch env vars indicate a >1-rank job.
+    ``WORLD_SIZE`` absent (or ``"1"``) means an ordinary single-process run."""
+    return int(os.environ.get("WORLD_SIZE", "1")) > 1
+
+
+def init_from_env(backend: str = "gloo") -> tuple[int, int, Any] | None:
+    """Initialize the default process group from torchrun's environment
+    (``RANK``, ``WORLD_SIZE``, ``MASTER_ADDR``, ``MASTER_PORT`` — the
+    ``env://`` rendezvous ``torch.distributed`` reads by default).
+
+    Returns ``(rank, world_size, group)``, or ``None`` when ``WORLD_SIZE`` is
+    absent or ``1`` (an ordinary single-process run — callers should fall back
+    to the non-distributed path, not fail). Idempotent: a process group
+    already initialized (e.g. by a test harness) is reused rather than
+    re-initialized.
+    """
+    if not is_distributed_env():
+        return None
+    import torch.distributed as dist
+
+    if not dist.is_initialized():
+        dist.init_process_group(backend=backend)
+    return dist.get_rank(), dist.get_world_size(), dist.group.WORLD
+
+
+def shard_range(n: int, rank: int, world_size: int) -> tuple[int, int]:
+    """Contiguous ``[start, end)`` block of ``n`` k-points for ``rank`` — an
+    as-even-as-possible split (the first ``n % world_size`` ranks get one
+    extra k-point). Contiguous, not round-robin, so concatenating every
+    rank's gathered arrays IN RANK ORDER reconstructs the original global
+    k order exactly."""
+    base, rem = divmod(n, world_size)
+    start = rank * base + min(rank, rem)
+    end = start + base + (1 if rank < rem else 0)
+    return start, end
+
+
+def shard_system(
+    system: "System", rank: int, world_size: int, group: Any
+) -> tuple["System", DistKContext]:
+    """Slice a fully-built ``System`` to this rank's contiguous k-shard.
+
+    Only the per-k fields move (``spheres``, ``kweights``, ``proj_data``, and
+    the batched ``BatchedK`` rebuilt from them); everything geometry-global
+    (grid, positions, species, charges, ``vloc_tables``, ``n_electrons``,
+    ``nbands``) is untouched and identical on every rank.
+
+    Requires an unsymmetrized system (``use_symmetry=False``): IBZ folding and
+    the ``rho_symmetrizer`` it builds couple k-points across the whole mesh in
+    a way this k-sharding does not yet account for (v1 scope; see module
+    docstring). Fully relativistic (SOC) pseudopotentials are excluded for the
+    same reason (the SCF driver that consumes them, ``scf_noncollinear``, is
+    out of scope here too).
+    """
+    if system.sym is not None or system.rho_symmetrizer is not None:
+        raise NotImplementedError(
+            "distributed k-point parallelism does not yet support "
+            "use_symmetry=True (IBZ reduction) — build the system with "
+            "use_symmetry=False for a distributed run"
+        )
+    if system.is_fr:
+        raise NotImplementedError(
+            "distributed k-point parallelism does not yet support "
+            "fully relativistic (SOC) pseudopotentials"
+        )
+    nk = len(system.kweights)
+    start, end = shard_range(nk, rank, world_size)
+    if start == end:
+        raise ValueError(
+            f"rank {rank} would get zero k-points out of {nk} total — "
+            f"world_size ({world_size}) exceeds the k-mesh size"
+        )
+
+    from gradwave.core.batch import build_batched
+
+    spheres = system.spheres[start:end]
+    proj_data = system.proj_data[start:end]
+    local = dataclasses.replace(
+        system,
+        spheres=spheres,
+        kweights=system.kweights[start:end],
+        proj_data=proj_data,
+        batch=build_batched(spheres, proj_data, device=system.positions.device),
+    )
+    ctx = DistKContext(
+        rank=rank,
+        world_size=world_size,
+        group=group,
+        k_start=start,
+        k_end=end,
+        nk_global=nk,
+        full_system=system,
+    )
+    return local, ctx
+
+
+def all_reduce_(tensor: torch.Tensor, ctx: DistKContext) -> torch.Tensor:
+    """In-place SUM ``all_reduce`` — the density / k-extensive-energy
+    reduction point. Works for any tensor shape shared identically across
+    ranks (the dense density grid, or a 0-d energy scalar)."""
+    import torch.distributed as dist
+
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=ctx.group)
+    return tensor
+
+
+def gather_cat(local: torch.Tensor, ctx: DistKContext, dim: int = 0) -> torch.Tensor:
+    """``all_gather`` ``local`` from every rank and concatenate along ``dim``,
+    IN RANK ORDER — reconstructs a global k-ordered array (eigenvalues,
+    kweights) from contiguous per-rank shards. Uses ``all_gather_object`` so
+    ranks need not share the exact same local shape and CUDA tensors round-trip
+    through the same code path as CPU ones."""
+    import torch.distributed as dist
+
+    buf: list[torch.Tensor | None] = [None] * ctx.world_size
+    dist.all_gather_object(buf, local.detach().cpu(), group=ctx.group)
+    # every slot was just filled by all_gather_object (one entry per rank)
+    tensors = cast("list[torch.Tensor]", buf)
+    return torch.cat(tensors, dim=dim).to(local.device)
+
+
+def gather_list_cat(local: list[_T], ctx: DistKContext) -> list[_T]:
+    """``all_gather`` a per-rank Python list (e.g. the per-k coefficient
+    tensors, ragged in shape across k) and concatenate in rank order into the
+    global per-k list."""
+    import torch.distributed as dist
+
+    buf: list[list[_T] | None] = [None] * ctx.world_size
+    dist.all_gather_object(buf, local, group=ctx.group)
+    out: list[_T] = []
+    for chunk in buf:
+        assert chunk is not None
+        out.extend(chunk)
+    return out
