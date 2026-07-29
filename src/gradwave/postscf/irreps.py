@@ -29,9 +29,11 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TypedDict, cast
 
 import numpy as np
 import torch
+from typing_extensions import override
 
 from gradwave.constants import HBAR2_2M
 from gradwave.core.hamiltonian import HamiltonianK, projectors
@@ -41,6 +43,22 @@ from gradwave.postscf._kb import projector_data_at_k, species_projector_tables
 from gradwave.scf.loop import SCFResult
 from gradwave.solvers.davidson import davidson
 from gradwave.symmetry import SpaceGroup, find_spacegroup
+
+
+class _Op(TypedDict):
+    """One little-group operation record, per-key precisely typed (not the
+    flattened ``dict[str, np.ndarray | str | int | None]`` a plain dict
+    literal would give every key -- which made ``kind``/``order`` read back
+    as that whole union at every use)."""
+
+    W: np.ndarray
+    w: np.ndarray
+    Winv_t: np.ndarray
+    g0: np.ndarray
+    S: np.ndarray
+    kind: str
+    order: int
+    axis: np.ndarray | None
 
 
 @dataclass
@@ -58,6 +76,7 @@ class KPointIrreps:
     n_ops: int
     clusters: list[IrrepCluster] = field(default_factory=list)
 
+    @override
     def __str__(self) -> str:
         lines = [f"k = {np.round(self.k_frac, 6)}  (little group: {self.n_ops} ops)"]
         for c in self.clusters:
@@ -90,10 +109,10 @@ def _classify_op(s: np.ndarray) -> tuple[str, int, None] | tuple[str, int, np.nd
     return "S", order, axis
 
 
-def little_group(k_frac: np.ndarray, sg: SpaceGroup, cell: np.ndarray) -> list[dict]:
+def little_group(k_frac: np.ndarray, sg: SpaceGroup, cell: np.ndarray) -> list[_Op]:
     """Operations with W⁻ᵀk ≡ k (mod 1), with Cartesian classification."""
     k_frac = np.asarray(k_frac, dtype=float)
-    ops = []
+    ops: list[_Op] = []
     for w_mat, w_vec in zip(sg.rotations, sg.translations, strict=True):
         w_inv_t = np.round(np.linalg.inv(w_mat).T).astype(np.int64)
         g0 = w_inv_t @ k_frac - k_frac
@@ -101,9 +120,9 @@ def little_group(k_frac: np.ndarray, sg: SpaceGroup, cell: np.ndarray) -> list[d
             continue
         s = _cartesian_rotation(w_mat, cell)
         kind, order, axis = _classify_op(s)
-        ops.append(dict(W=w_mat, w=np.asarray(w_vec, float), Winv_t=w_inv_t,
-                        g0=np.round(g0).astype(np.int64), S=s,
-                        kind=kind, order=order, axis=axis))
+        ops.append(_Op(W=w_mat, w=np.asarray(w_vec, float), Winv_t=w_inv_t,
+                       g0=np.round(g0).astype(np.int64), S=s,
+                       kind=kind, order=order, axis=axis))
     return ops
 
 
@@ -111,7 +130,7 @@ def _rep_matrix(
     c: np.ndarray,
     miller: np.ndarray,
     k_frac: np.ndarray,
-    op: dict[str, np.ndarray | str | int | None],
+    op: _Op,
 ) -> np.ndarray:
     """D_mn = ⟨ψ_m|O_g|ψ_n⟩ for a band block c (nb, npw)."""
     index = {tuple(m): i for i, m in enumerate(miller)}
@@ -124,8 +143,8 @@ def _rep_matrix(
 
 
 def _principal(
-    ops: list[dict[str, np.ndarray | str | int | None]],
-) -> tuple[int, np.ndarray, bool]:
+    ops: list[_Op],
+) -> tuple[int, np.ndarray | None, bool]:
     """(n, axis) of the principal rotation; n=1 if no proper rotations."""
     best = (1, None)
     axes = {}
@@ -144,9 +163,9 @@ def _principal(
 
 def _chi(
     clusters_chi: list[complex | np.complex128],
-    ops: list[dict[str, np.ndarray | str | int | None]],
-    select: Callable,
-) -> float:
+    ops: list[_Op],
+    select: Callable[[_Op], bool],
+) -> float | None:
     """Real class character used as a Mulliken discriminant.
 
     Not the plain class mean: at a zone-boundary k the members of one class can
@@ -164,7 +183,7 @@ def _chi(
     return float(np.real(rep))
 
 
-def _mulliken(chis: list, ops: list, dim: int) -> str:
+def _mulliken(chis: list[complex | np.complex128], ops: list[_Op], dim: int) -> str:
     n, axis, cubic = _principal(ops)
 
     def par(op_axis):
@@ -229,7 +248,7 @@ def _mulliken(chis: list, ops: list, dim: int) -> str:
     return base
 
 
-def _class_name(op: dict[str, np.ndarray | str | int | None]) -> str:
+def _class_name(op: _Op) -> str:
     if op["kind"] in ("E", "i"):
         return op["kind"]
     if op["kind"] == "sigma":
@@ -250,13 +269,17 @@ def band_irreps(
     cell = grid.cell
     device = res.v_eff.device
     nbands = nbands or system.nbands
-    k_frac = np.asarray(k_frac, dtype=float)
+    # renamed from the `k_frac` parameter (list[int | float]) -- ty treats a
+    # parameter's declared type as authoritative, so reassigning it to an
+    # ndarray here would itself be an error; the rest of this function needs
+    # the array form throughout.
+    k_frac_arr = np.asarray(k_frac, dtype=float)
 
     frac = system.positions.cpu().numpy() @ np.linalg.inv(cell)
     sg = system.sym or find_spacegroup(cell, frac, system.species_of_atom)
-    ops = little_group(k_frac, sg, cell)
+    ops = little_group(k_frac_arr, sg, cell)
 
-    sph = build_gsphere(grid, system.ecut, k_frac, device=device)
+    sph = build_gsphere(grid, system.ecut, k_frac_arr, device=device)
     beta_ls, dij_species = species_projector_tables(system.upfs, device)
     pd = projector_data_at_k(sph, system.species_of_atom, system.upfs, beta_ls,
                              dij_species, grid.volume, device)
@@ -266,10 +289,15 @@ def band_irreps(
     c0[torch.arange(nbands), torch.arange(nbands)] = 1.0
     # warm start from SCF orbitals when k coincides with a mesh point —
     # keeps symmetric degenerate subspaces intact and converges in a few steps
+    # band_irreps is nspin=1-only (norm-conserving irrep/symmetry analysis
+    # was never extended to spin-polarized SCFResult, same convention as
+    # api.py's "reached only for the norm-conserving SCFResult" call-site
+    # comments), so res.coeffs is always the flat per-k list here.
+    coeffs_nk = cast("list[torch.Tensor]", res.coeffs)
     for ik, s_scf in enumerate(system.spheres):
-        if np.max(np.abs((s_scf.k_frac - k_frac + 0.5) % 1.0 - 0.5)) < 1e-9:
-            nb0 = min(nbands, res.coeffs[ik].shape[0])
-            c0[:nb0] = res.coeffs[ik][:nb0].to(device)
+        if np.max(np.abs((s_scf.k_frac - k_frac_arr + 0.5) % 1.0 - 0.5)) < 1e-9:
+            nb0 = min(nbands, coeffs_nk[ik].shape[0])
+            c0[:nb0] = coeffs_nk[ik][:nb0].to(device)
             break
     out = davidson(h.apply, c0, HBAR2_2M * sph.kpg2, tol=diago_tol, max_iter=300)
 
@@ -298,7 +326,7 @@ def band_irreps(
         warn2 = "non-symmorphic zone-boundary k: labels may be projective"
         nonsym_warn = f"{solve_warn}; {warn2}" if solve_warn else warn2
 
-    result = KPointIrreps(k_frac=k_frac, n_ops=len(ops))
+    result = KPointIrreps(k_frac=k_frac_arr, n_ops=len(ops))
     start = 0
     while start < nbands:
         stop = start + 1
@@ -308,7 +336,7 @@ def band_irreps(
         dim = stop - start
         chis_raw, unitary = [], True
         for op in ops:
-            d = _rep_matrix(block, miller, k_frac, op)
+            d = _rep_matrix(block, miller, k_frac_arr, op)
             chis_raw.append(np.trace(d))
             if abs(np.linalg.norm(d) ** 2 - dim) > 1e-3 * dim:
                 unitary = False
