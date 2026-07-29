@@ -110,6 +110,7 @@ from gradwave.postscf._response import (
     sternheimer_shift,
 )
 from gradwave.postscf.uspp_frozen import (
+    _ResLike,
     aug_density_from_becsum,
     aug_dmat,
     frozen_veff,
@@ -132,12 +133,14 @@ def uspp_energy_param_grads(
     core = system.rho_core
 
     if nspin == 1:
+        assert isinstance(xc, XCFunctional)
         rho = res["rho"].detach()
         rho_xc = rho if core is None else rho + core
         sigma = (sigma_from_rho(rho_xc, grid.g_cart)
                  if xc.needs_gradient else None)
         e_theta = xc.energy(rho_xc, grid.volume, sigma)
     else:
+        assert isinstance(xc, SpinXC)
         c2 = 0.0 if core is None else 0.5 * core
         ru = res["rho_spin"][0].detach() + c2
         rd = res["rho_spin"][1].detach() + c2
@@ -181,7 +184,7 @@ _F_FULL_TOL = 1e-8  # |occ - f_full| below this counts as fully filled (not frac
 
 
 def _window_uspp(
-    res: USPPResult, isp: int, ik: int
+    res: _ResLike, isp: int, ik: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """The full computed-band window at (spin, k) — coeffs, ε, f — plus the
     number of occupation-carrying bands to solve for. Bands are ε-sorted;
@@ -204,7 +207,7 @@ class _ConvergedUSPP:
     """Frozen converged-state operators: per-k (H, S), occupied blocks,
     augmentation pairing and the one-center machinery."""
 
-    def __init__(self, res: USPPResult, xc: XCFunctional | SpinXC) -> None:
+    def __init__(self, res: _ResLike, xc: XCFunctional | SpinXC) -> None:
         from gradwave.scf.uspp import _HkS
 
         system = res["system"]
@@ -339,6 +342,8 @@ class _ConvergedUSPP:
         scheme-consistent for free."""
         if self.scheme is None or self.width <= 0.0:
             return torch.zeros_like(eps)
+        # a converged result always carries a real Fermi level.
+        assert self.mu is not None
         x = ((eps - self.mu) / self.width).detach().requires_grad_(True)
         with torch.enable_grad():
             f = self.scheme.occupation(x)
@@ -389,8 +394,11 @@ class _ConvergedUSPP:
         )
         return pc(x)
 
-    def apply_chi0(self, w_sp: list, d_bare_sp: list, dpsi_warm: list,
-                   cg_tol: float, cg_max_iter: int, d_hub_sp=None):
+    def apply_chi0(
+        self, w_sp: list[torch.Tensor], d_bare_sp: list[list[torch.Tensor]],
+        dpsi_warm: list[list[torch.Tensor]], cg_tol: float, cg_max_iter: int,
+        d_hub_sp: list[list[torch.Tensor]] | None = None,
+    ) -> tuple[list[torch.Tensor], list[list[torch.Tensor]], list[list[torch.Tensor]] | None]:
         """Composite response χ̃(w, D_bare, D_hub) → per-spin (δρ_σ(r),
         δbec_σ) and, with +U, the per-channel occupation-matrix response
         δn (returned third; None otherwise).
@@ -439,12 +447,17 @@ class _ConvergedUSPP:
                for _ in range(nsp)]
         a_bec = [[torch.zeros_like(m) for m in ch] for ch in dbec]
         b_bec = [[torch.zeros_like(m) for m in ch] for ch in dbec]
-        dnh = a_hub = b_hub = None
+        dnh: list[list[torch.Tensor]] | None = None
+        a_hub: list[list[torch.Tensor]] | None = None
+        b_hub: list[list[torch.Tensor]] | None = None
         if self.hub is not None:
-            def _hub_zeros():
+            # captured as a local (not `self.hub.sites` inside the closure)
+            # so the narrowing survives into the nested function body.
+            hub_sites = self.hub.sites
+            def _hub_zeros() -> list[list[torch.Tensor]]:
                 return [[torch.zeros(st["dim"], st["dim"], dtype=CDTYPE,
                                      device=dev)
-                         for st in self.hub.sites] for _ in range(self.nsh)]
+                         for st in hub_sites] for _ in range(self.nsh)]
             dnh, a_hub, b_hub = _hub_zeros(), _hub_zeros(), _hub_zeros()
         for isp in range(nsp):
             for ik, sph in enumerate(system.spheres):
@@ -488,6 +501,8 @@ class _ConvergedUSPP:
                     # hub convention n_pq = Σ wf ⟨φ_p|ψ⟩⟨ψ|φ_q⟩ (conj on the
                     # SECOND index, opposite to becsum); nspin=1 carries the
                     # SCF's half-occupancy weight
+                    # dnh built above under the same `self.hub is not None`.
+                    assert dnh is not None
                     bh = self.bh_win[isp][ik]
                     bh_d = becp(hk.hub_sphi, dpsi)
                     ich = min(isp, self.nsh - 1)
@@ -519,6 +534,7 @@ class _ConvergedUSPP:
                     dbec[isp][a] += wk * torch.einsum(
                         "nm,ni,mj->ij", m_pair, bw.conj(), bw)
                 if self.hub is not None:
+                    assert dnh is not None
                     bh = self.bh_win[isp][ik]
                     ich = min(isp, self.nsh - 1)
                     for si, st in enumerate(self.hub.sites):
@@ -545,6 +561,7 @@ class _ConvergedUSPP:
                         b_bec[isp][a] += torch.einsum(
                             "n,ni,nj->ij", cfs.to(CDTYPE), bwf.conj(), bwf)
                     if self.hub is not None:
+                        assert a_hub is not None and b_hub is not None
                         bh = self.bh_win[isp][ik]
                         ich = min(isp, self.nsh - 1)
                         for si, st in enumerate(self.hub.sites):
@@ -568,20 +585,31 @@ class _ConvergedUSPP:
                                                self.phase_pos)
             drho_out.append(drho_sm[isp] / self.vol + drho_aug)
         if self.hub is not None:
+            assert dnh is not None and a_hub is not None and b_hub is not None
             for ich in range(self.nsh):
                 for si in range(len(self.hub.sites)):
                     m = dnh[ich][si] + a_hub[ich][si] - dmu * b_hub[ich][si]
                     dnh[ich][si] = 0.5 * (m + m.conj().T)
         return drho_out, dbec, dnh
 
-    def k_hxc_grid(self, drho_sp: list) -> list:
+    def k_hxc_grid(self, drho_sp: list[torch.Tensor]) -> list[torch.Tensor]:
         """(K_Hxc δρ)^σ(r) per spin: the Hartree kernel acts on δρ_tot and
         enters every channel; f_xc is the autograd HVP of the grid E_xc at
         the converged density (spin HVP for nspin=2, NLCC core split
         half/half). Both kernels are the shared postscf._response ones."""
-        kh = hartree_kernel(self.grid, sum(drho_sp))
+        # Not `sum(drho_sp)`: its int `0` default start makes the inferred
+        # type `Tensor | int` even though drho_sp always has nspin (>= 1)
+        # entries.
+        rho_tot_pert = drho_sp[0]
+        for r in drho_sp[1:]:
+            rho_tot_pert = rho_tot_pert + r
+        kh = hartree_kernel(self.grid, rho_tot_pert)
         if self.nspin == 1:
+            # nspin=1 is always paired with a collinear XCFunctional (same
+            # convention as scf/uspp_loop.py's own xc dispatch).
+            assert isinstance(self.xc, XCFunctional)
             return [kh + fxc_hvp(self.xc, self.rho_xc, self.grid, drho_sp[0])]
+        assert isinstance(self.xc, SpinXC)
         core = self.system.rho_core
         c2 = 0.0 if core is None else 0.5 * core
         fu, fd = fxc_hvp_spin(self.xc, self.rho_sp[0] + c2,
@@ -589,12 +617,14 @@ class _ConvergedUSPP:
                               drho_sp[0], drho_sp[1])
         return [kh + fu, kh + fd]
 
-    def hvp_onecenter(self, dbec_sp: list) -> list:
+    def hvp_onecenter(
+        self, dbec_sp: list[list[torch.Tensor]]
+    ) -> list[list[torch.Tensor]]:
         """H_1c δbec per spin: per-atom one-center Hessian-vector products
         (zero for bare USPP, which has no one-center energy). For spin, the
         double backward through the joint E_1c(bec↑, bec↓) carries the
         cross-spin blocks automatically."""
-        out = [[] for _ in range(self.nspin)]
+        out: list[list[torch.Tensor]] = [[] for _ in range(self.nspin)]
         dev = self.system.positions.device
         for a, _sp in enumerate(self.system.species_of_atom):
             ms = []
@@ -605,21 +635,27 @@ class _ConvergedUSPP:
                 for isp in range(self.nspin):
                     out[isp].append(torch.zeros_like(ms[isp]))
             elif self.nspin == 1:
+                # self.hvp_at is built together with self.onec in __init__
+                # (both under the same `if self.is_paw:`), so it's real here.
+                assert self.hvp_at is not None
                 # one-center quadrature runs on the OneCenter table device;
                 # bridge back to the composite vector's device
                 out[0].append(self.hvp_at[a](ms[0]).to(dev))
             else:
+                assert self.hvp_at is not None
                 hu, hd = self.hvp_at[a](ms)
                 out[0].append(hu.to(dev))
                 out[1].append(hd.to(dev))
         return out
 
-    def k_hub(self, dnh: list) -> list:
+    def k_hub(self, dnh: list[list[torch.Tensor]]) -> list[list[torch.Tensor]]:
         """Dudarev kernel per hub channel: δD_U = −(U−J)·herm(δn). The
         second derivative of E_U = Σ (U−J)/2 Tr[n − n²] is −(U−J) on the
         Hermitian part, and the D-matrix the SCF applies is built from the
         same channel's matrix (n_half for nspin=1), so no extra spin
         factors appear."""
+        # only ever called (by every real caller) when self.hub is not None.
+        assert self.hub is not None
         out = []
         for ch in dnh:
             out.append([-(st["u"] - st["j"]) * 0.5 * (m + m.conj().T)
@@ -632,7 +668,7 @@ def uspp_density_loss_param_grads(
     outer_tol: float = 1e-9, max_outer: int = 100, cg_tol: float = 1e-8,
     cg_max_iter: int = 200, floor_tol: float | None = None,
     kerker_q0: float | None = None, verbose: bool = False,
-) -> tuple[torch.Tensor, dict]:
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """dL/dθ of a density-dependent loss through the USPP/PAW SCF fixed
     point. loss_fn: rho(grid tensor of the TOTAL density) -> scalar torch
     tensor (pure, differentiable) — for nspin=2 the loss stays a functional
@@ -706,6 +742,9 @@ def uspp_density_loss_param_grads(
             parts = ([w.reshape(-1) for w in w_sp]
                      + [m.reshape(-1) for mats in mats_sp for m in mats])
             if nsh:
+                # every real caller passes hub_sp together with a truthy nsh
+                # (split()'s own `if nsh:` builds it the same way).
+                assert hub_sp is not None
                 for ch in hub_sp:
                     for m in ch:
                         parts.append(m.real.reshape(-1))
@@ -764,15 +803,24 @@ def uspp_density_loss_param_grads(
         mixer = AndersonMixer(history, beta)
         drho = dbec = None
         rn_best, u_best, it_best = float("inf"), None, 0
+        # Bound before the loop purely so ty can see `rn` as always assigned
+        # in the `else` clause below (max_outer is always >= 1 in practice,
+        # same "runs >=1 iteration" pattern as scf/loop.py/uspp_loop.py).
+        rn = float("inf")
         for it in range(1, max_outer + 1):
             w_sp, d_bare_sp, d_hub_sp = split(u)
             w_sp, d_bare_sp = symmetrize(w_sp, d_bare_sp)
             drho, dbec, dnh = cs.apply_chi0(w_sp, d_bare_sp, dpsi_warm,
                                             cg_tol, cg_max_iter,
                                             d_hub_sp=d_hub_sp)
+            # nsh > 0 iff cs.hub is not None iff apply_chi0 returns a real dnh.
+            if nsh:
+                assert dnh is not None
+                hub_term = cs.k_hub(dnh)
+            else:
+                hub_term = None
             g_u = l_vec + join(cs.k_hxc_grid(drho),
-                               cs.hvp_onecenter(dbec),
-                               cs.k_hub(dnh) if nsh else None)
+                               cs.hvp_onecenter(dbec), hub_term)
             r_vec = g_u - u
             rn = float(torch.linalg.norm(r_vec)) / max(
                 1.0, float(torch.linalg.norm(u)))
@@ -805,6 +853,9 @@ def uspp_density_loss_param_grads(
         params = list(xc.parameters())
         with torch.enable_grad(), xc_eager():
             if nsp == 1:
+                # nsp=1 is always paired with a collinear XCFunctional (same
+                # convention as scf/uspp_loop.py's own xc dispatch).
+                assert isinstance(xc, XCFunctional)
                 rho_fix = cs.rho_xc.detach().clone().requires_grad_(True)
                 sigma = (sigma_from_rho(rho_fix, grid.g_cart)
                          if xc.needs_gradient else None)
@@ -813,6 +864,7 @@ def uspp_density_loss_param_grads(
                                               create_graph=True)
                 inner = (v_xc * drho[0].detach()).sum()
             else:
+                assert isinstance(xc, SpinXC)
                 core = system.rho_core
                 c2 = 0.0 if core is None else 0.5 * core
                 ru = (cs.rho_sp[0] + c2).detach().clone().requires_grad_(True)

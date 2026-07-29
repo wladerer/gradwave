@@ -44,6 +44,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from types import SimpleNamespace
+from typing import Any, cast
 
 import torch
 
@@ -85,6 +86,7 @@ def _shifted_projectors(system: System, dkvec: torch.Tensor) -> torch.Tensor:
     — radial form factors re-evaluated by SBT at the shifted |k+G|, Ylm and
     the e^{−i(k+G)τ} phases at the shifted vectors."""
     bk = system.batch
+    assert bk is not None
     beta_ls, dij_species = species_projector_tables(system.upfs)
     nproj = bk.proj_phase_free.shape[1]
     out = torch.zeros(len(system.spheres), nproj, bk.npw_max, dtype=CDTYPE,
@@ -131,6 +133,7 @@ def _spinor_box_to_sphere(f_ud_r: torch.Tensor, bk) -> torch.Tensor:
 def _dhdk_psi(system: System, c_occ: torch.Tensor, alpha: int, dk: float) -> torch.Tensor:
     """(∂H/∂k_α)|ψ⟩: analytic kinetic derivative + FD-in-k of the nonlocal."""
     bk = system.batch
+    assert bk is not None
     kin = (2.0 * HBAR2_2M) * bk.kpg[:, None, :, alpha] * c_occ
     if bk.proj_phase_free.shape[1] == 0:
         return kin
@@ -148,7 +151,7 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
                     dk: float = 1e-3, cg_tol: float = 1e-9,
                     beta: float = 0.5, outer_tol: float = 1e-7,
                     max_outer: int = 80, history: int = 8,
-                    verbose: bool = False) -> dict:
+                    verbose: bool = False) -> dict[str, Any]:
     """ε∞ (3,3) and Born effective charges Z* (na,3,3) from E-field DFPT.
 
     Collinear spin (nspin=2) is threaded per channel: the Sternheimer solve runs
@@ -164,6 +167,9 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
     """
     system = res.system
     if system.is_fr:
+        # is_fr is only ever true on a fully-relativistic NCResult, run with
+        # its NoncollinearXC.
+        assert isinstance(res, NCResult) and isinstance(xc, NoncollinearXC)
         return _dielectric_born_soc(
             res, xc, dk=dk, cg_tol=cg_tol, beta=beta, outer_tol=outer_tol,
             max_outer=max_outer, history=history, verbose=verbose)
@@ -178,16 +184,34 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
             raise NotImplementedError(
                 "dielectric response with IBZ symmetry: nspin=1 only "
                 "(nspin=2 magnetic-group vector fold not implemented)")
+        # nspin=2 is only ever an SCFResult (NCResult carries no nspin field,
+        # per the earlier is_fr/spinor dispatch above), run with its SpinXC.
+        assert isinstance(res, SCFResult)
+        assert isinstance(xc, SpinXC)
         return _dielectric_born_spin(
             res, xc, dk=dk, cg_tol=cg_tol, beta=beta, outer_tol=outer_tol,
             max_outer=max_outer, history=history, verbose=verbose)
     bk, grid = system.batch, system.grid
+    assert bk is not None
     kw = system.kweights
     vol = grid.volume
 
+    # the nspin=1, non-fr path below is SCFResult-only (v_eff is not a
+    # NCResult field; a scalar-relativistic (non-SOC) NCResult was never
+    # actually supported here -- see the analogous, now-explicit guard in
+    # postscf/stress.py's _energy_strained).
+    if not isinstance(res, SCFResult):
+        raise NotImplementedError(
+            "dielectric_born(): scalar-relativistic (non-SOC) noncollinear "
+            "results are not supported; only collinear (SCFResult, nspin 1 "
+            "or 2) and fully-relativistic spin-orbit (is_fr NCResult) are "
+            "implemented")
+    assert isinstance(xc, XCFunctional)
+
     nocc = insulator_window(res.occupations, 2.0,
                             "insulating occupations (f=2) required")
-    c_occ = pad_coeffs(res.coeffs, bk.npw_max)[:, :nocc]
+    coeffs_flat = cast("list[torch.Tensor]", res.coeffs)
+    c_occ = pad_coeffs(coeffs_flat, bk.npw_max)[:, :nocc]
     eps_occ = res.eigenvalues[:, :nocc].to(RDTYPE)
     shift = sternheimer_shift(eps_occ)
 
@@ -273,6 +297,8 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
             vsym, res, xc, n_pts, beta=beta, history=history,
             outer_tol=outer_tol, max_outer=max_outer, cg_tol=cg_tol,
             verbose=verbose)
+        # vsym is built from system.sym under the same `is not None` check.
+        assert system.sym is not None
         eps_mat = symmetrize_tensor(
             torch.eye(3, dtype=RDTYPE) - (16.0 * math.pi * E2 / vol) * col_mat,
             system.sym, grid.cell)
@@ -302,6 +328,7 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
     if vsym is not None:
         from gradwave.symmetry import symmetrize_atom_tensor
 
+        assert system.sym is not None
         born = symmetrize_atom_tensor(born, system.sym, grid.cell)
     asr = born.sum(dim=0)
     return {"eps": eps_mat, "born": born, "asr": asr,
@@ -321,7 +348,8 @@ def _symmetrize_drho_vec(vsym: VectorFieldSymmetrizer,
 @torch.no_grad()
 def _field_response_symmetrized(h: BatchedHamiltonian, bk: BatchedK, grid: FFTGrid,
                                 c_occ: torch.Tensor, eps_occ: torch.Tensor, shift: float,
-                                psi_r: torch.Tensor, xi: list[torch.Tensor], p_c: Callable,
+                                psi_r: torch.Tensor, xi: list[torch.Tensor],
+                                p_c: Callable[[torch.Tensor], torch.Tensor],
                                 kw: torch.Tensor, vol: float, vsym: VectorFieldSymmetrizer,
                                 res: SCFResult, xc: XCFunctional, n_pts: int, *, beta, history,
                                 outer_tol, max_outer, cg_tol, verbose,
@@ -341,7 +369,7 @@ def _field_response_symmetrized(h: BatchedHamiltonian, bk: BatchedK, grid: FFTGr
     u_flat = torch.zeros(3 * n_pts, dtype=RDTYPE, device=c_occ.device)
     mixer = AndersonMixer(history, beta)
     dpsi = [torch.zeros_like(c_occ) for _ in range(3)]
-    drho_raw = [None, None, None]
+    drho_raw: list[torch.Tensor | None] = [None, None, None]
     col_mat = torch.zeros(3, 3, dtype=RDTYPE)
     col_prev = None
     for it in range(1, max_outer + 1):
@@ -368,13 +396,17 @@ def _field_response_symmetrized(h: BatchedHamiltonian, bk: BatchedK, grid: FFTGr
             break
         col_prev = col_mat.clone()
         # full-BZ screening: fold the polar vector response, then K_Hxc per dir
-        drho_sym = _symmetrize_drho_vec(vsym, drho_raw)
+        # every element of drho_raw is reassigned each outer iteration (the
+        # `for b in range(3)` loop above runs unconditionally), so none are
+        # still the pre-loop `None` placeholder here.
+        drho_raw_real = cast("list[torch.Tensor]", drho_raw)
+        drho_sym = _symmetrize_drho_vec(vsym, drho_raw_real)
         u_new = torch.cat([_k_hxc(res, xc, drho_sym[b]).reshape(-1)
                            for b in range(3)]).to(u_flat.device)
         u_flat = mixer.step(u_flat, u_new - u_flat)
     else:
         raise RuntimeError("E-field response (symmetrized) not converged")
-    return dpsi, drho_raw, col_mat
+    return dpsi, cast("list[torch.Tensor]", drho_raw), col_mat
 
 
 def _k_hxc(res: SCFResult, xc: XCFunctional, drho: torch.Tensor) -> torch.Tensor:
@@ -403,6 +435,9 @@ def _k_hxc_spin(res: SCFResult, xc: SpinXC, dru: torch.Tensor,
     core = res.system.rho_core
     cu2 = 0.0 if core is None else 0.5 * core
     kh = hartree_kernel(res.system.grid, dru + drd)
+    # _k_hxc_spin is only called from _dielectric_born_spin's nspin=2 path,
+    # where the NC SCF always sets rho_spin (see results.py).
+    assert res.rho_spin is not None
     fu, fd = fxc_hvp_spin(xc, res.rho_spin[0] + cu2, res.rho_spin[1] + cu2,
                           res.system.grid, dru, drd)
     return kh + fu, kh + fd
@@ -410,7 +445,7 @@ def _k_hxc_spin(res: SCFResult, xc: SpinXC, dru: torch.Tensor,
 
 @torch.no_grad()
 def _dielectric_born_spin(res: SCFResult, xc: SpinXC, *, dk, cg_tol, beta, outer_tol, max_outer,
-                          history, verbose) -> dict:
+                          history, verbose) -> dict[str, Any]:
     """ε∞ and Born charges for a collinear spin-polarized insulator (nspin=2).
 
     Mirrors ``dielectric_born`` per spin channel: the ∂H/∂k RHS and the
@@ -424,16 +459,18 @@ def _dielectric_born_spin(res: SCFResult, xc: SpinXC, *, dk, cg_tol, beta, outer
 
     system = res.system
     bk, grid = system.batch, system.grid
+    assert bk is not None
     kw = system.kweights
     vol = grid.volume
 
     # per-spin occupied window, Hamiltonian, Sternheimer shift, conduction proj
     projs_b = projectors_b(bk, system.positions)
+    coeffs_sp = cast("list[list[torch.Tensor]]", res.coeffs)
     c_occ, eps_occ, hs, shift = [], [], [], []
     for sp in range(2):
         nocc = insulator_window(res.occupations[sp], 1.0,
                                 "insulating occupations (f=1 per spin) required")
-        c_occ.append(pad_coeffs(res.coeffs[sp], bk.npw_max)[:, :nocc])
+        c_occ.append(pad_coeffs(coeffs_sp[sp], bk.npw_max)[:, :nocc])
         eps_occ.append(res.eigenvalues[sp][:, :nocc].to(RDTYPE))
         hs.append(BatchedHamiltonian(bk, grid.shape, res.v_eff[sp], projs_b))
         shift.append(sternheimer_shift(eps_occ[sp]))
@@ -443,12 +480,15 @@ def _dielectric_born_spin(res: SCFResult, xc: SpinXC, *, dk, cg_tol, beta, outer
         return x - torch.einsum("kbn,kng->kbg", ov, c_occ[sp])
 
     # ξ^α_σ = P_c r_α ψ_σ per spin channel (∂H/∂k is spin-independent)
-    xi = [[None, None, None] for _ in range(2)]
+    xi_raw: list[list[torch.Tensor | None]] = [[None, None, None] for _ in range(2)]
     for sp in range(2):
         for a in range(3):
             rhs = -1j * p_c(_dhdk_psi(system, c_occ[sp], a, dk), sp)
-            xi[sp][a] = cg_sternheimer(hs[sp], bk, c_occ[sp], eps_occ[sp], rhs,
-                                       torch.zeros_like(rhs), shift[sp], tol=cg_tol)
+            xi_raw[sp][a] = cg_sternheimer(hs[sp], bk, c_occ[sp], eps_occ[sp], rhs,
+                                           torch.zeros_like(rhs), shift[sp], tol=cg_tol)
+    # every xi_raw[sp][a] was assigned above (the double loop covers every
+    # index unconditionally), so no `None` placeholder survives below.
+    xi = cast("list[list[torch.Tensor]]", xi_raw)
 
     psi_r = [g_to_r_b(c_occ[sp], bk, grid.shape) for sp in range(2)]
     n_pts = grid.n_points
@@ -598,7 +638,7 @@ def _k_hxc_soc(res: NCResult, xc: NoncollinearXC, drho: torch.Tensor) -> torch.T
 
 @torch.no_grad()
 def _dielectric_born_soc(res: NCResult, xc: NoncollinearXC, *, dk, cg_tol, beta, outer_tol,
-                         max_outer, history, verbose) -> dict:
+                         max_outer, history, verbose) -> dict[str, Any]:
     """ε∞ and Born charges for a NONMAGNETIC fully-relativistic (spin-orbit)
     spinor result (``scf_noncollinear`` on an ``is_fr`` system with m⃗ ≡ 0).
 
@@ -653,13 +693,16 @@ def _dielectric_born_soc(res: NCResult, xc: NoncollinearXC, *, dk, cg_tol, beta,
     from gradwave.scf.noncollinear import SpinorHamiltonian
 
     bk, grid = system.batch, system.grid
+    assert bk is not None
     kw = system.kweights
     vol = grid.volume
     dev = system.positions.device
 
+    assert res.occupations is not None
     nocc = insulator_window(res.occupations, 1.0,
                             "insulating occupations (f=1 per spinor band) "
                             "required")
+    assert res.coeffs is not None, "res carries no spinor coefficients"
     c_occ = res.coeffs[:, :nocc].to(CDTYPE)
     eps_occ = res.eigenvalues[:, :nocc].to(RDTYPE)
     shift = sternheimer_shift(eps_occ)

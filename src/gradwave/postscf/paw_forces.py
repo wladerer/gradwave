@@ -108,9 +108,13 @@ def _aug_at_fixed(res: USPPResult, system: USPPSystem, isp: int | None = None) -
         nspin = res.get("nspin", 1)
         chans = [res["rho_ij_atoms"]] if nspin == 1 else res["rho_ij_atoms"]
         sel = range(nspin) if isp is None else [isp]
-        out = 0.0
+        out: torch.Tensor | None = None
         for s in sel:
-            out = out + _aug_from_becsum(system, chans[s], phases)
+            contrib = _aug_from_becsum(system, chans[s], phases)
+            out = contrib if out is None else out + contrib
+        # sel is never empty: isp is None -> range(nspin) with nspin in {1, 2},
+        # or isp given -> the singleton [isp].
+        assert out is not None
         return out
 
 
@@ -183,13 +187,19 @@ def forces_uspp(
             for a in range(len(system.atom_slices)):
                 e = e + (ddd_atoms[a][isp].to(CDTYPE) * rho_ij[a]).sum().real
         if hub_sites is not None:
+            from gradwave.scf.uspp_hubbard import hubbard_e_channel
+
             mult = 2.0 if nspin == 1 else 1.0
             e = e + mult * hubbard_e_channel(
                 hub_sites, hub_phi_free, system.q_full, pos, system.spheres,
                 projs, coeffs, becps, occ, kw,
                 occ_scale=(0.5 if nspin == 1 else 1.0))
 
-    rho_tot = sum(rho_chans)
+    # Not `sum(rho_chans)`: its int `0` default start makes the inferred type
+    # `Tensor | int` even though rho_chans always has nspin (>= 1) entries.
+    rho_tot = rho_chans[0]
+    for rc in rho_chans[1:]:
+        rho_tot = rho_tot + rc
     rho_g = r_to_g(rho_tot.to(CDTYPE))
 
     # NLCC core on the graph
@@ -198,10 +208,15 @@ def forces_uspp(
     from gradwave.core.density import sigma_from_rho
 
     if nspin == 1:
+        # nspin=1 is always dispatched with a collinear XCFunctional (the
+        # SpinXC/nspin=2 pairing is enforced by forces_uspp's own callers,
+        # same convention as scf/uspp_loop.py's xc dispatch).
+        assert isinstance(xc, XCFunctional)
         rho_xc = rho_tot if rho_core is None else rho_tot + rho_core
         sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
         e = e + xc.energy(rho_xc, vol, sigma)
     else:
+        assert isinstance(xc, SpinXC)
         c2 = 0.0 if rho_core is None else 0.5 * rho_core
         r_u, r_d = rho_chans[0] + c2, rho_chans[1] + c2
         s_uu, s_dd, s_tt = spin_sigma_triple(xc, r_u, r_d, grid.g_cart)

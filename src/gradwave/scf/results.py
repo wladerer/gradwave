@@ -24,7 +24,7 @@ drivers can import it without cycles.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -35,26 +35,35 @@ if TYPE_CHECKING:
     # docstring) even though there is no actual cycle (scf/uspp_setup.py's own
     # top-level imports never reach back into this module, nor do scf/loop.py's
     # or scf/noncollinear.py's).
+    from _typeshed import DataclassInstance
+
     from gradwave.scf.loop import SCFResult
     from gradwave.scf.noncollinear import NCResult
     from gradwave.scf.uspp_setup import USPPSystem
 
 
 class _DictBridge:
-    """Transitional dict-style view of a result dataclass (see module docs)."""
+    """Transitional dict-style view of a result dataclass (see module docs).
+
+    ``_DictBridge`` itself is a plain mixin, not a dataclass -- ``fields()``
+    needs a real ``DataclassInstance``, which only the ``@dataclass``
+    subclasses (``USPPResult``/``USPPNCResult``) actually are, so ``self`` is
+    cast at each call rather than widening ``fields()``'s own parameter type."""
 
     # fields mirroring keys the legacy dict carried only when applicable;
     # they read as absent while their value is None
     _conditional_keys = frozenset()
 
     def _present(self, key) -> bool:
-        if key == "formalism" or key not in {f.name for f in fields(self)}:
+        self_dc = cast("DataclassInstance", self)
+        if key == "formalism" or key not in {f.name for f in fields(self_dc)}:
             return False
         return not (key in self._conditional_keys
                     and getattr(self, key) is None)
 
     def keys(self):
-        return [f.name for f in fields(self) if self._present(f.name)]
+        self_dc = cast("DataclassInstance", self)
+        return [f.name for f in fields(self_dc) if self._present(f.name)]
 
     def __iter__(self):
         return iter(self.keys())
@@ -84,24 +93,26 @@ class USPPResult(_DictBridge):
     energies: EnergyBreakdown
     eigenvalues: torch.Tensor  # (nk, nb) [eV]; (nspin, nk, nb) when nspin=2
     occupations: torch.Tensor  # (nk, nb); (nspin, nk, nb) when nspin=2
-    coeffs: list  # [(nb, npw_k)] per k; list-of-lists [spin][k] when nspin=2
+    # [(nb, npw_k)] per k (nspin=1); list-of-lists [spin][k] when nspin=2 --
+    # scf_uspp collapses the per-spin wrapper away at nspin=1 (`coeffs[0]`).
+    coeffs: list[torch.Tensor] | list[list[torch.Tensor]]
     rho: torch.Tensor  # TOTAL density (n1,n2,n3) [e/Å³]
-    rho_ij_atoms: list  # becsum per atom; [spin][atom] when nspin=2
-    becps: list  # ⟨β|ψ⟩ per k; [spin][k] when nspin=2
-    history: list
+    rho_ij_atoms: list[torch.Tensor] | list[list[torch.Tensor]]  # per atom; [spin][atom] w/ nspin=2
+    becps: list[torch.Tensor] | list[list[torch.Tensor]]  # ⟨β|ψ⟩ per k; [spin][k] when nspin=2
+    history: list[dict[str, int | float]]  # common.record_iteration's per-iter schema
     fermi: float | None
     system: USPPSystem
     nspin: int
     smearing: str
     width: float
     mixer_mult: dict[int, float] | None  # mixer block multipliers (diagnostics)
-    rho_out_spin: list  # RAW map output (pre-mixing) — rig/diagnostics
-    hub_occ: list | None = None  # DFT+U per-spin occupation matrices [σ][site]
-    hub_sites: list | None = None  # DFT+U site definitions
-    rho_spin: list | None = None  # [ρ↑, ρ↓] when nspin=2
+    rho_out_spin: list[torch.Tensor]  # RAW map output (pre-mixing) — rig/diagnostics
+    hub_occ: list[list[torch.Tensor]] | None = None  # DFT+U per-spin occupation matrices [σ][site]
+    hub_sites: list[dict[str, int | float]] | None = None  # DFT+U site definitions
+    rho_spin: list[torch.Tensor] | None = None  # [ρ↑, ρ↓] when nspin=2
     mag_total: float | None = None  # ∫(ρ↑−ρ↓) dr [μB] when nspin=2
     mag_abs: float | None = None  # ∫|ρ↑−ρ↓| dr [μB] when nspin=2
-    newton: list | None = None  # newton_polish per-step residual norms
+    newton: list[float] | None = None  # newton_polish per-step residual norms
     formalism: str = "uspp"
 
     _conditional_keys = frozenset(
@@ -120,14 +131,14 @@ class USPPNCResult(_DictBridge):
     n_iter: int
     energies: EnergyBreakdown
     fermi: float
-    mag_vec: tuple  # ∫ m⃗ dr [μB]
+    mag_vec: tuple[float, ...]  # ∫ m⃗ dr [μB], 3 components
     mag_abs: float  # ∫ |m⃗| dr [μB]
     rho: torch.Tensor
     m: torch.Tensor  # (3, *grid)
     eigenvalues: torch.Tensor  # (nk, nb)
     system: USPPSystem
-    history: list = field(default_factory=list)
-    rho_ij_chan: list | None = None  # becsum in the 4 (n, m⃗) channels
+    history: list[dict[str, int | float]] = field(default_factory=list)
+    rho_ij_chan: list[list[torch.Tensor]] | None = None  # becsum in the 4 (n, m⃗) channels
     coeffs: torch.Tensor | None = None  # (nk, nb, 2·npw_max) spinors
     formalism: str = "uspp_noncollinear"
 

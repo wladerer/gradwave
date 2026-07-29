@@ -29,6 +29,7 @@ tests is direct. Units: eV/Å³; stress_kbar() converts.
 from __future__ import annotations
 
 import math
+from typing import cast
 
 import numpy as np
 import torch
@@ -164,9 +165,26 @@ def _energy_strained(
     """
     system = res.system
     if getattr(system, "is_fr", False):
+        # is_fr is only ever true on a fully-relativistic NCResult, run with
+        # its NoncollinearXC.
+        assert isinstance(res, NCResult) and isinstance(xc, NoncollinearXC)
         return _energy_strained_fr(
             res, xc, eps, rho=rho, coeffs=coeffs, spheres=spheres,
             manifolds=manifolds)
+    # The collinear path below only handles SCFResult's per-spin rho_spin/
+    # coeffs structure -- a scalar-relativistic (non-SOC) NCResult was never
+    # actually supported here despite the wider `res: SCFResult | NCResult`
+    # signature: it would silently fall through to `res.rho_spin` (NCResult
+    # has no such field -- AttributeError) or nspin defaulting to 1 and a
+    # NoncollinearXC instance being called with XCFunctional's positional
+    # signature (wrong energy, not even an error). Made explicit instead of
+    # left as a landmine.
+    if not isinstance(res, SCFResult):
+        raise NotImplementedError(
+            "stress(): scalar-relativistic (non-SOC) noncollinear results "
+            "are not supported; only collinear (SCFResult) and "
+            "fully-relativistic spin-orbit (is_fr NCResult) stress are "
+            "implemented")
     grid = system.grid
     dev = system.positions.device
     rdt = RDTYPE
@@ -182,12 +200,18 @@ def _energy_strained(
     # nspin=1 and carries its own graph, so it is not detached here.
     if coeffs is not None:
         coeffs_s = [coeffs]
+    elif nspin == 2:
+        coeffs_s = [[c.detach() for c in cs]
+                    for cs in cast("list[list[torch.Tensor]]", res.coeffs)]
     else:
-        coeffs_s = (res.coeffs if nspin == 2 else [res.coeffs])
-        coeffs_s = [[c.detach() for c in cs] for cs in coeffs_s]
+        coeffs_s = [[c.detach() for c in cast("list[torch.Tensor]", res.coeffs)]]
     occ = res.occupations.detach()
     occ_s = occ if nspin == 2 else occ[None]
-    rho_spin = [r.detach() for r in res.rho_spin] if nspin == 2 else None
+    if nspin == 2:
+        assert res.rho_spin is not None  # scf() always sets rho_spin at nspin=2
+        rho_spin = [r.detach() for r in res.rho_spin]
+    else:
+        rho_spin = None
 
     _f_map, a_e, b_e, omega0, omega, pos_e = strain_cell(
         grid, system.positions, eps)
@@ -232,18 +256,37 @@ def _energy_strained(
     if xc.needs_gradient:
         g_box = (m_box @ b_e).reshape(*shape, 3)
     if nspin == 1:
+        # nspin=1 is always paired with a collinear XCFunctional (same
+        # convention as scf/uspp_loop.py's own xc dispatch).
+        assert isinstance(xc, XCFunctional)
         rho_xc = rho * (omega0 / omega)
         if core_e is not None:
             rho_xc = rho_xc + core_e
-        sigma_xc = _sigma(rho_xc, g_box) if xc.needs_gradient else None
+        if xc.needs_gradient:
+            assert g_box is not None
+            sigma_xc = _sigma(rho_xc, g_box)
+        else:
+            sigma_xc = None
         tau_xc = (_tau_strained(coeffs_s[0], spheres, b_e, omega, occ_s[0], kw,
                                 shape) if xc.needs_tau else None)
-        e_xc = xc.energy(rho_xc, omega, sigma_xc, tau_xc)
+        # XCFunctional.energy's `volume: float` annotation doesn't reflect
+        # its real contract: every strain/stress call site here (and the
+        # already-clean postscf/paw_stress.py, which passes an identically
+        # differentiable Tensor `omega` -- ty just doesn't catch it there
+        # because an intermediate `torch.sign(...)` reassignment degrades
+        # its inferred type) needs `omega` to stay a Tensor on the autograd
+        # graph so d(E_xc)/dε carries the Ω(ε) volume dependence; a real
+        # float would silently sever that term. cast(), not a semantic
+        # change -- core/xc/base.py is out of this pass's scope.
+        e_xc = xc.energy(rho_xc, cast(float, omega), sigma_xc, tau_xc)
     else:
+        assert isinstance(xc, SpinXC)
+        assert rho_spin is not None
         c2 = 0.0 if core_e is None else 0.5 * core_e
         r_u = rho_spin[0] * (omega0 / omega) + c2
         r_d = rho_spin[1] * (omega0 / omega) + c2
         if xc.needs_gradient:
+            assert g_box is not None
             s_uu, s_dd, s_tt = (_sigma(r_u, g_box), _sigma(r_d, g_box),
                                 _sigma(r_u + r_d, g_box))
         else:
@@ -325,6 +368,8 @@ def _tau_strained(
             grad2 = term if grad2 is None else grad2 + term
         contrib = 0.5 * torch.einsum("b,bxyz->xyz", w.to(grad2.dtype), grad2)
         tau = contrib if tau is None else tau + contrib
+    # spheres always has >= 1 k-point in practice.
+    assert tau is not None
     return tau / omega
 
 
@@ -366,7 +411,10 @@ def _energy_strained_fr(
     rho = res.rho.detach() if rho is None else rho  # total ρ↑+ρ↓
     m_vec = res.m.detach()  # magnetization (3, *grid)
     spheres = system.spheres if spheres is None else spheres
-    coeffs = res.coeffs.detach() if coeffs is None else coeffs  # (nk,nb,2·npw_max)
+    if coeffs is None:
+        assert res.coeffs is not None, "res carries no spinor coefficients"
+        coeffs = res.coeffs.detach()  # (nk,nb,2·npw_max)
+    assert res.occupations is not None
     occ = res.occupations.detach()  # (nk, nb), spinor degeneracy g=1
     kw = system.kweights
 
@@ -412,7 +460,9 @@ def _energy_strained_fr(
         s_tt = _sigma(rho_tot, g_box)
     else:
         s_uu = s_dd = s_tt = None
-    e_xc = xc.energy(rho_xc, m_xc, omega, s_uu, s_dd, s_tt, rho_core=core_e)
+    # NoncollinearXC.energy's `volume: float` has the same real-but-untyped
+    # Tensor contract as XCFunctional.energy (see the nspin=1 branch above).
+    e_xc = xc.energy(rho_xc, m_xc, cast(float, omega), s_uu, s_dd, s_tt, rho_core=core_e)
 
     # ---- kinetic + nonlocal, per k. The spinor coefficients live on a doubled
     # plane-wave axis [↑ (npw_max), ↓ (npw_max)]; slice each half to the

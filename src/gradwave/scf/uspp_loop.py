@@ -1555,13 +1555,18 @@ def scf_uspp(
     # values from the last iteration by the time we get here, never the
     # pre-loop placeholders.
     assert energies is not None and eigs_s is not None and occ_s is not None
+    # _solve_bands_uspp mutates every coeffs[isp][ik] in place unconditionally
+    # (same reasoning as _scf_iteration's own coeffs_full cast above), so by
+    # the final return every element is a real Tensor, not the seed-compatible
+    # `Tensor | None` the warm-start-carrying `coeffs` variable is typed for.
+    coeffs_final = cast("list[list[torch.Tensor]]", coeffs)
     return USPPResult(
         converged=converged,
         n_iter=len(history),
         energies=energies,
         eigenvalues=eigs_s[0] if nspin == 1 else torch.stack(eigs_s),
         occupations=occ_s[0] if nspin == 1 else torch.stack(occ_s),
-        coeffs=coeffs[0] if nspin == 1 else coeffs,
+        coeffs=coeffs_final[0] if nspin == 1 else coeffs_final,
         rho=rho_final,
         rho_ij_atoms=rho_ij_final[0] if nspin == 1 else rho_ij_final,
         becps=becps_s[0] if nspin == 1 else becps_s,

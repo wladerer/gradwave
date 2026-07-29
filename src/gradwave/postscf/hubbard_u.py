@@ -32,6 +32,8 @@ Three capabilities:
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import torch
 
 from gradwave.core._anderson import AndersonMixer
@@ -62,6 +64,7 @@ from gradwave.postscf._response import (
 from gradwave.postscf._response import (
     pad_coeffs as _pad,
 )
+from gradwave.postscf._strain import _HubbardSite
 from gradwave.scf.loop import SCFResult, System, scf
 
 
@@ -140,7 +143,7 @@ def _bare_response_occ(system, base_res, hub, hub_q, alpha_vec, smearing, width)
 
 
 def _fd_response_column(system, xc, base, hub, hub_q, j, alpha, man,
-                        smearing, width, scf_kwargs) -> tuple:
+                        smearing, width, scf_kwargs) -> tuple[torch.Tensor, torch.Tensor]:
     """Central-difference response column (χ_col, χ0_col) [1/eV] from perturbing
     the single site `j`: dN_I/dα_j for all sites I (interacting and bare)."""
     ns = hub.n_sites
@@ -162,7 +165,7 @@ def _fd_response_column(system, xc, base, hub, hub_q, j, alpha, man,
 
 def linear_response_u(system: System, xc: XCFunctional | SpinXC, l: int, species: int, *,
                       site: int = 0, alpha: float = 0.1, smearing: str="gaussian",
-                      width: float=0.05, scf_kwargs=None) -> dict:
+                      width: float=0.05, scf_kwargs=None) -> dict[str, Any]:
     """Compute the linear-response Hubbard U [eV] for a manifold.
 
     Measures the on-site occupation response to a rigid projector probe and
@@ -179,7 +182,13 @@ def linear_response_u(system: System, xc: XCFunctional | SpinXC, l: int, species
     hub_q = hubbard_projectors(hub, system.positions)
     ns = hub.n_sites
 
-    base = scf(system, xc, smearing=smearing, width=width, hubbard=man, **scf_kwargs)
+    # scf()'s own `xc: XCFunctional` annotation doesn't reflect its real
+    # runtime contract -- api.py's nspin=2 collinear path already calls it
+    # with a genuine SpinXC instance under an identical `cast` (run_scf's
+    # `scf(system, cast("XCFunctional", xc), ...)`), so this isn't a new
+    # widening, just the same established escape hatch at another call site.
+    base = scf(system, cast("XCFunctional", xc), smearing=smearing, width=width,
+              hubbard=man, **scf_kwargs)
 
     if _use_full_matrix(hub.sites, system.species_of_atom):
         chi_cols, chi0_cols = [], []  # column j = response to perturbing site j
@@ -197,7 +206,7 @@ def linear_response_u(system: System, xc: XCFunctional | SpinXC, l: int, species
     return _assemble_u(chi_col, chi0_col, site, hub.sites, system.species_of_atom)
 
 
-def _all_sites_equivalent(sites: list, species_of_atom: list[int]) -> bool:
+def _all_sites_equivalent(sites: list[_HubbardSite], species_of_atom: list[int]) -> bool:
     """True if every Hubbard site shares the first site's species and l — the
     symmetry-equivalent case where the symmetric single-column shortcut holds."""
     if len(sites) <= 1:
@@ -206,7 +215,7 @@ def _all_sites_equivalent(sites: list, species_of_atom: list[int]) -> bool:
     return all(species_of_atom[s["atom"]] == sp0 and s["l"] == l0 for s in sites)
 
 
-def _use_full_matrix(sites: list, species_of_atom: list[int]) -> bool:
+def _use_full_matrix(sites: list[_HubbardSite], species_of_atom: list[int]) -> bool:
     """Whether the general per-site response matrix is needed. The cheap
     single-column shortcut only covers a lone site (scalar) or exactly two
     symmetry-equivalent sites ([[a,b],[b,a]]); anything else — an inequivalent
@@ -220,7 +229,7 @@ def _use_full_matrix(sites: list, species_of_atom: list[int]) -> bool:
 
 
 def _assemble_u(chi_col: torch.Tensor, chi0_col: torch.Tensor, site: int,
-                sites: list, species_of_atom: list[int]) -> dict:
+                sites: list[_HubbardSite], species_of_atom: list[int]) -> dict[str, Any]:
     """U = (χ0^{-1} − χ^{-1})_II from one response column.
 
     The cheap single-perturbed-site path: a lone site gives the scalar estimate;
@@ -251,7 +260,7 @@ def _assemble_u(chi_col: torch.Tensor, chi0_col: torch.Tensor, site: int,
 
 
 def _assemble_u_matrix(chi_mat: torch.Tensor, chi0_mat: torch.Tensor,
-                       site: int) -> dict:
+                       site: int) -> dict[str, Any]:
     """U = (χ0^{-1} − χ^{-1})_{site,site} from the full response matrix χ_IJ
     (column J = response to perturbing site J), built by perturbing every
     correlated site independently — the general inequivalent/multi-site path."""
@@ -274,6 +283,9 @@ def _k_hxc_spin(
     core = res.system.rho_core
     cu2 = 0.0 if core is None else 0.5 * core
     kh = hartree_kernel(res.system.grid, dru + drd)
+    # _k_hxc_spin is only ever called from _k_hxc_channels's `nspin == 2`
+    # branch, and the NC SCF always sets rho_spin then (see results.py).
+    assert res.rho_spin is not None
     fu, fd = fxc_hvp_spin(xc, res.rho_spin[0] + cu2, res.rho_spin[1] + cu2,
                           res.system.grid, dru, drd)
     return kh + fu, kh + fd
@@ -292,8 +304,10 @@ def _k_hxc_channels(
     the nspin=1 SCF), so the closed-shell f_xc·Δρ_tot is the non-spin `fxc_hvp`
     at the full ρ+ρ_core, exactly matching the nspin=1 dielectric kernel."""
     if res.nspin == 2:
+        assert isinstance(xc, SpinXC)
         du, dd = _k_hxc_spin(res, xc, drho[0], drho[1])
         return [du, dd]
+    assert isinstance(xc, XCFunctional)
     core = res.system.rho_core
     rho_xc = res.rho if core is None else res.rho + core
     drho_tot = 2.0 * drho[0]  # Δρ_tot = Δρ↑ + Δρ↓, spin degeneracy of the one channel
@@ -334,6 +348,8 @@ def _response_columns(
 
     system = res.system
     bk, grid = system.batch, system.grid
+    # the batched Sternheimer path below needs system.batch built.
+    assert bk is not None
     kw = system.kweights
     nspin = res.nspin
     # g = spin degeneracy folded into each computed channel and the full band
@@ -410,6 +426,9 @@ def _response_columns(
         if verbose:
             print(f"  response it {it:3d}: chi_col = {chi_col.tolist()}")
         if chi_prev is not None and float((chi_col - chi_prev).abs().max()) < outer_tol:
+            # chi_prev is only real from it==2 onward, and chi0_col is always
+            # set on it==1, so it's real whenever this return is reached.
+            assert chi0_col is not None
             return chi0_col, chi_col, it
         chi_prev = chi_col
         dv = _k_hxc_channels(res, xc, drho)
@@ -434,7 +453,7 @@ def linear_response_u_autodiff(
     cg_tol: float = 1e-8,
     history: int = 8,
     verbose: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     """Linear-response Hubbard U [eV] with analytic (Sternheimer) response —
     no finite differences, no probe SCF re-runs; ONE ground-state SCF total.
 
@@ -446,7 +465,10 @@ def linear_response_u_autodiff(
     hub = build_hubbard_projectors(system, man)
     hub_q = hubbard_projectors(hub, system.positions)
 
-    base = scf(system, xc, smearing=smearing, width=width, hubbard=man, **scf_kwargs)
+    # see linear_response_u's identical cast for why: scf()'s own
+    # `xc: XCFunctional` annotation doesn't reflect its real nspin=2 contract.
+    base = scf(system, cast("XCFunctional", xc), smearing=smearing, width=width,
+              hubbard=man, **scf_kwargs)
     if not base.converged:
         raise RuntimeError("base SCF did not converge")
 
