@@ -100,6 +100,12 @@ Keep terminal output small: `git status -s`, `git log --oneline`, `git diff --st
 `ruff check --output-format=concise`, and `pytest --tb=short`. `GIT_PAGER=cat` avoids pager
 stalls.
 
+`gh pr checks <n>` intermittently fails with "no commit found on the pull request" even when
+the PR clearly exists — query `gh api repos/<owner>/<repo>/commits/<sha>/check-runs` directly
+instead, it doesn't have this problem. Re-check `gh pr view --json mergeable` immediately
+before merging even if CI showed green earlier in the same session — another PR merging in
+the interim can silently re-trigger a conflict that wasn't there a minute ago.
+
 ## Job queue (pueue) — route heavy runs through it
 
 When multiple agents run at once, don't launch heavy test/benchmark runs as raw
@@ -146,6 +152,26 @@ Rules that keep the fleet from tangling:
 - **Shared state is NOT worktree-isolated** — the git stash stack (never bare
   `git stash`; use a WIP commit), the primary `~/github/gradwave` checkout, and the
   `willnix` config repo (treat as single-writer; two agents editing it *will* clobber).
+- **Verify a branch's real state before rebasing it, and verify the result after.** A
+  worktree's local branch can silently drift from the actual remote branch (a stale
+  checkout, an earlier operation that never pushed). Before `git rebase origin/main`,
+  confirm `git rev-parse HEAD` matches the remote branch's real tip (`git fetch` +
+  `git rev-parse origin/<branch>`) — a rebase with nothing real to replay still reports
+  "Successfully rebased" while silently dropping every commit. After rebasing, diff the
+  result against the commit's own pre-rebase parent (`git diff --stat <old-parent>
+  <old-commit>` vs `git diff --stat origin/main HEAD`) rather than trusting a clean
+  exit code as proof nothing was lost.
+- **Split verification from destructive action into separate tool calls.** `cd <path>
+  && pwd` (and `git status`) to confirm location and state, THEN `git reset --hard` /
+  `git rebase` / etc. as its own following call. Chaining a verification step and a
+  destructive command in one shot is easy to get wrong and hard to audit after the fact.
+- **A background job needs a live `Monitor`, not a hope of being resumed.** If you're
+  pausing your turn to wait on a background command, arm your own `Monitor` on its
+  completion marker before you stop — otherwise there's no reliable signal that you're
+  actually still working, and you'll generate repeated no-op "still waiting" notifications
+  instead of one real one. If an investigation branches (e.g. you abandon one system or
+  approach for another), explicitly stop the abandoned branch's `Monitor` rather than
+  leaving it to fire on its own timeout well after the real work is already done.
 
 ## Remote compute (asus)
 
