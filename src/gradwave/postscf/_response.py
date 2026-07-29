@@ -24,11 +24,11 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
+from typing import Protocol
 
 import torch
 
 from gradwave.constants import E2
-from gradwave.core.batch import BatchedHamiltonian, BatchedK
 from gradwave.core.density import sigma_from_rho
 from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.xc.base import XCFunctional, xc_eager
@@ -37,6 +37,25 @@ from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import CDTYPE
 from gradwave.grids import FFTGrid
 from gradwave.solvers.precond import teter_b
+
+
+class _AppliesH(Protocol):
+    """Anything ``cg_sternheimer`` can call as a batched Hamiltonian: only
+    ``.apply(x)`` is read. ``BatchedHamiltonian`` satisfies this; so does
+    ``scf.noncollinear.SpinorHamiltonian`` (postscf.dielectric's spinor
+    Sternheimer solves reuse this same CG unchanged)."""
+
+    def apply(self, x: torch.Tensor) -> torch.Tensor: ...
+
+
+class _HasKineticTable(Protocol):
+    """Anything ``cg_sternheimer`` can use for the Teter preconditioner: only
+    ``.t`` (the kinetic table) is read -- not the full ``BatchedK`` contract.
+    ``BatchedK`` satisfies this; so does the ``SimpleNamespace(t=...)`` shim
+    postscf.dielectric's spinor path builds (a doubled-plane-wave-axis kinetic
+    table is all this function needs to run unchanged on spinors)."""
+
+    t: torch.Tensor
 
 
 class DysonNotConverged(RuntimeError):
@@ -221,9 +240,9 @@ def pad_coeffs(coeffs_per_k: list[torch.Tensor], npw_max: int,
     return out
 
 
-def cg_sternheimer(h: BatchedHamiltonian, bk: BatchedK, c_occ: torch.Tensor, eps_occ: torch.Tensor,
-                   rhs: torch.Tensor, x0: torch.Tensor, shift: float, tol: float=1e-8,
-                   max_iter: int=400) -> torch.Tensor:
+def cg_sternheimer(h: _AppliesH, bk: _HasKineticTable, c_occ: torch.Tensor,
+                   eps_occ: torch.Tensor, rhs: torch.Tensor, x0: torch.Tensor, shift: float,
+                   tol: float=1e-8, max_iter: int=400) -> torch.Tensor:
     """Batched conduction-projected Sternheimer: (H − ε_n + s·P_occ)δψ = rhs,
     for all occupied bands of all k at once ((nk, nocc, npw_max), masked).
     rhs must already lie in the conduction space; positive definite there
