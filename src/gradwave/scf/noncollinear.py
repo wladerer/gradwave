@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, TypedDict
 
 import numpy as np
 import torch
@@ -81,6 +81,23 @@ from gradwave.solvers.davidson import davidson_batched
 logger = logging.getLogger(__name__)
 
 
+class _WorkingTables(TypedDict):
+    """Working-precision copies cached per dtype by ``SpinorHamiltonian._tables``.
+    ``q``/``q_conj``/``dij_so`` are only present for fully-relativistic (SOC)
+    pseudos; every other entry is always a real tensor."""
+
+    t: torch.Tensor
+    v_uu: torch.Tensor
+    v_dd: torch.Tensor
+    v_ud: torch.Tensor
+    p: torch.Tensor
+    p_conj: torch.Tensor
+    q: torch.Tensor | None
+    q_conj: torch.Tensor | None
+    dij_so: torch.Tensor | None
+    dij: torch.Tensor
+
+
 class SpinorHamiltonian:
     """H apply on doubled vectors (nk, nb, 2·npw_max).
 
@@ -118,10 +135,11 @@ class SpinorHamiltonian:
         # runs (B⃗ ≡ 0) take a fast path that skips the spin-flip term.
         self.b_zero, self._v_uu, self._v_dd, self._v_ud = \
             spinor_potential_blocks(v_r, b_vec_r)
-        self._cache: dict = {}
-        self._hub_cache: dict = {}  # cdtype → cast (hub_q, hub_q_conj, hub_dij)
+        self._cache: dict[torch.dtype, _WorkingTables] = {}
+        # cdtype → cast (hub_q, hub_q_conj, hub_dij)
+        self._hub_cache: dict[torch.dtype, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
-    def _tables(self, cdtype: torch.dtype) -> dict[str, torch.Tensor | None]:
+    def _tables(self, cdtype: torch.dtype) -> _WorkingTables:
         """Working-precision copies of the fixed tensors (cached per dtype)."""
         cached = self._cache.get(cdtype)
         if cached is None:
@@ -130,7 +148,7 @@ class SpinorHamiltonian:
             rdtype = real_of(cdtype)
             p = self.p.to(cdtype)
             q = None if self.q is None else self.q.to(cdtype)
-            cached = {
+            cached: _WorkingTables = {
                 "t": self.bk.t.to(rdtype),
                 "v_uu": self._v_uu.to(rdtype),
                 "v_dd": self._v_dd.to(rdtype),
@@ -148,6 +166,10 @@ class SpinorHamiltonian:
         return cached
 
     def _hub_tables(self, cdtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # only called under `if self.hub_q is not None and self.hub_dij is
+        # not None:` (see apply() below)
+        assert self.hub_q is not None
+        assert self.hub_dij is not None
         cached = self._hub_cache.get(cdtype)
         if cached is None:
             hq = self.hub_q.to(cdtype)
@@ -221,17 +243,17 @@ class NCResult:
     n_iter: int
     energies: EnergyBreakdown
     fermi: float
-    mag_vec: tuple  # ∫ m⃗ dr [μB]
+    mag_vec: tuple[float, float, float]  # ∫ m⃗ dr [μB]
     mag_abs: float  # ∫ |m⃗| dr [μB]
     rho: torch.Tensor
     m: torch.Tensor  # (3, grid)
     eigenvalues: torch.Tensor  # (nk, nb)
     system: System
-    history: list = field(default_factory=list)
+    history: list[dict[str, int | float]] = field(default_factory=list)
     coeffs: torch.Tensor | None = None  # (nk, nb, 2·npw_max) spinor coefficients
     occupations: torch.Tensor | None = None  # (nk, nb) spinor occupations (g=1)
     formalism: str = "noncollinear"  # result-type tag shared by all four SCF drivers
-    hub_occ: list | None = None  # DFT+U per-site 2×2 spin-block occupation matrices N^I
+    hub_occ: list[torch.Tensor] | None = None  # DFT+U per-site 2×2 spin-block occ N^I
 
 
 _MAG_MIXERS = {"pulay": "PulayMixer", "johnson": "JohnsonMixer",
@@ -354,6 +376,7 @@ def _nc_energy_breakdown(
                             tau_up=tau_up, tau_dn=tau_dn)
     e_loc = local_energy(rho_g_out, vloc_g, vol)
     if q_so is not None:
+        assert dij_so is not None  # q_so and dij_so are always set together
         b_so = torch.einsum("kpg,kbg->kbp", q_so.conj(), coeffs)
         e_nl = nonlocal_energy([b_so[ik] for ik in range(nk)], dij_so, occ,
                                system.kweights)
@@ -520,7 +543,9 @@ def scf_noncollinear(
     # magnetic runs on the magnetic IBZ are allowed. The seeded mag_vec_init
     # must match the magmoms the group was built from — symmetrization
     # projects every iteration onto that magnetic symmetry.
-    mag_sym_active = hasattr(system.rho_symmetrizer, "apply_m")
+    from gradwave.symmetry import MagneticSymmetrizer
+
+    mag_sym_active = isinstance(system.rho_symmetrizer, MagneticSymmetrizer)
     if system.rho_symmetrizer is not None and not (nonmagnetic or mag_sym_active):
         raise ValueError(
             "noncollinear SCF with a nonzero m⃗ requires use_symmetry=False "
@@ -529,6 +554,10 @@ def scf_noncollinear(
             "(m⃗ ≡ 0) case keeps the full crystal symmetry — pass nonmagnetic=True"
         )
     grid, bk = system.grid, system.batch
+    # setup_system always builds System.batch (build_batched runs unconditionally);
+    # the field's `| None` only accommodates dataclasses.replace()-style partial
+    # copies, never a real system reaching the SCF driver.
+    assert bk is not None
     vol, nk = grid.volume, len(system.spheres)
     device = system.positions.device
     mp_crossover = MP_CROSSOVER
@@ -620,6 +649,7 @@ def scf_noncollinear(
         if not mag_sym_active or nonmagnetic:
             return m_r
         m_g = torch.stack([r_to_g(m_r[i].to(CDTYPE)) for i in range(3)])
+        assert isinstance(system.rho_symmetrizer, MagneticSymmetrizer)
         m_g = system.rho_symmetrizer.apply_m(m_g)
         return g_to_r_box(m_g, real=True)
 
@@ -643,6 +673,10 @@ def scf_noncollinear(
         hub_dij_nc = None
         if hub is not None:
             from gradwave.core.hubbard import hubbard_dmatrix_noncollinear
+            # hub, hub_q, and n_hub_nc are always set together (the `if
+            # hubbard:` block above sets all three; only its absence leaves
+            # them None)
+            assert n_hub_nc is not None
             hub_dij_nc = hubbard_dmatrix_noncollinear(
                 n_hub_nc, hub.sites, hub.nproj, device)
 
@@ -668,6 +702,7 @@ def scf_noncollinear(
                 hubbard_energy,
                 occupation_matrices_noncollinear,
             )
+            assert hub_q is not None  # set together with hub (see above)
             n_hub_nc = occupation_matrices_noncollinear(
                 hub_q, coeffs[..., :m_pw], coeffs[..., m_pw:], occ,
                 system.kweights, hub.sites)
@@ -771,7 +806,7 @@ def scf_noncollinear(
     m_norm = torch.sqrt((m**2).sum(dim=0))
     return NCResult(
         converged=converged, n_iter=it, energies=energies, fermi=mu,
-        mag_vec=tuple(m_int), mag_abs=float(m_norm.mean()) * vol,
+        mag_vec=(m_int[0], m_int[1], m_int[2]), mag_abs=float(m_norm.mean()) * vol,
         rho=rho, m=m, eigenvalues=eigs, system=system, history=history,
         coeffs=coeffs, occupations=occ, hub_occ=n_hub_nc,
     )
@@ -808,6 +843,12 @@ def band_structure_nc(res: NCResult, xc: NoncollinearXC, kpts_frac: np.ndarray,
     tau_up = tau_dn = None
     if getattr(xc, "needs_tau", False):
         bk0 = system.batch
+        # a converged NCResult always carries both (scf_noncollinear's own
+        # return always sets coeffs=coeffs, occupations=occ) and system.batch
+        # is likewise always built by setup_system (see the assert above)
+        assert bk0 is not None
+        assert res.coeffs is not None
+        assert res.occupations is not None
         tau_scalar, tau_vec = spinor_tau_matrix_b(
             res.coeffs, res.occupations, system.kweights, bk0, grid.shape,
             grid.volume, bk0.npw_max)
@@ -863,6 +904,7 @@ def band_structure_nc(res: NCResult, xc: NoncollinearXC, kpts_frac: np.ndarray,
         q_so, dij_so = build_so_projectors(bk, system, so_tables=so_tabs)
         metagga_op = None
         if v0 is not None:
+            assert vvec is not None  # v0 and vvec are always set together above
             def metagga_op(c, _v0=v0, _vv=vvec, _bk=bk, _mpw=bk.npw_max):
                 return spinor_metagga_tau_operator(c, _v0, _vv, _bk, grid.shape, _mpw)
         h = SpinorHamiltonian(bk, grid.shape, v_r, torch.zeros_like(b_xc)

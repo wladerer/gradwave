@@ -62,11 +62,9 @@ _StateKey = tuple[bytes, bytes, bytes, tuple[str, ...], bytes, str, str]
 
 
 def _fft_grid(system: System | USPPSystem) -> FFTGrid:
-    """`System`/`USPPSystem` both declare `grid` as bare `object` (their
-    modules stay import-light with respect to grids.py); every actual
-    instance is an `FFTGrid` — this names that fact for the type checker
-    instead of re-asserting it at each access site."""
-    return cast("FFTGrid", system.grid)
+    """Both `System.grid` and `USPPSystem.grid` are `FFTGrid`; this just names
+    the shared field for callers that hold the `System | USPPSystem` union."""
+    return system.grid
 
 
 @jaxtyped(typechecker=beartype)

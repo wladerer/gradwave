@@ -72,6 +72,20 @@ if TYPE_CHECKING:
     # stylistic) circular import at runtime, so this type is annotation-only.
     from gradwave.postscf.hybrid import MultiKFockExchange
 
+    # Annotation-only cross-module types for System's fields below. No import
+    # cycle here (symmetry.py and scf/alchemical.py's own top-level imports
+    # never reach back into this module), but every concrete use of these
+    # classes at runtime in this file already goes through its own
+    # function-local import (e.g. CollinearMagneticSymmetrizer at its
+    # isinstance-check call sites below), so this stays annotation-only too.
+    from gradwave.scf.alchemical import AlchemicalSpec
+    from gradwave.symmetry import (
+        CollinearMagneticSymmetrizer,
+        MagneticSymmetrizer,
+        RhoSymmetrizer,
+        SpaceGroup,
+    )
+
 logger = logging.getLogger(__name__)
 
 
@@ -79,7 +93,7 @@ logger = logging.getLogger(__name__)
 class System:
     """Frozen per-geometry setup (Layer B product)."""
 
-    grid: object
+    grid: FFTGrid
     spheres: list
     kweights: torch.Tensor
     positions: torch.Tensor  # (na,3) Å, detached
@@ -92,17 +106,19 @@ class System:
     n_electrons: float
     nbands: int
     ecut: float = 0.0  # eV — needed to build additional G-spheres (band paths)
-    batch: object = None  # core.batch.BatchedK — the padded k-batched tensors
-    sym: object = None  # symmetry.SpaceGroup when IBZ reduction is active, else None
-    rho_symmetrizer: object = None  # symmetry.RhoSymmetrizer (paired with sym)
+    batch: BatchedK | None = None  # the padded k-batched tensors
+    sym: SpaceGroup | None = None  # set when IBZ reduction is active, else None
+    rho_symmetrizer: RhoSymmetrizer | CollinearMagneticSymmetrizer | MagneticSymmetrizer | None = (
+        None  # paired with sym; the magnetic variants only when magmoms is set
+    )
     so_beta_tables: list | None = None  # FR pseudos: per-species (nk, nchan, npw_max)
     is_fr: bool = False  # fully-relativistic pseudos (spinor SCF only)
     rho_core: torch.Tensor | None = None  # NLCC core density on the grid [e/Å³]
     vloc_atom: torch.Tensor | None = None  # (na,n1,n2,n3) per-atom local table;
     # the alchemical composition channel sets a lambda-blended table here so
     # V_loc stays differentiable in composition (scf/alchemical.py)
-    alchemical: object = None  # endpoint spec for the composition gradient
-    # (scf/alchemical.setup_alchemical_system / alchemical_energy_gradient)
+    alchemical: AlchemicalSpec | None = None  # endpoint spec for the composition
+    # gradient (scf/alchemical.setup_alchemical_system / alchemical_energy_gradient)
 
     def to(self, device: str) -> System:
         """Copy with every tensor moved to `device` (setup stays CPU/numpy-built)."""

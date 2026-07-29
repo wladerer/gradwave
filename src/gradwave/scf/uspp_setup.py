@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import math
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -20,10 +21,19 @@ import torch
 from gradwave.core.gaunt import real_gaunt_table, ylm_np
 from gradwave.core.hamiltonian import build_projector_data
 from gradwave.dtypes import CDTYPE, RDTYPE
-from gradwave.grids import build_fft_grid, build_gsphere
+from gradwave.grids import FFTGrid, build_fft_grid, build_gsphere
 from gradwave.pseudo.kb import beta_form_factors
 from gradwave.pseudo.radial import sbt
 from gradwave.pseudo.upf_paw import PAWData
+
+if TYPE_CHECKING:
+    # Annotation-only: no import cycle (symmetry.py and scf/paw_symmetry.py's
+    # own top-level imports never reach back into this module), but the
+    # concrete classes are otherwise only ever reached through the existing
+    # function-local imports elsewhere in this file (find_symmetry_groups,
+    # _make_becsum_sym), so this keeps them out of the runtime import graph.
+    from gradwave.scf.paw_symmetry import BecsumSymmetrizer, MagneticBecsumSymmetrizer
+    from gradwave.symmetry import MagneticSymmetrizer, RhoSymmetrizer, SpaceGroup
 
 _MINUS_I_POW_L = [1.0, -1.0j, -1.0, 1.0j, 1.0]  # (−i)^L, L ≤ 4
 
@@ -51,7 +61,7 @@ class AugSpecies:
 
 @dataclass
 class USPPSystem:
-    grid: object
+    grid: FFTGrid
     spheres: list
     kweights: torch.Tensor
     positions: torch.Tensor
@@ -69,16 +79,16 @@ class USPPSystem:
     vloc_tables: torch.Tensor
     rho_core: torch.Tensor | None
     atom_slices: list = field(default_factory=list)  # per-atom projector column ranges
-    sym: object = None  # SpaceGroup when use_symmetry
-    rho_symmetrizer: object = None
-    becsum_sym: object = None
+    sym: SpaceGroup | None = None  # set when use_symmetry
+    rho_symmetrizer: RhoSymmetrizer | MagneticSymmetrizer | None = None
+    becsum_sym: BecsumSymmetrizer | MagneticBecsumSymmetrizer | None = None
     # dual grid: the H-apply local term runs on the smaller wavefunction box
     # (2·G_max(ecut)) instead of the dense ecutrho box. None disables it.
-    smooth_shape: tuple = None
-    smooth_flat_idx: torch.Tensor = None  # (nk, npw_max) into the smooth box
-    smooth2dense: torch.Tensor = None  # (n_smooth,) smooth→dense flat, by Miller
+    smooth_shape: tuple | None = None
+    smooth_flat_idx: torch.Tensor | None = None  # (nk, npw_max) into the smooth box
+    smooth2dense: torch.Tensor | None = None  # (n_smooth,) smooth→dense flat, by Miller
 
-    def to(self, device) -> USPPSystem:
+    def to(self, device: str) -> USPPSystem:
         """Copy with every tensor moved to `device` (mirrors System.to; the
         paws' numpy radial tables stay CPU, and the per-device OneCenter/
         RadialTables caches are not carried over — they rebuild lazily on
