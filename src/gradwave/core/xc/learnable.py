@@ -15,12 +15,20 @@ the DENSITY itself need the implicit-diff SCF backward (scf/implicit.py).
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 
 from gradwave.core.xc._pbe_kernels import KAPPA, MU
 from gradwave.core.xc.base import XCFunctional
 from gradwave.core.xc.pbe import PBE
 from gradwave.core.xc.spin import SpinPBE
+
+if TYPE_CHECKING:
+    # gradwave.scf.loop imports LearnableSpinX from this module, so importing
+    # SCFResult here for real would be circular (same pattern as core.hubbard's
+    # System import; see PR #182's precedent).
+    from gradwave.scf.loop import SCFResult
 
 # PBE reference values, re-exported for callers that initialize at PBE.
 PBE_KAPPA, PBE_MU = KAPPA, MU
@@ -33,18 +41,18 @@ class _LearnableKappaMu:
     At the default (PBE) initialization the properties return the PBE values
     and the functional reproduces its fixed-parameter base class exactly."""
 
-    def __init__(self, kappa: float = PBE_KAPPA, mu: float = PBE_MU):
+    def __init__(self, kappa: float = PBE_KAPPA, mu: float = PBE_MU) -> None:
         super().__init__()
         # softplus-parameterized to keep κ, μ > 0 under unconstrained training
         self.raw_kappa = torch.nn.Parameter(_inv_softplus(kappa))
         self.raw_mu = torch.nn.Parameter(_inv_softplus(mu))
 
     @property
-    def kappa(self):
+    def kappa(self) -> torch.Tensor:
         return torch.nn.functional.softplus(self.raw_kappa)
 
     @property
-    def mu(self):
+    def mu(self) -> torch.Tensor:
         return torch.nn.functional.softplus(self.raw_mu)
 
 
@@ -70,7 +78,7 @@ def _inv_softplus(y: float) -> torch.Tensor:
     return y + torch.log(-torch.expm1(-y))
 
 
-def energy_param_grads(res, xc: XCFunctional) -> dict[str, torch.Tensor]:
+def energy_param_grads(res: SCFResult, xc: XCFunctional) -> dict[str, torch.Tensor]:
     """dE_total/dθ for all parameters of `xc`, at the converged SCF point.
 
     Valid by variational stationarity: total-energy derivative w.r.t.

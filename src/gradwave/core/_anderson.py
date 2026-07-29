@@ -21,7 +21,7 @@ import torch
 class AndersonMixer:
     """Type-II Anderson mixing over a rolling window of `history` secant pairs."""
 
-    def __init__(self, history: int, beta: float):
+    def __init__(self, history: int, beta: float) -> None:
         self.history = history
         self.beta = beta
         self.prev_u = None

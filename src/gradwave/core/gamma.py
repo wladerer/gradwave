@@ -33,6 +33,7 @@ import torch
 
 from gradwave.constants import HBAR2_2M
 from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.grids import GSphere
 
 
 @dataclass
@@ -66,7 +67,9 @@ class GammaBasis:
         return int(self.src_half.shape[0])
 
 
-def build_gamma_basis(sphere, shape, device=None) -> GammaBasis:
+def build_gamma_basis(
+    sphere: GSphere, shape: tuple[int, int, int], device: torch.device | None = None
+) -> GammaBasis:
     """Assemble the half-sphere maps for a GSphere at k=0.
 
     Raises if the sphere is not closed under G -> -G (i.e. k != Gamma), since
@@ -164,7 +167,9 @@ class GammaHamiltonian:
     ifftn(x N) / fftn(/N) contract on the retained coefficients.
     """
 
-    def __init__(self, gb: GammaBasis, v_eff_r, p, dij):
+    def __init__(
+        self, gb: GammaBasis, v_eff_r: torch.Tensor, p: torch.Tensor, dij: torch.Tensor
+    ) -> None:
         self.gb = gb
         self.shape = gb.shape
         self.n = gb.shape[0] * gb.shape[1] * gb.shape[2]

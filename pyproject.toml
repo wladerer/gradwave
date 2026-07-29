@@ -198,6 +198,44 @@ include = [
     # DiscretizationError/USPPResult-adjacent dataclasses carry the same
     # bare-list/tuple-invariance debt loop.py/uspp_loop.py have above. Real
     # follow-up work, not a quick fix — left off rather than forced.
+    #
+    # Phase 6: autotyping + MonkeyType over core/ (30 files, the most-
+    # imported subpackage). 15 of the 27 non-empty touched files (+3
+    # trivially-empty __init__.py) verified genuinely clean this round --
+    # each tested individually (real ty check exit code, one file added at
+    # a time), not inferred from the batch run:
+    "src/gradwave/core/density.py",
+    "src/gradwave/core/energies/ewald.py",
+    "src/gradwave/core/energies/hartree.py",
+    "src/gradwave/core/energies/__init__.py",
+    "src/gradwave/core/energies/local_pp.py",
+    "src/gradwave/core/fftbox.py",
+    "src/gradwave/core/gamma.py",
+    "src/gradwave/core/gaunt.py",
+    "src/gradwave/core/hamiltonian.py",
+    "src/gradwave/core/__init__.py",
+    "src/gradwave/core/structure.py",
+    "src/gradwave/core/xc/__init__.py",
+    "src/gradwave/core/xc/noncollinear.py",
+    "src/gradwave/core/xc/_pbe_kernels.py",
+    "src/gradwave/core/ylm.py",
+    #
+    # Deliberately left off (individually verified NOT clean, 1-11 real
+    # errors apiece): _anderson.py (Tensor|None arithmetic on
+    # AndersonMixer.step), batch.py (bare dict/None-union unpacking in
+    # BatchedHamiltonian._tables/_hub_tables), hubbard.py (bare list/dict
+    # generics + the same TypedDict-shaped "site" dict-literal debt PR
+    # #185 flagged in postscf/, + a BatchedK|None narrowing gap),
+    # metagga.py/xc/spin.py/xc/r2scan.py (a torch.Tensor|float parameter
+    # arithmetic pattern ty cannot narrow through), occupations.py/
+    # xc/lda_pw92.py/xc/pbe.py/xc/r2scan.py/xc/spin.py (missing
+    # @override on Smearing/XCFunctional/SpinXC subclass overrides),
+    # spinor_proj.py (int|float|None arithmetic on UPF .j fields),
+    # xc/base.py (Self-typed eval_energy_density cannot see
+    # energy_density, a real base-class contract gap), xc/learnable.py
+    # (softplus-parameterized kappa/mu returns Tensor where the PBE base
+    # expects float). Real follow-up work, not a quick fix -- left off
+    # rather than forced.
 ]
 
 [tool.ty.overrides.rules]
@@ -226,6 +264,15 @@ name = "core stays independent of the SCF and analysis layers"
 type = "forbidden"
 source_modules = ["gradwave.core"]
 forbidden_modules = ["gradwave.scf", "gradwave.postscf"]
+# TYPE_CHECKING-only edges from the core/ typing pass (Phase 6): each annotates
+# a `system`/`res` parameter with its real scf.loop type (System, SCFResult) but
+# never imports it at runtime, so no actual circular import exists — same
+# pattern, same carve-out mechanism, as the scf -> postscf contract below.
+ignore_imports = [
+    "gradwave.core.hubbard -> gradwave.scf.loop",
+    "gradwave.core.spinor_proj -> gradwave.scf.loop",
+    "gradwave.core.xc.learnable -> gradwave.scf.loop",
+]
 
 [[tool.importlinter.contracts]]
 name = "pseudo is a leaf package"

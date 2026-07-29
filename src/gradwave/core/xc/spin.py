@@ -58,12 +58,29 @@ class SpinXC(CompilableXC, torch.nn.Module):
     needs_gradient: bool = False
     needs_tau: bool = False
 
-    def energy_density(self, rho_up, rho_dn, sigma_uu=None, sigma_dd=None,
-                       sigma_tot=None, tau_up=None, tau_dn=None):
+    def energy_density(
+        self,
+        rho_up: torch.Tensor,
+        rho_dn: torch.Tensor,
+        sigma_uu: torch.Tensor | None = None,
+        sigma_dd: torch.Tensor | None = None,
+        sigma_tot: torch.Tensor | None = None,
+        tau_up: torch.Tensor | None = None,
+        tau_dn: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         raise NotImplementedError
 
-    def energy(self, rho_up, rho_dn, volume, sigma_uu=None, sigma_dd=None,
-               sigma_tot=None, tau_up=None, tau_dn=None):
+    def energy(
+        self,
+        rho_up: torch.Tensor,
+        rho_dn: torch.Tensor,
+        volume: torch.Tensor | float,
+        sigma_uu: torch.Tensor | None = None,
+        sigma_dd: torch.Tensor | None = None,
+        sigma_tot: torch.Tensor | None = None,
+        tau_up: torch.Tensor | None = None,
+        tau_dn: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         e = self.eval_energy_density(rho_up, rho_dn, sigma_uu, sigma_dd, sigma_tot,
                                      tau_up, tau_dn)
         return e.sum() * (volume / e.numel())
@@ -72,8 +89,16 @@ class SpinXC(CompilableXC, torch.nn.Module):
 class LSDA_PW92(SpinXC):
     needs_gradient = False
 
-    def energy_density(self, rho_up, rho_dn, sigma_uu=None, sigma_dd=None,
-                       sigma_tot=None, tau_up=None, tau_dn=None):
+    def energy_density(
+        self,
+        rho_up: torch.Tensor,
+        rho_dn: torch.Tensor,
+        sigma_uu: torch.Tensor | None = None,
+        sigma_dd: torch.Tensor | None = None,
+        sigma_tot: torch.Tensor | None = None,
+        tau_up: torch.Tensor | None = None,
+        tau_dn: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         ru, rd = _to_au(rho_up), _to_au(rho_dn)
         rho = ru + rd
         zeta = (ru - rd) / rho
@@ -92,8 +117,16 @@ class SpinPBE(SpinXC):
     kappa = KAPPA
     mu = MU
 
-    def energy_density(self, rho_up, rho_dn, sigma_uu=None, sigma_dd=None,
-                       sigma_tot=None, tau_up=None, tau_dn=None):
+    def energy_density(
+        self,
+        rho_up: torch.Tensor,
+        rho_dn: torch.Tensor,
+        sigma_uu: torch.Tensor | None = None,
+        sigma_dd: torch.Tensor | None = None,
+        sigma_tot: torch.Tensor | None = None,
+        tau_up: torch.Tensor | None = None,
+        tau_dn: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         ru, rd = _to_au(rho_up), _to_au(rho_dn)
         rho = ru + rd
         zeta = (ru - rd) / rho

@@ -22,7 +22,9 @@ plugs into the same becp/D-contraction the KB nonlocal term already uses.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -31,6 +33,14 @@ from gradwave.constants import MINUS_I_POW as _MINUS_I_POW
 from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.pseudo.radial import sbt
+from gradwave.pseudo.upf import UPFData
+
+if TYPE_CHECKING:
+    # gradwave.scf.loop imports HubbardData/HubbardManifold from this module,
+    # so importing System here for real (even just at module scope) would be
+    # circular — this annotation-only edge is the same pattern as scf/loop.py's
+    # own TYPE_CHECKING-only postscf.hybrid.MultiKFockExchange import (PR #182).
+    from gradwave.scf.loop import System
 
 
 @dataclass(frozen=True)
@@ -69,7 +79,7 @@ def hubbard_projectors(hub: HubbardData, positions: torch.Tensor) -> torch.Tenso
     return hub.q_free * phases[:, :, hub.atom_of_col].permute(0, 2, 1)
 
 
-def manifold_radial(upf, l: int) -> np.ndarray:
+def manifold_radial(upf: UPFData, l: int) -> np.ndarray:
     """Effective scalar r·R_l(r) for the l manifold, renormalized to ∫=1.
     Fully-relativistic pseudos split l into j = l ± ½; combine them by the
     (2j+1) degeneracy weight to recover the scalar-relativistic orbital."""
@@ -87,7 +97,7 @@ def manifold_radial(upf, l: int) -> np.ndarray:
 
 
 @torch.no_grad()
-def build_hubbard_projectors(system, manifolds: list[HubbardManifold]) -> HubbardData:
+def build_hubbard_projectors(system: System, manifolds: list[HubbardManifold]) -> HubbardData:
     """Assemble batched atomic-orbital projectors (phases at system.positions)."""
     device = system.positions.device
     bk = system.batch
@@ -156,7 +166,10 @@ def hubbard_energy(mats: list[torch.Tensor], sites: list) -> torch.Tensor:
     return e
 
 
-def hubbard_occ_and_energy(occ_matrix, occ_s, sites, nspin):
+def hubbard_occ_and_energy(
+    occ_matrix: Callable, occ_s: list[torch.Tensor], sites: list[dict[str, int | float]],
+    nspin: int,
+) -> tuple[list[list[torch.Tensor]], torch.Tensor]:
     """DFT+U per-spin occupation matrices + Dudarev E_U. `occ_matrix(isp,
     occ_weights)` returns the spin-isp occupation matrix for the given
     per-band occupation weights (each SCF loop supplies its own projector,
@@ -170,7 +183,7 @@ def hubbard_occ_and_energy(occ_matrix, occ_s, sites, nspin):
 
 
 def hubbard_dmatrix(mats: list[torch.Tensor], sites: list, nproj: int,
-                    device) -> torch.Tensor:
+                    device: torch.device) -> torch.Tensor:
     """Block-diagonal D^I_{mm'} = (U−J)(½δ − n^I) over all correlated sites,
     shape (nproj, nproj) complex Hermitian (one spin channel)."""
     d = torch.zeros(nproj, nproj, dtype=CDTYPE, device=device)
@@ -232,7 +245,7 @@ def occupation_matrices_noncollinear(q: torch.Tensor, coeffs_up: torch.Tensor,
 
 
 def hubbard_dmatrix_noncollinear(mats: list[torch.Tensor], sites: list,
-                                 nproj: int, device) -> torch.Tensor:
+                                 nproj: int, device: torch.device) -> torch.Tensor:
     """2×2 spin-block D^I_{(σm),(σ'm')} = (U−J)(½δ − N^I), block-diagonal in
     site, shape (2, nproj, 2, nproj) complex Hermitian.
 

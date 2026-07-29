@@ -34,7 +34,7 @@ class PBE(XCFunctional):
     mu = MU
 
     def energy_density(
-        self, rho: torch.Tensor, sigma: torch.Tensor | None = None, tau=None
+        self, rho: torch.Tensor, sigma: torch.Tensor | None = None, tau: torch.Tensor | None = None
     ) -> torch.Tensor:
         if sigma is None:
             raise ValueError("PBE requires sigma = |grad rho|^2")

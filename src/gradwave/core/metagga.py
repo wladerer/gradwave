@@ -53,7 +53,7 @@ def tau_b(
     occ: torch.Tensor,  # (nk, nb)
     kweights: torch.Tensor,  # (nk,)
     bk: BatchedK,
-    shape,
+    shape: tuple[int, int, int],
     volume: float,
 ) -> torch.Tensor:
     """τ(r) = ½ Σ_k w_k Σ_n f_nk |∇ψ_nk(r)|² on the dense grid [e/Å⁵].
@@ -92,10 +92,10 @@ def spinor_tau_matrix_b(
     occ: torch.Tensor,  # (nk, nb)
     kweights: torch.Tensor,  # (nk,)
     bk: BatchedK,
-    shape,
+    shape: tuple[int, int, int],
     volume: float,
     m_pw: int,  # npw_max (the per-component plane-wave count)
-):
+) -> tuple[torch.Tensor, torch.Tensor]:
     """2×2 kinetic-energy-density-matrix Pauli components (τ_0, τ⃗) [e/Å⁵].
 
     The spinor generalization of `tau_b`: the KE-density matrix is
@@ -156,7 +156,7 @@ def spinor_metagga_tau_operator(
     v0_r: torch.Tensor,  # (n1,n2,n3) real, scalar τ-potential v_τ0
     vvec_r: torch.Tensor,  # (3,n1,n2,n3) real, vector τ-potential v_τ⃗
     bk: BatchedK,
-    shape,
+    shape: tuple[int, int, int],
     m_pw: int,
 ) -> torch.Tensor:
     """2×2 generalized-KS meta-GGA τ operator on doubled spinor coefficients:
@@ -205,7 +205,7 @@ def metagga_tau_operator(
     c: torch.Tensor,  # (nk, nb, npw_max)
     v_tau_r: torch.Tensor,  # (n1, n2, n3) real, the scaled v_τ = ∂E_xc/∂τ potential
     bk: BatchedK,
-    shape,
+    shape: tuple[int, int, int],
 ) -> torch.Tensor:
     """V_τ c = −½ Σ_d i(k+G)_d · F[ v_τ · F⁻¹[ i(k+G)_d c ] ], masked.
 
