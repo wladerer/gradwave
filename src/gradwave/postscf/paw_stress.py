@@ -17,6 +17,7 @@ On top of the norm-conserving strain terms (see stress.py), USPP/PAW adds:
 from __future__ import annotations
 
 import math
+from typing import cast
 
 import torch
 
@@ -27,6 +28,7 @@ from gradwave.core.xc.base import XCFunctional
 from gradwave.core.xc.spin import SpinXC
 from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.postscf._strain import _HubbardSite
 from gradwave.postscf.paw_forces import _aug_at_fixed, _normalize_spin
 from gradwave.postscf.stress import _box_millers, _ewald_strained
 from gradwave.pseudo.radial_torch import radial_tables, sbt_t, simpson_weights
@@ -97,7 +99,7 @@ def _strained_aug(
 
 
 def _hub_radial(
-    system: USPPSystem, hub_sites: list[dict[str, int | float]], dev: torch.device
+    system: USPPSystem, hub_sites: list[_HubbardSite], dev: torch.device
 ) -> dict[int, tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Per-species differentiable radial data for the +U orbitals.
 
@@ -127,7 +129,7 @@ def _hub_radial(
 
 
 def _hub_sproj_strained(
-    system: USPPSystem, hub_sites: list[dict[str, int | float]],
+    system: USPPSystem, hub_sites: list[_HubbardSite],
     hub_rad: dict[int, tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]], hub_lmax: int,
     kpg: torch.Tensor, q_k: torch.Tensor, ph: torch.Tensor, p: torch.Tensor, c: torch.Tensor,
     b_ovl: torch.Tensor, pref: torch.Tensor, q_full: torch.Tensor,
@@ -206,8 +208,10 @@ def _energy_strained_uspp(
     q_full = system.q_full.to(cdt)
 
     # DFT+U (Dudarev): setup for the strained S-dressed occupation matrices.
-    hub_sites = res.get("hub_sites")
-    hub_rad = hub_lmax = hub_nproj = None
+    hub_sites = cast("list[_HubbardSite] | None", res.get("hub_sites"))
+    hub_rad: dict[int, tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]] | None = None
+    hub_lmax: int | None = None
+    hub_nproj: int | None = None
     hub_scale = 0.5 if nspin == 1 else 1.0
     hub_mult = 2.0 if nspin == 1 else 1.0
     if hub_sites is not None:
@@ -222,8 +226,12 @@ def _energy_strained_uspp(
         eigs = eigs_s[isp].detach()
         rho_ij = [torch.zeros(s1 - s0, s1 - s0, dtype=cdt, device=dev)
                   for (s0, s1) in system.atom_slices]
-        n_hub = (torch.zeros(hub_nproj, hub_nproj, dtype=cdt, device=dev)
-                 if hub_sites is not None else None)
+        n_hub: torch.Tensor | None = None
+        if hub_sites is not None:
+            # hub_nproj is set together with hub_sites in the `if
+            # hub_sites is not None:` block above.
+            assert hub_nproj is not None
+            n_hub = torch.zeros(hub_nproj, hub_nproj, dtype=cdt, device=dev)
         for ik, sph in enumerate(system.spheres):
             kfrac = torch.as_tensor(sph.k_frac, dtype=rdt, device=dev)
             kpg = (sph.miller.to(rdt) + kfrac) @ b_e
@@ -253,6 +261,10 @@ def _energy_strained_uspp(
             p = p * ph[:, pd.atom_index].T
             b_ovl = c @ p.conj().T
             if hub_sites is not None:
+                # hub_rad/hub_lmax set together with hub_sites above; n_hub
+                # set together with hub_sites at the top of this spin loop.
+                assert hub_rad is not None and hub_lmax is not None
+                assert n_hub is not None
                 sproj = _hub_sproj_strained(
                     system, hub_sites, hub_rad, hub_lmax, kpg, q_k, ph, p, c,
                     b_ovl, pref, q_full)
@@ -271,6 +283,8 @@ def _energy_strained_uspp(
         rho_ij = [0.5 * (m + m.conj().T) for m in rho_ij]
 
         if is_paw:  # one-center chain with per-spin ddd at the converged becsum
+            # onec built together with is_paw's own `if is_paw:` block above.
+            assert onec is not None
             for a, sp in enumerate(system.species_of_atom):
                 bec = (becsum_s[0][a] if nspin == 1
                        else [becsum_s[0][a], becsum_s[1][a]])
@@ -281,6 +295,9 @@ def _energy_strained_uspp(
         if hub_sites is not None:  # Dudarev E_U from the S-dressed occupations
             from gradwave.core.hubbard import hubbard_energy
 
+            # n_hub is real whenever hub_sites is (set at the top of this
+            # spin loop and updated in the per-k loop above).
+            assert n_hub is not None
             n_hub = 0.5 * (n_hub + n_hub.conj().T)
             mats = [n_hub[site["start"]:site["start"] + site["dim"],
                           site["start"]:site["start"] + site["dim"]]
@@ -337,13 +354,22 @@ def _energy_strained_uspp(
     if xc.needs_gradient:
         g_box = (m_box @ b_e).reshape(*shape, 3)
     if nspin == 1:
+        # nspin=1 is always paired with a collinear XCFunctional (same
+        # convention as scf/uspp_loop.py's own xc dispatch).
+        assert isinstance(xc, XCFunctional)
         rho_xc = rho_r_chans[0] if rho_core_e is None else rho_r_chans[0] + rho_core_e
-        sigma = sigma_from_rho(rho_xc, g_box) if xc.needs_gradient else None
+        if xc.needs_gradient:
+            assert g_box is not None
+            sigma = sigma_from_rho(rho_xc, g_box)
+        else:
+            sigma = None
         e_total = e_total + xc.energy(rho_xc, omega, sigma)
     else:
+        assert isinstance(xc, SpinXC)
         c2 = 0.0 if rho_core_e is None else 0.5 * rho_core_e
         r_u, r_d = rho_r_chans[0] + c2, rho_r_chans[1] + c2
         if xc.needs_gradient:
+            assert g_box is not None
             s_uu = sigma_from_rho(r_u, g_box)
             s_dd = sigma_from_rho(r_d, g_box)
             s_tt = sigma_from_rho(r_u + r_d, g_box)
