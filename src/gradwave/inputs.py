@@ -338,6 +338,9 @@ class Input:
     projections: ProjectionsParams = field(default_factory=ProjectionsParams)
     dispersion: DispersionParams = field(default_factory=DispersionParams)
     device: str = "cpu"
+    distributed: bool = False  # k-point-sharded SCF across torchrun ranks (see
+    # gradwave.distributed / docs/manual/distributed.md); task: scf | bands only,
+    # norm-conserving collinear SCF only so far (v1 scope — see the module docstring)
     verbose: bool = True  # per-iteration SCF chatter; CLI --quiet overrides
     output_dir: Path = Path("./out")
     output_checkpoint: bool = True  # write checkpoint.pt after SCF tasks
@@ -492,7 +495,7 @@ _ALLOWED_TOP = {
     "kpoints", "smearing", "nbands", "symmetry", "nspin", "noncollinear",
     "nonmagnetic", "start_mag", "tot_magnetization",
     "scf", "task", "relax", "bands", "magnetism", "eos", "elastic", "phonons",
-    "projections", "dispersion", "device",
+    "projections", "dispersion", "device", "distributed",
     "verbose", "output", "error_estimate", "restart",
 }
 
@@ -836,6 +839,7 @@ def _load_input(path: Path) -> Input:
         projections=projections,
         dispersion=dispersion,
         device=raw.get("device", "cpu"),
+        distributed=bool(raw.get("distributed", False)),
         verbose=bool(raw.get("verbose", True)),
         output_dir=base / out_raw.get("dir", "./out"),
         output_checkpoint=bool(out_raw.get("checkpoint", True)),

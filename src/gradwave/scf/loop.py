@@ -69,6 +69,12 @@ from gradwave.scf.uspp_setup import USPPSystem
 if TYPE_CHECKING:
     # postscf.hybrid imports scf() back from this module — a real (not merely
     # stylistic) circular import at runtime, so this type is annotation-only.
+    # Same annotation-only story as MultiKFockExchange above: scf() takes an
+    # optional distributed context, but gradwave.distributed itself never
+    # imports this module at runtime (it only names System/DistKContext in
+    # type comments), so importing it eagerly here would be a needless
+    # top-level dependency on torch.distributed for every non-distributed run.
+    from gradwave.distributed import DistKContext
     from gradwave.postscf.hybrid import MultiKFockExchange
 
     # Annotation-only cross-module types for System's fields below. No import
@@ -1121,6 +1127,9 @@ def scf(
     hub_alpha: list[float] | None = None,  # per-site rigid manifold potential α [eV], lin-response
     start_from: _StartFrom = None,  # previous SCFResult (or checkpoint view) on the SAME FFT grid
     fock: MultiKFockExchange | None = None,  # optional orbital-dep. operator (hybrid Fock exchange)
+    dist_ctx: "DistKContext | None" = None,  # k-point-sharded distributed SCF (see
+    # gradwave.distributed): `system` is THIS RANK's local k-shard; None (default) runs
+    # the ordinary single-process path, byte-for-byte unchanged.
 ) -> SCFResult:
     # `fock`, when given, adds an orbital-dependent operator to the Hamiltonian
     # each SCF step (a hybrid functional's Fock exchange). It must expose
@@ -1136,6 +1145,19 @@ def scf(
     _validate_scf_args(
         system, nspin, eigensolver, smearing, mixing_scheme, precond, tot_magnetization
     )
+    if dist_ctx is not None:
+        if hubbard or fock is not None:
+            raise NotImplementedError(
+                "distributed (dist_ctx) SCF does not yet support DFT+U or "
+                "hybrid Fock exchange — both couple orbitals across k in ways "
+                "beyond the density/energy reduction implemented here (see "
+                "gradwave.distributed's module docstring)"
+            )
+        if system.rho_symmetrizer is not None:
+            raise NotImplementedError(
+                "distributed (dist_ctx) SCF does not yet support IBZ symmetry "
+                "reduction — build the system with use_symmetry=False"
+            )
     kerker = _resolve_kerker(kerker, smearing, grid)
 
     rho_s = _seed_density(system, nspin, start_from, start_mag, grid, vol)
@@ -1227,6 +1249,13 @@ def scf(
     coeffs_list_s: list[list[torch.Tensor]] | None = None
     eigs_s = [torch.zeros(nk, nb, dtype=RDTYPE, device=device) for _ in range(nspin)]
     occ_s = [torch.zeros(nk, nb, dtype=RDTYPE, device=device) for _ in range(nspin)]
+    # Global (full-mesh) eigenvalues/occupations under dist_ctx — gathered each
+    # iteration below, then substituted into the returned SCFResult so it looks
+    # like an ordinary full-mesh run (see the post-loop dist_ctx block). Bound
+    # here (same "always defined after the loop" reasoning as it/e_free/etc.
+    # above) since they are only reassigned inside `if dist_ctx is not None`.
+    eigs_global_s = eigs_s
+    occ_global_s = occ_s
     mu, entropy_term = 0.0, torch.zeros((), dtype=RDTYPE, device=device)
     veff_s = [torch.zeros(grid.shape, dtype=RDTYPE, device=device) for _ in range(nspin)]
 
@@ -1253,6 +1282,14 @@ def scf(
     from gradwave.symmetry import CollinearMagneticSymmetrizer
 
     collinear_mag = isinstance(system.rho_symmetrizer, CollinearMagneticSymmetrizer)
+
+    # Static across the loop (the mesh doesn't change), so gathered once here
+    # rather than every iteration alongside the eigenvalues.
+    kweights_global = system.kweights
+    if dist_ctx is not None:
+        from gradwave.distributed import gather_cat
+
+        kweights_global = gather_cat(system.kweights, dist_ctx)
 
     if verbose:
         _ec = getattr(system, "ecut", None)
@@ -1327,16 +1364,36 @@ def scf(
                 device,
             )
 
-        occ_s, mu, entropy_term = shared_fermi_occupations(
-            eigs_s,
-            system.kweights,
-            smearing,
-            width,
-            system.n_electrons,
-            nspin,
-            device,
-            tot_magnetization=tot_magnetization,
-        )
+        if dist_ctx is not None:
+            from gradwave.distributed import gather_cat
+
+            # A metal's Fermi level depends on eigenvalues from EVERY k-point,
+            # not just this rank's shard: gather them into the global array
+            # before the Fermi search, then keep only this rank's slice of the
+            # resulting occupations for the local density/energy calls below.
+            eigs_global_s = [gather_cat(eigs_s[sp], dist_ctx) for sp in range(nspin)]
+            occ_global_s, mu, entropy_term = shared_fermi_occupations(
+                eigs_global_s,
+                kweights_global,
+                smearing,
+                width,
+                system.n_electrons,
+                nspin,
+                device,
+                tot_magnetization=tot_magnetization,
+            )
+            occ_s = [occ_global_s[sp][dist_ctx.k_start : dist_ctx.k_end] for sp in range(nspin)]
+        else:
+            occ_s, mu, entropy_term = shared_fermi_occupations(
+                eigs_s,
+                system.kweights,
+                smearing,
+                width,
+                system.n_electrons,
+                nspin,
+                device,
+                tot_magnetization=tot_magnetization,
+            )
 
         # hybrid Fock: rebuild the exchange operator from the fresh orbitals
         # (used next iteration) and its energy (used in this iteration's total).
@@ -1350,6 +1407,14 @@ def scf(
             density_b(coeffs_b_s[sp], occ_s[sp], system.kweights, bk, grid.shape, vol)
             for sp in range(nspin)
         ]
+        if dist_ctx is not None:
+            from gradwave.distributed import all_reduce_
+
+            # Each rank's density_b call above already sums over its own
+            # k-shard (weighted by kweights); summing across ranks completes
+            # the sum over the full mesh (core/batch.py's einsum reduction,
+            # extended across ranks — see gradwave.distributed).
+            rho_raw_s = [all_reduce_(r, dist_ctx) for r in rho_raw_s]
         if collinear_mag:
             rho_out_s = list(
                 symmetrize_rho_pair(system.rho_symmetrizer, rho_raw_s[0], rho_raw_s[1], grid)
@@ -1392,6 +1457,16 @@ def scf(
             e_fock,
             projs_b,
         )
+        if dist_ctx is not None:
+            from gradwave.distributed import all_reduce_
+
+            # Kinetic and nonlocal (projector) energy are sums over k, computed
+            # above from this rank's local shard only. Every other term
+            # (Hartree, XC, local pseudopotential, Ewald, entropy) is a
+            # function of the ALREADY-global density/eigenvalues, so it is
+            # identical on every rank without further communication.
+            energies.kinetic = all_reduce_(energies.kinetic, dist_ctx)
+            energies.nonlocal_ = all_reduce_(energies.nonlocal_, dist_ctx)
         e_free = float(energies.free_energy)
 
         rho_in_vec, rho_out_vec, res_norm, drho_scf, de = _scf_residual_and_record(
@@ -1445,6 +1520,18 @@ def scf(
     # values from the last iteration by the time we get here, never the
     # pre-loop placeholders.
     assert energies is not None and coeffs_list_s is not None
+    if dist_ctx is not None:
+        from gradwave.distributed import gather_list_cat
+
+        # Reassemble a normal, full-mesh SCFResult: gather this rank's local
+        # per-k coefficients into the global per-k list, and substitute the
+        # GLOBAL eigenvalues/occupations (already gathered above) and the
+        # ORIGINAL unsharded system — a caller sees the same shapes/content a
+        # single-process run on the full mesh would have produced.
+        coeffs_list_s = [gather_list_cat(coeffs_list_s[sp], dist_ctx) for sp in range(nspin)]
+        eigs_s = eigs_global_s
+        occ_s = occ_global_s
+        system = dist_ctx.full_system
     if nspin == 1:
         return SCFResult(
             converged=converged,

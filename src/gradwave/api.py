@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from gradwave.calculator import GradWave
     from gradwave.core.hubbard import HubbardManifold
     from gradwave.core.xc.noncollinear import NoncollinearXC
+    from gradwave.distributed import DistKContext
     from gradwave.grids import FFTGrid
     from gradwave.postscf.magnetism import MagneticReport
     from gradwave.pseudo.upf import UPFData
@@ -213,6 +214,25 @@ def run_scf(
     system = system or build_system(inp)
     if inp.device != "cpu":
         system = system.to(inp.device)
+    dist_ctx: DistKContext | None = None
+    if inp.distributed:
+        if uspp or inp.hybrid.enabled or inp.noncollinear:
+            raise NotImplementedError(
+                "distributed (k-point-sharded) SCF is implemented for the "
+                "norm-conserving collinear path only so far — USPP/PAW, "
+                "hybrid functionals, and the noncollinear/SOC SCF are "
+                "documented follow-ups (see docs/manual/distributed.md)"
+            )
+        from gradwave.distributed import init_from_env, shard_system
+
+        info = init_from_env()
+        if info is not None:
+            rank, world_size, group = info
+            system, dist_ctx = shard_system(cast("System", system), rank, world_size, group)
+            # every rank still computes the identical, correctly-reduced
+            # result (see scf.loop.scf's dist_ctx handling) — quiet every
+            # rank but 0 purely to avoid world_size-fold duplicated chatter
+            verbose = verbose and rank == 0
     if inp.hybrid.enabled:
         return _run_scf_hybrid(inp, system, verbose, start_from, uspp)
     if inp.noncollinear:
@@ -266,6 +286,7 @@ def run_scf(
     return scf(cast("System", system), cast("XCFunctional", xc),
                kerker=kerker, start_from=start_from,
                mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
+               dist_ctx=dist_ctx,
                **common)
 
 
@@ -1713,10 +1734,22 @@ _POSTSCF_RUNNERS = {"eos": run_eos, "elastic": run_elastic,
 
 def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
     """Execute inp.task and write <task>.json, <task>.out and (for SCF
-    state) checkpoint.pt into inp.output_dir."""
+    state) checkpoint.pt into inp.output_dir.
+
+    Under ``inp.distributed`` (a torchrun launch), every rank computes the
+    identical, correctly-reduced result (see ``scf.loop.scf``'s ``dist_ctx``
+    handling), so file writing below is gated to rank 0 to avoid every rank
+    racing to write the same files."""
     from gradwave.output import write_output
     from gradwave.runinfo import ProcessMeter, machine_snapshot, provenance_block
 
+    if inp.distributed and inp.task not in ("scf", "bands"):
+        raise NotImplementedError(
+            f"distributed: true is only wired for task: scf | bands so far "
+            f"(got task: {inp.task!r}) — relax/eos/elastic/phonons/magnetism "
+            f"don't route through the k-point-sharded SCF path yet (see "
+            f"docs/manual/distributed.md)"
+        )
     snap = machine_snapshot()
     meter = ProcessMeter()
     t0 = time.time()
@@ -1781,6 +1814,12 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
         raise ValueError(
             f"unknown task {inp.task!r} "
             f"(scf | relax | bands | magnetism | eos | elastic | phonons)")
+
+    if inp.distributed:
+        from gradwave.distributed import current_rank
+
+        if current_rank() != 0:
+            return summary
 
     outdir = Path(inp.output_dir)
     outdir.mkdir(parents=True, exist_ok=True)

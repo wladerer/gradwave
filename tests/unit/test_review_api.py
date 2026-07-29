@@ -134,6 +134,6 @@ def test_calculator_accepts_new_settings():
 def test_unknown_task_message():
     import gradwave.api as api
 
-    inp = SimpleNamespace(task="nonsense", output_dir="/tmp/nope")
+    inp = SimpleNamespace(task="nonsense", output_dir="/tmp/nope", distributed=False)
     with pytest.raises(ValueError, match="scf | relax | bands | magnetism"):
         api.run(inp, verbose=False)
