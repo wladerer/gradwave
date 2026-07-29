@@ -19,7 +19,7 @@ import dataclasses
 import torch
 
 from gradwave.core.batch import BatchedHamiltonian, BatchedK, becp_b
-from gradwave.solvers.davidson import _offload_subspace, _orthonormalize_b
+from gradwave.solvers.davidson import _offload_subspace, _orthonormalize_b, _qr_offload
 from gradwave.solvers.precond import teter_b
 
 
@@ -76,7 +76,7 @@ def davidson_gen_batched(hs: BatchedHS, x0: torch.Tensor, nbands: int,
     def _contract(x_r, hx_r, sx_r):
         """QR-restart: re-orthonormalize the Ritz block in the standard
         metric, rotating the cached applies with the triangular factor."""
-        q, rmat = torch.linalg.qr(x_r.transpose(-1, -2), mode="reduced")
+        q, rmat = _qr_offload(x_r.transpose(-1, -2))
         rt = rmat.transpose(-1, -2)
         return (q.transpose(-1, -2).contiguous(),
                 torch.linalg.solve_triangular(rt, hx_r, upper=False),

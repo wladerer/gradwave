@@ -1486,6 +1486,23 @@ altogether. Net: the measured GPU bottleneck resists these fixes because the eig
 cliff-hit and non-capturable and removing the subspace method costs convergence speed;
 the durable levers stay throughput batching and a datacenter fp64 GPU.
 
+UPDATE (2026-07-28): the "fragments into tiny pieces around each eigh" concern
+above was tested directly rather than assumed. Building on the sync-free
+Davidson skeleton (branch-free per round, a prerequisite for capture) as the
+substrate, a round's post-eigh math (Rayleigh-Ritz combination, residual,
+Teter precondition, orthonormalize, restart) was captured per (subspace-dim,
+n_add) shape and replayed against real cached-shape recurrences from a real
+SCF run. It reproduces eager output bit-for-bit -- the fragmentation itself
+is not the problem -- but replays at 1.0x eager speed, same verdict as the
+apply-only probe in docs/manual/performance.md. There is no launch gap in this
+part of the loop either. The investigation was worth running anyway: isolating
+every op in a round found `torch.linalg.qr` on the tall-skinny expansion-
+direction shape costing more than the Hamiltonian apply itself on an RTX 3050,
+which a CPU-offload (mirroring this same eigh's own fix) turns into a real,
+measured 1.55-1.67x end-to-end win -- see "CUDA batched-QR CPU-offload" in
+docs/manual/performance.md. So: no graphed solver, but a real fix came out of
+looking for one.
+
 ## Local Thomas–Fermi metal preconditioner (DONE)
 
 Landed as opt-in `precond="local_tf"` on both `scf` and `scf_uspp`

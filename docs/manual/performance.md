@@ -82,6 +82,42 @@ fits the card. The still-missing code path is k-chunking the batched apply
 (`_band_chunk` handles bands, not k); it would let the GPU take every big-grid
 system at full mesh instead of falling back to the CPU.
 
+### CUDA batched-QR CPU-offload
+
+Found while chasing whether CUDA graphs could remove per-round kernel-launch
+overhead in `davidson_batched` (see "What does not help" below, and the
+`_QR_CPU_MAX_COLS` comment in `solvers/davidson.py`): they could not, because
+isolating every op in a round showed the kernels were already back-to-back --
+except one. `torch.linalg.qr` on the (nk, npw, cols) tall-skinny shape that
+`_orthonormalize_b` uses to orthonormalize new expansion directions measured
+**~3.9 ms on an RTX 3050 for a diamond-C, 50 Ry, nk=8, npw=465, cols=8 round --
+bigger than the two-FFT Hamiltonian apply next to it (~2.3 ms)**. A plain
+D2H + CPU LAPACK QR + H2D round trip runs the identical shape in ~0.3 ms, a
+>10x win, for the same reason issue #133 CPU-offloaded the subspace `eigh`:
+cuSOLVER's batched `geqrf`/`orgqr` pays a fixed per-call tax a genuinely tiny
+problem cannot amortize. A sweep (nk 8-112, npw 465-2500, cols 8-64) found the
+offload a clear-to-break-even win at cols<=16 (worst case 0.98x, typically
+2-12x) and mixed above that, so `_qr_offload` gates on cols<=16 -- comfortably
+above any nb in this repo's benchmark battery, so it fires on every ordinary
+Davidson round; wider blocks (LOBPCG's stacked [X,W,P], CheFSI's buffered
+block) fall through to the GPU unchanged.
+
+`_orthonormalize_b` is shared by every batched solver (Davidson, CheFSI,
+LOBPCG, the USPP/PAW generalized Davidson), so the fix lands everywhere at
+once with no new flag. End to end on the same diamond-C, 50 Ry benchmark the
+sync-free Davidson docstring already used as its reference point (RTX 3050):
+
+| k-mesh | before | after | speedup |
+|---|---|---|---|
+| 4³ | 0.152 s/it | 0.098 s/it | 1.55x |
+| 6³ | 0.234 s/it | 0.140 s/it | 1.67x |
+
+Converged total energy is bit-identical before/after at both sizes (QR spans
+the identical subspace regardless of which LAPACK implementation computes it;
+Rayleigh-Ritz only depends on the span, not the basis' phase convention), and
+inert on CPU (`_qr_offload` only takes the CPU branch when the input is
+already on CUDA).
+
 ### Warm-start SCF
 
 The ASE calculator reuses the previous step's density and orbitals as the next SCF
@@ -232,7 +268,18 @@ time again.
   fp32-deep redesign would want it, but on its own it does not help.
 - **CUDA graphs.** Capturing the real batched Hamiltonian apply replays
   bit-identically at 1.0 to 1.1 times eager speed. The kernels are already
-  back-to-back, so there is no launch gap to remove.
+  back-to-back, so there is no launch gap to remove. Extended (2026-07-28):
+  capturing a whole Davidson round's post-eigh math (Rayleigh-Ritz
+  combination, residual, Teter precondition, orthonormalize, restart) on the
+  sync-free skeleton -- the branch-free substrate a capture needs, since
+  `torch.linalg.eigh` on CUDA is not itself capturable (a host `info` check)
+  -- also replays bit-identically at 1.0x, including the pure-GPU remainder
+  once both `eigh` and the QR below are excluded. Same verdict as the apply:
+  no launch gap anywhere in the round on this hardware. The investigation was
+  not wasted, though -- it is what found the actual QR outlier below, which is
+  a real, measured, much larger win landed the same day. Building the
+  per-shape graph-cache/warmup machinery this would have needed was
+  abandoned once the isolated-op measurement made the null result clear.
 - **torch.compile on the Hamiltonian apply.** Inductor does not codegen complex
   operations, and the real-decomposed slice that would compile is too small next
   to the FFTs. It was tried and removed for the complex apply. The real-valued XC
