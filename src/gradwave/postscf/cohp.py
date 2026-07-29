@@ -152,6 +152,16 @@ class COHP:
     over the occupied manifold — the latter bounds how well the AO span captures
     the real electron density, and hence how much to trust the occupied ICOHP.
 
+    `spilling` (total) is NOT a fixed property of the system — it grows with how
+    many unoccupied bands the caller requests, since a fixed valence-oriented AO
+    basis captures high-lying conduction states far worse than occupied/near-Fermi
+    ones. Measured directly on Bi2Se3 no-SOC: requesting 44 vs. 80 bands (39
+    occupied either way) moves `spilling` from 0.64% to 43.8% while
+    `charge_spilling` and every physical quantity (Fermi level, ICOHP, band
+    character) stay identical to 8+ decimal places. Widening the band window on
+    its own is not evidence of a problem; `charge_spilling` is the metric that
+    actually bounds occupied-ICOHP trust, not `spilling`.
+
     The k-point- and band-resolved COHP is exposed unbroadened: `band_cohp[label]`
     is (nblocks, nb), the Hamilton population of each eigenstate (k, n) on that
     bond (bonding < 0), with `band_energies` (nblocks, nb) the matching eps_n(k)
