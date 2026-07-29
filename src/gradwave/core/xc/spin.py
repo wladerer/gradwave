@@ -20,6 +20,7 @@ from __future__ import annotations
 import math
 
 import torch
+from typing_extensions import override
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
 from gradwave.core.xc._pbe_kernels import KAPPA, MU, pbe_enhancement, pbe_h
@@ -89,6 +90,7 @@ class SpinXC(CompilableXC, torch.nn.Module):
 class LSDA_PW92(SpinXC):
     needs_gradient = False
 
+    @override
     def energy_density(
         self,
         rho_up: torch.Tensor,
@@ -117,6 +119,7 @@ class SpinPBE(SpinXC):
     kappa = KAPPA
     mu = MU
 
+    @override
     def energy_density(
         self,
         rho_up: torch.Tensor,
@@ -127,6 +130,8 @@ class SpinPBE(SpinXC):
         tau_up: torch.Tensor | None = None,
         tau_dn: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if sigma_uu is None or sigma_dd is None or sigma_tot is None:
+            raise ValueError("spin PBE requires sigma_uu, sigma_dd, and sigma_tot")
         ru, rd = _to_au(rho_up), _to_au(rho_dn)
         rho = ru + rd
         zeta = (ru - rd) / rho

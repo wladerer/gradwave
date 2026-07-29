@@ -266,22 +266,6 @@ include = [
     "src/gradwave/core/xc/_pbe_kernels.py",
     "src/gradwave/core/ylm.py",
     #
-    # Deliberately left off (individually verified NOT clean, 1-11 real
-    # errors apiece): _anderson.py (Tensor|None arithmetic on
-    # AndersonMixer.step), batch.py (bare dict/None-union unpacking in
-    # BatchedHamiltonian._tables/_hub_tables), hubbard.py (bare list/dict
-    # generics + the same TypedDict-shaped "site" dict-literal debt PR
-    # #185 flagged in postscf/, + a BatchedK|None narrowing gap),
-    # metagga.py/xc/spin.py/xc/r2scan.py (a torch.Tensor|float parameter
-    # arithmetic pattern ty cannot narrow through), occupations.py/
-    # xc/lda_pw92.py/xc/pbe.py/xc/r2scan.py/xc/spin.py (missing
-    # @override on Smearing/XCFunctional/SpinXC subclass overrides),
-    # spinor_proj.py (int|float|None arithmetic on UPF .j fields),
-    # xc/base.py (Self-typed eval_energy_density cannot see
-    # energy_density, a real base-class contract gap), xc/learnable.py
-    # (softplus-parameterized kappa/mu returns Tensor where the PBE base
-    # expects float). Real follow-up work, not a quick fix -- left off
-    # rather than forced.
     #
     # Phase 8: autotyping + MonkeyType over the three most-imported
     # top-level modules (symmetry.py, grids.py, kpoints.py) -- verified
@@ -324,6 +308,91 @@ include = [
     # real at runtime (the documented save_for_backward/saved_tensors
     # contract) but aren't part of the stub either way. Left unannotated
     # (matching autotyping's own choice not to touch them) rather than forced.
+    #
+    # Phase 6 follow-up: the 12 core/ files left off in Phase 6, each
+    # cleaned for real (real ty check exit code, one file added at a time
+    # against this list, same discipline as every phase above) rather than
+    # loosened to satisfy the checker:
+    #  - _anderson.py: AndersonMixer.prev_u/prev_r are a paired Optional
+    #    (both None only before the first step()); narrowed with
+    #    `assert self.prev_u is not None` alongside the existing prev_r check.
+    #  - batch.py: BatchedHamiltonian._tab_cache/_hub_cache needed real dict
+    #    type args; _hub_tables() needed its own `assert hub_q/hub_dij is
+    #    not None` (apply()'s guard narrows only apply()'s own locals, not
+    #    the callee); density_b's `rho` is the same "loop runs >=1 iteration"
+    #    pattern as scf/loop.py (nb >= 1 always) -- `assert rho is not None`.
+    #  - hubbard.py: bare list/dict generics fixed with a new HubbardSite
+    #    TypedDict (the {atom, l, u, j, start, dim} "site" record; also
+    #    imported by postscf/_strain.py -- keep this name/shape stable),
+    #    Callable given its real (int, Tensor) -> list[Tensor] signature,
+    #    build_hubbard_projectors' `bk = system.batch` narrowed with an
+    #    assert (DFT+U always runs the batched path). Along the way, found
+    #    and fixed hubbard_occ_and_energy's `sum(... for n in n_hub)`,
+    #    whose default start=0 made ty (correctly) infer Tensor | Literal[0]
+    #    -- replaced with an explicit zero-Tensor accumulator, a real latent
+    #    typing gap, not a false positive.
+    #  - metagga.py: tau_b/spinor_tau_matrix_b's tau/tau_uu/tau_dd/tau_ud
+    #    are the same "loop runs >=1 iteration" None-init pattern as
+    #    batch.py's density_b -- asserted non-None after the band loop.
+    #  - occupations.py: mechanical @override on the four Smearing
+    #    subclasses (FermiDirac, Gaussian, MethfesselPaxton1,
+    #    MarzariVanderbilt).
+    #  - spinor_proj.py: so_projector_channels' `beta.j` and
+    #    build_so_projectors' `so_tables` are only None-typed in general
+    #    (UPF.j is Optional; System.so_beta_tables is Optional) but this
+    #    whole module runs only in the fully-relativistic branch (callers
+    #    gate on `system.is_fr`), so both get a real `assert x is not None`
+    #    at the point they're known-set, plus real tuple/dict type args on
+    #    the return/cache types.
+    #  - xc/base.py: CompilableXC is a mixin with no energy_density of its
+    #    own -- only the concrete XCFunctional/SpinXC subclasses (mixed in
+    #    alongside it) supply one, with two DIFFERENT signatures. Giving
+    #    CompilableXC its own `energy_density(*args)` stub "fixed" the
+    #    Self-attribute gap but broke Liskov the other way (a subclass
+    #    narrowing *args: object down to 3 typed params is not a valid
+    #    override of the wider stub) -- ty caught this immediately as
+    #    invalid-method-override. The actual fix: a TYPE_CHECKING-only
+    #    `_HasEnergyDensity` Protocol (typing's documented pattern for
+    #    exactly this "mixin requires a sibling method" shape) used only as
+    #    an explicit self-type at the one call site in eval_energy_density
+    #    that needs it (via `cast`, zero runtime cost) -- it does not enter
+    #    the real class hierarchy, so it creates no override relationship
+    #    for XCFunctional.energy_density/SpinXC.energy_density to violate.
+    #  - xc/lda_pw92.py, xc/pbe.py, xc/r2scan.py, xc/spin.py: mechanical
+    #    @override on each XCFunctional/SpinXC subclass's energy_density.
+    #    Along the way, two real bugs surfaced and got fixed, not typed
+    #    around: SpinR2SCAN.energy_density's None-guard checked only
+    #    sigma_uu/tau_up while the body also uses sigma_dd/sigma_tot/tau_dn
+    #    unchecked; SpinPBE.energy_density had no None-guard at all (unlike
+    #    PBE's explicit ValueError) even though needs_gradient=True means
+    #    the SCF always supplies sigma. Both now raise the same explicit
+    #    ValueError as PBE instead of silently trusting the caller. Also:
+    #    _pbe_kernels.py's `pbe_h(t2, eps_c_lda, phi3=1.0)` is genuinely
+    #    dual-mode -- pbe.py's PBE passes the float default (unpolarized,
+    #    φ=1), spin.py's SpinPBE passes a per-point Tensor (φ(ζ(r))³) -- so
+    #    `phi3` is widened to `float | torch.Tensor` there (already
+    #    strict-typed; re-verified clean after the change).
+    #  - xc/learnable.py: `_inv_softplus`'s real bug was reassigning its own
+    #    `float`-typed parameter `y` to a `torch.Tensor`, not (as first
+    #    suspected) the kappa/mu Tensor-vs-float base-class question --
+    #    that suspicion did not reproduce under a real per-file ty check
+    #    once xc/pbe.py and xc/spin.py were in the same batch (PBE.kappa's
+    #    own `self.kappa: float` resolves at the PBE class level for
+    #    PBE.energy_density, unaffected by what a Learnable* subclass's
+    #    property later returns) -- renamed the reassigned local instead of
+    #    widening any signature.
+    "src/gradwave/core/_anderson.py",
+    "src/gradwave/core/batch.py",
+    "src/gradwave/core/hubbard.py",
+    "src/gradwave/core/metagga.py",
+    "src/gradwave/core/occupations.py",
+    "src/gradwave/core/spinor_proj.py",
+    "src/gradwave/core/xc/base.py",
+    "src/gradwave/core/xc/lda_pw92.py",
+    "src/gradwave/core/xc/learnable.py",
+    "src/gradwave/core/xc/pbe.py",
+    "src/gradwave/core/xc/r2scan.py",
+    "src/gradwave/core/xc/spin.py",
 ]
 
 [tool.ty.overrides.rules]

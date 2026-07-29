@@ -71,7 +71,9 @@ def _cg(l: int, j: float, mj: float) -> tuple[float, int | None, float, int | No
     return c_up, m_up, c_dn, m_dn
 
 
-def so_projector_channels(system: System) -> tuple[list, int]:
+def so_projector_channels(
+    system: System,
+) -> tuple[list[tuple[int, int, int, int, float, float]], int]:
     """Column layout of the FR spinor projectors and the beta lmax.
 
     Returns ``(col_meta, lmax)`` where ``col_meta`` lists one
@@ -81,11 +83,17 @@ def so_projector_channels(system: System) -> tuple[list, int]:
     (``strained_so_projector_cols``) share exactly one column ordering.
     """
     lmax = max(b.l for u in system.upfs for b in u.betas)
-    col_meta = []
+    col_meta: list[tuple[int, int, int, int, float, float]] = []
     for a, sp in enumerate(system.species_of_atom):
         upf = system.upfs[sp]
         for i, beta in enumerate(upf.betas):
-            l, j = beta.l, beta.j
+            l = beta.l
+            # Every caller reaches this function only in the fully-relativistic
+            # branch (e.g. scf/noncollinear.py's `if system.is_fr:`), where every
+            # beta was split by SOC into (l, j = l±½) channels, so .j is never
+            # None here even though the dataclass field is Optional in general.
+            assert beta.j is not None, "so_projector_channels needs a fully-relativistic UPF"
+            j = beta.j
             for imj in range(int(round(2 * j + 1))):
                 col_meta.append((a, sp, i, l, j, -j + imj))
     return col_meta, lmax
@@ -131,6 +139,10 @@ def build_so_projectors(
     """
     if so_tables is None:
         so_tables = system.so_beta_tables
+        # Only populated (System.so_beta_tables) for fully-relativistic systems,
+        # and this function is only called in that branch (see module docstring
+        # / so_projector_channels), so it is never None by this point.
+        assert so_tables is not None
     device = bk.mask.device
     nk, m_pw = bk.nk, bk.npw_max
     col_meta, lmax = so_projector_channels(system)
@@ -186,7 +198,7 @@ def strained_so_projector_cols(
     ph = torch.exp(torch.complex(torch.zeros_like(parg), -parg))
     vol_norm = (1.0 / torch.sqrt(omega)).to(CDTYPE)
 
-    f_cache: dict = {}
+    f_cache: dict[tuple[int, int], torch.Tensor] = {}
     cols = []
     for a, sp, i, l, j, mj in col_meta:
         f = f_cache.get((sp, i))

@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 
 import torch
+from typing_extensions import override
 
 from gradwave.core.xc.base import XCFunctional, eps_to_ev_density, to_au
 
@@ -46,6 +47,7 @@ def eps_c_pw92(rho_au: torch.Tensor) -> torch.Tensor:
 class LDA_PW92(XCFunctional):
     needs_gradient = False
 
+    @override
     def energy_density(
         self, rho: torch.Tensor, sigma: torch.Tensor | None = None, tau: torch.Tensor | None = None
     ) -> torch.Tensor:

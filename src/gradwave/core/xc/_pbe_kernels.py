@@ -26,11 +26,15 @@ def pbe_enhancement(
     return 1.0 + kappa - kappa / (1.0 + mu * s2 / kappa)
 
 
-def pbe_h(t2: torch.Tensor, eps_c_lda: torch.Tensor, phi3: float = 1.0) -> torch.Tensor:
+def pbe_h(
+    t2: torch.Tensor, eps_c_lda: torch.Tensor, phi3: float | torch.Tensor = 1.0
+) -> torch.Tensor:
     """PBE correlation gradient term H(rs, ζ, t) [Ha/electron].
 
     phi3 = φ³ is the spin-scaling factor; φ = 1 (phi3 = 1) in the unpolarized
-    case, which recovers the plain PBE H.
+    case (pbe.py's default), which recovers the plain PBE H. spin.py's SpinPBE
+    passes a genuine per-point Tensor (φ depends on ζ(r)), so this is a real
+    dual-mode signature, not a case that can be narrowed to one type.
     """
     expo = torch.exp(-eps_c_lda / (GAMMA * phi3))
     a = (BETA / GAMMA) / torch.clamp(expo - 1.0, min=1e-30)
