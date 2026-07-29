@@ -68,9 +68,9 @@ class FFTGrid:
 def build_fft_grid(
     cell: np.ndarray,
     ecut: float,
-    device=None,
+    device: torch.device | None = None,
     equal_dims: bool | Sequence[Sequence[int]] = False,
-    shape_override=None,
+    shape_override: tuple[int, int, int] | list[int] | None = None,
 ) -> FFTGrid:
     """equal_dims: True forces a cubic box; an iterable of axis-index groups
     (e.g. [(0, 1)] for a slab) instead equalizes only the coupled axes within
@@ -84,24 +84,26 @@ def build_fft_grid(
     b = reciprocal_cell(cell)
     gmax_dens = 2.0 * gmax_from_ecut(ecut)
 
+    shape: tuple[int, int, int]
     if shape_override is not None:
-        shape = tuple(int(n) for n in shape_override)
+        n0, n1, n2 = (int(n) for n in shape_override)
+        shape = (n0, n1, n2)
     else:
-        shape = []
+        dims = []
         for i in range(3):
             # minimal box: integer Miller extent of the density sphere
             m_i = int(np.floor(gmax_dens * np.linalg.norm(cell[i]) / (2.0 * np.pi)))
-            shape.append(good_fft_size(2 * m_i + 1))
+            dims.append(good_fft_size(2 * m_i + 1))
         if equal_dims is True:
             # symmetry operations permute axes; a cubic box is always closed
             # under m → Wᵀm mod n
-            shape = [max(shape)] * 3
+            dims = [max(dims)] * 3
         elif equal_dims:  # iterable of axis groups, e.g. [(0, 1)] for a slab
             for group in equal_dims:
-                n = max(shape[i] for i in group)
+                n = max(dims[i] for i in group)
                 for i in group:
-                    shape[i] = n
-        shape = tuple(shape)
+                    dims[i] = n
+        shape = (dims[0], dims[1], dims[2])
 
     millers = np.meshgrid(
         *[np.fft.fftfreq(n, d=1.0 / n).astype(np.int64) for n in shape], indexing="ij"
@@ -135,7 +137,12 @@ class GSphere:
         return int(self.miller.shape[0])
 
 
-def build_gsphere(grid: FFTGrid, ecut: float, k_frac, device=None) -> GSphere:
+def build_gsphere(
+    grid: FFTGrid,
+    ecut: float,
+    k_frac: tuple[float, float, float] | np.ndarray | list[float],
+    device: torch.device | None = None,
+) -> GSphere:
     """All G with HBAR2_2M|k+G|² ≤ ecut, as indices into `grid`'s FFT box."""
     cell = grid.cell
     b = reciprocal_cell(cell)
