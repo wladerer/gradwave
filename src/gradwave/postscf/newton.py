@@ -28,6 +28,7 @@ so the Fermi-surface χ̃ channel carries the response.
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import cast
 
 import torch
 
@@ -108,8 +109,12 @@ def newton_polish(res: USPPResult, xc: XCFunctional | SpinXC, *, tol: float = 1e
         # scf_uspp always sets rho_spin when nspin=2 (see results.py).
         assert res.rho_spin is not None
         rho_s = [r.detach().clone() for r in res.rho_spin]
-    bec_s = ([[m.detach().clone() for m in res.rho_ij_atoms]] if nspin == 1
-             else [[m.detach().clone() for m in ch] for ch in res.rho_ij_atoms])
+    if nspin == 1:
+        rho_ij_flat = cast("list[torch.Tensor]", res.rho_ij_atoms)
+        bec_s = [[m.detach().clone() for m in rho_ij_flat]]
+    else:
+        rho_ij_nested = cast("list[list[torch.Tensor]]", res.rho_ij_atoms)
+        bec_s = [[m.detach().clone() for m in ch] for ch in rho_ij_nested]
     hist_out = []
     it_out = None
     best = float("inf")
@@ -170,6 +175,11 @@ def newton_polish(res: USPPResult, xc: XCFunctional | SpinXC, *, tol: float = 1e
             d = r_vec.clone()
             prev_d = prev_g = None
             hist_dd, hist_dg = [], []
+            # Bound before the loop purely so ty can see `gn` as always
+            # assigned in the `else` clause below (max_inner is always >= 1
+            # in practice, same "runs >=1 iteration" pattern as
+            # scf/loop.py/uspp_loop.py) -- overwritten every real iteration.
+            gn = float("inf")
             for _it in range(1, max_inner + 1):
                 d_rho_s, d_bec_s = _unpack(d, shape, n_pts, nbec, nspin)
                 v_sp = cs.k_hxc_grid(d_rho_s)
@@ -187,6 +197,9 @@ def newton_polish(res: USPPResult, xc: XCFunctional | SpinXC, *, tol: float = 1e
                     d = g_vec
                     break
                 if prev_g is not None:
+                    # prev_d/prev_g are always set together (initialized
+                    # together, reassigned together below).
+                    assert prev_d is not None
                     hist_dd.append(d - prev_d)
                     hist_dg.append(g_res - prev_g)
                     if len(hist_dg) > history:
@@ -210,6 +223,11 @@ def newton_polish(res: USPPResult, xc: XCFunctional | SpinXC, *, tol: float = 1e
             bec_s = [[b + m.to(b.dtype) for b, m in zip(bec, dbec, strict=True)]
                      for bec, dbec in zip(bec_s, d_bec_s, strict=True)]
 
+    # The outer loop above always runs (max_newton >= 1 in practice), so
+    # it_out is a real _IterStep from the last iteration here, never the
+    # pre-loop placeholder (same "runs >=1 iteration" pattern as
+    # scf/loop.py/uspp_loop.py).
+    assert it_out is not None
     rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
     out = dict(
         coeffs=(coeffs[0] if nspin == 1 else coeffs),
