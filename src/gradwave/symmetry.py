@@ -313,7 +313,7 @@ class RhoSymmetrizer:
     are zero there; masking makes the operator exactly idempotent.
     """
 
-    def __init__(self, shape, sg: SpaceGroup, dens_mask=None):
+    def __init__(self, shape, sg: SpaceGroup, dens_mask=None) -> None:
         n1, n2, n3 = shape
         dims = np.array([n1, n2, n3])
         millers = np.stack(
@@ -390,7 +390,7 @@ class MagneticSymmetrizer:
     magnetic IBZ of reduce_mesh_magnetic.
     """
 
-    def __init__(self, shape, mg: MagneticGroup, cell: np.ndarray, dens_mask=None):
+    def __init__(self, shape, mg: MagneticGroup, cell: np.ndarray, dens_mask=None) -> None:
         combined = mg.combined()
         self.rho_sym = RhoSymmetrizer(shape, combined, dens_mask=dens_mask)
         a_t = np.asarray(cell, dtype=float).T
@@ -455,7 +455,7 @@ class CollinearMagneticSymmetrizer:
     """
 
     def __init__(self, shape, mg: MagneticGroup, cell: np.ndarray, magmoms,
-                 dens_mask=None):
+                 dens_mask=None) -> None:
         combined = mg.combined()
         self.rho_sym = RhoSymmetrizer(shape, combined, dens_mask=dens_mask)
         # collinear magnetic axis n̂ from the moment set (first nonzero moment)
@@ -540,7 +540,7 @@ class VectorFieldSymmetrizer:
     running the dielectric/Born DFPT with IBZ symmetry reduction.
     """
 
-    def __init__(self, shape, sg: SpaceGroup, cell: np.ndarray, dens_mask=None):
+    def __init__(self, shape, sg: SpaceGroup, cell: np.ndarray, dens_mask=None) -> None:
         self.rho_sym = RhoSymmetrizer(shape, sg, dens_mask=dens_mask)
         a_t = np.asarray(cell, dtype=float).T
         a_t_inv = np.linalg.inv(a_t)
