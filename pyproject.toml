@@ -237,12 +237,47 @@ include = [
     # expects float). Real follow-up work, not a quick fix -- left off
     # rather than forced.
     #
-    # Phase 7: autotyping + MonkeyType over the three most-imported
+    # Phase 8: autotyping + MonkeyType over the three most-imported
     # top-level modules (symmetry.py, grids.py, kpoints.py) -- verified
     # individually, real ty check exit code, one file at a time:
     "src/gradwave/kpoints.py",
     "src/gradwave/grids.py",
     "src/gradwave/symmetry.py",
+    #
+    # Phase 9: autotyping + MonkeyType over pseudo/ (9 files, the leaf
+    # UPF/PAW parsing package -- no core/scf/postscf/solvers imports allowed
+    # per the "pseudo is a leaf package" import-linter contract below, which
+    # this phase respects: RadialTables/radial_tables' `upf`/`system`
+    # parameters use a local `Any`/duck-typed contract instead of importing
+    # System/USPPSystem from scf/, and pseudo.local's UPFData-only helpers are
+    # called via `cast(UPFData, ...)` at the one call site that also takes
+    # PAWData (radial_torch.py) rather than widening local.py's signatures --
+    # the same precedent postscf/_kb.py already uses for beta_form_factors.
+    # upf.py/upf_paw.py needed a real fix, not just annotations: every
+    # `elem.find(tag).text`/`.find(tag)` chain returns `Element | None`
+    # (ElementTree's own stub), so two shared helpers (`_find`, `_find_text`,
+    # plus `_text` for already-resolved children from iteration) turn a
+    # would-be AttributeError-on-a-malformed-file into a clear ValueError and
+    # narrow the type for every caller, replacing ~20 unchecked chains.
+    "src/gradwave/pseudo/__init__.py",
+    "src/gradwave/pseudo/_bessel_data.py",
+    "src/gradwave/pseudo/atomic.py",
+    "src/gradwave/pseudo/kb.py",
+    "src/gradwave/pseudo/local.py",
+    "src/gradwave/pseudo/radial.py",
+    "src/gradwave/pseudo/upf.py",
+    "src/gradwave/pseudo/upf_paw.py",
+    #
+    # Deliberately left off: radial_torch.py. Its custom `_SBT(torch.autograd.
+    # Function)` forward/backward are a genuine base-class contract gap, not
+    # a quick fix -- torch's own stub types both as
+    # `(ctx, *args: Any, **kwargs: Any) -> Any`, so giving them a concrete
+    # signature (ctx: FunctionCtx, q: Tensor, ...) trips invalid-method-override
+    # (arity narrows the base's *args, violating LSP) and missing-override-
+    # decorator; FunctionCtx's dynamic ctx.l/ctx.saved_tensors attributes are
+    # real at runtime (the documented save_for_backward/saved_tensors
+    # contract) but aren't part of the stub either way. Left unannotated
+    # (matching autotyping's own choice not to touch them) rather than forced.
 ]
 
 [tool.ty.overrides.rules]

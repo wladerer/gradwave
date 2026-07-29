@@ -89,6 +89,31 @@ def _parse_floats(text: str) -> np.ndarray:
     return np.array(text.split(), dtype=np.float64)
 
 
+def _find(elem: ET.Element, tag: str) -> ET.Element:
+    """``elem.find(tag)``, raising instead of returning None. Every UPF v2 tag
+    looked up this way (PP_MESH, PP_NONLOCAL, PP_PAW, ...) is required by the
+    format — a miss means a genuinely malformed pseudopotential, not an
+    optional field, so this turns a would-be AttributeError-on-None into a
+    clear ValueError and narrows the type for every caller."""
+    child = elem.find(tag)
+    if child is None:
+        raise ValueError(f"missing required UPF element {tag!r} under <{elem.tag}>")
+    return child
+
+
+def _text(elem: ET.Element) -> str:
+    """``elem.text``, raising instead of returning None (an element with no
+    body text at all — distinct from empty text)."""
+    if elem.text is None:
+        raise ValueError(f"UPF element <{elem.tag}> has no text")
+    return elem.text
+
+
+def _find_text(elem: ET.Element, tag: str) -> str:
+    """``_text(_find(elem, tag))`` — the find-then-read-text combination."""
+    return _text(_find(elem, tag))
+
+
 # Matches the root open tag <UPF> or <UPF version="2.0.1"> but not <UPFX>:
 # "UPF" must be followed immediately by '>' or whitespace-introduced attrs.
 _UPF_OPEN_RE = re.compile(r"<UPF(?:\s[^>]*)?>")
@@ -156,7 +181,7 @@ def _check_mesh_lengths(path: Path, n: int, arrays: dict[str, np.ndarray]) -> No
             raise ValueError(f"{path}: {name} length {len(arr)} != mesh size {n}")
 
 
-def _header_flag(h: dict, name: str) -> bool:
+def _header_flag(h: dict[str, str], name: str) -> bool:
     """UPF boolean header attribute: 'T'/'TRUE' (case/space-insensitive) → True,
     everything else (including a missing attribute) → False. Shared by the NC
     and PAW/USPP header checks."""
@@ -166,15 +191,15 @@ def _header_flag(h: dict, name: str) -> bool:
 def _parse_mesh_vloc(root: ET.Element) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """(r, rab, vloc) from PP_MESH/PP_LOCAL: r, rab Bohr→Å and vloc Ry→eV.
     Identical for the NC and PAW/USPP parsers."""
-    mesh = root.find("PP_MESH")
-    r = _parse_floats(mesh.find("PP_R").text) * BOHR_ANG
-    rab = _parse_floats(mesh.find("PP_RAB").text) * BOHR_ANG
-    vloc = _parse_floats(root.find("PP_LOCAL").text) * RY_EV
+    mesh = _find(root, "PP_MESH")
+    r = _parse_floats(_find_text(mesh, "PP_R")) * BOHR_ANG
+    rab = _parse_floats(_find_text(mesh, "PP_RAB")) * BOHR_ANG
+    vloc = _parse_floats(_find_text(root, "PP_LOCAL")) * RY_EV
     return r, rab, vloc
 
 
 def _parse_betas(
-    nonlocal_: ET.Element, n_r: int, jjj: dict | None = None
+    nonlocal_: ET.Element, n_r: int, jjj: dict[int, float] | None = None
 ) -> list[BetaProjector]:
     """PP_BETA.i projectors in index order: r·β scaled by BOHR^{-1/2} and hard-
     truncated at cutoff_radius_index (SG15 β are noisy/zero-padded past it).
@@ -182,27 +207,29 @@ def _parse_betas(
     UPFs; None/empty leaves j unset (the ultrasoft/PAW and scalar-relativistic
     NC cases)."""
     jjj = jjj or {}
-    betas = []
+    betas: list[BetaProjector] = []
     for child in sorted(
         (c for c in nonlocal_ if c.tag.startswith("PP_BETA.")),
         key=lambda c: int(c.tag.split(".")[1]),
     ):
         l = int(child.attrib["angular_momentum"])
         kkbeta = int(child.attrib.get("cutoff_radius_index", n_r))
-        vals = _parse_floats(child.text) * BOHR_ANG ** (-0.5)
+        vals = _parse_floats(_text(child)) * BOHR_ANG ** (-0.5)
         idx = int(child.tag.split(".")[1])  # index attr can be "*" in SG15 FR
         betas.append(BetaProjector(l=l, rbeta=vals[:kkbeta], cutoff_idx=kkbeta,
                                    j=jjj.get(idx)))
     return betas
 
 
-def _parse_pswfc_chi(root: ET.Element, jchi: dict | None = None) -> list[AtomicOrbital]:
+def _parse_pswfc_chi(
+    root: ET.Element, jchi: dict[int, float] | None = None
+) -> list[AtomicOrbital]:
     """PP_PSWFC PP_CHI.i atomic orbitals (the +U/LCAO manifold), r·R_nl scaled
     by BOHR^{-1/2} so ∫(r·R)² dr = 1 with dr in Å and the r·β SBT form factor is
     reused. Empty when the dataset carries no PP_PSWFC block. `jchi` maps the
     1-based chi index to its total j (fully-relativistic UPFs)."""
     jchi = jchi or {}
-    chi = []
+    chi: list[AtomicOrbital] = []
     pswfc_block = root.find("PP_PSWFC")
     if pswfc_block is not None:
         for child in sorted(
@@ -214,7 +241,7 @@ def _parse_pswfc_chi(root: ET.Element, jchi: dict | None = None) -> list[AtomicO
                 l=int(child.attrib["l"]),
                 label=child.attrib.get("label", "").strip(),
                 occupation=float(child.attrib.get("occupation", "0")),
-                rchi=_parse_floats(child.text) * BOHR_ANG ** (-0.5),
+                rchi=_parse_floats(_text(child)) * BOHR_ANG ** (-0.5),
                 j=jchi.get(idx),
             ))
     return chi
@@ -240,11 +267,11 @@ def parse_upf(path: str | Path) -> UPFData:
 
     r, rab, vloc = _parse_mesh_vloc(root)
 
-    nonlocal_ = root.find("PP_NONLOCAL")
+    nonlocal_ = _find(root, "PP_NONLOCAL")
     # Fully-relativistic UPFs carry PP_RELBETA (β total-j) and PP_RELWFC (χ
     # total-j) side by side in one PP_SPIN_ORB block — read both in one pass.
-    jjj = {}
-    jchi = {}
+    jjj: dict[int, float] = {}
+    jchi: dict[int, float] = {}
     if has_so:
         so = root.find("PP_SPIN_ORB")
         if so is None:
@@ -259,9 +286,9 @@ def parse_upf(path: str | Path) -> UPFData:
     nproj = len(betas)
     dij = np.zeros((nproj, nproj))
     if nproj:
-        dij = _parse_floats(nonlocal_.find("PP_DIJ").text).reshape(nproj, nproj) * RY_EV
+        dij = _parse_floats(_find_text(nonlocal_, "PP_DIJ")).reshape(nproj, nproj) * RY_EV
 
-    rhoatom = _parse_floats(root.find("PP_RHOATOM").text) / BOHR_ANG
+    rhoatom = _parse_floats(_find_text(root, "PP_RHOATOM")) / BOHR_ANG
 
     # PP_PSWFC atomic orbitals (present in PseudoDojo, absent/empty in SG15).
     pswfc = _parse_pswfc_chi(root, jchi)
@@ -269,7 +296,7 @@ def parse_upf(path: str | Path) -> UPFData:
     core_rho = None
     if _header_flag(h, "core_correction"):
         # PP_NLCC stores ρ_core(r) directly (NOT 4πr²ρ), in bohr⁻³
-        core_rho = _parse_floats(root.find("PP_NLCC").text) / BOHR_ANG**3
+        core_rho = _parse_floats(_find_text(root, "PP_NLCC")) / BOHR_ANG**3
 
     _check_mesh_lengths(path, len(r), {"PP_RAB": rab, "PP_LOCAL": vloc, "PP_RHOATOM": rhoatom})
 
