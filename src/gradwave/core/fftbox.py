@@ -24,7 +24,9 @@ from __future__ import annotations
 import torch
 
 
-def sphere_to_box(coeffs: torch.Tensor, flat_idx: torch.Tensor, shape) -> torch.Tensor:
+def sphere_to_box(
+    coeffs: torch.Tensor, flat_idx: torch.Tensor, shape: tuple[int, int, int]
+) -> torch.Tensor:
     """Scatter sphere coefficients (..., npw) into dense boxes (..., n1, n2, n3)."""
     batch = coeffs.shape[:-1]
     n = shape[0] * shape[1] * shape[2]
@@ -55,7 +57,9 @@ def g_to_r_box(f_g: torch.Tensor, *, real: bool = False) -> torch.Tensor:
     return out.real if real else out
 
 
-def g_to_r(coeffs: torch.Tensor, flat_idx: torch.Tensor, shape) -> torch.Tensor:
+def g_to_r(
+    coeffs: torch.Tensor, flat_idx: torch.Tensor, shape: tuple[int, int, int]
+) -> torch.Tensor:
     """Sphere coefficients → periodic function values on the r-grid.
 
     Returns f(r_j) = Σ_G c(G) e^{iG·r_j}, shape (..., n1, n2, n3), complex.

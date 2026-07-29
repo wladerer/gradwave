@@ -19,12 +19,14 @@ BETA = 0.06672455060314922
 GAMMA = (1.0 - math.log(2.0)) / math.pi**2
 
 
-def pbe_enhancement(s2, kappa=KAPPA, mu=MU):
+def pbe_enhancement(
+    s2: torch.Tensor, kappa: float | torch.Tensor = KAPPA, mu: float | torch.Tensor = MU
+) -> torch.Tensor:
     """PBE exchange enhancement F_x(s²) = 1 + κ − κ/(1 + μ s²/κ)."""
     return 1.0 + kappa - kappa / (1.0 + mu * s2 / kappa)
 
 
-def pbe_h(t2, eps_c_lda, phi3=1.0):
+def pbe_h(t2: torch.Tensor, eps_c_lda: torch.Tensor, phi3: float = 1.0) -> torch.Tensor:
     """PBE correlation gradient term H(rs, ζ, t) [Ha/electron].
 
     phi3 = φ³ is the spin-scaling factor; φ = 1 (phi3 = 1) in the unpolarized

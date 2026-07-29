@@ -178,6 +178,22 @@ include = [
     # DiscretizationError/USPPResult-adjacent dataclasses carry the same
     # bare-list/tuple-invariance debt loop.py/uspp_loop.py have above. Real
     # follow-up work, not a quick fix — left off rather than forced.
+    #
+    # Phase 6: autotyping + MonkeyType over core/ (the most-imported
+    # subpackage). Of the 17 touched files, 5 verified genuinely clean this
+    # round (tested file-by-file, real ty check exit code each time):
+    "src/gradwave/core/fftbox.py",
+    "src/gradwave/core/gamma.py",
+    "src/gradwave/core/hamiltonian.py",
+    "src/gradwave/core/xc/_pbe_kernels.py",
+    "src/gradwave/core/xc/noncollinear.py",
+    # Deliberately left off (individually verified NOT clean): _anderson.py,
+    # batch.py, hubbard.py, metagga.py, occupations.py, spinor_proj.py,
+    # xc/base.py, xc/learnable.py, xc/pbe.py, xc/spin.py (1-11 real errors
+    # apiece); xc/lda_pw92.py, xc/r2scan.py (missing @override decorators on
+    # energy_density overrides, an unsupported-operator on a BOHR_ANG**8
+    # multiply) -- small, fixable, but left for a follow-up rather than
+    # widening this pass's scope.
 ]
 
 [tool.ty.overrides.rules]
@@ -206,6 +222,15 @@ name = "core stays independent of the SCF and analysis layers"
 type = "forbidden"
 source_modules = ["gradwave.core"]
 forbidden_modules = ["gradwave.scf", "gradwave.postscf"]
+# TYPE_CHECKING-only edges from the core/ typing pass (Phase 6): each annotates
+# a `system`/`res` parameter with its real scf.loop type (System, SCFResult) but
+# never imports it at runtime, so no actual circular import exists — same
+# pattern, same carve-out mechanism, as the scf -> postscf contract below.
+ignore_imports = [
+    "gradwave.core.hubbard -> gradwave.scf.loop",
+    "gradwave.core.spinor_proj -> gradwave.scf.loop",
+    "gradwave.core.xc.learnable -> gradwave.scf.loop",
+]
 
 [[tool.importlinter.contracts]]
 name = "pseudo is a leaf package"

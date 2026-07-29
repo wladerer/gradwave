@@ -75,18 +75,18 @@ _FZ20 = 1.709920934161365617563962776245
 _FZ_DEN = 2.0 ** (4.0 / 3.0) - 2.0
 
 
-def _f_zeta(z):
+def _f_zeta(z: torch.Tensor) -> torch.Tensor:
     return ((1.0 + z) ** (4.0 / 3.0) + (1.0 - z) ** (4.0 / 3.0) - 2.0) / _FZ_DEN
 
 
-def _mphi(z):
+def _mphi(z: torch.Tensor) -> torch.Tensor:
     return 0.5 * ((1.0 + z) ** (2.0 / 3.0) + (1.0 - z) ** (2.0 / 3.0))
 
 
 # ---------------------------------------------------------------------------
 # exchange
 # ---------------------------------------------------------------------------
-def _ex_enhancement(p, alpha):
+def _ex_enhancement(p: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
     """r2SCAN exchange enhancement F_x(p, ᾱ)."""
     # SCAN y-analogue with the r2SCAN gradient regularization
     r2x = (_CN * _C2X_COEF * torch.exp(-(p**2) / _DP2**4) + MU_GE) * p
@@ -106,7 +106,7 @@ def _ex_enhancement(p, alpha):
     return (h1x + f_a * (_H0X - h1x)) * gx
 
 
-def _ex_unpol(n, sig, tau):
+def _ex_unpol(n: torch.Tensor, sig: torch.Tensor, tau: torch.Tensor) -> torch.Tensor:
     """Exchange energy density [Ha/bohr³] for a spin-unpolarized density
     (n, sig, tau) in a.u. — the argument passed the spin-scaled 2ρ_s per channel."""
     n = torch.clamp(n, min=RHO_FLOOR_AU)
@@ -122,7 +122,7 @@ def _ex_unpol(n, sig, tau):
 # ---------------------------------------------------------------------------
 # correlation
 # ---------------------------------------------------------------------------
-def _pw92_g(k, rs):
+def _pw92_g(k: int, rs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """PW92(-modified) g(k, rs) and its rs-derivative (analytic, a.u.)."""
     a, a1, b1, b2, b3, b4 = (_PW_A[k], _PW_ALPHA1[k], _PW_BETA1[k], _PW_BETA2[k],
                              _PW_BETA3[k], _PW_BETA4[k])
@@ -135,7 +135,7 @@ def _pw92_g(k, rs):
     return g, gp
 
 
-def _f_pw(rs, z):
+def _f_pw(rs: torch.Tensor, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """PW92(-modified) correlation ε_c(rs, ζ) and dε_c/drs [Ha/particle]."""
     fz = _f_zeta(z)
     g1, g1p = _pw92_g(0, rs)
@@ -146,7 +146,7 @@ def _f_pw(rs, z):
     return e, ep
 
 
-def _scan_eclda0(rs):
+def _scan_eclda0(rs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """SCAN LSDA0 base ε and dε/drs (analytic)."""
     rsh = torch.sqrt(rs)
     den = 1.0 + _B2C * rsh + _B3C * rs
@@ -156,23 +156,25 @@ def _scan_eclda0(rs):
     return e, ep
 
 
-def _scan_Gc(z):
+def _scan_Gc(z: torch.Tensor) -> torch.Tensor:
     # one_minus_z_pow_n(z, 12) = 1 − z¹² (even-n telescoping); →1 at z=0, →0 at z=±1
     return (1.0 - _G_CNST * (2.0 ** (1.0 / 3.0) - 1.0) * _f_zeta(z)) * (1.0 - z**12)
 
 
-def _scan_e0(rs, z, s):
+def _scan_e0(rs: torch.Tensor, z: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
     eclda0, _ = _scan_eclda0(rs)
     one_minus_ginf = -torch.expm1(-0.25 * torch.log1p(4.0 * _CHI_INFTY * s**2))
     h0 = _B1C * torch.log1p(torch.expm1(-eclda0 / _B1C) * one_minus_ginf)
     return (eclda0 + h0) * _scan_Gc(z)
 
 
-def _mbeta(rs):
+def _mbeta(rs: torch.Tensor) -> torch.Tensor:
     return _BETA_A * (1.0 + _BETA_B * rs) / (1.0 + _BETA_C * rs)
 
 
-def _ec(n, sig_tot, tau_tot, zeta):
+def _ec(
+    n: torch.Tensor, sig_tot: torch.Tensor, tau_tot: torch.Tensor, zeta: torch.Tensor
+) -> torch.Tensor:
     """r2SCAN correlation energy density [Ha/bohr³], total-density functional."""
     n = torch.clamp(n, min=RHO_FLOOR_AU)
     rs = (3.0 / (4.0 * math.pi * n)) ** (1.0 / 3.0)
@@ -234,7 +236,9 @@ class R2SCAN(XCFunctional):
     needs_gradient = True
     needs_tau = True
 
-    def energy_density(self, rho, sigma=None, tau=None):
+    def energy_density(
+        self, rho: torch.Tensor, sigma: torch.Tensor | None = None, tau: torch.Tensor | None = None
+    ) -> torch.Tensor:
         if sigma is None or tau is None:
             raise ValueError("r2SCAN requires sigma = |∇ρ|² and tau")
         n = to_au(rho)
@@ -253,8 +257,16 @@ class SpinR2SCAN(SpinXC):
     needs_gradient = True
     needs_tau = True
 
-    def energy_density(self, rho_up, rho_dn, sigma_uu=None, sigma_dd=None,
-                       sigma_tot=None, tau_up=None, tau_dn=None):
+    def energy_density(
+        self,
+        rho_up: torch.Tensor,
+        rho_dn: torch.Tensor,
+        sigma_uu: torch.Tensor | None = None,
+        sigma_dd: torch.Tensor | None = None,
+        sigma_tot: torch.Tensor | None = None,
+        tau_up: torch.Tensor | None = None,
+        tau_dn: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if sigma_uu is None or tau_up is None:
             raise ValueError("spin r2SCAN requires per-spin sigma and tau")
         nu, nd = to_au(rho_up), to_au(rho_dn)

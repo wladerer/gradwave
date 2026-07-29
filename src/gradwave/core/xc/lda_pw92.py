@@ -28,7 +28,7 @@ def eps_x_lda(rho_au: torch.Tensor) -> torch.Tensor:
     return _CX * rho_au ** (1.0 / 3.0)
 
 
-def _g_pw92(rs: torch.Tensor, p) -> torch.Tensor:
+def _g_pw92(rs: torch.Tensor, p: tuple[float, float, float, float, float, float]) -> torch.Tensor:
     """PW92 G(rs) for one parameter set p = (A, α1, β1, β2, β3, β4) [Ha]."""
     a, a1, b1, b2, b3, b4 = p
     srs = torch.sqrt(rs)
@@ -46,7 +46,9 @@ def eps_c_pw92(rho_au: torch.Tensor) -> torch.Tensor:
 class LDA_PW92(XCFunctional):
     needs_gradient = False
 
-    def energy_density(self, rho: torch.Tensor, sigma=None, tau=None) -> torch.Tensor:
+    def energy_density(
+        self, rho: torch.Tensor, sigma: torch.Tensor | None = None, tau: torch.Tensor | None = None
+    ) -> torch.Tensor:
         rho_au = to_au(rho)
         eps = eps_x_lda(rho_au) + eps_c_pw92(rho_au)
         return eps_to_ev_density(rho, eps)

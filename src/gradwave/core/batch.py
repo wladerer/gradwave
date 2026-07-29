@@ -21,7 +21,9 @@ import torch
 
 from gradwave.constants import HBAR2_2M
 from gradwave.core.fftbox import g_to_r_box
+from gradwave.core.hamiltonian import ProjectorData
 from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.grids import GSphere
 
 # GPU dense-grid temporary budget [bytes]: bands are chunked so the ~4 dense-box
 # temporaries the apply/density chain holds at once stay under this. Sizes a
@@ -71,7 +73,9 @@ class BatchedK:
         return int(self.mask.shape[1])
 
 
-def build_batched(spheres, proj_data, device=None) -> BatchedK:
+def build_batched(
+    spheres: list[GSphere], proj_data: list[ProjectorData], device: torch.device | None = None
+) -> BatchedK:
     """Assemble padded batch tensors from per-k GSphere + ProjectorData lists."""
     nk = len(spheres)
     npw = torch.tensor([s.npw for s in spheres], dtype=torch.int64, device=device)
@@ -103,7 +107,7 @@ def build_batched(spheres, proj_data, device=None) -> BatchedK:
     )
 
 
-def g_to_r_b(coeffs: torch.Tensor, bk: BatchedK, shape) -> torch.Tensor:
+def g_to_r_b(coeffs: torch.Tensor, bk: BatchedK, shape: tuple[int, int, int]) -> torch.Tensor:
     """(nk, nb, npw_max) → (nk, nb, n1, n2, n3): f = Σ_G c e^{iGr}."""
     nk, nb, m = coeffs.shape
     n = shape[0] * shape[1] * shape[2]
@@ -143,9 +147,16 @@ class BatchedHamiltonian:
     g_to_r_b/box_to_sphere_b remain the differentiable API.
     """
 
-    def __init__(self, bk: BatchedK, shape, v_eff_r: torch.Tensor, p: torch.Tensor,
-                 hub_q: torch.Tensor | None = None, hub_dij: torch.Tensor | None = None,
-                 smooth=None):
+    def __init__(
+        self,
+        bk: BatchedK,
+        shape: tuple[int, int, int],
+        v_eff_r: torch.Tensor,
+        p: torch.Tensor,
+        hub_q: torch.Tensor | None = None,
+        hub_dij: torch.Tensor | None = None,
+        smooth: tuple[tuple[int, int, int], torch.Tensor, torch.Tensor] | None = None,
+    ) -> None:
         self.bk = bk
         # dual grid (USPP/PAW): run the local-potential FFT on the smaller
         # smooth box. Exact for ⟨ψ|V|ψ⟩ (see uspp_setup). The kinetic and
@@ -171,7 +182,9 @@ class BatchedHamiltonian:
         self._tab_cache: dict = {}  # cdtype → cast (t, v_eff, p, p_conj, dij)
         self._hub_cache: dict = {}  # cdtype → cast (hub_q, hub_q_conj, hub_dij)
 
-    def _tables(self, cdtype):
+    def _tables(
+        self, cdtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Cast tables to the working precision of the coefficients (cached).
 
         Feeding complex64 coefficients is not enough on its own: multiplying by
@@ -196,7 +209,7 @@ class BatchedHamiltonian:
             self._tab_cache[cdtype] = cached
         return cached
 
-    def _get_box(self, nk: int, nb: int, dtype, device):
+    def _get_box(self, nk: int, nb: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
         if (
             self._box is None
             or self._box.shape[0] != nk
@@ -206,7 +219,7 @@ class BatchedHamiltonian:
             self._box = torch.zeros(nk, nb, self.n + 1, dtype=dtype, device=device)
         return self._box[:, :nb]
 
-    def _band_chunk(self, nk: int, device, elem_bytes: int = 16) -> int:
+    def _band_chunk(self, nk: int, device: torch.device, elem_bytes: int = 16) -> int:
         """Bands per chunk so dense-box temporaries stay under ~380 MB on GPU
         (the apply chain holds ~4 such temporaries at once). CPU: no limit.
 
@@ -252,7 +265,7 @@ class BatchedHamiltonian:
             out = out + torch.einsum("kbp,pq,kqg->kbg", bh, hd, hq)
         return out * bk.mask[:, None, :]
 
-    def _hub_tables(self, cdtype):
+    def _hub_tables(self, cdtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         cached = self._hub_cache.get(cdtype)
         if cached is None:
             hq = self.hub_q.to(cdtype)
@@ -266,7 +279,7 @@ def density_b(
     occ: torch.Tensor,  # (nk, nb)
     kweights: torch.Tensor,  # (nk,)
     bk: BatchedK,
-    shape,
+    shape: tuple[int, int, int],
     volume: float,
 ) -> torch.Tensor:
     """ρ(r) on the dense grid [e/Å³]. Band-chunked to bound dense-grid memory."""

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import torch
 
@@ -28,6 +29,7 @@ from gradwave.constants import MINUS_I_POW as _MINUS_I_POW
 from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
 from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE, RDTYPE
+from gradwave.grids import GSphere
 
 
 @dataclass
@@ -42,7 +44,7 @@ class ProjectorData:
 
 
 def build_projector_data(
-    sphere,
+    sphere: GSphere | SimpleNamespace,
     species_of_atom: list[int],
     beta_tables: list[torch.Tensor],  # per species: (nchan, npw) F_i(|k+G|)
     beta_ls: list[list[int]],  # per species: l of each channel
@@ -122,7 +124,14 @@ class HamiltonianK:
     or traced for M4 Sternheimer solves).
     """
 
-    def __init__(self, sphere, shape, v_eff_r: torch.Tensor, pd: ProjectorData, p: torch.Tensor):
+    def __init__(
+        self,
+        sphere: GSphere,
+        shape: tuple[int, int, int],
+        v_eff_r: torch.Tensor,
+        pd: ProjectorData,
+        p: torch.Tensor,
+    ) -> None:
         self.sphere = sphere
         self.shape = shape
         self.v_eff_r = v_eff_r  # (n1,n2,n3) real [eV]

@@ -21,12 +21,23 @@ equal (l, j) at equal mj.
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 import torch
 
 from gradwave.constants import MINUS_I_POW as _MINUS_I_POW
+from gradwave.core.batch import BatchedK
 from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE
+
+if TYPE_CHECKING:
+    # gradwave.scf's System is the production caller's type for the `system`
+    # parameter below; importing it for real would violate the "core stays
+    # independent of scf/postscf" layering contract (import-linter), even
+    # though no literal circular import happens here (scf/noncollinear.py's
+    # own spinor_proj imports are lazy, function-local) — see core.hubbard's
+    # and core.xc.learnable's identical TYPE_CHECKING-only edges.
+    from gradwave.scf.loop import System
 
 
 def complex_ylm(lmax: int, g: torch.Tensor) -> torch.Tensor:
@@ -46,7 +57,7 @@ def complex_ylm(lmax: int, g: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def _cg(l: int, j: float, mj: float):
+def _cg(l: int, j: float, mj: float) -> tuple[float, int | None, float, int | None]:
     """(c_up, m_up, c_dn, m_dn) Clebsch–Gordan factors; None m if |m| > l."""
     up_m, dn_m = mj - 0.5, mj + 0.5
     a = math.sqrt((l + mj + 0.5) / (2 * l + 1))
@@ -60,7 +71,7 @@ def _cg(l: int, j: float, mj: float):
     return c_up, m_up, c_dn, m_dn
 
 
-def so_projector_channels(system) -> tuple[list, int]:
+def so_projector_channels(system: System) -> tuple[list, int]:
     """Column layout of the FR spinor projectors and the beta lmax.
 
     Returns ``(col_meta, lmax)`` where ``col_meta`` lists one
@@ -80,7 +91,11 @@ def so_projector_channels(system) -> tuple[list, int]:
     return col_meta, lmax
 
 
-def so_dij(system, col_meta, device=None) -> torch.Tensor:
+def so_dij(
+    system: System,
+    col_meta: list[tuple[int, int, int, int, float, float]],
+    device: torch.device | None = None,
+) -> torch.Tensor:
     """D matrix coupling equal (atom, l, j, mj) columns across radial channels.
 
     Geometry-independent, so the stress reuses the SCF's D unchanged (only the
@@ -95,7 +110,10 @@ def so_dij(system, col_meta, device=None) -> torch.Tensor:
 
 
 def build_so_projectors(
-    bk, system, so_tables=None, positions=None
+    bk: BatchedK,
+    system: System,
+    so_tables: list[torch.Tensor] | None = None,
+    positions: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """(q (nk, nproj_so, 2·npw_max), dij_so) for fully-relativistic pseudos.
 

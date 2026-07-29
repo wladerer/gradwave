@@ -25,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import threading
+from collections.abc import Iterator
 
 import torch
 
@@ -48,7 +49,7 @@ def _force_eager() -> bool:
 
 
 @contextlib.contextmanager
-def xc_eager():
+def xc_eager() -> Iterator[None]:
     """Force any compile-enabled XC functional onto its eager path inside this
     block. Required around f_xc HVPs, since compiled code cannot double-backward."""
     prev = getattr(_EAGER_TLS, "on", False)
@@ -99,7 +100,7 @@ class CompilableXC:
         self._xc_compiled = None
         return self
 
-    def eval_energy_density(self, *args):
+    def eval_energy_density(self, *args) -> torch.Tensor:
         """energy_density through the compiled callable when enabled, else eager.
 
         The compiled path serves the forward and its single backward (v_xc), which

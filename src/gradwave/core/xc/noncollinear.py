@@ -21,15 +21,18 @@ Hamiltonian/SCF consumes (v_xc, B⃗_xc) as the
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import torch
 
 from gradwave.core.xc.spin import SpinXC
+from gradwave.grids import FFTGrid
 
 
 class NoncollinearXC(torch.nn.Module):
     """Wraps any collinear SpinXC into a (ρ, m⃗) functional."""
 
-    def __init__(self, collinear: SpinXC, m_eps: float = 1e-24):
+    def __init__(self, collinear: SpinXC, m_eps: float = 1e-24) -> None:
         super().__init__()
         self.collinear = collinear
         self.m_eps = m_eps
@@ -45,8 +48,18 @@ class NoncollinearXC(torch.nn.Module):
         and core.metagga.spinor_metagga_tau_operator)."""
         return getattr(self.collinear, "needs_tau", False)
 
-    def energy(self, rho, m_vec, volume, sigma_uu=None, sigma_dd=None, sigma_tot=None,
-               rho_core=None, tau_up=None, tau_dn=None):
+    def energy(
+        self,
+        rho: torch.Tensor,
+        m_vec: torch.Tensor,
+        volume: float,
+        sigma_uu: torch.Tensor | None = None,
+        sigma_dd: torch.Tensor | None = None,
+        sigma_tot: torch.Tensor | None = None,
+        rho_core: torch.Tensor | None = None,
+        tau_up: torch.Tensor | None = None,
+        tau_dn: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """E_xc [eV]. rho (grid), m_vec (3, grid). GGA σ's are those of the
         locally-collinear channels (caller builds them from ρ± spectra).
         rho_core (NLCC) shifts ρ only — same semantics as energy_with_grid, so
@@ -58,7 +71,9 @@ class NoncollinearXC(torch.nn.Module):
                                      sigma_tot, tau_up, tau_dn)
 
 
-def _rho_pm(nc_xc: NoncollinearXC, rho, m_vec, rho_core):
+def _rho_pm(
+    nc_xc: NoncollinearXC, rho: torch.Tensor, m_vec: torch.Tensor, rho_core: torch.Tensor | None
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Locally-collinear channels ρ± = (ρ ± |m⃗|)/2, with the NLCC core (which
     carries no magnetization) folded into ρ before the split. Shared by both
     energy entry points so the projection is defined in exactly one place."""
@@ -68,8 +83,15 @@ def _rho_pm(nc_xc: NoncollinearXC, rho, m_vec, rho_core):
     return 0.5 * (rho + m_norm), 0.5 * (rho - m_norm)
 
 
-def energy_with_grid(nc_xc: NoncollinearXC, rho, m_vec, grid, rho_core=None,
-                     tau_up=None, tau_dn=None):
+def energy_with_grid(
+    nc_xc: NoncollinearXC,
+    rho: torch.Tensor,
+    m_vec: torch.Tensor,
+    grid: FFTGrid | SimpleNamespace,
+    rho_core: torch.Tensor | None = None,
+    tau_up: torch.Tensor | None = None,
+    tau_dn: torch.Tensor | None = None,
+) -> torch.Tensor:
     """E_xc with locally-collinear GGA σ's computed spectrally (in-graph).
     rho_core (NLCC) shifts ρ only — the core carries no magnetization.
     tau_up/tau_dn (meta-GGA) are the local-frame per-spin τ, passed through as
@@ -88,8 +110,15 @@ def energy_with_grid(nc_xc: NoncollinearXC, rho, m_vec, grid, rho_core=None,
                                   tau_up, tau_dn)
 
 
-def vxc_and_bxc(nc_xc: NoncollinearXC, rho, m_vec, grid, rho_core=None,
-                tau_up=None, tau_dn=None):
+def vxc_and_bxc(
+    nc_xc: NoncollinearXC,
+    rho: torch.Tensor,
+    m_vec: torch.Tensor,
+    grid: FFTGrid,
+    rho_core: torch.Tensor | None = None,
+    tau_up: torch.Tensor | None = None,
+    tau_dn: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """(v_xc(r), B⃗_xc(r), E_xc) via one autograd call — GGA terms included.
 
     For a meta-GGA τ_± are held FIXED (detached) during the (ρ, m⃗) autograd, so
@@ -108,7 +137,9 @@ def vxc_and_bxc(nc_xc: NoncollinearXC, rho, m_vec, grid, rho_core=None,
     return vr * scale, vm * scale, e.detach()
 
 
-def local_frame_tau(m_vec, tau_scalar, tau_vec, m_eps: float = 1e-24):
+def local_frame_tau(
+    m_vec: torch.Tensor, tau_scalar: torch.Tensor, tau_vec: torch.Tensor, m_eps: float = 1e-24
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Local-frame per-spin τ_± = (τ_0 ± τ⃗·m̂)/2 from the KE-density-matrix
     Pauli components (τ_0, τ⃗) built by core.metagga.spinor_tau_matrix_b.
 
@@ -123,7 +154,9 @@ def local_frame_tau(m_vec, tau_scalar, tau_vec, m_eps: float = 1e-24):
     return 0.5 * (tau_scalar + tau_par), 0.5 * (tau_scalar - tau_par)
 
 
-def tau_operator_fields(v_tau_up, v_tau_dn, m_vec, m_eps: float = 1e-24):
+def tau_operator_fields(
+    v_tau_up: torch.Tensor, v_tau_dn: torch.Tensor, m_vec: torch.Tensor, m_eps: float = 1e-24
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Rotate the local-frame τ potentials (v_τ↑, v_τ↓) back to the 2×2
     operator fields (v_τ0, v_τ⃗) that core.metagga.spinor_metagga_tau_operator
     consumes:
