@@ -22,7 +22,6 @@ import socket
 
 import numpy as np
 import pytest
-import torch
 import torch.multiprocessing as mp
 
 from tests.helpers import RY, si_fcc, si_upf
