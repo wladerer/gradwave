@@ -20,7 +20,7 @@ from gradwave.dtypes import CDTYPE
 
 class MixLayout:
     def __init__(self, grid, nspin: int, atom_slices, device=None,
-                 bec_step_scale: float = 0.4):
+                 bec_step_scale: float = 0.4) -> None:
         self.shape = tuple(grid.shape)
         self.n_pts = grid.n_points
         self.mask = grid.dens_mask.reshape(-1)

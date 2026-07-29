@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -33,12 +34,17 @@ import torch
 from gradwave.constants import HBAR2_2M
 from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.local_pp import local_potential_g
+from gradwave.core.energies.total import EnergyBreakdown
 from gradwave.core.fftbox import box_to_sphere, g_to_r, g_to_r_box, r_to_g
 from gradwave.core.hamiltonian import ProjectorData, becp, projectors
+from gradwave.core.hubbard import HubbardManifold
 from gradwave.core.occupations import (
     SCHEMES,
 )
+from gradwave.core.xc.base import XCFunctional
+from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import CDTYPE, CDTYPE_LOW, RDTYPE
+from gradwave.grids import FFTGrid, GSphere
 from gradwave.scf.common import (
     MP_CROSSOVER,
     adaptive_diago_tol,
@@ -54,7 +60,10 @@ from gradwave.scf.guess import sad_density
 from gradwave.scf.layout import MixLayout
 from gradwave.scf.loop import effective_potentials, resolve_atom_moments
 from gradwave.scf.mixing import BroydenMixer, JohnsonMixer, PulayMixer
+from gradwave.scf.options import SCFOptions
+from gradwave.scf.paw_onsite import OneCenter
 from gradwave.scf.results import USPPResult
+from gradwave.scf.uspp_hubbard import USPPHubbardData
 from gradwave.scf.uspp_setup import USPPSystem
 from gradwave.solvers.precond import teter
 
@@ -64,8 +73,18 @@ logger = logging.getLogger(__name__)
 class _HkS:
     """H and S applies at one k for fixed v_eff and screened D."""
 
-    def __init__(self, sphere, shape, v_eff_r, pd: ProjectorData, p, dscr, q_full,
-                 hub_sphi=None, hub_d=None):
+    def __init__(
+        self,
+        sphere: GSphere,
+        shape: tuple[int, int, int],
+        v_eff_r: torch.Tensor,
+        pd: ProjectorData,
+        p: torch.Tensor,
+        dscr: torch.Tensor,
+        q_full: torch.Tensor,
+        hub_sphi: torch.Tensor | None = None,
+        hub_d: torch.Tensor | None = None,
+    ) -> None:
         self.sphere, self.shape = sphere, shape
         self.v_eff_r = v_eff_r
         self.p = p
@@ -77,7 +96,7 @@ class _HkS:
         self.hub_sphi = hub_sphi
         self.hub_d = hub_d
 
-    def h(self, c):
+    def h(self, c: torch.Tensor) -> torch.Tensor:
         out = self.t * c
         psi = g_to_r(c, self.sphere.flat_idx, self.shape)
         out = out + box_to_sphere(r_to_g(psi * self.v_eff_r), self.sphere.flat_idx)
@@ -88,13 +107,19 @@ class _HkS:
             out = out + (bh @ self.hub_d) @ self.hub_sphi
         return out
 
-    def s(self, c):
+    def s(self, c: torch.Tensor) -> torch.Tensor:
         b = becp(self.p, c)
         return c + (b @ self.q) @ self.p
 
 
-def davidson_gen(hs: _HkS, x0: torch.Tensor, nbands: int, tol: float,
-                 max_iter: int = 60, max_dim: int | None = None):
+def davidson_gen(
+    hs: _HkS,
+    x0: torch.Tensor,
+    nbands: int,
+    tol: float,
+    max_iter: int = 60,
+    max_dim: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Block Davidson for H x = ε S x. x0 (nb0 ≥ nbands, npw).
 
     HV/SV are cached — H and S act only on the block of new directions each
@@ -154,7 +179,6 @@ def davidson_gen(hs: _HkS, x0: torch.Tensor, nbands: int, tol: float,
     return eps, x
 
 
-
 @dataclass
 class _IterOps:
     """Frozen per-run operators and tables for `_scf_iteration` — everything
@@ -192,15 +216,16 @@ class _IterOps:
 _MP_CROSSOVER = MP_CROSSOVER  # diago tol above this runs the fp32 draft solves
 
 
-def _resolve_start_mag(start_mag, species_of_atom, n_species) -> list[float]:
+def _resolve_start_mag(
+    start_mag: list[float] | None, species_of_atom: list[int], n_species: int
+) -> list[float]:
     """Per-ATOM moment fractions from start_mag, mirroring loop._seed_density:
     accept one entry per atom (AFM/ferrimagnetic seeds) or one per species
     (broadcast to that species' atoms); raise on a length matching neither."""
-    return resolve_atom_moments(start_mag, species_of_atom, n_species,
-                                default=0.0)
+    return resolve_atom_moments(start_mag, species_of_atom, n_species, default=0.0)
 
 
-def _species_atoms(system) -> dict[int, list[int]]:
+def _species_atoms(system: USPPSystem) -> dict[int, list[int]]:
     """Atoms grouped by species, for batching per-atom augmentation
     contractions into one einsum per species."""
     groups: dict[int, list[int]] = {}
@@ -209,8 +234,9 @@ def _species_atoms(system) -> dict[int, list[int]]:
     return groups
 
 
-def aug_dmat_batched(system, fields_g: torch.Tensor,
-                     phase_pos: torch.Tensor) -> torch.Tensor:
+def aug_dmat_batched(
+    system: USPPSystem, fields_g: torch.Tensor, phase_pos: torch.Tensor
+) -> torch.Tensor:
     """Block-diagonal ∫ w_c(r) Q_ij(r−τ_a) d³r for C grid fields at once — the
     augmentation screening of D.
 
@@ -222,11 +248,13 @@ def aug_dmat_batched(system, fields_g: torch.Tensor,
     and pure einsum, so it stays autograd-safe for the force/stress graph and
     gives block placement identical to the per-atom form (placed by atom index).
     """
-    out = torch.zeros((fields_g.shape[0], *system.q_full.shape),
-                      dtype=system.q_full.dtype, device=fields_g.device)
+    out = torch.zeros(
+        (fields_g.shape[0], *system.q_full.shape), dtype=system.q_full.dtype, device=fields_g.device
+    )
     for sp, atoms in _species_atoms(system).items():
-        contr = torch.einsum("ijg,cg,ga->caij", system.aug[sp].q_g.conj(),
-                             fields_g, phase_pos[:, atoms])
+        contr = torch.einsum(
+            "ijg,cg,ga->caij", system.aug[sp].q_g.conj(), fields_g, phase_pos[:, atoms]
+        )
         herm = (0.5 * (contr + contr.conj().transpose(-2, -1))).real
         for i, a in enumerate(atoms):
             s0, s1 = system.atom_slices[a]
@@ -234,7 +262,15 @@ def aug_dmat_batched(system, fields_g: torch.Tensor,
     return out
 
 
-def uspp_potentials_dscr(system, xc, rho_s, rho_ij_s, vloc_r, phase_pos, onec):
+def uspp_potentials_dscr(
+    system: USPPSystem,
+    xc: XCFunctional | SpinXC,
+    rho_s: list[torch.Tensor],
+    rho_ij_s: list[list[torch.Tensor]],
+    vloc_r: torch.Tensor,
+    phase_pos: torch.Tensor,
+    onec: list[OneCenter] | dict[int, OneCenter] | None,
+) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
     """(veff_s, dscr_s, e_onec) from the per-channel FULL densities (smooth +
     aug) and per-atom becsums — THE assembly the USPP/PAW SCF iterates with.
     A standalone function (not inlined in `_scf_iteration`) so the
@@ -259,8 +295,9 @@ def uspp_potentials_dscr(system, xc, rho_s, rho_ij_s, vloc_r, phase_pos, onec):
     # q_g.conj() per species, instead of a Python loop of small kernels
     # re-materializing the conjugate per atom)
     mask_flat = grid.dens_mask.reshape(-1)
-    fields_g = torch.stack([r_to_g(veff_s[isp].to(CDTYPE)).reshape(-1)[mask_flat]
-                            for isp in range(nspin)])
+    fields_g = torch.stack(
+        [r_to_g(veff_s[isp].to(CDTYPE)).reshape(-1)[mask_flat] for isp in range(nspin)]
+    )
     d_aug = aug_dmat_batched(system, fields_g, phase_pos)
     dscr_s = [d_aug[isp] + system.proj_data[0].dij_full for isp in range(nspin)]
     e_onec = torch.zeros((), dtype=RDTYPE, device=dev)
@@ -270,10 +307,8 @@ def uspp_potentials_dscr(system, xc, rho_s, rho_ij_s, vloc_r, phase_pos, onec):
         # species' atoms (a single autograd graph on the table device)
         # instead of a per-atom Python loop with per-atom device syncs
         for sp, atoms in _species_atoms(system).items():
-            bec_b = [torch.stack([rho_ij_s[isp][a] for a in atoms])
-                     for isp in range(nspin)]
-            e_at, ddd = onec[sp].energy_and_ddd_batch(
-                bec_b[0] if nspin == 1 else bec_b)
+            bec_b = [torch.stack([rho_ij_s[isp][a] for a in atoms]) for isp in range(nspin)]
+            e_at, ddd = onec[sp].energy_and_ddd_batch(bec_b[0] if nspin == 1 else bec_b)
             e_onec = e_onec + e_at.sum().to(dev)
             ddd_s = [ddd] if nspin == 1 else ddd
             for isp in range(nspin):
@@ -284,9 +319,17 @@ def uspp_potentials_dscr(system, xc, rho_s, rho_ij_s, vloc_r, phase_pos, onec):
     return veff_s, dscr_s, e_onec
 
 
-def _build_iter_ops(system: USPPSystem, xc, *, nspin=1, smearing="none",
-                    width=0.1, batched=True, hubbard=None,
-                    mixed_precision=False) -> _IterOps:
+def _build_iter_ops(
+    system: USPPSystem,
+    xc: XCFunctional | SpinXC,
+    *,
+    nspin: int = 1,
+    smearing: str = "none",
+    width: float = 0.1,
+    batched: bool = True,
+    hubbard: list[HubbardManifold] | None = None,
+    mixed_precision: bool = False,
+) -> _IterOps:
     grid = system.grid
     vol = grid.volume
     dev = system.positions.device
@@ -302,9 +345,13 @@ def _build_iter_ops(system: USPPSystem, xc, *, nspin=1, smearing="none",
         from gradwave.scf.uspp_hubbard import build_uspp_hubbard
 
         hub = build_uspp_hubbard(system, hubbard, bk, p_b)
-    vloc_g = local_potential_g(system.positions,
-                               torch.tensor(system.species_of_atom, device=dev),
-                               system.vloc_tables, grid.g_cart, vol)
+    vloc_g = local_potential_g(
+        system.positions,
+        torch.tensor(system.species_of_atom, device=dev),
+        system.vloc_tables,
+        grid.g_cart,
+        vol,
+    )
     vloc_r = g_to_r_box(vloc_g, real=True)
     # E_ewald depends only on the (frozen) positions — build once, reuse each step.
     e_ewald = ewald_energy(system.positions, system.charges, grid.cell)
@@ -318,18 +365,46 @@ def _build_iter_ops(system: USPPSystem, xc, *, nspin=1, smearing="none",
         # tables on the SCF device, cached on the system so forces/stress/
         # response reuse them instead of reconstructing per call
         onec = onecenters(system, xc, device=dev)
-    return _IterOps(system=system, xc=xc, nspin=nspin, smearing=smearing,
-                    width=width, batched=batched, projs=projs, bk=bk, p_b=p_b,
-                    hub=hub, vloc_g=vloc_g, vloc_r=vloc_r, e_ewald=e_ewald,
-                    phase_pos=phase_pos,
-                    is_paw=is_paw, onec=onec, grid=grid, vol=vol, dev=dev,
-                    shape=grid.shape, mask_flat=grid.dens_mask.reshape(-1),
-                    g_spin=2 if nspin == 1 else 1, nk=len(system.spheres),
-                    nb=system.nbands, mixed_precision=mixed_precision)
+    return _IterOps(
+        system=system,
+        xc=xc,
+        nspin=nspin,
+        smearing=smearing,
+        width=width,
+        batched=batched,
+        projs=projs,
+        bk=bk,
+        p_b=p_b,
+        hub=hub,
+        vloc_g=vloc_g,
+        vloc_r=vloc_r,
+        e_ewald=e_ewald,
+        phase_pos=phase_pos,
+        is_paw=is_paw,
+        onec=onec,
+        grid=grid,
+        vol=vol,
+        dev=dev,
+        shape=grid.shape,
+        mask_flat=grid.dens_mask.reshape(-1),
+        g_spin=2 if nspin == 1 else 1,
+        nk=len(system.spheres),
+        nb=system.nbands,
+        mixed_precision=mixed_precision,
+    )
 
 
-def _assemble_iter_energies(ops, coeffs, occ_s, becps_s, rho_out_s, rho_tot_out,
-                            entropy_term, e_hub, e_onec):
+def _assemble_iter_energies(
+    ops: _IterOps,
+    coeffs: list[list[torch.Tensor]],
+    occ_s: list[torch.Tensor],
+    becps_s: list[list[torch.Tensor]],
+    rho_out_s: list[torch.Tensor],
+    rho_tot_out: torch.Tensor,
+    entropy_term: torch.Tensor,
+    e_hub: torch.Tensor,
+    e_onec: torch.Tensor,
+) -> EnergyBreakdown:
     """Total-energy breakdown for one SCF-map evaluation: charge-conservation
     check, XC energy (nspin 1/2), and assemble_pw_energies. Pure function of the
     already-computed densities/occupations."""
@@ -340,9 +415,7 @@ def _assemble_iter_energies(ops, coeffs, occ_s, becps_s, rho_out_s, rho_tot_out,
 
     n_tot = float(rho_tot_out.sum()) * vol / grid.n_points
     if abs(n_tot - system.n_electrons) >= 1e-5:
-        raise ValueError(
-            f"charge not conserved: {n_tot:.8f} vs {system.n_electrons}"
-        )
+        raise ValueError(f"charge not conserved: {n_tot:.8f} vs {system.n_electrons}")
 
     rho_g_out = r_to_g(rho_tot_out.to(CDTYPE))
     from gradwave.core.density import sigma_from_rho
@@ -354,13 +427,35 @@ def _assemble_iter_energies(ops, coeffs, occ_s, becps_s, rho_out_s, rho_tot_out,
     else:
         e_xc = spin_xc_energy(xc, rho_out_s, core, vol, grid.g_cart)
     return assemble_pw_energies(
-        coeffs, occ_s, system.kweights, system.spheres, grid, vol, rho_g_out,
-        e_xc, vloc_g, becps_s, system.proj_data[0].dij_full, system.positions,
-        system.charges, entropy_term, nspin,
-        e_hub=e_hub if hub is not None else 0.0, e_onec=e_onec, e_ewald=e_ewald)
+        coeffs,
+        occ_s,
+        system.kweights,
+        system.spheres,
+        grid,
+        vol,
+        rho_g_out,
+        e_xc,
+        vloc_g,
+        becps_s,
+        system.proj_data[0].dij_full,
+        system.positions,
+        system.charges,
+        entropy_term,
+        nspin,
+        e_hub=e_hub if hub is not None else 0.0,
+        e_onec=e_onec,
+        e_ewald=e_ewald,
+    )
 
 
-def _hubbard_occ_update(ops, hub, coeffs, coeffs_b, occ_s, n_hub_s):
+def _hubbard_occ_update(
+    ops: _IterOps,
+    hub: USPPHubbardData | None,
+    coeffs: list[list[torch.Tensor]],
+    coeffs_b: list[torch.Tensor | None],
+    occ_s: list[torch.Tensor],
+    n_hub_s: list[list[torch.Tensor]] | None,
+) -> tuple[None, torch.Tensor] | tuple[list[list[torch.Tensor]], torch.Tensor]:
     """Refresh the DFT+U per-spin occupation matrices from the fresh orbitals and
     return (n_hub_s, e_hub). No Hubbard manifold → (n_hub_s, 0). The
     _padded_coeffs closure captures coeffs_b by default argument (per-k pads the
@@ -377,17 +472,26 @@ def _hubbard_occ_update(ops, hub, coeffs, coeffs_b, occ_s, n_hub_s):
             return _cb[isp]
         cp = torch.zeros(nk, nb, bk.npw_max, dtype=CDTYPE, device=dev)
         for ik, sph in enumerate(system.spheres):
-            cp[ik, :, :sph.npw] = coeffs[isp][ik]
+            cp[ik, :, : sph.npw] = coeffs[isp][ik]
         return cp
 
     n_hub_s, e_hub = hubbard_occ_and_energy(
-        lambda isp, w: occupation_matrices(hub.sphi, _padded_coeffs(isp), w,
-                                           system.kweights, hub.sites),
-        occ_s, hub.sites, nspin)
+        lambda isp, w: occupation_matrices(
+            hub.sphi, _padded_coeffs(isp), w, system.kweights, hub.sites
+        ),
+        occ_s,
+        hub.sites,
+        nspin,
+    )
     return n_hub_s, e_hub
 
 
-def _build_output_density(ops, coeffs, coeffs_b, occ_s):
+def _build_output_density(
+    ops: _IterOps,
+    coeffs: list[list[torch.Tensor]],
+    coeffs_b: list[torch.Tensor | None],
+    occ_s: list[torch.Tensor],
+) -> tuple[list[torch.Tensor], list[list[torch.Tensor]], list[list[torch.Tensor]]]:
     """Smooth densities + per-spin becsum (Hermitized, becsum-symmetrized) +
     augmentation charge for one SCF-map evaluation. Returns (rho_out_s, rho_ij_s,
     becps_s). Accumulation order and conj placement are load-bearing at the 1e-8
@@ -398,8 +502,10 @@ def _build_output_density(ops, coeffs, coeffs_b, occ_s):
     phase_pos, grid = ops.phase_pos, ops.grid
     sp_atoms = _species_atoms(system)
     rho_out_s, becps_s = [], []
-    rho_ij_s = [[torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev)
-                 for (s0, s1) in system.atom_slices] for _ in range(nspin)]
+    rho_ij_s = [
+        [torch.zeros(s1 - s0, s1 - s0, dtype=CDTYPE, device=dev) for (s0, s1) in system.atom_slices]
+        for _ in range(nspin)
+    ]
     for isp in range(nspin):
         if batched:
             # k-batched: one band-chunked batched FFT stack for the density,
@@ -416,8 +522,7 @@ def _build_output_density(ops, coeffs, coeffs_b, occ_s):
             b_flat = b_all.reshape(nk * nb, -1)
             for a, (s0, s1) in enumerate(system.atom_slices):
                 ba = b_flat[:, s0:s1]
-                rho_ij_s[isp][a] = torch.einsum("b,bi,bj->ij", w_all,
-                                                ba.conj(), ba)
+                rho_ij_s[isp][a] = torch.einsum("b,bi,bj->ij", w_all, ba.conj(), ba)
         else:
             rho_sp = torch.zeros(shape, dtype=RDTYPE, device=dev)
             becps = []
@@ -425,8 +530,7 @@ def _build_output_density(ops, coeffs, coeffs_b, occ_s):
                 c = coeffs[isp][ik]
                 psi_r = g_to_r(c, sph.flat_idx, shape)
                 w = system.kweights[ik] * occ_s[isp][ik]
-                rho_sp = rho_sp + torch.einsum("b,bxyz->xyz", w,
-                                               (psi_r.abs() ** 2)) / vol
+                rho_sp = rho_sp + torch.einsum("b,bxyz->xyz", w, (psi_r.abs() ** 2)) / vol
                 b = becp(projs[ik], c)
                 becps.append(b)
                 for a, (s0, s1) in enumerate(system.atom_slices):
@@ -444,8 +548,8 @@ def _build_output_density(ops, coeffs, coeffs_b, occ_s):
         for sp, atoms in sp_atoms.items():
             bec_sp = torch.stack([rho_ij_s[isp][a] for a in atoms])
             aug_sph = aug_sph + torch.einsum(
-                "aij,ijg,ga->g", bec_sp, system.aug[sp].q_g,
-                phase_pos[:, atoms].conj())
+                "aij,ijg,ga->g", bec_sp, system.aug[sp].q_g, phase_pos[:, atoms].conj()
+            )
         aug_box = torch.zeros(grid.n_points, dtype=CDTYPE, device=dev)
         aug_box[system.sphere_idx] = aug_sph / vol
         rho_aug = g_to_r_box(aug_box.reshape(shape), real=True)
@@ -455,8 +559,16 @@ def _build_output_density(ops, coeffs, coeffs_b, occ_s):
     return rho_out_s, rho_ij_s, becps_s
 
 
-def _solve_bands_uspp(ops, veff_s, dscr_s, n_hub_s, coeffs, coeffs_b, tol_eff,
-                      seed_salt):
+def _solve_bands_uspp(
+    ops: _IterOps,
+    veff_s: list[torch.Tensor],
+    dscr_s: list[torch.Tensor],
+    n_hub_s: list[list[torch.Tensor]] | None,
+    coeffs: list[list[torch.Tensor | None]],
+    coeffs_b: list[torch.Tensor | None],
+    tol_eff: float,
+    seed_salt: int,
+) -> list[torch.Tensor]:
     """Generalized eigensolve H x = ε S x per spin (batched or per-k). Warm-starts
     from and MUTATES coeffs/coeffs_b IN PLACE — the frozen warm-start contract
     newton.py relies on. The S-normalization is fp64 always (even under mixed
@@ -473,8 +585,9 @@ def _solve_bands_uspp(ops, veff_s, dscr_s, n_hub_s, coeffs, coeffs_b, tol_eff,
     for isp in range(nspin):
         hub_d = None
         if hub is not None:
-            hub_d = hubbard_dmatrix(n_hub_s[isp], hub.sites, hub.nproj,
-                                    dev).conj()  # apply wants D^T
+            hub_d = hubbard_dmatrix(
+                n_hub_s[isp], hub.sites, hub.nproj, dev
+            ).conj()  # apply wants D^T
         if batched:
             smooth = None
             if system.smooth_shape is not None:
@@ -483,23 +596,27 @@ def _solve_bands_uspp(ops, veff_s, dscr_s, n_hub_s, coeffs, coeffs_b, tol_eff,
                 vg = r_to_g(veff_s[isp].to(CDTYPE)).reshape(-1)[system.smooth2dense]
                 v_s = g_to_r_box(vg.reshape(system.smooth_shape), real=True)
                 smooth = (system.smooth_shape, system.smooth_flat_idx, v_s)
-            hs_b = BatchedHS(bk, shape, veff_s[isp], p_b, dscr_s[isp],
-                             system.q_full, hub_sphi=hub.sphi if hub else None,
-                             hub_d=hub_d, smooth=smooth)
+            hs_b = BatchedHS(
+                bk,
+                shape,
+                veff_s[isp],
+                p_b,
+                dscr_s[isp],
+                system.q_full,
+                hub_sphi=hub.sphi if hub else None,
+                hub_d=hub_d,
+                smooth=smooth,
+            )
             if coeffs_b[isp] is None:
                 # per-k CPU seeds (identical to the per-k path), padded
-                x0 = torch.zeros(nk, nb + 4, bk.npw_max, dtype=CDTYPE,
-                                 device=dev)
+                x0 = torch.zeros(nk, nb + 4, bk.npw_max, dtype=CDTYPE, device=dev)
                 for ik, sph in enumerate(system.spheres):
-                    gen = torch.Generator().manual_seed(
-                        1234 + ik + 7777 * isp + seed_salt)
-                    xk = torch.randn(nb + 4, sph.npw, generator=gen,
-                                     dtype=torch.float64) \
-                        + 1j * torch.randn(nb + 4, sph.npw, generator=gen,
-                                           dtype=torch.float64)
-                    xk = xk.to(dev) * torch.exp(
-                        -0.5 * HBAR2_2M * sph.kpg2 / system.ecut * 4.0)
-                    x0[ik, :, :sph.npw] = xk.to(CDTYPE)
+                    gen = torch.Generator().manual_seed(1234 + ik + 7777 * isp + seed_salt)
+                    xk = torch.randn(
+                        nb + 4, sph.npw, generator=gen, dtype=torch.float64
+                    ) + 1j * torch.randn(nb + 4, sph.npw, generator=gen, dtype=torch.float64)
+                    xk = xk.to(dev) * torch.exp(-0.5 * HBAR2_2M * sph.kpg2 / system.ecut * 4.0)
+                    x0[ik, :, : sph.npw] = xk.to(CDTYPE)
             else:
                 x0 = coeffs_b[isp]
             # fp32 draft while the diago tolerance is loose; the subspace
@@ -507,33 +624,39 @@ def _solve_bands_uspp(ops, veff_s, dscr_s, n_hub_s, coeffs, coeffs_b, tol_eff,
             # fp64 always, so the fp64 finish is bit-identical physics
             use_low = ops.mixed_precision and tol_eff > _MP_CROSSOVER
             eig_b, x_b = davidson_gen_batched(
-                hs_b, x0.to(CDTYPE_LOW) if use_low else x0, nb, tol=tol_eff)
+                hs_b, x0.to(CDTYPE_LOW) if use_low else x0, nb, tol=tol_eff
+            )
             x_b = x_b.to(CDTYPE)
             b_all = becp_b(p_b, x_b)
             snorm = (x_b.abs() ** 2).sum(dim=-1) + torch.einsum(
-                "kbi,ij,kbj->kb", b_all.conj(),
-                system.q_full.to(CDTYPE), b_all).real
+                "kbi,ij,kbj->kb", b_all.conj(), system.q_full.to(CDTYPE), b_all
+            ).real
             x_b = x_b / torch.sqrt(snorm)[..., None]
             coeffs_b[isp] = x_b
             for ik, sph in enumerate(system.spheres):
-                coeffs[isp][ik] = x_b[ik, :, :sph.npw]
+                coeffs[isp][ik] = x_b[ik, :, : sph.npw]
             eigs_s.append(eig_b)
             continue
         eigs_l = []
         for ik, sph in enumerate(system.spheres):
-            hs = _HkS(sph, shape, veff_s[isp], system.proj_data[ik], projs[ik],
-                      dscr_s[isp], system.q_full,
-                      hub_sphi=(hub.sphi[ik, :, :sph.npw] if hub else None),
-                      hub_d=hub_d)
+            hs = _HkS(
+                sph,
+                shape,
+                veff_s[isp],
+                system.proj_data[ik],
+                projs[ik],
+                dscr_s[isp],
+                system.q_full,
+                hub_sphi=(hub.sphi[ik, :, : sph.npw] if hub else None),
+                hub_d=hub_d,
+            )
             if coeffs[isp][ik] is None:
                 # seed on CPU (device-independent determinism), then move
-                gen = torch.Generator().manual_seed(
-                    1234 + ik + 7777 * isp + seed_salt)
-                x0 = torch.randn(nb + 4, sph.npw, generator=gen, dtype=torch.float64) \
-                    + 1j * torch.randn(nb + 4, sph.npw, generator=gen,
-                                       dtype=torch.float64)
-                x0 = x0.to(dev) * torch.exp(
-                    -0.5 * HBAR2_2M * sph.kpg2 / system.ecut * 4.0)
+                gen = torch.Generator().manual_seed(1234 + ik + 7777 * isp + seed_salt)
+                x0 = torch.randn(
+                    nb + 4, sph.npw, generator=gen, dtype=torch.float64
+                ) + 1j * torch.randn(nb + 4, sph.npw, generator=gen, dtype=torch.float64)
+                x0 = x0.to(dev) * torch.exp(-0.5 * HBAR2_2M * sph.kpg2 / system.ecut * 4.0)
                 x0 = x0.to(CDTYPE)
             else:
                 x0 = coeffs[isp][ik]
@@ -550,8 +673,18 @@ def _solve_bands_uspp(ops, veff_s, dscr_s, n_hub_s, coeffs, coeffs_b, tol_eff,
 
 
 @torch.no_grad()
-def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
-                   n_hub_s, tol_eff, seed_salt):
+def _scf_iteration(
+    ops: _IterOps,
+    rho_s: list[torch.Tensor],
+    rho_ij_mix: list[list[torch.Tensor]],
+    coeffs: list[list[torch.Tensor | None]],
+    coeffs_b: list[torch.Tensor | None],
+    n_hub_s: list[list[torch.Tensor]] | None,
+    tol_eff: float,
+    seed_salt: int,
+) -> dict[
+    str, list[torch.Tensor] | float | list[list[torch.Tensor]] | EnergyBreakdown | None
+]:
     """ONE evaluation of the SCF map at (rho_s, rho_ij_mix): potentials →
     screened D (+ one-center ddd from the MIXER-side becsum) → generalized
     Davidson (warm-started via coeffs/coeffs_b, mutated in place) →
@@ -564,15 +697,14 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
     vloc_r, phase_pos = ops.vloc_r, ops.phase_pos
     is_paw, onec, dev = ops.is_paw, ops.onec, ops.dev
     veff_s, dscr_s, e_onec = uspp_potentials_dscr(
-        system, xc, rho_s, rho_ij_mix, vloc_r, phase_pos,
-        onec if is_paw else None)
+        system, xc, rho_s, rho_ij_mix, vloc_r, phase_pos, onec if is_paw else None
+    )
 
-    eigs_s = _solve_bands_uspp(ops, veff_s, dscr_s, n_hub_s, coeffs, coeffs_b,
-                               tol_eff, seed_salt)
+    eigs_s = _solve_bands_uspp(ops, veff_s, dscr_s, n_hub_s, coeffs, coeffs_b, tol_eff, seed_salt)
 
     occ_s, mu, entropy_term = shared_fermi_occupations(
-        eigs_s, system.kweights, smearing, width, system.n_electrons,
-        nspin, dev)
+        eigs_s, system.kweights, smearing, width, system.n_electrons, nspin, dev
+    )
 
     # DFT+U: fresh S-metric occupation matrices + Dudarev E_U (lags one
     # step into V_U like the NC path; nspin=1 splits [0,2] occupations
@@ -583,14 +715,21 @@ def _scf_iteration(ops: _IterOps, rho_s, rho_ij_mix, coeffs, coeffs_b,
     rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
 
     energies = _assemble_iter_energies(
-        ops, coeffs, occ_s, becps_s, rho_out_s, rho_tot_out, entropy_term,
-        e_hub, e_onec)
-    return dict(eigs_s=eigs_s, occ_s=occ_s, mu=mu, n_hub_s=n_hub_s,
-                rho_out_s=rho_out_s, rho_ij_s=rho_ij_s, becps_s=becps_s,
-                energies=energies)
+        ops, coeffs, occ_s, becps_s, rho_out_s, rho_tot_out, entropy_term, e_hub, e_onec
+    )
+    return dict(
+        eigs_s=eigs_s,
+        occ_s=occ_s,
+        mu=mu,
+        n_hub_s=n_hub_s,
+        rho_out_s=rho_out_s,
+        rho_ij_s=rho_ij_s,
+        becps_s=becps_s,
+        energies=energies,
+    )
 
 
-def _resolve_uspp_mixing_scheme(mixing_scheme, nspin):
+def _resolve_uspp_mixing_scheme(mixing_scheme: str | None, nspin: int) -> str:
     """PAW/USPP mixing-scheme default. None → johnson for nspin==1, pulay for
     nspin==2; an explicit scheme always wins.
 
@@ -610,27 +749,65 @@ def _resolve_uspp_mixing_scheme(mixing_scheme, nspin):
     return "pulay" if nspin == 2 else "johnson"
 
 
-def _build_mixer(scheme, g2_full, *, alpha, history, kerker, kerker_mask,
-                 step_scale, metric_w, w0, adapt_ids):
+def _build_mixer(
+    scheme: str,
+    g2_full: torch.Tensor,
+    *,
+    alpha,
+    history,
+    kerker,
+    kerker_mask,
+    step_scale,
+    metric_w,
+    w0,
+    adapt_ids,
+) -> PulayMixer | BroydenMixer | JohnsonMixer:
     """Construct the charge mixer for the requested scheme over the composite
     (density + becsum) vector. Kept out of scf_uspp so the scheme dispatch is
     one place."""
     if scheme not in ("pulay", "broyden", "johnson"):
         raise ValueError("mixing_scheme must be 'pulay', 'broyden', or 'johnson'")
     if scheme == "broyden":
-        return BroydenMixer(g2_full, alpha=alpha, history=history, kerker=kerker,
-                            kerker_mask=kerker_mask, check_g0=False,
-                            step_scale=step_scale)
+        return BroydenMixer(
+            g2_full,
+            alpha=alpha,
+            history=history,
+            kerker=kerker,
+            kerker_mask=kerker_mask,
+            check_g0=False,
+            step_scale=step_scale,
+        )
     if scheme == "johnson":
-        return JohnsonMixer(g2_full, alpha=alpha, history=history, kerker=kerker,
-                            kerker_mask=kerker_mask, check_g0=False,
-                            step_scale=step_scale, metric_w=metric_w, w0=w0)
-    return PulayMixer(g2_full, alpha=alpha, history=history, kerker=kerker,
-                      kerker_mask=kerker_mask, check_g0=False,
-                      step_scale=step_scale, adapt_blocks=adapt_ids)
+        return JohnsonMixer(
+            g2_full,
+            alpha=alpha,
+            history=history,
+            kerker=kerker,
+            kerker_mask=kerker_mask,
+            check_g0=False,
+            step_scale=step_scale,
+            metric_w=metric_w,
+            w0=w0,
+        )
+    return PulayMixer(
+        g2_full,
+        alpha=alpha,
+        history=history,
+        kerker=kerker,
+        kerker_mask=kerker_mask,
+        check_g0=False,
+        step_scale=step_scale,
+        adapt_blocks=adapt_ids,
+    )
 
 
-def _seed_becsum(system, nspin, start_from, spin_frac, dev):
+def _seed_becsum(
+    system: USPPSystem,
+    nspin: int,
+    start_from: dict[str, SimpleNamespace | int | torch.Tensor | list[torch.Tensor] | None] | None,
+    spin_frac: list[list[float] | None],
+    dev: torch.device,
+) -> list[list[torch.Tensor]]:
     """Per-spin becsum seed: from a warm-start state, else the reference atomic
     PAW occupations (spin-split by start_mag); zeros for bare USPP without
     PP_OCCUPATIONS."""
@@ -639,8 +816,7 @@ def _seed_becsum(system, nspin, start_from, spin_frac, dev):
         prev_bec = start_from["rho_ij_atoms"]
         for isp in range(nspin):
             src = prev_bec if nspin == 1 else prev_bec[isp]
-            rho_ij_s[isp] = [m.detach().to(device=dev, dtype=CDTYPE).clone()
-                             for m in src]
+            rho_ij_s[isp] = [m.detach().to(device=dev, dtype=CDTYPE).clone() for m in src]
         return rho_ij_s
     for a, sp in enumerate(system.species_of_atom):
         paw = system.paws[sp]
@@ -652,14 +828,23 @@ def _seed_becsum(system, nspin, start_from, spin_frac, dev):
                 col = 0
                 for i, b in enumerate(paw.betas):
                     for _m in range(2 * b.l + 1):
-                        m0[col, col] = paw.paw_occ[i] / (2 * b.l + 1) * (
-                            2.0 * frac if nspin == 1 else frac)
+                        m0[col, col] = (
+                            paw.paw_occ[i] / (2 * b.l + 1) * (2.0 * frac if nspin == 1 else frac)
+                        )
                         col += 1
             rho_ij_s[isp].append(m0)
     return rho_ij_s
 
 
-def _seed_orbitals_uspp(system, nspin, nk, nb, batched, start_from, dev):
+def _seed_orbitals_uspp(
+    system: USPPSystem,
+    nspin: int,
+    nk: int,
+    nb: int,
+    batched: bool,
+    start_from: dict[str, SimpleNamespace | int | torch.Tensor | list[torch.Tensor] | None] | None,
+    dev: torch.device,
+) -> tuple[list[list[None]], list[None]]:
     """Seed the generalized Davidson from a previous result's eigenvectors — the
     ionic-step analogue of the density/becsum warm start — instead of the random
     atomic-scale start. Returns ``(coeffs, coeffs_b)``: per-spin, per-k blocks
@@ -677,31 +862,44 @@ def _seed_orbitals_uspp(system, nspin, nk, nb, batched, start_from, dev):
     coeffs_b = [None] * nspin
     prev_c = None
     if start_from is not None:
-        prev_c = (start_from.get("coeffs") if isinstance(start_from, dict)
-                  else getattr(start_from, "coeffs", None))
+        prev_c = (
+            start_from.get("coeffs")
+            if isinstance(start_from, dict)
+            else getattr(start_from, "coeffs", None)
+        )
     if prev_c is None:
         return coeffs, coeffs_b
-    prev_sys = (start_from.get("system") if isinstance(start_from, dict)
-                else getattr(start_from, "system", None))
+    prev_sys = (
+        start_from.get("system")
+        if isinstance(start_from, dict)
+        else getattr(start_from, "system", None)
+    )
     prev_sph = getattr(prev_sys, "spheres", None)
     chans = [prev_c] if nspin == 1 else list(prev_c)
     compat = len(chans) == nspin and all(
-        ch is not None and len(ch) == nk and all(
+        ch is not None
+        and len(ch) == nk
+        and all(
             ch[ik] is not None
             and ch[ik].shape[0] >= nb
             and ch[ik].shape[1] == system.spheres[ik].npw
-            and (prev_sph is None or np.allclose(
-                np.asarray(prev_sph[ik].k_frac, dtype=float),
-                np.asarray(system.spheres[ik].k_frac, dtype=float)))
-            for ik in range(nk))
-        for ch in chans)
+            and (
+                prev_sph is None
+                or np.allclose(
+                    np.asarray(prev_sph[ik].k_frac, dtype=float),
+                    np.asarray(system.spheres[ik].k_frac, dtype=float),
+                )
+            )
+            for ik in range(nk)
+        )
+        for ch in chans
+    )
     if not compat:
         return coeffs, coeffs_b
     npw_max = max(s.npw for s in system.spheres)
     for isp, ch in enumerate(chans):
         for ik in range(nk):
-            coeffs[isp][ik] = ch[ik][:nb].detach().to(
-                device=dev, dtype=CDTYPE).clone()
+            coeffs[isp][ik] = ch[ik][:nb].detach().to(device=dev, dtype=CDTYPE).clone()
         if batched:
             xb = torch.zeros(nk, nb, npw_max, dtype=CDTYPE, device=dev)
             for ik in range(nk):
@@ -710,7 +908,19 @@ def _seed_orbitals_uspp(system, nspin, nk, nb, batched, start_from, dev):
     return coeffs, coeffs_b
 
 
-def _seed_scf_density(system, grid, vol, dev, nspin, start_from, start_mag):
+def _seed_scf_density(
+    system: USPPSystem,
+    grid: FFTGrid,
+    vol: float,
+    dev: torch.device,
+    nspin: int,
+    start_from: (
+        dict[str, USPPSystem | int]
+        | dict[str, SimpleNamespace | int | torch.Tensor | list[torch.Tensor] | None]
+        | None
+    ),
+    start_mag: list[float] | None,
+) -> tuple[list[torch.Tensor], list[list[float]]] | tuple[list[torch.Tensor], list[None]]:
     """Seed (rho_s, spin_frac): warm-start rescale from a prior result, or a SAD
     density (nspin=1), or per-atom spin-split SAD (nspin=2). spin_frac carries the
     per-atom up/down fractions (or [None]) used later to seed becsum."""
@@ -720,41 +930,73 @@ def _seed_scf_density(system, grid, vol, dev, nspin, start_from, start_mag):
         rho_s = warm_start_densities(start_from, nspin, grid, vol, dev)
         if nspin == 1:
             return rho_s, [None]
-        mags = _resolve_start_mag(start_mag, system.species_of_atom,
-                                  len(system.paws))
-        return rho_s, [[(1.0 + m) / 2.0 for m in mags],
-                       [(1.0 - m) / 2.0 for m in mags]]
+        mags = _resolve_start_mag(start_mag, system.species_of_atom, len(system.paws))
+        return rho_s, [[(1.0 + m) / 2.0 for m in mags], [(1.0 - m) / 2.0 for m in mags]]
     if nspin == 1:
-        return [sad_density(grid, system.positions, system.species_of_atom,
-                            system.paws, system.n_electrons)], [None]
+        return [
+            sad_density(
+                grid, system.positions, system.species_of_atom, system.paws, system.n_electrons
+            )
+        ], [None]
     # per-ATOM moment fractions (AFM/ferrimagnetic seeds pass one entry per atom;
     # a per-species list is broadcast). sad_density's atom_scale seeds each atom
     # directly — identical to the old species_scale path when the moments are
     # uniform within a species.
-    mags = _resolve_start_mag(start_mag, system.species_of_atom,
-                              len(system.paws))
+    mags = _resolve_start_mag(start_mag, system.species_of_atom, len(system.paws))
     up = [(1.0 + m) / 2.0 for m in mags]
     dn = [(1.0 - m) / 2.0 for m in mags]
-    n_up = sum(float(system.charges[a]) * up[a]
-               for a in range(len(system.species_of_atom)))
+    n_up = sum(float(system.charges[a]) * up[a] for a in range(len(system.species_of_atom)))
     rho_s = [
-        sad_density(grid, system.positions, system.species_of_atom,
-                    system.paws, n_up, atom_scale=up),
-        sad_density(grid, system.positions, system.species_of_atom,
-                    system.paws, system.n_electrons - n_up, atom_scale=dn),
+        sad_density(
+            grid, system.positions, system.species_of_atom, system.paws, n_up, atom_scale=up
+        ),
+        sad_density(
+            grid,
+            system.positions,
+            system.species_of_atom,
+            system.paws,
+            system.n_electrons - n_up,
+            atom_scale=dn,
+        ),
     ]
     return rho_s, [up, dn]
 
 
 @torch.no_grad()
-def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
-             smearing="none", width=0.1, max_iter=60, etol=1e-8, rhotol=1e-7,
-             diago_tol=1e-9, mixing_alpha=0.7, mixing_history=None,
-             trust_factor=20.0, batched=True, hubbard=None, start_from=None,
-             criterion="drho", rho_safety=1e-2, adapt_step=False,
-             mixing_scheme=None, mixing_kerker=None, mixing_metric="plain",
-             spin_precond=False, mixed_precision=False, precond="kerker",
-             opts=None, verbose=True):
+def scf_uspp(
+    system: USPPSystem,
+    xc: XCFunctional | SpinXC,
+    *,
+    nspin: int = 1,
+    start_mag: list[float] | None = None,
+    smearing: str = "none",
+    width: float = 0.1,
+    max_iter: int = 60,
+    etol: float = 1e-8,
+    rhotol: float = 1e-7,
+    diago_tol: float = 1e-9,
+    mixing_alpha: float = 0.7,
+    mixing_history: int | None = None,
+    trust_factor: float = 20.0,
+    batched: bool = True,
+    hubbard: list[HubbardManifold] | None = None,
+    start_from: (
+        dict[str, USPPSystem | int]
+        | dict[str, SimpleNamespace | int | torch.Tensor | list[torch.Tensor] | None]
+        | None
+    ) = None,
+    criterion: str = "drho",
+    rho_safety: float = 1e-2,
+    adapt_step: bool = False,
+    mixing_scheme: str | None = None,
+    mixing_kerker: bool | None = None,
+    mixing_metric: str = "plain",
+    spin_precond: bool = False,
+    mixed_precision: bool = False,
+    precond: str = "kerker",
+    opts: SCFOptions | None = None,
+    verbose: bool = True,
+) -> USPPResult:
     """USPP/PAW SCF. nspin=2 takes a SpinXC functional and start_mag (list,
     in [-1, 1]) with one entry per species OR one per atom (the latter for
     AFM/ferrimagnetic seeds; a length matching neither raises); mixing then
@@ -815,37 +1057,63 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         # ambiguous, so reject any flat kwarg left non-default alongside opts
         # rather than silently overwriting it.
         _flat_defaults = {
-            "smearing": "none", "width": 0.1, "max_iter": 60, "etol": 1e-8,
-            "rhotol": 1e-7, "diago_tol": 1e-9, "mixing_alpha": 0.7,
-            "mixing_history": None, "trust_factor": 20.0, "batched": True,
-            "criterion": "drho", "rho_safety": 1e-2, "adapt_step": False,
-            "mixing_scheme": None, "mixing_kerker": None,
-            "mixing_metric": "plain", "spin_precond": False,
-            "mixed_precision": False, "precond": "kerker", "verbose": True,
+            "smearing": "none",
+            "width": 0.1,
+            "max_iter": 60,
+            "etol": 1e-8,
+            "rhotol": 1e-7,
+            "diago_tol": 1e-9,
+            "mixing_alpha": 0.7,
+            "mixing_history": None,
+            "trust_factor": 20.0,
+            "batched": True,
+            "criterion": "drho",
+            "rho_safety": 1e-2,
+            "adapt_step": False,
+            "mixing_scheme": None,
+            "mixing_kerker": None,
+            "mixing_metric": "plain",
+            "spin_precond": False,
+            "mixed_precision": False,
+            "precond": "kerker",
+            "verbose": True,
         }
         _supplied = {
-            k for k, v in (
-                ("smearing", smearing), ("width", width), ("max_iter", max_iter),
-                ("etol", etol), ("rhotol", rhotol), ("diago_tol", diago_tol),
-                ("mixing_alpha", mixing_alpha), ("mixing_history", mixing_history),
-                ("trust_factor", trust_factor), ("batched", batched),
-                ("criterion", criterion), ("rho_safety", rho_safety),
-                ("adapt_step", adapt_step), ("mixing_scheme", mixing_scheme),
-                ("mixing_kerker", mixing_kerker), ("mixing_metric", mixing_metric),
-                ("spin_precond", spin_precond), ("mixed_precision", mixed_precision),
-                ("precond", precond), ("verbose", verbose),
-            ) if v != _flat_defaults[k]
+            k
+            for k, v in (
+                ("smearing", smearing),
+                ("width", width),
+                ("max_iter", max_iter),
+                ("etol", etol),
+                ("rhotol", rhotol),
+                ("diago_tol", diago_tol),
+                ("mixing_alpha", mixing_alpha),
+                ("mixing_history", mixing_history),
+                ("trust_factor", trust_factor),
+                ("batched", batched),
+                ("criterion", criterion),
+                ("rho_safety", rho_safety),
+                ("adapt_step", adapt_step),
+                ("mixing_scheme", mixing_scheme),
+                ("mixing_kerker", mixing_kerker),
+                ("mixing_metric", mixing_metric),
+                ("spin_precond", spin_precond),
+                ("mixed_precision", mixed_precision),
+                ("precond", precond),
+                ("verbose", verbose),
+            )
+            if v != _flat_defaults[k]
         }
         if _supplied:
             raise ValueError(
                 "scf_uspp: configure through `opts` OR the flat keyword "
                 "arguments, not both (conflicting flat kwargs: "
-                f"{sorted(_supplied)})")
+                f"{sorted(_supplied)})"
+            )
         smearing, width = opts.smearing, opts.width
         max_iter, etol, rhotol = opts.max_iter, opts.etol, opts.rhotol
         diago_tol, criterion = opts.diago_tol, opts.criterion
-        rho_safety, batched, verbose = opts.rho_safety, opts.batched, \
-            opts.verbose
+        rho_safety, batched, verbose = opts.rho_safety, opts.batched, opts.verbose
         mixed_precision = opts.mixed_precision
         mx = opts.mixer
         mixing_alpha, mixing_history = mx.alpha, mx.history
@@ -860,26 +1128,36 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
     if mixing_metric not in ("plain", "coulomb"):
         raise ValueError("mixing_metric must be 'plain' or 'coulomb'")
     if hasattr(system.rho_symmetrizer, "apply_m"):
-        raise ValueError("system was built with magnetic symmetry (magmoms=...) — "
-                         "only scf_uspp_noncollinear consumes it (anti-unitary ops "
-                         "would mis-fold collinear spin channels); rebuild without "
-                         "magmoms")
+        raise ValueError(
+            "system was built with magnetic symmetry (magmoms=...) — "
+            "only scf_uspp_noncollinear consumes it (anti-unitary ops "
+            "would mis-fold collinear spin channels); rebuild without "
+            "magmoms"
+        )
     grid = system.grid
     vol = grid.volume
     dev = system.positions.device
     nk = len(system.spheres)
 
-    rho_s, spin_frac = _seed_scf_density(system, grid, vol, dev, nspin,
-                                         start_from, start_mag)
+    rho_s, spin_frac = _seed_scf_density(system, grid, vol, dev, nspin, start_from, start_mag)
 
-    ops = _build_iter_ops(system, xc, nspin=nspin, smearing=smearing,
-                          width=width, batched=batched, hubbard=hubbard,
-                          mixed_precision=mixed_precision)
+    ops = _build_iter_ops(
+        system,
+        xc,
+        nspin=nspin,
+        smearing=smearing,
+        width=width,
+        batched=batched,
+        hubbard=hubbard,
+        mixed_precision=mixed_precision,
+    )
     hub = ops.hub
     n_hub_s = None
     if hub is not None:
-        n_hub_s = [[torch.zeros(s["dim"], s["dim"], dtype=CDTYPE, device=dev)
-                    for s in hub.sites] for _ in range(nspin)]
+        n_hub_s = [
+            [torch.zeros(s["dim"], s["dim"], dtype=CDTYPE, device=dev) for s in hub.sites]
+            for _ in range(nspin)
+        ]
 
     # Mixing vector = [ρ channels on the density sphere, flattened becsum per
     # spin]. Mixing becsum TOGETHER with ρ (QE keeps it inside rho%mix the
@@ -898,14 +1176,12 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         # Johnson handles the on-site becsum↔ddd mode without extra
         # damping (FM Ni 27→16 it); the 0.4 stays for pulay/broyden
         bec_step_scale = 1.0 if mixing_scheme == "johnson" else 0.4
-    layout = MixLayout(grid, nspin, system.atom_slices, device=dev,
-                       bec_step_scale=bec_step_scale)
+    layout = MixLayout(grid, nspin, system.atom_slices, device=dev, bec_step_scale=bec_step_scale)
     g2_mix, ng, nbec = layout.g2_sphere, layout.ng, layout.nbec
     g2_full, kerker_mask = layout.g2_full, layout.kerker_mask
     step_scale = layout.step_scale
     adapt_ids = layout.block_ids if adapt_step else None
-    use_kerker = (smearing != "none") if mixing_kerker is None \
-        else bool(mixing_kerker)
+    use_kerker = (smearing != "none") if mixing_kerker is None else bool(mixing_kerker)
     if mixing_history is None:
         # per-scheme defaults, measured on FM Ni (see JohnsonMixer)
         mixing_history = 12 if mixing_scheme == "johnson" else 8
@@ -914,14 +1190,20 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         # QE rho_ddot: Coulomb-metric inner products (long-range emphasis).
         # G=0 is EXCLUDED (zero weight — 1/G² there poisons the Gram
         # matrix); becsum components get unit weight
-        wg = torch.where(g2_mix > 1e-12, 1.0 / g2_mix.clamp_min(1e-12),
-                         torch.zeros_like(g2_mix))
-        metric_w = torch.cat([wg] * nspin
-                             + [torch.ones(nbec, device=dev)] * nspin)
-    mixer = _build_mixer(mixing_scheme, g2_full, alpha=mixing_alpha,
-                         history=mixing_history, kerker=use_kerker,
-                         kerker_mask=kerker_mask, step_scale=step_scale,
-                         metric_w=metric_w, w0=mixing_w0, adapt_ids=adapt_ids)
+        wg = torch.where(g2_mix > 1e-12, 1.0 / g2_mix.clamp_min(1e-12), torch.zeros_like(g2_mix))
+        metric_w = torch.cat([wg] * nspin + [torch.ones(nbec, device=dev)] * nspin)
+    mixer = _build_mixer(
+        mixing_scheme,
+        g2_full,
+        alpha=mixing_alpha,
+        history=mixing_history,
+        kerker=use_kerker,
+        kerker_mask=kerker_mask,
+        step_scale=step_scale,
+        metric_w=metric_w,
+        w0=mixing_w0,
+        adapt_ids=adapt_ids,
+    )
     if precond not in ("kerker", "local_tf"):
         raise ValueError("precond must be 'kerker' or 'local_tf'")
     tf_precond = None
@@ -931,16 +1213,15 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         # channel keep plain damping, matching the kerker_mask). set_density()
         # is called with the current smooth density each iteration.
         from gradwave.scf.local_tf import LocalTFPrecond
-        tf_precond = LocalTFPrecond(grid.g2, grid.shape, layout.mask,
-                                    q0_max=mixer.q0)
+
+        tf_precond = LocalTFPrecond(grid.g2, grid.shape, layout.mask, q0_max=mixer.q0)
         mixer.precond_op = tf_precond
         mixer.precond_slice = slice(0, ng)
     # warm-start the eigensolver from a previous result's orbitals when they fit
     # this grid's G-spheres (same-grid ionic move, or calculator-remapped for a
     # grid-shape change); else a cold random start. coeffs/coeffs_b are then
     # mutated in place by _scf_iteration each cycle.
-    coeffs, coeffs_b = _seed_orbitals_uspp(system, nspin, nk, ops.nb, batched,
-                                           start_from, dev)
+    coeffs, coeffs_b = _seed_orbitals_uspp(system, nspin, nk, ops.nb, batched, start_from, dev)
     e_free_prev, history, converged = None, [], False
     rescue_count, seed_salt = 0, 0  # solver-blowup rescue state (task #55)
     last_reset_it = -10  # trust-region reset cooldown (task #55)
@@ -962,11 +1243,15 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         # already near a fixed point — scan/rig callers control precision
         # through diago_tol)
         tol_eff = adaptive_diago_tol(
-            it, history, diago_tol, system.n_electrons, schedule="quadratic",
-            first_tol=1e-3 if start_from is None else diago_tol)
+            it,
+            history,
+            diago_tol,
+            system.n_electrons,
+            schedule="quadratic",
+            first_tol=1e-3 if start_from is None else diago_tol,
+        )
 
-        step = _scf_iteration(ops, rho_s, rho_ij_mix, coeffs, coeffs_b,
-                              n_hub_s, tol_eff, seed_salt)
+        step = _scf_iteration(ops, rho_s, rho_ij_mix, coeffs, coeffs_b, n_hub_s, tol_eff, seed_salt)
         eigs_s, occ_s, mu = step["eigs_s"], step["occ_s"], step["mu"]
         n_hub_s = step["n_hub_s"]
         rho_out_s, rho_ij_s = step["rho_out_s"], step["rho_ij_s"]
@@ -981,38 +1266,51 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         # fingerprint). Detect the jump, throw away the poisoned warm starts,
         # and re-solve from salted fresh seeds WITHOUT feeding the garbage
         # into the mixer.
-        if (e_free_prev is not None and history
-                and abs(e_free - e_free_prev) > 5.0
-                and history[-1]["res"] < 1e-2 and rescue_count < 2):
+        if (
+            e_free_prev is not None
+            and history
+            and abs(e_free - e_free_prev) > 5.0
+            and history[-1]["res"] < 1e-2
+            and rescue_count < 2
+        ):
             rescue_count += 1
             seed_salt = 104729 * rescue_count
             logger.debug(
                 "USPP iter %d solver blowup: dE=%.3e eV from residual %.1e "
                 "(rescue %d/2), discarding warm starts and reseeding with "
-                "salt=%d", it, abs(e_free - e_free_prev), history[-1]["res"],
-                rescue_count, seed_salt)
+                "salt=%d",
+                it,
+                abs(e_free - e_free_prev),
+                history[-1]["res"],
+                rescue_count,
+                seed_salt,
+            )
             coeffs_b = [None] * nspin
             for isp in range(nspin):
                 coeffs[isp] = [None] * nk
             if verbose:
-                print(f"  USPP {it:3d}  [solver blowup: dE = "
-                      f"{abs(e_free - e_free_prev):.1f} eV from residual "
-                      f"{history[-1]['res']:.1e} — reseeding eigensolver]")
+                print(
+                    f"  USPP {it:3d}  [solver blowup: dE = "
+                    f"{abs(e_free - e_free_prev):.1f} eV from residual "
+                    f"{history[-1]['res']:.1e} — reseeding eigensolver]"
+                )
             continue
 
         rho_in_vec = to_mix(rho_s, rho_ij_mix)
         rho_out_vec = to_mix(rho_out_s, rho_ij_s)
-        res_norm = float(
-            torch.linalg.norm(rho_out_vec[: ng * nspin] - rho_in_vec[: ng * nspin])
-        ) * vol
+        res_norm = (
+            float(torch.linalg.norm(rho_out_vec[: ng * nspin] - rho_in_vec[: ng * nspin])) * vol
+        )
         de = record_iteration(history, it, e_free, e_free_prev, res_norm, t_it)
         if verbose:
             mag = ""
             if nspin == 2:
                 m = float((rho_out_s[0] - rho_out_s[1]).sum()) * vol / grid.n_points
                 mag = f"  m = {m:+.4f} muB"
-            print(f"  USPP {it:3d}  F = {e_free:+.10f} eV  dE = {de:.3e}  "
-                  f"|drho| = {res_norm:.3e}{mag}")
+            print(
+                f"  USPP {it:3d}  F = {e_free:+.10f} eV  dE = {de:.3e}  "
+                f"|drho| = {res_norm:.3e}{mag}"
+            )
         if criterion == "energy":
             # QE-style energy criterion: the free energy is variational, its
             # error is O(residual²), and for smeared metals the residual
@@ -1021,21 +1319,24 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
             # coincidence) plus a loose residual safety that excludes frozen
             # limit cycles without demanding the unreachable plateau floor.
             tail = [h["free_energy"] for h in history[-3:]]
-            done = (len(tail) == 3 and max(tail) - min(tail) < etol
-                    and res_norm < rho_safety
-                    and tol_eff <= diago_tol * 1.01)
+            done = (
+                len(tail) == 3
+                and max(tail) - min(tail) < etol
+                and res_norm < rho_safety
+                and tol_eff <= diago_tol * 1.01
+            )
         else:
-            done = convergence_gate(de, res_norm, tol_eff, etol, rhotol,
-                                    diago_tol)
+            done = convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol)
         if done:
             converged = True
             rho_s = rho_out_s
             if is_paw:  # report the one-center energy at the FINAL fresh becsum
                 e_onec = torch.zeros((), dtype=RDTYPE, device=dev)
                 for sp, atoms in _species_atoms(system).items():
-                    fresh = [onec[sp]._to_real_t(
-                        torch.stack([rho_ij_s[isp][a] for a in atoms]))
-                        for isp in range(nspin)]
+                    fresh = [
+                        onec[sp]._to_real_t(torch.stack([rho_ij_s[isp][a] for a in atoms]))
+                        for isp in range(nspin)
+                    ]
                     e_onec = e_onec + onec[sp].e1c_t(fresh).sum().to(dev)
                 energies.onecenter = e_onec
             break
@@ -1053,16 +1354,21 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         # floors; the cooldown stops a reset that didn't help from re-firing
         # before DIIS has curvature again.
         best_res = min(h["res"] for h in history[-10:])
-        if (it > 1 and res_norm > trust_factor * best_res
-                and it - last_reset_it >= 5):
+        if it > 1 and res_norm > trust_factor * best_res and it - last_reset_it >= 5:
             logger.debug(
-                "USPP iter %d trust-region mixer reset: residual %.2e > %gx "
-                "windowed best %.2e", it, res_norm, trust_factor, best_res)
+                "USPP iter %d trust-region mixer reset: residual %.2e > %gx windowed best %.2e",
+                it,
+                res_norm,
+                trust_factor,
+                best_res,
+            )
             mixer.reset()
             last_reset_it = it
             if verbose:
-                print(f"  USPP {it:3d}  [mixer reset: residual jumped "
-                      f"{res_norm:.2e} > {trust_factor:g}x best {best_res:.2e}]")
+                print(
+                    f"  USPP {it:3d}  [mixer reset: residual jumped "
+                    f"{res_norm:.2e} > {trust_factor:g}x best {best_res:.2e}]"
+                )
         if spin_precond and nspin == 2 and smearing != "none":
             # Stoner preconditioner on the m-channel (arXiv:2606.26693):
             # rebuilt each iteration from the current orbitals; neutralizes
@@ -1071,15 +1377,25 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
             from gradwave.scf.spin_precond import build_stoner_precond
 
             sp = build_stoner_precond(
-                system, coeffs, eigs_s, mu, SCHEMES[smearing], width,
-                rho_out_s[0] + rho_out_s[1], rho_out_s[0] - rho_out_s[1], xc)
+                system,
+                coeffs,
+                eigs_s,
+                mu,
+                SCHEMES[smearing],
+                width,
+                rho_out_s[0] + rho_out_s[1],
+                rho_out_s[0] - rho_out_s[1],
+                xc,
+            )
             if sp is None:
                 mixer.extra_precond = None
             else:
+
                 def _spin_pc(rvec, _sp=sp):
                     out = rvec.clone()
-                    out[ng:2 * ng] = _sp.apply(rvec[ng:2 * ng])
+                    out[ng : 2 * ng] = _sp.apply(rvec[ng : 2 * ng])
                     return out
+
                 mixer.extra_precond = _spin_pc
         if tf_precond is not None:
             tf_precond.set_density(rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1])
@@ -1094,8 +1410,11 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
 
     if not converged:
         logger.warning(
-            "USPP/PAW SCF did NOT converge in %d iterations: F=%+.10f eV, "
-            "|drho|=%.3e", it, e_free, res_norm)
+            "USPP/PAW SCF did NOT converge in %d iterations: F=%+.10f eV, |drho|=%.3e",
+            it,
+            e_free,
+            res_norm,
+        )
     rho_final = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
     # Return the becsum that PAIRS with the returned density. At convergence
     # rho_s was set to the fresh map output (rho_out_s), so the fresh output
@@ -1115,13 +1434,21 @@ def scf_uspp(system: USPPSystem, xc, *, nspin: int = 1, start_mag=None,
         extra["mag_total"] = float((rho_s[0] - rho_s[1]).sum()) * vol / grid.n_points
         extra["mag_abs"] = float((rho_s[0] - rho_s[1]).abs().sum()) * vol / grid.n_points
     return USPPResult(
-        converged=converged, n_iter=len(history), energies=energies,
+        converged=converged,
+        n_iter=len(history),
+        energies=energies,
         eigenvalues=eigs_s[0] if nspin == 1 else torch.stack(eigs_s),
         occupations=occ_s[0] if nspin == 1 else torch.stack(occ_s),
-        coeffs=coeffs[0] if nspin == 1 else coeffs, rho=rho_final,
+        coeffs=coeffs[0] if nspin == 1 else coeffs,
+        rho=rho_final,
         rho_ij_atoms=rho_ij_final[0] if nspin == 1 else rho_ij_final,
-        becps=becps_s[0] if nspin == 1 else becps_s, history=history,
-        fermi=mu, system=system, nspin=nspin, smearing=smearing, width=width,
+        becps=becps_s[0] if nspin == 1 else becps_s,
+        history=history,
+        fermi=mu,
+        system=system,
+        nspin=nspin,
+        smearing=smearing,
+        width=width,
         mixer_mult=mixer.block_mult,
         rho_out_spin=rho_out_s,  # RAW map output (pre-mixing) — rig/diagnostics
         **extra,

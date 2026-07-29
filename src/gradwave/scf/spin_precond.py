@@ -41,7 +41,7 @@ class StonerSpinPrecond:
     """(I − χ₀^diag K_mm)⁻¹ on the m-channel of the mixing vector."""
 
     def __init__(self, u_g: torch.Tensor, w_g: torch.Tensor,
-                 cvals: torch.Tensor, volume: float):
+                 cvals: torch.Tensor, volume: float) -> None:
         """u_g: (r, ng) codensities ρ̂_α(G) on the density sphere.
         w_g: (r, ng) kernel-weighted codensities (K_mm ρ_α)^(G).
         cvals: (r,) w_k f'(ε_α) (negative). volume: Ω (the ⟨,⟩ factor)."""
@@ -62,8 +62,8 @@ class StonerSpinPrecond:
 
 
 def build_stoner_precond(system, coeffs_s, eigs_s, mu, scheme,
-                         width, rho_tot, m_r, xc, fp_cut=1e-8,
-                         max_bands=96):
+                         width, rho_tot, m_r, xc, fp_cut: float=1e-8,
+                         max_bands: int=96):
     """Assemble the preconditioner from the current SCF iteration's state.
 
     coeffs_s/eigs_s: per-spin lists as in the scf_uspp loop. Returns None
@@ -138,8 +138,8 @@ def _stoner_kernel_diag(rho_tot, m_r, xc, grid, vol, rho_core):
 
 
 def build_stoner_precond_nc(system, coeffs, eigs, mu, scheme, width,
-                            rho_tot, m_vec, nc_xc, m_pw, fp_cut=1e-8,
-                            max_bands=96):
+                            rho_tot, m_vec, nc_xc, m_pw, fp_cut: float=1e-8,
+                            max_bands: int=96):
     """Stoner preconditioner for the NON-COLLINEAR moment channel.
 
     The non-collinear analogue of ``build_stoner_precond``. Near a

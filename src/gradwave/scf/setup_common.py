@@ -74,7 +74,7 @@ def coupled_axes(sym, mag_sym):
 
 
 def build_symmetrizer_and_kpoints(grid, cell, kmesh, kshift, sym, mag_sym,
-                                  time_reversal, collinear_magnetic=False,
+                                  time_reversal, collinear_magnetic: bool=False,
                                   magmoms=None):
     """(rho_symmetrizer, kfrac, kw): the magnetic group folds k into the
     magnetic IBZ (anti-unitary g·T ops as −W⁻ᵀ) — with a MagneticSymmetrizer

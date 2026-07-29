@@ -83,7 +83,7 @@ logger = logging.getLogger(__name__)
 class _SpinorBK:
     """The doubled-axis view of BatchedK that davidson_gen_batched reads."""
 
-    def __init__(self, bk):
+    def __init__(self, bk) -> None:
         self.mask = torch.cat([bk.mask, bk.mask], dim=-1)
         self.npw = 2 * bk.npw
         self.npw_max = 2 * bk.npw_max
@@ -96,7 +96,7 @@ class SpinorBatchedHS:
     and in projector space through the four screened-D channels; S = 1 + Σq|β⟩⟨β|
     is spin-diagonal (no SOC), applied per component with the same q_full."""
 
-    def __init__(self, bk, shape, v_r, b_vec_r, p, d_chan, q_full, smooth=None):
+    def __init__(self, bk, shape, v_r, b_vec_r, p, d_chan, q_full, smooth=None) -> None:
         self.inner = bk
         self.bk = _SpinorBK(bk)
         self.shape = shape

@@ -30,7 +30,9 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from typing import Callable
 
+import numpy as np
 import torch
 
 from gradwave.core.batch import BatchedK, becp_b, projectors_b
@@ -40,6 +42,7 @@ from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.energies.nl_pp import nonlocal_energy
 from gradwave.core.energies.total import EnergyBreakdown
 from gradwave.core.fftbox import g_to_r_box, r_to_g
+from gradwave.core.hubbard import HubbardManifold
 from gradwave.core.metagga import spinor_metagga_tau_operator, spinor_tau_matrix_b
 from gradwave.core.occupations import SCHEMES, find_fermi, occupations_and_entropy
 from gradwave.core.xc.noncollinear import (
@@ -50,6 +53,7 @@ from gradwave.core.xc.noncollinear import (
     vxc_and_bxc,
 )
 from gradwave.dtypes import CDTYPE, CDTYPE_LOW, RDTYPE, RDTYPE_LOW
+from gradwave.grids import FFTGrid
 from gradwave.scf.common import (
     MP_CROSSOVER,
     adaptive_diago_tol,
@@ -84,8 +88,13 @@ class SpinorHamiltonian:
     fully-relativistic pseudos use spinor projectors q on the DOUBLED axis
     (j-resolved SOC — see core/spinor_proj.py)."""
 
-    def __init__(self, bk: BatchedK, shape, v_r, b_vec_r, p, q=None, dij_so=None,
-                 metagga_op=None, hub_q=None, hub_dij=None):
+    def __init__(
+        self, bk: BatchedK, shape: tuple[int, int, int], v_r: torch.Tensor,
+        b_vec_r: torch.Tensor, p: torch.Tensor, q: torch.Tensor | None = None,
+        dij_so: torch.Tensor | None = None,
+        metagga_op: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        hub_q: torch.Tensor | None = None, hub_dij: torch.Tensor | None = None,
+    ) -> None:
         self.bk = bk
         self.shape = shape
         self.p = p  # (nk, nproj, npw_max) scalar projectors
@@ -112,7 +121,7 @@ class SpinorHamiltonian:
         self._cache: dict = {}
         self._hub_cache: dict = {}  # cdtype → cast (hub_q, hub_q_conj, hub_dij)
 
-    def _tables(self, cdtype):
+    def _tables(self, cdtype: torch.dtype) -> dict[str, torch.Tensor | None]:
         """Working-precision copies of the fixed tensors (cached per dtype)."""
         cached = self._cache.get(cdtype)
         if cached is None:
@@ -138,7 +147,7 @@ class SpinorHamiltonian:
             self._cache[cdtype] = cached
         return cached
 
-    def _hub_tables(self, cdtype):
+    def _hub_tables(self, cdtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         cached = self._hub_cache.get(cdtype)
         if cached is None:
             hq = self.hub_q.to(cdtype)
@@ -146,7 +155,7 @@ class SpinorHamiltonian:
             self._hub_cache[cdtype] = cached
         return cached
 
-    def _band_chunk(self, nk: int, device, elem_bytes: int = 16) -> int:
+    def _band_chunk(self, nk: int, device: torch.device, elem_bytes: int = 16) -> int:
         """Bands per chunk bounding the dense-grid temporaries — the shared
         spinor heuristic (scf/spinor_common.py)."""
         return spinor_band_chunk(self.shape, nk, device, elem_bytes)
@@ -229,8 +238,12 @@ _MAG_MIXERS = {"pulay": "PulayMixer", "johnson": "JohnsonMixer",
                "broyden": "BroydenMixer"}
 
 
-def _build_nc_mixer(g2_vec, ng, nonmagnetic, mixing_alpha, mag_mixing_alpha,
-                    mixing_history, precond_op, m, device, mag_mixer="pulay"):
+def _build_nc_mixer(
+    g2_vec: torch.Tensor, ng: int, nonmagnetic: bool, mixing_alpha: float,
+    mag_mixing_alpha: float, mixing_history: int,
+    precond_op: Callable[[torch.Tensor], torch.Tensor] | None,
+    m: torch.Tensor, device: torch.device, mag_mixer: str = "pulay",
+) -> tuple[PulayMixer, torch.Tensor | None, torch.Tensor]:
     """Build the (ρ, m⃗) mixer. Nonmagnetic: single ρ block with Kerker and
     check_g0, and m is zeroed. Magnetic: 4 blocks with Kerker on the ρ block only
     (kerker_mask, check_g0=False) and a decoupled m⃗ step (base_step_scale) to hold
@@ -263,9 +276,14 @@ def _build_nc_mixer(g2_vec, ng, nonmagnetic, mixing_alpha, mag_mixing_alpha,
     return mixer, base_step_scale, m
 
 
-def _solve_spinor_bands(bk, grid, v_r, b_xc, projs_b, q_so, dij_so, coeffs, t2,
-                        mask2, tol_eff, mixed_precision, mp_crossover,
-                        metagga_op=None, hub_q=None, hub_dij=None):
+def _solve_spinor_bands(
+    bk: BatchedK, grid: FFTGrid, v_r: torch.Tensor, b_xc: torch.Tensor,
+    projs_b: torch.Tensor, q_so: torch.Tensor | None, dij_so: torch.Tensor | None,
+    coeffs: torch.Tensor, t2: torch.Tensor, mask2: torch.Tensor, tol_eff: float,
+    mixed_precision: bool, mp_crossover: float,
+    metagga_op: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    hub_q: torch.Tensor | None = None, hub_dij: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, SpinorHamiltonian]:
     """Diagonalize the spinor Hamiltonian for one iteration at diagonalization
     tolerance tol_eff (optional fp32 draft with an fp64 spinor renorm over the
     doubled 2·npw axis so the electron count stays conserved through mixing).
@@ -289,8 +307,11 @@ def _solve_spinor_bands(bk, grid, v_r, b_xc, projs_b, q_so, dij_so, coeffs, t2,
     return eigs, coeffs, h
 
 
-def _nc_adaptive_backoff(adaptive, it, last_backoff, stall_window, adapt_mult,
-                         history, mixer, base_step_scale, verbose):
+def _nc_adaptive_backoff(
+    adaptive: bool, it: int, last_backoff: int, stall_window: int, adapt_mult: float,
+    history: list[dict[str, int | float]], mixer: PulayMixer,
+    base_step_scale: torch.Tensor | None, verbose: bool,
+) -> tuple[float, int]:
     """When the residual stalls or bounces over a window (a limit cycle at a
     frustrated moment / SOC), halve the global mixing step multiplier and drop the
     DIIS history — MUTATES mixer (step_scale, reset) — so the pre-stall vectors
@@ -312,9 +333,13 @@ def _nc_adaptive_backoff(adaptive, it, last_backoff, stall_window, adapt_mult,
     return adapt_mult, last_backoff
 
 
-def _nc_energy_breakdown(coeffs, occ, t2, entropy_term, rho_out, m_out, q_so,
-                         dij_so, projs_b, m_pw, vloc_g, e_ew, system, grid, xc,
-                         vol, nk, tau_up=None, tau_dn=None):
+def _nc_energy_breakdown(
+    coeffs: torch.Tensor, occ: torch.Tensor, t2: torch.Tensor, entropy_term: torch.Tensor,
+    rho_out: torch.Tensor, m_out: torch.Tensor, q_so: torch.Tensor | None,
+    dij_so: torch.Tensor | None, projs_b: torch.Tensor, m_pw: int, vloc_g: torch.Tensor,
+    e_ew: torch.Tensor, system: System, grid: FFTGrid, xc: NoncollinearXC, vol: float, nk: int,
+    tau_up: torch.Tensor | None = None, tau_dn: torch.Tensor | None = None,
+) -> EnergyBreakdown:
     """Per-iteration energy breakdown. The nonlocal term takes the SOC path
     (q_so becp) or the scalar-relativistic per-spin (up/down) path. tau_up/tau_dn
     (meta-GGA) are the local-frame per-spin τ from the current orbitals. Returns
@@ -342,10 +367,13 @@ def _nc_energy_breakdown(coeffs, occ, t2, entropy_term, rho_out, m_out, q_so,
                            nonlocal_=e_nl, ewald=e_ew, smearing=entropy_term)
 
 
-def _nc_effective_potential(xc, rho, m, grid, system, vloc_r, nonmagnetic,
-                            constrain_dirs, constrain_lambda, constrain_mode,
-                            constrain_target_mag, atom_weights, vol,
-                            tau_up=None, tau_dn=None):
+def _nc_effective_potential(
+    xc: NoncollinearXC, rho: torch.Tensor, m: torch.Tensor, grid: FFTGrid, system: System,
+    vloc_r: torch.Tensor, nonmagnetic: bool, constrain_dirs: torch.Tensor | None,
+    constrain_lambda: float, constrain_mode: str, constrain_target_mag: torch.Tensor | None,
+    atom_weights: torch.Tensor | None, vol: float,
+    tau_up: torch.Tensor | None = None, tau_dn: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Per-iteration effective potential v_r and exchange field b_xc. Nonmagnetic
     zeros b_xc; otherwise an optional Ma-Dudarev constraining field is ADDED to
     b_xc after (never before) the nonmagnetic zeroing. One vxc_and_bxc autograd
@@ -372,8 +400,10 @@ def _nc_effective_potential(xc, rho, m, grid, system, vloc_r, nonmagnetic,
     return v_r, b_xc
 
 
-def _bootstrap_spinor_tau(xc, coeffs, system, nbands, nk, bk, grid, vol, m_pw,
-                          device):
+def _bootstrap_spinor_tau(
+    xc: NoncollinearXC, coeffs: torch.Tensor, system: System, nbands: int, nk: int,
+    bk: BatchedK, grid: FFTGrid, vol: float, m_pw: int, device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
     """Seed the KE-density-matrix (τ_0, τ⃗) from the initial spinors so iteration
     1 has a valid τ for the τ-dependent v_xc and operator (refined immediately
     from the diagonalized orbitals). (None, None) for non-meta-GGA — mirrors
@@ -387,8 +417,14 @@ def _bootstrap_spinor_tau(xc, coeffs, system, nbands, nk, bk, grid, vol, m_pw,
                                vol, m_pw)
 
 
-def _nc_metagga_step(xc, rho, m, grid, system, tau_scalar, tau_vec, nonmagnetic,
-                     bk, m_pw):
+def _nc_metagga_step(
+    xc: NoncollinearXC, rho: torch.Tensor, m: torch.Tensor, grid: FFTGrid, system: System,
+    tau_scalar: torch.Tensor | None, tau_vec: torch.Tensor | None, nonmagnetic: bool,
+    bk: BatchedK, m_pw: int,
+) -> (
+    tuple[tuple[torch.Tensor, torch.Tensor], Callable[[torch.Tensor], torch.Tensor]]
+    | tuple[tuple[None, None], None]
+):
     """Meta-GGA per-iteration τ machinery for the spinor loop, or (None,None),None
     for LDA/GGA. From the stored KE-density-matrix (τ_0, τ⃗) — built from the
     previous iteration's orbitals — and the current (ρ, m⃗):
@@ -417,7 +453,9 @@ def _nc_metagga_step(xc, rho, m, grid, system, tau_scalar, tau_vec, nonmagnetic,
     return (tau_up, tau_dn), op
 
 
-def _seed_nc_density(grid, system, mag_vec_init, device):
+def _seed_nc_density(
+    grid: FFTGrid, system: System, mag_vec_init: torch.Tensor, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Initial (ρ, m⃗): SAD total density plus atom-directed magnetization
     channels seeded from mag_vec_init (per-atom moment fraction·direction)."""
     rho = sad_density(grid, system.positions, system.species_of_atom, system.upfs,
@@ -431,7 +469,10 @@ def _seed_nc_density(grid, system, mag_vec_init, device):
     return rho.to(device), torch.stack(m_chan).to(device)
 
 
-def _unpack_mixed_fields(mixed, n_chan, ng, mask_flat, grid, device):
+def _unpack_mixed_fields(
+    mixed: torch.Tensor, n_chan: int, ng: int, mask_flat: torch.Tensor, grid: FFTGrid,
+    device: torch.device,
+) -> list[torch.Tensor]:
     """Inverse-FFT the mixed (ρ, m⃗) vector back to per-channel real-space fields:
     [rho] when nonmagnetic (n_chan=1), else [rho, m_x, m_y, m_z]."""
     return unpack_grid_channels(mixed, n_chan, ng, mask_flat, grid.shape,
@@ -442,7 +483,7 @@ def _unpack_mixed_fields(mixed, n_chan, ng, mask_flat, grid, device):
 def scf_noncollinear(
     system: System,
     xc: NoncollinearXC,
-    mag_vec_init,  # (na, 3) initial moment fraction·direction per atom
+    mag_vec_init: list[list[float]] | torch.Tensor,  # (na, 3) initial moment fraction·direction
     smearing: str = "gaussian",
     width: float = 0.1,
     max_iter: int = 120,
@@ -459,15 +500,15 @@ def scf_noncollinear(
     verbose: bool = True,
     nonmagnetic: bool = False,  # pin m⃗ ≡ 0 (QE's domag=false): nonmagnetic + SOC
     mixed_precision: bool = False,  # opt-in fp32 draft (situational — see scf())
-    constrain_dirs=None,  # (na,3) unit target directions ê_I for constrained moments
+    constrain_dirs: torch.Tensor | None = None,  # (na,3) unit target directions ê_I
     constrain_lambda: float = 0.0,  # penalty strength λ [eV/μB²] (Ma-Dudarev)
-    atom_weights=None,  # (na,*grid) Hirshfeld weights; required when constraining
+    atom_weights: torch.Tensor | None = None,  # (na,*grid) Hirshfeld weights; needed to constrain
     constrain_mode: str = "perp",  # "perp" (direction only) or "vector" (+magnitude)
-    constrain_target_mag=None,  # per-atom |M| target [μB] for mode="vector"
-    precond_op=None,  # callable r→P·r on the density-total block (charge channel),
-    # overriding constant Kerker there — e.g. a fitted learned_precond filter
-    mixer_hook=None,  # research probe: called (it, vin, vout) each step pre-mix
-    hubbard=None,  # list[core.hubbard.HubbardManifold] — noncollinear DFT+U
+    constrain_target_mag: torch.Tensor | None = None,  # per-atom |M| target [μB], mode="vector"
+    precond_op: Callable[[torch.Tensor], torch.Tensor] | None = None,  # r -> P.r on density block
+    # (charge channel), overriding constant Kerker there — e.g. a fitted learned_precond filter
+    mixer_hook: Callable[[int, torch.Tensor, torch.Tensor], None] | None = None,  # (it, vin, vout)
+    hubbard: list[HubbardManifold] | None = None,  # noncollinear DFT+U
     # (Dudarev); the 2×2 spin-block generalization of the collinear occupation
     # matrix (core.hubbard.occupation_matrices_noncollinear). Shared with SOC
     # (is_fr): the +U term is orthogonal to the SOC nonlocal term, so a
@@ -736,14 +777,12 @@ def scf_noncollinear(
     )
 
 
-def band_structure_nc(res: NCResult, xc: NoncollinearXC, kpts_frac,
+def band_structure_nc(res: NCResult, xc: NoncollinearXC, kpts_frac: np.ndarray,
                       nbands: int | None = None, diago_tol: float = 1e-8,
                       chunk: int = 4, verbose: bool = False,
-                      mixed_precision: bool = False):
+                      mixed_precision: bool = False) -> np.ndarray:
     """Spinor band energies along arbitrary k (SOC-aware): rebuilds the
     converged potential from (ρ, m⃗) and solves per path chunk."""
-    import numpy as np
-
     from gradwave.core.batch import build_batched
     from gradwave.core.hamiltonian import build_projector_data
     from gradwave.core.spinor_proj import build_so_projectors

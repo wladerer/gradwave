@@ -40,6 +40,8 @@ dev = [
     "import-linter>=2.13",
     "hypothesis>=6.160.0",
     "ty>=0.0.64",
+    "monkeytype>=23.3.0",
+    "autotyping>=24.9.0",
 ]
 docs = [
     "mkdocs>=1.6",
@@ -146,4 +148,10 @@ name = "scf does not depend on the analysis layer, except the shared response ke
 type = "forbidden"
 source_modules = ["gradwave.scf"]
 forbidden_modules = ["gradwave.postscf"]
-ignore_imports = ["gradwave.scf.implicit -> gradwave.postscf._response"]
+# scf.loop -> postscf.hybrid is TYPE_CHECKING-only (the `fock: MultiKFockExchange
+# | None` annotation on scf()): postscf.hybrid imports scf() back, so importing
+# it for real here would be circular, not just architecturally backwards.
+ignore_imports = [
+    "gradwave.scf.implicit -> gradwave.postscf._response",
+    "gradwave.scf.loop -> gradwave.postscf.hybrid",
+]
