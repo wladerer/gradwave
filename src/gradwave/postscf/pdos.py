@@ -27,7 +27,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -72,7 +72,7 @@ class ProjectedDOS:
     nspin: int
     group_by: str
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """JSON-ready block (lists, not arrays); the parsing target for the
         analysis layer."""
         def _col(a):
@@ -106,7 +106,7 @@ class NoncollinearPDOS:
     fermi_eV: float | None
     group_by: str
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         def _col(a):
             return np.asarray(a).tolist()
 
@@ -147,21 +147,21 @@ def spectral_grid(
     return window, np.linspace(window[0], window[1], npoints)
 
 
-def _is_uspp_system(system: System | USPPSystem) -> bool:
-    """USPP/PAW systems carry the augmentation weights; NC systems carry .upfs."""
-    return hasattr(system, "paws") and hasattr(system, "q_full")
-
-
 def _species_orbitals(
     system: System | USPPSystem, sp: int
 ) -> (
-    tuple[PAWData, tuple[AtomicOrbital, AtomicOrbital]]
-    | tuple[UPFData, tuple[AtomicOrbital, AtomicOrbital]]
+    tuple[PAWData, tuple[AtomicOrbital, ...]]
+    | tuple[UPFData, tuple[AtomicOrbital, ...]]
 ):
     """(pseudopotential, PP_PSWFC atomic orbitals) for species `sp`. The radial
     tables live on .pswfc for norm-conserving UPFData and on .chi for PAWData,
-    but both are AtomicOrbital(l, label, rchi=r·R_nl) with matching .r/.rab."""
-    if _is_uspp_system(system):
+    but both are AtomicOrbital(l, label, rchi=r·R_nl) with matching .r/.rab.
+
+    USPP/PAW systems carry the augmentation weights (.paws/.q_full); NC
+    systems carry .upfs -- isinstance(system, USPPSystem), not the
+    hasattr-based duck check a plain `System | USPPSystem` union can't be
+    narrowed through statically."""
+    if isinstance(system, USPPSystem):
         pp = system.paws[sp]
         return pp, getattr(pp, "chi", ())
     pp = system.upfs[sp]
@@ -195,7 +195,7 @@ def _ao_projectors_k(
     l_max = max(c.l for c in cols)
     y = ylm_all(l_max, kpg)  # (npw, (l_max+1)^2)
     # radial form factors F_nl(q), cached per (species, orbital label)
-    fcache: dict[tuple, torch.Tensor] = {}
+    fcache: dict[tuple[int, str], torch.Tensor] = {}
     for sp in set(system.species_of_atom):
         u, orbs = _species_orbitals(system, sp)
         for o in orbs:
@@ -294,12 +294,19 @@ def _nc_weights_k(
 
 
 def _uspp_weights_k(
-    system: USPPSystem, sph: GSphere, ik: int, c: torch.Tensor, cols: list[AOColumn],
-    device: torch.device,
+    system: System | USPPSystem, sph: GSphere, ik: int, c: torch.Tensor,
+    cols: list[AOColumn], device: torch.device,
 ) -> np.ndarray:
     """USPP/PAW Löwdin weights with the S-metric. becp = <phi|S|psi> and the
     overlap = <phi|S|phi>, where the augmentation S = 1 + sum_ij |beta_i> q_ij
-    <beta_j| reuses the SCF's m-expanded beta projectors and charges q_full."""
+    <beta_j| reuses the SCF's m-expanded beta projectors and charges q_full.
+
+    Only ever called (through `_unpack_result`'s `_uspp` branch) with a real
+    USPPSystem -- the wider `System | USPPSystem` param (matching
+    `_nc_weights_k`'s own signature) is so both weight functions share one
+    Callable type; `_unpack_result`'s tuple-union return otherwise loses the
+    system/weight_fn pairing once the caller destructures it."""
+    assert isinstance(system, USPPSystem)
     from gradwave.core.hamiltonian import projectors
     q = _ao_projectors_k(system, sph, cols, device)             # (nproj, npw)
     pbeta = projectors(system.proj_data[ik], system.positions).to(device)  # (nb_i, npw)
@@ -325,12 +332,19 @@ def _group_key(col: AOColumn, group_by: str) -> str:
     return f"atom{col.atom + 1}:{col.label}{('_' + suffix) if suffix else ''}"
 
 
-def _unpack_result(
-    res: SCFResult | USPPResult,
-) -> (
-    tuple[System, int, torch.Tensor, list[list[torch.Tensor]], float, torch.device, Callable]
-    | tuple[USPPSystem, int, torch.Tensor, list[list[torch.Tensor]], float, torch.device, Callable]
-):
+_WeightFn = Callable[
+    [System | USPPSystem, GSphere, int, torch.Tensor, list[AOColumn], torch.device],
+    np.ndarray,
+]
+
+
+_Unpacked = tuple[
+    "System | USPPSystem", int, torch.Tensor, list[list[torch.Tensor]],
+    "float | None", torch.device, _WeightFn,
+]
+
+
+def _unpack_result(res: SCFResult | USPPResult) -> _Unpacked:
     """(system, nspin, eig[None-padded to (nspin,...)], coeffs[spin][k], fermi,
     device, weight_fn) for a norm-conserving SCFResult or a USPPResult."""
     formalism = getattr(res, "formalism", None)
@@ -338,14 +352,19 @@ def _unpack_result(
         system = res.system
         nspin = int(getattr(res, "nspin", 1))
         eig = res.eigenvalues if nspin == 2 else res.eigenvalues[None]
-        coeffs = res.coeffs if nspin == 2 else [res.coeffs]
+        # nspin=2: res.coeffs is really list[list[Tensor]] (per-spin, per-k);
+        # nspin=1: really list[Tensor] (per-k), wrapped in a length-1 outer
+        # list here to match the per-spin shape the caller iterates.
+        coeffs = (cast("list[list[torch.Tensor]]", res.coeffs) if nspin == 2
+                  else [cast("list[torch.Tensor]", res.coeffs)])
         return (system, nspin, eig, coeffs, res.fermi, res.rho.device,
                 _nc_weights_k)
     if formalism == "uspp":
         system = res.system
         nspin = int(res.nspin)
         eig = res.eigenvalues if nspin == 2 else res.eigenvalues[None]
-        coeffs = res.coeffs if nspin == 2 else [res.coeffs]
+        coeffs = (cast("list[list[torch.Tensor]]", res.coeffs) if nspin == 2
+                  else [cast("list[torch.Tensor]", res.coeffs)])
         return (system, nspin, eig, coeffs, res.fermi, res.rho.device,
                 _uspp_weights_k)
     raise NotImplementedError(
@@ -430,6 +449,8 @@ def projected_dos_noncollinear(
         raise NotImplementedError(
             "projected_dos_noncollinear expects a noncollinear NCResult")
     system = res.system
+    assert res.coeffs is not None, "res carries no spinor coefficients"
+    assert system.batch is not None
     device = res.coeffs.device
     cols = _atomic_columns(system)
     m_pw = system.batch.npw_max
@@ -535,10 +556,14 @@ def _ao_spinor_projectors_k(
     lmax = max(c.l for c in cols)
     yc = complex_ylm(lmax, kpg)  # (npw, (lmax+1)^2), index l^2 + l + m
     # radial form factors F_nl(q), one per (species, label, j) since j splits R_nl
-    fcache: dict[tuple, torch.Tensor] = {}
+    fcache: dict[tuple[int, str, float], torch.Tensor] = {}
     for sp in set(system.species_of_atom):
         u = system.upfs[sp]
         for o in u.pswfc:
+            # this spin-angular (j-resolved) projector path only ever runs
+            # for fully-relativistic UPFs, whose PP_PSWFC orbitals always
+            # carry j.
+            assert o.j is not None
             key = (sp, o.label, float(o.j))
             if key not in fcache:
                 fcache[key] = torch.as_tensor(
@@ -594,6 +619,8 @@ def projected_dos_soc(
         raise NotImplementedError(
             "j-resolved PDOS needs a fully-relativistic (SOC) pseudo; use "
             "projected_dos_noncollinear for scalar-relativistic noncollinear SCF")
+    assert res.coeffs is not None, "res carries no spinor coefficients"
+    assert system.batch is not None
     device = res.coeffs.device
     cols = _atomic_columns_so(system)
     m_pw = system.batch.npw_max
