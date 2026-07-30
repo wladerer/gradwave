@@ -1,0 +1,118 @@
+[
+ {
+  "nlayers": 4,
+  "detect_k": 6,
+  "A_local_tf": {
+   "n_iter": 17,
+   "conv": true,
+   "E": -7453.139711,
+   "wall_s": 14.5
+  },
+  "B_kerker": {
+   "n_iter": 21,
+   "conv": true,
+   "E": -7453.139711,
+   "wall_s": 17.9,
+   "low2_series": [
+    0.2376,
+    0.1904,
+    0.6177,
+    0.1665,
+    0.3624,
+    0.8698,
+    0.9562,
+    0.982,
+    0.965,
+    0.8217,
+    0.5474,
+    0.7837,
+    0.854,
+    0.8873,
+    0.7945,
+    0.9066,
+    0.7239,
+    0.9565,
+    0.9667,
+    0.9304,
+    0.7705
+   ]
+  },
+  "C_detect_restart": {
+   "phase1_iters": 6,
+   "flagged": false,
+   "phase2_iters": 14,
+   "total_iters": 20,
+   "conv": true,
+   "E": -7453.139711,
+   "wall_s": 17.8
+  },
+  "verdict": {
+   "A_iters": 17,
+   "B_iters": 21,
+   "C_iters": 20,
+   "C_beats_A": false,
+   "energies_match": true
+  }
+ },
+ {
+  "nlayers": 6,
+  "detect_k": 6,
+  "A_local_tf": {
+   "n_iter": 21,
+   "conv": true,
+   "E": -11179.569665,
+   "wall_s": 32.7
+  },
+  "B_kerker": {
+   "n_iter": 27,
+   "conv": true,
+   "E": -11179.569665,
+   "wall_s": 43.1,
+   "low2_series": [
+    0.3783,
+    0.1073,
+    0.2251,
+    0.1121,
+    0.3955,
+    0.8508,
+    0.9793,
+    0.9243,
+    0.9935,
+    0.9385,
+    0.9332,
+    0.7832,
+    0.4124,
+    0.503,
+    0.8195,
+    0.7181,
+    0.7297,
+    0.862,
+    0.9097,
+    0.9069,
+    0.9649,
+    0.9391,
+    0.9581,
+    0.7291,
+    0.8702,
+    0.8633,
+    0.7269
+   ]
+  },
+  "C_detect_restart": {
+   "phase1_iters": 6,
+   "flagged": false,
+   "phase2_iters": 20,
+   "total_iters": 26,
+   "conv": true,
+   "E": -11179.569665,
+   "wall_s": 39.5
+  },
+  "verdict": {
+   "A_iters": 21,
+   "B_iters": 27,
+   "C_iters": 26,
+   "C_beats_A": false,
+   "energies_match": true
+  }
+ }
+]
