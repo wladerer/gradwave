@@ -112,18 +112,57 @@ a new bug. Until the spinor operator route lands (see the follow-up note above),
 raise NBANDS and treat the SOC ICOHP's absolute value as bracketed within a
 factor of ~2, not exact.
 
-QUANTITATIVE STATUS (NOT yet calibrated to LOBSTER — do not ship as such). On
-diamond (PBE) LOBSTER reports IpCOHP ~= -9.64 eV per C-C bond. Two gaps remain:
-  1. Bond resolution. This atom-pair COHP uses Bloch AO projectors, so pair
-     (i, j) is the interaction of atom i with the WHOLE atom-j sublattice (all
-     periodic images), not a single bond — for diamond ~4 nearest bonds. A
-     per-bond (per-image R) resolution is needed to compare to LOBSTER directly.
-  2. Basis. A Loewdin-orthonormalized *pseudo-atomic* basis is more diffuse than
-     LOBSTER's contracted local orbitals and develops larger off-site elements,
-     so the operator-route per-bond magnitude overshoots (~2x) and the band-
-     limited eigenvalue route undershoots (~2x); the true value is bracketed
-     between them. A contracted / projected local basis is needed for a
-     quantitative match.
+QUANTITATIVE STATUS (NOT yet calibrated to LOBSTER — do not ship as such). No
+LOBSTER binary or fixture lives in this tree (checked: `nix search lobster`
+has no COHP package, only unrelated same-named packages; LOBSTER itself needs
+a separate free-for-academic-use license and binary this environment does not
+have), so what follows is a magnitude comparison against ONE published number,
+not a full cross-check:
+diamond (PBE) LOBSTER reports IpCOHP ~= -9.64 eV per C-C bond. Measured on
+diamond (PD_C_PBE_std, ecut 45 Ry, 2x2x2 UNREDUCED k-mesh, nbands=24 —
+tests/integration/test_cohp.py's `diamond_c` fixture, past the reference-leak
+knee above):
+
+  1. Bond resolution — CLOSED by `resolve_images`, verified rather than assumed.
+     The sublattice ICOHP (pairs=[(0,1)], resolve_images=False) is -83.5 eV,
+     diamond's 4 symmetry-equivalent nearest-neighbour bonds lumped together;
+     resolve_images=True gives -21.0 eV. Scanning every integer lattice shift R
+     that puts atom 1 at the nearest-neighbour distance from atom 0 finds
+     exactly 4 (diamond's tetrahedral coordination), and EVERY one gives the
+     identical -20.9589 eV bond ICOHP (to the digits printed — the site
+     symmetry is exact), summing to -83.8 eV, matching the sublattice number to
+     <0.4%. `resolve_images` is a real, symmetry-verified per-bond
+     decomposition, comparable in kind (though not yet magnitude — see #2) to
+     LOBSTER's per-bond number.
+  2. Basis diffuseness — NOT closed, and the "operator overshoots ~2x /
+     eigenvalue undershoots ~2x, true value bracketed between" framing this
+     section used to give does NOT survive per-bond resolution at a
+     well-converged band count: at nbands=24 (past the leak-convergence knee),
+     the eigenvalue-route per-bond ICOHP is -20.4 eV, only ~2% below the
+     operator route's -21.0 eV — not a factor of ~2 apart. Both sit on the
+     SAME side of LOBSTER, at ~2.1-2.2x its -9.64 eV. What looked like a
+     bracket was really the eigenvalue route converging UP toward the operator
+     value as nbands grows (see the reference-leak table above), not two
+     independent estimates straddling the truth.
+
+     basis="iao" (the Knizia intrinsic atomic orbitals below, which span the
+     occupied manifold exactly — charge_spilling collapses from 0.0038 to
+     ~0 on this system) does NOT shrink the overshoot either: -21.2 eV per
+     bond, ~1% LARGER than the pswfc basis's -21.0 eV, not smaller. IAO fixes
+     occupied-space completeness, which is a different property from real-space
+     extent — narrowing the latter is what would shrink the inter-atomic H~
+     off-site elements that drive the COHP magnitude — so despite already
+     being implemented, IAO does not close this gap. A quick (unshipped)
+     diagnostic — damping the PP_PSWFC radial tail with exp(-(r/rc)^2) post-SCF
+     and recomputing — shows why a naive truncation isn't a shortcut either:
+     the magnitude barely moves until rc drops below ~0.8x the bond length,
+     and by the rc (~0.7 A) where it crosses -9.64 eV, charge_spilling has
+     grown past 20% (from the untruncated basis's 0.0038) — i.e. it only
+     "matches" LOBSTER by no longer representing the occupied states. A real
+     fix needs an actual contracted/fitted local orbital (LOBSTER-style
+     minimal Slater-type basis tables), which is new machinery — per-element
+     basis data plus a fitting pipeline — not a parameter tweak on the existing
+     radial. Scoped, not started; see docs/plans/cohp-contracted-basis.md.
 Sign and bonding/antibonding shape are correct (diamond: COHP<0 valence, >0
 conduction; spilling physical after the projection-conjugation fix in
 core/pdos.py). Treat absolute solid-state ICOHP as not-yet-validated.
@@ -374,8 +413,13 @@ def _iao_projectors_k(phi: torch.Tensor, psi_occ: torch.Tensor, floor: float=1e-
     onto the occupied MOs *depolarised* into the minimal basis and reorthonormalised
     (psi~ = orthonormalise(phi S^{-1} <phi|psi>), S = <phi|phi>). By construction the
     IAOs span the occupied manifold exactly, so the occupied-state projection has
-    zero spilling — the contracted/localised basis the COHP docstring calls for,
-    built with no external tables (Knizia 2013; periodic form arXiv:2407.00852)."""
+    zero spilling, with no external tables (Knizia 2013; periodic form
+    arXiv:2407.00852). This closes occupied-space COMPLETENESS, a different
+    property from real-space EXTENT: measured on diamond (module docstring,
+    QUANTITATIVE STATUS #2) IAO does not itself narrow the per-bond COHP
+    magnitude relative to the plain pswfc basis, so it does NOT close the
+    basis-diffuseness gap the COHP docstring describes despite the resemblance
+    of the two problems."""
     Phi, Psi = phi, psi_occ
     eye = torch.eye(Phi.shape[0], dtype=Phi.dtype, device=Phi.device)
     B = torch.einsum("pg,ng->pn", Phi.conj(), Psi)          # <phi_p|psi_n>
@@ -567,8 +611,11 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
 
     `basis` selects the projector local basis: "pswfc" (default) the pseudo-atomic
     PP_PSWFC orbitals, or "iao" the Intrinsic Atomic Orbitals that span the occupied
-    manifold exactly (zero occupied-state spilling, more localised off-site
-    elements). "iao" needs the norm-conserving operator route. Returns a `COHP`.
+    manifold exactly (zero occupied-state spilling). "iao" needs the norm-conserving
+    operator route. NOTE: despite spanning the occupied space exactly, IAO does NOT
+    measurably shrink the off-site COHP magnitude on diamond (module docstring,
+    QUANTITATIVE STATUS #2) -- it fixes completeness, not real-space extent, so it
+    is not a fix for the basis-diffuseness gap. Returns a `COHP`.
     """
     from gradwave.scf.loop import SCFResult
     system, nspin, eig, coeffs, fermi, device, _ = _unpack_result(res)

@@ -105,6 +105,64 @@ Per-image `Σ_R` reconstruction and IAO zero-spilling are internal checks that c
 land now. A LOBSTER cross-check (diamond −9.64 eV/bond) needs step 4's fixture.
 Heavy runs go to `asus` (idle); local is reserved for the small O2/Bi2 gates.
 
+## Follow-up: magnitude check against the diamond −9.64 eV/bond citation (post-landing)
+
+Steps 1–3 above are landed (`resolve_images`, `basis="iao"`, `projection_rmsp`).
+This follow-up ran the comparison step 4 deferred — not a real LOBSTER fixture
+(none is available: no license/binary, `nix search lobster` has no COHP
+package), but a direct magnitude check against the one published number, on
+diamond (PD_C_PBE_std, ecut 45 Ry, 2×2×2 unreduced k-mesh, nbands=24 — the
+`diamond_c` fixture in `tests/integration/test_cohp.py`).
+
+**Bond resolution (cause 1): confirmed closed.** Scanning every integer lattice
+shift `R` that places atom 1 at the nearest-neighbour distance from atom 0
+finds exactly 4 (diamond's tetrahedral coordination), and `resolve_images`
+gives the IDENTICAL −20.9589 eV for all 4 — not approximately equal, identical
+to the digits measured. Summing the 4 reconstructs the −83.5 eV sublattice
+number to <0.4%. `resolve_images` is a verified, exact per-bond decomposition,
+not a partial fix.
+
+**Basis diffuseness (cause 2): IAO does NOT close it — the plan's central
+hypothesis was wrong.** Measured directly: `basis="iao"` gives −21.2 eV/bond
+vs. `basis="pswfc"`'s −21.0 eV/bond — 1% LARGER, not smaller, despite
+`charge_spilling` collapsing from 0.0038 to ~0. IAO fixes occupied-manifold
+*completeness* (which is what `charge_spilling`/RMSp measure); it does nothing
+to shrink the orbitals' real-space *extent*, which is what actually drives the
+inter-atomic `H̃` overlap and hence the COHP magnitude. In hindsight this
+should have been predictable from the construction: `A = [OÕ + (1−O)(1−Õ)]φ`
+is built to reproduce the occupied KS states exactly, including whatever
+bonding character extends onto neighbouring atoms — there is no term in it
+that penalises spatial spread. The "resemblance" between "spans the occupied
+space" and "is a contracted local basis" was a false equivalence.
+
+A separate, unshipped diagnostic (Gaussian-damping the PP_PSWFC radial tail,
+`exp(-(r/rc)^2)`, post-SCF — cheap because PP_PSWFC is a postscf-only
+projection table, not a SCF input) confirms a naive truncation is not a
+shortcut either: the per-bond magnitude barely moves for `rc` down to ~0.8×
+the bond length, and by the `rc` (~0.7 Å) where it crosses −9.64 eV,
+`charge_spilling` has grown past 20% (from 0.0038 undamped) — i.e. it only
+"matches" the LOBSTER number by no longer representing the occupied states,
+which is not a real fix.
+
+**Conclusion:** cause 2 is confirmed real (~2.1–2.2× overshoot, both routes
+agree at converged nbands, so this is not a route-choice artifact) and remains
+open. The step 4 decision above holds: closing it needs an actual
+contracted/fitted local orbital (LOBSTER-style minimal Slater-type basis
+tables), which is new machinery — per-element basis data plus a fitting
+pipeline, evaluated against a real external oracle — not a parameter tweak on
+the existing PP_PSWFC radial or a different orthogonalization of it. Scoped,
+not started.
+
+Also worth correcting: the original "operator overshoots ~2×, eigenvalue
+undershoots ~2×, true value bracketed between" framing does not survive
+per-bond resolution at a well-converged band count. At nbands=24 (well past
+the reference-leak knee `cohp.py`'s docstring already quantifies), the
+eigenvalue route (−20.4 eV/bond) sits only ~2% below the operator route
+(−21.0 eV/bond) — both on the SAME side of LOBSTER's −9.64 eV, not bracketing
+it. What looked like a bracket was the eigenvalue route's partial convergence
+toward the operator value at lower nbands, not two independent estimates of
+the true bond strength.
+
 ## References
 
 - Sánchez-Portal, Artacho, Soler, *Solid State Commun.* **95**, 685 (1995) — spilling, variational basis optimisation.
