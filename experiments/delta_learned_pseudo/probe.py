@@ -49,6 +49,20 @@ def build_si(scale: float, ecut_ry: float, k: int,
                         use_symmetry=True, fft_shape=fft_shape)
 
 
+def build_si_displaced(scale, ecut_ry, k, disp):
+    """Si diamond at `scale` with atom 1 displaced by `disp` (Cartesian Ang),
+    built with use_symmetry=False so the reduced k-mesh and density symmetrizer
+    match the broken symmetry (a force check needs the true low-symmetry cell)."""
+    import numpy as np
+
+    cell, pos, elems = geometry("diamond", "Si", V0_SI, scale)
+    pos = np.asarray(pos, dtype=float).copy()
+    pos[1] = pos[1] + np.asarray(disp, dtype=float)
+    return setup_system(cell, pos, [0] * len(elems), [_get_upf()],
+                        ecut=ecut_ry * RY, kmesh=(k, k, k),
+                        use_symmetry=False)
+
+
 def fixed_grid(scales, ecut_ry, k):
     """Elementwise-max FFT grid over the volume chain, so E(V) is not stepped by
     a grid change (matches benchmarks/delta_gauge/run_gw)."""

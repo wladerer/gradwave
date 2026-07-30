@@ -32,6 +32,7 @@ from correction import default_centers, dv_table  # noqa: E402
 from probe import (  # noqa: E402
     apply_correction,
     build_si,
+    build_si_displaced,
     energy_of_theta,
     fixed_grid,
     run_scf,
@@ -132,10 +133,10 @@ def main():
     d_after, fit_after = delta_vs_wien(vols, e_after)
 
     # --- off-training force check on a displaced cell (probe settings) ---
-    base_disp = build_si(1.0, ECUT, K)
-    pos = base_disp.positions.clone()
-    pos[1] = pos[1] + torch.tensor([0.10, 0.0, 0.0], dtype=RDTYPE)  # displace
-    base_disp = dataclasses.replace(base_disp, positions=pos)
+    # built with use_symmetry=False so the reduced k-mesh matches the broken
+    # symmetry of the displaced cell (the correction vs uncorrected comparison
+    # is otherwise apples-to-apples, but absolute forces need the true cell)
+    base_disp = build_si_displaced(1.0, ECUT, K, [0.10, 0.0, 0.0])
     r_unc = run_scf(base_disp)
     f_unc = forces(r_unc)
     # bake trained correction into vloc_tables so forces() sees it
