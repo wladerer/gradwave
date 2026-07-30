@@ -32,6 +32,7 @@ nav:
   - Architecture: architecture.md
   - Installation: installation.md
   - Cookbook: cookbook.md
+  - Improving electronic convergence: convergence.md
   - Tutorials:
       - Structure and forces:
           - Geometry optimization: geometry-optimization.md

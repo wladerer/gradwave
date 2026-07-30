@@ -112,6 +112,7 @@ tensor is float64 or complex128.
 |---|---|
 | [Installation](installation.md) | set up the environment and run the first SCF |
 | [Cookbook](cookbook.md) | task recipes, the shortest path to each quantity |
+| [Improving electronic convergence](convergence.md) | mixer/preconditioner recipes for hard-to-converge SCFs |
 | [Geometry optimization](geometry-optimization.md) | relax a structure with autograd forces |
 | [Learning XC by AD](learning-xc.md) | train a functional through the SCF density |
 | [Hybrid functionals](hybrid-functionals.md) | exact exchange in the SCF, trainable α and ω |
