@@ -54,27 +54,36 @@ detail (it's short — read it if you're modifying this).
 
 ### Scope (v1)
 
-Implemented for the norm-conserving **collinear** SCF (`scf.loop.scf`) only,
-via `task: scf` and `task: bands` (which calls the same driver). Not yet
-supported, and rejected with a clear `NotImplementedError` rather than
-silently ignored:
+Implemented for the norm-conserving **collinear** SCF (`scf.loop.scf`), via
+`task: scf` and `task: bands` (which calls the same driver), and for the
+USPP/PAW collinear driver (`scf.uspp_loop.scf_uspp`).
+`distributed.shard_uspp_system` slices a built `USPPSystem` to a rank's shard,
+and `scf_uspp(dist_ctx=...)` reduces the per-atom augmentation `becsum`
+alongside the smooth density, DFT+U included (see
+`tests/integration/test_distributed_uspp_scf.py` for the launch pattern).
+An input file with `distributed: true` now routes either formalism.
+`api.run_scf` shards a `USPPSystem` through `shard_uspp_system` and a
+norm-conserving `System` through `shard_system`, DFT+U carried through
+unchanged (see `tests/integration/test_distributed_uspp_api.py`). Also not yet
+supported, and rejected with a clear `NotImplementedError` rather than silently
+ignored:
 
 - IBZ symmetry reduction (`symmetry: true`) — build with `symmetry: false`
   for a distributed run.
-- USPP/PAW pseudopotentials.
 - The noncollinear/spinor SCF (`noncollinear: true`), and fully relativistic
   (SOC) pseudopotentials.
 - Hybrid (PBE0/HSE) Fock exchange — it couples orbitals across k-points in
   ways beyond the density/energy reduction implemented here. DFT+U (Dudarev)
-  IS supported: the Hubbard occupation matrix `n_hub` is a k-extensive sum,
-  reduced the same way as the density (`all_reduce`-summed across ranks); its
+  IS supported. The Hubbard occupation matrix `n_hub` is a k-extensive sum,
+  reduced the same way as the density (`all_reduce`-summed across ranks). Its
   energy term is then recomputed from the already-reduced `n_hub` rather than
   summed per rank, since it is a nonlinear function of `n_hub` (see
-  `scf.loop._hubbard_occ_update`).
+  `scf.loop._hubbard_occ_update` and `scf.uspp_loop._hubbard_occ_update`,
+  which mirror each other on the two drivers).
 - `task: relax | eos | elastic | phonons | magnetism` — these don't route
   through the k-point-sharded path yet.
 - Warm-starting a distributed run from a checkpoint (`restart:`) produced by
-  a *different* world_size/shard layout; a checkpoint's orbitals are matched
+  a *different* world_size/shard layout. A checkpoint's orbitals are matched
   to the local shard's k-count, so a mismatch is silently ignored (falls back
   to the default seed) rather than warm-starting.
 

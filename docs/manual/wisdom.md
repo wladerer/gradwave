@@ -253,6 +253,12 @@ defect, which the [Performance](performance.md) page works through in full.
   robust ferromagnet it discards the becsum step-damping that pulay leans on and
   blows up (bcc Fe 29 to 93 at the same moment and energy), so pulay is the safe
   magnetic default.
+- (2026-07-30) The bcc Fe johnson blowup above no longer reproduces. On current code
+  forced johnson takes 16 iterations against pulay's 30 on the same cell, with no becsum
+  oscillation left to spec a tag against (`research/convergence-case-studies`). The cause
+  of the cure is not isolated, the #199 Stoner `spin_precond` change being the leading
+  candidate. So the pulay-for-nspin=2 USPP default now rests on a stale measurement and
+  should be re-benchmarked before it is trusted or changed.
 - Do not expect the mixer to select the physical branch. The nonmagnetic state is a
   genuine stationary point tens of meV away, and every code can land on it. Warm-start
   chains across scan points are the practical defense, plus an explicit moment gate as a

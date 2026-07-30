@@ -44,6 +44,7 @@ nav:
           - Differentiable Hubbard U: hubbard-u.md
           - Hybrid functionals: hybrid-functionals.md
       - Convergence and error control:
+          - SCF convergence and optimizers: convergence.md
           - Symmetry reduction: symmetry.md
           - Basis-set error estimation: error-estimation.md
       - Post-SCF analysis:
