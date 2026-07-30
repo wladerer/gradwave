@@ -1,0 +1,35 @@
+[1m[33mwarning[39m[0m[1m:[0m [1m`VIRTUAL_ENV=/home/wladerer/.venvs/base` does not match the project environment path `/home/wladerer/github/gradwave/.claude/worktrees/agent-a88b92c972d2664ff/.venv` and will be ignored; use `--active` to target the active environment instead[0m
+Using CPython [36m3.12.13[39m[36m[39m
+Creating virtual environment at: [36m/home/wladerer/github/gradwave/.claude/worktrees/agent-a88b92c972d2664ff/.venv[39m
+   [36m[1mBuilding[0m[39m gradwave[2m @ file:///home/wladerer/github/gradwave/.claude/worktrees/agent-a88b92c972d2664ff[0m
+      [32m[1mBuilt[0m[39m gradwave[2m @ file:///home/wladerer/github/gradwave/.claude/worktrees/agent-a88b92c972d2664ff[0m
+[2mInstalled [1m79 packages[0m [2min 1.06s[0m[0m
+# Si (2 atoms), PBE, ONCV, 4x4x4, use_symmetry, smearing=none
+# probe ecut = 15.0 Ry, ecut_large = 40.0 Ry
+
+  sweep ecut= 12.0 Ry  E = -213.859607 eV
+  sweep ecut= 15.0 Ry  E = -214.141396 eV
+  sweep ecut= 18.0 Ry  E = -214.228263 eV
+  sweep ecut= 22.0 Ry  E = -214.277086 eV
+  sweep ecut= 26.0 Ry  E = -214.293577 eV
+  sweep ecut= 32.0 Ry  E = -214.305687 eV
+  sweep ecut= 40.0 Ry  E = -214.314152 eV
+
+  curve(ecut) = -1.273735e-01 eV   shipped denergy = -1.273735e-01 eV   (rel diff 2.18e-16)
+
+## Predicted vs actual remaining error (relative to 40 Ry), meV/atom
+
+ ecut(Ry)     actual  predicted    ratio
+     15.0     86.378     63.687     0.74
+     18.0     42.945     25.945     0.60
+     22.0     18.533     10.842     0.59
+     26.0     10.288      6.670     0.65
+     32.0      4.233      2.368     0.56
+
+## Recommended ecut [Ry] for energy targets
+
+target(meV/at)  predicted     true
+          10.0       23.0     26.5
+           3.0       31.0     34.5
+           1.0       36.0     38.5
+EXIT=0

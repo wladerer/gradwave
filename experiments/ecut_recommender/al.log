@@ -1,0 +1,32 @@
+[1m[33mwarning[39m[0m[1m:[0m [1m`VIRTUAL_ENV=/home/wladerer/.venvs/base` does not match the project environment path `/home/wladerer/github/gradwave/.claude/worktrees/agent-a88b92c972d2664ff/.venv` and will be ignored; use `--active` to target the active environment instead[0m
+# Al (1 atom fcc, 11-e semicore), PBE, ONCV, 6x6x6, sym, gaussian 0.14 eV
+# probe ecut = 40.0 Ry, ecut_large = 100.0 Ry
+
+  sweep ecut= 36.0 Ry  F = -1881.512341 eV
+  sweep ecut= 40.0 Ry  F = -1882.506449 eV
+  sweep ecut= 45.0 Ry  F = -1882.961273 eV
+  sweep ecut= 50.0 Ry  F = -1883.140316 eV
+  sweep ecut= 60.0 Ry  F = -1883.242629 eV
+  sweep ecut= 70.0 Ry  F = -1883.260153 eV
+  sweep ecut= 85.0 Ry  F = -1883.262557 eV
+  sweep ecut=100.0 Ry  F = -1883.262641 eV
+
+  curve(ecut) = -7.017552e-01 eV   shipped denergy = -7.017552e-01 eV   (rel diff 0.00e+00)
+
+## Predicted vs actual remaining error (relative to 40 Ry), meV/atom
+
+ ecut(Ry)     actual  predicted    ratio
+     40.0    756.192    701.755     0.93
+     45.0    301.369    261.937     0.87
+     50.0    122.325     97.719     0.80
+     60.0     20.012     12.629     0.63
+     70.0      2.489      1.185     0.48
+     85.0      0.084      0.272     3.23
+
+## Recommended ecut [Ry] for energy targets
+
+target(meV/at)  predicted     true
+          10.0       61.5     66.0
+           3.0       66.5     70.0
+           1.0       71.0     79.5
+EXIT=0

@@ -1,0 +1,21 @@
+[1m[33mwarning[39m[0m[1m:[0m [1m`VIRTUAL_ENV=/home/wladerer/.venvs/base` does not match the project environment path `/home/wladerer/github/gradwave/.claude/worktrees/agent-a88b92c972d2664ff/.venv` and will be ignored; use `--active` to target the active environment instead[0m
+# Displaced Si (atom1 +0.10 A along x), PBE, ONCV, 4x4x4, no sym
+# probe ecut = 15.0 Ry, ecut_large = 40.0 Ry
+
+  sweep ecut= 15.0 Ry  Fx(atom1) = -1.41933 eV/A
+  sweep ecut= 18.0 Ry  Fx(atom1) = -1.39465 eV/A
+  sweep ecut= 22.0 Ry  Fx(atom1) = -1.40727 eV/A
+  sweep ecut= 26.0 Ry  Fx(atom1) = -1.40663 eV/A
+  sweep ecut= 32.0 Ry  Fx(atom1) = -1.40172 eV/A
+  sweep ecut= 40.0 Ry  Fx(atom1) = -1.40235 eV/A
+
+## Force error remaining at virtual cutoff (rel to 40 Ry)
+## metric: max|dF| component over atoms [eV/A], and Fx(atom1)
+
+ ecut(Ry)   act_max  pred_max   ratio   act_Fx1  pred_Fx1   corr
+     15.0    0.0170    0.0089    0.53   +0.0170   +0.0089   1.00
+     18.0    0.0077    0.0063    0.82   -0.0077   -0.0063   1.00
+     22.0    0.0049    0.0022    0.46   +0.0049   -0.0022  -1.00
+     26.0    0.0043    0.0001    0.03   +0.0043   +0.0001   0.95
+     32.0    0.0006    0.0011    1.72   -0.0006   +0.0011  -1.00
+EXIT=0
