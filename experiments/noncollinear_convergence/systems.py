@@ -44,12 +44,12 @@ def ni_fcc(soc: bool, ecut_ry=40, kmesh=(4, 4, 4), nbands=16):
     return _mono(a / 2 * _FCC, "Ni_fr" if soc else "Ni_sr", ecut_ry, kmesh, nbands)
 
 
-def fe_bcc(soc: bool, ecut_ry=40, kmesh=(6, 6, 6), nbands=16):
+def fe_bcc(soc: bool, ecut_ry=40, kmesh=(4, 4, 4), nbands=16):
     a = 2.87
     return _mono(a / 2 * _BCC, "Fe_fr" if soc else "Fe_sr", ecut_ry, kmesh, nbands)
 
 
-def pt_fcc(ecut_ry=40, kmesh=(6, 6, 6), nbands=18):
+def pt_fcc(ecut_ry=40, kmesh=(4, 4, 4), nbands=18):
     a = 3.92
     return _mono(a / 2 * _FCC, "Pt_fr", ecut_ry, kmesh, nbands)
 
