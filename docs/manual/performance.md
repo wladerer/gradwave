@@ -303,6 +303,19 @@ time again.
   `cols=24`, and mixed-to-negative through `cols=60-64`. The existing cap is
   correctly conservative, not overly so, at this larger `npw` than the diamond-C
   sweep that set it covered.
+- **fp32-compute for the Rayleigh-Ritz GEMMs (`s`/`x`/`hx`) in isolation from the
+  rest of the SCF.** 13-18x on the raw GEMM at hematite's shape, but embedding it
+  in the actual Davidson loop stalls convergence at a ~1-2e-5 residual floor
+  instead of reaching `tol=1e-9` -- the same fp32-subspace failure issue #136
+  documents for the generalized USPP reduction, now shown to also hold for the
+  plain RR GEMMs. See "Case study, a large-nb magnetic mineral on GPU" below.
+- **Streaming/chunking `v`/`hv` to avoid keeping the full basis GPU-resident for
+  the Rayleigh-Ritz step.** Measured with real H2D transfers: chunked streaming
+  is worse than either keeping the basis fully GPU- or fully CPU-resident, and a
+  full CPU-resident redesign nets out roughly flat once every consumer of
+  `v`/`hv` (build, combine, `h_apply`, the orthonormalize projection) is
+  accounted for, not just the one op that looks good in isolation. Same case
+  study.
 
 ## Case study, geometry relaxation vs QE
 
@@ -486,6 +499,83 @@ slowdown at this system's size. The lesson generalizes the existing
 "GPU limit is precision, not structure" finding rather than overturning it:
 a bigger `nb` moves *which* op pays the fp64 tax (GEMM alongside
 factorization), not whether the tax exists.
+
+### Follow-up: the flagged device-residency redesign was investigated and does not pay off
+
+The section above flagged the RR GEMM slowdown as "a candidate for a future
+investigation with its own controlled measurement" rather than something to fix
+on the spot. That investigation happened. The short answer is nothing beats the
+status quo, for three independently measured reasons.
+
+**Reproducing the baseline first.** A clean, uncontended rerun on the same RTX
+3050 at the identical shape (`nk=13`, `dim=240`, `npw=6746`) against 8 CPU
+threads (asus's Core Ultra 7 155H, the same "22-core hybrid CPU" from the
+thread-default section above) partially confirms the original numbers. The
+subspace build reproduces the direction and rough magnitude (GPU 329 ms vs. CPU
+204 ms, 0.62x, against the earlier 0.53x), but the Ritz combination does not --
+the clean isolated read gives the GPU 1.31x *faster* (164 ms vs. 215 ms), not
+0.67x slower. Both GPU numbers check out against a FLOP roofline for this card
+(~123 GFLOP/s effective on both ops, self-consistent with each other and with
+the earlier fp64-throughput story), so the isolated measurement is trusted
+here; the original combine-op number was most likely measured in-situ inside a
+live round, where `v`/`hv` are the product of repeated `torch.cat` growth (a
+different memory layout than a fresh contiguous tensor) running alongside the
+rest of the round's queued kernels and allocator activity, not an
+apples-to-apples isolated GEMM comparison. Neither number is wrong so much as
+measuring slightly different things; both are recorded here rather than
+picking one.
+
+**fp32-compute, fp64-accumulate for `s`/`x`/`hx` alone.** Isolated, the GEMM
+speedup is real and large: computing `s = matmul(v.conj(), hv.mT)` and the
+`x`/`hx` combination in complex64 and upcasting only the *result* to
+complex128 (the same precision split `mixed_precision`'s draft phase already
+uses, just scoped to this one step instead of the whole solve) measures 18.7
+ms and 12.7 ms against the fp64 329/164 ms above -- 13-18x on the raw GEMM. It
+fails on convergence, though: reimplementing the exact `davidson_batched` loop
+body with only this one substitution and running it against a synthetic
+large-`nb` (`nb=60`) gapped-spectrum operator, the fp64 path converges to
+`tol=1e-9` in 131-146 iterations while the fp32-RR path hits a hard ~1-2e-5
+residual floor and never reaches `1e-9` even at 300 iterations, on both an
+easy- and a hard-conditioning test case. This is the same failure the
+`.to(torch.complex128)` upcast in `davidson_batched`'s `s` computation and
+issue #136 already document for the generalized USPP subspace reduction -- an
+fp32 subspace computation corrupts the Ritz rotation past what a tight SCF
+tolerance can tolerate -- now confirmed to also hold for the plain
+(non-generalized) RR GEMMs, not only the Cholesky-based generalized reduction
+it was first found on. Scoping the precision drop to one GEMM family rather
+than the whole draft phase does not dodge this; the RR combination *is* what
+determines the Ritz vector, so narrowing where the noise enters does not
+narrow how much it matters.
+
+**Streaming/chunked residency.** Tested with real H2D transfers (a first
+attempt with `v`/`hv` already GPU-resident was a no-op and discarded):
+chunking the subspace build over `k` while streaming from CPU is worse than
+either extreme at every chunk size tried (386-498 ms for chunk sizes 1/2/4/13,
+pageable or pinned, against 329 ms fully GPU-resident or 198-204 ms fully
+CPU-resident) -- per-transfer-call overhead dominates at this size, so finer
+streaming buys nothing. There is a real wrinkle worth recording: *if* `v`/`hv`
+already lived on CPU, computing the subspace build there and shipping back
+only the small `(nk, dim, dim)` result (198 ms) beats the status quo's
+fully-GPU-resident compute (329 ms) -- but that number only holds for this one
+op. The Ritz combination is GPU-favorable by this file's own clean measurement
+above (164 vs. 215 ms), so moving it to a CPU-resident design costs back
+roughly what the build step would save; `h_apply` (32.5% of the round,
+FFT-heavy) needs `v` on GPU and would need its own transfer; and
+`_orthonormalize_b`'s `against=v` projection is a fourth `v`-consuming GEMM not
+measured here at all. Summing what is known, the wins and losses roughly
+cancel before any transfer/synchronization overhead or implementation
+complexity is even counted. This does not overturn the residency-redesign
+caution above -- it replaces "unverified" with a specific accounting that
+comes out roughly flat, which is a stronger reason not to build it than the
+earlier absence of a number.
+
+**einsum vs. matmul.** No difference at this shape (329 vs. 330 ms build, 164
+vs. 164 ms combine) -- PyTorch dispatches both call patterns to the same
+kernel here.
+
+No candidate beats the status quo, so `davidson_batched`'s Rayleigh-Ritz step
+is unchanged. The hematite GPU SCF remains the 3.9x-faster-than-CPU result
+recorded above.
 
 ## The GPU limit is precision, not structure
 
