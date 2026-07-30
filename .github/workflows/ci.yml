@@ -89,8 +89,10 @@ jobs:
     # The standard tier is fp64/CPU-bound; on the free public `ubuntu-latest`
     # runner a single job takes ~90 min. Shard it across parallel runners
     # (public repos get generous free concurrency) so wall-clock is ~1/N.
-    # pytest-split balances by test count (or by .test_durations if present);
-    # -n auto still parallelizes within each shard.
+    # pytest-split balances by .test_durations; least_duration assigns greedily,
+    # so a shard can never come up empty when the durations file drifts behind
+    # the test set (duration_based_chunks left shard 6 with zero tests, and
+    # pytest exit code 5 failed the job). -n auto still parallelizes per shard.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -114,6 +116,7 @@ jobs:
         run: >-
           uv run pytest -m "not slow and not torture and not gpu"
           --dist loadscope --splits 6 --group ${{ matrix.group }}
+          --splitting-algorithm least_duration
 
   # Single required-status gate. Always runs (so the required check is reported
   # even when lint/test are skipped), and is green iff neither lint nor test
