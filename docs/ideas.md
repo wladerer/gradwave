@@ -319,7 +319,9 @@ settings to milli-eV, then repeating `train_xc_paw`, is the payoff.
 
 ## Differentiable pseudopotential correction
 
-**Status: open. Target identified from the Δ-gauge; substrate mostly in place.**
+**Status: PROBED 2026-07-29 on Si. The machinery is validated end to end. An EOS-only
+loss is rank-deficient, so the idea is shelved pending a multi-observable loss. Archive
+branch `research/delta-learned-pseudo-probe`.**
 
 The periodic-table Δ-gauge (`benchmarks/delta_gauge`) surfaced a concrete target. The
 PseudoDojo standard UPF for Cu reproduces neither all-electron nor its own psp8 (B0 167
@@ -342,6 +344,34 @@ and, if it generalizes, a per-element learned correction that pulls the stiff-me
 floor down. Care is needed. Keep the correction small and norm-conserving, and validate
 against overfitting the EOS at the expense of transferability (band structure, a second
 crystal structure).
+
+**Probed on Si (2026-07-29).** A smooth four-parameter reciprocal-space correction to the
+local form factor, `dv_loc(G) = Σ_k θ_k (G/μ_k)² exp(−(G/μ_k)²)` with μ_k = 1..4 Å⁻¹,
+threaded into `System.vloc_atom` the way the alchemical local-table blend threads λ. The
+credentials are exact. θ=0 reproduces the plain SCF bit-for-bit, and the Hellmann-Feynman
+dE/dθ matches a full-reconvergence central finite difference to 3.2e-10 max relative error,
+four decades below the repo's ~1e-5 FD floor, because the energy is exactly linear in θ at
+frozen density.
+
+The blocker is identifiability, not differentiability. A synthetic recovery oracle (perturb
+Si by a known θ*, fit θ back from zero) drives the EOS shape residual from 0.935 to 0.077
+meV/atom while |θ − θ*| stays at 0.364 and the fitted parameters collapse to a common
+value. The SVD of the 5×4 Hellmann-Feynman EOS Jacobian explains it. The singular values
+are 1.7e-2, 2.8e-4, 4.2e-6, 1.5e-7 (condition 1.1e5), so a 5-volume EOS window determines
+one, at most two, of the four directions, and the recovery error sits in the two weakest.
+This is rank deficiency of the loss, not an optimizer failure.
+
+One real step against the WIEN2k Si EOS pulled Δ(Si) from 0.258 to 0.057 meV/atom at the
+probe basis in 10 Adam steps, and the off-training forces changed by at most 2e-4 eV/Å.
+Honesty caveat, the basis error at the probe settings is 0.149 meV/atom, comparable to the
+Δ change, so part of what the correction learned is basis truncation rather than
+pseudization. A real run must sit at the converged basis.
+
+Next scope, in order. Add valence eigenvalues and displaced-cell forces to the EOS loss and
+rerun the recovery oracle. Success there is the true go signal. Then Cu at the converged
+basis along the leading Jacobian directions, or one Gauss-Newton step on the linear map
+instead of Adam. The D_ij (KB coefficient) rung comes last, since the nonlocal channel has
+the same linear-in-parameter HF structure but multiplies the null-space question.
 
 # Magnetism and spin-orbit coupling
 
@@ -727,6 +757,84 @@ only known through its forward action), so this is real work. Also open is the m
 term tooling, the fractional-charge self-interaction probe (self-contained, no second
 functional) and the DC-DFT density-sensitivity piece, plus the smaller density-grid
 (`ecutrho`) and finite-size terms.
+
+**Probed 2026-07-29, shelved.** Two probes measured the discretization estimator's bias
+independently and agreed. The machinery is validated in places but too fragile for
+production runs today, so the owner's call is to record both and not productionize now.
+Archive branches `research/error-calibration-probe` and `research/ecut-recommender-probe`.
+
+The truthfulness grid (Si/C/MgO/NaCl and the metals Al/Cu, three loose cutoffs each) is a
+consistent under-estimate. All 18 estimated/true ratios lie in [0.75, 0.98], never above 1,
+rising monotonically toward 1 as the cutoff approaches the reference, and the per-system
+geometric means agree to within a few percent across chemistry. A leave-one-system-out
+calibration on the ecut fraction cuts the held-out log-ratio RMS from 0.1633 to 0.0367,
+about 4.5x, a typical held-out miss of 4 percent. The band gap adds nothing at N=6, and a
+per-element scale is untestable there since each element appears in one system.
+
+The (ecut, k-mesh) cross term on fcc Al is second order for the total but first order for
+the k line item. The largest interior |cross| is at most 1.0 percent of the summed
+marginals but up to 119 percent of the k-point marginal below 0.65x of the converged
+cutoff. Budget totals are safe to add, per-axis attributions are not.
+
+The second probe read the whole error-vs-cutoff curve off one converged SCF by binning the
+complement correction by its per-plane-wave kinetic energy T_G and cumulatively summing
+from the top. The bin-and-cumsum reproduces the shipped `denergy` scalar to 2e-16, and the
+curve tracks a real Si sweep within a factor of 2 over the whole annulus, a consistent
+under-estimate near 0.6x that needs ~1.5x calibration. Inverting the calibrated curve gives
+an energy ecut recommender. For Si the recommended vs true cutoff is 23.0 vs 26.5 Ry at a
+10 meV/atom target, 31.0 vs 34.5 at 3, and 36.0 vs 38.5 at 1.
+
+Two fragility findings drove the shelving. A pre-asymptotic probe is silently garbage, the
+semicore Al_ONCV pseudo at a 15 Ry probe gives 140 eV/atom nonsense with no internal signal
+that the probe is too loose, so a production tool must detect and refuse. And the
+force-error curve does not extrapolate, the true force error is non-monotonic in cutoff and
+hits the eggbox / k-noise floor within one or two steps, so only the probe cutoff itself is
+trustworthy.
+
+Revisit criteria. Run the ~20-system sweep (delta-gauge geometries and pseudos, one `gwq`
+job) to test whether per-element structure emerges beyond the fraction slope, and build a
+robust asymptotic-validity guard, before either the calibration layer or the recommender is
+worth productionizing.
+
+## Adversarial testing by gradient ascent
+
+**Status: TRIED 2026-07-29, measured negative. Archive branch
+`research/adversarial-testing-probe`.**
+
+gradwave is differentiable end to end, so the tempting bug hunt is to wire two things that
+should agree into a disagreement functional D(x), gradient-ascend D to surface worst-case
+configurations that equal-budget random sampling misses, and pin each found maximum as a
+regression fixture. The premise fails structurally whenever D is built from forces. The
+cheap one-SCF-per-evaluation gradient is the frozen-density partial derivative, and for a
+force-based D that is a second derivative of the energy, which Hellmann-Feynman stationarity
+does not protect. Measured against the re-converged gradient on the FFT eggbox, the
+frozen-density gradient overestimates by 2771, 18935, and 11985 at three probe points and
+gets the sign wrong at one. It also points consistently toward grid-aligned symmetric
+configurations, which are minima of D, so following it is descent, not ascent.
+
+At equal budget the ascent found nothing random did not. Random uniform sampling reached
+3.23e-3 eV/Å max |Σ F| over the voxel against ascent's 3.79e-3, and the ascent "win" was
+its own random start rather than a followed gradient. A 15-point diagonal scan beat both.
+The eggbox landscape itself is informative, D has exact zeros at grid-aligned AND half-voxel
+shifts and maxima near 0.07 and 0.43 voxel, so the intuition of a maximum midway between
+grid planes is wrong for the net force.
+
+The maximizer's failure mode is a lesson for any optimizer in the loop. It preferentially
+drives cells metallic or non-convergent, and one apparent 3.99 eV/Å "disagreement" was a
+false positive from a non-converged SCF (converged=False under smearing="none" on a
+band-overlap configuration). Per-evaluation SCF convergence, and physical validity, must be
+a hard domain constraint on D, which applies to inverse design as much as to bug hunting.
+The clean part is a keeper, the analytic-vs-finite-difference force cross-check ceiling is
+5.06e-5 eV/Å (relative 1.4e-5), at the h² FD floor, confirming the two force paths agree
+everywhere the comparison is defined.
+
+Three revival paths are documented, in decreasing promise. Exact dD/dτ via the
+implicit-function adjoint (`scf/implicit.py` already computes response-aware parameter
+gradients), with the equal-budget bar raised because each evaluation then costs several
+SCF-equivalents. Energy-based D functionals, whose first derivatives are Hellmann-Feynman
+exact so the cheap gradient is correct. And dropping gradients for a coarse scan or Bayesian
+optimization, which fits this smooth low-dimensional oscillatory landscape better per SCF
+than ascent.
 
 ## Showcase figures: noncollinear magnetism and error estimates
 
