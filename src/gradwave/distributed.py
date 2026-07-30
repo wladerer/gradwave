@@ -45,7 +45,9 @@ environment of every rank (see docs).
 
 Scope: the norm-conserving collinear SCF (``scf.loop.scf``) and the
 USPP/PAW collinear SCF (``scf.uspp_loop.scf_uspp``, including DFT+U — see
-:func:`shard_uspp_system`) — no IBZ symmetry reduction (``use_symmetry=False``
+:func:`shard_uspp_system`), both reachable from an input file via
+``Input.distributed: true`` (``api.run_scf`` shards either formalism) — no IBZ
+symmetry reduction (``use_symmetry=False``
 is required on either path), no fully relativistic (SOC) pseudopotentials (NC
 only; USPP/PAW has no SOC representation at all in this codebase — see
 :func:`shard_uspp_system`'s docstring), no hybrid Fock exchange, and no warm
