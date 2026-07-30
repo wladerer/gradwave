@@ -1,30 +1,39 @@
 # Ideas and future work
 
-A running backlog for gradwave, with enough reasoning attached that each item
-can be picked up cold. Not commitments, just directions worth taking. The open
-backlog comes first, then a "Done and resolved" section that keeps the reasoning
-for items already built or settled.
+A running backlog for gradwave, with enough reasoning attached that each item can
+be picked up cold. Not commitments, just directions worth taking.
+
+The open backlog comes first, grouped by theme, then a "Done and resolved" archive
+that keeps the reasoning for items already built or settled as a measured negative.
+Each idea carries a **status** line (open / prototyped / landed / tried-and-rejected,
+with date and PR refs where they exist), then the idea, the evidence, and the next
+step. The 2026-07-23 effort-vs-value survey directly below is the entry point and
+the map over the sections. As items land, they move to the archive and the survey
+is re-ranked.
+
+Themes, in return order. Many-body electronic structure (exact exchange, hybrids,
+RI/THC). Differentiable and learned functionals. Magnetism and spin-orbit coupling.
+Post-SCF and spectroscopy. Coverage, correctness, and the error budget. Performance
+and scaling.
 
 # Open backlog
 
 ## Capability gaps: effort vs value (2026-07-23 survey)
 
 A whole-code survey of the electronic-structure methods gradwave does *not* yet
-have, ranked by return. Effort and value are calibrated to this codebase: what
+have, ranked by return. Effort and value are calibrated to this codebase, to what
 substrate already exists (the differentiable-by-construction design, the ISDF/ACE
-Fock build, the nspin=1 autograd force/stress machinery) and the difficulty
-framing the sections below already carry. Scale is Low / Med / High / V.High.
-Several rows have a dedicated section further down that holds the real reasoning;
-this table is the map over them, not a replacement. It is a snapshot — as items
-land, move them to "Done and resolved" and re-rank the rest.
+Fock build, the nspin=1 autograd force/stress machinery) and the difficulty the
+sections below already frame. Scale is Low / Med / High / V.High. Several rows have
+a dedicated section further down that holds the real reasoning. This table is the
+map, not a replacement.
 
 For context, the ground-state semilocal-plus-hybrid-plus-magnetism surface is
-already broad: LDA/PBE/r2SCAN, a self-consistent PBE0/HSE hybrid on a k-mesh,
-DFT+U from linear response, the full spin-unpolarized → collinear → non-collinear
-→ SOC ladder, norm-conserving and USPP/PAW pseudos, forces/stress/bands/DOS/
-PDOS/COHP/Bader/Γ-phonons/EOS, four smearing schemes, and Davidson plus CheFSI.
-The gaps are mostly *beyond* ground-state GGA/hybrid DFT, plus a few coverage
-holes inside it.
+already broad. LDA/PBE/r2SCAN, a self-consistent PBE0/HSE hybrid on a k-mesh, DFT+U
+from linear response, the full spin-unpolarized to collinear to non-collinear to
+SOC ladder, norm-conserving and USPP/PAW pseudos, forces/stress/bands/DOS/PDOS/COHP/
+Bader/Γ-phonons/EOS, four smearing schemes, and Davidson plus CheFSI. The gaps are
+mostly *beyond* ground-state GGA/hybrid DFT, plus a few coverage holes inside it.
 
 | Feature | Effort | Value | Why / reusable substrate |
 |---|---|---|---|
@@ -50,662 +59,457 @@ holes inside it.
 | GW quasiparticle | V.High | High | The standard ask for real gaps; ISDF helps but frequency integration plus the self-energy is a major build. |
 | BSE (excitons / optical) | V.High | High | Needs GW first plus the electron–hole kernel; the highest-effort item here. |
 
-The four quadrants:
+The four quadrants.
 
-- **Quick wins** (high value, low effort — do first): nspin=2 derivatives, D3
-  dispersion, and elastic constants have since landed (elastic constants #41,
-  the rest 2026-07-24); DFT+U and fully-relativistic stress remain.
-- **Big bets** (high value, high effort): RPA → GW → BSE built in that order on
-  the ISDF substrate, finite-q phonons, and the dipole/field boundary conditions.
-- **On-brand niche** (differentiability showcase, moderate value): Berry-phase
+- **Quick wins** (high value, low effort, do first). nspin=2 derivatives, D3
+  dispersion, and elastic constants have since landed (elastic constants #41, the
+  rest 2026-07-24); DFT+U and fully-relativistic stress remain.
+- **Big bets** (high value, high effort). RPA → GW → BSE built in that order on the
+  ISDF substrate, finite-q phonons, and the dipole/field boundary conditions.
+- **On-brand niche** (differentiability showcase, moderate value). Berry-phase
   polarization, RT-TDDFT, topological invariants.
-- **Low priority**: extra PP formats, higher-order MP smearing, standalone HF,
-  libxc breadth.
+- **Low priority.** Extra PP formats, higher-order MP smearing, standalone HF, libxc
+  breadth.
 
-The largest genuinely-absent physics is the excited-state / many-body tier (GW,
-BSE, TDDFT, RPA): every gap, level alignment, and spectrum today comes from
-semilocal or hybrid DFT with its self-interaction error. The two cheapest gaps
-this survey named — dispersion and the nspin=2 derivatives — both landed on
-2026-07-24 (see the LANDED tags above); the many-body tier is what is left at the
-top of the return ranking.
+The largest genuinely-absent physics is the excited-state / many-body tier (GW, BSE,
+TDDFT, RPA). Every gap, level alignment, and spectrum today comes from semilocal or
+hybrid DFT with its self-interaction error. The two cheapest gaps this survey named,
+dispersion and the nspin=2 derivatives, both landed on 2026-07-24; the many-body tier
+is what is left at the top of the return ranking.
 
-## Scaling up: RI and tensor hypercontraction
+# Many-body electronic structure
 
-The
-CheFSI no-go, the EOS-batching analysis, and the 128-atom memory cliff were all
-measured on a consumer RTX 3050, whose fp64 throughput is a small fraction of its
-fp32 and whose 6 GB caps the grid. Those numbers bound that card, not GPUs in
-general. A datacenter card with real fp64 changes the CheFSI arithmetic story on
-its own, before any code change. But the more effective approach is to cut the
-operation count itself, which helps on the CPU path and on any GPU, and that is
-what resolution of identity and tensor hypercontraction do. They are also the
-enabling piece for exact exchange, the largest missing physics in the
-code, so the scaling and accuracy work overlap.
+Exact exchange is the largest missing physics in the code. Every energy, gap, force,
+and adsorbate level gradwave produces comes from a GGA electronic structure with
+self-interaction error, so band gaps come out too small and defect and adsorbate
+levels land in the wrong place. A hybrid needs a Fock exchange operator applied each
+SCF step, the O(N⁴) object that resolution of identity and tensor hypercontraction
+exist to reduce. The scaling work and the accuracy work therefore overlap.
 
-### Resolution of identity (RI, density fitting)
+The CheFSI no-go, the EOS-batching analysis, and the 128-atom memory cliff (see the
+performance sections) were all measured on a consumer RTX 3050, whose fp64 throughput
+is a small fraction of its fp32 and whose 6 GB caps the grid. Those numbers bound that
+card. A datacenter card with real fp64 changes the CheFSI arithmetic on its own. The
+more durable approach is to cut the operation count itself, which helps on the CPU
+path and on any GPU, and that is what RI and THC do.
+
+## RI and tensor hypercontraction (ISDF)
+
+**Status: first cut and self-consistent k-mesh hybrid SCF landed (2026-07-20);
+learned hybrid landed; RPA and the fine-mesh/HSE tails open.**
+
+### The framing
 
 RI expands products of orbitals in an auxiliary basis so a four-center
-electron-repulsion object factorizes through two- and three-center intermediates.
-In a plane-wave code the Hartree term is already O(N log N) through the FFT, so
-RI is not a Hartree win. Where it pays is exact exchange. The Fock term is the
-O(N^4) bottleneck that keeps hybrids out of the code, and RI on the orbital pair
-densities `rho_ij(r) = psi_i*(r) psi_j(r)` is the standard route to make it
-affordable. So RI compresses the Fock exchange build, which is what makes hybrid functionals tractable.
+electron-repulsion object factorizes through two- and three-center intermediates. In
+a plane-wave code the Hartree term is already O(N log N) through the FFT, so RI is not
+a Hartree win. Where it pays is exact exchange. The Fock term is the O(N⁴) bottleneck
+that keeps hybrids out of the code, and RI on the orbital pair densities
+`rho_ij(r) = psi_i*(r) psi_j(r)` is the standard route to make it affordable.
 
-- The auxiliary representation. A plane-wave code already carries a complete
-  auxiliary basis in the dense-grid plane waves, so a pair density is exact on the
-  grid. The cost problem is the number of pairs, O(N^2) of them, each needing an
-  FFT to Coulomb-couple. RI proper compresses that, and its plane-wave-native form
-  is the ISDF factorization below.
-- The differentiable angle. The fit is a linear solve against a metric, which is
-  differentiable end to end, so a learnable hybrid could carry the exchange-mixing
-  fraction and the range-separation length as trained parameters on top of an
-  RI-compressed Fock build.
-
-### Tensor hypercontraction and ISDF
+A plane-wave code already carries a complete auxiliary basis in the dense-grid plane
+waves, so a pair density is exact on the grid. The cost problem is the number of
+pairs, O(N²), each needing an FFT to Coulomb-couple. The fit is a linear solve against
+a metric, differentiable end to end, so a learnable hybrid can carry the exchange-
+mixing fraction and the range-separation length as trained parameters on top of an
+RI-compressed Fock build.
 
 Tensor hypercontraction factorizes the pair-product tensor into a small set of
-interpolation points and interpolation vectors, so an object that is O(N^2) in
-orbital pairs and O(N_grid) in real space collapses to O(N) points times a
-compact factor. The plane-wave-native form is interpolative separable density
-fitting (ISDF, Lu and Ying), which writes `psi_i(r) psi_j(r)` approximately as
-`sum_mu zeta_mu(r) psi_i(r_mu) psi_j(r_mu)` over a small chosen point set
-`{r_mu}`. A QR-pivoted or centroidal-Voronoi point selection makes the rank grow
-like N rather than N^2.
+interpolation points and vectors, collapsing an object O(N²) in orbital pairs and
+O(N_grid) in real space to O(N) points times a compact factor. The plane-wave-native
+form is interpolative separable density fitting (ISDF, Lu and Ying), which writes
+`psi_i(r) psi_j(r) ≈ Σ_μ zeta_mu(r) psi_i(r_mu) psi_j(r_mu)` over a small chosen point
+set `{r_mu}`. A QR-pivoted or centroidal-Voronoi point selection makes the rank grow
+like N rather than N². It cuts the FLOP count of the exchange and correlation builds
+directly, so unlike the CheFSI fp32 story it does not depend on a card's fp64
+throughput. It is the standard enabling technique for affordable exact exchange and
+RPA correlation in plane-wave codes (Qbox, PWDFT, the ISDF-K line). Its accuracy knob
+is the interpolation-point count, and the point selection is the subtle part, so the
+validation is budgeted against a direct plane-wave Fock build, not another
+approximation, with the rank reported as a convergence parameter.
 
-- Why this is the right scaling approach. It cuts the FLOP count of the exchange and
-  correlation builds directly, so unlike the CheFSI fp32 story it does not depend
-  on a particular card's fp64 throughput. It helps on the CPU path and on any GPU.
-- What it unlocks. ISDF is the standard enabling technique for affordable exact
-  exchange and RPA correlation in plane-wave codes (Qbox, PWDFT, and the ISDF-K
-  line of work). With ISDF in place a hybrid functional and an RPA correlation
-  energy both become reachable, which is the jump from a very well validated GGA
-  code to one that does electronic structure GGA cannot.
-- Build order. Land ISDF first as a compression of the pair densities with a
-  QR-pivoted point selection, validate the compressed Fock exchange energy against
-  a direct plane-wave Fock build on a small molecule to milli-eV, then layer the
-  learnable-hybrid parameters and, separately, the RPA correlation contraction.
-  Each stage is a set of tensor contractions, so it stays inside the
-  differentiable-by-construction design.
-- The honest caveat. ISDF has its own accuracy knob, the interpolation-point
-  count, and the point selection is the subtle part. Budget the validation against
-  direct Fock, not against another approximate method, and treat the rank as a
-  convergence parameter reported alongside the result.
+Build order was ISDF as a compression of the pair densities, validate the compressed
+Fock exchange against direct to milli-eV, then the learnable-hybrid parameters and,
+separately, the RPA correlation contraction. Each stage is a set of tensor
+contractions, staying inside the differentiable-by-construction design.
 
-**First cut LANDED (2026-07-20), single-k (Γ).** `postscf/isdf.py`: the
-pivoted-QR interpolation-point selector (`select_interpolation_points`, exact
-pair matrix for small orbital sets, randomized Khatri–Rao sketch above a
-threshold), the `M S⁻¹` fit (`build_isdf`), the interpolation-vector Coulomb
-coupling (`_coulomb_coupling`, reusing the `hartree.py` G=0-excluded 4πe²/G²
-kernel), and the fully-contracted exchange energy
-`E_x = −½ Σ_μν W_μν |D_μν|²` (`ISDFExchange.energy`). Validated against a direct
-O(N²) pair-FFT Fock build (`exchange_energy_direct`) — the build-order gate
-above: at a rank past the co-density space ISDF ≡ direct to machine precision
-(synthetic complex orbitals, `tests/unit/test_isdf.py`; converged Γ Si,
-`tests/integration/test_isdf_vs_direct.py`), and below saturation the exchange
-error falls monotonically with the rank (8-atom Si measured 6.4 eV → 0.24 eV →
-1e-14 as n_μ → 40 → 80 → 136, the 16·17/2 real-orbital co-density rank), so the
-rank is the accuracy knob exactly as the caveat asks.
+### What landed (2026-07-20, all at single-k Γ unless noted)
 
-**Exchange operator + ACE LANDED (2026-07-20), single-k (Γ).**
-`postscf/exchange.py` builds on the factorization to give the pieces a hybrid
-SCF actually needs — the *operator*, not only the energy. The direct Fock
-operator `V_x φ = −Σ_j ψ_j v[ψ_j*φ]` (`exchange_operator_direct`, the O(N_occ²)
-pair-FFT reference); the ISDF-accelerated operator on the occupied set
-(`exchange_operator_isdf`, `V_x ψ_t = −Σ_μ v[ζ_μ] B(r,r_μ) ψ_t(r_μ)`, one
-Coulomb solve per interpolation vector instead of N_occ² pair solves); and the
-adaptively-compressed exchange (`build_ace`, Lin Lin JCTC 2016): the Cholesky of
-the exchange matrix gives a low-rank `V_x ≈ −Σ_k |ξ_k⟩⟨ξ_k|` that is *exact* on
-the occupied subspace, the object a generalized-KS Hamiltonian would carry.
-Validated on converged Γ Si and synthetic orbitals (`tests/unit/test_exchange.py`,
-`tests/integration/test_exchange_operator.py`): the operator energy equals the
-contracted energy build to machine precision; the ISDF operator saturates to the
-direct operator (rel-err 2e-2 → 1e-13 as the rank fills); and ACE reproduces
-`V_x ψ_n` on every occupied n to ~5e-14.
+- **ISDF energy.** `postscf/isdf.py`. The pivoted-QR interpolation-point selector
+  (`select_interpolation_points`, exact pair matrix for small orbital sets,
+  randomized Khatri–Rao sketch above a threshold), the `M S⁻¹` fit (`build_isdf`),
+  the interpolation-vector Coulomb coupling (`_coulomb_coupling`, reusing the
+  `hartree.py` G=0-excluded 4πe²/G² kernel), and the contracted exchange
+  `E_x = −½ Σ_μν W_μν |D_μν|²` (`ISDFExchange.energy`). Validated against the direct
+  O(N²) pair-FFT build `exchange_energy_direct`. Past the co-density rank, ISDF equals
+  direct to machine precision (`tests/unit/test_isdf.py`, converged Γ Si in
+  `tests/integration/test_isdf_vs_direct.py`); below saturation the error falls
+  monotonically with rank (8-atom Si, 6.4 eV → 0.24 eV → 1e-14 as n_μ → 40 → 80 → 136,
+  the 16·17/2 real-orbital co-density rank). The rank is the accuracy knob as promised.
+- **Exchange operator + ACE.** `postscf/exchange.py`. The direct Fock operator
+  `V_x φ = −Σ_j ψ_j v[ψ_j*φ]` (`exchange_operator_direct`, the O(N_occ²) reference);
+  the ISDF operator `exchange_operator_isdf` (`V_x ψ_t = −Σ_μ v[ζ_μ] B(r,r_μ)
+  ψ_t(r_μ)`, one Coulomb solve per interpolation vector instead of N_occ² pair
+  solves); and adaptively-compressed exchange (`build_ace`, Lin Lin JCTC 2016), the
+  Cholesky of the exchange matrix giving a low-rank `V_x ≈ −Σ_k |ξ_k⟩⟨ξ_k|` exact on
+  the occupied subspace, the object a generalized-KS Hamiltonian carries. Validated
+  (`tests/unit/test_exchange.py`, `tests/integration/test_exchange_operator.py`).
+  Operator energy equals the contracted energy to machine precision, the ISDF operator
+  saturates to direct (rel-err 2e-2 → 1e-13 as rank fills), and ACE reproduces
+  `V_x ψ_n` on every occupied n to ~5e-14.
+- **Multi-k exchange, range-separated kernel, learnable slot.**
+  `postscf/coulomb_kernel.py`, `postscf/exchange_multik.py`. `coulomb_kernel` gives
+  K(q+G) in `full` (PBE0), `short_range` (erfc, HSE), and `long_range` (erf) modes, ω
+  differentiable, with K_sr+K_lr=K_full at q+G≠0. At q+G=0 the screened kernel is
+  *finite* (π e²/ω²) while full/long-range drop the divergence, so **screened (HSE)
+  exchange needs no singularity correction**, the reason to reach for it first
+  (`tests/unit/test_coulomb_kernel.py`). `multik_exchange_energy` runs the full
+  exchange over a k-mesh through the co-density momentum q = k′−k, the kernel at
+  |q+G|². It reduces to the Γ direct build at one k-point (measured exact) and gives a
+  finite real exchange on a 2×2×2 full-BZ Si mesh, requiring an unreduced mesh
+  (`use_symmetry=False, time_reversal=False`) and the dense grid, both enforced by
+  convention (`tests/integration/test_exchange_multik.py`). `HybridExchangeParams` /
+  `hybrid_exchange_energy` is the learnable slot, α (sigmoid) and ω (softplus)
+  mirroring `core/xc/learnable.py`, initialized HSE-like, with autograd dE/dω matching
+  finite difference to 1e-9.
+- **Self-consistent hybrid SCF + ISDF-K.** `postscf/hybrid.py` runs a self-consistent
+  PBE0-form global hybrid at Γ. `ScaledExchangePBE` scales semilocal exchange by
+  (1−α); `GammaFockExchange` is an SCF `fock` hook rebuilding the ACE operator from the
+  current orbitals each iteration (lagging one step like DFT+U), adding α·V_x to
+  `BatchedHamiltonian.apply` and α·E_x as the new `EnergyBreakdown.fock` term. The hook
+  is guarded, default `fock=None` leaves every existing path bit-identical (golden
+  energies and the E↔H gate still pass). Validated
+  (`tests/integration/test_hybrid_scf.py`). α=0 reproduces PBE exactly; PBE0 (α=0.25)
+  converges and opens the Γ Si gap 2.32 → 2.97 eV; the Fock energy matches the ACE
+  energy on the converged orbitals. The spin factor (2/nspin in the energy, none in the
+  operator) keeps energy and operator derivative-consistent. `postscf/isdf_k.py` is the
+  multi-k ISDF acceleration, one shared interpolation set fit across all occupied
+  orbitals over the BZ, contracting through a per-q Coulomb matrix V^q and per-k
+  point-Grams A_k with N_μ FFTs instead of N_k²·N_occ² co-density FFTs. It reduces to
+  the Γ ISDF build exactly and matches direct `multik_exchange_energy` at saturated rank
+  (`tests/integration/test_isdf_k.py`).
+- **k-mesh hybrid SCF.** `exchange_multik.multik_exchange_operator` is the direct
+  multi-k Fock operator W_{tk} = V_x ψ̂_{tk}, summing over the whole BZ through
+  q = k−k′ and the range-separated kernel (`coulomb_potential_q`). At one k-point it is
+  exactly `exchange.exchange_operator_direct`, and its energy trace matches
+  `multik_exchange_energy` for full and screened kernels (machine-precision gates,
+  `tests/integration/test_hybrid_kmesh.py`). `hybrid.py::MultiKFockExchange` is the
+  k-mesh `fock` hook, ACE-compressing per k and applying α·V_x block-by-block over the
+  k batch plus α·E_x; `hybrid_scf` routes through it. α=0 reduces to the PBE SCF on a
+  mesh exactly; PBE0 on a (2,1,1) full-BZ mesh converges, the Fock term equals
+  α·(2/nspin)·`multik_exchange_energy` on the converged orbitals (~1e-13), and the gap
+  opens relative to PBE. Screened caveat. The screened Fock *operator* is exact and
+  energy-consistent, but `ScaledExchangePBE` scales the *whole* PBE exchange by (1−α),
+  correct for full-range PBE0 but not complete HSE (which also range-separates the
+  semilocal exchange, keeping long-range PBE and removing only the short-range
+  fraction). Use `mode="full"` for a physically complete SCF until wPBE lands.
+- **Learned hybrid.** The mixing α and screening ω train end to end.
+  `hybrid.differentiable_hybrid_energy(res, params)` turns a converged hybrid SCF into
+  a differentiable objective via the stationary-energy (Hellmann–Feynman) derivative.
+  At self-consistency the density is variational, so dE_total/dθ = ∂E_total/∂θ, only
+  the *explicit* θ-dependence of the exchange terms on the frozen converged orbitals
+  survives. It returns a scalar equal to `res.energies.total` whose (α, ω) gradient is
+  that exact derivative, and `hybrid_scf(..., params=)` solves at the current values
+  (the SCF stays `no_grad`, the gradient rides the converged result). Validated
+  (`tests/integration/test_learned_hybrid.py`). The differentiable energy equals the
+  SCF total; dE/dα matches a finite difference of *re-converged* SCF energies to 6e-7
+  (rel), dE/dω to 2e-3; a backward+optimizer step moves (α, ω).
 
-**Multi-k exchange + range-separated kernel + learnable hybrid slot LANDED
-(2026-07-20).** `postscf/coulomb_kernel.py` and `postscf/exchange_multik.py`:
-- `coulomb_kernel` — the range-separated exchange kernel K(q+G) in three modes:
-  bare `full` (PBE0-style), `short_range` (erfc, HSE), `long_range` (erf), ω
-  differentiable. The erfc/erf split satisfies K_sr+K_lr=K_full at q+G≠0; at
-  q+G=0 the screened kernel is *finite* (π e²/ω²) while full/long-range drop the
-  divergence, so **screened (HSE) exchange needs no singularity correction** —
-  the reason to reach for it first (`tests/unit/test_coulomb_kernel.py`).
-- `multik_exchange_energy` — the full exchange over a k-mesh through the
-  co-density crystal momentum q = k′−k, kernel evaluated at |q+G|²; reduces to
-  the Γ direct build at one k-point (measured exact) and gives a finite real
-  exchange on a 2×2×2 full-BZ Si mesh. Requires an unreduced mesh
-  (`use_symmetry=False, time_reversal=False`) and the dense grid, both enforced
-  by convention (`tests/integration/test_exchange_multik.py`).
-- `HybridExchangeParams` / `hybrid_exchange_energy` — the learnable slot: α
-  (sigmoid) and ω (softplus) mirroring `core/xc/learnable.py`, initialized to an
-  HSE-like screened hybrid. The exchange energy is differentiable in both
-  (autograd dE/dω matches finite difference to 1e-9), so a learned hybrid trains
-  the mixing and range end to end.
+### What remains, in build order
 
-**Self-consistent hybrid SCF + ISDF-K LANDED (2026-07-20), Γ.**
-- `postscf/hybrid.py` — a self-consistent PBE0-form global hybrid at Γ.
-  `ScaledExchangePBE` scales the semilocal exchange by (1−α); `GammaFockExchange`
-  is an SCF `fock` hook that rebuilds the ACE operator from the current orbitals
-  each iteration (lagging one step like DFT+U) and adds α·V_x to
-  `BatchedHamiltonian.apply` plus α·E_x as the new `EnergyBreakdown.fock` term.
-  The hook is a minimal, guarded addition to `scf` (default `fock=None` leaves
-  every existing path bit-identical — golden energies and the E↔H consistency
-  gate still pass). Validated (`tests/integration/test_hybrid_scf.py`): α=0
-  reproduces the PBE SCF exactly; PBE0 (α=0.25) converges and opens the Γ Si gap
-  2.32→2.97 eV; the Fock energy matches the ACE energy on the converged orbitals.
-  The spin factor (2/nspin in the energy, none in the operator) keeps energy and
-  operator derivative-consistent.
-- `postscf/isdf_k.py` — the multi-k ISDF acceleration. One shared interpolation
-  set (points + ζ) fit across all occupied orbitals over the BZ compresses every
-  co-density; the exchange contracts through a per-q Coulomb matrix V^q and per-k
-  point-Grams A_k with N_μ FFTs instead of N_k²·N_occ² co-density FFTs. Reduces
-  to the Γ ISDF build exactly and matches the direct `multik_exchange_energy` at
-  saturated rank, with the rank as the accuracy knob and the range-separated
-  kernel supported (`tests/integration/test_isdf_k.py`).
-
-**k-mesh hybrid SCF LANDED (2026-07-20).**
-- `exchange_multik.multik_exchange_operator` — the direct multi-k Fock operator:
-  W_{tk} = V_x ψ̂_{tk} summing over the whole BZ through the co-density momentum
-  q = k−k′ and the range-separated kernel (`coulomb_potential_q`). At one k-point
-  it is exactly `exchange.exchange_operator_direct`, and its energy trace matches
-  `multik_exchange_energy` on a mesh for the full and screened kernels
-  (machine-precision gates in `tests/integration/test_hybrid_kmesh.py`). This is
-  the O(N_k²·N_occ²) reference the per-k ACE compresses.
-- `postscf/hybrid.py::MultiKFockExchange` — the k-mesh `fock` hook. `rebuild`
-  extracts the occupied orbitals at every k, builds that operator, ACE-compresses
-  it *per k*, and returns a per-spin callable applying α·V_x block-by-block over
-  the k batch plus α·E_x. `hybrid_scf` now routes through it (reducing to the Γ
-  build at a single k-point — the existing Γ tests pass unchanged). Validated:
-  α=0 reduces to the PBE SCF on a mesh exactly; PBE0 on a (2,1,1) full-BZ mesh
-  converges, the Fock term equals α·(2/nspin)·`multik_exchange_energy` on the
-  converged orbitals (~1e-13), and the gap opens relative to PBE.
-- Screened caveat. The screened Fock *operator* is exact and energy-consistent,
-  but `ScaledExchangePBE` scales the *whole* PBE exchange by (1−α) — correct for
-  full-range PBE0, but a complete HSE also range-separates the semilocal exchange
-  (keep long-range PBE exchange, remove only the short-range fraction). That needs
-  the range-separated (wPBE) enhancement, still open; use `mode="full"` for a
-  physically complete SCF until then.
-
-**Learned hybrid LANDED (2026-07-20).** The mixing α and screening ω are now
-trainable end to end. `hybrid.differentiable_hybrid_energy(res, params)` turns a
-converged hybrid SCF into a differentiable objective via the stationary-energy
-(Hellmann–Feynman) derivative: at self-consistency the density is variational, so
-dE_total/dθ = ∂E_total/∂θ — only the *explicit* θ-dependence of the exchange terms
-on the frozen converged orbitals survives. It returns a scalar equal in value to
-`res.energies.total` whose (α, ω) gradient is that exact derivative, so a plain
-optimizer over `HybridExchangeParams` trains the hybrid. `hybrid_scf(..., params=)`
-solves at the current param values (the SCF stays `no_grad`; the gradient rides the
-converged result). The training loop is: converge → build the differentiable energy
-→ backprop a loss → step. Validated (`tests/integration/test_learned_hybrid.py`):
-the differentiable energy equals the SCF total; dE/dα matches a finite difference of
-*re-converged* SCF energies to 6e-7 (rel), dE/dω to 2e-3; and a backward+optimizer
-step moves (α, ω). This end-to-end trainable hybrid is what the framing below argues for.
-
-What remains, in build order: a Gygi–Baldereschi q+G=0 correction to complete
-unscreened `full`/PBE0 at fine meshes (the divergent q+G=0 cell is dropped today,
-converging slowly in N_k); the range-separated (wPBE) semilocal exchange to
-complete screened HSE; a truncated Coulomb for physically isolated molecules; and
-the RPA correlation contraction.
+A Gygi–Baldereschi q+G=0 correction to complete unscreened `full`/PBE0 at fine meshes
+(the divergent q+G=0 cell is dropped today, converging slowly in N_k); the range-
+separated (wPBE) semilocal exchange to complete screened HSE; a truncated Coulomb for
+physically isolated molecules; and the RPA correlation contraction. GW and BSE sit
+above these, built on the same ISDF substrate, and are the top of the return ranking.
 
 ## Exact exchange and hybrid functionals
 
-**Status: a learned PBE0-form hybrid SCF runs on a k-mesh — mixing/screening are
-trainable.** The energy, operator, ACE, multi-k build, range-separated kernel,
-differentiable hybrid parameters, the ISDF-K compression, the self-consistent Γ
-hybrid SCF, the k-mesh lift (per-k ACE with each k's exchange summed over the whole
-BZ, α·V_x acting in `BatchedHamiltonian.apply` block-by-block), and now the learned
-hybrid (differentiable dE_total/dα, dE_total/dω through the stationary-energy
-theorem) all landed (see the LANDED notes under the ISDF section above). gradwave
-*self-consistently solves* a PBE0 hybrid on a full-BZ k-mesh (gap opening measured)
-and *trains* its mixing and screening against a target. The remaining physics tails
-are the Gygi–Baldereschi q+G=0 correction (fine-mesh PBE0 convergence) and the wPBE
-semilocal screening (complete HSE). The paragraphs below are the original framing,
-kept for the reasoning.
+**Status: a learned PBE0-form hybrid SCF runs on a k-mesh, mixing and screening are
+trainable.** gradwave self-consistently solves a PBE0 hybrid on a full-BZ k-mesh (gap
+opening measured) and trains its mixing and screening against a target, through the
+ISDF/ACE Fock build, the k-mesh lift, and `differentiable_hybrid_energy` (see the
+ISDF section above for the landed pieces and their validation). This was the reason
+the two scaling items above are worth building. The remaining reach is the same as
+any hybrid, finer meshes (Gygi–Baldereschi) and a complete screened form (wPBE).
 
-Exact exchange is the largest missing piece of physics in the code, and the reason the two scaling items above are
-worth building. Every energy, gap, force, and adsorbate level gradwave produces
-comes from a GGA electronic structure with self-interaction error, so band gaps come
-out too small and defect and adsorbate levels land in the wrong place. There is no
-exact exchange anywhere in the SCF Hamiltonian today. A hybrid needs a Fock exchange operator applied
-each SCF step, which is the O(N^4) object RI and ISDF exist to reduce. A learnable hybrid, with the mixing fraction and range separation as trained parameters, only makes sense once the Fock build
-is affordable. **This is now realized** (see the Learned hybrid LANDED note above):
-the ISDF/ACE Fock build is affordable, the k-mesh hybrid SCF converges, and
-`differentiable_hybrid_energy` exposes the exact dE_total/dα, dE_total/dω so α and ω
-train end to end against a target. The remaining reach is the same as any hybrid —
-finer meshes (Gygi–Baldereschi) and a complete screened form (wPBE).
+# Differentiable and learned functionals
 
 ## Learned meta-GGA and the kinetic energy density
 
-**Infrastructure LANDED (2026-07-21), nspin=1 and 2.** `core/metagga.py`: the
-kinetic-energy density `tau_b` (τ = ½Σ_k w_k Σ_n f|∇ψ|² on the dense grid, one
-extra i(k+G) factor on the density-build FFT, differentiable in the coefficients)
-and the generalized-KS operator `metagga_tau_operator`
-(V_τψ = −½∇·(v_τ∇ψ) = −½ Σ_d i(k+G)_d·F[v_τ·F⁻¹[i(k+G)_d c]], Hermitian,
-band-chunked). The XC interface gained `needs_tau` plus an optional τ arg on both
-`XCFunctional` and `SpinXC` (backward compatible; every existing GGA/LDA path
-stays bit-identical). The SCF loop builds τ per channel each iteration and lags it
-one step (like the Fock/DFT+U rebuilds), extracting v_τ = ∂e_xc/∂τ by autograd on
-a τ leaf and injecting the operator additively into the H-apply through the same
-wrap the hybrid Fock uses — v_xc is evaluated with τ held fixed, so the
-multiplicative and τ-response pieces stay separated. As the note below predicted,
-τ is one FFT-per-band on the existing g→r path and the new operator is the only
-genuinely new physics; it makes this a generalized-KS scheme touching the H-apply.
-Validated *intrinsically* (no QE reference needed, since none exists yet):
-single-plane-wave τ = ½|k+G|² exactly, τ ≥ τ_W, operator Hermiticity, constant
-v_τ ≡ c gives c·(−½∇²), the defining generalized-KS gate that the operator equals
-the functional derivative ∂E_xc/∂ψ* (dE/dλ = 2Re Σf⟨φ|V_τ|ψ⟩ to 1e-5 vs finite
-difference), and at SCF scale the stationary-energy identity dE_total/dλ = ∫τ
-plus τ-flat reduction to PBE/spin-PBE bit-for-bit
-(`tests/unit/test_metagga.py`, `tests/integration/test_metagga_scf.py`).
+**Status: infrastructure and r2SCAN landed (2026-07-21); forces, stress, and the
+generalized-KS operator all built; USPP/PAW-τ, spinor-τ, and a learnable r2SCAN-form
+functional remain open.**
 
-**r2SCAN LANDED (2026-07-21).** `core/xc/r2scan.py` — the production meta-GGA,
-spin-unpolarized `R2SCAN` and collinear `SpinR2SCAN`, transcribed from libxc's
-own Maple source so it matches libxc (hence QE's `input_dft='r2scan'`) pointwise.
-Written as a differentiable PyTorch expression, not a libxc binding, so v_xc, the
-meta-GGA v_τ, forces, and the learnable-parameter graph all follow from autograd
-— the whole reason not to route the functional through opaque C. Validated
-against libxc via pyscf to machine precision across α spanning all three branches
-(`tests/unit/test_r2scan.py`): unpolarized e_xc/vρ/vσ/vτ to 1e-11–1e-14, exchange
-and correlation each exact standalone, spin-polarized energy and per-channel vτ
-to 1e-15 vs libxc spin=1. The self-consistent SCF converges (Si, 11 iterations,
-same as PBE) and opens the gap 2.44→2.67 eV (`tests/integration/test_r2scan_scf.py`).
-Wired into the input path: `xc: r2scan` resolves through the registries
-(`api.py`, `calculator.py`, `inputs.py`); guarded off on the non-collinear spinor
-path (no τ there yet). The libxc pointwise match — QE r2SCAN *is* libxc — stands
-in for a `pw.x` fixture, which would only re-confirm the integrated SCF energy the
-pointwise derivatives and the stationary-energy gate already pin; a `si_r2scan_ci`
-QE fixture is a nice-to-have, not a correctness gap.
+Meta-GGA is the natural next rung for the differentiable-XC work and the cheaper
+stepping stone before hybrids (roughly a week against a much larger EXX build). The
+current learnable functional spans GGA form only, the two PBE parameters kappa and mu,
+so it cannot fit, learn against, or compare with the functionals people use (SCAN,
+r2SCAN all depend on the kinetic energy density τ). Meta-GGA is what lets `train_xc_paw`
+learn a real functional rather than only recover PBE, and it is the item that most
+directly distinguishes gradwave from a very well-validated second copy of QE.
 
-**Forces need no τ term, verified (2026-07-21).** The original worry that "the τ
-operator contributes a Pulay-like term absent from the HF forces" turned out to be
-unfounded for the plane-wave case. The τ operator affects the *orbitals* (and thus
-the self-consistent density), but at the SCF stationary point the Hellmann–Feynman
-theorem holds exactly as for GGA: the meta-GGA force is the same three explicit-R
-terms (Ewald, local-PP structure factors, NL projectors) the existing `forces()`
-already carries — it is functional-agnostic and needs no change. Measured on Si
-(displaced atom, `forces()` vs finite difference): the gap falls 3.7e-3 (20 Ry) →
-8.6e-5 (45 Ry), i.e. it vanishes with grid density rather than plateauing at a
-constant, so it is real-space XC-grid egg-box (τ = ½Σf|∇ψ|² is exact in reciprocal
-space; only ∫e_xc(τ)dr on the grid is not), just larger than GGA — the known SCAN
-grid sensitivity. Meta-GGA forces therefore want a denser cutoff than GGA for the
-same accuracy, but are correct as-is (`tests/integration/test_r2scan_scf.py`). The
-reusable diagnostic — three knobs (SCF tolerance, FD step, grid) to tell a missing
-analytic term from egg-box/lag/FD noise — is recorded in `docs/manual/wisdom.md`
-under "Meta-GGA forces and stress".
+### What landed
 
-**Meta-GGA stress LANDED (2026-07-21).** Unlike forces, the stress genuinely
-needs a τ term: strain scales the plane-wave basis (the G-vectors), so ∇ψ — and
-hence τ = ½Σf|∇ψ|² — has an *explicit* strain dependence a GGA (a functional of
-ρ, which only scales as 1/Ω) lacks. `stress._tau_strained` rebuilds τ from the
-strained (k+G) and the fixed coefficients on the autograd graph, so `stress()`
-now carries the meta-GGA term (`_energy_strained` passes it to `xc.energy`).
-Validated on Si (asus): the ε=0 strained energy reproduces the SCF total (5e-8);
-autograd stress equals a finite difference of the strained energy (1e-10); and —
-the independent physics check — the τ term is large (~0.57 eV/Å³, flipping the
-sign of the Si stress), and the fixed-basis stress converges to a *re-converged*
-FD (Pulay→0) at high cutoff to ~9e-6 eV/Å³. So the ideas.md prediction that
-stress (not forces) needs the τ term was correct, and it is now built and pinned.
+- **Infrastructure (nspin=1 and 2).** `core/metagga.py`. The kinetic-energy density
+  `tau_b` (τ = ½ Σ_k w_k Σ_n f|∇ψ|² on the dense grid, one extra i(k+G) factor on the
+  density-build FFT, differentiable in the coefficients) and the generalized-KS
+  operator `metagga_tau_operator` (V_τψ = −½∇·(v_τ∇ψ) = −½ Σ_d i(k+G)_d·F[v_τ·F⁻¹[i(k+G)_d
+  c]], Hermitian, band-chunked). The XC interface gained `needs_tau` plus an optional τ
+  arg on both `XCFunctional` and `SpinXC`, backward compatible (every existing GGA/LDA
+  path stays bit-identical). The SCF loop builds τ per channel each iteration and lags
+  it one step (like the Fock/DFT+U rebuilds), extracting v_τ = ∂e_xc/∂τ by autograd on
+  a τ leaf and injecting the operator additively into the H-apply through the same wrap
+  the hybrid Fock uses, with v_xc evaluated at fixed τ so the multiplicative and τ-
+  response pieces stay separated. τ is one FFT-per-band on the existing g→r path and
+  the operator is the only genuinely new physics, making this a generalized-KS scheme
+  that touches the H-apply. Validated intrinsically, no QE reference needed
+  (`tests/unit/test_metagga.py`, `tests/integration/test_metagga_scf.py`). Single-plane-
+  wave τ = ½|k+G|² exactly, τ ≥ τ_W, operator Hermiticity, constant v_τ ≡ c gives
+  c·(−½∇²), the generalized-KS gate that the operator equals ∂E_xc/∂ψ* (dE/dλ = 2Re Σf
+  ⟨φ|V_τ|ψ⟩ to 1e-5 vs finite difference), the stationary-energy identity
+  dE_total/dλ = ∫τ, and τ-flat reduction to PBE/spin-PBE bit-for-bit.
+- **r2SCAN.** `core/xc/r2scan.py`, spin-unpolarized `R2SCAN` and collinear
+  `SpinR2SCAN`, transcribed from libxc's own Maple source so it matches libxc (hence
+  QE's `input_dft='r2scan'`) pointwise, written as a differentiable PyTorch expression
+  rather than a libxc binding so v_xc, v_τ, forces, and the learnable-parameter graph
+  all follow from autograd. Validated against libxc via pyscf to machine precision
+  across α spanning all three branches (`tests/unit/test_r2scan.py`). Unpolarized
+  e_xc/vρ/vσ/vτ to 1e-11–1e-14, exchange and correlation each exact standalone, spin-
+  polarized energy and per-channel vτ to 1e-15 vs libxc spin=1. The SCF converges (Si,
+  11 iterations, same as PBE) and opens the gap 2.44 → 2.67 eV
+  (`tests/integration/test_r2scan_scf.py`). Wired into the input path, `xc: r2scan`
+  resolves through the registries (`api.py`, `calculator.py`, `inputs.py`), guarded off
+  on the non-collinear spinor path (no τ there yet). The libxc pointwise match stands in
+  for a `pw.x` fixture; a `si_r2scan_ci` QE fixture is a nice-to-have, not a correctness
+  gap.
+- **Forces need no τ term (verified).** The worry that the τ operator contributes a
+  Pulay-like term absent from the HF forces was unfounded for the plane-wave case. The
+  τ operator affects the orbitals and thus the self-consistent density, but at the SCF
+  stationary point Hellmann–Feynman holds exactly as for GGA, so the meta-GGA force is
+  the same three explicit-R terms (Ewald, local-PP structure factors, NL projectors)
+  `forces()` already carries, functional-agnostic. Measured on Si (displaced atom,
+  `forces()` vs finite difference), the gap falls 3.7e-3 (20 Ry) → 8.6e-5 (45 Ry),
+  vanishing with grid density rather than plateauing, so it is real-space XC-grid
+  egg-box (τ is exact in reciprocal space, only ∫e_xc(τ)dr on the grid is not), the
+  known SCAN grid sensitivity, just larger than GGA. Meta-GGA forces want a denser
+  cutoff than GGA for the same accuracy but are correct as-is. The reusable diagnostic
+  (three knobs, SCF tolerance, FD step, grid, to tell a missing analytic term from
+  egg-box/lag/FD noise) is in `docs/manual/wisdom.md` under "Meta-GGA forces and
+  stress".
+- **Stress.** Unlike forces, stress genuinely needs a τ term. Strain scales the plane-
+  wave basis (the G-vectors), so ∇ψ, and hence τ = ½Σf|∇ψ|², has an explicit strain
+  dependence a GGA (a functional of ρ, which only scales as 1/Ω) lacks.
+  `stress._tau_strained` rebuilds τ from the strained (k+G) and the fixed coefficients
+  on the autograd graph, so `stress()` carries the meta-GGA term (`_energy_strained`
+  passes it to `xc.energy`). Validated on Si (asus). The ε=0 strained energy reproduces
+  the SCF total (5e-8); autograd stress equals a finite difference of the strained
+  energy (1e-10); the τ term is large (~0.57 eV/Å³, flipping the sign of the Si stress);
+  and the fixed-basis stress converges to a re-converged FD (Pulay→0) at high cutoff to
+  ~9e-6 eV/Å³. The prediction that stress (not forces) needs the τ term was correct.
 
-**What remains, in build order:** (1) USPP/PAW τ (the one-center augmentation of
-τ); (2) meta-GGA on the non-collinear/SOC spinor path; (3) then a learnable
-r2SCAN-form functional (α, and the enhancement-factor parameters as trained
-tensors) and the `train_xc_paw` recovery test at meta-GGA level — now directly
-reachable since r2SCAN is already a differentiable autograd expression. The
-paragraphs below are the original framing, kept for the reasoning.
+### What remains, in build order
 
-The learnable functional spans GGA form only, the two PBE parameters kappa and mu.
-Every modern accurate semilocal functional (SCAN, r2SCAN) is meta-GGA, which means
-it depends on the kinetic energy density `tau(r) = (1/2) Σ_i f_i |∇ψ_i(r)|²` on
-top of rho and `|∇rho|²`. Without tau the learnable-XC path cannot fit, learn
-against, or even compare with the functionals people actually use, so it cannot go
-past GGA form. This is the natural next rung for the differentiable-XC work and the
-one that lets `train_xc_paw` learn a real functional rather than only recover PBE.
-It is also the cheaper stepping stone before hybrids, roughly a week against a
-much larger EXX build.
+(1) USPP/PAW τ (the one-center augmentation of τ); (2) meta-GGA on the non-collinear/
+SOC spinor path; (3) a learnable r2SCAN-form functional (α, and the enhancement-factor
+parameters as trained tensors) and the `train_xc_paw` recovery test at meta-GGA level,
+now directly reachable since r2SCAN is already a differentiable autograd expression.
+Validating a learnable meta-GGA against QE `input_dft='scan'` or r2SCAN at pinned
+settings to milli-eV, then repeating `train_xc_paw`, is the payoff.
 
-- New piece, tau on the grid. Each occupied orbital's gradient is `i(k+G)` in
-  reciprocal space, so `∇ψ_i` is one FFT per band per Cartesian direction, squared
-  and accumulated with the occupations. This reuses the density-build FFT machinery
-  with an extra factor of `i(k+G)`; the batched g-to-r path already carries the
-  orbitals, so it is an added contraction, not a new solver.
-- New piece, the meta-GGA potential. `v_tau = ∂e_xc/∂tau` does not act
-  multiplicatively on rho. It enters the Hamiltonian as a tau-dependent
-  modification of the kinetic term, `-∇·(v_tau ∇ψ)`, which makes this a generalized
-  Kohn-Sham scheme and touches the H-apply, not just the functional. Autograd gives
-  `∂e/∂tau` exactly the way it already gives `v_xc`, so no hand-derived kernel is
-  needed, but the extra operator has to be wired into `BatchedHamiltonian.apply`
-  and into the force and stress terms.
-- Reuse, the functional interface. `XCFunctional.energy_density` gains a third
-  argument `tau` beside rho and sigma, and the autograd `v_xc`/`f_xc` machinery, the
-  spin channels, and the learnable-parameter graph all extend without new
-  derivations.
+## Differentiable pseudopotential correction
 
-Validate against QE `input_dft='scan'` (or r2SCAN) at pinned settings to the usual
-milli-eV, then expose a learnable meta-GGA (an r2SCAN-form functional with
-learnable parameters) and repeat the `train_xc_paw` recovery test at the meta-GGA
-level. This is the item that most directly distinguishes gradwave from
-a very well-validated second copy of QE.
+**Status: open. Target identified from the Δ-gauge; substrate mostly in place.**
 
-## Differentiable pseudopotential correction (learn away the Cu pseudization error)
+The periodic-table Δ-gauge (`benchmarks/delta_gauge`) surfaced a concrete target. The
+PseudoDojo standard UPF for Cu reproduces neither all-electron nor its own psp8 (B0 167
+vs 141, Δ 7.9 meV/atom), and gradwave matches QE on that same UPF to 0.08 meV, so the
+error is pseudization rather than implementation. Most transition metals carry a
+smaller version of the same "stiff-metal" Δ floor. Worth using gradwave's
+differentiability to address the error rather than only measure it.
 
-The periodic-table Δ-gauge (`benchmarks/delta_gauge`) surfaced a concrete target:
-the PseudoDojo standard UPF for Cu reproduces neither all-electron nor its own
-psp8 (B0 167 vs 141, Δ 7.9 meV/atom), and gradwave matches QE on that same UPF to
-0.08 meV, so the error is pseudization rather than implementation. Most transition
-metals carry a smaller version of the same error (the "stiff-metal" Δ floor). One
-day it would be worth using gradwave's differentiability to *address* that error
-rather than only measure it.
+Treat a small correction to the pseudopotential as a trained parameter and descend it
+through the self-consistent solution against all-electron reference data, the way the
+learned hybrid descends α and ω. Add a differentiable δv(r) (a few-parameter radial
+form, or a correction to the local channel / a KB coefficient) and minimize a multi-
+property loss, the EOS curve vs WIEN2k, or (better, once the all-electron anchor exists)
+valence eigenvalues and logarithmic derivatives at the reference energies. The gradient
+dLoss/dθ_pp flows through the same stationary-energy and Sternheimer machinery already
+used for dE/dα and the density adjoint. The pseudopotential enters the energy through
+the local potential and the nonlocal projectors, both already τ-differentiable for
+forces, so the parameter graph is mostly in place. The result would be a corrected Cu
+and, if it generalizes, a per-element learned correction that pulls the stiff-metal Δ
+floor down. Care is needed. Keep the correction small and norm-conserving, and validate
+against overfitting the EOS at the expense of transferability (band structure, a second
+crystal structure).
 
-The approach is to treat a small correction to the pseudopotential as a trained
-parameter and descend it through the self-consistent solution against
-all-electron reference data, the way the learned hybrid descends α and ω.
-Concretely, add a differentiable δv(r) (a few-parameter radial form, or a
-correction to the local channel / a KB coefficient) to the pseudo, and minimise a
-multi-property loss: the EOS curve vs WIEN2k, or (better, once the all-electron
-anchor exists) valence eigenvalues and the logarithmic derivatives at the
-reference energies. The gradient dLoss/dθ_pp flows through the same
-stationary-energy and Sternheimer machinery already used for dE/dα and the density
-adjoint. The pseudopotential enters the energy through the local potential and the
-nonlocal projectors, both already τ-differentiable for forces, so the parameter
-graph is mostly in place. The result would be a *corrected* Cu (and, if it
-generalises, a per-element learned correction that pulls the stiff-metal Δ floor
-down), and a demonstration that differentiable DFT can improve a pseudopotential
-against all-electron data rather than only use a fixed one. Care is needed. Keep
-the correction small and norm-conserving, and validate that it does not overfit
-the EOS at the expense of transferability (band structure, a second crystal
-structure).
+# Magnetism and spin-orbit coupling
 
 ## Differentiable spintronics: spin Hamiltonians, DMI, and inverse design
 
+**Status: open; the pseudopotential blocker is cleared. Constrained-moment torque is
+autograd-exact today.**
+
 The constrained non-collinear framework (`postscf/moment_config.py`,
-`scf/moment_penalty.py`) is differentiable, where the constrained-DFT in QE/VASP/FLEUR is not. The per-atom torque `dW/de_I` is
-autograd-exact (validated to a finite difference at ratio 1.000), not
-finite-differenced, and the magnitude-robust `vector` penalty holds an arbitrary
-non-collinear texture at fixed moment instead of letting it collapse. Every item
-here is a thing that is cheap *because* of AD and awkward otherwise; the framing
-below is roughly in impact order.
+`scf/moment_penalty.py`) is differentiable where constrained-DFT in QE/VASP/FLEUR is
+not. The per-atom torque `dW/de_I` is autograd-exact (validated to a finite difference
+at ratio 1.000), not finite-differenced, and the magnitude-robust `vector` penalty
+holds an arbitrary non-collinear texture at fixed moment instead of letting it
+collapse. Every item below is cheap because of AD and awkward otherwise, roughly in
+impact order.
 
-- **Extract the spin Hamiltonian (J, D, K) by differentiating the
-  torque.** The whole spintronics modeling stack — atomistic spin dynamics
-  (VAMPIRE, Spirit), micromagnetics (mumax) — runs on
-  `H = -Σ J_ij S_i·S_j - Σ D_ij·(S_i×S_j) - Σ K_i (S_i·n)²`, and DFT's job is to
-  parametrize it. Conventionally that is finite-difference energy mapping (fragile)
-  or a separate Green's-function (LKAG) machinery. Here the Heisenberg `J_ij`, the
-  Dzyaloshinskii–Moriya vectors `D_ij`, and the anisotropy `K` are *derivatives of
-  the torque*: `d(dW/de_I)/de_J` is the exchange/DMI coupling tensor between sites I
-  and J, so a second autograd pass over the torque we already compute gives the
-  couplings directly, cross-terms included. The DMI is the hardest of the three to compute. It needs SOC and
-  non-collinearity (both present), it sets skyrmion chirality and size, and it is
-  notoriously noisy to compute by finite differences. A differentiable,
-  magnitude-conserving DMI extractor is methodologically novel, and
-  it connects small-cell plane-wave DFT to device-scale spin dynamics: the
-  code cannot simulate a 50 nm skyrmion, but it can hand a clean spin Hamiltonian to
-  a code that can. Second derivatives of the
-  penalty scalar are already within reach of the autograd path; the work is wiring
-  the site-pair Hessian and validating J against a known magnet.
+- **Extract the spin Hamiltonian (J, D, K) by differentiating the torque.** The whole
+  spintronics modeling stack (atomistic spin dynamics VAMPIRE/Spirit, micromagnetics
+  mumax) runs on `H = -Σ J_ij S_i·S_j - Σ D_ij·(S_i×S_j) - Σ K_i (S_i·n)²`, and DFT's
+  job is to parametrize it. Conventionally that is finite-difference energy mapping
+  (fragile) or a separate Green's-function (LKAG) machinery. Here the Heisenberg J_ij,
+  the Dzyaloshinskii–Moriya vectors D_ij, and the anisotropy K are derivatives of the
+  torque, `d(dW/de_I)/de_J` being the exchange/DMI coupling tensor between sites I and
+  J, so a second autograd pass over the torque gives the couplings directly, cross-terms
+  included. DMI is the hardest of the three, needing SOC and non-collinearity (both
+  present), setting skyrmion chirality and size, and notoriously noisy to finite-
+  difference. A differentiable, magnitude-conserving DMI extractor is methodologically
+  novel and connects small-cell plane-wave DFT to device-scale spin dynamics. The code
+  cannot simulate a 50 nm skyrmion but can hand a clean spin Hamiltonian to a code that
+  can. Second derivatives of the penalty scalar are within reach of the autograd path;
+  the work is wiring the site-pair Hessian and validating J against a known magnet.
 - **Chiral textures and the micromagnetic DMI from spin-spiral asymmetry.** The Fe
-  spin-spiral demo (`examples/fe_spin_spiral.py`) traces `E(theta)` with inversion
-  symmetry, so `E(+q) = E(-q)`. Break inversion — an interface (Co/Pt, Fe/Ir) or a
-  B20 bulk (MnSi, FeGe) — and turn SOC on, and `E(+q) ≠ E(-q)`: the chiral splitting
-  whose `q→0` slope *is* the micromagnetic DMI constant. Demonstrating a measured
-  `E(+q) - E(-q)` is a direct extension of the committed spiral sweep (add SOC,
-  rotate in the DMI-active plane, sweep signed q) and a genuine chiral-magnetism
-  result.
-- **Inverse design.** Energy is differentiable w.r.t.
-  atomic positions, moment directions, and in principle strain and composition, so a
-  gradient-based search can optimize *toward a target magnetic property*: the strain
-  that maximizes DMI, the composition that flips the easy axis. No finite-difference
-  code can do this. Higher risk — it needs gradients through the SCF, not just the
-  envelope torque — but it is the fullest use of gradwave's differentiability applied to
-  magnetism.
-- **Demonstration vehicle: 2D magnets.** CrI3, Fe3GeTe2, CrSBr maximize impact per
-  core-hour: small unit cells (tractable in plane waves), large anisotropy (clears
-  the ~0.2 µeV rotation-invariance precision floor that cubic Fe sits on), and open
-  questions about their DMI, topological magnons, and stacking-dependent order. A
-  J/D/K extraction on CrI3, with DMI as the main target, is the most tractable and novel
-  option. The MAE map (next section) is the better *visual* deliverable and the
-  natural second step once the SOC force-theorem path is in.
+  spin-spiral demo (`examples/fe_spin_spiral.py`) traces E(theta) with inversion
+  symmetry, so E(+q) = E(−q). Break inversion (an interface Co/Pt, Fe/Ir, or a B20 bulk
+  MnSi, FeGe) with SOC on, and E(+q) ≠ E(−q), the chiral splitting whose q→0 slope is
+  the micromagnetic DMI constant. A measured E(+q) − E(−q) is a direct extension of the
+  committed spiral sweep (add SOC, rotate in the DMI-active plane, sweep signed q).
+- **Inverse design.** Energy is differentiable w.r.t. atomic positions, moment
+  directions, and in principle strain and composition, so a gradient search can
+  optimize toward a target magnetic property, the strain that maximizes DMI, the
+  composition that flips the easy axis. No finite-difference code can do this. Higher
+  risk, since it needs gradients through the SCF and not just the envelope torque, but
+  it is the fullest use of gradwave's differentiability applied to magnetism.
+- **Demonstration vehicle, 2D magnets.** CrI3, Fe3GeTe2, CrSBr maximize impact per
+  core-hour, small unit cells (tractable in plane waves), large anisotropy (clears the
+  ~0.2 µeV rotation-invariance floor cubic Fe sits on), and open questions about their
+  DMI, topological magnons, and stacking-dependent order. A J/D/K extraction on CrI3
+  with DMI as the main target is the most tractable and novel option. The MAE map (next
+  section) is the better visual deliverable and the natural second step once the SOC
+  force-theorem path is in.
 
-**The pseudopotential blocker is now cleared.** DMI and single-ion anisotropy K need
-spin-orbit coupling *on a magnetic atom*. The fully-relativistic magnetic pseudos
-(and iodine) are now in the fixtures — `Fe/Co/Ni/Cr/Pt_ONCV_PBE_FR-1.0.upf` and
-`I_ONCV_PBE_FR-1.1.upf`, pulled from the SG15 ONCV set (quantum-simulation.org, the
-same source as the scalar `_ONCV_PBE` pseudos). A magnetic FR pseudo correctly
-triggers the SOC path (`system.is_fr` → j-resolved spinor projectors). The natural
-order: L1_0 FePt MAE (`Fe_FR` + `Pt_FR`, ~2-3 meV/f.u., far above the 0.2 µeV floor)
-→ hcp Co (~65 µeV) → CrI3 (`Cr_FR` + `I_FR`) for the full J/K/DMI story. The
-Heisenberg-J machinery (`postscf/spin_exchange.py`) and the `characterize_magnetism`
-routine already work without SOC.
+**The pseudopotential blocker is cleared.** DMI and single-ion anisotropy K need spin-
+orbit coupling on a magnetic atom. The fully-relativistic magnetic pseudos (and iodine)
+are in the fixtures, `Fe/Co/Ni/Cr/Pt_ONCV_PBE_FR-1.0.upf` and `I_ONCV_PBE_FR-1.1.upf`,
+pulled from the SG15 ONCV set (quantum-simulation.org, the same source as the scalar
+`_ONCV_PBE` pseudos). A magnetic FR pseudo correctly triggers the SOC path
+(`system.is_fr` → j-resolved spinor projectors). The natural order is L1_0 FePt MAE
+(`Fe_FR` + `Pt_FR`, ~2-3 meV/f.u., far above the 0.2 µeV floor) → hcp Co (~65 µeV) →
+CrI3 (`Cr_FR` + `I_FR`) for the full J/K/DMI story. The Heisenberg-J machinery
+(`postscf/spin_exchange.py`) and `characterize_magnetism` already work without SOC.
 
 ## Magnetocrystalline anisotropy (MAE maps) and per-atom spin torques
 
-**Status: core landed, one open tail.** The force-theorem evaluator
-(`postscf/mae.py`) and per-direction magnetic-IBZ folding both landed and are
-validated at production scale (the dated LANDED notes below). What remains open
-is **band-resolved anisotropy** — decomposing ΔF into per-k, per-band
-contributions (last subsection). The rest of this section is kept for the
-reasoning.
+**Status: force-theorem evaluator and per-direction magnetic-IBZ folding landed
+(2026-07-19); band-resolved anisotropy is the one open tail.**
 
-The constrained-moment work (`postscf/moment_config.py`) already produces one half
-of this for free. `constrained_moment_scf` returns a per-atom transverse torque
-`-dW/de_I`, validated to a finite difference at ratio 1.000 — that *is* the
-magnetic force-theorem spin torque on each atom. Without spin-orbit coupling it is
-the inter-atomic exchange torque (what drives the config search and sets a spin
-spiral's stiffness); with a fully-relativistic pseudo the same per-atom torque
-picks up the on-site anisotropy term. So "individual spin torques" is not a future
-capability, it is what the module returns today. The missing half is the *global*
-anisotropy: MAE maps `E(theta, phi)` over the magnetization sphere.
+The constrained-moment work (`postscf/moment_config.py`) already produces half of this
+for free. `constrained_moment_scf` returns a per-atom transverse torque `-dW/de_I`,
+validated to a finite difference at ratio 1.000, which is the magnetic force-theorem
+spin torque. Without SOC it is the inter-atomic exchange torque (what drives the config
+search and sets a spin spiral's stiffness); with a fully-relativistic pseudo the same
+torque picks up the on-site anisotropy term. Individual spin torques are what the module
+returns today. The missing half was the global anisotropy, MAE maps E(theta, phi) over
+the magnetization sphere.
 
-The ingredients are in the tree. The SOC path exists — `core/spinor_proj.py` builds
-the j = l ± ½ resolved projectors and `SpinorHamiltonian` accepts them (`q`,
-`dij_so`). `NCResult.energies.free_energy` gives a total energy per direction, so
-`MAE = E(n1) - E(n2)` and a full surface are directly a direction sweep. The
-efficient route is the torque method: one SOC evaluation per direction yields the
-anisotropy torque `-dE/dn`, and integrating it over the sphere reconstructs the
-surface — and that torque is the machinery we already have, applied to the total
-moment instead of a local one.
+The SOC path exists, `core/spinor_proj.py` builds the j = l ± ½ projectors and
+`SpinorHamiltonian` accepts them (`q`, `dij_so`), and `NCResult.energies.free_energy`
+gives a total energy per direction, so MAE = E(n1) − E(n2) is a direction sweep. The
+efficient route is the torque method, one SOC evaluation per direction yielding
+−dE/dn, integrated over the sphere.
 
-**Proof-of-physics landed (2026-07-18): the two-point MAE of L1_0 FePt by full SOC
-SCF is correct** — +2.55 meV/cell (+1.28 meV/atom), easy axis [001], magnitude in
-the literature band, both orientations converged to ~1e-11 eV (`examples/
-fept_mae.py`, 144 k, on the asus CPU). The 48-k mesh gives the wrong easy axis
-(−1.39 meV/cell toward [100]) — the textbook sampling-error sign flip, measured
-here directly. So the remaining work is exactly the cost problem below: the
-force-theorem evaluator to make dense-k sweeps and full E(theta, phi) maps
-affordable, plus magnetic-space-group reduction (now landed, see the Shubnikov
-symmetry section under "Done and resolved") for the ~4-8x k-savings.
-
-Three things are genuinely in the way, and the third is the only real code.
+**Proof-of-physics (2026-07-18).** The two-point MAE of L1_0 FePt by full SOC SCF is
+correct, +2.55 meV/cell (+1.28 meV/atom), easy axis [001], in the literature band, both
+orientations converged to ~1e-11 eV (`examples/fept_mae.py`, 144 k, asus CPU). The 48-k
+mesh gives the wrong easy axis (−1.39 meV/cell toward [100]), the textbook sampling-
+error sign flip measured directly. Three things were in the way, and the third was the
+only real code.
 
 - **Precision floor.** `test_noncollinear.py` pins rotation-invariance (MAE ≡ 0
-  without SOC) to ~0.2 µeV, the numerical noise floor. Cubic Fe's MAE is ~1 µeV/atom,
-  sitting right on it — reproducible only with great care. Start instead on a
-  high-anisotropy case that clears the floor by orders of magnitude: L1_0 FePt
-  (~1 meV/atom), hcp Co (~65 µeV), or a uniaxial 2D magnet.
+  without SOC) to ~0.2 µeV, the noise floor. Cubic Fe's MAE is ~1 µeV/atom, right on
+  it. Start on a high-anisotropy case, L1_0 FePt (~1 meV/atom), hcp Co (~65 µeV), or a
+  uniaxial 2D magnet.
 - **k-convergence.** Metal MAE converges painfully slowly in k (thousands of points,
-  or fine-smearing / Fermi-surface-aware tricks). A cost problem, not a capability
-  gap, but it is the reason the force theorem matters.
-- **No force-theorem path for SOC yet.** The standard cheap recipe — converge the
-  density scalar-relativistically once, add SOC *non-self-consistently*, and take
-  occupied-band-energy differences per direction — is not wired. The frozen-potential
-  band-solve infrastructure already exists (`postscf/uspp_bands.py`, `core/gamma.py`,
-  the one-shot solve in `postscf/hubbard_u.py`); it just is not connected to the SOC
-  Hamiltonian plus a directional band sum. Without it, MAE falls back to a full
-  self-consistent SOC SCF per direction: affordable for FePt-class anisotropy, too
-  expensive and too noisy for Fe.
+  or fine-smearing / Fermi-surface-aware tricks). A cost problem, the reason the force
+  theorem matters.
+- **No force-theorem path for SOC (now built).** The cheap recipe is to converge the
+  density scalar-relativistically once, add SOC non-self-consistently, and take
+  occupied-band-energy differences per direction. The frozen-potential band-solve
+  infrastructure already existed (`postscf/uspp_bands.py`, `core/gamma.py`, the
+  one-shot solve in `postscf/hubbard_u.py`), it just was not connected to the SOC
+  Hamiltonian plus a directional band sum.
 
-What to build, all reusing what is here: (1) a global spin-axis control (rotate all
-local `e_I` together — a one-line special case of the per-atom constraint, or seed
-and let SOC pin it); (2) a force-theorem evaluator that freezes the converged
-density, adds the SOC block, and does one non-SCF diagonalization per direction into
-`dE(n)`, reusing the frozen-potential solve and the spinor projector block; (3) a
-thin sweep/integrate layer over `(theta, phi)` taking energy differences or
-integrating the torque into the anisotropy surface. The blocker is not the math —
-the torque is already exact and autograd-derived — it is getting a fully-relativistic
-pseudopotential into the fixtures and writing that force-theorem loop so the map is
-affordable.
+**Force-theorem evaluator (2026-07-19).** `postscf/mae.py` `force_theorem_mae`. One
+converged SOC SCF along a reference axis, then per direction a rigid rotation of
+(m⃗, B_xc), exact for the locally-collinear XC since B_xc co-rotates with m⃗ and v_xc
+depends only on (ρ, |m⃗|), one frozen-potential spinor diagonalization seeded with the
+SU(2)-rotated reference spinors, and the occupied band free energy at that direction's
+Fermi level. The anisotropy enters solely through the lattice-fixed SOC projectors, so
+a scalar-relativistic system gives an exactly direction-independent band sum, the
+correctness gate, measured invariant to <1e-6 eV over four directions
+(`tests/integration/test_mae_force_theorem.py`). At a shared small FePt mesh the FT
+difference tracks the two-SCF difference within the 30% gate. At scale
+(`examples/fept_mae_force_theorem.py`, 144 k full mesh, 70 Ry), FT MAE [100]−[001] =
++2.673 meV/cell vs the self-consistent +2.552 (4.7%), [110] +2.713 (in-plane spread
+0.04 meV), and the 45°-tilted [101] at +1.340 ≈ half of [100], the uniaxial K₁ sin²θ
+form from four one-shot solves. Each direction costs ~11 min against ~84 min for a full
+SCF (7.7×), which makes E(θ, φ) maps affordable. The global-spin-axis control and the
+sweep/integrate layer are subsumed, the directions list is the sweep.
 
-**Force-theorem evaluator LANDED (2026-07-19).** `postscf/mae.py`
-`force_theorem_mae`: one converged SOC SCF along a reference axis, then per
-direction a rigid rotation of (m⃗, B_xc) — exact for the locally-collinear XC,
-since B_xc co-rotates with m⃗ and v_xc depends only on (ρ, |m⃗|) — one
-frozen-potential spinor diagonalization seeded with the SU(2)-rotated reference
-spinors, and the occupied band free energy at that direction's own Fermi level.
-The anisotropy enters solely through the lattice-fixed SOC projectors, so a
-scalar-relativistic system gives an exactly direction-independent band sum, and
-that is the correctness gate: measured invariant to <1e-6 eV over four
-directions, with the reference direction reproducing the converged SCF spectrum
-(tests/integration/test_mae_force_theorem.py). At a shared small FePt mesh the
-FT difference tracks the two-SCF difference within the 30% gate. At scale
-(examples/fept_mae_force_theorem.py, 144 k full mesh, 70 Ry): FT MAE
-[100]−[001] = +2.673 meV/cell vs the self-consistent +2.552 (4.7%), [110]
-+2.713 (in-plane spread 0.04 meV), and the 45°-tilted [101] at +1.340 ≈ half of
-[100] — the uniaxial K₁ sin²θ form measured directly from four one-shot solves.
-Each direction costs ~11 min against ~84 min for a full SCF (7.7×), which is
-what makes E(θ, φ) maps affordable. Items (1) and (3) above are subsumed: the
-directions list is the sweep layer.
+**Per-direction magnetic-IBZ folding (2026-07-19).** `force_theorem_mae(..., magmoms=)`
+folds each one-shot solve into its own direction's Shubnikov IBZ. The per-atom
+reference moments rotate with the direction, the magnetic group of the rotated texture
+folds the mesh (`reduce_mesh_magnetic`), and because every folded representative is a
+point of the full mesh the solve runs on a subset of the stored reference spheres with
+folded weights, the SU(2)-rotated seeds gathering straight from the reference
+coefficients. The reference SCF still needs the full mesh, only the evaluations fold.
+The fold is exact for the collinear part of the frozen magnetization (ρ and |m⃗| carry
+the crystal symmetry, the uniform rotated direction transforms as an axial vector); the
+SOC-induced transverse textures formally break it, but the measured folded-vs-full
+residual on small FePt is ~4e-12 eV, far below the force-theorem error (gate 1e-6). On
+the 6×6×4 mesh the folds are [001]→30/144, [100]→48, generic (010)-plane tilt→56,
+compounding with the 7.7× per-direction saving. `examples/fept_mae_map.py` uses this for
+an E(θ) scan [001]→[100] with a K₁sin²θ + K₂sin⁴θ fit. Measured at scale (asus CPU,
+2026-07-19, batched spinor density path), 7 directions in 889 s (~2.1 min each, against
+~11 min unfolded pre-batching), K₁ = +2.6965 meV/cell, K₂ = −0.0358, max fit residual
+0.0015 meV (FePt is uniaxial to 1%). The 45° point reproduces the unfolded full-mesh
++1.3398 meV to all printed digits, and [100]−[001] = +2.660 vs the self-consistent
++2.552 (4.2%). The whole 7-point map costs about an hour of CPU, one 2450 s reference
+SCF plus 15 min of folded solves.
 
-**Per-direction magnetic-IBZ folding LANDED (2026-07-19).**
-`force_theorem_mae(..., magmoms=...)` folds each one-shot solve into its own
-direction's Shubnikov IBZ: the per-atom reference moments rotate with the
-direction, the magnetic group of the rotated texture folds the mesh
-(`reduce_mesh_magnetic`), and — because every folded representative is a point
-of the full mesh — the solve runs on a subset of the stored reference spheres
-with the folded weights, and the SU(2)-rotated seeds gather straight from the
-reference coefficients. The reference SCF still needs the full mesh. Only the
-evaluations fold. The fold is exact for the collinear part of the frozen
-magnetization (ρ and |m⃗| carry the crystal symmetry, the uniform rotated
-direction transforms as an axial vector). The SOC-induced transverse textures
-in m⃗(r) formally break it, but the measured folded-vs-full residual on the
-small FePt system is ~4e-12 eV, far below the force-theorem error
-(tests/integration/test_mae_force_theorem.py, gate at 1e-6). On the 6×6×4
-mesh the folds are [001]→30/144, [100]→48, generic (010)-plane tilt→56,
-compounding with the 7.7× per-direction saving.
-examples/fept_mae_map.py uses this for an E(θ) scan [001]→[100] with a
-K₁sin²θ + K₂sin⁴θ fit. Measured at scale (asus CPU, 2026-07-19, on the
-batched spinor density path): 7 directions in 889 s (~2.1 min each, against
-~11 min unfolded pre-batching), K₁ = +2.6965 meV/cell, K₂ = −0.0358, max fit
-residual 0.0015 meV — FePt is uniaxial to 1%. The 45° point reproduces the
-unfolded full-mesh +1.3398 meV to all printed digits, confirming the fold
-exact at production scale, and [100]−[001] = +2.660 vs the self-consistent
-+2.552 (4.2%). The whole 7-point map costs about an hour of CPU: one 2450 s
-reference SCF plus 15 min of folded solves.
+**Band-resolved anisotropy (open).** The MAE is a single number; the diagnostic that
+explains it decomposes ΔF into per-k, per-band contributions by differencing the
+spectra of two directions state by state (each at its own Fermi level) before summing.
+Away from ε_F the SOC shifts cancel in the difference, so the net anisotropy lives in
+near-degenerate band pairs within ~ξ_SOC of the Fermi level that split differently per
+direction, in FePt the Pt-5d avoided crossings, which is also why coarse meshes flip
+the sign. Everything needed is persisted, `MAEResult.save` keeps the full (nk, nb)
+spectra and Fermi levels per direction. What to build. (1) A ΔE(k) map over the mesh
+plus a band-index decomposition, occupation-weighted with the entropy term explicit.
+(2) An unfolding step, since per-direction folds put two directions on different
+k-subsets, either re-run the pair unfolded (minutes now) or expand folded spectra back
+through the orbit maps the magnetic-symmetry machinery already computes. Caveats for
+the docs, per-k contributions are gauge-sensitive (only the k-sum is physical), and
+band indices must be matched through crossings if the decomposition is followed along
+θ. Payoff is hotspot maps on the Fermi surface and a principled handle on how
+alloying/strain moves the MAE.
 
-**Band-resolved anisotropy (open).** The MAE is a single number; the
-diagnostic that *explains* it decomposes ΔF into per-k, per-band
-contributions by differencing the spectra of two directions state by state
-(each at its own Fermi level) before summing. The physics: away from ε_F the
-SOC shifts cancel in the difference, so the net anisotropy lives in
-near-degenerate band pairs within ~ξ_SOC of the Fermi level that split
-differently per direction — in FePt the Pt-5d avoided crossings, which is
-also why coarse meshes flip the sign. Everything needed is already persisted:
-MAEResult.save keeps the full (nk, nb) spectra and Fermi levels per
-direction. What to build: (1) a ΔE(k) map over the mesh plus a band-index
-decomposition, occupation-weighted with the entropy term handled explicitly;
-(2) an unfolding step, since per-direction folds put two directions on
-different k-subsets — either re-run the pair of interest unfolded (minutes
-now) or expand folded spectra back to the full mesh through the orbit maps
-the magnetic-symmetry machinery already computes. Caveats to state in the
-docs: per-k contributions are gauge-sensitive (only the k-sum is physical),
-and band *indices* must be matched through crossings if the decomposition is
-followed along θ. Payoff: hotspot maps on the Fermi surface, and a principled
-handle on how alloying/strain will move the MAE.
-
-## Davidson subspace Gram: conj-copy memory spike at large nk
-
-Measured on the A100 384-k FePt run (job 14076535, 2026-07-18): with
-fragmentation already fixed (expandable_segments), the run died at 32.2 GiB
-allocated when `davidson_batched`'s subspace overlap
-`torch.einsum("kig,kjg->kij", v.conj(), hv)` requested another 6.68 GiB —
-einsum materializes `.conj()` as a full copy of the (nk, nsub, 2npw) subspace
-block. Two cheap fixes when it next matters: chunk the Gram over k (the result
-is only (nk, nsub, nsub), tiny), or restructure to avoid the conj copy
-(`(hv @ v.mH)`-style batched matmul conjugates lazily). Deferred because the
-magnetic-IBZ fold (60–100 k instead of 384) removed the pressure — but any
-future dense-k run without magnetic symmetry hits the same wall at
-nk·nsub·2npw·16 B ≈ 7 GiB per copy.
-
-## One-center ddd analytic derivative
-
-The one-center ddd is a named micro-cost from the performance audit, 5% of the PAW
-profile through an autograd backward per iteration. It is already compiled when
-`compile_xc=True` (the `energy_and_ddd` path is a single backward), so the remaining
-question is only whether an analytic quadrature derivative beats the compiled
-autograd, which is a small isolated experiment, not a feature. (The local-TF metal
-preconditioner that used to head this section is now built, see the done section.)
-
-## RAIRS and a slab dipole moment
-
-We can do vibrational frequencies now (`postscf/phonons.py`, validated against QE
-`ph.x` to 0.003% on Si) and IR intensities for insulators and molecules (Born
-charges and epsilon-infinity from `postscf/dielectric.py`). Metals are the gap.
-
-The current `dielectric_born` refuses anything but an nspin=1 insulator, because it
-splits valence from conduction with a conduction projector `P_c` and a `(H - eps_v)`
-solve, and that construction goes singular at a metal Fermi level. A bulk metal also
-has no IR-active optical phonon in the insulator sense and no static Born charge, so
-"bulk metal IR" is not a real target.
-
-The real target is RAIRS, the reflection-absorption IR of an adsorbate on a metal
-surface (CO on Pt is the textbook case). The metal surface selection rule says only
-the dynamic dipole perpendicular to the surface couples, and the slab surface-normal
-dipole `mu_z` is well defined despite the metal because the vacuum gap gives a clean
-reference. So we sidestep the singular DFPT entirely and finite-difference.
-
-- New piece, a slab dipole-moment function `mu_z = integral z rho_tot(r) + ionic`,
-  with the standard slab caveat that it needs a vacuum gap and a dipole correction
-  so the two surfaces do not talk through the cell. This is the only genuinely new
-  physics. gradwave already has rho on the grid and the ion charges, so it is modest.
-- Reuse, finite-difference the dynamic dipole. Displace each adsorbate atom by
-  plus/minus delta, compute `mu_z`, difference to get `Ztilde_{s,zbeta} = d mu_z / d tau`.
-  For CO that is 2 atoms x 3 directions x 2 = 12 SCFs. Contract with the CO-projected
-  Hessian modes from `gamma_hessian` and keep the z component.
-
-Cost is finite-difference, roughly 12 extra slab SCFs on top of the Hessian, no DFPT.
-It works on the metal because it uses `mu_z`, not `Z*`. Estimate about 1 to 2 days,
-almost all of it in the slab dipole routine and its validation.
-
-Raman on a metal stays hard. The Raman tensor is `d alpha / d Q` and alpha itself is
-ill-defined for a metal, and surface-enhanced Raman is dominated by electromagnetic
-field enhancement rather than a clean DFT observable. Leave it.
-
-If someone wants the metal's own far-IR response, that is a different deliverable,
-the optical conductivity `sigma(omega)` (Drude plus interband). It extends the
-existing E-field Sternheimer to finite frequency and adds the intraband
-Fermi-surface term `dielectric.py` omits. Roughly a week, and it produces optical
-conductivity, not a vibrational spectrum.
-
-## Little and orbit groups for DFPT under symmetry-breaking perturbations
-
-The response calculations either use the full crystal symmetry or drop to
-time-reversal only. A perturbation lowers the symmetry to its little group, and we
-should reduce k-sampling and irreducible displacements by that residual group
-instead of discarding symmetry outright.
-
-- For a Gamma-phonon column, the displaced-atom pattern has a little group, the site
-  symmetry intersected with the displacement direction. Only symmetry-inequivalent
-  columns need computing, and the rest are reconstructed by the group action (the
-  `HessianSymmetry` reconstruction already does the reconstruction half for the full
-  group, this generalizes it to the perturbation little group).
-- For the E-field response, the little group is the subgroup that leaves the field
-  vector invariant, and k reduces to that subgroup's IBZ rather than to
-  time-reversal only.
-
-Payoff is direct k-point and displacement-column savings on exactly the expensive
-response runs, which is what QE `ph.x` does with its `modes_of_q` and small-group
-machinery. The building blocks (`find_spacegroup`, `reduce_mesh`) exist, the work is
-computing the little group of a given perturbation and threading it into the DFPT
-drivers.
+# Post-SCF and spectroscopy
 
 ## Phonon band structures
 
-`gamma_hessian` is Gamma-only. Extend to finite q to get dispersions.
+**Status: supercell route landed (2026-07-24, #61); arbitrary-q DFPT, LO-TO, and
+harmonic thermodynamics open.** `gamma_hessian` is Γ-only; the extension to finite q
+gives dispersions.
 
-**Supercell route LANDED (2026-07-24)** (#61). `postscf/phonons_supercell.py`: a
-native `phonons` task builds a supercell, displaces only the primitive home-cell
-atoms (the Born–von-Kármán translational reduction, so the SCF count is 6·N_prim
-regardless of supercell size), symmetrizes the force constants and applies the
+`postscf/phonons_supercell.py` builds a supercell, displaces only the primitive
+home-cell atoms (the Born–von-Kármán translational reduction, so the SCF count is
+6·N_prim regardless of supercell size), symmetrizes the force constants and applies the
 acoustic sum rule, then Fourier-folds `D(q)=Σ_R Φ/√(MμMν)·e^{iq·R}` onto the ASE
 bandpath for the dispersion and onto an MP q-mesh for the phonon DOS. It reuses the
 electronic bands-path builder and the PDOS broadener. Norm-conserving, nspin=1 (the
@@ -713,357 +517,295 @@ forces path). The 1×1×1 fold reproduces the analytic Γ route exactly (Si opti
 521.46 cm⁻¹, acoustic within ~1 cm⁻¹ of zero). Wired through inputs (`PhononParams`),
 the api dispatch, the output report, and `gradwave plot --kind phonons`.
 
-Still open below this:
+Still open. The analytic force response at q with a q-dependent perturbation
+(arbitrary-q DFPT), since the supercell route only reaches the commensurate q of its
+supercell. For polar insulators the nonanalytic LO-TO term at q→Γ, which needs Born
+charges and epsilon-infinity, both already in `dielectric.py`, so the polar correction
+is reachable. And the harmonic thermodynamics from the q-mesh DOS (free energy,
+entropy, heat capacity), which pairs with the EOS work for a full thermal equation of
+state.
 
-- The analytic force response at q with a q-dependent perturbation (arbitrary-q
-  DFPT) — the supercell route only reaches the commensurate q of its supercell.
-- For polar insulators the nonanalytic LO-TO term at q to Gamma, which needs Born
-  charges and epsilon-infinity. Both already exist in `dielectric.py`, so the polar
-  correction is reachable.
-- The harmonic thermodynamics from the q-mesh DOS (free energy, entropy, heat
-  capacity), which pairs well with the EOS work for a full thermal equation of state.
+## RAIRS and a slab dipole moment
+
+**Status: open. Vibrational frequencies and insulator/molecule IR intensities exist;
+the metal-surface case is the gap.** We do vibrational frequencies
+(`postscf/phonons.py`, validated against QE `ph.x` to 0.003% on Si) and IR intensities
+for insulators and molecules (Born charges and epsilon-infinity from
+`postscf/dielectric.py`). Metals are the gap.
+
+`dielectric_born` refuses anything but an nspin=1 insulator, because it splits valence
+from conduction with a projector `P_c` and a `(H − eps_v)` solve that goes singular at
+a metal Fermi level. A bulk metal also has no IR-active optical phonon in the insulator
+sense and no static Born charge, so "bulk metal IR" is not a real target.
+
+The real target is RAIRS, the reflection-absorption IR of an adsorbate on a metal
+surface (CO on Pt is the textbook case). The metal surface selection rule says only the
+dynamic dipole perpendicular to the surface couples, and the slab surface-normal dipole
+`mu_z` is well defined despite the metal because the vacuum gap gives a clean
+reference. So sidestep the singular DFPT and finite-difference.
+
+- New piece, a slab dipole-moment function `mu_z = integral z rho_tot(r) + ionic`,
+  with the standard slab caveat that it needs a vacuum gap and a dipole correction so
+  the two surfaces do not talk through the cell. The only genuinely new physics.
+  gradwave has rho on the grid and the ion charges, so it is modest.
+- Reuse, finite-difference the dynamic dipole. Displace each adsorbate atom by ±δ,
+  compute `mu_z`, difference to `Ztilde_{s,zbeta} = d mu_z / d tau`. For CO that is 2
+  atoms × 3 directions × 2 = 12 SCFs. Contract with the CO-projected Hessian modes from
+  `gamma_hessian` and keep the z component.
+
+Cost is finite-difference, roughly 12 extra slab SCFs on top of the Hessian, no DFPT.
+It works on the metal because it uses `mu_z`, not `Z*`. Estimate 1 to 2 days, almost
+all of it in the slab dipole routine and its validation.
+
+Raman on a metal stays hard. The Raman tensor is d alpha / d Q and alpha itself is
+ill-defined for a metal, and surface-enhanced Raman is dominated by electromagnetic
+field enhancement rather than a clean DFT observable. Leave it.
+
+If someone wants the metal's own far-IR response, that is a different deliverable, the
+optical conductivity sigma(omega) (Drude plus interband). It extends the existing
+E-field Sternheimer to finite frequency and adds the intraband Fermi-surface term
+`dielectric.py` omits. Roughly a week, and it produces optical conductivity, not a
+vibrational spectrum.
+
+## Little and orbit groups for DFPT under symmetry-breaking perturbations
+
+**Status: open.** The response calculations either use the full crystal symmetry or
+drop to time-reversal only. A perturbation lowers the symmetry to its little group, and
+we should reduce k-sampling and irreducible displacements by that residual group
+instead of discarding symmetry outright.
+
+- For a Γ-phonon column, the displaced-atom pattern has a little group, the site
+  symmetry intersected with the displacement direction. Only symmetry-inequivalent
+  columns need computing, the rest reconstructed by the group action (the
+  `HessianSymmetry` reconstruction already does the reconstruction half for the full
+  group; this generalizes it to the perturbation little group).
+- For the E-field response, the little group is the subgroup that leaves the field
+  vector invariant, and k reduces to that subgroup's IBZ rather than to time-reversal
+  only.
+
+Payoff is direct k-point and displacement-column savings on exactly the expensive
+response runs, which is what QE `ph.x` does with its `modes_of_q` and small-group
+machinery. The building blocks (`find_spacegroup`, `reduce_mesh`) exist; the work is
+computing the little group of a given perturbation and threading it into the DFPT
+drivers.
+
+# Coverage, correctness, and error budget
 
 ## Full nspin=2 and PAW coverage for every feature
 
-Coverage is uneven across the postscf features. Several are nspin=1 or NC only.
-The discretization-error force path is NC (nspin=1 or 2, no USPP/PAW), and the
-noncollinear and SOC PDOS paths have their own constraints.
+**Status: collinear nspin=2 post-SCF landed (2026-07-24); the residual gates are real
+physics gaps, not spin threading.** Coverage is uneven across the postscf features.
+Several are nspin=1 or NC only. The discretization-error force path is NC (nspin=1 or 2,
+no USPP/PAW), and the noncollinear and SOC PDOS paths have their own constraints.
 
-**Collinear nspin=2 post-SCF LANDED (2026-07-24).** The nspin=2 gates came off the
-main post-SCF properties, since the per-spin machinery already existed and only the
-spin loop was missing: band structures on the norm-conserving and USPP/PAW paths and
-atomic forces (#45), the Nielsen-Martin stress (#58), KPM-DOS and ELF, and the
-dielectric/Born E-field DFPT (`_dielectric_born_spin`, #65), each pinned by a
-nonmagnetic-limit or strain-FD self-oracle. Fixed-spin-moment SCF (a fixed
-`tot_magnetization = N↑ − N↓`) landed alongside (#45). What remains gated is real
-physics gaps rather than spin threading: the DFT+U and fully-relativistic stress, the
-metals (partial-occupation) dielectric path, and the USPP / noncollinear meta-GGA NLCC
-force. The rest of the matrix below is the residual.
+The nspin=2 gates came off the main post-SCF properties, since the per-spin machinery
+already existed and only the spin loop was missing. Band structures on the norm-
+conserving and USPP/PAW paths and atomic forces (#45), the Nielsen-Martin stress (#58),
+KPM-DOS and ELF, and the dielectric/Born E-field DFPT (`_dielectric_born_spin`, #65),
+each pinned by a nonmagnetic-limit or strain-FD self-oracle. Fixed-spin-moment SCF (a
+fixed `tot_magnetization = N↑ − N↓`) landed alongside (#45). What remains gated is real
+physics, the DFT+U and fully-relativistic stress, the metals (partial-occupation)
+dielectric path, and the USPP / noncollinear meta-GGA NLCC force.
 
-Make an explicit matrix of feature x {NC, USPP/PAW} x {nspin=1, 2} and close the
-gaps. Most of the per-channel machinery exists, so the work is threading the spin
-index and the S-metric or augmentation consistently, plus tests at each new cell of
-the matrix. Unglamorous, but it is what makes the code trustworthy on real systems
-like magnetic surfaces and spin-polarized adsorbates. The SCF core itself is already
-even here, the batched USPP/PAW eigensolve is validated at nspin=2 (O2 triplet,
-batched vs per-k to 7e-12 eV, and 21 iterations to QE's 20), so the gaps are in the
-postscf property layer, not the solver.
+Make an explicit matrix of feature × {NC, USPP/PAW} × {nspin=1, 2} and close the gaps.
+Most of the per-channel machinery exists, so the work is threading the spin index and
+the S-metric or augmentation consistently, plus tests at each new cell. Unglamorous,
+but it is what makes the code trustworthy on magnetic surfaces and spin-polarized
+adsorbates. The SCF core is already even, the batched USPP/PAW eigensolve is validated
+at nspin=2 (O2 triplet, batched vs per-k to 7e-12 eV, 21 iterations to QE's 20), so the
+gaps are in the postscf property layer, not the solver.
 
 ## Error estimation: the rest of the budget, and what it can and cannot reach
 
-The discretization estimate (`postscf/discretization_error.py`) is one term in a
-larger error budget, and it is the cleanest one because a plane-wave cutoff is a
-variational truncation: a converged truth exists at infinite basis, the energy is
-stationary there, so the error is second order and a single cheap perturbative pass
-reaches it. Density, energy, force (NC nspin=1/2), and now per-band eigenvalue and
-band-gap errors all fall out of the same complement correction. This section records
-what the other terms are, which of them share that structure, and whether adding
-them up ever gives the true error. It never does, and the reason bounds the whole
-program, so it is worth writing down.
+**Status: smearing, k-point, and cutoff terms landed (2026-07-18); SCF-convergence
+headline landed via trajectory extrapolation, the exact response form still open;
+model-term tooling open.**
 
-Split the budget into a numerical part and a model part. Every number sits at some
-distance from reality, and that distance factors:
+The discretization estimate (`postscf/discretization_error.py`) is one term in a larger
+error budget, and the cleanest one because a plane-wave cutoff is a variational
+truncation, so a converged truth exists at infinite basis, the energy is stationary
+there, the error is second order, and a single cheap perturbative pass reaches it.
+Density, energy, force (NC nspin=1/2), and now per-band eigenvalue and band-gap errors
+all fall out of the same complement correction. This section records what the other
+terms are, which share that structure, and whether adding them up ever gives the true
+error. It never does, and the reason bounds the whole program.
+
+Split the budget into a numerical part and a model part.
 
     E_computed - E_reality = (E_computed - E_KS_converged) + (E_KS_converged - E_reality)
                               \______ numerical ______/       \____ model (XC) ____/
 
-`E_KS_converged` is the exact-basis, dense-k, fully self-consistent Kohn-Sham energy
-for the functional you chose. The numerical term is the sum of the convergence
-errors (cutoff, k-points, SCF, smearing, density grid, cell size). The model term is
-the XC functional error. The two are categorically different, and only the first is
-reachable from inside a calculation.
+`E_KS_converged` is the exact-basis, dense-k, fully self-consistent Kohn-Sham energy for
+the chosen functional. The numerical term is the sum of the convergence errors (cutoff,
+k-points, SCF, smearing, density grid, cell size). The model term is the XC functional
+error. Only the first is reachable from inside a calculation.
 
 The numerical terms are trackable, roughly additive, and individually cheap.
 
-- SCF convergence error. Stopping the iteration at finite `rhotol` leaves a density
-  residual `drho = rho_out - rho_in`. Because the energy is stationary at the fixed
-  point, the error is `~ (1/2) <drho | K_Hxc + chi0 | drho>`, second order in the
-  residual (this is why the energy converges as the square of the density). The
-  kernel is exactly the operators `scf/implicit.py` already exposes for the Dyson
-  dressing, so this is a few lines and one response application, no new SCF. The
-  Harris-Foulkes vs Kohn-Sham energy pair at the last step brackets it as a
-  zero-machinery cross-check.
+- SCF convergence error. Stopping at finite `rhotol` leaves a density residual
+  `drho = rho_out - rho_in`. Because the energy is stationary at the fixed point, the
+  error is `~ (1/2) <drho | K_Hxc + chi0 | drho>`, second order in the residual (why
+  the energy converges as the square of the density). The kernel is exactly the
+  operators `scf/implicit.py` already exposes for the Dyson dressing, so it is a few
+  lines and one response application. The Harris-Foulkes vs Kohn-Sham energy pair at
+  the last step brackets it as a zero-machinery cross-check.
 - k-point sampling error. The largest untracked term for metals and small cells, and
-  the one that does not share the variational structure: BZ integration is a
-  quadrature, not a truncated variational space, so the complement trick does not
-  transfer. It is reachable instead by mesh extrapolation or integrand-smoothness
-  estimates. Different math, higher value.
-- Smearing / electronic temperature. The `E - (1/2)TS` (Methfessel-Paxton) T->0
-  correction adds almost no cost: the entropy term is already computed in
+  the one that does not share the variational structure, since BZ integration is a
+  quadrature not a truncated variational space, so the complement trick does not
+  transfer. Reachable by mesh extrapolation or integrand-smoothness estimates. Different
+  math, higher value.
+- Smearing / electronic temperature. The `E - (1/2)TS` (Methfessel-Paxton) T→0
+  correction adds almost no cost, the entropy term is already in
   `shared_fermi_occupations`, so exposing the extrapolated energy is the whole task.
 - Density-grid (`ecutrho`) and finite-size round out the list. The first is the same
-  perturbative logic on the dense grid (USPP/PAW-relevant). The second is
-  system-specific (Makov-Payne image corrections for charged/defect/molecular cells).
+  perturbative logic on the dense grid (USPP/PAW-relevant). The second is system-
+  specific (Makov-Payne image corrections for charged/defect/molecular cells).
 
-At leading order these add, but not exactly: the axes couple (the basis error depends
-on the density, which depends on the k-mesh), so the true numerical error carries
-cross terms the per-axis estimates omit. Summed, they estimate the distance to
+At leading order these add, but not exactly, since the axes couple (the basis error
+depends on the density, which depends on the k-mesh), so the true numerical error
+carries cross terms the per-axis estimates omit. Summed, they estimate the distance to
 `E_KS_converged` well; they do not reproduce it to machine precision.
 
-The model term, the XC error, is categorically not internally reachable. Converge
-every numerical knob and you are left with the exact answer for an approximate
-functional, off from reality by the XC error, and nothing in the run measures it: it
-needs external reference (CCSD(T), QMC, experiment) or the exact functional. What is
-available is weaker, and worth being precise about.
+The model term, the XC error, is categorically not internally reachable. Converge every
+numerical knob and you are left with the exact answer for an approximate functional,
+off from reality by the XC error, and nothing in the run measures it. It needs external
+reference (CCSD(T), QMC, experiment) or the exact functional. What is available is
+weaker.
 
-- Density-corrected decomposition (DC-DFT). The XC error splits into a
-  functional-driven part (wrong functional on the exact density, not recoverable
-  internally) and a density-driven part (`E_xc[rho_A] - E_xc[rho_B]` for a better
-  density `rho_B`, computable and correctable). The textbook `rho_B` is the
-  self-interaction-free Hartree-Fock density, which needs exact exchange the code
-  does not have cheaply; the available proxy is the LDA<->PBE density sensitivity,
-  and the differentiable machinery carries the resulting density change to any
-  observable exactly as the force estimate does.
-- Functional sensitivity. The `learnable.py` slot plus autograd give
-  `d(observable)/d(XC parameters)` in one pass, a linearized single-run version of
-  the BEEF ensemble spread. It is a variance, not the error, and it is calibrated to
-  whatever the parameters span.
-- Self-interaction diagnostic. `E(N)` should be piecewise-linear in fractional
-  electron number for the exact functional. The deviation is a direct, fully internal
-  measure of the delocalization error that dominates gaps and charge transfer,
-  needing only the fractional occupations the smearing path already supports.
+- Density-corrected decomposition (DC-DFT). The XC error splits into a functional-
+  driven part (wrong functional on the exact density, not recoverable internally) and a
+  density-driven part (`E_xc[rho_A] - E_xc[rho_B]` for a better density `rho_B`,
+  computable and correctable). The textbook `rho_B` is the self-interaction-free
+  Hartree-Fock density, which needs exact exchange the code does not have cheaply; the
+  available proxy is the LDA↔PBE density sensitivity, and the differentiable machinery
+  carries the resulting density change to any observable exactly as the force estimate
+  does.
+- Functional sensitivity. The `learnable.py` slot plus autograd give `d(observable)/d(XC
+  parameters)` in one pass, a linearized single-run version of the BEEF ensemble spread.
+  A variance, not the error, calibrated to whatever the parameters span.
+- Self-interaction diagnostic. `E(N)` should be piecewise-linear in fractional electron
+  number for the exact functional. The deviation is a direct, fully internal measure of
+  the delocalization error that dominates gaps and charge transfer, needing only the
+  fractional occupations the smearing path already supports.
 
 Self-interaction and the density-driven error are decompositions of the XC term, not
-independent channels to add on top of it; treating them as separate additive errors
-would double-count.
+independent channels; treating them as separate additive errors double-counts.
 
-So, does the full budget give the true error? No, for two reasons stacked. The XC
-(model) term is not knowable from inside the calculation, so there is an irreducible
-unknown no combination of internal estimates reaches; and even the numerical terms
-only sum to leading order, missing their cross-coupling. What the numerical budget
-does provide is a defensible estimate of the distance to `E_KS_converged`: you can drive
-the cutoff, k-point, SCF, and smearing errors to near zero and know that you have.
-The XC error is then both the largest remaining term for most production work and the
-only one you cannot self-certify. That is the honest shape of the effort. The
-numerical errors are a solved problem in principle, the accuracy that matters is in
-the functional, and the differentiable framework's advantage on that term is
-sensitivity and the density-driven half, not an absolute bar.
+So, does the full budget give the true error? No, for two stacked reasons. The XC
+(model) term is not knowable from inside the calculation, an irreducible unknown no
+combination of internal estimates reaches; and even the numerical terms only sum to
+leading order, missing their cross-coupling. What the numerical budget does provide is a
+defensible estimate of the distance to `E_KS_converged`, you can drive the cutoff,
+k-point, SCF, and smearing errors to near zero and know that you have. The XC error is
+then both the largest remaining term for most production work and the only one you
+cannot self-certify. The numerical errors are a solved problem in principle, the
+accuracy that matters is in the functional, and the differentiable framework's advantage
+on that term is sensitivity and the density-driven half, not an absolute bar.
 
-**Smearing and k-point terms LANDED (2026-07-18); SCF-convergence headline
-LANDED via trajectory extrapolation, exact response form still OPEN.**
-`postscf/convergence_error.py` holds three estimators. `estimate_smearing_error`
-(the scheme-matched `E0 = (E+F)/2` extrapolation with per-scheme caveats) and
-`estimate_kpoint_error` (mesh extrapolation `E(N_k) → E_inf`, the non-variational
-term that needs more than one run) are validated in
+**What landed.** `postscf/convergence_error.py` holds three estimators.
+`estimate_smearing_error` (the scheme-matched `E0 = (E+F)/2` extrapolation with per-
+scheme caveats) and `estimate_kpoint_error` (mesh extrapolation `E(N_k) → E_inf`, the
+non-variational term that needs more than one run) are validated in
 `tests/integration/test_convergence_error.py`. Together with the Ecut estimate in
-`discretization_error.py`, those two plus the cutoff term are the trackable part
-of the numerical budget that is built.
+`discretization_error.py`, those two plus the cutoff term are the trackable part of the
+numerical budget that is built. `estimate_scf_error`'s headline is now the robust
+piece, it extrapolates the recorded free-energy trajectory (`res.history`) as a
+geometric tail, `E_inf - E_last ~ dE_last q/(1-q)`, giving a non-negative `denergy` and
+an extrapolated `E_inf` from one run for any system (no χ0 solve), validated by
+truncating a converged run's history and recovering the final energy, and by
+`estimate_scf_error_bracket` against a loose/tight pair. This sidesteps, rather than
+solves, the second-order response formula.
 
-`estimate_scf_error`'s headline is now the robust piece: it extrapolates the
-recorded free-energy trajectory (`res.history`) as a geometric tail,
-`E_inf - E_last ~ dE_last q/(1-q)`, giving a non-negative `denergy` and an
-extrapolated `E_inf` from one run for any system (no χ0 solve). It is validated
-by truncating a converged run's history and recovering the final energy, and by
-`estimate_scf_error_bracket` against a loose/tight pair. This sidesteps, rather
-than solves, the second-order response formula.
-
-That exact response form is **still** open. The exact second-order residual
-energy is `1/2<x|(K_Hxc - chi0^-1)|x>` with `x` the dielectric-dressed density
-error, but the code can only form `1/2<r|K_Hxc (1-chi0 K)^-1|r>`, which omits the
-`chi0^-1` kinetic-response term and is not sign-definite. It is retained only as
-a labelled diagnostic (`denergy_response`), never the headline. Pinning the exact
-Schur coupling is the same missing term as the coarse-space Dyson refinement of
-δρ in [todo.md](todo.md) — resolve one and both resolve. The `chi0^-1` solve is
-numerically awkward by direct CG (chi0 is only known through its forward action),
-so this is a real piece of work, not a typo.
-
-Also open from this section is the model-term tooling: the fractional-charge
-self-interaction probe (self-contained, no second functional) and the DC-DFT
-density-sensitivity piece, plus the smaller density-grid (`ecutrho`) and
-finite-size terms.
+**Still open.** The exact second-order residual energy is
+`1/2<x|(K_Hxc - chi0^-1)|x>` with `x` the dielectric-dressed density error, but the
+code can only form `1/2<r|K_Hxc (1-chi0 K)^-1|r>`, which omits the `chi0^-1` kinetic-
+response term and is not sign-definite. It is retained only as a labelled diagnostic
+(`denergy_response`), never the headline. Pinning the exact Schur coupling is the same
+missing term as the coarse-space Dyson refinement of δρ in [todo.md](todo.md), resolve
+one and both resolve. The `chi0^-1` solve is numerically awkward by direct CG (chi0 is
+only known through its forward action), so this is real work. Also open is the model-
+term tooling, the fractional-charge self-interaction probe (self-contained, no second
+functional) and the DC-DFT density-sensitivity piece, plus the smaller density-grid
+(`ecutrho`) and finite-size terms.
 
 ## Showcase figures: noncollinear magnetism and error estimates
 
-The validation record is tables of meV agreements against QE, which persuades a
-methods reader and no one else. A small set of figures would carry the two
-capabilities that distinguish the code, autograd through the full spinor stack
-and per-calculation numerical error bars. DFTK has the Cancès/Herbst error
-bounds and several codes do noncollinear SOC, but the combination, and anything
-built on spinor autograd, has no published counterpart to point at. Candidates
-below, roughly by impact, each grounded in what exists in the tree today.
+**Status: open; several inputs half-built.** The validation record is tables of meV
+agreements against QE, which persuades a methods reader and no one else. A small set of
+figures would carry the two capabilities that distinguish the code, autograd through the
+full spinor stack and per-calculation numerical error bars. DFTK has the Cancès/Herbst
+error bounds and several codes do noncollinear SOC, but the combination, and anything
+built on spinor autograd, has no published counterpart. Candidates roughly by impact,
+each grounded in what exists in the tree.
 
 Noncollinear magnetism.
 
-- **MAE sphere for FePt.** `examples/fept_mae_map.py` already scans E(theta)
-  along [001]→[100]. The full version is E(theta, phi) − E(easy) as a heatmap
-  on the sphere (Mollweide projection), easy axis marked, with a few full-SCF
-  anchor points overlaid to show the force-theorem accuracy. The per-direction
-  magnetic-IBZ folding plus the 7.7× one-shot saving is what makes the map
-  affordable, so the figure doubles as the cost story.
-- **Torque against angle.** Plot the autograd dE/dtheta of the moment
-  direction as a smooth curve and overlay finite-difference slopes of the
-  E(theta) scan as points. One figure shows the SOC physics and that the
-  spinor stack differentiates. The per-atom torque is validated in
-  `moment_config`. The global-axis torque through the SOC energy is the piece
-  the "MCA dE/dtheta" line in the backlog still owes, so this figure is also
-  the natural acceptance test for it.
-- **Real-space magnetization texture.** A quiver plot of m⃗(r) on a plane
-  through the cell, arrows colored by |m⃗|, density as a background contour.
-  The strongest subject is a 120° Néel state on a triangular Mn or Cr
-  lattice, because frustration forces genuine noncollinearity and a collinear
-  code cannot represent the ground state at all. The Fe spiral
-  (`examples/fe_spin_spiral.py`) is the already-computed fallback.
-- **k-space spin texture.** `projected_dos_noncollinear` already Pauli-decomposes
-  each state into (n, m_x, m_y, m_z). Coloring a band path by ⟨sigma_z⟩ with
-  in-plane arrows at each k gives the spin-momentum-locking picture around
-  Gamma for Bi₂Se₃, whose SOC bands are already validated
-  (`examples/bi2se3_inversion.py`). Needs the per-state amplitudes routed onto
-  a band path rather than binned into a DOS.
-- **Magnetic-IBZ folding diagram.** The full mesh next to the Shubnikov IBZ
-  for FePt m∥[001] (144→30) and m∥[100] (144→48), with the folded-vs-full
-  energy residual quoted. A methods figure, narrower audience.
+- **MAE sphere for FePt.** `examples/fept_mae_map.py` already scans E(theta) along
+  [001]→[100]. The full version is E(theta, phi) − E(easy) as a heatmap on the sphere
+  (Mollweide), easy axis marked, with a few full-SCF anchor points overlaid to show the
+  force-theorem accuracy. The per-direction magnetic-IBZ folding plus the 7.7× one-shot
+  saving makes the map affordable, so the figure doubles as the cost story.
+- **Torque against angle.** Plot the autograd dE/dtheta of the moment direction as a
+  smooth curve and overlay finite-difference slopes of the E(theta) scan as points. One
+  figure shows the SOC physics and that the spinor stack differentiates. The per-atom
+  torque is validated in `moment_config`; the global-axis torque through the SOC energy
+  is the piece the "MCA dE/dtheta" line still owes, so this is also its acceptance test.
+- **Real-space magnetization texture.** A quiver plot of m⃗(r) on a plane through the
+  cell, arrows colored by |m⃗|, density as a background contour. The strongest subject
+  is a 120° Néel state on a triangular Mn or Cr lattice, where frustration forces
+  genuine noncollinearity and a collinear code cannot represent the ground state at all.
+  The Fe spiral (`examples/fe_spin_spiral.py`) is the already-computed fallback.
+- **k-space spin texture.** `projected_dos_noncollinear` already Pauli-decomposes each
+  state into (n, m_x, m_y, m_z). Coloring a band path by ⟨sigma_z⟩ with in-plane arrows
+  at each k gives the spin-momentum-locking picture around Γ for Bi₂Se₃, whose SOC bands
+  are validated (`examples/bi2se3_inversion.py`). Needs the per-state amplitudes routed
+  onto a band path rather than binned into a DOS.
+- **Magnetic-IBZ folding diagram.** The full mesh next to the Shubnikov IBZ for FePt
+  m∥[001] (144→30) and m∥[100] (144→48), with the folded-vs-full residual quoted. A
+  methods figure, narrower audience.
 
 Error estimates.
 
-- **Estimated against true error.** For a grid of systems and cutoffs, scatter
-  the `discretization_error` estimate against the measured error to a
-  converged-Ecut reference. Points on or bounded by the diagonal are the whole
-  argument for trusting the estimator, and the plot the Herbst/Levitt paper
-  the module follows leads with. The EOS/Δ-factor infrastructure
-  already produces the reference energies.
-- **EOS with error bars.** E(V) at a deliberately modest cutoff with per-point
-  error bars, overlaid on the converged curve, the bars visibly containing it,
-  and the fitted a₀/B₀ carrying propagated uncertainties. The force version is
-  displaced-Si force components with bars against converged forces.
-- **Stacked error budget.** One bar per system, stacked into basis, SCF,
-  smearing, and k-sampling terms from `discretization_error.py` plus
-  `convergence_error.py`. Few other codes decompose the budget this way, so the
-  figure shows the capability directly.
+- **Estimated against true error.** For a grid of systems and cutoffs, scatter the
+  `discretization_error` estimate against the measured error to a converged-Ecut
+  reference. Points on or bounded by the diagonal are the whole argument for trusting
+  the estimator, the plot the Herbst/Levitt paper leads with. The EOS/Δ-factor
+  infrastructure already produces the reference energies.
+- **EOS with error bars.** E(V) at a deliberately modest cutoff with per-point error
+  bars, overlaid on the converged curve, the bars visibly containing it, and the fitted
+  a₀/B₀ carrying propagated uncertainties. The force version is displaced-Si force
+  components with bars against converged forces.
+- **Stacked error budget.** One bar per system, stacked into basis, SCF, smearing, and
+  k-sampling terms from `discretization_error.py` plus `convergence_error.py`. Few other
+  codes decompose the budget this way, so the figure shows the capability directly.
 
-The combination, and the strongest single figure, is **MAE with numerical error
-bars**. Anisotropy energies sit at tens of µeV to meV, exactly the scale where
-convergence is the standing doubt, so E(n̂) − E(easy) with a shaded numerical
-uncertainty band makes a scientific claim rather than a benchmark claim, namely
-that the easy-axis assignment clears the error bar (or honestly, at which
-Ecut/k-mesh it does not). The `discretization_error` estimator covers NC
-nspin=1/2 but not the spinor/SOC path, so it needs the spinor extension first,
-and this figure is the reason to build it.
+The strongest single figure is **MAE with numerical error bars**. Anisotropy energies
+sit at tens of µeV to meV, exactly where convergence is the standing doubt, so E(n̂) −
+E(easy) with a shaded numerical uncertainty band makes a scientific claim rather than a
+benchmark claim, that the easy-axis assignment clears the error bar (or honestly, at
+which Ecut/k-mesh it does not). The `discretization_error` estimator covers NC nspin=1/2
+but not the spinor/SOC path, so it needs the spinor extension first, and this figure is
+the reason to build it. Several inputs are half-built (the MAE scan, the spiral, the
+Bi₂Se₃ band data, the EOS scans), so the marginal work is mostly plotting plus a few
+targeted calculations, with the heavy SOC sweeps routed to the GPU box.
 
-Several items are half-built (the MAE scan, the spiral, the Bi₂Se₃ band data,
-the EOS scans), so the marginal work is mostly plotting plus a few targeted
-calculations, with the heavy SOC sweeps routed to the GPU box as usual.
-
-## Batched multi-structure SCF, and the EOS-on-GPU question
-
-Question, would an EOS go faster by batching several volumes on the GPU at once?
-
-Measured on the asus RTX 3050 for the 1-atom fcc Pt EOS (40/400 Ry, 12x12x12), a
-single point sits at 100% nvidia-smi util but only 24.7 W of draw (the card's TGP is
-35 to 80 W) and 2.6 of 6 GB. The 100% util flag only means a kernel was in flight
-during the sample. The low power and low memory say the GPU is not compute-saturated.
-For a system this small it is launch and latency bound on many tiny kernels (small
-matmuls, a 35^3 FFT, per-k Davidson steps), so there is real headroom. So yes,
-concurrency would help here. Three ways, cheapest first.
-
-- Run several volumes as concurrent processes sharing the GPU, either plain
-  backgrounding or CUDA MPS. Zero code. Two points fit in 6 GB (2 x 2.6). Likely
-  1.5 to 1.8x on a launch-bound system. The catch is that the current EOS chains the
-  volumes with `start_from` warm starts, so they are serial by construction. Dropping
-  the chain trades the warm-start iteration savings for the concurrency, which is
-  close to a wash at N=2 but wins as the GPU empties.
-- Batched multi-structure SCF, the main structural gain. Stack the volumes as
-  independent k-blocks in one padded generalized Davidson, the same way the batched
-  Davidson already stacks k-points, so the small per-volume GEMMs become one big GEMM
-  and the kernel-launch overhead amortizes. The SCF loop has to carry per-volume
-  densities and potentials and mix them independently while sharing the linear
-  algebra, which is substantial feature work. This is the version that would
-  actually fill the card. It generalizes past EOS to any embarrassingly-parallel set
-  of small structures (displacement stencils for phonons, rattled configs for
-  training data, a k-convergence sweep).
-- CUDA streams to overlap independent kernels. Hard to orchestrate from PyTorch
-  eager, low priority.
-
-Note that this only pays for small systems where a single SCF underfills the GPU. The
-slab already uses more of the card, so batch structures for the cheap cases (bulk
-EOS, phonon stencils) and run the heavy cases one at a time.
-
-The cleanest first target is a spin-spiral / magnetic-dispersion sweep (see
-`examples/fe_spin_spiral.py`). Every angle theta is the *identical* cell, k-mesh, and
-band count -- same FFT dims, same tensor shapes -- so the batch has zero raggedness in
-the data layout; only the per-point convergence count differs. That is a strictly
-cleaner batching case than the EOS, where the cells (and their FFT boxes) vary slightly
-with volume. The one wrinkle is the same one everywhere: the frustrated large-angle
-points need many more iterations than the collinear ones, so a lockstep batched solve
-either over-iterates the easy members or needs per-member convergence masking. The real
-blocker is the hardware, not the workload -- on the RTX 3050 the sweep is fp64-bound and
-7.8x slower than the CPU (it runs as concurrent CPU processes today, see the done
-section on the measured 3050 profile). On a card with real fp64 (A100/H100, fp64 = 1/2
-fp32) and tens of GB, stacking these identical independent SCFs to fill the device is
-exactly where the batched-multi-structure path first pays off.
-
-The best fit is GGA insulators. They are fixed-occupation, converge in few
-iterations, and hold a small grid, so a single one badly underfills the card, which is
-exactly the regime where stacking several into one padded solve wins. A batch of GGA
-insulator structures is also the shape of a learned-XC training set and an EOS or
-convergence sweep, so this feature and the meta-GGA training work reinforce each other.
-
-## Gamma-only real wavefunctions for slabs and molecules
-
-At the Gamma point the orbitals can be taken real, because time reversal makes
-`ψ(-G) = ψ*(G)`, so only half the plane-wave sphere is independent. The foundation for
-this is built and validated in `core/gamma.py`, gated to machine precision against the
-complex path (apply 1e-13, frozen-potential eigenvalues 5e-14). It stores the half
-sphere, runs the local term on `irfftn`/`rfftn`, and solves the eigenproblem as a real
-symmetric one in a feature embedding where the half-sphere metric is the plain dot
-product, so the standard Davidson applies unchanged.
-
-The premise was a roughly 2x real-FFT win on the hottest kernel. That did not appear on
-the available CPU. The forward-plus-inverse real transform measured 0.75x to 1.25x the
-complex pair on non-power-of-two boxes at 63^3 and 72^3, so the H-apply came out 0.97x
-in isolation, and the full solver ran slower still (directionally 0.6x to 0.8x) once the
-per-apply overhead compounds over the Davidson iterations. The real-transform advantage
-is grid-size and library dependent, and MKL did not deliver it here. The correctness is
-solid, so the work that remains is measurement and integration rather than the core
-representation.
-
-- Re-measure on a GPU. cuFFT's real transform behaves differently from MKL's, and the
-  memory story is also better on the GPU, so the win may exist there even though it does
-  not on this CPU. This is the first thing to check before investing more.
-- Wire it into the SCF loop behind a flag, for a single Gamma k-point, insulators and
-  molecules first, then metals at Gamma with smeared occupations. The density build,
-  mixing, and energy assembly are unchanged, only the diagonalize call swaps.
-- The memory angle stands on its own. The real-space fields are half the size, so this
-  pairs with the size-ceiling item below independent of any speedup.
-
-## Raising the system-size ceiling past the dense-allocation cliff
-
-The GPU probe found peak memory scaling roughly linearly to about 96 atoms on the 6 GB
-RTX 3050, then a hard cliff at 128 atoms from a single roughly 37 GB allocation, an
-O(npw²) dense step (complex128 around 7.7 GB times the eigh workspace copies) that spikes
-at `npw` near 22k. So the practical ceiling is about 96 to 110 atoms at that cutoff,
-and the cliff is a specific dense allocation, not gradual fill, which means it is
-tileable rather than fundamental.
-
-- Identify the O(npw²) step. It is the dense object that scales with the square of the
-  plane-wave count, most likely a subspace-related workspace or the eigensolve's internal
-  copies, and the first task is to confirm which allocation trips at 128 atoms with a
-  memory profile.
-- Tile or avoid forming it. Block the offending contraction so the peak is bounded the
-  way `BatchedHamiltonian.apply` and `density_b` already band-chunk their dense-grid
-  temporaries, or restructure the step to never materialize the full O(npw²) array.
-
-This only matters if larger cells become a goal, defects, bigger slabs, or supercells for
-finite-q phonons, so it is a when-you-need-it item rather than a now item. But it is the
-one thing standing between the current sub-100-atom validation regime and running the
-kind of system where the code would do new science, so it is worth knowing the fix is a
-tiling change and not an architecture change. The ISDF work above is the complementary
-approach, it lowers the operation count where this item lowers the peak memory.
+# Performance and scaling
 
 ## Acceleration frontier, 2024-2026 literature sweep
 
-A focused survey of the recent literature (done after the local-TF preconditioner
-landed) for levers that pass the filter "single GPU or CPU, small FFT-bound cell,
-fp64". Two of the sweep's headline ideas turned out to be already implemented: the
-Gong and Dal Corso trick of batching the H-apply FFTs across all bands and k-points
-into one call (arXiv:2412.01695, worth 6x on their small-cell many-k H-apply) is
-exactly what `core/batch.py` already does over `(nk, nb, grid)`, and the CPU FFT is
-already on MKL rather than pocketfft, so the "free 1.5-2x pocketfft to MKL" swap is
-not available here. What remains, ranked by how well it fits this code:
+**Status: survey; two headline ideas were already implemented, the rest ranked below.**
+A focused survey of recent literature (after the local-TF preconditioner landed) for
+ideas that pass the filter "single GPU or CPU, small FFT-bound cell, fp64". Two headline
+ideas were already in the code. The Gong and Dal Corso trick of batching the H-apply FFTs
+across all bands and k-points into one call (arXiv:2412.01695, worth 6× on their small-
+cell many-k H-apply) is exactly what `core/batch.py` does over `(nk, nb, grid)`, and the
+CPU FFT is already MKL not pocketfft, so the "free 1.5-2× pocketfft to MKL" swap is not
+available.
 
 Measured on the RTX 3050 (2026-07-16, torch.profiler on 8 NC SCF iterations, aten-op
-device time, no kernel double-count). This revises the "FFT-bound" framing for the GPU
-small-cell regime, which came from CPU profiles and the molecule-in-large-box / USPP-Pt
-cases. For an ordinary small crystal on the GPU the FFT is only about 12 percent:
+device time). This revises the "FFT-bound" framing for the GPU small-cell regime, which
+came from CPU profiles and the molecule-in-large-box / USPP-Pt cases. For an ordinary
+small crystal on the GPU the FFT is only about 12 percent.
 
     Si8 2x2x2 (nband 20, m~40, box 27^3): GPU-busy 2111 ms, launch/sync gap 996 ms
       = 32% of wall.  GEMM(bmm) 43%, eigh 21%, QR/ortho 14%, FFT 12%, other 10%.
@@ -1071,563 +813,615 @@ cases. For an ordinary small crystal on the GPU the FFT is only about 12 percent
       = 46% of wall.  QR/ortho 44%, GEMM 23%, FFT 12%, eigh 11%, other 10%.
 
 Two things fall out. First, a small-cell GPU SCF is dense-linear-algebra-bound, not
-FFT-bound: GEMM + eigh + QR are about 78 percent of GPU-busy time (small boxes make the
-FFT cheap, and fp64 GEMM/eigh/QR pay the same 1/64 fp64 tax). Second, the launch/sync
-gap is 32-46 percent of wall (profiler-inflated but consistent with the earlier finding
-that eager dispatch of dozens of tiny kernels per Davidson round is the binding GPU
-constraint) - that gap is exactly what a whole-step CUDA graph reclaims. The eigh cliff
-is visible: eigh 11 percent at m~16 vs 21 percent at m~40 (the n>32 cusolver-batched
-fallback, measured 2.5-4.5x on its own). Reprioritized by this data: (1) whole-step CUDA
-graph to close the 32-46 percent launch gap, (2) cut the dense subspace LA - RMM-DIIS is
-now attractive because it removes the Rayleigh-Ritz (eigh) and the subspace
-orthonormalization (QR), together 35 percent (Si8) to 54 percent (Si2) of GPU-busy - and
-a c64 subspace reduction on the NC standard problem would dodge both the fp64 tax and the
-eigh cliff, (3) the FFT is no longer the thing to chase on GPU small cells.
+FFT-bound, GEMM + eigh + QR being about 78 percent of GPU-busy time (small boxes make the
+FFT cheap, and fp64 GEMM/eigh/QR pay the same 1/64 fp64 tax). Second, the launch/sync gap
+is 32-46 percent of wall (profiler-inflated but consistent with the earlier finding that
+eager dispatch of dozens of tiny kernels per Davidson round is the binding GPU
+constraint), exactly what a whole-step CUDA graph reclaims. The eigh cliff is visible,
+eigh 11 percent at m~16 vs 21 percent at m~40 (the n>32 cusolver-batched fallback,
+measured 2.5-4.5× on its own). Reprioritized. (1) Whole-step CUDA graph to close the
+32-46 percent launch gap. (2) Cut the dense subspace LA, RMM-DIIS now attractive because
+it removes the Rayleigh-Ritz (eigh) and the subspace orthonormalization (QR), together 35
+percent (Si8) to 54 percent (Si2) of GPU-busy, and a c64 subspace reduction on the NC
+standard problem would dodge both the fp64 tax and the eigh cliff. (3) The FFT is no
+longer the thing to chase on GPU small cells.
 
-
-
-- Whole-SCF-step CUDA-graph capture of the dispatch-bound glue. The measured GPU
-  negatives so far were an apply-only CUDA graph (1.0-1.1x, the back-to-back FFT
-  kernels have no launch gap) and torch.compile on the XC functional in isolation.
-  Neither touched the 55-65 percent of a step that is many-tiny-kernel real-valued
-  glue between the FFTs (XC assembly, mixing, occupations, PAW one-center, density
-  build). Capturing the whole step as one CUDA graph (the PyGraph line,
-  arXiv:2503.19779, averages 1.18x and never regresses where naive reduce-overhead
-  degrades up to 32 percent) removes the per-kernel launch overhead across that glue,
-  which is exactly where an 8-core host plus a consumer GPU hurt most. CUDA-graph
-  capture, unlike torch.compile fullgraph, tolerates the complex FFTs (the earlier
-  apply probe captured them fine), so the whole step is capturable. It cannot speed
-  the FFTs themselves. Estimate 1.2-1.5x on the non-FFT fraction, GPU only, needs
-  measuring on the RTX 3050. The highest-value new software item.
-- The batched `eigh` size cliff (diagnostic, cheap). `davidson_batched` calls
-  `torch.linalg.eigh` on the `(nk, m, m)` subspace matrix with `m` about `2*nband`.
-  On CUDA the fast `cusolverXsyevBatched` path is used only for `n <= 32`; above that
-  PyTorch loops per-matrix (measured about 83x slower at the boundary, pytorch#175585).
-  Every real system has `m > 32`, so the subspace diagonalization is probably on the
-  slow per-k loop on the 3050. It is only about 5 percent of the CPU profile, but the
-  cliff can inflate it on GPU. A ten-minute microbenchmark on asus settles whether it
-  matters; if it does, cap or tile the subspace or split the batched solve.
-- ML density initializer, plane-wave-native. "Global Plane Waves From Local
+- **Whole-SCF-step CUDA-graph capture of the dispatch-bound glue.** The measured GPU
+  negatives so far were an apply-only CUDA graph (1.0-1.1×, the back-to-back FFT kernels
+  have no launch gap) and torch.compile on the XC functional in isolation. Neither
+  touched the 55-65 percent of a step that is many-tiny-kernel real-valued glue between
+  the FFTs (XC assembly, mixing, occupations, PAW one-center, density build). Capturing
+  the whole step as one CUDA graph (the PyGraph line, arXiv:2503.19779, averages 1.18×
+  and never regresses where naive reduce-overhead degrades up to 32 percent) removes the
+  per-kernel launch overhead across that glue, exactly where an 8-core host plus a
+  consumer GPU hurt most. CUDA-graph capture, unlike torch.compile fullgraph, tolerates
+  the complex FFTs. It cannot speed the FFTs themselves. Estimate 1.2-1.5× on the non-FFT
+  fraction, GPU only, needs measuring on the RTX 3050. The highest-value new software
+  item. (Tried and found non-paying on the post-eigh math, see the Done section.)
+- **The batched `eigh` size cliff (diagnostic, cheap).** `davidson_batched` calls
+  `torch.linalg.eigh` on the `(nk, m, m)` subspace matrix with `m` about `2*nband`. On
+  CUDA the fast `cusolverXsyevBatched` path is used only for `n <= 32`; above that
+  PyTorch loops per-matrix (measured about 83× slower at the boundary, pytorch#175585).
+  Every real system has `m > 32`, so the subspace diagonalization is probably on the slow
+  per-k loop on the 3050. It is only about 5 percent of the CPU profile, but the cliff
+  can inflate it on GPU. A ten-minute microbenchmark on asus settles whether it matters;
+  if it does, cap or tile the subspace or split the batched solve.
+- **ML density initializer, plane-wave-native.** "Global Plane Waves From Local
   Gaussians" (arXiv:2601.19966) and a transferability study (arXiv:2509.25724) report
   25-33 percent fewer SCF iterations, and show a density init transfers out of
-  distribution where an ML-Hamiltonian init collapses. It only cuts iteration count,
-  not per-iteration FFTs, so about a 1.3x ceiling on a single point, but it stacks
-  with everything and its training set is the same shape as the learned-XC data. For
-  MD and relaxation the cheaper analog is wavefunction/Grassmann extrapolation across
-  geometries (about 3 iterations per step, JCTC 2022 1c00751), which QE and VASP
-  already do and gradwave's warm-start approximates.
+  distribution where an ML-Hamiltonian init collapses. It only cuts iteration count, not
+  per-iteration FFTs, so about a 1.3× ceiling on a single point, but it stacks with
+  everything and its training set is the same shape as the learned-XC data. For MD and
+  relaxation the cheaper analog is wavefunction/Grassmann extrapolation across geometries
+  (about 3 iterations per step, JCTC 2022 1c00751), which QE and VASP already do and
+  gradwave's warm-start approximates.
 
-Skip, from the same sweep, because they do not transfer: distributed GPU eigensolvers
-(ELPA, ChASE, SIRIUS all lose on small subspace matrices), ML Hamiltonian predictors
-and learned preconditioners (they need a localized basis; our kinetic preconditioner
-is already analytic), tensor-core FP16 FFT (accuracy-fatal against QE-grade fp64),
-FP8-emulated fp64 FFT (Blackwell-only, no FP8 on Ampere), NUFFT (our grid is uniform),
-and VkFFT (wins only at large-prime grids; `good_fft_size` restricts to 2*3*5*7
-radices cuFFT already handles). RMM-DIIS is the one prototype-worthy eigensolver, it
-removes the Rayleigh-Ritz that CheFSI could not, but the RR is cheap at small cell
-size so the win is uncertain. The through-line matches the earlier audit: on a single
-small SCF the consumer-GPU fp64 tax is the wall, and the durable gains are throughput
-(batch many small structures), fewer iterations (learned or extrapolated start), and a
-datacenter fp64 GPU.
+Skip, from the same sweep, because they do not transfer. Distributed GPU eigensolvers
+(ELPA, ChASE, SIRIUS all lose on small subspace matrices), ML Hamiltonian predictors and
+learned preconditioners (they need a localized basis, our kinetic preconditioner is
+already analytic), tensor-core FP16 FFT (accuracy-fatal against QE-grade fp64), FP8-
+emulated fp64 FFT (Blackwell-only, no FP8 on Ampere), NUFFT (our grid is uniform), and
+VkFFT (wins only at large-prime grids; `good_fft_size` restricts to 2*3*5*7 radices cuFFT
+already handles). RMM-DIIS is the one prototype-worthy eigensolver, it removes the
+Rayleigh-Ritz that CheFSI could not, but the RR is cheap at small cell size so the win is
+uncertain (built and rejected, see the Done section). The through-line matches the earlier
+audit, on a single small SCF the consumer-GPU fp64 tax is the wall, and the durable gains
+are throughput (batch many small structures), fewer iterations (learned or extrapolated
+start), and a datacenter fp64 GPU.
 
-## Learned multi-pole density-mixing preconditioner (PROTOTYPED, first real win on Cu)
+## Learned multi-pole density-mixing preconditioner
 
-The 2024-2026 sweep above skips "learned preconditioners" on the grounds that they
-need a localized basis and our kinetic preconditioner is already analytic. That
-reason is about *eigensolver* preconditioners. A learned *density-mixing*
-preconditioner is a different object, and this section is the prototype of it. It
-lives entirely in G-space, needs no localized basis, and generalizes the Kerker
-and local-TF filters the code already ships. It is also the approach
-`docs/manual/wisdom.md` points at twice over: prefer a preconditioner to
-step-size control, and the SCF iteration count is set by density mixing, not by
-the initial wavefunction (the reason the atomic-orbital seed in the done section
-saved nothing).
+**Status: prototyped, first real win on Cu; Cu₃Al harness and SCF oracle landed
+(2026-07-24, #60); the magnetization-channel extension is a measured negative.**
 
-The mechanism (`scf/learned_precond.py`). Bare Kerker, R̃(G) = R(G)·G²/(G²+q0²),
-is the single-pole long-wavelength approximation to the exact response
-preconditioner ε⁻¹ = (1 − v_c χ₀)⁻¹. `MultipoleKerkerPrecond` replaces the one
-pole with a learned sum, f_θ(G²) = Σ_i w_i·G²/(G²+q_i²), applied per density-sphere
-component exactly where the mixer applies Kerker (wired as `scf(..., precond_op=)`
-and `mixer.precond_op`, mirroring local-TF). Two Kerker properties carry over by
-construction and both matter: f_θ(0) = 0, so the pinned G=0 charge is never
-touched, and the fixed point is unchanged, so a bad filter can only cost
-iterations, never accuracy. K=1, w=1 reproduces bare Kerker to round-off, so the
-single pole is always inside the hypothesis class.
+The sweep above skips "learned preconditioners" because they need a localized basis and
+our kinetic preconditioner is already analytic. That reason is about *eigensolver*
+preconditioners. A learned *density-mixing* preconditioner is a different object. It
+lives entirely in G-space, needs no localized basis, and generalizes the Kerker and
+local-TF filters the code already ships. It is the approach `docs/manual/wisdom.md`
+points at twice, prefer a preconditioner to step-size control, and the SCF iteration
+count is set by density mixing, not by the initial wavefunction.
 
-The fit is where a differentiable solver does something a non-differentiable one
+**The mechanism (`scf/learned_precond.py`).** Bare Kerker, R̃(G) = R(G)·G²/(G²+q0²), is
+the single-pole long-wavelength approximation to the exact response preconditioner
+ε⁻¹ = (1 − v_c χ₀)⁻¹. `MultipoleKerkerPrecond` replaces the one pole with a learned sum,
+f_θ(G²) = Σ_i w_i·G²/(G²+q_i²), applied per density-sphere component where the mixer
+applies Kerker (wired as `scf(..., precond_op=)` and `mixer.precond_op`, mirroring
+local-TF). Two Kerker properties carry over by construction, f_θ(0) = 0 so the pinned G=0
+charge is never touched, and the fixed point is unchanged so a bad filter costs
+iterations, never accuracy. K=1, w=1 reproduces bare Kerker to round-off, so the single
+pole is always inside the hypothesis class.
+
+**The fit** is where a differentiable solver does something a non-differentiable one
 cannot. In the diagonal model the error of a mixing step evolves as
-e_{n+1}(G) = [1 − α·f_θ(G²)·d(G)]·ē(G), with d(G) = 1 − j(G) the response
-denominator and ē the mixer's extrapolate. `fit_multipole` unrolls that recurrence
-and backpropagates the residual to the pole weights and positions. It has two
-modes. `mixer="plain"` unrolls damped linear mixing (ē = e_n) and minimizes the
-worst-shell rate; that is the wrong objective when the deployment mixer is Pulay
-DIIS, as the first pass found. `mixer="diis"` (the default the benchmark uses)
-unrolls the *actual* Pulay recurrence — ē = Σ c_i e_i with the DIIS coefficients
-from the same bordered, Kerker-metric, Tikhonov-regularized solve `mixing.Pulay
-Mixer` runs — so the filter is trained to complement the low-G work DIIS already
-does with its history rather than to duplicate it. The coefficients do not depend
-on the filter, but the e-history they extrapolate does, so the gradient flows.
-gradwave can differentiate through the Pulay recurrence, which other plane-wave mixers do not. `response_from_residuals` estimates d(G) per |G|-shell from a short SCF
-captured through the new `scf` `mixer_hook`; probing a d-band metal with plain
-damping sloshes, so it probes with Kerker ON and divides the Kerker factor back
-out of the residual ratios to recover the bare d(G).
+e_{n+1}(G) = [1 − α·f_θ(G²)·d(G)]·ē(G), with d(G) = 1 − j(G) the response denominator and
+ē the mixer's extrapolate. `fit_multipole` unrolls that recurrence and backpropagates the
+residual to the pole weights and positions. `mixer="plain"` unrolls damped linear mixing
+(ē = e_n) and minimizes the worst-shell rate, the wrong objective when the deployment
+mixer is Pulay DIIS, as the first pass found. `mixer="diis"` (the default the benchmark
+uses) unrolls the actual Pulay recurrence, ē = Σ c_i e_i with the DIIS coefficients from
+the same bordered, Kerker-metric, Tikhonov-regularized solve `mixing.PulayMixer` runs, so
+the filter is trained to complement the low-G work DIIS already does with its history
+rather than duplicate it. The coefficients do not depend on the filter, but the e-history
+they extrapolate does, so the gradient flows. gradwave can differentiate through the Pulay
+recurrence, which other plane-wave mixers do not. `response_from_residuals` estimates d(G)
+per |G|-shell from a short SCF captured through the new `scf` `mixer_hook`; probing a
+d-band metal with plain damping sloshes, so it probes with Kerker ON and divides the
+Kerker factor back out of the residual ratios to recover the bare d(G).
 
-Measured (`benchmarks/bench_learned_precond.py`, `tests/unit/test_learned_precond.py`),
-gaussian 0.1 eV, PBE, energy-gated rhotol 1e-6, all filters reaching the Kerker
-energy to a few 1e-12 eV (fixed point unchanged, as designed):
+**Measured** (`benchmarks/bench_learned_precond.py`, `tests/unit/test_learned_precond.py`),
+gaussian 0.1 eV, PBE, energy-gated rhotol 1e-6, all filters reaching the Kerker energy to
+a few 1e-12 eV (fixed point unchanged, as designed).
 
-- synthetic two-scale response — learned three-pole spectral radius 0.82 → 0.50,
-  a 3.5x iteration ratio, and under a DIIS unroll the post-DIIS residual falls from
-  1e-5 to 1e-16. Isolates the mechanism from DFT cost.
-- fcc Al (30 Ry, 6x6x6) — Kerker 7 iters, learned 7 (tie). The DIIS-aware fit
-  clusters all three poles near q ≈ 1.0 A⁻¹, correctly recognizing that a single-
-  scale homogeneous metal has nothing for a radial filter to win, and does no harm.
-  (The plain-fit first pass took 9 here — a loss — which is what named the DIIS fix.)
-- fcc Cu (45 Ry, 6x6x6, 3s3p semicore d-band) — Kerker 10 iters, learned **8**, a
-  20 percent cut. The fit spreads its poles across q ≈ 0.07, 0.22, 0.70 A⁻¹, the
-  multi-scale shape a single Kerker pole cannot take. First real-system win.
+- Synthetic two-scale response. Learned three-pole spectral radius 0.82 → 0.50, a 3.5×
+  iteration ratio, and under a DIIS unroll the post-DIIS residual falls from 1e-5 to
+  1e-16. Isolates the mechanism from DFT cost.
+- fcc Al (30 Ry, 6×6×6). Kerker 7 iters, learned 7 (tie). The DIIS-aware fit clusters all
+  three poles near q ≈ 1.0 Å⁻¹, correctly recognizing that a single-scale homogeneous
+  metal has nothing for a radial filter to win, and does no harm. (The plain-fit first
+  pass took 9 here, a loss, which named the DIIS fix.)
+- fcc Cu (45 Ry, 6×6×6, 3s3p semicore d-band). Kerker 10 iters, learned **8**, a 20
+  percent cut. The fit spreads its poles across q ≈ 0.07, 0.22, 0.70 Å⁻¹, the multi-scale
+  shape a single Kerker pole cannot take. First real-system win.
 
-The Cu result also settles which objective is right, sharply: its *plain-mixing*
-spectral radius went up under the fit (0.39 → 0.82) while its DIIS iteration count
-went down (10 → 8). The plain rate is not the deployment rate; only unrolling the
-real mixer predicts the real win, and optimizing the plain rate actively mis-ranks
-filters. That is the load-bearing lesson of this section.
+The Cu result settles which objective is right, sharply. Its plain-mixing spectral radius
+went up under the fit (0.39 → 0.82) while its DIIS iteration count went down (10 → 8). The
+plain rate is not the deployment rate; only unrolling the real mixer predicts the real
+win, and optimizing the plain rate actively mis-ranks filters. That is the load-bearing
+lesson.
 
-**Cu₃Al harness + SCF oracle LANDED (2026-07-24)** (#60). `benchmarks/bench_learned_precond.py`
-gains `run_cu3al`, an L1₂ Cu₃Al intermetallic (the same QE-validated cell and
-pseudos as `test_metal_forces_vs_qe`) where two chemical species screen at two
-different lengths — the multi-scale-charge frontier this section named after the Cu
-win. It compares bare Kerker against the default DIIS-aware 3-pole fit and a wider
-4-pole fit. The companion `tests/integration/test_learned_precond_scf.py` is the
-end-to-end oracle that was missing: it deploys a genuinely multi-pole filter through
-the real SCF driver and asserts the converged free energy and eigenvalues match bare
-Kerker to solver precision, with f_θ(G=0)=0 — a preconditioner reshapes the path,
-never the fixed point. The honest scope is unchanged: the filter earns iterations
-only on a genuinely multi-scale charge response (the Cu d-band win, 10→8 iters), and
-on a single-scale homogeneous metal like Al it clusters its poles and ties Kerker
-within an iteration. The benchmark's iteration counts are measured at run time, not
-committed as fixtures, so the record here is the mechanism and its scope rather than a
-pinned number.
+**Cu₃Al harness + SCF oracle (2026-07-24, #60).** `benchmarks/bench_learned_precond.py`
+gains `run_cu3al`, an L1₂ Cu₃Al intermetallic (the same QE-validated cell and pseudos as
+`test_metal_forces_vs_qe`) where two chemical species screen at two different lengths, the
+multi-scale-charge frontier this section named after the Cu win. It compares bare Kerker
+against the default DIIS-aware 3-pole fit and a wider 4-pole fit. The companion
+`tests/integration/test_learned_precond_scf.py` is the end-to-end oracle that was missing,
+deploying a genuinely multi-pole filter through the real SCF driver and asserting the
+converged free energy and eigenvalues match bare Kerker to solver precision, with
+f_θ(G=0)=0. The honest scope is unchanged, the filter earns iterations only on a genuinely
+multi-scale charge response (the Cu d-band win, 10→8), and on a single-scale homogeneous
+metal like Al it clusters its poles and ties Kerker within an iteration. The benchmark's
+iteration counts are measured at run time, not committed as fixtures.
 
-Next, in rough priority. Push to more multi-scale systems (Cu₃Al and other
-intermetallics, PAW semicore, larger cells near the charge-sloshing cliff, FM
-metals near the Stoner boundary where wisdom.md asks for the χ₀-diagonal operator
-by name) to map where the win holds and how big it gets. Amortize the fit: right
-now each system pays a probe SCF and a fit, so the net gain is iteration count, not
-wall time on a single point. The gain is a filter trained once per chemistry
-family (the probe/fit data is the same shape as the learned-XC and ML-density-init
-training sets) and reused across a discovery scan, which is where the iteration cut
-compounds. The probe is still approximate (a diagonal, shell-averaged d from a
-handful of iterations); a cleaner route is to read the response straight from the
-implicit-differentiation machinery (`scf/implicit.py` already applies χ₀ and
-K_Hxc), which would make d exact and remove the probe SCF. And the filter is radial
-(G-only); the local-TF operator is spatial (r-only) — a learned operator that is
-both is the general form, and the two current preconditioners are its limits.
+**Magnetism and SOC, and where the charge-channel filter stops (measured).** The
+`precond_op` and `mixer_hook` hooks now reach `scf_noncollinear`, so the filter deploys on
+the collinear nspin=2 path (total block) and the noncollinear/SOC path (charge block, m⃗
+blocks keep their own step). fcc Pt nonmagnetic + SOC ties Kerker (9 vs 9) at a fixed point
+identical to 2e-11 eV, the wiring is correct through the spinor SCF and Pt's charge
+response is single-scale so the fit reproduces Kerker, as on Al. bcc Fe (nspin=2
+ferromagnet) loses (12 vs 13), the fit is on the charge (total) block but the FM
+convergence bottleneck is the magnetization channel (the Stoner mode with the measured
+gain near −6) which a charge-block operator cannot touch, and the noisy nspin=2 probe
+(plain damping wobbles the moment so d clamps) gives a slightly weak charge fit that costs
+the extra iteration. The learned filter is a charge-multi-scale tool, and it neither helps
+nor is meant to help a magnetization-channel problem.
 
-Magnetism and SOC, and where the charge-channel filter stops (measured). The
-`precond_op` and `mixer_hook` hooks now reach `scf_noncollinear` too, so the filter
-deploys on the collinear nspin=2 path (total block) and the noncollinear/SOC path
-(charge block, m⃗ blocks keep their own step). Two systems mapped the boundary:
-fcc Pt nonmagnetic + SOC ties Kerker (9 vs 9) at a fixed point identical to 2e-11
-eV — the wiring is correct through the spinor SCF, and Pt's charge response is
-single-scale, so the fit reproduces Kerker, exactly as on Al. bcc Fe (nspin=2
-ferromagnet) loses (12 vs 13): the fit is on the charge (total) block, but the FM
-convergence bottleneck is the magnetization channel — the Stoner mode with the
-measured gain near −6 — which a charge-block operator cannot touch, and the noisy
-nspin=2 probe (plain damping wobbles the moment, so d clamps) gives a slightly weak
-charge fit that costs the extra iteration. This is the honest scope: the learned
-filter is a charge-multi-scale tool, and it neither helps nor is meant to help a
-magnetization-channel problem.
+That pointed at what looked like the real magnetism fix, the operator wisdom.md asks for
+by name (the χ₀-diagonal preconditioner on the spin mode), a learned filter on the
+magnetization block. The infrastructure is built and tested, a G=0-alive filter form
+f_mag(G²) = w0 + Σ w_i·G²/(G²+q_i²) (the `const` term on `MultipoleKerkerPrecond`, since
+Kerker's G=0 zero would freeze the moment), a `BlockPrecond` composite running bare Kerker
+on the charge-total block and f_mag on the mag block, and the nspin=2 grid-spanning
+`precond_op` wiring in `scf`. The first hypothesis it enabled was wrong, and the
+measurement says so cleanly. The guess was that the near-critical uniform Stoner mode wants
+damping (small w0, since its spin susceptibility is large so its inverse is small). On fcc
+Ni near Stoner (PD_Ni NC, 45 Ry, 4×4×4, johnson, `benchmarks/bench_learned_precond.py ni`)
+a w0 sweep under johnson gives baseline 12 iters at m = 0.537 µB, w0 = 0.4 collapses the
+moment to 0 (23 iters to the wrong nonmagnetic branch), w0 = 0.6 gives 16 iters (holds the
+moment but slower), w0 = 0.8 gives 12 iters (recovers the baseline). Damping the uniform
+mode is backwards, the moment mode needs vigorous mixing to hold the ferromagnetic branch
+(wisdom.md's moment-collapse warning seen from the preconditioner side), and reducing it
+either collapses the moment or slows the run. There is no w0 that wins.
 
-That pointed at what looked like the real magnetism fix, the operator wisdom.md
-asks for by name (the χ₀-diagonal preconditioner on the spin mode) — a learned
-filter on the magnetization block. The infrastructure for it is built and tested:
-a G=0-alive filter form f_mag(G²) = w0 + Σ w_i·G²/(G²+q_i²) (the `const` term on
-`MultipoleKerkerPrecond`, since Kerker's G=0 zero would freeze the moment), a
-`BlockPrecond` composite that runs bare Kerker on the charge-total block and f_mag
-on the mag block, and the nspin=2 grid-spanning `precond_op` wiring in `scf`.
-
-The first hypothesis it enabled was wrong, and the measurement says so cleanly. The
-guess was that the near-critical uniform Stoner mode wants damping (small w0, since
-its spin susceptibility is large so its inverse is small). On fcc Ni near Stoner
-(PD_Ni NC, 45 Ry, 4x4x4, johnson, `benchmarks/bench_learned_precond.py ni`) a w0
-sweep under johnson gives: baseline 12 iters at m = 0.537 μB; w0 = 0.4 → the moment
-collapses to 0 (23 iters to the wrong nonmagnetic branch); w0 = 0.6 → 16 iters
-(holds the moment but slower); w0 = 0.8 → 12 iters (recovers the baseline). Damping
-the uniform mode is exactly backwards: the moment mode needs vigorous mixing to hold
-the ferromagnetic branch (wisdom.md's moment-collapse warning is the same physics
-seen from the preconditioner side), and reducing it either collapses the moment or
-just slows the run. There is no w0 that wins.
-
-The lesson refines the whole direction. Charge sloshing is a linear, diagonal-in-G
-problem where a filter shape is the right tool, and the Cu win is real. The FM
-convergence bottleneck is not that — it is branch selection, a nonlinear problem
-that vigorous moment mixing plus warm-start chains (johnson) already handle, and a
-linear filter on the mag block does not have the right form to help and can hurt. A
-mag-channel operator, if one helps at all, would have to come from the exact spin
-susceptibility (`scf/implicit.py`'s χ₀ path), not a hand-shaped or linearly-probed
-Kerker analog, and even then the headroom over johnson looks thin. Recorded as a
+The lesson refines the direction. Charge sloshing is a linear, diagonal-in-G problem where
+a filter shape is the right tool, and the Cu win is real. The FM convergence bottleneck is
+branch selection, a nonlinear problem that vigorous moment mixing plus warm-start chains
+(johnson) already handle, and a linear filter on the mag block does not have the right form
+and can hurt. A mag-channel operator, if one helps at all, would have to come from the
+exact spin susceptibility (`scf/implicit.py`'s χ₀ path), not a hand-shaped or linearly-
+probed Kerker analog, and even then the headroom over johnson looks thin. Recorded as a
 measured negative; the const-filter and BlockPrecond stay as reusable substrate.
 
-The clear remaining gains are on the charge channel, where the mechanism is proven:
-more multi-scale systems (Cu₃Al and other intermetallics, PAW semicore), and the
-amortized per-chemistry-family fit that turns the per-point iteration cut into a
-wall-time win across a discovery scan.
+**Next, in rough priority.** The clear gains are on the charge channel, where the mechanism
+is proven. Push to more multi-scale systems (Cu₃Al and other intermetallics, PAW semicore,
+larger cells near the charge-sloshing cliff) to map where the win holds and how big it gets.
+Amortize the fit, right now each system pays a probe SCF and a fit so the net gain is
+iteration count not wall time on a single point; the gain is a filter trained once per
+chemistry family (the probe/fit data is the same shape as the learned-XC and ML-density-
+init sets) and reused across a discovery scan, which is where the iteration cut compounds.
+A cleaner probe reads the response straight from the implicit-differentiation machinery
+(`scf/implicit.py` already applies χ₀ and K_Hxc), making d exact and removing the probe
+SCF. And the filter is radial (G-only) where the local-TF operator is spatial (r-only); a
+learned operator that is both is the general form, and the two current preconditioners are
+its limits.
 
 ## Second-order joint descent: exact Hvp Newton-CG (2026-07-27)
 
-The July performance campaign established that the remaining software gains are in
-iteration counts, not kernel speed (see wisdom.md, "GPU latency and precision").
-This section holds the largest iteration-count idea, second-order geometry
-optimization through exact Hessian-vector products, with the memory math and the
-application argument attached so it can be picked up cold.
+**Status: open; production joint substrate in flight.** The July performance campaign
+established that the remaining software gains are in iteration counts, not kernel speed
+(see wisdom.md, "GPU latency and precision"). This is the largest iteration-count idea,
+second-order geometry optimization through exact Hessian-vector products, with the memory
+math and the application argument attached.
 
-**The mechanism.** BFGS spends its early ionic steps learning curvature from
-rank-two updates, so every step is partly a probing move. A trust-region Newton-CG
-optimizer (Steihaug) needs the Hessian only through products $Hv$, and autograd
-supplies exact products by double-backward at 2 to 3 gradient-cost each. The trap
-in nested relaxation is that second derivatives of the SCF-converged energy contain
-the orbital response $d\psi/dR$, which is a Sternheimer solve per product. The
-joint functional from #123 dissolves the trap, since $E(\text{strain}, R, Z)$ is an
-explicit function of all its variables and double-backward on it is plain autograd.
-The CG loop then carries the electron-ion coupling that BFGS-on-ions has to learn
-the hard way. No plane-wave code has this combination, because none of them can
-afford exact $Hv$. Expected regime, 3 to 6 Newton steps at 5 to 15 CG products
-each against 15 to 50 quasi-Newton steps, which pays on soft-mode systems and
+**The mechanism.** BFGS spends its early ionic steps learning curvature from rank-two
+updates, so every step is partly a probing move. A trust-region Newton-CG optimizer
+(Steihaug) needs the Hessian only through products $Hv$, and autograd supplies exact
+products by double-backward at 2 to 3 gradient-cost each. The trap in nested relaxation is
+that second derivatives of the SCF-converged energy contain the orbital response
+$d\psi/dR$, a Sternheimer solve per product. The joint functional from #123 dissolves the
+trap, since $E(\text{strain}, R, Z)$ is an explicit function of all its variables and
+double-backward on it is plain autograd. The CG loop then carries the electron-ion coupling
+that BFGS-on-ions has to learn the hard way. No plane-wave code has this combination,
+because none of them can afford exact $Hv$. Expected regime, 3 to 6 Newton steps at 5 to 15
+CG products each against 15 to 50 quasi-Newton steps, which pays on soft-mode systems and
 loses on 4-atom cells that relax in 2 steps.
 
-**Memory envelope (the one hard requirement).** Retained activations for one
-gradient pass scale as roughly $3 n_{bk} N_{grid} \times 16$ B, and double-backward
-holds 2 to 3 times that. For 64-atom Si at 45 Ry ($n_{pw} \approx 44$k, grid
-$\approx 88^3$, $\approx 290$ band-k pairs) that is about 9 GB for the gradient
-graph and 20 to 27 GB for an $Hv$, and a 128-atom cell reaches 150 GB. Naive
-double-backward therefore fits nothing we own. Band-chunk gradient checkpointing
-(recompute the FFT sandwiches inside backward, retain per-chunk summaries) drops
-the 64-atom footprint to 1 to 2 GB at 1.5 to 2x flops per product, and the
-chunking to hang it on already exists in `core/batch.py`. Checkpointing is a
-prerequisite, not an optimization.
+**Memory envelope (the one hard requirement).** Retained activations for one gradient pass
+scale as roughly $3 n_{bk} N_{grid} \times 16$ B, and double-backward holds 2 to 3 times
+that. For 64-atom Si at 45 Ry ($n_{pw} \approx 44$k, grid $\approx 88^3$, $\approx 290$
+band-k pairs) that is about 9 GB for the gradient graph and 20 to 27 GB for an $Hv$, and a
+128-atom cell reaches 150 GB. Naive double-backward fits nothing we own. Band-chunk
+gradient checkpointing (recompute the FFT sandwiches inside backward, retain per-chunk
+summaries) drops the 64-atom footprint to 1 to 2 GB at 1.5 to 2× flops per product, and the
+chunking to hang it on already exists in `core/batch.py`. Checkpointing is a prerequisite,
+not an optimization.
 
-**Why glassy insulators are the launch application.** Low-thermal-conductivity
-glasses and anisotropic heat conduction are phonon-engineering problems on large,
-gapped, soft-mode cells. Those cells are simultaneously the worst case for BFGS,
-the best case for exact curvature, and inside the insulator coverage the current
-joint machinery already has. Two byproducts land on the same graph. The converged
-joint Hessian projected onto the ionic block is the dynamical matrix, so Hvp plus
-Lanczos gives matrix-free phonons with the supercell-phonons module as the
-self-oracle. And a second application of the same trick ($Hv$ of $Hv$) gives
-third-order anharmonic force constants without displacement combinatorics, which
-is the expensive ingredient of thermal-conductivity design.
+**Why glassy insulators are the launch application.** Low-thermal-conductivity glasses and
+anisotropic heat conduction are phonon-engineering problems on large, gapped, soft-mode
+cells. Those cells are simultaneously the worst case for BFGS, the best case for exact
+curvature, and inside the insulator coverage the current joint machinery already has. Two
+byproducts land on the same graph. The converged joint Hessian projected onto the ionic
+block is the dynamical matrix, so Hvp plus Lanczos gives matrix-free phonons with the
+supercell-phonons module as the self-oracle. And a second application of the same trick
+($Hv$ of $Hv$) gives third-order anharmonic force constants without displacement
+combinatorics, the expensive ingredient of thermal-conductivity design.
 
-**Metals.** The restriction to insulators is a sequencing artifact. What breaks at
-a Fermi surface is frozen occupations (#129), not the differentiation. With the
-Marzari-Vanderbilt occupation block, the Mermin free energy is again an explicit
-smooth functional and the same double-backward goes through. Metallic relaxations
-are the ill-conditioned ones, so exact curvature plausibly pays more there, not
-less.
+**Metals.** Smooth at the functional level, a measured negative at first order (PR #126,
+closed 2026-07-27 without merging). Three occupation-block strategies were tried, full
+subspace rotation, detached frozen occupations, and a preconditioned Marzari-Vanderbilt
+block with a degeneracy-robust eigh. The MV electronic solve itself is exact and eigh-free
+(smeared Al converges to the SCF free energy within 1.2e-7 eV in 27 closures, occupations
+to 1e-10), but the joint co-descent either never moved the atoms (the frozen-occupation
+head-to-head was an artifact) or, once genuinely live, inverted the H-apply ratio to
+~0.4x against nested BFGS, versus 7.8x for insulators. The bottleneck is ionic/ensemble
+conditioning, not the occupation model, which is exactly the case for exact curvature.
+Whether Newton-CG fixes it is the open question this plan tests, unresolved by #126,
+which was first-order only.
 
-**What remains, in order.**
+**What remains, in order** (items 1-4 landed 2026-07-27, the production substrate in #139
+and the gradgradcheck audit, chunk checkpointing, and Steihaug optimizer with Si benchmarks
+in #148; the metals research branch `research/joint-descent-metals` closed unmerged in #126
+and its worktree is prunable).
 
-1. The production joint substrate (in flight, `feat/joint-descent-production`).
-2. A double-differentiability audit of the joint energy graph, `gradgradcheck` on
-   a tiny cell. FFTs are linear and free, Cholesky is doubly differentiable in
-   torch, and the known blocker is any custom `autograd.Function` without a
-   double-backward, RobustEigh in particular. The insulator path avoids eigh via
-   Cholesky orthonormalization, so the audit likely passes there as-is.
+1. The production joint substrate (landed, #139).
+2. A double-differentiability audit of the joint energy graph, `gradgradcheck` on a tiny
+   cell. FFTs are linear and free, Cholesky is doubly differentiable in torch, and the
+   known blocker is any custom `autograd.Function` without a double-backward, RobustEigh in
+   particular. The insulator path avoids eigh via Cholesky orthonormalization, so the audit
+   likely passes there as-is.
 3. Band-chunk checkpointing through the density build (the memory table above).
-4. The optimizer itself, Steihaug trust-region Newton-CG over the joint variables,
-   with a preconditioned CG loop (Pfrommer-style ionic block, Teter-like
-   electronic block) and the Cholesky parametrization handling gauge.
-5. The validation ladder with one honest go/no-go number, total H-applies against
-   nested BFGS and first-order joint descent on perturbed Si-16, then Si-64, then
-   an amorphous cell near 100 atoms. The method earns default status only if the
-   H-apply count drops on the amorphous cell.
+4. The optimizer itself, Steihaug trust-region Newton-CG over the joint variables, with a
+   preconditioned CG loop (Pfrommer-style ionic block, Teter-like electronic block) and the
+   Cholesky parametrization handling gauge.
+5. The validation ladder with one honest go/no-go number, total H-applies against nested
+   BFGS and first-order joint descent on perturbed Si-16, then Si-64, then an amorphous cell
+   near 100 atoms. The method earns default status only if the H-apply count drops on the
+   amorphous cell.
 6. The phonon byproduct check, Hvp-Lanczos dynamical matrix against
    `postscf/phonons_supercell.py`.
 7. Metals, gated solely on #129.
-8. The third-derivative pipeline toward $\kappa$ as the follow-on application,
-   once 1 through 5 hold.
+8. The third-derivative pipeline toward $\kappa$ as the follow-on, once 1 through 5 hold.
+
+## Batched multi-structure SCF, and the EOS-on-GPU question
+
+**Status: open; profiled, the batched path is the main structural gain.** Would an EOS go
+faster by batching several volumes on the GPU at once?
+
+Measured on the asus RTX 3050 for the 1-atom fcc Pt EOS (40/400 Ry, 12×12×12), a single
+point sits at 100% nvidia-smi util but only 24.7 W of draw (the card's TGP is 35 to 80 W)
+and 2.6 of 6 GB. The 100% util flag only means a kernel was in flight during the sample. The
+low power and low memory say the GPU is not compute-saturated. For a system this small it is
+launch and latency bound on many tiny kernels (small matmuls, a 35^3 FFT, per-k Davidson
+steps), so there is real headroom. Yes, concurrency would help. Three ways, cheapest first.
+
+- Run several volumes as concurrent processes sharing the GPU, plain backgrounding or CUDA
+  MPS. Zero code. Two points fit in 6 GB (2 × 2.6). Likely 1.5 to 1.8× on a launch-bound
+  system. The catch is that the current EOS chains the volumes with `start_from` warm
+  starts, so they are serial by construction. Dropping the chain trades the warm-start
+  iteration savings for the concurrency, close to a wash at N=2 but a win as the GPU empties.
+- Batched multi-structure SCF, the main structural gain. Stack the volumes as independent
+  k-blocks in one padded generalized Davidson, the way the batched Davidson already stacks
+  k-points, so the small per-volume GEMMs become one big GEMM and the launch overhead
+  amortizes. The SCF loop has to carry per-volume densities and potentials and mix them
+  independently while sharing the linear algebra, substantial feature work. This is the
+  version that fills the card. It generalizes past EOS to any embarrassingly-parallel set of
+  small structures (displacement stencils for phonons, rattled configs for training data, a
+  k-convergence sweep).
+- CUDA streams to overlap independent kernels. Hard to orchestrate from PyTorch eager, low
+  priority.
+
+This only pays for small systems where a single SCF underfills the GPU. The slab already
+uses more of the card, so batch structures for the cheap cases (bulk EOS, phonon stencils)
+and run the heavy cases one at a time. The cleanest first target is a spin-spiral /
+magnetic-dispersion sweep (`examples/fe_spin_spiral.py`). Every angle theta is the identical
+cell, k-mesh, and band count, same FFT dims and tensor shapes, so the batch has zero
+raggedness; only the per-point convergence count differs. That is cleaner than the EOS,
+where the cells (and FFT boxes) vary with volume. The one wrinkle is the frustrated large-
+angle points needing many more iterations than the collinear ones, so a lockstep batched
+solve either over-iterates the easy members or needs per-member convergence masking. The
+real blocker is the hardware, not the workload, on the RTX 3050 the sweep is fp64-bound and
+7.8× slower than the CPU (it runs as concurrent CPU processes today). On a card with real
+fp64 (A100/H100, fp64 = 1/2 fp32) and tens of GB, stacking these identical independent SCFs
+to fill the device is where the batched path first pays off.
+
+The best fit is GGA insulators. They are fixed-occupation, converge in few iterations, and
+hold a small grid, so a single one badly underfills the card, exactly the regime where
+stacking wins. A batch of GGA insulator structures is also the shape of a learned-XC
+training set and an EOS or convergence sweep, so this feature and the meta-GGA training work
+reinforce each other.
+
+## Gamma-only real wavefunctions for slabs and molecules
+
+**Status: representation built and validated; the FFT speedup did not appear on this CPU.**
+At the Gamma point the orbitals can be taken real, because time reversal makes ψ(−G) = ψ*(G),
+so only half the plane-wave sphere is independent. The foundation is built and validated in
+`core/gamma.py`, gated to machine precision against the complex path (apply 1e-13, frozen-
+potential eigenvalues 5e-14). It stores the half sphere, runs the local term on
+`irfftn`/`rfftn`, and solves the eigenproblem as a real symmetric one in a feature embedding
+where the half-sphere metric is the plain dot product, so the standard Davidson applies
+unchanged.
+
+The premise was a roughly 2× real-FFT win on the hottest kernel. That did not appear on the
+available CPU. The forward-plus-inverse real transform measured 0.75× to 1.25× the complex
+pair on non-power-of-two boxes at 63^3 and 72^3, so the H-apply came out 0.97× in isolation,
+and the full solver ran slower still (directionally 0.6× to 0.8×) once the per-apply overhead
+compounds over the Davidson iterations. The real-transform advantage is grid-size and library
+dependent, and MKL did not deliver it here. The correctness is solid, so the remaining work is
+measurement and integration.
+
+- Re-measure on a GPU. cuFFT's real transform behaves differently from MKL's, and the memory
+  story is better on the GPU, so the win may exist there. Check this first before investing
+  more.
+- Wire it into the SCF loop behind a flag, single Gamma k-point, insulators and molecules
+  first, then metals at Gamma with smeared occupations. The density build, mixing, and energy
+  assembly are unchanged, only the diagonalize call swaps.
+- The memory angle stands on its own. The real-space fields are half the size, so this pairs
+  with the size-ceiling item below independent of any speedup.
+
+## Raising the system-size ceiling past the dense-allocation cliff
+
+**Status: open, when-you-need-it. The fix is a tiling change, not an architecture change.**
+The GPU probe found peak memory scaling roughly linearly to about 96 atoms on the 6 GB RTX
+3050, then a hard cliff at 128 atoms from a single roughly 37 GB allocation, an O(npw²) dense
+step (complex128 around 7.7 GB times the eigh workspace copies) that spikes at `npw` near 22k.
+The practical ceiling is about 96 to 110 atoms at that cutoff, and the cliff is a specific
+dense allocation, not gradual fill, so it is tileable rather than fundamental.
+
+- Identify the O(npw²) step. The dense object that scales with the square of the plane-wave
+  count, most likely a subspace-related workspace or the eigensolve's internal copies; the
+  first task is to confirm which allocation trips at 128 atoms with a memory profile.
+- Tile or avoid forming it. Block the offending contraction so the peak is bounded the way
+  `BatchedHamiltonian.apply` and `density_b` already band-chunk their dense-grid temporaries,
+  or restructure the step to never materialize the full O(npw²) array.
+
+This only matters if larger cells become a goal, defects, bigger slabs, or supercells for
+finite-q phonons. But it is the one thing standing between the sub-100-atom validation regime
+and running the kind of system where the code would do new science. The ISDF work above is the
+complementary approach, it lowers the operation count where this item lowers the peak memory.
+
+## Davidson subspace Gram: conj-copy memory spike at large nk
+
+**Status: open, deferred; two cheap fixes identified.** Measured on the A100 384-k FePt run
+(job 14076535, 2026-07-18), with fragmentation already fixed (expandable_segments), the run
+died at 32.2 GiB allocated when `davidson_batched`'s subspace overlap
+`torch.einsum("kig,kjg->kij", v.conj(), hv)` requested another 6.68 GiB, since einsum
+materializes `.conj()` as a full copy of the (nk, nsub, 2npw) subspace block. Two cheap fixes
+when it next matters, chunk the Gram over k (the result is only (nk, nsub, nsub), tiny), or
+restructure to avoid the conj copy (`(hv @ v.mH)`-style batched matmul conjugates lazily).
+Deferred because the magnetic-IBZ fold (60–100 k instead of 384) removed the pressure, but any
+future dense-k run without magnetic symmetry hits the same wall at nk·nsub·2npw·16 B ≈ 7 GiB
+per copy.
+
+## One-center ddd analytic derivative
+
+**Status: open, low priority.** The one-center ddd is a named micro-cost from the performance
+audit, 5% of the PAW profile through an autograd backward per iteration. It is already compiled
+when `compile_xc=True` (the `energy_and_ddd` path is a single backward), so the remaining
+question is only whether an analytic quadrature derivative beats the compiled autograd, a small
+isolated experiment, not a feature.
 
 # Done and resolved
 
-Kept for the reasoning. Each of these is either landed in the code or settled as a
-measured negative.
+Kept for the reasoning. Each is either landed in the code or settled as a measured negative.
 
 ## D3(BJ) dispersion correction (DONE)
 
 Landed as an opt-in, SCF-independent Grimme D3(BJ) correction (#59, #69),
-`postscf/dispersion.py`. A real-space image sum over a cutoff (reusing the Ewald
-image enumeration and the shift-before-norm double-backward guard) with exponential
-coordination numbers, CN-interpolated C6, C8 = 3 C6 √(Q_A Q_B), and Becke–Johnson
-damping; positions and cell in Å, energy in eV. Forces are autograd on positions and
-stress is autograd on strain, so the correction matches the suite's
-differentiable-energy ethos rather than reimplementing analytic derivatives. The BJ
-damping presets for 13 functionals are vendored in `postscf/_d3_params.py`
-(regenerated from Grimme's reference data by `scripts/gen_d3_params.py`). Wired opt-in
-through `inputs.py` (`DispersionParams`, a `dispersion:` block accepting `true`/`false`
-or an override dict), `api.py` (folds E_disp into the reported total and emits a
-dispersion summary), the checkpoint energy dict, and the ASE calculator (#69), so
-ASE-driven relaxations and MD carry it. It degrades to a no-op on elements without C6
-coverage or a missing preset. Self-oracle tests (`tests/unit/test_dispersion.py`,
-`tests/unit/test_calculator_dispersion.py`): forces and stress vs finite differences
-of the dispersion energy on a rattled low-symmetry cell, an independent scalar-loop
-transcription of the energy, a positions gradcheck, the ΣF=0 sum rule, and the
-calculator's on-minus-off shift matching the raw dispersion term. D4 was not
-attempted.
+`postscf/dispersion.py`. A real-space image sum over a cutoff (reusing the Ewald image
+enumeration and the shift-before-norm double-backward guard) with exponential coordination
+numbers, CN-interpolated C6, C8 = 3 C6 √(Q_A Q_B), and Becke–Johnson damping; positions and
+cell in Å, energy in eV. Forces are autograd on positions and stress autograd on strain, so the
+correction matches the suite's differentiable-energy ethos rather than reimplementing analytic
+derivatives. The BJ damping presets for 13 functionals are vendored in `postscf/_d3_params.py`
+(regenerated from Grimme's reference data by `scripts/gen_d3_params.py`). Wired opt-in through
+`inputs.py` (`DispersionParams`, a `dispersion:` block accepting `true`/`false` or an override
+dict), `api.py` (folds E_disp into the reported total and emits a dispersion summary), the
+checkpoint energy dict, and the ASE calculator (#69), so ASE-driven relaxations and MD carry
+it. It degrades to a no-op on elements without C6 coverage or a missing preset. Self-oracle
+tests (`tests/unit/test_dispersion.py`, `tests/unit/test_calculator_dispersion.py`), forces and
+stress vs finite differences of the dispersion energy on a rattled low-symmetry cell, an
+independent scalar-loop transcription of the energy, a positions gradcheck, the ΣF=0 sum rule,
+and the calculator's on-minus-off shift matching the raw dispersion term. D4 was not attempted.
 
 ## NLCC core-correction forces, including meta-GGA (DONE)
 
-Ungated the nonlinear-core-correction force term in `forces()` (#64, then #68 for
-meta-GGA). An NLCC pseudo adds a frozen pseudo-core charge ρ_core(r−R_I) to the XC
-argument, whose force is −∫ v_xc dρ_core/dR_I. Because the suite is autograd-based
-this is the gradient of E_xc(ρ + ρ_core(pos)) w.r.t. atomic positions with the SCF
-density detached — Hellmann-Feynman, stationary at convergence, so v_xc carries the
-full LDA/GGA gradient correction automatically. `setup_common` factors the core
-density into a position-independent |G| form factor plus a differentiable-in-positions
-assembly through the structure factor, reused by both the frozen-SCF build and the
-force path. The meta-GGA extension (#68) rebuilds τ_valence from the converged
-coefficients (τ_core = 0, matching the SCF's E_xc assembly) and threads it through
-`xc.energy` and `spin_xc_energy`; the LDA/GGA path is byte-for-byte unchanged since
-`needs_tau=False` leaves τ as `None`. Self-oracle tests match central finite
-differences of the total energy to ~1e-8 eV/Å (`test_forces_nlcc`,
-`test_forces_nlcc_metagga`), the latter also guarding the τ argument against being
-silently dropped. The USPP / noncollinear meta-GGA NLCC edge stays gated (τ is not
+Ungated the nonlinear-core-correction force term in `forces()` (#64, then #68 for meta-GGA). An
+NLCC pseudo adds a frozen pseudo-core charge ρ_core(r−R_I) to the XC argument, whose force is
+−∫ v_xc dρ_core/dR_I. Because the suite is autograd-based this is the gradient of E_xc(ρ +
+ρ_core(pos)) w.r.t. positions with the SCF density detached, Hellmann-Feynman, stationary at
+convergence, so v_xc carries the full LDA/GGA gradient correction automatically. `setup_common`
+factors the core density into a position-independent |G| form factor plus a differentiable-in-
+positions assembly through the structure factor, reused by both the frozen-SCF build and the
+force path. The meta-GGA extension (#68) rebuilds τ_valence from the converged coefficients
+(τ_core = 0, matching the SCF's E_xc assembly) and threads it through `xc.energy` and
+`spin_xc_energy`; the LDA/GGA path is byte-for-byte unchanged since `needs_tau=False` leaves τ
+as `None`. Self-oracle tests match central finite differences of the total energy to ~1e-8
+eV/Å (`test_forces_nlcc`, `test_forces_nlcc_metagga`), the latter also guarding the τ argument
+against being silently dropped. The USPP / noncollinear meta-GGA NLCC edge stays gated (τ is not
 stored on the batched-k / USPP results).
 
-## Magnetic space groups (Shubnikov symmetry) for non-collinear k-reduction
+## Magnetic space groups (Shubnikov symmetry) for non-collinear k-reduction (DONE)
 
-Every magnetic non-collinear run today uses the full k-mesh — `scf_noncollinear`
-(and the spinor PAW loop) refuse `use_symmetry` for any nonzero m⃗, because the
-existing spglib machinery only knows the paramagnetic group. That is the safe
-choice, not the cheap one: the FePt MAE runs carry 384 unreduced k-points, and the
-k-cost is the whole reason the force-theorem item above matters.
+**LANDED (2026-07-18).** Every magnetic non-collinear run previously used the full k-mesh, since
+`scf_noncollinear` (and the spinor PAW loop) refused `use_symmetry` for any nonzero m⃗, the
+existing spglib machinery only knowing the paramagnetic group. The safe choice, not the cheap
+one, the FePt MAE runs carried 384 unreduced k-points.
 
-The physics: a finite m⃗ changes the symmetry group itself. Time reversal dies (no
-k ↔ −k Kramers folding — the code already handles the *nonmagnetic* SOC case, where
-TR survives and the IBZ test pins it). And the moment filters the point group,
-because m⃗ is an axial vector (transforms as det(R)·R) locked to the lattice by SOC:
-an operation survives only if it maps the magnetization field onto itself.
-Operations that flip m⃗ survive only *combined with time reversal* — the anti-unitary
-half of the magnetic (Shubnikov) group, which relates band energies at Rk without
-being a unitary symmetry of H. Concretely for L1_0 FePt (paramagnetic D4h, 16 ops
-+ TR): moments along c leave the unitary C4h (8 ops, ~8x k-reduction); moments
-in-plane leave ~C2h (4 ops, ~4x). The easy-axis state is literally more symmetric
-than the hard-axis one — the anisotropy, seen group-theoretically.
+The physics. A finite m⃗ changes the symmetry group. Time reversal dies (no k ↔ −k Kramers
+folding, the code already handles the nonmagnetic SOC case where TR survives). And the moment
+filters the point group, because m⃗ is an axial vector (transforms as det(R)·R) locked to the
+lattice by SOC, so an operation survives only if it maps the magnetization field onto itself.
+Operations that flip m⃗ survive only combined with time reversal, the anti-unitary half of the
+magnetic (Shubnikov) group, relating band energies at Rk without being a unitary symmetry of H.
+For L1_0 FePt (paramagnetic D4h, 16 ops + TR), moments along c leave the unitary C4h (8 ops,
+~8× reduction), moments in-plane leave ~C2h (4 ops, ~4×). The easy-axis state is literally more
+symmetric than the hard-axis one, the anisotropy seen group-theoretically.
 
-What to build, on top of the existing spglib path: (1) filter the space group by the
-axial-vector action on the moment field (and classify the surviving anti-unitary
-R·T elements); (2) symmetrize (ρ, m⃗) with m⃗ transformed as an axial vector — and
-the on-site becsum's four Pauli channels likewise, mirroring `becsum_sym`; (3) fold
-k with the magnetic little groups, using the anti-unitary elements for band-energy
-relations only. spglib ships magnetic space-group (Shubnikov) support since 2.0, so
-the group identification is available off the shelf; the work is the axial-vector
-symmetrization and the k-folding bookkeeping.
+All four phases are in. (1) `magnetic_spacegroup(sg, magmoms, cell)` in symmetry.py, the axial-
+vector filter det(S)·S·m⃗ classifying each paramagnetic op as unitary / anti-unitary (op·T) /
+dropped, cross-checked against spglib.get_magnetic_symmetry. (2) `reduce_mesh_magnetic`, the
+shared orbit fold with unitary {W⁻ᵀ} ∪ anti-unitary {−W⁻ᵀ}, grey group (m⃗=0) reproducing the
+paramagnetic+TR fold bit-for-bit. (3) `MagneticSymmetrizer` (grid ρ, m⃗, RhoSymmetrizer maps on
+the combined op list + per-op axial 3×3 with s_T=−1 on the anti set) and
+`MagneticBecsumSymmetrizer` (BecsumSymmetrizer D^l blocks + the same axial across the Pauli
+channels + conj on anti ops). (4) `setup_system`/`setup_uspp` take `magmoms=`, both spinor loops
+consume the magnetic system and re-symmetrize (ρ, m⃗[, becsum]) each iteration, and the collinear
+loops reject magnetic systems. Measured folds, FePt m∥[001] (6,6,4) 144→30 k (equals the para+TR
+IBZ, inversion is unitary for axial vectors), m∥[100] 144→48, bcc Fe m∥z 64→13. Validation
+(`tests/unit/test_magnetic_symmetry.py`, `tests/integration/test_magnetic_ibz.py`), SOC FePt
+magnetic IBZ ≡ full mesh to 5.0e-11 eV, polar (inversion-broken) FePt exercises the anti-unitary-
+only fold (27→6 where unitary ops alone give 9), spinor PAW Si grey group ≡ symmetrized collinear
+scf_uspp to 5.1e-11 eV.
 
-**LANDED (2026-07-18).** All four phases are in: (1) `magnetic_spacegroup(sg,
-magmoms, cell)` in symmetry.py — the axial-vector filter det(S)·S·m⃗ classifying
-each paramagnetic op as unitary / anti-unitary (op·T) / dropped, cross-checked
-against spglib.get_magnetic_symmetry; (2) `reduce_mesh_magnetic` — the shared
-orbit fold with unitary {W⁻ᵀ} ∪ anti-unitary {−W⁻ᵀ}, grey group (m⃗=0)
-reproducing the paramagnetic+TR fold bit-for-bit; (3) `MagneticSymmetrizer`
-(grid ρ, m⃗: RhoSymmetrizer maps on the combined op list + per-op axial 3×3 with
-s_T=−1 on the anti set) and `MagneticBecsumSymmetrizer` (BecsumSymmetrizer D^l
-blocks + the same axial across the Pauli channels + conj on anti ops); (4)
-`setup_system`/`setup_uspp` take `magmoms=`, both spinor loops consume the
-magnetic system and re-symmetrize (ρ, m⃗[, becsum]) each iteration, and the
-collinear loops reject magnetic systems. Measured folds: FePt m∥[001] (6,6,4)
-144→30 k (equals the para+TR IBZ — inversion is unitary for axial vectors);
-m∥[100] 144→48; bcc Fe m∥z 64→13. Validation (tests/unit/
-test_magnetic_symmetry.py, tests/integration/test_magnetic_ibz.py): SOC FePt
-magnetic IBZ ≡ full mesh to 5.0e-11 eV; polar (inversion-broken) FePt exercises
-the anti-unitary-only fold (27→6 where unitary ops alone give 9); spinor PAW Si
-grey group ≡ symmetrized collinear scf_uspp to 5.1e-11 eV. The force-theorem
-MAE evaluator on the magnetic IBZ is the natural next stage.
-
-The caveat the original plan carried — "do not reduce each orientation to its
-own IBZ for MAE differences" — turned out to be wrong for this folding: the
-magnetic-IBZ sum is exactly the full-mesh sum re-weighted (measured 5e-11 eV,
-five orders below the meV signal), so each orientation's k-discretization error
-is identical to its full-mesh value and the common-mode cancellation in
-E(hard) − E(easy) survives per-orientation folding untouched. The caveat only
-bites if the two orientations use *different underlying meshes*. Keep the same
-(n1,n2,n3) mesh for both and fold each by its own magnetic group ([001]→30 k,
-[100]→48 k at (6,6,4)): 3.7× on the MAE pair, exactness preserved.
+The caveat the original plan carried, "do not reduce each orientation to its own IBZ for MAE
+differences," turned out wrong for this folding. The magnetic-IBZ sum is exactly the full-mesh sum
+re-weighted (measured 5e-11 eV, five orders below the meV signal), so each orientation's k-
+discretization error is identical to its full-mesh value and the common-mode cancellation in
+E(hard) − E(easy) survives per-orientation folding. The caveat only bites if the two orientations
+use different underlying meshes. Keep the same (n1,n2,n3) mesh for both and fold each by its own
+magnetic group ([001]→30 k, [100]→48 k at (6,6,4)), 3.7× on the MAE pair, exactness preserved.
 
 ## RMM-DIIS solver and whole-step CUDA graph (both TRIED, measured negatives)
 
-Prompted by the GPU profile above (dense-LA-bound, 32-46 percent launch gap), two of
-the three levers it suggested were built and measured, and neither pays for small
-cells.
+Prompted by the GPU profile (dense-LA-bound, 32-46 percent launch gap), two of its three candidate
+optimizations were built and measured, and neither pays for small cells.
 
-RMM-DIIS (a `solvers/rmm_diis.py` prototype, since removed) replaces the block
-Davidson's growing Rayleigh-Ritz subspace with per-band residual minimization, so it
-has no per-round eigh and no m x m subspace GEMM - the 64 percent the profile flagged.
-It needed two fixes to converge at all: a units-correct preconditioner (teter_b is a
-dimensionless filter, right for Davidson subspace expansion but not for a direct Jacobi
-step) and an exact line search (Teter-Payne preconditioned CG - a fixed step does not
-converge). After both it converges on a fixed operator (synthetic batched Hermitian, err
-2e-11) but in about 100 iterations to the block Davidson's 22, at two H-applies per
-iteration. In the real SCF it is worse than slow: on smeared fcc Al it hit the iteration
-cap without converging and returned the wrong energy (-368 vs -1828 eV), at 1,548,800
-band-applies against Davidson's 10,512 (147x). The reasons are exactly the textbook
-ones: subspace methods converge in far fewer iterations, the SCF drives the solver with
-a loose-early tolerance schedule that a residual method handles poorly, and a metal's
-near-degenerate bands break the per-band tracking. RMM-DIIS is a large-system solver
-(where the O(N^3) subspace eigh/GEMM finally dominates) and an MD warm-start refiner, not
-a small-cell Davidson replacement - and the dense LA it removes, while 64 percent of GPU
-time, is cheap in absolute terms at small cell size. Removed the prototype.
+RMM-DIIS (a `solvers/rmm_diis.py` prototype, since removed) replaces the block Davidson's growing
+Rayleigh-Ritz subspace with per-band residual minimization, so it has no per-round eigh and no
+m×m subspace GEMM, the 64 percent the profile flagged. It needed two fixes to converge at all, a
+units-correct preconditioner (teter_b is a dimensionless filter, right for Davidson subspace
+expansion but not for a direct Jacobi step) and an exact line search (Teter-Payne preconditioned
+CG, a fixed step does not converge). After both it converges on a fixed operator (synthetic
+batched Hermitian, err 2e-11) but in about 100 iterations to the block Davidson's 22, at two
+H-applies per iteration. In the real SCF it is worse than slow, on smeared fcc Al it hit the
+iteration cap without converging and returned the wrong energy (−368 vs −1828 eV), at 1,548,800
+band-applies against Davidson's 10,512 (147×). The reasons are the textbook ones, subspace methods
+converge in far fewer iterations, the SCF drives the solver with a loose-early tolerance schedule
+a residual method handles poorly, and a metal's near-degenerate bands break the per-band tracking.
+RMM-DIIS is a large-system solver (where the O(N³) subspace eigh/GEMM finally dominates) and an MD
+warm-start refiner, not a small-cell Davidson replacement, and the dense LA it removes, while 64
+percent of GPU time, is cheap in absolute terms at small cell size. Removed the prototype.
 
-The whole-step CUDA graph is blocked upstream: `torch.linalg.eigh` is not CUDA-graph
-capturable (it does a host-side info check), and it sits in the Davidson inner loop every
-expansion round, so a whole-step capture fragments into tiny pieces around each eigh
-rather than removing the launch gap. It genuinely needs the eigh out of the hot loop,
-which was RMM-DIIS's job, and RMM-DIIS is not viable here. So the 32-46 percent launch
-gap is real but not reclaimable by either lever without a solver that avoids eigh
-altogether. Net: the measured GPU bottleneck resists these fixes because the eigh is both
-cliff-hit and non-capturable and removing the subspace method costs convergence speed;
-the durable levers stay throughput batching and a datacenter fp64 GPU.
+The whole-step CUDA graph is blocked upstream, `torch.linalg.eigh` is not CUDA-graph capturable
+(it does a host-side info check) and sits in the Davidson inner loop every expansion round, so a
+whole-step capture fragments into tiny pieces around each eigh rather than removing the launch gap.
+It genuinely needs the eigh out of the hot loop, which was RMM-DIIS's job. So the 32-46 percent
+launch gap is real but not reclaimable by either optimization without a solver that avoids eigh
+altogether.
 
-UPDATE (2026-07-28): the "fragments into tiny pieces around each eigh" concern
-above was tested directly rather than assumed. Building on the sync-free
-Davidson skeleton (branch-free per round, a prerequisite for capture) as the
-substrate, a round's post-eigh math (Rayleigh-Ritz combination, residual,
-Teter precondition, orthonormalize, restart) was captured per (subspace-dim,
-n_add) shape and replayed against real cached-shape recurrences from a real
-SCF run. It reproduces eager output bit-for-bit -- the fragmentation itself
-is not the problem -- but replays at 1.0x eager speed, same verdict as the
-apply-only probe in docs/manual/performance.md. There is no launch gap in this
-part of the loop either. The investigation was worth running anyway: isolating
-every op in a round found `torch.linalg.qr` on the tall-skinny expansion-
-direction shape costing more than the Hamiltonian apply itself on an RTX 3050,
-which a CPU-offload (mirroring this same eigh's own fix) turns into a real,
-measured 1.55-1.67x end-to-end win -- see "CUDA batched-QR CPU-offload" in
-docs/manual/performance.md. So: no graphed solver, but a real fix came out of
-looking for one.
+UPDATE (2026-07-28). The "fragments into tiny pieces around each eigh" concern was tested directly
+rather than assumed. Building on the sync-free Davidson skeleton (branch-free per round, a
+prerequisite for capture), a round's post-eigh math (Rayleigh-Ritz combination, residual, Teter
+precondition, orthonormalize, restart) was captured per (subspace-dim, n_add) shape and replayed
+against real cached-shape recurrences from a real SCF run. It reproduces eager output bit-for-bit,
+the fragmentation itself is not the problem, but replays at 1.0× eager speed, same verdict as the
+apply-only probe in docs/manual/performance.md. There is no launch gap in this part of the loop
+either. The investigation was worth running anyway, isolating every op in a round found
+`torch.linalg.qr` on the tall-skinny expansion-direction shape costing more than the Hamiltonian
+apply itself on an RTX 3050, which a CPU-offload (mirroring this same eigh's own fix) turns into a
+real, measured 1.55-1.67× end-to-end win, see "CUDA batched-QR CPU-offload" in
+docs/manual/performance.md. No graphed solver, but a real fix came out of looking for one.
 
 ## Local Thomas–Fermi metal preconditioner (DONE)
 
-Landed as opt-in `precond="local_tf"` on both `scf` and `scf_uspp`
-(`scf/local_tf.py`, default `"kerker"`). The bare Kerker filter screens charge
-sloshing with a single length `1/q0`, right for a bulk metal but wrong for an
-inhomogeneous cell, where a fixed `q0` over-screens the vacuum. Following QE's
-`mixing_mode='local-TF'`, `LocalTFPrecond` lets the screening wavevector track the
-local density, `q²(r)=min(q²_TF(r), q0_max²)` with `q²_TF=(4/π)k_F(r)`, capped at
-the bare `q0` so a bulk metal is unchanged. It is applied by a short
-preconditioned-CG solve of the screened-Poisson operator (a few box FFTs per
-mixing step, warm-started across iterations), acting on the ρ-total block only.
+Landed as opt-in `precond="local_tf"` on both `scf` and `scf_uspp` (`scf/local_tf.py`, default
+`"kerker"`). The bare Kerker filter screens charge sloshing with a single length `1/q0`, right for
+a bulk metal but wrong for an inhomogeneous cell, where a fixed `q0` over-screens the vacuum.
+Following QE's `mixing_mode='local-TF'`, `LocalTFPrecond` lets the screening wavevector track the
+local density, `q²(r)=min(q²_TF(r), q0_max²)` with `q²_TF=(4/π)k_F(r)`, capped at the bare `q0` so
+a bulk metal is unchanged. It is applied by a short preconditioned-CG solve of the screened-Poisson
+operator (a few box FFTs per mixing step, warm-started across iterations), acting on the ρ-total
+block only.
 
-Measured (NC, fcc Al, PBE, gaussian 0.1 eV): energies bit-identical to bare Kerker
-(same fixed point). Bulk 8×8×8 neutral (9→9), Al(100) slab 21→17 (4 layers) and
-27→21 (6 layers) iterations, the margin growing with cell inhomogeneity, exactly the
-inhomogeneous regime the operator targets. So the original framing was right that a
-fixed Kerker is the wrong operator away from a uniform bulk, but the win is on slabs
-and molecules, not on a homogeneous bulk metal, where Kerker at a sensible `q0` is
-already near-optimal. The bulk-Pt 16-vs-7 iteration gap is therefore a
-starting-density and Broyden-history question more than a screening-length one, and
-this preconditioner does not by itself close it. Unit tests pin the three operator
-limits (`tests/unit/test_local_tf.py`), integration tests gate the fixed-point
-invariant on NC and USPP (`tests/integration/test_local_tf_scf.py`), and the
-slab iteration-count win lives in `benchmarks/bench_precond.py`.
+Measured (NC, fcc Al, PBE, gaussian 0.1 eV), energies bit-identical to bare Kerker (same fixed
+point). Bulk 8×8×8 neutral (9→9), Al(100) slab 21→17 (4 layers) and 27→21 (6 layers) iterations,
+the margin growing with cell inhomogeneity, exactly the regime the operator targets. So the
+original framing was right that a fixed Kerker is the wrong operator away from a uniform bulk, but
+the win is on slabs and molecules, not on a homogeneous bulk metal, where Kerker at a sensible `q0`
+is already near-optimal. The bulk-Pt 16-vs-7 iteration gap is therefore a starting-density and
+Broyden-history question more than a screening-length one, and this preconditioner does not by
+itself close it. Unit tests pin the three operator limits (`tests/unit/test_local_tf.py`),
+integration tests gate the fixed-point invariant on NC and USPP
+(`tests/integration/test_local_tf_scf.py`), and the slab iteration-count win lives in
+`benchmarks/bench_precond.py`.
 
-Two follow-ups worth noting. First, building this surfaced and fixed a separate
-bug: `setup_uspp` sized the FFT box as a blanket cube for any symmetric cell, so an
-anisotropic slab got a 105³ box instead of 20×20×105, a 27.6× over-allocation that
-OOMs during setup, now fixed by porting the NC path's symmetry-coupled axis grouping
-(`symmetry.coupled_axis_groups`). Second, the modern parameter-free successor to
-local-TF is the LDOS preconditioner of Herbst and Levitt (arXiv:2009.01665, DFTK's
-default), which adapts the screening to whether each region is metallic or
-insulating from the local density of states rather than a Thomas–Fermi model. If
-local-TF ever underdelivers on a strongly mixed metal-vacuum-insulator cell, that is
-the next rung, and it reuses the same reciprocal-space mixing hook.
+Two follow-ups. Building this surfaced and fixed a separate bug, `setup_uspp` sized the FFT box as
+a blanket cube for any symmetric cell, so an anisotropic slab got a 105³ box instead of 20×20×105,
+a 27.6× over-allocation that OOMs during setup, now fixed by porting the NC path's symmetry-coupled
+axis grouping (`symmetry.coupled_axis_groups`). And the modern parameter-free successor to local-TF
+is the LDOS preconditioner of Herbst and Levitt (arXiv:2009.01665, DFTK's default), which adapts
+the screening to whether each region is metallic or insulating from the local density of states
+rather than a Thomas–Fermi model. If local-TF ever underdelivers on a strongly mixed metal-vacuum-
+insulator cell, that is the next rung, and it reuses the same reciprocal-space mixing hook.
 
 ## torch.compile for the exchange-correlation layer (DONE)
 
-Landed as the opt-in `compile_xc` flag (`GradWave(compile_xc=True)` or
-`xc.enable_compile()`). Measured 19x forward and 16x forward-plus-`v_xc` at 64³,
-`v_xc` bit-accurate to 3e-16, with an eager fallback for the missing NixOS
-toolchain. Compiled aot_autograd cannot double-backward, so the `f_xc` response
-and HVP sites wrap their `xc.energy()` in `xc_eager()` to stay eager, which means
-only the forward and first-order `v_xc` legs accelerate. Details in
+Landed as the opt-in `compile_xc` flag (`GradWave(compile_xc=True)` or `xc.enable_compile()`).
+Measured 19× forward and 16× forward-plus-`v_xc` at 64³, `v_xc` bit-accurate to 3e-16, with an
+eager fallback for the missing NixOS toolchain. Compiled aot_autograd cannot double-backward, so
+the `f_xc` response and HVP sites wrap their `xc.energy()` in `xc_eager()` to stay eager, which
+means only the forward and first-order `v_xc` legs accelerate. Details in
 `docs/manual/performance.md`.
 
-The original analysis, kept for the reasoning. The compiler is dead on the complex,
-FFT-bound Hamiltonian apply, which two earlier attempts already confirmed, but the
-real-valued XC functional was never isolated and compiles well on a 64^3 grid. The
-end-to-end effect on a plain SCF is only a few percent because XC is a minority of
-runtime and its FFT-based gradient assembly does not compile, but learned-XC
-training, the PAW one-center angular loop, and the `f_xc` response HVPs call the XC
-transcendental chain far more than once per iteration and are CPU-bound, so those are
-the real targets. Insertion point is the single `XCFunctional.energy_density` choke
-point, opt-in with an eager fallback for the NixOS toolchain gap.
+The original analysis, kept for the reasoning. The compiler is dead on the complex, FFT-bound
+Hamiltonian apply, which two earlier attempts confirmed, but the real-valued XC functional was
+never isolated and compiles well on a 64^3 grid. The end-to-end effect on a plain SCF is only a few
+percent because XC is a minority of runtime and its FFT-based gradient assembly does not compile,
+but learned-XC training, the PAW one-center angular loop, and the `f_xc` response HVPs call the XC
+transcendental chain far more than once per iteration and are CPU-bound, so those are the real
+targets. Insertion point is the single `XCFunctional.energy_density` choke point, opt-in with an
+eager fallback for the NixOS toolchain gap.
 
 ## Dual FFT grid (DONE)
 
-Landed as commit `71a5265`, about 2x on the USPP/PAW H-apply FFT by running the
-smooth wavefunctions on a coarse grid and the augmentation on the dense grid,
-matching the audit spec.
+Landed as commit `71a5265`, about 2× on the USPP/PAW H-apply FFT by running the smooth
+wavefunctions on a coarse grid and the augmentation on the dense grid, matching the audit spec.
 
 ## CheFSI, benchmarked no-go on the RTX 3050 (DONE)
 
-Chebyshev-filtered subspace iteration is in `solvers/chebyshev.py`, unit-tested and
-wired opt-in as `scf(..., eigensolver="chebyshev")` on the NC collinear path,
-bit-identical to Davidson on the real NC SCF regression. The noncollinear spinor
-twin was tried but left unwired, CheFSI converges too slowly on the dense metal
-spinor spectrum (100-iteration cap vs Davidson's 18). The RTX 3050 fp32-deep
-benchmark found it 2.5 to 5x slower than Davidson at every grid size that fits in 6
-GB, up to 35^3. The fp32 FFT advantage there is only about 3.4x, not the 12x the
-larger systems would need, and CheFSI does 2 to 3x more H-applies, so the filter
-loses. It stays opt-in and off by default. Revisit on a bigger card where the grid
-can grow into the regime where the fp32 FFT gain dominates, which is the same
-hardware caveat the scaling section above opens with.
+Chebyshev-filtered subspace iteration is in `solvers/chebyshev.py`, unit-tested and wired opt-in as
+`scf(..., eigensolver="chebyshev")` on the NC collinear path, bit-identical to Davidson on the real
+NC SCF regression. The noncollinear spinor twin was tried but left unwired, CheFSI converges too
+slowly on the dense metal spinor spectrum (100-iteration cap vs Davidson's 18). The RTX 3050
+fp32-deep benchmark found it 2.5 to 5× slower than Davidson at every grid size that fits in 6 GB, up
+to 35^3. The fp32 FFT advantage there is only about 3.4×, not the 12× the larger systems would need,
+and CheFSI does 2 to 3× more H-applies, so the filter loses. It stays opt-in and off by default.
+Revisit on a bigger card where the grid can grow into the regime where the fp32 FFT gain dominates,
+the same hardware caveat the scaling section opens with.
 
 ## Batched Davidson conditioning guard, cond-SVD removed (DONE)
 
-The k-batched USPP/PAW generalized Davidson computed a full `linalg.cond` of the
-subspace overlap every round on top of the `cholesky_ex` it already ran. Probing a
-low-ecut Si PAW SCF (8, 10, 12 Ry) showed the overlap tips into non-PD, which
-`cholesky_ex` flags with info>0, long before its condition number nears the 1e14
-trip (max observed ~9e7), so the SVD never fired independently and was pure cost.
-Removed it. Batched-vs-per-k equality (identical eigenpairs) and USPP/PAW-vs-QE
+The k-batched USPP/PAW generalized Davidson computed a full `linalg.cond` of the subspace overlap
+every round on top of the `cholesky_ex` it already ran. Probing a low-ecut Si PAW SCF (8, 10, 12 Ry)
+showed the overlap tips into non-PD, which `cholesky_ex` flags with info>0, long before its
+condition number nears the 1e14 trip (max observed ~9e7), so the SVD never fired independently and
+was pure cost. Removed it. Batched-vs-per-k equality (identical eigenpairs) and USPP/PAW-vs-QE
 regression still pass, including nspin=2 PAW (O2 triplet, 7e-12 eV). Recorded in
 `docs/manual/wisdom.md` under Eigensolvers.
 
 ## Extended-xyz trajectory output for relax (DONE)
 
-`run_relax` accumulates an ASE frame per optimizer step with energy and forces
-frozen on a `SinglePointCalculator`, and `run` writes them to `relax.xyz` (extxyz)
-next to the JSON, re-readable in ovito or the ASE gui. The relax CLI now returns
-exit 0 on normal completion, since reaching the ionic-step limit still yields a
-valid trajectory, with convergence carried by the JSON `relax.converged` flag.
-Regression in `tests/integration/test_io.py::test_relax_writes_extxyz_trajectory`.
-MD does not have an output path yet, so the same frame accumulation extends there
-once it lands.
+`run_relax` accumulates an ASE frame per optimizer step with energy and forces frozen on a
+`SinglePointCalculator`, and `run` writes them to `relax.xyz` (extxyz) next to the JSON, re-readable
+in ovito or the ASE gui. The relax CLI returns exit 0 on normal completion, since reaching the
+ionic-step limit still yields a valid trajectory, with convergence carried by the JSON
+`relax.converged` flag. Regression in
+`tests/integration/test_io.py::test_relax_writes_extxyz_trajectory`. MD does not have an output path
+yet, so the same frame accumulation extends there once it lands.
 
 ## Atomic-orbital seeding for the initial wavefunctions (TRIED, no net gain)
 
-The idea was to hand the first Davidson solve a superposition of pseudo-atomic
-orbitals instead of bare lowest-kinetic plane waves. `scf/loop.py` builds `c0` as an
-identity block on the first `nb` sphere entries, the smoothest plane waves and
-nothing about the atoms, poor enough that the loop runs the first diagonalization at
-a loose `1e-3` tolerance before tightening. QE's default instead projects the atomic
-pseudo-wavefunctions onto the plane-wave basis (`startingwfc='atomic'`). All the
-pieces existed in-tree, the `upf.pswfc`/`paw.chi` orbitals and the SBT-and-Ylm
-projector build shared with the KB, Hubbard, and PDOS paths.
+The idea was to hand the first Davidson solve a superposition of pseudo-atomic orbitals instead of
+bare lowest-kinetic plane waves. `scf/loop.py` builds `c0` as an identity block on the first `nb`
+sphere entries, the smoothest plane waves and nothing about the atoms, poor enough that the loop
+runs the first diagonalization at a loose `1e-3` tolerance before tightening. QE's default instead
+projects the atomic pseudo-wavefunctions onto the plane-wave basis (`startingwfc='atomic'`). All the
+pieces existed in-tree, the `upf.pswfc`/`paw.chi` orbitals and the SBT-and-Ylm projector build
+shared with the KB, Hubbard, and PDOS paths.
 
-Built `lcao_seed` (per-k atomic-orbital block, QR-orthonormalized to 8e-15, padded
-with plane waves past the orbital count) and wired it at the `c0` site. It reaches
-the plane-wave-seeded energy to machine precision, as it must (NC O2 gives dF = 5e-12
-eV, fcc Ni gives dF = 3e-11 eV). The predicted one-to-three iteration saving is real
-but small (O2 goes 28 to 26 iterations, fcc Ni 6x6x6 goes 12 to 12), and the per-k
-seed build costs enough that wall time came out neutral to slightly worse (Ni, 108 s
-to 122 s). The reason is the one the prediction named. The loop already runs the
-first diagonalization at a loose 1e-3 tolerance, so a crude plane-wave start
-converges the cheap early eigensolves fine, and the total SCF count is set by density
-mixing, not by initial-orbital quality. Reverted the wiring rather than add per-k
-overhead to the default path for no measured gain. Recorded in
-`docs/manual/wisdom.md` under SCF and mixing.
+Built `lcao_seed` (per-k atomic-orbital block, QR-orthonormalized to 8e-15, padded with plane waves
+past the orbital count) and wired it at the `c0` site. It reaches the plane-wave-seeded energy to
+machine precision, as it must (NC O2 gives dF = 5e-12 eV, fcc Ni gives dF = 3e-11 eV). The predicted
+one-to-three iteration saving is real but small (O2 goes 28 to 26 iterations, fcc Ni 6×6×6 goes 12
+to 12), and the per-k seed build costs enough that wall time came out neutral to slightly worse (Ni,
+108 s to 122 s). The reason is the one the prediction named, the loop already runs the first
+diagonalization at a loose 1e-3 tolerance, so a crude plane-wave start converges the cheap early
+eigensolves fine, and the total SCF count is set by density mixing, not initial-orbital quality.
+Reverted the wiring rather than add per-k overhead to the default path for no measured gain. Recorded
+in `docs/manual/wisdom.md` under SCF and mixing.
 
-The remaining reason to revisit is that it composes with CheFSI, whose convergence
-rate depends directly on how much of the wanted subspace is already in the start. A
-Chebyshev filter fed atomic orbitals needs fewer rounds than one fed smooth plane
-waves, so the pair should be measured together. That is the only configuration where
-the seed cost might be repaid, and it is worth building `lcao_seed` back only
-alongside a CheFSI-default benchmark that shows the compound win.
+The remaining reason to revisit is that it composes with CheFSI, whose convergence rate depends
+directly on how much of the wanted subspace is already in the start. A Chebyshev filter fed atomic
+orbitals needs fewer rounds than one fed smooth plane waves, so the pair should be measured together.
+That is the only configuration where the seed cost might be repaid, and it is worth building
+`lcao_seed` back only alongside a CheFSI-default benchmark that shows the compound win.
