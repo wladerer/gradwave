@@ -31,6 +31,20 @@ points, all handled by :func:`shard_system` plus a few call sites in
    k-extensive-linear (``hubbard_energy`` is the NONLINEAR Tr[n(1−n)] of
    n_hub), so it is recomputed from the already-reduced, full-mesh n_hub
    rather than summed per rank like kinetic/nonlocal energy.
+5. **The Stoner spin preconditioner (``spin_precond=True``,
+   ``scf.spin_precond``).** Unlike the Kerker/Thomas-Fermi/learned-multipole
+   density-space preconditioners — which act purely on the already-global
+   mixing residual and so need no communication at all, just redundant
+   per-rank application of the same operator — the Stoner preconditioner's
+   ingredients (Fermi-surface band codensities) are inherently per-k. Two
+   collectives keep every rank's operator identical: an ``all_gather`` of
+   the cheap scalar pick metadata (which (spin, k, band) carries
+   Fermi-surface weight, and how much) to agree on the same global
+   top-``max_bands`` selection everywhere, then an ``all_reduce`` to
+   assemble the selected bands' (u, w) operator rows — each row is built
+   by the one rank that owns that k-point and left zero on every other
+   rank, so SUM-reducing reconstructs the full operator on every rank. See
+   ``scf.spin_precond.build_stoner_precond``/``build_stoner_precond_nc``.
 
 Opt in via ``Input.distributed: true`` (``api.run_scf``/``api.run``) or by
 calling :func:`init_from_env` and :func:`shard_system` directly and passing
