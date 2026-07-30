@@ -453,3 +453,34 @@ def test_cohp_iao_does_not_reduce_bond_overshoot_diamond(diamond_c):
     # ... but does NOT shrink (and here is marginally larger than) the pswfc
     # per-bond magnitude -- the basis-diffuseness gap is still open.
     assert abs(iao.pair_icohp["1-2"]) >= 0.9 * abs(base.pair_icohp["1-2"])
+
+
+@pytest.mark.standard
+def test_cohp_contracted_basis_moves_toward_lobster_direction(diamond_c):
+    """A first, honest measurement of pseudo.sto_basis's fitted contracted
+    STO basis (docs/plans/cohp-contracted-basis.md's deferred step 4) on the
+    SAME diamond cell IAO was shown not to fix. Unlike IAO (which fixes
+    occupied-space completeness, not real-space extent, and measurably lands
+    on the WRONG side -- see test_cohp_iao_does_not_reduce_bond_overshoot_diamond
+    above), the contracted basis targets extent directly by fitting at the
+    free-atom level with an explicit compactness regularizer
+    (pseudo.sto_basis.fit_contracted_sto's tail_reg). Measured: -20.68 eV/bond
+    vs. pswfc's -20.96 eV/bond and IAO's -21.25 eV/bond -- the RIGHT
+    direction (toward LOBSTER's -9.64 eV/bond), at the conservative default
+    tail_reg=1e-3/n_primitives=3. This is NOT a claim of having closed the
+    gap (it closes ~1.3% of the ~2.1x overshoot) -- it pins that the sign of
+    the effect is correct, unlike IAO, and that the machinery runs
+    end-to-end through the real operator route on a real PAW-free NC
+    system. Closing the gap further is a tail_reg/n_primitives calibration
+    question with no in-tree LOBSTER oracle to calibrate against yet."""
+    res, system = diamond_c
+
+    base = cohp.cohp(res, pairs=[(0, 1)], method="operator", width=0.2,
+                     resolve_images=True, basis="pswfc")
+    con = cohp.cohp(res, pairs=[(0, 1)], method="operator", width=0.2,
+                    resolve_images=True, basis="contracted")
+
+    assert con.charge_spilling < 0.05  # still representing the occupied states reasonably
+    # the actual point: strictly SMALLER magnitude than pswfc, moving toward
+    # LOBSTER -- the direction IAO gets wrong.
+    assert abs(con.pair_icohp["1-2"]) < abs(base.pair_icohp["1-2"])
