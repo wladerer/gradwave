@@ -836,6 +836,57 @@ exact so the cheap gradient is correct. And dropping gradients for a coarse scan
 optimization, which fits this smooth low-dimensional oscillatory landscape better per SCF
 than ascent.
 
+## SCF flight recorder: validating the convergence tags
+
+**Status: DONE 2026-07-30 (validation), with a measured negative for auto-remediation.
+Archive branch `research/convergence-case-studies`, stacked on `feat/scf-flight-recorder`.**
+
+The flight recorder (`scf.recorder`, PR #203) reads the last five SCF iterations and
+returns up to three convergence tags. Running it against the documented hard cases in
+`docs/manual/wisdom.md` first surfaced three systematic false positives, all from
+`diagnose()` inspecting the settled noise floor of a converged run rather than the
+pathological phase of a stuck one. All three are fixed on PR #203 commit 659b845.
+
+- Moment-collapse fired on every healthy ferromagnetic PAW metal. The USPP/PAW
+  `seed_moment` is the smooth-grid moment of the SAD seed, many times the converged
+  smooth moment (fcc Ni at `start_mag=0.6` seeds ~10.8 µB and holds ~0.79 µB), so the
+  relative test `mag < 0.1·seed_moment` was trivially true. A 0.1 µB absolute floor
+  fixes it.
+- Charge-sloshing fired on a cleanly converged fcc Ni at a ~1e-6 residual, where the
+  |G|-shell decomposition is roundoff. A 1e-4 residual floor fixes it.
+- Both synthetic true-positive tests still fire, and replaying every stored trace gives
+  zero tags on the converged battery.
+
+The hard-case battery then re-validated wisdom.md's documented iteration counts almost
+exactly (fcc Ni PAW 18 johnson and 27 pulay against 18 and 27, bcc Fe PAW pulay 30
+against 29, the Al(100) kerker slabs 21 and 27, their local_tf counterparts 17 and 21).
+Two structural gaps remain, both from the tag being post-hoc over the last five
+iterations.
+
+- Charge-sloshing misses the documented converging slab. The kerker Al slabs are
+  long-wavelength dominated for 15 or more iterations, but a competent Pulay mixer drives
+  the residual down almost monotonically, so the "not falling" requirement suppresses the
+  tag. The 2-lowest-shell fraction alone is the discriminator, not the non-monotonicity.
+- Level-crossing cannot report a crossing that resolves before the final window. fcc Pt
+  reorders 86 times in iterations 2 to 4 (`[0, 64, 17, 5, 0, ...]`) then converges clean,
+  so the window is all zeros.
+
+The bcc Fe johnson blowup did not reproduce. wisdom.md records forced johnson going to 93
+iterations on the USPP path against 29 for pulay, but on current code pulay took 30 and
+forced johnson took 16, with no becsum oscillation left to key a tag against (annotated in
+wisdom.md).
+
+Part 2 tested trace-driven auto-remediation for charge-sloshing and it is a measured
+negative. A mid-run detector that reads the same shell decomposition, run for `k` kerker
+iterations and warm-restarted onto `local_tf` when it flags, costs more than it saves. At
+`k=10` the detector flags but the total is 22 (Al 4-layer, 10+12) and 24 (Al 6-layer,
+10+14) against `local_tf`-from-start 17 and 21. At `k=6` the sloshing signature has not
+yet emerged (the first six iterations average a 2-lowest-shell fraction near 0.35, below
+the 0.5 flag), so the detector never fires. Always-robust beats detect-and-remediate,
+because the wasted kerker prefix sinks the switch. The follow-up worth taking is exposing
+`local_tf` in the YAML schema as a first-class preconditioner choice, not building the
+detector into the loop.
+
 ## Showcase figures: noncollinear magnetism and error estimates
 
 **Status: open; several inputs half-built.** The validation record is tables of meV
@@ -1533,3 +1584,43 @@ directly on how much of the wanted subspace is already in the start. A Chebyshev
 orbitals needs fewer rounds than one fed smooth plane waves, so the pair should be measured together.
 That is the only configuration where the seed cost might be repaid, and it is worth building
 `lcao_seed` back only alongside a CheFSI-default benchmark that shows the compound win.
+
+A separate revisit of the starting *density* seed (ρ0, not the wavefunctions) is recorded in
+the next entry.
+
+## Atomic-orbital seeding, the density channel (TRIED, no-go as default)
+
+**Status: TRIED 2026-07-30, no-go as a default, an opt-in rescue identified. Archive branch
+`research/ao-density-seed`.**
+
+The wavefunction-seeding no-go above covered the Davidson `c0`. This revisits a different
+object, the starting density ρ0 the first potential is built from. The audit came back
+cleaner than expected. The seed is already a superposition of atomic densities from the UPF
+`PP_RHOATOM` table, one builder shared by both formalisms (`scf/guess.py::sad_density`, wired
+at `loop.py` and `uspp_loop.py`), normalized to exact electron count. So the only live lever
+was the nspin=2 spin-split shape, and the charge channel has no headroom, matching the
+wavefunction result.
+
+The change under test shapes the seeded magnetization by the `PP_PSWFC` d-orbital density
+instead of the uniform `(1±m)/2` split, at the same per-atom moment. It is a systematic win
+on one system and a disqualifying regression on another.
+
+- fcc Ni PAW near the Stoner boundary is the win. The default seed converged 0 of 4
+  `start_mag` values at `rhotol` 1e-5, stagnating near the FM fixed point at 0.02, 0.05, and
+  0.30 and landing on the wrong NM branch (+77 meV) at 0.10. The d-localized seed converged
+  3 of 4, always to the FM branch.
+- bcc Fe PAW is the regression. At `start_mag` 0.02 the d-localized seed collapses Fe to the
+  nonmagnetic branch, +660 meV above the FM ground state the default reaches from the
+  identical seeded moment, and it costs 2 to 6 extra iterations at 0.05 and 0.10. fcc Ni NC
+  is neutral either way, within one iteration, and the seed build cost is neutral.
+
+The fixed-point oracle held everywhere both seeds reached the same branch, F agreeing to
+2e-11 eV or better, so the seed changes only the trajectory. The verdict is no-go for the
+default, because a default cannot trade Fe robustness for Ni convergence. The d-localized
+shape is worth keeping as an opt-in `start_mag_shape="d"` rescue for marginal-Stoner PAW
+systems that stagnate under the default.
+
+One diagnostic lead is worth its own line. The Ni PAW default-seed stagnation at 120
+iterations at every `start_mag`, including the comfortable 0.30, localizes the residual floor
+to the mixer's magnetization channel, not the seed or the charge channel, since a different
+magnetization shape at the identical moment converges fine.
