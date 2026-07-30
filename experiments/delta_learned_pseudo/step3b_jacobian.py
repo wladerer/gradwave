@@ -26,6 +26,7 @@ from probe import (  # noqa: E402
     fixed_grid,
     run_scf,
 )
+
 from gradwave.dtypes import RDTYPE  # noqa: E402
 
 ECUT = float(os.environ.get("GW_ECUT_RY", "28"))
