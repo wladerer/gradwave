@@ -1563,7 +1563,10 @@ def scf(
         coeffs_list_s = [gather_list_cat(coeffs_list_s[sp], dist_ctx) for sp in range(nspin)]
         eigs_s = eigs_global_s
         occ_s = occ_global_s
-        system = dist_ctx.full_system
+        # DistKContext.full_system is System | USPPSystem (shared with the
+        # USPP driver's dist_ctx) -- this rank's dist_ctx was built by
+        # shard_system, so it's always a System here.
+        system = cast("System", dist_ctx.full_system)
     if nspin == 1:
         return SCFResult(
             converged=converged,

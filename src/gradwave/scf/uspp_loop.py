@@ -27,7 +27,7 @@ import logging
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import numpy as np
 import torch
@@ -68,6 +68,14 @@ from gradwave.scf.results import USPPResult
 from gradwave.scf.uspp_hubbard import USPPHubbardData
 from gradwave.scf.uspp_setup import USPPSystem
 from gradwave.solvers.precond import teter
+
+if TYPE_CHECKING:
+    # Annotation-only, mirroring scf/loop.py's own TYPE_CHECKING-only
+    # DistKContext import: scf_uspp() takes an optional distributed context,
+    # but gradwave.distributed itself never imports this module at runtime, so
+    # importing it eagerly here would be a needless top-level dependency on
+    # torch.distributed for every non-distributed run.
+    from gradwave.distributed import DistKContext
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +248,13 @@ class _IterOps:
     nk: int
     nb: int
     mixed_precision: bool = False
+    dist_ctx: "DistKContext | None" = None  # k-point-sharded distributed SCF (see
+    # gradwave.distributed): `system` is THIS RANK's local k-shard; None (default)
+    # runs the ordinary single-process path, byte-for-byte unchanged.
+    kweights_global: torch.Tensor | None = None  # full-mesh kweights, gathered once
+    # by _build_iter_ops -- always a real Tensor by the time _scf_iteration reads it
+    # (equal to system.kweights itself when dist_ctx is None); Optional only so this
+    # trailing dataclass field can default like its neighbors.
 
 
 _MP_CROSSOVER = MP_CROSSOVER  # diago tol above this runs the fp32 draft solves
@@ -358,11 +373,20 @@ def _build_iter_ops(
     batched: bool = True,
     hubbard: list[HubbardManifold] | None = None,
     mixed_precision: bool = False,
+    dist_ctx: "DistKContext | None" = None,
 ) -> _IterOps:
     grid = system.grid
     vol = grid.volume
     dev = system.positions.device
     projs = [projectors(pd, system.positions) for pd in system.proj_data]
+    # Static across the run (the mesh doesn't change), so gathered once here
+    # rather than every iteration alongside the eigenvalues (mirrors
+    # scf/loop.py's own `kweights_global`).
+    kweights_global = system.kweights
+    if dist_ctx is not None:
+        from gradwave.distributed import gather_cat
+
+        kweights_global = gather_cat(system.kweights, dist_ctx)
     bk = p_b = None
     if batched or hubbard:
         from gradwave.core.batch import build_batched, projectors_b
@@ -423,6 +447,8 @@ def _build_iter_ops(
         nk=len(system.spheres),
         nb=system.nbands,
         mixed_precision=mixed_precision,
+        dist_ctx=dist_ctx,
+        kweights_global=kweights_global,
     )
 
 
@@ -494,7 +520,16 @@ def _hubbard_occ_update(
     """Refresh the DFT+U per-spin occupation matrices from the fresh orbitals and
     return (n_hub_s, e_hub). No Hubbard manifold → (n_hub_s, 0). The
     _padded_coeffs closure captures coeffs_b by default argument (per-k pads the
-    trimmed orbitals back to npw_max)."""
+    trimmed orbitals back to npw_max).
+
+    Under a distributed (dist_ctx) run, occupation_matrices' k-sum
+    (core/hubbard.py's ``einsum("kb,kbp,kbq->pq", ...)``) is only a sum over
+    THIS RANK's k-shard; the per-site matrices are all_reduce-summed across
+    ranks (a LINEAR operation, safe before the nonlinear Dudarev trace) before
+    Tr[n(1−n)] is evaluated, mirroring the density/becsum reduction in
+    _build_output_density below — hubbard_occ_and_energy's own e_hub (computed
+    from the un-reduced, rank-local matrices) is discarded and recomputed from
+    the globally-reduced ones via hubbard_energy directly."""
     system, nspin, batched = ops.system, ops.nspin, ops.batched
     bk, dev, nk, nb = ops.bk, ops.dev, ops.nk, ops.nb
     e_hub = torch.zeros((), dtype=RDTYPE, device=dev)
@@ -503,7 +538,7 @@ def _hubbard_occ_update(
         # None; if hubbard: n_hub_s = [...]`), so it's None here too.
         assert n_hub_s is None
         return n_hub_s, e_hub
-    from gradwave.core.hubbard import hubbard_occ_and_energy, occupation_matrices
+    from gradwave.core.hubbard import hubbard_energy, hubbard_occ_and_energy, occupation_matrices
 
     # _build_iter_ops only ever builds bk/p_b when `batched or hubbard` was
     # true; hub is not None here means hubbard was, so bk is real regardless
@@ -526,6 +561,24 @@ def _hubbard_occ_update(
         hub.sites,
         nspin,
     )
+    if ops.dist_ctx is not None:
+        from gradwave.distributed import all_reduce_
+
+        # occupation_matrices (core/hubbard.py) returns n_full[s0:s1, s0:s1]
+        # PER SITE -- a non-contiguous view into the shared (nproj, nproj)
+        # n_full whenever more than one site shares that tensor (two Si
+        # atoms of the same manifold here: dim < nproj). Gloo's all_reduce
+        # silently reduces the WRONG bytes on a non-contiguous view (no
+        # exception -- see the sibling NC+U distributed fix, PR #196, which
+        # hardens all_reduce_ itself against this for the shared primitive);
+        # until that lands, force a contiguous copy at this call site so this
+        # driver's own DFT+U reduction is correct regardless of merge order.
+        n_hub_new = [[all_reduce_(m.contiguous(), ops.dist_ctx) for m in ch] for ch in n_hub_new]
+        e_hub = (
+            hubbard_energy(n_hub_new[0], hub.sites) + hubbard_energy(n_hub_new[1], hub.sites)
+            if nspin == 2
+            else 2.0 * hubbard_energy(n_hub_new[0], hub.sites)
+        )
     return n_hub_new, e_hub
 
 
@@ -588,6 +641,18 @@ def _build_output_density(
                     rho_ij_s[isp][a] = rho_ij_s[isp][a] + torch.einsum(
                         "b,bi,bj->ij", w.to(CDTYPE), ba.conj(), ba
                     )
+        if ops.dist_ctx is not None:
+            # rho_sp/rho_ij_s[isp] above are each a k-weighted sum over ONLY
+            # this rank's k-shard (batched density_b's own reduction, or the
+            # per-k loop's running accumulation); all_reduce SUM completes the
+            # sum over the full mesh before Hermitizing/symmetrizing below —
+            # the same density/becsum reduction point as scf/loop.py's
+            # NC driver, just with becsum (complex, per-atom) added alongside
+            # the real density grid.
+            from gradwave.distributed import all_reduce_
+
+            rho_sp = all_reduce_(rho_sp, ops.dist_ctx)
+            rho_ij_s[isp] = [all_reduce_(m, ops.dist_ctx) for m in rho_ij_s[isp]]
         rho_ij_s[isp] = [0.5 * (m + m.conj().T) for m in rho_ij_s[isp]]
         if system.becsum_sym is not None:
             rho_ij_s[isp] = system.becsum_sym.apply(rho_ij_s[isp])
@@ -743,6 +808,14 @@ class _IterStep(TypedDict):
     rho_ij_s: list[list[torch.Tensor]]
     becps_s: list[list[torch.Tensor]]
     energies: EnergyBreakdown
+    # Full-mesh (gathered) eigenvalues/occupations under a distributed
+    # (dist_ctx) run -- identical to eigs_s/occ_s (same object) when
+    # ops.dist_ctx is None. scf_uspp substitutes these into the final
+    # USPPResult so it looks like an ordinary full-mesh run; eigs_s/occ_s
+    # above stay THIS RANK's local shard, the shape every other per-k
+    # collective point in this file (becps_s, coeffs) already keeps local.
+    eigs_global_s: list[torch.Tensor]
+    occ_global_s: list[torch.Tensor]
 
 
 @torch.no_grad()
@@ -773,8 +846,28 @@ def _scf_iteration(
 
     eigs_s = _solve_bands_uspp(ops, veff_s, dscr_s, n_hub_s, coeffs, coeffs_b, tol_eff, seed_salt)
 
-    occ_s, mu, entropy_term = shared_fermi_occupations(
-        eigs_s, system.kweights, smearing, width, system.n_electrons, nspin, dev
+    dist_ctx = ops.dist_ctx
+    if dist_ctx is not None:
+        from gradwave.distributed import gather_cat
+
+        # A metal's Fermi level depends on eigenvalues from EVERY k-point,
+        # not just this rank's shard: gather them into the global array
+        # before the Fermi search (mirrors scf/loop.py's NC driver), then
+        # keep only this rank's slice of the resulting occupations for the
+        # local density/becsum/energy calls below.
+        eigs_global_s = [gather_cat(e, dist_ctx) for e in eigs_s]
+    else:
+        eigs_global_s = eigs_s
+
+    kweights_g = ops.kweights_global
+    assert kweights_g is not None  # always set by _build_iter_ops
+    occ_global_s, mu, entropy_term = shared_fermi_occupations(
+        eigs_global_s, kweights_g, smearing, width, system.n_electrons, nspin, dev
+    )
+    occ_s = (
+        [occ_global_s[sp][dist_ctx.k_start : dist_ctx.k_end] for sp in range(nspin)]
+        if dist_ctx is not None
+        else occ_global_s
     )
 
     # _solve_bands_uspp mutates coeffs[isp][ik] in place for every (isp, ik)
@@ -795,6 +888,17 @@ def _scf_iteration(
     energies = _assemble_iter_energies(
         ops, coeffs_full, occ_s, becps_s, rho_out_s, rho_tot_out, entropy_term, e_hub, e_onec
     )
+    if dist_ctx is not None:
+        from gradwave.distributed import all_reduce_
+
+        # Kinetic and nonlocal (projector) energy are sums over k, computed
+        # above from this rank's local shard only. Every other term
+        # (Hartree, XC, local pseudopotential, Ewald, entropy, hubbard,
+        # onecenter) is a function of the ALREADY-global density/becsum/
+        # occupation-matrix, so it comes out identical on every rank without
+        # further communication (see _hubbard_occ_update/_build_output_density).
+        energies.kinetic = all_reduce_(energies.kinetic, dist_ctx)
+        energies.nonlocal_ = all_reduce_(energies.nonlocal_, dist_ctx)
     return _IterStep(
         eigs_s=eigs_s,
         occ_s=occ_s,
@@ -804,6 +908,8 @@ def _scf_iteration(
         rho_ij_s=rho_ij_s,
         becps_s=becps_s,
         energies=energies,
+        eigs_global_s=eigs_global_s,
+        occ_global_s=occ_global_s,
     )
 
 
@@ -1094,6 +1200,12 @@ def scf_uspp(
     precond: str = "kerker",
     opts: SCFOptions | None = None,
     verbose: bool = True,
+    dist_ctx: "DistKContext | None" = None,  # k-point-sharded distributed SCF (see
+    # gradwave.distributed): `system` is THIS RANK's local k-shard (built by
+    # gradwave.distributed.shard_uspp_system); None (default) runs the ordinary
+    # single-process path, byte-for-byte unchanged. DFT+U (`hubbard`) IS
+    # supported under dist_ctx (unlike the NC driver's dist_ctx, which rejects
+    # it) -- see _hubbard_occ_update's all_reduce over the occupation matrices.
 ) -> USPPResult:
     """USPP/PAW SCF. nspin=2 takes a SpinXC functional and start_mag (list,
     in [-1, 1]) with one entry per species OR one per atom (the latter for
@@ -1232,6 +1344,20 @@ def scf_uspp(
             "would mis-fold collinear spin channels); rebuild without "
             "magmoms"
         )
+    if dist_ctx is not None and (
+        system.sym is not None
+        or system.rho_symmetrizer is not None
+        or system.becsum_sym is not None
+    ):
+        # Belt-and-suspenders: gradwave.distributed.shard_uspp_system already
+        # rejects a symmetrized system before scf_uspp ever sees dist_ctx, but
+        # a caller could in principle pass an unsharded, symmetrized system
+        # alongside a dist_ctx built some other way -- reject that combination
+        # here too, same as scf/loop.py's NC driver.
+        raise NotImplementedError(
+            "distributed (dist_ctx) SCF does not yet support IBZ symmetry "
+            "reduction — build the system with use_symmetry=False"
+        )
     grid = system.grid
     vol = grid.volume
     dev = system.positions.device
@@ -1248,6 +1374,7 @@ def scf_uspp(
         batched=batched,
         hubbard=hubbard,
         mixed_precision=mixed_precision,
+        dist_ctx=dist_ctx,
     )
     hub = ops.hub
     n_hub_s = None
@@ -1334,6 +1461,13 @@ def scf_uspp(
     res_norm = float("nan")
     rho_out_s: list[torch.Tensor] = []
     becps_s: list[list[torch.Tensor]] = []
+    # Full-mesh (gathered) eigenvalues/occupations under dist_ctx -- tracked
+    # separately from the LOCAL eigs_s/occ_s above (same "runs >=1 iteration"
+    # binding as it/e_free/etc.) and substituted into the final USPPResult
+    # below so it looks like an ordinary full-mesh run; equal to eigs_s/occ_s
+    # (same object) whenever dist_ctx is None.
+    eigs_global_s: list[torch.Tensor] = []
+    occ_global_s: list[torch.Tensor] = []
 
     # PAW one-center machinery; becsum seeded from the reference atomic
     # occupations (spin-split by start_mag; zeros for bare USPP where the UPF
@@ -1360,6 +1494,7 @@ def scf_uspp(
 
         step = _scf_iteration(ops, rho_s, rho_ij_mix, coeffs, coeffs_b, n_hub_s, tol_eff, seed_salt)
         eigs_s, occ_s, mu = step["eigs_s"], step["occ_s"], step["mu"]
+        eigs_global_s, occ_global_s = step["eigs_global_s"], step["occ_global_s"]
         n_hub_s = step["n_hub_s"]
         rho_out_s, rho_ij_s = step["rho_out_s"], step["rho_ij_s"]
         becps_s, energies = step["becps_s"], step["energies"]
@@ -1560,6 +1695,24 @@ def scf_uspp(
     # the final return every element is a real Tensor, not the seed-compatible
     # `Tensor | None` the warm-start-carrying `coeffs` variable is typed for.
     coeffs_final = cast("list[list[torch.Tensor]]", coeffs)
+    if dist_ctx is not None:
+        from gradwave.distributed import gather_list_cat
+
+        # Reassemble a normal, full-mesh USPPResult: gather this rank's local
+        # per-k coefficients/⟨β|ψ⟩ into the global per-k lists, and substitute
+        # the GLOBAL eigenvalues/occupations (already gathered inside the last
+        # _scf_iteration call) and the ORIGINAL unsharded system — a caller
+        # sees the same shapes/content a single-process run on the full mesh
+        # would have produced (rho/rho_ij_atoms/hub_occ are already global,
+        # see _build_output_density/_hubbard_occ_update's own all_reduce).
+        coeffs_final = [gather_list_cat(coeffs_final[isp], dist_ctx) for isp in range(nspin)]
+        becps_s = [gather_list_cat(becps_s[isp], dist_ctx) for isp in range(nspin)]
+        eigs_s = eigs_global_s
+        occ_s = occ_global_s
+        # DistKContext.full_system is System | USPPSystem (shared with the NC
+        # driver's dist_ctx) -- this rank's dist_ctx was built by
+        # shard_uspp_system, so it's always a USPPSystem here.
+        system = cast("USPPSystem", dist_ctx.full_system)
     return USPPResult(
         converged=converged,
         n_iter=len(history),
