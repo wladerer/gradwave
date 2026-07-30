@@ -35,13 +35,14 @@ def test_mixing_scheme_explicit_wins():
     assert _resolve_mixing_scheme("broyden", nspin=1) == "broyden"
 
 
-def test_uspp_mixing_scheme_default_is_johnson_for_nspin1():
-    # PAW/USPP mirror-inverts the NC default: the composite (density, becsum)
-    # augmentation mode makes johnson beat pulay on non-magnetic PAW
-    # (insulators AND metals), so nspin==1 defaults to johnson; nspin==2 stays
-    # on pulay because johnson is a coin flip on magnetic PAW (bcc Fe 29→93).
+def test_uspp_mixing_scheme_default_is_johnson():
+    # The composite (density, becsum) augmentation mode makes johnson beat
+    # pulay on non-magnetic PAW (insulators AND metals). It also wins on every
+    # magnetic PAW case at the same fixed point now that the bcc Fe blowup no
+    # longer reproduces (experiments/uspp_mixing_default: Fe 30→16, Ni 27→18,
+    # AFM Fe 58→31), so both nspin channels default to johnson.
     assert _resolve_uspp_mixing_scheme(None, nspin=1) == "johnson"
-    assert _resolve_uspp_mixing_scheme(None, nspin=2) == "pulay"
+    assert _resolve_uspp_mixing_scheme(None, nspin=2) == "johnson"
 
 
 def test_uspp_mixing_scheme_explicit_wins():
