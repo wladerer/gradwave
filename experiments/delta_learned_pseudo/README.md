@@ -105,15 +105,27 @@ in step 3b.
 
 At frozen density the energy is exactly linear in theta, so the mean-subtracted
 5-volume EOS shape is a near-linear map r = A theta with A the (5 x 4)
-Hellmann-Feynman Jacobian (autograd, 5 SCFs). SVD of A: see
-`results_step3b.json`. The singular spectrum is steeply graded (condition number
-~1e3), so the EOS shape determines roughly one to two directions in theta-space
-and leaves a two-plus-dimensional near-null space; the step-3 recovery error
-lies almost entirely in that null space. Physically: the four Gaussian bumps
-(mu = 1..4 1/Ang) act on the E(V) curve almost interchangeably, because the
-five-volume window samples dv only through slowly-varying combinations of the
-few low-|G| shells (|G_min| ~ 2.0 1/Ang for Si diamond), and the mu = 1 bump is
-sampled only through its tail.
+Hellmann-Feynman Jacobian (autograd, 5 SCFs). SVD of A
+(`results_step3b.json`):
+
+    singular values  [1.67e-2, 2.84e-4, 4.18e-6, 1.55e-7]   (condition 1.1e5)
+
+Decomposing the recovery error theta_fit - theta* (norm 0.364) over the right
+singular directions:
+
+    dir 0  sigma 1.67e-2   err component -0.0053   residual contribution 8.8e-5 eV
+    dir 1  sigma 2.84e-4   err component +0.0388   residual contribution 1.1e-5 eV
+    dir 2  sigma 4.18e-6   err component +0.2960   residual contribution 1.2e-6 eV
+    dir 3  sigma 1.55e-7   err component -0.2088   residual contribution 3.2e-8 eV
+
+The one well-determined direction is recovered to 0.005; the error sits almost
+entirely in the two weakest directions, whose contribution to the EOS residual
+(1e-6 eV and 3e-8 eV) is invisible below the achieved 7.7e-5 eV shape residual.
+The EOS window determines one, at most two, directions of a four-parameter
+correction. Physically the four Gaussian bumps (mu = 1..4 1/Ang) act on E(V)
+almost interchangeably, because the volume window samples dv only through
+slowly varying combinations of the few populated low-|G| shells (|G_min| ~ 2.0
+1/Ang for Si diamond), and the mu = 1 bump is sampled only through its tail.
 
 Conclusion for the go/no-go: the *machinery* (differentiable correction, exact
 gradient, trainable loop) is validated end to end, but an EOS-only loss cannot
@@ -124,4 +136,65 @@ derivatives, forces, a second structure) that fills the null space.
 
 ### Step 4: one real step against WIEN2k Si
 
-(RESULTS PLACEHOLDER -- updated after the asus run.)
+7 volumes (94-106%), 10 Adam steps (lr 0.05) on the WIEN2k BM3 shape.
+93 SCFs, 283 s wall (plus one earlier attempt of ~92 SCFs discarded to an
+NLCC/forces API crash at the force check).
+
+    Delta(Si) converged basis (48 Ry, 8^3):        0.1090 meV/atom
+    Delta(Si) probe basis (28 Ry, 6^3), theta=0:   0.2578 meV/atom
+    Delta(Si) probe basis, after training:         0.0570 meV/atom
+    basis-error estimate |probe - converged|:      0.1488 meV/atom
+
+    V0 (Ang^3/atom): before 20.4669, after 20.4564, converged 20.4478, WIEN2k 20.4530
+    B0 (GPa):        before  88.47,  after  88.61,  converged  88.37,  WIEN2k  88.545
+
+Off-training force check (atom displaced 0.10 Ang, no symmetry, probe basis):
+max|F| uncorrected 1.3042 eV/Ang, max component change from the trained
+correction 0.0002 eV/Ang (0.015 percent). The EOS fix does not degrade forces
+at any meaningful level.
+
+Honesty caveats, in order of importance:
+
+- The basis error at the probe settings (0.149 meV/atom) is comparable to the
+  Delta improvement (0.258 -> 0.057, a 0.20 meV/atom change). Part of what the
+  correction learned is basis truncation, not pseudization. A real training run
+  must sit at the converged basis (48 Ry / 8^3 for Si, roughly 4x the probe
+  cost per SCF).
+- Si is a nearly-perfect pseudopotential to begin with (PseudoDojo dfact 0.146
+  meV/atom; our converged Delta 0.109). It was chosen because it is the
+  cheapest clean insulator, not because it needs fixing. The interesting
+  target (Cu, Delta ~7.9) is a metal with smearing and a 16^3 mesh, roughly
+  20x the SCF cost per volume.
+- Adam at lr 0.05 oscillates around the optimum (Delta dips to 0.013 at step 1,
+  ends at 0.057); the trajectory minimum and the final point differ. A real run
+  wants a smaller step or a line search; with the loss quadratic and the map
+  linear at frozen density, one Gauss-Newton step on the (already computed)
+  Jacobian would land at the optimum directly.
+
+## Budget
+
+All heavy runs on asus (22 cores, idle). Totals: 314 kept SCFs (+~92
+discarded in the crashed step-4 attempt), about 16 minutes of asus wall time
+across step1 60 s, step2 90 s, step3 395 s, step3b ~60 s, step4 283 s, plus
+setup. Local laptop use was limited to plumbing checks after an initial timing
+probe found the box at load 56 on 8 cores from sibling agents.
+
+## Go/no-go and recommended next scope
+
+GO on the machinery, NO-GO on EOS-only training. Everything the idea needs from
+the code side exists and is exact: endpoint bit-for-bit, HF gradient to 3e-10,
+stable warm-started training at ~2 s/SCF-step-volume on asus. The blocker is
+identifiability, not differentiability. Recommended next scope, in order:
+
+1. Multi-observable loss before any new element: add valence eigenvalues at a
+   few k-points (already differentiable via the same HF argument) and forces on
+   a displaced cell to the EOS loss, then rerun the synthetic recovery oracle.
+   Success there is the real go signal.
+2. Then Cu at converged basis on asus (the actual 7.9 meV/atom target), with a
+   1-2 parameter correction chosen along the leading singular directions of the
+   multi-observable Jacobian, or Gauss-Newton on the linear map instead of Adam.
+3. The D_ij (KB coefficient) rung only after the local channel shows a real
+   Delta gain on Cu: the nonlocal channel has the same linear-in-parameter HF
+   structure through `dij_full` (see `blend_projector_data`), so the plumbing
+   cost is small, but it multiplies the null-space question, so it needs the
+   richer loss first.
