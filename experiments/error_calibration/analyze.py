@@ -179,9 +179,19 @@ def main():
     w(f"| (c) linear [gap, frac] | 3 | -- | {rms(lin_gap_frac_resid):.4f} | "
       f"{rms(lin_gap_frac_resid)/raw_rms:.2f}x |")
     w()
-    w(f"Global scale factor (in-sample geomean of true/est) = {gm:.3f} "
-      f"(i.e. the raw estimate on average captures {1.0/gm*100:.0f}% ... "
-      f"equivalently multiply est by {gm:.3f} to hit the truth on average).")
+    w(f"Global scale factor (in-sample geomean of est/true) = {gm:.3f}: the raw "
+      f"estimate on average captures {gm*100:.0f}% of the true error; the "
+      f"one-parameter calibration multiplies est by 1/{gm:.3f} = {1.0/gm:.3f}.")
+    w()
+    w("In natural terms RMS(L) maps to a typical multiplicative miss of "
+      f"exp(RMS): raw {math.exp(raw_rms):.3f}x (about "
+      f"{100*(math.exp(raw_rms)-1):.0f}%), global scale "
+      f"{math.exp(rms(g_resid)):.3f}x ({100*(math.exp(rms(g_resid))-1):.0f}%), "
+      f"linear [frac] {math.exp(rms(lin_frac_resid)):.3f}x "
+      f"({100*(math.exp(rms(lin_frac_resid))-1):.0f}%). Adding the gap "
+      "descriptor does not beat [frac] alone out-of-sample "
+      f"({rms(lin_gap_frac_resid):.4f} vs {rms(lin_frac_resid):.4f}); six "
+      "systems support the ecut-fraction slope but not a chemistry descriptor.")
     w()
     w(f"In-sample linear [gap, frac] R^2 = {r2_full:.3f}, coefficients "
       f"[b0, b_gap, b_frac] = [{beta_full[0]:.3f}, {beta_full[1]:.4f}, "
@@ -204,23 +214,66 @@ def main():
       "atom/cell).")
     w()
     w("| factor | k-mesh | joint | marg_ecut | marg_k | cross | "
-      "cross / |marg_ecut+marg_k| |")
-    w("|---|---|---|---|---|---|---|")
-    max_cross_frac = 0.0
+      "cross/total | cross/marg_k |")
+    w("|---|---|---|---|---|---|---|---|")
+    max_tot, max_k = 0.0, 0.0
     for g in ct["grid"]:
+        interior = g["factor"] != 1.0 and g["kmesh"] != 8
         summ = g["marg_ecut_eV"] + g["marg_k_eV"]
-        frac = abs(g["cross_eV"]) / abs(summ) if summ != 0 else float("nan")
-        if not math.isnan(frac) and not (g["factor"] == 1.0 and g["kmesh"] == 8):
-            max_cross_frac = max(max_cross_frac, frac)
+        f_tot = abs(g["cross_eV"]) / abs(summ) if summ != 0 else float("nan")
+        f_k = (abs(g["cross_eV"]) / abs(g["marg_k_eV"])
+               if g["marg_k_eV"] != 0 else float("nan"))
+        if interior:
+            max_tot = max(max_tot, f_tot)
+            max_k = max(max_k, f_k)
         w(f"| {g['factor']:.2f} | {g['kmesh']} | {g['joint_eV']*1e3:.3f} | "
           f"{g['marg_ecut_eV']*1e3:.3f} | {g['marg_k_eV']*1e3:.3f} | "
-          f"{g['cross_eV']*1e3:.3f} | {frac:.3f} |")
+          f"{g['cross_eV']*1e3:.3f} | "
+          + (f"{f_tot:.3f}" if not math.isnan(f_tot) else "n/a") + " | "
+          + (f"{f_k:.3f}" if not math.isnan(f_k) else "n/a") + " |")
     w()
     crosses = [abs(g["cross_eV"]) for g in ct["grid"]
-               if not (g["factor"] == 1.0 and g["kmesh"] == 8)]
-    w(f"Largest |cross| = {max(crosses)*1e3:.3f} meV/atom; largest "
-      f"cross/(sum of marginals) = {max_cross_frac*100:.1f}%. This is the size "
-      f"of the coupling the additive per-axis budget omits.")
+               if g["factor"] != 1.0 and g["kmesh"] != 8]
+    w(f"Interior points (both axes loose): largest |cross| = "
+      f"{max(crosses)*1e3:.3f} meV/atom, at most {max_tot*100:.1f}% of the "
+      f"summed marginals but up to {max_k*100:.0f}% of the k-point marginal "
+      f"itself. The additive budget's total is barely wrong (the ecut term "
+      f"dominates), but its k-point line item is off by order-one factors when "
+      f"the cutoff is very loose: the coupling rides on the smaller axis.")
+    w()
+
+    # ---- verdict ----
+    w("## 4. Findings and verdict")
+    w()
+    w(f"1. The estimator is a consistent under-estimate: all {len(pts)} ratios "
+      f"lie in [{ratios.min():.2f}, {ratios.max():.2f}], never above 1. This "
+      "matches its construction (first order at fixed density, diagonal "
+      "kinetic denominator): it captures the complement channel and misses "
+      "part of the self-consistent relaxation.")
+    w("2. The bias is systematic, not scatter. Within every system the ratio "
+      "rises monotonically toward 1 as ecut approaches the reference, and the "
+      "per-system geomeans agree to within a few percent "
+      "(0.83 to 0.89 across insulators, semiconductors, and metals).")
+    w("3. Calibration works out-of-sample. A single global scale halves the "
+      "log-ratio RMS on held-out systems; a two-parameter model on the ecut "
+      "fraction cuts it to about a fifth (typical held-out miss about 4%). "
+      "The band gap adds nothing at N=6; per-element scales are untestable "
+      "at N=6 (each element appears in one system).")
+    w("4. The (ecut, k) coupling is second order for the total but first "
+      "order for the k line item at very loose cutoffs. Budget totals are "
+      "safe to add; per-axis attributions are not, below about 0.65 of the "
+      "converged cutoff.")
+    w()
+    w("Verdict: GO for a small calibration layer. The signal is a smooth, "
+      "monotone, chemistry-insensitive function of the ecut fraction, exactly "
+      "what a tiny model (or even a fixed 1-2 parameter correction shipped "
+      "with the estimator) can remove. The active-learning loop is worth one "
+      "more probe at larger N before committing: extend to about 20 systems "
+      "(delta-gauge elements give geometry plus pseudos for free), check "
+      "whether per-element structure emerges beyond the frac slope, and only "
+      "then decide between a fixed correction and a learned one. Caveats: "
+      "N=6, cubic 1-2 atom cells, NC ONCV pseudos, PBE, energy channel only; "
+      "force/stress ratio behavior not measured here.")
     w()
 
     # write

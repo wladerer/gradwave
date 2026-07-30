@@ -1,0 +1,468 @@
+{
+  "systems": {
+    "Si_diamond": {
+      "kind": "diamond",
+      "a": 5.43,
+      "natoms": 2,
+      "metal": false,
+      "ecut_ref_ry": 55.0,
+      "kmesh": 4,
+      "fixed_fft": [
+        35,
+        35,
+        35
+      ],
+      "e_ref": -214.31853165266082,
+      "gap_ref_eV": 0.6754003947710139,
+      "points": [
+        {
+          "factor": 0.5,
+          "ecut_loose_ry": 27.5,
+          "e_loose": -214.2970877031239,
+          "e_ref": -214.31853165266082,
+          "est_denergy_eV": -0.01632100673109715,
+          "true_denergy_eV": -0.021443949536916307,
+          "ratio": 0.7611007805721666,
+          "est_meV_atom": -8.160503365548575,
+          "true_meV_atom": -10.721974768458153,
+          "gap_loose_eV": 0.6814327297851257,
+          "converged": true,
+          "n_iter": 10
+        },
+        {
+          "factor": 0.65,
+          "ecut_loose_ry": 35.75,
+          "e_loose": -214.31002486083003,
+          "e_ref": -214.31853165266082,
+          "est_denergy_eV": -0.007120582927432424,
+          "true_denergy_eV": -0.008506791830797056,
+          "ratio": 0.8370468055482264,
+          "est_meV_atom": -3.560291463716212,
+          "true_meV_atom": -4.253395915398528,
+          "gap_loose_eV": 0.6764351597340124,
+          "converged": true,
+          "n_iter": 10
+        },
+        {
+          "factor": 0.8,
+          "ecut_loose_ry": 44.0,
+          "e_loose": -214.31612744367806,
+          "e_ref": -214.31853165266082,
+          "est_denergy_eV": -0.0021815142488296724,
+          "true_denergy_eV": -0.0024042089827673863,
+          "ratio": 0.9073729715120775,
+          "est_meV_atom": -1.0907571244148362,
+          "true_meV_atom": -1.2021044913836931,
+          "gap_loose_eV": 0.6759006765826507,
+          "converged": true,
+          "n_iter": 10
+        }
+      ]
+    },
+    "C_diamond": {
+      "kind": "diamond",
+      "a": 3.567,
+      "natoms": 2,
+      "metal": false,
+      "ecut_ref_ry": 90.0,
+      "kmesh": 4,
+      "fixed_fft": [
+        30,
+        30,
+        30
+      ],
+      "e_ref": -309.90762258245724,
+      "gap_ref_eV": 4.4630230427021225,
+      "points": [
+        {
+          "factor": 0.5,
+          "ecut_loose_ry": 45.0,
+          "e_loose": -309.4843238508977,
+          "e_ref": -309.90762258245724,
+          "est_denergy_eV": -0.3530235447795953,
+          "true_denergy_eV": -0.4232987315595551,
+          "ratio": 0.8339820520580213,
+          "est_meV_atom": -176.51177238979764,
+          "true_meV_atom": -211.64936577977755,
+          "gap_loose_eV": 4.422747930026857,
+          "converged": true,
+          "n_iter": 10
+        },
+        {
+          "factor": 0.65,
+          "ecut_loose_ry": 58.5,
+          "e_loose": -309.8406666497726,
+          "e_ref": -309.90762258245724,
+          "est_denergy_eV": -0.05903948613213658,
+          "true_denergy_eV": -0.06695593268466382,
+          "ratio": 0.881766316514317,
+          "est_meV_atom": -29.51974306606829,
+          "true_meV_atom": -33.47796634233191,
+          "gap_loose_eV": 4.447385183798911,
+          "converged": true,
+          "n_iter": 10
+        },
+        {
+          "factor": 0.8,
+          "ecut_loose_ry": 72.0,
+          "e_loose": -309.9041849875498,
+          "e_ref": -309.90762258245724,
+          "est_denergy_eV": -0.003301020852950286,
+          "true_denergy_eV": -0.003437594907438779,
+          "ratio": 0.9602704628771256,
+          "est_meV_atom": -1.650510426475143,
+          "true_meV_atom": -1.7187974537193895,
+          "gap_loose_eV": 4.460860014349656,
+          "converged": true,
+          "n_iter": 10
+        }
+      ]
+    },
+    "Al_fcc": {
+      "kind": "fcc",
+      "a": 4.05,
+      "natoms": 1,
+      "metal": true,
+      "ecut_ref_ry": 45.0,
+      "kmesh": 8,
+      "fixed_fft": [
+        24,
+        24,
+        24
+      ],
+      "e_ref": -1882.8866879872958,
+      "gap_ref_eV": null,
+      "points": [
+        {
+          "factor": 0.5,
+          "ecut_loose_ry": 22.5,
+          "e_loose": -1850.126513704261,
+          "e_ref": -1882.8866879872958,
+          "est_denergy_eV": -26.739041109877135,
+          "true_denergy_eV": -32.76017428303476,
+          "ratio": 0.816205703878818,
+          "est_meV_atom": -26739.041109877136,
+          "true_meV_atom": -32760.174283034758,
+          "gap_loose_eV": null,
+          "converged": true,
+          "n_iter": 10
+        },
+        {
+          "factor": 0.65,
+          "ecut_loose_ry": 29.25,
+          "e_loose": -1875.576642181641,
+          "e_ref": -1882.8866879872958,
+          "est_denergy_eV": -6.550661518277464,
+          "true_denergy_eV": -7.310045805654681,
+          "ratio": 0.8961177114937097,
+          "est_meV_atom": -6550.661518277464,
+          "true_meV_atom": -7310.045805654681,
+          "gap_loose_eV": null,
+          "converged": true,
+          "n_iter": 10
+        },
+        {
+          "factor": 0.8,
+          "ecut_loose_ry": 36.0,
+          "e_loose": -1881.4768747015464,
+          "e_ref": -1882.8866879872958,
+          "est_denergy_eV": -1.3353727738076773,
+          "true_denergy_eV": -1.409813285749351,
+          "ratio": 0.9471983186042209,
+          "est_meV_atom": -1335.3727738076773,
+          "true_meV_atom": -1409.813285749351,
+          "gap_loose_eV": null,
+          "converged": true,
+          "n_iter": 9
+        }
+      ]
+    },
+    "MgO_rocksalt": {
+      "kind": "rocksalt",
+      "a": 4.21,
+      "natoms": 2,
+      "metal": false,
+      "ecut_ref_ry": 90.0,
+      "kmesh": 4,
+      "fixed_fft": [
+        35,
+        35,
+        35
+      ],
+      "e_ref": -1916.3963933040204,
+      "gap_ref_eV": 4.773132468214504,
+      "points": [
+        {
+          "factor": 0.5,
+          "ecut_loose_ry": 45.0,
+          "e_loose": -1914.254011967892,
+          "e_ref": -1916.3963933040204,
+          "est_denergy_eV": -1.7212217413131021,
+          "true_denergy_eV": -2.1423813361284374,
+          "ratio": 0.8034152054477726,
+          "est_meV_atom": -860.610870656551,
+          "true_meV_atom": -1071.1906680642187,
+          "gap_loose_eV": 4.68733788073496,
+          "converged": true,
+          "n_iter": 12
+        },
+        {
+          "factor": 0.65,
+          "ecut_loose_ry": 58.5,
+          "e_loose": -1916.052101160019,
+          "e_ref": -1916.3963933040204,
+          "est_denergy_eV": -0.3027172280119466,
+          "true_denergy_eV": -0.3442921440014288,
+          "ratio": 0.8792452377614818,
+          "est_meV_atom": -151.3586140059733,
+          "true_meV_atom": -172.1460720007144,
+          "gap_loose_eV": 4.769442900363549,
+          "converged": true,
+          "n_iter": 12
+        },
+        {
+          "factor": 0.8,
+          "ecut_loose_ry": 72.0,
+          "e_loose": -1916.361184633115,
+          "e_ref": -1916.3963933040204,
+          "est_denergy_eV": -0.03309292858991635,
+          "true_denergy_eV": -0.03520867090537649,
+          "ratio": 0.9399084867149285,
+          "est_meV_atom": -16.546464294958177,
+          "true_meV_atom": -17.604335452688247,
+          "gap_loose_eV": 4.776219948816037,
+          "converged": true,
+          "n_iter": 12
+        }
+      ]
+    },
+    "Cu_fcc": {
+      "kind": "fcc",
+      "a": 3.61,
+      "natoms": 1,
+      "metal": true,
+      "ecut_ref_ry": 90.0,
+      "kmesh": 8,
+      "fixed_fft": [
+        30,
+        30,
+        30
+      ],
+      "e_ref": -4968.902780142504,
+      "gap_ref_eV": null,
+      "points": [
+        {
+          "factor": 0.5,
+          "ecut_loose_ry": 45.0,
+          "e_loose": -4950.420678892067,
+          "e_ref": -4968.902780142504,
+          "est_denergy_eV": -14.223810490671553,
+          "true_denergy_eV": -18.482101250436244,
+          "ratio": 0.769599208333296,
+          "est_meV_atom": -14223.810490671553,
+          "true_meV_atom": -18482.101250436244,
+          "gap_loose_eV": null,
+          "converged": true,
+          "n_iter": 11
+        },
+        {
+          "factor": 0.65,
+          "ecut_loose_ry": 58.5,
+          "e_loose": -4967.332961739348,
+          "e_ref": -4968.902780142504,
+          "est_denergy_eV": -1.423133767799342,
+          "true_denergy_eV": -1.5698184031552955,
+          "ratio": 0.9065594879884699,
+          "est_meV_atom": -1423.1337677993422,
+          "true_meV_atom": -1569.8184031552955,
+          "gap_loose_eV": null,
+          "converged": true,
+          "n_iter": 11
+        },
+        {
+          "factor": 0.8,
+          "ecut_loose_ry": 72.0,
+          "e_loose": -4968.867123013566,
+          "e_ref": -4968.902780142504,
+          "est_denergy_eV": -0.03487276726226926,
+          "true_denergy_eV": -0.035657128937600646,
+          "ratio": 0.9780026687873832,
+          "est_meV_atom": -34.872767262269264,
+          "true_meV_atom": -35.657128937600646,
+          "gap_loose_eV": null,
+          "converged": true,
+          "n_iter": 11
+        }
+      ]
+    },
+    "NaCl_rocksalt": {
+      "kind": "rocksalt",
+      "a": 5.64,
+      "natoms": 2,
+      "metal": false,
+      "ecut_ref_ry": 75.0,
+      "kmesh": 4,
+      "fixed_fft": [
+        42,
+        42,
+        42
+      ],
+      "e_ref": -1693.8030386928017,
+      "gap_ref_eV": 5.107241979974338,
+      "points": [
+        {
+          "factor": 0.5,
+          "ecut_loose_ry": 37.5,
+          "e_loose": -1678.7526024641916,
+          "e_ref": -1693.8030386928017,
+          "est_denergy_eV": -11.279506553242978,
+          "true_denergy_eV": -15.050436228610124,
+          "ratio": 0.7494471510268388,
+          "est_meV_atom": -5639.753276621489,
+          "true_meV_atom": -7525.218114305062,
+          "gap_loose_eV": 4.944014572501983,
+          "converged": true,
+          "n_iter": 13
+        },
+        {
+          "factor": 0.65,
+          "ecut_loose_ry": 48.75,
+          "e_loose": -1690.8307709802266,
+          "e_ref": -1693.8030386928017,
+          "est_denergy_eV": -2.5540620898236117,
+          "true_denergy_eV": -2.9722677125751034,
+          "ratio": 0.8592974579705109,
+          "est_meV_atom": -1277.0310449118058,
+          "true_meV_atom": -1486.1338562875517,
+          "gap_loose_eV": 5.052251436599472,
+          "converged": true,
+          "n_iter": 12
+        },
+        {
+          "factor": 0.8,
+          "ecut_loose_ry": 60.0,
+          "e_loose": -1693.4259397254054,
+          "e_ref": -1693.8030386928017,
+          "est_denergy_eV": -0.3527402705722179,
+          "true_denergy_eV": -0.3770989673962504,
+          "ratio": 0.9354050291035757,
+          "est_meV_atom": -176.37013528610896,
+          "true_meV_atom": -188.5494836981252,
+          "gap_loose_eV": 5.098976952779049,
+          "converged": true,
+          "n_iter": 12
+        }
+      ]
+    }
+  },
+  "meta": {
+    "factors": [
+      0.5,
+      0.65,
+      0.8
+    ],
+    "wall_seconds": 262.4848027229309,
+    "threads": 8
+  },
+  "cross_term_Al": {
+    "fixed_fft": [
+      24,
+      24,
+      24
+    ],
+    "factors": [
+      0.5,
+      0.65,
+      1.0
+    ],
+    "meshes": [
+      4,
+      6,
+      8
+    ],
+    "e_ref_corner": -1882.8866879872958,
+    "grid": [
+      {
+        "factor": 0.5,
+        "kmesh": 4,
+        "e": -1849.6382178212161,
+        "joint_eV": 33.24847016607964,
+        "marg_ecut_eV": 32.76017428303476,
+        "marg_k_eV": 0.2892927701896042,
+        "cross_eV": 0.19900311285528005
+      },
+      {
+        "factor": 0.5,
+        "kmesh": 6,
+        "e": -1850.1134004147748,
+        "joint_eV": 32.773287572520985,
+        "marg_ecut_eV": 32.76017428303476,
+        "marg_k_eV": -0.06941237981754966,
+        "cross_eV": 0.08252566930377725
+      },
+      {
+        "factor": 0.5,
+        "kmesh": 8,
+        "e": -1850.126513704261,
+        "joint_eV": 32.76017428303476,
+        "marg_ecut_eV": 32.76017428303476,
+        "marg_k_eV": 0.0,
+        "cross_eV": 0.0
+      },
+      {
+        "factor": 0.65,
+        "kmesh": 4,
+        "e": -1875.2693367036322,
+        "joint_eV": 7.617351283663538,
+        "marg_ecut_eV": 7.310045805654681,
+        "marg_k_eV": 0.2892927701896042,
+        "cross_eV": 0.018012707819252682
+      },
+      {
+        "factor": 0.65,
+        "kmesh": 6,
+        "e": -1875.5715964161145,
+        "joint_eV": 7.315091571181256,
+        "marg_ecut_eV": 7.310045805654681,
+        "marg_k_eV": -0.06941237981754966,
+        "cross_eV": 0.0744581453441242
+      },
+      {
+        "factor": 0.65,
+        "kmesh": 8,
+        "e": -1875.576642181641,
+        "joint_eV": 7.310045805654681,
+        "marg_ecut_eV": 7.310045805654681,
+        "marg_k_eV": 0.0,
+        "cross_eV": 0.0
+      },
+      {
+        "factor": 1.0,
+        "kmesh": 4,
+        "e": -1882.5973952171062,
+        "joint_eV": 0.2892927701896042,
+        "marg_ecut_eV": 0.0,
+        "marg_k_eV": 0.2892927701896042,
+        "cross_eV": 0.0
+      },
+      {
+        "factor": 1.0,
+        "kmesh": 6,
+        "e": -1882.9561003671133,
+        "joint_eV": -0.06941237981754966,
+        "marg_ecut_eV": 0.0,
+        "marg_k_eV": -0.06941237981754966,
+        "cross_eV": 0.0
+      },
+      {
+        "factor": 1.0,
+        "kmesh": 8,
+        "e": -1882.8866879872958,
+        "joint_eV": 0.0,
+        "marg_ecut_eV": 0.0,
+        "marg_k_eV": 0.0,
+        "cross_eV": 0.0
+      }
+    ]
+  }
+}
