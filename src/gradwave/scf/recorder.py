@@ -43,6 +43,29 @@ from gradwave.dtypes import CDTYPE
 # sidecar schema version (bump on any incompatible field change)
 TRACE_VERSION = 1
 
+# diagnose() guard thresholds (see the diagnose() docstring for the justification).
+# Both exist to stop a *converged* run's settled tail from tripping a tag: the
+# last-5-iteration window that diagnose() reads is the pathological phase for a
+# stuck run but the noise floor for a converged one.
+#
+# _SLOSH_RES_FLOOR_: charge-sloshing only means something while the residual is
+# still being driven down. Once |Δρ| has fallen below this, the |G|-shell
+# decomposition is dominated by roundoff-level noise and its (non-)monotonicity
+# is meaningless, so the sloshing fraction must not be read there. 1e-4 sits
+# above the occupation-noise floor of a smeared metal (~1e-5..1e-6) and well
+# below any genuinely stuck residual.
+_SLOSH_RES_FLOOR = 1e-4
+# _MOMENT_COLLAPSE_FLOOR_ (μB): a collapse is a fall to the *nonmagnetic* branch,
+# so the final moment must be genuinely near zero, not merely a large fraction
+# below the seed. The seed moment on the USPP/PAW path is the smooth-grid moment
+# of the atomic (SAD) seed, which for a strongly-seeded 3d metal is many times
+# the converged smooth moment (e.g. fcc Ni: seed ~10.8 μB vs converged ~0.79 μB
+# smooth), so "fell to <10% of the seed" alone false-positives on every healthy
+# FM PAW metal. The smallest held FM moment in the test battery (fcc Ni, ~0.79 μB
+# on the smooth grid) sits ~8x above this floor, while a Stoner collapse drives
+# the moment below occupation noise (<0.05 μB).
+_MOMENT_COLLAPSE_FLOOR = 0.1
+
 
 def _mean(xs: list[float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
@@ -188,9 +211,14 @@ class SCFRecorder:
         Thresholds are HEURISTICS, tuned on the test systems:
         - charge-sloshing: over the last ~5 iterations, >50% of the residual
           weight sits in the 2 lowest |G|-shells AND the residual is not
-          monotonically falling;
+          monotonically falling AND the residual is still above
+          ``_SLOSH_RES_FLOOR`` (a converged run's noise-floor tail has a
+          meaningless shell decomposition and roundoff-level non-monotonicity,
+          so it must not read as sloshing);
         - moment-collapse: nspin=2 with a nonzero seeded moment whose |M| falls
-          across recent iterations toward ~0 (below 10% of the seed);
+          across recent iterations to below both 10% of the seed AND
+          ``_MOMENT_COLLAPSE_FLOOR`` μB (a collapse is a fall to the nonmagnetic
+          branch, m→~0, not merely a large fraction below an inflated SAD seed);
         - level-crossing: a nonzero band-reordering count in a majority of
           recent (it > 1) iterations.
         """
@@ -204,7 +232,7 @@ class SCFRecorder:
         res = [i["drho"] for i in recent]
         falling = all(res[j] <= res[j - 1] for j in range(1, len(res)))
         frac = _mean(low2)
-        if frac > 0.5 and not falling:
+        if frac > 0.5 and not falling and max(res) > _SLOSH_RES_FLOOR:
             tags.append(
                 (
                     "charge-sloshing",
@@ -215,7 +243,12 @@ class SCFRecorder:
 
         if self.nspin == 2 and self.seed_moment > 1e-6:
             mags = [i["mag_abs"] for i in recent if i["mag_abs"] is not None]
-            if len(mags) >= 3 and mags[-1] < mags[0] and mags[-1] < 0.1 * self.seed_moment:
+            if (
+                len(mags) >= 3
+                and mags[-1] < mags[0]
+                and mags[-1] < 0.1 * self.seed_moment
+                and mags[-1] < _MOMENT_COLLAPSE_FLOOR
+            ):
                 tags.append(
                     (
                         "moment-collapse",

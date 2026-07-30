@@ -87,6 +87,34 @@ def test_moment_collapse_detected():
     assert "moment-collapse" in tags
 
 
+def test_no_sloshing_at_converged_noise_floor():
+    # Regression: a converged run whose residual has fallen to the noise floor
+    # has a meaningless |G|-shell decomposition (long-wavelength-dominated by
+    # roundoff) and roundoff-level non-monotonicity. It must NOT read as
+    # sloshing even though frac>0.5 and the tail is non-monotone. Observed on
+    # fcc Ni (NC, johnson) whose tail residual is ~1e-6.
+    rec = _rec()
+    # last-5 window entirely at the noise floor (< _SLOSH_RES_FLOOR), with a
+    # roundoff-level non-monotone tick and a high long-wavelength fraction.
+    drhos = [1e-1, 1e-2, 1e-3, 1e-5, 1e-6, 2e-6, 1e-6, 3e-6]
+    rec.iters = [_iter(i + 1, drhos[i], 0.72) for i in range(len(drhos))]
+    assert "charge-sloshing" not in dict(rec.diagnose())
+
+
+def test_no_moment_collapse_when_seed_is_inflated_but_moment_holds():
+    # Regression: the USPP/PAW seed_moment is the smooth-grid moment of the SAD
+    # atomic seed, many times the converged smooth moment for a strongly-seeded
+    # 3d metal (fcc Ni: seed ~10.8 μB vs converged ~0.79 μB). "Fell to <10% of
+    # the seed" alone then trips on every healthy FM PAW metal. A moment that
+    # settles at a clearly-magnetic value must NOT read as collapsed.
+    rec = _rec(nspin=2, seed_moment=10.8)
+    mags = [2.5, 1.0, 0.8, 0.79, 0.79]  # settles at a held FM moment
+    rec.iters = [
+        _iter(i + 1, 10.0 ** -(i + 1), 0.1, mag_abs=mags[i]) for i in range(5)
+    ]
+    assert "moment-collapse" not in dict(rec.diagnose())
+
+
 def test_no_moment_collapse_when_moment_holds():
     rec = _rec(nspin=2, seed_moment=1.0)
     mags = [0.9, 0.92, 0.91, 0.90, 0.91]  # stable moment
