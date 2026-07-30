@@ -43,13 +43,15 @@ torchrun job. The backend is Gloo (CPU collectives); a cross-machine launch
 over Tailscale additionally needs ``GLOO_SOCKET_IFNAME=tailscale0`` set in the
 environment of every rank (see docs).
 
-Scope (v1): the norm-conserving collinear SCF (``scf.loop.scf``) only — no
-IBZ symmetry reduction (``use_symmetry=False`` is required), no fully
-relativistic (SOC) pseudopotentials, no hybrid Fock exchange, and no warm
-start across a shard boundary. DFT+U (Dudarev) IS supported (see point 4
-above). USPP/PAW, the noncollinear/spinor SCF, and hybrid-under-distribution
-are documented follow-ups (see ``docs/manual/distributed.md``), not
-implemented here.
+Scope: the norm-conserving collinear SCF (``scf.loop.scf``) and the
+USPP/PAW collinear SCF (``scf.uspp_loop.scf_uspp``, including DFT+U — see
+:func:`shard_uspp_system`) — no IBZ symmetry reduction (``use_symmetry=False``
+is required on either path), no fully relativistic (SOC) pseudopotentials (NC
+only; USPP/PAW has no SOC representation at all in this codebase — see
+:func:`shard_uspp_system`'s docstring), no hybrid Fock exchange, and no warm
+start across a shard boundary. The noncollinear/spinor SCF and
+hybrid-under-distribution are documented follow-ups (see
+``docs/manual/distributed.md``), not implemented here.
 """
 
 from __future__ import annotations
@@ -63,6 +65,7 @@ import torch
 
 if TYPE_CHECKING:
     from gradwave.scf.loop import System
+    from gradwave.scf.uspp_setup import USPPSystem
 
 _T = TypeVar("_T")
 
@@ -71,12 +74,14 @@ _T = TypeVar("_T")
 class DistKContext:
     """One rank's view of a k-point-sharded distributed SCF.
 
-    Built by :func:`shard_system`; threaded through ``scf.loop.scf`` as the
-    ``dist_ctx`` argument. ``full_system`` is the ORIGINAL, unsharded system
-    this rank was given — kept around so the converged ``SCFResult`` can be
-    reassembled with a normal, full-mesh ``system``/``eigenvalues``/
-    ``occupations``/``coeffs`` (as if it had been an ordinary, single-process
-    run), rather than leaking the local shard to callers.
+    Built by :func:`shard_system` (NC) or :func:`shard_uspp_system`
+    (USPP/PAW); threaded through ``scf.loop.scf`` / ``scf.uspp_loop.scf_uspp``
+    as the ``dist_ctx`` argument. ``full_system`` is the ORIGINAL, unsharded
+    system this rank was given — kept around so the converged
+    ``SCFResult``/``USPPResult`` can be reassembled with a normal, full-mesh
+    ``system``/``eigenvalues``/``occupations``/``coeffs`` (as if it had been
+    an ordinary, single-process run), rather than leaking the local shard to
+    callers.
     """
 
     rank: int
@@ -85,7 +90,7 @@ class DistKContext:
     k_start: int  # this rank's slice into the GLOBAL k-ordered arrays
     k_end: int
     nk_global: int
-    full_system: "System"
+    full_system: "System | USPPSystem"
 
 
 def current_rank() -> int:
@@ -178,6 +183,86 @@ def shard_system(
         kweights=system.kweights[start:end],
         proj_data=proj_data,
         batch=build_batched(spheres, proj_data, device=system.positions.device),
+    )
+    ctx = DistKContext(
+        rank=rank,
+        world_size=world_size,
+        group=group,
+        k_start=start,
+        k_end=end,
+        nk_global=nk,
+        full_system=system,
+    )
+    return local, ctx
+
+
+def shard_uspp_system(
+    system: "USPPSystem", rank: int, world_size: int, group: Any
+) -> tuple["USPPSystem", DistKContext]:
+    """Slice a fully-built ``USPPSystem`` to this rank's contiguous k-shard.
+
+    Only the per-k fields move (``spheres``, ``kweights``, ``proj_data``, and
+    ``smooth_flat_idx`` when the dual-grid H-apply is in use); everything
+    geometry/species-global (grid, positions, ``paws``, augmentation tables
+    ``aug``/``q_full``, ``atom_slices``, ``vloc_tables``, the density-sphere
+    fields ``sphere_idx``/``g_sphere``, ``n_electrons``, ``nbands``) is
+    untouched and identical on every rank. Unlike NC's ``System``,
+    ``USPPSystem`` carries no batched ``BatchedK`` field to rebuild here —
+    ``scf.uspp_loop._build_iter_ops`` builds it fresh from ``spheres``/
+    ``proj_data`` every call, so slicing those two is enough.
+
+    Requires an unsymmetrized system (``use_symmetry=False``): IBZ folding and
+    the ``rho_symmetrizer``/``becsum_sym`` it builds couple k-points (and, for
+    becsum, atoms) across the whole mesh in a way this k-sharding does not yet
+    account for (same v1 scope as :func:`shard_system`).
+
+    No fully-relativistic (SOC) guard here: ``USPPSystem`` has no ``is_fr`` /
+    ``so_beta_tables`` fields at all — this codebase's only SOC pseudopotential
+    path is the norm-conserving spinor driver (``scf_noncollinear``, consuming
+    ``System``); the USPP/PAW noncollinear driver (``scf_uspp_noncollinear``,
+    out of scope here too) takes a magnetic ``rho_symmetrizer``/``becsum_sym``
+    instead, already excluded by the symmetry guard above.
+    """
+    if (
+        system.sym is not None
+        or system.rho_symmetrizer is not None
+        or system.becsum_sym is not None
+    ):
+        raise NotImplementedError(
+            "distributed k-point parallelism does not yet support "
+            "use_symmetry=True (IBZ reduction) — build the system with "
+            "use_symmetry=False for a distributed run"
+        )
+    nk = len(system.kweights)
+    start, end = shard_range(nk, rank, world_size)
+    if start == end:
+        raise ValueError(
+            f"rank {rank} would get zero k-points out of {nk} total — "
+            f"world_size ({world_size}) exceeds the k-mesh size"
+        )
+
+    local_spheres = system.spheres[start:end]
+    smooth_flat_idx = system.smooth_flat_idx
+    if smooth_flat_idx is not None:
+        # smooth_flat_idx's column width was built as
+        # max(s.miller.shape[0] for s in <the FULL-mesh spheres>) (uspp_setup.
+        # _build_smooth_grid) -- the same quantity scf.uspp_loop._build_iter_ops
+        # independently recomputes as bk.npw_max (core.batch.build_batched's
+        # `int(npw.max())`), but over just THIS RANK's local_spheres. The two
+        # need not agree once sharded (a rank's shard can easily miss the
+        # single k-point that carries the global-max plane-wave count), and
+        # BatchedHamiltonian requires them to match exactly -- so re-truncate
+        # the column width down to the LOCAL max here. Row-slicing already
+        # keeps every real (nonzero-padded) entry of the kept rows; this only
+        # drops always-zero padding columns beyond the local max.
+        local_npw_max = max(s.npw for s in local_spheres)
+        smooth_flat_idx = smooth_flat_idx[start:end, :local_npw_max]
+    local = dataclasses.replace(
+        system,
+        spheres=local_spheres,
+        kweights=system.kweights[start:end],
+        proj_data=system.proj_data[start:end],
+        smooth_flat_idx=smooth_flat_idx,
     )
     ctx = DistKContext(
         rank=rank,
