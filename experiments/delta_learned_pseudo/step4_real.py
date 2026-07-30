@@ -38,6 +38,7 @@ from probe import (  # noqa: E402
     run_scf,
 )
 
+from gradwave.core.xc.pbe import PBE  # noqa: E402
 from gradwave.dtypes import RDTYPE  # noqa: E402
 from gradwave.postscf.eos import (  # noqa: E402
     EV_A3_TO_GPA,
@@ -45,7 +46,6 @@ from gradwave.postscf.eos import (  # noqa: E402
     delta_value,
     fit_bm3,
 )
-from gradwave.core.xc.pbe import PBE  # noqa: E402
 from gradwave.postscf.forces import forces  # noqa: E402
 
 ECUT = float(os.environ.get("GW_ECUT_RY", "28"))
