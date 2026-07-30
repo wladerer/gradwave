@@ -115,8 +115,8 @@ def run(nlay, detect_k):
     # verdict: does detect+restart beat robust-from-start?
     out["verdict"] = {
         "A_iters": rA.n_iter, "B_iters": rB.n_iter, "C_iters": total,
-        "C_beats_A": total < rA.n_iter,
-        "energies_match": abs(rA.energies.total - E) < 1e-3,
+        "C_beats_A": bool(total < rA.n_iter),
+        "energies_match": bool(abs(float(rA.energies.total) - E) < 1e-3),
     }
     print(f"slab{nlay}: A(local_tf)={rA.n_iter}  B(kerker)={rB.n_iter}  "
           f"C(detect@{detect_k}+restart)={total} (flagged={flagged})  "
