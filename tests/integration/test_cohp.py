@@ -351,3 +351,105 @@ def test_cohp_symmetry_scheme_consistency():
         icohp_by_scheme[use_sym] = c_op.pair_icohp["1-2"]
 
     assert abs(icohp_by_scheme[True] - icohp_by_scheme[False]) < 1e-6, icohp_by_scheme
+
+
+@pytest.mark.standard
+def test_cohp_resolve_images_diamond_bond_degeneracy(diamond_c):
+    """The concrete physics evidence behind the cohp.py module docstring's
+    "gap 1 (bond resolution) is closed by resolve_images" claim: diamond's
+    4 nearest-neighbour bonds are related by the tetrahedral site symmetry, so
+    an EXACT per-bond decomposition must give sublattice/4 for every one of
+    them. Verified two ways here: (1) the public resolve_images=True API gives
+    ~1/4 of the resolve_images=False sublattice number, and (2) scanning every
+    integer lattice shift R that puts atom 1 at the nearest-neighbour distance
+    from atom 0 finds exactly 4 such R, and _accumulate_images gives the
+    IDENTICAL per-bond ICOHP for all 4 (not merely close -- exact, since the
+    site symmetry is exact), summing back to the sublattice number."""
+    res, system = diamond_c
+
+    sub = cohp.cohp(res, pairs=[(0, 1)], method="operator", width=0.2,
+                    resolve_images=False)
+    per_bond = cohp.cohp(res, pairs=[(0, 1)], method="operator", width=0.2,
+                        resolve_images=True)
+    assert per_bond.bond_images == {"1-2": (0, 0, 0)}
+    ratio = per_bond.pair_icohp["1-2"] / sub.pair_icohp["1-2"]
+    assert 0.24 < ratio < 0.26, (per_bond.pair_icohp, sub.pair_icohp, ratio)
+
+    # cross-check via every symmetry-equivalent image directly, not just the
+    # one _nearest_image_R happens to pick by naive fractional-coordinate
+    # rounding -- rebuild the per-k projections/AO Hamiltonian once (the same
+    # objects cohp.cohp() builds internally) and reuse them for every R.
+    cell = np.asarray(system.grid.cell, dtype=float)
+    pos = system.positions.detach().cpu().numpy()
+    d0 = pos[0] - pos[1]
+    dists: dict[float, list[np.ndarray]] = {}
+    for n1 in range(-2, 3):
+        for n2 in range(-2, 3):
+            for n3 in range(-2, 3):
+                R = np.array([n1, n2, n3])
+                dist = round(float(np.linalg.norm(d0 - R @ cell)), 6)
+                if dist > 1e-6:
+                    dists.setdefault(dist, []).append(R)
+    nn_dist = min(dists)
+    nn_Rs = dists[nn_dist]
+    assert len(nn_Rs) == 4, "diamond's tetrahedral coordination"
+
+    system_, nspin, eig, coeffs, fermi, device, _ = cohp._unpack_result(res)
+    cols = cohp._atomic_columns(system_)
+    atom_of = np.array([c.atom for c in cols])
+    kw = system_.kweights.to(device)
+    from gradwave.core.hamiltonian import HamiltonianK, projectors
+    proj_per_k, htilde_per_k, eig_per_k, kw_flat, kpts = [], [], [], [], []
+    for ik, sph in enumerate(system_.spheres):
+        c = coeffs[0][ik].to(device)
+        e = eig[0, ik].to(device)
+        q = cohp._ao_projectors_k(system_, sph, cols, device)
+        overlap = torch.einsum("ig,jg->ij", q.conj(), q)
+        becp = torch.einsum("bg,pg->bp", c, q.conj())
+        proj = cohp._lowdin_project(becp, overlap)
+        ois = cohp.o_inv_sqrt(overlap)
+        pd = system_.proj_data[ik]
+        p = projectors(pd, system_.positions).to(device)
+        h = HamiltonianK(sph, system_.grid.shape, res.v_eff, pd, p)
+        htilde = cohp._htilde_operator(q, ois, h.apply)
+        proj_per_k.append(proj)
+        htilde_per_k.append(htilde)
+        eig_per_k.append(e)
+        kw_flat.append(float(kw[ik]))
+        kpts.append(np.asarray(sph.k_frac, dtype=float))
+
+    pair_list = [(0, 1, nn_dist)]
+    per_R = []
+    for R in nn_Rs:
+        _, ic = cohp._accumulate_images(
+            proj_per_k, htilde_per_k, eig_per_k, kw_flat, kpts, atom_of,
+            pair_list, {(0, 1): R}, nspin, len(system_.spheres), 2.0, res.fermi)
+        per_R.append(ic[(0, 1)])
+    assert max(per_R) - min(per_R) < 1e-6, per_R
+    assert abs(sum(per_R) - sub.pair_icohp["1-2"]) < 0.5, (sum(per_R), sub.pair_icohp)
+
+
+@pytest.mark.standard
+def test_cohp_iao_does_not_reduce_bond_overshoot_diamond(diamond_c):
+    """Guards a real, measured (NOT hoped-for) result: IAO spans the occupied
+    manifold exactly (charge_spilling collapses toward zero) but does NOT
+    shrink the per-bond COHP magnitude relative to the plain pswfc basis on
+    diamond -- it fixes occupied-space completeness, a different property from
+    the real-space extent that drives the inter-atomic H~ overlap, so it does
+    not close the basis-diffuseness gap docs/plans/cohp-contracted-basis.md
+    originally hypothesized it would. This pins the measurement (module
+    docstring, QUANTITATIVE STATUS #2) so a future change to _iao_projectors_k
+    that silently reintroduces that claim gets caught."""
+    res, system = diamond_c
+
+    base = cohp.cohp(res, pairs=[(0, 1)], method="operator", width=0.2,
+                     resolve_images=True, basis="pswfc")
+    iao = cohp.cohp(res, pairs=[(0, 1)], method="operator", width=0.2,
+                    resolve_images=True, basis="iao")
+
+    # IAO closes occupied-space completeness far better than pswfc ...
+    assert iao.charge_spilling < 1e-3
+    assert iao.charge_spilling < 0.1 * base.charge_spilling
+    # ... but does NOT shrink (and here is marginally larger than) the pswfc
+    # per-bond magnitude -- the basis-diffuseness gap is still open.
+    assert abs(iao.pair_icohp["1-2"]) >= 0.9 * abs(base.pair_icohp["1-2"])
