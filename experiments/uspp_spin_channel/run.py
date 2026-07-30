@@ -67,11 +67,13 @@ def _xc():
     return SpinPBE()
 
 
-def run_one(formalism, system, *, start_mag, spin_precond, smearing, width, xc,
-            etol, rhotol, mixing_alpha, max_iter):
+def run_one(formalism, system, *, start_mag, spin_precond, scheme, smearing,
+            width, xc, etol, rhotol, mixing_alpha, max_iter):
     kw = dict(nspin=2, start_mag=[start_mag], smearing=smearing, width=width,
               etol=etol, rhotol=rhotol, mixing_alpha=mixing_alpha,
               max_iter=max_iter, verbose=False)
+    if scheme != "default":
+        kw["mixing_scheme"] = scheme
     t0 = time.perf_counter()
     if formalism == "nc":
         # the NC loop has no spin_precond in main; run it plain (anchor)
@@ -113,6 +115,8 @@ def main():
     ap.add_argument("--start-mags", default="0.02,0.05,0.1,0.3")
     ap.add_argument("--precond", default="off,on",
                     help="comma list from {off,on}; nc ignores 'on'")
+    ap.add_argument("--scheme", default="default",
+                    help="mixing scheme: default|pulay|johnson|broyden")
     ap.add_argument("--smearing", default="gaussian")
     ap.add_argument("--width", type=float, default=0.1)
     ap.add_argument("--etol", type=float, default=1e-6)
@@ -132,11 +136,13 @@ def main():
             if formalism == "nc" and sp:
                 continue  # no spin_precond on the NC path; off-only anchor
             out = run_one(formalism, system, start_mag=sm, spin_precond=sp,
-                          smearing=args.smearing, width=args.width, xc=xc,
-                          etol=args.etol, rhotol=args.rhotol,
-                          mixing_alpha=args.alpha, max_iter=args.max_iter)
+                          scheme=args.scheme, smearing=args.smearing,
+                          width=args.width, xc=xc, etol=args.etol,
+                          rhotol=args.rhotol, mixing_alpha=args.alpha,
+                          max_iter=args.max_iter)
             print(json.dumps({"system": args.system, "start_mag": sm,
-                              "spin_precond": pc, **out}), flush=True)
+                              "spin_precond": pc, "scheme": args.scheme,
+                              **out}), flush=True)
 
 
 if __name__ == "__main__":
