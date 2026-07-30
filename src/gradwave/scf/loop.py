@@ -1025,14 +1025,26 @@ def _hubbard_occ_update(
     system: System,
     nspin: int,
     device: torch.device,
+    dist_ctx: "DistKContext | None" = None,
 ) -> tuple[list[list[torch.Tensor]], torch.Tensor] | tuple[None, torch.Tensor]:
     """Refresh the DFT+U per-spin occupation matrices from the fresh orbitals and
     return (n_hub_s, e_hub). No Hubbard manifold → (None, 0). For nspin=1 the
-    [0,2] occupation splits into two equal spin channels."""
+    [0,2] occupation splits into two equal spin channels.
+
+    Under ``dist_ctx`` (distributed k-point-sharded SCF), ``system``/``occ_s``/
+    ``coeffs_b_s``/``hub_q`` are all THIS RANK's local k-shard, so
+    ``occupation_matrices``' k-weighted sum below is only a PARTIAL sum over
+    the local shard — exactly like ``core.batch.density_b``'s partial density.
+    ``n_hub`` is therefore ``all_reduce``-SUMmed across ranks to the full-mesh
+    value before ``e_hub`` is computed. Unlike kinetic/nonlocal energy, e_hub
+    is NOT itself k-extensive-linear — ``hubbard_energy`` is a NONLINEAR
+    (Tr[n(1−n)]) function of n_hub, so summing each rank's LOCAL e_hub would
+    be wrong (Tr[(nA+nB)(1−nA−nB)] ≠ Tr[nA(1−nA)] + Tr[nB(1−nB)]). e_hub is
+    instead recomputed from the already-reduced, full-mesh n_hub_s."""
     e_hub = torch.zeros((), dtype=RDTYPE, device=device)
     if hub is None:
         return None, e_hub
-    from gradwave.core.hubbard import hubbard_occ_and_energy, occupation_matrices
+    from gradwave.core.hubbard import hubbard_energy, hubbard_occ_and_energy, occupation_matrices
 
     assert hub_q is not None  # set together with hub (scf()'s `if hubbard:` block)
     n_hub_s, e_hub = hubbard_occ_and_energy(
@@ -1041,6 +1053,21 @@ def _hubbard_occ_update(
         hub.sites,
         nspin,
     )
+    if dist_ctx is not None:
+        from gradwave.distributed import all_reduce_
+
+        n_hub_s = [[all_reduce_(m, dist_ctx) for m in mats] for mats in n_hub_s]
+        # e_hub above was computed from this rank's PARTIAL (local-shard)
+        # n_hub_s — recompute from the just-reduced, full-mesh matrices,
+        # mirroring hubbard_occ_and_energy's own e_hub formula (nspin=2:
+        # sum of the two channels' Dudarev traces; nspin=1: half-filled
+        # single channel doubled).
+        if nspin == 2:
+            e_hub = torch.zeros((), dtype=RDTYPE, device=device)
+            for mats in n_hub_s:
+                e_hub = e_hub + hubbard_energy(mats, hub.sites)
+        else:
+            e_hub = 2.0 * hubbard_energy(n_hub_s[0], hub.sites)
     if nspin == 1:
         n_hub_s = [n_hub_s[0], n_hub_s[0]]  # loop returns BOTH spin channels
     return n_hub_s, e_hub
@@ -1146,12 +1173,15 @@ def scf(
         system, nspin, eigensolver, smearing, mixing_scheme, precond, tot_magnetization
     )
     if dist_ctx is not None:
-        if hubbard or fock is not None:
+        if fock is not None:
             raise NotImplementedError(
-                "distributed (dist_ctx) SCF does not yet support DFT+U or "
-                "hybrid Fock exchange — both couple orbitals across k in ways "
-                "beyond the density/energy reduction implemented here (see "
-                "gradwave.distributed's module docstring)"
+                "distributed (dist_ctx) SCF does not yet support hybrid Fock "
+                "exchange — it couples orbitals across k in ways beyond the "
+                "density/energy reduction implemented here (see "
+                "gradwave.distributed's module docstring). DFT+U IS "
+                "supported: the Hubbard occupation matrix is a k-extensive "
+                "sum reduced the same way as the density (see "
+                "_hubbard_occ_update)."
             )
         if system.rho_symmetrizer is not None:
             raise NotImplementedError(
@@ -1401,7 +1431,9 @@ def scf(
             fock_apply_s, e_fock = fock.rebuild(coeffs_b_s, occ_s, system)
 
         # DFT+U occupation matrices from the fresh orbitals; E_U (Dudarev).
-        n_hub_s, e_hub = _hubbard_occ_update(hub, hub_q, coeffs_b_s, occ_s, system, nspin, device)
+        n_hub_s, e_hub = _hubbard_occ_update(
+            hub, hub_q, coeffs_b_s, occ_s, system, nspin, device, dist_ctx
+        )
 
         rho_raw_s = [
             density_b(coeffs_b_s[sp], occ_s[sp], system.kweights, bk, grid.shape, vol)

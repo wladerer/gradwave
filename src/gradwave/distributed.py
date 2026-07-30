@@ -23,6 +23,14 @@ points, all handled by :func:`shard_system` plus a few call sites in
    pseudopotential, Ewald, entropy) is a function of the ALREADY-global
    density/eigenvalues and so comes out identical on every rank without
    further communication.
+4. **DFT+U (Dudarev).** The Hubbard occupation matrix ``n_hub`` is built by
+   ``core.hubbard.occupation_matrices`` from exactly the same
+   k-weighted-sum pattern as the density — a k-extensive sum, computed per
+   rank on the local shard, then ``all_reduce``-summed (see
+   ``scf.loop._hubbard_occ_update``). Its energy term ``e_hub`` is NOT itself
+   k-extensive-linear (``hubbard_energy`` is the NONLINEAR Tr[n(1−n)] of
+   n_hub), so it is recomputed from the already-reduced, full-mesh n_hub
+   rather than summed per rank like kinetic/nonlocal energy.
 
 Opt in via ``Input.distributed: true`` (``api.run_scf``/``api.run``) or by
 calling :func:`init_from_env` and :func:`shard_system` directly and passing
@@ -37,10 +45,11 @@ environment of every rank (see docs).
 
 Scope (v1): the norm-conserving collinear SCF (``scf.loop.scf``) only — no
 IBZ symmetry reduction (``use_symmetry=False`` is required), no fully
-relativistic (SOC) pseudopotentials, no DFT+U, no hybrid Fock exchange, and no
-warm start across a shard boundary. USPP/PAW, the noncollinear/spinor SCF, and
-Hubbard/hybrid-under-distribution are documented follow-ups (see
-``docs/manual/distributed.md``), not implemented here.
+relativistic (SOC) pseudopotentials, no hybrid Fock exchange, and no warm
+start across a shard boundary. DFT+U (Dudarev) IS supported (see point 4
+above). USPP/PAW, the noncollinear/spinor SCF, and hybrid-under-distribution
+are documented follow-ups (see ``docs/manual/distributed.md``), not
+implemented here.
 """
 
 from __future__ import annotations
@@ -183,13 +192,27 @@ def shard_system(
 
 
 def all_reduce_(tensor: torch.Tensor, ctx: DistKContext) -> torch.Tensor:
-    """In-place SUM ``all_reduce`` — the density / k-extensive-energy
-    reduction point. Works for any tensor shape shared identically across
-    ranks (the dense density grid, or a 0-d energy scalar)."""
+    """SUM ``all_reduce`` — the density / k-extensive-energy reduction point.
+    Works for any tensor shape shared identically across ranks (the dense
+    density grid, a 0-d energy scalar, or a Hubbard occupation-matrix
+    diagonal block sliced out of a bigger tensor).
+
+    Non-contiguous input is made contiguous first: a Gloo ``all_reduce`` on a
+    non-contiguous VIEW (e.g. ``n_full[start:start+dim, start:start+dim]``,
+    a diagonal block of a bigger square matrix) does not raise — it silently
+    reduces the wrong bytes, treating the view as ``numel()`` contiguous
+    elements starting at its base pointer rather than respecting its actual
+    strides (caught by a real distributed DFT+U correctness test; see
+    ``scf.loop._hubbard_occ_update``). When a copy was needed, the returned
+    tensor is a DIFFERENT object from the input — not truly in-place in that
+    case — so callers should use the return value rather than rely on the
+    input being mutated; every current call site already does
+    (``x = all_reduce_(x, ctx)``)."""
     import torch.distributed as dist
 
-    dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=ctx.group)
-    return tensor
+    t = tensor if tensor.is_contiguous() else tensor.contiguous()
+    dist.all_reduce(t, op=dist.ReduceOp.SUM, group=ctx.group)
+    return t
 
 
 def gather_cat(local: torch.Tensor, ctx: DistKContext, dim: int = 0) -> torch.Tensor:

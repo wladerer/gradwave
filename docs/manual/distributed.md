@@ -64,8 +64,13 @@ silently ignored:
 - USPP/PAW pseudopotentials.
 - The noncollinear/spinor SCF (`noncollinear: true`), and fully relativistic
   (SOC) pseudopotentials.
-- DFT+U and hybrid (PBE0/HSE) Fock exchange — both couple orbitals across
-  k-points in ways beyond the density/energy reduction implemented here.
+- Hybrid (PBE0/HSE) Fock exchange — it couples orbitals across k-points in
+  ways beyond the density/energy reduction implemented here. DFT+U (Dudarev)
+  IS supported: the Hubbard occupation matrix `n_hub` is a k-extensive sum,
+  reduced the same way as the density (`all_reduce`-summed across ranks); its
+  energy term is then recomputed from the already-reduced `n_hub` rather than
+  summed per rank, since it is a nonlinear function of `n_hub` (see
+  `scf.loop._hubbard_occ_update`).
 - `task: relax | eos | elastic | phonons | magnetism` — these don't route
   through the k-point-sharded path yet.
 - Warm-starting a distributed run from a checkpoint (`restart:`) produced by
