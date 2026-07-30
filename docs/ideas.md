@@ -1617,8 +1617,9 @@ on one system and a disqualifying regression on another.
 The fixed-point oracle held everywhere both seeds reached the same branch, F agreeing to
 2e-11 eV or better, so the seed changes only the trajectory. The verdict is no-go for the
 default, because a default cannot trade Fe robustness for Ni convergence. The d-localized
-shape is worth keeping as an opt-in `start_mag_shape="d"` rescue for marginal-Stoner PAW
-systems that stagnate under the default.
+shape is worth keeping as a future opt-in rescue (a `start_mag_shape="d"` style option,
+prototyped only as the archive branch's monkeypatch, not wired into inputs) for
+marginal-Stoner PAW systems that stagnate under the default.
 
 One diagnostic lead is worth its own line. The Ni PAW default-seed stagnation at 120
 iterations at every `start_mag`, including the comfortable 0.30, localizes the residual floor
