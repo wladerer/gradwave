@@ -1,0 +1,2 @@
+{"system": "ni_paw", "start_mag": 0.02, "spin_precond": "on", "scheme": "pulay", "n_iter": 56, "converged": true, "F_eV": -5838.398322940448, "res_final": 9.468760322786176e-06, "mag_total": 0.5937499999983709, "mag_abs": 0.6990402963006521, "wall_s": 444.4, "diag": []}
+{"system": "ni_paw", "start_mag": 0.05, "spin_precond": "on", "scheme": "pulay", "n_iter": 120, "converged": false, "F_eV": -5838.398322922913, "res_final": 0.00014571953523606927, "mag_total": 0.5937498916400187, "mag_abs": 0.6990402351868047, "wall_s": 827.2, "diag": []}
