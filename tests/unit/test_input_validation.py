@@ -85,6 +85,51 @@ def test_precond_local_tf_parses(tmp_path):
     assert inp.scf.mixing.precond == "local_tf"
 
 
+def test_mixing_scheme_defaults_to_auto(tmp_path):
+    # the default defers to each formalism's resolver rather than pinning pulay
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _base()))
+    assert inp.scf.mixing.scheme == "auto"
+
+
+def test_mixing_scheme_auto_and_explicit_parse(tmp_path):
+    from gradwave.inputs import load_input
+
+    auto = load_input(_write(tmp_path, _base("scf: {mixing: {scheme: auto}}\n")))
+    assert auto.scf.mixing.scheme == "auto"
+    exp = load_input(_write(tmp_path, _base("scf: {mixing: {scheme: johnson}}\n")))
+    assert exp.scf.mixing.scheme == "johnson"
+
+
+def test_auto_scheme_resolves_to_johnson_for_nspin2(tmp_path):
+    """The auto default maps to None at the api boundary so BOTH the NC and the
+    USPP/PAW resolver pick johnson for a collinear-spin (nspin=2) run — the
+    scheme an input-file user gets without naming one."""
+    from gradwave.api import _mixing_scheme
+    from gradwave.inputs import load_input
+    from gradwave.scf.loop import _resolve_mixing_scheme
+    from gradwave.scf.uspp_loop import _resolve_uspp_mixing_scheme
+
+    inp = load_input(_write(tmp_path, _base()))
+    scheme = _mixing_scheme(inp)
+    assert scheme is None
+    assert _resolve_mixing_scheme(scheme, nspin=2) == "johnson"
+    assert _resolve_uspp_mixing_scheme(scheme, nspin=2) == "johnson"
+
+
+def test_explicit_scheme_bypasses_resolver(tmp_path):
+    # an explicit scheme reaches the driver unchanged (resolver is a no-op on it)
+    from gradwave.api import _mixing_scheme
+    from gradwave.inputs import load_input
+    from gradwave.scf.loop import _resolve_mixing_scheme
+
+    inp = load_input(_write(tmp_path, _base("scf: {mixing: {scheme: pulay}}\n")))
+    scheme = _mixing_scheme(inp)
+    assert scheme == "pulay"
+    assert _resolve_mixing_scheme(scheme, nspin=2) == "pulay"
+
+
 @pytest.mark.parametrize("mode", ["noncollinear: true\n", "task: magnetism\n"])
 def test_symmetry_true_rejected_for_magnetic_modes(tmp_path, mode):
     from gradwave.inputs import InputError, load_input

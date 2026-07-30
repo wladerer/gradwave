@@ -218,7 +218,10 @@ class GradWave(Calculator):
         etol: float = 1e-8,
         rhotol: float = 1e-7,
         diago_tol: float = 1e-9,
-        mixing_scheme: str = "pulay",  # USPP/PAW path only (NC scf is Pulay)
+        mixing_scheme: str | None = None,  # USPP/PAW path only (the NC scf
+        # resolves its own scheme). None → the formalism's resolver default
+        # (johnson for USPP/PAW; see scf.uspp_loop._resolve_uspp_mixing_scheme);
+        # or an explicit pulay | broyden | johnson
         mixing_alpha: float = 0.7,
         mixing_history: int | None = None,  # None → solver's per-scheme default
         mixing_kerker: bool | None = None,  # None → auto (on iff smeared)

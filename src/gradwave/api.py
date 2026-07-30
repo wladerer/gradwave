@@ -61,6 +61,18 @@ _UPF_CACHE: dict[str, UPFData | PAWData] = {}
 logger = logging.getLogger(__name__)
 
 
+def _mixing_scheme(inp: Input) -> str | None:
+    """The mixing scheme the api forwards to the SCF driver. The input default
+    ``auto`` maps to None so each formalism's own resolver picks its
+    evidence-backed default (johnson for USPP/PAW and for collinear-spin nspin=2
+    norm-conserving, pulay otherwise); an explicit pulay|broyden|johnson passes
+    through unchanged. Shared by run_scf and _build_relax_calc so both entry
+    points defer to the same resolvers. See scf.loop._resolve_mixing_scheme and
+    scf.uspp_loop._resolve_uspp_mixing_scheme."""
+    scheme = inp.scf.mixing.scheme
+    return None if scheme == "auto" else scheme
+
+
 def _load_upf(path: str | Path) -> UPFData | PAWData:
     """Parse a UPF of either family (NC via upf.py, USPP/PAW via
     upf_paw.py — same detection the ASE calculator uses), cached by path."""
@@ -268,6 +280,9 @@ def run_scf(
         smearing=inp.smearing.type, width=inp.smearing.width,
         max_iter=inp.scf.max_iter, etol=inp.scf.etol, rhotol=inp.scf.rhotol,
         mixing_alpha=inp.scf.mixing.alpha, precond=inp.scf.mixing.precond,
+        # auto → None so each formalism's resolver (scf / scf_uspp) picks its
+        # evidence-backed default; both branches consume it identically here.
+        mixing_scheme=_mixing_scheme(inp),
         diago_tol=inp.scf.diago_tol, verbose=verbose,
     )
     # DFT+U: the same manifold list feeds the NC and USPP/PAW SCF (both take a
@@ -284,9 +299,9 @@ def run_scf(
     if uspp:
         from gradwave.scf.uspp import scf_uspp
 
-        # history=None keeps the per-scheme default (johnson 12, else 8)
+        # history=None keeps the per-scheme default (johnson 12, else 8);
+        # mixing_scheme rides in `common` (shared with the NC branch below)
         return scf_uspp(cast("USPPSystem", system), xc,
-                        mixing_scheme=inp.scf.mixing.scheme,
                         mixing_history=inp.scf.mixing.history,
                         mixing_kerker=kerker, start_from=start_from,
                         dist_ctx=dist_ctx, **common)
@@ -575,7 +590,7 @@ def _build_relax_calc(inp: Input) -> GradWave:
         etol=inp.scf.etol,
         rhotol=inp.scf.rhotol,
         diago_tol=inp.scf.diago_tol,
-        mixing_scheme=inp.scf.mixing.scheme,
+        mixing_scheme=_mixing_scheme(inp),
         mixing_alpha=inp.scf.mixing.alpha,
         mixing_history=inp.scf.mixing.history,
         mixing_kerker=kerker,
