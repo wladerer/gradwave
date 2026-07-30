@@ -185,9 +185,19 @@ def _atomic_columns(system: System | USPPSystem) -> list[AOColumn]:
 
 
 def _ao_projectors_k(
-    system: System | USPPSystem, sph: GSphere, cols: list[AOColumn], device: torch.device
+    system: System | USPPSystem, sph: GSphere, cols: list[AOColumn], device: torch.device,
+    radial_override: dict[tuple[int, str], np.ndarray] | None = None,
 ) -> torch.Tensor:
-    """AO projectors q (nproj, npw) on one G-sphere, phased at the positions."""
+    """AO projectors q (nproj, npw) on one G-sphere, phased at the positions.
+
+    radial_override: optional {(species, orbital label): rchi(r)} table --
+    plain numpy, matching `AtomicOrbital.rchi`'s own type -- on the SAME
+    radial mesh as that species' pseudopotential (`_species_orbitals(system,
+    sp)[0].r`), to substitute for the raw UPF PP_PSWFC/PP_AECHI orbital --
+    e.g. a fitted `pseudo.sto_basis.ContractedSTO` (see cohp.py's
+    basis="contracted"). Missing keys fall back to the ordinary UPF table, so
+    a partial override (e.g. only the orbitals COHP's projector columns
+    actually use) is fine."""
     vol = system.grid.volume
     kpg = sph.kpg.to(device)
     npw = sph.npw
@@ -201,8 +211,11 @@ def _ao_projectors_k(
         for o in orbs:
             key = (sp, o.label)
             if key not in fcache:
+                rchi = o.rchi
+                if radial_override is not None and key in radial_override:
+                    rchi = radial_override[key]
                 fcache[key] = torch.as_tensor(
-                    sbt(o.l, o.rchi * u.r, u.r, u.rab, qmag),
+                    sbt(o.l, rchi * u.r, u.r, u.rab, qmag),
                     dtype=RDTYPE, device=device)
     # phases e^{-i(k+G).tau_a}
     phase_arg = kpg @ system.positions.to(device).T  # (npw, na)

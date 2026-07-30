@@ -186,6 +186,7 @@ from gradwave.postscf.pdos import (
     _atomic_columns_so,
     _broaden,
     _lowdin_project,
+    _species_orbitals,
     _unpack_result,
     o_inv_sqrt,
     spectral_grid,
@@ -438,6 +439,33 @@ def _iao_projectors_k(phi: torch.Tensor, psi_occ: torch.Tensor, floor: float=1e-
     return Phi - o_phi - ot_phi + 2.0 * oot_phi
 
 
+def _contracted_radial_override(
+    system: System | USPPSystem, *, n_primitives: int = 3, tail_reg: float = 1e-3,
+) -> dict[tuple[int, str], np.ndarray]:
+    """Fit a pseudo.sto_basis.ContractedSTO to every (species, orbital label)
+    PP_PSWFC/PP_AECHI table this system's AO columns use, keyed the same way
+    _ao_projectors_k's own fcache is (species index, orbital label) -- see
+    cohp()'s basis="contracted". K-independent (a free-atom fit, not a
+    crystal-SCF quantity), so this runs ONCE per cohp() call, not per k."""
+    from gradwave.pseudo.sto_basis import fit_contracted_sto, n_from_label
+
+    override: dict[tuple[int, str], np.ndarray] = {}
+    for sp in set(system.species_of_atom):
+        u, orbs = _species_orbitals(system, sp)
+        for o in orbs:
+            key = (sp, o.label)
+            if key in override:
+                continue
+            r = torch.as_tensor(u.r, dtype=torch.float64)
+            rab = torch.as_tensor(u.rab, dtype=torch.float64)
+            rchi_ref = torch.as_tensor(o.rchi, dtype=torch.float64)
+            sto, _rmse = fit_contracted_sto(
+                r, rab, rchi_ref, n=n_from_label(o.label), l=o.l,
+                n_primitives=n_primitives, tail_reg=tail_reg)
+            override[key] = sto.rchi(r).detach().numpy()
+    return override
+
+
 def _htilde_eig(proj: torch.Tensor, eig: torch.Tensor) -> torch.Tensor:
     """Band-limited AO Hamiltonian H~ = P^dagger diag(eps) P (nbasis, nbasis).
     Cheap (needs only projections + eigenvalues) but carries the plane-wave
@@ -610,24 +638,30 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
     full (unreduced) k-mesh for bonds that cross a cell boundary; exact at Gamma.
 
     `basis` selects the projector local basis: "pswfc" (default) the pseudo-atomic
-    PP_PSWFC orbitals, or "iao" the Intrinsic Atomic Orbitals that span the occupied
-    manifold exactly (zero occupied-state spilling). "iao" needs the norm-conserving
-    operator route. NOTE: despite spanning the occupied space exactly, IAO does NOT
+    PP_PSWFC orbitals, "iao" the Intrinsic Atomic Orbitals that span the occupied
+    manifold exactly (zero occupied-state spilling), or "contracted" a fitted
+    LOBSTER-style minimal contracted-STO radial basis (pseudo.sto_basis) -- see
+    docs/plans/cohp-contracted-basis.md. "iao" needs the norm-conserving operator
+    route. NOTE: despite spanning the occupied space exactly, IAO does NOT
     measurably shrink the off-site COHP magnitude on diamond (module docstring,
     QUANTITATIVE STATUS #2) -- it fixes completeness, not real-space extent, so it
-    is not a fix for the basis-diffuseness gap. Returns a `COHP`.
+    is not a fix for the basis-diffuseness gap. "contracted" targets extent
+    directly (a free-atom fit, not a crystal-SCF quantity) but is a fresh, as yet
+    uncalibrated draft (no in-tree LOBSTER oracle to tune n_primitives/tail_reg
+    against -- see pseudo.sto_basis.fit_contracted_sto). Returns a `COHP`.
     """
     from gradwave.scf.loop import SCFResult
     system, nspin, eig, coeffs, fermi, device, _ = _unpack_result(res)
     use_op = method == "operator" and isinstance(res, SCFResult)
     method = "operator" if use_op else "eigenvalue"
-    if basis not in ("pswfc", "iao"):
-        raise ValueError(f"basis must be 'pswfc' or 'iao', got {basis!r}")
+    if basis not in ("pswfc", "iao", "contracted"):
+        raise ValueError(f"basis must be 'pswfc', 'iao', or 'contracted', got {basis!r}")
     if basis == "iao" and not use_op:
         raise NotImplementedError(
             "basis='iao' needs the norm-conserving operator route "
             "(method='operator' on an SCFResult)")
     cols = _atomic_columns(system)
+    radial_override = _contracted_radial_override(system) if basis == "contracted" else None
     atom_of = np.array([c.atom for c in cols])
     pair_list = _select_pairs(system, pairs, rcut)
     kw = system.kweights.to(device)
@@ -652,7 +686,7 @@ def cohp(res: SCFResult | USPPResult, *, pairs: list[tuple[int, int]] | None = N
         for ik, sph in enumerate(system.spheres):
             c = coeffs[isp][ik].to(device)                       # (nb, npw)
             e = eig[isp, ik].to(device)
-            q = _ao_projectors_k(system, sph, cols, device)      # (nproj, npw)
+            q = _ao_projectors_k(system, sph, cols, device, radial_override)  # (nproj, npw)
             if basis == "iao":
                 occ_mask = (e < fermi) if fermi is not None \
                     else torch.ones_like(e, dtype=torch.bool)
@@ -729,12 +763,13 @@ def projection_rmsp(res: SCFResult, *, basis: str = "pswfc",
     system, nspin, eig, coeffs, fermi, device, _ = _unpack_result(res)
     cols = _atomic_columns(system)
     kw = system.kweights.to(device)
+    radial_override = _contracted_radial_override(system) if basis == "contracted" else None
     num = den = None
     for isp in range(nspin):
         for ik, sph in enumerate(system.spheres):
             c = coeffs[isp][ik].to(device)
             e = eig[isp, ik].to(device)
-            q = _ao_projectors_k(system, sph, cols, device)
+            q = _ao_projectors_k(system, sph, cols, device, radial_override)
             if basis == "iao":
                 occ_mask = (e < fermi) if fermi is not None \
                     else torch.ones_like(e, dtype=torch.bool)
