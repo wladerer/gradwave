@@ -182,10 +182,19 @@ class SCFRecorder:
         fermi: float | None,
         entropy: float,
         mag_abs: float | None = None,
+        e_metric: float | None = None,
+        e_metric_charge: float | None = None,
+        e_metric_mag: float | None = None,
     ) -> None:
         """Append one outer-iteration record. ``drho_r`` is the total real-space
         SCF residual (ρ_out − ρ_in), ``eigs`` the per-spin eigenvalue tensors,
-        ``t_iter`` the loop's own measured wall time for this iteration."""
+        ``t_iter`` the loop's own measured wall time for this iteration.
+
+        ``e_metric`` (and its charge/magnetization decomposition) is the
+        residual's second-order energy-error estimate 1/2 <r|K_Hxc|r> [eV]
+        (``postscf._response.kernel_energy_error``), recorded only when the
+        energy-metric convergence gate is active; None otherwise (the cheap
+        default path does not compute it)."""
         stacked = torch.stack([e.detach() for e in eigs])  # (nspin, nk, nb)
         drift, reorder = self._eig_drift_and_reorder(stacked)
         self.iters.append(
@@ -201,6 +210,11 @@ class SCFRecorder:
                 "reorder": int(reorder),
                 "shell_frac": self._shell_fractions(drho_r),
                 "mag_abs": None if mag_abs is None else float(mag_abs),
+                "e_metric": None if e_metric is None else float(e_metric),
+                "e_metric_charge": (
+                    None if e_metric_charge is None else float(e_metric_charge)),
+                "e_metric_mag": (
+                    None if e_metric_mag is None else float(e_metric_mag)),
             }
         )
 
@@ -285,6 +299,14 @@ class SCFRecorder:
             block["final_magnetization_muB"] = (
                 None if final["mag_abs"] is None else float(final["mag_abs"])
             )
+        if final.get("e_metric") is not None:
+            block["energy_metric_eV"] = float(final["e_metric"])
+            block["energy_metric_charge_eV"] = (
+                None if final.get("e_metric_charge") is None
+                else float(final["e_metric_charge"]))
+            block["energy_metric_mag_eV"] = (
+                None if final.get("e_metric_mag") is None
+                else float(final["e_metric_mag"]))
         return block
 
     def to_trace_dict(self) -> dict[str, Any]:
@@ -313,6 +335,15 @@ class SCFRecorder:
                     "reorder_count": i["reorder"],
                     "shell_fraction": i["shell_frac"],
                     **({"mag_abs_muB": i["mag_abs"]} if self.nspin == 2 else {}),
+                    **(
+                        {
+                            "energy_metric_eV": i["e_metric"],
+                            "energy_metric_charge_eV": i["e_metric_charge"],
+                            "energy_metric_mag_eV": i["e_metric_mag"],
+                        }
+                        if i.get("e_metric") is not None
+                        else {}
+                    ),
                 }
                 for i in self.iters
             ],

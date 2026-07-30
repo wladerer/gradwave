@@ -36,11 +36,25 @@ def record_iteration(history, it, e_free, e_free_prev, res_norm, t_it):
     return de
 
 
-def convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol):
+def convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol,
+                     *, energy_error=None, entol=None):
     """The strict convergence gate shared by all four SCF drivers: energy
     settled AND density residual down AND the eigensolve tight relative to the
     density tolerance (a loose eigensolve can fake a small dE/res pair — the
     orbitals barely move, so ρ_out ≈ ρ_in for the wrong reason).
+
+    Energy-metric gate (opt-in): when ``energy_error`` is given, the density
+    clause ``res_norm < rhotol`` is REPLACED by ``|energy_error| < entol`` — the
+    exactly-computed second-order energy error of the residual (the
+    ``postscf._response.kernel_energy_error`` 1/2 <r|K_Hxc|r> estimate). The
+    energy-tail (``de < etol``) and stale-solve (``tol_eff``) clauses are
+    unchanged, so a loose eigensolve still cannot fake convergence and the
+    reported free energy is settled. Passing ``energy_error=None`` (the default)
+    keeps the original density gate bit-for-bit. This is the honest criterion
+    for metallic magnets, whose magnetization-channel density residual has a
+    physical floor (~2e-3) that a rhotol gate can never reach, while the energy
+    error — dominated by the Hartree-amplified charge channel — settles far
+    below it.
 
     The third clause guards against that stale-solve fake. It must be satisfied
     by an eigensolver noise floor BELOW the residual we are trusting: if
@@ -56,7 +70,11 @@ def convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol):
     plunges tol_eff to diago_tol the moment res_prev is small, so both bounds
     agree there and this change leaves the collinear path's convergence point
     untouched."""
-    return de < etol and res_norm < rhotol and tol_eff <= max(diago_tol, rhotol) * 1.01
+    if not (de < etol and tol_eff <= max(diago_tol, rhotol) * 1.01):
+        return False
+    if energy_error is None:
+        return res_norm < rhotol
+    return abs(energy_error) < entol
 
 
 def adaptive_diago_tol(it, history, diago_tol, n_electrons, *, schedule,

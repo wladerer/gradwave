@@ -182,6 +182,84 @@ def fxc_hvp_noncollinear_nonmagnetic(xc: NoncollinearXC, rho0: torch.Tensor, gri
     return fxc_w * (grid.n_points / grid.volume)
 
 
+# --------------------------------------------------------------------------- #
+#  Energy-metric SCF convergence estimate: 1/2 <r|K_Hxc|r>                     #
+# --------------------------------------------------------------------------- #
+
+
+def _k_hxc_apply(grid: FFTGrid, xc, w_s: list[torch.Tensor],
+                 rho_s: list[torch.Tensor], rho_core: torch.Tensor | None,
+                 nspin: int) -> list[torch.Tensor]:
+    """(K_Hxc w)_σ per spin channel [eV] for a per-spin field list ``w_s``.
+
+    Mirrors ``scf.implicit.apply_k_hxc`` but takes raw grid densities (no
+    ``SCFResult``), so a mid-SCF loop can call it. The Hartree kernel acts on
+    the TOTAL δρ = Σ_σ w_σ and enters every channel; f_xc is the LDA/GGA spin
+    HVP of E_xc at the current densities, NLCC core split half/half (nspin=2)
+    or added whole (nspin=1) — the exact evaluation point the SCF's own v_xc
+    uses (``scf.loop.effective_potentials``)."""
+    if nspin == 1:
+        rho_xc = rho_s[0] if rho_core is None else rho_s[0] + rho_core
+        return [hartree_kernel(grid, w_s[0]) + fxc_hvp(xc, rho_xc, grid, w_s[0])]
+    kh = hartree_kernel(grid, w_s[0] + w_s[1])
+    c2 = 0.0 if rho_core is None else 0.5 * rho_core
+    fu, fd = fxc_hvp_spin(xc, rho_s[0] + c2, rho_s[1] + c2, grid, w_s[0], w_s[1])
+    return [kh + fu, kh + fd]
+
+
+def kernel_energy_error(grid: FFTGrid, xc, r_s: list[torch.Tensor],
+                        rho_s: list[torch.Tensor],
+                        rho_core: torch.Tensor | None = None,
+                        nspin: int = 1) -> tuple[float, float, float]:
+    """Second-order SCF energy-error estimate 1/2 <r|K_Hxc|r> [eV] of a density
+    residual r = ρ_out − ρ_in, decomposed into charge and magnetization
+    channels. Returns ``(e_total, e_charge, e_mag)``.
+
+    Because the energy is stationary at the SCF fixed point, the residual's
+    energy error is second order, 1/2 <r|(K_Hxc + χ₀)|r> (docs/ideas.md's
+    error-budget section). This computes the KERNEL-ONLY contraction
+    1/2 <r|K_Hxc|r> exactly — Hartree kernel 4πe²/G² plus the f_xc HVP of the
+    XC energy — which is the QE-comparable quantity (QE's "estimated scf
+    accuracy" is the un-halved <r|K_Hxc|r>, so this is about half of it). It
+    OMITS the χ₀ independent-particle response term, whose one application needs
+    a conduction-projected Sternheimer solve per occupied band per k restricted
+    to nspin=1 insulators — not cheap per SCF iteration, and inapplicable to
+    the metallic magnets this gate is built for. It also omits any Hubbard (+U)
+    or Fock (hybrid) second-order kernel.
+
+    The charge/magnetization split (nspin=2) writes the residual pair as
+    c = ((r↑+r↓)/2, (r↑+r↓)/2) and m = ((r↑−r↓)/2, (r↓−r↑)/2); ``e_charge`` and
+    ``e_mag`` are each channel's own 1/2 <·|K_Hxc|·>. They do NOT sum to
+    ``e_total`` because the f_xc kernel carries a charge<->magnetization cross
+    term (``e_total − e_charge − e_mag``). The Hartree kernel contributes only
+    to ``e_charge`` (it acts on the total charge, which is zero for the pure-mag
+    pair). ``e_mag = 0`` for nspin=1.
+
+    Raises ``NotImplementedError`` for a meta-GGA (``needs_tau``): the kernel
+    here omits the kinetic-energy-density (τ) response.
+    """
+    if getattr(xc, "needs_tau", False):
+        raise NotImplementedError(
+            "energy-metric convergence gate does not support meta-GGA "
+            "(needs_tau): the K_Hxc kernel here omits the kinetic-energy-density "
+            "(tau) response")
+    cell = grid.volume / grid.n_points
+    kr = _k_hxc_apply(grid, xc, r_s, rho_s, rho_core, nspin)
+    e_total = 0.5 * sum(float((r_s[s] * kr[s]).sum()) for s in range(nspin)) * cell
+    if nspin == 1:
+        return e_total, e_total, 0.0
+    # Linear kernel: the swap r↑<->r↓ gives K on the (charge, mag) basis in two
+    # applications (see the derivation above).
+    kr_sw = _k_hxc_apply(grid, xc, [r_s[1], r_s[0]], rho_s, rho_core, nspin)
+    rn2 = 0.5 * (r_s[0] + r_s[1])       # charge residual / 2 (both channels)
+    rm2 = 0.5 * (r_s[0] - r_s[1])       # +mag residual / 2 (spin up channel)
+    kc = [0.5 * (kr[0] + kr_sw[0]), 0.5 * (kr[1] + kr_sw[1])]
+    km = [0.5 * (kr[0] - kr_sw[0]), 0.5 * (kr[1] - kr_sw[1])]
+    e_charge = 0.5 * (float((rn2 * kc[0]).sum()) + float((rn2 * kc[1]).sum())) * cell
+    e_mag = 0.5 * (float((rm2 * km[0]).sum()) + float((-rm2 * km[1]).sum())) * cell
+    return e_total, e_charge, e_mag
+
+
 def spin_sigma_triple(
     xc: SpinXC, r_u: torch.Tensor, r_d: torch.Tensor, g_cart: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[None, None, None]:

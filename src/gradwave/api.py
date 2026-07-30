@@ -284,6 +284,10 @@ def run_scf(
         # evidence-backed default; both branches consume it identically here.
         mixing_scheme=_mixing_scheme(inp),
         diago_tol=inp.scf.diago_tol, verbose=verbose,
+        # energy-metric convergence gate (opt-in via scf.convergence: "energy").
+        # Both the NC scf() and USPP scf_uspp() take these kwargs; the default
+        # "density" leaves the density gate bit-for-bit unchanged.
+        energy_metric=(inp.scf.convergence == "energy"), entol=inp.scf.entol,
     )
     # DFT+U: the same manifold list feeds the NC and USPP/PAW SCF (both take a
     # `hubbard=` kwarg); species already resolved to the setup's integer index.
@@ -500,12 +504,18 @@ def build_summary(res: SCFLike, inp: Input, task: str,
         q = float(_tail[len(_tail) // 2])  # median of the last few ratios
     _final = trace[-1] if trace else {}
     scf_block["convergence"] = {
+        "criterion": inp.scf.convergence,
         "final_dE_eV": _final.get("dE_eV"),
         "final_drho": _final.get("drho"),
         "etol_eV": float(inp.scf.etol),
         "rhotol": float(inp.scf.rhotol),
         "ratio_q": q,
         "warm_started": inp.restart is not None,
+        # the per-iteration energy-metric value itself is surfaced under
+        # scf_diagnostics.energy_metric_eV (the recorder block); here we record
+        # only the active criterion and its threshold.
+        **({"entol_eV": float(inp.scf.entol)}
+           if inp.scf.convergence == "energy" else {}),
     }
 
     summary = {

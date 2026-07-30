@@ -52,6 +52,43 @@ energy is long settled. Gate on the energy tail rather than the density residual
 which in practice means a looser `scf.rhotol` around 1e-5 for a ferromagnetic
 metal instead of the 1e-7 default.
 
+### The energy-metric gate
+
+The residual floor is not noise on a magnetic metal, it is physics. On a
+ferromagnet near the Stoner boundary the magnetization-channel residual settles
+around 2e-3 and does not fall further, mixer-independently, while the charge
+channel sits five to seven times lower. A `scf.rhotol` gate then either never
+fires or has to be loosened by hand to a value chosen per system.
+
+The energy metric replaces that hand-tuning with the residual's exact energy
+error. Because the energy is stationary at the self-consistent fixed point, the
+error left by stopping at a finite residual r is second order, and its leading
+term is the kernel contraction $\tfrac{1}{2}\langle r | K_\text{Hxc} | r\rangle$
+with $K_\text{Hxc}$ the Hartree-plus-XC kernel. gradwave already carries those
+operators for the Dyson dressing, so the estimate is computed exactly once per
+iteration from the same $4\pi e^2/G^2$ Hartree kernel and an autograd
+Hessian-vector product of $E_\text{xc}$. The Hartree kernel amplifies the charge
+channel and leaves the magnetization channel alone, so the energy error is set by
+the well-converged charge residual and settles far below any reachable `rhotol`
+while the magnetization residual sits on its floor. This is the same quantity
+VASP gates on through `EDIFF` and QuantumESPRESSO estimates through its
+`conv_thr` accuracy, computed here rather than approximated. QE reports the
+un-halved $\langle r | K_\text{Hxc} | r\rangle$, so its threshold is about twice
+this one.
+
+Select it with `scf.convergence: energy`, which converges when the estimated
+energy error falls below `scf.entol` (default 1e-6 eV) with the energy tail
+(`scf.etol`) and the stale-solve guard both still enforced. The default
+`scf.convergence: density` leaves the residual gate unchanged. The per-iteration
+estimate and its charge and magnetization decomposition are recorded in the SCF
+diagnostics block and the `scf_trace.json` sidecar, so a trace shows which
+channel carries the remaining error. The estimate is the kernel-only term. It
+omits the independent-particle $\chi_0$ response, whose one application needs a
+Sternheimer solve per band restricted to insulators and is neither cheap per
+iteration nor applicable to the metals this gate targets, and it omits the
+Hubbard and Fock second-order kernels. A meta-GGA is rejected rather than
+estimated without its kinetic-energy-density response.
+
 ### Magnetic systems
 
 A spin-polarized run is set with `nspin: 2` and seeded with `start_mag`, a map
@@ -124,8 +161,8 @@ the right operator fixes the mode directly.
 4. For a magnet, seed with `start_mag` and rely on the automatic Johnson scheme on
    the norm-conserving path. Chain warm starts across a scan to hold the branch.
 5. Only then tune `scf.mixing.alpha` down or `scf.mixing.history` up, and gate a
-   smeared metal on the energy tail (`scf.rhotol` ~1e-5) rather than the density
-   residual.
+   magnetic metal with `scf.convergence: energy` rather than loosening
+   `scf.rhotol` to ~1e-5 by hand.
 
 ## Dual descent for geometry optimization
 

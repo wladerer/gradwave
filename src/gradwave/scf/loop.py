@@ -1161,6 +1161,13 @@ def scf(
     # the ordinary single-process path, byte-for-byte unchanged.
     recorder: "SCFRecorder | None" = None,  # per-iteration flight recorder (scf.recorder);
     # None (default) builds a fresh cheap-path recorder — detached, off the autograd graph
+    energy_metric: bool = False,  # opt-in energy-metric convergence gate: converge on the
+    # residual's exact second-order energy error 1/2<r|K_Hxc|r> < entol instead of
+    # rhotol (etol and the stale-solve guard unchanged). The honest criterion for
+    # metallic magnets, whose magnetization-channel density residual floors above any
+    # reachable rhotol while the (Hartree-dominated) energy error settles far below it.
+    # False (default) leaves the density gate bit-for-bit unchanged and costs nothing.
+    entol: float = 1e-6,  # eV, the energy-error threshold for energy_metric (see docs)
 ) -> SCFResult:
     # `fock`, when given, adds an orbital-dependent operator to the Hamiltonian
     # each SCF step (a hybrid functional's Fock exchange). It must expose
@@ -1536,6 +1543,19 @@ def scf(
             verbose,
         )
 
+        # energy-metric gate (opt-in): the residual's exact second-order energy
+        # error 1/2<r|K_Hxc|r>, per-channel (charge/magnetization). Computed only
+        # when selected, so the default density-gate path is bit-for-bit unchanged
+        # and pays nothing (one f_xc HVP per iteration otherwise).
+        e_metric = e_metric_charge = e_metric_mag = None
+        if energy_metric:
+            from gradwave.postscf._response import kernel_energy_error
+
+            r_s = [rho_out_s[sp] - rho_s[sp] for sp in range(nspin)]
+            e_metric, e_metric_charge, e_metric_mag = kernel_energy_error(
+                grid, xc, r_s, rho_s, system.rho_core, nspin
+            )
+
         # flight recorder: cheap detached per-iteration metrics. drho_scf is the
         # total real-space residual already formed above; history[-1]["t"] is the
         # loop's own timing for this iteration (no extra sync).
@@ -1552,9 +1572,13 @@ def scf(
             mag_abs=(float((rho_out_s[0] - rho_out_s[1]).abs().mean()) * vol)
             if nspin == 2
             else None,
+            e_metric=e_metric,
+            e_metric_charge=e_metric_charge,
+            e_metric_mag=e_metric_mag,
         )
 
-        if convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol):
+        if convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol,
+                            energy_error=e_metric, entol=entol):
             converged = True
             rho_s = rho_out_s
             break

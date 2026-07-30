@@ -43,6 +43,13 @@ class SCFOptions:
     rhotol: float = 1e-7
     diago_tol: float = 1e-9
     criterion: str = "drho"  # drho | energy
+    # opt-in energy-metric convergence gate: converge on the residual's exact
+    # second-order energy error 1/2<r|K_Hxc|r> < entol instead of rhotol (etol
+    # and the stale-solve guard unchanged), overriding `criterion`. The honest
+    # criterion for metallic magnets. False (default) leaves the density gate
+    # bit-for-bit unchanged.
+    energy_metric: bool = False
+    entol: float = 1e-6  # eV, the energy-error threshold for energy_metric
     rho_safety: float = 1e-2
     batched: bool = True
     # fp32 draft for the batched Davidson while the diago tolerance is
