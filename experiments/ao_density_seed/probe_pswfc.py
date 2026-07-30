@@ -1,7 +1,7 @@
 """Probe which pseudos carry PSWFC orbitals and their l/occupation."""
-import sys
 from gradwave.pseudo.upf import parse_upf
 from gradwave.pseudo.upf_paw import parse_upf_paw
+
 
 def show(path, paw=False):
     try:
@@ -12,13 +12,15 @@ def show(path, paw=False):
     orbs = d.chi if paw else d.pswfc
     zval = d.z_valence
     tag = "PAW" if paw else "NC"
-    print(f"  [{tag}] {path.split('/')[-1]}  Zval={zval}  norb={len(orbs)}  nlcc={d.core_rho is not None}")
+    nlcc = d.core_rho is not None
+    print(f"  [{tag}] {path.split('/')[-1]}  Zval={zval}  norb={len(orbs)}  nlcc={nlcc}")
     for o in orbs:
         print(f"      l={o.l} label={o.label!r} occ={o.occupation}")
 
 base = "tests/fixtures/qe/pseudos/"
 print("NONMAG NC:")
-for f in ["Si_ONCV_PBE-1.2.upf","Al_ONCV_PBE-1.2.upf","Mg_ONCV_PBE-1.2.upf","O_ONCV_PBE-1.2.upf","Na_ONCV_PBE_sr.upf","Cl_ONCV_PBE_sr.upf"]:
+for f in ["Si_ONCV_PBE-1.2.upf", "Al_ONCV_PBE-1.2.upf", "Mg_ONCV_PBE-1.2.upf",
+          "O_ONCV_PBE-1.2.upf", "Na_ONCV_PBE_sr.upf", "Cl_ONCV_PBE_sr.upf"]:
     show(base+f)
 print("MAG NC:")
 for f in ["Fe_ONCV_PBE-1.2.upf","PD_Ni_PBE.upf"]:

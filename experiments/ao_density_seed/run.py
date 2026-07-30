@@ -21,13 +21,12 @@ import time
 import numpy as np
 import torch
 
+from experiments.ao_density_seed import patch
 from gradwave.pseudo.upf import parse_upf
 from gradwave.pseudo.upf_paw import parse_upf_paw
 from gradwave.scf.loop import scf, setup_system
 from gradwave.scf.uspp import scf_uspp, setup_uspp
 from tests.helpers import RY, pseudo
-
-from experiments.ao_density_seed import patch
 
 
 # ---------------------------------------------------------------- systems

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import gradwave.scf.loop as _loop
 import gradwave.scf.uspp_loop as _uspp
-
 from experiments.ao_density_seed.seed import d_localized_spin_densities
 
 _ORIG = {}

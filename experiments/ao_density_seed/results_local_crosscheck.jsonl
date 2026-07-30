@@ -1,0 +1,4 @@
+{"system": "ni_nc", "start_mag": 0.02, "seed": "default", "n_iter": 23, "converged": true, "F_eV": -4527.560809371014, "res1": 6.759391303682218, "mag_total": -2.832645850299426e-07, "mag_abs": 8.510163153151798e-07, "wall_s": 984.3883109940216}
+{"system": "ni_nc", "start_mag": 0.02, "seed": "dloc", "n_iter": 23, "converged": true, "F_eV": -4527.560809371024, "res1": 6.74557794334329, "mag_total": 4.861518551572811e-06, "mag_abs": 5.359526421852226e-06, "wall_s": 788.1776863429986}
+{"system": "ni_nc", "start_mag": 0.3, "seed": "default", "n_iter": 15, "converged": true, "F_eV": -4527.577510568156, "res1": 13.01526921802984, "mag_total": 0.5923452696293574, "mag_abs": 0.6925698836694727, "wall_s": 462.3184091379808}
+{"system": "ni_nc", "start_mag": 0.3, "seed": "dloc", "n_iter": 16, "converged": true, "F_eV": -4527.57751056814, "res1": 11.370391259171017, "mag_total": 0.592345521721926, "mag_abs": 0.6925723857467787, "wall_s": 515.5121732309926}
