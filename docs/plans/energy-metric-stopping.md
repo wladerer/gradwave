@@ -2,8 +2,17 @@
 
 ## Status
 
-Proposed, phases (a) and (b) starting now (2026-07-30) on branch
-`feat/energy-metric-convergence`. The plan adds an opt-in convergence gate on the
+Phases (a) and (b) landed (2026-07-30, branch `feat/energy-metric-convergence`).
+The gate is the kernel-only contraction `(1/2)<r|K_Hxc|r>` rather than the
+chi0-dressed response metric, since one chi0 application per iteration needs a
+Sternheimer solve per band restricted to insulators, which is neither cheap nor
+applicable to the metallic magnets the gate targets. The kernel term alone
+validated cleanly, terminating the stagnating Ni PAW pulay arm at F within
+2e-8 eV of the johnson reference fixed point while the density gate sat at the
+120-iteration cap, and agreeing with the density gate on Ni/Fe PAW johnson and
+Si NC. The Harris-Foulkes/KS gap is recorded alongside on the NC path as the
+zero-machinery bracket. Phases (c) (spinor) and (d) (default flip) remain open.
+The plan adds an opt-in convergence gate on the
 estimated energy error `<drho|K|drho>`, formed from the exact response operators
 `scf/implicit.py` already exposes and resolved per channel. It replaces the raw
 density-residual norm as the stopping test on the systems where that norm has a

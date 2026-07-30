@@ -185,6 +185,7 @@ class SCFRecorder:
         e_metric: float | None = None,
         e_metric_charge: float | None = None,
         e_metric_mag: float | None = None,
+        e_hf_gap: float | None = None,
     ) -> None:
         """Append one outer-iteration record. ``drho_r`` is the total real-space
         SCF residual (ρ_out − ρ_in), ``eigs`` the per-spin eigenvalue tensors,
@@ -194,7 +195,9 @@ class SCFRecorder:
         residual's second-order energy-error estimate 1/2 <r|K_Hxc|r> [eV]
         (``postscf._response.kernel_energy_error``), recorded only when the
         energy-metric convergence gate is active; None otherwise (the cheap
-        default path does not compute it)."""
+        default path does not compute it). ``e_hf_gap`` is the Harris-Foulkes
+        minus Kohn-Sham free energy at this iteration [eV], the zero-machinery
+        bracket of the same error (NC driver, plain semilocal path only)."""
         stacked = torch.stack([e.detach() for e in eigs])  # (nspin, nk, nb)
         drift, reorder = self._eig_drift_and_reorder(stacked)
         self.iters.append(
@@ -215,6 +218,7 @@ class SCFRecorder:
                     None if e_metric_charge is None else float(e_metric_charge)),
                 "e_metric_mag": (
                     None if e_metric_mag is None else float(e_metric_mag)),
+                "e_hf_gap": None if e_hf_gap is None else float(e_hf_gap),
             }
         )
 
@@ -307,6 +311,8 @@ class SCFRecorder:
             block["energy_metric_mag_eV"] = (
                 None if final.get("e_metric_mag") is None
                 else float(final["e_metric_mag"]))
+            if final.get("e_hf_gap") is not None:
+                block["harris_foulkes_gap_eV"] = float(final["e_hf_gap"])
         return block
 
     def to_trace_dict(self) -> dict[str, Any]:
@@ -340,6 +346,8 @@ class SCFRecorder:
                             "energy_metric_eV": i["e_metric"],
                             "energy_metric_charge_eV": i["e_metric_charge"],
                             "energy_metric_mag_eV": i["e_metric_mag"],
+                            **({"harris_foulkes_gap_eV": i["e_hf_gap"]}
+                               if i.get("e_hf_gap") is not None else {}),
                         }
                         if i.get("e_metric") is not None
                         else {}

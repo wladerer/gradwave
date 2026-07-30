@@ -366,6 +366,57 @@ def vtau_potential(
     return v * (grid.n_points / grid.volume)
 
 
+def _harris_foulkes_gap(
+    system: System,
+    xc: XCFunctional | SpinXC,
+    rho_s_in: list[torch.Tensor],
+    eigs_s: list[torch.Tensor],
+    occ_s: list[torch.Tensor],
+    e_free: float,
+    e_ewald: torch.Tensor,
+    entropy_term: torch.Tensor,
+    nspin: int,
+) -> float:
+    """Harris-Foulkes minus Kohn-Sham free energy at this iteration [eV].
+
+    E_HF[ρ_in] = Σ f ε − E_H[ρ_in] − ∫v_xc[ρ_in]ρ_in + E_xc[ρ_in] + E_ewald
+    − σS, with the eigenvalues of H[ρ_in] (this iteration's solve). Both
+    energies equal the self-consistent energy at the fixed point and differ at
+    second order in the residual with opposite-signed leading terms, so the gap
+    is the zero-machinery bracket of the SCF convergence error (docs/ideas.md's
+    error-budget section). Everything here is already computed or one grid
+    pass; the caller guards the orbital-dependent terms (Hubbard/Fock/meta-GGA)
+    whose double counting this plain form omits.
+    """
+    from gradwave.core.energies.hartree import hartree_energy
+
+    grid = system.grid
+    cell = grid.volume / grid.n_points
+    e_band = sum(
+        float((system.kweights[:, None] * occ_s[sp] * eigs_s[sp]).sum())
+        for sp in range(nspin)
+    )
+    rho_tot_in = rho_s_in[0] if nspin == 1 else rho_s_in[0] + rho_s_in[1]
+    e_h_in = float(hartree_energy(r_to_g(rho_tot_in.to(CDTYPE)), grid.g2, grid.volume))
+    core = system.rho_core
+    if nspin == 1:
+        assert isinstance(xc, XCFunctional)
+        rho_xc = rho_tot_in if core is None else rho_tot_in + core
+        v_xc, e_xc_in = vxc_potential(xc, rho_xc, grid)
+        int_vxc = float((v_xc * rho_tot_in).sum()) * cell
+    else:
+        assert isinstance(xc, SpinXC)
+        c2 = None if core is None else 0.5 * core
+        ru = rho_s_in[0] if c2 is None else rho_s_in[0] + c2
+        rd = rho_s_in[1] if c2 is None else rho_s_in[1] + c2
+        vu, vd, e_xc_in = vxc_spin_potential(xc, ru, rd, grid)
+        int_vxc = (float((vu * rho_s_in[0]).sum())
+                   + float((vd * rho_s_in[1]).sum())) * cell
+    e_hf = (e_band - e_h_in - int_vxc + float(e_xc_in) + float(e_ewald)
+            + float(entropy_term))
+    return e_hf - e_free
+
+
 @dataclass
 class SCFResult:
     converged: bool
@@ -1546,8 +1597,11 @@ def scf(
         # energy-metric gate (opt-in): the residual's exact second-order energy
         # error 1/2<r|K_Hxc|r>, per-channel (charge/magnetization). Computed only
         # when selected, so the default density-gate path is bit-for-bit unchanged
-        # and pays nothing (one f_xc HVP per iteration otherwise).
-        e_metric = e_metric_charge = e_metric_mag = None
+        # and pays nothing (one f_xc HVP per iteration otherwise). The
+        # Harris-Foulkes/KS gap rides along as the zero-machinery bracket of the
+        # same error, skipped when an orbital-dependent term (Hubbard/Fock/
+        # meta-GGA) would need extra double-counting terms.
+        e_metric = e_metric_charge = e_metric_mag = e_hf_gap = None
         if energy_metric:
             from gradwave.postscf._response import kernel_energy_error
 
@@ -1555,6 +1609,11 @@ def scf(
             e_metric, e_metric_charge, e_metric_mag = kernel_energy_error(
                 grid, xc, r_s, rho_s, system.rho_core, nspin
             )
+            if hub is None and fock is None and not xc.needs_tau:
+                e_hf_gap = _harris_foulkes_gap(
+                    system, xc, rho_s, eigs_s, occ_s, e_free, e_ewald,
+                    entropy_term, nspin
+                )
 
         # flight recorder: cheap detached per-iteration metrics. drho_scf is the
         # total real-space residual already formed above; history[-1]["t"] is the
@@ -1575,6 +1634,7 @@ def scf(
             e_metric=e_metric,
             e_metric_charge=e_metric_charge,
             e_metric_mag=e_metric_mag,
+            e_hf_gap=e_hf_gap,
         )
 
         if convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol,

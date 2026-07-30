@@ -54,6 +54,15 @@ def test_energy_gate_matches_density_gate():
     # final estimate sits at/under the threshold that stopped the run
     assert abs(res_en.recorder.iters[-1]["e_metric"]) < 1e-9
 
+    # the Harris-Foulkes/KS gap rides along as the zero-machinery bracket:
+    # recorded each iteration, second order in the residual, so it collapses to
+    # ~the entol scale at the converged step and shrinks from its early value
+    gaps = [i["e_hf_gap"] for i in res_en.recorder.iters]
+    assert all(g is not None for g in gaps)
+    assert abs(gaps[-1]) < 1e-7
+    assert abs(gaps[-1]) < abs(gaps[1])
+    assert "harris_foulkes_gap_eV" in res_en.recorder.summarize()
+
 
 def test_omitting_the_option_is_bit_for_bit():
     """The default (density) gate is unchanged when the new knobs are left off:

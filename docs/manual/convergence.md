@@ -82,7 +82,10 @@ energy error falls below `scf.entol` (default 1e-6 eV) with the energy tail
 `scf.convergence: density` leaves the residual gate unchanged. The per-iteration
 estimate and its charge and magnetization decomposition are recorded in the SCF
 diagnostics block and the `scf_trace.json` sidecar, so a trace shows which
-channel carries the remaining error. The estimate is the kernel-only term. It
+channel carries the remaining error. On the norm-conserving path the
+Harris-Foulkes and Kohn-Sham free energies at each iteration bracket the same
+error with no extra machinery, and their gap is recorded alongside the estimate
+as an independent cross-check. The estimate is the kernel-only term. It
 omits the independent-particle $\chi_0$ response, whose one application needs a
 Sternheimer solve per band restricted to insulators and is neither cheap per
 iteration nor applicable to the metals this gate targets, and it omits the
