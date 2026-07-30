@@ -137,7 +137,7 @@ geometry file alongside it.
 
 | keyword | default | unit | type | description |
 |---|---|---|---|---|
-| `scheme` | `pulay` | — | string | `pulay`, `broyden`, or `johnson`. |
+| `scheme` | `auto` | — | string | `auto`, `pulay`, `broyden`, or `johnson`. `auto` defers to the formalism default, `johnson` for USPP/PAW and for collinear-spin (`nspin: 2`) norm-conserving, `pulay` otherwise. |
 | `alpha` | `0.7` | — | float | Linear mixing fraction. |
 | `history` | `null` | — | int | Mixing history depth. `null` uses the per-scheme default (johnson 12, else 8). |
 | `kerker` | `auto` | — | string or bool | Kerker preconditioner: `auto` (on when smearing is enabled), `true`, or `false`. |

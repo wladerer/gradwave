@@ -32,7 +32,11 @@ class InputError(ValueError):
 
 @dataclass(frozen=True)
 class MixingParams:
-    scheme: str = "pulay"  # pulay | broyden | johnson (USPP/PAW path)
+    scheme: str = "auto"  # auto | pulay | broyden | johnson. auto (the default)
+    # defers to each formalism's evidence-backed resolver (johnson for USPP/PAW
+    # and for collinear-spin nspin=2 norm-conserving, pulay otherwise); an
+    # explicit scheme always wins. See scf.loop._resolve_mixing_scheme and
+    # scf.uspp_loop._resolve_uspp_mixing_scheme.
     alpha: float = 0.7
     history: int | None = None  # None → per-scheme default (johnson 12, else 8)
     kerker: str | bool = "auto"  # auto: on iff smearing enabled
@@ -578,8 +582,8 @@ def _validate_mixing(mix_raw: dict[str, Any]) -> None:
     schemes, and normalize the `kerker` shorthand. Mutates `mix_raw['kerker']`."""
     _check_keys("scf.mixing", mix_raw,
                 {f.name for f in dataclasses.fields(MixingParams)})
-    mix_scheme = str(mix_raw.get("scheme", "pulay"))
-    if mix_scheme not in ("pulay", "broyden", "johnson"):
+    mix_scheme = str(mix_raw.get("scheme", "auto"))
+    if mix_scheme not in ("auto", "pulay", "broyden", "johnson"):
         raise InputError(f"unknown mixing scheme {mix_scheme!r}")
     if "precond" in mix_raw:
         precond = str(mix_raw["precond"])
