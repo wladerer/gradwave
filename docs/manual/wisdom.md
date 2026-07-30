@@ -259,6 +259,17 @@ defect, which the [Performance](performance.md) page works through in full.
   of the cure is not isolated, the #199 Stoner `spin_precond` change being the leading
   candidate. So the pulay-for-nspin=2 USPP default now rests on a stale measurement and
   should be re-benchmarked before it is trusted or changed.
+- (2026-07-30) Re-benchmarked, and the nspin=2 USPP default is now johnson
+  (`experiments/uspp_mixing_default`). Johnson wins every magnetic PAW pair at the same
+  fixed point, with no blowup and no branch flip. On bcc Fe johnson takes 16 iterations
+  against pulay's 30 and broyden's 32, on fcc Ni across start_mag 0.6/0.3/0.02 it takes
+  18/15/13 against pulay 27/25/19 and broyden 29/31/21, and on a two-sublattice AFM Fe
+  cell it takes 31 against pulay's 58. Every run lands on the same free energy and moment,
+  including the underseeded start_mag 0.02 Ni that holds 0.79 muB rather than collapsing to
+  the nonmagnetic branch under any scheme. The becsum step-damping the pulay default leaned
+  on is the crutch re-audit below, namely matching QE's unscaled becsum mix removed the
+  johnson penalty. So the whole USPP/PAW path defaults to johnson, no longer mirror-inverting
+  the norm-conserving default but matching its magnetic choice.
 - Do not expect the mixer to select the physical branch. The nonmagnetic state is a
   genuine stationary point tens of meV away, and every code can land on it. Warm-start
   chains across scan points are the practical defense, plus an explicit moment gate as a

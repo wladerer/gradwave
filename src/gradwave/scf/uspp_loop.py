@@ -923,23 +923,27 @@ def _scf_iteration(
 
 
 def _resolve_uspp_mixing_scheme(mixing_scheme: str | None, nspin: int) -> str:
-    """PAW/USPP mixing-scheme default. None → johnson for nspin==1, pulay for
+    """PAW/USPP mixing-scheme default. None → johnson for both nspin==1 and
     nspin==2; an explicit scheme always wins.
 
     The composite (density, becsum) mixing vector carries the on-site
     augmentation-charge mode, whose response is stiff even in a gapped
     insulator, so Kerker-preconditioned Johnson beats plain Pulay across
     non-magnetic PAW insulators AND metals (measured, same fixed point:
-    Si 18→12, Cu 19→13, Pt 21→12, 8-atom Si 20→13). This is the mirror image
-    of the norm-conserving default (johnson iff nspin==2): NC nspin==1 johnson
-    is iteration-identical to pulay because there is no augmentation mode to
-    fix. nspin==2 PAW stays on pulay: johnson swings from a win near the Stoner
-    boundary (fcc Ni 27→18) to a large loss on a robust ferromagnet (bcc Fe
-    29→93) once it discards the becsum step-damping crutch pulay leans on, so
-    pulay is the safe magnetic default."""
+    Si 18→12, Cu 19→13, Pt 21→12, 8-atom Si 20→13).
+
+    nspin==2 was on pulay while the bcc Fe johnson blowup (29→93) stood, on the
+    theory that johnson discarded the becsum step-damping a robust ferromagnet
+    leans on. That blowup no longer reproduces after the #199 Stoner
+    spin_precond change, and a re-benchmark (experiments/uspp_mixing_default)
+    puts johnson ahead on every magnetic PAW case at the same fixed point:
+    bcc Fe 30→16, fcc Ni across three seeds 19/25/27→13/15/18, and a
+    two-sublattice AFM Fe 58→31. So the whole USPP/PAW path now defaults to
+    johnson, matching the norm-conserving path's magnetic default rather than
+    mirror-inverting it."""
     if mixing_scheme is not None:
         return mixing_scheme
-    return "pulay" if nspin == 2 else "johnson"
+    return "johnson"
 
 
 def _build_mixer(
@@ -1250,11 +1254,12 @@ def scf_uspp(
     |dρ| 2e-3 where adaptive stalls at 2e-2 with the ρ-block floored).
     Use it as a stabilizer for exploratory runs at unknown damping; for
     production FM metals keep hand-set mixing_alpha (0.3 for Ni).
-    mixing_scheme: None (default) resolves per nspin — "johnson" for
-    nspin==1 (Kerker-preconditioned Broyden; the augmentation-charge mode
-    in the composite (density, becsum) vector makes it beat pulay across
-    PAW insulators and metals alike), "pulay" for nspin==2 (johnson is a
-    coin flip on magnetic PAW once it drops the becsum step-damping crutch).
+    mixing_scheme: None (default) resolves to "johnson" for both nspin==1
+    and nspin==2 (Kerker-preconditioned Broyden; the augmentation-charge
+    mode in the composite (density, becsum) vector makes it beat pulay
+    across PAW insulators and metals alike, and it also wins on every
+    magnetic PAW case at the same fixed point now that the bcc Fe blowup no
+    longer reproduces, see experiments/uspp_mixing_default).
     Override with "pulay", "broyden", or "johnson"; broyden is limited-memory
     Broyden-II, whose sequential secant updates keep directional gain
     estimates that Pulay's residual-span extrapolation loses (the QE

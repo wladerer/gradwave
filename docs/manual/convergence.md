@@ -68,10 +68,13 @@ is Johnson mixing, whose normalized multisecant update with the w0 regularizatio
 handles that expansive mode. On the norm-conserving path `scf.mixing.scheme`
 resolves automatically to `johnson` for `nspin: 2` and `pulay` otherwise, so a
 collinear magnet already runs on the right scheme with no setting. The USPP/PAW
-path mirror-inverts this, keeping `pulay` for `nspin: 2` because Johnson discards
-the becsum step-damping that a robust ferromagnet leans on and blows up (bcc Fe 29
-to 93 iterations at the same moment and energy), while Johnson wins near the Stoner
-boundary (fcc Ni 27 to 18).
+path defaults to `johnson` for every `nspin`, including `nspin: 2`. An earlier
+bcc Fe blowup kept it on `pulay`, on the theory that Johnson discarded a becsum
+step-damping the ferromagnet needed, but that damping was a crutch tuned for
+Pulay, and matching QuantumESPRESSO's unscaled becsum mix removed the penalty.
+Johnson now converges bcc Fe in 16 iterations against Pulay's 30, fcc Ni near the
+Stoner boundary in 18 against 27, and a two-sublattice AFM Fe cell in 31 against
+58, each at the same moment and energy.
 
 The mixer does not select the physical branch. The practical defense across a scan
 is a warm-start chain, carrying the converged density from one point to the next so
