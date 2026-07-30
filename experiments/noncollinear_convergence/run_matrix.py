@@ -30,13 +30,12 @@ import torch
 # regardless of the launching cwd (the script dir alone is added by default)
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from experiments.noncollinear_convergence import systems as sysmod  # noqa: E402
+from experiments.noncollinear_convergence.probe import NCConvergenceProbe  # noqa: E402
 from gradwave.core.xc.noncollinear import NoncollinearXC  # noqa: E402
 from gradwave.core.xc.spin import SpinPBE  # noqa: E402
 from gradwave.scf.loop import scf  # noqa: E402
 from gradwave.scf.noncollinear import scf_noncollinear  # noqa: E402
-
-from experiments.noncollinear_convergence import systems as sysmod  # noqa: E402
-from experiments.noncollinear_convergence.probe import NCConvergenceProbe  # noqa: E402
 
 # identical tolerances for every run (tight enough that a limit-cycling run
 # exhausts the cap rather than passing on a loose gate)
