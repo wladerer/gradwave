@@ -141,6 +141,7 @@ geometry file alongside it.
 | `alpha` | `0.7` | — | float | Linear mixing fraction. |
 | `history` | `null` | — | int | Mixing history depth. `null` uses the per-scheme default (johnson 12, else 8). |
 | `kerker` | `auto` | — | string or bool | Kerker preconditioner: `auto` (on when smearing is enabled), `true`, or `false`. |
+| `precond` | `kerker` | — | string | `kerker` or `local_tf`. `local_tf` is the position-dependent Thomas-Fermi preconditioner, which replaces the constant Kerker filter on the charge channel, so `kerker` no longer applies there. |
 
 ### `relax`
 

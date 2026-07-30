@@ -93,9 +93,11 @@ A single Kerker screening length is the right operator for a bulk metal and the
 wrong one for a cell with vacuum, where a fixed screening over-damps the modes
 that must stay free in the vacuum region. The local Thomas-Fermi preconditioner
 lets the screening wavevector track the local density, capped at the bare Kerker
-value so a homogeneous bulk is unchanged. It is reached through the Python
-calculator, `GradWave(precond="local_tf")`, or `scf(..., precond="local_tf")`, not
-through the YAML input, which exposes only the mixing block. On fcc Al slabs it cut
+value so a homogeneous bulk is unchanged. It is selected with `precond: local_tf`
+under `scf.mixing`, or through the Python calculator as `GradWave(precond="local_tf")`.
+The default is `kerker`, the constant filter described above, whose on and off state
+`scf.mixing.kerker` sets. Choosing `local_tf` replaces that filter on the charge
+channel, so the `kerker` setting no longer applies there. On fcc Al slabs it cut
 the 4-layer Al(100) slab from 21 to 17 iterations and the 6-layer from 27 to 21,
 with the converged energy bit-identical to bare Kerker, while bulk Al is unchanged
 at 9 iterations either way. The gain grows with the vacuum fraction.
@@ -114,8 +116,8 @@ the right operator fixes the mode directly.
    Confirm fractional occupations actually appear at your mesh and width.
 2. If a near-degenerate cluster sits at the top of the band window, raise `nbands`.
 3. If the residual sloshes at long wavelength, confirm `scf.mixing.kerker` is on
-   (it is by default for a smeared cell), then switch to `precond="local_tf"` for a
-   slab or a molecule in a box.
+   (it is by default for a smeared cell), then set `scf.mixing.precond: local_tf`
+   for a slab or a molecule in a box.
 4. For a magnet, seed with `start_mag` and rely on the automatic Johnson scheme on
    the norm-conserving path. Chain warm starts across a scan to hold the branch.
 5. Only then tune `scf.mixing.alpha` down or `scf.mixing.history` up, and gate a

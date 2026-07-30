@@ -36,6 +36,9 @@ class MixingParams:
     alpha: float = 0.7
     history: int | None = None  # None → per-scheme default (johnson 12, else 8)
     kerker: str | bool = "auto"  # auto: on iff smearing enabled
+    precond: str = "kerker"  # kerker | local_tf. local_tf is the position-
+    # dependent Thomas-Fermi preconditioner; it replaces the constant Kerker
+    # filter on the charge channel, so `kerker` no longer applies there.
 
 
 @dataclass(frozen=True)
@@ -578,6 +581,11 @@ def _validate_mixing(mix_raw: dict[str, Any]) -> None:
     mix_scheme = str(mix_raw.get("scheme", "pulay"))
     if mix_scheme not in ("pulay", "broyden", "johnson"):
         raise InputError(f"unknown mixing scheme {mix_scheme!r}")
+    if "precond" in mix_raw:
+        precond = str(mix_raw["precond"])
+        if precond not in ("kerker", "local_tf"):
+            raise InputError(
+                f"unknown mixing precond {precond!r} (kerker | local_tf)")
     if "kerker" in mix_raw:
         mix_raw["kerker"] = _normalize_kerker(mix_raw["kerker"])
 
