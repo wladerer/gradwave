@@ -31,10 +31,15 @@ does no harm.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 
 from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import CDTYPE
+
+if TYPE_CHECKING:
+    from gradwave.distributed import DistKContext
 
 
 class StonerSpinPrecond:
@@ -63,20 +68,39 @@ class StonerSpinPrecond:
 
 def build_stoner_precond(system, coeffs_s, eigs_s, mu, scheme,
                          width, rho_tot, m_r, xc, fp_cut: float=1e-8,
-                         max_bands: int=96):
+                         max_bands: int=96,
+                         dist_ctx: "DistKContext | None" = None):
     """Assemble the preconditioner from the current SCF iteration's state.
 
     coeffs_s/eigs_s: per-spin lists as in the scf_uspp loop. Returns None
     when no state carries Fermi-surface weight (insulating limit — the
-    operator would be the identity)."""
+    operator would be the identity).
+
+    dist_ctx: under a k-point-sharded distributed SCF (see
+    gradwave.distributed), ``system``/``coeffs_s``/``eigs_s`` are THIS
+    RANK's local k-shard. The Fermi-surface band selection (top
+    ``max_bands`` by |c|) and the resulting (u_g, w_g, cvals) operator must
+    come out IDENTICAL on every rank — it is applied redundantly to the
+    same already-global mixing residual, exactly like the density-space
+    Kerker/TF preconditioners (see gradwave.distributed's module
+    docstring). Unlike those, the ingredients here are per-k Fermi-surface
+    band codensities, so two extra collectives are needed: an
+    ``all_gather`` of the (cheap, scalar) pick metadata to agree on the
+    SAME global top-``max_bands`` set on every rank, then an
+    ``all_reduce`` to assemble the full (n_picks, ng) operator rows — each
+    row is built by the one rank that owns that k-point and left zero on
+    every other rank, so SUM-reducing reconstructs the full set
+    everywhere. None (default) is the ordinary single-process path,
+    byte-for-byte unchanged (every pick is always locally "owned")."""
     from gradwave.core.fftbox import g_to_r, r_to_g
 
     grid = system.grid
     shape, vol = grid.shape, grid.volume
     mask_flat = grid.dens_mask.reshape(-1)
+    k_start = dist_ctx.k_start if dist_ctx is not None else 0
 
     # f' per spin channel by autograd through the smearing scheme
-    picks = []  # (isp, ik, band index, c = w_k f')
+    picks = []  # (isp, ik_GLOBAL, band index, c = w_k f')
     for isp in (0, 1):
         eigs = eigs_s[isp]
         x = ((eigs - mu) / width).detach().requires_grad_(True)
@@ -87,28 +111,50 @@ def build_stoner_precond(system, coeffs_s, eigs_s, mu, scheme,
         for ik in range(eigs.shape[0]):
             wk = float(system.kweights[ik])
             for n in torch.nonzero(fp[ik].abs() > fp_cut).flatten().tolist():
-                picks.append((isp, ik, n, wk * float(fp[ik][n])))
+                picks.append((isp, ik + k_start, n, wk * float(fp[ik][n])))
+
+    if dist_ctx is not None:
+        from gradwave.distributed import gather_list_cat
+
+        picks = gather_list_cat(picks, dist_ctx)
     if not picks:
         return None
-    # keep the largest |c| columns (cost control on dense meshes)
-    picks.sort(key=lambda t: -abs(t[3]))
+    # keep the largest |c| columns (cost control on dense meshes). Secondary
+    # sort key (isp, ik_g, n) makes truncation ties break canonically by
+    # GLOBAL index rather than by gather order -- gather_list_cat concatenates
+    # rank0's full (isp, k) block before rank1's, a different pre-sort
+    # interleaving than single-process's isp-major loop; Python's stable sort
+    # would otherwise keep a DIFFERENT SET (not just a different order) of
+    # tied-|c| picks across the truncation boundary between the two runs.
+    picks.sort(key=lambda t: (-abs(t[3]), t[0], t[1], t[2]))
     picks = picks[:max_bands]
 
     # local m-m kernel diagonal K_mm(r) = ∂v_m/∂m at the current (ρ, m)
     fmm = _stoner_kernel_diag(rho_tot, m_r, xc, grid, vol, system.rho_core)
 
-    u_rows, w_rows, cvals = [], [], []
-    for isp, ik, n, c in picks:
+    device = rho_tot.device
+    ng = int(mask_flat.sum())
+    nk_local = len(system.spheres)
+    u_full = torch.zeros(len(picks), ng, dtype=CDTYPE, device=device)
+    w_full = torch.zeros(len(picks), ng, dtype=CDTYPE, device=device)
+    cvals = torch.tensor([c for (_, _, _, c) in picks], dtype=torch.float64, device=device)
+    for i, (isp, ik_g, n, _c) in enumerate(picks):
+        ik = ik_g - k_start
+        if not (0 <= ik < nk_local):
+            continue  # a different rank owns this k-point; leave this row zero
         sph = system.spheres[ik]
         psi_r = g_to_r(coeffs_s[isp][ik][n], sph.flat_idx, shape)
         dens = (psi_r.conj() * psi_r).real / vol  # ∫ρ_α = 1
-        u_rows.append(r_to_g(dens.to(CDTYPE)).reshape(-1)[mask_flat])
-        w_rows.append(r_to_g((fmm * dens).to(CDTYPE)).reshape(-1)[mask_flat])
-        cvals.append(c)
-    return StonerSpinPrecond(
-        torch.stack(u_rows), torch.stack(w_rows),
-        torch.tensor(cvals, dtype=torch.float64, device=u_rows[0].device),
-        float(vol))
+        u_full[i] = r_to_g(dens.to(CDTYPE)).reshape(-1)[mask_flat]
+        w_full[i] = r_to_g((fmm * dens).to(CDTYPE)).reshape(-1)[mask_flat]
+
+    if dist_ctx is not None:
+        from gradwave.distributed import all_reduce_
+
+        u_full = all_reduce_(u_full, dist_ctx)
+        w_full = all_reduce_(w_full, dist_ctx)
+
+    return StonerSpinPrecond(u_full, w_full, cvals, float(vol))
 
 
 def _stoner_kernel_diag(rho_tot, m_r, xc, grid, vol, rho_core):
@@ -139,7 +185,8 @@ def _stoner_kernel_diag(rho_tot, m_r, xc, grid, vol, rho_core):
 
 def build_stoner_precond_nc(system, coeffs, eigs, mu, scheme, width,
                             rho_tot, m_vec, nc_xc, m_pw, fp_cut: float=1e-8,
-                            max_bands: int=96):
+                            max_bands: int=96,
+                            dist_ctx: "DistKContext | None" = None):
     """Stoner preconditioner for the NON-COLLINEAR moment channel.
 
     The non-collinear analogue of ``build_stoner_precond``. Near a
@@ -161,13 +208,19 @@ def build_stoner_precond_nc(system, coeffs, eigs, mu, scheme, width,
 
     coeffs: (nk, nbands, 2·m_pw) spinor coefficients (up = [:m_pw], down =
     [m_pw:]). eigs: (nk, nbands). Returns None in the insulating limit (no
-    Fermi-surface weight)."""
+    Fermi-surface weight).
+
+    dist_ctx: same k-point-sharded-distributed contract as
+    ``build_stoner_precond`` — see that function's docstring for the
+    two-collective (gather picks, then all_reduce rows) design. ``system``/
+    ``coeffs``/``eigs`` are THIS RANK's local k-shard when not None."""
     from gradwave.core.fftbox import g_to_r, r_to_g
 
     grid = system.grid
     shape, vol = grid.shape, grid.volume
     mask_flat = grid.dens_mask.reshape(-1)
     device = coeffs.device
+    k_start = dist_ctx.k_start if dist_ctx is not None else 0
 
     # f' per spinor band by autograd through the smearing scheme (g=1)
     x = ((eigs - mu) / width).detach().requires_grad_(True)
@@ -175,14 +228,20 @@ def build_stoner_precond_nc(system, coeffs, eigs, mu, scheme, width,
         f = scheme.occupation(x)
         (dfdx,) = torch.autograd.grad(f.sum(), x)
     fp = dfdx / width  # (nk, nb), ≤ 0
-    picks = []  # (ik, band index, c = w_k f')
+    picks = []  # (ik_GLOBAL, band index, c = w_k f')
     for ik in range(eigs.shape[0]):
         wk = float(system.kweights[ik])
         for n in torch.nonzero(fp[ik].abs() > fp_cut).flatten().tolist():
-            picks.append((ik, n, wk * float(fp[ik][n])))
+            picks.append((ik + k_start, n, wk * float(fp[ik][n])))
+
+    if dist_ctx is not None:
+        from gradwave.distributed import gather_list_cat
+
+        picks = gather_list_cat(picks, dist_ctx)
     if not picks:
         return None
-    picks.sort(key=lambda t: -abs(t[2]))
+    # see build_stoner_precond's comment on the (isp, ik_g, n) tiebreaker
+    picks.sort(key=lambda t: (-abs(t[2]), t[0], t[1]))
     picks = picks[:max_bands]
 
     # longitudinal kernel diagonal from the locally-collinear magnitude |m⃗|
@@ -190,18 +249,28 @@ def build_stoner_precond_nc(system, coeffs, eigs, mu, scheme, width,
     fmm = _stoner_kernel_diag(rho_tot, m_mag, nc_xc.collinear, grid, vol,
                               system.rho_core)
 
-    u_rows, w_rows, cvals = [], [], []
-    for ik, n, c in picks:
+    ng = int(mask_flat.sum())
+    nk_local = eigs.shape[0]
+    u_full = torch.zeros(len(picks), ng, dtype=CDTYPE, device=device)
+    w_full = torch.zeros(len(picks), ng, dtype=CDTYPE, device=device)
+    cvals = torch.tensor([c for (_, _, c) in picks], dtype=torch.float64, device=device)
+    for i, (ik_g, n, _c) in enumerate(picks):
+        ik = ik_g - k_start
+        if not (0 <= ik < nk_local):
+            continue  # a different rank owns this k-point; leave this row zero
         sph = system.spheres[ik]
         npw = sph.npw
         psi_up = g_to_r(coeffs[ik, n, :npw], sph.flat_idx, shape)
         psi_dn = g_to_r(coeffs[ik, n, m_pw:m_pw + npw], sph.flat_idx, shape)
         dens = ((psi_up.conj() * psi_up).real
                 + (psi_dn.conj() * psi_dn).real) / vol  # ∫ρ_α = 1 (spinor norm)
-        u_rows.append(r_to_g(dens.to(CDTYPE)).reshape(-1)[mask_flat])
-        w_rows.append(r_to_g((fmm * dens).to(CDTYPE)).reshape(-1)[mask_flat])
-        cvals.append(c)
-    return StonerSpinPrecond(
-        torch.stack(u_rows), torch.stack(w_rows),
-        torch.tensor(cvals, dtype=torch.float64, device=device),
-        float(vol))
+        u_full[i] = r_to_g(dens.to(CDTYPE)).reshape(-1)[mask_flat]
+        w_full[i] = r_to_g((fmm * dens).to(CDTYPE)).reshape(-1)[mask_flat]
+
+    if dist_ctx is not None:
+        from gradwave.distributed import all_reduce_
+
+        u_full = all_reduce_(u_full, dist_ctx)
+        w_full = all_reduce_(w_full, dist_ctx)
+
+    return StonerSpinPrecond(u_full, w_full, cvals, float(vol))

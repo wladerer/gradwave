@@ -691,6 +691,14 @@ def _solve_bands_uspp(
     system, nspin, batched = ops.system, ops.nspin, ops.batched
     bk, shape, dev = ops.bk, ops.shape, ops.dev
     nk, nb, p_b, projs, hub = ops.nk, ops.nb, ops.p_b, ops.projs, ops.hub
+    # cold-start seeds below key on the GLOBAL k-index so a distributed run
+    # (system is THIS RANK's local k-shard, ik loops 0..nk_local) reproduces
+    # the EXACT SAME per-k random draw a single-process run would use for
+    # that same global k-point -- keying on the local loop index alone
+    # collides different ranks' k-points onto the same seed (e.g. every
+    # rank's local ik=0 would seed identically) and desyncs the two runs'
+    # Davidson trajectories from the very first cold-started k-point.
+    k_off = ops.dist_ctx.k_start if ops.dist_ctx is not None else 0
     eigs_s = []
     for isp in range(nspin):
         hub_d = None
@@ -733,7 +741,7 @@ def _solve_bands_uspp(
                 # per-k CPU seeds (identical to the per-k path), padded
                 x0 = torch.zeros(nk, nb + 4, bk.npw_max, dtype=CDTYPE, device=dev)
                 for ik, sph in enumerate(system.spheres):
-                    gen = torch.Generator().manual_seed(1234 + ik + 7777 * isp + seed_salt)
+                    gen = torch.Generator().manual_seed(1234 + ik + k_off + 7777 * isp + seed_salt)
                     xk = torch.randn(
                         nb + 4, sph.npw, generator=gen, dtype=torch.float64
                     ) + 1j * torch.randn(nb + 4, sph.npw, generator=gen, dtype=torch.float64)
@@ -775,7 +783,7 @@ def _solve_bands_uspp(
             c_isp_ik = coeffs[isp][ik]
             if c_isp_ik is None:
                 # seed on CPU (device-independent determinism), then move
-                gen = torch.Generator().manual_seed(1234 + ik + 7777 * isp + seed_salt)
+                gen = torch.Generator().manual_seed(1234 + ik + k_off + 7777 * isp + seed_salt)
                 x0 = torch.randn(
                     nb + 4, sph.npw, generator=gen, dtype=torch.float64
                 ) + 1j * torch.randn(nb + 4, sph.npw, generator=gen, dtype=torch.float64)
@@ -1630,6 +1638,7 @@ def scf_uspp(
                 rho_out_s[0] + rho_out_s[1],
                 rho_out_s[0] - rho_out_s[1],
                 xc,
+                dist_ctx=dist_ctx,
             )
             if sp is None:
                 mixer.extra_precond = None
