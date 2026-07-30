@@ -64,6 +64,64 @@ run on asus (22 cores) because the laptop was saturated by sibling agents.
 
 ## Results
 
-See `results_step{1,2,3,4}.json`. Filled in by the run; summary below.
+All runs on asus (22-core, idle; laptop was at load 56/8 from sibling agents).
+Raw numbers in `results_step{1,2,3,3b,4}.json`.
+
+### Step 1: endpoint exactness (PASS)
+
+theta=0 through the vloc_atom path reproduces the plain SCF bit-for-bit:
+E_base = E_theta0 = -230.25119705855093 eV, |dE| = 0.0 exactly (28 Ry, 6^3,
+grid 25^3).
+
+### Step 2: gradient credential (PASS)
+
+At a nonzero theta0 = [0.15, -0.10, 0.05, -0.02], Hellmann-Feynman dE/dtheta by
+autograd vs central finite difference (eps 1e-3, full SCF re-convergence per
+displaced theta):
+
+    grad_hf = [ 0.0375487064,  0.1436920889, -0.0365698429, -0.1883876964]
+    grad_fd = [ 0.0375487064,  0.1436920889, -0.0365698429, -0.1883876964]
+    max relative error 3.2e-10
+
+Four decades below the ~1e-6 target and the repo's ~1e-5 FD floor, because the
+energy is exactly linear in theta at frozen density, so HF here is not an
+approximation and the only noise is SCF convergence residual.
+
+### Step 3: synthetic recovery oracle (MIXED -- the key finding)
+
+Known perturbation theta* = [0.30, -0.20, 0.10, -0.04], 5 volumes (94-106%),
+40 Adam steps (lr 0.05) from theta = 0, warm-started everywhere. 205 SCFs,
+395 s wall.
+
+    EOS shape residual:   0.935 -> 0.077 meV/atom   (12x, observable recovered)
+    |theta - theta*|:     0.367 -> 0.364            (parameters NOT recovered)
+    theta_fit = [0.0716, 0.0592, 0.0714, 0.0721]    (collapsed to a common value)
+
+The EOS observable trains to near-zero while theta goes somewhere else entirely.
+This is not an optimizer failure; it is rank deficiency of the loss, quantified
+in step 3b.
+
+### Step 3b: Jacobian diagnosis of the recovery failure
+
+At frozen density the energy is exactly linear in theta, so the mean-subtracted
+5-volume EOS shape is a near-linear map r = A theta with A the (5 x 4)
+Hellmann-Feynman Jacobian (autograd, 5 SCFs). SVD of A: see
+`results_step3b.json`. The singular spectrum is steeply graded (condition number
+~1e3), so the EOS shape determines roughly one to two directions in theta-space
+and leaves a two-plus-dimensional near-null space; the step-3 recovery error
+lies almost entirely in that null space. Physically: the four Gaussian bumps
+(mu = 1..4 1/Ang) act on the E(V) curve almost interchangeably, because the
+five-volume window samples dv only through slowly-varying combinations of the
+few low-|G| shells (|G_min| ~ 2.0 1/Ang for Si diamond), and the mu = 1 bump is
+sampled only through its tail.
+
+Conclusion for the go/no-go: the *machinery* (differentiable correction, exact
+gradient, trainable loop) is validated end to end, but an EOS-only loss cannot
+identify a multi-parameter correction. Any real training needs either (a) a
+parameterization with as many effective degrees of freedom as the loss actually
+constrains (1-2 for an EOS window), or (b) a richer loss (eigenvalues, log
+derivatives, forces, a second structure) that fills the null space.
+
+### Step 4: one real step against WIEN2k Si
 
 (RESULTS PLACEHOLDER -- updated after the asus run.)

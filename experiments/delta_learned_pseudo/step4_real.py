@@ -45,6 +45,7 @@ from gradwave.postscf.eos import (  # noqa: E402
     delta_value,
     fit_bm3,
 )
+from gradwave.core.xc.pbe import PBE  # noqa: E402
 from gradwave.postscf.forces import forces  # noqa: E402
 
 ECUT = float(os.environ.get("GW_ECUT_RY", "28"))
@@ -138,14 +139,14 @@ def main():
     # is otherwise apples-to-apples, but absolute forces need the true cell)
     base_disp = build_si_displaced(1.0, ECUT, K, [0.10, 0.0, 0.0])
     r_unc = run_scf(base_disp)
-    f_unc = forces(r_unc)
+    f_unc = forces(r_unc, xc=PBE())  # Si.upf carries an NLCC core charge
     # bake trained correction into vloc_tables so forces() sees it
     dv = dv_table(base_disp.grid, theta.detach(), centers)
     vt = base_disp.vloc_tables.clone()
     vt[0] = vt[0] + dv
     sys_corr = dataclasses.replace(base_disp, vloc_tables=vt)
     r_cor = run_scf(sys_corr)
-    f_cor = forces(r_cor)
+    f_cor = forces(r_cor, xc=PBE())
     scf_count += 2
     df = (f_cor - f_unc)
     fmax_unc = float(f_unc.abs().max())
