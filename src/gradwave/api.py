@@ -267,7 +267,7 @@ def run_scf(
         nspin=inp.nspin, start_mag=mags,
         smearing=inp.smearing.type, width=inp.smearing.width,
         max_iter=inp.scf.max_iter, etol=inp.scf.etol, rhotol=inp.scf.rhotol,
-        mixing_alpha=inp.scf.mixing.alpha,
+        mixing_alpha=inp.scf.mixing.alpha, precond=inp.scf.mixing.precond,
         diago_tol=inp.scf.diago_tol, verbose=verbose,
     )
     # DFT+U: the same manifold list feeds the NC and USPP/PAW SCF (both take a
@@ -518,6 +518,7 @@ def build_summary(res: SCFLike, inp: Input, task: str,
                 "history": inp.scf.mixing.history,
                 "kerker": inp.scf.mixing.kerker,
                 "kerker_used": _get(res, "kerker_used"),
+                "precond": inp.scf.mixing.precond,
             },
             "n_electrons": float(system.n_electrons),
             "nbands": int(system.nbands),
@@ -578,6 +579,7 @@ def _build_relax_calc(inp: Input) -> GradWave:
         mixing_alpha=inp.scf.mixing.alpha,
         mixing_history=inp.scf.mixing.history,
         mixing_kerker=kerker,
+        precond=inp.scf.mixing.precond,
         hubbard=list(inp.hubbard.manifolds) if inp.hubbard.enabled else None,
         device=inp.device,
         verbose=False,
@@ -1207,6 +1209,7 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
                    etol=inp.scf.etol, rhotol=inp.scf.rhotol,
                    mixing_alpha=inp.scf.mixing.alpha,
                    mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
+                   precond=inp.scf.mixing.precond,
                    diago_tol=inp.scf.diago_tol, start_from=start_from, verbose=False,
                    **spin_kw)
 
@@ -1937,6 +1940,7 @@ def _parameters_block(inp: Input) -> dict[str, Any]:
             "history": inp.scf.mixing.history,
             "kerker": inp.scf.mixing.kerker,
             "kerker_used": None,
+            "precond": inp.scf.mixing.precond,
         },
         "pseudos": {s: inp.pseudo_map[s] for s in species},
     }

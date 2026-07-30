@@ -137,3 +137,72 @@ def test_unknown_task_message():
     inp = SimpleNamespace(task="nonsense", output_dir="/tmp/nope", distributed=False)
     with pytest.raises(ValueError, match="scf | relax | bands | magnetism"):
         api.run(inp, verbose=False)
+
+
+# --------------------------------------------------------------------------- #
+#  scf.mixing.precond routes to the loop for both formalisms                   #
+# --------------------------------------------------------------------------- #
+def _mk_input(tmp_path, pseudo, precond_line):
+    from gradwave.inputs import load_input
+    from tests.helpers import PSEUDOS
+
+    body = f"""
+structure:
+  cell: [[0, 1.7835, 1.7835], [1.7835, 0, 1.7835], [1.7835, 1.7835, 0]]
+  positions: {{cart: [[0, 0, 0], [0.89175, 0.89175, 0.89175]]}}
+  species: [C, C]
+pseudopotentials:
+  dir: {PSEUDOS}
+  map: {{C: {pseudo}}}
+ecut: 400
+{precond_line}"""
+    p = tmp_path / "in.yaml"
+    p.write_text(body)
+    return load_input(p)
+
+
+@pytest.mark.parametrize("pseudo, target_mod, fname", [
+    ("C_ONCV_PBE-1.2.upf", "gradwave.scf.loop", "scf"),            # NC path
+    ("C.pbe-n-kjpaw_psl.1.0.0.UPF", "gradwave.scf.uspp", "scf_uspp"),  # PAW path
+])
+def test_precond_reaches_the_scf_call(tmp_path, monkeypatch, pseudo, target_mod, fname):
+    """scf.mixing.precond must land as the precond= kwarg on whichever loop the
+    formalism dispatches to. build_system and the loop are both stubbed so the
+    test asserts only on the plumbing, not on a real SCF."""
+    import importlib
+
+    import gradwave.api as api
+
+    inp = _mk_input(tmp_path, pseudo, "scf: {mixing: {precond: local_tf}}\n")
+
+    captured: dict = {}
+    monkeypatch.setattr(api, "build_system", lambda _inp: object())
+    mod = importlib.import_module(target_mod)
+
+    def fake_loop(*_args, **kw):
+        captured.update(kw)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(mod, fname, fake_loop)
+    api.run_scf(inp, verbose=False)
+    assert captured["precond"] == "local_tf"
+
+
+def test_precond_omitted_defaults_to_kerker_at_the_scf_call(tmp_path, monkeypatch):
+    """Regression: an input with no precond key must reach the loop with the
+    prior default (precond='kerker'), so existing inputs are unchanged."""
+    import gradwave.api as api
+    import gradwave.scf.loop as loop
+
+    inp = _mk_input(tmp_path, "C_ONCV_PBE-1.2.upf", "")
+
+    captured: dict = {}
+    monkeypatch.setattr(api, "build_system", lambda _inp: object())
+
+    def fake_scf(*_args, **kw):
+        captured.update(kw)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(loop, "scf", fake_scf)
+    api.run_scf(inp, verbose=False)
+    assert captured["precond"] == "kerker"

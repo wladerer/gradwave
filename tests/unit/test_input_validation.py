@@ -61,12 +61,28 @@ def test_unknown_key_suggests_the_right_one(tmp_path, extra, needle):
     # 'linear' parses but no mixer implements it — reject at parse time, not
     # deep in the SCF where the mixer builder raises a bare ValueError.
     ("scf: {mixing: {scheme: linear}}\n", "unknown mixing scheme"),
+    # precond selects the density preconditioner; only kerker | local_tf exist.
+    ("scf: {mixing: {precond: tf}}\n", "unknown mixing precond"),
 ])
 def test_value_range_errors(tmp_path, extra, needle):
     from gradwave.inputs import InputError, load_input
 
     with pytest.raises(InputError, match=needle):
         load_input(_write(tmp_path, _base(extra)))
+
+
+def test_precond_defaults_to_kerker(tmp_path):
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _base()))
+    assert inp.scf.mixing.precond == "kerker"
+
+
+def test_precond_local_tf_parses(tmp_path):
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _base("scf: {mixing: {precond: local_tf}}\n")))
+    assert inp.scf.mixing.precond == "local_tf"
 
 
 @pytest.mark.parametrize("mode", ["noncollinear: true\n", "task: magnetism\n"])
