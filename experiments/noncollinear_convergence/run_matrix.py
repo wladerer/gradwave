@@ -6,9 +6,12 @@ NCConvergenceProbe attached, at identical tolerances, and writes:
                                  final F, moment, per-channel floor stats)
   results/<host>/trace_<name>.jsonl  the full per-iteration probe trace
 
+Groups are generators and the summary row is flushed as soon as each run
+finishes, so a killed job loses at most the in-flight run.
+
 Usage:
+  uv run python experiments/noncollinear_convergence/run_matrix.py --group ni_stock
   uv run python experiments/noncollinear_convergence/run_matrix.py --group all
-  uv run python experiments/noncollinear_convergence/run_matrix.py --group ni
 """
 
 from __future__ import annotations
@@ -27,16 +30,16 @@ import torch
 # regardless of the launching cwd (the script dir alone is added by default)
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from gradwave.core.xc.noncollinear import NoncollinearXC
-from gradwave.core.xc.spin import SpinPBE
-from gradwave.scf.loop import scf
-from gradwave.scf.noncollinear import scf_noncollinear
+from gradwave.core.xc.noncollinear import NoncollinearXC  # noqa: E402
+from gradwave.core.xc.spin import SpinPBE  # noqa: E402
+from gradwave.scf.loop import scf  # noqa: E402
+from gradwave.scf.noncollinear import scf_noncollinear  # noqa: E402
 
-from experiments.noncollinear_convergence import systems as sysmod
-from experiments.noncollinear_convergence.probe import NCConvergenceProbe
+from experiments.noncollinear_convergence import systems as sysmod  # noqa: E402
+from experiments.noncollinear_convergence.probe import NCConvergenceProbe  # noqa: E402
 
-# identical tolerances for every magnetic/anchor run (tight enough that a
-# limit-cycling run exhausts the cap rather than passing on a loose gate)
+# identical tolerances for every run (tight enough that a limit-cycling run
+# exhausts the cap rather than passing on a loose gate)
 TOL = dict(smearing="gaussian", width=0.1, max_iter=80, etol=1e-6, rhotol=1e-5,
            diago_tol=1e-9, verbose=False)
 # the merged #79 recipe (spin_precond on the longitudinal m channel + the
@@ -76,17 +79,18 @@ def run_nc(name, system, mag_vec_init, nonmagnetic=False, outdir=None, **kw):
         mag_abs=round(float(res.mag_abs), 4),
         seed=[round(float(x), 3) for x in np.asarray(mag_vec_init).ravel()],
         wall_s=round(wall, 1),
-        opts={k: kw[k] for k in kw},
+        opts={k: repr(v) for k, v in kw.items()},
     )
     if not nonmagnetic:
-        row.update(_floor_stats(probe.records, ["dn", "dm", "dm_z", "dtheta_out"]))
+        row.update(_floor_stats(probe.records,
+                                ["dn", "dm", "dm_x", "dm_y", "dm_z", "dtheta_out"]))
         row["final_dtheta"] = probe.records[-1].get("dtheta_out")
     else:
         row.update(_floor_stats(probe.records, ["dn"]))
     return row
 
 
-def run_collinear(name, system, start_mag, outdir=None):
+def run_collinear(name, system, start_mag):
     t0 = time.perf_counter()
     res = scf(system, SpinPBE(), nspin=2, start_mag=[start_mag],
               smearing="gaussian", width=0.1, max_iter=80, etol=1e-6,
@@ -107,70 +111,70 @@ def z(s):
 
 
 def tilt(s):
-    v = np.array([1.0, 1.0, 1.0]); v = v / np.linalg.norm(v) * s
+    v = np.array([1.0, 1.0, 1.0])
+    v = v / np.linalg.norm(v) * s
     return [list(map(float, v))]
 
 
 def build_groups(outdir):
-    G = {}
-
     def anchor():
-        return [run_nc("pt_soc_nm", sysmod.pt_fcc(), z(0.0),
-                       nonmagnetic=True, outdir=outdir)]
+        yield run_nc("pt_soc_nm", sysmod.pt_fcc(), z(0.0),
+                     nonmagnetic=True, outdir=outdir)
 
-    def ni():
-        rows = []
+    def ni_stock():
         for s in (0.3, 0.6, 1.0):
-            rows.append(run_nc(f"ni_soc_stock_s{s}_z", sysmod.ni_fcc(True), z(s),
-                               outdir=outdir))
-            rows.append(run_nc(f"ni_soc_fix_s{s}_z", sysmod.ni_fcc(True), z(s),
-                               outdir=outdir, **FIX))
-        # johnson alternative to the Stoner precond
-        rows.append(run_nc("ni_soc_johnson_s0.6_z", sysmod.ni_fcc(True), z(0.6),
-                           outdir=outdir, mag_mixer="johnson"))
+            yield run_nc(f"ni_soc_stock_s{s}_z", sysmod.ni_fcc(True), z(s),
+                         outdir=outdir)
         # second seed DIRECTION: does the final moment axis track the seed?
-        rows.append(run_nc("ni_soc_stock_s0.6_tilt", sysmod.ni_fcc(True),
-                           tilt(0.6), outdir=outdir))
-        rows.append(run_nc("ni_soc_fix_s0.6_tilt", sysmod.ni_fcc(True),
-                           tilt(0.6), outdir=outdir, **FIX))
+        yield run_nc("ni_soc_stock_s0.6_tilt", sysmod.ni_fcc(True), tilt(0.6),
+                     outdir=outdir)
+
+    def ni_fix():
+        for s in (0.3, 0.6, 1.0):
+            yield run_nc(f"ni_soc_fix_s{s}_z", sysmod.ni_fcc(True), z(s),
+                         outdir=outdir, **FIX)
+        yield run_nc("ni_soc_fix_s0.6_tilt", sysmod.ni_fcc(True), tilt(0.6),
+                     outdir=outdir, **FIX)
+
+    def ni_alt():
+        # johnson alternative to the Stoner precond (the collinear cure)
+        yield run_nc("ni_soc_johnson_s0.6_z", sysmod.ni_fcc(True), z(0.6),
+                     outdir=outdir, mag_mixer="johnson")
+        # long-cap johnson: the fixed-point oracle attempt at tight tolerance
+        yield run_nc("ni_soc_johnson_long_s0.6_z", sysmod.ni_fcc(True), z(0.6),
+                     outdir=outdir, mag_mixer="johnson", max_iter=200)
         # SOC-free non-collinear vs the collinear path (cost of going NC)
-        rows.append(run_nc("ni_socfree_s0.6_z", sysmod.ni_fcc(False), z(0.6),
-                           outdir=outdir))
-        rows.append(run_collinear("ni_collinear_s0.6", sysmod.ni_fcc(False),
-                                  0.6, outdir=outdir))
-        return rows
+        yield run_nc("ni_socfree_s0.6_z", sysmod.ni_fcc(False), z(0.6),
+                     outdir=outdir)
+        yield run_collinear("ni_collinear_s0.6", sysmod.ni_fcc(False), 0.6)
 
     def fe():
-        rows = []
-        rows.append(run_nc("fe_soc_stock_s0.6_z", sysmod.fe_bcc(True), z(0.6),
-                           outdir=outdir))
-        rows.append(run_nc("fe_soc_fix_s0.6_z", sysmod.fe_bcc(True), z(0.6),
-                           outdir=outdir, **FIX))
-        rows.append(run_nc("fe_socfree_s0.6_z", sysmod.fe_bcc(False), z(0.6),
-                           outdir=outdir))
-        rows.append(run_collinear("fe_collinear_s0.6", sysmod.fe_bcc(False),
-                                  0.6, outdir=outdir))
-        return rows
+        yield run_nc("fe_soc_stock_s0.6_z", sysmod.fe_bcc(True), z(0.6),
+                     outdir=outdir)
+        yield run_nc("fe_soc_fix_s0.6_z", sysmod.fe_bcc(True), z(0.6),
+                     outdir=outdir, **FIX)
+        yield run_nc("fe_socfree_s0.6_z", sysmod.fe_bcc(False), z(0.6),
+                     outdir=outdir)
+        yield run_collinear("fe_collinear_s0.6", sysmod.fe_bcc(False), 0.6)
 
     def canted():
-        rows = []
-        # two moments seeded 90 deg apart (m0=[0,0,1], m1=[1,0,0]); unconstrained
-        # -> exchange should align them. Watch the transient direction dynamics.
+        # two moments seeded 90 deg apart (m0 along z, m1 along x); the
+        # unconstrained exchange should align them. Watch the direction
+        # dynamics on the way.
         for soc in (False, True):
             tag = "soc" if soc else "socfree"
             system = sysmod.fe_bcc_2atom(soc)
             mvi = [[0.0, 0.0, 0.6], [0.6, 0.0, 0.0]]
-            rows.append(run_nc(f"fe2_canted90_{tag}", system, mvi, outdir=outdir))
-        return rows
+            yield run_nc(f"fe2_canted90_{tag}", system, mvi, outdir=outdir)
 
-    G["anchor"], G["ni"], G["fe"], G["canted"] = anchor, ni, fe, canted
-    return G
+    return {"anchor": anchor, "ni_stock": ni_stock, "ni_fix": ni_fix,
+            "ni_alt": ni_alt, "fe": fe, "canted": canted}
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--group", default="all",
-                    choices=["all", "anchor", "ni", "fe", "canted"])
+                    help="comma-separated group names, or 'all'")
     ap.add_argument("--threads", type=int, default=8)
     ap.add_argument("--host", default=platform.node().split(".")[0])
     args = ap.parse_args()
@@ -179,17 +183,17 @@ def main():
     outdir = Path(__file__).resolve().parent / "results" / args.host
     outdir.mkdir(parents=True, exist_ok=True)
     groups = build_groups(outdir)
-    names = ["anchor", "ni", "fe", "canted"] if args.group == "all" else [args.group]
+    names = list(groups) if args.group == "all" else args.group.split(",")
 
     summary_path = outdir / "summary.jsonl"
-    rows = []
+    n = 0
     for gname in names:
         for row in groups[gname]():
-            rows.append(row)
+            n += 1
             print(json.dumps(row), flush=True)
             with open(summary_path, "a") as f:
                 f.write(json.dumps(row) + "\n")
-    print(f"\nDONE group={args.group} host={args.host} runs={len(rows)}", flush=True)
+    print(f"\nDONE group={args.group} host={args.host} runs={n}", flush=True)
 
 
 if __name__ == "__main__":

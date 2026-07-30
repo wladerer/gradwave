@@ -54,7 +54,7 @@ def pt_fcc(ecut_ry=40, kmesh=(4, 4, 4), nbands=18):
     return _mono(a / 2 * _FCC, "Pt_fr", ecut_ry, kmesh, nbands)
 
 
-def fe_bcc_2atom(soc: bool, ecut_ry=35, kmesh=(4, 4, 4), nbands=28):
+def fe_bcc_2atom(soc: bool, ecut_ry=35, kmesh=(3, 3, 3), nbands=24):
     """Conventional 2-atom bcc Fe cell (corner + body-center): the substrate for
     a genuinely non-collinear seed (two moments started at a relative angle)."""
     a = 2.87
