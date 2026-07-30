@@ -24,7 +24,7 @@ drivers can import it without cycles.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -53,10 +53,15 @@ class _DictBridge:
     # fields mirroring keys the legacy dict carried only when applicable;
     # they read as absent while their value is None
     _conditional_keys = frozenset()
+    # fields never part of the legacy dict shape — internal diagnostics that
+    # dict-style consumers (and dict(res) / checkpoint) should not see even when
+    # set. Kept out of the dict view unconditionally.
+    _hidden_keys = frozenset({"recorder"})
 
     def _present(self, key) -> bool:
         self_dc = cast("DataclassInstance", self)
-        if key == "formalism" or key not in {f.name for f in fields(self_dc)}:
+        if (key == "formalism" or key in self._hidden_keys
+                or key not in {f.name for f in fields(self_dc)}):
             return False
         return not (key in self._conditional_keys
                     and getattr(self, key) is None)
@@ -113,6 +118,7 @@ class USPPResult(_DictBridge):
     mag_total: float | None = None  # ∫(ρ↑−ρ↓) dr [μB] when nspin=2
     mag_abs: float | None = None  # ∫|ρ↑−ρ↓| dr [μB] when nspin=2
     newton: list[float] | None = None  # newton_polish per-step residual norms
+    recorder: Any = None  # scf.recorder.SCFRecorder — per-iteration flight recorder
     formalism: str = "uspp"
 
     _conditional_keys = frozenset(

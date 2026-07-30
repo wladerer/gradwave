@@ -45,6 +45,10 @@ class SCFParams:
     rhotol: float = 1.0e-7
     mixing: MixingParams = field(default_factory=MixingParams)
     diago_tol: float = 1.0e-9
+    # write the per-iteration SCF flight-recorder trace to scf_trace.json (the
+    # cheap diagnostics are always summarized into the output regardless). Off
+    # by default to keep the output directory lean.
+    trace: bool = False
 
 
 @dataclass(frozen=True)
@@ -728,7 +732,7 @@ def _load_input(path: Path) -> Input:
     sm = raw.get("smearing", {})
     _check_keys("smearing", sm, {"type", "width"})
     scf_raw = dict(raw.get("scf", {}))
-    _check_keys("scf", scf_raw, {"max_iter", "etol", "rhotol", "mixing", "diago"})
+    _check_keys("scf", scf_raw, {"max_iter", "etol", "rhotol", "mixing", "diago", "trace"})
     mix_raw = dict(scf_raw.pop("mixing", {}))
     diago = scf_raw.pop("diago", {})
     _check_keys("scf.diago", diago, {"tol"})
@@ -828,6 +832,7 @@ def _load_input(path: Path) -> Input:
             rhotol=float(scf_raw.get("rhotol", 1e-7)),
             mixing=MixingParams(**mix_raw) if mix_raw else MixingParams(),
             diago_tol=float(diago.get("tol", 1e-9)),
+            trace=bool(scf_raw.get("trace", False)),
         ),
         task=task,
         relax=_build(RelaxParams, raw.get("relax", {}), "relax"),

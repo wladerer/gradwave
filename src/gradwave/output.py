@@ -582,9 +582,21 @@ def _provenance_lines(prov):
     return lines
 
 
+def _diagnosis_line(diag):
+    """One line naming the SCF flight-recorder tags, only when tags fired."""
+    tags = [d["tag"] for d in diag.get("diagnosis", [])]
+    if not tags:
+        return None
+    return f"   SCF diagnosis: {', '.join(tags)} (see scf_trace)"
+
+
 def _scf_report(summary):
     """SCF block: iterations, energy breakdown, error estimate, eigenvalues."""
     lines = _scf_lines(summary["scf"], summary.get("runtime_s"))
+    if "scf_diagnostics" in summary:
+        diag_line = _diagnosis_line(summary["scf_diagnostics"])
+        if diag_line:
+            lines.append(diag_line)
     lines += _energy_lines(summary["scf"], _disp_label(summary.get("dispersion")))
     if "error_estimate" in summary:
         lines += _error_lines(summary["error_estimate"])

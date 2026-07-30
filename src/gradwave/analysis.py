@@ -62,6 +62,28 @@ def scf_frame(source):
     return df
 
 
+def trace_frame(source):
+    """The SCF flight-recorder sidecar (scf_trace.json) as a per-iteration
+    DataFrame: one row per iteration with the scalar metrics plus the |G|-shell
+    residual decomposition expanded into shell_0 … shell_{n-1} columns. Accepts
+    a path to scf_trace.json or an already-loaded trace dict. The mixing metadata
+    and shell edges ride along on df.attrs."""
+    t = load(source)
+    pd = _pd()
+    rows = []
+    for rec in t.get("iterations", []):
+        row = {k: v for k, v in rec.items() if k != "shell_fraction"}
+        for i, frac in enumerate(rec.get("shell_fraction", [])):
+            row[f"shell_{i}"] = frac
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    df.attrs["mixing"] = t.get("mixing", {})
+    df.attrs["shell_edges_invAng"] = t.get("shell_edges_invAng", [])
+    df.attrs["diagnosis"] = t.get("diagnosis", [])
+    df.attrs["version"] = t.get("version")
+    return df
+
+
 def eigenvalues_frame(source):
     """Tidy eigenvalues: one row per (spin, k, band) with energy [eV],
     occupation and k-weight."""
