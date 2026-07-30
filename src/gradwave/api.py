@@ -216,22 +216,30 @@ def run_scf(
         system = system.to(inp.device)
     dist_ctx: DistKContext | None = None
     if inp.distributed:
-        if uspp or inp.hybrid.enabled or inp.noncollinear:
+        if inp.hybrid.enabled or inp.noncollinear:
             raise NotImplementedError(
                 "distributed (k-point-sharded) SCF is implemented for the "
-                "norm-conserving collinear path only so far — USPP/PAW, "
-                "hybrid functionals, and the noncollinear/SOC SCF are "
-                "documented follow-ups (see docs/manual/distributed.md)"
+                "norm-conserving and USPP/PAW collinear paths (DFT+U "
+                "included) — hybrid functionals and the noncollinear/SOC SCF "
+                "are documented follow-ups (see docs/manual/distributed.md)"
             )
-        from gradwave.distributed import init_from_env, shard_system
+        from gradwave.distributed import init_from_env, shard_system, shard_uspp_system
 
         info = init_from_env()
         if info is not None:
             rank, world_size, group = info
-            system, dist_ctx = shard_system(cast("System", system), rank, world_size, group)
+            # symmetry (IBZ) is rejected inside the shard_* call for either
+            # formalism (build with symmetry: false) — nothing to gate here.
+            if uspp:
+                system, dist_ctx = shard_uspp_system(
+                    cast("USPPSystem", system), rank, world_size, group)
+            else:
+                system, dist_ctx = shard_system(
+                    cast("System", system), rank, world_size, group)
             # every rank still computes the identical, correctly-reduced
-            # result (see scf.loop.scf's dist_ctx handling) — quiet every
-            # rank but 0 purely to avoid world_size-fold duplicated chatter
+            # result (see scf.loop.scf / scf.uspp_loop.scf_uspp dist_ctx
+            # handling) — quiet every rank but 0 purely to avoid world_size-fold
+            # duplicated chatter
             verbose = verbose and rank == 0
     if inp.hybrid.enabled:
         return _run_scf_hybrid(inp, system, verbose, start_from, uspp)
@@ -280,7 +288,8 @@ def run_scf(
         return scf_uspp(cast("USPPSystem", system), xc,
                         mixing_scheme=inp.scf.mixing.scheme,
                         mixing_history=inp.scf.mixing.history,
-                        mixing_kerker=kerker, start_from=start_from, **common)
+                        mixing_kerker=kerker, start_from=start_from,
+                        dist_ctx=dist_ctx, **common)
     from gradwave.scf.loop import scf
 
     return scf(cast("System", system), cast("XCFunctional", xc),

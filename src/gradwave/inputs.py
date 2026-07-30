@@ -340,7 +340,8 @@ class Input:
     device: str = "cpu"
     distributed: bool = False  # k-point-sharded SCF across torchrun ranks (see
     # gradwave.distributed / docs/manual/distributed.md); task: scf | bands only,
-    # norm-conserving collinear SCF only so far (v1 scope — see the module docstring)
+    # norm-conserving and USPP/PAW collinear SCF (DFT+U included), symmetry: false
+    # required (v1 scope — see the module docstring)
     verbose: bool = True  # per-iteration SCF chatter; CLI --quiet overrides
     output_dir: Path = Path("./out")
     output_checkpoint: bool = True  # write checkpoint.pt after SCF tasks
