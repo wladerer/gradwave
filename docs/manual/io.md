@@ -131,6 +131,7 @@ geometry file alongside it.
 | `etol` | `1.0e-8` | eV | float | Total-energy convergence threshold. |
 | `rhotol` | `1.0e-7` | — | float | Density-residual convergence threshold. |
 | `diago.tol` | `1.0e-9` | — | float | Davidson eigensolver residual tolerance. |
+| `trace` | `false` | — | bool | Write the per-iteration SCF flight-recorder trace to `scf_trace.json`. The compact diagnostics are summarized into the report regardless. |
 
 ### `scf.mixing`
 
@@ -271,6 +272,9 @@ Each calculation writes three files into the output directory.
   `output.checkpoint` key. Wavefunctions are excluded by default because they
   dominate the file size and a restart consumes only the density and becsum. Set
   `output.wavefunctions: true` to archive them.
+- `scf_trace.json` is the per-iteration flight-recorder trace, written only when
+  `scf.trace: true`. The compact `scf_diagnostics` block rides in `<task>.json`
+  regardless. See [SCF flight recorder](#scf-flight-recorder).
 
 `<task>` is the input's `task` value (`scf`, `relax`, `bands`, `magnetism`, `eos`,
 `elastic`, or `phonons`). A relax task additionally writes the
@@ -291,6 +295,54 @@ far below `torch_threads` fingerprints a contested box), peak RSS, and peak
 CUDA memory. Collection is best-effort and dependency-free (`/proc`, `/sys`,
 `nvidia-smi`); unreadable fields are absent rather than errors. The `.out`
 report renders it as the closing `machine` section.
+
+## SCF flight recorder
+
+The SCF loop records a handful of cheap per-iteration metrics in memory during
+every run and summarizes them into the report. The compact block sits under the
+top-level `scf_diagnostics` key of `<task>.json`, with the iteration count, the
+final density residual, the long-wavelength (sloshing) fraction of that residual,
+the total band-reordering count, the mean per-iteration wall time, and a list of
+heuristic `diagnosis` tags. The recorder collects the norm-conserving and
+USPP/PAW collinear paths. The noncollinear/spinor drivers do not record, since
+their magnetization is a vector field the heuristics below do not model.
+
+Each iteration measures the density residual, its decomposition onto twelve
+|G|-shells (one extra real-to-reciprocal transform of the residual), the maximum
+eigenvalue drift and a band-reordering count against the previous iteration, the
+Fermi level, and the absolute magnetization for `nspin: 2`. Everything stored is
+a detached scalar or short vector, so the recorder stays off the differentiable
+path and adds no measurable overhead.
+
+`diagnose()` returns up to three tags, each with a one-line reason. The
+thresholds are heuristics tuned on the test systems.
+
+- `charge-sloshing`: over the last five iterations more than half of the
+  residual weight sits in the two longest-wavelength |G|-shells and the residual
+  is not falling monotonically. This is the long-range charge redistribution
+  Kerker mixing damps, so turn Kerker on (`scf.mixing.kerker: on`) or lower
+  `scf.mixing.alpha`.
+- `moment-collapse`: a spin-polarized (`nspin: 2`) run seeded with a nonzero
+  moment whose absolute magnetization falls toward zero across iterations. Raise
+  the initial moment with `start_mag`, or pin it with `tot_magnetization`.
+- `level-crossing`: a nonzero band-reordering count in a majority of recent
+  iterations, common for metals and near-degenerate manifolds. A finer smearing
+  width or more bands usually settles it.
+
+A diagnosis line appears in `<task>.out` only when a tag fires, naming the tags
+and pointing at the trace.
+
+Setting `scf.trace: true` writes the full per-iteration trace to `scf_trace.json`
+alongside the other outputs (rank 0 only under a distributed run). The file is
+schema-versioned under a `version` key and carries the |G|-shell edges, the
+mixing configuration, and one entry per iteration with the residual, shell
+fractions, eigenvalue drift, reorder count, Fermi level, and wall time. Load it
+into a pandas DataFrame with `analysis.trace_frame`, one row per iteration with
+the shell decomposition expanded into `shell_0` through `shell_11` columns.
+
+    from gradwave import analysis
+    df = analysis.trace_frame("out/scf_trace.json")
+    df[["iter", "drho", "shell_0", "shell_1"]]   # long-wavelength residual weight
 
 ## Basis-set error estimate
 

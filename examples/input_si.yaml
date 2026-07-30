@@ -27,6 +27,7 @@ scf:
   max_iter: 100
   etol: 1.0e-8        # eV
   rhotol: 1.0e-7
+  trace: false        # write per-iteration scf_trace.json (diagnostics always in the report)
   mixing: {scheme: johnson}   # pulay | broyden | johnson | linear
 
 task: scf             # scf | relax | bands | magnetism

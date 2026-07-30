@@ -84,6 +84,7 @@ if TYPE_CHECKING:
     # function-local import (e.g. CollinearMagneticSymmetrizer at its
     # isinstance-check call sites below), so this stays annotation-only too.
     from gradwave.scf.alchemical import AlchemicalSpec
+    from gradwave.scf.recorder import SCFRecorder
     from gradwave.symmetry import (
         CollinearMagneticSymmetrizer,
         MagneticSymmetrizer,
@@ -388,6 +389,7 @@ class SCFResult:
     # (total density) for the SCF-error estimate
     formalism: str = "nc"  # result-type tag shared by all four SCF drivers
     kerker_used: bool | None = None  # resolved Kerker on/off (auto → concrete)
+    recorder: Any = None  # scf.recorder.SCFRecorder — per-iteration flight recorder
 
 
 # A warm-start source for scf(): either a converged SCFResult, or the plainer
@@ -1157,6 +1159,8 @@ def scf(
     dist_ctx: "DistKContext | None" = None,  # k-point-sharded distributed SCF (see
     # gradwave.distributed): `system` is THIS RANK's local k-shard; None (default) runs
     # the ordinary single-process path, byte-for-byte unchanged.
+    recorder: "SCFRecorder | None" = None,  # per-iteration flight recorder (scf.recorder);
+    # None (default) builds a fresh cheap-path recorder — detached, off the autograd graph
 ) -> SCFResult:
     # `fock`, when given, adds an orbital-dependent operator to the Hamiltonian
     # each SCF step (a hybrid functional's Fock exchange). It must expose
@@ -1209,6 +1213,20 @@ def scf(
         kerker,
         precond,
         precond_op,
+    )
+
+    # flight recorder (scf.recorder): cheap per-iteration diagnostics, always
+    # collected in memory, detached and off the autograd graph. Defaults on; a
+    # caller may pass a preconfigured recorder. Noncollinear is out of scope.
+    if recorder is None:
+        from gradwave.scf.recorder import SCFRecorder
+
+        seed_mom = (
+            float((rho_s[0] - rho_s[1]).abs().mean()) * vol if nspin == 2 else 0.0
+        )
+        recorder = SCFRecorder(grid.g2, nspin=nspin, seed_moment=seed_mom)
+    recorder.set_mixing(
+        scheme=mixing_scheme, alpha=mixing_alpha, kerker=bool(kerker), history=mixing_history
     )
 
     from gradwave.core.batch import density_b, projectors_b
@@ -1518,6 +1536,24 @@ def scf(
             verbose,
         )
 
+        # flight recorder: cheap detached per-iteration metrics. drho_scf is the
+        # total real-space residual already formed above; history[-1]["t"] is the
+        # loop's own timing for this iteration (no extra sync).
+        recorder.record(
+            it=it,
+            free_energy=e_free,
+            dE=de,
+            res_norm=res_norm,
+            t_iter=float(history[-1]["t"]),
+            drho_r=drho_scf,
+            eigs=eigs_s,
+            fermi=mu,
+            entropy=float(entropy_term),
+            mag_abs=(float((rho_out_s[0] - rho_out_s[1]).abs().mean()) * vol)
+            if nspin == 2
+            else None,
+        )
+
         if convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol):
             converged = True
             rho_s = rho_out_s
@@ -1583,6 +1619,7 @@ def scf(
             hub_occ=n_hub_s,
             drho_scf=drho_scf,
             kerker_used=bool(kerker),
+            recorder=recorder,
         )
     m_density = rho_s[0] - rho_s[1]
     return SCFResult(
@@ -1604,6 +1641,7 @@ def scf(
         hub_occ=n_hub_s,
         drho_scf=drho_scf,
         kerker_used=bool(kerker),
+        recorder=recorder,
     )
 
 

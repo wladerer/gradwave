@@ -76,6 +76,7 @@ if TYPE_CHECKING:
     # importing it eagerly here would be a needless top-level dependency on
     # torch.distributed for every non-distributed run.
     from gradwave.distributed import DistKContext
+    from gradwave.scf.recorder import SCFRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -1214,6 +1215,9 @@ def scf_uspp(
     # single-process path, byte-for-byte unchanged. DFT+U (`hubbard`) IS
     # supported under dist_ctx (unlike the NC driver's dist_ctx, which rejects
     # it) -- see _hubbard_occ_update's all_reduce over the occupation matrices.
+    recorder: "SCFRecorder | None" = None,  # per-iteration flight recorder (scf.recorder);
+    # None (default) builds a fresh cheap-path recorder. NOT part of SCFOptions — an
+    # internal diagnostics object, so it is exempt from the opts-vs-flat-kwarg guard below.
 ) -> USPPResult:
     """USPP/PAW SCF. nspin=2 takes a SpinXC functional and start_mag (list,
     in [-1, 1]) with one entry per species OR one per atom (the latter for
@@ -1485,6 +1489,19 @@ def scf_uspp(
     rho_ij_s = _seed_becsum(system, nspin, start_from, spin_frac, dev)
     rho_ij_mix = [[m.clone() for m in ch] for ch in rho_ij_s]
 
+    # flight recorder (scf.recorder): cheap per-iteration diagnostics, always
+    # collected in memory, detached and off the autograd graph. Defaults on.
+    if recorder is None:
+        from gradwave.scf.recorder import SCFRecorder
+
+        seed_mom = (
+            float((rho_s[0] - rho_s[1]).abs().sum()) * vol / grid.n_points if nspin == 2 else 0.0
+        )
+        recorder = SCFRecorder(grid.g2, nspin=nspin, seed_moment=seed_mom)
+    recorder.set_mixing(
+        scheme=mixing_scheme, alpha=mixing_alpha, kerker=bool(use_kerker), history=mixing_history
+    )
+
     for it in range(1, max_iter + 1):
         t_it = time.perf_counter()
         # quadratic schedule (common.adaptive_diago_tol). SAD starts don't
@@ -1552,6 +1569,25 @@ def scf_uspp(
             float(torch.linalg.norm(rho_out_vec[: ng * nspin] - rho_in_vec[: ng * nspin])) * vol
         )
         de = record_iteration(history, it, e_free, e_free_prev, res_norm, t_it)
+        # flight recorder: cheap detached per-iteration metrics. The total
+        # real-space residual is ρ_out − ρ_in; history[-1]["t"] is this
+        # iteration's own measured wall time (no extra sync).
+        rho_in_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
+        rho_out_tot = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
+        recorder.record(
+            it=it,
+            free_energy=e_free,
+            dE=de,
+            res_norm=res_norm,
+            t_iter=float(history[-1]["t"]),
+            drho_r=rho_out_tot - rho_in_tot,
+            eigs=list(eigs_s),
+            fermi=mu,
+            entropy=0.0,
+            mag_abs=(float((rho_out_s[0] - rho_out_s[1]).abs().sum()) * vol / grid.n_points)
+            if nspin == 2
+            else None,
+        )
         if verbose:
             mag = ""
             if nspin == 2:
@@ -1745,4 +1781,5 @@ def scf_uspp(
         rho_spin=rho_spin,
         mag_total=mag_total,
         mag_abs=mag_abs,
+        recorder=recorder,
     )

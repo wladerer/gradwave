@@ -532,6 +532,14 @@ def build_summary(res: SCFLike, inp: Input, task: str,
         "eigenvalues_eV": eig.tolist(),
         "occupations": [] if occ is None else occ.tolist(),
     }
+    # SCF flight-recorder diagnostics (scf.recorder): a compact block of the
+    # per-iteration convergence health — heuristic tags, long-wavelength
+    # (sloshing) residual fraction, band-reordering count, per-iteration wall
+    # time. Present for the recording drivers (NC / USPP-PAW collinear); absent
+    # for the noncollinear path, which does not record.
+    _rec = _get(res, "recorder")
+    if _rec is not None and getattr(_rec, "iters", None):
+        summary["scf_diagnostics"] = _rec.summarize()
     if runtime_s is not None:
         summary["runtime_s"] = round(float(runtime_s), 2)
     if extra:
@@ -1846,6 +1854,14 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
         outputs["trajectory"] = "relax.xyz"
     if res is not None and inp.output_volumetric.any():
         outputs.update(_write_volumetric(res, inp.output_volumetric, outdir, verbose))
+    # SCF flight-recorder sidecar: the full per-iteration trace, opted in via
+    # scf.trace. The compact diagnostics ride in the JSON regardless; this is the
+    # heavy per-iteration corpus (schema-versioned scf_trace.json). Rank-0 only,
+    # inheriting the gate above.
+    _rec = getattr(res, "recorder", None) if res is not None else None
+    if inp.scf.trace and _rec is not None and getattr(_rec, "iters", None):
+        (outdir / "scf_trace.json").write_text(json.dumps(_rec.to_trace_dict(), indent=1))
+        outputs["scf_trace"] = "scf_trace.json"
     summary["provenance"] = provenance_block(snap, meter)
     summary["outputs"] = {**outputs, "json": f"{inp.task}.json",
                           "report": f"{inp.task}.out"}
