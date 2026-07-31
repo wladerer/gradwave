@@ -32,3 +32,27 @@ Ratios are estimate / true; 1.0 is exact.
 | 3x3x3 | 12 | 3.799 | 0.478 |
 | 3x3x3 | 14 | 2.111 | 0.524 |
 | 3x3x3 | 16 | 1.085 | 0.582 |
+
+## Rung 1: annulus-truncation extrapolation (off by default)
+
+`extrapolate=True` samples the frozen-state energy error at annulus factors
+(1.8, 2.2, 2.6, 3.0) and fits the tail `dE(ecl) = dE_inf + c*ecl**(-p)`, using
+`dE_inf` in the volume derivative. Finding: the annulus tail is nearly
+volume-independent on silicon, so it barely enters the pressure (the volume
+derivative of the tail is small). Extrapolating a nearly-flat, noisy tail does
+not move the ratio toward 1 at every ecut. It is worse at ecut 10 to 12 (the
+independent minus/plus fits amplify sampling noise into the small pressure
+difference) and only marginally better at 14 to 16. The feature is shipped but
+off by default. The under-estimate comes from the diagonal resolvent, not
+annulus truncation, which motivates rung 2.
+
+| kmesh | ecut (Ry) | P_true (GPa) | baseline | extrap |
+|---|---|---|---|---|
+| 2x2x2 | 10 | 5.304 | 0.435 | 0.343 |
+| 2x2x2 | 12 | 3.496 | 0.478 | 0.407 |
+| 2x2x2 | 14 | 1.806 | 0.523 | 0.617 |
+| 2x2x2 | 16 | 0.843 | 0.599 | 0.615 |
+| 3x3x3 | 10 | 6.395 | 0.434 | 0.328 |
+| 3x3x3 | 12 | 3.799 | 0.478 | 0.413 |
+| 3x3x3 | 14 | 2.111 | 0.524 | 0.621 |
+| 3x3x3 | 16 | 1.085 | 0.582 | 0.597 |
