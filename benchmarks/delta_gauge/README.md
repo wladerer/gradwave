@@ -32,8 +32,10 @@ refractory), and `diamond` (group IV). Non-cubic ground states (hcp Mg/Zn/Ti,
 rhombohedral As/Bi, graphite C) are out of scope. Ferromagnetic Fe (bcc) and Ni
 (fcc) run with `mixing_scheme="johnson"` and an energy-tail criterion, which
 holds the moment where the default mixer collapses it to the nonmagnetic branch
-near the Stoner instability (fcc Ni). Cr is antiferromagnetic and needs a 2-atom
-cell rather than the 1-atom bcc primitive here, so it stays out.
+near the Stoner instability (fcc Ni). Cr is antiferromagnetic; its true ground
+state needs a 2-atom cell (up/down sublattices), so the 1-atom bcc primitive
+here can only run it as a collinear-FM proxy. Its Δ reflects the wrong magnetic
+state and is not comparable to the rest of the set (see "Results").
 
 ## Settings
 
@@ -97,6 +99,13 @@ Two features of the data are worth reading correctly.
   psp8 dfact (0.53), and it fails identically in QE. The two-axis check of
   `docs/manual/wisdom.md` applies: Cu is bad on the all-electron axis
   (pseudization) and exact on the QE axis (implementation).
+
+- **Cr's Δ (~11.9) reflects the wrong magnetic state, not a pseudopotential or
+  gradwave error.** Cr is antiferromagnetic, but the 1-atom bcc primitive used
+  here carries a single collinear moment, so it runs as a ferromagnetic proxy
+  that cannot represent the up/down sublattice order. The AFM ground state needs
+  a 2-atom cell (not attempted here); Cr's number is therefore out of scope for
+  the Δ-gauge claim and must not be read as a defective pseudopotential.
 
 ### Practical notes recorded during the campaign (`results/timing.json`)
 

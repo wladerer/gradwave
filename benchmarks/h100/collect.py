@@ -165,11 +165,19 @@ def build_markdown(recs: dict[str, dict]) -> str:
         struct = eos.get("struct", "") if eos else ""
         h100_sper = ""
         h100_it = ""
-        if eos and eos.get("sec"):
-            secs = [v for v in eos["sec"].values()]
-            its = [v for v in eos.get("it", {}).values()]
-            if secs:
-                h100_sper = f"{sum(secs) / len(secs):.1f}"
+        # H100 GPU s/vol: MEASURED from this lane's own subprocess wall time
+        # (the lane1_delta_<el> record), divided by the number of EOS volumes,
+        # to match the RTX 3050 reference's total_s / 7 definition in
+        # results/timing.json. The eos_<el>.json "sec" field times only the SCF
+        # (excluding per-run setup/import), so it is NOT comparable to the
+        # reference and must not fill this column.
+        rec = recs.get(f"lane1_delta_{el}", {})
+        n_vol = len(eos["sec"]) if eos and eos.get("sec") else 7
+        wall = rec.get("wall_s")
+        if wall and n_vol:
+            h100_sper = f"{wall / n_vol:.1f}"
+        if eos and eos.get("it"):
+            its = [v for v in eos["it"].values()]
             if its:
                 h100_it = f"{min(its)}"
         lines.append(f"| {el} | {struct} | {DELTA_REF_PDOJO[el]:.3f} | "

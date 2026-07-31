@@ -495,13 +495,38 @@ def _lane3_ladder(ecut_ry: float, max_iter: int) -> None:
         _write_record(name, rec)
 
 
+def _physical_gpu_count() -> int:
+    """Number of GPUs on the box, IGNORING any ``CUDA_VISIBLE_DEVICES`` pin.
+
+    run_all.sh pins each lane to a single GPU, and by the time this runs the
+    lane-3 ladder has already initialised CUDA under that pin — so
+    ``torch.cuda.device_count()`` is both pin-limited and cached at 1, which
+    made the multi-GPU probe self-skip (``gpu_count=1``). Count the physical
+    devices with ``nvidia-smi -L`` instead (unaffected by the pin), falling
+    back to the pinned torch count only if nvidia-smi is unavailable.
+    """
+    try:
+        out = subprocess.run(["nvidia-smi", "-L"], capture_output=True,
+                             text=True, timeout=10)
+        n = sum(1 for ln in out.stdout.splitlines()
+                if ln.strip().startswith("GPU "))
+        if n:
+            return n
+    except Exception:  # noqa: BLE001 -- no nvidia-smi -> fall back to torch
+        pass
+    import torch  # noqa: PLC0415
+
+    return torch.cuda.device_count() if torch.cuda.is_available() else 0
+
+
 def _lane3_multigpu_probe() -> None:
     """torchrun 4-rank k-sharded SCF on 4 GPUs. UNTESTED end to end (no H100
     here). Captures whether it runs and the verbatim error if not, plus the
     speedup vs a 1-GPU single-process run of the same input."""
-    import torch  # noqa: PLC0415
-
-    ngpu = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    # Count physical GPUs ignoring the lane's single-GPU pin (see
+    # _physical_gpu_count) — the pinned torch count would falsely trip the
+    # >=2-GPU guard below and self-skip the probe.
+    ngpu = _physical_gpu_count()
     inp = HERE / "inputs" / "si_dist.yaml"
     wrap = HERE / "mgpu_wrap.sh"
     py = sys.executable
