@@ -120,7 +120,31 @@ def build_groups(outdir, q0lo, q0mid, q0hi):
         yield run_wrapped("fe2bsoc_qmid", sysmod.fe_bcc_2atom(True), mvi, outdir,
                           track_per_atom=True, wrap=K(4.0))
 
-    return {"nisf2": nisf2, "nis2": nis2, "best2": best2, "canted2": canted2}
+    def lab2():
+        # The nisf2 group found the frame is the discriminator: the moment
+        # frame chases the amplified noise (nhat tilts with the wandering
+        # G=0 moment, reclassifying the mode as longitudinal), while the lab
+        # frame holds still and the step-wrap kerker arm drops the transverse
+        # floor 13x. These arms carry the lab frame through the rest of the
+        # matrix: the flat null in the working frame, SOC, the best-arm
+        # stack, and the canted kill-criterion (where a fixed z frame damps
+        # PHYSICAL alignment motion, the honest worst case for this frame).
+        yield run_wrapped("nisf2_flat03_lab", NI_F(), z(0.6), outdir,
+                          wrap=dict(form="flat", alpha_perp=0.3, frame="lab"))
+        yield run_wrapped("nis2_qmid_lab", NI_S(), z(0.6), outdir,
+                          wrap=K(q0mid, frame="lab"))
+        yield run_wrapped("nisbest2_qmid_lab", NI_S(), z(0.6), outdir,
+                          wrap=K(q0mid, frame="lab"), **BEST)
+        yield run_wrapped("nisfbest2_qmid_lab", NI_F(), z(0.6), outdir,
+                          wrap=K(q0mid, frame="lab"), **BEST)
+        mvi = [[0.0, 0.0, 0.6], [0.6, 0.0, 0.0]]
+        yield run_wrapped("fe2b_qmid_lab", sysmod.fe_bcc_2atom(False), mvi,
+                          outdir, track_per_atom=True, wrap=K(4.0, frame="lab"))
+        yield run_wrapped("fe2bsoc_qmid_lab", sysmod.fe_bcc_2atom(True), mvi,
+                          outdir, track_per_atom=True, wrap=K(4.0, frame="lab"))
+
+    return {"nisf2": nisf2, "nis2": nis2, "best2": best2, "canted2": canted2,
+            "lab2": lab2}
 
 
 def main():
