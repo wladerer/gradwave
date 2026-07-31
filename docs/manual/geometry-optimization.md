@@ -201,10 +201,22 @@ couple of SCF iterations.
     estimator applies — norm-conserving, `symmetry: false`, Γ-centered mesh, no
     DFT+U — and prints the per-step correction; `relax.pulay_correction:
     true|false` overrides the auto default. Direct ASE users opt in with
-    `GradWave(pulay_stress_correction=True)`. The estimate recovers roughly half
-    to three quarters of the true Pulay pressure, so a large reported correction
-    (the driver warns above 5 GPa) still means: converge `ecut` before trusting
-    the volume.
+    `GradWave(pulay_stress_correction=True)`. The default (diagonal) estimate
+    recovers roughly half to three quarters of the true Pulay pressure, so a
+    large reported correction (the driver warns above 5 GPa) still means:
+    converge `ecut` before trusting the volume.
+
+    The estimator has an optional iterative annulus solver that recovers a larger
+    fraction of the true Pulay pressure (about 0.6 to 0.8x versus 0.45 to 0.6x on
+    silicon; see `benchmarks/pulay_accuracy/RESULTS.md`). It replaces the diagonal
+    kinetic-only resolvent with a preconditioned conjugate-gradient solve of the
+    annulus-projected Hamiltonian, which captures the potential coupling the
+    diagonal drops. It costs a handful of extra Hamiltonian applies per step
+    (about 0.1 to 0.4 s on the silicon harness), small next to the SCF itself, so
+    careful variable-cell relaxations may prefer it. Enable it with
+    `GradWave(pulay_stress_correction=True, pulay_solver="cg")`; the default stays
+    `"diagonal"` so existing runs are unchanged. The correction remains a
+    first-order indicator, not a substitute for converging `ecut`.
 
 ## Gotchas
 

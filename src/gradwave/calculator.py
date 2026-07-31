@@ -243,6 +243,15 @@ class GradWave(Calculator):
         # Estimator contract: norm-conserving, use_symmetry=False, Γ-centered
         # (unshifted) mesh, no DFT+U, scalar-relativistic; enabling it outside
         # that contract raises at calculate(). Energy and forces are untouched.
+        pulay_solver: str = "diagonal",  # complement-correction solver for the
+        # Pulay pressure estimate: "diagonal" (default, kinetic-only resolvent)
+        # or "cg" (preconditioned iterative annulus solve). "cg" recovers a
+        # substantially larger fraction of the true Pulay pressure (~0.6-0.8x vs
+        # ~0.45-0.6x on silicon) for a modest per-step cost, so careful
+        # variable-cell relaxations may prefer it; see
+        # benchmarks/pulay_accuracy/RESULTS.md and
+        # docs/manual/geometry-optimization.md. Inert unless
+        # pulay_stress_correction is True.
         dispersion: bool | dict[str, Any] | None = None,  # opt-in D3(BJ):
         # True/False, or a dict of overrides
         hubbard: Iterable[object] | None = None,  # DFT+U: list of per-species
@@ -273,8 +282,12 @@ class GradWave(Calculator):
                  mixing_alpha=mixing_alpha, mixing_history=mixing_history,
                  mixing_kerker=mixing_kerker, eigensolver=eigensolver,
                  precond=precond, reuse_wavefunctions=reuse_wavefunctions,
-                 pulay_stress_correction=bool(pulay_stress_correction))
+                 pulay_stress_correction=bool(pulay_stress_correction),
+                 pulay_solver=str(pulay_solver))
         )
+        if pulay_solver not in ("diagonal", "cg"):
+            raise ValueError(
+                f"pulay_solver must be 'diagonal' or 'cg', got {pulay_solver!r}")
         # Opt-in D3(BJ) dispersion, mirroring inputs.DispersionParams: True →
         # enabled with defaults (functional = the SCF xc); a dict overrides any
         # of functional/cutoff/cn_cutoff/s6/s8/a1/a2; None/False → off. Stored on
@@ -749,7 +762,7 @@ class GradWave(Calculator):
             estimate_pressure_error,
         )
 
-        est = estimate_pressure_error(res, xc)
+        est = estimate_pressure_error(res, xc, solver=self.parameters["pulay_solver"])
         p_err = float(cast(float, est["pressure_error_eV_A3"]))
         self.results["stress"] = self.results["stress"] - p_err * np.array(
             [1.0, 1.0, 1.0, 0.0, 0.0, 0.0])

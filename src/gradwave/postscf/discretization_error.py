@@ -151,6 +151,7 @@ class DiscretizationError:
     # [spin][k] for nspin=2
     deig: list[torch.Tensor] | list[list[torch.Tensor]] | None = None
     drho_smooth_spin: list[torch.Tensor] | None = None  # USPP: per-spin smooth drho (force err XC)
+    n_h_apply: int = 0           # extra H-applies from the iterative annulus solver (solver="cg")
 
 
 def _occupied(res: SCFResult, ik: int,
@@ -240,6 +241,71 @@ def _complement_correction(resid: torch.Tensor, t: torch.Tensor, eps: torch.Tens
     denom = torch.clamp(t.unsqueeze(-2) - eps.unsqueeze(-1), min=1e-3)
     corr = -resid / denom.to(resid.dtype)
     return torch.where(annulus.unsqueeze(-2), corr, torch.zeros_like(resid))
+
+
+def _annulus_cg(h1: HamiltonianK, t: torch.Tensor, eps: torch.Tensor,
+                resid: torch.Tensor, ecut: float, *, tol: float = 1e-6,
+                max_iter: int = 20) -> tuple[torch.Tensor, int]:
+    """δψ solving P_annulus (H − ε) P_annulus δψ = −P_annulus R on the annulus.
+
+    The diagonal correction (``_complement_correction``) approximates the
+    resolvent by its kinetic diagonal (T_G − ε)^-1, dropping the local and
+    nonlocal potential coupling inside the high-G annulus. This replaces it with
+    a preconditioned conjugate-gradient solve of the true annulus-projected
+    operator, per occupied band (each band carries its own ε), batched over
+    bands. The operator is symmetric positive definite on the annulus because
+    every annulus kinetic energy exceeds ``ecut``, which for a converged run is
+    far above the occupied eigenvalues, so H − ε there is dominated by the
+    positive kinetic diagonal. The Jacobi preconditioner is that same diagonal,
+    so the CG starts from the diagonal correction and only improves it (the
+    variational second-order energy −⟨δψ|A|δψ⟩ can only grow in magnitude). This
+    is the refinement behind the near-quantitative DFTK property-error estimates
+    (Cances/Levitt/Herbst). Returns ``(δψ, n_h_apply)``; ``δψ`` is annulus-only
+    to match the diagonal path, and it falls back to the diagonal correction if
+    the CG residual fails to shrink.
+
+    ``resid`` is the (nband, npw) residual R = (H − ε)ψ on the enlarged sphere;
+    ``t``/``eps`` are the (npw,) kinetic energies and (nband,) eigenvalues.
+    """
+    annulus = (t > ecut * (1.0 + 1e-9)).unsqueeze(0)          # (1, npw)
+    inv = (1.0 / torch.clamp(t.unsqueeze(0) - eps.unsqueeze(1), min=1e-3)
+           ).to(resid.dtype)                                  # (nband, npw)
+
+    def proj(x: torch.Tensor) -> torch.Tensor:
+        return torch.where(annulus, x, torch.zeros_like(x))
+
+    def a_apply(x: torch.Tensor) -> torch.Tensor:
+        return proj(h1.apply(x) - eps[:, None] * x)
+
+    def dot(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return torch.einsum("bg,bg->b", a.conj(), b).real       # (nband,)
+
+    b = proj(-resid)                                            # RHS = −P_ann R
+    x = proj(inv * b)                                           # diagonal guess
+    n_apply = 1
+    r = b - a_apply(x)
+    r0 = float(torch.linalg.norm(r, dim=-1).max())
+    z = proj(inv * r)
+    p = z.clone()
+    rz = dot(r, z)
+    x_diag = x.clone()
+    for _ in range(max_iter):
+        ap = a_apply(p)
+        n_apply += 1
+        pap = torch.clamp(dot(p, ap), min=1e-300)
+        alpha = (rz / pap)[:, None]
+        x = x + alpha * p
+        r = r - alpha * ap
+        if float(torch.linalg.norm(r, dim=-1).max()) < tol * max(r0, 1e-300):
+            break
+        z = proj(inv * r)
+        rz_new = dot(r, z)
+        p = z + (rz_new / torch.clamp(rz, min=1e-300))[:, None] * p
+        rz = rz_new
+    # guard: fall back to the diagonal correction if CG did not reduce the residual
+    if float(torch.linalg.norm(b - a_apply(x), dim=-1).max()) > r0:
+        return proj(x_diag), n_apply + 1
+    return proj(x), n_apply
 
 
 def _enlarged_hamiltonian(res: SCFResult, k_frac: np.ndarray, ecut_large: float,
@@ -364,6 +430,9 @@ def estimate_density_error(
     dyson_max_iter: int = 60,
     smearing: str | None = None,
     width: float | None = None,
+    solver: str = "diagonal",
+    cg_tol: float = 1e-6,
+    cg_max_iter: int = 20,
     verbose: bool = False,
 ) -> DiscretizationError:
     """Estimate the plane-wave discretization error in the converged density.
@@ -388,8 +457,22 @@ def estimate_density_error(
         insulating occupations (the coarse-space χ₀ is a conduction-projected
         solve). Requesting it on the USPP/PAW or spinor paths raises
         ``NotImplementedError`` (the ``dyson_*`` tuning kwargs are inert there).
+    solver : {"diagonal", "cg"}
+        Complement-correction solver. ``"diagonal"`` (default) uses the
+        kinetic-only resolvent (T_G - eps)^-1. ``"cg"`` replaces it with a
+        preconditioned conjugate-gradient solve of the annulus-projected
+        operator P_annulus (H - eps) P_annulus, capturing the local and nonlocal
+        potential coupling the diagonal drops (``_annulus_cg``). Norm-conserving
+        collinear only; ``cg_tol``/``cg_max_iter`` tune it. The extra H-applies
+        are reported in ``DiscretizationError.n_h_apply``.
     """
+    if solver not in ("diagonal", "cg"):
+        raise ValueError(f"solver must be 'diagonal' or 'cg', got {solver!r}")
     formalism = _result_formalism(res)
+    if solver == "cg" and formalism != "nc":
+        raise NotImplementedError(
+            "the iterative annulus solver (solver='cg') is norm-conserving "
+            "collinear only; USPP/PAW and spinor paths use the diagonal solver")
     if formalism == "uspp_noncollinear":
         raise NotImplementedError(
             "discretization error is not implemented for the USPP/PAW spinor "
@@ -443,6 +526,7 @@ def estimate_density_error(
     ecut_large = _resolve_ecut_large(system, ecut_large, factor)
 
     denergy = 0.0
+    n_h_apply = 0
     # per-spin lists (single spin channel when nspin=1)
     spins = [None] if nspin == 1 else list(range(nspin))
     drho_sp = [torch.zeros(grid.shape, dtype=RDTYPE, device=device)
@@ -462,7 +546,12 @@ def estimate_density_error(
 
             # complement residual R = P_annulus (H - eps) psi and correction
             resid = h1.apply(c_occ_1) - eps_occ[:, None] * c_occ_1
-            dpsi = _complement_correction(resid, h1.t, eps_occ, ecut)
+            if solver == "cg":
+                dpsi, n_ap = _annulus_cg(h1, h1.t, eps_occ, resid, ecut,
+                                         tol=cg_tol, max_iter=cg_max_iter)
+                n_h_apply += n_ap
+            else:
+                dpsi = _complement_correction(resid, h1.t, eps_occ, ecut)
 
             # density error contribution: drho = sum_i f_i * 2 Re(psi_i* dpsi_i).
             # occ is [0,2] for nspin=1 and [0,1] per spin channel for nspin=2;
@@ -535,7 +624,7 @@ def estimate_density_error(
     return DiscretizationError(
         drho=drho, drho_first_order=drho_fo, denergy=denergy, dpsi=dpsi_all,
         psi_large=psi_large_all, occ=occ_all, spheres_large=sph_all, ecut=ecut,
-        ecut_large=ecut_large, dyson=dyson,
+        ecut_large=ecut_large, dyson=dyson, n_h_apply=n_h_apply,
     )
 
 
