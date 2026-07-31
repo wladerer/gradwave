@@ -185,8 +185,30 @@ def build_groups(outdir, q0lo, q0mid, q0hi):
         yield run_nc("fe2soc_kerker_qmid", sysmod.fe_bcc_2atom(True), mvi, outdir,
                      track_per_atom=True, damp=K(q0mid))
 
+    def allg():
+        # The G=0 split diagnostic shows the unstable transverse mode is a
+        # rigid rotation of the whole magnetization density: its residual has
+        # weight at G=0 AND the low shells in lockstep, so a G-selective
+        # damping tears the rotation apart instead of suppressing it. These
+        # arms damp the transverse residual at ALL G including G=0 (a moment
+        # rotation brake). The canted case measures the physical cost.
+        AG = lambda a: dict(form="flat", alpha_perp=a, frame="moment",  # noqa: E731
+                            damp_g0=True)
+        yield run_nc("nisf_allg_a03", NI_F(), z(0.6), outdir, damp=AG(0.3))
+        yield run_nc("nisf_allg_a01", NI_F(), z(0.6), outdir, damp=AG(0.1))
+        yield run_nc("nis_allg_a03", NI_S(), z(0.6), outdir, damp=AG(0.3))
+        yield run_nc("nisbest_allg_a03", NI_S(), z(0.6), outdir, damp=AG(0.3),
+                     **BEST)
+        yield run_nc("nisfbest_allg_a03", NI_F(), z(0.6), outdir, damp=AG(0.3),
+                     **BEST)
+        mvi = [[0.0, 0.0, 0.6], [0.6, 0.0, 0.0]]
+        yield run_nc("fe2_allg_a03", sysmod.fe_bcc_2atom(False), mvi, outdir,
+                     track_per_atom=True, damp=AG(0.3))
+        yield run_nc("fe2soc_allg_a03", sysmod.fe_bcc_2atom(True), mvi, outdir,
+                     track_per_atom=True, damp=AG(0.3))
+
     return {"ni_socfree": ni_socfree, "ni_soc": ni_soc,
-            "ni_soc_best": ni_soc_best, "canted": canted}
+            "ni_soc_best": ni_soc_best, "canted": canted, "allg": allg}
 
 
 def main():

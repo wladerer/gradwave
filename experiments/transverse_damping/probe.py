@@ -135,6 +135,13 @@ class NCConvergenceProbe:
             rec["dm_x"] = float(rm[0].norm()) * self.vol
             rec["dm_y"] = float(rm[1].norm()) * self.vol
             rec["dm_z"] = float(rm[2].norm()) * self.vol
+            # G=0 vs G!=0 split of each m-component residual: locates the
+            # amplified transverse mode (uniform moment rotation vs finite-q)
+            for i, c in enumerate("xyz"):
+                a2 = float(rm[i, self.g0].abs() ** 2)
+                tot2 = float((rm[i].abs() ** 2).sum())
+                rec[f"dm_{c}_g0"] = (a2 ** 0.5) * self.vol
+                rec[f"dm_{c}_ne0"] = (max(tot2 - a2, 0.0) ** 0.5) * self.vol
             rec["shell_mag"] = self._shell_fracs(rm)
             mvec = torch.tensor(
                 [float(vout[c * ng + self.g0].real) * self.vol for c in (1, 2, 3)])
