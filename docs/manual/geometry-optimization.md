@@ -193,8 +193,18 @@ couple of SCF iterations.
     Variable-cell relaxation works through `ase.filters.FrechetCellFilter` because
     the calculator returns the stress from the differentiable radial transforms.
     Relaxing the cell at fixed `ecut` carries a Pulay stress from basis
-    incompleteness,[[2]](bibliography.md#payne) so converge `ecut` or re-relax at
-    the new cell before trusting the volume.
+    incompleteness,[[2]](bibliography.md#payne) which under-pressures the cell and
+    silently drives soft materials toward too-small volumes (#217). Through the
+    input surface (`task: relax` with `relax.cell: true`) the driver corrects the
+    reported stress by the estimated Pulay pressure
+    (`postscf.stress_error.estimate_pressure_error`, no extra SCF) whenever the
+    estimator applies — norm-conserving, `symmetry: false`, Γ-centered mesh, no
+    DFT+U — and prints the per-step correction; `relax.pulay_correction:
+    true|false` overrides the auto default. Direct ASE users opt in with
+    `GradWave(pulay_stress_correction=True)`. The estimate recovers roughly half
+    to three quarters of the true Pulay pressure, so a large reported correction
+    (the driver warns above 5 GPa) still means: converge `ecut` before trusting
+    the volume.
 
 ## Gotchas
 

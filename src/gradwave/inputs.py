@@ -130,6 +130,15 @@ class RelaxParams:
     # "newton" is the exact-Hvp Steihaug trust-region Newton-CG engine
     # (opt/newton.py); same NC-insulator contract and nested fallback as "joint".
     method: str = "nested"  # nested | joint | newton
+    # Pulay (basis-incompleteness) pressure correction for variable-cell relax:
+    # the fixed-basis stress under-pressures a too-small basis, silently driving
+    # soft cells toward spuriously small volumes (#217). None (auto, default)
+    # enables it whenever cell relaxation is on and the estimator supports the
+    # run (norm-conserving, symmetry: false, Γ-centered mesh, no DFT+U,
+    # scalar-relativistic — see postscf/stress_error.py); true requires it
+    # (InputError when unsupported); false disables. Never applied to a
+    # fixed-cell relax.
+    pulay_correction: bool | None = None
 
     def __post_init__(self):
         if self.method not in ("nested", "joint", "newton"):

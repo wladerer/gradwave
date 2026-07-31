@@ -232,6 +232,17 @@ class GradWave(Calculator):
         reuse_wavefunctions: bool = True,  # seed the Davidson eigensolver from the
         # previous ionic step's eigenvectors (alongside the density warm start);
         # False falls back to a density-only warm start (cold orbital seed)
+        pulay_stress_correction: bool = False,  # add the estimated Pulay
+        # (basis-incompleteness) pressure to the reported stress diagonal via
+        # postscf.stress_error.estimate_pressure_error. The fixed-basis
+        # (Nielsen-Martin) stress systematically under-pressures a too-small
+        # basis, which drives variable-cell relaxations toward spuriously small
+        # volumes (#217); the correction moves the stress toward the
+        # basis-rebuilt -dE/dV. First-order estimate (recovers ~0.5-0.75x of
+        # the true Pulay pressure) — it reduces, not eliminates, the bias.
+        # Estimator contract: norm-conserving, use_symmetry=False, Γ-centered
+        # (unshifted) mesh, no DFT+U, scalar-relativistic; enabling it outside
+        # that contract raises at calculate(). Energy and forces are untouched.
         dispersion: bool | dict[str, Any] | None = None,  # opt-in D3(BJ):
         # True/False, or a dict of overrides
         hubbard: Iterable[object] | None = None,  # DFT+U: list of per-species
@@ -261,7 +272,8 @@ class GradWave(Calculator):
                  diago_tol=diago_tol, mixing_scheme=mixing_scheme,
                  mixing_alpha=mixing_alpha, mixing_history=mixing_history,
                  mixing_kerker=mixing_kerker, eigensolver=eigensolver,
-                 precond=precond, reuse_wavefunctions=reuse_wavefunctions)
+                 precond=precond, reuse_wavefunctions=reuse_wavefunctions,
+                 pulay_stress_correction=bool(pulay_stress_correction))
         )
         # Opt-in D3(BJ) dispersion, mirroring inputs.DispersionParams: True →
         # enabled with defaults (functional = the SCF xc); a dict overrides any
@@ -328,6 +340,9 @@ class GradWave(Calculator):
         self._cached_results: dict[str, Any] = {}  # full results dict paired
         # with _scf_state
         self._warm_start_remaps = 0  # count of grid-shape-change density remaps
+        self.last_pulay_pressure_gpa: float | None = None  # the Pulay pressure
+        # [GPa] added to the reported stress by the last calculate() (None when
+        # the correction is off) — read by api._relax_nested for reporting
 
     def _make_xc(self, nspin: int = 1) -> XCFunctional | SpinXC:
         """Instantiate the XC functional, opting into the compiled real-valued
@@ -700,7 +715,45 @@ class GradWave(Calculator):
             self.results["stress"] = np.array([
                 sig[0, 0], sig[1, 1], sig[2, 2], sig[1, 2], sig[0, 2], sig[0, 1],
             ])
+            if p["pulay_stress_correction"]:
+                self._apply_pulay_correction(res, xc)
         self._apply_dispersion(system)
+
+    def _apply_pulay_correction(
+        self, res: SCFResult, xc: XCFunctional | SpinXC
+    ) -> None:
+        """Add the estimated Pulay (basis-incompleteness) pressure to the
+        reported stress diagonal.
+
+        ``estimate_pressure_error`` returns ``P_exact − P_coarse`` (positive is
+        the usual Pulay under-pressure of a too-small basis). With
+        ``P = −tr σ/3``, raising the reported pressure by that amount means
+        subtracting it from each stress diagonal — under a FrechetCellFilter
+        the corrected stress then pushes the cell toward the basis-rebuilt
+        energy minimum instead of the fixed-basis stress zero (#217). The
+        hydrostatic component only; the shear part of the basis-set stress
+        error is ~1% of it (see postscf/stress_error.py).
+
+        The estimator's own guards reject symmetry-reduced k-meshes, DFT+U,
+        and fully-relativistic pseudos with descriptive errors; the shifted
+        (non-Γ-centered) mesh is rejected HERE because the estimator's frozen
+        strained rebuild would silently reconstruct the wrong k-point set
+        rather than raise."""
+        if tuple(self.parameters["kshift"]) != (0, 0, 0):
+            raise ValueError(
+                "pulay_stress_correction requires a Γ-centered (unshifted) "
+                "k-mesh: the estimator's frozen strained rebuild cannot "
+                "reproduce a shifted mesh's k-point set")
+        from gradwave.postscf.stress_error import (
+            EV_A3_TO_KBAR,
+            estimate_pressure_error,
+        )
+
+        est = estimate_pressure_error(res, xc)
+        p_err = float(cast(float, est["pressure_error_eV_A3"]))
+        self.results["stress"] = self.results["stress"] - p_err * np.array(
+            [1.0, 1.0, 1.0, 0.0, 0.0, 0.0])
+        self.last_pulay_pressure_gpa = p_err * EV_A3_TO_KBAR / 10.0
 
     def _get_uspp_system(self, atoms: Atoms) -> USPPSystem:
         """With use_symmetry off, positions-only updates reuse the cached
@@ -761,6 +814,10 @@ class GradWave(Calculator):
             raise ValueError(
                 "eigensolver='chebyshev' is norm-conserving only; the USPP/PAW "
                 "generalized S-metric problem is not supported yet")
+        if p["pulay_stress_correction"]:
+            raise NotImplementedError(
+                "pulay_stress_correction is norm-conserving only; the "
+                "USPP/PAW stress-error estimator is not implemented")
         # DFT+U (Dudarev) is wired end-to-end for USPP/PAW: the S-metric SCF
         # (scf_uspp), the +U force (forces_uspp reads it off the result), and
         # now the +U stress (stress_uspp adds the strained S-dressed occupation

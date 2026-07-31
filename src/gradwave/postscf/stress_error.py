@@ -113,6 +113,8 @@ def estimate_pressure_error(res: SCFResult, xc: XCFunctional | SpinXC, *,
         # fixed Miller set: ecut/s**2 on the s-scaled cell strains only the metric
         ss = setup_system(s * cell0, s * pos0, system.species_of_atom, system.upfs,
                           ecut=ecut / s ** 2, kmesh=kmesh, fft_shape=grid.shape)
+        # follow the run's device (per-tensor .to is a no-op when already there)
+        ss = ss.to(str(res.rho.device))
         scale = vol0 / float(ss.grid.volume)               # conserve electron count
         vloc_g = local_potential_g(ss.positions, ss.species_index, ss.vloc_tables,
                                    ss.grid.g_cart, ss.grid.volume)
