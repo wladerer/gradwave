@@ -210,9 +210,12 @@ fast gate on push). Before opening a PR, from the worktree:
 2. `uv run ty check` is clean (error-level gate on the growing typed-file list in
    `pyproject.toml`'s `[[tool.ty.overrides]]`; warn-only (non-blocking) everywhere
    else — see "Typing" below).
-3. `uv run pytest -m "not standard and not slow and not torture and not gpu"` passes.
-4. The branch is rebased on `main` so conflicts surface locally rather than at merge.
-5. Regenerate `uv.lock` (`uv lock`) only if dependencies changed, and commit it last.
+3. `uv run lint-imports` is clean (the import contracts in `pyproject.toml`'s
+   `[tool.importlinter]`, where `scf -> postscf._response` goes through the
+   shared-response-kernel exception list).
+4. `uv run pytest -m "not standard and not slow and not torture and not gpu"` passes.
+5. The branch is rebased on `main` so conflicts surface locally rather than at merge.
+6. Regenerate `uv.lock` (`uv lock`) only if dependencies changed, and commit it last.
 
 CI runs ruff, ty, and the standard tier on every PR, so let the green check
 stand in for re-running the standard suite by hand.

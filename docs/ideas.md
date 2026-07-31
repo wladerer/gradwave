@@ -887,6 +887,81 @@ because the wasted kerker prefix sinks the switch. The follow-up worth taking is
 `local_tf` in the YAML schema as a first-class preconditioner choice, not building the
 detector into the loop.
 
+## Non-collinear and SOC SCF convergence: a transverse instability
+
+**Status: DONE 2026-07-30 (campaign), archive branch `research/noncollinear-convergence`
+(tip b472c1c), no PR. Follow-ons landed and in flight, see the dispositions below.**
+
+The spinor SCF has a residual floor the energy does not share. No magnetic spinor run in
+the matrix reaches rhotol 1e-5, under any mixer config (pulay, the #79 recipe, johnson to
+200 iterations) on Ni, Fe, or a canted 2-atom cell, yet every arm that holds the FM
+branch lands on the same free energy to about 4e-5 eV and the same moment to 1e-4 mu_B.
+The fixed points are identical, so the floor is a residual-gate artifact, not a
+fixed-point problem. The paired comparison isolates what the spinor path costs, the
+scalar-pseudo Ni cell converges collinear in 13 iterations and floors at 80 through the
+spinor path with SOC off in both.
+
+The floor decomposes into two independent parts, measured by a `mixer_hook` probe with no
+source changes. The transverse magnetization channels (m_x, m_y) start at machine zero
+and are amplified by the SCF map at roughly 3x per iteration (3.9e-11 at iteration 10,
+6.9e-6 at 20, 7.1e-5 at 40) until they saturate near 1e-4, with the residual power in the
+two lowest |G| shells, the magnon-soft long-wavelength sector where the response gain is
+near unity and mixing has nothing to contract. A transverse pin prototype holds m_x/m_y
+at 1e-14 for all 80 iterations, which proves the amplification lives in the mixed state
+and not the band solve. The longitudinal channel keeps its own near-Stoner floor of a few
+1e-4 (dm_z 3.4e-4 under pulay), so the two channels fail independently and both need
+treatment.
+
+Full parity with the collinear nspin=2 default (johnson plus the quadratic schedule)
+converges the spinor run in 16 iterations, but onto the nonmagnetic branch, 1.2 meV above
+the FM answer the collinear path holds with the same mixer, and the pin does not save it.
+The cause is the m-channel step boost `max(mixing_alpha, 0.6)`, a pulay-tuned guard
+against moment collapse that inverts into a collapse accelerant under johnson's normalized
+update. Cutting the m step to 0.3 (johnson plus quadratic plus `mag_mixing_alpha` 0.3)
+holds the moment and gives the best honest arm, a floor 8x below the default that is still
+30x above rhotol.
+
+Recommendations, ranked by evidence, with their dispositions.
+
+- Gate magnetic spinor runs on the energy, not the residual. Landed as the opt-in
+  energy-metric gate (#210, next entry), with phase (c) spinor wiring in progress on
+  `feat/spinor-convergence-surface`.
+- Expose the magnetic spinor knobs (`mag_mixer`, `mag_mixing_alpha`, `mag_diago_schedule`,
+  `spin_precond`) through `inputs.py`/`api.py`, since the best measured arm cannot be
+  selected from an input file today. Same branch.
+- Make the m-step boost scheme-dependent before porting the #205 johnson default to
+  `mag_mixer`, since the boost is a pulay-tuned guard that collapses the moment under
+  johnson (measured twice, pin and no pin).
+- Damp the transverse m channels at low q, a reverse of the Kerker exemption the m blocks
+  enjoy, leaving the G=0 moment untouched. In progress on `research/transverse-damping`.
+- `fix/ni-soc-convergence` is deletable, its substance (the `mag_mixer` selector and
+  `build_stoner_precond_nc`) is on main verbatim.
+
+One loose end from the branch audit. The plain NC collinear path (`scf/loop.py`) still
+lacks the Stoner spin-preconditioner that the USPP and noncollinear paths carry.
+`perf/magnetic-mixing` (df156ed) adds it there as an opt-in `spin_precond` flag and sits
+unmerged, worth revisiting.
+
+## Energy-metric SCF convergence gate
+
+**Status: LANDED 2026-07-30 (#210, phases (a) and (b)), plan
+`docs/plans/energy-metric-stopping.md`. Phases (c) and (d) open.**
+
+An opt-in stopping test that gates on the estimated energy error rather than the raw
+density residual, triggered by the `convergence: energy` token against the default
+`density`. It forms the kernel-only contraction `(1/2)<r|K_Hxc|r>` from the exact
+response operators `scf/implicit.py` exposes, resolved per channel so the
+mid-to-high-|G| precessing m-channel mode that carries little energy is down-weighted.
+The chi0-dressed response metric was scoped out, since one chi0 application per iteration
+needs a Sternheimer solve per band restricted to insulators, neither cheap nor applicable
+to the metallic magnets the gate targets. On the stagnating Ni PAW pulay arm the
+charge-channel estimate is 1.4e-8 eV against 1.7e-8 measured, and the arm terminates
+converged at iteration 91 where the density gate sat at its 120-iteration cap. The
+Harris-Foulkes/KS gap is recorded alongside on the NC path as the zero-machinery bracket.
+Phase (c) threads the metric through `scf_noncollinear` and re-runs the Ni+SOC matrix,
+phase (d) documents it and flips the default only after a soak across the magnetic and
+metallic battery. Both are open.
+
 ## Showcase figures: noncollinear magnetism and error estimates
 
 **Status: open; several inputs half-built.** The validation record is tables of meV
