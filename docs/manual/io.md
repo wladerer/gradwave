@@ -130,6 +130,8 @@ geometry file alongside it.
 | `max_iter` | `100` | — | int | Maximum self-consistency iterations. |
 | `etol` | `1.0e-8` | eV | float | Total-energy convergence threshold. |
 | `rhotol` | `1.0e-7` | — | float | Density-residual convergence threshold. |
+| `convergence` | `density` | — | string | Convergence criterion. `density` gates on the density residual (`rhotol`) plus the energy tail (`etol`). `energy` gates on the residual's exact second-order energy error (`entol`) plus the same energy tail, the honest criterion for magnetic metals whose magnetization-channel residual floors above any reachable `rhotol` (see the manual's convergence page). |
+| `entol` | `1.0e-6` | eV | float | Energy-error threshold used when `convergence: energy`. Comparable to VASP `EDIFF`; about half the QuantumESPRESSO `conv_thr` accuracy, which reports the un-halved kernel contraction. |
 | `diago.tol` | `1.0e-9` | — | float | Davidson eigensolver residual tolerance. |
 | `trace` | `false` | — | bool | Write the per-iteration SCF flight-recorder trace to `scf_trace.json`. The compact diagnostics are summarized into the report regardless. |
 

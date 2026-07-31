@@ -1203,6 +1203,9 @@ def scf_uspp(
     hubbard: list[HubbardManifold] | None = None,
     start_from: _USPPStartFrom = None,
     criterion: str = "drho",
+    energy_metric: bool = False,  # opt-in energy-metric gate (converge on
+    # 1/2<r|K_Hxc|r> < entol); overrides `criterion`. See scf.loop.scf / docs.
+    entol: float = 1e-6,  # eV, energy-error threshold for energy_metric
     rho_safety: float = 1e-2,
     adapt_step: bool = False,
     mixing_scheme: str | None = None,
@@ -1295,6 +1298,8 @@ def scf_uspp(
             "trust_factor": 20.0,
             "batched": True,
             "criterion": "drho",
+            "energy_metric": False,
+            "entol": 1e-6,
             "rho_safety": 1e-2,
             "adapt_step": False,
             "mixing_scheme": None,
@@ -1319,6 +1324,8 @@ def scf_uspp(
                 ("trust_factor", trust_factor),
                 ("batched", batched),
                 ("criterion", criterion),
+                ("energy_metric", energy_metric),
+                ("entol", entol),
                 ("rho_safety", rho_safety),
                 ("adapt_step", adapt_step),
                 ("mixing_scheme", mixing_scheme),
@@ -1340,6 +1347,7 @@ def scf_uspp(
         smearing, width = opts.smearing, opts.width
         max_iter, etol, rhotol = opts.max_iter, opts.etol, opts.rhotol
         diago_tol, criterion = opts.diago_tol, opts.criterion
+        energy_metric, entol = opts.energy_metric, opts.entol
         rho_safety, batched, verbose = opts.rho_safety, opts.batched, opts.verbose
         mixed_precision = opts.mixed_precision
         mx = opts.mixer
@@ -1579,6 +1587,23 @@ def scf_uspp(
         # iteration's own measured wall time (no extra sync).
         rho_in_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
         rho_out_tot = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
+        # energy-metric gate (opt-in): the residual's second-order energy error
+        # 1/2<r|K_Hxc|r>, per-channel. Computed only when selected (one f_xc HVP
+        # per iteration); the default path pays nothing. r is the SMOOTH-density
+        # residual (the quantity res_norm gates on), read back from the mixing
+        # vectors so the output augmentation does not contaminate it; the
+        # augmentation/one-center PAW correction to K_Hxc is on-site and higher
+        # order, omitted here, so this is the dominant Hartree+XC term.
+        e_metric = e_metric_charge = e_metric_mag = None
+        if energy_metric:
+            from gradwave.postscf._response import kernel_energy_error
+
+            sm_in, _ = layout.unpack(rho_in_vec)
+            sm_out, _ = layout.unpack(rho_out_vec)
+            r_s = [sm_out[sp] - sm_in[sp] for sp in range(nspin)]
+            e_metric, e_metric_charge, e_metric_mag = kernel_energy_error(
+                grid, xc, r_s, sm_in, system.rho_core, nspin
+            )
         recorder.record(
             it=it,
             free_energy=e_free,
@@ -1592,6 +1617,9 @@ def scf_uspp(
             mag_abs=(float((rho_out_s[0] - rho_out_s[1]).abs().sum()) * vol / grid.n_points)
             if nspin == 2
             else None,
+            e_metric=e_metric,
+            e_metric_charge=e_metric_charge,
+            e_metric_mag=e_metric_mag,
         )
         if verbose:
             mag = ""
@@ -1602,7 +1630,13 @@ def scf_uspp(
                 f"  USPP {it:3d}  F = {e_free:+.10f} eV  dE = {de:.3e}  "
                 f"|drho| = {res_norm:.3e}{mag}"
             )
-        if criterion == "energy":
+        if energy_metric:
+            # energy-metric gate (overrides `criterion`): the residual's exact
+            # second-order energy error < entol, with etol and the stale-solve
+            # guard kept (see scf.common.convergence_gate).
+            done = convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol,
+                                    energy_error=e_metric, entol=entol)
+        elif criterion == "energy":
             # QE-style energy criterion: the free energy is variational, its
             # error is O(residual²), and for smeared metals the residual
             # floors at occupation noise long after F has settled. Require a

@@ -56,6 +56,20 @@ class SCFParams:
     # cheap diagnostics are always summarized into the output regardless). Off
     # by default to keep the output directory lean.
     trace: bool = False
+    # convergence criterion: "density" (default) gates on the density residual
+    # (< rhotol) plus the energy tail (< etol); "energy" gates on the residual's
+    # exactly-computed second-order energy error (1/2<r|K_Hxc|r> < entol) plus
+    # the same energy tail, and is the honest criterion for metallic magnets
+    # whose magnetization-channel density residual floors above any reachable
+    # rhotol (docs/manual/convergence.md).
+    convergence: str = "density"
+    entol: float = 1.0e-6  # eV, energy-error threshold used when convergence="energy"
+
+    def __post_init__(self):
+        if self.convergence not in ("density", "energy"):
+            raise InputError(
+                "scf.convergence must be 'density' or 'energy', got "
+                f"{self.convergence!r}")
 
 
 @dataclass(frozen=True)
@@ -745,7 +759,9 @@ def _load_input(path: Path) -> Input:
     sm = raw.get("smearing", {})
     _check_keys("smearing", sm, {"type", "width"})
     scf_raw = dict(raw.get("scf", {}))
-    _check_keys("scf", scf_raw, {"max_iter", "etol", "rhotol", "mixing", "diago", "trace"})
+    _check_keys("scf", scf_raw,
+                {"max_iter", "etol", "rhotol", "mixing", "diago", "trace",
+                 "convergence", "entol"})
     mix_raw = dict(scf_raw.pop("mixing", {}))
     diago = scf_raw.pop("diago", {})
     _check_keys("scf.diago", diago, {"tol"})
@@ -846,6 +862,8 @@ def _load_input(path: Path) -> Input:
             mixing=MixingParams(**mix_raw) if mix_raw else MixingParams(),
             diago_tol=float(diago.get("tol", 1e-9)),
             trace=bool(scf_raw.get("trace", False)),
+            convergence=str(scf_raw.get("convergence", "density")),
+            entol=float(scf_raw.get("entol", 1e-6)),
         ),
         task=task,
         relax=_build(RelaxParams, raw.get("relax", {}), "relax"),
