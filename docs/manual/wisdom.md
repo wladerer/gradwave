@@ -203,6 +203,14 @@ defect, which the [Performance](performance.md) page works through in full.
   escape. Datacenter parts run fp64 at half rate, a factor near 100 on the dominant
   bucket, which is why hardware outranks every remaining software optimization on this
   workload.
+- GPU tuning verdicts are device-class-specific, so benchmark per card and never port one
+  across the consumer/datacenter line. The QR CPU-offload and the Rayleigh-Ritz GEMM
+  residency choice both invert between the RTX 3050 and an H100. Offloading a small fp64
+  factorization to CPU LAPACK wins on the 3050 (its fp64 is 1/64 of fp32) and loses on the
+  H100 (fp64 near fp32), and the fp32-subspace trick that dodges the consumer fp64 tax gains
+  nothing against fp64 tensor cores. The #214 microbench gate is the pattern, time a small
+  fp64 GEMM against an fp32 GEMM once per device and choose from the measured ratio (3050
+  38.3, H100 near 1) rather than hardcoding the consumer-card answer.
 
 ## SCF and mixing
 
@@ -312,6 +320,17 @@ defect, which the [Performance](performance.md) page works through in full.
   magnetic system shows no gap. Only the metal opens the 16-to-7 distance, which points
   at the density preconditioner and leaves spin orthogonal to it. Do not chase the metal
   gap through the spin or PAW machinery.
+- A large linear-response U on a metallic adsorbate system diverges by occupation
+  flip-flop, not by charge sloshing or a dipole. On Pt(111)+H a bulk-derived U(Pt 5d) =
+  8.949 eV oscillates about 30 eV and never converges, while U=2 and U=4 converge in about
+  30 iterations, so the threshold is (4, 6] eV. When U/2 exceeds the smearing width the +U
+  potential shift crosses levels through the Fermi window faster than the one-step-lagged
+  occupation update tracks (reorder counts scale with U, 28597 at U=8.95 with a 0.235 eV
+  Fermi swing against a 0.14 eV width). Charge sloshing shows in the converged runs too, and
+  a symmetric double-H cell cancels the adsorbate dipole and still diverges, so both are red
+  herrings. Remedies to try, +U occupation-matrix mixing or damping, U-ramping into the SCF,
+  and distrust of a bulk-derived U~9 eV transferred to a metallic adsorbate system. See the
+  ideas.md record for the full diagnosis.
 
 ## Spin
 
@@ -371,6 +390,14 @@ defect, which the [Performance](performance.md) page works through in full.
   `collinear_magnetic` on an unshifted mesh. Plain `use_symmetry` on an AFM drops to the
   time-reversal-only reduction and keeps a near-full mesh, because the sublattice swap is a
   symmetry of the crystal but not of either spin channel.
+- Gate magnetic spinor runs on the energy, not the density residual. No magnetic spinor run
+  reaches rhotol 1e-5 under any mixer, yet every arm that holds the branch agrees on the
+  free energy to about 4e-5 eV, so the residual floor is a stopping-rule artifact with a
+  physical origin (a rigid-rotation transverse mode amplified by the DIIS recombination that
+  no low-q filter removes, see the transverse-damping record). Use the energy-metric gate
+  (#210, #215) with `entol` 1e-4, the calibrated tolerance for magnetic spinor runs, rather
+  than tightening rhotol into a floor it cannot cross. The same energy-tail rule already
+  applies to collinear FM metals near the Stoner boundary, gated at rhotol ~1e-5.
 
 ## Response, adjoints, and autograd
 
@@ -506,6 +533,12 @@ differentiable-DFT coupling of arXiv:2509.07785. A few things are not obvious.
 
 - Check what a reference structure is. The Lejaeghere reference for carbon is
   graphite, not diamond.
+- Distrust a variable-cell relax on a soft framework cell until #217 lands. The FFT grid is
+  held fixed while the cell moves, so a shrinking cell raises the effective ecut and the
+  uncorrected Pulay stress drives spurious collapse (alpha-quartz SiO2 collapsed to 44% of
+  its volume and still reported fmax 0.009 eV/A). Take equilibrium geometries from an
+  ions-only relax at a fixed literature cell, or an EOS scan with the grid rebuilt per
+  volume, and treat any vc-relax whose volume moved substantially as suspect.
 - Pin everything in a cross-code comparison. Pseudo, cutoffs, k-mesh, FFT dimensions,
   occupation scheme, and compare the quantity the other code prints.
 - Use two comparison axes. The Δ-factor against all-electron mixes pseudization with

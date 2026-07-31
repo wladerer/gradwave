@@ -201,6 +201,30 @@ a stiff response at the cost of memory. Reach for the preconditioner before eith
 of these, since a step-size or history change trades against convergence rate while
 the right operator fixes the mode directly.
 
+### Large U on a metallic adsorbate system
+
+A large Hubbard U on a metallic slab carrying an adsorbate can diverge where the
+bare slab converges. On Pt(111) with an adsorbed H, a bulk-derived U(Pt 5d) of
+8.949 eV oscillates the energy by about 30 eV and never converges, while U of 2 and
+4 eV converge in about 30 iterations, which places the threshold between 4 and 6 eV.
+The bare slab at the same U is fine, so the adsorbate is required.
+
+The mechanism is occupation flip-flop, not the charge sloshing of the section above
+and not the adsorbate dipole. When U/2 exceeds the smearing width, the +U potential
+shift moves levels through the Fermi window faster than the one-step-lagged
+occupation update tracks, so occupations reorder every iteration and the density
+limit-cycles. The reorder count scales with U, reaching 28597 at U = 8.95 eV with a
+Fermi-level swing of 0.235 eV against a 0.14 eV smearing width. Charge sloshing is
+present in the converged runs too, so it is not the driver, and a symmetric cell that
+cancels the net adsorbate dipole still diverges, which rules the dipole out as well.
+
+The remedies to reach for are U-ramping, converging at a lower U and carrying that
+density into a higher-U run, and distrust of a bulk-derived U near 9 eV transferred
+to a metallic adsorbate system where the level structure differs. Occupation-matrix
+mixing or damping to remove the one-step lag is the structural fix and is not yet
+implemented. The full diagnosis is in the ideas.md record "Large-U divergence on
+metallic adsorbate systems".
+
 ### Which knob, in which order
 
 1. If occupations are integer and the system is a metal, add `smearing` first.

@@ -126,8 +126,8 @@ datacenter fp64 GPU. On the 4x H100 session (issue #206,
 13% penalty, with Cr2O3 eskolaite converging in 16 iterations either way to an
 energy identical at 1.8e-10 meV/atom, at 37.1 s with the offload against 32.7 s
 without. `_qr_offload` therefore times a small fp64 GEMM against an fp32 GEMM
-once per device and offloads only when the ratio exceeds 8. A consumer card
-measures a ratio in the tens and keeps today's behavior, while datacenter fp64
+once per device and offloads only when the ratio exceeds 8. The RTX 3050
+measures 38.3 and keeps today's behavior, while datacenter fp64
 hardware measures a ratio near 1 and keeps the QR on-GPU. The environment
 variable `GRADWAVE_QR_OFFLOAD` in `{on, off, auto}` forces the offload either
 way or restores the microbenchmark default, so a benchmark toggles the path
@@ -592,6 +592,20 @@ No candidate beats the status quo, so `davidson_batched`'s Rayleigh-Ritz step
 is unchanged. The hematite GPU SCF remains the 3.9x-faster-than-CPU result
 recorded above.
 
+**The verdict inverts on datacenter fp64 (H100).** Everything above is scoped
+to the RTX 3050. The 4x H100 session (issue #206) re-ran the same hematite-shape
+microbenchmark (`nk=13`, `dim=240`, `npw=6746`) on real fp64 hardware, and the
+finding reverses on both counts. The fp64 GPU GEMM measures 1.26 ms against 139.6
+ms for the CPU-resident path, so the CPU offload the 3050 profile flirted with is
+a 100x loss here, not a candidate. The fp32-compute variant measures 1.16 ms, no
+margin over the fp64 tensor cores, so the fp32-subspace trick that would have
+dodged the consumer card's fp64 tax gains nothing on a card that has none. On a
+datacenter card the Rayleigh-Ritz step belongs on the GPU in fp64 and the whole
+offload/precision-split question is moot. The consumer-card scope of the sections
+above holds unchanged. Benchmark per device class, do not port a GPU tuning
+verdict across it, and see the QR-offload note above for the gated version of the
+same lesson.
+
 ## The GPU limit is precision, not structure
 
 The kernel-level claim verifies. On the exact hot shapes from the
@@ -645,6 +659,47 @@ what makes the spin-Hamiltonian and MAE work tractable at useful cell sizes. The
 three-SCF Fe exchange benchmark ran there in minutes. One caveat: the *CPU cores* of a shared GPU node can be far slower than a dedicated CPU box
 (a single Fe SCF on 8 such cores ran past a one-hour walltime), so benchmark the GPU
 against a real CPU reference, never the GPU node's own cores.
+
+### Measured on a datacenter fp64 GPU (4x H100)
+
+The A100 result held on a full battery. A four-GPU H100 SXM session (vast.ai, issue #206,
+data in `benchmarks/results/h100-session/`) ran the production-size cases the RTX 3050
+sections could only bound. The speedups below are against the recorded CPU and 3050
+baselines, all at bit-matching energies.
+
+| case | RTX 3050 / CPU | H100 | speedup |
+|---|---|---|---|
+| Cr2O3 eskolaite (magnetic USPP) | 1128 s (asus CPU) | 46.8 s | 24x vs CPU |
+| Fe2O3 hematite (magnetic USPP) | 2275 s CPU, 3050 slower | 39.4 s | 58x vs CPU, 15x vs 3050 |
+| delta-gauge point (many-k 1-atom) | 14 to 97 s/vol (3050) | 0.3 to 0.4 s/vol | 35 to 240x |
+| PBE0 hybrid Si2 to Si16 | -- | seconds/SCF, 0.33 GB | 4.6x vs 32-thread CPU |
+| Si-216 memory ceiling | OOM past 128 atoms (6 GB) | 29.4 GB peak, 3.9 s/iter | ~350 atoms in 80 GB |
+
+Iteration counts are identical to the CPU and 3050 runs, so these are pure
+kernel-throughput gains, not solver-logic differences. The eskolaite and hematite rows are
+the magnetic USPP minerals that ran in tens of minutes on the 3050. The memory row removes
+the 128-atom cliff the "GPU limit is precision, not structure" section documents, and the
+~350-atom projection is what makes the amorphous glass models for the kappa_min plan
+tractable on one card.
+
+Two limits stay in place on this hardware. ISDF is not wired into the hybrid SCF (the
+driver hard-codes a direct Fock build plus ACE per step, see
+`docs/manual/hybrid-functionals.md`), so the hybrid speedup is on the direct path. And a
+metallic 16-atom 4x4-mesh slab PBE0 timed out at 600 s, since the full-BZ Fock build over a
+metal is the cost wall regardless of card.
+
+The solver A/B holds here too. Chebyshev-filtered subspace iteration is 2x slower than
+davidson at 10 atoms and 13x slower at Si-128 (15.316 vs 1.165 s/iter, identical energy),
+worsening with size and with no crossover in 10 to 216 atoms, so davidson stays the
+unconditional default on datacenter fp64 as well as on the consumer card.
+
+**Multi-GPU.** The k-point-sharded SCF (`docs/manual/distributed.md`) runs unmodified
+across the four devices via Gloo host staging, all ranks bit-identical to 1e-11. Toy cells
+are slower than one GPU (startup- and collective-bound), but a real-scale Si-16 6x6x6 on 2
+ranks reaches 3.2 s/iter against about 16.8 s/iter amortized single-rank, so the sharding
+pays once per-k work dominates the collectives. Large multi-rank runs are blocked by issue
+#216, where the post-SCF result gather deadlocks on large CUDA payloads. Use it for k-heavy
+systems and watch that issue before relying on it in production.
 
 ## Measuring performance without fooling yourself
 
