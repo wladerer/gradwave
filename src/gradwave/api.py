@@ -656,8 +656,23 @@ def run_relax(
     it is norm-conserving-insulator only and transparently falls back to the
     nested engine on an unsupported system (USPP/PAW, spin, smearing) or if the
     joint descent does not converge. The frames carry energy and forces
-    (SinglePointCalculator) so the caller can write an extxyz trajectory."""
+    (SinglePointCalculator) so the caller can write an extxyz trajectory.
+
+    Selective dynamics (``inp.fixed``) only the nested engine honours — the joint
+    and newton engines relax all degrees of freedom — so a ``joint``/``newton``
+    request with fixed atoms falls back to nested with the reason recorded in the
+    ``relax`` block (``requested_method``/``fallback_reason``)."""
     if inp.relax.method in ("joint", "newton"):
+        if inp.fixed is not None:
+            if verbose:
+                print(f"  relax: selective dynamics (structure.fixed) is not "
+                      f"supported by the {inp.relax.method} engine — using "
+                      f"nested", flush=True)
+            relax, atoms, frames = _relax_nested(inp, verbose)
+            relax["requested_method"] = inp.relax.method
+            relax["fallback_reason"] = (
+                "selective dynamics (structure.fixed) requires the nested engine")
+            return relax, atoms, frames
         out = (_relax_newton(inp, verbose) if inp.relax.method == "newton"
                else _relax_joint(inp, verbose))
         if out is not None:
@@ -674,6 +689,19 @@ def _relax_nested(
     from ase.optimize import BFGS, FIRE
 
     atoms = inp.atoms.copy()
+    if inp.fixed is not None:
+        # Selective dynamics: fix each atom's masked axes in FRACTIONAL space, so
+        # held atoms ride the cell under a variable-cell relax. ASE applies the
+        # constraint inside get_forces (zeroing the held components before the
+        # optimizer sees them and before its fmax gate) and inside the position
+        # update (so a fully-fixed atom never moves). FixScaled masks the same
+        # axes for a fixed cell too, where fractional and Cartesian coincide.
+        from ase.constraints import FixScaled
+
+        atoms.set_constraint([
+            FixScaled(i, mask=tuple(bool(b) for b in inp.fixed[i]))
+            for i in range(len(atoms)) if bool(inp.fixed[i].any())
+        ])
     atoms.calc = _build_relax_calc(inp)
     opt_cls = {"fire": FIRE, "bfgs": BFGS}[inp.relax.optimizer]
     target: Atoms | FrechetCellFilter = atoms
@@ -770,6 +798,11 @@ def _relax_nested(
     if inp.relax.cell:
         relax["max_stress_eV_ang3"] = float(np.abs(atoms.get_stress()).max())
         relax["pressure_GPa"] = inp.relax.pressure
+    if inp.fixed is not None:
+        # record the selective-dynamics mask (True = axis held fixed) so the
+        # output documents which degrees of freedom were frozen
+        relax["fixed"] = inp.fixed.tolist()
+        relax["n_fixed_atoms"] = int(inp.fixed.any(axis=1).sum())
     return relax, atoms, frames
 
 
@@ -789,6 +822,9 @@ def _joint_supported(inp: Input, upfs: list[UPFData | PAWData]) -> str | None:
         return f"smearing={inp.smearing.type!r} (metals reintroduce level crossings)"
     if inp.relax.pressure != 0.0:
         return "external pressure (joint functional minimizes E, not enthalpy)"
+    if inp.fixed is not None:
+        return ("selective dynamics (structure.fixed) — the joint/newton engines "
+                "relax all degrees of freedom; use method=nested to hold atoms")
     return None
 
 

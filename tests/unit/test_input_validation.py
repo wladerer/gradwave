@@ -332,3 +332,101 @@ def test_dispersion_unknown_subkey_suggests(tmp_path):
 
     with pytest.raises(InputError, match="did you mean"):
         load_input(_write(tmp_path, _base("dispersion:\n  cutof: 20.0\n")))
+
+
+# --- selective dynamics (structure.fixed) --------------------------------------
+
+def _with_fixed(fixed_line: str, extra: str = "") -> str:
+    """A two-atom C2 inline structure carrying a `fixed:` line in the structure
+    block, plus optional top-level `extra` keys."""
+    return f"""
+structure:
+  cell: [[0, 1.7835, 1.7835], [1.7835, 0, 1.7835], [1.7835, 1.7835, 0]]
+  positions: {{cart: [[0, 0, 0], [0.89175, 0.89175, 0.89175]]}}
+  species: [C, C]
+  {fixed_line}
+pseudopotentials:
+  dir: {PSEUDOS}
+  map: {{C: C_ONCV_PBE-1.2.upf}}
+ecut: 680.28
+{extra}"""
+
+
+def test_fixed_default_is_none(tmp_path):
+    from gradwave.inputs import load_input
+
+    # no fixed key: the historical path, mask is None
+    inp = load_input(_write(tmp_path, _base()))
+    assert inp.fixed is None
+
+
+def test_fixed_index_form_parses(tmp_path):
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _with_fixed("fixed: [0]")))
+    assert inp.fixed is not None
+    assert inp.fixed.shape == (2, 3)
+    assert inp.fixed[0].all()          # atom 0 fully fixed
+    assert not inp.fixed[1].any()      # atom 1 free
+
+
+def test_fixed_per_axis_form_parses(tmp_path):
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _with_fixed(
+        "fixed: [[true, true, true], [true, false, false]]")))
+    assert inp.fixed is not None
+    assert inp.fixed.tolist() == [[True, True, True], [True, False, False]]
+
+
+def test_fixed_file_form_parses(tmp_path):
+    from gradwave.inputs import load_input
+
+    a = Atoms("C2", positions=[[0, 0, 0], [0.9, 0.9, 0.9]],
+              cell=[[0, 1.7835, 1.7835], [1.7835, 0, 1.7835], [1.7835, 1.7835, 0]],
+              pbc=True)
+    ase_write(str(tmp_path / "geo.xyz"), a, format="extxyz")
+    body = f"""
+structure: {{file: geo.xyz, fixed: [1]}}
+pseudopotentials:
+  dir: {PSEUDOS}
+  map: {{C: C_ONCV_PBE-1.2.upf}}
+ecut: 680.28
+"""
+    inp = load_input(_write(tmp_path, body))
+    assert inp.fixed is not None
+    assert inp.fixed[1].all() and not inp.fixed[0].any()
+
+
+@pytest.mark.parametrize("fixed_line, needle", [
+    ("fixed: [2]", "out of range"),                          # index >= natoms
+    ("fixed: [0, 0]", "duplicate"),                          # repeated index
+    ("fixed: [[true, true, true]]", "2 atoms"),              # per-atom length off
+    ("fixed: [[true, true], [false, false, false]]", "3 booleans"),  # row len
+    ("fixed: [[true, true, 1], [false, false, false]]", "boolean"),  # non-bool
+    ("fixed: [[false, false, false], [false, false, false]]", "pins no axes"),
+    ("fixed: []", "non-empty"),                              # empty
+    ("fixed: [0, [true, true, true]]", "not a mix"),         # mixed spellings
+])
+def test_fixed_validation_rejects(tmp_path, fixed_line, needle):
+    from gradwave.inputs import InputError, load_input
+
+    with pytest.raises(InputError) as exc:
+        load_input(_write(tmp_path, _with_fixed(fixed_line)))
+    if needle is not None:
+        assert needle in str(exc.value)
+
+
+def test_fixed_forces_symmetry_off_by_default(tmp_path):
+    from gradwave.inputs import load_input
+
+    # symmetry defaults True, but selective dynamics forces it off
+    inp = load_input(_write(tmp_path, _with_fixed("fixed: [0]")))
+    assert inp.symmetry is False
+
+
+def test_fixed_with_explicit_symmetry_true_rejected(tmp_path):
+    from gradwave.inputs import InputError, load_input
+
+    with pytest.raises(InputError, match="selective dynamics"):
+        load_input(_write(tmp_path, _with_fixed("fixed: [0]", "symmetry: true\n")))

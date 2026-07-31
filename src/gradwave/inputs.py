@@ -414,6 +414,14 @@ class Input:
     # run (no extra SCF) and out-of-coverage runs degrade to available: false
     error_estimate: bool = True
     restart: Path | None = None  # checkpoint.pt to warm-start from (USPP/PAW)
+    # selective dynamics (VASP/QE if_pos analog): a (natoms, 3) boolean mask,
+    # True = that fractional axis is HELD FIXED during a relax, False = free.
+    # None (the default) relaxes every atom, bit-for-bit the historical path.
+    # Fixed components are zeroed before the optimizer and before the fmax gate
+    # (convergence is over free components only); held atoms ride the cell in
+    # fractional coordinates under a variable-cell relax (see structure.fixed in
+    # docs/manual/io.md and docs/manual/geometry-optimization.md).
+    fixed: np.ndarray | None = None
 
 
 def _check_keys(label: str, got: object, allowed: Iterable[str]) -> None:
@@ -518,37 +526,105 @@ def _normalize_kerker(value: object) -> str | bool:
         f"invalid mixing.kerker {value!r} (auto | on | off | true | false)")
 
 
-def _load_structure(spec: str | dict[str, Any], base: Path) -> Atoms:
-    """Three spellings, all reaching the same Atoms:
+def _parse_fixed(raw_fixed: Any, natoms: int) -> np.ndarray:
+    """Parse ``structure.fixed`` into a ``(natoms, 3)`` boolean selective-dynamics
+    mask where ``True`` means that fractional axis is held fixed in a relax.
+
+    Two spellings, validated against the atom count at parse time:
+
+      fixed: [0, 3, 4]                        # 0-based indices, atoms fully fixed
+      fixed: [[true, true, true], [false, false, false], ...]  # per-atom [x,y,z]
+
+    The index form fixes all three axes of each listed atom; the per-atom form
+    needs one ``[x, y, z]`` boolean row per atom (length == natoms). A YAML bool
+    is a Python ``int`` subclass, so the index form rejects booleans to keep the
+    two spellings distinct.
+    """
+    if not isinstance(raw_fixed, (list, tuple)) or len(raw_fixed) == 0:
+        raise InputError(
+            "structure.fixed must be a non-empty list of atom indices or a "
+            "per-atom list of [x, y, z] booleans")
+    mask = np.zeros((natoms, 3), dtype=bool)
+    if all(isinstance(e, (list, tuple)) for e in raw_fixed):
+        # per-atom [x, y, z] boolean rows
+        if len(raw_fixed) != natoms:
+            raise InputError(
+                f"structure.fixed per-atom mask has {len(raw_fixed)} rows but "
+                f"the structure has {natoms} atoms")
+        for i, row in enumerate(raw_fixed):
+            if len(row) != 3:
+                raise InputError(
+                    f"structure.fixed[{i}] must be 3 booleans [x, y, z], got "
+                    f"{len(row)}")
+            for j, v in enumerate(row):
+                if not isinstance(v, bool):
+                    raise InputError(
+                        f"structure.fixed[{i}][{j}] must be a boolean "
+                        f"(true/false), got {v!r}")
+                mask[i, j] = v
+        if not mask.any():
+            raise InputError(
+                "structure.fixed pins no axes (every entry false); omit it to "
+                "relax every atom")
+        return mask
+    if all(isinstance(e, int) and not isinstance(e, bool) for e in raw_fixed):
+        # flat list of 0-based atom indices, fully fixed
+        idx = list(raw_fixed)
+        for i in idx:
+            if not 0 <= i < natoms:
+                raise InputError(
+                    f"structure.fixed index {i} out of range for {natoms} atoms "
+                    f"(valid 0..{natoms - 1})")
+        if len(set(idx)) != len(idx):
+            raise InputError(f"structure.fixed has duplicate indices: {idx}")
+        mask[idx, :] = True
+        return mask
+    raise InputError(
+        "structure.fixed must be either a flat list of integer atom indices or "
+        "a per-atom list of [x, y, z] boolean rows, not a mix of the two")
+
+
+def _load_structure(
+    spec: str | dict[str, Any], base: Path
+) -> tuple[Atoms, np.ndarray | None]:
+    """Three spellings, all reaching the same Atoms (plus an optional
+    selective-dynamics mask parsed from ``fixed`` in either mapping form):
 
       structure: geometry.cif                     # bare filename (any ASE format)
       structure: {file: t.xyz, format: extxyz, index: 0}   # file + read controls
       structure: {cell: ..., positions: ..., species: ...} # inline block
+
+    Returns ``(atoms, fixed)`` where ``fixed`` is the ``(natoms, 3)`` boolean
+    mask or ``None`` when no ``fixed`` key is given (the bare-filename form
+    cannot carry one — use a mapping to fix atoms with a file geometry).
     """
     if isinstance(spec, str):
-        return _read_atoms(base / spec)
+        return _read_atoms(base / spec), None
     if not isinstance(spec, dict):
         raise InputError(
             f"structure must be a filename or a mapping, got {type(spec).__name__}")
     if "file" in spec:
-        _check_keys("structure", spec, {"file", "format", "index"})
-        return _read_atoms(base / spec["file"], fmt=spec.get("format"),
-                           index=spec.get("index", -1))
-    _check_keys("structure", spec, {"cell", "positions", "species"})
-    for req in ("cell", "positions", "species"):
-        if req not in spec:
-            raise InputError(f"inline structure is missing required key {req!r}")
-    cell = np.asarray(spec["cell"], dtype=float)
-    posblock = spec["positions"]
-    _check_keys("structure.positions", posblock, {"cart", "frac"})
-    species = spec["species"]
-    if "frac" in posblock:
-        atoms = Atoms(species, scaled_positions=posblock["frac"], cell=cell, pbc=True)
-    elif "cart" in posblock:
-        atoms = Atoms(species, positions=posblock["cart"], cell=cell, pbc=True)
+        _check_keys("structure", spec, {"file", "format", "index", "fixed"})
+        atoms = _read_atoms(base / spec["file"], fmt=spec.get("format"),
+                            index=spec.get("index", -1))
     else:
-        raise InputError("structure.positions needs a 'cart' or 'frac' block")
-    return atoms
+        _check_keys("structure", spec, {"cell", "positions", "species", "fixed"})
+        for req in ("cell", "positions", "species"):
+            if req not in spec:
+                raise InputError(f"inline structure is missing required key {req!r}")
+        cell = np.asarray(spec["cell"], dtype=float)
+        posblock = spec["positions"]
+        _check_keys("structure.positions", posblock, {"cart", "frac"})
+        species = spec["species"]
+        if "frac" in posblock:
+            atoms = Atoms(species, scaled_positions=posblock["frac"], cell=cell,
+                          pbc=True)
+        elif "cart" in posblock:
+            atoms = Atoms(species, positions=posblock["cart"], cell=cell, pbc=True)
+        else:
+            raise InputError("structure.positions needs a 'cart' or 'frac' block")
+    fixed = None if "fixed" not in spec else _parse_fixed(spec["fixed"], len(atoms))
+    return atoms, fixed
 
 
 # Every top-level key the schema understands; anything else is a typo. Kept
@@ -814,7 +890,7 @@ def _load_input(path: Path) -> Input:
         if req not in raw:
             raise InputError(f"missing required key {req!r}")
 
-    atoms = _load_structure(raw["structure"], base)
+    atoms, fixed = _load_structure(raw["structure"], base)
     pseudo_dir, pseudo_map = _resolve_pseudopotentials(
         raw["pseudopotentials"], base, atoms.get_chemical_symbols())
 
@@ -845,6 +921,22 @@ def _load_input(path: Path) -> Input:
         raise InputError(f"nspin must be 1 or 2, got {nspin}")
 
     noncollinear, nonmagnetic, symmetry = _resolve_symmetry(raw, task)
+
+    # selective dynamics lowers the crystal symmetry: held atoms and their free
+    # symmetry partners no longer transform into each other, so IBZ reduction and
+    # force symmetrization would couple a fixed atom's force back onto a partner
+    # that is meant to relax. Default symmetry off when atoms are fixed and reject
+    # an explicit symmetry: true here, where the message names the fix (mirrors
+    # the noncollinear handling in _resolve_symmetry).
+    if fixed is not None:
+        if raw.get("symmetry") is True:
+            raise InputError(
+                "symmetry: true is invalid with selective dynamics "
+                "(structure.fixed) — fixed atoms lower the crystal symmetry, so "
+                "IBZ reduction and force symmetrization would couple a held atom "
+                "to its free symmetry partners. Set symmetry: false (the default "
+                "when atoms are fixed).")
+        symmetry = False
 
     # a hybrid SCF is norm-conserving and spin-unpolarized (the Fock hook builds
     # on PBE exchange, nspin=1); reject the combinations the driver cannot run
@@ -952,4 +1044,5 @@ def _load_input(path: Path) -> Input:
         error_estimate=bool(out_raw.get("error_estimate",
                                         raw.get("error_estimate", True))),
         restart=None if restart is None else (base / restart),
+        fixed=fixed,
     )

@@ -123,7 +123,7 @@ def test_relax_method_validation_and_dispatch_guard():
     nc_upfs = [si_upf()]  # NC (not PAWData) → the joint-eligible case
 
     def _inp(**kw):
-        base = dict(nspin=1, noncollinear=False,
+        base = dict(nspin=1, noncollinear=False, fixed=None,
                     smearing=SimpleNamespace(type="none"),
                     relax=SimpleNamespace(pressure=0.0))
         base.update(kw)
@@ -135,6 +135,8 @@ def test_relax_method_validation_and_dispatch_guard():
         _inp(smearing=SimpleNamespace(type="gauss")), nc_upfs)
     assert _joint_supported(
         _inp(relax=SimpleNamespace(pressure=2.0)), nc_upfs)
+    assert _joint_supported(  # selective dynamics → nested only
+        _inp(fixed=np.ones((1, 3), dtype=bool)), nc_upfs)
 
 
 def test_teter_precond_range():
