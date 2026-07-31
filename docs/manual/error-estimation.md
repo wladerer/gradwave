@@ -270,6 +270,25 @@ under-estimate, so it does not give false confidence. The full anisotropic
 stress-error tensor is deferred (it needs the strain-differentiated orbital
 residual, not just its trace).
 
+The default complement correction uses the diagonal kinetic-only resolvent
+$(T_G-\varepsilon)^{-1}$. Passing `solver="cg"` replaces it with a preconditioned
+conjugate-gradient solve of the annulus-projected operator
+$P_\text{ann}(H-\varepsilon)P_\text{ann}$, which restores the local and nonlocal
+potential coupling the diagonal drops. This lifts the recovered fraction to about
+0.6 to 0.8× on the silicon harness (measured in `benchmarks/pulay_accuracy/`) for
+a handful of extra Hamiltonian applies, reported as `n_h_apply` in the return
+dict. The diagonal path is unchanged, so `solver="cg"` is a strict opt-in.
+
+```python
+pe = estimate_pressure_error(res, PBE(), solver="cg")
+print(pe["pressure_error_kbar"], pe["n_h_apply"])
+```
+
+An `extrapolate=True` flag samples the frozen-state energy error at several
+annulus factors and fits the tail toward the complete-annulus limit. On silicon
+the annulus tail is nearly volume-independent, so it barely moves the pressure
+and is off by default. See `benchmarks/pulay_accuracy/RESULTS.md` for the numbers.
+
 ## Coverage
 
 | quantity | norm-conserving | USPP/PAW | non-collinear / SOC |

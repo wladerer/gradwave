@@ -121,6 +121,45 @@ def test_pressure_error_nspin2_nonmagnetic_limit_matches_nspin1():
     assert abs(o2["pressure_error_kbar"] - p1) < 1e-6 * abs(p1)
 
 
+def test_pressure_error_cg_and_extrapolate_options():
+    """solver='cg' recovers more of the Pulay pressure than the diagonal
+    resolvent; the extrapolate flag runs and stays finite. Both keep the correct
+    sign, and 'cg' reports a nonzero H-apply count while the diagonal does not.
+
+    See benchmarks/pulay_accuracy/RESULTS.md: on this cell the CG annulus solve
+    lifts the recovered fraction from ~0.45-0.6x to ~0.6-0.8x of the true error.
+    """
+    torch.set_num_threads(4)
+    res = _run(12 * RY)
+    diag = estimate_pressure_error(res, PBE(), ecut_large=45 * RY)
+    cg = estimate_pressure_error(res, PBE(), ecut_large=45 * RY, solver="cg")
+    assert diag["pressure_error_kbar"] > 0.0
+    assert diag["n_h_apply"] == 0
+    assert cg["pressure_error_kbar"] > diag["pressure_error_kbar"] > 0.0
+    assert cg["n_h_apply"] > 0
+    ext = estimate_pressure_error(res, PBE(), extrapolate=True)
+    assert np.isfinite(ext["pressure_error_kbar"])
+    assert ext["pressure_error_kbar"] > 0.0
+    with pytest.raises(ValueError, match="solver"):
+        estimate_pressure_error(res, PBE(), solver="bogus")
+
+
+@pytest.mark.slow
+def test_pressure_error_cg_beats_diagonal_vs_truth():
+    """Against the 45 Ry reference the CG annulus solver's ratio is closer to 1
+    than the diagonal solver's, at every step of the harness spirit (one point)."""
+    torch.set_num_threads(4)
+    KB = 1602.176634
+    res_ref = _run(45 * RY)
+    sig_ref = stress(res_ref, PBE(), symmetrize=False).cpu().numpy()
+    res = _run(12 * RY)
+    sig = stress(res, PBE(), symmetrize=False).cpu().numpy()
+    p_true = -np.trace(sig_ref - sig) / 3.0 * KB
+    r_diag = estimate_pressure_error(res, PBE())["pressure_error_kbar"] / p_true
+    r_cg = estimate_pressure_error(res, PBE(), solver="cg")["pressure_error_kbar"] / p_true
+    assert 0.0 < r_diag < r_cg < 1.2
+
+
 @pytest.mark.slow
 def test_pressure_error_rejects_symmetry():
     """The frozen strained rebuild needs the full k-point set (use_symmetry=False)."""

@@ -29,7 +29,10 @@ Accuracy. A first-order indicator, not a bound. It is correctly signed
 (Pulay pressure) and captures ~0.45-0.75x of the true pressure error over
 ecut ~ 10-18 Ry on silicon, the ratio rising toward 1 as the cutoff converges
 (a consistent under-estimate -- it does not give false confidence). It inherits
-the ~0.75x absolute accuracy of the underlying energy-error estimate.
+the ~0.75x absolute accuracy of the underlying energy-error estimate. The opt-in
+iterative annulus solver (``solver="cg"``) recovers more of it, ~0.6-0.8x on
+silicon, by including the potential coupling the diagonal resolvent drops (see
+``estimate_pressure_error`` and benchmarks/pulay_accuracy/RESULTS.md).
 """
 
 from __future__ import annotations
@@ -86,10 +89,42 @@ def _sphere_on_cell(sph: GSphere, grid: FFTGrid) -> GSphere:
     )
 
 
+def _fit_dE_inf(ecls: list[float], des: list[float]) -> float:
+    """Extrapolate the frozen-state energy error to the complete-annulus limit.
+
+    Fits ``dE(ecl) = dE_inf + c * ecl**(-p)`` to the (ecut_large, denergy)
+    samples and returns ``dE_inf``. ``denergy`` is negative and grows more
+    negative as the annulus widens, so the missing tail decays as a power law in
+    the annulus cutoff. The exponent ``p`` is chosen by a coarse grid search
+    (linear least squares for ``dE_inf`` and ``c`` at each ``p``), which avoids a
+    scipy dependency and is stable for the 3 to 4 samples used here. Falls back
+    to the widest-annulus sample if the fit does not extend past it (a
+    non-monotone or ill-conditioned tail), so the extrapolation never returns a
+    value less converged than the samples themselves.
+    """
+    x = np.asarray(ecls, dtype=np.float64)
+    y = np.asarray(des, dtype=np.float64)
+    widest = float(y[int(np.argmax(x))])
+    best_resid, best_inf = np.inf, widest
+    for p in np.linspace(0.5, 4.0, 36):
+        a_mat = np.stack([np.ones_like(x), x ** (-p)], axis=1)
+        coef, *_ = np.linalg.lstsq(a_mat, y, rcond=None)
+        resid = float(np.sum((a_mat @ coef - y) ** 2))
+        if resid < best_resid:
+            best_resid, best_inf = resid, float(coef[0])
+    # dE_inf must be at least as converged (as negative) as the widest sample;
+    # otherwise the tail model misbehaved and we keep the widest annulus.
+    return best_inf if best_inf <= widest else widest
+
+
 @torch.no_grad()
 def estimate_pressure_error(res: SCFResult, xc: XCFunctional | SpinXC, *,
                             ecut_large: float | None = None, factor: float = 2.5,
-                            strain: float = 0.01) -> dict[str, float | str]:
+                            strain: float = 0.01, extrapolate: bool = False,
+                            extrap_factors: tuple[float, ...] = (1.8, 2.2, 2.6, 3.0),
+                            solver: str = "diagonal", cg_tol: float = 1e-6,
+                            cg_max_iter: int = 20,
+                            ) -> dict[str, float | str]:
     """Estimate the hydrostatic (pressure) plane-wave stress error of a run.
 
     Returns a dict with ``pressure_error_kbar`` and ``pressure_error_eV_A3``:
@@ -105,6 +140,23 @@ def estimate_pressure_error(res: SCFResult, xc: XCFunctional | SpinXC, *,
     defaults to ``factor*ecut`` and sets the complement annulus, exactly as in
     ``estimate_density_error``. ``strain`` is the finite-difference half-step in
     the linear scale ``s`` (the estimate is flat in it from ~0.005 to ~0.02).
+
+    ``extrapolate`` replaces the single-annulus energy error with a power-law
+    extrapolation to the complete-annulus limit, evaluating the frozen-state
+    ``denergy`` at ``extrap_factors`` and fitting the tail (see ``_fit_dE_inf``).
+    It is off by default because the annulus tail is nearly volume-independent on
+    silicon, so it moves the pressure estimate only marginally (the diagonal
+    resolvent, not annulus truncation, is the dominant source of the
+    under-estimate; see benchmarks/pulay_accuracy/RESULTS.md). ``extrap_factors``
+    must all be at most 4 so each enlarged sphere fits the density FFT box.
+
+    ``solver="cg"`` replaces the diagonal complement resolvent with a
+    preconditioned iterative solve of the annulus-projected P(H-eps)P operator
+    (``discretization_error._annulus_cg``), which captures the potential coupling
+    the diagonal drops and roughly doubles the recovered fraction of the true
+    Pulay pressure on silicon (see benchmarks/pulay_accuracy/RESULTS.md). It
+    costs extra H-applies, reported as ``n_h_apply`` in the return dict;
+    ``cg_tol``/``cg_max_iter`` tune it.
     """
     system = res.system
     if getattr(system, "sym", None) is not None:
@@ -125,7 +177,7 @@ def estimate_pressure_error(res: SCFResult, xc: XCFunctional | SpinXC, *,
     ecl = float(ecut_large) if ecut_large is not None else factor * ecut
     vol0 = float(grid.volume)
 
-    def _denergy_at(s: float):
+    def _scaled_result(s: float):
         # fixed Miller set: ecut/s**2 on the s-scaled cell strains only the
         # metric. The Γ-only kmesh is a placeholder — the run's own k-set
         # (spheres + weights) is grafted in below (see _sphere_on_cell), so
@@ -156,8 +208,28 @@ def estimate_pressure_error(res: SCFResult, xc: XCFunctional | SpinXC, *,
         else:
             res_s = dataclasses.replace(res, system=ss, v_eff=torch.stack(veff),
                                         rho_spin=rho_list)
-        err = estimate_density_error(res_s, ecut_large=ecl / s ** 2)
-        return float(err.denergy), float(ss.grid.volume)
+        return res_s, float(ss.grid.volume)
+
+    n_h_apply = 0
+
+    def _de(res_s, ecut_large_s: float) -> float:
+        nonlocal n_h_apply
+        err = estimate_density_error(res_s, ecut_large=ecut_large_s,
+                                     solver=solver, cg_tol=cg_tol,
+                                     cg_max_iter=cg_max_iter)
+        n_h_apply += err.n_h_apply
+        return float(err.denergy)
+
+    def _denergy_at(s: float) -> tuple[float, float]:
+        res_s, vol_s = _scaled_result(s)
+        if not extrapolate:
+            return _de(res_s, ecl / s ** 2), vol_s
+        # sample the frozen-state energy error over a range of annulus cutoffs
+        # (at fixed metric) and extrapolate to the complete-annulus limit.
+        ecut_s = float(res_s.system.ecut)
+        ecls = [f * ecut_s for f in extrap_factors]
+        des = [_de(res_s, e) for e in ecls]
+        return _fit_dE_inf(ecls, des), vol_s
 
     d_minus, v_minus = _denergy_at(1.0 - strain)
     d_plus, v_plus = _denergy_at(1.0 + strain)
@@ -169,6 +241,7 @@ def estimate_pressure_error(res: SCFResult, xc: XCFunctional | SpinXC, *,
         "denergy_minus_eV": d_minus,
         "denergy_plus_eV": d_plus,
         "volume_A3": vol0,
+        "n_h_apply": n_h_apply,
         "note": "first-order indicator (under-estimates ~0.5-0.75x, correctly "
                 "signed); hydrostatic component only",
     }

@@ -989,6 +989,39 @@ source hook it would need is a post-extrapolation `step_transform` callable insi
 `PulayMixer.step`, since the existing `mixer_hook` is the wrong insertion point for any
 recombination-driven instability.
 
+## Self-consistent dressing of the Pulay pressure estimate: no-go
+
+**Status: TRIED 2026-07-31 on branch `feat/pulay-estimator-accuracy`, measured and
+rejected. Rung 3 of issue #227. The shipped estimator improvements are the iterative
+annulus solver (rung 2) and the annulus-factor flatness finding (rung 1).**
+
+The Pulay pressure estimator differentiates a frozen-density energy error, so the
+open question was whether restoring self-consistency recovers the roughly 30 percent
+that the estimate still misses after the rung-2 iterative annulus solver. The
+independent-particle correction relaxes the occupied orbitals into the high-G annulus
+in the frozen Kohn-Sham potential and reads off the second-order band-energy change.
+Restoring self-consistency adds the Harris-like double-counting term of the total
+energy, one half of the inner product of the density change with the Hartree plus xc
+kernel applied to it, evaluated with the existing `apply_k_hxc` response primitive.
+
+The measured effect on the silicon harness is negligible. On the diagonal solver the
+ratio moves from 0.435 to 0.441 at 10 Ry and from 0.599 to 0.602 at 16 Ry. On the
+iterative annulus solver it moves from 0.611 to 0.624 at 10 Ry and from 0.770 to 0.772
+at 16 Ry. Every shift is one to two percent of the estimate, well inside the finite
+difference noise and nowhere near the missing fraction. This is consistent with the
+derivation. The double-counting term is a positive penalty that makes the total-energy
+error slightly less negative than the band-energy correction, so it can only shrink the
+estimate, not grow it toward the truth. The earlier `dyson=True` density-dressing path
+in `estimate_density_error` was already documented as neutral to negative for the same
+structural reason.
+
+Verdict, no-go. The frozen-density approximation is not the dominant error in the
+pressure estimate. The recoverable half lives in the diagonal kinetic resolvent, which
+rung 2 addresses. The remaining gap after rung 2 sits in the annulus-only restriction of
+the orbital correction and the second-order truncation, neither of which the
+self-consistent dressing touches. The code path is not shipped. Numbers and the harness
+are in `benchmarks/pulay_accuracy/`.
+
 ## Energy-metric SCF convergence gate
 
 **Status: LANDED 2026-07-30 (#210, phases (a) and (b)), plan
