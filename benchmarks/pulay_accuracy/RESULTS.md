@@ -33,6 +33,24 @@ Ratios are estimate / true; 1.0 is exact.
 | 3x3x3 | 14 | 2.111 | 0.524 |
 | 3x3x3 | 16 | 1.085 | 0.582 |
 
+## Rung 1: annulus factor is flat (measured negative)
+
+The pressure estimate is nearly independent of the annulus factor, so there is no
+tail worth extrapolating. Sweeping the factor at fixed ecut (2x2x2 Si, default
+strain) gives (P_est in GPa):
+
+| ecut (Ry) | f=1.8 | f=2.0 | f=2.2 | f=2.6 | f=3.0 | f=3.5 | f=3.9 |
+|---|---|---|---|---|---|---|---|
+| 10 | 2.361 | 2.421 | 2.393 | 2.282 | 2.247 | 2.281 | 2.318 |
+| 16 | 0.479 | 0.477 | 0.488 | 0.508 | 0.519 | 0.524 | 0.525 |
+
+The spread is a few percent and non-monotone. The frozen-state energy error
+itself grows with the factor and saturates, but its volume derivative (the
+pressure) does not, because the high-G tail responds weakly to the strain. This
+matches the asus quartz ladder at 65 Ry, flat to +/-0.3% across factors 2.0 /
+2.5 / 3.0 (+3.809 / +3.783 / +3.796 GPa, issue #227). Annulus truncation is not
+the source of the under-estimate, so no extrapolation feature is warranted.
+
 ## Rung 1: annulus-truncation extrapolation (off by default)
 
 `extrapolate=True` samples the frozen-state energy error at annulus factors
@@ -84,3 +102,38 @@ Full comparison (ratio = estimate / true; 1.0 exact):
 12 Ry, below cg alone at 0.689), so extrapolation stays off by default even on
 top of the CG solver. The robust recommendation is `solver="cg"` with
 `extrapolate=False`.
+
+## Rung 3: self-consistent (Schur-coupled) dressing (no-go, not shipped)
+
+Adding the Harris-like double-counting term (1/2)<drho|K_Hxc|drho> to the frozen
+energy error to restore self-consistency moves the silicon ratio by only one to
+two percent, far short of the remaining gap, on both solvers:
+
+| point | diagonal | diagonal+sc | cg | cg+sc |
+|---|---|---|---|---|
+| 2x2x2 / 10 Ry | 0.435 | 0.441 | 0.611 | 0.624 |
+| 2x2x2 / 16 Ry | 0.599 | 0.602 | 0.770 | 0.772 |
+
+The double-counting term is a positive penalty that can only shrink the estimate,
+so self-consistency is not the missing lever. Gated off and not shipped; the
+measured no-go is recorded in docs/ideas.md.
+
+## Quartz validation (relaxed alpha-quartz, 65 Ry)
+
+Relaxed geometry from benchmarks/results/sio2-elastic/out_relax/relax.json, Si/O
+ONCV PBE, kmesh (3,3,3), use_symmetry=False, smearing none. Ground-truth error
+7.653 GPa (P_raw(130 Ry) - P_raw(65 Ry), given). The harness reproduces the
+given reference exactly: P_raw(65 Ry) = -3.779 GPa and the diagonal estimate
+3.783 GPa (ratio 0.494).
+
+| solver | P_est (GPa) | ratio | cost |
+|---|---|---|---|
+| diagonal | 3.783 | 0.494 | 0 extra H-applies |
+| cg | 4.048 | 0.529 | 168 H-applies, ~81 s |
+
+The CG annulus solve improves quartz from 0.494 to 0.529, a smaller lift than on
+silicon (0.49 to 0.69). At 65 Ry the annulus sits at very high kinetic energy
+where the diagonal resolvent is already close, so the potential coupling the CG
+restores is a smaller relative correction. The remaining quartz gap is in the
+annulus-only restriction and the second-order truncation, which rung 1 (flat) and
+rung 3 (no-go) do not close cheaply.
