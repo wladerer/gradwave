@@ -1,0 +1,30 @@
+# Si SCF for the lane-3 multi-GPU curiosity probe. distributed: true shards the
+# k-mesh across torchrun ranks (Gloo backend); device: cuda builds each rank's
+# shard on its own GPU (pinned by mgpu_wrap.sh via CUDA_VISIBLE_DEVICES=LOCAL_RANK).
+# symmetry: false keeps the full time-reversal k-list so there are plenty of
+# k-points to shard four ways. The same file, run as a single process (no
+# torchrun -> WORLD_SIZE unset), is the 1-GPU baseline.
+structure:
+  cell: [[0.0, 2.715, 2.715], [2.715, 0.0, 2.715], [2.715, 2.715, 0.0]]
+  positions: {frac: [[0.0, 0.0, 0.0], [0.25, 0.25, 0.25]]}
+  species: [Si, Si]
+
+pseudopotentials:
+  dir: ../../../tests/fixtures/qe/pseudos
+  map: {Si: Si_ONCV_PBE-1.2.upf}
+
+ecut: 408.17          # eV (30 Ry)
+xc: pbe
+kpoints: {mesh: [6, 6, 6]}
+smearing: {type: none}
+symmetry: false
+device: cuda
+distributed: true
+
+scf:
+  max_iter: 60
+  etol: 1.0e-8
+  rhotol: 1.0e-7
+
+task: scf
+output: {dir: ./out_si_dist, checkpoint: false}

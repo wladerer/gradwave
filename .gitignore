@@ -11,6 +11,7 @@ tests/fixtures/qe/**/tmp/
 *.wfc*
 *.save/
 benchmarks/*.pt
+benchmarks/h100_results_*.tar.gz
 site/
 
 # stray editor/tool temp input
