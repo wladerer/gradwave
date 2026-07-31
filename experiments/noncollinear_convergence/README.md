@@ -10,12 +10,15 @@ floor, and does the moment direction converge or wander.
 The short version. Every magnetic spinor run in the matrix fails rhotol 1e-5,
 under every exposed knob, while the collinear path converges the same physics
 in 13 iterations. The floor is not the mixer, not the eigensolver, not the
-schedule, not the backoff, and not the smearing. The probe traces localize it
-to the transverse magnetization channels, which are amplified from machine
-zero at roughly 3x per iteration until they saturate near 1e-4. Pinning those
-two channels makes the collinear-limit spinor run converge (measured below).
-The energies and moments at the floor are still good to about 3e-5 eV and
-1e-4 mu_B, so the floor is a residual-gate problem, not a fixed-point problem.
+schedule, not the backoff, and not the smearing. The probe traces decompose it
+into two independent parts. The transverse magnetization channels are
+amplified from machine zero at roughly 3x per iteration until they saturate
+near 1e-4 (pinning them holds the transverse residual at 1e-14, which proves
+the mechanism), and the longitudinal channel keeps its own near-Stoner floor
+of a few 1e-4 that only johnson contracts, at a step that risks collapsing
+the moment. The energies and moments at the floor are still good to about
+3e-5 eV and 1e-4 mu_B, so the floor is a residual-gate problem, not a
+fixed-point problem.
 
 ## The mixing story on the non-collinear path, precisely
 
@@ -222,15 +225,60 @@ one (4.9e-4).
 | ni_socfree_quad | no | 80 | -4500.062703 | 0.116 z | quadratic schedule alone does not fix it |
 | ni_socfree_quad_tight | no | 80 | -4500.062702 | 0.115 z | + diago 1e-11, no backoff. Eigensolver exonerated |
 | ni_socfree_johnson_quad | yes | 16 | -4500.061478 | 0.000 COLLAPSED | converges by killing the moment, +1.2 meV NM branch |
+| ni_pin_pulay_quad | no | 80 | -4500.062703 | 0.116 z | transverse held at 1e-14, dm_z floors at 3.4e-04 |
+| ni_pin_johnson_quad | yes | 16 | -4500.061478 | 0.000 COLLAPSED | pin does not prevent the johnson collapse |
+| ni_johnson_quad_soft | no | 80 | -4500.062703 | 0.115 z | moment held, best floor of any magnetic arm |
+| ni_pin_soc_johnson_quad | no | 80 | -4189.802299 | 0.579 z | SOC regrows transverse at a constant 4.6e-03 |
 
-PROTO2 PENDING
+The pin verifies the transverse mechanism and bounds what fixing it buys.
+With the transverse blocks zeroed, m_x/m_y sit at 1e-14 for all 80 iterations
+(against growth to 1e-4 unpinned), so the amplification is real and lives in
+the mixed state, not in the band solve. But the longitudinal channel keeps
+its own floor (dm_z 3.4e-4 under pulay), so the composite still misses 1e-5.
+The two channels fail independently and both need treatment.
 
-The johnson result deserves its own flag. Full parity with the collinear
-nspin=2 default (johnson + quadratic) does converge the spinor run in 16
-iterations, but onto the nonmagnetic branch, 1.2 meV above the FM answer the
-collinear path holds with the same mixer. Johnson on the spinor path is a
-moment-collapse hazard the collinear path does not have, so simply porting
-the #205 default to `mag_mixer` is not the fix.
+The johnson results carry two separate lessons. First, full parity with the
+collinear nspin=2 default (johnson + quadratic) converges the spinor run in
+16 iterations, but onto the nonmagnetic branch, 1.2 meV above the FM answer
+the collinear path holds with the same mixer, and the pin does not save it.
+The trace shows the moment driven through zero by iteration 5, which points
+at the m-channel step boost (`max(mixing_alpha, 0.6)`, a pulay-tuned
+collapse GUARD) acting as a collapse ACCELERANT under johnson's normalized
+update. Cutting the m step to 0.3 (johnson_quad_soft) holds the moment and
+produces the lowest floor of any magnetic run (dn 6.2e-5, dm_z 2.1e-4,
+dm_x 2.2e-4), still 30x above rhotol. Second, with SOC the pin leaves a
+CONSTANT 4.6e-3 transverse residual at every iteration, which is the
+physical G != 0 transverse structure of the SOC ground state being zeroed
+each step. Pinning is a diagnostic, not a fix, anywhere SOC is on.
+
+## Recommendations, ranked by evidence
+
+1. Gate magnetic spinor runs at rhotol about 1e-3, and say so in the manual.
+   Every magnetic configuration measured floors between 3e-4 and 3e-2, the
+   fixed point underneath is converged to 3e-5 eV and 1e-4 mu_B, and the #79
+   test already gates at 5e-3 for this reason. The driver's advertised 1e-7
+   default (`scf/noncollinear.py:518`) is unreachable on a magnetic metal.
+2. Expose the magnetic spinor knobs (`mag_mixer`, `mag_mixing_alpha`,
+   `mag_diago_schedule`, `spin_precond`) through `inputs.py`/`api.py`. The
+   best measured configuration (johnson + quadratic + mag_mixing_alpha 0.3,
+   an 8x lower floor than the default, moment held) cannot currently be
+   selected from an input file.
+3. Do not port the #205 johnson default to `mag_mixer` as-is. Johnson at the
+   default m step collapses the near-Stoner moment (measured twice, pin and
+   no pin), because the `max(mixing_alpha, 0.6)` m-step boost is a
+   pulay-tuned guard that inverts under johnson. Any scheme change must make
+   the boost scheme-dependent.
+4. The real fix for the transverse floor is a low-q damping on the transverse
+   m channels, a reverse of the Kerker exemption the m blocks currently
+   enjoy. The unstable modes are measured to be long-wavelength (0.5 to 0.8
+   of the residual power in the two lowest |G| shells) and transverse (the
+   pin removes them), which is the magnon-soft sector. The collinear wisdom
+   that Kerker must not touch the m channel protects the G = 0 moment, and a
+   transverse-only, G != 0 damping respects that. This needs src work
+   (per-block or locally-rotated step scales in the mixer) and a follow-up
+   study.
+5. Delete the stale `fix/ni-soc-convergence` branch. Its content is on main
+   (see prior art above).
 
 ## Flags
 
