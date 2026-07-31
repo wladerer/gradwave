@@ -1888,8 +1888,14 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
             f"(scf | relax | bands | magnetism | eos | elastic | phonons)")
 
     if inp.distributed:
-        from gradwave.distributed import current_rank
+        from gradwave.distributed import current_rank, maybe_destroy_process_group
 
+        # All collective communication finished inside run_scf's result gather;
+        # from here on every rank works purely locally (file writing below is
+        # rank-0-only). Tear the process group down now so a torchrun launch
+        # exits cleanly instead of leaking it (#216). Guarded (no-op if never
+        # initialized), so the single-process path never touches it.
+        maybe_destroy_process_group()
         if current_rank() != 0:
             return summary
 
