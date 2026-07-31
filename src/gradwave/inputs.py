@@ -46,6 +46,32 @@ class MixingParams:
 
 
 @dataclass(frozen=True)
+class MagneticParams:
+    """Magnetic-channel SCF controls for the noncollinear/spinor path
+    (task: scf with noncollinear: true). The spinor driver resolves its
+    (ρ, m⃗) mixing independently of scf.mixing, so these are the only knobs that
+    reach it. Ignored by the collinear formalisms, whose magnetization mixing is
+    set by scf.mixing. See docs/manual/noncollinear-soc.md."""
+
+    mixer: str = "pulay"  # pulay | johnson | broyden — the (ρ, m⃗) mixer class
+    spin_precond: bool = False  # Stoner preconditioner on the longitudinal m⃗ channel
+    mixing_alpha: float | None = None  # separate step for the m⃗ blocks; None keeps
+    # the scheme-dependent driver default (max(scf.mixing.alpha, 0.6) for pulay/
+    # broyden, 0.3 for johnson — see scf.noncollinear._resolve_mag_mixing_alpha)
+    diago_schedule: str = "linear"  # linear | quadratic adaptive diago-tol schedule
+
+    def __post_init__(self):
+        if self.mixer not in ("pulay", "johnson", "broyden"):
+            raise InputError(
+                "scf.magnetic.mixer must be 'pulay', 'johnson', or 'broyden', "
+                f"got {self.mixer!r}")
+        if self.diago_schedule not in ("linear", "quadratic"):
+            raise InputError(
+                "scf.magnetic.diago_schedule must be 'linear' or 'quadratic', "
+                f"got {self.diago_schedule!r}")
+
+
+@dataclass(frozen=True)
 class SCFParams:
     max_iter: int = 100
     etol: float = 1.0e-8
@@ -64,6 +90,8 @@ class SCFParams:
     # rhotol (docs/manual/convergence.md).
     convergence: str = "density"
     entol: float = 1.0e-6  # eV, energy-error threshold used when convergence="energy"
+    # magnetic-channel SCF controls for the noncollinear/spinor path only
+    magnetic: MagneticParams = field(default_factory=MagneticParams)
 
     def __post_init__(self):
         if self.convergence not in ("density", "energy"):
@@ -761,8 +789,11 @@ def _load_input(path: Path) -> Input:
     scf_raw = dict(raw.get("scf", {}))
     _check_keys("scf", scf_raw,
                 {"max_iter", "etol", "rhotol", "mixing", "diago", "trace",
-                 "convergence", "entol"})
+                 "convergence", "entol", "magnetic"})
     mix_raw = dict(scf_raw.pop("mixing", {}))
+    mag_raw = dict(scf_raw.pop("magnetic", {}))
+    _check_keys("scf.magnetic", mag_raw,
+                {"mixer", "spin_precond", "mixing_alpha", "diago_schedule"})
     diago = scf_raw.pop("diago", {})
     _check_keys("scf.diago", diago, {"tol"})
 
@@ -864,6 +895,7 @@ def _load_input(path: Path) -> Input:
             trace=bool(scf_raw.get("trace", False)),
             convergence=str(scf_raw.get("convergence", "density")),
             entol=float(scf_raw.get("entol", 1e-6)),
+            magnetic=MagneticParams(**mag_raw) if mag_raw else MagneticParams(),
         ),
         task=task,
         relax=_build(RelaxParams, raw.get("relax", {}), "relax"),

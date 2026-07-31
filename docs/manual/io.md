@@ -145,6 +145,17 @@ geometry file alongside it.
 | `kerker` | `auto` | — | string or bool | Kerker preconditioner: `auto` (on when smearing is enabled), `true`, or `false`. |
 | `precond` | `kerker` | — | string | `kerker` or `local_tf`. `local_tf` is the position-dependent Thomas-Fermi preconditioner, which replaces the constant Kerker filter on the charge channel, so `kerker` no longer applies there. |
 
+### `scf.magnetic`
+
+Magnetic-channel SCF controls for the noncollinear/spinor path (`noncollinear: true`). Ignored by the collinear formalisms, whose magnetization mixing is set by `scf.mixing`.
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `mixer` | `pulay` | — | string | `pulay`, `johnson`, or `broyden`. The (ρ, m⃗) mixer class, resolved independently of `scf.mixing.scheme`. |
+| `spin_precond` | `false` | — | bool | Stoner preconditioner on the longitudinal magnetization channel. |
+| `mixing_alpha` | `null` | — | float | Mixing step for the magnetization blocks. `null` keeps the scheme default, `max(scf.mixing.alpha, 0.6)` for pulay and broyden and `0.3` for johnson, whose normalized update collapses the moment at the higher step. |
+| `diago_schedule` | `linear` | — | string | `linear` or `quadratic`. Adaptive diagonalization-tolerance schedule for a magnetic run. |
+
 ### `relax`
 
 Used when `task: relax`.
