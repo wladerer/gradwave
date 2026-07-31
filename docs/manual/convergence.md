@@ -110,10 +110,23 @@ error as the collinear one, decomposed here into charge, longitudinal, and
 transverse magnetization channels. The kernel is the exact coupled (ρ, m⃗) f_xc
 Hessian-vector product of the noncollinear functional plus the charge-channel
 Hartree kernel, evaluated at the iteration's input density. The transverse
-magnon-soft modes carry the residual floor but almost no energy, so the estimate
-settles microelectronvolts below `scf.entol` while the transverse residual sits
-on its floor. The per-channel decomposition is recorded in the `scf_trace.json`
-sidecar, so a trace shows which channel carries the remaining error.
+magnon-soft modes carry the residual floor but almost none of the energy error
+(3e-6 eV at a stop whose magnetization residual sits at 2e-2). The per-channel
+decomposition is recorded in the `scf_trace.json` sidecar, so a trace shows which
+channel carries the remaining error.
+
+Set `scf.entol` to 1e-4 for a magnetic spinor run rather than the 1e-6 default,
+which is calibrated to the collinear paths. On fcc Ni + SOC the johnson recipe
+below stops at iteration 10 under `entol` 1e-4, at the cross-arm consensus energy
+to 6e-5 eV with the moment intact, and its estimate dips to the 5e-6 eV scale a
+few iterations later without reliably crossing 1e-6. The estimate is conservative
+on the near-Stoner magnetization channels, whose soft modes make the kernel-only
+contraction an overestimate of the energy they carry, so a fired gate is trusted
+and a lower `entol` costs iterations rather than accuracy. Pair the energy gate
+with the `quadratic` diagonalization schedule. Under the stock `linear` schedule
+the eigensolves track the flooring residual loosely and inject 1e-4-scale energy
+noise each iteration, which the estimator honestly reports, and the gate then
+floors near 5e-4 instead.
 
 The magnetization mixing has its own controls under `scf.magnetic`, because the
 spinor driver resolves the charge and moment mixing independently of
@@ -122,9 +135,10 @@ spinor driver resolves the charge and moment mixing independently of
 longitudinal moment channel, `mixing_alpha` sets the moment step, and
 `diago_schedule` picks the adaptive diagonalization-tolerance schedule. Under
 `johnson` the pulay-tuned moment step collapses the near-Stoner moment onto the
-nonmagnetic branch, so an unset `mixing_alpha` with `mixer: johnson` takes a
-lower default (0.3) instead of the pulay guard. See [Non-collinear magnetism and
-spin-orbit coupling](noncollinear-soc.md) for the measured arms.
+nonmagnetic branch, measured on the SOC-free spinor run of the Ni cell, so an
+unset `mixing_alpha` with `mixer: johnson` takes a lower default (0.3) instead of
+the pulay guard. See [Non-collinear magnetism and spin-orbit
+coupling](noncollinear-soc.md) for the measured arms.
 
 ### Magnetic systems
 
