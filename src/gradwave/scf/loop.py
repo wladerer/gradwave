@@ -1653,10 +1653,14 @@ def scf(
         e_free_prev = e_free
         if spin_precond and nspin == 2 and smearing != "none":
             # Stoner preconditioner on the magnetization channel
-            # (arXiv:2606.26693): rebuilt each iteration from the current
-            # orbitals, it neutralizes the Stoner-expansive spin mode that
-            # plain damping amplifies and history mixing grinds through. A
-            # residual preconditioner leaves the fixed point unchanged.
+            # (arXiv:2606.26693): a rank-r Woodbury Newton step that models the
+            # Stoner-expansive spin mode, rebuilt each iteration from the current
+            # orbitals and applied to the m-channel residual before mixing. A
+            # residual preconditioner leaves the fixed point unchanged (verified
+            # to ~1e-12 eV). Opt-in, off by default: it is near-identity in the
+            # insulating limit but a wash-to-negative outside its target regime
+            # (measured on bcc Fe FM — see tests/integration/
+            # test_nc_spin_precond_convergence.py), so it is never auto-enabled.
             from gradwave.scf.spin_precond import build_stoner_precond
 
             ng = layout.ng
