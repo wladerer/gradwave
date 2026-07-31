@@ -71,6 +71,29 @@ def test_pressure_error_matches_true_basis_error():
     assert abs(out2["pressure_error_kbar"] - p_est) < 0.05 * abs(p_est)
 
 
+def test_pressure_error_tr_reduced_odd_mesh():
+    """Odd MP meshes are TR-reduced even with symmetry off; the strained
+    rebuild must reuse the run's k-set instead of re-inferring a mesh.
+
+    A Γ-centered 3x3x3 set keeps 14 of 27 k-points under time reversal, with
+    an uneven fraction census per axis; the former per-axis-unique-count
+    inference read that as a (2,3,3) mesh, and the 10 regenerated k-points
+    zipped against 14 stored coefficient lists crashed in the sphere padding
+    (first hit by a quartz vc-relax with the #217 Pulay correction)."""
+    torch.set_num_threads(4)
+    upf = si_upf()
+    system = setup_system(CELL, POS, [0, 0], [upf], ecut=12 * RY,
+                          kmesh=(3, 3, 3), use_symmetry=False)
+    assert len(system.spheres) == 14           # TR reduction really applied
+    res = scf(system, PBE(), smearing="none", etol=1e-10, rhotol=1e-9,
+              verbose=False)
+    assert res.converged
+    out = estimate_pressure_error(res, PBE(), ecut_large=45 * RY)
+    p_est = out["pressure_error_kbar"]
+    assert np.isfinite(p_est)
+    assert p_est > 0.0        # 12 Ry Si carries a real Pulay under-pressure
+
+
 def test_pressure_error_nspin2_nonmagnetic_limit_matches_nspin1():
     """nspin=2 pressure error at zero moment reproduces the nspin=1 estimate.
 
