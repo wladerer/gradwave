@@ -15,9 +15,10 @@ magnetic convergence-delta measurement is the standard-tier integration test on
 bcc Fe.
 """
 
+from unittest.mock import patch
+
 import numpy as np
 import torch
-from unittest.mock import patch
 
 import gradwave.scf.spin_precond as spmod
 from gradwave.core.xc.lda_pw92 import LDA_PW92
@@ -77,9 +78,9 @@ def test_spin_precond_false_is_default_path():
     assert spy.call_count == 0  # guard never enters the branch
 
     # identical trajectory → identical fixed-point energy, moment, density
-    assert off.free_energy == ref.free_energy
+    assert float(off.energies.free_energy) == float(ref.energies.free_energy)
     assert off.mag_total == ref.mag_total
-    assert torch.equal(off.density, ref.density)
+    assert torch.equal(off.rho, ref.rho)
 
 
 def test_spin_precond_noop_when_nonmagnetic():
