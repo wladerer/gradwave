@@ -23,7 +23,8 @@ _FIXTURE_UPF = "Si_ONCV_PBE-1.2.upf"   # any real UPF; existence is all that is 
 @pytest.mark.parametrize("name", templates.names())
 def test_template_parses(name, tmp_path):
     raw = yaml.safe_load(templates.render(name))
-    species = set(_load_structure(raw["structure"], Path(".")).get_chemical_symbols())
+    atoms, _fixed = _load_structure(raw["structure"], Path("."))
+    species = set(atoms.get_chemical_symbols())
     raw["pseudopotentials"] = {"dir": str(PSEUDOS),
                                "map": {s: _FIXTURE_UPF for s in species}}
     p = tmp_path / "in.yaml"

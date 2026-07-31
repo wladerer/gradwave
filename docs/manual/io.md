@@ -88,6 +88,7 @@ The filename form accepts either a bare string or a mapping with read controls:
 | `file` | *required* | — | string | Path to a geometry file, relative to the input. |
 | `format` | *auto* | — | string | ASE format name, overriding the extension guess when it misfires. |
 | `index` | `-1` | — | int | Frame to read from a multi-image file. `-1` is the last frame; a slice like `":"` is an error (pick one frame). |
+| `fixed` | `null` | — | list | Selective-dynamics mask, see [Selective dynamics](#selective-dynamics). |
 
 The inline block:
 
@@ -97,10 +98,43 @@ The inline block:
 | `positions.cart` | *required* | Å | list[list[float]] | Cartesian coordinates. Use this **or** `frac`. |
 | `positions.frac` | *required* | — | list[list[float]] | Fractional coordinates. Use this **or** `cart`. |
 | `species` | *required* | — | list[string] | Chemical symbols, one per atom. |
+| `fixed` | `null` | — | list | Selective-dynamics mask, see [Selective dynamics](#selective-dynamics). |
 
 Reading from an external file means the geometry is no longer self-contained in
 the YAML, so for an archived input either use the inline block or keep the
 geometry file alongside it.
+
+### Selective dynamics
+
+`structure.fixed` holds chosen atoms in place during a `task: relax`, the analog
+of VASP selective dynamics and QuantumESPRESSO `if_pos`. It takes two forms.
+
+```yaml
+structure:
+  # ... cell / positions / species, or file ...
+  fixed: [0, 3, 4]                    # 0-based indices, these atoms fully fixed
+  fixed:                              # or one [x, y, z] boolean row per atom
+    - [true, true, true]
+    - [false, false, false]
+```
+
+The index form fixes all three axes of each listed atom. The per-atom form takes
+one boolean row per atom, where `true` marks an axis that is held. Both are
+validated against the atom count at load time, so an out-of-range index, a
+duplicate, a wrong row length, or a non-boolean entry fails with a message that
+names the fault. The bare-filename structure form cannot carry a mask, so use a
+mapping form to fix atoms read from a file.
+
+The masked force components are zeroed before the optimizer sees them and before
+the convergence gate, so `fmax` is evaluated over the free components alone. A
+fully fixed atom does not move. Held atoms are fixed in fractional coordinates,
+so under a variable-cell relax they ride the cell as it deforms.
+
+Fixed atoms lower the crystal symmetry, so selective dynamics forces `symmetry`
+off, and setting `symmetry: true` alongside `fixed` is an error. The `joint` and
+`newton` relaxation engines relax every degree of freedom, so a `relax.method`
+of `joint` or `newton` with `fixed` present falls back to the nested engine and
+records the reason in the `relax` block.
 
 ### `pseudopotentials`
 

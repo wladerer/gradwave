@@ -107,7 +107,9 @@ Three files are written to `out_diamond/`.
 - `relax.json` is the machine-readable summary and the parsing target. The
   `relax` block holds `converged`, `n_steps`, `energy_eV`, `fmax_eV_ang`,
   `max_displacement_ang`, the final `positions_ang` and `cell_ang`, and a
-  `trajectory` list of `{step, energy_eV, fmax_eV_ang, positions_ang}`.
+  `trajectory` list of `{step, energy_eV, fmax_eV_ang, positions_ang}`. When
+  atoms are held (see [Fix atoms during a relax](#fix-atoms-during-a-relax)) it
+  also carries `fixed`, the selective-dynamics mask, and `n_fixed_atoms`.
 - `checkpoint.pt` is restartable SCF state for the final geometry.
 
 ## Plot the trajectory
@@ -126,6 +128,40 @@ traj.plot(x="step", y="fmax_eV_ang", logy=True)
 A log-scale $\max_I |\mathbf{F}_I|$ against step shows the approach to the
 threshold. The energy column shows the monotone descent BFGS produces on a convex
 basin.
+
+## Fix atoms during a relax
+
+A slab relaxation often holds the bottom layers at their bulk positions and lets
+only the surface and adsorbate move. Add `structure.fixed` to pin those atoms.
+Give either a list of 0-based atom indices, which fixes all three axes of each
+listed atom, or one `[x, y, z]` boolean row per atom for per-axis control.
+
+```yaml
+structure:
+  file: slab.traj
+  fixed: [0, 1, 2, 3]          # hold the bottom-layer atoms, all axes
+```
+
+```yaml
+structure:
+  file: slab.traj
+  fixed:
+    - [true, true, true]       # atom 0 fully fixed
+    - [true, true, false]      # atom 1 free along z only
+    # ... one row per atom
+```
+
+The relaxation zeroes the held force components before the optimizer and before
+the `fmax` gate, so convergence is measured over the free components alone. A
+fully fixed atom stays exactly put, and the `relax.json` `fixed` and
+`n_fixed_atoms` fields record the mask. Held atoms are fixed in fractional
+coordinates, so they ride the cell under a variable-cell relax.
+
+Selective dynamics forces `symmetry` off, since the held atoms lower the crystal
+symmetry. Leave `symmetry` unset and the loader defaults it off, or set it
+`false` yourself. Setting `symmetry: true` alongside `fixed` is an error. The
+`joint` and `newton` engines relax every degree of freedom, so pair `fixed` with
+the default `nested` method.
 
 ## Drive it from Python
 
