@@ -60,11 +60,23 @@ def _structure_lines(struct):
 
 
 def _mesh_label(par):
-    """k-mesh string, annotated with total / IBZ k-point counts when known."""
+    """k-mesh string, annotated with total / reduced k-point counts when known.
+
+    The reduction label names *what* shrank the mesh: spatial symmetry folds
+    the full grid to the irreducible wedge ("IBZ"), but a time-reversal pairing
+    still halves the mesh even with symmetry off, so an unsymmetrized run is
+    labelled "TR-reduced" rather than the misleading "IBZ". Under a distributed
+    k-shard the parameters block may also carry ``nk_local`` — this rank's slice
+    of the reduced mesh — which is surfaced as "N of M on this rank".
+    """
     mesh = "×".join(str(n) for n in par["kmesh"])
     total, nk = par.get("nk_total"), par.get("nk")
     if total and nk:
-        return mesh + f" = {total} k ({nk} IBZ)"
+        kind = "IBZ" if par.get("symmetry") else "TR-reduced"
+        nk_local = par.get("nk_local")
+        if nk_local is not None and nk_local != nk:
+            return mesh + f" = {total} k ({nk_local} of {nk} {kind} on this rank)"
+        return mesh + f" = {total} k ({nk} {kind})"
     if total:
         return mesh + f" = {total} k"
     if nk:

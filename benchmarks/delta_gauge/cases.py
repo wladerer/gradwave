@@ -115,8 +115,11 @@ CASES = {
     "Pb": _case("fcc", 14, 68, 16, dfact=0.063),
     # magnetic: Fe/Ni ferromagnetic (johnson mixer, energy-gated). Seed high and
     # let the moment relax down (weak seeds collapse to the NM branch). Cr is
-    # antiferromagnetic and needs a 2-atom cell — not the 1-atom bcc primitive
-    # here — so it is left out of the FM path.
+    # antiferromagnetic: its true ground state needs a 2-atom cell (up/down
+    # sublattices), so on the 1-atom bcc primitive here it can only run as a
+    # collinear-FM proxy that CANNOT represent the AFM order. Its Δ (~11.9 vs
+    # WIEN2k) therefore reflects the wrong magnetic state, NOT a pseudopotential
+    # or gradwave error; the AFM cell is not attempted (see README "Results").
     "Fe": _case("bcc", 16, 106, 12, nspin=2, start_mag=[0.7], dfact=5.599),
     "Ni": _case("fcc", 18, 110, 12, nspin=2, start_mag=[0.5], dfact=1.065),
     "Cr": _case("bcc", 14, 110, 12, nspin=2, start_mag=[0.7], dfact=10.499),
