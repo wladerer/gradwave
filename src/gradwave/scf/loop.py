@@ -40,6 +40,7 @@ from gradwave.pseudo.kb import beta_form_factors
 from gradwave.pseudo.upf import UPFData
 from gradwave.scf.common import (
     MP_CROSSOVER,
+    SCHEMES,
     adaptive_diago_tol,
     assemble_pw_energies,
     convergence_gate,
@@ -1197,6 +1198,12 @@ def scf(
     mixed_precision: bool = False,  # opt-in fp32 draft (see note at resolution below)
     eigensolver: str = "davidson",  # davidson | chebyshev (NC standard problem only)
     precond: str = "kerker",  # kerker | local_tf (position-dependent TF screening)
+    spin_precond: bool = False,  # Stoner m-channel preconditioner (smeared nspin=2
+    # only; scf/spin_precond.py) — the physics-informed damping of the Stoner-
+    # expansive magnetization mode, applied to the residual before mixing. No-op
+    # otherwise; mirrors scf_uspp's spin_precond. Not input-reachable (kwarg only,
+    # matching the collinear USPP path — scf.magnetic.spin_precond feeds only the
+    # spinor scf_noncollinear driver).
     precond_op: MultipoleKerkerPrecond | None = None,  # callable r→P·r on the density-total
     # block, overriding kerker/local_tf (e.g. a fitted scf.learned_precond.MultipoleKerkerPrecond);
     # must leave the G=0 component untouched and needs no per-iteration state
@@ -1644,6 +1651,37 @@ def scf(
             break
 
         e_free_prev = e_free
+        if spin_precond and nspin == 2 and smearing != "none":
+            # Stoner preconditioner on the magnetization channel
+            # (arXiv:2606.26693): rebuilt each iteration from the current
+            # orbitals, it neutralizes the Stoner-expansive spin mode that
+            # plain damping amplifies and history mixing grinds through. A
+            # residual preconditioner leaves the fixed point unchanged.
+            from gradwave.scf.spin_precond import build_stoner_precond
+
+            ng = layout.ng
+            sp = build_stoner_precond(
+                system,
+                coeffs_list_s,
+                eigs_s,
+                mu,
+                SCHEMES[smearing],
+                width,
+                rho_out_s[0] + rho_out_s[1],
+                rho_out_s[0] - rho_out_s[1],
+                xc,
+                dist_ctx=dist_ctx,
+            )
+            if sp is None:
+                mixer.extra_precond = None
+            else:
+
+                def _spin_pc(rvec, _sp=sp, _ng=ng):
+                    out = rvec.clone()
+                    out[_ng : 2 * _ng] = _sp.apply(rvec[_ng : 2 * _ng])
+                    return out
+
+                mixer.extra_precond = _spin_pc
         # (total, mag) → per-channel r-space densities (MixLayout.unpack)
         rho_s, _ = layout.unpack(mixer.step(rho_in_vec, rho_out_vec))
 
