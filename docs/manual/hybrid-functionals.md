@@ -53,6 +53,16 @@ lags one step, exactly the way the DFT+U occupation matrices do
 ([Differentiable Hubbard U](hubbard-u.md)). ACE makes that frozen operator cheap
 to re-apply through the inner Davidson solves.
 
+!!! note "ISDF is implemented but not on the SCF path"
+    The ISDF compression lives in `postscf/exchange.py`
+    (`exchange_operator_isdf`, validated against the direct build), but the
+    self-consistent `hybrid_scf` driver does not call it. The driver builds the
+    Fock operator directly and compresses it with ACE each step, so a hybrid SCF
+    pays the direct co-density cost today. ACE itself is exact on the occupied
+    subspace, reproducing the direct operator's action to 1e-13 eV/atom on the
+    H100 oracle (issue #206). Routing the SCF through ISDF is separable follow-up
+    work.
+
 ## Range separation
 
 Splitting the Coulomb kernel at a length $1/\omega$ gives the screened hybrids.
@@ -177,6 +187,11 @@ reproduces.
   machine precision, and a single $\Gamma$ point with `mode="full"` must
   reproduce the $\Gamma$-only Fock build. Both are cheap sanity checks before a
   production run.
+- **Metals are a cost wall.** A hybrid SCF over a smeared metal carries no formal
+  gate, but the full-BZ Fock build scales with the mesh and a metal needs a dense
+  one. A 16-atom slab on a 4×4 mesh timed out at 600 s on an H100 (issue #206), so
+  budget hybrid work for gapped systems on small meshes and expect long runs on
+  metallic slabs.
 
 ## Next
 

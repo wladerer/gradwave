@@ -924,8 +924,10 @@ holds the moment and gives the best honest arm, a floor 8x below the default tha
 Recommendations, ranked by evidence, with their dispositions.
 
 - Gate magnetic spinor runs on the energy, not the residual. Landed as the opt-in
-  energy-metric gate (#210, next entry), with phase (c) spinor wiring in progress on
-  `feat/spinor-convergence-surface`.
+  energy-metric gate (#210, next entry), with phase (c) spinor wiring and the YAML knobs
+  in PR #215 (the best campaign arm converges in 10 iterations through the gate at the
+  consensus F where every rhotol arm capped at 80, and `entol` 1e-4 is the calibrated
+  magnetic-spinor tolerance).
 - Expose the magnetic spinor knobs (`mag_mixer`, `mag_mixing_alpha`, `mag_diago_schedule`,
   `spin_precond`) through `inputs.py`/`api.py`, since the best measured arm cannot be
   selected from an input file today. Same branch.
@@ -933,7 +935,8 @@ Recommendations, ranked by evidence, with their dispositions.
   `mag_mixer`, since the boost is a pulay-tuned guard that collapses the moment under
   johnson (measured twice, pin and no pin).
 - Damp the transverse m channels at low q, a reverse of the Kerker exemption the m blocks
-  enjoy, leaving the G=0 moment untouched. In progress on `research/transverse-damping`.
+  enjoy, leaving the G=0 moment untouched. Built and rejected, see "Low-q transverse
+  damping in the spinor SCF: no-go" below.
 - `fix/ni-soc-convergence` is deletable, its substance (the `mag_mixer` selector and
   `build_stoner_precond_nc`) is on main verbatim.
 
@@ -942,10 +945,54 @@ lacks the Stoner spin-preconditioner that the USPP and noncollinear paths carry.
 `perf/magnetic-mixing` (df156ed) adds it there as an opt-in `spin_precond` flag and sits
 unmerged, worth revisiting.
 
+## Low-q transverse damping in the spinor SCF: no-go
+
+**Status: DONE 2026-07-30 (37 arms), branch `research/transverse-damping` (tip 82b08bb),
+no PR. Recommendation 4 of the campaign above, measured and rejected.**
+
+The campaign's proposed cure for the transverse floor was a reverse-Kerker damping of the
+m channels, suppress low-|G|, pass high-|G|, leave G=0 free. Built two ways and measured,
+the design is structurally mismatched to the instability, and every form fails the
+canted-cell kill criterion.
+
+The amplified mode is a rigid rotation of the whole magnetization density, not a finite-q
+magnon packet. Its residual grows in lockstep at G=0 and at finite G (5.8e-5 vs 8.2e-5 at
+the floor), so no |G|-selective filter isolates it, and exempting G=0 while damping the
+cloud tears the rotation apart rather than suppressing it.
+
+The amplifier is the DIIS state recombination, not the mixing step. A residual-side hook
+(the campaign's proposed `mixer_hook` insertion) leaves the growth bit-for-bit identical
+to baseline through iteration 20. The same kernel applied to the mixer's total update in a
+fixed lab frame kills the transverse floor 13x (dm_x 7.9e-6 against 1.2e-4 at the residual
+hook, same kernel, same frame, different insertion point). The frame matters as much as
+the insertion point, the instantaneous-moment frame tilts with the wandering G=0 noise and
+self-defeats, the lab/seed-axis frame holds. Where the damping works, reverse-Kerker beats
+the flat null 8x, so the |G| structure is real.
+
+None of it lowers the total floor. The longitudinal near-Stoner channel binds at 2e-4 to
+9e-4 regardless, the transverse treatments aggravate it, and the champion does not stack
+with johnson (dm_x back to 1.9e-4). The best total floor stays the undamped johnson best
+arm at 3.5e-4, and SOC is untouched at 1.5e-3 to 2.0e-3 under every treatment.
+
+The kill criterion decides it. Two Fe moments seeded 90 degrees apart must still align,
+and the baseline closes 88.7 to 0.6 degrees in eight iterations. Every damped arm fails,
+the moment-frame hook drives the pair to 171.8 degrees near anti-alignment, the lab-frame
+wrap lands its axis off the bisector, and the SOC lab-frame wrap never completes and
+settles 8 meV into a different basin. The G=0-free design does not protect physical
+rotation because interatomic alignment is a staggered rotation living at finite G, exactly
+where the damping bites.
+
+Verdict, no-go for production. The operative fix stays recommendation 1, gate magnetic
+spinor runs on the energy (#210, #215). A future mixer-side cure must damp the update not
+the residual, work in a fixed seed-axis frame, and treat G=0 together with its cloud. The
+source hook it would need is a post-extrapolation `step_transform` callable inside
+`PulayMixer.step`, since the existing `mixer_hook` is the wrong insertion point for any
+recombination-driven instability.
+
 ## Energy-metric SCF convergence gate
 
 **Status: LANDED 2026-07-30 (#210, phases (a) and (b)), plan
-`docs/plans/energy-metric-stopping.md`. Phases (c) and (d) open.**
+`docs/plans/energy-metric-stopping.md`. Phase (c) in PR #215, phase (d) open.**
 
 An opt-in stopping test that gates on the estimated energy error rather than the raw
 density residual, triggered by the `convergence: energy` token against the default
@@ -958,9 +1005,11 @@ to the metallic magnets the gate targets. On the stagnating Ni PAW pulay arm the
 charge-channel estimate is 1.4e-8 eV against 1.7e-8 measured, and the arm terminates
 converged at iteration 91 where the density gate sat at its 120-iteration cap. The
 Harris-Foulkes/KS gap is recorded alongside on the NC path as the zero-machinery bracket.
-Phase (c) threads the metric through `scf_noncollinear` and re-runs the Ni+SOC matrix,
-phase (d) documents it and flips the default only after a soak across the magnetic and
-metallic battery. Both are open.
+Phase (c) threads the metric through `scf_noncollinear`, exposes the `scf.magnetic` YAML
+block, and re-runs the Ni+SOC matrix (PR #215, `entol` 1e-4 calibrated for magnetic spinor
+runs and the exact coupled (rho, m) f_xc HVP taken by double-backward). Phase (d) documents
+it and flips the default only after a soak across the magnetic and metallic battery, still
+open.
 
 ## Showcase figures: noncollinear magnetism and error estimates
 
@@ -1102,6 +1151,128 @@ uncertain (built and rejected, see the Done section). The through-line matches t
 audit, on a single small SCF the consumer-GPU fp64 tax is the wall, and the durable gains
 are throughput (batch many small structures), fewer iterations (learned or extrapolated
 start), and a datacenter fp64 GPU.
+
+## The 4x H100 session (2026-07-31)
+
+**Status: DONE, five rounds on 4x H100 SXM (vast.ai, ~1 hr provisioned), data in
+`benchmarks/results/h100-session/`, benchmark pack in `benchmarks/h100/` (#212). This
+records the datacenter-fp64 numbers the RTX 3050 sections could only bound.**
+
+The consumer-card ceilings the performance sections open with, the CheFSI no-go, the
+128-atom memory cliff, the QR and RR-GEMM offload tuning, were all measured on a 6 GB RTX
+3050 whose fp64 runs at 1/64 of fp32. This session ran the same battery on real fp64
+hardware. Several verdicts hold and several invert, and the split is itself the lesson,
+GPU tuning is device-class-specific and has to be benchmarked per card.
+
+- **Minerals.** Cr2O3 eskolaite 1128 s to 46.8 s (24x vs the asus CPU), Fe2O3 hematite
+  2275 s to 39.4 s (58x vs CPU, 15x vs the 3050), with identical iteration counts in both.
+  These are the production-size magnetic USPP cases the 3050 ran in tens of minutes.
+- **Delta gauge.** About 0.3 to 0.4 s per volume against the 3050's 14 to 97 s/vol, 35 to
+  240x on the many-k one-atom chains the fp64 tax hit hardest. The complete 25-element
+  table has median 0.845 meV/atom against QE, 20 of 25 under 2.0, and every outlier already
+  understood, Cu 7.9 (the documented pseudopotential anomaly), Fe 5.4 (tracks pseudodojo),
+  and Cr 11.9 (a nonmagnetic run of an AFM ground state). This is the rung-1 baseline for
+  the delta-learned plan.
+- **Memory.** Si-216 ran with no OOM at 29.4 GB peak and 3.9 s/iter, so the 3050's 128-atom
+  cliff is a card limit, not a code limit. Linear extrapolation puts about 350 atoms inside
+  an 80 GB card, which widens the glass-model scope for the kappa_min plan.
+- **Hybrids.** A PBE0-form SCF runs in seconds on Si2 through Si16 at 0.33 GB peak, 4.6x
+  the 32-thread CPU. ACE reproduces the direct Fock on the occupied subspace to 1e-13
+  eV/atom (H100 oracle). Two limits recorded, ISDF is not wired into the hybrid SCF (the
+  driver hard-codes direct Fock plus ACE per step, `exchange_operator_isdf` unused), and a
+  metallic 16-atom 4x4-mesh slab PBE0 timed out at 600 s (full-BZ Fock).
+- **Solvers.** Chebyshev loses to davidson at every size, see the CheFSI done-entry.
+- **QR and RR-GEMM offload inversions.** The #214 QR-offload gate landed from this data,
+  the 3050 measures an fp64/fp32 penalty ratio of 38.3 against the gate threshold of 8 and
+  keeps offloading, the H100 measures near 1 and keeps the QR on-GPU (worth 13% there). The
+  #195 RR-GEMM device-residency no-win inverts, at hematite's shape the fp64 GPU GEMM is
+  1.26 ms against 139.6 ms CPU-resident, and fp32-compute (1.16 ms) has no margin over the
+  fp64 tensor cores, so the fp32-subspace trick is permanently obsolete here. The
+  consumer-card verdict stands (performance.md).
+- **Multi-GPU.** The k-sharded SCF runs unmodified over 4 ranks via Gloo (all ranks
+  identical to 1e-11) and scales at real size (2-rank Si-16 6x6x6 at 3.2 s/iter),
+  production-blocked by #216, see the distributed record below.
+- **Learned-U.** A linear-response U(Pt 5d) on bulk Pt solves in 12 s.
+
+Repo gaps this session surfaced, no H pseudopotential in-repo (SG15 fetched and archived),
+no selective-dynamics/atom-fixing in `inputs.py`, ISDF not wired into the hybrid SCF, a
+`collect.py` delta-column bug (the H100 column was filled with reference values, trivial
+fix), and a cosmetic "56 k(IBZ)" header printed under `symmetry: false` (a time-reversal
+reduction shown with an IBZ label on the local shard, display only).
+
+The +U metallic-adsorbate divergence and the vc-relax collapse are their own records below.
+
+## Multi-GPU distributed SCF: status and the gather blocker
+
+**Status: the k-point-sharded SCF (#196, #197) runs correctly across CUDA devices,
+production-blocked by #216 (H100 session, rounds 3 and 5).**
+
+The k-point-sharded distributed SCF runs unmodified across multiple CUDA devices. Gloo
+stages CUDA tensors through host memory, so no NCCL build is needed, and a 4-rank run lands
+energies identical to the single-rank result at 1e-11. At toy scale it is slower than one
+GPU (startup- and collective-bound), but a real-scale Si-16 6x6x6 on 2 ranks reaches 3.2
+s/iter against about 16.8 s/iter amortized single-rank with bit-identical energies, so the
+sharding pays once per-k work dominates the collectives.
+
+Production is blocked by #216. The SCF completes correctly but hangs in post-SCF result
+reassembly at `scf/loop.py:1683`, where `gather_list_cat` calls `dist.all_gather_object` to
+pickle each rank's list of large CUDA coefficient tensors and both ranks block in
+`_object_to_tensor` (faulthandler stacks captured). It is payload-dependent, Si-2 gathers
+fine and Si-16 6x6x6 deadlocks. The fix is a sized raw-tensor `all_gather` staged through
+CPU rather than the pickle-based object gather. Separately, no `destroy_process_group` call
+exists anywhere in cli/api/distributed, benign today, worth adding in the same fix. NCCL
+plus heavy systems is the eventual path once the gather is sized.
+
+## Large-U divergence on metallic adsorbate systems
+
+**Status: DONE 2026-07-31 (H100 session round 4, `benchmarks/results/h100-session/round4/`,
+flight traces recorded). A new convergence pathology class.**
+
+DFT+U on Pt(111)+H with a bulk-derived U(Pt 5d) = 8.949 eV never converges, oscillating
+about 30 eV across a 300-iteration cap under three mixing configs. The bare slab plus the
+same U was fine, so the adsorbate is required. The threshold is (4, 6] eV, U=2 and U=4
+converge in about 30 iterations while U=6 and U=8.95 never do.
+
+The mechanism is occupation flip-flop and level-crossing, quantified from the recorder
+traces. Occupation-reorder counts scale with U, 0 in the converging tails, 6650 total at
+U=6, and 28597 at U=8.95, where the Fermi level swings 0.235 eV against the 0.14 eV
+smearing width. When U/2 exceeds the smearing width the +U potential shift crosses levels
+through the Fermi window faster than the one-step-lagged occupation update can track, and
+the density limit-cycles.
+
+Two candidate causes were ruled out. Charge sloshing is present in every run including the
+converged ones, so the channel-resolved traces cleared it as a red herring. The adsorbate
+dipole is exonerated by a symmetric double-H discriminator (net adsorbate dipole
+cancelled), which still diverges at U=8.95 and still converges at U=4, so the divergence is
+U-driven and geometry-independent.
+
+The PBE binding is clean, E_b = -0.55 eV at z* = 0.95 A from an unrelaxed z-scan, plausible
+against literature, and the learned-U solve itself ran in 12 s. Remedies to pursue, +U
+occupation-matrix mixing or damping to kill the one-step lag, U-ramping into the SCF, and
+caution transferring a bulk-derived U~9 eV to a metallic adsorbate system where the level
+structure differs. Recorded for the manual under convergence and wisdom.
+
+## Variable-cell relax collapses on soft framework cells
+
+**Status: filed as #217 (H100 session round 5). Blocks kappa_min plan phase 2, worked
+around by fixed-cell relax.**
+
+A variable-cell relax of 9-atom alpha-quartz SiO2 (PBE, 30-40 Ry) reported converged at
+fmax 0.009 eV/A in 52 steps, at a collapsed cell, a 4.916 to 3.623 A and volume 113.1 to
+50.1 A^3, 44% of the start. The FFT grid and plane-wave basis are held fixed while the cell
+shrinks, so the effective ecut rises with compression and the uncorrected
+basis-incompleteness (Pulay) stress spuriously favors collapse. Hard framework oxides with
+soft shear modes are the worst case.
+
+The consequence for the kappa_min plan is that phase-2 equilibrium geometries must come
+from ions-only relax at a fixed literature cell (or an EOS scan with the grid rebuilt per
+volume) until #217 is fixed. The elastic machinery itself validated on the same session,
+the trigonal C_ij pattern is correct and densities land within 0.5% of literature. The
+Cahill-Pohl arithmetic checked out, kappa_min(SiO2) = 1.46 W/mK against literature 1.3 to
+1.4 using literature moduli, while unrelaxed moduli overestimate it 1.9x, which is exactly
+why the trustworthy geometry is the blocker. Candidate fixes, rebuild the grid when the
+volume drifts past a threshold (with a mixing restart), or apply a Pulay-stress correction
+along the path.
 
 ## Learned multi-pole density-mixing preconditioner
 
@@ -1300,7 +1471,11 @@ and its worktree is prunable).
 5. The validation ladder with one honest go/no-go number, total H-applies against nested
    BFGS and first-order joint descent on perturbed Si-16, then Si-64, then an amorphous cell
    near 100 atoms. The method earns default status only if the H-apply count drops on the
-   amorphous cell.
+   amorphous cell. Measured on the H100 (#206, round 3), the nested-to-joint H-apply ratio is
+   7.8x on Si-2, 7.69x on Si-16 (2x2x2), and 2.30x on Si-64 (Gamma-only, so the drop conflates
+   atom count with k-point count and is not a clean size trend). The edge does not grow with
+   cell size across this ladder, so the amorphous-cell default gate looks unlikely to be met,
+   though joint stays a win at every size measured.
 6. The phonon byproduct check, Hvp-Lanczos dynamical matrix against
    `postscf/phonons_supercell.py`.
 7. Metals, gated solely on #129.
@@ -1612,6 +1787,13 @@ to 35^3. The fp32 FFT advantage there is only about 3.4×, not the 12× the larg
 and CheFSI does 2 to 3× more H-applies, so the filter loses. It stays opt-in and off by default.
 Revisit on a bigger card where the grid can grow into the regime where the fp32 FFT gain dominates,
 the same hardware caveat the scaling section opens with.
+
+The H100 session (#206, round 5) closes the revisit permanently. At datacenter fp64 the fp32 FFT
+advantage the revisit was waiting for is gone, since fp64 tensor cores run the standard kernels
+directly and the extra H-applies have nothing to buy. Chebyshev is 2x slower than davidson at 10
+atoms and 13x slower at Si-128 (15.316 vs 1.165 s/iter, identical energy), and the gap widens with
+cell size with no crossover anywhere in 10 to 216 atoms. Davidson stays the unconditional default on
+every device class.
 
 ## Batched Davidson conditioning guard, cond-SVD removed (DONE)
 

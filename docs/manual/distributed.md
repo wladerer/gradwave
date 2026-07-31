@@ -164,3 +164,29 @@ write the same files).
   this is a documented, not-yet-executed follow-up: run the multi-machine
   invocation above by hand and confirm the free energy against a
   single-process reference before relying on it for real production k-meshes.
+
+## Multi-GPU
+
+The k-point-sharded path runs across several CUDA devices without code changes.
+Gloo stages CUDA tensors through host memory for each collective, so no NCCL
+build is required and one rank per GPU works out of the box. On the 4x H100
+session (issue #206) a 4-rank run produced energies bit-identical to the
+single-rank result at 1e-11, so the reduction is correct across devices.
+
+Scaling follows the same rule as the CPU case, per-k work has to outweigh the
+collectives. A toy cell is slower than a single GPU (startup- and
+collective-bound), while a real-scale Si-16 6×6×6 on 2 ranks reaches 3.2 s/iter
+against about 16.8 s/iter amortized single-rank. Reach for it on k-heavy
+systems, not on coarse meshes.
+
+Two cautions from that session. Large multi-rank runs currently deadlock in the
+post-SCF result reassembly (issue #216): the final gather pickles each rank's
+list of large CUDA coefficient tensors through `dist.all_gather_object`, and
+both ranks block. It is payload-dependent, so a small cell gathers fine while a
+54³-grid, 28-k-per-rank shard hangs. Until the gather is replaced with a sized
+raw-tensor `all_gather` staged through CPU, treat big multi-rank GPU runs as
+blocked. Separately, cosmetic only: a distributed run built with
+`symmetry: false` still prints a header like "56 k(IBZ)", because the count
+shown is the time-reversal reduction on the local shard labelled with the IBZ
+tag. The mesh is the full one, the label is wrong, nothing about the calculation
+changes.
