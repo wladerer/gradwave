@@ -316,31 +316,134 @@ def all_reduce_(tensor: torch.Tensor, ctx: DistKContext) -> torch.Tensor:
     return t
 
 
+def _gather_var_tensor_lists(
+    local: list[torch.Tensor], world_size: int, group: Any, device: torch.device
+) -> list[list[torch.Tensor]]:
+    """``all_gather`` a per-rank list of tensors (ragged in shape/count across
+    ranks) as raw bytes staged through CPU, returning one reconstructed list
+    per rank IN RANK ORDER, each tensor placed back on ``device``.
+
+    This is the deadlock-free replacement for pickling large (CUDA) tensors
+    through ``all_gather_object`` (#216): ``all_gather_object`` serializes each
+    rank's payload via ``_object_to_tensor``, and on multi-tens-of-MB CUDA
+    coefficient lists over Gloo both ranks block there indefinitely. Here only
+    a small metadata list (per-tensor shape + dtype) rides the object path; the
+    bulk moves as a single padded ``uint8`` buffer through the plain-tensor
+    ``all_gather`` collective, which does not pickle.
+
+    Variable sizes are handled by exchanging each rank's byte count via a tiny
+    ``all_gather``, padding every rank's buffer up to the global maximum, then
+    slicing each rank's contribution back out using its own metadata. Dtypes
+    are preserved exactly by reinterpreting the raw bytes (``view(dtype)``), so
+    complex coefficients and real becp/eigenvalue arrays round-trip losslessly.
+    """
+    import torch.distributed as dist
+
+    # 1. Metadata (shape, dtype) per local tensor — small, so the object path
+    #    is fine here (this is NOT the large-payload pathology).
+    local_meta = [(tuple(t.shape), t.dtype) for t in local]
+    metas: list[list[tuple[tuple[int, ...], torch.dtype]] | None] = [None] * world_size
+    dist.all_gather_object(metas, local_meta, group=group)
+
+    # 2. Pack this rank's tensors into one contiguous CPU uint8 byte buffer.
+    parts = [
+        t.detach().to("cpu").contiguous().reshape(-1).view(torch.uint8)
+        for t in local
+        if t.numel() > 0
+    ]
+    flat = torch.cat(parts) if parts else torch.empty(0, dtype=torch.uint8)
+
+    # 3. Exchange byte counts and pad every rank's buffer to the global max.
+    nbytes = torch.tensor([flat.numel()], dtype=torch.int64)
+    sizes = [torch.zeros(1, dtype=torch.int64) for _ in range(world_size)]
+    dist.all_gather(sizes, nbytes, group=group)
+    maxlen = max(int(s.item()) for s in sizes)
+
+    per_rank: list[list[torch.Tensor]] = [[] for _ in range(world_size)]
+    if maxlen == 0:
+        return per_rank  # every rank contributed an empty list
+
+    padded = torch.zeros(maxlen, dtype=torch.uint8)
+    padded[: flat.numel()] = flat
+    gathered = [torch.zeros(maxlen, dtype=torch.uint8) for _ in range(world_size)]
+    dist.all_gather(gathered, padded, group=group)
+
+    # 4. Slice each rank's byte buffer back into tensors using its metadata.
+    for r in range(world_size):
+        rank_meta = metas[r]
+        assert rank_meta is not None
+        buf = gathered[r]
+        off = 0
+        for shape, dtype in rank_meta:
+            numel = 1
+            for d in shape:
+                numel *= d
+            nb = numel * torch.empty(0, dtype=dtype).element_size()
+            chunk = buf[off : off + nb].clone().view(dtype).reshape(shape)
+            per_rank[r].append(chunk.to(device))
+            off += nb
+    return per_rank
+
+
 def gather_cat(local: torch.Tensor, ctx: DistKContext, dim: int = 0) -> torch.Tensor:
     """``all_gather`` ``local`` from every rank and concatenate along ``dim``,
     IN RANK ORDER — reconstructs a global k-ordered array (eigenvalues,
-    kweights) from contiguous per-rank shards. Uses ``all_gather_object`` so
-    ranks need not share the exact same local shape and CUDA tensors round-trip
-    through the same code path as CPU ones."""
-    import torch.distributed as dist
-
-    buf: list[torch.Tensor | None] = [None] * ctx.world_size
-    dist.all_gather_object(buf, local.detach().cpu(), group=ctx.group)
-    # every slot was just filled by all_gather_object (one entry per rank)
-    tensors = cast("list[torch.Tensor]", buf)
-    return torch.cat(tensors, dim=dim).to(local.device)
+    kweights) from contiguous per-rank shards. Ranks need not share the exact
+    same local shape, and CUDA tensors round-trip through the same code path as
+    CPU ones: the payload is staged as raw CPU bytes (see
+    :func:`_gather_var_tensor_lists`), not pickled through
+    ``all_gather_object`` (#216), then moved back onto ``local``'s device."""
+    per_rank = _gather_var_tensor_lists(
+        [local.detach()], ctx.world_size, ctx.group, local.device
+    )
+    tensors = [chunk[0] for chunk in per_rank]
+    return torch.cat(tensors, dim=dim)
 
 
 def gather_list_cat(local: list[_T], ctx: DistKContext) -> list[_T]:
-    """``all_gather`` a per-rank Python list (e.g. the per-k coefficient
-    tensors, ragged in shape across k) and concatenate in rank order into the
-    global per-k list."""
+    """``all_gather`` a per-rank Python list and concatenate in rank order into
+    the global list.
+
+    Two payload kinds flow through here. Lists of tensors (the per-k
+    coefficient / ⟨β|ψ⟩ arrays, ragged in shape across k) are the large,
+    possibly-CUDA payloads that deadlocked ``all_gather_object`` (#216); they
+    take the raw-byte, CPU-staged path in :func:`_gather_var_tensor_lists` and
+    come back on the local tensors' device. Lists of small Python scalars (the
+    Stoner spin-preconditioner ``picks`` metadata tuples) are tiny and stay on
+    the object path, where pickling is harmless. A one-shot boolean
+    ``all_gather_object`` agrees on the kind across ranks first, so every rank
+    enters the same collective sequence even when a rank's local list is empty
+    (avoiding a path-divergence deadlock)."""
     import torch.distributed as dist
+
+    is_tensor_local = bool(local) and isinstance(local[0], torch.Tensor)
+    flags: list[bool | None] = [None] * ctx.world_size
+    dist.all_gather_object(flags, is_tensor_local, group=ctx.group)
+
+    if any(flags):
+        tensors = cast("list[torch.Tensor]", local)
+        device = tensors[0].device if tensors else torch.device("cpu")
+        per_rank = _gather_var_tensor_lists(tensors, ctx.world_size, ctx.group, device)
+        out: list[_T] = []
+        for chunk in per_rank:
+            out.extend(cast("list[_T]", chunk))
+        return out
 
     buf: list[list[_T] | None] = [None] * ctx.world_size
     dist.all_gather_object(buf, local, group=ctx.group)
-    out: list[_T] = []
+    out_obj: list[_T] = []
     for chunk in buf:
         assert chunk is not None
-        out.extend(chunk)
-    return out
+        out_obj.extend(chunk)
+    return out_obj
+
+
+def maybe_destroy_process_group() -> None:
+    """Tear down the default process group if one is initialized (a distributed
+    torchrun launch); a no-op otherwise. Safe to call unconditionally at the
+    end of a run — single-process paths never initialize a group, so they never
+    touch it. Idempotent: a second call after teardown does nothing."""
+    import torch.distributed as dist
+
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
