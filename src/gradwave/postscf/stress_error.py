@@ -42,10 +42,11 @@ import torch
 from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.xc.base import XCFunctional
 from gradwave.core.xc.spin import SpinXC
+from gradwave.dtypes import RDTYPE
+from gradwave.grids import FFTGrid, GSphere, reciprocal_cell
 from gradwave.postscf.discretization_error import estimate_density_error
 from gradwave.scf.loop import (
     SCFResult,
-    System,
     effective_potentials,
     local_potential_r,
     setup_system,
@@ -56,17 +57,33 @@ EV_A3_TO_KBAR = 1602.176634  # 1 eV/Å³ = 160.2176634 GPa
 __all__ = ["estimate_pressure_error"]
 
 
-def _infer_kmesh(system: System) -> tuple[int, int, int]:
-    """Monkhorst-Pack mesh dimensions from a full (unreduced) k-point set.
+def _sphere_on_cell(sph: GSphere, grid: FFTGrid) -> GSphere:
+    """``sph``'s exact Miller set, in its exact order, with ``grid``'s metric.
 
-    Each axis carries ``N`` distinct fractional values for an ``N``-fold mesh,
-    shift or not; count them. Only valid when the run kept the full BZ
-    (``use_symmetry=False``), which the estimator requires so the rebuilt
-    strained system reproduces the run's k-point ordering.
-    """
-    kf = np.array([np.asarray(sph.k_frac, dtype=float) for sph in system.spheres])
-    n0, n1, n2 = (len(np.unique(np.round(kf[:, i] % 1.0, 6))) for i in range(3))
-    return n0, n1, n2
+    The strained rebuild must reproduce the run's k-set and per-k basis
+    exactly, and regenerating them does not do that. ``symmetry: false`` still
+    applies time-reversal reduction, so the run k-list is not a full MP mesh
+    and cannot be recovered from an inferred mesh (a Γ-centered 3×3×3 on
+    hexagonal quartz keeps only 2 unique fractions on one axis after TR
+    reduction, so the old per-axis-unique-count inference rebuilt a (2,3,3)
+    mesh with misaligned spheres — the #217-fix crash). And even at the right
+    k, ``build_gsphere``'s cutoff re-selection can tie-break a boundary
+    G-shell differently under the scaled metric. Taking the run sphere's
+    integer Millers verbatim implements the fixed-Miller-set convention by
+    construction; ``flat_idx`` carries over because the rebuild is pinned to
+    the run's FFT shape."""
+    b = reciprocal_cell(np.asarray(grid.cell, dtype=np.float64))
+    mm = sph.miller.detach().cpu().numpy()
+    kpg = (mm + sph.k_frac) @ b
+    kpg2 = np.einsum("ij,ij->i", kpg, kpg)
+    return GSphere(
+        k_frac=sph.k_frac,
+        k_cart=torch.as_tensor(sph.k_frac @ b, dtype=RDTYPE),
+        miller=sph.miller.detach().cpu(),
+        kpg=torch.as_tensor(kpg, dtype=RDTYPE),
+        kpg2=torch.as_tensor(kpg2, dtype=RDTYPE),
+        flat_idx=sph.flat_idx.detach().cpu(),
+    )
 
 
 @torch.no_grad()
@@ -92,8 +109,8 @@ def estimate_pressure_error(res: SCFResult, xc: XCFunctional | SpinXC, *,
     system = res.system
     if getattr(system, "sym", None) is not None:
         raise NotImplementedError(
-            "pressure error requires use_symmetry=False: the frozen strained "
-            "rebuild reproduces the run's full k-point set")
+            "pressure error requires use_symmetry=False: the symmetrized "
+            "density-error path is untested under the strained rebuild")
     nspin = int(getattr(res, "nspin", 1))
     if getattr(system, "is_fr", False):
         raise NotImplementedError(
@@ -106,13 +123,20 @@ def estimate_pressure_error(res: SCFResult, xc: XCFunctional | SpinXC, *,
     pos0 = system.positions.detach().cpu().numpy()
     ecut = float(system.ecut)
     ecl = float(ecut_large) if ecut_large is not None else factor * ecut
-    kmesh = _infer_kmesh(system)
     vol0 = float(grid.volume)
 
     def _denergy_at(s: float):
-        # fixed Miller set: ecut/s**2 on the s-scaled cell strains only the metric
+        # fixed Miller set: ecut/s**2 on the s-scaled cell strains only the
+        # metric. The Γ-only kmesh is a placeholder — the run's own k-set
+        # (spheres + weights) is grafted in below (see _sphere_on_cell), so
+        # the mesh passed here only sizes unused per-k tables.
         ss = setup_system(s * cell0, s * pos0, system.species_of_atom, system.upfs,
-                          ecut=ecut / s ** 2, kmesh=kmesh, fft_shape=grid.shape)
+                          ecut=ecut / s ** 2, kmesh=(1, 1, 1), fft_shape=grid.shape)
+        ss = dataclasses.replace(
+            ss,
+            spheres=[_sphere_on_cell(sph, ss.grid) for sph in system.spheres],
+            kweights=system.kweights.detach().cpu(),
+        )
         # follow the run's device (per-tensor .to is a no-op when already there)
         ss = ss.to(str(res.rho.device))
         scale = vol0 / float(ss.grid.volume)               # conserve electron count
