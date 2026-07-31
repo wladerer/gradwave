@@ -77,6 +77,47 @@ def convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol,
     return abs(energy_error) < entol
 
 
+def validate_hubbard_conv(occ_mix: float, u_ramp_iters: int) -> None:
+    """Reject invalid DFT+U convergence-aid settings (shared by both collinear
+    drivers). ``occ_mix`` (occupation-matrix damping β) must lie in (0, 1];
+    ``u_ramp_iters`` (linear U ramp length) must be a non-negative integer."""
+    if not (0.0 < occ_mix <= 1.0):
+        raise ValueError(
+            f"hubbard occ_mix (occupation-matrix damping) must be in (0, 1], "
+            f"got {occ_mix}")
+    if int(u_ramp_iters) != u_ramp_iters or u_ramp_iters < 0:
+        raise ValueError(
+            f"hubbard u_ramp_iters must be a non-negative integer, "
+            f"got {u_ramp_iters}")
+
+
+def hubbard_u_ramp_scale(it: int, u_ramp_iters: int) -> float:
+    """Linear U-ramp factor for SCF iteration ``it`` (1-based): U_eff climbs
+    from ``1/u_ramp_iters`` at ``it==1`` to full (1.0) at ``it>=u_ramp_iters``.
+    Returns 1.0 for every iteration when ``u_ramp_iters<=0`` (ramp off). The
+    Dudarev E_U and V_U are both exactly linear in U_eff, so scaling the
+    assembled energy scalar and the on-site D-matrix by this factor is identical
+    to running that iteration at the ramped U_eff."""
+    if u_ramp_iters <= 0:
+        return 1.0
+    return min(1.0, it / u_ramp_iters)
+
+
+def mix_hubbard_occ(n_prev, n_new, occ_mix: float):
+    """Damp the DFT+U occupation matrices across SCF iterations:
+    ``n = (1-occ_mix)*n_prev + occ_mix*n_new``, applied per spin channel and
+    per correlated site. ``occ_mix==1.0`` (the default) or a missing previous
+    matrix returns ``n_new`` unchanged, bit-for-bit — today's raw one-step lag.
+    A smaller beta contracts the occupation-matrix flip-flop that diverges
+    large-U +U on metallic systems (see docs/manual/hubbard-u.md)."""
+    if occ_mix == 1.0 or n_prev is None:
+        return n_new
+    return [
+        [(1.0 - occ_mix) * p + occ_mix * m for p, m in zip(pc, mc, strict=True)]
+        for pc, mc in zip(n_prev, n_new, strict=True)
+    ]
+
+
 def adaptive_diago_tol(it, history, diago_tol, n_electrons, *, schedule,
                        first_tol: float=1e-3):
     """Adaptive diagonalization tolerance (QE-style): loose while the density

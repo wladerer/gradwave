@@ -112,6 +112,41 @@ collinear USPP/PAW path for a +U ultrasoft/PAW run.
 Combining `hubbard` with a hybrid `xc` is rejected at load: the hybrid Fock SCF
 has no +U hook.
 
+## Large U on metallic systems
+
+A large U on a manifold that sits at the Fermi level can stop the SCF from
+converging. The +U potential uses the previous iteration's occupation matrix, so
+a U of several eV shifts the correlated levels by about U/2, far above a metallic
+smearing width. The occupations at the Fermi level then flip between full and
+empty from one iteration to the next, and the density residual oscillates without
+settling. The flight recorder records a nonzero band-reordering count in most
+iterations, the signature of this flip-flop.
+
+Two convergence aids handle this, and both leave the default runs bit-for-bit
+unchanged. Occupation-matrix damping mixes the occupation matrix across
+iterations, $n = (1-\beta)\,n_\text{prev} + \beta\,n_\text{new}$, in place of the
+raw one-step-lagged matrix. A $\beta$ around 0.3 contracts the flip-flop toward
+its fixed point. The U-ramp raises $U_\text{eff}$ linearly from a fraction to its
+full value over the first $N$ iterations and then holds, so the correlated levels
+never jump past the smearing window in a single step. Convergence is blocked
+until the ramp completes, so the reported final energy is always at the full U.
+
+Both are exposed on the input `hubbard` block written as a mapping, with
+`occ_mix` ($\beta$ in $(0, 1]$, default 1.0) and `u_ramp_iters` (default 0, off).
+
+```yaml
+hubbard:
+  manifolds:
+    - {species: Pt, l: 2, u: 9.0}   # +U on the Pt 5d manifold
+  occ_mix: 0.3
+  u_ramp_iters: 15
+```
+
+The same knobs are `hub_occ_mix` and `hub_u_ramp_iters` on `scf` and `scf_uspp`,
+and on the `GradWave` calculator. They apply on both collinear paths, the
+norm-conserving `scf` and the USPP/PAW `scf_uspp`. The noncollinear spinor path
+does not take them yet, so a large-U metallic SOC +U run has neither aid.
+
 ## Forces and stress with +U
 
 The +U energy is a differentiable function of the positions and the cell through

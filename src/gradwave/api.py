@@ -294,6 +294,10 @@ def run_scf(
     manifolds = _hubbard_manifolds(inp)
     if manifolds is not None:
         common["hubbard"] = manifolds
+        # +U convergence aids (both collinear drivers take these kwarg names);
+        # defaults (β=1.0, ramp off) leave today's numbers bit-for-bit
+        common["hub_occ_mix"] = inp.hubbard.occ_mix
+        common["hub_u_ramp_iters"] = inp.hubbard.u_ramp_iters
     if inp.tot_magnetization is not None and not uspp:
         # fixed spin moment: a collinear nspin=2, no-smearing pin (see
         # scf/loop.py:_check_scf_args). The USPP path has no such argument.
@@ -633,6 +637,8 @@ def _build_relax_calc(inp: Input) -> GradWave:
         mixing_kerker=kerker,
         precond=inp.scf.mixing.precond,
         hubbard=list(inp.hubbard.manifolds) if inp.hubbard.enabled else None,
+        hub_occ_mix=inp.hubbard.occ_mix,
+        hub_u_ramp_iters=inp.hubbard.u_ramp_iters,
         device=inp.device,
         verbose=False,
     )

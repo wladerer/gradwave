@@ -52,10 +52,13 @@ from gradwave.scf.common import (
     adaptive_diago_tol,
     assemble_pw_energies,
     convergence_gate,
+    hubbard_u_ramp_scale,
+    mix_hubbard_occ,
     record_iteration,
     shared_fermi_occupations,
     spin_xc_energy,
     symmetrize_rho,
+    validate_hubbard_conv,
     warm_start_densities,
 )
 from gradwave.scf.guess import sad_density
@@ -256,6 +259,8 @@ class _IterOps:
     # by _build_iter_ops -- always a real Tensor by the time _scf_iteration reads it
     # (equal to system.kweights itself when dist_ctx is None); Optional only so this
     # trailing dataclass field can default like its neighbors.
+    hub_occ_mix: float = 1.0  # DFT+U occupation-matrix damping β in (0,1] (1.0 = raw one-step lag)
+    hub_u_ramp_iters: int = 0  # DFT+U linear U-ramp length in iterations (0 = off)
 
 
 _MP_CROSSOVER = MP_CROSSOVER  # diago tol above this runs the fp32 draft solves
@@ -375,6 +380,8 @@ def _build_iter_ops(
     hubbard: list[HubbardManifold] | None = None,
     mixed_precision: bool = False,
     dist_ctx: "DistKContext | None" = None,
+    hub_occ_mix: float = 1.0,
+    hub_u_ramp_iters: int = 0,
 ) -> _IterOps:
     grid = system.grid
     vol = grid.volume
@@ -450,6 +457,8 @@ def _build_iter_ops(
         mixed_precision=mixed_precision,
         dist_ctx=dist_ctx,
         kweights_global=kweights_global,
+        hub_occ_mix=hub_occ_mix,
+        hub_u_ramp_iters=hub_u_ramp_iters,
     )
 
 
@@ -517,11 +526,19 @@ def _hubbard_occ_update(
     coeffs_b: list[torch.Tensor | None],
     occ_s: list[torch.Tensor],
     n_hub_s: list[list[torch.Tensor]] | None,
+    u_scale: float = 1.0,
 ) -> tuple[None, torch.Tensor] | tuple[list[list[torch.Tensor]], torch.Tensor]:
     """Refresh the DFT+U per-spin occupation matrices from the fresh orbitals and
     return (n_hub_s, e_hub). No Hubbard manifold → (n_hub_s, 0). The
     _padded_coeffs closure captures coeffs_b by default argument (per-k pads the
     trimmed orbitals back to npw_max).
+
+    ``n_hub_s`` on entry is the PREVIOUS iteration's matrix; it is the damping
+    target for the ``ops.hub_occ_mix`` (β) mix that produces the carry-forward
+    ``n = (1-β)·n_prev + β·n_new``. ``e_hub`` stays at the FRESH ``n_new`` and is
+    scaled by ``u_scale`` for the U-ramp (mirrors the D-matrix scaling in
+    ``_solve_bands_uspp``). β=1.0 AND u_scale=1.0 reproduce today's numbers
+    bit-for-bit — the NC driver's ``_hubbard_occ_update`` mirrors this exactly.
 
     Under a distributed (dist_ctx) run, occupation_matrices' k-sum
     (core/hubbard.py's ``einsum("kb,kbp,kbq->pq", ...)``) is only a sum over
@@ -580,6 +597,12 @@ def _hubbard_occ_update(
             if nspin == 2
             else 2.0 * hubbard_energy(n_hub_new[0], hub.sites)
         )
+    # U-ramp: E_U is linear in U_eff, so scaling the full-U energy by u_scale
+    # matches the ramped-U D-matrix built in _solve_bands_uspp this iteration.
+    if u_scale != 1.0:
+        e_hub = e_hub * u_scale
+    # occupation-matrix damping for the NEXT iteration's V_U (energy stays fresh)
+    n_hub_new = mix_hubbard_occ(n_hub_s, n_hub_new, ops.hub_occ_mix)
     return n_hub_new, e_hub
 
 
@@ -684,11 +707,15 @@ def _solve_bands_uspp(
     coeffs_b: list[torch.Tensor | None],
     tol_eff: float,
     seed_salt: int,
+    u_scale: float = 1.0,
 ) -> list[torch.Tensor]:
     """Generalized eigensolve H x = ε S x per spin (batched or per-k). Warm-starts
     from and MUTATES coeffs/coeffs_b IN PLACE — the frozen warm-start contract
     newton.py relies on. The S-normalization is fp64 always (even under mixed
-    precision), and x_b is cast to CDTYPE before it. Returns eigs_s."""
+    precision), and x_b is cast to CDTYPE before it. Returns eigs_s.
+
+    ``u_scale`` (default 1.0) linearly scales the Hubbard V_U D-matrix for the
+    U-ramp; V_U is exactly linear in U_eff (see hubbard_u_ramp_scale)."""
     system, nspin, batched = ops.system, ops.nspin, ops.batched
     bk, shape, dev = ops.bk, ops.shape, ops.dev
     nk, nb, p_b, projs, hub = ops.nk, ops.nb, ops.p_b, ops.projs, ops.hub
@@ -709,9 +736,10 @@ def _solve_bands_uspp(
             # n_hub_s is set together with hub at scf_uspp's setup and only
             # ever refreshed (never reset to None) while hub stays set.
             assert n_hub_s is not None
-            hub_d = hubbard_dmatrix(
-                n_hub_s[isp], hub.sites, hub.nproj, dev
-            ).conj()  # apply wants D^T
+            dij_hub = hubbard_dmatrix(n_hub_s[isp], hub.sites, hub.nproj, dev)
+            if u_scale != 1.0:  # U-ramp: V_U is linear in U_eff
+                dij_hub = dij_hub * u_scale
+            hub_d = dij_hub.conj()  # apply wants D^T
         if batched:
             from gradwave.core.batch import becp_b
             from gradwave.scf.uspp_batch import BatchedHS, davidson_gen_batched
@@ -837,6 +865,7 @@ def _scf_iteration(
     n_hub_s: list[list[torch.Tensor]] | None,
     tol_eff: float,
     seed_salt: int,
+    it: int | None = None,
 ) -> _IterStep:
     """ONE evaluation of the SCF map at (rho_s, rho_ij_mix): potentials →
     screened D (+ one-center ddd from the MIXER-side becsum) → generalized
@@ -844,16 +873,24 @@ def _scf_iteration(
     shared-Fermi occupations (+U matrices) → fresh densities/becsum →
     energy assembly. No mixing, no convergence judgment, no rescue —
     those belong to the driver (or to newton/the rig, which call this
-    directly)."""
+    directly).
+
+    ``it`` (the 1-based SCF iteration) drives the DFT+U U-ramp; when None (the
+    newton/rig direct callers) or ``ops.hub_u_ramp_iters<=0`` the ramp factor is
+    1.0 (full U)."""
     system, xc, nspin = ops.system, ops.xc, ops.nspin
     smearing, width, hub = ops.smearing, ops.width, ops.hub
     vloc_r, phase_pos = ops.vloc_r, ops.phase_pos
     is_paw, onec, dev = ops.is_paw, ops.onec, ops.dev
+    # DFT+U U-ramp factor for this iteration; 1.0 (no ramp) when it is None.
+    u_scale = 1.0 if it is None else hubbard_u_ramp_scale(it, ops.hub_u_ramp_iters)
     veff_s, dscr_s, e_onec = uspp_potentials_dscr(
         system, xc, rho_s, rho_ij_mix, vloc_r, phase_pos, onec if is_paw else None
     )
 
-    eigs_s = _solve_bands_uspp(ops, veff_s, dscr_s, n_hub_s, coeffs, coeffs_b, tol_eff, seed_salt)
+    eigs_s = _solve_bands_uspp(
+        ops, veff_s, dscr_s, n_hub_s, coeffs, coeffs_b, tol_eff, seed_salt, u_scale
+    )
 
     dist_ctx = ops.dist_ctx
     if dist_ctx is not None:
@@ -889,7 +926,7 @@ def _scf_iteration(
     # DFT+U: fresh S-metric occupation matrices + Dudarev E_U (lags one
     # step into V_U like the NC path; nspin=1 splits [0,2] occupations
     # into two equal channels)
-    n_hub_s, e_hub = _hubbard_occ_update(ops, hub, coeffs_full, coeffs_b, occ_s, n_hub_s)
+    n_hub_s, e_hub = _hubbard_occ_update(ops, hub, coeffs_full, coeffs_b, occ_s, n_hub_s, u_scale)
 
     rho_out_s, rho_ij_s, becps_s = _build_output_density(ops, coeffs_full, coeffs_b, occ_s)
     rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
@@ -1201,6 +1238,10 @@ def scf_uspp(
     trust_factor: float = 20.0,
     batched: bool = True,
     hubbard: list[HubbardManifold] | None = None,
+    hub_occ_mix: float = 1.0,  # DFT+U occupation-matrix damping β in (0,1] (1.0 = raw one-step
+    # lag, bit-for-bit). Mirrors scf.loop.scf; a +U knob tied to `hubbard`, not part of SCFOptions
+    hub_u_ramp_iters: int = 0,  # DFT+U linear U-ramp length (0 = off); convergence is blocked until
+    # the ramp completes so the reported final energy is at full U. Mirrors scf.loop.scf
     start_from: _USPPStartFrom = None,
     criterion: str = "drho",
     energy_metric: bool = False,  # opt-in energy-metric gate (converge on
@@ -1362,6 +1403,8 @@ def scf_uspp(
         raise ValueError("criterion must be 'drho' or 'energy'")
     if mixing_metric not in ("plain", "coulomb"):
         raise ValueError("mixing_metric must be 'plain' or 'coulomb'")
+    if hubbard:
+        validate_hubbard_conv(hub_occ_mix, hub_u_ramp_iters)
     if hasattr(system.rho_symmetrizer, "apply_m"):
         raise ValueError(
             "system was built with magnetic symmetry (magmoms=...) — "
@@ -1400,6 +1443,8 @@ def scf_uspp(
         hubbard=hubbard,
         mixed_precision=mixed_precision,
         dist_ctx=dist_ctx,
+        hub_occ_mix=hub_occ_mix,
+        hub_u_ramp_iters=hub_u_ramp_iters,
     )
     hub = ops.hub
     n_hub_s = None
@@ -1530,7 +1575,9 @@ def scf_uspp(
             first_tol=1e-3 if start_from is None else diago_tol,
         )
 
-        step = _scf_iteration(ops, rho_s, rho_ij_mix, coeffs, coeffs_b, n_hub_s, tol_eff, seed_salt)
+        step = _scf_iteration(
+            ops, rho_s, rho_ij_mix, coeffs, coeffs_b, n_hub_s, tol_eff, seed_salt, it
+        )
         eigs_s, occ_s, mu = step["eigs_s"], step["occ_s"], step["mu"]
         eigs_global_s, occ_global_s = step["eigs_global_s"], step["occ_global_s"]
         n_hub_s = step["n_hub_s"]
@@ -1652,6 +1699,10 @@ def scf_uspp(
             )
         else:
             done = convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol)
+        # Block convergence until the U-ramp reaches full U, so the reported
+        # final energy is never at a partial, ramped U_eff.
+        if hub_u_ramp_iters > 0 and it < hub_u_ramp_iters:
+            done = False
         if done:
             converged = True
             rho_s = rho_out_s
