@@ -207,7 +207,7 @@ defect, which the [Performance](performance.md) page works through in full.
   across the consumer/datacenter line. The QR CPU-offload and the Rayleigh-Ritz GEMM
   residency choice both invert between the RTX 3050 and an H100. Offloading a small fp64
   factorization to CPU LAPACK wins on the 3050 (its fp64 is 1/64 of fp32) and loses on the
-  H100 (fp64 near fp32), and the fp32-subspace trick that dodges the consumer fp64 tax buys
+  H100 (fp64 near fp32), and the fp32-subspace trick that dodges the consumer fp64 tax gains
   nothing against fp64 tensor cores. The #214 microbench gate is the pattern, time a small
   fp64 GEMM against an fp32 GEMM once per device and choose from the measured ratio (3050
   38.3, H100 near 1) rather than hardcoding the consumer-card answer.

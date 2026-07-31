@@ -966,7 +966,7 @@ to baseline through iteration 20. The same kernel applied to the mixer's total u
 fixed lab frame kills the transverse floor 13x (dm_x 7.9e-6 against 1.2e-4 at the residual
 hook, same kernel, same frame, different insertion point). The frame matters as much as
 the insertion point, the instantaneous-moment frame tilts with the wandering G=0 noise and
-self-defeats, the lab/seed-axis frame holds. Where the damping works, reverse-Kerker beats
+self-defeats, the lab/seed-axis frame holds. Where the damping works, reverse-Kerker outperforms
 the flat null 8x, so the |G| structure is real.
 
 None of it lowers the total floor. The longitudinal near-Stoner channel binds at 2e-4 to
@@ -980,7 +980,7 @@ the moment-frame hook drives the pair to 171.8 degrees near anti-alignment, the 
 wrap lands its axis off the bisector, and the SOC lab-frame wrap never completes and
 settles 8 meV into a different basin. The G=0-free design does not protect physical
 rotation because interatomic alignment is a staggered rotation living at finite G, exactly
-where the damping bites.
+where the damping acts.
 
 Verdict, no-go for production. The operative fix stays recommendation 1, gate magnetic
 spinor runs on the energy (#210, #215). A future mixer-side cure must damp the update not
@@ -1475,7 +1475,7 @@ and its worktree is prunable).
    7.8x on Si-2, 7.69x on Si-16 (2x2x2), and 2.30x on Si-64 (Gamma-only, so the drop conflates
    atom count with k-point count and is not a clean size trend). The edge does not grow with
    cell size across this ladder, so the amorphous-cell default gate looks unlikely to be met,
-   though joint stays a win at every size measured.
+   though joint stays faster at every size measured.
 6. The phonon byproduct check, Hvp-Lanczos dynamical matrix against
    `postscf/phonons_supercell.py`.
 7. Metals, gated solely on #129.
@@ -1790,7 +1790,7 @@ the same hardware caveat the scaling section opens with.
 
 The H100 session (#206, round 5) closes the revisit permanently. At datacenter fp64 the fp32 FFT
 advantage the revisit was waiting for is gone, since fp64 tensor cores run the standard kernels
-directly and the extra H-applies have nothing to buy. Chebyshev is 2x slower than davidson at 10
+directly and the extra H-applies have nothing to gain. Chebyshev is 2x slower than davidson at 10
 atoms and 13x slower at Si-128 (15.316 vs 1.165 s/iter, identical energy), and the gap widens with
 cell size with no crossover anywhere in 10 to 216 atoms. Davidson stays the unconditional default on
 every device class.

@@ -58,7 +58,7 @@ to re-apply through the inner Davidson solves.
     (`exchange_operator_isdf`, validated against the direct build), but the
     self-consistent `hybrid_scf` driver does not call it. The driver builds the
     Fock operator directly and compresses it with ACE each step, so a hybrid SCF
-    pays the direct co-density cost today. ACE itself is exact on the occupied
+    incurs the direct co-density cost today. ACE itself is exact on the occupied
     subspace, reproducing the direct operator's action to 1e-13 eV/atom on the
     H100 oracle (issue #206). Routing the SCF through ISDF is separable follow-up
     work.

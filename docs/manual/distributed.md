@@ -180,12 +180,12 @@ against about 16.8 s/iter amortized single-rank. Reach for it on k-heavy
 systems, not on coarse meshes.
 
 Two cautions from that session. Large multi-rank runs currently deadlock in the
-post-SCF result reassembly (issue #216): the final gather pickles each rank's
+post-SCF result reassembly (issue #216). The final gather pickles each rank's
 list of large CUDA coefficient tensors through `dist.all_gather_object`, and
 both ranks block. It is payload-dependent, so a small cell gathers fine while a
 54³-grid, 28-k-per-rank shard hangs. Until the gather is replaced with a sized
 raw-tensor `all_gather` staged through CPU, treat big multi-rank GPU runs as
-blocked. Separately, cosmetic only: a distributed run built with
+blocked. Separately, and cosmetic only, a distributed run built with
 `symmetry: false` still prints a header like "56 k(IBZ)", because the count
 shown is the time-reversal reduction on the local shard labelled with the IBZ
 tag. The mesh is the full one, the label is wrong, nothing about the calculation

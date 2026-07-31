@@ -599,7 +599,7 @@ finding reverses on both counts. The fp64 GPU GEMM measures 1.26 ms against 139.
 ms for the CPU-resident path, so the CPU offload the 3050 profile flirted with is
 a 100x loss here, not a candidate. The fp32-compute variant measures 1.16 ms, no
 margin over the fp64 tensor cores, so the fp32-subspace trick that would have
-dodged the consumer card's fp64 tax buys nothing on a card that has none. On a
+dodged the consumer card's fp64 tax gains nothing on a card that has none. On a
 datacenter card the Rayleigh-Ritz step belongs on the GPU in fp64 and the whole
 offload/precision-split question is moot. The consumer-card scope of the sections
 above holds unchanged. Benchmark per device class, do not port a GPU tuning
