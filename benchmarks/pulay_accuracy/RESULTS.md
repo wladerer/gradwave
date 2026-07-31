@@ -9,7 +9,7 @@ Truth harness `measure.py` on the sheared-Si cell from
 `P_raw` uses `postscf.stress.stress(symmetrize=False)`, converted with
 1 eV/A^3 = 160.2176634 GPa. The estimate uses the default annulus
 (factor*ecut, factor=2.5) so the reference at 45 Ry is a genuine target the
-estimator does not see. A ratio of 1.0 is exact; the estimator is a correctly
+estimator does not see. A ratio of 1.0 is exact. The estimator is a correctly
 signed first-order indicator that historically under-estimates.
 
 Reproduce:
@@ -115,7 +115,7 @@ two percent, far short of the remaining gap, on both solvers:
 | 2x2x2 / 16 Ry | 0.599 | 0.602 | 0.770 | 0.772 |
 
 The double-counting term is a positive penalty that can only shrink the estimate,
-so self-consistency is not the missing lever. Gated off and not shipped; the
+so self-consistency is not the missing lever. Gated off and not shipped. The
 measured no-go is recorded in docs/ideas.md.
 
 ## Quartz validation (relaxed alpha-quartz, 65 Ry)

@@ -287,7 +287,7 @@ print(pe["pressure_error_kbar"], pe["n_h_apply"])
 An `extrapolate=True` flag samples the frozen-state energy error at several
 annulus factors and fits the tail toward the complete-annulus limit. On silicon
 the annulus tail is nearly volume-independent, so it barely moves the pressure
-and is off by default; see `benchmarks/pulay_accuracy/RESULTS.md` for the numbers.
+and is off by default. See `benchmarks/pulay_accuracy/RESULTS.md` for the numbers.
 
 ## Coverage
 
