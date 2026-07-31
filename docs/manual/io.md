@@ -49,7 +49,7 @@ means the quantity is dimensionless or a plain count.
 | `ecutrho` | `4 × ecut` | eV | float | Density/augmentation cutoff. USPP/PAW only. Ignored for norm-conserving. |
 | `xc` | `pbe` | — | string | Functional: `lda`, `pbe`, `r2scan`, or a hybrid `pbe0` / `hse` (see [`hybrid`](#hybrid) and [Hybrid functionals](hybrid-functionals.md)). |
 | `hybrid` | *see below* | — | mapping | Hybrid-exchange overrides (`alpha`, `omega`); only with a hybrid `xc`. |
-| `hubbard` | `null` | — | list | DFT+U (Dudarev) manifolds, one per correlated species (see [`hubbard`](#hubbard)). |
+| `hubbard` | `null` | — | list or mapping | DFT+U (Dudarev) manifolds, one per correlated species; a mapping form carries the `occ_mix`/`u_ramp_iters` convergence aids (see [`hubbard`](#hubbard)). |
 | `nbands` | `auto` | — | int or `auto` | Number of Kohn-Sham bands. `auto` picks from the electron count. |
 | `symmetry` | `true` | — | bool | Reduce k to the IBZ and symmetrize the density each step. Forced off for a magnetic `noncollinear` run and the `magnetism` task (symmetry acts on the moment vector); setting it `true` there is an error. A spin-orbit-only run (`nonmagnetic: true`) keeps symmetry. |
 | `nspin` | `1` | — | int | `1` unpolarized, `2` collinear spin. |
@@ -226,6 +226,25 @@ hubbard:
 | `l` | *required* | — | int | Correlated shell: `0` (s), `1` (p), `2` (d), `3` (f). |
 | `u` | *required* | eV | float | Hubbard U. |
 | `j` | `0.0` | eV | float | Hund J; enters Dudarev only as `U_eff = U − J`. |
+
+For large U on a metallic manifold the occupation matrix can flip-flop and stall
+the SCF (see [Large U on metallic systems](hubbard-u.md#large-u-on-metallic-systems)).
+Write the block as a mapping to carry the two convergence aids alongside the
+manifold list.
+
+```yaml
+hubbard:
+  manifolds:
+    - {species: Pt, l: 2, u: 9.0}
+  occ_mix: 0.3        # occupation-matrix damping β
+  u_ramp_iters: 15    # linear U-ramp length in iterations
+```
+
+| keyword | default | unit | type | description |
+|---|---|---|---|---|
+| `manifolds` | *required* | — | list | The per-species manifolds above; required key of the mapping form. |
+| `occ_mix` | `1.0` | — | float | Occupation-matrix damping β in (0, 1]; `n = (1−β)·n_prev + β·n_new`. `1.0` is the raw one-step lag. |
+| `u_ramp_iters` | `0` | — | int | Ramp `U_eff` linearly from `1/N` to full over the first `N` iterations, then hold; `0` is off. |
 
 ### `projections`
 

@@ -354,10 +354,19 @@ class HubbardParams:
     spin-orbit — the 2×2 spin-block occupation matrix) and USPP/PAW-collinear
     SCF; its force/stress terms are added on the collinear paths (USPP/PAW +U
     stress stays gated for the noncollinear USPP/PAW SCF, which does not yet
-    have +U wired at all — see scf.uspp_noncollinear.scf_uspp_noncollinear)."""
+    have +U wired at all — see scf.uspp_noncollinear.scf_uspp_noncollinear).
+
+    ``occ_mix`` (β, default 1.0 = today's raw one-step lag) damps the occupation
+    matrix across SCF iterations; ``u_ramp_iters`` (default 0 = off) linearly
+    ramps U_eff over the first N iterations. Both are convergence aids for
+    large-U +U on metallic systems (see docs/manual/hubbard-u.md); set them by
+    giving the ``hubbard`` block as a mapping ``{manifolds: [...], occ_mix: ...,
+    u_ramp_iters: ...}`` instead of a bare list."""
 
     enabled: bool = False
     manifolds: tuple[HubbardManifoldSpec, ...] = ()
+    occ_mix: float = 1.0
+    u_ramp_iters: int = 0
 
 
 @dataclass(frozen=True)
@@ -729,16 +738,42 @@ def _resolve_xc(raw: dict[str, Any]) -> tuple[str, HybridParams]:
 
 
 def _build_hubbard(
-    hub_raw: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+    hub_raw: list[dict[str, Any]] | tuple[dict[str, Any], ...] | dict[str, Any] | None,
     symbols: list[str],
 ) -> HubbardParams:
     """Parse the `hubbard` block: a list of per-species +U manifolds. Each entry
     names an element `species` present in the structure, the correlated shell
     `l`, and `u` (+ optional `j`) in eV. One manifold per species (Dudarev is a
     per-species correction); a species absent from the cell is a typo, not a
-    silent no-op, so it is rejected."""
+    silent no-op, so it is rejected.
+
+    The block may also be a mapping ``{manifolds: [...], occ_mix, u_ramp_iters}``
+    to carry the two convergence aids alongside the manifold list: ``occ_mix``
+    (occupation-matrix damping β in (0, 1], default 1.0) and ``u_ramp_iters``
+    (linear U-ramp length, non-negative integer, default 0 = off)."""
     if hub_raw is None:
         return HubbardParams()
+    occ_mix, u_ramp_iters = 1.0, 0
+    if isinstance(hub_raw, dict):
+        # mapping form: manifolds list plus the convergence-aid knobs. Require
+        # `manifolds` before validating keys so a bare single-manifold mapping
+        # (no `manifolds` key) still fails with the list-form guidance.
+        if "manifolds" not in hub_raw:
+            raise InputError(
+                "hubbard must be a list of {species, l, u[, j]} manifolds, or a "
+                "mapping {manifolds: [...], occ_mix, u_ramp_iters}")
+        _check_keys("hubbard", hub_raw, {"manifolds", "occ_mix", "u_ramp_iters"})
+        occ_mix = float(hub_raw.get("occ_mix", 1.0))
+        u_ramp_iters = int(hub_raw.get("u_ramp_iters", 0))
+        if not (0.0 < occ_mix <= 1.0):
+            raise InputError(
+                f"hubbard.occ_mix (occupation-matrix damping) must be in "
+                f"(0, 1], got {occ_mix}")
+        if u_ramp_iters < 0:
+            raise InputError(
+                f"hubbard.u_ramp_iters must be a non-negative integer, "
+                f"got {u_ramp_iters}")
+        hub_raw = hub_raw["manifolds"]
     if not isinstance(hub_raw, (list, tuple)):
         raise InputError(
             "hubbard must be a list of {species, l, u[, j]} manifolds")
@@ -763,7 +798,8 @@ def _build_hubbard(
         manifolds.append(HubbardManifoldSpec(
             species=sp, l=int(entry["l"]), u=float(entry["u"]),
             j=float(entry.get("j", 0.0))))
-    return HubbardParams(enabled=bool(manifolds), manifolds=tuple(manifolds))
+    return HubbardParams(enabled=bool(manifolds), manifolds=tuple(manifolds),
+                         occ_mix=occ_mix, u_ramp_iters=u_ramp_iters)
 
 
 def _load_input(path: Path) -> Input:

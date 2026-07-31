@@ -239,6 +239,8 @@ class GradWave(Calculator):
         # .u [eV] / optional .j; None → off. Norm-conserving only through the
         # calculator (USPP/PAW +U stress is not implemented and the
         # calculator always evaluates stress for a cell).
+        hub_occ_mix: float = 1.0,  # DFT+U occupation-matrix damping β in (0,1] (1.0 = raw lag)
+        hub_u_ramp_iters: int = 0,  # DFT+U linear U-ramp length in iterations (0 = off)
         verbose: bool = False,
         **kwargs: Any,
     ) -> None:
@@ -304,6 +306,15 @@ class GradWave(Calculator):
             None if not hubbard else [_norm(m) for m in hubbard])
         self.parameters["hubbard"] = (None if self._hubbard is None
                                       else tuple(self._hubbard))
+        # +U convergence aids (forwarded to scf/scf_uspp when hubbard is set);
+        # validated eagerly so a bad value fails at construction, not mid-SCF
+        from gradwave.scf.common import validate_hubbard_conv
+        if self._hubbard is not None:
+            validate_hubbard_conv(hub_occ_mix, hub_u_ramp_iters)
+        self._hub_occ_mix = hub_occ_mix
+        self._hub_u_ramp_iters = hub_u_ramp_iters
+        self.parameters["hub_occ_mix"] = hub_occ_mix
+        self.parameters["hub_u_ramp_iters"] = hub_u_ramp_iters
         self._pseudo_paths: dict[str, str] = dict(pseudopotentials)
         self._upf_cache: dict[str, UPFData | PAWData] = {}
         self._system: System | USPPSystem | None = None
@@ -651,6 +662,7 @@ class GradWave(Calculator):
             eigensolver=p["eigensolver"], precond=p["precond"],
             nspin=nspin, start_mag=start_mag, tot_magnetization=tot_mag,
             hubbard=manifolds,
+            hub_occ_mix=self._hub_occ_mix, hub_u_ramp_iters=self._hub_u_ramp_iters,
             # _warm_start is shared with the USPP path, so its declared return
             # spans both; scf() only ever receives the NC-shaped subset here
             # (is_uspp gates it internally) — the cast documents that, not a
@@ -766,7 +778,10 @@ class GradWave(Calculator):
                        mixing_alpha=p["mixing_alpha"],
                        mixing_history=p["mixing_history"],
                        mixing_kerker=p["mixing_kerker"], precond=p["precond"],
-                       hubbard=manifolds, verbose=self._verbose,
+                       hubbard=manifolds,
+                       hub_occ_mix=self._hub_occ_mix,
+                       hub_u_ramp_iters=self._hub_u_ramp_iters,
+                       verbose=self._verbose,
                        # _warm_start is shared with the NC path; scf_uspp only
                        # ever receives the USPP-shaped subset here (is_uspp
                        # gates it internally) — the cast documents that.

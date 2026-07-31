@@ -43,11 +43,14 @@ from gradwave.scf.common import (
     adaptive_diago_tol,
     assemble_pw_energies,
     convergence_gate,
+    hubbard_u_ramp_scale,
+    mix_hubbard_occ,
     record_iteration,
     shared_fermi_occupations,
     spin_sigmas,
     spin_xc_energy,
     symmetrize_rho,
+    validate_hubbard_conv,
     warm_start_densities,
 )
 from gradwave.scf.guess import sad_density
@@ -861,6 +864,7 @@ def _solve_bands(
     cdtype: torch.dtype,
     t_solve: torch.Tensor,
     device: torch.device,
+    u_scale: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Eigensolve one spin channel of the NC standard problem H x = ε x.
 
@@ -869,6 +873,10 @@ def _solve_bands(
     (eigenvalues [RDTYPE], coeffs [CDTYPE]). fock_apply_sp / metagga_apply_sp are
     this spin's already-indexed operators (or None); each is captured by DEFAULT
     ARGUMENT so the composed closure binds this operator, not a later one.
+
+    ``u_scale`` (default 1.0) linearly scales the Hubbard V_U D-matrix for the
+    U-ramp; the rigid manifold probe alpha is added AFTER scaling so the ramp
+    never touches the linear-response probe.
     """
     from gradwave.core.batch import BatchedHamiltonian
     from gradwave.solvers.registry import get as get_solver
@@ -881,6 +889,8 @@ def _solve_bands(
         # in scf()'s main loop), so it's always real here.
         assert n_hub_sp is not None
         dij = hubbard_dmatrix(n_hub_sp, hub.sites, hub.nproj, device)
+        if u_scale != 1.0:  # U-ramp: V_U is linear in U_eff (see hubbard_u_ramp_scale)
+            dij = dij * u_scale
         if hub_alpha is not None:  # rigid manifold probe α·I (linear response)
             for si, s in enumerate(hub.sites):
                 st, dim = s["start"], s["dim"]
@@ -1079,10 +1089,22 @@ def _hubbard_occ_update(
     nspin: int,
     device: torch.device,
     dist_ctx: "DistKContext | None" = None,
+    n_hub_prev: list[list[torch.Tensor]] | None = None,
+    occ_mix: float = 1.0,
+    u_scale: float = 1.0,
 ) -> tuple[list[list[torch.Tensor]], torch.Tensor] | tuple[None, torch.Tensor]:
     """Refresh the DFT+U per-spin occupation matrices from the fresh orbitals and
     return (n_hub_s, e_hub). No Hubbard manifold → (None, 0). For nspin=1 the
     [0,2] occupation splits into two equal spin channels.
+
+    ``occ_mix`` (β, default 1.0) damps the returned matrices against the previous
+    iteration's ``n_hub_prev`` — ``n = (1-β)·n_prev + β·n_new`` — the
+    occupation-matrix mixing that contracts the large-U-on-metal flip-flop. The
+    energy ``e_hub`` is always evaluated at the FRESH ``n_new`` (the occupation of
+    the current orbitals), not the mixed carry-forward; the two coincide at the
+    fixed point. ``u_scale`` (default 1.0) scales ``e_hub`` for the U-ramp, in
+    lockstep with the D-matrix scaling in ``_solve_bands``. β=1.0 AND u_scale=1.0
+    reproduce today's numbers bit-for-bit.
 
     Under ``dist_ctx`` (distributed k-point-sharded SCF), ``system``/``occ_s``/
     ``coeffs_b_s``/``hub_q`` are all THIS RANK's local k-shard, so
@@ -1123,6 +1145,12 @@ def _hubbard_occ_update(
             e_hub = 2.0 * hubbard_energy(n_hub_s[0], hub.sites)
     if nspin == 1:
         n_hub_s = [n_hub_s[0], n_hub_s[0]]  # loop returns BOTH spin channels
+    # U-ramp: E_U is linear in U_eff, so scaling the full-U energy by u_scale
+    # matches the ramped-U D-matrix built in _solve_bands this same iteration.
+    if u_scale != 1.0:
+        e_hub = e_hub * u_scale
+    # occupation-matrix damping for the NEXT iteration's V_U (energy stays fresh)
+    n_hub_s = mix_hubbard_occ(n_hub_prev, n_hub_s, occ_mix)
     return n_hub_s, e_hub
 
 
@@ -1204,6 +1232,12 @@ def scf(
     # called (it, rho_in_vec, rho_out_vec) each step before mixing, e.g. to capture the residual
     # history a preconditioner fit consumes (see scf.learned_precond.response_from_residuals)
     hubbard: list[HubbardManifold] | None = None,  # list[core.hubbard.HubbardManifold] — Dudarev +U
+    hub_occ_mix: float = 1.0,  # DFT+U occupation-matrix damping β in (0,1]: n_hub carried into the
+    # next iteration's V_U is (1-β)·n_prev + β·n_new. 1.0 (default) = today's raw one-step lag,
+    # bit-for-bit. β~0.3 contracts the large-U-on-metal occupation flip-flop (see the manual)
+    hub_u_ramp_iters: int = 0,  # DFT+U linear U ramp: U_eff climbs 1/N→full over the first N
+    # iterations, then holds; convergence is blocked until it completes so the final energy is at
+    # full U. 0 (default) = off. Pairs with hub_occ_mix for stiff large-U metallic +U systems.
     hub_alpha: list[float] | None = None,  # per-site rigid manifold potential α [eV], lin-response
     start_from: _StartFrom = None,  # previous SCFResult (or checkpoint view) on the SAME FFT grid
     fock: MultiKFockExchange | None = None,  # optional orbital-dep. operator (hybrid Fock exchange)
@@ -1234,6 +1268,8 @@ def scf(
     _validate_scf_args(
         system, nspin, eigensolver, smearing, mixing_scheme, precond, tot_magnetization
     )
+    if hubbard:
+        validate_hubbard_conv(hub_occ_mix, hub_u_ramp_iters)
     if dist_ctx is not None:
         if fock is not None:
             raise NotImplementedError(
@@ -1315,9 +1351,13 @@ def scf(
 
         hub = build_hubbard_projectors(system, hubbard)
         hub_q = hubbard_projectors(hub, system.positions)  # phased (positions fixed)
+        # _hubbard_occ_update always returns BOTH spin channels (nspin=1 splits
+        # [0,2] into two equal halves), so seed the lagged/damping-target matrix
+        # with two channels too — otherwise the occ_mix zip length-mismatches on
+        # the first iteration for nspin=1. Only n_hub_s[0] is read for nspin=1.
         n_hub_s = [
             [torch.zeros(s["dim"], s["dim"], dtype=CDTYPE, device=device) for s in hub.sites]
-            for _ in range(nspin)
+            for _ in range(2)
         ]
 
     vloc_g = local_potential_g(
@@ -1440,6 +1480,10 @@ def scf(
         use_low = mixed_precision and tol_eff > mp_crossover
         cdtype = CDTYPE_LOW if use_low else CDTYPE
         t_solve = bk.t.to(RDTYPE_LOW) if use_low else bk.t
+        # DFT+U U-ramp factor for THIS iteration; 1.0 when the ramp is off. The
+        # same u_scale scales the V_U D-matrix (here) and the E_U energy
+        # (_hubbard_occ_update below), so energy and potential stay at one U.
+        u_scale = hubbard_u_ramp_scale(it, hub_u_ramp_iters)
         for sp in range(nspin):
             fock_sp = fock_apply_s[sp] if fock_apply_s is not None else None
             mgga_sp = metagga_apply_s[sp] if metagga_apply_s is not None else None
@@ -1468,6 +1512,7 @@ def scf(
                 cdtype,
                 t_solve,
                 device,
+                u_scale,
             )
 
         if dist_ctx is not None:
@@ -1507,8 +1552,11 @@ def scf(
             fock_apply_s, e_fock = fock.rebuild(coeffs_b_s, occ_s, system)
 
         # DFT+U occupation matrices from the fresh orbitals; E_U (Dudarev).
+        # n_hub_s on entry is the PREVIOUS iteration's matrix (damping target);
+        # the update returns the mixed carry-forward and the fresh-U-scaled E_U.
         n_hub_s, e_hub = _hubbard_occ_update(
-            hub, hub_q, coeffs_b_s, occ_s, system, nspin, device, dist_ctx
+            hub, hub_q, coeffs_b_s, occ_s, system, nspin, device, dist_ctx,
+            n_hub_prev=n_hub_s, occ_mix=hub_occ_mix, u_scale=u_scale,
         )
 
         rho_raw_s = [
@@ -1637,8 +1685,11 @@ def scf(
             e_hf_gap=e_hf_gap,
         )
 
-        if convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol,
-                            energy_error=e_metric, entol=entol):
+        # Block convergence until the U-ramp reaches full U (u_scale==1.0), so
+        # the reported final energy is never at a partial, ramped U_eff.
+        ramp_done = hub_u_ramp_iters <= 0 or it >= hub_u_ramp_iters
+        if ramp_done and convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol,
+                                          energy_error=e_metric, entol=entol):
             converged = True
             rho_s = rho_out_s
             break
