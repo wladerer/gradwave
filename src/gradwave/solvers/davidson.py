@@ -4,11 +4,21 @@ Norm-conserving pseudopotentials ⇒ standard eigenproblem, no overlap matrix.
 Growing subspace with Rayleigh–Ritz via torch.linalg.eigh, Teter-
 preconditioned residual expansion, band locking, restart at max_dim.
 Runs entirely under torch.no_grad() — autograd must never see this.
+
+Environment
+-----------
+``GRADWAVE_QR_OFFLOAD`` in {"on", "off", "auto"} (default "auto") controls the
+CUDA batched-QR CPU offload (see ``_qr_offload``). "auto" gates it on a one-time
+per-device fp64 microbenchmark, so the offload fires on fp64-crippled consumer
+cards and stays off on datacenter fp64 hardware. "on"/"off" force it either way,
+so a benchmark can toggle the path without monkeypatching. Read once at import.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -68,15 +78,90 @@ def _eigh_subspace(s: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 # Davidson's own n_add is bounded by nb, comfortably under 16 for the systems
 # in this repo's benchmark battery; wider blocks (LOBPCG's stacked [X,W,P],
 # CheFSI's buffered block) fall through to the GPU unchanged, same as today.
+# This is the SIZE gate only. Whether the offload activates at all is a second,
+# device-dependent gate (`_qr_offload_active`): the whole trick only pays off on
+# a card whose fp64 units are slow enough that the D2H/H2D round trip beats them,
+# which the RTX 3050 sweep above assumed but datacenter fp64 hardware breaks.
 _QR_CPU_MAX_COLS = 16
+
+# fp64/fp32 GEMM time ratio above which the CUDA batched-QR offload activates in
+# "auto" mode. Two measurement sources bracket the threshold with a wide margin.
+# On the RTX 3050 that PR #174 tuned, fp64 runs at ~1/64 of fp32 (docs/manual/
+# performance.md), so the measured ratio is tens (~20-60) and the offload is a
+# clear win. On the 4x H100 session (issue #206, benchmarks/results/h100-session)
+# the same A/B measured the offload as a ~13% PENALTY -- Cr2O3 eskolaite, offload
+# on 37.1 s vs off 32.7 s, identical energy to 1.8e-10 meV/atom and identical 16
+# iterations -- because a datacenter fp64 GPU (ratio ~1-2) has no cuSOLVER tax to
+# escape. A threshold of 8 sits an order of magnitude clear of both regimes.
+_QR_OFFLOAD_PENALTY_THRESHOLD = 8.0
+
+# One-shot escape hatch, read once at import (see module docstring). "auto" (the
+# default) uses the microbenchmark gate; "on"/"off" force the offload either way.
+_QR_OFFLOAD_ENV = os.environ.get("GRADWAVE_QR_OFFLOAD", "auto").strip().lower()
+
+# fp64 penalty ratio per CUDA device index. Plain dict, GIL-guarded like the rest
+# of this module -- the microbenchmark is idempotent, so a rare double-measure on
+# first concurrent use is harmless.
+_FP64_PENALTY: dict[int, float] = {}
+
+
+def _fp64_penalty(device: torch.device) -> float:
+    """Measured fp64/fp32 GEMM time ratio on a CUDA device, cached per index.
+
+    Times a small square fp64 matmul against the same-shape fp32 matmul (warmup
+    plus synchronize, a few reps, ~1 ms total). A large ratio means crippled
+    fp64 (consumer card) and favors the CPU-offloaded QR; a ratio near 1 means
+    real fp64 hardware that keeps the QR on-GPU. CUDA-only: the offload it gates
+    is a no-op on CPU, so calling this for a non-CUDA device is a programming
+    error, not a silently-handled case."""
+    if device.type != "cuda":
+        raise ValueError(f"_fp64_penalty is CUDA-only, got device {device!r}")
+    idx = device.index if device.index is not None else torch.cuda.current_device()
+    cached = _FP64_PENALTY.get(idx)
+    if cached is not None:
+        return cached
+    n, reps = 512, 10
+    a32 = torch.randn(n, n, device=device, dtype=torch.float32)
+    a64 = torch.randn(n, n, device=device, dtype=torch.float64)
+
+    def _time(a: torch.Tensor) -> float:
+        for _ in range(3):  # warm the kernel / allocator
+            a @ a
+        torch.cuda.synchronize(device)
+        t0 = time.perf_counter()
+        for _ in range(reps):
+            a @ a
+        torch.cuda.synchronize(device)
+        return (time.perf_counter() - t0) / reps
+
+    t32 = _time(a32)
+    ratio = _time(a64) / t32 if t32 > 0 else float("inf")
+    _FP64_PENALTY[idx] = ratio
+    return ratio
+
+
+def _qr_offload_active(device: torch.device) -> bool:
+    """Whether the CUDA batched-QR CPU offload should apply on `device`.
+
+    False on CPU (the offload is CUDA-only). On CUDA the env hatch wins in both
+    directions; "auto" defers to the fp64 microbenchmark against the threshold."""
+    if device.type != "cuda":
+        return False
+    if _QR_OFFLOAD_ENV == "on":
+        return True
+    if _QR_OFFLOAD_ENV == "off":
+        return False
+    return _fp64_penalty(device) >= _QR_OFFLOAD_PENALTY_THRESHOLD
 
 
 def _qr_offload(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Reduced QR of x (..., rows, cols), CPU-offloaded on CUDA for small cols.
 
+    Two gates guard the offload: the SIZE gate (`_QR_CPU_MAX_COLS`) and the
+    device gate (`_qr_offload_active`, a measured fp64 penalty or the env hatch).
     Returns (q, r) on x.device. Physics-neutral: LAPACK and cuSOLVER QR agree
     to fp64 round-off, well inside the orthonormalization's own tolerance."""
-    if x.is_cuda and x.shape[-1] <= _QR_CPU_MAX_COLS:
+    if x.is_cuda and x.shape[-1] <= _QR_CPU_MAX_COLS and _qr_offload_active(x.device):
         q, r = torch.linalg.qr(x.cpu(), mode="reduced")
         return q.to(x.device), r.to(x.device)
     return torch.linalg.qr(x, mode="reduced")

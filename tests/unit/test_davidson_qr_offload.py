@@ -25,7 +25,12 @@ import importlib
 import pytest
 import torch
 
-from gradwave.solvers.davidson import _qr_offload, davidson_batched
+from gradwave.solvers.davidson import (
+    _fp64_penalty,
+    _qr_offload,
+    _qr_offload_active,
+    davidson_batched,
+)
 
 davidson = importlib.import_module("gradwave.solvers.davidson")
 
@@ -87,6 +92,75 @@ def test_qr_offload_column_count_gate():
     only on CUDA -- exercised directly against the private threshold so a
     future retune of _QR_CPU_MAX_COLS doesn't silently stop being tested."""
     assert davidson._QR_CPU_MAX_COLS >= 1
+
+
+# --- device gate: fp64-penalty microbenchmark ---------------------------------
+
+
+def test_fp64_penalty_rejects_non_cuda_device():
+    """_fp64_penalty is CUDA-only: the offload it gates is a no-op on CPU, so
+    calling it for a CPU device is a programming error, not a handled case."""
+    with pytest.raises(ValueError, match="CUDA-only"):
+        _fp64_penalty(torch.device("cpu"))
+
+
+def test_qr_offload_active_false_on_cpu():
+    """On CPU the device gate is always off -- no microbenchmark, no env read --
+    so CPU-path Davidson behavior is untouched by any of this machinery."""
+    assert _qr_offload_active(torch.device("cpu")) is False
+
+
+def test_qr_offload_active_auto_gates_on_penalty(monkeypatch):
+    """In "auto" mode the gate follows the measured fp64 penalty against the
+    threshold: a crippled-fp64 ratio activates the offload, a datacenter ratio
+    skips it. The microbenchmark is stubbed so the branch is tested without a
+    GPU (a real CUDA device would run it; this isolates the decision logic)."""
+    monkeypatch.setattr(davidson, "_QR_OFFLOAD_ENV", "auto")
+    cuda = torch.device("cuda", 0)
+
+    monkeypatch.setattr(davidson, "_fp64_penalty",
+                        lambda dev: davidson._QR_OFFLOAD_PENALTY_THRESHOLD + 10.0)
+    assert _qr_offload_active(cuda) is True
+
+    monkeypatch.setattr(davidson, "_fp64_penalty",
+                        lambda dev: davidson._QR_OFFLOAD_PENALTY_THRESHOLD - 6.0)
+    assert _qr_offload_active(cuda) is False
+
+
+def test_qr_offload_env_override_wins_both_directions(monkeypatch):
+    """The env hatch overrides the microbenchmark in both directions: "off"
+    skips even a crippled card, "on" offloads even a datacenter card. The
+    penalty stub is set to the opposite verdict to prove the env wins."""
+    cuda = torch.device("cuda", 0)
+
+    monkeypatch.setattr(davidson, "_QR_OFFLOAD_ENV", "off")
+    monkeypatch.setattr(davidson, "_fp64_penalty",
+                        lambda dev: davidson._QR_OFFLOAD_PENALTY_THRESHOLD + 100.0)
+    assert _qr_offload_active(cuda) is False
+
+    monkeypatch.setattr(davidson, "_QR_OFFLOAD_ENV", "on")
+    monkeypatch.setattr(davidson, "_fp64_penalty",
+                        lambda dev: 1.0)  # datacenter-class ratio
+    assert _qr_offload_active(cuda) is True
+
+
+def test_cpu_davidson_unchanged_by_device_gate():
+    """Regression: the CPU Davidson path converges to the operator's true
+    lowest eigenvalues regardless of the new device gate (which is inert on
+    CPU). Guards against the gate leaking into the non-CUDA path."""
+    nk, npw, nb = 2, 60, 6
+    apply, mask = _make_gapped_operator(nk, npw, seed=7, device="cpu")
+    torch.manual_seed(21)
+    x0 = torch.randn(nk, nb, npw, dtype=torch.complex128)
+    t = torch.zeros(nk, npw, dtype=torch.float64)
+    res = davidson_batched(apply, x0, t, mask, tol=1e-9, max_iter=200)
+    assert float(res.residual_norms.max()) < 1e-8
+    # eigenpairs are genuine: H x - lambda x is tiny for every returned band
+    hx = apply(res.eigenvectors)
+    resid = hx - res.eigenvalues[..., None] * res.eigenvectors
+    assert float(torch.linalg.norm(resid, dim=-1).max()) < 1e-6
+    # and returned ascending, as Davidson contracts
+    assert bool((res.eigenvalues[:, 1:] >= res.eigenvalues[:, :-1] - 1e-9).all())
 
 
 @pytest.mark.gpu

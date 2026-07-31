@@ -118,6 +118,21 @@ Rayleigh-Ritz only depends on the span, not the basis' phase convention), and
 inert on CPU (`_qr_offload` only takes the CPU branch when the input is
 already on CUDA).
 
+The offload is now gated on measured fp64 capability. The win above assumes a
+card whose fp64 units are slow enough that the D2H/H2D round trip beats them,
+which holds on the RTX 3050 (fp64 at about 1/64 of fp32) but breaks on a
+datacenter fp64 GPU. On the 4x H100 session (issue #206,
+`benchmarks/results/h100-session`) the same on/off A/B measured the offload as a
+13% penalty, with Cr2O3 eskolaite converging in 16 iterations either way to an
+energy identical at 1.8e-10 meV/atom, at 37.1 s with the offload against 32.7 s
+without. `_qr_offload` therefore times a small fp64 GEMM against an fp32 GEMM
+once per device and offloads only when the ratio exceeds 8. A consumer card
+measures a ratio in the tens and keeps today's behavior, while datacenter fp64
+hardware measures a ratio near 1 and keeps the QR on-GPU. The environment
+variable `GRADWAVE_QR_OFFLOAD` in `{on, off, auto}` forces the offload either
+way or restores the microbenchmark default, so a benchmark toggles the path
+without monkeypatching the module global.
+
 ### Warm-start SCF
 
 The ASE calculator reuses the previous step's density and orbitals as the next SCF
