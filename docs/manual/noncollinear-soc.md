@@ -61,6 +61,45 @@ moment to zero with `nonmagnetic=True` (QE's `domag=false`). The spinor structur
 and SOC stay, the magnetization does not. The converged moment *direction* is
 whatever the unconstrained SCF settles into.
 
+### Convergence and the magnetic knobs
+
+A magnetic spinor SCF does not reach the norm-conserving `rhotol` default on a
+metallic magnet. The magnetization-channel residual floors near 2e-3 from a
+transverse instability while the fixed point underneath is converged. Across
+mixer arms fcc Ni + SOC agrees on the free energy to 4e-5 eV and on the moment to
+four digits, so the residual gate reports an error the energy does not have.
+Gate on the energy instead of loosening the residual tolerance by hand.
+`scf.convergence: energy` stops the spinor run when the residual's exact
+second-order energy error falls below `scf.entol`, with the per-channel charge,
+longitudinal, and transverse decomposition recorded in the trace. See
+[Improving convergence](convergence.md#the-spinor-path).
+
+The (ρ, m⃗) mixing is controlled under `scf.magnetic`, which the spinor driver
+resolves independently of `scf.mixing` (it never reads `scf.mixing.scheme`).
+`mixer` selects the mixer class (`pulay`, `johnson`, or `broyden`),
+`spin_precond` turns on the Stoner preconditioner for the longitudinal moment
+channel, `mixing_alpha` sets the moment step, and `diago_schedule` picks the
+adaptive diagonalization-tolerance schedule (`linear` or `quadratic`). On fcc
+Ni + SOC the stock `pulay` default holds the moment, and the lowest measured
+floor comes from `johnson` with the `quadratic` schedule and a moment step of
+0.3, the moment held throughout.
+
+```yaml
+scf:
+  convergence: energy
+  entol: 1.0e-6
+  magnetic:
+    mixer: johnson
+    diago_schedule: quadratic
+    mixing_alpha: 0.3
+```
+
+`johnson` normalizes its update, so the `pulay`-tuned moment-step boost
+(`max(alpha, 0.6)`) inverts into a moment-collapse accelerant that drives the Ni
+moment through zero onto the nonmagnetic branch. When `mixer: johnson` is
+selected without an explicit `mixing_alpha`, the driver takes 0.3 rather than the
+pulay guard for that reason.
+
 ## Spin-orbit band inversion in Bi₂Se₃
 
 `examples/bi2se3_inversion.py` runs the calculation twice, a scalar-relativistic
@@ -152,6 +191,10 @@ fixed-spin-moment mode and the antiferromagnetic k-fold. See
 - The $\pm\mathbf{m}$ branches are exactly degenerate without spin-orbit coupling,
   and the branch the SCF settles into depends on the trajectory. Gate on the moment
   magnitude, not its sign.
+- A magnetic spinor run floors the density residual near 2e-3 on a metallic magnet
+  and will not hit `rhotol` 1e-5. The floor is a transverse instability, not a
+  wrong fixed point. Use `scf.convergence: energy` rather than loosening `rhotol`
+  by hand (see [Convergence and the magnetic knobs](#convergence-and-the-magnetic-knobs)).
 
 ## Next
 

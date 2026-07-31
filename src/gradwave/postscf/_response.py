@@ -260,6 +260,120 @@ def kernel_energy_error(grid: FFTGrid, xc, r_s: list[torch.Tensor],
     return e_total, e_charge, e_mag
 
 
+def _fxc_hvp_noncollinear(
+    xc: NoncollinearXC, rho0: torch.Tensor, m0: torch.Tensor, grid: FFTGrid,
+    w_rho: torch.Tensor, w_m: torch.Tensor,
+    rho_core: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Coupled (ρ, m⃗) f_xc Hessian-vector product of the noncollinear E_xc at
+    (rho0, m0), in physical units [eV]. Returns (f_ρ, f_m⃗), the ρ- and
+    m⃗-components of f_xc·(w_ρ, w_m⃗).
+
+    Double backward through ``core.xc.noncollinear.energy_with_grid``, the same
+    locally-collinear energy the spinor SCF's v_xc/B⃗_xc autograd uses
+    (``vxc_and_bxc``), so the kernel is evaluated at the SCF's own linearization
+    point. ``xc_eager()`` forces eager mode, since compiled aot_autograd cannot
+    double-backward. rho_core (NLCC) is folded into ρ inside ``energy_with_grid``,
+    matching the SCF, and the returned fields carry the grid-cell → physical
+    conversion n_points/Ω (see ``fxc_hvp``). Unlike
+    ``fxc_hvp_noncollinear_nonmagnetic`` this keeps the full charge<->magnetization
+    coupling and works at a nonzero moment.
+    """
+    from gradwave.core.xc.noncollinear import energy_with_grid
+
+    rho = rho0.detach().clone().requires_grad_(True)
+    m = m0.detach().clone().requires_grad_(True)
+    with torch.enable_grad(), xc_eager():
+        e_xc = energy_with_grid(xc, rho, m, grid, rho_core=rho_core)
+        v_rho, v_m = torch.autograd.grad(e_xc, (rho, m), create_graph=True)
+        inner = (v_rho * w_rho.detach()).sum() + (v_m * w_m.detach()).sum()
+        f_rho, f_m = torch.autograd.grad(inner, (rho, m))
+    scale = grid.n_points / grid.volume
+    return f_rho * scale, f_m * scale
+
+
+def kernel_energy_error_noncollinear(
+    grid: FFTGrid, xc: NoncollinearXC, r_rho: torch.Tensor, r_m: torch.Tensor,
+    rho0: torch.Tensor, m0: torch.Tensor,
+    rho_core: torch.Tensor | None = None,
+) -> tuple[float, float, float, float, float]:
+    """Second-order SCF energy-error estimate 1/2 <r|K_Hxc|r> [eV] of a spinor
+    density residual r = (r_ρ, r_m⃗), decomposed into charge, longitudinal, and
+    transverse magnetization channels. Returns
+    ``(e_total, e_charge, e_mag, e_long, e_trans)``.
+
+    The noncollinear counterpart of ``kernel_energy_error``. K_Hxc is the Hartree
+    kernel 4πe²/G² acting on the charge channel plus the EXACT coupled (ρ, m⃗)
+    f_xc Hessian-vector product of the noncollinear E_xc (``_fxc_hvp_noncollinear``),
+    evaluated at the iteration's input density (rho0, m0). The f_xc term carries the
+    full charge<->magnetization coupling, so no channel is dropped, and at a moment
+    purely along one axis this reduces exactly to the collinear ``kernel_energy_error``
+    (verified to machine precision).
+
+    Omissions, mirroring ``kernel_energy_error``. The χ₀ independent-particle
+    response term needs a conduction-projected Sternheimer solve per band restricted
+    to insulators, neither cheap per iteration nor applicable to the metallic magnets
+    this gate targets, so it is omitted, as are the Hubbard (+U) and Fock second-order
+    kernels. A meta-GGA (``needs_tau``) raises rather than return a silently-wrong
+    estimate that drops the kinetic-energy-density response.
+
+    Channel decomposition. The magnetization residual is split about the global
+    integrated-moment axis m̂ = ∫m⃗/|∫m⃗| into a longitudinal part
+    r_∥ = (r_m⃗·m̂) m̂ and a transverse part r_⊥ = r_m⃗ − r_∥. This is the
+    campaign's floor decomposition (research/noncollinear-convergence), where the
+    transverse magnon-soft modes carry the density-residual floor but little energy
+    and the longitudinal near-Stoner channel carries the rest. ``e_charge``,
+    ``e_long``, and ``e_trans`` are each the pure diagonal quadratic form
+    1/2<·|K_Hxc|·> of that channel alone; ``e_mag`` is the full magnetization block
+    1/2<(0,r_m⃗)|K_Hxc|(0,r_m⃗)> = e_long + e_trans + a longitudinal<->transverse
+    cross term. The four do NOT sum to ``e_total``, which also carries the
+    charge<->magnetization f_xc cross term. With no net moment (a nonmagnetic or
+    fully-compensated cell) the whole magnetization residual is reported as
+    transverse, there being no longitudinal axis.
+    """
+    if getattr(xc, "needs_tau", False):
+        raise NotImplementedError(
+            "energy-metric convergence gate does not support meta-GGA "
+            "(needs_tau): the noncollinear K_Hxc kernel here omits the "
+            "kinetic-energy-density (tau) response")
+    cell = grid.volume / grid.n_points
+    zero_rho = torch.zeros_like(r_rho)
+    zero_m = torch.zeros_like(r_m)
+
+    # longitudinal/transverse split about the global integrated-moment axis of
+    # the state (∫ m0 dr), the near-collinear magnet's well-defined moment axis
+    m_int = torch.stack([m0[i].sum() for i in range(3)]) * cell
+    m_norm = float(torch.linalg.norm(m_int))
+    if m_norm > 1e-8:
+        m_hat = (m_int / m_norm).to(r_m.dtype)
+        r_par = sum(r_m[i] * m_hat[i] for i in range(3))
+        r_long = torch.stack([r_par * m_hat[i] for i in range(3)])
+        r_trans = r_m - r_long
+    else:
+        r_long, r_trans = zero_m, r_m
+
+    kh_r = hartree_kernel(grid, r_rho)  # charge-only Hartree kernel
+
+    # three f_xc block applications (f_xc is linear): (r_ρ,0), (0,r_∥), (0,r_⊥)
+    frr_rho, frr_m = _fxc_hvp_noncollinear(xc, rho0, m0, grid, r_rho, zero_m, rho_core)
+    fl_rho, fl_m = _fxc_hvp_noncollinear(xc, rho0, m0, grid, zero_rho, r_long, rho_core)
+    ft_rho, ft_m = _fxc_hvp_noncollinear(xc, rho0, m0, grid, zero_rho, r_trans, rho_core)
+
+    def _dot_m(a, b):
+        return sum(float((a[i] * b[i]).sum()) for i in range(3))
+
+    e_charge = 0.5 * (float((r_rho * kh_r).sum()) + float((r_rho * frr_rho).sum())) * cell
+    e_long = 0.5 * _dot_m(r_long, fl_m) * cell
+    e_trans = 0.5 * _dot_m(r_trans, ft_m) * cell
+    fm_m = [fl_m[i] + ft_m[i] for i in range(3)]  # f_xc·(0, r_m⃗), m-component
+    e_mag = 0.5 * _dot_m(r_m, fm_m) * cell
+    # total: K_Hxc·(r_ρ, r_m⃗) contracted with (r_ρ, r_m⃗), by linearity
+    f_rho_tot = kh_r + frr_rho + fl_rho + ft_rho
+    f_m_tot = [frr_m[i] + fl_m[i] + ft_m[i] for i in range(3)]
+    e_total = 0.5 * (float((r_rho * f_rho_tot).sum()) + _dot_m(r_m, f_m_tot)) * cell
+    return e_total, e_charge, e_mag, e_long, e_trans
+
+
 def spin_sigma_triple(
     xc: SpinXC, r_u: torch.Tensor, r_d: torch.Tensor, g_cart: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[None, None, None]:

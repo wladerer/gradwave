@@ -362,6 +362,16 @@ def _run_scf_noncollinear(
         max_iter=inp.scf.max_iter, etol=inp.scf.etol, rhotol=inp.scf.rhotol,
         mixing_alpha=inp.scf.mixing.alpha,
         mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
+        # magnetic-channel spinor knobs (scf.magnetic); the spinor driver
+        # resolves its (ρ, m⃗) mixing independently of scf.mixing.scheme, so
+        # these are the only path to them from an input file.
+        mag_mixer=inp.scf.magnetic.mixer,
+        spin_precond=inp.scf.magnetic.spin_precond,
+        mag_mixing_alpha=inp.scf.magnetic.mixing_alpha,
+        mag_diago_schedule=inp.scf.magnetic.diago_schedule,
+        # energy-metric convergence gate (opt-in via scf.convergence: "energy");
+        # the default "density" leaves the residual gate bit-for-bit unchanged.
+        energy_metric=(inp.scf.convergence == "energy"), entol=inp.scf.entol,
         diago_tol=inp.scf.diago_tol, verbose=verbose,
         nonmagnetic=inp.nonmagnetic,
         hubbard=manifolds,
@@ -466,7 +476,16 @@ def build_summary(res: SCFLike, inp: Input, task: str,
     trace: list[dict[str, Any]] = [
         {"iter": h["iter"], "free_energy_eV": float(h["free_energy"]),
          "dE_eV": _finite(h["dE"]), "drho": float(h["res"]),
-         **({"t_s": round(float(h["t"]), 3)} if "t" in h else {})}
+         **({"t_s": round(float(h["t"]), 3)} if "t" in h else {}),
+         # spinor energy-metric gate (scf.convergence: energy): the per-iteration
+         # estimate and its charge / longitudinal / transverse decomposition,
+         # recorded only on the noncollinear driver's own history (it has no
+         # SCFRecorder). Absent on the density-gate path and the other formalisms.
+         **({"energy_metric_eV": float(h["energy_metric_eV"]),
+             "energy_metric_charge_eV": float(h["energy_metric_charge_eV"]),
+             "energy_metric_longitudinal_eV": float(h["energy_metric_longitudinal_eV"]),
+             "energy_metric_transverse_eV": float(h["energy_metric_transverse_eV"])}
+            if h.get("energy_metric_eV") is not None else {})}
         for h in (_get(res, "history") or [])
     ]
     scf_block: dict[str, Any] = {
@@ -511,11 +530,19 @@ def build_summary(res: SCFLike, inp: Input, task: str,
         "rhotol": float(inp.scf.rhotol),
         "ratio_q": q,
         "warm_started": inp.restart is not None,
-        # the per-iteration energy-metric value itself is surfaced under
-        # scf_diagnostics.energy_metric_eV (the recorder block); here we record
-        # only the active criterion and its threshold.
+        # the per-iteration energy-metric value is surfaced under
+        # scf_diagnostics.energy_metric_eV (the recorder block) on the collinear
+        # and USPP/PAW paths; here we record the active criterion and threshold,
+        # plus the final estimate for the spinor path (which has no recorder).
         **({"entol_eV": float(inp.scf.entol)}
            if inp.scf.convergence == "energy" else {}),
+        **({"final_energy_metric_eV": _final.get("energy_metric_eV"),
+            "final_energy_metric_charge_eV": _final.get("energy_metric_charge_eV"),
+            "final_energy_metric_longitudinal_eV":
+                _final.get("energy_metric_longitudinal_eV"),
+            "final_energy_metric_transverse_eV":
+                _final.get("energy_metric_transverse_eV")}
+           if _final.get("energy_metric_eV") is not None else {}),
     }
 
     summary = {

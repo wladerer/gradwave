@@ -11,7 +11,20 @@ validated cleanly, terminating the stagnating Ni PAW pulay arm at F within
 2e-8 eV of the johnson reference fixed point while the density gate sat at the
 120-iteration cap, and agreeing with the density gate on Ni/Fe PAW johnson and
 Si NC. The Harris-Foulkes/KS gap is recorded alongside on the NC path as the
-zero-machinery bracket. Phases (c) (spinor) and (d) (default flip) remain open.
+zero-machinery bracket.
+
+Phase (c) (spinor) landed on branch `feat/spinor-convergence-surface`
+(2026-07-30). The spinor driver takes `energy_metric`/`entol` and gates on the
+exact 4-channel kernel error `postscf._response.kernel_energy_error_noncollinear`,
+the Hartree charge kernel plus the coupled (ρ, m⃗) f_xc Hessian-vector product of
+the noncollinear functional. The decomposition is charge, longitudinal, and
+transverse magnetization rather than the three Cartesian components, following
+the campaign's floor decomposition where the transverse magnon-soft modes carry
+the density-residual floor and little energy. At a moment along a single axis the
+total reduces to the collinear `kernel_energy_error` to machine precision. The
+same branch exposes the four magnetic spinor knobs through `scf.magnetic` and adds
+the johnson moment-collapse guard. Phase (d) (default flip) remains open.
+
 The plan adds an opt-in convergence gate on the
 estimated energy error `<drho|K|drho>`, formed from the exact response operators
 `scf/implicit.py` already exposes and resolved per channel. It replaces the raw
@@ -85,7 +98,13 @@ Thread the metric through `scf_noncollinear`, which the collinear response
 primitives do not yet reach, and re-run the `test_ni_soc_convergence.py` matrix arms
 against the energy gate. The arms that pass today only at `rhotol=5e-3` should pass
 at microelectronvolt estimated energy error under the new gate, replacing the loose
-residual tolerance with a physical one. Gated on (a) and (b) landing.
+residual tolerance with a physical one.
+
+Done (branch `feat/spinor-convergence-surface`). The spinor kernel error is the
+new `kernel_energy_error_noncollinear`, decomposed into charge, longitudinal, and
+transverse magnetization channels. The evaluation point is the iteration's input
+density (rho, m⃗), the same point the SCF's `vxc_and_bxc` linearizes at. The
+Ni + SOC re-run against the energy gate is the branch's acceptance evidence.
 
 ### (d) Docs and a default flip
 

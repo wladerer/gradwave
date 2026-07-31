@@ -92,6 +92,40 @@ iteration nor applicable to the metals this gate targets, and it omits the
 Hubbard and Fock second-order kernels. A meta-GGA is rejected rather than
 estimated without its kinetic-energy-density response.
 
+### The spinor path
+
+A magnetic spinor SCF (`task: scf` with `noncollinear: true` and a nonzero
+moment) does not reach `rhotol` 1e-5 under any mixer. The magnetization-channel
+residual floors near 2e-3 while the charge channel sits five to seven times
+lower, and the floor is a transverse instability rather than a stuck fixed
+point. Long-wavelength transverse magnetization is the magnon-soft direction of
+a ferromagnet, whose linear response has near-unit gain, so the mixed iteration
+amplifies it about threefold per step until it saturates near 1e-4. The fixed
+point underneath is converged. Every fcc Ni + SOC arm that holds the
+ferromagnetic branch agrees on the free energy to 4e-5 eV and on the moment to
+four digits, so the residual gate reports an error the energy does not have.
+
+`scf.convergence: energy` gates the spinor path on the same second-order energy
+error as the collinear one, decomposed here into charge, longitudinal, and
+transverse magnetization channels. The kernel is the exact coupled (ρ, m⃗) f_xc
+Hessian-vector product of the noncollinear functional plus the charge-channel
+Hartree kernel, evaluated at the iteration's input density. The transverse
+magnon-soft modes carry the residual floor but almost no energy, so the estimate
+settles microelectronvolts below `scf.entol` while the transverse residual sits
+on its floor. The per-channel decomposition is recorded in the `scf_trace.json`
+sidecar, so a trace shows which channel carries the remaining error.
+
+The magnetization mixing has its own controls under `scf.magnetic`, because the
+spinor driver resolves the charge and moment mixing independently of
+`scf.mixing`. `mixer` selects the (ρ, m⃗) mixer class (`pulay`, `johnson`, or
+`broyden`), `spin_precond` turns on the Stoner preconditioner for the
+longitudinal moment channel, `mixing_alpha` sets the moment step, and
+`diago_schedule` picks the adaptive diagonalization-tolerance schedule. Under
+`johnson` the pulay-tuned moment step collapses the near-Stoner moment onto the
+nonmagnetic branch, so an unset `mixing_alpha` with `mixer: johnson` takes a
+lower default (0.3) instead of the pulay guard. See [Non-collinear magnetism and
+spin-orbit coupling](noncollinear-soc.md) for the measured arms.
+
 ### Magnetic systems
 
 A spin-polarized run is set with `nspin: 2` and seeded with `start_mag`, a map

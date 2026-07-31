@@ -508,5 +508,6 @@ ignore_imports = [
     "gradwave.scf.implicit -> gradwave.postscf._response",
     "gradwave.scf.loop -> gradwave.postscf._response",
     "gradwave.scf.uspp_loop -> gradwave.postscf._response",
+    "gradwave.scf.noncollinear -> gradwave.postscf._response",
     "gradwave.scf.loop -> gradwave.postscf.hybrid",
 ]

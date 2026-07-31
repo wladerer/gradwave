@@ -298,6 +298,28 @@ def _build_nc_mixer(
     return mixer, base_step_scale, m
 
 
+def _resolve_mag_mixing_alpha(
+    mag_mixer: str, mag_mixing_alpha: float | None, mixing_alpha: float
+) -> float:
+    """The m⃗ step used when ``mag_mixing_alpha`` is not set explicitly.
+
+    pulay and broyden keep the moment-collapse guard ``max(mixing_alpha, 0.6)``,
+    which holds the magnetic branch when the charge is under-relaxed (see the
+    step-decoupling note in ``scf_noncollinear``). johnson gets a lower default
+    (0.3) instead. Its normalized multisecant update inverts that boost into a
+    collapse ACCELERANT, and the noncollinear campaign
+    (research/noncollinear-convergence) measured johnson at the boosted step
+    driving the Ni+SOC moment through zero by iteration 5, converging onto the
+    wrong nonmagnetic branch 1.2 meV above the ferromagnetic answer. 0.3 is the
+    campaign's best measured arm (moment held, lowest floor of any magnetic run).
+    An explicit ``mag_mixing_alpha`` always wins."""
+    if mag_mixing_alpha is not None:
+        return float(mag_mixing_alpha)
+    if mag_mixer == "johnson":
+        return 0.3
+    return max(mixing_alpha, 0.6)
+
+
 def _solve_spinor_bands(
     bk: BatchedK, grid: FFTGrid, v_r: torch.Tensor, b_xc: torch.Tensor,
     projs_b: torch.Tensor, q_so: torch.Tensor | None, dij_so: torch.Tensor | None,
@@ -524,6 +546,13 @@ def scf_noncollinear(
     mag_diago_schedule: str = "linear",  # adaptive diago tol schedule for magnetic runs
     adaptive: bool = True,  # back off mixing on a stalled/oscillating residual
     diago_tol: float = 1e-9,
+    energy_metric: bool = False,  # opt-in energy-metric convergence gate: converge on the
+    # spinor residual's exact second-order energy error 1/2<r|K_Hxc|r> < entol instead of
+    # rhotol (etol and the stale-solve guard unchanged). The honest criterion for magnetic
+    # metals, whose magnetization-channel density residual floors above any reachable rhotol
+    # while the (Hartree-dominated) energy error settles far below it. False (default) leaves
+    # the density gate bit-for-bit unchanged and costs nothing.
+    entol: float = 1e-6,  # eV, the energy-error threshold for energy_metric (see docs)
     verbose: bool = True,
     nonmagnetic: bool = False,  # pin m⃗ ≡ 0 (QE's domag=false): nonmagnetic + SOC
     mixed_precision: bool = False,  # opt-in fp32 draft (situational — see scf())
@@ -586,8 +615,11 @@ def scf_noncollinear(
     # triplet). Decoupling the m⃗ step with a floor keeps the magnetization mixed
     # vigorously enough to hold the magnetic branch regardless of the charge
     # step; the adaptive backoff below is the counterweight against overshoot.
-    if mag_mixing_alpha is None:
-        mag_mixing_alpha = max(mixing_alpha, 0.6)
+    # johnson needs a lower default step than pulay/broyden (its normalized
+    # update turns the max(alpha, 0.6) boost into a collapse accelerant) —
+    # _resolve_mag_mixing_alpha carries that scheme-dependent choice.
+    mag_mixing_alpha = _resolve_mag_mixing_alpha(
+        mag_mixer, mag_mixing_alpha, mixing_alpha)
     mixer, base_step_scale, m = _build_nc_mixer(
         g2_vec, ng, nonmagnetic, mixing_alpha, mag_mixing_alpha, mixing_history,
         precond_op, m, device, mag_mixer=mag_mixer)
@@ -763,13 +795,38 @@ def scf_noncollinear(
             vin, vout = vec_of([rho, *m]), vec_of([rho_out, *m_out])
         res_norm = float(torch.linalg.norm(vout - vin)) * vol
         de = record_iteration(history, it, e_free, e_free_prev, res_norm, t_it)
+        # energy-metric gate (opt-in): the spinor residual's exact second-order
+        # energy error 1/2<r|K_Hxc|r>, decomposed into charge / longitudinal /
+        # transverse magnetization channels. Computed only when selected (three
+        # f_xc HVPs per iteration), so the default density-gate path is
+        # bit-for-bit unchanged and pays nothing. The kernel is evaluated at the
+        # iteration's input density (rho, m), the SCF's own v_xc/B⃗_xc
+        # linearization point, and the metric rides the history record so
+        # build_summary can surface it (the spinor driver has no SCFRecorder).
+        e_metric = None
+        if energy_metric:
+            from gradwave.postscf._response import kernel_energy_error_noncollinear
+
+            r_rho = rho_out - rho
+            r_m = m_out - m
+            e_metric, e_m_chg, e_m_mag, e_m_long, e_m_trans = (
+                kernel_energy_error_noncollinear(
+                    grid, xc, r_rho, r_m, rho, m, rho_core=system.rho_core))
+            history[-1].update(
+                energy_metric_eV=e_metric, energy_metric_charge_eV=e_m_chg,
+                energy_metric_mag_eV=e_m_mag,
+                energy_metric_longitudinal_eV=e_m_long,
+                energy_metric_transverse_eV=e_m_trans)
         if verbose:
             mv = [float(m_out[i].mean()) * vol for i in range(3)]
+            em = "" if e_metric is None else f"  E_err = {e_metric:.2e}"
             print(f"  NC-SCF {it:3d}  F = {e_free:+.8f}  dE = {de:.2e}  "
-                  f"|dρ,m| = {res_norm:.2e}  m⃗ = ({mv[0]:+.3f},{mv[1]:+.3f},{mv[2]:+.3f})",
+                  f"|dρ,m| = {res_norm:.2e}  m⃗ = ({mv[0]:+.3f},{mv[1]:+.3f},{mv[2]:+.3f})"
+                  f"{em}",
                   flush=True)
 
-        if convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol):
+        if convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol,
+                            energy_error=e_metric, entol=entol):
             converged = True
             rho, m = rho_out, m_out
             break
