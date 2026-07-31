@@ -22,7 +22,7 @@ from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.core.xc.pbe import PBE
 from gradwave.core.xc.r2scan import R2SCAN, SpinR2SCAN
 from gradwave.core.xc.spin import LSDA_PW92, SpinPBE, SpinXC
-from gradwave.inputs import Input, VolumetricParams
+from gradwave.inputs import Input, InputError, VolumetricParams
 
 if TYPE_CHECKING:
     from ase import Atoms
@@ -604,7 +604,64 @@ def build_summary(res: SCFLike, inp: Input, task: str,
     return summary
 
 
-def _build_relax_calc(inp: Input) -> GradWave:
+# Above this estimated Pulay pressure a vc-relax is running on a severely
+# underconverged basis: the (under-estimating) correction can no longer be
+# trusted to reach the energy-consistent cell, so the driver warns loudly.
+# Scale: converged runs sit ≪1 GPa; 12 Ry silicon ~1-2 GPa; 40 Ry ONCV-oxygen
+# quartz (the #217 collapse) ~40 GPa.
+_PULAY_WARN_GPA = 5.0
+
+
+def _pulay_correction_unsupported(inp: Input) -> str | None:
+    """Reason the Pulay stress correction cannot run this input, or None.
+
+    Mirrors ``estimate_pressure_error``'s contract (and the calculator's
+    shifted-mesh guard): norm-conserving, full (unreduced) Γ-centered k-set,
+    no DFT+U, scalar-relativistic. Checked only for a variable-cell relax —
+    a fixed-cell relax never applies the correction."""
+    _species, upfs, _soa = _species_upfs(inp)
+    if _is_uspp(upfs):
+        return "USPP/PAW pseudopotentials (the stress-error estimator is NC-only)"
+    if inp.symmetry:
+        return ("symmetry: true (the estimator's frozen strained rebuild needs "
+                "the full k-point set; set symmetry: false to enable)")
+    if tuple(inp.kpoints.shift) != (0, 0, 0):
+        return "shifted k-mesh (the estimator rebuilds a Γ-centered mesh only)"
+    if inp.hubbard.enabled:
+        return "DFT+U (pressure error with +U not implemented)"
+    if inp.noncollinear:
+        return "noncollinear/SOC (no calculator path)"
+    if any(b.j is not None for u in upfs for b in u.betas):
+        return "fully-relativistic pseudopotentials"
+    return None
+
+
+def _resolve_pulay_correction(inp: Input, verbose: bool = True) -> bool:
+    """Whether the vc-relax calculator applies the Pulay pressure correction.
+
+    ``relax.pulay_correction`` None (auto) → on whenever supported, with a
+    visible warning naming the reason when it is not (the #217 trap — a
+    vc-relax whose stress silently carries the full basis-incompleteness
+    bias should never again look routine); True → required, InputError when
+    unsupported; False → off. Fixed-cell relax: always False (the stress
+    drives nothing)."""
+    if not inp.relax.cell or inp.relax.pulay_correction is False:
+        return False
+    reason = _pulay_correction_unsupported(inp)
+    if reason is None:
+        return True
+    if inp.relax.pulay_correction is True:
+        raise InputError(f"relax.pulay_correction: true is unsupported here: {reason}")
+    logger.warning("vc-relax without Pulay stress correction: %s", reason)
+    if verbose:
+        print(f"  relax: Pulay stress correction unavailable ({reason}) — the "
+              "reported stress carries uncorrected basis-incompleteness "
+              "(Pulay) pressure; converge ecut before trusting the relaxed "
+              "cell", flush=True)
+    return False
+
+
+def _build_relax_calc(inp: Input, verbose: bool = True) -> GradWave:
     """The GradWave calculator a relaxation drives — shared by the nested
     engine and by ``joint``'s final consistent-energy/forces/stress SCF at the
     relaxed geometry (so both report ASE-calculator numbers, not the joint
@@ -614,6 +671,7 @@ def _build_relax_calc(inp: Input) -> GradWave:
     kerker = inp.scf.mixing.kerker
     kerker = None if kerker == "auto" else bool(kerker)
     return GradWave(
+        pulay_stress_correction=_resolve_pulay_correction(inp, verbose),
         ecut=inp.ecut,
         pseudopotentials={s: str(inp.pseudo_dir / f)
                           for s, f in inp.pseudo_map.items()},
@@ -702,7 +760,7 @@ def _relax_nested(
             FixScaled(i, mask=tuple(bool(b) for b in inp.fixed[i]))
             for i in range(len(atoms)) if bool(inp.fixed[i].any())
         ])
-    atoms.calc = _build_relax_calc(inp)
+    atoms.calc = _build_relax_calc(inp, verbose)
     opt_cls = {"fire": FIRE, "bfgs": BFGS}[inp.relax.optimizer]
     target: Atoms | FrechetCellFilter = atoms
     if inp.relax.cell:
@@ -742,13 +800,18 @@ def _relax_nested(
         if scf_res is not None:
             entry["scf_iter"] = int(getattr(scf_res, "n_iter", 0))
             entry["scf_converged"] = bool(getattr(scf_res, "converged", True))
+        pulay_gpa = getattr(atoms.calc, "last_pulay_pressure_gpa", None)
+        if pulay_gpa is not None:
+            entry["pulay_pressure_GPa"] = round(float(pulay_gpa), 4)
         trajectory.append(entry)
         if verbose:
             sc = ((f" · SCF {entry['scf_iter']} it"
                    + ("" if entry.get("scf_converged", True) else " (NOT conv.)"))
                   if "scf_iter" in entry else "")
+            pl = (f" · Pulay {pulay_gpa:+.2f} GPa" if pulay_gpa is not None
+                  else "")
             print(f"  relax step {opt.nsteps:>3d} · E = {energy:+.8f} eV"
-                  f" · fmax = {fmax:.5f} eV/Å{sc}", flush=True)
+                  f" · fmax = {fmax:.5f} eV/Å{sc}{pl}", flush=True)
         frame = atoms.copy()
         sp_kw: dict[str, Any] = {"energy": energy, "forces": forces}
         if inp.relax.cell:
@@ -798,6 +861,17 @@ def _relax_nested(
     if inp.relax.cell:
         relax["max_stress_eV_ang3"] = float(np.abs(atoms.get_stress()).max())
         relax["pressure_GPa"] = inp.relax.pressure
+        pulay_final = getattr(atoms.calc, "last_pulay_pressure_gpa", None)
+        relax["pulay_correction"] = pulay_final is not None
+        if pulay_final is not None:
+            relax["pulay_pressure_GPa_final"] = round(float(pulay_final), 4)
+            if abs(pulay_final) > _PULAY_WARN_GPA and verbose:
+                print(f"  relax: WARNING — estimated Pulay pressure "
+                      f"{pulay_final:+.1f} GPa exceeds {_PULAY_WARN_GPA:.0f} GPa: "
+                      "the stress at this ecut is severely underconverged. The "
+                      "correction reduces but does not eliminate the bias "
+                      "(first-order estimate, ~0.5-0.75x); increase ecut before "
+                      "trusting the relaxed cell.", flush=True)
     if inp.fixed is not None:
         # record the selective-dynamics mask (True = axis held fixed) so the
         # output documents which degrees of freedom were frozen
@@ -878,7 +952,7 @@ def _relax_joint(
     atoms = inp.atoms.copy()
     atoms.set_cell(res.cell, scale_atoms=False)
     atoms.set_positions(res.positions)
-    atoms.calc = _build_relax_calc(inp)
+    atoms.calc = _build_relax_calc(inp, verbose)
     energy = float(atoms.get_potential_energy())
     forces = atoms.get_forces()
     fmax_final = float(np.linalg.norm(forces, axis=1).max())
@@ -969,7 +1043,7 @@ def _relax_newton(
     atoms = inp.atoms.copy()
     atoms.set_cell(res.cell, scale_atoms=False)
     atoms.set_positions(res.positions)
-    atoms.calc = _build_relax_calc(inp)
+    atoms.calc = _build_relax_calc(inp, verbose)
     energy = float(atoms.get_potential_energy())
     forces = atoms.get_forces()
     fmax_final = float(np.linalg.norm(forces, axis=1).max())
