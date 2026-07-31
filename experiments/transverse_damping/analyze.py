@@ -13,8 +13,6 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
-
 HOST = sys.argv[1] if len(sys.argv) > 1 else "nixos"
 RES = Path(__file__).resolve().parent / "results" / HOST
 

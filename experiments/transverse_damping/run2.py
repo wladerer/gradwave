@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from experiments.transverse_damping import systems as sysmod  # noqa: E402
 from experiments.transverse_damping.damping2 import StepWrapPatch  # noqa: E402
 from experiments.transverse_damping.probe import NCConvergenceProbe  # noqa: E402
-from experiments.transverse_damping.run import TOL, BEST, _floor_stats, z  # noqa: E402
+from experiments.transverse_damping.run import BEST, TOL, _floor_stats, z  # noqa: E402
 from gradwave.core.xc.noncollinear import NoncollinearXC  # noqa: E402
 from gradwave.core.xc.spin import SpinPBE  # noqa: E402
 from gradwave.scf.noncollinear import scf_noncollinear  # noqa: E402
