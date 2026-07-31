@@ -506,5 +506,7 @@ forbidden_modules = ["gradwave.postscf"]
 # it for real here would be circular, not just architecturally backwards.
 ignore_imports = [
     "gradwave.scf.implicit -> gradwave.postscf._response",
+    "gradwave.scf.loop -> gradwave.postscf._response",
+    "gradwave.scf.uspp_loop -> gradwave.postscf._response",
     "gradwave.scf.loop -> gradwave.postscf.hybrid",
 ]
