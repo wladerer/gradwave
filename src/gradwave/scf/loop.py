@@ -1656,11 +1656,14 @@ def scf(
             # (arXiv:2606.26693): a rank-r Woodbury Newton step that models the
             # Stoner-expansive spin mode, rebuilt each iteration from the current
             # orbitals and applied to the m-channel residual before mixing. A
-            # residual preconditioner leaves the fixed point unchanged (verified
-            # to ~1e-12 eV). Opt-in, off by default: it is near-identity in the
-            # insulating limit but a wash-to-negative outside its target regime
-            # (measured on bcc Fe FM — see tests/integration/
-            # test_nc_spin_precond_convergence.py), so it is never auto-enabled.
+            # residual preconditioner leaves the fixed point unchanged at
+            # well-converged settings (verified to machine precision). Opt-in,
+            # off by default: near-identity in the insulating limit, but on
+            # bcc Fe FM it is a wash-to-negative on a dense mesh and outright
+            # unstable on a coarse one (the rank-r Stoner susceptibility is a
+            # poor estimate on sparse Fermi-surface sampling) — see
+            # tests/integration/test_nc_spin_precond_convergence.py. Never
+            # auto-enabled for that reason.
             from gradwave.scf.spin_precond import build_stoner_precond
 
             ng = layout.ng
