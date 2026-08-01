@@ -63,12 +63,28 @@ def test_unknown_key_suggests_the_right_one(tmp_path, extra, needle):
     ("scf: {mixing: {scheme: linear}}\n", "unknown mixing scheme"),
     # precond selects the density preconditioner; only kerker | local_tf exist.
     ("scf: {mixing: {precond: tf}}\n", "unknown mixing precond"),
+    ("elastic: {mode: relax}\n", "clamped.*relaxed"),
+    ("elastic: {fmax: 0}\n", "elastic.fmax"),
+    ("elastic: {max_steps: 0}\n", "elastic.max_steps"),
 ])
 def test_value_range_errors(tmp_path, extra, needle):
     from gradwave.inputs import InputError, load_input
 
     with pytest.raises(InputError, match=needle):
         load_input(_write(tmp_path, _base(extra)))
+
+
+def test_elastic_mode_parses(tmp_path):
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _base()))
+    assert inp.elastic.mode == "clamped"  # default stays the historical tensor
+
+    inp = load_input(_write(tmp_path, _base(
+        "task: elastic\nelastic: {mode: relaxed, fmax: 0.005, max_steps: 40}\n")))
+    assert inp.elastic.mode == "relaxed"
+    assert inp.elastic.fmax == pytest.approx(0.005)
+    assert inp.elastic.max_steps == 40
 
 
 def test_precond_defaults_to_kerker(tmp_path):

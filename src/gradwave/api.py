@@ -1181,14 +1181,26 @@ def run_eos(inp: Input, verbose: bool = True) -> dict[str, Any]:
 
 
 def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
-    """Clamped-ion elastic constants: FD of the analytic stress over the six
-    Voigt strains → the 6×6 stiffness C and Voigt–Reuss–Hill moduli.
+    """Elastic constants: FD of the analytic stress over the six Voigt strains
+    → the 6×6 stiffness C and Voigt–Reuss–Hill moduli.
 
-    Each strain deforms the cell (fractional coordinates fixed) on one FFT grid
-    pinned across the scan; every strained SCF warm-starts from the unstrained
-    reference. Norm-conserving (``postscf.stress``) and USPP/PAW
-    (``postscf.paw_stress``) are both handled, for nspin=1 and collinear nspin=2
-    (the fixed-basis stress sums per spin channel — see postscf.stress).
+    ``elastic.mode`` picks the tensor. ``"clamped"`` (default) deforms the cell
+    with fractional coordinates fixed and re-relaxes only the electrons.
+    ``"relaxed"`` additionally relaxes the internal coordinates at every
+    strained cell (fixed-cell BFGS on the analytic forces, gated by
+    ``elastic.fmax``) before reading the stress, giving the relaxed-ion tensor
+    C_ij = dσ_i/dε_j along the relaxed path — the physical constants for
+    crystals whose compliance is dominated by symmetry-allowed internal
+    displacement (quartz, diamond/zincblende shear). The input geometry is
+    assumed to be the equilibrium one; the residual reference fmax is reported
+    so a non-equilibrium start is visible in the output.
+
+    Each strain runs on one FFT grid pinned across the scan; every strained SCF
+    warm-starts from the unstrained reference (in relaxed mode, each ionic step
+    warm-starts from the previous one). Norm-conserving (``postscf.stress``) and
+    USPP/PAW (``postscf.paw_stress``) are both handled, for nspin=1 and
+    collinear nspin=2 (the fixed-basis stress sums per spin channel — see
+    postscf.stress).
 
     Fully-relativistic (spin-orbit) spinor runs (``noncollinear: true`` with
     j-resolved pseudos) are handled on the norm-conserving path:
@@ -1207,6 +1219,12 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
     _species, upfs, species_of_atom = _species_upfs(inp)
     uspp = _is_uspp(upfs)
     is_fr = any(b.j is not None for u in upfs for b in u.betas)
+    relaxed_ion = inp.elastic.mode == "relaxed"
+    if relaxed_ion and inp.noncollinear:
+        raise NotImplementedError(
+            "relaxed-ion elastic constants need the collinear force path — "
+            "noncollinear/spinor forces are not implemented (use "
+            "elastic.mode: clamped)")
     if inp.noncollinear:
         if uspp:
             raise NotImplementedError(
@@ -1244,9 +1262,10 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
     time_reversal = not (inp.noncollinear and not inp.nonmagnetic)
 
     def _build(
-        cell: Any, fft_shape: tuple[int, ...] | None
+        cell: Any, fft_shape: tuple[int, ...] | None, pos: Any = None
     ) -> System | USPPSystem:
-        pos = frac @ cell
+        if pos is None:
+            pos = frac @ cell
         if uspp:
             from gradwave.scf.uspp import setup_uspp
 
@@ -1271,7 +1290,8 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
     fixed = tuple(max(int(_fft_grid(_build(c, None)).shape[i]) for c in probe)
                   for i in range(3))
     if verbose:
-        print(f"elastic: strain h={h}, fixed FFT grid {fixed}", flush=True)
+        print(f"elastic: {inp.elastic.mode}-ion, strain h={h}, "
+              f"fixed FFT grid {fixed}", flush=True)
 
     # reference SCF once — warm-start seed and residual-stress readout
     ref = run_scf(inp, system=_build(cell0, fixed), verbose=False)
@@ -1285,11 +1305,82 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
     # needs Any on both arguments, not a specific cast.
     sigma_ref = _stress(cast(Any, ref), cast(Any, xc)).detach().cpu().numpy()
 
+    # relaxed-ion machinery: analytic forces for the per-strain fixed-cell BFGS
+    ref_fmax: float | None = None
+    relax_steps: list[int] = []
+    relax_conv: list[bool] = []
+    if relaxed_ion:
+        if uspp:
+            from gradwave.postscf.paw_forces import forces_uspp
+
+            def _forces(res: Any) -> Any:
+                return forces_uspp(res, cast(Any, xc)).detach().cpu().numpy()
+        else:
+            from gradwave.postscf.forces import forces as _forces_nc
+
+            def _forces(res: Any) -> Any:
+                return _forces_nc(res, xc=cast(Any, xc)).detach().cpu().numpy()
+
+        ref_fmax = float(np.linalg.norm(_forces(ref), axis=1).max())
+        if verbose and ref_fmax > inp.elastic.fmax:
+            print(f"elastic: reference fmax {ref_fmax:.4f} eV/Å exceeds the "
+                  f"relax gate {inp.elastic.fmax} — input geometry is not at "
+                  "equilibrium, C is about the current state", flush=True)
+
+    def _relax_ions(cell: Any) -> Any:
+        """Fixed-cell BFGS on the analytic forces at a strained cell; returns
+        the SCF result at the relaxed geometry (each ionic step warm-starts
+        from the previous one, the first from the unstrained reference)."""
+        from ase import Atoms as _AseAtoms
+        from ase.calculators.calculator import Calculator, all_changes
+        from ase.optimize import BFGS
+        from typing_extensions import override
+
+        state: dict[str, Any] = {"prev": ref, "res": None}
+
+        class _FixedCellCalc(Calculator):
+            implemented_properties = ["energy", "forces"]
+
+            # ASE's signature (atoms/properties/system_changes defaults) — the
+            # base class drives this; only the SCF+forces body is ours.
+            @override
+            def calculate(self, atoms: Any = None,
+                          properties: Any = ("energy",),
+                          system_changes: Any = all_changes) -> None:
+                super().calculate(atoms, properties, system_changes)
+                pos = cast("Atoms", self.atoms).get_positions()
+                res = run_scf(
+                    inp, system=_build(cell, fixed, pos=pos),
+                    verbose=False, start_from=state["prev"])
+                state["prev"] = state["res"] = res
+                converged.append(bool(getattr(res, "converged", True)))
+                self.results = {
+                    "energy": float(res.energies.total),
+                    "forces": _forces(res),
+                }
+
+        atoms = _AseAtoms(inp.atoms.get_chemical_symbols(), scaled_positions=frac,
+                          cell=np.asarray(cell), pbc=True)
+        atoms.calc = _FixedCellCalc()
+        opt = BFGS(atoms, logfile=None)
+        ok = bool(opt.run(fmax=inp.elastic.fmax, steps=inp.elastic.max_steps))
+        relax_steps.append(int(opt.nsteps))
+        relax_conv.append(ok)
+        if verbose:
+            fnow = float(np.linalg.norm(atoms.get_forces(), axis=1).max())
+            print(f"elastic: strain {len(relax_steps):>2d}/12 ions relaxed in "
+                  f"{opt.nsteps} steps (fmax {fnow:.4f} eV/Å"
+                  f"{'' if ok else ', NOT converged'})", flush=True)
+        return state["res"]
+
     def _stress_at(eps: Any) -> Any:
         cell = cell0 @ (np.eye(3) + eps).T
-        res = run_scf(inp, system=_build(cell, fixed), verbose=False,
-                      start_from=ref)
-        converged.append(bool(getattr(res, "converged", True)))
+        if relaxed_ion:
+            res = _relax_ions(cell)
+        else:
+            res = run_scf(inp, system=_build(cell, fixed), verbose=False,
+                          start_from=ref)
+            converged.append(bool(getattr(res, "converged", True)))
         return _stress(cast(Any, res), cast(Any, xc)).detach().cpu().numpy()
 
     c = elastic_tensor(_stress_at, h=h)
@@ -1297,6 +1388,7 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
     resid_gpa = float(np.abs(sigma_ref).max()) * 160.2176634
     block: dict[str, Any] = {
         "strain": h,
+        "mode": inp.elastic.mode,
         "n_atoms": natoms,
         "formalism": "uspp/paw" if uspp else "nc",
         "c_GPa": c.tolist(),
@@ -1310,6 +1402,12 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
         "residual_stress_GPa": resid_gpa,
         "all_converged": all(converged),
     }
+    if relaxed_ion:
+        block["relax_fmax"] = inp.elastic.fmax
+        block["ref_fmax_eV_ang"] = ref_fmax
+        # 12 entries in FD order: strain j = 0..5, +h then −h for each
+        block["relax_steps"] = relax_steps
+        block["relax_all_converged"] = all(relax_conv)
     if verbose:
         print(f"elastic: K={mod.bulk_hill:.1f}  G={mod.shear_hill:.1f}  "
               f"E={mod.young:.1f} GPa  ν={mod.poisson:.3f}  "

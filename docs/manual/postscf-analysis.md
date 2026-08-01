@@ -267,19 +267,37 @@ reference density and pinned to one FFT grid, so the 13 solves (a reference plus
 six strains at two signs) share a clean stress baseline. The Voigt-Reuss-Hill
 averages give the polycrystalline bulk and shear moduli.
 
-The tensor is the clamped-ion one. The cell is strained with fractional
-coordinates held fixed and only the electrons re-relax. This is exact for any
-constant with no symmetry-allowed internal displacement, the bulk modulus of any
-crystal and every constant of rocksalt, but the diamond and zincblende shear
-constants pick up an internal sublattice shift the clamped tensor omits (PBE Si
-clamped-ion $C_{44} \approx 98$ GPa against the relaxed $\approx 76$). $C_{11}$,
-$C_{12}$, and the bulk modulus are unaffected, and the elastic-tensor bulk
-modulus matches the equation-of-state value from the same PBE setup.
+By default the tensor is the clamped-ion one. The cell is strained with
+fractional coordinates held fixed and only the electrons re-relax. This is
+exact for any constant with no symmetry-allowed internal displacement, the bulk
+modulus of any crystal and every constant of rocksalt, but the diamond and
+zincblende shear constants pick up an internal sublattice shift the clamped
+tensor omits (PBE Si clamped-ion $C_{44} \approx 98$ GPa against the relaxed
+$\approx 76$). $C_{11}$, $C_{12}$, and the bulk modulus are unaffected, and the
+elastic-tensor bulk modulus matches the equation-of-state value from the same
+PBE setup.
+
+`elastic.mode: relaxed` computes the relaxed-ion tensor instead. Every strained
+cell gets a fixed-cell BFGS relaxation of the internal coordinates on the
+analytic forces, gated by `elastic.fmax`, before the stress is read, so the
+central difference runs along the relaxed path. This is the tensor that
+compares to experiment whenever the compliance is dominated by internal
+degrees of freedom. Quartz is the extreme case, where rigid SiO$_4$ tetrahedra
+rotate under strain and the clamped-ion constants overshoot the relaxed ones
+several-fold. The cost is one ionic relaxation instead of one SCF per strained
+cell, with each ionic step warm-started from the previous one. Strains that
+allow no internal displacement converge in zero steps and cost the same as the
+clamped run. The input geometry is assumed to be the equilibrium one, and the
+residual reference `fmax` is reported in the output so a non-equilibrium start
+is visible.
 
 ```yaml
 task: elastic
 elastic:
   strain: 0.005             # Voigt strain magnitude for the central difference
+  mode: relaxed             # clamped (default) | relaxed (per-strain ionic relax)
+  fmax: 0.01                # relaxed mode: per-strain force gate [eV/Å]
+  max_steps: 100            # relaxed mode: per-strain BFGS step cap
 ```
 
 The Voigt-Reuss-Hill Poisson ratio is the isotropic polycrystalline average,

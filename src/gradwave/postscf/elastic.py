@@ -10,17 +10,19 @@ This module is the pure-numerics half (Voigt bookkeeping, the FD driver over a
 caller-supplied ``stress_at_strain`` closure, and the Voigt–Reuss–Hill
 polycrystalline averages); the SCF/strain plumbing lives in ``api.run_elastic``.
 
-The C returned is the CLAMPED-ION elastic tensor: the cell is strained with
-fractional coordinates held fixed and only the electrons re-relaxed. This is
-exact for any constant with no symmetry-allowed internal displacement — the
-bulk modulus of any crystal, and every constant of rocksalt (MgO, NaCl) where
-the atoms stay on their special positions under strain. It is NOT exact for
-shear constants of the diamond/zincblende structure (Si, C, GaAs): a shear
-strain there induces an internal sublattice shift (the Kleinman internal
-parameter), so the clamped-ion C44 overestimates the fully-relaxed value
-(PBE Si: clamped-ion C44 ≈ 98 GPa vs relaxed ≈ 76). C11/C12 and hence the bulk
-modulus are unaffected. Adding the internal-strain correction (coupling the
-strain response to the Γ displacement Hessian) is a documented follow-up.
+Whether C comes out clamped-ion or relaxed-ion is decided by the closure, not
+by this module. With fractional coordinates held fixed at each strain (only the
+electrons re-relaxed) the result is the CLAMPED-ION tensor: exact for any
+constant with no symmetry-allowed internal displacement — the bulk modulus of
+any crystal, and every constant of rocksalt (MgO, NaCl) where the atoms stay on
+their special positions under strain — but NOT for shear constants of the
+diamond/zincblende structure (Si, C, GaAs), where a shear strain induces an
+internal sublattice shift (the Kleinman internal parameter) and the clamped-ion
+C44 overestimates the fully-relaxed value (PBE Si: clamped-ion C44 ≈ 98 GPa vs
+relaxed ≈ 76). If the closure instead relaxes the internal coordinates at every
+strained cell before returning the stress, the same driver yields the
+RELAXED-ION tensor. ``api.run_elastic`` provides both via ``elastic.mode``
+("clamped" | "relaxed").
 
 Units: stress in eV/Å³, so C is eV/Å³ internally and reported in GPa.
 """
