@@ -411,12 +411,17 @@ def _eos_lines(eos):
 def _elastic_lines(el):
     stab = "stable" if el["mechanically_stable"] else "UNSTABLE (Born criteria)"
     k, g = el["bulk_modulus_GPa"], el["shear_modulus_GPa"]
+    mode = el.get("mode", "clamped")
     lines = [_sec("elastic constants"),
-             f"   clamped-ion 6×6 stiffness from ±{el['strain']} Voigt strain"
-             f" ({el['formalism']})",
-             "   shear constants overestimate the relaxed value for "
-             "diamond/zincblende (no internal-strain relaxation)",
-             ""]
+             f"   {mode}-ion 6×6 stiffness from ±{el['strain']} Voigt strain"
+             f" ({el['formalism']})"]
+    if mode == "relaxed":
+        lines.append(f"   internal coordinates re-relaxed at every strained "
+                     f"cell (fmax {el.get('relax_fmax', 0.0)} eV/Å)")
+    else:
+        lines.append("   shear constants overestimate the relaxed value for "
+                     "diamond/zincblende (no internal-strain relaxation)")
+    lines.append("")
     lines.append(f"   bulk K      {k['hill']:7.1f} GPa   "
                  f"(Voigt {k['voigt']:.1f} / Reuss {k['reuss']:.1f})")
     lines.append(f"   shear G     {g['hill']:7.1f} GPa   "
@@ -429,6 +434,13 @@ def _elastic_lines(el):
                      f" — cell not at equilibrium, C is about the current state")
     if not el.get("all_converged", True):
         lines.append("   note: some strained SCFs did NOT converge")
+    if not el.get("relax_all_converged", True):
+        lines.append("   note: some per-strain ionic relaxations did NOT "
+                     "converge (raise elastic.max_steps or loosen elastic.fmax)")
+    ref_fmax = el.get("ref_fmax_eV_ang")
+    if ref_fmax is not None and ref_fmax > el.get("relax_fmax", 0.0):
+        lines.append(f"   note: reference fmax {ref_fmax:.4f} eV/Å exceeds the "
+                     "relax gate — input geometry not at equilibrium")
     lines.append("")
     lines.append("   stiffness matrix C [GPa] (Voigt order xx,yy,zz,yz,xz,xy):")
     for row in el["c_GPa"]:

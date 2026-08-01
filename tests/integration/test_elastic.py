@@ -79,6 +79,32 @@ def test_elastic_bulk_matches_eos(si_elastic):
     assert k == pytest.approx(WIEN2K_SI_B0, abs=12.0)
 
 
+@pytest.fixture(scope="module")
+def si_elastic_relaxed():
+    import dataclasses
+
+    torch.set_num_threads(8)
+    inp = dataclasses.replace(_si_input(), elastic=ElasticParams(
+        strain=0.006, mode="relaxed", fmax=0.005))
+    return run_elastic(inp, verbose=False)
+
+
+def test_elastic_si_relaxed_ion_c44(si_elastic, si_elastic_relaxed):
+    """The relaxed-ion C44 lands in the physical band (PBE ≈ 76, experiment
+    76–80) that the clamped tensor overshoots, while the constants with no
+    symmetry-allowed internal displacement (C11, C12, K) are unchanged."""
+    cc = np.array(si_elastic["c_GPa"])
+    cr = np.array(si_elastic_relaxed["c_GPa"])
+    assert si_elastic_relaxed["all_converged"]
+    assert si_elastic_relaxed["relax_all_converged"]
+    c44_r = np.mean([cr[3, 3], cr[4, 4], cr[5, 5]])
+    assert 60 < c44_r < 90, c44_r
+    assert c44_r < np.mean([cc[3, 3], cc[4, 4], cc[5, 5]]) - 10.0
+    assert np.allclose(cc[:3, :3], cr[:3, :3], atol=3.0)
+    k = si_elastic_relaxed["bulk_modulus_GPa"]["hill"]
+    assert k == pytest.approx(WIEN2K_SI_B0, abs=12.0)
+
+
 def test_elastic_stress_matches_ase_calculator():
     """The stress the FD driver differentiates equals the GradWave ASE
     calculator's stress at the same strained geometry (one SCF each)."""

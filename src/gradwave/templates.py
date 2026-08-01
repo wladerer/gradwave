@@ -381,6 +381,9 @@ kpoints:
 task: elastic
 elastic:
   strain: 0.005                  # Voigt strain magnitude for the central difference
+  mode: clamped                  # relaxed = re-relax ions at every strained cell
+                                 # (the physical tensor for soft internal modes;
+                                 # ~10x the SCF count). Extra knobs: fmax, max_steps.
 
 output:
   dir: ./out

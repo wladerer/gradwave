@@ -287,15 +287,33 @@ class EOSParams:
 
 @dataclass(frozen=True)
 class ElasticParams:
-    """Clamped-ion elastic constants: FD of the analytic stress over the six
-    Voigt strains → the 6×6 stiffness C (and Voigt–Reuss–Hill moduli)."""
+    """Elastic constants: FD of the analytic stress over the six Voigt strains
+    → the 6×6 stiffness C (and Voigt–Reuss–Hill moduli).
+
+    ``mode`` selects the tensor. ``"clamped"`` (default) strains the cell with
+    fractional coordinates held fixed — exact where symmetry forbids internal
+    displacement, a large overestimate for soft shear constants elsewhere.
+    ``"relaxed"`` re-relaxes the internal coordinates at every strained cell
+    (fixed-cell BFGS to ``fmax``) before differentiating the stress, giving the
+    relaxed-ion tensor that compares to experiment."""
 
     strain: float = 0.005  # Voigt strain magnitude h for the central difference
+    mode: str = "clamped"  # clamped | relaxed (relaxed-ion: per-strain ionic relax)
+    fmax: float = 0.01     # per-strain ionic relax force gate [eV/Å] (relaxed mode)
+    max_steps: int = 100   # per-strain ionic relax step cap (relaxed mode)
 
     def __post_init__(self):
         if not 0.0 < self.strain < 0.1:
             raise InputError(
                 f"elastic.strain must be in (0, 0.1), got {self.strain}")
+        if self.mode not in ("clamped", "relaxed"):
+            raise InputError(
+                f"elastic.mode must be 'clamped' or 'relaxed', got {self.mode!r}")
+        if not self.fmax > 0.0:
+            raise InputError(f"elastic.fmax must be > 0, got {self.fmax}")
+        if self.max_steps < 1:
+            raise InputError(
+                f"elastic.max_steps must be >= 1, got {self.max_steps}")
 
 
 @dataclass(frozen=True)
