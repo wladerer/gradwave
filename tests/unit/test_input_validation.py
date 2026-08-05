@@ -66,6 +66,7 @@ def test_unknown_key_suggests_the_right_one(tmp_path, extra, needle):
     ("elastic: {mode: relax}\n", "clamped.*relaxed"),
     ("elastic: {fmax: 0}\n", "elastic.fmax"),
     ("elastic: {max_steps: 0}\n", "elastic.max_steps"),
+    ("relax: {extrapolation: cubic}\n", "relax.extrapolation"),
 ])
 def test_value_range_errors(tmp_path, extra, needle):
     from gradwave.inputs import InputError, load_input
@@ -85,6 +86,16 @@ def test_elastic_mode_parses(tmp_path):
     assert inp.elastic.mode == "relaxed"
     assert inp.elastic.fmax == pytest.approx(0.005)
     assert inp.elastic.max_steps == 40
+
+
+def test_extrapolation_defaults_and_parses(tmp_path):
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _base()))
+    assert inp.relax.extrapolation == "reuse"  # unchanged historical warm start
+    inp = load_input(_write(tmp_path, _base(
+        "task: relax\nrelax: {extrapolation: quadratic}\n")))
+    assert inp.relax.extrapolation == "quadratic"
 
 
 def test_precond_defaults_to_kerker(tmp_path):

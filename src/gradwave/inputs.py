@@ -139,12 +139,26 @@ class RelaxParams:
     # (InputError when unsupported); false disables. Never applied to a
     # fixed-cell relax.
     pulay_correction: bool | None = None
+    # Charge-density (and USPP becsum) extrapolation across ionic steps, QE-style:
+    # each nested step seeds the SCF from an extrapolation of the previous
+    # geometries' converged states instead of re-converging cold. "reuse" (the
+    # default, unchanged behaviour) shifts the atomic-superposition part with the
+    # atoms and reuses the bonding remainder; "linear"/"quadratic" additionally
+    # extrapolate that remainder from the last two/three steps by least-squares
+    # matching the new positions; "none" disables the warm start (cold SAD every
+    # step). Nested engine, nspin=1 only — a spin-polarized or joint/newton run
+    # ignores it. See docs/manual/geometry-optimization.md.
+    extrapolation: str = "reuse"  # none | reuse | linear | quadratic
 
     def __post_init__(self):
         if self.method not in ("nested", "joint", "newton"):
             raise InputError(
                 "relax.method must be 'nested', 'joint', or 'newton', got "
                 f"{self.method!r}")
+        if self.extrapolation not in ("none", "reuse", "linear", "quadratic"):
+            raise InputError(
+                "relax.extrapolation must be 'none', 'reuse', 'linear', or "
+                f"'quadratic', got {self.extrapolation!r}")
 
 
 @dataclass(frozen=True)
