@@ -15,10 +15,11 @@ core count is the bottleneck.
 - **Not** worth it for a coarse mesh (Γ-only, 2×2×2) — process/collective
   overhead dominates and IBZ symmetry reduction (`symmetry: true`, on by
   default) already gives 5–14× for free on a single box; reach for that first.
-- **Not** a substitute for `use_symmetry=True` — the two are currently
-  mutually exclusive (see Scope below), so distributing an IBZ-reduced mesh
-  isn't available yet; distributing the FULL mesh may still win over a
-  symmetry-reduced single-box run once the mesh is large enough.
+- The two **compose**: a distributed run keeps IBZ symmetry reduction, so the
+  ranks shard the *reduced* k-list and the 5–14× symmetry factor multiplies
+  the rank-count factor instead of being traded away. The one constraint is
+  `world_size ≤ nk_IBZ` — every rank must own at least one k-point of the
+  reduced list (a zero-share rank raises a clear `ValueError`).
 
 ## What's distributed, and what isn't
 
@@ -81,11 +82,26 @@ the per-step SCF iteration count identical to a single-process run (see
 engine routes this way. A `joint` or `newton` request under `distributed: true`
 falls back to nested, with the reason recorded in the `relax` block.
 
+IBZ symmetry reduction (`symmetry: true`, the default) composes with the
+sharding rather than fighting it. The shard unit is simply the IBZ k-list
+with its orbit weights, and the symmetry machinery needs nothing extra from
+the distributed layer: the density symmetrizer (and, for USPP/PAW, the
+per-atom becsum symmetrizer) is built from the space-group ops and the FFT
+box/atoms — not the k-set — and both SCF drivers apply it *after* the
+cross-rank `all_reduce`, at which point every rank already holds the
+identical global density. Symmetrization is therefore redundant per-rank
+work rather than a fourth collective, and a 2-rank symmetric run reproduces
+the single-process symmetric result to the same tolerances as the
+unsymmetrized case (`tests/integration/test_distributed_scf.py`, plus the
+`+U` USPP variant in `test_distributed_uspp_scf.py`). Shifted meshes
+(`kpoints: shift`) fall back to time-reversal-only reduction, exactly as in
+a single-process run. Post-SCF forces and stress symmetrize as usual: the
+reassembled full result carries the space group, and every rank derives
+identical symmetrized values from the identical full-mesh result.
+
 Also not yet supported, and rejected with a clear `NotImplementedError` rather
 than silently ignored:
 
-- IBZ symmetry reduction (`symmetry: true`) — build with `symmetry: false`
-  for a distributed run.
 - The noncollinear/spinor SCF (`noncollinear: true`), and fully relativistic
   (SOC) pseudopotentials.
 - Hybrid (PBE0/HSE) Fock exchange — it couples orbitals across k-points in
@@ -207,4 +223,5 @@ blocker. Separately, and cosmetic only, a distributed run built with
 `symmetry: false` still prints a header like "56 k(IBZ)", because the count
 shown is the time-reversal reduction on the local shard labelled with the IBZ
 tag. The mesh is the full one, the label is wrong, nothing about the calculation
-changes.
+changes. (A `symmetry: true` distributed run's header counts the local shard
+of the genuinely IBZ-reduced list, so there the label is accurate.)

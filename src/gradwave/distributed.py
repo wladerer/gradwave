@@ -57,16 +57,27 @@ torchrun job. The backend is Gloo (CPU collectives); a cross-machine launch
 over Tailscale additionally needs ``GLOO_SOCKET_IFNAME=tailscale0`` set in the
 environment of every rank (see docs).
 
+IBZ symmetry reduction (``use_symmetry=True``) composes with the sharding:
+the shard unit becomes the IBZ k-list with its orbit weights, and the
+symmetry operators need nothing extra from this module. ``rho_symmetrizer``
+(and USPP's ``becsum_sym``) are built from the ops and the FFT box / atoms,
+not the k-set, and both SCF drivers apply them AFTER the density/becsum
+``all_reduce`` — at that point every rank holds the identical global
+quantity, so the (deterministic) symmetrization is redundant per-rank work,
+not a fourth collective. The Fermi search is likewise untouched: the
+eigenvalue gather + the once-gathered global IBZ weights make the same
+weighted count a single-process symmetric run performs. The only new
+constraint is ``world_size <= nk_IBZ`` (the zero-share ValueError below).
+
 Scope: the norm-conserving collinear SCF (``scf.loop.scf``) and the
 USPP/PAW collinear SCF (``scf.uspp_loop.scf_uspp``, including DFT+U — see
 :func:`shard_uspp_system`), both reachable from an input file via
-``Input.distributed: true`` (``api.run_scf`` shards either formalism) — no IBZ
-symmetry reduction (``use_symmetry=False``
-is required on either path), no fully relativistic (SOC) pseudopotentials (NC
-only; USPP/PAW has no SOC representation at all in this codebase — see
-:func:`shard_uspp_system`'s docstring), no hybrid Fock exchange, and no warm
-start across a shard boundary. The noncollinear/spinor SCF and
-hybrid-under-distribution are documented follow-ups (see
+``Input.distributed: true`` (``api.run_scf`` shards either formalism), with
+or without IBZ symmetry reduction — no fully relativistic (SOC)
+pseudopotentials (NC only; USPP/PAW has no SOC representation at all in this
+codebase — see :func:`shard_uspp_system`'s docstring), no hybrid Fock
+exchange, and no warm start across a shard boundary. The noncollinear/spinor
+SCF and hybrid-under-distribution are documented follow-ups (see
 ``docs/manual/distributed.md``), not implemented here.
 """
 
@@ -163,19 +174,18 @@ def shard_system(
     (grid, positions, species, charges, ``vloc_tables``, ``n_electrons``,
     ``nbands``) is untouched and identical on every rank.
 
-    Requires an unsymmetrized system (``use_symmetry=False``): IBZ folding and
-    the ``rho_symmetrizer`` it builds couple k-points across the whole mesh in
-    a way this k-sharding does not yet account for (v1 scope; see module
-    docstring). Fully relativistic (SOC) pseudopotentials are excluded for the
-    same reason (the SCF driver that consumes them, ``scf_noncollinear``, is
-    out of scope here too).
+    A symmetrized system (``use_symmetry=True``) shards the same way: the
+    per-k fields sliced here are already the IBZ set with its orbit weights,
+    and ``sym``/``rho_symmetrizer`` ride along via ``dataclasses.replace``.
+    Neither depends on the k-set — the symmetrizer is built from
+    ``(FFT shape, ops, dens_mask)`` and the SCF applies it to the density
+    AFTER the cross-rank ``all_reduce`` has made it global, so every rank
+    applies the same deterministic operator to identical input and needs no
+    extra communication (see the module docstring). ``world_size`` is bounded
+    by the IBZ k-count, not the full mesh. Fully relativistic (SOC)
+    pseudopotentials are excluded (the SCF driver that consumes them,
+    ``scf_noncollinear``, is out of scope here too).
     """
-    if system.sym is not None or system.rho_symmetrizer is not None:
-        raise NotImplementedError(
-            "distributed k-point parallelism does not yet support "
-            "use_symmetry=True (IBZ reduction) — build the system with "
-            "use_symmetry=False for a distributed run"
-        )
     if system.is_fr:
         raise NotImplementedError(
             "distributed k-point parallelism does not yet support "
@@ -186,7 +196,8 @@ def shard_system(
     if start == end:
         raise ValueError(
             f"rank {rank} would get zero k-points out of {nk} total — "
-            f"world_size ({world_size}) exceeds the k-mesh size"
+            f"world_size ({world_size}) exceeds the k-point count "
+            f"(after IBZ reduction, if enabled)"
         )
 
     from gradwave.core.batch import build_batched
@@ -227,34 +238,28 @@ def shard_uspp_system(
     ``scf.uspp_loop._build_iter_ops`` builds it fresh from ``spheres``/
     ``proj_data`` every call, so slicing those two is enough.
 
-    Requires an unsymmetrized system (``use_symmetry=False``): IBZ folding and
-    the ``rho_symmetrizer``/``becsum_sym`` it builds couple k-points (and, for
-    becsum, atoms) across the whole mesh in a way this k-sharding does not yet
-    account for (same v1 scope as :func:`shard_system`).
+    A symmetrized system shards the same way as in :func:`shard_system`, with
+    one addition: ``becsum_sym`` (the per-atom augmentation symmetrization)
+    also rides along. Like the density symmetrizer it depends on the ops and
+    atoms, not the k-set, and ``uspp_loop._build_output_density`` applies it
+    to the becsum AFTER the cross-rank ``all_reduce`` — identical global
+    input on every rank, identical output, no extra communication.
 
     No fully-relativistic (SOC) guard here: ``USPPSystem`` has no ``is_fr`` /
     ``so_beta_tables`` fields at all — this codebase's only SOC pseudopotential
     path is the norm-conserving spinor driver (``scf_noncollinear``, consuming
-    ``System``); the USPP/PAW noncollinear driver (``scf_uspp_noncollinear``,
-    out of scope here too) takes a magnetic ``rho_symmetrizer``/``becsum_sym``
-    instead, already excluded by the symmetry guard above.
+    ``System``); the USPP/PAW noncollinear driver (``scf_uspp_noncollinear``)
+    is out of scope here too, rejected upstream (``inputs.py`` and
+    ``api.run_scf`` gate ``distributed`` to the collinear drivers, and
+    ``scf_uspp`` rejects a magnetic symmetrizer under ``dist_ctx``).
     """
-    if (
-        system.sym is not None
-        or system.rho_symmetrizer is not None
-        or system.becsum_sym is not None
-    ):
-        raise NotImplementedError(
-            "distributed k-point parallelism does not yet support "
-            "use_symmetry=True (IBZ reduction) — build the system with "
-            "use_symmetry=False for a distributed run"
-        )
     nk = len(system.kweights)
     start, end = shard_range(nk, rank, world_size)
     if start == end:
         raise ValueError(
             f"rank {rank} would get zero k-points out of {nk} total — "
-            f"world_size ({world_size}) exceeds the k-mesh size"
+            f"world_size ({world_size}) exceeds the k-point count "
+            f"(after IBZ reduction, if enabled)"
         )
 
     local_spheres = system.spheres[start:end]

@@ -11,7 +11,7 @@ stress, the optimizer step, and the E(V) fit come out identical on every rank.
 The reference is the SAME input run in an ordinary single process (no
 WORLD_SIZE in the environment, so ``distributed: true`` is a no-op and
 ``init_from_env`` returns None). Small Si NC cell, 2x2x1 mesh (nk=4,
-``symmetry: false`` as distributed v1 requires), and the 2-rank-on-one-box
+``symmetry: false`` to pin the plain 4-point mesh), and the 2-rank-on-one-box
 caveat as tests/integration/test_distributed_scf.py.
 """
 

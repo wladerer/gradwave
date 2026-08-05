@@ -1412,20 +1412,10 @@ def scf_uspp(
             "would mis-fold collinear spin channels); rebuild without "
             "magmoms"
         )
-    if dist_ctx is not None and (
-        system.sym is not None
-        or system.rho_symmetrizer is not None
-        or system.becsum_sym is not None
-    ):
-        # Belt-and-suspenders: gradwave.distributed.shard_uspp_system already
-        # rejects a symmetrized system before scf_uspp ever sees dist_ctx, but
-        # a caller could in principle pass an unsharded, symmetrized system
-        # alongside a dist_ctx built some other way -- reject that combination
-        # here too, same as scf/loop.py's NC driver.
-        raise NotImplementedError(
-            "distributed (dist_ctx) SCF does not yet support IBZ symmetry "
-            "reduction — build the system with use_symmetry=False"
-        )
+    # IBZ symmetry needs no special handling under dist_ctx: rho_symmetrizer
+    # and becsum_sym are k-set-independent and _build_output_density applies
+    # them AFTER the cross-rank all_reduce, so every rank symmetrizes the
+    # identical global density/becsum (see gradwave.distributed's docstring).
     if dist_ctx is not None and start_from is not None:
         # A relax/EOS warm start hands the previous, reassembled FULL-mesh
         # result here; `system` is only this rank's k-shard, so slice the per-k

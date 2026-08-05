@@ -1324,7 +1324,11 @@ The +U metallic-adsorbate divergence and the vc-relax collapse are their own rec
 ## Multi-GPU distributed SCF: status and the gather blocker
 
 **Status: the k-point-sharded SCF (#196, #197) runs correctly across CUDA devices. The
-#216 result-gather deadlock is fixed (#218, commits 9e81317 / 8afe0a5).**
+#216 result-gather deadlock is fixed (#218, commits 9e81317 / 8afe0a5). IBZ symmetry
+reduction composes with the sharding (2026-08-05): the shard unit is the reduced k-list,
+the symmetrizers are k-set-independent and act on the post-all_reduce global
+density/becsum, so the 5–14× symmetry factor and the rank count now multiply instead of
+being mutually exclusive.**
 
 The k-point-sharded distributed SCF runs unmodified across multiple CUDA devices. Gloo
 stages CUDA tensors through host memory, so no NCCL build is needed, and a 4-rank run lands

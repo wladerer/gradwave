@@ -35,15 +35,20 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _build_system():
-    """2-atom Si, a 2x2x1 Monkhorst-Pack mesh (nk=4, no symmetry reduction --
-    distributed v1 requires use_symmetry=False), small enough to run 3x
-    (reference + 2 shards) quickly."""
+def _build_system(use_symmetry: bool = False):
+    """2-atom Si, small enough to run 3x (reference + 2 shards) quickly.
+
+    Unsymmetrized: a 2x2x1 Monkhorst-Pack mesh (nk=4). Symmetrized: the full
+    cubic point group needs an equal-dimension mesh to reduce cleanly (see
+    setup_common.coupled_axes), so 2x2x2 -- 8 points folding to 3 IBZ
+    k-points, which also gives the 2-rank shard an UNEVEN 2/1 split."""
     from gradwave.scf.loop import setup_system
 
     cell, pos = si_fcc()
+    kmesh = (2, 2, 2) if use_symmetry else (2, 2, 1)
     return setup_system(
-        cell, pos, [0, 0], [si_upf()], ecut=8 * RY, kmesh=(2, 2, 1), use_symmetry=False
+        cell, pos, [0, 0], [si_upf()], ecut=8 * RY, kmesh=kmesh,
+        use_symmetry=use_symmetry,
     )
 
 
@@ -52,7 +57,8 @@ _SCF_KWARGS = dict(
 )
 
 
-def _worker(rank: int, world_size: int, port: int, out: dict) -> None:
+def _worker(rank: int, world_size: int, port: int, out: dict,
+            use_symmetry: bool = False) -> None:
     os.environ["GRADWAVE_NUM_THREADS"] = "1"  # 2 worker processes share this box
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
@@ -63,7 +69,7 @@ def _worker(rank: int, world_size: int, port: int, out: dict) -> None:
     from gradwave.distributed import init_from_env, shard_system
     from gradwave.scf.loop import scf
 
-    system = _build_system()
+    system = _build_system(use_symmetry)
     info = init_from_env()
     assert info is not None
     r, ws, group = info
@@ -102,6 +108,36 @@ def test_distributed_matches_single_rank():
     # the reassembled SCFResult looks like an ordinary full-mesh run: every
     # k-point's orbitals/system present, not just this rank's shard
     assert out["n_coeffs_k"] == out["nk_full"] == 4
+
+    assert out["free_energy"] == pytest.approx(float(ref.energies.free_energy), abs=1e-7)
+    assert out["kinetic"] == pytest.approx(float(ref.energies.kinetic), abs=1e-7)
+    assert out["nonlocal"] == pytest.approx(float(ref.energies.nonlocal_), abs=1e-7)
+    np.testing.assert_allclose(out["rho"], ref.rho.numpy(), atol=1e-8)
+    np.testing.assert_allclose(out["eigenvalues"], ref.eigenvalues.numpy(), atol=1e-6)
+    np.testing.assert_allclose(out["occupations"], ref.occupations.numpy(), atol=1e-6)
+
+
+def test_distributed_symmetric_scf_matches_single_rank():
+    """distributed x IBZ: the sharded run on a use_symmetry=True system (3 IBZ
+    k-points out of a 2x2x2 mesh, uneven 2/1 shard) reproduces the plain
+    single-process SYMMETRIC run. The rho_symmetrizer rides on each shard and
+    is applied to the post-all_reduce global density, so the result must match
+    to the same tolerances as the unsymmetrized test above."""
+    port = _free_port()
+    manager = mp.Manager()
+    out = manager.dict()
+    mp.spawn(_worker, args=(2, port, out, True), nprocs=2, join=True)
+
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.scf.loop import scf
+
+    ref = scf(_build_system(use_symmetry=True), PBE(), **_SCF_KWARGS)
+
+    assert out["converged"]
+    assert ref.converged
+    # reassembled over the IBZ list (2x2x2 folds to 3 for FCC Si), not the
+    # full 8-point mesh and not one rank's shard
+    assert out["n_coeffs_k"] == out["nk_full"] == len(ref.system.kweights) == 3
 
     assert out["free_energy"] == pytest.approx(float(ref.energies.free_energy), abs=1e-7)
     assert out["kinetic"] == pytest.approx(float(ref.energies.kinetic), abs=1e-7)

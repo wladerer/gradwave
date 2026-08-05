@@ -240,8 +240,8 @@ def run_scf(
         info = init_from_env()
         if info is not None:
             rank, world_size, group = info
-            # symmetry (IBZ) is rejected inside the shard_* call for either
-            # formalism (build with symmetry: false) — nothing to gate here.
+            # symmetry (IBZ) composes with the sharding: shard_* slices the
+            # IBZ k-list and the symmetrizers ride along — nothing to gate.
             if uspp:
                 system, dist_ctx = shard_uspp_system(
                     cast("USPPSystem", system), rank, world_size, group)

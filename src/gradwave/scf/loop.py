@@ -1288,11 +1288,10 @@ def scf(
                 "sum reduced the same way as the density (see "
                 "_hubbard_occ_update)."
             )
-        if system.rho_symmetrizer is not None:
-            raise NotImplementedError(
-                "distributed (dist_ctx) SCF does not yet support IBZ symmetry "
-                "reduction — build the system with use_symmetry=False"
-            )
+        # IBZ symmetry needs no special handling here: the rho_symmetrizer is
+        # k-set-independent and is applied to the density AFTER the cross-rank
+        # all_reduce below, so every rank symmetrizes the identical global
+        # density (see gradwave.distributed's module docstring).
         if start_from is not None:
             # A relax/EOS warm start hands the previous, reassembled FULL-mesh
             # result here; `system` is only this rank's k-shard, so slice the

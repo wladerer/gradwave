@@ -313,7 +313,7 @@ class GradWave(Calculator):
         # k-shard, all-reduces the density/energy, and reassembles a full-mesh
         # result so forces/stress come out identical on every rank. A no-op
         # outside such a launch (WORLD_SIZE unset/1 → the ordinary full-mesh
-        # path). Requires use_symmetry=False (shard_system rejects otherwise).
+        # path). Composes with use_symmetry (the shard unit is the IBZ k-list).
         verbose: bool = False,
         **kwargs: Any,
     ) -> None:
