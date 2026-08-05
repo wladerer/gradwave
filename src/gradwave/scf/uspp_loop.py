@@ -1426,6 +1426,15 @@ def scf_uspp(
             "distributed (dist_ctx) SCF does not yet support IBZ symmetry "
             "reduction — build the system with use_symmetry=False"
         )
+    if dist_ctx is not None and start_from is not None:
+        # A relax/EOS warm start hands the previous, reassembled FULL-mesh
+        # result here; `system` is only this rank's k-shard, so slice the per-k
+        # orbital seed down to [k_start, k_end) or _seed_orbitals_uspp's k-count
+        # check silently cold-starts every orbital (see shard_start_from). The
+        # per-atom becsum (rho_ij_atoms) it also carries stays global.
+        from gradwave.distributed import shard_start_from
+
+        start_from = shard_start_from(start_from, dist_ctx)
     grid = system.grid
     vol = grid.volume
     dev = system.positions.device

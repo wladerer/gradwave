@@ -18,12 +18,19 @@ the two things that don't need one:
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 import torch
 
 from gradwave.core.batch import density_b
-from gradwave.distributed import shard_range, shard_system
+from gradwave.distributed import (
+    DistKContext,
+    shard_range,
+    shard_start_from,
+    shard_system,
+)
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.scf.loop import setup_system
 from tests.helpers import RY, si_upf
@@ -136,3 +143,60 @@ def test_sharded_density_sums_to_full_density():
 
     rho_full = density_b(c_full, occ_full, system.kweights, full_bk, grid_shape, vol)
     torch.testing.assert_close(rho0 + rho1, rho_full, atol=1e-12, rtol=1e-10)
+
+
+def _ctx(k_start, k_end, nk_global):
+    """A bare DistKContext for the pure-slicing tests (no process group needed:
+    shard_start_from only reads k_start/k_end)."""
+    return DistKContext(
+        rank=0, world_size=2, group=None, k_start=k_start, k_end=k_end,
+        nk_global=nk_global, full_system=None,  # type: ignore[arg-type]
+    )
+
+
+@dataclasses.dataclass
+class _FakeResult:
+    """Minimal stand-in for an SCFResult so shard_start_from's dataclass path
+    (dataclasses.replace on .coeffs) is exercised without a real SCF."""
+    coeffs: object
+    rho: object = None
+
+
+def test_shard_start_from_slices_flat_coeffs_nspin1():
+    # nspin=1 warm start: coeffs is a flat per-k list over the FULL mesh.
+    full = [torch.full((3, 5 + ik), float(ik)) for ik in range(4)]
+    rho = torch.ones(2, 2, 2)
+    res = _FakeResult(coeffs=full, rho=rho)
+
+    r0 = shard_start_from(res, _ctx(0, 2, 4))
+    r1 = shard_start_from(res, _ctx(2, 4, 4))
+    assert [c.shape[1] for c in r0.coeffs] == [5, 6]  # k 0,1
+    assert [c.shape[1] for c in r1.coeffs] == [7, 8]  # k 2,3
+    # concatenating the shards in rank order reconstructs the full list
+    assert [id(c) for c in r0.coeffs] + [id(c) for c in r1.coeffs] == [id(c) for c in full]
+    # the global density field rides through untouched (same object)
+    assert r0.rho is rho and r1.rho is rho
+
+
+def test_shard_start_from_slices_nested_coeffs_nspin2():
+    # nspin=2 warm start: coeffs is a [spin][k] list-of-lists.
+    full = [[torch.zeros(2, 4) for _ in range(4)] for _ in range(2)]
+    res = _FakeResult(coeffs=full)
+    r1 = shard_start_from(res, _ctx(2, 4, 4))
+    assert len(r1.coeffs) == 2  # both spin channels preserved
+    assert all(len(ch) == 2 for ch in r1.coeffs)  # each sliced to k 2,3
+    assert r1.coeffs[0][0] is full[0][2] and r1.coeffs[1][1] is full[1][3]
+
+
+def test_shard_start_from_dict_and_passthrough():
+    full = [torch.zeros(2, 3) for _ in range(4)]
+    d = {"coeffs": full, "rho": "rho-obj", "nspin": 1}
+    out = shard_start_from(d, _ctx(0, 2, 4))
+    assert len(out["coeffs"]) == 2 and out["coeffs"][0] is full[0]
+    assert out["rho"] == "rho-obj"  # non-coeff fields carried through
+    assert d["coeffs"] is full  # original left unmutated
+
+    # None and coeff-less warm starts pass through unchanged
+    assert shard_start_from(None, _ctx(0, 2, 4)) is None
+    coeffless = _FakeResult(coeffs=None)
+    assert shard_start_from(coeffless, _ctx(0, 2, 4)) is coeffless

@@ -292,6 +292,53 @@ def shard_uspp_system(
     return local, ctx
 
 
+def shard_start_from(start_from: _T, ctx: DistKContext) -> _T:
+    """Slice a FULL-mesh warm-start's per-k orbital coefficients down to this
+    rank's k-shard ``[k_start, k_end)``, so the orbital seed matches the local
+    system :func:`shard_system`/:func:`shard_uspp_system` built.
+
+    The relax calculator and the EOS volume chain both warm-start each SCF from
+    the previous, already-reassembled FULL-mesh result. That result's ``coeffs``
+    carry every k-point, but the local shard's ``scf(..., dist_ctx=)`` seeds
+    orbitals against a local system whose ``spheres``/``BatchedK`` cover only
+    ``[k_start, k_end)`` — so an unsliced full-mesh ``coeffs`` fails the seed's
+    k-count compatibility check and silently cold-starts every orbital
+    (``scf.loop._seed_orbitals`` / ``scf.uspp_loop._seed_orbitals_uspp``),
+    inflating the per-step SCF iteration count away from the single-process run.
+    Slicing the per-k coefficient list here restores the exact per-k reuse.
+
+    Only the per-k ``coeffs`` are sharded. Every other warm-start field is
+    already global: the real-space density (``rho``/``rho_spin``, ``all_reduce``
+    -summed each SCF iteration), the per-atom USPP augmentation ``rho_ij_atoms``,
+    and ``system.grid`` (geometry-global, used only for the volume-ratio
+    rescale in ``scf.common.warm_start_densities``). ``coeffs`` is a flat per-k
+    list for nspin=1 and a ``[spin][k]`` list-of-lists for nspin=2; both layouts
+    are sliced along the k axis. A ``None`` ``start_from`` (or one carrying no
+    ``coeffs``) passes through unchanged."""
+    if start_from is None:
+        return start_from
+    lo, hi = ctx.k_start, ctx.k_end
+
+    def _slice(coeffs: Any) -> Any:
+        if coeffs is None:
+            return None
+        # nspin=2 is a [spin][k] list-of-lists; nspin=1 is a flat per-k list.
+        if len(coeffs) > 0 and isinstance(coeffs[0], list):
+            return [ch[lo:hi] for ch in coeffs]
+        return coeffs[lo:hi]
+
+    if isinstance(start_from, dict):
+        if start_from.get("coeffs") is None:
+            return start_from
+        out = dict(start_from)
+        out["coeffs"] = _slice(start_from["coeffs"])
+        return cast("_T", out)
+    coeffs = getattr(start_from, "coeffs", None)
+    if coeffs is None:
+        return start_from
+    return dataclasses.replace(start_from, coeffs=_slice(coeffs))
+
+
 def all_reduce_(tensor: torch.Tensor, ctx: DistKContext) -> torch.Tensor:
     """SUM ``all_reduce`` — the density / k-extensive-energy reduction point.
     Works for any tensor shape shared identically across ranks (the dense

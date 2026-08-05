@@ -45,6 +45,7 @@ from gradwave.scf.loop import System, scf, setup_system
 if TYPE_CHECKING:
     from gradwave.core.hubbard import HubbardManifold
     from gradwave.core.xc.base import XCFunctional
+    from gradwave.distributed import DistKContext
     from gradwave.pseudo.upf import UPFData
     from gradwave.pseudo.upf_paw import PAWData
     from gradwave.scf.loop import SCFResult
@@ -306,6 +307,13 @@ class GradWave(Calculator):
         # calculator always evaluates stress for a cell).
         hub_occ_mix: float = 1.0,  # DFT+U occupation-matrix damping β in (0,1] (1.0 = raw lag)
         hub_u_ramp_iters: int = 0,  # DFT+U linear U-ramp length in iterations (0 = off)
+        distributed: bool = False,  # opt into k-point-sharded distributed SCF
+        # (gradwave.distributed) for every ionic step. Under an active torchrun
+        # launch (WORLD_SIZE>1) each calculate() diagonalizes only this rank's
+        # k-shard, all-reduces the density/energy, and reassembles a full-mesh
+        # result so forces/stress come out identical on every rank. A no-op
+        # outside such a launch (WORLD_SIZE unset/1 → the ordinary full-mesh
+        # path). Requires use_symmetry=False (shard_system rejects otherwise).
         verbose: bool = False,
         **kwargs: Any,
     ) -> None:
@@ -396,6 +404,7 @@ class GradWave(Calculator):
         self._system_key: tuple[tuple[float, ...], tuple[str, ...]] | None = None
         self._device = device
         self._compile_xc = compile_xc
+        self._distributed = bool(distributed)
         self._verbose = verbose
         self.last_result: SCFResult | USPPResult | None = None
         self._scf_state: _StateKey | None = None  # the geometry/params the
@@ -823,6 +832,38 @@ class GradWave(Calculator):
         self._scf_state = key
         self._cached_results = dict(self.results)
 
+    def _maybe_shard(
+        self, system: System | USPPSystem
+    ) -> tuple[System | USPPSystem, DistKContext | None]:
+        """This rank's k-shard of ``system`` and its ``DistKContext`` under an
+        active distributed launch, else ``(system, None)`` (the ordinary path).
+
+        Sharding is opted into per calculator (``distributed=True``) and only
+        engages when torchrun's env actually describes a >1-rank job; outside
+        one, ``init_from_env`` returns None and the full system runs unchanged.
+        Re-sharded every calculate() — ``shard_system`` partitions
+        deterministically from ``(nk, rank, world_size)``, so a relaxation's
+        per-step (or per-volume) rebuild lands on the same contiguous shard on
+        every rank. The returned ``dist_ctx`` is threaded into scf/scf_uspp,
+        which reduce the density/energy across ranks and reassemble a full-mesh
+        result so forces/stress below see the whole k-mesh identically."""
+        if not self._distributed:
+            return system, None
+        from gradwave.distributed import (
+            init_from_env,
+            shard_system,
+            shard_uspp_system,
+        )
+        from gradwave.scf.uspp import USPPSystem
+
+        info = init_from_env()
+        if info is None:
+            return system, None
+        rank, world_size, group = info
+        if isinstance(system, USPPSystem):
+            return shard_uspp_system(system, rank, world_size, group)
+        return shard_system(cast("System", system), rank, world_size, group)
+
     def _calculate_nc(self) -> None:
         """Norm-conserving route: one SCF, then energy, forces, and (for a
         periodic cell) stress in the same pass."""
@@ -837,13 +878,20 @@ class GradWave(Calculator):
         mix_kw = ({} if p["mixing_history"] is None
                   else {"mixing_history": p["mixing_history"]})
         manifolds = self._resolve_hubbard(self.atoms)
+        # Warm-start off the FULL previous result (its density is global and its
+        # per-k orbitals full-mesh); scf() slices the orbital seed to the local
+        # shard under dist_ctx (shard_start_from). Sharding runs AFTER the warm
+        # start so it operates on the full mesh, and forces/stress below read
+        # the reassembled full-mesh result — never this rank's shard.
+        start = cast(Any, self._warm_start(system, nspin))
+        local_system, dist_ctx = self._maybe_shard(system)
         # scf()/forces() declare xc: XCFunctional (nspin=1 only in their own
         # signature); the nspin=2 SpinXC variants both share XCFunctional's
         # interface (CompilableXC, torch.nn.Module) and are the SCF's own
         # long-standing collinear-spin contract (see _make_xc / the SPIN_XC
         # registries in api.py) — the cast documents that, not a workaround.
         res = scf(
-            system, cast("XCFunctional", xc),
+            cast("System", local_system), cast("XCFunctional", xc),
             smearing=p["smearing"], width=p["width"],
             max_iter=p["max_iter"], etol=p["etol"], rhotol=p["rhotol"],
             mixing_alpha=p["mixing_alpha"], kerker=p["mixing_kerker"],
@@ -852,11 +900,8 @@ class GradWave(Calculator):
             nspin=nspin, start_mag=start_mag, tot_magnetization=tot_mag,
             hubbard=manifolds,
             hub_occ_mix=self._hub_occ_mix, hub_u_ramp_iters=self._hub_u_ramp_iters,
-            # _warm_start is shared with the USPP path, so its declared return
-            # spans both; scf() only ever receives the NC-shaped subset here
-            # (is_uspp gates it internally) — the cast documents that, not a
-            # workaround.
-            start_from=cast(Any, self._warm_start(system, nspin)), **mix_kw,
+            dist_ctx=dist_ctx,
+            start_from=start, **mix_kw,
         )
         if not res.converged:
             raise RuntimeError("gradwave SCF did not converge")
@@ -999,10 +1044,17 @@ class GradWave(Calculator):
         # term), so relaxation / EOS / elastic constants run here too.
         manifolds = self._resolve_hubbard(self.atoms)
         xc = self._make_xc(nspin)
+        # Warm-start off the FULL previous result, then shard the system to this
+        # rank's k-slice; scf_uspp slices the orbital seed to match under
+        # dist_ctx (shard_start_from) and reassembles a full-mesh result so
+        # forces/stress below see the whole mesh (see _calculate_nc).
+        start = cast(Any, self._warm_start(system, nspin))
+        local_system, dist_ctx = self._maybe_shard(system)
         # scf_uspp has no tot_magnetization pin (no fixed-spin-moment mode); the
         # start_mag seed and a shared Fermi level find the moment.
         # scf_uspp takes mixing_history=None natively (per-scheme default)
-        res = scf_uspp(system, xc, nspin=nspin, start_mag=start_mag,
+        res = scf_uspp(cast("USPPSystem", local_system), xc, nspin=nspin,
+                       start_mag=start_mag,
                        smearing=p["smearing"],
                        width=p["width"], max_iter=p["max_iter"],
                        etol=p["etol"], rhotol=p["rhotol"],
@@ -1014,10 +1066,11 @@ class GradWave(Calculator):
                        hub_occ_mix=self._hub_occ_mix,
                        hub_u_ramp_iters=self._hub_u_ramp_iters,
                        verbose=self._verbose,
+                       dist_ctx=dist_ctx,
                        # _warm_start is shared with the NC path; scf_uspp only
                        # ever receives the USPP-shaped subset here (is_uspp
                        # gates it internally) — the cast documents that.
-                       start_from=cast(Any, self._warm_start(system, nspin)))
+                       start_from=start)
         if not res.converged:
             raise RuntimeError("gradwave USPP SCF did not converge")
         self.last_result = res
