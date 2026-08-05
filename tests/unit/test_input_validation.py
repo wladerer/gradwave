@@ -67,6 +67,10 @@ def test_unknown_key_suggests_the_right_one(tmp_path, extra, needle):
     ("elastic: {fmax: 0}\n", "elastic.fmax"),
     ("elastic: {max_steps: 0}\n", "elastic.max_steps"),
     ("relax: {extrapolation: cubic}\n", "relax.extrapolation"),
+    # ecutrho (density cutoff) must be a finer grid than the wavefunction cutoff
+    ("ecutrho: 100\n", "ecutrho must exceed ecut"),
+    ("scf: {eigensolver: lobpcg}\n", "scf.eigensolver"),
+    ("relax: {pulay_solver: gmres}\n", "relax.pulay_solver"),
 ])
 def test_value_range_errors(tmp_path, extra, needle):
     from gradwave.inputs import InputError, load_input
@@ -96,6 +100,50 @@ def test_extrapolation_defaults_and_parses(tmp_path):
     inp = load_input(_write(tmp_path, _base(
         "task: relax\nrelax: {extrapolation: quadratic}\n")))
     assert inp.relax.extrapolation == "quadratic"
+
+
+@pytest.mark.parametrize("ecut", ["0", "-5", "-680.28"])
+def test_nonpositive_ecut_rejected(tmp_path, ecut):
+    from gradwave.inputs import InputError, load_input
+
+    # _base hardcodes ecut: 680.28; swap it for the non-positive value under test
+    body = _base().replace("ecut: 680.28", f"ecut: {ecut}")
+    with pytest.raises(InputError, match="ecut must be > 0"):
+        load_input(_write(tmp_path, body))
+
+
+def test_missing_pseudo_names_element_and_path(tmp_path):
+    # a mapped-but-absent UPF surfaces as an actionable InputError, not a bare
+    # FileNotFoundError, and load_input prepends the input file path
+    from gradwave.inputs import InputError, load_input
+
+    body = _base().replace("C_ONCV_PBE-1.2.upf", "does_not_exist.upf")
+    p = _write(tmp_path, body)
+    with pytest.raises(InputError, match="not found") as exc:
+        load_input(p)
+    msg = str(exc.value)
+    assert "C" in msg and "does_not_exist.upf" in msg
+    assert "pseudopotentials.dir" in msg  # points at the fix
+    assert str(p) in msg                   # file-path prefixing applied
+
+
+def test_eigensolver_defaults_and_parses(tmp_path):
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _base()))
+    assert inp.scf.eigensolver == "davidson"  # the workhorse default
+    inp = load_input(_write(tmp_path, _base("scf: {eigensolver: chebyshev}\n")))
+    assert inp.scf.eigensolver == "chebyshev"
+
+
+def test_pulay_solver_defaults_and_parses(tmp_path):
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _base()))
+    assert inp.relax.pulay_solver == "diagonal"  # default, unchanged behaviour
+    inp = load_input(_write(tmp_path, _base(
+        "task: relax\nrelax: {pulay_solver: cg}\n")))
+    assert inp.relax.pulay_solver == "cg"
 
 
 def test_precond_defaults_to_kerker(tmp_path):

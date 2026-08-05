@@ -31,6 +31,17 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 TIMEOUT_S = int(os.environ.get("BENCH_TIMEOUT", "3600"))
 
+# Map a box's OS hostname to its logical name so results land under the same
+# directory scripts/gwq keys by. Kept in sync with gwq's HOST_ALIASES (the
+# source of truth): asus's hostName is "nixos", so without this its records
+# would split into results/nixos/ instead of results/asus/.
+HOST_ALIASES = {"nixos": "asus"}
+
+
+def this_host() -> str:
+    return os.environ.get("GWQ_HOST") or HOST_ALIASES.get(
+        socket.gethostname(), socket.gethostname())
+
 
 def git_sha() -> str:
     try:
@@ -54,7 +65,7 @@ def main() -> int:
         print(f"error: no benchmark named {name!r} ({script} missing)", file=sys.stderr)
         return 2
 
-    host = socket.gethostname()
+    host = this_host()
     sha = git_sha()
     started = datetime.now(timezone.utc)
 

@@ -229,9 +229,10 @@ records the chosen `extrapolation` alongside the existing `scf_iter_per_step` an
     annulus-projected Hamiltonian, which captures the potential coupling the
     diagonal drops. It costs a handful of extra Hamiltonian applies per step
     (about 0.1 to 0.4 s on the silicon harness), small next to the SCF itself, so
-    careful variable-cell relaxations may prefer it. Enable it with
+    careful variable-cell relaxations may prefer it. Enable it through the input
+    surface with `relax.pulay_solver: cg`, or directly with
     `GradWave(pulay_stress_correction=True, pulay_solver="cg")`. The default stays
-    `"diagonal"` so existing runs are unchanged. The correction remains a
+    `diagonal` so existing runs are unchanged. The correction remains a
     first-order indicator, not a substitute for converging `ecut`.
 
 ## Gotchas

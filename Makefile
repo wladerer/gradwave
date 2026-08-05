@@ -73,16 +73,16 @@ q-status: ## live queue view across the fleet (thinkpad + asus)
 DASH_HOST ?= homelab
 
 dashboard: ## generate the fleet dashboard -> dashboard.html (open it in a browser)
-	./scripts/dashboard.py --collect
+	uv run python scripts/dashboard.py --collect
 
 worktrees: ## fleet worktree overview — drift, stale branches, cross-worktree file overlap
-	./scripts/worktrees.py
+	uv run python scripts/worktrees.py
 
 worktrees-prune: ## remove stale (merged) + clean + idle worktrees under .claude/worktrees/
-	./scripts/worktrees.py --prune
+	uv run python scripts/worktrees.py --prune
 
 dashboard-push: ## generate and push the dashboard to $(DASH_HOST) for tailscale-serve
-	./scripts/dashboard.py --collect --out /tmp/gwdash.html
+	uv run python scripts/dashboard.py --collect --out /tmp/gwdash.html
 	ssh $(DASH_HOST) 'mkdir -p ~/gwdash'
 	rsync -az /tmp/gwdash.html $(DASH_HOST):gwdash/index.html
 	@echo "pushed to $(DASH_HOST):~/gwdash/index.html — serve once with (absolute path: \$$HOME is /root under sudo):"
