@@ -218,9 +218,9 @@ def test_symmetry_true_rejected_for_magnetic_modes(tmp_path, mode):
     ("distributed: true\nnoncollinear: true\n", "noncollinear"),
     # distributed + hybrid functional: rejected (api.run_scf's gate)
     ("distributed: true\nxc: pbe0\n", "hybrid functional"),
-    # distributed + a non-scf/bands task: rejected (api.run's task gate)
-    ("distributed: true\ntask: relax\n", "task: scf | bands"),
-    ("distributed: true\ntask: eos\n", "task: scf | bands"),
+    # distributed + a task outside the sharded set: rejected (api.run's gate)
+    ("distributed: true\ntask: elastic\n", "task: scf | bands | relax | eos"),
+    ("distributed: true\ntask: phonons\n", "task: scf | bands | relax | eos"),
     # distributed with symmetry on (the default) needs symmetry: false — the
     # shard path has no IBZ reduction
     ("distributed: true\n", "requires symmetry: false"),
@@ -233,12 +233,14 @@ def test_distributed_incompatible_combos_rejected(tmp_path, extra, needle):
         load_input(_write(tmp_path, _base(extra)))
 
 
-@pytest.mark.parametrize("task_line", ["", "task: bands\n"])
+@pytest.mark.parametrize(
+    "task_line", ["", "task: bands\n", "task: relax\n", "task: eos\n"]
+)
 def test_distributed_collinear_scf_symmetry_off_parses(tmp_path, task_line):
     # the supported case: a collinear (norm-conserving OR USPP/PAW — this layer
-    # cannot tell them apart, and both are wired) scf/bands run with symmetry
-    # off validates cleanly. Nothing here keys on the pseudopotential kind, so a
-    # USPP/PAW distributed run is NOT rejected.
+    # cannot tell them apart, and both are wired) scf/bands/relax/eos run with
+    # symmetry off validates cleanly. Nothing here keys on the pseudopotential
+    # kind, so a USPP/PAW distributed run is NOT rejected.
     from gradwave.inputs import load_input
 
     inp = load_input(_write(tmp_path, _base(
