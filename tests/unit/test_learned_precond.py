@@ -1,6 +1,8 @@
 """Learned multi-pole Kerker preconditioner: filter algebra, mixer wiring, and
 the differentiable fit against a diagonal response model."""
 
+import math
+
 import torch
 
 from gradwave.dtypes import RDTYPE
@@ -8,7 +10,9 @@ from gradwave.scf.learned_precond import (
     BlockPrecond,
     MultipoleKerkerPrecond,
     _diis_unroll_logres,
+    diis_objective,
     fit_multipole,
+    fit_multipole_robust,
     response_from_residuals,
     spectral_radius,
 )
@@ -170,3 +174,118 @@ def test_response_estimate_recovers_known_denominator():
     # bins away from the noisy G→0 turn-on recover d to a few percent
     mid = centers > 2.0
     assert torch.allclose(d_shell[mid], d_expect[mid], atol=0.03, rtol=0.05)
+
+
+# -- robust fit: multi-seed, quality weighting, model selection, abstention ----
+
+def _two_scale_res_hist(alpha, g2, noise=0.0, seed=0, n=10):
+    """Synthetic probe residual history whose ratios encode a two-scale d(G)."""
+    d_true = 0.5 * g2 / (g2 + 0.3**2) + 0.5 * g2 / (g2 + 2.5**2)
+    amp = (1.0 - alpha * d_true).to(torch.complex128)
+    r0 = torch.ones(g2.shape[0], dtype=torch.complex128)
+    r0[0] = 0.0                                        # pinned G=0
+    hist = [r0 * amp**k for k in range(n)]
+    if noise:
+        g = torch.Generator().manual_seed(seed)
+        hist = [r * (1.0 + noise * torch.randn(r.shape, generator=g,
+                                               dtype=torch.float64)) for r in hist]
+    return hist
+
+
+def test_robust_fit_selection_is_noise_stable():
+    """The recorded failure: ~1e-14 last-bit noise in the residual history steered
+    the deterministic optimizer into a worse local minimum (the #91 rfft round-trip
+    flipped Cu 10→8 back to a tie). Multi-seed objective selection must make the
+    deployed filter's objective and synthetic iteration count stable across noise
+    realizations — the selection must not flip to a worse minimum."""
+    alpha = 0.5
+    g2 = torch.linspace(0.05, 25.0, 120, dtype=RDTYPE)
+    objs, ks, iters = [], [], []
+    for seed in range(3):
+        hist = _two_scale_res_hist(alpha, g2, noise=1e-14, seed=seed)
+        centers, d_shell, count, quality = response_from_residuals(
+            hist, g2, alpha, n_bins=24, skip=1, return_quality=True)
+        P, info = fit_multipole_robust(
+            centers, d_shell, alpha=alpha, q0=1.1, history=6, n_unroll=15,
+            steps=80, k_max=2, n_seeds=3, q_min=0.1, q_max=4.0,
+            weight=count, quality=quality)
+        objs.append(diis_objective(P, centers, d_shell, alpha=alpha, q0=1.1,
+                                   n_unroll=18, history=6, weight=quality))
+        ks.append(info["selected_k"])
+        rho = float(spectral_radius(P.filter_vals(), d_shell, alpha))
+        iters.append(math.log(1e-8) / math.log(rho))
+    # 1e-14 probe noise must move the deployed objective by far less than a win
+    # margin, never flip the selected pole count, and leave the synthetic
+    # iteration count essentially fixed.
+    assert max(objs) - min(objs) < 0.1
+    assert len(set(ks)) == 1
+    assert max(iters) - min(iters) < 0.5
+
+
+def test_robust_fit_keeps_two_scale_win():
+    """On a genuinely two-scale response the gate does NOT abstain: it deploys a
+    multi-pole filter whose unrolled-DIIS objective beats bare Kerker by more than
+    the abstention margin (the win the whole mechanism exists to capture)."""
+    alpha = 0.7
+    g2 = torch.linspace(0.15, 40.0, 100, dtype=RDTYPE)
+    d = 0.5 * g2 / (g2 + 0.3**2) + 0.5 * g2 / (g2 + 2.5**2)
+    P, info = fit_multipole_robust(g2, d, alpha=alpha, q0=1.1, history=8,
+                                   n_unroll=20, steps=150, k_max=3, n_seeds=3,
+                                   q_min=0.2, q_max=4.0)
+    assert not info["abstained"]
+    assert info["selected_kind"] == "fit"
+    assert info["obj_kerker"] - info["obj_best"] > 1.0     # beats Kerker by margin
+
+
+def test_robust_fit_abstains_to_kerker_on_single_scale():
+    """A single-scale response (the response denominator is itself a single Kerker
+    pole) offers no multi-scale room, so the abstention gate returns bare Kerker
+    exactly — losing to Kerker is impossible by construction."""
+    alpha = 0.7
+    g2 = torch.linspace(0.15, 40.0, 100, dtype=RDTYPE)
+    q0 = 1.1
+    d = g2 / (g2 + q0**2)                               # single scale at q0
+    P, info = fit_multipole_robust(g2, d, alpha=alpha, q0=q0, history=8,
+                                   n_unroll=20, steps=150, k_max=3, n_seeds=3,
+                                   q_min=0.2, q_max=4.0)
+    assert info["abstained"]
+    assert info["selected_kind"] == "kerker"
+    kerker = MultipoleKerkerPrecond.kerker(g2, q0)
+    assert torch.allclose(P.filter_vals(), kerker.filter_vals(), atol=1e-12)
+
+
+def test_robust_fit_model_selection_prefers_fewer_poles():
+    """With the abstention gate disabled, model selection still prefers the
+    smallest pole count whose objective is within tolerance of the best: a
+    single-scale response selects K=1, not the larger K_max fit."""
+    alpha = 0.7
+    g2 = torch.linspace(0.15, 40.0, 100, dtype=RDTYPE)
+    d = g2 / (g2 + 0.9**2)                              # single scale
+    P, info = fit_multipole_robust(g2, d, alpha=alpha, q0=1.1, history=8,
+                                   n_unroll=20, steps=150, k_max=3, n_seeds=3,
+                                   q_min=0.2, q_max=4.0, abstain_margin=-1e9)
+    assert info["selected_k"] == 1
+
+
+def test_robust_fit_pole_floor_from_quality():
+    """Probe-quality weighting forbids a pole below the lowest trustworthy shell:
+    when the low-|G| shells carry no trustworthy data (quality 0 there), the fitted
+    poles all sit at or above the reported pole floor, killing the q≈0.03 Å⁻¹
+    overfit-to-lowest-shell-noise failure mode structurally."""
+    alpha = 0.5
+    g2 = torch.linspace(0.05, 25.0, 120, dtype=RDTYPE)
+    hist = _two_scale_res_hist(alpha, g2, noise=1e-12, seed=7)
+    centers, d_shell, count, quality = response_from_residuals(
+        hist, g2, alpha, n_bins=24, skip=1, return_quality=True)
+    # zero out the two lowest shells' confidence: they become untrusted, so the
+    # floor must climb above them and no pole may land there.
+    quality = quality.clone()
+    quality[:2] = 0.0
+    P, info = fit_multipole_robust(
+        centers, d_shell, alpha=alpha, q0=1.1, history=6, n_unroll=15, steps=80,
+        k_max=2, n_seeds=3, q_min=0.05, q_max=4.0, weight=count, quality=quality,
+        abstain_margin=-1e9)
+    trust = quality > 0.0
+    q_lo_trust = float(centers[trust].min().sqrt())
+    assert info["q_floor"] >= q_lo_trust - 1e-9
+    assert float(P.q2().sqrt().min()) >= info["q_floor"] - 1e-9

@@ -43,6 +43,7 @@ from gradwave.scf.learned_precond import (  # noqa: E402
     MultipoleKerkerPrecond,
     _inv_softplus,
     fit_multipole,
+    fit_multipole_robust,
     response_from_residuals,
     spectral_radius,
 )
@@ -135,18 +136,21 @@ def run_metal(label, q0=1.1):
     scf(sys_(), xc, mixing_alpha=alpha_probe, mixing_history=1, kerker=True,
         max_iter=14, mixer_hook=hook, **common)
     kfac = g2_dens / (g2_dens + q0**2)
-    g2_shell, d_shell, count = response_from_residuals(
-        res_hist, g2_dens, alpha_probe, n_bins=48, skip=2, precond_fac=kfac)
+    g2_shell, d_shell, count, quality = response_from_residuals(
+        res_hist, g2_dens, alpha_probe, n_bins=48, skip=2, precond_fac=kfac,
+        return_quality=True)
     print(f"  probe {len(res_hist)} residuals → d(G) over {len(d_shell)} shells, "
           f"d in [{float(d_shell.min()):.2f}, {float(d_shell.max()):.2f}]")
 
-    # fit through the ACTUAL DIIS mixer the deploy run uses (history 8), so the
-    # filter complements DIIS rather than duplicating its low-G work.
-    P, info = fit_multipole(g2_shell, d_shell, n_poles=3, alpha=0.7,
-                            mixer="diis", history=8, q0=q0, n_unroll=30,
-                            steps=700, weight=count)
+    # robust fit through the ACTUAL DIIS mixer the deploy run uses (history 8):
+    # multi-seed, quality-weighted, model-selected, Kerker abstention gate.
+    P, info = fit_multipole_robust(g2_shell, d_shell, alpha=0.7, q0=q0,
+                                   history=8, n_unroll=30, steps=700,
+                                   weight=count, quality=quality)
     P = P.rebind(g2_dens).detach_()
-    print(f"  fitted {P.summary()}  (plain rho {info['rho_init']:.3f}→{info['rho_final']:.3f})")
+    gate = "abstain→kerker" if info["abstained"] else f"deploy K={info['selected_k']}"
+    print(f"  fitted {P.summary()}  [{gate}]  "
+          f"(kerker obj {info['obj_kerker']:.3f} → best {info['obj_best']:.3f})")
 
     t = time.perf_counter()
     learned = scf(sys_(), xc, mixing_alpha=0.7, precond_op=P, **common)
@@ -219,43 +223,46 @@ def run_cu3al():
     scf(sys_(), xc, mixing_alpha=alpha_probe, mixing_history=1, kerker=True,
         max_iter=14, mixer_hook=hook, **common)
     kfac = g2_dens / (g2_dens + q0**2)
-    g2_shell, d_shell, count = response_from_residuals(
-        res_hist, g2_dens, alpha_probe, n_bins=48, skip=2, precond_fac=kfac)
+    g2_shell, d_shell, count, quality = response_from_residuals(
+        res_hist, g2_dens, alpha_probe, n_bins=48, skip=2, precond_fac=kfac,
+        return_quality=True)
     print(f"  probe {len(res_hist)} residuals → d(G) over {len(d_shell)} shells, "
           f"d in [{float(d_shell.min()):.2f}, {float(d_shell.max()):.2f}]")
 
-    # two DIIS-aware fits: the default seed range, and a wider/more-poled seed.
-    variants = [
-        ("learned 3-pole [0.3,3.0]", dict(n_poles=3, q_min=0.3, q_max=3.0)),
-        ("learned 4-pole [0.05,4.0]", dict(n_poles=4, q_min=0.05, q_max=4.0)),
-    ]
-    for label, fit_kw in variants:
-        P, info = fit_multipole(g2_shell, d_shell, alpha=0.7, mixer="diis",
-                                history=8, q0=q0, n_unroll=30, steps=700,
-                                weight=count, **fit_kw)
-        P = P.rebind(g2_dens).detach_()
-        t = time.perf_counter()
-        learned = scf(sys_(), xc, mixing_alpha=0.7, precond_op=P, **common)
-        f_l = float(learned.energies.free_energy)
-        v = _verdict(learned.n_iter, ref.n_iter)
-        print(f"  {label:26s} {learned.n_iter:3d} iters   F={f_l:+.6f} eV   "
-              f"{time.perf_counter()-t:.1f}s   [{v}]")
-        print(f"    {P.summary()}  (plain rho {info['rho_init']:.3f}"
-              f"→{info['rho_final']:.3f})  dF={f_l-f_ref:+.2e} eV")
+    # robust fit: multi-seed over a wide pole band, quality-weighted (the pole
+    # floor sits at the lowest trustworthy shell, not a fixed seed), model-selected
+    # across K, Kerker abstention gate. Replaces the old fixed 3-pole/4-pole sweep.
+    P, info = fit_multipole_robust(g2_shell, d_shell, alpha=0.7, q0=q0, history=8,
+                                   n_unroll=30, steps=700, k_max=4,
+                                   q_min=0.05, q_max=4.0, weight=count,
+                                   quality=quality)
+    P = P.rebind(g2_dens).detach_()
+    t = time.perf_counter()
+    learned = scf(sys_(), xc, mixing_alpha=0.7, precond_op=P, **common)
+    f_l = float(learned.energies.free_energy)
+    v = _verdict(learned.n_iter, ref.n_iter)
+    gate = "abstain→kerker" if info["abstained"] else f"deploy K={info['selected_k']}"
+    print(f"  robust fit             {learned.n_iter:3d} iters   F={f_l:+.6f} eV   "
+          f"{time.perf_counter()-t:.1f}s   [{v}]")
+    print(f"    {P.summary()}  [{gate}]  (kerker obj {info['obj_kerker']:.3f}"
+          f"→ best {info['obj_best']:.3f})  dF={f_l-f_ref:+.2e} eV")
 
 
 def _fit_charge_filter(res_total, g2_dens, q0=1.1, alpha_probe=0.7):
-    """Probe residuals (density-total block) → estimated d(G) → DIIS-aware fit →
-    deployable filter on the density sphere. Shared by every metal runner."""
+    """Probe residuals (density-total block) → estimated d(G) → robust DIIS-aware
+    fit → deployable filter on the density sphere. Shared by every metal runner."""
     kfac = g2_dens / (g2_dens + q0**2)
-    g2_shell, d_shell, count = response_from_residuals(
-        res_total, g2_dens, alpha_probe, n_bins=48, skip=2, precond_fac=kfac)
+    g2_shell, d_shell, count, quality = response_from_residuals(
+        res_total, g2_dens, alpha_probe, n_bins=48, skip=2, precond_fac=kfac,
+        return_quality=True)
     print(f"  probe {len(res_total)} residuals → d(G) over {len(d_shell)} shells, "
           f"d in [{float(d_shell.min()):.2f}, {float(d_shell.max()):.2f}]")
-    P, _ = fit_multipole(g2_shell, d_shell, n_poles=3, alpha=0.7, mixer="diis",
-                         history=8, q0=q0, n_unroll=30, steps=700, weight=count)
+    P, info = fit_multipole_robust(g2_shell, d_shell, alpha=0.7, q0=q0,
+                                   history=8, n_unroll=30, steps=700,
+                                   weight=count, quality=quality)
     P = P.rebind(g2_dens).detach_()
-    print(f"  fitted {P.summary()}")
+    gate = "abstain→kerker" if info["abstained"] else f"deploy K={info['selected_k']}"
+    print(f"  fitted {P.summary()}  [{gate}]")
     return P
 
 
