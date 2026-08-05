@@ -48,9 +48,9 @@ the UPF file).
   structures with point-group irrep labels, total and projected (l, m, j) DOS, and
   phonons: the Γ-point analytic response and a supercell finite-displacement route for
   the full dispersion and phonon DOS.
-- **Dispersion.** Grimme D3(BJ) as an opt-in, SCF-independent correction with analytic
-  forces and stress, folded into the reported total through the CLI and the ASE
-  calculator.
+- **Dispersion.** Grimme D3(BJ) and D4(BJ) as an opt-in, SCF-independent correction
+  with analytic forces and stress, folded into the reported total through the CLI and
+  the ASE calculator (`dispersion.method: d3` or `d4`).
 - **Magnetism.** Collinear spin, non-collinear magnetism, and spin-orbit coupling from
   fully-relativistic pseudopotentials. Constrained non-collinear moments with
   autograd-exact torques, spin spirals, magnetocrystalline anisotropy, and the exchange
@@ -260,6 +260,11 @@ uv run pytest -m "not standard and not slow and not torture and not gpu"   # fas
 uv run ruff check
 ```
 
+The `Makefile` wraps the common flows in `uv run` with the correct tier markers.
+`make hooks` installs the pre-commit hooks once per clone, `make check` runs lint
+plus the fast gate, and `make test-fast` / `make test-standard` select a tier.
+`CONTRIBUTING.md` covers the setup, the test tiers, and the definition of done.
+
 The suite is tiered by pytest marker. Unmarked tests are the fast tier.
 
 | tier | select | wall time | when |
@@ -267,7 +272,7 @@ The suite is tiered by pytest marker. Unmarked tests are the fast tier.
 | fast | `-m "not standard and not slow and not torture and not gpu"` | ~80 s | every commit |
 | standard | `-m "not slow and not torture and not gpu"` | ~10 min | CI |
 | nightly | `-m "not torture and not gpu"` | hours | nightly / pre-release |
-| torture | `-m torture` | 10 min – hours each | manually, when the subsystem changes |
+| torture | `-m torture` | >10 min each | manual, when the subsystem changes |
 
 Reference data is generated against Quantum ESPRESSO `pw.x` with the same UPF files
 (`tests/fixtures/qe/regenerate.py`, QE via `nix shell nixpkgs#quantum-espresso`). CI
