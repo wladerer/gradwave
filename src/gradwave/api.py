@@ -13,7 +13,7 @@ import datetime
 import json
 import logging
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -1438,8 +1438,9 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
     Builds the diagonal supercell, displaces only the primitive home-cell atoms
     (the translational reduction — 6·N_prim SCFs regardless of supercell size,
     each warm-started from the undisplaced reference), folds the force constants
-    to D(q) and diagonalizes. Norm-conserving, nspin ∈ {1, 2} (the analytic
-    forces sum per spin channel — see postscf.forces)."""
+    to D(q) and diagonalizes. Norm-conserving OR ultrasoft/PAW, nspin ∈ {1, 2}
+    (the analytic forces sum per spin channel — see postscf.forces /
+    postscf.paw_forces)."""
     import numpy as np
 
     from gradwave.postscf.phonons_supercell import (
@@ -1454,11 +1455,7 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
             "supercell phonons do not support noncollinear/spinor runs "
             "(the finite-displacement force fold uses the collinear force path)")
     _species, upfs, species_of_atom = _species_upfs(inp)
-    if _is_uspp(upfs):
-        raise NotImplementedError(
-            "supercell phonons need norm-conserving pseudopotentials (the "
-            "finite-displacement force fold uses the NC postscf.forces path; "
-            "the USPP/PAW paw_forces route is not wired into the fold yet)")
+    uspp = _is_uspp(upfs)
 
     if inp.nspin == 2:
         xc, mags = _spin_setup(inp)
@@ -1472,7 +1469,27 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
     # fold the primitive k-mesh by the supercell size (equivalent BZ sampling)
     ksuper = tuple(max(1, inp.kpoints.mesh[i] // n[i]) for i in range(3))
 
-    def make_scf(pos_sc: Any, start_from: Any = None) -> SCFResult:
+    def make_scf(pos_sc: Any, start_from: Any = None) -> SCFResult | USPPResult:
+        if uspp:
+            from gradwave.scf.uspp import scf_uspp, setup_uspp
+
+            usystem = setup_uspp(
+                scmap.cell_super, pos_sc, scmap.species_super, _as_paws(upfs),
+                ecut=inp.ecut, kmesh=ksuper, ecutrho=inp.ecutrho,
+                use_symmetry=False)
+            if inp.device != "cpu":
+                usystem = usystem.to(inp.device)
+            # scf_uspp has no tot_magnetization pin (see run_scf); a zero
+            # start_mag is the nonmagnetic seed for nspin=2.
+            return scf_uspp(
+                usystem, xc, nspin=inp.nspin,
+                start_mag=mags,
+                smearing=inp.smearing.type, width=inp.smearing.width,
+                etol=inp.scf.etol, rhotol=inp.scf.rhotol,
+                mixing_alpha=inp.scf.mixing.alpha,
+                mixing_history=inp.scf.mixing.history,
+                diago_tol=inp.scf.diago_tol, start_from=start_from,
+                verbose=False)
         from gradwave.scf.loop import scf, setup_system
 
         system = setup_system(
@@ -1500,9 +1517,16 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
               f"{scmap.n_prim} home atoms → {6 * scmap.n_prim} SCFs, k-mesh {ksuper}",
               flush=True)
     # xc is needed by the force path only for NLCC species (spin-resolved for
-    # nspin=2); it is ignored for valence-only pseudos.
+    # nspin=2); it is ignored for valence-only pseudos. USPP/PAW routes the fold
+    # through the augmentation-aware paw_forces.forces_uspp; NC uses the default.
+    force_fn: Callable[[Any], Any] | None = None
+    if uspp:
+        from gradwave.postscf.paw_forces import forces_uspp
+
+        def force_fn(res: Any) -> Any:
+            return forces_uspp(res, xc)
     phi = force_constants_home(make_scf, scmap, h=inp.phonons.displacement,
-                               xc=xc, verbose=verbose)
+                               xc=xc, force_fn=force_fn, verbose=verbose)
 
     bp = inp.atoms.cell.bandpath(path=inp.phonons.path or None,
                                  npoints=inp.phonons.npoints)

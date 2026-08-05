@@ -196,7 +196,7 @@ different, larger pieces of new machinery:
 |---|---|---|
 | api.py:400 | NC-only | hybrid functionals need norm-conserving pseudos |
 | api.py:1443 | SOC | supercell phonons for noncollinear/spinor runs (collinear nspin=2 now supported) |
-| api.py:1448 | NC-only | supercell phonons need norm-conserving pseudos (the FD fold calls the NC `postscf.forces` path; the USPP/PAW `paw_forces` route is not wired into `force_constants_home` yet) |
+| ~~api.py:1448~~ | NC-only | supercell phonons need norm-conserving pseudos — **landed (feat/postscf-plumbing-trio)**: `force_constants_home` gained a formalism-agnostic `force_fn` (defaults to the NC `postscf.forces` path) and `api.run_phonons` wires the augmentation-aware `paw_forces.forces_uspp` fold + a `scf_uspp` make_scf branch. Oracle: `test_uspp_supercell_fold_matches_analytic_gamma` (supercell-fold Γ freqs == analytic `postscf.phonons.gamma_hessian`, <0.5 cm⁻¹, + acoustic-sum-rule residual) and `test_run_phonons_uspp_end_to_end` (PAW `run_phonons` no longer raises, physical Γ). Noncollinear/spinor supercell phonons stay rejected (api.py:1443) |
 | postscf/cohp.py:660 | NC-only | COHP `basis='iao'` needs the NC operator route (USPP/spinor absent) |
 | postscf/cohp.py:762 | NC-only | `projection_rmsp`: NC SCFResult only (USPP/spinor absent) |
 | postscf/forces.py:66 | metaGGA / NC | meta-GGA NLCC force needs the batched-k geometry (collinear NC only) |
@@ -256,7 +256,7 @@ guards or entry-point routing, not capability gaps:
 | scf/implicit.py:91 | insulator | implicit SCF backward supports insulators only (occ = 2) |
 | postscf/_response.py:421 | insulator | `insulator_window` rejects metallic (partial) occupations (shared response helper) |
 | postscf/discretization_error.py:525 | symmetry | Dyson dressing requires `use_symmetry=False` (permanent — response solve needs the full k-mesh, both nspin) |
-| postscf/newton.py:87 | +U | `newton_polish` +U raw-map plumbing |
+| ~~postscf/newton.py:87~~ | +U | `newton_polish` +U raw-map plumbing — **landed (feat/postscf-plumbing-trio)**: the packed residual/state vector gained the per-channel Hubbard occupation-matrix block (Re/Im pairs, mirroring the USPP adjoint's join/split); the raw map carries the mixer-side n through `_scf_iteration` into V_U and the exact Jacobian folds in the Dudarev kernel K_U=−(U−J) via `_ConvergedUSPP.{k_hub, apply_chi0}`'s hub channel. Oracle: `test_newton_polish_hubbard_matches_reference` (loose +U PAW Si polished to the deep-converged reference: free energy <1e-6 eV, Hubbard occupation <1e-4) |
 | symmetry.py:193,318 | symmetry | shifted meshes not reduced here (caller reduces unshifted) |
 | postscf/dispersion.py:134 | data | D3(BJ) reference C6 not vendored for requested element(s) |
 | postscf/dispersion_d4.py:184 | data | D4(BJ) reference data not vendored for requested element(s) |
