@@ -1026,11 +1026,11 @@ def _load_input(path: Path) -> Input:
                 f"distributed: true is not supported with a hybrid functional "
                 f"(xc: {hybrid.name}) — the k-point-sharded SCF is wired for the "
                 f"collinear semilocal paths only (see docs/manual/distributed.md)")
-        if task not in ("scf", "bands"):
+        if task not in ("scf", "bands", "relax", "eos"):
             raise InputError(
-                f"distributed: true is only wired for task: scf | bands (got "
-                f"task: {task!r}) — relax/eos/elastic/phonons/magnetism don't "
-                f"route through the k-point-sharded SCF path yet (see "
+                f"distributed: true is only wired for task: scf | bands | "
+                f"relax | eos (got task: {task!r}) — elastic/phonons/magnetism "
+                f"don't route through the k-point-sharded SCF path yet (see "
                 f"docs/manual/distributed.md)")
         if symmetry:
             raise InputError(
