@@ -90,6 +90,10 @@ class SCFParams:
     # rhotol (docs/manual/convergence.md).
     convergence: str = "density"
     entol: float = 1.0e-6  # eV, energy-error threshold used when convergence="energy"
+    # block eigensolver: "davidson" (the workhorse) | "chebyshev" (Chebyshev-
+    # filtered subspace iteration). Norm-conserving only; the USPP/PAW generalized
+    # S-metric problem rejects a non-davidson choice (see api / calculator).
+    eigensolver: str = "davidson"  # davidson | chebyshev
     # magnetic-channel SCF controls for the noncollinear/spinor path only
     magnetic: MagneticParams = field(default_factory=MagneticParams)
 
@@ -98,6 +102,10 @@ class SCFParams:
             raise InputError(
                 "scf.convergence must be 'density' or 'energy', got "
                 f"{self.convergence!r}")
+        if self.eigensolver not in ("davidson", "chebyshev"):
+            raise InputError(
+                "scf.eigensolver must be 'davidson' or 'chebyshev', got "
+                f"{self.eigensolver!r}")
 
 
 @dataclass(frozen=True)
@@ -149,6 +157,12 @@ class RelaxParams:
     # step). Nested engine, nspin=1 only — a spin-polarized or joint/newton run
     # ignores it. See docs/manual/geometry-optimization.md.
     extrapolation: str = "reuse"  # none | reuse | linear | quadratic
+    # complement-correction solver for the Pulay (basis-incompleteness) pressure
+    # estimate, inert unless the correction is on (see pulay_correction above):
+    # "diagonal" (the default, kinetic-only resolvent) or "cg" (preconditioned
+    # iterative annulus solve, which recovers a larger fraction of the true Pulay
+    # pressure for a modest per-step cost — see docs/manual/geometry-optimization.md).
+    pulay_solver: str = "diagonal"  # diagonal | cg
 
     def __post_init__(self):
         if self.method not in ("nested", "joint", "newton"):
@@ -159,6 +173,10 @@ class RelaxParams:
             raise InputError(
                 "relax.extrapolation must be 'none', 'reuse', 'linear', or "
                 f"'quadratic', got {self.extrapolation!r}")
+        if self.pulay_solver not in ("diagonal", "cg"):
+            raise InputError(
+                "relax.pulay_solver must be 'diagonal' or 'cg', got "
+                f"{self.pulay_solver!r}")
 
 
 @dataclass(frozen=True)
@@ -705,8 +723,11 @@ def _resolve_pseudopotentials(
     for sym in set(symbols):
         if sym not in pseudo_map:
             raise InputError(f"no pseudopotential mapped for element {sym}")
-        if not (pseudo_dir / pseudo_map[sym]).exists():
-            raise FileNotFoundError(pseudo_dir / pseudo_map[sym])
+        resolved = pseudo_dir / pseudo_map[sym]
+        if not resolved.exists():
+            raise InputError(
+                f"pseudopotential for element {sym!r} not found at {resolved} — "
+                f"check pseudopotentials.dir and pseudopotentials.map")
     return pseudo_dir, pseudo_map
 
 
@@ -942,7 +963,7 @@ def _load_input(path: Path) -> Input:
     scf_raw = dict(raw.get("scf", {}))
     _check_keys("scf", scf_raw,
                 {"max_iter", "etol", "rhotol", "mixing", "diago", "trace",
-                 "convergence", "entol", "magnetic"})
+                 "convergence", "entol", "eigensolver", "magnetic"})
     mix_raw = dict(scf_raw.pop("mixing", {}))
     mag_raw = dict(scf_raw.pop("magnetic", {}))
     _check_keys("scf.magnetic", mag_raw,
@@ -1032,15 +1053,25 @@ def _load_input(path: Path) -> Input:
     restart = raw.get("restart")
 
     nbands = raw.get("nbands", "auto")
+    ecut = float(raw["ecut"])
+    if ecut <= 0.0:
+        raise InputError(f"ecut must be > 0 eV, got {ecut}")
     ecutrho = raw.get("ecutrho")
+    if ecutrho is not None:
+        ecutrho = float(ecutrho)
+        if ecutrho <= ecut:
+            raise InputError(
+                f"ecutrho must exceed ecut (the density cutoff is a finer grid "
+                f"than the wavefunction cutoff), got ecutrho={ecutrho} eV, "
+                f"ecut={ecut} eV")
     projections = _build_projections(raw.get("projections", False))
     dispersion = _build_dispersion(raw.get("dispersion", False))
     return Input(
         atoms=atoms,
         pseudo_dir=pseudo_dir,
         pseudo_map=pseudo_map,
-        ecut=float(raw["ecut"]),
-        ecutrho=None if ecutrho is None else float(ecutrho),
+        ecut=ecut,
+        ecutrho=ecutrho,
         xc=xc,
         hybrid=hybrid,
         hubbard=hubbard,
@@ -1064,6 +1095,7 @@ def _load_input(path: Path) -> Input:
             trace=bool(scf_raw.get("trace", False)),
             convergence=str(scf_raw.get("convergence", "density")),
             entol=float(scf_raw.get("entol", 1e-6)),
+            eigensolver=str(scf_raw.get("eigensolver", "davidson")),
             magnetic=MagneticParams(**mag_raw) if mag_raw else MagneticParams(),
         ),
         task=task,

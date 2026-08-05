@@ -307,6 +307,13 @@ def run_scf(
     if uspp:
         from gradwave.scf.uspp import scf_uspp
 
+        # scf_uspp has no eigensolver knob — the S-metric problem is Davidson-only.
+        # Reject a chebyshev request here, mirroring the calculator's rejection
+        # (calculator.calculate), rather than silently ignoring it.
+        if inp.scf.eigensolver != "davidson":
+            raise InputError(
+                "scf.eigensolver='chebyshev' is norm-conserving only; the "
+                "USPP/PAW generalized S-metric problem is not supported yet")
         # history=None keeps the per-scheme default (johnson 12, else 8);
         # mixing_scheme rides in `common` (shared with the NC branch below)
         return scf_uspp(cast("USPPSystem", system), xc,
@@ -317,6 +324,7 @@ def run_scf(
 
     return scf(cast("System", system), cast("XCFunctional", xc),
                kerker=kerker, start_from=start_from,
+               eigensolver=inp.scf.eigensolver,
                mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
                dist_ctx=dist_ctx,
                **common)
@@ -693,11 +701,13 @@ def _build_relax_calc(inp: Input, verbose: bool = True) -> GradWave:
         mixing_alpha=inp.scf.mixing.alpha,
         mixing_history=inp.scf.mixing.history,
         mixing_kerker=kerker,
+        eigensolver=inp.scf.eigensolver,
         precond=inp.scf.mixing.precond,
         hubbard=list(inp.hubbard.manifolds) if inp.hubbard.enabled else None,
         hub_occ_mix=inp.hubbard.occ_mix,
         hub_u_ramp_iters=inp.hubbard.u_ramp_iters,
         extrapolation=inp.relax.extrapolation,
+        pulay_solver=inp.relax.pulay_solver,
         device=inp.device,
         verbose=False,
     )

@@ -167,6 +167,7 @@ records the reason in the `relax` block.
 | `convergence` | `density` | — | string | Convergence criterion. `density` gates on the density residual (`rhotol`) plus the energy tail (`etol`). `energy` gates on the residual's exact second-order energy error (`entol`) plus the same energy tail, the honest criterion for magnetic metals whose magnetization-channel residual floors above any reachable `rhotol` (see the manual's convergence page). |
 | `entol` | `1.0e-6` | eV | float | Energy-error threshold used when `convergence: energy`. Comparable to VASP `EDIFF`; about half the QuantumESPRESSO `conv_thr` accuracy, which reports the un-halved kernel contraction. |
 | `diago.tol` | `1.0e-9` | — | float | Davidson eigensolver residual tolerance. |
+| `eigensolver` | `davidson` | — | string | Block eigensolver. `davidson` (the workhorse) or `chebyshev` (Chebyshev-filtered subspace iteration). Norm-conserving only, the USPP/PAW generalized S-metric problem rejects a non-Davidson choice. |
 | `trace` | `false` | — | bool | Write the per-iteration SCF flight-recorder trace to `scf_trace.json`. The compact diagnostics are summarized into the report regardless. |
 
 ### `scf.mixing`
@@ -202,6 +203,7 @@ Used when `task: relax`.
 | `cell` | `false` | — | bool | Variable-cell relaxation: relax the lattice with the atoms via `FrechetCellFilter` (stress). |
 | `pressure` | `0.0` | GPa | float | External hydrostatic pressure, applied during cell relaxation. |
 | `method` | `nested` | — | string | `nested` (full SCF per ASE step, every formalism/spin/metal), `joint` (descends on strain+positions+orbitals at once, norm-conserving insulators only), or `newton` (exact-Hvp Steihaug trust-region Newton-CG, same scope as `joint`). `joint`/`newton` fall back to `nested` on non-convergence or an unsupported system. |
+| `pulay_solver` | `diagonal` | — | string | Complement-correction solver for the Pulay stress estimate under `cell` relaxation, inert unless the correction applies. `diagonal` (the default, kinetic-only resolvent) or `cg` (preconditioned iterative annulus solve, which recovers a larger fraction of the true Pulay pressure for a modest per-step cost). See the geometry-optimization page. |
 
 With `cell: true` the `relax.json` also reports `volume_ang3` and `max_stress_eV_ang3`. Relaxing a cell at fixed `ecut` carries Pulay (basis-incompleteness) stress, so converge `ecut` first or re-relax at the new cell. The plain filter does not constrain symmetry.
 
