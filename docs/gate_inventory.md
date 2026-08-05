@@ -24,9 +24,9 @@ Regenerate the raw list with:
 grep -rn "raise NotImplementedError" src/gradwave --include=*.py
 ```
 
-Current count: **77** `raise NotImplementedError` sites, of which **4 are
+Current count: **74** `raise NotImplementedError` sites, of which **4 are
 abstract-method stubs** (interface contracts on base classes, not capability
-gaps) — see the last section. So **73 real capability gates** remain. Two
+gaps) — see the last section. So **70 real capability gates** remain. Two
 subsystems landed since the last recount and carry their own gates, now
 enumerated below. The k-point-sharded distributed SCF (#196, #197, #218) rejects
 SOC, hybrid Fock, and the non-sharded task routes (see Open — distributed);

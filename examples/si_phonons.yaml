@@ -1,0 +1,32 @@
+# Silicon phonon dispersion and DOS — supercell finite displacement.
+# 6 SCFs (2 home-cell atoms x 3 Cartesian displacements, +/- central FD),
+# Fourier-interpolated to the full dispersion and an 8x8x8 q-mesh DOS.
+#   gradwave si_phonons.yaml
+#   gradwave plot out_si_phonons/phonons.json
+structure:
+  cell: [[0.0, 2.715, 2.715], [2.715, 0.0, 2.715], [2.715, 2.715, 0.0]]
+  positions: {frac: [[0.0, 0.0, 0.0], [0.25, 0.25, 0.25]]}
+  species: [Si, Si]
+
+pseudopotentials:
+  dir: ../tests/fixtures/qe/pseudos
+  map: {Si: Si_ONCV_PBE-1.2.upf}
+
+ecut: 408.171          # eV (30 Ry)
+xc: pbe
+kpoints: {mesh: [4, 4, 4]}
+smearing: {type: none}
+
+scf:
+  etol: 1.0e-8
+  rhotol: 1.0e-7
+
+task: phonons
+phonons:
+  supercell: [2, 2, 2]
+  displacement: 0.01
+  path: GXWKGL
+  npoints: 120
+  dos_mesh: [8, 8, 8]
+
+output: {dir: ./out_si_phonons}

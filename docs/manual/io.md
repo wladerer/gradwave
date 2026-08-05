@@ -59,6 +59,7 @@ means the quantity is dimensionless or a plain count.
 | `tot_magnetization` | `null` | μB | float | Fix the spin moment M = N↑ − N↓ (integer-occupation pin). Collinear `nspin: 2` only; pair with `smearing: {type: none}`. |
 | `task` | `scf` | — | string | `scf`, `relax`, `bands`, `magnetism`, `eos`, `elastic`, or `phonons`. |
 | `device` | `cpu` | — | string | Torch device, e.g. `cpu` or `cuda`. |
+| `distributed` | `false` | — | bool | Shard the k-set across torchrun ranks (`scf`, `bands`, `relax`, `eos`); see [Distributed k-point parallelism](distributed.md). |
 | `verbose` | `true` | — | bool | Per-iteration SCF chatter on stdout. `gradwave run --quiet` silences a run regardless of this key. |
 | `restart` | `null` | — | path | Checkpoint file to warm-start the density from. |
 

@@ -1,8 +1,8 @@
 """Volumetric export: the valence charge density and ELF of diamond.
 
-Runs a norm-conserving SCF on the 2-atom diamond cell, writes the total valence
-density ρ(r) and the electron-localization function ELF(r) to VASP CHGCAR files,
-and renders a 2x2x2 supercell isosurface of each with tinykit (POV-Ray). The
+Runs a norm-conserving SCF on the 8-atom conventional diamond cell, writes the
+total valence density ρ(r) and the electron-localization function ELF(r) to VASP
+CHGCAR files, and renders an isosurface of each with tinykit (POV-Ray). The
 density isosurface traces the tetrahedral covalent bonds; the ELF isosurface
 (Becke and Edgecombe, J. Chem. Phys. 92, 5397 (1990)) localizes on the bond
 midpoints, the signature of covalent bonding.
@@ -13,7 +13,7 @@ convention), so ASE's VaspChargeDensity reader — and tinykit, which is built o
 it — recover ρ(r) in e/Å³.
 
 Fixtures: tests/fixtures/qe/pseudos/C_ONCV_PBE-1.2.upf (SG15 ONCV, PBE).
-Runtime: ~30 s SCF on 8 CPU threads, plus a POV-Ray render per isosurface.
+Runtime: ~2 min SCF on 8 CPU threads, plus a POV-Ray render per isosurface.
 
 Run:
     uv run python examples/volumetric_density.py --outdir examples
@@ -42,26 +42,40 @@ PSE = "tests/fixtures/qe/pseudos"
 
 
 def diamond_scf():
-    """Converged SCF for the 2-atom diamond primitive cell."""
+    """Converged SCF for the 8-atom conventional (cubic) diamond cell.
+
+    The cubic cell is chosen over the 2-atom primitive one for the renders:
+    every C-C bond midpoint — where the ELF and bond-density lobes live — is
+    interior to the cube, so tiling it gives isosurfaces with no lobes cut at
+    a skewed supercell boundary."""
     c = parse_upf(f"{PSE}/C_ONCV_PBE-1.2.upf")
     a = 3.567  # Å, experimental lattice constant
-    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
-    pos = np.array([[0.0, 0, 0], [0.25, 0.25, 0.25]]) @ cell
-    system = setup_system(cell, pos, [0, 0], [c, c], ecut=50 * RY,
-                          kmesh=(4, 4, 4), nbands=8)
+    cell = a * np.eye(3)
+    frac = np.array([[0.0, 0.0, 0.0], [0.0, 0.5, 0.5],
+                     [0.5, 0.0, 0.5], [0.5, 0.5, 0.0],
+                     [0.25, 0.25, 0.25], [0.25, 0.75, 0.75],
+                     [0.75, 0.25, 0.75], [0.75, 0.75, 0.25]])
+    pos = frac @ cell
+    system = setup_system(cell, pos, [0] * 8, [c], ecut=50 * RY,
+                          kmesh=(2, 2, 2), nbands=20)
     return scf(system, PBE(), etol=1e-8, rhotol=1e-7, verbose=False)
 
 
 def render(chgcar: Path, png: Path, isovalue: float, color: str) -> bool:
-    """Render a 2x2x2 supercell isosurface of a CHGCAR with tinykit."""
+    """Render a single-cell isosurface of a CHGCAR with tinykit. One cubic
+    cell with the frame drawn reads best: every bond lobe is interior, so
+    nothing is cut at a boundary. --color-scheme custom is required or
+    --iso-color is silently ignored."""
     if shutil.which("tk") is None:
         print(f"  [skip render] tk not on PATH; wrote {chgcar.name}")
         return False
     cmd = [
         "tk", "viz", str(chgcar), "-o", str(png),
-        "--supercell", "2", "2", "2",
-        "--isovalue", str(isovalue), "--iso-color", color,
-        "--rotation", "-70", "10", "0", "--width", "900", "--height", "700",
+        "--supercell", "1", "1", "1", "--show-cell",
+        "--isovalue", str(isovalue),
+        "--color-scheme", "custom", "--iso-color", color,
+        "--mesh-refinement", "3",
+        "--rotation", "-60", "15", "0", "--width", "900", "--height", "700",
     ]
     subprocess.run(cmd, check=True)
     print(f"  wrote {png.name}")
@@ -90,8 +104,10 @@ def main():
     print(f"  wrote {Path(rho_chg).name}, {Path(elf_chg).name}")
 
     if not args.no_render:
+        # 1.3 e/Å³ traces the connected covalent bond network; 0.55 gives an
+        # extended sheet in the cubic cell
         render(Path(rho_chg), outdir / "diamond_density.png",
-               isovalue=0.55, color="0.95,0.72,0.20")
+               isovalue=1.3, color="0.95,0.72,0.20")
         render(Path(elf_chg), outdir / "diamond_elf.png",
                isovalue=0.85, color="0.35,0.65,0.85")
 

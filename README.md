@@ -44,10 +44,18 @@ the UPF file).
   (psl), read directly from the freely available UPF files, with the formalism
   auto-detected.
 - **Structure and response.** Total and free energies, Hellmann-Feynman forces, the
-  stress tensor, geometry and variable-cell relaxation through any ASE optimizer, band
-  structures with point-group irrep labels, total and projected (l, m, j) DOS, and
-  phonons: the Γ-point analytic response and a supercell finite-displacement route for
-  the full dispersion and phonon DOS.
+  stress tensor, geometry and variable-cell relaxation through any ASE optimizer (with
+  selective dynamics via `structure.fixed` and density extrapolation across ionic
+  steps), band structures with point-group irrep labels, total and projected (l, m, j)
+  DOS, and phonons on both formalisms: the Γ-point analytic response and a supercell
+  finite-displacement route for the full dispersion, phonon DOS, and the harmonic
+  thermodynamics integrated from it.
+- **Equations of state and elasticity.** `task: eos` fits a Birch-Murnaghan curve
+  (V₀, B₀, B₀′) to a volume scan, and `task: elastic` builds the 6×6 stiffness tensor
+  and Voigt-Reuss-Hill moduli from the analytic stress, clamped-ion or relaxed-ion
+  (`elastic.mode: relaxed`).
+- **Bonding and charge analysis.** k-resolved COHP bonding analysis, Bader charges,
+  and charge-density/ELF/PARCHG export to `.cube`, `.xsf`, and VASP CHGCAR.
 - **Dispersion.** Grimme D3(BJ) and D4(BJ) as an opt-in, SCF-independent correction
   with analytic forces and stress, folded into the reported total through the CLI and
   the ASE calculator (`dispersion.method: d3` or `d4`).
@@ -61,8 +69,22 @@ the UPF file).
 - **Brillouin zone.** Symmetry reduction to the irreducible wedge with density and
   becsum symmetrization, including magnetic (Shubnikov) groups for non-collinear cells,
   and Fermi-Dirac, Gaussian, Methfessel-Paxton, and cold smearing for metals.
-- **Numerics.** A fully k-batched SCF, a batched Davidson eigensolver, and Kerker,
-  Johnson, and local-TF preconditioners, all in float64/complex128 on CPU and GPU.
+- **Numerics.** A fully k-batched SCF, batched Davidson and Chebyshev-filtered
+  eigensolvers, Pulay/Broyden/Johnson density mixing with Kerker or local
+  Thomas-Fermi preconditioning, all in float64/complex128 on CPU and GPU.
+- **Convergence control.** An opt-in energy-metric stopping rule
+  (`scf.convergence: energy`), a per-iteration SCF flight recorder (`scf.trace`),
+  a Stoner preconditioner for the spin channel, and occupation-matrix damping with
+  a U-ramp for metallic DFT+U.
+- **Parallelism.** `distributed: true` under a torchrun launch shards the k-set
+  across processes — multi-core or multi-GPU, single box or several — for `scf`,
+  `bands`, `relax`, and `eos` on the norm-conserving and USPP/PAW collinear paths,
+  including DFT+U, and composes with IBZ symmetry reduction (the ranks shard the
+  reduced k-set).
+- **Workflow.** One YAML input file per run, checkpointed restarts
+  (`gradwave run -r`), an ASE `Calculator` for driving gradwave from existing ASE
+  scripts, and `gradwave plot` figures for scf, bands, DOS/PDOS, COHP, phonons,
+  EOS, and elastic results.
 
 ## Error estimation
 
@@ -170,6 +192,20 @@ The [performance page](docs/manual/performance.md) reports the full matrix and w
 through where the small-system gap against a mature Fortran code comes from (fp64
 throughput and kernel maturity).
 
+Beyond one process, `distributed: true` under torchrun shards the k-set across
+ranks (multi-core or multi-GPU):
+
+<div align="center">
+<img src="benchmarks/distributed/scaling.png" width="560" alt="k-point-sharding scaling: wall clock versus torchrun rank count for a 1728-k Al SCF">
+</div>
+
+*The same fcc Al SCF (1728 k, no symmetry, 2 CPU threads per rank) as the k-set
+is sharded over torchrun ranks on a 22-core workstation. Every rank count
+converges to the same free energy to 2e-12 eV. The 8-rank point flattens on
+per-rank setup work and the box's hybrid P/E cores, not on the sharding itself
+(`benchmarks/distributed/scaling.py`; the [distributed
+page](docs/manual/distributed.md) covers multi-node and multi-GPU launches).*
+
 ## Quickstart
 
 ```bash
@@ -252,12 +288,69 @@ directly.
 fully-relativistic with spin-orbit coupling (red), both referenced to the valence-band
 maximum. SOC opens and inverts the Γ gap (`examples/bi2se3_bands_compare.py`).*
 
+**Chemical bonding.** The COHP projection decomposes the band structure onto a
+bond, so each state carries a bonding or antibonding weight and the band picture
+connects to the chemistry.
+
+<div align="center">
+<img src="examples/diamond_cohp_fatbands.png" width="760" alt="Diamond COHP fat bands: band structure colored by bonding/antibonding weight, with the energy-resolved COHP">
+</div>
+
+*The diamond C-C bond. Each (k, band) state is colored by its COHP weight on the
+nearest-neighbor bond (bonding blue, antibonding red), with point-group irrep
+labels at the special points; the right panel is the energy-resolved −COHP. The
+occupied valence bands are bonding and the conduction bands antibonding, the
+textbook picture of the covalent bond (`examples/cohp_fatbands.py`).*
+
+**Equation of state.** `task: eos` scans the volume with warm-started SCFs on a
+shared FFT grid and fits the third-order Birch-Murnaghan form.
+
+<div align="center">
+<img src="examples/eos_silicon.png" width="560" alt="Silicon equation of state: seven SCF points and the Birch-Murnaghan fit">
+</div>
+
+*Si equation of state: seven SCF points and the Birch-Murnaghan fit. gradwave
+(PBE) gives V₀ = 20.57 Å³/atom, B₀ = 87.8 GPa, B₀′ = 4.21, against the WIEN2k
+all-electron reference V₀ = 20.45 Å³/atom, B₀ = 88.5 GPa
+(`examples/eos_silicon.py`).*
+
+**Phonon dispersion.** `task: phonons` displaces the two home-cell atoms in a
+supercell (12 SCFs, independent of supercell size), builds the force constants
+from the autograd forces, and Fourier-interpolates the dynamical matrix to any q.
+
+<div align="center">
+<img src="examples/si_phonons.png" width="720" alt="Silicon phonon dispersion and DOS from supercell finite displacement">
+</div>
+
+*Si phonons on a 2×2×2 supercell along Γ-X-W-K-Γ-L with the DOS from an 8×8×8
+q-mesh. The Γ optical mode comes out triply degenerate at 523 cm⁻¹ (experiment:
+519), the acoustic branches go to zero at Γ, and no mode is imaginary
+(`examples/si_phonons.yaml`, plotted by `gradwave plot`).*
+
+**Stopping on the energy, not the density.** The free energy converges
+quadratically in the density residual: its exact second-order error is
+½⟨r|K_Hxc|r⟩, evaluable each iteration from the response kernel the mixer
+already uses. The opt-in energy-metric gate (`scf.convergence: energy`) stops
+on that number, and the per-iteration flight recorder (`scf.trace`) makes both
+measures visible.
+
+<div align="center">
+<img src="examples/fe_energy_gate.png" width="760" alt="bcc Fe SCF: density residual gate versus the second-order energy-error gate">
+</div>
+
+*One spin-polarized SCF on bcc Fe (m = 2.224 μB). The density gate at
+rhotol = 1e-7 polishes until iteration 15; the energy gate at entol = 1e-6 eV
+stops at iteration 9, where the energy error is already 5e-8 eV
+(`examples/fe_energy_gate.py`).*
+
 ## Development
 
 ```bash
 uv sync
 uv run pytest -m "not standard and not slow and not torture and not gpu"   # fast gate, ~80 s
-uv run ruff check
+uv run ruff check      # lint
+uv run ty check        # types (error-level on the typed-file list)
+uv run lint-imports    # import contracts
 ```
 
 The `Makefile` wraps the common flows in `uv run` with the correct tier markers.
@@ -276,7 +369,7 @@ The suite is tiered by pytest marker. Unmarked tests are the fast tier.
 
 Reference data is generated against Quantum ESPRESSO `pw.x` with the same UPF files
 (`tests/fixtures/qe/regenerate.py`, QE via `nix shell nixpkgs#quantum-espresso`). CI
-runs ruff and the standard tier on every pull request.
+runs ruff, ty, lint-imports, and the sharded standard tier on every pull request.
 
 ## Documentation and license
 
