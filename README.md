@@ -79,7 +79,8 @@ the UPF file).
 - **Parallelism.** `distributed: true` under a torchrun launch shards the k-set
   across processes — multi-core or multi-GPU, single box or several — for `scf`,
   `bands`, `relax`, and `eos` on the norm-conserving and USPP/PAW collinear paths,
-  including DFT+U.
+  including DFT+U, and composes with IBZ symmetry reduction (the ranks shard the
+  reduced k-set).
 - **Workflow.** One YAML input file per run, checkpointed restarts
   (`gradwave run -r`), an ASE `Calculator` for driving gradwave from existing ASE
   scripts, and `gradwave plot` figures for scf, bands, DOS/PDOS, COHP, phonons,
