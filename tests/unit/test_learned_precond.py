@@ -300,7 +300,8 @@ def test_robust_fit_pole_floor_from_quality():
     overfit-to-lowest-shell-noise failure mode structurally."""
     alpha = 0.5
     g2 = torch.linspace(0.05, 25.0, 120, dtype=RDTYPE)
-    hist = _two_scale_res_hist(alpha, g2, noise=1e-12, seed=7)
+    d_two = 0.5 * g2 / (g2 + 0.3**2) + 0.5 * g2 / (g2 + 2.5**2)
+    hist = _res_hist(d_two, g2, alpha, noise=1e-12, seed=7)
     centers, d_shell, count, quality = response_from_residuals(
         hist, g2, alpha, n_bins=24, skip=1, return_quality=True)
     # zero out the two lowest shells' confidence: they become untrusted, so the
