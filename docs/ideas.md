@@ -1309,8 +1309,12 @@ along the path.
 
 ## Learned multi-pole density-mixing preconditioner
 
-**Status: prototyped, first real win on Cu; Cu₃Al harness and SCF oracle landed
-(2026-07-24, #60); the magnetization-channel extension is a measured negative.**
+**Status: hardened (2026-08-04, #232). The fit is multi-seed, quality-weighted, and
+gated behind a Kerker abstention, so losing to Kerker is impossible at fit time. The
+battery is 1 synthetic win, 5 real-system ties, 0 losses, and the measured reading is
+that Pulay DIIS already absorbs the single-pole reshaping the earlier wins were made
+of. Earlier milestones were the Cu win and the Cu₃Al harness and SCF oracle
+(2026-07-24, #60), and the magnetization-channel extension stays a measured negative.**
 
 The sweep above skips "learned preconditioners" because they need a localized basis and
 our kinetic preconditioner is already analytic. That reason is about *eigensolver*
@@ -1420,18 +1424,73 @@ exact spin susceptibility (`scf/implicit.py`'s χ₀ path), not a hand-shaped or
 probed Kerker analog, and even then the headroom over johnson looks thin. Recorded as a
 measured negative; the const-filter and BlockPrecond stay as reusable substrate.
 
-**Next, in rough priority.** The clear gains are on the charge channel, where the mechanism
-is proven. Push to more multi-scale systems (Cu₃Al and other intermetallics, PAW semicore,
-larger cells near the charge-sloshing cliff) to map where the win holds and how big it gets.
-Amortize the fit, right now each system pays a probe SCF and a fit so the net gain is
-iteration count not wall time on a single point; the gain is a filter trained once per
-chemistry family (the probe/fit data is the same shape as the learned-XC and ML-density-
-init sets) and reused across a discovery scan, which is where the iteration cut compounds.
+**Fragility, measured (2026-08-04).** The Cu win did not survive an unrelated change.
+Commit e5a8ac4 (#91, the rfft Hartree round trip), a last-bit-rounding-equivalent
+change, flipped Cu from 10 to 8 back to a tie, and an automated bisect pinned the flip
+to that commit. The fit was deterministic but fragile. The probe's d(G) estimate moves
+at the last bit and the optimizer lands in a different local minimum. Two more probe
+pathologies were on record, the Cu₃Al and Fe d(G) estimates saturate the [0, 2] clamp,
+and a wide-seed 4-pole fit placed a pole at q = 0.034 Å⁻¹, overfit to lowest-shell
+noise, and lost 2 iterations. The full battery had walked back to 0 wins, 4 ties, and
+1 loss.
+
+**Robust fit and the abstention gate (2026-08-04, #232).** `fit_multipole_robust`
+hardens the fit at the one-iteration scale by four mechanisms, all deterministic.
+Multi-seed fitting runs every pole count K = 1..K_max from a fixed set of seed
+placements spread over the pole range and keeps the candidate minimizing the
+unrolled-DIIS objective, so the choice between local minima is made by the objective
+rather than by where floating-point noise dropped the seed. Probe-quality weighting
+(`response_from_residuals(..., return_quality=True)`) turns the spread of the
+per-iteration ratio samples into a per-shell confidence, zeroes shells whose mean
+saturates the clamp, and sets a hard floor on pole positions at the lowest trustworthy
+shell, which removes the q = 0.034 failure mode structurally. Model selection always
+includes bare Kerker as a candidate and picks the smallest K within tolerance of the
+best objective. The abstention gate deploys a K ≥ 2 fit only when it beats the best
+single-pole candidate by a margin decisively above fit noise, and otherwise returns
+bare Kerker exactly, so a noise-level win or loss becomes a guaranteed tie and losing
+to Kerker is impossible at fit time. The regression tests pin the 1e-14 noise case,
+the single-scale abstention, the fewer-poles preference, the pole floor, and the
+deploy branch (`tests/unit/test_learned_precond.py`).
+
+The calibration behind the gate is measured, and it explains the walk-back. Under the
+DIIS-aware objective a free-weight single pole captures the headroom on every smooth
+radial response tried (two-scale, three-scale, flat) to within 0.7 log units, while
+1e-14 probe noise moves candidate objectives by up to 0.75, indistinguishable. The 10
+to 30 log-unit predicted gains over bare Kerker are single-pole reshaping the real
+Pulay mixer already absorbs with its history, which is why they never survived
+deployment. The gate opens only on genuinely staged screening. A d(G) stepping down at
+two separated scales gives K = 2 a 20 to 27 log-unit margin over the best single pole
+and deploys.
+
+**Battery (asus, 2026-08-04), all fixed points identical to ≤ 4e-11 eV.**
+
+| case | kerker | robust fit | verdict | gate |
+|---|---|---|---|---|
+| synthetic two-scale (plain mixing) | ρ 0.82, ~93 iters | ρ 0.50, ~26 iters | win, 3.52× | mechanism case |
+| fcc Al (30 Ry, 6×6×6) | 7 | 7 | tie | Kerker model-selected |
+| fcc Cu (45 Ry, 6×6×6) | 10 | 10 | tie | Kerker model-selected |
+| bcc Fe (nspin=2 FM, johnson) | 12 | 12 | tie | Kerker model-selected |
+| fcc Pt (SOC, 45 Ry, 4×4×4) | 9 | 9 | tie | Kerker model-selected |
+| L1₂ Cu₃Al (40 Ry, 2×2×2) | 11 | 11 | tie | abstained |
+
+No case loses, and none can. The former Cu win is a structural tie rather than a
+noise-dependent outcome, and the former Fe loss (13 vs 12) is gone. The synthetic
+plain-mixing win is untouched, so the honest scope tightens further. The radial
+multi-pole class earns iterations only where the deployment mixer cannot, under plain
+or short-history mixing, or on a response with genuinely staged screening, and none of
+the probed systems shows one.
+
+**Next, in rough priority.** The 2026-08-04 battery narrows the search. A radial filter
+under Pulay DIIS earns nothing on smooth responses, so the systems worth probing are the
+ones whose screening is plausibly staged, PAW semicore metals and larger cells near the
+charge-sloshing cliff, where the gate would open on real structure instead of abstaining.
 A cleaner probe reads the response straight from the implicit-differentiation machinery
-(`scf/implicit.py` already applies χ₀ and K_Hxc), making d exact and removing the probe
-SCF. And the filter is radial (G-only) where the local-TF operator is spatial (r-only); a
-learned operator that is both is the general form, and the two current preconditioners are
-its limits.
+(`scf/implicit.py` already applies χ₀ and K_Hxc), making d exact and removing both the
+probe SCF and the clamp saturation that costs Fe and Cu₃Al their low-shell data. And the
+filter is radial (G-only) where the local-TF operator is spatial (r-only). A learned
+operator that is both is the general form, and the two current preconditioners are its
+limits. Amortizing the fit across a chemistry family only becomes interesting after some
+system deploys.
 
 ## Second-order joint descent: exact Hvp Newton-CG (2026-07-27)
 
