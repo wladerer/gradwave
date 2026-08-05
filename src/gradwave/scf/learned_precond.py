@@ -404,8 +404,8 @@ def fit_multipole_robust(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
                          q_min: float = 0.3, q_max: float = 3.0,
                          weight: torch.Tensor | None = None,
                          quality: torch.Tensor | None = None,
-                         model_tol: float = 0.75, abstain_margin: float = 1.0,
-                         rel_margin: float = 0.15, verbose: bool = False
+                         model_tol: float = 0.75, abstain_margin: float = 1.5,
+                         rel_margin: float = 0.0, verbose: bool = False
                          ) -> tuple[MultipoleKerkerPrecond, dict]:
     """Robust multi-pole fit: multi-seed, quality-weighted, model-selected, with a
     Kerker abstention gate. Hardens :func:`fit_multipole` against the one-iteration
@@ -434,14 +434,21 @@ def fit_multipole_robust(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
        always deploys BARE Kerker. A K≥2 selection deploys only if it beats the
        best single-pole candidate (bare Kerker or the fitted one-pole, whichever
        is lower) by more than ``max(abstain_margin, rel_margin·|obj_ref|)``, i.e.
-       only when the response carries multi-scale structure a single pole
-       provably cannot express, by a margin far above fit noise. Otherwise: bare
-       Kerker. A noise-level win or loss becomes a guaranteed tie by
-       construction — losing to Kerker is impossible at fit time. (Comparing
-       against the best single pole rather than bare Kerker alone matters: the
-       diagonal model always predicts a large gain for rescaling Kerker's single
-       pole, but that gain is model optimism the real DIIS mixer already
-       captures, which is how the old fit converted noise into losses.)
+       only when the response carries structure a single pole provably cannot
+       express, by a margin decisively above fit noise. Otherwise: bare Kerker.
+       A noise-level win or loss becomes a guaranteed tie by construction —
+       losing to Kerker is impossible at fit time. Two measured calibrations
+       behind the defaults: (a) the diagonal model always predicts a large gain
+       for merely rescaling Kerker's single pole (10-20 log units even on a
+       single-scale response), which is model optimism the real DIIS mixer
+       already captures — hence the best-single-pole reference, not bare Kerker;
+       (b) across two-scale/three-scale/single-scale synthetic responses the
+       K≥2 headroom over the fitted single pole is |Δ| ≲ 0.7 log units (DIIS's
+       finite-history extrapolation absorbs radial multi-scale structure in the
+       diagonal model), while 1e-14 probe noise moves the deployed objective by
+       up to ~0.75 — so ``abstain_margin=1.5`` sits above both, and only a
+       decisively non-single-pole response (measured example: a flat d(G), K=2
+       headroom ≈ 3.3) deploys.
 
     Returns the chosen preconditioner (on ``g2_shell``; rebind to deploy) and an
     info dict recording every candidate's objective, the model-selected and
