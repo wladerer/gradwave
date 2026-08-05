@@ -21,8 +21,9 @@ cannot drift.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -129,20 +130,32 @@ def apply_acoustic_sum_rule(phi_home: np.ndarray) -> np.ndarray:
 def force_constants_home(make_scf, scmap: SupercellMap, h: float = 0.01,
                          acoustic_sum_rule: bool = True, warm_start: bool = True,
                          xc: XCFunctional | SpinXC | None = None,
+                         force_fn: Callable[[Any], Any] | None = None,
                          verbose: bool = False) -> np.ndarray:
     """FD force constants Φ_home (N_prim, 3, N_sc, 3) [eV/Å²].
 
     Displaces ONLY the N_prim home-cell atoms (±h) and reads the analytic force
     on every supercell site — the translational reduction that makes the SCF
     count 6·N_prim regardless of supercell size. `make_scf(positions,
-    start_from=None)` must return a converged SCF result; forces come from
-    `postscf.forces` (nspin ∈ {1, 2}). Each displaced SCF warm-starts from the
-    undisplaced reference when `warm_start`.
+    start_from=None)` must return a converged SCF result. Each displaced SCF
+    warm-starts from the undisplaced reference when `warm_start`.
 
-    `xc` is forwarded to `postscf.forces.forces`; it is required only when the
-    pseudos carry an NLCC core charge (the core-correction force term), and is
-    ignored for valence-only species."""
+    The force route is formalism-agnostic through `force_fn`: when None (the
+    default) the norm-conserving `postscf.forces.forces(res, xc=xc)` path is
+    used; pass `force_fn=lambda res: forces_uspp(res, xc)` to fold an
+    ultrasoft/PAW run (the displacement count logic is identical either way,
+    only the analytic force differs by pseudopotential kind). `force_fn` must
+    return a torch tensor of shape (N_sc, 3) [eV/Å].
+
+    `xc` is forwarded to the default `postscf.forces.forces`; it is required
+    only when the pseudos carry an NLCC core charge (the core-correction force
+    term), and is ignored for valence-only species. It is unused when a
+    `force_fn` is supplied (the caller closes over its own xc there)."""
     from gradwave.postscf.forces import forces
+
+    if force_fn is None:
+        def force_fn(res: Any) -> Any:
+            return forces(res, xc=xc)
 
     pos0 = scmap.positions_super.copy()
     ref = make_scf(pos0) if warm_start else None
@@ -153,8 +166,8 @@ def force_constants_home(make_scf, scmap: SupercellMap, h: float = 0.01,
             pp, pm = pos0.copy(), pos0.copy()
             pp[a, i] += h
             pm[a, i] -= h
-            fp = forces(make_scf(pp, start_from=ref), xc=xc).detach().cpu().numpy()
-            fm = forces(make_scf(pm, start_from=ref), xc=xc).detach().cpu().numpy()
+            fp = force_fn(make_scf(pp, start_from=ref)).detach().cpu().numpy()
+            fm = force_fn(make_scf(pm, start_from=ref)).detach().cpu().numpy()
             # Φ_{(a,i),(s,j)} = −∂F_{s,j}/∂τ_{a,i}
             phi[a, i, :, :] = -(fp - fm) / (2.0 * h)
             if verbose:

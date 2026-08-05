@@ -431,7 +431,10 @@ def _self_consistent_response(cs, bare_rho, bare_bec, bare_nh=None, *,
         return torch.cat([v] + tail)
 
     def _unpack_all(vec):
-        d_rho_s, d_bec_s = _unpack(vec[:base_len], shape, n_pts, nbec, nspin=1)
+        # newton._unpack returns a (grid, becsum, hub) triple; this module
+        # slices off the hub tail itself, so it always passes the non-hub head
+        # (nsh=0) and discards the trailing None.
+        d_rho_s, d_bec_s, _ = _unpack(vec[:base_len], shape, n_pts, nbec, nspin=1)
         d_rho, d_bec = d_rho_s[0], d_bec_s[0]
         if not has_hub:
             return d_rho, d_bec, None
