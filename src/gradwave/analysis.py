@@ -231,6 +231,53 @@ def noncollinear_pdos_frame(source):
     return df
 
 
+def eos_frame(source):
+    """Equation-of-state scan as a tidy frame: one row per scanned volume with
+    the volume and energy per atom and the fitted Birch-Murnaghan energy at that
+    volume (bm3_eV_per_atom). ``df.attrs`` carries the BM3 fit parameters
+    (v0_ang3_per_atom, b0_GPa, b0_prime, e0_eV_per_atom, b0_eV_ang3) and the RMS
+    residual. Accepts an eos.json path/summary or a bare eos block."""
+    from gradwave.postscf.eos import birch_murnaghan
+
+    pd = _pd()
+    s = load(source)
+    b = s["eos"] if "eos" in s else s
+    v = np.asarray(b["volumes_ang3_per_atom"], dtype=float)
+    e = np.asarray(b["energies_eV_per_atom"], dtype=float)
+    fit_e = birch_murnaghan(v, b["e0_eV_per_atom"], b["v0_ang3_per_atom"],
+                            b["b0_eV_ang3"], b["b0_prime"])
+    df = pd.DataFrame({"scale": np.asarray(b["scales"], dtype=float),
+                       "volume_ang3_per_atom": v,
+                       "energy_eV_per_atom": e,
+                       "bm3_eV_per_atom": fit_e})
+    df.attrs.update(v0_ang3_per_atom=b["v0_ang3_per_atom"],
+                    b0_GPa=b["b0_GPa"], b0_prime=b["b0_prime"],
+                    e0_eV_per_atom=b["e0_eV_per_atom"],
+                    b0_eV_ang3=b["b0_eV_ang3"],
+                    rms_residual_eV_per_atom=b.get("rms_residual_eV_per_atom"))
+    return df
+
+
+def elastic_frame(source):
+    """The 6×6 stiffness matrix C [GPa] as a DataFrame, rows and columns the
+    Voigt indices 1..6. ``df.attrs`` carries the Voigt-Reuss-Hill moduli
+    (bulk_modulus_GPa/shear_modulus_GPa as {voigt, reuss, hill}), Young's
+    modulus, the Poisson ratio and the mechanical-stability flag. Accepts an
+    elastic.json path/summary or a bare elastic block."""
+    pd = _pd()
+    s = load(source)
+    b = s["elastic"] if "elastic" in s else s
+    c = np.asarray(b["c_GPa"], dtype=float)
+    idx = list(range(1, 7))
+    df = pd.DataFrame(c, index=idx, columns=idx)
+    df.attrs.update(bulk_modulus_GPa=b["bulk_modulus_GPa"],
+                    shear_modulus_GPa=b["shear_modulus_GPa"],
+                    young_modulus_GPa=b["young_modulus_GPa"],
+                    poisson_ratio=b["poisson_ratio"],
+                    mechanically_stable=b["mechanically_stable"])
+    return df
+
+
 def _finish(fig, ax, path):
     fig.tight_layout()
     if path is not None:
@@ -332,6 +379,64 @@ def plot_dos(source, path=None, ax=None, width: float = 0.1):
         ax.axvline(df.attrs["fermi_eV"], color="#52514e", lw=0.7, ls="--")
     ax.set_xlabel("E [eV]")
     ax.set_ylabel("DOS [states/eV]")
+    return _finish(ax.figure, ax, path)
+
+
+def plot_eos(source, path=None, ax=None):
+    """Equation of state: the scanned E(V) points as markers, the fitted
+    third-order Birch-Murnaghan curve through them, and the equilibrium volume
+    V0 marked at the fitted minimum."""
+    from gradwave.postscf.eos import birch_murnaghan
+
+    plt = _plt()
+    df = eos_frame(source)
+    if ax is None:
+        _fig, ax = plt.subplots(figsize=(5.4, 3.8))
+    v = df["volume_ang3_per_atom"].to_numpy()
+    ax.plot(v, df["energy_eV_per_atom"], "o", ms=5, color="#2a78d6",
+            label="E(V) points")
+    vv = np.linspace(v.min(), v.max(), 200)
+    ec = birch_murnaghan(vv, df.attrs["e0_eV_per_atom"],
+                         df.attrs["v0_ang3_per_atom"],
+                         df.attrs["b0_eV_ang3"], df.attrs["b0_prime"])
+    ax.plot(vv, ec, "-", color="#1baf7a", lw=1.3, label="BM3 fit")
+    v0, e0 = df.attrs["v0_ang3_per_atom"], df.attrs["e0_eV_per_atom"]
+    ax.axvline(v0, color="#52514e", lw=0.7, ls="--")
+    ax.plot([v0], [e0], "*", ms=13, color="#d64b6b",
+            label=f"V0 = {v0:.3f} Å³/atom, B0 = {df.attrs['b0_GPa']:.1f} GPa")
+    ax.set_xlabel("V [Å³/atom]")
+    ax.set_ylabel("E [eV/atom]")
+    ax.legend(frameon=False)
+    ax.grid(alpha=0.25)
+    return _finish(ax.figure, ax, path)
+
+
+def plot_elastic(source, path=None, ax=None):
+    """Annotated heatmap of the 6×6 stiffness matrix C_ij [GPa]: the Voigt
+    indices 1..6 on both axes, each entry labeled, diverging color around zero.
+    The Voigt-Reuss-Hill bulk/shear moduli go in the title."""
+    plt = _plt()
+    df = elastic_frame(source)
+    c = df.to_numpy()
+    if ax is None:
+        _fig, ax = plt.subplots(figsize=(5.4, 4.8))
+    vmax = float(np.abs(c).max()) or 1.0
+    im = ax.imshow(c, cmap="RdBu_r", vmin=-vmax, vmax=vmax)
+    ax.set_xticks(range(6), labels=range(1, 7))
+    ax.set_yticks(range(6), labels=range(1, 7))
+    ax.set_xlabel("j")
+    ax.set_ylabel("i")
+    for i in range(6):
+        for j in range(6):
+            val = c[i, j]
+            ax.text(j, i, f"{val:.0f}", ha="center", va="center", fontsize=8,
+                    color="#111" if abs(val) < 0.6 * vmax else "#fff")
+    k = df.attrs["bulk_modulus_GPa"]["hill"]
+    g = df.attrs["shear_modulus_GPa"]["hill"]
+    stable = "stable" if df.attrs["mechanically_stable"] else "UNSTABLE"
+    ax.set_title(f"C_ij [GPa]   K = {k:.0f}, G = {g:.0f} GPa   ({stable})",
+                 fontsize=9)
+    ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     return _finish(ax.figure, ax, path)
 
 

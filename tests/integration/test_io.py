@@ -182,6 +182,129 @@ def test_analysis_frames_and_plots(tmp_path):
     assert (tmp_path / "dos.png").exists()
 
 
+def _canned_eos() -> dict:
+    """An eos summary built from a real BM3 fit of synthetic points, so the
+    fitted-curve column reproduces the input energies at the fit tolerance."""
+    from gradwave.postscf.eos import EV_A3_TO_GPA, birch_murnaghan, fit_bm3
+
+    v0, b0, b0p, e0 = 20.0, 0.55, 4.2, -108.0  # eV/Å³ for b0
+    scales = [0.94, 0.97, 1.0, 1.03, 1.06, 1.09]
+    v = v0 * np.array(scales)
+    e = birch_murnaghan(v, e0, v0, b0, b0p)
+    fit = fit_bm3(v, e)
+    return {
+        "task": "eos",
+        "eos": {"scales": scales, "energy_kind": "free_energy", "n_atoms": 2,
+                "volumes_ang3_per_atom": v.tolist(),
+                "energies_eV_per_atom": e.tolist(), "fft_grid": [24, 24, 24],
+                "v0_ang3_per_atom": fit.v0, "b0_GPa": fit.b0_GPa,
+                "b0_prime": fit.b0_prime, "e0_eV_per_atom": fit.e0,
+                "rms_residual_eV_per_atom": fit.rms_residual_eV,
+                "b0_eV_ang3": fit.b0, "ev_a3_to_gpa": EV_A3_TO_GPA,
+                "all_converged": True},
+    }
+
+
+def _canned_elastic() -> dict:
+    c = [[166.0, 64.0, 64.0, 0.0, 0.0, 0.0],
+         [64.0, 166.0, 64.0, 0.0, 0.0, 0.0],
+         [64.0, 64.0, 166.0, 0.0, 0.0, 0.0],
+         [0.0, 0.0, 0.0, 80.0, 0.0, 0.0],
+         [0.0, 0.0, 0.0, 0.0, 80.0, 0.0],
+         [0.0, 0.0, 0.0, 0.0, 0.0, 80.0]]
+    return {
+        "task": "elastic",
+        "elastic": {"strain": 0.005, "mode": "clamped", "n_atoms": 2,
+                    "formalism": "nc", "c_GPa": c,
+                    "bulk_modulus_GPa": {"voigt": 98.0, "reuss": 98.0,
+                                         "hill": 98.0},
+                    "shear_modulus_GPa": {"voigt": 62.0, "reuss": 60.0,
+                                          "hill": 61.0},
+                    "young_modulus_GPa": 150.0, "poisson_ratio": 0.22,
+                    "mechanically_stable": True, "residual_stress_GPa": 0.01,
+                    "all_converged": True},
+    }
+
+
+def test_eos_elastic_frames_and_plots(tmp_path):
+    pytest.importorskip("pandas")
+    pytest.importorskip("matplotlib")
+    from gradwave import analysis
+
+    eos = _canned_eos()
+    ef = analysis.eos_frame(eos)
+    assert list(ef.columns) == ["scale", "volume_ang3_per_atom",
+                                "energy_eV_per_atom", "bm3_eV_per_atom"]
+    assert len(ef) == 6
+    assert ef.attrs["b0_GPa"] > 0
+    # the fitted curve reproduces the (synthetic BM3) energies at the fit tol
+    assert (ef["bm3_eV_per_atom"] - ef["energy_eV_per_atom"]).abs().max() < 1e-6
+
+    elastic = _canned_elastic()
+    cf = analysis.elastic_frame(elastic)
+    assert cf.shape == (6, 6)
+    assert list(cf.index) == [1, 2, 3, 4, 5, 6]
+    assert list(cf.columns) == [1, 2, 3, 4, 5, 6]
+    assert cf.loc[1, 1] == pytest.approx(166.0)
+    assert cf.attrs["mechanically_stable"] is True
+    assert cf.attrs["bulk_modulus_GPa"]["hill"] == pytest.approx(98.0)
+
+    analysis.plot_eos(eos, path=tmp_path / "eos.png")
+    analysis.plot_elastic(elastic, path=tmp_path / "elastic.png")
+    assert (tmp_path / "eos.png").exists()
+    assert (tmp_path / "elastic.png").exists()
+
+
+def test_cli_plot_autodetects_eos_and_elastic(tmp_path):
+    pytest.importorskip("pandas")
+    pytest.importorskip("matplotlib")
+    from gradwave.cli import main
+
+    (tmp_path / "eos.json").write_text(json.dumps(_canned_eos()))
+    assert main(["plot", str(tmp_path / "eos.json")]) == 0
+    assert (tmp_path / "eos.eos.png").exists()
+
+    (tmp_path / "elastic.json").write_text(json.dumps(_canned_elastic()))
+    assert main(["plot", str(tmp_path / "elastic.json")]) == 0
+    assert (tmp_path / "elastic.elastic.png").exists()
+
+
+def test_cli_restart_flag_overrides_yaml(tmp_path, monkeypatch):
+    """`gradwave run -r PATH` sets Input.restart, overriding the YAML restart:
+    key. Parse-only: api.run is stubbed so nothing computes."""
+    import gradwave.api as api
+    from gradwave.cli import main
+
+    captured: dict = {}
+
+    def fake_run(inp, verbose=True):
+        captured["inp"] = inp
+        return {}
+
+    monkeypatch.setattr(api, "run", fake_run)
+    (tmp_path / "in.yaml").write_text(f"""
+structure:
+  cell: {SI_CELL.tolist()}
+  positions:
+    cart: {SI_POS.tolist()}
+  species: [Si, Si]
+pseudopotentials:
+  dir: {FIX / "pseudos"}
+  map: {{Si: Si_ONCV_PBE-1.2.upf}}
+ecut: {15 * RY}
+kpoints: {{mesh: [2, 2, 2]}}
+restart: {tmp_path / "from_yaml.pt"}
+""")
+    cli_ck = tmp_path / "from_cli.pt"
+    assert main([str(tmp_path / "in.yaml"), "-r", str(cli_ck), "-q"]) == 0
+    assert captured["inp"].restart == cli_ck  # CLI beats the YAML restart:
+
+    # without -r the YAML restart: is honored
+    captured.clear()
+    assert main([str(tmp_path / "in.yaml"), "-q"]) == 0
+    assert captured["inp"].restart == tmp_path / "from_yaml.pt"
+
+
 @pytest.mark.standard
 def test_paw_checkpoint_roundtrip_and_restart(tmp_path):
     from gradwave.checkpoint import (
@@ -331,6 +454,72 @@ scf: {{etol: 1.0e-8, rhotol: 1.0e-7}}
     assert s2["scf"]["n_iter"] < summary["scf"]["n_iter"]
     assert abs(s2["scf"]["energies_eV"]["free_energy"]
                - summary["scf"]["energies_eV"]["free_energy"]) < 1e-6
+
+    # the same restart via the -r CLI flag (no restart: in the YAML): -r must
+    # override the (absent) YAML key and warm-start identically.
+    out3 = tmp_path / "results3"
+    assert main([str(tmp_path / "input.yaml"), "-o", str(out3),
+                 "-r", str(out / "checkpoint.pt"), "-q"]) == 0
+    s3 = json.loads((out3 / "scf.json").read_text())
+    assert s3["scf"]["n_iter"] < summary["scf"]["n_iter"]
+    assert abs(s3["scf"]["energies_eV"]["free_energy"]
+               - summary["scf"]["energies_eV"]["free_energy"]) < 1e-6
+
+
+@pytest.mark.standard
+def test_cli_noncollinear_restart_via_nc_mag_seed(tmp_path):
+    """A restart pointing at a *noncollinear* (spinor) checkpoint warm-starts
+    the spinor SCF instead of raising. The checkpoint kind is "noncollinear",
+    so api.run_scf routes it through checkpoint.nc_mag_seed (which decomposes
+    the stored m⃗ field back onto per-atom moments) rather than as_start_from
+    (which rejects a noncollinear kind). Both the YAML restart: key and the -r
+    CLI flag drive it."""
+    from gradwave.cli import main
+
+    def write(name: str, extra: str = "") -> None:
+        (tmp_path / name).write_text(f"""
+structure:
+  cell: {SI_CELL.tolist()}
+  positions:
+    cart: {SI_POS.tolist()}
+  species: [Si, Si]
+pseudopotentials:
+  dir: {FIX / "pseudos"}
+  map: {{Si: Si_ONCV_PBE-1.2.upf}}
+ecut: {15 * RY}
+xc: pbe
+noncollinear: true
+start_mag: {{Si: 0.5}}
+smearing: {{type: gaussian, width: 0.1}}
+kpoints: {{mesh: [2, 2, 2]}}
+scf: {{etol: 1.0e-7, rhotol: 1.0e-6}}
+{extra}""")
+
+    torch.set_num_threads(8)
+    write("input.yaml")
+    out = tmp_path / "run1"
+    assert main([str(tmp_path / "input.yaml"), "-o", str(out), "-q"]) == 0
+    s1 = json.loads((out / "scf.json").read_text())
+    assert s1["parameters"]["formalism"] == "noncollinear"
+    ck = out / "checkpoint.pt"
+    assert ck.exists()
+    from gradwave.checkpoint import load_checkpoint
+    assert load_checkpoint(ck)["kind"] == "noncollinear"
+    f1 = s1["scf"]["energies_eV"]["free_energy"]
+
+    # YAML restart: routes through nc_mag_seed (does not raise), same energy
+    write("input2.yaml", extra=f"restart: {ck}\n")
+    out2 = tmp_path / "run2"
+    assert main([str(tmp_path / "input2.yaml"), "-o", str(out2), "-q"]) == 0
+    s2 = json.loads((out2 / "scf.json").read_text())
+    assert abs(s2["scf"]["energies_eV"]["free_energy"] - f1) < 1e-6
+
+    # the -r CLI flag on the plain input drives the identical NC restart path
+    out3 = tmp_path / "run3"
+    assert main([str(tmp_path / "input.yaml"), "-o", str(out3),
+                 "-r", str(ck), "-q"]) == 0
+    s3 = json.loads((out3 / "scf.json").read_text())
+    assert abs(s3["scf"]["energies_eV"]["free_energy"] - f1) < 1e-6
 
 
 @pytest.mark.standard

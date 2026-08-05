@@ -530,11 +530,14 @@ payload = load_checkpoint("checkpoint.pt")   # plain dict of CPU tensors + metad
 res2 = scf_uspp(system, xc, start_from=as_start_from(payload))
 ```
 
-The `restart:` YAML key does the same from the command line. A restart requires the
-same FFT grid and spin count. The solver validates both and rescales the density by
-the volume ratio, so small cell changes in EOS-style scans restart cleanly. Both
-formalisms restart, and the ASE calculator applies the same density reuse
-automatically between the ionic steps of a relaxation or MD run.
+The `restart:` YAML key does the same from a run. The `gradwave run -r PATH` (long
+`--restart`) flag sets it from the command line and overrides the YAML key. A restart
+requires the same FFT grid and spin count. The solver validates both and rescales the
+density by the volume ratio, so small cell changes in EOS-style scans restart cleanly.
+Both formalisms restart, and the ASE calculator applies the same density reuse
+automatically between the ionic steps of a relaxation or MD run. A noncollinear
+checkpoint carries no collinear density view, so a restart pointing at one re-seeds the
+per-atom moments from the stored magnetization field instead of the density.
 
 ## Analysis
 
@@ -548,14 +551,19 @@ analysis.scf_frame(r)             # iter, free_energy_eV, dE_eV, drho, dF_from_f
 analysis.eigenvalues_frame(r)     # spin, k, kweight, band, energy_eV, occupation
 analysis.bands_frame(r)           # k, x, band, energy_eV; labels in df.attrs
 analysis.dos_frame(r, width=0.1)  # gaussian DOS from eigenvalues and k-weights
+analysis.eos_frame(r)             # scale, volume/energy per atom, BM3 fit in df.attrs
+analysis.elastic_frame(r)         # 6x6 stiffness C [GPa]; VRH moduli in df.attrs
 
 analysis.plot_scf(r, path="scf.png")
 analysis.plot_bands(r, path="bands.png")
 analysis.plot_dos(r, path="dos.png")
+analysis.plot_eos(r, path="eos.png")          # E(V) points + BM3 curve, V0 marked
+analysis.plot_elastic(r, path="elastic.png")  # annotated C_ij heatmap
 ```
 
 `gradwave plot` wraps the same functions. `gradwave plot out/scf.json --kind dos
 --width 0.2` selects the DOS view of an SCF result. The plot command dispatches over
-scf, bands, and dos results, so a `relax.json` has no plot view. Read its trajectory
-into pandas directly, as shown in the
+scf, bands, dos, pdos, cohp, phonons, eos, and elastic results, keyed on the block the
+JSON carries, so a `relax.json` has no plot view. Read its trajectory into pandas
+directly, as shown in the
 [geometry optimization tutorial](geometry-optimization.md#plot-the-trajectory).
