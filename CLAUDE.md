@@ -60,8 +60,8 @@ Tests live in `tests/{unit,integration,gradcheck}` with shared fixtures in
 Before writing a helper, check whether one of these canonical symbols already
 does it. This table is the judgement layer (which symbol is right, what not to
 touch); for a full greppable list of every public symbol with its signature,
-see **`docs/symbols.txt`** (`grep stress docs/symbols.txt`), regenerated with
-`make symbols`. Import from the leaf module — the subpackage `__init__.py` files
+run `make symbols` to generate the gitignored **`docs/symbols.txt`**, then grep
+it (`grep stress docs/symbols.txt`). Import from the leaf module — the subpackage `__init__.py` files
 are empty; underscore-prefixed names are internal.
 
 | If you need to… | Use | Not |

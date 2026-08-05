@@ -70,22 +70,37 @@ gradient engine landing before the surrogate.
    and charge, λ threaded to autograd. The oracle has two parts. At λ=1 the
    system reproduces the real B-substituted cell in energy and forces, and
    `dE/dλ` matches a full-SCF finite difference over λ at a relaxed reference.
-   The first alloy is Si-Ge.
+   The first alloy is Si-Ge. **Landed** (`scf.alchemical.setup_alchemical_system`,
+   `blend_local_table`, `alchemical_charges`; oracles `test_alchemical_scf_endpoints_match_pure`,
+   `test_local_potential_gradient_vs_fd`, `test_charge_channel_ewald_gradient_vs_fd` in
+   `tests/unit/test_alchemical_composition.py`).
 2. Nonlocal projector blending. Extend to the KB projectors for channel-
    compatible norm-conserving pairs. The oracle checks that the Si-to-Ge
    transmutation gradient matches finite difference, and that thermodynamic
    integration from Si to Ge recovers the real energy difference within tolerance.
+   **Landed** (`scf.alchemical.blend_projector_data` and the nonlocal term in
+   `alchemical_energy_gradient`; oracles `test_nonlocal_blend_gradient_vs_fd`,
+   `test_alchemical_scf_gradient_hellmann_feynman`).
 3. Geometry and property response. Fold in `dR/dλ` by solving
    `K (dR/dλ) = −d(force)/dλ` with the existing Hessian, so property derivatives
    are correct through relaxation. The oracle checks `d(lattice constant)/dλ`
-   and `dB_modulus/dλ` against finite difference.
+   and `dB_modulus/dλ` against finite difference. **Not landed.** `scf/alchemical.py`
+   folds no geometry response; `alchemical_energy_gradient` is a fixed-geometry
+   Hellmann-Feynman energy gradient, with no `K (dR/dλ)` solve against the Hessian.
 4. Heterovalent extension. Charge-changing substitutions on the same channel,
    with a compensating background and Ewald neutrality. Higher physics risk, so
-   it follows the validated isovalent machinery.
+   it follows the validated isovalent machinery. **Landed.** `alchemical_energy_gradient`
+   adds the Janak chemical-potential term `μ · dN/dλ` (`scf/alchemical.py:268`,
+   `float(res.fermi) * charges.sum()`) and the NLCC core-correction term for a
+   charge-changing endpoint; oracles `test_per_site_alchemical_heterovalent_endpoint`,
+   `test_heterovalent_gradient_core_and_janak`.
 5. Surrogate and inverse-design loop. A cluster expansion or small equivariant
    surrogate fit to real endpoints and alchemical gradients, then composition
    optimization toward a target property with snap-and-verify. Demonstrated on
-   one alloy, for example a Si_xGe_{1-x} band-gap or modulus target.
+   one alloy, for example a Si_xGe_{1-x} band-gap or modulus target. **Partially
+   landed.** The surrogate and optimizer exist (`postscf.composition_design.fit_surrogate`,
+   `optimize_composition`, `sample_alchemical`); the end-to-end snap-and-verify
+   inverse-design demonstration on an alloy is not yet in the repo.
 
 ## Scope limits
 
@@ -104,3 +119,11 @@ strain, and the functional parameters. Gradient-based inverse design can then
 target any differentiable property, a band gap, an elastic modulus, a diffusion
 barrier, or a heat capacity, with the geometry response included, on the same
 autograd stack that already produces those properties.
+
+The "with the geometry response included" part of this payoff, and the synthesis
+claim above that `dB_modulus/dcomp`, `dBarrier/dcomp`, and `dC_V/dcomp` follow
+from one backward pass, both depend on Phase 3, which has not landed. Today
+`alchemical_energy_gradient` gives `dE/dλ` and property derivatives at fixed
+geometry. Any derivative that runs through relaxation, `dB_modulus/dλ` and
+`d(lattice constant)/dλ` among them, waits on the `K (dR/dλ) = −d(force)/dλ`
+solve of Phase 3.

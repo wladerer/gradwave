@@ -7,6 +7,25 @@ comes out of the differentiable stack. It reuses the harmonic thermodynamics
 equation of state (`postscf.eos`), and the composition surrogate
 (`postscf.composition_design`).
 
+## Status
+
+All four phases below have landed with unit tests. Each maps to a module in
+`postscf` and its test.
+
+| phase | module | key symbols | test |
+|---|---|---|---|
+| 1. Quasi-harmonic single phase | `postscf.qha` | `qha`, `QHAResult` | `tests/unit/test_qha.py` |
+| 2. Zero-temperature hull | `postscf.convex_hull` | `formation_energy`, `lower_convex_hull`, `hull_distance`, `ground_states`, `leave_one_out_rmse` | `tests/unit/test_convex_hull.py` |
+| 3. Finite-temperature configurational | `postscf.lattice_mc` | `simulate`, `scan_temperature`, `order_disorder_temperature`, `configurational_free_energy` | `tests/unit/test_lattice_mc.py` |
+| 4. Full temperature-composition diagram | `postscf.phase_diagram` | `two_phase_regions`, `binodal`, `critical_temperature` | `tests/unit/test_phase_diagram.py` |
+
+Remaining beyond the four phases is what the scope limits already name. Strongly
+anharmonic phases and the liquid free energy have no harmonic reference, so they
+sit outside the quasi-harmonic term and wait on the Boltzmann-generator frontier
+below. The full-binary validation against a CALPHAD or experimental reference is
+the Phase 4 oracle rather than a shipped diagram, and cluster-expansion
+convergence stays its own art.
+
 ## What a phase diagram decomposes into
 
 A phase boundary is where two competing phases share a free energy. For each

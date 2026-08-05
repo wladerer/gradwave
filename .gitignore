@@ -14,6 +14,9 @@ benchmarks/*.pt
 benchmarks/h100_results_*.tar.gz
 site/
 
+# generated on demand by `make symbols`, not checked in
+docs/symbols.txt
+
 # stray editor/tool temp input
 input_tmp.in
 

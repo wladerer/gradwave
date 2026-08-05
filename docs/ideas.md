@@ -1323,8 +1323,8 @@ The +U metallic-adsorbate divergence and the vc-relax collapse are their own rec
 
 ## Multi-GPU distributed SCF: status and the gather blocker
 
-**Status: the k-point-sharded SCF (#196, #197) runs correctly across CUDA devices,
-production-blocked by #216 (H100 session, rounds 3 and 5).**
+**Status: the k-point-sharded SCF (#196, #197) runs correctly across CUDA devices. The
+#216 result-gather deadlock is fixed (#218, commits 9e81317 / 8afe0a5).**
 
 The k-point-sharded distributed SCF runs unmodified across multiple CUDA devices. Gloo
 stages CUDA tensors through host memory, so no NCCL build is needed, and a 4-rank run lands
@@ -1333,14 +1333,14 @@ GPU (startup- and collective-bound), but a real-scale Si-16 6x6x6 on 2 ranks rea
 s/iter against about 16.8 s/iter amortized single-rank with bit-identical energies, so the
 sharding pays once per-k work dominates the collectives.
 
-Production is blocked by #216. The SCF completes correctly but hangs in post-SCF result
-reassembly at `scf/loop.py:1683`, where `gather_list_cat` calls `dist.all_gather_object` to
-pickle each rank's list of large CUDA coefficient tensors and both ranks block in
-`_object_to_tensor` (faulthandler stacks captured). It is payload-dependent, Si-2 gathers
-fine and Si-16 6x6x6 deadlocks. The fix is a sized raw-tensor `all_gather` staged through
-CPU rather than the pickle-based object gather. Separately, no `destroy_process_group` call
-exists anywhere in cli/api/distributed, benign today, worth adding in the same fix. NCCL
-plus heavy systems is the eventual path once the gather is sized.
+The #216 deadlock is resolved. The SCF previously completed correctly but hung in post-SCF
+result reassembly, where `dist.all_gather_object` pickled each rank's list of large CUDA
+coefficient tensors and both ranks blocked in `_object_to_tensor`. It was payload-dependent,
+so Si-2 gathered fine while Si-16 6x6x6 deadlocked. #218 replaced the pickle-based object
+gather with a sized raw-tensor `all_gather` staged through CPU, and added a
+`maybe_destroy_process_group` teardown (called from `api.py`) so the process group closes
+cleanly. NCCL plus heavy systems stays the eventual path once a NCCL build is wired in. Until
+then Gloo host-staging carries the multi-GPU case.
 
 ## Large-U divergence on metallic adsorbate systems
 
