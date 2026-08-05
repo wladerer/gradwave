@@ -796,6 +796,92 @@ job) to test whether per-element structure emerges beyond the fraction slope, an
 robust asymptotic-validity guard, before either the calibration layer or the recommender is
 worth productionizing.
 
+## Kato-Temple band-energy enclosures
+
+**Status: open, scoped 2026-08-05.**
+
+After diagonalization the solver already holds everything a rigorous eigenvalue
+enclosure needs. Davidson returns Ritz pairs (theta_i, x_i) of the discretized H[rho]
+together with their residual norms ||r_i||, the same norms it uses as its own
+convergence criterion (`DavidsonResult.residual_norms` in
+`src/gradwave/solvers/davidson.py`, formed as `torch.linalg.norm(r, dim=1)` and
+compared against `tol`). Those norms are enough to certify where the true eigenvalues
+of the diagonalized matrix lie, at no extra cost.
+
+The mechanism is two classical bounds. Bauer-Fike is the linear certificate, for
+Hermitian H some true eigenvalue lies within ||r|| of theta. Kato-Temple sharpens it to
+quadratic, |lambda - theta| <= ||r||^2 / delta, with delta a lower bound on the gap from
+theta to the rest of the spectrum. At Davidson's 1e-9 residual and a gap of order 1 eV
+the enclosure is of order 1e-18 Ha, so diagonalization becomes a certified link in the
+error chain for one already-computed norm per band.
+
+The difficulty is delta. It must be a certified lower bound on the gap, but only the
+computed Ritz values are in hand. The bootstrap runs Bauer-Fike first for coarse
+enclosures on every band, uses those enclosures to certify the gaps, then applies
+Kato-Temple to tighten. Near-degenerate clusters, metals at the Fermi level, break the
+single-eigenvalue form and need the block variant, which certifies the cluster's
+invariant subspace rather than the individual eigenvalues.
+
+The scope is narrow and worth stating plainly. This certifies the eigenvalues of the
+matrix actually diagonalized, at the ecut the calculation used, with fp64 arithmetic
+taken as exact. It does not bound basis-set, SCF, or pseudopotential error. It composes
+with the error-estimation module (`docs/manual/error-estimation.md`, with estimators in
+`postscf/convergence_error.py` and `postscf/discretization_error.py`), which estimates
+exactly those non-rigorous terms, so the report can label which bars are certified and
+which are estimates. This strengthens the showcase claim already recorded below, that
+per-calculation error bars plus spinor autograd have no published counterpart, since the
+DFTK Cancès/Herbst guaranteed bounds are the standing competition.
+
+Next step is a small postscf function taking eigenvalues and residual norms and
+returning per-band enclosures, wired into the band-structure report as optional +/-
+bars, with a unit test against a dense-diagonalized small matrix whose true eigenvalues
+are known.
+
+## Exact-constraint oracle suite for the learned XC
+
+**Status: open, scoped 2026-08-05.**
+
+The exact functional is unknown, but many exact constraints on it are known, and the
+SCAN construction used about 17 of them. For a learned functional (the learned meta-GGA
+line above) these constraints are guardrails against unphysical extrapolation, and in a
+differentiable code the derivative-flavored ones become one-line autograd asserts on the
+trained object rather than hand-derivations about a formula.
+
+Five relations make up the autograd-natural set.
+
+- Uniform coordinate scaling of exchange, E_x[rho_gamma] = gamma E_x[rho] with
+  rho_gamma(r) = gamma^3 rho(gamma r). This holds automatically when the learned
+  enhancement factor takes only dimensionless inputs, but a feature-normalization bug
+  breaks it silently, so the test evaluates the functional on a density and its scaled
+  copy.
+- The Lieb-Oxford bound, E_xc >= -C ∫ rho^(4/3), enforced pointwise as a cap on the
+  enhancement factor and hunted adversarially by gradient ascent over the input domain
+  (the "Adversarial testing by gradient ascent" section below, the same machinery
+  pointed at a new target).
+- The Levy-Perdew virial relation, which connects E_x to its own functional derivative.
+  Autograd supplies that derivative for free, so the identity ties the energy to the
+  exact v_x the SCF uses and catches a broken backward.
+- The spin-scaling relation for exchange.
+- F(s → 0) = 1, recovering LDA in the slowly-varying limit.
+
+The learnable functional (`LearnableX`, `LearnableSpinX` in
+`src/gradwave/core/xc/learnable.py`) already builds in F(0) = 1 and the
+Lieb-Oxford-motivated cap by construction, so the suite checks that the construction
+survives training and feature handling rather than adding constraints the form lacks.
+
+The same checks serve three roles. As fast-tier property tests they run pointwise on
+shipped learned functionals with no SCF. As optional hinge-penalty regularizers they
+enter training. And the adversarial ascent is the violation hunter.
+
+The scope is necessary and not sufficient. Passing every constraint does not make a
+functional accurate, it prevents unphysical extrapolation.
+
+Next step is a `tests/unit` constraint suite parameterized over the learned functionals
+(`LearnableX`, `LearnableSpinX`), plus a training-penalty option in the XC-learning
+path. The energy-loss training gradients are already free at convergence
+(`energy_param_grads` in `src/gradwave/core/xc/learnable.py`, with the driver in
+`examples/train_xc_paw.py`), so the penalty is an added term on the same graph.
+
 ## Adversarial testing by gradient ascent
 
 **Status: TRIED 2026-07-29, measured negative. Archive branch
