@@ -235,6 +235,14 @@ frequencies. Validation: the Si $2\times2\times2$ dispersion gives a Γ optical
 phonon near 521 cm⁻¹ against the ~520 experiment, three acoustic branches at
 zero, and no imaginary branch along the path.
 
+<figure markdown>
+  ![Si phonon dispersion and DOS](img/si_phonons.png){ width="640" }
+  <figcaption>Si phonons from the shipped <code>examples/si_phonons.yaml</code>:
+  the Γ-X-W-K-Γ-L dispersion and the 8×8×8 q-mesh DOS, rendered by
+  <code>gradwave plot</code>. The Γ optical mode is triply degenerate at
+  523 cm⁻¹.</figcaption>
+</figure>
+
 ## Thermodynamics from the phonon DOS
 
 The vibrational free energy, entropy, and heat capacity of a harmonic crystal

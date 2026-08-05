@@ -299,6 +299,19 @@ shared FFT grid and fits the third-order Birch-Murnaghan form.
 all-electron reference V₀ = 20.45 Å³/atom, B₀ = 88.5 GPa
 (`examples/eos_silicon.py`).*
 
+**Phonon dispersion.** `task: phonons` displaces the two home-cell atoms in a
+supercell (12 SCFs, independent of supercell size), builds the force constants
+from the autograd forces, and Fourier-interpolates the dynamical matrix to any q.
+
+<div align="center">
+<img src="examples/si_phonons.png" width="720" alt="Silicon phonon dispersion and DOS from supercell finite displacement">
+</div>
+
+*Si phonons on a 2×2×2 supercell along Γ-X-W-K-Γ-L with the DOS from an 8×8×8
+q-mesh. The Γ optical mode comes out triply degenerate at 523 cm⁻¹ (experiment:
+519), the acoustic branches go to zero at Γ, and no mode is imaginary
+(`examples/si_phonons.yaml`, plotted by `gradwave plot`).*
+
 ## Development
 
 ```bash
