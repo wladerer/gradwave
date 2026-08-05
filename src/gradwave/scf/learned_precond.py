@@ -442,13 +442,14 @@ def fit_multipole_robust(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
        for merely rescaling Kerker's single pole (10-20 log units even on a
        single-scale response), which is model optimism the real DIIS mixer
        already captures — hence the best-single-pole reference, not bare Kerker;
-       (b) across two-scale/three-scale/single-scale synthetic responses the
-       K≥2 headroom over the fitted single pole is |Δ| ≲ 0.7 log units (DIIS's
-       finite-history extrapolation absorbs radial multi-scale structure in the
-       diagonal model), while 1e-14 probe noise moves the deployed objective by
-       up to ~0.75 — so ``abstain_margin=1.5`` sits above both, and only a
-       decisively non-single-pole response (measured example: a flat d(G), K=2
-       headroom ≈ 3.3) deploys.
+       (b) across two-scale/three-scale/single-scale/flat synthetic responses
+       the K≥2 headroom over the fitted single pole is |Δ| ≲ 0.7 log units
+       (DIIS's finite-history extrapolation absorbs smooth radial multi-scale
+       structure in the diagonal model), while 1e-14 probe noise moves the
+       candidate objectives by up to ~0.75 — so ``abstain_margin=1.5`` sits
+       above both, and only a decisively non-single-pole response deploys
+       (measured example: a two-stage screening d(G) stepping down at two
+       separated scales, K=2 headroom ≈ 20-27).
 
     Returns the chosen preconditioner (on ``g2_shell``; rebind to deploy) and an
     info dict recording every candidate's objective, the model-selected and

@@ -244,14 +244,15 @@ def test_robust_fit_selection_is_noise_stable():
 
 
 def test_robust_fit_deploys_on_decisive_headroom():
-    """The gate is conservative, not inert: on a response where the K≥2 headroom
-    over every single-pole candidate is decisively above the margin (a flat d(G),
-    which no single pole with f(0)=0 can match across the sphere — measured
-    headroom ≈ 3 log units at the 10-step horizon), the driver deploys a genuine
-    multi-pole fit instead of abstaining."""
+    """The gate is conservative, not inert: on a TWO-STAGE screening response
+    (d(G) stepping down at two well-separated scales, so the optimal filter rises
+    in two stages — the semicore+valence analog no single pole can express) the
+    K≥2 headroom over every single-pole candidate is decisively above the margin
+    (measured ≈ 27 log units at the 10-step horizon) and the driver deploys a
+    genuine multi-pole fit instead of abstaining."""
     alpha = 0.7
     g2 = torch.linspace(0.15, 40.0, 100, dtype=RDTYPE)
-    d = 0.8 * torch.ones_like(g2)
+    d = 0.4 + 0.9 * 0.4**2 / (g2 + 0.4**2) + 0.7 * 3.0**2 / (g2 + 3.0**2)
     P, info = fit_multipole_robust(g2, d, alpha=alpha, q0=1.1, history=8,
                                    n_unroll=10, steps=150, k_max=2, n_seeds=3,
                                    q_min=0.2, q_max=4.0)
