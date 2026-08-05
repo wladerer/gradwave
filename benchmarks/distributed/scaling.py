@@ -63,7 +63,10 @@ def plot(rows: list[dict], png: Path) -> None:
     import matplotlib.pyplot as plt
 
     n = [r["nproc"] for r in rows]
-    w = [r["wall_s"] for r in rows]
+    # runtime_s is gradwave's own end-to-end wall clock (parse → SCF →
+    # outputs), the per-run number that scales with the k-shard; wall_s adds
+    # the torchrun + interpreter launch on top and is kept in scaling.json.
+    w = [r["runtime_s"] for r in rows]
     ideal = [w[0] / (ni / n[0]) for ni in n]
 
     fig, ax = plt.subplots(figsize=(5.2, 3.8))
@@ -78,8 +81,8 @@ def plot(rows: list[dict], png: Path) -> None:
     ax.set_xticks(n)
     ax.set_xticklabels([str(x) for x in n])
     ax.set_xlabel("torchrun ranks (k-set shards)")
-    ax.set_ylabel("wall time [s]")
-    ax.set_title(f"fcc Al, 512 k, {rows[0]['threads_per_rank']} threads/rank")
+    ax.set_ylabel("run wall clock [s]")
+    ax.set_title(f"fcc Al, 1728 k, {rows[0]['threads_per_rank']} threads/rank")
     ax.grid(True, which="both", lw=0.4, alpha=0.25)
     ax.legend(frameon=False)
     fig.tight_layout()

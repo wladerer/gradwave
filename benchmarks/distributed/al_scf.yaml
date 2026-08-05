@@ -1,7 +1,8 @@
 # fcc Al SCF for the k-sharding scaling sweep (benchmarks/distributed/scaling.py).
-# symmetry off: the distributed path shards the full mesh (512 k), so the
+# symmetry off: the distributed path shards the full mesh (1728 k), so the
 # per-rank share is nk / world_size exactly and the sweep measures pure
-# k-parallel scaling. Gaussian smearing: metal.
+# k-parallel scaling. Gaussian smearing: metal. The mesh is deliberately
+# dense — the sweep needs the SCF, not setup, to dominate the run.
 structure:
   cell: [[0.0, 2.025, 2.025], [2.025, 0.0, 2.025], [2.025, 2.025, 0.0]]
   positions: {frac: [[0.0, 0.0, 0.0]]}
@@ -13,7 +14,7 @@ pseudopotentials:
 
 ecut: 544.228          # eV (40 Ry)
 xc: pbe
-kpoints: {mesh: [8, 8, 8]}
+kpoints: {mesh: [12, 12, 12]}
 smearing: {type: gaussian, width: 0.1}
 symmetry: false
 distributed: true

@@ -191,6 +191,20 @@ The [performance page](docs/manual/performance.md) reports the full matrix and w
 through where the small-system gap against a mature Fortran code comes from (fp64
 throughput and kernel maturity).
 
+Beyond one process, `distributed: true` under torchrun shards the k-set across
+ranks (multi-core or multi-GPU):
+
+<div align="center">
+<img src="benchmarks/distributed/scaling.png" width="560" alt="k-point-sharding scaling: wall clock versus torchrun rank count for a 1728-k Al SCF">
+</div>
+
+*The same fcc Al SCF (1728 k, no symmetry, 2 CPU threads per rank) as the k-set
+is sharded over torchrun ranks on a 22-core workstation. Every rank count
+converges to the same free energy to 2e-12 eV. The 8-rank point flattens on
+per-rank setup work and the box's hybrid P/E cores, not on the sharding itself
+(`benchmarks/distributed/scaling.py`; the [distributed
+page](docs/manual/distributed.md) covers multi-node and multi-GPU launches).*
+
 ## Quickstart
 
 ```bash
