@@ -1008,6 +1008,37 @@ def _load_input(path: Path) -> Input:
             f"hybrid functionals (xc: {hybrid.name}) are spin-unpolarized "
             f"(nspin=1, collinear) only")
 
+    # distributed (k-point-sharded) SCF is a torchrun launch; the authoritative
+    # gates live in api.run_scf / api.run, but they only fire at run time inside
+    # torchrun. Mirror them here so `gradwave validate` rejects an unsupported
+    # combination up front, with a message that names the fix. USPP/PAW is a
+    # SUPPORTED formalism (this layer cannot tell it from norm-conserving anyway),
+    # so nothing keys on the pseudopotential kind.
+    distributed = bool(raw.get("distributed", False))
+    if distributed:
+        if noncollinear:
+            raise InputError(
+                "distributed: true is not supported with a noncollinear/SOC SCF "
+                "— the k-point-sharded SCF is wired for the norm-conserving and "
+                "USPP/PAW collinear paths only (see docs/manual/distributed.md)")
+        if hybrid.enabled:
+            raise InputError(
+                f"distributed: true is not supported with a hybrid functional "
+                f"(xc: {hybrid.name}) — the k-point-sharded SCF is wired for the "
+                f"collinear semilocal paths only (see docs/manual/distributed.md)")
+        if task not in ("scf", "bands"):
+            raise InputError(
+                f"distributed: true is only wired for task: scf | bands (got "
+                f"task: {task!r}) — relax/eos/elastic/phonons/magnetism don't "
+                f"route through the k-point-sharded SCF path yet (see "
+                f"docs/manual/distributed.md)")
+        if symmetry:
+            raise InputError(
+                "distributed: true requires symmetry: false — the k-point-sharded "
+                "SCF has no IBZ reduction (each rank owns a slice of the full "
+                "Monkhorst-Pack mesh). Set symmetry: false for a distributed run "
+                "(see docs/manual/distributed.md)")
+
     # fixed spin moment: an integer-occupation pin, so only a collinear nspin=2
     # run without smearing consumes it (the calculator/SCF requirement).
     tot_mag = raw.get("tot_magnetization")
@@ -1108,7 +1139,7 @@ def _load_input(path: Path) -> Input:
         projections=projections,
         dispersion=dispersion,
         device=raw.get("device", "cpu"),
-        distributed=bool(raw.get("distributed", False)),
+        distributed=distributed,
         verbose=bool(raw.get("verbose", True)),
         output_dir=base / out_raw.get("dir", "./out"),
         output_checkpoint=bool(out_raw.get("checkpoint", True)),

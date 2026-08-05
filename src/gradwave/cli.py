@@ -35,6 +35,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("input", help="path to input.yaml")
     p_run.add_argument("-o", "--output", metavar="DIR",
                        help="output directory (overrides output.dir)")
+    p_run.add_argument("-r", "--restart", metavar="PATH",
+                       help="checkpoint.pt to warm-start from (overrides the "
+                            "restart: key in the YAML)")
     p_run.add_argument("-q", "--quiet", action="store_true")
     p_run.add_argument("--log-level", metavar="LEVEL",
                        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
@@ -61,7 +64,7 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="figure file (default: alongside the JSON)")
     p_plot.add_argument("--kind",
                         choices=("auto", "scf", "bands", "dos", "pdos", "cohp",
-                                 "phonons"),
+                                 "phonons", "eos", "elastic"),
                         default="auto")
     p_plot.add_argument("--width", type=float, default=0.1,
                         help="DOS broadening [eV]")
@@ -150,6 +153,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
     assert inp is not None
     if args.output:
         inp = dataclasses.replace(inp, output_dir=Path(args.output))
+    if args.restart:
+        inp = dataclasses.replace(inp, restart=Path(args.restart))
     summary = run(inp, verbose=inp.verbose and not args.quiet)
     scf = summary.get("scf")
     if scf is not None:
@@ -197,6 +202,10 @@ def _cmd_plot(args: argparse.Namespace) -> int:
     if kind == "auto":
         if "phonons" in summary:
             kind = "phonons"
+        elif "eos" in summary:
+            kind = "eos"
+        elif "elastic" in summary:
+            kind = "elastic"
         elif "bands" in summary:
             kind = "bands"
         elif "pdos" in summary:
@@ -218,6 +227,10 @@ def _cmd_plot(args: argparse.Namespace) -> int:
         analysis.plot_cohp(summary, path=out)
     elif kind == "phonons":
         analysis.plot_phonons(summary, path=out)
+    elif kind == "eos":
+        analysis.plot_eos(summary, path=out)
+    elif kind == "elastic":
+        analysis.plot_elastic(summary, path=out)
     else:
         analysis.plot_dos(summary, path=out, width=args.width)
     print(f"wrote {out}")

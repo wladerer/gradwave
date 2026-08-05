@@ -251,7 +251,14 @@ def _error_lines(err):
     lines += _cols(pairs)
     lines.append(f"   {err['note']}")
     if scf is not None:
-        mode = "dielectric-screened" if scf["screened"] else "unscreened upper bound"
+        # "screened" rides along only when the response diagnostic ran (the
+        # norm-conserving collinear path). The noncollinear/USPP paths report
+        # the trajectory extrapolation alone, so the qualifier is absent there.
+        if "screened" in scf:
+            mode = ("dielectric-screened" if scf["screened"]
+                    else "unscreened upper bound")
+        else:
+            mode = "trajectory extrapolation"
         lines.append(f"   SCF error: {mode}; converged energy ≈ "
                      f"{scf['energy_converged_estimate_eV']:.8f} eV")
     if sm is not None and sm.get("note"):

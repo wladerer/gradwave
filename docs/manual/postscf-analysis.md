@@ -160,6 +160,11 @@ about 1 meV, and a good pseudopotential lands within a few. Only the third-order
 Birch-Murnaghan form is fit. The module also exposes `delta_value` for comparing
 any two fits.
 
+`analysis.eos_frame` returns the E(V) points and the fitted-curve energy per volume
+as a DataFrame, with V₀, B₀, and B₀' on `df.attrs`. `analysis.plot_eos`, wrapped by
+`gradwave plot eos.json`, draws the points, the Birch-Murnaghan curve through them,
+and the equilibrium volume.
+
 ## Grimme dispersion (D3 and D4)
 
 A semilocal functional misses the long-range correlation that binds layered and
@@ -313,6 +318,11 @@ $\langle110\rangle$ while the Hill average stays near $+0.35$, the known result
 that most cubic metals are auxetic along $\langle110\rangle$ even though their
 polycrystalline average is not. `is_mechanically_stable` checks the Born
 stability criteria on $C$ before either average is trusted.
+
+`analysis.elastic_frame` returns the $6\times6$ stiffness $C$ [GPa] as a DataFrame
+with the Voigt-Reuss-Hill moduli, Young's modulus, Poisson ratio, and the stability
+flag on `df.attrs`. `analysis.plot_elastic`, wrapped by `gradwave plot elastic.json`,
+renders $C$ as an annotated heatmap with the bulk and shear moduli in the title.
 
 ## Dielectric tensor and Born effective charges
 
