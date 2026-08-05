@@ -24,6 +24,7 @@ def main():
         raise SystemExit("matplotlib not installed — `uv pip install matplotlib`") from None
 
     d = json.loads(open(args.json_file).read())
+    d = d.get("bands", d)  # current bands.json nests under "bands"
     x, eigs, ref = d["x"], d["eigenvalues_eV"], d["reference_eV"]
 
     fig, ax = plt.subplots(figsize=(5, 5))
