@@ -24,20 +24,14 @@ Regenerate the raw list with:
 grep -rn "raise NotImplementedError" src/gradwave --include=*.py
 ```
 
-Current count: **66** `raise NotImplementedError` sites, of which **4 are
-Current count: **64** `raise NotImplementedError` sites, of which **4 are
+Current count: **80** `raise NotImplementedError` sites, of which **4 are
 abstract-method stubs** (interface contracts on base classes, not capability
-gaps) — see the last section. So **62 real capability gates** remain. (The
-noncollinear/SOC forces PR added a brand-new code path, `postscf/forces.py`,
-previously absent entirely, gaining one narrower NLCC gate of its own; this PR
-then ungated the fully-relativistic dielectric/Born-charge path but added its
-own narrower magnetic-SOC and SOC+symmetry gates in its place — see Done/Open
-below for both.)
-gaps) — see the last section. So **60 real capability gates** remain. (This PR
-removed two: `checkpoint.py`'s `scf_uspp_noncollinear` restart gate and
-`postscf/uspp_bands.py`'s USPP+U bands gate; see Done below. The pressure-error
-SOC/+U axes in `postscf/stress_error.py` were investigated but NOT closed this
-PR — see the note under Open — PAW/NC stress & +U.)
+gaps) — see the last section. So **76 real capability gates** remain. Two
+subsystems landed since the last recount and carry their own gates, now
+enumerated below. The k-point-sharded distributed SCF (#196, #197, #218) rejects
+symmetry, SOC, hybrid Fock, and the non-scf/bands task routes (see Open —
+distributed). The relaxed-ion elastic path (#229) adds four collinear-force
+gates on the noncollinear/SOC route (see Open — noncollinear / SOC).
 
 ## Axis legend
 
@@ -64,7 +58,7 @@ PR — see the note under Open — PAW/NC stress & +U.)
 | ~~postscf/uspp_position.py:262,326~~ | USPP/PAW +U | position (Berry) response with DFT+U | **removed, this PR** — threaded the occupation-matrix channel n^{Iσ} through the position (displacement) response, the S-dressed analogue of #156's strain path (Sφ = φ + Σ\|β⟩q⟨β\|φ⟩ now moves with its atom): the bare perturbation gains δH_U = \|∂(Sφ)⟩D_U⟨Sφ\| + h.c. (∂(Sφ) via a jvp through the same `build_uspp_hubbard` S-dressing — `PositionPerturbation._build_dsphi`), `bare_map_derivative` returns the bare δn, and `_self_consistent_response` carries the Dudarev kernel δD_U = −(U−J)·herm(δn) through the existing `apply_chi0`/`k_hub` adjoint machinery. Oracle: `test_position_density_response_hubbard_vs_scf_fd` (analytic dρ*/dτ, dbecsum*/dτ == central FD of +U SCF re-runs, ~3e-5) |
 | ~~postscf/uspp_position.py:399~~ | USPP/PAW +U | `hessian_column` (Γ-phonon mixed second derivative) with DFT+U | **removed, this PR** — added the in-graph Dudarev E_U(c, τ) term (the same `hubbard_e_channel` expression `forces_uspp` differentiates for the +U force) so the double backward picks up ∂²E_U/∂τ∂τ′, fed by the +U-total orbital response (V_U feedback threaded through `_self_consistent_response`/`_total_orbital_response`). Oracle: `test_hessian_column_hubbard_vs_fd_of_forces` (analytic +U column == central FD of the +U-aware `forces_uspp`, ~3e-6) + `test_hessian_column_u0_is_inert` (U=0 == non-+U column, ~1e-13) |
 | ~~postscf/discretization_error.py:379~~ | nspin2 | Dyson-dressed disc. density error for nspin=2 | **removed, this PR** — spin-resolved coarse-space Dyson (`_dyson_dress_spin`): per-spin χ₀ (conduction-projected Sternheimer, block-diagonal in spin, `_apply_chi0_spin`) dressed through the spin Hxc kernel K_Hxc^{σσ'} (Hartree on total δρ + spin f_xc HVP), reusing `dielectric._k_hxc_spin` and the `_response` primitives (`cg_sternheimer`, `insulator_window`, `sternheimer_shift`). The density loop now keeps the per-spin first-order δρ so the dressing has both channels. Still `use_symmetry=False` + insulating occupations (the χ₀ solve is conduction-projected — same requirement as nspin=1). Oracle: `test_nspin2_dyson_nonmagnetic_limit_matches_nspin1` (nonmag insulator: spin-summed dressed δρ == the nspin=1 dressing to the shared fixed-point tol, ~1e-6 rel) |
-| ~~postscf/discretization_error.py:312~~ | nspin2 / symmetry | symmetric disc. error nspin=1 only | **resolved, this PR** — the density/energy error already threaded nspin=2 per spin channel (`use_symmetry=False`); with the Dyson dressing now spin-resolved too, nspin=2 is complete for this module. The remaining raise (now :392) only guards nspin=2 **with** crystal symmetry (the magnetic/AFM IBZ fold), a documented boundary — not a gap. Oracle: `test_nspin2_nonmagnetic_limit_matches_nspin1` (+ the dyson and force-error nspin=2 nonmag variants) |
+| ~~postscf/discretization_error.py:312~~ | nspin2 / symmetry | symmetric disc. error nspin=1 only | **resolved, this PR** — the density/energy error already threaded nspin=2 per spin channel (`use_symmetry=False`); with the Dyson dressing now spin-resolved too, nspin=2 is complete for this module. The remaining raise (now :521) only guards nspin=2 **with** crystal symmetry (the magnetic/AFM IBZ fold), a documented boundary — not a gap. Oracle: `test_nspin2_nonmagnetic_limit_matches_nspin1` (+ the dyson and force-error nspin=2 nonmag variants) |
 | ~~postscf/stress_error.py:90~~ | nspin2 | pressure (stress) disc.-error estimate nspin=1 only | **removed, this PR** — the frozen strained rebuild now builds a per-spin v_eff from the per-spin densities (`effective_potentials` on `[ρ↑,ρ↓]`, stacked into `res_s.v_eff`) and `estimate_density_error` sums both channels' energy error, exactly as the fixed-basis stress does. `use_symmetry=False` still required (frozen rebuild needs the full k-set, permanent). Oracle: `test_pressure_error_nspin2_nonmagnetic_limit_matches_nspin1` (nonmag == nspin=1 to ~1e-11 rel) |
 | ~~inputs.py~~ (`hubbard.enabled and noncollinear` `InputError`) | SOC/NC-spinor + U | DFT+U on the noncollinear/spin-orbit spinor path | **removed, this PR** — not in the grep'd `NotImplementedError` list above (it was an `inputs.py`-level `InputError` combination guard, not a `NotImplementedError`, so the regen script would not have caught it). Generalized the occupation matrix to a 2×2 spin block per orbital pair, `N^{Iσσ'}_{mm'}` (`core.hubbard.occupation_matrices_noncollinear`/`hubbard_dmatrix_noncollinear`); `hubbard_energy`'s Dudarev trace is unmodified — it operates on the bigger composite matrix as-is and reduces exactly to the collinear sum in the z-polarized (no-canting) limit. Wired into `scf.noncollinear.scf_noncollinear`'s `SpinorHamiltonian` (the +U term is orthogonal to the SOC nonlocal term, so fully-relativistic pseudos get +U through the same apply — no separate SOC gate needed). SCF/energy path only; noncollinear +U forces/stress remain a follow-up (see the new Open row below). The noncollinear **USPP/PAW** SCF (`scf.uspp_noncollinear.scf_uspp_noncollinear`) does NOT get +U in this PR — it explicitly raises `NotImplementedError` on a `hubbard=` argument (see the Open table). Oracle: `test_occupation_matrix_noncollinear_reduces_to_collinear_limit` (exact algebraic reduction, 1e-12) + U=0 bit-for-bit SCF oracles (both a nonmagnetic diamond-C run through the input surface and a real ferromagnetic-Ni SCF through the driver directly) |
 | ~~postscf/volumetric.py:266~~ | NC-only (spinor) | ELF for a noncollinear/SOC spinor result | **removed, this PR** — the ELF is the closed-shell form of the CHARGE density (`res.rho`, the trace of the spin-density matrix) and the total kinetic-energy density τ_0 = τ_↑↑ + τ_↓↓ (the trace of the 2×2 KE-density matrix `core.metagga.spinor_tau_matrix_b` already assembles). τ_0 ≥ \|∇ρ\|²/(8ρ) (von Weizsäcker bound on the total density), so D ≥ 0 and ELF ∈ [0, 1] just as collinear; no spin split, so no 2^{2/3} TF factor. Works with or without SOC. USPP/PAW still raises (no `batch`; the soft KE density needs the augmentation). Oracle: `test_elf_noncollinear_nonmagnetic_limit_matches_collinear` (nonmagnetic scalar-relativistic NC ELF == nspin=1 collinear ELF, ~2e-3) + the boundedness check folded into `test_noncollinear_spinor_export` (SOC GaAs, ELF ∈ [0, 1]) |
@@ -88,23 +82,45 @@ PR — see the note under Open — PAW/NC stress & +U.)
 
 | file:line | axis | operation blocked |
 |---|---|---|
-| postscf/dielectric.py:169 | nspin2 + symmetry | dielectric response with IBZ symmetry (nspin=2 magnetic-group vector fold) |
-| postscf/dielectric.py:627 | SOC/NC-spinor + symmetry | dielectric response with IBZ symmetry (spin-orbit magnetic-group polar-vector fold) |
+| postscf/dielectric.py:184 | nspin2 + symmetry | dielectric response with IBZ symmetry (nspin=2 magnetic-group vector fold) |
+| postscf/dielectric.py:682 | SOC/NC-spinor + symmetry | dielectric response with IBZ symmetry (spin-orbit magnetic-group polar-vector fold) |
+| postscf/discretization_error.py:521 | nspin2 + symmetry | symmetric disc. error is nspin=1 only (nspin=2 needs `use_symmetry=False`; the magnetic IBZ fold is a boundary) |
+| postscf/discretization_error.py:1120 | nspin2 + NLCC | NLCC force-error term needs the per-spin density perturbation (only the spin-summed `drho_first_order` is available for nspin=2) |
+
+## Open — distributed (k-point-sharded) SCF
+
+The distributed SCF (#196, #197) and its deadlock-free result gather (#218)
+shard k-points across ranks. The formalism is deliberately narrow: it covers the
+norm-conserving and USPP/PAW collinear paths, and rejects everything below with a
+loud raise rather than a silently-wrong reduction.
+
+| file:line | axis | operation blocked |
+|---|---|---|
+| api.py:232 | formalism routing | distributed SCF is wired for the NC and USPP/PAW collinear paths only (the raise names the covered set) |
+| api.py:2039 | task routing | `distributed: true` is wired for `task: scf | bands` only (relax/eos/elastic/phonons/magnetism route serially) |
+| distributed.py:174,247 | symmetry | distributed k-point parallelism does not support `use_symmetry=True` (IBZ reduction) |
+| distributed.py:180 | SOC | distributed k-point parallelism does not support fully-relativistic (SOC) pseudos |
+| scf/loop.py:1282 | formalism | distributed SCF does not support hybrid Fock exchange (couples orbitals across k) |
+| scf/loop.py:1292 | symmetry | distributed SCF does not support IBZ symmetry reduction |
+| scf/uspp_loop.py:1425 | symmetry | distributed USPP/PAW SCF does not support IBZ symmetry reduction |
 
 ## Open — USPP/PAW response & error operators (lower-priority tranche)
 
 | file:line | axis | operation blocked |
 |---|---|---|
-| postscf/uspp_position.py | insulator | position response: fixed occupations only (metals need occupation derivatives) |
-| postscf/uspp_position.py | insulator | `hessian_column`: insulators only |
-| postscf/uspp_implicit.py:166 | validation | USPP adjoint: nspin must be 1 or 2 |
-| postscf/uspp_implicit.py:193 | insulator | USPP adjoint: non-prefix band occupations |
-| postscf/discretization_error.py:278,1215 | USPP/PAW SOC-spinor | disc. error / eigenvalue error for USPP/PAW spinor result |
-| postscf/discretization_error.py:283,290 | USPP/PAW | Dyson dressing on the USPP/spinor path |
-| postscf/discretization_error.py:467,598,669 | symmetry | USPP density/eig/force error requires `use_symmetry=False` |
-| postscf/discretization_error.py:465,673 | +U | USPP density/force error with DFT+U |
-| postscf/stress_error.py:86 | symmetry | pressure error requires `use_symmetry=False` |
-| postscf/volumetric.py:266 | USPP/PAW | ELF for USPP/PAW (no `batch`; the soft KE density needs the augmentation) — the NC-spinor part of this site was ungated this PR, USPP remains |
+| postscf/uspp_position.py:383,493 | nspin2 | position response (density, becsum): nspin=1 only |
+| postscf/uspp_position.py:385,495 | insulator | position response: fixed occupations only (metals need occupation derivatives) |
+| postscf/uspp_position.py:585 | nspin2 | `hessian_column`: nspin=1 only |
+| postscf/uspp_position.py:587 | insulator | `hessian_column`: insulators only |
+| postscf/uspp_implicit.py:173 | validation | USPP adjoint: nspin must be 1 or 2 |
+| postscf/uspp_implicit.py:202 | insulator | USPP adjoint: non-prefix band occupations |
+| postscf/discretization_error.py:477,1533 | USPP/PAW SOC-spinor | disc. error / eigenvalue error for USPP/PAW spinor result |
+| postscf/discretization_error.py:482,493 | USPP/PAW | Dyson dressing on the USPP/spinor path |
+| postscf/discretization_error.py:473 | USPP/PAW + SOC | iterative annulus solver (`solver='cg'`) is NC-collinear only (USPP/PAW and spinor use the diagonal solver) |
+| postscf/discretization_error.py:698,830,902 | symmetry | USPP density/eig/force error requires `use_symmetry=False` |
+| postscf/discretization_error.py:696,906 | +U | USPP density/force error with DFT+U |
+| postscf/stress_error.py:163 | symmetry | pressure error requires `use_symmetry=False` |
+| postscf/volumetric.py:294 | USPP/PAW | ELF for USPP/PAW (no `batch`; the soft KE density needs the augmentation) — the NC-spinor part of this site was ungated earlier, USPP remains |
 
 **Γ-point Hvp-phonons cross-validated (#141 step 2).** The Γ dynamical
 matrix built on `hessian_column` (`postscf.phonons.gamma_hessian`) is now
@@ -134,8 +150,8 @@ keep the −½ limit (their own continuous limit), so their gates are unchanged.
 
 | file:line | axis | operation blocked |
 |---|---|---|
-| postscf/stress_error.py:92 | SOC | pressure error for fully-relativistic pseudos |
-| postscf/stress_error.py:95 | +U | pressure error with DFT+U |
+| postscf/stress_error.py:168 | SOC | pressure error for fully-relativistic pseudos |
+| postscf/stress_error.py:171 | +U | pressure error with DFT+U |
 
 **Pressure-error SOC/+U axes — investigated, NOT closed this PR.**
 `estimate_pressure_error`'s `_denergy_at` measures `err.denergy`, the
@@ -178,15 +194,19 @@ different, larger pieces of new machinery:
 
 | file:line | axis | operation blocked |
 |---|---|---|
-| api.py:236 | NC-only | hybrid functionals need norm-conserving pseudos |
-| api.py (phonons) | SOC | supercell phonons for noncollinear/spinor runs (collinear nspin=2 now supported) |
-| api.py:975 | NC-only | supercell phonons need norm-conserving pseudos (the FD fold calls the NC `postscf.forces` path; the USPP/PAW `paw_forces` route is not wired into `force_constants_home` yet) |
-| postscf/cohp.py:456 | NC-only | COHP `basis='iao'` needs the NC operator route (USPP/spinor absent) |
-| postscf/cohp.py:550 | NC-only | `projection_rmsp`: NC SCFResult only (USPP/spinor absent) |
-| postscf/forces.py:42 | metaGGA / NC | meta-GGA NLCC force needs the batched-k geometry (collinear NC only) |
+| api.py:400 | NC-only | hybrid functionals need norm-conserving pseudos |
+| api.py:1443 | SOC | supercell phonons for noncollinear/spinor runs (collinear nspin=2 now supported) |
+| api.py:1448 | NC-only | supercell phonons need norm-conserving pseudos (the FD fold calls the NC `postscf.forces` path; the USPP/PAW `paw_forces` route is not wired into `force_constants_home` yet) |
+| postscf/cohp.py:660 | NC-only | COHP `basis='iao'` needs the NC operator route (USPP/spinor absent) |
+| postscf/cohp.py:762 | NC-only | `projection_rmsp`: NC SCFResult only (USPP/spinor absent) |
+| postscf/forces.py:66 | metaGGA / NC | meta-GGA NLCC force needs the batched-k geometry (collinear NC only) |
+| postscf/discretization_error.py:1131 | metaGGA | NLCC force-error term does not support meta-GGA (the valence τ response is not threaded into the estimator) |
+| postscf/_response.py:242,335 | metaGGA | energy-metric SCF convergence gate omits the meta-GGA τ kernel (collinear :242, noncollinear :335) |
+| postscf/stress.py:183 | routing | `stress()` rejects scalar-relativistic noncollinear results (collinear `SCFResult` and the SOC spinor path only) |
+| calculator.py:993 | USPP/PAW | `pulay_stress_correction` is norm-conserving only (the USPP/PAW stress-error estimator is absent) |
 | opt/joint.py:278 | metaGGA | meta-GGA joint (strain+orbital) minimization (τ rebuild) |
 
-**COHP `basis='iao'` / `projection_rmsp` (cohp.py:456, :550) — genuine gaps,
+**COHP `basis='iao'` / `projection_rmsp` (cohp.py:660, :762) — genuine gaps,
 deferred (audited this PR).** Both are real: `basis='iao'` and `projection_rmsp`
 work on the norm-conserving collinear `SCFResult` (tested: `test_cohp_resolve_images_and_iao_o2`)
 and raise for USPP/PAW and spinor results. Unlike the ELF wire-through, neither is
@@ -203,14 +223,17 @@ this slice.
 | file:line | axis | operation blocked |
 |---|---|---|
 | scf/paw_noncollinear.py:49 | SOC/NC-spinor | noncollinear one-center XC is LDA-only (GGA rejected) |
-| scf/uspp_noncollinear.py:193 | SOC/NC-spinor | noncollinear USPP/PAW is LDA-only |
-| scf/uspp_noncollinear.py:200 | SOC/NC-spinor + U | DFT+U on the noncollinear USPP/PAW path (the norm-conserving spinor path has it — see Done above) |
-| postscf/forces.py:229 (`_forces_noncollinear`) | NLCC | NLCC core-correction force on the noncollinear/SOC path (new gate — forces themselves are now supported, see Done above, and PR #165 already closed the analogous +U SOC stress gate; no NLCC-free Hubbard-eligible fully-relativistic pseudo exists in the fixture set either, which is why the Stage-2 +U force test also stays clear of this) |
-| checkpoint.py:76 | SOC/NC-spinor | checkpointing a `scf_uspp_noncollinear` result (no restart consumer) |
-| postscf/dielectric.py:631 | SOC/NC-spinor | magnetic (m⃗ ≠ 0) fully-relativistic dielectric response — needs the coupled (ρ, m⃗) K_Hxc Hessian-vector product; the nonmagnetic case was ungated this PR (see Done above) |
-| postscf/dielectric.py:115 | SOC | dielectric response scalar-relativistic only |
-| postscf/discretization_error.py:841 | SOC/NC-spinor | force-error estimate NC-collinear only (spinor force terms unassembled) |
-| postscf/discretization_error.py:1010 | SOC/NC-spinor + symmetry | noncollinear disc. error requires `use_symmetry=False` |
+| scf/uspp_noncollinear.py:247 | SOC/NC-spinor | noncollinear USPP/PAW is LDA-only |
+| scf/uspp_noncollinear.py:250 | SOC/NC-spinor + U | DFT+U on the noncollinear USPP/PAW path (the norm-conserving spinor path has it — see Done above) |
+| postscf/forces.py:251 (`_forces_noncollinear`) | NLCC | NLCC core-correction force on the noncollinear/SOC path (forces themselves are supported, see Done above, and PR #165 closed the analogous +U SOC stress gate; no NLCC-free Hubbard-eligible fully-relativistic pseudo exists in the fixture set either, which is why the Stage-2 +U force test also stays clear of this) |
+| postscf/dielectric.py:686 | SOC/NC-spinor | magnetic (m⃗ ≠ 0) fully-relativistic dielectric response — needs the coupled (ρ, m⃗) K_Hxc Hessian-vector product; the nonmagnetic case is ungated (see Done above) |
+| postscf/dielectric.py:204 | routing | `dielectric_born()` rejects scalar-relativistic noncollinear results (only collinear `SCFResult` and the SOC spinor path are served) |
+| postscf/discretization_error.py:1103 | SOC/NC-spinor | force-error estimate NC-collinear only (spinor force terms unassembled) |
+| postscf/discretization_error.py:1326 | SOC/NC-spinor + symmetry | noncollinear disc. error requires `use_symmetry=False` |
+| api.py:1230 | SOC | relaxed-ion elastic constants need the collinear force path (noncollinear/spinor forces absent) |
+| api.py:1236 | SOC + USPP/PAW | relaxed-ion elastic for noncollinear USPP/PAW runs (no spinor USPP/PAW stress path) |
+| api.py:1240 | SOC | relaxed-ion elastic for a magnetic noncollinear run without spin-orbit needs fully-relativistic (j-resolved) pseudos |
+| api.py:1245 | SOC + U | DFT+U relaxed-ion elastic on the spin-orbit path (feature boundary, #142) |
 
 **Noncollinear / SOC COHP and PDOS — NOT gaps, confirmed validation/routing
 (audited this PR).** The spinor post-SCF analysis for COHP and PDOS is fully
@@ -219,25 +242,26 @@ guards or entry-point routing, not capability gaps:
 
 | file:line | classification | what it actually is |
 |---|---|---|
-| postscf/cohp.py:623 | validation | `cohp_noncollinear` rejects a non-`NCResult`; the noncollinear (charge, spin-summed) COHP is fully implemented (`test_cohp_soc_bi2`) |
-| postscf/cohp.py:662,665 | validation | `cohp_soc` rejects a non-`NCResult` / non-FR pseudo; the j-resolved SOC COHP is fully implemented (`test_cohp_soc_bi2`) |
-| postscf/pdos.py:312 | routing | inside the COLLINEAR unpacker `_unpack_result`; a spinor result is served by the dedicated `projected_dos_noncollinear` / `projected_dos_soc` (both fully implemented and tested), so this raise only routes a spinor result away from the collinear entry point |
-| postscf/pdos.py:387 | validation | `projected_dos_noncollinear` rejects a non-`NCResult`; the charge + spin-texture (m_x/m_y/m_z) projected DOS is fully implemented (`test_pdos_noncollinear_spin_texture`) |
-| postscf/pdos.py:543,547 | validation | `projected_dos_soc` rejects a non-`NCResult` / non-FR pseudo; the j-resolved projected DOS is fully implemented (`test_pdos_soc_j_resolved`) |
+| postscf/cohp.py:848 | validation | `cohp_noncollinear` rejects a non-`NCResult`; the noncollinear (charge, spin-summed) COHP is fully implemented (`test_cohp_soc_bi2`) |
+| postscf/cohp.py:890,893 | validation | `cohp_soc` rejects a non-`NCResult` / non-FR pseudo; the j-resolved SOC COHP is fully implemented (`test_cohp_soc_bi2`) |
+| postscf/pdos.py:383 | routing | inside the COLLINEAR unpacker `_unpack_result`; a spinor result is served by the dedicated `projected_dos_noncollinear` / `projected_dos_soc` (both fully implemented and tested), so this raise only routes a spinor result away from the collinear entry point |
+| postscf/pdos.py:462 | validation | `projected_dos_noncollinear` rejects a non-`NCResult`; the charge + spin-texture (m_x/m_y/m_z) projected DOS is fully implemented (`test_pdos_noncollinear_spin_texture`) |
+| postscf/pdos.py:628,632 | validation | `projected_dos_soc` rejects a non-`NCResult` / non-FR pseudo; the j-resolved projected DOS is fully implemented (`test_pdos_soc_j_resolved`) |
 
 ## Open — symmetry / occupations / data / validation
 
 | file:line | axis | operation blocked |
 |---|---|---|
-| scf/implicit.py:55 | symmetry | implicit SCF backward requires `use_symmetry=False` |
-| scf/implicit.py:66 | insulator | implicit SCF backward supports insulators only (occ = 2) |
-| postscf/_response.py:168 | insulator | response builder rejects metallic (partial) occupations |
-| postscf/discretization_error.py:396 | symmetry | Dyson dressing requires `use_symmetry=False` (permanent — response solve needs the full k-mesh, both nspin) |
-| postscf/newton.py:64 | +U | `newton_polish` +U raw-map plumbing |
-| symmetry.py:180,297 | symmetry | shifted meshes not reduced here (caller reduces unshifted) |
+| scf/implicit.py:66 | symmetry | implicit SCF backward requires `use_symmetry=False` |
+| scf/implicit.py:91 | insulator | implicit SCF backward supports insulators only (occ = 2) |
+| postscf/_response.py:421 | insulator | `insulator_window` rejects metallic (partial) occupations (shared response helper) |
+| postscf/discretization_error.py:525 | symmetry | Dyson dressing requires `use_symmetry=False` (permanent — response solve needs the full k-mesh, both nspin) |
+| postscf/newton.py:87 | +U | `newton_polish` +U raw-map plumbing |
+| symmetry.py:193,318 | symmetry | shifted meshes not reduced here (caller reduces unshifted) |
 | postscf/dispersion.py:134 | data | D3(BJ) reference C6 not vendored for requested element(s) |
-| postscf/dispersion_d4.py:171 | data | D4(BJ) reference data not vendored for requested element(s) |
-| postscf/dielectric.py:163 | validation | dielectric response: nspin must be 1 or 2 |
+| postscf/dispersion_d4.py:184 | data | D4(BJ) reference data not vendored for requested element(s) |
+| postscf/dielectric.py:178 | validation | dielectric response: nspin must be 1 or 2 |
+| postscf/hubbard_u.py:245 | validation | single-column linear-response U guard for two Hubbard sites of different species or l (internal precondition; the full-matrix path is used instead — see Done) |
 
 ## Not gates — abstract-method stubs (interface contracts)
 
@@ -247,7 +271,7 @@ should not be counted or "removed".
 
 | file:line | base class / method |
 |---|---|
-| core/occupations.py:44 | `Smearing.occupation` |
-| core/occupations.py:48 | `Smearing.entropy` |
-| core/xc/base.py:169 | `XCFunctional.energy_density` |
-| core/xc/spin.py:63 | `SpinXC.energy_density` |
+| core/occupations.py:45 | `Smearing.occupation` |
+| core/occupations.py:49 | `Smearing.entropy` |
+| core/xc/base.py:195 | `XCFunctional.energy_density` |
+| core/xc/spin.py:72 | `SpinXC.energy_density` |
