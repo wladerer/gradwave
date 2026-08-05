@@ -708,6 +708,10 @@ def _build_relax_calc(inp: Input, verbose: bool = True) -> GradWave:
         hub_u_ramp_iters=inp.hubbard.u_ramp_iters,
         extrapolation=inp.relax.extrapolation,
         pulay_solver=inp.relax.pulay_solver,
+        # k-point sharding for every ionic step's SCF (a no-op outside a
+        # torchrun launch); the calculator reassembles a full-mesh result so
+        # forces/stress and the BFGS/FIRE step stay identical on every rank.
+        distributed=inp.distributed,
         device=inp.device,
         verbose=False,
     )
@@ -730,7 +734,31 @@ def run_relax(
     Selective dynamics (``inp.fixed``) only the nested engine honours — the joint
     and newton engines relax all degrees of freedom — so a ``joint``/``newton``
     request with fixed atoms falls back to nested with the reason recorded in the
-    ``relax`` block (``requested_method``/``fallback_reason``)."""
+    ``relax`` block (``requested_method``/``fallback_reason``).
+
+    Under ``distributed: true`` only the nested engine routes through k-point
+    sharding (its per-step SCF runs on the calculator, which shards). The joint
+    and newton engines drive ``opt.joint``/``opt.newton`` on their own
+    unsharded systems, so a ``joint``/``newton`` request under distribution
+    falls back to nested with the reason recorded, rather than silently running
+    the whole mesh on every rank."""
+    if inp.distributed:
+        # every rank runs the identical (full-mesh-reduced) optimization, so
+        # quiet all but rank 0 to avoid world_size-fold duplicated step lines
+        from gradwave.distributed import current_rank
+
+        verbose = verbose and current_rank() == 0
+    if inp.distributed and inp.relax.method in ("joint", "newton"):
+        if verbose:
+            print(f"  relax: {inp.relax.method} engine does not route through "
+                  f"k-point sharding — using nested under distributed: true",
+                  flush=True)
+        relax, atoms, frames = _relax_nested(inp, verbose)
+        relax["requested_method"] = inp.relax.method
+        relax["fallback_reason"] = (
+            f"distributed: true routes only the nested engine (the "
+            f"{inp.relax.method} engine has no k-point-sharded path)")
+        return relax, atoms, frames
     if inp.relax.method in ("joint", "newton"):
         if inp.fixed is not None:
             if verbose:
@@ -1114,11 +1142,24 @@ def run_eos(inp: Input, verbose: bool = True) -> dict[str, Any]:
     volumes share ONE FFT grid, pinned to the elementwise max over the scan, so
     E(V) carries no grid-discontinuity steps; each volume warm-starts from the
     previous converged density (the cheap, branch-stable EOS chain). Returns the
-    ``eos`` summary block."""
+    ``eos`` summary block.
+
+    Under ``distributed: true`` each per-volume ``run_scf`` shards the k-mesh
+    across ranks (the volume-scan chain is a series of warm-started SCFs, and
+    ``run_scf`` already routes the sharded path). The FFT box is pinned across
+    the scan, so the shard rebuilds deterministically per volume from
+    ``(nk, rank, world_size)``. Every rank fits the identical E(V), so only the
+    printing is quieted below."""
     import numpy as np
 
     from gradwave.postscf.eos import EV_A3_TO_GPA, fit_bm3
 
+    if inp.distributed:
+        # every rank scans the identical (full-mesh-reduced) E(V); quiet all but
+        # rank 0 to avoid world_size-fold duplicated per-volume lines
+        from gradwave.distributed import current_rank
+
+        verbose = verbose and current_rank() == 0
     _species, upfs, species_of_atom = _species_upfs(inp)
     uspp = _is_uspp(upfs)
     scales = list(inp.eos.scales)
@@ -2069,11 +2110,11 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
     from gradwave.output import write_output
     from gradwave.runinfo import ProcessMeter, machine_snapshot, provenance_block
 
-    if inp.distributed and inp.task not in ("scf", "bands"):
+    if inp.distributed and inp.task not in ("scf", "bands", "relax", "eos"):
         raise NotImplementedError(
-            f"distributed: true is only wired for task: scf | bands so far "
-            f"(got task: {inp.task!r}) — relax/eos/elastic/phonons/magnetism "
-            f"don't route through the k-point-sharded SCF path yet (see "
+            f"distributed: true is wired for task: scf | bands | relax | eos "
+            f"(got task: {inp.task!r}) — elastic/phonons/magnetism don't route "
+            f"through the k-point-sharded SCF path yet (see "
             f"docs/manual/distributed.md)"
         )
     snap = machine_snapshot()

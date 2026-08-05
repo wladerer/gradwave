@@ -64,9 +64,25 @@ alongside the smooth density, DFT+U included (see
 An input file with `distributed: true` now routes either formalism.
 `api.run_scf` shards a `USPPSystem` through `shard_uspp_system` and a
 norm-conserving `System` through `shard_system`, DFT+U carried through
-unchanged (see `tests/integration/test_distributed_uspp_api.py`). Also not yet
-supported, and rejected with a clear `NotImplementedError` rather than silently
-ignored:
+unchanged (see `tests/integration/test_distributed_uspp_api.py`).
+
+`task: relax` and `task: eos` route through the same sharding. A relaxation
+runs a full SCF at every ionic step, and a volume scan runs one warm-started
+SCF per point, so both are dominated by the many-SCF cost that sharding cuts.
+The relax calculator (`calculator.GradWave` with `distributed=True`) shards
+each step's SCF, and the volume chain shards each point's `run_scf`. Forces and
+stress need no new k-sum reduction. `scf` and `scf_uspp` already reassemble a
+full-mesh result before either is evaluated, so every rank differentiates the
+whole k-mesh and reaches identical forces, stress, and BFGS or FIRE steps
+without a rank-dependent value entering the optimizer. The per-step warm start
+is sliced to each rank's k-shard by `distributed.shard_start_from`, which keeps
+the per-step SCF iteration count identical to a single-process run (see
+`tests/integration/test_distributed_relax_eos.py`). Only the nested relax
+engine routes this way. A `joint` or `newton` request under `distributed: true`
+falls back to nested, with the reason recorded in the `relax` block.
+
+Also not yet supported, and rejected with a clear `NotImplementedError` rather
+than silently ignored:
 
 - IBZ symmetry reduction (`symmetry: true`) — build with `symmetry: false`
   for a distributed run.
@@ -80,8 +96,8 @@ ignored:
   summed per rank, since it is a nonlinear function of `n_hub` (see
   `scf.loop._hubbard_occ_update` and `scf.uspp_loop._hubbard_occ_update`,
   which mirror each other on the two drivers).
-- `task: relax | eos | elastic | phonons | magnetism` — these don't route
-  through the k-point-sharded path yet.
+- `task: elastic | phonons | magnetism`, which don't route through the
+  k-point-sharded path yet.
 - Warm-starting a distributed run from a checkpoint (`restart:`) produced by
   a *different* world_size/shard layout. A checkpoint's orbitals are matched
   to the local shard's k-count, so a mismatch is silently ignored (falls back
