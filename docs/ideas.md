@@ -1395,12 +1395,23 @@ along the path.
 
 ## Learned multi-pole density-mixing preconditioner
 
-**Status: hardened (2026-08-04, #232). The fit is multi-seed, quality-weighted, and
-gated behind a Kerker abstention, so losing to Kerker is impossible at fit time. The
-battery is 1 synthetic win, 5 real-system ties, 0 losses, and the measured reading is
-that Pulay DIIS already absorbs the single-pole reshaping the earlier wins were made
-of. Earlier milestones were the Cu win and the Cu₃Al harness and SCF oracle
-(2026-07-24, #60), and the magnetization-channel extension stays a measured negative.**
+**Status: closed on real systems (2026-08-05, slab test); fit hardened (2026-08-04,
+#232). The fit is multi-seed, quality-weighted, and gated behind a Kerker abstention,
+so losing to Kerker is impossible at fit time. The battery is 1 synthetic win, 5
+real-system ties, 0 losses, and the measured reading is that Pulay DIIS already
+absorbs the single-pole reshaping the earlier wins were made of. The Al(100) slab
+test then closed the line. On the 4- and 6-layer slabs the robust fit selected K=1
+and tied bare Kerker (21 and 27 iterations) while local-TF kept its win (17 and 21).
+The diagnosis is structural, not statistical. The multipole filter is radial in G,
+but a slab's screening inhomogeneity is spatial, screen in the metal and not in the
+vacuum, an operator that is r-dependent and off-diagonal in G. The radially averaged
+probe sees the two regions smeared into one near-single-scale d(G), and the gate
+correctly abstains. Bulk metals are single-scale (robust ties) and spatially
+inhomogeneous cells need local-TF's operator family, so no tested real system
+produces the radially staged response the mechanism wins on. Any successor lives in
+the local-TF family (a learned local screening functional), not in radial poles.
+Earlier milestones were the Cu win and the Cu₃Al harness and SCF oracle (2026-07-24,
+#60), and the magnetization-channel extension stays a measured negative.**
 
 The sweep above skips "learned preconditioners" because they need a localized basis and
 our kinetic preconditioner is already analytic. That reason is about *eigensolver*
