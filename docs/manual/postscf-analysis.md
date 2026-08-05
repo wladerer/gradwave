@@ -33,8 +33,8 @@ built on it, recovers ρ(r) in e/Å³. From the YAML interface the same fields c
 from an `output.volumetric` block with `format: chgcar` (see
 [Inputs and outputs](io.md#volumetric-export)).
 
-`examples/volumetric_density.py` runs an SCF on the 2-atom diamond cell, writes
-the density and ELF, and renders a 2×2×2 supercell isosurface of each:
+`examples/volumetric_density.py` runs an SCF on the 8-atom conventional diamond
+cell, writes the density and ELF, and renders an isosurface of each:
 
 ```bash
 uv run python examples/volumetric_density.py --outdir examples
@@ -44,14 +44,15 @@ uv run python examples/volumetric_density.py --outdir examples
   ![Diamond valence density and ELF isosurfaces](img/diamond_density.png){ width="360" }
   ![](img/diamond_elf.png){ width="360" }
   <figcaption>Left: the valence charge density of diamond, isosurface at
-  0.55 e/Å³, traces the connected covalent network and the empty channels along
+  1.3 e/Å³, traces the connected covalent network and the empty channels along
   the tetrahedral voids. Right: the ELF at 0.85 localizes on the bond midpoints,
-  the signature of the covalent C-C pair. Both are 2×2×2 supercells rendered from
-  a CHGCAR with <code>tk viz</code>.</figcaption>
+  the signature of the covalent C-C pair. Both are the conventional cubic cell
+  rendered from a CHGCAR with <code>tk viz</code>.</figcaption>
 </figure>
 
-A supercell tiling reads more clearly than the primitive cell for a periodic
-field, and a planar slice through the same grid is the other useful view. The
+The conventional cubic cell reads more clearly than the skewed primitive cell
+for a periodic field (and keeps every bond lobe interior to the frame), and a
+planar slice through the same grid is the other useful view. The
 density integrates to the electron count, the single-state PARCHG integrates to
 one, and the occupation-weighted sum of the PARCHG densities returns the total
 density, all to machine precision (`tests/integration/test_volumetric.py`).
