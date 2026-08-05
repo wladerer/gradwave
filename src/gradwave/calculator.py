@@ -181,6 +181,44 @@ def _remap_coeffs_to_spheres(
     return out
 
 
+def _extrapolation_coeffs(
+    d: torch.Tensor, basis: list[torch.Tensor], *, tol: float = 1e-10
+) -> list[float]:
+    """QE-style least-squares extrapolation coefficients for an ionic step.
+
+    ``d`` is the target displacement ``pos_new − pos_t`` (flattened); ``basis``
+    the difference vectors ``[pos_t − pos_{t-1}, pos_{t-1} − pos_{t-2}]`` (one for
+    linear, two for quadratic). Solves ``min_c ||d − Σ_k c_k · basis_k||²`` and
+    returns ``[c_k]`` aligned to ``basis`` — the same combination the caller then
+    applies to the stored remainder densities (and USPP becsum).
+
+    Degenerate directions fall back cleanly with no separate code path: a repeated
+    geometry (a vanishing basis vector) or two collinear differences make the
+    Gram matrix singular, so the highest-order term is dropped and the smaller
+    system re-solved, down to the scalar (linear) case and finally to all-zero
+    coefficients (plain reuse)."""
+    m = len(basis)
+    g = torch.zeros((m, m), dtype=d.dtype, device=d.device)
+    b = torch.zeros(m, dtype=d.dtype, device=d.device)
+    for i in range(m):
+        b[i] = torch.dot(basis[i], d)
+        for j in range(m):
+            g[i, j] = torch.dot(basis[i], basis[j])
+    coeffs = [0.0] * m
+    for k in range(m, 0, -1):
+        gk = g[:k, :k]
+        det = float(torch.det(gk))
+        # scale-free degeneracy test: a k×k Gram determinant scales like the
+        # k-th power of the diagonal magnitude (units of length^{2k}).
+        scale = float(torch.diagonal(gk).abs().max()) ** k
+        if scale > 0.0 and abs(det) > tol * scale:
+            sol = torch.linalg.solve(gk, b[:k])
+            for i in range(k):
+                coeffs[i] = float(sol[i])
+            return coeffs
+    return coeffs  # fully degenerate → all zeros (plain reuse)
+
+
 class GradWave(Calculator):
     implemented_properties = ["energy", "free_energy", "forces", "stress",
                               "magmom"]
@@ -232,6 +270,13 @@ class GradWave(Calculator):
         reuse_wavefunctions: bool = True,  # seed the Davidson eigensolver from the
         # previous ionic step's eigenvectors (alongside the density warm start);
         # False falls back to a density-only warm start (cold orbital seed)
+        extrapolation: str = "reuse",  # cross-step density seed (nspin=1):
+        # "none" (cold SAD each step) | "reuse" (shift the atomic part with the
+        # atoms, reuse the bonding remainder — the historical warm start) |
+        # "linear"/"quadratic" (also extrapolate the remainder, and USPP becsum,
+        # from the last two/three converged steps by least-squares matching the
+        # new positions). Falls back to reuse when the history is too short or
+        # the least-squares system is degenerate.
         pulay_stress_correction: bool = False,  # add the estimated Pulay
         # (basis-incompleteness) pressure to the reported stress diagonal via
         # postscf.stress_error.estimate_pressure_error. The fixed-basis
@@ -283,11 +328,16 @@ class GradWave(Calculator):
                  mixing_kerker=mixing_kerker, eigensolver=eigensolver,
                  precond=precond, reuse_wavefunctions=reuse_wavefunctions,
                  pulay_stress_correction=bool(pulay_stress_correction),
-                 pulay_solver=str(pulay_solver))
+                 pulay_solver=str(pulay_solver),
+                 extrapolation=str(extrapolation))
         )
         if pulay_solver not in ("diagonal", "cg"):
             raise ValueError(
                 f"pulay_solver must be 'diagonal' or 'cg', got {pulay_solver!r}")
+        if extrapolation not in ("none", "reuse", "linear", "quadratic"):
+            raise ValueError(
+                "extrapolation must be 'none', 'reuse', 'linear', or "
+                f"'quadratic', got {extrapolation!r}")
         # Opt-in D3(BJ) dispersion, mirroring inputs.DispersionParams: True →
         # enabled with defaults (functional = the SCF xc); a dict overrides any
         # of functional/cutoff/cn_cutoff/s6/s8/a1/a2; None/False → off. Stored on
@@ -353,6 +403,12 @@ class GradWave(Calculator):
         self._cached_results: dict[str, Any] = {}  # full results dict paired
         # with _scf_state
         self._warm_start_remaps = 0  # count of grid-shape-change density remaps
+        # cross-step extrapolation state: up to the last 3 converged steps'
+        # (positions, grid shape, bonding remainder Δρ, USPP becsum), and a
+        # sticky flag recording whether the extrapolated density ever needed
+        # negative-clamping (read by api._relax_nested for the relax summary).
+        self._history: list[dict[str, Any]] = []
+        self._density_clamped = False
         self.last_pulay_pressure_gpa: float | None = None  # the Pulay pressure
         # [GPa] added to the reported stress by the last calculate() (None when
         # the correction is off) — read by api._relax_nested for reporting
@@ -575,6 +631,9 @@ class GradWave(Calculator):
         # becsum) warm start is unconditional. False → density-only warm start
         # (cold orbital seed), the pre-reuse behavior.
         reuse = self.parameters["reuse_wavefunctions"]
+        mode = self.parameters["extrapolation"]
+        if mode == "none":
+            return None  # cold SAD start each step (density and orbitals)
         is_uspp = prev.formalism == "uspp"
         # prev: SCFResult | USPPResult already narrows prev.system to
         # System | USPPSystem statically; the assert below is a runtime
@@ -610,16 +669,118 @@ class GradWave(Calculator):
         tabs = prev_sys.paws if isinstance(prev_sys, USPPSystem) else prev_sys.upfs
         soa = prev_sys.species_of_atom
         ne = prev_sys.n_electrons
-        delta = (sad_density(_fft_grid(system), pos_new, soa, tabs, ne)
-                 - sad_density(_fft_grid(system), pos_old, soa, tabs, ne))
-        rho = prev.rho.detach() + delta
+        grid = _fft_grid(system)
+        sad_new = sad_density(grid, pos_new, soa, tabs, ne)
+        # The bonding remainder Δρ = ρ_scf − ρ_atomic travels the least under
+        # motion. "reuse" reuses the previous step's Δρ unchanged (zeroth order);
+        # "linear"/"quadratic" extrapolate it (and USPP becsum) from the last
+        # steps, falling back to reuse when the history is short or degenerate.
+        extrap = None
+        if mode in ("linear", "quadratic"):
+            extrap = self._extrapolated_remainder(
+                mode, grid, pos_new, sad_new, float(ne), is_uspp)
+        if extrap is not None:
+            rho, becsum = extrap
+        else:
+            rho = sad_new + (prev.rho.detach()
+                             - sad_density(grid, pos_old, soa, tabs, ne))
+            becsum = None
         if is_uspp:
-            # becsum is per-atom and rides along as-is; orbitals live on the same
-            # G-spheres (positions-only move), so they seed the Davidson directly
-            return dataclasses.replace(prev, rho=rho,
-                                       coeffs=prev.coeffs if reuse else None)
+            # becsum rides along (reuse) or is the extrapolated combination;
+            # orbitals live on the same G-spheres (positions-only move), so they
+            # seed the Davidson directly.
+            repl: dict[str, Any] = {"rho": rho,
+                                    "coeffs": prev.coeffs if reuse else None}
+            if becsum is not None:
+                repl["rho_ij_atoms"] = becsum
+            return dataclasses.replace(prev, **repl)
         return {"system": prev_sys, "nspin": 1, "rho": rho, "rho_spin": None,
                 "coeffs": prev.coeffs if reuse else None}
+
+    def _extrapolated_remainder(
+        self, mode: str, grid: FFTGrid, pos_new: torch.Tensor,
+        sad_new: torch.Tensor, n_electrons: float, is_uspp: bool,
+    ) -> tuple[torch.Tensor, list[torch.Tensor] | None] | None:
+        """QE-style multi-step extrapolation of the bonding remainder Δρ (and, on
+        USPP/PAW, the per-atom becsum) onto the new geometry.
+
+        Solves for the mixing coefficients that reproduce the new positions from
+        the last two (linear) or three (quadratic) converged geometries, then
+        applies the same combination to the stored remainders. The extrapolated
+        density is ``ρ_atomic(new) + Δρ_extrap``; negatives are clamped to zero
+        and the integral renormalized to N_e (recording whether clamping fired).
+
+        Returns ``(rho, becsum)`` — ``becsum`` a per-atom list on USPP, else None
+        — or ``None`` when the same-grid history is too short or the least-squares
+        system is degenerate, so the caller uses the zeroth-order reuse seed."""
+        gshape = tuple(grid.shape)
+        hist = [h for h in self._history if h["grid_shape"] == gshape]
+        if len(hist) < 2:
+            return None
+        order = 2 if (mode == "quadratic" and len(hist) >= 3) else 1
+        p_t = hist[-1]["pos"]
+        basis = [p_t - hist[-2]["pos"]]
+        if order == 2:
+            basis.append(hist[-2]["pos"] - hist[-3]["pos"])
+        d = pos_new.reshape(-1).to(p_t) - p_t
+        coeffs = _extrapolation_coeffs(d, basis)
+        if all(c == 0.0 for c in coeffs):
+            return None  # degenerate least-squares → plain reuse
+
+        def _series(get: Any) -> torch.Tensor:
+            x_t, x_1 = get(hist[-1]), get(hist[-2])
+            out = x_t + coeffs[0] * (x_t - x_1)
+            if order == 2:
+                out = out + coeffs[1] * (x_1 - get(hist[-3]))
+            return out
+
+        rho = sad_new + _series(lambda h: h["delta_rho"])
+        if bool(torch.any(rho < 0)):
+            rho = torch.clamp(rho, min=0.0)
+            self._density_clamped = True
+        vol = float(grid.volume)
+        rho = rho * (n_electrons / (rho.mean() * vol))
+        becsum: list[torch.Tensor] | None = None
+        if is_uspp:
+            nat = len(hist[-1]["becsum"])
+            becsum = [_series(lambda h, a=a: h["becsum"][a]) for a in range(nat)]
+        return rho, becsum
+
+    def _push_history(
+        self, system: System | USPPSystem, res: Any, nspin: int
+    ) -> None:
+        """Record this converged step's bonding remainder Δρ (and USPP becsum)
+        for the multi-step extrapolation seed.
+
+        Kept only for the extrapolating modes on an nspin=1 run; any other mode/
+        spin clears it. Reset on an FFT-grid-shape change (a variable-cell step)
+        since the stored densities no longer share a grid — multi-step
+        extrapolation then restarts from the new grid, plain reuse bridges the
+        step itself."""
+        if (self.parameters["extrapolation"] not in ("linear", "quadratic")
+                or nspin != 1):
+            self._history = []
+            return
+        from gradwave.scf.guess import sad_density
+        from gradwave.scf.uspp import USPPSystem
+
+        grid = _fft_grid(system)
+        gshape = tuple(grid.shape)
+        if self._history and self._history[-1]["grid_shape"] != gshape:
+            self._history = []
+        tabs = system.paws if isinstance(system, USPPSystem) else system.upfs
+        pos = system.positions.detach()
+        sad = sad_density(grid, pos, system.species_of_atom, tabs,
+                          system.n_electrons)
+        self._history.append({
+            "grid_shape": gshape,
+            "pos": pos.reshape(-1).clone(),
+            "delta_rho": (res.rho.detach() - sad).clone(),
+            "becsum": ([b.detach().clone() for b in res.rho_ij_atoms]
+                       if isinstance(system, USPPSystem) else None),
+        })
+        if len(self._history) > 3:
+            self._history.pop(0)
 
     def _state_key(self, atoms: Atoms) -> _StateKey:
         """Exact-match key for the (geometry, parameters) state an SCF result
@@ -700,6 +861,7 @@ class GradWave(Calculator):
         if not res.converged:
             raise RuntimeError("gradwave SCF did not converge")
         self.last_result = res
+        self._push_history(system, res, nspin)
         self.results["energy"] = float(res.energies.free_energy)  # consistent forces
         self.results["free_energy"] = float(res.energies.free_energy)
         if nspin == 2:
@@ -859,6 +1021,7 @@ class GradWave(Calculator):
         if not res.converged:
             raise RuntimeError("gradwave USPP SCF did not converge")
         self.last_result = res
+        self._push_history(system, res, nspin)
         self.results["energy"] = float(res.energies.free_energy)
         self.results["free_energy"] = float(res.energies.free_energy)
         if nspin == 2:

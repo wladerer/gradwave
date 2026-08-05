@@ -697,6 +697,7 @@ def _build_relax_calc(inp: Input, verbose: bool = True) -> GradWave:
         hubbard=list(inp.hubbard.manifolds) if inp.hubbard.enabled else None,
         hub_occ_mix=inp.hubbard.occ_mix,
         hub_u_ramp_iters=inp.hubbard.u_ramp_iters,
+        extrapolation=inp.relax.extrapolation,
         device=inp.device,
         verbose=False,
     )
@@ -849,6 +850,11 @@ def _relax_nested(
         relax["scf_total_iter"] = int(sum(scf_iters))
         relax["scf_all_converged"] = all(
             s.get("scf_converged", True) for s in trajectory)
+    relax["extrapolation"] = inp.relax.extrapolation
+    if getattr(atoms.calc, "_density_clamped", False):
+        # the extrapolated density dipped negative on at least one step and was
+        # clamped to zero then renormalized to N_e (a benign, recorded fallback)
+        relax["extrapolation_density_clamped"] = True
     if trajectory:
         relax["energy_change_eV"] = (
             float(atoms.get_potential_energy()) - trajectory[0]["energy_eV"])

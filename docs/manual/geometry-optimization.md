@@ -189,6 +189,22 @@ positions change, which is the common case during a relaxation. It also reuses t
 previous step's density as the SCF start, so same-position restarts drop to a
 couple of SCF iterations.
 
+`relax.extrapolation` sets how that density seed carries across ionic steps. The
+default `reuse` shifts the atomic-superposition part of the density with the atoms
+and reuses the converged bonding remainder unchanged, the historical warm start.
+`linear` and `quadratic` extrapolate the remainder as well, from the last two or
+three converged geometries, choosing the mixing coefficients by a least-squares
+match of the new positions and applying the same combination to the stored
+densities and, on USPP/PAW, the becsum. A degenerate least-squares system or a
+too-short history falls back to `reuse`, and a variable-cell step that resizes the
+FFT grid restarts the history. `none` disables the warm start and seeds each step
+from the atomic superposition. Extrapolation applies to the nested engine at
+`nspin=1`. On a curved six-step Si2 trajectory the total SCF iterations dropped
+from 63 with `none` to 60 with `reuse` to 55 with `linear` or `quadratic`, and the
+converged energies matched across modes to below 1e-13 eV. The relax summary
+records the chosen `extrapolation` alongside the existing `scf_iter_per_step` and
+`scf_total_iter`, so the saving is visible in the output.
+
 !!! note "Variable cell"
     Variable-cell relaxation works through `ase.filters.FrechetCellFilter` because
     the calculator returns the stress from the differentiable radial transforms.
