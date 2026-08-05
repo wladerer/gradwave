@@ -65,6 +65,37 @@ Add `relax: {cell: true}` for a variable-cell relaxation through `FrechetCellFil
 Depth and the Pulay-stress caveat are in
 [Geometry optimization](geometry-optimization.md).
 
+## Equation of state
+
+Set `task: eos` for an isotropic volume scan fitted to a third-order
+Birch-Murnaghan curve (V₀, B₀, B₀′). The default seven-point window is the
+calcDelta 94–106% of the input volume.
+
+```yaml
+task: eos
+eos: {scales: [0.94, 0.96, 0.98, 1.00, 1.02, 1.04, 1.06]}
+```
+
+```bash
+gradwave eos.yaml -o out/
+gradwave plot out/eos.json
+```
+
+## Elastic constants
+
+Set `task: elastic` for the 6×6 stiffness tensor (and Voigt-Reuss-Hill moduli)
+by finite difference of the analytic stress over the six Voigt strains.
+
+```yaml
+task: elastic
+elastic: {mode: relaxed, fmax: 0.01}   # relaxed-ion; clamped is the default
+```
+
+`mode: clamped` holds fractional coordinates fixed, which is exact where symmetry
+forbids internal displacement and a large overestimate for soft shear constants
+elsewhere; `mode: relaxed` re-relaxes the ions at every strained cell. Depth in
+[Post-SCF analysis](postscf-analysis.md).
+
 ## Band structure
 
 Run `task: bands` after an SCF-quality density. The `path` is an ASE bandpath
@@ -160,3 +191,20 @@ system = system.to("cuda")
 The GPU is worth using once the cell reaches production size. On small cells the
 fp64 cost on a consumer card is slower than the CPU, worked through on the
 [Performance](performance.md) page.
+
+## Shard the k-set across processes
+
+Set `distributed: true` and launch under torchrun; each rank owns a slice of the
+k-set. Works for `scf`, `bands`, `relax`, and `eos` on the norm-conserving and
+USPP/PAW collinear paths, including DFT+U.
+
+```yaml
+distributed: true
+```
+
+```bash
+scripts/gradwave_distributed.sh input.yaml --nproc-per-node 2
+```
+
+Multi-node launches, GPU placement, and the unsupported combinations are in
+[Distributed k-point parallelism](distributed.md).

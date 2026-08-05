@@ -218,7 +218,8 @@ Fourier interpolation of the force constants gives the dynamical matrix at any q
 so one set of supercell forces yields the full dispersion along a q-path and the
 phonon density of states (`postscf.phonons_supercell`). The analytic Γ-point
 response (`postscf.phonons`) stays available for the zone center. The supercell
-route runs for any q on a plain norm-conserving SCF.
+route runs for any q on the norm-conserving and USPP/PAW paths alike (the force
+routine is chosen per formalism, so the same input drives both).
 
 ```yaml
 task: phonons

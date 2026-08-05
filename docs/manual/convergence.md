@@ -218,11 +218,13 @@ Fermi-level swing of 0.235 eV against a 0.14 eV smearing width. Charge sloshing 
 present in the converged runs too, so it is not the driver, and a symmetric cell that
 cancels the net adsorbate dipole still diverges, which rules the dipole out as well.
 
-The remedies to reach for are U-ramping, converging at a lower U and carrying that
-density into a higher-U run, and distrust of a bulk-derived U near 9 eV transferred
-to a metallic adsorbate system where the level structure differs. Occupation-matrix
-mixing or damping to remove the one-step lag is the structural fix and is not yet
-implemented. The full diagnosis is in the ideas.md record "Large-U divergence on
+The structural fix is occupation-matrix damping, which removes the one-step lag.
+Give the `hubbard` block as a mapping and set `occ_mix` (β in (0, 1]) below 1, with
+`u_ramp_iters` to ramp U in linearly over the first iterations — see
+[Differentiable Hubbard U](hubbard-u.md) for both knobs. Beyond that, converge at a
+lower U and carry that density into a higher-U run, and distrust a bulk-derived U
+near 9 eV transferred to a metallic adsorbate system where the level structure
+differs. The full diagnosis is in the ideas.md record "Large-U divergence on
 metallic adsorbate systems".
 
 ### Which knob, in which order
@@ -235,7 +237,10 @@ metallic adsorbate systems".
    for a slab or a molecule in a box.
 4. For a magnet, seed with `start_mag` and rely on the automatic Johnson scheme on
    the norm-conserving path. Chain warm starts across a scan to hold the branch.
-5. Only then tune `scf.mixing.alpha` down or `scf.mixing.history` up, and gate a
+5. For a metallic +U system that limit-cycles, damp the occupation matrix
+   (`hubbard: {manifolds: [...], occ_mix: 0.3, u_ramp_iters: 15}`) before touching
+   the charge-channel knobs — the instability is in the occupations, not the density.
+6. Only then tune `scf.mixing.alpha` down or `scf.mixing.history` up, and gate a
    magnetic metal with `scf.convergence: energy` rather than loosening
    `scf.rhotol` to ~1e-5 by hand.
 

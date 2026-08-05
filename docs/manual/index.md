@@ -60,6 +60,10 @@ collects the CLI, the output files, and the entry points, and the
   Birch-Murnaghan equation of state with the Δ gauge.
 - Norm-conserving (ONCV) and ultrasoft/PAW pseudopotentials, detected from the UPF
   file, on CPU and GPU in float64/complex128.
+- Distributed k-point parallelism: `distributed: true` under a torchrun launch
+  shards the k-set across processes (multi-core or multi-GPU) for `scf`, `bands`,
+  `relax`, and `eos`, on the norm-conserving and USPP/PAW collinear paths
+  including DFT+U — see [Distributed k-point parallelism](distributed.md).
 
 ## Validation vs Quantum ESPRESSO
 
@@ -124,5 +128,6 @@ tensor is float64 or complex128.
 | [Inputs and outputs](io.md) | input schema, output files, checkpoints, analysis |
 | [Reference](reference.md) | CLI and entry points |
 | [Performance](performance.md) | where time goes, what helps, the GPU precision story |
+| [Distributed k-point parallelism](distributed.md) | shard the k-set across processes with torchrun |
 | [Wisdom](wisdom.md) | non-obvious do and do-not rules learned the hard way |
 | [Bibliography](bibliography.md) | numbered references |

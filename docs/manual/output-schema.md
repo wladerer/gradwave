@@ -32,8 +32,9 @@ rather than a missing file. The `.out` header reads `NOT CONVERGED` in place of
 | elastic | `elastic.all_converged` (and `relax_all_converged`) | any strained SCF did not converge |
 | phonons | `min_frequency_cm1 > -1.0` | imaginary modes present |
 
-Under `distributed: true` (a torchrun launch, wired for `scf` and `bands`), every
-rank computes the identical reduced summary and only rank 0 writes files.
+Under `distributed: true` (a torchrun launch, wired for `scf`, `bands`, `relax`,
+and `eos`), every rank computes the identical reduced summary and only rank 0
+writes files.
 
 ## Blocks present on every task
 
