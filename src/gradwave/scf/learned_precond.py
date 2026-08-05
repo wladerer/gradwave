@@ -258,6 +258,8 @@ def fit_multipole(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
                   n_poles: int = 3, alpha: float = 0.7, n_unroll: int = 40,
                   steps: int = 400, lr: float = 0.05,
                   q_min: float = 0.3, q_max: float = 3.0,
+                  seed_q: list[float] | None = None,
+                  q_floor: float | None = None, q_ceil: float | None = None,
                   weight: torch.Tensor | None = None,
                   mixer: str = "plain", history: int = 8, q0: float = 1.1,
                   verbose: bool = False) -> tuple[MultipoleKerkerPrecond, dict]:
@@ -271,8 +273,17 @@ def fit_multipole(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
     Args:
         g2_shell: (S,) representative |G|² per shell [Å⁻²].
         d_shell:  (S,) response denominator d = 1 − j per shell (real).
-        weight:   (S,) per-shell importance (shell multiplicity); defaults to
-                  uniform. In ``mixer="diis"`` it also enters the Pulay metric.
+        seed_q:   optional explicit initial pole positions [Å⁻¹] (length overrides
+                  ``n_poles``); the multi-seed driver passes a deterministic set of
+                  these. ``None`` seeds ``n_poles`` log-spaced over [q_min, q_max].
+        q_floor:  optional hard lower bound [Å⁻¹] on every pole position, projected
+                  after each optimizer step. Set by the robust driver to the lowest
+                  |G| shell with trustworthy probe data so a pole cannot chase
+                  lowest-shell noise below where d(G) is measured.
+        q_ceil:   optional hard upper bound [Å⁻¹] on every pole position.
+        weight:   (S,) per-shell importance (shell multiplicity or probe-quality
+                  confidence); defaults to uniform. In ``mixer="diis"`` it also
+                  enters the Pulay metric. A zero-weight shell is excluded.
         mixer:    ``"plain"`` unrolls damped linear mixing e_{n+1}=(1−αfd)e_n and
                   minimizes the worst-shell rate (a smooth max over shells). This
                   is the right target when the deployment mixer is plain damping.
@@ -280,6 +291,7 @@ def fit_multipole(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
                   wavevector ``q0``) so the filter is trained to complement the
                   DIIS the real ``scf`` runs, not to duplicate its low-G work.
     """
+    import math
     g2_shell = g2_shell.to(RDTYPE)
     d_shell = d_shell.to(RDTYPE)
     raw_w = (torch.ones_like(g2_shell) if weight is None
@@ -289,8 +301,27 @@ def fit_multipole(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
     if mixer not in ("plain", "diis"):
         raise ValueError("mixer must be 'plain' or 'diis'")
 
-    P = MultipoleKerkerPrecond.init_poles(g2_shell, n_poles, q_min, q_max,
-                                          requires_grad=True)
+    if seed_q is not None:
+        q = torch.tensor(list(seed_q), dtype=RDTYPE, device=g2_shell.device)
+        logq2 = (2.0 * torch.log(q)).clone().requires_grad_(True)
+        w_raw = torch.full((len(seed_q),), _inv_softplus(1.0 / len(seed_q)),
+                           dtype=RDTYPE, device=g2_shell.device
+                           ).requires_grad_(True)
+        P = MultipoleKerkerPrecond(g2_shell, w_raw, logq2)
+    else:
+        P = MultipoleKerkerPrecond.init_poles(g2_shell, n_poles, q_min, q_max,
+                                              requires_grad=True)
+    lo = 2.0 * math.log(q_floor) if q_floor is not None else None
+    hi = 2.0 * math.log(q_ceil) if q_ceil is not None else None
+
+    def _project() -> None:
+        if lo is None and hi is None:
+            return
+        with torch.no_grad():
+            P.logq2.clamp_(min=lo if lo is not None else float("-inf"),
+                           max=hi if hi is not None else float("inf"))
+
+    _project()  # keep the seed inside the bounds too
     opt = torch.optim.Adam(P.params, lr=lr)
     e0 = torch.ones_like(g2_shell)
     rho_init = float(spectral_radius(P.filter_vals().detach(), d_shell, alpha))
@@ -313,6 +344,7 @@ def fit_multipole(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
                                    dim=0)
         loss.backward()
         opt.step()
+        _project()
         loss_hist.append(float(loss.detach()))
         if verbose and (it % max(1, steps // 10) == 0):
             print(f"  fit {it:4d}  loss={float(loss):+.4f}  "
@@ -323,10 +355,195 @@ def fit_multipole(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
     return P, {"loss": loss_hist, "rho_init": rho_init, "rho_final": rho_final}
 
 
+def diis_objective(P: MultipoleKerkerPrecond, g2_shell: torch.Tensor,
+                   d_shell: torch.Tensor, *, alpha: float = 0.7, q0: float = 1.1,
+                   n_unroll: int = 30, history: int = 8,
+                   weight: torch.Tensor | None = None) -> float:
+    """The unrolled-Pulay-DIIS objective log‖res_N‖ for a filter on a response.
+
+    The single number the robust driver ranks candidates by: lower is a smaller
+    predicted post-DIIS residual. Evaluated with the SAME metric the fit and the
+    real ``mixing.PulayMixer`` use (Kerker weight 1/(g²+q0²)), so Kerker and every
+    learned candidate are scored on one common yardstick.
+    """
+    g2_shell = g2_shell.to(RDTYPE)
+    d_shell = d_shell.to(RDTYPE)
+    raw_w = (torch.ones_like(g2_shell) if weight is None
+             else weight.to(RDTYPE)).clamp_min(0.0)
+    metric = raw_w / (g2_shell + q0**2)
+    f = P.filter_vals(g2_shell).detach()
+    return float(_diis_unroll_logres(f, d_shell, metric, alpha, n_unroll, history))
+
+
+def _seed_positions(k: int, q_lo: float, q_hi: float, n_seeds: int
+                    ) -> list[list[float]]:
+    """Deterministic multi-seed pole placements for a K-pole fit: ``n_seeds``
+    anchor scales log-spaced across [q_lo, q_hi], each seeding K poles log-spaced
+    over a sub-band around its anchor. No RNG — the same input gives the same
+    seeds every call, so selection cannot flip on RNG-state leakage."""
+    import math
+    lo, hi = math.log10(q_lo), math.log10(q_hi)
+    anchors = torch.logspace(lo, hi, n_seeds).tolist()
+    half = 0.25 * (hi - lo)                       # sub-band half-width in decades
+    seeds: list[list[float]] = []
+    for a in anchors:
+        la = math.log10(a)
+        if k == 1:
+            seeds.append([a])
+        else:
+            sub_lo = max(lo, la - half)
+            sub_hi = min(hi, la + half)
+            seeds.append(torch.logspace(sub_lo, sub_hi, k).tolist())
+    return seeds
+
+
+def fit_multipole_robust(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
+                         alpha: float = 0.7, q0: float = 1.1,
+                         n_unroll: int = 30, history: int = 8, steps: int = 500,
+                         lr: float = 0.05, k_max: int = 3, n_seeds: int = 5,
+                         q_min: float = 0.3, q_max: float = 3.0,
+                         weight: torch.Tensor | None = None,
+                         quality: torch.Tensor | None = None,
+                         model_tol: float = 0.75, abstain_margin: float = 1.5,
+                         rel_margin: float = 0.0, verbose: bool = False
+                         ) -> tuple[MultipoleKerkerPrecond, dict]:
+    """Robust multi-pole fit: multi-seed, quality-weighted, model-selected, with a
+    Kerker abstention gate. Hardens :func:`fit_multipole` against the one-iteration
+    fragility where floating-point noise in the probe steered the deterministic
+    optimizer into a worse local minimum.
+
+    Four mechanisms, all deterministic:
+
+    1. **Multi-seed.** Each K is fit from ``n_seeds`` deterministic initial pole
+       placements spread over the pole range (:func:`_seed_positions`); the
+       candidate minimizing the true unrolled-DIIS objective wins. Selecting by the
+       actual objective, not by which seed the optimizer happened to start from,
+       is what makes the choice noise-stable.
+    2. **Probe-quality weighting.** ``quality`` (from
+       ``response_from_residuals(..., return_quality=True)``) downweights or
+       excludes shells whose d(G) saturates the clamp or scatters widely, and sets
+       a pole floor at the lowest trustworthy shell so no pole lands in the
+       untrusted low-|G| noise.
+    3. **Pole-count model selection.** Bare Kerker (single pole at ``q0``) is always
+       a candidate. Fit K=1..``k_max``; pick the SMALLEST K whose best objective is
+       within ``model_tol`` of the overall best, so equal-objective fits prefer
+       fewer poles (recorded as ``info["selected_k_model"]``).
+    4. **Abstention gate.** A single pole is Kerker's own shape, and reshaping it
+       (moving w or q off the default) is exactly the noise-level tweak the
+       fragility record shows flipping on last-bit rounding — so a K=1 selection
+       always deploys BARE Kerker. A K≥2 selection deploys only if it beats the
+       best single-pole candidate (bare Kerker or the fitted one-pole, whichever
+       is lower) by more than ``max(abstain_margin, rel_margin·|obj_ref|)``, i.e.
+       only when the response carries structure a single pole provably cannot
+       express, by a margin decisively above fit noise. Otherwise: bare Kerker.
+       A noise-level win or loss becomes a guaranteed tie by construction —
+       losing to Kerker is impossible at fit time. Two measured calibrations
+       behind the defaults: (a) the diagonal model always predicts a large gain
+       for merely rescaling Kerker's single pole (10-20 log units even on a
+       single-scale response), which is model optimism the real DIIS mixer
+       already captures — hence the best-single-pole reference, not bare Kerker;
+       (b) across two-scale/three-scale/single-scale/flat synthetic responses
+       the K≥2 headroom over the fitted single pole is |Δ| ≲ 0.7 log units
+       (DIIS's finite-history extrapolation absorbs smooth radial multi-scale
+       structure in the diagonal model), while 1e-14 probe noise moves the
+       candidate objectives by up to ~0.75 — so ``abstain_margin=1.5`` sits
+       above both, and only a decisively non-single-pole response deploys
+       (measured example: a two-stage screening d(G) stepping down at two
+       separated scales, K=2 headroom ≈ 20-27).
+
+    Returns the chosen preconditioner (on ``g2_shell``; rebind to deploy) and an
+    info dict recording every candidate's objective, the model-selected and
+    deployed pole counts, and whether the gate abstained.
+    """
+    g2_shell = g2_shell.to(RDTYPE)
+    d_shell = d_shell.to(RDTYPE)
+
+    # weight for the loss/metric: prefer the probe-quality confidence, fall back to
+    # the shell multiplicity, then to uniform. Guard an all-zero quality vector.
+    w = quality if quality is not None else weight
+    if w is not None:
+        w = w.to(RDTYPE).clamp_min(0.0)
+        if float(w.sum()) <= 0.0:
+            w = weight if weight is not None else None
+            w = w.to(RDTYPE).clamp_min(0.0) if w is not None else None
+
+    # pole floor: lowest |G| shell with trustworthy probe data (quality>0). Kills
+    # the q≈0.03 Å⁻¹ overfit-to-lowest-shell-noise failure mode structurally.
+    q_lo = q_min
+    if quality is not None:
+        trust = quality.to(RDTYPE) > 0.0
+        if bool(trust.any()):
+            q_lo = max(q_min, float(g2_shell[trust].min().clamp_min(1e-12).sqrt()))
+    q_hi = q_max
+
+    def _obj(P: MultipoleKerkerPrecond) -> float:
+        return diis_objective(P, g2_shell, d_shell, alpha=alpha, q0=q0,
+                              n_unroll=n_unroll, history=history, weight=w)
+
+    # candidate 0: bare Kerker, always present, the abstention reference.
+    kerker = MultipoleKerkerPrecond.kerker(g2_shell, q0)
+    j_kerker = _obj(kerker)
+    cand: list[dict] = [{"k": 1, "kind": "kerker", "P": kerker, "obj": j_kerker}]
+
+    for k in range(1, k_max + 1):
+        best_k: dict | None = None
+        for seed_q in _seed_positions(k, q_lo, q_hi, n_seeds):
+            P, _ = fit_multipole(g2_shell, d_shell, alpha=alpha, mixer="diis",
+                                 history=history, q0=q0, n_unroll=n_unroll,
+                                 steps=steps, lr=lr, seed_q=seed_q,
+                                 q_floor=q_lo, q_ceil=q_hi, weight=w)
+            j = _obj(P)
+            if best_k is None or j < best_k["obj"]:
+                best_k = {"k": k, "kind": "fit", "P": P, "obj": j}
+        assert best_k is not None
+        cand.append(best_k)
+        if verbose:
+            print(f"  K={k}  best obj={best_k['obj']:+.4f}")
+
+    j_best = min(c["obj"] for c in cand)
+    # smallest K within model_tol of the best objective (Kerker's K=1 included).
+    within = [c for c in cand if c["obj"] <= j_best + model_tol]
+    k_sel = min(c["k"] for c in within)
+    sel = min((c for c in within if c["k"] == k_sel), key=lambda c: c["obj"])
+
+    # abstention gate. Reference: the best single-pole candidate (bare Kerker or
+    # the fitted one-pole) — single-pole reshaping gains are model optimism, not
+    # deployable wins. Deploy a K≥2 fit only when it clears the margin over that
+    # reference; a K=1 selection always deploys bare Kerker.
+    j_ref = min(c["obj"] for c in cand if c["k"] == 1)
+    margin = max(abstain_margin, rel_margin * abs(j_ref))
+    abstained = False
+    chosen = sel
+    if sel["kind"] != "kerker" and (sel["k"] == 1
+                                    or (j_ref - sel["obj"]) <= margin):
+        chosen = cand[0]                                   # return bare Kerker
+        abstained = True
+
+    info = {
+        "obj_kerker": j_kerker,
+        "obj_ref": j_ref,
+        "obj_best": j_best,
+        "obj_deployed": chosen["obj"],
+        "margin": margin,
+        "selected_k_model": sel["k"],
+        "selected_k": chosen["k"],
+        "selected_kind": chosen["kind"],
+        "abstained": abstained,
+        "q_floor": q_lo,
+        "candidates": [{"k": c["k"], "kind": c["kind"], "obj": c["obj"]}
+                       for c in cand],
+    }
+    if verbose:
+        gate = "abstain→kerker" if abstained else f"deploy K={chosen['k']}"
+        print(f"  robust: kerker={j_kerker:+.4f} best={j_best:+.4f} "
+              f"[{gate}]  {chosen['P'].summary()}")
+    return chosen["P"], info
+
+
 def response_from_residuals(res_hist: list[torch.Tensor], g2: torch.Tensor,
                             alpha: float, n_bins: int = 40, skip: int = 2,
-                            precond_fac: torch.Tensor | None = None
-                            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                            precond_fac: torch.Tensor | None = None,
+                            return_quality: bool = False):
     """Estimate the per-shell response denominator d(G) from a short SCF's
     residual history.
 
@@ -341,8 +558,18 @@ def response_from_residuals(res_hist: list[torch.Tensor], g2: torch.Tensor,
     diago tolerance). Shells where the probe preconditioner is too small to invert
     reliably (P < 0.05) are excluded.
 
-    Returns (g2_shell, d_shell, count): representative |G|² [Å⁻²], estimated d, and
-    the component count per shell (the fit ``weight``). G=0 is excluded (pinned).
+    With ``return_quality=True`` a fourth tensor is returned: a per-shell confidence
+    weight = count·reliability, where reliability falls with the spread of the
+    per-sample d estimates within the shell (a wide scatter is unreliable probe
+    data) and is zeroed for shells whose mean d(G) saturates the [0, 2] stable-mode
+    clamp (the estimate ran off the invertible range and carries no information).
+    The robust fit uses this both as the loss/metric weight and to set the pole
+    floor at the lowest shell that is actually trustworthy — which structurally
+    forbids placing a pole in the untrusted low-|G| noise.
+
+    Returns (g2_shell, d_shell, count[, quality]): representative |G|² [Å⁻²],
+    estimated d, the component count per shell (the default fit ``weight``), and —
+    when requested — the confidence weight. G=0 is excluded (pinned).
     """
     g2 = g2.reshape(-1)
     nz = g2 > 1e-12
@@ -356,6 +583,7 @@ def response_from_residuals(res_hist: list[torch.Tensor], g2: torch.Tensor,
     idx = idx.clamp(0, n_bins - 1)
 
     d_acc = torch.zeros(n_bins, dtype=RDTYPE, device=g2.device)
+    d2_acc = torch.zeros(n_bins, dtype=RDTYPE, device=g2.device)
     n_acc = torch.zeros(n_bins, dtype=RDTYPE, device=g2.device)
     for a, b in zip(res_hist[skip:-1], res_hist[skip + 1:], strict=True):
         ratio = (b / a.masked_fill(a.abs() < 1e-14, 1.0)).real  # 1 − α P d per comp
@@ -363,11 +591,26 @@ def response_from_residuals(res_hist: list[torch.Tensor], g2: torch.Tensor,
         if precond_fac is not None:
             d_comp = d_comp / pf                    # divide the probe Kerker out
         keep = nz & torch.isfinite(d_comp)
-        d_acc.index_add_(0, idx[keep], d_comp[keep].to(RDTYPE))
+        vals = d_comp[keep].to(RDTYPE)
+        d_acc.index_add_(0, idx[keep], vals)
+        d2_acc.index_add_(0, idx[keep], vals * vals)
         n_acc.index_add_(0, idx[keep], torch.ones(int(keep.sum()),
                          dtype=RDTYPE, device=g2.device))
 
     full = n_acc > 0
-    d_shell = (d_acc[full] / n_acc[full]).clamp(0.0, 2.0)  # stable-mode range
+    n_f = n_acc[full]
+    raw_mean = d_acc[full] / n_f                           # pre-clamp shell mean
+    d_shell = raw_mean.clamp(0.0, 2.0)                     # stable-mode range
     centers = 0.5 * (edges[:-1] + edges[1:])[full]
-    return centers, d_shell, n_acc[full]
+    if not return_quality:
+        return centers, d_shell, n_f
+
+    # per-shell spread of the individual d samples; std_scale ~ typical d, so a
+    # scatter comparable to d itself roughly halves the shell's confidence.
+    var = (d2_acc[full] / n_f - raw_mean * raw_mean).clamp_min(0.0)
+    std_scale = 0.25
+    reliability = 1.0 / (1.0 + (var.sqrt() / std_scale) ** 2)
+    eps = 1e-3
+    trust = (raw_mean > eps) & (raw_mean < 2.0 - eps) & (n_f >= 2)
+    quality = torch.where(trust, n_f * reliability, torch.zeros_like(n_f))
+    return centers, d_shell, n_f, quality
