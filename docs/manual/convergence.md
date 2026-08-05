@@ -92,6 +92,15 @@ iteration nor applicable to the metals this gate targets, and it omits the
 Hubbard and Fock second-order kernels. A meta-GGA is rejected rather than
 estimated without its kinetic-energy-density response.
 
+<figure markdown>
+  ![bcc Fe: density gate vs energy-metric gate](img/fe_energy_gate.png){ width="680" }
+  <figcaption>One spin-polarized SCF on bcc Fe with both measures recorded
+  (<code>examples/fe_energy_gate.py</code>). The density gate at
+  rhotol = 1e-7 polishes until iteration 15; the energy gate at
+  entol = 1e-6 eV stops at iteration 9, where the second-order energy error
+  is already 5e-8 eV.</figcaption>
+</figure>
+
 ### The spinor path
 
 A magnetic spinor SCF (`task: scf` with `noncollinear: true` and a nonzero

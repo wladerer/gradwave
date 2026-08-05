@@ -326,6 +326,22 @@ q-mesh. The Γ optical mode comes out triply degenerate at 523 cm⁻¹ (experime
 519), the acoustic branches go to zero at Γ, and no mode is imaginary
 (`examples/si_phonons.yaml`, plotted by `gradwave plot`).*
 
+**Stopping on the energy, not the density.** The free energy converges
+quadratically in the density residual: its exact second-order error is
+½⟨r|K_Hxc|r⟩, evaluable each iteration from the response kernel the mixer
+already uses. The opt-in energy-metric gate (`scf.convergence: energy`) stops
+on that number, and the per-iteration flight recorder (`scf.trace`) makes both
+measures visible.
+
+<div align="center">
+<img src="examples/fe_energy_gate.png" width="760" alt="bcc Fe SCF: density residual gate versus the second-order energy-error gate">
+</div>
+
+*One spin-polarized SCF on bcc Fe (m = 2.224 μB). The density gate at
+rhotol = 1e-7 polishes until iteration 15; the energy gate at entol = 1e-6 eV
+stops at iteration 9, where the energy error is already 5e-8 eV
+(`examples/fe_energy_gate.py`).*
+
 ## Development
 
 ```bash
