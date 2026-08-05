@@ -312,9 +312,8 @@ The `distributed: true` input path routes the norm-conserving and USPP/PAW
 collinear SCF, and DFT+U (Dudarev) rides along on either, reduced the same way as
 the density. #196 and #197 extended the sharding machinery to the USPP/PAW
 collinear SCF and to DFT+U on that path, and `api.run_scf` now shards either
-formalism straight from an input file. IBZ
-symmetry reduction is mutually exclusive with distribution for now, so build with
-`symmetry: false` for a distributed run and reach for symmetry first on a single box,
-where it already gives a 5 to 14 times k-point reduction. See [Distributed k-point
-parallelism](distributed.md) for the full scope, the reduction detail, and the
-launch reference.
+formalism straight from an input file. IBZ symmetry reduction composes with
+distribution: the ranks shard the reduced k-list, so the 5 to 14 times k-point
+reduction from symmetry and the rank count multiply (the world size just cannot
+exceed the IBZ k-count). See [Distributed k-point parallelism](distributed.md)
+for the full scope, the reduction detail, and the launch reference.

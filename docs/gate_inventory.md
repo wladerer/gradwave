@@ -24,14 +24,16 @@ Regenerate the raw list with:
 grep -rn "raise NotImplementedError" src/gradwave --include=*.py
 ```
 
-Current count: **80** `raise NotImplementedError` sites, of which **4 are
+Current count: **77** `raise NotImplementedError` sites, of which **4 are
 abstract-method stubs** (interface contracts on base classes, not capability
-gaps) — see the last section. So **76 real capability gates** remain. Two
+gaps) — see the last section. So **73 real capability gates** remain. Two
 subsystems landed since the last recount and carry their own gates, now
 enumerated below. The k-point-sharded distributed SCF (#196, #197, #218) rejects
-symmetry, SOC, hybrid Fock, and the non-scf/bands task routes (see Open —
-distributed). The relaxed-ion elastic path (#229) adds four collinear-force
-gates on the noncollinear/SOC route (see Open — noncollinear / SOC).
+SOC, hybrid Fock, and the non-sharded task routes (see Open — distributed);
+its three symmetry gates were removed when IBZ reduction was composed with the
+sharding (2026-08-05). The relaxed-ion elastic path (#229) adds four
+collinear-force gates on the noncollinear/SOC route (see Open — noncollinear /
+SOC).
 
 ## Axis legend
 
@@ -97,12 +99,16 @@ loud raise rather than a silently-wrong reduction.
 | file:line | axis | operation blocked |
 |---|---|---|
 | api.py:232 | formalism routing | distributed SCF is wired for the NC and USPP/PAW collinear paths only (the raise names the covered set) |
-| api.py:2039 | task routing | `distributed: true` is wired for `task: scf | bands` only (relax/eos/elastic/phonons/magnetism route serially) |
-| distributed.py:174,247 | symmetry | distributed k-point parallelism does not support `use_symmetry=True` (IBZ reduction) |
+| api.py:2039 | task routing | `distributed: true` is wired for `task: scf | bands | relax | eos` only (elastic/phonons/magnetism route serially) |
 | distributed.py:180 | SOC | distributed k-point parallelism does not support fully-relativistic (SOC) pseudos |
 | scf/loop.py:1282 | formalism | distributed SCF does not support hybrid Fock exchange (couples orbitals across k) |
-| scf/loop.py:1292 | symmetry | distributed SCF does not support IBZ symmetry reduction |
-| scf/uspp_loop.py:1425 | symmetry | distributed USPP/PAW SCF does not support IBZ symmetry reduction |
+
+Landed 2026-08-05: the three symmetry gates (distributed.py:174,247;
+scf/loop.py:1292; scf/uspp_loop.py:1425) were removed — IBZ reduction now
+composes with the sharding. The symmetrizers are k-set-independent and are
+applied to the post-`all_reduce` global density/becsum, so no new collective
+was needed (self-oracle: the symmetric 2-rank tests in
+tests/integration/test_distributed_scf.py and test_distributed_uspp_scf.py).
 
 ## Open — USPP/PAW response & error operators (lower-priority tranche)
 

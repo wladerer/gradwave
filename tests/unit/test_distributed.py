@@ -61,18 +61,37 @@ def test_shard_range_partitions_exactly(n, world_size):
     assert seen == list(range(n))
 
 
-def test_shard_system_rejects_symmetry_and_zero_share():
-    # FCC Si's full cubic point group needs an equal-dimension mesh to reduce
-    # cleanly (see setup_common.coupled_axes) -- (2,2,2), not the (2,2,1) the
-    # other tests below use just to keep nk small.
-    sym_system = _si_system(kmesh=(2, 2, 2), use_symmetry=True)
-    with pytest.raises(NotImplementedError):
-        shard_system(sym_system, rank=0, world_size=2, group=None)
-
+def test_shard_system_zero_share_rejected():
     plain_system = _si_system(kmesh=(2, 2, 1))  # nk=4
     with pytest.raises(ValueError):
         # more ranks than k-points: some rank gets zero
         shard_system(plain_system, rank=5, world_size=8, group=None)
+
+
+def test_shard_system_carries_symmetry():
+    """A symmetrized system shards like any other: the IBZ k-list/weights are
+    what gets sliced, and the k-set-independent symmetry objects (sym,
+    rho_symmetrizer) ride through as the SAME objects — the SCF applies them
+    to the post-all_reduce global density, so no per-rank rebuild is needed.
+
+    FCC Si's full cubic point group needs an equal-dimension mesh to reduce
+    cleanly (see setup_common.coupled_axes) -- (2,2,2), not the (2,2,1) the
+    other tests use to keep nk small."""
+    system = _si_system(kmesh=(2, 2, 2), use_symmetry=True)
+    assert system.sym is not None and system.rho_symmetrizer is not None
+    nk_ibz = len(system.kweights)
+    assert nk_ibz < 8  # the 2x2x2 mesh actually folded
+
+    locals_ = [shard_system(system, rank=r, world_size=2, group=None) for r in (0, 1)]
+    (l0, c0), (l1, c1) = locals_
+    assert l0.sym is system.sym and l1.sym is system.sym
+    assert l0.rho_symmetrizer is system.rho_symmetrizer
+    assert l1.rho_symmetrizer is system.rho_symmetrizer
+    # the shard covers the IBZ list exactly, orbit weights intact (sum to 1)
+    assert (c0.k_end - c0.k_start) + (c1.k_end - c1.k_start) == nk_ibz
+    w_cat = torch.cat([l0.kweights, l1.kweights])
+    assert torch.equal(w_cat, system.kweights)
+    assert torch.isclose(w_cat.sum(), torch.ones((), dtype=RDTYPE))
 
 
 def test_shard_system_splits_k_data_contiguously():
@@ -143,6 +162,46 @@ def test_sharded_density_sums_to_full_density():
 
     rho_full = density_b(c_full, occ_full, system.kweights, full_bk, grid_shape, vol)
     torch.testing.assert_close(rho0 + rho1, rho_full, atol=1e-12, rtol=1e-10)
+
+
+def test_sharded_ibz_density_symmetrizes_like_full():
+    """The distributed-IBZ claim, process-group-free: density_b over two IBZ
+    k-shards, summed (what the all_reduce produces on every rank) and THEN
+    symmetrized, equals the single-shot symmetric path (full IBZ density_b →
+    symmetrize_rho). The symmetrizer sees an identical global density either
+    way, so this must hold to the same tolerance as the unsymmetrized test."""
+    from gradwave.scf.common import symmetrize_rho
+
+    system = _si_system(kmesh=(2, 2, 2), use_symmetry=True)
+    local0, _ = shard_system(system, rank=0, world_size=2, group=None)
+    local1, _ = shard_system(system, rank=1, world_size=2, group=None)
+
+    torch.manual_seed(0)
+    nb = system.nbands
+    grid_shape = tuple(system.grid.shape)
+    vol = system.grid.volume
+    assert system.batch is not None
+    assert local0.batch is not None and local1.batch is not None
+
+    def _rand(bk):
+        c = torch.randn(bk.nk, nb, bk.npw_max, dtype=CDTYPE) * bk.mask[:, None, :]
+        return c, torch.rand(bk.nk, nb, dtype=RDTYPE)
+
+    c0, o0 = _rand(local0.batch)
+    c1, o1 = _rand(local1.batch)
+    rho0 = density_b(c0, o0, local0.kweights, local0.batch, grid_shape, vol)
+    rho1 = density_b(c1, o1, local1.kweights, local1.batch, grid_shape, vol)
+
+    full_bk = system.batch
+    c_full = torch.zeros(full_bk.nk, nb, full_bk.npw_max, dtype=CDTYPE)
+    c_full[: local0.batch.nk, :, : local0.batch.npw_max] = c0
+    c_full[local0.batch.nk :, :, : local1.batch.npw_max] = c1
+    occ_full = torch.cat([o0, o1], dim=0)
+    rho_full = density_b(c_full, occ_full, system.kweights, full_bk, grid_shape, vol)
+
+    sym_sharded = symmetrize_rho(system.rho_symmetrizer, rho0 + rho1, system.grid)
+    sym_full = symmetrize_rho(system.rho_symmetrizer, rho_full, system.grid)
+    torch.testing.assert_close(sym_sharded, sym_full, atol=1e-12, rtol=1e-10)
 
 
 def _ctx(k_start, k_end, nk_global):

@@ -221,10 +221,6 @@ def test_symmetry_true_rejected_for_magnetic_modes(tmp_path, mode):
     # distributed + a task outside the sharded set: rejected (api.run's gate)
     ("distributed: true\ntask: elastic\n", "task: scf | bands | relax | eos"),
     ("distributed: true\ntask: phonons\n", "task: scf | bands | relax | eos"),
-    # distributed with symmetry on (the default) needs symmetry: false — the
-    # shard path has no IBZ reduction
-    ("distributed: true\n", "requires symmetry: false"),
-    ("distributed: true\nsymmetry: true\n", "requires symmetry: false"),
 ])
 def test_distributed_incompatible_combos_rejected(tmp_path, extra, needle):
     from gradwave.inputs import InputError, load_input
@@ -236,18 +232,21 @@ def test_distributed_incompatible_combos_rejected(tmp_path, extra, needle):
 @pytest.mark.parametrize(
     "task_line", ["", "task: bands\n", "task: relax\n", "task: eos\n"]
 )
-def test_distributed_collinear_scf_symmetry_off_parses(tmp_path, task_line):
+@pytest.mark.parametrize("sym_line", ["", "symmetry: false\n", "symmetry: true\n"])
+def test_distributed_collinear_scf_parses(tmp_path, task_line, sym_line):
     # the supported case: a collinear (norm-conserving OR USPP/PAW — this layer
-    # cannot tell them apart, and both are wired) scf/bands/relax/eos run with
-    # symmetry off validates cleanly. Nothing here keys on the pseudopotential
-    # kind, so a USPP/PAW distributed run is NOT rejected.
+    # cannot tell them apart, and both are wired) scf/bands/relax/eos run
+    # validates cleanly, with or without IBZ symmetry reduction (the sharded
+    # SCF composes with the symmetrizer — see gradwave.distributed). Nothing
+    # here keys on the pseudopotential kind, so a USPP/PAW distributed run is
+    # NOT rejected.
     from gradwave.inputs import load_input
 
     inp = load_input(_write(tmp_path, _base(
-        "distributed: true\nsymmetry: false\n"
-        "kpoints: {mesh: [4, 4, 4]}\n" + task_line)))
+        "distributed: true\n"
+        "kpoints: {mesh: [4, 4, 4]}\n" + sym_line + task_line)))
     assert inp.distributed is True
-    assert inp.symmetry is False
+    assert inp.symmetry is (sym_line != "symmetry: false\n")
 
 
 def test_volumetric_shorthand_and_mapping(tmp_path):

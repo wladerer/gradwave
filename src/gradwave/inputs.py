@@ -460,9 +460,9 @@ class Input:
     dispersion: DispersionParams = field(default_factory=DispersionParams)
     device: str = "cpu"
     distributed: bool = False  # k-point-sharded SCF across torchrun ranks (see
-    # gradwave.distributed / docs/manual/distributed.md); task: scf | bands only,
-    # norm-conserving and USPP/PAW collinear SCF (DFT+U included), symmetry: false
-    # required (v1 scope — see the module docstring)
+    # gradwave.distributed / docs/manual/distributed.md); norm-conserving and
+    # USPP/PAW collinear SCF (DFT+U included), with or without IBZ symmetry
+    # reduction (the shard unit is whatever k-list the system was built with)
     verbose: bool = True  # per-iteration SCF chatter; CLI --quiet overrides
     output_dir: Path = Path("./out")
     output_checkpoint: bool = True  # write checkpoint.pt after SCF tasks
@@ -1032,12 +1032,6 @@ def _load_input(path: Path) -> Input:
                 f"relax | eos (got task: {task!r}) — elastic/phonons/magnetism "
                 f"don't route through the k-point-sharded SCF path yet (see "
                 f"docs/manual/distributed.md)")
-        if symmetry:
-            raise InputError(
-                "distributed: true requires symmetry: false — the k-point-sharded "
-                "SCF has no IBZ reduction (each rank owns a slice of the full "
-                "Monkhorst-Pack mesh). Set symmetry: false for a distributed run "
-                "(see docs/manual/distributed.md)")
 
     # fixed spin moment: an integer-occupation pin, so only a collinear nspin=2
     # run without smearing consumes it (the calculator/SCF requirement).

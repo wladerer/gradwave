@@ -11,7 +11,7 @@ manifold the api builds reaches the sharded driver unchanged.
 The reference is the SAME input run in an ordinary single process (no
 WORLD_SIZE in the environment, so ``distributed: true`` is a no-op and
 ``init_from_env`` returns None). Same Si PAW fixture, 2x2x1 mesh (nk=4,
-``symmetry: false`` as distributed v1 requires), and 2-rank-on-one-box caveat
+``symmetry: false`` to pin the plain 4-point mesh), and 2-rank-on-one-box caveat
 as test_distributed_uspp_scf.py.
 """
 
