@@ -405,7 +405,7 @@ def fit_multipole_robust(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
                          weight: torch.Tensor | None = None,
                          quality: torch.Tensor | None = None,
                          model_tol: float = 0.75, abstain_margin: float = 1.0,
-                         verbose: bool = False
+                         rel_margin: float = 0.15, verbose: bool = False
                          ) -> tuple[MultipoleKerkerPrecond, dict]:
     """Robust multi-pole fit: multi-seed, quality-weighted, model-selected, with a
     Kerker abstention gate. Hardens :func:`fit_multipole` against the one-iteration
@@ -427,15 +427,25 @@ def fit_multipole_robust(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
     3. **Pole-count model selection.** Bare Kerker (single pole at ``q0``) is always
        a candidate. Fit K=1..``k_max``; pick the SMALLEST K whose best objective is
        within ``model_tol`` of the overall best, so equal-objective fits prefer
-       fewer poles.
-    4. **Abstention gate.** Deploy a non-Kerker filter only if it beats Kerker's
-       objective by more than ``abstain_margin``; otherwise return bare Kerker. A
-       noise-level win or loss becomes a guaranteed tie by construction — losing to
-       Kerker is impossible at fit time.
+       fewer poles (recorded as ``info["selected_k_model"]``).
+    4. **Abstention gate.** A single pole is Kerker's own shape, and reshaping it
+       (moving w or q off the default) is exactly the noise-level tweak the
+       fragility record shows flipping on last-bit rounding — so a K=1 selection
+       always deploys BARE Kerker. A K≥2 selection deploys only if it beats the
+       best single-pole candidate (bare Kerker or the fitted one-pole, whichever
+       is lower) by more than ``max(abstain_margin, rel_margin·|obj_ref|)``, i.e.
+       only when the response carries multi-scale structure a single pole
+       provably cannot express, by a margin far above fit noise. Otherwise: bare
+       Kerker. A noise-level win or loss becomes a guaranteed tie by
+       construction — losing to Kerker is impossible at fit time. (Comparing
+       against the best single pole rather than bare Kerker alone matters: the
+       diagonal model always predicts a large gain for rescaling Kerker's single
+       pole, but that gain is model optimism the real DIIS mixer already
+       captures, which is how the old fit converted noise into losses.)
 
     Returns the chosen preconditioner (on ``g2_shell``; rebind to deploy) and an
-    info dict recording every candidate's objective, the selected K, and whether
-    the gate abstained.
+    info dict recording every candidate's objective, the model-selected and
+    deployed pole counts, and whether the gate abstained.
     """
     g2_shell = g2_shell.to(RDTYPE)
     d_shell = d_shell.to(RDTYPE)
@@ -488,15 +498,26 @@ def fit_multipole_robust(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
     k_sel = min(c["k"] for c in within)
     sel = min((c for c in within if c["k"] == k_sel), key=lambda c: c["obj"])
 
+    # abstention gate. Reference: the best single-pole candidate (bare Kerker or
+    # the fitted one-pole) — single-pole reshaping gains are model optimism, not
+    # deployable wins. Deploy a K≥2 fit only when it clears the margin over that
+    # reference; a K=1 selection always deploys bare Kerker.
+    j_ref = min(c["obj"] for c in cand if c["k"] == 1)
+    margin = max(abstain_margin, rel_margin * abs(j_ref))
     abstained = False
     chosen = sel
-    if sel["kind"] != "kerker" and (j_kerker - sel["obj"]) <= abstain_margin:
+    if sel["kind"] != "kerker" and (sel["k"] == 1
+                                    or (j_ref - sel["obj"]) <= margin):
         chosen = cand[0]                                   # return bare Kerker
         abstained = True
 
     info = {
         "obj_kerker": j_kerker,
+        "obj_ref": j_ref,
         "obj_best": j_best,
+        "obj_deployed": chosen["obj"],
+        "margin": margin,
+        "selected_k_model": sel["k"],
         "selected_k": chosen["k"],
         "selected_kind": chosen["kind"],
         "abstained": abstained,

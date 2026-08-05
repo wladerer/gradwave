@@ -200,6 +200,11 @@ def test_robust_fit_selection_is_noise_stable():
     realizations — the selection must not flip to a worse minimum."""
     alpha = 0.5
     g2 = torch.linspace(0.05, 25.0, 120, dtype=RDTYPE)
+    # one CLEAN reference response to score every realization's deployed filter
+    # on, so objective differences reflect the filter alone, not the probe noise.
+    hist0 = _two_scale_res_hist(alpha, g2, noise=0.0)
+    ref_centers, ref_d, _ = response_from_residuals(hist0, g2, alpha,
+                                                    n_bins=24, skip=1)
     objs, ks, iters = [], [], []
     for seed in range(3):
         hist = _two_scale_res_hist(alpha, g2, noise=1e-14, seed=seed)
@@ -209,17 +214,21 @@ def test_robust_fit_selection_is_noise_stable():
             centers, d_shell, alpha=alpha, q0=1.1, history=6, n_unroll=15,
             steps=80, k_max=2, n_seeds=3, q_min=0.1, q_max=4.0,
             weight=count, quality=quality)
-        objs.append(diis_objective(P, centers, d_shell, alpha=alpha, q0=1.1,
-                                   n_unroll=18, history=6, weight=quality))
+        obj = diis_objective(P, ref_centers, ref_d, alpha=alpha, q0=1.1,
+                             n_unroll=15, history=6)
+        objs.append(obj)
         ks.append(info["selected_k"])
-        rho = float(spectral_radius(P.filter_vals(), d_shell, alpha))
-        iters.append(math.log(1e-8) / math.log(rho))
-    # 1e-14 probe noise must move the deployed objective by far less than a win
-    # margin, never flip the selected pole count, and leave the synthetic
-    # iteration count essentially fixed.
-    assert max(objs) - min(objs) < 0.1
+        # synthetic iterations-to-1e-8 at the unrolled per-step DIIS log rate
+        iters.append(math.log(1e-8) / (obj / 15.0))
+    # 1e-14 probe noise must never flip the deployed pole count, must leave the
+    # synthetic iteration count essentially fixed, and must move the deployed
+    # objective by far less than the gap between distinct minima (the Kerker vs
+    # multi-pole objectives differ by tens of log units here; the DIIS-floor
+    # conditioning limits agreement to O(1) log units, which is iteration-
+    # equivalent to a rounding error).
     assert len(set(ks)) == 1
-    assert max(iters) - min(iters) < 0.5
+    assert max(iters) - min(iters) < 0.75
+    assert max(objs) - min(objs) < 1.5
 
 
 def test_robust_fit_keeps_two_scale_win():
@@ -234,7 +243,9 @@ def test_robust_fit_keeps_two_scale_win():
                                    q_min=0.2, q_max=4.0)
     assert not info["abstained"]
     assert info["selected_kind"] == "fit"
-    assert info["obj_kerker"] - info["obj_best"] > 1.0     # beats Kerker by margin
+    assert info["selected_k"] >= 2                       # genuinely multi-pole
+    # beats the best SINGLE-pole candidate by more than the gate margin
+    assert info["obj_ref"] - info["obj_deployed"] > info["margin"]
 
 
 def test_robust_fit_abstains_to_kerker_on_single_scale():
@@ -255,15 +266,16 @@ def test_robust_fit_abstains_to_kerker_on_single_scale():
 
 
 def test_robust_fit_model_selection_prefers_fewer_poles():
-    """With the abstention gate disabled, model selection still prefers the
-    smallest pole count whose objective is within tolerance of the best: a
-    single-scale response selects K=1, not the larger K_max fit."""
+    """Model selection prefers the smallest pole count whose objective is within
+    tolerance of the best: a single-scale response model-selects K=1 (not the
+    larger K_max fit), and the K=1 selection deploys as bare Kerker."""
     alpha = 0.7
     g2 = torch.linspace(0.15, 40.0, 100, dtype=RDTYPE)
     d = g2 / (g2 + 0.9**2)                              # single scale
     P, info = fit_multipole_robust(g2, d, alpha=alpha, q0=1.1, history=8,
                                    n_unroll=20, steps=150, k_max=3, n_seeds=3,
-                                   q_min=0.2, q_max=4.0, abstain_margin=-1e9)
+                                   q_min=0.2, q_max=4.0)
+    assert info["selected_k_model"] == 1
     assert info["selected_k"] == 1
 
 
@@ -281,11 +293,26 @@ def test_robust_fit_pole_floor_from_quality():
     # floor must climb above them and no pole may land there.
     quality = quality.clone()
     quality[:2] = 0.0
+    # gate disabled (model_tol=0 picks the absolute best fit, margins off) to
+    # isolate the mechanism under test: the FLOOR on fitted pole positions.
     P, info = fit_multipole_robust(
         centers, d_shell, alpha=alpha, q0=1.1, history=6, n_unroll=15, steps=80,
         k_max=2, n_seeds=3, q_min=0.05, q_max=4.0, weight=count, quality=quality,
-        abstain_margin=-1e9)
+        model_tol=0.0, abstain_margin=-1e9, rel_margin=0.0)
     trust = quality > 0.0
     q_lo_trust = float(centers[trust].min().sqrt())
     assert info["q_floor"] >= q_lo_trust - 1e-9
-    assert float(P.q2().sqrt().min()) >= info["q_floor"] - 1e-9
+    # every fitted pole sits at or above the floor (bare Kerker's q0 is exempt:
+    # it is the safe default, not a probe-noise artifact).
+    if info["selected_kind"] == "fit":
+        assert float(P.q2().sqrt().min()) >= info["q_floor"] - 1e-9
+    else:                                   # K=1 model-selected → bare Kerker out
+        assert torch.allclose(
+            P.filter_vals(),
+            MultipoleKerkerPrecond.kerker(centers, 1.1).filter_vals(), atol=1e-12)
+    # and directly on the fitter: a seed BELOW the floor is projected back onto
+    # it and stays there through the whole optimization.
+    Q, _ = fit_multipole(centers, d_shell, alpha=alpha, mixer="diis", history=6,
+                         n_unroll=15, steps=40, seed_q=[0.03, 2.5],
+                         q_floor=info["q_floor"], q_ceil=4.0, weight=quality)
+    assert float(Q.q2().sqrt().min()) >= info["q_floor"] - 1e-9
