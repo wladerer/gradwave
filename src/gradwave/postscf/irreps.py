@@ -20,6 +20,8 @@ Caveats (reported, not hidden):
   labels there may not match tabulated ordinary-rep names (warned).
 - A cluster whose D matrices are not unitary (‖D‖_F² ≠ dim) indicates an
   accidental degeneracy fused by cluster_tol — labeled "?" with a warning.
+  (A few bands beyond the requested window are solved so a multiplet cut by
+  nbands can close; a top-of-window cluster is reported with its full dim.)
 - B₁/B₂-type subscripts depend on which C₂′/σ_v a textbook calls "primed";
   our deterministic axis choice may differ from a given table's orientation.
 """
@@ -285,8 +287,12 @@ def band_irreps(
                              dij_species, grid.volume, device)
     p = projectors(pd, system.positions)
     h = HamiltonianK(sph, grid.shape, res.v_eff, pd, p)
-    c0 = torch.zeros(nbands, sph.npw, dtype=CDTYPE, device=device)
-    c0[torch.arange(nbands), torch.arange(nbands)] = 1.0
+    # solve a few bands past the requested window so a degenerate multiplet
+    # cut by nbands can still close under the group (its partner would
+    # otherwise be missing and the cluster would come out "?")
+    nsolve = min(nbands + 4, sph.npw)
+    c0 = torch.zeros(nsolve, sph.npw, dtype=CDTYPE, device=device)
+    c0[torch.arange(nsolve), torch.arange(nsolve)] = 1.0
     # warm start from SCF orbitals when k coincides with a mesh point —
     # keeps symmetric degenerate subspaces intact and converges in a few steps
     # band_irreps is nspin=1-only (norm-conserving irrep/symmetry analysis
@@ -296,7 +302,7 @@ def band_irreps(
     coeffs_nk = cast("list[torch.Tensor]", res.coeffs)
     for ik, s_scf in enumerate(system.spheres):
         if np.max(np.abs((s_scf.k_frac - k_frac_arr + 0.5) % 1.0 - 0.5)) < 1e-9:
-            nb0 = min(nbands, coeffs_nk[ik].shape[0])
+            nb0 = min(nsolve, coeffs_nk[ik].shape[0])
             c0[:nb0] = coeffs_nk[ik][:nb0].to(device)
             break
     out = davidson(h.apply, c0, HBAR2_2M * sph.kpg2, tol=diago_tol, max_iter=300)
@@ -330,7 +336,7 @@ def band_irreps(
     start = 0
     while start < nbands:
         stop = start + 1
-        while stop < nbands and eigs[stop] - eigs[stop - 1] < cluster_tol:
+        while stop < nsolve and eigs[stop] - eigs[stop - 1] < cluster_tol:
             stop += 1
         block = coeffs[start:stop]
         dim = stop - start

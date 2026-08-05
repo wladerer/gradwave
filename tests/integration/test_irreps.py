@@ -45,6 +45,17 @@ def test_gamma_labels(graphene):
     assert all(not c.warning for c in out.clusters[:3])
 
 
+def test_window_cut_multiplet_closes(graphene):
+    # nbands=3 cuts the E2g doublet: band 3 is its first component, whose
+    # partner sits just above the window. The buffer bands let the cluster
+    # close under the group instead of coming out "?" (dim 1, not closed).
+    out = band_irreps(graphene, [0, 0, 0], nbands=3)
+    top = out.clusters[-1]
+    assert top.label == "E2g", top.label
+    assert top.dim == 2
+    assert not top.warning
+
+
 def test_k_dirac_pair_is_e_doubleprime(graphene):
     # cluster_tol generous enough to fuse the σ E' doublet, whose grid-level
     # splitting at these cheap settings is a few meV

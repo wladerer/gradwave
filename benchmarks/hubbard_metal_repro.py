@@ -55,9 +55,44 @@ def run(system, u, *, occ_mix=1.0, u_ramp_iters=0, max_iter=80):
     return r, reorder
 
 
+def plot_fig(runs: list[tuple[str, str, object]], u: float, png: str) -> None:
+    """Two-panel flight-recorder view: density residual and per-iteration
+    band-reorder count, raw one-step lag vs the two convergence aids."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, (axr, axo) = plt.subplots(1, 2, figsize=(8.6, 3.6))
+    for label, color, res in runs:
+        iters = res.recorder.iters
+        it = [i["it"] for i in iters]
+        axr.semilogy(it, [i["drho"] for i in iters], lw=1.8, color=color,
+                     label=label)
+        axo.plot(it, [i["reorder"] for i in iters], lw=1.8, color=color,
+                 label=label)
+    axr.set_xlabel("SCF iteration")
+    axr.set_ylabel("‖ρ_out − ρ_in‖")
+    axo.set_xlabel("SCF iteration")
+    axo.set_ylabel("band reorders / iteration")
+    axo.legend(frameon=False, fontsize=9)
+    for ax in (axr, axo):
+        ax.grid(True, which="both", lw=0.4, alpha=0.25)
+    fig.suptitle(f"fcc Pt, U = {u:g} eV on 5d — the occupation flip-flop "
+                 "in the SCF flight recorder", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(png, dpi=180)
+    print(f"wrote {png}")
+
+
 def main():
-    u = float(sys.argv[1]) if len(sys.argv) > 1 else 9.0
-    ecut = float(sys.argv[2]) if len(sys.argv) > 2 else 35.0
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    fig_path = None
+    for a in sys.argv[1:]:
+        if a.startswith("--fig"):
+            fig_path = a.split("=", 1)[1] if "=" in a else "hubbard_flipflop.png"
+    u = float(args[0]) if len(args) > 0 else 9.0
+    ecut = float(args[1]) if len(args) > 1 else 35.0
     system = build(ecut)
     print(f"fcc Pt, U={u} eV on 5d, ecut={ecut} Ry, gaussian smearing 0.2 eV\n")
 
@@ -79,6 +114,11 @@ def main():
     if damp.converged and ramp.converged:
         d = abs(float(damp.energies.free_energy) - float(ramp.energies.free_energy))
         print(f"\ndamped-vs-ramped |ΔF| = {d:.2e} eV (same fixed point)")
+
+    if fig_path:
+        plot_fig([("raw one-step lag (β=1)", "#c1442e", base),
+                  ("occ_mix = 0.3", "#2a78d6", damp),
+                  ("U-ramp, 15 iters", "#3a8f6f", ramp)], u, fig_path)
 
 
 if __name__ == "__main__":

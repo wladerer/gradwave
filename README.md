@@ -273,6 +273,32 @@ directly.
 fully-relativistic with spin-orbit coupling (red), both referenced to the valence-band
 maximum. SOC opens and inverts the Γ gap (`examples/bi2se3_bands_compare.py`).*
 
+**Chemical bonding.** The COHP projection decomposes the band structure onto a
+bond, so each state carries a bonding or antibonding weight and the band picture
+connects to the chemistry.
+
+<div align="center">
+<img src="examples/diamond_cohp_fatbands.png" width="760" alt="Diamond COHP fat bands: band structure colored by bonding/antibonding weight, with the energy-resolved COHP">
+</div>
+
+*The diamond C-C bond. Each (k, band) state is colored by its COHP weight on the
+nearest-neighbor bond (bonding blue, antibonding red), with point-group irrep
+labels at the special points; the right panel is the energy-resolved −COHP. The
+occupied valence bands are bonding and the conduction bands antibonding, the
+textbook picture of the covalent bond (`examples/cohp_fatbands.py`).*
+
+**Equation of state.** `task: eos` scans the volume with warm-started SCFs on a
+shared FFT grid and fits the third-order Birch-Murnaghan form.
+
+<div align="center">
+<img src="examples/eos_silicon.png" width="560" alt="Silicon equation of state: seven SCF points and the Birch-Murnaghan fit">
+</div>
+
+*Si equation of state: seven SCF points and the Birch-Murnaghan fit. gradwave
+(PBE) gives V₀ = 20.57 Å³/atom, B₀ = 87.8 GPa, B₀′ = 4.21, against the WIEN2k
+all-electron reference V₀ = 20.45 Å³/atom, B₀ = 88.5 GPa
+(`examples/eos_silicon.py`).*
+
 ## Development
 
 ```bash
