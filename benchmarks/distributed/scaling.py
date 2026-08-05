@@ -30,10 +30,17 @@ def run_one(nproc: int, threads: int) -> dict:
     env = dict(os.environ)
     env["OMP_NUM_THREADS"] = str(threads)
     env["MKL_NUM_THREADS"] = str(threads)
+    # same launch as scripts/gradwave_distributed.sh, with the uv project
+    # overridable so an offline box can point at an already-synced env
+    # (GRADWAVE_UV_PROJECT=~/github/gradwave GRADWAVE_UV_NO_SYNC=1)
+    uv = ["uv", "run", "--project", env.get("GRADWAVE_UV_PROJECT", str(ROOT))]
+    if env.get("GRADWAVE_UV_NO_SYNC"):
+        uv.append("--no-sync")
     t0 = time.monotonic()
     subprocess.run(
-        [str(ROOT / "scripts" / "gradwave_distributed.sh"),
-         str(HERE / "al_scf.yaml"), "--nproc-per-node", str(nproc)],
+        [*uv, "torchrun", f"--nproc-per-node={nproc}",
+         "--master-addr=127.0.0.1", "--master-port=29500",
+         "-m", "gradwave.cli", "run", str(HERE / "al_scf.yaml")],
         cwd=ROOT, env=env, check=True,
         stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     wall = time.monotonic() - t0
