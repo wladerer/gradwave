@@ -50,6 +50,7 @@ nav:
       - Post-SCF analysis:
           - Densities, bonding, phonons, and response: postscf-analysis.md
   - Inputs and outputs: io.md
+  - Output schema: output-schema.md
   - Reference: reference.md
   - API reference:
       - Overview: api/index.md
