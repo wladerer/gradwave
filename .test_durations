@@ -126,7 +126,6 @@
     "tests/integration/test_local_tf_scf.py::test_uspp_local_tf_matches_kerker": 16.914165989961475,
     "tests/integration/test_metagga_scf.py::test_linear_tau_metagga_converges_and_shifts": 5.276371649699286,
     "tests/integration/test_metagga_scf.py::test_tau_flat_metagga_reduces_to_pbe": 5.7722040459048,
-    "tests/integration/test_metal_forces_vs_qe.py::test_cu3al_vs_qe": 724.3812167120632,
     "tests/integration/test_metal_forces_vs_qe.py::test_smeared_forces_match_free_energy_fd[cold]": 52.691712198080495,
     "tests/integration/test_metal_forces_vs_qe.py::test_smeared_forces_match_free_energy_fd[mp1]": 49.48674293817021,
     "tests/integration/test_metal_forces_vs_qe.py::test_smeared_metal_forces_vs_qe": 50.47201888402924,
