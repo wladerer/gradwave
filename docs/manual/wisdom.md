@@ -212,6 +212,29 @@ defect, which the [Performance](performance.md) page works through in full.
   fp64 GEMM against an fp32 GEMM once per device and choose from the measured ratio (3050
   38.3, H100 near 1) rather than hardcoding the consumer-card answer.
 
+## Distributed execution (k-point sharding)
+
+- k-point sharding is the cheapest scale lever, but measure the sharded part, not the
+  wall clock. `distributed: true` under torchrun splits the k-set across ranks; the SCF
+  compute for a 1728-k fcc Al run (no symmetry, 2 threads per rank on a 22-core box) drops
+  193 to 118 to 69 to 55 s at 1/2/4/8 ranks (1.6x, 2.8x, 3.5x), every rank count converging
+  to the same free energy to 2e-12 eV. The reported speedup is on the SCF loop
+  (`runtime_s`), not total wall (`benchmarks/distributed/scaling.py`).
+- Per-rank setup does not shard, so wall clock turns over before the SCF does. Form-factor
+  build and pseudopotential parse are replicated on every rank and stay serial, so total
+  wall (302, 240, 214, 321 s for 1/2/4/8) rises again at 8 ranks while the SCF is still
+  falling. The turnover is Amdahl on the replicated setup plus the box's hybrid P/E cores,
+  not the sharding itself, and it sets the practical rank ceiling for a given cell.
+- Compose sharding with IBZ reduction rather than trading one for the other. Ranks shard the
+  *reduced* k-list, so the 5 to 14x symmetry factor multiplies the rank-count factor instead
+  of being spent to get it (#242). The one hard constraint is `world_size <= nk_IBZ`, every
+  rank must own at least one reduced k-point, and a zero-share rank raises a clear
+  `ValueError` rather than hanging on an empty collective.
+- The distributed forward runs under `no_grad` and reduces analytic forces/stress across
+  ranks, it is not DDP autograd. Per-k graphs are independent so a gradient reduction is
+  tractable, but it is deliberately not wired yet; do not assume `loss.backward()` composes
+  with `distributed: true` today.
+
 ## SCF and mixing
 
 - Mix the composite (density, becsum) pair for USPP/PAW. Mixing becsum outside the
