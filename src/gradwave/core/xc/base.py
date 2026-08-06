@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import shutil
 import threading
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Protocol, cast
@@ -62,6 +63,41 @@ _EAGER_TLS = threading.local()
 
 def _force_eager() -> bool:
     return getattr(_EAGER_TLS, "on", False)
+
+
+_INDUCTOR_TOOLCHAIN_CHECKED = False
+
+
+def _ensure_inductor_toolchain() -> None:
+    """Keep Inductor's C++ codegen off the one host tool it hard-requires.
+
+    torch's Inductor precompiled-header cache shells out to the ``openssl`` CLI
+    to checksum headers (``torch/_inductor/codecache.py`` ``_precompile_header``).
+    On a box without ``openssl`` on PATH — e.g. a stock NixOS shell — that
+    subprocess raises FileNotFoundError, which aborts codegen and silently
+    latches every compile-enabled functional onto its eager fallback (so a
+    "compiled" run is secretly eager). Disable just that header cache when
+    ``openssl`` is absent — the JIT ``torch.compile`` path we use gates it on
+    ``cpp_cache_precompile_headers`` — and leave it on (the faster default)
+    wherever ``openssl`` exists, so this is a no-op on a normal machine. Runs
+    once per process; the config is a torch global.
+    """
+    global _INDUCTOR_TOOLCHAIN_CHECKED
+    if _INDUCTOR_TOOLCHAIN_CHECKED or shutil.which("openssl") is not None:
+        _INDUCTOR_TOOLCHAIN_CHECKED = True
+        return
+    _INDUCTOR_TOOLCHAIN_CHECKED = True
+    try:
+        from torch._inductor import config as inductor_config
+    except Exception:  # torch built without Inductor — nothing to adjust
+        return
+    if getattr(inductor_config, "cpp_cache_precompile_headers", False):
+        inductor_config.cpp_cache_precompile_headers = False
+        logger.info(
+            "openssl not found on PATH; disabling Inductor's precompiled-header "
+            "cache so torch.compile uses a working codegen path instead of "
+            "silently falling back to eager."
+        )
 
 
 @contextlib.contextmanager
@@ -103,6 +139,7 @@ class CompilableXC:
     def enable_compile(self, dynamic: bool = True, **kwargs):
         """Turn on the compiled energy_density path. dynamic=True avoids a
         recompile per grid size, which otherwise dominates short runs."""
+        _ensure_inductor_toolchain()
         self._xc_compile_on = True
         self._xc_compile_dynamic = dynamic
         self._xc_compile_kwargs = kwargs
