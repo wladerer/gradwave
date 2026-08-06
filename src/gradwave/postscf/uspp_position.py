@@ -578,7 +578,8 @@ def _total_orbital_response(cs, pert, w_grid, d_ddd, d_hub=None, cg_tol: float=1
             hub_extra_sp[isp] = hub_extra.conj()
     dpsi_all: list[list[torch.Tensor]] = [[] for _ in range(nsp)]
     deps_all: list[list[torch.Tensor]] = [[] for _ in range(nsp)]
-    drho_sm = [torch.zeros(cs.shape, dtype=RDTYPE) for _ in range(nsp)]
+    drho_sm = [torch.zeros(cs.shape, dtype=RDTYPE, device=system.positions.device)
+               for _ in range(nsp)]
     for isp in range(nsp):
         warm = [torch.zeros_like(c[:n_sv]) for c, n_sv in
                 zip(cs.c_win[isp], cs.n_solve[isp], strict=True)]

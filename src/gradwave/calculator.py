@@ -501,53 +501,23 @@ class GradWave(Calculator):
         exists for the functional, matching the api's ``{'available': False}``."""
         if self._dispersion is None:
             return
+        from gradwave.api import _compute_dispersion
+
         d = self._dispersion
         method = str(d.get("method", "d3")).lower()
         functional = d.get("functional") or self.parameters["xc"]
         positions = system.positions.detach().to(RDTYPE)
         cell = np.asarray(_fft_grid(system).cell, dtype=np.float64)
         z = [int(v) for v in self.atoms.get_atomic_numbers()]
-        # each branch calls its OWN energy/forces/stress trio right after
-        # building the matching Config type (rather than joining afterward,
-        # which would leave a same-named-but-different-signature callable
-        # unioned with an incompatible D3Config | D4Config argument type).
         try:
-            if method == "d4":
-                from gradwave.postscf.dispersion_d4 import (
-                    D4Config,
-                    dispersion_energy,
-                    dispersion_forces,
-                    dispersion_stress,
-                )
-                cfg_d4 = D4Config.resolve(
-                    functional, charge=float(d.get("charge", 0.0)),
-                    cutoff_ang=d.get("cutoff", 21.2),
-                    cn_cutoff_ang=d.get("cn_cutoff", 10.6),
-                    s6=d.get("s6"), s8=d.get("s8"), a1=d.get("a1"), a2=d.get("a2"),
-                )
-                cell_t = torch.as_tensor(cell, dtype=RDTYPE, device=positions.device)
-                e = dispersion_energy(positions, cell_t, z, cfg_d4)
-                f = dispersion_forces(positions, cell, z, cfg_d4)
-                sig = (dispersion_stress(positions, cell, z, cfg_d4)
-                       if "stress" in self.results else None)
-            else:
-                from gradwave.postscf.dispersion import (
-                    D3Config,
-                    dispersion_energy,
-                    dispersion_forces,
-                    dispersion_stress,
-                )
-                cfg_d3 = D3Config.resolve(
-                    functional,
-                    cutoff_ang=d.get("cutoff", 21.2),
-                    cn_cutoff_ang=d.get("cn_cutoff", 10.6),
-                    s6=d.get("s6"), s8=d.get("s8"), a1=d.get("a1"), a2=d.get("a2"),
-                )
-                cell_t = torch.as_tensor(cell, dtype=RDTYPE, device=positions.device)
-                e = dispersion_energy(positions, cell_t, z, cfg_d3)
-                f = dispersion_forces(positions, cell, z, cfg_d3)
-                sig = (dispersion_stress(positions, cell, z, cfg_d3)
-                       if "stress" in self.results else None)
+            e, f, sig, _cfg = _compute_dispersion(
+                positions, cell, z, method=method, functional=functional,
+                charge=float(d.get("charge", 0.0)),
+                cutoff_ang=d.get("cutoff", 21.2),
+                cn_cutoff_ang=d.get("cn_cutoff", 10.6),
+                s6=d.get("s6"), s8=d.get("s8"), a1=d.get("a1"), a2=d.get("a2"),
+                need_stress="stress" in self.results,
+            )
         except (ValueError, NotImplementedError):
             return
 

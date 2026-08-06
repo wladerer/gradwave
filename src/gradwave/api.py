@@ -15,7 +15,7 @@ import logging
 import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from gradwave.core.xc.base import XCFunctional
 from gradwave.core.xc.lda_pw92 import LDA_PW92
@@ -1906,6 +1906,73 @@ def _nc_occupations(res: NCResult, scheme: str, width: float) -> list[Any]:
     return [occ[ik] for ik in range(eps.shape[0])]
 
 
+class _DispersionTerms(NamedTuple):
+    """Evaluated D3/D4 correction: energy (eV scalar), forces (na,3), stress
+    (3,3) or None when not requested, and the resolved config (carries the
+    damping params s6/s8/a1/a2). Returned by :func:`_compute_dispersion`."""
+
+    energy: Any
+    forces: Any
+    stress: Any
+    cfg: Any
+
+
+def _compute_dispersion(
+    positions: Any, cell: Any, z: list[int], *,
+    method: str, functional: str, charge: float = 0.0,
+    cutoff_ang: float, cn_cutoff_ang: float,
+    s6: float | None = None, s8: float | None = None,
+    a1: float | None = None, a2: float | None = None,
+    need_stress: bool = True,
+) -> _DispersionTerms:
+    """Resolve the D3(BJ)/D4(BJ) config and evaluate energy, forces, and (if
+    ``need_stress``) stress. The single shared compute core behind both
+    ``_apply_dispersion`` (YAML pipeline, summary-dict output) and
+    ``GradWave._apply_dispersion`` (calculator, ASE-results output): the two
+    callers differ only in how they read the knobs and shape the result, so the
+    resolve+evaluate step — and any future damping-param or model change — lives
+    here once. ``method`` is ``'d3'`` (default) or ``'d4'`` (``'d4'`` also uses
+    ``charge``). Raises ``ValueError``/``NotImplementedError`` when the element
+    set is uncovered or no BJ preset exists; callers catch and degrade.
+
+    Each branch calls its OWN energy/forces/stress trio right after building the
+    matching Config type (rather than joining afterward, which would leave a
+    same-named-but-different-signature callable unioned with an incompatible
+    ``D3Config | D4Config`` argument type)."""
+    import torch
+
+    cell_t = torch.as_tensor(cell, dtype=positions.dtype, device=positions.device)
+    if method == "d4":
+        from gradwave.postscf.dispersion_d4 import (
+            D4Config,
+            dispersion_energy,
+            dispersion_forces,
+            dispersion_stress,
+        )
+        cfg = D4Config.resolve(
+            functional, charge=charge, cutoff_ang=cutoff_ang,
+            cn_cutoff_ang=cn_cutoff_ang, s6=s6, s8=s8, a1=a1, a2=a2,
+        )
+        e = dispersion_energy(positions, cell_t, z, cfg)
+        forces = dispersion_forces(positions, cell, z, cfg)
+        stress = dispersion_stress(positions, cell, z, cfg) if need_stress else None
+    else:
+        from gradwave.postscf.dispersion import (
+            D3Config,
+            dispersion_energy,
+            dispersion_forces,
+            dispersion_stress,
+        )
+        cfg = D3Config.resolve(
+            functional, cutoff_ang=cutoff_ang, cn_cutoff_ang=cn_cutoff_ang,
+            s6=s6, s8=s8, a1=a1, a2=a2,
+        )
+        e = dispersion_energy(positions, cell_t, z, cfg)
+        forces = dispersion_forces(positions, cell, z, cfg)
+        stress = dispersion_stress(positions, cell, z, cfg) if need_stress else None
+    return _DispersionTerms(e, forces, stress, cfg)
+
+
 def _apply_dispersion(res: SCFLike, inp: Input) -> dict[str, Any]:
     """Compute the D3(BJ)/D4(BJ) correction, fold its energy into ``res.energies``
     (so the reported total/free energy include it), and return the summary block
@@ -1922,45 +1989,13 @@ def _apply_dispersion(res: SCFLike, inp: Input) -> dict[str, Any]:
     positions = system.positions.detach().to(torch.float64)
     cell = np.asarray(system.grid.cell, dtype=np.float64)
     z = [int(v) for v in inp.atoms.get_atomic_numbers()]
-    # each branch calls its OWN energy/forces/stress trio right after
-    # building the matching Config type (rather than joining afterward,
-    # which would leave a same-named-but-different-signature callable
-    # unioned with an incompatible D3Config | D4Config argument type).
     try:
-        if method == "d4":
-            from gradwave.postscf.dispersion_d4 import (
-                D4Config,
-                dispersion_energy,
-                dispersion_forces,
-                dispersion_stress,
-            )
-            cfg_d4 = D4Config.resolve(
-                dp.functional or inp.xc, charge=dp.charge,
-                cutoff_ang=dp.cutoff, cn_cutoff_ang=dp.cn_cutoff,
-                s6=dp.s6, s8=dp.s8, a1=dp.a1, a2=dp.a2,
-            )
-            cell_t = torch.as_tensor(cell, dtype=torch.float64, device=positions.device)
-            e = dispersion_energy(positions, cell_t, z, cfg_d4)
-            forces = dispersion_forces(positions, cell, z, cfg_d4)
-            stress = dispersion_stress(positions, cell, z, cfg_d4)
-            cfg = cfg_d4
-        else:
-            from gradwave.postscf.dispersion import (
-                D3Config,
-                dispersion_energy,
-                dispersion_forces,
-                dispersion_stress,
-            )
-            cfg_d3 = D3Config.resolve(
-                dp.functional or inp.xc,
-                cutoff_ang=dp.cutoff, cn_cutoff_ang=dp.cn_cutoff,
-                s6=dp.s6, s8=dp.s8, a1=dp.a1, a2=dp.a2,
-            )
-            cell_t = torch.as_tensor(cell, dtype=torch.float64, device=positions.device)
-            e = dispersion_energy(positions, cell_t, z, cfg_d3)
-            forces = dispersion_forces(positions, cell, z, cfg_d3)
-            stress = dispersion_stress(positions, cell, z, cfg_d3)
-            cfg = cfg_d3
+        e, forces, stress, cfg = _compute_dispersion(
+            positions, cell, z, method=method,
+            functional=dp.functional or inp.xc, charge=dp.charge,
+            cutoff_ang=dp.cutoff, cn_cutoff_ang=dp.cn_cutoff,
+            s6=dp.s6, s8=dp.s8, a1=dp.a1, a2=dp.a2, need_stress=True,
+        )
     except (ValueError, NotImplementedError) as err:
         return {"available": False, "reason": str(err)}
 
