@@ -261,12 +261,17 @@ def diamond_c():
     the reference-leak / cross-route COHP hardening tests below. nbands=24 sits
     well past the diamond nbands-convergence sweep's knee (see the cohp.py module
     docstring): the eigenvalue route is within ~3% of the operator route there,
-    so this is a fair, non-flaky point to regression-test the bracket at."""
+    so this is a fair, non-flaky point to regression-test the bracket at.
+
+    ecut is 30 Ry, not the plane-wave-converged 45: the cross-route ratio and
+    reference-leak this fixture feeds are flat in ecut (1.024 at 30 vs 1.025 at
+    45, leak unchanged), so the lower cutoff keeps the ~167 s CI fixture cost
+    down without moving the calibrated bracket."""
     torch.set_num_threads(8)
     from gradwave.core.xc.pbe import PBE
     upf = parse_upf(f"{FIX}/PD_C_PBE_std.upf")
     cell, pos = si_fcc(a=3.567)
-    system = setup_system(cell, pos, [0, 0], [upf], ecut=45 * RY, kmesh=(2, 2, 2),
+    system = setup_system(cell, pos, [0, 0], [upf], ecut=30 * RY, kmesh=(2, 2, 2),
                           nbands=24, use_symmetry=False)
     res = scf(system, PBE(), smearing="gaussian", width=0.05, etol=1e-8,
               rhotol=1e-7, verbose=False, kerker=True)

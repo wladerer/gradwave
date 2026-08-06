@@ -17,6 +17,9 @@ the FD floor. This is the oracle that catches an implementation that merely
 agrees with another code — it is a derivative of gradwave's own energy.
 """
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -37,6 +40,15 @@ A = 3.2
 CELL = A * np.array([[1.0, 0.0, 0.0], [0.12, 1.0, 0.0], [0.05, 0.08, 1.05]])
 FRAC = np.array([[0.02, 0.01, 0.0], [0.27, 0.31, 0.24]])
 POS = FRAC @ CELL
+
+# Committed finite-difference reference: the six ±h-displaced r2SCAN total
+# energies the analytic NLCC force is checked against. Caching them turns this
+# from 7 live meta-GGA SCFs (1 base + 6 displaced) into 1. The analytic force
+# is still computed live; only the FD reference energies are read from disk.
+# Regenerate after any change to the r2SCAN model, the NLCC force path, or the
+# carbon cell with:  uv run python scripts/gen_metagga_nlcc_fd.py
+FD_FIX = (Path(__file__).parents[1] / "fixtures" / "qe" / "metagga_nlcc_fd"
+          / "fd_reference.json")
 
 
 def _run(upf, pos, xc, etol=1e-11, rhotol=1e-10):
@@ -59,14 +71,11 @@ def test_metagga_nlcc_force_matches_finite_difference():
     assert res.system.rho_core is not None  # NLCC active in the SCF
     f = forces(res, remove_net=False, xc=R2SCAN()).cpu().numpy()
 
-    h = 1e-4
+    fd_ref = json.loads(FD_FIX.read_text())
+    h = fd_ref["h"]
     for ia, ic in [(1, 0), (1, 1), (0, 2)]:
-        vals = []
-        for sign in (+1, -1):
-            pos = POS.copy()
-            pos[ia, ic] += sign * h
-            vals.append(float(_run(upf, pos, R2SCAN()).energies.total))
-        fd = -(vals[0] - vals[1]) / (2 * h)
+        rec = fd_ref[f"{ia},{ic}"]
+        fd = -(rec["ep"] - rec["em"]) / (2 * h)
         assert abs(fd - float(f[ia, ic])) < 1e-6, (
             f"comp ({ia},{ic}): analytic={f[ia, ic]:.9f} fd={fd:.9f}"
         )
