@@ -19,7 +19,10 @@ from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
 from tests.helpers import RY
 
-pytestmark = pytest.mark.standard
+# Per-test tiers: the Al smeared-force checks are standard-tier (seconds);
+# the Cu3Al intermetallic (ecut=40 Ry, Cu d-states, ~12 min) is slow-tier and
+# runs nightly, not on every standard CI shard, where it was the split floor.
+
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
 AL_A = 4.05
@@ -32,6 +35,7 @@ CU3AL_CELL = 3.70 * np.eye(3)
 CU3AL_FRAC = np.array([[0, 0, 0], [0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0.5, 0]])
 
 
+@pytest.mark.standard
 def test_smeared_metal_forces_vs_qe():
     torch.set_num_threads(4)
     ref = json.loads((FIX / "al_forces_ci" / "reference.json").read_text())
@@ -61,6 +65,7 @@ def test_smeared_metal_forces_vs_qe():
 FD_FIX = FIX / "al_forces_fd" / "fd_reference.json"
 
 
+@pytest.mark.standard
 @pytest.mark.parametrize("smearing", ["mp1", "cold"])
 def test_smeared_forces_match_free_energy_fd(smearing):
     # The rigorous per-scheme check: F_a = −dF/dτ_a of that scheme's OWN
@@ -88,6 +93,7 @@ def test_smeared_forces_match_free_energy_fd(smearing):
         assert abs(fd - float(f[0, comp])) < 2e-4, (smearing, comp, fd, float(f[0, comp]))
 
 
+@pytest.mark.slow
 def test_cu3al_vs_qe():
     torch.set_num_threads(4)
     ref = json.loads((FIX / "cu3al_pbe_ci" / "reference.json").read_text())
