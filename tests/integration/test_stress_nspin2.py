@@ -135,8 +135,11 @@ def test_run_elastic_nspin2_nc_matches_nspin1():
     (start_mag=0) elastic driver must reproduce the nspin=1 tensor computed with
     identical settings — the whole strain scan (reference + 12 warm-started
     strained SCFs) runs through the newly-reachable spin-resolved stress path.
-    Coarse Si (ecut 12 Ry, 2×2×2 k) keeps this a self-consistency check where
-    the absolute C is irrelevant, only nspin=2 == nspin=1."""
+    Coarse Si (ecut 9 Ry, 2×2×2 k) keeps this a self-consistency check where the
+    absolute C is irrelevant, only nspin=2 == nspin=1: the two routes share the
+    basis/k/grid, so they agree to SCF-convergence precision (validated to
+    0.0000 GPa) at any ecut — the low cutoff just makes it cheap for every-push
+    CI."""
     from gradwave.api import run_elastic
     from gradwave.inputs import (
         ElasticParams,
@@ -154,7 +157,7 @@ def test_run_elastic_nspin2_nc_matches_nspin1():
     def _inp(nspin):
         return Input(
             atoms=atoms, pseudo_dir=Path(PSEUDOS),
-            pseudo_map={"Si": "Si_ONCV_PBE-1.2.upf"}, ecut=12 * RY, xc="pbe",
+            pseudo_map={"Si": "Si_ONCV_PBE-1.2.upf"}, ecut=9 * RY, xc="pbe",
             kpoints=KPointsParams(mesh=(2, 2, 2)),
             smearing=SmearingParams(type="none"),
             elastic=ElasticParams(strain=0.01),
