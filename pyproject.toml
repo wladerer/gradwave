@@ -114,11 +114,10 @@ include = [
     # loop.py, uspp_loop.py, noncollinear.py, and the other 9 mechanically
     # autotyped scf/ files (common.py, layout.py, learned_precond.py,
     # local_tf.py, paw_onsite.py, paw_symmetry.py, setup_common.py,
-    # uspp_batch.py, uspp_noncollinear.py) were each individually verified NOT
-    # clean this round (1-31 real errors apiece: bare list/dict generics, the
-    # SCF loop's "runs >=1 iteration" possibly-unresolved-reference pattern,
-    # and — uspp_loop.py/uspp_noncollinear.py especially — deeper
-    # argument-type mismatches) and are deliberately left off.
+    # uspp_batch.py, uspp_noncollinear.py) were left off in this pilot round
+    # (1-31 real errors apiece). The three central drivers landed in Phase 9;
+    # the rest of scf/ (these nine and the remaining unlisted files) landed in
+    # Phase 11 below, which closes the subpackage.
     "src/gradwave/scf/mixing.py",
     "src/gradwave/scf/spin_precond.py",
     #
@@ -242,6 +241,71 @@ include = [
     "src/gradwave/scf/loop.py",
     "src/gradwave/scf/uspp_loop.py",
     "src/gradwave/scf/noncollinear.py",
+    # Phase 11: the remaining 20 scf/ files (the empty __init__.py aside) --
+    # closing the scf/ gap so the ENTIRE subpackage is now error-gated. 64 real
+    # errors -> 0, verified by adding all 20 at once and driving the count down,
+    # not annotated around. Six of the 20 (moment_penalty.py, options.py,
+    # paw_noncollinear.py, recorder.py, spinor_common.py, uspp.py) were already
+    # clean and just needed listing. The rest, by pattern:
+    #   * bare list/dict/tuple generics (the bulk): filled with the real element
+    #     type. The dict-shaped Hubbard "site" records reuse core.hubbard's
+    #     public HubbardSite TypedDict (uspp_hubbard.py) -- and tightening
+    #     hubbard_sites()'s return rippled a genuine improvement into two
+    #     already-listed consumers (scf/results.py's USPPResult.hub_sites,
+    #     postscf/uspp_bands.py) whose annotations were the looser
+    #     list[dict[str, int | float]];
+    #   * the "runs >=1 iteration" possibly-unresolved pattern in
+    #     uspp_noncollinear.py's driver (e_free/res_norm/eigs/energies after the
+    #     `for it in range(1, max_iter+1)` loop), and learned_precond.py's `pf`
+    #     bound under one `if precond_fac is not None` and read under another --
+    #     fixed the Phase-9 way (bind a real placeholder before, narrow/assert at
+    #     the read), not by weakening the guarantee;
+    #   * paired-Optional narrowing via `assert x is not None` for
+    #     construction-order-deferred attributes (local_tf.py's q2_r set by
+    #     set_density; uspp_setup.py's q_full/becsum cache; setup_common.py's
+    #     magmoms/RhoSymmetrizer cache; implicit.py/uspp_noncollinear.py's
+    #     nspin=2-only rho_spin/onec and dual-grid smooth_shape);
+    #   * XC/symmetrizer union dispatch via `isinstance` at the call site
+    #     (uspp_loop.py/uspp_noncollinear.py narrow becsum_sym to the
+    #     per-channel BecsumSymmetrizer vs the Pauli MagneticBecsumSymmetrizer;
+    #     uspp_noncollinear.py narrows rho_symmetrizer to MagneticSymmetrizer),
+    #     the Phase-9/10 precedent;
+    #   * sum-of-Tensors over a generator types as `Tensor | Literal[0]` (the `0`
+    #     start) and won't satisfy a strict-Tensor field/param -- rewritten as
+    #     torch.stack([...]).sum(dim=0), numerically identical, in common.py's
+    #     EnergyBreakdown assembly and paw_onsite.py's one-center energy/HVP
+    #     (both once-per-iteration, not hot inner loops);
+    #   * two duck-typed interfaces made explicit rather than papered over:
+    #     PAWData duck-types UPFData's beta-radial / atomic-density surface (the
+    #     USPP setup has always relied on this), narrowed with a localized cast
+    #     at the pseudo call sites (uspp_setup.beta_form_factors,
+    #     guess.sad_density -- whose `upfs` widened to
+    #     Sequence[UPFData | PAWData], Sequence not list so an invariant
+    #     list[PAWData]/list[UPFData] caller still fits); and the generalized
+    #     Davidson's `hs` param, which both BatchedHS and the noncollinear
+    #     SpinorBatchedHS (whose `.bk` is a _SpinorBK shim) satisfy -- widened to
+    #     two minimal read-only Protocols (_GenEigHS/_BKLike) in uspp_batch.py,
+    #     the postscf._response.py precedent, not a cast past a real pattern.
+    "src/gradwave/scf/alchemical.py",
+    "src/gradwave/scf/common.py",
+    "src/gradwave/scf/guess.py",
+    "src/gradwave/scf/implicit.py",
+    "src/gradwave/scf/layout.py",
+    "src/gradwave/scf/learned_precond.py",
+    "src/gradwave/scf/local_tf.py",
+    "src/gradwave/scf/moment_penalty.py",
+    "src/gradwave/scf/options.py",
+    "src/gradwave/scf/paw_noncollinear.py",
+    "src/gradwave/scf/paw_onsite.py",
+    "src/gradwave/scf/paw_symmetry.py",
+    "src/gradwave/scf/recorder.py",
+    "src/gradwave/scf/setup_common.py",
+    "src/gradwave/scf/spinor_common.py",
+    "src/gradwave/scf/uspp.py",
+    "src/gradwave/scf/uspp_batch.py",
+    "src/gradwave/scf/uspp_hubbard.py",
+    "src/gradwave/scf/uspp_noncollinear.py",
+    "src/gradwave/scf/uspp_setup.py",
     #
     # Phase 10: the 16 postscf/ files (+ scf/results.py) left off in the
     # Phase-4 postscf/ pass -- all 17 cleaned up for real (400+ real errors

@@ -37,7 +37,7 @@ def _sphere_quad(lmax: int):
     return dirs, w
 
 
-def ylm_rotation_matrices(sg, cell: np.ndarray, lmax: int) -> list:
+def ylm_rotation_matrices(sg, cell: np.ndarray, lmax: int) -> list[list[torch.Tensor]]:
     """Per-op block-diagonal D matrices, one (2l+1)² block per l ≤ lmax.
 
     Returns [ops][l] → (2l+1, 2l+1) torch.float64 with
@@ -95,7 +95,7 @@ class MagneticBecsumSymmetrizer:
         self.axial = self.axial.to(device)
         return self
 
-    def apply(self, chans_atoms: list) -> list:
+    def apply(self, chans_atoms: list[list[torch.Tensor]]) -> list[list[torch.Tensor]]:
         """[4][na] Pauli channels [n_ij, mx_ij, my_ij, mz_ij] → symmetrized
         (same nesting; accumulation runs in complex128, real inputs come back
         real — the symmetrized imaginary part of a Hermitian channel is the
@@ -147,7 +147,7 @@ class BecsumSymmetrizer:
         self.d_full = [[d.to(device) for d in per_sp] for per_sp in self.d_full]
         return self
 
-    def apply(self, rho_ij_atoms: list) -> list:
+    def apply(self, rho_ij_atoms: list[torch.Tensor]) -> list[torch.Tensor]:
         """ρ^a ← (1/N) Σ_op D ρ^{map(op,a)} Dᵀ (one spin channel)."""
         n_ops = self.sg.n_ops
         out = [torch.zeros_like(m) for m in rho_ij_atoms]

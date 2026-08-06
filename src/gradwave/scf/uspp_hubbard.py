@@ -22,7 +22,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from gradwave.core.hubbard import _MINUS_I_POW, HubbardManifold
+from gradwave.core.hubbard import _MINUS_I_POW, HubbardManifold, HubbardSite
 from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.pseudo.radial import sbt
@@ -35,11 +35,11 @@ class USPPHubbardData:
     """S-dressed atomic-orbital projectors, padded over k (setup product)."""
 
     sphi: torch.Tensor  # (nk, nprojU, npw_max) — S|φ⟩, phased at positions
-    sites: list  # per correlated atom: {atom, l, u, j, start, dim}
+    sites: list[HubbardSite]  # per correlated atom: {atom, l, u, j, start, dim}
     nproj: int
 
 
-def hubbard_sites(system, manifolds: list[HubbardManifold]) -> list:
+def hubbard_sites(system, manifolds: list[HubbardManifold]) -> list[HubbardSite]:
     """Per-correlated-atom site descriptors {atom, l, u, j, start, dim}."""
     man_by_sp = {m.species: m for m in manifolds}
     correlated = [(a, s) for a, s in enumerate(system.species_of_atom)
@@ -55,7 +55,7 @@ def hubbard_sites(system, manifolds: list[HubbardManifold]) -> list:
     return sites
 
 
-def _hubbard_radial_setup(system, sites: list):
+def _hubbard_radial_setup(system, sites: list[HubbardSite]):
     """Shared per-species radial atomic-orbital data, independent of any
     particular k/G-sphere: ``(rchi_by_sp, l_by_sp, l_max, nproj)``."""
     site_by_atom = {s["atom"]: s for s in sites}
@@ -78,7 +78,7 @@ def _hubbard_radial_setup(system, sites: list):
 
 
 @torch.no_grad()
-def phi_free_at_sphere(system, sites: list, sph, radial=None) -> torch.Tensor:
+def phi_free_at_sphere(system, sites: list[HubbardSite], sph, radial=None) -> torch.Tensor:
     """PHASE-FREE atomic-orbital projector factors (nprojU, npw) at ONE
     arbitrary G-sphere — the per-k body of ``phi_free_per_k``, reusable at a
     band k-point that need not belong to ``system.spheres`` (frozen-potential
@@ -117,7 +117,7 @@ def phi_free_at_sphere(system, sites: list, sph, radial=None) -> torch.Tensor:
 
 
 @torch.no_grad()
-def phi_free_per_k(system, sites: list) -> list[torch.Tensor]:
+def phi_free_per_k(system, sites: list[HubbardSite]) -> list[torch.Tensor]:
     """Per-k PHASE-FREE atomic-orbital projector factors (nprojU, npw_k) —
     the position-independent product; multiply by e^{−i(k+G)·τ} per column
     atom for the full projector (the same split as the KB ProjectorData)."""
@@ -126,7 +126,7 @@ def phi_free_per_k(system, sites: list) -> list[torch.Tensor]:
            for sph in system.spheres]
 
 
-def atom_of_col(sites: list) -> torch.Tensor:
+def atom_of_col(sites: list[HubbardSite]) -> torch.Tensor:
     return torch.tensor([s["atom"] for s in sites for _ in range(s["dim"])],
                         dtype=torch.int64)
 

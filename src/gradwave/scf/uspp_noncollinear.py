@@ -33,6 +33,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import time
+from typing import cast
 
 import torch
 
@@ -267,6 +268,7 @@ def scf_uspp_noncollinear(
                           batched=True)
     grid, vol, dev, shape = ops.grid, ops.vol, ops.dev, ops.shape
     bk, p_b = ops.bk, ops.p_b
+    assert bk is not None  # the batched spinor path always builds a BatchedK
     mask_flat, nk = ops.mask_flat, ops.nk
     nbands = 2 * system.nbands             # spinor bands hold one electron each
     m_pw = bk.npw_max
@@ -345,7 +347,11 @@ def scf_uspp_noncollinear(
     scheme = SCHEMES[smearing]
     e_free_prev, converged, history = None, False, []
     mu, it = 0.0, 0
-    energies = None
+    # bound before the loop so the post-loop warning / return typecheck even on
+    # the (unreachable, max_iter>=1) empty-loop path; asserted non-None at return.
+    e_free = res_norm = 0.0
+    eigs: torch.Tensor | None = None
+    energies: EnergyBreakdown | None = None
     q_c = system.q_full.to(CDTYPE)
     dij_bare = system.proj_data[0].dij_full
     # atoms grouped by species: the per-iteration ∫(v,B⃗)Q and augmentation
@@ -378,6 +384,7 @@ def scf_uspp_noncollinear(
         d_chan[0] = d_chan[0] + dij_bare
         e_onec = torch.zeros((), dtype=RDTYPE, device=dev)
         if ops.is_paw:
+            assert ops.onec is not None  # is_paw carries the one-center tables
             for a, sp in enumerate(system.species_of_atom):
                 s0, s1 = system.atom_slices[a]
                 e1c, ddd = onsite_nc_energy_and_ddd(
@@ -395,6 +402,7 @@ def scf_uspp_noncollinear(
             # G-coeffs above restricted to the smooth sphere by shared Miller)
             # for the dual-grid H-apply; filtering is linear, so filtering the
             # (v, B⃗) fields and combining into the 2×2 blocks commutes
+            assert system.smooth2dense is not None and system.smooth_shape is not None
             vb_s = g_to_r_box(
                 pots_g_box[:, system.smooth2dense].reshape(
                     4, *system.smooth_shape), real=True)
@@ -437,7 +445,8 @@ def scf_uspp_noncollinear(
             coeffs, w_kb, bk, shape, m_pw, nbands, nbc, dev)
         # becsum from the already-computed S-normalized projections, with k
         # folded into the band axis (the einsums contract over bands anyway)
-        bec_out = [[None] * len(system.atom_slices) for _ in range(4)]
+        bec_out: list[list[torch.Tensor | None]] = [
+            [None] * len(system.atom_slices) for _ in range(4)]
         w_flat = w_kb.reshape(-1).to(CDTYPE)
         bu_f = bu.reshape(nk * nbands, -1)
         bd_f = bd.reshape(nk * nbands, -1)
@@ -446,10 +455,15 @@ def scf_uspp_noncollinear(
             for c4 in range(4):
                 bec_out[c4][a] = chans[c4]
         rho_out, m_out = rho_out / vol, m_out / vol
-        bec_out_r = [[c.real for c in bec_out[c4]] for c4 in range(4)]
+        # every (channel, atom) slot was filled in the loop above
+        bec_out_r = [[cast("torch.Tensor", c).real for c in bec_out[c4]]
+                     for c4 in range(4)]
         if mag_sym_active:
             # symmetrize the becsum BEFORE building the augmentation charge so
-            # the smooth and one-center densities carry the same symmetry
+            # the smooth and one-center densities carry the same symmetry. The
+            # spinor path always carries the Pauli-channel Magnetic symmetrizers.
+            from gradwave.scf.paw_symmetry import MagneticBecsumSymmetrizer
+            assert isinstance(system.becsum_sym, MagneticBecsumSymmetrizer)
             bec_out_r = system.becsum_sym.apply(bec_out_r)
 
         # augmentation: n_aug → ρ, m⃗_aug → m⃗, from the matching becsum channel —
@@ -470,6 +484,8 @@ def scf_uspp_noncollinear(
         rho_out = rho_out + aug_fields[0]
         m_out = m_out + aug_fields[1:]
         if mag_sym_active:
+            from gradwave.symmetry import MagneticSymmetrizer
+            assert isinstance(system.rho_symmetrizer, MagneticSymmetrizer)
             rho_out = symmetrize_rho(system.rho_symmetrizer, rho_out, grid)
             m_g = torch.stack([r_to_g(m_out[i].to(CDTYPE)) for i in range(3)])
             m_out = g_to_r_box(system.rho_symmetrizer.apply_m(m_g), real=True)
@@ -529,6 +545,7 @@ def scf_uspp_noncollinear(
             "|drho|=%.3e", it, e_free, res_norm)
     m_int = [float(m[i].mean()) * vol for i in range(3)]
     m_norm = torch.sqrt((m ** 2).sum(dim=0))
+    assert energies is not None and eigs is not None  # loop runs >= 1 iteration
     return USPPNCResult(
         converged=converged, n_iter=it, energies=energies, fermi=mu,
         mag_vec=tuple(m_int), mag_abs=float(m_norm.mean()) * vol,

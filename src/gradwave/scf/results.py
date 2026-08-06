@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     # or scf/noncollinear.py's).
     from _typeshed import DataclassInstance
 
+    from gradwave.core.hubbard import HubbardSite
     from gradwave.scf.loop import SCFResult
     from gradwave.scf.noncollinear import NCResult
     from gradwave.scf.uspp_setup import USPPSystem
@@ -113,7 +114,7 @@ class USPPResult(_DictBridge):
     mixer_mult: dict[int, float] | None  # mixer block multipliers (diagnostics)
     rho_out_spin: list[torch.Tensor]  # RAW map output (pre-mixing) — rig/diagnostics
     hub_occ: list[list[torch.Tensor]] | None = None  # DFT+U per-spin occupation matrices [σ][site]
-    hub_sites: list[dict[str, int | float]] | None = None  # DFT+U site definitions
+    hub_sites: list[HubbardSite] | None = None  # DFT+U site definitions
     rho_spin: list[torch.Tensor] | None = None  # [ρ↑, ρ↓] when nspin=2
     mag_total: float | None = None  # ∫(ρ↑−ρ↓) dr [μB] when nspin=2
     mag_abs: float | None = None  # ∫|ρ↑−ρ↓| dr [μB] when nspin=2

@@ -2,19 +2,29 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, cast
+
 import numpy as np
 import torch
 
 from gradwave.core.fftbox import g_to_r_box
 from gradwave.dtypes import CDTYPE
 from gradwave.pseudo.atomic import rhoatom_of_q
+from gradwave.pseudo.upf import UPFData
+
+if TYPE_CHECKING:
+    from gradwave.pseudo.upf_paw import PAWData
 
 
 def sad_density(
     grid,
     positions: torch.Tensor,  # (na, 3) Å (detached — guess is not differentiated)
     species_of_atom: list[int],
-    upfs: list,  # [UPFData] per species
+    # PAWData duck-types UPFData's atomic-density radial interface; the USPP/PAW
+    # drivers pass PAW pseudos here. Sequence (not list) so the invariant
+    # list[UPFData]/list[PAWData] a caller holds is still assignable.
+    upfs: Sequence[UPFData | PAWData],  # per species
     n_electrons: float | None,
     species_scale=None,  # per-species factor (spin-channel splits), default 1
     atom_scale=None,  # per-ATOM factor (AFM seeds); overrides species_scale
@@ -34,7 +44,7 @@ def sad_density(
     for s, upf in enumerate(upfs):
         scale = 1.0 if species_scale is None else float(species_scale[s])
         table = scale * torch.as_tensor(
-            rhoatom_of_q(upf, uniq), dtype=torch.float64, device=device)
+            rhoatom_of_q(cast("UPFData", upf), uniq), dtype=torch.float64, device=device)
         shell = table[torch.as_tensor(inverse, device=device)]
         atoms = [a for a, sa in enumerate(species_of_atom) if sa == s]
         if not atoms:

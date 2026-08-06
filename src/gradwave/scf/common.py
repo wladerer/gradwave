@@ -241,14 +241,14 @@ def assemble_pw_energies(coeffs_s, occ_s, kweights, spheres, grid, vol,
     extra = {} if e_onec is None else {"onecenter": e_onec}
     e_ew = ewald_energy(positions, charges, grid.cell) if e_ewald is None else e_ewald
     return EnergyBreakdown(
-        kinetic=sum(kinetic_energy(coeffs_s[sp], occ_s[sp], kweights, spheres)
-                    for sp in range(nspin)),
+        kinetic=torch.stack([kinetic_energy(coeffs_s[sp], occ_s[sp], kweights, spheres)
+                             for sp in range(nspin)]).sum(dim=0),
         hartree=hartree_energy(rho_g_out, grid.g2, vol),
         xc=e_xc,
         local=local_energy(rho_g_out, vloc_g, vol),
-        nonlocal_=sum(nonlocal_energy(becps_s[sp], dij_full, occ_s[sp],
-                                      kweights)
-                      for sp in range(nspin)),
+        nonlocal_=torch.stack([nonlocal_energy(becps_s[sp], dij_full, occ_s[sp],
+                                               kweights)
+                               for sp in range(nspin)]).sum(dim=0),
         ewald=e_ew,
         smearing=entropy_term,
         hubbard=e_hub,

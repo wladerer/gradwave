@@ -20,7 +20,7 @@ import numpy as np
 import torch
 
 from gradwave.core.hamiltonian import projectors
-from gradwave.core.hubbard import hubbard_dmatrix
+from gradwave.core.hubbard import HubbardSite, hubbard_dmatrix
 from gradwave.core.xc.base import XCFunctional
 from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import CDTYPE
@@ -38,7 +38,7 @@ from gradwave.scf.uspp_setup import USPPSystem
 
 
 def _hubbard_sphi_at_k(
-    system: USPPSystem, sites: list[dict[str, int | float]],
+    system: USPPSystem, sites: list[HubbardSite],
     radial: tuple[dict[int, np.ndarray], dict[int, int], int, int], sph: GSphere, p: torch.Tensor,
     dev: torch.device,
 ) -> torch.Tensor:

@@ -285,8 +285,10 @@ def alchemical_energy_gradient(res, lam, xc=None):
     return grad.detach()
 
 
-def per_atom_local_tables(base_tables: torch.Tensor, species_index: torch.Tensor,
-                          alchemical: dict) -> torch.Tensor:
+def per_atom_local_tables(
+    base_tables: torch.Tensor, species_index: torch.Tensor,
+    alchemical: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+) -> torch.Tensor:
     """Assemble the full (na, n1, n2, n3) per-atom local table that
     local_potential_g consumes through its vloc_atom argument.
 

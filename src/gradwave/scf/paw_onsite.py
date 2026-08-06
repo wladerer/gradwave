@@ -81,7 +81,7 @@ def _cumint_t(g: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def onecenters(system, xc, device=None) -> dict:
+def onecenters(system, xc, device=None) -> dict[int, OneCenter]:
     """Per-species {sp: OneCenter} for every species with atoms, cached on
     the system object per (xc, device) so the SCF, forces, stress and
     response paths share one set of radial tables and dense ρ_lm maps
@@ -366,7 +366,7 @@ class OneCenter:
               + (mid[..., 1, :] - mid[..., 0, :]) * tt["c0"]).unsqueeze(-2)
         return torch.cat([g0, mid, torch.zeros_like(f[..., :1, :])], dim=-2)
 
-    def _xc_exact(self, rho_lms: list, what: str):
+    def _xc_exact(self, rho_lms: list[torch.Tensor], what: str):
         """(E_xc [eV], [dE_xc/dρ_lm (mesh, l2) numpy] per spin) with the
         derivative EXACT for the quadrature actually summed — autograd through
         density and gradient chains, no integration by parts. (The divergence
@@ -380,7 +380,7 @@ class OneCenter:
             gs = torch.autograd.grad(e_xc, leaves)
         return float(e_xc.detach()), [g.cpu().numpy() for g in gs]
 
-    def _exc_t(self, rls: list, what: str) -> torch.Tensor:
+    def _exc_t(self, rls: list[torch.Tensor], what: str) -> torch.Tensor:
         """E_xc [eV] from (..., mesh, l2) torch ρ_lm tensors, shaped like the
         leading (atom-batch) dims — a scalar for a single atom. The
         quadrature body shared by _xc_exact, e1c_t and energy_theta."""
@@ -418,7 +418,7 @@ class OneCenter:
 
     # ---------- fully in-graph one-center chain (torch) ----------
 
-    def e1c_t(self, rho_ijs: list) -> torch.Tensor:
+    def e1c_t(self, rho_ijs: list[torch.Tensor]) -> torch.Tensor:
         """E_1c [eV] as a torch tensor shaped like the leading (atom-batch)
         dims of the REAL (..., nm, nm) rho_ij tensors — a scalar for one
         atom — fully differentiable in rho_ij AND the XC-functional
@@ -435,7 +435,7 @@ class OneCenter:
         e_tot = None
         for what, sgn in (("ae", 1.0), ("ps", -1.0)):
             rls = [self.rho_lm_t(r, what) for r in rho_ijs]
-            _, e_h = self.hartree_t(sum(rls))
+            _, e_h = self.hartree_t(torch.stack(rls).sum(dim=0))
             term = sgn * (e_h + self._exc_t(rls, what))
             e_tot = term if e_tot is None else e_tot + term
         return e_tot.to(in_dev)
@@ -479,8 +479,8 @@ class OneCenter:
             vecs = ([self._to_real_t(m) for m in vec] if spin
                     else [self._to_real_t(vec)])
             with torch.enable_grad():
-                inner = sum((g * v).sum()
-                            for g, v in zip(gs, vecs, strict=True))
+                inner = torch.stack([(g * v).sum()
+                                     for g, v in zip(gs, vecs, strict=True)]).sum()
                 hv = torch.autograd.grad(inner, leaves, retain_graph=True)
             hv = [h.detach() for h in hv]
             return hv if spin else hv[0]
