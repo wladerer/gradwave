@@ -20,6 +20,7 @@ import pytest
 import torch
 
 from gradwave.core.xc.pbe import PBE
+from gradwave.core.xc.spin import SpinPBE
 from gradwave.postscf.uspp_position import (
     bare_position_derivative,
     hessian_column,
@@ -185,3 +186,72 @@ def test_gamma_hessian_symmetry_reconstruction():
     rel = (np.linalg.norm(h_rec[:, :, 1, 2] - col_direct)
            / np.linalg.norm(col_direct))
     assert rel < 2e-4, f"symmetry-reconstructed column rel {rel:.2e}"
+
+
+def _fold_nonmagnetic_nspin2(r1):
+    """Build a fixed-occupation nspin=2 USPPResult from a converged nspin=1
+    one by splitting every spin-resolved quantity equally between the two
+    channels (ρ^σ = ρ/2, becsum^σ = becsum/2, occ^σ = occ/2, same orbitals and
+    eigenvalues). For a nonmagnetic system this IS an exact converged nspin=2
+    fixed point (V↑ = V↓ because ρ↑ = ρ↓), so the analytic response identity
+    holds on it. It is the only route to a fixed-occupation nspin=2 PAW state:
+    scf_uspp has no fixed-spin-moment mode, and the position response requires
+    smearing='none' (the metals gate), so an actual nspin=2 SCF run cannot
+    produce a valid input here. The stacked (2, nk, nb) occupation/eigenvalue
+    layout mirrors scf_uspp's own nspin=2 result assembly."""
+    r2 = dict(r1)
+    r2["nspin"] = 2
+    r2["rho_spin"] = [r1["rho"] * 0.5, r1["rho"] * 0.5]
+    r2["rho_ij_atoms"] = [[m * 0.5 for m in r1["rho_ij_atoms"]],
+                          [m * 0.5 for m in r1["rho_ij_atoms"]]]
+    r2["coeffs"] = [list(r1["coeffs"]), list(r1["coeffs"])]
+    r2["occupations"] = torch.stack(
+        [r1["occupations"] * 0.5, r1["occupations"] * 0.5])
+    r2["eigenvalues"] = torch.stack([r1["eigenvalues"], r1["eigenvalues"]])
+    return r2
+
+
+@pytest.mark.standard
+def test_nspin2_nonmagnetic_limit_matches_nspin1():
+    """Self-oracle for the nspin=2 position-response unblock: on a nonmagnetic
+    PAW Si dimer the nspin=2 position density response and Hessian column must
+    reproduce the nspin=1 result. This is an exact algebraic identity (the two
+    spin channels are equal, so the per-spin threading — halved occupations,
+    per-spin frozen operators, spin-summed density, the SpinXC/spin-f_xc core
+    path, spin_sigma_triple in hessian_column — must collapse to the collinear
+    path); any factor-2 spin-folding error would miss it by orders. No FD and
+    no second SCF: one nspin=1 SCF is shared, folded into a nonmagnetic nspin=2
+    state (see _fold_nonmagnetic_nspin2)."""
+    torch.set_num_threads(8)
+    paw = parse_upf_paw(FIX / "pseudos" / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")
+    # displaced, low-symmetry dimer so every column entry is nonzero
+    pos0 = np.array([[0.02, -0.01, 0.015], [1.3575, 1.36, 1.35]])
+    res1 = scf_uspp(setup_uspp(CELL, pos0, [0, 0], [paw], ecut=12 * RY,
+                               kmesh=(2, 2, 2), ecutrho=48 * RY),
+                    PBE(), etol=1e-11, rhotol=1e-9, verbose=False, max_iter=80)
+    assert res1["converged"]
+    res2 = _fold_nonmagnetic_nspin2(res1)
+    a, alpha = 1, 0
+
+    # bare map derivative: nspin=2 spin-summed δρ == nspin=1 δρ
+    br1, _ = bare_position_derivative(res1, PBE(), a, alpha)
+    br2, _ = bare_position_derivative(res2, SpinPBE(), a, alpha)
+    rel_bare = float((br1 - (br2[0] + br2[1])).norm() / br1.norm())
+    assert rel_bare < 1e-9, f"bare drho rel {rel_bare:.2e}"
+
+    # self-consistent position response: spin-summed δρ* and δbec* == nspin=1
+    drho1, dbec1, _ = position_density_response(res1, PBE(), a, alpha)
+    drho2, dbec2, _ = position_density_response(res2, SpinPBE(), a, alpha)
+    rel_rho = float((drho1 - (drho2[0] + drho2[1])).norm() / drho1.norm())
+    assert rel_rho < 1e-9, f"self-consistent drho rel {rel_rho:.2e}"
+    for i in range(2):
+        dtot = dbec2[0][i] + dbec2[1][i]
+        relb = float((dbec1[i] - dtot).abs().max()
+                     / dbec1[i].abs().max().clamp_min(1e-30))
+        assert relb < 1e-9, f"self-consistent dbec[{i}] rel {relb:.2e}"
+
+    # Hessian column: d²E_total is spin-summed, so it matches directly
+    col1 = hessian_column(res1, PBE(), a, alpha)
+    col2 = hessian_column(res2, SpinPBE(), a, alpha)
+    rel_col = float((col1 - col2).norm() / col1.norm())
+    assert rel_col < 1e-9, f"hessian column rel {rel_col:.2e}"
