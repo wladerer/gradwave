@@ -535,7 +535,7 @@ def _total_orbital_response(cs, pert, w_grid, d_ddd, d_hub=None, cg_tol: float=1
             hub_extra[s0:s0 + d, s0:s0 + d] = 0.5 * (m + m.conj().T)
         hub_extra = hub_extra.conj()
     dpsi_all, deps_all = [], []
-    drho_sm = torch.zeros(cs.shape, dtype=RDTYPE)
+    drho_sm = torch.zeros(cs.shape, dtype=RDTYPE, device=system.positions.device)
     warm = [torch.zeros_like(c[:n_sv]) for c, n_sv in
             zip(cs.c_win[0], cs.n_solve[0], strict=True)]
     for ik, sph in enumerate(system.spheres):

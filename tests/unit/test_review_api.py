@@ -206,3 +206,91 @@ def test_precond_omitted_defaults_to_kerker_at_the_scf_call(tmp_path, monkeypatc
     monkeypatch.setattr(loop, "scf", fake_scf)
     api.run_scf(inp, verbose=False)
     assert captured["precond"] == "kerker"
+
+
+# --------------------------------------------------------------------------- #
+#  shared dispersion compute core (api._compute_dispersion)                    #
+#                                                                             #
+#  api._apply_dispersion (YAML pipeline) and GradWave._apply_dispersion       #
+#  (calculator) used to carry two byte-for-byte copies of the D3/D4 resolve+  #
+#  evaluate block — a drift hazard. They now both delegate to                 #
+#  api._compute_dispersion; these lock that seam to the direct config path so #
+#  neither caller can silently diverge from postscf/dispersion*.              #
+# --------------------------------------------------------------------------- #
+# rattled CO in a box: C and O both D3/D4-covered, within dispersion range.
+_DISP_POS = torch.tensor([[3.15, 3.20, 3.20], [3.15, 3.20, 4.33]], dtype=torch.float64)
+_DISP_CELL = torch.eye(3, dtype=torch.float64).numpy() * 6.4
+_DISP_Z = [6, 8]
+
+
+def test_compute_dispersion_d3_matches_direct_config():
+    from gradwave.api import _compute_dispersion
+    from gradwave.postscf.dispersion import (
+        D3Config,
+        dispersion_energy,
+        dispersion_forces,
+        dispersion_stress,
+    )
+
+    cfg = D3Config.resolve("pbe", cutoff_ang=21.2, cn_cutoff_ang=10.6)
+    cell_t = torch.as_tensor(_DISP_CELL, dtype=torch.float64)
+    e_ref = float(dispersion_energy(_DISP_POS, cell_t, _DISP_Z, cfg))
+    f_ref = dispersion_forces(_DISP_POS, _DISP_CELL, _DISP_Z, cfg)
+    s_ref = dispersion_stress(_DISP_POS, _DISP_CELL, _DISP_Z, cfg)
+
+    terms = _compute_dispersion(
+        _DISP_POS, _DISP_CELL, _DISP_Z, method="d3", functional="pbe",
+        cutoff_ang=21.2, cn_cutoff_ang=10.6,
+    )
+    assert float(terms.energy) == pytest.approx(e_ref, rel=1e-12)
+    assert torch.allclose(terms.forces, f_ref)
+    assert torch.allclose(terms.stress, s_ref)
+    # the resolved config the summary block reports its damping from
+    assert (terms.cfg.s6, terms.cfg.s8, terms.cfg.a1, terms.cfg.a2) == (
+        cfg.s6, cfg.s8, cfg.a1, cfg.a2)
+
+
+def test_compute_dispersion_d4_matches_direct_config():
+    from gradwave.api import _compute_dispersion
+    from gradwave.postscf.dispersion_d4 import (
+        D4Config,
+        dispersion_energy,
+        dispersion_forces,
+    )
+
+    cfg = D4Config.resolve("pbe", charge=0.0, cutoff_ang=21.2, cn_cutoff_ang=10.6)
+    cell_t = torch.as_tensor(_DISP_CELL, dtype=torch.float64)
+    e_ref = float(dispersion_energy(_DISP_POS, cell_t, _DISP_Z, cfg))
+    f_ref = dispersion_forces(_DISP_POS, _DISP_CELL, _DISP_Z, cfg)
+
+    terms = _compute_dispersion(
+        _DISP_POS, _DISP_CELL, _DISP_Z, method="d4", functional="pbe",
+        charge=0.0, cutoff_ang=21.2, cn_cutoff_ang=10.6,
+    )
+    assert float(terms.energy) == pytest.approx(e_ref, rel=1e-12)
+    assert torch.allclose(terms.forces, f_ref)
+
+
+def test_compute_dispersion_skips_stress_when_not_needed():
+    """The calculator passes need_stress=False when 'stress' isn't requested;
+    the shared core must then skip the stress evaluation and return None."""
+    from gradwave.api import _compute_dispersion
+
+    terms = _compute_dispersion(
+        _DISP_POS, _DISP_CELL, _DISP_Z, method="d3", functional="pbe",
+        cutoff_ang=21.2, cn_cutoff_ang=10.6, need_stress=False,
+    )
+    assert terms.stress is None
+    assert terms.forces is not None
+
+
+def test_compute_dispersion_uncovered_element_raises():
+    """An element with no vendored reference raises (callers catch and degrade
+    to their own not-available shape)."""
+    from gradwave.api import _compute_dispersion
+
+    with pytest.raises((ValueError, NotImplementedError)):
+        _compute_dispersion(
+            _DISP_POS, _DISP_CELL, [6, 118], method="d3", functional="pbe",
+            cutoff_ang=21.2, cn_cutoff_ang=10.6,
+        )
