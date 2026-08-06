@@ -35,9 +35,13 @@ the gap: the two paths agree to ~0.01 cm⁻¹ (~1e-5), matching the P1 column ch
 and the energy-second-difference oracle.
 
 The analytic path is also QE-validated (SiGe ph.x DFPT, 4×4×4/45 Ry: gradwave
-419.4 vs QE 419.14, +0.06 %). The 0.2 cm⁻¹ optical tolerance guards the two paths
-tracking each other (catching sign/factor/unit/solver breakage) with margin over
-the observed ~0.01 cm⁻¹.
+419.4 vs QE 419.14, +0.06 %). The 0.05 cm⁻¹ optical tolerance guards the two
+paths tracking each other (catching sign/factor/unit/solver breakage) with ~9×
+margin over the observed ~0.006 cm⁻¹ — the residual is deterministic (Sternheimer
+CG tolerance and O(h²) FD truncation, not platform BLAS/FFT noise), so the tight
+bound also serves as a regression guard on the degenerate-window fix itself: with
+the pre-#141 −½⟨m|δS|n⟩ gauge the mismatch is ~1.6 cm⁻¹ (0.27 %), 30× over this
+bound.
 """
 
 from pathlib import Path
@@ -113,8 +117,9 @@ def test_gamma_phonons_hvp_matches_finite_displacement():
     assert 400.0 < f_hvp[3:].mean() < 700.0
     assert 400.0 < f_fd[3:].mean() < 700.0
     # the cross-validation: the two independent methods now track each other to
-    # ~0.01 cm⁻¹ (~1e-5) — the degenerate-window systematic is fixed (#141, see
-    # module docstring). 0.2 cm⁻¹ leaves margin for platform BLAS/FFT noise
-    # while still catching any sign/factor/unit/solver regression in either path
-    assert np.abs(f_hvp[3:] - f_fd[3:]).max() < 0.2, (
+    # ~0.006 cm⁻¹ (~1e-5) — the degenerate-window systematic is fixed (#141, see
+    # module docstring). 0.05 cm⁻¹ keeps ~9× margin over the deterministic
+    # residual while still catching the pre-fix ~1.6 cm⁻¹ regression (or any
+    # sign/factor/unit/solver breakage) in either path
+    assert np.abs(f_hvp[3:] - f_fd[3:]).max() < 0.05, (
         f"optical mismatch Hvp={f_hvp[3:]} FD={f_fd[3:]}")
