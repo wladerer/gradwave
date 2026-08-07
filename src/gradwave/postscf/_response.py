@@ -422,6 +422,56 @@ def insulator_window(occ: torch.Tensor, f_full: float, err_msg: str) -> int:
     return nocc
 
 
+def is_insulating(occ: torch.Tensor, f_full: float, tol: float = 1e-6) -> bool:
+    """True iff every occupation in ``occ`` is (near-)integer — 0 or ``f_full``.
+
+    The dispatch that separates the exact insulator χ₀ path (fully-occupied
+    Sternheimer, no Fermi surface) from the metallic partial-occupation path.
+    A single fractional occupation anywhere flips it to the metallic branch,
+    matching the wisdom-note guidance that the metallic response must be tested
+    only where fractional occupations actually exist."""
+    frac = (occ > tol) & (occ < f_full - tol)
+    return not bool(frac.any())
+
+
+def occupation_derivative(eps: torch.Tensor, mu: float, scheme, width: float,
+                          degeneracy: float) -> torch.Tensor:
+    """d(occ_n)/dε_n [1/eV] for a smearing ``scheme`` — the (negative) local
+    density-of-states weight −(g/σ)·δ̃((ε−μ)/σ).
+
+    ``scheme`` is a ``core.occupations.Smearing``; ``occ = g·f((ε−μ)/σ)`` so
+    ``d occ/dε = (g/σ)·f'`` with ``f'`` taken by autograd through the scheme's
+    own occupation function (exact for any of the four schemes, no separate
+    derivative to keep in sync). Returns a tensor shaped like ``eps``, ≤ 0."""
+    x = ((eps.detach() - mu) / width).clone().requires_grad_(True)
+    with torch.enable_grad():
+        f = scheme.occupation(x).sum()
+        (df,) = torch.autograd.grad(f, x)
+    return degeneracy * df / width
+
+
+def divided_difference_weights(eps: torch.Tensor, occ: torch.Tensor,
+                               occ_deriv: torch.Tensor,
+                               deg_tol: float = 1e-6) -> torch.Tensor:
+    """The Adler–Wiser divided-difference matrix β_nm = (occ_n−occ_m)/(ε_n−ε_m)
+    of one k-point's window, with the analytic degenerate limit on the diagonal
+    and near-degenerate pairs.
+
+    For |ε_n−ε_m| > ``deg_tol`` this is the plain divided difference; as
+    ε_m → ε_n (including n=m) it goes to the derivative, taken here as the
+    average of the two endpoint slopes ½(occ'_n+occ'_m). β is real-symmetric;
+    the diagonal is occ'_n (the Fermi-surface / occupation-response weight).
+    Deep pairs where occ_n=occ_m (both full or both empty) give β=0 — Pauli
+    blocking, no interband response. Shape (nb, nb)."""
+    de = eps[:, None] - eps[None, :]
+    do = occ[:, None] - occ[None, :]
+    near = de.abs() < deg_tol
+    safe_de = torch.where(near, torch.ones_like(de), de)
+    beta = do / safe_de
+    avg = 0.5 * (occ_deriv[:, None] + occ_deriv[None, :])
+    return torch.where(near, avg, beta)
+
+
 def pad_coeffs(coeffs_per_k: list[torch.Tensor], npw_max: int,
                device: torch.device | None=None) -> torch.Tensor:
     """[(nb, npw_k)] per k → padded (nk, nb, npw_max), detached. `device`
