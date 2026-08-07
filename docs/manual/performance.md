@@ -295,6 +295,23 @@ time again.
   a real, measured, much larger win landed the same day. Building the
   per-shape graph-cache/warmup machinery this would have needed was
   abandoned once the isolated-op measurement made the null result clear.
+- **PyGraph-style glue capture (measured 2026-08-06, RTX 3050).** The one thread
+  the prior investigation left open: capture only the real-valued glue kernels the
+  profile names -- XC `energy_density`, Hartree, density build -- outside the solver
+  and between the FFTs, leaving the uncapturable Fermi solve and mixer eager (the
+  PyGraph cut). Measured on the real iteration-2 glue tensors snapshotted from the NC
+  loop (`benchmarks/bench_glue_capture.py`, Si 4x4x4, box 25^3, nk 36, nb 8). The
+  result splits. The small non-FFT tiny-kernel work *does* reclaim its launch
+  overhead -- `xc.energy_density` 1.3x (LDA) to 2.0x (PBE), `hartree_potential_r`
+  1.8x to 2.8x, at or above the 1.2-1.5x estimate -- but it is ~1% of the glue. The
+  density build (`density_b`, ~10.4 ms) dominates the real-valued glue on a multi-k
+  cell and is FFT-compute-bound, replaying at 1.00x, so the *composite* glue capture
+  is 1.00-1.01x. The reclaim is real but lands only on kernels that are a percent of
+  the step, so it does not pay for the per-shape graph-cache/warmup machinery on a
+  multi-k periodic cell. It would matter where `density_b` does not dominate --
+  Gamma-point / few-band / small-grid (small-molecule) regimes -- which is not the
+  multi-k periodic target. The vxc *potential* (an autograd backward of the same
+  elementwise kernels) and the uncapturable Fermi/mixer were excluded.
 - **torch.compile on the Hamiltonian apply.** Inductor does not codegen complex
   operations, and the real-decomposed slice that would compile is too small next
   to the FFTs. It was tried and removed for the complex apply. The real-valued XC
