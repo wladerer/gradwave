@@ -8,11 +8,16 @@ self-consistent linear problem regardless of the number of parameters:
     u = v̄ + K_Hxc[χ₀ u],        v̄(r) = ∂L/∂ρ(r)
     dL/dθ = ⟨χ₀ u, ∂v_xc/∂θ⟩_grid + ∂L/∂θ|_explicit
 
-χ₀ w:  independent-particle response of the density to a local potential w,
-       one conduction-projected Sternheimer solve (H − ε_n + αP_occ)|δψ_n⟩ =
-       −P_c w|ψ_n⟩ per occupied band per k (CG; positive definite on the
-       conduction space thanks to the gap — INSULATORS ONLY here; the
-       metallic Fermi-surface term is future work).
+χ₀ w:  independent-particle response of the density to a local potential w.
+       Insulator: one conduction-projected Sternheimer solve (H − ε_n +
+       αP_occ)|δψ_n⟩ = −P_c w|ψ_n⟩ per occupied band per k (CG; positive
+       definite on the conduction space thanks to the gap). Metal (any
+       fractional occupation): the window scheme (``_chi0_channel_metal``) —
+       an above-window Sternheimer (project out the *whole* computed window,
+       positive definite through the Fermi level), plus the in-window band
+       pairs with divided-difference occupation weights, plus the rank-one
+       δμ Fermi-level-shift term that conserves particle number. It reduces
+       smoothly to the insulator response as the Fermi-surface weight occ'→0.
 K_Hxc: Hartree kernel 4πe²/G² + f_xc, with f_xc·w obtained as an autograd
        Hessian-vector product of E_xc — any twice-differentiable functional
        works automatically, including learnable ones.
@@ -29,8 +34,9 @@ Sternheimer solves, with the single-band degeneracy weight g = 1 instead of
 the grid E_xc (fxc_hvp_spin, NLCC core split half/half). The loss stays a
 functional of the total density, so v̄ = ∂L/∂ρ seeds both channels equally.
 This mirrors the USPP/PAW twin in postscf/uspp_implicit.py, minus the
-augmentation/one-center blocks (norm-conserving has none) and minus the
-Fermi-surface channel (insulators only, both spin channels integer-filled).
+augmentation/one-center blocks (norm-conserving has none). The metallic
+Fermi-surface channel above applies per spin channel independently, so a
+collinear magnet with a partially-filled spin channel is handled.
 
 This module is the mathematical core that a torch.autograd.Function wrapper
 (and torch.func Hessians) will build on; the direct API here is
@@ -50,12 +56,16 @@ from gradwave.core._anderson import AndersonMixer
 from gradwave.core.density import sigma_from_rho
 from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
 from gradwave.core.hamiltonian import HamiltonianK, projectors
+from gradwave.core.occupations import SCHEMES
 from gradwave.core.xc.base import xc_eager
 from gradwave.dtypes import RDTYPE
 from gradwave.postscf._response import (
+    divided_difference_weights,
     fxc_hvp,
     fxc_hvp_spin,
     hartree_kernel,
+    is_insulating,
+    occupation_derivative,
     spin_sigma_triple,
     sternheimer_shift,
 )
@@ -185,6 +195,119 @@ def _sternheimer(h: HamiltonianK, c_occ, eps_occ, w_r, alpha: float, tol: float,
     return p_c(x)
 
 
+def _all_bands(res: SCFResult, isp: int, ik: int):
+    """All computed (coeffs, ε, occ) of spin channel ``isp`` at k-point ``ik``.
+
+    The full window the metallic χ₀ projects out of (Sternheimer) and sums band
+    pairs over — occupied, partially occupied, and the empty buffer bands. No
+    insulator check: the metallic path handles any occupation."""
+    nspin = getattr(res, "nspin", 1)
+    if nspin == 1:
+        return res.coeffs[ik], res.eigenvalues[ik], res.occupations[ik]
+    return res.coeffs[isp][ik], res.eigenvalues[isp][ik], res.occupations[isp][ik]
+
+
+def _sternheimer_above(h: HamiltonianK, c_win, c_solve, eps_solve, w_r, alpha: float,
+                       tol: float, max_iter: int):
+    """(H − ε_n + α P_win) δψ_n = −P_⊥ w ψ_n for the ``c_solve`` bands, δψ living
+    ABOVE the entire computed window (P_win = c_win c_win†, P_⊥ = 1 − P_win).
+
+    The metallic counterpart of ``_sternheimer``: projecting out the *whole*
+    window (not just the occupied bands) keeps H − ε_n positive definite on the
+    complement even for a band n sitting at the Fermi level, so CG never sees the
+    indefinite Fermi-surface block. Returns δψ (n_solve, npw), all above-window.
+    """
+
+    def p_win(x):
+        return (x @ c_win.conj().T) @ c_win
+
+    psi_r = g_to_r(c_solve, h.sphere.flat_idx, h.shape)
+    w_psi = box_to_sphere(r_to_g(psi_r * w_r), h.sphere.flat_idx)
+    rhs = -(w_psi - p_win(w_psi))
+
+    def a_apply(x):
+        hx = h.apply(x) - eps_solve[:, None] * x
+        return (hx - p_win(hx)) + alpha * p_win(x)
+
+    x = torch.zeros_like(rhs)
+    r = rhs - a_apply(x)
+    t_g = h.t
+    t_band = torch.clamp(
+        torch.einsum("bg,g,bg->b", c_solve.conj(), t_g.to(c_solve.dtype), c_solve).real,
+        min=1e-6,
+    )
+    x = projected_cg(a_apply, lambda rr: teter(rr, t_g, t_band), x, r, tol, max_iter)
+    return x - p_win(x)
+
+
+def _chi0_channel_metal(res: SCFResult, hs_k: list[HamiltonianK], isp: int,
+                        w_r: torch.Tensor, f_full: float, mu: float, scheme,
+                        width: float, tol: float, max_iter: int) -> torch.Tensor:
+    """δρ_σ(r) = χ₀^σ w for one spin channel WITH partial occupations (metal).
+
+    The window scheme (wisdom.md, "Response, adjoints, and autograd"): split the
+    Adler–Wiser response into three physically disjoint pieces, summed over the
+    computed band window at each k —
+
+      1. window → above-window transitions, via a Sternheimer solve that projects
+         out the *entire* window (``_sternheimer_above``), weighted by the band's
+         own occupation occ_n;
+      2. in-window band pairs (n, m), summed explicitly with the divided-
+         difference weight β_nm = (occ_n−occ_m)/(ε_n−ε_m), which stays finite
+         through the Fermi surface (the analytic derivative limit on the
+         diagonal and near-degenerate pairs);
+      3. the rank-one Fermi-level-shift −δμ Σ_n occ'_n |ψ_n|² that keeps the
+         electron number fixed, δμ = ⟨occ'·V_nn⟩ / ⟨occ'⟩ summed over the whole
+         Brillouin zone.
+
+    In the insulating limit occ'_n → 0, so pieces (2)-diagonal and (3) vanish and
+    the pair sum reduces to the occupied→empty response — the same physics as the
+    ``_chi0_channel`` insulator path (verified to agree in the tests). δμ is a
+    global scalar, so a first pass accumulates its numerator/denominator before
+    the second pass assembles the density.
+    """
+    system = res.system
+    grid = system.grid
+    ng = grid.shape
+    dr = torch.zeros(ng, dtype=RDTYPE, device=grid.g2.device)
+
+    stash = []
+    num = 0.0
+    den = 0.0
+    for ik, h in enumerate(hs_k):
+        c_all, eps, occ = _all_bands(res, isp, ik)
+        occ_d = occupation_derivative(eps, mu, scheme, width, f_full)
+        psi_r = g_to_r(c_all, h.sphere.flat_idx, ng)
+        wpsi_sph = box_to_sphere(r_to_g(psi_r * w_r), h.sphere.flat_idx)
+        v_mat = c_all.conj() @ wpsi_sph.transpose(-1, -2)  # V[m,n]=⟨ψ_m|w|ψ_n⟩
+        vnn = torch.diagonal(v_mat).real
+        kw = float(system.kweights[ik])
+        num += kw * float((occ_d * vnn).sum())
+        den += kw * float(occ_d.sum())
+        stash.append((h, c_all, eps, occ, occ_d, psi_r, v_mat, kw))
+    dmu = num / den if abs(den) > 1e-30 else 0.0
+
+    for h, c_all, eps, occ, occ_d, psi_r, v_mat, kw in stash:
+        pr = psi_r.reshape(c_all.shape[0], -1)  # (nb, ngrid)
+        beta = divided_difference_weights(eps, occ, occ_d)
+        a_mat = beta * v_mat.transpose(-1, -2)  # A[n,m] = β[n,m]·V[m,n]
+        inwin = torch.einsum("nm,ng,mg->g", a_mat, pr.conj(), pr).real
+        occ_resp = torch.einsum("n,ng->g", occ_d, (pr.conj() * pr).real)
+        contrib = kw * (inwin - dmu * occ_resp)
+
+        mask = occ > 1e-6 * f_full
+        if bool(mask.any()):
+            c_solve, eps_solve, occ_solve = c_all[mask], eps[mask], occ[mask]
+            dpsi = _sternheimer_above(h, c_all, c_solve, eps_solve, w_r,
+                                      sternheimer_shift(eps), tol, max_iter)
+            dpsi_r = g_to_r(dpsi, h.sphere.flat_idx, ng).reshape(occ_solve.shape[0], -1)
+            above = 2.0 * torch.einsum("n,ng->g", occ_solve,
+                                       (pr[mask].conj() * dpsi_r).real)
+            contrib = contrib + kw * above
+        dr += contrib.reshape(ng)
+    return dr / grid.volume
+
+
 def _chi0_channel(res: SCFResult, hs_k: list[HamiltonianK], isp: int, w_r: torch.Tensor,
                   f_full: float, tol: float, max_iter: int) -> torch.Tensor:
     """δρ_σ(r) = χ₀^σ w for one spin channel (block-diagonal in spin)."""
@@ -206,23 +329,47 @@ def _chi0_channel(res: SCFResult, hs_k: list[HamiltonianK], isp: int, w_r: torch
     return dr / grid.volume
 
 
+def _res_is_insulating(res: SCFResult) -> bool:
+    """Every spin channel integer-filled → the exact insulator χ₀ path applies."""
+    nspin = getattr(res, "nspin", 1)
+    if nspin == 1:
+        return is_insulating(res.occupations, 2.0)
+    return all(is_insulating(res.occupations[isp], 1.0) for isp in range(nspin))
+
+
 @torch.no_grad()
 def apply_chi0(res: SCFResult, w_r: torch.Tensor, tol: float = 1e-8,
                max_iter: int = 200) -> torch.Tensor:
-    """δρ = χ₀ w for a real local field w [insulator].
+    """δρ = χ₀ w for a real local field w — insulator or metal.
 
     nspin=1: ``w_r`` is a grid field, returns a grid field. nspin=2: ``w_r`` is
     the stacked per-spin field (2, *grid.shape) and the return is the stacked
-    per-spin density response — χ₀ is block-diagonal over spin."""
+    per-spin density response — χ₀ is block-diagonal over spin.
+
+    Dispatch on the occupations: an integer-filled result uses the exact
+    fully-occupied Sternheimer path (``_chi0_channel``); any fractional
+    occupation (a smeared metal, or a magnet with partial spin fillings) uses
+    the partial-occupation window path (``_chi0_channel_metal``), which reduces
+    smoothly to the insulator response as the Fermi-surface weight occ' → 0."""
     _check_no_symmetry(res)
     hs = _hamiltonians(res)
     nspin = getattr(res, "nspin", 1)
+    if _res_is_insulating(res):
+        if nspin == 1:
+            return _chi0_channel(res, cast("list[HamiltonianK]", hs), 0, w_r, 2.0,
+                                 tol, max_iter)
+        hs_spin = cast("list[list[HamiltonianK]]", hs)
+        return torch.stack([_chi0_channel(res, hs_spin[isp], isp, w_r[isp], 1.0,
+                                          tol, max_iter) for isp in range(nspin)])
+    scheme = SCHEMES[res.smearing]
+    mu = float(res.fermi)
     if nspin == 1:
-        return _chi0_channel(res, cast("list[HamiltonianK]", hs), 0, w_r, 2.0, tol, max_iter)
+        return _chi0_channel_metal(res, cast("list[HamiltonianK]", hs), 0, w_r, 2.0,
+                                   mu, scheme, res.width, tol, max_iter)
     hs_spin = cast("list[list[HamiltonianK]]", hs)
-    drs = [_chi0_channel(res, hs_spin[isp], isp, w_r[isp], 1.0, tol, max_iter)
-           for isp in range(nspin)]
-    return torch.stack(drs)
+    return torch.stack([
+        _chi0_channel_metal(res, hs_spin[isp], isp, w_r[isp], 1.0, mu, scheme,
+                            res.width, tol, max_iter) for isp in range(nspin)])
 
 
 def apply_k_hxc(res: SCFResult, xc, w_r: torch.Tensor) -> torch.Tensor:
