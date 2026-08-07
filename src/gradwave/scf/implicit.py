@@ -39,6 +39,8 @@ This module is the mathematical core that a torch.autograd.Function wrapper
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 
 # Cycle-free import direction: postscf._response depends only on core/, and
@@ -93,7 +95,7 @@ def _occupied(res: SCFResult, isp: int, ik: int):
     return coeffs[:n_occ], eps[:n_occ]
 
 
-def _hamiltonians(res: SCFResult) -> list:
+def _hamiltonians(res: SCFResult) -> list[HamiltonianK] | list[list[HamiltonianK]]:
     """Per-k HamiltonianK (nspin=1) or per-spin, per-k list-of-lists (nspin=2).
 
     For nspin=2 each channel uses its own v_eff^σ; the plane-wave sphere and
@@ -183,7 +185,7 @@ def _sternheimer(h: HamiltonianK, c_occ, eps_occ, w_r, alpha: float, tol: float,
     return p_c(x)
 
 
-def _chi0_channel(res: SCFResult, hs_k: list, isp: int, w_r: torch.Tensor,
+def _chi0_channel(res: SCFResult, hs_k: list[HamiltonianK], isp: int, w_r: torch.Tensor,
                   f_full: float, tol: float, max_iter: int) -> torch.Tensor:
     """δρ_σ(r) = χ₀^σ w for one spin channel (block-diagonal in spin)."""
     system = res.system
@@ -216,8 +218,9 @@ def apply_chi0(res: SCFResult, w_r: torch.Tensor, tol: float = 1e-8,
     hs = _hamiltonians(res)
     nspin = getattr(res, "nspin", 1)
     if nspin == 1:
-        return _chi0_channel(res, hs, 0, w_r, 2.0, tol, max_iter)
-    drs = [_chi0_channel(res, hs[isp], isp, w_r[isp], 1.0, tol, max_iter)
+        return _chi0_channel(res, cast("list[HamiltonianK]", hs), 0, w_r, 2.0, tol, max_iter)
+    hs_spin = cast("list[list[HamiltonianK]]", hs)
+    drs = [_chi0_channel(res, hs_spin[isp], isp, w_r[isp], 1.0, tol, max_iter)
            for isp in range(nspin)]
     return torch.stack(drs)
 
@@ -251,6 +254,7 @@ def apply_k_hxc(res: SCFResult, xc, w_r: torch.Tensor) -> torch.Tensor:
         return hartree_kernel(grid, w_r) + fxc_hvp(xc, rho_xc, grid, w_r)
     kh = hartree_kernel(grid, w_r[0] + w_r[1])
     c2 = 0.0 if core is None else 0.5 * core
+    assert res.rho_spin is not None  # nspin=2 always carries per-spin densities
     fu, fd = fxc_hvp_spin(xc, res.rho_spin[0] + c2, res.rho_spin[1] + c2,
                           grid, w_r[0], w_r[1])
     return torch.stack([kh + fu, kh + fd])
@@ -291,7 +295,9 @@ def solve_adjoint(res: SCFResult, xc, vbar_r: torch.Tensor, beta: float = 0.4,
         f"adjoint fixed point not converged ({step:.2e} after {max_iter} iters)")
 
 
-def density_loss_param_grads(res: SCFResult, xc, loss_fn) -> tuple[torch.Tensor, dict]:
+def density_loss_param_grads(
+    res: SCFResult, xc, loss_fn,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Gradients dL/dθ of a density-dependent loss through the SCF fixed point.
 
     loss_fn: rho(grid tensor of the TOTAL density) -> scalar torch tensor
@@ -331,6 +337,7 @@ def density_loss_param_grads(res: SCFResult, xc, loss_fn) -> tuple[torch.Tensor,
             inner = (v_xc * chi0_u.detach()).sum() * scale
         else:
             c2 = 0.0 if core is None else 0.5 * core
+            assert res.rho_spin is not None  # nspin=2 always carries per-spin densities
             ru = (res.rho_spin[0] + c2).detach().clone().requires_grad_(True)
             rd = (res.rho_spin[1] + c2).detach().clone().requires_grad_(True)
             s_uu, s_dd, s_tt = spin_sigma_triple(xc, ru, rd, grid.g_cart)

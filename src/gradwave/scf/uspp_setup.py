@@ -13,7 +13,7 @@ from __future__ import annotations
 import dataclasses
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import torch
@@ -32,6 +32,9 @@ if TYPE_CHECKING:
     # concrete classes are otherwise only ever reached through the existing
     # function-local imports elsewhere in this file (find_symmetry_groups,
     # _make_becsum_sym), so this keeps them out of the runtime import graph.
+    from gradwave.core.hamiltonian import ProjectorData
+    from gradwave.grids import GSphere
+    from gradwave.pseudo.upf import UPFData
     from gradwave.scf.paw_symmetry import BecsumSymmetrizer, MagneticBecsumSymmetrizer
     from gradwave.symmetry import MagneticSymmetrizer, RhoSymmetrizer, SpaceGroup
 
@@ -62,29 +65,29 @@ class AugSpecies:
 @dataclass
 class USPPSystem:
     grid: FFTGrid
-    spheres: list
+    spheres: list[GSphere]
     kweights: torch.Tensor
     positions: torch.Tensor
-    species_of_atom: list
-    paws: list
+    species_of_atom: list[int]
+    paws: list[PAWData]
     charges: torch.Tensor
     n_electrons: float
     nbands: int
     ecut: float
-    proj_data: list  # per-k ProjectorData (dij_full = BARE D, m-expanded)
+    proj_data: list[ProjectorData]  # per-k ProjectorData (dij_full = BARE D, m-expanded)
     q_full: torch.Tensor  # (nproj_tot, nproj_tot) m-expanded S weights
-    aug: list  # per-species AugSpecies
+    aug: list[AugSpecies]  # per-species AugSpecies
     sphere_idx: torch.Tensor  # (nGm,) flat indices of the density sphere
     g_sphere: torch.Tensor  # (nGm, 3)
     vloc_tables: torch.Tensor
     rho_core: torch.Tensor | None
-    atom_slices: list = field(default_factory=list)  # per-atom projector column ranges
+    atom_slices: list[tuple[int, int]] = field(default_factory=list)  # per-atom col ranges
     sym: SpaceGroup | None = None  # set when use_symmetry
     rho_symmetrizer: RhoSymmetrizer | MagneticSymmetrizer | None = None
     becsum_sym: BecsumSymmetrizer | MagneticBecsumSymmetrizer | None = None
     # dual grid: the H-apply local term runs on the smaller wavefunction box
     # (2·G_max(ecut)) instead of the dense ecutrho box. None disables it.
-    smooth_shape: tuple | None = None
+    smooth_shape: tuple[int, int, int] | None = None
     smooth_flat_idx: torch.Tensor | None = None  # (nk, npw_max) into the smooth box
     smooth2dense: torch.Tensor | None = None  # (n_smooth,) smooth→dense flat, by Miller
 
@@ -145,7 +148,7 @@ def _aug_tables(paw: PAWData, g_sphere: np.ndarray) -> AugSpecies:
 
     # radial transforms per (channel pair, L) on unique shells
     n = paw.aug_cutoff_idx
-    rad: dict[tuple, np.ndarray] = {}
+    rad: dict[tuple[int, int, int], np.ndarray] = {}
     for (i, j, ll), qfun in paw.qijl.items():
         rad[(i, j, ll)] = sbt(ll, qfun, paw.r[:n], paw.rab[:n], uniq)[inv]
 
@@ -182,7 +185,7 @@ def _aug_tables(paw: PAWData, g_sphere: np.ndarray) -> AugSpecies:
 # change (new G set) recomputes. Keyed by id(paw) with a weakref finalizer so
 # a dead pseudo cannot alias a recycled id; the G set is a content digest.
 # Values stay CPU-pristine — USPPSystem.to copies via dataclasses.replace.
-_AUG_CACHE: dict[int, tuple] = {}
+_AUG_CACHE: dict[int, tuple[object, AugSpecies]] = {}
 
 
 def _aug_tables_cached(paw: PAWData, g_sphere: np.ndarray) -> AugSpecies:
@@ -300,8 +303,11 @@ def setup_uspp(
     proj_data, q_full = [], None
     for sph in spheres:
         q_of_k = np.sqrt(sph.kpg2.numpy())
+        # PAWData duck-types UPFData's beta-radial interface (n_proj/betas/r/rab),
+        # which is all beta_form_factors reads — the USPP setup relies on this.
         beta_tables = [
-            torch.as_tensor(beta_form_factors(p, q_of_k), dtype=RDTYPE) for p in paws
+            torch.as_tensor(beta_form_factors(cast("UPFData", p), q_of_k), dtype=RDTYPE)
+            for p in paws
         ]
         proj_data.append(
             build_projector_data(sph, species_of_atom, beta_tables, beta_ls,
@@ -329,6 +335,7 @@ def setup_uspp(
         slices.append((start, start + nm))
         start += nm
 
+    assert q_full is not None  # spheres is non-empty, so the loop always sets it
     return USPPSystem(
         grid=grid, spheres=spheres,
         kweights=torch.as_tensor(kw, dtype=RDTYPE),
@@ -353,7 +360,7 @@ def setup_uspp(
 # rounded S stack rather than the raw cell — a symmetry-preserving strain or
 # position step leaves S unchanged and reuses the blocks. Cached entries stay
 # pristine (callers get a shallow copy; ``.to`` rebinds, never mutates them).
-_BECSUM_SYM_CACHE: dict[tuple, object] = {}
+_BECSUM_SYM_CACHE: dict[tuple[object, ...], BecsumSymmetrizer] = {}
 _BECSUM_SYM_CACHE_MAX = 8
 
 

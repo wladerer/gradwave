@@ -679,6 +679,11 @@ def _build_output_density(
             rho_ij_s[isp] = [all_reduce_(m, ops.dist_ctx) for m in rho_ij_s[isp]]
         rho_ij_s[isp] = [0.5 * (m + m.conj().T) for m in rho_ij_s[isp]]
         if system.becsum_sym is not None:
+            # the collinear driver only ever carries the per-channel
+            # BecsumSymmetrizer; the Pauli-channel MagneticBecsumSymmetrizer
+            # is the noncollinear (spinor) driver's business.
+            from gradwave.scf.paw_symmetry import BecsumSymmetrizer
+            assert isinstance(system.becsum_sym, BecsumSymmetrizer)
             rho_ij_s[isp] = system.becsum_sym.apply(rho_ij_s[isp])
         becps_s.append(becps)
 

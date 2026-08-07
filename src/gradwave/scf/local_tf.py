@@ -64,8 +64,8 @@ class LocalTFPrecond:
         self.q0_max2 = float(q0_max) ** 2
         self.cg_iters = cg_iters
         self.cg_tol = cg_tol
-        self.q2_r = None      # (*shape,) real, q²(r) [Å⁻²]
-        self._u_warm = None   # (n_points,) complex, warm-started CG solution
+        self.q2_r: torch.Tensor | None = None      # (*shape,) real, q²(r) [Å⁻²]
+        self._u_warm: torch.Tensor | None = None   # (n_points,) complex, warm CG solution
 
     def set_density(self, rho_r: torch.Tensor) -> None:
         """Build q²(r) from the current total density n(r) [e/Å³]."""
@@ -80,6 +80,7 @@ class LocalTFPrecond:
 
     def _apply_operator(self, u_box: torch.Tensor) -> torch.Tensor:
         """(-∇² + Q̂) u in box G-space.  u_box, out: (n_points,) complex."""
+        assert self.q2_r is not None, "call set_density() before applying the operator"
         lap = self.g2 * u_box
         u_r = g_to_r_box(u_box.reshape(self.shape))
         qu = torch.fft.fftn(self.q2_r * u_r, dim=(-3, -2, -1)).reshape(-1) / self.n_points

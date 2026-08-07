@@ -15,6 +15,7 @@ at the same tolerance (validated on the Si USPP/PAW fast test).
 from __future__ import annotations
 
 import dataclasses
+from typing import Protocol
 
 import torch
 
@@ -38,7 +39,8 @@ class BatchedHS:
             hub_q=hub_sphi, hub_dij=hub_d, smooth=smooth,
         )
         self.t = bk.t
-        self._pq_cache: dict = {}  # cdtype → (p, p_conj, q) for mixed precision
+        # cdtype → (p, p_conj, q) for mixed precision
+        self._pq_cache: dict[torch.dtype, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
     def _pq(self, cdtype):
         cached = self._pq_cache.get(cdtype)
@@ -60,7 +62,30 @@ class BatchedHS:
                 ) * self.bk.mask[:, None, :]
 
 
-def davidson_gen_batched(hs: BatchedHS, x0: torch.Tensor, nbands: int,
+class _BKLike(Protocol):
+    """The padded-batch metadata the generalized Davidson reads off ``hs.bk`` —
+    satisfied by both BatchedK and the noncollinear ``_SpinorBK`` shim."""
+
+    @property
+    def mask(self) -> torch.Tensor: ...
+    @property
+    def npw(self) -> torch.Tensor: ...
+
+
+class _GenEigHS(Protocol):
+    """The H/S apply surface the generalized Davidson reads — satisfied by
+    both BatchedHS (collinear) and SpinorBatchedHS (noncollinear)."""
+
+    @property
+    def bk(self) -> _BKLike: ...
+    @property
+    def t(self) -> torch.Tensor: ...
+
+    def h(self, c: torch.Tensor) -> torch.Tensor: ...
+    def s(self, c: torch.Tensor) -> torch.Tensor: ...
+
+
+def davidson_gen_batched(hs: _GenEigHS, x0: torch.Tensor, nbands: int,
                          tol: float, max_iter: int = 60,
                          max_dim_factor: int = 4):
     """Block Davidson for H x = ε S x over (nk, ·, npw_max) padded blocks.

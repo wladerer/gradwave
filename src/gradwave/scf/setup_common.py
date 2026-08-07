@@ -7,6 +7,8 @@ cutoff logic)."""
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import torch
 
@@ -14,13 +16,16 @@ from gradwave.core.fftbox import g_to_r_box
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.kpoints import monkhorst_pack
 
+if TYPE_CHECKING:
+    from gradwave.symmetry import RhoSymmetrizer
+
 
 def _unique_shells(vals: np.ndarray):
     uniq, inverse = np.unique(np.round(vals, 9), return_inverse=True)
     return uniq, inverse
 
 
-def sym_ops_key(sym) -> tuple:
+def sym_ops_key(sym) -> tuple[bytes, bytes]:
     """Content key for a space group's operation set. Rotations are integer
     matrices; translations are rounded so spglib jitter far below symprec
     cannot split a cache on a symmetry-preserving geometry step (+0.0
@@ -36,7 +41,7 @@ def sym_ops_key(sym) -> tuple:
 # shape, so the maps are rebuilt only on a genuine change. Entries hold the
 # CPU-built maps (with_mask/to never mutate them); the cap is small because
 # one entry is the size of a symmetrizer already alive inside a System.
-_RHO_SYM_CACHE: dict[tuple, object] = {}
+_RHO_SYM_CACHE: dict[tuple[tuple[int, ...], tuple[bytes, bytes]], RhoSymmetrizer] = {}
 _RHO_SYM_CACHE_MAX = 2
 
 
@@ -91,6 +96,7 @@ def build_symmetrizer_and_kpoints(grid, cell, kmesh, kshift, sym, mag_sym,
         if collinear_magnetic:
             from gradwave.symmetry import CollinearMagneticSymmetrizer
 
+            assert magmoms is not None  # collinear_magnetic implies a moment config
             rho_symmetrizer = CollinearMagneticSymmetrizer(
                 grid.shape, mag_sym, cell, magmoms, dens_mask=grid.dens_mask)
         else:

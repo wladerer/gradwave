@@ -49,6 +49,8 @@ so the whole loop — probe, fit, deploy — runs on real solver output.
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 
 from gradwave.dtypes import RDTYPE
@@ -262,7 +264,7 @@ def fit_multipole(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
                   q_floor: float | None = None, q_ceil: float | None = None,
                   weight: torch.Tensor | None = None,
                   mixer: str = "plain", history: int = 8, q0: float = 1.1,
-                  verbose: bool = False) -> tuple[MultipoleKerkerPrecond, dict]:
+                  verbose: bool = False) -> tuple[MultipoleKerkerPrecond, dict[str, Any]]:
     """Fit multi-pole Kerker poles to a per-shell response denominator d(G).
 
     Differentiates the unrolled mixing residual through the solver's linearized
@@ -406,7 +408,7 @@ def fit_multipole_robust(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
                          quality: torch.Tensor | None = None,
                          model_tol: float = 0.75, abstain_margin: float = 1.5,
                          rel_margin: float = 0.0, verbose: bool = False
-                         ) -> tuple[MultipoleKerkerPrecond, dict]:
+                         ) -> tuple[MultipoleKerkerPrecond, dict[str, Any]]:
     """Robust multi-pole fit: multi-seed, quality-weighted, model-selected, with a
     Kerker abstention gate. Hardens :func:`fit_multipole` against the one-iteration
     fragility where floating-point noise in the probe steered the deterministic
@@ -483,10 +485,10 @@ def fit_multipole_robust(g2_shell: torch.Tensor, d_shell: torch.Tensor, *,
     # candidate 0: bare Kerker, always present, the abstention reference.
     kerker = MultipoleKerkerPrecond.kerker(g2_shell, q0)
     j_kerker = _obj(kerker)
-    cand: list[dict] = [{"k": 1, "kind": "kerker", "P": kerker, "obj": j_kerker}]
+    cand: list[dict[str, Any]] = [{"k": 1, "kind": "kerker", "P": kerker, "obj": j_kerker}]
 
     for k in range(1, k_max + 1):
-        best_k: dict | None = None
+        best_k: dict[str, Any] | None = None
         for seed_q in _seed_positions(k, q_lo, q_hi, n_seeds):
             P, _ = fit_multipole(g2_shell, d_shell, alpha=alpha, mixer="diis",
                                  history=history, q0=q0, n_unroll=n_unroll,
@@ -573,6 +575,7 @@ def response_from_residuals(res_hist: list[torch.Tensor], g2: torch.Tensor,
     """
     g2 = g2.reshape(-1)
     nz = g2 > 1e-12
+    pf = None
     if precond_fac is not None:
         nz = nz & (precond_fac.reshape(-1) > 0.05)
         pf = precond_fac.reshape(-1).clamp_min(1e-3)
@@ -588,7 +591,7 @@ def response_from_residuals(res_hist: list[torch.Tensor], g2: torch.Tensor,
     for a, b in zip(res_hist[skip:-1], res_hist[skip + 1:], strict=True):
         ratio = (b / a.masked_fill(a.abs() < 1e-14, 1.0)).real  # 1 − α P d per comp
         d_comp = (1.0 - ratio) / alpha
-        if precond_fac is not None:
+        if pf is not None:
             d_comp = d_comp / pf                    # divide the probe Kerker out
         keep = nz & torch.isfinite(d_comp)
         vals = d_comp[keep].to(RDTYPE)
