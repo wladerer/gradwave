@@ -717,7 +717,17 @@ class GradWave(Calculator):
         if bool(torch.any(rho < 0)):
             rho = torch.clamp(rho, min=0.0)
             self._density_clamped = True
-        vol = float(grid.volume)
+        # Renormalize to N_e at the PREVIOUS cell's volume, not the current one.
+        # This seed is tagged with the previous system (see _warm_start's return),
+        # so warm_start_densities rescales it by prev_vol/vol to conserve the
+        # electron count across the cell change. Normalizing at the current volume
+        # here as well double-applies that cell change, leaving the seed's G=0
+        # (electron count) off by prev_vol/vol — which the mixer rejects as
+        # "density not normalized" on the first variable-cell extrapolation step
+        # (#259). Fixed-cell relaxes are unaffected (prev_vol == vol).
+        prev = self.last_result
+        vol = float(_fft_grid(prev.system).volume) if prev is not None \
+            else float(grid.volume)
         rho = rho * (n_electrons / (rho.mean() * vol))
         becsum: list[torch.Tensor] | None = None
         if is_uspp:

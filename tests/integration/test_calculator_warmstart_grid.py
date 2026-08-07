@@ -78,3 +78,35 @@ def test_warmstart_survives_grid_shape_change():
         f"warm fixed point moved: {abs(e_warm - e_cold):.2e} eV")
     # the remapped seed pays off: fewer SCF iterations than the cold SAD start
     assert n_warm < n_cold, f"warm {n_warm} not < cold {n_cold} iterations"
+
+
+def test_extrapolation_survives_cell_volume_change():
+    """#259: density extrapolation across a cell-VOLUME change at fixed FFT grid
+    must keep the SCF seed normalized.
+
+    ``_extrapolated_remainder`` renormalized the seed to N_e at the CURRENT cell
+    volume, but the seed is tagged with the PREVIOUS system, so
+    ``warm_start_densities`` rescaled it by prev/current again — leaving the
+    electron count (the density's G=0 component) off by the volume ratio, which
+    the mixer rejected as "density not normalized". It bit every extrapolating
+    order (linear and quadratic), only under a changing cell; fixed-cell relaxes
+    were fine (ratio 1). Tiny isotropic strains keep the grid at (15,15,15) so the
+    history accumulates and the order-1 then order-2 extrapolation both fire.
+    """
+    torch.set_num_threads(4)
+    calc = _calc(extrapolation="quadratic")
+    cell0 = A0 / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos0 = A0 / 4 * np.array([[0.0, 0, 0], [1, 1, 1]])
+    at = Atoms("Si2", positions=pos0, cell=cell0, pbc=True)
+    at.calc = calc
+    shapes: set = set()
+    energies = []
+    for s in (1.0, 1.001, 1.002, 1.003):   # grid fixed, volume changes each step
+        at.set_cell(cell0 * s, scale_atoms=False)
+        at.set_positions(pos0 * s)
+        energies.append(at.get_potential_energy())   # must NOT raise (#259)
+        shapes.add(tuple(calc.last_result.system.grid.shape))
+
+    assert shapes == {(15, 15, 15)}, f"grid must stay fixed to exercise it: {shapes}"
+    assert len(calc._history) >= 3   # the order-2 (quadratic) extrapolation engaged
+    assert all(np.isfinite(e) for e in energies)
