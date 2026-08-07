@@ -22,7 +22,7 @@ warm SCF plus a full forces evaluation just to append the stress.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -315,6 +315,7 @@ class GradWave(Calculator):
         # outside such a launch (WORLD_SIZE unset/1 → the ordinary full-mesh
         # path). Composes with use_symmetry (the shard unit is the IBZ k-list).
         verbose: bool = False,
+        scf_step_hook: Callable[[], None] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -406,6 +407,11 @@ class GradWave(Calculator):
         self._compile_xc = compile_xc
         self._distributed = bool(distributed)
         self._verbose = verbose
+        # called once just before each FRESH SCF (not on a cached re-entry) —
+        # the relax driver uses it to print a per-ionic-step header above the
+        # SCF trace. None for standalone/ASE use, so the calculator stays quiet
+        # about "steps" it has no concept of.
+        self._scf_step_hook = scf_step_hook
         self.last_result: SCFResult | USPPResult | None = None
         self._scf_state: _StateKey | None = None  # the geometry/params the
         # stored SCF state was built at
@@ -794,6 +800,8 @@ class GradWave(Calculator):
             # answers any request without re-running the SCF.
             self.results.update(self._cached_results)
             return
+        if self._scf_step_hook is not None:
+            self._scf_step_hook()
         symbols = self.atoms.get_chemical_symbols()
         if self._is_uspp(sorted(set(symbols))):
             self._calculate_uspp()

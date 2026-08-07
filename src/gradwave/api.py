@@ -669,11 +669,18 @@ def _resolve_pulay_correction(inp: Input, verbose: bool = True) -> bool:
     return False
 
 
-def _build_relax_calc(inp: Input, verbose: bool = True) -> GradWave:
+def _build_relax_calc(
+    inp: Input,
+    verbose: bool = True,
+    scf_step_hook: Callable[[], None] | None = None,
+) -> GradWave:
     """The GradWave calculator a relaxation drives — shared by the nested
     engine and by ``joint``'s final consistent-energy/forces/stress SCF at the
     relaxed geometry (so both report ASE-calculator numbers, not the joint
-    functional's fixed-basis energy)."""
+    functional's fixed-basis energy).
+
+    ``verbose`` streams each ionic step's SCF trace (VASP OSZICAR-style);
+    ``scf_step_hook`` (nested engine only) prints the per-step header above it."""
     from gradwave.calculator import GradWave
 
     kerker = inp.scf.mixing.kerker
@@ -713,7 +720,8 @@ def _build_relax_calc(inp: Input, verbose: bool = True) -> GradWave:
         # forces/stress and the BFGS/FIRE step stay identical on every rank.
         distributed=inp.distributed,
         device=inp.device,
-        verbose=False,
+        verbose=verbose,
+        scf_step_hook=scf_step_hook,
     )
 
 
@@ -799,7 +807,19 @@ def _relax_nested(
             FixScaled(i, mask=tuple(bool(b) for b in inp.fixed[i]))
             for i in range(len(atoms)) if bool(inp.fixed[i].any())
         ])
-    atoms.calc = _build_relax_calc(inp, verbose)
+    # VASP OSZICAR-style output: a per-ionic-step header above that step's SCF
+    # trace. The calculator fires _scf_header once per FRESH SCF (one per
+    # geometry — cached property fetches don't re-trigger it), so ion_step["n"]
+    # counts ionic steps 1, 2, 3 … and the post-step summary below reuses it, so
+    # the header and its summary line always carry the same number.
+    ion_step = {"n": 0}
+
+    def _scf_header() -> None:
+        ion_step["n"] += 1
+        if verbose:
+            print(f"\n── ionic step {ion_step['n']} ──", flush=True)
+
+    atoms.calc = _build_relax_calc(inp, verbose, scf_step_hook=_scf_header)
     opt_cls = {"fire": FIRE, "bfgs": BFGS}[inp.relax.optimizer]
     target: Atoms | FrechetCellFilter = atoms
     if inp.relax.cell:
@@ -825,7 +845,13 @@ def _relax_nested(
 
         forces = atoms.get_forces()
         energy = float(atoms.get_potential_energy())
-        fmax = float(np.linalg.norm(forces, axis=1).max())
+        # fmax the optimizer actually gates on: for a variable-cell relax `target`
+        # is the FrechetCellFilter, whose force array appends the stress-derived
+        # rows, so this matches the convergence criterion. Reporting atomic-only
+        # forces there can read ~0 (symmetric cell) while stress still drives the
+        # cell — a "fmax = 0.00000" next to "NOT CONVERGED". Positions-only relax:
+        # `target` is `atoms`, so this is identical to the atomic fmax.
+        fmax = float(np.linalg.norm(target.get_forces(), axis=1).max())
         entry: dict[str, Any] = {
             "step": opt.nsteps,
             "energy_eV": energy,
@@ -849,7 +875,7 @@ def _relax_nested(
                   if "scf_iter" in entry else "")
             pl = (f" · Pulay {pulay_gpa:+.2f} GPa" if pulay_gpa is not None
                   else "")
-            print(f"  relax step {opt.nsteps:>3d} · E = {energy:+.8f} eV"
+            print(f"  ionic step {ion_step['n']:>3d} · E = {energy:+.8f} eV"
                   f" · fmax = {fmax:.5f} eV/Å{sc}{pl}", flush=True)
         frame = atoms.copy()
         sp_kw: dict[str, Any] = {"energy": energy, "forces": forces}
@@ -871,8 +897,11 @@ def _relax_nested(
         "cell_relaxed": bool(inp.relax.cell),
         "fmax_target_eV_ang": inp.relax.fmax,
         "energy_eV": float(atoms.get_potential_energy()),
+        # the optimizer's convergence quantity (target = FrechetCellFilter under
+        # a cell relax, so this includes stress), matching the per-step fmax and
+        # the fmax_target gate — not the atomic-only forces
         "fmax_eV_ang": float(
-            np.linalg.norm(atoms.get_forces(), axis=1).max()),
+            np.linalg.norm(target.get_forces(), axis=1).max()),
         "max_displacement_ang": float(np.linalg.norm(
             atoms.get_positions() - inp.atoms.get_positions(),
             axis=1).max()),

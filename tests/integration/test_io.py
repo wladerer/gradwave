@@ -601,6 +601,43 @@ relax: {{optimizer: fire, fmax: 0.02, max_steps: 3}}
 
 
 @pytest.mark.standard
+def test_cli_relax_streams_scf_trace_vasp_style(tmp_path, capsys):
+    """A relax streams each ionic step's SCF trace under a `── ionic step N ──`
+    header (VASP OSZICAR-style) by default; `-q` silences the stream. The header
+    and its summary line carry the same step number."""
+    from gradwave.cli import main
+
+    (tmp_path / "relax.yaml").write_text(f"""
+task: relax
+structure:
+  cell: {SI_CELL.tolist()}
+  positions:
+    cart: {SI_POS.tolist()}
+  species: [Si, Si]
+pseudopotentials:
+  dir: {FIX / "pseudos"}
+  map: {{Si: Si_ONCV_PBE-1.2.upf}}
+ecut: {15 * RY}
+xc: lda
+symmetry: false
+kpoints: {{mesh: [2, 2, 2]}}
+relax: {{optimizer: bfgs, cell: true, fmax: 0.05, max_steps: 1}}
+""")
+    out = tmp_path / "results"
+    assert main([str(tmp_path / "relax.yaml"), "-o", str(out)]) == 0
+    shown = capsys.readouterr().out
+    assert "── ionic step 1 ──" in shown       # per-step header
+    assert "  SCF   1" in shown                 # nested electronic-step trace
+    assert "ionic step   1 ·" in shown          # summary line, same number
+
+    # -q silences the whole electronic/ionic stream
+    assert main([str(tmp_path / "relax.yaml"), "-o", str(out), "-q"]) == 0
+    quiet = capsys.readouterr().out
+    assert "ionic step" not in quiet
+    assert "SCF" not in quiet
+
+
+@pytest.mark.standard
 def test_cli_end_to_end_paw_with_restart(tmp_path):
     """YAML → USPP/PAW routing (formalism detected from the UPF), then a
     second run warm-started through the YAML restart: key."""
