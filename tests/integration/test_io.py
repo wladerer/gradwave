@@ -305,6 +305,43 @@ restart: {tmp_path / "from_yaml.pt"}
     assert captured["inp"].restart == tmp_path / "from_yaml.pt"
 
 
+def test_cli_run_prints_banner_and_summary(tmp_path, monkeypatch, capsys):
+    """A bare `gradwave run` prints the wave banner + input summary + a
+    'preparing' notice before the (silent) build; `-q` suppresses all of it.
+    Parse-only: api.run is stubbed so nothing computes."""
+    import gradwave.api as api
+    from gradwave.cli import main
+
+    def fake_run(inp, verbose=True):
+        return {}
+
+    monkeypatch.setattr(api, "run", fake_run)
+    (tmp_path / "in.yaml").write_text(f"""
+structure:
+  cell: {SI_CELL.tolist()}
+  positions:
+    cart: {SI_POS.tolist()}
+  species: [Si, Si]
+pseudopotentials:
+  dir: {FIX / "pseudos"}
+  map: {{Si: Si_ONCV_PBE-1.2.upf}}
+ecut: {15 * RY}
+kpoints: {{mesh: [2, 2, 2]}}
+""")
+    assert main([str(tmp_path / "in.yaml")]) == 0
+    out = capsys.readouterr().out
+    assert "gradwave" in out                       # banner wordmark
+    assert "differentiable plane-wave DFT" in out  # tagline
+    assert "preparing system" in out               # the pre-build notice
+    assert "Si2" in out                            # structure summary line
+
+    # -q suppresses the banner/summary/preparing block entirely
+    assert main([str(tmp_path / "in.yaml"), "-q"]) == 0
+    out_q = capsys.readouterr().out
+    assert "gradwave" not in out_q
+    assert "preparing system" not in out_q
+
+
 @pytest.mark.standard
 def test_paw_checkpoint_roundtrip_and_restart(tmp_path):
     from gradwave.checkpoint import (
