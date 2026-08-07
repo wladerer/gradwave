@@ -1860,7 +1860,7 @@ CRIU work.
 
 **Status: open, planned (2026-08-06). Near-term; reuses the full shipped response stack. The core
 (single-point deflated solve) is ~3-4 weeks and low-risk because exactness is unconditional. Tracked
-in the P0-P2 spike issue.**
+in #257.**
 
 The self-consistent response solve `scf/implicit.py::solve_adjoint` (and its USPP twin
 `postscf/uspp_implicit.py`) solves `u = v̄ + K_Hxc[χ₀ u]`, i.e. `(1 − K_Hxc χ₀) u = v̄`, by
@@ -1901,7 +1901,7 @@ partial-occupation χ₀ path to compose with the deflation. Effort: P0-P2 core 
 
 **Status: open, planned (2026-08-06). Multi-month research build — a new resolvent / contour /
 impurity-SCF solver stack. Front-load the de-risking spike (P0-P1, ~4-5 weeks) as an explicit go/no-go
-before committing the full build. Tracked in the P0-P1 spike issue.**
+before committing the full build. Tracked in #258.**
 
 A dilute point defect (vacancy, substitutional dopant, colour centre, qubit host) is solved today only
 via a 200-500-atom periodic supercell — at or past the size cliff, requiring size extrapolation against
