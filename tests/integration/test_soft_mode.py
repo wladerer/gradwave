@@ -15,6 +15,7 @@ import torch
 
 from gradwave.core.xc.learnable import LearnableX
 from gradwave.pseudo.upf import parse_upf
+from gradwave.scf.implicit import solve_adjoint
 from gradwave.scf.loop import scf, setup_system
 from gradwave.scf.soft_mode import (
     anderson_solve,
@@ -26,6 +27,7 @@ from gradwave.scf.soft_mode import (
     screening_apply,
     soft_subspace,
     soft_subspace_from_operator,
+    solve_adjoint_deflated,
 )
 from tests.helpers import RY, si_fcc
 
@@ -170,6 +172,47 @@ def test_fxc_scaling_drives_a_physical_soft_cluster(si_res):
     assert d3.n_iter < base.n_iter, (d3.n_iter, base.n_iter)
     # ...while deflating only 1 of the 3 does not help (needs the full cluster)
     assert d3.n_iter < d1.n_iter, (d3.n_iter, d1.n_iter)
+
+
+def test_solve_adjoint_deflated_is_a_faithful_drop_in(si_res):
+    """Production entry: on benign Si, auto falls back to plain Anderson and lands
+    on the same solution as the shipped solve_adjoint."""
+    res, xc = si_res
+    g = torch.Generator().manual_seed(7)
+    vbar = torch.randn(res.rho.shape, dtype=res.rho.dtype, generator=g)
+    vbar = vbar - vbar.mean()
+
+    u_ref = solve_adjoint(res, xc, vbar, tol=1e-8)
+    # Si's soft mode (0.15) is below the 0.9 near-critical threshold → plain solve
+    got = solve_adjoint_deflated(res, xc, vbar, auto_threshold=0.9, tol=1e-8,
+                                 chi0_tol=1e-8)
+    assert got.converged
+    rel = float(torch.linalg.vector_norm(got.u - u_ref)
+                / torch.linalg.vector_norm(u_ref))
+    assert rel < 1e-5, rel
+
+
+def test_solve_adjoint_deflated_auto_and_recycle_near_critical(si_res):
+    """Production entry: near a soft cluster, auto detects and deflates, and a
+    recycled (precomputed) subspace gives the identical solution."""
+    res, xc = si_res
+    g = torch.Generator().manual_seed(7)
+    vbar = torch.randn(res.rho.shape, dtype=res.rho.dtype, generator=g)
+    vbar = vbar - vbar.mean()
+
+    auto = solve_adjoint_deflated(res, xc, vbar, fxc_scale=2.4, auto_threshold=0.9,
+                                  tol=1e-6, max_iter=120, chi0_tol=1e-5)
+    assert auto.converged
+
+    # recycle a cluster extracted once (the sweep use-case)
+    m = screening_apply(res, xc, fxc_scale=2.4, chi0_tol=1e-5)
+    q = soft_subspace_from_operator(m, res.rho, krylov=30, n_modes=3, seed=0).vectors
+    recyc = solve_adjoint_deflated(res, xc, vbar, subspace=q, fxc_scale=2.4,
+                                   tol=1e-6, max_iter=120, chi0_tol=1e-5)
+    assert recyc.converged
+    rel = float(torch.linalg.vector_norm(auto.u - recyc.u)
+                / torch.linalg.vector_norm(recyc.u))
+    assert rel < 1e-4, rel
 
 
 def test_operator_wrappers_are_consistent(si_res):

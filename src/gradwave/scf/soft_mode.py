@@ -50,6 +50,7 @@ __all__ = [
     "anderson_solve",
     "deflated_solve",
     "critical_coupling",
+    "solve_adjoint_deflated",
 ]
 
 # A response field is a real grid tensor (nspin=1) or a stacked per-spin pair
@@ -530,3 +531,48 @@ def critical_coupling(res, xc, **kw) -> float:
     driven critical at this coupling and unstable ("gain > 1") above it."""
     lam = max_real_screening_eigenvalue(res, xc, **kw).eigenvalue
     return float("inf") if lam <= 0 else 1.0 / lam
+
+
+# ---------------------------------------------------------------------------
+# Production entry point: an opt-in deflated drop-in for solve_adjoint, with
+# soft-subspace RECYCLING (extract the cluster once, reuse across a sweep — the
+# P3 idea) and AUTO-DETECTION (only pay the extraction/deflation when a system is
+# actually near-critical; away from criticality it falls back to plain Anderson,
+# which is exactly as good there). It does not modify scf/implicit.py::solve_adjoint.
+# ---------------------------------------------------------------------------
+
+def solve_adjoint_deflated(res, xc, vbar: Field, *, subspace: list[Field] | None = None,
+                           auto_threshold: float = 0.9, max_modes: int = 8,
+                           krylov: int = 30, seed: int = 0, beta: float = 0.4,
+                           tol: float = 1e-8, max_iter: int = 200, history: int = 8,
+                           **screen_kw) -> SolveResult:
+    """Deflated drop-in for ``scf/implicit.py::solve_adjoint``.
+
+    Solves ``(1 − M) u = v̄`` for ``M = K_Hxc·χ₀`` and returns a ``SolveResult``.
+    Away from criticality it is Anderson (the plain solve), and it becomes the
+    deflated solve only when a soft cluster is present — so it is never worse than
+    the baseline and decisively better near an instability with a degenerate soft
+    cluster (the P2b regime).
+
+    Subspace selection, cheapest first:
+    - ``subspace`` given → deflate exactly those modes (RECYCLE a cluster extracted
+      once and reused across an EOS / phonon-stencil / temperature sweep, where the
+      soft mode moves slowly). Skips the per-solve extraction cost.
+    - otherwise AUTO → extract the top ``max_modes`` real Ritz modes of ``M`` and
+      keep those above ``auto_threshold`` (near-critical). If none qualify (a benign
+      system), fall back to plain Anderson.
+
+    ``**screen_kw`` forwards to :func:`screening_apply` (``chi0_tol``, and the
+    ``coupling`` / ``fxc_scale`` instability knobs for near-critical testbeds).
+    """
+    m = screening_apply(res, xc, **screen_kw)
+    if subspace is None:
+        sub = soft_subspace_from_operator(m, res.rho, krylov=krylov,
+                                          n_modes=max_modes, seed=seed)
+        subspace = [v for v, val in zip(sub.vectors, sub.values, strict=True)
+                    if val.real > auto_threshold]
+    if not subspace:
+        return anderson_solve(m, vbar, beta=beta, tol=tol, max_iter=max_iter,
+                              history=history)
+    return deflated_solve(m, vbar, subspace, method="post", beta=beta, tol=tol,
+                          max_iter=max_iter, history=history)
