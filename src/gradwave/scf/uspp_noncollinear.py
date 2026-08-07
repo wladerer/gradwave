@@ -528,7 +528,8 @@ def scf_uspp_noncollinear(
         de = record_iteration(history, it, e_free, e_free_prev, res_norm, t_it)
         if verbose:
             mv = [float(m_out[i].mean()) * vol for i in range(3)]
-            print(f"  NC-USPP {it:3d}  F = {e_free:+.8f}  dE = {de:.2e}  "
+            print(f"  NC-USPP {it:3d}  F = {e_free:+.8f}  "
+                  f"dE = {(0.0 if de == float('inf') else de):.2e}  "
                   f"|dρ,m| = {res_norm:.2e}  "
                   f"m⃗ = ({mv[0]:+.3f},{mv[1]:+.3f},{mv[2]:+.3f})", flush=True)
         if convergence_gate(de, res_norm, tol_eff, etol, rhotol, diago_tol):

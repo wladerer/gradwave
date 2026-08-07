@@ -625,6 +625,10 @@ kpoints: {{mesh: [2, 2, 2]}}
 relax: {{optimizer: bfgs, cell: true, fmax: 0.05, max_steps: 1}}
 """)
     out = tmp_path / "results"
+    out.mkdir()
+    # pre-seed a corrupt/leftover relax.xyz: the incremental writer must overwrite
+    # it cleanly on the first frame without erroring
+    (out / "relax.xyz").write_bytes(b"\x00 corrupt leftover, not an xyz \x00")
     assert main([str(tmp_path / "relax.yaml"), "-o", str(out)]) == 0
     shown = capsys.readouterr().out
     assert "── ionic step 1 ──" in shown       # per-step header
@@ -633,6 +637,14 @@ relax: {{optimizer: bfgs, cell: true, fmax: 0.05, max_steps: 1}}
     # timing + memory: per-iteration time on the SCF line, and the run footer
     assert re.search(r"\|drho\| = \S+ +\d+\.\d\ds", shown)  # per-SCF-iter seconds
     assert "wall" in shown and "peak RSS" in shown          # timing + memory footer
+
+    # incremental trajectory: the corrupt pre-existing relax.xyz was cleanly
+    # overwritten, each step saved with per-atom forces + (variable-cell) stress
+    from ase.io import read as ase_read
+    traj = ase_read(str(out / "relax.xyz"), index=":")
+    assert len(traj) >= 1
+    assert traj[0].get_forces().shape == (2, 3)
+    assert traj[0].calc.results.get("stress") is not None
 
     # -q silences the whole electronic/ionic stream AND the footer
     assert main([str(tmp_path / "relax.yaml"), "-o", str(out), "-q"]) == 0

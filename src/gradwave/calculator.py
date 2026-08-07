@@ -569,6 +569,12 @@ class GradWave(Calculator):
                 positions=torch.as_tensor(atoms.get_positions(), dtype=RDTYPE).to(
                     self._system.positions.device),
             )
+        # A rebuild (the cell changed) — not the first build, which ran under the
+        # CLI's "preparing system" line — is the silent multi-second gap between
+        # ionic steps in a vc-relax; announce it so it doesn't read as a hang.
+        if self._verbose and self._system is not None:
+            print("  rebuilding plane-wave basis + form factors for the new cell …",
+                  flush=True)
         system = setup_system(
             cell=atoms.cell.array,
             positions=atoms.get_positions(),
@@ -947,6 +953,9 @@ class GradWave(Calculator):
             estimate_pressure_error,
         )
 
+        if self._verbose:
+            print("  estimating Pulay stress correction (strained rebuild) …",
+                  flush=True)
         est = estimate_pressure_error(res, xc, solver=self.parameters["pulay_solver"])
         p_err = float(cast(float, est["pressure_error_eV_A3"]))
         self.results["stress"] = self.results["stress"] - p_err * np.array(
@@ -984,6 +993,9 @@ class GradWave(Calculator):
                 positions=torch.as_tensor(atoms.get_positions(), dtype=RDTYPE).to(
                     self._system.positions.device),
             )
+        if self._verbose and self._system is not None:
+            print("  rebuilding plane-wave basis + form factors for the new cell …",
+                  flush=True)
         system = setup_uspp(
             atoms.cell.array, atoms.get_positions(),
             [species.index(s) for s in symbols],

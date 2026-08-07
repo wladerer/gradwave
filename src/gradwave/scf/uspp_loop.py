@@ -1678,7 +1678,8 @@ def scf_uspp(
                 m = float((rho_out_s[0] - rho_out_s[1]).sum()) * vol / grid.n_points
                 mag = f"  m = {m:+.4f} muB"
             print(
-                f"  USPP {it:3d}  F = {e_free:+.10f} eV  dE = {de:.3e}  "
+                f"  USPP {it:3d}  F = {e_free:+.10f} eV  "
+                f"dE = {(0.0 if de == float('inf') else de):.3e}  "
                 f"|drho| = {res_norm:.3e}{mag}"
             )
         if energy_metric:

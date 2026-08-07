@@ -839,6 +839,23 @@ def _relax_nested(
     opt = opt_cls(cast("Atoms", target), logfile=None)  # our own per-step line below
     trajectory: list[dict[str, Any]] = []
     frames: list[Atoms] = []  # ASE Atoms per step, energy+forces frozen for extxyz output
+    # incremental trajectory: each step's frame is appended to this file as it
+    # completes, so an interrupted relax keeps its progress. write_output re-emits
+    # the identical full file at the end. Under distribution only rank 0 writes
+    # (matching write_output's gating), else every run writes — independent of -q.
+    traj_path = Path(inp.output_dir) / "relax.xyz"
+    _write_traj = True
+    if inp.distributed:
+        from gradwave.distributed import current_rank
+
+        _write_traj = current_rank() == 0
+    if _write_traj:
+        try:
+            traj_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning("could not prepare %s (%s); incremental trajectory "
+                           "off, final write still attempted", traj_path, exc)
+            _write_traj = False
 
     def _record() -> None:
         import numpy as np
@@ -886,9 +903,30 @@ def _relax_nested(
         sp_kw: dict[str, Any] = {"energy": energy, "forces": forces}
         if inp.relax.cell:
             sp_kw["stress"] = atoms.get_stress()
+        # total magnetic moment for a spin-polarized run (the calculator sets
+        # results["magmom"] only for nspin=2); rides the frame into the extxyz
+        mag = atoms.calc.results.get("magmom") if atoms.calc is not None else None
+        if mag is not None:
+            sp_kw["magmom"] = float(mag)
         frame.calc = SinglePointCalculator(frame, **sp_kw)
         frame.info["step"] = opt.nsteps
         frames.append(frame)
+        if _write_traj:
+            from ase.io import write as ase_write
+
+            # First frame truncates (append=False) — cleanly overwriting any
+            # stale/corrupt/leftover relax.xyz; the rest append. append mode
+            # doesn't read the file, so a corrupt existing file can't break it,
+            # and a missing file/dir is (re)created. Best-effort regardless: a
+            # write failure (disk full, permissions, races) must not abort a
+            # multi-hour relax, so warn and carry on — write_output re-emits the
+            # full trajectory at the end.
+            try:
+                ase_write(str(traj_path), frame, format="extxyz",
+                          append=len(frames) > 1)
+            except Exception as exc:  # noqa: BLE001 — best-effort progress dump
+                logger.warning("could not append relax step to %s: %s",
+                               traj_path, exc)
 
     opt.attach(_record)
     converged = opt.run(fmax=inp.relax.fmax, steps=inp.relax.max_steps)

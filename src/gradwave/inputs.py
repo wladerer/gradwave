@@ -74,7 +74,7 @@ class MagneticParams:
 @dataclass(frozen=True)
 class SCFParams:
     max_iter: int = 100
-    etol: float = 1.0e-8
+    etol: float = 1.0e-7
     rhotol: float = 1.0e-7
     mixing: MixingParams = field(default_factory=MixingParams)
     diago_tol: float = 1.0e-9
@@ -1113,7 +1113,7 @@ def _load_input(path: Path) -> Input:
         tot_magnetization=tot_mag,
         scf=SCFParams(
             max_iter=int(scf_raw.get("max_iter", 100)),
-            etol=float(scf_raw.get("etol", 1e-8)),
+            etol=float(scf_raw.get("etol", 1e-7)),
             rhotol=float(scf_raw.get("rhotol", 1e-7)),
             mixing=MixingParams(**mix_raw) if mix_raw else MixingParams(),
             diago_tol=float(diago.get("tol", 1e-9)),
