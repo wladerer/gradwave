@@ -17,6 +17,8 @@ from gradwave.core.xc.learnable import LearnableX
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
 from gradwave.scf.soft_mode import (
+    anderson_solve,
+    deflated_solve,
     dielectric_apply,
     dominant_screening_eigenvalue,
     max_real_screening_eigenvalue,
@@ -98,6 +100,37 @@ def test_soft_subspace_arnoldi_matches_p0_estimator(si_res):
     # non-normality flag stays ~0 (the P2 signal is absent on a benign insulator).
     assert sub.residuals[0] < 1e-2, sub.residuals
     assert sub.max_imag < 1e-3, sub.max_imag
+
+
+def test_deflated_solve_is_exact_on_the_real_operator(si_res):
+    """P2: the deflated solve is correct on the real Si response operator.
+
+    Si has a SINGLE dielectric soft mode, which Anderson already handles (base 27
+    vs deflated 29 iters at a modest near-critical coupling) — so deflation is
+    neutral on speed here, matching the synthetic single-mode result. The decisive
+    speedup needs a soft *cluster* beyond Anderson's history (validated in the
+    synthetic unit test). The physical gate is therefore exactness/robustness: the
+    deflated solve converges on the real coupling-scaled operator and agrees with
+    the baseline solution."""
+    res, xc = si_res
+    sub = soft_subspace(res, xc, krylov=24, n_modes=1, chi0_tol=1e-5)
+    q = sub.vectors
+    c = 0.7 / sub.values[0].real  # a modest near-critical coupling on real Si
+
+    m = screening_apply(res, xc, coupling=c, chi0_tol=1e-5)
+    g = torch.Generator().manual_seed(5)
+    vbar = torch.randn(res.rho.shape, dtype=res.rho.dtype, generator=g)
+    vbar = vbar - vbar.mean()
+
+    base = anderson_solve(m, vbar, tol=1e-6, max_iter=60, history=8)
+    defl = deflated_solve(m, vbar, q, method="post", tol=1e-6, max_iter=60, history=8)
+
+    assert base.converged and defl.converged, (base, defl)
+    assert defl.residual < 1e-6, defl
+    # deflated and undeflated solve the SAME real near-critical system
+    agree = float(torch.linalg.vector_norm(base.u - defl.u)
+                  / torch.linalg.vector_norm(defl.u))
+    assert agree < 1e-4, agree
 
 
 def test_operator_wrappers_are_consistent(si_res):
