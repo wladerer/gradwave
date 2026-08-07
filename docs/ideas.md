@@ -1856,6 +1856,86 @@ answer. Next step is a `multiprocessing` forkserver prototype behind `gwq` measu
 jobs-per-hour on a delta-gauge column against the cold-process baseline, before any daemon or
 CRIU work.
 
+## Soft-mode deflation for the near-critical response solve
+
+**Status: open, planned (2026-08-06). Near-term; reuses the full shipped response stack. The core
+(single-point deflated solve) is ~3-4 weeks and low-risk because exactness is unconditional. Tracked
+in the P0-P2 spike issue.**
+
+The self-consistent response solve `scf/implicit.py::solve_adjoint` (and its USPP twin
+`postscf/uspp_implicit.py`) solves `u = v̄ + K_Hxc[χ₀ u]`, i.e. `(1 − K_Hxc χ₀) u = v̄`, by
+Anderson-accelerated fixed point. Its own docstring records the failure mode: near a spin/structural
+instability an eigenvalue of `K_Hxc χ₀` approaches 1, the operator goes near-singular along the soft
+mode, plain damping diverges and Anderson stalls (the "NiO lesson"). That is exactly the physically
+interesting regime — incipient ferroelectrics, CDW/Peierls, Kohn anomalies, magnetic instabilities —
+where phonons, Born charges, and the dielectric response are the deliverable, and gradwave's
+differentiability makes those autograd-exact IF the solve stays tractable.
+
+Deflate the soft near-null mode: extract the few offending eigenvectors of `(1 − K_Hxc χ₀)`, solve that
+tiny subspace exactly, and run Anderson on the well-conditioned complement, cutting near-critical outer
+iterations from hundreds to ~10. Each outer apply is a full Sternheimer sweep, so the win is large, and
+the soft subspace moves slowly along an EOS / phonon-stencil / temperature trajectory, so recycling it
+across the sweep compounds the saving. Exactness is unconditional — deflation only preconditions the
+linear solve, so a wrong subspace costs iterations, never correctness, and the 1e-13 gate is preserved.
+
+The one hard part is that `(1 − K_Hxc χ₀)` is non-normal (a product of two symmetric operators), so at a
+true transition the soft mode goes defective (an exceptional point where left/right eigenvectors
+coalesce) and clean deflation loses its footing. The fix is to work in the self-adjoint form
+`|χ₀|^½ K_Hxc |χ₀|^½` (same eigenvalues, orthonormal eigenvectors), extracting the subspace by symmetric
+Lanczos on matvecs.
+
+Build order, each with a kill-gate. (P0) Expose `L(u) = u − K_Hxc[χ₀ u]` as an explicit linear operator
+over the existing `apply_chi0` / `apply_k_hxc` matvecs, plus a power-iteration softness diagnostic (the
+dominant eigenvalue of `K_Hxc χ₀`); gate on a benign insulator predicting Anderson's observed
+contraction rate. (P1) Symmetrize and extract the near-null Ritz pairs by short symmetric Lanczos. (P2,
+the go/no-go) Deflated solve inside `solve_adjoint`; gate on a constructed near-critical case (an AFM
+transition-metal oxide near its instability, or the xc kernel scaled toward gain→1) converging in ~10
+iters where Anderson takes hundreds or diverges, bit-identical to a converged Anderson solve where
+Anderson still works. (P3) Recycle the subspace across a sweep. (P4) Confirm autograd
+forces/phonons/Born charges are unaffected against `test_dielectric_vs_qe` / `test_phonons`, and land a
+near-critical regression test — the missing NiO-lesson test. Metals need the window-pair
+partial-occupation χ₀ path to compose with the deflation. Effort: P0-P2 core ~3-4 weeks, P3-P4 another
+1-2.
+
+## Plane-wave Green's-function defect embedding (CirculantCore)
+
+**Status: open, planned (2026-08-06). Multi-month research build — a new resolvent / contour /
+impurity-SCF solver stack. Front-load the de-risking spike (P0-P1, ~4-5 weeks) as an explicit go/no-go
+before committing the full build. Tracked in the P0-P1 spike issue.**
+
+A dilute point defect (vacancy, substitutional dopant, colour centre, qubit host) is solved today only
+via a 200-500-atom periodic supercell — at or past the size cliff, requiring size extrapolation against
+spurious image interactions, and re-solving perfect bulk hundreds of times to study one local
+perturbation. The KKR impurity method avoids this: dress the perfect-host Green's function `G₀` with a
+Dyson correction `G = (1 − G₀ ΔV)⁻¹ G₀` restricted to the defect support, where `ΔV` is spatially local
+so Woodbury collapses the inverse to an `O(defect-rank³)` solve. Cost is the primitive-cell host solve
+(done once, reusable for every defect in that host) plus a small correction, no supercell. Building this
+in a plane-wave basis AND keeping it autograd-differentiable is the novel part: the defect formation
+energy then carries exact forces and analytic gradients w.r.t. dopant identity / host composition —
+differentiable defect design, which no KKR code offers. It removes the size wall exactly (no
+truncation-accuracy floor) for the gapped-host defect class.
+
+Two constraints are structural. Metals are excluded — the Friedel screening tail `cos(2k_F r)/r³` is
+long-ranged and defeats the local-`ΔV` / low-rank premise, so this is insulators and semiconductors only
+(which is exactly the defect / qubit-host class). And a truncated-band plane-wave Green's function loses
+the high-energy continuum tail that matters for the local `G₀`, a documented PW-GF pitfall needing a
+completeness correction.
+
+Build order is front-loaded to de-risk. (P0, make-or-break) Build `G₀(E)` for the perfect host from a
+converged primitive-cell spectral sum and recover the bulk density by contour integration around the
+occupied states; gate on the contour density and DOS matching the ordinary SCF density — this validates
+the Green's-function + contour machinery and the tail correction BEFORE any defect work. (P1) A
+complex-shift resolvent `(E − H)⁻¹` apply, generalising the existing `cg_sternheimer` / `projected_cg`
+real-shift solves to complex energy; gate against a dense inverse on a tiny cell. (P2) Woodbury/Dyson
+dressing on a frozen local `ΔV`, `δρ` by contour integration; gate against a defect in a large explicit
+supercell inside the defect region. (P3) Impurity self-consistency `ΔV ← ΔV[δρ]`; gate on the embedded
+formation energy matching a converged supercell reference for a gapped host (vacancy / substitutional in
+MgO / diamond / Si). (P4) Autograd through the dressing → `dE/d(dopant)` vs finite difference, then the
+differentiable-design demo. gradwave is pure Davidson + density mixing today, so the resolvent solver,
+contour machinery, and impurity loop are all new; `scf/implicit.py` (χ₀/K_Hxc, the first-order Dyson
+kernel, the IFT adjoint) and the k-mesh machinery are the substrate. Effort: P0-P1 spike ~4-5 weeks (the
+go/no-go), full build P2-P4 ~3-4 months.
+
 # Done and resolved
 
 Kept for the reasoning. Each is either landed in the code or settled as a measured negative.
@@ -2263,3 +2343,36 @@ measured 0-2 saved iterations at neutral-to-worse wall time, and reverted; by Ra
 a Huckel rotation WITHIN the AO block converges identically to the raw-AO block already tried, and the
 outer count is mixing-limited not orbital-quality-limited. The seed channel is structurally closed; the
 preconditioner reframing (GammaPrime) is the only live variant of the theme.
+
+**Round 5 (MOONSHOT round: wall-breaking-by-construction reformulations). Two ideas PROMOTED to full
+open-backlog entries above; the rest recorded here.**
+
+PROMOTED (see the Performance and scaling entries above, with phased plans and spike issues):
+soft-mode deflation for the near-critical response solve (best payoff-to-tractability ratio, near-term,
+exact-at-convergence), and CirculantCore plane-wave Green's-function defect embedding (the boldest EXACT
+size-wall break, multi-month).
+
+CONSIDERED AND DEFERRED (credible mechanism, harder blockers):
+- ShatterDFT: differentiable adaptive-local-basis Discontinuous Galerkin (DGDFT). Dissolves the size
+  wall structurally (block-sparse H, tens of adaptive local basis functions/atom, metal-accurate) but
+  trades the 1e-13 gate for a ~1 meV DG-truncation floor and needs a block-sparse / selected-inversion
+  forward solve reconciled with eager autograd (the IFT adjoint is the escape). The boldest size-wall
+  break, but a large new research code.
+- Mermin thermal-annealing homotopy: track the KS fixed point as a temperature-continuation ODE with
+  (1 − χ₀K) as the exact analytic tangent, so no near-singular cold dielectric is inverted (breaks the
+  ~2.3x-QE metal iteration penalty). Blocker: crossing a real electronic transition on the cooling path
+  can track the wrong branch; safe floor is degrade-to-the-shipped-annealing-list. Shares the soft-mode
+  machinery with the promoted deflation entry.
+- SeparableResponse (THC-χ): extend the shipped ISDF/THC substrate to the response manifold with an
+  imaginary-frequency quadrature for a cubic-scaling, autograd-differentiable RPA correlation energy.
+  Blocker is empirical (THC-χ rank vs accuracy on metals), not theoretical; an extension of validated
+  code and the natural precursor to a differentiable GW/BSE.
+- Longshots with real mechanisms: RiemannWave (learned adaptive-coordinate plane waves), BetaBeam (NUFFT
+  nonlocal projector apply), Resolvent-Flow FEAST contour projector, DielectricNet (learned short-range
+  dielectric preconditioner via the mixing hook), FieldGalerkin (neural-field coarse space with an exact
+  PW corrector), Parareal-SCF (parallel-in-imaginary-time), Resonate (analog coupled-oscillator inner
+  loop). Each names a hard blocker: custom kernels, PW-uncompetitive contour solves, or hardware years
+  out.
+
+REJECTED: HierFock (hierarchical / butterfly exact exchange) — redundant, the ISDF+ACE hybrid stack it
+would replace is already shipped and validated to 1e-13, and butterfly has lost to ISDF in practice.
