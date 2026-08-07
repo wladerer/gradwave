@@ -1792,6 +1792,70 @@ when `compile_xc=True` (the `energy_and_ddd` path is a single backward), so the 
 question is only whether an analytic quadrature derivative beats the compiled autograd, a small
 isolated experiment, not a feature.
 
+## Campaign setup amortization: a warm fork-server for cold-start cost
+
+**Status: open, prototype-worthy. Measured 2026-08-06. The setup cost it targets is real and
+un-shardable, and the fix is pure systems engineering with zero effect on the physics.**
+
+gradwave's per-process cold start is fixed serial work done before any physics: the torch
+import, the one-time XC `torch.compile`, the UPF parse, and the form-factor / radial-table
+build. None of it shards (k-point sharding and IBZ reduction leave it untouched, and it is
+replicated on every distributed rank, see the distributed record above). For a big cell it is
+noise, but gradwave's bread-and-butter is small cells (1-16 atoms) in large campaigns (an EOS
+scan, a delta-gauge column, a phonon stencil, a rattled training set), where one SCF is seconds
+and cold start is tens of seconds, so the campaign spends most of its wall clock re-doing
+byte-identical warm-up.
+
+Measured footprint of a warmed CPU process (asus, `import torch` + the gradwave stack + warmed
+BLAS): RSS ~540 MB, of which the private/anonymous memory a snapshot must carry is ~320 MB,
+dominated by torch's ~275 MB heap; gradwave's own imports plus physics tables are only ~45 MB.
+The expensive state to preserve is almost entirely PyTorch, not anything DFT.
+
+Warm the state once and reuse it, in one of three flavors, cheapest first.
+
+- **Fork-server / zygote (the CPU quick win, zero disk).** Warm one parent, then `fork()` a
+  child per job. Copy-on-write makes the fork O(page-table), a few milliseconds regardless of
+  the ~500 MB RSS, and the child inherits the imports, parsed pseudos, and tables for free. Each
+  child runs one SCF and exits, so a crash, OOM, or diverged solve dies with the child and never
+  poisons the warm parent, which is the advantage over a single long-lived in-process daemon.
+  This is Android's zygote and Gunicorn/uWSGI prefork. Low-effort route is the stdlib:
+  `multiprocessing.set_forkserver_preload(["torch", "gradwave.api"])` +
+  `set_start_method("forkserver")`, then point `pueue`/`gwq` at the resident server instead of
+  launching a cold `uv run python -m gradwave` per slot.
+- **Persistent in-process daemon.** One warm process serving structures over IPC, no fork. Same
+  setup saving, no per-job fork cost, but no crash isolation, so a memory leak or segfault in one
+  SCF corrupts the shared state. Needs real isolation discipline.
+- **CRIU / durable image.** Freeze the warm process to a disk image (~300 MB raw, ~100-150 MB
+  zstd; ~400-600 MB once the compiled XC is baked in) and thaw copies, including on the asus
+  worker. The only flavor that ships across machines, at the cost of privileges (CAP_SYS_ADMIN,
+  awkward on unprivileged NixOS), and it captures no GPU state.
+
+Three hazards fix the shape of any implementation.
+
+- **fork-after-threads deadlocks.** `fork()` duplicates only the calling thread; a lock held by
+  an MKL/OpenMP/torch worker pool in the parent stays locked forever in the child, which then
+  hangs on first use. The parent must be quiescent at fork, so inherit only thread-free state
+  (imports, parsed pseudos, tables) and let each child spawn and tune its own threads after the
+  fork (gradwave already caps threads at import). The stdlib forkserver enforces this by keeping
+  the server process minimal and single-threaded.
+- **CUDA is not fork-safe.** A forked child gets an invalid CUDA context, so a fork-server is
+  CPU-only. That matches the regime, since small cells already belong on the CPU; a GPU warm pool
+  would need an in-process persistent worker, not a fork.
+- **CPython COW is leaky.** Refcount writes dirty shared pages, so the sharing erodes over a
+  long-lived child. A short-lived one-SCF child exits before this matters.
+
+Honest scope caveat. The single largest setup term, the XC `torch.compile`, is partly a
+first-ever cost: Inductor caches compiled kernels to disk, so a second cold process with a warm
+cache reloads them in seconds rather than the ~1-minute first trace (and on a box without
+`openssl` on PATH the compile silently falls back to eager and never caches, see the
+torch.compile note). So the durable per-job saving a fork-server banks is the torch import plus
+the pseudo parse and table build (seconds each, thread-free, perfectly inheritable), plus
+dodging any per-process recompile, on the order of seconds to tens of seconds per job across a
+500-point campaign, at zero correctness risk because a fork changes only speed, never the
+answer. Next step is a `multiprocessing` forkserver prototype behind `gwq` measuring
+jobs-per-hour on a delta-gauge column against the cold-process baseline, before any daemon or
+CRIU work.
+
 # Done and resolved
 
 Kept for the reasoning. Each is either landed in the code or settled as a measured negative.
@@ -2075,3 +2139,74 @@ One diagnostic lead is worth its own line. The Ni PAW default-seed stagnation at
 iterations at every `start_mag`, including the comfortable 0.30, localizes the residual floor
 to the mixer's magnetization channel, not the seed or the charge channel, since a different
 magnetization shape at the identical moment converges fine.
+
+# Acceleration idea rounds: evaluated and shelved (2026-08)
+
+Three structured idea-generation-and-vetting passes (agent-workflow ideation, then literature
+plus codebase compare plus adversarial verification) ran on "what else could accelerate
+gradwave." They are catalogued here so the directions are not re-litigated. The recurring lesson
+is that the single-SCF fp64 small-cell axis is largely exhausted, and the live headroom is
+campaign-level, not kernel-level. Verdicts are the vetting output, not commitments. Anything
+that graduates to real work gets its own open entry above (the fork-server already has).
+
+**Round 1 (single-SCF numerical / solver methods; all researched, none a speed win in this
+regime).**
+- fp64 emulation (double-single / Ozaki tensor-core): NOT-HELPFUL. double-single is 44-48 bits
+  (fails the 1e-13 gates); Ozaki reaches fp64 but only pays at m>=8192 (gradwave npw <=6746) and
+  needs custom kernels; Amdahl-capped ~1.2-1.35x wall, consumer-GPU-only, moot on CPU/H100.
+- Stochastic DFT (stochastic-orbital density): NOT-HELPFUL. Crossover is thousands of atoms;
+  force noise floors ~0.1 eV/A even with variance reduction, disqualifying for autograd forces
+  and the sub-meV gates.
+- Direct energy minimization (ensemble-CG): NOT a speed win (large-N story), MARGINAL for
+  robustness (monotonic descent structurally avoids charge-sloshing / Stoner collapse; substrate
+  exists in `opt/joint.py` + `opt/newton.py`; net-new is differentiable ensemble/MV occupations).
+- Sketched Rayleigh-Ritz: NOT-HELPFUL. A dressed-up fp32-RR; the sketch dimension reaching 1e-9
+  exceeds npw, so the savings invert.
+- s-step / communication-avoiding Davidson: MARGINAL to NOT-HELPFUL. The CheFSI/LOBPCG
+  more-applies-to-cheapen-RR trade minus the MPI-latency regime it was built for; also drives the
+  n>32 eigh cliff.
+- Proposed, not deep-researched: Fermi-operator-expansion density matrix (reuse KPM), Shirley
+  optimal-basis k-interpolation, stick/pruned FFT (needs kernels), meta-learned SCF map,
+  adaptive/multi-fidelity BZ integration.
+
+**Round 2 (mixing / eigensolver / conditioning micro-opts; 0 pursue, 2 marginal, 7 dead).**
+- Quasi-Newton mixer-Jacobian transfer across scan steps: MARGINAL. ~1.3-1.7x fewer iters/step on
+  fixed-cell magnetic/metal scans, but collides with the "early garbage secant pairs poison the
+  inverse Jacobian near Stoner" negative (wisdom.md); probe-gate before building.
+- Occupation-aware adaptive band budget: MARGINAL. Only the empty-headroom per-band gate survives
+  (stop stragglers holding `rn.max()` hostage); a few percent CPU; drop the pruning and buffer-ramp.
+- Dead: charge-block / codensity + delta-mu preconditioner (re-runs the #232 learned-multipole
+  negative, DIIS absorbs the smooth charge response); smearing / electronic-temperature
+  continuation ("the mixing scheme sets the metal iteration count, the smearing kernel does not");
+  FFT arena + Morton layout (the arena half already ships in `BatchedHamiltonian`); cross-SCF
+  invariant-subspace deflation (destroys the uniform `(nk,nb,npw)` batch); cross-k Taylor
+  subspace-transport warm start (batching-hostile, first-iteration-only); one-center becsum
+  local-response preconditioner (phantom bottleneck, Johnson conditions it natively);
+  Harris-Foulkes trust-region line search (step-size control, an archived negative; bare HF is
+  non-variational near convergence).
+
+**Round 3 (lateral: architectural / systems / surrogate / campaign / deliverable; 0 dead, four
+live axes). These are DEFERRED / OPEN, not rejected.**
+- Warm-process setup amortization (fork-server / daemon / CRIU): PROMISING, the quick win, now its
+  own open entry above.
+- Delta-tier (multifidelity delta-learning, cheap base + learned smooth correction, oracle-audited):
+  PROMISING; the uncertainty/audit gate is the research, not the plumbing.
+- GreedyManifold (reduced-basis POD-Galerkin over a sweep): PROMISING but research-project
+  (nonlinear + non-affine parameter dependence needs EIM/DEIM); 5-20x campaign potential and the
+  reduced model is itself a differentiable surrogate.
+- Continuation Sweep (analytic drho/dlambda tangent drives EOS/elastic, read C_ij/B0/Gruneisen as
+  exact derivatives) and GradTrust (exact-gradient trust-region inverse design): INTERESTING, both
+  gated by the same missing piece, the metallic Fermi-surface response and strain/dR seed in
+  `scf/implicit.py` (insulator-only today). That response machinery is the highest-leverage single
+  enabler across the whole round.
+- RESPA-SCF (multirate: hold the ACE Fock on a slow clock for hybrids): INTERESTING, 2-4x on a
+  hybrid SCF at an unchanged fixed point; the multirate stride is the win, the response-certifier
+  the least-justified part.
+- HessNet (emulator supervised on exact Hessians / response tensors external MLIPs cannot supply),
+  Density Git (content-keyed converged-state store with equivariant transport), Control-Variate /
+  MLMC campaigns (only for true population expectations), Backprop-the-Budget (per-knob error
+  allocation, but the repo's own per-axis attributions are unreliable), Speculative trajectory
+  prefetch (capped at the line-search regime): INTERESTING to bounded.
+- InverseFlow (amortized generative designer): LONGSHOT, gradwave is the worst-positioned engine to
+  generate the training corpus. MigrateSCF precision-migration half: net-negative on this hardware
+  (fp32 GPU draft measured 0.35x); only its warm-pool half survives.
