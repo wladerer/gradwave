@@ -5,6 +5,7 @@ real small SCFs — a PAW checkpoint restart and a CLI end-to-end on an
 NC config.
 """
 
+import importlib.util
 import json
 from pathlib import Path
 
@@ -439,10 +440,14 @@ scf: {{etol: 1.0e-8, rhotol: 1.0e-7}}
     assert "self-consistency" in report and "free energy F" in report
     assert (out / "checkpoint.pt").exists()
 
-    # the plot subcommand consumes the JSON it just wrote
-    rc = main(["plot", str(out / "scf.json"), "-o",
-               str(tmp_path / "conv.png")])
-    assert rc == 0 and (tmp_path / "conv.png").exists()
+    # the plot subcommand consumes the JSON it just wrote; it routes through
+    # gradwave.analysis, which needs the `analysis` optional extra
+    # (pandas/matplotlib). Guard just this block so the end-to-end SCF and the
+    # restart coverage below still run on a core-only install.
+    if all(importlib.util.find_spec(m) for m in ("pandas", "matplotlib")):
+        rc = main(["plot", str(out / "scf.json"), "-o",
+                   str(tmp_path / "conv.png")])
+        assert rc == 0 and (tmp_path / "conv.png").exists()
 
     # NC restart from the checkpoint: same F, fewer iterations
     (tmp_path / "input2.yaml").write_text(
