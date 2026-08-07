@@ -1194,7 +1194,8 @@ def _scf_residual_and_record(
             m = float((rho_out_s[0] - rho_out_s[1]).mean()) * vol
             mag = f"   m = {m:+.4f} muB"
         print(
-            f"  SCF {it:3d}  F = {e_free:+.10f} eV   dE = {de:.3e}   |drho| = {res_norm:.3e}{mag}"
+            f"  SCF {it:3d}  F = {e_free:+.10f} eV   dE = {de:.3e}   "
+            f"|drho| = {res_norm:.3e}   {history[-1]['t']:5.2f}s{mag}"
         )
     return rho_in_vec, rho_out_vec, res_norm, drho_scf, de
 

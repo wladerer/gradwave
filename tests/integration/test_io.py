@@ -6,6 +6,7 @@ NC config.
 """
 
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -629,12 +630,16 @@ relax: {{optimizer: bfgs, cell: true, fmax: 0.05, max_steps: 1}}
     assert "── ionic step 1 ──" in shown       # per-step header
     assert "  SCF   1" in shown                 # nested electronic-step trace
     assert "ionic step   1 ·" in shown          # summary line, same number
+    # timing + memory: per-iteration time on the SCF line, and the run footer
+    assert re.search(r"\|drho\| = \S+ +\d+\.\d\ds", shown)  # per-SCF-iter seconds
+    assert "wall" in shown and "peak RSS" in shown          # timing + memory footer
 
-    # -q silences the whole electronic/ionic stream
+    # -q silences the whole electronic/ionic stream AND the footer
     assert main([str(tmp_path / "relax.yaml"), "-o", str(out), "-q"]) == 0
     quiet = capsys.readouterr().out
     assert "ionic step" not in quiet
     assert "SCF" not in quiet
+    assert "peak RSS" not in quiet
 
 
 @pytest.mark.standard

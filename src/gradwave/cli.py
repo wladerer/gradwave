@@ -184,6 +184,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from gradwave.api import run
 
     summary = run(inp, verbose=inp.verbose and not args.quiet)
+    if not args.quiet:
+        # timing + peak memory footer (VASP-style), from the provenance block the
+        # run always records — surfaced here rather than left in the JSON only.
+        proc = (summary.get("provenance") or {}).get("process") or {}
+        if proc:
+            foot = f"\n  {proc.get('wall_s', 0):.1f}s wall"
+            if proc.get("cpu_s") is not None:
+                foot += f" · {proc['cpu_s']:.0f}s cpu"
+            if proc.get("effective_threads"):
+                foot += f" ({proc['effective_threads']:.1f}× threads)"
+            if proc.get("peak_rss_gb") is not None:
+                foot += f" · peak RSS {proc['peak_rss_gb']:.2f} GB"
+            if "cuda_peak_alloc_gb" in proc:
+                foot += f" · CUDA peak {proc['cuda_peak_alloc_gb']:.2f} GB"
+            print(foot)
     scf = summary.get("scf")
     if scf is not None:
         e = scf["energies_eV"]

@@ -812,10 +812,11 @@ def _relax_nested(
     # geometry — cached property fetches don't re-trigger it), so ion_step["n"]
     # counts ionic steps 1, 2, 3 … and the post-step summary below reuses it, so
     # the header and its summary line always carry the same number.
-    ion_step = {"n": 0}
+    ion_step: dict[str, Any] = {"n": 0, "t0": None}
 
     def _scf_header() -> None:
         ion_step["n"] += 1
+        ion_step["t0"] = time.perf_counter()  # stamped at the SCF start (see _record)
         if verbose:
             print(f"\n── ionic step {ion_step['n']} ──", flush=True)
 
@@ -852,10 +853,14 @@ def _relax_nested(
         # cell — a "fmax = 0.00000" next to "NOT CONVERGED". Positions-only relax:
         # `target` is `atoms`, so this is identical to the atomic fmax.
         fmax = float(np.linalg.norm(target.get_forces(), axis=1).max())
+        # wall time for this ionic step: SCF start (stamped in _scf_header, just
+        # before the fresh SCF) to here (forces/step done). ~VASP's LOOP+ time.
+        wall_s = (time.perf_counter() - ion_step["t0"]) if ion_step["t0"] else 0.0
         entry: dict[str, Any] = {
             "step": opt.nsteps,
             "energy_eV": energy,
             "fmax_eV_ang": fmax,
+            "wall_s": round(wall_s, 2),
             "positions_ang": atoms.get_positions().tolist(),
             "cell_ang": atoms.cell.array.tolist(),
         }
@@ -876,7 +881,7 @@ def _relax_nested(
             pl = (f" · Pulay {pulay_gpa:+.2f} GPa" if pulay_gpa is not None
                   else "")
             print(f"  ionic step {ion_step['n']:>3d} · E = {energy:+.8f} eV"
-                  f" · fmax = {fmax:.5f} eV/Å{sc}{pl}", flush=True)
+                  f" · fmax = {fmax:.5f} eV/Å{sc}{pl} · {wall_s:.1f}s", flush=True)
         frame = atoms.copy()
         sp_kw: dict[str, Any] = {"energy": energy, "forces": forces}
         if inp.relax.cell:
