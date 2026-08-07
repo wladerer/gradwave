@@ -91,10 +91,11 @@ relax: {{optimizer: bfgs, fmax: 0.001, max_steps: 200, method: {method}}}
 
 
 def _patch_harmonic(monkeypatch):
-    # _build_relax_calc(inp, verbose): verbose rides along for the Pulay
-    # auto-resolution message (#217); the harmonic stand-in ignores it
+    # _build_relax_calc(inp, verbose, scf_step_hook=...): the extra kwargs
+    # (verbose for the Pulay message #217, scf_step_hook for the ionic-step
+    # header) ride along; the harmonic stand-in ignores them all
     monkeypatch.setattr("gradwave.api._build_relax_calc",
-                        lambda inp, verbose=True: _Harmonic(_TARGETS))
+                        lambda inp, verbose=True, **_kw: _Harmonic(_TARGETS))
 
 
 def test_fixed_atom_is_stationary_and_free_atom_relaxes(tmp_path, monkeypatch):

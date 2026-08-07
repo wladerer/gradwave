@@ -669,11 +669,18 @@ def _resolve_pulay_correction(inp: Input, verbose: bool = True) -> bool:
     return False
 
 
-def _build_relax_calc(inp: Input, verbose: bool = True) -> GradWave:
+def _build_relax_calc(
+    inp: Input,
+    verbose: bool = True,
+    scf_step_hook: Callable[[], None] | None = None,
+) -> GradWave:
     """The GradWave calculator a relaxation drives — shared by the nested
     engine and by ``joint``'s final consistent-energy/forces/stress SCF at the
     relaxed geometry (so both report ASE-calculator numbers, not the joint
-    functional's fixed-basis energy)."""
+    functional's fixed-basis energy).
+
+    ``verbose`` streams each ionic step's SCF trace (VASP OSZICAR-style);
+    ``scf_step_hook`` (nested engine only) prints the per-step header above it."""
     from gradwave.calculator import GradWave
 
     kerker = inp.scf.mixing.kerker
@@ -713,7 +720,8 @@ def _build_relax_calc(inp: Input, verbose: bool = True) -> GradWave:
         # forces/stress and the BFGS/FIRE step stay identical on every rank.
         distributed=inp.distributed,
         device=inp.device,
-        verbose=False,
+        verbose=verbose,
+        scf_step_hook=scf_step_hook,
     )
 
 
@@ -799,7 +807,20 @@ def _relax_nested(
             FixScaled(i, mask=tuple(bool(b) for b in inp.fixed[i]))
             for i in range(len(atoms)) if bool(inp.fixed[i].any())
         ])
-    atoms.calc = _build_relax_calc(inp, verbose)
+    # VASP OSZICAR-style output: a per-ionic-step header above that step's SCF
+    # trace. The calculator fires _scf_header once per FRESH SCF (one per
+    # geometry — cached property fetches don't re-trigger it), so ion_step["n"]
+    # counts ionic steps 1, 2, 3 … and the post-step summary below reuses it, so
+    # the header and its summary line always carry the same number.
+    ion_step: dict[str, Any] = {"n": 0, "t0": None}
+
+    def _scf_header() -> None:
+        ion_step["n"] += 1
+        ion_step["t0"] = time.perf_counter()  # stamped at the SCF start (see _record)
+        if verbose:
+            print(f"\n── ionic step {ion_step['n']} ──", flush=True)
+
+    atoms.calc = _build_relax_calc(inp, verbose, scf_step_hook=_scf_header)
     opt_cls = {"fire": FIRE, "bfgs": BFGS}[inp.relax.optimizer]
     target: Atoms | FrechetCellFilter = atoms
     if inp.relax.cell:
@@ -818,6 +839,23 @@ def _relax_nested(
     opt = opt_cls(cast("Atoms", target), logfile=None)  # our own per-step line below
     trajectory: list[dict[str, Any]] = []
     frames: list[Atoms] = []  # ASE Atoms per step, energy+forces frozen for extxyz output
+    # incremental trajectory: each step's frame is appended to this file as it
+    # completes, so an interrupted relax keeps its progress. write_output re-emits
+    # the identical full file at the end. Under distribution only rank 0 writes
+    # (matching write_output's gating), else every run writes — independent of -q.
+    traj_path = Path(inp.output_dir) / "relax.xyz"
+    _write_traj = True
+    if inp.distributed:
+        from gradwave.distributed import current_rank
+
+        _write_traj = current_rank() == 0
+    if _write_traj:
+        try:
+            traj_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning("could not prepare %s (%s); incremental trajectory "
+                           "off, final write still attempted", traj_path, exc)
+            _write_traj = False
 
     def _record() -> None:
         import numpy as np
@@ -825,11 +863,21 @@ def _relax_nested(
 
         forces = atoms.get_forces()
         energy = float(atoms.get_potential_energy())
-        fmax = float(np.linalg.norm(forces, axis=1).max())
+        # fmax the optimizer actually gates on: for a variable-cell relax `target`
+        # is the FrechetCellFilter, whose force array appends the stress-derived
+        # rows, so this matches the convergence criterion. Reporting atomic-only
+        # forces there can read ~0 (symmetric cell) while stress still drives the
+        # cell — a "fmax = 0.00000" next to "NOT CONVERGED". Positions-only relax:
+        # `target` is `atoms`, so this is identical to the atomic fmax.
+        fmax = float(np.linalg.norm(target.get_forces(), axis=1).max())
+        # wall time for this ionic step: SCF start (stamped in _scf_header, just
+        # before the fresh SCF) to here (forces/step done). ~VASP's LOOP+ time.
+        wall_s = (time.perf_counter() - ion_step["t0"]) if ion_step["t0"] else 0.0
         entry: dict[str, Any] = {
             "step": opt.nsteps,
             "energy_eV": energy,
             "fmax_eV_ang": fmax,
+            "wall_s": round(wall_s, 2),
             "positions_ang": atoms.get_positions().tolist(),
             "cell_ang": atoms.cell.array.tolist(),
         }
@@ -849,15 +897,36 @@ def _relax_nested(
                   if "scf_iter" in entry else "")
             pl = (f" · Pulay {pulay_gpa:+.2f} GPa" if pulay_gpa is not None
                   else "")
-            print(f"  relax step {opt.nsteps:>3d} · E = {energy:+.8f} eV"
-                  f" · fmax = {fmax:.5f} eV/Å{sc}{pl}", flush=True)
+            print(f"  ionic step {ion_step['n']:>3d} · E = {energy:+.8f} eV"
+                  f" · fmax = {fmax:.5f} eV/Å{sc}{pl} · {wall_s:.1f}s", flush=True)
         frame = atoms.copy()
         sp_kw: dict[str, Any] = {"energy": energy, "forces": forces}
         if inp.relax.cell:
             sp_kw["stress"] = atoms.get_stress()
+        # total magnetic moment for a spin-polarized run (the calculator sets
+        # results["magmom"] only for nspin=2); rides the frame into the extxyz
+        mag = atoms.calc.results.get("magmom") if atoms.calc is not None else None
+        if mag is not None:
+            sp_kw["magmom"] = float(mag)
         frame.calc = SinglePointCalculator(frame, **sp_kw)
         frame.info["step"] = opt.nsteps
         frames.append(frame)
+        if _write_traj:
+            from ase.io import write as ase_write
+
+            # First frame truncates (append=False) — cleanly overwriting any
+            # stale/corrupt/leftover relax.xyz; the rest append. append mode
+            # doesn't read the file, so a corrupt existing file can't break it,
+            # and a missing file/dir is (re)created. Best-effort regardless: a
+            # write failure (disk full, permissions, races) must not abort a
+            # multi-hour relax, so warn and carry on — write_output re-emits the
+            # full trajectory at the end.
+            try:
+                ase_write(str(traj_path), frame, format="extxyz",
+                          append=len(frames) > 1)
+            except Exception as exc:  # noqa: BLE001 — best-effort progress dump
+                logger.warning("could not append relax step to %s: %s",
+                               traj_path, exc)
 
     opt.attach(_record)
     converged = opt.run(fmax=inp.relax.fmax, steps=inp.relax.max_steps)
@@ -871,8 +940,11 @@ def _relax_nested(
         "cell_relaxed": bool(inp.relax.cell),
         "fmax_target_eV_ang": inp.relax.fmax,
         "energy_eV": float(atoms.get_potential_energy()),
+        # the optimizer's convergence quantity (target = FrechetCellFilter under
+        # a cell relax, so this includes stress), matching the per-step fmax and
+        # the fmax_target gate — not the atomic-only forces
         "fmax_eV_ang": float(
-            np.linalg.norm(atoms.get_forces(), axis=1).max()),
+            np.linalg.norm(target.get_forces(), axis=1).max()),
         "max_displacement_ang": float(np.linalg.norm(
             atoms.get_positions() - inp.atoms.get_positions(),
             axis=1).max()),

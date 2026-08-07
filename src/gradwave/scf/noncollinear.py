@@ -820,7 +820,8 @@ def scf_noncollinear(
         if verbose:
             mv = [float(m_out[i].mean()) * vol for i in range(3)]
             em = "" if e_metric is None else f"  E_err = {e_metric:.2e}"
-            print(f"  NC-SCF {it:3d}  F = {e_free:+.8f}  dE = {de:.2e}  "
+            print(f"  NC-SCF {it:3d}  F = {e_free:+.8f}  "
+                  f"dE = {(0.0 if de == float('inf') else de):.2e}  "
                   f"|dρ,m| = {res_norm:.2e}  m⃗ = ({mv[0]:+.3f},{mv[1]:+.3f},{mv[2]:+.3f})"
                   f"{em}",
                   flush=True)

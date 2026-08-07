@@ -7,6 +7,7 @@ NC config.
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -306,6 +307,43 @@ restart: {tmp_path / "from_yaml.pt"}
     assert captured["inp"].restart == tmp_path / "from_yaml.pt"
 
 
+def test_cli_run_prints_banner_and_summary(tmp_path, monkeypatch, capsys):
+    """A bare `gradwave run` prints the wave banner + input summary + a
+    'preparing' notice before the (silent) build; `-q` suppresses all of it.
+    Parse-only: api.run is stubbed so nothing computes."""
+    import gradwave.api as api
+    from gradwave.cli import main
+
+    def fake_run(inp, verbose=True):
+        return {}
+
+    monkeypatch.setattr(api, "run", fake_run)
+    (tmp_path / "in.yaml").write_text(f"""
+structure:
+  cell: {SI_CELL.tolist()}
+  positions:
+    cart: {SI_POS.tolist()}
+  species: [Si, Si]
+pseudopotentials:
+  dir: {FIX / "pseudos"}
+  map: {{Si: Si_ONCV_PBE-1.2.upf}}
+ecut: {15 * RY}
+kpoints: {{mesh: [2, 2, 2]}}
+""")
+    assert main([str(tmp_path / "in.yaml")]) == 0
+    out = capsys.readouterr().out
+    assert "gradwave" in out                       # banner wordmark
+    assert "differentiable plane-wave DFT" in out  # tagline
+    assert "preparing system" in out               # the pre-build notice
+    assert "Si2" in out                            # structure summary line
+
+    # -q suppresses the banner/summary/preparing block entirely
+    assert main([str(tmp_path / "in.yaml"), "-q"]) == 0
+    out_q = capsys.readouterr().out
+    assert "gradwave" not in out_q
+    assert "preparing system" not in out_q
+
+
 @pytest.mark.standard
 def test_paw_checkpoint_roundtrip_and_restart(tmp_path):
     from gradwave.checkpoint import (
@@ -566,6 +604,59 @@ relax: {{optimizer: fire, fmax: 0.02, max_steps: 3}}
     e_json = summary["relax"]["trajectory"][-1]["energy_eV"]
     assert abs(frames[-1].get_potential_energy() - e_json) < 1e-6
     assert frames[-1].get_forces().shape == (2, 3)
+
+
+@pytest.mark.standard
+def test_cli_relax_streams_scf_trace_vasp_style(tmp_path, capsys):
+    """A relax streams each ionic step's SCF trace under a `── ionic step N ──`
+    header (VASP OSZICAR-style) by default; `-q` silences the stream. The header
+    and its summary line carry the same step number."""
+    from gradwave.cli import main
+
+    (tmp_path / "relax.yaml").write_text(f"""
+task: relax
+structure:
+  cell: {SI_CELL.tolist()}
+  positions:
+    cart: {SI_POS.tolist()}
+  species: [Si, Si]
+pseudopotentials:
+  dir: {FIX / "pseudos"}
+  map: {{Si: Si_ONCV_PBE-1.2.upf}}
+ecut: {15 * RY}
+xc: lda
+symmetry: false
+kpoints: {{mesh: [2, 2, 2]}}
+relax: {{optimizer: bfgs, cell: true, fmax: 0.05, max_steps: 1}}
+""")
+    out = tmp_path / "results"
+    out.mkdir()
+    # pre-seed a corrupt/leftover relax.xyz: the incremental writer must overwrite
+    # it cleanly on the first frame without erroring
+    (out / "relax.xyz").write_bytes(b"\x00 corrupt leftover, not an xyz \x00")
+    assert main([str(tmp_path / "relax.yaml"), "-o", str(out)]) == 0
+    shown = capsys.readouterr().out
+    assert "── ionic step 1 ──" in shown       # per-step header
+    assert "  SCF   1" in shown                 # nested electronic-step trace
+    assert "ionic step   1 ·" in shown          # summary line, same number
+    # timing + memory: per-iteration time on the SCF line, and the run footer
+    assert re.search(r"\|drho\| = \S+ +\d+\.\d\ds", shown)  # per-SCF-iter seconds
+    assert "wall" in shown and "peak RSS" in shown          # timing + memory footer
+
+    # incremental trajectory: the corrupt pre-existing relax.xyz was cleanly
+    # overwritten, each step saved with per-atom forces + (variable-cell) stress
+    from ase.io import read as ase_read
+    traj = ase_read(str(out / "relax.xyz"), index=":")
+    assert len(traj) >= 1
+    assert traj[0].get_forces().shape == (2, 3)
+    assert traj[0].calc.results.get("stress") is not None
+
+    # -q silences the whole electronic/ionic stream AND the footer
+    assert main([str(tmp_path / "relax.yaml"), "-o", str(out), "-q"]) == 0
+    quiet = capsys.readouterr().out
+    assert "ionic step" not in quiet
+    assert "SCF" not in quiet
+    assert "peak RSS" not in quiet
 
 
 @pytest.mark.standard

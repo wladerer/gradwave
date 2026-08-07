@@ -111,31 +111,49 @@ def _load_checked(path: str) -> tuple[Input | None, int | None]:
         return None, 1
 
 
-def _cmd_validate(args: argparse.Namespace) -> int:
+def _banner() -> str:
+    """The startup wordmark. A ``╱╲`` wave motif — a nod to the plane-wave basis
+    — plus the version, so a bare `gradwave run` gives immediate feedback while
+    the (silent, slow) pseudopotential parse and basis build get under way."""
+    return (f"\n  ╱╲╱╲╱╲   gradwave  v{__version__}\n"
+            f"  ╲╱╲╱╲╱   differentiable plane-wave DFT\n")
+
+
+def _summary_lines(inp: Input) -> list[str]:
+    """The input at a glance — shared by `validate` and the `run` startup block."""
     import numpy as np
 
+    a = inp.atoms
+    task = inp.task
+    if task == "relax":
+        task += "  (variable cell)" if inp.relax.cell else "  (positions only)"
+    return [
+        f"  task        {task}",
+        f"  structure   {a.get_chemical_formula()}  ({len(a)} atoms)",
+        f"  cell [Å]    {np.array2string(a.cell.array, precision=4)}",
+        f"  ecut [eV]   {inp.ecut:g}"
+        + (f"   ecutrho {inp.ecutrho:g}" if inp.ecutrho else ""),
+        f"  xc          {inp.xc}",
+        f"  kpoints     mesh {list(inp.kpoints.mesh)} shift "
+        f"{list(inp.kpoints.shift)}",
+        f"  smearing    {inp.smearing.type}"
+        + (f" ({inp.smearing.width} eV)" if inp.smearing.type != "none" else ""),
+        f"  nspin       {inp.nspin}"
+        + ("  noncollinear" if inp.noncollinear else ""),
+        f"  pseudos     {inp.pseudo_map}",
+        f"  device      {inp.device}",
+        f"  output_dir  {inp.output_dir}",
+    ]
+
+
+def _cmd_validate(args: argparse.Namespace) -> int:
     inp, rc = _load_checked(args.input)
     if rc is not None:
         return rc
     assert inp is not None
-    a = inp.atoms
-    formula = a.get_chemical_formula()
     print(f"ok: {args.input}")
-    print(f"  task        {inp.task}")
-    print(f"  structure   {formula}  ({len(a)} atoms)")
-    print(f"  cell [Å]    {np.array2string(a.cell.array, precision=4)}")
-    print(f"  ecut [eV]   {inp.ecut:g}"
-          + (f"   ecutrho {inp.ecutrho:g}" if inp.ecutrho else ""))
-    print(f"  xc          {inp.xc}")
-    print(f"  kpoints     mesh {list(inp.kpoints.mesh)} shift "
-          f"{list(inp.kpoints.shift)}")
-    print(f"  smearing    {inp.smearing.type}"
-          + (f" ({inp.smearing.width} eV)" if inp.smearing.type != "none" else ""))
-    print(f"  nspin       {inp.nspin}"
-          + ("  noncollinear" if inp.noncollinear else ""))
-    print(f"  pseudos     {inp.pseudo_map}")
-    print(f"  device      {inp.device}")
-    print(f"  output_dir  {inp.output_dir}")
+    for line in _summary_lines(inp):
+        print(line)
     return 0
 
 
@@ -143,7 +161,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
     import dataclasses
 
     from gradwave import configure_logging
-    from gradwave.api import run
 
     if args.log_level:
         configure_logging(args.log_level)
@@ -155,7 +172,33 @@ def _cmd_run(args: argparse.Namespace) -> int:
         inp = dataclasses.replace(inp, output_dir=Path(args.output))
     if args.restart:
         inp = dataclasses.replace(inp, restart=Path(args.restart))
+    if not args.quiet:
+        # Print before importing api (torch) and before the silent build, so the
+        # user sees what they launched instead of a blank terminal. flush=True:
+        # the following build can run for seconds with no further output.
+        print(_banner())
+        for line in _summary_lines(inp):
+            print(line)
+        print("\n  preparing system — parsing pseudopotentials, building the "
+              "plane-wave basis and form factors …\n", flush=True)
+    from gradwave.api import run
+
     summary = run(inp, verbose=inp.verbose and not args.quiet)
+    if not args.quiet:
+        # timing + peak memory footer (VASP-style), from the provenance block the
+        # run always records — surfaced here rather than left in the JSON only.
+        proc = (summary.get("provenance") or {}).get("process") or {}
+        if proc:
+            foot = f"\n  {proc.get('wall_s', 0):.1f}s wall"
+            if proc.get("cpu_s") is not None:
+                foot += f" · {proc['cpu_s']:.0f}s cpu"
+            if proc.get("effective_threads"):
+                foot += f" ({proc['effective_threads']:.1f}× threads)"
+            if proc.get("peak_rss_gb") is not None:
+                foot += f" · peak RSS {proc['peak_rss_gb']:.2f} GB"
+            if "cuda_peak_alloc_gb" in proc:
+                foot += f" · CUDA peak {proc['cuda_peak_alloc_gb']:.2f} GB"
+            print(foot)
     scf = summary.get("scf")
     if scf is not None:
         e = scf["energies_eV"]
