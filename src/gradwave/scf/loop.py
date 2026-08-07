@@ -1345,11 +1345,16 @@ def scf(
     # instance; every System that reaches scf() came from setup_system(),
     # which always fills it via build_batched() (never returns None).
     assert bk is not None
-    # Opt-in, NOT auto: benchmarking (RTX 3050) showed the fp32 draft is
-    # situational — a clear win only for moderate-grid, many-k, smeared/SOC
-    # systems (e.g. GaAs, 1.45×), but a REGRESSION for fixed-occupation
-    # insulators (Si8 0.35×: the fp32 draft inflates SCF iterations ~50%) and
-    # neutral for metals / very large grids. Callers enable it per system.
+    # Opt-in, NOT auto: it drafts only the *early* Davidson iterations in fp32
+    # and re-polishes in fp64 below MP_CROSSOVER, so it pays only when those
+    # early solves are compute-bound. The RTX 3050 battery
+    # (benchmarks/solver_battery/results/mixed_precision/{,cuda/}) shows the win
+    # is Davidson-only and size-dependent: insulators win at every size
+    # (Si2/MgO/Si16 1.16-1.34×), but metals REGRESS while small and launch-bound
+    # (Al/Cu/Fe 0.76-0.97×) and only cross into a win once the grid is large
+    # enough to be compute-bound (Cu8 supercell 1.23×, -5 iters). LOBPCG never
+    # wins (its fp64 polish dominates); best case tops out ~1.35× because the
+    # polish keeps most work fp64. Callers enable it per system.
     mp_crossover = MP_CROSSOVER  # fp64 once the diago tolerance drops below this
 
     # frozen projector matrices (positions fixed during SCF)

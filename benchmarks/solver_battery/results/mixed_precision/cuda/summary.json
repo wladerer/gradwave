@@ -1,0 +1,1020 @@
+{
+  "meta": {
+    "timestamp": "2026-08-06 18:33 UTC",
+    "host": "asus",
+    "torch": "2.12.1+cu130",
+    "device": "cuda",
+    "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+    "threads": 8,
+    "solvers": [
+      "davidson",
+      "lobpcg"
+    ],
+    "systems": [
+      "si_insulator",
+      "mgo_insulator",
+      "al_metal",
+      "cu_metal",
+      "fe_fm_metal",
+      "cr_afm_metal",
+      "bi_heavy",
+      "si_insulator_m",
+      "cu_metal_m"
+    ],
+    "mode": "mixed_precision",
+    "mp_crossover": 1e-05,
+    "mp_e_tol_eV_per_atom": 1e-06
+  },
+  "records": [
+    {
+      "system": "si_insulator",
+      "cls": "insulator",
+      "formula": "Si2",
+      "device": "cuda",
+      "solvers": {
+        "davidson": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 2,
+            "converged": true,
+            "scf_iters": 9,
+            "wall_s": 2.684,
+            "eigh_s": 0.185,
+            "eigh_share": 0.069,
+            "eigh_calls": 139,
+            "final_res": 5.14607082338798e-09,
+            "energy_eV": -213.93343314517045,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 2,
+            "converged": true,
+            "scf_iters": 10,
+            "wall_s": 1.995,
+            "eigh_s": 0.221,
+            "eigh_share": 0.1109,
+            "eigh_calls": 174,
+            "final_res": 1.9108583927532237e-09,
+            "energy_eV": -213.93343314517045,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 1.345,
+            "iters_delta": 1,
+            "energy_error_eV": 0.0,
+            "energy_error_eV_per_atom": 0.0,
+            "energy_ok": true,
+            "regresses": false
+          }
+        },
+        "lobpcg": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 2,
+            "converged": true,
+            "scf_iters": 9,
+            "wall_s": 9.143,
+            "eigh_s": 0.279,
+            "eigh_share": 0.0306,
+            "eigh_calls": 115,
+            "final_res": 9.207985550467072e-09,
+            "energy_eV": -213.93343314517048,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 2,
+            "converged": true,
+            "scf_iters": 10,
+            "wall_s": 10.939,
+            "eigh_s": 0.434,
+            "eigh_share": 0.0396,
+            "eigh_calls": 194,
+            "final_res": 3.745269994851791e-09,
+            "energy_eV": -213.93343314517048,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 0.836,
+            "iters_delta": 1,
+            "energy_error_eV": 0.0,
+            "energy_error_eV_per_atom": 0.0,
+            "energy_ok": true,
+            "regresses": true
+          }
+        }
+      },
+      "meta": {
+        "timestamp": "2026-08-06 18:33 UTC",
+        "host": "asus",
+        "torch": "2.12.1+cu130",
+        "device": "cuda",
+        "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+        "threads": 8,
+        "solvers": [
+          "davidson",
+          "lobpcg"
+        ],
+        "systems": [
+          "si_insulator",
+          "mgo_insulator",
+          "al_metal",
+          "cu_metal",
+          "fe_fm_metal",
+          "cr_afm_metal",
+          "bi_heavy",
+          "si_insulator_m",
+          "cu_metal_m"
+        ],
+        "mode": "mixed_precision",
+        "mp_crossover": 1e-05,
+        "mp_e_tol_eV_per_atom": 1e-06
+      }
+    },
+    {
+      "system": "mgo_insulator",
+      "cls": "insulator",
+      "formula": "MgO",
+      "device": "cuda",
+      "solvers": {
+        "davidson": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 2,
+            "converged": true,
+            "scf_iters": 11,
+            "wall_s": 3.86,
+            "eigh_s": 0.416,
+            "eigh_share": 0.1077,
+            "eigh_calls": 140,
+            "final_res": 7.562008463250246e-10,
+            "energy_eV": -1908.1165513239403,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 2,
+            "converged": true,
+            "scf_iters": 11,
+            "wall_s": 3.326,
+            "eigh_s": 0.5,
+            "eigh_share": 0.1503,
+            "eigh_calls": 158,
+            "final_res": 7.704844690090608e-10,
+            "energy_eV": -1908.1165513239407,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 1.161,
+            "iters_delta": 0,
+            "energy_error_eV": 4.547473508864641e-13,
+            "energy_error_eV_per_atom": 2.2737367544323206e-13,
+            "energy_ok": true,
+            "regresses": false
+          }
+        },
+        "lobpcg": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 2,
+            "converged": true,
+            "scf_iters": 11,
+            "wall_s": 24.066,
+            "eigh_s": 0.834,
+            "eigh_share": 0.0347,
+            "eigh_calls": 173,
+            "final_res": 7.410058536826322e-10,
+            "energy_eV": -1908.1165513239398,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 2,
+            "converged": true,
+            "scf_iters": 11,
+            "wall_s": 21.875,
+            "eigh_s": 0.867,
+            "eigh_share": 0.0396,
+            "eigh_calls": 187,
+            "final_res": 7.556745310905924e-10,
+            "energy_eV": -1908.1165513239393,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 1.1,
+            "iters_delta": 0,
+            "energy_error_eV": 4.547473508864641e-13,
+            "energy_error_eV_per_atom": 2.2737367544323206e-13,
+            "energy_ok": true,
+            "regresses": false
+          }
+        }
+      },
+      "meta": {
+        "timestamp": "2026-08-06 18:33 UTC",
+        "host": "asus",
+        "torch": "2.12.1+cu130",
+        "device": "cuda",
+        "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+        "threads": 8,
+        "solvers": [
+          "davidson",
+          "lobpcg"
+        ],
+        "systems": [
+          "si_insulator",
+          "mgo_insulator",
+          "al_metal",
+          "cu_metal",
+          "fe_fm_metal",
+          "cr_afm_metal",
+          "bi_heavy",
+          "si_insulator_m",
+          "cu_metal_m"
+        ],
+        "mode": "mixed_precision",
+        "mp_crossover": 1e-05,
+        "mp_e_tol_eV_per_atom": 1e-06
+      }
+    },
+    {
+      "system": "al_metal",
+      "cls": "simple metal",
+      "formula": "Al",
+      "device": "cuda",
+      "solvers": {
+        "davidson": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 1,
+            "converged": true,
+            "scf_iters": 10,
+            "wall_s": 3.891,
+            "eigh_s": 0.903,
+            "eigh_share": 0.2321,
+            "eigh_calls": 147,
+            "final_res": 1.0680451842873425e-09,
+            "energy_eV": -1841.6074485724034,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 1,
+            "converged": true,
+            "scf_iters": 10,
+            "wall_s": 4.578,
+            "eigh_s": 1.514,
+            "eigh_share": 0.3308,
+            "eigh_calls": 247,
+            "final_res": 1.0651312622853142e-09,
+            "energy_eV": -1841.6074485724066,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 0.85,
+            "iters_delta": 0,
+            "energy_error_eV": 3.183231456205249e-12,
+            "energy_error_eV_per_atom": 3.183231456205249e-12,
+            "energy_ok": true,
+            "regresses": true
+          }
+        },
+        "lobpcg": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 1,
+            "converged": true,
+            "scf_iters": 10,
+            "wall_s": 31.993,
+            "eigh_s": 2.199,
+            "eigh_share": 0.0687,
+            "eigh_calls": 221,
+            "final_res": 1.1082759485344146e-09,
+            "energy_eV": -1841.6074485724032,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 1,
+            "converged": true,
+            "scf_iters": 10,
+            "wall_s": 33.745,
+            "eigh_s": 2.882,
+            "eigh_share": 0.0854,
+            "eigh_calls": 305,
+            "final_res": 1.2241699771281654e-09,
+            "energy_eV": -1841.607448572408,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 0.948,
+            "iters_delta": 0,
+            "energy_error_eV": 4.774847184307873e-12,
+            "energy_error_eV_per_atom": 4.774847184307873e-12,
+            "energy_ok": true,
+            "regresses": true
+          }
+        }
+      },
+      "meta": {
+        "timestamp": "2026-08-06 18:33 UTC",
+        "host": "asus",
+        "torch": "2.12.1+cu130",
+        "device": "cuda",
+        "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+        "threads": 8,
+        "solvers": [
+          "davidson",
+          "lobpcg"
+        ],
+        "systems": [
+          "si_insulator",
+          "mgo_insulator",
+          "al_metal",
+          "cu_metal",
+          "fe_fm_metal",
+          "cr_afm_metal",
+          "bi_heavy",
+          "si_insulator_m",
+          "cu_metal_m"
+        ],
+        "mode": "mixed_precision",
+        "mp_crossover": 1e-05,
+        "mp_e_tol_eV_per_atom": 1e-06
+      }
+    },
+    {
+      "system": "cu_metal",
+      "cls": "noble metal",
+      "formula": "Cu",
+      "device": "cuda",
+      "solvers": {
+        "davidson": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 1,
+            "converged": true,
+            "scf_iters": 11,
+            "wall_s": 10.553,
+            "eigh_s": 1.799,
+            "eigh_share": 0.1705,
+            "eigh_calls": 137,
+            "final_res": 3.179107438938179e-09,
+            "energy_eV": -4942.414113276807,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 1,
+            "converged": true,
+            "scf_iters": 11,
+            "wall_s": 13.919,
+            "eigh_s": 3.266,
+            "eigh_share": 0.2346,
+            "eigh_calls": 249,
+            "final_res": 8.687736261987994e-09,
+            "energy_eV": -4942.414113276803,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 0.758,
+            "iters_delta": 0,
+            "energy_error_eV": 4.547473508864641e-12,
+            "energy_error_eV_per_atom": 4.547473508864641e-12,
+            "energy_ok": true,
+            "regresses": true
+          }
+        },
+        "lobpcg": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 1,
+            "converged": true,
+            "scf_iters": 11,
+            "wall_s": 122.962,
+            "eigh_s": 5.43,
+            "eigh_share": 0.0442,
+            "eigh_calls": 267,
+            "final_res": 2.9934190409839244e-09,
+            "energy_eV": -4942.414113276808,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 1,
+            "converged": true,
+            "scf_iters": 11,
+            "wall_s": 154.885,
+            "eigh_s": 8.255,
+            "eigh_share": 0.0533,
+            "eigh_calls": 426,
+            "final_res": 6.579884261430944e-09,
+            "energy_eV": -4942.4141132768045,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 0.794,
+            "iters_delta": 0,
+            "energy_error_eV": 3.637978807091713e-12,
+            "energy_error_eV_per_atom": 3.637978807091713e-12,
+            "energy_ok": true,
+            "regresses": true
+          }
+        }
+      },
+      "meta": {
+        "timestamp": "2026-08-06 18:33 UTC",
+        "host": "asus",
+        "torch": "2.12.1+cu130",
+        "device": "cuda",
+        "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+        "threads": 8,
+        "solvers": [
+          "davidson",
+          "lobpcg"
+        ],
+        "systems": [
+          "si_insulator",
+          "mgo_insulator",
+          "al_metal",
+          "cu_metal",
+          "fe_fm_metal",
+          "cr_afm_metal",
+          "bi_heavy",
+          "si_insulator_m",
+          "cu_metal_m"
+        ],
+        "mode": "mixed_precision",
+        "mp_crossover": 1e-05,
+        "mp_e_tol_eV_per_atom": 1e-06
+      }
+    },
+    {
+      "system": "fe_fm_metal",
+      "cls": "ferromagnetic metal",
+      "formula": "Fe",
+      "device": "cuda",
+      "solvers": {
+        "davidson": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 1,
+            "converged": true,
+            "scf_iters": 14,
+            "wall_s": 22.98,
+            "eigh_s": 2.652,
+            "eigh_share": 0.1154,
+            "eigh_calls": 335,
+            "final_res": 8.527580280149016e-09,
+            "energy_eV": -3209.665270433434,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 1,
+            "converged": true,
+            "scf_iters": 16,
+            "wall_s": 23.801,
+            "eigh_s": 4.066,
+            "eigh_share": 0.1708,
+            "eigh_calls": 508,
+            "final_res": 1.7559260455717013e-09,
+            "energy_eV": -3209.6652704334037,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 0.966,
+            "iters_delta": 2,
+            "energy_error_eV": 3.0468072509393096e-11,
+            "energy_error_eV_per_atom": 3.0468072509393096e-11,
+            "energy_ok": true,
+            "regresses": true
+          }
+        },
+        "lobpcg": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 1,
+            "converged": true,
+            "scf_iters": 14,
+            "wall_s": 143.415,
+            "eigh_s": 5.232,
+            "eigh_share": 0.0365,
+            "eigh_calls": 422,
+            "final_res": 8.609245245172793e-09,
+            "energy_eV": -3209.6652704334333,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 1,
+            "converged": true,
+            "scf_iters": 16,
+            "wall_s": 167.824,
+            "eigh_s": 11.881,
+            "eigh_share": 0.0708,
+            "eigh_calls": 1037,
+            "final_res": 2.075672393723299e-09,
+            "energy_eV": -3209.6652704334074,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 0.855,
+            "iters_delta": 2,
+            "energy_error_eV": 2.5920599000528455e-11,
+            "energy_error_eV_per_atom": 2.5920599000528455e-11,
+            "energy_ok": true,
+            "regresses": true
+          }
+        }
+      },
+      "meta": {
+        "timestamp": "2026-08-06 18:33 UTC",
+        "host": "asus",
+        "torch": "2.12.1+cu130",
+        "device": "cuda",
+        "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+        "threads": 8,
+        "solvers": [
+          "davidson",
+          "lobpcg"
+        ],
+        "systems": [
+          "si_insulator",
+          "mgo_insulator",
+          "al_metal",
+          "cu_metal",
+          "fe_fm_metal",
+          "cr_afm_metal",
+          "bi_heavy",
+          "si_insulator_m",
+          "cu_metal_m"
+        ],
+        "mode": "mixed_precision",
+        "mp_crossover": 1e-05,
+        "mp_e_tol_eV_per_atom": 1e-06
+      }
+    },
+    {
+      "system": "cr_afm_metal",
+      "cls": "antiferromagnet",
+      "formula": "Cr2",
+      "device": "cuda",
+      "solvers": {
+        "davidson": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 2,
+            "converged": true,
+            "scf_iters": 20,
+            "wall_s": 43.894,
+            "eigh_s": 5.022,
+            "eigh_share": 0.1144,
+            "eigh_calls": 537,
+            "final_res": 6.627634836712795e-09,
+            "energy_eV": -4552.537726313651,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 2,
+            "converged": true,
+            "scf_iters": 22,
+            "wall_s": 50.244,
+            "eigh_s": 9.381,
+            "eigh_share": 0.1867,
+            "eigh_calls": 924,
+            "final_res": 9.242154859549423e-09,
+            "energy_eV": -4552.537726313651,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 0.874,
+            "iters_delta": 2,
+            "energy_error_eV": 0.0,
+            "energy_error_eV_per_atom": 0.0,
+            "energy_ok": true,
+            "regresses": true
+          }
+        },
+        "lobpcg": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 2,
+            "converged": true,
+            "scf_iters": 20,
+            "wall_s": 215.289,
+            "eigh_s": 9.541,
+            "eigh_share": 0.0443,
+            "eigh_calls": 630,
+            "final_res": 6.4825771892258725e-09,
+            "energy_eV": -4552.53772631365,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 2,
+            "converged": true,
+            "scf_iters": 22,
+            "wall_s": 282.142,
+            "eigh_s": 16.039,
+            "eigh_share": 0.0568,
+            "eigh_calls": 1115,
+            "final_res": 7.3619907523313825e-09,
+            "energy_eV": -4552.53772631365,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 0.763,
+            "iters_delta": 2,
+            "energy_error_eV": 0.0,
+            "energy_error_eV_per_atom": 0.0,
+            "energy_ok": true,
+            "regresses": true
+          }
+        }
+      },
+      "meta": {
+        "timestamp": "2026-08-06 18:33 UTC",
+        "host": "asus",
+        "torch": "2.12.1+cu130",
+        "device": "cuda",
+        "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+        "threads": 8,
+        "solvers": [
+          "davidson",
+          "lobpcg"
+        ],
+        "systems": [
+          "si_insulator",
+          "mgo_insulator",
+          "al_metal",
+          "cu_metal",
+          "fe_fm_metal",
+          "cr_afm_metal",
+          "bi_heavy",
+          "si_insulator_m",
+          "cu_metal_m"
+        ],
+        "mode": "mixed_precision",
+        "mp_crossover": 1e-05,
+        "mp_e_tol_eV_per_atom": 1e-06
+      }
+    },
+    {
+      "system": "bi_heavy",
+      "cls": "heavy (scalar-rel)",
+      "formula": "Bi",
+      "device": "cuda",
+      "solvers": {
+        "davidson": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 1,
+            "converged": true,
+            "scf_iters": 11,
+            "wall_s": 12.468,
+            "eigh_s": 1.654,
+            "eigh_share": 0.1327,
+            "eigh_calls": 198,
+            "final_res": 2.9165670926978414e-09,
+            "energy_eV": -2210.732746884435,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 1,
+            "converged": true,
+            "scf_iters": 11,
+            "wall_s": 14.308,
+            "eigh_s": 2.63,
+            "eigh_share": 0.1838,
+            "eigh_calls": 314,
+            "final_res": 3.445225981448546e-09,
+            "energy_eV": -2210.732746884439,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 0.871,
+            "iters_delta": 0,
+            "energy_error_eV": 4.092726157978177e-12,
+            "energy_error_eV_per_atom": 4.092726157978177e-12,
+            "energy_ok": true,
+            "regresses": true
+          }
+        },
+        "lobpcg": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 1,
+            "converged": true,
+            "scf_iters": 11,
+            "wall_s": 130.337,
+            "eigh_s": 4.209,
+            "eigh_share": 0.0323,
+            "eigh_calls": 312,
+            "final_res": 4.101085399502001e-09,
+            "energy_eV": -2210.7327468844387,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 1,
+            "converged": true,
+            "scf_iters": 11,
+            "wall_s": 152.664,
+            "eigh_s": 5.386,
+            "eigh_share": 0.0353,
+            "eigh_calls": 408,
+            "final_res": 6.341149652472042e-09,
+            "energy_eV": -2210.7327468844423,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 0.854,
+            "iters_delta": 0,
+            "energy_error_eV": 3.637978807091713e-12,
+            "energy_error_eV_per_atom": 3.637978807091713e-12,
+            "energy_ok": true,
+            "regresses": true
+          }
+        }
+      },
+      "meta": {
+        "timestamp": "2026-08-06 18:33 UTC",
+        "host": "asus",
+        "torch": "2.12.1+cu130",
+        "device": "cuda",
+        "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+        "threads": 8,
+        "solvers": [
+          "davidson",
+          "lobpcg"
+        ],
+        "systems": [
+          "si_insulator",
+          "mgo_insulator",
+          "al_metal",
+          "cu_metal",
+          "fe_fm_metal",
+          "cr_afm_metal",
+          "bi_heavy",
+          "si_insulator_m",
+          "cu_metal_m"
+        ],
+        "mode": "mixed_precision",
+        "mp_crossover": 1e-05,
+        "mp_e_tol_eV_per_atom": 1e-06
+      }
+    },
+    {
+      "system": "si_insulator_m",
+      "cls": "insulator (medium)",
+      "formula": "Si16",
+      "device": "cuda",
+      "solvers": {
+        "davidson": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 16,
+            "converged": true,
+            "scf_iters": 17,
+            "wall_s": 83.05,
+            "eigh_s": 4.682,
+            "eigh_share": 0.0564,
+            "eigh_calls": 588,
+            "final_res": 5.975896880980486e-09,
+            "energy_eV": -1711.4674651613636,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 16,
+            "converged": true,
+            "scf_iters": 17,
+            "wall_s": 62.071,
+            "eigh_s": 4.405,
+            "eigh_share": 0.071,
+            "eigh_calls": 606,
+            "final_res": 3.465665051963196e-09,
+            "energy_eV": -1711.4674651613636,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 1.338,
+            "iters_delta": 0,
+            "energy_error_eV": 0.0,
+            "energy_error_eV_per_atom": 0.0,
+            "energy_ok": true,
+            "regresses": false
+          }
+        },
+        "lobpcg": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 16,
+            "converged": true,
+            "scf_iters": 13,
+            "wall_s": 354.024,
+            "eigh_s": 4.248,
+            "eigh_share": 0.012,
+            "eigh_calls": 409,
+            "final_res": 6.9914345412951705e-09,
+            "energy_eV": -1711.4674651613636,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 16,
+            "converged": true,
+            "scf_iters": 14,
+            "wall_s": 342.689,
+            "eigh_s": 4.404,
+            "eigh_share": 0.0129,
+            "eigh_calls": 435,
+            "final_res": 3.79491202234512e-09,
+            "energy_eV": -1711.4674651613636,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 1.033,
+            "iters_delta": 1,
+            "energy_error_eV": 0.0,
+            "energy_error_eV_per_atom": 0.0,
+            "energy_ok": true,
+            "regresses": false
+          }
+        }
+      },
+      "meta": {
+        "timestamp": "2026-08-06 18:33 UTC",
+        "host": "asus",
+        "torch": "2.12.1+cu130",
+        "device": "cuda",
+        "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+        "threads": 8,
+        "solvers": [
+          "davidson",
+          "lobpcg"
+        ],
+        "systems": [
+          "si_insulator",
+          "mgo_insulator",
+          "al_metal",
+          "cu_metal",
+          "fe_fm_metal",
+          "cr_afm_metal",
+          "bi_heavy",
+          "si_insulator_m",
+          "cu_metal_m"
+        ],
+        "mode": "mixed_precision",
+        "mp_crossover": 1e-05,
+        "mp_e_tol_eV_per_atom": 1e-06
+      }
+    },
+    {
+      "system": "cu_metal_m",
+      "cls": "noble metal (medium)",
+      "formula": "Cu8",
+      "device": "cuda",
+      "solvers": {
+        "davidson": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 8,
+            "converged": true,
+            "scf_iters": 23,
+            "wall_s": 184.622,
+            "eigh_s": 80.446,
+            "eigh_share": 0.4357,
+            "eigh_calls": 601,
+            "final_res": 6.2676475483213805e-09,
+            "energy_eV": -39376.70301254929,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 8,
+            "converged": true,
+            "scf_iters": 18,
+            "wall_s": 150.352,
+            "eigh_s": 73.622,
+            "eigh_share": 0.4897,
+            "eigh_calls": 659,
+            "final_res": 8.997945810625932e-09,
+            "energy_eV": -39376.703012549326,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 1.228,
+            "iters_delta": -5,
+            "energy_error_eV": 3.637978807091713e-11,
+            "energy_error_eV_per_atom": 4.547473508864641e-12,
+            "energy_ok": true,
+            "regresses": false
+          }
+        },
+        "lobpcg": {
+          "fp64": {
+            "mixed_precision": false,
+            "device": "cuda",
+            "natoms": 8,
+            "converged": true,
+            "scf_iters": 15,
+            "wall_s": 422.167,
+            "eigh_s": 322.041,
+            "eigh_share": 0.7628,
+            "eigh_calls": 258,
+            "final_res": 3.8408116927492985e-09,
+            "energy_eV": -39376.70301254932,
+            "error": null
+          },
+          "mixed": {
+            "mixed_precision": true,
+            "device": "cuda",
+            "natoms": 8,
+            "converged": true,
+            "scf_iters": 18,
+            "wall_s": 610.4,
+            "eigh_s": 481.887,
+            "eigh_share": 0.7895,
+            "eigh_calls": 669,
+            "final_res": 3.5854393275618265e-09,
+            "energy_eV": -39376.70301254928,
+            "error": null
+          },
+          "comparison": {
+            "speedup": 0.692,
+            "iters_delta": 3,
+            "energy_error_eV": 3.637978807091713e-11,
+            "energy_error_eV_per_atom": 4.547473508864641e-12,
+            "energy_ok": true,
+            "regresses": true
+          }
+        }
+      },
+      "meta": {
+        "timestamp": "2026-08-06 18:33 UTC",
+        "host": "asus",
+        "torch": "2.12.1+cu130",
+        "device": "cuda",
+        "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+        "threads": 8,
+        "solvers": [
+          "davidson",
+          "lobpcg"
+        ],
+        "systems": [
+          "si_insulator",
+          "mgo_insulator",
+          "al_metal",
+          "cu_metal",
+          "fe_fm_metal",
+          "cr_afm_metal",
+          "bi_heavy",
+          "si_insulator_m",
+          "cu_metal_m"
+        ],
+        "mode": "mixed_precision",
+        "mp_crossover": 1e-05,
+        "mp_e_tol_eV_per_atom": 1e-06
+      }
+    }
+  ]
+}

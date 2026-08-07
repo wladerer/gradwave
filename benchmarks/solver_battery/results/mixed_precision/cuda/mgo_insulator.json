@@ -1,0 +1,110 @@
+{
+  "system": "mgo_insulator",
+  "cls": "insulator",
+  "formula": "MgO",
+  "device": "cuda",
+  "solvers": {
+    "davidson": {
+      "fp64": {
+        "mixed_precision": false,
+        "device": "cuda",
+        "natoms": 2,
+        "converged": true,
+        "scf_iters": 11,
+        "wall_s": 3.86,
+        "eigh_s": 0.416,
+        "eigh_share": 0.1077,
+        "eigh_calls": 140,
+        "final_res": 7.562008463250246e-10,
+        "energy_eV": -1908.1165513239403,
+        "error": null
+      },
+      "mixed": {
+        "mixed_precision": true,
+        "device": "cuda",
+        "natoms": 2,
+        "converged": true,
+        "scf_iters": 11,
+        "wall_s": 3.326,
+        "eigh_s": 0.5,
+        "eigh_share": 0.1503,
+        "eigh_calls": 158,
+        "final_res": 7.704844690090608e-10,
+        "energy_eV": -1908.1165513239407,
+        "error": null
+      },
+      "comparison": {
+        "speedup": 1.161,
+        "iters_delta": 0,
+        "energy_error_eV": 4.547473508864641e-13,
+        "energy_error_eV_per_atom": 2.2737367544323206e-13,
+        "energy_ok": true,
+        "regresses": false
+      }
+    },
+    "lobpcg": {
+      "fp64": {
+        "mixed_precision": false,
+        "device": "cuda",
+        "natoms": 2,
+        "converged": true,
+        "scf_iters": 11,
+        "wall_s": 24.066,
+        "eigh_s": 0.834,
+        "eigh_share": 0.0347,
+        "eigh_calls": 173,
+        "final_res": 7.410058536826322e-10,
+        "energy_eV": -1908.1165513239398,
+        "error": null
+      },
+      "mixed": {
+        "mixed_precision": true,
+        "device": "cuda",
+        "natoms": 2,
+        "converged": true,
+        "scf_iters": 11,
+        "wall_s": 21.875,
+        "eigh_s": 0.867,
+        "eigh_share": 0.0396,
+        "eigh_calls": 187,
+        "final_res": 7.556745310905924e-10,
+        "energy_eV": -1908.1165513239393,
+        "error": null
+      },
+      "comparison": {
+        "speedup": 1.1,
+        "iters_delta": 0,
+        "energy_error_eV": 4.547473508864641e-13,
+        "energy_error_eV_per_atom": 2.2737367544323206e-13,
+        "energy_ok": true,
+        "regresses": false
+      }
+    }
+  },
+  "meta": {
+    "timestamp": "2026-08-06 18:33 UTC",
+    "host": "asus",
+    "torch": "2.12.1+cu130",
+    "device": "cuda",
+    "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+    "threads": 8,
+    "solvers": [
+      "davidson",
+      "lobpcg"
+    ],
+    "systems": [
+      "si_insulator",
+      "mgo_insulator",
+      "al_metal",
+      "cu_metal",
+      "fe_fm_metal",
+      "cr_afm_metal",
+      "bi_heavy",
+      "si_insulator_m",
+      "cu_metal_m"
+    ],
+    "mode": "mixed_precision",
+    "mp_crossover": 1e-05,
+    "mp_e_tol_eV_per_atom": 1e-06
+  }
+}
