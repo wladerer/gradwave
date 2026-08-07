@@ -82,3 +82,48 @@ def test_soft_subspace_selects_the_soft_mode():
     # the recovered Ritz vector is a real eigenvector of A
     q = sub.vectors[0]
     assert float(torch.linalg.vector_norm(a @ q - lam * q)) < 1e-3
+
+
+def _exact_degenerate_operator(n=30, lam=0.97, k=3, noise=0.05, seed=13):
+    """Block-diagonal with an EXACTLY k-fold degenerate eigenvalue `lam` (a λ·I
+    block) plus distinct lower eigenvalues (upper-triangular → non-normal). Because
+    the degenerate block is an exact scalar block, a single-vector Krylov start can
+    pull only ONE dimension out of the k-fold eigenspace."""
+    g = torch.Generator().manual_seed(seed)
+    a = torch.zeros(n, n, dtype=torch.float64)
+    for i in range(k):
+        a[i, i] = lam
+    m = n - k
+    rest = torch.triu(noise * torch.randn(m, m, generator=g, dtype=torch.float64), 1)
+    rest = rest + torch.diag(torch.linspace(-0.5, 0.9, m, dtype=torch.float64))
+    a[k:, k:] = rest
+    return a
+
+
+def test_block_arnoldi_resolves_an_exactly_degenerate_cluster():
+    a = _exact_degenerate_operator(k=3, lam=0.97)
+    n = a.shape[0]
+
+    def apply(x):
+        return a @ x
+
+    ref = torch.zeros(n, dtype=torch.float64)
+    single = soft_subspace_from_operator(apply, ref, krylov=30, n_modes=3, seed=0,
+                                         block=1)
+    blk = soft_subspace_from_operator(apply, ref, krylov=30, n_modes=3, seed=0,
+                                      block=3)
+
+    def near_097(sub):
+        return [q for v, q in zip(sub.values, sub.vectors, strict=True)
+                if abs(v.real - 0.97) < 1e-5]
+
+    # The discriminator is SPAN, not count: single-vector Arnoldi cannot pull more
+    # than one dimension out of an exact scalar eigenblock (any extra Ritz values it
+    # reports at 0.97 are spurious ghost duplicates pointing the same direction).
+    sblk = near_097(blk)
+    ssingle = near_097(single)
+    assert len(sblk) == 3, blk.values
+    # block-Arnoldi spans the full 3-dimensional degenerate eigenspace...
+    assert int(torch.linalg.matrix_rank(torch.stack(sblk))) == 3
+    # ...single-vector cannot — its 0.97 vectors are rank-deficient (all ~parallel)
+    assert int(torch.linalg.matrix_rank(torch.stack(ssingle))) < 3

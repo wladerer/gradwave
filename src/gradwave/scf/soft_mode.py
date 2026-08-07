@@ -339,29 +339,60 @@ class SoftSubspace:
     max_imag: float
 
 
-def soft_subspace_from_operator(apply: LinOp, ref: Field, *, krylov: int = 24,
-                                n_modes: int = 1, seed: int = 0,
-                                real_tol: float = 1e-4) -> SoftSubspace:
-    """Extract the top-``n_modes`` real eigenpairs of a linear operator by Arnoldi.
+def _block_krylov_basis(apply: LinOp, ref: Field, *, block: int, steps: int,
+                        seed: int, reorth: bool = True,
+                        breakdown: float = 1e-10) -> list[Field]:
+    """Orthonormal basis of the block-Krylov space ``span{V0, MV0, …, M^{s-1}V0}``.
 
-    Core of :func:`soft_subspace`, decoupled from the DFT operator so the
-    linear-algebra can be exercised on a synthetic operator with a planted
-    spectrum. "Top" is by descending real part — the soft end that reaches +1 at
-    an instability. Ritz vectors for real-ish Ritz values are realified (the
-    real/imag part of larger norm, which for a real eigenvalue of a real operator
-    is itself a real eigenvector) and residuals are recomputed against the true
-    operator, not the cheap Arnoldi bound. A benign (near-normal) spectrum returns
-    modes with ``max_imag ≈ 0`` and small residuals; a defective/near-critical
-    spectrum shows a growing ``max_imag`` (the P2 signal)."""
-    m = apply
-    v0 = _rand_field_like(ref, seed)
-    v_list, h, reached = arnoldi_factorization(m, v0, krylov=krylov)
-    hm = h[:reached, :reached]
-    evals, evecs = torch.linalg.eig(hm)  # complex
+    A block start of ``block`` vectors lets the extractor span an *exactly*
+    ``block``-fold degenerate eigenspace, which a single Krylov start cannot: inside
+    a scalar eigenblock ``M`` acts as ``λ·I``, so the powers ``M^j v0`` stay parallel
+    and a single-vector Krylov space intersects the eigenspace in one dimension."""
+    basis: list[Field] = []
 
-    # rank Ritz values by descending real part
-    order = sorted(range(reached), key=lambda k: float(evals[k].real),
-                   reverse=True)
+    def _add(w: Field) -> None:
+        for u in basis:
+            w = w - _inner(u, w) * u
+        if reorth:
+            for u in basis:
+                w = w - _inner(u, w) * u
+        if _norm(w) > breakdown:
+            basis.append(w / _norm(w))
+
+    for b in range(block):
+        _add(_rand_field_like(ref, seed + b))
+    lo, hi = 0, len(basis)
+    for _ in range(steps - 1):
+        new_lo = len(basis)
+        for i in range(lo, hi):
+            _add(apply(basis[i]))
+        lo, hi = new_lo, len(basis)
+        if lo == hi:  # invariant subspace reached
+            break
+    return basis
+
+
+def _projection(apply: LinOp, basis: list[Field]) -> torch.Tensor:
+    """Rayleigh-Ritz projection ``T = Vᵀ M V`` over an orthonormal basis list."""
+    mv = [apply(v) for v in basis]
+    n = len(basis)
+    t = torch.zeros(n, n, dtype=torch.float64)
+    for i in range(n):
+        for j in range(n):
+            t[i, j] = _inner(basis[i], mv[j])
+    return t
+
+
+def _select_ritz(v_list: list[Field], proj: torch.Tensor, apply: LinOp, *,
+                 n_modes: int, real_tol: float) -> SoftSubspace:
+    """Top-``n_modes`` real Ritz pairs of ``proj = Vᵀ M V`` by descending real part.
+
+    Ritz vectors for real-ish values are realified (the real/imag part of larger
+    norm) and their residuals recomputed against the true operator, not the cheap
+    Arnoldi bound."""
+    reached = proj.shape[0]  # single-vector Arnoldi returns v_list of len reached+1
+    evals, evecs = torch.linalg.eig(proj)
+    order = sorted(range(reached), key=lambda k: float(evals[k].real), reverse=True)
 
     values: list[complex] = []
     residuals: list[float] = []
@@ -372,8 +403,6 @@ def soft_subspace_from_operator(apply: LinOp, ref: Field, *, krylov: int = 24,
             break
         theta = complex(evals[k])
         if abs(theta.imag) > real_tol * (1.0 + abs(theta.real)):
-            # complex (defective/rotating) mode — record its imag as the warning
-            # but keep scanning for the requested number of real modes
             max_imag = max(max_imag, abs(theta.imag))
             continue
         y = evecs[:, k]
@@ -381,7 +410,7 @@ def soft_subspace_from_operator(apply: LinOp, ref: Field, *, krylov: int = 24,
         q = sum((float(yv[i]) * v_list[i] for i in range(reached)),
                 torch.zeros_like(v_list[0]))
         q = q / _norm(q)
-        mq = m(q)
+        mq = apply(q)
         theta_r = _inner(q, mq)  # Rayleigh quotient at the realified vector
         values.append(complex(theta_r, 0.0))
         residuals.append(_norm(mq - theta_r * q))
@@ -392,16 +421,45 @@ def soft_subspace_from_operator(apply: LinOp, ref: Field, *, krylov: int = 24,
                         n_krylov=reached, max_imag=max_imag)
 
 
+def soft_subspace_from_operator(apply: LinOp, ref: Field, *, krylov: int = 24,
+                                n_modes: int = 1, seed: int = 0,
+                                real_tol: float = 1e-4,
+                                block: int = 1) -> SoftSubspace:
+    """Extract the top-``n_modes`` real eigenpairs of a linear operator.
+
+    Core of :func:`soft_subspace`, decoupled from the DFT operator so the
+    linear-algebra can be exercised on a synthetic operator with a planted
+    spectrum. "Top" is by descending real part — the soft end that reaches +1 at an
+    instability. A benign (near-normal) spectrum returns modes with ``max_imag ≈ 0``
+    and small residuals; a defective/near-critical spectrum shows a growing
+    ``max_imag`` (the P2 signal).
+
+    ``block = 1`` is single-vector Arnoldi (the default). ``block > 1`` runs
+    block-Arnoldi from a ``block``-vector start, which is what robustly resolves an
+    *exactly* ``k``-fold degenerate soft cluster (set ``block ≥ k``) — the
+    symmetry-degenerate case a single Krylov start cannot span."""
+    if block <= 1:
+        v0 = _rand_field_like(ref, seed)
+        v_list, h, reached = arnoldi_factorization(apply, v0, krylov=krylov)
+        proj = h[:reached, :reached]
+    else:
+        steps = max(2, -(-krylov // block))  # ceil(krylov / block)
+        v_list = _block_krylov_basis(apply, ref, block=block, steps=steps, seed=seed)
+        proj = _projection(apply, v_list)
+    return _select_ritz(v_list, proj, apply, n_modes=n_modes, real_tol=real_tol)
+
+
 def soft_subspace(res, xc, *, krylov: int = 24, n_modes: int = 1, seed: int = 0,
-                  real_tol: float = 1e-4, **kw) -> SoftSubspace:
+                  real_tol: float = 1e-4, block: int = 1, **kw) -> SoftSubspace:
     """Soft subspace of ``M = K_Hxc·χ₀`` for a converged SCF result.
 
     Thin convenience over :func:`soft_subspace_from_operator` bound to the DFT
-    screening operator; ``**kw`` forwards to :func:`screening_apply` (e.g.
-    ``chi0_tol``)."""
+    screening operator. ``block`` selects single-vector (1) or block-Arnoldi (≥ the
+    degeneracy) extraction; ``**kw`` forwards to :func:`screening_apply` (e.g.
+    ``chi0_tol``, ``fxc_scale``)."""
     return soft_subspace_from_operator(screening_apply(res, xc, **kw), res.rho,
                                        krylov=krylov, n_modes=n_modes, seed=seed,
-                                       real_tol=real_tol)
+                                       real_tol=real_tol, block=block)
 
 
 # ---------------------------------------------------------------------------
