@@ -22,6 +22,7 @@ from gradwave.scf.soft_mode import (
     max_real_screening_eigenvalue,
     plain_fixed_point_rate,
     screening_apply,
+    soft_subspace,
 )
 from tests.helpers import RY, si_fcc
 
@@ -78,6 +79,25 @@ def test_soft_mode_margin_is_positive_for_benign_insulator(si_res):
     # And it must not exceed the spectral radius.
     dom = dominant_screening_eigenvalue(res, xc, n_iter=80, chi0_tol=1e-7)
     assert soft.eigenvalue <= abs(dom.eigenvalue) + 1e-6, (soft, dom)
+
+
+def test_soft_subspace_arnoldi_matches_p0_estimator(si_res):
+    """P1: the Arnoldi soft mode agrees with P0's shifted power iteration."""
+    res, xc = si_res
+
+    sub = soft_subspace(res, xc, krylov=24, n_modes=1, chi0_tol=1e-7)
+    assert len(sub.values) == 1
+    lam = sub.values[0].real
+
+    # It IS the soft (max-real) mode, not the dominant negative charge mode.
+    ref = max_real_screening_eigenvalue(res, xc, n_iter=120, chi0_tol=1e-7)
+    assert lam == pytest.approx(ref.eigenvalue, abs=0.02), (lam, ref.eigenvalue)
+    assert 0.0 < lam < 1.0, sub.values
+
+    # Genuine eigenpair (true operator residual), and near-normal here so the
+    # non-normality flag stays ~0 (the P2 signal is absent on a benign insulator).
+    assert sub.residuals[0] < 1e-2, sub.residuals
+    assert sub.max_imag < 1e-3, sub.max_imag
 
 
 def test_operator_wrappers_are_consistent(si_res):

@@ -36,11 +36,15 @@ from gradwave.scf.implicit import apply_chi0, apply_k_hxc
 
 __all__ = [
     "SoftModeEstimate",
+    "SoftSubspace",
     "screening_apply",
     "dielectric_apply",
     "dominant_screening_eigenvalue",
     "max_real_screening_eigenvalue",
     "plain_fixed_point_rate",
+    "arnoldi_factorization",
+    "soft_subspace_from_operator",
+    "soft_subspace",
 ]
 
 # A response field is a real grid tensor (nspin=1) or a stacked per-spin pair
@@ -218,3 +222,140 @@ def plain_fixed_point_rate(res, xc, *, vbar: Field | None = None,
         return float("nan")
     last = sorted(ratios[-tail:])
     return last[len(last) // 2]
+
+
+# ---------------------------------------------------------------------------
+# P1: soft-subspace extraction.
+#
+# M = K_Hxc·χ₀ is non-symmetric (a product of two symmetric operators), and the
+# matrix-free χ₀ has no cheap square root, so the plan's literal "symmetric
+# Lanczos on |χ₀|^½ K |χ₀|^½" is impractical. Arnoldi extracts the same near-null
+# / top-of-spectrum invariant subspace directly from the non-symmetric matvec,
+# and — unlike a forced symmetrisation — it *exposes* non-normality as complex
+# Ritz pairs rather than hiding it (the defective-mode signal the deflation in P2
+# must handle). This is the honest matrix-free route to the soft subspace.
+# ---------------------------------------------------------------------------
+
+def _inner(a: Field, b: Field) -> float:
+    return float((a * b).sum())
+
+
+def _norm(a: Field) -> float:
+    return float(torch.linalg.vector_norm(a))
+
+
+def arnoldi_factorization(apply: LinOp, v0: Field, *, krylov: int,
+                          reorth: bool = True, breakdown: float = 1e-12
+                          ) -> tuple[list[Field], torch.Tensor, int]:
+    """``krylov``-step Arnoldi factorisation of ``apply`` from start field ``v0``.
+
+    Modified Gram-Schmidt with one reorthogonalisation pass (``reorth``) for
+    numerical stability at tight extraction tolerances. Returns ``(V, H, m)``:
+    ``V`` the length-``m`` list of orthonormal basis fields, ``H`` the
+    ``(krylov+1, krylov)`` upper-Hessenberg matrix with ``A V_m = V_m H[:m,:m]
+    + h_{m+1,m} v_{m+1} e_m^T``, and ``m`` the reached dimension (``< krylov``
+    only on a lucky breakdown, i.e. an exact invariant subspace)."""
+    beta0 = _norm(v0)
+    v_list = [v0 / beta0]
+    h = torch.zeros(krylov + 1, krylov, dtype=torch.float64)
+    reached = krylov
+    for j in range(krylov):
+        w = apply(v_list[j])
+        for i in range(j + 1):
+            hij = _inner(v_list[i], w)
+            h[i, j] = hij
+            w = w - hij * v_list[i]
+        if reorth:
+            for i in range(j + 1):
+                s = _inner(v_list[i], w)
+                h[i, j] += s
+                w = w - s * v_list[i]
+        hnext = _norm(w)
+        h[j + 1, j] = hnext
+        if hnext < breakdown:
+            reached = j + 1
+            break
+        v_list.append(w / hnext)
+    return v_list, h, reached
+
+
+@dataclass
+class SoftSubspace:
+    """The extracted soft subspace of ``M = K_Hxc·χ₀`` (top of the real spectrum).
+
+    Selected Ritz pairs sorted by descending real part — the modes nearest (and
+    past) the +1 instability that the deflation in P2 removes. ``values`` are the
+    (generally complex) Ritz values; ``residuals`` are true operator residuals
+    ``‖M q − θ q‖`` at the realified Ritz vectors; ``vectors`` are those unit-norm
+    real fields; ``max_imag`` is the largest ``|Im|`` among the *selected* values —
+    the non-normality warning (≈ 0 for a benign, near-normal spectrum)."""
+    values: list[complex]
+    residuals: list[float]
+    vectors: list[Field]
+    n_krylov: int
+    max_imag: float
+
+
+def soft_subspace_from_operator(apply: LinOp, ref: Field, *, krylov: int = 24,
+                                n_modes: int = 1, seed: int = 0,
+                                real_tol: float = 1e-4) -> SoftSubspace:
+    """Extract the top-``n_modes`` real eigenpairs of a linear operator by Arnoldi.
+
+    Core of :func:`soft_subspace`, decoupled from the DFT operator so the
+    linear-algebra can be exercised on a synthetic operator with a planted
+    spectrum. "Top" is by descending real part — the soft end that reaches +1 at
+    an instability. Ritz vectors for real-ish Ritz values are realified (the
+    real/imag part of larger norm, which for a real eigenvalue of a real operator
+    is itself a real eigenvector) and residuals are recomputed against the true
+    operator, not the cheap Arnoldi bound. A benign (near-normal) spectrum returns
+    modes with ``max_imag ≈ 0`` and small residuals; a defective/near-critical
+    spectrum shows a growing ``max_imag`` (the P2 signal)."""
+    m = apply
+    v0 = _rand_field_like(ref, seed)
+    v_list, h, reached = arnoldi_factorization(m, v0, krylov=krylov)
+    hm = h[:reached, :reached]
+    evals, evecs = torch.linalg.eig(hm)  # complex
+
+    # rank Ritz values by descending real part
+    order = sorted(range(reached), key=lambda k: float(evals[k].real),
+                   reverse=True)
+
+    values: list[complex] = []
+    residuals: list[float] = []
+    vectors: list[Field] = []
+    max_imag = 0.0
+    for k in order:
+        if len(values) >= n_modes:
+            break
+        theta = complex(evals[k])
+        if abs(theta.imag) > real_tol * (1.0 + abs(theta.real)):
+            # complex (defective/rotating) mode — record its imag as the warning
+            # but keep scanning for the requested number of real modes
+            max_imag = max(max_imag, abs(theta.imag))
+            continue
+        y = evecs[:, k]
+        yv = y.real if _norm(y.real) >= _norm(y.imag) else y.imag  # real e-vector
+        q = sum((float(yv[i]) * v_list[i] for i in range(reached)),
+                torch.zeros_like(v_list[0]))
+        q = q / _norm(q)
+        mq = m(q)
+        theta_r = _inner(q, mq)  # Rayleigh quotient at the realified vector
+        values.append(complex(theta_r, 0.0))
+        residuals.append(_norm(mq - theta_r * q))
+        vectors.append(q)
+        max_imag = max(max_imag, abs(theta.imag))
+
+    return SoftSubspace(values=values, residuals=residuals, vectors=vectors,
+                        n_krylov=reached, max_imag=max_imag)
+
+
+def soft_subspace(res, xc, *, krylov: int = 24, n_modes: int = 1, seed: int = 0,
+                  real_tol: float = 1e-4, **kw) -> SoftSubspace:
+    """Soft subspace of ``M = K_Hxc·χ₀`` for a converged SCF result.
+
+    Thin convenience over :func:`soft_subspace_from_operator` bound to the DFT
+    screening operator; ``**kw`` forwards to :func:`screening_apply` (e.g.
+    ``chi0_tol``)."""
+    return soft_subspace_from_operator(screening_apply(res, xc, **kw), res.rho,
+                                       krylov=krylov, n_modes=n_modes, seed=seed,
+                                       real_tol=real_tol)
