@@ -2210,3 +2210,56 @@ live axes). These are DEFERRED / OPEN, not rejected.**
 - InverseFlow (amortized generative designer): LONGSHOT, gradwave is the worst-positioned engine to
   generate the training corpus. MigrateSCF precision-migration half: net-negative on this hardware
   (fp32 GPU draft measured 0.35x); only its warm-pool half survives.
+
+**Round 4 (fresh lenses: cheaper-physics inner accelerators, active campaign control, compression,
+exotic hardware, systems borrowings, researcher velocity). The cheaper-physics-inner-accelerator
+theme largely did not pay off; the built-est ideas were campaign-layer, and the MOONSHOTS are the
+ones flagged worth revisiting.**
+
+CONSIDERED AND DEFERRED (moonshots, revisit — bold, unbuilt, wall-breaking-by-construction, not
+rejected):
+- QTT-Orbitals: represent Kohn-Sham orbitals as quantized tensor trains with a QTT-FFT H-apply,
+  compressing storage O(npw) to O(r^2 log npw). The one idea that breaks the fp64-tax and size walls
+  BY CONSTRUCTION rather than around them. Deferred: ranks explode on metals' oscillatory
+  Fermi-surface states, the 1e-13 gate forces near-dense truncation tolerances, and differentiable
+  complex128 TT-SVD/rounding gradients are ill-conditioned at near-degenerate singular values and
+  unproven. Revisit for smooth insulating large cells.
+- Wannier Courier: run downfolding in REVERSE, Slater-Koster-scaling a transported Wannier/TB
+  Hamiltonian to regenerate a seed density across a geometry scan, targeting the large-jump regime
+  where local density extrapolators break. Deferred: needs a full MLWF/downfolding subsystem plus a
+  reverse WF->PW-density map (the Wannier interface is itself an open capability gap), and rigid-Wannier
+  translation fails for metals' entangled bands.
+- Conformal Scout Cascade: a cheap in-code scout (LDA / Gamma-only / tiny-ecut) emitting BOTH a warm
+  density AND a conformally-calibrated deliverable band, gating the exact solver at a controlled
+  abstention-error ceiling. Deferred: marginal conformal's coverage needs exchangeability, which
+  chemistry-to-chemistry campaigns violate exactly on the decision-relevant hard tail; needs
+  Mondrian/covariate-shift conformal, which is the research content.
+- CompressedTape: low-rank/HOSVD compression of the retained adjoint state to raise the
+  differentiable-regime (learned-XC / inverse-design / Hessian) cell-size ceiling. Deferred and
+  premise-flagged: gradwave's adjoint is implicit-function-theorem based (one fixed-point linear
+  solve), NOT differentiation through an unrolled SCF trajectory, so there is no long activation tape
+  to compress; the real low-rank structure is spatial/Wannier, needing an on-the-fly localization.
+- GammaPrime (the cheaper-physics-theme survivor): repurpose a converged SCC-DFTB gamma-matrix as a
+  connectivity-aware dielectric PRECONDITIONER, meta-learning its Hubbard-U through downstream PW
+  iteration count. Deferred: needs a whole SCC-DFTB engine + Slater-Koster tables absent for the
+  metal/f-element campaign, and gamma is a long-wavelength monopole response overlapping the Kerker
+  regime already shipped.
+
+Evaluated, campaign/settings layer (mostly-built, lower novelty, deprioritized in review):
+- Converge-to-Answer: goal-oriented auto-convergence driving ecut/kmesh/smearing from an a-posteriori
+  error target on a DERIVED observable, emitting a per-run error certificate; the estimation half
+  already ships (discretization_error.py / convergence_error.py / stress_error.py), only the
+  escalation controller is missing. Real ~5-10x-fewer-exploratory-SCF potential, but the estimators
+  are calibrated indicators not bounds and certify distance to E_KS_converged, never to reality.
+- Hull-Chasing: per-point convex-hull distance as the SCF convergence-DEPTH knob (distinct from
+  published sample-acquisition active learning). ~1.3-1.7x campaign trim; references must stay tight.
+- SplitFinish: fp32-GPU bands/DOS/PDOS overlapped against the fp64-CPU SCF of the next structure. Small
+  real win on property campaigns only (its phonon example is physically wrong). RussianRoulette-SCF:
+  unbiased randomized SCF-tail truncation, out-competed by the repo's own deterministic geometric
+  extrapolator except on multi-mode tails.
+
+CLOSED: cheaper-physics SEED channel (Huckel Ignition). The AO predecessor (lcao_seed) was built,
+measured 0-2 saved iterations at neutral-to-worse wall time, and reverted; by Rayleigh-Ritz invariance
+a Huckel rotation WITHIN the AO block converges identically to the raw-AO block already tried, and the
+outer count is mixing-limited not orbital-quality-limited. The seed channel is structurally closed; the
+preconditioner reframing (GammaPrime) is the only live variant of the theme.
