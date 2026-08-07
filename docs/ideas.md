@@ -1792,6 +1792,150 @@ when `compile_xc=True` (the `energy_and_ddd` path is a single backward), so the 
 question is only whether an analytic quadrature derivative beats the compiled autograd, a small
 isolated experiment, not a feature.
 
+## Campaign setup amortization: a warm fork-server for cold-start cost
+
+**Status: open, prototype-worthy. Measured 2026-08-06. The setup cost it targets is real and
+un-shardable, and the fix is pure systems engineering with zero effect on the physics.**
+
+gradwave's per-process cold start is fixed serial work done before any physics: the torch
+import, the one-time XC `torch.compile`, the UPF parse, and the form-factor / radial-table
+build. None of it shards (k-point sharding and IBZ reduction leave it untouched, and it is
+replicated on every distributed rank, see the distributed record above). For a big cell it is
+noise, but gradwave's bread-and-butter is small cells (1-16 atoms) in large campaigns (an EOS
+scan, a delta-gauge column, a phonon stencil, a rattled training set), where one SCF is seconds
+and cold start is tens of seconds, so the campaign spends most of its wall clock re-doing
+byte-identical warm-up.
+
+Measured footprint of a warmed CPU process (asus, `import torch` + the gradwave stack + warmed
+BLAS): RSS ~540 MB, of which the private/anonymous memory a snapshot must carry is ~320 MB,
+dominated by torch's ~275 MB heap; gradwave's own imports plus physics tables are only ~45 MB.
+The expensive state to preserve is almost entirely PyTorch, not anything DFT.
+
+Warm the state once and reuse it, in one of three flavors, cheapest first.
+
+- **Fork-server / zygote (the CPU quick win, zero disk).** Warm one parent, then `fork()` a
+  child per job. Copy-on-write makes the fork O(page-table), a few milliseconds regardless of
+  the ~500 MB RSS, and the child inherits the imports, parsed pseudos, and tables for free. Each
+  child runs one SCF and exits, so a crash, OOM, or diverged solve dies with the child and never
+  poisons the warm parent, which is the advantage over a single long-lived in-process daemon.
+  This is Android's zygote and Gunicorn/uWSGI prefork. Low-effort route is the stdlib:
+  `multiprocessing.set_forkserver_preload(["torch", "gradwave.api"])` +
+  `set_start_method("forkserver")`, then point `pueue`/`gwq` at the resident server instead of
+  launching a cold `uv run python -m gradwave` per slot.
+- **Persistent in-process daemon.** One warm process serving structures over IPC, no fork. Same
+  setup saving, no per-job fork cost, but no crash isolation, so a memory leak or segfault in one
+  SCF corrupts the shared state. Needs real isolation discipline.
+- **CRIU / durable image.** Freeze the warm process to a disk image (~300 MB raw, ~100-150 MB
+  zstd; ~400-600 MB once the compiled XC is baked in) and thaw copies, including on the asus
+  worker. The only flavor that ships across machines, at the cost of privileges (CAP_SYS_ADMIN,
+  awkward on unprivileged NixOS), and it captures no GPU state.
+
+Three hazards fix the shape of any implementation.
+
+- **fork-after-threads deadlocks.** `fork()` duplicates only the calling thread; a lock held by
+  an MKL/OpenMP/torch worker pool in the parent stays locked forever in the child, which then
+  hangs on first use. The parent must be quiescent at fork, so inherit only thread-free state
+  (imports, parsed pseudos, tables) and let each child spawn and tune its own threads after the
+  fork (gradwave already caps threads at import). The stdlib forkserver enforces this by keeping
+  the server process minimal and single-threaded.
+- **CUDA is not fork-safe.** A forked child gets an invalid CUDA context, so a fork-server is
+  CPU-only. That matches the regime, since small cells already belong on the CPU; a GPU warm pool
+  would need an in-process persistent worker, not a fork.
+- **CPython COW is leaky.** Refcount writes dirty shared pages, so the sharing erodes over a
+  long-lived child. A short-lived one-SCF child exits before this matters.
+
+Honest scope caveat. The single largest setup term, the XC `torch.compile`, is partly a
+first-ever cost: Inductor caches compiled kernels to disk, so a second cold process with a warm
+cache reloads them in seconds rather than the ~1-minute first trace (and on a box without
+`openssl` on PATH the compile silently falls back to eager and never caches, see the
+torch.compile note). So the durable per-job saving a fork-server banks is the torch import plus
+the pseudo parse and table build (seconds each, thread-free, perfectly inheritable), plus
+dodging any per-process recompile, on the order of seconds to tens of seconds per job across a
+500-point campaign, at zero correctness risk because a fork changes only speed, never the
+answer. Next step is a `multiprocessing` forkserver prototype behind `gwq` measuring
+jobs-per-hour on a delta-gauge column against the cold-process baseline, before any daemon or
+CRIU work.
+
+## Soft-mode deflation for the near-critical response solve
+
+**Status: open, planned (2026-08-06). Near-term; reuses the full shipped response stack. The core
+(single-point deflated solve) is ~3-4 weeks and low-risk because exactness is unconditional. Tracked
+in #257.**
+
+The self-consistent response solve `scf/implicit.py::solve_adjoint` (and its USPP twin
+`postscf/uspp_implicit.py`) solves `u = v̄ + K_Hxc[χ₀ u]`, i.e. `(1 − K_Hxc χ₀) u = v̄`, by
+Anderson-accelerated fixed point. Its own docstring records the failure mode: near a spin/structural
+instability an eigenvalue of `K_Hxc χ₀` approaches 1, the operator goes near-singular along the soft
+mode, plain damping diverges and Anderson stalls (the "NiO lesson"). That is exactly the physically
+interesting regime — incipient ferroelectrics, CDW/Peierls, Kohn anomalies, magnetic instabilities —
+where phonons, Born charges, and the dielectric response are the deliverable, and gradwave's
+differentiability makes those autograd-exact IF the solve stays tractable.
+
+Deflate the soft near-null mode: extract the few offending eigenvectors of `(1 − K_Hxc χ₀)`, solve that
+tiny subspace exactly, and run Anderson on the well-conditioned complement, cutting near-critical outer
+iterations from hundreds to ~10. Each outer apply is a full Sternheimer sweep, so the win is large, and
+the soft subspace moves slowly along an EOS / phonon-stencil / temperature trajectory, so recycling it
+across the sweep compounds the saving. Exactness is unconditional — deflation only preconditions the
+linear solve, so a wrong subspace costs iterations, never correctness, and the 1e-13 gate is preserved.
+
+The one hard part is that `(1 − K_Hxc χ₀)` is non-normal (a product of two symmetric operators), so at a
+true transition the soft mode goes defective (an exceptional point where left/right eigenvectors
+coalesce) and clean deflation loses its footing. The fix is to work in the self-adjoint form
+`|χ₀|^½ K_Hxc |χ₀|^½` (same eigenvalues, orthonormal eigenvectors), extracting the subspace by symmetric
+Lanczos on matvecs.
+
+Build order, each with a kill-gate. (P0) Expose `L(u) = u − K_Hxc[χ₀ u]` as an explicit linear operator
+over the existing `apply_chi0` / `apply_k_hxc` matvecs, plus a power-iteration softness diagnostic (the
+dominant eigenvalue of `K_Hxc χ₀`); gate on a benign insulator predicting Anderson's observed
+contraction rate. (P1) Symmetrize and extract the near-null Ritz pairs by short symmetric Lanczos. (P2,
+the go/no-go) Deflated solve inside `solve_adjoint`; gate on a constructed near-critical case (an AFM
+transition-metal oxide near its instability, or the xc kernel scaled toward gain→1) converging in ~10
+iters where Anderson takes hundreds or diverges, bit-identical to a converged Anderson solve where
+Anderson still works. (P3) Recycle the subspace across a sweep. (P4) Confirm autograd
+forces/phonons/Born charges are unaffected against `test_dielectric_vs_qe` / `test_phonons`, and land a
+near-critical regression test — the missing NiO-lesson test. Metals need the window-pair
+partial-occupation χ₀ path to compose with the deflation. Effort: P0-P2 core ~3-4 weeks, P3-P4 another
+1-2.
+
+## Plane-wave Green's-function defect embedding (CirculantCore)
+
+**Status: open, planned (2026-08-06). Multi-month research build — a new resolvent / contour /
+impurity-SCF solver stack. Front-load the de-risking spike (P0-P1, ~4-5 weeks) as an explicit go/no-go
+before committing the full build. Tracked in #258.**
+
+A dilute point defect (vacancy, substitutional dopant, colour centre, qubit host) is solved today only
+via a 200-500-atom periodic supercell — at or past the size cliff, requiring size extrapolation against
+spurious image interactions, and re-solving perfect bulk hundreds of times to study one local
+perturbation. The KKR impurity method avoids this: dress the perfect-host Green's function `G₀` with a
+Dyson correction `G = (1 − G₀ ΔV)⁻¹ G₀` restricted to the defect support, where `ΔV` is spatially local
+so Woodbury collapses the inverse to an `O(defect-rank³)` solve. Cost is the primitive-cell host solve
+(done once, reusable for every defect in that host) plus a small correction, no supercell. Building this
+in a plane-wave basis AND keeping it autograd-differentiable is the novel part: the defect formation
+energy then carries exact forces and analytic gradients w.r.t. dopant identity / host composition —
+differentiable defect design, which no KKR code offers. It removes the size wall exactly (no
+truncation-accuracy floor) for the gapped-host defect class.
+
+Two constraints are structural. Metals are excluded — the Friedel screening tail `cos(2k_F r)/r³` is
+long-ranged and defeats the local-`ΔV` / low-rank premise, so this is insulators and semiconductors only
+(which is exactly the defect / qubit-host class). And a truncated-band plane-wave Green's function loses
+the high-energy continuum tail that matters for the local `G₀`, a documented PW-GF pitfall needing a
+completeness correction.
+
+Build order is front-loaded to de-risk. (P0, make-or-break) Build `G₀(E)` for the perfect host from a
+converged primitive-cell spectral sum and recover the bulk density by contour integration around the
+occupied states; gate on the contour density and DOS matching the ordinary SCF density — this validates
+the Green's-function + contour machinery and the tail correction BEFORE any defect work. (P1) A
+complex-shift resolvent `(E − H)⁻¹` apply, generalising the existing `cg_sternheimer` / `projected_cg`
+real-shift solves to complex energy; gate against a dense inverse on a tiny cell. (P2) Woodbury/Dyson
+dressing on a frozen local `ΔV`, `δρ` by contour integration; gate against a defect in a large explicit
+supercell inside the defect region. (P3) Impurity self-consistency `ΔV ← ΔV[δρ]`; gate on the embedded
+formation energy matching a converged supercell reference for a gapped host (vacancy / substitutional in
+MgO / diamond / Si). (P4) Autograd through the dressing → `dE/d(dopant)` vs finite difference, then the
+differentiable-design demo. gradwave is pure Davidson + density mixing today, so the resolvent solver,
+contour machinery, and impurity loop are all new; `scf/implicit.py` (χ₀/K_Hxc, the first-order Dyson
+kernel, the IFT adjoint) and the k-mesh machinery are the substrate. Effort: P0-P1 spike ~4-5 weeks (the
+go/no-go), full build P2-P4 ~3-4 months.
+
 # Done and resolved
 
 Kept for the reasoning. Each is either landed in the code or settled as a measured negative.
@@ -2075,3 +2219,160 @@ One diagnostic lead is worth its own line. The Ni PAW default-seed stagnation at
 iterations at every `start_mag`, including the comfortable 0.30, localizes the residual floor
 to the mixer's magnetization channel, not the seed or the charge channel, since a different
 magnetization shape at the identical moment converges fine.
+
+# Acceleration idea rounds: evaluated and shelved (2026-08)
+
+Three structured idea-generation-and-vetting passes (agent-workflow ideation, then literature
+plus codebase compare plus adversarial verification) ran on "what else could accelerate
+gradwave." They are catalogued here so the directions are not re-litigated. The recurring lesson
+is that the single-SCF fp64 small-cell axis is largely exhausted, and the live headroom is
+campaign-level, not kernel-level. Verdicts are the vetting output, not commitments. Anything
+that graduates to real work gets its own open entry above (the fork-server already has).
+
+**Round 1 (single-SCF numerical / solver methods; all researched, none a speed win in this
+regime).**
+- fp64 emulation (double-single / Ozaki tensor-core): NOT-HELPFUL. double-single is 44-48 bits
+  (fails the 1e-13 gates); Ozaki reaches fp64 but only pays at m>=8192 (gradwave npw <=6746) and
+  needs custom kernels; Amdahl-capped ~1.2-1.35x wall, consumer-GPU-only, moot on CPU/H100.
+- Stochastic DFT (stochastic-orbital density): NOT-HELPFUL. Crossover is thousands of atoms;
+  force noise floors ~0.1 eV/A even with variance reduction, disqualifying for autograd forces
+  and the sub-meV gates.
+- Direct energy minimization (ensemble-CG): NOT a speed win (large-N story), MARGINAL for
+  robustness (monotonic descent structurally avoids charge-sloshing / Stoner collapse; substrate
+  exists in `opt/joint.py` + `opt/newton.py`; net-new is differentiable ensemble/MV occupations).
+- Sketched Rayleigh-Ritz: NOT-HELPFUL. A dressed-up fp32-RR; the sketch dimension reaching 1e-9
+  exceeds npw, so the savings invert.
+- s-step / communication-avoiding Davidson: MARGINAL to NOT-HELPFUL. The CheFSI/LOBPCG
+  more-applies-to-cheapen-RR trade minus the MPI-latency regime it was built for; also drives the
+  n>32 eigh cliff.
+- Proposed, not deep-researched: Fermi-operator-expansion density matrix (reuse KPM), Shirley
+  optimal-basis k-interpolation, stick/pruned FFT (needs kernels), meta-learned SCF map,
+  adaptive/multi-fidelity BZ integration.
+
+**Round 2 (mixing / eigensolver / conditioning micro-opts; 0 pursue, 2 marginal, 7 dead).**
+- Quasi-Newton mixer-Jacobian transfer across scan steps: MARGINAL. ~1.3-1.7x fewer iters/step on
+  fixed-cell magnetic/metal scans, but collides with the "early garbage secant pairs poison the
+  inverse Jacobian near Stoner" negative (wisdom.md); probe-gate before building.
+- Occupation-aware adaptive band budget: MARGINAL. Only the empty-headroom per-band gate survives
+  (stop stragglers holding `rn.max()` hostage); a few percent CPU; drop the pruning and buffer-ramp.
+- Dead: charge-block / codensity + delta-mu preconditioner (re-runs the #232 learned-multipole
+  negative, DIIS absorbs the smooth charge response); smearing / electronic-temperature
+  continuation ("the mixing scheme sets the metal iteration count, the smearing kernel does not");
+  FFT arena + Morton layout (the arena half already ships in `BatchedHamiltonian`); cross-SCF
+  invariant-subspace deflation (destroys the uniform `(nk,nb,npw)` batch); cross-k Taylor
+  subspace-transport warm start (batching-hostile, first-iteration-only); one-center becsum
+  local-response preconditioner (phantom bottleneck, Johnson conditions it natively);
+  Harris-Foulkes trust-region line search (step-size control, an archived negative; bare HF is
+  non-variational near convergence).
+
+**Round 3 (lateral: architectural / systems / surrogate / campaign / deliverable; 0 dead, four
+live axes). These are DEFERRED / OPEN, not rejected.**
+- Warm-process setup amortization (fork-server / daemon / CRIU): PROMISING, the quick win, now its
+  own open entry above.
+- Delta-tier (multifidelity delta-learning, cheap base + learned smooth correction, oracle-audited):
+  PROMISING; the uncertainty/audit gate is the research, not the plumbing.
+- GreedyManifold (reduced-basis POD-Galerkin over a sweep): PROMISING but research-project
+  (nonlinear + non-affine parameter dependence needs EIM/DEIM); 5-20x campaign potential and the
+  reduced model is itself a differentiable surrogate.
+- Continuation Sweep (analytic drho/dlambda tangent drives EOS/elastic, read C_ij/B0/Gruneisen as
+  exact derivatives) and GradTrust (exact-gradient trust-region inverse design): INTERESTING, both
+  gated by the same missing piece, the metallic Fermi-surface response and strain/dR seed in
+  `scf/implicit.py` (insulator-only today). That response machinery is the highest-leverage single
+  enabler across the whole round.
+- RESPA-SCF (multirate: hold the ACE Fock on a slow clock for hybrids): INTERESTING, 2-4x on a
+  hybrid SCF at an unchanged fixed point; the multirate stride is the win, the response-certifier
+  the least-justified part.
+- HessNet (emulator supervised on exact Hessians / response tensors external MLIPs cannot supply),
+  Density Git (content-keyed converged-state store with equivariant transport), Control-Variate /
+  MLMC campaigns (only for true population expectations), Backprop-the-Budget (per-knob error
+  allocation, but the repo's own per-axis attributions are unreliable), Speculative trajectory
+  prefetch (capped at the line-search regime): INTERESTING to bounded.
+- InverseFlow (amortized generative designer): LONGSHOT, gradwave is the worst-positioned engine to
+  generate the training corpus. MigrateSCF precision-migration half: net-negative on this hardware
+  (fp32 GPU draft measured 0.35x); only its warm-pool half survives.
+
+**Round 4 (fresh lenses: cheaper-physics inner accelerators, active campaign control, compression,
+exotic hardware, systems borrowings, researcher velocity). The cheaper-physics-inner-accelerator
+theme largely did not pay off; the built-est ideas were campaign-layer, and the MOONSHOTS are the
+ones flagged worth revisiting.**
+
+CONSIDERED AND DEFERRED (moonshots, revisit — bold, unbuilt, wall-breaking-by-construction, not
+rejected):
+- QTT-Orbitals: represent Kohn-Sham orbitals as quantized tensor trains with a QTT-FFT H-apply,
+  compressing storage O(npw) to O(r^2 log npw). The one idea that breaks the fp64-tax and size walls
+  BY CONSTRUCTION rather than around them. Deferred: ranks explode on metals' oscillatory
+  Fermi-surface states, the 1e-13 gate forces near-dense truncation tolerances, and differentiable
+  complex128 TT-SVD/rounding gradients are ill-conditioned at near-degenerate singular values and
+  unproven. Revisit for smooth insulating large cells.
+- Wannier Courier: run downfolding in REVERSE, Slater-Koster-scaling a transported Wannier/TB
+  Hamiltonian to regenerate a seed density across a geometry scan, targeting the large-jump regime
+  where local density extrapolators break. Deferred: needs a full MLWF/downfolding subsystem plus a
+  reverse WF->PW-density map (the Wannier interface is itself an open capability gap), and rigid-Wannier
+  translation fails for metals' entangled bands.
+- Conformal Scout Cascade: a cheap in-code scout (LDA / Gamma-only / tiny-ecut) emitting BOTH a warm
+  density AND a conformally-calibrated deliverable band, gating the exact solver at a controlled
+  abstention-error ceiling. Deferred: marginal conformal's coverage needs exchangeability, which
+  chemistry-to-chemistry campaigns violate exactly on the decision-relevant hard tail; needs
+  Mondrian/covariate-shift conformal, which is the research content.
+- CompressedTape: low-rank/HOSVD compression of the retained adjoint state to raise the
+  differentiable-regime (learned-XC / inverse-design / Hessian) cell-size ceiling. Deferred and
+  premise-flagged: gradwave's adjoint is implicit-function-theorem based (one fixed-point linear
+  solve), NOT differentiation through an unrolled SCF trajectory, so there is no long activation tape
+  to compress; the real low-rank structure is spatial/Wannier, needing an on-the-fly localization.
+- GammaPrime (the cheaper-physics-theme survivor): repurpose a converged SCC-DFTB gamma-matrix as a
+  connectivity-aware dielectric PRECONDITIONER, meta-learning its Hubbard-U through downstream PW
+  iteration count. Deferred: needs a whole SCC-DFTB engine + Slater-Koster tables absent for the
+  metal/f-element campaign, and gamma is a long-wavelength monopole response overlapping the Kerker
+  regime already shipped.
+
+Evaluated, campaign/settings layer (mostly-built, lower novelty, deprioritized in review):
+- Converge-to-Answer: goal-oriented auto-convergence driving ecut/kmesh/smearing from an a-posteriori
+  error target on a DERIVED observable, emitting a per-run error certificate; the estimation half
+  already ships (discretization_error.py / convergence_error.py / stress_error.py), only the
+  escalation controller is missing. Real ~5-10x-fewer-exploratory-SCF potential, but the estimators
+  are calibrated indicators not bounds and certify distance to E_KS_converged, never to reality.
+- Hull-Chasing: per-point convex-hull distance as the SCF convergence-DEPTH knob (distinct from
+  published sample-acquisition active learning). ~1.3-1.7x campaign trim; references must stay tight.
+- SplitFinish: fp32-GPU bands/DOS/PDOS overlapped against the fp64-CPU SCF of the next structure. Small
+  real win on property campaigns only (its phonon example is physically wrong). RussianRoulette-SCF:
+  unbiased randomized SCF-tail truncation, out-competed by the repo's own deterministic geometric
+  extrapolator except on multi-mode tails.
+
+CLOSED: cheaper-physics SEED channel (Huckel Ignition). The AO predecessor (lcao_seed) was built,
+measured 0-2 saved iterations at neutral-to-worse wall time, and reverted; by Rayleigh-Ritz invariance
+a Huckel rotation WITHIN the AO block converges identically to the raw-AO block already tried, and the
+outer count is mixing-limited not orbital-quality-limited. The seed channel is structurally closed; the
+preconditioner reframing (GammaPrime) is the only live variant of the theme.
+
+**Round 5 (MOONSHOT round: wall-breaking-by-construction reformulations). Two ideas PROMOTED to full
+open-backlog entries above; the rest recorded here.**
+
+PROMOTED (see the Performance and scaling entries above, with phased plans and spike issues):
+soft-mode deflation for the near-critical response solve (best payoff-to-tractability ratio, near-term,
+exact-at-convergence), and CirculantCore plane-wave Green's-function defect embedding (the boldest EXACT
+size-wall break, multi-month).
+
+CONSIDERED AND DEFERRED (credible mechanism, harder blockers):
+- ShatterDFT: differentiable adaptive-local-basis Discontinuous Galerkin (DGDFT). Dissolves the size
+  wall structurally (block-sparse H, tens of adaptive local basis functions/atom, metal-accurate) but
+  trades the 1e-13 gate for a ~1 meV DG-truncation floor and needs a block-sparse / selected-inversion
+  forward solve reconciled with eager autograd (the IFT adjoint is the escape). The boldest size-wall
+  break, but a large new research code.
+- Mermin thermal-annealing homotopy: track the KS fixed point as a temperature-continuation ODE with
+  (1 − χ₀K) as the exact analytic tangent, so no near-singular cold dielectric is inverted (breaks the
+  ~2.3x-QE metal iteration penalty). Blocker: crossing a real electronic transition on the cooling path
+  can track the wrong branch; safe floor is degrade-to-the-shipped-annealing-list. Shares the soft-mode
+  machinery with the promoted deflation entry.
+- SeparableResponse (THC-χ): extend the shipped ISDF/THC substrate to the response manifold with an
+  imaginary-frequency quadrature for a cubic-scaling, autograd-differentiable RPA correlation energy.
+  Blocker is empirical (THC-χ rank vs accuracy on metals), not theoretical; an extension of validated
+  code and the natural precursor to a differentiable GW/BSE.
+- Longshots with real mechanisms: RiemannWave (learned adaptive-coordinate plane waves), BetaBeam (NUFFT
+  nonlocal projector apply), Resolvent-Flow FEAST contour projector, DielectricNet (learned short-range
+  dielectric preconditioner via the mixing hook), FieldGalerkin (neural-field coarse space with an exact
+  PW corrector), Parareal-SCF (parallel-in-imaginary-time), Resonate (analog coupled-oscillator inner
+  loop). Each names a hard blocker: custom kernels, PW-uncompetitive contour solves, or hardware years
+  out.
+
+REJECTED: HierFock (hierarchical / butterfly exact exchange) — redundant, the ISDF+ACE hybrid stack it
+would replace is already shipped and validated to 1e-13, and butterfly has lost to ISDF in practice.
