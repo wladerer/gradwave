@@ -25,6 +25,7 @@ from gradwave.scf.soft_mode import (
     plain_fixed_point_rate,
     screening_apply,
     soft_subspace,
+    soft_subspace_from_operator,
 )
 from tests.helpers import RY, si_fcc
 
@@ -131,6 +132,44 @@ def test_deflated_solve_is_exact_on_the_real_operator(si_res):
     agree = float(torch.linalg.vector_norm(base.u - defl.u)
                   / torch.linalg.vector_norm(defl.u))
     assert agree < 1e-4, agree
+
+
+def test_fxc_scaling_drives_a_physical_soft_cluster(si_res):
+    """P2b: fxc-selective scaling makes a real, bounded soft cluster on Si, and the
+    deflation must capture the whole (degenerate) cluster to help.
+
+    Scaling only the xc kernel drives cubic Si's 3-fold degenerate dielectric mode
+    toward +1 while leaving the Hartree charge spectrum fixed (unlike uniform
+    coupling-scaling, which amplifies the −2.2 charge mode and swamps the smoother).
+    That is a genuine physical near-critical soft *cluster* — deflation's regime —
+    and it confirms on the real operator what the synthetic cluster test showed:
+    deflating the whole cluster beats the baseline, deflating only part of it does
+    not."""
+    res, xc = si_res
+    m = screening_apply(res, xc, fxc_scale=2.4, chi0_tol=1e-5)  # near-critical
+
+    sub = soft_subspace_from_operator(m, res.rho, krylov=30, n_modes=3, seed=0)
+    top = [v.real for v in sub.values]
+    assert len(top) == 3
+    assert 0.95 < top[0] < 1.0, top             # near-critical, still stable
+    assert abs(top[0] - top[2]) < 0.02, top     # a 3-fold degenerate triplet
+    assert sub.max_imag < 1e-3, sub.max_imag    # near-normal (not defective yet)
+
+    q3 = sub.vectors
+    q1 = q3[:1]
+    g = torch.Generator().manual_seed(5)
+    vbar = torch.randn(res.rho.shape, dtype=res.rho.dtype, generator=g)
+    vbar = vbar - vbar.mean()
+
+    base = anderson_solve(m, vbar, tol=1e-6, max_iter=120, history=8)
+    d1 = deflated_solve(m, vbar, q1, method="post", tol=1e-6, max_iter=120, history=8)
+    d3 = deflated_solve(m, vbar, q3, method="post", tol=1e-6, max_iter=120, history=8)
+    assert base.converged and d1.converged and d3.converged, (base, d1, d3)
+
+    # capturing the WHOLE degenerate cluster beats the baseline...
+    assert d3.n_iter < base.n_iter, (d3.n_iter, base.n_iter)
+    # ...while deflating only 1 of the 3 does not help (needs the full cluster)
+    assert d3.n_iter < d1.n_iter, (d3.n_iter, d1.n_iter)
 
 
 def test_operator_wrappers_are_consistent(si_res):

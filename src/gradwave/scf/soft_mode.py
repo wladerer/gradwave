@@ -32,6 +32,7 @@ from dataclasses import dataclass
 
 import torch
 
+from gradwave.postscf._response import fxc_hvp, fxc_hvp_spin, hartree_kernel
 from gradwave.scf.implicit import apply_chi0, apply_k_hxc
 
 __all__ = [
@@ -57,29 +58,56 @@ Field = torch.Tensor
 LinOp = Callable[[Field], Field]
 
 
-def screening_apply(res, xc, *, coupling: float = 1.0, chi0_tol: float = 1e-7,
-                    chi0_max_iter: int = 200) -> LinOp:
-    """Matrix-free apply of the screening operator ``M_c = c · K_Hxc·χ₀``.
+def _k_hxc_fxc_scaled(res, xc, w_r: Field, fxc_scale: float) -> Field:
+    """``(K_H + s·f_xc) w`` — the Hxc kernel with only the *xc* part scaled by ``s``.
 
-    Returns ``M_c(u) = c · K_Hxc[χ₀ u]``, the Jacobian of the fixed-point map
-    ``solve_adjoint`` iterates (at ``c = 1``). ``chi0_tol`` loosens the inner
-    Sternheimer solve relative to the production adjoint default (1e-8): the
-    dominant eigenvalue does not need a machine-tight χ₀ apply, and the looser tol
-    keeps the diagnostic cheap.
+    Mirrors ``scf/implicit.py::apply_k_hxc`` exactly (nspin, NLCC core split, the
+    total-density Hartree coupling) but multiplies the ``f_xc`` HVP by ``s``, so
+    the Hartree charge spectrum is untouched. ``s = 1`` is byte-identical to
+    ``apply_k_hxc``."""
+    grid = res.system.grid
+    core = res.system.rho_core
+    nspin = getattr(res, "nspin", 1)
+    if nspin == 1:
+        rho_xc = res.rho if core is None else res.rho + core
+        return hartree_kernel(grid, w_r) + fxc_scale * fxc_hvp(xc, rho_xc, grid, w_r)
+    kh = hartree_kernel(grid, w_r[0] + w_r[1])
+    c2 = 0.0 if core is None else 0.5 * core
+    assert res.rho_spin is not None
+    fu, fd = fxc_hvp_spin(xc, res.rho_spin[0] + c2, res.rho_spin[1] + c2,
+                          grid, w_r[0], w_r[1])
+    return torch.stack([kh + fxc_scale * fu, kh + fxc_scale * fd])
 
-    ``coupling`` is a coupling-constant (λ-scaling) knob on the whole Hxc kernel —
-    the standard device for tracing toward an instability, since a mode goes soft
-    exactly when ``c · λ(K_Hxc·χ₀)`` reaches 1 (the RPA/Stoner picture). It lets a
-    single benign material's *real* response operator be driven from benign
-    (``c = 1``) through critical (``c = 1/λ_max``) to the "gain > 1" regime, which
-    is the physically-informed near-critical testbed for the deflated solve, and
-    it leaves the eigenvectors unchanged (a pure scalar), so a soft subspace
-    extracted at ``c = 1`` deflates the scaled operator unchanged.
+
+def screening_apply(res, xc, *, coupling: float = 1.0, fxc_scale: float = 1.0,
+                    chi0_tol: float = 1e-7, chi0_max_iter: int = 200) -> LinOp:
+    """Matrix-free apply of the screening operator ``M = c · (K_H + s·f_xc)·χ₀``.
+
+    Returns the Jacobian of the fixed-point map ``solve_adjoint`` iterates (at
+    ``c = s = 1``). ``chi0_tol`` loosens the inner Sternheimer solve relative to
+    the production adjoint default (1e-8): the eigenvalue estimates do not need a
+    machine-tight χ₀ apply, and the looser tol keeps the diagnostic cheap.
+
+    Two instability knobs, both physically-informed devices for driving a benign
+    material's *real* response operator toward criticality (a mode goes soft when
+    ``λ(M)`` reaches 1):
+
+    - ``coupling`` (``c``) scales the *whole* Hxc kernel (the RPA λ-scaling). It
+      reaches criticality but also amplifies the strong negative Hartree charge
+      modes, so at large ``c`` the smoother, not the deflation, is the bottleneck.
+    - ``fxc_scale`` (``s``) scales *only* the xc kernel — the physically correct
+      knob for a Stoner / soft-phonon instability, which is xc-driven — leaving the
+      Hartree charge spectrum fixed. This is the clean near-critical testbed: the
+      soft mode rises toward +1 while the charge modes stay put.
+
+    Both leave the eigenvectors of the affected block essentially in place, so a
+    soft subspace extracted at one scale deflates a nearby scale unchanged.
     """
     def m_apply(u: Field) -> Field:
-        mu = apply_k_hxc(res, xc, apply_chi0(res, u, tol=chi0_tol,
-                                             max_iter=chi0_max_iter))
-        return coupling * mu if coupling != 1.0 else mu
+        chi0u = apply_chi0(res, u, tol=chi0_tol, max_iter=chi0_max_iter)
+        khxc = (apply_k_hxc(res, xc, chi0u) if fxc_scale == 1.0
+                else _k_hxc_fxc_scaled(res, xc, chi0u, fxc_scale))
+        return coupling * khxc if coupling != 1.0 else khxc
     return m_apply
 
 
