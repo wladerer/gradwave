@@ -373,6 +373,36 @@ basis along the leading Jacobian directions, or one Gauss-Newton step on the lin
 instead of Adam. The D_ij (KB coefficient) rung comes last, since the nonlocal channel has
 the same linear-in-parameter HF structure but multiplies the null-space question.
 
+## Differentiable open-boundary (DtN) surfaces — exact vacuum embedding
+
+**Status: prototyped 2026-08-08, PR #265 (`experiments/dtn_1d/`).** Round-5 moonshot
+"The Vacuum That Isn't There": impose the analytically-known evanescent vacuum tail as
+an exact Dirichlet-to-Neumann boundary self-energy so a plane-wave slab lives in a
+slab-sized box with no image leakage, by construction — and, uniquely to gradwave, with
+autograd surface forces. Reduced-model go/no-go done in 1D (the G∥=0 channel of a
+jellium slab, reusing `LDA_PW92` + `constants`): open-BC Poisson makes the work function
+box-independent (open/DtN plateau ~2.95 eV; periodic drifts 1.72→3.95 eV unboundedly); an
+asymmetric bilayer shows periodic *collapsing* the surface dipole while open/DtN resolve
+the true 0.88 eV dipole with no dipole correction; and the autograd Hellmann-Feynman
+surface force matches finite difference to 0.74% (differentiates through the nested
+SCF+DtN fixed point). Prior art: Inglesfield embedding (DtN, no AD), Bhowmik et al.
+arXiv:2607.07894 (bulk-constraint OBC, no AD), AD-NEGF arXiv:2202.05098 (differentiable
+open boundary but TB transport, not DFT surfaces) — gradwave sits in the empty middle.
+
+**PARKED — inverse surface design demo (the capabilities shot).** On top of the validated
+Step-2 autograd force, gradient-descend a surface parameter (adsorbate z, or a strain /
+edge coordinate) to drive the surface to a target — the "only differentiability unlocks
+this" result. A few lines: wrap `force_check`'s converged autograd force in an optimizer
+loop and report the optimized geometry vs a finite-difference line search. This is the
+deliverable that turns the methods result into a paper hook; parked while the energy-exact
+Green's-function path (below) is built.
+
+**Next after that — energy-exact DtN (the real blocker).** The fixed-κ branch is an
+approximation; the exact energy-dependent Σ(E) turns Hψ = εSψ nonlinear, so it needs a
+Green's-function contour density (NEGF-grade: lead self-energy Σ(E) = t²·g_surface(E) at
+the boundary, contour integral for the occupied density) instead of an eigensolver.
+Multi-quarter for the full 3D plane-wave engine; the 1D version is the current work item.
+
 # Magnetism and spin-orbit coupling
 
 ## Differentiable spintronics: spin Hamiltonians, DMI, and inverse design
