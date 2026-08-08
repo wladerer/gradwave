@@ -69,7 +69,7 @@ def test_uspp_composite_operator_and_deflation():
     torch.set_num_threads(4)
     res = _si_paw()
     xc = LearnableX()
-    sc = build_uspp_screening(res, xc, chi0_tol=1e-7)
+    sc = build_uspp_screening(res, xc, cg_tol=1e-7)
 
     # a well-defined LinOp: deterministic in its input
     u = _rand_composite(sc, 1)
@@ -102,8 +102,8 @@ def test_uspp_plus_u_block_is_live_and_deflates():
     torch.set_num_threads(4)
     res = _si_paw(hubbard=[HubbardManifold(species=0, l=1, u=4.0)])
     xc = LearnableX()
-    sc = build_uspp_screening(res, xc, chi0_tol=1e-7)
-    sc_noU = build_uspp_screening(_si_paw(), xc, chi0_tol=1e-7)
+    sc = build_uspp_screening(res, xc, cg_tol=1e-7)
+    sc_noU = build_uspp_screening(_si_paw(), xc, cg_tol=1e-7)
 
     # the +U composite vector is strictly longer (it carries the δn block)
     assert sc.ref.numel() > sc_noU.ref.numel()
