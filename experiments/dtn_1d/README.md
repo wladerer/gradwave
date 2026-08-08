@@ -121,9 +121,33 @@ autograd (exactly as in the 3D SCF), and all units/prefactors come from
 - [x] **Step 2 — differentiable surface force** (`force_check`): autograd
       Hellmann-Feynman force matches finite difference to 0.74% — differentiates
       correctly through the nested SCF+DtN fixed point.
-- [ ] **Inverse design demo**: optimize an adsorbate position / surface parameter
-      by gradient descent on `force_check`'s autograd force (a few lines on top of
-      Step 2) — the "only differentiability unlocks this" money shot.
-- [ ] **Energy-exact DtN** (multi-quarter): replace the fixed-κ eigensolver path
-      with a Green's-function / contour-integration density so `κ(E)` is exact.
-      This is the report's real blocker and the ambitious 3D version.
+- [x] **Energy-exact DtN** (`greens.py`): replace the fixed-κ eigensolver path with
+      a Green's-function contour density and the *exact* energy-dependent vacuum
+      self-energy `Σ(E) = t²·g_surface(E)` — the report's identified hard blocker,
+      resolved in 1D. Density matches the eigensolver to **5.7e-12**; the
+      self-consistent `scf_green` converges to Φ ≈ 2.91 eV, on the plateau, with no
+      κ approximation. (Slow — dense complex solves per contour point; a real
+      implementation wants a sparse solver + pole/Matsubara contour.)
+- [ ] **Inverse design demo** (parked, in `docs/ideas.md`): gradient-descend an
+      adsorbate position / surface parameter on `force_check`'s autograd force — the
+      "only differentiability unlocks this" money shot, a few lines on top of Step 2.
+- [ ] **Full 3D plane-wave engine**: the energy-exact DtN with a proper
+      Green's-function density in the real code (multi-quarter, per the report).
+
+## Energy-exact DtN (`greens.py`) — the blocker, cracked in 1D
+
+The fixed-κ `dtn` mode above imposes the vacuum decay at one reference energy. The
+*exact* DtN self-energy is energy-dependent, which turns `Hψ = εψ` nonlinear —
+incompatible with an eigensolver. `greens.py` escapes it the NEGF way: no
+eigenstates, build the density from a contour integral of
+`G(E) = [E − H − Σ_L(E) − Σ_R(E)]⁻¹`, where each vacuum is a semi-infinite lead with
+exact surface self-energy `Σ(E) = t²·g_surface(E)` (trivial at any complex E).
+`uv run python experiments/dtn_1d/greens.py`:
+
+```
+  Green density vs eigensolver density (same V_eff):  max|Δ| = 5.7e-12   MATCH
+  energy-exact DtN SCF, vac = 8 A:  Phi = +2.909 eV   (plateau ~2.95)
+```
+
+So the exact energy-dependent Σ(E) reproduces the box-independent plateau with no
+fixed-κ. The 3D version is the multi-quarter build.
