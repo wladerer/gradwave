@@ -7,9 +7,10 @@
 (c) the scaling: the composite response apply is ~24x faster on an H100.
 """
 import matplotlib as mpl
-mpl.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
+
+mpl.use("Agg")  # non-interactive backend; must be set before pyplot import
+import matplotlib.pyplot as plt  # noqa: E402
 
 mpl.rcParams.update({
     "font.size": 10, "axes.titlesize": 11, "axes.labelsize": 10,
@@ -94,7 +95,7 @@ axB.set_ylim(0, 62)
 # --- (c) --- #
 cols = [MUTE, BLUE]
 bars = axC.bar(hw, apply_s, color=cols, width=0.5, zorder=3)
-for b, s in zip(bars, apply_s):
+for b, s in zip(bars, apply_s, strict=True):
     axC.text(b.get_x()+b.get_width()/2, s+1.2, f"{s:.1f} s",
              ha="center", va="bottom", fontsize=10, color=INK)
 axC.annotate("23.8×", (1, 2.29), xytext=(1, 26), color=BLUE, fontsize=20,
