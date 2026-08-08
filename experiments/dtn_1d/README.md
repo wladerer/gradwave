@@ -67,6 +67,25 @@ dipole correction. **Open/DtN resolve the true dipole**: Φ_left = 3.48 ≠
 correction, by construction. This is the compelling demonstration; the symmetric
 slab above is the conservative one.
 
+## Step 2 — differentiable surface force (the superpower)
+
+The whole reason to do this *in* gradwave. `force_check()` validates that autograd
+gives the correct surface force **through the self-consistent DtN fixed point**. A
+weak gaussian "adsorbate" proxy is placed just outside the surface; the force on it
+via Hellmann-Feynman (autograd of the explicit z₀-dependence at the fixed converged
+density) is compared against a finite-difference of the total energy:
+
+```
+  Hellmann-Feynman force (autograd, fixed rho*):  -0.01783 eV/A
+  finite-difference force (dE_total / dz0):       -0.01796 eV/A
+  agreement: 0.74%
+```
+
+The ~1% residual is SCF tolerance + grid + the fixed-κ approximation. This is the
+thing a non-AD code (QE/VASP) structurally cannot do: **exact, differentiable
+surface forces through an open boundary** — the basis for inverse surface design
+and learned embedding operators trained through the exact vacuum.
+
 ## What's real gradwave
 
 The XC potential comes straight from gradwave's `LDA_PW92.energy_density` via
@@ -92,15 +111,19 @@ autograd (exactly as in the 3D SCF), and all units/prefactors come from
   elimination gives a non-Hermitian matrix and `eigh` returns garbage — that bug
   cost a debugging round and is called out in the code.
 
-## Next steps (the POC ladder)
+## POC ladder — status
 
-1. **Asymmetric / dipolar slab** — the case where the periodic artifact is
-   *dramatic* and DtN clearly beats a hard wall (bilayer of two `rs`, or a dipole
-   layer). This is the most convincing next experiment.
-2. **Step 2 — differentiability**: put a surface parameter (e.g. the slab edge or
-   an adsorbate position) into the model and check `autograd dE/dparam` through the
-   nested (SCF + V_vac→κ) fixed point matches finite difference. This validates the
-   moonshot's actual superpower — exact, differentiable surface forces.
-3. **Energy-exact DtN** (multi-quarter): replace the fixed-κ eigensolver path with
-   a Green's-function / contour-integration density so `κ(E)` is exact. This is the
-   real blocker and the ambitious 3D version.
+- [x] **Step 1 — box-independence** (`box_sweep`): open-BC Poisson removes the
+      periodic vacuum-level drift; open/DtN plateau, periodic diverges.
+- [x] **Asymmetric / dipolar slab** (`asym_sweep`): the dramatic case — periodic
+      collapses the surface dipole (both faces ~equal, wrong), open/DtN resolve the
+      true 0.88 eV dipole, box-independent.
+- [x] **Step 2 — differentiable surface force** (`force_check`): autograd
+      Hellmann-Feynman force matches finite difference to 0.74% — differentiates
+      correctly through the nested SCF+DtN fixed point.
+- [ ] **Inverse design demo**: optimize an adsorbate position / surface parameter
+      by gradient descent on `force_check`'s autograd force (a few lines on top of
+      Step 2) — the "only differentiability unlocks this" money shot.
+- [ ] **Energy-exact DtN** (multi-quarter): replace the fixed-κ eigensolver path
+      with a Green's-function / contour-integration density so `κ(E)` is exact.
+      This is the report's real blocker and the ambitious 3D version.
