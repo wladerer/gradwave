@@ -88,6 +88,36 @@ def test_open_z_forces_match_total_energy_finite_difference():
 
 
 @pytest.mark.standard
+def test_open_z_metal_capacitor_scf_and_bias():
+    """The metal/capacitor mode (boundary=open_z_metal) runs end-to-end: the SCF
+    converges, the loop ΔE matches the standalone capacitor energy on the
+    converged density, and an applied bias does work on the charge (nonzero ΔE)
+    and shifts the forces — the field effect."""
+    upf = parse_upf(pseudo("H_ONCV_PBE-1.2.upf"))
+    cell = np.diag([5.0, 5.0, 14.0])
+    pos = np.array([[2.5, 2.5, 6.0], [2.5, 2.5, 8.0]])
+    common = dict(smearing="none", etol=1e-6, rhotol=1e-5, max_iter=60, verbose=False)
+
+    def run(bias):
+        sysx = setup_system(cell, pos, [0, 0], [upf], ecut=16 * RY)
+        return scf(sysx, LDA_PW92(), boundary="open_z_metal", esm_bias=bias, **common), sysx
+
+    r0, s0 = run(0.0)
+    rb, sb = run(2.0)
+    assert r0.converged and rb.converged
+
+    de0 = esm_energy(r0.rho, s0.positions, s0.charges, s0.grid, mode="capacitor", bias=0.0)
+    deb = esm_energy(rb.rho, sb.positions, sb.charges, sb.grid, mode="capacitor", bias=2.0)
+    assert float(r0.energies.esm) == pytest.approx(float(de0), abs=1e-6)
+    assert float(rb.energies.esm) == pytest.approx(float(deb), abs=1e-6)
+
+    assert abs(float(rb.energies.esm)) > 1e-3  # bias does work on the charge
+    f0 = forces(r0, remove_net=False)
+    fb = forces(rb, remove_net=False)
+    assert abs(float(fb[1, 2]) - float(f0[1, 2])) > 1e-3  # bias shifts the force
+
+
+@pytest.mark.standard
 def test_open_z_stress_is_in_plane_only():
     """The ESM stress contribution lands only on the in-plane (surface-stress)
     components — the open z-axis has no lattice to strain, so σ's z-row/col are
