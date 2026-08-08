@@ -101,6 +101,9 @@ class SCFParams:
     # core/energies/esm.py.
     boundary: str = "periodic"
     esm_bias: float = 0.0  # applied capacitor bias [V] for boundary="open_z_metal"
+    target_mu: float | None = None  # constant-potential (grand-canonical) SCF: hold
+    # the Fermi level µ [eV] fixed and let the electron count float. Requires
+    # boundary="open_z_metal" and a smearing. None = ordinary fixed-N SCF.
     # magnetic-channel SCF controls for the noncollinear/spinor path only
     magnetic: MagneticParams = field(default_factory=MagneticParams)
 

@@ -330,6 +330,7 @@ def run_scf(
                dist_ctx=dist_ctx,
                boundary=inp.scf.boundary,
                esm_bias=inp.scf.esm_bias,
+               target_mu=inp.scf.target_mu,
                **common)
 
 
