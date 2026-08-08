@@ -97,3 +97,61 @@ the ceiling where plain plane waves hit the memory wall, so DG-ALB is what lets
 the calculation exist at all past ~200 atoms. The next lever to reach *enormous*
 (10^4+) is swapping the dense global eigh for an O(N) density-matrix solver on
 the block-sparse ALB Hamiltonian.
+
+---
+
+# Follow-up: global-solver scaling (dense eigh vs O(N) density-matrix)
+
+`bench_dgalb_solver.py` asks the forward question toward enormous N: does the
+dense reduced global `eigh` (O(D^3)) eventually dominate, and does an O(N)
+density-matrix solver on the block-sparse ALB Hamiltonian push that ceiling out?
+asus, 8 threads, fp64, M_elem=64, avg_deg=7, n_cheby=500, purify_iters=25.
+
+```
+atoms  n_elem     D    t_alb_s  t_dense_s  t_foe_s  t_purify_s  dense>build?
+   64      8    512      28.0      0.01      47.3       4.7          no
+  216     27   1728      94.5      0.28     172.4      17.2          no
+ 1000    125   8000     437.5     16.37     831.3      83.1          no
+ 4000    500  32000    1750.0   OOM(est)  3316.6     331.7          no
+10000   1250  80000    4375.0   OOM(est)  7858.2     785.8          no
+30000   3750 240000   13125.0   OOM(est) 23144.2    2314.4          no
+```
+
+`t_dense` = measured `eigvalsh(D)` (OOM(est) past the 9 GB budget). `t_foe`,
+`t_purify` = block-sparse density-matrix cost, grounded in a measured batched
+`bmm` at the DG block count (~N_elem*avg_deg^2, linear in N) times the iteration
+count. `t_alb` = measured-linear ALB build (3.5 s/element, from bench_dgalb.py).
+
+## Findings — two of them against the naive expectation
+
+1. **The "second crossover" is a MEMORY wall, not a compute one.** Dense `eigh`
+   is so LAPACK-efficient that it stays *cheaper* than the O(N) density-matrix
+   solvers right up to where it OOMs: at D=8000 (1000 atoms) dense is 16 s vs
+   purification 83 s. The O(N) solver is not a global-step *speed* win — it is a
+   *memory* enabler that lets the global solve exist past ~1000-1500 atoms
+   (where the dense D x D no longer fits 14 GB).
+
+2. **The global solve is never the DG bottleneck — the ALB build is, at every
+   size.** Even at 30,000 atoms the linear ALB build (3.6 h) dwarfs the best
+   global solve (0.6 h). DG-ALB cost is gated by ALB regeneration (linear), so
+   the global-solver choice is second-order. `dense>build?` is "no" throughout.
+
+3. **Purification beats FOE ~10x** (25 iters x 2 matmuls << 500 Chebyshev terms)
+   and is cleanly O(N) (332 -> 786 -> 2314 s for 4000 -> 10000 -> 30000 atoms).
+   FOE's advantage is the metals/finite-T case (purification needs a gap), not
+   cost — so the choice is physics-driven, not speed-driven.
+
+## Practical guidance (flips the naive prescription)
+
+Use dense `eigh` for the reduced global solve as long as it fits (~1000-1500
+atoms on 14 GB); past that switch to **purification** purely to dodge the memory
+wall, NOT for speed; reach for **Chebyshev-FOE** only on metals (finite-T, no
+gap). And regardless of global solver, the thing to optimise for enormous N is
+the ALB *build* — that is where the wall-time actually goes.
+
+## Caveats
+
+n_cheby/purify_iters are inputs (f(H) accuracy not computed — a cost study);
+cold metals inflate n_cheby (FOE worse). The block-sparse step is a conservative
+batched-bmm model of a truncated sparse-sparse product with fixed pattern (the
+standard O(N) locality assumption). Dense `eigh` gated at 9 GB.
