@@ -448,6 +448,8 @@ class SCFResult:
     recorder: Any = None  # scf.recorder.SCFRecorder — per-iteration flight recorder
     smearing: str = "none"  # smearing scheme name; the metallic χ₀ response needs
     width: float = 0.1  # it plus the width σ [eV] to form d(occ)/dε at the Fermi level
+    boundary: str = "periodic"  # electrostatic BC the SCF ran with (periodic |
+    # open_z); forces/stress read it to add the ESM contribution (core/energies/esm)
 
 
 # A warm-start source for scf(): either a converged SCFResult, or the plainer
@@ -1835,6 +1837,7 @@ def scf(
             recorder=recorder,
             smearing=smearing,
             width=width,
+            boundary=boundary,
         )
     m_density = rho_s[0] - rho_s[1]
     return SCFResult(
@@ -1859,6 +1862,7 @@ def scf(
         recorder=recorder,
         smearing=smearing,
         width=width,
+        boundary=boundary,
     )
 
 

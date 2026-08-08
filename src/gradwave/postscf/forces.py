@@ -196,6 +196,13 @@ def forces(
         + e_nl
         + ewald_energy(pos, system.charges, grid.cell)
     )
+    if getattr(res, "boundary", "periodic") == "open_z":
+        # Open-boundary (ESM): the correction's only τ-dependence is the Gaussian
+        # ion charge, so its autograd gradient is the ESM force — added to the
+        # same fixed-density Hellmann-Feynman graph as the local/Ewald terms.
+        from gradwave.core.energies.esm import esm_energy
+
+        e_pos = e_pos + esm_energy(res.rho.detach(), pos, system.charges, grid)
     if has_core:
         # XC carries no τ-dependence at fixed ρ EXCEPT through the core charge;
         # the valence-only part of E_xc has zero gradient here (ρ detached), so
