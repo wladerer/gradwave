@@ -227,6 +227,12 @@ def forces_uspp(
     vloc_g = local_potential_g(pos, species_index, system.vloc_tables,
                                grid.g_cart, vol)
     e = e + hartree_energy(rho_g, grid.g2, vol) + local_energy(rho_g, vloc_g, vol)
+    if getattr(res, "boundary", "periodic") == "open_z":
+        # open-boundary (ESM) force: −∂ΔE/∂R via the Gaussian ion charge, on the
+        # FULL (smooth + aug) total density (same term the NC forces() adds).
+        from gradwave.core.energies.esm import esm_energy
+
+        e = e + esm_energy(res.rho.detach(), pos, system.charges, grid)
 
     (grad,) = torch.autograd.grad(e, pos)
     f = -grad

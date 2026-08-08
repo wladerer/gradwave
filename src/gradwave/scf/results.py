@@ -121,6 +121,8 @@ class USPPResult(_DictBridge):
     newton: list[float] | None = None  # newton_polish per-step residual norms
     recorder: Any = None  # scf.recorder.SCFRecorder — per-iteration flight recorder
     formalism: str = "uspp"
+    boundary: str = "periodic"  # electrostatic BC the SCF ran with (periodic |
+    # open_z); forces/stress read it to add the ESM contribution (core/energies/esm)
 
     _conditional_keys = frozenset(
         {"hub_occ", "hub_sites", "rho_spin", "mag_total", "mag_abs", "newton"})
