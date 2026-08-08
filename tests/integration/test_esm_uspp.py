@@ -29,21 +29,18 @@ def test_uspp_open_z_scf_energy_and_forces():
     common = dict(smearing="fermi-dirac", width=0.1, etol=1e-7, rhotol=1e-6,
                   max_iter=100)
 
-    res_p = scf_uspp(setup_uspp(cell, pos, [0, 1], [c, o], ecut=40 * RY),
-                     LDA_PW92(), boundary="periodic", **common)
+    # one open_z SCF (PAW SCFs are expensive; the periodic USPP path is covered by
+    # the existing USPP tests and the ESM code is gated on open_z).
     sys_o = setup_uspp(cell, pos, [0, 1], [c, o], ecut=40 * RY)
     res_o = scf_uspp(sys_o, LDA_PW92(), boundary="open_z", **common)
-
-    assert res_p.converged, "periodic USPP SCF did not converge"
     assert res_o.converged, "open_z USPP SCF did not converge"
-    assert float(res_p.energies.esm) == 0.0
 
     # the loop's ΔE equals the standalone correction on the converged full density
     de = esm_energy(res_o.rho, sys_o.positions, sys_o.charges, sys_o.grid)
     assert float(res_o.energies.esm) == pytest.approx(float(de), abs=1e-6)
     assert abs(float(res_o.energies.esm)) > 1e-3  # CO dipole → a real correction
 
-    # PAW forces include the ESM term (toggle it off at the same density)
+    # PAW forces include the ESM term (toggle it off at the same density — cheap)
     f = forces_uspp(res_o, LDA_PW92(), remove_net=False)
     res_o.boundary = "periodic"
     f_no = forces_uspp(res_o, LDA_PW92(), remove_net=False)
