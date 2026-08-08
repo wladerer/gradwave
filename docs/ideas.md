@@ -420,11 +420,17 @@ loop and report the optimized geometry vs a finite-difference line search. This 
 deliverable that turns the methods result into a paper hook; parked while the energy-exact
 Green's-function path (below) is built.
 
-**Next after that — energy-exact DtN (the real blocker).** The fixed-κ branch is an
-approximation; the exact energy-dependent Σ(E) turns Hψ = εSψ nonlinear, so it needs a
-Green's-function contour density (NEGF-grade: lead self-energy Σ(E) = t²·g_surface(E) at
-the boundary, contour integral for the occupied density) instead of an eigensolver.
-Multi-quarter for the full 3D plane-wave engine; the 1D version is the current work item.
+**Energy-exact DtN — the report's hard blocker, now cracked in 1D** (`greens.py`).
+The fixed-κ branch approximates the vacuum decay at one reference energy; the exact
+Σ(E) is energy-dependent, turning Hψ = εSψ nonlinear, so it needs a Green's-function
+contour density (NEGF-grade: lead self-energy Σ(E) = t²·g_surface(E) at the boundary,
+contour integral for the occupied density) instead of an eigensolver. Done in the 1D
+reduced model: the contour density reproduces the eigensolver density to 5.7e-12
+(machine precision — branch, contour, and factor all validated), and the
+self-consistent `scf_green` converges to the box-independent plateau (Φ ≈ 2.91 eV at
+vac = 8, matching open/fixed-κ ~2.95) with no fixed-κ. The full 3D plane-wave engine
+(a proper Green's-function/contour density in the real code, sparse solver + pole
+contour) is the multi-quarter build — the remaining ambitious version.
 
 # Magnetism and spin-orbit coupling
 
