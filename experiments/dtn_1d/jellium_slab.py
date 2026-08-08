@@ -275,7 +275,7 @@ def total_energy(n, dz, mode, n_plus, vx, wf_ref=3.0):
     dn = n - n_plus
     e_es = 0.5 * float((dn * v_es * dz).sum())
     dc = (-float((n * v_es * dz).sum()) + e_es
-          - float((n * v_xc * dz).sum()) + float(e_xc))
+          - float((n * v_xc * dz).sum()) + float(e_xc.detach()))
     return e_band + dc
 
 
