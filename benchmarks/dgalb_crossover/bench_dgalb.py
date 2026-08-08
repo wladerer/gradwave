@@ -140,7 +140,15 @@ def _tile_batch(sphere, pd, positions, reps, ecut_ry):
     return bk, p
 
 
-def run_size(total_atoms_req, ecut_ry, m_per_atom, core, ext, n_iter, upf, elem_batch):
+def _peak_gb(nk, nb, npw, n_grid, nproj):
+    """Rough peak-RAM estimate (GB) of a batched davidson run, complex128.
+    Covers the projector table (+ its cached conjugate), the CPU box temporary
+    (unchunked), and the growing subspace (~max_dim=4*nb)."""
+    return nk * 16.0 * (2 * nproj * npw + 3 * nb * n_grid + 13 * nb * npw) / 1e9
+
+
+def run_size(total_atoms_req, ecut_ry, m_per_atom, core, ext, n_iter, upf, elem_batch,
+             mem_budget_gb):
     # ---- element geometry -------------------------------------------------
     # core = conv cells per side of the DG element; ext = conv cells per side
     # of the extended element (core + buffer halo). Atoms per core element:
@@ -162,12 +170,18 @@ def run_size(total_atoms_req, ecut_ry, m_per_atom, core, ext, n_iter, upf, elem_
     e_pos = esys.positions
     e_veff = _smooth_veff(e_shape, e_pos.device)
     npw_e = e_sphere.npw
+    n_grid_e = int(np.prod(e_shape))
+    nproj_e = e_pd.f_ylm_phase_free.shape[0]
 
-    # time ALB build in element-batch chunks (bounds memory), sum wall time
+    # time ALB build in element-batch chunks; shrink the batch to fit the
+    # memory budget so a big extended element never trips the OS OOM-killer.
+    fit_batch = elem_batch
+    while fit_batch > 1 and _peak_gb(fit_batch, m_elem, npw_e, n_grid_e, nproj_e) > mem_budget_gb:
+        fit_batch -= 1
     t_alb = 0.0
     done = 0
     while done < n_elem:
-        b = min(elem_batch, n_elem - done)
+        b = min(fit_batch, n_elem - done)
         bk_b, p_b = _tile_batch(e_sphere, e_pd, e_pos, b, ecut_ry)
         t_alb += _time_davidson(bk_b, e_shape, e_veff, p_b, m_elem, n_iter)
         done += b
@@ -176,21 +190,26 @@ def run_size(total_atoms_req, ecut_ry, m_per_atom, core, ext, n_iter, upf, elem_
     D = m_elem * n_elem
     t_glob = float("nan")
     glob_note = ""
-    try:
-        torch.manual_seed(1)
-        A = torch.randn(D, D, dtype=CDTYPE)
-        A = A + A.conj().T
-        # warmup skipped (one-shot); time the eigh
-        t0 = time.perf_counter()
-        torch.linalg.eigvalsh(A)          # eigenvalues suffice for a timing ceiling
-        t_glob = time.perf_counter() - t0
-        del A
-    except RuntimeError as exc:
-        glob_note = "OOM" if "alloc" in str(exc).lower() or "memory" in str(exc).lower() else "ERR"
+    if 3 * D * D * 16.0 / 1e9 > mem_budget_gb:      # A + eigvalsh workspace
+        glob_note = "OOM(est)"
+    else:
+        try:
+            torch.manual_seed(1)
+            A = torch.randn(D, D, dtype=CDTYPE)
+            A = A + A.conj().T
+            t0 = time.perf_counter()
+            torch.linalg.eigvalsh(A)      # eigenvalues suffice for a timing ceiling
+            t_glob = time.perf_counter() - t0
+            del A
+        except RuntimeError as exc:
+            glob_note = "OOM" if "alloc" in str(exc).lower() or "memory" in str(exc).lower() else "ERR"
 
     t_dg = t_alb + (0.0 if np.isnan(t_glob) else t_glob)
 
     # ---- plane-wave baseline (the object DG replaces) ---------------------
+    # setup_system is cheap (sphere/grid metadata only); estimate the davidson
+    # peak from it and skip the run gracefully if it would exceed the budget —
+    # the OS OOM-killer is uncatchable, so we must not trigger it.
     npw_pw = nb_pw = float("nan")
     t_pw = float("nan")
     pw_note = ""
@@ -200,12 +219,17 @@ def run_size(total_atoms_req, ecut_ry, m_per_atom, core, ext, n_iter, upf, elem_
         p_sphere = psys.spheres[0]
         npw_pw = p_sphere.npw
         nb_pw = int(psys.nbands)
-        bk_pw = build_batched([p_sphere], [psys.proj_data[0]])
-        p_pw = projectors_b(bk_pw, psys.positions)
-        pw_shape = psys.grid.shape
-        pw_veff = _smooth_veff(pw_shape, psys.positions.device)
-        t_pw = _time_davidson(bk_pw, pw_shape, pw_veff, p_pw, nb_pw, n_iter)
-        del psys, bk_pw, p_pw
+        nproj_pw = psys.proj_data[0].f_ylm_phase_free.shape[0]
+        n_grid_pw = int(np.prod(psys.grid.shape))
+        if _peak_gb(1, nb_pw, npw_pw, n_grid_pw, nproj_pw) > mem_budget_gb:
+            pw_note = "OOM(est)"
+            del psys
+        else:
+            bk_pw = build_batched([p_sphere], [psys.proj_data[0]])
+            p_pw = projectors_b(bk_pw, psys.positions)
+            pw_veff = _smooth_veff(psys.grid.shape, psys.positions.device)
+            t_pw = _time_davidson(bk_pw, psys.grid.shape, pw_veff, p_pw, nb_pw, n_iter)
+            del psys, bk_pw, p_pw
     except RuntimeError as exc:
         pw_note = "OOM" if "alloc" in str(exc).lower() or "memory" in str(exc).lower() else "ERR"
 
@@ -234,24 +258,29 @@ def main():
     ap.add_argument("--ext", type=int, default=2, help="conv cells/side of the extended element")
     ap.add_argument("--n-iter", type=int, default=12, help="fixed davidson iterations (timing)")
     ap.add_argument("--elem-batch", type=int, default=8, help="elements solved per batch (memory)")
+    ap.add_argument("--mem-budget-gb", type=float, default=9.0,
+                    help="skip runs whose estimated peak exceeds this (avoids OS OOM-kill)")
     ap.add_argument("--upf", default="tests/fixtures/qe/pseudos/Si_ONCV_PBE-1.2.upf")
     ap.add_argument("--threads", type=int, default=None)
+    ap.add_argument("--no-header", action="store_true",
+                    help="skip the banner + column header (per-size subprocess driver)")
     args = ap.parse_args()
     if args.threads:
         torch.set_num_threads(args.threads)
 
-    print(f"# torch threads={torch.get_num_threads()}  ecut={args.ecut_ry} Ry  "
-          f"M/atom={args.m_per_atom}  core={args.core}c ext={args.ext}c  "
-          f"n_iter={args.n_iter}  (fp64)")
-    print("# t_pw = full plane-wave davidson (REAL); t_dg = ALB build (REAL) + dense "
-          "global eigh (MODEL, dense upper bound)")
-    hdr = ("atoms", "n_elem", "npw_pw", "nb_pw", "npw_e", "M_el", "D", "npw/D",
-           "t_pw_s", "t_alb_s", "t_glob_s", "t_dg_s", "PW/DG")
-    print(("{:>6} {:>6} {:>8} {:>6} {:>7} {:>5} {:>7} {:>7} "
-           "{:>9} {:>9} {:>9} {:>9} {:>7}").format(*hdr))
+    if not args.no_header:
+        print(f"# torch threads={torch.get_num_threads()}  ecut={args.ecut_ry} Ry  "
+              f"M/atom={args.m_per_atom}  core={args.core}c ext={args.ext}c  "
+              f"n_iter={args.n_iter}  (fp64)", flush=True)
+        print("# t_pw = full plane-wave davidson (REAL); t_dg = ALB build (REAL) + dense "
+              "global eigh (MODEL, dense upper bound)", flush=True)
+        hdr = ("atoms", "n_elem", "npw_pw", "nb_pw", "npw_e", "M_el", "D", "npw/D",
+               "t_pw_s", "t_alb_s", "t_glob_s", "t_dg_s", "PW/DG")
+        print(("{:>6} {:>6} {:>8} {:>6} {:>7} {:>5} {:>7} {:>7} "
+               "{:>9} {:>9} {:>9} {:>9} {:>7}").format(*hdr), flush=True)
     for tok in args.sizes.split(","):
         r = run_size(int(tok), args.ecut_ry, args.m_per_atom, args.core, args.ext,
-                     args.n_iter, args.upf, args.elem_batch)
+                     args.n_iter, args.upf, args.elem_batch, args.mem_budget_gb)
         pw = r["pw_note"] or f"{r['t_pw']:.2f}"
         gl = r["glob_note"] or f"{r['t_glob']:.2f}"
         sp = "  —  " if np.isnan(r["speedup"]) else f"{r['speedup']:.2f}x"
@@ -261,7 +290,7 @@ def main():
         print(("{:>6} {:>6} {:>8} {:>6} {:>7} {:>5} {:>7} {:>7} "
                "{:>9} {:>9.2f} {:>9} {:>9.2f} {:>7}").format(
             r["atoms"], r["n_elem"], npw_pw, nb_pw, r["npw_e"], r["m_elem"],
-            r["D"], dr, pw, r["t_alb"], gl, r["t_dg"], sp))
+            r["D"], dr, pw, r["t_alb"], gl, r["t_dg"], sp), flush=True)
 
 
 if __name__ == "__main__":
