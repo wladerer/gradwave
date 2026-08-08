@@ -1,6 +1,7 @@
 # Design: ESM metal / capacitor sub-modes (constant-potential electrochemistry)
 
-Status: **Level 1 implemented (NC); Level 2 deferred.** The vacuum/vacuum ESM
+Status: **Level 1 implemented (NC + USPP/PAW); Level 2 electrostatics done, fixed-µ
+SCF remaining.** The vacuum/vacuum ESM
 (`boundary: open_z`) is implemented and validated — potential, energy, forces, and
 in-plane stress, for both the norm-conserving and USPP/PAW paths. **Level 1 below
 (the metal/capacitor `metal_metal` boundary conditions at fixed charge, grounded +
@@ -53,23 +54,36 @@ consistent for both (all FD-validated). Validated: `v=0`/`v=bias` at the planes 
 and the **USPP/PAW** capacitor path (`esm_bias` not threaded through `scf_uspp`;
 `api` rejects `open_z_metal` there for now).
 
-### Level 2 — constant-potential (grand-canonical) SCF (large — the real feature)
+### Level 2 — constant-potential (grand-canonical) SCF (in progress)
 
 Electrochemistry means holding the electrode **potential** fixed while the slab
 exchanges charge with the reservoir — a grand-canonical ensemble at fixed `μ`, with
-a *floating* electron count `N(μ)`. That is not an electrostatics change; it is an
-SCF change:
-- the neutrality/`E_F` bisection becomes a `μ`-controlled charge equation (`N` is
-  solved for, not fixed);
-- the compensating counter-charge lives on the electrodes (the capacitor plates),
-  not a uniform background;
-- the energy becomes the grand potential `Ω = E − μN`, and forces/stress pick up
-  the `−μ dN/dR` term.
+a *floating* electron count `N(μ)`. The **electrostatics prerequisite is DONE**:
+`hartree_potential_capacitor` (and the capacitor `esm_energy`/`esm_potential`) now
+handle a **net-charged cell** — the `G∥=0` channel solves the Dirichlet BVP directly
+with the parabolic Green's function `G_D0(z,z')=z_<(L−z_>)/L`, so the plates carry
+the induced counter-charge (validated: analytic triangular potential, induced plate
+charges sum to −σ, and `esm_potential=δΔE/δρ` holds for a +0.4 e cell → a fixed-µ SCF
+on it is variational).
 
-This composes with Level 1's biased-capacitor electrostatics but is independently
-sized (it touches `scf/loop.py`'s occupation/neutrality machinery and the energy
-definition). It is the "constant-potential DFT" capability (cf. Bonnet–Marzari,
-Sundararaman ESM-RISM) and deserves its own focused build.
+**Remaining (SCF-side) work — the invasive part.** It touches `scf/loop.py`'s
+occupation/charge machinery:
+- **Occupation.** Add a constant-µ path beside `shared_fermi_occupations`: given µ,
+  `occ = g·f((ε−µ)/σ)` and `N = Σ w·occ` (N floats), instead of bisecting µ from a
+  fixed N (`core/occupations.find_fermi`).
+- **Floating charge.** `n_electrons` (today `charges.sum()`, neutral) becomes the
+  floating `N(µ)`; the density integrates to `N`, the cell is charged (`q = ΣZ − N`),
+  and the ESM must be `open_z_metal` (the plates hold `−q`; vacuum ESM can't source
+  charge). The periodic `G=0` term is the usual charged-cell jellium background.
+- **Grand potential.** Report/converge on `Ω = E − µN`; forces/stress pick up the
+  `−µ dN/dR` term (zero at self-consistency by the same Hellmann–Feynman argument,
+  since the ESM potential is already `δE/δρ`).
+- **Config.** `esm_target_mu` (the electrode potential / applied U vs a reference).
+
+This is "constant-potential DFT" (cf. Bonnet–Marzari, Sundararaman ESM-RISM). It
+needs SCF-level validation (a constant-µ run converging to the right `N(µ)`, and a
+`N`-vs-µ capacitance curve), so it is its own focused build on top of the now-done
+charged electrostatics.
 
 ## Recommendation
 
