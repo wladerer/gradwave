@@ -94,6 +94,11 @@ class SCFParams:
     # filtered subspace iteration). Norm-conserving only; the USPP/PAW generalized
     # S-metric problem rejects a non-davidson choice (see api / calculator).
     eigensolver: str = "davidson"  # davidson | chebyshev
+    # electrostatic boundary: "periodic" (default 3D-periodic) | "open_z"
+    # (open-boundary / ESM in the c direction — slab geometry, c ⊥ a,b). open_z
+    # removes the vacuum-image dipole field so asymmetric surfaces need no dipole
+    # correction and surface energetics are box-independent (core/energies/esm.py).
+    boundary: str = "periodic"
     # magnetic-channel SCF controls for the noncollinear/spinor path only
     magnetic: MagneticParams = field(default_factory=MagneticParams)
 
@@ -106,6 +111,10 @@ class SCFParams:
             raise InputError(
                 "scf.eigensolver must be 'davidson' or 'chebyshev', got "
                 f"{self.eigensolver!r}")
+        if self.boundary not in ("periodic", "open_z"):
+            raise InputError(
+                "scf.boundary must be 'periodic' or 'open_z', got "
+                f"{self.boundary!r}")
 
 
 @dataclass(frozen=True)
