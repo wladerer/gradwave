@@ -16,6 +16,7 @@ import torch
 
 from gradwave.core.energies.esm import (
     esm_energy,
+    esm_energy_strained,
     esm_potential,
     gaussian_ion_density,
 )
@@ -113,6 +114,39 @@ def test_total_energy_box_independent():
     eo2, ep2 = eo_ep(36.0, 180)
     assert abs(eo2 - eo1) < 5e-3, (eo1, eo2)
     assert abs(ep2 - ep1) > 5 * abs(eo2 - eo1)  # periodic drifts, open does not
+
+
+def test_strained_energy_matches_and_stress_matches_fd():
+    """esm_energy_strained equals esm_energy at zero strain, and its autograd
+    w.r.t. an in-plane strain (the ESM stress contribution) matches finite
+    difference — the term postscf.stress adds for open_z."""
+    grid = _grid(20.0, 100)
+    pos = torch.tensor([[3.0, 3.0, 8.0], [3.0, 3.0, 12.0]], dtype=torch.float64)
+    z = torch.tensor([4.0, 6.0], dtype=torch.float64)
+    rho = _elec(grid, [[3, 3, 8.6], [3, 3, 11.4]], [4.0, 6.0])
+    cell0 = torch.tensor(np.asarray(grid.cell), dtype=torch.float64)
+    beta = 0.8
+
+    assert float(esm_energy_strained(rho, pos, z, cell0, grid.shape, beta)) == \
+        pytest.approx(float(esm_energy(rho, pos, z, grid, beta=beta)), abs=1e-9)
+
+    eye = torch.eye(3, dtype=torch.float64)
+    mask = torch.ones(3, 3, dtype=torch.float64)
+    mask[2, :] = 0.0
+    mask[:, 2] = 0.0  # in-plane strain only (z is open)
+
+    def energy(eps):
+        f = eye + eps * mask
+        return esm_energy_strained(rho, pos @ f.T, z, cell0 @ f.T, grid.shape, beta)
+
+    eps = torch.zeros(3, 3, dtype=torch.float64, requires_grad=True)
+    (g,) = torch.autograd.grad(energy(eps), eps)
+    h = 1e-5
+    for a, b in [(0, 0), (1, 1), (0, 1)]:
+        ep = torch.zeros(3, 3, dtype=torch.float64)
+        ep[a, b] += h
+        fd = (float(energy(ep)) - float(energy(-ep))) / (2 * h)
+        assert float(g[a, b]) == pytest.approx(fd, abs=1e-5)
 
 
 def test_input_rejects_bad_boundary():

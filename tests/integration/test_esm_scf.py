@@ -17,6 +17,7 @@ import pytest
 from gradwave.core.energies.esm import esm_energy
 from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.postscf.forces import forces
+from gradwave.postscf.stress import stress
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
 from tests.helpers import RY, pseudo
@@ -84,3 +85,29 @@ def test_open_z_forces_match_total_energy_finite_difference():
     f_no_esm = forces(res, remove_net=False)
     res.boundary = "open_z"
     assert abs(float(f[1, 2]) - float(f_no_esm[1, 2])) > 1e-2
+
+
+@pytest.mark.standard
+def test_open_z_stress_is_in_plane_only():
+    """The ESM stress contribution lands only on the in-plane (surface-stress)
+    components — the open z-axis has no lattice to strain, so σ's z-row/col are
+    left to the periodic terms. Toggle boundary at the same converged result."""
+    na = parse_upf(pseudo("Na_ONCV_PBE_sr.upf"))
+    h = parse_upf(pseudo("H_ONCV_PBE-1.2.upf"))
+    cell = np.diag([7.0, 7.0, 16.0])
+    pos = np.array([[3.5, 3.5, 6.5], [3.5, 3.5, 9.0]])
+    common = dict(smearing="fermi-dirac", width=0.1, etol=1e-7, rhotol=1e-6,
+                  max_iter=100, verbose=False)
+    res = scf(setup_system(cell, pos, [0, 1], [na, h], ecut=24 * RY),
+              LDA_PW92(), boundary="open_z", **common)
+
+    s_open = stress(res, LDA_PW92(), symmetrize=False)
+    res.boundary = "periodic"
+    s_per = stress(res, LDA_PW92(), symmetrize=False)
+    res.boundary = "open_z"
+    d = s_open - s_per  # the ESM stress contribution
+
+    assert abs(float(d[0, 0])) + abs(float(d[1, 1])) > 1e-4  # in-plane surface stress
+    for i in range(3):  # open z-axis untouched (gated)
+        assert abs(float(d[2, i])) < 1e-8
+        assert abs(float(d[i, 2])) < 1e-8

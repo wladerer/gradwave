@@ -44,7 +44,6 @@ import torch
 from gradwave.constants import E2
 from gradwave.core.fftbox import g_to_r_box
 from gradwave.core.structure import structure_factors
-from gradwave.grids import reciprocal_cell
 
 # |G∥|² [Å⁻²] at/below this is the G∥=0 channel (open 1D Coulomb, handled apart).
 _GPAR2_ZERO_TOL = 1e-12
@@ -69,16 +68,26 @@ def _decay_conv(rho: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     return torch.stack([fwd[i] + bwd[i] for i in range(nz)], dim=-1) - rho
 
 
-def _inplane_gpar(cell: np.ndarray, shape: tuple[int, int],
-                  in_axes: tuple[int, ...], device, dtype) -> torch.Tensor:
-    """|G∥| [Å⁻¹] on the in-plane FFT grid for the two periodic axes."""
-    b = reciprocal_cell(cell)  # rows b_i, b_i·a_j = 2π δ_ij
+def _esm_geom(cell, shape: tuple[int, ...], open_axis: int, device, dtype):
+    """In-plane |G∥| [Å⁻¹] (n_a, n_b), z spacing dz, and z extent lz [Å].
+
+    Computed in torch so a differentiable (strained) torch ``cell`` flows to the
+    stress; an ``np.ndarray`` cell takes the same path with no grad. n_a/n_b are
+    the two periodic-axis sizes, nz the open-axis size (matching the movedim'd
+    density layout in :func:`esm_delta_potential`).
+    """
+    in_axes = tuple(a for a in (0, 1, 2) if a != open_axis)
+    if not torch.is_tensor(cell):
+        cell = torch.as_tensor(np.asarray(cell, dtype=np.float64), device=device, dtype=dtype)
+    b = 2.0 * math.pi * torch.linalg.inv(cell).transpose(-2, -1)  # rows b_i
+    lz = torch.linalg.norm(cell[open_axis])
+    dz = lz / shape[open_axis]
     b0, b1 = b[in_axes[0]], b[in_axes[1]]
-    k0 = np.fft.fftfreq(shape[0], d=1.0 / shape[0]).astype(np.int64)
-    k1 = np.fft.fftfreq(shape[1], d=1.0 / shape[1]).astype(np.int64)
+    na, nb = shape[in_axes[0]], shape[in_axes[1]]
+    k0 = torch.as_tensor(np.fft.fftfreq(na, d=1.0 / na).astype(np.int64), device=device).to(dtype)
+    k1 = torch.as_tensor(np.fft.fftfreq(nb, d=1.0 / nb).astype(np.int64), device=device).to(dtype)
     gvec = k0[:, None, None] * b0[None, None, :] + k1[None, :, None] * b1[None, None, :]
-    gpar = np.sqrt(np.einsum("...i,...i->...", gvec, gvec))
-    return torch.as_tensor(gpar, device=device, dtype=dtype)
+    return torch.linalg.norm(gvec, dim=-1), dz, lz
 
 
 def hartree_potential_esm(rho_r: torch.Tensor, cell: np.ndarray,
@@ -110,10 +119,9 @@ def hartree_potential_esm(rho_r: torch.Tensor, cell: np.ndarray,
     # Work with the open axis last: (n_a, n_b, nz).
     rho_m = torch.movedim(rho_r, open_axis, -1)
     n_a, n_b, nz = rho_m.shape
-    dz = float(np.linalg.norm(c)) / nz
     dev, rdt = rho_r.device, rho_r.dtype
 
-    gpar = _inplane_gpar(cell, (n_a, n_b), in_axes, dev, rdt)  # (n_a, n_b)
+    gpar, dz, _lz = _esm_geom(cell, tuple(rho_r.shape), open_axis, dev, rdt)
     rho_hat = torch.fft.fft2(rho_m, dim=(0, 1))               # (n_a, n_b, nz) complex
 
     # Screened channels |G∥|>0: v = (2π e²/|G∥|) · dz · Σ_j e^{−|G∥|dz|i−j|} ρ[j].
@@ -174,10 +182,16 @@ def gaussian_ion_density(positions: torch.Tensor, charges: torch.Tensor, grid,
     to Σ_a Z_a = N_e, so ρ_elec − ρ_ion is net neutral. β cancels in ΔE (it is the
     short-range width) — keep it a few grid spacings: representable, narrow.
     """
-    s = structure_factors(positions.to(grid.g_cart.dtype), grid.g_cart)  # e^{−iG·R}
-    form = torch.exp(-0.5 * grid.g2 * beta * beta).to(s.dtype)
+    return _gaussian_ion(positions, charges, grid.g_cart, grid.g2, grid.volume, beta)
+
+
+def _gaussian_ion(positions: torch.Tensor, charges: torch.Tensor,
+                  g_cart: torch.Tensor, g2: torch.Tensor, volume, beta: float) -> torch.Tensor:
+    """gaussian_ion_density from explicit (possibly strained) G-vectors/volume."""
+    s = structure_factors(positions.to(g_cart.dtype), g_cart)  # e^{−iG·R}
+    form = torch.exp(-0.5 * g2 * beta * beta).to(s.dtype)
     z = charges.to(s.dtype)
-    rho_ion_g = torch.einsum("a,axyz,xyz->xyz", z, s, form) / grid.volume
+    rho_ion_g = torch.einsum("a,axyz,xyz->xyz", z, s, form) / volume
     return g_to_r_box(rho_ion_g, real=True)
 
 
@@ -187,7 +201,7 @@ def _default_beta(grid, open_axis: int) -> float:
     return 2.0 * dz
 
 
-def esm_delta_potential(rho_r: torch.Tensor, cell: np.ndarray,
+def esm_delta_potential(rho_r: torch.Tensor, cell: "np.ndarray | torch.Tensor",
                         open_axis: int = 2) -> torch.Tensor:
     """v_H^open(r) − v_H^periodic(r) [eV] — the open-minus-periodic field.
 
@@ -201,14 +215,10 @@ def esm_delta_potential(rho_r: torch.Tensor, cell: np.ndarray,
     whose mismatched z-discretization leaves grid-scale residue that a sharp ion
     charge amplifies without bound).
     """
-    cell = np.asarray(cell, dtype=np.float64)
-    in_axes = tuple(a for a in (0, 1, 2) if a != open_axis)
     rho_m = torch.movedim(rho_r, open_axis, -1)
     n_a, n_b, nz = rho_m.shape
-    dz = float(np.linalg.norm(cell[open_axis])) / nz
     dev, rdt = rho_r.device, rho_r.dtype
-
-    gpar = _inplane_gpar(cell, (n_a, n_b), in_axes, dev, rdt)
+    gpar, dz, lz = _esm_geom(cell, tuple(rho_r.shape), open_axis, dev, rdt)
     rho_hat = torch.fft.fft2(rho_m, dim=(0, 1))
     gpar_safe = torch.clamp(gpar, min=math.sqrt(_GPAR2_ZERO_TOL))
     q = torch.exp(-gpar_safe * dz)
@@ -233,7 +243,6 @@ def esm_delta_potential(rho_r: torch.Tensor, cell: np.ndarray,
     s = rho_hat[0, 0, :]
     zc = torch.arange(nz, device=dev, dtype=rdt) * dz
     u = zc[:, None] - zc[None, :]
-    lz = nz * dz
     u_wrap = u - lz * torch.round(u / lz)
     k0 = (-0.5 * u.abs()) - (-0.5 * u_wrap.abs() + u_wrap * u_wrap / (2.0 * lz))
     dv00 = 4.0 * math.pi * E2 * dz * (k0.to(rho_hat.dtype) @ s)
@@ -261,6 +270,37 @@ def esm_energy(rho_elec: torch.Tensor, positions: torch.Tensor,
     rho_tot = rho_elec - gaussian_ion_density(positions, charges, grid, beta)
     dv = esm_delta_potential(rho_tot, grid.cell, open_axis)
     dvol = grid.volume / rho_elec.numel()
+    return 0.5 * (rho_tot * dv).sum() * dvol
+
+
+def esm_energy_strained(rho_elec: torch.Tensor, positions: torch.Tensor,
+                        charges: torch.Tensor, cell: torch.Tensor,
+                        shape: tuple[int, int, int], beta: float,
+                        open_axis: int = 2) -> torch.Tensor:
+    """ΔE [eV] from a differentiable (strained) ``cell`` — the stress entry point.
+
+    Builds the strained full-box G-vectors and volume from ``cell`` (a torch
+    tensor of the strained lattice rows, requires_grad through the strain), so
+    autograd of the returned energy w.r.t. the strain gives the ESM stress
+    contribution. ``beta`` is a fixed physical width (strain-independent).
+    """
+    b = 2.0 * math.pi * torch.linalg.inv(cell).transpose(-2, -1)  # rows b_i
+    dev = cell.device
+
+    def _miller(n):
+        k = np.fft.fftfreq(n, d=1.0 / n).astype(np.int64)
+        return torch.as_tensor(k, device=dev).to(cell.dtype)
+
+    axes = [_miller(n) for n in shape]
+    miller = torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=-1)  # (n1,n2,n3,3)
+    g_cart = miller @ b                                                  # strained Cartesian G
+    g2 = (g_cart * g_cart).sum(-1)
+    volume = torch.abs(torch.linalg.det(cell))
+
+    rho_ion = _gaussian_ion(positions, charges, g_cart, g2, volume, beta)
+    rho_tot = rho_elec - rho_ion
+    dv = esm_delta_potential(rho_tot, cell, open_axis)
+    dvol = volume / rho_elec.numel()
     return 0.5 * (rho_tot * dv).sum() * dvol
 
 
