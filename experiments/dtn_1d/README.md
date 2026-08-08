@@ -40,12 +40,32 @@ open/dtn and ~0.7 eV (and growing) for periodic.
 **Honest nuance.** For a *symmetric* jellium slab (no net surface dipole) the
 dominant box artifact is the periodic **electrostatics**, which open-BC Poisson
 removes — not the wavefunction tail. So DtN here mainly *recovers the same correct
-plateau* rather than dramatically beating a hard wall. DtN's real edge shows up on
-(a) smaller boxes / systems where the wavefunction tail is the limiter, and (b)
-**asymmetric / dipolar slabs**, where periodic images create a genuine dipole
-artifact — the natural next test (see below). And this is still the fixed-κ
-*honest-approximation* branch; the energy-**exact** DtN needs a Green's-function
-density path (the report's hard blocker).
+plateau* rather than dramatically beating a hard wall. And this is still the
+fixed-κ *honest-approximation* branch; the energy-**exact** DtN needs a
+Green's-function density path (the report's hard blocker).
+
+## The dramatic case — asymmetric (bilayer) slab
+
+Where the boundary treatment stops being a refinement and becomes right-vs-wrong:
+a bilayer jellium (two `r_s` across the midplane) has a real charge-transfer
+**surface dipole**, so its two faces have *different* work functions. From
+`asym_sweep()` (rs = 3 / 5 bohr, 12 Å slab), Φ_left / Φ_right [eV]:
+
+```
+  vac[A] |    periodic    |      open       |       dtn
+  ------------------------------------------------------------
+     8   |  +3.00 / +2.96 |  +3.43 / +2.57  |  +3.41 / +2.55
+    14   |  +3.03 / +3.00 |  +3.47 / +2.60  |  +3.47 / +2.60
+    20   |  +3.03 / +3.01 |  +3.48 / +2.60  |  +3.48 / +2.60
+```
+
+**Periodic collapses the dipole** — it forces one common vacuum level, so
+Φ_left ≈ Φ_right (~3.0, *wrong*): a periodic box structurally cannot represent two
+different work functions, which is exactly why periodic surface calculations need a
+dipole correction. **Open/DtN resolve the true dipole**: Φ_left = 3.48 ≠
+Φ_right = 2.60 (a 0.88 eV difference), both **box-independent** — no dipole
+correction, by construction. This is the compelling demonstration; the symmetric
+slab above is the conservative one.
 
 ## What's real gradwave
 
