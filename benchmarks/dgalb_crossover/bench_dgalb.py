@@ -148,7 +148,7 @@ def _peak_gb(nk, nb, npw, n_grid, nproj):
 
 
 def run_size(total_atoms_req, ecut_ry, m_per_atom, core, ext, n_iter, upf, elem_batch,
-             mem_budget_gb):
+             mem_budget_gb, no_pw=False):
     # ---- element geometry -------------------------------------------------
     # core = conv cells per side of the DG element; ext = conv cells per side
     # of the extended element (core + buffer halo). Atoms per core element:
@@ -210,28 +210,41 @@ def run_size(total_atoms_req, ecut_ry, m_per_atom, core, ext, n_iter, upf, elem_
     # setup_system is cheap (sphere/grid metadata only); estimate the davidson
     # peak from it and skip the run gracefully if it would exceed the budget —
     # the OS OOM-killer is uncatchable, so we must not trigger it.
+    # setup_system itself builds the dense projector table (f_ylm_phase_free,
+    # nproj x npw) — that alone OOMs the OS above ~a few hundred atoms, before
+    # any peak gate can read the sizes. A coarse pre-estimate from atom count
+    # skips the baseline build entirely when it is hopeless; --no-pw forces it.
     npw_pw = nb_pw = float("nan")
     t_pw = float("nan")
     pw_note = ""
-    try:
-        nx, ny, nz = _cubeish(n_elem * core**3)      # same atom count, cubic-ish
-        psys = _build_system(nx, ny, nz, ecut_ry, upf_data)
-        p_sphere = psys.spheres[0]
-        npw_pw = p_sphere.npw
-        nb_pw = int(psys.nbands)
-        nproj_pw = psys.proj_data[0].f_ylm_phase_free.shape[0]
-        n_grid_pw = int(np.prod(psys.grid.shape))
-        if _peak_gb(1, nb_pw, npw_pw, n_grid_pw, nproj_pw) > mem_budget_gb:
-            pw_note = "OOM(est)"
-            del psys
-        else:
-            bk_pw = build_batched([p_sphere], [psys.proj_data[0]])
-            p_pw = projectors_b(bk_pw, psys.positions)
-            pw_veff = _smooth_veff(psys.grid.shape, psys.positions.device)
-            t_pw = _time_davidson(bk_pw, psys.grid.shape, pw_veff, p_pw, nb_pw, n_iter)
-            del psys, bk_pw, p_pw
-    except RuntimeError as exc:
-        pw_note = "OOM" if "alloc" in str(exc).lower() or "memory" in str(exc).lower() else "ERR"
+    natoms_pw = n_elem * core_atoms
+    # projector-table bytes ~ (proj/atom ~ nproj_e/core_atoms) * natoms * npw * 16;
+    # npw scales ~linearly with atoms. Reuse the element table density as a proxy.
+    proj_per_atom = nproj_e / (8 * ext**3)
+    npw_est = npw_e / ext**3 * natoms_pw                 # npw ~ volume ~ atoms
+    proj_tab_gb = proj_per_atom * natoms_pw * npw_est * 16 / 1e9
+    if no_pw or proj_tab_gb > mem_budget_gb:
+        pw_note = "skip" if no_pw else "OOM(setup)"
+    else:
+        try:
+            nx, ny, nz = _cubeish(n_elem * core**3)      # same atom count, cubic-ish
+            psys = _build_system(nx, ny, nz, ecut_ry, upf_data)
+            p_sphere = psys.spheres[0]
+            npw_pw = p_sphere.npw
+            nb_pw = int(psys.nbands)
+            nproj_pw = psys.proj_data[0].f_ylm_phase_free.shape[0]
+            n_grid_pw = int(np.prod(psys.grid.shape))
+            if _peak_gb(1, nb_pw, npw_pw, n_grid_pw, nproj_pw) > mem_budget_gb:
+                pw_note = "OOM(est)"
+                del psys
+            else:
+                bk_pw = build_batched([p_sphere], [psys.proj_data[0]])
+                p_pw = projectors_b(bk_pw, psys.positions)
+                pw_veff = _smooth_veff(psys.grid.shape, psys.positions.device)
+                t_pw = _time_davidson(bk_pw, psys.grid.shape, pw_veff, p_pw, nb_pw, n_iter)
+                del psys, bk_pw, p_pw
+        except RuntimeError as exc:
+            pw_note = "OOM" if "alloc" in str(exc).lower() or "memory" in str(exc).lower() else "ERR"
 
     speedup = (t_pw / t_dg) if (not np.isnan(t_pw) and t_dg > 0) else float("nan")
 
@@ -260,6 +273,8 @@ def main():
     ap.add_argument("--elem-batch", type=int, default=8, help="elements solved per batch (memory)")
     ap.add_argument("--mem-budget-gb", type=float, default=9.0,
                     help="skip runs whose estimated peak exceeds this (avoids OS OOM-kill)")
+    ap.add_argument("--no-pw", action="store_true",
+                    help="skip the plane-wave baseline entirely (its setup OOMs at large N)")
     ap.add_argument("--upf", default="tests/fixtures/qe/pseudos/Si_ONCV_PBE-1.2.upf")
     ap.add_argument("--threads", type=int, default=None)
     ap.add_argument("--no-header", action="store_true",
@@ -280,12 +295,12 @@ def main():
                "{:>9} {:>9} {:>9} {:>9} {:>7}").format(*hdr), flush=True)
     for tok in args.sizes.split(","):
         r = run_size(int(tok), args.ecut_ry, args.m_per_atom, args.core, args.ext,
-                     args.n_iter, args.upf, args.elem_batch, args.mem_budget_gb)
+                     args.n_iter, args.upf, args.elem_batch, args.mem_budget_gb, args.no_pw)
         pw = r["pw_note"] or f"{r['t_pw']:.2f}"
         gl = r["glob_note"] or f"{r['t_glob']:.2f}"
         sp = "  —  " if np.isnan(r["speedup"]) else f"{r['speedup']:.2f}x"
         dr = "  —  " if np.isnan(r["dim_red"]) else f"{r['dim_red']:.0f}x"
-        npw_pw = "OOM" if np.isnan(r["npw_pw"]) else f"{int(r['npw_pw'])}"
+        npw_pw = "—" if np.isnan(r["npw_pw"]) else f"{int(r['npw_pw'])}"
         nb_pw = "—" if np.isnan(r["nb_pw"]) else f"{int(r['nb_pw'])}"
         print(("{:>6} {:>6} {:>8} {:>6} {:>7} {:>5} {:>7} {:>7} "
                "{:>9} {:>9.2f} {:>9} {:>9.2f} {:>7}").format(

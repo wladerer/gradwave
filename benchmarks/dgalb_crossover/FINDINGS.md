@@ -14,14 +14,36 @@ atoms  n_elem   npw_pw  nb_pw   npw_e   M_el     D   npw/D    t_pw_s   t_alb_s  
    64      8     13133    154   13133    64     512    26x      9.71     26.02     0.02     26.04   0.37x
   216     27     43867    519   13133    64    1728    25x   OOM(est)    92.93     0.31     93.24     —
   512     64    104415   1229   13133    64    4096    25x   OOM(est)   219.95     4.13    224.08     —
- 1000    125    ...      ...    13133    64    8000    ...   OOM(est)    (t_alb only; global eigh gated off)
+ 1000    125     —        —     13133    64    8000    —      skip       442.46    (gated)  442.46     —
 ```
 
 `t_pw` = full plane-wave `davidson_batched` (REAL, the object DG replaces).
 `t_dg` = ALB build (REAL) + reduced global `eigh` (MODEL, dense upper bound).
 `OOM(est)` = the plane-wave davidson's estimated peak exceeds the 9 GB budget,
 so it is skipped rather than tripping the OS OOM-killer (the 14 GB box cannot
-hold the global sphere + projector table — the wall DG-ALB removes).
+hold the global sphere + projector table — the wall DG-ALB removes). At 1000
+atoms plane waves cannot even be *set up*: `setup_system` builds the dense
+projector table (nproj x npw ~ 32 GB) and OS-OOM-kills before any peak gate can
+act, so that baseline is skipped (`--no-pw`) and the dense global eigh gated off
+— the row isolates the ALB build.
+
+## The ALB build is linear — the O(N) signature
+
+Wall time per element is flat across two decades of atom count:
+
+```
+atoms   n_elem   t_alb (s)   s / element
+    8       1        3.22        3.22
+   64       8       26.02        3.25
+  216      27       92.93        3.44
+  512      64      219.95        3.44
+ 1000     125      442.46        3.54
+```
+
+~3.5 s/element with only a slight upward drift — the ALB regeneration is O(N)
+while the plane-wave davidson it replaces is ~N^2.4 (and un-runnable past
+~128–216 atoms). The crossover made concrete: a linear curve overtaking a
+superlinear one that also hits a hard memory wall.
 
 ## What the numbers say
 
