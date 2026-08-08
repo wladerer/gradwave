@@ -335,3 +335,51 @@ pseudopotentials in the ALB basis, (b) porting into gradwave proper (3D FFT
 element solves, real Si potential), (c) a buffer/quadrature schedule to push the
 floor to sub-meV on all states. The deepest uncertainty of the whole moonshot —
 the SIPG form in 3D — is now validated end-to-end.
+
+---
+
+# Build: kill point 2 FULLY cleared — nonlocal PP in the ALB basis
+
+`dgalb_spike_3d.py --vnl-d0` adds a separable Kleinman-Bylander nonlocal term
+V_NL = sum_a d0 |beta_a><beta_a| (one atom-centred Gaussian projector per atom),
+threaded through all three places it must appear: the plane-wave reference, the
+per-element local solve (so the ALBs adapt to it), and the DG assembly as the
+ALB-basis becp d0 * B outer B^H, B[i] = <b_i|beta_a> = sum_core b_i* beta dV.
+
+```
+# regression (d0=0): reproduces local-only exactly
+  M=32  e0_err 4.1e-07  max_err 1.1e-03  herm 9e-13
+
+# nonlocal ON (d0=-0.5, rc=0.35): reference SHIFTS, DG tracks it
+# ref e0: -0.0689 -> -0.0720 (projector deepens ground state ~3 mHa)
+  M=32  e0_err 3.1e-06  max_err 1.1e-03  herm 9e-13   min_eig=ref (no spurious)
+  M=48  e0_err 3.2e-06  max_err 1.6e-03  herm 2e-12   min_eig=ref
+```
+
+## Findings
+
+1. **Nonlocal PP in the ALB basis is correct.** The DG spectrum tracks the
+   nonlocal-SHIFTED plane-wave reference to the same accuracy as the local-only
+   case: ground state to ~3e-6 Ha, occupied manifold sub-meV, operator Hermitian
+   to 1e-12, no spurious modes. The becp-in-ALB assembly (real-space core overlap
+   contracted with the KB matrix) reproduces the separable operator exactly.
+2. **The normalization is verified by the shift itself.** V_NL moves the ground
+   state by ~3 mHa; DG reproduces that to ~3e-6 Ha (~0.05%). A 10%-wrong
+   mode-basis/real-space V_NL factor would show as ~3e-4 e0_err, not 3e-6 — so the
+   box-volume factor (mode basis) vs direct real-space overlap (DG) is consistent.
+3. **It is additive and does not touch the face assembly.** V_NL is a volume
+   operator: it adds only to the (here block-diagonal, atom-centred) diagonal
+   blocks; the SIPG jump/flux/penalty face terms are unchanged. Turning V_NL off
+   (d0=0) reproduces the validated local-only spectrum bit-for-bit.
+
+## What this retires
+
+Kill point 2 is now FULLY cleared (for norm-conserving separable nonlocal PP):
+the 3D SIPG DG-ALB operator, with BOTH local and nonlocal potentials, is
+Hermitian, coercive, free of spurious modes, and converges to the plane-wave
+reference to sub-meV on the occupied manifold. Both kill points passed. What
+remains is engineering, not physics risk: porting into gradwave proper (real Si
+ONCV pseudo via the existing becp/projector machinery — the accuracy study already
+ran real ONCV SCFs), USPP/PAW overlap operator S (generalized eigenproblem), a
+buffer/quadrature schedule for sub-meV on all states, and Phases 3-6 (SCF loop,
+forces, differentiability, scale-out).

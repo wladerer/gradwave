@@ -64,9 +64,17 @@ def modes(n, w):
     return mm, G
 
 
-def pw_hamiltonian(mm, G, w, n, Vfunc, corner):
+def beta_vals(center, pts, rc):
+    """Localized Gaussian KB projector beta_a(r) = exp(-|r-tau|^2/rc^2).
+    No periodic wrap: projectors are used well inside their box (rc << box)."""
+    return np.exp(-((np.asarray(pts) - center) ** 2).sum(-1) / rc ** 2)
+
+
+def pw_hamiltonian(mm, G, w, n, Vfunc, corner, vnl=None):
     """Dense PW Hamiltonian H[a,b] = Vhat[m_a-m_b] + HB|G_a|^2 delta on the box
-    [corner, corner+w]^3 sampled with n points/axis."""
+    [corner, corner+w]^3 sampled with n points/axis. Optional separable nonlocal
+    term vnl=(centers, d0, rc): H += d0 * Vbox * sum_a bhat_a outer conj(bhat_a),
+    bhat_a = fft(beta_a)/n^3 (coeffs in the e^{iG.(r-corner)} basis the states use)."""
     lin = np.arange(n) * w / n
     grid = np.array(list(itertools.product(lin, lin, lin))) + corner
     Vx = Vfunc(grid).reshape(n, n, n)
@@ -74,6 +82,12 @@ def pw_hamiltonian(mm, G, w, n, Vfunc, corner):
     a = (mm[:, None, :] - mm[None, :, :]) % n             # (Nk,Nk,3)
     H = Vhat[a[..., 0], a[..., 1], a[..., 2]].astype(complex)
     H[np.diag_indices(len(mm))] += HB * (G ** 2).sum(1)
+    if vnl is not None:
+        centers, d0, rc = vnl
+        Vbox = w ** 3
+        for c in centers:
+            bhat = (np.fft.fftn(beta_vals(c, grid, rc).reshape(n, n, n)) / n ** 3).reshape(-1)
+            H += d0 * Vbox * np.outer(bhat, bhat.conj())
     return H
 
 
@@ -86,11 +100,15 @@ def eval3d(coeffs, G, corner, pts, dax=None):
 
 
 # ---------------------------------------------------------------- ALB per element
-def build_alb(xe, h, buf, Vfunc, nmode, ncore, nface, M, orth_tol=1e-8):
+def build_alb(xe, h, buf, Vfunc, nmode, ncore, nface, M, orth_tol=1e-8, vnl=None):
     corner = xe - buf
     w = h + 2 * buf
     mm, G = modes(nmode, w)
-    Hloc = pw_hamiltonian(mm, G, w, nmode, Vfunc, corner)
+    # the element's own atom sits at the core centre; its projector is included
+    # in the local solve so the ALBs adapt to the nonlocal potential.
+    atom = xe + h / 2
+    vnl_loc = (([atom],) + tuple(vnl[1:])) if vnl is not None else None
+    Hloc = pw_hamiltonian(mm, G, w, nmode, Vfunc, corner, vnl=vnl_loc)
     ev, U = np.linalg.eigh(Hloc)
     C = U[:, np.argsort(ev.real)[:M]]                     # (Nk, M) PW coeffs
 
@@ -106,6 +124,15 @@ def build_alb(xe, h, buf, Vfunc, nmode, ncore, nface, M, orth_tol=1e-8):
     X = Q[:, keep] * (s[keep] ** -0.5)[None, :]           # (M, n_keep)
     Phi = Phi @ X
     dPhi = [d @ X for d in dPhi]
+
+    # nonlocal becp in the ALB basis: B[i] = <b_i|beta_atom> = sum_core b_i* beta dV.
+    # block contribution (added in assemble) is d0 * B outer conj(B).
+    bnl = None
+    if vnl is not None:
+        _, d0, rc = vnl
+        beta_c = torch.tensor(beta_vals(atom, xc, rc), dtype=CD)
+        B = (torch.tensor(Phi, dtype=CD).conj().T @ beta_c) * dV  # (n_keep,)
+        bnl = (B, float(d0))
 
     # face quadrature grids: 6 faces (axis, side). side 0 = low (xe), 1 = high (xe+h).
     fl = (np.arange(nface) + 0.5) * h / nface
@@ -129,7 +156,7 @@ def build_alb(xe, h, buf, Vfunc, nmode, ncore, nface, M, orth_tol=1e-8):
         "Phi": torch.tensor(Phi, dtype=CD),
         "dPhi": [torch.tensor(d, dtype=CD) for d in dPhi],
         "Vc": torch.tensor(Vc), "dV": dV, "n": int(keep.sum()),
-        "faces": faces, "dA": dA,
+        "faces": faces, "dA": dA, "bnl": bnl,
     }
 
 
@@ -148,6 +175,9 @@ def assemble(elems, idx_of, n_side, h, sigma):
         Vm = (el["Phi"].conj().T @ (el["Vc"].to(CD)[:, None] * el["Phi"])) * el["dV"]
         i = rng(e)
         H[i.unsqueeze(1), i.unsqueeze(0)] += T + Vm
+        if el["bnl"] is not None:                          # nonlocal KB: d0 * B outer B^H
+            B, d0 = el["bnl"]
+            H[i.unsqueeze(1), i.unsqueeze(0)] += d0 * torch.outer(B, B.conj())
 
     # each interior face counted once: for every element, its +axis face with the
     # neighbour in +axis. e uses its high face (ax,1); neighbour uses low (ax,0).
@@ -176,19 +206,20 @@ def assemble(elems, idx_of, n_side, h, sigma):
 
 
 # ---------------------------------------------------------------- driver
-def reference(L, nmode, Vfunc):
+def reference(L, nmode, Vfunc, vnl=None):
     mm, G = modes(nmode, L)
-    H = pw_hamiltonian(mm, G, L, nmode, Vfunc, np.zeros(3))
+    H = pw_hamiltonian(mm, G, L, nmode, Vfunc, np.zeros(3), vnl=vnl)
     return np.sort(np.linalg.eigvalsh(H).real)
 
 
-def build_all(L, n_side, buf_frac, Vfunc, nmode, ncore, nface, M):
+def build_all(L, n_side, buf_frac, Vfunc, nmode, ncore, nface, M, vnl=None):
     h = L / n_side
     idx_of = {}
     cells = list(itertools.product(range(n_side), repeat=3))
     for i, c in enumerate(cells):
         idx_of[c] = i
-    elems = [build_alb(np.array(c) * h, h, buf_frac * h, Vfunc, nmode, ncore, nface, M)
+    elems = [build_alb(np.array(c) * h, h, buf_frac * h, Vfunc, nmode, ncore, nface, M,
+                       vnl=vnl)
              for c in cells]
     return elems, idx_of, h
 
@@ -207,15 +238,20 @@ def main():
     ap.add_argument("--sigma-list", default="20,100,500,2000")
     ap.add_argument("--sigma-scale", type=float, default=2.0, help="coercive sigma = scale*M^2")
     ap.add_argument("--n-check", type=int, default=6)
+    ap.add_argument("--vnl-d0", type=float, default=0.0,
+                    help="nonlocal KB strength (0 = off; e.g. -0.5 attractive)")
+    ap.add_argument("--vnl-rc", type=float, default=0.35, help="KB projector radius")
     args = ap.parse_args()
 
     L = args.n_side * args.spacing
     centers = [(np.array(c) + 0.5) * args.spacing
                for c in itertools.product(range(args.n_side), repeat=3)]
     Vfunc = make_Vfunc(L, centers, args.v0, args.width)
-    ref = reference(L, args.nmode, Vfunc)
+    vnl = (centers, args.vnl_d0, args.vnl_rc) if args.vnl_d0 != 0.0 else None
+    ref = reference(L, args.nmode, Vfunc, vnl=vnl)
     print(f"# 3D DG-ALB spike: L={L:.2f} n_side={args.n_side} ({args.n_side**3} atoms) "
-          f"buf={args.buf_frac}h nmode={args.nmode} (HB={HB}, Ha-like)", flush=True)
+          f"buf={args.buf_frac}h nmode={args.nmode} "
+          f"VNL(d0={args.vnl_d0},rc={args.vnl_rc}) (HB={HB}, Ha-like)", flush=True)
     print(f"# plane-wave reference lowest {args.n_check}: "
           f"{np.array2string(ref[:args.n_check], precision=4)}", flush=True)
 
@@ -226,7 +262,7 @@ def main():
     print(f"{'sigma':>8} {'max_err':>11} {'e0_err':>11} {'min_eig':>11} {'ref_e0':>11} "
           f"{'herm':>9}", flush=True)
     elems, idx_of, h = build_all(L, args.n_side, args.buf_frac, Vfunc, args.nmode,
-                                 args.ncore, args.nface, m_list[-1])
+                                 args.ncore, args.nface, m_list[-1], vnl=vnl)
     for s in sig_list:
         H, herm = assemble(elems, idx_of, args.n_side, h, s)
         w = np.sort(torch.linalg.eigvalsh(H).real.numpy())[:args.n_check]
@@ -239,7 +275,7 @@ def main():
           flush=True)
     for M in m_list:
         elems, idx_of, h = build_all(L, args.n_side, args.buf_frac, Vfunc, args.nmode,
-                                     args.ncore, args.nface, M)
+                                     args.ncore, args.nface, M, vnl=vnl)
         s = args.sigma_scale * M ** 2
         H, herm = assemble(elems, idx_of, args.n_side, h, s)
         w = np.sort(torch.linalg.eigvalsh(H).real.numpy())[:args.n_check]

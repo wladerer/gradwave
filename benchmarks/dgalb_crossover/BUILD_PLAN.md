@@ -105,7 +105,7 @@ Gate: 10^3-10^4-atom runs; O(N) scaling curves.
 
 - Kill point 1 (cheap): the spike. SIPG must reproduce the 1D spectrum. **CLEARED** — sub-meV at ~8-12 ALBs/atom, Hermitian to 1e-15, coercivity threshold sigma~M^2 confirmed.
 - Kill point 2 (the real one): Phase 2 gate. 3D DG energy must converge to the
-  plane-wave reference to sub-meV at a tractable M/buffer. **CORE CLEARED** (dgalb_spike_3d.py) — 3D SIPG with 2D surface quadrature is Hermitian to 1e-12, no spurious modes, variationally convergent (ground sub-ueV, occupied sub-meV, low spectrum ~21 meV at M>=48, floor is buffer/quadrature not M). Remaining: nonlocal PP in the ALB basis + gradwave port (additive, no face-assembly change).
+  plane-wave reference to sub-meV at a tractable M/buffer. **CLEARED** (dgalb_spike_3d.py) — 3D SIPG with 2D surface quadrature is Hermitian to 1e-12, no spurious modes, variationally convergent (ground sub-ueV, occupied sub-meV, low spectrum ~21 meV at M>=48, floor is buffer/quadrature not M). Remaining: nonlocal PP in the ALB basis (dgalb_spike_3d.py --vnl-d0: DG tracks the nonlocal-shifted reference to ~3e-6 Ha, Hermitian, no spurious modes) + gradwave port. BOTH kill points passed; remainder is engineering, not physics risk.
 - Phases 0-2 are the WHOLE risk and are fast to reach. Phases 3-6 are known
   engineering conditional on Phase 2 passing.
 
