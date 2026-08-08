@@ -1,13 +1,15 @@
 # Design: ESM metal / capacitor sub-modes (constant-potential electrochemistry)
 
-Status: **design note / deferred.** The vacuum/vacuum ESM (`boundary: open_z`) is
-implemented and validated — potential, energy, forces, and in-plane stress, for
-both the norm-conserving and USPP/PAW paths (`core/energies/esm.py`, PR that added
-this file). This note scopes the remaining Phase-1 item from
-`docs/design/dtn-3d-engine.md`: the **metal** and **capacitor** boundary
-conditions for electrochemistry. It is deferred because — unlike the other Phase-1
-increments, which were self-contained — the headline use case (constant-potential
-electrochemistry) needs a grand-canonical SCF, which is a separate, larger feature.
+Status: **Level 1 implemented (NC); Level 2 deferred.** The vacuum/vacuum ESM
+(`boundary: open_z`) is implemented and validated — potential, energy, forces, and
+in-plane stress, for both the norm-conserving and USPP/PAW paths. **Level 1 below
+(the metal/capacitor `metal_metal` boundary conditions at fixed charge, grounded +
+applied bias) is now implemented for the norm-conserving path** as
+`boundary: open_z_metal` + `esm_bias` (`core/energies/esm.py`
+`hartree_potential_capacitor`, mode-aware `esm_energy`/`esm_potential`). Level 2
+(constant-potential grand-canonical SCF) remains deferred — it is a separate,
+larger feature (a floating electron count at fixed µ), not a boundary-condition
+tweak.
 
 ## The three ESM boundary conditions (Otani–Sugino)
 
@@ -26,30 +28,30 @@ finite-interval kernel `z_<(L−z_>)/L` plus, for a bias, the linear ramp
 
 ## Two levels of scope
 
-### Level 1 — metal electrostatics at fixed charge (moderate)
+### Level 1 — metal electrostatics at fixed charge — **DONE (NC)**
 
-Add `esm_mode: vacuum | metal | capacitor` and, for `capacitor`, an applied bias.
-Mechanism: replace the open z Green's function with the Dirichlet one per `G∥`, and
-add the bias ramp to the `G∥=0` channel. Unlocks: a neutral slab between grounded
-plates, and field-effect / Stark response to an applied bias.
+Exposed as `boundary: open_z_metal` (+ `esm_bias` [V]): metal Dirichlet planes at
+both z-box edges, grounded, with an optional applied bias. Unlocks a neutral slab
+between grounded plates and the field-effect / Stark response to an applied bias.
 
-**The one real subtlety.** The current vacuum implementation gets its
-discretization-matched, ion-width-independent ΔE from a *linear vs circular
-convolution of the same translation-invariant kernel* (`esm_delta_potential`). The
-Dirichlet Green's function is **not** translation-invariant (it depends on `z` and
-`z'` separately, not `z−z'`), so that trick does not carry over directly. Options,
-cheapest-first:
-- Solve the Dirichlet BVP per `G∥` with a tridiagonal (finite-difference) `(∂²_z −
-  g²)` operator — O(Nz) per mode — and form the open-minus-periodic correction
-  against a **matching** tridiagonal periodic operator (circulant), so the
-  short-range field still cancels. This keeps the "correction to periodic" framing
-  and its ion-width independence.
-- Or the analytic sinh/parabolic kernels applied via an O(Nz) forward/backward
-  recurrence (the Thomas algorithm is exactly this for the tridiagonal form).
+**How the discretization subtlety was avoided.** The Dirichlet Green's function is
+not translation-invariant, so the vacuum linear-vs-circular convolution trick does
+not apply directly. Instead the metal potential is built from the *already-validated*
+open potential plus a homogeneous image solution:
 
-Avoid the dense `Nz×Nz` kernel per mode (the memory blow-up the vacuum recursion
-was written to dodge). Forces/stress then follow for free by the same autograd
-route already used for vacuum (the bias adds an explicit, differentiable term).
+    v_cap(G∥, z) = v_open(G∥, z) − [v_open(G∥,0)·sinh(g(L−z)) + v_open(G∥,L)·sinh(gz)] / sinh(gL)
+
+(linear image for `G∥=0`), computed with a numerically stable `sinh`-ratio (all
+exponents ≤ 0, no overflow), plus the bias ramp `bias·z/L`. This inherits the
+vacuum kernel's ion-width independence and needs no `Nz×Nz` kernel. The
+charge-induced correction is the quadratic `½∫ρ ΔV` (grounded); the applied bias is
+the linear `∫ρ·(bias·z/L)`, so `esm_potential = δΔE/δρ` and the force `δΔE/δR` stay
+consistent for both (all FD-validated). Validated: `v=0`/`v=bias` at the planes to
+1e-15, Poisson in the interior, uniform field `bias/L`, and an end-to-end NC SCF.
+
+**Not yet:** capacitor **stress** (needs `esm_energy_strained`'s capacitor variant)
+and the **USPP/PAW** capacitor path (`esm_bias` not threaded through `scf_uspp`;
+`api` rejects `open_z_metal` there for now).
 
 ### Level 2 — constant-potential (grand-canonical) SCF (large — the real feature)
 
