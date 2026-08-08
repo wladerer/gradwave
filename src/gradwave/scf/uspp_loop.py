@@ -261,8 +261,9 @@ class _IterOps:
     # trailing dataclass field can default like its neighbors.
     hub_occ_mix: float = 1.0  # DFT+U occupation-matrix damping β in (0,1] (1.0 = raw one-step lag)
     hub_u_ramp_iters: int = 0  # DFT+U linear U-ramp length in iterations (0 = off)
-    boundary: str = "periodic"  # electrostatic BC (periodic | open_z); open_z adds
-    # the ESM correction to v_eff and the energy (core/energies/esm)
+    boundary: str = "periodic"  # electrostatic BC (periodic | open_z | open_z_metal);
+    # the ESM modes add the correction to v_eff and the energy (core/energies/esm)
+    esm_bias: float = 0.0  # applied capacitor bias [V] for boundary="open_z_metal"
 
 
 _MP_CROSSOVER = MP_CROSSOVER  # diago tol above this runs the fp32 draft solves
@@ -323,6 +324,7 @@ def uspp_potentials_dscr(
     phase_pos: torch.Tensor,
     onec: list[OneCenter] | dict[int, OneCenter] | None,
     boundary: str = "periodic",
+    esm_bias: float = 0.0,
 ) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
     """(veff_s, dscr_s, e_onec) from the per-channel FULL densities (smooth +
     aug) and per-atom becsums — THE assembly the USPP/PAW SCF iterates with.
@@ -341,7 +343,8 @@ def uspp_potentials_dscr(
     # the norm-conserving loop iterates (loop.effective_potentials); USPP passes
     # the FULL (smooth + aug) densities and its own vloc_r. No meta-GGA on the
     # USPP path yet, so tau stays None.
-    veff_s = effective_potentials(system, xc, rho_s, vloc_r, boundary=boundary)
+    veff_s = effective_potentials(system, xc, rho_s, vloc_r, boundary=boundary,
+                                  esm_bias=esm_bias)
 
     # screened D per spin/atom: D_ij + Σ_G ṽ_σ(G) e^{iGτ} Q̃_ij(G)* —
     # batched over the atoms of each species (one einsum per species, one
@@ -386,6 +389,7 @@ def _build_iter_ops(
     hub_occ_mix: float = 1.0,
     hub_u_ramp_iters: int = 0,
     boundary: str = "periodic",
+    esm_bias: float = 0.0,
 ) -> _IterOps:
     grid = system.grid
     vol = grid.volume
@@ -464,6 +468,7 @@ def _build_iter_ops(
         hub_occ_mix=hub_occ_mix,
         hub_u_ramp_iters=hub_u_ramp_iters,
         boundary=boundary,
+        esm_bias=esm_bias,
     )
 
 
@@ -528,9 +533,8 @@ def _assemble_iter_energies(
     if _esm_mode is not None:
         # ΔE = open-minus-periodic electrostatic correction on the FULL (smooth +
         # aug) total density — same term the NC loop adds; detached breakdown.
-        # (USPP threads no bias yet, so the capacitor mode here is grounded.)
         energies.esm = esm_energy(rho_tot_out, system.positions, system.charges,
-                                  grid, mode=_esm_mode)
+                                  grid, mode=_esm_mode, bias=ops.esm_bias)
     return energies
 
 
@@ -906,7 +910,7 @@ def _scf_iteration(
     u_scale = 1.0 if it is None else hubbard_u_ramp_scale(it, ops.hub_u_ramp_iters)
     veff_s, dscr_s, e_onec = uspp_potentials_dscr(
         system, xc, rho_s, rho_ij_mix, vloc_r, phase_pos, onec if is_paw else None,
-        boundary=ops.boundary,
+        boundary=ops.boundary, esm_bias=ops.esm_bias,
     )
 
     eigs_s = _solve_bands_uspp(
@@ -1287,9 +1291,10 @@ def scf_uspp(
     recorder: "SCFRecorder | None" = None,  # per-iteration flight recorder (scf.recorder);
     # None (default) builds a fresh cheap-path recorder. NOT part of SCFOptions — an
     # internal diagnostics object, so it is exempt from the opts-vs-flat-kwarg guard below.
-    boundary: str = "periodic",  # periodic | open_z — open-boundary (ESM) electrostatics
-    # (slab, c ⊥ a,b); adds the differentiable open-minus-periodic correction on the
+    boundary: str = "periodic",  # periodic | open_z | open_z_metal — open-boundary
+    # (ESM) electrostatics (slab, c ⊥ a,b); adds the differentiable correction on the
     # FULL (smooth + augmentation) density to v_eff and the total energy.
+    esm_bias: float = 0.0,  # applied capacitor bias [V] for boundary="open_z_metal"
 ) -> USPPResult:
     """USPP/PAW SCF. nspin=2 takes a SpinXC functional and start_mag (list,
     in [-1, 1]) with one entry per species OR one per atom (the latter for
@@ -1469,6 +1474,7 @@ def scf_uspp(
         hub_occ_mix=hub_occ_mix,
         hub_u_ramp_iters=hub_u_ramp_iters,
         boundary=boundary,
+        esm_bias=esm_bias,
     )
     hub = ops.hub
     n_hub_s = None
@@ -1898,4 +1904,5 @@ def scf_uspp(
         mag_abs=mag_abs,
         recorder=recorder,
         boundary=boundary,
+        esm_bias=esm_bias,
     )

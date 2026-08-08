@@ -90,7 +90,7 @@ def _esm_geom(cell, shape: tuple[int, ...], open_axis: int, device, dtype):
     return torch.linalg.norm(gvec, dim=-1), dz, lz
 
 
-def hartree_potential_esm(rho_r: torch.Tensor, cell: np.ndarray,
+def hartree_potential_esm(rho_r: torch.Tensor, cell: "np.ndarray | torch.Tensor",
                           open_axis: int = 2, *,
                           neutralize_g0: bool = True) -> torch.Tensor:
     """Open-boundary Hartree potential v_H(r) [eV] for a slab.

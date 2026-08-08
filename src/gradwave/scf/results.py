@@ -122,7 +122,8 @@ class USPPResult(_DictBridge):
     recorder: Any = None  # scf.recorder.SCFRecorder — per-iteration flight recorder
     formalism: str = "uspp"
     boundary: str = "periodic"  # electrostatic BC the SCF ran with (periodic |
-    # open_z); forces/stress read it to add the ESM contribution (core/energies/esm)
+    # open_z | open_z_metal); forces/stress read it to add the ESM contribution
+    esm_bias: float = 0.0  # applied capacitor bias [V] (open_z_metal); forces read it
 
     _conditional_keys = frozenset(
         {"hub_occ", "hub_sites", "rho_spin", "mag_total", "mag_abs", "newton"})
