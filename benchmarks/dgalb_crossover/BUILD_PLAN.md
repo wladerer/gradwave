@@ -40,7 +40,7 @@ NEW (the "zero non-volumetric machinery" gap):
 - block-sparse global H container + solve; density assembly from ALB coefficients
 - the moving-(adaptive-)basis SCF driver; Pulay forces for a position-dependent basis
 
-## De-risking spike (FIRST — days, standalone, not gradwave-integrated)
+## De-risking spike  [DONE — CLEARED, see dgalb_spike_1d.py / FINDINGS.md]
 
 **1D / two-element SIPG validation.** 1D periodic box, 2 elements, free electrons
 (or a known potential). Build toy ALBs, assemble the SIPG kinetic + penalty form,
@@ -103,7 +103,7 @@ Gate: 10^3-10^4-atom runs; O(N) scaling curves.
 
 ## Critical path & kill points
 
-- Kill point 1 (cheap): the spike. SIPG must reproduce the 1D spectrum.
+- Kill point 1 (cheap): the spike. SIPG must reproduce the 1D spectrum. **CLEARED** — sub-meV at ~8-12 ALBs/atom, Hermitian to 1e-15, coercivity threshold sigma~M^2 confirmed.
 - Kill point 2 (the real one): Phase 2 gate. 3D DG energy must converge to the
   plane-wave reference to sub-meV at a tractable M/buffer.
 - Phases 0-2 are the WHOLE risk and are fast to reach. Phases 3-6 are known

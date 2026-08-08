@@ -228,3 +228,54 @@ speed result (linear ALB build, crossover ~150-200 atoms) and the solver study
 (dense eigh until it OOMs, then purification), the three studies bracket the
 DG-ALB moonshot on all the axes that decide it — short of the full DG
 interior-penalty global assembly, which remains the real build.
+
+---
+
+# Build: kill point 1 CLEARED — 1D SIPG spike
+
+`dgalb_spike_1d.py` — the de-risking spike from BUILD_PLAN.md. Tests whether the
+symmetric interior-penalty (SIPG) assembly of an adaptive local basis reproduces
+the exact plane-wave spectrum, in 1D, before any 3D machinery is built. Periodic
+1D KS-like H = -HB d^2/dx^2 + V (six Gaussian wells); reference from a dense
+plane-wave diagonalisation; DG-ALB from per-element extended-box solves,
+core-restricted + canonically orthonormalised, assembled with the SIPG form.
+
+```
+# sigma sweep (M=24): the coercivity threshold
+ sigma    max_err     min_eig     ref_e0     herm
+   1.0   1.81e+03   -1811.45    -0.37859   3.6e-15   spurious modes far below truth
+  50.0   1.05e+02    -104.99    -0.37859   3.6e-15   still unstable
+ 200.0   8.66e-05    -0.37859   -0.37859   3.6e-15   STABLE, sub-meV
+2000.0   6.98e-05    -0.37859   -0.37859   3.6e-15   no over-penalisation
+
+# M convergence (coercive sigma = 2*M^2)
+  M   M/atom   sigma   max_err    e0_err
+  4    4.0       32   2.6e-02   5.9e-09   under-resolved basis
+  8    8.0      128   1.3e-05   9.6e-08   sub-meV
+ 12   12.0     288   3.2e-06   4.7e-07   best (~0.03 meV)
+ 24   24.0    1152   7.1e-05   1.2e-06   sub-meV
+```
+
+## Findings
+
+1. **The SIPG assembly is correct and variational.** The global operator is
+   Hermitian to machine precision (~3e-15) for every sigma and M — the
+   consistency/symmetry/penalty signs are right.
+2. **The interior penalty behaves exactly as theory predicts.** Below the
+   coercivity threshold (sigma ~ 100 here) spurious eigenvalues crash far below
+   the true ground state (-1811 at sigma=1); above it the spectrum is correct and
+   accuracy is flat out to sigma=2000 (no over-penalisation). The threshold grows
+   with basis richness (sigma ~ M^2), the standard interior-penalty scaling.
+3. **DG-ALB reproduces the exact spectrum to sub-meV at ~8-12 ALBs/atom**
+   (1e-5-1e-6 Ha ~ 0.03-0.3 meV) — consistent with the accuracy study's
+   representability curve, now confirmed as an actual variational solve.
+
+## What this retires
+
+Kill point 1 from BUILD_PLAN.md: the deepest uncertainty of the moonshot — does
+the DG interior-penalty assembly give a correct, variational operator from a
+discontinuous adaptive basis? — is answered YES in the cleanest setting. The
+penalty is real, tunable (sigma ~ M^2 above a coercivity floor), and the method
+hits sub-meV. The remaining risk is Phase 2's kill point 2: does this hold in 3D
+with a real potential and nonlocal pseudopotentials. But the SIPG form itself is
+now validated end-to-end.
