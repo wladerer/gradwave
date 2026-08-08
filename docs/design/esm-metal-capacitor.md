@@ -1,7 +1,9 @@
 # Design: ESM metal / capacitor sub-modes (constant-potential electrochemistry)
 
-Status: **Level 1 implemented (NC + USPP/PAW); Level 2 electrostatics done, fixed-µ
-SCF remaining.** The vacuum/vacuum ESM
+Status: **Level 1 implemented (NC + USPP/PAW); Level 2 (constant-µ SCF) working on
+the NC path** — converges, N floats with µ, reduces to the canonical result at the
+neutral µ; absolute-reference calibration is the remaining refinement. The
+vacuum/vacuum ESM
 (`boundary: open_z`) is implemented and validated — potential, energy, forces, and
 in-plane stress, for both the norm-conserving and USPP/PAW paths. **Level 1 below
 (the metal/capacitor `metal_metal` boundary conditions at fixed charge, grounded +
@@ -54,7 +56,30 @@ consistent for both (all FD-validated). Validated: `v=0`/`v=bias` at the planes 
 and the **USPP/PAW** capacitor path (`esm_bias` not threaded through `scf_uspp`;
 `api` rejects `open_z_metal` there for now).
 
-### Level 2 — constant-potential (grand-canonical) SCF (in progress)
+### Level 2 — constant-potential (grand-canonical) SCF — **WORKING (NC)**
+
+Exposed as `scf(target_mu=µ)` / `inputs.SCFParams.target_mu` (requires
+`boundary="open_z_metal"` + a smearing). Validated on a free-electron metal (Na):
+the SCF converges, the electron count **N floats monotonically with µ** (positive
+differential capacitance / DOS>0), and **at the neutral µ it recovers the canonical
+N exactly** (Na₂: `N(µ₀)=18.000`). What made it work, beyond the charged
+electrostatics below:
+- `common.constant_mu_occupations` (fixed µ → `N=Σw·g·f`, N floats; no bisection);
+- the density mixer must **float the charge** — `check_g0` is disabled under
+  `target_mu` so the G∥=0 (charge) residual is mixed rather than asserted zero;
+- `SCFResult.n_electrons` carries the floating N; the grand potential is
+  `Ω = free_energy − fermi·n_electrons`.
+
+**Remaining refinement (not blocking):** the absolute-energy reference for a
+charged cell. The ESM correction differences against the *matched* periodic
+(β-safe), while the KS energy uses the *spectral* periodic; for a neutral cell they
+agree, but for the net charge the G∥=0 term differs. This shifts the absolute
+grand-potential zero (the "potential of zero charge" calibration), not the *N(µ)*
+response or the converged density's self-consistency. Quantitative electrochemistry
+(absolute potentials vs SHE) needs this calibration; capacitance/relative-potential
+studies do not.
+
+#### Original scoping notes
 
 Electrochemistry means holding the electrode **potential** fixed while the slab
 exchanges charge with the reservoir — a grand-canonical ensemble at fixed `μ`, with
