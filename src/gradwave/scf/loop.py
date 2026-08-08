@@ -810,6 +810,7 @@ def _build_mixer_precond(
     kerker: bool,
     precond: str,
     precond_op: MultipoleKerkerPrecond | None,
+    float_charge: bool = False,
 ) -> tuple[PulayMixer | BroydenMixer | JohnsonMixer, LocalTFPrecond | None]:
     """Construct the density mixer and resolve its preconditioner.
 
@@ -835,7 +836,9 @@ def _build_mixer_precond(
         alpha=mixing_alpha,
         history=hist,
         kerker=kerker,
-        check_g0=nspin == 1,
+        # constant-µ lets the charge (G=0) float, so the mixer must mix it and
+        # NOT assert charge conservation.
+        check_g0=(nspin == 1) and not float_charge,
         kerker_mask=layout.kerker_mask if nspin == 2 else None,
     )
 
@@ -1370,6 +1373,7 @@ def scf(
         kerker,
         precond,
         precond_op,
+        float_charge=target_mu is not None,
     )
 
     # flight recorder (scf.recorder): cheap per-iteration diagnostics, always
