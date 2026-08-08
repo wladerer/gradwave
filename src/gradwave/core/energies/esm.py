@@ -104,13 +104,17 @@ def hartree_potential_esm(rho_r: torch.Tensor, cell: np.ndarray,
 
     Returns v_H(r) real, same shape as rho_r. Differentiable in rho_r.
     """
-    cell = np.asarray(cell, dtype=np.float64)
+    # Orthogonality check on a detached numpy copy — keep the original ``cell``
+    # (which may be a grad-requiring strained tensor for the stress) untouched so
+    # _esm_geom below stays differentiable in it.
+    cell_np = np.asarray(cell.detach().cpu() if torch.is_tensor(cell) else cell,
+                         dtype=np.float64)
     in_axes = tuple(a for a in (0, 1, 2) if a != open_axis)
-    c = cell[open_axis]
+    c = cell_np[open_axis]
     # ESM geometry: open axis orthogonal to both periodic axes.
     for a in in_axes:
-        cos = abs(float(np.dot(c, cell[a]))) / (
-            np.linalg.norm(c) * np.linalg.norm(cell[a]))
+        cos = abs(float(np.dot(c, cell_np[a]))) / (
+            np.linalg.norm(c) * np.linalg.norm(cell_np[a]))
         if cos > 1e-8:
             raise ValueError(
                 f"ESM open_axis={open_axis} must be orthogonal to the periodic "
@@ -360,13 +364,16 @@ def esm_energy(rho_elec: torch.Tensor, positions: torch.Tensor,
 def esm_energy_strained(rho_elec: torch.Tensor, positions: torch.Tensor,
                         charges: torch.Tensor, cell: torch.Tensor,
                         shape: tuple[int, int, int], beta: float,
-                        open_axis: int = 2) -> torch.Tensor:
+                        open_axis: int = 2, mode: str = "vacuum",
+                        bias: float = 0.0) -> torch.Tensor:
     """ΔE [eV] from a differentiable (strained) ``cell`` — the stress entry point.
 
     Builds the strained full-box G-vectors and volume from ``cell`` (a torch
     tensor of the strained lattice rows, requires_grad through the strain), so
     autograd of the returned energy w.r.t. the strain gives the ESM stress
-    contribution. ``beta`` is a fixed physical width (strain-independent).
+    contribution. Supports ``mode="vacuum"|"capacitor"`` (+ ``bias``); the
+    capacitor sub-terms flow through the same differentiable cell. ``beta`` is a
+    fixed physical width (strain-independent).
     """
     b = 2.0 * math.pi * torch.linalg.inv(cell).transpose(-2, -1)  # rows b_i
     dev = cell.device
@@ -383,9 +390,23 @@ def esm_energy_strained(rho_elec: torch.Tensor, positions: torch.Tensor,
 
     rho_ion = _gaussian_ion(positions, charges, g_cart, g2, volume, beta)
     rho_tot = rho_elec - rho_ion
-    dv = esm_delta_potential(rho_tot, cell, open_axis)
     dvol = volume / rho_elec.numel()
-    return 0.5 * (rho_tot * dv).sum() * dvol
+    if mode == "vacuum":
+        dv = esm_delta_potential(rho_tot, cell, open_axis)
+        return 0.5 * (rho_tot * dv).sum() * dvol
+    if mode != "capacitor":
+        raise ValueError(f"esm mode must be 'vacuum' or 'capacitor', got {mode!r}")
+    dv_grounded = (esm_delta_potential(rho_tot, cell, open_axis)
+                   + hartree_potential_capacitor(rho_tot, cell, open_axis, bias=0.0)
+                   - hartree_potential_esm(rho_tot, cell, open_axis))
+    de = 0.5 * (rho_tot * dv_grounded).sum() * dvol
+    if bias != 0.0:
+        nz = shape[open_axis]
+        ramp = bias * torch.arange(nz, device=dev, dtype=rho_elec.dtype) / (nz - 1)
+        shp = [1, 1, 1]
+        shp[open_axis] = nz
+        de = de + (rho_tot * ramp.reshape(shp)).sum() * dvol
+    return de
 
 
 def esm_potential(rho_elec: torch.Tensor, positions: torch.Tensor,

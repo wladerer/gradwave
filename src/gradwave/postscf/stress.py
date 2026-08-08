@@ -345,9 +345,14 @@ def _energy_strained(
     # strain, so the ESM term contributes only to in-plane (surface-stress)
     # components; the z-row/col of σ is left to the periodic terms and is not
     # physically meaningful for an open slab.
-    if getattr(res, "boundary", "periodic") == "open_z":
-        from gradwave.core.energies.esm import _default_beta, esm_energy_strained
+    from gradwave.core.energies.esm import (
+        _default_beta,
+        esm_energy_strained,
+        esm_mode_of,
+    )
 
+    _esm_mode = esm_mode_of(getattr(res, "boundary", "periodic"))
+    if _esm_mode is not None:
         open_axis = 2
         m = torch.ones((3, 3), dtype=eps.dtype, device=eps.device)
         m[open_axis, :] = 0.0
@@ -356,7 +361,8 @@ def _energy_strained(
             grid, system.positions, eps * m)
         e_tot = e_tot + esm_energy_strained(
             rho, pos_e_ip, system.charges, a_e_ip, shape,
-            _default_beta(grid, open_axis), open_axis)
+            _default_beta(grid, open_axis), open_axis,
+            mode=_esm_mode, bias=getattr(res, "esm_bias", 0.0))
 
     return e_tot
 

@@ -116,10 +116,12 @@ def test_total_energy_box_independent():
     assert abs(ep2 - ep1) > 5 * abs(eo2 - eo1)  # periodic drifts, open does not
 
 
-def test_strained_energy_matches_and_stress_matches_fd():
+@pytest.mark.parametrize(("mode", "bias"), [("vacuum", 0.0), ("capacitor", 0.0),
+                                            ("capacitor", 2.0)])
+def test_strained_energy_matches_and_stress_matches_fd(mode, bias):
     """esm_energy_strained equals esm_energy at zero strain, and its autograd
     w.r.t. an in-plane strain (the ESM stress contribution) matches finite
-    difference — the term postscf.stress adds for open_z."""
+    difference — the term postscf.stress adds, for both vacuum and capacitor."""
     grid = _grid(20.0, 100)
     pos = torch.tensor([[3.0, 3.0, 8.0], [3.0, 3.0, 12.0]], dtype=torch.float64)
     z = torch.tensor([4.0, 6.0], dtype=torch.float64)
@@ -127,8 +129,10 @@ def test_strained_energy_matches_and_stress_matches_fd():
     cell0 = torch.tensor(np.asarray(grid.cell), dtype=torch.float64)
     beta = 0.8
 
-    assert float(esm_energy_strained(rho, pos, z, cell0, grid.shape, beta)) == \
-        pytest.approx(float(esm_energy(rho, pos, z, grid, beta=beta)), abs=1e-9)
+    assert float(esm_energy_strained(rho, pos, z, cell0, grid.shape, beta,
+                                     mode=mode, bias=bias)) == \
+        pytest.approx(float(esm_energy(rho, pos, z, grid, beta=beta,
+                                       mode=mode, bias=bias)), abs=1e-9)
 
     eye = torch.eye(3, dtype=torch.float64)
     mask = torch.ones(3, 3, dtype=torch.float64)
@@ -137,7 +141,8 @@ def test_strained_energy_matches_and_stress_matches_fd():
 
     def energy(eps):
         f = eye + eps * mask
-        return esm_energy_strained(rho, pos @ f.T, z, cell0 @ f.T, grid.shape, beta)
+        return esm_energy_strained(rho, pos @ f.T, z, cell0 @ f.T, grid.shape,
+                                   beta, mode=mode, bias=bias)
 
     eps = torch.zeros(3, 3, dtype=torch.float64, requires_grad=True)
     (g,) = torch.autograd.grad(energy(eps), eps)
