@@ -522,12 +522,15 @@ def _assemble_iter_energies(
         e_onec=e_onec,
         e_ewald=e_ewald,
     )
-    if ops.boundary == "open_z":
+    from gradwave.core.energies.esm import esm_energy, esm_mode_of
+
+    _esm_mode = esm_mode_of(ops.boundary)
+    if _esm_mode is not None:
         # ΔE = open-minus-periodic electrostatic correction on the FULL (smooth +
         # aug) total density — same term the NC loop adds; detached breakdown.
-        from gradwave.core.energies.esm import esm_energy
-
-        energies.esm = esm_energy(rho_tot_out, system.positions, system.charges, grid)
+        # (USPP threads no bias yet, so the capacitor mode here is grounded.)
+        energies.esm = esm_energy(rho_tot_out, system.positions, system.charges,
+                                  grid, mode=_esm_mode)
     return energies
 
 

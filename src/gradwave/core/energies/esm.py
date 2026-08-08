@@ -307,6 +307,12 @@ def esm_delta_potential(rho_r: torch.Tensor, cell: "np.ndarray | torch.Tensor",
     return torch.movedim(dv_r, -1, open_axis)
 
 
+def esm_mode_of(boundary: str) -> str | None:
+    """ESM electrostatics mode for an SCF ``boundary`` string, or None for a
+    periodic (non-ESM) run. ``open_z`` → vacuum, ``open_z_metal`` → capacitor."""
+    return {"open_z": "vacuum", "open_z_metal": "capacitor"}.get(boundary)
+
+
 def _bias_ramp(grid, open_axis: int, bias: float, ref: torch.Tensor) -> torch.Tensor:
     """Applied capacitor bias as a uniform-in-plane ramp v(z)=bias·z/L on the box
     (v=0 at the near plane, v=bias at the far plane)."""

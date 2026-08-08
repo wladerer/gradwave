@@ -314,6 +314,12 @@ def run_scf(
             raise InputError(
                 "scf.eigensolver='chebyshev' is norm-conserving only; the "
                 "USPP/PAW generalized S-metric problem is not supported yet")
+        # USPP/PAW supports the vacuum open-boundary mode; the metal/capacitor
+        # mode (open_z_metal) is norm-conserving only for now.
+        if inp.scf.boundary == "open_z_metal":
+            raise InputError(
+                "scf.boundary='open_z_metal' (ESM capacitor) is norm-conserving "
+                "only for now; the USPP/PAW capacitor path is not implemented yet")
         # history=None keeps the per-scheme default (johnson 12, else 8);
         # mixing_scheme rides in `common` (shared with the NC branch below)
         return scf_uspp(cast("USPPSystem", system), xc,
@@ -328,6 +334,7 @@ def run_scf(
                mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
                dist_ctx=dist_ctx,
                boundary=inp.scf.boundary,
+               esm_bias=inp.scf.esm_bias,
                **common)
 
 

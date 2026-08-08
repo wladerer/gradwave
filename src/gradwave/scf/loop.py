@@ -25,7 +25,7 @@ import torch
 from gradwave.constants import RY_EV
 from gradwave.core.batch import BatchedK
 from gradwave.core.density import sigma_from_rho
-from gradwave.core.energies.esm import esm_energy, esm_potential
+from gradwave.core.energies.esm import esm_energy, esm_mode_of, esm_potential
 from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.hartree import hartree_potential_r
 from gradwave.core.energies.local_pp import local_potential_g
@@ -449,7 +449,8 @@ class SCFResult:
     smearing: str = "none"  # smearing scheme name; the metallic χ₀ response needs
     width: float = 0.1  # it plus the width σ [eV] to form d(occ)/dε at the Fermi level
     boundary: str = "periodic"  # electrostatic BC the SCF ran with (periodic |
-    # open_z); forces/stress read it to add the ESM contribution (core/energies/esm)
+    # open_z | open_z_metal); forces/stress read it to add the ESM contribution
+    esm_bias: float = 0.0  # applied capacitor bias [V] (open_z_metal); forces read it
 
 
 # A warm-start source for scf(): either a converged SCFResult, or the plainer
@@ -536,6 +537,7 @@ def effective_potentials(
     vloc_r: torch.Tensor,
     tau: torch.Tensor | list[torch.Tensor] | None = None,
     boundary: str = "periodic",
+    esm_bias: float = 0.0,
 ) -> list[torch.Tensor]:
     """Per-spin v_eff(r) from per-channel densities — THE assembly the SCF
     iterates with. A standalone function (not inlined in the loop) so the
@@ -554,8 +556,10 @@ def effective_potentials(
     v_h_r = hartree_potential_r(rho_tot, grid.g2)
     # Open-boundary (ESM): add the open-minus-periodic electrostatic potential
     # δΔE/δρ. Spin-independent (acts on the total charge); zero when periodic.
-    if boundary == "open_z":
-        v_h_r = v_h_r + esm_potential(rho_tot, system.positions, system.charges, grid)
+    esm_mode = esm_mode_of(boundary)
+    if esm_mode is not None:
+        v_h_r = v_h_r + esm_potential(rho_tot, system.positions, system.charges,
+                                      grid, mode=esm_mode, bias=esm_bias)
     core = system.rho_core
     if nspin == 1:
         # nspin=1 is always dispatched with a collinear XCFunctional (the
@@ -1021,6 +1025,7 @@ def _assemble_scf_energies(
     e_fock: torch.Tensor,
     projs_b: torch.Tensor,
     boundary: str = "periodic",
+    esm_bias: float = 0.0,
 ) -> tuple[EnergyBreakdown, list[list[torch.Tensor]]]:
     """Total-energy breakdown at (current orbitals, mixed-out density), plus the
     per-k trimmed coeff views that flow to SCFResult. Returns (energies,
@@ -1089,11 +1094,13 @@ def _assemble_scf_energies(
             e_ewald=e_ewald,
         )
         energies.fock = e_fock
-    if boundary == "open_z":
+    esm_mode = esm_mode_of(boundary)
+    if esm_mode is not None:
         # ΔE = open-minus-periodic electrostatic correction (both spins act on
         # the total charge). Detached like the rest of this no_grad breakdown;
         # the differentiable copy for forces is rebuilt in postscf/forces.py.
-        energies.esm = esm_energy(rho_tot_out, system.positions, system.charges, grid)
+        energies.esm = esm_energy(rho_tot_out, system.positions, system.charges,
+                                  grid, mode=esm_mode, bias=esm_bias)
     return energies, coeffs_list_s
 
 
@@ -1278,10 +1285,12 @@ def scf(
     # reachable rhotol while the (Hartree-dominated) energy error settles far below it.
     # False (default) leaves the density gate bit-for-bit unchanged and costs nothing.
     entol: float = 1e-6,  # eV, the energy-error threshold for energy_metric (see docs)
-    boundary: str = "periodic",  # periodic | open_z — open-boundary (ESM) electrostatics
-    # in the z direction (slab geometry; c ⊥ a,b). Adds the differentiable
-    # open-minus-periodic Hartree correction to v_eff and the total energy
+    boundary: str = "periodic",  # periodic | open_z | open_z_metal — open-boundary
+    # (ESM) electrostatics in the z direction (slab geometry; c ⊥ a,b). open_z =
+    # vacuum both sides; open_z_metal = metal Dirichlet planes (a capacitor). Adds
+    # the differentiable ESM correction to v_eff and the total energy
     # (core/energies/esm.py); no dipole correction, box-independent surfaces.
+    esm_bias: float = 0.0,  # applied capacitor bias [V] for boundary="open_z_metal"
 ) -> SCFResult:
     # `fock`, when given, adds an orbital-dependent operator to the Hamiltonian
     # each SCF step (a hybrid functional's Fock exchange). It must expose
@@ -1495,7 +1504,8 @@ def scf(
         if tf_precond is not None:
             tf_precond.set_density(rho_tot)
         tau_arg = None if tau_list is None else (tau_list[0] if nspin == 1 else tau_list)
-        veff_s = effective_potentials(system, xc, rho_s, vloc_r, tau=tau_arg, boundary=boundary)
+        veff_s = effective_potentials(system, xc, rho_s, vloc_r, tau=tau_arg,
+                                      boundary=boundary, esm_bias=esm_bias)
 
         # meta-GGA generalized-KS operator: v_τσ = ∂e_xc/∂τ_σ from the current
         # (ρ, τ), applied additively as −½∇·(v_τσ∇ψ_σ) per spin in the H-apply.
@@ -1654,6 +1664,7 @@ def scf(
             e_fock,
             projs_b,
             boundary,
+            esm_bias,
         )
         if dist_ctx is not None:
             from gradwave.distributed import all_reduce_
@@ -1838,6 +1849,7 @@ def scf(
             smearing=smearing,
             width=width,
             boundary=boundary,
+            esm_bias=esm_bias,
         )
     m_density = rho_s[0] - rho_s[1]
     return SCFResult(
@@ -1863,6 +1875,7 @@ def scf(
         smearing=smearing,
         width=width,
         boundary=boundary,
+        esm_bias=esm_bias,
     )
 
 
