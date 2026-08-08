@@ -44,6 +44,7 @@ from gradwave.scf.common import (
     SCHEMES,
     adaptive_diago_tol,
     assemble_pw_energies,
+    constant_mu_occupations,
     convergence_gate,
     hubbard_u_ramp_scale,
     mix_hubbard_occ,
@@ -451,6 +452,8 @@ class SCFResult:
     boundary: str = "periodic"  # electrostatic BC the SCF ran with (periodic |
     # open_z | open_z_metal); forces/stress read it to add the ESM contribution
     esm_bias: float = 0.0  # applied capacitor bias [V] (open_z_metal); forces read it
+    n_electrons: float = 0.0  # electron count (floats under constant-µ / target_mu);
+    # the grand potential is Ω = free_energy − fermi·n_electrons
 
 
 # A warm-start source for scf(): either a converged SCFResult, or the plainer
@@ -1291,6 +1294,10 @@ def scf(
     # the differentiable ESM correction to v_eff and the total energy
     # (core/energies/esm.py); no dipole correction, box-independent surfaces.
     esm_bias: float = 0.0,  # applied capacitor bias [V] for boundary="open_z_metal"
+    target_mu: float | None = None,  # constant-potential (grand-canonical) SCF: hold
+    # the Fermi level µ [eV] fixed and let the electron count N float. Requires a
+    # smearing scheme and boundary="open_z_metal" (the plates source/sink the charge).
+    # None (default) runs the ordinary fixed-N SCF.
 ) -> SCFResult:
     # `fock`, when given, adds an orbital-dependent operator to the Hamiltonian
     # each SCF step (a hybrid functional's Fock exchange). It must expose
@@ -1306,6 +1313,17 @@ def scf(
     _validate_scf_args(
         system, nspin, eigensolver, smearing, mixing_scheme, precond, tot_magnetization
     )
+    if target_mu is not None:
+        # Constant-potential (grand-canonical) SCF: the electron count floats to
+        # hold µ, so the cell is charged — the metal plates must source/sink the
+        # charge (a vacuum ESM or a periodic cell cannot), and the Fermi edge must
+        # be broadened by a smearing.
+        if boundary != "open_z_metal":
+            raise ValueError(
+                "target_mu (constant-µ) requires boundary='open_z_metal' — the "
+                "capacitor plates carry the floating counter-charge")
+        if smearing == "none":
+            raise ValueError("target_mu (constant-µ) requires a smearing scheme")
     if hubbard:
         validate_hubbard_conv(hub_occ_mix, hub_u_ramp_iters)
     if dist_ctx is not None:
@@ -1453,6 +1471,7 @@ def scf(
     eigs_global_s = eigs_s
     occ_global_s = occ_s
     mu, entropy_term = 0.0, torch.zeros((), dtype=RDTYPE, device=device)
+    n_float = float(system.n_electrons)  # floats each iteration under target_mu
     veff_s = [torch.zeros(grid.shape, dtype=RDTYPE, device=device) for _ in range(nspin)]
 
     # hybrid Fock exchange: the operator lags one iteration (built from the
@@ -1574,17 +1593,20 @@ def scf(
             # before the Fermi search, then keep only this rank's slice of the
             # resulting occupations for the local density/energy calls below.
             eigs_global_s = [gather_cat(eigs_s[sp], dist_ctx) for sp in range(nspin)]
-            occ_global_s, mu, entropy_term = shared_fermi_occupations(
-                eigs_global_s,
-                kweights_global,
-                smearing,
-                width,
-                system.n_electrons,
-                nspin,
-                device,
-                tot_magnetization=tot_magnetization,
-            )
+            if target_mu is not None:
+                occ_global_s, mu, entropy_term, n_float = constant_mu_occupations(
+                    eigs_global_s, kweights_global, smearing, width, target_mu,
+                    nspin, device)
+            else:
+                occ_global_s, mu, entropy_term = shared_fermi_occupations(
+                    eigs_global_s, kweights_global, smearing, width,
+                    system.n_electrons, nspin, device,
+                    tot_magnetization=tot_magnetization)
+                n_float = float(system.n_electrons)
             occ_s = [occ_global_s[sp][dist_ctx.k_start : dist_ctx.k_end] for sp in range(nspin)]
+        elif target_mu is not None:
+            occ_s, mu, entropy_term, n_float = constant_mu_occupations(
+                eigs_s, system.kweights, smearing, width, target_mu, nspin, device)
         else:
             occ_s, mu, entropy_term = shared_fermi_occupations(
                 eigs_s,
@@ -1596,6 +1618,7 @@ def scf(
                 device,
                 tot_magnetization=tot_magnetization,
             )
+            n_float = float(system.n_electrons)
 
         # hybrid Fock: rebuild the exchange operator from the fresh orbitals
         # (used next iteration) and its energy (used in this iteration's total).
@@ -1850,6 +1873,7 @@ def scf(
             width=width,
             boundary=boundary,
             esm_bias=esm_bias,
+            n_electrons=n_float,
         )
     m_density = rho_s[0] - rho_s[1]
     return SCFResult(
@@ -1876,6 +1900,7 @@ def scf(
         width=width,
         boundary=boundary,
         esm_bias=esm_bias,
+        n_electrons=n_float,
     )
 
 
