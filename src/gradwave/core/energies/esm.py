@@ -174,7 +174,7 @@ def gaussian_ion_density(positions: torch.Tensor, charges: torch.Tensor, grid,
     to Σ_a Z_a = N_e, so ρ_elec − ρ_ion is net neutral. β cancels in ΔE (it is the
     short-range width) — keep it a few grid spacings: representable, narrow.
     """
-    s = structure_factors(positions, grid.g_cart)  # (na, n1,n2,n3), e^{−iG·R}
+    s = structure_factors(positions.to(grid.g_cart.dtype), grid.g_cart)  # e^{−iG·R}
     form = torch.exp(-0.5 * grid.g2 * beta * beta).to(s.dtype)
     z = charges.to(s.dtype)
     rho_ion_g = torch.einsum("a,axyz,xyz->xyz", z, s, form) / grid.volume
