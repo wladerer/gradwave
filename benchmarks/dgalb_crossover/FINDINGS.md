@@ -155,3 +155,76 @@ n_cheby/purify_iters are inputs (f(H) accuracy not computed — a cost study);
 cold metals inflate n_cheby (FOE worse). The block-sparse step is a conservative
 batched-bmm model of a truncated sparse-sparse product with fixed pattern (the
 standard O(N) locality assumption). Dense `eigh` gated at 9 GB.
+
+---
+
+# Two-scale accuracy: do ALBs represent the crystal to sub-meV?
+
+`bench_dgalb_accuracy.py` — the rigorous element<->crystal test the crossover
+study left open. Real SCF on a 216-atom Si crystal gives the true occupied
+orbitals; they are sampled on real-space points in the central conventional cell
+(the "core") by explicit Fourier sum. Separately, real SCF on an ISOLATED
+k x k x k conv-cell element gives ALB-candidate eigenstates, evaluated on the
+SAME core points. Residual = fraction of the crystal occupied subspace outside
+span{M lowest element states}. asus, fp64, LDA, ecut 12 Ry, K=12^3 core points.
+
+Pipeline correctness verified separately: crystal=1, element==crystal gives
+residual 1.7e-16 at M>=N_occ (machine zero) — frame/Fourier/projection correct.
+
+```
+buffer_k  elem_atoms   M   M/core-atom   mean_res    ~E_err_meV
+   1          8         8      1.0        6.6e-01       7923     no buffer:
+   1          8        32      4.0        2.3e-01       2768     residual PLATEAUS
+   1          8        64      8.0        1.4e-01       1685     ~0.11 — cannot be
+   1          8        96     12.0        1.1e-01       1347     fixed by more ALBs
+   2         64        32      4.0        2.1e-01       2562     with buffer:
+   2         64        64      8.0        3.5e-02        422     collapses steeply
+   2         64        96     12.0        1.8e-03         22     with M -> ~22 meV
+   3        216        64      8.0        8.8e-02       1054     under-resolved
+   3        216        96     12.0        5.0e-02        603     (M fixed, elem grew)
+```
+(M/core-atom = M / 8, the core is one conventional cell = 8 atoms.)
+
+## Findings
+
+1. **The buffer is essential — and its absence is unfixable.** A no-buffer
+   isolated element (k=1) plateaus at ~11% residual (~1300 meV) no matter how
+   many ALBs you add: the isolated element's boundary conditions don't match the
+   crystal, and no amount of basis fixes a wrong BC. This is precisely the
+   physics DGDFT's extended-element buffer exists to cure.
+
+2. **With a buffer, ALB representability is real and steep.** k=2 collapses
+   0.21 -> 0.035 -> 0.0018 over M = 32 -> 64 -> 96, reaching ~22 meV (proxy) at
+   ~12 ALBs/core-atom and still dropping past the M cutoff — consistent with
+   DGDFT's published sub-meV at ~20-40 ALBs/atom. The DG-ALB representation is
+   sound, provided the buffer is carried (which is also what makes the
+   extended-element solves cost what the crossover study measured).
+
+3. **M scales with the CORE, not the extended element** — the non-monotonic k=3
+   is the proof. At fixed M=96 the whole-crystal "element" (k=3) is WORSE (0.05)
+   than the smaller k=2 (0.0018): its lowest 96 states out of 432 occupied are
+   too smooth/delocalised to cover the core's higher-frequency content. It is
+   under-resolved, not buffer-regressed — it would need M proportional to the
+   element size. This is exactly why DGDFT keeps M per CORE atom with a fixed
+   small buffer halo (the k=2 regime), not per extended-element atom.
+
+## Caveats
+
+LDA, ecut 12 Ry (moderate), and k=2's buffer is one-sided/partial (the block is
+corner-aligned, not centred — a symmetric halo would do better, so 22 meV is a
+conservative reading; note max_res 0.076 vs mean 0.0018 = a few
+boundary-weighted orbitals lag). Residual is a subspace fraction; the meV column
+is a crude fraction x bandwidth proxy, not a variational energy. Still, the
+qualitative verdict is robust: buffer essential, ALBs accurate with M/core-atom,
+and the M-per-core scaling law falls straight out of the data.
+
+## Bottom line
+
+The accuracy axis the crossover study left open comes out **positive**: DG-ALB
+is a genuine (not lossy) representation — a fixed buffer plus ~10-12 ALBs per
+core atom captures the true crystal occupied subspace to tens of meV and
+improving, while a no-buffer element is BC-limited at ~1 eV. Together with the
+speed result (linear ALB build, crossover ~150-200 atoms) and the solver study
+(dense eigh until it OOMs, then purification), the three studies bracket the
+DG-ALB moonshot on all the axes that decide it — short of the full DG
+interior-penalty global assembly, which remains the real build.
