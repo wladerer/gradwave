@@ -15,7 +15,10 @@ import pytest
 import torch
 
 from gradwave.constants import E2
-from gradwave.core.energies.esm import hartree_potential_esm
+from gradwave.core.energies.esm import (
+    hartree_potential_capacitor,
+    hartree_potential_esm,
+)
 
 FOURPI_E2 = 4.0 * math.pi * E2
 
@@ -147,6 +150,39 @@ def test_differentiable_in_density():
     (g,) = torch.autograd.grad(v.pow(2).sum(), rho)
     assert torch.isfinite(g).all()
     assert float(g.abs().max()) > 0
+
+
+def test_capacitor_satisfies_dirichlet_poisson_and_bias():
+    """The metal/metal (capacitor) potential: v=0 at the grounded near plane and
+    v=bias at the far plane (for every in-plane channel), it solves Poisson in the
+    interior, and an empty box under bias gives the uniform field bias/L."""
+    cell = np.diag([6.0, 6.0, 22.0])
+    na, nb, nz = 30, 30, 110
+    dz = 22.0 / nz
+    # in-plane-asymmetric neutral density in the middle (between the plates)
+    rho = (_neutral_dipole_density(cell, (na, nb, nz))
+           .roll(shifts=(5, -7), dims=(0, 1)))  # break in-plane symmetry
+    bias = 1.5
+    v = hartree_potential_capacitor(rho, cell, bias=bias)
+
+    assert float(v[:, :, 0].abs().max()) < 1e-9  # grounded near plane
+    assert float((v[:, :, -1] - bias).abs().max()) < 1e-9  # biased far plane
+
+    hx = 6.0 / na
+    lap = (torch.roll(v, 1, 0) + torch.roll(v, -1, 0) - 2 * v) / hx**2
+    lap += (torch.roll(v, 1, 1) + torch.roll(v, -1, 1) - 2 * v) / hx**2
+    lap[:, :, 1:-1] += (v[:, :, 2:] + v[:, :, :-2] - 2 * v[:, :, 1:-1]) / dz**2
+    target = -FOURPI_E2 * rho
+    m = rho.abs() > 0.02 * rho.abs().max()
+    m[:, :, :6] = False
+    m[:, :, -6:] = False
+    assert float((lap - target)[m].abs().max() / target[m].abs().max()) < 2e-2
+
+    # empty box: pure uniform bias field V/L
+    vb = hartree_potential_capacitor(torch.zeros_like(rho), cell, bias=3.0)
+    line = vb[0, 0]
+    lm = (nz - 1) * dz
+    assert float((line.diff() - 3.0 * dz / lm).abs().max()) < 1e-9
 
 
 def test_rejects_non_orthogonal_open_axis():

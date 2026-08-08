@@ -149,6 +149,43 @@ def test_strained_energy_matches_and_stress_matches_fd():
         assert float(g[a, b]) == pytest.approx(fd, abs=1e-5)
 
 
+@pytest.mark.parametrize("bias", [0.0, 2.0])
+def test_capacitor_potential_and_force_match_fd(bias):
+    """In capacitor mode (metal planes, optional bias), esm_potential = δΔE/δρ and
+    the ESM force = δΔE/δR by finite difference — the grounded (quadratic) and
+    applied-bias (linear) parts are both handled consistently."""
+    grid = _grid(20.0, 100)
+    pos = torch.tensor([[3.0, 3.0, 8.0], [3.0, 3.0, 12.0]], dtype=torch.float64)
+    z = torch.tensor([4.0, 6.0], dtype=torch.float64)
+    rho = _elec(grid, [[3, 3, 8.6], [3, 3, 11.4]], [4.0, 6.0])
+    dvol = grid.volume / rho.numel()
+
+    dv = esm_potential(rho, pos, z, grid, mode="capacitor", bias=bias)
+    rng = np.random.default_rng(5)
+    h = 1e-6
+    worst = 0.0
+    for _ in range(6):
+        ix = tuple(int(rng.integers(n)) for n in rho.shape)
+        rp = rho.clone()
+        rp[ix] += h
+        rm = rho.clone()
+        rm[ix] -= h
+        ep = float(esm_energy(rp, pos, z, grid, mode="capacitor", bias=bias))
+        em = float(esm_energy(rm, pos, z, grid, mode="capacitor", bias=bias))
+        worst = max(worst, abs((ep - em) / (2 * h) - float(dv[ix]) * dvol))
+    assert worst < 1e-7, worst
+
+    p = pos.clone().requires_grad_(True)
+    (fg,) = torch.autograd.grad(esm_energy(rho, p, z, grid, mode="capacitor", bias=bias), p)
+    pp = pos.clone()
+    pp[1, 2] += 1e-5
+    pm = pos.clone()
+    pm[1, 2] -= 1e-5
+    fd = (float(esm_energy(rho, pp, z, grid, mode="capacitor", bias=bias))
+          - float(esm_energy(rho, pm, z, grid, mode="capacitor", bias=bias))) / 2e-5
+    assert float(fg[1, 2]) == pytest.approx(fd, abs=1e-5)
+
+
 def test_input_rejects_bad_boundary():
     """inputs validation guards the boundary knob."""
     from gradwave.inputs import InputError, SCFParams

@@ -149,6 +149,59 @@ def hartree_potential_esm(rho_r: torch.Tensor, cell: np.ndarray,
     return torch.movedim(v_r, -1, open_axis)
 
 
+def hartree_potential_capacitor(rho_r: torch.Tensor, cell: "np.ndarray | torch.Tensor",
+                                open_axis: int = 2, *, bias: float = 0.0) -> torch.Tensor:
+    """Hartree v_H(r) [eV] with METAL (Dirichlet) planes at both z-box edges — the
+    ESM capacitor / metal-metal mode.
+
+    The metal planes are grounded equipotentials at the first and last grid slabs
+    (v=0 there for every in-plane channel), with an optional applied ``bias`` [V]
+    lifting the far plane (a uniform vacuum field bias/L — field-effect / biased
+    electrochemistry). Built from the validated open (vacuum) potential plus the
+    homogeneous image solution that cancels its boundary values:
+
+        v_cap(G∥, z) = v_open(G∥, z) + v_image(G∥, z),
+        v_image(G∥, z) = −[v_open(G∥,0)·sinh(g(L−z)) + v_open(G∥,L)·sinh(g z)]/sinh(gL)
+
+    (the linear analogue for G∥=0), so v_cap satisfies the same Poisson equation
+    but with v_cap(0)=v_cap(L)=0. Differentiable in rho_r.
+    """
+    v_open = hartree_potential_esm(rho_r, cell, open_axis)
+    v_m = torch.movedim(v_open, open_axis, -1)
+    n_a, n_b, nz = v_m.shape
+    dev, rdt = rho_r.device, rho_r.dtype
+    gpar, dz, _lz = _esm_geom(cell, tuple(rho_r.shape), open_axis, dev, rdt)
+    zc = torch.arange(nz, device=dev, dtype=rdt) * dz
+    lm = zc[-1]  # plane separation: first grid point to last
+
+    v_hat = torch.fft.fft2(v_m, dim=(0, 1))
+    v0 = v_hat[:, :, 0].unsqueeze(-1)   # (n_a,n_b,1) boundary values per G∥
+    vl = v_hat[:, :, -1].unsqueeze(-1)
+    g = gpar.unsqueeze(-1)              # (n_a,n_b,1)
+    glm = (gpar * lm).unsqueeze(-1)
+    gz = g * zc                         # (n_a,n_b,nz)
+
+    # stable sinh(g(L−z))/sinh(gL) and sinh(gz)/sinh(gL): divide by e^{gL} so all
+    # exponents are ≤ 0 (no overflow for large g·L).
+    denom = 1.0 - torch.exp(-2.0 * glm)
+    ra = (torch.exp(-gz) - torch.exp(-(2.0 * glm - gz)))          # · /denom = sinh ratio a
+    rb = (torch.exp(-(glm - gz)) - torch.exp(-(glm + gz)))        # · /denom = sinh ratio b
+    # v0/vL are complex Fourier coefficients; keep the full complex value (the real
+    # ratios ra/rb broadcast against them) — do NOT cast to real.
+    v_img = -(v0 * ra + vl * rb) / denom.clamp(min=1e-30)
+
+    # G∥=0 (g=0) mode: the linear image −[v0·(L−z) + vL·z]/L
+    lin = -(v_hat[0, 0, 0] * (lm - zc) + v_hat[0, 0, -1] * zc) / lm
+    mask = torch.zeros((n_a, n_b), device=dev, dtype=v_img.dtype)
+    mask[0, 0] = 1.0
+    v_img = v_img * (1.0 - mask).unsqueeze(-1) + mask.unsqueeze(-1) * lin
+
+    v_cap_m = torch.fft.ifft2(v_hat + v_img, dim=(0, 1)).real
+    if bias != 0.0:  # applied ramp: v(0)=0, v(L)=bias (uniform in-plane)
+        v_cap_m = v_cap_m + bias * (zc / lm)
+    return torch.movedim(v_cap_m, -1, open_axis)
+
+
 # --- SCF wiring: the ESM electrostatic correction (Gaussian counter-charge) ---
 #
 # The physically-correct ESM restructures the whole electrostatics: the electron
@@ -254,23 +307,48 @@ def esm_delta_potential(rho_r: torch.Tensor, cell: "np.ndarray | torch.Tensor",
     return torch.movedim(dv_r, -1, open_axis)
 
 
+def _bias_ramp(grid, open_axis: int, bias: float, ref: torch.Tensor) -> torch.Tensor:
+    """Applied capacitor bias as a uniform-in-plane ramp v(z)=bias·z/L on the box
+    (v=0 at the near plane, v=bias at the far plane)."""
+    nz = grid.shape[open_axis]
+    ramp = bias * torch.arange(nz, device=ref.device, dtype=ref.dtype) / (nz - 1)
+    shp = [1, 1, 1]
+    shp[open_axis] = nz
+    return ramp.reshape(shp).expand(grid.shape)
+
+
 def esm_energy(rho_elec: torch.Tensor, positions: torch.Tensor,
                charges: torch.Tensor, grid, *, beta: float | None = None,
-               open_axis: int = 2) -> torch.Tensor:
-    """ΔE [eV] — the open-minus-periodic electrostatic energy correction.
+               open_axis: int = 2, mode: str = "vacuum",
+               bias: float = 0.0) -> torch.Tensor:
+    """ΔE [eV] — the ESM electrostatic energy correction to add to the periodic KS
+    total energy for an open-boundary calculation.
 
-    Add to the periodic KS total energy for an open-boundary (ESM) calculation.
-    A pure function, differentiable in ``rho_elec`` (→ the SCF potential) and in
-    ``positions`` (→ the ESM contribution to the force). ``beta`` (the Gaussian
-    ion width) defaults to ~2 grid spacings; the discretization-matched
-    difference makes ΔE independent of it in the point-ion limit.
+    ``mode``: ``vacuum`` (open both sides) or ``capacitor`` (metal Dirichlet planes
+    at both z-box edges, with an optional applied ``bias`` [V] — field-effect /
+    biased electrochemistry). A pure function, differentiable in ``rho_elec``
+    (→ the SCF potential) and in ``positions`` (→ the force). ``beta`` (the Gaussian
+    ion width) defaults to ~2 grid spacings; the matched difference makes the
+    charge-induced part independent of it in the point-ion limit.
     """
     if beta is None:
         beta = _default_beta(grid, open_axis)
     rho_tot = rho_elec - gaussian_ion_density(positions, charges, grid, beta)
-    dv = esm_delta_potential(rho_tot, grid.cell, open_axis)
     dvol = grid.volume / rho_elec.numel()
-    return 0.5 * (rho_tot * dv).sum() * dvol
+    if mode == "vacuum":
+        dv = esm_delta_potential(rho_tot, grid.cell, open_axis)
+        return 0.5 * (rho_tot * dv).sum() * dvol
+    if mode != "capacitor":
+        raise ValueError(f"esm mode must be 'vacuum' or 'capacitor', got {mode!r}")
+    # capacitor: grounded charge-induced correction (quadratic) + applied bias
+    # (linear). ΔV_grounded = ΔV_vacuum + image term = ΔV_vacuum + (v_cap − v_open).
+    dv_grounded = (esm_delta_potential(rho_tot, grid.cell, open_axis)
+                   + hartree_potential_capacitor(rho_tot, grid.cell, open_axis, bias=0.0)
+                   - hartree_potential_esm(rho_tot, grid.cell, open_axis))
+    de = 0.5 * (rho_tot * dv_grounded).sum() * dvol
+    if bias != 0.0:
+        de = de + (rho_tot * _bias_ramp(grid, open_axis, bias, rho_elec)).sum() * dvol
+    return de
 
 
 def esm_energy_strained(rho_elec: torch.Tensor, positions: torch.Tensor,
@@ -306,18 +384,21 @@ def esm_energy_strained(rho_elec: torch.Tensor, positions: torch.Tensor,
 
 def esm_potential(rho_elec: torch.Tensor, positions: torch.Tensor,
                   charges: torch.Tensor, grid, *, beta: float | None = None,
-                  open_axis: int = 2) -> torch.Tensor:
+                  open_axis: int = 2, mode: str = "vacuum",
+                  bias: float = 0.0) -> torch.Tensor:
     """ΔV(r) [eV] = δΔE/δρ_elec — the consistent open-boundary SCF potential.
 
     Add to the electron effective potential each SCF step. Computed as the exact
     autograd gradient of :func:`esm_energy` (rho detached; one cheap backward
-    through a few FFTs), so it is variationally consistent with the energy.
+    through a few FFTs), so it is variationally consistent with the energy — for
+    both ``mode="vacuum"`` and ``mode="capacitor"`` (incl. the applied ``bias``).
     """
     # Force grad on — the SCF applies this under torch.no_grad(); the outer SCF
     # gradient goes through the IFT adjoint, not this local backward.
     with torch.enable_grad():
         r = rho_elec.detach().requires_grad_(True)
-        de = esm_energy(r, positions.detach(), charges, grid, beta=beta, open_axis=open_axis)
+        de = esm_energy(r, positions.detach(), charges, grid, beta=beta,
+                        open_axis=open_axis, mode=mode, bias=bias)
         (grad,) = torch.autograd.grad(de, r)
     dvol = grid.volume / rho_elec.numel()
     return grad / dvol
