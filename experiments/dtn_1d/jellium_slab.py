@@ -138,7 +138,7 @@ def fill(eps: torch.Tensor, psi: torch.Tensor, n_areal: float, dz: float):
 # self-consistent jellium slab
 # ----------------------------------------------------------------------------- #
 def scf_slab(rs_bohr=4.0, slab_ang=10.0, vac_ang=8.0, nz=400, mode="open",
-             alpha=0.05, iters=1200, tol=1e-6, wf_ref=3.0):
+             alpha=0.05, iters=1200, tol=1e-6, wf_ref=3.0, rs2_bohr=None):
     """Self-consistent 1D jellium slab. rs_bohr sets the bulk density; slab_ang is
     the positive-background width; vac_ang is the vacuum on EACH side (the box knob
     we sweep). Returns (work_function_eV, E_F, n(z), z, V_eff, converged).
@@ -148,14 +148,22 @@ def scf_slab(rs_bohr=4.0, slab_ang=10.0, vac_ang=8.0, nz=400, mode="open",
     SCF. Recomputing kappa from the drifting V_vac/E_F each step moves the boundary
     condition and prevents convergence; freezing it is the eigensolver-compatible
     honest-approximation branch (the energy-EXACT branch needs a Green's function)."""
-    rs = rs_bohr * BOHR_ANG
-    n_bulk = 3.0 / (4.0 * math.pi * rs**3)          # 1/A^3
-    n_areal = n_bulk * slab_ang                      # electrons per area (neutrality)
     box = slab_ang + 2.0 * vac_ang
     dz = box / nz
     z = (torch.arange(nz) + 0.5) * dz
-    n_plus = torch.where((z >= vac_ang) & (z < vac_ang + slab_ang),
-                         torch.full_like(z, n_bulk), torch.zeros_like(z))
+    # jellium background — bilayer (two r_s across the midplane) when rs2_bohr is
+    # given: the charge transfer builds a net surface dipole, so the two faces have
+    # DIFFERENT work functions. A periodic box forces one common vacuum level and
+    # cannot represent that dipole (needs a dipole correction); open/DtN can.
+    rs1 = rs_bohr * BOHR_ANG
+    rs2 = (rs2_bohr if rs2_bohr is not None else rs_bohr) * BOHR_ANG
+    n1 = 3.0 / (4.0 * math.pi * rs1**3)
+    n2 = 3.0 / (4.0 * math.pi * rs2**3)
+    mid = vac_ang + 0.5 * slab_ang
+    n_plus = torch.zeros_like(z)
+    n_plus[(z >= vac_ang) & (z < mid)] = n1
+    n_plus[(z >= mid) & (z < vac_ang + slab_ang)] = n2
+    n_areal = float(n_plus.sum() * dz)               # electrons per area (neutrality)
 
     n = n_plus.clone()                               # start neutral
     kin_mode = {"periodic": "periodic", "open": "wall", "dtn": "dtn"}[mode]
@@ -215,5 +223,32 @@ def box_sweep(rs_bohr=4.0, slab_ang=10.0, vacs=(3, 4, 6, 10, 16)):
     print("           box (the spurious vacuum-level / image artifact). '*' = not converged.")
 
 
+def asym_sweep(rs1=3.0, rs2=5.0, slab_ang=12.0, vacs=(4, 8, 14, 20)):
+    """Asymmetric bilayer jellium: the two faces have DIFFERENT work functions (a
+    real surface dipole). A periodic box forces one common vacuum level and cannot
+    represent the dipole (needs a dipole correction); open/DtN can, and give two
+    box-independent Phi. This is the case where the boundary treatment matters most."""
+    print(f"\nAsymmetric bilayer jellium  (rs1={rs1}, rs2={rs2} bohr, slab={slab_ang} A)")
+    print("Phi_left / Phi_right [eV] vs vacuum-per-side. The two faces SHOULD differ,")
+    print("and open/dtn should be box-INDEPENDENT; periodic cannot hold the dipole.\n")
+    print(f"  {'vac[A]':>6} | " + " | ".join(f"{m:>18}" for m in ("periodic", "open", "dtn")))
+    print("  " + "-" * 70)
+    for vac in vacs:
+        cells = []
+        for m in ("periodic", "open", "dtn"):
+            _, ef, _n, _z, v_eff, conv = scf_slab(rs1, slab_ang, float(vac),
+                                                  mode=m, rs2_bohr=rs2)
+            k = max(4, v_eff.shape[0] // 40)
+            phi_l = float(v_eff[:k].mean()) - ef
+            phi_r = float(v_eff[-k:].mean()) - ef
+            cells.append(f"{phi_l:+5.2f}/{phi_r:+5.2f}{'' if conv else '*'}")
+        print(f"  {vac:>6} | " + " | ".join(f"{c:>18}" for c in cells))
+    print("\n  open/dtn: Phi_left != Phi_right, both ~box-independent (the true dipole).")
+    print("  periodic: forced single vacuum level -> the two faces collapse/drift, the")
+    print("            surface dipole is misrepresented (why periodic codes need a dipole")
+    print("            correction; open/DtN need none, by construction).")
+
+
 if __name__ == "__main__":
     box_sweep()
+    asym_sweep()
