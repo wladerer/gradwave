@@ -191,6 +191,34 @@ def test_capacitor_potential_and_force_match_fd(bias):
     assert float(fg[1, 2]) == pytest.approx(fd, abs=1e-5)
 
 
+def test_capacitor_charged_cell_potential_is_functional_derivative():
+    """In the capacitor mode a NET-CHARGED cell (N_e ≠ ΣZ, the constant-potential
+    regime — the plates carry the counter-charge) is well defined, and
+    esm_potential = δΔE/δρ still holds by finite difference, so a fixed-µ SCF on
+    it would be variational."""
+    grid = _grid(20.0, 100)
+    pos = torch.tensor([[3.0, 3.0, 8.0], [3.0, 3.0, 12.0]], dtype=torch.float64)
+    z = torch.tensor([4.0, 6.0], dtype=torch.float64)
+    rho = _elec(grid, [[3, 3, 8.6], [3, 3, 11.4]], [4.0, 6.0])
+    dvol = grid.volume / rho.numel()
+    rho = rho * (10.4 / (float(rho.sum()) * dvol))  # N_e=10.4 vs ΣZ=10 → +0.4 e
+
+    dv = esm_potential(rho, pos, z, grid, mode="capacitor")
+    rng = np.random.default_rng(7)
+    h = 1e-6
+    worst = 0.0
+    for _ in range(6):
+        ix = tuple(int(rng.integers(n)) for n in rho.shape)
+        rp = rho.clone()
+        rp[ix] += h
+        rm = rho.clone()
+        rm[ix] -= h
+        ep = float(esm_energy(rp, pos, z, grid, mode="capacitor"))
+        em = float(esm_energy(rm, pos, z, grid, mode="capacitor"))
+        worst = max(worst, abs((ep - em) / (2 * h) - float(dv[ix]) * dvol))
+    assert worst < 1e-7, worst
+
+
 def test_input_rejects_bad_boundary():
     """inputs validation guards the boundary knob."""
     from gradwave.inputs import InputError, SCFParams

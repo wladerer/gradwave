@@ -185,6 +185,32 @@ def test_capacitor_satisfies_dirichlet_poisson_and_bias():
     assert float((line.diff() - 3.0 * dz / lm).abs().max()) < 1e-9
 
 
+def test_capacitor_handles_net_charge():
+    """A NET-CHARGED sheet between grounded plates gives the analytic triangular
+    potential (charge NOT neutralized), and the plates carry induced charges that
+    sum to −σ — the constant-potential / charged-cell prerequisite for Level 2."""
+    cell = np.diag([4.0, 4.0, 20.0])
+    na, nb, nz = 8, 8, 200
+    dz = 20.0 / nz
+    z0i = 70
+    sigma = 0.02  # e/A^2 areal, net charge
+    rho = torch.zeros((na, nb, nz), dtype=torch.float64)
+    rho[:, :, z0i] = sigma / dz
+    v = hartree_potential_capacitor(rho, cell)
+    line = v[0, 0]
+    lm = (nz - 1) * dz
+    z0 = z0i * dz
+
+    assert float(line[0].abs()) < 1e-9 and float(line[-1].abs()) < 1e-9  # grounded
+    peak = FOURPI_E2 * sigma * z0 * (lm - z0) / lm
+    assert float(line[z0i]) == pytest.approx(peak, rel=1e-3)  # NOT neutralized
+
+    # induced plate charges (−dv/dz / 4πe², outward normals) sum to −σ
+    q0 = -float((line[1] - line[0]) / dz) / FOURPI_E2
+    ql = float((line[-1] - line[-2]) / dz) / FOURPI_E2
+    assert q0 + ql == pytest.approx(-sigma, abs=1e-4)
+
+
 def test_rejects_non_orthogonal_open_axis():
     """ESM requires the open axis ⊥ the periodic plane; a sheared cell is refused."""
     cell = np.array([[6.0, 0.0, 0.0], [0.0, 6.0, 0.0], [1.0, 0.0, 20.0]])

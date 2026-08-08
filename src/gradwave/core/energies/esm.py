@@ -194,13 +194,21 @@ def hartree_potential_capacitor(rho_r: torch.Tensor, cell: "np.ndarray | torch.T
     # ratios ra/rb broadcast against them) — do NOT cast to real.
     v_img = -(v0 * ra + vl * rb) / denom.clamp(min=1e-30)
 
-    # G∥=0 (g=0) mode: the linear image −[v0·(L−z) + vL·z]/L
-    lin = -(v_hat[0, 0, 0] * (lm - zc) + v_hat[0, 0, -1] * zc) / lm
+    # G∥=0 (g=0) mode: solve the Dirichlet BVP DIRECTLY with the parabolic Green's
+    # function G_D0(z,z')=z_<(L−z_>)/L. This handles a NET-CHARGED channel (the
+    # plates carry the induced counter-charge) rather than neutralizing it — the
+    # prerequisite for constant-potential / charged-cell electrochemistry. For a
+    # neutral channel it equals the open+linear-image result.
+    rho00 = torch.fft.fft2(torch.movedim(rho_r, open_axis, -1), dim=(0, 1))[0, 0, :]
+    zlo = torch.minimum(zc[:, None], zc[None, :])
+    zhi = torch.maximum(zc[:, None], zc[None, :])
+    gd0 = (zlo * (lm - zhi) / lm).to(rho00.dtype)
+    v00 = 4.0 * math.pi * E2 * dz * (gd0 @ rho00)
     mask = torch.zeros((n_a, n_b), device=dev, dtype=v_img.dtype)
     mask[0, 0] = 1.0
-    v_img = v_img * (1.0 - mask).unsqueeze(-1) + mask.unsqueeze(-1) * lin
+    combined = (v_hat + v_img) * (1.0 - mask).unsqueeze(-1) + mask.unsqueeze(-1) * v00
 
-    v_cap_m = torch.fft.ifft2(v_hat + v_img, dim=(0, 1)).real
+    v_cap_m = torch.fft.ifft2(combined, dim=(0, 1)).real
     if bias != 0.0:  # applied ramp: v(0)=0, v(L)=bias (uniform in-plane)
         v_cap_m = v_cap_m + bias * (zc / lm)
     return torch.movedim(v_cap_m, -1, open_axis)
