@@ -177,6 +177,25 @@ class RelaxParams:
     # iterative annulus solve, which recovers a larger fraction of the true Pulay
     # pressure for a modest per-step cost — see docs/manual/geometry-optimization.md).
     pulay_solver: str = "diagonal"  # diagonal | cg
+    # Outer-SCF tolerance ladder (nested engine only, opt-in): schedule each
+    # ionic step's SCF stop tolerance from the optimizer's current max|F| — loose
+    # when forces are large (early throwaway geometries), tightening as forces
+    # shrink — then re-solve the converged geometry at the full rhotol so the
+    # reported/differentiated result sits at the exact fixed point. Off by default
+    # (behaviour byte-identical to a constant-rhotol relax). Never applied to
+    # EOS/phonon/elastic (their per-config observables can't be loosened).
+    tol_ladder: bool = False
+    # rhotol_step = clamp(c * max|F|**p, lo=rhotol_final, hi=rhotol_start), with
+    # etol scaled proportionally. p=2 (quadratic) tightens faster than p=1
+    # (linear); c sets the overall scale. rhotol_final None → the scf.rhotol
+    # (so the exactness re-solve lands on the same fixed point as a baseline run).
+    tol_ladder_c: float = 1.0e-3
+    tol_ladder_p: float = 2.0
+    tol_ladder_rhotol_start: float = 1.0e-4  # first/loosest step tol (hi clamp)
+    tol_ladder_rhotol_final: float | None = None  # None → scf.rhotol (lo clamp)
+    # first ionic step (no previous fmax yet): "loose" applies rhotol_start to
+    # step 1 too; "tight" solves step 1 at rhotol_final and ladders from step 2.
+    tol_ladder_first_step: str = "loose"  # loose | tight
 
     def __post_init__(self):
         if self.method not in ("nested", "joint", "newton"):
@@ -191,6 +210,22 @@ class RelaxParams:
             raise InputError(
                 "relax.pulay_solver must be 'diagonal' or 'cg', got "
                 f"{self.pulay_solver!r}")
+        if self.tol_ladder_first_step not in ("loose", "tight"):
+            raise InputError(
+                "relax.tol_ladder_first_step must be 'loose' or 'tight', got "
+                f"{self.tol_ladder_first_step!r}")
+        if self.tol_ladder:
+            if self.tol_ladder_c <= 0.0 or self.tol_ladder_p <= 0.0:
+                raise InputError(
+                    "relax.tol_ladder_c and tol_ladder_p must be positive")
+            if self.tol_ladder_rhotol_start <= 0.0:
+                raise InputError(
+                    "relax.tol_ladder_rhotol_start must be positive")
+            rf = self.tol_ladder_rhotol_final
+            if rf is not None and (rf <= 0.0 or rf > self.tol_ladder_rhotol_start):
+                raise InputError(
+                    "relax.tol_ladder_rhotol_final must be in "
+                    "(0, tol_ladder_rhotol_start]")
 
 
 @dataclass(frozen=True)

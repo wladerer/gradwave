@@ -726,6 +726,16 @@ def _build_relax_calc(
         device=inp.device,
         verbose=verbose,
         scf_step_hook=scf_step_hook,
+        # Outer-SCF tolerance ladder — nested engine only (the joint/newton
+        # engines and every non-relax driver leave it None, so their SCFs run at
+        # the constant configured rhotol). The driver (_relax_nested) threads the
+        # previous step's fmax in and runs the exactness re-solve.
+        tol_ladder=(
+            {"c": inp.relax.tol_ladder_c, "p": inp.relax.tol_ladder_p,
+             "rhotol_start": inp.relax.tol_ladder_rhotol_start,
+             "rhotol_final": inp.relax.tol_ladder_rhotol_final,
+             "first_step": inp.relax.tol_ladder_first_step}
+            if inp.relax.tol_ladder and inp.relax.method == "nested" else None),
     )
 
 
@@ -891,6 +901,15 @@ def _relax_nested(
         if scf_res is not None:
             entry["scf_iter"] = int(getattr(scf_res, "n_iter", 0))
             entry["scf_converged"] = bool(getattr(scf_res, "converged", True))
+        if inp.relax.tol_ladder:
+            # thread THIS accepted geometry's optimizer fmax (target's, so it
+            # folds in the stress under a cell relax) into the calculator so the
+            # NEXT ionic step's SCF tol is scheduled from it; record the tol this
+            # step actually ran at for the trace.
+            atoms.calc._last_fmax = fmax
+            rt = getattr(atoms.calc, "last_rhotol_used", None)
+            if rt is not None:
+                entry["rhotol_used"] = float(rt)
         pulay_gpa = getattr(atoms.calc, "last_pulay_pressure_gpa", None)
         if pulay_gpa is not None:
             entry["pulay_pressure_GPa"] = round(float(pulay_gpa), 4)
@@ -936,6 +955,17 @@ def _relax_nested(
     converged = opt.run(fmax=inp.relax.fmax, steps=inp.relax.max_steps)
     import numpy as np
 
+    # Exactness gate for the tolerance ladder: the trajectory above converged the
+    # SCFs to a schedule of loosened rhotol, so re-solve the final geometry ONCE
+    # at the full rhotol (warm-started from the loose state) and report THAT
+    # energy/forces/stress. A baseline (ladder-off) relax skips this entirely.
+    final_resolve_iter: int | None = None
+    if inp.relax.tol_ladder and atoms.calc is not None:
+        if verbose:
+            print("  tol_ladder: re-solving the converged geometry at full "
+                  "rhotol (exactness gate) …", flush=True)
+        final_resolve_iter = atoms.calc.resolve_full_tol()
+
     relax: dict[str, Any] = {
         "converged": bool(converged),
         "method": "nested",
@@ -964,6 +994,13 @@ def _relax_nested(
         relax["scf_total_iter"] = int(sum(scf_iters))
         relax["scf_all_converged"] = all(
             s.get("scf_converged", True) for s in trajectory)
+    if inp.relax.tol_ladder:
+        relax["tol_ladder"] = True
+        if final_resolve_iter is not None:
+            # the exactness re-solve's SCF iterations are part of the total cost
+            relax["final_resolve_scf_iter"] = int(final_resolve_iter)
+            if "scf_total_iter" in relax:
+                relax["scf_total_iter"] += int(final_resolve_iter)
     relax["extrapolation"] = inp.relax.extrapolation
     if getattr(atoms.calc, "_density_clamped", False):
         # the extrapolated density dipped negative on at least one step and was
