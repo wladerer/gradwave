@@ -42,6 +42,7 @@ import numpy as np
 import torch
 
 from gradwave.constants import E2
+from gradwave.core.energies.hartree import hartree_potential_r
 from gradwave.core.fftbox import g_to_r_box
 from gradwave.core.structure import structure_factors
 
@@ -335,6 +336,46 @@ def _bias_ramp(grid, open_axis: int, bias: float, ref: torch.Tensor) -> torch.Te
     return ramp.reshape(shp).expand(grid.shape)
 
 
+def _matched_cap_dv(rho: torch.Tensor, cell, open_axis: int) -> torch.Tensor:
+    """β-safe matched capacitor correction ΔV = ΔV_vacuum + image (v_cap − v_open)."""
+    return (esm_delta_potential(rho, cell, open_axis)
+            + hartree_potential_capacitor(rho, cell, open_axis, bias=0.0)
+            - hartree_potential_esm(rho, cell, open_axis))
+
+
+def _smooth_charge_carrier(q, grid, open_axis: int, ref: torch.Tensor) -> torch.Tensor:
+    """The net charge q spread as an in-plane-uniform broad Gaussian in z (∫=q).
+    Smooth, so its spectral-referenced electrostatics stays grid-safe."""
+    nz = grid.shape[open_axis]
+    dz = float(np.linalg.norm(np.asarray(grid.cell)[open_axis])) / nz
+    zc = torch.arange(nz, device=ref.device, dtype=ref.dtype) * dz
+    lz = (nz - 1) * dz
+    w = lz / 6.0
+    g1 = torch.exp(-((zc - 0.5 * lz) ** 2) / (2.0 * w * w))
+    shp = [1, 1, 1]
+    shp[open_axis] = nz
+    rho_q = g1.reshape(shp).expand(grid.shape)
+    dvol = grid.volume / rho_q.numel()
+    return rho_q * (q / (rho_q.sum() * dvol))
+
+
+def _capacitor_grounded_de(rho_tot: torch.Tensor, grid, open_axis: int) -> torch.Tensor:
+    """Grounded capacitor charge-induced energy ½∫ρ_tot ΔV, with the NET charge's
+    reference calibrated to the spectral periodic (matching the KS energy). Split
+    ρ_tot = ρ_n (neutral) + ρ_q (smooth net charge): the neutral part uses the
+    β-safe matched correction; the net-charge terms use the spectral reference (v_cap
+    − v_periodic) directly, valid for a charged cell and grid-safe since ρ_q is
+    smooth. Reduces to the plain matched energy for a neutral cell (ρ_q → 0)."""
+    cell = grid.cell
+    dvol = grid.volume / rho_tot.numel()
+    q = rho_tot.sum() * dvol
+    rho_q = _smooth_charge_carrier(q, grid, open_axis, rho_tot)
+    rho_n = rho_tot - rho_q
+    s_q = hartree_potential_capacitor(rho_q, cell, open_axis) - hartree_potential_r(rho_q, grid.g2)
+    de_n = 0.5 * (rho_n * _matched_cap_dv(rho_n, cell, open_axis)).sum()
+    return (de_n + (rho_n * s_q).sum() + 0.5 * (rho_q * s_q).sum()) * dvol
+
+
 def esm_energy(rho_elec: torch.Tensor, positions: torch.Tensor,
                charges: torch.Tensor, grid, *, beta: float | None = None,
                open_axis: int = 2, mode: str = "vacuum",
@@ -358,12 +399,9 @@ def esm_energy(rho_elec: torch.Tensor, positions: torch.Tensor,
         return 0.5 * (rho_tot * dv).sum() * dvol
     if mode != "capacitor":
         raise ValueError(f"esm mode must be 'vacuum' or 'capacitor', got {mode!r}")
-    # capacitor: grounded charge-induced correction (quadratic) + applied bias
-    # (linear). ΔV_grounded = ΔV_vacuum + image term = ΔV_vacuum + (v_cap − v_open).
-    dv_grounded = (esm_delta_potential(rho_tot, grid.cell, open_axis)
-                   + hartree_potential_capacitor(rho_tot, grid.cell, open_axis, bias=0.0)
-                   - hartree_potential_esm(rho_tot, grid.cell, open_axis))
-    de = 0.5 * (rho_tot * dv_grounded).sum() * dvol
+    # capacitor: grounded charge-induced correction (quadratic, net-charge
+    # reference calibrated to the spectral periodic) + applied bias (linear).
+    de = _capacitor_grounded_de(rho_tot, grid, open_axis)
     if bias != 0.0:
         de = de + (rho_tot * _bias_ramp(grid, open_axis, bias, rho_elec)).sum() * dvol
     return de

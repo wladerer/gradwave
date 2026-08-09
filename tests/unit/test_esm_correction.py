@@ -19,6 +19,7 @@ from gradwave.core.energies.esm import (
     esm_energy_strained,
     esm_potential,
     gaussian_ion_density,
+    hartree_potential_capacitor,
 )
 from gradwave.core.energies.hartree import hartree_potential_r
 from gradwave.grids import build_fft_grid
@@ -217,6 +218,35 @@ def test_capacitor_charged_cell_potential_is_functional_derivative():
         em = float(esm_energy(rm, pos, z, grid, mode="capacitor"))
         worst = max(worst, abs((ep - em) / (2 * h) - float(dv[ix]) * dvol))
     assert worst < 1e-7, worst
+
+
+def test_capacitor_charged_reference_calibrated_to_plates():
+    """The net-charge reference is calibrated to the plates. Isolate it via the
+    charged−neutral difference (which cancels the ion self-energy, correctly
+    excluded from v_eff but present in v_cap): the ESM effective electrostatic
+    potential then tracks the plate-referenced v_cap to ~1e-3. Without the
+    calibration this difference is O(1 eV) in z-structure."""
+    from gradwave.core.energies.esm import _default_beta
+    from gradwave.core.energies.hartree import hartree_potential_r
+
+    grid = _grid(20.0, 100)
+    pos = torch.tensor([[3.0, 3.0, 8.0], [3.0, 3.0, 12.0]], dtype=torch.float64)
+    z = torch.tensor([4.0, 6.0], dtype=torch.float64)
+    e0 = _elec(grid, [[3, 3, 8.6], [3, 3, 11.4]], [4.0, 6.0])
+    dvol = grid.volume / e0.numel()
+    rho_ion = gaussian_ion_density(pos, z, grid, _default_beta(grid, 2))
+
+    def veff_vcap(n_e):
+        rho = e0 * (n_e / (float(e0.sum()) * dvol))
+        rho_tot = rho - rho_ion
+        v_eff = (hartree_potential_r(rho_tot, grid.g2)
+                 + esm_potential(rho, pos, z, grid, mode="capacitor"))
+        return v_eff, hartree_potential_capacitor(rho_tot, grid.cell)
+
+    ve_n, vc_n = veff_vcap(10.0)  # neutral (N=ΣZ)
+    ve_c, vc_c = veff_vcap(10.4)  # +0.4 e charged
+    d = (ve_c - ve_n) - (vc_c - vc_n)
+    assert float(d.std()) < 5e-3
 
 
 def test_input_rejects_bad_boundary():
