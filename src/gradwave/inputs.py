@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import numpy as np
 import yaml
 from ase import Atoms
-from ase.io import read as ase_read
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -559,6 +558,11 @@ def _read_atoms(path: Path, fmt: str | None = None, index: int = -1) -> Atoms:
     `structure.index` to choose. A structure with no 3D cell cannot be run by a
     plane-wave code, so that fails here with a clear message rather than deep in
     grid construction."""
+    # Deferred: `ase.io.read` drags in ASE's format-plugin registry (scipy.integrate,
+    # ase.spacegroup, ...), ~0.6 s that every `import gradwave` would otherwise pay for
+    # a geometry-read that happens once per run, off the SCF/autograd path.
+    from ase.io import read as ase_read
+
     try:
         atoms = ase_read(str(path), format=fmt, index=index)
     except FileNotFoundError:
