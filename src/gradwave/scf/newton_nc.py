@@ -34,7 +34,17 @@ would otherwise take many applies per Newton step):
   mixer). Kerker damps the strong negative Hartree charge-sloshing mode — the
   dominant eigenvalue of ``χ₀K``, magnitude > 1 even for a benign system (see
   ``scf.soft_mode``) — which is exactly what makes the un-preconditioned inner
-  fixed point stiff, so it collapses the inner iteration count.
+  fixed point stiff, so it collapses the inner iteration count. It acts on the
+  *charge* channel only, so for a magnetic (nspin=2) system the
+  magnetization/Stoner inner mode is left un-preconditioned and its inner solve
+  stays expensive — a Stoner spin preconditioner (cf. ``scf.spin_precond``) is
+  the clear next lever there.
+
+A related tuning caveat: the inner tolerance must be tight enough to reach the
+target ``rhotol``, or the *density* residual floors above it and the finisher
+stalls (correct energy — the fixed point is unchanged — but ``converged=False``,
+with many wasted 1-apply outer steps). This bites the stiff nspin=2 case most; a
+tighter inner tol is then often *cheaper* (far fewer stalled outer iterations).
 
 The inner linear solve is a preconditioned Anderson fixed point of
 ``g(x) = r + M(x)``, ``M(x) = χ₀(K_Hxc(x))`` (density space) — the same operator
@@ -195,7 +205,7 @@ def newton_finish_step(system, xc, nspin, smearing, width, mu, rho_s,
                        rho_out_s, veff_s, coeffs_s, eigs_s, occ_s, *,
                        mixer=None, prev_rnorm: float | None = None,
                        ew: bool = False, ew_gamma: float = 0.9,
-                       ew_alpha: float = 2.0, ew_floor: float = 1e-6,
+                       ew_alpha: float = 2.0, ew_floor: float = 1e-8,
                        ew_max: float = 1e-1, precond: bool = True,
                        inner_tol: float = 1e-6, max_inner: int = 60,
                        beta: float = 0.4, history: int = 8,

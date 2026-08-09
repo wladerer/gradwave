@@ -113,7 +113,11 @@ def main():
                     help="comma list from: " + ",".join(_CASES))
     ap.add_argument("--kmesh", type=int, default=None, help="override every case's kmesh")
     ap.add_argument("--switch", type=float, default=1e-3, help="mixer→Newton threshold")
-    ap.add_argument("--inner-tol", type=float, default=1e-6, help="fixed inner tol (non-EW)")
+    ap.add_argument("--inner-tol", type=float, default=1e-7,
+                    help="fixed inner tol (non-EW). Must be tight enough to reach the "
+                         "target rhotol or the density residual floors and the finisher "
+                         "stalls (esp. nspin=2 magnetic); tighter is often CHEAPER (fewer "
+                         "stalled outer steps).")
     ap.add_argument("--chi0-tol", type=float, default=1e-8,
                     help="Sternheimer tol per χ₀ apply (looser = cheaper apply)")
     ap.add_argument("--max-inner", type=int, default=60)
