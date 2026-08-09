@@ -70,14 +70,24 @@ electrostatics below:
 - `SCFResult.n_electrons` carries the floating N; the grand potential is
   `Ω = free_energy − fermi·n_electrons`.
 
-**Remaining refinement (not blocking):** the absolute-energy reference for a
-charged cell. The ESM correction differences against the *matched* periodic
-(β-safe), while the KS energy uses the *spectral* periodic; for a neutral cell they
-agree, but for the net charge the G∥=0 term differs. This shifts the absolute
-grand-potential zero (the "potential of zero charge" calibration), not the *N(µ)*
-response or the converged density's self-consistency. Quantitative electrochemistry
-(absolute potentials vs SHE) needs this calibration; capacitance/relative-potential
-studies do not.
+**Net-charge reference calibration — DONE.** The capacitor correction was built on
+the vacuum ESM pieces, which are *invalid for a net-charged cell* (the open Poisson
+of a charged sheet is ill-defined). So for a charged cell the effective potential
+deviated from the plate-referenced `v_cap` by O(1 eV) in z-structure — a real error
+(it persists for a smooth charged blob with no ions, so it is not the ion
+self-energy). Fixed by referencing the **net** charge to the *spectral* periodic
+(matching the KS energy) via a neutral/smooth-charge split: `ρ_tot = ρ_n (neutral)
++ ρ_q (net charge as an in-plane-uniform broad Gaussian)`; the neutral part keeps
+the β-safe matched correction, the net-charge terms use `v_cap − v_periodic`
+directly (valid for charge, grid-safe since ρ_q is smooth). The net-charge
+reference now tracks `v_cap` to ~1e-3 (was ~3.4), `δE/δρ` stays consistent, and
+neutral cells are unchanged. The remaining raw `v_eff − v_cap` (~0.08) is the ion
+self-energy, correctly *excluded* (Ewald handles it — the calibrated energy differs
+from the naive `½∫ρ v_cap` by exactly that self-energy).
+
+**Still external:** mapping the absolute µ scale to SHE (the computational hydrogen
+electrode convention) — as in every constant-potential DFT code; the natural
+internal reference is the potential of zero charge (the neutral-cell Fermi level).
 
 #### Original scoping notes
 
