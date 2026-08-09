@@ -27,8 +27,8 @@ import math
 
 import torch
 
-from gradwave.core.fftbox import g_to_r
-from gradwave.dtypes import RDTYPE
+from gradwave.core.fftbox import g_to_r, g_to_r_box, r_to_g
+from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.scf.loop import SCFResult
 
 
@@ -50,6 +50,9 @@ def ldos_grid(
     """Tersoff-Hamann LDOS on the real-space FFT grid [states/eV per grid cell]:
 
         ρ(r) = Σ_{n,k} w_k · g_σ(E_{nk} − energy) · |ψ_{nk}(r)|²
+
+    A symmetry-reduced SCF sums over the irreducible zone, so the map is
+    symmetrized over the space group afterwards to recover the full-BZ result.
 
     Args:
         result: converged SCFResult.
@@ -78,6 +81,13 @@ def ldos_grid(
             ldos = ldos + float(kw[ik]) * (
                 wts[:, None, None, None] * (psi_r.real**2 + psi_r.imag**2)
             ).sum(0)
+    # A symmetry-reduced SCF sums |psi_k|^2 over the irreducible zone, which omits
+    # the star of each k-point. Symmetrize the map over the space group (the same
+    # G-space RhoSymmetrizer the SCF uses on the density, exact for non-symmorphic
+    # groups) to recover the full-BZ result without an unreduced calculation.
+    symr = getattr(system, "rho_symmetrizer", None)
+    if symr is not None:
+        ldos = g_to_r_box(symr.apply(r_to_g(ldos.to(CDTYPE))), real=True)
     return ldos
 
 

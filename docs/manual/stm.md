@@ -23,12 +23,19 @@ distance above the surface. A constant-current map is the height at which the LD
 reaches a target isovalue, the quantity an experiment records while it holds the
 current fixed.
 
+A symmetry-reduced SCF sums $|\psi_k|^2$ over the irreducible zone, which omits the
+star of each k-point and does not carry the crystal point-group symmetry of the
+real-space map. `ldos_grid` symmetrizes the map over the space group afterwards, so
+a reduced calculation gives the same image as a full-zone one.
+
 ## Graphene
 
-A monolayer graphene calculation, two carbon atoms with PBE and 43 k-points in the
-irreducible zone, converges in 17 iterations to a Fermi level of −3.37 eV. The
-constant-height map 2 Å above the sheet resolves the honeycomb, with the carbon
-$\pi$ states forming the bright network and the ring centers dark.
+Graphene is a semimetal, so the density of states vanishes at the Dirac point at the
+Fermi level and imaging there samples that node. A small negative bias images the
+occupied $\pi$ band instead. A monolayer calculation, two carbon atoms with PBE and
+37 k-points in the irreducible zone, converges in 15 iterations. The constant-height
+map 2 Å above the sheet resolves the honeycomb, with the carbon $\pi$ states forming
+the bright network and the ring centers dark.
 
 ![Graphene, constant-height LDOS at the Fermi level, 2 Å above the sheet. The cyan
 circles mark the carbon atoms.](img/graphene_stm.png)

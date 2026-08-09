@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
+from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.dtypes import CDTYPE
 from gradwave.postscf.stm import ldos_grid, stm_constant_height
 from gradwave.pseudo.upf import parse_upf
@@ -50,6 +51,27 @@ def test_energy_window_excludes_far_states():
     near = ldos_grid(_mock_result(system, c, torch.zeros(1, 1)), energy=0.0, sigma=0.2)
     far = ldos_grid(_mock_result(system, c, torch.full((1, 1), 50.0)), energy=0.0, sigma=0.2)
     assert float(far.abs().max()) < 1e-6 * float(near.abs().max())
+
+
+def test_symmetry_reduced_ldos_is_space_group_symmetric():
+    """A symmetry-reduced SCF sums over the IBZ; ldos_grid symmetrizes the map over
+    the space group, so the result is invariant under the group (re-symmetrizing is
+    a no-op) — this is what makes an IBZ STM match a full-BZ one."""
+    from tests.helpers import pseudo  # noqa: PLC0415
+    cell = 5.43 / 2 * np.array([[0, 1, 1], [1, 0, 1], [1, 1, 0]])  # fcc Si primitive
+    pos = np.array([[0.0, 0, 0], [0.25, 0.25, 0.25]]) @ cell
+    upf = parse_upf(pseudo("Si_ONCV_PBE-1.2.upf"))
+    system = setup_system(cell, pos, [0, 0], [upf], ecut=8 * RY, kmesh=(2, 2, 2),
+                          use_symmetry=True)
+    assert system.sym is not None and system.sym.n_ops > 1
+    torch.manual_seed(0)
+    coeffs = [torch.randn(2, s.npw, dtype=CDTYPE) for s in system.spheres]
+    eigs = torch.zeros(len(system.spheres), 2)
+    res = SimpleNamespace(system=system, fermi=0.0, nspin=1, coeffs=coeffs, eigenvalues=eigs)
+    ldos = ldos_grid(res, energy=0.0, sigma=1.0)
+    # re-applying the same G-space symmetrizer is a no-op on an already-symmetric map
+    resym = g_to_r_box(system.rho_symmetrizer.apply(r_to_g(ldos.to(CDTYPE))), real=True)
+    assert torch.allclose(ldos, resym, atol=1e-9)
 
 
 def test_constant_height_returns_2d_plane():

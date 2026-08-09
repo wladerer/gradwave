@@ -1,18 +1,17 @@
 """Tersoff-Hamann STM of monolayer graphene (postscf/stm.py demo).
 
-Runs a real gradwave SCF of graphene, then images the Fermi-level LDOS on a tip
-plane ~2 A above the carbon sheet -> the iconic honeycomb STM pattern. Saves the
-LDOS map (.npy) and a tiled PNG.
+Graphene is a semimetal with the Dirac point at E_F, so the density of states
+vanishes there. A small negative bias images the occupied pi band, where the map
+resolves the lattice. The SCF is symmetry-reduced (IBZ); ldos_grid symmetrizes the
+map over the space group, so the result matches a full-BZ calculation.
 """
 
 from __future__ import annotations
 
-import sys
-
 import numpy as np
 
 from gradwave.core.xc.pbe import PBE
-from gradwave.postscf.stm import stm_constant_height
+from gradwave.postscf.stm import ldos_grid
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
 
@@ -23,42 +22,23 @@ UPF = "tests/fixtures/qe/pseudos/C_ONCV_PBE-1.2.upf"
 def main():
     a, c = 2.46, 16.0
     cell = np.array([[a, 0, 0], [a / 2, a * np.sqrt(3) / 2, 0], [0, 0, c]])
-    frac = np.array([[1 / 3, 2 / 3, 0.5], [2 / 3, 1 / 3, 0.5]])  # honeycomb A/B sublattice
+    frac = np.array([[1 / 3, 1 / 3, 0.5], [2 / 3, 2 / 3, 0.5]])  # honeycomb, 1.42 A bonds
     pos = frac @ cell
     upf = parse_upf(UPF)
-    ecut = float(sys.argv[1]) if len(sys.argv) > 1 else 35.0
-    nk = int(sys.argv[2]) if len(sys.argv) > 2 else 12
-    print(f"# graphene STM: a={a} A, vacuum c={c} A, ecut={ecut} Ry, k=({nk},{nk},1)", flush=True)
-    system = setup_system(
-        cell, pos, [0, 0], [upf], ecut=ecut * RY, kmesh=(nk, nk, 1), use_symmetry=True
-    )
-    print(
-        f"# npw~{system.spheres[0].npw}, nk_ibz={len(system.spheres)}, nbands={system.nbands}",
-        flush=True,
-    )
-    res = scf(
-        system,
-        PBE(),
-        smearing="gaussian",
-        width=0.1,
-        max_iter=120,
-        etol=1e-7,
-        rhotol=1e-6,
-        verbose=True,
-    )
-    print(f"# converged={res.converged} in {res.n_iter} iters, E_F={res.fermi:.4f} eV", flush=True)
-
-    img, z_tip = stm_constant_height(res, height=2.0, energy=res.fermi, sigma=0.3)
-    arr = img.detach().cpu().numpy()
-    np.save("/tmp/graphene_stm.npy", arr)
-    print(
-        f"# STM map at z_tip={z_tip:.2f} A: shape={arr.shape}, "
-        f"contrast max/min={arr.max() / max(arr.min(), 1e-30):.2f}",
-        flush=True,
-    )
-    np.save("/tmp/graphene_cell.npy", cell)
-    np.save("/tmp/graphene_pos.npy", pos)
-    print("EXIT_OK", flush=True)
+    system = setup_system(cell, pos, [0, 0], [upf], ecut=40 * RY, kmesh=(18, 18, 1),
+                          use_symmetry=True)
+    print(f"# graphene: npw~{system.spheres[0].npw}, nk_ibz={len(system.spheres)}, "
+          f"n_ops={system.sym.n_ops}", flush=True)
+    res = scf(system, PBE(), smearing="gaussian", width=0.05, max_iter=150,
+              etol=1e-7, rhotol=1e-6, verbose=False)
+    print(f"# converged={res.converged} in {res.n_iter}, E_F={res.fermi:.4f} eV", flush=True)
+    n3 = system.grid.shape[2]
+    iz = round(10.0 / c * n3)                                   # tip plane 2 A above sheet
+    occ = sum(ldos_grid(res, energy=res.fermi + de, sigma=0.3) for de in (-1.8, -1.4, -1.0, -0.6))
+    np.save("/tmp/g_occ.npy", occ[:, :, iz].numpy())
+    np.save("/tmp/g_cell.npy", cell)
+    np.save("/tmp/g_pos.npy", pos)
+    print("# saved occupied-pi STM map", flush=True)
 
 
 if __name__ == "__main__":
