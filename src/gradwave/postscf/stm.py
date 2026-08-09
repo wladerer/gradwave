@@ -21,11 +21,16 @@ The three formalisms are special cases of the same (ρ, m):
 
 A symmetry-reduced SCF sums over the irreducible zone, so the map is symmetrized
 over the space group with the matching G-space symmetrizer (charge via
-`RhoSymmetrizer.apply`, the collinear pair via `apply_pair` (correct for
-antiferromagnets, where anti-unitary ops swap the channels), the vector m via
+`RhoSymmetrizer.apply`, the collinear pair via `apply_pair`, the vector m via
 `MagneticSymmetrizer.apply_m`). This recovers the full-BZ result from the reduced
-one. The collinear paths are verified against full-BZ to ~1e-6; the non-collinear
-path reuses the validated `apply_m` but has not been benchmarked on an SOC surface.
+one. `apply_pair` symmetrizes each spin channel over the magnetic group and, where
+a sublattice-swap anti-unitary op is present, couples ρ↑ and ρ↓. For a
+body-centered antiferromagnet that swap op shares its rotation with a unitary op
+and is removed by the per-rotation translation dedup in `find_spacegroup`, so the
+fold there rests on the per-channel symmetrization plus the plain k → −k mesh fold
+rather than the channel swap. The collinear paths are verified against full-BZ to
+~1e-6; the non-collinear path reuses the validated `apply_m` but has not been
+benchmarked on an SOC surface.
 """
 
 from __future__ import annotations
