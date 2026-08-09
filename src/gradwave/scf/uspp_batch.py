@@ -30,8 +30,9 @@ class BatchedHS:
     Dudarev D, already conj-transposed for the apply convention)."""
 
     def __init__(self, bk: BatchedK, shape, v_eff_r, p, dscr, q_full,
-                 hub_sphi=None, hub_d=None, smooth=None) -> None:
+                 hub_sphi=None, hub_d=None, smooth=None, metagga_v=None) -> None:
         self.bk = bk
+        self.shape = shape
         self.p = p  # (nk, nproj, npw_max)
         self.q = q_full.to(p.dtype)
         self.ham = BatchedHamiltonian(
@@ -39,6 +40,11 @@ class BatchedHS:
             hub_q=hub_sphi, hub_dij=hub_d, smooth=smooth,
         )
         self.t = bk.t
+        # meta-GGA generalized-KS τ term −½∇·(v_τ∇ψ) on the SMOOTH orbitals
+        # (v_τ = ∂e_xc/∂τ̃ on the dense grid); added onto H, S is untouched.
+        # None for GGA/LDA. Same additive H-apply composition as the NC path
+        # (scf.loop._solve_bands).
+        self.metagga_v = metagga_v
         # cdtype → (p, p_conj, q) for mixed precision
         self._pq_cache: dict[torch.dtype, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
@@ -53,7 +59,12 @@ class BatchedHS:
         return cached
 
     def h(self, c):
-        return self.ham.apply(c)  # dtype-follows c (BatchedHamiltonian._tables)
+        out = self.ham.apply(c)  # dtype-follows c (BatchedHamiltonian._tables)
+        if self.metagga_v is not None:
+            from gradwave.core.metagga import metagga_tau_operator
+
+            out = out + metagga_tau_operator(c, self.metagga_v, self.bk, self.shape)
+        return out
 
     def s(self, c):
         p, p_conj, q = self._pq(c.dtype)
