@@ -210,6 +210,12 @@ class _ConvergedUSPP:
     def __init__(self, res: _ResLike, xc: XCFunctional | SpinXC) -> None:
         from gradwave.scf.uspp import _HkS
 
+        if getattr(xc, "needs_tau", False):
+            raise NotImplementedError(
+                "USPP implicit-diff / adjoint response does not support "
+                "meta-GGA (needs_tau): the frozen (H, S) here omit the τ "
+                "generalized-KS operator and its response kernel"
+            )
         system = res["system"]
         grid = system.grid
         self.res, self.xc, self.system, self.grid = res, xc, system, grid

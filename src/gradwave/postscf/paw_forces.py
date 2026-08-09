@@ -118,6 +118,31 @@ def _aug_at_fixed(res: USPPResult, system: USPPSystem, isp: int | None = None) -
         return out
 
 
+def _smooth_tau_fixed(
+    system: USPPSystem,
+    xc: XCFunctional | SpinXC,
+    coeffs_s: list[list[torch.Tensor]],
+    occ_s: torch.Tensor,
+    nspin: int,
+) -> list[torch.Tensor]:
+    """Per-spin smooth τ̃ = ½Σf|∇ψ̃|² [e/Å⁵] from the converged orbitals, detached
+    (a fixed constant on the force/stress energy graph). Pads the per-k coeffs to
+    the batched (nk, nb, npw_max) layout `core.metagga.tau_b` consumes."""
+    from gradwave.core.batch import build_batched
+    from gradwave.core.metagga import tau_b
+
+    grid, vol, dev = system.grid, system.grid.volume, system.positions.device
+    bk = build_batched(system.spheres, system.proj_data, device=dev)
+    tau_s = []
+    for isp in range(nspin):
+        nb = occ_s[isp].shape[1]
+        cb = torch.zeros(len(system.spheres), nb, bk.npw_max, dtype=CDTYPE, device=dev)
+        for ik, sph in enumerate(system.spheres):
+            cb[ik, :, : sph.npw] = coeffs_s[isp][ik].detach()
+        tau_s.append(tau_b(cb, occ_s[isp].detach(), system.kweights, bk, grid.shape, vol))
+    return tau_s
+
+
 def forces_uspp(
     res: USPPResult, xc: XCFunctional | SpinXC, remove_net: bool = True
 ) -> torch.Tensor:
@@ -205,6 +230,15 @@ def forces_uspp(
     # NLCC core on the graph
     rho_core = rho_core_on_graph(system, phases)
 
+    # meta-GGA: the smooth τ̃ = ½Σf|∇ψ̃|² is a functional of the (position-free)
+    # plane-wave coefficients only, so at fixed coefficients it has NO explicit
+    # position dependence and enters the force energy as a DETACHED constant —
+    # it carries no force term of its own (the one-center τ force rides ddd, the
+    # smooth-τ Hellmann-Feynman term vanishes at the stationary point) but is
+    # needed so the meta-GGA v_xc = ∂e/∂ρ|_τ is evaluated at the correct τ̃.
+    tau_fixed_s = _smooth_tau_fixed(system, xc, coeffs_s, occ_s, nspin) \
+        if xc.needs_tau else None
+
     from gradwave.core.density import sigma_from_rho
 
     if nspin == 1:
@@ -214,13 +248,15 @@ def forces_uspp(
         assert isinstance(xc, XCFunctional)
         rho_xc = rho_tot if rho_core is None else rho_tot + rho_core
         sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
-        e = e + xc.energy(rho_xc, vol, sigma)
+        tau_xc = tau_fixed_s[0] if tau_fixed_s is not None else None
+        e = e + xc.energy(rho_xc, vol, sigma, tau_xc)
     else:
         assert isinstance(xc, SpinXC)
         c2 = 0.0 if rho_core is None else 0.5 * rho_core
         r_u, r_d = rho_chans[0] + c2, rho_chans[1] + c2
         s_uu, s_dd, s_tt = spin_sigma_triple(xc, r_u, r_d, grid.g_cart)
-        e = e + xc.energy(r_u, r_d, vol, s_uu, s_dd, s_tt)
+        tu, td = (None, None) if tau_fixed_s is None else (tau_fixed_s[0], tau_fixed_s[1])
+        e = e + xc.energy(r_u, r_d, vol, s_uu, s_dd, s_tt, tu, td)
 
     species_index = torch.tensor(system.species_of_atom, dtype=torch.int64,
                                  device=pos.device)

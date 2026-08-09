@@ -24,6 +24,7 @@ can absorb it later.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -63,7 +64,12 @@ from gradwave.scf.common import (
 )
 from gradwave.scf.guess import sad_density
 from gradwave.scf.layout import MixLayout
-from gradwave.scf.loop import effective_potentials, resolve_atom_moments
+from gradwave.scf.loop import (
+    effective_potentials,
+    resolve_atom_moments,
+    vtau_potential,
+    vtau_spin_potential,
+)
 from gradwave.scf.mixing import BroydenMixer, JohnsonMixer, PulayMixer
 from gradwave.scf.options import SCFOptions
 from gradwave.scf.paw_onsite import OneCenter
@@ -320,6 +326,7 @@ def uspp_potentials_dscr(
     vloc_r: torch.Tensor,
     phase_pos: torch.Tensor,
     onec: list[OneCenter] | dict[int, OneCenter] | None,
+    tau_s: list[torch.Tensor] | None = None,
 ) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
     """(veff_s, dscr_s, e_onec) from the per-channel FULL densities (smooth +
     aug) and per-atom becsums — THE assembly the USPP/PAW SCF iterates with.
@@ -330,15 +337,25 @@ def uspp_potentials_dscr(
 
     rho_ij_s: [spin][atom] becsum matrices (the mixer-side becsum in the SCF;
     the same-state becsum in the gate). onec: per-species OneCenter list for
-    PAW, None for bare USPP."""
+    PAW, None for bare USPP.
+
+    tau_s (meta-GGA only): the LAGGING smooth kinetic-energy density τ̃ — a
+    grid for nspin=1, [τ̃↑, τ̃↓] for nspin=2 — passed to the local v_xc as a
+    held-fixed constant so it carries the multiplicative ∂e/∂ρ|_τ term. The
+    τ-response operator −½∇·(v_τ∇ψ) is NOT built here; `_scf_iteration` builds
+    it from the same τ̃ and composes it onto the H-apply (see `_uspp_vtau_fields`)."""
     grid = system.grid
     dev = system.positions.device
     nspin = len(rho_s)
     # v_eff = v_H + v_xc(+½ core fold) + v_loc — the identical per-spin assembly
     # the norm-conserving loop iterates (loop.effective_potentials); USPP passes
-    # the FULL (smooth + aug) densities and its own vloc_r. No meta-GGA on the
-    # USPP path yet, so tau stays None.
-    veff_s = effective_potentials(system, xc, rho_s, vloc_r)
+    # the FULL (smooth + aug) densities and its own vloc_r. The smooth τ̃ rides
+    # the density argument for the meta-GGA v_xc; there is no τ compensation
+    # charge (the meta-GGA kernel is short-ranged, so n̂ appears only in ρ).
+    # effective_potentials takes a bare grid for nspin=1, a [τ↑, τ↓] list for
+    # nspin=2 (matching its ρ argument shape).
+    tau_arg = None if tau_s is None else (tau_s[0] if nspin == 1 else tau_s)
+    veff_s = effective_potentials(system, xc, rho_s, vloc_r, tau=tau_arg)
 
     # screened D per spin/atom: D_ij + Σ_G ṽ_σ(G) e^{iGτ} Q̃_ij(G)* —
     # batched over the atoms of each species (one einsum per species, one
@@ -367,6 +384,54 @@ def uspp_potentials_dscr(
                     s0, s1 = system.atom_slices[a]
                     dscr_s[isp][s0:s1, s0:s1] += dd[i]
     return veff_s, dscr_s, e_onec
+
+
+def _bootstrap_tau_uspp(
+    xc: XCFunctional | SpinXC,
+    rho_s: list[torch.Tensor],
+    nspin: int,
+) -> list[torch.Tensor] | None:
+    """Orbital-free Thomas-Fermi seed τ̃ = C_F ρ^{5/3} for iteration 1 (and after
+    a solver-blowup reseed), where the USPP cold start has no orbitals to build
+    the real τ̃ from — the USPP analogue of `scf.loop._bootstrap_tau`. r2SCAN
+    hard-requires a τ, so a valid positive seed is needed before the first solve;
+    it is refined to the true ½Σf|∇ψ̃|² immediately after. None for GGA/LDA."""
+    if not xc.needs_tau:
+        return None
+    if nspin == 1:
+        cf = 0.3 * (3.0 * math.pi**2) ** (2.0 / 3.0)
+        return [cf * rho_s[0].clamp_min(0.0) ** (5.0 / 3.0)]
+    # spin-polarized per-channel TF constant (6π² per spin)
+    cf = 0.3 * (6.0 * math.pi**2) ** (2.0 / 3.0)
+    return [cf * rho_s[isp].clamp_min(0.0) ** (5.0 / 3.0) for isp in range(nspin)]
+
+
+def _uspp_vtau_fields(
+    ops: "_IterOps",
+    rho_s: list[torch.Tensor],
+    tau_s: list[torch.Tensor] | None,
+) -> list[torch.Tensor] | None:
+    """Per-spin scaled v_τ = ∂e_xc/∂τ̃ grids for the smooth generalized-KS
+    operator −½∇·(v_τ∇ψ̃), or None when the functional is not τ-dependent or τ̃
+    is not yet seeded (iteration 1 of a cold start). Mirrors
+    `scf.loop._build_metagga_apply`'s v_τ extraction but on the USPP FULL
+    (smooth + aug) density: v_τ is autograded from the SAME density the smooth
+    v_xc sees, plus the NLCC core fold."""
+    xc, system, grid, nspin = ops.xc, ops.system, ops.grid, ops.nspin
+    if not xc.needs_tau or tau_s is None:
+        return None
+    core = system.rho_core
+    if nspin == 1:
+        assert isinstance(xc, XCFunctional)
+        rho_tot = rho_s[0]
+        rho_for_xc = rho_tot if core is None else rho_tot + core
+        return [vtau_potential(xc, rho_for_xc, tau_s[0], grid)]
+    assert isinstance(xc, SpinXC)
+    cu2 = None if core is None else 0.5 * core
+    r_u = rho_s[0] if cu2 is None else rho_s[0] + cu2
+    r_d = rho_s[1] if cu2 is None else rho_s[1] + cu2
+    vu, vd = vtau_spin_potential(xc, r_u, r_d, tau_s[0], tau_s[1], grid)
+    return [vu, vd]
 
 
 def _build_iter_ops(
@@ -472,10 +537,15 @@ def _assemble_iter_energies(
     entropy_term: torch.Tensor,
     e_hub: torch.Tensor,
     e_onec: torch.Tensor,
+    tau_s: list[torch.Tensor] | None = None,
 ) -> EnergyBreakdown:
     """Total-energy breakdown for one SCF-map evaluation: charge-conservation
     check, XC energy (nspin 1/2), and assemble_pw_energies. Pure function of the
-    already-computed densities/occupations."""
+    already-computed densities/occupations.
+
+    tau_s (meta-GGA only): the smooth τ̃ [τ̃] / [τ̃↑, τ̃↓] consistent with these
+    orbitals, so the smooth E_xc^PW[ρ̃+n̂, τ̃] is evaluated at the same τ̃ the
+    Hamiltonian's next step will lag on."""
     system, xc, nspin = ops.system, ops.xc, ops.nspin
     grid, vol, vloc_g = ops.grid, ops.vol, ops.vloc_g
     hub, e_ewald = ops.hub, ops.e_ewald
@@ -494,9 +564,10 @@ def _assemble_iter_energies(
         assert isinstance(xc, XCFunctional)
         rho_xc_out = rho_tot_out if core is None else rho_tot_out + core
         sigma = sigma_from_rho(rho_xc_out, grid.g_cart) if xc.needs_gradient else None
-        e_xc = xc.energy(rho_xc_out, vol, sigma)
+        tau_xc = tau_s[0] if (xc.needs_tau and tau_s is not None) else None
+        e_xc = xc.energy(rho_xc_out, vol, sigma, tau_xc)
     else:
-        e_xc = spin_xc_energy(xc, rho_out_s, core, vol, grid.g_cart)
+        e_xc = spin_xc_energy(xc, rho_out_s, core, vol, grid.g_cart, tau_s=tau_s)
     return assemble_pw_energies(
         coeffs,
         occ_s,
@@ -713,6 +784,7 @@ def _solve_bands_uspp(
     tol_eff: float,
     seed_salt: int,
     u_scale: float = 1.0,
+    metagga_v_s: list[torch.Tensor] | None = None,
 ) -> list[torch.Tensor]:
     """Generalized eigensolve H x = ε S x per spin (batched or per-k). Warm-starts
     from and MUTATES coeffs/coeffs_b IN PLACE — the frozen warm-start contract
@@ -769,6 +841,7 @@ def _solve_bands_uspp(
                 hub_sphi=hub.sphi if hub else None,
                 hub_d=hub_d,
                 smooth=smooth,
+                metagga_v=None if metagga_v_s is None else metagga_v_s[isp],
             )
             cb_isp = coeffs_b[isp]
             if cb_isp is None:
@@ -801,6 +874,13 @@ def _solve_bands_uspp(
                 coeffs[isp][ik] = x_b[ik, :, : sph.npw]
             eigs_s.append(eig_b)
             continue
+        if metagga_v_s is not None:
+            # scf_uspp gates needs_tau to the batched solver up front; this is
+            # the belt-and-braces guard for a direct per-k caller.
+            raise NotImplementedError(
+                "meta-GGA on the USPP/PAW path requires the batched solver "
+                "(batched=True); the per-k τ operator is not wired"
+            )
         eigs_l = []
         for ik, sph in enumerate(system.spheres):
             hs = _HkS(
@@ -850,6 +930,10 @@ class _IterStep(TypedDict):
     rho_ij_s: list[list[torch.Tensor]]
     becps_s: list[list[torch.Tensor]]
     energies: EnergyBreakdown
+    # Fresh smooth kinetic-energy density τ̃ built from THIS iteration's
+    # orbitals — the driver feeds it back as the next iteration's lagging τ_s
+    # (the τ analogue of the density/becsum warm state). None for GGA/LDA.
+    tau_out_s: list[torch.Tensor] | None
     # Full-mesh (gathered) eigenvalues/occupations under a distributed
     # (dist_ctx) run -- identical to eigs_s/occ_s (same object) when
     # ops.dist_ctx is None. scf_uspp substitutes these into the final
@@ -871,6 +955,7 @@ def _scf_iteration(
     tol_eff: float,
     seed_salt: int,
     it: int | None = None,
+    tau_s: list[torch.Tensor] | None = None,
 ) -> _IterStep:
     """ONE evaluation of the SCF map at (rho_s, rho_ij_mix): potentials →
     screened D (+ one-center ddd from the MIXER-side becsum) → generalized
@@ -882,7 +967,14 @@ def _scf_iteration(
 
     ``it`` (the 1-based SCF iteration) drives the DFT+U U-ramp; when None (the
     newton/rig direct callers) or ``ops.hub_u_ramp_iters<=0`` the ramp factor is
-    1.0 (full U)."""
+    1.0 (full U).
+
+    ``tau_s`` (meta-GGA only) is the LAGGING smooth τ̃ from the previous
+    iteration's orbitals — it dresses the smooth v_xc (multiplicative ∂e/∂ρ|_τ)
+    and the generalized-KS operator −½∇·(v_τ∇ψ̃) in H. The FRESH τ̃ built from
+    this iteration's orbitals is used for the energy and returned as
+    ``tau_out_s`` for the driver to feed back next step (τ is a functional of
+    the orbitals, never mixed — same lag as the density/becsum/Hubbard state)."""
     system, xc, nspin = ops.system, ops.xc, ops.nspin
     smearing, width, hub = ops.smearing, ops.width, ops.hub
     vloc_r, phase_pos = ops.vloc_r, ops.phase_pos
@@ -890,11 +982,15 @@ def _scf_iteration(
     # DFT+U U-ramp factor for this iteration; 1.0 (no ramp) when it is None.
     u_scale = 1.0 if it is None else hubbard_u_ramp_scale(it, ops.hub_u_ramp_iters)
     veff_s, dscr_s, e_onec = uspp_potentials_dscr(
-        system, xc, rho_s, rho_ij_mix, vloc_r, phase_pos, onec if is_paw else None
+        system, xc, rho_s, rho_ij_mix, vloc_r, phase_pos, onec if is_paw else None, tau_s
     )
+    # meta-GGA generalized-KS τ operator for the smooth orbitals, from the same
+    # lagging τ̃ that dressed v_xc; None for GGA/LDA or the cold-start iter 1.
+    metagga_v_s = _uspp_vtau_fields(ops, rho_s, tau_s)
 
     eigs_s = _solve_bands_uspp(
-        ops, veff_s, dscr_s, n_hub_s, coeffs, coeffs_b, tol_eff, seed_salt, u_scale
+        ops, veff_s, dscr_s, n_hub_s, coeffs, coeffs_b, tol_eff, seed_salt, u_scale,
+        metagga_v_s=metagga_v_s,
     )
 
     dist_ctx = ops.dist_ctx
@@ -936,8 +1032,34 @@ def _scf_iteration(
     rho_out_s, rho_ij_s, becps_s = _build_output_density(ops, coeffs_full, coeffs_b, occ_s)
     rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
 
+    # Fresh smooth τ̃ from this iteration's orbitals (same occupations that made
+    # rho_out), for a consistent meta-GGA energy and as the lagging τ_s the
+    # driver feeds back next step. all_reduce completes the k-sum under dist_ctx,
+    # mirroring the density/becsum reduction in _build_output_density.
+    tau_out_s: list[torch.Tensor] | None = None
+    if xc.needs_tau:
+        from gradwave.core.metagga import tau_b
+
+        # coeffs_b[isp] is the padded (nk, nb, npw_max) block the batched solver
+        # filled in place; needs_tau is gated to the batched solver in scf_uspp,
+        # which builds bk (the `if batched or hubbard` guard in _build_iter_ops).
+        bk = ops.bk
+        assert bk is not None
+        tau_out_s = []
+        for isp in range(nspin):
+            cb = coeffs_b[isp]
+            assert cb is not None
+            tau_out_s.append(
+                tau_b(cb, occ_s[isp], system.kweights, bk, ops.shape, ops.vol)
+            )
+        if dist_ctx is not None:
+            from gradwave.distributed import all_reduce_
+
+            tau_out_s = [all_reduce_(t, dist_ctx) for t in tau_out_s]
+
     energies = _assemble_iter_energies(
-        ops, coeffs_full, occ_s, becps_s, rho_out_s, rho_tot_out, entropy_term, e_hub, e_onec
+        ops, coeffs_full, occ_s, becps_s, rho_out_s, rho_tot_out, entropy_term, e_hub,
+        e_onec, tau_out_s,
     )
     if dist_ctx is not None:
         from gradwave.distributed import all_reduce_
@@ -959,6 +1081,7 @@ def _scf_iteration(
         rho_ij_s=rho_ij_s,
         becps_s=becps_s,
         energies=energies,
+        tau_out_s=tau_out_s,
         eigs_global_s=eigs_global_s,
         occ_global_s=occ_global_s,
     )
@@ -1450,6 +1573,22 @@ def scf_uspp(
         hub_occ_mix=hub_occ_mix,
         hub_u_ramp_iters=hub_u_ramp_iters,
     )
+    if xc.needs_tau:
+        # meta-GGA on the USPP/PAW path: the smooth τ̃ enters H exactly as on
+        # the NC path, but the AE/PS τ correction lives in the PAW one-center
+        # spheres. Bare ultrasoft has no one-center sphere to carry it (QE
+        # likewise supports meta-GGA only with PAW or norm-conserving), and the
+        # τ generalized-KS operator is wired only into the batched solver.
+        if not ops.is_paw:
+            raise NotImplementedError(
+                "meta-GGA requires PAW; bare ultrasoft has no one-center τ "
+                "augmentation (use a PAW dataset or a norm-conserving pseudo)"
+            )
+        if not batched:
+            raise NotImplementedError(
+                "meta-GGA on the USPP/PAW path requires the batched solver "
+                "(batched=True)"
+            )
     hub = ops.hub
     n_hub_s = None
     if hub is not None:
@@ -1522,6 +1661,10 @@ def scf_uspp(
     # mutated in place by _scf_iteration each cycle.
     coeffs, coeffs_b = _seed_orbitals_uspp(system, nspin, nk, ops.nb, batched, start_from, dev)
     e_free_prev, history, converged = None, [], False
+    # meta-GGA lagging smooth τ̃ (None ⇒ GGA/LDA). Iteration 1 uses a Thomas-Fermi
+    # seed (no orbitals yet); from iter 2 on it is the true ½Σf|∇ψ̃|² rebuilt from
+    # each iteration's fresh orbitals, never mixed, consistent at the fixed point.
+    tau_state: list[torch.Tensor] | None = _bootstrap_tau_uspp(xc, rho_s, nspin)
     rescue_count, seed_salt = 0, 0  # solver-blowup rescue state (task #55)
     last_reset_it = -10  # trust-region reset cooldown (task #55)
     occ_s = eigs_s = mu = None
@@ -1580,8 +1723,10 @@ def scf_uspp(
         )
 
         step = _scf_iteration(
-            ops, rho_s, rho_ij_mix, coeffs, coeffs_b, n_hub_s, tol_eff, seed_salt, it
+            ops, rho_s, rho_ij_mix, coeffs, coeffs_b, n_hub_s, tol_eff, seed_salt, it,
+            tau_s=tau_state,
         )
+        tau_state = step["tau_out_s"]  # lag the fresh τ̃ into the next step's H
         eigs_s, occ_s, mu = step["eigs_s"], step["occ_s"], step["mu"]
         eigs_global_s, occ_global_s = step["eigs_global_s"], step["occ_global_s"]
         n_hub_s = step["n_hub_s"]
@@ -1617,6 +1762,9 @@ def scf_uspp(
                 seed_salt,
             )
             coeffs_b = [None] * nspin
+            # the lagging τ̃ was built from the poisoned orbitals; fall back to the
+            # TF seed (r2SCAN needs a valid τ) then rebuild from clean orbitals
+            tau_state = _bootstrap_tau_uspp(xc, rho_s, nspin)
             for isp in range(nspin):
                 coeffs[isp] = [None] * nk
             if verbose:

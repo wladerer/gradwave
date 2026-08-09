@@ -113,6 +113,11 @@ def newton_polish(res: USPPResult, xc: XCFunctional | SpinXC, *, tol: float = 1e
     χ̃ / K_Hxc / one-center operators already in _ConvergedUSPP (χ̃ block-
     diagonal over spin except the shared-Fermi δμ; K_Hxc cross-spin)."""
     _check_supported(res)
+    if getattr(xc, "needs_tau", False):
+        raise NotImplementedError(
+            "USPP Newton polish does not support meta-GGA (needs_tau): the raw "
+            "map here evaluates H without the τ generalized-KS operator"
+        )
     nspin = res.nspin
     system = res.system
     grid = system.grid
