@@ -54,6 +54,11 @@ def test_newton_finish_same_fixed_point_and_fewer_iters():
     assert abs(e_new - e_mix) < 1e-8, abs(e_new - e_mix)
     # the whole point: the finisher does not cost extra iterations, and cuts them
     assert new.n_iter <= mix.n_iter
+    # the finisher records its per-step inner-solve diagnostics; the mixer run does not
+    assert mix.newton_info is None
+    assert new.newton_info is not None
+    assert new.newton_info["steps"] >= 1
+    assert len(new.newton_info["applies_per_step"]) == new.newton_info["steps"]
 
 
 def test_newton_finish_requires_no_symmetry():
