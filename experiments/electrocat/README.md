@@ -34,6 +34,38 @@ results/        per-pair JSON + BFGS logs (written incrementally)
   ZPE+TS aggregates (`che.DG_CORR`) — swap for frequency-derived values for
   quantitative work (a `vib.py` Hessian hook is the natural add-on).
 
+## Acceleration / convergence settings (audited vs docs/manual/*)
+
+Tuned per `wisdom.md` / `performance.md` / `convergence.md`:
+
+- **`precond="local_tf"`** (not the default kerker) — the key change. Constant
+  Kerker over-damps the vacuum region of a slab/molecule box; local Thomas–Fermi
+  tracks local density (capped at Kerker in the bulk). Al-slab iters 21→17, 27→21,
+  energy bit-identical; the gain grows with vacuum fraction.
+- **`mixing_scheme="johnson"`** — pinned (the PAW default already resolves to it;
+  johnson 13 vs pulay 17 iters on fcc Pt PAW).
+- **Metals: `rhotol=1e-5`, `etol=1e-6`** — a smeared metal floors the density
+  residual at occupation noise while the free energy is settled; gate on the
+  energy tail, don't fight the 1e-7 floor. (The doc's `scf.convergence: energy`
+  gate isn't exposed on the ASE calculator.) Gas insulators keep tight tol.
+- **Kept (correct for a PAW-metal relaxation):** `use_symmetry=True` (IBZ 5–14×),
+  `davidson` (chebyshev is NC-only → would error on PAW, and slower on H100),
+  `reuse_wavefunctions` + `extrapolation="reuse"` (part of the 1.37× PAW-metal
+  relaxation speedup), `nbands=None` (20% metal headroom — do NOT trim; buffer
+  bands hold the smearing tail), `cold`/0.15 eV, BFGS optimizer (FIRE is 8.5×
+  slower), ions-only fixed-cell relax.
+- **OFF on purpose:** `mixed_precision` (regresses every metal; no win on H100
+  fp64), `compile_xc` (few %, 1-min first trace — not worth it for a single relax),
+  CUDA graphs / fp32 Rayleigh–Ritz (measured no-ops or floors).
+
+**Two runtime checks (the docs' explicit caveats):**
+1. **Fractional occupations must appear** at 0.15 eV on the k-mesh — else the
+   "metal" is silently a fixed-occupation insulator. If not, raise the k-mesh.
+2. **k-mesh convergence.** `(4,4,1)` is the fast first-pass (audit-approved, not
+   flagged). For production accuracy on a 2×2 metal surface, re-check the best
+   site at **`(6,6,1)`** (edit `config.KPTS_SLAB`) — adsorption energies on metals
+   can be k-noisy; the difference should be < ~30 meV or bump further.
+
 ## Run order (do this on the box)
 
 ```bash
