@@ -5,6 +5,11 @@ CHE-based adsorption energetics for four adsorbate–surface pairs, structured s
 then two stretch goals (r2SCAN/ISDF, differentiable descriptors). Built to run on
 a rented H100 (see the connection notes at the bottom).
 
+The walkthrough with results and figures is the manual chapter,
+`docs/manual/electrocatalysis.md`. Figures were rendered from the relaxed
+geometries with tinykit, e.g. `tk viz results/Pt_CO_hcp_relaxed.xyz --supercell 2
+2 1 --rotation -75 -8 0 --orthographic -o fig.png`.
+
 ## What's here
 
 ```

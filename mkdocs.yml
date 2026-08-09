@@ -35,6 +35,8 @@ nav:
   - Tutorials:
       - Structure and forces:
           - Geometry optimization: geometry-optimization.md
+      - Surfaces and electrochemistry:
+          - Adsorption and constant-potential electrochemistry: electrocatalysis.md
       - Magnetism and spin-orbit:
           - Non-collinear magnetism and SOC: noncollinear-soc.md
           - Magnetic structure and spin Hamiltonians: magnetism.md
