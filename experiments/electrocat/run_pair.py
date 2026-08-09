@@ -100,11 +100,20 @@ def _diagnostics(calc, opt, fmax, max_steps, wall, log_path, do_wf) -> dict:
     except Exception as e:
         d["scf_diag_err"] = str(e)[:80]
     if do_wf:
-        try:
-            from gradwave.postscf.work_function import work_function
-            d["work_function_eV"] = float(work_function(calc.last_result))
-        except Exception as e:
-            d["wf_err"] = str(e)[:80]
+        # work_function reads res.v_eff, which only the NC SCFResult exposes. The
+        # USPP/PAW path (this campaign) returns a USPPResult without it — a correct Φ
+        # for a PAW slab needs v_eff reconstructed from the converged density
+        # (gauge-consistent with E_F), a dedicated post-processing step. Record
+        # cleanly rather than erroring or computing a wrong-by-a-constant value.
+        r = calc.last_result
+        if getattr(r, "formalism", "nc") == "nc":
+            try:
+                from gradwave.postscf.work_function import work_function
+                d["work_function_eV"] = float(work_function(r))
+            except Exception as e:
+                d["wf_err"] = str(e)[:80]
+        else:
+            d["work_function"] = "n/a: uspp/paw result carries no v_eff (Φ via post-proc)"
     return d
 
 
