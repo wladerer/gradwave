@@ -37,10 +37,13 @@ GAS_SCALE = {"H": 0.5, "CO": 1.0}  # ½H2 for *H, CO for *CO
 def _relax(atoms, calc, fmax, max_steps, tag):
     atoms.calc = calc
     t = time.time()
-    opt = BFGS(atoms, logfile=str(RESULTS / f"{tag}.log"))
+    # logfile: per-step energy/fmax text; trajectory: every ionic step's geometry
+    # (with forces) so the relaxation path can be replayed / restarted / visualized
+    opt = BFGS(atoms, logfile=str(RESULTS / f"{tag}.log"),
+               trajectory=str(RESULTS / f"{tag}.traj"))
     opt.run(fmax=fmax, steps=max_steps)
     e = float(atoms.get_potential_energy())
-    write(RESULTS / f"{tag}_relaxed.xyz", atoms)  # for the r2SCAN/diff stretch
+    write(RESULTS / f"{tag}_relaxed.xyz", atoms)  # final geom for r2SCAN/diff stretch
     print(f"    [{tag}] E={e:.4f} eV  ({opt.nsteps} steps, {time.time()-t:.0f}s)",
           flush=True)
     return e
