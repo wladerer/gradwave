@@ -148,7 +148,9 @@ def _relax(atoms, calc, fmax, max_steps, tag, do_wf=True):
     return e
 
 
-def run_pair(metal: str, ads: str, dbg: dict | None = None) -> dict:
+def run_pair(metal: str, ads: str, dbg: dict | None = None,
+             skip: set[str] | None = None) -> dict:
+    skip = skip or set()  # site names to skip (e.g. a saddle-point bridge)
     RESULTS.mkdir(exist_ok=True)
     try:  # provenance snapshot (best-effort; never blocks the run)
         (RESULTS / "runinfo.json").write_text(json.dumps(_provenance(), indent=2))
@@ -183,7 +185,7 @@ def run_pair(metal: str, ads: str, dbg: dict | None = None) -> dict:
     # 2. adsorbate at each site
     res.setdefault("sites", {})
     for site in ("ontop", "bridge", "fcc", "hcp"):
-        if site in res["sites"]:
+        if site in skip or site in res["sites"]:
             continue
         a = read(STRUCT / f"{metal}_{ads}_{site}.xyz")
         res["sites"][site] = _relax(a, config.make_calc(**kw_slab), fmax, steps,
@@ -217,5 +219,8 @@ if __name__ == "__main__":
     ap.add_argument("metal", choices=["Pt", "Au"])
     ap.add_argument("ads", choices=["H", "CO"])
     ap.add_argument("--debug", action="store_true", help="tiny CPU profile")
+    ap.add_argument("--skip", default="",
+                    help="comma-separated sites to skip, e.g. --skip bridge")
     args = ap.parse_args()
-    run_pair(args.metal, args.ads, config.DEBUG if args.debug else None)
+    skip = {s.strip() for s in args.skip.split(",") if s.strip()}
+    run_pair(args.metal, args.ads, config.DEBUG if args.debug else None, skip=skip)
