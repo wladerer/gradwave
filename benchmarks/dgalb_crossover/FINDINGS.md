@@ -496,3 +496,51 @@ Gamma-point (H_00+H_01+H_01^dag) low bands. Full production needs the k-consiste
 invariant subspace across the BZ (not a single fixed p), plus the energy-contour
 current (reuse #265's greens.py) -- but the transmission, self-energy, and
 differentiability are all validated. All of S0/S1/S2 now have working spikes.
+
+---
+
+# Build: adsorbate binding with open (ESM) boundaries — accurate/reliable/robust
+
+`adsorbate_binding_1d.py` — a self-consistent 1D adsorbate-binding calculation with
+open (ESM) electrostatics, the decisive open-boundary win for adsorption. Reuses
+PR #265's validated jellium primitives (`_binding_jellium.py`, vendored with
+attribution): poisson (open/fft), kinetic, fill, LDA XC, KS total_energy. The
+adsorbate is a jellium bump (positive background + electrons) so E_bind has real
+Pauli + electrostatic + XC physics. Anderson mixing for robust metallic convergence.
+
+```
+(A) reliability  open E_bind box-independent (drift 4.4e-4 eV/A^2 over 6->18 A vac)   PASS
+(B) accuracy     binding curve: +0.093 (d=0.5, Pauli wall) -> min -0.030 (d~2.0) ->   PASS
+                 -0.001 (d=6): repulsive wall, attractive well, decays. Physical.
+(C) accuracy     differentiable surface force, autograd vs finite-diff  rel 1.1e-2    PASS
+(D) robustness   all 18 (vac x distance x mode) SCFs converged (Anderson)            PASS
+```
+
+## Findings
+
+1. **Accurate.** The binding curve is physical — a short-range Pauli repulsive wall,
+   an attractive well with an interior minimum (~2 A here), decaying to zero at
+   large separation. The differentiable force matches finite difference to 1.1%
+   (autograd through the nested SCF + open-BC fixed point — matches #265's
+   force-check quality), which also validates the total-energy consistency.
+2. **Reliable (box-independent) — with the honest scope.** The open-BC binding
+   energy is box-independent to ~4e-4 eV/A^2. IMPORTANT: for a NEUTRAL adsorbate
+   the PERIODIC binding energy is ALSO box-independent here, because the image
+   error cancels in the E_c - E_s difference. So the ESM win is NOT for neutral
+   adsorption energies (periodic already gets those right — why catalysis codes
+   work); it is decisive for (a) POLAR adsorbates / work-function changes and (b)
+   CHARGED / constant-potential electrochemical adsorption, where the surface
+   dipole/charge does not cancel (#265's asym_sweep: periodic collapses the dipole).
+3. **Robust.** Anderson mixing converges every metallic-jellium SCF across all box
+   sizes, distances, and boundary modes (18/18) — the naive linear mixing did not.
+
+## Honest scope
+
+1D (G|| = 0 channel), jellium model — this validates the METHOD (open electrostatics
++ differentiable binding forces + robust SCF), not absolute 3D adsorption numbers.
+The XC error — usually the DOMINANT adsorption-energy error — is untouched by
+boundaries. What open boundaries buy adsorption: correct polar/charged surface
+energetics, no dipole correction, constant-potential electrochemistry, and
+differentiable forces for gradient-based site relaxation / inverse design. The 3D
+production path is the ESM Poisson (basis-agnostic; #265 Phase-1 map to
+core/energies/hartree.py) inside the DG-ALB or plane-wave engine.
