@@ -81,6 +81,18 @@ def _cumint_t(g: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def _radial_grad_np(f: np.ndarray, r: np.ndarray) -> np.ndarray:
+    """df/dr on the (non-uniform) radial mesh — QE radial_gradient iflag=0
+    stencil, the numpy twin of OneCenter._rgrad_t (final point 0, point 0
+    linearly extrapolated). Used once to tabulate the partial-wave gradients
+    for the meta-GGA one-center kinetic-energy density."""
+    rp = r[2:] - r[1:-1]
+    rm = r[:-2] - r[1:-1]
+    mid = (rp**2 * (f[:-2] - f[1:-1]) - rm**2 * (f[2:] - f[1:-1])) / (rp * rm * (rp - rm))
+    g0 = mid[0] + (mid[1] - mid[0]) * ((r[0] - r[1]) / (r[2] - r[1]))
+    return np.concatenate([[g0], mid, [0.0]])
+
+
 def onecenters(system, xc, device=None) -> dict[int, OneCenter]:
     """Per-species {sp: OneCenter} for every species with atoms, cached on
     the system object per (xc, device) so the SCF, forces, stress and
@@ -341,6 +353,58 @@ class OneCenter:
                           dtype=cut.dtype, device=cut.device)
         return torch.cat([cut, pad], dim=-2)
 
+    # ---------- meta-GGA one-center kinetic-energy density τ ----------
+
+    def _tau_grad_G(self, what: str) -> torch.Tensor:
+        """(3, nm, mesh, nx) gradient-component table for channel ``what``: row
+        ``[:, a]`` is ∇φ_a resolved on the (radial × angular) grid,
+
+            ∇φ_a = φ'_{i(a)} Y_{L_a} r̂
+                 + (φ_{i(a)}/r)(∂_θY_{L_a} θ̂ + (1/sinθ)∂_φY_{L_a} φ̂),
+
+        with φ_i = u_i/r the AE (``aewfc``) or PS (``pswfc``) partial wave. The
+        one-center τ = ½ Σ_ab ρ_ab ∇φ_a·∇φ_b is then a plain becsum contraction
+        (`_tau_rad`). Cut at the augmentation radius (zero beyond ircut) like the
+        density pfunc, but with the interior gradient taken on the un-cut wave so
+        there is no boundary spike. Cached per channel; the tables are fixed."""
+        cache = getattr(self, "_tau_G", None)
+        if cache is None:
+            cache = self._tau_G = {}
+        if what in cache:
+            return cache[what]
+        tt = self._torch_tables()
+        r, ircut, nb = self.r, self.ircut, self.paw.n_proj
+        wf = self.paw.aewfc if what == "ae" else self.paw.pswfc
+        # per beta i: φ'_i = d/dr(u_i/r) and φ_i/r, both cut at ircut. r=0 (zero
+        # quadrature weight) is guarded to keep the tables finite; the 1/r factor
+        # only diverges for l=0, whose angular gradient is identically zero.
+        dphi = np.zeros((nb, self.mesh))
+        phi_over_r = np.zeros((nb, self.mesh))
+        for i in range(nb):
+            phi = np.where(r > 0, wf[i].rphi / r, 0.0)
+            dphi[i, :ircut] = _radial_grad_np(phi, r)[:ircut]
+            phi_over_r[i, :ircut] = np.where(r > 0, phi / r, 0.0)[:ircut]
+        dphi_t = torch.as_tensor(dphi, dtype=torch.float64, device=self.device)
+        cr_t = torch.as_tensor(phi_over_r, dtype=torch.float64, device=self.device)
+        ylm, dylmt, dylmp = tt["ylm"], tt["dylmt"], tt["dylmp"]  # (nx, l2)
+        g = torch.zeros(3, self.nm, self.mesh, self.nx, dtype=torch.float64,
+                        device=self.device)
+        for a, (i, _l, lm) in enumerate(self.idx):
+            g[0, a] = dphi_t[i][:, None] * ylm[:, lm][None, :]
+            g[1, a] = cr_t[i][:, None] * dylmt[:, lm][None, :]
+            g[2, a] = cr_t[i][:, None] * dylmp[:, lm][None, :]
+        cache[what] = g
+        return g
+
+    def _tau_rad(self, rho_ij: torch.Tensor, what: str) -> torch.Tensor:
+        """(..., mesh, nx) one-center kinetic-energy density τ = ½ Σ_ab ρ_ab
+        ∇φ_a·∇φ_b [e/Å⁵], differentiable in the real (..., nm, nm) becsum
+        (leading dims batch over atoms/spins). Per spin this is exactly the
+        smooth ``core.metagga.tau_b`` convention applied to the one-center
+        wavefunction Σ_a ⟨β_a|ψ⟩ φ_a, so no extra spin factor is needed."""
+        g = self._tau_grad_G(what)
+        return 0.5 * torch.einsum("...ab,camn,cbmn->...mn", rho_ij, g, g)
+
     def hartree_t(self, rho_lm: torch.Tensor):
         """Torch twin of hartree(): (v_lm (..., mesh, l2) [eV], E_H [eV],
         shaped like the leading dims). All l² channels (and any leading atom
@@ -380,15 +444,23 @@ class OneCenter:
             gs = torch.autograd.grad(e_xc, leaves)
         return float(e_xc.detach()), [g.cpu().numpy() for g in gs]
 
-    def _exc_t(self, rls: list[torch.Tensor], what: str) -> torch.Tensor:
+    def _exc_t(self, rls: list[torch.Tensor], what: str,
+               taus: list[torch.Tensor] | None = None) -> torch.Tensor:
         """E_xc [eV] from (..., mesh, l2) torch ρ_lm tensors, shaped like the
         leading (atom-batch) dims — a scalar for a single atom. The
-        quadrature body shared by _xc_exact, e1c_t and energy_theta."""
+        quadrature body shared by _xc_exact, e1c_t and energy_theta.
+
+        ``taus`` (meta-GGA only; per spin, each (..., mesh, nx)) is the
+        one-center kinetic-energy density on this angular grid — the AE or PS τ
+        the AE−PS subtraction in e1c_t augments the smooth τ̃ with. The angular
+        grid already carries the extended (GGA) resolution, which covers τ's
+        Y·∂Y content."""
         tt = self._torch_tables()
         spin = len(rls) == 2
         core = tt["core_ae"] if what == "ae" else tt["core_ps"]
         cfrac = 0.5 if spin else 1.0
         gga = getattr(self.xc, "needs_gradient", False)
+        mgga = getattr(self.xc, "needs_tau", False)
         dens, grads = [], []
         for rl in rls:
             rho_rad = rl @ tt["ylm"].T  # (..., mesh, nx), r² included
@@ -401,17 +473,25 @@ class OneCenter:
         if spin:
             if gga:
                 g_tot = grads[0] + grads[1]
-                e = self.xc.eval_energy_density(
-                    dens[0].reshape(-1), dens[1].reshape(-1),
-                    (grads[0] ** 2).sum(0).reshape(-1),
-                    (grads[1] ** 2).sum(0).reshape(-1),
-                    (g_tot**2).sum(0).reshape(-1))
+                args = [dens[0].reshape(-1), dens[1].reshape(-1),
+                        (grads[0] ** 2).sum(0).reshape(-1),
+                        (grads[1] ** 2).sum(0).reshape(-1),
+                        (g_tot**2).sum(0).reshape(-1)]
+                if mgga:
+                    assert taus is not None
+                    args += [taus[0].reshape(-1), taus[1].reshape(-1)]
+                e = self.xc.eval_energy_density(*args)
             else:
                 e = self.xc.eval_energy_density(dens[0].reshape(-1),
                                                 dens[1].reshape(-1))
         else:
             sig = (grads[0] ** 2).sum(0).reshape(-1) if gga else None
-            e = self.xc.eval_energy_density(dens[0].reshape(-1), sig)
+            if mgga:
+                assert taus is not None
+                e = self.xc.eval_energy_density(dens[0].reshape(-1), sig,
+                                                taus[0].reshape(-1))
+            else:
+                e = self.xc.eval_energy_density(dens[0].reshape(-1), sig)
         lead = rls[0].shape[:-2]
         return (e.reshape(*lead, self.mesh, self.nx) * tt["wq"][:, None]
                 * tt["ww"]).sum(dim=(-2, -1))
@@ -432,11 +512,16 @@ class OneCenter:
         tdev = self._torch_tables()["ylm"].device
         in_dev = rho_ijs[0].device
         rho_ijs = [r.to(tdev) for r in rho_ijs]
+        mgga = getattr(self.xc, "needs_tau", False)
         e_tot = None
         for what, sgn in (("ae", 1.0), ("ps", -1.0)):
             rls = [self.rho_lm_t(r, what) for r in rho_ijs]
+            # one-center τ from the SAME becsum leaves — the AE/PS partial-wave
+            # KE density whose AE−PS difference augments the smooth τ̃ (there is
+            # no τ compensation charge, unlike the density's q^L augmentation).
+            taus = [self._tau_rad(r, what) for r in rho_ijs] if mgga else None
             _, e_h = self.hartree_t(torch.stack(rls).sum(dim=0))
-            term = sgn * (e_h + self._exc_t(rls, what))
+            term = sgn * (e_h + self._exc_t(rls, what, taus))
             e_tot = term if e_tot is None else e_tot + term
         return e_tot.to(in_dev)
 

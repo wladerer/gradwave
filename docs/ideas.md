@@ -308,14 +308,37 @@ directly distinguishes gradwave from a very well-validated second copy of QE.
   and the fixed-basis stress converges to a re-converged FD (Pulay→0) at high cutoff to
   ~9e-6 eV/Å³. The prediction that stress (not forces) needs the τ term was correct.
 
+### USPP/PAW τ (landed)
+
+The collinear USPP/PAW path now carries the full meta-GGA. The smooth τ̃ = ½Σf|∇ψ̃|²
+enters exactly as on the NC path (`core.metagga.tau_b` on the smooth orbitals, the
+−½∇·(v_τ∇ψ̃) generalized-KS operator composed onto the batched USPP Hamiltonian in
+`scf.uspp_batch.BatchedHS`; v_xc = ∂e/∂ρ|_τ rides the density argument, and there is no
+τ compensation charge since the meta-GGA kernel is short-ranged). The one-center
+augmentation is `τ¹ = ½ Σ_ij ρ_ij ∇φ_i·∇φ_j` on the PAW radial×angular grid, built for
+the AE and PS partial waves and fed into the on-site XC quadrature
+(`scf.paw_onsite.OneCenter._tau_rad`); the AE−PS difference is the τ correction, and the
+on-site potential ddd_ij = ∂E_1c/∂ρ_ij picks up the τ term for free through the existing
+autograd-through-`e1c_t`. Forces work with no dedicated smooth-τ term (the smooth τ̃ is a
+functional of the position-free plane-wave coefficients, so it is a detached constant at
+fixed coefficients; the one-center τ force rides ddd). We follow the NC convention of
+building τ from valence orbitals only (no core-τ; the frozen core enters XC through
+ρ_core), and bare (non-PAW) ultrasoft is rejected up front — it has no one-center sphere
+to carry the AE/PS τ correction, matching QE. Stress and the noncollinear/SOC spinor USPP
+path stay follow-ups. Validated: one-center ddd == finite difference, an r2SCAN PAW SCF
+converges and is genuinely τ-dependent, and analytic forces == finite difference of the
+SCF energy.
+
 ### What remains, in build order
 
-(1) USPP/PAW τ (the one-center augmentation of τ); (2) meta-GGA on the non-collinear/
-SOC spinor path; (3) a learnable r2SCAN-form functional (α, and the enhancement-factor
-parameters as trained tensors) and the `train_xc_paw` recovery test at meta-GGA level,
-now directly reachable since r2SCAN is already a differentiable autograd expression.
-Validating a learnable meta-GGA against QE `input_dft='scan'` or r2SCAN at pinned
-settings to milli-eV, then repeating `train_xc_paw`, is the payoff.
+(1) USPP/PAW meta-GGA stress (the strained smooth τ̃, mirroring `postscf.stress._tau_strained`)
+and a QE r2SCAN-PAW reference fixture; (2) meta-GGA on the non-collinear/SOC spinor USPP
+path (the one-center 2×2 τ-density-matrix augmentation); (3) a learnable r2SCAN-form
+functional (α, and the enhancement-factor parameters as trained tensors) and the
+`train_xc_paw` recovery test at meta-GGA level, now directly reachable since r2SCAN is
+already a differentiable autograd expression. Validating a learnable meta-GGA against QE
+`input_dft='scan'` or r2SCAN at pinned settings to milli-eV, then repeating
+`train_xc_paw`, is the payoff.
 
 ## Differentiable pseudopotential correction
 
