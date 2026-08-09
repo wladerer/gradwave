@@ -117,3 +117,55 @@ Gate: 10^3-10^4-atom runs; O(N) scaling curves.
   quadrature points).
 - Nonlocal PP in the ALB basis — may warrant its own sub-phase.
 - eta schedule (element-size-dependent; from the spike + DGDFT literature).
+
+## Semi-infinite / open-boundary extension (S0-S2)
+
+Open systems — surfaces, interfaces, transport — on top of the validated DG-ALB
+core. Key facts that make this natural: (a) DG's nearest-neighbour face coupling
+makes H block-tridiagonal, exactly the input surface-Green's-function methods
+need; (b) the Dirichlet-to-Neumann map, the lead self-energy, and the surface
+Green's function are the SAME operator (how the semi-infinite exterior responds to
+the boundary); (c) electrostatics and wavefunctions are SEPARABLE (per PR #265's
+insight), and the electrostatics is the cheaper, larger win.
+
+Coordination with PR #265 (`moonshot-dtn-1d`, "the vacuum that isn't there"): #265
+is the PLANAR-SURFACE specialist (plane-wave in-plane, per-G|| channels, ESM
+electrostatics + energy-exact DtN). Its `experiments/dtn_1d/greens.py` implements
+the energy-exact contour density with a SCALAR 1D lead self-energy, validated to
+match the eigensolver to 5.7e-12. DG-ALB is the GENERAL-GEOMETRY route (real-space
+element blocks -> arbitrary leads / junctions). Shared core: the Green's-function
+self-energy. Reuse #265's `greens.py` contour-density template; generalize its
+scalar `lead_sigma` to a BLOCK surface GF (Sancho-Rubio) fed by DG-ALB H_00/H_01.
+
+### S0-electrostatics — open-BC Hartree (ESM)  [risk: low, the 80% win]
+Basis-AGNOSTIC: only the Poisson solve changes. Per-G|| 1D open Green's function
+`e^{-|G|||z-z'|}/(2|G|||)` instead of the periodic `1/G^2` (Otani-Sugino ESM).
+Kills the vacuum tax / dipole correction; box-independent surface observables;
+differentiable (autograd through the Poisson). Drops into the DG-ALB Hartree
+unchanged. #265 validated this in 1D jellium; adopt wholesale.
+Gate: box-independent work function; asymmetric-slab dipole without correction.
+
+### S0-wavefunction — Nitsche boundary faces  [risk: low-medium]
+Faces with one owner (domain edge) get a Nitsche boundary term (Dirichlet psi=0 /
+Robin decay) instead of an interior-penalty coupling -- a one-sided special case of
+the validated SIPG face assembly. Approximate open BC; vacuum elements need only a
+few evanescent ALBs (the adaptive basis makes vacuum orbitals cheap -- relieving
+#265's expensive Phase-2 mixed-basis problem).
+Gate: slab open in z, periodic in-plane (Bloch k||); surface energy vs a PW slab.
+
+### S1 — surface Green's function (exact open BC = lead self-energy)  [risk: medium]
+Assemble the repeating-layer H_00 (element diagonal block) and H_01 (face coupling)
+from DG; block surface GF g_s(E) by Sancho-Rubio decimation; self-energy
+Sigma = H_10 g_s H_01. This is the BLOCK generalization of #265's scalar
+`lead_sigma`. Density via the contour integral -- reuse #265's `greens.py`
+structure with block matrices. No eigensolver; Sigma(E) exact at every contour E.
+Gate: (a) 1x1-block Sancho-Rubio == #265 analytic lead_sigma; (b) bulk LDOS
+reproduces the periodic band DOS; (c) box-independent boundary LDOS.
+
+### S2 — NEGF transport  [risk: medium]
+Device = finite DG elements; leads = semi-infinite stacks (S1) attached at boundary
+faces as ADDITIVE self-energies Sigma_L, Sigma_R (no interior-face change).
+G = (E - H_dev - Sigma_L - Sigma_R)^{-1} by recursive Green's function (block-
+tridiagonal -> O(N)/energy); transmission T(E) = Tr[Gamma_L G Gamma_R G^dag].
+Differentiable transport (dT/dR, dT/d(gate)) via autograd / scf.implicit -- novel.
+Gate: clean channel -> integer conductance steps; benchmark junction.
