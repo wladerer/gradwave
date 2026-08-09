@@ -1,0 +1,109 @@
+{
+  "slabs": {
+    "Pt": "slab_Pt.xyz",
+    "Au": "slab_Au.xyz"
+  },
+  "adsorbed": {
+    "Pt_H_ontop": {
+      "file": "Pt_H_ontop.xyz",
+      "metal": "Pt",
+      "ads": "H",
+      "site": "ontop"
+    },
+    "Pt_H_bridge": {
+      "file": "Pt_H_bridge.xyz",
+      "metal": "Pt",
+      "ads": "H",
+      "site": "bridge"
+    },
+    "Pt_H_fcc": {
+      "file": "Pt_H_fcc.xyz",
+      "metal": "Pt",
+      "ads": "H",
+      "site": "fcc"
+    },
+    "Pt_H_hcp": {
+      "file": "Pt_H_hcp.xyz",
+      "metal": "Pt",
+      "ads": "H",
+      "site": "hcp"
+    },
+    "Pt_CO_ontop": {
+      "file": "Pt_CO_ontop.xyz",
+      "metal": "Pt",
+      "ads": "CO",
+      "site": "ontop"
+    },
+    "Pt_CO_bridge": {
+      "file": "Pt_CO_bridge.xyz",
+      "metal": "Pt",
+      "ads": "CO",
+      "site": "bridge"
+    },
+    "Pt_CO_fcc": {
+      "file": "Pt_CO_fcc.xyz",
+      "metal": "Pt",
+      "ads": "CO",
+      "site": "fcc"
+    },
+    "Pt_CO_hcp": {
+      "file": "Pt_CO_hcp.xyz",
+      "metal": "Pt",
+      "ads": "CO",
+      "site": "hcp"
+    },
+    "Au_H_ontop": {
+      "file": "Au_H_ontop.xyz",
+      "metal": "Au",
+      "ads": "H",
+      "site": "ontop"
+    },
+    "Au_H_bridge": {
+      "file": "Au_H_bridge.xyz",
+      "metal": "Au",
+      "ads": "H",
+      "site": "bridge"
+    },
+    "Au_H_fcc": {
+      "file": "Au_H_fcc.xyz",
+      "metal": "Au",
+      "ads": "H",
+      "site": "fcc"
+    },
+    "Au_H_hcp": {
+      "file": "Au_H_hcp.xyz",
+      "metal": "Au",
+      "ads": "H",
+      "site": "hcp"
+    },
+    "Au_CO_ontop": {
+      "file": "Au_CO_ontop.xyz",
+      "metal": "Au",
+      "ads": "CO",
+      "site": "ontop"
+    },
+    "Au_CO_bridge": {
+      "file": "Au_CO_bridge.xyz",
+      "metal": "Au",
+      "ads": "CO",
+      "site": "bridge"
+    },
+    "Au_CO_fcc": {
+      "file": "Au_CO_fcc.xyz",
+      "metal": "Au",
+      "ads": "CO",
+      "site": "fcc"
+    },
+    "Au_CO_hcp": {
+      "file": "Au_CO_hcp.xyz",
+      "metal": "Au",
+      "ads": "CO",
+      "site": "hcp"
+    }
+  },
+  "gas": {
+    "H2": "gas_H2.xyz",
+    "H2O": "gas_H2O.xyz",
+    "CO": "gas_CO.xyz"
+  }
+}

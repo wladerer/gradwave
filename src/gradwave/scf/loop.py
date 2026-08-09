@@ -25,6 +25,7 @@ import torch
 from gradwave.constants import RY_EV
 from gradwave.core.batch import BatchedK
 from gradwave.core.density import sigma_from_rho
+from gradwave.core.energies.esm import esm_energy, esm_mode_of, esm_potential
 from gradwave.core.energies.ewald import ewald_energy
 from gradwave.core.energies.hartree import hartree_potential_r
 from gradwave.core.energies.local_pp import local_potential_g
@@ -43,6 +44,7 @@ from gradwave.scf.common import (
     SCHEMES,
     adaptive_diago_tol,
     assemble_pw_energies,
+    constant_mu_occupations,
     convergence_gate,
     hubbard_u_ramp_scale,
     mix_hubbard_occ,
@@ -447,6 +449,11 @@ class SCFResult:
     recorder: Any = None  # scf.recorder.SCFRecorder — per-iteration flight recorder
     smearing: str = "none"  # smearing scheme name; the metallic χ₀ response needs
     width: float = 0.1  # it plus the width σ [eV] to form d(occ)/dε at the Fermi level
+    boundary: str = "periodic"  # electrostatic BC the SCF ran with (periodic |
+    # open_z | open_z_metal); forces/stress read it to add the ESM contribution
+    esm_bias: float = 0.0  # applied capacitor bias [V] (open_z_metal); forces read it
+    n_electrons: float = 0.0  # electron count (floats under constant-µ / target_mu);
+    # the grand potential is Ω = free_energy − fermi·n_electrons
 
 
 # A warm-start source for scf(): either a converged SCFResult, or the plainer
@@ -532,6 +539,8 @@ def effective_potentials(
     rho_s: list[torch.Tensor],
     vloc_r: torch.Tensor,
     tau: torch.Tensor | list[torch.Tensor] | None = None,
+    boundary: str = "periodic",
+    esm_bias: float = 0.0,
 ) -> list[torch.Tensor]:
     """Per-spin v_eff(r) from per-channel densities — THE assembly the SCF
     iterates with. A standalone function (not inlined in the loop) so the
@@ -548,6 +557,12 @@ def effective_potentials(
     # Real density → real Hartree potential in one rfft round trip (half the
     # transform work of the full-complex fftn/ifftn; bit-exact to it).
     v_h_r = hartree_potential_r(rho_tot, grid.g2)
+    # Open-boundary (ESM): add the open-minus-periodic electrostatic potential
+    # δΔE/δρ. Spin-independent (acts on the total charge); zero when periodic.
+    esm_mode = esm_mode_of(boundary)
+    if esm_mode is not None:
+        v_h_r = v_h_r + esm_potential(rho_tot, system.positions, system.charges,
+                                      grid, mode=esm_mode, bias=esm_bias)
     core = system.rho_core
     if nspin == 1:
         # nspin=1 is always dispatched with a collinear XCFunctional (the
@@ -795,6 +810,7 @@ def _build_mixer_precond(
     kerker: bool,
     precond: str,
     precond_op: MultipoleKerkerPrecond | None,
+    float_charge: bool = False,
 ) -> tuple[PulayMixer | BroydenMixer | JohnsonMixer, LocalTFPrecond | None]:
     """Construct the density mixer and resolve its preconditioner.
 
@@ -820,7 +836,9 @@ def _build_mixer_precond(
         alpha=mixing_alpha,
         history=hist,
         kerker=kerker,
-        check_g0=nspin == 1,
+        # constant-µ lets the charge (G=0) float, so the mixer must mix it and
+        # NOT assert charge conservation.
+        check_g0=(nspin == 1) and not float_charge,
         kerker_mask=layout.kerker_mask if nspin == 2 else None,
     )
 
@@ -1012,6 +1030,8 @@ def _assemble_scf_energies(
     e_hub: torch.Tensor,
     e_fock: torch.Tensor,
     projs_b: torch.Tensor,
+    boundary: str = "periodic",
+    esm_bias: float = 0.0,
 ) -> tuple[EnergyBreakdown, list[list[torch.Tensor]]]:
     """Total-energy breakdown at (current orbitals, mixed-out density), plus the
     per-k trimmed coeff views that flow to SCFResult. Returns (energies,
@@ -1080,6 +1100,13 @@ def _assemble_scf_energies(
             e_ewald=e_ewald,
         )
         energies.fock = e_fock
+    esm_mode = esm_mode_of(boundary)
+    if esm_mode is not None:
+        # ΔE = open-minus-periodic electrostatic correction (both spins act on
+        # the total charge). Detached like the rest of this no_grad breakdown;
+        # the differentiable copy for forces is rebuilt in postscf/forces.py.
+        energies.esm = esm_energy(rho_tot_out, system.positions, system.charges,
+                                  grid, mode=esm_mode, bias=esm_bias)
     return energies, coeffs_list_s
 
 
@@ -1264,6 +1291,16 @@ def scf(
     # reachable rhotol while the (Hartree-dominated) energy error settles far below it.
     # False (default) leaves the density gate bit-for-bit unchanged and costs nothing.
     entol: float = 1e-6,  # eV, the energy-error threshold for energy_metric (see docs)
+    boundary: str = "periodic",  # periodic | open_z | open_z_metal — open-boundary
+    # (ESM) electrostatics in the z direction (slab geometry; c ⊥ a,b). open_z =
+    # vacuum both sides; open_z_metal = metal Dirichlet planes (a capacitor). Adds
+    # the differentiable ESM correction to v_eff and the total energy
+    # (core/energies/esm.py); no dipole correction, box-independent surfaces.
+    esm_bias: float = 0.0,  # applied capacitor bias [V] for boundary="open_z_metal"
+    target_mu: float | None = None,  # constant-potential (grand-canonical) SCF: hold
+    # the Fermi level µ [eV] fixed and let the electron count N float. Requires a
+    # smearing scheme and boundary="open_z_metal" (the plates source/sink the charge).
+    # None (default) runs the ordinary fixed-N SCF.
 ) -> SCFResult:
     # `fock`, when given, adds an orbital-dependent operator to the Hamiltonian
     # each SCF step (a hybrid functional's Fock exchange). It must expose
@@ -1279,6 +1316,17 @@ def scf(
     _validate_scf_args(
         system, nspin, eigensolver, smearing, mixing_scheme, precond, tot_magnetization
     )
+    if target_mu is not None:
+        # Constant-potential (grand-canonical) SCF: the electron count floats to
+        # hold µ, so the cell is charged — the metal plates must source/sink the
+        # charge (a vacuum ESM or a periodic cell cannot), and the Fermi edge must
+        # be broadened by a smearing.
+        if boundary != "open_z_metal":
+            raise ValueError(
+                "target_mu (constant-µ) requires boundary='open_z_metal' — the "
+                "capacitor plates carry the floating counter-charge")
+        if smearing == "none":
+            raise ValueError("target_mu (constant-µ) requires a smearing scheme")
     if hubbard:
         validate_hubbard_conv(hub_occ_mix, hub_u_ramp_iters)
     if dist_ctx is not None:
@@ -1325,6 +1373,7 @@ def scf(
         kerker,
         precond,
         precond_op,
+        float_charge=target_mu is not None,
     )
 
     # flight recorder (scf.recorder): cheap per-iteration diagnostics, always
@@ -1426,6 +1475,7 @@ def scf(
     eigs_global_s = eigs_s
     occ_global_s = occ_s
     mu, entropy_term = 0.0, torch.zeros((), dtype=RDTYPE, device=device)
+    n_float = float(system.n_electrons)  # floats each iteration under target_mu
     veff_s = [torch.zeros(grid.shape, dtype=RDTYPE, device=device) for _ in range(nspin)]
 
     # hybrid Fock exchange: the operator lags one iteration (built from the
@@ -1477,7 +1527,8 @@ def scf(
         if tf_precond is not None:
             tf_precond.set_density(rho_tot)
         tau_arg = None if tau_list is None else (tau_list[0] if nspin == 1 else tau_list)
-        veff_s = effective_potentials(system, xc, rho_s, vloc_r, tau=tau_arg)
+        veff_s = effective_potentials(system, xc, rho_s, vloc_r, tau=tau_arg,
+                                      boundary=boundary, esm_bias=esm_bias)
 
         # meta-GGA generalized-KS operator: v_τσ = ∂e_xc/∂τ_σ from the current
         # (ρ, τ), applied additively as −½∇·(v_τσ∇ψ_σ) per spin in the H-apply.
@@ -1546,17 +1597,20 @@ def scf(
             # before the Fermi search, then keep only this rank's slice of the
             # resulting occupations for the local density/energy calls below.
             eigs_global_s = [gather_cat(eigs_s[sp], dist_ctx) for sp in range(nspin)]
-            occ_global_s, mu, entropy_term = shared_fermi_occupations(
-                eigs_global_s,
-                kweights_global,
-                smearing,
-                width,
-                system.n_electrons,
-                nspin,
-                device,
-                tot_magnetization=tot_magnetization,
-            )
+            if target_mu is not None:
+                occ_global_s, mu, entropy_term, n_float = constant_mu_occupations(
+                    eigs_global_s, kweights_global, smearing, width, target_mu,
+                    nspin, device)
+            else:
+                occ_global_s, mu, entropy_term = shared_fermi_occupations(
+                    eigs_global_s, kweights_global, smearing, width,
+                    system.n_electrons, nspin, device,
+                    tot_magnetization=tot_magnetization)
+                n_float = float(system.n_electrons)
             occ_s = [occ_global_s[sp][dist_ctx.k_start : dist_ctx.k_end] for sp in range(nspin)]
+        elif target_mu is not None:
+            occ_s, mu, entropy_term, n_float = constant_mu_occupations(
+                eigs_s, system.kweights, smearing, width, target_mu, nspin, device)
         else:
             occ_s, mu, entropy_term = shared_fermi_occupations(
                 eigs_s,
@@ -1568,6 +1622,7 @@ def scf(
                 device,
                 tot_magnetization=tot_magnetization,
             )
+            n_float = float(system.n_electrons)
 
         # hybrid Fock: rebuild the exchange operator from the fresh orbitals
         # (used next iteration) and its energy (used in this iteration's total).
@@ -1635,6 +1690,8 @@ def scf(
             e_hub,
             e_fock,
             projs_b,
+            boundary,
+            esm_bias,
         )
         if dist_ctx is not None:
             from gradwave.distributed import all_reduce_
@@ -1818,6 +1875,9 @@ def scf(
             recorder=recorder,
             smearing=smearing,
             width=width,
+            boundary=boundary,
+            esm_bias=esm_bias,
+            n_electrons=n_float,
         )
     m_density = rho_s[0] - rho_s[1]
     return SCFResult(
@@ -1842,6 +1902,9 @@ def scf(
         recorder=recorder,
         smearing=smearing,
         width=width,
+        boundary=boundary,
+        esm_bias=esm_bias,
+        n_electrons=n_float,
     )
 
 

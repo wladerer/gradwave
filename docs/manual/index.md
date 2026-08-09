@@ -11,7 +11,8 @@ functional.
 
 This manual is organized as a wiki. Start with [Installation](installation.md),
 then work through the tutorials. They relax a geometry with exact autograd
-forces, train an exchange-correlation functional back to PBE[[10]](bibliography.md#pbe)
+forces, compute adsorption free energies and the electrode potential at constant
+chemical potential, train an exchange-correlation functional back to PBE[[10]](bibliography.md#pbe)
 through the self-consistent density, solve a hybrid functional with exact
 exchange in the SCF, reduce the Brillouin zone by symmetry, estimate the
 plane-wave basis error, determine the Hubbard U from linear response, add

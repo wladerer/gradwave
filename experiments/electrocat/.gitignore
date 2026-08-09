@@ -1,0 +1,6 @@
+# regenerable — pseudos via get_pseudos.sh, structures via structures.py, results at runtime
+pseudos/
+pseudos_nc/
+structures/*.xyz
+results/
+__pycache__/

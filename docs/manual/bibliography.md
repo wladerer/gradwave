@@ -46,4 +46,7 @@ the text link here.
 <li id="davidson">E. R. Davidson, "The iterative calculation of a few of the lowest eigenvalues and corresponding eigenvectors of large real-symmetric matrices," J. Comput. Phys. <strong>17</strong>, 87 (1975).</li>
 <li id="weinert">M. Weinert, R. E. Watson, and J. W. Davenport, "Total-energy differences and eigenvalue sums," Phys. Rev. B <strong>32</strong>, 2115 (1985).</li>
 <li id="pajda">M. Pajda, J. Kudrnovský, I. Turek, V. Drchal, and P. Bruno, "Ab initio calculations of exchange interactions, spin-wave stiffness constants, and Curie temperatures of Fe, Co, and Ni," Phys. Rev. B <strong>64</strong>, 174402 (2001).</li>
+<li id="otani">M. Otani and O. Sugino, "First-principles calculations of charged surfaces and interfaces: A plane-wave nonrepeated slab approach," Phys. Rev. B <strong>73</strong>, 115407 (2006).</li>
+<li id="che">J. K. Nørskov, J. Rossmeisl, A. Logadottir, L. Lindqvist, J. R. Kitchin, T. Bligaard, and H. Jónsson, "Origin of the Overpotential for Oxygen Reduction at a Fuel-Cell Cathode," J. Phys. Chem. B <strong>108</strong>, 17886 (2004).</li>
+<li id="trasatti">S. Trasatti, "The absolute electrode potential: an explanatory note (Recommendations 1986)," Pure Appl. Chem. <strong>58</strong>, 955 (1986).</li>
 </ol>

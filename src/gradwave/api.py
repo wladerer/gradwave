@@ -319,7 +319,8 @@ def run_scf(
         return scf_uspp(cast("USPPSystem", system), xc,
                         mixing_history=inp.scf.mixing.history,
                         mixing_kerker=kerker, start_from=start_from,
-                        dist_ctx=dist_ctx, **common)
+                        dist_ctx=dist_ctx, boundary=inp.scf.boundary,
+                        esm_bias=inp.scf.esm_bias, **common)
     from gradwave.scf.loop import scf
 
     return scf(cast("System", system), cast("XCFunctional", xc),
@@ -327,6 +328,9 @@ def run_scf(
                eigensolver=inp.scf.eigensolver,
                mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
                dist_ctx=dist_ctx,
+               boundary=inp.scf.boundary,
+               esm_bias=inp.scf.esm_bias,
+               target_mu=inp.scf.target_mu,
                **common)
 
 

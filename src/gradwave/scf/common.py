@@ -308,3 +308,25 @@ def shared_fermi_occupations(eigs_s, kweights, smearing, width, n_electrons,
         occ_s.append(o)
         ent = ent - width * (g_spin * kweights[:, None] * s_ent).sum()
     return occ_s, mu, ent
+
+
+def constant_mu_occupations(eigs_s, kweights, smearing, width, mu, nspin, device):
+    """Occupations at a FIXED Fermi level µ (constant-potential / grand-canonical):
+    the electron count N = Σ_k w_k Σ_n g·f((ε−µ)/σ) FLOATS with the eigenvalues,
+    instead of being fixed with µ solved for. Returns (occ_s, µ, entropy_term,
+    n_electrons). Requires a smearing scheme (a metal held at a fixed electrode
+    potential); pair with boundary="open_z_metal" so the plates carry the charge."""
+    if smearing == "none":
+        raise ValueError("constant-µ (target_mu) requires a smearing scheme "
+                         "(the electrode potential broadens the Fermi edge)")
+    scheme = SCHEMES[smearing]
+    g_spin = 2 if nspin == 1 else 1
+    mu_t = torch.tensor(float(mu), dtype=RDTYPE, device=device)
+    occ_s, ent, n_e = [], torch.zeros((), dtype=RDTYPE, device=device), 0.0
+    for isp in range(nspin):
+        o, s_ent = occupations_and_entropy(eigs_s[isp], mu_t, scheme, width,
+                                           degeneracy=g_spin)
+        occ_s.append(o)
+        ent = ent - width * (g_spin * kweights[:, None] * s_ent).sum()
+        n_e += float((kweights[:, None] * o).sum())
+    return occ_s, float(mu), ent, n_e
