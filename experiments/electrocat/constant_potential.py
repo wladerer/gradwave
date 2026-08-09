@@ -44,7 +44,11 @@ RESULTS = HERE / "results"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 ECUT_NC = 80.0 * RY          # ONCV 5d metal needs a high wavefunction cutoff
 KPTS = (4, 4, 1)
-WIDTH = 0.1                  # eV, fermi-dirac (physical electronic temperature)
+WIDTH = 0.3                  # eV, fermi-dirac. A high-DOS metal needs a BROAD
+# smearing for the grand-canonical SCF: Pt's large d-band DOS at E_F makes dN/dµ
+# huge, so a sharp (0.1 eV) smearing lets the floating N oscillate and the fixed-µ
+# SCF never converges (even at µ=µ0). Na tolerated 0.1 only because it is
+# free-electron (low DOS); 0.3 eV ≈ the validated Na-test width.
 U_SHE_ABS = 4.44            # V, absolute SHE potential (Trasatti)
 
 
@@ -69,8 +73,13 @@ def run(quick: bool = False) -> dict:
     pos = atoms.get_positions()
     species = [0] * len(atoms)                    # pure Pt
     xc = PBE()
+    # local_tf: the vacuum-aware preconditioner (the slab is mostly vacuum + plates),
+    # which damps the spatial charge-sloshing between slab and capacitor plates.
+    # mixing_alpha=0.4: extra damping for the oscillatory grand-canonical N feedback
+    # (the instability is oscillatory, so a more conservative step stabilizes it).
     common = dict(smearing="fermi-dirac", width=WIDTH, boundary="open_z_metal",
-                  max_iter=200, etol=1e-6, rhotol=1e-5, verbose=False)
+                  precond="local_tf", mixing_alpha=0.4, max_iter=250,
+                  etol=1e-6, rhotol=1e-5, verbose=False)
 
     def _scf(**kw):
         sysx = setup_system(cell, pos, species, [pt], ecut=ECUT_NC,
@@ -79,22 +88,22 @@ def run(quick: bool = False) -> dict:
             sysx = sysx.to(DEVICE)
         return scf(sysx, xc, **common, **kw)
 
-    # 0. neutral fixed-N run → the PZC reference (Fermi level µ0, work function Φ_PZC)
-    if "pzc" not in res:
-        t = time.time()
-        r0 = _scf()
-        if not r0.converged:
-            raise SystemExit("neutral SCF did not converge")
-        phi_pzc = float(work_function(r0))
-        res["pzc"] = dict(mu0=float(r0.fermi), n0=float(r0.n_electrons),
-                          phi_pzc=phi_pzc, u_pzc_vs_she=phi_pzc - U_SHE_ABS,
-                          n_iter=int(r0.n_iter))
-        print(f"[PZC] µ0={r0.fermi:+.3f} eV  N0={r0.n_electrons:.3f}  "
-              f"Φ_PZC={phi_pzc:.3f} eV  U_PZC={phi_pzc - U_SHE_ABS:+.3f} V vs SHE  "
-              f"({time.time() - t:.0f}s)", flush=True)
-        save()
-    mu0, n0 = res["pzc"]["mu0"], res["pzc"]["n0"]
-    phi_pzc = res["pzc"]["phi_pzc"]
+    # 0. neutral fixed-N run → the PZC reference AND the warm-start seed for every
+    #    fixed-µ run. A charged high-DOS metal cold-starts terribly; seeding the
+    #    fixed-µ SCF from the converged neutral density means only N has to adjust,
+    #    not the whole density. Always recomputed (needed live as the seed).
+    t = time.time()
+    r0 = _scf()
+    if not r0.converged:
+        raise SystemExit("neutral SCF did not converge")
+    phi_pzc = float(work_function(r0))
+    mu0, n0 = float(r0.fermi), float(r0.n_electrons)
+    res["pzc"] = dict(mu0=mu0, n0=n0, phi_pzc=phi_pzc,
+                      u_pzc_vs_she=phi_pzc - U_SHE_ABS, n_iter=int(r0.n_iter))
+    print(f"[PZC] µ0={mu0:+.3f} eV  N0={n0:.3f}  Φ_PZC={phi_pzc:.3f} eV  "
+          f"U_PZC={phi_pzc - U_SHE_ABS:+.3f} V vs SHE  ({time.time() - t:.0f}s)",
+          flush=True)
+    save()
 
     # 1. fixed-µ (grand-canonical) sweep — N floats, plates carry the counter-charge
     dmus = [-0.2, 0.0, 0.2] if quick else [-0.4, -0.2, -0.1, 0.0, 0.1, 0.2, 0.4]
@@ -104,7 +113,7 @@ def run(quick: bool = False) -> dict:
         if key in res["sweep"]:
             continue
         t = time.time()
-        r = _scf(target_mu=mu0 + dmu)
+        r = _scf(target_mu=mu0 + dmu, start_from=r0)  # seed from neutral density
         if not r.converged:
             print(f"[µ{key}] did NOT converge — skipping", flush=True)
             continue
