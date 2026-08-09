@@ -165,32 +165,28 @@ def run_pair(metal: str, ads: str, dbg: dict | None = None) -> dict:
                    ecut=p.get("ecut"), ecutrho=p.get("ecutrho"))
     fmax, steps = p.get("fmax", config.FMAX), p.get("max_steps", config.MAX_STEPS)
 
-    # ONE calculator for the clean slab + all four adsorbate sites (same cell and
-    # elements). Two wins over a fresh calc per stage:
-    #   (1) the pseudopotential form factors (radial FT / sbt, the CPU-bound setup
-    #       that dominates the first SCF of a fresh calc) are built once, not 5×.
-    #   (2) each stage's SCF warm-starts off the previous stage's converged density
-    #       — the metal is barely perturbed by one adsorbate, so the slab density is
-    #       a far better seed than an atomic guess. The density seed is grid-based
-    #       and always applies; the orbital seed is auto-dropped when the adsorbate
-    #       changes the symmetry/nbands (_remap_coeffs_to_spheres bails to a fresh
-    #       orbital start) — robust, never an error.
-    # Gas uses its own calculator below (different cell).
-    slab_calc = config.make_calc(**kw_slab)
+    # A fresh calculator per stage (the safe, known-good behavior the Pt-H run used).
+    # An earlier optimization reused one calculator across the slab + sites to build
+    # form factors once and warm-start each stage, but the adsorbate changes the atom
+    # count vs the clean slab (16 → 17/18) and the USPP/PAW warm-start extrapolates a
+    # per-atom becsum that cannot cross a natoms change — it crashes ("tensor 18 vs
+    # 16"). A natoms-aware calc reuse (bail to a cold start on atom-count change, like
+    # the orbital seed already does) is future work; correctness first here.
 
     # 1. clean slab
     if "e_clean" not in res:
         slab = read(STRUCT / f"slab_{metal}.xyz")
-        res["e_clean"] = _relax(slab, slab_calc, fmax, steps, f"{metal}_slab")
+        res["e_clean"] = _relax(slab, config.make_calc(**kw_slab), fmax, steps,
+                                f"{metal}_slab")
         save()
 
-    # 2. adsorbate at each site (reusing slab_calc → warm-started from the slab)
+    # 2. adsorbate at each site
     res.setdefault("sites", {})
     for site in ("ontop", "bridge", "fcc", "hcp"):
         if site in res["sites"]:
             continue
         a = read(STRUCT / f"{metal}_{ads}_{site}.xyz")
-        res["sites"][site] = _relax(a, slab_calc, fmax, steps,
+        res["sites"][site] = _relax(a, config.make_calc(**kw_slab), fmax, steps,
                                     f"{metal}_{ads}_{site}")
         save()
 
