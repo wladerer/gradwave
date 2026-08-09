@@ -1301,6 +1301,15 @@ def scf(
     # the Fermi level µ [eV] fixed and let the electron count N float. Requires a
     # smearing scheme and boundary="open_z_metal" (the plates source/sink the charge).
     # None (default) runs the ordinary fixed-N SCF.
+    newton_finish: bool = False,  # inexact-Newton (JFNK) finisher: once the density
+    # residual falls below `newton_switch`, replace the linear mixer step with the
+    # exact-Jacobian Newton step (I - χ₀ K_Hxc) δ = r (scf.newton_nc), reusing the
+    # response matvecs. Same fixed point as the mixer (exact at convergence), quadratic
+    # near it. Requires use_symmetry=False; NC valence path only (no +U/Fock/meta-GGA/
+    # dist/constant-µ). False (default) leaves mixing bit-for-bit unchanged.
+    newton_switch: float = 1e-3,  # residual-norm threshold to switch mixer→Newton
+    newton_kwargs: dict[str, Any] | None = None,  # forwarded to newton_nc.newton_delta_nc
+    # (inner_tol, max_inner, beta, history, chi0_tol, chi0_max_iter)
 ) -> SCFResult:
     # `fock`, when given, adds an orbital-dependent operator to the Hamiltonian
     # each SCF step (a hybrid functional's Fock exchange). It must expose
@@ -1327,6 +1336,20 @@ def scf(
                 "capacitor plates carry the floating counter-charge")
         if smearing == "none":
             raise ValueError("target_mu (constant-µ) requires a smearing scheme")
+    if newton_finish:
+        if getattr(system, "sym", None) is not None:
+            raise ValueError(
+                "newton_finish requires use_symmetry=False: the exact-Jacobian "
+                "response matvecs (scf.newton_nc / scf.implicit) need the full "
+                "TR-reduced k-mesh, since a density perturbation breaks the "
+                "crystal symmetry")
+        if hubbard or fock is not None or xc.needs_tau or dist_ctx is not None \
+                or target_mu is not None:
+            raise NotImplementedError(
+                "newton_finish supports the plain norm-conserving valence path "
+                "only (no DFT+U, hybrid Fock, meta-GGA, distributed, or "
+                "constant-µ); those Jacobian blocks are not wired into the NC "
+                "response matvecs")
     if hubbard:
         validate_hubbard_conv(hub_occ_mix, hub_u_ramp_iters)
     if dist_ctx is not None:
@@ -1453,6 +1476,11 @@ def scf(
     coeffs_b_s = _seed_orbitals(nk, nb, bk, nspin, device, start_from)
 
     e_free_prev, converged, history = None, False, []
+    # inexact-Newton finisher latch: flips True (and stays) the first iteration
+    # the density residual drops below newton_switch; from then on the linear
+    # mixer step is replaced by the exact-Jacobian Newton step (scf.newton_nc).
+    newton_active = False
+    newton_steps = 0
     # Bound before the loop purely so ty can see these names as always defined
     # after it (the loop runs `for it in range(1, max_iter + 1)`, and max_iter
     # is always >= 1 in practice -- never surfaced as a user knob below 1, see
@@ -1813,8 +1841,23 @@ def scf(
                     return out
 
                 mixer.extra_precond = _spin_pc
-        # (total, mag) → per-channel r-space densities (MixLayout.unpack)
-        rho_s, _ = layout.unpack(mixer.step(rho_in_vec, rho_out_vec))
+        # inexact-Newton finisher: once inside the quadratic basin (residual
+        # below newton_switch) replace the linear mixer step with the exact
+        # Newton step (I − χ₀ K_Hxc) δ = r on the SCF residual. Reaches the SAME
+        # fixed point (exact at convergence), so correctness is unchanged; the
+        # gain is fewer iterations to a tight residual (scf.newton_nc).
+        if newton_finish and not newton_active and res_norm < newton_switch:
+            newton_active = True
+        if newton_active:
+            from gradwave.scf.newton_nc import newton_finish_step
+
+            rho_s, _nsol = newton_finish_step(
+                system, xc, nspin, smearing, width, mu, rho_s, rho_out_s,
+                veff_s, coeffs_list_s, eigs_s, occ_s, **(newton_kwargs or {}))
+            newton_steps += 1
+        else:
+            # (total, mag) → per-channel r-space densities (MixLayout.unpack)
+            rho_s, _ = layout.unpack(mixer.step(rho_in_vec, rho_out_vec))
 
     if not converged:
         logger.warning(
