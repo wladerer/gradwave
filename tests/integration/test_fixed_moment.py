@@ -46,8 +46,12 @@ def test_fsm_holds_the_moment_fixed():
     torch.set_num_threads(4)
     r0 = scf(_make(), LSDA_PW92(), nspin=2, tot_magnetization=0.0, smearing="none",
              etol=1e-9, rhotol=1e-8, verbose=False)
+    # The forced M=2 state sits near a numerical instability, so its iteration
+    # count is runner-dependent. The fuller-mesh PP_RHOATOM guess shifted it near
+    # the old 150 cap (it converges in ~110 locally but exceeded 150 on a CI shard);
+    # 300 gives margin. The moment is still held exactly, which is the point.
     r2 = scf(_make(), LSDA_PW92(), nspin=2, tot_magnetization=2.0, smearing="none",
-             etol=1e-9, rhotol=1e-8, verbose=False, max_iter=150)
+             etol=1e-9, rhotol=1e-8, verbose=False, max_iter=300)
     assert r2.converged
     assert abs(float(r2.mag_total) - 2.0) < 1e-6  # moment fixed, not relaxed
     assert float(r2.energies.total) > float(r0.energies.total)  # excited
