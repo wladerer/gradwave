@@ -282,6 +282,126 @@ class BatchedHamiltonian:
         return cached
 
 
+class SpinBatchedHamiltonian:
+    """Collinear nspin=2 H apply that folds spin into the batch axis: ONE op of
+    each kind (kinetic mul, box scatter, ifftn, potential mul, fftn, gather, KB
+    becp + einsum) over the stacked ``(2·nk, nb, npw_max)`` block, spin-up in the
+    first ``nk`` rows and spin-down in the next ``nk``.
+
+    Only ``v_eff`` is spin-dependent — kinetic ``t``, the KB projectors ``p`` and
+    ``dij`` are shared — so the two per-spin ``BatchedHamiltonian`` applies differ
+    solely in the real-space potential multiply. This class runs the identical
+    FLOPs as those two applies (2× the batch = 2× the work in one call); the win
+    is HALVED Python/ATen per-op dispatch and kernel-launch overhead. Its output
+    on ``cat([c_up, c_dn])`` is bit-identical to
+    ``cat([H_up.apply(c_up), H_dn.apply(c_dn)])`` (verified by test).
+
+    Scope: NC (norm-conserving), plain LDA/GGA only. No DFT+U (``hub_dij`` is
+    per-spin), meta-GGA, Fock, or dual-grid (``smooth``); the SCF loop guards
+    those cases and falls back to the serial per-spin path.
+    """
+
+    def __init__(
+        self,
+        bk: BatchedK,
+        shape: tuple[int, int, int],
+        v_eff_r_up: torch.Tensor,
+        v_eff_r_dn: torch.Tensor,
+        p: torch.Tensor,
+    ) -> None:
+        self.bk = bk
+        self.shape = shape
+        self.n = shape[0] * shape[1] * shape[2]
+        self.nk = bk.nk
+        # per-spin real-space potential, stacked (2, *shape)
+        self.v_eff2 = torch.stack([v_eff_r_up, v_eff_r_dn], dim=0)
+        self.p = p  # (nk, nproj, npw_max), spin-independent
+        flat_idx = bk.flat_idx
+        # padded slots → trash index n (one past the box), doubled over spin
+        idx_scatter = torch.where(bk.mask, flat_idx, torch.full_like(flat_idx, self.n))
+        self.idx_scatter2 = torch.cat([idx_scatter, idx_scatter], dim=0)
+        self.gather2 = torch.cat([flat_idx, flat_idx], dim=0)
+        self.mask2 = torch.cat([bk.mask, bk.mask], dim=0)
+        self._box: torch.Tensor | None = None
+        # cdtype → cast (t2, v2, p2, p2_conj, dij)
+        self._tab_cache: dict[
+            torch.dtype, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        ] = {}
+
+    def _tables(
+        self, cdtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Cast + spin-double the tables to the coefficients' precision (cached).
+
+        Mirrors ``BatchedHamiltonian._tables``: t and the KB projectors are
+        doubled over spin (``cat``), v_eff stays the (2, *shape) stack."""
+        cached = self._tab_cache.get(cdtype)
+        if cached is None:
+            from gradwave.dtypes import real_of
+
+            rdtype = real_of(cdtype)
+            p2 = torch.cat([self.p, self.p], dim=0).to(cdtype)
+            cached = (
+                torch.cat([self.bk.t, self.bk.t], dim=0).to(rdtype),
+                self.v_eff2.to(rdtype),
+                p2,
+                p2.conj().resolve_conj(),
+                self.bk.dij_full.to(cdtype),
+            )
+            self._tab_cache[cdtype] = cached
+        return cached
+
+    def _get_box(self, nk2: int, nb: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        if (
+            self._box is None
+            or self._box.shape[0] != nk2
+            or self._box.shape[1] < nb
+            or self._box.dtype != dtype
+        ):
+            self._box = torch.zeros(nk2, nb, self.n + 1, dtype=dtype, device=device)
+        return self._box[:, :nb]
+
+    def _band_chunk(self, nk2: int, device: torch.device, elem_bytes: int = 16) -> int:
+        """Bands per chunk (dense-box memory bound); see ``BatchedHamiltonian``."""
+        if device.type != "cuda":
+            return 1_000_000
+        return max(1, int(_GPU_DENSE_BUDGET_BYTES / (elem_bytes * self.n * max(nk2, 1))))
+
+    def apply(self, c: torch.Tensor) -> torch.Tensor:
+        """(2·nk, nb, npw_max) → H c, per-spin V_eff, mask preserved. Chunked
+        over bands to bound peak memory on the dense grid (math identical)."""
+        nk2, nb, m = c.shape
+        nk = self.nk
+        if _HAPPLY_TALLY["on"]:
+            _HAPPLY_TALLY["count"] += nk2 * nb
+        t_r, v2, p, p_conj, dij = self._tables(c.dtype)
+        out = t_r[:, None, :] * c
+
+        chunk = self._band_chunk(nk2, c.device, c.element_size())
+        for lo in range(0, nb, chunk):
+            hi = min(lo + chunk, nb)
+            cc = c[:, lo:hi]
+            nbc = hi - lo
+            box = self._get_box(nk2, nbc, cc.dtype, cc.device)
+            idx = self.idx_scatter2[:, None, :].expand(nk2, nbc, m)
+            box.scatter_(2, idx, cc)
+            psi = torch.fft.ifftn(box[..., : self.n].reshape(nk2, nbc, *self.shape),
+                                  dim=(-3, -2, -1))
+            # per-spin potential: split (2·nk) → (2, nk), multiply by v2 broadcast
+            # over (nk, nb, *grid), fold back. Same multiply value per row as the
+            # serial applies, so fftn(ifftn(·)·V) is bit-identical to those.
+            psi = psi.reshape(2, nk, nbc, *self.shape) * v2[:, None, None]
+            psi = psi.reshape(nk2, nbc, *self.shape)
+            vg = torch.fft.fftn(psi, dim=(-3, -2, -1)).reshape(nk2, nbc, self.n)
+            gath = self.gather2[:, None, :].expand(nk2, nbc, m)
+            out[:, lo:hi] += vg.gather(2, gath)
+
+        if p.shape[1]:
+            b = becp_b(p, c, p_conj)
+            out = out + torch.einsum("kbp,pq,kqg->kbg", b, dij, p)
+        return out * self.mask2[:, None, :]
+
+
 def density_b(
     coeffs: torch.Tensor,  # (nk, nb, npw_max)
     occ: torch.Tensor,  # (nk, nb)

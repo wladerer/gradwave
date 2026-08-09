@@ -945,6 +945,48 @@ def _solve_bands(
     return eigenvalues, c
 
 
+def _solve_bands_spin_batched(
+    veff_s: list[torch.Tensor],
+    coeffs_b_s: list[torch.Tensor],
+    bk: BatchedK,
+    grid_shape: tuple[int, int, int],
+    projs_b: torch.Tensor,
+    eigensolver: str,
+    tol_eff: float,
+    use_low: bool,
+    cdtype: torch.dtype,
+    t_solve: torch.Tensor,
+    device: torch.device,
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Collinear nspin=2 eigensolve folding spin into the batch: ONE batched
+    solve over a stacked (2·nk, nb, npw) block instead of two serial per-spin
+    Davidson calls. Only ``v_eff`` differs between spins; kinetic + KB are shared
+    (see ``SpinBatchedHamiltonian``). Returns per-spin ``[eigs↑, eigs↓]`` and
+    ``[coeffs↑, coeffs↓]``, split back from the stacked result. Eligibility is
+    decided by the caller (NC/LDA-GGA/davidson, no +U/meta-GGA/Fock/dist/µ/sym)."""
+    from gradwave.core.batch import SpinBatchedHamiltonian
+    from gradwave.solvers.registry import get as get_solver
+
+    nk = bk.nk
+    h = SpinBatchedHamiltonian(bk, grid_shape, veff_s[0], veff_s[1], projs_b)
+    c0 = torch.cat([coeffs_b_s[0].to(cdtype), coeffs_b_s[1].to(cdtype)], dim=0)
+    t2 = torch.cat([t_solve, t_solve], dim=0)
+    mask2 = torch.cat([bk.mask, bk.mask], dim=0)
+
+    dav = get_solver(eigensolver)(
+        h.apply, c0, t2, mask2, tol=tol_eff, nbands=c0.shape[1]
+    )
+    eig2 = dav.eigenvalues.to(RDTYPE)  # (2·nk, nb)
+    c2 = dav.eigenvectors.to(CDTYPE)  # (2·nk, nb, npw)
+    eigs = [eig2[:nk], eig2[nk:]]
+    coeffs = [c2[:nk], c2[nk:]]
+    if use_low:
+        coeffs = [
+            c / torch.linalg.norm(c, dim=-1, keepdim=True).clamp_min(1e-30) for c in coeffs
+        ]
+    return eigs, coeffs
+
+
 def _bootstrap_tau(
     xc: XCFunctional | SpinXC,
     coeffs_b_s: list[torch.Tensor],
@@ -1301,6 +1343,13 @@ def scf(
     # the Fermi level µ [eV] fixed and let the electron count N float. Requires a
     # smearing scheme and boundary="open_z_metal" (the plates source/sink the charge).
     # None (default) runs the ordinary fixed-N SCF.
+    spin_batch: bool = False,  # opt-in collinear nspin=2 speedup: fold the two spin
+    # channels into ONE davidson_batched call over a (2·nk, nb, npw) block instead of
+    # two serial per-spin solves, halving per-op dispatch/launch overhead (identical
+    # FLOPs). Only the eligible NC/LDA-GGA/davidson case takes the fast path; +U,
+    # meta-GGA, Fock, distributed, constant-µ, symmetry-reduced spin, and any
+    # non-davidson solver fall back to the per-spin loop. nspin=1 ignores it. The
+    # fixed point is unchanged (only the eigensolve batching differs).
 ) -> SCFResult:
     # `fock`, when given, adds an orbital-dependent operator to the Hamiltonian
     # each SCF step (a hybrid functional's Fock exchange). It must expose
@@ -1502,6 +1551,24 @@ def scf(
 
     collinear_mag = isinstance(system.rho_symmetrizer, CollinearMagneticSymmetrizer)
 
+    # Spin-batched eigensolve eligibility (opt-in `spin_batch`): fold the two
+    # collinear spin channels into ONE davidson_batched call. Only the plain
+    # NC/LDA-GGA/davidson case qualifies — +U (per-spin hub_dij), meta-GGA
+    # (per-spin v_τ), Fock, distributed, constant-µ, and the spin-swapping
+    # magnetic symmetrizer all need the per-spin operators the serial path
+    # builds, so they fall back byte-for-byte. nspin=1 never enters this branch.
+    spin_batch_ok = (
+        spin_batch
+        and nspin == 2
+        and eigensolver == "davidson"
+        and hub is None
+        and fock is None
+        and not xc.needs_tau
+        and dist_ctx is None
+        and target_mu is None
+        and not collinear_mag
+    )
+
     # Static across the loop (the mesh doesn't change), so gathered once here
     # rather than every iteration alongside the eigenvalues.
     kweights_global = system.kweights
@@ -1558,36 +1625,45 @@ def scf(
         # same u_scale scales the V_U D-matrix (here) and the E_U energy
         # (_hubbard_occ_update below), so energy and potential stay at one U.
         u_scale = hubbard_u_ramp_scale(it, hub_u_ramp_iters)
-        for sp in range(nspin):
-            fock_sp = fock_apply_s[sp] if fock_apply_s is not None else None
-            mgga_sp = metagga_apply_s[sp] if metagga_apply_s is not None else None
-            n_hub_sp = None
-            if hub is not None:
-                # n_hub_s is set together with hub (the `if hubbard:` block
-                # above, and refreshed in lockstep by _hubbard_occ_update
-                # below), so it's never None when hub isn't.
-                assert n_hub_s is not None
-                n_hub_sp = n_hub_s[sp]
-            eigs_s[sp], coeffs_b_s[sp] = _solve_bands(
-                veff_s[sp],
-                coeffs_b_s[sp],
-                bk,
-                grid.shape,
-                projs_b,
-                hub,
-                hub_q,
-                n_hub_sp,
-                hub_alpha,
-                fock_sp,
-                mgga_sp,
-                eigensolver,
-                tol_eff,
-                use_low,
-                cdtype,
-                t_solve,
-                device,
-                u_scale,
+        if spin_batch_ok:
+            # eligible collinear nspin=2: one davidson_batched over (2·nk, nb, npw)
+            # (see _solve_bands_spin_batched). fock/mgga/hub are all guaranteed
+            # absent here by spin_batch_ok, so no per-spin operators are dropped.
+            eigs_s, coeffs_b_s = _solve_bands_spin_batched(
+                veff_s, coeffs_b_s, bk, grid.shape, projs_b,
+                eigensolver, tol_eff, use_low, cdtype, t_solve, device,
             )
+        else:
+            for sp in range(nspin):
+                fock_sp = fock_apply_s[sp] if fock_apply_s is not None else None
+                mgga_sp = metagga_apply_s[sp] if metagga_apply_s is not None else None
+                n_hub_sp = None
+                if hub is not None:
+                    # n_hub_s is set together with hub (the `if hubbard:` block
+                    # above, and refreshed in lockstep by _hubbard_occ_update
+                    # below), so it's never None when hub isn't.
+                    assert n_hub_s is not None
+                    n_hub_sp = n_hub_s[sp]
+                eigs_s[sp], coeffs_b_s[sp] = _solve_bands(
+                    veff_s[sp],
+                    coeffs_b_s[sp],
+                    bk,
+                    grid.shape,
+                    projs_b,
+                    hub,
+                    hub_q,
+                    n_hub_sp,
+                    hub_alpha,
+                    fock_sp,
+                    mgga_sp,
+                    eigensolver,
+                    tol_eff,
+                    use_low,
+                    cdtype,
+                    t_solve,
+                    device,
+                    u_scale,
+                )
 
         if dist_ctx is not None:
             from gradwave.distributed import gather_cat
