@@ -8,6 +8,7 @@ from gradwave.constants import BOHR_ANG, E2, RY_EV
 from gradwave.pseudo.atomic import rhoatom_of_q
 from gradwave.pseudo.kb import beta_form_factors
 from gradwave.pseudo.local import alpha_z, vloc_of_g
+from gradwave.pseudo.radial import sbt
 from gradwave.pseudo.upf import parse_upf
 from gradwave.pseudo.upf_paw import parse_upf_paw
 
@@ -98,6 +99,16 @@ def test_rhoatom_normalization(si):
     # SAD guess rescales to the exact electron count downstream.
     zhat = rhoatom_of_q(si, np.array([0.0]))[0]
     assert abs(zhat - si.z_valence) < 0.05
+
+
+def test_rhoatom_integrates_full_mesh(si):
+    # rhoatom_of_q must integrate the WHOLE radial mesh, not the 10-bohr _msh
+    # local-channel clip (the atomic density has no −Z/r tail, so clipping only
+    # sheds charge and distorts the SAD guess shape under its G=0 rescale). Pin
+    # the no-clip behaviour: the form factor equals the full-mesh SBT exactly.
+    q = np.array([0.0, 0.3, 1.0])
+    full = sbt(0, si.rhoatom, si.r, si.rab, q)
+    np.testing.assert_allclose(rhoatom_of_q(si, q), full, rtol=0, atol=0)
 
 
 def test_vloc_long_range_is_coulomb(si):
