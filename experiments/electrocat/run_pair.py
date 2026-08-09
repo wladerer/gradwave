@@ -34,7 +34,81 @@ GAS_FOR = {"H": "H2", "CO": "CO"}
 GAS_SCALE = {"H": 0.5, "CO": 1.0}  # ½H2 for *H, CO for *CO
 
 
-def _relax(atoms, calc, fmax, max_steps, tag):
+def _provenance() -> dict:
+    """One-time environment/provenance snapshot so a result is reproducible and a
+    slow run can be blamed on a throttled/loaded host. All best-effort."""
+    info: dict = {}
+    try:
+        from gradwave import runinfo as ri
+        info["git"] = ri._git_commit()
+        info["cpu"], info["memory"] = ri.cpu_info(), ri.memory_info()
+        info["gpu"], info["thermal"] = ri.gpu_info(), ri.thermal_info()
+    except Exception as e:
+        info["runinfo_err"] = str(e)[:120]
+    try:
+        import torch
+
+        import gradwave
+        info["torch"] = torch.__version__
+        info["gradwave"] = getattr(gradwave, "__version__", "?")
+        info["cuda"] = bool(torch.cuda.is_available())
+        info["device"] = (torch.cuda.get_device_name(0)
+                          if torch.cuda.is_available() else "cpu")
+        info["torch_threads"] = torch.get_num_threads()
+    except Exception as e:
+        info["ver_err"] = str(e)[:120]
+    info["config"] = dict(ecut=config.ECUT, ecutrho=config.ECUTRHO,
+                          kpts_slab=config.KPTS_SLAB, kpts_gas=config.KPTS_GAS,
+                          smearing=config.SMEARING, width=config.WIDTH, xc=config.XC,
+                          fmax=config.FMAX, max_steps=config.MAX_STEPS)
+    return info
+
+
+def _final_fmax(log_path) -> float | None:
+    try:
+        return float(Path(log_path).read_text().strip().splitlines()[-1].split()[-1])
+    except Exception:
+        return None
+
+
+def _diagnostics(calc, opt, fmax, max_steps, wall, log_path, do_wf) -> dict:
+    """Per-stage diagnostics (all best-effort — never raises). Surfaces the SILENT
+    failure modes: a metal converging as an insulator, nbands too small to hold the
+    smearing tail, and a geometry that hit the BFGS step cap without converging."""
+    d: dict = {"wall_s": round(wall, 1), "final_fmax": _final_fmax(log_path)}
+    try:
+        d["bfgs_steps"] = int(opt.nsteps)
+        ff = d["final_fmax"]
+        d["bfgs_capped"] = bool(opt.nsteps >= max_steps and (ff is None or ff > fmax))
+    except Exception as e:
+        d["bfgs_err"] = str(e)[:80]
+    try:
+        r = calc.last_result
+        d["scf_converged"] = bool(r.converged)
+        d["scf_n_iter"] = int(r.n_iter)
+        d["fermi_eV"] = float(r.fermi)
+        d["n_electrons"] = float(getattr(r, "n_electrons", 0.0) or 0.0)
+        d["kerker_used"] = getattr(r, "kerker_used", None)
+        occ = r.occupations.detach().to("cpu")
+        full = 2.0 if getattr(r, "nspin", 1) == 1 else 1.0
+        d["fractional_occ_count"] = int(((occ > 1e-3) & (occ < full - 1e-3)).sum())
+        d["is_metallic"] = bool(d["fractional_occ_count"] > 0)
+        d["max_top_band_occ"] = float(occ[..., -1].max())  # ≳1e-3 ⇒ raise nbands
+        dr = getattr(r, "drho_scf", None)
+        if dr is not None:
+            d["scf_residual"] = float(dr.abs().max())
+    except Exception as e:
+        d["scf_diag_err"] = str(e)[:80]
+    if do_wf:
+        try:
+            from gradwave.postscf.work_function import work_function
+            d["work_function_eV"] = float(work_function(calc.last_result))
+        except Exception as e:
+            d["wf_err"] = str(e)[:80]
+    return d
+
+
+def _relax(atoms, calc, fmax, max_steps, tag, do_wf=True):
     atoms.calc = calc
     t = time.time()
     # logfile: per-step energy/fmax text; trajectory: every ionic step's geometry
@@ -44,13 +118,33 @@ def _relax(atoms, calc, fmax, max_steps, tag):
     opt.run(fmax=fmax, steps=max_steps)
     e = float(atoms.get_potential_energy())
     write(RESULTS / f"{tag}_relaxed.xyz", atoms)  # final geom for r2SCAN/diff stretch
-    print(f"    [{tag}] E={e:.4f} eV  ({opt.nsteps} steps, {time.time()-t:.0f}s)",
+    wall = time.time() - t
+    # diagnostics sidecar — best-effort, must never break the campaign
+    tail = ""
+    try:
+        diag = _diagnostics(calc, opt, fmax, max_steps, wall, RESULTS / f"{tag}.log",
+                            do_wf)
+        (RESULTS / f"{tag}.diag.json").write_text(json.dumps(diag, indent=2))
+        tail = f", scf_iter={diag.get('scf_n_iter', '?')}"
+        if diag.get("bfgs_capped"):
+            tail += "  ⚠STEP-CAP"
+        if diag.get("is_metallic") is False:
+            tail += "  ⚠NON-METALLIC"
+        if diag.get("max_top_band_occ", 0.0) > 1e-3:
+            tail += "  ⚠NBANDS-LOW"
+    except Exception as ex:  # diagnostics are never allowed to fail the run
+        tail = f"  [diag err: {str(ex)[:50]}]"
+    print(f"    [{tag}] E={e:.4f} eV  ({opt.nsteps} steps, {wall:.0f}s{tail})",
           flush=True)
     return e
 
 
 def run_pair(metal: str, ads: str, dbg: dict | None = None) -> dict:
     RESULTS.mkdir(exist_ok=True)
+    try:  # provenance snapshot (best-effort; never blocks the run)
+        (RESULTS / "runinfo.json").write_text(json.dumps(_provenance(), indent=2))
+    except Exception:
+        pass
     out_f = RESULTS / f"{metal}_{ads}.json"
     res = json.loads(out_f.read_text()) if out_f.exists() else {"metal": metal, "ads": ads}
 
@@ -98,7 +192,7 @@ def run_pair(metal: str, ads: str, dbg: dict | None = None) -> dict:
         kw_gas = dict(is_gas=True, device=p.get("device"),
                       ecut=p.get("ecut"), ecutrho=p.get("ecutrho"))
         res["e_gas"] = _relax(g, config.make_calc(**kw_gas), fmax, steps,
-                              f"gas_{gas}")
+                              f"gas_{gas}", do_wf=False)  # Φ undefined for a molecule
         save()
 
     # 4. thermodynamics
