@@ -109,6 +109,15 @@ Local sanity of the whole flow (tiny, CPU, minutes): add `--debug` to `run_pair`
     echo EXIT=$? >> /root/run_all.log' </dev/null >/dev/null 2>&1 &
   ```
 - **`pytest` on the box: always `-n0`** (192 cores → xdist hangs).
+- **CPU threads on a big uniform box:** gradwave caps intra-op threads at
+  `min(cores,8)` (tuned for hybrid P/E laptops). On a uniform many-core server
+  (e.g. 2× Xeon 8480+, 112 cores) the parallel setup phase (G-sphere build,
+  atomic-superposition density) can use more, so launch with
+  `GRADWAVE_NUM_THREADS=32` — within one NUMA socket (56 cores) to avoid
+  cross-socket traffic. Do NOT bake this into `config.py`: >8 threads *regress*
+  on hybrid CPUs (asus/laptop). It's a minor lever — the SCF is GPU-bound and the
+  dominant one-time cost is torch/CUDA import (unthreadable); the calc-reuse in
+  `run_pair` is the real per-stage win.
 
 ## Connect (vast.ai, mirrors ~/Downloads/h100_bifeo3_handoff.md)
 
