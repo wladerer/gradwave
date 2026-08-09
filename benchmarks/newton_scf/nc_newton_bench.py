@@ -1,24 +1,31 @@
-"""NC inexact-Newton SCF finisher — measurement harness (prototype).
+"""NC inexact-Newton SCF finisher — self-contained benchmark (prototype).
 
 Compares the shipped linear density mixer against the exact-Jacobian Newton
-finisher (scf.newton_nc, wired into scf/loop.py via `newton_finish=`) on a
-norm-conserving metal. Two things are measured, both from identical starting
-runs:
+finisher (scf.newton_nc, wired into scf/loop.py via `newton_finish=`) on
+norm-conserving metals, and isolates the two inner-solve levers (Kerker
+preconditioning; Eisenstat–Walker adaptive forcing) by reporting the
+inner-apply count per Newton step for each variant.
 
-  Stage 1 (the lever, same-state single step): the default and newton runs are
-  bit-identical until the residual first crosses `switch` at iteration k (the
-  newton run only diverges in the UPDATE at step k, with the linear mixer at
-  full history in the default run). So r[k] is shared, and r[k+1] compares one
-  shipped mixer step vs one Newton step FROM THE SAME STATE.
+The Newton step solves (I − χ₀ K_Hxc) δ = r on the SCF density residual using
+the existing response matvecs (scf.implicit.{apply_chi0, apply_k_hxc}) plus a
+preconditioned Anderson inner solve. It reaches the SAME fixed point as the
+mixer (exact at convergence) — the ΔE column is the correctness gate (< 1e-8 eV).
 
-  Stage 2 (iteration count): total SCF iterations and same-machine wall time to
-  the same convergence gate, plus ΔE (must be < 1e-8 eV — same fixed point).
+Systems (default set; --systems to subset):
+  Al-fcc      easy nearly-free-electron metal (nspin=1)         — mixer wins fast
+  Fe-bcc-nm   nonmagnetic bcc Fe, stiffer d-band metal (nspin=1)
+  Fe-bcc-fm   FERROMAGNETIC bcc Fe (nspin=2, start_mag) — the STIFF case where
+              the default mixer needs many iterations and the Newton iteration
+              cut is large enough to matter
 
-Usage:
-  uv run python benchmarks/newton_scf/nc_newton_bench.py \
-      --elem Al --struct fcc --ecut 30 --kmesh 8 --width 0.2 --switch 1e-3
-  uv run python benchmarks/newton_scf/nc_newton_bench.py \
-      --elem Fe --struct bcc --ecut 45 --kmesh 8 --width 0.2 --switch 1e-3
+Variants per system: mixer, newton-plain (no lever), newton-kerker,
+newton-ew (EW + Kerker). Each newton variant is measured; the table shows
+iters / wall / ΔE / total inner χ₀-applies / applies-per-step.
+
+Run start-to-finish (writes its own EXIT marker at the end):
+  uv run python benchmarks/newton_scf/nc_newton_bench.py
+  uv run python benchmarks/newton_scf/nc_newton_bench.py --systems Fe-bcc-fm
+  uv run python benchmarks/newton_scf/nc_newton_bench.py --chi0-tol 1e-6   # cheaper per-apply
 """
 
 from __future__ import annotations
@@ -26,8 +33,10 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+import traceback
 from pathlib import Path
 
+import numpy as np
 import torch
 
 RY = 13.605693122994
@@ -36,100 +45,153 @@ sys.path.insert(0, str(_ROOT / "benchmarks" / "delta_gauge"))
 from lattices import geometry  # noqa: E402
 
 # WIEN2k reference per-atom volumes (Å³/atom) for the cubic elemental metals.
-_V0 = {"Al": 16.4796, "Fe": 11.3436, "Cu": 11.9511, "Ni": 10.8876,
-       "Pd": 15.3148, "Ag": 17.8534, "Au": 18.0022, "Li": 20.2191,
-       "Na": 37.4686, "V": 13.4520, "Nb": 18.0686, "Mo": 15.8382}
+_V0 = {"Al": 16.4796, "Fe": 11.3436, "Cu": 11.9511, "Ni": 10.8876}
 
 
-def _build(elem, struct, ecut, kmesh):
+def _pseudo(elem):
     from gradwave.pseudo.upf import parse_upf
+    return parse_upf(str(_ROOT / "benchmarks" / "delta_gauge" / "pseudos" / f"{elem}.upf"))
+
+
+# --- system catalogue -------------------------------------------------------
+# Each case: (elem, struct, ecut Ry, kmesh, nspin, smearing, width, start_mag,
+#             mixing_scheme, nbands, elong).
+_CASES = {
+    "Al-fcc":    dict(elem="Al", struct="fcc", ecut=30, kmesh=8, nspin=1,
+                      smearing="cold", width=0.2, start_mag=None,
+                      mixing_scheme=None, nbands=None),
+    "Fe-bcc-nm": dict(elem="Fe", struct="bcc", ecut=45, kmesh=8, nspin=1,
+                      smearing="cold", width=0.2, start_mag=None,
+                      mixing_scheme=None, nbands=12),
+    "Fe-bcc-fm": dict(elem="Fe", struct="bcc", ecut=45, kmesh=8, nspin=2,
+                      smearing="gaussian", width=0.1, start_mag=[0.7, 0.7],
+                      mixing_scheme="pulay", nbands=24),
+}
+
+
+def _build(case, kmesh_override=None):
     from gradwave.scf.loop import setup_system
 
-    cell, pos, _ = geometry(struct, elem, _V0[elem])
-    upf = parse_upf(str(_ROOT / "benchmarks" / "delta_gauge" / "pseudos" / f"{elem}.upf"))
-    system = setup_system(cell, pos, [0], [upf], ecut=ecut * RY,
-                          kmesh=(kmesh, kmesh, kmesh), use_symmetry=False)
-    return system
+    cell, pos, _ = geometry(case["struct"], case["elem"], _V0[case["elem"]])
+    # bcc/fcc primitive cells here are 1 atom; a magnetic case needs one
+    # start_mag entry per atom, so size start_mag to the basis.
+    natom = pos.shape[0]
+    km = case["kmesh"] if kmesh_override is None else kmesh_override
+    system = setup_system(cell, pos, [0] * natom, [_pseudo(case["elem"])],
+                          ecut=case["ecut"] * RY, kmesh=(km, km, km),
+                          nbands=case["nbands"], use_symmetry=False)
+    return system, natom
 
 
-def _run(system, xc, *, newton, switch, width, newton_kwargs, max_iter):
+def _xc(case):
+    if case["nspin"] == 2:
+        from gradwave.core.xc.spin import SpinPBE
+        return SpinPBE()
+    from gradwave.core.xc.pbe import PBE
+    return PBE()
+
+
+def _run(system, case, natom, *, newton, newton_kwargs, switch, max_iter):
     from gradwave.scf.loop import scf
 
+    sm = case["start_mag"]
+    start_mag = None if sm is None else sm[:natom]
     t0 = time.time()
-    res = scf(system, xc, smearing="cold", width=width, max_iter=max_iter,
-              etol=1e-11, rhotol=1e-9, verbose=False,
+    res = scf(system, _xc(case), smearing=case["smearing"], width=case["width"],
+              nspin=case["nspin"], start_mag=start_mag,
+              mixing_scheme=case["mixing_scheme"], max_iter=max_iter,
+              etol=1e-10, rhotol=1e-8, verbose=False,
               newton_finish=newton, newton_switch=switch,
               newton_kwargs=newton_kwargs)
     wall = time.time() - t0
-    traj = [float(h["res"]) for h in res.history]
-    return res, wall, traj
+    return res, wall
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--elem", default="Al")
-    ap.add_argument("--struct", default="fcc", choices=["fcc", "bcc"])
-    ap.add_argument("--ecut", type=float, default=30.0, help="Ry")
-    ap.add_argument("--kmesh", type=int, default=8)
-    ap.add_argument("--width", type=float, default=0.2, help="cold-smearing width [eV]")
-    ap.add_argument("--switch", type=float, default=1e-3, help="mixer→Newton residual threshold")
-    ap.add_argument("--inner-tol", type=float, default=1e-6)
+    ap.add_argument("--systems", default="Al-fcc,Fe-bcc-nm,Fe-bcc-fm",
+                    help="comma list from: " + ",".join(_CASES))
+    ap.add_argument("--kmesh", type=int, default=None, help="override every case's kmesh")
+    ap.add_argument("--switch", type=float, default=1e-3, help="mixer→Newton threshold")
+    ap.add_argument("--inner-tol", type=float, default=1e-6, help="fixed inner tol (non-EW)")
+    ap.add_argument("--chi0-tol", type=float, default=1e-8,
+                    help="Sternheimer tol per χ₀ apply (looser = cheaper apply)")
     ap.add_argument("--max-inner", type=int, default=60)
     ap.add_argument("--beta", type=float, default=0.4)
-    ap.add_argument("--max-iter", type=int, default=100)
+    ap.add_argument("--max-iter", type=int, default=150)
     ap.add_argument("--threads", type=int, default=8)
     a = ap.parse_args()
     torch.set_num_threads(a.threads)
 
-    from gradwave.core.xc.pbe import PBE
+    base_kw = dict(inner_tol=a.inner_tol, max_inner=a.max_inner, beta=a.beta,
+                   chi0_tol=a.chi0_tol)
+    # (label, newton?, extra newton_kwargs). Levers isolated:
+    variants = [
+        ("mixer",         False, None),
+        ("newton-plain",  True,  dict(ew=False, precond=False)),
+        ("newton-kerker", True,  dict(ew=False, precond=True)),
+        ("newton-ew",     True,  dict(ew=True, precond=True)),
+    ]
 
-    system = _build(a.elem, a.struct, a.ecut, a.kmesh)
-    nk, nb = len(system.spheres), system.nbands
-    print(f"# {a.elem} {a.struct}  ecut={a.ecut:.0f} Ry  kmesh={a.kmesh}^3 "
-          f"(nk_TR={nk})  nbands={nb}  grid={tuple(system.grid.shape)}  "
-          f"width={a.width} eV  switch={a.switch:g}  threads={a.threads}",
+    hdr = ("%-11s %-14s %5s %8s %11s %8s  %s" %
+           ("system", "variant", "iters", "wall_s", "dE_eV", "applies", "applies/step"))
+    print(f"# NC inexact-Newton finisher benchmark  switch={a.switch:g}  "
+          f"inner_tol={a.inner_tol:g}  chi0_tol={a.chi0_tol:g}  threads={a.threads}",
           flush=True)
-    nkw = dict(inner_tol=a.inner_tol, max_inner=a.max_inner, beta=a.beta)
 
-    resA, wA, tA = _run(system, PBE(), newton=False, switch=a.switch,
-                        width=a.width, newton_kwargs=nkw, max_iter=a.max_iter)
-    resB, wB, tB = _run(system, PBE(), newton=True, switch=a.switch,
-                        width=a.width, newton_kwargs=nkw, max_iter=a.max_iter)
+    rows = []
+    for name in a.systems.split(","):
+        name = name.strip()
+        if name not in _CASES:
+            print(f"# skip unknown system {name!r}", flush=True)
+            continue
+        case = _CASES[name]
+        try:
+            system, natom = _build(case, a.kmesh)
+        except Exception:  # noqa: BLE001
+            print(f"# {name}: BUILD FAILED\n{traceback.format_exc()}", flush=True)
+            continue
+        km = case["kmesh"] if a.kmesh is None else a.kmesh
+        print(f"\n# {name}: {case['elem']} {case['struct']} nspin={case['nspin']} "
+              f"ecut={case['ecut']} Ry kmesh={km}^3 (nk_TR={len(system.spheres)}) "
+              f"nbands={system.nbands} grid={tuple(system.grid.shape)} "
+              f"smear={case['smearing']} {case['width']}", flush=True)
+        print("# " + hdr, flush=True)
 
-    FA = float(resA.energies.free_energy)
-    FB = float(resB.energies.free_energy)
+        e_ref = None
+        for label, newton, extra in variants:
+            nkw = None if not newton else {**base_kw, **(extra or {})}
+            try:
+                res, wall = _run(system, case, natom, newton=newton,
+                                 newton_kwargs=nkw, switch=a.switch,
+                                 max_iter=a.max_iter)
+            except Exception:  # noqa: BLE001
+                print("  %-11s %-14s  RUN FAILED\n%s" %
+                      (name, label, traceback.format_exc()), flush=True)
+                continue
+            F = float(res.energies.free_energy)
+            if label == "mixer":
+                e_ref = F
+            dE = float("nan") if e_ref is None else F - e_ref
+            ni = res.newton_info
+            appl = "" if ni is None else str(ni["total_applies"])
+            per = "" if ni is None else str(ni["applies_per_step"])
+            line = ("  %-11s %-14s %5d %8.1f %11.2e %8s  %s" %
+                    (name, label, res.n_iter, wall, dE, appl, per))
+            print(line + ("" if res.converged else "  [NOT CONVERGED]"), flush=True)
+            rows.append((name, label, res.n_iter, wall, dE, appl,
+                         res.converged))
 
-    print("\n== Stage 2: iteration count (PRIMARY) ==")
-    print(f"  default mixer : n_iter={resA.n_iter:2d}  converged={resA.converged}  "
-          f"F={FA:.9f} eV  wall={wA:.1f}s")
-    print(f"  newton finish : n_iter={resB.n_iter:2d}  converged={resB.converged}  "
-          f"F={FB:.9f} eV  wall={wB:.1f}s")
-    print(f"  ΔE (newton − default) = {FB - FA:+.2e} eV  "
-          f"(gate: |ΔE| < 1e-8 → {'PASS' if abs(FB - FA) < 1e-8 else 'FAIL'})")
-    print(f"  iteration reduction: {resA.n_iter} → {resB.n_iter}  "
-          f"(mixer wall is back-to-back on the same machine; iteration count is "
-          f"the machine-independent metric)")
-
-    # Stage 1: same-state single-step comparison. Runs are identical until the
-    # first iteration k with res < switch; that step's update differs.
-    print("\n== Stage 1: same-state single-step residual drop (the lever) ==")
-    print("  default res traj:", ["%.2e" % x for x in tA])
-    print("  newton  res traj:", ["%.2e" % x for x in tB])
-    k = next((i for i, x in enumerate(tB) if x < a.switch), None)
-    if k is None or k + 1 >= len(tA) or k + 1 >= len(tB):
-        print("  (no clean single-step bracket — residual crossed switch on the "
-              "last iteration; loosen --switch or tighten rhotol)")
-        return
-    # sanity: r[k] should match between runs (identical state up to the switch)
-    shared = abs(tA[k] - tB[k]) / max(tA[k], 1e-300)
-    print(f"  switch at iter k={k+1}: r[k] = {tB[k]:.3e}  "
-          f"(runs agree to {shared:.1e} up to here)")
-    print(f"    one mixer step : r[k+1] = {tA[k+1]:.3e}   "
-          f"(drop ×{tB[k] / max(tA[k+1], 1e-300):.2f})")
-    print(f"    one Newton step: r[k+1] = {tB[k+1]:.3e}   "
-          f"(drop ×{tB[k] / max(tB[k+1], 1e-300):.2f})")
-    print(f"    Newton beats mixer by ×{tA[k+1] / max(tB[k+1], 1e-300):.1f} "
-          f"on this single step")
+    print("\n# ==== summary ====", flush=True)
+    print("# " + hdr, flush=True)
+    for name, label, it, wall, dE, appl, conv in rows:
+        print("  %-11s %-14s %5d %8.1f %11.2e %8s  %s" %
+              (name, label, it, wall, dE, appl,
+               "OK" if conv else "NOT-CONVERGED"), flush=True)
+    gate = all(abs(dE) < 1e-8 for *_x, dE, _a, _c in rows if not np.isnan(dE))
+    print(f"# correctness gate (all |ΔE| < 1e-8 eV vs mixer): "
+          f"{'PASS' if gate else 'FAIL'}", flush=True)
+    print("EXIT=0", flush=True)
 
 
 if __name__ == "__main__":

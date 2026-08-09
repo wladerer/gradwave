@@ -454,6 +454,8 @@ class SCFResult:
     esm_bias: float = 0.0  # applied capacitor bias [V] (open_z_metal); forces read it
     n_electrons: float = 0.0  # electron count (floats under constant-µ / target_mu);
     # the grand potential is Ω = free_energy − fermi·n_electrons
+    newton_info: dict[str, Any] | None = None  # inexact-Newton finisher diagnostics
+    # (newton_finish=True): per-step inner-solve applies/iters, switch iteration
 
 
 # A warm-start source for scf(): either a converged SCFResult, or the plainer
@@ -1481,6 +1483,9 @@ def scf(
     # mixer step is replaced by the exact-Jacobian Newton step (scf.newton_nc).
     newton_active = False
     newton_steps = 0
+    newton_prev_rnorm: float | None = None  # Eisenstat-Walker cross-step state
+    newton_applies: list[int] = []          # inner χ₀+K_Hxc applies per Newton step
+    newton_inner_iters: list[int] = []
     # Bound before the loop purely so ty can see these names as always defined
     # after it (the loop runs `for it in range(1, max_iter + 1)`, and max_iter
     # is always >= 1 in practice -- never surfaced as a user knob below 1, see
@@ -1851,10 +1856,20 @@ def scf(
         if newton_active:
             from gradwave.scf.newton_nc import newton_finish_step
 
-            rho_s, _nsol = newton_finish_step(
+            rho_s, _ninfo = newton_finish_step(
                 system, xc, nspin, smearing, width, mu, rho_s, rho_out_s,
-                veff_s, coeffs_list_s, eigs_s, occ_s, **(newton_kwargs or {}))
+                veff_s, coeffs_list_s, eigs_s, occ_s, mixer=mixer,
+                prev_rnorm=newton_prev_rnorm, **(newton_kwargs or {}))
+            newton_prev_rnorm = _ninfo["rnorm"]
+            newton_applies.append(int(_ninfo["inner_applies"]))
+            newton_inner_iters.append(int(_ninfo["inner_iters"]))
             newton_steps += 1
+            if verbose:
+                print(f"  newton step {newton_steps}: |r|={_ninfo['rnorm']:.2e} "
+                      f"inner_tol={_ninfo['inner_tol']:.1e} "
+                      f"inner_iters={_ninfo['inner_iters']} "
+                      f"applies={_ninfo['inner_applies']} "
+                      f"(pc={_ninfo['preconditioned']})", flush=True)
         else:
             # (total, mag) → per-channel r-space densities (MixLayout.unpack)
             rho_s, _ = layout.unpack(mixer.step(rho_in_vec, rho_out_vec))
@@ -1900,6 +1915,12 @@ def scf(
         print(f"SCF {_tag} in {it} iterations · F = {e_free:+.10f} eV{_fm}{_extra}", flush=True)
 
     rho_tot_final = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
+    newton_info = (
+        {"steps": newton_steps, "switch_iter": it - newton_steps,
+         "applies_per_step": newton_applies,
+         "inner_iters_per_step": newton_inner_iters,
+         "total_applies": int(sum(newton_applies))}
+        if newton_steps else None)
     # The loop above always runs (max_iter >= 1 in practice) so these are real
     # values from the last iteration by the time we get here, never the
     # pre-loop placeholders.
@@ -1941,6 +1962,7 @@ def scf(
             boundary=boundary,
             esm_bias=esm_bias,
             n_electrons=n_float,
+            newton_info=newton_info,
         )
     m_density = rho_s[0] - rho_s[1]
     return SCFResult(
@@ -1968,6 +1990,7 @@ def scf(
         boundary=boundary,
         esm_bias=esm_bias,
         n_electrons=n_float,
+        newton_info=newton_info,
     )
 
 
