@@ -465,50 +465,63 @@ class PulayMixer(_DampedMixerBase):
 
 class SoftModeDeflatingMixer:
     """Deflate the constant-µ soft mode (the total-charge / G=0 channel) out of
-    the density mixer, treating it EXACTLY with a secant-Newton update.
+    the density mixer and treat it with a dedicated, stabilized charge update.
 
     Under a constant-potential (grand-canonical) SCF the electron count N floats
     to hold the Fermi level µ, so the uniform-charge component ρ(G=0) = N/vol is a
     live mixing variable (``float_charge`` disables the usual G=0-conservation
-    pin). On a high-DOS transition metal the loop gain of that channel,
-    a = dρ_out(0)/dρ_in(0) ≈ (dN/dµ)·(dV/dN), exceeds 1 — the SCF charge-response
-    operator (1 − χ₀K) has an eigenvalue past +1 along the uniform-charge
-    direction, and any linear / DIIS mixing of it oscillates or crawls (Na needs
-    ~130 iterations even at moderate |µ − µ0|; Pt fails outright). Broadening the
-    smearing only shrinks a; the principled cure is DEFLATION.
+    pin). On a high-DOS transition metal that channel is a SOFT MODE of the SCF
+    charge response (1 − χ₀K): its loop gain a = dρ_out(0)/dρ_in(0) ≈
+    −(dN/dµ)·(dV/dN) is large and negative — adding electrons raises the potential
+    at fixed µ, which lowers N_out — so the plain fixed-point map 1 + α(a − 1) has
+    magnitude > 1 and any linear/DIIS mixing of it oscillates or diverges (Na
+    crawls ~130 iterations at moderate |µ − µ0|; Pt/Ni fail outright). The
+    mixer-wide α that converges the G ≠ 0 modes is simply too large for this one
+    stiff, negative-gain coordinate. Broadening the smearing only shrinks |a|; the
+    principled cure is to DEFLATE the mode and treat it on its own terms.
 
     This is the ground-state analogue of the χ₀-response deflation in
-    ``solvers.deflation`` (#263): the χ₀ path extracts the soft subspace of the
+    ``solvers.deflation`` (#263): that path extracts the soft subspace of the
     explicit ``M = K·χ`` matvec and removes it with an exact coarse solve while
-    Anderson smooths the complement; here the SCF Jacobian is only available
-    implicitly through the (ρ_in, ρ_out) stream, and the soft subspace is the
-    physically known rank-1 uniform-charge direction, so the "coarse solve" is a
-    scalar Newton step. Concretely, per iteration:
+    Anderson smooths the complement. Here the SCF Jacobian is available only
+    implicitly through the (ρ_in, ρ_out) stream and the soft subspace is the
+    physically known rank-1 uniform-charge direction, so per iteration we:
 
     * hide the soft channel from the wrapped mixer (zero its G=0 residual) so its
-      DIIS / Broyden history stays in the well-conditioned complement (G ≠ 0),
-      which converges exactly as the neutral fixed-N run does; and
-    * update the scalar total-charge coordinate ρ0 = ρ(G=0) by Newton on its
-      residual r0(ρ0) = ρ_out(0) − ρ_in(0), with a secant estimate of the slope
-      j0 = dr0/dρ0 ≈ a − 1. For a locally linear channel Newton lands the fixed
-      point in one step, ρ0* = ρ0 − r0/j0, regardless of |a| — and when a > 1 it
-      steps OPPOSITE to the naive damped step (−r0/j0 vs +α·r0), which is exactly
-      why plain mixing diverges there and the deflated update does not.
+      DIIS / Broyden history and metric stay in the well-conditioned complement
+      (G ≠ 0) — which then converges as the neutral fixed-N run does, instead of
+      being polluted by the Kerker-over-weighted (1/q0²) G=0 residual; and
+    * update the scalar total-charge coordinate ρ0 = ρ(G=0) on its own. When a
+      clean secant slope j0 = dr0/dρ0 in the physical screening regime (j0 < 0,
+      the negative-gain channel) is available, take the (under-relaxed) Newton
+      step ρ0 − r0/j0 — the exact 1-D coarse solve, which converges the stiff
+      channel in a few steps regardless of |a|. Otherwise fall back to a SMALL
+      fixed damping α0·r0: with |a| large and negative, α0 ≲ 1/|a| makes the
+      channel a contraction on its own even when the mixer-wide α would not, so
+      the charge stays bounded and creeps to the fixed point. A noisy secant (the
+      G ≠ 0 density is still co-varying early on, contaminating dr0) is REJECTED
+      rather than trusted — an out-of-regime j0 is exactly what makes a naive
+      Newton bolt — and a fixed relative trust cap bounds any single step.
 
     The wrapper forwards every other attribute/method to the inner mixer, so the
     driver drives it identically (``step``/``extra_precond``/``reset``/…)."""
 
     def __init__(self, inner: PulayMixer | BroydenMixer | JohnsonMixer,
                  g2: torch.Tensor, alpha0: float,
-                 *, trust: float = 5.0, j0_floor: float = 1e-8) -> None:
+                 *, damp: float = 0.1, relax: float = 0.5, j0_min: float = 0.3,
+                 max_frac: float = 0.05) -> None:
         # inner: the wrapped mixer (Pulay/Broyden/Johnson) handling the complement.
         # g2: per-component |G|² of the mixing vector; the total-charge G=0
         # coordinate is its (first, min-g2) zero — argmin picks it robustly.
+        # alpha0: the mixer-wide α (kept for reference / provenance; the charge
+        # channel uses its OWN small `damp`, since alpha0 is what destabilizes it).
         self._inner = inner
         self._i0 = int(torch.argmin(g2))
-        self._alpha0 = float(alpha0)  # damped step for the bootstrap / secant-fallback
-        self._trust = float(trust)    # trust-region cap (× the last accepted step)
-        self._j0_floor = float(j0_floor)  # guard 1/j0 blow-up; the cap handles small j0
+        self._alpha0 = float(alpha0)
+        self._damp = float(damp)      # small fixed step for the stiff G=0 channel
+        self._relax = float(relax)    # under-relaxation of the Newton step
+        self._j0_min = float(j0_min)  # require j0 < −j0_min (physical screening regime)
+        self._max_frac = float(max_frac)  # per-step cap as a fraction of |ρ0|
         self._p0_prev: torch.Tensor | None = None
         self._r0_prev: torch.Tensor | None = None
 
@@ -531,32 +544,38 @@ class SoftModeDeflatingMixer:
         self._p0_prev = None
         self._r0_prev = None
 
+    def _capped(self, p0: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Move ρ0 toward ``target`` but no further than max_frac·|ρ0| — a fixed
+        trust region (no dependence on the last step, so it cannot self-amplify)."""
+        step = target - p0
+        lim = self._max_frac * p0.abs().clamp_min(1e-12)
+        mag = step.abs()
+        if float(mag) > float(lim):
+            step = step * (lim / mag)
+        return p0 + step
+
     def _charge_update(self, p0: torch.Tensor, r0: torch.Tensor) -> torch.Tensor:
-        """Newton step on the scalar total-charge residual r0(ρ0) = 0, with a
-        secant slope; a damped step bootstraps iter 1 and backs up a degenerate
-        secant."""
-        a = self._alpha0
+        """Stabilized update for the scalar total-charge coordinate: an
+        under-relaxed Newton step when a clean in-regime secant slope is
+        available, else a small fixed-damping step."""
+        damped = p0 + self._damp * r0
         if self._p0_prev is None:
-            return p0 + a * r0
-        # _p0_prev and _r0_prev are always set together (step()'s tail, cleared
-        # jointly in __init__/reset), so _r0_prev is non-None here too.
+            return self._capped(p0, damped)
+        # _p0_prev and _r0_prev are set together (step()'s tail, cleared jointly
+        # in __init__/reset), so _r0_prev is non-None here too.
         assert self._r0_prev is not None
         dp = p0 - self._p0_prev
         dr = r0 - self._r0_prev
-        if float(dp.abs()) < 1e-10 or float(dr.abs()) < 1e-14:
-            return p0 + a * r0
-        j0 = dr / dp  # secant slope of r0 wrt ρ0 (≈ dρ_out(0)/dρ_in(0) − 1)
-        if not bool(torch.isfinite(j0)) or float(j0.abs()) < self._j0_floor:
-            return p0 + a * r0
-        step = -r0 / j0  # exact for a locally linear r0(ρ0); one step to the root
-        # trust region: an early/noisy secant can give a wild Newton step — cap it
-        # to a few times (the last accepted step + the damped step). Near the fixed
-        # point r0 → 0 so the step and the cap both vanish; the cap never floors it.
-        cap = self._trust * (dp.abs() + (a * r0).abs())
-        mag = step.abs()
-        if float(mag) > float(cap):
-            step = step * (cap / mag)
-        return p0 + step
+        if float(dp.abs()) < 1e-12 or float(dr.abs()) < 1e-16:
+            return self._capped(p0, damped)
+        j0 = dr / dp  # secant slope dr0/dρ0 ≈ a − 1 (physically < −1: screening)
+        # Trust the Newton step only when j0 is clearly in the negative-gain
+        # screening regime; a near-zero or positive j0 is secant noise from the
+        # still-converging G ≠ 0 density and would send Newton the wrong way.
+        if not bool(torch.isfinite(j0)) or float(j0) > -self._j0_min:
+            return self._capped(p0, damped)
+        newton = p0 - self._relax * r0 / j0
+        return self._capped(p0, newton)
 
     def step(self, rho_in: torch.Tensor, rho_out: torch.Tensor) -> torch.Tensor:
         i0 = self._i0
@@ -570,7 +589,7 @@ class SoftModeDeflatingMixer:
         inner_out = rho_out.clone()
         inner_out[i0] = inner_in[i0]
         rho_new = self._inner.step(inner_in, inner_out).clone()
-        # overwrite the soft coordinate with the exact (deflated) Newton update.
+        # overwrite the soft coordinate with the deflated charge update.
         rho_new[i0] = self._charge_update(p0, r0).to(rho_new.dtype)
         self._p0_prev, self._r0_prev = p0, r0
         return rho_new
