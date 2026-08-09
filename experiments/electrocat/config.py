@@ -31,7 +31,10 @@ KPTS_GAS = (1, 1, 1)
 SMEARING = "cold"       # Marzari-Vanderbilt (metals)
 WIDTH = 0.15            # eV
 XC = "pbe"
-FMAX = 0.03             # eV/Å relaxation threshold
+FMAX = 0.05             # eV/Å relaxation threshold — 0.05 is plenty for adsorption
+# energetics; on the flat hollow-site PES the energy converges well before a tighter
+# 0.03 force does, wasting steps on threshold chatter (Pt-H bridge took 41 steps /
+# 70 min at 0.03). The .diag.json final_fmax records the actual converged force.
 MAX_STEPS = 80
 DEVICE = "cuda"         # "cpu" for a local debug run
 
