@@ -43,6 +43,18 @@ def test_constant_mu_scf_floats_charge():
     omega = float(r_up.energies.free_energy) - r_up.fermi * r_up.n_electrons
     assert np.isfinite(omega)
 
+    # electrode-potential post-processing: a physical Na work function, U vs SHE
+    # from the −4.44 V offset, and U − U_PZC that moves the right way (raising µ /
+    # adding electrons makes the electrode more cathodic).
+    from gradwave.postscf.work_function import electrode_potential, work_function
+
+    phi_pzc = work_function(rf)  # neutral run = potential of zero charge
+    assert 1.0 < phi_pzc < 5.0
+    ep_up = electrode_potential(r_up, phi_pzc=phi_pzc)
+    ep_dn = electrode_potential(r_dn, phi_pzc=phi_pzc)
+    assert ep_up.potential_vs_she == pytest.approx(ep_up.work_function - 4.44, abs=1e-6)
+    assert ep_up.potential_vs_pzc < 0.0 < ep_dn.potential_vs_pzc
+
 
 def test_constant_mu_requires_metal_plates_and_smearing():
     """Guards: target_mu needs open_z_metal (charged cell → plates) and a smearing."""
