@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 from ase.io import read
+
 from gradwave.constants import RY_EV as RY
 
 HERE = Path(__file__).parent

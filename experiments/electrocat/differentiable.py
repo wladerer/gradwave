@@ -28,7 +28,6 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
 from ase.io import read
 
 HERE = Path(__file__).parent
