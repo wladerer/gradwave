@@ -60,7 +60,12 @@ from gradwave.scf.guess import sad_density
 from gradwave.scf.layout import MixLayout
 from gradwave.scf.learned_precond import MultipoleKerkerPrecond
 from gradwave.scf.local_tf import LocalTFPrecond
-from gradwave.scf.mixing import BroydenMixer, JohnsonMixer, PulayMixer
+from gradwave.scf.mixing import (
+    BroydenMixer,
+    JohnsonMixer,
+    PulayMixer,
+    SoftModeDeflatingMixer,
+)
 from gradwave.scf.setup_common import (
     _unique_shells,
     build_core_density,
@@ -811,7 +816,11 @@ def _build_mixer_precond(
     precond: str,
     precond_op: MultipoleKerkerPrecond | None,
     float_charge: bool = False,
-) -> tuple[PulayMixer | BroydenMixer | JohnsonMixer, LocalTFPrecond | None]:
+    deflate_soft_modes: bool = False,
+) -> tuple[
+    PulayMixer | BroydenMixer | JohnsonMixer | SoftModeDeflatingMixer,
+    LocalTFPrecond | None,
+]:
     """Construct the density mixer and resolve its preconditioner.
 
     (mixer, tf_precond) genuinely range over all 6 combinations here --
@@ -864,7 +873,14 @@ def _build_mixer_precond(
         tf_precond = LocalTFPrecond(grid.g2, grid.shape, layout.mask, q0_max=mixer.q0)
         mixer.precond_op = tf_precond
         mixer.precond_slice = slice(0, layout.ng) if nspin == 2 else None
-    return mixer, tf_precond
+
+    # Soft-mode deflation for the constant-µ (float_charge) path: wrap the mixer so
+    # the unstable uniform-charge (G=0) mode is treated by an exact Newton update
+    # rather than mixed. Only meaningful when the charge floats; a no-op otherwise.
+    out_mixer: PulayMixer | BroydenMixer | JohnsonMixer | SoftModeDeflatingMixer = mixer
+    if deflate_soft_modes and float_charge:
+        out_mixer = SoftModeDeflatingMixer(mixer, layout.g2_full, mixing_alpha)
+    return out_mixer, tf_precond
 
 
 def _solve_bands(
@@ -1301,6 +1317,12 @@ def scf(
     # the Fermi level µ [eV] fixed and let the electron count N float. Requires a
     # smearing scheme and boundary="open_z_metal" (the plates source/sink the charge).
     # None (default) runs the ordinary fixed-N SCF.
+    deflate_soft_modes: bool = False,  # constant-µ only: deflate the uniform-charge
+    # (G=0) soft mode out of the density mixer and treat it with an exact secant-
+    # Newton update on the floating charge. On a high-DOS metal (Pt) the grand-
+    # canonical feedback a = dN/dµ·dV/dN drives that mode past +1 so the plain mixer
+    # oscillates/crawls; deflation converges it. No-op unless target_mu is set;
+    # False (default) leaves the mixer untouched (no behaviour change for callers).
 ) -> SCFResult:
     # `fock`, when given, adds an orbital-dependent operator to the Hamiltonian
     # each SCF step (a hybrid functional's Fock exchange). It must expose
@@ -1374,6 +1396,7 @@ def scf(
         precond,
         precond_op,
         float_charge=target_mu is not None,
+        deflate_soft_modes=deflate_soft_modes,
     )
 
     # flight recorder (scf.recorder): cheap per-iteration diagnostics, always

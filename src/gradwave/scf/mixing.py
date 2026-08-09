@@ -461,3 +461,116 @@ class PulayMixer(_DampedMixerBase):
                     "into the linear-response region", float(snorm), float(lim))
                 rho_new = rho_in + step * (lim / snorm)
         return rho_new
+
+
+class SoftModeDeflatingMixer:
+    """Deflate the constant-µ soft mode (the total-charge / G=0 channel) out of
+    the density mixer, treating it EXACTLY with a secant-Newton update.
+
+    Under a constant-potential (grand-canonical) SCF the electron count N floats
+    to hold the Fermi level µ, so the uniform-charge component ρ(G=0) = N/vol is a
+    live mixing variable (``float_charge`` disables the usual G=0-conservation
+    pin). On a high-DOS transition metal the loop gain of that channel,
+    a = dρ_out(0)/dρ_in(0) ≈ (dN/dµ)·(dV/dN), exceeds 1 — the SCF charge-response
+    operator (1 − χ₀K) has an eigenvalue past +1 along the uniform-charge
+    direction, and any linear / DIIS mixing of it oscillates or crawls (Na needs
+    ~130 iterations even at moderate |µ − µ0|; Pt fails outright). Broadening the
+    smearing only shrinks a; the principled cure is DEFLATION.
+
+    This is the ground-state analogue of the χ₀-response deflation in
+    ``solvers.deflation`` (#263): the χ₀ path extracts the soft subspace of the
+    explicit ``M = K·χ`` matvec and removes it with an exact coarse solve while
+    Anderson smooths the complement; here the SCF Jacobian is only available
+    implicitly through the (ρ_in, ρ_out) stream, and the soft subspace is the
+    physically known rank-1 uniform-charge direction, so the "coarse solve" is a
+    scalar Newton step. Concretely, per iteration:
+
+    * hide the soft channel from the wrapped mixer (zero its G=0 residual) so its
+      DIIS / Broyden history stays in the well-conditioned complement (G ≠ 0),
+      which converges exactly as the neutral fixed-N run does; and
+    * update the scalar total-charge coordinate ρ0 = ρ(G=0) by Newton on its
+      residual r0(ρ0) = ρ_out(0) − ρ_in(0), with a secant estimate of the slope
+      j0 = dr0/dρ0 ≈ a − 1. For a locally linear channel Newton lands the fixed
+      point in one step, ρ0* = ρ0 − r0/j0, regardless of |a| — and when a > 1 it
+      steps OPPOSITE to the naive damped step (−r0/j0 vs +α·r0), which is exactly
+      why plain mixing diverges there and the deflated update does not.
+
+    The wrapper forwards every other attribute/method to the inner mixer, so the
+    driver drives it identically (``step``/``extra_precond``/``reset``/…)."""
+
+    def __init__(self, inner: PulayMixer | BroydenMixer | JohnsonMixer,
+                 g2: torch.Tensor, alpha0: float,
+                 *, trust: float = 5.0, j0_floor: float = 1e-8) -> None:
+        # inner: the wrapped mixer (Pulay/Broyden/Johnson) handling the complement.
+        # g2: per-component |G|² of the mixing vector; the total-charge G=0
+        # coordinate is its (first, min-g2) zero — argmin picks it robustly.
+        self._inner = inner
+        self._i0 = int(torch.argmin(g2))
+        self._alpha0 = float(alpha0)  # damped step for the bootstrap / secant-fallback
+        self._trust = float(trust)    # trust-region cap (× the last accepted step)
+        self._j0_floor = float(j0_floor)  # guard 1/j0 blow-up; the cap handles small j0
+        self._p0_prev: torch.Tensor | None = None
+        self._r0_prev: torch.Tensor | None = None
+
+    def __getattr__(self, name: str):
+        # Delegate anything not defined here (q0, precond_op, block_mult, …) to the
+        # wrapped mixer. Only fires for names missing on self; _inner is set first
+        # in __init__, so this never recurses on it.
+        return getattr(self._inner, name)
+
+    @property
+    def extra_precond(self):
+        return self._inner.extra_precond
+
+    @extra_precond.setter
+    def extra_precond(self, value) -> None:
+        self._inner.extra_precond = value
+
+    def reset(self) -> None:
+        self._inner.reset()
+        self._p0_prev = None
+        self._r0_prev = None
+
+    def _charge_update(self, p0: torch.Tensor, r0: torch.Tensor) -> torch.Tensor:
+        """Newton step on the scalar total-charge residual r0(ρ0) = 0, with a
+        secant slope; a damped step bootstraps iter 1 and backs up a degenerate
+        secant."""
+        a = self._alpha0
+        if self._p0_prev is None:
+            return p0 + a * r0
+        # _p0_prev and _r0_prev are always set together (step()'s tail, cleared
+        # jointly in __init__/reset), so _r0_prev is non-None here too.
+        assert self._r0_prev is not None
+        dp = p0 - self._p0_prev
+        dr = r0 - self._r0_prev
+        if float(dp.abs()) < 1e-10 or float(dr.abs()) < 1e-14:
+            return p0 + a * r0
+        j0 = dr / dp  # secant slope of r0 wrt ρ0 (≈ dρ_out(0)/dρ_in(0) − 1)
+        if not bool(torch.isfinite(j0)) or float(j0.abs()) < self._j0_floor:
+            return p0 + a * r0
+        step = -r0 / j0  # exact for a locally linear r0(ρ0); one step to the root
+        # trust region: an early/noisy secant can give a wild Newton step — cap it
+        # to a few times (the last accepted step + the damped step). Near the fixed
+        # point r0 → 0 so the step and the cap both vanish; the cap never floors it.
+        cap = self._trust * (dp.abs() + (a * r0).abs())
+        mag = step.abs()
+        if float(mag) > float(cap):
+            step = step * (cap / mag)
+        return p0 + step
+
+    def step(self, rho_in: torch.Tensor, rho_out: torch.Tensor) -> torch.Tensor:
+        i0 = self._i0
+        # the uniform charge is real (∫ρ = N); carry only the real part.
+        p0 = rho_in[i0].real.clone()
+        r0 = (rho_out[i0] - rho_in[i0]).real.clone()
+        # hide the soft channel from the inner mixer: a zero G=0 residual keeps it
+        # out of the DIIS metric (where the Kerker weight 1/q0² would over-weight
+        # it) and out of the Broyden/Anderson history.
+        inner_in = rho_in.clone()
+        inner_out = rho_out.clone()
+        inner_out[i0] = inner_in[i0]
+        rho_new = self._inner.step(inner_in, inner_out).clone()
+        # overwrite the soft coordinate with the exact (deflated) Newton update.
+        rho_new[i0] = self._charge_update(p0, r0).to(rho_new.dtype)
+        self._p0_prev, self._r0_prev = p0, r0
+        return rho_new
