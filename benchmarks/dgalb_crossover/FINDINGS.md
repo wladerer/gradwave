@@ -383,3 +383,68 @@ ONCV pseudo via the existing becp/projector machinery — the accuracy study alr
 ran real ONCV SCFs), USPP/PAW overlap operator S (generalized eigenproblem), a
 buffer/quadrature schedule for sub-meV on all states, and Phases 3-6 (SCF loop,
 forces, differentiability, scale-out).
+
+---
+
+# Build: semi-infinite / open boundaries (S0-S1) — both validated
+
+Two spikes for the open-boundary extension (BUILD_PLAN.md "Semi-infinite S0-S2"),
+coordinated with PR #265's DtN work. Recall DtN map = lead self-energy = surface
+Green's function (one operator), and electrostatics/wavefunctions are separable.
+
+## S0-electrostatics — open Poisson (ESM core), `esm_poisson_1d.py`
+
+A neutral dipole in a box; observable = the dipole step Dv = v(right)-v(left).
+
+```
+ box  vac/side   Dv_open   Dv_periodic
+10.0     3.0     2.00000     -0.30000
+20.0     8.0     2.00000     -0.15000
+44.0    20.0     2.00000     -0.06818
+open drift over box sweep = 8.9e-16 ;  periodic drift = 2.3e-01
+```
+
+Open Poisson holds the true dipole step (2.00000) box-independent to MACHINE
+PRECISION; periodic collapses it toward 0 and drifts with box size — exactly the
+artifact that forces a dipole correction. Reproduces #265's asymmetric-slab result
+in pure electrostatics. Basis-agnostic (only the Poisson solve): drops into the
+DG-ALB Hartree unchanged. The "80% win."
+
+## S1 — open boundary via BLOCK lead self-energy, `dgalb_open_1d.py`
+
+Generalizes #265's scalar `greens.py` lead_sigma to a BLOCK surface Green's
+function (Sancho-Rubio decimation) fed by the DG-ALB block-tridiagonal H (H_00 =
+element diagonal block, H_01 = SIPG face coupling).
+
+```
+(1) unit test:  1x1 block Sancho-Rubio  ==  analytic scalar lead_sigma   4e-13  PASS
+(2) bulk bands: Bloch(H00,H01)  ==  periodic DG spectrum (folded)        7e-12  PASS
+                lowest 6 = [-0.379,-0.245x2,0.151x2,0.630] = plane-wave physical
+(3) surface LDOS = -Im tr g_surf/pi:  positive (min 1.5e-8), O(1) max    PASS
+(4) box-independence: boundary LDOS ~const over device length 2/4/8      PASS
+```
+
+## Findings
+
+1. **The block lead self-energy is correct.** In the scalar limit the block
+   Sancho-Rubio reproduces #265's analytic retarded self-energy to 4e-13 (after
+   fixing the reference's branch selection: the `|t^2 g|<=1` test fails for |t|>1;
+   the robust criterion is Im(g)<=0 with E+i*eta).
+2. **DG-ALB blocks feed it physically.** The Bloch bands from (H_00, H_01) exactly
+   reproduce the periodic DG spectrum (7e-12), which is the plane-wave physical
+   spectrum — so the block-tridiagonal structure DG produces is a valid lead.
+3. **The open boundary is physical and box-independent.** Surface LDOS is positive
+   with no spurious in-gap states; the boundary observable is independent of device
+   length (leads absorb the rest). Bug fixed en route: a homogeneous chain needs
+   the SAME element replicated, else floating-point differences in the canonical-
+   orthogonalization cut give non-uniform n_keep and break block-circulancy.
+
+## What this retires + reuse
+
+S0-electrostatics (ESM) and the S1 self-energy core are both validated in the
+DG-ALB framing. The Green's-function CONTOUR DENSITY on top (n(z) from a contour of
+G(E), no eigensolver) is #265's `greens.py`, validated there to 5.7e-12 — reuse it
+directly with block Sigma. Remaining for full transport (S2): device+two-lead NEGF
+(additive Sigma_L/Sigma_R), transmission T(E), and differentiable transport via
+scf.implicit. The shared self-energy core now works for both the planar-surface
+(#265, per-G|| channels) and general-geometry (DG-ALB, per-element blocks) routes.
