@@ -448,3 +448,51 @@ directly with block Sigma. Remaining for full transport (S2): device+two-lead NE
 (additive Sigma_L/Sigma_R), transmission T(E), and differentiable transport via
 scf.implicit. The shared self-energy core now works for both the planar-surface
 (#265, per-G|| channels) and general-geometry (DG-ALB, per-element blocks) routes.
+
+---
+
+# Build: S2 NEGF transport — validated (machinery exact; DG needs subspace projection)
+
+`dgalb_transport_1d.py` — device between two semi-infinite leads, Landauer/Caroli
+transmission T(E) = Tr[Gamma_L G_1N Gamma_R G_1N^dag] on the S1 block self-energies,
+and DIFFERENTIABLE transport (autograd through the Green's-function inverse).
+
+```
+##### scalar tight-binding lead (analytic: band [-2,2]) #####   -- machinery unit test
+ (A) perfect conductor  T(E)=1 in band, 0 out    max|T-N_open| = 6e-06   PASS
+ (B) barrier            T 1.000 -> 0.500                                  PASS
+ (C) differentiable     dT/db autograd vs FD     rel = 3.8e-09           PASS
+
+##### DG-ALB blocks, physical-subspace projected (p=3) #####
+ (A) perfect conductor  T ~ 1 in band (0.97-1.00), 0 out                 PASS (band-edge 2.7e-2)
+ (B) barrier            T 0.987 -> 0.913                                  PASS
+ (C) differentiable     dT/db autograd vs FD     rel = 1.1e-08           PASS
+```
+
+## Findings
+
+1. **The NEGF transport machinery is exact.** On an analytic 1D tight-binding chain
+   the Caroli transmission gives integer perfect transmission (T=1 in band to 6e-6),
+   a barrier suppresses it (1.0 -> 0.5), and **dT/d(barrier) via autograd matches
+   finite difference to 3.8e-9** -- differentiable transport works end to end.
+2. **DG-ALB transport needs a physical-subspace projection.** The raw SIPG penalty
+   modes (lifted to ~1000s) dominate the face-coupling block H_01 and swamp the
+   physical channel -> T=0. Projecting the lead blocks onto the low-energy Gamma-
+   point invariant subspace (lowest p physical bands) removes them: T ~ 1 across the
+   band (mid-band to ~1e-3; ~2.7e-2 at the band edge, the finite-p projection error),
+   a barrier suppresses T, and **dT/db autograd matches FD to 1.1e-8**.
+3. **Differentiable transport on the DG-ALB engine is real.** The full path
+   (block lead self-energy -> Green's function -> Caroli T -> autograd) is
+   differentiable to ~1e-8 on the DG blocks -- the inverse-design superpower
+   (dT/d(gate), dT/dR) that no non-AD NEGF code offers.
+
+## Status + remaining
+
+S2 machinery: DONE and differentiable. DG integration: works with a physical-
+subspace (transport-window) projection -- the standard DGDFT-transport reduction;
+the naive projection onto H_00's own eigenvectors shifts the bands (H_00 is not the
+physical Hamiltonian -- the bands are the full Bloch sum), so project onto the
+Gamma-point (H_00+H_01+H_01^dag) low bands. Full production needs the k-consistent
+invariant subspace across the BZ (not a single fixed p), plus the energy-contour
+current (reuse #265's greens.py) -- but the transmission, self-energy, and
+differentiability are all validated. All of S0/S1/S2 now have working spikes.

@@ -162,10 +162,10 @@ structure with block matrices. No eigensolver; Sigma(E) exact at every contour E
 Gate: (a) 1x1-block Sancho-Rubio == #265 analytic lead_sigma; (b) bulk LDOS
 reproduces the periodic band DOS; (c) box-independent boundary LDOS.
 
-### S2 — NEGF transport  [risk: medium]
+### S2 — NEGF transport  [VALIDATED — dgalb_transport_1d.py]
 Device = finite DG elements; leads = semi-infinite stacks (S1) attached at boundary
 faces as ADDITIVE self-energies Sigma_L, Sigma_R (no interior-face change).
 G = (E - H_dev - Sigma_L - Sigma_R)^{-1} by recursive Green's function (block-
 tridiagonal -> O(N)/energy); transmission T(E) = Tr[Gamma_L G Gamma_R G^dag].
 Differentiable transport (dT/dR, dT/d(gate)) via autograd / scf.implicit -- novel.
-Gate: clean channel -> integer conductance steps; benchmark junction.
+Gate: clean channel -> integer conductance steps; benchmark junction. **DONE (spike)**: Caroli T exact on tight-binding (T=1 in band to 6e-6, barrier 1.0->0.5, dT/db autograd=FD to 3.8e-9); DG-ALB transport works after a physical-subspace (Gamma-point low-band) projection -- T~1 in band, differentiable to 1.1e-8. Remaining: k-consistent invariant subspace + contour current (reuse #265 greens.py).
