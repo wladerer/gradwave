@@ -204,6 +204,30 @@ different, more modest idea).
 **Honest scope.** Load-imbalanced metals with many k-points on heterogeneous nodes; the realistic
 end state is async-fine + a tiny sync-coarse space, not fully barrier-free.
 
+**Measured result (2026-08-09) — blocker CONFIRMED, part (a).** Ran the spectral-radius half on
+asus: `dominant_screening_eigenvalue` (spectral radius of the raw, un-Kerkered fixed-point
+Jacobian M = K_Hxc·χ₀) on Al fcc at two box sizes, PBE, Fermi-Dirac smearing.
+
+| cell | box L | ρ(M) | λ_max^real (soft-mode margin) |
+|---|---|---|---|
+| Al, 1 atom | 2.86 Å | 0.42 | +0.001 |
+| Al, 8 atoms | 5.73 Å | **2.27** | +0.001 |
+| Si, 2 atoms | 3.84 Å | 1.06 | +0.002 |
+
+ρ(M) grows steeply with box length (0.42 → 2.27 for a 2× cell, a 5.4× jump) and is already
+2.3× over the async-convergence threshold ρ(|M|) < 1 at just 8 atoms — and ρ(|M|) ≥ ρ(M), so
+the true async bound is worse still. The sub-1 value at 1 atom is the degenerate small-box limit
+(large G_min ⇒ weak Hartree charge mode), not a counterexample; it pins the crossing. The
+dominant mode is the negative Hartree charge-sloshing mode (hence the sign), exactly the term an
+unpreconditioned local async field cannot tame — Kerker, its only stabilizer, is nonlocal. So an
+async chaotic-relaxation SCF diverges on any physically-relevant metal cell and worsens with size,
+by construction. The soft-mode margin (λ_max^real ≈ +0.001, i.e. 1 − λ ≈ 1) confirms no
+CDW/magnetic instability is involved — this is the plain screening wall, not a special case.
+Part (b) (straggler/barrier-waste) was not run and is now moot: even with large reclaimable waste,
+the async formulation is non-convergent on metals without the nonlocal coarse-space fix. Net: the
+rung survives only in the demoted async-fine + sync-coarse form, not as a by-construction async
+cure. Bench: `benchmarks/chaosfield_spectral_radius/`.
+
 ---
 
 ## What this program explicitly does not claim
