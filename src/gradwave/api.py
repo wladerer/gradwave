@@ -1247,6 +1247,292 @@ def _relax_newton(
     return relax, atoms, [frame]
 
 
+# ---------------------------------------------------------------------------
+# SeedPool: forward-only parallel dispatch for the hub-and-spoke campaigns.
+#
+# Each campaign computes its reference SCF ONCE (serially), checkpoints it, and
+# fans the independent spoke SCFs out to worker PROCESSES that warm-start from
+# that checkpoint (postscf.seedpool.map_spokes). The specs below are picklable
+# NamedTuples; the worker functions are module-level (picklable by reference)
+# and reload upfs/xc from `inp` inside the worker (nothing heavy is pickled —
+# only the checkpoint PATH and cheap ndarray/scalar spoke parameters cross the
+# process boundary). forward-only: the workers return plain arrays; autograd
+# graphs are process-local and do NOT survive the pool, so a differentiable
+# campaign must use n_workers=1 (the serial path, which keeps the live result).
+# ---------------------------------------------------------------------------
+
+
+# --- phonons (displacement spokes) -----------------------------------------
+def _phonon_run_scf(
+    inp: Input, scmap: Any, ksuper: Any, upfs: Any, uspp: bool, xc: Any,
+    mags: Any, pos_sc: Any, start_from: Any,
+) -> SCFResult | USPPResult:
+    """One supercell SCF at displaced positions ``pos_sc``. Module-level so the
+    serial (run_phonons make_scf) and parallel (worker) paths share ONE SCF
+    construction — the two cannot drift."""
+    if uspp:
+        from gradwave.scf.uspp import scf_uspp, setup_uspp
+
+        usystem = setup_uspp(
+            scmap.cell_super, pos_sc, scmap.species_super, _as_paws(upfs),
+            ecut=inp.ecut, kmesh=ksuper, ecutrho=inp.ecutrho,
+            use_symmetry=False)
+        if inp.device != "cpu":
+            usystem = usystem.to(inp.device)
+        return scf_uspp(
+            usystem, xc, nspin=inp.nspin, start_mag=mags,
+            smearing=inp.smearing.type, width=inp.smearing.width,
+            etol=inp.scf.etol, rhotol=inp.scf.rhotol,
+            mixing_alpha=inp.scf.mixing.alpha,
+            mixing_history=inp.scf.mixing.history,
+            diago_tol=inp.scf.diago_tol, start_from=start_from, verbose=False)
+    from gradwave.scf.loop import scf, setup_system
+
+    system = setup_system(
+        scmap.cell_super, pos_sc, scmap.species_super, _as_upfs(upfs),
+        ecut=inp.ecut, kmesh=ksuper, kshift=inp.kpoints.shift,
+        use_symmetry=False)
+    if inp.device != "cpu":
+        system = system.to(inp.device)
+    spin_kw: dict[str, Any] = (
+        {"tot_magnetization": inp.tot_magnetization}
+        if inp.nspin == 2 and inp.tot_magnetization is not None else {})
+    return scf(system, cast("XCFunctional", xc), nspin=inp.nspin,
+               start_mag=mags, smearing=inp.smearing.type,
+               width=inp.smearing.width, etol=inp.scf.etol, rhotol=inp.scf.rhotol,
+               mixing_alpha=inp.scf.mixing.alpha,
+               mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
+               precond=inp.scf.mixing.precond, diago_tol=inp.scf.diago_tol,
+               start_from=start_from, verbose=False, **spin_kw)
+
+
+def _phonon_force(res: Any, xc: Any, uspp: bool) -> Any:
+    """Analytic force (N_sc, 3) [eV/Å] for the FD fold — USPP/PAW routes through
+    the augmentation-aware forces_uspp, NC through the default force path."""
+    if uspp:
+        from gradwave.postscf.paw_forces import forces_uspp
+
+        return forces_uspp(res, xc)
+    from gradwave.postscf.forces import forces
+
+    return forces(res, xc=xc)
+
+
+def _phonon_rebuild(inp: Input) -> tuple[Any, bool, Any, Any]:
+    """Reconstruct ``(upfs, uspp, xc, mags)`` from ``inp`` inside a worker,
+    mirroring run_phonons' setup (path-cached upf load, nspin xc/mags)."""
+    _species, upfs, _soa = _species_upfs(inp)
+    uspp = _is_uspp(upfs)
+    if inp.nspin == 2:
+        xc, mags = _spin_setup(inp)
+    else:
+        xc, mags = XC_REGISTRY[inp.xc](), None
+    return upfs, uspp, xc, mags
+
+
+class _PhononSpoke(NamedTuple):
+    inp: Input
+    scmap: Any
+    ksuper: tuple[int, int, int]
+    pos_sc: Any            # (N_sc, 3) displaced positions [Å], numpy
+    ckpt_path: str
+    tag: tuple[int, int, int]   # (home atom a, axis i, sign)
+
+
+def _phonon_spoke_worker(spoke: _PhononSpoke) -> tuple[tuple[int, int, int], Any]:
+    """Worker: build the displaced supercell, warm-start from the reference
+    checkpoint, run the SCF and return ``(tag, force[N_sc,3])`` (numpy)."""
+    from gradwave.checkpoint import as_start_from, load_checkpoint
+
+    upfs, uspp, xc, mags = _phonon_rebuild(spoke.inp)
+    start_from = as_start_from(load_checkpoint(spoke.ckpt_path))
+    res = _phonon_run_scf(spoke.inp, spoke.scmap, spoke.ksuper, upfs, uspp,
+                          xc, mags, spoke.pos_sc, start_from)
+    return spoke.tag, _phonon_force(res, xc, uspp).detach().cpu().numpy()
+
+
+def _phonons_fc_parallel(
+    inp: Input, scmap: Any, ksuper: Any, upfs: Any, uspp: bool, xc: Any,
+    mags: Any, *, h: float, n_workers: int, verbose: bool,
+) -> Any:
+    """Force constants Φ_home via SeedPool: reference SCF serially, then the
+    6·N_prim displacement SCFs across worker processes, each warm-started from
+    the reference checkpoint. The FD/symmetrize/ASR assembly is shared with the
+    serial path (postscf.phonons_supercell.force_constants_from_forces)."""
+    import os
+    import tempfile
+
+    from gradwave.checkpoint import save_checkpoint
+    from gradwave.postscf.phonons_supercell import (
+        displacement_list,
+        force_constants_from_forces,
+    )
+    from gradwave.postscf.seedpool import map_spokes
+
+    ref = _phonon_run_scf(inp, scmap, ksuper, upfs, uspp, xc, mags,
+                          scmap.positions_super.copy(), None)
+    with tempfile.TemporaryDirectory(prefix="gw_seedpool_") as td:
+        ckpt = os.path.join(td, "ref.ckpt")
+        save_checkpoint(ref, ckpt)
+        spokes = [_PhononSpoke(inp, scmap, ksuper, pos, ckpt, (a, i, sign))
+                  for (a, i, sign, pos) in displacement_list(scmap, h)]
+        out = map_spokes(_phonon_spoke_worker, spokes,
+                         n_workers=n_workers, verbose=verbose)
+    force_map = {tag: f for tag, f in out}
+    return force_constants_from_forces(force_map, scmap, h)
+
+
+# --- elastic (strain spokes; clamped-ion only) -----------------------------
+def _elastic_rebuild(inp: Input) -> tuple[Any, bool, Any, Any, bool]:
+    """Reconstruct ``(upfs, uspp, species_of_atom, xc, is_fr)`` from ``inp``
+    inside a worker, mirroring run_elastic's setup."""
+    _species, upfs, soa = _species_upfs(inp)
+    uspp = _is_uspp(upfs)
+    is_fr = any(b.j is not None for u in upfs for b in u.betas)
+    if inp.noncollinear:
+        from gradwave.core.xc.noncollinear import NoncollinearXC
+
+        xc: Any = NoncollinearXC(SPIN_XC_REGISTRY[inp.xc]())
+    elif inp.nspin == 2:
+        xc = SPIN_XC_REGISTRY[inp.xc]()
+    else:
+        xc = XC_REGISTRY[inp.xc]()
+    return upfs, uspp, soa, xc, is_fr
+
+
+def _elastic_time_reversal(inp: Input) -> bool:
+    """k ≡ −k holds unless a magnetic spinor breaks it (mirrors run_elastic)."""
+    return not (inp.noncollinear and not inp.nonmagnetic)
+
+
+def _elastic_build(
+    inp: Input, upfs: Any, uspp: bool, soa: Any, cell: Any,
+    fixed: Any, time_reversal: bool,
+) -> System | USPPSystem:
+    """Build the strained system on the pinned FFT grid (mirrors run_elastic's
+    ``_build`` closure; fractional coordinates held fixed = clamped-ion)."""
+    import numpy as np
+
+    pos = inp.atoms.get_scaled_positions() @ np.asarray(cell, dtype=float)
+    if uspp:
+        from gradwave.scf.uspp import setup_uspp
+
+        return setup_uspp(
+            cell, pos, soa, _as_paws(upfs), ecut=inp.ecut,
+            kmesh=inp.kpoints.mesh, ecutrho=inp.ecutrho, nbands=inp.nbands,
+            use_symmetry=inp.symmetry, fft_shape=fixed)
+    from gradwave.scf.loop import setup_system
+
+    return setup_system(
+        cell=cell, positions=pos, species_of_atom=soa, upfs=_as_upfs(upfs),
+        ecut=inp.ecut, kmesh=inp.kpoints.mesh, kshift=inp.kpoints.shift,
+        nbands=inp.nbands, use_symmetry=inp.symmetry,
+        time_reversal=time_reversal, fft_shape=fixed)
+
+
+def _elastic_stress(res: Any, xc: Any, uspp: bool) -> Any:
+    """Analytic stress (3, 3) [eV/Å³] — USPP/PAW vs norm-conserving path."""
+    if uspp:
+        from gradwave.postscf.paw_stress import stress_uspp
+
+        return stress_uspp(res, xc)
+    from gradwave.postscf.stress import stress
+
+    return stress(res, xc)
+
+
+def _epskey(eps: Any) -> tuple[float, ...]:
+    """Hashable key for a 3×3 strain tensor, so the parallel path can back an
+    ``elastic.elastic_tensor`` closure with precomputed stresses (elastic_tensor
+    calls it with the exact voigt_strain_tensor(j, ±h) tensors)."""
+    import numpy as np
+
+    return tuple(np.round(np.asarray(eps, dtype=float).ravel(), 12).tolist())
+
+
+class _ElasticSpoke(NamedTuple):
+    inp: Input
+    cell0: Any
+    fixed: Any
+    eps: Any               # 3×3 strain tensor
+    ckpt_path: str
+    key: tuple[float, ...]
+
+
+def _elastic_spoke_worker(
+    spoke: _ElasticSpoke,
+) -> tuple[tuple[float, ...], Any, bool]:
+    """Worker: strain the cell, warm-start from the reference checkpoint, run
+    the SCF and return ``(key, stress[3,3], converged)`` (numpy)."""
+    import numpy as np
+
+    from gradwave.checkpoint import as_start_from, load_checkpoint
+
+    upfs, uspp, soa, xc, _is_fr = _elastic_rebuild(spoke.inp)
+    tr = _elastic_time_reversal(spoke.inp)
+    cell = spoke.cell0 @ (np.eye(3) + spoke.eps).T
+    system = _elastic_build(spoke.inp, upfs, uspp, soa, cell, spoke.fixed, tr)
+    start_from = as_start_from(load_checkpoint(spoke.ckpt_path))
+    res = run_scf(spoke.inp, system=system, verbose=False, start_from=start_from)
+    sigma = _elastic_stress(res, xc, uspp).detach().cpu().numpy()
+    return spoke.key, sigma, bool(getattr(res, "converged", True))
+
+
+# --- eos (volume spokes) ---------------------------------------------------
+def _eos_rebuild(inp: Input) -> tuple[Any, bool, Any]:
+    _species, upfs, soa = _species_upfs(inp)
+    return upfs, _is_uspp(upfs), soa
+
+
+def _eos_build(
+    inp: Input, upfs: Any, uspp: bool, soa: Any, scale: float, fixed: Any,
+) -> tuple[System | USPPSystem, Any]:
+    """Isotropically-scaled system on the pinned grid (mirrors run_eos'
+    ``_build_at``); returns ``(system, cell)``."""
+    import numpy as np
+
+    cell0 = np.asarray(inp.atoms.cell.array, dtype=float)
+    cell = cell0 * scale ** (1.0 / 3.0)
+    pos = inp.atoms.get_scaled_positions() @ cell
+    if uspp:
+        from gradwave.scf.uspp import setup_uspp
+
+        return setup_uspp(
+            cell, pos, soa, _as_paws(upfs), ecut=inp.ecut,
+            kmesh=inp.kpoints.mesh, ecutrho=inp.ecutrho, nbands=inp.nbands,
+            use_symmetry=inp.symmetry, fft_shape=fixed), cell
+    from gradwave.scf.loop import setup_system
+
+    return setup_system(
+        cell=cell, positions=pos, species_of_atom=soa, upfs=_as_upfs(upfs),
+        ecut=inp.ecut, kmesh=inp.kpoints.mesh, kshift=inp.kpoints.shift,
+        nbands=inp.nbands, use_symmetry=inp.symmetry, fft_shape=fixed), cell
+
+
+class _EosSpoke(NamedTuple):
+    inp: Input
+    scale: float
+    fixed: Any
+    ckpt_path: str
+    idx: int
+
+
+def _eos_spoke_worker(spoke: _EosSpoke) -> tuple[int, float, float, bool]:
+    """Worker: build the scaled volume, warm-start from the reference volume's
+    checkpoint, run the SCF and return ``(idx, volume, energy, converged)``."""
+    import numpy as np
+
+    from gradwave.checkpoint import as_start_from, load_checkpoint
+
+    upfs, uspp, soa = _eos_rebuild(spoke.inp)
+    system, cell = _eos_build(spoke.inp, upfs, uspp, soa, spoke.scale, spoke.fixed)
+    start_from = as_start_from(load_checkpoint(spoke.ckpt_path))
+    res = run_scf(spoke.inp, system=system, verbose=False, start_from=start_from)
+    e = float(getattr(res.energies, spoke.inp.eos.energy))
+    vol = float(abs(np.linalg.det(cell)))
+    return spoke.idx, vol, e, bool(getattr(res, "converged", True))
+
+
 def run_eos(inp: Input, verbose: bool = True) -> dict[str, Any]:
     """Isotropic volume scan + 3rd-order Birch-Murnaghan fit → V0, B0, B0'.
 
@@ -1262,7 +1548,14 @@ def run_eos(inp: Input, verbose: bool = True) -> dict[str, Any]:
     ``run_scf`` already routes the sharded path). The FFT box is pinned across
     the scan, so the shard rebuilds deterministically per volume from
     ``(nk, rank, world_size)``. Every rank fits the identical E(V), so only the
-    printing is quieted below."""
+    printing is quieted below.
+
+    ``eos.n_workers > 1`` (SeedPool) evaluates the volumes across that many
+    worker processes, each warm-started from the reference volume (nearest 1.0)
+    rather than the serial neighbour chain, so E(V) matches the serial fit to SCF
+    tolerance (not bit-for-bit). Forward-only: a differentiable EOS must keep
+    ``n_workers=1``. Forced serial under ``distributed`` (k-sharding already owns
+    the parallelism there)."""
     import numpy as np
 
     from gradwave.postscf.eos import EV_A3_TO_GPA, fit_bm3
@@ -1307,23 +1600,65 @@ def run_eos(inp: Input, verbose: bool = True) -> dict[str, Any]:
     if verbose:
         print(f"eos: {len(scales)} volumes on fixed FFT grid {fixed}", flush=True)
 
-    prev = None
-    volumes, energies, converged = [], [], []
     ekind = inp.eos.energy
-    for s in scales:
-        sysd, cell = _build_at(s, fixed)
-        res = run_scf(inp, system=sysd, verbose=False, start_from=prev)
-        prev = res
-        e = float(getattr(res.energies, ekind))
-        vol = float(abs(np.linalg.det(cell)))
-        conv = bool(getattr(res, "converged", True))
-        volumes.append(vol)
-        energies.append(e)
-        converged.append(conv)
+    # SeedPool routes the volumes through worker processes; forced serial under
+    # `distributed` (that path already shards k across ranks — the two
+    # parallelisms do not compose in v1).
+    n_workers = 1 if inp.distributed else (inp.eos.n_workers or 1)
+
+    def _eos_print(s: float, vol: float, e: float, conv: bool) -> None:
         if verbose:
             tag = "" if conv else "  (NOT converged)"
             print(f"  s={s:.3f}  V={vol / natoms:8.4f} Å³/at  "
                   f"E={e / natoms:+.6f} eV/at{tag}", flush=True)
+
+    if n_workers > 1:
+        # reference = the volume nearest 1.0 (cheapest cold start); every other
+        # volume warm-starts from ITS checkpoint (a shared seed, not the serial
+        # neighbour chain), so E(V) matches the serial fit to SCF tolerance.
+        import os
+        import tempfile
+
+        from gradwave.checkpoint import save_checkpoint
+        from gradwave.postscf.seedpool import map_spokes
+
+        ref_idx = int(np.argmin([abs(s - 1.0) for s in scales]))
+        ref_sys, ref_cell = _build_at(scales[ref_idx], fixed)
+        ref = run_scf(inp, system=ref_sys, verbose=False, start_from=None)
+        volumes = [0.0] * len(scales)
+        energies = [0.0] * len(scales)
+        converged = [False] * len(scales)
+        volumes[ref_idx] = float(abs(np.linalg.det(ref_cell)))
+        energies[ref_idx] = float(getattr(ref.energies, ekind))
+        converged[ref_idx] = bool(getattr(ref, "converged", True))
+        with tempfile.TemporaryDirectory(prefix="gw_seedpool_") as td:
+            ckpt = os.path.join(td, "ref.ckpt")
+            save_checkpoint(ref, ckpt)
+            spokes = [_EosSpoke(inp, s, fixed, ckpt, i)
+                      for i, s in enumerate(scales) if i != ref_idx]
+            out = map_spokes(_eos_spoke_worker, spokes,
+                             n_workers=n_workers, verbose=verbose)
+        for idx, vol, e, conv in out:
+            volumes[idx] = vol
+            energies[idx] = e
+            converged[idx] = conv
+        for s, vol, e, conv in zip(scales, volumes, energies, converged,
+                                   strict=True):
+            _eos_print(s, vol, e, conv)
+    else:
+        prev = None
+        volumes, energies, converged = [], [], []
+        for s in scales:
+            sysd, cell = _build_at(s, fixed)
+            res = run_scf(inp, system=sysd, verbose=False, start_from=prev)
+            prev = res
+            e = float(getattr(res.energies, ekind))
+            vol = float(abs(np.linalg.det(cell)))
+            conv = bool(getattr(res, "converged", True))
+            volumes.append(vol)
+            energies.append(e)
+            converged.append(conv)
+            _eos_print(s, vol, e, conv)
 
     v_at = np.array(volumes) / natoms
     e_at = np.array(energies) / natoms
@@ -1377,7 +1712,15 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
     ``postscf.stress.stress`` differentiates the spinor strained energy
     (``_energy_strained_fr``), so the same FD-of-analytic-stress driver folds it
     into C. DFT+U on that path is a feature boundary (#142), and the USPP/PAW
-    spinor stress has no path yet, so both are rejected below."""
+    spinor stress has no path yet, so both are rejected below.
+
+    ``elastic.n_workers > 1`` (SeedPool) fans the 12 CLAMPED-ion strain SCFs out
+    to that many worker processes, each warm-started from the shared unstrained
+    reference checkpoint. Relaxed-ion stays serial (its per-strain BFGS is a
+    nested optimization, not one forward SCF). Forward-only: a differentiable
+    elastic run must keep ``n_workers=1``. It composes with a future
+    irreducible-strain reduction — the pool runs over whatever strain spoke set
+    is generated."""
     import numpy as np
 
     from gradwave.postscf.elastic import (
@@ -1572,7 +1915,44 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
             converged.append(bool(getattr(res, "converged", True)))
         return _stress(cast(Any, res), cast(Any, xc)).detach().cpu().numpy()
 
-    c = elastic_tensor(_stress_at, h=h, symmetry=strain_sym)
+    # SeedPool: the 12 clamped-ion strain SCFs are independent forward runs, so
+    # fan them across worker processes (each warm-started from the unstrained
+    # reference checkpoint). Relaxed-ion stays serial — its per-strain BFGS is a
+    # nested optimization, not one forward SCF — and `distributed` forces serial
+    # (that path shards k across ranks; the two parallelisms don't compose in v1).
+    # StrainStar symmetry (`strain_sym`) still applies either way: elastic_tensor
+    # only evaluates the Laue-irreducible strains and rebuilds the rest by symmetry
+    # (the parallel path precomputes all 12; the reduction just uses fewer of them).
+    n_workers = 1 if inp.distributed else (inp.elastic.n_workers or 1)
+    if n_workers > 1 and not relaxed_ion:
+        import os
+        import tempfile
+
+        from gradwave.checkpoint import save_checkpoint
+        from gradwave.postscf.seedpool import map_spokes
+
+        with tempfile.TemporaryDirectory(prefix="gw_seedpool_") as td:
+            ckpt = os.path.join(td, "ref.ckpt")
+            save_checkpoint(ref, ckpt)
+            spokes = []
+            for j in range(6):
+                for sgn in (+1, -1):
+                    eps = voigt_strain_tensor(j, sgn * h)
+                    spokes.append(
+                        _ElasticSpoke(inp, cell0, fixed, eps, ckpt, _epskey(eps)))
+            out = map_spokes(_elastic_spoke_worker, spokes,
+                             n_workers=n_workers, verbose=verbose)
+        stress_map = {key: sigma for key, sigma, _conv in out}
+        converged.extend(bool(conv) for _key, _sigma, conv in out)
+
+        # back elastic_tensor with the precomputed stresses — it calls the
+        # closure with the exact voigt_strain_tensor(j, ±h) tensors we keyed.
+        def _stress_at_precomputed(eps: Any) -> Any:
+            return stress_map[_epskey(eps)]
+
+        c = elastic_tensor(_stress_at_precomputed, h=h, symmetry=strain_sym)
+    else:
+        c = elastic_tensor(_stress_at, h=h, symmetry=strain_sym)
     mod = moduli_from_cij(c)
     resid_gpa = float(np.abs(sigma_ref).max()) * 160.2176634
     block: dict[str, Any] = {
@@ -1614,7 +1994,17 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
     each warm-started from the undisplaced reference), folds the force constants
     to D(q) and diagonalizes. Norm-conserving OR ultrasoft/PAW, nspin ∈ {1, 2}
     (the analytic forces sum per spin channel — see postscf.forces /
-    postscf.paw_forces)."""
+    postscf.paw_forces).
+
+    ``phonons.n_workers > 1`` (SeedPool) fans the 6·N_prim displacement SCFs out
+    to that many worker processes, each warm-started from the shared undisplaced
+    reference checkpoint (thread budget split ~total/n_workers per worker). This
+    is forward-only: worker autograd graphs do not cross processes, so a
+    differentiable phonon run must keep ``n_workers=1`` (the serial path). It
+    composes with a future irreducible-displacement reduction — the parallel
+    dispatch runs over whatever displacement set ``displacement_list`` yields, so
+    reducing 6·N_prim to the symmetry-irreducible spokes simply shortens the list
+    the pool consumes."""
     import numpy as np
 
     from gradwave.postscf.phonons_supercell import (
@@ -1644,47 +2034,11 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
     ksuper = tuple(max(1, inp.kpoints.mesh[i] // n[i]) for i in range(3))
 
     def make_scf(pos_sc: Any, start_from: Any = None) -> SCFResult | USPPResult:
-        if uspp:
-            from gradwave.scf.uspp import scf_uspp, setup_uspp
-
-            usystem = setup_uspp(
-                scmap.cell_super, pos_sc, scmap.species_super, _as_paws(upfs),
-                ecut=inp.ecut, kmesh=ksuper, ecutrho=inp.ecutrho,
-                use_symmetry=False)
-            if inp.device != "cpu":
-                usystem = usystem.to(inp.device)
-            # scf_uspp has no tot_magnetization pin (see run_scf); a zero
-            # start_mag is the nonmagnetic seed for nspin=2.
-            return scf_uspp(
-                usystem, xc, nspin=inp.nspin,
-                start_mag=mags,
-                smearing=inp.smearing.type, width=inp.smearing.width,
-                etol=inp.scf.etol, rhotol=inp.scf.rhotol,
-                mixing_alpha=inp.scf.mixing.alpha,
-                mixing_history=inp.scf.mixing.history,
-                diago_tol=inp.scf.diago_tol, start_from=start_from,
-                verbose=False)
-        from gradwave.scf.loop import scf, setup_system
-
-        system = setup_system(
-            scmap.cell_super, pos_sc, scmap.species_super, _as_upfs(upfs),
-            ecut=inp.ecut, kmesh=ksuper, kshift=inp.kpoints.shift,
-            use_symmetry=False)
-        if inp.device != "cpu":
-            system = system.to(inp.device)
-        # fixed spin moment: a collinear nspin=2, no-smearing pin (see run_scf)
-        spin_kw: dict[str, Any] = (
-            {"tot_magnetization": inp.tot_magnetization}
-            if inp.nspin == 2 and inp.tot_magnetization is not None else {})
-        return scf(system, cast("XCFunctional", xc), nspin=inp.nspin,
-                   start_mag=mags,
-                   smearing=inp.smearing.type, width=inp.smearing.width,
-                   etol=inp.scf.etol, rhotol=inp.scf.rhotol,
-                   mixing_alpha=inp.scf.mixing.alpha,
-                   mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
-                   precond=inp.scf.mixing.precond,
-                   diago_tol=inp.scf.diago_tol, start_from=start_from, verbose=False,
-                   **spin_kw)
+        # thin wrapper over the module-level _phonon_run_scf so the serial
+        # (here) and parallel (worker) paths share ONE SCF construction — the
+        # (tot_magnetization pin / device move / nspin seed) logic lives there.
+        return _phonon_run_scf(inp, scmap, ksuper, upfs, uspp, xc, mags,
+                               pos_sc, start_from)
 
     if verbose:
         sym_note = (" (point-group-reduced set)"
@@ -1701,11 +2055,23 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
 
         def force_fn(res: Any) -> Any:
             return forces_uspp(res, xc)
-    phi = force_constants_home(make_scf, scmap, h=inp.phonons.displacement,
-                               xc=xc, force_fn=force_fn,
-                               use_displacement_symmetry=(
-                                   inp.phonons.use_displacement_symmetry),
-                               verbose=verbose)
+    # SeedPool: fan the 6·N_prim displacement SCFs across worker processes (each
+    # warm-started from the undisplaced reference checkpoint). Forced serial under
+    # `distributed`. SeedPool (parallelize the full displacement set) and the
+    # point-group displacement reduction (fewer SCFs, serial) are alternative ways
+    # to cut the phonon cost and do not compose in v1 — parallel wins if both are
+    # requested; the reduction applies on the serial path.
+    n_workers = 1 if inp.distributed else (inp.phonons.n_workers or 1)
+    if n_workers > 1:
+        phi = _phonons_fc_parallel(inp, scmap, ksuper, upfs, uspp, xc, mags,
+                                   h=inp.phonons.displacement,
+                                   n_workers=n_workers, verbose=verbose)
+    else:
+        phi = force_constants_home(make_scf, scmap, h=inp.phonons.displacement,
+                                   xc=xc, force_fn=force_fn,
+                                   use_displacement_symmetry=(
+                                       inp.phonons.use_displacement_symmetry),
+                                   verbose=verbose)
 
     bp = inp.atoms.cell.bandpath(path=inp.phonons.path or None,
                                  npoints=inp.phonons.npoints)
