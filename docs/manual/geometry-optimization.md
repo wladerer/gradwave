@@ -235,6 +235,83 @@ records the chosen `extrapolation` alongside the existing `scf_iter_per_step` an
     `diagonal` so existing runs are unchanged. The correction remains a
     first-order indicator, not a substitute for converging `ecut`.
 
+## Speculative line search
+
+BFGS takes one step per ionic iteration along the quasi-Newton direction. On a
+soft mode — a lateral adsorbate coordinate, a rigid intermolecular translation —
+a fixed step overshoots: the force rises instead of falling, and the optimizer
+spends several iterations recovering. The speculative line search evaluates
+several step lengths along the BFGS direction *at once*, fits a cubic to the
+`(energy, projected-gradient)` samples, and accepts the interpolated minimum. The
+accepted geometry is always re-evaluated by the main calculator at full SCF
+tolerance, so the search changes only the *path* to the minimum, never the
+minimum itself.
+
+Set it in the `relax` block:
+
+```yaml
+relax:
+  line_search: adaptive        # off | parallel | adaptive
+  line_search_n_samples: 4     # step lengths bracketed per ionic step
+  line_search_n_workers: 2     # processes evaluating the samples concurrently
+```
+
+- `off` (default) — plain BFGS, byte-for-byte unchanged.
+- `parallel` — bracket and interpolate every ionic step.
+- `adaptive` — stay dormant while the relax makes monotone progress, and fan out
+  only when a step raises the energy or stalls (the overshoot signature). It pays
+  for the extra SCFs only on the steps where they help, so it is the safe default
+  for a mixed workload.
+
+The samples are independent forward SCFs with no shared autograd graph, so they
+parallelize cleanly over `line_search_n_workers` spawned processes (the same
+forward-only substrate as the campaign spokes; a differentiable relax must keep
+one worker). One worker evaluates the samples serially in-process.
+
+### When it helps
+
+The lever is overshoot, so the benefit tracks how soft the softest relaxed mode
+is. Smooth bulk relaxes barely move; soft-mode systems — adsorbates on a surface,
+molecular crystals, and by extension NEB images and H-bonded or dispersion-bound
+structures — are where a fixed BFGS step overshoots and the search pays off.
+
+### Measured
+
+A full-fp64 validation on an H100 (three systems, each relaxed with serial BFGS
+and with the two line-search modes from the identical rattled start, all landing
+on the same minimum to under a meV):
+
+![Max force per ionic step, serial BFGS vs line search, three systems](img/line_search_convergence.png)
+
+Ionic steps to reach `fmax < 0.03 eV/Å`, and the total SCF compute (accepted
+steps **plus** every candidate evaluation, so the candidate overhead is charged in
+full):
+
+| system | serial | parallel | adaptive | adaptive fired |
+|---|---|---|---|---|
+| rattled fcc-Al, 4 atoms | 8 steps · 30 s | **6 · 18 s (1.63×)** | 8 · 26 s (1.12×) | 0 / 7 |
+| H on Al(111), 13 atoms | 35 steps · 329 s | **27 · 264 s (1.25×)** | 31 · 308 s (1.07×) | 7 / 30 |
+| 2×CO₂ molecular crystal, 6 atoms | 35 steps · 30 s | **27 · 26 s (1.15×)** | 31 · 27 s (1.11×) | 9 / 30 |
+
+The step reduction outweighs the candidate cost, so the search is a net wall-time
+win even here, where the candidates were evaluated *serially* (`n_workers=1`);
+real `n_workers>1` parallelism drives the per-step candidate cost toward `1/N` and
+widens the margin. Adaptive stayed dormant on the smooth metal (fired on 0 of 7
+steps) and fired on the two soft-mode systems, exactly as intended.
+
+### Limits — the early-overshoot bump
+
+In the plot, `fmax` rises around step 5 on the molecular crystal for *every*
+curve, serial included. That bump is not a line-search artifact; it is BFGS
+starting from a scaled-identity Hessian on a system with stiff intramolecular
+(C=O stretch) and soft intermolecular modes together. Until the Hessian
+approximation fills in, the quasi-Newton *direction* itself is poorly scaled, and
+the line search can only rescale the *step* along it — it damps the bump (its peak
+is lower than serial's) but cannot remove it. Removing it needs a better starting
+direction: a model initial Hessian from bond/angle connectivity, or a
+preconditioned optimizer built for stiff/soft contrast. Those are complementary
+to the line search, not replaced by it.
+
 ## Gotchas
 
 - Forces sum to zero to about 1e-6 eV/Å by construction, since $E$ is invariant
