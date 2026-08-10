@@ -176,6 +176,61 @@ class RelaxParams:
     # iterative annulus solve, which recovers a larger fraction of the true Pulay
     # pressure for a modest per-step cost — see docs/manual/geometry-optimization.md).
     pulay_solver: str = "diagonal"  # diagonal | cg
+    # ------------------------------------------------------------------
+    # Parallel / speculative line search (opt-in, nested engine only).
+    # A quasi-Newton relax computes a search direction dₖ each ionic step, then
+    # takes a fixed step along it (BFGS uses α=1, capped by maxstep) — the step
+    # length is not searched. This replaces that fixed step with ONE parallel
+    # round: evaluate Rₖ + αᵢ·dₖ for a spread of αᵢ CONCURRENTLY (each a forward
+    # SCF warm-started from Rₖ's checkpoint, returning E and F), fit a cubic
+    # through the (αᵢ, Eᵢ, gᵢ = −Fᵢ·d̂) samples and step to the interpolated
+    # minimum α*. It only changes the PATH: the accepted geometry is always
+    # re-evaluated by the main calculator at full SCF tol (the next ionic step's
+    # force call), so the relaxed minimum matches a plain serial BFGS relax to
+    # the geometry/energy tolerance — same minimum, different route.
+    #   "off"      (default) serial fixed step — BYTE-IDENTICAL to today.
+    #   "parallel" fan candidates out every ionic step.
+    #   "adaptive" fan out ONLY when the optimizer is struggling (energy rose on
+    #              the last accepted step, or max|F| failed to decrease over the
+    #              last `line_search_patience` steps); a normal serial step
+    #              otherwise.
+    # Scope: positions-only relax (cell: false) with the bfgs optimizer; a
+    # cell/fire/joint/newton run silently keeps the serial step (recorded in the
+    # relax block). FORWARD-ONLY — the candidate SCFs run in worker processes and
+    # PyTorch autograd graphs do not cross a process boundary, so a
+    # DIFFERENTIABLE relax must leave this "off".
+    line_search: str = "off"  # off | parallel | adaptive
+    # DECOUPLED knobs: n_samples is how many α to try (the cubic sample count);
+    # n_workers is how many run AT ONCE. PEAK memory ≈ n_workers × one-SCF and is
+    # INDEPENDENT of n_samples — more samples than workers run in later waves, not
+    # concurrently. Cap RAM via n_workers; raise n_samples to resolve the cubic.
+    line_search_n_samples: int = 3
+    line_search_n_workers: int = 2
+    # Explicit geometric α schedule around the proposed step (α=1). Empty →
+    # auto-generate n_samples points geometrically bracketing 1.0 (e.g. n=4 →
+    # {0.25, 0.5, 1.0, 2.0}). α* is clamped to line_search_max_alpha: a large α
+    # crosses a bigger geometry change → a worse warm-start seed → a costlier
+    # candidate SCF, so the step is bounded.
+    line_search_alphas: tuple[float, ...] = ()
+    line_search_max_alpha: float = 2.5
+    # adaptive trigger window: struggle is judged over the last `patience`
+    # accepted steps (max|F| failed to decrease across them, or E increased).
+    line_search_patience: int = 1
+    # PREDICTIVE trigger: search the first `line_search_warmup` ionic steps
+    # unconditionally (0 = off). The BFGS Hessian is least informed early, so the
+    # step is likeliest to overshoot then; searching those steps up front pre-empts
+    # the first overshoot instead of reacting to it (adaptive fires only after the
+    # damage). Applies to `adaptive`; `parallel` already searches every step.
+    line_search_warmup: int = 0
+    # DENSER bracket during warmup only: warmup steps use this many α samples
+    # (0 → inherit line_search_n_samples). Early overshoot needs a finer/wider
+    # search to pin the true minimum, but paying for extra samples every step is
+    # wasteful — so spend them only on the warmup steps where they earn their keep.
+    line_search_warmup_samples: int = 0
+    # Initial BFGS Hessian: "identity" (ASE default, scaled unit matrix) or "lindh"
+    # (a cheap curvature-aware model Hessian — stiff bonds, soft non-bonded — that
+    # removes the early overshoot on stiff/soft-mixed systems). See opt.model_hessian.
+    initial_hessian: str = "identity"
     # Outer-SCF tolerance ladder (nested engine only, opt-in): schedule each
     # ionic step's SCF stop tolerance from the optimizer's current max|F| — loose
     # when forces are large (early throwaway geometries), tightening as forces
@@ -197,6 +252,12 @@ class RelaxParams:
     tol_ladder_first_step: str = "loose"  # loose | tight
 
     def __post_init__(self):
+        # YAML parses the bare word `off` (also `no`/`false`) as the boolean False
+        # (the "Norway problem"), so a natural `line_search: off` arrives here as
+        # False. Coerce it back to the string "off" so the unquoted spelling — the
+        # one shown in the template — just works.
+        if self.line_search is False:
+            object.__setattr__(self, "line_search", "off")
         if self.method not in ("nested", "joint", "newton"):
             raise InputError(
                 "relax.method must be 'nested', 'joint', or 'newton', got "
@@ -209,6 +270,45 @@ class RelaxParams:
             raise InputError(
                 "relax.pulay_solver must be 'diagonal' or 'cg', got "
                 f"{self.pulay_solver!r}")
+        if self.line_search not in ("off", "parallel", "adaptive"):
+            raise InputError(
+                "relax.line_search must be 'off', 'parallel', or 'adaptive', "
+                f"got {self.line_search!r}")
+        if self.line_search_n_samples < 2:
+            raise InputError(
+                "relax.line_search_n_samples must be >= 2 (a cubic fit needs at "
+                f"least two E/g samples), got {self.line_search_n_samples}")
+        if self.line_search_n_workers < 1:
+            raise InputError(
+                "relax.line_search_n_workers must be >= 1, got "
+                f"{self.line_search_n_workers}")
+        if self.line_search_max_alpha <= 0.0:
+            raise InputError(
+                "relax.line_search_max_alpha must be > 0, got "
+                f"{self.line_search_max_alpha}")
+        if self.line_search_patience < 1:
+            raise InputError(
+                "relax.line_search_patience must be >= 1, got "
+                f"{self.line_search_patience}")
+        if self.line_search_warmup < 0:
+            raise InputError(
+                "relax.line_search_warmup must be >= 0, got "
+                f"{self.line_search_warmup}")
+        if self.line_search_warmup_samples < 0:
+            raise InputError(
+                "relax.line_search_warmup_samples must be >= 0, got "
+                f"{self.line_search_warmup_samples}")
+        if self.initial_hessian not in ("identity", "lindh"):
+            raise InputError(
+                "relax.initial_hessian must be 'identity' or 'lindh', got "
+                f"{self.initial_hessian!r}")
+        object.__setattr__(
+            self, "line_search_alphas",
+            tuple(float(a) for a in self.line_search_alphas))
+        if any(a <= 0.0 for a in self.line_search_alphas):
+            raise InputError(
+                "relax.line_search_alphas must all be > 0, got "
+                f"{self.line_search_alphas}")
         if self.tol_ladder_first_step not in ("loose", "tight"):
             raise InputError(
                 "relax.tol_ladder_first_step must be 'loose' or 'tight', got "

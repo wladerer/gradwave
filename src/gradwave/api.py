@@ -846,11 +846,37 @@ def _relax_nested(
         gpa_to_ev_a3 = 1.0 / 160.21766208
         target = FrechetCellFilter(
             atoms, scalar_pressure=inp.relax.pressure * gpa_to_ev_a3)
+    # Parallel/speculative line search (opt-in): a positions-only bfgs relax may
+    # replace each step's fixed length with one parallel round (see
+    # opt/line_search.py). A cell/fire request keeps the serial step and records
+    # why, so the default and unsupported paths stay byte-identical to today.
+    ls_mode = inp.relax.line_search
+    ls_opt: Any = None
+    ls_fallback_reason: str | None = None
+    if ls_mode != "off":
+        if inp.relax.cell:
+            ls_fallback_reason = "cell relaxation (line search is positions-only)"
+        elif inp.relax.optimizer != "bfgs":
+            ls_fallback_reason = (
+                f"optimizer={inp.relax.optimizer!r} (line search needs bfgs)")
+        else:
+            from gradwave.opt.line_search import make_line_search_bfgs
+
+            ls_opt = make_line_search_bfgs(target, inp=inp, verbose=verbose)
+            if verbose:
+                print(f"  relax: {ls_mode} line search "
+                      f"({inp.relax.line_search_n_samples} samples, "
+                      f"{inp.relax.line_search_n_workers} workers) — forward-only",
+                      flush=True)
+        if ls_fallback_reason is not None and verbose:
+            print(f"  relax: line_search={ls_mode!r} ignored — "
+                  f"{ls_fallback_reason}; serial step", flush=True)
     # ASE's Optimizer.__init__ declares atoms: Atoms, but at runtime accepts
     # any Atoms-like object implementing get_positions/get_forces/etc. —
     # every ase.filters wrapper (FrechetCellFilter included) is meant to be
     # passed here; the stub just doesn't spell out that duck-typed contract.
-    opt = opt_cls(cast("Atoms", target), logfile=None)  # our own per-step line below
+    opt = (ls_opt if ls_opt is not None
+           else opt_cls(cast("Atoms", target), logfile=None))  # per-step line below
     trajectory: list[dict[str, Any]] = []
     frames: list[Atoms] = []  # ASE Atoms per step, energy+forces frozen for extxyz output
     # incremental trajectory: each step's frame is appended to this file as it
@@ -951,8 +977,32 @@ def _relax_nested(
                 logger.warning("could not append relax step to %s: %s",
                                traj_path, exc)
 
+    if inp.relax.initial_hessian == "lindh":
+        # seed a curvature-aware model Hessian so early steps don't overshoot the
+        # stiff directions (atomic DOFs only — a cell relax keeps the default)
+        if inp.relax.cell:
+            if verbose:
+                print("  relax: initial_hessian=lindh ignored under a cell relax "
+                      "(atomic model Hessian only)", flush=True)
+        else:
+            from gradwave.opt.model_hessian import lindh_hessian, seed_bfgs_hessian
+
+            h0 = lindh_hessian(atoms.get_positions(),
+                               list(atoms.get_atomic_numbers()))
+            applied = seed_bfgs_hessian(opt, h0)
+            if verbose:
+                print("  relax: initial_hessian=lindh "
+                      f"({'applied' if applied else 'skipped — DOF mismatch'})",
+                      flush=True)
+
     opt.attach(_record)
-    converged = opt.run(fmax=inp.relax.fmax, steps=inp.relax.max_steps)
+    try:
+        converged = opt.run(fmax=inp.relax.fmax, steps=inp.relax.max_steps)
+    finally:
+        # tear down the line search's persistent candidate pool (no-op otherwise)
+        _close_pool = getattr(opt, "_ls_close_pool", None)
+        if callable(_close_pool):
+            _close_pool()
     import numpy as np
 
     # Exactness gate for the tolerance ladder: the trajectory above converged the
@@ -1002,6 +1052,23 @@ def _relax_nested(
             if "scf_total_iter" in relax:
                 relax["scf_total_iter"] += int(final_resolve_iter)
     relax["extrapolation"] = inp.relax.extrapolation
+    if ls_mode != "off":
+        # document the parallel line search: whether it engaged, and (adaptive)
+        # how many ionic steps actually fanned candidates out vs took the serial
+        # step — so an easy relax shows a dormant trigger and a soft/overshoot
+        # relax shows it firing.
+        relax["line_search"] = ls_mode
+        if ls_fallback_reason is not None:
+            relax["line_search_active"] = False
+            relax["line_search_fallback_reason"] = ls_fallback_reason
+        else:
+            events = list(getattr(opt, "_ls_events", []))
+            relax["line_search_active"] = True
+            relax["line_search_n_samples"] = inp.relax.line_search_n_samples
+            relax["line_search_n_workers"] = inp.relax.line_search_n_workers
+            relax["line_search_steps_searched"] = int(
+                sum(1 for e in events if e.get("searched")))
+            relax["line_search_events"] = events
     if getattr(atoms.calc, "_density_clamped", False):
         # the extrapolated density dipped negative on at least one step and was
         # clamped to zero then renormalized to N_e (a benign, recorded fallback)

@@ -103,6 +103,15 @@ relax:
   optimizer: bfgs                # bfgs (default) | fire
   fmax: 0.01                     # eV/Å convergence criterion
   max_steps: 100
+  # Parallel/speculative line search (opt-in; positions-only + bfgs). Replaces
+  # the fixed step length with one parallel round that evaluates several step
+  # sizes at once and interpolates the best. Only changes the PATH — same
+  # relaxed minimum. Forward-only (worker processes), so a differentiable relax
+  # must leave this "off".
+  line_search: "off"             # "off" (default) | "parallel" | "adaptive"
+  line_search_n_samples: 3       # how many step sizes to try (cubic samples)
+  line_search_n_workers: 2       # how many run AT ONCE — sets PEAK memory
+                                 # (≈ n_workers × one SCF), independent of n_samples
 
 output:
   dir: ./out

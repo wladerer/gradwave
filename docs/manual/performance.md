@@ -718,6 +718,53 @@ pays once per-k work dominates the collectives. Large multi-rank runs are blocke
 #216, where the post-SCF result gather deadlocks on large CUDA payloads. Use it for k-heavy
 systems and watch that issue before relying on it in production.
 
+### Size-scaling crossover, autograd, and SOC (single H100)
+
+A later single-H100 SXM session (vast.ai, 80 GB, 192 cores) pinned down three things
+the earlier batteries left implicit: *where* the GPU crossover is, and that the two
+capabilities most associated with gradwave — autograd through the SCF, and the
+spinor SOC path — win at least as hard as the plain SCF.
+
+**The crossover is cell size, and the card is compute-bound above it.** A Γ-only
+fcc-Al SCF swept from 4 to 256 atoms, GPU against the CPU's best thread count (8):
+
+| atoms | npw | GPU | CPU 8t | speedup | GPU %compute |
+|---|---|---|---|---|---|
+| 4 | 1,237 | 0.76 s | 0.40 s | 0.5× (GPU loses) | 48% |
+| 32 | 9,939 | 0.81 s | 9.75 s | 12× | 72% |
+| 108 | 33,401 | 2.87 s | 152 s | 53× | 74% |
+| 256 | 79,597 | 18.1 s | 1007 s | 56× | 96% |
+
+Below ~a few tens of atoms the GPU loses to launch overhead; above it the gap opens
+to 50–56× and the fraction of wall spent in real compute kernels climbs to 96%. That
+last number matters: the small cell is the only launch-bound point, so fusing many
+small ops into fewer kernels (spin-batching the two spin channels into one Davidson,
+folding configs onto a batch axis) has nothing to reclaim on a saturated card. A
+spin-batched Davidson A/B confirmed it — 0.93–0.95× on the isolated kernel and a flat
+full-SCF wall even where it cut iterations — so the op-fusion family is a dead lever
+on the H100, and the datacenter payoff is throughput at size, not fusion.
+
+**Autograd through the SCF wins as hard as the SCF.** The response-carrying gradient
+(`scf.implicit.density_loss_param_grads`: an Anderson-accelerated adjoint solve plus
+an f_xc double-backward) had never been timed at scale on a full-fp64 GPU. On diamond
+Si it runs 11× faster than the 8-thread CPU at 16 atoms and 50× at 54, and the
+*backward is cheaper than the forward* (adjoint 1.8 s vs SCF 4.0 s at 54 atoms), at
+2.5 GB peak. Differentiable DFT is not a GPU tax here — it is the same throughput win
+as the forward solve.
+
+**The spinor SOC path is the most GPU-favorable, and improves with k.** A
+non-collinear fcc-Ni SCF with a fully-relativistic pseudopotential (the spinor basis
+doubles the plane-wave axis and the j-resolved projectors act on it) ran 4.8× faster
+than the CPU at a 4×4×4 mesh and 6.0× at 6×6×6 — the win grows with k-density because
+the doubled basis is exactly the dense-linear-algebra regime the card wants. The
+denser mesh also stabilized the moment (0.607 μB, versus a spurious collapse at the
+coarse mesh), so the fast run is the physical one.
+
+Iteration counts match the CPU at every point above, so all of these are
+kernel-throughput gains, not solver-logic differences — the same reading the A100 and
+4×H100 sections reached, now with the crossover located and the autograd/SOC paths
+measured.
+
 ## Measuring performance without fooling yourself
 
 - **Iteration counts are more trustworthy than wall time for solver-logic

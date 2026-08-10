@@ -235,6 +235,109 @@ records the chosen `extrapolation` alongside the existing `scf_iter_per_step` an
     `diagonal` so existing runs are unchanged. The correction remains a
     first-order indicator, not a substitute for converging `ecut`.
 
+## Speculative line search
+
+BFGS takes one step per ionic iteration along the quasi-Newton direction. On a
+soft mode — a lateral adsorbate coordinate, a rigid intermolecular translation —
+a fixed step overshoots: the force rises instead of falling, and the optimizer
+spends several iterations recovering. The speculative line search evaluates
+several step lengths along the BFGS direction *at once*, fits a cubic to the
+`(energy, projected-gradient)` samples, and accepts the interpolated minimum. The
+accepted geometry is always re-evaluated by the main calculator at full SCF
+tolerance, so the search changes only the *path* to the minimum, never the
+minimum itself.
+
+Set it in the `relax` block:
+
+```yaml
+relax:
+  line_search: adaptive        # off | parallel | adaptive
+  line_search_n_samples: 4     # step lengths bracketed per ionic step
+  line_search_n_workers: 2     # processes evaluating the samples concurrently
+  line_search_warmup: 2        # also search the first N steps unconditionally
+  line_search_warmup_samples: 6  # a denser bracket during those warmup steps
+  initial_hessian: lindh       # identity | lindh (a curvature-aware start)
+```
+
+- `off` (default) — plain BFGS, byte-for-byte unchanged.
+- `parallel` — bracket and interpolate every ionic step.
+- `adaptive` — stay dormant while the relax makes monotone progress, and fan out
+  only when a step raises the energy or stalls (the overshoot signature). It pays
+  for the extra SCFs only on the steps where they help, so it is the safe default
+  for a mixed workload.
+
+The samples are independent forward SCFs with no shared autograd graph, so they
+parallelize cleanly over `line_search_n_workers` spawned processes (the same
+forward-only substrate as the campaign spokes; a differentiable relax must keep
+one worker). The pool is created once and reused for the whole relax, so `spawn`
+and the torch re-import are paid once rather than every ionic step. One worker
+evaluates the samples serially in-process.
+
+**`adaptive` is reactive** — it fires only *after* a step overshoots. The first
+overshoot usually lands in the first few steps, before it has evidence, so
+`line_search_warmup: N` searches the first `N` steps unconditionally (a predictive
+trigger), and `line_search_warmup_samples` gives just those steps a denser bracket
+where the true minimum is hardest to locate — the extra SCFs are spent only where
+overshoot lives, not on every step.
+
+### When it helps
+
+The lever is overshoot, so the benefit tracks how soft the softest relaxed mode
+is. Smooth bulk relaxes barely move; soft-mode systems — adsorbates on a surface,
+molecular crystals, and by extension NEB images and H-bonded or dispersion-bound
+structures — are where a fixed BFGS step overshoots and the search pays off.
+
+### Measured
+
+A full-fp64 validation on an H100 (three systems, each relaxed with serial BFGS
+and with the two line-search modes from the identical rattled start, all landing
+on the same minimum to under a meV):
+
+![Max force per ionic step, serial BFGS vs line search, three systems](img/line_search_convergence.png)
+
+Ionic steps to reach `fmax < 0.03 eV/Å`, and the total SCF compute (accepted
+steps **plus** every candidate evaluation, so the candidate overhead is charged in
+full):
+
+| system | serial | parallel | adaptive | adaptive fired |
+|---|---|---|---|---|
+| rattled fcc-Al, 4 atoms | 8 steps · 30 s | **6 · 18 s (1.63×)** | 8 · 26 s (1.12×) | 0 / 7 |
+| H on Al(111), 13 atoms | 35 steps · 329 s | **27 · 264 s (1.25×)** | 31 · 308 s (1.07×) | 7 / 30 |
+| 2×CO₂ molecular crystal, 6 atoms | 35 steps · 30 s | **27 · 26 s (1.15×)** | 31 · 27 s (1.11×) | 9 / 30 |
+
+The step reduction outweighs the candidate cost, so the search is a net wall-time
+win even here, where the candidates were evaluated *serially* (`n_workers=1`);
+real `n_workers>1` parallelism drives the per-step candidate cost toward `1/N` and
+widens the margin. Adaptive stayed dormant on the smooth metal (fired on 0 of 7
+steps) and fired on the two soft-mode systems, exactly as intended.
+
+### Limits — the early-overshoot bump
+
+In the plot, `fmax` rises around step 5 on the molecular crystal for *every*
+curve, serial included. That bump is not a line-search artifact; it is BFGS
+starting from a scaled-identity Hessian on a system with stiff intramolecular
+(C=O stretch) and soft intermolecular modes together. Until the Hessian
+approximation fills in, the quasi-Newton *direction* itself is poorly scaled, and
+the line search can only rescale the *step* along it — it damps the bump (its peak
+is lower than serial's) but cannot remove it. A better starting *direction* is what
+helps, so gradwave ships `initial_hessian: lindh`: BFGS is seeded with the Lindh
+model Hessian (`opt.model_hessian`), a cheap pairwise-stretch model that already
+knows the C=O stretch is stiff (it reproduces its ~116 eV/Å² force constant) and the
+non-bonded modes are soft.
+
+Measured on the same 2×CO₂ crystal (H100, fp64), the seed fixes the early
+mis-scaling directly: step-2 max force drops from **14.1 eV/Å** (identity) to
+**4.2** with `lindh` and **0.95** with `lindh` + `line_search: adaptive` +
+`line_search_warmup: 2`, cutting the relax from **34** steps to **26** and **25**,
+all on the same minimum to under 0.2 meV. Two honest caveats: the shipped model is
+**stretch-only** (no bend/torsion terms), so it reshapes rather than fully removes
+the residual bump — the reliable bump-tamer is pairing it with the warmup line
+search, which gives both the fewest steps and the lowest overshoot. And the model
+covers atomic coordinates only, so a cell relax keeps the identity start. A fuller
+Lindh with angle terms is the natural next step for the bend-dominated residual.
+
+![Max force per ionic step, identity vs lindh vs lindh+warmup, first 12 steps](img/initial_hessian_convergence.png)
+
 ## Gotchas
 
 - Forces sum to zero to about 1e-6 eV/Å by construction, since $E$ is invariant
