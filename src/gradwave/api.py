@@ -1422,9 +1422,28 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
                        for j in range(6)]
     fixed = tuple(max(int(_fft_grid(_build(c, None)).shape[i]) for c in probe)
                   for i in range(3))
+
+    # opt-in Laue-point-group strain reduction: run only the irreducible Voigt
+    # strains and reconstruct C by the group action (mirrors
+    # phonons.use_displacement_symmetry). The pinned FFT box is handed in so the
+    # reducer can refuse an anisotropic grid and fall back to the full 6 strains.
+    strain_sym = None
+    if inp.elastic.use_strain_symmetry:
+        from gradwave.postscf.elastic import ElasticStrainSymmetry
+
+        strain_sym = ElasticStrainSymmetry(cell0, frac, species_of_atom,
+                                           fft_shape=fixed)
+        if not strain_sym.can_reduce:
+            strain_sym = None
     if verbose:
+        sym_note = ""
+        if inp.elastic.use_strain_symmetry:
+            sym_note = (f", strain symmetry {len(strain_sym.strains)}/6 "
+                        f"irreducible ({strain_sym.sg.international})"
+                        if strain_sym is not None
+                        else ", strain symmetry off (unsafe → full set)")
         print(f"elastic: {inp.elastic.mode}-ion, strain h={h}, "
-              f"fixed FFT grid {fixed}", flush=True)
+              f"fixed FFT grid {fixed}{sym_note}", flush=True)
 
     # reference SCF once — warm-start seed and residual-stress readout
     ref = run_scf(inp, system=_build(cell0, fixed), verbose=False)
@@ -1516,7 +1535,7 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
             converged.append(bool(getattr(res, "converged", True)))
         return _stress(cast(Any, res), cast(Any, xc)).detach().cpu().numpy()
 
-    c = elastic_tensor(_stress_at, h=h)
+    c = elastic_tensor(_stress_at, h=h, symmetry=strain_sym)
     mod = moduli_from_cij(c)
     resid_gpa = float(np.abs(sigma_ref).max()) * 160.2176634
     block: dict[str, Any] = {
@@ -1534,6 +1553,7 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
         "mechanically_stable": is_mechanically_stable(c),
         "residual_stress_GPa": resid_gpa,
         "all_converged": all(converged),
+        "n_strains": len(strain_sym.strains) if strain_sym is not None else 6,
     }
     if relaxed_ion:
         block["relax_fmax"] = inp.elastic.fmax

@@ -347,6 +347,7 @@ class ElasticParams:
     mode: str = "clamped"  # clamped | relaxed (relaxed-ion: per-strain ionic relax)
     fmax: float = 0.01     # per-strain ionic relax force gate [eV/Å] (relaxed mode)
     max_steps: int = 100   # per-strain ionic relax step cap (relaxed mode)
+    use_strain_symmetry: bool = False  # run only Laue-point-group-irreducible strains
 
     def __post_init__(self):
         if not 0.0 < self.strain < 0.1:
