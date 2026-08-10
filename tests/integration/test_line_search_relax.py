@@ -128,7 +128,7 @@ relax:
   optimizer: bfgs
   fmax: 0.03
   max_steps: 40
-  line_search: {line_search}
+  line_search: "{line_search}"
   line_search_n_samples: 4
   line_search_n_workers: 2
 scf:

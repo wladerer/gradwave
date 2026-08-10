@@ -219,6 +219,12 @@ class RelaxParams:
     line_search_patience: int = 1
 
     def __post_init__(self):
+        # YAML parses the bare word `off` (also `no`/`false`) as the boolean False
+        # (the "Norway problem"), so a natural `line_search: off` arrives here as
+        # False. Coerce it back to the string "off" so the unquoted spelling — the
+        # one shown in the template — just works.
+        if self.line_search is False:
+            object.__setattr__(self, "line_search", "off")
         if self.method not in ("nested", "joint", "newton"):
             raise InputError(
                 "relax.method must be 'nested', 'joint', or 'newton', got "

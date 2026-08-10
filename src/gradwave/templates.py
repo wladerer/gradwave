@@ -108,7 +108,7 @@ relax:
   # sizes at once and interpolates the best. Only changes the PATH — same
   # relaxed minimum. Forward-only (worker processes), so a differentiable relax
   # must leave this "off".
-  line_search: off               # off (default) | parallel | adaptive
+  line_search: "off"             # "off" (default) | "parallel" | "adaptive"
   line_search_n_samples: 3       # how many step sizes to try (cubic samples)
   line_search_n_workers: 2       # how many run AT ONCE — sets PEAK memory
                                  # (≈ n_workers × one SCF), independent of n_samples
