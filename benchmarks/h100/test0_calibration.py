@@ -138,8 +138,8 @@ def main() -> int:
                + f" {ratio:>9} {(f'{gpu_frac:.1f}' if has_cuda else '-'):>8}")
         print(row)
 
-    print("\n# READ: gpu/best = H100 vs the CPU's BEST thread count (a fair baseline). Watch where the")
-    print("# CPU stops scaling. gpu%cmp LOW (<~50%) => launch-bound => batching/fusing is the lever.")
+    print("\n# READ: gpu/best = H100 vs the CPU's BEST thread count (fair baseline).")
+    print("# gpu%cmp LOW (<~50%) => launch-bound => batching/fusing is the lever.")
     print("EXIT=0")
     return 0
 
