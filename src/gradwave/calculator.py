@@ -62,6 +62,36 @@ _SPIN_XC = {"lda": LSDA_PW92, "pbe": SpinPBE, "r2scan": SpinR2SCAN}
 _StateKey = tuple[bytes, bytes, bytes, tuple[str, ...], bytes, str, str]
 
 
+@dataclasses.dataclass(frozen=True)
+class _TolLadder:
+    """Normalized outer-SCF tolerance-ladder policy (see GradWave's tol_ladder).
+
+    ``rhotol_final`` None means "the calculator's configured rhotol" — resolved
+    in ``_effective_tols`` so the exactness re-solve lands on the same fixed
+    point a constant-rhotol (baseline) relax would."""
+
+    c: float
+    p: float
+    rhotol_start: float          # first/loosest step tol (hi clamp)
+    rhotol_final: float | None   # None → the calc's rhotol (lo clamp)
+    first_step: str              # "loose" | "tight"
+
+    @staticmethod
+    def from_config(cfg: dict[str, Any]) -> _TolLadder:
+        first = str(cfg.get("first_step", "loose"))
+        if first not in ("loose", "tight"):
+            raise ValueError(
+                f"tol_ladder first_step must be 'loose' or 'tight', got {first!r}")
+        return _TolLadder(
+            c=float(cfg.get("c", 1.0e-3)),
+            p=float(cfg.get("p", 2.0)),
+            rhotol_start=float(cfg.get("rhotol_start", 1.0e-4)),
+            rhotol_final=(None if cfg.get("rhotol_final") is None
+                          else float(cfg["rhotol_final"])),
+            first_step=first,
+        )
+
+
 def _fft_grid(system: System | USPPSystem) -> FFTGrid:
     """Both `System.grid` and `USPPSystem.grid` are `FFTGrid`; this just names
     the shared field for callers that hold the `System | USPPSystem` union."""
@@ -316,6 +346,13 @@ class GradWave(Calculator):
         # path). Composes with use_symmetry (the shard unit is the IBZ k-list).
         verbose: bool = False,
         scf_step_hook: Callable[[], None] | None = None,
+        tol_ladder: dict[str, Any] | None = None,  # opt-in outer-SCF tolerance
+        # ladder (relaxation only): loosen each ionic step's rhotol/etol when the
+        # optimizer's max|F| is large, tightening as forces shrink. Keys: c, p,
+        # rhotol_start, rhotol_final (None → this calc's rhotol), first_step
+        # ("loose"|"tight"). None → off (constant rhotol, behaviour unchanged).
+        # The relax driver threads the previous accepted geometry's fmax in and
+        # runs the exactness re-solve at full rhotol; see api._relax_nested.
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -412,6 +449,16 @@ class GradWave(Calculator):
         # SCF trace. None for standalone/ASE use, so the calculator stays quiet
         # about "steps" it has no concept of.
         self._scf_step_hook = scf_step_hook
+        # Outer-SCF tolerance ladder (opt-in, relaxation only). _last_fmax is the
+        # previous accepted geometry's max|F| the next step's tol is scheduled
+        # from (None → first-step policy); _ladder_disabled forces the full tol
+        # for the exactness re-solve; last_rhotol_used records the tol the last
+        # SCF actually ran at (read by the relax driver for the per-step trace).
+        self._tol_ladder: _TolLadder | None = (
+            None if tol_ladder is None else _TolLadder.from_config(tol_ladder))
+        self._last_fmax: float | None = None
+        self._ladder_disabled = False
+        self.last_rhotol_used: float | None = None
         self.last_result: SCFResult | USPPResult | None = None
         self._scf_state: _StateKey | None = None  # the geometry/params the
         # stored SCF state was built at
@@ -799,6 +846,48 @@ class GradWave(Calculator):
             self._device,
         )
 
+    def _effective_tols(self) -> tuple[float, float]:
+        """(rhotol, etol) the next SCF should run at.
+
+        With no ladder (or during the exactness re-solve) these are the
+        calculator's configured full tolerances — byte-identical to a
+        constant-rhotol run. Otherwise schedule rhotol from the previous
+        accepted geometry's max|F|:
+        ``rhotol_step = clamp(c·max|F|**p, lo=rhotol_final, hi=rhotol_start)``,
+        and scale etol by the same factor (rhotol_step / rhotol_final) so the
+        energy-tail gate loosens in lockstep. The first step (no fmax yet) uses
+        rhotol_start ("loose") or rhotol_final ("tight")."""
+        p = self.parameters
+        lad = self._tol_ladder
+        if lad is None or self._ladder_disabled:
+            return p["rhotol"], p["etol"]
+        rf = p["rhotol"] if lad.rhotol_final is None else lad.rhotol_final
+        fmax = self._last_fmax
+        if fmax is None:
+            rhotol = rf if lad.first_step == "tight" else lad.rhotol_start
+        else:
+            raw = lad.c * (max(float(fmax), 0.0) ** lad.p)
+            rhotol = min(lad.rhotol_start, max(rf, raw))
+        etol = p["etol"] * (rhotol / rf) if rf > 0.0 else p["etol"]
+        return rhotol, etol
+
+    def resolve_full_tol(self) -> int:
+        """Exactness gate: re-solve the current geometry at the full (un-laddered)
+        rhotol/etol, warm-started from the last (loosely converged) state, and
+        return the SCF iteration count. Called by the relax driver once the
+        optimizer reports converged, so the reported/differentiated energy and
+        forces sit at the exact fixed point (not a loosened one). No-op-safe to
+        call with no ladder — it just re-solves at the (already-full) tol."""
+        if self.atoms is None:
+            raise RuntimeError("resolve_full_tol() before any calculate()")
+        self._ladder_disabled = True
+        atoms = self.atoms
+        self.reset()          # clear results + self.atoms so ASE recomputes
+        self._scf_state = None  # bypass the geometry-match SCF-reuse guard
+        self.calculate(atoms, properties=("energy", "forces", "stress"),
+                       system_changes=all_changes)
+        return int(getattr(self.last_result, "n_iter", 0))
+
     @override
     def calculate(
         self,
@@ -879,6 +968,8 @@ class GradWave(Calculator):
         # the reassembled full-mesh result — never this rank's shard.
         start = cast(Any, self._warm_start(system, nspin))
         local_system, dist_ctx = self._maybe_shard(system)
+        rhotol_eff, etol_eff = self._effective_tols()
+        self.last_rhotol_used = rhotol_eff
         # scf()/forces() declare xc: XCFunctional (nspin=1 only in their own
         # signature); the nspin=2 SpinXC variants both share XCFunctional's
         # interface (CompilableXC, torch.nn.Module) and are the SCF's own
@@ -887,7 +978,7 @@ class GradWave(Calculator):
         res = scf(
             cast("System", local_system), cast("XCFunctional", xc),
             smearing=p["smearing"], width=p["width"],
-            max_iter=p["max_iter"], etol=p["etol"], rhotol=p["rhotol"],
+            max_iter=p["max_iter"], etol=etol_eff, rhotol=rhotol_eff,
             mixing_alpha=p["mixing_alpha"], kerker=p["mixing_kerker"],
             diago_tol=p["diago_tol"], verbose=self._verbose,
             eigensolver=p["eigensolver"], precond=p["precond"],
@@ -932,6 +1023,18 @@ class GradWave(Calculator):
             if p["pulay_stress_correction"]:
                 self._apply_pulay_correction(res, xc)
         self._apply_dispersion(system)
+        self._update_ladder_fmax()
+
+    def _update_ladder_fmax(self) -> None:
+        """Record this geometry's atomic max|F| as the fmax the NEXT ionic step's
+        ladder tol is scheduled from (self-contained fallback; the relax driver
+        overrides with the optimizer's own fmax, which under a cell relax also
+        folds in the stress). Cheap; only meaningful while a ladder is active."""
+        if self._tol_ladder is None:
+            return
+        f = self.results.get("forces")
+        if f is not None:
+            self._last_fmax = float(np.linalg.norm(f, axis=1).max())
 
     def _apply_pulay_correction(
         self, res: SCFResult, xc: XCFunctional | SpinXC
@@ -1050,6 +1153,8 @@ class GradWave(Calculator):
         # forces/stress below see the whole mesh (see _calculate_nc).
         start = cast(Any, self._warm_start(system, nspin))
         local_system, dist_ctx = self._maybe_shard(system)
+        rhotol_eff, etol_eff = self._effective_tols()
+        self.last_rhotol_used = rhotol_eff
         # scf_uspp has no tot_magnetization pin (no fixed-spin-moment mode); the
         # start_mag seed and a shared Fermi level find the moment.
         # scf_uspp takes mixing_history=None natively (per-scheme default)
@@ -1057,7 +1162,7 @@ class GradWave(Calculator):
                        start_mag=start_mag,
                        smearing=p["smearing"],
                        width=p["width"], max_iter=p["max_iter"],
-                       etol=p["etol"], rhotol=p["rhotol"],
+                       etol=etol_eff, rhotol=rhotol_eff,
                        diago_tol=p["diago_tol"], mixing_scheme=p["mixing_scheme"],
                        mixing_alpha=p["mixing_alpha"],
                        mixing_history=p["mixing_history"],
@@ -1092,3 +1197,4 @@ class GradWave(Calculator):
                 sig[0, 0], sig[1, 1], sig[2, 2], sig[1, 2], sig[0, 2], sig[0, 1],
             ])
         self._apply_dispersion(system)
+        self._update_ladder_fmax()
