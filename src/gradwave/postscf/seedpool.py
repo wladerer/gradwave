@@ -91,7 +91,7 @@ def map_spokes(
     n_workers: int | None,
     total_threads: int | None = None,
     verbose: bool = False,
-    mp_context: str | None = None,
+    mp_context: str | None = "spawn",
 ) -> list[_R]:
     """Evaluate ``worker(spoke)`` for every spoke, results in input order.
 
@@ -107,7 +107,12 @@ def map_spokes(
     else crosses the boundary; the workers are expected to reload any heavy state
     (a reference-SCF checkpoint) from a path they carry. ``total_threads``
     defaults to the parent's current ``torch.get_num_threads()``. ``mp_context``
-    (e.g. ``"spawn"``/``"fork"``) overrides the platform default start method.
+    defaults to ``"spawn"``: forking a worker after torch/BLAS have started their
+    thread pools deadlocks (a classic fork-after-threads hazard, and MEASURED here
+    — the fork path hung on the real SCF workers), so each worker is spawned with a
+    fresh interpreter. Spawn re-imports torch/gradwave once per worker (~a few
+    seconds), amortized across the campaign's spokes. Pass ``"fork"`` only if you
+    know the parent has no live thread pools.
     """
     spoke_list = list(spokes)
     w = resolve_workers(n_workers, len(spoke_list))
