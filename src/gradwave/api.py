@@ -1667,9 +1667,11 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
                    **spin_kw)
 
     if verbose:
+        sym_note = (" (point-group-reduced set)"
+                    if inp.phonons.use_displacement_symmetry else "")
         print(f"phonons: {tuple(n)} supercell ({scmap.n_sc} atoms), displacing "
-              f"{scmap.n_prim} home atoms → {6 * scmap.n_prim} SCFs, k-mesh {ksuper}",
-              flush=True)
+              f"{scmap.n_prim} home atoms → ≤{6 * scmap.n_prim} SCFs{sym_note}, "
+              f"k-mesh {ksuper}", flush=True)
     # xc is needed by the force path only for NLCC species (spin-resolved for
     # nspin=2); it is ignored for valence-only pseudos. USPP/PAW routes the fold
     # through the augmentation-aware paw_forces.forces_uspp; NC uses the default.
@@ -1680,7 +1682,10 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
         def force_fn(res: Any) -> Any:
             return forces_uspp(res, xc)
     phi = force_constants_home(make_scf, scmap, h=inp.phonons.displacement,
-                               xc=xc, force_fn=force_fn, verbose=verbose)
+                               xc=xc, force_fn=force_fn,
+                               use_displacement_symmetry=(
+                                   inp.phonons.use_displacement_symmetry),
+                               verbose=verbose)
 
     bp = inp.atoms.cell.bandpath(path=inp.phonons.path or None,
                                  npoints=inp.phonons.npoints)
