@@ -1644,6 +1644,37 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
 
         def force_fn(res: Any) -> Any:
             return forces_uspp(res, xc)
+    if inp.dispersion.enabled:
+        # Fold the Grimme D3/D4 dispersion FORCES into every displaced-geometry
+        # force. The bare-DFT phonon path omits them, so the interlayer (vdW-bound)
+        # branches of a layered material come out unphysically soft; adding the
+        # analytic dispersion force at each displaced supercell geometry stiffens
+        # them. The correction is recomputed per displacement because it depends on
+        # the displaced positions (res.system carries them).
+        import numpy as _np
+        import torch as _torch
+
+        from gradwave.postscf.forces import forces as _nc_forces
+
+        _dp = inp.dispersion
+        _method = _dp.method.lower()
+        _zprim = inp.atoms.get_atomic_numbers()
+        _sp2z = {species_of_atom[a]: int(_zprim[a]) for a in range(len(_zprim))}
+        _zsuper = [_sp2z[s] for s in scmap.species_super]
+        _base_ff = force_fn
+
+        def force_fn(res: Any) -> Any:  # noqa: F811
+            f = _base_ff(res) if _base_ff is not None else _nc_forces(res, xc=xc)
+            system = res.system
+            pos = system.positions.detach().to(_torch.float64)
+            cell_sc = _np.asarray(system.grid.cell, dtype=_np.float64)
+            fd = _compute_dispersion(
+                pos, cell_sc, _zsuper, method=_method,
+                functional=_dp.functional or inp.xc, charge=_dp.charge,
+                cutoff_ang=_dp.cutoff, cn_cutoff_ang=_dp.cn_cutoff,
+                s6=_dp.s6, s8=_dp.s8, a1=_dp.a1, a2=_dp.a2, need_stress=False,
+            ).forces
+            return f + fd.to(f.dtype).to(f.device)
     phi = force_constants_home(make_scf, scmap, h=inp.phonons.displacement,
                                xc=xc, force_fn=force_fn,
                                use_displacement_symmetry=(
