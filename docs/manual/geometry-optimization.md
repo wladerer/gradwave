@@ -319,16 +319,22 @@ starting from a scaled-identity Hessian on a system with stiff intramolecular
 (C=O stretch) and soft intermolecular modes together. Until the Hessian
 approximation fills in, the quasi-Newton *direction* itself is poorly scaled, and
 the line search can only rescale the *step* along it — it damps the bump (its peak
-is lower than serial's) but cannot remove it. Removing it needs a better starting
-*direction*, which is why gradwave ships one: `initial_hessian: lindh` seeds BFGS
-with the Lindh model Hessian (`opt.model_hessian`), a cheap pairwise-stretch model
-that already knows the C=O stretch is stiff (it reproduces its ~116 eV/Å² force
-constant) and the intermolecular modes are soft. The stiff directions then get
-proportionately small first steps, so the overshoot never forms. It composes with
-the line search — the strongest relax pairs `initial_hessian: lindh` (fixes the
-direction) with `line_search: adaptive` + `line_search_warmup` (rescales the step
-and catches whatever overshoot remains). The model covers atomic coordinates only,
-so a cell relax keeps the identity start.
+is lower than serial's) but cannot remove it. A better starting *direction* is what
+helps, so gradwave ships `initial_hessian: lindh`: BFGS is seeded with the Lindh
+model Hessian (`opt.model_hessian`), a cheap pairwise-stretch model that already
+knows the C=O stretch is stiff (it reproduces its ~116 eV/Å² force constant) and the
+non-bonded modes are soft.
+
+Measured on the same 2×CO₂ crystal (H100, fp64), the seed fixes the early
+mis-scaling directly: step-2 max force drops from **14.1 eV/Å** (identity) to
+**4.2** with `lindh` and **0.95** with `lindh` + `line_search: adaptive` +
+`line_search_warmup: 2`, cutting the relax from **34** steps to **26** and **25**,
+all on the same minimum to under 0.2 meV. Two honest caveats: the shipped model is
+**stretch-only** (no bend/torsion terms), so it reshapes rather than fully removes
+the residual bump — the reliable bump-tamer is pairing it with the warmup line
+search, which gives both the fewest steps and the lowest overshoot. And the model
+covers atomic coordinates only, so a cell relax keeps the identity start. A fuller
+Lindh with angle terms is the natural next step for the bend-dominated residual.
 
 ## Gotchas
 
