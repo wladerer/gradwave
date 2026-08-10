@@ -959,7 +959,12 @@ def _relax_nested(
                                traj_path, exc)
 
     opt.attach(_record)
-    converged = opt.run(fmax=inp.relax.fmax, steps=inp.relax.max_steps)
+    try:
+        converged = opt.run(fmax=inp.relax.fmax, steps=inp.relax.max_steps)
+    finally:
+        # tear down the line search's persistent candidate pool (no-op otherwise)
+        if hasattr(opt, "_ls_close_pool"):
+            opt._ls_close_pool()
     import numpy as np
 
     relax: dict[str, Any] = {

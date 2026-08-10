@@ -230,6 +230,22 @@ def _evaluate_candidate(cand: _Candidate) -> tuple[float, np.ndarray]:
     return energy, forces
 
 
+def _ls_init_worker(n_threads: int) -> None:
+    """Pool initializer: pin this candidate worker to ``n_threads`` intra-op
+    threads so N concurrent candidate SCFs don't each grab every core (the same
+    thread-budget split as ``seedpool._init_worker``). Module-level so it is
+    picklable for the spawn context."""
+    import os
+
+    os.environ["GRADWAVE_NUM_THREADS"] = str(max(1, int(n_threads)))
+    try:
+        import torch
+
+        torch.set_num_threads(max(1, int(n_threads)))
+    except Exception:  # pragma: no cover - torch is always present in the relax path
+        pass
+
+
 # ---------------------------------------------------------------------------
 # The ASE optimizer wrapper.
 # ---------------------------------------------------------------------------
@@ -294,6 +310,7 @@ class ParallelLineSearchBFGS(_BFGS):  # type: ignore[valid-type,misc]
         self.ls_verbose = bool(verbose)
         self._ls_progress: list[tuple[float, float]] = []
         self._ls_events: list[dict[str, Any]] = []
+        self._ls_pool: Any = None  # persistent candidate pool, created on first use
 
     def _ls_should_search(self) -> bool:
         if self.ls_mode == "parallel":
@@ -301,6 +318,58 @@ class ParallelLineSearchBFGS(_BFGS):  # type: ignore[valid-type,misc]
         if self.ls_mode == "adaptive":
             return struggle_trigger(self._ls_progress, patience=self.ls_patience)
         return False
+
+    def _ls_map(self, cands: list[Any]) -> list[tuple[float, np.ndarray]]:
+        """Evaluate the candidate SCFs. ``n_workers <= 1`` (or a single candidate)
+        runs them serially in-process; otherwise they fan out over a PERSISTENT
+        worker pool that lives for the whole relax — created once, reused every
+        ionic step — so spawn + torch re-import is paid once, not per step (the
+        old per-step ``map_spokes`` pool made ``n_workers>1`` a net loss on cheap
+        SCFs)."""
+        from gradwave.postscf.seedpool import resolve_workers
+
+        w = resolve_workers(self.ls_n_workers, len(cands))
+        if w <= 1 or len(cands) <= 1:
+            return [_evaluate_candidate(c) for c in cands]
+        pool = self._ls_get_pool(w)
+        futs = [pool.submit(_evaluate_candidate, c) for c in cands]
+        return [f.result() for f in futs]
+
+    def _ls_get_pool(self, w: int) -> Any:
+        """Lazily create — and thereafter reuse — the spawn-based candidate pool.
+        Each worker's intra-op thread budget is split off the parent's (matching
+        seedpool) so N candidate SCFs don't each grab every core."""
+        if self._ls_pool is not None:
+            return self._ls_pool
+        import concurrent.futures as cf
+        import multiprocessing as mp
+
+        import torch
+
+        from gradwave.postscf.seedpool import worker_thread_cap
+
+        cap = worker_thread_cap(torch.get_num_threads(), w)
+        self._ls_pool = cf.ProcessPoolExecutor(
+            max_workers=w, mp_context=mp.get_context("spawn"),
+            initializer=_ls_init_worker, initargs=(cap,))
+        if self.ls_verbose:
+            print(f"    line-search: persistent pool of {w} workers "
+                  f"({cap} threads each)", flush=True)
+        return self._ls_pool
+
+    def _ls_close_pool(self) -> None:
+        """Shut the persistent candidate pool down (idempotent). The relax driver
+        calls this when the optimization finishes; ``__del__`` is a safety net."""
+        pool = getattr(self, "_ls_pool", None)
+        if pool is not None:
+            pool.shutdown(wait=True)
+            self._ls_pool = None
+
+    def __del__(self) -> None:
+        try:
+            self._ls_close_pool()
+        except Exception:  # pragma: no cover - interpreter-teardown races
+            pass
 
     def step(self, gradient=None):  # type: ignore[override]
         gradient = self._get_gradient(gradient)
@@ -355,7 +424,6 @@ class ParallelLineSearchBFGS(_BFGS):  # type: ignore[valid-type,misc]
             return 1.0, "serial(no-alphas)"
 
         from gradwave.checkpoint import save_checkpoint
-        from gradwave.postscf.seedpool import map_spokes
 
         tmpdir = tempfile.mkdtemp(prefix="gw_ls_")
         try:
@@ -363,9 +431,7 @@ class ParallelLineSearchBFGS(_BFGS):  # type: ignore[valid-type,misc]
             save_checkpoint(res, ckpt)
             cands = [_Candidate(self.ls_inp, base + a * d, ckpt) for a in alphas]
             try:
-                out = map_spokes(
-                    _evaluate_candidate, cands,
-                    n_workers=self.ls_n_workers, verbose=self.ls_verbose)
+                out = self._ls_map(cands)
             except Exception:  # noqa: BLE001 - worker/pool failure → serial step
                 return 1.0, "serial(worker-error)"
             # α=0 anchor is free: the current point's E and projected gradient
