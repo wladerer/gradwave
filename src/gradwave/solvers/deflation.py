@@ -369,7 +369,7 @@ def _coarse_correct(m_apply: LinOp, vbar: Field, u: Field, q: list[Field],
     # made the near-critical soft-mode test crash on CI).
     try:
         e = torch.linalg.solve(ac, rc)
-    except torch._C._LinAlgError:
+    except torch.linalg.LinAlgError:
         e = torch.linalg.lstsq(ac, rc).solution
     for i in range(len(q)):
         u = u + float(e[i]) * q[i]
