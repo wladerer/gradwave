@@ -1000,8 +1000,9 @@ def _relax_nested(
         converged = opt.run(fmax=inp.relax.fmax, steps=inp.relax.max_steps)
     finally:
         # tear down the line search's persistent candidate pool (no-op otherwise)
-        if hasattr(opt, "_ls_close_pool"):
-            opt._ls_close_pool()
+        _close_pool = getattr(opt, "_ls_close_pool", None)
+        if callable(_close_pool):
+            _close_pool()
     import numpy as np
 
     # Exactness gate for the tolerance ladder: the trajectory above converged the
