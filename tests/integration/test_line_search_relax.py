@@ -42,15 +42,19 @@ O = pseudo("O_ONCV_PBE-1.2.upf")
 
 
 def _bulk_metal():
-    """Rattled fcc-Al primitive cell (a smooth metal — the easy baseline)."""
+    """Rattled fcc-Al conventional 4-atom cell (a smooth metal — the easy
+    baseline). A MULTI-atom cell is required: a 1-atom primitive cell has no
+    internal relaxation (the lone atom's force is zero by translational symmetry),
+    so it converges in 0 ionic steps and never exercises the line search."""
     from ase import Atoms
 
     a = 4.05
-    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    basis = a * np.array([[0.0, 0, 0], [0.5, 0.5, 0], [0.5, 0, 0.5], [0, 0.5, 0.5]])
     rng = np.random.default_rng(0)
-    atoms = Atoms("Al", positions=rng.normal(0, 0.06, (1, 3)), cell=cell, pbc=True)
+    pos = basis + rng.normal(0, 0.12, basis.shape)  # rattle → real internal forces
+    atoms = Atoms("Al4", positions=pos, cell=a * np.eye(3), pbc=True)
     pseudos = {"Al": AL}
-    kpts = (4, 4, 4)
+    kpts = (3, 3, 3)
     return atoms, pseudos, kpts, dict(smearing="gaussian", width=0.1), True
 
 
