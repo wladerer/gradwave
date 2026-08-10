@@ -81,9 +81,10 @@ def launch_fraction(system, device: str) -> float:
         return getattr(e, "self_device_time_total", 0) if device != "cpu" else e.self_cpu_time_total
     ka = prof.key_averages()
     total = sum(self_time(e) for e in ka) or 1.0
-    compute = sum(self_time(e) for e in ka if any(
-        k in e.key.lower() for k in
-        ("fft", "mm", "bmm", "matmul", "addmm", "gemm", "einsum", "eigh", "qr", "linalg", "cublas", "cufft")))
+    _compute_ops = ("fft", "mm", "bmm", "matmul", "addmm", "gemm", "einsum",
+                    "eigh", "qr", "linalg", "cublas", "cufft")
+    compute = sum(self_time(e) for e in ka
+                  if any(k in e.key.lower() for k in _compute_ops))
     return 100.0 * compute / total
 
 
@@ -92,7 +93,8 @@ def main() -> int:
     ap.add_argument("--sizes", default="1,2,3",
                     help="comma nrep list; atoms = 4*nrep**3 (1->4, 2->32, 3->108)")
     ap.add_argument("--ecut", type=float, default=30.0, help="Ry")
-    ap.add_argument("--kmesh", type=int, default=4, help="k per axis (drops to 1/Gamma above --gamma-above atoms)")
+    ap.add_argument("--kmesh", type=int, default=4,
+                    help="k per axis (drops to Gamma above --gamma-above atoms)")
     ap.add_argument("--gamma-above", type=int, default=32)
     ap.add_argument("--reps", type=int, default=2, help="median over this many timed SCFs (warm)")
     ap.add_argument("--threads", type=int, default=8)
@@ -120,7 +122,8 @@ def main() -> int:
         cpu_frac = launch_fraction(system, "cpu")
 
         if has_cuda:
-            gpu_walls = [run_scf(system, "cuda")[0] for _ in range(args.reps)]  # first is warm-up-ish
+            # first rep also warms cuda kernels/caches; median absorbs it
+            gpu_walls = [run_scf(system, "cuda")[0] for _ in range(args.reps)]
             gpu = statistics.median(gpu_walls)
             gpu_frac = launch_fraction(system, "cuda")
             ratio = f"{gpu / cpu:.2f}x"
