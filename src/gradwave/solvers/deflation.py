@@ -361,7 +361,12 @@ def _coarse_correct(m_apply: LinOp, vbar: Field, u: Field, q: list[Field],
     """Exact residual removal in the soft subspace: ``u += Q A_c⁻¹ Qᵀ r``."""
     r = _sys_residual(m_apply, vbar, u)
     rc = torch.tensor([_inner(q[i], r) for i in range(len(q))], dtype=torch.float64)
-    e = torch.linalg.solve(ac, rc)
+    # A_c can be (near-)singular exactly in the near-critical regime this soft-space
+    # correction targets — a null direction of M in the subspace. `lstsq` degrades
+    # to the least-squares / min-norm solution there instead of raising a hard
+    # _LinAlgError (which made the near-critical soft-mode test flaky on CI); it
+    # coincides with `solve` whenever A_c is well-conditioned.
+    e = torch.linalg.lstsq(ac, rc).solution
     for i in range(len(q)):
         u = u + float(e[i]) * q[i]
     return u
