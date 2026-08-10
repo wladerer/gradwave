@@ -115,7 +115,7 @@ def run(at, pmap, kpts, smear, *, cfg, ecut_ry, xc, device, tmp, tag):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--si-nrep", type=int, default=2, help="defected-Si tiling (atoms = 2*n**3 - 1)")
+    ap.add_argument("--si-nrep", type=int, default=2, help="defected-Si tiling; atoms = 2*n**3 - 1")
     ap.add_argument("--with-cpu-baseline", action="store_true",
                     help="also run naive on CPU (the full hardware+algorithm headline)")
     args = ap.parse_args()
@@ -149,7 +149,8 @@ def main() -> int:
               f"| steps {rn['steps']}->{re['steps']} | scf_iter {rn['scf_iter']}->{re['scf_iter']} "
               f"| dE={abs(rn['E'] - re['E']) * 1e3:.3f} meV")
         if args.with_cpu_baseline:
-            print(f"  -> everything(GPU) vs naive(CPU, full stack): {rows[0][1]['wall'] / re['wall']:.2f}x")
+            full = rows[0][1]["wall"] / re["wall"]
+            print(f"  -> everything(GPU) vs naive(CPU, full stack): {full:.2f}x")
     print("EXIT=0")
     return 0
 
