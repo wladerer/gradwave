@@ -111,18 +111,16 @@ def seed_bfgs_hessian(optimizer: object, h0: np.ndarray) -> bool:
         ndof = None
     if ndof is not None and int(h0.shape[0]) != int(ndof):
         return False
-    try:
-        from ase.optimize.bfgs import BFGSMethod
-
-        optimizer.H0 = h0            # type: ignore[attr-defined]
-        optimizer.state = BFGSMethod(h0)  # type: ignore[attr-defined]
+    if hasattr(optimizer, "H0"):
+        # ASE (3.29) builds its BFGSMethod from ``H0`` LAZILY on the first step,
+        # guarded by ``state is None``. Set only ``H0`` and leave ``state`` unset so
+        # that guard still fires — installing a live state here defeats it and
+        # crashes updating from the (None) previous forces.
+        optimizer.H0 = h0                 # type: ignore[attr-defined]
+        if hasattr(optimizer, "state"):
+            optimizer.state = None        # type: ignore[attr-defined]
         return True
-    except Exception:  # pragma: no cover - older ASE stored the Hessian directly
-        applied = False
-        if hasattr(optimizer, "H0"):
-            optimizer.H0 = h0        # type: ignore[attr-defined]
-            applied = True
-        if hasattr(optimizer, "H"):
-            optimizer.H = h0         # type: ignore[attr-defined]
-            applied = True
-        return applied
+    if hasattr(optimizer, "H"):  # pragma: no cover - very old ASE stored H directly
+        optimizer.H = h0                  # type: ignore[attr-defined]
+        return True
+    return False
