@@ -211,6 +211,7 @@ class PhononParams:
     npoints: int = 120             # q-points along the dispersion path
     dos_mesh: tuple[int, int, int] = (8, 8, 8)    # MP q-mesh for the phonon DOS ((0,0,0) = skip)
     dos_width: float = 6.0         # Gaussian broadening for the DOS [cm⁻¹]
+    use_displacement_symmetry: bool = False  # run only point-group-irreducible displacements
 
     def __post_init__(self):
         object.__setattr__(self, "supercell", tuple(int(n) for n in self.supercell))
