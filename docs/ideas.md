@@ -1420,6 +1420,65 @@ why the trustworthy geometry is the blocker. Candidate fixes, rebuild the grid w
 volume drifts past a threshold (with a mixing restart), or apply a Pulay-stress correction
 along the path.
 
+## Parallel / speculative line search for geometry relaxation
+
+**Status: prototype under construction on the SeedPool substrate (`postscf/seedpool.py::map_spokes`).**
+
+A relaxation is a SEQUENTIAL chain (step k+1 needs the gradient at step k's chosen point), so it
+cannot be parallelized ACROSS ionic steps the way SeedPool fans out the independent EOS/elastic/phonon
+spokes. But it CAN be parallelized WITHIN a step: replace the sequential line search for the step
+length alpha along the quasi-Newton direction d_k with ONE parallel round. Evaluate R_k + alpha_i*d_k
+for a spread of alpha_i concurrently (each a forward SCF warm-started from R_k via map_spokes), each
+returning E AND the force F (hence the projected gradient g_i = -F_i . d_hat); fit a cubic through the
+(alpha_i, E_i, g_i) samples and take the interpolated minimum alpha* ("somewhere between the samples").
+Forward-only (autograd is process-local -> serial for a differentiable relax). Reuses warm-start
+(#231/#127) so the candidates are cheap few-iteration SCFs, the tol-ladder for the candidate tol, and
+SPAWN not fork for the workers (fork deadlocks with live torch/BLAS threads).
+
+OPT-IN + ADAPTIVE. `relax.line_search = off|parallel|adaptive`, default off = byte-identical serial.
+`adaptive` fans out ONLY when the optimizer is STRUGGLING (energy increased on the last step, max|F|
+stalled, or a backtracked/rejected step); otherwise it takes the normal serial step. This keeps it
+dormant on the easy majority (well-conditioned bulk from a good guess, where BFGS+Wolfe already nails
+alpha in ~1 eval/step and extra SCFs are waste) and active on the hard tail. Memory is process-parallel
+(n_workers separate ~single-SCF footprints, transient), NOT a per-process doubling; peak RAM is set by
+`line_search_n_workers`, DECOUPLED from `line_search_n_samples` (more samples run in waves), so big
+cells cap RAM by lowering n_workers.
+
+Economics: a latency-vs-throughput trade (n SCFs/step instead of ~1 -> more total compute for fewer
+sequential rounds), a win only with idle parallel workers AND a genuinely hard line search. The
+underrated benefit is ROBUSTNESS, not speed: a parallel line search never backtracks sequentially
+(always a good alpha in hand), so failed/wasted steps -- which also corrupt the BFGS Hessian and
+lengthen the trajectory -- largely disappear, cutting the pathological long tail.
+
+WHERE IT PAYS (expensive x ill-conditioned/soft x overshoot-prone x poor initial geometry):
+- Surface adsorbates -- the poster child: stiff bond mode + soft frustrated lateral/rotational modes =
+  anisotropic ill-conditioned Hessian; hand-placed/auto-generated initial heights -> big early forces;
+  expensive metallic slabs. (For the anisotropy specifically, a multi-point local-Hessian variant may
+  beat the pure line search.)
+- Soft / framework materials (MOFs, layered/vdW, molecular crystals) -- directly addresses the
+  "variable-cell relax collapses on soft framework cells" failure above.
+- Soft H-networks (water/ice, ammonia, hydrides, organic crystals): floppy H sublattice, H last to
+  converge. NB this is IONIC-convergence robustness, NOT electronic (SCF) convergence -- that is the
+  mixing/preconditioner/tol-ladder territory, a different toolbox.
+- Clusters / nanoparticles / interfaces / grain boundaries.
+
+MATERIALS DISCOVERY on generative structures (the highest-value application): diffusion-generated /
+inpainted crystals are off-equilibrium by construction (big initial forces), chemically unusual
+(ill-conditioned, near-instability), and relaxed in high volume unattended -- so the metric that matters
+is the FAILURE / long-tail rate, not average speed. Pipeline design: relax the batch candidate-parallel
+with serial BFGS (SeedPool ACROSS STRUCTURES is the first-order parallelism); the adaptive trigger flags
+the struggling subset; RE-RUN only those with the parallel line search. That concentrates the expensive
+parallel effort on exactly the candidates that would otherwise fail -- the novel, near-instability
+structures one most wants to keep -- and fits gradwave's differentiable / inverse-design identity.
+(Hypothesis from the mechanism; a generated-structure batch is the proof.)
+
+NOT for: easy well-conditioned bulk relaxations (BFGS already ~1 eval/step); across-step parallelism
+(impossible); electronic SCF convergence (different toolbox). For NEB the first-order parallelism is
+ACROSS IMAGES (independent forward SCFs per band step = a SeedPool target), with the line search a
+secondary robustness aid for the CI-NEB climbing image. Feasibility tests: reaching the SAME minimum as
+serial BFGS on a rattled adsorbate-on-slab and a small rattled molecular crystal, plus that the adaptive
+trigger fires on those and stays dormant on easy bulk.
+
 ## Learned multi-pole density-mixing preconditioner
 
 **Status: closed on real systems (2026-08-05, slab test); fit hardened (2026-08-04,
