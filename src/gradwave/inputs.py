@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import numpy as np
 import yaml
 from ase import Atoms
-from ase.io import read as ase_read
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -177,6 +176,25 @@ class RelaxParams:
     # iterative annulus solve, which recovers a larger fraction of the true Pulay
     # pressure for a modest per-step cost — see docs/manual/geometry-optimization.md).
     pulay_solver: str = "diagonal"  # diagonal | cg
+    # Outer-SCF tolerance ladder (nested engine only, opt-in): schedule each
+    # ionic step's SCF stop tolerance from the optimizer's current max|F| — loose
+    # when forces are large (early throwaway geometries), tightening as forces
+    # shrink — then re-solve the converged geometry at the full rhotol so the
+    # reported/differentiated result sits at the exact fixed point. Off by default
+    # (behaviour byte-identical to a constant-rhotol relax). Never applied to
+    # EOS/phonon/elastic (their per-config observables can't be loosened).
+    tol_ladder: bool = False
+    # rhotol_step = clamp(c * max|F|**p, lo=rhotol_final, hi=rhotol_start), with
+    # etol scaled proportionally. p=2 (quadratic) tightens faster than p=1
+    # (linear); c sets the overall scale. rhotol_final None → the scf.rhotol
+    # (so the exactness re-solve lands on the same fixed point as a baseline run).
+    tol_ladder_c: float = 1.0e-3
+    tol_ladder_p: float = 2.0
+    tol_ladder_rhotol_start: float = 1.0e-4  # first/loosest step tol (hi clamp)
+    tol_ladder_rhotol_final: float | None = None  # None → scf.rhotol (lo clamp)
+    # first ionic step (no previous fmax yet): "loose" applies rhotol_start to
+    # step 1 too; "tight" solves step 1 at rhotol_final and ladders from step 2.
+    tol_ladder_first_step: str = "loose"  # loose | tight
 
     def __post_init__(self):
         if self.method not in ("nested", "joint", "newton"):
@@ -191,6 +209,22 @@ class RelaxParams:
             raise InputError(
                 "relax.pulay_solver must be 'diagonal' or 'cg', got "
                 f"{self.pulay_solver!r}")
+        if self.tol_ladder_first_step not in ("loose", "tight"):
+            raise InputError(
+                "relax.tol_ladder_first_step must be 'loose' or 'tight', got "
+                f"{self.tol_ladder_first_step!r}")
+        if self.tol_ladder:
+            if self.tol_ladder_c <= 0.0 or self.tol_ladder_p <= 0.0:
+                raise InputError(
+                    "relax.tol_ladder_c and tol_ladder_p must be positive")
+            if self.tol_ladder_rhotol_start <= 0.0:
+                raise InputError(
+                    "relax.tol_ladder_rhotol_start must be positive")
+            rf = self.tol_ladder_rhotol_final
+            if rf is not None and (rf <= 0.0 or rf > self.tol_ladder_rhotol_start):
+                raise InputError(
+                    "relax.tol_ladder_rhotol_final must be in "
+                    "(0, tol_ladder_rhotol_start]")
 
 
 @dataclass(frozen=True)
@@ -212,6 +246,10 @@ class PhononParams:
     dos_mesh: tuple[int, int, int] = (8, 8, 8)    # MP q-mesh for the phonon DOS ((0,0,0) = skip)
     dos_width: float = 6.0         # Gaussian broadening for the DOS [cm⁻¹]
     use_displacement_symmetry: bool = False  # run only point-group-irreducible displacements
+    # SeedPool: run the 6·N_prim displacement SCFs across this many worker
+    # processes (each warm-started from the shared undisplaced reference). 1 =
+    # serial (default). forward-only — a differentiable phonon run must stay at 1.
+    n_workers: int = 1
 
     def __post_init__(self):
         object.__setattr__(self, "supercell", tuple(int(n) for n in self.supercell))
@@ -225,6 +263,9 @@ class PhononParams:
         if len(self.dos_mesh) != 3 or min(self.dos_mesh) < 0:
             raise InputError(
                 f"phonons.dos_mesh must be 3 non-negative ints, got {self.dos_mesh}")
+        if self.n_workers < 1:
+            raise InputError(
+                f"phonons.n_workers must be >= 1, got {self.n_workers}")
 
 
 @dataclass(frozen=True)
@@ -318,6 +359,12 @@ class EOSParams:
     # Lejaeghere seven-point window (94–106% of V0). Needs ≥4 points to fit.
     scales: tuple[float, ...] = (0.94, 0.96, 0.98, 1.00, 1.02, 1.04, 1.06)
     energy: str = "free_energy"  # free_energy | total | e0 — quantity fitted vs V
+    # SeedPool: evaluate the volumes across this many worker processes, each
+    # warm-started from the reference volume (nearest 1.0). 1 = serial (default,
+    # the exact neighbour-chained warm start). >1 trades the neighbour chain for
+    # a shared seed, so E(V) matches the serial fit to SCF tolerance, not
+    # bit-for-bit. forward-only — a differentiable EOS must stay at 1.
+    n_workers: int = 1
 
     def __post_init__(self):
         # coerce a YAML list to a tuple (frozen dataclass hashability) and
@@ -330,6 +377,9 @@ class EOSParams:
         if self.energy not in ("free_energy", "total", "e0"):
             raise InputError(
                 f"unknown eos.energy {self.energy!r} (free_energy | total | e0)")
+        if self.n_workers < 1:
+            raise InputError(
+                f"eos.n_workers must be >= 1, got {self.n_workers}")
 
 
 @dataclass(frozen=True)
@@ -348,6 +398,13 @@ class ElasticParams:
     mode: str = "clamped"  # clamped | relaxed (relaxed-ion: per-strain ionic relax)
     fmax: float = 0.01     # per-strain ionic relax force gate [eV/Å] (relaxed mode)
     max_steps: int = 100   # per-strain ionic relax step cap (relaxed mode)
+    use_strain_symmetry: bool = False  # run only Laue-point-group-irreducible strains
+    # SeedPool: run the 12 strain SCFs across this many worker processes, each
+    # warm-started from the shared unstrained reference. 1 = serial (default).
+    # Parallelizes the CLAMPED-ion path only; relaxed-ion stays serial (its
+    # per-strain BFGS relax is a nested optimization, not a single forward SCF).
+    # forward-only — a differentiable elastic run must stay at 1.
+    n_workers: int = 1
 
     def __post_init__(self):
         if not 0.0 < self.strain < 0.1:
@@ -361,6 +418,9 @@ class ElasticParams:
         if self.max_steps < 1:
             raise InputError(
                 f"elastic.max_steps must be >= 1, got {self.max_steps}")
+        if self.n_workers < 1:
+            raise InputError(
+                f"elastic.n_workers must be >= 1, got {self.n_workers}")
 
 
 @dataclass(frozen=True)
@@ -560,6 +620,11 @@ def _read_atoms(path: Path, fmt: str | None = None, index: int = -1) -> Atoms:
     `structure.index` to choose. A structure with no 3D cell cannot be run by a
     plane-wave code, so that fails here with a clear message rather than deep in
     grid construction."""
+    # Deferred: `ase.io.read` drags in ASE's format-plugin registry (scipy.integrate,
+    # ase.spacegroup, ...), ~0.6 s that every `import gradwave` would otherwise pay for
+    # a geometry-read that happens once per run, off the SCF/autograd path.
+    from ase.io import read as ase_read
+
     try:
         atoms = ase_read(str(path), format=fmt, index=index)
     except FileNotFoundError:

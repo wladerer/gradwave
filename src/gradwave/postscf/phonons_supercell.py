@@ -373,6 +373,57 @@ def force_constants_home(make_scf, scmap: SupercellMap, h: float = 0.01,
     return phi
 
 
+def displacement_list(
+    scmap: SupercellMap, h: float
+) -> list[tuple[int, int, int, np.ndarray]]:
+    """The 6·N_prim central-FD displacements as ``(a, i, sign, positions)``.
+
+    Displaces ONLY the N_prim home-cell atoms (sites 0…N_prim-1) by ``sign·h``
+    along axis ``i``; ``positions`` is the full (N_sc, 3) displaced supercell
+    geometry [Å]. This is the parallel-dispatch counterpart of the inner loop in
+    :func:`force_constants_home` — the two enumerate the same displacements in
+    the same order, so a serial run and a SeedPool run see an identical spoke
+    set. Reassemble the force constants from the per-spoke forces with
+    :func:`force_constants_from_forces`."""
+    pos0 = scmap.positions_super
+    tasks: list[tuple[int, int, int, np.ndarray]] = []
+    for a in range(scmap.n_prim):
+        for i in range(3):
+            for sign in (+1, -1):
+                p = pos0.copy()
+                p[a, i] += sign * h
+                tasks.append((a, i, sign, p))
+    return tasks
+
+
+def force_constants_from_forces(
+    force_map: dict[tuple[int, int, int], np.ndarray],
+    scmap: SupercellMap,
+    h: float,
+    acoustic_sum_rule: bool = True,
+) -> np.ndarray:
+    """Assemble Φ_home (N_prim, 3, N_sc, 3) [eV/Å²] from precomputed spoke forces.
+
+    ``force_map[(a, i, sign)]`` is the analytic force (N_sc, 3) [eV/Å] on every
+    supercell site when home atom ``a`` is displaced by ``sign·h`` along axis
+    ``i`` (the spokes enumerated by :func:`displacement_list`). The central
+    difference, symmetrization and acoustic-sum-rule steps are byte-identical to
+    :func:`force_constants_home`'s — only the SCF/force evaluation was hoisted
+    out (into parallel workers)."""
+    n_prim, n_sc = scmap.n_prim, scmap.n_sc
+    phi = np.zeros((n_prim, 3, n_sc, 3))
+    for a in range(n_prim):
+        for i in range(3):
+            fp = np.asarray(force_map[(a, i, +1)])
+            fm = np.asarray(force_map[(a, i, -1)])
+            # Φ_{(a,i),(s,j)} = −∂F_{s,j}/∂τ_{a,i}
+            phi[a, i, :, :] = -(fp - fm) / (2.0 * h)
+    phi = symmetrize_force_constants(phi, scmap)
+    if acoustic_sum_rule:
+        phi = apply_acoustic_sum_rule(phi)
+    return phi
+
+
 def phonon_dos(phi_home, scmap, masses_amu, q_mesh, weights,
                width: float = 6.0, npoints: int = 600):
     """Gaussian-broadened phonon DOS over a q-mesh. `width` in cm⁻¹. Returns
