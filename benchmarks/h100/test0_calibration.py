@@ -16,6 +16,7 @@ Run (tomorrow, on the H100 box):
     uv run python benchmarks/h100/test0_calibration.py --sizes 1,2,3 --ecut 30 --reps 3
 """
 import argparse
+import os
 import statistics
 import time
 from pathlib import Path
@@ -45,10 +46,12 @@ def build_al(nrep: int, ecut_ry: float, kmesh: tuple[int, int, int]):
     return system, len(pos)
 
 
-def run_scf(system, device: str):
+def run_scf(system, device: str, threads: int | None = None):
     from gradwave.core.xc.lda_pw92 import LDA_PW92
     from gradwave.scf.loop import scf
 
+    if device == "cpu" and threads is not None:
+        torch.set_num_threads(threads)
     sysd = system.to(device) if device != "cpu" else system
     if device != "cpu":
         torch.cuda.synchronize()
@@ -97,18 +100,19 @@ def main() -> int:
                     help="k per axis (drops to Gamma above --gamma-above atoms)")
     ap.add_argument("--gamma-above", type=int, default=32)
     ap.add_argument("--reps", type=int, default=2, help="median over this many timed SCFs (warm)")
-    ap.add_argument("--threads", type=int, default=8)
+    ap.add_argument("--cpu-threads", default="8,32,64",
+                    help="comma list of CPU thread counts to sweep side-by-side with the GPU")
     args = ap.parse_args()
-    torch.set_num_threads(args.threads)
 
+    cpu_ts = [int(t) for t in args.cpu_threads.split(",")]
     has_cuda = torch.cuda.is_available()
     dev_name = torch.cuda.get_device_name(0) if has_cuda else "no-CUDA"
-    print(f"# H100 Test 0 — calibration | CUDA={has_cuda} ({dev_name}) | "
-          f"cpu-threads={args.threads} | ecut={args.ecut} Ry")
-    if not has_cuda:
-        print("# WARNING: no CUDA visible — this run only characterizes CPU. Run on the H100 box.")
-    print(f"{'atoms':>6} {'npw':>7} {'nb':>4} {'nk':>4} {'cpu[s]':>9} {'gpu[s]':>9} "
-          f"{'gpu/cpu':>8} {'cpu%cmp':>8} {'gpu%cmp':>8}")
+    print(f"# H100 Test 0 — calibration | CUDA={has_cuda} ({dev_name}) | ncores={os.cpu_count()} | "
+          f"cpu-thread-sweep={cpu_ts} | ecut={args.ecut} Ry | reps={args.reps}")
+    hdr = (f"{'atoms':>6} {'npw':>7} {'nb':>4} {'nk':>4} {'gpu[s]':>9} "
+           + " ".join(f"{'cpu' + str(t) + 't':>9}" for t in cpu_ts)
+           + f" {'gpu/best':>9} {'gpu%cmp':>8}")
+    print(hdr)
 
     for nrep in [int(x) for x in args.sizes.split(",")]:
         km = 1 if 4 * nrep**3 > args.gamma_above else args.kmesh
@@ -117,25 +121,25 @@ def main() -> int:
         nb = int(system.nbands)
         nk = len(system.spheres)
 
-        cpu_walls = [run_scf(system, "cpu")[0] for _ in range(args.reps)]
-        cpu = statistics.median(cpu_walls)
-        cpu_frac = launch_fraction(system, "cpu")
-
         if has_cuda:
-            # first rep also warms cuda kernels/caches; median absorbs it
-            gpu_walls = [run_scf(system, "cuda")[0] for _ in range(args.reps)]
-            gpu = statistics.median(gpu_walls)
+            gpu = statistics.median([run_scf(system, "cuda")[0] for _ in range(args.reps)])
             gpu_frac = launch_fraction(system, "cuda")
-            ratio = f"{gpu / cpu:.2f}x"
-            gpu_s, gpu_fs = f"{gpu:.3f}", f"{gpu_frac:.1f}"
         else:
-            gpu_s, ratio, gpu_fs = "-", "-", "-"
+            gpu, gpu_frac = float("nan"), float("nan")
 
-        print(f"{natoms:>6} {npw:>7} {nb:>4} {nk:>4} {cpu:>9.3f} {gpu_s:>9} "
-              f"{ratio:>8} {cpu_frac:>7.1f} {gpu_fs:>8}")
+        cpu_by_t = {t: statistics.median([run_scf(system, "cpu", threads=t)[0]
+                                          for _ in range(args.reps)]) for t in cpu_ts}
+        best_cpu = min(cpu_by_t.values())
+        ratio = f"{gpu / best_cpu:.2f}x" if has_cuda else "-"
 
-    print("\n# READ: gpu/cpu < 1 => H100 wins for that size. gpu%cmp LOW (say <50%) => "
-          "launch-bound => batching/fusing (spin-batch, config-batch, CUDA graphs) is the lever.")
+        row = (f"{natoms:>6} {npw:>7} {nb:>4} {nk:>4} "
+               f"{(f'{gpu:.3f}' if has_cuda else '-'):>9} "
+               + " ".join(f"{cpu_by_t[t]:>9.3f}" for t in cpu_ts)
+               + f" {ratio:>9} {(f'{gpu_frac:.1f}' if has_cuda else '-'):>8}")
+        print(row)
+
+    print("\n# READ: gpu/best = H100 vs the CPU's BEST thread count (a fair baseline). Watch where the")
+    print("# CPU stops scaling. gpu%cmp LOW (<~50%) => launch-bound => batching/fusing is the lever.")
     print("EXIT=0")
     return 0
 
