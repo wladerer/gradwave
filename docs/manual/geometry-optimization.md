@@ -336,6 +336,8 @@ search, which gives both the fewest steps and the lowest overshoot. And the mode
 covers atomic coordinates only, so a cell relax keeps the identity start. A fuller
 Lindh with angle terms is the natural next step for the bend-dominated residual.
 
+![Max force per ionic step, identity vs lindh vs lindh+warmup, first 12 steps](img/initial_hessian_convergence.png)
+
 ## Gotchas
 
 - Forces sum to zero to about 1e-6 eV/Å by construction, since $E$ is invariant
