@@ -254,6 +254,9 @@ relax:
   line_search: adaptive        # off | parallel | adaptive
   line_search_n_samples: 4     # step lengths bracketed per ionic step
   line_search_n_workers: 2     # processes evaluating the samples concurrently
+  line_search_warmup: 2        # also search the first N steps unconditionally
+  line_search_warmup_samples: 6  # a denser bracket during those warmup steps
+  initial_hessian: lindh       # identity | lindh (a curvature-aware start)
 ```
 
 - `off` (default) — plain BFGS, byte-for-byte unchanged.
@@ -266,7 +269,16 @@ relax:
 The samples are independent forward SCFs with no shared autograd graph, so they
 parallelize cleanly over `line_search_n_workers` spawned processes (the same
 forward-only substrate as the campaign spokes; a differentiable relax must keep
-one worker). One worker evaluates the samples serially in-process.
+one worker). The pool is created once and reused for the whole relax, so `spawn`
+and the torch re-import are paid once rather than every ionic step. One worker
+evaluates the samples serially in-process.
+
+**`adaptive` is reactive** — it fires only *after* a step overshoots. The first
+overshoot usually lands in the first few steps, before it has evidence, so
+`line_search_warmup: N` searches the first `N` steps unconditionally (a predictive
+trigger), and `line_search_warmup_samples` gives just those steps a denser bracket
+where the true minimum is hardest to locate — the extra SCFs are spent only where
+overshoot lives, not on every step.
 
 ### When it helps
 
@@ -308,9 +320,15 @@ starting from a scaled-identity Hessian on a system with stiff intramolecular
 approximation fills in, the quasi-Newton *direction* itself is poorly scaled, and
 the line search can only rescale the *step* along it — it damps the bump (its peak
 is lower than serial's) but cannot remove it. Removing it needs a better starting
-direction: a model initial Hessian from bond/angle connectivity, or a
-preconditioned optimizer built for stiff/soft contrast. Those are complementary
-to the line search, not replaced by it.
+*direction*, which is why gradwave ships one: `initial_hessian: lindh` seeds BFGS
+with the Lindh model Hessian (`opt.model_hessian`), a cheap pairwise-stretch model
+that already knows the C=O stretch is stiff (it reproduces its ~116 eV/Å² force
+constant) and the intermolecular modes are soft. The stiff directions then get
+proportionately small first steps, so the overshoot never forms. It composes with
+the line search — the strongest relax pairs `initial_hessian: lindh` (fixes the
+direction) with `line_search: adaptive` + `line_search_warmup` (rescales the step
+and catches whatever overshoot remains). The model covers atomic coordinates only,
+so a cell relax keeps the identity start.
 
 ## Gotchas
 

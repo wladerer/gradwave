@@ -958,6 +958,24 @@ def _relax_nested(
                 logger.warning("could not append relax step to %s: %s",
                                traj_path, exc)
 
+    if inp.relax.initial_hessian == "lindh":
+        # seed a curvature-aware model Hessian so early steps don't overshoot the
+        # stiff directions (atomic DOFs only — a cell relax keeps the default)
+        if inp.relax.cell:
+            if verbose:
+                print("  relax: initial_hessian=lindh ignored under a cell relax "
+                      "(atomic model Hessian only)", flush=True)
+        else:
+            from gradwave.opt.model_hessian import lindh_hessian, seed_bfgs_hessian
+
+            h0 = lindh_hessian(atoms.get_positions(),
+                               list(atoms.get_atomic_numbers()))
+            applied = seed_bfgs_hessian(opt, h0)
+            if verbose:
+                print("  relax: initial_hessian=lindh "
+                      f"({'applied' if applied else 'skipped — DOF mismatch'})",
+                      flush=True)
+
     opt.attach(_record)
     try:
         converged = opt.run(fmax=inp.relax.fmax, steps=inp.relax.max_steps)

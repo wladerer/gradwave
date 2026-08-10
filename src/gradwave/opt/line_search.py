@@ -266,6 +266,8 @@ def make_line_search_bfgs(target: Any, *, inp: Any, verbose: bool) -> Any:
         alphas=tuple(r.line_search_alphas),
         max_alpha=r.line_search_max_alpha,
         patience=r.line_search_patience,
+        warmup=r.line_search_warmup,
+        warmup_samples=r.line_search_warmup_samples,
         verbose=verbose,
     )
     return opt
@@ -299,6 +301,8 @@ class ParallelLineSearchBFGS(_BFGS):  # type: ignore[valid-type,misc]
         max_alpha: float,
         patience: int,
         verbose: bool,
+        warmup: int = 0,
+        warmup_samples: int = 0,
     ) -> None:
         self.ls_inp = inp
         self.ls_mode = mode
@@ -308,11 +312,20 @@ class ParallelLineSearchBFGS(_BFGS):  # type: ignore[valid-type,misc]
         self.ls_max_alpha = float(max_alpha)
         self.ls_patience = int(patience)
         self.ls_verbose = bool(verbose)
+        self.ls_warmup = int(warmup)
+        self.ls_warmup_samples = int(warmup_samples)
         self._ls_progress: list[tuple[float, float]] = []
         self._ls_events: list[dict[str, Any]] = []
         self._ls_pool: Any = None  # persistent candidate pool, created on first use
 
+    def _ls_in_warmup(self) -> bool:
+        return bool(self.ls_warmup) and self.nsteps < self.ls_warmup
+
     def _ls_should_search(self) -> bool:
+        # PREDICTIVE: force a search on the first `warmup` steps (Hessian least
+        # informed → overshoot likeliest), regardless of mode.
+        if self._ls_in_warmup():
+            return True
         if self.ls_mode == "parallel":
             return True
         if self.ls_mode == "adaptive":
@@ -418,8 +431,11 @@ class ParallelLineSearchBFGS(_BFGS):  # type: ignore[valid-type,misc]
         na = len(self.atoms)
         d = np.asarray(dpos, dtype=float).reshape(na, 3)
         base = np.asarray(pos, dtype=float).reshape(na, 3)
+        n_samples = self.ls_n_samples
+        if self._ls_in_warmup() and self.ls_warmup_samples:
+            n_samples = self.ls_warmup_samples  # denser bracket while overshoot-prone
         alphas = self.ls_alphas or default_alpha_schedule(
-            self.ls_n_samples, self.ls_max_alpha)
+            n_samples, self.ls_max_alpha)
         if not alphas:
             return 1.0, "serial(no-alphas)"
 

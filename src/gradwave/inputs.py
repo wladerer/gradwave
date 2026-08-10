@@ -217,6 +217,21 @@ class RelaxParams:
     # adaptive trigger window: struggle is judged over the last `patience`
     # accepted steps (max|F| failed to decrease across them, or E increased).
     line_search_patience: int = 1
+    # PREDICTIVE trigger: search the first `line_search_warmup` ionic steps
+    # unconditionally (0 = off). The BFGS Hessian is least informed early, so the
+    # step is likeliest to overshoot then; searching those steps up front pre-empts
+    # the first overshoot instead of reacting to it (adaptive fires only after the
+    # damage). Applies to `adaptive`; `parallel` already searches every step.
+    line_search_warmup: int = 0
+    # DENSER bracket during warmup only: warmup steps use this many α samples
+    # (0 → inherit line_search_n_samples). Early overshoot needs a finer/wider
+    # search to pin the true minimum, but paying for extra samples every step is
+    # wasteful — so spend them only on the warmup steps where they earn their keep.
+    line_search_warmup_samples: int = 0
+    # Initial BFGS Hessian: "identity" (ASE default, scaled unit matrix) or "lindh"
+    # (a cheap curvature-aware model Hessian — stiff bonds, soft non-bonded — that
+    # removes the early overshoot on stiff/soft-mixed systems). See opt.model_hessian.
+    initial_hessian: str = "identity"
 
     def __post_init__(self):
         # YAML parses the bare word `off` (also `no`/`false`) as the boolean False
@@ -257,6 +272,18 @@ class RelaxParams:
             raise InputError(
                 "relax.line_search_patience must be >= 1, got "
                 f"{self.line_search_patience}")
+        if self.line_search_warmup < 0:
+            raise InputError(
+                "relax.line_search_warmup must be >= 0, got "
+                f"{self.line_search_warmup}")
+        if self.line_search_warmup_samples < 0:
+            raise InputError(
+                "relax.line_search_warmup_samples must be >= 0, got "
+                f"{self.line_search_warmup_samples}")
+        if self.initial_hessian not in ("identity", "lindh"):
+            raise InputError(
+                "relax.initial_hessian must be 'identity' or 'lindh', got "
+                f"{self.initial_hessian!r}")
         object.__setattr__(
             self, "line_search_alphas",
             tuple(float(a) for a in self.line_search_alphas))
