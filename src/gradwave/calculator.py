@@ -413,6 +413,13 @@ class GradWave(Calculator):
         # about "steps" it has no concept of.
         self._scf_step_hook = scf_step_hook
         self.last_result: SCFResult | USPPResult | None = None
+        # One-shot warm-start seed override (api._relax_nested's parallel line
+        # search sets it in a worker process to seed a candidate SCF from Rₖ's
+        # checkpoint, where there is no in-process last_result history). Default
+        # None → the ordinary _warm_start path below is used verbatim, so the
+        # standalone/relax behaviour is unchanged. Consumed (reset to None) by
+        # the first _warm_start call so only the first SCF uses the injected seed.
+        self._warm_start_override: dict[str, Any] | None = None
         self._scf_state: _StateKey | None = None  # the geometry/params the
         # stored SCF state was built at
         self._cached_results: dict[str, Any] = {}  # full results dict paired
@@ -614,6 +621,17 @@ class GradWave(Calculator):
         fewer SCF iterations per variable-cell step."""
         from gradwave.scf.guess import sad_density
         from gradwave.scf.uspp import USPPSystem
+
+        # One-shot injected seed (parallel line-search candidate SCF in a fresh
+        # worker process): return the checkpoint-derived start_from shim directly,
+        # bypassing the last_result history this process does not have. Consumed
+        # on first use so any subsequent SCF in the same process warm-starts
+        # normally. The shim is the same shape checkpoint.as_start_from feeds
+        # scf()/scf_uspp() start_from, so the solver validates/rescales it.
+        if self._warm_start_override is not None:
+            seed = self._warm_start_override
+            self._warm_start_override = None
+            return seed
 
         prev = self.last_result
         if prev is None or nspin != 1 or getattr(prev, "nspin", 1) != 1:

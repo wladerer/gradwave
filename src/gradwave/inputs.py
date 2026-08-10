@@ -177,6 +177,46 @@ class RelaxParams:
     # iterative annulus solve, which recovers a larger fraction of the true Pulay
     # pressure for a modest per-step cost — see docs/manual/geometry-optimization.md).
     pulay_solver: str = "diagonal"  # diagonal | cg
+    # ------------------------------------------------------------------
+    # Parallel / speculative line search (opt-in, nested engine only).
+    # A quasi-Newton relax computes a search direction dₖ each ionic step, then
+    # takes a fixed step along it (BFGS uses α=1, capped by maxstep) — the step
+    # length is not searched. This replaces that fixed step with ONE parallel
+    # round: evaluate Rₖ + αᵢ·dₖ for a spread of αᵢ CONCURRENTLY (each a forward
+    # SCF warm-started from Rₖ's checkpoint, returning E and F), fit a cubic
+    # through the (αᵢ, Eᵢ, gᵢ = −Fᵢ·d̂) samples and step to the interpolated
+    # minimum α*. It only changes the PATH: the accepted geometry is always
+    # re-evaluated by the main calculator at full SCF tol (the next ionic step's
+    # force call), so the relaxed minimum matches a plain serial BFGS relax to
+    # the geometry/energy tolerance — same minimum, different route.
+    #   "off"      (default) serial fixed step — BYTE-IDENTICAL to today.
+    #   "parallel" fan candidates out every ionic step.
+    #   "adaptive" fan out ONLY when the optimizer is struggling (energy rose on
+    #              the last accepted step, or max|F| failed to decrease over the
+    #              last `line_search_patience` steps); a normal serial step
+    #              otherwise.
+    # Scope: positions-only relax (cell: false) with the bfgs optimizer; a
+    # cell/fire/joint/newton run silently keeps the serial step (recorded in the
+    # relax block). FORWARD-ONLY — the candidate SCFs run in worker processes and
+    # PyTorch autograd graphs do not cross a process boundary, so a
+    # DIFFERENTIABLE relax must leave this "off".
+    line_search: str = "off"  # off | parallel | adaptive
+    # DECOUPLED knobs: n_samples is how many α to try (the cubic sample count);
+    # n_workers is how many run AT ONCE. PEAK memory ≈ n_workers × one-SCF and is
+    # INDEPENDENT of n_samples — more samples than workers run in later waves, not
+    # concurrently. Cap RAM via n_workers; raise n_samples to resolve the cubic.
+    line_search_n_samples: int = 3
+    line_search_n_workers: int = 2
+    # Explicit geometric α schedule around the proposed step (α=1). Empty →
+    # auto-generate n_samples points geometrically bracketing 1.0 (e.g. n=4 →
+    # {0.25, 0.5, 1.0, 2.0}). α* is clamped to line_search_max_alpha: a large α
+    # crosses a bigger geometry change → a worse warm-start seed → a costlier
+    # candidate SCF, so the step is bounded.
+    line_search_alphas: tuple[float, ...] = ()
+    line_search_max_alpha: float = 2.5
+    # adaptive trigger window: struggle is judged over the last `patience`
+    # accepted steps (max|F| failed to decrease across them, or E increased).
+    line_search_patience: int = 1
 
     def __post_init__(self):
         if self.method not in ("nested", "joint", "newton"):
@@ -191,6 +231,33 @@ class RelaxParams:
             raise InputError(
                 "relax.pulay_solver must be 'diagonal' or 'cg', got "
                 f"{self.pulay_solver!r}")
+        if self.line_search not in ("off", "parallel", "adaptive"):
+            raise InputError(
+                "relax.line_search must be 'off', 'parallel', or 'adaptive', "
+                f"got {self.line_search!r}")
+        if self.line_search_n_samples < 2:
+            raise InputError(
+                "relax.line_search_n_samples must be >= 2 (a cubic fit needs at "
+                f"least two E/g samples), got {self.line_search_n_samples}")
+        if self.line_search_n_workers < 1:
+            raise InputError(
+                "relax.line_search_n_workers must be >= 1, got "
+                f"{self.line_search_n_workers}")
+        if self.line_search_max_alpha <= 0.0:
+            raise InputError(
+                "relax.line_search_max_alpha must be > 0, got "
+                f"{self.line_search_max_alpha}")
+        if self.line_search_patience < 1:
+            raise InputError(
+                "relax.line_search_patience must be >= 1, got "
+                f"{self.line_search_patience}")
+        object.__setattr__(
+            self, "line_search_alphas",
+            tuple(float(a) for a in self.line_search_alphas))
+        if any(a <= 0.0 for a in self.line_search_alphas):
+            raise InputError(
+                "relax.line_search_alphas must all be > 0, got "
+                f"{self.line_search_alphas}")
 
 
 @dataclass(frozen=True)
