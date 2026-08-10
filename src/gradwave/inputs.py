@@ -246,6 +246,10 @@ class PhononParams:
     dos_mesh: tuple[int, int, int] = (8, 8, 8)    # MP q-mesh for the phonon DOS ((0,0,0) = skip)
     dos_width: float = 6.0         # Gaussian broadening for the DOS [cm⁻¹]
     use_displacement_symmetry: bool = False  # run only point-group-irreducible displacements
+    # SeedPool: run the 6·N_prim displacement SCFs across this many worker
+    # processes (each warm-started from the shared undisplaced reference). 1 =
+    # serial (default). forward-only — a differentiable phonon run must stay at 1.
+    n_workers: int = 1
 
     def __post_init__(self):
         object.__setattr__(self, "supercell", tuple(int(n) for n in self.supercell))
@@ -259,6 +263,9 @@ class PhononParams:
         if len(self.dos_mesh) != 3 or min(self.dos_mesh) < 0:
             raise InputError(
                 f"phonons.dos_mesh must be 3 non-negative ints, got {self.dos_mesh}")
+        if self.n_workers < 1:
+            raise InputError(
+                f"phonons.n_workers must be >= 1, got {self.n_workers}")
 
 
 @dataclass(frozen=True)
@@ -352,6 +359,12 @@ class EOSParams:
     # Lejaeghere seven-point window (94–106% of V0). Needs ≥4 points to fit.
     scales: tuple[float, ...] = (0.94, 0.96, 0.98, 1.00, 1.02, 1.04, 1.06)
     energy: str = "free_energy"  # free_energy | total | e0 — quantity fitted vs V
+    # SeedPool: evaluate the volumes across this many worker processes, each
+    # warm-started from the reference volume (nearest 1.0). 1 = serial (default,
+    # the exact neighbour-chained warm start). >1 trades the neighbour chain for
+    # a shared seed, so E(V) matches the serial fit to SCF tolerance, not
+    # bit-for-bit. forward-only — a differentiable EOS must stay at 1.
+    n_workers: int = 1
 
     def __post_init__(self):
         # coerce a YAML list to a tuple (frozen dataclass hashability) and
@@ -364,6 +377,9 @@ class EOSParams:
         if self.energy not in ("free_energy", "total", "e0"):
             raise InputError(
                 f"unknown eos.energy {self.energy!r} (free_energy | total | e0)")
+        if self.n_workers < 1:
+            raise InputError(
+                f"eos.n_workers must be >= 1, got {self.n_workers}")
 
 
 @dataclass(frozen=True)
@@ -383,6 +399,12 @@ class ElasticParams:
     fmax: float = 0.01     # per-strain ionic relax force gate [eV/Å] (relaxed mode)
     max_steps: int = 100   # per-strain ionic relax step cap (relaxed mode)
     use_strain_symmetry: bool = False  # run only Laue-point-group-irreducible strains
+    # SeedPool: run the 12 strain SCFs across this many worker processes, each
+    # warm-started from the shared unstrained reference. 1 = serial (default).
+    # Parallelizes the CLAMPED-ion path only; relaxed-ion stays serial (its
+    # per-strain BFGS relax is a nested optimization, not a single forward SCF).
+    # forward-only — a differentiable elastic run must stay at 1.
+    n_workers: int = 1
 
     def __post_init__(self):
         if not 0.0 < self.strain < 0.1:
@@ -396,6 +418,9 @@ class ElasticParams:
         if self.max_steps < 1:
             raise InputError(
                 f"elastic.max_steps must be >= 1, got {self.max_steps}")
+        if self.n_workers < 1:
+            raise InputError(
+                f"elastic.n_workers must be >= 1, got {self.n_workers}")
 
 
 @dataclass(frozen=True)
