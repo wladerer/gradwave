@@ -356,6 +356,9 @@ eos:
   # seven-point 94-106% window. Needs >=4 points for the four-parameter fit.
   scales: [0.94, 0.96, 0.98, 1.00, 1.02, 1.04, 1.06]
   energy: free_energy            # free_energy | total | e0 (quantity fitted vs V)
+  n_workers: 1                   # SeedPool: >1 evaluates volumes in parallel
+                                 # processes (each warm-started from V~V0).
+                                 # forward-only; keep 1 for a differentiable EOS.
 
 output:
   dir: ./out
@@ -393,6 +396,9 @@ elastic:
   mode: clamped                  # relaxed = re-relax ions at every strained cell
                                  # (the physical tensor for soft internal modes;
                                  # ~10x the SCF count). Extra knobs: fmax, max_steps.
+  n_workers: 1                   # SeedPool: >1 runs the 12 clamped-ion strain
+                                 # SCFs in parallel processes (warm-started from
+                                 # the unstrained ref). clamped-only; forward-only.
 
 output:
   dir: ./out
@@ -538,6 +544,10 @@ phonons:
   path: ""                       # ASE bandpath string (e.g. GXWKGL); "" = default
   npoints: 120                   # q-points along the dispersion
   dos_mesh: [8, 8, 8]            # MP q-mesh for the DOS ([0,0,0] to skip)
+  n_workers: 1                   # SeedPool: >1 runs the 6·N_prim displacement
+                                 # SCFs in parallel processes (each warm-started
+                                 # from the undisplaced ref). forward-only; keep
+                                 # 1 for a differentiable phonon run.
 
 output:
   dir: ./out

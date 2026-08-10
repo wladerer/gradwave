@@ -361,7 +361,16 @@ def _coarse_correct(m_apply: LinOp, vbar: Field, u: Field, q: list[Field],
     """Exact residual removal in the soft subspace: ``u += Q A_c⁻¹ Qᵀ r``."""
     r = _sys_residual(m_apply, vbar, u)
     rc = torch.tensor([_inner(q[i], r) for i in range(len(q))], dtype=torch.float64)
-    e = torch.linalg.solve(ac, rc)
+    # Prefer the direct solve — it is what the deflation was tuned against, and an
+    # unconditional lstsq (min-norm, less aggressive near-singular) can slow the
+    # deflated solve. Only when A_c is exactly singular — a null direction of M in
+    # the subspace, the near-critical regime this correction targets — fall back to
+    # the min-norm least-squares solution instead of raising _LinAlgError (which
+    # made the near-critical soft-mode test crash on CI).
+    try:
+        e = torch.linalg.solve(ac, rc)
+    except torch.linalg.LinAlgError:
+        e = torch.linalg.lstsq(ac, rc).solution
     for i in range(len(q)):
         u = u + float(e[i]) * q[i]
     return u
