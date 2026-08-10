@@ -113,8 +113,8 @@ def main() -> int:
     for nrep in [int(x) for x in args.sizes.split(",")]:
         km = 1 if 4 * nrep**3 > args.gamma_above else args.kmesh
         system, natoms = build_al(nrep, args.ecut, (km, km, km))
-        npw = max(int(s.shape[0]) for s in system.spheres)
-        nb = int(system.n_bands) if hasattr(system, "n_bands") else -1
+        npw = max(int(s.npw) for s in system.spheres)
+        nb = int(system.nbands)
         nk = len(system.spheres)
 
         cpu_walls = [run_scf(system, "cpu")[0] for _ in range(args.reps)]
