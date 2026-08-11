@@ -156,6 +156,27 @@ def test_strained_energy_matches_and_stress_matches_fd(mode, bias):
 
 
 @pytest.mark.parametrize("bias", [0.0, 2.0])
+def test_charged_capacitor_strained_energy_matches(bias):
+    """For a NET-CHARGED capacitor cell, esm_energy_strained must equal
+    esm_energy at zero strain — both now share the net-charge-aware
+    _capacitor_grounded_sum core. Regression for the drift where the strained
+    path kept an inline pre-net-charge copy, so stress was not dE/dstrain for
+    exactly the charged-slab regime capacitor mode exists for (the neutral-cell
+    test above cannot see this: the net-charge terms vanish with ρ_q)."""
+    grid = _grid(20.0, 100)
+    pos = torch.tensor([[3.0, 3.0, 8.0], [3.0, 3.0, 12.0]], dtype=torch.float64)
+    z = torch.tensor([4.0, 6.0], dtype=torch.float64)
+    # 10% electron deficit: net cell charge +1 |e|
+    rho = 0.9 * _elec(grid, [[3, 3, 8.6], [3, 3, 11.4]], [4.0, 6.0])
+    cell0 = torch.tensor(np.asarray(grid.cell), dtype=torch.float64)
+    beta = 0.8
+    assert float(esm_energy_strained(rho, pos, z, cell0, grid.shape, beta,
+                                     mode="capacitor", bias=bias)) == \
+        pytest.approx(float(esm_energy(rho, pos, z, grid, beta=beta,
+                                       mode="capacitor", bias=bias)), abs=1e-9)
+
+
+@pytest.mark.parametrize("bias", [0.0, 2.0])
 def test_capacitor_potential_and_force_match_fd(bias):
     """In capacitor mode (metal planes, optional bias), esm_potential = δΔE/δρ and
     the ESM force = δΔE/δR by finite difference — the grounded (quadratic) and

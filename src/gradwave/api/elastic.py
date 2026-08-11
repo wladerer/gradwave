@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
-from gradwave.api._common import SPIN_XC_REGISTRY, XC_REGISTRY
+from gradwave.api._common import build_xc, time_reversal_ok
 from gradwave.api.scf import run_scf
 from gradwave.api.system import _as_paws, _as_upfs, _fft_grid, _is_uspp, _species_upfs
+from gradwave.constants import EV_A3_TO_GPA
 from gradwave.inputs import Input
 
 if TYPE_CHECKING:
@@ -26,20 +27,8 @@ def _elastic_rebuild(inp: Input) -> tuple[Any, bool, Any, Any, bool]:
     _species, upfs, soa = _species_upfs(inp)
     uspp = _is_uspp(upfs)
     is_fr = any(b.j is not None for u in upfs for b in u.betas)
-    if inp.noncollinear:
-        from gradwave.core.xc.noncollinear import NoncollinearXC
-
-        xc: Any = NoncollinearXC(SPIN_XC_REGISTRY[inp.xc]())
-    elif inp.nspin == 2:
-        xc = SPIN_XC_REGISTRY[inp.xc]()
-    else:
-        xc = XC_REGISTRY[inp.xc]()
+    xc: Any = build_xc(inp)
     return upfs, uspp, soa, xc, is_fr
-
-
-def _elastic_time_reversal(inp: Input) -> bool:
-    """k ≡ −k holds unless a magnetic spinor breaks it (mirrors run_elastic)."""
-    return not (inp.noncollinear and not inp.nonmagnetic)
 
 
 def _elastic_build(
@@ -106,7 +95,7 @@ def _elastic_spoke_worker(
     from gradwave.io.checkpoint import as_start_from, load_checkpoint
 
     upfs, uspp, soa, xc, _is_fr = _elastic_rebuild(spoke.inp)
-    tr = _elastic_time_reversal(spoke.inp)
+    tr = time_reversal_ok(spoke.inp)
     cell = spoke.cell0 @ (np.eye(3) + spoke.eps).T
     system = _elastic_build(spoke.inp, upfs, uspp, soa, cell, spoke.fixed, tr)
     start_from = as_start_from(load_checkpoint(spoke.ckpt_path))
@@ -183,13 +172,7 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
                 "DFT+U elastic constants on the spin-orbit path (feature "
                 "boundary, #142)")
 
-    if inp.noncollinear:
-        from gradwave.core.xc.noncollinear import NoncollinearXC
-        xc = NoncollinearXC(SPIN_XC_REGISTRY[inp.xc]())
-    elif inp.nspin == 2:
-        xc = SPIN_XC_REGISTRY[inp.xc]()
-    else:
-        xc = XC_REGISTRY[inp.xc]()
+    xc = build_xc(inp)
     if uspp:
         from gradwave.postscf.paw_stress import stress_uspp as _stress
     else:
@@ -202,7 +185,7 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
 
     # a magnetic spinor breaks k ≡ −k (TR flips m⃗); a nonmagnetic spinor
     # (SOC only) keeps Kramers, matching build_system's time-reversal logic.
-    time_reversal = not (inp.noncollinear and not inp.nonmagnetic)
+    time_reversal = time_reversal_ok(inp)
 
     def _build(
         cell: Any, fft_shape: tuple[int, ...] | None, pos: Any = None
@@ -384,7 +367,7 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
     else:
         c = elastic_tensor(_stress_at, h=h, symmetry=strain_sym)
     mod = moduli_from_cij(c)
-    resid_gpa = float(np.abs(sigma_ref).max()) * 160.2176634
+    resid_gpa = float(np.abs(sigma_ref).max()) * EV_A3_TO_GPA
     block: dict[str, Any] = {
         "strain": h,
         "mode": inp.elastic.mode,

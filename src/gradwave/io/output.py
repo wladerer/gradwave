@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from gradwave.constants import EV_A3_TO_KBAR
+
 _W = 72
 
 
@@ -476,7 +478,7 @@ def _dispersion_lines(disp):
     if disp.get("stress_eV_ang3") is not None:
         import numpy as np
 
-        p = -np.trace(np.asarray(disp["stress_eV_ang3"])) / 3.0 * 1602.176634
+        p = -np.trace(np.asarray(disp["stress_eV_ang3"])) / 3.0 * EV_A3_TO_KBAR
         lines.append(f"   {'pressure':<18s}{p:>20.6f}  kbar")
     return lines
 

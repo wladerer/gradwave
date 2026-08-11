@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from gradwave.api._common import SPIN_XC_REGISTRY
+from gradwave.api._common import SPIN_XC_REGISTRY, time_reversal_ok
 from gradwave.core.xc.spin import SpinXC
 from gradwave.inputs import Input
 
@@ -151,8 +151,7 @@ def build_system(inp: Input) -> System | USPPSystem:
         kshift=inp.kpoints.shift,
         nbands=inp.nbands,
         use_symmetry=inp.symmetry and not hybrid and not hubbard,
-        time_reversal=(not hybrid
-                       and not (inp.noncollinear and not inp.nonmagnetic)),
+        time_reversal=not hybrid and time_reversal_ok(inp),
     )
 
 

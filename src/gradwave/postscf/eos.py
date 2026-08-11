@@ -22,9 +22,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-# 1 eV/Å³ in GPa. eV/Å³ = 1.602176634e-19 J / 1e-30 m³ = 1.602176634e11 Pa
-# = 160.2176634 GPa.
-EV_A3_TO_GPA = 160.2176634
+from gradwave.constants import EV_A3_TO_GPA
 
 
 def birch_murnaghan(

@@ -317,9 +317,16 @@ def _rr(q: torch.Tensor, hq: torch.Tensor, nw: int) -> tuple[torch.Tensor, torch
     own s built from lazy-conj views to avoid a large-nk memory spike).
     """
     s = torch.einsum("kig,kjg->kij", q.conj(), hq)
-    s = 0.5 * (s + s.conj().transpose(-1, -2))
+    # Subspace reduction ALWAYS in fp64 (issue #136), same contract as
+    # davidson_batched's inline RR: an fp32 eigh of an ill-conditioned subspace
+    # matrix in the complex64 draft phase yields inaccurate Ritz rotations.
+    # Upcast only the small (nk, m, m) matrix and the eigensolve; returns are
+    # downcast so the caller's basis and Ritz combination stay in the block
+    # dtype. (davidson_batched keeps its matmul-built s for memory, but the
+    # fp64 contract is now identical in both.)
+    s = (0.5 * (s + s.conj().transpose(-1, -2))).to(torch.complex128)
     w, u = _eigh_subspace(s)
-    return w[:, :nw].real, u[:, :, :nw]
+    return w[:, :nw].real.to(q.real.dtype), u[:, :, :nw].to(q.dtype)
 
 
 def _combine(c: torch.Tensor, block: torch.Tensor) -> torch.Tensor:

@@ -33,10 +33,8 @@ from beartype import beartype
 from jaxtyping import Complex, Float, jaxtyped
 from typing_extensions import override
 
-from gradwave.core.xc.lda_pw92 import LDA_PW92
-from gradwave.core.xc.pbe import PBE
-from gradwave.core.xc.r2scan import R2SCAN, SpinR2SCAN
-from gradwave.core.xc.spin import LSDA_PW92, SpinPBE, SpinXC
+from gradwave.api._common import SPIN_XC_REGISTRY, XC_REGISTRY
+from gradwave.core.xc.spin import SpinXC
 from gradwave.dtypes import RDTYPE
 from gradwave.grids import FFTGrid, GSphere
 from gradwave.postscf.forces import forces as hf_forces
@@ -52,10 +50,11 @@ if TYPE_CHECKING:
     from gradwave.scf.results import USPPResult
     from gradwave.scf.uspp_setup import USPPSystem
 
-_XC = {"lda": LDA_PW92, "pbe": PBE, "r2scan": R2SCAN}
-# Spin-polarized (nspin=2) counterparts, keyed identically — same registry the
-# api's _spin_setup uses, so the calculator's collinear path matches task: scf.
-_SPIN_XC = {"lda": LSDA_PW92, "pbe": SpinPBE, "r2scan": SpinR2SCAN}
+# The api's canonical name→class registries (api/_common.py) — the calculator
+# once carried its own structurally identical copies, so a functional added to
+# one map but not the other silently split the ASE and YAML paths.
+_XC = XC_REGISTRY
+_SPIN_XC = SPIN_XC_REGISTRY
 
 # The exact-match tuple `_state_key()` builds for the (geometry, parameters)
 # state an SCF result is valid at (see its docstring below).
