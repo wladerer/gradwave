@@ -49,4 +49,6 @@ the text link here.
 <li id="otani">M. Otani and O. Sugino, "First-principles calculations of charged surfaces and interfaces: A plane-wave nonrepeated slab approach," Phys. Rev. B <strong>73</strong>, 115407 (2006).</li>
 <li id="che">J. K. Nørskov, J. Rossmeisl, A. Logadottir, L. Lindqvist, J. R. Kitchin, T. Bligaard, and H. Jónsson, "Origin of the Overpotential for Oxygen Reduction at a Fuel-Cell Cathode," J. Phys. Chem. B <strong>108</strong>, 17886 (2004).</li>
 <li id="trasatti">S. Trasatti, "The absolute electrode potential: an explanatory note (Recommendations 1986)," Pure Appl. Chem. <strong>58</strong>, 955 (1986).</li>
+<li id="tersoff">J. Tersoff and D. R. Hamann, "Theory of the scanning tunneling microscope," Phys. Rev. B <strong>31</strong>, 805 (1985).</li>
+<li id="sptm">R. Wiesendanger, "Spin mapping at the nanoscale and atomic scale," Rev. Mod. Phys. <strong>81</strong>, 1495 (2009).</li>
 </ol>
