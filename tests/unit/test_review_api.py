@@ -176,7 +176,9 @@ def test_precond_reaches_the_scf_call(tmp_path, monkeypatch, pseudo, target_mod,
     inp = _mk_input(tmp_path, pseudo, "scf: {mixing: {precond: local_tf}}\n")
 
     captured: dict = {}
-    monkeypatch.setattr(api, "build_system", lambda _inp: object())
+    # patch the leaf module (api.scf holds run_scf's build_system global), not
+    # the package re-export — the latter would leave the real build_system live
+    monkeypatch.setattr("gradwave.api.scf.build_system", lambda _inp: object())
     mod = importlib.import_module(target_mod)
 
     def fake_loop(*_args, **kw):
@@ -197,7 +199,9 @@ def test_precond_omitted_defaults_to_kerker_at_the_scf_call(tmp_path, monkeypatc
     inp = _mk_input(tmp_path, "C_ONCV_PBE-1.2.upf", "")
 
     captured: dict = {}
-    monkeypatch.setattr(api, "build_system", lambda _inp: object())
+    # patch the leaf module (api.scf holds run_scf's build_system global), not
+    # the package re-export — the latter would leave the real build_system live
+    monkeypatch.setattr("gradwave.api.scf.build_system", lambda _inp: object())
 
     def fake_scf(*_args, **kw):
         captured.update(kw)

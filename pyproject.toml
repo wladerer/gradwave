@@ -98,7 +98,7 @@ all = "warn"
 
 [[tool.ty.overrides]]
 include = [
-    "src/gradwave/api.py",
+    "src/gradwave/api",
     "src/gradwave/calculator.py",
     "src/gradwave/inputs.py",
     "src/gradwave/cli.py",
