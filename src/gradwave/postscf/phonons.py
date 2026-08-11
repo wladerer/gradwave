@@ -132,7 +132,9 @@ def gamma_hessian(res: USPPResult, xc: XCFunctional | SpinXC, *, response_kw=Non
                   verbose: bool = False) -> np.ndarray:
     """(na, 3, na, 3) analytic Γ Hessian [eV/Å²]: irreducible columns via
     hessian_column, symmetry reconstruction, transpose symmetrization and
-    the acoustic sum rule."""
+    the acoustic sum rule (imposed by a symmetric translational projector so
+    the result is both symmetric and translation-invariant to machine
+    precision)."""
     from gradwave.postscf.uspp_position import hessian_column
 
     system = res["system"]
@@ -165,11 +167,19 @@ def gamma_hessian(res: USPPResult, xc: XCFunctional | SpinXC, *, response_kw=Non
     na = hs.na
     h2 = h_full.reshape(3 * na, 3 * na)
     h2 = 0.5 * (h2 + h2.T)
-    hblk = h2.reshape(na, 3, na, 3)
-    for a in range(na):
-        hblk[a, :, a, :] -= hblk[a].sum(axis=1)  # acoustic sum rule
-    h2 = hblk.reshape(3 * na, 3 * na)
-    return (0.5 * (h2 + h2.T)).reshape(na, 3, na, 3)
+    # Acoustic sum rule enforced symmetrically. The three rigid-translation
+    # modes tᵅ (all atoms displaced along Cartesian α) must be exact null
+    # vectors: Σ_b H[a,i,b,α] = 0. Subtracting the per-atom row sum from the
+    # self-block zeroes that sum but leaves an antisymmetric part when the
+    # row-sum block C_a = Σ_b H[a,i,b,j] is not symmetric (it generally is
+    # not), and a trailing transpose-symmetrization would then re-break the
+    # sum rule. Instead project with P = I − (1/na)(J⊗I₃), which annihilates
+    # every tᵅ: P·H·P is symmetric (P and H symmetric) and satisfies the
+    # sum rule exactly, so the three Γ acoustic modes are machine-zero.
+    proj = np.eye(3 * na) - np.kron(np.ones((na, na)) / na, np.eye(3))
+    h2 = proj @ h2 @ proj
+    h2 = 0.5 * (h2 + h2.T)  # clear rounding-level asymmetry from the matmuls
+    return h2.reshape(na, 3, na, 3)
 
 
 def gamma_frequencies(hess: np.ndarray, masses_amu: np.ndarray | list[float]) -> np.ndarray:

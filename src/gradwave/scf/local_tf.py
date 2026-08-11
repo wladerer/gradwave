@@ -13,7 +13,7 @@ than turning it off (21 vs 18 iterations), while the best constant q0 (0.5) took
 The fix, following Quantum ESPRESSO's ``mixing_mode='local-TF'``, is to let the
 screening wavevector track the local density,
 
-    q²(r) = min( q²_TF(r),  q0_max² ),   q²_TF(r) = (4/π) k_F(r) / a0² ,
+    q²(r) = min( q²_TF(r),  q0_max² ),   q²_TF(r) = (4/π) k_F(r) / a0 ,
     k_F(r) = (3π² n(r))^{1/3}  (atomic units),
 
 so the metal is screened at the (capped) bulk value and the vacuum, where
@@ -70,11 +70,12 @@ class LocalTFPrecond:
     def set_density(self, rho_r: torch.Tensor) -> None:
         """Build q²(r) from the current total density n(r) [e/Å³]."""
         n = rho_r.reshape(self.shape).clamp_min(0.0)
-        # k_F in atomic units from n in bohr⁻³, then q²_TF = (4/π) k_F in bohr⁻²,
-        # converted to Å⁻². Everything below the vacuum floor screens at ~0.
+        # k_F in atomic units from n in bohr⁻³, then q²_TF = (4/π) k_F / a0 with
+        # a0 ≡ 1 bohr, so numerically (4/π)·kf is already in bohr⁻²; converted to
+        # Å⁻². Everything below the vacuum floor screens at ~0.
         n_bohr = n * (_BOHR ** 3)
         kf = (3.0 * torch.pi ** 2 * n_bohr).clamp_min(0.0) ** (1.0 / 3.0)  # bohr⁻¹
-        q2_bohr = (4.0 / torch.pi) * kf                                    # bohr⁻²
+        q2_bohr = (4.0 / torch.pi) * kf   # (4/π)·k_F/a0, a0 ≡ 1 bohr → bohr⁻²
         q2_ang = q2_bohr / (_BOHR ** 2)                                    # Å⁻²
         self.q2_r = q2_ang.clamp_max(self.q0_max2)
 

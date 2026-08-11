@@ -272,7 +272,7 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
                 col = torch.tensor([
                     float((kw[:, None] * torch.einsum(
                         "kbg,kbg->kb", xi[a].conj(), dpsi).real).sum())
-                    for a in range(3)])
+                    for a in range(3)], dtype=RDTYPE)
                 if verbose:
                     print(f"  E{b_dir} it {it:3d}: eps col = "
                           f"{[round(1 - 16 * math.pi * E2 / vol * c, 6) for c in col.tolist()]}")
@@ -285,7 +285,7 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
                 raise RuntimeError(f"E-field response ({b_dir}) not converged")
             dpsi_all.append(dpsi)
             drho_all.append(drho)
-            eps_mat[:, b_dir] = 1.0 * torch.eye(3)[:, b_dir] \
+            eps_mat[:, b_dir] = 1.0 * torch.eye(3, dtype=RDTYPE)[:, b_dir] \
                 - (16.0 * math.pi * E2 / vol) * col
     else:
         # IBZ-reduced: joint 3-direction solve with the polar vector fold on the
@@ -521,7 +521,7 @@ def _dielectric_born_spin(res: SCFResult, xc: SpinXC, *, dk, cg_tol, beta, outer
                     (kw[:, None] * torch.einsum(
                         "kbg,kbg->kb", xi[sp][a].conj(), dpsi[sp]).real).sum()
                     for sp in range(2)))
-                for a in range(3)])
+                for a in range(3)], dtype=RDTYPE)
             if verbose:
                 print(f"  E{b_dir} it {it:3d}: eps col = "
                       f"{[round(1 - 8 * math.pi * E2 / vol * c, 6) for c in col.tolist()]}")
@@ -536,7 +536,7 @@ def _dielectric_born_spin(res: SCFResult, xc: SpinXC, *, dk, cg_tol, beta, outer
         for sp in range(2):
             dpsi_all[sp].append(dpsi[sp])
         drho_tot_all.append(drho[0] + drho[1])
-        eps_mat[:, b_dir] = 1.0 * torch.eye(3)[:, b_dir] \
+        eps_mat[:, b_dir] = 1.0 * torch.eye(3, dtype=RDTYPE)[:, b_dir] \
             - (8.0 * math.pi * E2 / vol) * col
 
     # Born charges: mixed derivative ∂²E/∂E_α∂τ via one autograd backward per
@@ -775,7 +775,7 @@ def _dielectric_born_soc(res: NCResult, xc: NoncollinearXC, *, dk, cg_tol, beta,
             col = torch.tensor([
                 float((kw[:, None] * torch.einsum(
                     "kbg,kbg->kb", xi[a].conj(), dpsi).real).sum())
-                for a in range(3)])
+                for a in range(3)], dtype=RDTYPE)
             if verbose:
                 print(f"  E{b_dir} it {it:3d}: eps col = "
                       f"{[round(1 - 8 * math.pi * E2 / vol * c, 6) for c in col.tolist()]}")
@@ -788,7 +788,7 @@ def _dielectric_born_soc(res: NCResult, xc: NoncollinearXC, *, dk, cg_tol, beta,
             raise RuntimeError(f"E-field response ({b_dir}) not converged")
         dpsi_all.append(dpsi)
         drho_all.append(drho)
-        eps_mat[:, b_dir] = 1.0 * torch.eye(3)[:, b_dir] \
+        eps_mat[:, b_dir] = 1.0 * torch.eye(3, dtype=RDTYPE)[:, b_dir] \
             - (8.0 * math.pi * E2 / vol) * col
 
     # Born charges: mixed derivative via one autograd backward per field

@@ -62,6 +62,18 @@ def vacuum_level(res, open_axis: int = 2, frac: float = 0.1,
         # split the box at the density maximum (inside the slab); take the
         # lowest-density points on each side as that face's vacuum.
         mid = int(torch.argmax(rho_z))
+        # If the slab straddles the periodic seam (vacuum in the cell middle,
+        # slab wrapping z=0/z=nz), argmax lands near an edge and one [0:mid] /
+        # [mid:nz] segment holds no vacuum — an empty slice makes topk raise, a
+        # tiny one returns an in-slab plane as a bogus "face". Recenter the slab
+        # on the open axis first; a slab already in the interior (argmax well
+        # away from both edges) triggers no roll and is left byte-identical.
+        k_vac = max(1, int(frac * nz))
+        if min(mid, nz - mid) < k_vac:
+            shift = nz // 2 - mid
+            rho_z = torch.roll(rho_z, shift)
+            v_z = torch.roll(v_z, shift)
+            mid = int(torch.argmax(rho_z))
         out = []
         for lo, hi in ((0, mid), (mid, nz)):
             seg_rho, seg_v = rho_z[lo:hi], v_z[lo:hi]
