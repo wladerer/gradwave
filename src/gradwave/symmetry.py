@@ -655,9 +655,8 @@ def symmetrize_forces(forces: torch.Tensor, sg: SpaceGroup, cell: np.ndarray) ->
     a_t = np.asarray(cell, dtype=float).T
     dev = forces.device
     acc = torch.zeros_like(forces)
-    f = forces.detach()
     for w_mat, amap in zip(sg.rotations, sg.atom_map, strict=True):
         s = a_t @ w_mat @ np.linalg.inv(a_t)
         s_t = torch.as_tensor(s.T, dtype=forces.dtype, device=dev)
-        acc = acc + f[torch.as_tensor(amap.copy(), device=dev)] @ s_t.T
+        acc = acc + forces[torch.as_tensor(amap.copy(), device=dev)] @ s_t.T
     return acc / sg.n_ops

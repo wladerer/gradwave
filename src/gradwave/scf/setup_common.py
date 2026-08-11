@@ -135,7 +135,20 @@ def build_symmetrizer_and_kpoints(grid, cell, kmesh, kshift, sym, mag_sym,
 
 
 def default_nbands(n_electrons: float) -> int:
-    """20% headroom over the occupied count, at least 4 extra bands."""
+    """20% headroom over the occupied count, at least 4 extra bands.
+
+    The occupied count is the PARAMAGNETIC one, ceil(n_electrons/2) (every
+    state holds two electrons); the result has no spin-moment dependence, so
+    it sizes bands for a nonmagnetic / spin-averaged run. A collinear nspin=2
+    run reuses the SAME count per spin channel, but the majority channel holds
+    ceil((N + |M|)/2) states (M = N↑−N↓, the total moment). Once |M| is a
+    sizable fraction of N this under-provisions the majority channel (small
+    cells are saved by the nocc+4 term) and the Fermi solver cannot place all
+    majority electrons, so the converged electron count / free energy come out
+    wrong. Pass an explicit `nbands` >= ceil((N+|M|)/2) for such runs; the
+    collinear drivers (scf / scf_uspp) warn when the highest band is left
+    occupied, the direct symptom of this.
+    """
     nocc = int(np.ceil(n_electrons / 2.0))
     return max(int(np.ceil(nocc * 1.2)), nocc + 4)
 

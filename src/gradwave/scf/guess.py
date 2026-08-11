@@ -17,6 +17,34 @@ if TYPE_CHECKING:
     from gradwave.pseudo.upf_paw import PAWData
 
 
+def _resolve_atom_weights(
+    species_of_atom: list[int],
+    species_scale,
+    atom_scale,
+    *,
+    device,
+    dtype=torch.float64,
+) -> torch.Tensor:
+    """Resolve one per-atom weight vector w ∈ ℝ^{na} (encodes the override contract).
+
+        w[a] = 1.0                                 if both None
+        w[a] = species_scale[species_of_atom[a]]   if only species_scale (per-species)
+        w[a] = atom_scale[a]                        if atom_scale given (REPLACES, never
+                                                    multiplies, species_scale)
+
+    Built with ``torch.as_tensor`` (never ``float()``) so gradients flow to whichever
+    scale tensor is passed. This is the single place the documented contract lives."""
+    na = len(species_of_atom)
+    if atom_scale is not None:
+        # OVERRIDE: replace species_scale entirely.
+        return torch.as_tensor(atom_scale, dtype=dtype, device=device)
+    if species_scale is not None:
+        ss = torch.as_tensor(species_scale, dtype=dtype, device=device)
+        idx = torch.as_tensor(species_of_atom, dtype=torch.long, device=device)
+        return ss[idx]
+    return torch.ones(na, dtype=dtype, device=device)
+
+
 def sad_density(
     grid,
     positions: torch.Tensor,  # (na, 3) Å (detached — guess is not differentiated)
@@ -27,7 +55,7 @@ def sad_density(
     upfs: Sequence[UPFData | PAWData],  # per species
     n_electrons: float | None,
     species_scale=None,  # per-species factor (spin-channel splits), default 1
-    atom_scale=None,  # per-ATOM factor (AFM seeds); overrides species_scale
+    atom_scale=None,  # per-ATOM factor (AFM seeds); REPLACES species_scale
     clamp_positive: bool = True,
 ) -> torch.Tensor:
     """ρ₀(r) on the dense grid [e/Å³], rescaled to exactly N_e electrons.
@@ -41,9 +69,11 @@ def sad_density(
 
     rho_g = torch.zeros(grid.n_points, dtype=CDTYPE, device=device)
     pos = positions.detach()
+    # One per-atom weight vector encoding the atom_scale-overrides-species_scale
+    # contract; folded into the structure factor below (never into the radial table).
+    w = _resolve_atom_weights(species_of_atom, species_scale, atom_scale, device=device)
     for s, upf in enumerate(upfs):
-        scale = 1.0 if species_scale is None else float(species_scale[s])
-        table = scale * torch.as_tensor(
+        table = torch.as_tensor(
             rhoatom_of_q(cast("UPFData", upf), uniq), dtype=torch.float64, device=device)
         shell = table[torch.as_tensor(inverse, device=device)]
         atoms = [a for a, sa in enumerate(species_of_atom) if sa == s]
@@ -52,12 +82,8 @@ def sad_density(
         gvec = grid.g_cart.reshape(-1, 3)
         phase = gvec @ pos[atoms].T  # (nG, natoms_s)
         sfac_a = torch.exp(torch.complex(torch.zeros_like(phase), -phase))
-        if atom_scale is not None:
-            w_at = torch.tensor([float(atom_scale[a]) for a in atoms],
-                                dtype=sfac_a.real.dtype, device=device)
-            sfac = (sfac_a * w_at[None, :]).sum(dim=1)
-        else:
-            sfac = sfac_a.sum(dim=1)
+        w_at = w[torch.as_tensor(atoms, dtype=torch.long, device=device)]
+        sfac = (sfac_a * w_at[None, :]).sum(dim=1)
         rho_g += sfac * shell.to(CDTYPE) / vol
 
     # rescale so that Ω·ρ(G=0) = N_e exactly (mesh-truncation fix)

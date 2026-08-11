@@ -40,11 +40,17 @@ def _simpson_index_weights(n: int) -> np.ndarray:
 
     Odd n: the plain 1/3 rule. Even n: 1/3 rule over the first n-3 points plus a
     3/8 closure over the last 4 — uniformly O(h⁴), unlike a trapezoid closure.
+
+    n=4 is a special case: the 1/3 sub-rule needs an odd count ≥3 (m=n-3≥3 ⇒
+    n≥6), so the even branch degenerates at n=4 (m=1 collapses the 1/3 region
+    onto the 3/8 boundary, over-integrating by ~11%). n=4 is the pure 3/8 rule.
     """
     if n < 4:
         raise ValueError("need at least 4 mesh points")
     w = np.zeros(n)
-    if n % 2 == 1:
+    if n == 4:
+        w[:] = [3.0 / 8.0, 9.0 / 8.0, 9.0 / 8.0, 3.0 / 8.0]
+    elif n % 2 == 1:
         w[:] = 2.0 / 3.0
         w[1::2] = 4.0 / 3.0
         w[0] = w[-1] = 1.0 / 3.0

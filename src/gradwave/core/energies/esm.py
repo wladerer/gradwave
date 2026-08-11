@@ -343,35 +343,53 @@ def _matched_cap_dv(rho: torch.Tensor, cell, open_axis: int) -> torch.Tensor:
             - hartree_potential_esm(rho, cell, open_axis))
 
 
-def _smooth_charge_carrier(q, grid, open_axis: int, ref: torch.Tensor) -> torch.Tensor:
+def _smooth_charge_carrier(q, cell, volume, shape, open_axis: int,
+                           ref: torch.Tensor) -> torch.Tensor:
     """The net charge q spread as an in-plane-uniform broad Gaussian in z (∫=q).
-    Smooth, so its spectral-referenced electrostatics stays grid-safe."""
-    nz = grid.shape[open_axis]
-    dz = float(np.linalg.norm(np.asarray(grid.cell)[open_axis])) / nz
+    Smooth, so its spectral-referenced electrostatics stays grid-safe.
+
+    Takes explicit geometry (``cell``, ``volume``, ``shape``) rather than a grid
+    so the SAME carrier serves the value/force path and the strained stress path.
+    The Gaussian *shape* is strain-independent (the dz factor cancels between the
+    z-coordinates and the width), so only ``q`` and ``volume`` carry the strain
+    dependence — both flow through here when ``volume``/``q`` are strained tensors.
+    """
+    shape = tuple(int(s) for s in shape)
+    nz = shape[open_axis]
+    cell_np = np.asarray(cell.detach().cpu() if torch.is_tensor(cell) else cell,
+                         dtype=np.float64)
+    dz = float(np.linalg.norm(cell_np[open_axis])) / nz
     zc = torch.arange(nz, device=ref.device, dtype=ref.dtype) * dz
     lz = (nz - 1) * dz
     w = lz / 6.0
     g1 = torch.exp(-((zc - 0.5 * lz) ** 2) / (2.0 * w * w))
     shp = [1, 1, 1]
     shp[open_axis] = nz
-    rho_q = g1.reshape(shp).expand(grid.shape)
-    dvol = grid.volume / rho_q.numel()
+    rho_q = g1.reshape(shp).expand(shape)
+    dvol = volume / rho_q.numel()
     return rho_q * (q / (rho_q.sum() * dvol))
 
 
-def _capacitor_grounded_de(rho_tot: torch.Tensor, grid, open_axis: int) -> torch.Tensor:
+def _capacitor_grounded_de(rho_tot: torch.Tensor, cell, g2, volume, shape,
+                           open_axis: int) -> torch.Tensor:
     """Grounded capacitor charge-induced energy ½∫ρ_tot ΔV, with the NET charge's
     reference calibrated to the spectral periodic (matching the KS energy). Split
     ρ_tot = ρ_n (neutral) + ρ_q (smooth net charge): the neutral part uses the
     β-safe matched correction; the net-charge terms use the spectral reference (v_cap
     − v_periodic) directly, valid for a charged cell and grid-safe since ρ_q is
-    smooth. Reduces to the plain matched energy for a neutral cell (ρ_q → 0)."""
-    cell = grid.cell
-    dvol = grid.volume / rho_tot.numel()
+    smooth. Reduces to the plain matched energy for a neutral cell (ρ_q → 0).
+
+    Takes explicit (possibly strained) geometry — ``cell``, the full-box ``g2``,
+    the ``volume`` and box ``shape`` — so this ONE function is the capacitor
+    grounded energy for BOTH the value/force path (:func:`esm_energy`) and the
+    stress path (:func:`esm_energy_strained`). Because it is a single functional,
+    its strain derivative is exactly the stress of the energy it reports, for a
+    net-charged cell as well as a neutral one (the derivative-identity fix)."""
+    dvol = volume / rho_tot.numel()
     q = rho_tot.sum() * dvol
-    rho_q = _smooth_charge_carrier(q, grid, open_axis, rho_tot)
+    rho_q = _smooth_charge_carrier(q, cell, volume, shape, open_axis, rho_tot)
     rho_n = rho_tot - rho_q
-    s_q = hartree_potential_capacitor(rho_q, cell, open_axis) - hartree_potential_r(rho_q, grid.g2)
+    s_q = hartree_potential_capacitor(rho_q, cell, open_axis) - hartree_potential_r(rho_q, g2)
     de_n = 0.5 * (rho_n * _matched_cap_dv(rho_n, cell, open_axis)).sum()
     return (de_n + (rho_n * s_q).sum() + 0.5 * (rho_q * s_q).sum()) * dvol
 
@@ -401,7 +419,8 @@ def esm_energy(rho_elec: torch.Tensor, positions: torch.Tensor,
         raise ValueError(f"esm mode must be 'vacuum' or 'capacitor', got {mode!r}")
     # capacitor: grounded charge-induced correction (quadratic, net-charge
     # reference calibrated to the spectral periodic) + applied bias (linear).
-    de = _capacitor_grounded_de(rho_tot, grid, open_axis)
+    de = _capacitor_grounded_de(rho_tot, grid.cell, grid.g2, grid.volume,
+                                grid.shape, open_axis)
     if bias != 0.0:
         de = de + (rho_tot * _bias_ramp(grid, open_axis, bias, rho_elec)).sum() * dvol
     return de
@@ -442,10 +461,11 @@ def esm_energy_strained(rho_elec: torch.Tensor, positions: torch.Tensor,
         return 0.5 * (rho_tot * dv).sum() * dvol
     if mode != "capacitor":
         raise ValueError(f"esm mode must be 'vacuum' or 'capacitor', got {mode!r}")
-    dv_grounded = (esm_delta_potential(rho_tot, cell, open_axis)
-                   + hartree_potential_capacitor(rho_tot, cell, open_axis, bias=0.0)
-                   - hartree_potential_esm(rho_tot, cell, open_axis))
-    de = 0.5 * (rho_tot * dv_grounded).sum() * dvol
+    # Same grounded functional as the value/force path (single source of the
+    # capacitor energy), through the strained geometry — so this energy's strain
+    # derivative is the stress even for a net-charged cell (was the plain matched
+    # functional on full rho_tot, which only equals this at q=0).
+    de = _capacitor_grounded_de(rho_tot, cell, g2, volume, shape, open_axis)
     if bias != 0.0:
         nz = shape[open_axis]
         ramp = bias * torch.arange(nz, device=dev, dtype=rho_elec.dtype) / (nz - 1)

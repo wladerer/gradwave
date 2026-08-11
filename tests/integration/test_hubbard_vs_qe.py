@@ -184,6 +184,37 @@ def test_diamond_c_linear_response_u_nspin1_matches_nspin2():
 
 
 @pytest.mark.standard
+def test_diamond_c_linear_response_u_fd_nspin1_matches_nspin2():
+    """Finite-difference linear-response U (the ``linear_response_u`` estimator,
+    whose bare χ0 comes from ``_bare_response_occ``) must give the SAME U for
+    nspin=1 and nspin=2 in the nonmagnetic limit — diamond C is nonmagnetic, so
+    the spin formalism cannot change the physics. This is the FD sibling of the
+    autodiff cross-check above and the regression guard for the χ0 spin-weight
+    scale: the nspin=1 path fed g·f (= 2f) into occupation_matrices while also
+    keeping the trailing ×2, double-counting the spin degeneracy, so χ0 — and
+    hence U — came out 2× off while nspin=2 stayed correct. With the per-spin
+    weight fixed (0.5·w = f for nspin=1) the two formalisms must agree."""
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.postscf.hubbard_u import linear_response_u
+
+    torch.set_num_threads(4)
+    system = _diamond_c_system()
+    kw = dict(l=1, species=0, site=0, alpha=0.1, smearing="gaussian", width=0.02)
+    out1 = linear_response_u(
+        system, PBE(),
+        scf_kwargs=dict(etol=1e-8, rhotol=1e-7, verbose=False,
+                        nspin=1, max_iter=120), **kw)
+    out2 = linear_response_u(
+        system, SpinPBE(),
+        scf_kwargs=dict(etol=1e-8, rhotol=1e-7, verbose=False,
+                        nspin=2, start_mag=[0.0, 0.0], max_iter=120), **kw)
+    assert out1["chi0"] < out1["chi"] < 0.0            # localizing response
+    assert abs(out1["chi0"] - out2["chi0"]) < 1e-6, (out1["chi0"], out2["chi0"])
+    assert abs(out1["chi"] - out2["chi"]) < 1e-6, (out1["chi"], out2["chi"])
+    assert abs(out1["U_eV"] - out2["U_eV"]) < 1e-4, (out1["U_eV"], out2["U_eV"])
+
+
+@pytest.mark.standard
 def test_diamond_c_linear_response_u_full_matrix_matches_shortcut():
     """The general per-site response-matrix path (perturb every correlated site,
     invert the full χ_IJ) must reduce to the cheap [[a,b],[b,a]] single-column

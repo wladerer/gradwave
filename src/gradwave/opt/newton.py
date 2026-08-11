@@ -197,13 +197,25 @@ def _newton_inner(system, xc, tabs, precond_cols, npws, occ, a0_np, omega0,
             converged = True
             break
 
-        def hvp(v, _g=grads):
-            return list(torch.autograd.grad(_dot(_g, v), leaves,
-                                            retain_graph=True))
-
-        g_det = [g.detach() for g in grads]
         accepted = False
-        for _trial in range(8):                # shrink Δ, reuse the gradient
+        for _trial in range(8):                # shrink Δ, retry with smaller trust radius
+            # Rebuild the create_graph gradient (and its double-backward graph)
+            # at the base point on every retry. A rejected trial probes the trial
+            # point by mutating the leaves in place (add_/sub_ below) and restores
+            # them; that still bumps the leaves' version counters, so a graph
+            # *retained* from a previous trial would make the next Hvp raise
+            # ("variable modified by an inplace operation"). The base point is
+            # unchanged, so the recomputed gradient is numerically identical — this
+            # only refreshes the graph so the Hvp stays valid across trials.
+            if _trial > 0:
+                e_val, grads = energy_and_grad(leaves)
+                n_grad += 1
+
+            def hvp(v, _g=grads):
+                return list(torch.autograd.grad(_dot(_g, v), leaves,
+                                                retain_graph=True))
+            g_det = [g.detach() for g in grads]
+
             p, hit_bnd, nh = steihaug_cg(
                 grads, hvp, delta, _identity_precond, cg_max_iter, cg_tol)
             hp = hvp(p)                        # predicted decrease (one Hvp)

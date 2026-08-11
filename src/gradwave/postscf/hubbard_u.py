@@ -133,9 +133,14 @@ def _bare_response_occ(system, base_res, hub, hub_q, alpha_vec, smearing, width)
                                     system.n_electrons, degeneracy=g_spin)).to(RDTYPE)
     n = torch.zeros(hub.n_sites, dtype=RDTYPE, device=hub_q.device)
     for sp in range(nspin):
-        # occupations_and_entropy already returns g·f (g = g_spin = 2/nspin), the
-        # per-state weight occupation_matrices expects; the old ×g×½ was a no-op.
+        # occupations_and_entropy returns g·f (g = g_spin = 2/nspin), but
+        # occupation_matrices weights becp·becp* linearly and expects a PER-SPIN
+        # weight f∈[0,1]. Drop the degeneracy for nspin=1 (0.5·w = f), matching
+        # _site_occupations' `0.5 * occ_sp`; nspin=2 already has g=1 so w = f.
+        # The trailing ×2.0 (nspin=1) then supplies the spin degeneracy, keeping
+        # this χ0 path on the SAME occupation scale as the interacting χ path.
         w, _ = occupations_and_entropy(eigs_s[sp], mu, scheme, width, degeneracy=g_spin)
+        w = 0.5 * w if nspin == 1 else w
         mats = occupation_matrices(hub_q, coeffs_s[sp], w, system.kweights, hub.sites)
         for i, m in enumerate(mats):
             n[i] += torch.trace(m).real

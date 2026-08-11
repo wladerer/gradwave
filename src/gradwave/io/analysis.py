@@ -130,15 +130,21 @@ def dos_frame(source, width: float = 0.1, npoints: int = 800, window=None):
     padded by 10 widths. Spin channels come back as separate columns."""
     s = load(source)
     pd = _pd()
-    nspin = s["parameters"]["nspin"]
-    kw = np.asarray(s["parameters"]["kweights"], dtype=float)
+    params = s["parameters"]
+    nspin = params["nspin"]
+    kw = np.asarray(params["kweights"], dtype=float)
     eig = np.asarray(s["eigenvalues_eV"], dtype=float)
     if nspin == 1:
         eig = eig[None]
     if window is None:
         window = (eig.min() - 10 * width, eig.max() + 10 * width)
     grid = np.linspace(window[0], window[1], npoints)
-    g_spin = 2.0 if nspin == 1 else 1.0
+    # spin degeneracy: a noncollinear/spinor result stores one electron per
+    # state (formalism="noncollinear", but nspin defaults to 1 as it has no
+    # nspin field), so it gets g=1 — only a genuine COLLINEAR nspin=1 run holds
+    # spatial orbitals doubly occupied (g=2). Collinear nspin=2 is already g=1.
+    noncollinear = params.get("formalism") == "noncollinear"
+    g_spin = 2.0 if (nspin == 1 and not noncollinear) else 1.0
     cols = {"energy_eV": grid}
     for isp in range(nspin):
         w = np.broadcast_to(kw[:, None], eig[isp].shape).reshape(-1)

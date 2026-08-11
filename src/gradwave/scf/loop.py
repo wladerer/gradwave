@@ -1816,6 +1816,26 @@ def scf(
         # (total, mag) → per-channel r-space densities (MixLayout.unpack)
         rho_s, _ = layout.unpack(mixer.step(rho_in_vec, rho_out_vec))
 
+    # Band-count guard (collinear nspin=2). default_nbands sizes the per-channel
+    # band count from the PARAMAGNETIC ceil(N/2) with no moment dependence, so a
+    # sizable spin moment can leave the majority channel with more occupied
+    # states than bands — the Fermi solver then cannot place all majority
+    # electrons and the electron count / free energy come out wrong. Occupation
+    # left in the highest band is the direct symptom (occ_s is per-state in
+    # [0,1] on the nspin=2 path); warn to raise nbands. Cheap: one reduction.
+    if nspin == 2:
+        top_occ = max(float(o[:, -1].max()) for o in occ_s)
+        if top_occ > 1e-3:
+            logger.warning(
+                "collinear nspin=2: the highest band (of %d) carries occupation "
+                "%.3g — the majority spin channel is not fully accommodated, so "
+                "the converged electron count / free energy may be wrong. "
+                "default_nbands sizes bands from the paramagnetic ceil(N/2) with "
+                "no moment dependence; pass an explicit larger nbands covering "
+                "ceil((N+|M|)/2), e.g. setup_system(..., nbands=...).",
+                nb, top_occ,
+            )
+
     if not converged:
         logger.warning(
             "SCF did NOT converge in %d iterations: F=%+.10f eV, dE=%.3e, "
