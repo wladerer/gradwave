@@ -48,9 +48,15 @@ ESPRESSO. Regenerate fixtures with `tests/fixtures/qe/regenerate.py` (QE via
 - `core/`, `grids.py`, `kpoints.py`, `symmetry.py` — plane-wave basis, k-points, symmetry
 - `scf/`, `solvers/`, `postscf/` — the SCF loop, eigensolvers, post-SCF analysis
 - `pseudo/` — pseudopotentials
-- `inputs.py`, `templates.py`, `cli.py`, `api.py` — input parsing, init templates, CLI, public API
-- `analysis.py` — frames and plotting, imports pandas/matplotlib lazily (the
-  `analysis` optional-dependency group); core and CLI run without them
+- `inputs/` — the input layer: `models.py` (the `Input`/`*Params` dataclass
+  schema), `parse.py` (loading/validation); a leaf, imports no physics
+- `api/` — the driver layer (Layer C), split by task: `system`, `scf`, `relax`,
+  `eos`, `elastic`, `phonons`, `dispersion`, `summary`, `dispatch` (+ `_common`)
+- `io/` — reporting and serialization: `output`, `checkpoint`, `runinfo`,
+  `templates`, and `analysis` (frames/plotting; imports pandas/matplotlib
+  lazily via the `analysis` optional-dependency group — core and CLI run
+  without them)
+- `cli.py`, `calculator.py`, `distributed.py` — entry points above the api layer
 
 Tests live in `tests/{unit,integration,gradcheck}` with shared fixtures in
 `tests/fixtures` and helpers in `tests/helpers.py`.
@@ -61,8 +67,14 @@ Before writing a helper, check whether one of these canonical symbols already
 does it. This table is the judgement layer (which symbol is right, what not to
 touch); for a full greppable list of every public symbol with its signature,
 run `make symbols` to generate the gitignored **`docs/symbols.txt`**, then grep
-it (`grep stress docs/symbols.txt`). Import from the leaf module — the subpackage `__init__.py` files
-are empty; underscore-prefixed names are internal.
+it (`grep stress docs/symbols.txt`). Import from the leaf module — the physics
+subpackage `__init__.py` files are empty; underscore-prefixed names are
+internal. Exceptions: `api/` and `inputs/` re-export their public surface from
+`__init__` (the historical flat-module paths, so `from gradwave.api import run`
+and `from gradwave.inputs import Input` stay valid). When monkeypatching an
+`api` internal in a test, patch the owning leaf module (e.g.
+`gradwave.api.relax._build_relax_calc`), not the package re-export — the
+drivers call their own module globals.
 
 | If you need to… | Use | Not |
 |---|---|---|
@@ -81,9 +93,9 @@ are empty; underscore-prefixed names are internal.
 | Forces / stress | `postscf.forces.forces`, `postscf.stress.stress` (`stress_kbar` to convert) | recompute Hellmann-Feynman/Pulay terms |
 | Bands / DOS / PDOS / phonons / EOS | `postscf.{bands.band_structure, dos.kpm_dos, pdos.projected_dos, phonons, eos.fit_bm3}` | |
 | Load a pseudopotential (NC or PAW) | `pseudo.upf.parse_upf`, `pseudo.upf_paw.parse_upf_paw` (unified: `api._load_upf`, path-cached) | re-parse UPF XML; re-implement the radial FT (`pseudo.radial.sbt`) |
-| Build the result summary / serialize / render | `api.build_summary`, `checkpoint.save_checkpoint`, `output.format_output` | hand-roll the summary-dict schema |
-| Warm-start an SCF from a checkpoint | `checkpoint.load_checkpoint` → `checkpoint.as_start_from` (pass as `scf(..., start_from=)`) | |
-| Load results into pandas frames / plot | `analysis.{load, scf_frame, bands_frame, plot_bands, …}` (needs the `analysis` extra) | parse the JSON by hand |
+| Build the result summary / serialize / render | `api.build_summary`, `io.checkpoint.save_checkpoint`, `io.output.format_output` | hand-roll the summary-dict schema |
+| Warm-start an SCF from a checkpoint | `io.checkpoint.load_checkpoint` → `io.checkpoint.as_start_from` (pass as `scf(..., start_from=)`) | |
+| Load results into pandas frames / plot | `io.analysis.{load, scf_frame, bands_frame, plot_bands, …}` (needs the `analysis` extra) | parse the JSON by hand |
 
 ## Running commands efficiently
 
