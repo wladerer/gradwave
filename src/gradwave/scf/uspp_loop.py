@@ -188,11 +188,27 @@ def davidson_gen(
     x = v_sub[:nbands]
     hx = sx = None
     for _ in range(max_iter):
-        h_sub = v_sub.conj() @ hv.T
-        s_sub = v_sub.conj() @ sv.T
-        h_sub = 0.5 * (h_sub + h_sub.conj().T)
-        s_sub = 0.5 * (s_sub + s_sub.conj().T)
-        ell = torch.linalg.cholesky(s_sub)
+        # Indefinite-S guard, same contract as davidson_gen_batched: a hard
+        # PAW/USPP augmentation can make vSv† lose positive-definiteness, and
+        # the reduction then yields garbage rotations (spurious below-minimum
+        # states). cholesky_ex is exactly the non-PD detector; drop the OLDEST
+        # subspace entries while it fails (keeps the newest curvature), then
+        # fall back to a tiny diagonal jitter. This catch previously existed
+        # only in the batched twin (whose comment claimed per-k parity).
+        while True:
+            h_sub = v_sub.conj() @ hv.T
+            s_sub = v_sub.conj() @ sv.T
+            h_sub = 0.5 * (h_sub + h_sub.conj().T)
+            s_sub = 0.5 * (s_sub + s_sub.conj().T)
+            ell, info = torch.linalg.cholesky_ex(s_sub)
+            bad = int(info) > 0
+            if not bad or v_sub.shape[0] <= nbands + 1:
+                break
+            v_sub, hv, sv = v_sub[1:], hv[1:], sv[1:]
+        if bad:
+            eye = torch.eye(s_sub.shape[0], dtype=s_sub.dtype,
+                            device=s_sub.device)
+            ell = torch.linalg.cholesky(s_sub + 1e-10 * eye)
         a = torch.linalg.solve_triangular(ell, h_sub, upper=False)  # L⁻¹H
         # (L⁻¹H)L⁻† = (L⁻¹ (L⁻¹H)†)† — solve with L again, then dagger
         a = torch.linalg.solve_triangular(ell, a.conj().T, upper=False).conj().T

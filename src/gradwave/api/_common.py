@@ -75,3 +75,25 @@ def _gap(eigenvalues: Any, occupations: Any, nspin: int) -> float | None:
     homo = e[f > _OCC_TOL].max()
     lumo = e[f <= _OCC_TOL].min()
     return float(lumo - homo) if lumo > homo else 0.0
+
+
+def time_reversal_ok(inp: Input) -> bool:
+    """k ≡ −k eligibility: a magnetic spinor breaks time reversal (TR flips
+    m⃗); a nonmagnetic spinor (SOC only) keeps Kramers degeneracy. The single
+    home for the predicate build_system and the elastic driver each used to
+    inline (three hand-kept copies of a documented recurring bug class)."""
+    return not (inp.noncollinear and not inp.nonmagnetic)
+
+
+def build_xc(inp: Input):
+    """The XC functional the input selects: NoncollinearXC-wrapped spin
+    functional for spinor runs, the spin registry for collinear nspin=2, the
+    charge-only registry otherwise. The single home for the three-branch
+    dispatch formerly reconstructed at each api call site."""
+    if inp.noncollinear:
+        from gradwave.core.xc.noncollinear import NoncollinearXC
+
+        return NoncollinearXC(SPIN_XC_REGISTRY[inp.xc]())
+    if inp.nspin == 2:
+        return SPIN_XC_REGISTRY[inp.xc]()
+    return XC_REGISTRY[inp.xc]()

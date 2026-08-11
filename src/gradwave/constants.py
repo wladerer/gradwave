@@ -26,3 +26,10 @@ KB_EV = 8.617333262e-5
 # MINUS_I_POW[l]. Tabulated to l = 4 (covers every caller); a longer table than
 # a given caller needs is harmless since it is only ever indexed.
 MINUS_I_POW = (1.0 + 0.0j, -1.0j, -1.0 + 0.0j, 1.0j, 1.0 + 0.0j)
+
+# 1 eV/Å³ in GPa (stress/pressure conversion): 1.602176634e-19 J / 1e-30 m³
+# = 1.602176634e11 Pa = 160.2176634 GPa, with the exact SI-2018 elementary
+# charge. Import THESE — five modules once carried private copies and one
+# (api/relax.py) drifted to the CODATA-2014 value.
+EV_A3_TO_GPA = 160.2176634
+EV_A3_TO_KBAR = 10.0 * EV_A3_TO_GPA

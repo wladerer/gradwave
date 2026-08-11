@@ -34,13 +34,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from gradwave.constants import EV_A3_TO_GPA
 from gradwave.symmetry import (
     SpaceGroup,
     coupled_axis_groups,
     find_spacegroup,
 )
-
-EV_A3_TO_GPA = 160.2176634
 
 _RANK_TOL = 1e-8
 

@@ -42,6 +42,7 @@ import dataclasses
 import numpy as np
 import torch
 
+from gradwave.constants import EV_A3_TO_KBAR
 from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.xc.base import XCFunctional
 from gradwave.core.xc.spin import SpinXC
@@ -54,8 +55,6 @@ from gradwave.scf.loop import (
     local_potential_r,
     setup_system,
 )
-
-EV_A3_TO_KBAR = 1602.176634  # 1 eV/Å³ = 160.2176634 GPa
 
 __all__ = ["estimate_pressure_error"]
 

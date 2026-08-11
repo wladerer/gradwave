@@ -7,8 +7,8 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from gradwave.api._common import _OCC_TOL, SPIN_XC_REGISTRY, XC_REGISTRY, _gap, _get
-from gradwave.api.system import _is_uspp, _species_upfs, _spin_setup
+from gradwave.api._common import _OCC_TOL, SPIN_XC_REGISTRY, XC_REGISTRY, _gap, _get, build_xc
+from gradwave.api.system import _is_uspp, _species_upfs
 from gradwave.core.xc.base import XCFunctional
 from gradwave.core.xc.spin import SpinXC
 from gradwave.inputs import Input, VolumetricParams
@@ -294,11 +294,7 @@ def _error_estimate_xc(inp: Input) -> NoncollinearXC | SpinXC | XCFunctional:
     spinor Hamiltonian); collinear nspin=2 needs the spin functional; nspin=1 the
     plain one.
     """
-    if inp.noncollinear:
-        from gradwave.core.xc.noncollinear import NoncollinearXC
-
-        return NoncollinearXC(SPIN_XC_REGISTRY[inp.xc]())
-    return _spin_setup(inp)[0] if inp.nspin == 2 else XC_REGISTRY[inp.xc]()
+    return build_xc(inp)
 
 
 def _error_estimate_block(res: SCFLike, inp: Input) -> dict[str, Any]:

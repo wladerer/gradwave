@@ -34,7 +34,7 @@ from typing import cast
 import numpy as np
 import torch
 
-from gradwave.constants import E2
+from gradwave.constants import E2, EV_A3_TO_KBAR
 from gradwave.core.hubbard import HubbardManifold
 from gradwave.core.spinor_proj import (
     so_dij,
@@ -70,7 +70,6 @@ from gradwave.symmetry import SpaceGroup
 _box_millers = box_millers
 _ewald_strained = ewald_strained
 
-EV_A3_TO_KBAR = 1602.176634  # 1 eV/Å³ = 160.2176634 GPa
 
 
 def stress_kbar(sigma: torch.Tensor) -> torch.Tensor:

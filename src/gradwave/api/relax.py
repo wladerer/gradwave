@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from gradwave.api._common import XC_REGISTRY, _mixing_scheme
 from gradwave.api.system import _is_uspp, _species_upfs
+from gradwave.constants import EV_A3_TO_GPA
 from gradwave.inputs import Input, InputError
 
 if TYPE_CHECKING:
@@ -249,7 +250,7 @@ def _relax_nested(
         # ASE stress/pressure is eV/Å³; the user knob is GPa. The filter adds
         # the cell degrees of freedom, so opt.run(fmax) then gates BOTH the
         # atomic forces and the stress (external pressure subtracted).
-        gpa_to_ev_a3 = 1.0 / 160.21766208
+        gpa_to_ev_a3 = 1.0 / EV_A3_TO_GPA
         target = FrechetCellFilter(
             atoms, scalar_pressure=inp.relax.pressure * gpa_to_ev_a3)
     # Parallel/speculative line search (opt-in): a positions-only bfgs relax may
