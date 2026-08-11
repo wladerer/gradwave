@@ -6,9 +6,10 @@ Two entry points mirror one another:
   ``Input``, ``run`` executes the requested task and returns the summary dict;
 - the ASE-style ``GradWave`` calculator for programmatic use.
 
-``analysis.load`` reads a run's JSON summary back into plain dicts/frames for
-plotting. Submodules (``core``, ``scf``, ``postscf``, ``pseudo``, ``solvers``)
-hold the physics layers and are imported directly when needed.
+``io.analysis.load`` reads a run's JSON summary back into plain dicts/frames
+for plotting. Submodules (``core``, ``scf``, ``postscf``, ``pseudo``,
+``solvers``, ``io``) hold the physics and reporting layers and are imported
+directly when needed.
 """
 
 from gradwave._logging import _install_null_handler, configure_logging

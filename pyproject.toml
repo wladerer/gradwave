@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# gradwave.analysis (frames + plotting) imports these lazily; the core
+# gradwave.io.analysis (frames + plotting) imports these lazily; the core
 # package and CLI run without them. Install with: gradwave[analysis]
 analysis = [
     "pandas>=3.0.3",

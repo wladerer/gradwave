@@ -56,11 +56,11 @@ autograd quantities.
 A checkpoint stores the converged density (and becsum for USPP/PAW) so an SCF
 can restart. Wavefunctions are excluded by default.
 
-::: gradwave.checkpoint.save_checkpoint
+::: gradwave.io.checkpoint.save_checkpoint
 
-::: gradwave.checkpoint.load_checkpoint
+::: gradwave.io.checkpoint.load_checkpoint
 
-::: gradwave.checkpoint.as_start_from
+::: gradwave.io.checkpoint.as_start_from
 
 ## Analysis
 
@@ -68,21 +68,21 @@ These helpers turn a result file (or an in-memory summary dict) into tidy
 pandas frames and matplotlib figures. `gradwave plot` wraps the plotting
 functions.
 
-::: gradwave.analysis.load
+::: gradwave.io.analysis.load
 
-::: gradwave.analysis.scf_frame
+::: gradwave.io.analysis.scf_frame
 
-::: gradwave.analysis.eigenvalues_frame
+::: gradwave.io.analysis.eigenvalues_frame
 
-::: gradwave.analysis.bands_frame
+::: gradwave.io.analysis.bands_frame
 
-::: gradwave.analysis.dos_frame
+::: gradwave.io.analysis.dos_frame
 
-::: gradwave.analysis.plot_scf
+::: gradwave.io.analysis.plot_scf
 
-::: gradwave.analysis.plot_bands
+::: gradwave.io.analysis.plot_bands
 
-::: gradwave.analysis.plot_dos
+::: gradwave.io.analysis.plot_dos
 
 ## Command line
 

@@ -87,7 +87,7 @@ def run_scf(
         mags = None
 
     if start_from is None and inp.restart is not None:
-        from gradwave.checkpoint import as_start_from, load_checkpoint
+        from gradwave.io.checkpoint import as_start_from, load_checkpoint
 
         start_from = as_start_from(load_checkpoint(inp.restart))
 
@@ -175,7 +175,7 @@ def _run_scf_noncollinear(
         # spin-orbit only: pin m⃗ ≡ 0 (no seed, no spurious moment)
         mag_vec_init = torch.zeros((len(inp.atoms), 3), dtype=torch.float64)
     elif inp.restart is not None:
-        from gradwave.checkpoint import load_checkpoint, nc_mag_seed
+        from gradwave.io.checkpoint import load_checkpoint, nc_mag_seed
 
         mag_vec_init = nc_mag_seed(load_checkpoint(inp.restart), system)
     else:
@@ -238,7 +238,7 @@ def _run_scf_hybrid(
     from gradwave.postscf.hybrid import hybrid_scf
 
     if start_from is None and inp.restart is not None:
-        from gradwave.checkpoint import as_start_from, load_checkpoint
+        from gradwave.io.checkpoint import as_start_from, load_checkpoint
 
         start_from = as_start_from(load_checkpoint(inp.restart))
 

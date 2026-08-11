@@ -168,7 +168,7 @@ The method and its coverage are in
 The analysis helpers return tidy pandas frames and matplotlib figures.
 
 ```python
-from gradwave import analysis
+from gradwave.io import analysis
 r = analysis.load("out/scf.json")
 
 analysis.scf_frame(r)             # iter, free_energy_eV, dE_eV, drho

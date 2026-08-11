@@ -103,7 +103,7 @@ def _elastic_spoke_worker(
     the SCF and return ``(key, stress[3,3], converged)`` (numpy)."""
     import numpy as np
 
-    from gradwave.checkpoint import as_start_from, load_checkpoint
+    from gradwave.io.checkpoint import as_start_from, load_checkpoint
 
     upfs, uspp, soa, xc, _is_fr = _elastic_rebuild(spoke.inp)
     tr = _elastic_time_reversal(spoke.inp)
@@ -358,7 +358,7 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
         import os
         import tempfile
 
-        from gradwave.checkpoint import save_checkpoint
+        from gradwave.io.checkpoint import save_checkpoint
         from gradwave.postscf.seedpool import map_spokes
 
         with tempfile.TemporaryDirectory(prefix="gw_seedpool_") as td:

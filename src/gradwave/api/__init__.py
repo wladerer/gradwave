@@ -4,7 +4,7 @@ run() executes a task and writes three files into the output directory:
 <task>.json (the machine-readable summary — the parsing target),
 <task>.out (the human-readable report) and, for SCF tasks, checkpoint.pt
 (restartable state, wavefunctions excluded unless requested). The same
-summary dict feeds gradwave.analysis for pandas/matplotlib work.
+summary dict feeds gradwave.io.analysis for pandas/matplotlib work.
 
 Formerly a single ~3k-line module, now a package; the implementation lives
 in the sibling modules (system, scf, relax, eos, elastic, phonons,

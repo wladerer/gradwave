@@ -115,7 +115,7 @@ class _PhononSpoke(NamedTuple):
 def _phonon_spoke_worker(spoke: _PhononSpoke) -> tuple[tuple[int, int, int], Any]:
     """Worker: build the displaced supercell, warm-start from the reference
     checkpoint, run the SCF and return ``(tag, force[N_sc,3])`` (numpy)."""
-    from gradwave.checkpoint import as_start_from, load_checkpoint
+    from gradwave.io.checkpoint import as_start_from, load_checkpoint
 
     upfs, uspp, xc, mags = _phonon_rebuild(spoke.inp)
     start_from = as_start_from(load_checkpoint(spoke.ckpt_path))
@@ -135,7 +135,7 @@ def _phonons_fc_parallel(
     import os
     import tempfile
 
-    from gradwave.checkpoint import save_checkpoint
+    from gradwave.io.checkpoint import save_checkpoint
     from gradwave.postscf.phonons_supercell import (
         displacement_list,
         force_constants_from_forces,

@@ -7,7 +7,7 @@ import json
 
 import torch
 
-from gradwave.runinfo import (
+from gradwave.io.runinfo import (
     ProcessMeter,
     cpu_info,
     load_info,
@@ -42,7 +42,7 @@ def test_process_meter_accounts_work():
 
 
 def test_provenance_block_renders_in_report():
-    from gradwave.output import _provenance_lines
+    from gradwave.io.output import _provenance_lines
 
     prov = provenance_block(machine_snapshot(), ProcessMeter())
     assert "load_end" in prov and "process" in prov

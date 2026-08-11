@@ -35,7 +35,7 @@ def build_summary(res: SCFLike, inp: Input, task: str,
                   extra: dict[str, Any] | None = None) -> dict[str, Any]:
     """The unified machine-readable summary for a task run."""
     from gradwave._version import __version__
-    from gradwave.checkpoint import energies_eV_dict
+    from gradwave.io.checkpoint import energies_eV_dict
 
     system = _get(res, "system")
     e = _get(res, "energies")

@@ -61,7 +61,7 @@ def _eos_spoke_worker(spoke: _EosSpoke) -> tuple[int, float, float, bool]:
     checkpoint, run the SCF and return ``(idx, volume, energy, converged)``."""
     import numpy as np
 
-    from gradwave.checkpoint import as_start_from, load_checkpoint
+    from gradwave.io.checkpoint import as_start_from, load_checkpoint
 
     upfs, uspp, soa = _eos_rebuild(spoke.inp)
     system, cell = _eos_build(spoke.inp, upfs, uspp, soa, spoke.scale, spoke.fixed)
@@ -158,7 +158,7 @@ def run_eos(inp: Input, verbose: bool = True) -> dict[str, Any]:
         import os
         import tempfile
 
-        from gradwave.checkpoint import save_checkpoint
+        from gradwave.io.checkpoint import save_checkpoint
         from gradwave.postscf.seedpool import map_spokes
 
         ref_idx = int(np.argmin([abs(s - 1.0) for s in scales]))

@@ -68,8 +68,8 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
     identical, correctly-reduced result (see ``scf.loop.scf``'s ``dist_ctx``
     handling), so file writing below is gated to rank 0 to avoid every rank
     racing to write the same files."""
-    from gradwave.output import write_output
-    from gradwave.runinfo import ProcessMeter, machine_snapshot, provenance_block
+    from gradwave.io.output import write_output
+    from gradwave.io.runinfo import ProcessMeter, machine_snapshot, provenance_block
 
     if inp.distributed and inp.task not in ("scf", "bands", "relax", "eos"):
         raise NotImplementedError(
@@ -159,7 +159,7 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
     outdir.mkdir(parents=True, exist_ok=True)
     outputs = {}
     if res is not None and inp.output_checkpoint:
-        from gradwave.checkpoint import save_checkpoint
+        from gradwave.io.checkpoint import save_checkpoint
 
         ck = save_checkpoint(res, outdir / "checkpoint.pt",
                              wavefunctions=inp.output_wavefunctions)

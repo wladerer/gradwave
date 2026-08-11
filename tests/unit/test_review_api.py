@@ -57,7 +57,7 @@ def _fake_nc_result():
 
 
 def test_checkpoint_round_trip_weights_only(tmp_path):
-    from gradwave.checkpoint import load_checkpoint, save_checkpoint
+    from gradwave.io.checkpoint import load_checkpoint, save_checkpoint
 
     path = save_checkpoint(_fake_nc_result(), tmp_path / "checkpoint.pt")
     payload = load_checkpoint(path)  # weights_only=True internally
@@ -72,7 +72,7 @@ def test_checkpoint_round_trip_weights_only(tmp_path):
 #  fix 9: the shared 11-key energy breakdown helper                           #
 # --------------------------------------------------------------------------- #
 def test_energies_eV_dict_keys():
-    from gradwave.checkpoint import energies_eV_dict
+    from gradwave.io.checkpoint import energies_eV_dict
 
     e = EnergyBreakdown(kinetic=1.0, hartree=2.0, xc=-1.0, local=0.5,
                         nonlocal_=0.1, ewald=-3.0, smearing=0.0)

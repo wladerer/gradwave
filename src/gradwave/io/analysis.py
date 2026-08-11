@@ -5,7 +5,7 @@ Everything here consumes the machine-readable JSON that run() writes
 analyzed on any machine. Imports of pandas/matplotlib are lazy so the
 core package works without them installed.
 
-    from gradwave import analysis
+    from gradwave.io import analysis
     r = analysis.load("out/scf.json")
     analysis.scf_frame(r)            # per-iteration convergence table
     analysis.eigenvalues_frame(r)    # tidy (spin, k, band, energy, occ)
@@ -25,7 +25,7 @@ def _pd():
     try:
         import pandas
     except ImportError as err:  # pragma: no cover
-        raise ImportError("gradwave.analysis needs pandas "
+        raise ImportError("gradwave.io.analysis needs pandas "
                           "(uv pip install pandas)") from err
     return pandas
 
@@ -37,7 +37,7 @@ def _plt():
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError as err:  # pragma: no cover
-        raise ImportError("gradwave.analysis plotting needs matplotlib "
+        raise ImportError("gradwave.io.analysis plotting needs matplotlib "
                           "(uv pip install matplotlib)") from err
     return plt
 

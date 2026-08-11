@@ -410,7 +410,7 @@ fractions, eigenvalue drift, reorder count, Fermi level, and wall time. Load it
 into a pandas DataFrame with `analysis.trace_frame`, one row per iteration with
 the shell decomposition expanded into `shell_0` through `shell_11` columns.
 
-    from gradwave import analysis
+    from gradwave.io import analysis
     df = analysis.trace_frame("out/scf_trace.json")
     df[["iter", "drho", "shell_0", "shell_1"]]   # long-wavelength residual weight
 
@@ -524,7 +524,7 @@ the converged state in a single response solve, no re-runs.
 ## Checkpoints
 
 ```python
-from gradwave.checkpoint import save_checkpoint, load_checkpoint, as_start_from
+from gradwave.io.checkpoint import save_checkpoint, load_checkpoint, as_start_from
 
 save_checkpoint(res, "checkpoint.pt")        # res: scf_uspp dict or NC SCFResult
 payload = load_checkpoint("checkpoint.pt")   # plain dict of CPU tensors + metadata
@@ -545,7 +545,7 @@ per-atom moments from the stored magnetization field instead of the density.
 The analysis helpers return tidy pandas frames and matplotlib figures.
 
 ```python
-from gradwave import analysis
+from gradwave.io import analysis
 r = analysis.load("out/scf.json")
 
 analysis.scf_frame(r)             # iter, free_energy_eV, dE_eV, drho, dF_from_final_eV
