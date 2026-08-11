@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from gradwave import __version__
+from gradwave._version import __version__
 
 if TYPE_CHECKING:
     from gradwave.inputs import Input

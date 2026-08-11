@@ -59,7 +59,7 @@ def save_checkpoint(res, path, *, wavefunctions: bool = False) -> Path:
     USPPResult). Returns the written path."""
     import numpy as np
 
-    from gradwave import __version__
+    from gradwave._version import __version__
 
     get = (res.get if isinstance(res, dict)
            else lambda k, d=None: getattr(res, k, d))

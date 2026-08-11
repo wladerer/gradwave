@@ -34,7 +34,7 @@ def build_summary(res: SCFLike, inp: Input, task: str,
                   runtime_s: float | None = None,
                   extra: dict[str, Any] | None = None) -> dict[str, Any]:
     """The unified machine-readable summary for a task run."""
-    from gradwave import __version__
+    from gradwave._version import __version__
     from gradwave.checkpoint import energies_eV_dict
 
     system = _get(res, "system")
@@ -573,7 +573,7 @@ def _base_summary(inp: Input, task: str) -> dict[str, Any]:
     use build_summary() instead. Callers append their per-task result block
     and a trailing "runtime_s" so the serialized key order stays
     code/task/structure/parameters/<block>/runtime_s."""
-    from gradwave import __version__
+    from gradwave._version import __version__
 
     return {
         "code": {"name": "gradwave", "version": __version__,

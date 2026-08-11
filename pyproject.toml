@@ -100,7 +100,7 @@ all = "warn"
 include = [
     "src/gradwave/api",
     "src/gradwave/calculator.py",
-    "src/gradwave/inputs.py",
+    "src/gradwave/inputs",
     "src/gradwave/cli.py",
     # Phase 3: System/USPPSystem's object-typed fields (grid, batch, sym,
     # rho_symmetrizer, becsum_sym, alchemical) are now precisely typed. That
@@ -546,6 +546,30 @@ ignore_imports = [
     "gradwave.core.hubbard -> gradwave.scf.loop",
     "gradwave.core.spinor_proj -> gradwave.scf.loop",
     "gradwave.core.xc.learnable -> gradwave.scf.loop",
+]
+
+[[tool.importlinter.contracts]]
+name = "inputs is a leaf (schema + parsing only, no physics imports)"
+type = "forbidden"
+source_modules = ["gradwave.inputs"]
+forbidden_modules = [
+    "gradwave.api", "gradwave.core", "gradwave.scf", "gradwave.postscf",
+    "gradwave.solvers", "gradwave.pseudo", "gradwave.opt",
+]
+
+[[tool.importlinter.contracts]]
+name = "api is the top of the stack (physics layers do not import it)"
+type = "forbidden"
+source_modules = [
+    "gradwave.core", "gradwave.scf", "gradwave.postscf", "gradwave.solvers",
+    "gradwave.pseudo", "gradwave.opt", "gradwave.inputs",
+]
+forbidden_modules = ["gradwave.api"]
+# Function-scoped late imports, deliberate late binding to break the cycle
+# (the api drivers import these packages at module level):
+ignore_imports = [
+    "gradwave.postscf.response -> gradwave.api",
+    "gradwave.opt.line_search -> gradwave.api",
 ]
 
 [[tool.importlinter.contracts]]

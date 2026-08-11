@@ -135,7 +135,7 @@ def machine_snapshot() -> dict:
     """Full static + dynamic machine state; take one at run start."""
     import torch
 
-    from gradwave import __version__
+    from gradwave._version import __version__
 
     uname = platform.uname()
     return {
