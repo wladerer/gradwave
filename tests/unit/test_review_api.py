@@ -57,7 +57,7 @@ def _fake_nc_result():
 
 
 def test_checkpoint_round_trip_weights_only(tmp_path):
-    from gradwave.checkpoint import load_checkpoint, save_checkpoint
+    from gradwave.io.checkpoint import load_checkpoint, save_checkpoint
 
     path = save_checkpoint(_fake_nc_result(), tmp_path / "checkpoint.pt")
     payload = load_checkpoint(path)  # weights_only=True internally
@@ -72,7 +72,7 @@ def test_checkpoint_round_trip_weights_only(tmp_path):
 #  fix 9: the shared 11-key energy breakdown helper                           #
 # --------------------------------------------------------------------------- #
 def test_energies_eV_dict_keys():
-    from gradwave.checkpoint import energies_eV_dict
+    from gradwave.io.checkpoint import energies_eV_dict
 
     e = EnergyBreakdown(kinetic=1.0, hartree=2.0, xc=-1.0, local=0.5,
                         nonlocal_=0.1, ewald=-3.0, smearing=0.0)
@@ -176,7 +176,9 @@ def test_precond_reaches_the_scf_call(tmp_path, monkeypatch, pseudo, target_mod,
     inp = _mk_input(tmp_path, pseudo, "scf: {mixing: {precond: local_tf}}\n")
 
     captured: dict = {}
-    monkeypatch.setattr(api, "build_system", lambda _inp: object())
+    # patch the leaf module (api.scf holds run_scf's build_system global), not
+    # the package re-export — the latter would leave the real build_system live
+    monkeypatch.setattr("gradwave.api.scf.build_system", lambda _inp: object())
     mod = importlib.import_module(target_mod)
 
     def fake_loop(*_args, **kw):
@@ -197,7 +199,9 @@ def test_precond_omitted_defaults_to_kerker_at_the_scf_call(tmp_path, monkeypatc
     inp = _mk_input(tmp_path, "C_ONCV_PBE-1.2.upf", "")
 
     captured: dict = {}
-    monkeypatch.setattr(api, "build_system", lambda _inp: object())
+    # patch the leaf module (api.scf holds run_scf's build_system global), not
+    # the package re-export — the latter would leave the real build_system live
+    monkeypatch.setattr("gradwave.api.scf.build_system", lambda _inp: object())
 
     def fake_scf(*_args, **kw):
         captured.update(kw)

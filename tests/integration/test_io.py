@@ -83,7 +83,7 @@ def _canned_summary():
 
 
 def test_human_report_from_summary():
-    from gradwave.output import format_output
+    from gradwave.io.output import format_output
 
     text = format_output(_canned_summary())
     for token in ("gradwave 0.1.0", "── structure", "── parameters",
@@ -124,7 +124,7 @@ def _canned_magnetism_summary():
 
 
 def test_magnetism_report_from_summary():
-    from gradwave.output import format_output
+    from gradwave.io.output import format_output
 
     text = format_output(_canned_magnetism_summary())
     for token in ("── magnetism", "ordering: ferromagnetic",
@@ -159,7 +159,7 @@ def test_analysis_frames_and_plots(tmp_path):
     # rather than fail the fast gate when they are not installed.
     pytest.importorskip("pandas")
     pytest.importorskip("matplotlib")
-    from gradwave import analysis
+    from gradwave.io import analysis
 
     s = _canned_summary()
     df = analysis.scf_frame(s)
@@ -231,7 +231,7 @@ def _canned_elastic() -> dict:
 def test_eos_elastic_frames_and_plots(tmp_path):
     pytest.importorskip("pandas")
     pytest.importorskip("matplotlib")
-    from gradwave import analysis
+    from gradwave.io import analysis
 
     eos = _canned_eos()
     ef = analysis.eos_frame(eos)
@@ -346,12 +346,12 @@ kpoints: {{mesh: [2, 2, 2]}}
 
 @pytest.mark.standard
 def test_paw_checkpoint_roundtrip_and_restart(tmp_path):
-    from gradwave.checkpoint import (
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.io.checkpoint import (
         as_start_from,
         load_checkpoint,
         save_checkpoint,
     )
-    from gradwave.core.xc.pbe import PBE
     from gradwave.pseudo.upf_paw import parse_upf_paw
     from gradwave.scf.uspp import scf_uspp, setup_uspp
 
@@ -396,12 +396,12 @@ def test_uspp_noncollinear_checkpoint_roundtrip_and_restart(tmp_path):
     4-channel (n, mx, my, mz) becsum — must archive and restart together,
     mirroring test_paw_checkpoint_roundtrip_and_restart's collinear USPP
     pattern above."""
-    from gradwave.checkpoint import (
+    from gradwave.core.xc.spin import LSDA_PW92
+    from gradwave.io.checkpoint import (
         as_start_from,
         load_checkpoint,
         save_checkpoint,
     )
-    from gradwave.core.xc.spin import LSDA_PW92
     from gradwave.pseudo.upf_paw import parse_upf_paw
     from gradwave.scf.uspp import setup_uspp
     from gradwave.scf.uspp_noncollinear import scf_uspp_noncollinear
@@ -479,7 +479,7 @@ scf: {{etol: 1.0e-8, rhotol: 1.0e-7}}
     assert (out / "checkpoint.pt").exists()
 
     # the plot subcommand consumes the JSON it just wrote; it routes through
-    # gradwave.analysis, which needs the `analysis` optional extra
+    # gradwave.io.analysis, which needs the `analysis` optional extra
     # (pandas/matplotlib). Guard just this block so the end-to-end SCF and the
     # restart coverage below still run on a core-only install.
     if all(importlib.util.find_spec(m) for m in ("pandas", "matplotlib")):
@@ -546,7 +546,7 @@ scf: {{etol: 1.0e-7, rhotol: 1.0e-6}}
     assert s1["parameters"]["formalism"] == "noncollinear"
     ck = out / "checkpoint.pt"
     assert ck.exists()
-    from gradwave.checkpoint import load_checkpoint
+    from gradwave.io.checkpoint import load_checkpoint
     assert load_checkpoint(ck)["kind"] == "noncollinear"
     f1 = s1["scf"]["energies_eV"]["free_energy"]
 

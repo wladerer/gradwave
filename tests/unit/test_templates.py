@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from gradwave import templates
 from gradwave.inputs import _load_structure, load_input
+from gradwave.io import templates
 from tests.helpers import PSEUDOS
 
 _FIXTURE_UPF = "Si_ONCV_PBE-1.2.upf"   # any real UPF; existence is all that is checked

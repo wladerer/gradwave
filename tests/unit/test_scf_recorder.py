@@ -232,9 +232,9 @@ def test_uspp_recorder_records():
 
 def test_scf_trace_sidecar_and_frame(tmp_path):
     pytest.importorskip("pandas")
-    from gradwave import analysis
     from gradwave.api import run
     from gradwave.inputs import load_input
+    from gradwave.io import analysis
 
     a = 5.43
     h = a / 2

@@ -94,7 +94,9 @@ def _patch_harmonic(monkeypatch):
     # _build_relax_calc(inp, verbose, scf_step_hook=...): the extra kwargs
     # (verbose for the Pulay message #217, scf_step_hook for the ionic-step
     # header) ride along; the harmonic stand-in ignores them all
-    monkeypatch.setattr("gradwave.api._build_relax_calc",
+    # patch the leaf module (api.relax), not the package re-export: the relax
+    # drivers call their own module global, which the package alias no longer is
+    monkeypatch.setattr("gradwave.api.relax._build_relax_calc",
                         lambda inp, verbose=True, **_kw: _Harmonic(_TARGETS))
 
 

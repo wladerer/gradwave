@@ -209,7 +209,7 @@ def _evaluate_candidate(cand: _Candidate) -> tuple[float, np.ndarray]:
     warm-start seed for the single candidate SCF, and returns only small arrays.
     """
     from gradwave.api import _build_relax_calc
-    from gradwave.checkpoint import as_start_from, load_checkpoint
+    from gradwave.io.checkpoint import as_start_from, load_checkpoint
 
     inp = cand.inp
     atoms = inp.atoms.copy()
@@ -439,7 +439,7 @@ class ParallelLineSearchBFGS(_BFGS):  # type: ignore[valid-type,misc]
         if not alphas:
             return 1.0, "serial(no-alphas)"
 
-        from gradwave.checkpoint import save_checkpoint
+        from gradwave.io.checkpoint import save_checkpoint
 
         tmpdir = tempfile.mkdtemp(prefix="gw_ls_")
         try:

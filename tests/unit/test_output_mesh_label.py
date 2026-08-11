@@ -6,7 +6,7 @@ unsymmetrized run is "TR-reduced" — not "IBZ". Under a distributed k-shard the
 label reports this rank's slice of the reduced mesh.
 """
 
-from gradwave.output import _mesh_label
+from gradwave.io.output import _mesh_label
 
 
 def test_symmetry_on_labels_ibz():

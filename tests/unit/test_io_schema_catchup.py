@@ -172,7 +172,7 @@ def _summary_with_dispersion(method: str) -> dict:
 
 
 def test_format_output_labels_d4_block():
-    from gradwave.output import format_output
+    from gradwave.io.output import format_output
 
     text = format_output(_summary_with_dispersion("d4-bj"))
     assert "D4(BJ) dispersion" in text
@@ -182,7 +182,7 @@ def test_format_output_labels_d4_block():
 
 
 def test_format_output_still_labels_d3_block():
-    from gradwave.output import format_output
+    from gradwave.io.output import format_output
 
     text = format_output(_summary_with_dispersion("d3-bj"))
     assert "D3(BJ) dispersion" in text

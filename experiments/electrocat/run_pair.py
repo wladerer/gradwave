@@ -39,7 +39,7 @@ def _provenance() -> dict:
     slow run can be blamed on a throttled/loaded host. All best-effort."""
     info: dict = {}
     try:
-        from gradwave import runinfo as ri
+        from gradwave.io import runinfo as ri
         info["git"] = ri._git_commit()
         info["cpu"], info["memory"] = ri.cpu_info(), ri.memory_info()
         info["gpu"], info["thermal"] = ri.gpu_info(), ri.thermal_info()

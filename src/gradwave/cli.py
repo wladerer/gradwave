@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from gradwave import __version__
+from gradwave._version import __version__
 
 if TYPE_CHECKING:
     from gradwave.inputs import Input
@@ -72,7 +72,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
-    from gradwave import templates
+    from gradwave.io import templates
 
     if not args.template:
         print("available templates (gradwave init <name>):")
@@ -238,7 +238,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_plot(args: argparse.Namespace) -> int:
-    from gradwave import analysis
+    from gradwave.io import analysis
 
     summary = analysis.load(args.result)
     kind = args.kind
