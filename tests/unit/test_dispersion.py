@@ -212,7 +212,12 @@ def test_unknown_element_raises():
     pos = torch.tensor([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]], dtype=torch.float64)
     cfg = D3Config.from_functional("pbe")
     with pytest.raises(NotImplementedError, match="not vendored"):
-        dispersion_energy(pos, None, [1, 3], cfg)  # Li (Z=3) not in subset
+        dispersion_energy(pos, None, [1, 37], cfg)  # Rb (Z=37) beyond the H..Kr subset
+
+
+def test_covered_range_is_h_through_kr():
+    # the widened vendored set is exactly Z=1..36 (periods 1-4 main-group + 3d)
+    assert sorted(MXC) == list(range(1, 37))
 
 
 def test_all_vendored_elements_self_pair_present():
@@ -247,3 +252,62 @@ def test_external_reference_simple_dftd3():
     cfg = D3Config.from_functional("pbe0")
     e_hartree = dispersion_energy(pos, None, Z, cfg).item() / _H
     assert abs(e_hartree - _DIMER_EDISP_HARTREE) < 1e-7  # machine-level agreement
+
+
+# --------------------------------------------------------------------------
+# widened element set (Z=1..36): new-element molecules vs simple-dftd3.
+# References are total two-body D3(BJ) energies (Hartree) from simple-dftd3's
+# RationalDampingParam(method, atm=False) — an independent C implementation over
+# the same Grimme reference data. Geometry is Å converted to Bohr with BOHR_ANG,
+# so agreement is at the Bohr-conversion floor (~1e-11 Ha, well under 1e-9).
+# Systems deliberately use elements outside the original 11-element subset:
+# Al, Si (period 3) and K, Ca, Fe (period 4, incl. the 3d metal Fe).
+# --------------------------------------------------------------------------
+_ALSIO_Z = [13, 14, 8, 8, 8, 1]  # Al Si O O O H
+_ALSIO_XYZ = [
+    [0.0102, 0.0231, -0.0157], [1.7321, 0.0412, 0.0233],
+    [-0.9124, 1.2842, 0.3319], [2.6013, 1.2201, -0.4471],
+    [0.8442, -1.3122, 0.7215], [-1.8331, 1.0113, 0.5528],
+]
+_KCAFE_Z = [19, 20, 26, 8, 8]  # K Ca Fe O O
+_KCAFE_XYZ = [
+    [0.0311, -0.0212, 0.0431], [2.9124, 0.1201, -0.1123],
+    [1.4432, 2.3841, 0.2214], [1.5013, 0.0113, 1.4528],
+    [1.4221, -1.9902, -0.3315],
+]
+# (system, functional) -> total two-body D3(BJ) energy [Hartree], s-dftd3 atm=False
+_NEW_ELEMENT_D3 = {
+    ("alsio", "pbe"): -0.004777489306177081,
+    ("alsio", "pbe0"): -0.004406848542979641,
+    ("kcafe", "pbe"): -0.004904060769491955,
+    ("kcafe", "pbe0"): -0.004962852390056221,
+}
+
+
+@pytest.mark.parametrize("system,func", list(_NEW_ELEMENT_D3))
+def test_external_reference_new_elements(system, func):
+    Z, xyz = {"alsio": (_ALSIO_Z, _ALSIO_XYZ),
+              "kcafe": (_KCAFE_Z, _KCAFE_XYZ)}[system]
+    pos = torch.tensor(xyz, dtype=torch.float64)
+    cfg = D3Config.from_functional(func)
+    e_hartree = dispersion_energy(pos, None, Z, cfg).item() / HARTREE_EV
+    assert abs(e_hartree - _NEW_ELEMENT_D3[(system, func)]) < 1e-9
+
+
+def test_new_element_forces_match_finite_differences():
+    # autograd force vs central FD on a 3d-metal-bearing molecule (K, Ca, Fe)
+    Z = _KCAFE_Z
+    pos = torch.tensor(_KCAFE_XYZ, dtype=torch.float64)
+    cfg = D3Config.from_functional("pbe0")
+    f = dispersion_forces(pos, None, Z, cfg)  # (na,3) eV/Å = -dE/dτ
+    h = 1e-5
+    scale = f.abs().max().item()
+    for a in range(len(Z)):
+        for comp in range(3):
+            dp = torch.zeros_like(pos)
+            dp[a, comp] = h
+            ep = dispersion_energy(pos + dp, None, Z, cfg).item()
+            em = dispersion_energy(pos - dp, None, Z, cfg).item()
+            fd = -(ep - em) / (2 * h)
+            assert abs(fd - f[a, comp].item()) <= 1e-6 * scale + 1e-10
+    assert f.sum(dim=0).abs().max().item() < 1e-9  # Σ_a F_a = 0

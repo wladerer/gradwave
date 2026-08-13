@@ -18,17 +18,26 @@ Usage:  python scripts/gen_d3_params.py
 from __future__ import annotations
 
 import re
+import textwrap
 import urllib.request
 from pathlib import Path
 
 BASE = "https://raw.githubusercontent.com/dftbplus/dftd3-lib/main/lib"
 OUT = Path(__file__).resolve().parents[1] / "src/gradwave/postscf/_d3_params.py"
 
-# Element subset to vendor: main-group organics + P/S/Cl/F and the metals Mg,
-# Cu, Zn. (At least H, C, N, O plus a few metals — the task's coverage floor.)
-SUBSET = [1, 6, 7, 8, 9, 12, 15, 16, 17, 29, 30]
-SYM = {1: "H", 6: "C", 7: "N", 8: "O", 9: "F", 12: "Mg", 15: "P",
-       16: "S", 17: "Cl", 29: "Cu", 30: "Zn"}
+# Element subset to vendor: Z=1..36 (H through Kr) — all of periods 1-4
+# main-group plus the 3d transition metals. The upstream dftd3-lib reference C6
+# table (pars.f90) carries data for every element in this range (verified: no
+# gaps, mxc<=5), so the boundary here is a size/scope choice, not a data limit.
+# Extend the range if heavier elements are needed; pars.f90 goes to Z=94.
+SUBSET = list(range(1, 37))
+SYM = {
+    1: "H", 2: "He", 3: "Li", 4: "Be", 5: "B", 6: "C", 7: "N", 8: "O",
+    9: "F", 10: "Ne", 11: "Na", 12: "Mg", 13: "Al", 14: "Si", 15: "P",
+    16: "S", 17: "Cl", 18: "Ar", 19: "K", 20: "Ca", 21: "Sc", 22: "Ti",
+    23: "V", 24: "Cr", 25: "Mn", 26: "Fe", 27: "Co", 28: "Ni", 29: "Cu",
+    30: "Zn", 31: "Ga", 32: "Ge", 33: "As", 34: "Se", 35: "Br", 36: "Kr",
+}
 
 # D3(BJ) damping presets (s6, s8, a1, a2), a2 in Bohr — from dftd3-lib
 # setfuncpar (version 4); rs6→a1, s18→s8, rs18→a2.
@@ -100,8 +109,10 @@ def main() -> None:
         f.write("RCOV[Z-1] = covalent radius scaled by k2=4/3 and in Bohr. Both cover\n")
         f.write("Z=1..94. C6AB is CN-resolved reference C6 for the element subset\n")
         subset_syms = ", ".join(SYM[z] for z in SUBSET)
-        f.write(f"{subset_syms}; each (Z_a, Z_b) maps to reference points\n")
-        f.write("(i, j, C6ref, CN_a_i, CN_b_j). Extend SUBSET in the generator to add more.\n")
+        for line in textwrap.wrap(subset_syms + ";", width=88):
+            f.write(line + "\n")
+        f.write("each (Z_a, Z_b) maps to reference points (i, j, C6ref, CN_a_i, CN_b_j).\n")
+        f.write("Extend SUBSET in the generator to add more elements, then re-run.\n")
         f.write('"""\n\n')
         f.write("from __future__ import annotations\n\n")
         f.write("# CN counting-function steepness (exponential counting, Grimme 2010).\n")

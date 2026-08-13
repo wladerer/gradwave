@@ -10,8 +10,9 @@ scope). Positions are in Å; the reference was produced in Bohr, so agreement is
 at the ~1e-11 Hartree level (the Bohr↔Å constant differs in its last digits).
 
 Systems are deliberately low-symmetry and rattled (the verification.md rule).
-``cluster11`` carries one atom of every vendored element, exercising each
-reference block and every C6REF pair.
+``cluster11`` carries one atom of each of the original eleven vendored elements,
+exercising those reference blocks and C6REF pairs; the widened Z=1..36 set is
+anchored by the new-element molecules below.
 """
 
 import numpy as np
@@ -68,7 +69,7 @@ _OH_XYZ = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.97]]
 _OH_E = -0.00017066628134750867  # pbe, charge -1
 _OH_Q = [-1.1351115137, 0.1351115137]
 
-# one atom of every vendored element (H C N O F Mg P S Cl Cu Zn), rattled
+# one atom of each of the original eleven elements (H C N O F Mg P S Cl Cu Zn), rattled
 _CLUSTER_Z = [1, 6, 7, 8, 9, 12, 15, 16, 17, 29, 30]
 _CLUSTER_XYZ = [
     [-0.0705481833, -0.2028551816, 0.1495700839],
@@ -84,6 +85,26 @@ _CLUSTER_XYZ = [
     [2.4797595341, -0.0861717048, 2.5869887182],
 ]
 _CLUSTER_E = -0.0146177524269614  # pbe0
+
+# Widened element set (Z=1..36): molecules using elements outside the original
+# 11-element subset. References are total two-body D4(BJ) energies [Hartree] from
+# tad-dftd4 with s9=0 (dftd4() over the same reference tables). _ALSIO carries
+# Al, Si (period 3); _KCAFE carries K, Ca and the 3d metal Fe (period 4).
+_ALSIO_Z = [13, 14, 8, 8, 8, 1]  # Al Si O O O H
+_ALSIO_XYZ = [
+    [0.0102, 0.0231, -0.0157], [1.7321, 0.0412, 0.0233],
+    [-0.9124, 1.2842, 0.3319], [2.6013, 1.2201, -0.4471],
+    [0.8442, -1.3122, 0.7215], [-1.8331, 1.0113, 0.5528],
+]
+_ALSIO_E = -0.00486336433584832  # pbe0
+_KCAFE_Z = [19, 20, 26, 8, 8]  # K Ca Fe O O
+_KCAFE_XYZ = [
+    [0.0311, -0.0212, 0.0431], [2.9124, 0.1201, -0.1123],
+    [1.4432, 2.3841, 0.2214], [1.5013, 0.0113, 1.4528],
+    [1.4221, -1.9902, -0.3315],
+]
+_KCAFE_E = -0.004572779412217115  # pbe0
+_KCAFE_E_PBE = -0.005385353753303957  # pbe
 
 
 def _tensor(xyz):
@@ -103,6 +124,9 @@ def _tensor(xyz):
          _DIMER_XYZ, "pbe0", 0.0, _DIMER_E),
         (_OH_Z, _OH_XYZ, "pbe", -1.0, _OH_E),
         (_CLUSTER_Z, _CLUSTER_XYZ, "pbe0", 0.0, _CLUSTER_E),
+        (_ALSIO_Z, _ALSIO_XYZ, "pbe0", 0.0, _ALSIO_E),      # Al, Si (new)
+        (_KCAFE_Z, _KCAFE_XYZ, "pbe0", 0.0, _KCAFE_E),      # K, Ca, Fe (new)
+        (_KCAFE_Z, _KCAFE_XYZ, "pbe", 0.0, _KCAFE_E_PBE),   # K, Ca, Fe (new)
     ],
 )
 def test_external_reference_energy(Z, xyz, func, charge, e_ref):
@@ -193,7 +217,31 @@ def test_unknown_element_raises():
     cfg = D4Config.from_functional("pbe")
     with pytest.raises(NotImplementedError, match="not vendored"):
         dispersion_energy(_tensor([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]]), None,
-                          [1, 3], cfg)  # Li (Z=3) not in subset
+                          [1, 37], cfg)  # Rb (Z=37) beyond the H..Kr subset
+
+
+def test_covered_range_is_h_through_kr():
+    # the widened vendored set is exactly Z=1..36 (periods 1-4 main-group + 3d)
+    assert sorted(NREF) == list(range(1, 37))
+
+
+def test_new_element_forces_match_finite_differences():
+    # autograd force vs central FD on a 3d-metal-bearing molecule (K, Ca, Fe),
+    # exercising the full EEQ→ζ→C6→BJ graph over newly vendored elements
+    Z, cfg = _KCAFE_Z, D4Config.from_functional("pbe0")
+    base = _tensor(_KCAFE_XYZ)
+    f = dispersion_forces(base, None, Z, cfg)  # (na,3) eV/Å = -dE/dτ
+    h = 1e-5
+    scale = f.abs().max().item()
+    for a in range(len(Z)):
+        for comp in range(3):
+            dp = torch.zeros_like(base)
+            dp[a, comp] = h
+            ep = dispersion_energy(base + dp, None, Z, cfg).item()
+            em = dispersion_energy(base - dp, None, Z, cfg).item()
+            fd = -(ep - em) / (2 * h)
+            assert abs(fd - f[a, comp].item()) <= 1e-6 * scale + 1e-9
+    assert f.sum(dim=0).abs().max().item() < 1e-9  # Σ_a F_a = 0
 
 
 # --------------------------------------------------------------------------
