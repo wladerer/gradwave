@@ -58,7 +58,8 @@ def generate(tree: ast.AST):
         muts = []
         if isinstance(node, ast.BinOp) and type(node.op) in _BIN_SWAP:
             muts.append(("binop", _BIN_SWAP[type(node.op)]()))
-        elif isinstance(node, ast.Compare) and len(node.ops) == 1 and type(node.ops[0]) in _CMP_SWAP:
+        elif isinstance(node, ast.Compare) and len(node.ops) == 1 \
+                and type(node.ops[0]) in _CMP_SWAP:
             muts.append(("compare", _CMP_SWAP[type(node.ops[0])]()))
         elif isinstance(node, ast.BoolOp) and type(node.op) in _BOOL_SWAP:
             muts.append(("boolop", _BOOL_SWAP[type(node.op)]()))
