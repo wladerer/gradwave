@@ -19,8 +19,11 @@ Systems (default set; --systems to subset):
               cut is large enough to matter
 
 Variants per system: mixer, newton-plain (no lever), newton-kerker,
-newton-ew (EW + Kerker). Each newton variant is measured; the table shows
-iters / wall / ΔE / total inner χ₀-applies / applies-per-step.
+newton-stoner (Kerker + Stoner spin precond on the mag channel, nspin=2 only),
+newton-ew (EW + Kerker), newton-ew-ston (EW + Kerker + Stoner). Each newton
+variant is measured; the table shows iters / wall / ΔE / total inner
+χ₀-applies / applies-per-step. The Stoner lever isolates on Fe-bcc-fm: compare
+newton-kerker vs newton-stoner (mag channel un-preconditioned vs preconditioned).
 
 Run start-to-finish (writes its own EXIT marker at the end):
   uv run python benchmarks/newton_scf/nc_newton_bench.py
@@ -131,10 +134,12 @@ def main():
                    chi0_tol=a.chi0_tol)
     # (label, newton?, extra newton_kwargs). Levers isolated:
     variants = [
-        ("mixer",         False, None),
-        ("newton-plain",  True,  dict(ew=False, precond=False)),
-        ("newton-kerker", True,  dict(ew=False, precond=True)),
-        ("newton-ew",     True,  dict(ew=True, precond=True)),
+        ("mixer",          False, None),
+        ("newton-plain",   True,  dict(ew=False, precond=False)),
+        ("newton-kerker",  True,  dict(ew=False, precond=True)),
+        ("newton-stoner",  True,  dict(ew=False, precond=True, spin_precond=True)),
+        ("newton-ew",      True,  dict(ew=True, precond=True)),
+        ("newton-ew-ston", True,  dict(ew=True, precond=True, spin_precond=True)),
     ]
 
     hdr = ("%-11s %-14s %5s %8s %11s %8s  %s" %

@@ -35,10 +35,16 @@ would otherwise take many applies per Newton step):
   dominant eigenvalue of ``χ₀K``, magnitude > 1 even for a benign system (see
   ``scf.soft_mode``) — which is exactly what makes the un-preconditioned inner
   fixed point stiff, so it collapses the inner iteration count. It acts on the
-  *charge* channel only, so for a magnetic (nspin=2) system the
-  magnetization/Stoner inner mode is left un-preconditioned and its inner solve
-  stays expensive — a Stoner spin preconditioner (cf. ``scf.spin_precond``) is
-  the clear next lever there.
+  *charge* channel only.
+* **Stoner spin preconditioning** (``spin_precond=True``, default off, nspin=2 +
+  smearing only) — the magnetization companion to Kerker. Kerker leaves the
+  magnetization/Stoner inner mode un-damped, so for a magnetic system that mode
+  makes the inner solve expensive (or floors the density residual above rhotol).
+  This adds the mixer's rank-r Woodbury Stoner operator ``(I − χ₀^diag K_mm)⁻¹``
+  (``scf.spin_precond``) on the mag channel of the inner residual, built from the
+  frozen orbitals. Off by default: like its mixing-path twin it is near-identity
+  outside the FM-metal regime and depends on adequate Fermi-surface sampling, so
+  its benefit is system-dependent — measure before enabling on a given system.
 
 A related tuning caveat: the inner tolerance must be tight enough to reach the
 target ``rhotol``, or the *density* residual floors above it and the finisher
@@ -97,7 +103,8 @@ def _frozen_state(system, xc, nspin, smearing, width, mu, rho_s, veff_s,
     )
 
 
-def kerker_precond(grid, q0: float, nspin: int) -> Callable[[torch.Tensor], torch.Tensor]:
+def kerker_precond(grid, q0: float, nspin: int,
+                   stoner=None) -> Callable[[torch.Tensor], torch.Tensor]:
     """Real-space Kerker preconditioner ``P ≈ (I − χ₀K)⁻¹`` on the density
     residual: ``R̃(G) = R(G)·G²/(G²+q0²)`` on the total-charge channel.
 
@@ -107,7 +114,18 @@ def kerker_precond(grid, q0: float, nspin: int) -> Callable[[torch.Tensor], torc
     ``χ₀K``. The G=0 (total-charge) component is zeroed, which both matches the
     Kerker factor's ``g2→0`` limit and keeps the update charge-neutral (the
     residual already integrates to zero). For nspin=2 the factor acts on the
-    total channel only (mag passes through), mirroring the mixer's kerker_mask.
+    total channel only, mirroring the mixer's kerker_mask.
+
+    ``stoner`` (optional, nspin=2 only): a :class:`scf.spin_precond.StonerSpinPrecond`
+    for the magnetization channel. Without it the mag residual passes through
+    un-preconditioned — the un-damped Stoner-expansive spin mode that leaves the
+    magnetic inner solve stiff. With it, the mag channel gets the same rank-r
+    Woodbury Newton model ``(I − χ₀^diag K_mm)⁻¹`` the mixer's ``extra_precond``
+    uses; the operator lives on the density sphere, so the real-space mag field
+    is FFT'd, restricted to ``grid.dens_mask``, preconditioned, and transformed
+    back (components outside the sphere pass through, where the operator is the
+    identity anyway). Charge and mag are preconditioned independently, exactly as
+    in the mixer's packed ``[charge, mag]`` vector.
     """
     fac = (grid.g2 / (grid.g2 + q0 * q0)).to(RDTYPE)
 
@@ -117,9 +135,16 @@ def kerker_precond(grid, q0: float, nspin: int) -> Callable[[torch.Tensor], torc
     if nspin == 1:
         return _kerker_field
 
+    mask = grid.dens_mask.reshape(-1)
+
     def _apply(r: torch.Tensor) -> torch.Tensor:
         tot = _kerker_field(r[0] + r[1])
         mag = r[0] - r[1]
+        if stoner is not None:
+            mag_g = r_to_g(mag.to(CDTYPE)).reshape(-1)
+            out = mag_g.clone()
+            out[mask] = stoner.apply(mag_g[mask])
+            mag = g_to_r_box(out.reshape(grid.shape), real=True)
         return torch.stack([(tot + mag) * 0.5, (tot - mag) * 0.5])
 
     return _apply
@@ -207,6 +232,7 @@ def newton_finish_step(system, xc, nspin, smearing, width, mu, rho_s,
                        ew: bool = False, ew_gamma: float = 0.9,
                        ew_alpha: float = 2.0, ew_floor: float = 1e-8,
                        ew_max: float = 1e-1, precond: bool = True,
+                       spin_precond: bool = False,
                        inner_tol: float = 1e-6, max_inner: int = 60,
                        beta: float = 0.4, history: int = 8,
                        chi0_tol: float = 1e-8, chi0_max_iter: int = 200,
@@ -221,9 +247,13 @@ def newton_finish_step(system, xc, nspin, smearing, width, mu, rho_s,
     ``ew`` enables Eisenstat–Walker adaptive inner tolerance (``prev_rnorm`` is
     the previous Newton step's residual norm; None on the first step). ``precond``
     enables Kerker preconditioning of the inner solve, reusing ``mixer.q0`` from
-    the loop's mixer. Returns ``(new_rho_s, info)`` — the per-spin density list
-    ``ρ_in + δ`` and a diagnostics dict (``rnorm``, ``inner_tol``,
-    ``inner_iters``, ``inner_applies``, ``inner_resid``, ``inner_converged``)."""
+    the loop's mixer. ``spin_precond`` (nspin=2 + smearing only) additionally
+    preconditions the magnetization channel with the Woodbury Stoner operator
+    (built from the frozen orbitals at ρ_in); ``None`` in the insulating limit,
+    in which case the mag channel passes through. Returns ``(new_rho_s, info)`` —
+    the per-spin density list ``ρ_in + δ`` and a diagnostics dict (``rnorm``,
+    ``inner_tol``, ``inner_iters``, ``inner_applies``, ``inner_resid``,
+    ``inner_converged``, ``preconditioned``, ``spin_preconditioned``)."""
     jac = _frozen_state(system, xc, nspin, smearing, width, mu, rho_s, veff_s,
                         coeffs_s, eigs_s, occ_s)
     if nspin == 1:
@@ -237,8 +267,20 @@ def newton_finish_step(system, xc, nspin, smearing, width, mu, rho_s,
                       floor=ew_floor, eta_max=ew_max) if ew else inner_tol
 
     p = None
+    stoner = None
     if precond and mixer is not None and getattr(mixer, "kerker", False):
-        p = kerker_precond(system.grid, float(mixer.q0), nspin)
+        if spin_precond and nspin == 2 and smearing != "none":
+            # Precondition the magnetization channel too: without it the
+            # Stoner-expansive spin mode is un-damped and the nspin=2 inner
+            # solve dominates. Reuses the mixer's Woodbury Stoner operator,
+            # built from the frozen orbitals/eigenvalues at ρ_in.
+            from gradwave.core.occupations import SCHEMES
+            from gradwave.scf.spin_precond import build_stoner_precond
+
+            stoner = build_stoner_precond(
+                system, coeffs_s, eigs_s, mu, SCHEMES[smearing], width,
+                rho_s[0] + rho_s[1], rho_s[0] - rho_s[1], xc)
+        p = kerker_precond(system.grid, float(mixer.q0), nspin, stoner=stoner)
 
     delta, info = newton_delta_nc(
         jac, xc, r, inner_tol=tol_eff, max_inner=max_inner, beta=beta,
@@ -246,6 +288,7 @@ def newton_finish_step(system, xc, nspin, smearing, width, mu, rho_s,
         precond=p)
     info["rnorm"] = rnorm
     info["preconditioned"] = p is not None
+    info["spin_preconditioned"] = stoner is not None
 
     if nspin == 1:
         new_rho_s = [rho_s[0] + delta]
