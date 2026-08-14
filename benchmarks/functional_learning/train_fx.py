@@ -53,8 +53,10 @@ _PDIR = _ROOT / "benchmarks" / "delta_gauge" / "pseudos"
 # Non-magnetic only for the prototype (no Fe/Ni; Cu excluded — defective pseudo).
 _EL = {
     "Al": ("fcc", 3, 30, 12, "gaussian", 0.01, 16.24),
-    "Si": ("diamond", 4, 24, 6, "none", 0.0, 19.85),
-    "Ge": ("diamond", 4, 24, 6, "none", 0.0, 22.57),
+    "Si": ("diamond", 4, 24, 6, "gaussian", 0.005, 19.85),
+    # Ge/Sn are near-zero-gap in PBE, so a whisker of smearing keeps occupations
+    # well-defined at compressed volumes (mirrors the delta_gauge protocol).
+    "Ge": ("diamond", 4, 28, 6, "gaussian", 0.005, 22.57),
     "Pd": ("fcc", 18, 48, 12, "gaussian", 0.01, 14.56),
     "Ag": ("fcc", 19, 48, 12, "gaussian", 0.01, 16.76),
     "Au": ("fcc", 11, 48, 12, "gaussian", 0.01, 16.76),
@@ -77,7 +79,8 @@ def _energy_and_grads(el, v0_per_atom, xc):
     system = setup_system(cell, pos, [0] * nat, [_upf(el)], ecut=ecut * RY,
                           kmesh=(k, k, k))
     res = scf(system, xc, smearing=smear, width=width * RY, etol=1e-9,
-              rhotol=1e-8, diago_tol=1e-10, verbose=False)
+              rhotol=1e-8, diago_tol=1e-10, max_iter=150,
+              mixing_scheme="pulay", verbose=False)
     assert res.converged, f"{el} @ {v0_per_atom:.2f} did not converge"
     g = energy_param_grads(res, xc)
     e_atom = float(res.energies.total) / nat
