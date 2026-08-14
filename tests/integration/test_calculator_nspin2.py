@@ -39,6 +39,7 @@ ECUT = 16 * RY
 POS = np.array([[0.0, 0.0, -BOND / 2], [0.0, 0.0, BOND / 2]]) + BOX / 2
 
 
+@pytest.mark.standard  # ~40s wiring/bit-identity check — off the every-commit fast gate
 def test_calculator_nspin2_matches_direct_scf():
     torch.set_num_threads(4)
     pse = pseudo("O_ONCV_PBE-1.2.upf")

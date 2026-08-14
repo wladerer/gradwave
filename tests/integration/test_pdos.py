@@ -39,7 +39,8 @@ def test_pdos_nc_collinear_sum_rule():
     L, d = 7.0, 1.21
     cell = L * np.eye(3)
     pos = np.array([[L / 2, L / 2, L / 2 - d / 2], [L / 2, L / 2, L / 2 + d / 2]])
-    system = setup_system(cell, pos, [0, 0], [upf], ecut=40 * RY, kmesh=(1, 1, 1))
+    # partition-of-unity sum rule is exact at any ecut; spilling stays in (0,1)
+    system = setup_system(cell, pos, [0, 0], [upf], ecut=20 * RY, kmesh=(1, 1, 1))
     res = scf(system, PBE(), smearing="gaussian", width=0.1, etol=1e-7,
               rhotol=1e-6, verbose=False, kerker=True)
     assert res.converged
