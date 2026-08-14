@@ -49,18 +49,22 @@ from gradwave.scf.loop import scf, setup_system  # noqa: E402
 _PDIR = _ROOT / "benchmarks" / "delta_gauge" / "pseudos"
 
 # element -> (structure, valence, reduced ecut [Ry], kmesh, smear, width [Ry],
-#            experimental V0 [Å³/atom], ZP-corrected 0 K — PROVISIONAL values).
-# Non-magnetic only for the prototype (no Fe/Ni; Cu excluded — defective pseudo).
+#            experimental V0 [Å³/atom]). V0 = a0³/{4 fcc, 8 diamond} from the
+# ZPAE-corrected (0 K static-lattice) experimental lattice constants a0 [Å] of
+# Peng, Yang, Perdew & Sun, PRX 6, 041005 (2016) (tabulated in Mejía-Rodríguez &
+# Trickey, PRB 98, 115161 (2018), Table III): Al 4.018, Si 5.421, Ge 5.644,
+# Pd 3.876, Ag 4.062, Au 4.062, Pt 3.913. Non-magnetic only for the prototype
+# (no Fe/Ni; Cu excluded — defective PseudoDojo pseudo, see delta_gauge/cu_anomaly).
 _EL = {
-    "Al": ("fcc", 3, 30, 12, "gaussian", 0.01, 16.24),
-    "Si": ("diamond", 4, 24, 6, "gaussian", 0.005, 19.85),
+    "Al": ("fcc", 3, 30, 12, "gaussian", 0.01, 16.217),
+    "Si": ("diamond", 4, 24, 6, "gaussian", 0.005, 19.915),
     # Ge/Sn are near-zero-gap in PBE, so a whisker of smearing keeps occupations
     # well-defined at compressed volumes (mirrors the delta_gauge protocol).
-    "Ge": ("diamond", 4, 28, 6, "gaussian", 0.005, 22.57),
-    "Pd": ("fcc", 18, 48, 12, "gaussian", 0.01, 14.56),
-    "Ag": ("fcc", 19, 48, 12, "gaussian", 0.01, 16.76),
-    "Au": ("fcc", 11, 48, 12, "gaussian", 0.01, 16.76),
-    "Pt": ("fcc", 10, 48, 12, "gaussian", 0.01, 14.98),
+    "Ge": ("diamond", 4, 28, 6, "gaussian", 0.005, 22.479),
+    "Pd": ("fcc", 18, 48, 12, "gaussian", 0.01, 14.559),
+    "Ag": ("fcc", 19, 48, 12, "gaussian", 0.01, 16.756),
+    "Au": ("fcc", 11, 48, 12, "gaussian", 0.01, 16.756),
+    "Pt": ("fcc", 10, 48, 12, "gaussian", 0.01, 14.979),
 }
 _UPF = {}
 
