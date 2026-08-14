@@ -104,7 +104,7 @@ def test_pdos_noncollinear_spin_texture():
 
     col = scf(sys(), LSDA_PW92(), smearing="gaussian", width=0.1, nspin=2,
               start_mag=[0.5], etol=1e-7, rhotol=1e-6, verbose=False, kerker=True)
-    assert col.converged and col.mag_total > 0.5
+    assert col.converged and abs(col.mag_total) > 0.5  # |m|: ±m FM degeneracy
     pc = pdos.projected_dos(col, group_by="l", width=0.2)
 
     ncz = scf_noncollinear(sys(), NoncollinearXC(LSDA_PW92()),

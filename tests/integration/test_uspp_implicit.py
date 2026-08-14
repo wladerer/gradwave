@@ -223,7 +223,7 @@ def test_spin_o2_grads_vs_fd():
                      width=0.01 * RY, etol=3e-7, criterion="energy",
                      rhotol=1e-9, verbose=False, max_iter=90)
         assert r["converged"]
-        assert abs(r["mag_total"] - 2.0) < 1e-2
+        assert abs(abs(r["mag_total"]) - 2.0) < 1e-2  # |m|: ±m FM degeneracy
         return r
 
     xc0 = LearnableSpinX()
