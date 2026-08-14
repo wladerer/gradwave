@@ -29,7 +29,10 @@ import torch.multiprocessing as mp
 
 from tests.helpers import RY
 
-pytestmark = pytest.mark.standard
+# nightly: distributed-vs-single-rank is a structural-equivalence guard on the
+# k-sharding path, which changes rarely; a refactor that touches it runs the full
+# suite anyway, so it needn't cost every CI shard.
+pytestmark = pytest.mark.slow
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
 SI_CELL = 5.43 / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])

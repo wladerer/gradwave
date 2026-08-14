@@ -19,7 +19,8 @@ from gradwave.pseudo.upf_paw import parse_upf_paw
 from gradwave.scf.uspp import scf_uspp, setup_uspp
 from tests.helpers import PSEUDOS, RY, si_fcc
 
-pytestmark = pytest.mark.standard  # ultrasoft SCF; not a fast-gate test
+pytestmark = pytest.mark.slow  # nightly: nspin=2→restricted nonmagnetic-limit
+# equivalence guard (a stable reduction check), not a per-commit accuracy test
 
 
 def test_uspp_bands_nspin2_nonmagnetic_limit_matches_restricted():

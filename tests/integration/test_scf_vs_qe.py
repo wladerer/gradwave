@@ -118,7 +118,7 @@ def test_scf_vs_qe_converged(name):
         assert abs(res.fermi - ref["fermi_eV"]) < 0.010  # 10 meV
 
 
-@pytest.mark.standard
+@pytest.mark.slow  # nightly: Chebyshev-vs-Davidson solver equivalence (stable)
 @pytest.mark.parametrize("name", ["si_lda_ci", "al_pbe_ci"])
 def test_chebyshev_matches_davidson(name):
     """CheFSI is a drop-in for Davidson on the NC batched path. The two solve the

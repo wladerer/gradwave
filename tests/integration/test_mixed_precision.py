@@ -63,7 +63,7 @@ def test_davidson_ms_two_stage_synthetic():
     assert torch.allclose(out.eigenvalues, ref, atol=1e-7)
 
 
-@pytest.mark.standard
+@pytest.mark.slow  # nightly: fp32-draft-vs-fp64 equivalence guard (stable)
 def test_uspp_paw_scf_mixed_precision_matches_fp64():
     """USPP/PAW twin of the NC gate: the fp32 draft in the generalized
     batched Davidson (fp64 subspace reduction, fp64 S-normalization) must

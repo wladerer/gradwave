@@ -115,6 +115,7 @@ def test_gap_error_moves_toward_high_cutoff():
     assert err_corr < err_raw                                   # correction helps
 
 
+@pytest.mark.slow  # nightly: nspin=2→nspin=1 nonmagnetic-limit reduction (stable)
 def test_nspin2_nonmagnetic_limit_matches_nspin1():
     """nspin=2 with zero moment reproduces the nspin=1 estimate exactly."""
     torch.set_num_threads(4)
@@ -135,6 +136,7 @@ def test_nspin2_nonmagnetic_limit_matches_nspin1():
     assert abs(e1.denergy - e2.denergy) < 1e-8
 
 
+@pytest.mark.slow  # nightly: nspin=2→nspin=1 Dyson nonmagnetic-limit reduction
 def test_nspin2_dyson_nonmagnetic_limit_matches_nspin1():
     """nspin=2 Dyson dressing at zero moment reproduces the nspin=1 dressing.
 

@@ -48,7 +48,7 @@ jobs:
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             case "$f" in
-              docs/*|benchmarks/*|ideas/*|.claude/*|*.md|LICENSE|.gitignore) ;;
+              docs/*|benchmarks/*|experiments/*|ideas/*|.claude/*|*.md|LICENSE|.gitignore) ;;
               *) run=true; break ;;
             esac
           done <<< "$files"
