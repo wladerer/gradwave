@@ -227,7 +227,9 @@ def test_uspp_paw_hubbard_stress_through_calculator(tmp_path):
     atoms = Atoms("Si2", scaled_positions=[[0, 0, 0], [0.25, 0.25, 0.25]],
                   cell=cell, pbc=True)
     atoms.calc = GradWave(
-        ecut=340.0,
+        # only asserts isfinite (physics oracled in test_paw_stress_hubbard.py),
+        # so run at a wiring-guard cutoff, not the 340 eV accuracy setting
+        ecut=200.0,
         pseudopotentials={"Si": str(PSEUDOS / "Si.pbe-n-kjpaw_psl.1.0.0.UPF")},
         kpts=(1, 1, 1), smearing="none",
         hubbard=[{"species": "Si", "l": 1, "u": 2.0}], verbose=False)

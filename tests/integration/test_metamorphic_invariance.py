@@ -51,9 +51,9 @@ def test_permutation_invariance_exact():
     xc = LDA_PW92()
 
     res_a = scf(setup_system(lattice, pos, [0, 1], [ga, ars],
-                             ecut=25 * RY, kmesh=(2, 1, 1)), xc, **SCF_KW)
+                             ecut=15 * RY, kmesh=(2, 1, 1)), xc, **SCF_KW)
     res_b = scf(setup_system(lattice, np.ascontiguousarray(pos[::-1]), [1, 0],
-                             [ga, ars], ecut=25 * RY, kmesh=(2, 1, 1)),
+                             [ga, ars], ecut=15 * RY, kmesh=(2, 1, 1)),
                 xc, **SCF_KW)
     assert res_a.converged and res_b.converged
     de = abs(float(res_a.energies.free_energy)

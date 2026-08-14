@@ -127,7 +127,8 @@ def test_stress_nspin2_matches_spin_restricted_pbe():
     assert np.abs(s2 - s1).max() < 1e-8, f"\nnspin1:\n{s1}\nnspin2:\n{s2}"
 
 
-@pytest.mark.standard
+@pytest.mark.slow  # nspin2==nspin1 stress identity already gated by the 1-SCF
+# test_stress_nspin2_matches_spin_restricted; this adds only the 26-SCF elastic driver
 def test_run_elastic_nspin2_nc_matches_nspin1():
     """Driver-level ungate: run_elastic now accepts collinear nspin=2 with
     norm-conserving pseudos (was gated to PAW/USPP-only). Decisive self-oracle:
