@@ -69,6 +69,12 @@ _CASES = {
     "Fe-bcc-fm": dict(elem="Fe", struct="bcc", ecut=45, kmesh=8, nspin=2,
                       smearing="gaussian", width=0.1, start_mag=[0.7, 0.7],
                       mixing_scheme="pulay", nbands=24),
+    # fcc Ni FM: the near-critical-Stoner magnet where history mixing plateaus /
+    # collapses the moment (scf.spin_precond was validated here, not on Fe) — the
+    # system where preconditioning the magnetization inner mode should bite.
+    "Ni-fcc-fm": dict(elem="Ni", struct="fcc", ecut=45, kmesh=8, nspin=2,
+                      smearing="gaussian", width=0.1, start_mag=[0.5],
+                      mixing_scheme="pulay", nbands=16),
 }
 
 
