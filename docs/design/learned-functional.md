@@ -41,6 +41,26 @@ factor for solids — a *generalizable* improvement to the method, not a one-off
 - **Held-out** elements + QMC solids are the generalization test.
 - Serial now; the per-element EOS spokes are SeedPool-parallelizable.
 
+## Results — parametric Stage A (measured, asus)
+The differentiable-training loop works and **rediscovers known physics**: fitting μ
+against experimental lattice constants (train Al, Si) drives μ 0.2195 → ~0.13
+(≈PBEsol) and collapses train V0-error 2.18% → 0.65%. But it **does not
+generalize** — held-out **Ge** V0-error *rises* 2.66% → 3.26% as μ falls:
+
+| μ | train MAE (Al, Si) | held-out Ge |
+|---|---|---|
+| 0.2195 (PBE) | 2.18% | +2.66% |
+| 0.1302 (≈PBEsol) | 0.65% | +2.98% |
+| 0.0907 | 0.99% | +3.19% |
+
+Confirmed **real, not k-point noise**: at converged kmesh 10 / ecut 40 the Ge
+trend is identical (+2.66 → +2.98 → +3.19% as μ drops). Lowering μ genuinely
+*expands* Ge (wrong direction) while it contracts Al/Si — a concrete demonstration
+of GGA non-transferability (why PBEsol is a compromise and SCAN needed τ). The
+pipeline caught it via the held-out set, which is exactly what the methodology is
+for. **Takeaway:** the machinery is validated; the parametric GGA ceiling is real;
+generalization requires the richer constrained form (`ConstrainedFx`) → meta-GGA τ.
+
 ## The learnable object (staged, always constrained)
 Keep `LearnableX`'s philosophy — UEG limit and Lieb-Oxford bound enforced BY
 CONSTRUCTION ("weird PBE, never garbage") — and lift it from parameters to forms:
