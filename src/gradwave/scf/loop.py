@@ -1230,6 +1230,101 @@ def _scf_residual_and_record(
     return rho_in_vec, rho_out_vec, res_norm, drho_scf, de
 
 
+def _fermi_occupations(eigs_s, system, smearing, width, nspin, device, *,
+                       target_mu, tot_magnetization, dist_ctx, kweights_global):
+    """Fermi level + occupations from the current eigenvalues, returning
+    ``(occ_s, mu, entropy_term, n_float)`` where ``occ_s`` is THIS rank's slice.
+
+    Three regimes: constant-µ (``target_mu`` set), the default shared-Fermi
+    search, and the k-point-sharded distributed path — where the Fermi level
+    depends on eigenvalues from EVERY k-point, so the eigenvalues are gathered
+    for the search and only the local shard's occupations are sliced back."""
+    if dist_ctx is not None:
+        from gradwave.distributed import gather_cat
+
+        eigs_global_s = [gather_cat(eigs_s[sp], dist_ctx) for sp in range(nspin)]
+        if target_mu is not None:
+            occ_global_s, mu, entropy_term, n_float = constant_mu_occupations(
+                eigs_global_s, kweights_global, smearing, width, target_mu,
+                nspin, device)
+        else:
+            occ_global_s, mu, entropy_term = shared_fermi_occupations(
+                eigs_global_s, kweights_global, smearing, width,
+                system.n_electrons, nspin, device,
+                tot_magnetization=tot_magnetization)
+            n_float = float(system.n_electrons)
+        occ_s = [occ_global_s[sp][dist_ctx.k_start : dist_ctx.k_end]
+                 for sp in range(nspin)]
+        return occ_s, mu, entropy_term, n_float
+    if target_mu is not None:
+        return constant_mu_occupations(
+            eigs_s, system.kweights, smearing, width, target_mu, nspin, device)
+    occ_s, mu, entropy_term = shared_fermi_occupations(
+        eigs_s, system.kweights, smearing, width, system.n_electrons, nspin,
+        device, tot_magnetization=tot_magnetization)
+    return occ_s, mu, entropy_term, float(system.n_electrons)
+
+
+def _output_density(coeffs_b_s, occ_s, system, bk, grid, vol, nspin, *,
+                    dist_ctx, collinear_mag):
+    """Output density ρ_out from the fresh orbitals: per-spin ``density_b``, a
+    distributed all-reduce that completes the k-sum across shards, then
+    symmetrization. A collinear magnetic (Shubnikov) system folds ρ↑/ρ↓ JOINTLY
+    (anti-unitary ops swap the spin channels, so they cannot be symmetrized
+    separately); otherwise each channel folds independently. Returns
+    ``(rho_out_s, rho_tot_out)``."""
+    from gradwave.core.batch import density_b
+
+    rho_raw_s = [
+        density_b(coeffs_b_s[sp], occ_s[sp], system.kweights, bk, grid.shape, vol)
+        for sp in range(nspin)
+    ]
+    if dist_ctx is not None:
+        from gradwave.distributed import all_reduce_
+
+        # each rank's density_b summed its own k-shard; the reduce completes the
+        # sum over the full mesh (core/batch.py's einsum, extended across ranks)
+        rho_raw_s = [all_reduce_(r, dist_ctx) for r in rho_raw_s]
+    if collinear_mag:
+        from gradwave.scf.common import symmetrize_rho_pair
+
+        rho_out_s = list(symmetrize_rho_pair(
+            system.rho_symmetrizer, rho_raw_s[0], rho_raw_s[1], grid))
+    else:
+        rho_out_s = [symmetrize_rho(system.rho_symmetrizer, r, grid)
+                     for r in rho_raw_s]
+    rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
+    return rho_out_s, rho_tot_out
+
+
+def _apply_spin_precond(mixer, system, coeffs_list_s, eigs_s, mu, smearing,
+                        width, rho_out_s, xc, dist_ctx, ng):
+    """Set the mixer's Stoner spin preconditioner on the magnetization channel
+    from the current orbitals (arXiv:2606.26693): a rank-r Woodbury Newton step
+    for the Stoner-expansive spin mode, applied to the m-channel residual before
+    mixing. Residual-space, so the fixed point is unchanged. Opt-in / off by
+    default — near-identity in the insulating limit but wash-to-unstable on FM
+    metals with sparse Fermi sampling (see test_nc_spin_precond_convergence),
+    never auto-enabled. Sets ``mixer.extra_precond`` (``None`` in the insulating
+    limit, where ``build_stoner_precond`` returns nothing)."""
+    from gradwave.scf.spin_precond import build_stoner_precond
+
+    sp = build_stoner_precond(
+        system, coeffs_list_s, eigs_s, mu, SCHEMES[smearing], width,
+        rho_out_s[0] + rho_out_s[1], rho_out_s[0] - rho_out_s[1], xc,
+        dist_ctx=dist_ctx)
+    if sp is None:
+        mixer.extra_precond = None
+        return
+
+    def _spin_pc(rvec, _sp=sp, _ng=ng):
+        out = rvec.clone()
+        out[_ng : 2 * _ng] = _sp.apply(rvec[_ng : 2 * _ng])
+        return out
+
+    mixer.extra_precond = _spin_pc
+
+
 @torch.no_grad()
 def scf(
     system: System,
@@ -1390,7 +1485,7 @@ def scf(
         scheme=mixing_scheme, alpha=mixing_alpha, kerker=bool(kerker), history=mixing_history
     )
 
-    from gradwave.core.batch import density_b, projectors_b
+    from gradwave.core.batch import projectors_b
 
     device = system.positions.device
     bk = system.batch
@@ -1492,12 +1587,6 @@ def scf(
     # take tau_list[0], the nspin=2 sites take the whole list.
     tau_list = _bootstrap_tau(xc, coeffs_b_s, system, nspin, nk, nb, bk, grid, vol, device)
 
-    def symmetrize(r_out):
-        return symmetrize_rho(system.rho_symmetrizer, r_out, grid)
-
-    # A collinear magnetic (Shubnikov) system folds ρ↑/ρ↓ JOINTLY: anti-unitary
-    # ops swap the two spin channels, so they cannot be symmetrized separately.
-    from gradwave.scf.common import symmetrize_rho_pair
     from gradwave.symmetry import CollinearMagneticSymmetrizer
 
     collinear_mag = isinstance(system.rho_symmetrizer, CollinearMagneticSymmetrizer)
@@ -1589,40 +1678,10 @@ def scf(
                 u_scale,
             )
 
-        if dist_ctx is not None:
-            from gradwave.distributed import gather_cat
-
-            # A metal's Fermi level depends on eigenvalues from EVERY k-point,
-            # not just this rank's shard: gather them into the global array
-            # before the Fermi search, then keep only this rank's slice of the
-            # resulting occupations for the local density/energy calls below.
-            eigs_global_s = [gather_cat(eigs_s[sp], dist_ctx) for sp in range(nspin)]
-            if target_mu is not None:
-                occ_global_s, mu, entropy_term, n_float = constant_mu_occupations(
-                    eigs_global_s, kweights_global, smearing, width, target_mu,
-                    nspin, device)
-            else:
-                occ_global_s, mu, entropy_term = shared_fermi_occupations(
-                    eigs_global_s, kweights_global, smearing, width,
-                    system.n_electrons, nspin, device,
-                    tot_magnetization=tot_magnetization)
-                n_float = float(system.n_electrons)
-            occ_s = [occ_global_s[sp][dist_ctx.k_start : dist_ctx.k_end] for sp in range(nspin)]
-        elif target_mu is not None:
-            occ_s, mu, entropy_term, n_float = constant_mu_occupations(
-                eigs_s, system.kweights, smearing, width, target_mu, nspin, device)
-        else:
-            occ_s, mu, entropy_term = shared_fermi_occupations(
-                eigs_s,
-                system.kweights,
-                smearing,
-                width,
-                system.n_electrons,
-                nspin,
-                device,
-                tot_magnetization=tot_magnetization,
-            )
-            n_float = float(system.n_electrons)
+        occ_s, mu, entropy_term, n_float = _fermi_occupations(
+            eigs_s, system, smearing, width, nspin, device,
+            target_mu=target_mu, tot_magnetization=tot_magnetization,
+            dist_ctx=dist_ctx, kweights_global=kweights_global)
 
         # hybrid Fock: rebuild the exchange operator from the fresh orbitals
         # (used next iteration) and its energy (used in this iteration's total).
@@ -1637,25 +1696,9 @@ def scf(
             n_hub_prev=n_hub_s, occ_mix=hub_occ_mix, u_scale=u_scale,
         )
 
-        rho_raw_s = [
-            density_b(coeffs_b_s[sp], occ_s[sp], system.kweights, bk, grid.shape, vol)
-            for sp in range(nspin)
-        ]
-        if dist_ctx is not None:
-            from gradwave.distributed import all_reduce_
-
-            # Each rank's density_b call above already sums over its own
-            # k-shard (weighted by kweights); summing across ranks completes
-            # the sum over the full mesh (core/batch.py's einsum reduction,
-            # extended across ranks — see gradwave.distributed).
-            rho_raw_s = [all_reduce_(r, dist_ctx) for r in rho_raw_s]
-        if collinear_mag:
-            rho_out_s = list(
-                symmetrize_rho_pair(system.rho_symmetrizer, rho_raw_s[0], rho_raw_s[1], grid)
-            )
-        else:
-            rho_out_s = [symmetrize(r) for r in rho_raw_s]
-        rho_tot_out = rho_out_s[0] if nspin == 1 else rho_out_s[0] + rho_out_s[1]
+        rho_out_s, rho_tot_out = _output_density(
+            coeffs_b_s, occ_s, system, bk, grid, vol, nspin,
+            dist_ctx=dist_ctx, collinear_mag=collinear_mag)
 
         # meta-GGA: rebuild τ_σ from the fresh orbitals — this iteration's energy
         # uses it, and it lags into next iteration's v_τ (like the Fock and DFT+U
@@ -1776,43 +1819,8 @@ def scf(
 
         e_free_prev = e_free
         if spin_precond and nspin == 2 and smearing != "none":
-            # Stoner preconditioner on the magnetization channel
-            # (arXiv:2606.26693): a rank-r Woodbury Newton step that models the
-            # Stoner-expansive spin mode, rebuilt each iteration from the current
-            # orbitals and applied to the m-channel residual before mixing. A
-            # residual preconditioner leaves the fixed point unchanged at
-            # well-converged settings (verified to machine precision). Opt-in,
-            # off by default: near-identity in the insulating limit, but on
-            # bcc Fe FM it is a wash-to-negative on a dense mesh and outright
-            # unstable on a coarse one (the rank-r Stoner susceptibility is a
-            # poor estimate on sparse Fermi-surface sampling) — see
-            # tests/integration/test_nc_spin_precond_convergence.py. Never
-            # auto-enabled for that reason.
-            from gradwave.scf.spin_precond import build_stoner_precond
-
-            ng = layout.ng
-            sp = build_stoner_precond(
-                system,
-                coeffs_list_s,
-                eigs_s,
-                mu,
-                SCHEMES[smearing],
-                width,
-                rho_out_s[0] + rho_out_s[1],
-                rho_out_s[0] - rho_out_s[1],
-                xc,
-                dist_ctx=dist_ctx,
-            )
-            if sp is None:
-                mixer.extra_precond = None
-            else:
-
-                def _spin_pc(rvec, _sp=sp, _ng=ng):
-                    out = rvec.clone()
-                    out[_ng : 2 * _ng] = _sp.apply(rvec[_ng : 2 * _ng])
-                    return out
-
-                mixer.extra_precond = _spin_pc
+            _apply_spin_precond(mixer, system, coeffs_list_s, eigs_s, mu,
+                                smearing, width, rho_out_s, xc, dist_ctx, layout.ng)
         # (total, mag) → per-channel r-space densities (MixLayout.unpack)
         rho_s, _ = layout.unpack(mixer.step(rho_in_vec, rho_out_vec))
 
