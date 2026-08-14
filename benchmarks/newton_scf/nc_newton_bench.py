@@ -133,6 +133,9 @@ def main():
     ap.add_argument("--beta", type=float, default=0.4)
     ap.add_argument("--max-iter", type=int, default=150)
     ap.add_argument("--threads", type=int, default=8)
+    ap.add_argument("--variants", default=None,
+                    help="comma list to subset the variant labels (e.g. "
+                         "mixer,newton-kerker,newton-stoner)")
     a = ap.parse_args()
     torch.set_num_threads(a.threads)
 
@@ -147,6 +150,9 @@ def main():
         ("newton-ew",      True,  dict(ew=True, precond=True)),
         ("newton-ew-ston", True,  dict(ew=True, precond=True, spin_precond=True)),
     ]
+    if a.variants:
+        want = {v.strip() for v in a.variants.split(",")}
+        variants = [v for v in variants if v[0] in want]
 
     hdr = ("%-11s %-14s %5s %8s %11s %8s  %s" %
            ("system", "variant", "iters", "wall_s", "dE_eV", "applies", "applies/step"))
