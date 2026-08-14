@@ -144,6 +144,8 @@ def main():
     ev_fold = _solve(bk_f, v_eff, p_fold, x0_fold).eigenvalues
     ev_fold0 = ev_fold[: bk.nk]
     max_dev = float((ev_sep0 - ev_fold0).abs().max())
+    # fp32 (c64) accumulates ~1e-4 eV eigensolve noise; fp64 folds bit-exact.
+    ok_tol = 1e-6 if cdtype == torch.complex128 else 5e-3
 
     # timings (min of reps)
     def _time_separate():
@@ -172,7 +174,7 @@ def main():
           f"folded_batch={bk_f.nk}  device={a.device}  dtype={a.dtype}  threads={a.threads}",
           flush=True)
     print(f"#   correctness: |Δeig| config0 sep-vs-folded = {max_dev:.2e} eV "
-          f"({'OK' if max_dev < 1e-6 else 'MISMATCH'})", flush=True)
+          f"({'OK' if max_dev < ok_tol else 'MISMATCH'})", flush=True)
     print(f"  separate ({a.n_configs} solves) : {t_sep:8.3f} s", flush=True)
     print(f"  folded   (1 solve, {bk_f.nk:>4} batch): {t_fold:8.3f} s", flush=True)
     print(f"  SPEEDUP (separate/folded)      : {t_sep / max(t_fold, 1e-9):6.2f}x", flush=True)
