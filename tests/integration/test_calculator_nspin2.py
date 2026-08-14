@@ -124,7 +124,9 @@ def test_calculator_uspp_nspin2_matches_direct_scf():
     # genuinely magnetic: a live spin channel (not collapsed to nspin=1); the
     # sign of the moment is the arbitrary spontaneous choice of the seed branch
     assert abs(m_calc) > 1.0, m_calc
-    # same scf_uspp underneath → bit-identical (tol is generous slack)
+    # same scf_uspp underneath → bit-identical energy. The MOMENT is compared by
+    # magnitude: a free-moment FM triplet has a ±m degeneracy (same energy), so
+    # the calculator and direct routes can spontaneously pick opposite signs.
     assert abs(e_calc - float(res.energies.free_energy)) < 1e-8
-    assert abs(m_calc - float(res.mag_total)) < 1e-8
+    assert abs(abs(m_calc) - abs(float(res.mag_total))) < 1e-8
     assert "magmom" in atoms.calc.results
