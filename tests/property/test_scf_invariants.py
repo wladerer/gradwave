@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 import torch
 
-from gradwave.core.xc.lda_pw92 import LDA_PW92
+from gradwave.core.xc.lda_pw92 import LDA_PW92, LSDA_PW92
 from gradwave.postscf.forces import forces as compute_forces
 from gradwave.postscf.stress import stress as compute_stress
 from gradwave.pseudo.upf import parse_upf
@@ -133,6 +133,26 @@ def test_force_sum_rule(seed, _si):
     lattice, pos = _rattled_si(seed)
     f = compute_forces(_run(lattice, pos, _si)).numpy()
     assert np.abs(f.sum(axis=0)).max() < 1e-6, f"ΣF ≠ 0: {f.sum(axis=0)}"
+
+
+def test_spin_flip_symmetry(_si):
+    """Collinear spin-flip: with no external field the energy functional is
+    symmetric under ↑↔↓, so a fixed-moment state +M and its mirror −M share the
+    same energy and have opposite total magnetization. A spin-channel-asymmetric
+    bug (a factor on one channel, a swapped up/dn potential) breaks it. Uses
+    fixed-moment (tot_magnetization, smearing='none') so no slow metallic loop."""
+    lattice, pos = _rattled_si(1)
+    fsm_kw = dict(nspin=2, smearing="none", etol=1e-9, rhotol=1e-8,
+                  diago_tol=1e-11, verbose=False)
+
+    def _fsm(m):
+        sys = setup_system(lattice, pos, [0, 0], [_si], ecut=_ECUT, kmesh=_KMESH)
+        return scf(sys, LSDA_PW92(), tot_magnetization=m, **fsm_kw)
+
+    up, dn = _fsm(2.0), _fsm(-2.0)
+    assert up.converged and dn.converged
+    assert abs(_e_per_atom(up) - _e_per_atom(dn)) < 5e-8
+    assert abs(float(up.mag_total) + float(dn.mag_total)) < 1e-6
 
 
 def test_translation_invariance_to_floor(_si):
