@@ -87,6 +87,29 @@ def test_permutation_invariance(seed, _si):
     assert np.abs(fb - fa[::-1]).max() < 1e-6
 
 
+@pytest.mark.parametrize("seed", [1, 7])
+def test_forces_match_fd_magnitude(seed, _si):
+    """Analytic forces match a central FD of the total energy — the MAGNITUDE
+    anchor the symmetry invariants above cannot provide. A force term scaled or
+    perturbed by a wrong constant still permutes, rotates, and sums to zero, so the
+    invariants pass while the number is wrong; only an energy-derivative oracle
+    pins it. Live FD on the tiny NC cell stays fast (~few SCFs). A mutation probe
+    on postscf/forces.py showed the invariants alone leave the local/nonlocal force
+    magnitudes untested — this closes that fast-gate blind spot."""
+    lattice, pos = _rattled_si(seed)
+    f = compute_forces(_run(lattice, pos, _si), remove_net=False).numpy()
+    h = 2e-4
+    for ia, ic in [(1, 0), (0, 2)]:
+        e = []
+        for s in (+1, -1):
+            p = pos.copy()
+            p[ia, ic] += s * h
+            e.append(float(_run(lattice, p, _si).energies.total))
+        fd = -(e[0] - e[1]) / (2 * h)
+        assert abs(fd - f[ia, ic]) < 2e-3, (
+            f"seed {seed} ({ia},{ic}): analytic={f[ia, ic]:.6f} fd={fd:.6f}")
+
+
 @pytest.mark.parametrize("seed", _SEEDS)
 def test_spatial_inversion(seed, _si):
     """Global inversion τ → −τ: the total-energy functional has even parity, so
