@@ -24,6 +24,7 @@ Usage (needs the reference libs, not a gradwave runtime dep):
 from __future__ import annotations
 
 import math
+import textwrap
 from pathlib import Path
 
 import tad_dftd4 as d4
@@ -37,10 +38,19 @@ from tad_multicharge.param import eeq2019
 OUT = Path(__file__).resolve().parents[1] / "src/gradwave/postscf/_d4_params.py"
 
 # Element subset to vendor — identical to the D3 subset (gen_d3_params.py):
-# main-group organics + P/S/Cl/F and the metals Mg, Cu, Zn.
-SUBSET = [1, 6, 7, 8, 9, 12, 15, 16, 17, 29, 30]
-SYM = {1: "H", 6: "C", 7: "N", 8: "O", 9: "F", 12: "Mg", 15: "P",
-       16: "S", 17: "Cl", 29: "Cu", 30: "Zn"}
+# Z=1..36 (H through Kr), all of periods 1-4 main-group plus the 3d transition
+# metals. tad-dftd4's reference tables carry active reference systems (nref>0)
+# for every element in this range (verified: no gaps, max nref=7), so the
+# boundary is a size/scope choice, not a data limit. The upstream data goes to
+# Z=103; extend SUBSET if heavier elements are needed.
+SUBSET = list(range(1, 37))
+SYM = {
+    1: "H", 2: "He", 3: "Li", 4: "Be", 5: "B", 6: "C", 7: "N", 8: "O",
+    9: "F", 10: "Ne", 11: "Na", 12: "Mg", 13: "Al", 14: "Si", 15: "P",
+    16: "S", 17: "Cl", 18: "Ar", 19: "K", 20: "Ca", 21: "Sc", 22: "Ti",
+    23: "V", 24: "Cr", 25: "Mn", 26: "Fe", 27: "Co", 28: "Ni", 29: "Cu",
+    30: "Zn", 31: "Ga", 32: "Ge", 33: "As", 34: "Se", 35: "Br", 36: "Kr",
+}
 
 # D4(BJ-EEQ-ATM) two-body damping presets (s6, s8, a1, a2). s6 is 1.0 for all;
 # s9 (three-body/ATM) is out of scope for this two-body correction. From
@@ -121,8 +131,10 @@ def main() -> None:
         w("polarizabilities are built from fixed reference charges) and are precomputed\n")
         w("with tad-dftd4's Casimir-Polder integration. Runtime charge dependence enters\n")
         w("only through the EEQ partial charges and the zeta weighting of the references.\n\n")
-        w("Covered subset: " + ", ".join(SYM[z] for z in SUBSET) + ". Extend SUBSET in\n")
-        w("the generator to add more elements, then re-run the D4 dispersion tests.\n")
+        w("Covered subset (extend SUBSET in the generator to add more, then re-run\n")
+        w("the D4 dispersion tests):\n")
+        for line in textwrap.wrap(", ".join(SYM[z] for z in SUBSET) + ".", width=88):
+            w(line + "\n")
         w('"""\n\n')
         w("from __future__ import annotations\n\n")
 
