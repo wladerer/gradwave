@@ -56,8 +56,9 @@ def _build_reference(nrep: int, ecut_ry: float, kmesh: int, device: str):
     at = Atoms("Si2", scaled_positions=[[0, 0, 0], [0.25, 0.25, 0.25]],
                cell=prim, pbc=True).repeat((nrep, nrep, nrep))
     upf = parse_upf(str(_PSEUDO_DIR / "Si_ONCV_PBE-1.2.upf"))
+    species_of_atom = [0] * len(at)  # integer indices into the upf list
     system = setup_system(np.asarray(at.cell.array), at.get_positions(),
-                          at.get_chemical_symbols(), [upf], ecut=ecut_ry * RY,
+                          species_of_atom, [upf], ecut=ecut_ry * RY,
                           kmesh=(kmesh, kmesh, kmesh), use_symmetry=False)
     if device != "cpu":
         system = system.to(device)
