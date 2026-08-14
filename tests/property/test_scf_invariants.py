@@ -21,7 +21,8 @@ import numpy as np
 import pytest
 import torch
 
-from gradwave.core.xc.lda_pw92 import LDA_PW92, LSDA_PW92
+from gradwave.core.xc.lda_pw92 import LDA_PW92
+from gradwave.core.xc.spin import LSDA_PW92
 from gradwave.postscf.forces import forces as compute_forces
 from gradwave.postscf.stress import stress as compute_stress
 from gradwave.pseudo.upf import parse_upf
