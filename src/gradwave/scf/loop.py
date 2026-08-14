@@ -1230,6 +1230,41 @@ def _scf_residual_and_record(
     return rho_in_vec, rho_out_vec, res_norm, drho_scf, de
 
 
+def _fermi_occupations(eigs_s, system, smearing, width, nspin, device, *,
+                       target_mu, tot_magnetization, dist_ctx, kweights_global):
+    """Fermi level + occupations from the current eigenvalues, returning
+    ``(occ_s, mu, entropy_term, n_float)`` where ``occ_s`` is THIS rank's slice.
+
+    Three regimes: constant-µ (``target_mu`` set), the default shared-Fermi
+    search, and the k-point-sharded distributed path — where the Fermi level
+    depends on eigenvalues from EVERY k-point, so the eigenvalues are gathered
+    for the search and only the local shard's occupations are sliced back."""
+    if dist_ctx is not None:
+        from gradwave.distributed import gather_cat
+
+        eigs_global_s = [gather_cat(eigs_s[sp], dist_ctx) for sp in range(nspin)]
+        if target_mu is not None:
+            occ_global_s, mu, entropy_term, n_float = constant_mu_occupations(
+                eigs_global_s, kweights_global, smearing, width, target_mu,
+                nspin, device)
+        else:
+            occ_global_s, mu, entropy_term = shared_fermi_occupations(
+                eigs_global_s, kweights_global, smearing, width,
+                system.n_electrons, nspin, device,
+                tot_magnetization=tot_magnetization)
+            n_float = float(system.n_electrons)
+        occ_s = [occ_global_s[sp][dist_ctx.k_start : dist_ctx.k_end]
+                 for sp in range(nspin)]
+        return occ_s, mu, entropy_term, n_float
+    if target_mu is not None:
+        return constant_mu_occupations(
+            eigs_s, system.kweights, smearing, width, target_mu, nspin, device)
+    occ_s, mu, entropy_term = shared_fermi_occupations(
+        eigs_s, system.kweights, smearing, width, system.n_electrons, nspin,
+        device, tot_magnetization=tot_magnetization)
+    return occ_s, mu, entropy_term, float(system.n_electrons)
+
+
 @torch.no_grad()
 def scf(
     system: System,
@@ -1589,40 +1624,10 @@ def scf(
                 u_scale,
             )
 
-        if dist_ctx is not None:
-            from gradwave.distributed import gather_cat
-
-            # A metal's Fermi level depends on eigenvalues from EVERY k-point,
-            # not just this rank's shard: gather them into the global array
-            # before the Fermi search, then keep only this rank's slice of the
-            # resulting occupations for the local density/energy calls below.
-            eigs_global_s = [gather_cat(eigs_s[sp], dist_ctx) for sp in range(nspin)]
-            if target_mu is not None:
-                occ_global_s, mu, entropy_term, n_float = constant_mu_occupations(
-                    eigs_global_s, kweights_global, smearing, width, target_mu,
-                    nspin, device)
-            else:
-                occ_global_s, mu, entropy_term = shared_fermi_occupations(
-                    eigs_global_s, kweights_global, smearing, width,
-                    system.n_electrons, nspin, device,
-                    tot_magnetization=tot_magnetization)
-                n_float = float(system.n_electrons)
-            occ_s = [occ_global_s[sp][dist_ctx.k_start : dist_ctx.k_end] for sp in range(nspin)]
-        elif target_mu is not None:
-            occ_s, mu, entropy_term, n_float = constant_mu_occupations(
-                eigs_s, system.kweights, smearing, width, target_mu, nspin, device)
-        else:
-            occ_s, mu, entropy_term = shared_fermi_occupations(
-                eigs_s,
-                system.kweights,
-                smearing,
-                width,
-                system.n_electrons,
-                nspin,
-                device,
-                tot_magnetization=tot_magnetization,
-            )
-            n_float = float(system.n_electrons)
+        occ_s, mu, entropy_term, n_float = _fermi_occupations(
+            eigs_s, system, smearing, width, nspin, device,
+            target_mu=target_mu, tot_magnetization=tot_magnetization,
+            dist_ctx=dist_ctx, kweights_global=kweights_global)
 
         # hybrid Fock: rebuild the exchange operator from the fresh orbitals
         # (used next iteration) and its energy (used in this iteration's total).
