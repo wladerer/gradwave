@@ -76,7 +76,7 @@ def test_forces_nspin2_finite_difference_magnetic():
                    start_mag=[0.4, 0.4], etol=etol, rhotol=rhotol, verbose=False)
 
     res = run(geom(0.0), 1e-9, 1e-8)
-    assert res.converged and res.mag_total > 5.0  # ~3.6 μB/atom, genuinely FM
+    assert res.converged and abs(res.mag_total) > 5.0  # ~3.6 μB/atom, genuinely FM (|m|: ±m degeneracy)
     f = forces(res, remove_net=False).cpu().numpy()
 
     h = 1e-3  # cartesian displacement (Å)

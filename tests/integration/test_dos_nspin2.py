@@ -33,7 +33,7 @@ def test_kpm_dos_nspin2_sum_rules_and_magnetization():
                           kmesh=(2, 2, 2), nbands=14, time_reversal=False)
     res = scf(system, LSDA_PW92(), smearing="gaussian", width=0.1, nspin=2,
               start_mag=[0.5], etol=1e-7, rhotol=1e-6, verbose=False, kerker=True)
-    assert res.converged and res.mag_total > 0.5
+    assert res.converged and abs(res.mag_total) > 0.5  # |m|: ±m FM degeneracy
 
     # fine energy grid: the sum rule below is a Riemann sum of a reconstruction
     # with integrable 1/√(1-Ẽ²) edge singularities, so its accuracy is grid- not
