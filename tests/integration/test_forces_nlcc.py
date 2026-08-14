@@ -10,6 +10,9 @@ the FD floor. A valence-only (no-NLCC) system is unaffected — passing xc is a
 no-op there.
 """
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -30,11 +33,27 @@ CELL = A * np.array([[1.0, 0.0, 0.0], [0.12, 1.0, 0.0], [0.05, 0.08, 1.05]])
 FRAC = np.array([[0.02, 0.01, 0.0], [0.27, 0.31, 0.24]])
 POS = FRAC @ CELL
 
+# The FD reference is the ±h-displaced total energies (the *reference* the live
+# analytic force is compared against — NOT the asserted quantity). Caching them
+# turns this test from 7 SCFs (1 base + 3 comps × 2 signs) into 1 live SCF.
+# Regenerate after any change to the energy model, the NLCC term, the C cell, or
+# these displacement components with:  uv run python scripts/gen_nlcc_forces_fd.py
+_H = 1e-4
+_DISP = [(1, 0), (1, 1), (0, 2)]  # (atom, Cartesian comp): all forces nonzero
+FD_FIX = Path(__file__).parents[1] / "fixtures" / "qe" / "nlcc_forces_fd" / "fd_reference.json"
+
 
 def _run(upf, pos, etol=1e-11, rhotol=1e-10):
     system = setup_system(CELL, pos, [0, 0], [upf], ecut=35 * RY, kmesh=(2, 2, 2))
     return scf(system, PBE(), smearing="gaussian", width=0.05,
                etol=etol, rhotol=rhotol, verbose=False)
+
+
+def _total_energy(upf, pos):
+    """Converged total energy at ``pos`` — the quantity the FD reference caches."""
+    res = _run(upf, pos)
+    assert res.converged
+    return float(res.energies.total)
 
 
 def test_nlcc_force_matches_finite_difference():
@@ -46,19 +65,16 @@ def test_nlcc_force_matches_finite_difference():
     upf = parse_upf(PSEUDOS / "C_ONCV_PBE_sr.upf")
     assert upf.core_rho is not None, "fixture must have an NLCC core charge"
 
-    res = _run(upf, POS)
+    res = _run(upf, POS)  # the single LIVE SCF — the analytic force under test
     assert res.converged
     assert res.system.rho_core is not None  # NLCC active in the SCF
     f = forces(res, remove_net=False, xc=PBE()).cpu().numpy()
 
-    h = 1e-4
-    for ia, ic in [(1, 0), (1, 1), (0, 2)]:
-        vals = []
-        for sign in (+1, -1):
-            pos = POS.copy()
-            pos[ia, ic] += sign * h
-            vals.append(float(_run(upf, pos).energies.total))
-        fd = -(vals[0] - vals[1]) / (2 * h)
+    fd_ref = json.loads(FD_FIX.read_text())
+    h = fd_ref["h"]
+    for ia, ic in _DISP:
+        c = fd_ref[f"{ia},{ic}"]  # cached ±h total energies; FD taken live
+        fd = -(c["fp"] - c["fm"]) / (2 * h)
         assert abs(fd - float(f[ia, ic])) < 1e-6, (
             f"comp ({ia},{ic}): analytic={f[ia, ic]:.9f} fd={fd:.9f}"
         )

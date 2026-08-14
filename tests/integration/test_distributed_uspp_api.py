@@ -28,7 +28,10 @@ import torch.multiprocessing as mp
 
 from tests.helpers import RY
 
-pytestmark = pytest.mark.standard
+# The API/YAML layer re-drives the SAME k-point sharding that the direct
+# test_distributed_uspp_scf.py already validates on the standard path; this only
+# adds the run_scf/YAML wrapper, so it rides the heavier slow tier (2 × ~29s).
+pytestmark = pytest.mark.slow
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
 PSEUDO = FIX / "pseudos" / "Si.pbe-n-kjpaw_psl.1.0.0.UPF"
