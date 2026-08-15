@@ -461,18 +461,23 @@ Per-state eigenvalue derivatives in the metallic case need the metallic χ₀ pa
 is exact at first order by the envelope theorem; eigenvalue alchemy is not — the
 frozen-vs-relaxed gaps above are the direct evidence).
 
-**Rung 3 — charged-cell fixed-N (scoped, NOT built — needs infrastructure).** Hold N fixed and
-transmute one site aliovalently → the cell carries a net charge. gradwave currently *forces*
-neutrality (`scf/loop.py`: `n_electrons = charges.sum()`, no `tot_charge` knob), so this rung
-needs (a) a net-charge SCF capability (a compensating uniform jellium background — the Ewald
-already has the neutralizing-background term, but nelec must be allowed to differ from ΣZ) and
-(b) a finite-size image-charge correction (Makov-Payne monopole ∝ L⁻¹, or the better
-Freysoldt-Neugebauer-Van de Walle / Lany-Zunger schemes for localized charge; MP overcorrects
-except for point-charge-like defects — Kumagai & Oba, PRB 86, 045112, 2012). This is a
-general charged-cell infrastructure project (the defect-formation-energy machinery), not an
-alchemical-gradient extension, so it is deliberately left for a dedicated build rather than
-forced here. The derivative machinery (`_substitution_energy_gradient`) would then carry the
-background/correction terms.
+**Rung 3 — charged-cell fixed-N (landed 2026-08-15).** Hold N fixed and transmute one site
+aliovalently → the cell carries a net charge q(λ)=ΣZ(λ)−N. Built in three pieces:
+(a) **net-charge SCF** — `setup_system(..., tot_charge=q)` sets `n_electrons=ΣZ−q` with the
+implicit compensating −q jellium background (the G=0 electrostatics already carry it; the
+occupation filling and density normalization target the reduced count). Empirically confirmed
+consistent: a charged Na⁺ cell's energy follows the Makov-Payne law E(L)=E∞−q²α_M e²/(2L) with
+the monopole coefficient matching the true simple-cubic α_M=2.837 to ~4 % (SCF noise) — gradwave
+behaves like a standard PW code (QE/VASP: the periodic charged cell is the jellium cell, the
+finite-size term is post-hoc), NOT a spurious η-monopole. (b) **Finite-size correction** —
+`postscf/charged.py`: `makov_payne_correction(q, cell, ε)` computes the monopole term from the
+cell's own Ewald-sum Madelung energy (exact α_M for any lattice, cubic reproduced to 6 digits),
+and applying it collapses the box-size spread of the charged cell. Refinements (FNV / Lany-Zunger
+for localized charge, the L⁻³ quadrupole term) are follow-ups — Kumagai & Oba, PRB 86, 045112.
+(c) **Charged-cell alchemical gradient** — `setup_alchemical_substitution(..., n_electrons=N)`
+holds N fixed, so an aliovalent transmutation charges the cell; the fixed-N energy gradient is
+the bare Hellmann-Feynman ionic derivative (`grand_canonical=True`, no Janak since dN/dλ=0),
+validated on Si→As at fixed N=8 (q=+0.5 at λ=0.5) vs FD to <5 meV.
 
 **Rung 4 — grand-canonical fixed-μ (landed 2026-08-15).** `alchemical_energy_gradient(...,
 grand_canonical=True)` returns the grand-potential derivative dΩ/dλ = dF/dλ − μ·dN/dλ. At

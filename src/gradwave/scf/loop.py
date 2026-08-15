@@ -202,6 +202,8 @@ def setup_system(
     time_reversal: bool = True,  # False for noncollinear/SOC (TR flips m)
     magmoms: np.ndarray | None = None,  # (na, 3) moment directions → magnetic (Shubnikov) symmetry
     collinear_magnetic: bool = False,  # collinear nspin=2 FM/AFM Shubnikov fold
+    tot_charge: float = 0.0,  # net cell charge q [e]: n_electrons = ΣZ − q, with
+    # a compensating uniform jellium background (see io/... charged-cell handling)
 ) -> System:
     """use_symmetry: reduce k to the IBZ and symmetrize ρ each SCF step.
     Requires an unshifted (Γ-centered) mesh — shifted meshes fall back to
@@ -254,9 +256,15 @@ def setup_system(
     spheres = [build_gsphere(grid, ecut, k) for k in kfrac]
 
     charges = torch.tensor([upfs[s].z_valence for s in species_of_atom], dtype=RDTYPE)
-    n_electrons = float(charges.sum())
+    # net cell charge q = tot_charge: remove q electrons (q>0 → cation/electron-
+    # deficient). The G=0 electrostatics carry an implicit uniform −q jellium
+    # background; the finite net-charge monopole self-energy is a post-SCF
+    # correction (charged-cell / Makov-Payne), not part of the SCF total.
+    n_electrons = float(charges.sum()) - float(tot_charge)
+    if n_electrons <= 0:
+        raise ValueError(f"tot_charge={tot_charge} leaves n_electrons={n_electrons} ≤ 0")
     if nbands is None:
-        nbands = default_nbands(n_electrons)
+        nbands = default_nbands(max(float(charges.sum()), n_electrons))
 
     # local potential tables on the dense box, per species (the NC setup
     # keeps the single-|G|-shell guard — see setup_common.build_vloc_tables)
