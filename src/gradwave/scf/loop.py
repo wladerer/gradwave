@@ -1233,7 +1233,12 @@ def _scf_residual_and_record(
 def _fermi_occupations(eigs_s, system, smearing, width, nspin, device, *,
                        target_mu, tot_magnetization, dist_ctx, kweights_global):
     """Fermi level + occupations from the current eigenvalues, returning
-    ``(occ_s, mu, entropy_term, n_float)`` where ``occ_s`` is THIS rank's slice.
+    ``(occ_s, mu, entropy_term, n_float, eigs_global_s, occ_global_s)`` where
+    ``occ_s`` is THIS rank's slice and ``eigs_global_s`` / ``occ_global_s`` are
+    the full-mesh gathered eigenvalues/occupations (equal to the local arrays
+    off the distributed path). The caller carries the globals forward so the
+    final reassembled SCFResult reports full-mesh eigenvalues/occupations rather
+    than one rank's shard.
 
     Three regimes: constant-µ (``target_mu`` set), the default shared-Fermi
     search, and the k-point-sharded distributed path — where the Fermi level
@@ -1255,14 +1260,15 @@ def _fermi_occupations(eigs_s, system, smearing, width, nspin, device, *,
             n_float = float(system.n_electrons)
         occ_s = [occ_global_s[sp][dist_ctx.k_start : dist_ctx.k_end]
                  for sp in range(nspin)]
-        return occ_s, mu, entropy_term, n_float
+        return occ_s, mu, entropy_term, n_float, eigs_global_s, occ_global_s
     if target_mu is not None:
-        return constant_mu_occupations(
+        occ_s, mu, entropy_term, n_float = constant_mu_occupations(
             eigs_s, system.kweights, smearing, width, target_mu, nspin, device)
+        return occ_s, mu, entropy_term, n_float, eigs_s, occ_s
     occ_s, mu, entropy_term = shared_fermi_occupations(
         eigs_s, system.kweights, smearing, width, system.n_electrons, nspin,
         device, tot_magnetization=tot_magnetization)
-    return occ_s, mu, entropy_term, float(system.n_electrons)
+    return occ_s, mu, entropy_term, float(system.n_electrons), eigs_s, occ_s
 
 
 def _output_density(coeffs_b_s, occ_s, system, bk, grid, vol, nspin, *,
@@ -1678,7 +1684,7 @@ def scf(
                 u_scale,
             )
 
-        occ_s, mu, entropy_term, n_float = _fermi_occupations(
+        occ_s, mu, entropy_term, n_float, eigs_global_s, occ_global_s = _fermi_occupations(
             eigs_s, system, smearing, width, nspin, device,
             target_mu=target_mu, tot_magnetization=tot_magnetization,
             dist_ctx=dist_ctx, kweights_global=kweights_global)
