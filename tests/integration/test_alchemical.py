@@ -26,6 +26,7 @@ from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.alchemical import (
     alchemical_energy_gradient,
     alchemical_gap_gradient,
+    alchemical_gap_gradient_per_site,
     setup_alchemical_substitution,
     setup_alchemical_system,
 )
@@ -135,3 +136,46 @@ def test_gap_gradient_dfpt_matches_fd():
     # the relaxed gradient is not the frozen one: the SC density response is the
     # whole point of the nonlocal DFPT build.
     assert abs(g.dgap - g.dgap_frozen) > 0.1
+
+
+def test_persite_charge_conserving_cosubstitution():
+    """Per-site vector-λ gap gradient on a charge-conserving CO-substitution,
+    MgO -> NaCl (rocksalt): Mg(10)+O(6) = 16 = Na(9)+Cl(7), so each component is
+    aliovalent but the total valence is conserved (N=16 fixed, insulating). The
+    coupled d(E_gap)/dλ matches FD; the per-site Jacobian sums to it exactly; and
+    the frozen estimate is materially wrong (here even the sign) -- the density
+    response carries the whole gradient."""
+    torch.set_num_threads(4)
+    mg = parse_upf(PSEUDOS / "Mg_ONCV_PBE-1.2.upf")
+    o = parse_upf(PSEUDOS / "O_ONCV_PBE-1.2.upf")
+    na = parse_upf(PSEUDOS / "Na_ONCV_PBE_sr.upf")
+    cl = parse_upf(PSEUDOS / "Cl_ONCV_PBE_sr.upf")
+    a = 4.9
+    cell = a * np.array([[0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0.5, 0]])
+    pos = np.array([[0, 0, 0], [0.5, 0.5, 0.5]]) @ cell
+    ecut, km = 45 * RY, (2, 2, 2)
+    kw = dict(smearing="none", etol=1e-10, rhotol=1e-9, verbose=False)
+
+    def run(lam):
+        return scf(setup_alchemical_substitution(
+            cell, pos, [mg, o], [0, 1], {0: na, 1: cl}, lam, ecut=ecut, kmesh=km,
+            use_symmetry=False), PBE(), **kw)
+
+    lam = 0.5
+    res = run(lam)
+    assert res.converged
+    assert abs(res.system.n_electrons - 16.0) < 1e-9  # valence conserved
+
+    g = alchemical_gap_gradient(res, PBE())
+    per_site = alchemical_gap_gradient_per_site(res, PBE())
+    h = 0.02
+    fd = (_gap(run(lam + h)) - _gap(run(lam - h))) / (2 * h)
+
+    # coupled analytic == coupled FD
+    assert abs(g.dgap - fd) < 5e-3, f"coupled dgap {g.dgap} vs FD {fd}"
+    # per-site Jacobian sums to the coupled gradient exactly (linearity)
+    site_sum = sum(v.dgap for v in per_site.values())
+    assert abs(site_sum - g.dgap) < 1e-4, f"Σ per-site {site_sum} vs coupled {g.dgap}"
+    assert set(per_site) == {0, 1}
+    # frozen is materially wrong: the density response is the whole gradient
+    assert abs(g.dgap - g.dgap_frozen) > 1.0

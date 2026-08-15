@@ -524,7 +524,9 @@ class AlchemicalGapGradient:
     cbm_index: tuple[int, int]
 
 
-def _substitution_bare_perturbation(res, xc) -> tuple[torch.Tensor, torch.Tensor]:
+def _substitution_bare_perturbation(
+    res, xc, mask=None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Bare alchemical perturbation ∂V_ion/∂λ from a substitution System.
 
     Returns ``(dvloc_r, ddij)``: the local field ∂v_loc/∂λ [eV] on the real-space
@@ -534,6 +536,14 @@ def _substitution_bare_perturbation(res, xc) -> tuple[torch.Tensor, torch.Tensor
     hence ``system.proj_data`` already use. Everything is an exact λ-derivative
     (the blend is linear), evaluated from the endpoint differences stashed on
     ``system.alchemical`` by :func:`setup_alchemical_substitution`.
+
+    ``mask`` is the per-atom transmutation-rate vector (na,): the derivative
+    direction in composition space. Default (None) is the stashed ``sub_mask``
+    (1.0 on every substituted site) — the "all substituted sites move together"
+    scalar λ. A one-hot mask selects a SINGLE site, giving that site's ∂V_ion/∂λ_k
+    for the per-site Jacobian (:func:`alchemical_gap_gradient_per_site`). Because
+    the perturbation is linear and additive over sites, the full-mask result is
+    the sum of the one-hot results.
     """
     from gradwave.core.energies.local_pp import local_potential_g
     from gradwave.core.fftbox import g_to_r_box
@@ -548,12 +558,13 @@ def _substitution_bare_perturbation(res, xc) -> tuple[torch.Tensor, torch.Tensor
             "(no substitution spec on system.alchemical)")
     grid = system.grid
     na = len(system.positions)
+    m = spec["sub_mask"] if mask is None else torch.as_tensor(mask, dtype=RDTYPE)
 
-    # local: per-atom ∂v_loc/∂λ = tab_target − tab_base (0 on fixed sites, whose
-    # base and target rows are the same pseudo table).
+    # local: per-atom ∂v_loc/∂λ = tab_target − tab_base, scaled by the per-atom
+    # rate m (0 on fixed sites, whose base and target rows are the same pseudo).
     ta = spec["vloc_tables_a"][torch.as_tensor(spec["species_a"])]
     tb = spec["vloc_tables_b"][torch.as_tensor(spec["species_b"])]
-    dtable = tb - ta  # (na, n1,n2,n3)
+    dtable = (tb - ta) * m.reshape(na, *([1] * (tb.dim() - 1)))  # (na, n1,n2,n3)
     dvloc_g = local_potential_g(system.positions, system.species_index,
                                 system.vloc_tables, grid.g_cart, grid.volume,
                                 vloc_atom=dtable)
@@ -576,7 +587,7 @@ def _substitution_bare_perturbation(res, xc) -> tuple[torch.Tensor, torch.Tensor
             if i in tgt_cores:
                 tc = tgt_cores[i]
                 tc = tc if tc is not None else torch.zeros_like(ref)
-                shells.append(tc - base_c)  # ∂n_core/∂λ on a substituted site
+                shells.append((tc - base_c) * m[i])  # ∂n_core/∂λ on a sub site
             else:
                 shells.append(torch.zeros_like(ref))
         dcore_r = assemble_core_density(shells, list(range(na)),
@@ -584,12 +595,11 @@ def _substitution_bare_perturbation(res, xc) -> tuple[torch.Tensor, torch.Tensor
         rho_xc = res.rho if system.rho_core is None else res.rho + system.rho_core
         dvloc_r = dvloc_r + fxc_hvp(xc, rho_xc, grid, dcore_r)
 
-    # nonlocal: ∂D/∂λ = block_diag(−mask·D_a, +mask·D_b), row-scaling each atom's
-    # block by its transmutation weight derivative (mask=1 on substituted sites).
-    # Block-diagonal over atoms, so the row scale is the whole-block scale.
-    mask = spec["sub_mask"]
-    da = _scale_dij_blocks(spec["dij_a"], -mask, spec["atom_index_a"])
-    db = _scale_dij_blocks(spec["dij_b"], mask, spec["atom_index_b"])
+    # nonlocal: ∂D/∂λ = block_diag(−m·D_a, +m·D_b), row-scaling each atom's block
+    # by its transmutation rate. Block-diagonal over atoms, so the row scale is
+    # the whole-block scale.
+    da = _scale_dij_blocks(spec["dij_a"], -m, spec["atom_index_a"])
+    db = _scale_dij_blocks(spec["dij_b"], m, spec["atom_index_b"])
     ddij = torch.block_diag(da, db)
     return dvloc_r, ddij
 
@@ -684,12 +694,14 @@ def _solve_forward_response(res, xc, drho0, beta=0.4, tol=1e-9, max_iter=100,
         f"alchemical forward response not converged ({step:.2e} after {max_iter})")
 
 
-def alchemical_density_response(res, xc, tol=1e-8, max_iter=200):
+def alchemical_density_response(res, xc, tol=1e-8, max_iter=200, mask=None):
     """Relaxed first-order density response dρ/dλ to the alchemical perturbation.
 
     Returns ``(drho, dvloc_r, ddij)``: the self-consistent dρ/dλ on the grid and
     the bare-perturbation pieces (reused by the eigenvalue expectations). nspin=1
-    insulator with use_symmetry=False, matching scf.implicit's regime.
+    insulator with use_symmetry=False, matching scf.implicit's regime. ``mask``
+    is the per-atom transmutation-rate direction (None = all substituted sites
+    together); see :func:`_substitution_bare_perturbation`.
     """
     from gradwave.scf.implicit import _check_no_symmetry, _res_is_insulating
 
@@ -701,7 +713,7 @@ def alchemical_density_response(res, xc, tol=1e-8, max_iter=200):
     if not _res_is_insulating(res):
         raise NotImplementedError(
             "relaxed alchemical gradient: insulator (smearing='none') only")
-    dvloc_r, ddij = _substitution_bare_perturbation(res, xc)
+    dvloc_r, ddij = _substitution_bare_perturbation(res, xc, mask=mask)
     drho0 = _chi0_operator(res, dvloc_r, ddij, tol, max_iter)
     drho = _solve_forward_response(res, xc, drho0)
     return drho, dvloc_r, ddij
@@ -744,22 +756,17 @@ def _band_deps_dlam(res, k, band, dv_local_r, ddij) -> float:
     return float(local + nl)
 
 
-def alchemical_gap_gradient(res, xc, tol=1e-8, max_iter=200) -> AlchemicalGapGradient:
-    """Relaxed d(E_gap)/dλ for a substitution System, by composition DFPT.
-
-    The fundamental gap's sensitivity to the alchemical weight, with the full
-    self-consistent density response — the analytic counterpart of a finite
-    difference of re-converged SCF gaps. Also returns the sudden (frozen-density)
-    estimate so the relaxation contribution is explicit. Needs a System from
-    :func:`setup_alchemical_substitution`; nspin=1 insulator, use_symmetry=False.
-    """
+def _gap_gradient_for_mask(res, xc, mask, edges, tol, max_iter):
+    """d(E_gap)/dλ along one composition direction ``mask`` (per-atom rate), for
+    fixed band edges ``edges = ((vk,vb),(ck,cb))``. The DFPT response is solved
+    for this direction; the edges are shared across directions so a per-site
+    Jacobian reuses the reference VBM/CBM."""
     from gradwave.scf.implicit import apply_k_hxc
 
-    drho, dvloc_r, ddij = alchemical_density_response(res, xc, tol, max_iter)
-    dv_hxc_r = apply_k_hxc(res, xc, drho)  # local SC potential shift [eV]
-    dv_ks_local_r = dvloc_r + dv_hxc_r
-
-    (vk, vb), (ck, cb) = _vbm_cbm(res)
+    (vk, vb), (ck, cb) = edges
+    drho, dvloc_r, ddij = alchemical_density_response(res, xc, tol, max_iter,
+                                                      mask=mask)
+    dv_ks_local_r = dvloc_r + apply_k_hxc(res, xc, drho)
     dvbm = _band_deps_dlam(res, vk, vb, dv_ks_local_r, ddij)
     dcbm = _band_deps_dlam(res, ck, cb, dv_ks_local_r, ddij)
     dvbm_f = _band_deps_dlam(res, vk, vb, dvloc_r, ddij)
@@ -768,3 +775,57 @@ def alchemical_gap_gradient(res, xc, tol=1e-8, max_iter=200) -> AlchemicalGapGra
         dgap=dcbm - dvbm, dvbm=dvbm, dcbm=dcbm,
         dgap_frozen=dcbm_f - dvbm_f, dvbm_frozen=dvbm_f, dcbm_frozen=dcbm_f,
         vbm_index=(vk, vb), cbm_index=(ck, cb))
+
+
+def alchemical_gap_gradient(res, xc, tol=1e-8, max_iter=200) -> AlchemicalGapGradient:
+    """Relaxed d(E_gap)/dλ for a substitution System, by composition DFPT.
+
+    The fundamental gap's sensitivity to the alchemical weight with all
+    substituted sites moving together (scalar λ), with the full self-consistent
+    density response — the analytic counterpart of a finite difference of
+    re-converged SCF gaps. Also returns the sudden (frozen-density) estimate so
+    the relaxation contribution is explicit. Needs a System from
+    :func:`setup_alchemical_substitution`; nspin=1 insulator, use_symmetry=False.
+    """
+    return _gap_gradient_for_mask(res, xc, None, _vbm_cbm(res), tol, max_iter)
+
+
+def alchemical_gap_gradient_per_site(
+    res, xc, tol=1e-8, max_iter=200,
+) -> dict[int, AlchemicalGapGradient]:
+    """Per-site Jacobian ∂(E_gap)/∂λ_k for each substituted site k independently.
+
+    Returns ``{atom_index: AlchemicalGapGradient}`` — one composition DFPT solve
+    per substituted site, all sharing the reference VBM/CBM edges. Because the
+    alchemical perturbation is linear and additive over sites, the scalar
+    all-sites-together gradient (:func:`alchemical_gap_gradient`) equals the sum
+    of the per-site ``dgap`` values (a built-in consistency check).
+
+    This is the inverse-design gradient over composition: which site, transmuted
+    which way, moves the gap fastest. For an ISOVALENT substitution every per-site
+    component is individually finite-difference-verifiable (the site stays
+    charge-neutral). For a charge-conserving CO-substitution (a donor+acceptor
+    pair whose total valence is invariant), only the coupled sum is directly
+    FD-verifiable — the individual aliovalent components are the fixed-N linear
+    responses that sum to it (see docs/ideas.md, the aliovalent ladder).
+
+    Degenerate-edge caveat: a single-site perturbation breaks the crystal
+    symmetry, so if the band edge is degenerate (e.g. the cubic-perovskite p-like
+    VBM triplet) the single-state expectation ⟨ψ_edge|∂V/∂λ_k|ψ_edge⟩ is
+    gauge-dependent and a per-site component need not match its own single-site
+    FD to meV (the FD tracks the least-shifted degenerate partner). The exact
+    sum, the coupled (symmetry-preserving) gradient, and any non-degenerate edge
+    are unaffected; a degenerate-subspace first-order form is the fix (open).
+    """
+    system = res.system
+    spec = system.alchemical
+    if spec is None or "sub_atoms" not in spec:
+        raise ValueError("res.system was not built by setup_alchemical_substitution")
+    na = len(system.positions)
+    edges = _vbm_cbm(res)
+    out: dict[int, AlchemicalGapGradient] = {}
+    for k in spec["sub_atoms"]:
+        onehot = torch.zeros(na, dtype=RDTYPE)
+        onehot[k] = 1.0
+        out[int(k)] = _gap_gradient_for_mask(res, xc, onehot, edges, tol, max_iter)
+    return out
