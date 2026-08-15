@@ -11,102 +11,61 @@
 
 </div>
 
-gradwave solves the Kohn-Sham equations in a plane-wave basis with norm-conserving or
-ultrasoft/PAW pseudopotentials. Every energy term is a pure tensor function of the
-atomic positions, the cell, the density, and the functional's parameters, so automatic
-differentiation gives the derivative-based properties (forces, stress, and phonons)
-straight from the total energy. An implicit-differentiation wrapper gives the response
-of the self-consistent density to any parameter of the functional. The same machinery
-trains parameters against data, so an exchange-correlation functional, a hybrid's
-mixing and screening, or a Hubbard U each descend by gradient through the SCF. Base
-units are eV and Ångström, and every tensor is float64 or complex128, on CPU and GPU.
+gradwave is my pet project of various electronic structure methods for solids. It is,
+for the most part, vibe coded, so please treat it with skepticism and perhaps an iota of
+contempt. It is not my intention to masquerade as a gifted method developer. Instead, I
+hope this repository demonstrates my attempt to satisfy my curiosity and to fill out the
+wishlist of methods I wished I had during my PhD. gradwave is not meant to dethrone
+behemoths like VASP or Quantum ESPRESSO, nor is it as mature or rigorous as something
+like DFTK.jl.
+
+With the baggage out of the way, I want to explain the overarching philosophy of how I
+validate correctness and build trust in gradwave's output. In the beginning, I spent
+much time running gradwave and Quantum ESPRESSO calculations side by side to ensure that
+I was getting near identical results. When the energies and forces of test cases across insulators, semi-metals, metals, and
+magnetic metals matched, I knew I had a relatively reliable core to extend outwards. Since gradwave is written in PyTorch,
+automatic differentiation is a built-in feature. This gives us first (and even second)
+derivative properties for free. These results were then checked against finite
+differences within gradwave as well as with Quantum ESPRESSO. You can even see in the
+testing suite that this procedure has been codified as a few unit and integration tests.
 
 <div align="center">
-<img src="docs/manual/img/train_xc_paw.png" width="820" alt="A GGA exchange functional trained by gradient descent through the self-consistent density">
+<img src="benchmarks/delta_gauge/results/delta_gauge.png" width="880" alt="Delta-gauge reproducibility of gradwave against the WIEN2k all-electron reference across 24 cubic elements">
 </div>
 
-*A GGA exchange functional trained by gradient descent through the self-consistent
-density. Each gradient is one adjoint solve rather than a finite difference over
-re-converged calculations. From perturbed parameters, κ and μ descend to their PBE
-values while the four-system density loss falls three orders of magnitude
-(`examples/train_xc_paw.py`).*
-
-## Features
-
-gradwave runs the calculations a plane-wave practitioner expects, and the input schema
-is the same across the norm-conserving and PAW paths (the formalism is detected from
-the UPF file).
-
-- **Functionals.** LDA, PBE, and the r2SCAN meta-GGA (`xc: r2scan`), transcribed from
-  libxc and matched pointwise. Global (PBE0-form) and screened (HSE-form) hybrids with
-  exact Fock exchange acting in the SCF. DFT+U with the Hubbard U from linear response.
-- **Pseudopotentials.** Norm-conserving (PseudoDojo and SG15 ONCV) and ultrasoft/PAW
-  (psl), read directly from the freely available UPF files, with the formalism
-  auto-detected.
-- **Structure and response.** Total and free energies, Hellmann-Feynman forces, the
-  stress tensor, geometry and variable-cell relaxation through any ASE optimizer (with
-  selective dynamics via `structure.fixed` and density extrapolation across ionic
-  steps), band structures with point-group irrep labels, total and projected (l, m, j)
-  DOS, and phonons on both formalisms: the Γ-point analytic response and a supercell
-  finite-displacement route for the full dispersion, phonon DOS, and the harmonic
-  thermodynamics integrated from it.
-- **Equations of state and elasticity.** `task: eos` fits a Birch-Murnaghan curve
-  (V₀, B₀, B₀′) to a volume scan, and `task: elastic` builds the 6×6 stiffness tensor
-  and Voigt-Reuss-Hill moduli from the analytic stress, clamped-ion or relaxed-ion
-  (`elastic.mode: relaxed`).
-- **Bonding and charge analysis.** k-resolved COHP bonding analysis, Bader charges,
-  and charge-density/ELF/PARCHG export to `.cube`, `.xsf`, and VASP CHGCAR.
-- **Dispersion.** Grimme D3(BJ) and D4(BJ) as an opt-in, SCF-independent correction
-  with analytic forces and stress, folded into the reported total through the CLI and
-  the ASE calculator (`dispersion.method: d3` or `d4`).
-- **Magnetism.** Collinear spin, non-collinear magnetism, and spin-orbit coupling from
-  fully-relativistic pseudopotentials. Constrained non-collinear moments with
-  autograd-exact torques, spin spirals, magnetocrystalline anisotropy, and the exchange
-  constants (J, DMI) of a Heisenberg model. The collinear spin-polarized (nspin=2) path
-  carries the post-SCF properties — forces, stress, band structures (norm-conserving and
-  USPP/PAW), KPM-DOS, ELF, and the dielectric/Born E-field response — along with
-  fixed-spin-moment SCF.
-- **Brillouin zone.** Symmetry reduction to the irreducible wedge with density and
-  becsum symmetrization, including magnetic (Shubnikov) groups for non-collinear cells,
-  and Fermi-Dirac, Gaussian, Methfessel-Paxton, and cold smearing for metals.
-- **Numerics.** A fully k-batched SCF, batched Davidson and Chebyshev-filtered
-  eigensolvers, Pulay/Broyden/Johnson density mixing with Kerker or local
-  Thomas-Fermi preconditioning, all in float64/complex128 on CPU and GPU.
-- **Convergence control.** An opt-in energy-metric stopping rule
-  (`scf.convergence: energy`), a per-iteration SCF flight recorder (`scf.trace`),
-  a Stoner preconditioner for the spin channel, and occupation-matrix damping with
-  a U-ramp for metallic DFT+U.
-- **Parallelism.** `distributed: true` under a torchrun launch shards the k-set
-  across processes — multi-core or multi-GPU, single box or several — for `scf`,
-  `bands`, `relax`, and `eos` on the norm-conserving and USPP/PAW collinear paths,
-  including DFT+U, and composes with IBZ symmetry reduction (the ranks shard the
-  reduced k-set).
-- **Workflow.** One YAML input file per run, checkpointed restarts
-  (`gradwave run -r`), an ASE `Calculator` for driving gradwave from existing ASE
-  scripts, and `gradwave plot` figures for scf, bands, DOS/PDOS, COHP, phonons,
-  EOS, and elastic results.
-
-## Error estimation
-
-Because a plane-wave cutoff is a variational truncation, the distance to the
-converged-basis energy is second order and reachable from one calculation. gradwave
-estimates the discretization (Ecut) error from a single converged run rather than a
-cutoff sweep, and reports it alongside the result. The SCF-convergence and smearing
-terms come from the same single run. The k-point-sampling term is a quadrature rather
-than a variational truncation, so it is reached by a mesh sweep instead: run a few
-rising meshes and extrapolate (`examples/kmesh_error.py`). Coverage is broadest
-for the energy and density error across the norm-conserving and PAW paths, and the
-force and stress error terms carry narrower coverage.
+*Δ against the WIEN2k all-electron reference for 24 cubic elements (norm-conserving
+PseudoDojo pseudopotentials), next to PseudoDojo's own published Δ for the same
+pseudopotentials. The median is 0.8 meV/atom, inside the 1 meV/atom band that separates
+mature codes.*
 
 ## Validation
 
-Capabilities are checked against a reference where one exists, and the two axes are
-kept separate because they measure different things. Against Quantum ESPRESSO `pw.x` at identical
-pseudopotential, cutoff, k-mesh, and FFT grid, the comparison isolates the
-implementation, since both codes read the same UPF and the settings are pinned. Against
-an all-electron reference it also carries the pseudopotential's own error. gradwave
-reports the free energy that QE prints for smeared systems, and the QE reference data
-is committed as fixtures, so CI reproduces the comparison without running QE.
+I've been through enough agonizing test cases and sample runs to feel comfortable with
+the accuracy of gradwave's output. Still, vibes and "trust me" are probably not
+reassuring enough, so I have tried my best to demonstrate gradwave rigorously. In
+particular, I implemented the Δ-gauge from Lejaeghere et al.,
+[*Reproducibility in density functional theory calculations of solids*, Science **351**,
+aad3000 (2016)](https://doi.org/10.1126/science.aad3000) (building on their earlier
+Δ-factor, [*Crit. Rev. Solid State Mater. Sci.* **39**, 1 (2014)](https://doi.org/10.1080/10408436.2013.772503)).
+The general idea behind it is that for each element you compute the total energy over a
+range of unit-cell volumes, fit that E(V) curve to a Birch-Murnaghan equation of state,
+and take Δ as the root-mean-square energy difference between gradwave's curve and a
+reference code's curve over a ±6% window around equilibrium, normalized per atom. A Δ
+below roughly 1 meV/atom is the range that separates mature, production DFT codes, so it
+is a stringent and code-agnostic check. As you can see in the figure at the top of the
+page, there is a good deal of agreement between gradwave and the PseudoDojo and WIEN2k
+references, with some minor exceptions.
+
+The all-electron Δ mixes pseudization with implementation, so a large Δ on a transition
+metal is usually the pseudopotential's doing rather than gradwave's. The elevated Pt, Pd, and Ir values are the stiff-metal floor of
+the metric, which scales with the bulk modulus, and Cu is a known pseudopotential-file
+anomaly that QE reproduces identically (both codes give B₀ = 167 GPa against the
+all-electron 141). The element-by-element tracking against PseudoDojo's own Δ is what the
+figure really supports. To isolate gradwave itself, a second axis pins it directly
+against Quantum ESPRESSO `pw.x` at identical pseudopotential, cutoff, k-mesh, and FFT
+grid, so both codes read the same UPF and only the implementation can differ. There the
+same elements agree to 0.01 to 0.03 meV/atom, and the QE reference data is committed as
+fixtures, so CI reproduces the comparison without running QE.
 
 A representative set of pinned QE comparisons:
 
@@ -120,32 +79,6 @@ A representative set of pinned QE comparisons:
 | NiO Hubbard U vs `hp.x` DFPT | 6.449 vs 6.431 eV (0.3%) |
 | Si Γ phonon (PAW) vs `ph.x` | 0.003% |
 | GaAs spin-orbit split-off Δ₀ vs fully-relativistic QE | 0.336 eV, within 2e-3 eV |
-
-For transferability across the periodic table, the Δ-gauge measures equation-of-state
-reproducibility. Each element's E(V) is fit to a third-order Birch-Murnaghan curve, and
-Δ is the RMS energy difference between two such curves over a ±6% window around
-equilibrium, per atom. It is the standard cross-code reproducibility metric introduced
-by [Lejaeghere et al., *Science* **351**, aad3000 (2016)](https://doi.org/10.1126/science.aad3000),
-building on the Δ-factor of
-[Lejaeghere et al., *Crit. Rev. Solid State Mater. Sci.* **39**, 1 (2014)](https://doi.org/10.1080/10408436.2013.772503).
-
-<div align="center">
-<img src="benchmarks/delta_gauge/results/delta_gauge.png" width="880" alt="Delta-gauge reproducibility of gradwave against the WIEN2k all-electron reference across 24 cubic elements">
-</div>
-
-*Δ against the WIEN2k all-electron reference for 24 cubic elements (norm-conserving
-PseudoDojo pseudopotentials), next to PseudoDojo's own published Δ for the same
-pseudopotentials. The median is 0.8 meV/atom, inside the 1 meV/atom band that separates
-mature codes. The elevated transition-metal values (Pt, Pd, Ir) are the stiff-metal
-floor of the metric, which scales with the bulk modulus, and Cu is a known
-pseudopotential-file anomaly that QE reproduces identically (both codes give B0 = 167 GPa
-against the all-electron 141). Against QE at pinned settings the same elements agree to
-0.01 to 0.03 meV/atom, the implementation floor.*
-
-The all-electron Δ mixes pseudization with implementation, so a large Δ on Cu or Fe is a
-property of the pseudopotential, not of gradwave, and the element-by-element tracking
-against PseudoDojo's own Δ is the claim the figure supports. The pinned-QE axis is the
-one that isolates gradwave itself.
 
 The derivatives carry their own validation. Each one is checked either against a finite
 difference of its own energy, which floors near the finite-difference noise, or against
@@ -161,13 +94,84 @@ gradcheck comparisons (blue) sit at or below the 1e-5 first-derivative floor, an
 comparisons against a QE response module (green) sit at the 0.1 to 1 percent cross-code
 level.*
 
+## Features
+
+In terms of features, there is quite a lot. gradwave is a fully differentiable
+plane-wave DFT suite that supports norm-conserving, ultrasoft, and PAW pseudopotentials,
+including nonlinear core corrections (NLCC), which you can get from freely available
+sources like PseudoDojo, SG15, and SSSP. The input schema is the same across every formalism, which is
+detected from the UPF file.
+
+- **Functionals.** LDA, PBE, and the r2SCAN meta-GGA (`xc: r2scan`), transcribed from
+  libxc and matched pointwise. Global (PBE0-form) and screened (HSE-form) hybrids with
+  exact Fock exchange acting in the SCF. DFT+U with the Hubbard U from linear response.
+- **Pseudopotentials.** Norm-conserving (PseudoDojo and SG15 ONCV) and ultrasoft/PAW
+  (psl), read directly from the freely available UPF files, with the formalism
+  auto-detected.
+- **Structure and response.** Total and free energies, Hellmann-Feynman forces, the
+  stress tensor, geometry and variable-cell relaxation through any ASE optimizer (with
+  selective dynamics via `structure.fixed` and density extrapolation across ionic
+  steps), band structures with point-group irrep labels, total and projected (l, m, j)
+  DOS, and phonons on both formalisms, the Γ-point analytic response and a supercell
+  finite-displacement route for the full dispersion, phonon DOS, and the harmonic
+  thermodynamics integrated from it.
+- **Equations of state and elasticity.** `task: eos` fits a Birch-Murnaghan curve
+  (V₀, B₀, B₀′) to a volume scan, and `task: elastic` builds the 6×6 stiffness tensor
+  and Voigt-Reuss-Hill moduli from the analytic stress, clamped-ion or relaxed-ion
+  (`elastic.mode: relaxed`).
+- **Bonding and charge analysis.** k-resolved COHP bonding analysis, Bader charges,
+  and charge-density/ELF/PARCHG export to `.cube`, `.xsf`, and VASP CHGCAR.
+- **Dispersion.** Grimme D3(BJ) and D4(BJ) as an opt-in, SCF-independent correction
+  with analytic forces and stress, folded into the reported total through the CLI and
+  the ASE calculator (`dispersion.method: d3` or `d4`).
+- **Magnetism.** Collinear spin, non-collinear magnetism, and spin-orbit coupling from
+  fully-relativistic pseudopotentials. Constrained non-collinear moments with
+  autograd-exact torques, spin spirals, magnetocrystalline anisotropy, and the exchange
+  constants (J, DMI) of a Heisenberg model. The collinear spin-polarized (nspin=2) path
+  carries the post-SCF properties (forces, stress, band structures for norm-conserving
+  and USPP/PAW, KPM-DOS, ELF, and the dielectric/Born E-field response), along with
+  fixed-spin-moment SCF.
+- **Brillouin zone.** Symmetry reduction to the irreducible wedge with density and
+  becsum symmetrization, including magnetic (Shubnikov) groups for non-collinear cells,
+  and Fermi-Dirac, Gaussian, Methfessel-Paxton, and cold smearing for metals.
+- **Numerics.** A fully k-batched SCF, batched Davidson and Chebyshev-filtered
+  eigensolvers, Pulay/Broyden/Johnson density mixing with Kerker or local
+  Thomas-Fermi preconditioning, all in float64/complex128 on CPU and GPU.
+- **Convergence control.** An opt-in energy-metric stopping rule
+  (`scf.convergence: energy`), a per-iteration SCF flight recorder (`scf.trace`),
+  a Stoner preconditioner for the spin channel, and occupation-matrix damping with
+  a U-ramp for metallic DFT+U.
+- **Parallelism.** `distributed: true` under a torchrun launch shards the k-set
+  across processes (multi-core or multi-GPU, single box or several) for `scf`,
+  `bands`, `relax`, and `eos` on the norm-conserving and USPP/PAW collinear paths,
+  including DFT+U, and composes with IBZ symmetry reduction (the ranks shard the
+  reduced k-set).
+- **Workflow.** One YAML input file per run, checkpointed restarts
+  (`gradwave run -r`), an ASE `Calculator` for driving gradwave from existing ASE
+  scripts, and `gradwave plot` figures for scf, bands, DOS/PDOS, COHP, phonons,
+  EOS, and elastic results.
+
+## Error estimation
+
+Nobody enjoys running the same calculation at five cutoffs only to learn the first one
+was fine. Because a plane-wave cutoff is a variational truncation, the distance to the
+converged-basis energy is second order and reachable from a single calculation, so
+gradwave estimates the discretization (Ecut) error from one converged run and reports it
+alongside the result. The SCF-convergence and smearing
+terms come from the same single run. The k-point-sampling term is a quadrature rather
+than a variational truncation, so it is reached by a mesh sweep instead, running a few
+rising meshes and extrapolating (`examples/kmesh_error.py`). Coverage is broadest
+for the energy and density error across the norm-conserving and PAW paths, and the
+force and stress error terms carry narrower coverage.
+
 ## Performance
 
-The SCF runs fully k-batched, with a padded `(nk, nb, npw_max)` layout, batched FFT
-Hamiltonian applies, a batched Davidson eigensolver, and band-chunked dense-grid
-operations to bound GPU memory. `System.to("cuda")` moves a prepared calculation to
-GPU. The wall times below are the same Si SCF (LDA, 30 Ry / 408 eV, 4×4×4) as the
-optimizations accumulate, on the three machines side by side.
+gradwave will not out-muscle a Fortran code that has had a decade of tuning, but it is
+not slow either. The SCF runs fully k-batched, with a padded `(nk, nb, npw_max)` layout,
+batched FFT Hamiltonian applies, a batched Davidson eigensolver, and band-chunked
+dense-grid operations to bound GPU memory. `System.to("cuda")` moves a prepared
+calculation to the GPU. The wall times below are the same Si SCF (LDA, 30 Ry / 408 eV,
+4×4×4) as the optimizations accumulate, across the three machines side by side.
 
 | configuration | wall time |
 |---|---|
@@ -208,13 +212,17 @@ page](docs/manual/distributed.md) covers multi-node and multi-GPU launches).*
 
 ## Quickstart
 
+Running gradwave is deliberately boring, which is about the highest compliment I can pay
+research software. There is one YAML file per calculation, and no Python API to learn
+first.
+
 ```bash
 uv sync                # managed venv with all dependencies
 uv run gradwave --help
 ```
 
-An input is a single YAML file. The two examples below optimize the geometry of L1₀
-FePt and then compute its band structure. Run them from the `examples/` directory.
+The two examples below optimize the geometry of L1₀ FePt and then compute its band
+structure. Run them from the `examples/` directory.
 
 ```bash
 gradwave fept_relax.yaml    # relax the tetragonal cell and atoms
@@ -248,6 +256,10 @@ positions. See `examples/` for inputs covering relaxation, band structures, magn
 and the differentiable workflows.
 
 ## Examples
+
+This is the part I have the most fun with. Differentiability lets you ask questions that
+are awkward to pose in a conventional code, so here are a handful of worked examples, each
+with the script that produced it.
 
 **Magnetocrystalline anisotropy.** The energy cost of rotating the magnetization away
 from the easy axis is a spin-orbit effect of a few meV per formula unit. gradwave
@@ -298,7 +310,7 @@ connects to the chemistry.
 
 *The diamond C-C bond. Each (k, band) state is colored by its COHP weight on the
 nearest-neighbor bond (bonding blue, antibonding red), with point-group irrep
-labels at the special points; the right panel is the energy-resolved −COHP. The
+labels at the special points, and the right panel is the energy-resolved −COHP. The
 occupied valence bands are bonding and the conduction bands antibonding, the
 textbook picture of the covalent bond (`examples/cohp_fatbands.py`).*
 
@@ -309,7 +321,7 @@ shared FFT grid and fits the third-order Birch-Murnaghan form.
 <img src="examples/eos_silicon.png" width="560" alt="Silicon equation of state: seven SCF points and the Birch-Murnaghan fit">
 </div>
 
-*Si equation of state: seven SCF points and the Birch-Murnaghan fit. gradwave
+*Silicon equation of state, seven SCF points and the Birch-Murnaghan fit. gradwave
 (PBE) gives V₀ = 20.57 Å³/atom, B₀ = 87.8 GPa, B₀′ = 4.21, against the WIEN2k
 all-electron reference V₀ = 20.45 Å³/atom, B₀ = 88.5 GPa
 (`examples/eos_silicon.py`).*
@@ -328,7 +340,7 @@ q-mesh. The Γ optical mode comes out triply degenerate at 523 cm⁻¹ (experime
 (`examples/si_phonons.yaml`, plotted by `gradwave plot`).*
 
 **Stopping on the energy, not the density.** The free energy converges
-quadratically in the density residual: its exact second-order error is
+quadratically in the density residual, and its exact second-order error is
 ½⟨r|K_Hxc|r⟩, evaluable each iteration from the response kernel the mixer
 already uses. The opt-in energy-metric gate (`scf.convergence: energy`) stops
 on that number, and the per-iteration flight recorder (`scf.trace`) makes both
@@ -339,11 +351,14 @@ measures visible.
 </div>
 
 *One spin-polarized SCF on bcc Fe (m = 2.224 μB). The density gate at
-rhotol = 1e-7 polishes until iteration 15; the energy gate at entol = 1e-6 eV
+rhotol = 1e-7 polishes until iteration 15. The energy gate at entol = 1e-6 eV
 stops at iteration 9, where the energy error is already 5e-8 eV
 (`examples/fe_energy_gate.py`).*
 
 ## Development
+
+If you want to poke under the hood, the loop is quick. The fast gate runs in about 80
+seconds, so the edit-test cycle stays tight.
 
 ```bash
 uv sync
