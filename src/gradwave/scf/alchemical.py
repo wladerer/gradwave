@@ -808,6 +808,14 @@ def alchemical_gap_gradient_per_site(
     pair whose total valence is invariant), only the coupled sum is directly
     FD-verifiable — the individual aliovalent components are the fixed-N linear
     responses that sum to it (see docs/ideas.md, the aliovalent ladder).
+
+    Degenerate-edge caveat: a single-site perturbation breaks the crystal
+    symmetry, so if the band edge is degenerate (e.g. the cubic-perovskite p-like
+    VBM triplet) the single-state expectation ⟨ψ_edge|∂V/∂λ_k|ψ_edge⟩ is
+    gauge-dependent and a per-site component need not match its own single-site
+    FD to meV (the FD tracks the least-shifted degenerate partner). The exact
+    sum, the coupled (symmetry-preserving) gradient, and any non-degenerate edge
+    are unaffected; a degenerate-subspace first-order form is the fix (open).
     """
     system = res.system
     spec = system.alchemical

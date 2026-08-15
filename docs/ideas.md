@@ -427,14 +427,53 @@ off by >10×** on the perovskite (+8.9 vs +0.77 eV) and is ~0 while the relaxed 
 on SiC→C — the density response is the entire gradient, which is why the nonlocal build
 was necessary rather than the cheap frozen matrix element.
 
-Open tails, in order. (1) Per-site vector λ (the primitives already take a per-atom weight;
-the DFPT currently returns the scalar-λ gap gradient — expose the per-site vector so a
-gradient search over site occupancies falls out). (2) nspin=2 and (3) metals: the χ₀/K_Hxc
-kernels already have spin-resolved and partial-occupation paths in `scf/implicit.py`, so
-these are threading, not new physics. (4) The relaxed derivative of an arbitrary observable
-(not just the gap edges) via the same density response, e.g. a target-property inverse
-design over composition. (5) Degenerate band edges need the degenerate-subspace first-order
-form (the current single-state expectation assumes a non-degenerate edge).
+### The aliovalent ladder (beyond isovalent)
+
+The gap DFPT above is isovalent (ΔN=0, cell neutral, integer occupations, clean gap).
+"Beyond isovalent" is a ladder of increasing difficulty, being built out as rungs:
+
+**Rung 1 — per-site vector λ + charge-conserving co-substitution (landed 2026-08-15,
+`alchemical_gap_gradient_per_site`).** The bare perturbation is parameterized by a per-atom
+rate mask, so a one-hot mask gives a single site's ∂V_ion/∂λ_k and the per-site Jacobian
+∂(E_gap)/∂λ_k falls out (one DFPT solve per site, shared edges). Because the perturbation is
+linear and additive, Σ_k ∂/∂λ_k equals the coupled scalar gradient exactly (a built-in
+consistency check). This enables the honest "beyond single-species isovalent" case: a
+charge-conserving CO-substitution (a donor+acceptor pair whose TOTAL valence is invariant),
+where each component is aliovalent but N stays fixed and insulating, so the coupled λ DFPT
+applies directly. Validated on **MgO→NaCl** (Mg 10 + O 6 = 16 = Na 9 + Cl 7): coupled
+d(E_gap)/dλ analytic +6.822 vs FD +6.821 (1 meV), Σ per-site = coupled exactly, and the
+**frozen estimate has the WRONG SIGN** (−0.17 eV) — first-order APDFT band-gap alchemy would
+mispredict the direction, the relaxed DFPT gets it right. Isovalent per-site (CsPbI3 3×X→Cl)
+matches single-site FD to ~0.1 meV on non-degenerate-picking sites; the degenerate cubic-VBM
+gauge dependence (rung-1 caveat) shifts one equivalent site by ~4 meV — the sum and coupled
+are unaffected.
+
+**Rung 2 — single-site aliovalent + Janak (open).** Let N(λ)=ΣZ(λ) follow the ionic charge
+(neutral), fractional N mid-path → metallic → the gap dissolves; the ENERGY gradient stays
+clean via the Janak term μ·dN/dλ (wire it for the substitution spec; the binary
+`alchemical_energy_gradient` already carries it). Per-state eigenvalue derivatives need the
+metallic χ₀ path (`_chi0_channel_metal`, exists). Grounding: von Lilienfeld APDFT (energy
+alchemy is exact at first order by the envelope theorem; eigenvalue alchemy is not — the
+frozen-vs-relaxed gaps above are the direct evidence).
+
+**Rung 3 — charged-cell fixed-N (open).** Hold N, transmute aliovalently → charged cell →
+jellium + finite-size (Makov-Payne / FNV) image corrections; the defect-formation route.
+
+**Rung 4 — grand-canonical fixed-μ (open, research-y).** Legendre-transform to fixed μ; N
+floats, Janak term central; constant-potential/electrochemistry DFT.
+
+Other open tails. nspin=2 and metals for the gap DFPT: the χ₀/K_Hxc kernels already have
+spin-resolved and partial-occupation paths in `scf/implicit.py`, so these are threading, not
+new physics. The relaxed derivative of an ARBITRARY observable (not just gap edges) via the
+same density response → target-property inverse design over composition. Degenerate band
+edges want the degenerate-subspace first-order form (the current single-state expectation
+assumes a non-degenerate edge).
+
+Framing / citations: this whole line is the self-consistent upgrade to first-order band-gap
+alchemy — APDFT (von Lilienfeld & Tuckerman, arXiv:1809.01647) and the AlxGa1-xAs direct-gap
+design of Chang & von Lilienfeld (Phys. Rev. Materials 2, 073802, 2018) use the first-order
+(frozen) alchemical derivative, which the frozen-vs-FD numbers here show is inadequate for
+gaps (energy alchemy is fine at first order; eigenvalue alchemy needs the density response).
 
 # Magnetism and spin-orbit coupling
 
