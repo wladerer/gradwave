@@ -517,6 +517,24 @@ spin-resolved and partial-occupation paths in `scf/implicit.py`, so these are th
 new physics. Degenerate band edges want the degenerate-subspace first-order form (the current
 single-state expectation assumes a non-degenerate edge).
 
+Response-function tier — composition derivative of ε∞ / Born charges (landed 2026-08-15,
+FD; analytic 2n+1 open). A RESPONSE function is itself a second energy derivative (ε∞ ∝
+d²E/dℰ²), so dε∞/dλ is a mixed THIRD-order derivative d³E/(dλ dℰ²). Two parts landed:
+(a) an infrastructure fix — the E-field DFPT (`postscf/dielectric.py`) now runs on the
+alchemical blended-projector System: `_shifted_projectors` rebuilds the STACKED [base;target]
+KB columns at shifted k (the λ-weighting rides `bk.dij_full`), which it previously could not
+(it rebuilt only the base per-species set, half the columns). The substitution spec stashes
+the target UPFs for this. (b) `postscf/alchemical_response.alchemical_dielectric_gradient`
+gives dε∞/dλ and dZ*/dλ by a central FD of `dielectric_born` along the composition path;
+validated h-convergent on SiC→C (dε∞_iso/dλ = +14.77 at h=0.04 and 0.02, differing 0.014).
+FD is the reliable route for a third-order quantity. The fully-ANALYTIC mixed derivative is a
+2n+1 build (dε∞/dλ from first-order responses dρ/dℰ, dρ/dλ + the bare-λ RHS) whose one
+genuinely new/expensive piece is the third functional derivative of E_xc (the ∂_λK_Hxc term,
+a triple-backward HVP) plus the periodic-field position-operator assembly; the FD here is the
+ground truth it would validate against. Binary (whole-cell) alchemical dielectric and the
+metals/nspin=2 E-field paths are further follow-ups. No prior Raman/mixed-response machinery
+existed — this is the first mixed-response derivative in the code.
+
 Framing / citations: this whole line is the self-consistent upgrade to first-order band-gap
 alchemy — APDFT (von Lilienfeld & Tuckerman, arXiv:1809.01647) and the AlxGa1-xAs direct-gap
 design of Chang & von Lilienfeld (Phys. Rev. Materials 2, 073802, 2018) use the first-order
