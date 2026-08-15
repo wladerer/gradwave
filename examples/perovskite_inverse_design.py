@@ -20,6 +20,13 @@ Scalar-relativistic PBE, nspin=1 insulator, use_symmetry=False (the response
 regime). The gap edges of cubic CsPbI3 are degenerate, so the DFPT gap gradient
 carries the rung-1 degenerate-edge caveat; this run is also a test of whether it
 is good enough to design with.
+
+Validated (asus, ECUT=30 Ry, 2x2x2): the path integral ∫₀¹ dGap/dλ dλ = +1.393 eV
+matches the endpoint ΔGap = +1.383 eV to 10 meV (trapezoid curvature), and the
+Newton loop reaches λ*=0.468 in 3 steps with a direct-SCF gap of 1.7003 eV against
+the 1.700 eV target (0.3 meV miss). The scalar λ preserves the cubic symmetry, so
+the degenerate VBM shifts uniformly and the gap gradient stays exact here — the
+degenerate-edge caveat bites only for symmetry-breaking per-site perturbations.
 """
 
 from pathlib import Path

@@ -493,6 +493,15 @@ already exists via `target_mu`, but it requires `boundary='open_z_metal'` (an ES
 electron reservoir), so composing it with an alchemical substitution on a slab is the
 electrochemistry follow-up.
 
+Inverse design (capstone, validated 2026-08-15). `examples/perovskite_inverse_design.py`
+closes the loop: two checks on the CsPbI3→CsPbCl3 path. (1) Path integration — ∫₀¹ dGap/dλ dλ
+= +1.393 eV (trapezoid over 6 DFPT gradients) matches the endpoint ΔGap = +1.383 eV to 10 meV,
+so the local gradient is a true global derivative. (2) A Newton loop on λ using dGap/dλ reaches
+a 1.7 eV target in 3 steps (λ*=0.468), and a fresh direct SCF at λ* gives 1.7003 eV — a 0.3 meV
+miss, gradient-driven composition design verified against ground truth. The scalar-λ path keeps
+the cubic symmetry so the degenerate VBM shifts uniformly and the gradient stays exact; the
+degenerate-edge caveat only matters for symmetry-breaking per-site design.
+
 Other open tails. nspin=2 and metals for the gap DFPT: the χ₀/K_Hxc kernels already have
 spin-resolved and partial-occupation paths in `scf/implicit.py`, so these are threading, not
 new physics. The relaxed derivative of an ARBITRARY observable (not just gap edges) via the
