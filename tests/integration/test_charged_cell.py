@@ -92,7 +92,7 @@ def test_charged_cell_alchemical_gradient():
     assert res.converged
     assert abs(res.system.n_electrons - n0) < 1e-9      # N held fixed
     q = float(res.system.charges.sum()) - n0
-    assert abs(q - 0.5) > 0.1                             # cell is genuinely charged
+    assert abs(q - 0.5) < 0.05                            # ΣZ(0.5)=8.5, N=8 → q=+0.5
 
     dE = float(alchemical_energy_gradient(res, lam, xc=PBE(), grand_canonical=True))
     h = 0.01
