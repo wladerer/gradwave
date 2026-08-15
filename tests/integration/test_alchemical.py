@@ -223,3 +223,48 @@ def test_aliovalent_energy_gradient_with_janak():
     assert abs(janak_alio) > 1.0
     janak_iso = check(cc, 0)       # isovalent control: Janak vanishes
     assert abs(janak_iso) < 1e-9
+
+
+def test_grand_canonical_energy_gradient():
+    """Rung 4: the grand-canonical alchemical gradient dΩ/dλ (grand_canonical=True)
+    drops the Janak term and equals the bare Hellmann-Feynman ionic derivative. It
+    matches a central FD of the grand potential Ω = F − μN (μ held at the reference
+    Fermi level), and the Legendre relation dF = dΩ + μ·dN holds. Si → As, N=8.5,
+    metallic."""
+    torch.set_num_threads(4)
+    si = parse_upf(PSEUDOS / "Si_ONCV_PBE-1.2.upf")
+    as_ = parse_upf(PSEUDOS / "As_ONCV_PBE-1.2.upf")
+    a = 5.43
+    cell = a * np.array([[0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0.5, 0]])
+    pos = np.array([[0, 0, 0], [0.25, 0.25, 0.25]]) @ cell
+    ecut, km = 30 * RY, (2, 2, 2)
+    kw = dict(smearing="fermi-dirac", width=0.15, etol=1e-10, rhotol=1e-9,
+              max_iter=400, verbose=False)
+
+    def run(lam):
+        return scf(setup_alchemical_substitution(
+            cell, pos, [si], [0, 0], {1: as_}, lam, ecut=ecut, kmesh=km,
+            use_symmetry=False), PBE(), **kw)
+
+    lam = 0.5
+    res = run(lam)
+    assert res.converged
+    mu = float(res.fermi)
+
+    d_omega = float(alchemical_energy_gradient(res, lam, xc=PBE(),
+                                               grand_canonical=True))
+    d_f = float(alchemical_energy_gradient(res, lam, xc=PBE()))  # canonical
+
+    # FD of the grand potential Ω = F − μN, μ fixed at the reference Fermi level
+    h = 0.01
+    def omega(r):
+        return float(r.energies.free_energy) - mu * r.system.n_electrons
+    fd_omega = (omega(run(lam + h)) - omega(run(lam - h))) / (2 * h)
+    assert abs(d_omega - fd_omega) < 5e-3, f"dΩ/dλ {d_omega} vs FD {fd_omega}"
+
+    # Legendre relation: dF = dΩ + μ·dN (dN=+1 for one Si→As site)
+    spec = res.system.alchemical
+    dN = float((spec["z_target"] - spec["z_base"]).sum())
+    assert abs(d_f - (d_omega + mu * dN)) < 1e-6
+    # the grand-canonical gradient really differs from the canonical one
+    assert abs(d_f - d_omega) > 1.0
