@@ -951,3 +951,35 @@ def alchemical_gap_gradient_per_site(
         onehot[k] = 1.0
         out[int(k)] = _gap_gradient_for_mask(res, xc, onehot, edges, tol, max_iter)
     return out
+
+
+def alchemical_observable_gradient(res, xc, observable, *, mask=None,
+                                   tol=1e-8, max_iter=200) -> float:
+    """Relaxed dO/dλ for an arbitrary density-functional observable O = O[ρ].
+
+    Generalizes the band-gap gradient to any observable that is a differentiable
+    functional of the converged total density — a multipole moment, the charge in
+    a region, a density overlap, the density at a point. Because the observable
+    depends on λ only through the density, the relaxed derivative is
+
+        dO/dλ = ⟨ δO/δρ | dρ/dλ ⟩
+
+    with δO/δρ taken by autograd on ``observable`` and dρ/dλ the self-consistent
+    composition response (:func:`alchemical_density_response`). This is the
+    general composition→property design gradient; the band gap is the
+    eigenvalue-observable special case (:func:`alchemical_gap_gradient`), and
+    response-function observables (ε∞, Born charges) are second-order and out of
+    scope here.
+
+    ``observable`` is a pure function ``rho -> scalar tensor`` of the total
+    density grid (``res.rho``, e/Å³); write it as a proper grid integral (fold in
+    the cell volume element) so dO/dλ comes out in the observable's own units.
+    ``mask`` picks the composition direction (None = all substituted sites moving
+    together, the scalar λ). nspin=1 insulator, use_symmetry=False.
+    """
+    drho, _, _ = alchemical_density_response(res, xc, tol, max_iter, mask=mask)
+    rho = res.rho.detach().clone().requires_grad_(True)
+    with torch.enable_grad():
+        val = observable(rho)
+        (dobs_drho,) = torch.autograd.grad(val, rho)
+    return float((dobs_drho * drho).sum())
