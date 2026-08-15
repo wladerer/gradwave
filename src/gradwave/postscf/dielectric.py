@@ -97,6 +97,8 @@ def _shifted_projectors(system: System, dkvec: torch.Tensor) -> torch.Tensor:
     alch = isinstance(spec, dict) and "upfs_b" in spec
     if alch:
         beta_ls_b, dij_species_b = species_projector_tables(spec["upfs_b"])
+    else:
+        beta_ls_b, dij_species_b = [], []
     out = torch.zeros(len(system.spheres), nproj, bk.npw_max, dtype=CDTYPE,
                       device=bk.kpg.device)
     for ik, sph in enumerate(system.spheres):
