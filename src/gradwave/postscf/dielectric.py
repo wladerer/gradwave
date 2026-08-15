@@ -89,6 +89,14 @@ def _shifted_projectors(system: System, dkvec: torch.Tensor) -> torch.Tensor:
     assert bk is not None
     beta_ls, dij_species = species_projector_tables(system.upfs)
     nproj = bk.proj_phase_free.shape[1]
+    # Alchemical substitution System: the projector set is the stacked blend
+    # [base cols; target cols] (blend_projector_data), twice the base count, with
+    # the λ-weighting carried in bk.dij_full. Rebuild BOTH endpoints' shifted
+    # columns and concatenate so the count matches; the weighting is untouched.
+    spec = getattr(system, "alchemical", None)
+    alch = isinstance(spec, dict) and "upfs_b" in spec
+    if alch:
+        beta_ls_b, dij_species_b = species_projector_tables(spec["upfs_b"])
     out = torch.zeros(len(system.spheres), nproj, bk.npw_max, dtype=CDTYPE,
                       device=bk.kpg.device)
     for ik, sph in enumerate(system.spheres):
@@ -96,7 +104,13 @@ def _shifted_projectors(system: System, dkvec: torch.Tensor) -> torch.Tensor:
         pd = projector_data_at_k(shim, system.species_of_atom, system.upfs,
                                  beta_ls, dij_species, system.grid.volume,
                                  device=shim.kpg.device)
-        out[ik, :, : sph.npw] = projectors(pd, system.positions)
+        p_shift = projectors(pd, system.positions)
+        if alch:
+            pd_b = projector_data_at_k(shim, spec["species_b"], spec["upfs_b"],
+                                       beta_ls_b, dij_species_b, system.grid.volume,
+                                       device=shim.kpg.device)
+            p_shift = torch.cat([p_shift, projectors(pd_b, system.positions)], dim=0)
+        out[ik, :, : sph.npw] = p_shift
     return out
 
 
