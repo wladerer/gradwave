@@ -302,3 +302,115 @@ def per_atom_local_tables(
     for a, (tab_a, tab_b, lam) in alchemical.items():
         rows[a] = blend_local_table(tab_a, tab_b, lam)
     return torch.stack(rows, dim=0)
+
+
+def setup_alchemical_substitution(cell, positions, pseudos, species_index,
+                                  substitutions, lam, ecut, kmesh=(1, 1, 1),
+                                  nbands=None, **setup_kw):
+    """Heterogeneous alchemical System: a real multi-species cell in which a chosen
+    subset of sites transmutes toward a target species with weight ``lam``, while
+    every other site stays its own fixed species.
+
+    This is the perovskite/defect/doping generalization of
+    :func:`setup_alchemical_system` (which blends the WHOLE cell between a single
+    endpoint pair). ``pseudos`` is the base per-species UPF list and
+    ``species_index`` the per-atom species (as passed to ``setup_system``).
+    ``substitutions`` maps an atom index to the target parsed UPF it transmutes
+    toward (e.g. every X-site of an ABX3 mapped to a different halide). ``lam`` is
+    a scalar (all substituted sites move together) or a vector over the substituted
+    sites in ``substitutions`` order. At ``lam=0`` this is the untouched base cell;
+    at ``lam=1`` the substituted sites are fully the target species. Only the ionic
+    terms (local table, KB projectors, ionic charge, NLCC core) depend on ``lam``.
+
+    The build mirrors :func:`setup_alchemical_system`: it forms the base cell and a
+    target twin (identical except at the substituted sites), then blends per atom
+    with a weight vector that is 0 on the fixed sites and ``lam`` on the substituted
+    ones. The blended KB operator carries both endpoints' projectors with the
+    inactive block zero-coupled, so ``lam=0``/``lam=1`` reproduce the pure cells.
+    """
+    import dataclasses
+
+    import numpy as np
+
+    from gradwave.core.batch import build_batched
+    from gradwave.scf.loop import setup_system
+    from gradwave.scf.setup_common import (
+        _unique_shells,
+        assemble_core_density,
+        core_shell_tables,
+        default_nbands,
+    )
+
+    na = len(positions)
+    species_index = list(species_index)
+    sub_atoms = list(substitutions.keys())
+
+    # base cell (lam=0) and a target twin (lam=1) that differs only at the
+    # substituted sites -- each gets a fresh species slot for its target pseudo.
+    sys_a = setup_system(cell, positions, species_index, list(pseudos),
+                         ecut, kmesh, **setup_kw)
+    tgt_species = list(species_index)
+    tgt_pseudos = list(pseudos)
+    for a, tgt_upf in substitutions.items():
+        tgt_pseudos.append(tgt_upf)
+        tgt_species[a] = len(tgt_pseudos) - 1
+    sys_b = setup_system(cell, positions, tgt_species, tgt_pseudos, ecut, kmesh,
+                         **setup_kw)
+
+    # per-atom transmutation weight: 0 on fixed sites, lam on substituted ones
+    lam_t = torch.as_tensor(lam, dtype=RDTYPE)
+    lam_vals = lam_t.expand(len(sub_atoms)) if lam_t.dim() == 0 else lam_t
+    lam_vec = torch.zeros(na, dtype=RDTYPE)
+    lam_vec[torch.tensor(sub_atoms, dtype=torch.long)] = lam_vals.to(RDTYPE)
+
+    # local table: base per atom, substituted rows blended toward the target
+    alch = {a: (sys_a.vloc_tables[species_index[a]],
+                sys_b.vloc_tables[tgt_species[a]], lam_vec[a])
+            for a in sub_atoms}
+    vloc_atom = per_atom_local_tables(
+        sys_a.vloc_tables, torch.as_tensor(species_index), alch)
+
+    # KB projectors: blend the two full multi-species projector sets per k
+    proj_data = [blend_projector_data(sys_a.proj_data[k], sys_b.proj_data[k], lam_vec)
+                 for k in range(len(sys_a.proj_data))]
+
+    # ionic charge per atom (constant across lam for an isovalent substitution)
+    z_a = torch.tensor([float(pseudos[species_index[i]].z_valence)
+                        for i in range(na)], dtype=RDTYPE)
+    z_b = torch.tensor([float(tgt_pseudos[tgt_species[i]].z_valence)
+                        for i in range(na)], dtype=RDTYPE)
+    charges = (1.0 - lam_vec) * z_a + lam_vec * z_b
+    n_electrons = float(charges.sum())
+
+    # NLCC core density, blended per atom where an endpoint carries one
+    grid = sys_a.grid
+    uniq, inverse = _unique_shells(np.sqrt(grid.g2.reshape(-1).numpy()))
+    core_base = core_shell_tables(list(pseudos), uniq, inverse)
+    tgt_cores = {a: core_shell_tables([substitutions[a]], uniq, inverse)[0]
+                 for a in sub_atoms}
+    has_core = any(c is not None for c in core_base) or any(
+        c is not None for c in tgt_cores.values())
+    if has_core:
+        ref = next(c for c in list(core_base) + list(tgt_cores.values())
+                   if c is not None)
+        shells = []
+        for i in range(na):
+            base_c = core_base[species_index[i]]
+            base_c = base_c if base_c is not None else torch.zeros_like(ref)
+            if i in substitutions:
+                tc = tgt_cores[i]
+                tc = tc if tc is not None else torch.zeros_like(ref)
+                shells.append((1.0 - lam_vec[i]) * base_c + lam_vec[i] * tc)
+            else:
+                shells.append(base_c)
+        pos_t = torch.as_tensor(np.asarray(positions), dtype=RDTYPE)
+        rho_core = assemble_core_density(shells, list(range(na)), pos_t, grid)
+    else:
+        rho_core = None
+
+    batch = build_batched(sys_a.spheres, proj_data)
+    if nbands is None:
+        nbands = default_nbands(max(n_electrons, float(sys_b.n_electrons)))
+    return dataclasses.replace(
+        sys_a, charges=charges, n_electrons=n_electrons, vloc_atom=vloc_atom,
+        proj_data=proj_data, batch=batch, nbands=nbands, rho_core=rho_core)
