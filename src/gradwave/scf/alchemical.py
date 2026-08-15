@@ -23,14 +23,14 @@ difference. nspin=1 insulator for the gap DFPT; the energy gradient is general.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, TypedDict, cast
 
 import torch
 
 from gradwave.dtypes import RDTYPE
 
 if TYPE_CHECKING:
-    from gradwave.core.hamiltonian import ProjectorData
+    from gradwave.core.hamiltonian import HamiltonianK, ProjectorData
 
 
 class AlchemicalSpec(TypedDict):
@@ -642,7 +642,9 @@ def _chi0_operator(res, dvloc_r, ddij, tol=1e-8, max_iter=200) -> torch.Tensor:
 
     system = res.system
     grid = system.grid
-    hs = _hamiltonians(res)  # nspin=1: list[HamiltonianK]
+    # nspin=1 (guarded by the caller alchemical_density_response), so the union
+    # return of _hamiltonians is the flat per-k list.
+    hs = cast("list[HamiltonianK]", _hamiltonians(res))
     dr = torch.zeros(grid.shape, dtype=RDTYPE, device=grid.g2.device)
     for ik, h in enumerate(hs):
         c_occ, eps_occ = _occupied(res, 0, ik)
