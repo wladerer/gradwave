@@ -1,28 +1,36 @@
-"""Alchemical composition channel, phase 1 (local potential and ionic charge).
+"""Alchemical composition channel: differentiable substitution and design gradients.
 
-A per-atom weight lambda in [0, 1] blends two endpoint pseudopotentials so the
-ionic charge and the local potential become differentiable in composition. At
-lambda=0 the atom is species A, at lambda=1 it is species B, and dE/dlambda is
-the exact alchemical derivative of the local and Ewald terms by Hellmann-Feynman.
+A per-atom weight lambda in [0, 1] blends two endpoint pseudopotentials so
+composition becomes a differentiable coordinate. Every ionic piece blends: the
+ionic charge, the local potential, the KB nonlocal projectors (both endpoints'
+columns carried with the inactive one zero-coupled), and the NLCC core density.
+At lambda=0 the atom is species A, at lambda=1 species B. This is not the virtual
+crystal approximation -- the endpoints are real species and derivatives are taken
+there, so lambda=0/1 reproduce the pure cells to SCF noise.
 
-This never averages a potential into a fictitious crystal, so it is not the
-virtual crystal approximation. The blended endpoints are real species and the
-derivative is taken at those real endpoints. The nonlocal (KB) projectors are
-not blended here, so full-SCF endpoint exactness is a later phase. What phase 1
-establishes is the differentiable local-potential and charge channel, verified
-against finite difference.
+Two builders: ``setup_alchemical_system`` blends a whole cell between one A->B
+pair; ``setup_alchemical_substitution`` transmutes a chosen subset of sites in a
+real multi-species cell (the perovskite / defect / doping case). Two gradients:
+``alchemical_energy_gradient`` gives dE/dlambda for free by Hellmann-Feynman (the
+energy is variational, so the density response drops by the envelope theorem);
+``alchemical_gap_gradient`` gives the relaxed d(E_gap)/dlambda by a composition
+DFPT -- an eigenvalue is not variational, so it carries the self-consistent
+density response to a local+nonlocal bare perturbation (Sternheimer with an
+operator RHS, then a forward Dyson dressing). Both are checked against finite
+difference. nspin=1 insulator for the gap DFPT; the energy gradient is general.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypedDict
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, TypedDict, cast
 
 import torch
 
 from gradwave.dtypes import RDTYPE
 
 if TYPE_CHECKING:
-    from gradwave.core.hamiltonian import ProjectorData
+    from gradwave.core.hamiltonian import HamiltonianK, ProjectorData
 
 
 class AlchemicalSpec(TypedDict):
@@ -40,6 +48,39 @@ class AlchemicalSpec(TypedDict):
     tab_b: torch.Tensor  # (n1,n2,n3) endpoint B local table [eV·Å³]
     core_a: torch.Tensor | None  # endpoint A NLCC |G| shells, or None
     core_b: torch.Tensor | None  # endpoint B NLCC |G| shells, or None
+
+
+class SubstitutionSpec(TypedDict):
+    """Endpoint spec stashed on ``System.alchemical`` by
+    ``setup_alchemical_substitution`` and read back by the relaxed alchemical
+    gradient (``alchemical_gap_gradient`` / ``alchemical_eigenvalue_gradient``).
+
+    Unlike :class:`AlchemicalSpec` (a single A→B pair over the whole cell), this
+    carries a heterogeneous multi-species cell in which only ``sub_atoms``
+    transmute. Everything here is a detached λ-derivative building block: the
+    perturbation ∂V_ion/∂λ is linear in λ (a blend), so its derivative is the
+    fixed endpoint difference these fields encode. ``sub_mask`` is 1.0 on the
+    substituted sites and 0.0 elsewhere, keyed by atom index.
+
+    Local: per-atom ∂v_loc/∂λ = tab_target − tab_base, rebuilt from the two
+    ``vloc_tables`` and species maps. Nonlocal: ∂D/∂λ = block_diag(−mask·D_a,
+    +mask·D_b) over the stacked [A cols, B cols] layout ``blend_projector_data``
+    produced, so ``dij_a``/``dij_b`` (k-independent) and the two atom-index maps
+    reconstruct it. Core (NLCC): per-atom ∂n_core/∂λ = core_target − core_base.
+    """
+
+    sub_atoms: list[int]
+    sub_mask: torch.Tensor  # (na,) 1.0 on substituted sites, else 0.0
+    vloc_tables_a: torch.Tensor  # base per-species local tables [eV·Å³]
+    species_a: list[int]  # per-atom base species row into vloc_tables_a
+    vloc_tables_b: torch.Tensor  # target twin per-species tables
+    species_b: list[int]  # per-atom target species row into vloc_tables_b
+    dij_a: torch.Tensor  # (nproj_a, nproj_a) base KB matrix [eV], k-independent
+    dij_b: torch.Tensor  # (nproj_b, nproj_b) target KB matrix [eV]
+    atom_index_a: torch.Tensor  # (nproj_a,) atom of each base projector column
+    atom_index_b: torch.Tensor  # (nproj_b,) atom of each target projector column
+    core_base: list[torch.Tensor | None]  # per base-species NLCC |G| shells / None
+    tgt_cores: dict[int, torch.Tensor | None]  # substituted atom → target shells / None
 
 
 def alchemical_charges(z_a: float, z_b: float, lam: torch.Tensor) -> torch.Tensor:
@@ -302,3 +343,428 @@ def per_atom_local_tables(
     for a, (tab_a, tab_b, lam) in alchemical.items():
         rows[a] = blend_local_table(tab_a, tab_b, lam)
     return torch.stack(rows, dim=0)
+
+
+def setup_alchemical_substitution(cell, positions, pseudos, species_index,
+                                  substitutions, lam, ecut, kmesh=(1, 1, 1),
+                                  nbands=None, **setup_kw):
+    """Heterogeneous alchemical System: a real multi-species cell in which a chosen
+    subset of sites transmutes toward a target species with weight ``lam``, while
+    every other site stays its own fixed species.
+
+    This is the perovskite/defect/doping generalization of
+    :func:`setup_alchemical_system` (which blends the WHOLE cell between a single
+    endpoint pair). ``pseudos`` is the base per-species UPF list and
+    ``species_index`` the per-atom species (as passed to ``setup_system``).
+    ``substitutions`` maps an atom index to the target parsed UPF it transmutes
+    toward (e.g. every X-site of an ABX3 mapped to a different halide). ``lam`` is
+    a scalar (all substituted sites move together) or a vector over the substituted
+    sites in ``substitutions`` order. At ``lam=0`` this is the untouched base cell;
+    at ``lam=1`` the substituted sites are fully the target species. Only the ionic
+    terms (local table, KB projectors, ionic charge, NLCC core) depend on ``lam``.
+
+    The build mirrors :func:`setup_alchemical_system`: it forms the base cell and a
+    target twin (identical except at the substituted sites), then blends per atom
+    with a weight vector that is 0 on the fixed sites and ``lam`` on the substituted
+    ones. The blended KB operator carries both endpoints' projectors with the
+    inactive block zero-coupled, so ``lam=0``/``lam=1`` reproduce the pure cells.
+    """
+    import dataclasses
+
+    import numpy as np
+
+    from gradwave.core.batch import build_batched
+    from gradwave.scf.loop import setup_system
+    from gradwave.scf.setup_common import (
+        _unique_shells,
+        assemble_core_density,
+        core_shell_tables,
+        default_nbands,
+    )
+
+    na = len(positions)
+    species_index = list(species_index)
+    sub_atoms = list(substitutions.keys())
+
+    # base cell (lam=0) and a target twin (lam=1) that differs only at the
+    # substituted sites -- each gets a fresh species slot for its target pseudo.
+    sys_a = setup_system(cell, positions, species_index, list(pseudos),
+                         ecut, kmesh, **setup_kw)
+    tgt_species = list(species_index)
+    tgt_pseudos = list(pseudos)
+    for a, tgt_upf in substitutions.items():
+        tgt_pseudos.append(tgt_upf)
+        tgt_species[a] = len(tgt_pseudos) - 1
+    sys_b = setup_system(cell, positions, tgt_species, tgt_pseudos, ecut, kmesh,
+                         **setup_kw)
+
+    # per-atom transmutation weight: 0 on fixed sites, lam on substituted ones
+    lam_t = torch.as_tensor(lam, dtype=RDTYPE)
+    lam_vals = lam_t.expand(len(sub_atoms)) if lam_t.dim() == 0 else lam_t
+    lam_vec = torch.zeros(na, dtype=RDTYPE)
+    lam_vec[torch.tensor(sub_atoms, dtype=torch.long)] = lam_vals.to(RDTYPE)
+
+    # local table: base per atom, substituted rows blended toward the target
+    alch = {a: (sys_a.vloc_tables[species_index[a]],
+                sys_b.vloc_tables[tgt_species[a]], lam_vec[a])
+            for a in sub_atoms}
+    vloc_atom = per_atom_local_tables(
+        sys_a.vloc_tables, torch.as_tensor(species_index), alch)
+
+    # KB projectors: blend the two full multi-species projector sets per k
+    proj_data = [blend_projector_data(sys_a.proj_data[k], sys_b.proj_data[k], lam_vec)
+                 for k in range(len(sys_a.proj_data))]
+
+    # ionic charge per atom (constant across lam for an isovalent substitution)
+    z_a = torch.tensor([float(pseudos[species_index[i]].z_valence)
+                        for i in range(na)], dtype=RDTYPE)
+    z_b = torch.tensor([float(tgt_pseudos[tgt_species[i]].z_valence)
+                        for i in range(na)], dtype=RDTYPE)
+    charges = (1.0 - lam_vec) * z_a + lam_vec * z_b
+    n_electrons = float(charges.sum())
+
+    # NLCC core density, blended per atom where an endpoint carries one
+    grid = sys_a.grid
+    uniq, inverse = _unique_shells(np.sqrt(grid.g2.reshape(-1).numpy()))
+    core_base = core_shell_tables(list(pseudos), uniq, inverse)
+    tgt_cores = {a: core_shell_tables([substitutions[a]], uniq, inverse)[0]
+                 for a in sub_atoms}
+    has_core = any(c is not None for c in core_base) or any(
+        c is not None for c in tgt_cores.values())
+    if has_core:
+        ref = next(c for c in list(core_base) + list(tgt_cores.values())
+                   if c is not None)
+        shells = []
+        for i in range(na):
+            base_c = core_base[species_index[i]]
+            base_c = base_c if base_c is not None else torch.zeros_like(ref)
+            if i in substitutions:
+                tc = tgt_cores[i]
+                tc = tc if tc is not None else torch.zeros_like(ref)
+                shells.append((1.0 - lam_vec[i]) * base_c + lam_vec[i] * tc)
+            else:
+                shells.append(base_c)
+        pos_t = torch.as_tensor(np.asarray(positions), dtype=RDTYPE)
+        rho_core = assemble_core_density(shells, list(range(na)), pos_t, grid)
+    else:
+        rho_core = None
+
+    batch = build_batched(sys_a.spheres, proj_data)
+    if nbands is None:
+        nbands = default_nbands(max(n_electrons, float(sys_b.n_electrons)))
+
+    # stash the λ-derivative building blocks so the relaxed alchemical gradient
+    # (alchemical_gap_gradient) can reconstruct the bare perturbation ∂V_ion/∂λ.
+    sub_mask = torch.zeros(na, dtype=RDTYPE)
+    sub_mask[torch.tensor(sub_atoms, dtype=torch.long)] = 1.0
+    spec: SubstitutionSpec = {
+        "sub_atoms": sub_atoms,
+        "sub_mask": sub_mask,
+        "vloc_tables_a": sys_a.vloc_tables.detach(),
+        "species_a": list(species_index),
+        "vloc_tables_b": sys_b.vloc_tables.detach(),
+        "species_b": list(tgt_species),
+        "dij_a": sys_a.proj_data[0].dij_full.detach(),
+        "dij_b": sys_b.proj_data[0].dij_full.detach(),
+        "atom_index_a": sys_a.proj_data[0].atom_index,
+        "atom_index_b": sys_b.proj_data[0].atom_index,
+        "core_base": list(core_base),
+        "tgt_cores": tgt_cores,
+    }
+    return dataclasses.replace(
+        sys_a, charges=charges, n_electrons=n_electrons, vloc_atom=vloc_atom,
+        proj_data=proj_data, batch=batch, nbands=nbands, rho_core=rho_core,
+        alchemical=spec)
+
+
+# --------------------------------------------------------------------------- #
+# Relaxed alchemical eigenvalue / band-gap gradient (composition DFPT)
+#
+# alchemical_energy_gradient above is free: at the SCF stationary point the
+# energy is variational in ρ, so dE/dλ is the bare Hellmann-Feynman ionic term
+# and the density response drops out (envelope theorem). An *eigenvalue* is NOT
+# variational, so dε_i/dλ carries the self-consistent density response and is a
+# genuine DFPT problem:
+#
+#     dε_i/dλ = ⟨ψ_i| dV_KS/dλ |ψ_i⟩,   dV_KS/dλ = dV_ion/dλ + K_Hxc · dρ/dλ
+#
+# The bare perturbation dV_ion/dλ is a *local + nonlocal* operator: the local
+# form-factor change ∂v_loc/∂λ (and, for NLCC pseudos, the explicit core-XC
+# term f_xc·∂ρ_core/∂λ), plus the KB change ∂D/∂λ acting through the fixed
+# projectors. The density response solves the Dyson equation
+#
+#     dρ/dλ = χ₀[ dV_ion/dλ + K_Hxc dρ/dλ ]  =>  (1 − χ₀K_Hxc) dρ/dλ = χ₀[dV_ion/dλ]
+#
+# χ₀[dV_ion/dλ] needs a Sternheimer solve with an OPERATOR right-hand side
+# (scf.implicit.apply_chi0 only accepts a local field), which _chi0_operator
+# below supplies by adding the nonlocal ∂D/∂λ piece to the usual local RHS.
+# The self-consistent dressing then reuses the local χ₀ and K_Hxc kernels.
+# nspin=1 insulator (smearing="none"), use_symmetry=False — same regime as the
+# rest of scf.implicit. --------------------------------------------------------
+
+
+@dataclass
+class AlchemicalGapGradient:
+    """Result of :func:`alchemical_gap_gradient`.
+
+    ``dgap`` is the physically-meaningful relaxed d(E_gap)/dλ [eV] — the number
+    a finite difference of re-converged SCF gaps returns. ``dgap_frozen`` is the
+    sudden (frozen-density) estimate ⟨ψ|dV_ion/dλ|ψ⟩ with the same edges; the
+    difference ``dgap − dgap_frozen`` is exactly the self-consistent density
+    response, so reporting both makes the relaxation contribution explicit.
+    """
+
+    dgap: float
+    dvbm: float
+    dcbm: float
+    dgap_frozen: float
+    dvbm_frozen: float
+    dcbm_frozen: float
+    vbm_index: tuple[int, int]
+    cbm_index: tuple[int, int]
+
+
+def _substitution_bare_perturbation(res, xc) -> tuple[torch.Tensor, torch.Tensor]:
+    """Bare alchemical perturbation ∂V_ion/∂λ from a substitution System.
+
+    Returns ``(dvloc_r, ddij)``: the local field ∂v_loc/∂λ [eV] on the real-space
+    grid (including the explicit NLCC core-XC term f_xc·∂ρ_core/∂λ when an
+    endpoint carries a core), and the nonlocal KB derivative ∂D/∂λ over the
+    stacked [A cols, B cols] projector layout that ``blend_projector_data`` and
+    hence ``system.proj_data`` already use. Everything is an exact λ-derivative
+    (the blend is linear), evaluated from the endpoint differences stashed on
+    ``system.alchemical`` by :func:`setup_alchemical_substitution`.
+    """
+    from gradwave.core.energies.local_pp import local_potential_g
+    from gradwave.core.fftbox import g_to_r_box
+    from gradwave.postscf._response import fxc_hvp
+    from gradwave.scf.setup_common import assemble_core_density
+
+    system = res.system
+    spec = system.alchemical
+    if spec is None or "sub_atoms" not in spec:
+        raise ValueError(
+            "res.system was not built by setup_alchemical_substitution "
+            "(no substitution spec on system.alchemical)")
+    grid = system.grid
+    na = len(system.positions)
+
+    # local: per-atom ∂v_loc/∂λ = tab_target − tab_base (0 on fixed sites, whose
+    # base and target rows are the same pseudo table).
+    ta = spec["vloc_tables_a"][torch.as_tensor(spec["species_a"])]
+    tb = spec["vloc_tables_b"][torch.as_tensor(spec["species_b"])]
+    dtable = tb - ta  # (na, n1,n2,n3)
+    dvloc_g = local_potential_g(system.positions, system.species_index,
+                                system.vloc_tables, grid.g_cart, grid.volume,
+                                vloc_atom=dtable)
+    dvloc_r = g_to_r_box(dvloc_g).real  # (n1,n2,n3) [eV]
+
+    # explicit NLCC core-XC term: v_xc is built at ρ + ρ_core in the SCF, so a
+    # λ-dependent core contributes f_xc[ρ+ρ_core]·∂ρ_core/∂λ to the bare
+    # perturbation, exactly as the NLCC force carries ∫v_xc ∂ρ_core/∂τ.
+    core_base = spec["core_base"]
+    tgt_cores = spec["tgt_cores"]
+    has_core = any(c is not None for c in core_base) or any(
+        c is not None for c in tgt_cores.values())
+    if has_core:
+        ref = next(c for c in list(core_base) + list(tgt_cores.values())
+                   if c is not None)
+        shells = []
+        for i in range(na):
+            base_c = core_base[spec["species_a"][i]]
+            base_c = base_c if base_c is not None else torch.zeros_like(ref)
+            if i in tgt_cores:
+                tc = tgt_cores[i]
+                tc = tc if tc is not None else torch.zeros_like(ref)
+                shells.append(tc - base_c)  # ∂n_core/∂λ on a substituted site
+            else:
+                shells.append(torch.zeros_like(ref))
+        dcore_r = assemble_core_density(shells, list(range(na)),
+                                        system.positions, grid)
+        rho_xc = res.rho if system.rho_core is None else res.rho + system.rho_core
+        dvloc_r = dvloc_r + fxc_hvp(xc, rho_xc, grid, dcore_r)
+
+    # nonlocal: ∂D/∂λ = block_diag(−mask·D_a, +mask·D_b), row-scaling each atom's
+    # block by its transmutation weight derivative (mask=1 on substituted sites).
+    # Block-diagonal over atoms, so the row scale is the whole-block scale.
+    mask = spec["sub_mask"]
+    da = _scale_dij_blocks(spec["dij_a"], -mask, spec["atom_index_a"])
+    db = _scale_dij_blocks(spec["dij_b"], mask, spec["atom_index_b"])
+    ddij = torch.block_diag(da, db)
+    return dvloc_r, ddij
+
+
+def _sternheimer_op(h, c_occ, eps_occ, dvloc_r, ddij, alpha, tol, max_iter):
+    """(H − ε_n + α P_occ) δψ_n = −P_c (dV_ion/dλ) ψ_n for all occupied n at one k.
+
+    The operator counterpart of ``scf.implicit._sternheimer``: identical LHS, but
+    the RHS applies the full bare perturbation — the local field dvloc_r as a
+    real-space multiply plus the nonlocal ∂D/∂λ through the fixed projectors h.p.
+    """
+    from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
+    from gradwave.core.hamiltonian import becp
+    from gradwave.scf.implicit import projected_cg
+    from gradwave.solvers.precond import teter
+
+    def p_c(x):
+        return x - (x @ c_occ.conj().T) @ c_occ
+
+    psi_r = g_to_r(c_occ, h.sphere.flat_idx, h.shape)
+    dv_psi = box_to_sphere(r_to_g(psi_r * dvloc_r), h.sphere.flat_idx)
+    if h.p.shape[0]:
+        b = becp(h.p, c_occ)
+        dv_psi = dv_psi + (b.to(h.p.dtype) @ ddij.to(h.p.dtype)) @ h.p
+    rhs = -p_c(dv_psi)
+
+    def a_apply(x):
+        hx = h.apply(x) - eps_occ[:, None] * x
+        return p_c(hx) + alpha * ((x @ c_occ.conj().T) @ c_occ)
+
+    x = torch.zeros_like(rhs)
+    r = rhs - a_apply(x)
+    t_g = h.t
+    t_band = torch.clamp(
+        torch.einsum("bg,g,bg->b", c_occ.conj(), t_g.to(c_occ.dtype), c_occ).real,
+        min=1e-6)
+    x = projected_cg(a_apply, lambda rr: teter(rr, t_g, t_band), x, r, tol, max_iter)
+    return p_c(x)
+
+
+def _chi0_operator(res, dvloc_r, ddij, tol=1e-8, max_iter=200) -> torch.Tensor:
+    """δρ⁰ = χ₀[dV_ion/dλ] for the operator-valued bare perturbation (nspin=1).
+
+    Mirrors ``scf.implicit._chi0_channel`` — same occupied-band Sternheimer sum,
+    factor 2·f_full·w_k per band — but with the operator RHS of _sternheimer_op.
+    """
+    from gradwave.core.fftbox import g_to_r
+    from gradwave.postscf._response import sternheimer_shift
+    from gradwave.scf.implicit import _hamiltonians, _occupied
+
+    system = res.system
+    grid = system.grid
+    # nspin=1 (guarded by the caller alchemical_density_response), so the union
+    # return of _hamiltonians is the flat per-k list.
+    hs = cast("list[HamiltonianK]", _hamiltonians(res))
+    dr = torch.zeros(grid.shape, dtype=RDTYPE, device=grid.g2.device)
+    for ik, h in enumerate(hs):
+        c_occ, eps_occ = _occupied(res, 0, ik)
+        dpsi = _sternheimer_op(h, c_occ, eps_occ, dvloc_r, ddij,
+                               sternheimer_shift(eps_occ), tol, max_iter)
+        psi_r = g_to_r(c_occ, h.sphere.flat_idx, grid.shape)
+        dpsi_r = g_to_r(dpsi, h.sphere.flat_idx, grid.shape)
+        dr += (4.0 * float(system.kweights[ik])
+               * (psi_r.conj() * dpsi_r).real.sum(dim=0))
+    return dr / grid.volume
+
+
+def _solve_forward_response(res, xc, drho0, beta=0.4, tol=1e-9, max_iter=100,
+                            history=8) -> torch.Tensor:
+    """Forward Dyson solve (1 − χ₀K_Hxc) δρ = δρ⁰ by Anderson fixed-point.
+
+    δρ = δρ⁰ + χ₀[K_Hxc δρ]; the dressing term is a local field, so it reuses
+    scf.implicit.apply_chi0 / apply_k_hxc. This is the forward companion of
+    scf.implicit.solve_adjoint (which solves the transpose u = v̄ + K_Hxc[χ₀u]).
+    """
+    from gradwave.core._anderson import AndersonMixer
+    from gradwave.scf.implicit import apply_chi0, apply_k_hxc
+
+    def g(u):
+        return drho0 + apply_chi0(res, apply_k_hxc(res, xc, u))
+
+    u = drho0.clone()
+    mixer = AndersonMixer(history, beta)
+    step = float("inf")
+    for _ in range(max_iter):
+        r = g(u) - u
+        step = float(torch.linalg.norm(r)) / max(1.0, float(torch.linalg.norm(u)))
+        if step < tol:
+            return u
+        u = mixer.step(u.reshape(-1), r.reshape(-1)).reshape(u.shape)
+    raise RuntimeError(
+        f"alchemical forward response not converged ({step:.2e} after {max_iter})")
+
+
+def alchemical_density_response(res, xc, tol=1e-8, max_iter=200):
+    """Relaxed first-order density response dρ/dλ to the alchemical perturbation.
+
+    Returns ``(drho, dvloc_r, ddij)``: the self-consistent dρ/dλ on the grid and
+    the bare-perturbation pieces (reused by the eigenvalue expectations). nspin=1
+    insulator with use_symmetry=False, matching scf.implicit's regime.
+    """
+    from gradwave.scf.implicit import _check_no_symmetry, _res_is_insulating
+
+    if getattr(res, "nspin", 1) != 1:
+        raise NotImplementedError(
+            "relaxed alchemical gradient: nspin=1 only for now (the nspin=2 "
+            "χ₀/K_Hxc kernels exist; threading the spin channel is a follow-up)")
+    _check_no_symmetry(res)
+    if not _res_is_insulating(res):
+        raise NotImplementedError(
+            "relaxed alchemical gradient: insulator (smearing='none') only")
+    dvloc_r, ddij = _substitution_bare_perturbation(res, xc)
+    drho0 = _chi0_operator(res, dvloc_r, ddij, tol, max_iter)
+    drho = _solve_forward_response(res, xc, drho0)
+    return drho, dvloc_r, ddij
+
+
+def _vbm_cbm(res) -> tuple[tuple[int, int], tuple[int, int]]:
+    """(k, band) of the valence-band max (highest occupied) and conduction-band
+    min (lowest empty), from an insulating nspin=1 result."""
+    eig = res.eigenvalues  # (nk, nb)
+    occ_mask = res.occupations > 1e-6
+    if not bool(occ_mask.any()) or not bool((~occ_mask).any()):
+        raise ValueError("no clean occupied/empty split (metal or full/empty)")
+    vbm = eig[occ_mask].max()
+    cbm = eig[~occ_mask].min()
+    vk, vb = (int(i) for i in (eig == vbm).nonzero()[0])
+    ck, cb = (int(i) for i in (eig == cbm).nonzero()[0])
+    return (vk, vb), (ck, cb)
+
+
+def _band_deps_dlam(res, k, band, dv_local_r, ddij) -> float:
+    """dε_{k,band}/dλ = ⟨ψ|dv_local|ψ⟩ + ⟨ψ|∂D/∂λ|ψ⟩ for a single frozen orbital.
+
+    ``dv_local_r`` is the local field the orbital sees (the bare ∂v_loc/∂λ for the
+    sudden term, or the full dV_KS local part dv_loc + K_Hxc dρ for the relaxed
+    one). The nonlocal ∂D/∂λ expectation uses the same becp†·D·becp form as the
+    nonlocal energy.
+    """
+    from gradwave.core.fftbox import g_to_r
+    from gradwave.core.hamiltonian import becp, projectors
+
+    system = res.system
+    grid = system.grid
+    c = res.coeffs[k][band]
+    psi_box = g_to_r(c, system.spheres[k].flat_idx, grid.shape)
+    # ⟨ψ|V|ψ⟩ = ∫|ψ|²V dr = (1/N) Σ_grid |ψ_box|² V(r)  (ψ normalized: Σ_G|c|²=1)
+    local = ((psi_box.real ** 2 + psi_box.imag ** 2) * dv_local_r).mean()
+    p = projectors(system.proj_data[k], system.positions)
+    b = becp(p, c.unsqueeze(0))[0]  # (nproj,)
+    nl = torch.einsum("i,ij,j->", b.conj(), ddij.to(b.dtype), b).real
+    return float(local + nl)
+
+
+def alchemical_gap_gradient(res, xc, tol=1e-8, max_iter=200) -> AlchemicalGapGradient:
+    """Relaxed d(E_gap)/dλ for a substitution System, by composition DFPT.
+
+    The fundamental gap's sensitivity to the alchemical weight, with the full
+    self-consistent density response — the analytic counterpart of a finite
+    difference of re-converged SCF gaps. Also returns the sudden (frozen-density)
+    estimate so the relaxation contribution is explicit. Needs a System from
+    :func:`setup_alchemical_substitution`; nspin=1 insulator, use_symmetry=False.
+    """
+    from gradwave.scf.implicit import apply_k_hxc
+
+    drho, dvloc_r, ddij = alchemical_density_response(res, xc, tol, max_iter)
+    dv_hxc_r = apply_k_hxc(res, xc, drho)  # local SC potential shift [eV]
+    dv_ks_local_r = dvloc_r + dv_hxc_r
+
+    (vk, vb), (ck, cb) = _vbm_cbm(res)
+    dvbm = _band_deps_dlam(res, vk, vb, dv_ks_local_r, ddij)
+    dcbm = _band_deps_dlam(res, ck, cb, dv_ks_local_r, ddij)
+    dvbm_f = _band_deps_dlam(res, vk, vb, dvloc_r, ddij)
+    dcbm_f = _band_deps_dlam(res, ck, cb, dvloc_r, ddij)
+    return AlchemicalGapGradient(
+        dgap=dcbm - dvbm, dvbm=dvbm, dcbm=dcbm,
+        dgap_frozen=dcbm_f - dvbm_f, dvbm_frozen=dvbm_f, dcbm_frozen=dcbm_f,
+        vbm_index=(vk, vb), cbm_index=(ck, cb))

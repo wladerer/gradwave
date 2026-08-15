@@ -89,7 +89,7 @@ if TYPE_CHECKING:
     # classes at runtime in this file already goes through its own
     # function-local import (e.g. CollinearMagneticSymmetrizer at its
     # isinstance-check call sites below), so this stays annotation-only too.
-    from gradwave.scf.alchemical import AlchemicalSpec
+    from gradwave.scf.alchemical import AlchemicalSpec, SubstitutionSpec
     from gradwave.scf.recorder import SCFRecorder
     from gradwave.symmetry import (
         CollinearMagneticSymmetrizer,
@@ -129,8 +129,10 @@ class System:
     vloc_atom: torch.Tensor | None = None  # (na,n1,n2,n3) per-atom local table;
     # the alchemical composition channel sets a lambda-blended table here so
     # V_loc stays differentiable in composition (scf/alchemical.py)
-    alchemical: AlchemicalSpec | None = None  # endpoint spec for the composition
-    # gradient (scf/alchemical.setup_alchemical_system / alchemical_energy_gradient)
+    alchemical: AlchemicalSpec | SubstitutionSpec | None = None  # endpoint spec
+    # for the composition gradient: AlchemicalSpec (whole-cell A→B,
+    # setup_alchemical_system / alchemical_energy_gradient) or SubstitutionSpec
+    # (heterogeneous, setup_alchemical_substitution / alchemical_gap_gradient)
 
     def to(self, device: str) -> System:
         """Copy with every tensor moved to `device` (setup stays CPU/numpy-built)."""
