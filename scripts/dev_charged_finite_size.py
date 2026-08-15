@@ -46,25 +46,26 @@ def energy(L, q):
 
 
 def scan(q, label):
-    Ls = [8.0, 10.0, 12.0, 14.0]
-    Es = [energy(L, q) for L in Ls]
-    inv = np.array([1.0 / L for L in Ls])
-    # linear fit E = E_inf + slope/L
-    slope, e_inf = np.polyfit(inv, np.array(Es), 1)
+    Ls = [8.0, 10.0, 12.0, 14.0, 16.0, 18.0]
+    Es = np.array([energy(box, q) for box in Ls])
+    inv = np.array([1.0 / box for box in Ls])
     print(f"--- {label} (q={q}) ---")
-    for L, E in zip(Ls, Es):
-        print(f"  L={L:5.1f} Å   E={E:12.5f} eV   1/L={1 / L:.4f}")
-    print(f"  fit: E_inf={e_inf:.5f} eV   slope(E vs 1/L)={slope:+.4f} eV·Å")
-    if q != 0:
-        expect = q * q * ALPHA_M * E2 / 2.0
-        print(f"  Makov-Payne expected slope = q²·α_M·e²/2 = {expect:+.4f} eV·Å")
-        print(f"  ratio measured/expected = {slope / expect:+.4f}\n")
-    else:
-        print()
+    for box, E in zip(Ls, Es):
+        print(f"  L={box:5.1f} Å   E={E:12.5f} eV   1/L={1 / box:.4f}")
+    # 1-term (monopole only) and 2-term (monopole + L^-3 quadrupole) fits
+    slope1 = np.polyfit(inv, Es, 1)[0]
+    A = np.vstack([np.ones_like(inv), inv, inv ** 3]).T
+    _, a, b = np.linalg.lstsq(A, Es, rcond=None)[0]
+    # Makov-Payne monopole: E ~ E_inf - q² α_M e² / (2L), so the L^-1 coefficient
+    # should be -q² α_M e²/2. Report the implied Madelung constant.
+    unit = -q * q * E2 / 2.0
+    print(f"  slope (1-term, E vs 1/L)   = {slope1:+.4f} eV·Å  → α_M,eff = {slope1 / unit:.4f}")
+    print(f"  L^-1 coeff (2-term +L^-3)  = {a:+.4f} eV·Å  → α_M,eff = {a / unit:.4f}"
+          f"   (L^-3 coeff {b:+.2f})")
+    print(f"  true simple-cubic α_M = {ALPHA_M:.4f}   (α_M+1/π = {ALPHA_M + 1 / np.pi:.4f})\n")
 
 
 def main():
-    scan(0, "neutral Na  (control)")
     scan(1, "Na+ charged cell")
 
 
