@@ -448,12 +448,17 @@ matches single-site FD to ~0.1 meV on non-degenerate-picking sites; the degenera
 gauge dependence (rung-1 caveat) shifts one equivalent site by ~4 meV — the sum and coupled
 are unaffected.
 
-**Rung 2 — single-site aliovalent + Janak (open).** Let N(λ)=ΣZ(λ) follow the ionic charge
-(neutral), fractional N mid-path → metallic → the gap dissolves; the ENERGY gradient stays
-clean via the Janak term μ·dN/dλ (wire it for the substitution spec; the binary
-`alchemical_energy_gradient` already carries it). Per-state eigenvalue derivatives need the
-metallic χ₀ path (`_chi0_channel_metal`, exists). Grounding: von Lilienfeld APDFT (energy
-alchemy is exact at first order by the envelope theorem; eigenvalue alchemy is not — the
+**Rung 2 — single-site aliovalent + Janak (landed 2026-08-15).** N(λ)=ΣZ(λ) follows the ionic
+charge, fractional N mid-path → metallic (smearing), the gap dissolves, but the ENERGY
+gradient stays clean via the Janak term μ·dN/dλ. `alchemical_energy_gradient` now dispatches
+on the spec kind: `_substitution_energy_gradient` rebuilds the per-atom ionic terms from the
+`SubstitutionSpec` (which now stashes `z_base`/`z_target`) and carries the Janak term (the
+binary path already had it). Validated on **Si→As** (ΔZ=+1, one site in diamond Si, N=8.5,
+metallic): analytic dF/dλ = −64.766 vs FD −64.766 (0.2 meV), the Janak share being +7.42 eV
+(11.5 %); the **Si→C** isovalent control (ΔZ=0) has the Janak term vanish and still matches FD.
+Per-state eigenvalue derivatives in the metallic case need the metallic χ₀ path
+(`_chi0_channel_metal`, exists) — a follow-up. Grounding: von Lilienfeld APDFT (energy alchemy
+is exact at first order by the envelope theorem; eigenvalue alchemy is not — the
 frozen-vs-relaxed gaps above are the direct evidence).
 
 **Rung 3 — charged-cell fixed-N (open).** Hold N, transmute aliovalently → charged cell →

@@ -179,3 +179,47 @@ def test_persite_charge_conserving_cosubstitution():
     assert set(per_site) == {0, 1}
     # frozen is materially wrong: the density response is the whole gradient
     assert abs(g.dgap - g.dgap_frozen) > 1.0
+
+
+def test_aliovalent_energy_gradient_with_janak():
+    """Single-site aliovalent transmutation (Si -> As, ΔZ=+1) in diamond Si: N
+    follows the ionic charge (fractional, metallic), so dF/dλ carries the Janak
+    term μ·dN/dλ on top of the bare Hellmann-Feynman ionic derivative. It matches
+    a central FD of re-converged free energies, and the isovalent control
+    (Si -> C, ΔZ=0) has the Janak term vanish."""
+    torch.set_num_threads(4)
+    si = parse_upf(PSEUDOS / "Si_ONCV_PBE-1.2.upf")
+    as_ = parse_upf(PSEUDOS / "As_ONCV_PBE-1.2.upf")
+    cc = parse_upf(PSEUDOS / "C_ONCV_PBE-1.2.upf")
+    a = 5.43
+    cell = a * np.array([[0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0.5, 0]])
+    pos = np.array([[0, 0, 0], [0.25, 0.25, 0.25]]) @ cell
+    ecut, km = 30 * RY, (2, 2, 2)
+    kw = dict(smearing="fermi-dirac", width=0.15, etol=1e-10, rhotol=1e-9,
+              max_iter=400, verbose=False)
+
+    def check(target, dZ_expected):
+        def run(lam):
+            return scf(setup_alchemical_substitution(
+                cell, pos, [si], [0, 0], {1: target}, lam, ecut=ecut, kmesh=km,
+                use_symmetry=False), PBE(), **kw)
+
+        lam = 0.5
+        res = run(lam)
+        assert res.converged
+        spec = res.system.alchemical
+        dN = float((spec["z_target"] - spec["z_base"]).sum())
+        assert abs(dN - dZ_expected) < 1e-9
+        janak = float(res.fermi) * dN
+
+        dF = float(alchemical_energy_gradient(res, lam, xc=PBE()))
+        h = 0.01
+        fd = (float(run(lam + h).energies.free_energy)
+              - float(run(lam - h).energies.free_energy)) / (2 * h)
+        assert abs(dF - fd) < 5e-3, f"dF/dλ {dF} vs FD {fd} (ΔZ={dZ_expected})"
+        return janak
+
+    janak_alio = check(as_, 1)     # aliovalent: Janak term is real and large
+    assert abs(janak_alio) > 1.0
+    janak_iso = check(cc, 0)       # isovalent control: Janak vanishes
+    assert abs(janak_iso) < 1e-9
