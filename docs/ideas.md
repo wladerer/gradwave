@@ -461,11 +461,32 @@ Per-state eigenvalue derivatives in the metallic case need the metallic χ₀ pa
 is exact at first order by the envelope theorem; eigenvalue alchemy is not — the
 frozen-vs-relaxed gaps above are the direct evidence).
 
-**Rung 3 — charged-cell fixed-N (open).** Hold N, transmute aliovalently → charged cell →
-jellium + finite-size (Makov-Payne / FNV) image corrections; the defect-formation route.
+**Rung 3 — charged-cell fixed-N (scoped, NOT built — needs infrastructure).** Hold N fixed and
+transmute one site aliovalently → the cell carries a net charge. gradwave currently *forces*
+neutrality (`scf/loop.py`: `n_electrons = charges.sum()`, no `tot_charge` knob), so this rung
+needs (a) a net-charge SCF capability (a compensating uniform jellium background — the Ewald
+already has the neutralizing-background term, but nelec must be allowed to differ from ΣZ) and
+(b) a finite-size image-charge correction (Makov-Payne monopole ∝ L⁻¹, or the better
+Freysoldt-Neugebauer-Van de Walle / Lany-Zunger schemes for localized charge; MP overcorrects
+except for point-charge-like defects — Kumagai & Oba, PRB 86, 045112, 2012). This is a
+general charged-cell infrastructure project (the defect-formation-energy machinery), not an
+alchemical-gradient extension, so it is deliberately left for a dedicated build rather than
+forced here. The derivative machinery (`_substitution_energy_gradient`) would then carry the
+background/correction terms.
 
-**Rung 4 — grand-canonical fixed-μ (open, research-y).** Legendre-transform to fixed μ; N
-floats, Janak term central; constant-potential/electrochemistry DFT.
+**Rung 4 — grand-canonical fixed-μ (landed 2026-08-15).** `alchemical_energy_gradient(...,
+grand_canonical=True)` returns the grand-potential derivative dΩ/dλ = dF/dλ − μ·dN/dλ. At
+fixed chemical potential the Janak μ·dN/dλ bookkeeping cancels the −μN Legendre term, so the
+grand-canonical alchemical gradient reduces to the **bare Hellmann-Feynman ionic derivative**
+— the electron reservoir absorbs the composition-driven electron-count change. Validated on
+Si→As (N=8.5, metallic): dΩ/dλ matches a central FD of Ω = F − μN (μ fixed at the reference
+Fermi level) to <5 meV, and the Legendre relation dF = dΩ + μ·dN holds to 1e-6. This is the
+standard *indirect* route to grand-canonical properties (Legendre transform of the canonical
+fixed-N path — Sundararaman et al., JCP 146, 114104, 2017): a grand-canonical surface carries
+no more information than the canonical one they are linked to. A *direct* constant-µ SCF
+already exists via `target_mu`, but it requires `boundary='open_z_metal'` (an ESM slab with an
+electron reservoir), so composing it with an alchemical substitution on a slab is the
+electrochemistry follow-up.
 
 Other open tails. nspin=2 and metals for the gap DFPT: the χ₀/K_Hxc kernels already have
 spin-resolved and partial-occupation paths in `scf/implicit.py`, so these are threading, not

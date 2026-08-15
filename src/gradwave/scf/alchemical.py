@@ -246,7 +246,7 @@ def setup_alchemical_system(cell, positions, upf_a, upf_b, lam, ecut,
                                alchemical=spec)
 
 
-def _substitution_energy_gradient(res, lam, xc=None):
+def _substitution_energy_gradient(res, lam, xc=None, grand_canonical=False):
     """dE/dλ for a heterogeneous substitution System (rung 2 of the aliovalent
     ladder), by Hellmann-Feynman at the converged density.
 
@@ -257,6 +257,13 @@ def _substitution_energy_gradient(res, lam, xc=None):
     the free energy carries the Janak chemical-potential term μ·dN/dλ (μ the
     Fermi level) — the same term the binary path already has. ``lam`` is a scalar
     driving all substituted sites together.
+
+    ``grand_canonical`` (rung 4) drops the Janak term to return the grand-potential
+    derivative dΩ/dλ = dF/dλ − μ·dN/dλ instead of the canonical dF/dλ. At fixed
+    chemical potential the μ·dN/dλ bookkeeping cancels against the −μN Legendre
+    term, so the grand-canonical alchemical gradient is exactly the bare
+    Hellmann-Feynman ionic derivative — the reservoir absorbs the electron-count
+    change (the standard indirect Legendre route to grand-canonical properties).
     """
     from gradwave.core.energies.ewald import ewald_energy
     from gradwave.core.energies.local_pp import local_energy, local_potential_g
@@ -305,7 +312,9 @@ def _substitution_energy_gradient(res, lam, xc=None):
     e_ion = e_local + e_nl + e_ewald
 
     # Janak term: N(λ) follows the ionic charge for an aliovalent transmutation.
-    if getattr(res, "fermi", None) is not None:
+    # Omitted in the grand-canonical ensemble, where it cancels the −μN Legendre
+    # term (rung 4): dΩ/dλ is then the bare Hellmann-Feynman ionic derivative.
+    if not grand_canonical and getattr(res, "fermi", None) is not None:
         e_ion = e_ion + float(res.fermi) * charges.sum()
 
     core_base = spec["core_base"]
@@ -338,7 +347,7 @@ def _substitution_energy_gradient(res, lam, xc=None):
     return grad.detach()
 
 
-def alchemical_energy_gradient(res, lam, xc=None):
+def alchemical_energy_gradient(res, lam, xc=None, grand_canonical=False):
     """dE/dlambda through the converged SCF by Hellmann-Feynman (phases 3b, 4).
 
     At the self-consistent density only the ionic terms depend on lambda, so
@@ -353,8 +362,14 @@ def alchemical_energy_gradient(res, lam, xc=None):
     density depends on lambda, so E_xc(rho + rho_core(lambda)) contributes a
     core-correction term, the composition analogue of the NLCC force. For an
     aliovalent (charge-changing) transmutation the electron count follows the
-    ionic charge and the free energy gains the Janak term mu*dN/dlambda. lam
-    matches the shape used to build the system, so a scalar returns the uniform
+    ionic charge and the free energy gains the Janak term mu*dN/dlambda (rung 2).
+
+    ``grand_canonical=True`` (rung 4) drops the Janak term and returns the grand
+    potential derivative dOmega/dlambda = dF/dlambda - mu*dN/dlambda instead of
+    the canonical dF/dlambda. At fixed chemical potential the two are linked by a
+    Legendre transform, and the grand-canonical alchemical gradient reduces to the
+    bare Hellmann-Feynman ionic derivative (no chemical-potential bookkeeping).
+    lam matches the shape used to build the system, so a scalar returns the uniform
     dE/dlambda and a per-atom (na,) vector returns the per-site gradient.
     """
     from gradwave.core.energies.ewald import ewald_energy
@@ -369,7 +384,7 @@ def alchemical_energy_gradient(res, lam, xc=None):
         raise ValueError(
             "res.system was not built by setup_alchemical_system/substitution")
     if "sub_atoms" in spec:  # heterogeneous substitution spec
-        return _substitution_energy_gradient(res, lam, xc)
+        return _substitution_energy_gradient(res, lam, xc, grand_canonical)
     grid = system.grid
     nspin = getattr(res, "nspin", 1)
     na = len(system.positions)
@@ -404,8 +419,9 @@ def alchemical_energy_gradient(res, lam, xc=None):
     # Heterovalent (charge-changing) transmutation: the electron count follows the
     # ionic charge, N(lambda) = sum_i Z_i(lambda), so the free energy gains the
     # Janak chemical-potential term mu * dN/dlambda with mu the Fermi level. This
-    # vanishes for isovalent pairs where N is constant.
-    if getattr(res, "fermi", None) is not None:
+    # vanishes for isovalent pairs where N is constant, and is dropped in the
+    # grand-canonical ensemble (rung 4), leaving the bare ionic derivative.
+    if not grand_canonical and getattr(res, "fermi", None) is not None:
         e_ion = e_ion + float(res.fermi) * charges.sum()
 
     # NLCC core-correction: rho_core depends on lambda, so E_xc(rho + rho_core)
