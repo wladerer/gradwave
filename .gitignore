@@ -23,3 +23,6 @@ input_tmp.in
 # py-spy / profiling artifacts
 profile.speedscope.json
 *.speedscope.json
+
+# generated interactive delta-gauge periodic table (PNG is committed)
+benchmarks/delta_gauge/results/delta_ptable.html
