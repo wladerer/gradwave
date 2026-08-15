@@ -502,12 +502,20 @@ miss, gradient-driven composition design verified against ground truth. The scal
 the cubic symmetry so the degenerate VBM shifts uniformly and the gradient stays exact; the
 degenerate-edge caveat only matters for symmetry-breaking per-site design.
 
+Arbitrary observable (landed 2026-08-15). `alchemical_observable_gradient(res, xc, observable)`
+gives the relaxed dO/dλ for ANY differentiable density-functional observable O[ρ] — a multipole
+moment, the charge in a region, a density overlap — as ⟨δO/δρ|dρ/dλ⟩, with δO/δρ by autograd
+and dρ/dλ the composition DFPT response. This turns the gap-specific tool into general
+composition→property design. Validated on SiC→C: the electron-count response dN/dλ = −4e-17 (the
+isovalent response conserves electrons, an exact internal check) and the density overlap
+d(∫ρ²)/dλ = −0.2111 matches FD to 7e-4. The band gap is the eigenvalue-observable special case
+(a function of {ε_i} rather than of ρ); response-function observables (ε∞, Born charges) are
+second-order (a mixed composition+field DFPT) and remain open.
+
 Other open tails. nspin=2 and metals for the gap DFPT: the χ₀/K_Hxc kernels already have
 spin-resolved and partial-occupation paths in `scf/implicit.py`, so these are threading, not
-new physics. The relaxed derivative of an ARBITRARY observable (not just gap edges) via the
-same density response → target-property inverse design over composition. Degenerate band
-edges want the degenerate-subspace first-order form (the current single-state expectation
-assumes a non-degenerate edge).
+new physics. Degenerate band edges want the degenerate-subspace first-order form (the current
+single-state expectation assumes a non-degenerate edge).
 
 Framing / citations: this whole line is the self-consistent upgrade to first-order band-gap
 alchemy — APDFT (von Lilienfeld & Tuckerman, arXiv:1809.01647) and the AlxGa1-xAs direct-gap

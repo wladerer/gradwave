@@ -27,6 +27,7 @@ from gradwave.scf.alchemical import (
     alchemical_energy_gradient,
     alchemical_gap_gradient,
     alchemical_gap_gradient_per_site,
+    alchemical_observable_gradient,
     setup_alchemical_substitution,
     setup_alchemical_system,
 )
@@ -268,3 +269,41 @@ def test_grand_canonical_energy_gradient():
     assert abs(d_f - (d_omega + mu * dN)) < 1e-6
     # the grand-canonical gradient really differs from the canonical one
     assert abs(d_f - d_omega) > 1.0
+
+
+def test_observable_gradient_vs_fd():
+    """The general relaxed derivative dO/dλ for a density-functional observable
+    matches a central FD of the re-converged observable. Two observables on the
+    isovalent SiC→C substitution: the electron count ∫ρ (whose response gradient
+    must vanish — the composition response conserves electrons for an isovalent
+    pair) and the density overlap ∫ρ² (a nonzero localization change)."""
+    torch.set_num_threads(4)
+    cell, pos = _sic_cell()
+    si, c = parse_upf(SI), parse_upf(C)
+    ecut, km = 30 * RY, (2, 2, 2)
+    kw = dict(smearing="none", etol=1e-10, rhotol=1e-9, verbose=False)
+
+    def run(lam):
+        return scf(setup_alchemical_substitution(
+            cell, pos, [si, c], [0, 1], {0: c}, lam, ecut=ecut, kmesh=km,
+            use_symmetry=False), PBE(), **kw)
+
+    lam = 0.5
+    res = run(lam)
+    assert res.converged
+    dv = res.system.grid.volume / res.rho.numel()
+
+    # 1. electron count: ∫ρ dr = N; the isovalent response conserves it → dO/dλ≈0
+    n_of = lambda rho: rho.sum() * dv                                   # noqa: E731
+    dN = alchemical_observable_gradient(res, PBE(), n_of)
+    assert abs(dN) < 5e-4, f"∫dρ/dλ should vanish (isovalent), got {dN}"
+
+    # 2. density overlap ∫ρ² dr — a real localization change, checked vs FD
+    ov = lambda rho: (rho ** 2).sum() * dv                             # noqa: E731
+    dO = alchemical_observable_gradient(res, PBE(), ov)
+    h = 0.02
+    op = float((run(lam + h).rho ** 2).sum() * dv)
+    om = float((run(lam - h).rho ** 2).sum() * dv)
+    fd = (op - om) / (2 * h)
+    assert abs(dO) > 1e-3                       # genuinely nonzero
+    assert abs(dO - fd) < 5e-3, f"d(∫ρ²)/dλ {dO} vs FD {fd}"
