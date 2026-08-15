@@ -1,16 +1,23 @@
-"""Alchemical composition channel, phase 1 (local potential and ionic charge).
+"""Alchemical composition channel: differentiable substitution and design gradients.
 
-A per-atom weight lambda in [0, 1] blends two endpoint pseudopotentials so the
-ionic charge and the local potential become differentiable in composition. At
-lambda=0 the atom is species A, at lambda=1 it is species B, and dE/dlambda is
-the exact alchemical derivative of the local and Ewald terms by Hellmann-Feynman.
+A per-atom weight lambda in [0, 1] blends two endpoint pseudopotentials so
+composition becomes a differentiable coordinate. Every ionic piece blends: the
+ionic charge, the local potential, the KB nonlocal projectors (both endpoints'
+columns carried with the inactive one zero-coupled), and the NLCC core density.
+At lambda=0 the atom is species A, at lambda=1 species B. This is not the virtual
+crystal approximation -- the endpoints are real species and derivatives are taken
+there, so lambda=0/1 reproduce the pure cells to SCF noise.
 
-This never averages a potential into a fictitious crystal, so it is not the
-virtual crystal approximation. The blended endpoints are real species and the
-derivative is taken at those real endpoints. The nonlocal (KB) projectors are
-not blended here, so full-SCF endpoint exactness is a later phase. What phase 1
-establishes is the differentiable local-potential and charge channel, verified
-against finite difference.
+Two builders: ``setup_alchemical_system`` blends a whole cell between one A->B
+pair; ``setup_alchemical_substitution`` transmutes a chosen subset of sites in a
+real multi-species cell (the perovskite / defect / doping case). Two gradients:
+``alchemical_energy_gradient`` gives dE/dlambda for free by Hellmann-Feynman (the
+energy is variational, so the density response drops by the envelope theorem);
+``alchemical_gap_gradient`` gives the relaxed d(E_gap)/dlambda by a composition
+DFPT -- an eigenvalue is not variational, so it carries the self-consistent
+density response to a local+nonlocal bare perturbation (Sternheimer with an
+operator RHS, then a forward Dyson dressing). Both are checked against finite
+difference. nspin=1 insulator for the gap DFPT; the energy gradient is general.
 """
 
 from __future__ import annotations

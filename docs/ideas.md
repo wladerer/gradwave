@@ -396,6 +396,46 @@ basis along the leading Jacobian directions, or one Gauss-Newton step on the lin
 instead of Adam. The D_ij (KB coefficient) rung comes last, since the nonlocal channel has
 the same linear-in-parameter HF structure but multiplies the null-space question.
 
+## Alchemical composition channel and the band-gap design gradient
+
+**Status: landed (2026-08-15). Differentiable substitution + the relaxed d(E_gap)/dλ
+by composition DFPT, validated against finite difference; per-site vector λ, nspin=2,
+and metals are the open tails.**
+
+`scf/alchemical.py`. A per-atom weight λ blends two endpoint pseudopotentials across
+every ionic piece — charge, local potential, KB projectors (both endpoints' columns
+carried, the inactive one zero-coupled), and the NLCC core density — so composition is
+a differentiable coordinate. `setup_alchemical_system` blends a whole cell A→B;
+`setup_alchemical_substitution` transmutes a chosen subset of sites in a real
+multi-species cell (perovskite/defect/doping). Not the VCA: the endpoints are real and
+λ=0/1 reproduce the pure cells to SCF noise (verified).
+
+Two gradients. `alchemical_energy_gradient` gives dE/dλ for free by Hellmann-Feynman —
+at the SCF minimum the density is variational, so the response drops by the envelope
+theorem and only the bare ionic terms survive (validated to ~3e-10 rel vs FD, the energy
+being exactly linear in λ at frozen density). `alchemical_gap_gradient` gives the
+*relaxed* d(E_gap)/dλ, the physically-meaningful design quantity: an eigenvalue is NOT
+variational, so dε_i/dλ = ⟨ψ_i|dV_KS/dλ|ψ_i⟩ carries the self-consistent density
+response. The bare perturbation dV_ion/dλ is a **local + nonlocal operator** (the local
+form-factor change, the explicit NLCC core-XC term f_xc·∂ρ_core/∂λ, and the KB ∂D/∂λ
+through the fixed projectors), so the response needs a Sternheimer solve with an operator
+RHS — `_chi0_operator` adds the nonlocal piece to the local-field Sternheimer of
+`scf/implicit.py` — plus a forward Dyson dressing (1−χ₀K_Hxc)⁻¹. Validated on two systems
+(SiC→C, CsPbI3→CsPbCl3): analytic relaxed dε and d(E_gap)/dλ match a central FD of
+re-converged eigenvalues/gaps to ~1e-4 eV (FD-limited). The **frozen (sudden) estimate is
+off by >10×** on the perovskite (+8.9 vs +0.77 eV) and is ~0 while the relaxed is +2.4 eV
+on SiC→C — the density response is the entire gradient, which is why the nonlocal build
+was necessary rather than the cheap frozen matrix element.
+
+Open tails, in order. (1) Per-site vector λ (the primitives already take a per-atom weight;
+the DFPT currently returns the scalar-λ gap gradient — expose the per-site vector so a
+gradient search over site occupancies falls out). (2) nspin=2 and (3) metals: the χ₀/K_Hxc
+kernels already have spin-resolved and partial-occupation paths in `scf/implicit.py`, so
+these are threading, not new physics. (4) The relaxed derivative of an arbitrary observable
+(not just the gap edges) via the same density response, e.g. a target-property inverse
+design over composition. (5) Degenerate band edges need the degenerate-subspace first-order
+form (the current single-state expectation assumes a non-degenerate edge).
+
 # Magnetism and spin-orbit coupling
 
 ## Differentiable spintronics: spin Hamiltonians, DMI, and inverse design

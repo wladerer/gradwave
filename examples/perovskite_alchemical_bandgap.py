@@ -3,8 +3,12 @@
 The X-site halides of cubic CsPbI3 are transmuted toward Cl with an alchemical
 weight lambda, holding the Cs (A-site) and Pb (B-site) sublattices fixed. Because
 composition is now a differentiable coordinate, the sensitivity of the fundamental
-gap to substitution, d(E_gap)/d(lambda), is read from a small finite difference of
-full SCFs -- a composition-to-property design gradient at (a few) SCF cost.
+gap to substitution, d(E_gap)/d(lambda), is a composition-to-property design
+gradient computed analytically by the composition DFPT (alchemical_gap_gradient):
+the relaxed derivative, with the self-consistent density response, from a single
+converged SCF. It is cross-checked here against a central finite difference of
+re-converged SCFs, and the frozen (sudden) estimate is shown for contrast -- the
+density response, not the bare matrix element, carries the gradient.
 
 Replacing the heavier halide (I) by the lighter one (Cl) widens the gap of a
 lead-halide perovskite, so d(E_gap)/d(lambda_Cl) > 0 is the expected, checkable
@@ -25,7 +29,10 @@ import numpy as np
 from gradwave.api._common import _gap
 from gradwave.core.xc.pbe import PBE
 from gradwave.pseudo.upf import parse_upf
-from gradwave.scf.alchemical import setup_alchemical_substitution
+from gradwave.scf.alchemical import (
+    alchemical_gap_gradient,
+    setup_alchemical_substitution,
+)
 from gradwave.scf.loop import scf, setup_system
 
 RY = 13.605693122994
@@ -54,27 +61,34 @@ X_SITES = {2: cl, 3: cl, 4: cl}   # transmute the three I sites toward Cl
 
 ECUT = 40 * RY
 KMESH = (2, 2, 2)   # Gamma-centered, so it contains R = (1/2,1/2,1/2), the ABX3 gap
-SCF_KW = dict(smearing="none", etol=1e-8, rhotol=1e-8, max_iter=200, verbose=False)
+# use_symmetry=False: the composition DFPT (alchemical_gap_gradient) needs the
+# full TR-reduced mesh, since the perturbation breaks the crystal symmetry.
+SCF_KW = dict(smearing="none", etol=1e-9, rhotol=1e-9, max_iter=300, verbose=False)
 
 
-def gap_of(system):
+def _run(system):
     res = scf(system, PBE(), **SCF_KW)
-    return (float(res.energies.free_energy),
-            _gap(res.eigenvalues, res.occupations, res.nspin),
-            bool(res.converged))
+    return (res, float(res.energies.free_energy),
+            _gap(res.eigenvalues, res.occupations, res.nspin))
 
 
 def alch(lam):
     return setup_alchemical_substitution(
-        cell, pos, pseudos, species, X_SITES, lam, ecut=ECUT, kmesh=KMESH)
+        cell, pos, pseudos, species, X_SITES, lam, ecut=ECUT, kmesh=KMESH,
+        use_symmetry=False)
+
+
+def _base(pseudo_list):
+    return setup_system(cell, pos, species, pseudo_list, ECUT, KMESH,
+                        use_symmetry=False)
 
 
 def main():
     # endpoint reproduction: alchemical lam=0 == pure CsPbI3, lam=1 == pure CsPbCl3
-    e_i, gap_i, _ = gap_of(setup_system(cell, pos, species, pseudos, ECUT, KMESH))
-    e_a0, gap_a0, _ = gap_of(alch(0.0))
-    e_cl, gap_cl, _ = gap_of(setup_system(cell, pos, species, [cs, pb, cl], ECUT, KMESH))
-    e_a1, gap_a1, _ = gap_of(alch(1.0))
+    _, e_i, gap_i = _run(_base(pseudos))
+    _, e_a0, gap_a0 = _run(alch(0.0))
+    _, e_cl, gap_cl = _run(_base([cs, pb, cl]))
+    _, e_a1, gap_a1 = _run(alch(1.0))
     print(f"CsPbI3    : E = {e_i:.6f} eV   gap = {gap_i}")
     print(f"  alch(0) : E = {e_a0:.6f} eV   gap = {gap_a0}   "
           f"|dE| = {abs(e_a0 - e_i) * 1e3:.2e} meV")
@@ -82,12 +96,26 @@ def main():
     print(f"  alch(1) : E = {e_a1:.6f} eV   gap = {gap_a1}   "
           f"|dE| = {abs(e_a1 - e_cl) * 1e3:.2e} meV")
 
-    # band-gap design gradient d(gap)/d(lambda_Cl) by a forward finite difference
-    h = 0.1
-    _, gap_h, _ = gap_of(alch(h))
-    dgap = (gap_h - gap_a0) / h
-    print(f"\nd(E_gap)/d(lambda_Cl) ~ {dgap:+.3f} eV   (I->Cl should widen the gap, i.e. > 0)")
-    print(f"endpoint gap change    {gap_cl - gap_i:+.3f} eV   (CsPbCl3 - CsPbI3)")
+    # band-gap design gradient d(E_gap)/d(lambda_Cl), analytically by the
+    # composition DFPT (the relaxed derivative, with the self-consistent density
+    # response), checked against a central finite difference of re-converged SCF
+    # gaps. The frozen (sudden) estimate is printed too, to show how much of the
+    # gradient is the density response.
+    lam = 0.5
+    res, _, gap_m = _run(alch(lam))
+    g = alchemical_gap_gradient(res, PBE())
+    h = 0.05
+    _, _, gap_p = _run(alch(lam + h))
+    _, _, gap_n = _run(alch(lam - h))
+    fd = (gap_p - gap_n) / (2 * h)
+    print(f"\nat lambda={lam}  gap = {gap_m:.4f} eV")
+    print(f"d(E_gap)/d(lambda_Cl)  DFPT (relaxed) = {g.dgap:+.4f} eV")
+    print(f"                       finite diff     = {fd:+.4f} eV   "
+          f"(agree to {abs(g.dgap - fd) * 1e3:.2f} meV)")
+    print(f"                       frozen (sudden) = {g.dgap_frozen:+.4f} eV   "
+          f"(density response carries the rest)")
+    print(f"endpoint gap change    {gap_cl - gap_i:+.3f} eV   (CsPbCl3 - CsPbI3, "
+          "I->Cl widens the gap as expected)")
 
 
 if __name__ == "__main__":
