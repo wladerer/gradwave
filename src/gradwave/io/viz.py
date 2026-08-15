@@ -11,6 +11,8 @@ a static image with ``fig.write_image(path)`` (which needs kaleido).
                                                      # vectors drawn when present
     fig = viz.ptable_delta("results/delta_summary.json")
     fig.write_image("delta_ptable.png")              # per-element Δ heatmap
+    fig = viz.field_isosurface(drho, cell, positions, symbols)  # signed grid field
+    fig.write_image("response.png")                  # e.g. a composition dρ/dλ
 """
 
 from __future__ import annotations
@@ -18,6 +20,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import numpy as np
 
 if TYPE_CHECKING:
     import plotly.graph_objects as go
@@ -32,6 +36,17 @@ def _pmv():
             "gradwave.io.viz needs pymatviz (uv pip install gradwave[viz])"
         ) from err
     return pymatviz
+
+
+def _go():
+    """Import plotly.graph_objects lazily (bundled with the ``viz`` extra)."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError as err:  # pragma: no cover - exercised only without the extra
+        raise ImportError(
+            "gradwave.io.viz needs plotly (uv pip install gradwave[viz])"
+        ) from err
+    return go
 
 
 def _resolve_struct(obj: Any) -> Any:
@@ -98,3 +113,81 @@ def ptable_delta(
     if not values:
         raise ValueError(f"no element carried the key {key!r} in the Δ summary")
     return pmv.ptable_heatmap(values, colorscale=colorscale, fmt=fmt, **kwargs)
+
+
+def field_isosurface(
+    field: Any,
+    cell: Any,
+    positions: Any,
+    symbols: list[str] | None = None,
+    *,
+    iso_frac: float = 0.3,
+    signed: bool = True,
+    opacity: float = 0.5,
+    pos_color: str = "#d62728",
+    neg_color: str = "#1f77b4",
+    atom_color: str = "#222222",
+    **layout: Any,
+) -> go.Figure:
+    """Isosurface of a real-space grid field over a crystal cell, as a Plotly figure.
+
+    ``field`` is a real ``(n1, n2, n3)`` array sampled on the fractional grid of
+    ``cell`` (lattice rows a_i in Å, e.g. ``system.grid.cell``); ``positions`` are
+    the Cartesian atom coordinates ``(na, 3)`` in Å; ``symbols`` are optional
+    per-atom element labels for the markers.
+
+    For a SIGNED field — a density response ``dρ/dλ``, a deformation density, a
+    frontier-orbital difference — the positive and negative lobes are drawn as two
+    isosurfaces (charge flowing in vs out) at ``±iso_frac·max|field|``, which is
+    what makes a composition response legible: the screening cloud that the frozen
+    (first-order) picture omits. A magnitude field (``signed=False``) draws a
+    single surface at ``iso_frac·max(field)``. Atoms are overlaid as markers.
+
+    Returns a rotatable Plotly ``go.Figure``; ``fig.write_image(path)`` writes a
+    static PNG (needs kaleido + a browser). Extra keyword args pass to
+    ``fig.update_layout`` (``title``, ``width``, ...).
+    """
+    go = _go()
+    field = np.asarray(field, dtype=float)
+    if field.ndim != 3:
+        raise ValueError(f"field must be a 3-D grid, got shape {field.shape}")
+    n1, n2, n3 = field.shape
+    cell = np.asarray(cell, dtype=float)
+
+    # Cartesian coordinate of each grid point: fractional (i/n_i) @ cell. Handles
+    # a non-orthogonal cell (the coords carry the skew), matching the SCF grid.
+    fa, fb, fc = (np.arange(n) / n for n in (n1, n2, n3))
+    grid = np.meshgrid(fa, fb, fc, indexing="ij")
+    xyz = np.stack([g.ravel() for g in grid], axis=1) @ cell
+    x, y, z = xyz.T
+    val = field.ravel()
+    amax = float(np.abs(val).max()) or 1.0
+    iso = iso_frac * amax
+    caps = {"x_show": False, "y_show": False, "z_show": False}
+
+    data = []
+    if signed:
+        data.append(go.Isosurface(
+            x=x, y=y, z=z, value=val, isomin=iso, isomax=amax, surface_count=1,
+            opacity=opacity, showscale=False, caps=caps, name="δ > 0",
+            colorscale=[[0, pos_color], [1, pos_color]]))
+        data.append(go.Isosurface(
+            x=x, y=y, z=z, value=val, isomin=-amax, isomax=-iso, surface_count=1,
+            opacity=opacity, showscale=False, caps=caps, name="δ < 0",
+            colorscale=[[0, neg_color], [1, neg_color]]))
+    else:
+        data.append(go.Isosurface(
+            x=x, y=y, z=z, value=np.abs(val), isomin=iso, isomax=amax,
+            surface_count=1, opacity=opacity, showscale=False, caps=caps,
+            name="field"))
+
+    if positions is not None:
+        px, py, pz = np.asarray(positions, dtype=float).T
+        data.append(go.Scatter3d(
+            x=px, y=py, z=pz, mode="markers+text" if symbols else "markers",
+            marker={"size": 5, "color": atom_color}, text=symbols,
+            textposition="top center", name="atoms"))
+
+    fig = go.Figure(data=data)
+    fig.update_layout(scene={"aspectmode": "data"}, **layout)
+    return fig
