@@ -81,6 +81,8 @@ class SubstitutionSpec(TypedDict):
     atom_index_b: torch.Tensor  # (nproj_b,) atom of each target projector column
     core_base: list[torch.Tensor | None]  # per base-species NLCC |G| shells / None
     tgt_cores: dict[int, torch.Tensor | None]  # substituted atom → target shells / None
+    z_base: torch.Tensor  # (na,) per-atom base valence charge [e]
+    z_target: torch.Tensor  # (na,) per-atom target valence charge [e]
 
 
 def alchemical_charges(z_a: float, z_b: float, lam: torch.Tensor) -> torch.Tensor:
@@ -244,6 +246,98 @@ def setup_alchemical_system(cell, positions, upf_a, upf_b, lam, ecut,
                                alchemical=spec)
 
 
+def _substitution_energy_gradient(res, lam, xc=None):
+    """dE/dλ for a heterogeneous substitution System (rung 2 of the aliovalent
+    ladder), by Hellmann-Feynman at the converged density.
+
+    Same envelope-theorem structure as the binary
+    :func:`alchemical_energy_gradient`, but the ionic terms are rebuilt per atom
+    from the ``SubstitutionSpec``. For an ALIOVALENT (charge-changing)
+    transmutation the electron count follows the ionic charge, N(λ)=ΣZ_i(λ), so
+    the free energy carries the Janak chemical-potential term μ·dN/dλ (μ the
+    Fermi level) — the same term the binary path already has. ``lam`` is a scalar
+    driving all substituted sites together.
+    """
+    from gradwave.core.energies.ewald import ewald_energy
+    from gradwave.core.energies.local_pp import local_energy, local_potential_g
+    from gradwave.core.energies.nl_pp import nonlocal_energy
+    from gradwave.core.fftbox import r_to_g
+    from gradwave.core.hamiltonian import becp, projectors
+    from gradwave.scf.setup_common import assemble_core_density
+
+    system = res.system
+    spec = system.alchemical
+    grid = system.grid
+    nspin = getattr(res, "nspin", 1)
+    na = len(system.positions)
+    lam = torch.as_tensor(lam, dtype=RDTYPE).detach().clone().requires_grad_(True)
+    lam_vec = lam * spec["sub_mask"]  # scalar λ → per-atom rate (0 on fixed sites)
+
+    charges = (1.0 - lam_vec) * spec["z_base"] + lam_vec * spec["z_target"]
+
+    # local: per-atom (1-λ)tab_base + λ tab_target
+    ta = spec["vloc_tables_a"][torch.as_tensor(spec["species_a"])]
+    tb = spec["vloc_tables_b"][torch.as_tensor(spec["species_b"])]
+    w = lam_vec.reshape(na, *([1] * (ta.dim() - 1)))
+    vloc_atom = (1.0 - w) * ta + w * tb
+    vloc_g = local_potential_g(system.positions, system.species_index,
+                               system.vloc_tables, grid.g_cart, grid.volume,
+                               vloc_atom=vloc_atom)
+    rho_g = r_to_g(res.rho.detach().to(torch.complex128))
+    e_local = local_energy(rho_g, vloc_g, grid.volume)
+    e_ewald = ewald_energy(system.positions, charges, grid.cell)
+
+    # nonlocal: dij(λ) over the stacked [A cols, B cols] layout already on
+    # system.proj_data (columns are λ-independent; only the KB energies scale).
+    dij_a = _scale_dij_blocks(spec["dij_a"], 1.0 - lam_vec, spec["atom_index_a"])
+    dij_b = _scale_dij_blocks(spec["dij_b"], lam_vec, spec["atom_index_b"])
+    dij_lam = torch.block_diag(dij_a, dij_b)
+    projs = [projectors(pd, system.positions) for pd in system.proj_data]
+    coeffs_s = res.coeffs if nspin == 2 else [res.coeffs]
+    occ_s = res.occupations.detach()
+    occ_s = occ_s if nspin == 2 else occ_s[None]
+    e_nl = torch.zeros((), dtype=RDTYPE)
+    for sp in range(nspin):
+        cs = [c.detach() for c in coeffs_s[sp]]
+        becps = [becp(projs[ik], cs[ik]) for ik in range(len(cs))]
+        e_nl = e_nl + nonlocal_energy(becps, dij_lam, occ_s[sp], system.kweights)
+
+    e_ion = e_local + e_nl + e_ewald
+
+    # Janak term: N(λ) follows the ionic charge for an aliovalent transmutation.
+    if getattr(res, "fermi", None) is not None:
+        e_ion = e_ion + float(res.fermi) * charges.sum()
+
+    core_base = spec["core_base"]
+    tgt_cores = spec["tgt_cores"]
+    has_core = any(c is not None for c in core_base) or any(
+        c is not None for c in tgt_cores.values())
+    if has_core:
+        if xc is None:
+            raise ValueError("an endpoint has an NLCC core charge; pass xc")
+        from gradwave.core.density import sigma_from_rho
+        ref = next(c for c in list(core_base) + list(tgt_cores.values())
+                   if c is not None)
+        shells = []
+        for i in range(na):
+            base_c = core_base[spec["species_a"][i]]
+            base_c = base_c if base_c is not None else torch.zeros_like(ref)
+            if i in tgt_cores:
+                tc = tgt_cores[i]
+                tc = tc if tc is not None else torch.zeros_like(ref)
+                shells.append((1.0 - lam_vec[i]) * base_c + lam_vec[i] * tc)
+            else:
+                shells.append(base_c)
+        core_lam = assemble_core_density(shells, list(range(na)),
+                                         system.positions, grid)
+        rho_xc = res.rho.detach() + core_lam
+        sigma = sigma_from_rho(rho_xc, grid.g_cart) if xc.needs_gradient else None
+        e_ion = e_ion + xc.energy(rho_xc, grid.volume, sigma, None)
+
+    (grad,) = torch.autograd.grad(e_ion, lam)
+    return grad.detach()
+
+
 def alchemical_energy_gradient(res, lam, xc=None):
     """dE/dlambda through the converged SCF by Hellmann-Feynman (phases 3b, 4).
 
@@ -251,13 +345,16 @@ def alchemical_energy_gradient(res, lam, xc=None):
     dE/dlambda = d(E_local + E_nl + E_ewald)/dlambda evaluated at the converged
     (detached) density and orbitals. The XC, Hartree, and kinetic terms are
     stationary in the density, so their lambda-derivative vanishes at convergence
-    (the envelope theorem), and the derivative is the transmutation energy. Needs
-    a system built by setup_alchemical_system, which stashes the endpoint spec.
+    (the envelope theorem), and the derivative is the transmutation energy. Works
+    for both the whole-cell binary (setup_alchemical_system) and the heterogeneous
+    substitution (setup_alchemical_substitution) endpoint specs.
 
     xc is required only when an endpoint carries an NLCC core charge. The core
     density depends on lambda, so E_xc(rho + rho_core(lambda)) contributes a
-    core-correction term, the composition analogue of the NLCC force. lam matches
-    the shape used to build the system, so a scalar returns the uniform
+    core-correction term, the composition analogue of the NLCC force. For an
+    aliovalent (charge-changing) transmutation the electron count follows the
+    ionic charge and the free energy gains the Janak term mu*dN/dlambda. lam
+    matches the shape used to build the system, so a scalar returns the uniform
     dE/dlambda and a per-atom (na,) vector returns the per-site gradient.
     """
     from gradwave.core.energies.ewald import ewald_energy
@@ -269,7 +366,10 @@ def alchemical_energy_gradient(res, lam, xc=None):
     system = res.system
     spec = system.alchemical
     if spec is None:
-        raise ValueError("res.system was not built by setup_alchemical_system")
+        raise ValueError(
+            "res.system was not built by setup_alchemical_system/substitution")
+    if "sub_atoms" in spec:  # heterogeneous substitution spec
+        return _substitution_energy_gradient(res, lam, xc)
     grid = system.grid
     nspin = getattr(res, "nspin", 1)
     na = len(system.positions)
@@ -470,6 +570,8 @@ def setup_alchemical_substitution(cell, positions, pseudos, species_index,
         "atom_index_b": sys_b.proj_data[0].atom_index,
         "core_base": list(core_base),
         "tgt_cores": tgt_cores,
+        "z_base": z_a.detach(),
+        "z_target": z_b.detach(),
     }
     return dataclasses.replace(
         sys_a, charges=charges, n_electrons=n_electrons, vloc_atom=vloc_atom,
