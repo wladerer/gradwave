@@ -463,7 +463,7 @@ def per_atom_local_tables(
 
 def setup_alchemical_substitution(cell, positions, pseudos, species_index,
                                   substitutions, lam, ecut, kmesh=(1, 1, 1),
-                                  nbands=None, **setup_kw):
+                                  nbands=None, n_electrons=None, **setup_kw):
     """Heterogeneous alchemical System: a real multi-species cell in which a chosen
     subset of sites transmutes toward a target species with weight ``lam``, while
     every other site stays its own fixed species.
@@ -537,7 +537,11 @@ def setup_alchemical_substitution(cell, positions, pseudos, species_index,
     z_b = torch.tensor([float(tgt_pseudos[tgt_species[i]].z_valence)
                         for i in range(na)], dtype=RDTYPE)
     charges = (1.0 - lam_vec) * z_a + lam_vec * z_b
-    n_electrons = float(charges.sum())
+    # default: neutral, N follows the ionic charge (N=ΣZ(λ)). An explicit
+    # n_electrons holds N FIXED across λ — an aliovalent transmutation then
+    # charges the cell by q(λ)=ΣZ(λ)−N (rung 3, the charged-cell path); its
+    # fixed-N energy gradient is the bare ionic derivative (grand_canonical=True).
+    n_electrons = float(charges.sum()) if n_electrons is None else float(n_electrons)
 
     # NLCC core density, blended per atom where an endpoint carries one
     grid = sys_a.grid
