@@ -23,7 +23,7 @@ difference. nspin=1 insulator for the gap DFPT; the energy gradient is general.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import torch
 
@@ -83,6 +83,8 @@ class SubstitutionSpec(TypedDict):
     tgt_cores: dict[int, torch.Tensor | None]  # substituted atom → target shells / None
     z_base: torch.Tensor  # (na,) per-atom base valence charge [e]
     z_target: torch.Tensor  # (na,) per-atom target valence charge [e]
+    upfs_b: list[Any]  # target-twin per-species UPFs (rebuild B-block projectors
+    # at shifted k for the E-field DFPT; base UPFs are System.upfs)
 
 
 def alchemical_charges(z_a: float, z_b: float, lam: torch.Tensor) -> torch.Tensor:
@@ -592,6 +594,7 @@ def setup_alchemical_substitution(cell, positions, pseudos, species_index,
         "tgt_cores": tgt_cores,
         "z_base": z_a.detach(),
         "z_target": z_b.detach(),
+        "upfs_b": tgt_pseudos,
     }
     return dataclasses.replace(
         sys_a, charges=charges, n_electrons=n_electrons, vloc_atom=vloc_atom,
