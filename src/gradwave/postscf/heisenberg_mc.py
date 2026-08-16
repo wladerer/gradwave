@@ -59,6 +59,43 @@ def bcc_lattice(L: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return nbr, sub, pos
 
 
+def fcc_lattice(L: int) -> tuple[np.ndarray, np.ndarray]:
+    """An fcc lattice of L×L×L conventional cells (4 L³ sites) with the 12 nn bond
+    graph. Returns ``(neighbors, positions)``; the fcc nn graph is NOT bipartite
+    (triangular loops), so the MC uses a general graph colouring, not checkerboard.
+    """
+    basis = np.array([[0, 0, 0], [0.5, 0.5, 0], [0.5, 0, 0.5], [0, 0.5, 0.5]])
+    cells = np.array([(x, y, z) for x in range(L) for y in range(L)
+                      for z in range(L)], dtype=np.int64)
+    pos = (cells[:, None, :] + basis[None, :, :]).reshape(-1, 3)
+    # fcc nn = the 12 sites at ½⟨110⟩. Build by matching fractional coordinates
+    # (mod L) — robust and geometry-agnostic.
+    key = {tuple(np.round((p % L) * 2).astype(int)): i for i, p in enumerate(pos)}
+    shifts = np.array([[a, b, 0] for a in (-.5, .5) for b in (-.5, .5)]
+                      + [[a, 0, b] for a in (-.5, .5) for b in (-.5, .5)]
+                      + [[0, a, b] for a in (-.5, .5) for b in (-.5, .5)])
+    nbr = np.empty((len(pos), 12), dtype=np.int64)
+    for i, p in enumerate(pos):
+        nbr[i] = [key[tuple(np.round(((p + s) % L) * 2).astype(int))] for s in shifts]
+    return nbr, pos
+
+
+def _greedy_coloring(neighbors: np.ndarray) -> list[np.ndarray]:
+    """Greedy proper vertex colouring of the nn graph: a list of index arrays, one
+    per colour, each an independent set (no two members are neighbours). Updating
+    a whole colour at once from the current state is then exact Metropolis. For a
+    bipartite graph (bcc, sc) this returns the 2 sublattices (checkerboard)."""
+    n = neighbors.shape[0]
+    color = np.full(n, -1, dtype=np.int64)
+    for i in range(n):
+        used = {int(color[j]) for j in neighbors[i] if color[j] >= 0}
+        c = 0
+        while c in used:
+            c += 1
+        color[i] = c
+    return [np.where(color == c)[0] for c in range(color.max() + 1)]
+
+
 def _random_spins(n: int, rng: np.random.Generator) -> np.ndarray:
     v = rng.standard_normal((n, 3))
     return v / np.linalg.norm(v, axis=1, keepdims=True)
@@ -66,7 +103,6 @@ def _random_spins(n: int, rng: np.random.Generator) -> np.ndarray:
 
 def heisenberg_mc(
     neighbors: np.ndarray,
-    sublattice: np.ndarray,
     k_bond: float,
     temps: np.ndarray,
     *,
@@ -74,18 +110,19 @@ def heisenberg_mc(
     n_sample: int = 800,
     seed: int = 0,
 ) -> dict[str, np.ndarray]:
-    """Classical Heisenberg MC on a bipartite nn lattice at each temperature.
+    """Classical Heisenberg MC on an arbitrary nn lattice at each temperature.
 
-    ``neighbors`` (N, z) the nn index table, ``sublattice`` (N,) the {0,1} colour,
-    ``k_bond`` the per-bond coupling K [same energy unit as ``temps``·k_B; pass K
-    and temps both in eV to read T_c in K downstream]. Returns per-temperature
-    ``mag`` (⟨|m|⟩ per spin), ``chi`` (susceptibility N·var(|m|)/T), ``energy``
-    (per spin). T_c is the susceptibility peak (see :func:`curie_temperature`).
+    ``neighbors`` (N, z) the nn index table, ``k_bond`` the per-bond coupling K
+    [same energy unit as ``temps``·k_B; pass K and temps both in eV to read T_c in
+    K downstream]. Works for any lattice (bipartite or not) via a greedy graph
+    colouring — each colour is an independent set updated at once (exact
+    Metropolis). Returns per-temperature ``mag`` (⟨|m|⟩ per spin), ``chi``
+    (susceptibility N·var(|m|)/T), ``energy`` (per spin). T_c is the
+    susceptibility peak (see :func:`curie_temperature`).
     """
     rng = np.random.default_rng(seed)
     n = neighbors.shape[0]
-    mask0 = sublattice == 0
-    mask1 = ~mask0
+    colors = _greedy_coloring(neighbors)
     temps = np.asarray(temps, dtype=float)
     mag = np.zeros_like(temps)
     chi = np.zeros_like(temps)
@@ -93,14 +130,14 @@ def heisenberg_mc(
     spins = _random_spins(n, rng)
 
     def sweep(beta: float) -> None:
-        for m in (mask0, mask1):  # checkerboard: a colour's nn are all the other
-            field = k_bond * spins[neighbors[m]].sum(axis=1)      # (Nm, 3) = KΣŝ_j
-            new = _random_spins(int(m.sum()), rng)
-            dE = -((new - spins[m]) * field).sum(axis=1)          # ΔE = -Δŝ·field
-            acc = (dE <= 0) | (rng.random(dE.shape[0]) < np.exp(-beta * np.minimum(dE, 700)))
-            sel = spins[m].copy()
+        for idx in colors:  # each colour is an independent set (its nn are elsewhere)
+            field = k_bond * spins[neighbors[idx]].sum(axis=1)    # (Nc, 3) = KΣŝ_j
+            new = _random_spins(len(idx), rng)
+            dE = -((new - spins[idx]) * field).sum(axis=1)        # ΔE = -Δŝ·field
+            acc = (dE <= 0) | (rng.random(len(idx)) < np.exp(-beta * np.minimum(dE, 700)))
+            sel = spins[idx].copy()
             sel[acc] = new[acc]
-            spins[m] = sel
+            spins[idx] = sel
 
     for it, T in enumerate(temps):
         beta = 1.0 / T

@@ -80,9 +80,9 @@ def tc_at(a, label):
     # calibrate per-bond K so the MC mean-field limit (zK/3) equals the DFT MFA
     # T_c; the MC then applies the geometry-exact fluctuation reduction.
     k_bond = 3.0 * KB_EV * tc_mfa / Z
-    nbr, sub, _ = bcc_lattice(10)
+    nbr, _, _ = bcc_lattice(10)
     temps = np.linspace(0.60, 0.88, 9) * tc_mfa * KB_EV
-    r = heisenberg_mc(nbr, sub, k_bond, temps, n_equil=500, n_sample=1000, seed=0)
+    r = heisenberg_mc(nbr, k_bond, temps, n_equil=500, n_sample=1000, seed=0)
     tc_mc = curie_temperature(r["temp"], r["chi"]) / KB_EV
     print(f"  [{label}] a={a:.3f} Å  M={rep.moment_magnitudes[0]:.2f} μB  "
           f"J_01={j01 * 1e3:.0f} meV  →  MFA T_c={tc_mfa:.0f} K   MC T_c={tc_mc:.0f} K")
