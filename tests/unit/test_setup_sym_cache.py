@@ -14,6 +14,7 @@ mask, and cached instances act identically to freshly constructed ones.
 """
 
 import numpy as np
+import pytest
 import torch
 
 from gradwave.scf.loop import setup_system
@@ -23,6 +24,26 @@ from gradwave.symmetry import RhoSymmetrizer
 from tests.helpers import RY, si_upf
 
 _FCC = np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_setup_caches():
+    """Start each test from empty setup-layer memo caches.
+
+    The identity/reuse oracles below assert object identity across cache hits.
+    The RhoSymmetrizer memo is deliberately tiny (``_RHO_SYM_CACHE_MAX = 2``), so
+    under pytest-xdist a preceding test in the same worker can leave it full and
+    the in-test cache miss (the rattled, symmetry-broken geometry) can then evict
+    the very entry a later ``is`` assertion expects — a sharding-order flake that
+    never shows in isolation. Clearing the three caches first makes the test
+    depend only on its own call sequence, which fits the limits deterministically.
+    """
+    from gradwave.scf import setup_common, uspp_setup
+
+    for cache in (setup_common._RHO_SYM_CACHE, uspp_setup._AUG_CACHE,
+                  uspp_setup._BECSUM_SYM_CACHE):
+        cache.clear()
+    yield
 
 
 def _si_nc(scale=1.0, a=5.43):
