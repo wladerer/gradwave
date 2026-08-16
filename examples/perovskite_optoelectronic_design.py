@@ -19,6 +19,10 @@ Jacobian a perovskite absorber would be tuned along.
     uv run python examples/perovskite_optoelectronic_design.py
 
 Scalar-relativistic PBE, nspin=1 insulator, use_symmetry=False.
+
+Validated (asus, 30 Ry, 2x2x2, λ=0.5): E_g = 1.74 eV with dE_g/dλ = +1.28 eV, and
+ε∞_iso = 9.60 with dε∞/dλ = -13.33 — the two optoelectronic design gradients come
+out opposite-signed, the expected I->Cl trade-off (wider gap, less polarizable).
 """
 
 from pathlib import Path
