@@ -73,7 +73,7 @@ def main():
     diel = dielectric_born(res, PBE())
     d_eps = alchemical_dielectric_gradient(converge, PBE(), lam, h=0.05)
 
-    print(f"CsPb(I,Cl)3 at λ=0.5  (0=CsPbI3, 1=CsPbCl3)")
+    print("CsPb(I,Cl)3 at λ=0.5  (0=CsPbI3, 1=CsPbCl3)")
     print(f"  band gap     E_g   = {gap:.4f} eV     dE_g/dλ   = {d_gap:+.4f} eV")
     print(f"  dielectric   ε∞_iso = {diel['eps_iso']:.4f}        dε∞/dλ    = "
           f"{d_eps['d_eps_iso']:+.4f}")
