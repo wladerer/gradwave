@@ -1,10 +1,14 @@
 """Stretch: fcc Co Curie temperature (exp 1388 K) — the general (fcc) MC path.
 
-Second magnet after bcc Fe, exercising the non-bipartite fcc Monte Carlo. Co is
-FR-only here (SOC on), but the Heisenberg J uses only the isotropic torque.
+Second magnet after bcc Fe, exercising the non-bipartite fcc Monte Carlo. The
+isotropic Heisenberg J needs only the constrained-moment torque, *not* SOC, so
+this uses a scalar-relativistic Co pseudo (same as Fe) — a fully-relativistic
+(FR) pseudo makes every noncollinear SCF a full SOC-spinor solve, ~100× slower,
+for zero benefit to the isotropic J. Set ``CO_UPF`` to override the pseudo path.
 Conventional 4-atom fcc cell; relax then extract at experimental a=3.54 Å.
 """
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -23,7 +27,8 @@ RY = 13.605693122994
 Z = 12
 EXP_TC = 1388.0
 FIX = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "qe" / "pseudos"
-co = parse_upf(FIX / "Co_ONCV_PBE_FR-1.0.upf")
+CO_UPF = os.environ.get("CO_UPF", str(FIX / "Co_ONCV_PBE_FR-1.0.upf"))
+co = parse_upf(CO_UPF)
 xc = NoncollinearXC(LSDA_PW92())
 SCF_KW = dict(smearing="gaussian", width=0.1, etol=1e-6, rhotol=1e-5,
               max_iter=250, mixing_alpha=0.3, verbose=False)
