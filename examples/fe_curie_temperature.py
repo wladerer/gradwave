@@ -12,8 +12,12 @@ Curie temperature of iron (1043 K) with no empirical input:
      overshoot ~30 %) and a classical Heisenberg Monte Carlo (postscf.heisenberg_mc)
      that includes the transverse spin fluctuations mean field ignores.
 
-Mean field lands near 1390 K; the Monte Carlo brings it down to ~1050 K — the
-fluctuation correction is the difference between "33 % too high" and experiment.
+Validated (asus): at the experimental lattice constant the moment is 2.22 μB
+(experiment 2.22), J_01 = 179 meV, mean-field T_c = 1386 K (33 % over), and the
+Monte-Carlo T_c = 1125 K — 8 % from the 1043 K experiment. The transverse-
+fluctuation (MC) correction is the whole difference. PBE overbinds Fe (relaxed
+a = 2.75 Å), which inflates J and T_c to 1468 K, so the experimental lattice is
+the appropriate T_c geometry (the Pajda-convention standard).
 
     uv run python examples/fe_curie_temperature.py
 """
@@ -30,7 +34,6 @@ from gradwave.postscf.heisenberg_mc import (
     bcc_lattice,
     curie_temperature,
     heisenberg_mc,
-    mean_field_tc,
 )
 from gradwave.postscf.magnetism import characterize_magnetism
 from gradwave.pseudo.upf import parse_upf
@@ -97,9 +100,11 @@ def main():
     mfa_exp, mc_exp = tc_at(2.87, "experimental")
     tc_at(a_eq, "PBE-relaxed ")
 
+    e_mfa = abs(mfa_exp - EXP_TC) / EXP_TC * 100
+    e_mc = abs(mc_exp - EXP_TC) / EXP_TC * 100
     print("\n3. reproduction — bcc Fe at the experimental lattice constant:")
-    print(f"   mean-field T_c  = {mfa_exp:.0f} K   ({abs(mfa_exp - EXP_TC) / EXP_TC * 100:.0f}% high)")
-    print(f"   Monte Carlo T_c = {mc_exp:.0f} K   ({abs(mc_exp - EXP_TC) / EXP_TC * 100:.0f}% from exp)")
+    print(f"   mean-field T_c  = {mfa_exp:.0f} K   ({e_mfa:.0f}% high)")
+    print(f"   Monte Carlo T_c = {mc_exp:.0f} K   ({e_mc:.0f}% from exp)")
     print(f"   experiment      = {EXP_TC:.0f} K")
     print("   → the transverse-fluctuation (MC) correction is what reproduces experiment;")
     print("     mean field alone overshoots by a third.")
