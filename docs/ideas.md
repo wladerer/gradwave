@@ -601,6 +601,27 @@ pulled from the SG15 ONCV set (quantum-simulation.org, the same source as the sc
 CrI3 (`Cr_FR` + `I_FR`) for the full J/K/DMI story. The Heisenberg-J machinery
 (`postscf/spin_exchange.py`) and `characterize_magnetism` already work without SOC.
 
+### Curie temperature: DFT J → Heisenberg Monte Carlo (landed 2026-08-16)
+
+The spin-Hamiltonian edge, closed to an experimental number. `postscf/heisenberg_mc.py`
+is a classical (continuous 3-vector) Heisenberg Metropolis MC on an arbitrary nn lattice
+— greedy graph-colouring generalises the bipartite checkerboard, so it handles bcc *and*
+fcc/hcp (the frustrated non-bipartite cases). It fills a real gap: the repo's only lattice
+MC (`lattice_mc`) is Ising, which cannot give a magnetic T_c, and the only prior estimator
+was mean field (`characterize_magnetism.curie_temperature_mfa`), which overshoots ~30 %.
+Validated against the textbook classical coefficients k_B T_c/K = 2.054 (bcc) and 3.18
+(fcc). `examples/fe_curie_temperature.py` runs the full pipeline for bcc Fe — relax
+(spin-polarised EOS) → extract J (autograd-exact constrained-moment torque, no SOC) →
+mean-field + MC T_c — and reproduces experiment: at the experimental lattice, M = 2.22 μB
+(exp 2.22), J_01 = 179 meV, MFA T_c = 1386 K (33 % high), **MC T_c = 1125 K (8 % from the
+1043 K experiment)** — the transverse-fluctuation correction is the whole difference. PBE
+overbinds Fe (relaxed a = 2.75 Å vs 2.87), inflating T_c to 1468 K, so the experimental
+lattice is the appropriate geometry (Pajda convention). Open follow-ups: multi-shell J
+from a supercell (removes the nn-only approximation), fcc Co/Ni (the general MC path is in
+place; Co running), the RPA/Tyablikov estimator, and quantum (S=1) corrections. This is the
+one place small-cell DFT genuinely reaches an experimental observable others reach only
+with much larger machinery.
+
 ## Magnetocrystalline anisotropy (MAE maps) and per-atom spin torques
 
 **Status: force-theorem evaluator and per-direction magnetic-IBZ folding landed
