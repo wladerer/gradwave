@@ -97,7 +97,8 @@ def _sternheimer_kq(h_kq, c_occ_kq, eps_k, rhs_r, sphere_kq, alpha, tol, max_ite
 
 
 def chi0_q(res: SCFResult, q_frac, v_box: torch.Tensor, tol: float = 1e-8,
-           max_iter: int = 200) -> torch.Tensor:
+           max_iter: int = 200, *, k_indices=None, k_weights=None,
+           symmetrizer=None) -> torch.Tensor:
     """Bare density response δρ_q = χ₀[δV_q] for wavevector q (nspin=1 insulator).
 
     ``v_box`` is the cell-periodic part v(r) of δV_q(r) = e^{iq·r} v(r), a complex
@@ -117,8 +118,10 @@ def chi0_q(res: SCFResult, q_frac, v_box: torch.Tensor, tol: float = 1e-8,
     k_frac = np.stack([sph.k_frac for sph in system.spheres])
     jidx, g0 = kpq_map(k_frac, q_frac)
     v_box = v_box.to(CDTYPE)
+    ks = range(len(system.spheres)) if k_indices is None else list(k_indices)
+    kw = system.kweights if k_weights is None else k_weights
     dr_r = torch.zeros(shape, dtype=CDTYPE, device=grid.g2.device)
-    for ik in range(len(system.spheres)):
+    for ik in ks:
         c_occ_k, eps_k = _occupied(res, 0, ik)
         j = int(jidx[ik])
         c_occ_kq, _eps_kq = _occupied(res, 0, j)
@@ -133,6 +136,67 @@ def chi0_q(res: SCFResult, q_frac, v_box: torch.Tensor, tol: float = 1e-8,
                                alpha, tol, max_iter)
         dpsi_box = g_to_r(dpsi, sphere_kq.flat_idx, shape)
         # δρ_q periodic part: ψ*_k δψ_{k+q} with the umklapp phase undone
-        dr_r += 2.0 * float(system.kweights[ik]) * (
+        dr_r += 2.0 * float(kw[ik]) * (
             psi_box.conj() * dpsi_box * ph.conj().unsqueeze(0)).sum(dim=0)
-    return dr_r / grid.volume
+    dr_r = dr_r / grid.volume
+    if symmetrizer is not None:
+        dr_r = symmetrizer.apply(r_to_g(dr_r))
+        from gradwave.core.fftbox import g_to_r_box
+        dr_r = g_to_r_box(dr_r)
+    return dr_r
+
+
+def _little_group_orbits(k_frac: np.ndarray, sg, q_frac):
+    """Partition the mesh k-points into orbits under the little co-group of q
+    (reciprocal action W⁻ᵀk). Returns (rep_indices, multiplicities) — one
+    representative per orbit and the orbit size."""
+    from gradwave.symmetry import _k_ops, little_cogroup
+
+    lg, _ = little_cogroup(q_frac, sg)
+    ops_t = _k_ops(lg.rotations)
+    n = len(k_frac)
+    key = {tuple(np.round(_fold(k), 6)): i for i, k in enumerate(k_frac)}
+    owner = -np.ones(n, dtype=np.int64)
+    reps, mult = [], []
+    for i in range(n):
+        if owner[i] >= 0:
+            continue
+        orbit = set()
+        for w_t in ops_t:
+            j = key.get(tuple(np.round(_fold(w_t @ k_frac[i]), 6)))
+            if j is not None:
+                orbit.add(j)
+        for j in orbit:
+            owner[j] = len(reps)
+        reps.append(i)
+        mult.append(len(orbit))
+    return np.asarray(reps), np.asarray(mult)
+
+
+def chi0_q_reduced(res: SCFResult, q_frac, v_box: torch.Tensor, sg,
+                   tol: float = 1e-8, max_iter: int = 200) -> torch.Tensor:
+    """The q≠0 star-unfold: chi0_q summed over the little-group IBZ of q and
+    folded by ``QFieldSymmetrizer``, reproducing the full-mesh chi0_q at
+    ~|little co-group|-fold lower k-cost.
+
+    Valid when the perturbation v is invariant under the little co-group of q
+    (an ordinary-rep q — construction raises for a projective small rep). The
+    k-points reduce to the little-group orbits (rep × multiplicity); the folded
+    response reconstructs the star. ``sg`` is the crystal ``SpaceGroup``."""
+    from gradwave.symmetry import QFieldSymmetrizer
+
+    system = res.system
+    grid = system.grid
+    qsym = QFieldSymmetrizer(grid.shape, q_frac, sg, grid.cell, grid.g2,
+                             grid.dens_mask)
+    k_frac = np.stack([sph.k_frac for sph in system.spheres])
+    reps, mult = _little_group_orbits(k_frac, sg, q_frac)
+    kw = system.kweights
+    k_weights = {int(r): float(kw[r]) * int(m) for r, m in zip(reps, mult, strict=True)}
+    # per-rep weight = its own kweight × orbit size (the star multiplicity)
+    weights = torch.zeros(len(system.spheres), dtype=kw.dtype, device=kw.device)
+    for r, w in k_weights.items():
+        weights[r] = w
+    return chi0_q(res, q_frac, v_box, tol, max_iter,
+                  k_indices=[int(r) for r in reps], k_weights=weights,
+                  symmetrizer=qsym)

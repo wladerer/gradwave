@@ -130,3 +130,39 @@ def test_chi0_q_matches_supercell_gamma():
 
     rel = float((drho_from_prim - drho_sc).abs().max() / drho_sc.abs().max())
     assert rel < 1e-3, rel
+
+
+def test_chi0_q_star_unfold_matches_full_mesh():
+    """q≠0 star-unfold (Phase 3): chi0_q summed over the little-group IBZ of q and
+    folded by QFieldSymmetrizer equals the full-mesh chi0_q, for a perturbation
+    invariant under the little co-group of q. Fewer k-points, identical result."""
+    import numpy as np
+
+    from gradwave.core.fftbox import g_to_r_box, r_to_g
+    from gradwave.postscf.dfpt_q import chi0_q_reduced
+    from gradwave.symmetry import (
+        QFieldSymmetrizer,
+        _k_ops,
+        find_spacegroup,
+        little_cogroup,
+    )
+
+    res = _si_res()                       # (4,4,4), use_symmetry=False, TR=False
+    grid = res.system.grid
+    cell, pos = si_fcc()
+    sg = find_spacegroup(cell, np.array([[0.0, 0, 0], [0.25, 0.25, 0.25]]), [0, 0])
+    q = [0.25, 0.0, 0.0]                  # ordinary small rep (no glide in its little group)
+
+    # a perturbation invariant under the little co-group of q
+    qsym = QFieldSymmetrizer(grid.shape, q, sg, cell, grid.g2, grid.dens_mask)
+    torch.manual_seed(0)
+    v = g_to_r_box(qsym.apply(r_to_g(torch.randn(grid.shape, dtype=torch.complex128))))
+
+    d_full = chi0_q(res, q, v)
+    d_red = chi0_q_reduced(res, q, v, sg)
+    rel = float((d_full - d_red).abs().max() / d_full.abs().max())
+    assert rel < 1e-6, rel
+
+    # the reduction is real: the little group of q shrinks the k-set
+    ops_t = _k_ops(little_cogroup(q, sg)[0].rotations)
+    assert len(ops_t) > 1

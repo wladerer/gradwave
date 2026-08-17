@@ -192,14 +192,22 @@ finite-displacement path on a test crystal (e.g. Si, MgO).
   at q≠0 it is the −q component), which checks the whole k+q plumbing reduces
   correctly; and (b) **q≠0 conjugate symmetry** δρ_{−q} = conj(δρ_q) to <1e-6 at
   q with and without umklapps, which exercises the genuine k↔k+q coupling.
-  Tests: `tests/gradcheck/test_dfpt_q.py`. **Still owed:** the external
-  gold-standard oracle — a supercell frozen-phonon / static-potential
-  finite-difference (`phonons_supercell.dynamical_matrix`) — and the screened
-  (self-consistent) response; conjugate symmetry is necessary but not sufficient.
-- **Phases 3–4 — not started.** Fold `chi0_q` over the little-group IBZ with
-  `QFieldSymmetrizer` and unfold the star (Phase 3), then drive an atomic
-  displacement perturbation into the dynamical matrix at q and match the
-  supercell dispersion (Phase 4).
+  Tests: `tests/gradcheck/test_dfpt_q.py`. **External oracle now also done:**
+  `test_chi0_q_matches_supercell_gamma` — the primitive χ₀ at q=[1/2,0,0] equals
+  the q=0 `apply_chi0` of a 2x1x1 supercell (an entirely independent path: no k+q,
+  no umklapp) to <1e-3, with a q=0 cross-cell control pinning the normalization
+  and the physical c.c. factor accounted for. Ground-truth confirmation of the
+  k↔k+q coupling. (Still owed: the screened self-consistent response, for phonons.)
+- **Phase 3 — landed and verified.** `dfpt_q.chi0_q_reduced` sums `chi0_q` over
+  the little-group IBZ of q (orbit reps × star multiplicities) and folds with
+  `QFieldSymmetrizer`, reproducing the full-mesh `chi0_q` to <1e-6 for a
+  little-group-invariant perturbation at an ordinary-rep q — the q≠0 star-unfold,
+  at ~|little co-group|-fold lower k-cost. `chi0_q` gained `k_indices`/`k_weights`/
+  `symmetrizer` hooks for this. Test: `test_chi0_q_star_unfold_matches_full_mesh`.
+- **Phase 4 — not started.** The remaining chain: the screened self-consistent
+  response at q (Dyson `δρ = δρ⁰ + χ₀ K_Hxc δρ` with a q-aware Hartree kernel
+  `4πe²/|q+G|²`), an atomic-displacement perturbation `dV_q/du`, the dynamical
+  matrix assembly, and the supercell-dispersion match (`phonons_supercell`).
 
 ## Non-goals
 
