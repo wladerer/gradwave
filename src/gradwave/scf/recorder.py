@@ -187,6 +187,8 @@ class SCFRecorder:
         e_metric_mag: float | None = None,
         e_hf_gap: float | None = None,
         subspace_size: int | None = None,
+        op_counts: dict[str, int] | None = None,
+        t_eig_s: float | None = None,
     ) -> None:
         """Append one outer-iteration record. ``drho_r`` is the total real-space
         SCF residual (ρ_out − ρ_in), ``eigs`` the per-spin eigenvalue tensors,
@@ -222,6 +224,10 @@ class SCFRecorder:
                 "e_hf_gap": None if e_hf_gap is None else float(e_hf_gap),
                 "subspace_size": None if subspace_size is None else int(subspace_size),
                 "rss_mb": _rss_mb(),
+                "t_eig": None if t_eig_s is None else float(t_eig_s),
+                "n_fft": None if op_counts is None else int(op_counts.get("fft", 0)),
+                "n_eigh": None if op_counts is None else int(op_counts.get("eigh", 0)),
+                "n_hpsi": None if op_counts is None else int(op_counts.get("hpsi", 0)),
             }
         )
 
@@ -344,6 +350,10 @@ class SCFRecorder:
                     "reorder_count": i["reorder"],
                     "subspace_size": i.get("subspace_size"),
                     "rss_mb": i.get("rss_mb"),
+                    "t_eig_s": i.get("t_eig"),
+                    "n_fft": i.get("n_fft"),
+                    "n_eigh": i.get("n_eigh"),
+                    "n_hpsi": i.get("n_hpsi"),
                     "shell_fraction": i["shell_frac"],
                     **({"mag_abs_muB": i["mag_abs"]} if self.nspin == 2 else {}),
                     **(

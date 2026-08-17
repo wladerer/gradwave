@@ -24,6 +24,7 @@ from dataclasses import dataclass
 
 import torch
 
+from gradwave.core import opcount
 from gradwave.solvers.precond import teter, teter_b
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ def _eigh_subspace(s: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
     Returns (w, u) on s.device. Physics-neutral: LAPACK and cuSOLVER agree to
     fp64 round-off, well inside the batched-solver eigenpair contract."""
+    opcount.bump("eigh")
     if _offload_subspace(s.is_cuda, s.shape[-1]):
         w, u = torch.linalg.eigh(s.cpu())
         return w.to(s.device), u.to(s.device)
@@ -219,6 +221,7 @@ def davidson(
         # uses the opposite pair: s conjugates v, u is used unconjugated.)
         s = v @ hv.conj().T  # (m, m) — rows of v are the basis
         s = 0.5 * (s + s.conj().T)
+        opcount.bump("eigh")
         w, u = torch.linalg.eigh(s)
         eig = w[:nb].real
         x = u[:, :nb].T.conj() @ v  # (nb, npw) Ritz vectors

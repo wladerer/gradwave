@@ -44,6 +44,9 @@ def test_recorder_trace_carries_subspace_and_rss():
     # RSS is a positive number on Linux (None-tolerant elsewhere)
     rss = [it["rss_mb"] for it in iters if it["rss_mb"] is not None]
     assert not rss or all(x > 0 for x in rss)
+    # op-counts + eigensolve phase time populate and are non-trivial
+    assert all(it["n_fft"] and it["n_hpsi"] and it["n_eigh"] for it in iters)
+    assert all(it["t_eig_s"] is not None and it["t_eig_s"] >= 0 for it in iters)
 
 
 def test_run_record_is_analyzable():
