@@ -166,19 +166,23 @@ finite-displacement path on a test crystal (e.g. Si, MgO).
   `little_group_ibz` with a group-theory test suite (`tests/unit/test_little_group.py`):
   orbit–stabilizer (`|star| · |G_q| = |G|`), Γ-reduction to `reduce_mesh`, the
   umklapp identity `W⁻ᵀq − q = g0`, star generation, and IBZ sizing.
-- **Phase 1 — attempted; deferred with a concrete finding.** A first
-  `QFieldSymmetrizer` (naive little-co-group average of the q-modulated field)
-  is **not** a correct projector as written, for two reasons that surfaced
-  empirically and confirm this note's risk flags: (a) at a **non-symmorphic
-  zone-boundary q** (e.g. Si diamond at X) the small representation is
-  **projective** — a non-trivial factor system ω(g,h) means the plain average is
-  not idempotent, and the fold needs the multiplier representation, not the
-  vector one; (b) the **density-sphere mask is not closed** under the `m → W⁻ᵀm +
-  g0` map when the umklapp `g0 ≠ 0`, so a boundary-G contribution is dropped and
-  even an *interior* q loses idempotence. Both must be handled (a projective-rep
-  construction, and a q-shifted sphere/closure treatment) before the fold is
-  correct; the group-average shortcut that works at q=Γ (`RhoSymmetrizer`) does
-  not carry over unchanged. This is the crux of Phase 1 and gates Phase 3.
+- **Phase 1 — landed and verified (for ordinary small reps), with the projective
+  case handled by an honest fallback.** `symmetry.QFieldSymmetrizer` averages the
+  little co-group with the q-shifted non-symmorphic phase, and it is a correct
+  idempotent projector wherever the small representation is **ordinary** —
+  verified to machine precision on the decisive case (Si `[1/2,0,0]`, whose little
+  group carries both glide ops *and* nonzero umklapps), on interior q, on all
+  symmorphic bcc-Fe q, and matching `RhoSymmetrizer` exactly at q=Γ. Two things
+  had to be right and now are: (a) the **q-shifted band-limit** `{|q+G| ≤ G_cut}`
+  (the set the little group preserves), not the ordinary density sphere `{|G| ≤
+  G_cut}` — the latter drops a boundary shell for `g0 ≠ 0` and breaks the
+  projector; (b) the gather construction `(P c)(m) = ⟨e^{−2πi(q+m)·w} c(Wᵀ(m−g0))⟩`.
+  The remaining hard case is the **projective small rep** (non-trivial factor
+  system, e.g. Si `[1/4,1/4,0]`): there the plain average is provably not a
+  projector, so construction raises fail-fast and the response fold must use the
+  full mesh at that q — correct, just not reduced. A full multiplier-rep
+  construction that also reduces the projective q's is a further extension.
+  Tests: `tests/unit/test_little_group.py`.
 - **Phases 2–4 — not started.** The k+q Sternheimer core, the reduced/folded
   response, and phonon DFPT at q remain, on top of a correct Phase 1. The
   substrate is mapped (every k+q primitive exists — `build_gsphere` at k+q,

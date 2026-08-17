@@ -476,6 +476,97 @@ class RhoSymmetrizer:
         return acc.reshape(self.shape)
 
 
+class QFieldSymmetrizer:
+    """G-space symmetrization of a scalar field of crystal wavevector q.
+
+    A response of wavevector q is stored on the dense FFT box as coefficients
+    c(G) of the plane waves e^{i(q+G)·r} (the periodic part of
+    δρ_q(r) = e^{iq·r} Σ_G c(G) e^{iG·r}). Only the **little co-group of q** (the
+    ops with W⁻ᵀq ≡ q mod 1) symmetrizes it. Averaging over that group,
+    ``(P c)(m) = (1/N) Σ_g e^{−2πi (q+m)·w_g} c(Wᵀ(m − g0_g))`` with g0 = W⁻ᵀq − q,
+    is the projector onto the q-symmetric subspace — the group-average identity
+    that folds the IBZ(of q) response to the full-BZ response, and the direct
+    generalization of ``RhoSymmetrizer`` (recovered at q=Γ, g0=0, w-phase only).
+
+    Two things differ from the q=Γ scalar case and are handled here:
+
+    * **q-shifted mask.** The little-group action preserves |q+G|, not |G|, so
+      the invariant band-limited set is the sphere centred at −q,
+      {G : |q+G| ≤ G_cut}, not the ordinary density sphere. Using the latter
+      drops a boundary shell for a nonzero umklapp and the operator stops being a
+      projector. The mask is rebuilt as {|q+G| ≤ G_cut} from ``g2``/``dens_mask``.
+    * **Projective small reps.** At a non-symmorphic zone-boundary q the small
+      representation is projective (non-trivial factor system) and the plain
+      average is not idempotent. Construction verifies idempotence on a probe and
+      raises rather than fold with a wrong operator (see
+      docs/design/little-group-star-unfold.md — use the full mesh at such q).
+    """
+
+    def __init__(
+        self, shape: tuple[int, int, int], q_frac: np.ndarray, sg: SpaceGroup,
+        cell: np.ndarray, g2: torch.Tensor, dens_mask: torch.Tensor,
+    ) -> None:
+        lg, g0 = little_cogroup(q_frac, sg)
+        q = np.asarray(q_frac, dtype=float)
+        n1, n2, n3 = shape
+        dims = np.array([n1, n2, n3])
+        millers = np.stack(
+            np.meshgrid(*[np.fft.fftfreq(n, 1.0 / n).astype(np.int64) for n in shape],
+                        indexing="ij"),
+            axis=-1,
+        ).reshape(-1, 3)
+        # q-shifted band-limit: {|q+G| ≤ G_cut(density)}, the set the little group
+        # preserves. G_cut² is the max |G|² carried by the ordinary density mask.
+        b = 2.0 * np.pi * np.linalg.inv(np.asarray(cell, float)).T   # reciprocal rows
+        g_cart = millers @ b
+        q_cart = q @ b
+        g2_flat = g2.reshape(-1).cpu().numpy()
+        gmax2 = float(g2_flat[dens_mask.reshape(-1).cpu().numpy()].max())
+        qpg2 = np.einsum("ij,ij->i", g_cart + q_cart, g_cart + q_cart)
+        mask_q = torch.as_tensor(qpg2 <= gmax2 * (1 + 1e-9), dtype=torch.bool)
+
+        idx_maps, phases = [], []
+        for w_mat, w_vec, g in zip(lg.rotations, lg.translations, g0, strict=True):
+            source = (millers - g) @ w_mat            # Wᵀ(m − g0)  (gather source)
+            folded = source % dims
+            flat = folded[:, 0] * (n2 * n3) + folded[:, 1] * n3 + folded[:, 2]
+            idx_maps.append(flat)
+            phases.append(np.exp(-2j * np.pi * ((q + millers) @ w_vec)))
+        self.idx = torch.as_tensor(np.stack(idx_maps), dtype=torch.int64)   # (nops,N)
+        self.phase = torch.as_tensor(np.stack(phases), dtype=torch.complex128)
+        self.shape = tuple(shape)
+        self.mask = mask_q
+        # projector check: idempotent iff the small rep is ordinary.
+        gen = torch.Generator().manual_seed(0)
+        probe = (torch.randn(n1 * n2 * n3, generator=gen, dtype=torch.float64)
+                 + 1j * torch.randn(n1 * n2 * n3, generator=gen, dtype=torch.float64)
+                 ).reshape(shape)
+        p1 = self.apply(probe)
+        p2 = self.apply(p1)
+        scale = float(p1.abs().max())
+        if scale > 1e-12 and float((p2 - p1).abs().max()) > 1e-8 * scale:
+            raise NotImplementedError(
+                "QFieldSymmetrizer: projective small representation at this q "
+                "(non-symmorphic zone boundary) — the little-co-group average is "
+                "not a projector here. Use the full (unreduced) mesh at this q; "
+                "see docs/design/little-group-star-unfold.md.")
+
+    def to(self, device: torch.device | str) -> QFieldSymmetrizer:
+        new = object.__new__(QFieldSymmetrizer)
+        new.idx = self.idx.to(device)
+        new.phase = self.phase.to(device)
+        new.mask = self.mask.to(device)
+        new.shape = self.shape
+        return new
+
+    def apply(self, c_g_box: torch.Tensor) -> torch.Tensor:
+        """Project a wavevector-q field c(G) onto the q-symmetric subspace:
+        (n1,n2,n3) complex → same. Idempotent (a little-co-group average)."""
+        flat = c_g_box.reshape(-1) * self.mask
+        acc = (self.phase * flat[self.idx]).mean(dim=0) * self.mask
+        return acc.reshape(self.shape)
+
+
 class MagneticSymmetrizer:
     """G-space symmetrization of (ρ, m⃗) under a magnetic (Shubnikov) group.
 

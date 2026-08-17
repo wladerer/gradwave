@@ -3,8 +3,13 @@ symmetry-breaking star-unfold; see docs/design/little-group-star-unfold.md)."""
 
 import numpy as np
 import pytest
+import torch
 
+from gradwave.grids import build_fft_grid
 from gradwave.symmetry import (
+    QFieldSymmetrizer,
+    RhoSymmetrizer,
+    coupled_axis_groups,
     find_spacegroup,
     little_cogroup,
     little_group_ibz,
@@ -13,6 +18,31 @@ from gradwave.symmetry import (
 )
 
 pytestmark = pytest.mark.standard
+
+RY = 13.605693122994
+
+
+def _grid_sg_cell(cell, frac, species, ecut_ry=20):
+    sg = find_spacegroup(cell, frac, species)
+    grid = build_fft_grid(cell, ecut_ry * RY, equal_dims=coupled_axis_groups(sg))
+    return grid, sg, np.asarray(cell, float)
+
+
+def _si():
+    a = 5.43
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    frac = np.array([[0.0, 0, 0], [0.25, 0.25, 0.25]])
+    return _grid_sg_cell(cell, frac, [0, 0])
+
+
+def _fe():
+    a = 2.87
+    cell = a / 2 * np.array([[-1.0, 1, 1], [1, -1, 1], [1, 1, -1]])
+    return _grid_sg_cell(cell, np.zeros((1, 3)), [0], ecut_ry=30)
+
+
+def _qsym(grid, q, sg, cell):
+    return QFieldSymmetrizer(grid.shape, q, sg, cell, grid.g2, grid.dens_mask)
 
 
 def _fcc_si():
@@ -91,3 +121,68 @@ def test_little_group_ibz_ge_full_ibz():
     k_lg, _ = little_group_ibz((4, 4, 4), q, sg, time_reversal=False)
     k_full, _ = reduce_mesh((4, 4, 4), (0, 0, 0), sg, time_reversal=False)
     assert len(k_full) <= len(k_lg) <= 4 ** 3
+
+
+def test_qfield_gamma_matches_rho_symmetrizer():
+    """At q=Γ the QFieldSymmetrizer is the same group-average projector as
+    RhoSymmetrizer (full group, g0=0, and the q-shifted mask = density mask)."""
+    grid, sg, cell = _si()
+    qsym = _qsym(grid, [0.0, 0.0, 0.0], sg, cell)
+    rsym = RhoSymmetrizer(grid.shape, sg, dens_mask=grid.dens_mask)
+    torch.manual_seed(0)
+    c = torch.randn(grid.shape, dtype=torch.complex128)
+    rel = float((qsym.apply(c) - rsym.apply(c)).abs().max() / rsym.apply(c).abs().max())
+    assert rel < 1e-12, rel
+
+
+@pytest.mark.parametrize("q", [[0.0, 0.0, 0.0], [0.25, 0.0, 0.0], [0.5, 0.0, 0.0]])
+def test_qfield_idempotent_ordinary(q):
+    """Ordinary small rep: the little-co-group average is a projector,
+    P(P c) == P c. [0.5,0,0] exercises the hard features together — nonsymmorphic
+    (glide) ops AND nonzero umklapps g0 — so its machine-precision idempotence is
+    the decisive check that the q-shifted mask + gather construction is right."""
+    grid, sg, cell = _si()
+    qsym = _qsym(grid, q, sg, cell)
+    torch.manual_seed(1)
+    c = torch.randn(grid.shape, dtype=torch.complex128)
+    pc = qsym.apply(c)
+    rel = float((qsym.apply(pc) - pc).abs().max() / max(1e-30, float(pc.abs().max())))
+    assert rel < 1e-10, rel
+
+
+@pytest.mark.parametrize("q", [[0.5, 0.0, 0.0], [0.5, 0.5, 0.0], [0.5, 0.5, 0.5]])
+def test_qfield_symmorphic_zone_boundary_idempotent(q):
+    """A symmorphic crystal (bcc Fe, Im-3m) has an ordinary small rep even at the
+    zone boundary — with the q-shifted mask the projector is idempotent there,
+    which the ordinary density mask (centred at G=0) would break for g0≠0."""
+    grid, sg, cell = _fe()
+    qsym = _qsym(grid, q, sg, cell)
+    torch.manual_seed(3)
+    c = torch.randn(grid.shape, dtype=torch.complex128)
+    pc = qsym.apply(c)
+    rel = float((qsym.apply(pc) - pc).abs().max() / max(1e-30, float(pc.abs().max())))
+    assert rel < 1e-10, rel
+
+
+def test_qfield_is_a_projector_not_identity():
+    """P genuinely projects (changes a generic field) when the little group is
+    non-trivial."""
+    grid, sg, cell = _si()
+    q = [0.25, 0.0, 0.0]
+    assert little_cogroup(q, sg)[0].n_ops > 1
+    qsym = _qsym(grid, q, sg, cell)
+    torch.manual_seed(2)
+    c = torch.randn(grid.shape, dtype=torch.complex128) * qsym.mask.reshape(grid.shape)
+    changed = float((qsym.apply(c) - c).abs().max() / c.abs().max())
+    assert changed > 1e-3, changed
+
+
+def test_qfield_projective_rep_raises():
+    """Non-symmorphic Si (diamond glide) has PROJECTIVE small reps at certain q
+    (here [1/4,1/4,0], whose little group carries glide ops with a non-trivial
+    factor system) — the plain little-co-group average is not a projector, so
+    construction fails fast rather than fold with a wrong operator. The response
+    fold must use the full mesh at such q (see the design note)."""
+    grid, sg, cell = _si()
+    with pytest.raises(NotImplementedError, match="projective"):
+        _qsym(grid, [0.25, 0.25, 0.0], sg, cell)
