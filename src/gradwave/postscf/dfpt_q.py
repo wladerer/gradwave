@@ -146,6 +146,68 @@ def chi0_q(res: SCFResult, q_frac, v_box: torch.Tensor, tol: float = 1e-8,
     return dr_r
 
 
+def _k_hxc_q(res, xc, u_r, q_cart):
+    """(K_Hxc^q u)(r): the q-shifted Hartree kernel 4πe²/|q+G|² plus the local
+    f_xc, applied to a complex wavevector-q field. Unlike q=0 there is no G=0
+    exclusion (|q+G| ≠ 0 for q ≠ Γ); at Γ the G=0 term is dropped. f_xc is a real
+    local operator, so it acts on the real and imaginary parts separately."""
+    import math
+
+    from gradwave.constants import E2
+    from gradwave.core.fftbox import g_to_r_box
+    from gradwave.postscf._response import fxc_hvp
+
+    grid = res.system.grid
+    core = res.system.rho_core
+    rho_xc = res.rho if core is None else res.rho + core
+    qpg2 = ((grid.g_cart + q_cart) ** 2).sum(dim=-1)             # |q+G|²
+    inv = torch.where(qpg2 > 1e-12, 1.0 / torch.clamp(qpg2, min=1e-12),
+                      torch.zeros_like(qpg2))
+    kh = g_to_r_box(4.0 * math.pi * E2 * r_to_g(u_r.to(CDTYPE)) * inv)  # complex
+    fx = (fxc_hvp(xc, rho_xc, grid, u_r.real)
+          + 1j * fxc_hvp(xc, rho_xc, grid, u_r.imag)).to(CDTYPE)
+    return kh + fx
+
+
+def screened_response_q(res: SCFResult, xc, q_frac, dv_ext: torch.Tensor,
+                        tol: float = 1e-8, max_iter: int = 200,
+                        dyson_tol: float = 1e-8, dyson_iter: int = 60,
+                        beta: float = 0.4, history: int = 8) -> torch.Tensor:
+    """Screened (self-consistent) +q density response to a bare perturbation
+    ``dv_ext`` (periodic part), by the Dyson fixed point
+    δρ = χ₀[δV_ext] + χ₀[K_Hxc^q δρ] (nspin=1 insulator).
+
+    ``dv_ext`` is the cell-periodic part of the bare perturbation δV_ext,q(r) =
+    e^{iq·r} dv_ext(r); returns the periodic part of the screened δρ_{+q}. K_Hxc
+    is a local field, so the fixed point stays at wavevector q. This is the
+    interacting density response at finite q (the object phonon DFPT screens
+    with); at q=0 for a real perturbation it is real."""
+    from gradwave.core._anderson import AndersonMixer
+
+    b = 2.0 * np.pi * np.linalg.inv(np.asarray(res.system.grid.cell, float)).T
+    q_cart = torch.as_tensor(np.asarray(q_frac, float) @ b,
+                             dtype=RDTYPE, device=res.system.grid.g2.device)
+
+    def bare(field):
+        return chi0_q(res, q_frac, field, tol=tol, max_iter=max_iter)
+
+    drho0 = bare(dv_ext)
+
+    def g(u):
+        return drho0 + bare(_k_hxc_q(res, xc, u, q_cart))
+
+    u = drho0.clone()
+    mixer = AndersonMixer(history, beta)
+    step = float("inf")
+    for _ in range(dyson_iter):
+        r = g(u) - u
+        step = float(torch.linalg.norm(r)) / max(1.0, float(torch.linalg.norm(u)))
+        if step < dyson_tol:
+            return u
+        u = mixer.step(u.reshape(-1), r.reshape(-1)).reshape(u.shape)
+    raise RuntimeError(f"screened q-response not converged ({step:.2e} after {dyson_iter})")
+
+
 def _little_group_orbits(k_frac: np.ndarray, sg, q_frac):
     """Partition the mesh k-points into orbits under the little co-group of q
     (reciprocal action W⁻ᵀk). Returns (rep_indices, multiplicities) — one

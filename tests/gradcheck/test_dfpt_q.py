@@ -166,3 +166,22 @@ def test_chi0_q_star_unfold_matches_full_mesh():
     # the reduction is real: the little group of q shrinks the k-set
     ops_t = _k_ops(little_cogroup(q, sg)[0].rotations)
     assert len(ops_t) > 1
+
+
+@pytest.mark.parametrize("q", [[0.25, 0.0, 0.0], [0.5, 0.0, 0.0]])
+def test_screened_response_q_conjugate_symmetry(q):
+    """Screened (Dyson) +q response (Phase 4, link 1): δρ_{-q}=conj(δρ_q) for a
+    conjugated perturbation, and screening materially changes the bare response."""
+    from gradwave.postscf.dfpt_q import chi0_q, screened_response_q
+
+    res = _si_res()
+    grid = res.system.grid
+    torch.manual_seed(4)
+    v = torch.randn(grid.shape, dtype=torch.complex128)
+    d_q = screened_response_q(res, PBE(), q, v)
+    d_mq = screened_response_q(res, PBE(), [-x for x in q], v.conj())
+    rel = float((d_mq - d_q.conj()).abs().max() / d_q.abs().max())
+    assert rel < 1e-5, rel
+    # screening is not a no-op: the self-consistent response differs from the bare
+    bare = chi0_q(res, q, v)
+    assert float((d_q - bare).abs().max() / bare.abs().max()) > 1e-2

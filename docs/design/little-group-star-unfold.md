@@ -204,10 +204,18 @@ finite-displacement path on a test crystal (e.g. Si, MgO).
   little-group-invariant perturbation at an ordinary-rep q — the q≠0 star-unfold,
   at ~|little co-group|-fold lower k-cost. `chi0_q` gained `k_indices`/`k_weights`/
   `symmetrizer` hooks for this. Test: `test_chi0_q_star_unfold_matches_full_mesh`.
-- **Phase 4 — not started.** The remaining chain: the screened self-consistent
-  response at q (Dyson `δρ = δρ⁰ + χ₀ K_Hxc δρ` with a q-aware Hartree kernel
-  `4πe²/|q+G|²`), an atomic-displacement perturbation `dV_q/du`, the dynamical
-  matrix assembly, and the supercell-dispersion match (`phonons_supercell`).
+- **Phase 4 — link 1 (screened response) landed and verified; the phonon
+  capstone remains.** `dfpt_q.screened_response_q` solves the Dyson fixed point
+  `δρ = χ₀[δV_ext] + χ₀[K_Hxc^q δρ]` at wavevector q — the interacting density
+  response — with the q-aware Hartree kernel `4πe²/|q+G|²` (no G=0 exclusion for
+  q≠Γ) and the local f_xc applied per real/imag part. Verified by conjugate
+  symmetry (<1e-5) and that screening materially changes the bare response
+  (`test_screened_response_q_conjugate_symmetry`). **Still owed (the capstone):**
+  an atomic-displacement perturbation `dV_q/du_{μi}` (local + KB-projector
+  derivative with the e^{iq·R} phase), the dynamical-matrix assembly
+  `D_{μi,νj}(q)` (the mixed second derivative + the ion-ion Ewald-at-q term), and
+  the frequency match against `phonons_supercell.dynamical_matrix`. That is a
+  substantial module in its own right and the natural next PR.
 
 ## Non-goals
 
