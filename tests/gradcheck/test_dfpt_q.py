@@ -64,3 +64,69 @@ def test_chi0_q_conjugate_symmetry(q):
     d_mq = chi0_q(res, [-x for x in q], v.conj())
     rel = float((d_mq - d_q.conj()).abs().max() / d_q.abs().max())
     assert rel < 1e-6, rel
+
+
+@pytest.mark.standard
+def test_chi0_q_matches_supercell_gamma():
+    """External oracle: the primitive χ₀ at q=[1/2,0,0] equals the q=0 χ₀
+    (apply_chi0, independently verified) of a 2x1x1 supercell for the SAME
+    physical plane-wave potential.
+
+    A wavevector-q perturbation in the primitive cell is a Γ perturbation in the
+    commensurate supercell, so δρ_prim,q folds into δρ_sc,Γ. This runs an entirely
+    different code path (supercell Γ Sternheimer, no k+q, no umklapp) and so
+    validates chi0_q's k↔k+q coupling and umklapp bookkeeping against ground
+    truth. δV = e^{iq·r} (v=1), real supercell potential 2cos(q·r); commensurate
+    FFT grids let the comparison be done directly in real space."""
+    import numpy as np
+
+    cell, pos = si_fcc()
+    upf = parse_upf(_FIX / "Si_ONCV_PBE-1.2.upf")
+    kw = dict(smearing="none", etol=1e-10, rhotol=1e-9, max_iter=150, verbose=False)
+    ecut = 18 * RY
+
+    # primitive: q=[1/2,0,0] needs k along a1 with a 2-point mesh (k, k+q on mesh)
+    sys_p = setup_system(cell, pos, [0, 0], [upf], ecut, kmesh=(2, 2, 2),
+                         nbands=8, use_symmetry=False, time_reversal=False)
+    res_p = scf(sys_p, PBE(), **kw)
+    n1, n2, n3 = res_p.system.grid.shape
+
+    # 2x1x1 supercell, FFT grid forced to exactly 2x along a1 (commensurate)
+    cell_sc = cell.copy()
+    cell_sc[0] = 2.0 * cell[0]
+    pos_sc = np.concatenate([pos, pos + cell[0]], axis=0)
+    sys_s = setup_system(cell_sc, pos_sc, [0, 0, 0, 0], [upf], ecut, kmesh=(1, 2, 2),
+                         nbands=16, use_symmetry=False, time_reversal=False,
+                         fft_shape=(2 * n1, n2, n3))
+    res_s = scf(sys_s, PBE(), **kw)
+    assert res_p.converged and res_s.converged
+
+    i1 = torch.arange(2 * n1).view(-1, 1, 1)
+
+    # --- control: apply_chi0 is consistent across cells (factor 1) for a q=0,
+    # cell-periodic potential — the supercell response is the primitive one tiled.
+    # This pins the k-mesh/normalization match, isolating the q≠0 check below. ---
+    torch.manual_seed(7)
+    w0_p = torch.randn(res_p.system.grid.shape, dtype=torch.float64)
+    w0_s = torch.cat([w0_p, w0_p], dim=0)                       # tiled, cell-periodic
+    d0_p = apply_chi0(res_p, w0_p)
+    d0_s = apply_chi0(res_s, w0_s)
+    ctrl = float((torch.cat([d0_p, d0_p], 0) - d0_s).abs().max() / d0_s.abs().max())
+    assert ctrl < 1e-3, ("q=0 cross-cell control", ctrl)
+
+    # --- q≠0 check. The real supercell potential 2cos(q·r) = e^{iq·r}+e^{-iq·r}
+    # drives the +q density response TWICE: directly (the +q perturbation) and via
+    # the −q perturbation's complex conjugate. So the supercell response is
+    # δρ_sc = 2 · (2 Re[e^{iq·r} chi0_q]) — the factor-2 c.c. doubling confirms
+    # chi0_q is the response to a single e^{iq·r}. ---
+    q = [0.5, 0.0, 0.0]
+    v = torch.ones(res_p.system.grid.shape, dtype=torch.complex128)
+    u = chi0_q(res_p, q, v)                     # primitive +q response, periodic part
+    phase = torch.exp(1j * np.pi * i1 / n1)     # e^{iq·r}, q·a1 = pi over the supercell
+    drho_from_prim = 2.0 * (phase * torch.cat([u, u], dim=0)).real
+
+    w_sc = (2.0 * torch.cos(np.pi * i1 / n1)).expand(2 * n1, n2, n3).to(torch.float64)
+    drho_sc = apply_chi0(res_s, w_sc) / 2.0     # undo the c.c. doubling
+
+    rel = float((drho_from_prim - drho_sc).abs().max() / drho_sc.abs().max())
+    assert rel < 1e-3, rel
