@@ -183,13 +183,23 @@ finite-displacement path on a test crystal (e.g. Si, MgO).
   full mesh at that q — correct, just not reduced. A full multiplier-rep
   construction that also reduces the projective q's is a further extension.
   Tests: `tests/unit/test_little_group.py`.
-- **Phases 2–4 — not started.** The k+q Sternheimer core, the reduced/folded
-  response, and phonon DFPT at q remain, on top of a correct Phase 1. The
-  substrate is mapped (every k+q primitive exists — `build_gsphere` at k+q,
-  projector rebuild at k+q, `cg_sternheimer` unchanged; the two new pieces are
-  the cross-sphere `e^{iq·r}` product and the k+q index/umklapp lookup on a full
-  `time_reversal=False` mesh) and the oracles are identified
-  (`phonons.gamma_hessian` at q=Γ, `phonons_supercell.dynamical_matrix` at q≠0).
+- **Phase 2 — bare k+q χ₀ landed and verified (internal oracles).**
+  `postscf.dfpt_q.chi0_q` computes the +q Fourier component of the bare density
+  response δρ_{+q} = χ₀[δV_q] on a full `time_reversal=False` mesh, with the
+  k+q index/umklapp lookup (`kpq_map`) and the cross-sphere product carrying the
+  `e^{iG0·r}` umklapp phase. Verified by (a) **q=0 reduction** — `apply_chi0 =
+  2·Re(chi0_q)` to <1e-7 (the factor 2 is the c.c. term that at q=0 doubles;
+  at q≠0 it is the −q component), which checks the whole k+q plumbing reduces
+  correctly; and (b) **q≠0 conjugate symmetry** δρ_{−q} = conj(δρ_q) to <1e-6 at
+  q with and without umklapps, which exercises the genuine k↔k+q coupling.
+  Tests: `tests/gradcheck/test_dfpt_q.py`. **Still owed:** the external
+  gold-standard oracle — a supercell frozen-phonon / static-potential
+  finite-difference (`phonons_supercell.dynamical_matrix`) — and the screened
+  (self-consistent) response; conjugate symmetry is necessary but not sufficient.
+- **Phases 3–4 — not started.** Fold `chi0_q` over the little-group IBZ with
+  `QFieldSymmetrizer` and unfold the star (Phase 3), then drive an atomic
+  displacement perturbation into the dynamical matrix at q and match the
+  supercell dispersion (Phase 4).
 
 ## Non-goals
 
