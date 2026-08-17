@@ -146,6 +146,40 @@ def chi0_q(res: SCFResult, q_frac, v_box: torch.Tensor, tol: float = 1e-8,
     return dr_r
 
 
+def local_displacement_perturbation_q(res: SCFResult, q_frac, atom: int,
+                                      alpha: int) -> torch.Tensor:
+    """Periodic part of the local-potential phonon perturbation ∂V_loc,q/∂u_{atom,α}
+    (Phase 4, piece 1: the local displacement perturbation of wavevector q).
+
+    Displacing ``atom`` in Cartesian direction ``alpha``, with its periodic images
+    phased by e^{iq·R}, gives a wavevector-q perturbation whose coefficient at q+G
+    is −i(q+G)_α · ṽ_loc(|q+G|) · e^{−i(q+G)·τ}/Ω, where ṽ_loc is the local form
+    factor (``pseudo.local.vloc_of_g``, re-evaluated at the shifted magnitude
+    |q+G| — the q=0 vloc_tables are sampled at |G| only). Returns the complex
+    real-space periodic field to feed ``chi0_q`` / ``screened_response_q``. At q=0
+    the G=0 term vanishes (its (q+G)_α factor is zero) and this reduces to the real
+    ∂v_loc/∂τ (``postscf.uspp_position._dvloc_r``)."""
+    from gradwave.core.fftbox import g_to_r_box
+    from gradwave.pseudo.local import vloc_of_g
+
+    system = res.system
+    grid = system.grid
+    b = 2.0 * np.pi * np.linalg.inv(np.asarray(grid.cell, float)).T
+    q_cart = torch.as_tensor(np.asarray(q_frac, float) @ b, dtype=RDTYPE,
+                             device=grid.g2.device)
+    qpg = grid.g_cart + q_cart                       # (n1,n2,n3,3) Cartesian q+G
+    qpg_mag = torch.linalg.norm(qpg, dim=-1)
+    upf = system.upfs[int(system.species_of_atom[atom])]
+    ff = torch.zeros_like(qpg_mag)
+    m = qpg_mag > 1e-8                                # |q+G|=0 only at q=Γ,G=0
+    ff[m] = torch.as_tensor(vloc_of_g(upf, qpg_mag[m].cpu().numpy()),
+                            dtype=RDTYPE, device=grid.g2.device)
+    tau = system.positions[atom].to(RDTYPE)
+    phase = torch.exp(-1j * (qpg @ tau).to(CDTYPE))  # e^{−i(q+G)·τ}
+    coeff = -1j * qpg[..., alpha].to(CDTYPE) * ff.to(CDTYPE) * phase / grid.volume
+    return g_to_r_box(coeff)
+
+
 def _k_hxc_q(res, xc, u_r, q_cart):
     """(K_Hxc^q u)(r): the q-shifted Hartree kernel 4πe²/|q+G|² plus the local
     f_xc, applied to a complex wavevector-q field. Unlike q=0 there is no G=0

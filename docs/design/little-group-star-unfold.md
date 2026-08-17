@@ -210,12 +210,19 @@ finite-displacement path on a test crystal (e.g. Si, MgO).
   response — with the q-aware Hartree kernel `4πe²/|q+G|²` (no G=0 exclusion for
   q≠Γ) and the local f_xc applied per real/imag part. Verified by conjugate
   symmetry (<1e-5) and that screening materially changes the bare response
-  (`test_screened_response_q_conjugate_symmetry`). **Still owed (the capstone):**
-  an atomic-displacement perturbation `dV_q/du_{μi}` (local + KB-projector
-  derivative with the e^{iq·R} phase), the dynamical-matrix assembly
-  `D_{μi,νj}(q)` (the mixed second derivative + the ion-ion Ewald-at-q term), and
-  the frequency match against `phonons_supercell.dynamical_matrix`. That is a
-  substantial module in its own right and the natural next PR.
+  (`test_screened_response_q_conjugate_symmetry`).
+- **Phase 4 piece 1 (local displacement perturbation) landed and verified.**
+  `dfpt_q.local_displacement_perturbation_q` — the local-potential phonon
+  perturbation ∂V_loc,q/∂u_{aα}, coefficient at q+G being −i(q+G)_α ṽ_loc(|q+G|)
+  e^{−i(q+G)·τ}/Ω with the form factor re-evaluated at |q+G| (`pseudo.local.vloc_of_g`;
+  the q=0 vloc_tables sample |G| only). Verified: exact q=0 reduction to the
+  established real ∂v_loc/∂τ (`uspp_position._dvloc_r`, rel<1e-6) and q≠0 conjugate
+  symmetry.
+- **Phase 4 remaining (the rest of the capstone):** the nonlocal KB q-derivative
+  ∂V_NL,q/∂u (projector infra at q-shifted spheres exists), the frozen
+  second-order term, the **from-scratch Ewald-at-q dynamical matrix** (no q-Ewald
+  in the repo — the supercell path gets ion-ion via forces), and the assembly +
+  mass-weighting + frequency match against `phonons_supercell.dynamical_matrix`.
 
 ## Non-goals
 

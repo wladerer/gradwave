@@ -185,3 +185,27 @@ def test_screened_response_q_conjugate_symmetry(q):
     # screening is not a no-op: the self-consistent response differs from the bare
     bare = chi0_q(res, q, v)
     assert float((d_q - bare).abs().max() / bare.abs().max()) > 1e-2
+
+
+def test_local_displacement_perturbation_q0_reduces():
+    """Phase 4 piece 1: the q-shifted local displacement perturbation reduces to
+    the existing real q=0 ∂v_loc/∂τ (uspp_position._dvloc_r) at q=Γ — the form
+    factor re-evaluated at |q+G| matches the vloc_tables at |G|, and the G=0 term
+    (whose (q+G)_α factor vanishes) contributes nothing."""
+    from gradwave.postscf.dfpt_q import local_displacement_perturbation_q
+    from gradwave.postscf.uspp_position import _dvloc_r
+
+    res = _si_res()
+    for atom, alpha in ((1, 0), (0, 2), (1, 1)):
+        dv_q = local_displacement_perturbation_q(res, [0.0, 0.0, 0.0], atom, alpha)
+        dv_ref = _dvloc_r(res.system, atom, alpha)          # real q=0 derivative
+        assert float(dv_q.imag.abs().max()) < 1e-8 * float(dv_q.real.abs().max())
+        rel = float((dv_q.real - dv_ref).abs().max()
+                    / max(1e-30, float(dv_ref.abs().max())))
+        assert rel < 1e-6, (atom, alpha, rel)
+
+    # q≠0: a real displacement gives conjugate ±q perturbations, dV_{-q}=conj(dV_q)
+    q = [0.25, 0.0, 0.0]
+    dvp = local_displacement_perturbation_q(res, q, 1, 0)
+    dvm = local_displacement_perturbation_q(res, [-x for x in q], 1, 0)
+    assert float((dvm - dvp.conj()).abs().max() / dvp.abs().max()) < 1e-10
