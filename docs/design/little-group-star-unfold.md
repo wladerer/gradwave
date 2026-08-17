@@ -160,6 +160,33 @@ finite-displacement path on a test crystal (e.g. Si, MgO).
   turns the largest remaining piece (Phase 2) into a well-scoped, well-oracle'd
   follow-up.
 
+## Implementation status
+
+- **Phase 0 — landed and verified.** `symmetry.little_cogroup`, `star_of_q`, and
+  `little_group_ibz` with a group-theory test suite (`tests/unit/test_little_group.py`):
+  orbit–stabilizer (`|star| · |G_q| = |G|`), Γ-reduction to `reduce_mesh`, the
+  umklapp identity `W⁻ᵀq − q = g0`, star generation, and IBZ sizing.
+- **Phase 1 — attempted; deferred with a concrete finding.** A first
+  `QFieldSymmetrizer` (naive little-co-group average of the q-modulated field)
+  is **not** a correct projector as written, for two reasons that surfaced
+  empirically and confirm this note's risk flags: (a) at a **non-symmorphic
+  zone-boundary q** (e.g. Si diamond at X) the small representation is
+  **projective** — a non-trivial factor system ω(g,h) means the plain average is
+  not idempotent, and the fold needs the multiplier representation, not the
+  vector one; (b) the **density-sphere mask is not closed** under the `m → W⁻ᵀm +
+  g0` map when the umklapp `g0 ≠ 0`, so a boundary-G contribution is dropped and
+  even an *interior* q loses idempotence. Both must be handled (a projective-rep
+  construction, and a q-shifted sphere/closure treatment) before the fold is
+  correct; the group-average shortcut that works at q=Γ (`RhoSymmetrizer`) does
+  not carry over unchanged. This is the crux of Phase 1 and gates Phase 3.
+- **Phases 2–4 — not started.** The k+q Sternheimer core, the reduced/folded
+  response, and phonon DFPT at q remain, on top of a correct Phase 1. The
+  substrate is mapped (every k+q primitive exists — `build_gsphere` at k+q,
+  projector rebuild at k+q, `cg_sternheimer` unchanged; the two new pieces are
+  the cross-sphere `e^{iq·r}` product and the k+q index/umklapp lookup on a full
+  `time_reversal=False` mesh) and the oracles are identified
+  (`phonons.gamma_hessian` at q=Γ, `phonons_supercell.dynamical_matrix` at q≠0).
+
 ## Non-goals
 
 This note does not cover magnetic little groups at q≠0 (spin-wave / magnon

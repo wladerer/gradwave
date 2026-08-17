@@ -199,6 +199,82 @@ def reduce_mesh(
     return _orbit_reduce(mesh, ops_t)
 
 
+def _fold_bz(q: np.ndarray) -> np.ndarray:
+    """Fold a fractional wavevector into the (-1/2, 1/2] cell (per component)."""
+    return -((-np.asarray(q, float) + 0.5) % 1.0 - 0.5)
+
+
+def little_cogroup(
+    q_frac: np.ndarray, sg: SpaceGroup, tol: float = 1e-6
+) -> tuple[SpaceGroup, np.ndarray]:
+    """The little co-group of q: the point-group operations whose reciprocal
+    action fixes q modulo a reciprocal-lattice vector, W⁻ᵀq ≡ q (mod 1).
+
+    Returns ``(SpaceGroup of those ops, g0)`` where ``g0[i]`` is the integer
+    umklapp W⁻ᵀq − q of op i (needed by a q-dependent field symmetrizer to fold
+    G-vectors of the q-modulated response back onto the box). At q=Γ this is the
+    full ``sg`` with g0 all zero. This is the group that symmetrizes a
+    perturbation (and its response) of wavevector q; the k-points of the DFPT
+    sum reduce under it.
+    """
+    q = np.asarray(q_frac, dtype=float)
+    keep: list[int] = []
+    g0s: list[np.ndarray] = []
+    for i, w in enumerate(sg.rotations):
+        w_inv_t = np.round(np.linalg.inv(w).T).astype(np.int64)
+        g0 = w_inv_t @ q - q
+        if np.max(np.abs(g0 - np.round(g0))) <= tol:
+            keep.append(i)
+            g0s.append(np.round(g0).astype(np.int64))
+    lg = SpaceGroup(
+        rotations=sg.rotations[keep], translations=sg.translations[keep],
+        atom_map=sg.atom_map[keep], international=sg.international,
+        origin_shift=sg.origin_shift)
+    return lg, (np.stack(g0s) if g0s else np.zeros((0, 3), dtype=np.int64))
+
+
+def star_of_q(
+    q_frac: np.ndarray, sg: SpaceGroup, tol: float = 1e-6
+) -> tuple[np.ndarray, np.ndarray]:
+    """The star of q: the distinct images {W⁻ᵀ q} (mod 1), folded to (-1/2, 1/2].
+
+    Returns ``(qs (s,3), rep_ops (s,))`` — the star members and, for each, the
+    index into ``sg.rotations`` of one operation carrying q onto it. By
+    orbit–stabilizer ``len(star) * little_cogroup(q).n_ops == sg.n_ops``; the
+    full response over the BZ is reconstructed from the one representative q by
+    generating its star.
+    """
+    q = np.asarray(q_frac, dtype=float)
+    stars: list[np.ndarray] = []
+    reps: list[int] = []
+    for i, w in enumerate(sg.rotations):
+        w_inv_t = np.round(np.linalg.inv(w).T).astype(np.int64)
+        qi = _fold_bz(w_inv_t @ q)
+        if not any(np.max(np.abs(_fold_bz(qi - s))) < tol for s in stars):
+            stars.append(qi)
+            reps.append(i)
+    return np.stack(stars), np.asarray(reps, dtype=np.int64)
+
+
+def little_group_ibz(
+    mesh: tuple[int, int, int], q_frac: np.ndarray, sg: SpaceGroup,
+    time_reversal: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """IBZ reduction of a Γ-centered MP mesh under the little group of q.
+
+    The DFPT k-sum at wavevector q is invariant under the little co-group of q
+    (it fixes q, so it maps the k↔k+q pairing onto itself); the k-points reduce
+    to that group's IBZ. Time reversal is added only when it too fixes q
+    (−q ≡ q, i.e. q at Γ or a TR-invariant zone-boundary point). Reduces to
+    ``reduce_mesh`` at q=Γ.
+    """
+    lg, _ = little_cogroup(q_frac, sg)
+    ops_t = _k_ops(lg.rotations)
+    if time_reversal and np.max(np.abs(_fold_bz(2.0 * np.asarray(q_frac, float)))) < 1e-6:
+        ops_t = ops_t + [-w for w in ops_t]
+    return _orbit_reduce(mesh, ops_t)
+
+
 @dataclass(frozen=True)
 class MagneticGroup:
     """Shubnikov magnetic space group of a (possibly non-collinear) moment set.
