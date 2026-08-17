@@ -378,6 +378,7 @@ def davidson_batched(
     max_iter: int = 40,
     max_dim_factor: int = 4,
     sync_free: bool = False,
+    history_out: list | None = None,
 ) -> BatchedDavidsonResult:
     """sync_free removes every per-round host readback: convergence stats
     travel through a non-blocking copy into pinned memory and are judged
@@ -461,6 +462,9 @@ def davidson_batched(
 
         r = hx - eig[..., None] * x
         rn = torch.linalg.norm(r, dim=-1).real
+        if history_out is not None:  # opt-in per-band convergence telemetry (off by default)
+            history_out.append((it, rn.detach().to("cpu").clone(),
+                                eig.detach().to("cpu").clone()))
         if not sync_free:
             if float(rn.max()) < tol:
                 return BatchedDavidsonResult(eig, x, it, rn)
