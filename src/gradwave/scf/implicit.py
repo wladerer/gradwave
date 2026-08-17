@@ -478,7 +478,7 @@ def solve_adjoint(res: SCFResult, xc, vbar_r: torch.Tensor, beta: float = 0.4,
 
 
 def density_loss_param_grads(
-    res: SCFResult, xc, loss_fn,
+    res: SCFResult, xc, loss_fn, *, assume_totally_symmetric: bool = False,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Gradients dL/dθ of a density-dependent loss through the SCF fixed point.
 
@@ -486,6 +486,10 @@ def density_loss_param_grads(
     (pure, differentiable). For nspin=2 the loss stays a functional of ρ_tot,
     so its gradient v̄ = ∂L/∂ρ seeds both spin channels equally.
     Returns (L, {param_name: grad}).
+
+    ``assume_totally_symmetric`` (use_symmetry=True nspin=1 only): run the adjoint
+    on the IBZ for a symmetry-invariant loss (its v̄ = ∂L/∂ρ is totally symmetric),
+    a ~7x cheaper backward with an identical gradient. See :func:`apply_chi0`.
     """
     grid = res.system.grid
     nspin = getattr(res, "nspin", 1)
@@ -497,8 +501,8 @@ def density_loss_param_grads(
     # already is ∂L/∂ρ_j — the grid-sum adjoint field. nspin=2: the loss is a
     # functional of ρ_tot, so v̄ enters both channels equally (stacked).
     vbar_seed = vbar if nspin == 1 else torch.stack([vbar] * nspin)
-    u = solve_adjoint(res, xc, vbar_seed)
-    chi0_u = apply_chi0(res, u)
+    u = solve_adjoint(res, xc, vbar_seed, assume_totally_symmetric=assume_totally_symmetric)
+    chi0_u = apply_chi0(res, u, assume_totally_symmetric=assume_totally_symmetric)
 
     # dL/dθ = Σ_σ ⟨χ₀u_σ, ∂v_xc^σ/∂θ⟩, differentiate ⟨χ₀u, v_xc(ρ; θ)⟩ w.r.t. θ
     # at fixed ρ. Double backward through E_xc, so force eager with xc_eager().

@@ -16,10 +16,11 @@ from pathlib import Path
 import pytest
 import torch
 
+from gradwave.core.xc.learnable import LearnableX
 from gradwave.core.xc.pbe import PBE
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.common import symmetrize_rho
-from gradwave.scf.implicit import apply_chi0, solve_adjoint
+from gradwave.scf.implicit import apply_chi0, density_loss_param_grads, solve_adjoint
 from gradwave.scf.loop import scf, setup_system
 from tests.helpers import RY, si_fcc
 
@@ -68,3 +69,32 @@ def test_symmetric_system_raises_without_optin():
     grid = res_ibz.system.grid
     with pytest.raises(NotImplementedError):
         apply_chi0(res_ibz, torch.zeros(grid.shape, dtype=torch.float64))
+
+
+def _sym_loss(rho):
+    return (rho**2).sum()          # symmetry-invariant functional of the density
+
+
+def _si_learnable(use_symmetry):
+    cell, pos = si_fcc()
+    upf = parse_upf(_FIX / "Si_ONCV_PBE-1.2.upf")
+    system = setup_system(cell, pos, [0, 0], [upf], ecut=25 * RY, kmesh=(4, 4, 4),
+                          nbands=8, use_symmetry=use_symmetry)
+    xc = LearnableX(kappa=0.8, mu=0.2)
+    return scf(system, xc, smearing="none", etol=1e-10, rhotol=1e-9,
+               max_iter=120, verbose=False), xc
+
+
+def test_symmetric_xc_param_gradient_matches_full_mesh():
+    """End-to-end: dL/dθ (XC params) through the IBZ backward equals the
+    full-mesh gradient for a symmetry-invariant loss."""
+    res_f, xc_f = _si_learnable(False)
+    res_i, xc_i = _si_learnable(True)
+    _, g_full = density_loss_param_grads(res_f, xc_f, _sym_loss)
+    _, g_ibz = density_loss_param_grads(res_i, xc_i, _sym_loss,
+                                        assume_totally_symmetric=True)
+    assert set(g_full) == set(g_ibz) and g_full
+    for k in g_full:
+        denom = float(g_full[k].abs().max()) or 1.0
+        rel = float((g_full[k] - g_ibz[k]).abs().max()) / denom
+        assert rel < 1e-5, (k, rel)
