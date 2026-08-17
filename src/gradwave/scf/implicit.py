@@ -69,6 +69,7 @@ from gradwave.postscf._response import (
     spin_sigma_triple,
     sternheimer_shift,
 )
+from gradwave.scf.common import symmetrize_rho
 from gradwave.scf.loop import SCFResult
 from gradwave.solvers.precond import teter
 
@@ -339,7 +340,7 @@ def _res_is_insulating(res: SCFResult) -> bool:
 
 @torch.no_grad()
 def apply_chi0(res: SCFResult, w_r: torch.Tensor, tol: float = 1e-8,
-               max_iter: int = 200) -> torch.Tensor:
+               max_iter: int = 200, *, assume_totally_symmetric: bool = False) -> torch.Tensor:
     """δρ = χ₀ w for a real local field w — insulator or metal.
 
     nspin=1: ``w_r`` is a grid field, returns a grid field. nspin=2: ``w_r`` is
@@ -350,26 +351,53 @@ def apply_chi0(res: SCFResult, w_r: torch.Tensor, tol: float = 1e-8,
     fully-occupied Sternheimer path (``_chi0_channel``); any fractional
     occupation (a smeared metal, or a magnet with partial spin fillings) uses
     the partial-occupation window path (``_chi0_channel_metal``), which reduces
-    smoothly to the insulator response as the Fermi-surface weight occ' → 0."""
-    _check_no_symmetry(res)
-    hs = _hamiltonians(res)
+    smoothly to the insulator response as the Fermi-surface weight occ' → 0.
+
+    Symmetry (``assume_totally_symmetric``): the SCF backward normally requires
+    ``use_symmetry=False`` — a perturbation breaks the crystal group, so folded
+    IBZ representatives no longer suffice. The ONE exception is a *totally
+    symmetric* perturbation (isotropic strain / EOS, a symmetry-preserving
+    composition or XC-parameter change): there the response δρ = χ₀ w is itself
+    totally symmetric, so the IBZ k-sum (``res.kweights`` are already the star
+    multiplicities) folded by the scalar ``RhoSymmetrizer`` reproduces the
+    full-BZ response — the same identity that makes the forward symmetrized SCF
+    bit-exact. Pass ``assume_totally_symmetric=True`` to opt into that fold on a
+    ``use_symmetry=True`` (nspin=1) system; the caller certifies w is totally
+    symmetric (it is projected on input to drop asymmetric noise). Without the
+    flag a symmetric system still raises, so no existing caller silently changes."""
+    sym = getattr(res.system, "sym", None)
+    symmetrizer = getattr(res.system, "rho_symmetrizer", None)
     nspin = getattr(res, "nspin", 1)
+    if sym is not None:
+        if not assume_totally_symmetric:
+            _check_no_symmetry(res)          # raises: the safe default
+        if nspin != 1:
+            raise NotImplementedError(
+                "symmetric χ₀ fold is implemented for nspin=1 only")
+        w_r = symmetrize_rho(symmetrizer, w_r, res.system.grid)  # project input
+    hs = _hamiltonians(res)
     if _res_is_insulating(res):
         if nspin == 1:
-            return _chi0_channel(res, cast("list[HamiltonianK]", hs), 0, w_r, 2.0,
-                                 tol, max_iter)
-        hs_spin = cast("list[list[HamiltonianK]]", hs)
-        return torch.stack([_chi0_channel(res, hs_spin[isp], isp, w_r[isp], 1.0,
-                                          tol, max_iter) for isp in range(nspin)])
-    scheme = SCHEMES[res.smearing]
-    mu = float(res.fermi)
-    if nspin == 1:
-        return _chi0_channel_metal(res, cast("list[HamiltonianK]", hs), 0, w_r, 2.0,
-                                   mu, scheme, res.width, tol, max_iter)
-    hs_spin = cast("list[list[HamiltonianK]]", hs)
-    return torch.stack([
-        _chi0_channel_metal(res, hs_spin[isp], isp, w_r[isp], 1.0, mu, scheme,
-                            res.width, tol, max_iter) for isp in range(nspin)])
+            out = _chi0_channel(res, cast("list[HamiltonianK]", hs), 0, w_r, 2.0,
+                                tol, max_iter)
+        else:
+            hs_spin = cast("list[list[HamiltonianK]]", hs)
+            out = torch.stack([_chi0_channel(res, hs_spin[isp], isp, w_r[isp], 1.0,
+                                             tol, max_iter) for isp in range(nspin)])
+    else:
+        scheme = SCHEMES[res.smearing]
+        mu = float(res.fermi)
+        if nspin == 1:
+            out = _chi0_channel_metal(res, cast("list[HamiltonianK]", hs), 0, w_r, 2.0,
+                                      mu, scheme, res.width, tol, max_iter)
+        else:
+            hs_spin = cast("list[list[HamiltonianK]]", hs)
+            out = torch.stack([
+                _chi0_channel_metal(res, hs_spin[isp], isp, w_r[isp], 1.0, mu, scheme,
+                                    res.width, tol, max_iter) for isp in range(nspin)])
+    if sym is not None:
+        out = symmetrize_rho(symmetrizer, out, res.system.grid)  # fold the star
+    return out
 
 
 def apply_k_hxc(res: SCFResult, xc, w_r: torch.Tensor) -> torch.Tensor:
@@ -410,8 +438,14 @@ def apply_k_hxc(res: SCFResult, xc, w_r: torch.Tensor) -> torch.Tensor:
 @torch.no_grad()
 def solve_adjoint(res: SCFResult, xc, vbar_r: torch.Tensor, beta: float = 0.4,
                   tol: float = 1e-9, max_iter: int = 100,
-                  history: int = 8) -> torch.Tensor:
+                  history: int = 8, *, assume_totally_symmetric: bool = False) -> torch.Tensor:
     """Solve u = v̄ + K_Hxc[χ₀ u] by Anderson-accelerated fixed-point iteration.
+
+    ``assume_totally_symmetric`` threads to ``apply_chi0`` to allow a
+    ``use_symmetry=True`` (nspin=1) system when v̄ (and hence u) is totally
+    symmetric — the IBZ χ₀ is folded by the scalar RhoSymmetrizer, and K_Hxc
+    (local Hartree + f_xc) preserves the totally-symmetric subspace, so the whole
+    fixed point stays in it. See :func:`apply_chi0`.
 
     For nspin=2 ``vbar_r`` (and hence ``u``) is the stacked per-spin pair
     (2, *grid.shape); the loop runs on the flattened tensor — every operation
@@ -426,7 +460,8 @@ def solve_adjoint(res: SCFResult, xc, vbar_r: torch.Tensor, beta: float = 0.4,
     shape = vbar_r.shape
 
     def g(u):
-        return vbar_r + apply_k_hxc(res, xc, apply_chi0(res, u))
+        return vbar_r + apply_k_hxc(res, xc, apply_chi0(
+            res, u, assume_totally_symmetric=assume_totally_symmetric))
 
     u = vbar_r.clone()
     mixer = AndersonMixer(history, beta)
