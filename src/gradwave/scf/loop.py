@@ -1822,6 +1822,7 @@ def scf(
             e_metric_charge=e_metric_charge,
             e_metric_mag=e_metric_mag,
             e_hf_gap=e_hf_gap,
+            subspace_size=mixer.subspace_size,
         )
 
         # Block convergence until the U-ramp reaches full U (u_scale==1.0), so
