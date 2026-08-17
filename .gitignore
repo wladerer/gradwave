@@ -26,3 +26,6 @@ profile.speedscope.json
 
 # generated interactive delta-gauge periodic table (PNG is committed)
 benchmarks/delta_gauge/results/delta_ptable.html
+
+# generated SCF-telemetry benchmark datasets (gradwave.bench)
+bench_runs/
