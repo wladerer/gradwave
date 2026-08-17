@@ -69,9 +69,10 @@ from gradwave.postscf._response import (
     spin_sigma_triple,
     sternheimer_shift,
 )
-from gradwave.scf.common import symmetrize_rho
+from gradwave.scf.common import symmetrize_rho, symmetrize_rho_pair
 from gradwave.scf.loop import SCFResult
 from gradwave.solvers.precond import teter
+from gradwave.symmetry import CollinearMagneticSymmetrizer, RhoSymmetrizer
 
 
 def _check_no_symmetry(res: SCFResult):
@@ -81,6 +82,30 @@ def _check_no_symmetry(res: SCFResult):
             "breaks the crystal symmetry, so the response needs the full "
             "(TR-reduced) k-mesh"
         )
+
+
+def _sym_fold(symmetrizer, field, grid, nspin):
+    """Fold a totally-symmetric real field into the symmetric subspace, matching
+    the forward SCF's ``_output_density`` dispatch (scf/loop.py).
+
+    nspin=1: scalar ``RhoSymmetrizer`` round-trip. nspin=2 (collinear): dispatch
+    on the symmetrizer class exactly as the forward density does — a
+    ``CollinearMagneticSymmetrizer`` folds the (ρ↑, ρ↓) pair jointly via the
+    (n=ρ↑+ρ↓, m=ρ↑−ρ↓) representation (the −1 anti-unitary sign on m, channel
+    swap), a plain ``RhoSymmetrizer`` (uniform-moment / FM, chemical group
+    unbroken) folds each spin channel independently. ``field`` is (2, *grid) for
+    nspin=2."""
+    if nspin == 1:
+        return symmetrize_rho(symmetrizer, field, grid)
+    if isinstance(symmetrizer, CollinearMagneticSymmetrizer):
+        up, dn = symmetrize_rho_pair(symmetrizer, field[0], field[1], grid)
+        return torch.stack([up, dn])
+    if isinstance(symmetrizer, RhoSymmetrizer):
+        return torch.stack([symmetrize_rho(symmetrizer, field[isp], grid)
+                            for isp in range(nspin)])
+    raise NotImplementedError(
+        "symmetric χ₀ fold (nspin=2) supports RhoSymmetrizer (uniform-moment) "
+        f"and CollinearMagneticSymmetrizer, not {type(symmetrizer).__name__}")
 
 
 def _occupied(res: SCFResult, isp: int, ik: int):
@@ -362,19 +387,22 @@ def apply_chi0(res: SCFResult, w_r: torch.Tensor, tol: float = 1e-8,
     multiplicities) folded by the scalar ``RhoSymmetrizer`` reproduces the
     full-BZ response — the same identity that makes the forward symmetrized SCF
     bit-exact. Pass ``assume_totally_symmetric=True`` to opt into that fold on a
-    ``use_symmetry=True`` (nspin=1) system; the caller certifies w is totally
-    symmetric (it is projected on input to drop asymmetric noise). Without the
-    flag a symmetric system still raises, so no existing caller silently changes."""
+    ``use_symmetry=True`` system; the caller certifies w is totally symmetric (it
+    is projected on input to drop asymmetric noise). Without the flag a symmetric
+    system still raises, so no existing caller silently changes.
+
+    nspin=2 (collinear) is supported: the per-spin response pair is folded by the
+    same dispatch the forward density uses (``_sym_fold`` → the (n,m) magnetic
+    fold for a ``CollinearMagneticSymmetrizer``, else independent per-channel for
+    a uniform-moment ``RhoSymmetrizer``). The perturbation must be totally
+    symmetric under the system's (magnetic) group."""
     sym = getattr(res.system, "sym", None)
     symmetrizer = getattr(res.system, "rho_symmetrizer", None)
     nspin = getattr(res, "nspin", 1)
     if sym is not None:
         if not assume_totally_symmetric:
             _check_no_symmetry(res)          # raises: the safe default
-        if nspin != 1:
-            raise NotImplementedError(
-                "symmetric χ₀ fold is implemented for nspin=1 only")
-        w_r = symmetrize_rho(symmetrizer, w_r, res.system.grid)  # project input
+        w_r = _sym_fold(symmetrizer, w_r, res.system.grid, nspin)  # project input
     hs = _hamiltonians(res)
     if _res_is_insulating(res):
         if nspin == 1:
@@ -396,7 +424,7 @@ def apply_chi0(res: SCFResult, w_r: torch.Tensor, tol: float = 1e-8,
                 _chi0_channel_metal(res, hs_spin[isp], isp, w_r[isp], 1.0, mu, scheme,
                                     res.width, tol, max_iter) for isp in range(nspin)])
     if sym is not None:
-        out = symmetrize_rho(symmetrizer, out, res.system.grid)  # fold the star
+        out = _sym_fold(symmetrizer, out, res.system.grid, nspin)  # fold the star
     return out
 
 

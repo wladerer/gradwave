@@ -13,11 +13,13 @@ system still raises without it (no existing caller silently changes).
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
 from gradwave.core.xc.learnable import LearnableX
 from gradwave.core.xc.pbe import PBE
+from gradwave.core.xc.spin import SpinPBE
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.common import symmetrize_rho
 from gradwave.scf.implicit import apply_chi0, density_loss_param_grads, solve_adjoint
@@ -98,3 +100,46 @@ def test_symmetric_xc_param_gradient_matches_full_mesh():
         denom = float(g_full[k].abs().max()) or 1.0
         rel = float((g_full[k] - g_ibz[k]).abs().max()) / denom
         assert rel < 1e-5, (k, rel)
+
+
+def _fe_bcc(use_symmetry):
+    """Ferromagnetic bcc Fe (collinear nspin=2, smeared metal). The chemical
+    point group is unbroken (uniform moment), so ``System.rho_symmetrizer`` is a
+    scalar ``RhoSymmetrizer`` and each spin channel folds independently."""
+    a = 2.87
+    cell = a / 2 * np.array([[-1.0, 1, 1], [1, -1, 1], [1, 1, -1]])
+    pos = np.zeros((1, 3))
+    upf = parse_upf(_FIX / "Fe_ONCV_PBE-1.2.upf")
+    system = setup_system(cell, pos, [0], [upf], ecut=45 * RY, kmesh=(4, 4, 4),
+                          nbands=16, use_symmetry=use_symmetry)
+    return scf(system, SpinPBE(), smearing="gaussian", width=0.1, nspin=2,
+               start_mag=[2.2], etol=1e-9, rhotol=1e-8, max_iter=250, verbose=False)
+
+
+def test_symmetric_chi0_nspin2_matches_full_mesh():
+    """Collinear nspin=2: the per-spin χ₀ fold on the IBZ reproduces the full mesh.
+
+    A ferromagnetic metal (bcc Fe, moment ≈2.6 μB — genuinely spin-split, δρ↑≠δρ↓)
+    with the chemical point group unbroken folds each spin channel independently
+    with the scalar RhoSymmetrizer, exactly as the forward collinear SCF
+    symmetrizes (ρ↑, ρ↓). The totally-symmetric per-spin probe's IBZ response
+    matches the use_symmetry=False full-BZ response to solver tolerance — a
+    channel-confusion or unfolded bug would be O(1)."""
+    res_full, res_ibz = _fe_bcc(False), _fe_bcc(True)
+    assert res_full.nspin == 2 and res_ibz.nspin == 2
+    assert res_ibz.mag_total > 1.0  # genuinely spin-split (ferromagnetic)
+    assert len(res_ibz.system.kweights) < len(res_full.system.kweights)  # IBZ smaller
+    grid = res_ibz.system.grid
+    torch.manual_seed(0)
+    # totally-symmetric per-spin probe field (2, *grid.shape)
+    w = torch.stack([symmetrize_rho(res_ibz.system.rho_symmetrizer,
+                                    torch.randn(grid.shape, dtype=torch.float64), grid)
+                     for _ in range(2)])
+    d_full = apply_chi0(res_full, w)
+    d_ibz = apply_chi0(res_ibz, w, assume_totally_symmetric=True)
+    rel = float((d_full - d_ibz).abs().max() / d_full.abs().max())
+    assert rel < 1e-7, rel
+
+    # a symmetric nspin=2 system still raises without the opt-in (safe default)
+    with pytest.raises(NotImplementedError):
+        apply_chi0(res_ibz, w)
