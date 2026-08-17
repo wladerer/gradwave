@@ -54,7 +54,7 @@ class BenchCase:
 
 
 def _case(name, hardness, pseudo, cell, pos, *, ecut_ry, kmesh, nband_buffer,
-          smearing, width, gap_hint):
+          smearing, width, gap_hint, use_symmetry=True):
     upf = parse_upf(_PSEUDO_DIR / pseudo)
     zval = float(upf.z_valence)
     natoms = len(pos)
@@ -62,14 +62,18 @@ def _case(name, hardness, pseudo, cell, pos, *, ecut_ry, kmesh, nband_buffer,
     nbands = int(np.ceil(nelec / 2)) + nband_buffer
 
     def build():
+        # Forward-SCF benchmarks reduce k to the IBZ by the crystal point group
+        # (setup_system use_symmetry) — exact (energy bit-for-bit) and ~10-15x
+        # faster on symmetric metals. Set use_symmetry=False for a case that will
+        # feed the differentiable/response path (a perturbation breaks the group).
         return setup_system(np.asarray(cell, float), np.asarray(pos, float),
                             [0] * natoms, [upf], ecut=ecut_ry * RY, kmesh=kmesh,
-                            nbands=nbands)
+                            nbands=nbands, use_symmetry=use_symmetry)
 
     desc = dict(hardness=hardness, n_atoms=natoms, z_valence=zval, n_electrons=nelec,
                 ecut_ry=ecut_ry, kmesh="x".join(map(str, kmesh)), nbands=nbands,
                 smearing=smearing, width_eV=width, gap_hint_eV=gap_hint,
-                pseudo=pseudo)
+                use_symmetry=use_symmetry, pseudo=pseudo)
     scf_kw = dict(smearing=smearing, width=width, max_iter=70, etol=1e-6,
                   rhotol=1e-5, verbose=False)
     return BenchCase(name, hardness, build, scf_kw, desc)
