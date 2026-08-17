@@ -24,6 +24,7 @@ import torch
 from gradwave.core.xc.pbe import PBE
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.alchemical import (
+    alchemical_density_response,
     alchemical_energy_gradient,
     alchemical_gap_gradient,
     alchemical_gap_gradient_per_site,
@@ -307,3 +308,62 @@ def test_observable_gradient_vs_fd():
     fd = (op - om) / (2 * h)
     assert abs(dO) > 1e-3                       # genuinely nonzero
     assert abs(dO - fd) < 5e-3, f"d(∫ρ²)/dλ {dO} vs FD {fd}"
+
+
+def _si_diamond(a=5.43):
+    """2-Si diamond primitive cell. Substituting BOTH sites at the same rate
+    keeps the full Fd-3m point group, so a Si→Ge transmutation is a totally
+    symmetric perturbation."""
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0, 0], [a / 4] * 3])
+    return cell, pos
+
+
+def test_alchemical_star_unfolding_matches_full_mesh():
+    """IBZ-reduced Si→Ge alchemical response == full-mesh, via star-unfolding.
+
+    A homogeneous both-site Si→Ge substitution preserves the crystal point group,
+    so ∂V_ion/∂λ is totally symmetric and the response dρ/dλ is too. The
+    ``assume_totally_symmetric`` fold then lets the symmetry-reduced (IBZ) k-set
+    reproduce the full-BZ dρ/dλ and d(E_gap)/dλ — the alchemical counterpart of
+    the implicit-backward star-unfolding (``test_implicit_symmetry``). Evaluated
+    at λ=0 (pure Si, a clean insulator: PBE closes Ge's gap, so an intermediate
+    or λ=1 point is metallic and outside the insulator response regime); the
+    Si→Ge direction still enters through the bare (Ge−Si) ionic derivative. This
+    is the pair the earlier Si→C attempt could not reach — C at Si's stretched
+    lattice does not converge."""
+    torch.set_num_threads(4)
+    cell, pos = _si_diamond()
+    si = parse_upf(PSEUDOS / "Si_ONCV_PBE_sr.upf")
+    ge = parse_upf(PSEUDOS / "Ge_ONCV_PBE_sr.upf")
+    ecut, km = 30 * RY, (4, 4, 4)
+    kw = dict(smearing="none", etol=1e-10, rhotol=1e-9, verbose=False)
+
+    def build(use_symmetry):
+        return setup_alchemical_substitution(
+            cell, pos, [si], [0, 0], {0: ge, 1: ge}, 0.0, ecut=ecut, kmesh=km,
+            nbands=8, use_symmetry=use_symmetry)
+
+    res_full = scf(build(False), PBE(), **kw)
+    res_ibz = scf(build(True), PBE(), **kw)
+    assert res_full.converged and res_ibz.converged
+    assert len(res_ibz.system.kweights) < len(res_full.system.kweights)  # IBZ smaller
+
+    # a symmetric system still raises without the opt-in (existing callers unchanged)
+    with pytest.raises(NotImplementedError):
+        alchemical_density_response(res_ibz, PBE())
+
+    drho_f, _, _ = alchemical_density_response(res_full, PBE())
+    drho_i, _, _ = alchemical_density_response(
+        res_ibz, PBE(), assume_totally_symmetric=True)
+    rel = float((drho_f - drho_i).abs().max() / drho_f.abs().max())
+    # ~1e-6 floor: the sym-on and sym-off SCF ground-state densities differ by
+    # the ~1e-5 point-group/FFT-grid discretization floor, which propagates into
+    # χ₀; a broken fold would be O(1e-2), not O(1e-6).
+    assert rel < 5e-6, rel
+
+    g_f = alchemical_gap_gradient(res_full, PBE())
+    g_i = alchemical_gap_gradient(res_ibz, PBE(), assume_totally_symmetric=True)
+    assert abs(g_f.dgap - g_i.dgap) < 1e-4, (g_f.dgap, g_i.dgap)
+    assert abs(g_f.dvbm - g_i.dvbm) < 1e-4
+    assert abs(g_f.dcbm - g_i.dcbm) < 1e-4
