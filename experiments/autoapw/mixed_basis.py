@@ -93,10 +93,18 @@ def radial_channel(l, El, r, v, R):
     def T(i, j):
         return 0.5 * ((dRf[i] * dRf[j]) * rr**2 + ll * Rf[i] * Rf[j]).sum() * dr
 
+    # sphere potential integrals V_ij = ∫_0^R u_i V(r) u_j dr  (=0 for the empty lattice)
+    v_in = v.detach().numpy()[inside]
+    fi = {"u": ui, "ud": udi}
+
+    def V(i, j):
+        return (fi[i] * v_in * fi[j]).sum() * dr
+
     return {"uR": uR, "upR": upR, "udR": udR, "udpR": udpR,
             "uu": float(ov[("u", "u")]), "uud": float(ov[("u", "ud")]),
             "udud": float(ov[("ud", "ud")]),
             "Tuu": float(T("u", "u")), "Tuud": float(T("u", "ud")), "Tudud": float(T("ud", "ud")),
+            "Vuu": float(V("u", "u")), "Vuud": float(V("u", "ud")), "Vudud": float(V("ud", "ud")),
             "El": El, "l": l}
 
 
@@ -158,13 +166,13 @@ def build_matrices(kfrac, L, R, lmax, El_by_l, ecut, r, v_sphere):
         ch = radial_channel(l, El_by_l[l], r, v_sphere, R)
         ab = np.array([match_ab(ch, ksafe[g], R) for g in range(npw)])   # (npw,2)
         a, bb = ab[:, 0], ab[:, 1]
-        Ms = (np.outer(a, a) * ch["uu"] + (np.outer(a, bb) + np.outer(bb, a)) * ch["uud"]
-              + np.outer(bb, bb) * ch["udud"])
-        Tk = (np.outer(a, a) * ch["Tuu"] + (np.outer(a, bb) + np.outer(bb, a)) * ch["Tuud"]
-              + np.outer(bb, bb) * ch["Tudud"])
+        aa, ab_s, bbo = np.outer(a, a), np.outer(a, bb) + np.outer(bb, a), np.outer(bb, bb)
+        Ms = aa * ch["uu"] + ab_s * ch["uud"] + bbo * ch["udud"]
+        Tk = aa * ch["Tuu"] + ab_s * ch["Tuud"] + bbo * ch["Tudud"]
+        Vk = aa * ch["Vuu"] + ab_s * ch["Vuud"] + bbo * ch["Vudud"]   # sphere potential
         pref = (4 * math.pi / Ω) * (2 * l + 1) * eval_legendre(l, cost)   # (npw,npw)
         S += pref * Ms
-        H += pref * Tk
+        H += pref * (Tk + Vk)
     return H, S, knorm
 
 
@@ -192,6 +200,70 @@ def empty_lattice_bands(kfrac, L, R, lmax, El, ecut, nbands=6):
     evals = np.sort(_sym_geneig(H, S))[:nbands]
     ref = free_electron_ref(kfrac, L, ecut, nbands)
     return evals, ref, float(np.abs(evals - ref).max())
+
+
+def muffin_tin_v(r, R, V0):
+    """A smooth attractive muffin-tin well V(r) = -V0 (1-(r/R)²)² for r<R, 0 outside (C¹ at R)."""
+    well = -V0 * (1.0 - (r / R) ** 2) ** 2
+    return torch.where(r < R, well, torch.zeros_like(r))
+
+
+def lapw_bands(kfrac, L, R, lmax, El, ecut, V0, nbands=6):
+    """LAPW bands for the muffin-tin well of depth V0 (V=0 in the interstitial)."""
+    r = torch.linspace(1e-4, R + 0.5, 1600, dtype=torch.float64)
+    v = muffin_tin_v(r, R, V0)
+    H, S, _ = build_matrices(kfrac, L, R, lmax, {l: El for l in range(lmax + 1)}, ecut, r, v)
+    H = 0.5 * (H + H.T)
+    return np.sort(_sym_geneig(H, S))[:nbands]
+
+
+def pw_ref_bands(kfrac, L, R, V0, ecut_ref, N=64, nbands=6):
+    """Converged plane-wave reference for the SAME muffin-tin well: H = ½|k+G|² + Ṽ(G-G')."""
+    ax = np.arange(N) * (L / N)
+    X, Y, Z = np.meshgrid(ax, ax, ax, indexing="ij")
+
+    def mi(a):
+        return a - L * np.round(a / L)
+
+    d = np.sqrt(mi(X) ** 2 + mi(Y) ** 2 + mi(Z) ** 2)
+    Vr = np.where(d < R, -V0 * (1 - (d / R) ** 2) ** 2, 0.0)
+    Vg = np.fft.fftn(Vr) / N**3                      # Ṽ(G) on integer frequencies
+
+    b = 2 * math.pi / L
+    nmax = int(math.ceil(math.sqrt(2 * ecut_ref) / b)) + 1
+    mills, kgs = [], []
+    for i in range(-nmax, nmax + 1):
+        for j in range(-nmax, nmax + 1):
+            for m in range(-nmax, nmax + 1):
+                kg = b * (np.array([i, j, m]) + np.asarray(kfrac))
+                if 0.5 * kg @ kg <= ecut_ref:
+                    mills.append([i, j, m])
+                    kgs.append(kg)
+    mills = np.array(mills)
+    kgs = np.array(kgs)
+    dG = (mills[:, None, :] - mills[None, :, :]) % N
+    H = Vg[dG[..., 0], dG[..., 1], dG[..., 2]]
+    H = H + np.diag(0.5 * np.einsum("ij,ij->i", kgs, kgs))
+    return np.sort(np.linalg.eigvalsh(H).real)[:nbands]
+
+
+def run_real(L=6.0, R=1.2, lmax=6, ecut=8.0, V0=1.0):
+    """Non-empty muffin-tin well: LAPW (small augmented basis) vs a converged PW solve of the
+    SAME potential. They must agree — a real-physics correctness check beyond the empty lattice."""
+    print("\nAutoAPW GATE S3b — REAL bands: muffin-tin well vs converged plane-wave reference")
+    print(f"  well V(r)=-{V0}(1-(r/R)²)² for r<{R}; LAPW ecut={ecut},lmax={lmax}  vs  PW ecut=20\n")
+    print(f"  {'k':>14} | {'max|LAPW-PW|':>13} | bands (Ha)")
+    ok = True
+    for kf, name in ([[0.0, 0.0, 0.0], "Γ"], [[0.5, 0.0, 0.0], "X"], [[0.5, 0.5, 0.0], "M"]):
+        lap = lapw_bands(kf, L, R, lmax, -0.3, ecut, V0)
+        ref = pw_ref_bands(kf, L, R, V0, 20.0)
+        d = float(np.abs(lap - ref).max())
+        ok = ok and d < 5e-3
+        print(f"  {name:>14} | {d:>13.2e} | LAPW {np.array2string(lap[:4], precision=4)}")
+        print(f"  {'':>14} | {'':>13} | PW   {np.array2string(ref[:4], precision=4)}")
+    print(f"\n  VERDICT: LAPW == converged PW on the same well: {'PASS' if ok else 'FAIL'} "
+          f"(a real muffin-tin potential, not just empty lattice)")
+    return ok
 
 
 def run(device):
@@ -257,6 +329,7 @@ def main():
     ap.add_argument("--device", default="cpu")
     args = ap.parse_args()
     run(args.device)
+    run_real()
 
 
 if __name__ == "__main__":
