@@ -48,9 +48,17 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
       lmax≈R·Gmax), and is R_MT-independent (max 3.5e-5). CPU+CUDA. Two real bugs the empty-lattice
       gate caught and fixed: (1) match the u-functions (u=r·R) to r·j_l(qr), not j_l(qr); (2) use
       the WEAK-form kinetic in the sphere for consistency across the C¹ boundary.
-- [ ] S3 follow-ons: a non-zero muffin-tin potential (real band structure vs a converged PW/QE
-      reference) and a torch/autograd assembly for differentiable bands dε/dparam (the numpy
-      assembly is not yet autograd; the gate-D atom already shows the differentiable-oracle path).
+- [x] GATE S3b — REAL bands (non-empty muffin-tin well) vs a converged plane-wave reference.
+      **PASSED.** LAPW small augmented basis (ecut=8,lmax=6) == converged PW (ecut=20) on the SAME
+      well to 2.5e-4–6.7e-4 Ha per band across Γ,X,M; the attractive well pulls the lowest band to
+      -0.01 Ha. Concrete AutoAPW payoff (LAPW hits PW-ecut-20 accuracy at ecut=8).
+- [x] GATE S3c — DIFFERENTIABLE bands via a torch autograd assembly (`torch_bands`). **PASSED.**
+      dε/dV0 (band response to the potential) autograd == finite-diff to ~1e-7 for all bands at a
+      general k, flowing through numerov → radial integrals → matching → generalized eigensolve.
+      Extends the gate-D atomic oracle to the solid-state mixed-basis solver. (General k lifts the
+      cubic degeneracies that make eigh's backward diverge.)
+- [ ] Production follow-ons: a real UPF/all-electron radial potential (log mesh, eV/Å units),
+      multi-atom cells, self-consistency, and promoting the validated pieces into src/gradwave.
 - [ ] Then #1 DualBasis oxygen gate; then benchmark; then SlepianCore (slabs/molecular crystals).
 
 Prototypes/tests run on asus per user request (`ssh asus`), heavy runs via ./scripts/gwq.

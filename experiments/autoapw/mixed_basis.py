@@ -43,7 +43,7 @@ import math
 
 import numpy as np
 import torch
-from radial_solve import numerov_outward
+from radial_solve import _lin_interp, numerov_outward
 
 
 def sph_jn(l, x):
@@ -266,6 +266,135 @@ def run_real(L=6.0, R=1.2, lmax=6, ecut=8.0, V0=1.0):
     return ok
 
 
+def _ddr(f, dr):
+    """Central-difference d/dr of a 1D torch tensor on a uniform mesh (autograd-clean)."""
+    d = torch.empty_like(f)
+    d[1:-1] = (f[2:] - f[:-2]) / (2 * dr)
+    d[0] = (f[1] - f[0]) / dr
+    d[-1] = (f[-1] - f[-2]) / dr
+    return d
+
+
+def torch_bands(kfrac, L, R, lmax, El, ecut, V0, N=700, nbands=4):
+    """Differentiable LAPW bands: the same assembly as build_matrices, but in torch with the well
+    depth V0 as a leaf, so dε/dV0 flows through numerov -> radial integrals -> matching -> the
+    generalized eigensolve via autograd. Geometric factors (P_l, W, k·k') are constants."""
+    from scipy.special import eval_legendre
+    Ω = L**3
+    b = 2 * math.pi / L
+    nmax = int(math.ceil(math.sqrt(2 * ecut) / b)) + 1
+    ks = [b * (np.array([i, j, m]) + np.asarray(kfrac))
+          for i in range(-nmax, nmax + 1) for j in range(-nmax, nmax + 1)
+          for m in range(-nmax, nmax + 1)]
+    ks = np.array([k for k in ks if 0.5 * k @ k <= ecut])
+    npw = len(ks)
+    knorm = np.maximum(np.linalg.norm(ks, axis=1), 1e-9)
+
+    dk = np.linalg.norm(ks[:, None, :] - ks[None, :, :], axis=2)
+    inter = torch.tensor(np.eye(npw) - ball_ff_np(dk, R) / Ω)
+    kdot = ks @ ks.T
+    cost = np.clip(kdot / np.outer(knorm, knorm), -1.0, 1.0)
+
+    r = torch.linspace(1e-4, R + 0.5, N, dtype=torch.float64)
+    dr = r[1] - r[0]
+    inside = r <= R
+    rr = r[inside]
+    v = muffin_tin_v(r, R, V0)
+
+    S = inter.clone()
+    H = 0.5 * torch.tensor(kdot) * inter
+
+    for l in range(lmax + 1):
+        def norm_u(E, l=l):
+            u = numerov_outward(l, E, r, v)
+            return u / torch.sqrt((u[inside] ** 2).sum() * dr)
+
+        hE = 1e-4
+        u = norm_u(torch.tensor(El, dtype=torch.float64))
+        udot = (norm_u(torch.tensor(El + hE)) - norm_u(torch.tensor(El - hE))) / (2 * hE)
+
+        def vs(f):
+            v0 = _lin_interp(r, f, torch.tensor(R, dtype=torch.float64))
+            vp = _lin_interp(r, f, torch.tensor(R + float(dr), dtype=torch.float64))
+            vm = _lin_interp(r, f, torch.tensor(R - float(dr), dtype=torch.float64))
+            return v0, (vp - vm) / (2 * dr)
+
+        uR, upR = vs(u)
+        udR, udpR = vs(udot)
+        ui, udi, v_in = u[inside], udot[inside], v[inside]
+        uu, uud, udud = (ui * ui).sum() * dr, (ui * udi).sum() * dr, (udi * udi).sum() * dr
+        Vuu = (ui * v_in * ui).sum() * dr
+        Vuud = (ui * v_in * udi).sum() * dr
+        Vudud = (udi * v_in * udi).sum() * dr
+        ll = l * (l + 1)
+        Ru, Rud = ui / rr, udi / rr
+        dRu = (_ddr(ui, dr) * rr - ui) / rr**2
+        dRud = (_ddr(udi, dr) * rr - udi) / rr**2
+        Tuu = 0.5 * ((dRu * dRu) * rr**2 + ll * Ru * Ru).sum() * dr
+        Tuud = 0.5 * ((dRu * dRud) * rr**2 + ll * Ru * Rud).sum() * dr
+        Tudud = 0.5 * ((dRud * dRud) * rr**2 + ll * Rud * Rud).sum() * dr
+
+        Wl = uR * udpR - upR * udR
+        aa_, bb_ = [], []
+        for g in range(npw):
+            q = knorm[g]
+            jl = float(sph_jn(l, q * R))
+            x = q * R
+            djl = -float(sph_jn(1, x)) if l == 0 else (
+                float(sph_jn(l - 1, x)) - (l + 1) / x * float(sph_jn(l, x)))
+            tval, tslope = R * jl, jl + R * q * djl
+            aa_.append((tval * udpR - tslope * udR) / Wl)
+            bb_.append((uR * tslope - upR * tval) / Wl)
+        a, bb = torch.stack(aa_), torch.stack(bb_)
+        aa, bbo = torch.outer(a, a), torch.outer(bb, bb)
+        ab_s = torch.outer(a, bb) + torch.outer(bb, a)
+        Ms = aa * uu + ab_s * uud + bbo * udud
+        Tk = aa * Tuu + ab_s * Tuud + bbo * Tudud
+        Vk = aa * Vuu + ab_s * Vuud + bbo * Vudud
+        pref = torch.tensor((4 * math.pi / Ω) * (2 * l + 1) * eval_legendre(l, cost))
+        S = S + pref * Ms
+        H = H + pref * (Tk + Vk)
+
+    H = 0.5 * (H + H.T)
+    w, U = torch.linalg.eigh(S)
+    Sinv2 = U @ torch.diag(w.clamp_min(1e-12) ** -0.5) @ U.T
+    ev = torch.linalg.eigvalsh(Sinv2 @ H @ Sinv2)
+    return torch.sort(ev).values[:nbands]
+
+
+def run_autograd(L=6.0, R=1.2, lmax=2, ecut=4.0):
+    """Differentiable bands: dε/dV0 (band response to the potential) via autograd vs finite diff —
+    the exact gradient to fit a pseudopotential/functional parameter against in a solid.
+
+    Uses a GENERAL k-point (no symmetry degeneracies) so the eigendecomposition backward is
+    well-conditioned — degenerate eigenvalues make the 1/(λ_i-λ_j) in eigh's backward diverge."""
+    print("\nAutoAPW GATE S3c — DIFFERENTIABLE bands: dε/dV0 via autograd through the LAPW solve")
+    kpt = [0.13, 0.08, 0.05]     # general point: lifts the cubic degeneracies
+    V0 = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
+    ev = torch_bands(kpt, L, R, lmax, -0.3, ecut, V0)
+    print(f"  bands at k={kpt} (Ha): {np.array2string(ev.detach().numpy(), precision=4)}")
+    print(f"  {'band':>5} | {'dε/dV0 autograd':>16} | {'dε/dV0 finite-diff':>18} | {'|Δ|':>9}")
+    h = 1e-4
+    ok = True
+    for k in range(len(ev)):
+        (g,) = torch.autograd.grad(ev[k], V0, retain_graph=True)
+        with torch.no_grad():
+            ep = torch_bands(kpt, L, R, lmax, -0.3, ecut,
+                             torch.tensor(1.0 + h, dtype=torch.float64))[k]
+            em = torch_bands(kpt, L, R, lmax, -0.3, ecut,
+                             torch.tensor(1.0 - h, dtype=torch.float64))[k]
+        fd = float((ep - em) / (2 * h))
+        err = abs(float(g) - fd)
+        ok = ok and err < 1e-4
+        print(f"  {k:>5} | {float(g):>16.6f} | {fd:>18.6f} | {err:>9.1e}")
+    print(f"\n  VERDICT: differentiable LAPW bands (autograd dε/dV0 == finite diff): "
+          f"{'PASS' if ok else 'FAIL'}")
+    print("  => bands in a periodic augmented (all-electron-style) basis are differentiable in the")
+    print("     potential parameters — the exact gradient to fit a pseudo/functional against in a")
+    print("     solid, extending the gate-D atomic oracle to the mixed-basis solid-state solver.")
+    return ok
+
+
 def run(device):
     L, R, lmax, ecut = 6.0, 1.2, 6, 8.0
     print("\nAutoAPW GATE S3 — periodic mixed-basis (single-atom LAPW) secular equation\n")
@@ -330,6 +459,7 @@ def main():
     args = ap.parse_args()
     run(args.device)
     run_real()
+    run_autograd()
 
 
 if __name__ == "__main__":
