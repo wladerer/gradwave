@@ -2566,6 +2566,30 @@ CONSIDERED AND DEFERRED (credible mechanism, harder blockers):
 REJECTED: HierFock (hierarchical / butterfly exact exchange) — redundant, the ISDF+ACE hybrid stack it
 would replace is already shipped and validated to 1e-13, and butterfly has lost to ISDF in practice.
 
+NEW (2026-08-17, moonshot-vetted — response/adjoint composition-design family):
+- ResponseDesign (dε∞/dλ, dZ*/dλ): analytic mixed 3rd-order composition×field derivative via one nested
+  adjoint composing the shipped alchemical χ₀ (scf/alchemical.py, PR #301) with the field DFPT
+  (postscf/dielectric.py). Gradient-descend composition to a target permittivity / Born charge — a
+  VCA-IMPOSSIBLE capability (Z* is a discrete-atom projector response the averaged VCA potential cannot
+  represent). Both first-order solves already ship on one autograd graph; the mixed derivative composes
+  existing matvecs — no new physics or solver change. De-risk: dε∞/dλ on SiC→C vs the existing FD ground
+  truth to ~1e-3 rel. Flags: NO "stopgap" is being replaced (sell as new capability); DROP piezo (strain
+  DFPT absent from src). Highest-ROI moonshot bet — most machinery shipped, cheapest validation.
+- RelaxDesign (relax-consistent dO/dλ): dO/dλ = ∂O/∂λ − ∂O/∂R·H⁻¹·∂F/∂λ, chaining the alchemical force
+  response through the inverse Γ-Hessian (postscf.phonons.gamma_hessian) for relaxation-dominated
+  observables (polar-mode amplitude, adsorption geometry) the frozen-ion gap gradient gets structurally
+  wrong. Needs 2 near-existing pieces: the mixed alchemical-force response ∂F/∂λ (absent) and ∂O/∂R
+  (buildable from the ∂V/∂R displacement DFPT). Reuses ResponseDesign's nested-adjoint harness; build 2nd.
+- MagnonSusceptibility (χ⁺⁻(q,ω) poles): magnon dispersion + differentiable spin-wave stiffness dD/dparam
+  from the finite-q TRANSVERSE dynamical spin susceptibility, in the (m_x,m_y) noncollinear channel —
+  builds on the new q≠0 DFPT stack (postscf/dfpt_q.py) + _fxc_hvp_noncollinear. An INDEPENDENT route to
+  the spin-wave spectrum vs the shipped classical J/D/K→MC path; same-process cross-validation of the
+  susceptibility- vs J-derived stiffness is the novel deliverable. Blocker: needs a NEW DYNAMICAL
+  Sternheimer (complex shift (H−ε±ω−iη), non-Hermitian resolvent — TDDFT/BSE-tier build) + the classic
+  LSDA Goldstone-violation pathology (spurious Γ gap unless χ₀ and the xc kernel are grid-consistent).
+  GATE on a bcc-Fe/CrI3 acoustic-magnon ω→0 (Goldstone) check before any real investment. High ceiling,
+  most directly on the response/adjoint edge.
+
 **Round 6 (MOONSHOT round: "resurrect & re-cross the crossover" lens). Two survivors VALIDATED by
 prove-or-kill; #1 deferred to a future PR, #2 pocketed as a niche extension.**
 

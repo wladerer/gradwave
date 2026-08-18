@@ -69,8 +69,10 @@ from gradwave.postscf._response import (
     spin_sigma_triple,
     sternheimer_shift,
 )
+from gradwave.scf.common import symmetrize_rho, symmetrize_rho_pair
 from gradwave.scf.loop import SCFResult
 from gradwave.solvers.precond import teter
+from gradwave.symmetry import CollinearMagneticSymmetrizer, RhoSymmetrizer
 
 
 def _check_no_symmetry(res: SCFResult):
@@ -80,6 +82,30 @@ def _check_no_symmetry(res: SCFResult):
             "breaks the crystal symmetry, so the response needs the full "
             "(TR-reduced) k-mesh"
         )
+
+
+def _sym_fold(symmetrizer, field, grid, nspin):
+    """Fold a totally-symmetric real field into the symmetric subspace, matching
+    the forward SCF's ``_output_density`` dispatch (scf/loop.py).
+
+    nspin=1: scalar ``RhoSymmetrizer`` round-trip. nspin=2 (collinear): dispatch
+    on the symmetrizer class exactly as the forward density does — a
+    ``CollinearMagneticSymmetrizer`` folds the (ρ↑, ρ↓) pair jointly via the
+    (n=ρ↑+ρ↓, m=ρ↑−ρ↓) representation (the −1 anti-unitary sign on m, channel
+    swap), a plain ``RhoSymmetrizer`` (uniform-moment / FM, chemical group
+    unbroken) folds each spin channel independently. ``field`` is (2, *grid) for
+    nspin=2."""
+    if nspin == 1:
+        return symmetrize_rho(symmetrizer, field, grid)
+    if isinstance(symmetrizer, CollinearMagneticSymmetrizer):
+        up, dn = symmetrize_rho_pair(symmetrizer, field[0], field[1], grid)
+        return torch.stack([up, dn])
+    if isinstance(symmetrizer, RhoSymmetrizer):
+        return torch.stack([symmetrize_rho(symmetrizer, field[isp], grid)
+                            for isp in range(nspin)])
+    raise NotImplementedError(
+        "symmetric χ₀ fold (nspin=2) supports RhoSymmetrizer (uniform-moment) "
+        f"and CollinearMagneticSymmetrizer, not {type(symmetrizer).__name__}")
 
 
 def _occupied(res: SCFResult, isp: int, ik: int):
@@ -339,7 +365,7 @@ def _res_is_insulating(res: SCFResult) -> bool:
 
 @torch.no_grad()
 def apply_chi0(res: SCFResult, w_r: torch.Tensor, tol: float = 1e-8,
-               max_iter: int = 200) -> torch.Tensor:
+               max_iter: int = 200, *, assume_totally_symmetric: bool = False) -> torch.Tensor:
     """δρ = χ₀ w for a real local field w — insulator or metal.
 
     nspin=1: ``w_r`` is a grid field, returns a grid field. nspin=2: ``w_r`` is
@@ -350,26 +376,56 @@ def apply_chi0(res: SCFResult, w_r: torch.Tensor, tol: float = 1e-8,
     fully-occupied Sternheimer path (``_chi0_channel``); any fractional
     occupation (a smeared metal, or a magnet with partial spin fillings) uses
     the partial-occupation window path (``_chi0_channel_metal``), which reduces
-    smoothly to the insulator response as the Fermi-surface weight occ' → 0."""
-    _check_no_symmetry(res)
-    hs = _hamiltonians(res)
+    smoothly to the insulator response as the Fermi-surface weight occ' → 0.
+
+    Symmetry (``assume_totally_symmetric``): the SCF backward normally requires
+    ``use_symmetry=False`` — a perturbation breaks the crystal group, so folded
+    IBZ representatives no longer suffice. The ONE exception is a *totally
+    symmetric* perturbation (isotropic strain / EOS, a symmetry-preserving
+    composition or XC-parameter change): there the response δρ = χ₀ w is itself
+    totally symmetric, so the IBZ k-sum (``res.kweights`` are already the star
+    multiplicities) folded by the scalar ``RhoSymmetrizer`` reproduces the
+    full-BZ response — the same identity that makes the forward symmetrized SCF
+    bit-exact. Pass ``assume_totally_symmetric=True`` to opt into that fold on a
+    ``use_symmetry=True`` system; the caller certifies w is totally symmetric (it
+    is projected on input to drop asymmetric noise). Without the flag a symmetric
+    system still raises, so no existing caller silently changes.
+
+    nspin=2 (collinear) is supported: the per-spin response pair is folded by the
+    same dispatch the forward density uses (``_sym_fold`` → the (n,m) magnetic
+    fold for a ``CollinearMagneticSymmetrizer``, else independent per-channel for
+    a uniform-moment ``RhoSymmetrizer``). The perturbation must be totally
+    symmetric under the system's (magnetic) group."""
+    sym = getattr(res.system, "sym", None)
+    symmetrizer = getattr(res.system, "rho_symmetrizer", None)
     nspin = getattr(res, "nspin", 1)
+    if sym is not None:
+        if not assume_totally_symmetric:
+            _check_no_symmetry(res)          # raises: the safe default
+        w_r = _sym_fold(symmetrizer, w_r, res.system.grid, nspin)  # project input
+    hs = _hamiltonians(res)
     if _res_is_insulating(res):
         if nspin == 1:
-            return _chi0_channel(res, cast("list[HamiltonianK]", hs), 0, w_r, 2.0,
-                                 tol, max_iter)
-        hs_spin = cast("list[list[HamiltonianK]]", hs)
-        return torch.stack([_chi0_channel(res, hs_spin[isp], isp, w_r[isp], 1.0,
-                                          tol, max_iter) for isp in range(nspin)])
-    scheme = SCHEMES[res.smearing]
-    mu = float(res.fermi)
-    if nspin == 1:
-        return _chi0_channel_metal(res, cast("list[HamiltonianK]", hs), 0, w_r, 2.0,
-                                   mu, scheme, res.width, tol, max_iter)
-    hs_spin = cast("list[list[HamiltonianK]]", hs)
-    return torch.stack([
-        _chi0_channel_metal(res, hs_spin[isp], isp, w_r[isp], 1.0, mu, scheme,
-                            res.width, tol, max_iter) for isp in range(nspin)])
+            out = _chi0_channel(res, cast("list[HamiltonianK]", hs), 0, w_r, 2.0,
+                                tol, max_iter)
+        else:
+            hs_spin = cast("list[list[HamiltonianK]]", hs)
+            out = torch.stack([_chi0_channel(res, hs_spin[isp], isp, w_r[isp], 1.0,
+                                             tol, max_iter) for isp in range(nspin)])
+    else:
+        scheme = SCHEMES[res.smearing]
+        mu = float(res.fermi)
+        if nspin == 1:
+            out = _chi0_channel_metal(res, cast("list[HamiltonianK]", hs), 0, w_r, 2.0,
+                                      mu, scheme, res.width, tol, max_iter)
+        else:
+            hs_spin = cast("list[list[HamiltonianK]]", hs)
+            out = torch.stack([
+                _chi0_channel_metal(res, hs_spin[isp], isp, w_r[isp], 1.0, mu, scheme,
+                                    res.width, tol, max_iter) for isp in range(nspin)])
+    if sym is not None:
+        out = _sym_fold(symmetrizer, out, res.system.grid, nspin)  # fold the star
+    return out
 
 
 def apply_k_hxc(res: SCFResult, xc, w_r: torch.Tensor) -> torch.Tensor:
@@ -410,8 +466,14 @@ def apply_k_hxc(res: SCFResult, xc, w_r: torch.Tensor) -> torch.Tensor:
 @torch.no_grad()
 def solve_adjoint(res: SCFResult, xc, vbar_r: torch.Tensor, beta: float = 0.4,
                   tol: float = 1e-9, max_iter: int = 100,
-                  history: int = 8) -> torch.Tensor:
+                  history: int = 8, *, assume_totally_symmetric: bool = False) -> torch.Tensor:
     """Solve u = v̄ + K_Hxc[χ₀ u] by Anderson-accelerated fixed-point iteration.
+
+    ``assume_totally_symmetric`` threads to ``apply_chi0`` to allow a
+    ``use_symmetry=True`` (nspin=1) system when v̄ (and hence u) is totally
+    symmetric — the IBZ χ₀ is folded by the scalar RhoSymmetrizer, and K_Hxc
+    (local Hartree + f_xc) preserves the totally-symmetric subspace, so the whole
+    fixed point stays in it. See :func:`apply_chi0`.
 
     For nspin=2 ``vbar_r`` (and hence ``u``) is the stacked per-spin pair
     (2, *grid.shape); the loop runs on the flattened tensor — every operation
@@ -426,7 +488,8 @@ def solve_adjoint(res: SCFResult, xc, vbar_r: torch.Tensor, beta: float = 0.4,
     shape = vbar_r.shape
 
     def g(u):
-        return vbar_r + apply_k_hxc(res, xc, apply_chi0(res, u))
+        return vbar_r + apply_k_hxc(res, xc, apply_chi0(
+            res, u, assume_totally_symmetric=assume_totally_symmetric))
 
     u = vbar_r.clone()
     mixer = AndersonMixer(history, beta)
@@ -443,7 +506,7 @@ def solve_adjoint(res: SCFResult, xc, vbar_r: torch.Tensor, beta: float = 0.4,
 
 
 def density_loss_param_grads(
-    res: SCFResult, xc, loss_fn,
+    res: SCFResult, xc, loss_fn, *, assume_totally_symmetric: bool = False,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Gradients dL/dθ of a density-dependent loss through the SCF fixed point.
 
@@ -451,6 +514,10 @@ def density_loss_param_grads(
     (pure, differentiable). For nspin=2 the loss stays a functional of ρ_tot,
     so its gradient v̄ = ∂L/∂ρ seeds both spin channels equally.
     Returns (L, {param_name: grad}).
+
+    ``assume_totally_symmetric`` (use_symmetry=True nspin=1 only): run the adjoint
+    on the IBZ for a symmetry-invariant loss (its v̄ = ∂L/∂ρ is totally symmetric),
+    a ~7x cheaper backward with an identical gradient. See :func:`apply_chi0`.
     """
     grid = res.system.grid
     nspin = getattr(res, "nspin", 1)
@@ -462,8 +529,8 @@ def density_loss_param_grads(
     # already is ∂L/∂ρ_j — the grid-sum adjoint field. nspin=2: the loss is a
     # functional of ρ_tot, so v̄ enters both channels equally (stacked).
     vbar_seed = vbar if nspin == 1 else torch.stack([vbar] * nspin)
-    u = solve_adjoint(res, xc, vbar_seed)
-    chi0_u = apply_chi0(res, u)
+    u = solve_adjoint(res, xc, vbar_seed, assume_totally_symmetric=assume_totally_symmetric)
+    chi0_u = apply_chi0(res, u, assume_totally_symmetric=assume_totally_symmetric)
 
     # dL/dθ = Σ_σ ⟨χ₀u_σ, ∂v_xc^σ/∂θ⟩, differentiate ⟨χ₀u, v_xc(ρ; θ)⟩ w.r.t. θ
     # at fixed ρ. Double backward through E_xc, so force eager with xc_eager().

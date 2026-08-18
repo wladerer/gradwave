@@ -31,6 +31,15 @@ analysis = [
 viz = [
     "pymatviz>=0.17",
 ]
+# gradwave.bench.analyze (flatten SCF flight-recorder runs into a tidy per-
+# iteration table for a notebook / DuckDB / statistical model / symbolic
+# regression) imports these lazily; the harness itself writes stdlib JSON and
+# needs none of them. Install with: gradwave[bench].
+bench = [
+    "pandas>=3.0.3",
+    "pyarrow>=17",
+    "duckdb>=1.1",
+]
 
 [dependency-groups]
 dev = [

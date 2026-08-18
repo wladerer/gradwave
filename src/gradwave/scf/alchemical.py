@@ -765,18 +765,29 @@ def _sternheimer_op(h, c_occ, eps_occ, dvloc_r, ddij, alpha, tol, max_iter):
     return p_c(x)
 
 
-def _chi0_operator(res, dvloc_r, ddij, tol=1e-8, max_iter=200) -> torch.Tensor:
+def _chi0_operator(res, dvloc_r, ddij, tol=1e-8, max_iter=200, *,
+                   assume_totally_symmetric=False) -> torch.Tensor:
     """δρ⁰ = χ₀[dV_ion/dλ] for the operator-valued bare perturbation (nspin=1).
 
     Mirrors ``scf.implicit._chi0_channel`` — same occupied-band Sternheimer sum,
     factor 2·f_full·w_k per band — but with the operator RHS of _sternheimer_op.
+
+    ``assume_totally_symmetric`` (use_symmetry=True only): the star-unfolding fold
+    that lets an IBZ-reduced k-sum reproduce the full-BZ response for a totally
+    symmetric perturbation. ``res.kweights`` are already the star multiplicities;
+    the ``RhoSymmetrizer`` fold of the accumulated response completes the unfold,
+    the same identity ``scf.implicit.apply_chi0`` uses.
     """
     from gradwave.core.fftbox import g_to_r
     from gradwave.postscf._response import sternheimer_shift
+    from gradwave.scf.common import symmetrize_rho
     from gradwave.scf.implicit import _hamiltonians, _occupied
 
     system = res.system
     grid = system.grid
+    symmetrizer = getattr(system, "rho_symmetrizer", None)
+    if assume_totally_symmetric and symmetrizer is not None:
+        dvloc_r = symmetrize_rho(symmetrizer, dvloc_r, grid)  # project the field
     # nspin=1 (guarded by the caller alchemical_density_response), so the union
     # return of _hamiltonians is the flat per-k list.
     hs = cast("list[HamiltonianK]", _hamiltonians(res))
@@ -789,22 +800,30 @@ def _chi0_operator(res, dvloc_r, ddij, tol=1e-8, max_iter=200) -> torch.Tensor:
         dpsi_r = g_to_r(dpsi, h.sphere.flat_idx, grid.shape)
         dr += (4.0 * float(system.kweights[ik])
                * (psi_r.conj() * dpsi_r).real.sum(dim=0))
-    return dr / grid.volume
+    dr = dr / grid.volume
+    if assume_totally_symmetric and symmetrizer is not None:
+        dr = symmetrize_rho(symmetrizer, dr, grid)  # fold the star
+    return dr
 
 
 def _solve_forward_response(res, xc, drho0, beta=0.4, tol=1e-9, max_iter=100,
-                            history=8) -> torch.Tensor:
+                            history=8, *, assume_totally_symmetric=False) -> torch.Tensor:
     """Forward Dyson solve (1 − χ₀K_Hxc) δρ = δρ⁰ by Anderson fixed-point.
 
     δρ = δρ⁰ + χ₀[K_Hxc δρ]; the dressing term is a local field, so it reuses
     scf.implicit.apply_chi0 / apply_k_hxc. This is the forward companion of
     scf.implicit.solve_adjoint (which solves the transpose u = v̄ + K_Hxc[χ₀u]).
+
+    ``assume_totally_symmetric`` threads the star-unfolding fold into the inner
+    ``apply_chi0``; K_Hxc is a local field (symmetry-preserving), so with a
+    totally symmetric δρ⁰ the whole fixed point stays in the symmetric subspace.
     """
     from gradwave.core._anderson import AndersonMixer
     from gradwave.scf.implicit import apply_chi0, apply_k_hxc
 
     def g(u):
-        return drho0 + apply_chi0(res, apply_k_hxc(res, xc, u))
+        return drho0 + apply_chi0(res, apply_k_hxc(res, xc, u),
+                                  assume_totally_symmetric=assume_totally_symmetric)
 
     u = drho0.clone()
     mixer = AndersonMixer(history, beta)
@@ -819,14 +838,22 @@ def _solve_forward_response(res, xc, drho0, beta=0.4, tol=1e-9, max_iter=100,
         f"alchemical forward response not converged ({step:.2e} after {max_iter})")
 
 
-def alchemical_density_response(res, xc, tol=1e-8, max_iter=200, mask=None):
+def alchemical_density_response(res, xc, tol=1e-8, max_iter=200, mask=None, *,
+                                assume_totally_symmetric=False):
     """Relaxed first-order density response dρ/dλ to the alchemical perturbation.
 
     Returns ``(drho, dvloc_r, ddij)``: the self-consistent dρ/dλ on the grid and
     the bare-perturbation pieces (reused by the eigenvalue expectations). nspin=1
-    insulator with use_symmetry=False, matching scf.implicit's regime. ``mask``
-    is the per-atom transmutation-rate direction (None = all substituted sites
-    together); see :func:`_substitution_bare_perturbation`.
+    insulator, matching scf.implicit's regime. ``mask`` is the per-atom
+    transmutation-rate direction (None = all substituted sites together); see
+    :func:`_substitution_bare_perturbation`.
+
+    ``assume_totally_symmetric`` (opt-in, use_symmetry=True nspin=1): when the
+    substitution preserves the crystal point group (every equivalent site moves
+    with the same rate), ∂V_ion/∂λ is totally symmetric, so the IBZ-reduced χ₀
+    folded by the ``RhoSymmetrizer`` reproduces the full-BZ response — a
+    ~star-multiplicity-fold cheaper gradient. Without the flag a use_symmetry=True
+    system raises (the safe default), unchanged for every existing caller.
     """
     from gradwave.scf.implicit import _check_no_symmetry, _res_is_insulating
 
@@ -834,13 +861,16 @@ def alchemical_density_response(res, xc, tol=1e-8, max_iter=200, mask=None):
         raise NotImplementedError(
             "relaxed alchemical gradient: nspin=1 only for now (the nspin=2 "
             "χ₀/K_Hxc kernels exist; threading the spin channel is a follow-up)")
-    _check_no_symmetry(res)
+    if not assume_totally_symmetric:
+        _check_no_symmetry(res)
     if not _res_is_insulating(res):
         raise NotImplementedError(
             "relaxed alchemical gradient: insulator (smearing='none') only")
     dvloc_r, ddij = _substitution_bare_perturbation(res, xc, mask=mask)
-    drho0 = _chi0_operator(res, dvloc_r, ddij, tol, max_iter)
-    drho = _solve_forward_response(res, xc, drho0)
+    drho0 = _chi0_operator(res, dvloc_r, ddij, tol, max_iter,
+                           assume_totally_symmetric=assume_totally_symmetric)
+    drho = _solve_forward_response(res, xc, drho0,
+                                   assume_totally_symmetric=assume_totally_symmetric)
     return drho, dvloc_r, ddij
 
 
@@ -881,7 +911,8 @@ def _band_deps_dlam(res, k, band, dv_local_r, ddij) -> float:
     return float(local + nl)
 
 
-def _gap_gradient_for_mask(res, xc, mask, edges, tol, max_iter):
+def _gap_gradient_for_mask(res, xc, mask, edges, tol, max_iter, *,
+                           assume_totally_symmetric=False):
     """d(E_gap)/dλ along one composition direction ``mask`` (per-atom rate), for
     fixed band edges ``edges = ((vk,vb),(ck,cb))``. The DFPT response is solved
     for this direction; the edges are shared across directions so a per-site
@@ -889,8 +920,9 @@ def _gap_gradient_for_mask(res, xc, mask, edges, tol, max_iter):
     from gradwave.scf.implicit import apply_k_hxc
 
     (vk, vb), (ck, cb) = edges
-    drho, dvloc_r, ddij = alchemical_density_response(res, xc, tol, max_iter,
-                                                      mask=mask)
+    drho, dvloc_r, ddij = alchemical_density_response(
+        res, xc, tol, max_iter, mask=mask,
+        assume_totally_symmetric=assume_totally_symmetric)
     dv_ks_local_r = dvloc_r + apply_k_hxc(res, xc, drho)
     dvbm = _band_deps_dlam(res, vk, vb, dv_ks_local_r, ddij)
     dcbm = _band_deps_dlam(res, ck, cb, dv_ks_local_r, ddij)
@@ -902,7 +934,8 @@ def _gap_gradient_for_mask(res, xc, mask, edges, tol, max_iter):
         vbm_index=(vk, vb), cbm_index=(ck, cb))
 
 
-def alchemical_gap_gradient(res, xc, tol=1e-8, max_iter=200) -> AlchemicalGapGradient:
+def alchemical_gap_gradient(res, xc, tol=1e-8, max_iter=200, *,
+                            assume_totally_symmetric=False) -> AlchemicalGapGradient:
     """Relaxed d(E_gap)/dλ for a substitution System, by composition DFPT.
 
     The fundamental gap's sensitivity to the alchemical weight with all
@@ -910,9 +943,15 @@ def alchemical_gap_gradient(res, xc, tol=1e-8, max_iter=200) -> AlchemicalGapGra
     density response — the analytic counterpart of a finite difference of
     re-converged SCF gaps. Also returns the sudden (frozen-density) estimate so
     the relaxation contribution is explicit. Needs a System from
-    :func:`setup_alchemical_substitution`; nspin=1 insulator, use_symmetry=False.
+    :func:`setup_alchemical_substitution`; nspin=1 insulator.
+
+    ``assume_totally_symmetric`` (use_symmetry=True) opts into the star-unfolding
+    fold — valid when the substitution preserves the point group (every
+    equivalent site substituted at the same rate); see
+    :func:`alchemical_density_response`.
     """
-    return _gap_gradient_for_mask(res, xc, None, _vbm_cbm(res), tol, max_iter)
+    return _gap_gradient_for_mask(res, xc, None, _vbm_cbm(res), tol, max_iter,
+                                  assume_totally_symmetric=assume_totally_symmetric)
 
 
 def alchemical_gap_gradient_per_site(

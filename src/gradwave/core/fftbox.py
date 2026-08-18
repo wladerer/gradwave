@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import torch
 
+from gradwave.core import opcount
+
 
 def sphere_to_box(
     coeffs: torch.Tensor, flat_idx: torch.Tensor, shape: tuple[int, int, int]
@@ -53,6 +55,7 @@ def g_to_r_box(f_g: torch.Tensor, *, real: bool = False) -> torch.Tensor:
     augmentation charge). Out-of-place; stays autograd- and torch.func-traceable.
     """
     n = f_g.shape[-3] * f_g.shape[-2] * f_g.shape[-1]
+    opcount.bump("fft")
     out = torch.fft.ifftn(f_g, dim=(-3, -2, -1)) * n
     return out.real if real else out
 
@@ -70,4 +73,5 @@ def g_to_r(
 def r_to_g(f: torch.Tensor) -> torch.Tensor:
     """Function values on the r-grid → Fourier coefficients f̃(G) on the box."""
     n = f.shape[-3] * f.shape[-2] * f.shape[-1]
+    opcount.bump("fft")
     return torch.fft.fftn(f, dim=(-3, -2, -1)) / n

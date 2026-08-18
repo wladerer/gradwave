@@ -186,6 +186,9 @@ class SCFRecorder:
         e_metric_charge: float | None = None,
         e_metric_mag: float | None = None,
         e_hf_gap: float | None = None,
+        subspace_size: int | None = None,
+        op_counts: dict[str, int] | None = None,
+        t_eig_s: float | None = None,
     ) -> None:
         """Append one outer-iteration record. ``drho_r`` is the total real-space
         SCF residual (ρ_out − ρ_in), ``eigs`` the per-spin eigenvalue tensors,
@@ -219,6 +222,12 @@ class SCFRecorder:
                 "e_metric_mag": (
                     None if e_metric_mag is None else float(e_metric_mag)),
                 "e_hf_gap": None if e_hf_gap is None else float(e_hf_gap),
+                "subspace_size": None if subspace_size is None else int(subspace_size),
+                "rss_mb": _rss_mb(),
+                "t_eig": None if t_eig_s is None else float(t_eig_s),
+                "n_fft": None if op_counts is None else int(op_counts.get("fft", 0)),
+                "n_eigh": None if op_counts is None else int(op_counts.get("eigh", 0)),
+                "n_hpsi": None if op_counts is None else int(op_counts.get("hpsi", 0)),
             }
         )
 
@@ -339,6 +348,12 @@ class SCFRecorder:
                     "entropy_eV": i["entropy"],
                     "eig_max_drift_eV": i["eig_drift"],
                     "reorder_count": i["reorder"],
+                    "subspace_size": i.get("subspace_size"),
+                    "rss_mb": i.get("rss_mb"),
+                    "t_eig_s": i.get("t_eig"),
+                    "n_fft": i.get("n_fft"),
+                    "n_eigh": i.get("n_eigh"),
+                    "n_hpsi": i.get("n_hpsi"),
                     "shell_fraction": i["shell_frac"],
                     **({"mag_abs_muB": i["mag_abs"]} if self.nspin == 2 else {}),
                     **(
@@ -362,3 +377,27 @@ def _is_finite(x: float) -> bool:
     import math
 
     return math.isfinite(x)
+
+
+# Resident-set size sampled per outer iteration for the memory-over-time trace.
+# Dependency-free (matches io/runinfo's /proc style — no psutil): statm field 2
+# is RSS in pages. Returns None off Linux or if /proc is unreadable, so the
+# recorder never fails on a platform without it.
+_PAGE_MB = 4096 / 1e6  # overwritten at import if the real page size differs
+
+
+def _rss_mb() -> float | None:
+    try:
+        with open("/proc/self/statm") as fh:
+            rss_pages = int(fh.read().split()[1])
+        return round(rss_pages * _PAGE_MB, 3)
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+try:  # resolve the true page size once; fall back to the 4 KiB assumption
+    import resource as _resource
+
+    _PAGE_MB = _resource.getpagesize() / 1e6
+except Exception:  # noqa: BLE001 — any failure keeps the 4 KiB default
+    pass

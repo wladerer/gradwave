@@ -84,6 +84,19 @@ class _DampedMixerBase:
         adaptation (only PulayMixer with adapt_blocks tracks them)."""
         return None
 
+    @property
+    def subspace_size(self) -> int:
+        """Mixing-history depth in use this step: the number of residual/density
+        pairs the quasi-Newton update currently spans (0 for the plain damped
+        step, or before any history has accrued). Read once per outer iteration
+        by the flight recorder; the subclasses keep the history under different
+        names (Broyden ``_pairs``, Johnson ``_df``, Pulay ``_res``)."""
+        for name in ("_pairs", "_df", "_res"):
+            hist = getattr(self, name, None)
+            if hist is not None:
+                return len(hist)
+        return 0
+
 
 class BroydenMixer(_DampedMixerBase):
     """Limited-memory Broyden's second method (QE mixing_mode='plain').

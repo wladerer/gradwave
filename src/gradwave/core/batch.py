@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import torch
 
 from gradwave.constants import HBAR2_2M
+from gradwave.core import opcount
 from gradwave.core.fftbox import g_to_r_box
 from gradwave.core.hamiltonian import ProjectorData
 from gradwave.dtypes import CDTYPE, RDTYPE
@@ -152,6 +153,7 @@ def box_to_sphere_b(box: torch.Tensor, bk: BatchedK) -> torch.Tensor:
     """(nk, nb, n1, n2, n3) → coefficients (nk, nb, npw_max); masked."""
     nk, nb = box.shape[0], box.shape[1]
     n = box.shape[-3] * box.shape[-2] * box.shape[-1]
+    opcount.bump("fft")
     coeff = torch.fft.fftn(box, dim=(-3, -2, -1)).reshape(nk, nb, n) / n
     idx = bk.flat_idx[:, None, :].expand(nk, nb, bk.npw_max)
     return coeff.gather(2, idx) * bk.mask[:, None, :]
@@ -316,6 +318,7 @@ class BatchedHamiltonian:
         nk, nb, m = c.shape
         if _HAPPLY_TALLY["on"]:
             _HAPPLY_TALLY["count"] += nk * nb
+        opcount.bump("hpsi", nk * nb)
         t_r, v_eff, p, p_conj, dij = self._tables(c.dtype)
         out = t_r[:, None, :] * c
 
@@ -336,10 +339,12 @@ class BatchedHamiltonian:
                 box = self._get_box(nk, nbc, cc.dtype, cc.device)
                 idx = self.idx_scatter[:, None, :].expand(nk, nbc, m)
                 box.scatter_(2, idx, cc)
+                opcount.bump("fft")
                 psi = torch.fft.ifftn(box[..., : self.n].reshape(nk, nbc, *self.shape),
                                       dim=(-3, -2, -1))
                 # fftn(ifftn(·)) is norm-neutral: the 1/N and ×N of the fftbox
                 # conventions cancel, so no scaling factors here
+                opcount.bump("fft")
                 vg = torch.fft.fftn(psi * v_eff, dim=(-3, -2, -1)).reshape(nk, nbc, self.n)
                 gath = self.gather_idx[:, None, :].expand(nk, nbc, m)
                 out[:, lo:hi] += vg.gather(2, gath)

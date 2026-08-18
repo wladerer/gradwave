@@ -199,6 +199,82 @@ def reduce_mesh(
     return _orbit_reduce(mesh, ops_t)
 
 
+def _fold_bz(q: np.ndarray) -> np.ndarray:
+    """Fold a fractional wavevector into the (-1/2, 1/2] cell (per component)."""
+    return -((-np.asarray(q, float) + 0.5) % 1.0 - 0.5)
+
+
+def little_cogroup(
+    q_frac: np.ndarray, sg: SpaceGroup, tol: float = 1e-6
+) -> tuple[SpaceGroup, np.ndarray]:
+    """The little co-group of q: the point-group operations whose reciprocal
+    action fixes q modulo a reciprocal-lattice vector, W⁻ᵀq ≡ q (mod 1).
+
+    Returns ``(SpaceGroup of those ops, g0)`` where ``g0[i]`` is the integer
+    umklapp W⁻ᵀq − q of op i (needed by a q-dependent field symmetrizer to fold
+    G-vectors of the q-modulated response back onto the box). At q=Γ this is the
+    full ``sg`` with g0 all zero. This is the group that symmetrizes a
+    perturbation (and its response) of wavevector q; the k-points of the DFPT
+    sum reduce under it.
+    """
+    q = np.asarray(q_frac, dtype=float)
+    keep: list[int] = []
+    g0s: list[np.ndarray] = []
+    for i, w in enumerate(sg.rotations):
+        w_inv_t = np.round(np.linalg.inv(w).T).astype(np.int64)
+        g0 = w_inv_t @ q - q
+        if np.max(np.abs(g0 - np.round(g0))) <= tol:
+            keep.append(i)
+            g0s.append(np.round(g0).astype(np.int64))
+    lg = SpaceGroup(
+        rotations=sg.rotations[keep], translations=sg.translations[keep],
+        atom_map=sg.atom_map[keep], international=sg.international,
+        origin_shift=sg.origin_shift)
+    return lg, (np.stack(g0s) if g0s else np.zeros((0, 3), dtype=np.int64))
+
+
+def star_of_q(
+    q_frac: np.ndarray, sg: SpaceGroup, tol: float = 1e-6
+) -> tuple[np.ndarray, np.ndarray]:
+    """The star of q: the distinct images {W⁻ᵀ q} (mod 1), folded to (-1/2, 1/2].
+
+    Returns ``(qs (s,3), rep_ops (s,))`` — the star members and, for each, the
+    index into ``sg.rotations`` of one operation carrying q onto it. By
+    orbit–stabilizer ``len(star) * little_cogroup(q).n_ops == sg.n_ops``; the
+    full response over the BZ is reconstructed from the one representative q by
+    generating its star.
+    """
+    q = np.asarray(q_frac, dtype=float)
+    stars: list[np.ndarray] = []
+    reps: list[int] = []
+    for i, w in enumerate(sg.rotations):
+        w_inv_t = np.round(np.linalg.inv(w).T).astype(np.int64)
+        qi = _fold_bz(w_inv_t @ q)
+        if not any(np.max(np.abs(_fold_bz(qi - s))) < tol for s in stars):
+            stars.append(qi)
+            reps.append(i)
+    return np.stack(stars), np.asarray(reps, dtype=np.int64)
+
+
+def little_group_ibz(
+    mesh: tuple[int, int, int], q_frac: np.ndarray, sg: SpaceGroup,
+    time_reversal: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """IBZ reduction of a Γ-centered MP mesh under the little group of q.
+
+    The DFPT k-sum at wavevector q is invariant under the little co-group of q
+    (it fixes q, so it maps the k↔k+q pairing onto itself); the k-points reduce
+    to that group's IBZ. Time reversal is added only when it too fixes q
+    (−q ≡ q, i.e. q at Γ or a TR-invariant zone-boundary point). Reduces to
+    ``reduce_mesh`` at q=Γ.
+    """
+    lg, _ = little_cogroup(q_frac, sg)
+    ops_t = _k_ops(lg.rotations)
+    if time_reversal and np.max(np.abs(_fold_bz(2.0 * np.asarray(q_frac, float)))) < 1e-6:
+        ops_t = ops_t + [-w for w in ops_t]
+    return _orbit_reduce(mesh, ops_t)
+
+
 @dataclass(frozen=True)
 class MagneticGroup:
     """Shubnikov magnetic space group of a (possibly non-collinear) moment set.
@@ -396,6 +472,97 @@ class RhoSymmetrizer:
     def apply(self, rho_g_box: torch.Tensor) -> torch.Tensor:
         """Symmetrize ρ(G) on the dense box: (n1,n2,n3) complex → same."""
         flat = rho_g_box.reshape(-1) * self.mask
+        acc = (self.phase * flat[self.idx]).mean(dim=0) * self.mask
+        return acc.reshape(self.shape)
+
+
+class QFieldSymmetrizer:
+    """G-space symmetrization of a scalar field of crystal wavevector q.
+
+    A response of wavevector q is stored on the dense FFT box as coefficients
+    c(G) of the plane waves e^{i(q+G)·r} (the periodic part of
+    δρ_q(r) = e^{iq·r} Σ_G c(G) e^{iG·r}). Only the **little co-group of q** (the
+    ops with W⁻ᵀq ≡ q mod 1) symmetrizes it. Averaging over that group,
+    ``(P c)(m) = (1/N) Σ_g e^{−2πi (q+m)·w_g} c(Wᵀ(m − g0_g))`` with g0 = W⁻ᵀq − q,
+    is the projector onto the q-symmetric subspace — the group-average identity
+    that folds the IBZ(of q) response to the full-BZ response, and the direct
+    generalization of ``RhoSymmetrizer`` (recovered at q=Γ, g0=0, w-phase only).
+
+    Two things differ from the q=Γ scalar case and are handled here:
+
+    * **q-shifted mask.** The little-group action preserves |q+G|, not |G|, so
+      the invariant band-limited set is the sphere centred at −q,
+      {G : |q+G| ≤ G_cut}, not the ordinary density sphere. Using the latter
+      drops a boundary shell for a nonzero umklapp and the operator stops being a
+      projector. The mask is rebuilt as {|q+G| ≤ G_cut} from ``g2``/``dens_mask``.
+    * **Projective small reps.** At a non-symmorphic zone-boundary q the small
+      representation is projective (non-trivial factor system) and the plain
+      average is not idempotent. Construction verifies idempotence on a probe and
+      raises rather than fold with a wrong operator (see
+      docs/design/little-group-star-unfold.md — use the full mesh at such q).
+    """
+
+    def __init__(
+        self, shape: tuple[int, int, int], q_frac: np.ndarray, sg: SpaceGroup,
+        cell: np.ndarray, g2: torch.Tensor, dens_mask: torch.Tensor,
+    ) -> None:
+        lg, g0 = little_cogroup(q_frac, sg)
+        q = np.asarray(q_frac, dtype=float)
+        n1, n2, n3 = shape
+        dims = np.array([n1, n2, n3])
+        millers = np.stack(
+            np.meshgrid(*[np.fft.fftfreq(n, 1.0 / n).astype(np.int64) for n in shape],
+                        indexing="ij"),
+            axis=-1,
+        ).reshape(-1, 3)
+        # q-shifted band-limit: {|q+G| ≤ G_cut(density)}, the set the little group
+        # preserves. G_cut² is the max |G|² carried by the ordinary density mask.
+        b = 2.0 * np.pi * np.linalg.inv(np.asarray(cell, float)).T   # reciprocal rows
+        g_cart = millers @ b
+        q_cart = q @ b
+        g2_flat = g2.reshape(-1).cpu().numpy()
+        gmax2 = float(g2_flat[dens_mask.reshape(-1).cpu().numpy()].max())
+        qpg2 = np.einsum("ij,ij->i", g_cart + q_cart, g_cart + q_cart)
+        mask_q = torch.as_tensor(qpg2 <= gmax2 * (1 + 1e-9), dtype=torch.bool)
+
+        idx_maps, phases = [], []
+        for w_mat, w_vec, g in zip(lg.rotations, lg.translations, g0, strict=True):
+            source = (millers - g) @ w_mat            # Wᵀ(m − g0)  (gather source)
+            folded = source % dims
+            flat = folded[:, 0] * (n2 * n3) + folded[:, 1] * n3 + folded[:, 2]
+            idx_maps.append(flat)
+            phases.append(np.exp(-2j * np.pi * ((q + millers) @ w_vec)))
+        self.idx = torch.as_tensor(np.stack(idx_maps), dtype=torch.int64)   # (nops,N)
+        self.phase = torch.as_tensor(np.stack(phases), dtype=torch.complex128)
+        self.shape = tuple(shape)
+        self.mask = mask_q
+        # projector check: idempotent iff the small rep is ordinary.
+        gen = torch.Generator().manual_seed(0)
+        probe = (torch.randn(n1 * n2 * n3, generator=gen, dtype=torch.float64)
+                 + 1j * torch.randn(n1 * n2 * n3, generator=gen, dtype=torch.float64)
+                 ).reshape(shape)
+        p1 = self.apply(probe)
+        p2 = self.apply(p1)
+        scale = float(p1.abs().max())
+        if scale > 1e-12 and float((p2 - p1).abs().max()) > 1e-8 * scale:
+            raise NotImplementedError(
+                "QFieldSymmetrizer: projective small representation at this q "
+                "(non-symmorphic zone boundary) — the little-co-group average is "
+                "not a projector here. Use the full (unreduced) mesh at this q; "
+                "see docs/design/little-group-star-unfold.md.")
+
+    def to(self, device: torch.device | str) -> QFieldSymmetrizer:
+        new = object.__new__(QFieldSymmetrizer)
+        new.idx = self.idx.to(device)
+        new.phase = self.phase.to(device)
+        new.mask = self.mask.to(device)
+        new.shape = self.shape
+        return new
+
+    def apply(self, c_g_box: torch.Tensor) -> torch.Tensor:
+        """Project a wavevector-q field c(G) onto the q-symmetric subspace:
+        (n1,n2,n3) complex → same. Idempotent (a little-co-group average)."""
+        flat = c_g_box.reshape(-1) * self.mask
         acc = (self.phase * flat[self.idx]).mean(dim=0) * self.mask
         return acc.reshape(self.shape)
 

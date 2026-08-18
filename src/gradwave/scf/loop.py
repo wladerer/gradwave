@@ -23,6 +23,7 @@ import numpy as np
 import torch
 
 from gradwave.constants import RY_EV
+from gradwave.core import opcount
 from gradwave.core.batch import BatchedK
 from gradwave.core.density import sigma_from_rho
 from gradwave.core.energies.esm import esm_energy, esm_mode_of, esm_potential
@@ -1500,6 +1501,10 @@ def scf(
     recorder.set_mixing(
         scheme=mixing_scheme, alpha=mixing_alpha, kerker=bool(kerker), history=mixing_history
     )
+    # per-iteration primitive-op tally (FFT/eigh/H-apply) for the recorder; the
+    # loop snapshots the delta each outer iteration and restores the default-off
+    # state on exit (finally, below).
+    opcount.enable()
 
     from gradwave.core.batch import projectors_b
 
@@ -1628,6 +1633,8 @@ def scf(
 
     for it in range(1, max_iter + 1):
         t_it = time.perf_counter()
+        _op_prev = opcount.snapshot()      # per-iteration primitive-op baseline
+        _t_eig_s = 0.0                      # eigensolve wall this iteration
         rho_tot = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
         if tf_precond is not None:
             tf_precond.set_density(rho_tot)
@@ -1663,6 +1670,7 @@ def scf(
         # same u_scale scales the V_U D-matrix (here) and the E_U energy
         # (_hubbard_occ_update below), so energy and potential stay at one U.
         u_scale = hubbard_u_ramp_scale(it, hub_u_ramp_iters)
+        _t_eig0 = time.perf_counter()
         for sp in range(nspin):
             fock_sp = fock_apply_s[sp] if fock_apply_s is not None else None
             mgga_sp = metagga_apply_s[sp] if metagga_apply_s is not None else None
@@ -1693,6 +1701,7 @@ def scf(
                 device,
                 u_scale,
             )
+        _t_eig_s = time.perf_counter() - _t_eig0
 
         occ_s, mu, entropy_term, n_float, eigs_global_s, occ_global_s = _fermi_occupations(
             eigs_s, system, smearing, width, nspin, device,
@@ -1822,6 +1831,9 @@ def scf(
             e_metric_charge=e_metric_charge,
             e_metric_mag=e_metric_mag,
             e_hf_gap=e_hf_gap,
+            subspace_size=mixer.subspace_size,
+            op_counts=opcount.since(_op_prev),
+            t_eig_s=_t_eig_s,
         )
 
         # Block convergence until the U-ramp reaches full U (u_scale==1.0), so
@@ -1880,6 +1892,7 @@ def scf(
         _fm = "" if mu is None else f" · Fermi = {mu:.4f} eV"
         print(f"SCF {_tag} in {it} iterations · F = {e_free:+.10f} eV{_fm}{_extra}", flush=True)
 
+    opcount.disable()   # restore the default-off tally state after the run
     rho_tot_final = rho_s[0] if nspin == 1 else rho_s[0] + rho_s[1]
     # The loop above always runs (max_iter >= 1 in practice) so these are real
     # values from the last iteration by the time we get here, never the
