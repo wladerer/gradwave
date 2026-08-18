@@ -139,8 +139,56 @@ def build_matrices(kfrac, L, R, lmax, El_by_l, ecut, r, dx, v):
 
 def _sym_geneig(H, S, nbands):
     w, U = np.linalg.eigh(S)
-    Sinv2 = U @ np.diag(np.clip(w, 1e-12, None) ** -0.5) @ U.T
-    return np.sort(np.linalg.eigvalsh(Sinv2 @ H @ Sinv2))[:nbands]
+    Uh = U.conj().T
+    Sinv2 = U @ np.diag(np.clip(w, 1e-12, None) ** -0.5) @ Uh    # works for real or complex-Herm
+    return np.sort(np.linalg.eigvalsh(Sinv2 @ H @ Sinv2).real)[:nbands]
+
+
+def build_matrices_multi(kfrac, L, atoms, lmax, ecut, r, dx, species):
+    """Multi-atom LAPW S, H (complex Hermitian). `atoms` = [(τ (3,), species_key), ...];
+    `species[key]` = {'R': R_MT, 'v': v_tensor, 'El': {l: E_l}}. Each atom contributes its
+    interstitial sphere-removal and augmentation weighted by the structure phase e^{i(k_G'-k_G)·τ}.
+    Spheres must not overlap (R_a + R_b < |τ_a-τ_b|)."""
+    from scipy.special import eval_legendre
+    vol = L**3
+    b = 2 * math.pi / L
+    nmax = int(math.ceil(math.sqrt(ecut / HBAR2_2M) / b)) + 1
+    ks = [b * (np.array([i, j, m]) + np.asarray(kfrac))
+          for i in range(-nmax, nmax + 1) for j in range(-nmax, nmax + 1)
+          for m in range(-nmax, nmax + 1)]
+    ks = np.array([k for k in ks if HBAR2_2M * (k @ k) <= ecut])
+    npw = len(ks)
+    ksafe = np.maximum(np.linalg.norm(ks, axis=1), 1e-12)
+    dkvec = ks[None, :, :] - ks[:, None, :]              # [g,h] = k_h - k_g
+    dk_norm = np.linalg.norm(dkvec, axis=2)
+    kdot = ks @ ks.T
+    cost = np.clip(kdot / np.outer(ksafe, ksafe), -1.0, 1.0)
+
+    chan = {key: {l: radial_channel(l, sp["El"][l], r, dx, sp["v"], sp["R"])
+                  for l in range(lmax + 1)} for key, sp in species.items()}
+
+    inter = np.eye(npw, dtype=complex)
+    Saug = np.zeros((npw, npw), dtype=complex)
+    Haug = np.zeros((npw, npw), dtype=complex)
+    for tau, key in atoms:
+        R = species[key]["R"]
+        phase = np.exp(1j * (dkvec @ np.asarray(tau, dtype=float)))
+        inter -= (ball_ff_np(dk_norm, R) / vol) * phase
+        for lang in range(lmax + 1):
+            ch = chan[key][lang]
+            ab = np.array([match_ab(ch, ksafe[g], R) for g in range(npw)])
+            a, bb = ab[:, 0], ab[:, 1]
+            aa, bbo = np.outer(a, a), np.outer(bb, bb)
+            ab_s = np.outer(a, bb) + np.outer(bb, a)
+            Ms = aa * ch["uu"] + ab_s * ch["uud"] + bbo * ch["udud"]
+            Tk = aa * ch["Tuu"] + ab_s * ch["Tuud"] + bbo * ch["Tudud"]
+            Vk = aa * ch["Vuu"] + ab_s * ch["Vuud"] + bbo * ch["Vudud"]
+            pref = (4 * math.pi / vol) * (2 * lang + 1) * eval_legendre(lang, cost)
+            Saug += phase * (pref * Ms)
+            Haug += phase * (pref * (Tk + Vk))
+    S = inter + Saug
+    H = HBAR2_2M * kdot * inter + Haug
+    return 0.5 * (H + H.conj().T), 0.5 * (S + S.conj().T)
 
 
 def free_electron_ref(kfrac, L, ecut, nbands):
@@ -212,13 +260,70 @@ def isolated_atom_check(symbol="Ne", R=2.0, L=7.0, ecut=140.0):
     return ok
 
 
+def empty_lattice_multi_check(L=6.0, R=1.0, lmax=6, ecut=120.0):
+    """PROD-E: TWO muffin-tin spheres at arbitrary positions, V=0 → still free-electron bands.
+    This is the decisive structure-factor check: carving extra spheres out of vacuum cannot
+    change the spectrum, so a wrong e^{iΔk·τ} phase breaks it."""
+    from radial_log import log_mesh
+    r, dx = log_mesh(1e-4, R + 1.0, 1500)
+    v = torch.zeros_like(r)
+    species = {"X": {"R": R, "v": v, "El": {lg: 2.5 for lg in range(lmax + 1)}}}
+    atoms = [([0.0, 0.0, 0.0], "X"), ([2.3, 1.1, 0.7], "X")]     # arbitrary, non-overlapping
+    print("  EMPTY LATTICE, 2 spheres at arbitrary positions (structure-factor check):")
+    ok = True
+    for kfrac in ([0.0, 0.0, 0.0], [0.13, 0.05, 0.0]):
+        H, S = build_matrices_multi(kfrac, L, atoms, lmax, ecut, r, dx, species)
+        ev = _sym_geneig(H, S, 6)
+        ref = free_electron_ref(kfrac, L, ecut, 6)
+        err = float(np.abs(ev - ref).max())
+        ok = ok and err < 5e-3
+        print(f"    k={kfrac}  max|Δ| = {err:.2e} eV")
+    return ok
+
+
+def two_atom_check(symbol="Ne", R=1.5, L=7.0, sep=3.5, ecut=130.0):
+    """PROD-E: two well-separated atoms (real self-consistent potential) — valence levels appear as
+    near-degenerate pairs at ~the atomic eigenvalues (weak interaction)."""
+    from atomic_scf import atomic_scf
+    from radial_log import log_mesh
+    r, dx = log_mesh(1e-5, 28.0, 2500)
+    at_eigs, v_at = atomic_scf(symbol, r, dx)
+    iR = int(np.argmin(np.abs(r.numpy() - R)))
+    v0 = float(v_at[iR])
+    v_mt = torch.where(r <= R, v_at - v0, torch.zeros_like(r))
+    val = {0: "2s", 1: "2p"}
+    El = {lg: (at_eigs.get(val.get(lg, ""), -5.0) - v0) for lg in range(3)}
+    species = {symbol: {"R": R, "v": v_mt, "El": El}}
+    atoms = [([0.0, 0.0, 0.0], symbol), ([sep, 0.0, 0.0], symbol)]
+    H, S = build_matrices_multi([0.0, 0.0, 0.0], L, atoms, 2, ecut, r, dx, species)
+    ev = _sym_geneig(H, S, 16) + v0
+    print(f"\n  TWO {symbol} atoms ({sep} Å apart, R_MT={R} Å, L={L} Å):")
+    print(f"  {'valence':>8} | {'atomic KS (eV)':>14} | {'LAPW pair (eV)':>22} | {'max|Δ|':>8}")
+    ok = True
+    for lvl in ("2s", "2p"):
+        if lvl not in at_eigs:
+            continue
+        e_at = at_eigs[lvl]
+        near = ev[np.argsort(np.abs(ev - e_at))[:2]]      # the (bonding/antibonding) pair
+        d = float(np.abs(near - e_at).max())
+        ok = ok and d < 1.0
+        print(f"  {lvl:>8} | {e_at:>14.3f} | {np.array2string(np.sort(near), precision=3):>22} "
+              f"| {d:>8.3f}")
+    return ok
+
+
 def main():
-    print("\nPROD-D — LAPW in production units (eV/Å, log mesh) on a real atomic potential\n")
+    print("\nPROD-D/E — LAPW in production units (eV/Å) on a real potential, multi-atom\n")
     el = empty_lattice_check()
     at = isolated_atom_check("Ne")
+    elm = empty_lattice_multi_check()
+    ta = two_atom_check("Ne")
     print("\n  VERDICT:")
-    print(f"    empty-lattice port correct (free-electron bands)     : {'PASS' if el else 'FAIL'}")
-    print(f"    real atomic potential -> valence bands match atomic  : {'PASS' if at else 'FAIL'}")
+    print(f"    [D] empty-lattice port correct (free-electron)        : {'PASS' if el else 'FAIL'}")
+    print(f"    [D] real atomic potential -> valence bands match      : {'PASS' if at else 'FAIL'}")
+    print(f"    [E] multi-atom structure factors (2-sphere empty)     : "
+          f"{'PASS' if elm else 'FAIL'}")
+    print(f"    [E] two-atom real potential -> near-atomic valence    : {'PASS' if ta else 'FAIL'}")
 
 
 if __name__ == "__main__":

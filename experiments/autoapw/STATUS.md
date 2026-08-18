@@ -77,7 +77,11 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
       2.4e-3 eV); and fed Ne's PROD-C self-consistent all-electron potential, the Γ LAPW valence
       bands reproduce the atom's own KS eigenvalues: 2s −35.51 vs −35.67 (0.17 eV), 2p −13.14 vs
       −13.20 (0.06 eV). Real bands on a real potential. CPU+asus.
-- [ ] PROD-E — multi-atom cells (per-atom structure factors e^{iG·τ_a}, per-sphere blocks).
+- [x] PROD-E — multi-atom cells (`prod_lapw.build_matrices_multi`): per-atom structure phases
+      e^{i(k_G'-k_G)·τ_a} on interstitial + augmentation, per-species radial channels, complex-
+      Hermitian S/H. Verified: TWO spheres at arbitrary positions (V=0) still give free-electron
+      bands to 2.3e-3 eV (decisive structure-factor check); two Ne atoms 3.5 Å apart give
+      near-degenerate valence pairs at the atomic KS levels (2s Δ 0.17 eV, 2p Δ 0.03 eV). CPU+asus.
 - [ ] PROD-F — crystal self-consistency (density from Bloch states across interstitial+spheres,
       Hartree/XC in both regions, mixing). The largest remaining piece.
 - [ ] PROD-G — promote validated modules into src/gradwave (types, tests, import contracts). LAST.
