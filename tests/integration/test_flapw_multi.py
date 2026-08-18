@@ -1,5 +1,6 @@
-"""Multi-sphere self-consistent FLAPW (``crystal_scf_multi``): single-atom reduction and the
-two-sphere dilute limit. Zero-independent splittings, as everywhere in the muffin-tin scheme."""
+"""Multi-sphere self-consistent FLAPW (``crystal_scf_multi``): single-atom reduction, the two-sphere
+dilute limit, Fermi smearing, and general cells (orthorhombic, rotation invariance, fcc-primitive).
+Zero-independent splittings, as everywhere in the muffin-tin scheme."""
 
 from __future__ import annotations
 
@@ -63,4 +64,37 @@ def test_orthorhombic_tetragonal_dilute():
     ev = np.array(conv["ev"])
     assert abs(ev[0] - ev[1]) < 0.05
     split = float(ev[2:8].mean() - ev[:2].mean())
+    assert abs(split - 22.47) < 0.2
+
+
+@pytest.mark.slow
+def test_triclinic_rotation_invariance():
+    """Rotating the whole cell is a passive coordinate change, so the spectrum must be invariant.
+    An exact check of the general-cell machinery (reciprocal lattice G=m·B, Cartesian distances):
+    a rotated cubic Ne cell reproduces the unrotated 2s-2p splitting to sub-meV."""
+    acub = np.eye(3) * 6.0
+    th, ph = 0.7, 0.4
+    rz = np.array([[np.cos(th), -np.sin(th), 0], [np.sin(th), np.cos(th), 0], [0, 0, 1]])
+    rx = np.array([[1, 0, 0], [0, np.cos(ph), -np.sin(ph)], [0, np.sin(ph), np.cos(ph)]])
+    arot = acub @ (rz @ rx).T
+    unrot, _ = crystal_scf_multi(acub, [((0.5, 0.5, 0.5), "Ne")], {"Ne": 1.4},
+                                 ecut=160.0, iters=25)
+    rot, _ = crystal_scf_multi(arot, [((0.5, 0.5, 0.5), "Ne")], {"Ne": 1.4},
+                               ecut=160.0, iters=25)
+    ev0, ev1 = np.array(unrot["ev"]), np.array(rot["ev"])
+    s0 = float(ev0[1:4].mean() - ev0[0])
+    s1 = float(ev1[1:4].mean() - ev1[0])
+    assert abs(s0 - s1) < 0.01
+
+
+@pytest.mark.slow
+def test_fcc_primitive_dilute_recovers_atom():
+    """A genuinely non-orthogonal Bravais lattice: the fcc primitive cell (60° angles) exercises
+    the 27-image minimum-image search. A dilute single Ne recovers the atomic 2s-2p splitting."""
+    a = 11.0
+    afcc = 0.5 * a * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    conv, info = crystal_scf_multi(afcc, [((0.0, 0.0, 0.0), "Ne")], {"Ne": 2.0},
+                                   ecut=110.0, iters=25)
+    ev = np.array(conv["ev"])
+    split = float(ev[1:4].mean() - ev[0])
     assert abs(split - 22.47) < 0.2

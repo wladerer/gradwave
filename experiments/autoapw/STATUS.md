@@ -128,14 +128,17 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
       [x] 2. multi-sphere / multi-species SCF — `crystal_scf_multi(atoms, radii)`; `_lapw_multi_k` +
              `_weinert_multi`. Single-atom reduction matches crystal_scf (0.055 eV); two dilute Ne
              give the correct degenerate spectrum (0.028 eV). Validated on asus.
-      [x] 3. orthorhombic cells — per-axis L in the Coulomb primitives + SCF (scalar = cubic, back-
-             compat). Cubic-vector reduction exact; tetragonal 2-Ne dilute recovers the atom (0.021).
+      [x] 3. general cells — Coulomb primitives + SCF take a scalar (cubic), length-3 (orthorhombic),
+             or 3×3 (triclinic) cell. FFT on the fractional grid; cell enters via |G|²=|m·B|²,
+             Cartesian min-image (27-image search for skewed cells), and Ω=|det A|. Validated on asus:
+             cubic scalar==matrix; ROTATION INVARIANCE |Δ|=0.0001 eV (exact passive-rotation check);
+             fcc-primitive dilute Ne 22.474 vs atom 22.47. Orthorhombic tetragonal 2-Ne dilute 0.021.
       [x] 4. metals via Fermi smearing — `crystal_scf_multi(smearing=...)`; `_fermi_level` (FD,
              charge-conserving). Smeared insulator == sharp; Fermi solver unit-tested. Validated.
-      [ ] REMAINING for a real material vs Elk: general triclinic lattice (reciprocal metric +
-          non-orthogonal min-image), a real ionic/metallic test case + its Elk reference, and the
-          full-potential non-spherical (l>0) sphere terms — the last is also what EFG/quadrupolar
-          NMR needs (muffin-tin l=0 gives EFG≡0).
+      [ ] REMAINING for a real material vs Elk: a real ionic/metallic test case + its Elk reference,
+          and the full-potential non-spherical (l>0) sphere terms — the last is also what
+          EFG/quadrupolar NMR needs (muffin-tin l=0 gives EFG≡0). The cell/BZ/occupation machinery
+          for arbitrary crystals is now in place (steps 1-4 + triclinic).
 - [ ] Then #1 DualBasis oxygen gate; then benchmark; then SlepianCore (slabs/molecular crystals).
 
 Prototypes/tests run on asus per user request (`ssh asus`), heavy runs via ./scripts/gwq.
