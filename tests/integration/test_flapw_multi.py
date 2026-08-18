@@ -88,6 +88,15 @@ def test_triclinic_rotation_invariance():
 
 
 @pytest.mark.slow
+def test_efg_cubic_null():
+    """EFG null test: a cubic site has no l=2 invariant (lowest cubic anisotropy is l=4), so the
+    valence EFG magnitude Q2 vanishes for simple-cubic Ne."""
+    _, info = crystal_scf_multi(6.0, [((0.5, 0.5, 0.5), "Ne")], {"Ne": 1.4},
+                                ecut=160.0, iters=25, efg=True)
+    assert info["efg"]["a0"]["Q2"] < 1e-9
+
+
+@pytest.mark.slow
 def test_fcc_primitive_dilute_recovers_atom():
     """A genuinely non-orthogonal Bravais lattice: the fcc primitive cell (60° angles) exercises
     the 27-image minimum-image search. A dilute single Ne recovers the atomic 2s-2p splitting."""

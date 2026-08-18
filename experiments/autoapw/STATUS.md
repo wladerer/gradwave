@@ -135,10 +135,20 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
              fcc-primitive dilute Ne 22.474 vs atom 22.47. Orthorhombic tetragonal 2-Ne dilute 0.021.
       [x] 4. metals via Fermi smearing — `crystal_scf_multi(smearing=...)`; `_fermi_level` (FD,
              charge-conserving). Smeared insulator == sharp; Fermi solver unit-tested. Validated.
-      [ ] REMAINING for a real material vs Elk: a real ionic/metallic test case + its Elk reference,
-          and the full-potential non-spherical (l>0) sphere terms — the last is also what
-          EFG/quadrupolar NMR needs (muffin-tin l=0 gives EFG≡0). The cell/BZ/occupation machinery
-          for arbitrary crystals is now in place (steps 1-4 + triclinic).
+      The cell/BZ/occupation machinery for arbitrary crystals is now complete (steps 1-4 + triclinic).
+- [~] EFG / QUADRUPOLAR-NMR (the reachable NMR observable) — `gradwave.flapw.efg`:
+      [x] step 1: aspherical l=2 density multipoles `sphere_density_multipoles` (direct angular
+             projection of |psi|^2, no Gaunt) + `valence_efg_moments` (r^-3 valence magnitude Q2);
+             `crystal_scf_multi(efg=True)`. NULL TEST: cubic Ne Q2=1.4e-13 (cubic has no l=2
+             invariant). Routine unit-tested (s->0, p_z->l=2 M=0, filled-p->0 = the positive control).
+             NOTE: closed-shell Ne is spherical in ANY cell (filled-shell rule), so a nonzero PHYSICAL
+             crystal Q2 needs an open-shell element (real EFG benchmark) — comes with the plumbing.
+      [ ] step 2: l=2 sphere Poisson (multipole Green's fn) + interstitial V_2M matching → V_zz.
+      [ ] step 3: full-potential non-spherical V matrix elements in H (Gaunt l-coupling) for accuracy.
+      [ ] plumbing: real open-shell elements (Ti/O/Cu…) beyond He/Be/Ne; a benchmark (TiO2/Zn/Ti) vs
+          WIEN2k/Elk. Then differentiable EFG (∂C_Q/∂structure) — the AutoAPW-specific payoff.
+- [ ] Chemical shielding σ (all nuclei) — GIPAW magnetic linear response; a separate large subsystem.
+- [ ] Remaining for a real material vs Elk: a real ionic/metallic case + its Elk reference.
 - [ ] Then #1 DualBasis oxygen gate; then benchmark; then SlepianCore (slabs/molecular crystals).
 
 Prototypes/tests run on asus per user request (`ssh asus`), heavy runs via ./scripts/gwq.
