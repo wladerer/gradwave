@@ -209,3 +209,19 @@ def test_local_displacement_perturbation_q0_reduces():
     dvp = local_displacement_perturbation_q(res, q, 1, 0)
     dvm = local_displacement_perturbation_q(res, [-x for x in q], 1, 0)
     assert float((dvm - dvp.conj()).abs().max() / dvp.abs().max()) < 1e-10
+
+
+@pytest.mark.parametrize("q", [[0.0, 0.0, 0.0], [0.25, 0.0, 0.0], [0.5, 0.0, 0.0],
+                               [0.25, 0.25, 0.0]])
+def test_chi0_q_batched_matches_loop(q):
+    """R1+R3: the batched block solve (one masked cg_sternheimer over the k+q
+    spheres, Toeplitz apply) reproduces the reference per-k loop to the CG tol."""
+    res = _si_res()
+    grid = res.system.grid
+    torch.manual_seed(3)
+    w = (torch.randn(grid.shape, dtype=torch.float64)
+         + 1j * torch.randn(grid.shape, dtype=torch.float64)).to(torch.complex128)
+    d_loop = chi0_q(res, q, w, _impl="loop")
+    d_batch = chi0_q(res, q, w, _impl="batched")
+    rel = float((d_batch - d_loop).abs().max() / d_loop.abs().max())
+    assert rel < 1e-5, (q, rel)

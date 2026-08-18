@@ -20,12 +20,20 @@ Insulator, nspin=1 (matching the q=0 insulator χ₀ path). Requires a
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import torch
 
+from gradwave.core.batch import (
+    BatchedHamiltonian,
+    box_to_sphere_b,
+    g_to_r_b,
+    projectors_b,
+)
 from gradwave.core.fftbox import box_to_sphere, g_to_r, r_to_g
 from gradwave.dtypes import CDTYPE, RDTYPE
-from gradwave.postscf._response import sternheimer_shift
+from gradwave.postscf._response import cg_sternheimer, sternheimer_shift
 from gradwave.scf.implicit import _hamiltonians, _occupied, projected_cg
 from gradwave.scf.loop import SCFResult
 from gradwave.solvers.precond import teter
@@ -98,7 +106,7 @@ def _sternheimer_kq(h_kq, c_occ_kq, eps_k, rhs_r, sphere_kq, alpha, tol, max_ite
 
 def chi0_q(res: SCFResult, q_frac, v_box: torch.Tensor, tol: float = 1e-8,
            max_iter: int = 200, *, k_indices=None, k_weights=None,
-           symmetrizer=None) -> torch.Tensor:
+           symmetrizer=None, _impl: str = "batched") -> torch.Tensor:
     """Bare density response δρ_q = χ₀[δV_q] for wavevector q (nspin=1 insulator).
 
     ``v_box`` is the cell-periodic part v(r) of δV_q(r) = e^{iq·r} v(r), a complex
@@ -106,11 +114,25 @@ def chi0_q(res: SCFResult, q_frac, v_box: torch.Tensor, tol: float = 1e-8,
     component** δρ_{+q}(r) = Σ_{nk} f w_k ψ*_{n,k} δψ_{n,k+q} (so the physical
     δρ_q(r) = e^{iq·r} · result). The −q term δψ* ψ belongs to δρ_{−q}. At q=0 the
     two coincide, so the full real q=0 response is δρ_0 = 2·Re δρ_{+q}|_{q=0} =
-    ``scf.implicit.apply_chi0`` (a use_symmetry=False result)."""
+    ``scf.implicit.apply_chi0`` (a use_symmetry=False result).
+
+    ``_impl="batched"`` (default) solves every k's k+q Sternheimer system as one
+    masked block against a batched k+q Hamiltonian — amortizing the per-k kernel
+    launches and inheriting the small-cell Toeplitz apply. ``_impl="loop"`` is the
+    reference per-k Python loop; the two agree to the CG tolerance."""
     if getattr(res, "nspin", 1) != 1:
         raise NotImplementedError("chi0_q: nspin=1 only")
     if getattr(res.system, "sym", None) is not None:
         raise ValueError("chi0_q needs a use_symmetry=False result (full k-mesh)")
+    system = res.system
+    ks = list(range(len(system.spheres))) if k_indices is None else list(k_indices)
+    kw = system.kweights if k_weights is None else k_weights
+    impl = _chi0_q_batched if _impl == "batched" else _chi0_q_loop
+    return impl(res, q_frac, v_box, tol, max_iter, ks, kw, symmetrizer)
+
+
+def _chi0_q_loop(res, q_frac, v_box, tol, max_iter, ks, kw, symmetrizer):
+    """Reference per-k Python loop (kept for regression A/B against the batch)."""
     system = res.system
     grid = system.grid
     shape = grid.shape
@@ -118,8 +140,6 @@ def chi0_q(res: SCFResult, q_frac, v_box: torch.Tensor, tol: float = 1e-8,
     k_frac = np.stack([sph.k_frac for sph in system.spheres])
     jidx, g0 = kpq_map(k_frac, q_frac)
     v_box = v_box.to(CDTYPE)
-    ks = range(len(system.spheres)) if k_indices is None else list(k_indices)
-    kw = system.kweights if k_weights is None else k_weights
     dr_r = torch.zeros(shape, dtype=CDTYPE, device=grid.g2.device)
     for ik in ks:
         c_occ_k, eps_k = _occupied(res, 0, ik)
@@ -143,6 +163,85 @@ def chi0_q(res: SCFResult, q_frac, v_box: torch.Tensor, tol: float = 1e-8,
         dr_r = symmetrizer.apply(r_to_g(dr_r))
         from gradwave.core.fftbox import g_to_r_box
         dr_r = g_to_r_box(dr_r)
+    return dr_r
+
+
+def _reindex_bk(bk, idx: torch.Tensor):
+    """BatchedK restricted/reordered to k-mesh indices ``idx`` (per-k fields only;
+    npw_max, atom index and the D-matrix are k-independent)."""
+    return dataclasses.replace(
+        bk, mask=bk.mask[idx], flat_idx=bk.flat_idx[idx], kpg=bk.kpg[idx],
+        t=bk.t[idx], proj_phase_free=bk.proj_phase_free[idx])
+
+
+def _chi0_q_batched(res, q_frac, v_box, tol, max_iter, ks, kw, symmetrizer):
+    """One masked block Sternheimer solve over all selected k (R1), against a
+    batched k+q Hamiltonian whose apply carries the Toeplitz path (R3). The k+q
+    operator is exactly ``cg_sternheimer``'s (H − ε_{n,k} + s·P_occ), so this is a
+    reindex-and-batch of the reference loop, not a new solver."""
+    system = res.system
+    grid = system.grid
+    shape = grid.shape
+    dev = grid.g2.device
+    bk = system.batch
+    k_frac = np.stack([sph.k_frac for sph in system.spheres])
+    jidx, g0 = kpq_map(k_frac, q_frac)
+    v_box = v_box.to(CDTYPE)
+    nsel = len(ks)
+    ksel = torch.as_tensor(ks, dtype=torch.long, device=dev)
+    jsel = torch.as_tensor([int(jidx[ik]) for ik in ks], dtype=torch.long, device=dev)
+
+    bk_k = _reindex_bk(bk, ksel)                       # the k spheres (selected)
+    bk_kq = _reindex_bk(bk, jsel)                      # the k+q spheres
+    # The Toeplitz local apply is opt-in (off by default — it regresses routine
+    # SCFs), but the batched many-k Sternheimer solve here is exactly the regime it
+    # WINS (~2×), so enable it for this Hamiltonian's construction. The memory gate
+    # still declines for large npw, falling back to the FFT apply.
+    import gradwave.core.batch as _batch
+
+    _toep_prev = _batch._TOEPLITZ_LOCAL_ENABLED
+    _batch._TOEPLITZ_LOCAL_ENABLED = True
+    try:
+        h_kq = BatchedHamiltonian(bk_kq, shape, res.v_eff, projectors_b(bk_kq, system.positions))
+    finally:
+        _batch._TOEPLITZ_LOCAL_ENABLED = _toep_prev
+
+    npw_max = bk.mask.shape[1]
+    nocc = _occupied(res, 0, ks[0])[0].shape[0]
+    c_occ_k = torch.zeros(nsel, nocc, npw_max, dtype=CDTYPE, device=dev)
+    c_occ_kq = torch.zeros(nsel, nocc, npw_max, dtype=CDTYPE, device=dev)
+    eps_k = torch.zeros(nsel, nocc, dtype=RDTYPE, device=dev)
+    ph = torch.zeros(nsel, 1, *shape, dtype=CDTYPE, device=dev)
+    shifts = []
+    for i, ik in enumerate(ks):
+        ck, e_k = _occupied(res, 0, ik)
+        ckq, _ = _occupied(res, 0, int(jidx[ik]))
+        c_occ_k[i, :, : ck.shape[1]] = ck
+        c_occ_kq[i, :, : ckq.shape[1]] = ckq
+        eps_k[i] = e_k
+        ph[i, 0] = _g0_phase(shape, g0[ik], dev)
+        shifts.append(sternheimer_shift(e_k))
+    shift = float(max(shifts))  # common PD shift (acts only on the projected-out occupied space)
+
+    psi_box = g_to_r_b(c_occ_k, bk_k, shape)           # u_{n,k} (nsel, nocc, *box)
+    rhs_r = psi_box * v_box[None, None] * ph           # δV_q·ψ_k on the k+q convention
+    rhs_s = box_to_sphere_b(rhs_r, bk_kq)              # onto the k+q spheres
+
+    def p_occ(x):
+        ov = torch.einsum("kng,kbg->kbn", c_occ_kq.conj(), x)
+        return torch.einsum("kbn,kng->kbg", ov, c_occ_kq)
+
+    rhs = -(rhs_s - p_occ(rhs_s))                      # −P_c^{k+q}(δV_q·ψ_k)
+    dpsi = cg_sternheimer(h_kq, bk_kq, c_occ_kq, eps_k, rhs,
+                          torch.zeros_like(rhs), shift, tol=tol, max_iter=max_iter)
+    dpsi_box = g_to_r_b(dpsi, bk_kq, shape)            # (nsel, nocc, *box)
+
+    w = torch.tensor([2.0 * float(kw[ik]) for ik in ks], dtype=RDTYPE, device=dev)
+    contrib = (psi_box.conj() * dpsi_box * ph.conj()).sum(dim=1)     # (nsel, *box)
+    dr_r = (w.view(nsel, *([1] * len(shape))) * contrib).sum(dim=0) / grid.volume
+    if symmetrizer is not None:
+        from gradwave.core.fftbox import g_to_r_box
+        dr_r = g_to_r_box(symmetrizer.apply(r_to_g(dr_r)))
     return dr_r
 
 
