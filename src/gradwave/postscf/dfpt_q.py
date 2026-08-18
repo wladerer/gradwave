@@ -20,10 +20,10 @@ Insulator, nspin=1 (matching the q=0 insulator χ₀ path). Requires a
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import torch
-
-import dataclasses
 
 from gradwave.core.batch import (
     BatchedHamiltonian,
