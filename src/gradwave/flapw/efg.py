@@ -22,7 +22,7 @@ import math
 import numpy as np
 
 from gradwave.constants import E2
-from gradwave.flapw.coulomb import cell_matrix
+from gradwave.flapw.coulomb import cell_matrix, reciprocal
 
 
 def _angular_grid(nx: int, nphi: int):
@@ -118,18 +118,23 @@ def efg_tensor(multipoles, rr, drw):
 
 def interstitial_l2_boundary(v_grid, center_cart, R, cell, nx: int = 16, nphi: int = 24):
     """The l=2 components ``v_bc_2M = ∮ V_int(center + R Ω) Y*_2M(Ω) dΩ`` of the interstitial FFT
-    potential on the sphere surface, by trilinear interpolation of the periodic grid + projection.
-    ``v_grid`` is the interstitial potential on the fractional grid; ``center_cart`` the atom, Å."""
-    from scipy.ndimage import map_coordinates
+    potential on the sphere surface. The potential is evaluated on the sphere by its exact
+    band-limited Fourier series ``V(r) = Σ_G v_G e^{iG·r}`` (no interpolation error, so a cubic-
+    symmetric grid projects to machine-zero l=2). ``center_cart`` is the atom in Å."""
     from scipy.special import sph_harm_y
     a = cell_matrix(cell)
-    ainv = np.linalg.inv(a)
+    b = reciprocal(a)
     nfft = v_grid.shape[0]
+    fi = np.fft.fftfreq(nfft, d=1.0 / nfft)
+    mx, my, mz = np.meshgrid(fi, fi, fi, indexing="ij")
+    gvec = np.stack([mx * b[0, 0] + my * b[1, 0] + mz * b[2, 0],
+                     mx * b[0, 1] + my * b[1, 1] + mz * b[2, 1],
+                     mx * b[0, 2] + my * b[1, 2] + mz * b[2, 2]], axis=-1).reshape(-1, 3)
+    vg = (np.fft.fftn(v_grid) / nfft**3).reshape(-1)               # V(r) = Σ_G v_G e^{iG·r}
     th, ph, wgt = _angular_grid(nx, nphi)
     dirs = np.stack([np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)], axis=-1)
-    pts_frac = (R * dirs + np.asarray(center_cart)) @ ainv          # (nx,nphi,3), fractional
-    coords = ((pts_frac % 1.0).reshape(-1, 3) * nfft).T            # (3, npts), grid-index units
-    vals = map_coordinates(v_grid, coords, order=1, mode="grid-wrap").reshape(th.shape)
+    pts = (R * dirs + np.asarray(center_cart)).reshape(-1, 3)      # (npts,3) Cartesian
+    vals = (np.exp(1j * (pts @ gvec.T)) @ vg).reshape(th.shape).real
     return {m: complex(np.sum(vals * wgt * np.conj(sph_harm_y(2, m, th, ph))))
             for m in range(-2, 3)}
 
