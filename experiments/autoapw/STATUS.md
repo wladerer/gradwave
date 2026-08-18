@@ -122,6 +122,20 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
       [slow]); ruff + import contracts clean, ty warn-only. Demo: `examples/flapw_neon_crystal.py`
       (atom→LAPW→crystal→autograd, writes flapw_neon_crystal.png). Tests key on the 2s-2p splitting,
       not absolute eigenvalues (the muffin-tin interstitial zero wanders — documented in scf.py).
+- [~] REAL-MATERIAL PREREQUISITES (get off Ne-cubic-Γ) — steps 1-4, all in `gradwave.flapw`:
+      [x] 1. multi-k BZ integration — `crystal_scf(kmesh=...)`; `_lapw_k(kfrac)`. 2×2×2 mesh recovers
+             the atom to 0.028 eV; multi-atom empty-lattice gate (2 empty spheres → free electron).
+      [x] 2. multi-sphere / multi-species SCF — `crystal_scf_multi(atoms, radii)`; `_lapw_multi_k` +
+             `_weinert_multi`. Single-atom reduction matches crystal_scf (0.055 eV); two dilute Ne
+             give the correct degenerate spectrum (0.028 eV). Validated on asus.
+      [x] 3. orthorhombic cells — per-axis L in the Coulomb primitives + SCF (scalar = cubic, back-
+             compat). Cubic-vector reduction exact; tetragonal 2-Ne dilute recovers the atom (0.021).
+      [x] 4. metals via Fermi smearing — `crystal_scf_multi(smearing=...)`; `_fermi_level` (FD,
+             charge-conserving). Smeared insulator == sharp; Fermi solver unit-tested. Validated.
+      [ ] REMAINING for a real material vs Elk: general triclinic lattice (reciprocal metric +
+          non-orthogonal min-image), a real ionic/metallic test case + its Elk reference, and the
+          full-potential non-spherical (l>0) sphere terms — the last is also what EFG/quadrupolar
+          NMR needs (muffin-tin l=0 gives EFG≡0).
 - [ ] Then #1 DualBasis oxygen gate; then benchmark; then SlepianCore (slabs/molecular crystals).
 
 Prototypes/tests run on asus per user request (`ssh asus`), heavy runs via ./scripts/gwq.

@@ -9,13 +9,21 @@ against independent references (NIST LDA atomic data; Elk 11 all-electron FLAPW)
 - ``mixing`` — Anderson mixing
 - ``atom`` — the self-consistent spherical KS atom (the muffin-tin reference)
 - ``lapw`` — the (L)APW secular equation (single- and multi-atom, differentiable primitives)
-- ``scf`` — the self-consistent crystal FLAPW loop (muffin-tin)
+- ``scf`` — the self-consistent crystal FLAPW loop (muffin-tin): ``crystal_scf`` (single atom) and
+  ``crystal_scf_multi`` (several atoms/species, a Monkhorst-Pack k-mesh, cubic or orthorhombic
+  cells, and Fermi smearing for metals)
 
 Example — a self-consistent simple-cubic Ne crystal, and its atomic limit::
 
     from gradwave.flapw import crystal_scf
     bands, atomic = crystal_scf(6.0, "Ne")          # a = 6 Bohr
     print(bands["2p"] - bands["2s"])                # 2s-2p splitting (eV)
+
+Example — a multi-atom cell with a BZ mesh (and Fermi smearing for a metal)::
+
+    from gradwave.flapw import crystal_scf_multi
+    bands, info = crystal_scf_multi(6.0, [((0.0, 0.0, 0.0), "Ne")], {"Ne": 1.4},
+                                    kmesh=(2, 2, 2), smearing=0.1)
 
 The muffin-tin ``scf`` is a numerical (LAPACK) forward solver; the ``lapw`` and ``atom`` primitives
 are autograd-differentiable in the potential/basis parameters (see the gate-D atomic oracle and the
