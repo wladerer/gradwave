@@ -1001,7 +1001,11 @@ def _build_metagga_apply(
     v_τ, not a later one."""
     if not xc.needs_tau:
         return None
-    from gradwave.core.metagga import metagga_tau_operator
+    from gradwave.core.metagga import (
+        apply_tau_toeplitz,
+        build_tau_toeplitz,
+        metagga_tau_operator,
+    )
 
     # tau_list is bootstrapped/rebuilt in lockstep with xc.needs_tau by the
     # caller (_bootstrap_tau before the loop, then the `if xc.needs_tau:`
@@ -1016,10 +1020,17 @@ def _build_metagga_apply(
         r_u = rho_s[0] if cu2 is None else rho_s[0] + cu2
         r_d = rho_s[1] if cu2 is None else rho_s[1] + cu2
         v_tau_s = list(vtau_spin_potential(xc, r_u, r_d, tau_list[0], tau_list[1], grid))
-    return [
-        (lambda c, _v=v_tau_s[sp]: metagga_tau_operator(c, _v, bk, grid.shape))
-        for sp in range(nspin)
-    ]
+    # Small-cell fast path: build the weighted-Toeplitz matrix once per spin (v_τ
+    # is fixed for this iteration's solve) so V_τ c is one GEMM instead of 6
+    # FFTs/band. build_tau_toeplitz returns None when the gate declines → FFT.
+    ops: list[Callable[[torch.Tensor], torch.Tensor]] = []
+    for sp in range(nspin):
+        vt_mat = build_tau_toeplitz(v_tau_s[sp], bk, grid.shape)
+        if vt_mat is not None:
+            ops.append(lambda c, _V=vt_mat: apply_tau_toeplitz(_V, c, bk))
+        else:
+            ops.append(lambda c, _v=v_tau_s[sp]: metagga_tau_operator(c, _v, bk, grid.shape))
+    return ops
 
 
 def _assemble_scf_energies(
