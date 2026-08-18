@@ -47,7 +47,17 @@ _GPU_DENSE_BUDGET_BYTES = 4e8
 # surprises a memory-tight GPU: it covers small cells and modest k-meshes (e.g.
 # npw≈260 up to ~250 k-points). Raise it to extend coverage to finer meshes /
 # larger npw when memory allows; set the flag False to disable entirely.
+#
+# CUDA is opt-in (default off). The whole-SCF win is measured and verified on CPU
+# fp64 (dense GEMM beats the box FFT at small npw). On GPU the picture did NOT hold
+# end-to-end on the tested hardware (RTX 3050): the isolated fp32 M@c is tensor-
+# core-fast, but the non-apply fp64 FFTs (density build, Hartree, XC) dominate the
+# SCF and Amdahl-dilute the gain, while fp64 GEMM is crippled on consumer GPUs so a
+# pure-fp64 GPU SCF would REGRESS. A data-center GPU (real fp64 / saturation) may
+# invert this — flip _TOEPLITZ_ON_CUDA to test there — but it stays off by default
+# until validated so the path never silently slows a GPU run.
 _TOEPLITZ_LOCAL_ENABLED = True
+_TOEPLITZ_ON_CUDA = False  # opt-in: GPU whole-SCF win unproven; consumer fp64 regresses
 _TOEPLITZ_M_BUDGET_BYTES = 1 << 28  # 256 MiB cap on the cached local-potential matrix
 
 # Optional H-application instrumentation. BatchedHamiltonian.apply is the single
@@ -207,7 +217,8 @@ class BatchedHamiltonian:
         # every apply (v_eff is fixed for this Hamiltonian).
         self._toep_idx: torch.Tensor | None = None
         self._toep_M_cache: dict[torch.dtype, torch.Tensor] = {}
-        if _TOEPLITZ_LOCAL_ENABLED and smooth is None:
+        on_device = bk.mask.device.type == "cpu" or _TOEPLITZ_ON_CUDA
+        if _TOEPLITZ_LOCAL_ENABLED and on_device and smooth is None:
             nk, npw = bk.mask.shape
             if nk * npw * npw * 16 <= _TOEPLITZ_M_BUDGET_BYTES:
                 self._toep_idx = self._build_toeplitz_index()
