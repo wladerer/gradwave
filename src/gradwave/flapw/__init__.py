@@ -34,6 +34,7 @@ from gradwave.flapw.atom import CONFIG, NIST_LDA_EV, atomic_scf
 from gradwave.flapw.efg import (
     efg_tensor,
     efg_tensor_full,
+    gaunt_matrix,
     interstitial_l2_boundary,
     l2_sphere_poisson,
     sphere_density_multipoles,
@@ -58,6 +59,7 @@ __all__ = [
     "crystal_scf_multi",
     "efg_tensor",
     "efg_tensor_full",
+    "gaunt_matrix",
     "interstitial_l2_boundary",
     "l2_sphere_poisson",
     "log_mesh",

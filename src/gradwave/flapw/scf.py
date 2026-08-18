@@ -261,10 +261,15 @@ def crystal_scf(a_bohr: float, symbol: str = "Ne", R: float = 1.4, ecut: float =
     return conv, at
 
 
-def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands):
+def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=None):
     """Multi-atom LAPW at wavevector k, exposing the density internals the SCF needs. Returns
     ``(eigvals, eigvecs, miller, ks, [abl per atom], vol)``. H,S are complex Hermitian (structure
-    phases ``e^{i(k_G'-k_G)·τ_a}``). ``atoms_cart`` = ``[(τ_cart, species_key), ...]``."""
+    phases ``e^{i(k_G'-k_G)·τ_a}``). ``atoms_cart`` = ``[(τ_cart, species_key), ...]``.
+
+    ``v_nsph`` (optional) = ``{species_key: {(L,M): V_LM(r) in-sphere}}`` — the non-spherical
+    (full-potential) sphere potential components (harmonic coefficients, ``V(r,Ω)=Σ V_LM Y_LM``).
+    Their L>0 parts add the l-channel coupling ``⟨u_l Y_lm|V_LM Y_LM|u_l' Y_l'm'⟩`` to H (the L=0
+    spherical part is already in the muffin tin). ``None`` → muffin-tin (backward compatible)."""
     from scipy.special import eval_legendre
     A = cell_matrix(L)
     B = reciprocal(A)                                     # rows = reciprocal vectors
@@ -312,11 +317,60 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands):
             Saug += phase * (pref * Ms)
             Haug += phase * (pref * (Tk + Vk))
         abl_by_atom.append(abl)
+    if v_nsph:
+        Haug = Haug + _nonspherical_augment(v_nsph, atoms_cart, abl_by_atom, ks, species,
+                                            lmax, vol, r, dx)
     S = 0.5 * (inter + Saug + (inter + Saug).conj().T)
     Hm = HBAR2_2M * kdot * inter + Haug
     Hm = 0.5 * (Hm + Hm.conj().T)
     ev, c = solve_geneig(Hm, S, nbands, with_vecs=True)
     return ev, c, mill, ks, abl_by_atom, vol
+
+
+def _nonspherical_augment(v_nsph, atoms_cart, abl_by_atom, ks, species, lmax, vol, r, dx):
+    """The full-potential non-spherical augmentation ``ΔH[g,g'] = Σ_{lm,l'm',LM>0}
+    B_lm(g)* [∫u_l V_LM u_l' dr] G^{LM}_{lm,l'm'} B_l'm'(g')`` (and the u̇ cross terms), where
+    ``B_lm(g) = (4π/√Ω) i^l Y*_lm(k+G) [a_l or b_l](g) e^{i(k+G)·τ}`` is the per-plane-wave
+    augmentation amplitude. Per-(L,M,l,l') radial integrals × Gaunt blocks contract to npw×npw."""
+    from gradwave.flapw.efg import gaunt_matrix
+    r_np = r.numpy()
+    npw = len(ks)
+    ha = np.zeros((npw, npw), dtype=complex)
+    for ai, (tau, key) in enumerate(atoms_cart):
+        comps = v_nsph.get(key)
+        if not comps:
+            continue
+        rr = r_np[r_np <= species[key]["R"]]
+        drw = rr * dx
+        el, vsph = species[key]["El"], species[key]["v"]
+        us = {lang: _radial_u(lang, el[lang], r, dx, vsph, species[key]["R"])
+              for lang in range(lmax + 1)}
+        ph = np.exp(1j * (ks @ np.asarray(tau, dtype=float)))
+        b_a, b_b = {}, {}
+        for lang in range(lmax + 1):
+            ylm = np.array([_ylm_star(lang, ks[g]) for g in range(npw)])
+            pf = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
+            b_a[lang] = pf * ylm * (abl_by_atom[ai][lang][:, 0] * ph)[:, None]
+            b_b[lang] = pf * ylm * (abl_by_atom[ai][lang][:, 1] * ph)[:, None]
+        for (big_l, big_m), vlm in comps.items():
+            if big_l == 0:
+                continue                                   # spherical part is in the muffin tin
+            vlm = np.asarray(vlm)
+            for lang in range(lmax + 1):
+                for lp in range(lmax + 1):
+                    if big_l < abs(lang - lp) or big_l > lang + lp or (lang + lp + big_l) % 2:
+                        continue
+                    ul, udl = us[lang]
+                    ulp, udlp = us[lp]
+                    i_aa = np.sum(ul * vlm * ulp * drw)
+                    i_ab = np.sum(ul * vlm * udlp * drw)
+                    i_ba = np.sum(udl * vlm * ulp * drw)
+                    i_bb = np.sum(udl * vlm * udlp * drw)
+                    g = gaunt_matrix(lang, big_l, big_m, lp)
+                    ca, cb = b_a[lang].conj(), b_b[lang].conj()
+                    ha += (i_aa * (ca @ g @ b_a[lp].T) + i_ab * (ca @ g @ b_b[lp].T)
+                           + i_ba * (cb @ g @ b_a[lp].T) + i_bb * (cb @ g @ b_b[lp].T))
+    return ha
 
 
 def _weinert_multi(rho_I, spheres, L, nfft):

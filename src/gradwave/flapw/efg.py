@@ -35,6 +35,22 @@ def _angular_grid(nx: int, nphi: int):
     return th, ph, wgt
 
 
+def gaunt_matrix(l, big_l, big_m, lp, nx: int = 16, nphi: int = 24):
+    """The Gaunt coupling block ``G[m,m'] = ∫ Y*_lm Y_LM Y_l'm' dΩ`` (complex harmonics), shape
+    ``(2l+1, 2l'+1)``, computed by Gauss-Legendre angular quadrature. This is the angular factor of
+    the non-spherical potential matrix element ``⟨u_l Y_lm | V_LM Y_LM | u_l' Y_l'm'⟩``."""
+    from scipy.special import sph_harm_y
+    th, ph, wgt = _angular_grid(nx, nphi)
+    ylm = [sph_harm_y(l, m, th, ph) for m in range(-l, l + 1)]
+    ylpm = [sph_harm_y(lp, mp, th, ph) for mp in range(-lp, lp + 1)]
+    y_big = sph_harm_y(big_l, big_m, th, ph)
+    g = np.zeros((2 * l + 1, 2 * lp + 1), dtype=complex)
+    for i in range(2 * l + 1):
+        for j in range(2 * lp + 1):
+            g[i, j] = np.sum(np.conj(ylm[i]) * y_big * ylpm[j] * wgt)
+    return g
+
+
 def sphere_density_multipoles(amps, us, lmax, lset, nx: int = 16, nphi: int = 24):
     """Aspherical density components ``ρ_LM(r)`` inside a sphere by angular projection of ``|ψ|²``.
 

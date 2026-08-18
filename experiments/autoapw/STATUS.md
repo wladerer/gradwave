@@ -155,7 +155,16 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
              CAVEAT: interstitial potential is from an l=0-matched Weinert pseudocharge, so the
              inter-atomic l=2 field (other spheres' quadrupoles) needs multipole-matched
              pseudocharges — folds into step 3 (full-potential).
-      [ ] step 3: full-potential non-spherical V matrix elements in H (Gaunt l-coupling) for accuracy.
+      [x] step 3 (Hamiltonian machinery): non-spherical V in H. `efg.gaunt_matrix` (angular
+             G^{LM}_{lm,l'm'} = ∫Y*_lm Y_LM Y_l'm' dΩ by quadrature); `_lapw_multi_k(v_nsph=...)` adds
+             ΔH[g,g'] = Σ B_lm(g)* [∫u_l V_LM u_l' dr] G B_l'm'(g') (+ u̇ terms), where V_LM is the
+             harmonic coefficient (V=Σ V_LM Y_LM). Normalization verified: L=0 with V_00=√4π·v_sph
+             reduces to the muffin-tin pref×Vuu (addition theorem). VALIDATED: empty v_nsph → H
+             bit-identical to muffin-tin (Δ=0); a synthetic axial V_20 splits the Ne 2p triplet into
+             a doublet+singlet matching first-order PT (0.7477 vs 0.7569 eV, 1.2%; correct sign/mult).
+      [ ] step 3b (self-consistent full-potential): compute V_LM from the aspherical density each
+             iteration (l>0 Poisson, have l=2) + non-spherical XC, feed v_nsph into the SCF; also the
+             multipole-matched Weinert pseudocharge (for the inter-atomic l=2 in step 2b).
       [ ] plumbing: real open-shell elements (Ti/O/Cu…) beyond He/Be/Ne; a benchmark (TiO2/Zn/Ti) vs
           WIEN2k/Elk. Then differentiable EFG (∂C_Q/∂structure) — the AutoAPW-specific payoff.
 - [ ] Chemical shielding σ (all nuclei) — GIPAW magnetic linear response; a separate large subsystem.
