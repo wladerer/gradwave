@@ -2565,3 +2565,44 @@ CONSIDERED AND DEFERRED (credible mechanism, harder blockers):
 
 REJECTED: HierFock (hierarchical / butterfly exact exchange) — redundant, the ISDF+ACE hybrid stack it
 would replace is already shipped and validated to 1e-13, and butterfly has lost to ISDF in practice.
+
+**Round 6 (MOONSHOT round: "resurrect & re-cross the crossover" lens). Two survivors VALIDATED by
+prove-or-kill; #1 deferred to a future PR, #2 pocketed as a niche extension.**
+
+The lens: every settled plane-wave-DFT choice was decided at a crossover for a regime (one large
+fp64 CPU cell, non-differentiable). gradwave's regime — tiny batched cells, GPU tensor cores,
+dispatch-bound, autograd-native — is none of those. A dense-GEMM/Toeplitz re-cross works ONLY when
+N_grid contracts out (operator output lands back on the npw sphere); operators with grid-valued
+output (density build, Hartree, XC, τ-build) do NOT re-cross. The shipped local-potential Toeplitz
+apply (PR #316) is the proof-of-concept; these extend it.
+
+DEFERRED — the real frontier (insulators; pick up when returning to the response/phonon layer):
+- **Resolvent-Sternheimer for small-insulator DFPT.** Resurrect 1990s-abandoned dense sum-over-states
+  response: ONE per-k eigh of the fixed ground-state H (reusing the Toeplitz dense-H assembly), then
+  δψ = Σ_c U_c (U_c†·rhs) / (Λ_c − ε_n) for every band/direction/perturbation — GEMM back-substitution
+  replacing the unfused iterative cg_sternheimer. The response layer is simultaneously dispatch-bound
+  (~1e5 launches/phonon-q), operator-reuse-rich (one H fixed across 3N×n_DFPT right-hand sides), and
+  un-reformulated. VALIDATED forward (resolvent_sternheimer.py): δψ matches cg_sternheimer to 4–7e-11;
+  the warm-CG kill-risk is REFUTED (CG to absolute tol 1e-8 needs ~all its iters from any warm start,
+  so warm is only ~10–20% faster than cold across outer-step sizes 20%/2%/0.2%); crossover N to
+  amortize the eigh is a robust 1.8/4.1/9.7 for Si npw 537/588/960, so at a realistic ~60 shared solves
+  the resolvent is 20×/8.5×/4× on the Sternheimer wall → ~2–4× whole-phonon-DFPT. Scope: INSULATORS
+  only (metals put the resolvent pole in the continuum) and small cells (eigh O(nk·npw³) grows N with
+  npw). Remaining unbuilt piece: the differentiable backward (dω²/dparam through DFPT) needs a custom
+  autograd.Function that re-applies the resolvent instead of differentiating the degenerate eigh at
+  high-symmetry Γ — the non-differentiated phonon calc (the common product) does not need it. This is
+  where the crossover has moved MOST: the gradient/response machinery a differentiable DFT code exists
+  to run, not the forward SCF apply (already re-crossed and shipped).
+
+POCKETED — niche extension of the shipped apply (build behind the size gate + a meta-GGA-active check
+whenever an r2SCAN/SCAN campaign wants it):
+- **Meta-GGA τ-operator as one weighted-Toeplitz GEMM** Ṽ[i,j] = ½·((k+G_i)·(k+G_j))·v̂_τ(G_i−G_j),
+  collapsing the 6-FFT/band round-trip in core.metagga.metagga_tau_operator. VALIDATED (tau_toeplitz.py):
+  Ṽ@c matches the operator to 7e-16, apply-level 10.7×/54.7×/11.0× (bigger than the local apply — 6 FFTs
+  deleted vs 2). But meta-GGA-gated (niche functional) → regime-weighted ~1.03×. The τ-BUILD stays FFT
+  (grid-valued output, does not re-cross).
+
+REJECTED with data (this round and prior): dense-eigh forward-solve (O(npw³) all-band loses to warm
+Davidson), truncated/banded M (v̂ decays too slowly to sparsify), GPU whole-SCF on consumer hardware
+(mixed-precision regresses + non-apply fp64 FFTs dominate; crippled consumer fp64), density-build /
+Hartree Toeplitz (grid-valued output — does not re-cross).
