@@ -39,10 +39,18 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
       and for a screened (Yukawa) potential dE/dλ autograd == finite-diff (1.382428) — the exact
       gradient to fit a pseudopotential/functional parameter against. CPU+CUDA. This is the "full
       potential" demo: a differentiable all-electron ORACLE with exact parameter gradients.
-- [ ] Mixed-basis Hamiltonian assembly + single-atom all-electron energy (S3 full): assemble
-      H over {interstitial PWs, augmented sphere channels}, solve the generalized eigenproblem,
-      integrate a real UPF/all-electron radial potential (log mesh + eV/Å units). The remaining
-      "second code"; gates A–D validate its differentiable primitives + the atomic-limit oracle.
+- [x] GATE S3 — periodic mixed-basis (single-atom LAPW) secular equation
+      (experiments/autoapw/mixed_basis.py). **PASSED the FLAPW empty-lattice correctness gate.**
+      Assembles S and H over {interstitial PWs, augmented sphere channels} — interstitial Θ(G)
+      step (gate A) + augmentation from u_l,u̇_l (gate B) + value/slope matching (gate C) +
+      weak-form muffin-tin kinetic — and solves H c = ε S c. Empty lattice (V=0) reproduces the
+      free-electron bands ½|k+G|² to **5.5e-6 Ha**, converges with lmax (5.2e-4→5.5e-6, FLAPW rule
+      lmax≈R·Gmax), and is R_MT-independent (max 3.5e-5). CPU+CUDA. Two real bugs the empty-lattice
+      gate caught and fixed: (1) match the u-functions (u=r·R) to r·j_l(qr), not j_l(qr); (2) use
+      the WEAK-form kinetic in the sphere for consistency across the C¹ boundary.
+- [ ] S3 follow-ons: a non-zero muffin-tin potential (real band structure vs a converged PW/QE
+      reference) and a torch/autograd assembly for differentiable bands dε/dparam (the numpy
+      assembly is not yet autograd; the gate-D atom already shows the differentiable-oracle path).
 - [ ] Then #1 DualBasis oxygen gate; then benchmark; then SlepianCore (slabs/molecular crystals).
 
 Prototypes/tests run on asus per user request (`ssh asus`), heavy runs via ./scripts/gwq.
@@ -53,6 +61,13 @@ Prototypes/tests run on asus per user request (`ssh asus`), heavy runs via ./scr
   tests green. Reusable primitive src/gradwave/core/sphere_ff.ball_ff. Results in results_gate_a.json.
 - 2026-08-17 GATE B PASSED. radial_solve.py Numerov solver matches analytic j_l to 1e-9..1e-12,
   gradcheck-exact ∂u(R_MT)/∂E and ∂u/∂R_MT, hydrogen-1s to 2.5e-4. asus-CPU + asus-CUDA. ruff clean.
+- 2026-08-18 GATE S3 PASSED (empty-lattice FLAPW correctness gate). mixed_basis.py single-atom
+  LAPW secular equation reproduces free-electron bands to 5.5e-6 Ha, lmax-convergent (5.2e-4→5.5e-6),
+  R_MT-independent (≤3.5e-5). asus CPU+CUDA, ruff clean. Empty-lattice gate caught two real bugs:
+  the u=r·R factor in the matching target (match to r·j_l, not j_l), and weak- vs strong-form
+  muffin-tin kinetic across the C¹ boundary. This is a genuinely working periodic augmented-basis
+  solver — the "second code" the earlier gates were foundations for. numpy assembly (not yet
+  autograd); differentiable-bands + non-empty potential are the follow-ons.
 - 2026-08-17 GATE C PASSED. boundary_match.py LAPW value+slope match: C¹ residual ~1e-17,
   (a_l,b_l) differentiable in E_l and R_MT (autograd vs FD rel ≤1e-6), u̇_l free from autograd.
   asus-CPU + asus-CUDA, ruff clean. ALL THREE net-new differentiable primitives now validated:
