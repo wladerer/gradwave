@@ -60,6 +60,77 @@ def _match_mismatch(l, E, r, dx, v):
     return mism, q, i_c
 
 
+def radial_eigs_tridiag(l, r, dx, v, k):
+    """Direct radial eigensolve: the KS operator on the log mesh is symmetric tridiagonal after
+    q=u/√r then w=u√r, so ALL k lowest bound states come from one compiled LAPACK call — no
+    shooting, no scan/bisection, robust for deep-core AND diffuse states.
+
+    -q'' + [(l+½)² + r²V/ℏ²2m] q = (E/ℏ²2m) r² q  ->  standard tridiagonal M w = (E/ℏ²2m) w with
+        M_ii   = [2/dx² + (l+½)²]/r_i²  +  V_i/ℏ²2m
+        M_i,i+1 = -1/(dx² r_i r_{i+1}),      w = u·√r.
+
+    Returns (E [k] eV, u [N,k] each normalized ∫u²dr=1, dr=r·dx). Not autograd (LAPACK); for
+    gradients use first-order perturbation dε = <ψ|dH|ψ> as in gate D.
+    """
+    import numpy as np
+    from scipy.linalg import eigh_tridiagonal
+
+    rn = r.detach().numpy() if torch.is_tensor(r) else np.asarray(r)
+    vn = v.detach().numpy() if torch.is_tensor(v) else np.asarray(v)
+    invr2 = 1.0 / (rn * rn)
+    diag = (2.0 / dx**2 + (l + 0.5) ** 2) * invr2 + vn / HBAR2_2M
+    off = -1.0 / (dx**2 * rn[:-1] * rn[1:])
+    w, W = eigh_tridiagonal(diag, off, select="i", select_range=(0, k - 1))
+    E = w * HBAR2_2M
+    u = W / np.sqrt(rn)[:, None]
+    u = u / np.sqrt((u**2 * (rn * dx)[:, None]).sum(axis=0))[None, :]
+    return E, u
+
+
+def turning_point(l, E, r, v):
+    """Outermost classically-allowed index (V_eff < E)."""
+    veff = v + HBAR2_2M * l * (l + 1) / (r * r)
+    allowed = (veff < E).nonzero().flatten()
+    n = r.shape[0]
+    i_c = int(allowed[-1]) if len(allowed) else n // 2
+    return max(3, min(i_c, n - 4))
+
+
+def mismatch_batch(l, energies, r, dx, v, i_c):
+    """Log-derivative mismatch Δ(E) for a BATCH of energies at a fixed match index i_c (vectorized
+    inward+outward Numerov). One pass replaces a whole energy scan; valid over a narrow window
+    where i_c stays in the classically-allowed region."""
+    n = r.shape[0]
+    rr2 = (r * r)[None, :]
+    g = (l + 0.5) ** 2 + rr2 * (v[None, :] - energies[:, None]) / HBAR2_2M
+    f = 1.0 - (dx * dx / 12.0) * g                    # (B, N)
+    cap = {}
+    a = torch.full_like(energies, float(r[0] ** (l + 0.5)))
+    b = torch.full_like(energies, float(r[1] ** (l + 0.5)))
+    if 0 in (i_c - 1, i_c, i_c + 1):
+        cap[0] = a.clone()
+    if 1 in (i_c - 1, i_c, i_c + 1):
+        cap[1] = b.clone()
+    for i in range(2, i_c + 2):
+        a, b = b, ((12.0 - 10.0 * f[:, i - 1]) * b - f[:, i - 2] * a) / f[:, i]
+        if i in (i_c - 1, i_c, i_c + 1):
+            cap[i] = b.clone()
+    qo_lo, qo_c, qo_hi = cap[i_c - 1], cap[i_c], cap[i_c + 1]
+
+    kappa = torch.sqrt(torch.clamp(v[-1] - energies, min=1e-6) / HBAR2_2M)
+    ai = torch.exp(-kappa * float(r[-1])) / math.sqrt(float(r[-1]))
+    bi = torch.exp(-kappa * float(r[-2])) / math.sqrt(float(r[-2]))
+    capi = {n - 1: ai.clone(), n - 2: bi.clone()}
+    for i in range(n - 3, i_c - 2, -1):
+        ai, bi = bi, ((12.0 - 10.0 * f[:, i + 1]) * bi - f[:, i + 2] * ai) / f[:, i]
+        if i in (i_c - 1, i_c, i_c + 1):
+            capi[i] = bi.clone()
+    qi_lo, qi_c, qi_hi = capi[i_c - 1], capi[i_c], capi[i_c + 1]
+
+    scale = qo_c / qi_c
+    return ((qo_hi - qo_lo) - scale * (qi_hi - qi_lo)) / qo_c
+
+
 def _nodes(q, r, rmax):
     m = r < rmax
     s = torch.sign(q[m])
