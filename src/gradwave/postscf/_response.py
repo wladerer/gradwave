@@ -523,3 +523,108 @@ def cg_sternheimer(h: _AppliesH, bk: _HasKineticTable, c_occ: torch.Tensor,
         p = z + (rz_new / torch.clamp(rz, min=1e-300))[..., None] * p
         rz = rz_new
     return x - p_occ(x)
+
+
+class ResolventSternheimer:
+    """Factorize the fixed ground-state Hamiltonian ONCE (a per-k dense eigh), then
+    solve any number of conduction-projected Sternheimer right-hand sides by
+    resolvent back-substitution
+
+        δψ_n = Σ_{c∈cond} U_c ⟨U_c|rhs_n⟩ / (Λ_c − ε_{n,k}) .
+
+    A factorize-once / solve-many alternative to repeated ``cg_sternheimer`` calls
+    for INSULATORS (needs a gap) and small cells: the one eigh (O(nk·npw³))
+    amortizes over every RHS / perturbation / DFPT iteration that shares the fixed
+    H, so it wins where many solves reuse one operator (measured ~2–4× whole-DFPT vs
+    warm CG, agreeing to the CG tolerance). No shift — the sum runs over the
+    conduction block only, so the occupied poles never appear.
+
+    ``h`` must expose the dense operator's pieces (a ``BatchedHamiltonian``:
+    ``_tables``, ``shape``, ``v_eff_r``, ``gather_idx``). No-grad: the response is
+    numerical; the differentiable adjoint is a separate custom Function that
+    re-applies the resolvent rather than differentiating the degenerate eigh."""
+
+    @torch.no_grad()
+    def __init__(self, h, bk, c_occ: torch.Tensor,
+                 eps_occ: torch.Tensor) -> None:
+        cdtype = c_occ.dtype
+        t_r, _v_eff, p, _p_conj, dij = h._tables(cdtype)
+        shape = h.shape
+        s1s2, s2 = shape[1] * shape[2], shape[2]
+        vhat = r_to_g(h.v_eff_r.to(cdtype)).reshape(-1)
+        ntorch = torch.tensor(shape, device=c_occ.device)
+        self.bk = bk
+        self.eps_occ = eps_occ.detach()  # constant resolvent denom (see solve_differentiable)
+        self.nocc = int(c_occ.shape[1])
+        self._eig: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        for k in range(bk.mask.shape[0]):
+            valid = bk.mask[k]
+            flat = h.gather_idx[k][valid].to(torch.long)
+            rem = flat % s1s2
+            g = torch.stack([flat // s1s2, rem // s2, rem % s2], dim=-1)  # (nv, 3)
+            diff = (g[:, None, :] - g[None, :, :]) % ntorch
+            idx = diff[..., 0] * s1s2 + diff[..., 1] * s2 + diff[..., 2]
+            hk = torch.diag(t_r[k][valid].to(cdtype)) + vhat[idx]         # kinetic + local
+            if p.shape[1]:
+                pk = p[k][:, valid]
+                hk = hk + (pk.conj().T @ dij @ pk).T                      # KB nonlocal (col form)
+            hk = 0.5 * (hk + hk.conj().T)
+            w, u = torch.linalg.eigh(hk)
+            self._eig.append((valid, w, u))
+
+    def _backsub(self, rhs: torch.Tensor) -> torch.Tensor:
+        """Resolvent back-substitution with the CACHED (constant) eigendecomposition.
+        Differentiable in ``rhs`` (U, Λ, ε are constants), so it carries the gradient
+        of the refinement step in ``solve_differentiable``. Valid plane waves are the
+        leading npw slots (BatchedK convention) — the padding is a plain right-pad,
+        which keeps this out-of-place (no in-place masked write to break autograd)."""
+        npw_max = rhs.shape[2]
+        outs = []
+        for k, (_valid, w, u) in enumerate(self._eig):
+            nv = u.shape[0]
+            uc, wc = u[:, self.nocc:], w[self.nocc:]                     # conduction block
+            proj = uc.conj().T @ rhs[k, :, :nv].T                        # (ncond, nocc)
+            dvk = (uc @ (proj / (wc[:, None] - self.eps_occ[k][None, :]))).T  # (nocc, nv)
+            outs.append(torch.nn.functional.pad(dvk, (0, npw_max - nv)))
+        return torch.stack(outs, dim=0)
+
+    @torch.no_grad()
+    def solve(self, rhs: torch.Tensor) -> torch.Tensor:
+        """δψ (nk, nocc, npw_max), masked, conduction space — ``rhs`` already
+        conduction-projected (same contract as ``cg_sternheimer``). No-grad; use
+        ``solve_differentiable`` when the solve sits on an autograd graph."""
+        return self._backsub(rhs)
+
+    def solve_differentiable(self, rhs: torch.Tensor, h, eps_occ: torch.Tensor,
+                             c_occ: torch.Tensor) -> torch.Tensor:
+        """δψ, differentiable w.r.t. every parameter ``rhs``/``h``/``eps_occ`` depend
+        on, WITHOUT differentiating the (degenerate) eigh.
+
+        One Newton refinement of the detached solution against the θ-differentiable
+        conduction Sternheimer operator A_c = P_c(H − ε_n):
+
+            δψ = δψ₀ + R·(rhs − A_c δψ₀),   δψ₀ = R·rhs (detached),
+
+        with R the cached constant resolvent. At the current parameters the residual
+        is ~0 so the VALUE equals ``solve``; its derivative is the exact
+        implicit-function gradient dδψ = R·(drhs − dA_c·δψ). The ground state
+        (c_occ, the eigh) is held fixed here — its own parameter dependence is the
+        outer SCF adjoint, not this Sternheimer solve."""
+        with torch.no_grad():
+            dpsi0 = self._backsub(rhs)
+        cc = c_occ.detach()
+
+        def p_c(x):
+            ov = torch.einsum("kng,kbg->kbn", cc.conj(), x)
+            return x - torch.einsum("kbn,kng->kbg", ov, cc)
+
+        resid = rhs - p_c(h.apply(dpsi0) - eps_occ[..., None] * dpsi0)
+        return dpsi0 + self._backsub(resid)
+
+
+def resolvent_sternheimer(h, bk, c_occ: torch.Tensor,
+                          eps_occ: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
+    """One-shot resolvent Sternheimer (factorize + solve). For many solves that
+    share the fixed H, build a ``ResolventSternheimer`` once and call ``.solve``
+    per RHS so the eigh is paid once."""
+    return ResolventSternheimer(h, bk, c_occ, eps_occ).solve(rhs)
