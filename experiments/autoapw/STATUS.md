@@ -72,8 +72,11 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
       + LDA (Slater-X + PW92-C). Verified vs NIST LDA: Be 1s 0.002 eV, He 1s 0.13 eV, valence
       ≤0.4 eV; deep cores ~1 eV (O(dx²) stencil, mesh-limited). ~0.1 s per atom. Delivers "real
       potential" + atomic self-consistency. (Perf refactor per the dev-speed discussion.)
-- [ ] PROD-D — port the LAPW mixed-basis assembly (`mixed_basis.py`) to eV/Å + log mesh + a real
-      atomic potential; recover a real element's bands.
+- [x] PROD-D — LAPW assembly in production units (eV/Å + log mesh) on a REAL self-consistent
+      atomic potential (`prod_lapw.py`). Empty-lattice port correct (free-electron bands to
+      2.4e-3 eV); and fed Ne's PROD-C self-consistent all-electron potential, the Γ LAPW valence
+      bands reproduce the atom's own KS eigenvalues: 2s −35.51 vs −35.67 (0.17 eV), 2p −13.14 vs
+      −13.20 (0.06 eV). Real bands on a real potential. CPU+asus.
 - [ ] PROD-E — multi-atom cells (per-atom structure factors e^{iG·τ_a}, per-sphere blocks).
 - [ ] PROD-F — crystal self-consistency (density from Bloch states across interstitial+spheres,
       Hartree/XC in both regions, mixing). The largest remaining piece.
