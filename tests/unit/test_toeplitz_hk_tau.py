@@ -6,6 +6,7 @@ the FFT path, so they must reproduce it to machine precision.
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 import gradwave.core.batch as batch
@@ -18,6 +19,16 @@ from gradwave.scf.loop import scf, setup_system
 from tests.helpers import RY
 
 FIX = Path(__file__).parents[1] / "fixtures" / "qe" / "pseudos"
+
+
+@pytest.fixture(autouse=True)
+def _enable_toeplitz():
+    """The Toeplitz local path is opt-in (default off — it regresses routine SCFs);
+    these tests exercise it, so enable it and restore the default afterwards."""
+    old = batch._TOEPLITZ_LOCAL_ENABLED
+    batch._TOEPLITZ_LOCAL_ENABLED = True
+    yield
+    batch._TOEPLITZ_LOCAL_ENABLED = old
 
 
 def _si_res(kmesh=(2, 2, 2)):
