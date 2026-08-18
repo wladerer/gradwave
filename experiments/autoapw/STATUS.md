@@ -57,8 +57,25 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
       general k, flowing through numerov → radial integrals → matching → generalized eigensolve.
       Extends the gate-D atomic oracle to the solid-state mixed-basis solver. (General k lifts the
       cubic degeneracies that make eigh's backward diverge.)
-- [ ] Production follow-ons: a real UPF/all-electron radial potential (log mesh, eV/Å units),
-      multi-atom cells, self-consistency, and promoting the validated pieces into src/gradwave.
+## Production track (NOT to be merged until genuinely production-worthy)
+
+- [x] PROD-A — production radial solver: gradwave eV/Å units + UPF constant-dx log meshes via the
+      x=ln r Numerov transform (`radial_log.py`). Verified: hydrogen spectrum exact to <0.01 meV;
+      the solver on oxygen's real native log mesh reproduces the analytic Coulomb spectrum to meV
+      for contained states.
+- [ ] PROD-B — robust radial eigensolver (inward-outward matching at the classical turning point).
+      NEEDED: outward-only shooting confines diffuse states and contaminates deep-core states
+      (surfaced by the oxygen check). Blocker for the atomic SCF.
+- [ ] PROD-C — atomic KS self-consistent solve → the real screened all-electron potential. NEEDED
+      because the PAW dataset's stored `ae_vloc` is the IONIC -z_valence/r (verified: matches
+      -6·e²/r to 3.5e-6), NOT the neutral-atom AE potential. Delivers "real potential" + atomic-
+      level "self-consistency". Verify vs known atomic KS eigenvalues.
+- [ ] PROD-D — port the LAPW mixed-basis assembly (`mixed_basis.py`) to eV/Å + log mesh + a real
+      atomic potential; recover a real element's bands.
+- [ ] PROD-E — multi-atom cells (per-atom structure factors e^{iG·τ_a}, per-sphere blocks).
+- [ ] PROD-F — crystal self-consistency (density from Bloch states across interstitial+spheres,
+      Hartree/XC in both regions, mixing). The largest remaining piece.
+- [ ] PROD-G — promote validated modules into src/gradwave (types, tests, import contracts). LAST.
 - [ ] Then #1 DualBasis oxygen gate; then benchmark; then SlepianCore (slabs/molecular crystals).
 
 Prototypes/tests run on asus per user request (`ssh asus`), heavy runs via ./scripts/gwq.
