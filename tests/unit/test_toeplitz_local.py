@@ -24,6 +24,18 @@ from tests.helpers import RY
 FIX = Path(__file__).parents[1] / "fixtures" / "qe"
 
 
+@pytest.fixture(autouse=True)
+def _enable_toeplitz():
+    """The Toeplitz local path is opt-in (default off — it regresses routine
+    symmetry-on insulator SCFs); these tests exercise it, so enable it here and
+    restore the default afterwards. Tests that toggle the flag themselves still
+    save/restore the current (enabled) value."""
+    old = batch._TOEPLITZ_LOCAL_ENABLED
+    batch._TOEPLITZ_LOCAL_ENABLED = True
+    yield
+    batch._TOEPLITZ_LOCAL_ENABLED = old
+
+
 def _si_system(kmesh=(2, 2, 2), ecut=12):
     si = parse_upf(str(FIX / "pseudos" / "Si_ONCV_PBE-1.2.upf"))
     a = 5.43

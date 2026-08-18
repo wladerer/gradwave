@@ -37,10 +37,17 @@ _GPU_DENSE_BUDGET_BYTES = 4e8
 # One dense GEMM replaces the scatter → ifftn → ·v_eff → fftn → gather chain,
 # deleting both FFTs and the irregular scatter/gather that dominate the small-cell
 # apply. Bit-identical to the FFT path (it's an algebraic identity, not an
-# approximation); measured ~1.5× whole-SCF on small metals. M is npw²·16 B, so the
-# path is memory-gated: it activates only when the cached per-k matrix fits the
-# budget below (nk·npw²·elem ≤ budget), which restricts it to the small cells where
-# npw² beats the box FFT's N·logN. Disable globally by setting the flag False.
+# approximation). M is npw²·16 B, so the path is memory-gated: the cached per-k
+# matrix must fit the budget below (nk·npw²·elem ≤ budget), which restricts it to
+# small npw where npw² beats the box FFT's N·logN.
+#
+# OPT-IN (default OFF). The win is narrow: it needs many k (no symmetry), low ecut
+# (small npw), and a metal — e.g. ~1.5× on a 512-k Al SCF, or ~2× inside a batched
+# k+q Sternheimer solve. In the ROUTINE regime — symmetry on (few k), typical ecut
+# (larger npw), insulators (few Davidson iterations) — the per-iteration M-build +
+# GEMM is NOT repaid (the FFT apply is already efficient there) and it REGRESSES the
+# SCF ~20-25% (measured: Si 0.80×, GaAs 0.79×; Al neutral). So it stays off by
+# default and callers opt in for the regime where it wins (set the flag True).
 #
 # The budget caps the cached matrix at nk·npw²·16 B (fp64 worst case); the
 # difference-index table adds ~half that again, both held for the Hamiltonian's
@@ -57,7 +64,7 @@ _GPU_DENSE_BUDGET_BYTES = 4e8
 # pure-fp64 GPU SCF would REGRESS. A data-center GPU (real fp64 / saturation) may
 # invert this — flip _TOEPLITZ_ON_CUDA to test there — but it stays off by default
 # until validated so the path never silently slows a GPU run.
-_TOEPLITZ_LOCAL_ENABLED = True
+_TOEPLITZ_LOCAL_ENABLED = False  # opt-in: regresses routine symmetry-on insulator SCFs
 _TOEPLITZ_ON_CUDA = False  # opt-in: GPU whole-SCF win unproven; consumer fp64 regresses
 _TOEPLITZ_M_BUDGET_BYTES = 1 << 28  # 256 MiB cap on the cached local-potential matrix
 
