@@ -116,7 +116,12 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
       [ ] full-potential refinements (non-spherical l>0 sphere terms, varying interstitial-potential
           matrix elements) and multi-k BZ + Fermi level (metals). The muffin-tin SCF above is the
           classic self-consistent scheme; full-potential is the accuracy refinement.
-- [ ] PROD-G — promote validated modules into src/gradwave (types, tests, import contracts). LAST.
+- [x] PROD-G DONE — promoted into the `gradwave.flapw` subpackage (radial, functionals, coulomb,
+      mixing, atom, lapw, scf), re-exported from `gradwave.flapw`. 7 tests (radial spectrum, Be/Ne
+      atomic vs NIST, empty-lattice gate, a=6 Ne 2s-2p vs Elk single-shot, dilute-splitting SCF
+      [slow]); ruff + import contracts clean, ty warn-only. Demo: `examples/flapw_neon_crystal.py`
+      (atom→LAPW→crystal→autograd, writes flapw_neon_crystal.png). Tests key on the 2s-2p splitting,
+      not absolute eigenvalues (the muffin-tin interstitial zero wanders — documented in scf.py).
 - [ ] Then #1 DualBasis oxygen gate; then benchmark; then SlepianCore (slabs/molecular crystals).
 
 Prototypes/tests run on asus per user request (`ssh asus`), heavy runs via ./scripts/gwq.
