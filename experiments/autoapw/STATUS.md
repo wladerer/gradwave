@@ -28,10 +28,15 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
       ∂u(R_MT)/∂E and ∂u/∂R_MT are exact; Coulomb hydrogen-1s outward shape to 2.5e-4. CPU+CUDA.
       (Atomic units, uniform mesh. TODO for promotion: gradwave eV/Å units via HBAR2_2M, UPF log
       meshes via the x=ln r transform, u̇_l = ∂u/∂E_l for the LAPW linearization.)
-- [ ] GATE C — single-sphere APW value+derivative boundary match (S2): match interstitial PW
-      value+slope to u_l/u̇_l at R_MT, differentiable R_MT / E_l gradients vs finite difference.
-      NEXT.
-- [ ] Mixed-basis Hamiltonian assembly + single-atom all-electron energy (S3 full).
+- [x] GATE C — single-sphere (L)APW value+slope boundary match (S2)
+      (experiments/autoapw/boundary_match.py). **PASSED.** Matches interstitial PW Rayleigh
+      component j_l(qr) to a_l u_l + b_l u̇_l at R_MT; C¹ continuity residual ~1e-17 (by
+      construction); (a_l,b_l) differentiable in E_l and R_MT (autograd vs FD rel ≤1e-6). u̇_l
+      obtained free as autograd ∂u_l/∂E_l through the GATE-B solver. CPU+CUDA.
+- [ ] Mixed-basis Hamiltonian assembly + single-atom all-electron energy (S3 full): assemble
+      H over {interstitial PWs, augmented sphere channels}, solve the generalized eigenproblem,
+      integrate a real UPF/all-electron radial potential (log mesh + eV/Å units). The remaining
+      "second code"; gates A–C validate its differentiable primitives.
 - [ ] Then #1 DualBasis oxygen gate; then benchmark; then SlepianCore (slabs/molecular crystals).
 
 Prototypes/tests run on asus per user request (`ssh asus`), heavy runs via ./scripts/gwq.
@@ -42,5 +47,9 @@ Prototypes/tests run on asus per user request (`ssh asus`), heavy runs via ./scr
   tests green. Reusable primitive src/gradwave/core/sphere_ff.ball_ff. Results in results_gate_a.json.
 - 2026-08-17 GATE B PASSED. radial_solve.py Numerov solver matches analytic j_l to 1e-9..1e-12,
   gradcheck-exact ∂u(R_MT)/∂E and ∂u/∂R_MT, hydrogen-1s to 2.5e-4. asus-CPU + asus-CUDA. ruff clean.
-  Two of the three net-new AutoAPW subsystems now have a validated differentiable core (Θ(G)
-  surface term + radial interior); GATE C (the APW boundary match tying them together) is next.
+- 2026-08-17 GATE C PASSED. boundary_match.py LAPW value+slope match: C¹ residual ~1e-17,
+  (a_l,b_l) differentiable in E_l and R_MT (autograd vs FD rel ≤1e-6), u̇_l free from autograd.
+  asus-CPU + asus-CUDA, ruff clean. ALL THREE net-new differentiable primitives now validated:
+  Θ(G) interstitial surface term (A) + radial muffin-tin interior (B) + the boundary match tying
+  them (C). Remaining for a full code: assemble the mixed-basis Hamiltonian + real UPF radial
+  potential on a log mesh (S3). The differentiable-by-construction thesis is de-risked end to end.
