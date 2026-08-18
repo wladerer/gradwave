@@ -36,6 +36,23 @@ def test_two_spheres_dilute_recover_atom():
 
 
 @pytest.mark.slow
+def test_smearing_leaves_insulator_unchanged():
+    """Fermi smearing on a gapped insulator (Ne) reproduces the sharp-filling result: the extra
+    conduction bands sit above E_F with ~zero occupation, so the metal code path is a no-op here.
+    Validates the smearing machinery (extra bands + Fermi level + fractional occupations)."""
+    sharp, _ = crystal_scf_multi(6.0, [((0.5, 0.5, 0.5), "Ne")], {"Ne": 1.4},
+                                 ecut=160.0, iters=25)
+    smeared, info = crystal_scf_multi(6.0, [((0.5, 0.5, 0.5), "Ne")], {"Ne": 1.4},
+                                      ecut=160.0, iters=25, smearing=0.1)
+    ss = np.array(sharp["ev"])
+    ms = np.array(smeared["ev"])
+    assert info["e_fermi"] is not None
+    sharp_split = float(ss[1:4].mean() - ss[0])
+    smeared_split = float(ms[1:4].mean() - ms[0])
+    assert abs(smeared_split - sharp_split) < 0.1
+
+
+@pytest.mark.slow
 def test_orthorhombic_tetragonal_dilute():
     """An anisotropic (tetragonal) cell: two Ne far apart still recover the isolated atom — the
     per-axis Coulomb grid and reciprocal lattice reduce correctly (cubic a-vector reproduces the

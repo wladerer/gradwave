@@ -346,9 +346,28 @@ def _weinert_multi(rho_I, spheres, L, nfft):
     return v_sph_list, v_i0
 
 
+def _fermi_level(ev_all, w_all, nelec, kT):
+    """Bisect the Fermi energy: ``Σ_k w_k Σ_n 2·f_FD((E_F-ε)/kT) = nelec`` (weights sum to 1)."""
+    ev_all = np.asarray(ev_all)
+    w_all = np.asarray(w_all)
+
+    def count(ef):
+        f = 1.0 / (1.0 + np.exp(np.clip((ev_all - ef) / kT, -60, 60)))
+        return 2.0 * float((w_all[:, None] * f).sum())
+
+    lo, hi = float(ev_all.min()) - 5.0, float(ev_all.max()) + 5.0
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if count(mid) < nelec:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
 def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
-                      iters: int = 40, tol: float = 3e-3, kmesh=(1, 1, 1)):
-    """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell (insulator).
+                      iters: int = 40, tol: float = 3e-3, kmesh=(1, 1, 1), smearing: float = 0.0):
+    """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
     ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
     ``atoms`` = ``[(frac (3,), symbol), ...]``; ``radii`` = ``{symbol: R_MT}``. Each atom gets its
@@ -356,8 +375,11 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     ``(bands, info)`` with ``bands['ev']`` the Γ valence eigenvalues (eV, referenced to the
     interstitial zero — compare splittings, not absolute levels; see ``crystal_scf``).
 
-    Cubic/orthorhombic cell (Step 3; general triclinic lattices are still to do); insulators only,
-    valence bands filled two-per-state (Step 4 adds Fermi smearing for metals)."""
+    ``smearing`` (eV) > 0 enables Fermi-Dirac occupations for metals: extra conduction bands are
+    solved, the Fermi level is found by charge conservation over the k-mesh, and the density uses
+    fractional occupations (``info['e_fermi']`` is returned). ``smearing=0`` fills exactly
+    ``N_val/2`` bands two-per-state (insulators). Cubic/orthorhombic cell only (general triclinic
+    lattices are still to do)."""
     L = np.broadcast_to(np.asarray(a_bohr, dtype=float) * BOHR_ANG, (3,))
     nfft = 2 * int(math.ceil(math.sqrt(4 * ecut / HBAR2_2M) * L.max() / (2 * math.pi))) + 2
     nfft = min(max(nfft, 24), 72)
@@ -392,24 +414,40 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
             species[k] = {"R": R, "v": vmt, "El": El}
             El_by_key[k], vmt_by_key[k] = El, vmt
 
+        # pass 1 — solve every k, keep the results; pass 2 — occupy and accumulate the density.
+        npad = max(2, nbands // 2) if smearing > 0 else 0
+        nb_solve = nbands + npad
+        kdata, ev_all, ev_gamma = [], [], None
+        for kf, w in zip(kfracs, kw, strict=True):
+            res = _lapw_multi_k(kf, L, acart, species, lmax, ecut, r, dx, nb_solve)
+            kdata.append((kf, w, res))
+            ev_all.append(res[0])
+            if np.all(np.abs(kf) < 1e-9):
+                ev_gamma = res[0]
+        if ev_gamma is None:
+            ev_gamma = _lapw_multi_k((0, 0, 0), L, acart, species, lmax, ecut, r, dx, nb_solve)[0]
+        ev_all = np.array(ev_all)
+
+        e_fermi = None
+        if smearing > 0:
+            e_fermi = _fermi_level(ev_all, kw, 2 * nbands, smearing)
+            occ_by_k = [2.0 / (1.0 + np.exp(np.clip((ev - e_fermi) / smearing, -60, 60)))
+                        for ev in ev_all]
+        else:
+            occ_by_k = [np.array([2.0] * nbands + [0.0] * npad) for _ in ev_all]
+
         rho_I = np.zeros((nfft, nfft, nfft))
         rho_val = {k: np.zeros_like(rr_by_key[k]) for k in keys}
-        ev_gamma = None
-        for kf, w in zip(kfracs, kw, strict=True):
-            ev, c, mill, ks, abl_all, vol = _lapw_multi_k(kf, L, acart, species, lmax, ecut,
-                                                          r, dx, nbands)
-            occ = [2.0] * nbands
-            rho_I += w * _interstitial_density(c[:, :nbands], occ, mill, L, nfft)
+        for (_kf, w, res), occ in zip(kdata, occ_by_k, strict=True):
+            _, c, mill, ks, abl_all, vol = res
+            occl = list(occ)
+            rho_I += w * _interstitial_density(c[:, :nb_solve], occl, mill, L, nfft)
             for ai, k in enumerate(keys):
                 phase = np.exp(1j * (ks @ np.asarray(acart[ai][0])))
-                cp = c[:, :nbands] * phase[:, None]
-                _, rk = _sphere_valence_density(cp, occ, ks, abl_all[ai], El_by_key[k], lmax,
+                cp = c[:, :nb_solve] * phase[:, None]
+                _, rk = _sphere_valence_density(cp, occl, ks, abl_all[ai], El_by_key[k], lmax,
                                                 vol, r, dx, vmt_by_key[k], R_by_key[k])
                 rho_val[k] += w * rk
-            if np.all(np.abs(kf) < 1e-9):
-                ev_gamma = ev
-        if ev_gamma is None:
-            ev_gamma = _lapw_multi_k((0, 0, 0), L, acart, species, lmax, ecut, r, dx, nbands)[0]
 
         spheres, rho_sph_by_key = [], {}
         for ai, (k, s) in enumerate(zip(keys, syms, strict=True)):
@@ -437,9 +475,9 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
             v_by_key[k] = anderson_next(hist[k][0], hist[k][1], beta=0.3, m=5)
 
         span = float(ev_gamma[nbands - 1] - ev_gamma[0])
-        new = {"span": span, "ev": ev_gamma.tolist()}
+        new = {"span": span, "ev": ev_gamma[:nbands].tolist(), "e_fermi": e_fermi}
         if conv is not None and abs(new["span"] - conv["span"]) < tol:
             conv = new
             break
         conv = new
-    return conv, {"nbands": nbands, "symbols": syms}
+    return conv, {"nbands": nbands, "symbols": syms, "e_fermi": conv.get("e_fermi")}
