@@ -378,7 +378,7 @@ def davidson_batched(
     max_iter: int = 40,
     max_dim_factor: int = 4,
     sync_free: bool = False,
-    history_out: list | None = None,
+    history_out: list[tuple[int, torch.Tensor, torch.Tensor]] | None = None,
 ) -> BatchedDavidsonResult:
     """sync_free removes every per-round host readback: convergence stats
     travel through a non-blocking copy into pinned memory and are judged
