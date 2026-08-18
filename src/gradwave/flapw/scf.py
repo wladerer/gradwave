@@ -128,6 +128,19 @@ def _interstitial_density(c_occ, occ, mill, vol, nfft):
     return rho
 
 
+def _augment_amplitudes(cp, ks, abl, lmax, vol):
+    """The muffin-tin augmentation amplitudes for one (phased) band: dicts ``a[l]``, ``b[l]`` (each
+    ``(2l+1,)`` complex) — the u_l / udot_l coefficients ``A_lm = pfac Σ_G Y*_lm(k+G) c_G a_G``."""
+    a_out, b_out = {}, {}
+    for lang in range(lmax + 1):
+        ylm = np.array([_ylm_star(lang, ks[g]) for g in range(len(ks))])
+        a, bb = abl[lang][:, 0], abl[lang][:, 1]
+        pfac = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
+        a_out[lang] = pfac * (ylm * (cp * a)[:, None]).sum(axis=0)
+        b_out[lang] = pfac * (ylm * (cp * bb)[:, None]).sum(axis=0)
+    return a_out, b_out
+
+
 def _sphere_valence_density(c_occ, occ, ks, abl, El, lmax, vol, r, dx, v_sphere, R):
     rr = r.numpy()[r.numpy() <= R]
     us = {lang: _radial_u(lang, El[lang], r, dx, v_sphere, R) for lang in range(lmax + 1)}
@@ -364,7 +377,8 @@ def _fermi_level(ev_all, w_all, nelec, kT):
 
 
 def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
-                      iters: int = 40, tol: float = 3e-3, kmesh=(1, 1, 1), smearing: float = 0.0):
+                      iters: int = 40, tol: float = 3e-3, kmesh=(1, 1, 1), smearing: float = 0.0,
+                      efg: bool = False):
     """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
     ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
@@ -481,4 +495,31 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
             conv = new
             break
         conv = new
-    return conv, {"nbands": nbands, "symbols": syms, "e_fermi": conv.get("e_fermi")}
+
+    info = {"nbands": nbands, "symbols": syms, "e_fermi": conv.get("e_fermi")}
+    if efg:
+        info["efg"] = _sphere_efg_gamma(A, acart, keys, species, El_by_key, vmt_by_key, R_by_key,
+                                        rr_by_key, lmax, ecut, r, dx, nbands)
+    return conv, info
+
+
+def _sphere_efg_gamma(A, acart, keys, species, El_by_key, vmt_by_key, R_by_key, rr_by_key,
+                      lmax, ecut, r, dx, nbands):
+    """Per-atom l=2 density multipoles and the r⁻³ valence EFG magnitude ``Q2`` at Γ, from the
+    converged potential. Cubic sites give ``Q2 ≈ 0`` (no l=2 invariant)."""
+    from gradwave.flapw.efg import sphere_density_multipoles, valence_efg_moments
+    _, cg, _, ksg, ablg, volg = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx,
+                                              nbands)
+    lset = [(2, m) for m in range(-2, 3)]
+    out = {}
+    for ai, k in enumerate(keys):
+        us = {lang: _radial_u(lang, El_by_key[k][lang], r, dx, vmt_by_key[k], R_by_key[k])
+              for lang in range(lmax + 1)}
+        phase = np.exp(1j * (ksg @ np.asarray(acart[ai][0])))
+        amps = [(2.0, *_augment_amplitudes(cg[:, n] * phase, ksg, ablg[ai], lmax, volg))
+                for n in range(nbands)]
+        rho_lm = sphere_density_multipoles(amps, us, lmax, lset)
+        rr = rr_by_key[k]
+        q, q2 = valence_efg_moments(rho_lm, rr, rr * dx)
+        out[k] = {"Q2": q2, "q_moments": {m: complex(v) for m, v in q.items()}}
+    return out

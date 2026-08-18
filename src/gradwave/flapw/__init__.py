@@ -31,6 +31,7 @@ differentiable-band demonstrations in ``experiments/autoapw``).
 """
 
 from gradwave.flapw.atom import CONFIG, NIST_LDA_EV, atomic_scf
+from gradwave.flapw.efg import sphere_density_multipoles, valence_efg_moments
 from gradwave.flapw.lapw import build_matrices, build_matrices_multi, solve_geneig
 from gradwave.flapw.radial import (
     log_mesh,
@@ -53,4 +54,6 @@ __all__ = [
     "numerov_log_batch",
     "radial_eigs_tridiag",
     "solve_geneig",
+    "sphere_density_multipoles",
+    "valence_efg_moments",
 ]
