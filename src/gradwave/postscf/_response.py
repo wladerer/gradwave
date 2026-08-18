@@ -525,49 +525,68 @@ def cg_sternheimer(h: _AppliesH, bk: _HasKineticTable, c_occ: torch.Tensor,
     return x - p_occ(x)
 
 
-def resolvent_sternheimer(h, bk: _HasKineticTable, c_occ: torch.Tensor,
-                          eps_occ: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
-    """Direct sum-over-states Sternheimer — a drop-in alternative to
-    ``cg_sternheimer`` with the same masked (nk, nocc, npw_max) conduction-space
-    output (``rhs`` already conduction-projected).
-
-    For each k, assemble the dense ground-state Hamiltonian H_k, diagonalize it
-    ONCE (H_k = U diag(Λ) Uᴴ), and back-substitute every occupied band's
-    right-hand side through the conduction resolvent
+class ResolventSternheimer:
+    """Factorize the fixed ground-state Hamiltonian ONCE (a per-k dense eigh), then
+    solve any number of conduction-projected Sternheimer right-hand sides by
+    resolvent back-substitution
 
         δψ_n = Σ_{c∈cond} U_c ⟨U_c|rhs_n⟩ / (Λ_c − ε_{n,k}) .
 
-    INSULATORS and small cells only: the one eigh (O(nk·npw³)) amortizes over every
-    right-hand side / perturbation / DFPT iteration that shares the fixed H, so it
-    wins where many solves reuse one operator (measured ~2–4× whole-phonon-DFPT vs
-    warm CG, agreeing to the CG tolerance). No shift is needed — the sum runs over
-    the conduction block only, so the occupied poles never appear. ``h`` must expose
-    the dense operator's pieces (a ``BatchedHamiltonian``: ``_tables``, ``shape``,
-    ``v_eff_r``, ``gather_idx``). No-grad forward; the differentiable adjoint is a
-    separate custom Function (it re-applies the resolvent, never differentiates the
-    degenerate eigh)."""
-    cdtype = rhs.dtype
-    t_r, _v_eff, p, _p_conj, dij = h._tables(cdtype)
-    shape = h.shape
-    s1s2, s2 = shape[1] * shape[2], shape[2]
-    vhat = r_to_g(h.v_eff_r.to(cdtype)).reshape(-1)
-    ntorch = torch.tensor(shape, device=rhs.device)
-    nk, nocc, _ = rhs.shape
-    dpsi = torch.zeros_like(rhs)
-    for k in range(nk):
-        valid = bk.mask[k]
-        flat = h.gather_idx[k][valid].to(torch.long)
-        rem = flat % s1s2
-        g = torch.stack([flat // s1s2, rem // s2, rem % s2], dim=-1)  # (nv, 3)
-        diff = (g[:, None, :] - g[None, :, :]) % ntorch
-        idx = diff[..., 0] * s1s2 + diff[..., 1] * s2 + diff[..., 2]
-        hk = torch.diag(t_r[k][valid].to(cdtype)) + vhat[idx]         # kinetic + local
-        if p.shape[1]:
-            pk = p[k][:, valid]
-            hk = hk + (pk.conj().T @ dij @ pk).T                      # KB nonlocal (col form)
-        hk = 0.5 * (hk + hk.conj().T)
-        w, u = torch.linalg.eigh(hk)
-        uc, wc = u[:, nocc:], w[nocc:]                               # conduction block
-        proj = uc.conj().T @ rhs[k][:, valid].T                      # (ncond, nocc)
-        dpsi[k][:, valid] = (uc @ (proj / (wc[:, None] - eps_occ[k][None, :]))).T
-    return dpsi
+    A factorize-once / solve-many alternative to repeated ``cg_sternheimer`` calls
+    for INSULATORS (needs a gap) and small cells: the one eigh (O(nk·npw³))
+    amortizes over every RHS / perturbation / DFPT iteration that shares the fixed
+    H, so it wins where many solves reuse one operator (measured ~2–4× whole-DFPT vs
+    warm CG, agreeing to the CG tolerance). No shift — the sum runs over the
+    conduction block only, so the occupied poles never appear.
+
+    ``h`` must expose the dense operator's pieces (a ``BatchedHamiltonian``:
+    ``_tables``, ``shape``, ``v_eff_r``, ``gather_idx``). No-grad: the response is
+    numerical; the differentiable adjoint is a separate custom Function that
+    re-applies the resolvent rather than differentiating the degenerate eigh."""
+
+    @torch.no_grad()
+    def __init__(self, h, bk: _HasKineticTable, c_occ: torch.Tensor,
+                 eps_occ: torch.Tensor) -> None:
+        cdtype = c_occ.dtype
+        t_r, _v_eff, p, _p_conj, dij = h._tables(cdtype)
+        shape = h.shape
+        s1s2, s2 = shape[1] * shape[2], shape[2]
+        vhat = r_to_g(h.v_eff_r.to(cdtype)).reshape(-1)
+        ntorch = torch.tensor(shape, device=c_occ.device)
+        self.bk = bk
+        self.eps_occ = eps_occ
+        self.nocc = int(c_occ.shape[1])
+        self._eig: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        for k in range(bk.mask.shape[0]):
+            valid = bk.mask[k]
+            flat = h.gather_idx[k][valid].to(torch.long)
+            rem = flat % s1s2
+            g = torch.stack([flat // s1s2, rem // s2, rem % s2], dim=-1)  # (nv, 3)
+            diff = (g[:, None, :] - g[None, :, :]) % ntorch
+            idx = diff[..., 0] * s1s2 + diff[..., 1] * s2 + diff[..., 2]
+            hk = torch.diag(t_r[k][valid].to(cdtype)) + vhat[idx]         # kinetic + local
+            if p.shape[1]:
+                pk = p[k][:, valid]
+                hk = hk + (pk.conj().T @ dij @ pk).T                      # KB nonlocal (col form)
+            hk = 0.5 * (hk + hk.conj().T)
+            w, u = torch.linalg.eigh(hk)
+            self._eig.append((valid, w, u))
+
+    @torch.no_grad()
+    def solve(self, rhs: torch.Tensor) -> torch.Tensor:
+        """δψ (nk, nocc, npw_max), masked, in the conduction space — ``rhs`` must
+        already be conduction-projected (same contract as ``cg_sternheimer``)."""
+        dpsi = torch.zeros_like(rhs)
+        for k, (valid, w, u) in enumerate(self._eig):
+            uc, wc = u[:, self.nocc:], w[self.nocc:]                     # conduction block
+            proj = uc.conj().T @ rhs[k][:, valid].T                      # (ncond, nocc)
+            dpsi[k][:, valid] = (uc @ (proj / (wc[:, None] - self.eps_occ[k][None, :]))).T
+        return dpsi
+
+
+def resolvent_sternheimer(h, bk: _HasKineticTable, c_occ: torch.Tensor,
+                          eps_occ: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
+    """One-shot resolvent Sternheimer (factorize + solve). For many solves that
+    share the fixed H, build a ``ResolventSternheimer`` once and call ``.solve``
+    per RHS so the eigh is paid once."""
+    return ResolventSternheimer(h, bk, c_occ, eps_occ).solve(rhs)
