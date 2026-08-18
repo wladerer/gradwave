@@ -545,7 +545,7 @@ class ResolventSternheimer:
     re-applies the resolvent rather than differentiating the degenerate eigh."""
 
     @torch.no_grad()
-    def __init__(self, h, bk: _HasKineticTable, c_occ: torch.Tensor,
+    def __init__(self, h, bk, c_occ: torch.Tensor,
                  eps_occ: torch.Tensor) -> None:
         cdtype = c_occ.dtype
         t_r, _v_eff, p, _p_conj, dij = h._tables(cdtype)
@@ -584,7 +584,7 @@ class ResolventSternheimer:
         return dpsi
 
 
-def resolvent_sternheimer(h, bk: _HasKineticTable, c_occ: torch.Tensor,
+def resolvent_sternheimer(h, bk, c_occ: torch.Tensor,
                           eps_occ: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
     """One-shot resolvent Sternheimer (factorize + solve). For many solves that
     share the fixed H, build a ``ResolventSternheimer`` once and call ``.solve``
