@@ -66,10 +66,12 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
 - [x] PROD-B — robust radial eigensolver (inward-outward matching at the classical turning point)
       (`radial_eigen.py`). Verified: hydrogen exact; DEEP hydrogenic Z=8 1s at -870.76 eV to 8 meV
       (outward-only shooting gets this wrong), 2s/2p to ~1 meV, node counts correct. asus+thinkpad.
-- [ ] PROD-C — atomic KS self-consistent solve → the real screened all-electron potential. NEEDED
-      because the PAW dataset's stored `ae_vloc` is the IONIC -z_valence/r (verified: matches
-      -6·e²/r to 3.5e-6), NOT the neutral-atom AE potential. Delivers "real potential" + atomic-
-      level "self-consistency". Verify vs known atomic KS eigenvalues.
+- [x] PROD-C — atomic KS self-consistent solve → the real screened all-electron potential
+      (`atomic_scf.py`). Tridiagonal radial eigensolve (`radial_eigen.radial_eigs_tridiag`, ~7 ms,
+      ~7000× over shooting, robust deep+diffuse) + type-II Anderson mixing + radial-Poisson Hartree
+      + LDA (Slater-X + PW92-C). Verified vs NIST LDA: Be 1s 0.002 eV, He 1s 0.13 eV, valence
+      ≤0.4 eV; deep cores ~1 eV (O(dx²) stencil, mesh-limited). ~0.1 s per atom. Delivers "real
+      potential" + atomic self-consistency. (Perf refactor per the dev-speed discussion.)
 - [ ] PROD-D — port the LAPW mixed-basis assembly (`mixed_basis.py`) to eV/Å + log mesh + a real
       atomic potential; recover a real element's bands.
 - [ ] PROD-E — multi-atom cells (per-atom structure factors e^{iG·τ_a}, per-sphere blocks).
