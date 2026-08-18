@@ -89,14 +89,16 @@ def test_triclinic_rotation_invariance():
 
 @pytest.mark.slow
 def test_efg_cubic_null():
-    """EFG null test: a cubic site has no l=2 invariant (lowest cubic anisotropy is l=4), so both
-    the l=2 density magnitude Q2 and the EFG V_zz (from the l=2 sphere Poisson) vanish for
-    simple-cubic Ne."""
+    """EFG null test: a cubic site has no l=2 invariant (lowest cubic anisotropy is l=4), so the
+    l=2 density Q2 and both the valence and full EFG V_zz vanish for simple-cubic Ne. The valence
+    term (on-site sphere Poisson) is machine-zero; the full term (with the interstitial l=2 boundary
+    match) is limited by the FFT-grid discretization but still ~1e-7 eV/Å² — physically zero."""
     _, info = crystal_scf_multi(6.0, [((0.5, 0.5, 0.5), "Ne")], {"Ne": 1.4},
                                 ecut=160.0, iters=25, efg=True)
     site = info["efg"]["a0"]
     assert site["Q2"] < 1e-9
-    assert abs(site["V_zz"]) < 1e-8               # eV/Å²
+    assert abs(site["V_zz_valence"]) < 1e-8       # eV/Å²  (on-site, machine-zero)
+    assert abs(site["V_zz"]) < 1e-5               # eV/Å²  (full; grid-discretization floor)
 
 
 @pytest.mark.slow
