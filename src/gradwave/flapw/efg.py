@@ -90,7 +90,7 @@ def l2_sphere_poisson(rho2m, rr, drw):
 
 def _tensor_from_v(v):
     """Cartesian EFG tensor + ``(V_zz, η)`` from the five r² potential coefficients ``v_M`` (real V,
-    complex harmonics): V_zz=√(5/π)v0, V_xx/yy=-½√(5/π)v0±√(15/2π)Re v2, V_xy=-√(15/2π)Im v2, etc."""
+    complex harmonics): V_zz=√(5/π)v0; V_xx/yy=-½√(5/π)v0±√(15/2π)Re v2; V_xy=-√(15/2π)Im v2; …"""
     c0, c = math.sqrt(5.0 / math.pi), math.sqrt(15.0 / (2.0 * math.pi))
     v0, v1, v2 = v[0].real, v[1], v[2]
     vxx, vyy, vzz = -0.5 * c0 * v0 + c * v2.real, -0.5 * c0 * v0 - c * v2.real, c0 * v0
@@ -119,7 +119,7 @@ def efg_tensor(multipoles, rr, drw):
 def interstitial_l2_boundary(v_grid, center_cart, R, cell, nx: int = 16, nphi: int = 24):
     """The l=2 components ``v_bc_2M = ∮ V_int(center + R Ω) Y*_2M(Ω) dΩ`` of the interstitial FFT
     potential on the sphere surface, by trilinear interpolation of the periodic grid + projection.
-    ``v_grid`` is the interstitial potential on the fractional grid; ``center_cart`` the atom (Å)."""
+    ``v_grid`` is the interstitial potential on the fractional grid; ``center_cart`` the atom, Å."""
     from scipy.ndimage import map_coordinates
     from scipy.special import sph_harm_y
     a = cell_matrix(cell)
