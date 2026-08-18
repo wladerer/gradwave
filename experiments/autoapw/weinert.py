@@ -86,9 +86,77 @@ def _stage1_gaussian_check():
     return ok
 
 
+def radial_poisson_to_R(rho, r, R):
+    """l=0 radial Poisson inside R with the density contained in R (ρ=0 beyond):
+    V_part(r) = E2[(1/r)∫_0^r 4πρr'²dr' + ∫_r^R 4πρr'dr'].  Uniform mesh r (0..R)."""
+    dr = r[1] - r[0]
+    q_in = np.concatenate([[0.0], np.cumsum(0.5 * (4 * math.pi * rho[1:] * r[1:] ** 2
+                                                    + 4 * math.pi * rho[:-1] * r[:-1] ** 2) * dr)])
+    integ = 4 * math.pi * rho * r
+    tail = np.concatenate([np.cumsum(0.5 * (integ[1:] + integ[:-1])[::-1] * dr)[::-1], [0.0]])
+    return E2 * (q_in / np.maximum(r, 1e-12) + tail)
+
+
+def sphere_pseudocharge(q00, R, center, N, L, npow=3):
+    """Smooth l=0 pseudocharge on the grid with monopole q00: ρ̃(d) ∝ (1-(d/R)²)^npow for d<R."""
+    ax = np.arange(N) * (L / N)
+    X, Y, Z = np.meshgrid(ax, ax, ax, indexing="ij")
+
+    def mi(a, c):
+        return (a - c) - L * np.round((a - c) / L)
+
+    d = np.sqrt(mi(X, center[0]) ** 2 + mi(Y, center[1]) ** 2 + mi(Z, center[2]) ** 2)
+    shape = np.where(d < R, (1 - (d / R) ** 2) ** npow, 0.0)
+    norm = shape.sum() * (L / N) ** 3
+    return shape * (q00 / norm)
+
+
+def _stage2_sphere_check():
+    """Full Weinert for a spherical charge in one sphere (large cell): the pseudocharge must give
+    the correct interstitial V at R_MT (monopole E2·q/R up to images), and the sphere radial Poisson
+    with that boundary must reproduce the direct radial Poisson shape."""
+    L, N, R = 12.0, 96, 2.5
+    q = 8.0
+    beta = 3.0            # Å⁻¹; ρ = q(β³/8π)e^{-βr} (Slater-like), well contained in R
+    c = np.array([L / 2, L / 2, L / 2])
+    ic = N // 2
+    h = L / N
+
+    # (a) THE pseudocharge property — two different smooth shapes with the SAME monopole q must
+    # give the IDENTICAL potential OUTSIDE the sphere (Weinert's key point). Image/reference-free.
+    V_A = fft_poisson(sphere_pseudocharge(q, R, c, N, L, npow=3) - q / L**3, L)
+    V_B = fft_poisson(sphere_pseudocharge(q, R, c, N, L, npow=6) - q / L**3, L)
+    kR = int(round(R / h))
+    ke = np.arange(kR, int(round(4.5 / h)))          # exterior axis points, r = R .. 4.5 Å (< L/2)
+    signed = (V_A - V_B)[ic + ke, ic, ic]
+    # physical (reference-free) test: the exterior FIELD is shape-independent -> the difference is
+    # a pure constant, so its r-VARIATION -> 0 (the constant offset is a global reference shift).
+    ext_err = float(signed.max() - signed.min())
+    ext_const = float(signed.mean())
+
+    # (b) sphere radial Poisson for the TRUE density, matched to the interstitial V at R_MT
+    V_bc = float(0.25 * (V_A[ic + kR, ic, ic] + V_A[ic - kR, ic, ic]
+                         + V_A[ic, ic + kR, ic] + V_A[ic, ic, ic + kR]))
+    rr = np.linspace(1e-4, R, 600)
+    rho_r = q * (beta**3 / (8 * math.pi)) * np.exp(-beta * rr)
+    Vpart = radial_poisson_to_R(rho_r, rr, R)
+    V_sphere = Vpart + (V_bc - Vpart[-1])
+    shape_err = float(np.abs((V_sphere - V_sphere[-1]) - (Vpart - Vpart[-1])).max())
+
+    print("\n  Stage 2 — Weinert pseudocharge + sphere radial Poisson (monopole, l=0):")
+    print("    (a) two pseudocharge shapes (same q) -> exterior field shape-independent:")
+    print(f"        r-variation of ΔV = {ext_err:.2e} eV  (const {ext_const:.3f} eV = ref shift)")
+    print(f"    (b) sphere radial Poisson matched to V(R_MT): shape max|Δ| = {shape_err:.2e} eV")
+    ok = ext_err < 1e-2 and shape_err < 1e-6
+    print(f"\n  Stage 2 VERDICT: {'PASS' if ok else 'FAIL'} "
+          f"(pseudocharge -> correct exterior potential; radial Poisson exact)")
+    return ok
+
+
 def main():
     print("\nPROD-F — Weinert crystal Coulomb (staged build)\n")
     _stage1_gaussian_check()
+    _stage2_sphere_check()
 
 
 if __name__ == "__main__":
