@@ -30,6 +30,36 @@ from gradwave.grids import GSphere
 # band chunk as budget / (elem_bytes · n_grid · nk). CPU paths do not chunk.
 _GPU_DENSE_BUDGET_BYTES = 4e8
 
+# Small-cell fast path for the local potential term V(r)·ψ(r). On the wavefunction
+# G-sphere this term is EXACTLY the convolution out(G_i)=Σ_j V̂(G_i−G_j) c(G_j) =
+# M @ c, with M[i,j]=V̂(G_i−G_j) (a Toeplitz/difference matrix; V̂=FFT of v_eff).
+# One dense GEMM replaces the scatter → ifftn → ·v_eff → fftn → gather chain,
+# deleting both FFTs and the irregular scatter/gather that dominate the small-cell
+# apply. Bit-identical to the FFT path (it's an algebraic identity, not an
+# approximation); measured ~1.5× whole-SCF on small metals. M is npw²·16 B, so the
+# path is memory-gated: it activates only when the cached per-k matrix fits the
+# budget below (nk·npw²·elem ≤ budget), which restricts it to the small cells where
+# npw² beats the box FFT's N·logN. Disable globally by setting the flag False.
+#
+# The budget caps the cached matrix at nk·npw²·16 B (fp64 worst case); the
+# difference-index table adds ~half that again, both held for the Hamiltonian's
+# lifetime. The default (256 MiB) is deliberately conservative so the path never
+# surprises a memory-tight GPU: it covers small cells and modest k-meshes (e.g.
+# npw≈260 up to ~250 k-points). Raise it to extend coverage to finer meshes /
+# larger npw when memory allows; set the flag False to disable entirely.
+#
+# CUDA is opt-in (default off). The whole-SCF win is measured and verified on CPU
+# fp64 (dense GEMM beats the box FFT at small npw). On GPU the picture did NOT hold
+# end-to-end on the tested hardware (RTX 3050): the isolated fp32 M@c is tensor-
+# core-fast, but the non-apply fp64 FFTs (density build, Hartree, XC) dominate the
+# SCF and Amdahl-dilute the gain, while fp64 GEMM is crippled on consumer GPUs so a
+# pure-fp64 GPU SCF would REGRESS. A data-center GPU (real fp64 / saturation) may
+# invert this — flip _TOEPLITZ_ON_CUDA to test there — but it stays off by default
+# until validated so the path never silently slows a GPU run.
+_TOEPLITZ_LOCAL_ENABLED = True
+_TOEPLITZ_ON_CUDA = False  # opt-in: GPU whole-SCF win unproven; consumer fp64 regresses
+_TOEPLITZ_M_BUDGET_BYTES = 1 << 28  # 256 MiB cap on the cached local-potential matrix
+
 # Optional H-application instrumentation. BatchedHamiltonian.apply is the single
 # chokepoint every batched Davidson round (NC and USPP/PAW) funnels its H|ψ⟩
 # through, so tallying band·k applies here counts the eigensolver work a warm
@@ -179,6 +209,19 @@ class BatchedHamiltonian:
             bk.mask, flat_idx, torch.full_like(flat_idx, self.n)
         )
         self._box: torch.Tensor | None = None
+        # Toeplitz small-cell fast path (see _TOEPLITZ_LOCAL_ENABLED). Eligible
+        # only for the plain box (no USPP dual grid) and when the cached matrix
+        # fits the budget. The difference-index table depends on geometry alone
+        # (the Miller indices are fixed for the H's lifetime) so it is built once
+        # here; M itself is built lazily per working precision and reused across
+        # every apply (v_eff is fixed for this Hamiltonian).
+        self._toep_idx: torch.Tensor | None = None
+        self._toep_M_cache: dict[torch.dtype, torch.Tensor] = {}
+        on_device = bk.mask.device.type == "cpu" or _TOEPLITZ_ON_CUDA
+        if _TOEPLITZ_LOCAL_ENABLED and on_device and smooth is None:
+            nk, npw = bk.mask.shape
+            if nk * npw * npw * 16 <= _TOEPLITZ_M_BUDGET_BYTES:
+                self._toep_idx = self._build_toeplitz_index()
         # cdtype → cast (t, v_eff, p, p_conj, dij)
         self._tab_cache: dict[
             torch.dtype, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
@@ -213,6 +256,38 @@ class BatchedHamiltonian:
             self._tab_cache[cdtype] = cached
         return cached
 
+    def _build_toeplitz_index(self) -> torch.Tensor:
+        """(nk, npw, npw) box-flat index of G_i−G_j for the local-potential
+        Toeplitz matrix. Recovers each sphere point's Miller triple from its
+        box-flat index (gather_idx), takes the box-wrapped pairwise difference,
+        and re-flattens. Padded slots reuse their raw box index; their M entries
+        are harmless (the input is masked before the contraction and the output
+        rows are masked after)."""
+        shape = self.shape
+        s1s2, s2 = shape[1] * shape[2], shape[2]
+        flat = self.gather_idx.to(torch.long)  # (nk, npw) box → sphere
+        g0 = flat // s1s2
+        rem = flat % s1s2
+        g = torch.stack([g0, rem // s2, rem % s2], dim=-1)  # (nk, npw, 3) Miller
+        n = torch.tensor(shape, device=flat.device)
+        diff = (g[:, :, None, :] - g[:, None, :, :]) % n  # (nk, npw, npw, 3)
+        return diff[..., 0] * s1s2 + diff[..., 1] * s2 + diff[..., 2]
+
+    def _toeplitz_M(self, cdtype: torch.dtype) -> torch.Tensor:
+        """Local-potential matrix M[k,i,j]=V̂(G_i−G_j) at the working precision,
+        cached for the H's lifetime (v_eff is fixed). V̂ is the FFT of v_eff on
+        the dense box; indexing it by the geometry table gives M with no explicit
+        difference loop."""
+        M = self._toep_M_cache.get(cdtype)
+        if M is None:
+            from gradwave.core.fftbox import r_to_g
+
+            assert self._toep_idx is not None
+            vhat = r_to_g(self.v_eff_r.to(cdtype)).reshape(-1)
+            M = vhat[self._toep_idx]
+            self._toep_M_cache[cdtype] = M
+        return M
+
     def _get_box(self, nk: int, nb: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
         if (
             self._box is None
@@ -244,21 +319,30 @@ class BatchedHamiltonian:
         t_r, v_eff, p, p_conj, dij = self._tables(c.dtype)
         out = t_r[:, None, :] * c
 
-        chunk = self._band_chunk(nk, c.device, c.element_size())
-        for lo in range(0, nb, chunk):
-            hi = min(lo + chunk, nb)
-            cc = c[:, lo:hi]
-            nbc = hi - lo
-            box = self._get_box(nk, nbc, cc.dtype, cc.device)
-            idx = self.idx_scatter[:, None, :].expand(nk, nbc, m)
-            box.scatter_(2, idx, cc)
-            psi = torch.fft.ifftn(box[..., : self.n].reshape(nk, nbc, *self.shape),
-                                  dim=(-3, -2, -1))
-            # fftn(ifftn(·)) is norm-neutral: the 1/N and ×N of the fftbox
-            # conventions cancel, so no scaling factors here
-            vg = torch.fft.fftn(psi * v_eff, dim=(-3, -2, -1)).reshape(nk, nbc, self.n)
-            gath = self.gather_idx[:, None, :].expand(nk, nbc, m)
-            out[:, lo:hi] += vg.gather(2, gath)
+        if self._toep_idx is not None:
+            # Small-cell Toeplitz path: local V·ψ as one dense GEMM per k,
+            # out(G_i) += Σ_j M[i,j] c(G_j). Mask the input so padded columns
+            # (whose M entries are undefined) cannot pollute valid rows; the
+            # output is masked again at the return, as in the FFT path.
+            M = self._toeplitz_M(c.dtype)
+            cm = c * bk.mask[:, None, :]
+            out = out + torch.einsum("kij,kbj->kbi", M, cm)
+        else:
+            chunk = self._band_chunk(nk, c.device, c.element_size())
+            for lo in range(0, nb, chunk):
+                hi = min(lo + chunk, nb)
+                cc = c[:, lo:hi]
+                nbc = hi - lo
+                box = self._get_box(nk, nbc, cc.dtype, cc.device)
+                idx = self.idx_scatter[:, None, :].expand(nk, nbc, m)
+                box.scatter_(2, idx, cc)
+                psi = torch.fft.ifftn(box[..., : self.n].reshape(nk, nbc, *self.shape),
+                                      dim=(-3, -2, -1))
+                # fftn(ifftn(·)) is norm-neutral: the 1/N and ×N of the fftbox
+                # conventions cancel, so no scaling factors here
+                vg = torch.fft.fftn(psi * v_eff, dim=(-3, -2, -1)).reshape(nk, nbc, self.n)
+                gath = self.gather_idx[:, None, :].expand(nk, nbc, m)
+                out[:, lo:hi] += vg.gather(2, gath)
 
         if p.shape[1]:
             b = becp_b(p, c, p_conj)
