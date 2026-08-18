@@ -93,9 +93,15 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
           and re-solves. Converges to the PROD-C all-electron eigenvalues: Ne 2s −35.52 vs −35.67
           (0.15 eV), 2p −13.15 vs −13.20 (0.04 eV). Spherical Coulomb (isolated atom) — proves the
           density→potential→solve→mix cycle works before the crystal Coulomb.
-      [ ] the CRYSTAL self-consistent loop remains — interstitial+sphere Coulomb via Weinert's
-          method, multi-k BZ integration + Fermi level. Reference ready: Elk 11.0.2 built on asus
-          (~/github/elk-11.0.2), for all-electron LDA (xctype 3 = PW92) cross-validation.
+      [x] CROSS-VALIDATED the crystal BAND machinery against Elk 11.0.2 (independent all-electron
+          FLAPW), `elk_ne_compare.py`. Simple-cubic Ne (a=6 Bohr, LSDA PW92): my LAPW vs Elk —
+          2s-2p splitting @ Γ 22.54 vs 22.77 eV (Δ 0.23); 2s bandwidth Γ→X 0.032 vs 0.030 eV
+          (Δ 0.002); 2p 3-fold degenerate at Γ and splits 1+2 at X in both. The band DISPERSION
+          (crystal physics) matches. Elk built on asus (~/github/elk-11.0.2); the ILP64-vs-LP64
+          BLAS gotcha on NixOS is fixed by linking -lblas -llapack (not -lopenblas).
+      [ ] the CRYSTAL self-consistent LOOP itself remains — interstitial+sphere Coulomb via
+          Weinert's method + multi-k BZ + Fermi level (my crystal bands above use the atomic
+          potential). Elk is ready as the self-consistent reference when that loop is built.
 - [ ] PROD-G — promote validated modules into src/gradwave (types, tests, import contracts). LAST.
 - [ ] Then #1 DualBasis oxygen gate; then benchmark; then SlepianCore (slabs/molecular crystals).
 
