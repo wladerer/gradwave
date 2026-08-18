@@ -147,8 +147,14 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
              r²∫ρ/r']) → r² coefficients → `efg_tensor` (Cartesian 3×3, principal V_zz + asymmetry
              η). crystal_scf_multi(efg=True) returns V_zz/η/tensor per atom. Tensor unit-tested
              (traceless+symmetric; ρ_20→axial η≈0; ρ_22→η≈1; p_z→axial). Cubic Ne null V_zz<1e-8.
-      [ ] step 2b (lattice term): project the interstitial FFT potential onto Y_2M at R_MT → the
-             homogeneous C_2M; add to the valence r² coeff for the FULL V_zz (valence is dominant).
+      [x] step 2b (lattice term): `interstitial_l2_boundary` projects the interstitial potential
+             onto Y_2M at R_MT (exact band-limited Fourier eval V(r)=Σ v_G e^{iG·r}, not trilinear
+             — restores machine cancellation); `efg_tensor_full` adds C_2M=[v_bc_2M-V_2M^part(R)]/R².
+             `_weinert_multi` returns v_grid; crystal_scf_multi(efg=True) reports V_zz + V_zz_valence.
+             Cubic Ne: V_zz_valence=4e-12, V_zz(full)=4e-7 (FFT-grid floor). Boundary unit-tested.
+             CAVEAT: interstitial potential is from an l=0-matched Weinert pseudocharge, so the
+             inter-atomic l=2 field (other spheres' quadrupoles) needs multipole-matched
+             pseudocharges — folds into step 3 (full-potential).
       [ ] step 3: full-potential non-spherical V matrix elements in H (Gaunt l-coupling) for accuracy.
       [ ] plumbing: real open-shell elements (Ti/O/Cu…) beyond He/Be/Ne; a benchmark (TiO2/Zn/Ti) vs
           WIEN2k/Elk. Then differentiable EFG (∂C_Q/∂structure) — the AutoAPW-specific payoff.
