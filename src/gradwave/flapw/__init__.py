@@ -30,7 +30,7 @@ from gradwave.flapw.radial import (
     numerov_log_batch,
     radial_eigs_tridiag,
 )
-from gradwave.flapw.scf import crystal_scf
+from gradwave.flapw.scf import crystal_scf, crystal_scf_multi
 
 __all__ = [
     "CONFIG",
@@ -39,6 +39,7 @@ __all__ = [
     "build_matrices",
     "build_matrices_multi",
     "crystal_scf",
+    "crystal_scf_multi",
     "log_mesh",
     "numerov_log",
     "numerov_log_batch",

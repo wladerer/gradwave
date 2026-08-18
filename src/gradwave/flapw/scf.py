@@ -24,13 +24,14 @@ from gradwave.constants import BOHR_ANG, E2, HBAR2_2M
 from gradwave.flapw.atom import CONFIG, atomic_scf
 from gradwave.flapw.coulomb import fft_poisson, radial_poisson_to_R, sphere_pseudocharge
 from gradwave.flapw.functionals import vxc_lda
-from gradwave.flapw.lapw import ball_ff_np, match_ab, radial_channel
+from gradwave.flapw.lapw import ball_ff_np, match_ab, radial_channel, solve_geneig
 from gradwave.flapw.mixing import anderson_next
 from gradwave.flapw.radial import log_mesh, numerov_log, radial_eigs_tridiag
 from gradwave.kpoints import monkhorst_pack
 
 _CORE = {"He": [], "Be": [(0, 2)], "Ne": [(0, 2)]}
 _N_VAL_BANDS = {"He": 1, "Be": 1, "Ne": 4}
+_VAL_E = {"He": 2, "Be": 2, "Ne": 8}       # valence electron count (Z − frozen core)
 
 
 def _ylm_star(l, kg):
@@ -239,3 +240,200 @@ def crystal_scf(a_bohr: float, symbol: str = "Ne", R: float = 1.4, ecut: float =
         conv = new
         v = anderson_next(hist_v, hist_r, beta=0.3, m=5)
     return conv, at
+
+
+def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands):
+    """Multi-atom LAPW at wavevector k, exposing the density internals the SCF needs. Returns
+    ``(eigvals, eigvecs, miller, ks, [abl per atom], vol)``. H,S are complex Hermitian (structure
+    phases ``e^{i(k_G'-k_G)·τ_a}``). ``atoms_cart`` = ``[(τ_cart, species_key), ...]``."""
+    from scipy.special import eval_legendre
+    vol = L**3
+    b = 2 * math.pi / L
+    kf = np.asarray(kf, dtype=float)
+    nmax = int(math.ceil(math.sqrt(ecut / HBAR2_2M) / b)) + 2
+    mill, ks = [], []
+    for i in range(-nmax, nmax + 1):
+        for j in range(-nmax, nmax + 1):
+            for m in range(-nmax, nmax + 1):
+                kg = b * (np.array([i, j, m]) + kf)
+                if HBAR2_2M * (kg @ kg) <= ecut:
+                    mill.append([i, j, m])
+                    ks.append(kg)
+    mill, ks = np.array(mill), np.array(ks)
+    npw = len(ks)
+    ksafe = np.maximum(np.linalg.norm(ks, axis=1), 1e-12)
+    dkvec = ks[None, :, :] - ks[:, None, :]
+    dk_norm = np.linalg.norm(dkvec, axis=2)
+    kdot = ks @ ks.T
+    cost = np.clip(kdot / np.outer(ksafe, ksafe), -1.0, 1.0)
+    chan = {key: {lang: radial_channel(lang, sp["El"][lang], r, dx, sp["v"], sp["R"])
+                  for lang in range(lmax + 1)} for key, sp in species.items()}
+    inter = np.eye(npw, dtype=complex)
+    Saug = np.zeros((npw, npw), dtype=complex)
+    Haug = np.zeros((npw, npw), dtype=complex)
+    abl_by_atom = []
+    for tau, key in atoms_cart:
+        R = species[key]["R"]
+        phase = np.exp(1j * (dkvec @ np.asarray(tau, dtype=float)))
+        inter -= (ball_ff_np(dk_norm, R) / vol) * phase
+        abl = {}
+        for lang in range(lmax + 1):
+            ch = chan[key][lang]
+            ab = np.array([match_ab(ch, ksafe[g], R) for g in range(npw)])
+            abl[lang] = ab
+            a, bb = ab[:, 0], ab[:, 1]
+            aa, bbo = np.outer(a, a), np.outer(bb, bb)
+            ab_s = np.outer(a, bb) + np.outer(bb, a)
+            Ms = aa * ch["uu"] + ab_s * ch["uud"] + bbo * ch["udud"]
+            Tk = aa * ch["Tuu"] + ab_s * ch["Tuud"] + bbo * ch["Tudud"]
+            Vk = aa * ch["Vuu"] + ab_s * ch["Vuud"] + bbo * ch["Vudud"]
+            pref = (4 * math.pi / vol) * (2 * lang + 1) * eval_legendre(lang, cost)
+            Saug += phase * (pref * Ms)
+            Haug += phase * (pref * (Tk + Vk))
+        abl_by_atom.append(abl)
+    S = 0.5 * (inter + Saug + (inter + Saug).conj().T)
+    Hm = HBAR2_2M * kdot * inter + Haug
+    Hm = 0.5 * (Hm + Hm.conj().T)
+    ev, c = solve_geneig(Hm, S, nbands, with_vecs=True)
+    return ev, c, mill, ks, abl_by_atom, vol
+
+
+def _weinert_multi(rho_I, spheres, L, nfft):
+    """Weinert Hartree for several muffin tins. ``spheres`` = list of
+    ``{tau (cart), rr, dx, rho_sph, Z, R}``. Returns ``([v_sph radial per sphere], v_i0)``."""
+    h = L / nfft
+    ax = np.arange(nfft) * h
+    X, Y, Zc = np.meshgrid(ax, ax, ax, indexing="ij")
+
+    def mi(x, x0):
+        return (x - x0) - L * np.round((x - x0) / L)
+
+    rho_smooth = rho_I.astype(float).copy()
+    inside_any = np.zeros((nfft, nfft, nfft), dtype=bool)
+    for sp in spheres:
+        c = np.asarray(sp["tau"])
+        dgrid = np.sqrt(mi(X, c[0]) ** 2 + mi(Y, c[1]) ** 2 + mi(Zc, c[2]) ** 2)
+        inside = dgrid < sp["R"]
+        inside_any |= inside
+        drw = sp["rr"] * sp["dx"]
+        q_sph = float(np.sum(4 * math.pi * sp["rho_sph"] * sp["rr"] ** 2 * drw))
+        q_i_in = float(rho_I[inside].sum() * h**3)
+        net = q_sph - sp["Z"] - q_i_in           # net charge: electrons − nucleus − interstitial-in
+        rho_smooth += sphere_pseudocharge(net, sp["R"], c, nfft, L, npow=4)
+    v_grid = fft_poisson(rho_smooth, L)
+    v_i0 = float(v_grid[~inside_any].mean())
+    v_sph_list = []
+    for sp in spheres:
+        c = np.asarray(sp["tau"])
+        R = sp["R"]
+        rr = sp["rr"]
+        drw = rr * sp["dx"]
+        pts = []
+        for axis in range(3):
+            for sgn in (+1, -1):
+                p = c.copy()
+                p[axis] += sgn * R
+                idx = tuple(int(round(p[d] / h)) % nfft for d in range(3))
+                pts.append(v_grid[idx])
+        v_bc = float(np.mean(pts))
+        vpart = radial_poisson_to_R(sp["rho_sph"], rr, R, drw=drw) - sp["Z"] * E2 / rr
+        v_sph_list.append(vpart + (v_bc - vpart[-1]))
+    return v_sph_list, v_i0
+
+
+def crystal_scf_multi(a_bohr: float, atoms, radii, ecut: float = 200.0, lmax: int = 2,
+                      iters: int = 40, tol: float = 3e-3, kmesh=(1, 1, 1)):
+    """Multi-sphere self-consistent muffin-tin FLAPW for a cubic crystal (insulator).
+
+    ``atoms`` = ``[(frac (3,), symbol), ...]``; ``radii`` = ``{symbol: R_MT}``. Each atom gets its
+    own sphere potential (so inequivalent same-species atoms are handled). Returns
+    ``(bands, info)`` with ``bands['ev']`` the Γ valence eigenvalues (eV, referenced to the
+    interstitial zero — compare splittings, not absolute levels; see ``crystal_scf``).
+
+    Cubic cell only (Step 3 generalizes to arbitrary Bravais lattices); insulators only, valence
+    bands filled two-per-state (Step 4 adds Fermi smearing for metals)."""
+    L = a_bohr * BOHR_ANG
+    nfft = 2 * int(math.ceil(math.sqrt(4 * ecut / HBAR2_2M) * L / (2 * math.pi))) + 2
+    nfft = min(max(nfft, 24), 72)
+    r, dx = log_mesh(1e-5, 28.0, 2500)
+    r_np = r.numpy()
+    atoms_cart = [(np.asarray(f, dtype=float) * L, sym) for f, sym in atoms]
+    keys = [f"a{i}" for i in range(len(atoms))]
+    syms = [sym for _, sym in atoms]
+    nbands = sum(_VAL_E[s] for s in syms) // 2
+    kfracs, kw = monkhorst_pack(tuple(kmesh))
+    kw = kw / kw.sum()
+
+    at_by_sym, vat_by_sym = {}, {}
+    for s in set(syms):
+        at_by_sym[s], vat_by_sym[s] = atomic_scf(s, r, dx)
+    R_by_key = {k: radii[s] for k, s in zip(keys, syms, strict=True)}
+    rr_by_key = {k: r_np[r_np <= R_by_key[k]] for k in keys}
+    mask_by_key = {k: r_np <= R_by_key[k] for k in keys}
+    acart = [(tau, key) for (tau, _), key in zip(atoms_cart, keys, strict=True)]
+    v_by_key = {k: vat_by_sym[s].clone() for k, s in zip(keys, syms, strict=True)}
+
+    conv = None
+    hist = {k: ([], []) for k in keys}
+    for _ in range(iters):
+        species, El_by_key, vmt_by_key = {}, {}, {}
+        for k, s in zip(keys, syms, strict=True):
+            R = R_by_key[k]
+            v0 = float(v_by_key[k].numpy()[np.argmin(np.abs(r_np - R))])
+            vmt = torch.where(r <= R, v_by_key[k] - v0, torch.zeros_like(r))
+            El = {0: at_by_sym[s].get("2s", -5.0) - v0, 1: at_by_sym[s].get("2p", -5.0) - v0,
+                  2: -5.0 - v0}
+            species[k] = {"R": R, "v": vmt, "El": El}
+            El_by_key[k], vmt_by_key[k] = El, vmt
+
+        rho_I = np.zeros((nfft, nfft, nfft))
+        rho_val = {k: np.zeros_like(rr_by_key[k]) for k in keys}
+        ev_gamma = None
+        for kf, w in zip(kfracs, kw, strict=True):
+            ev, c, mill, ks, abl_all, vol = _lapw_multi_k(kf, L, acart, species, lmax, ecut,
+                                                          r, dx, nbands)
+            occ = [2.0] * nbands
+            rho_I += w * _interstitial_density(c[:, :nbands], occ, mill, L, nfft)
+            for ai, k in enumerate(keys):
+                phase = np.exp(1j * (ks @ np.asarray(acart[ai][0])))
+                cp = c[:, :nbands] * phase[:, None]
+                _, rk = _sphere_valence_density(cp, occ, ks, abl_all[ai], El_by_key[k], lmax,
+                                                vol, r, dx, vmt_by_key[k], R_by_key[k])
+                rho_val[k] += w * rk
+            if np.all(np.abs(kf) < 1e-9):
+                ev_gamma = ev
+        if ev_gamma is None:
+            ev_gamma = _lapw_multi_k((0, 0, 0), L, acart, species, lmax, ecut, r, dx, nbands)[0]
+
+        spheres, rho_sph_by_key = [], {}
+        for ai, (k, s) in enumerate(zip(keys, syms, strict=True)):
+            rr, mask = rr_by_key[k], mask_by_key[k]
+            rho_core = np.zeros_like(rr)
+            for lc, fc in _CORE[s]:
+                _, uc = radial_eigs_tridiag(lc, r, dx, v_by_key[k], 1)
+                rho_core += fc * uc[mask, 0] ** 2 / (4 * math.pi * rr**2)
+            rho_sph_by_key[k] = rho_val[k] + rho_core
+            spheres.append({"tau": acart[ai][0], "rr": rr, "dx": dx,
+                            "rho_sph": rho_sph_by_key[k], "Z": CONFIG[s][0], "R": R_by_key[k]})
+        v_sph_list, v_i0 = _weinert_multi(rho_I, spheres, L, nfft)
+
+        for ai, k in enumerate(keys):
+            mask = mask_by_key[k]
+            vnew_sph = v_sph_list[ai] + vxc_lda(torch.tensor(rho_sph_by_key[k])).numpy()
+            vnew_np = np.full(r.shape[0], v_i0)
+            vnew_np[mask] = vnew_sph
+            vnew = torch.tensor(vnew_np)
+            hist[k][0].append(v_by_key[k])
+            hist[k][1].append(vnew - v_by_key[k])
+            if len(hist[k][1]) > 6:
+                hist[k] = (hist[k][0][-6:], hist[k][1][-6:])
+        for k in keys:
+            v_by_key[k] = anderson_next(hist[k][0], hist[k][1], beta=0.3, m=5)
+
+        span = float(ev_gamma[nbands - 1] - ev_gamma[0])
+        new = {"span": span, "ev": ev_gamma.tolist()}
+        if conv is not None and abs(new["span"] - conv["span"]) < tol:
+            conv = new
+            break
+        conv = new
+    return conv, {"nbands": nbands, "symbols": syms}
