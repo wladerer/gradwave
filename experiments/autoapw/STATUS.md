@@ -63,9 +63,9 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
       x=ln r Numerov transform (`radial_log.py`). Verified: hydrogen spectrum exact to <0.01 meV;
       the solver on oxygen's real native log mesh reproduces the analytic Coulomb spectrum to meV
       for contained states.
-- [ ] PROD-B — robust radial eigensolver (inward-outward matching at the classical turning point).
-      NEEDED: outward-only shooting confines diffuse states and contaminates deep-core states
-      (surfaced by the oxygen check). Blocker for the atomic SCF.
+- [x] PROD-B — robust radial eigensolver (inward-outward matching at the classical turning point)
+      (`radial_eigen.py`). Verified: hydrogen exact; DEEP hydrogenic Z=8 1s at -870.76 eV to 8 meV
+      (outward-only shooting gets this wrong), 2s/2p to ~1 meV, node counts correct. asus+thinkpad.
 - [ ] PROD-C — atomic KS self-consistent solve → the real screened all-electron potential. NEEDED
       because the PAW dataset's stored `ae_vloc` is the IONIC -z_valence/r (verified: matches
       -6·e²/r to 3.5e-6), NOT the neutral-atom AE potential. Delivers "real potential" + atomic-
