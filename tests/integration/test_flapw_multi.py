@@ -33,3 +33,17 @@ def test_two_spheres_dilute_recover_atom():
     assert abs(ev[0] - ev[1]) < 0.05               # the two 2s levels are degenerate
     split = float(ev[2:8].mean() - ev[:2].mean())
     assert abs(split - 22.47) < 0.2
+
+
+@pytest.mark.slow
+def test_orthorhombic_tetragonal_dilute():
+    """An anisotropic (tetragonal) cell: two Ne far apart still recover the isolated atom — the
+    per-axis Coulomb grid and reciprocal lattice reduce correctly (cubic a-vector reproduces the
+    cubic result; this checks a genuinely non-cubic cell)."""
+    conv, info = crystal_scf_multi([12.0, 12.0, 10.0],
+                                   [((0.25, 0.25, 0.3), "Ne"), ((0.75, 0.75, 0.7), "Ne")],
+                                   {"Ne": 2.0}, ecut=120.0, iters=20)
+    ev = np.array(conv["ev"])
+    assert abs(ev[0] - ev[1]) < 0.05
+    split = float(ev[2:8].mean() - ev[:2].mean())
+    assert abs(split - 22.47) < 0.2
