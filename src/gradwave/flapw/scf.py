@@ -27,6 +27,7 @@ from gradwave.flapw.functionals import vxc_lda
 from gradwave.flapw.lapw import ball_ff_np, match_ab, radial_channel
 from gradwave.flapw.mixing import anderson_next
 from gradwave.flapw.radial import log_mesh, numerov_log, radial_eigs_tridiag
+from gradwave.kpoints import monkhorst_pack
 
 _CORE = {"He": [], "Be": [(0, 2)], "Ne": [(0, 2)]}
 _N_VAL_BANDS = {"He": 1, "Be": 1, "Ne": 4}
@@ -61,17 +62,20 @@ def _radial_u(l, El, r, dx, v, R):
     return u[inside], ud[inside]
 
 
-def _lapw_gamma(L, R, lmax, El, ecut, r, dx, v_sphere):
-    """Single-atom LAPW at Γ (real H,S). Returns eigvals, eigvecs, miller/ks, matching coeffs."""
+def _lapw_k(kfrac, L, R, lmax, El, ecut, r, dx, v_sphere):
+    """Single-atom LAPW at wavevector k (fractional ``kfrac``). One atom at the origin carries no
+    structure phase, so H,S are real symmetric at any k. Returns eigvals, eigvecs, miller/ks,
+    matching coeffs. ``ks`` are the Cartesian k+G; the ecut sphere is centred at -k."""
     from scipy.special import eval_legendre
     vol = L**3
     b = 2 * math.pi / L
-    nmax = int(math.ceil(math.sqrt(ecut / HBAR2_2M) / b)) + 1
+    kf = np.asarray(kfrac, dtype=float)
+    nmax = int(math.ceil(math.sqrt(ecut / HBAR2_2M) / b)) + 2
     mill, ks = [], []
     for i in range(-nmax, nmax + 1):
         for j in range(-nmax, nmax + 1):
             for m in range(-nmax, nmax + 1):
-                kg = b * (np.array([i, j, m]))
+                kg = b * (np.array([i, j, m]) + kf)
                 if HBAR2_2M * (kg @ kg) <= ecut:
                     mill.append([i, j, m])
                     ks.append(kg)
@@ -167,9 +171,12 @@ def _weinert_potential(rho_I, rr, dx, rho_sph, Z, R, L, nfft):
 
 
 def crystal_scf(a_bohr: float, symbol: str = "Ne", R: float = 1.4, ecut: float = 250.0,
-                lmax: int = 2, iters: int = 40, tol: float = 3e-3):
-    """Muffin-tin self-consistent FLAPW for a simple-cubic crystal at Γ. Returns
-    ``(valence_eigs_eV, atomic_eigs_eV)`` — the crystal valence eigenvalues and the atomic limit.
+                lmax: int = 2, iters: int = 40, tol: float = 3e-3, kmesh=(1, 1, 1)):
+    """Muffin-tin self-consistent FLAPW for a simple-cubic crystal. Returns
+    ``(valence_eigs_eV, atomic_eigs_eV)`` — the crystal Γ valence eigenvalues and the atomic limit.
+
+    ``kmesh`` is a Monkhorst-Pack division for BZ integration of the density (default Γ-only). The
+    reported eigenvalues are always at Γ; the density is summed over the mesh with symmetry weights.
 
     The returned eigenvalues are referenced to the flat interstitial potential level, which the
     muffin-tin scheme only weakly determines (worst in dilute cells): the *absolute* levels wander
@@ -181,7 +188,10 @@ def crystal_scf(a_bohr: float, symbol: str = "Ne", R: float = 1.4, ecut: float =
     r, dx = log_mesh(1e-5, 28.0, 2500)
     Z, _ = CONFIG[symbol]
     rr_mask = r.numpy() <= R
+    rr = r.numpy()[rr_mask]
     core, n_val = _CORE[symbol], _N_VAL_BANDS[symbol]
+    kfracs, kw = monkhorst_pack(tuple(kmesh))
+    kw = kw / kw.sum()
 
     at, v = atomic_scf(symbol, r, dx)
     v = v.clone()
@@ -190,11 +200,22 @@ def crystal_scf(a_bohr: float, symbol: str = "Ne", R: float = 1.4, ecut: float =
         v0 = float(v.numpy()[np.argmin(np.abs(r.numpy() - R))])
         v_mt = torch.where(r <= R, v - v0, torch.zeros_like(r))
         El = {0: at.get("2s", -5.0) - v0, 1: at.get("2p", -5.0) - v0, 2: -5.0 - v0}
-        ea, c, mill, ks, _, abl, vol = _lapw_gamma(L, R, lmax, El, ecut, r, dx, v_mt)
-        occb, c_occ = [2.0] * n_val, c[:, :n_val]
-
-        rho_I = _interstitial_density(c_occ, occb, mill, L, nfft)
-        rr, rho_val = _sphere_valence_density(c_occ, occb, ks, abl, El, lmax, vol, r, dx, v_mt, R)
+        occb = [2.0] * n_val
+        # BZ-integrate the valence density over the k-mesh; keep Γ eigenvalues for reporting.
+        rho_I = np.zeros((nfft, nfft, nfft))
+        rho_val = np.zeros_like(rr)
+        ea_gamma = None
+        for kf, w in zip(kfracs, kw, strict=True):
+            ea, c, mill, ks, _, abl, vol = _lapw_k(kf, L, R, lmax, El, ecut, r, dx, v_mt)
+            c_occ = c[:, :n_val]
+            rho_I += w * _interstitial_density(c_occ, occb, mill, L, nfft)
+            _, rk = _sphere_valence_density(c_occ, occb, ks, abl, El, lmax, vol, r, dx, v_mt, R)
+            rho_val += w * rk
+            if np.all(np.abs(kf) < 1e-9):
+                ea_gamma = ea
+        if ea_gamma is None:                       # mesh excludes Γ; one extra solve for reporting
+            ea_gamma = _lapw_k((0.0, 0.0, 0.0), L, R, lmax, El, ecut, r, dx, v_mt)[0]
+        ea = ea_gamma
         rho_core = np.zeros_like(rr)
         for lc, fc in core:
             _, uc = radial_eigs_tridiag(lc, r, dx, v, 1)

@@ -51,3 +51,13 @@ def test_crystal_scf_dilute_limit_recovers_atomic_splitting():
     crystal_split = bands["2p"] - bands["2s"]
     atomic_split = atomic["2p"] - atomic["2s"]
     assert abs(crystal_split - atomic_split) < 0.15
+
+
+@pytest.mark.slow
+def test_crystal_scf_multik_bz_integration():
+    """A 2x2x2 Monkhorst-Pack k-mesh (folded to 4 irreducible points by time reversal) BZ-integrates
+    the density; the dilute-limit 2s-2p splitting still recovers the atom — the k-loop is wired."""
+    bands, atomic = crystal_scf(10.0, "Ne", R=2.0, ecut=120.0, iters=20, kmesh=(2, 2, 2))
+    crystal_split = bands["2p"] - bands["2s"]
+    atomic_split = atomic["2p"] - atomic["2s"]
+    assert abs(crystal_split - atomic_split) < 0.2
