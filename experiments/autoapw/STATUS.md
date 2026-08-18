@@ -87,10 +87,15 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
           (`prod_lapw.crystal_charges_check`, population analysis on the overlap sub-blocks). Two
           Ne (16 val e): each sphere 7.912 e (equivalent atoms exactly equal), interstitial 0.177 e,
           total 16.000 — physically correct (Ne valence ~99% inside R_MT). CPU+asus.
-      [ ] the full self-consistent LOOP remains — the hard part: interstitial+sphere Coulomb via
-          Weinert's method, XC on the crystal density (interstitial FFT grid + sphere radial),
-          density mixing, and multi-k Brillouin-zone integration with a Fermi level. This is the
-          major remaining subsystem (weeks); the density decomposition above is its prerequisite.
+      [x] the SCF LOOP closes (isolated-atom geometry) — `prod_scf.py`. Builds the valence density
+          from the LAPW Bloch eigenstates (FLAPW A_lm/B_lm augmentation amplitudes via scipy
+          sph_harm_y), adds the frozen core, forms Hartree (radial Poisson) + LDA-XC, Anderson-mixes
+          and re-solves. Converges to the PROD-C all-electron eigenvalues: Ne 2s −35.52 vs −35.67
+          (0.15 eV), 2p −13.15 vs −13.20 (0.04 eV). Spherical Coulomb (isolated atom) — proves the
+          density→potential→solve→mix cycle works before the crystal Coulomb.
+      [ ] the CRYSTAL self-consistent loop remains — interstitial+sphere Coulomb via Weinert's
+          method, multi-k BZ integration + Fermi level. Reference ready: Elk 11.0.2 built on asus
+          (~/github/elk-11.0.2), for all-electron LDA (xctype 3 = PW92) cross-validation.
 - [ ] PROD-G — promote validated modules into src/gradwave (types, tests, import contracts). LAST.
 - [ ] Then #1 DualBasis oxygen gate; then benchmark; then SlepianCore (slabs/molecular crystals).
 
