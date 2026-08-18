@@ -33,10 +33,16 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
       component j_l(qr) to a_l u_l + b_l u̇_l at R_MT; C¹ continuity residual ~1e-17 (by
       construction); (a_l,b_l) differentiable in E_l and R_MT (autograd vs FD rel ≤1e-6). u̇_l
       obtained free as autograd ∂u_l/∂E_l through the GATE-B solver. CPU+CUDA.
+- [x] GATE D — a WORKING differentiable all-electron atom (experiments/autoapw/allelectron_atom.py).
+      **PASSED.** Bound-state eigenvalues via batched-Numerov shooting + root-finding reproduce the
+      analytic hydrogen spectrum (1s -0.499998, 2s/2p -0.125000); exact autograd dE_nl/dZ == -Z/n²;
+      and for a screened (Yukawa) potential dE/dλ autograd == finite-diff (1.382428) — the exact
+      gradient to fit a pseudopotential/functional parameter against. CPU+CUDA. This is the "full
+      potential" demo: a differentiable all-electron ORACLE with exact parameter gradients.
 - [ ] Mixed-basis Hamiltonian assembly + single-atom all-electron energy (S3 full): assemble
       H over {interstitial PWs, augmented sphere channels}, solve the generalized eigenproblem,
       integrate a real UPF/all-electron radial potential (log mesh + eV/Å units). The remaining
-      "second code"; gates A–C validate its differentiable primitives.
+      "second code"; gates A–D validate its differentiable primitives + the atomic-limit oracle.
 - [ ] Then #1 DualBasis oxygen gate; then benchmark; then SlepianCore (slabs/molecular crystals).
 
 Prototypes/tests run on asus per user request (`ssh asus`), heavy runs via ./scripts/gwq.
