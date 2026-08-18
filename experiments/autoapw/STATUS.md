@@ -99,9 +99,16 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
           (Δ 0.002); 2p 3-fold degenerate at Γ and splits 1+2 at X in both. The band DISPERSION
           (crystal physics) matches. Elk built on asus (~/github/elk-11.0.2); the ILP64-vs-LP64
           BLAS gotcha on NixOS is fixed by linking -lblas -llapack (not -lopenblas).
-      [ ] the CRYSTAL self-consistent LOOP itself remains — interstitial+sphere Coulomb via
-          Weinert's method + multi-k BZ + Fermi level (my crystal bands above use the atomic
-          potential). Elk is ready as the self-consistent reference when that loop is built.
+      [~] the CRYSTAL self-consistent LOOP — Weinert Coulomb + BZ. PARTIAL:
+          [x] Weinert Coulomb CORE verified (l=0), `weinert.py`: stage 1 interstitial FFT Poisson
+              vs analytic Gaussian (<0.5%); stage 2 the pseudocharge trick (two same-monopole
+              shapes -> identical exterior field, r-variation 1.6e-5 eV) + sphere radial Poisson
+              with Dirichlet matching at R_MT (exact, 1.4e-14).
+          [ ] remaining to close the loop: general-l multipole moments (non-spherical density),
+              the interstitial density ρ_I(G) built from the Bloch states, XC on the crystal grid
+              (interstitial + sphere), multi-k BZ integration + Fermi level, and wiring/converging
+              the loop. Elk 11 (asus) is the self-consistent reference. This is the genuine
+              multi-week FLAPW integration; the Coulomb algorithm (its crux) is now de-risked.
 - [ ] PROD-G — promote validated modules into src/gradwave (types, tests, import contracts). LAST.
 - [ ] Then #1 DualBasis oxygen gate; then benchmark; then SlepianCore (slabs/molecular crystals).
 
