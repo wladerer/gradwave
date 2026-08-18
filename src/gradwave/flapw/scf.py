@@ -22,7 +22,14 @@ import torch
 
 from gradwave.constants import BOHR_ANG, E2, HBAR2_2M
 from gradwave.flapw.atom import CONFIG, atomic_scf
-from gradwave.flapw.coulomb import fft_poisson, radial_poisson_to_R, sphere_pseudocharge
+from gradwave.flapw.coulomb import (
+    _min_image_dist,
+    cell_matrix,
+    fft_poisson,
+    radial_poisson_to_R,
+    reciprocal,
+    sphere_pseudocharge,
+)
 from gradwave.flapw.functionals import vxc_lda
 from gradwave.flapw.lapw import ball_ff_np, match_ab, radial_channel, solve_geneig
 from gradwave.flapw.mixing import anderson_next
@@ -110,8 +117,7 @@ def _lapw_k(kfrac, L, R, lmax, El, ecut, r, dx, v_sphere):
     return ea, Sinv2 @ Va, mill, ks, ksafe, abl, vol
 
 
-def _interstitial_density(c_occ, occ, mill, L, nfft):
-    vol = float(np.prod(np.broadcast_to(np.asarray(L, dtype=float), (3,))))
+def _interstitial_density(c_occ, occ, mill, vol, nfft):
     rho = np.zeros((nfft, nfft, nfft))
     idx = (mill[:, 0] % nfft, mill[:, 1] % nfft, mill[:, 2] % nfft)
     for n, f in enumerate(occ):
@@ -209,7 +215,7 @@ def crystal_scf(a_bohr: float, symbol: str = "Ne", R: float = 1.4, ecut: float =
         for kf, w in zip(kfracs, kw, strict=True):
             ea, c, mill, ks, _, abl, vol = _lapw_k(kf, L, R, lmax, El, ecut, r, dx, v_mt)
             c_occ = c[:, :n_val]
-            rho_I += w * _interstitial_density(c_occ, occb, mill, L, nfft)
+            rho_I += w * _interstitial_density(c_occ, occb, mill, L**3, nfft)
             _, rk = _sphere_valence_density(c_occ, occb, ks, abl, El, lmax, vol, r, dx, v_mt, R)
             rho_val += w * rk
             if np.all(np.abs(kf) < 1e-9):
@@ -247,16 +253,17 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands):
     ``(eigvals, eigvecs, miller, ks, [abl per atom], vol)``. H,S are complex Hermitian (structure
     phases ``e^{i(k_G'-k_G)·τ_a}``). ``atoms_cart`` = ``[(τ_cart, species_key), ...]``."""
     from scipy.special import eval_legendre
-    L3 = np.broadcast_to(np.asarray(L, dtype=float), (3,))
-    vol = float(np.prod(L3))
-    bvec = 2 * math.pi / L3
+    A = cell_matrix(L)
+    B = reciprocal(A)                                     # rows = reciprocal vectors
+    vol = float(abs(np.linalg.det(A)))
     kf = np.asarray(kf, dtype=float)
-    nmax = int(math.ceil(math.sqrt(ecut / HBAR2_2M) / bvec.min())) + 2
+    bmin = float(np.linalg.norm(B, axis=1).min())        # shortest reciprocal vector
+    nmax = int(math.ceil(math.sqrt(ecut / HBAR2_2M) / bmin)) + 2
     mill, ks = [], []
     for i in range(-nmax, nmax + 1):
         for j in range(-nmax, nmax + 1):
             for m in range(-nmax, nmax + 1):
-                kg = bvec * (np.array([i, j, m]) + kf)
+                kg = (np.array([i, j, m]) + kf) @ B
                 if HBAR2_2M * (kg @ kg) <= ecut:
                     mill.append([i, j, m])
                     ks.append(kg)
@@ -301,31 +308,23 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands):
 
 def _weinert_multi(rho_I, spheres, L, nfft):
     """Weinert Hartree for several muffin tins. ``spheres`` = list of
-    ``{tau (cart), rr, dx, rho_sph, Z, R}``. ``L`` cubic side or length-3 orthorhombic edges.
-    Returns ``([v_sph radial per sphere], v_i0)``."""
-    L3 = np.broadcast_to(np.asarray(L, dtype=float), (3,))
-    h3 = L3 / nfft
-    X, Y, Zc = np.meshgrid(np.arange(nfft) * h3[0], np.arange(nfft) * h3[1],
-                           np.arange(nfft) * h3[2], indexing="ij")
-
-    def mi(x, x0, Le):
-        return (x - x0) - Le * np.round((x - x0) / Le)
-
+    ``{tau (cart), rr, dx, rho_sph, Z, R}``. ``L`` is any cell (cubic side, orthorhombic edges, or a
+    3×3 triclinic matrix). Returns ``([v_sph radial per sphere], v_i0)``."""
+    A = cell_matrix(L)
+    ainv = np.linalg.inv(A)
+    dvol = float(abs(np.linalg.det(A))) / nfft**3
     rho_smooth = rho_I.astype(float).copy()
     inside_any = np.zeros((nfft, nfft, nfft), dtype=bool)
-    dvol = float(np.prod(h3))
     for sp in spheres:
-        c = np.asarray(sp["tau"])
-        dgrid = np.sqrt(mi(X, c[0], L3[0]) ** 2 + mi(Y, c[1], L3[1]) ** 2
-                        + mi(Zc, c[2], L3[2]) ** 2)
-        inside = dgrid < sp["R"]
+        cfrac = np.asarray(sp["tau"]) @ ainv
+        inside = _min_image_dist(cfrac, nfft, A) < sp["R"]
         inside_any |= inside
         drw = sp["rr"] * sp["dx"]
         q_sph = float(np.sum(4 * math.pi * sp["rho_sph"] * sp["rr"] ** 2 * drw))
         q_i_in = float(rho_I[inside].sum() * dvol)
         net = q_sph - sp["Z"] - q_i_in           # net charge: electrons − nucleus − interstitial-in
-        rho_smooth += sphere_pseudocharge(net, sp["R"], c, nfft, L3, npow=4)
-    v_grid = fft_poisson(rho_smooth, L3)
+        rho_smooth += sphere_pseudocharge(net, sp["R"], sp["tau"], nfft, A, npow=4)
+    v_grid = fft_poisson(rho_smooth, A)
     v_i0 = float(v_grid[~inside_any].mean())
     v_sph_list = []
     for sp in spheres:
@@ -336,9 +335,8 @@ def _weinert_multi(rho_I, spheres, L, nfft):
         pts = []
         for axis in range(3):
             for sgn in (+1, -1):
-                p = c.copy()
-                p[axis] += sgn * R
-                idx = tuple(int(round(p[d] / h3[d])) % nfft for d in range(3))
+                pf = (c + sgn * R * np.eye(3)[axis]) @ ainv       # a Cartesian surface point → frac
+                idx = tuple(int(round(pf[d] * nfft)) % nfft for d in range(3))
                 pts.append(v_grid[idx])
         v_bc = float(np.mean(pts))
         vpart = radial_poisson_to_R(sp["rho_sph"], rr, R, drw=drw) - sp["Z"] * E2 / rr
@@ -378,14 +376,17 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     ``smearing`` (eV) > 0 enables Fermi-Dirac occupations for metals: extra conduction bands are
     solved, the Fermi level is found by charge conservation over the k-mesh, and the density uses
     fractional occupations (``info['e_fermi']`` is returned). ``smearing=0`` fills exactly
-    ``N_val/2`` bands two-per-state (insulators). Cubic/orthorhombic cell only (general triclinic
-    lattices are still to do)."""
-    L = np.broadcast_to(np.asarray(a_bohr, dtype=float) * BOHR_ANG, (3,))
-    nfft = 2 * int(math.ceil(math.sqrt(4 * ecut / HBAR2_2M) * L.max() / (2 * math.pi))) + 2
+    ``N_val/2`` bands two-per-state (insulators). ``a_bohr`` may be a scalar (cubic edge), a
+    length-3 vector (orthorhombic edges), or a 3×3 matrix (triclinic cell, rows = lattice
+    vectors), all in Bohr."""
+    A = cell_matrix(np.asarray(a_bohr, dtype=float) * BOHR_ANG)     # 3×3 cell in Å
+    vol = float(abs(np.linalg.det(A)))
+    amax = float(np.linalg.norm(A, axis=1).max())
+    nfft = 2 * int(math.ceil(math.sqrt(4 * ecut / HBAR2_2M) * amax / (2 * math.pi))) + 2
     nfft = min(max(nfft, 24), 72)
     r, dx = log_mesh(1e-5, 28.0, 2500)
     r_np = r.numpy()
-    atoms_cart = [(np.asarray(f, dtype=float) * L, sym) for f, sym in atoms]
+    atoms_cart = [(np.asarray(f, dtype=float) @ A, sym) for f, sym in atoms]
     keys = [f"a{i}" for i in range(len(atoms))]
     syms = [sym for _, sym in atoms]
     nbands = sum(_VAL_E[s] for s in syms) // 2
@@ -419,13 +420,13 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
         nb_solve = nbands + npad
         kdata, ev_all, ev_gamma = [], [], None
         for kf, w in zip(kfracs, kw, strict=True):
-            res = _lapw_multi_k(kf, L, acart, species, lmax, ecut, r, dx, nb_solve)
+            res = _lapw_multi_k(kf, A, acart, species, lmax, ecut, r, dx, nb_solve)
             kdata.append((kf, w, res))
             ev_all.append(res[0])
             if np.all(np.abs(kf) < 1e-9):
                 ev_gamma = res[0]
         if ev_gamma is None:
-            ev_gamma = _lapw_multi_k((0, 0, 0), L, acart, species, lmax, ecut, r, dx, nb_solve)[0]
+            ev_gamma = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx, nb_solve)[0]
         ev_all = np.array(ev_all)
 
         e_fermi = None
@@ -441,7 +442,7 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
         for (_kf, w, res), occ in zip(kdata, occ_by_k, strict=True):
             _, c, mill, ks, abl_all, vol = res
             occl = list(occ)
-            rho_I += w * _interstitial_density(c[:, :nb_solve], occl, mill, L, nfft)
+            rho_I += w * _interstitial_density(c[:, :nb_solve], occl, mill, vol, nfft)
             for ai, k in enumerate(keys):
                 phase = np.exp(1j * (ks @ np.asarray(acart[ai][0])))
                 cp = c[:, :nb_solve] * phase[:, None]
@@ -459,7 +460,7 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
             rho_sph_by_key[k] = rho_val[k] + rho_core
             spheres.append({"tau": acart[ai][0], "rr": rr, "dx": dx,
                             "rho_sph": rho_sph_by_key[k], "Z": CONFIG[s][0], "R": R_by_key[k]})
-        v_sph_list, v_i0 = _weinert_multi(rho_I, spheres, L, nfft)
+        v_sph_list, v_i0 = _weinert_multi(rho_I, spheres, A, nfft)
 
         for ai, k in enumerate(keys):
             mask = mask_by_key[k]

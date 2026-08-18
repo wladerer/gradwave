@@ -16,6 +16,7 @@ neutralizing background — the density passed for a crystal should be net-neutr
 
 from __future__ import annotations
 
+import itertools
 import math
 
 import numpy as np
@@ -45,19 +46,55 @@ def hartree(rho: Tensor, r: Tensor, dx: float) -> Tensor:
     return E2 * (q_in / r + tail)
 
 
+def cell_matrix(L) -> np.ndarray:
+    """The 3×3 cell (Å, rows = lattice vectors) from a scalar (cubic side), a length-3 array
+    (orthorhombic edges), or a 3×3 matrix (triclinic). The one place cell shape is decoded."""
+    a = np.asarray(L, dtype=float)
+    if a.ndim == 0:
+        return np.eye(3) * float(a)
+    if a.shape == (3,):
+        return np.diag(a)
+    if a.shape == (3, 3):
+        return a
+    raise ValueError(f"cell must be scalar, (3,), or (3,3); got shape {a.shape}")
+
+
+def reciprocal(A: np.ndarray) -> np.ndarray:
+    """Reciprocal lattice ``B = 2π (A⁻¹)ᵀ`` (rows = reciprocal vectors); ``a_i·b_j = 2π δ_ij``."""
+    return 2 * math.pi * np.linalg.inv(A).T
+
+
+def _min_image_dist(cfrac, n, A):
+    """Cartesian minimum-image distance from fractional centre ``cfrac`` to every ``n³`` grid point.
+    Per-component wrap suffices for orthogonal axes; general cells search neighbour images."""
+    fi = np.arange(n) / n
+    FX, FY, FZ = np.meshgrid(fi, fi, fi, indexing="ij")
+    df = np.stack([FX - cfrac[0], FY - cfrac[1], FZ - cfrac[2]], axis=-1)
+    df -= np.round(df)                                    # wrap fractional to (-1/2, 1/2]
+    metric = A @ A.T
+    if np.allclose(metric - np.diag(np.diag(metric)), 0.0):
+        return np.sqrt(((df @ A) ** 2).sum(-1))          # orthogonal: the wrapped image is nearest
+    d2 = np.full((n, n, n), np.inf)                       # triclinic: search the 27 nearest images
+    for s in itertools.product((-1, 0, 1), repeat=3):
+        d2 = np.minimum(d2, (((df + np.asarray(s)) @ A) ** 2).sum(-1))
+    return np.sqrt(d2)
+
+
 def g2_grid(n: int, L):
-    """``|G|²`` (Å⁻²) and the G-vector components on an ``n³`` FFT grid. ``L`` is the cubic side, or
-    a length-3 array of orthorhombic edges (the index grid stays ``n³``; spacing is per-axis)."""
-    Lx, Ly, Lz = np.broadcast_to(np.asarray(L, dtype=float), (3,))
+    """``|G|²`` (Å⁻²) and the G-vector components on an ``n³`` FFT grid over the fractional cell.
+    ``L`` is a cubic side, length-3 orthorhombic edges, or a 3×3 triclinic cell; ``G = m·B``."""
+    B = reciprocal(cell_matrix(L))
     fi = np.fft.fftfreq(n, d=1.0 / n)
-    Gx, Gy, Gz = np.meshgrid(fi * (2 * math.pi / Lx), fi * (2 * math.pi / Ly),
-                             fi * (2 * math.pi / Lz), indexing="ij")
+    MX, MY, MZ = np.meshgrid(fi, fi, fi, indexing="ij")
+    Gx = MX * B[0, 0] + MY * B[1, 0] + MZ * B[2, 0]
+    Gy = MX * B[0, 1] + MY * B[1, 1] + MZ * B[2, 1]
+    Gz = MX * B[0, 2] + MY * B[1, 2] + MZ * B[2, 2]
     return Gx**2 + Gy**2 + Gz**2, (Gx, Gy, Gz)
 
 
 def fft_poisson(rho_r: np.ndarray, L) -> np.ndarray:
-    """Periodic Hartree potential (eV) of a smooth density ``rho_r`` (e/Å³). ``L`` cubic side or
-    length-3 orthorhombic edges."""
+    """Periodic Hartree potential (eV) of a smooth density ``rho_r`` (e/Å³) on the fractional grid.
+    ``L`` cubic side, length-3 orthorhombic edges, or a 3×3 triclinic cell."""
     n = rho_r.shape[0]
     g2, _ = g2_grid(n, L)
     rho_g = np.fft.fftn(rho_r)
@@ -68,17 +105,12 @@ def fft_poisson(rho_r: np.ndarray, L) -> np.ndarray:
 
 def sphere_pseudocharge(q00: float, R: float, center, n: int, L, npow: int = 4) -> np.ndarray:
     """Smooth l=0 pseudocharge on the grid with monopole ``q00``: ``ρ̃(d) ∝ (1-(d/R)²)^npow``.
-    ``L`` cubic side or length-3 orthorhombic edges (Cartesian distance, per-axis minimum image)."""
-    Lx, Ly, Lz = np.broadcast_to(np.asarray(L, dtype=float), (3,))
-    X, Y, Z = np.meshgrid(np.arange(n) * (Lx / n), np.arange(n) * (Ly / n),
-                          np.arange(n) * (Lz / n), indexing="ij")
-
-    def mi(a, c, Le):
-        return (a - c) - Le * np.round((a - c) / Le)
-
-    d = np.sqrt(mi(X, center[0], Lx) ** 2 + mi(Y, center[1], Ly) ** 2 + mi(Z, center[2], Lz) ** 2)
+    ``center`` is Cartesian (Å); ``L`` any cell (Cartesian distance, minimum image)."""
+    A = cell_matrix(L)
+    cfrac = np.asarray(center) @ np.linalg.inv(A)
+    d = _min_image_dist(cfrac, n, A)
     shape = np.where(d < R, (1 - (d / R) ** 2) ** npow, 0.0)
-    norm = shape.sum() * (Lx * Ly * Lz / n**3)
+    norm = shape.sum() * (abs(np.linalg.det(A)) / n**3)
     return shape * (q00 / norm)
 
 
