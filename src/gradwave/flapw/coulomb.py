@@ -45,15 +45,19 @@ def hartree(rho: Tensor, r: Tensor, dx: float) -> Tensor:
     return E2 * (q_in / r + tail)
 
 
-def g2_grid(n: int, L: float):
-    """``|G|²`` (Å⁻²) and the G-vector components on an ``n³`` FFT grid for a cubic cell side L."""
-    f = np.fft.fftfreq(n, d=1.0 / n) * (2 * math.pi / L)
-    Gx, Gy, Gz = np.meshgrid(f, f, f, indexing="ij")
+def g2_grid(n: int, L):
+    """``|G|²`` (Å⁻²) and the G-vector components on an ``n³`` FFT grid. ``L`` is the cubic side, or
+    a length-3 array of orthorhombic edges (the index grid stays ``n³``; spacing is per-axis)."""
+    Lx, Ly, Lz = np.broadcast_to(np.asarray(L, dtype=float), (3,))
+    fi = np.fft.fftfreq(n, d=1.0 / n)
+    Gx, Gy, Gz = np.meshgrid(fi * (2 * math.pi / Lx), fi * (2 * math.pi / Ly),
+                             fi * (2 * math.pi / Lz), indexing="ij")
     return Gx**2 + Gy**2 + Gz**2, (Gx, Gy, Gz)
 
 
-def fft_poisson(rho_r: np.ndarray, L: float) -> np.ndarray:
-    """Periodic Hartree potential (eV) of a smooth density ``rho_r`` (e/Å³) on a cubic grid."""
+def fft_poisson(rho_r: np.ndarray, L) -> np.ndarray:
+    """Periodic Hartree potential (eV) of a smooth density ``rho_r`` (e/Å³). ``L`` cubic side or
+    length-3 orthorhombic edges."""
     n = rho_r.shape[0]
     g2, _ = g2_grid(n, L)
     rho_g = np.fft.fftn(rho_r)
@@ -62,18 +66,19 @@ def fft_poisson(rho_r: np.ndarray, L: float) -> np.ndarray:
     return np.fft.ifftn(vg).real
 
 
-def sphere_pseudocharge(q00: float, R: float, center, n: int, L: float,
-                        npow: int = 4) -> np.ndarray:
-    """Smooth l=0 pseudocharge on the grid with monopole ``q00``: ``ρ̃(d) ∝ (1-(d/R)²)^npow``."""
-    ax = np.arange(n) * (L / n)
-    X, Y, Z = np.meshgrid(ax, ax, ax, indexing="ij")
+def sphere_pseudocharge(q00: float, R: float, center, n: int, L, npow: int = 4) -> np.ndarray:
+    """Smooth l=0 pseudocharge on the grid with monopole ``q00``: ``ρ̃(d) ∝ (1-(d/R)²)^npow``.
+    ``L`` cubic side or length-3 orthorhombic edges (Cartesian distance, per-axis minimum image)."""
+    Lx, Ly, Lz = np.broadcast_to(np.asarray(L, dtype=float), (3,))
+    X, Y, Z = np.meshgrid(np.arange(n) * (Lx / n), np.arange(n) * (Ly / n),
+                          np.arange(n) * (Lz / n), indexing="ij")
 
-    def mi(a, c):
-        return (a - c) - L * np.round((a - c) / L)
+    def mi(a, c, Le):
+        return (a - c) - Le * np.round((a - c) / Le)
 
-    d = np.sqrt(mi(X, center[0]) ** 2 + mi(Y, center[1]) ** 2 + mi(Z, center[2]) ** 2)
+    d = np.sqrt(mi(X, center[0], Lx) ** 2 + mi(Y, center[1], Ly) ** 2 + mi(Z, center[2], Lz) ** 2)
     shape = np.where(d < R, (1 - (d / R) ** 2) ** npow, 0.0)
-    norm = shape.sum() * (L / n) ** 3
+    norm = shape.sum() * (Lx * Ly * Lz / n**3)
     return shape * (q00 / norm)
 
 

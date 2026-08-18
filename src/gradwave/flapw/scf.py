@@ -111,7 +111,7 @@ def _lapw_k(kfrac, L, R, lmax, El, ecut, r, dx, v_sphere):
 
 
 def _interstitial_density(c_occ, occ, mill, L, nfft):
-    vol = L**3
+    vol = float(np.prod(np.broadcast_to(np.asarray(L, dtype=float), (3,))))
     rho = np.zeros((nfft, nfft, nfft))
     idx = (mill[:, 0] % nfft, mill[:, 1] % nfft, mill[:, 2] % nfft)
     for n, f in enumerate(occ):
@@ -247,15 +247,16 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands):
     ``(eigvals, eigvecs, miller, ks, [abl per atom], vol)``. H,S are complex Hermitian (structure
     phases ``e^{i(k_G'-k_G)·τ_a}``). ``atoms_cart`` = ``[(τ_cart, species_key), ...]``."""
     from scipy.special import eval_legendre
-    vol = L**3
-    b = 2 * math.pi / L
+    L3 = np.broadcast_to(np.asarray(L, dtype=float), (3,))
+    vol = float(np.prod(L3))
+    bvec = 2 * math.pi / L3
     kf = np.asarray(kf, dtype=float)
-    nmax = int(math.ceil(math.sqrt(ecut / HBAR2_2M) / b)) + 2
+    nmax = int(math.ceil(math.sqrt(ecut / HBAR2_2M) / bvec.min())) + 2
     mill, ks = [], []
     for i in range(-nmax, nmax + 1):
         for j in range(-nmax, nmax + 1):
             for m in range(-nmax, nmax + 1):
-                kg = b * (np.array([i, j, m]) + kf)
+                kg = bvec * (np.array([i, j, m]) + kf)
                 if HBAR2_2M * (kg @ kg) <= ecut:
                     mill.append([i, j, m])
                     ks.append(kg)
@@ -300,27 +301,31 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands):
 
 def _weinert_multi(rho_I, spheres, L, nfft):
     """Weinert Hartree for several muffin tins. ``spheres`` = list of
-    ``{tau (cart), rr, dx, rho_sph, Z, R}``. Returns ``([v_sph radial per sphere], v_i0)``."""
-    h = L / nfft
-    ax = np.arange(nfft) * h
-    X, Y, Zc = np.meshgrid(ax, ax, ax, indexing="ij")
+    ``{tau (cart), rr, dx, rho_sph, Z, R}``. ``L`` cubic side or length-3 orthorhombic edges.
+    Returns ``([v_sph radial per sphere], v_i0)``."""
+    L3 = np.broadcast_to(np.asarray(L, dtype=float), (3,))
+    h3 = L3 / nfft
+    X, Y, Zc = np.meshgrid(np.arange(nfft) * h3[0], np.arange(nfft) * h3[1],
+                           np.arange(nfft) * h3[2], indexing="ij")
 
-    def mi(x, x0):
-        return (x - x0) - L * np.round((x - x0) / L)
+    def mi(x, x0, Le):
+        return (x - x0) - Le * np.round((x - x0) / Le)
 
     rho_smooth = rho_I.astype(float).copy()
     inside_any = np.zeros((nfft, nfft, nfft), dtype=bool)
+    dvol = float(np.prod(h3))
     for sp in spheres:
         c = np.asarray(sp["tau"])
-        dgrid = np.sqrt(mi(X, c[0]) ** 2 + mi(Y, c[1]) ** 2 + mi(Zc, c[2]) ** 2)
+        dgrid = np.sqrt(mi(X, c[0], L3[0]) ** 2 + mi(Y, c[1], L3[1]) ** 2
+                        + mi(Zc, c[2], L3[2]) ** 2)
         inside = dgrid < sp["R"]
         inside_any |= inside
         drw = sp["rr"] * sp["dx"]
         q_sph = float(np.sum(4 * math.pi * sp["rho_sph"] * sp["rr"] ** 2 * drw))
-        q_i_in = float(rho_I[inside].sum() * h**3)
+        q_i_in = float(rho_I[inside].sum() * dvol)
         net = q_sph - sp["Z"] - q_i_in           # net charge: electrons − nucleus − interstitial-in
-        rho_smooth += sphere_pseudocharge(net, sp["R"], c, nfft, L, npow=4)
-    v_grid = fft_poisson(rho_smooth, L)
+        rho_smooth += sphere_pseudocharge(net, sp["R"], c, nfft, L3, npow=4)
+    v_grid = fft_poisson(rho_smooth, L3)
     v_i0 = float(v_grid[~inside_any].mean())
     v_sph_list = []
     for sp in spheres:
@@ -333,7 +338,7 @@ def _weinert_multi(rho_I, spheres, L, nfft):
             for sgn in (+1, -1):
                 p = c.copy()
                 p[axis] += sgn * R
-                idx = tuple(int(round(p[d] / h)) % nfft for d in range(3))
+                idx = tuple(int(round(p[d] / h3[d])) % nfft for d in range(3))
                 pts.append(v_grid[idx])
         v_bc = float(np.mean(pts))
         vpart = radial_poisson_to_R(sp["rho_sph"], rr, R, drw=drw) - sp["Z"] * E2 / rr
@@ -341,19 +346,20 @@ def _weinert_multi(rho_I, spheres, L, nfft):
     return v_sph_list, v_i0
 
 
-def crystal_scf_multi(a_bohr: float, atoms, radii, ecut: float = 200.0, lmax: int = 2,
+def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
                       iters: int = 40, tol: float = 3e-3, kmesh=(1, 1, 1)):
-    """Multi-sphere self-consistent muffin-tin FLAPW for a cubic crystal (insulator).
+    """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell (insulator).
 
+    ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
     ``atoms`` = ``[(frac (3,), symbol), ...]``; ``radii`` = ``{symbol: R_MT}``. Each atom gets its
     own sphere potential (so inequivalent same-species atoms are handled). Returns
     ``(bands, info)`` with ``bands['ev']`` the Γ valence eigenvalues (eV, referenced to the
     interstitial zero — compare splittings, not absolute levels; see ``crystal_scf``).
 
-    Cubic cell only (Step 3 generalizes to arbitrary Bravais lattices); insulators only, valence
-    bands filled two-per-state (Step 4 adds Fermi smearing for metals)."""
-    L = a_bohr * BOHR_ANG
-    nfft = 2 * int(math.ceil(math.sqrt(4 * ecut / HBAR2_2M) * L / (2 * math.pi))) + 2
+    Cubic/orthorhombic cell (Step 3; general triclinic lattices are still to do); insulators only,
+    valence bands filled two-per-state (Step 4 adds Fermi smearing for metals)."""
+    L = np.broadcast_to(np.asarray(a_bohr, dtype=float) * BOHR_ANG, (3,))
+    nfft = 2 * int(math.ceil(math.sqrt(4 * ecut / HBAR2_2M) * L.max() / (2 * math.pi))) + 2
     nfft = min(max(nfft, 24), 72)
     r, dx = log_mesh(1e-5, 28.0, 2500)
     r_np = r.numpy()
