@@ -144,6 +144,15 @@ def _sym_geneig(H, S, nbands):
     return np.sort(np.linalg.eigvalsh(Sinv2 @ H @ Sinv2).real)[:nbands]
 
 
+def _geneig_vec(H, S, nbands):
+    """Generalized eig with S-normalized eigenvectors (c†Sc=1)."""
+    w, U = np.linalg.eigh(S)
+    Sinv2 = U @ np.diag(np.clip(w, 1e-12, None) ** -0.5) @ U.conj().T
+    ea, Va = np.linalg.eigh(Sinv2 @ H @ Sinv2)
+    order = np.argsort(ea.real)[:nbands]
+    return ea.real[order], (Sinv2 @ Va[:, order])
+
+
 def build_matrices_multi(kfrac, L, atoms, lmax, ecut, r, dx, species):
     """Multi-atom LAPW S, H (complex Hermitian). `atoms` = [(τ (3,), species_key), ...];
     `species[key]` = {'R': R_MT, 'v': v_tensor, 'El': {l: E_l}}. Each atom contributes its
@@ -170,10 +179,12 @@ def build_matrices_multi(kfrac, L, atoms, lmax, ecut, r, dx, species):
     inter = np.eye(npw, dtype=complex)
     Saug = np.zeros((npw, npw), dtype=complex)
     Haug = np.zeros((npw, npw), dtype=complex)
+    Saug_by_atom = []
     for tau, key in atoms:
         R = species[key]["R"]
         phase = np.exp(1j * (dkvec @ np.asarray(tau, dtype=float)))
         inter -= (ball_ff_np(dk_norm, R) / vol) * phase
+        Sa = np.zeros((npw, npw), dtype=complex)                 # this atom's augmentation block
         for lang in range(lmax + 1):
             ch = chan[key][lang]
             ab = np.array([match_ab(ch, ksafe[g], R) for g in range(npw)])
@@ -184,11 +195,14 @@ def build_matrices_multi(kfrac, L, atoms, lmax, ecut, r, dx, species):
             Tk = aa * ch["Tuu"] + ab_s * ch["Tuud"] + bbo * ch["Tudud"]
             Vk = aa * ch["Vuu"] + ab_s * ch["Vuud"] + bbo * ch["Vudud"]
             pref = (4 * math.pi / vol) * (2 * lang + 1) * eval_legendre(lang, cost)
-            Saug += phase * (pref * Ms)
+            Sa += phase * (pref * Ms)
             Haug += phase * (pref * (Tk + Vk))
+        Saug += Sa
+        Saug_by_atom.append(0.5 * (Sa + Sa.conj().T))
     S = inter + Saug
     H = HBAR2_2M * kdot * inter + Haug
-    return 0.5 * (H + H.conj().T), 0.5 * (S + S.conj().T)
+    comps = {"inter": 0.5 * (inter + inter.conj().T), "aug": Saug_by_atom}
+    return 0.5 * (H + H.conj().T), 0.5 * (S + S.conj().T), comps
 
 
 def free_electron_ref(kfrac, L, ecut, nbands):
@@ -272,7 +286,7 @@ def empty_lattice_multi_check(L=6.0, R=1.0, lmax=6, ecut=120.0):
     print("  EMPTY LATTICE, 2 spheres at arbitrary positions (structure-factor check):")
     ok = True
     for kfrac in ([0.0, 0.0, 0.0], [0.13, 0.05, 0.0]):
-        H, S = build_matrices_multi(kfrac, L, atoms, lmax, ecut, r, dx, species)
+        H, S, _ = build_matrices_multi(kfrac, L, atoms, lmax, ecut, r, dx, species)
         ev = _sym_geneig(H, S, 6)
         ref = free_electron_ref(kfrac, L, ecut, 6)
         err = float(np.abs(ev - ref).max())
@@ -295,7 +309,7 @@ def two_atom_check(symbol="Ne", R=1.5, L=7.0, sep=3.5, ecut=130.0):
     El = {lg: (at_eigs.get(val.get(lg, ""), -5.0) - v0) for lg in range(3)}
     species = {symbol: {"R": R, "v": v_mt, "El": El}}
     atoms = [([0.0, 0.0, 0.0], symbol), ([sep, 0.0, 0.0], symbol)]
-    H, S = build_matrices_multi([0.0, 0.0, 0.0], L, atoms, 2, ecut, r, dx, species)
+    H, S, _ = build_matrices_multi([0.0, 0.0, 0.0], L, atoms, 2, ecut, r, dx, species)
     ev = _sym_geneig(H, S, 16) + v0
     print(f"\n  TWO {symbol} atoms ({sep} Å apart, R_MT={R} Å, L={L} Å):")
     print(f"  {'valence':>8} | {'atomic KS (eV)':>14} | {'LAPW pair (eV)':>22} | {'max|Δ|':>8}")
@@ -312,18 +326,63 @@ def two_atom_check(symbol="Ne", R=1.5, L=7.0, sep=3.5, ecut=130.0):
     return ok
 
 
+def crystal_charges_check(symbol="Ne", R=1.5, L=7.0, sep=3.5, ecut=130.0, nval_atom=8):
+    """PROD-F (density decomposition): the charge partition the self-consistent FLAPW Coulomb needs.
+    From the occupied LAPW Bloch states, the valence charge in each muffin tin and the interstitial
+    is Q = Σ_occ occ · c†S_region c (population analysis on the overlap sub-blocks). Must be
+    physical (positive, equal for equivalent atoms) and sum to N_valence — the density is built
+    correctly from the eigenstates."""
+    from atomic_scf import atomic_scf
+    from radial_log import log_mesh
+    r, dx = log_mesh(1e-5, 28.0, 2500)
+    at_eigs, v_at = atomic_scf(symbol, r, dx)
+    iR = int(np.argmin(np.abs(r.numpy() - R)))
+    v0 = float(v_at[iR])
+    v_mt = torch.where(r <= R, v_at - v0, torch.zeros_like(r))
+    val = {0: "2s", 1: "2p"}
+    El = {lg: (at_eigs.get(val.get(lg, ""), -5.0) - v0) for lg in range(3)}
+    species = {symbol: {"R": R, "v": v_mt, "El": El}}
+    atoms = [([0.0, 0.0, 0.0], symbol), ([sep, 0.0, 0.0], symbol)]
+    _, S, comps = build_matrices_multi([0.0, 0.0, 0.0], L, atoms, 2, ecut, r, dx, species)
+    H, _, _ = build_matrices_multi([0.0, 0.0, 0.0], L, atoms, 2, ecut, r, dx, species)
+
+    nval = 2 * nval_atom                 # two atoms
+    nbands = nval // 2                    # doubly occupied
+    _, c = _geneig_vec(H, S, nbands)
+
+    def pop(mat):
+        return sum(2.0 * float((c[:, n].conj() @ mat @ c[:, n]).real) for n in range(nbands))
+
+    q_int = pop(comps["inter"])
+    q_sph = [pop(sa) for sa in comps["aug"]]
+    total = q_int + sum(q_sph)
+    print(f"\n  CRYSTAL CHARGE DECOMPOSITION (two {symbol}, {nval} valence e):")
+    print(f"    interstitial Q_I = {q_int:.3f} e")
+    for a, q in enumerate(q_sph):
+        print(f"    sphere {a} (Q_MT) = {q:.3f} e")
+    print(f"    total            = {total:.3f} e  (should be {nval})")
+    equal = abs(q_sph[0] - q_sph[1]) < 1e-3
+    physical = all(q > 0 for q in q_sph) and q_int > 0 and abs(total - nval) < 1e-6
+    ok = equal and physical
+    print(f"    -> physical (positive, equivalent atoms equal, sum=N_val): "
+          f"{'PASS' if ok else 'FAIL'}")
+    return ok
+
+
 def main():
-    print("\nPROD-D/E — LAPW in production units (eV/Å) on a real potential, multi-atom\n")
+    print("\nPROD-D/E/F — LAPW in production units (eV/Å), multi-atom, charge decomposition\n")
     el = empty_lattice_check()
     at = isolated_atom_check("Ne")
     elm = empty_lattice_multi_check()
     ta = two_atom_check("Ne")
+    cc = crystal_charges_check("Ne")
     print("\n  VERDICT:")
     print(f"    [D] empty-lattice port correct (free-electron)        : {'PASS' if el else 'FAIL'}")
     print(f"    [D] real atomic potential -> valence bands match      : {'PASS' if at else 'FAIL'}")
     print(f"    [E] multi-atom structure factors (2-sphere empty)     : "
           f"{'PASS' if elm else 'FAIL'}")
     print(f"    [E] two-atom real potential -> near-atomic valence    : {'PASS' if ta else 'FAIL'}")
+    print(f"    [F] crystal charge decomposition (density from Bloch) : {'PASS' if cc else 'FAIL'}")
 
 
 if __name__ == "__main__":

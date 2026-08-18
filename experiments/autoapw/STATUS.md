@@ -82,8 +82,15 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
       Hermitian S/H. Verified: TWO spheres at arbitrary positions (V=0) still give free-electron
       bands to 2.3e-3 eV (decisive structure-factor check); two Ne atoms 3.5 Å apart give
       near-degenerate valence pairs at the atomic KS levels (2s Δ 0.17 eV, 2p Δ 0.03 eV). CPU+asus.
-- [ ] PROD-F — crystal self-consistency (density from Bloch states across interstitial+spheres,
-      Hartree/XC in both regions, mixing). The largest remaining piece.
+- [~] PROD-F — crystal self-consistency. PARTIAL:
+      [x] density-side foundation — the crystal charge decomposition from the LAPW Bloch states
+          (`prod_lapw.crystal_charges_check`, population analysis on the overlap sub-blocks). Two
+          Ne (16 val e): each sphere 7.912 e (equivalent atoms exactly equal), interstitial 0.177 e,
+          total 16.000 — physically correct (Ne valence ~99% inside R_MT). CPU+asus.
+      [ ] the full self-consistent LOOP remains — the hard part: interstitial+sphere Coulomb via
+          Weinert's method, XC on the crystal density (interstitial FFT grid + sphere radial),
+          density mixing, and multi-k Brillouin-zone integration with a Fermi level. This is the
+          major remaining subsystem (weeks); the density decomposition above is its prerequisite.
 - [ ] PROD-G — promote validated modules into src/gradwave (types, tests, import contracts). LAST.
 - [ ] Then #1 DualBasis oxygen gate; then benchmark; then SlepianCore (slabs/molecular crystals).
 
