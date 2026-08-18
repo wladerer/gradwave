@@ -86,14 +86,14 @@ def _stage1_gaussian_check():
     return ok
 
 
-def radial_poisson_to_R(rho, r, R):
+def radial_poisson_to_R(rho, r, R, drw=None):
     """l=0 radial Poisson inside R with the density contained in R (ρ=0 beyond):
-    V_part(r) = E2[(1/r)∫_0^r 4πρr'²dr' + ∫_r^R 4πρr'dr'].  Uniform mesh r (0..R)."""
-    dr = r[1] - r[0]
-    q_in = np.concatenate([[0.0], np.cumsum(0.5 * (4 * math.pi * rho[1:] * r[1:] ** 2
-                                                    + 4 * math.pi * rho[:-1] * r[:-1] ** 2) * dr)])
-    integ = 4 * math.pi * rho * r
-    tail = np.concatenate([np.cumsum(0.5 * (integ[1:] + integ[:-1])[::-1] * dr)[::-1], [0.0]])
+    V_part(r) = E2[(1/r)∫_0^r 4πρr'²dr' + ∫_r^R 4πρr'dr'].
+
+    drw = per-point ∫dr weight. None -> uniform mesh (r[1]-r[0]); pass r·dx for a log mesh."""
+    w = np.full_like(r, float(r[1] - r[0])) if drw is None else np.asarray(drw)
+    q_in = np.cumsum(4 * math.pi * rho * r**2 * w)
+    tail = np.cumsum((4 * math.pi * rho * r * w)[::-1])[::-1] - (4 * math.pi * rho * r * w)
     return E2 * (q_in / np.maximum(r, 1e-12) + tail)
 
 

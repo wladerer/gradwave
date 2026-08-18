@@ -99,16 +99,23 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
           (Δ 0.002); 2p 3-fold degenerate at Γ and splits 1+2 at X in both. The band DISPERSION
           (crystal physics) matches. Elk built on asus (~/github/elk-11.0.2); the ILP64-vs-LP64
           BLAS gotcha on NixOS is fixed by linking -lblas -llapack (not -lopenblas).
-      [~] the CRYSTAL self-consistent LOOP — Weinert Coulomb + BZ. PARTIAL:
-          [x] Weinert Coulomb CORE verified (l=0), `weinert.py`: stage 1 interstitial FFT Poisson
-              vs analytic Gaussian (<0.5%); stage 2 the pseudocharge trick (two same-monopole
-              shapes -> identical exterior field, r-variation 1.6e-5 eV) + sphere radial Poisson
-              with Dirichlet matching at R_MT (exact, 1.4e-14).
-          [ ] remaining to close the loop: general-l multipole moments (non-spherical density),
-              the interstitial density ρ_I(G) built from the Bloch states, XC on the crystal grid
-              (interstitial + sphere), multi-k BZ integration + Fermi level, and wiring/converging
-              the loop. Elk 11 (asus) is the self-consistent reference. This is the genuine
-              multi-week FLAPW integration; the Coulomb algorithm (its crux) is now de-risked.
+      [x] the CRYSTAL self-consistent LOOP WORKS (muffin-tin FLAPW) — `crystal_scf.py`. Wires the
+          whole cycle: LAPW Bloch solve -> crystal density (interstitial ρ_I from the plane-wave
+          parts via FFT + spherical sphere density from the augmentation + frozen core) -> Weinert
+          Coulomb (`weinert.py`: FFT Poisson on the net-charge pseudocharge + sphere radial Poisson
+          matched at R_MT) -> LDA XC -> Anderson mixing. Verified TWO ways for simple-cubic Ne (Γ):
+            (1) dilute limit (a=10 Bohr) converges to the isolated-atom eigenvalues: 2s -35.81 vs
+                -35.67 (0.13 eV), 2p -13.36 vs -13.20 (0.16 eV), splitting 22.45 vs 22.47.
+            (2) real crystal (a=6 Bohr) self-consistent 2s-2p splitting 22.62 eV vs Elk 11 22.77
+                (0.15 eV) — and self-consistency moves it toward Elk vs the atomic-potential 22.54.
+          Weinert Coulomb core independently verified (weinert.py): interstitial FFT Poisson <0.5%
+          vs analytic Gaussian; pseudocharge exterior shape-independent to 1.6e-5 eV; sphere radial
+          Poisson matched exact to 1.4e-14. Two reference bugs found+fixed: the net-charge (−Z)
+          pseudocharge monopole, and the nucleus inside the boundary matching; plus the log-mesh
+          integration weight r·dx in the radial Poisson.
+      [ ] full-potential refinements (non-spherical l>0 sphere terms, varying interstitial-potential
+          matrix elements) and multi-k BZ + Fermi level (metals). The muffin-tin SCF above is the
+          classic self-consistent scheme; full-potential is the accuracy refinement.
 - [ ] PROD-G — promote validated modules into src/gradwave (types, tests, import contracts). LAST.
 - [ ] Then #1 DualBasis oxygen gate; then benchmark; then SlepianCore (slabs/molecular crystals).
 
