@@ -35,6 +35,8 @@ from __future__ import annotations
 import torch
 
 from gradwave.core.batch import BatchedK, box_to_sphere_b, g_to_r_b
+from gradwave.core.fftbox import r_to_g
+from gradwave.dtypes import CDTYPE
 
 # GPU dense-grid temporary budget [bytes]; matches core.batch. The τ paths hold
 # a handful of (nk, nb, n_grid) boxes at once, so bands are chunked to bound the
@@ -242,3 +244,41 @@ def metagga_tau_operator(
             acc = term if acc is None else acc + term
         out[:, lo:hi] = acc
     return (-0.5 * out) * bk.mask[:, None, :]
+
+
+def build_tau_toeplitz(v_tau_r: torch.Tensor, bk: BatchedK,
+                       shape: tuple[int, int, int]) -> torch.Tensor | None:
+    """Weighted-Toeplitz matrix Ṽ[k,i,j] = ½·((k+G_i)·(k+G_j))·v̂_τ(G_i−G_j) for
+    which ``V_τ c = einsum('kij,kbj->kbi', Ṽ, c)·mask`` — the exact small-cell
+    dense-GEMM form of ``metagga_tau_operator`` (the −½ prefactor and the two
+    i(k+G) gradient factors fold into +½·(k+G_i)·(k+G_j)), collapsing its 6
+    FFTs/band into one bmm. Reuses the shipped Toeplitz gate: returns ``None``
+    when the flag is off, the device is CUDA without the opt-in, or the cached
+    matrix exceeds the memory budget — the caller then keeps the FFT path."""
+    from gradwave.core import batch as _batch
+
+    if not _batch._TOEPLITZ_LOCAL_ENABLED:
+        return None
+    if bk.mask.device.type != "cpu" and not _batch._TOEPLITZ_ON_CUDA:
+        return None
+    nk, npw = bk.mask.shape
+    if nk * npw * npw * 16 > _batch._TOEPLITZ_M_BUDGET_BYTES:
+        return None
+    s1s2, s2 = shape[1] * shape[2], shape[2]
+    flat = bk.flat_idx.to(torch.long)  # (nk, npw)
+    rem = flat % s1s2
+    g = torch.stack([flat // s1s2, rem // s2, rem % s2], dim=-1)  # (nk, npw, 3)
+    ntorch = torch.tensor(shape, device=flat.device)
+    diff = (g[:, :, None, :] - g[:, None, :, :]) % ntorch
+    idx = diff[..., 0] * s1s2 + diff[..., 1] * s2 + diff[..., 2]
+    vhat = r_to_g(v_tau_r.to(CDTYPE)).reshape(-1)
+    kpg = bk.kpg.to(CDTYPE)  # (nk, npw, 3)
+    w = torch.einsum("kid,kjd->kij", kpg, kpg)  # (k+G_i)·(k+G_j)
+    return 0.5 * w * vhat[idx]  # (nk, npw, npw)
+
+
+def apply_tau_toeplitz(v_tau_matrix: torch.Tensor, c: torch.Tensor,
+                       bk: BatchedK) -> torch.Tensor:
+    """V_τ c via the cached weighted-Toeplitz matrix from ``build_tau_toeplitz``
+    (mask-preserved). ``.to(c.dtype)`` is a no-op at the working precision."""
+    return torch.einsum("kij,kbj->kbi", v_tau_matrix.to(c.dtype), c) * bk.mask[:, None, :]
