@@ -138,13 +138,50 @@ class HamiltonianK:
         self.pd = pd
         self.p = p  # (nproj_tot, npw)
         self.t = HBAR2_2M * sphere.kpg2  # (npw,)
+        # Small-cell Toeplitz local apply (shares the gate/flags with
+        # core.batch.BatchedHamiltonian — see the note there). Single-k, so no
+        # padding: the local V·ψ is exactly the dense GEMM c @ Mᵀ with
+        # M[i,j]=V̂(G_i−G_j). Index + M are built lazily on first apply and reused.
+        self._toep_idx: torch.Tensor | None = None
+        self._toep_M_cache: dict[torch.dtype, torch.Tensor] = {}
+        self._toep_eligible = self._toeplitz_eligible()
+
+    def _toeplitz_eligible(self) -> bool:
+        from gradwave.core import batch as _batch  # lazy: batch imports this module
+
+        if not _batch._TOEPLITZ_LOCAL_ENABLED:
+            return False
+        if self.v_eff_r.device.type != "cpu" and not _batch._TOEPLITZ_ON_CUDA:
+            return False
+        npw = int(self.sphere.npw)
+        return npw * npw * 16 <= _batch._TOEPLITZ_M_BUDGET_BYTES
+
+    def _toeplitz_M(self, cdtype: torch.dtype) -> torch.Tensor:
+        M = self._toep_M_cache.get(cdtype)
+        if M is None:
+            if self._toep_idx is None:
+                shape = self.shape
+                s1s2, s2 = shape[1] * shape[2], shape[2]
+                flat = self.sphere.flat_idx.to(torch.long)
+                rem = flat % s1s2
+                g = torch.stack([flat // s1s2, rem // s2, rem % s2], dim=-1)  # (npw,3)
+                n = torch.tensor(shape, device=flat.device)
+                diff = (g[:, None, :] - g[None, :, :]) % n
+                self._toep_idx = diff[..., 0] * s1s2 + diff[..., 1] * s2 + diff[..., 2]
+            vhat = r_to_g(self.v_eff_r.to(cdtype)).reshape(-1)
+            M = vhat[self._toep_idx]
+            self._toep_M_cache[cdtype] = M
+        return M
 
     def apply(self, c: torch.Tensor) -> torch.Tensor:
         """H c for a block c (nb, npw)."""
         out = self.t * c
-        psi = g_to_r(c, self.sphere.flat_idx, self.shape)
-        v_psi = psi * self.v_eff_r
-        out = out + box_to_sphere(r_to_g(v_psi), self.sphere.flat_idx)
+        if self._toep_eligible:
+            out = out + c @ self._toeplitz_M(c.dtype).T  # local V·ψ as one GEMM
+        else:
+            psi = g_to_r(c, self.sphere.flat_idx, self.shape)
+            v_psi = psi * self.v_eff_r
+            out = out + box_to_sphere(r_to_g(v_psi), self.sphere.flat_idx)
         if self.p.shape[0]:
             b = becp(self.p, c)  # (nb, np)
             out = out + (b.to(self.p.dtype) @ self.pd.dij_full.to(self.p.dtype)) @ self.p
