@@ -143,7 +143,12 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
              invariant). Routine unit-tested (s->0, p_z->l=2 M=0, filled-p->0 = the positive control).
              NOTE: closed-shell Ne is spherical in ANY cell (filled-shell rule), so a nonzero PHYSICAL
              crystal Q2 needs an open-shell element (real EFG benchmark) — comes with the plumbing.
-      [ ] step 2: l=2 sphere Poisson (multipole Green's fn) + interstitial V_2M matching → V_zz.
+      [x] step 2 (valence): l=2 sphere Poisson `l2_sphere_poisson` (V_2M(r)=4πE2/5[r^-3∫ρr'^4 +
+             r²∫ρ/r']) → r² coefficients → `efg_tensor` (Cartesian 3×3, principal V_zz + asymmetry
+             η). crystal_scf_multi(efg=True) returns V_zz/η/tensor per atom. Tensor unit-tested
+             (traceless+symmetric; ρ_20→axial η≈0; ρ_22→η≈1; p_z→axial). Cubic Ne null V_zz<1e-8.
+      [ ] step 2b (lattice term): project the interstitial FFT potential onto Y_2M at R_MT → the
+             homogeneous C_2M; add to the valence r² coeff for the FULL V_zz (valence is dominant).
       [ ] step 3: full-potential non-spherical V matrix elements in H (Gaunt l-coupling) for accuracy.
       [ ] plumbing: real open-shell elements (Ti/O/Cu…) beyond He/Be/Ne; a benchmark (TiO2/Zn/Ti) vs
           WIEN2k/Elk. Then differentiable EFG (∂C_Q/∂structure) — the AutoAPW-specific payoff.
