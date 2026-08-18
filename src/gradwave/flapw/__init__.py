@@ -33,6 +33,8 @@ differentiable-band demonstrations in ``experiments/autoapw``).
 from gradwave.flapw.atom import CONFIG, NIST_LDA_EV, atomic_scf
 from gradwave.flapw.efg import (
     efg_tensor,
+    efg_tensor_full,
+    interstitial_l2_boundary,
     l2_sphere_poisson,
     sphere_density_multipoles,
     valence_efg_moments,
@@ -55,6 +57,8 @@ __all__ = [
     "crystal_scf",
     "crystal_scf_multi",
     "efg_tensor",
+    "efg_tensor_full",
+    "interstitial_l2_boundary",
     "l2_sphere_poisson",
     "log_mesh",
     "numerov_log",

@@ -354,7 +354,7 @@ def _weinert_multi(rho_I, spheres, L, nfft):
         v_bc = float(np.mean(pts))
         vpart = radial_poisson_to_R(sp["rho_sph"], rr, R, drw=drw) - sp["Z"] * E2 / rr
         v_sph_list.append(vpart + (v_bc - vpart[-1]))
-    return v_sph_list, v_i0
+    return v_sph_list, v_i0, v_grid
 
 
 def _fermi_level(ev_all, w_all, nelec, kT):
@@ -474,7 +474,7 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
             rho_sph_by_key[k] = rho_val[k] + rho_core
             spheres.append({"tau": acart[ai][0], "rr": rr, "dx": dx,
                             "rho_sph": rho_sph_by_key[k], "Z": CONFIG[s][0], "R": R_by_key[k]})
-        v_sph_list, v_i0 = _weinert_multi(rho_I, spheres, A, nfft)
+        v_sph_list, v_i0, v_grid = _weinert_multi(rho_I, spheres, A, nfft)
 
         for ai, k in enumerate(keys):
             mask = mask_by_key[k]
@@ -499,15 +499,22 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     info = {"nbands": nbands, "symbols": syms, "e_fermi": conv.get("e_fermi")}
     if efg:
         info["efg"] = _sphere_efg_gamma(A, acart, keys, species, El_by_key, vmt_by_key, R_by_key,
-                                        rr_by_key, lmax, ecut, r, dx, nbands)
+                                        rr_by_key, lmax, ecut, r, dx, nbands, v_grid)
     return conv, info
 
 
 def _sphere_efg_gamma(A, acart, keys, species, El_by_key, vmt_by_key, R_by_key, rr_by_key,
-                      lmax, ecut, r, dx, nbands):
-    """Per-atom l=2 density multipoles and the r⁻³ valence EFG magnitude ``Q2`` at Γ, from the
-    converged potential. Cubic sites give ``Q2 ≈ 0`` (no l=2 invariant)."""
-    from gradwave.flapw.efg import efg_tensor, sphere_density_multipoles, valence_efg_moments
+                      lmax, ecut, r, dx, nbands, v_grid):
+    """Per-atom EFG at Γ from the converged potential: the aspherical l=2 density, its valence V_zz
+    (on-site l=2 sphere Poisson), and the full V_zz adding the lattice term (interstitial l=2
+    boundary matching against ``v_grid``). Cubic sites give ``V_zz ≈ 0`` (no l=2 invariant)."""
+    from gradwave.flapw.efg import (
+        efg_tensor,
+        efg_tensor_full,
+        interstitial_l2_boundary,
+        sphere_density_multipoles,
+        valence_efg_moments,
+    )
     _, cg, _, ksg, ablg, volg = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx,
                                               nbands)
     lset = [(2, m) for m in range(-2, 3)]
@@ -521,7 +528,10 @@ def _sphere_efg_gamma(A, acart, keys, species, El_by_key, vmt_by_key, R_by_key, 
         rho_lm = sphere_density_multipoles(amps, us, lmax, lset)
         rr, drw = rr_by_key[k], rr_by_key[k] * dx
         q, q2 = valence_efg_moments(rho_lm, rr, drw)
-        tensor, v_zz, eta = efg_tensor(rho_lm, rr, drw)
-        out[k] = {"Q2": q2, "V_zz": v_zz, "eta": eta, "tensor": tensor,
+        _, v_zz_val, eta_val = efg_tensor(rho_lm, rr, drw)
+        v_bc = interstitial_l2_boundary(v_grid, acart[ai][0], R_by_key[k], A)
+        tensor, v_zz, eta = efg_tensor_full(rho_lm, rr, drw, v_bc, R_by_key[k])
+        out[k] = {"Q2": q2, "V_zz": v_zz, "eta": eta, "V_zz_valence": v_zz_val,
+                  "eta_valence": eta_val, "tensor": tensor,
                   "q_moments": {m: complex(v) for m, v in q.items()}}
     return out

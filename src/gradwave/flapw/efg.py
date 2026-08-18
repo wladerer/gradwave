@@ -22,6 +22,7 @@ import math
 import numpy as np
 
 from gradwave.constants import E2
+from gradwave.flapw.coulomb import cell_matrix
 
 
 def _angular_grid(nx: int, nphi: int):
@@ -87,14 +88,10 @@ def l2_sphere_poisson(rho2m, rr, drw):
     return (4 * math.pi * E2 / 5.0) * (inner / rr**3 + rr**2 * outer)
 
 
-def efg_tensor(multipoles, rr, drw):
-    """The valence electric field gradient from the l=2 density multipoles, via the l=2 sphere
-    Poisson r² coefficients ``v_M = (4π E2/5) ∫ ρ_2M/r dr``. Returns ``(V, V_zz, eta)``: the 3×3
-    Cartesian tensor (eV/Å²), the principal component ``|V_zz| = max|eigenvalue|``, and the
-    asymmetry ``η = |V_xx−V_yy|/|V_zz|`` (``|V_zz|≥|V_yy|≥|V_xx|``). Vanishes at a cubic site."""
+def _tensor_from_v(v):
+    """Cartesian EFG tensor + ``(V_zz, η)`` from the five r² potential coefficients ``v_M`` (real V,
+    complex harmonics): V_zz=√(5/π)v0, V_xx/yy=-½√(5/π)v0±√(15/2π)Re v2, V_xy=-√(15/2π)Im v2, etc."""
     c0, c = math.sqrt(5.0 / math.pi), math.sqrt(15.0 / (2.0 * math.pi))
-    v = {m: (4 * math.pi * E2 / 5.0) * complex(np.sum(multipoles[(2, m)] / rr * drw))
-         for m in range(-2, 3)}
     v0, v1, v2 = v[0].real, v[1], v[2]
     vxx, vyy, vzz = -0.5 * c0 * v0 + c * v2.real, -0.5 * c0 * v0 - c * v2.real, c0 * v0
     vxy, vxz, vyz = -c * v2.imag, -c * v1.real, c * v1.imag
@@ -104,3 +101,46 @@ def efg_tensor(multipoles, rr, drw):
     v_zz, v_yy, v_xx = w[order[2]], w[order[1]], w[order[0]]
     eta = abs((v_xx - v_yy) / v_zz) if abs(v_zz) > 1e-30 else 0.0
     return tensor, float(v_zz), float(eta)
+
+
+def _valence_v(multipoles, rr, drw):
+    """The valence r² coefficients ``v_M = (4π E2/5) ∫ ρ_2M/r dr`` from the l=2 sphere Poisson."""
+    return {m: (4 * math.pi * E2 / 5.0) * complex(np.sum(multipoles[(2, m)] / rr * drw))
+            for m in range(-2, 3)}
+
+
+def efg_tensor(multipoles, rr, drw):
+    """The valence electric field gradient from the l=2 density multipoles (on-site sphere Poisson).
+    Returns ``(V, V_zz, eta)``: the 3×3 Cartesian tensor (eV/Å²), the principal component
+    ``|V_zz| = max|eigenvalue|``, and the asymmetry ``η = |V_xx−V_yy|/|V_zz|``. Cubic → 0."""
+    return _tensor_from_v(_valence_v(multipoles, rr, drw))
+
+
+def interstitial_l2_boundary(v_grid, center_cart, R, cell, nx: int = 16, nphi: int = 24):
+    """The l=2 components ``v_bc_2M = ∮ V_int(center + R Ω) Y*_2M(Ω) dΩ`` of the interstitial FFT
+    potential on the sphere surface, by trilinear interpolation of the periodic grid + projection.
+    ``v_grid`` is the interstitial potential on the fractional grid; ``center_cart`` the atom (Å)."""
+    from scipy.ndimage import map_coordinates
+    from scipy.special import sph_harm_y
+    a = cell_matrix(cell)
+    ainv = np.linalg.inv(a)
+    nfft = v_grid.shape[0]
+    th, ph, wgt = _angular_grid(nx, nphi)
+    dirs = np.stack([np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)], axis=-1)
+    pts_frac = (R * dirs + np.asarray(center_cart)) @ ainv          # (nx,nphi,3), fractional
+    coords = ((pts_frac % 1.0).reshape(-1, 3) * nfft).T            # (3, npts), grid-index units
+    vals = map_coordinates(v_grid, coords, order=1, mode="grid-wrap").reshape(th.shape)
+    return {m: complex(np.sum(vals * wgt * np.conj(sph_harm_y(2, m, th, ph))))
+            for m in range(-2, 3)}
+
+
+def efg_tensor_full(multipoles, rr, drw, v_bc_2m, R):
+    """The full EFG = valence (on-site sphere Poisson) + lattice (interstitial boundary matching).
+    ``v_M^full = v_M^valence + C_2M`` with ``C_2M = [v_bc_2M − V_2M^part(R)]/R²`` — the homogeneous
+    r² term matching the sphere l=2 potential to the interstitial value ``v_bc_2M`` at R_MT."""
+    v_val = _valence_v(multipoles, rr, drw)
+    v_full = {}
+    for m in range(-2, 3):
+        vpart_r = l2_sphere_poisson(multipoles[(2, m)], rr, drw)[-1]     # V_2M^part(R)
+        v_full[m] = v_val[m] + (v_bc_2m[m] - vpart_r) / R**2
+    return _tensor_from_v(v_full)

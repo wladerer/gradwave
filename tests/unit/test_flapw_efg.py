@@ -94,3 +94,37 @@ def test_efg_from_pz_amplitudes_is_axial():
     _, v_zz, eta = efg_tensor(rho, rr, drw)
     assert abs(v_zz) > 1e-6
     assert eta < 1e-6
+
+
+def _cubic_grid(n, L):
+    """Cartesian displacement components (x,y,z) from the cell centre on an n^3 cubic grid."""
+    ax = np.arange(n) * (L / n)
+    xx, yy, zz = np.meshgrid(ax, ax, ax, indexing="ij")
+    c = L / 2
+
+    def mi(a):
+        return (a - c) - L * np.round((a - c) / L)
+
+    return mi(xx), mi(yy), mi(zz), np.array([c, c, c])
+
+
+def test_interstitial_l2_boundary_recovers_l2():
+    """A pure r²Y_20 interstitial potential projects onto v_bc_20 only (the boundary sampling)."""
+    from gradwave.flapw.efg import interstitial_l2_boundary
+    n, L = 32, 6.0
+    x, y, z, center = _cubic_grid(n, L)
+    vgrid = 2 * z**2 - x**2 - y**2                       # proportional to r² Y_20
+    vbc = interstitial_l2_boundary(vgrid, center, 1.5, np.eye(3) * L)
+    mags = {m: abs(vbc[m]) for m in range(-2, 3)}
+    assert mags[0] > 0.1
+    assert all(mags[m] < 1e-3 * mags[0] for m in (-2, -1, 1, 2))
+
+
+def test_interstitial_l2_boundary_isotropic_is_zero():
+    """An isotropic interstitial potential has no l=2 component at the boundary."""
+    from gradwave.flapw.efg import interstitial_l2_boundary
+    n, L = 32, 6.0
+    x, y, z, center = _cubic_grid(n, L)
+    vgrid = x**2 + y**2 + z**2                            # isotropic
+    vbc = interstitial_l2_boundary(vgrid, center, 1.5, np.eye(3) * L)
+    assert all(abs(vbc[m]) < 1e-3 * L**2 for m in range(-2, 3))
