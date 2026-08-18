@@ -5,11 +5,19 @@ from __future__ import annotations
 
 import numpy as np
 
-from gradwave.flapw.efg import sphere_density_multipoles
+from gradwave.flapw.efg import efg_tensor, sphere_density_multipoles
 
 NR = 8
 _US = {l: (np.ones(NR), np.zeros(NR)) for l in range(3)}     # flat radial parts (angular test only)
 _LSET = [(0, 0)] + [(2, m) for m in range(-2, 3)]
+
+
+def _const_multipoles(vals):
+    """l=2 multipoles with constant values over a small radial mesh; returns (rho, rr, drw)."""
+    rr = np.linspace(0.05, 1.3, 40)
+    drw = np.full_like(rr, float(rr[1] - rr[0]))
+    rho = {(2, m): np.full(rr.shape, vals.get(m, 0.0), dtype=complex) for m in range(-2, 3)}
+    return rho, rr, drw
 
 
 def _amp(l, m):
@@ -45,3 +53,44 @@ def test_filled_p_shell_is_spherical():
     rho = sphere_density_multipoles(amps, _US, 2, _LSET)
     assert abs(rho[(0, 0)][0]) > 0.1
     assert _l2_magnitude(rho) < 1e-10
+
+
+def test_efg_tensor_is_traceless_and_symmetric():
+    """The EFG tensor from any l=2 density is symmetric and traceless (Laplace: ∇²V=0)."""
+    rho, rr, drw = _const_multipoles({0: 0.5, 1: 0.3 + 0.1j, 2: 0.2 - 0.4j})
+    t, _, _ = efg_tensor(rho, rr, drw)
+    assert np.allclose(t, t.T)
+    assert abs(np.trace(t)) < 1e-10 * np.abs(t).max()
+
+
+def test_efg_axial_from_rho20():
+    """A pure ρ_20 density is axial: V_xx=V_yy=-V_zz/2, no off-diagonal, asymmetry η≈0."""
+    rho, rr, drw = _const_multipoles({0: 1.0})
+    t, v_zz, eta = efg_tensor(rho, rr, drw)
+    assert abs(v_zz) > 1e-6
+    assert eta < 1e-9
+    assert abs(t[0, 1]) < 1e-12 and abs(t[0, 2]) < 1e-12 and abs(t[1, 2]) < 1e-12
+    assert abs(t[0, 0] - t[1, 1]) < 1e-12          # V_xx = V_yy
+    assert abs(t[2, 2] + 2 * t[0, 0]) < 1e-12      # V_zz = -2 V_xx
+
+
+def test_efg_asymmetric_from_rho22():
+    """A pure real ρ_22 density gives a fully asymmetric EFG (η≈1) with zero cell-frame V_zz."""
+    rho, rr, drw = _const_multipoles({2: 1.0})
+    t, v_zz, eta = efg_tensor(rho, rr, drw)
+    assert abs(t[2, 2]) < 1e-12                    # no ρ_20 -> zero cell-frame V_zz
+    assert eta > 0.99
+
+
+def test_efg_from_pz_amplitudes_is_axial():
+    """End to end: the l=2 density of a p_z state, through the sphere Poisson, is an axial EFG."""
+    rr = np.linspace(0.05, 1.2, 30)
+    drw = np.full_like(rr, float(rr[1] - rr[0]))
+    us = {l: (np.ones(rr.shape), np.zeros(rr.shape)) for l in range(3)}
+    a = {0: np.zeros(1, complex), 1: np.zeros(3, complex), 2: np.zeros(5, complex)}
+    a[1][1] = 1.0
+    b = {ll: np.zeros(2 * ll + 1, complex) for ll in range(3)}
+    rho = sphere_density_multipoles([(1.0, a, b)], us, 2, [(2, m) for m in range(-2, 3)])
+    _, v_zz, eta = efg_tensor(rho, rr, drw)
+    assert abs(v_zz) > 1e-6
+    assert eta < 1e-6

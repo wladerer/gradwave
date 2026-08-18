@@ -507,7 +507,7 @@ def _sphere_efg_gamma(A, acart, keys, species, El_by_key, vmt_by_key, R_by_key, 
                       lmax, ecut, r, dx, nbands):
     """Per-atom l=2 density multipoles and the r⁻³ valence EFG magnitude ``Q2`` at Γ, from the
     converged potential. Cubic sites give ``Q2 ≈ 0`` (no l=2 invariant)."""
-    from gradwave.flapw.efg import sphere_density_multipoles, valence_efg_moments
+    from gradwave.flapw.efg import efg_tensor, sphere_density_multipoles, valence_efg_moments
     _, cg, _, ksg, ablg, volg = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx,
                                               nbands)
     lset = [(2, m) for m in range(-2, 3)]
@@ -519,7 +519,9 @@ def _sphere_efg_gamma(A, acart, keys, species, El_by_key, vmt_by_key, R_by_key, 
         amps = [(2.0, *_augment_amplitudes(cg[:, n] * phase, ksg, ablg[ai], lmax, volg))
                 for n in range(nbands)]
         rho_lm = sphere_density_multipoles(amps, us, lmax, lset)
-        rr = rr_by_key[k]
-        q, q2 = valence_efg_moments(rho_lm, rr, rr * dx)
-        out[k] = {"Q2": q2, "q_moments": {m: complex(v) for m, v in q.items()}}
+        rr, drw = rr_by_key[k], rr_by_key[k] * dx
+        q, q2 = valence_efg_moments(rho_lm, rr, drw)
+        tensor, v_zz, eta = efg_tensor(rho_lm, rr, drw)
+        out[k] = {"Q2": q2, "V_zz": v_zz, "eta": eta, "tensor": tensor,
+                  "q_moments": {m: complex(v) for m, v in q.items()}}
     return out

@@ -17,7 +17,11 @@ Poisson + interstitial matching) is the next step; the r^-3 valence moment here 
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
+
+from gradwave.constants import E2
 
 
 def _angular_grid(nx: int, nphi: int):
@@ -68,3 +72,35 @@ def valence_efg_moments(multipoles, rr, drw):
     q = {m: complex(np.sum(multipoles[(2, m)] * drw / rr)) for m in range(-2, 3)}
     q2 = float(np.sqrt(sum(abs(v) ** 2 for v in q.values())))
     return q, q2
+
+
+def l2_sphere_poisson(rho2m, rr, drw):
+    """The l=2 radial Poisson inside the sphere: ``V_2M(r)`` (eV) from the on-site l=2 density
+    (the particular solution, density contained in [0,R]):
+
+        V_2M(r) = (4π E2 / 5) [ r⁻³ ∫_0^r ρ_2M r'⁴ dr' + r² ∫_r^R ρ_2M / r' dr' ].
+
+    Near the origin ``V_2M(r) → v_M r²`` with ``v_M = (4π E2/5) ∫_0^R ρ_2M/r' dr'`` — the r²
+    coefficient that becomes the EFG. ``drw`` is the radial ``dr`` weight."""
+    inner = np.cumsum(rho2m * rr**4 * drw)
+    outer = np.cumsum((rho2m / rr * drw)[::-1])[::-1]
+    return (4 * math.pi * E2 / 5.0) * (inner / rr**3 + rr**2 * outer)
+
+
+def efg_tensor(multipoles, rr, drw):
+    """The valence electric field gradient from the l=2 density multipoles, via the l=2 sphere
+    Poisson r² coefficients ``v_M = (4π E2/5) ∫ ρ_2M/r dr``. Returns ``(V, V_zz, eta)``: the 3×3
+    Cartesian tensor (eV/Å²), the principal component ``|V_zz| = max|eigenvalue|``, and the
+    asymmetry ``η = |V_xx−V_yy|/|V_zz|`` (``|V_zz|≥|V_yy|≥|V_xx|``). Vanishes at a cubic site."""
+    c0, c = math.sqrt(5.0 / math.pi), math.sqrt(15.0 / (2.0 * math.pi))
+    v = {m: (4 * math.pi * E2 / 5.0) * complex(np.sum(multipoles[(2, m)] / rr * drw))
+         for m in range(-2, 3)}
+    v0, v1, v2 = v[0].real, v[1], v[2]
+    vxx, vyy, vzz = -0.5 * c0 * v0 + c * v2.real, -0.5 * c0 * v0 - c * v2.real, c0 * v0
+    vxy, vxz, vyz = -c * v2.imag, -c * v1.real, c * v1.imag
+    tensor = np.array([[vxx, vxy, vxz], [vxy, vyy, vyz], [vxz, vyz, vzz]])
+    w = np.linalg.eigvalsh(tensor)
+    order = np.argsort(np.abs(w))                    # |V_xx| ≤ |V_yy| ≤ |V_zz|
+    v_zz, v_yy, v_xx = w[order[2]], w[order[1]], w[order[0]]
+    eta = abs((v_xx - v_yy) / v_zz) if abs(v_zz) > 1e-30 else 0.0
+    return tensor, float(v_zz), float(eta)
