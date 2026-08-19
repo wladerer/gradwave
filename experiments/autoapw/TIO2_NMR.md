@@ -101,3 +101,18 @@ BeO). Fullpot adds response (|V_zz| ~7-12) but must also use smearing=0 to be st
 smearing=0 for TiO2 (insulator); the earlier "eta=0.745" fullpot number was a smeared partial-occ fluke.
 Remaining question: does fullpot+sm0 give correct eta AND larger (toward 19) magnitude, and does the
 muffin-tin magnitude converge up with k.
+
+## sm=0 sweep results (2026-08-19) — the proper (stable) numbers
+All with Elk R_MT (Ti 1.098/O 0.824 A), smearing=0 (essential; TiO2 is an insulator).
+| variant           | ecut/k     | O evals (eV/A^2)          | eta   | C_Q(17O) |
+|-------------------|------------|---------------------------|-------|----------|
+| muffin-tin        | 350/2,2,3  | [-5.33,+4.54,+0.78]       | 0.706 | 0.330 |
+| muffin-tin        | 350/4,4,6  | [-4.31,+3.73,+0.58]       | 0.730 | 0.267 |
+| **fullpot+antishield** | 300/3,3,3 | [-14.09,+13.52,+0.57] | 0.919 | 0.872 |
+| Elk 11.0.2        | 350/4,4,6  | [-19.10,+16.60,+2.50]     | 0.740 | 1.18  |
+KEY: muffin-tin gets eta right (~0.73=Elk) but |V_zz| only ~4-5 (22% of Elk) — under-captures the O
+2p asphericity/covalency. FULLPOT + the lattice-field antishielding lifts |V_zz| to ~14 (74% of Elk),
+C_Q 0.87 vs Elk 1.18 (74%) — a genuine semiquantitative result — BUT eta rises to 0.92 (too axial: the
+smallest principal value +0.57 vs Elk +2.5; the response amplifies the two large components more than
+the third). So current honest status: O C_Q ~74% of Elk with sm=0+fullpot, right order + right sign;
+eta too axial. Remaining: k-convergence (fp446 running), and the response-anisotropy (eta) gap.
