@@ -10,6 +10,7 @@ ecut = float(sys.argv[1]) if len(sys.argv) > 1 else 320.0
 kmesh = tuple(int(x) for x in sys.argv[2:5]) if len(sys.argv) > 4 else (2, 2, 3)
 iters = int(sys.argv[5]) if len(sys.argv) > 5 else 40
 fullpot = len(sys.argv) > 6 and sys.argv[6].lower() in ("fp", "fullpot", "1", "true")
+smearing = float(sys.argv[7]) if len(sys.argv) > 7 else 0.15
 
 u = 0.3048
 a_bohr = [8.68083, 8.68083, 5.59096]          # rutile a,a,c in Bohr
@@ -20,7 +21,7 @@ radii = {"Ti": 0.95, "O": 0.80}               # Ti-O min bond 1.946 Å; no MT ov
 
 t0 = time.time()
 bands, info = crystal_scf_multi(a_bohr, atoms, radii, ecut=ecut, lmax=2, iters=iters,
-                                kmesh=kmesh, smearing=0.15, efg=True, fullpot=fullpot)
+                                kmesh=kmesh, smearing=smearing, efg=True, fullpot=fullpot)
 dt = time.time() - t0
 print(f"TiO2 ecut={ecut} kmesh={kmesh} iters={iters} fullpot={fullpot}: "
       f"{dt:.1f}s, e_fermi={info.get('e_fermi')}")
