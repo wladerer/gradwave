@@ -7,7 +7,7 @@ U = 0.3048
 ATOMS = [((0.0, 0.0, 0.0), "Ti"), ((0.5, 0.5, 0.5), "Ti"),
          ((U, U, 0.0), "O"), ((1 - U, 1 - U, 0.0), "O"),
          ((0.5 + U, 0.5 - U, 0.5), "O"), ((0.5 - U, 0.5 + U, 0.5), "O")]
-BASE = dict(ecut=300.0, smearing=0.0, efg=True, fullpot=True, use_symmetry=True, kworkers=5)
+BASE = dict(ecut=300.0, smearing=0.0, efg=True, subspace_reuse=False, fullpot=True, use_symmetry=True, kworkers=5)
 LO = dict(los={"Ti": [(0, "3s"), (1, "3p")]},
           core={"Ti": [(0, 1, 2), (0, 2, 2), (1, 1, 6)]},
           val_e={"Ti": 12}, el_override={"Ti": {1: "3d"}})
