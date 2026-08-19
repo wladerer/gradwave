@@ -61,3 +61,18 @@ Elk R_MT: Ti 2.075 bohr (1.098 Å), O 1.557 bohr (0.824 Å); mine were Ti 0.95/O
    missing. 3p-in-valence + the l=2 lattice field capture only the (small) 3p response. The remaining
    piece is a core-Sternheimer / non-spherical-core response (DFPT for the frozen core) — the known
    reason Ti EFG is a hard FLAPW case. Groundwork (3p-valence, fullpot, lattice field) is in place.
+
+## Next step (designed, not yet implemented): core-Sternheimer for the Ti EFG
+The missing piece is the frozen 2p (and 3p) core's l=2 polarization response to the crystal field.
+Per core state u_c=rR_{n l_c} (energy E_c) and each l=2 potential V_{2M}(r), the first-order radial
+response delta-u_{l'} (l' in {l_c-2, l_c, l_c+2}, dominant l'=l_c for p->p) solves the inhomogeneous
+Sternheimer equation
+    [H_{l'} - E_c] delta-u_{l'}(r) = -G^{l'm'}_{2M,l_c m_c} V_{2M}(r) u_c(r),
+    H_{l'} = -hbar^2/2m (d^2/dr^2 - l'(l'+1)/r^2) + V_sph(r),  (Gaunt G).
+Solve by the radial Green's function G(r,r')=u_reg(r_<) u_irr(r_>)/W from two homogeneous solutions of
+(H_{l'}-E_c)u=0 (numerov). The response l=2 density delta-rho_{2M} = sum_core 2 occ_c u_c delta-u_{l'}
+(Gaunt-weighted)/(4 pi r^2) adds to rho_2m before the EFG. Validation gates before trusting it:
+(a) cubic Ne fullpot null stays ~0; (b) Ti V_zz moves toward Elk +19.34 with correct sign; (c) the O
+result is not degraded. This is the standard FLAPW/Blaha-Schwarz antishielding; it is the reason a
+d0-cation EFG needs full-potential + core response, and is a research-grade addition to build+validate
+carefully (not overnight without a reference for intermediate values).
