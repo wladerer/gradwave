@@ -457,7 +457,7 @@ def _fermi_level(ev_all, w_all, nelec, kT):
 
 def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
                       iters: int = 40, tol: float = 3e-3, kmesh=(1, 1, 1), smearing: float = 0.0,
-                      efg: bool = False, fullpot: bool = False):
+                      efg: bool = False, fullpot: bool = False, use_symmetry: bool = True):
     """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
     ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
@@ -476,7 +476,13 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     ``fullpot=True`` runs the self-consistent full-potential loop: each iteration computes the
     non-spherical (l=2) sphere potential (on-site Hartree + XC) from the aspherical density and
     feeds it back into the Hamiltonian, so the wavefunctions respond to the non-spherical field.
-    ``fullpot=False`` is the muffin-tin (spherical-potential) scheme."""
+    ``fullpot=False`` is the muffin-tin (spherical-potential) scheme.
+
+    ``use_symmetry`` (default True, muffin-tin runs only) reduces the k-mesh to the irreducible
+    wedge and resymmetrizes the density each iteration to restore the full-BZ symmetry the reduced
+    sum drops — the interstitial density in G-space (``RhoSymmetrizer``) and the muffin-tin density
+    by averaging symmetry-equivalent atoms. Falls back to the full mesh if the space group can't be
+    built. Disabled for ``fullpot`` (its aspherical potential would need l>0 star-unfolding)."""
     A = cell_matrix(np.asarray(a_bohr, dtype=float) * BOHR_ANG)     # 3×3 cell in Å
     vol = float(abs(np.linalg.det(A)))
     amax = float(np.linalg.norm(A, axis=1).max())
@@ -490,6 +496,21 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     nbands = sum(_VAL_E[s] for s in syms) // 2
     kfracs, kw = monkhorst_pack(tuple(kmesh))
     kw = kw / kw.sum()
+    sg, rho_symm, atom_orbits = None, None, None
+    if use_symmetry and not fullpot:
+        try:                                            # IBZ reduction + resymmetrization
+            from gradwave.symmetry import RhoSymmetrizer, find_spacegroup, reduce_mesh
+            uniq = {s: i for i, s in enumerate(dict.fromkeys(syms))}
+            sg = find_spacegroup(A, np.array([f for f, _ in atoms], dtype=float),
+                                 [uniq[s] for s in syms])
+            kfracs, kw = reduce_mesh(tuple(kmesh), (0, 0, 0), sg)
+            kw = kw / kw.sum()
+            rho_symm = RhoSymmetrizer((nfft, nfft, nfft), sg)
+            atom_orbits = _atom_orbits(sg.atom_map)
+        except Exception:                               # any failure → full mesh (set above)
+            kfracs, kw = monkhorst_pack(tuple(kmesh))
+            kw = kw / kw.sum()
+            sg, rho_symm, atom_orbits = None, None, None
 
     at_by_sym, vat_by_sym = {}, {}
     for s in set(syms):
@@ -582,6 +603,16 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
                     for lm in lset2:
                         rho_2m[k][lm] += w * rlm[lm]
 
+        if rho_symm is not None:                        # restore full-BZ symmetry lost to IBZ:
+            rho_I = np.fft.ifftn(                        #   interstitial ρ symmetrized in G-space,
+                rho_symm.apply(torch.tensor(np.fft.fftn(rho_I))).numpy()).real
+        if atom_orbits is not None:                     #   muffin-tin ρ averaged over equiv. atoms
+            for orbit in atom_orbits:
+                ok = [keys[i] for i in orbit]
+                avg = sum(rho_val[k] for k in ok) / len(ok)
+                for k in ok:
+                    rho_val[k] = avg.copy()
+
         spheres, rho_sph_by_key = [], {}
         for ai, (k, s) in enumerate(zip(keys, syms, strict=True)):
             rr, mask = rr_by_key[k], mask_by_key[k]
@@ -629,16 +660,51 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     info = {"nbands": nbands, "symbols": syms, "e_fermi": conv.get("e_fermi")}
     if efg:
         if not fullpot:
-            # muffin-tin EFG: build the aspherical density once from the converged wavefunctions,
-            # then recompute the interstitial potential with the l=2 Weinert pseudocharge so its
-            # lattice term is present. (fullpot already holds the converged rho_2m/v_grid.)
-            rho_2m = _efg_density_pass(kdata, occ_by_k, keys, acart, El_by_key, vmt_by_key,
+            if rho_symm is not None:
+                # The aspherical (l=2) EFG density needs the full star of each k; IBZ drops it. So
+                # when the SCF ran on the reduced mesh, do ONE full-mesh solve at the converged
+                # potential (1 pass vs n_iter) and accumulate the l=2 density there — correct EFG,
+                # no star-unfolding. Without IBZ the loop's own k-data already spans the full mesh.
+                kf_full, kw_full = monkhorst_pack(tuple(kmesh))
+                kw_full = kw_full / kw_full.sum()
+                res_full = [_lapw_multi_k(kf, A, acart, species, lmax, ecut, r, dx, nb_solve,
+                                          chan=chan) for kf in kf_full]
+                ev_full = np.array([rf[0] for rf in res_full])
+                if smearing > 0:
+                    ef = _fermi_level(ev_full, kw_full, 2 * nbands, smearing)
+                    occ_e = [2.0 / (1.0 + np.exp(np.clip((ev - ef) / smearing, -60, 60)))
+                             for ev in ev_full]
+                else:
+                    occ_e = [np.array([2.0] * nbands + [0.0] * npad) for _ in ev_full]
+                kdata_e = list(zip(kf_full, kw_full, res_full, strict=True))
+            else:
+                kdata_e, occ_e = kdata, occ_by_k
+            # build the aspherical density once from the converged wavefunctions, then recompute the
+            # interstitial potential with the l=2 Weinert pseudocharge for the lattice term.
+            rho_2m = _efg_density_pass(kdata_e, occ_e, keys, acart, El_by_key, vmt_by_key,
                                        R_by_key, rr_by_key, lmax, r, dx, nb_solve)
             for ai, k in enumerate(keys):
                 spheres[ai]["rho_2m"] = rho_2m[k]
             _, _, v_grid = _weinert_multi(rho_I, spheres, A, nfft)
         info["efg"] = _efg_from_multipoles(rho_2m, v_grid, acart, keys, R_by_key, rr_by_key, dx, A)
     return conv, info
+
+
+def _atom_orbits(atom_map):
+    """Group atoms into symmetry orbits from a space group's ``atom_map`` ((nops, na);
+    ``atom_map[op, a]`` = image of atom a under op). The orbit of atom a is column a — the set of
+    atoms it is carried onto. Symmetry-equivalent atoms share one orbit; averaging the spherical
+    density over each orbit restores the muffin-tin symmetry that IBZ k-reduction would break."""
+    na = atom_map.shape[1]
+    seen: set[int] = set()
+    orbits: list[list[int]] = []
+    for i in range(na):
+        if i in seen:
+            continue
+        orbit = sorted({int(x) for x in atom_map[:, i]})
+        seen.update(orbit)
+        orbits.append(orbit)
+    return orbits
 
 
 def _efg_density_pass(kdata, occ_by_k, keys, acart, El_by_key, vmt_by_key, R_by_key, rr_by_key,
