@@ -154,3 +154,20 @@ capture more covalency). muffin-tin is itself lmax-sensitive too (k446: lmax2 4.
 gradwave FLAPW reproduces the EFG SHAPE (eta) of a reference code but under-estimates the MAGNITUDE ~4x
 for this oxide — a genuine method/basis limitation, not a convergence knob. Ti also fails (core response
 missing). This is the honest state; earlier "82% converging to Elk" was an lmax=2 artifact, retracted.
+
+## Accuracy build-out (2026-08-19, session 2): high-L potential + LAPW+LO
+Implemented + committed (all gates green so far):
+1. **General-L non-spherical potential** (3f1f18b): sphere_pseudocharge_lm (moments exact for
+   L=1,3,4), lx_sphere_poisson, interstitial_boundary_multi, nonspherical_potential(lset),
+   _weinert_multi matches every L>0, crystal_scf_multi(fullpot_lmax=). Odd L included (O 4f site
+   has no inversion -> L=1,3 fields polarize O 2p; these were entirely missing before).
+2. **LAPW+LO local orbitals** (f23ee2b): confined phi=a·u+b·u̇+c·u(E2), phi(R)=phi'(R)=0; secular
+   extension + LO-aware density/multipoles; crystal_scf_multi(los=, val_e=, core=, el_override=).
+   Gates: Ne no-LO bit-consistent (22.6235), redundant-LO shift -0.001 eV, no ghosts, null ok.
+3. **LO aspherical coupling** (0a6faf8): _nonspherical_augment_lo — the semicore's response channel
+   to the crystal field (the antishielding). Null preserved (-1.4e-6 @ fp_lmax=4).
+Ti LO treatment (runner "lo" mode): 3s/3p semicore LOs, core=1s2s2p, val_e=12, El(l=1)->3d region.
+In flight on asus: hl_l3/hl_l4 (is the fullpot O EFG now lmax-STABLE with fp_lmax=4?), lo_fp/lo_mt
+(semicore-LO A-side, launched pre-coupling). Next: B-side full treatment (fullpot fp4 + LO + coupling)
+-> does Ti move toward Elk +19.34 and O toward -19.1? Then core-Sternheimer only if Ti still short
+(gate: internal sum-over-states check with the same tridiagonal operator).
