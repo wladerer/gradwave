@@ -171,3 +171,8 @@ In flight on asus: hl_l3/hl_l4 (is the fullpot O EFG now lmax-STABLE with fp_lma
 (semicore-LO A-side, launched pre-coupling). Next: B-side full treatment (fullpot fp4 + LO + coupling)
 -> does Ti move toward Elk +19.34 and O toward -19.1? Then core-Sternheimer only if Ti still short
 (gate: internal sum-over-states check with the same tridiagonal operator).
+
+## Fullpot-path optimizations (340a2c1, bit-exact): 2.7x measured
+Gaunt memoization + k-independent aspherical-integral hoist + ylm-per-k hoist + masked/shared-geometry
+pseudocharges. TiO2 fullpot+LO (ecut250 k222 aug-lmax3 fp_lmax4): 606 -> 226 s per 3 iters = 2.68x.
+Nulls and the muffin-tin span reproduce to the last digit; flapw suite green through the LO work.
