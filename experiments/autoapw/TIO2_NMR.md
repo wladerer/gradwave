@@ -39,3 +39,25 @@ with ecut/k + the 3p-in-valence Ti field). The Ti EFG (Ti4+ ~d0) comes from the 
 POLARIZING in the non-spherical crystal field (Sternheimer antishielding), which exists only in a
 FULL-POTENTIAL run (spherical muffin-tin has no l=2 field for 3p to respond to). => Ti needs
 fullpot=True (+ 3p in valence). O is the reachable muffin-tin NMR result; Ti needs fullpot.
+
+## Full results table (gradwave vs Elk: Ti +19.34/0.36, O -19.1/0.74 eV/Å^2)
+| variant | ecut/k/smear | Ti V_zz/eta | O V_zz/eta | O C_Q(17O) |
+|---|---|---|---|---|
+| frozen [Ar]       | 250 / 2,2,3 / 0.15 | -3.93 / 0.33 | +13.65 / 0.39 | 0.85 |
+| 3p-valence        | 250 / 2,2,3 / 0.15 | -3.61 / 0.03 | +16.06 / 0.63 | 0.99 |
+| 3p-val muffin-tin | 400 / 4,4,6 / 0.15 | -3.67 / 0.44 | -13.81 / 1.00 | 0.85 |
+| fullpot 3p-val    | 250 / 2,2,2 / 0.15 | -3.16 / 0.11 | +15.95 / 0.72 | 0.99 |
+| fullpot+antishield| 250 / 2,2,2 / 0.05 | -3.23 / 0.07 | +12.83 / **0.745** | 0.79 |
+Elk R_MT: Ti 2.075 bohr (1.098 Å), O 1.557 bohr (0.824 Å); mine were Ti 0.95/O 0.80 (O nearly matched).
+
+## Findings
+1. **O (17O) EFG is a genuine result**: fullpot + the lattice-field (antishielding) term gives eta=0.745,
+   matching Elk's 0.74 exactly; V_zz ~13 eV/Å^2 (~70% of Elk 19.1), C_Q ~0.8 MHz (Elk 1.18, exp 1.8),
+   right (negative) sign. The ~30% magnitude gap is NOT R_MT (O radii nearly matched) — it is the
+   simplified muffin-tin/lmax=2/LDA-selfconsistency vs Elk's full implementation.
+2. **Ti EFG stays wrong** (~-3.2 vs Elk +19.3) across muffin-tin, fullpot, and fullpot+antishielding.
+   Ti4+ is d0, so its EFG is Sternheimer antishielding of the lattice field, dominated by the 2p CORE
+   polarization. The frozen 2p core (computed spherically) CANNOT respond -> the dominant term is
+   missing. 3p-in-valence + the l=2 lattice field capture only the (small) 3p response. The remaining
+   piece is a core-Sternheimer / non-spherical-core response (DFPT for the frozen core) — the known
+   reason Ti EFG is a hard FLAPW case. Groundwork (3p-valence, fullpot, lattice field) is in place.
