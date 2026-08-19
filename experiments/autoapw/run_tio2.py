@@ -9,6 +9,7 @@ from gradwave.flapw.nmr import quadrupolar_coupling
 ecut = float(sys.argv[1]) if len(sys.argv) > 1 else 320.0
 kmesh = tuple(int(x) for x in sys.argv[2:5]) if len(sys.argv) > 4 else (2, 2, 3)
 iters = int(sys.argv[5]) if len(sys.argv) > 5 else 40
+fullpot = len(sys.argv) > 6 and sys.argv[6].lower() in ("fp", "fullpot", "1", "true")
 
 u = 0.3048
 a_bohr = [8.68083, 8.68083, 5.59096]          # rutile a,a,c in Bohr
@@ -19,9 +20,10 @@ radii = {"Ti": 0.95, "O": 0.80}               # Ti-O min bond 1.946 Å; no MT ov
 
 t0 = time.time()
 bands, info = crystal_scf_multi(a_bohr, atoms, radii, ecut=ecut, lmax=2, iters=iters,
-                                kmesh=kmesh, smearing=0.15, efg=True)
+                                kmesh=kmesh, smearing=0.15, efg=True, fullpot=fullpot)
 dt = time.time() - t0
-print(f"TiO2 ecut={ecut} kmesh={kmesh} iters={iters}: {dt:.1f}s, e_fermi={info.get('e_fermi')}")
+print(f"TiO2 ecut={ecut} kmesh={kmesh} iters={iters} fullpot={fullpot}: "
+      f"{dt:.1f}s, e_fermi={info.get('e_fermi')}")
 # Elk ref: Ti V_zz=19.34 eV/Å^2 eta=0.36 C_Q(49Ti)=11.5 ; O V_zz=19.1 eta=0.74 C_Q(17O)=1.18
 ti = info["efg"]["a0"]
 o = info["efg"]["a2"]
