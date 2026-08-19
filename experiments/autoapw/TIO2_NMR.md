@@ -242,3 +242,17 @@ aspherical self-consistency. Fixes landed: adaptive-damped v_nsph mixing (halve 
 growth), r_nsph < 0.05 REQUIRED for convergence, telemetry to see it. The k333 Ti/Elk match must be
 re-established with an r_nsph-converged run (more iters and/or Anderson on v_nsph if slow).
 Campaign complete; all its fullpot numbers are provisional pending converged-loop reruns.
+
+## Session close state (2026-08-19 late): staged-start + collapse landed; TiO2 blow-up isolated
+- Aspherical dH collapse (8e0af35): 109x kernel / 3.9x per iteration (129->33 s local, 11 s on asus).
+  Elk gap now ~15-20x per unit work (was ~100x).
+- Staged MT->fullpot start: Ne r_nsph 10%/iter (cold) -> 4e-5 (staged). TiO2 staged run converged
+  smoothly to d~6e-3/r_nsph~0.08 then BLEW UP at it34 on a [subsp] iteration (span 24->61, r_v 100).
+  HYPOTHESIS: electronic level crossing under the growing aspherical potential slips through the
+  subspace gate's blind spot (gate validates returned states; a NEW state entering the window
+  between forced exact solves is invisible). Ne (no crossings) stages cleanly.
+- DISCRIMINATOR RUNNING: same staged gated run with subspace_reuse=False (exact solves only) —
+  if it converges, the fix is fullpot-aware solve cadence (e.g. exact solves while r_nsph>1e-3, or
+  a window-entry check in the gate); if it still blows up, the instability is occupation/crossing
+  physics (next: larger degen tol, tiny smearing ramp, or occupation tracking across iterations).
+- FLAPWRecorder (3c86336) now captures every iteration (info["recorder"]) — no more lost histories.
