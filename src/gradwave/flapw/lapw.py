@@ -197,18 +197,54 @@ def solve_geneig(H, S, nbands, with_vecs=False, tol=1e-8):
     spurious "ghost" eigenvalues — catastrophic for multi-atom cells with large muffin tins. For a
     well-conditioned S this is identical to Löwdin ``S^{-1/2}``. Returns sorted eigenvalues (eV);
     with ``with_vecs`` also the S-normalized eigenvectors."""
+    from scipy.linalg import eigh as scipy_eigh
     w, u = np.linalg.eigh(S)
+    return _canonical_solve(H, S, w, u, nbands, with_vecs, tol, scipy_eigh)
+
+
+def _canonical_solve(H, S, w, u, nbands, with_vecs, tol, scipy_eigh):
     keep = w > tol * w[-1]                                # w ascending; w[-1] = largest
     x = u[:, keep] * (w[keep] ** -0.5)                   # npw × nkeep, S-orthonormal columns
-    ea, va = np.linalg.eigh(x.conj().T @ H @ x)
-    order = np.argsort(ea.real)[:nbands]
-    evals = ea.real[order]
+    m = x.conj().T @ H @ x
+    m = 0.5 * (m + m.conj().T)
+    rank = m.shape[0]
+    nb = min(nbands, rank)
+    # only the lowest nbands eigenpairs are consumed — the MRRR subset solver skips the rest
+    # (the S diagonalization above stays full: the null-space detection needs the whole spectrum)
+    ea, va = scipy_eigh(m, subset_by_index=(0, nb - 1))
+    evals = ea.real
     if len(evals) < nbands:                              # rank-deficient: pad empty (high) states
         evals = np.concatenate([evals, np.full(nbands - len(evals), 1e10)])
     if with_vecs:
-        vecs = x @ va[:, order]
+        vecs = x @ va
         if vecs.shape[1] < nbands:
             vecs = np.concatenate([vecs, np.zeros((x.shape[0], nbands - vecs.shape[1]),
                                                   dtype=vecs.dtype)], axis=1)
         return evals, vecs
     return evals
+
+
+def solve_geneig_subspace(H, S, c_prev, nbands, tol=1e-8):
+    """Rayleigh-Ritz solve of ``H c = ε S c`` inside the span of a previous iteration's
+    eigenvectors ``c_prev`` (dim × nkeep, nkeep ≥ nbands). Near SCF self-consistency the
+    eigenvectors barely rotate between iterations, so projecting into last iteration's subspace
+    (two thin GEMMs + an nkeep×nkeep dense solve) replaces the O(dim³) full diagonalization.
+
+    Returns ``(evals, vecs, resid)`` where ``resid = max_n ||H c_n − ε_n S c_n|| / ||H c_n||``
+    over the ``nbands`` kept states — the caller accepts the step only when ``resid`` is below its
+    threshold and falls back to the exact solve otherwise, so a drifting subspace (band crossings,
+    early iterations, large mixing steps) can never silently corrupt the result."""
+    hp = H @ c_prev
+    sp = S @ c_prev
+    hs = c_prev.conj().T @ hp
+    ss = c_prev.conj().T @ sp
+    hs = 0.5 * (hs + hs.conj().T)
+    ss = 0.5 * (ss + ss.conj().T)
+    ev, y = solve_geneig(hs, ss, nbands, with_vecs=True, tol=tol)
+    vecs = c_prev @ y
+    hv = hp @ y
+    sv = sp @ y
+    r = hv - sv * ev[None, :]
+    scale = np.maximum(np.linalg.norm(hv, axis=0), 1e-12)
+    resid = float((np.linalg.norm(r, axis=0) / scale).max())
+    return ev, vecs, resid

@@ -34,7 +34,13 @@ from gradwave.flapw.coulomb import (
     sphere_pseudocharge_lm,
 )
 from gradwave.flapw.functionals import vxc_lda
-from gradwave.flapw.lapw import ball_ff_np, match_ab_vec, radial_channel, solve_geneig
+from gradwave.flapw.lapw import (
+    ball_ff_np,
+    match_ab_vec,
+    radial_channel,
+    solve_geneig,
+    solve_geneig_subspace,
+)
 from gradwave.flapw.mixing import anderson_next
 from gradwave.flapw.radial import log_mesh, numerov_log_np, radial_eigs_tridiag
 from gradwave.kpoints import monkhorst_pack
@@ -415,7 +421,7 @@ def crystal_scf(a_bohr: float, symbol: str = "Ne", R: float = 1.4, ecut: float =
 
 
 def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=None, chan=None,
-                  lodat=None, nsph_int=None):
+                  lodat=None, nsph_int=None, c_prev=None, subspace_tol=1e-5):
     """Multi-atom LAPW at wavevector k, exposing the density internals the SCF needs. Returns
     ``(eigvals, eigvecs, miller, ks, [abl per atom], vol)``. H,S are complex Hermitian (structure
     phases ``e^{i(k_G'-k_G)·τ_a}``). ``atoms_cart`` = ``[(τ_cart, species_key), ...]``.
@@ -534,6 +540,12 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
             s_ext[npw:, npw:] = np.diag(diag_s)
             h_ext[npw:, npw:] = lo_lo_h
             S, Hm = s_ext, h_ext
+    if c_prev is not None and c_prev.shape[0] == Hm.shape[0]:
+        # Rayleigh-Ritz in last iteration's subspace; the residual gate falls back to the exact
+        # dense solve whenever the subspace has drifted (band crossings, early SCF, mixing jumps).
+        ev, c, resid = solve_geneig_subspace(Hm, S, c_prev, nbands)
+        if resid < subspace_tol:
+            return ev, c, mill, ks, abl_by_atom, vol
     ev, c = solve_geneig(Hm, S, nbands, with_vecs=True)
     return ev, c, mill, ks, abl_by_atom, vol
 
@@ -770,7 +782,8 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
                       iters: int = 40, tol: float = 3e-3, kmesh=(1, 1, 1), smearing: float = 0.0,
                       efg: bool = False, fullpot: bool = False, use_symmetry: bool = True,
                       fullpot_lmax: int = 2, los=None, val_e=None, core=None, el_override=None,
-                      v_start=None, kworkers: int = 1):
+                      v_start=None, kworkers: int = 1, subspace_reuse: bool = True,
+                      subspace_tol: float = 1e-5):
     """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
     ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
@@ -819,7 +832,12 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     ``kworkers=6`` on ~20 cores) — the pool multiplies whatever thread count each worker uses.
     The workers are spawned (fork inherits live BLAS state and computes wrong numbers), so the
     CALLING script must be import-safe: guard its executable body with ``if __name__ ==
-    "__main__":`` or the workers re-run it on import."""
+    "__main__":`` or the workers re-run it on import.
+
+    ``subspace_reuse`` (default True) solves most iterations by Rayleigh-Ritz in the previous
+    iteration's eigenvector subspace (residual-gated, exact-solve fallback); every 5th iteration
+    is a forced exact solve and convergence is only accepted on exact-solve iterations, so the
+    reported state never rests on a projected solve."""
     A = cell_matrix(np.asarray(a_bohr, dtype=float) * BOHR_ANG)     # 3×3 cell in Å
     vol = float(abs(np.linalg.det(A)))
     amax = float(np.linalg.norm(A, axis=1).max())
@@ -886,7 +904,9 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     conv = None
     v_nsph = None                                          # non-spherical potential (fullpot)
     hist = {k: ([], []) for k in keys}
-    for _ in range(iters):
+    c_prev_by_k = [None] * len(kfracs)
+    for it in range(iters):
+        full_iter = (not subspace_reuse) or (it % 5 == 0)
         species, El_by_key, vmt_by_key, v0_by_key = {}, {}, {}, {}
         for k, s in zip(keys, syms, strict=True):
             R = R_by_key[k]
@@ -912,11 +932,12 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
         nsph_int = (_nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=lodat)
                     if v_nsph else None)
         kdata, ev_all, ev_gamma = [], [], None
+        cprevs = [None if full_iter else c_prev_by_k[ik] for ik in range(len(kfracs))]
         if kworkers > 1 and len(kfracs) > 1:
             import multiprocessing as _mp
             from concurrent.futures import ProcessPoolExecutor
             argl = [(kf, A, acart, species, lmax, ecut, r, dx, nb_solve, v_nsph, chan, lodat,
-                     nsph_int) for kf in kfracs]
+                     nsph_int, cprevs[ik], subspace_tol) for ik, kf in enumerate(kfracs)]
             # spawn, not fork: forked children inherit live OpenMP/BLAS state and can compute
             # silently wrong numbers (observed: a 6 eV span error). Spawned workers re-import
             # (~seconds per iteration) — negligible on the multi-minute fullpot iterations the
@@ -926,11 +947,13 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
                 res_list = list(ex.map(_solve_k_args, argl))
         else:
             res_list = [_lapw_multi_k(kf, A, acart, species, lmax, ecut, r, dx, nb_solve,
-                                      v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int)
-                        for kf in kfracs]
-        for kf, w, res in zip(kfracs, kw, res_list, strict=True):
+                                      v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int,
+                                      c_prev=cprevs[ik], subspace_tol=subspace_tol)
+                        for ik, kf in enumerate(kfracs)]
+        for ik, (kf, w, res) in enumerate(zip(kfracs, kw, res_list, strict=True)):
             kdata.append((kf, w, res))
             ev_all.append(res[0])
+            c_prev_by_k[ik] = res[1]
             if np.all(np.abs(kf) < 1e-9):
                 ev_gamma = res[0]
         if ev_gamma is None:
@@ -1070,7 +1093,7 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
 
         span = float(ev_gamma[nbands - 1] - ev_gamma[0])
         new = {"span": span, "ev": ev_gamma[:nbands].tolist(), "e_fermi": e_fermi}
-        if conv is not None and abs(new["span"] - conv["span"]) < tol:
+        if conv is not None and full_iter and abs(new["span"] - conv["span"]) < tol:
             conv = new
             break
         conv = new
@@ -1144,9 +1167,11 @@ def _atom_orbits(atom_map):
 
 def _solve_k_args(args):
     """Picklable per-k secular solve for the k-point process pool (``kworkers``)."""
-    (kf, cell, acart, species, lmax, ecut, r, dx, nb_solve, v_nsph, chan, lodat, nsph_int) = args
+    (kf, cell, acart, species, lmax, ecut, r, dx, nb_solve, v_nsph, chan, lodat, nsph_int,
+     c_prev, subspace_tol) = args
     return _lapw_multi_k(kf, cell, acart, species, lmax, ecut, r, dx, nb_solve,
-                         v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int)
+                         v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int,
+                         c_prev=c_prev, subspace_tol=subspace_tol)
 
 
 def _efg_density_pass(kdata, occ_by_k, keys, acart, El_by_key, vmt_by_key, R_by_key, rr_by_key,
