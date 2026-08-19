@@ -21,6 +21,7 @@ fullpot = len(sys.argv) > 6 and sys.argv[6].lower() in ("fp", "fullpot", "1", "t
 smearing = float(sys.argv[7]) if len(sys.argv) > 7 else 0.15
 r_o = float(sys.argv[8]) if len(sys.argv) > 8 else 0.80      # O muffin-tin radius (Å)
 r_ti = float(sys.argv[9]) if len(sys.argv) > 9 else 0.95     # Ti muffin-tin radius (Å)
+lmax = int(sys.argv[10]) if len(sys.argv) > 10 else 2        # augmentation l cutoff
 
 u = 0.3048
 a_bohr = [8.68083, 8.68083, 5.59096]          # rutile a,a,c in Bohr
@@ -30,10 +31,10 @@ atoms = [((0.0, 0.0, 0.0), "Ti"), ((0.5, 0.5, 0.5), "Ti"),
 radii = {"Ti": r_ti, "O": r_o}                # Ti-O min bond 1.946 Å; no MT overlap
 
 t0 = time.time()
-bands, info = crystal_scf_multi(a_bohr, atoms, radii, ecut=ecut, lmax=2, iters=iters,
+bands, info = crystal_scf_multi(a_bohr, atoms, radii, ecut=ecut, lmax=lmax, iters=iters,
                                 kmesh=kmesh, smearing=smearing, efg=True, fullpot=fullpot)
 dt = time.time() - t0
-print(f"TiO2 ecut={ecut} kmesh={kmesh} iters={iters} fullpot={fullpot}: "
+print(f"TiO2 ecut={ecut} kmesh={kmesh} iters={iters} fullpot={fullpot} lmax={lmax}: "
       f"{dt:.1f}s, e_fermi={info.get('e_fermi')}")
 # Elk ref eigenvalues (eV/Å^2, |V_zz|>|V_yy|>|V_xx|): Ti [+19.34,-13.16,-6.18] eta 0.36;
 #                                                     O  [-19.1, +16.6, +2.5] eta 0.74
