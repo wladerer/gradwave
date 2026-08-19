@@ -11,6 +11,15 @@ varying interstitial matrix elements) is the accuracy refinement.
 
 Verified for simple-cubic Ne (Γ): the dilute limit recovers the atomic eigenvalues, and the
 a=6 Bohr crystal 2s-2p splitting matches Elk 11.0.2 (all-electron FLAPW) to 0.14 eV.
+
+Units at the public entry points (``crystal_scf`` / ``crystal_scf_multi``):
+
+    cell        Å    (``cell=`` keyword; scalar cubic edge, length-3 edges, or a 3×3 matrix)
+    a_bohr      Bohr (legacy positional cell; pass exactly one of ``a_bohr`` / ``cell``)
+    radii, R    Å    (muffin-tin radii — NOT Bohr; mixing these up caused a real bug)
+    ecut        eV
+    energies    eV   (eigenvalues referenced to the interstitial zero — compare splittings)
+    smearing    eV
 """
 
 from __future__ import annotations
@@ -36,6 +45,7 @@ from gradwave.flapw.coulomb import (
 from gradwave.flapw.functionals import vxc_lda
 from gradwave.flapw.lapw import (
     ball_ff_np,
+    enumerate_kg,
     match_ab_vec,
     radial_channel,
     solve_geneig,
@@ -164,17 +174,7 @@ def _lapw_k(kfrac, L, R, lmax, El, ecut, r, dx, v_sphere):
     from scipy.special import eval_legendre
     vol = L**3
     b = 2 * math.pi / L
-    kf = np.asarray(kfrac, dtype=float)
-    nmax = int(math.ceil(math.sqrt(ecut / HBAR2_2M) / b)) + 2
-    mill, ks = [], []
-    for i in range(-nmax, nmax + 1):
-        for j in range(-nmax, nmax + 1):
-            for m in range(-nmax, nmax + 1):
-                kg = b * (np.array([i, j, m]) + kf)
-                if HBAR2_2M * (kg @ kg) <= ecut:
-                    mill.append([i, j, m])
-                    ks.append(kg)
-    mill, ks = np.array(mill), np.array(ks)
+    mill, ks = enumerate_kg(kfrac, b * np.eye(3), ecut)
     npw = len(ks)
     ksafe = np.maximum(np.linalg.norm(ks, axis=1), 1e-12)
     dk = np.linalg.norm(ks[:, None, :] - ks[None, :, :], axis=2)
@@ -215,19 +215,6 @@ def _interstitial_density(c_occ, occ, mill, vol, nfft):
     return rho
 
 
-def _augment_amplitudes(cp, ks, abl, lmax, vol):
-    """The muffin-tin augmentation amplitudes for one (phased) band: dicts ``a[l]``, ``b[l]`` (each
-    ``(2l+1,)`` complex) — the u_l / udot_l coefficients ``A_lm = pfac Σ_G Y*_lm(k+G) c_G a_G``."""
-    a_out, b_out = {}, {}
-    for lang in range(lmax + 1):
-        ylm = _ylm_star(lang, ks)
-        a, bb = abl[lang][:, 0], abl[lang][:, 1]
-        pfac = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
-        a_out[lang] = pfac * (ylm * (cp * a)[:, None]).sum(axis=0)
-        b_out[lang] = pfac * (ylm * (cp * bb)[:, None]).sum(axis=0)
-    return a_out, b_out
-
-
 def _lo_row_slices(los):
     """Row layout of one atom's LO block: ``{l: (start, stop, lo)}`` in the deterministic order the
     matrix build used (defs in list order, m=-l..l within each)."""
@@ -238,34 +225,9 @@ def _lo_row_slices(los):
     return out
 
 
-def _band_amps(cp, ks, abl, lmax, vol, lo_coeff=None, los=None, ylm_by_l=None):
-    """Per-band sphere amplitude lists ``{l: [amps per radial]}`` aligned with the radial lists
-    ``[u, u̇ (, u₂ for an LO on this l)]``. ``cp`` = phased PW coefficients; ``lo_coeff`` = this
-    atom's LO-block coefficients for the band (matrix row order). ``ylm_by_l`` = precomputed
-    ``{l: _ylm_star(l, ks)}`` — band- and atom-independent, hoist it per k-point."""
-    slices = _lo_row_slices(los)
-    out = {}
-    for lang in range(lmax + 1):
-        ylm = ylm_by_l[lang] if ylm_by_l is not None else _ylm_star(lang, ks)
-        a, bb = abl[lang][:, 0], abl[lang][:, 1]
-        pfac = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
-        amp_a = pfac * (ylm * (cp * a)[:, None]).sum(axis=0)
-        amp_b = pfac * (ylm * (cp * bb)[:, None]).sum(axis=0)
-        amps = [amp_a, amp_b]
-        if lang in slices:
-            lo_start, lo_stop, lo = slices[lang]
-            cv = lo_coeff[lo_start:lo_stop]
-            amps[0] = amps[0] + cv * lo["a"]
-            amps[1] = amps[1] + cv * lo["b"]
-            amps.append(cv * lo["cn"])
-        out[lang] = amps
-    return out
-
-
 def _bands_amps(c_pw, ks, abl, lmax, vol, lo_block=None, los=None, ylm_by_l=None):
     """All-band sphere amplitudes ``{l: [(nb, 2l+1) per radial]}`` — one GEMM per (l, radial)
-    over every band at once instead of a Python loop of per-band reductions (``_band_amps`` row by
-    row; equivalent to machine precision, the summation order differs). ``c_pw`` = phased PW
+    over every band at once instead of a Python loop of per-band reductions. ``c_pw`` = phased PW
     coefficients ``(npw, nb)``; ``lo_block`` = this atom's LO rows ``(nlo_atom, nb)``."""
     slices = _lo_row_slices(los)
     out = {}
@@ -287,7 +249,7 @@ def _bands_amps(c_pw, ks, abl, lmax, vol, lo_block=None, los=None, ylm_by_l=None
 
 
 def _us_ext(El, lmax, r, dx, v_sphere, R, los=None):
-    """The per-l radial-function lists ``[u, u̇ (, u₂)]`` matching ``_band_amps``' amplitudes."""
+    """The per-l radial-function lists ``[u, u̇ (, u₂)]`` matching ``_bands_amps``' amplitudes."""
     slices = _lo_row_slices(los)
     us = {}
     for lang in range(lmax + 1):
@@ -348,8 +310,9 @@ def _weinert_potential(rho_I, rr, dx, rho_sph, Z, R, L, nfft):
     return vpart + (v_bc - vpart[-1]), v_i0
 
 
-def crystal_scf(a_bohr: float, symbol: str = "Ne", R: float = 1.4, ecut: float = 250.0,
-                lmax: int = 2, iters: int = 40, tol: float = 3e-3, kmesh=(1, 1, 1)):
+def crystal_scf(a_bohr: float | None = None, symbol: str = "Ne", R: float = 1.4,
+                ecut: float = 250.0, lmax: int = 2, iters: int = 40, tol: float = 3e-3,
+                kmesh=(1, 1, 1), cell: float | None = None):
     """Muffin-tin self-consistent FLAPW for a simple-cubic crystal. Returns
     ``(valence_eigs_eV, atomic_eigs_eV)`` — the crystal Γ valence eigenvalues and the atomic limit.
 
@@ -360,7 +323,9 @@ def crystal_scf(a_bohr: float, symbol: str = "Ne", R: float = 1.4, ecut: float =
     muffin-tin scheme only weakly determines (worst in dilute cells): the *absolute* levels wander
     run-to-run under threaded BLAS while energy *differences* (2p-2s splittings, bandwidths) are
     stable and physical. Compare splittings, not absolute eigenvalues, as against any FLAPW code."""
-    L = a_bohr * BOHR_ANG
+    if (a_bohr is None) == (cell is None):
+        raise ValueError("pass exactly one of a_bohr (Bohr, legacy) or cell (Å cubic edge)")
+    L = float(cell) if cell is not None else a_bohr * BOHR_ANG
     nfft = 2 * int(math.ceil(math.sqrt(4 * ecut / HBAR2_2M) * L / (2 * math.pi))) + 2
     nfft = min(max(nfft, 24), 72)
     r, dx = log_mesh(1e-5, 28.0, 2500)
@@ -439,18 +404,7 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
     A = cell_matrix(L)
     B = reciprocal(A)                                     # rows = reciprocal vectors
     vol = float(abs(np.linalg.det(A)))
-    kf = np.asarray(kf, dtype=float)
-    bmin = float(np.linalg.norm(B, axis=1).min())        # shortest reciprocal vector
-    nmax = int(math.ceil(math.sqrt(ecut / HBAR2_2M) / bmin)) + 2
-    mill, ks = [], []
-    for i in range(-nmax, nmax + 1):
-        for j in range(-nmax, nmax + 1):
-            for m in range(-nmax, nmax + 1):
-                kg = (np.array([i, j, m]) + kf) @ B
-                if HBAR2_2M * (kg @ kg) <= ecut:
-                    mill.append([i, j, m])
-                    ks.append(kg)
-    mill, ks = np.array(mill), np.array(ks)
+    mill, ks = enumerate_kg(kf, B, ecut)
     npw = len(ks)
     ksafe = np.maximum(np.linalg.norm(ks, axis=1), 1e-12)
     kdot = ks @ ks.T
@@ -778,12 +732,12 @@ def _fermi_level(ev_all, w_all, nelec, kT):
     return 0.5 * (lo + hi)
 
 
-def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
+def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax: int = 2,
                       iters: int = 40, tol: float = 3e-3, kmesh=(1, 1, 1), smearing: float = 0.0,
                       efg: bool = False, fullpot: bool = False, use_symmetry: bool = True,
                       fullpot_lmax: int = 2, los=None, val_e=None, core=None, el_override=None,
                       v_start=None, kworkers: int = 1, subspace_reuse: bool = True,
-                      subspace_tol: float = 1e-5):
+                      subspace_tol: float = 1e-5, cell=None):
     """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
     ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
@@ -838,7 +792,13 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     iteration's eigenvector subspace (residual-gated, exact-solve fallback); every 5th iteration
     is a forced exact solve and convergence is only accepted on exact-solve iterations, so the
     reported state never rests on a projected solve."""
-    A = cell_matrix(np.asarray(a_bohr, dtype=float) * BOHR_ANG)     # 3×3 cell in Å
+    if (a_bohr is None) == (cell is None):
+        raise ValueError("pass exactly one of a_bohr (Bohr, legacy) or cell (Å)")
+    if atoms is None or radii is None:
+        raise ValueError("atoms and radii are required")
+    cell_ang = (np.asarray(cell, dtype=float) if cell is not None
+                else np.asarray(a_bohr, dtype=float) * BOHR_ANG)
+    A = cell_matrix(cell_ang)                                       # 3×3 cell in Å
     vol = float(abs(np.linalg.det(A)))
     amax = float(np.linalg.norm(A, axis=1).max())
     nfft = 2 * int(math.ceil(math.sqrt(4 * ecut / HBAR2_2M) * amax / (2 * math.pi))) + 2
@@ -881,6 +841,17 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     for s in set(syms):
         at_by_sym[s], vat_by_sym[s] = atomic_scf(s, r, dx)
     R_by_key = {k: radii[s] for k, s in zip(keys, syms, strict=True)}
+    min_edge = float(np.linalg.norm(A, axis=1).min())
+    r_max, r_min = max(R_by_key.values()), min(R_by_key.values())
+    if r_max > 0.45 * min_edge:                # Å cell passed as Bohr / Bohr radius passed as Å
+        raise ValueError(f"muffin-tin radius {r_max:.2f} Å is >45% of the shortest cell edge "
+                         f"({min_edge:.2f} Å) — check the cell/radii units (cell in Å via cell=, "
+                         "Bohr via a_bohr; radii always Å)")
+    if r_min < 0.02 * min_edge:
+        import warnings
+        warnings.warn(f"muffin-tin radius {r_min:.2f} Å is <2% of the shortest cell edge "
+                      f"({min_edge:.2f} Å) — an Å radius mistakenly converted to Bohr?",
+                      stacklevel=2)
     rr_by_key = {k: r_np[r_np <= R_by_key[k]] for k in keys}
     mask_by_key = {k: r_np <= R_by_key[k] for k in keys}
     acart = [(tau, key) for (tau, _), key in zip(atoms_cart, keys, strict=True)]

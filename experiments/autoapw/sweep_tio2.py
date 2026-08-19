@@ -6,6 +6,7 @@ from the chain's fixed point — so differences measure the knob, not SCF basin 
 Env: GW_KWORKERS = k-point pool size (divide OMP_NUM_THREADS to match).
 """
 import os
+import pickle
 import time
 
 import numpy as np
@@ -43,6 +44,8 @@ def run(tag, kmesh, iters, v_start=None, lmax=3, extra=None):
                              v_start=v_start, kworkers=int(os.environ.get("GW_KWORKERS", "1")),
                              **BASE, **(extra or {}))
     report(f"{tag} ({time.time() - t0:.0f}s)", b, i)
+    with open(os.path.expanduser(f"~/tio2_v_{tag.split()[0]}.pkl"), "wb") as fh:
+        fh.write(pickle.dumps(i["v_by_key"]))          # anchor for frozen-potential k-probes
     return b, i
 
 

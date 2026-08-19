@@ -80,6 +80,20 @@ def test_warm_restart_stays_on_fixed_point(bct_converged):
     assert abs(b1["span"] - bands0["span"]) < 5e-2
 
 
+@pytest.mark.standard
+def test_cell_units_equivalence():
+    """MR: the same crystal specified via the legacy Bohr positional (a_bohr) and via the Å
+    keyword (cell=) must be numerically identical — the Bohr-cell/Å-radii convention split caused
+    a real bug (overlapping muffin tins from misread units)."""
+    from gradwave.constants import BOHR_ANG
+    kw = dict(ecut=140.0, iters=8, kmesh=(1, 1, 1), smearing=0.0, efg=True, use_symmetry=False)
+    b1, i1 = crystal_scf_multi(6.0, [((0.5, 0.5, 0.5), "Ne")], {"Ne": 1.4}, **kw)
+    b2, i2 = crystal_scf_multi(atoms=[((0.5, 0.5, 0.5), "Ne")], radii={"Ne": 1.4},
+                               cell=6.0 * BOHR_ANG, **kw)
+    assert abs(b1["span"] - b2["span"]) < 1e-9
+    assert abs(i1["efg"]["a0"]["V_zz"] - i2["efg"]["a0"]["V_zz"]) < 1e-9
+
+
 def test_pool_single_solve_bit_equal():
     """MR: one secular solve through a spawn worker is BIT-identical to in-process (the fork pool
     silently returned wrong eigenvalues — this pins the pool mechanics at zero tolerance)."""
@@ -88,7 +102,7 @@ def test_pool_single_solve_bit_equal():
     species = {"a0": {"R": 1.4, "v": v, "El": {0: -3.0, 1: -1.5, 2: -0.5}}}
     acart = [(np.array([3.0, 3.0, 3.0]), "a0")]
     args = ((0.25, 0.0, 0.0), 6.0 * 0.529177, acart, species, 2, 120.0, r, dx, 4,
-            None, None, None, None)
+            None, None, None, None, None, 1e-5)
     ev_local = _lapw_multi_k(*args[:9], v_nsph=None, chan=None, lodat=None, nsph_int=None)[0]
     with ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn")) as ex:
         ev_pool = list(ex.map(_solve_k_args, [args]))[0][0]

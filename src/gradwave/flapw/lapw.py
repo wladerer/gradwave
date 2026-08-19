@@ -29,6 +29,26 @@ def sph_jn(l, x):
     return spherical_jn(l, np.asarray(x))
 
 
+def enumerate_kg(kfrac, B, ecut):
+    """The plane-wave basis at wavevector k: Miller indices + Cartesian ``k+G`` with
+    ``(hbar^2/2m)|k+G|^2 <= ecut``, for reciprocal cell ``B`` (rows). The single k+G enumerator —
+    this logic was quadruplicated across the matrix builders with an inconsistent search margin
+    (+1 vs +2 shells); the wider margin is kept (never under-covers the ecut sphere)."""
+    kf = np.asarray(kfrac, dtype=float)
+    b_arr = np.asarray(B, dtype=float)
+    bmin = float(np.linalg.norm(b_arr, axis=1).min())
+    nmax = int(math.ceil(math.sqrt(ecut / HBAR2_2M) / bmin)) + 2
+    mill, ks = [], []
+    for i in range(-nmax, nmax + 1):
+        for j in range(-nmax, nmax + 1):
+            for m in range(-nmax, nmax + 1):
+                kg = (np.array([i, j, m]) + kf) @ b_arr
+                if HBAR2_2M * (kg @ kg) <= ecut:
+                    mill.append([i, j, m])
+                    ks.append(kg)
+    return np.array(mill), np.array(ks)
+
+
 def radial_channel(l, El, r, dx, v, R):
     """``u_l``, ``u̇_l`` on the log mesh + value/slope at R, overlaps, weak-form kinetic (ℏ²2m), and
     potential integrals. ``d/dr = (1/r) d/dx`` on the log mesh; ``dr = r·dx``."""
@@ -115,11 +135,7 @@ def build_matrices(kfrac, L, R, lmax, El_by_l, ecut, r, dx, v):
     from scipy.special import eval_legendre
     vol = L**3
     b = 2 * math.pi / L
-    nmax = int(math.ceil(math.sqrt(ecut / HBAR2_2M) / b)) + 1
-    ks = [b * (np.array([i, j, m]) + np.asarray(kfrac))
-          for i in range(-nmax, nmax + 1) for j in range(-nmax, nmax + 1)
-          for m in range(-nmax, nmax + 1)]
-    ks = np.array([k for k in ks if HBAR2_2M * (k @ k) <= ecut])
+    _, ks = enumerate_kg(kfrac, b * np.eye(3), ecut)
     npw = len(ks)
     knorm = np.linalg.norm(ks, axis=1)
     ksafe = np.maximum(knorm, 1e-12)
@@ -148,11 +164,7 @@ def build_matrices_multi(kfrac, L, atoms, lmax, ecut, r, dx, species):
     from scipy.special import eval_legendre
     vol = L**3
     b = 2 * math.pi / L
-    nmax = int(math.ceil(math.sqrt(ecut / HBAR2_2M) / b)) + 1
-    ks = [b * (np.array([i, j, m]) + np.asarray(kfrac))
-          for i in range(-nmax, nmax + 1) for j in range(-nmax, nmax + 1)
-          for m in range(-nmax, nmax + 1)]
-    ks = np.array([k for k in ks if HBAR2_2M * (k @ k) <= ecut])
+    _, ks = enumerate_kg(kfrac, b * np.eye(3), ecut)
     npw = len(ks)
     ksafe = np.maximum(np.linalg.norm(ks, axis=1), 1e-12)
     dkvec = ks[None, :, :] - ks[:, None, :]

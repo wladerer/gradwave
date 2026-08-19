@@ -173,11 +173,6 @@ def sphere_pseudocharge_lm(qlm, R: float, center, n: int, L, big_l: int,
     return out
 
 
-def sphere_pseudocharge_l2(q2m, R: float, center, n: int, L, npow: int = 4) -> np.ndarray:
-    """The l=2 case of ``sphere_pseudocharge_lm`` (kept as the historical entry point)."""
-    return sphere_pseudocharge_lm(q2m, R, center, n, L, 2, npow=npow)
-
-
 def radial_poisson_to_R(rho: np.ndarray, r: np.ndarray, R: float, drw=None) -> np.ndarray:
     """l=0 radial Poisson inside R with the density contained in R (ρ=0 beyond):
     ``V_part(r) = E2[(1/r)∫_0^r 4πρr'²dr' + ∫_r^R 4πρr'dr']``.
