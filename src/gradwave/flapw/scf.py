@@ -25,14 +25,16 @@ from gradwave.constants import BOHR_ANG, E2, HBAR2_2M
 from gradwave.flapw.atom import CONFIG, atomic_scf
 from gradwave.flapw.coulomb import (
     _min_image_dist,
+    _min_image_vec,
     cell_matrix,
     fft_poisson,
     radial_poisson_to_R,
     reciprocal,
     sphere_pseudocharge,
+    sphere_pseudocharge_l2,
 )
 from gradwave.flapw.functionals import vxc_lda
-from gradwave.flapw.lapw import ball_ff_np, match_ab, radial_channel, solve_geneig
+from gradwave.flapw.lapw import ball_ff_np, match_ab_vec, radial_channel, solve_geneig
 from gradwave.flapw.mixing import anderson_next
 from gradwave.flapw.radial import log_mesh, numerov_log_np, radial_eigs_tridiag
 from gradwave.kpoints import monkhorst_pack
@@ -101,7 +103,7 @@ def _lapw_k(kfrac, L, R, lmax, El, ecut, r, dx, v_sphere):
     abl = {}
     for lang in range(lmax + 1):
         ch = radial_channel(lang, El[lang], r, dx, v_sphere, R)
-        ab = np.array([match_ab(ch, ksafe[g], R) for g in range(npw)])
+        ab = np.stack(match_ab_vec(ch, ksafe, R), axis=1)
         abl[lang] = ab
         a, bb = ab[:, 0], ab[:, 1]
         aa, bbo = np.outer(a, a), np.outer(bb, bb)
@@ -263,7 +265,7 @@ def crystal_scf(a_bohr: float, symbol: str = "Ne", R: float = 1.4, ecut: float =
     return conv, at
 
 
-def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=None):
+def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=None, chan=None):
     """Multi-atom LAPW at wavevector k, exposing the density internals the SCF needs. Returns
     ``(eigvals, eigvecs, miller, ks, [abl per atom], vol)``. H,S are complex Hermitian (structure
     phases ``e^{i(k_G'-k_G)·τ_a}``). ``atoms_cart`` = ``[(τ_cart, species_key), ...]``.
@@ -271,7 +273,12 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
     ``v_nsph`` (optional) = ``{species_key: {(L,M): V_LM(r) in-sphere}}`` — the non-spherical
     (full-potential) sphere potential components (harmonic coefficients, ``V(r,Ω)=Σ V_LM Y_LM``).
     Their L>0 parts add the l-channel coupling ``⟨u_l Y_lm|V_LM Y_LM|u_l' Y_l'm'⟩`` to H (the L=0
-    spherical part is already in the muffin tin). ``None`` → muffin-tin (backward compatible)."""
+    spherical part is already in the muffin tin). ``None`` → muffin-tin (backward compatible).
+
+    ``chan`` (optional) = precomputed ``{species_key: {l: radial_channel}}``. The radial channels
+    are k-independent, so a caller sweeping a k-mesh builds them once per SCF iteration and passes
+    them in, instead of paying the Numerov + radial-integral cost again at every k. ``None`` →
+    build locally (backward compatible)."""
     from scipy.special import eval_legendre
     A = cell_matrix(L)
     B = reciprocal(A)                                     # rows = reciprocal vectors
@@ -294,8 +301,9 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
     dk_norm = np.linalg.norm(dkvec, axis=2)
     kdot = ks @ ks.T
     cost = np.clip(kdot / np.outer(ksafe, ksafe), -1.0, 1.0)
-    chan = {key: {lang: radial_channel(lang, sp["El"][lang], r, dx, sp["v"], sp["R"])
-                  for lang in range(lmax + 1)} for key, sp in species.items()}
+    if chan is None:
+        chan = {key: {lang: radial_channel(lang, sp["El"][lang], r, dx, sp["v"], sp["R"])
+                      for lang in range(lmax + 1)} for key, sp in species.items()}
     inter = np.eye(npw, dtype=complex)
     Saug = np.zeros((npw, npw), dtype=complex)
     Haug = np.zeros((npw, npw), dtype=complex)
@@ -307,7 +315,7 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
         abl = {}
         for lang in range(lmax + 1):
             ch = chan[key][lang]
-            ab = np.array([match_ab(ch, ksafe[g], R) for g in range(npw)])
+            ab = np.stack(match_ab_vec(ch, ksafe, R), axis=1)
             abl[lang] = ab
             a, bb = ab[:, 0], ab[:, 1]
             aa, bbo = np.outer(a, a), np.outer(bb, bb)
@@ -393,6 +401,21 @@ def _weinert_multi(rho_I, spheres, L, nfft):
         q_i_in = float(rho_I[inside].sum() * dvol)
         net = q_sph - sp["Z"] - q_i_in           # net charge: electrons − nucleus − interstitial-in
         rho_smooth += sphere_pseudocharge(net, sp["R"], sp["tau"], nfft, A, npow=4)
+        if sp.get("rho_2m") is not None:
+            # Weinert l=2: match the sphere quadrupole moment so the interstitial FFT potential
+            # carries the inter-atomic l=2 (lattice EFG) field.
+            from scipy.special import sph_harm_y
+            rr4w = sp["rr"] ** 4 * drw
+            q2 = {mm: complex(np.sum(sp["rho_2m"][(2, mm)] * rr4w)) for mm in range(-2, 3)}
+            disp = _min_image_vec(cfrac, nfft, A)
+            dv = np.linalg.norm(disp, axis=-1)
+            dsafe = np.where(dv < 1e-12, 1.0, dv)
+            th = np.arccos(np.clip(disp[..., 2] / dsafe, -1.0, 1.0))
+            ph = np.arctan2(disp[..., 1], disp[..., 0])
+            for mm in range(-2, 3):              # subtract the interstitial density's l=2 inside R
+                yc = np.conj(sph_harm_y(2, mm, th, ph))
+                q2[mm] -= complex(np.sum(rho_I[inside] * dv[inside] ** 2 * yc[inside]) * dvol)
+            rho_smooth += sphere_pseudocharge_l2(q2, sp["R"], sp["tau"], nfft, A)
     v_grid = fft_poisson(rho_smooth, A)
     v_i0 = float(v_grid[~inside_any].mean())
     v_sph_list = []
@@ -504,16 +527,20 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
         # pass 1 — solve every k, keep the results; pass 2 — occupy and accumulate the density.
         npad = max(2, nbands // 2) if smearing > 0 else 0
         nb_solve = nbands + npad
+        # radial channels are k-independent — build once per iteration, reuse across the k-mesh.
+        chan = {key: {lang: radial_channel(lang, sp["El"][lang], r, dx, sp["v"], sp["R"])
+                      for lang in range(lmax + 1)} for key, sp in species.items()}
         kdata, ev_all, ev_gamma = [], [], None
         for kf, w in zip(kfracs, kw, strict=True):
-            res = _lapw_multi_k(kf, A, acart, species, lmax, ecut, r, dx, nb_solve, v_nsph=v_nsph)
+            res = _lapw_multi_k(kf, A, acart, species, lmax, ecut, r, dx, nb_solve,
+                                v_nsph=v_nsph, chan=chan)
             kdata.append((kf, w, res))
             ev_all.append(res[0])
             if np.all(np.abs(kf) < 1e-9):
                 ev_gamma = res[0]
         if ev_gamma is None:
             ev_gamma = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx, nb_solve,
-                                     v_nsph=v_nsph)[0]
+                                     v_nsph=v_nsph, chan=chan)[0]
         ev_all = np.array(ev_all)
 
         e_fermi = None
@@ -559,7 +586,8 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
                 rho_core += fc * uc[mask, 0] ** 2 / (4 * math.pi * rr**2)
             rho_sph_by_key[k] = rho_val[k] + rho_core
             spheres.append({"tau": acart[ai][0], "rr": rr, "dx": dx,
-                            "rho_sph": rho_sph_by_key[k], "Z": CONFIG[s][0], "R": R_by_key[k]})
+                            "rho_sph": rho_sph_by_key[k], "Z": CONFIG[s][0], "R": R_by_key[k],
+                            "rho_2m": rho_2m[k] if (fullpot or efg) else None})
         v_sph_list, v_i0, v_grid = _weinert_multi(rho_I, spheres, A, nfft)
 
         if fullpot:

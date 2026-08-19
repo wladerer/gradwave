@@ -86,6 +86,23 @@ def match_ab(ch, q, R):
     return a, b
 
 
+def match_ab_vec(ch, q, R):
+    """Value+slope match over a whole array of ``q=|k+G|`` at once — the vectorized ``match_ab``.
+    One batched ``spherical_jn`` per l replaces one scalar scipy call per plane wave (the LAPW
+    build's hot loop). Returns ``(a, b)`` arrays. Bit-identical to looping ``match_ab``."""
+    from scipy.special import spherical_jn
+    l = ch["l"]
+    q = np.asarray(q, dtype=float)
+    x = q * R
+    jl = spherical_jn(l, x)
+    djl = -spherical_jn(1, x) if l == 0 else (spherical_jn(l - 1, x) - (l + 1) / x * jl)
+    tval, tslope = R * jl, jl + R * q * djl
+    w = ch["uR"] * ch["udpR"] - ch["upR"] * ch["udR"]
+    a = (tval * ch["udpR"] - tslope * ch["udR"]) / w
+    b = (ch["uR"] * tslope - ch["upR"] * tval) / w
+    return a, b
+
+
 def _accumulate(H, S, ch, a, bb, aa, ab_s, bbo, pref):
     Ms = aa * ch["uu"] + ab_s * ch["uud"] + bbo * ch["udud"]
     Tk = aa * ch["Tuu"] + ab_s * ch["Tuud"] + bbo * ch["Tudud"]
@@ -114,8 +131,7 @@ def build_matrices(kfrac, L, R, lmax, El_by_l, ecut, r, dx, v):
     H = HBAR2_2M * kdot * inter
     for lang in range(lmax + 1):
         ch = radial_channel(lang, El_by_l[lang], r, dx, v, R)
-        ab = np.array([match_ab(ch, ksafe[g], R) for g in range(npw)])
-        a, bb = ab[:, 0], ab[:, 1]
+        a, bb = match_ab_vec(ch, ksafe, R)
         aa, bbo = np.outer(a, a), np.outer(bb, bb)
         ab_s = np.outer(a, bb) + np.outer(bb, a)
         pref = (4 * math.pi / vol) * (2 * lang + 1) * eval_legendre(lang, cost)
@@ -156,8 +172,7 @@ def build_matrices_multi(kfrac, L, atoms, lmax, ecut, r, dx, species):
         Sa = np.zeros((npw, npw), dtype=complex)
         for lang in range(lmax + 1):
             ch = chan[key][lang]
-            ab = np.array([match_ab(ch, ksafe[g], R) for g in range(npw)])
-            a, bb = ab[:, 0], ab[:, 1]
+            a, bb = match_ab_vec(ch, ksafe, R)
             aa, bbo = np.outer(a, a), np.outer(bb, bb)
             ab_s = np.outer(a, bb) + np.outer(bb, a)
             Ms = aa * ch["uu"] + ab_s * ch["uud"] + bbo * ch["udud"]

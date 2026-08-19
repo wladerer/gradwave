@@ -74,15 +74,27 @@ def gaunt_matrix(l, big_l, big_m, lp, nx: int = 16, nphi: int = 24):
     return g
 
 
-def sphere_density_multipoles(amps, us, lmax, lset, nx: int = 16, nphi: int = 24):
+def sphere_density_multipoles(amps, us, lmax, lset, nx: int | None = None,
+                              nphi: int | None = None):
     """Aspherical density components ``ρ_LM(r)`` inside a sphere by angular projection of ``|ψ|²``.
 
     ``amps`` = list over occupied states of ``(f, a, b)`` with occupation ``f`` and amplitude dicts
     ``a[l]``, ``b[l]`` each ``(2l+1,)`` complex (the ``u_l`` and ``u̇_l`` coefficients, m=-l..l).
     ``us`` = ``{l: (u_l, u̇_l)}`` radial functions on the in-sphere mesh (each ``(nr,)``).
     Returns ``{(L,M): ρ_LM(r)}`` (complex ``(nr,)``) for every ``(L,M)`` in ``lset``.
+
+    ``nx``/``nphi`` default (``None``) to the smallest grid that integrates the projector exactly:
+    ``|ψ|²`` has angular degree ``2·lmax``, so ``|ψ|²·Y*_LM`` is a polynomial of degree
+    ``2·lmax + max(L)`` — Gauss-Legendre ``nx`` is exact to ``2nx-1``, and the uniform ``φ`` rule is
+    exact for azimuthal orders below ``nphi``. This is bit-exact vs an over-resolved grid.
     """
     from scipy.special import sph_harm_y
+    max_l = max((lang for (lang, _) in lset), default=0)
+    deg = 2 * lmax + max_l
+    if nx is None:
+        nx = deg // 2 + 1                                 # GL exact to 2nx-1 >= deg
+    if nphi is None:
+        nphi = deg + 1                                    # uniform φ exact for orders < nphi
     th, ph, wgt = _angular_grid(nx, nphi)
     ylm = {(l, m): sph_harm_y(l, m, th, ph)
            for l in range(lmax + 1) for m in range(-l, l + 1)}

@@ -114,6 +114,53 @@ def sphere_pseudocharge(q00: float, R: float, center, n: int, L, npow: int = 4) 
     return shape * (q00 / norm)
 
 
+def _min_image_vec(cfrac, n, A):
+    """The Cartesian minimum-image displacement vector (n,n,n,3) from fractional centre ``cfrac`` to
+    each ``n³`` grid point — the vector form of ``_min_image_dist`` (needed for angular shapes)."""
+    fi = np.arange(n) / n
+    fx, fy, fz = np.meshgrid(fi, fi, fi, indexing="ij")
+    df = np.stack([fx - cfrac[0], fy - cfrac[1], fz - cfrac[2]], axis=-1)
+    df -= np.round(df)
+    metric = A @ A.T
+    if np.allclose(metric - np.diag(np.diag(metric)), 0.0):
+        return df @ A
+    disp = (df @ A)
+    best = (disp ** 2).sum(-1)
+    for s in itertools.product((-1, 0, 1), repeat=3):
+        if s == (0, 0, 0):
+            continue
+        rc = (df + np.asarray(s)) @ A
+        d2 = (rc ** 2).sum(-1)
+        m = d2 < best
+        disp = np.where(m[..., None], rc, disp)
+        best = np.minimum(best, d2)
+    return disp
+
+
+def sphere_pseudocharge_l2(q2m, R: float, center, n: int, L, npow: int = 4) -> np.ndarray:
+    """Smooth l=2 pseudocharge on the grid matching the sphere's l=2 charge moments
+    ``q2m = {M: Q_2M}`` (M=-2..2): ``ρ̃(r,Ω) = Σ_M c_M d²(1-(d/R)²)^npow Y_2M(Ω)`` with
+    ``c_M = Q_2M / (R⁷ ∫_0^1 x⁶(1-x²)^npow dx)`` so its l=2 moment is ``Q_2M``. This is the l=2 part
+    of Weinert's pseudocharge — matching it (not just the l=0 monopole) makes the interstitial FFT
+    potential carry each sphere's quadrupole field, i.e. the inter-atomic l=2 (lattice) EFG term."""
+    from scipy.special import sph_harm_y
+    a = cell_matrix(L)
+    disp = _min_image_vec(np.asarray(center) @ np.linalg.inv(a), n, a)
+    d = np.linalg.norm(disp, axis=-1)
+    inside = d < R
+    ds = np.where(d < 1e-12, 1.0, d)
+    theta = np.arccos(np.clip(disp[..., 2] / ds, -1.0, 1.0))
+    phi = np.arctan2(disp[..., 1], disp[..., 0])
+    x = np.linspace(0.0, 1.0, 4000)
+    i_n = float(np.trapezoid(x**6 * (1 - x**2) ** npow, x))     # ∫_0^1 x⁶(1-x²)^npow dx
+    radial = np.where(inside, d**2 * (1 - (d / R) ** 2) ** npow, 0.0)
+    out = np.zeros(d.shape)
+    for m in range(-2, 3):
+        c_m = q2m[m] / (R**7 * i_n)
+        out = out + (c_m * radial * sph_harm_y(2, m, theta, phi)).real
+    return out
+
+
 def radial_poisson_to_R(rho: np.ndarray, r: np.ndarray, R: float, drw=None) -> np.ndarray:
     """l=0 radial Poisson inside R with the density contained in R (ρ=0 beyond):
     ``V_part(r) = E2[(1/r)∫_0^r 4πρr'²dr' + ∫_r^R 4πρr'dr']``.
