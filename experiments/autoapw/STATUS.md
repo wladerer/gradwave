@@ -172,9 +172,16 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
              open-shell element (plumbing). REMAINING: multipole-matched Weinert pseudocharge (for the
              step-2b inter-atomic l=2 term).
       The EFG analytical pipeline is complete: aspherical density → l=2 Poisson + boundary → V_zz
-      tensor → non-spherical H → self-consistent full-potential. Only plumbing + benchmark remain.
-      [ ] plumbing: real open-shell elements (Ti/O/Cu…) beyond He/Be/Ne; a benchmark (TiO2/Zn/Ti) vs
-          WIEN2k/Elk. Then differentiable EFG (∂C_Q/∂structure) — the AutoAPW-specific payoff.
+      tensor → non-spherical H → self-consistent full-potential.
+      [x] NMR OBSERVABLE (end to end): `nmr.quadrupolar_coupling` V_zz(eV/Å²)→C_Q via
+          C_Q[MHz]=2.4180·Q[barn]·V_zz (the 234.965 a.u. relation, cross-checked) + NUCLEAR_Q table.
+          Open-shell O (2p⁴) added to CONFIG. WORKING SIM: tetragonal O (a p-hole, symmetry-broken
+          even at c/a=1) → V_zz≈-46 eV/Å², η tracks the c/a distortion (0 axial → 0.06), C_Q(¹⁷O)≈2.9
+          MHz (physical 1-15 MHz range). Demo `examples/flapw_oxygen_nmr.py` (c/a scan + plot); unit +
+          slow integration tests. NOTE: NOT yet calibrated vs WIEN2k on a real material.
+      [ ] plumbing/benchmark: more open-shell elements (Ti/Al/Na…); a real material (TiO2/α-quartz/
+          corundum) vs WIEN2k to calibrate C_Q quantitatively. Then differentiable EFG
+          (∂C_Q/∂structure) — the AutoAPW-specific payoff.
 - [ ] Chemical shielding σ (all nuclei) — GIPAW magnetic linear response; a separate large subsystem.
 - [ ] Remaining for a real material vs Elk: a real ionic/metallic case + its Elk reference.
 - [ ] Then #1 DualBasis oxygen gate; then benchmark; then SlepianCore (slabs/molecular crystals).
