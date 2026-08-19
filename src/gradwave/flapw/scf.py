@@ -43,14 +43,17 @@ from gradwave.kpoints import monkhorst_pack
 # (1s/2p/3d…), 2 the next (2s/3p…), so an element with several core states of the same l (Ti's
 # [Ar] core: 1s2s3s, 2p3p) lists one entry each.
 _CORE = {"He": [], "Be": [(0, 1, 2)], "O": [(0, 1, 2)], "Ne": [(0, 1, 2)],
-         "Ti": [(0, 1, 2), (0, 2, 2), (0, 3, 2), (1, 1, 6), (1, 2, 6)]}   # [Ar] frozen core
-_N_VAL_BANDS = {"He": 1, "Be": 1, "O": 3, "Ne": 4, "Ti": 6}
-_VAL_E = {"He": 2, "Be": 2, "O": 6, "Ne": 8, "Ti": 4}   # valence electron count (Z − frozen core)
+         # Ti: freeze 1s2s3s2p; 3p is SEMICORE and stays in the valence (its EFG contribution is
+         # comparable to the valence one — frozen 3p gives a badly wrong Ti EFG). Only the l=1
+         # energy parameter linearizes at 3p (Ti 4p is empty), which captures the 3p response.
+         "Ti": [(0, 1, 2), (0, 2, 2), (0, 3, 2), (1, 1, 6)]}
+_N_VAL_BANDS = {"He": 1, "Be": 1, "O": 3, "Ne": 4, "Ti": 9}
+_VAL_E = {"He": 2, "Be": 2, "O": 6, "Ne": 8, "Ti": 10}  # valence electron count (Z − frozen core)
 # LAPW energy-parameter orbital per angular momentum: the crystal valence linearization point for
-# each l (the atomic KS eigenvalue used to build u_l/u̇_l). Second-row atoms use 2s/2p; Ti's
-# valence is 4s/4p/3d. A missing l (e.g. an empty 4p) falls back to a default in the SCF.
+# each l (the atomic KS eigenvalue used to build u_l/u̇_l). Second-row atoms use 2s/2p; Ti uses
+# 4s/3p/3d (l=1 at the 3p semicore, since 4p is empty). A missing l falls back to a default.
 _VALENCE_NL = {"He": {0: "1s"}, "Be": {0: "2s"}, "O": {0: "2s", 1: "2p"},
-               "Ne": {0: "2s", 1: "2p"}, "Ti": {0: "4s", 1: "4p", 2: "3d"}}
+               "Ne": {0: "2s", 1: "2p"}, "Ti": {0: "4s", 1: "3p", 2: "3d"}}
 
 
 def _ylm_star(l, ks):
