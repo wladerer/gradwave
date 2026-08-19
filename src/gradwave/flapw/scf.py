@@ -448,8 +448,18 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
             Haug += phase * (pref_l[lang] * (Tk + Vk))
         abl_by_atom.append(abl)
     if v_nsph:
-        Haug = Haug + _nonspherical_augment(v_nsph, atoms_cart, abl_by_atom, ks, species,
-                                            lmax, vol, r, dx, nsph_int=nsph_int)
+        if nsph_int is None:
+            nsph_int = _nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=lodat)
+        ylm_nsph = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
+        for ai, (tau, key) in enumerate(atoms_cart):
+            ints = nsph_int.get(key)
+            if not ints or not ints["uu"]:
+                continue
+            ph_a = np.exp(1j * (ks @ np.asarray(tau, dtype=float)))
+            cstk = _channel_stack(abl_by_atom[ai], ks, lmax, vol, ph_a, ylm_by_l=ylm_nsph)
+            # ONE triple product per atom replaces the per-(L,M,l,l') chained GEMMs (109x
+            # measured, equal to 2.5e-14; _nonspherical_augment kept as the reference impl)
+            Haug = Haug + cstk.conj() @ (ints["m_uu"] @ cstk.T)
     S = 0.5 * (inter + Saug + (inter + Saug).conj().T)
     Hm = HBAR2_2M * kdot * inter + Haug
     Hm = 0.5 * (Hm + Hm.conj().T)
@@ -549,8 +559,53 @@ def _nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=None):
                     if big_l < abs(li - lj) or big_l > li + lj or (li + lj + big_l) % 2:
                         continue
                     lo_lo[(big_l, big_m, i, j)] = np.sum(lo["phi"] * vlm * lo2["phi"] * drw)
-        out[key] = {"uu": uu, "lo_u": lo_u, "lo_lo": lo_lo}
+        out[key] = {"uu": uu, "lo_u": lo_u, "lo_lo": lo_lo,
+                    "m_uu": _nsph_coupling_matrix(uu, lmax)}
     return out
+
+
+def _nsph_coupling_matrix(ints_uu, lmax):
+    """The k-independent aspherical coupling matrix ``M`` over the stacked augmentation
+    channels ``[(l, m, u|udot)]`` (size ``2(lmax+1)^2``):
+    ``M[(l,m,X),(l',m',Y)] = Sum_LM  i_XY(L,M,l,l') * G^{LM}_{lm,l'm'}``. With the per-atom
+    channel amplitudes ``C`` (npw x n_ch), the whole non-spherical augmentation collapses to ONE
+    triple product ``dH = conj(C) @ M @ C.T`` per atom per k — replacing ~hundreds of chained
+    small GEMMs (one per (L,M,l,l',term)), which were the dominant fullpot glue cost. Built once
+    per iteration from the hoisted radial integrals."""
+    from gradwave.flapw.efg import gaunt_matrix
+    nlm = (lmax + 1) ** 2
+    n_ch = 2 * nlm
+    off = {}
+    o = 0
+    for lang in range(lmax + 1):
+        off[lang] = o
+        o += 2 * lang + 1
+    m = np.zeros((n_ch, n_ch), dtype=complex)
+    for (big_l, big_m, lang, lp), (i_aa, i_ab, i_ba, i_bb) in ints_uu.items():
+        g = gaunt_matrix(lang, big_l, big_m, lp)
+        r0, c0 = off[lang], off[lp]
+        m[r0:r0 + 2 * lang + 1, c0:c0 + 2 * lp + 1] += i_aa * g
+        m[r0:r0 + 2 * lang + 1, nlm + c0:nlm + c0 + 2 * lp + 1] += i_ab * g
+        m[nlm + r0:nlm + r0 + 2 * lang + 1, c0:c0 + 2 * lp + 1] += i_ba * g
+        m[nlm + r0:nlm + r0 + 2 * lang + 1, nlm + c0:nlm + c0 + 2 * lp + 1] += i_bb * g
+    return m
+
+
+def _channel_stack(abl_atom, ks, lmax, vol, ph, ylm_by_l=None):
+    """The stacked augmentation amplitudes ``C`` (npw x 2(lmax+1)^2): columns are the
+    ``B_lm(g)`` coefficients of ``u_l Y_lm`` (first (lmax+1)^2 columns) then ``udot_l Y_lm``,
+    matching ``_nsph_coupling_matrix``'s channel layout."""
+    nlm = (lmax + 1) ** 2
+    npw = len(ks)
+    c = np.empty((npw, 2 * nlm), dtype=complex)
+    o = 0
+    for lang in range(lmax + 1):
+        ylm = ylm_by_l[lang] if ylm_by_l is not None else _ylm_star(lang, ks)
+        pf = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
+        c[:, o:o + 2 * lang + 1] = pf * ylm * (abl_atom[lang][:, 0] * ph)[:, None]
+        c[:, nlm + o:nlm + o + 2 * lang + 1] = pf * ylm * (abl_atom[lang][:, 1] * ph)[:, None]
+        o += 2 * lang + 1
+    return c
 
 
 def _nonspherical_augment(v_nsph, atoms_cart, abl_by_atom, ks, species, lmax, vol, r, dx,
@@ -876,6 +931,11 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     conv = None
     v_nsph = None                                          # non-spherical potential (fullpot)
     r_nsph, beta_nsph = float("inf"), 0.3                  # aspherical-mix residual + step
+    # staged start: a cold fullpot SCF couples the spherical and aspherical loops from iteration 0
+    # and can diverge violently (observed: span bouncing 20 eV, r_v ~100). Converge the muffin-tin
+    # problem first, then switch the aspherical potential on from that state (what every
+    # well-behaved fullpot run implicitly did via warm-starting).
+    mt_phase = bool(fullpot)
     hist = {k: ([], []) for k in keys}
     c_prev_by_k = [None] * len(kfracs)
     for it in range(iters):
@@ -952,7 +1012,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
         # and the l=2 Weinert pseudocharge has zero monopole so it leaves v_sph untouched). So
         # accumulate it once after convergence (_efg_density_pass, below) instead of paying the
         # per-k sphere_density_multipoles at every SCF iteration.
-        if fullpot:
+        if fullpot and not mt_phase:
             from gradwave.flapw.efg import sphere_density_multipoles_bands
             us_by_key = {k: _us_ext(El_by_key[k], lmax, r, dx, vmt_by_key[k], R_by_key[k],
                                     (lodat or {}).get(k)) for k in keys}
@@ -984,7 +1044,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                                                 vol, r, dx, vmt_by_key[k], R_by_key[k],
                                                 lo_block=lo_block, los=los_k, ylm_by_l=ylm_by_l)
                 rho_val[k] += w * rk
-                if fullpot:
+                if fullpot and not mt_phase:
                     amps_all = _bands_amps(cp, ks, abl_all[ai], lmax, vol, lo_block=lo_block,
                                            los=los_k, ylm_by_l=ylm_by_l)
                     rlm = sphere_density_multipoles_bands(amps_all, occl, us_by_key[k], lmax,
@@ -1004,7 +1064,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                 for k in ok:
                     sym_dev = max(sym_dev, float(np.abs(rho_val[k] - avg).max()) / scale)
                     rho_val[k] = avg.copy()
-        if fullpot and d_ops is not None:               #   aspherical ρ_LM star-unfolded (Wigner-D)
+        if fullpot and not mt_phase and d_ops is not None:   # ρ_LM star-unfolded (Wigner-D)
             raw = rho_2m
             rho_2m = _symmetrize_rho_lm(rho_2m, keys, sg, d_ops)
             for k in keys:                              # residual of the projector = asymmetry,
@@ -1023,10 +1083,10 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
             rho_sph_by_key[k] = rho_val[k] + rho_core
             spheres.append({"tau": acart[ai][0], "rr": rr, "dx": dx,
                             "rho_sph": rho_sph_by_key[k], "Z": CONFIG[s][0], "R": R_by_key[k],
-                            "rho_2m": rho_2m[k] if fullpot else None})
+                            "rho_2m": rho_2m[k] if fullpot and not mt_phase else None})
         v_sph_list, v_i0, v_grid = _weinert_multi(rho_I, spheres, A, nfft)
 
-        if fullpot:
+        if fullpot and not mt_phase:
             from gradwave.flapw.efg import (
                 interstitial_boundary_multi,
                 lx_sphere_poisson,
@@ -1094,6 +1154,10 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                   f"r_nsph={rn} symdev={sd} b_nsph={beta_nsph:.2f} "
                   f"[{'exact' if full_iter else 'subsp'}] {time.time() - t_it:5.1f}s",
                   flush=True)
+        if mt_phase and full_iter and d_span < 3 * tol:
+            mt_phase = False                       # spherical loop settled -> enable fullpot
+            if verbose:
+                print("  flapw: muffin-tin phase converged -> fullpot on", flush=True)
         nsph_ok = (not fullpot) or (r_nsph < 0.05)
         if conv is not None and full_iter and nsph_ok and d_span < tol:
             conv = new
