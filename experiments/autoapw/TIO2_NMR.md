@@ -297,3 +297,16 @@ DECISIVE ACCEPTANCE = the TiO2 matrix (closed-shell insulator, Elk ref): (a) r_n
 (b) base/fp6/k444 magnitudes mutually consistent (no 6x runaway), (c) O near the physical basin
 (~14-19 vs Elk 19.1). Matrix running on the full fixed chain (Gram + own-field + joint Anderson +
 staged + exact solves).
+
+## SLEDGEHAMMER (de93344): true full-potential interstitial
+User called the incrementalism; the audit agreed. Landed together: (1) warped-interstitial H
+matrix elements FT[(V_I-v_i0)·Θ_I](G-G') (Toeplitz-indexed, one FFT/iter) — the standard FLAPW
+term we NEVER had ("constant in the interstitial" was in the docstring all along); (2) interstitial
+XC (previously ZERO — a potential discontinuity at every R_MT); (3) unified metric-weighted
+Anderson over (v_sph ⊕ v_nsph ⊕ interstitial grid) in the L2 measure (√r²dr, √dvol) — the
+principled scale-weighting; the interstitial was previously entirely UNMIXED and drove boundary
+conditions at full amplitude; (4) r_v < 0.1 eV added to the convergence gate. MR suite green;
+nulls at a new 3e-5 floor (warp band-limitation); dilute Ne unchanged (empty interstitial).
+Pre-sledgehammer matrix (for the record): no config reached the gate, TiLO still found the
+runaway — incremental fixes necessary but insufficient. ACCEPTANCE = the TiO2 matrix now running:
+gates green + config-consistent magnitudes + O toward Elk 19.1.
