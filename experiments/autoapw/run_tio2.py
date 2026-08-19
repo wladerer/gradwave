@@ -1,10 +1,18 @@
 """gradwave FLAPW EFG for rutile TiO2 — validate vs Elk (experiments/autoapw/TIO2_NMR.md).
-Usage: uv run python experiments/autoapw/run_tio2.py [ecut] [kx ky kz] [iters]"""
+Usage: uv run python experiments/autoapw/run_tio2.py [ecut] [kx ky kz] [iters] [fp] [smear] [rO] [rTi]"""
 import sys
 import time
 
+import numpy as np
+
 from gradwave.flapw import crystal_scf_multi
 from gradwave.flapw.nmr import quadrupolar_coupling
+
+
+def evals(site):
+    """The three EFG principal values (eV/Å^2), sorted by descending magnitude (V_zz, V_yy, V_xx)."""
+    w = np.linalg.eigvalsh(site["tensor"])
+    return w[np.argsort(-np.abs(w))]
 
 ecut = float(sys.argv[1]) if len(sys.argv) > 1 else 320.0
 kmesh = tuple(int(x) for x in sys.argv[2:5]) if len(sys.argv) > 4 else (2, 2, 3)
@@ -27,12 +35,14 @@ bands, info = crystal_scf_multi(a_bohr, atoms, radii, ecut=ecut, lmax=2, iters=i
 dt = time.time() - t0
 print(f"TiO2 ecut={ecut} kmesh={kmesh} iters={iters} fullpot={fullpot}: "
       f"{dt:.1f}s, e_fermi={info.get('e_fermi')}")
-# Elk ref: Ti V_zz=19.34 eV/Å^2 eta=0.36 C_Q(49Ti)=11.5 ; O V_zz=19.1 eta=0.74 C_Q(17O)=1.18
+# Elk ref eigenvalues (eV/Å^2, |V_zz|>|V_yy|>|V_xx|): Ti [+19.34,-13.16,-6.18] eta 0.36;
+#                                                     O  [-19.1, +16.6, +2.5] eta 0.74
 ti = info["efg"]["a0"]
 o = info["efg"]["a2"]
+et, eo = evals(ti), evals(o)
 cq_ti = quadrupolar_coupling(ti["V_zz"], ti["eta"], "49Ti")
 cq_o = quadrupolar_coupling(o["V_zz"], o["eta"], "17O")
-print(f"  Ti: V_zz={ti['V_zz']:+.3f} eV/A2 (Elk 19.34)  eta={ti['eta']:.3f} (0.36)  "
-      f"val={ti['V_zz_valence']:+.3f}  C_Q(49Ti)={cq_ti['abs_C_Q_MHz']:.2f} MHz (Elk 11.5)")
-print(f"  O : V_zz={o['V_zz']:+.3f} eV/A2 (Elk 19.1)   eta={o['eta']:.3f} (0.74)  "
-      f"val={o['V_zz_valence']:+.3f}  C_Q(17O)={cq_o['abs_C_Q_MHz']:.3f} MHz (Elk 1.18)")
+print(f"  Ti: evals=[{et[0]:+.2f},{et[1]:+.2f},{et[2]:+.2f}] eta={ti['eta']:.3f} "
+      f"C_Q(49Ti)={cq_ti['abs_C_Q_MHz']:.2f}  | Elk [+19.34,-13.16,-6.18] 0.36 11.5")
+print(f"  O : evals=[{eo[0]:+.2f},{eo[1]:+.2f},{eo[2]:+.2f}] eta={o['eta']:.3f} "
+      f"C_Q(17O)={cq_o['abs_C_Q_MHz']:.3f}  | Elk [-19.10,+16.60,+2.50] 0.74 1.18")
