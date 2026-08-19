@@ -143,3 +143,14 @@ was an lmax artifact. Testing lmax=4 (decisive: if ~lmax3 then fullpot converges
 was the artifact; if different, fullpot is just lmax-broken). LESSON: always check lmax convergence for
 a full-potential EFG; a single lmax is not enough. My non-spherical potential is l=2-only (Elk uses
 lmax~8); mismatched potential-lmax vs augmentation-lmax is the likely instability source.
+
+## lmax-CONVERGED verdict (decisive): fullpot O |V_zz| = lmax2 14.1 / lmax3 4.4 / lmax4 4.5 -> ~4.5
+lmax3 ~= lmax4 => fullpot CONVERGES in lmax to |V_zz|~4.5, eta~0.76 (=Elk 0.74). lmax2=14 was the
+artifact. FINAL HONEST O RESULT: eta correct (0.76 vs Elk 0.74) but MAGNITUDE ~4.5 = 24% of Elk 19.1,
+C_Q(17O) ~0.28 MHz (Elk 1.18, exp 1.8). The fullpot antishielding does NOT lift the magnitude at
+converged lmax (~4.5 = muffin-tin ballpark). The ~4x magnitude deficit is real: under-captured O 2p
+asphericity/covalency (my LAPW over-ionizes O2- toward spherical 2p6, cf BeO; Elk's LOs+high-lmax
+capture more covalency). muffin-tin is itself lmax-sensitive too (k446: lmax2 4.31, lmax3 7.41). NET:
+gradwave FLAPW reproduces the EFG SHAPE (eta) of a reference code but under-estimates the MAGNITUDE ~4x
+for this oxide — a genuine method/basis limitation, not a convergence knob. Ti also fails (core response
+missing). This is the honest state; earlier "82% converging to Elk" was an lmax=2 artifact, retracted.
