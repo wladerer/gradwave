@@ -256,6 +256,30 @@ def _band_amps(cp, ks, abl, lmax, vol, lo_coeff=None, los=None, ylm_by_l=None):
     return out
 
 
+def _bands_amps(c_pw, ks, abl, lmax, vol, lo_block=None, los=None, ylm_by_l=None):
+    """All-band sphere amplitudes ``{l: [(nb, 2l+1) per radial]}`` — one GEMM per (l, radial)
+    over every band at once instead of a Python loop of per-band reductions (``_band_amps`` row by
+    row; equivalent to machine precision, the summation order differs). ``c_pw`` = phased PW
+    coefficients ``(npw, nb)``; ``lo_block`` = this atom's LO rows ``(nlo_atom, nb)``."""
+    slices = _lo_row_slices(los)
+    out = {}
+    for lang in range(lmax + 1):
+        ylm = ylm_by_l[lang] if ylm_by_l is not None else _ylm_star(lang, ks)
+        a, bb = abl[lang][:, 0], abl[lang][:, 1]
+        pfac = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
+        amp_a = pfac * ((c_pw * a[:, None]).T @ ylm)          # (nb, npw) @ (npw, 2l+1)
+        amp_b = pfac * ((c_pw * bb[:, None]).T @ ylm)
+        amps = [amp_a, amp_b]
+        if lang in slices:
+            lo0, lo1, lo = slices[lang]
+            cv = lo_block[lo0:lo1, :].T                       # (nb, 2l+1)
+            amps[0] = amps[0] + cv * lo["a"]
+            amps[1] = amps[1] + cv * lo["b"]
+            amps.append(cv * lo["cn"])
+        out[lang] = amps
+    return out
+
+
 def _us_ext(El, lmax, r, dx, v_sphere, R, los=None):
     """The per-l radial-function lists ``[u, u̇ (, u₂)]`` matching ``_band_amps``' amplitudes."""
     slices = _lo_row_slices(los)
@@ -274,28 +298,19 @@ def _sphere_valence_density(c_occ, occ, ks, abl, El, lmax, vol, r, dx, v_sphere,
     rr = r.numpy()[r.numpy() <= R]
     us = _us_ext(El, lmax, r, dx, v_sphere, R, los)
     rho = np.zeros_like(rr)
-    nb = len(occ)
     if ylm_by_l is None:
         ylm_by_l = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
-    amps_by_band = [
-        _band_amps(c_occ[:, n], ks, abl, lmax, vol,
-                   lo_coeff=(lo_block[:, n] if lo_block is not None else None), los=los,
-                   ylm_by_l=ylm_by_l)
-        for n in range(nb) if occ[n] != 0
-    ]
-    occs = [f for f in occ if f != 0]
+    amps_all = _bands_amps(c_occ, ks, abl, lmax, vol, lo_block=lo_block, los=los,
+                           ylm_by_l=ylm_by_l)
+    occ_arr = np.asarray(occ, dtype=float)
     for lang in range(lmax + 1):
         rads = us[lang]
+        al = amps_all[lang]
         nrf = len(rads)
-        pmat = np.zeros((nrf, nrf))
-        for f, amps in zip(occs, amps_by_band, strict=True):
-            al = amps[lang]
-            for i in range(nrf):
-                for j in range(nrf):
-                    pmat[i, j] += f * float(np.sum((np.conj(al[i]) * al[j]).real))
         for i in range(nrf):
             for j in range(nrf):
-                rho += (1.0 / (4 * math.pi)) * pmat[i, j] * rads[i] * rads[j] / rr**2
+                pij = float(np.sum(occ_arr[:, None] * (np.conj(al[i]) * al[j]).real))
+                rho += (1.0 / (4 * math.pi)) * pij * rads[i] * rads[j] / rr**2
     return rr, rho
 
 
@@ -432,9 +447,10 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
     mill, ks = np.array(mill), np.array(ks)
     npw = len(ks)
     ksafe = np.maximum(np.linalg.norm(ks, axis=1), 1e-12)
-    dkvec = ks[None, :, :] - ks[:, None, :]
-    dk_norm = np.linalg.norm(dkvec, axis=2)
     kdot = ks @ ks.T
+    kk = np.einsum("ij,ij->i", ks, ks)
+    # |k_G - k_G'| from kdot (no (npw,npw,3) displacement tensor): |dk|² = k² + k'² - 2 k·k'
+    dk_norm = np.sqrt(np.maximum(kk[:, None] + kk[None, :] - 2.0 * kdot, 0.0))
     cost = np.clip(kdot / np.outer(ksafe, ksafe), -1.0, 1.0)
     if chan is None:
         chan = {key: {lang: radial_channel(lang, sp["El"][lang], r, dx, sp["v"], sp["R"])
@@ -442,11 +458,20 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
     inter = np.eye(npw, dtype=complex)
     Saug = np.zeros((npw, npw), dtype=complex)
     Haug = np.zeros((npw, npw), dtype=complex)
+    # atom-independent geometry: Legendre prefactors per l, ball form factor per unique R
+    pref_l = {lang: (4 * math.pi / vol) * (2 * lang + 1) * eval_legendre(lang, cost)
+              for lang in range(lmax + 1)}
+    ballf = {}
     abl_by_atom = []
     for tau, key in atoms_cart:
         R = species[key]["R"]
-        phase = np.exp(1j * (dkvec @ np.asarray(tau, dtype=float)))
-        inter -= (ball_ff_np(dk_norm, R) / vol) * phase
+        # e^{i(k_G'-k_G)·τ} factorizes exactly: outer(conj(p), p) with p = e^{i k_G·τ} — npw
+        # exponentials instead of npw² (the npw² exp was a top build cost).
+        pvec = np.exp(1j * (ks @ np.asarray(tau, dtype=float)))
+        phase = np.conj(pvec)[:, None] * pvec[None, :]
+        if R not in ballf:
+            ballf[R] = ball_ff_np(dk_norm, R) / vol
+        inter -= ballf[R] * phase
         abl = {}
         for lang in range(lmax + 1):
             ch = chan[key][lang]
@@ -458,9 +483,8 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
             Ms = aa * ch["uu"] + ab_s * ch["uud"] + bbo * ch["udud"]
             Tk = aa * ch["Tuu"] + ab_s * ch["Tuud"] + bbo * ch["Tudud"]
             Vk = aa * ch["Vuu"] + ab_s * ch["Vuud"] + bbo * ch["Vudud"]
-            pref = (4 * math.pi / vol) * (2 * lang + 1) * eval_legendre(lang, cost)
-            Saug += phase * (pref * Ms)
-            Haug += phase * (pref * (Tk + Vk))
+            Saug += phase * (pref_l[lang] * Ms)
+            Haug += phase * (pref_l[lang] * (Tk + Vk))
         abl_by_atom.append(abl)
     if v_nsph:
         Haug = Haug + _nonspherical_augment(v_nsph, atoms_cart, abl_by_atom, ks, species,
@@ -700,6 +724,29 @@ def _weinert_multi(rho_I, spheres, L, nfft):
     return v_sph_list, v_i0, v_grid
 
 
+def _occ_degenerate_aware(ev, nbands, tol=1e-3):
+    """T→0 occupations that respect degeneracies: filled bands get 2; if the filling boundary
+    cuts a degenerate group (levels within ``tol`` eV), the remaining electrons are spread EQUALLY
+    over the group — the symmetry-invariant subspace-trace density. Winner-take-all filling of a
+    partially-occupied degenerate manifold lets the diagonalizer's arbitrary in-subspace basis
+    choose where charge goes; SCF feedback then locks in a spuriously symmetry-broken, basin-
+    dependent state (observed: translation-equivalent atoms disagreeing by 40% in the EFG). For a
+    clean-gap insulator this reduces exactly to the old fill-lowest-nbands behaviour."""
+    ev = np.asarray(ev)
+    occ = np.zeros(len(ev))
+    electrons = 2.0 * nbands
+    i = 0
+    while i < len(ev) and electrons > 1e-12:
+        j = i + 1
+        while j < len(ev) and ev[j] - ev[j - 1] < tol:    # extend the degenerate group
+            j += 1
+        fill = min(2.0 * (j - i), electrons)
+        occ[i:j] = fill / (j - i)
+        electrons -= fill
+        i = j
+    return occ
+
+
 def _fermi_level(ev_all, w_all, nelec, kT):
     """Bisect the Fermi energy: ``Σ_k w_k Σ_n 2·f_FD((E_F-ε)/kT) = nelec`` (weights sum to 1)."""
     ev_all = np.asarray(ev_all)
@@ -722,7 +769,8 @@ def _fermi_level(ev_all, w_all, nelec, kT):
 def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
                       iters: int = 40, tol: float = 3e-3, kmesh=(1, 1, 1), smearing: float = 0.0,
                       efg: bool = False, fullpot: bool = False, use_symmetry: bool = True,
-                      fullpot_lmax: int = 2, los=None, val_e=None, core=None, el_override=None):
+                      fullpot_lmax: int = 2, los=None, val_e=None, core=None, el_override=None,
+                      v_start=None, kworkers: int = 1):
     """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
     ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
@@ -745,11 +793,12 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     checked for convergence (odd L are included — a site without inversion symmetry has L=1,3
     components that polarize the valence). ``fullpot=False`` is the muffin-tin scheme.
 
-    ``use_symmetry`` (default True, muffin-tin runs only) reduces the k-mesh to the irreducible
-    wedge and resymmetrizes the density each iteration to restore the full-BZ symmetry the reduced
-    sum drops — the interstitial density in G-space (``RhoSymmetrizer``) and the muffin-tin density
-    by averaging symmetry-equivalent atoms. Falls back to the full mesh if the space group can't be
-    built. Disabled for ``fullpot`` (its aspherical potential would need l>0 star-unfolding).
+    ``use_symmetry`` (default True) reduces the k-mesh to the irreducible wedge and resymmetrizes
+    the density each iteration to restore the full-BZ symmetry the reduced sum drops — the
+    interstitial density in G-space (``RhoSymmetrizer``), the muffin-tin density by averaging
+    symmetry-equivalent atoms, and the aspherical multipoles by the Wigner-D group average
+    (``_symmetrize_rho_lm`` — the l>0 star-unfolding, so ``fullpot`` and the EFG run on the wedge
+    too). Falls back to the full mesh if the space group can't be built.
 
     ``los`` = ``{symbol: [(l, spec), ...]}`` adds LAPW+LO local orbitals per species — confined
     ``φ = a·u(E_l)+b·u̇(E_l)+c·u(E₂)`` with ``φ(R)=φ'(R)=0`` — for semicore states (Ti 3s/3p) or
@@ -758,7 +807,19 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     ``val_e = {symbol: n}`` and drop the state from the frozen core with ``core = {symbol: [...]}``
     (both override the module defaults) — the LO does not change electron bookkeeping by itself.
     ``el_override = {symbol: {l: spec}}`` moves an energy parameter (e.g. Ti l=1 into the valence
-    region once a 3p LO carries the semicore)."""
+    region once a 3p LO carries the semicore).
+
+    ``v_start`` = ``{key: radial potential array}`` warm-starts the SCF from a previous run's
+    converged spherical potentials (returned as ``info["v_by_key"]``) instead of the atomic ones —
+    a convergence-sweep point then starts nearly converged (~2-3x fewer iterations).
+
+    ``kworkers > 1`` solves the k-points of each iteration in a process pool (each k's secular
+    build+solve is independent). Results are accumulated in mesh order, so the density is identical
+    to the serial run. Divide the BLAS threads accordingly (e.g. ``OMP_NUM_THREADS=3`` with
+    ``kworkers=6`` on ~20 cores) — the pool multiplies whatever thread count each worker uses.
+    The workers are spawned (fork inherits live BLAS state and computes wrong numbers), so the
+    CALLING script must be import-safe: guard its executable body with ``if __name__ ==
+    "__main__":`` or the workers re-run it on import."""
     A = cell_matrix(np.asarray(a_bohr, dtype=float) * BOHR_ANG)     # 3×3 cell in Å
     vol = float(abs(np.linalg.det(A)))
     amax = float(np.linalg.norm(A, axis=1).max())
@@ -778,9 +839,10 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     key_sym = dict(zip(keys, syms, strict=True))
     kfracs, kw = monkhorst_pack(tuple(kmesh))
     kw = kw / kw.sum()
-    sg, rho_symm, atom_orbits = None, None, None
-    if use_symmetry and not fullpot:
+    sg, rho_symm, atom_orbits, d_ops = None, None, None, None
+    if use_symmetry:
         try:                                            # IBZ reduction + resymmetrization
+            from gradwave.flapw.efg import ylm_rotations_complex
             from gradwave.symmetry import RhoSymmetrizer, find_spacegroup, reduce_mesh
             uniq = {s: i for i, s in enumerate(dict.fromkeys(syms))}
             sg = find_spacegroup(A, np.array([f for f, _ in atoms], dtype=float),
@@ -789,10 +851,13 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
             kw = kw / kw.sum()
             rho_symm = RhoSymmetrizer((nfft, nfft, nfft), sg)
             atom_orbits = _atom_orbits(sg.atom_map)
+            # rotation blocks for the aspherical multipoles (fullpot / EFG star-unfolding)
+            big_ls = sorted({2} | set(range(1, fullpot_lmax + 1)))
+            d_ops = ylm_rotations_complex(sg, A, big_ls)
         except Exception:                               # any failure → full mesh (set above)
             kfracs, kw = monkhorst_pack(tuple(kmesh))
             kw = kw / kw.sum()
-            sg, rho_symm, atom_orbits = None, None, None
+            sg, rho_symm, atom_orbits, d_ops = None, None, None, None
 
     at_by_sym, vat_by_sym = {}, {}
     for s in set(syms):
@@ -811,7 +876,12 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
                     f"muffin-tin spheres overlap ({keys[i]},{keys[j]}): "
                     f"R={R_by_key[keys[i]]:.3f}+{R_by_key[keys[j]]:.3f} Å > separation {sep:.3f} Å "
                     "(radii are in ångström)")
-    v_by_key = {k: vat_by_sym[s].clone() for k, s in zip(keys, syms, strict=True)}
+    v_by_key = {}
+    for k, s in zip(keys, syms, strict=True):
+        if v_start is not None and k in v_start:
+            v_by_key[k] = torch.as_tensor(np.asarray(v_start[k]), dtype=torch.float64).clone()
+        else:
+            v_by_key[k] = vat_by_sym[s].clone()
 
     conv = None
     v_nsph = None                                          # non-spherical potential (fullpot)
@@ -831,7 +901,7 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
             El_by_key[k], vmt_by_key[k], v0_by_key[k] = El, vmt, v0
 
         # pass 1 — solve every k, keep the results; pass 2 — occupy and accumulate the density.
-        npad = max(2, nbands // 2) if smearing > 0 else 0
+        npad = max(2, nbands // 2) if smearing > 0 else 4
         nb_solve = nbands + npad
         # radial channels are k-independent — build once per iteration, reuse across the k-mesh.
         chan = {key: {lang: radial_channel(lang, sp["El"][lang], r, dx, sp["v"], sp["R"])
@@ -842,9 +912,23 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
         nsph_int = (_nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=lodat)
                     if v_nsph else None)
         kdata, ev_all, ev_gamma = [], [], None
-        for kf, w in zip(kfracs, kw, strict=True):
-            res = _lapw_multi_k(kf, A, acart, species, lmax, ecut, r, dx, nb_solve,
-                                v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int)
+        if kworkers > 1 and len(kfracs) > 1:
+            import multiprocessing as _mp
+            from concurrent.futures import ProcessPoolExecutor
+            argl = [(kf, A, acart, species, lmax, ecut, r, dx, nb_solve, v_nsph, chan, lodat,
+                     nsph_int) for kf in kfracs]
+            # spawn, not fork: forked children inherit live OpenMP/BLAS state and can compute
+            # silently wrong numbers (observed: a 6 eV span error). Spawned workers re-import
+            # (~seconds per iteration) — negligible on the multi-minute fullpot iterations the
+            # pool exists for.
+            with ProcessPoolExecutor(max_workers=min(kworkers, len(argl)),
+                                     mp_context=_mp.get_context("spawn")) as ex:
+                res_list = list(ex.map(_solve_k_args, argl))
+        else:
+            res_list = [_lapw_multi_k(kf, A, acart, species, lmax, ecut, r, dx, nb_solve,
+                                      v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int)
+                        for kf in kfracs]
+        for kf, w, res in zip(kfracs, kw, res_list, strict=True):
             kdata.append((kf, w, res))
             ev_all.append(res[0])
             if np.all(np.abs(kf) < 1e-9):
@@ -861,7 +945,7 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
             occ_by_k = [2.0 / (1.0 + np.exp(np.clip((ev - e_fermi) / smearing, -60, 60)))
                         for ev in ev_all]
         else:
-            occ_by_k = [np.array([2.0] * nbands + [0.0] * npad) for _ in ev_all]
+            occ_by_k = [_occ_degenerate_aware(ev, nbands) for ev in ev_all]
 
         rho_I = np.zeros((nfft, nfft, nfft))
         rho_val = {k: np.zeros_like(rr_by_key[k]) for k in keys}
@@ -871,7 +955,7 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
         # accumulate it once after convergence (_efg_density_pass, below) instead of paying the
         # per-k sphere_density_multipoles at every SCF iteration.
         if fullpot:
-            from gradwave.flapw.efg import sphere_density_multipoles_multi
+            from gradwave.flapw.efg import sphere_density_multipoles_bands
             us_by_key = {k: _us_ext(El_by_key[k], lmax, r, dx, vmt_by_key[k], R_by_key[k],
                                     (lodat or {}).get(k)) for k in keys}
             lset_pot = [(lg, m) for lg in range(1, fullpot_lmax + 1) for m in range(-lg, lg + 1)]
@@ -903,12 +987,10 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
                                                 lo_block=lo_block, los=los_k, ylm_by_l=ylm_by_l)
                 rho_val[k] += w * rk
                 if fullpot:
-                    amps = [(occl[n],
-                             _band_amps(cp[:, n], ks, abl_all[ai], lmax, vol,
-                                        lo_coeff=(lo_block[:, n] if nlo_k else None), los=los_k,
-                                        ylm_by_l=ylm_by_l))
-                            for n in range(nb_solve)]
-                    rlm = sphere_density_multipoles_multi(amps, us_by_key[k], lmax, lset2)
+                    amps_all = _bands_amps(cp, ks, abl_all[ai], lmax, vol, lo_block=lo_block,
+                                           los=los_k, ylm_by_l=ylm_by_l)
+                    rlm = sphere_density_multipoles_bands(amps_all, occl, us_by_key[k], lmax,
+                                                          lset2)
                     for lm in lset2:
                         rho_2m[k][lm] += w * rlm[lm]
 
@@ -916,11 +998,21 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
             rho_I = np.fft.ifftn(                        #   interstitial ρ symmetrized in G-space,
                 rho_symm.apply(torch.tensor(np.fft.fftn(rho_I))).numpy()).real
         if atom_orbits is not None:                     #   muffin-tin ρ averaged over equiv. atoms
+            sym_dev = 0.0
             for orbit in atom_orbits:
                 ok = [keys[i] for i in orbit]
                 avg = sum(rho_val[k] for k in ok) / len(ok)
+                scale = max(float(np.abs(avg).max()), 1e-30)
                 for k in ok:
+                    sym_dev = max(sym_dev, float(np.abs(rho_val[k] - avg).max()) / scale)
                     rho_val[k] = avg.copy()
+        if fullpot and d_ops is not None:               #   aspherical ρ_LM star-unfolded (Wigner-D)
+            raw = rho_2m
+            rho_2m = _symmetrize_rho_lm(rho_2m, keys, sg, d_ops)
+            for k in keys:                              # residual of the projector = asymmetry
+                for lm, v in rho_2m[k].items():
+                    scale = max(float(np.abs(v).max()), 1e-30)
+                    sym_dev = max(sym_dev, float(np.abs(raw[k][lm] - v).max()) / scale)
 
         spheres, rho_sph_by_key = [], {}
         for ai, (k, s) in enumerate(zip(keys, syms, strict=True)):
@@ -983,37 +1075,54 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
             break
         conv = new
 
-    info = {"nbands": nbands, "symbols": syms, "e_fermi": conv.get("e_fermi")}
+    info = {"nbands": nbands, "symbols": syms, "e_fermi": conv.get("e_fermi"),
+            "v_by_key": {k: v_by_key[k].numpy().copy() for k in keys}}
+    if atom_orbits is not None:
+        # relative asymmetry of the RAW final-iteration density across symmetry-equivalent atoms
+        # (and, for fullpot, the star-unfolding projector residual). Near convergence this should
+        # be small; an order-unity value means the wedge sum sits in a symmetry-broken state —
+        # multistable SCF basin or a symmetry bug. Surfaced so it can never fail silently.
+        info["symmetry_dev"] = sym_dev
     if efg:
         if not fullpot:
-            if rho_symm is not None:
-                # The aspherical (l=2) EFG density needs the full star of each k; IBZ drops it. So
-                # when the SCF ran on the reduced mesh, do ONE full-mesh solve at the converged
-                # potential (1 pass vs n_iter) and accumulate the l=2 density there — correct EFG,
-                # no star-unfolding. Without IBZ the loop's own k-data already spans the full mesh.
-                kf_full, kw_full = monkhorst_pack(tuple(kmesh))
-                kw_full = kw_full / kw_full.sum()
-                res_full = [_lapw_multi_k(kf, A, acart, species, lmax, ecut, r, dx, nb_solve,
-                                          chan=chan, lodat=lodat) for kf in kf_full]
-                ev_full = np.array([rf[0] for rf in res_full])
-                if smearing > 0:
-                    ef = _fermi_level(ev_full, kw_full, 2 * nbands, smearing)
-                    occ_e = [2.0 / (1.0 + np.exp(np.clip((ev - ef) / smearing, -60, 60)))
-                             for ev in ev_full]
-                else:
-                    occ_e = [np.array([2.0] * nbands + [0.0] * npad) for _ in ev_full]
-                kdata_e = list(zip(kf_full, kw_full, res_full, strict=True))
-            else:
-                kdata_e, occ_e = kdata, occ_by_k
-            # build the aspherical density once from the converged wavefunctions, then recompute the
-            # interstitial potential with the l=2 Weinert pseudocharge for the lattice term.
-            rho_2m = _efg_density_pass(kdata_e, occ_e, keys, acart, El_by_key, vmt_by_key,
+            # Build the aspherical density once from the converged wavefunctions. On an IBZ run the
+            # reduced k-sum misses the star of each k, so the l=2 multipoles are star-unfolded with
+            # the Wigner-D group average (_symmetrize_rho_lm) — no full-mesh re-solve needed. Then
+            # recompute the interstitial potential with the l=2 Weinert pseudocharge (lattice term).
+            rho_2m = _efg_density_pass(kdata, occ_by_k, keys, acart, El_by_key, vmt_by_key,
                                        R_by_key, rr_by_key, lmax, r, dx, nb_solve, lodat=lodat)
+            if d_ops is not None:
+                rho_2m = _symmetrize_rho_lm(rho_2m, keys, sg, d_ops)
             for ai, k in enumerate(keys):
                 spheres[ai]["rho_2m"] = rho_2m[k]
             _, _, v_grid = _weinert_multi(rho_I, spheres, A, nfft)
         info["efg"] = _efg_from_multipoles(rho_2m, v_grid, acart, keys, R_by_key, rr_by_key, dx, A)
     return conv, info
+
+
+def _symmetrize_rho_lm(rho_2m, keys, sg, d_ops):
+    """Group-average the aspherical sphere multipoles — the l>0 piece of the IBZ star-unfolding.
+    An IBZ-weighted k-sum misses the star of each k; averaging over the space group restores it:
+    op ``g: a → b`` contributes ``ρ_b[L] += D^L(S_g) ρ_a[L]`` (``d_ops`` from
+    ``efg.ylm_rotations_complex``; atom permutation from ``sg.atom_map``). Time reversal needs no
+    extra term: each k's density contribution is real and ρ_{-k} = ρ_k exactly. Equivalent-atom
+    spheres share one radial mesh (same species), so the radial arrays add directly."""
+    n_ops = len(d_ops)
+    big_ls = sorted({lm[0] for lm in next(iter(rho_2m.values()))})
+    acc = {k: {lm: np.zeros_like(v) for lm, v in rho_2m[k].items()} for k in keys}
+    for iop in range(n_ops):
+        amap = sg.atom_map[iop]
+        for ai, k in enumerate(keys):
+            kb = keys[int(amap[ai])]                     # op sends atom ai onto amap[ai]
+            for bl in big_ls:
+                if bl == 0:
+                    acc[kb][(0, 0)] += rho_2m[k][(0, 0)]
+                    continue
+                mat = np.stack([rho_2m[k][(bl, m)] for m in range(-bl, bl + 1)])
+                rot = d_ops[iop][bl] @ mat
+                for mi, m in enumerate(range(-bl, bl + 1)):
+                    acc[kb][(bl, m)] += rot[mi]
+    return {k: {lm: v / n_ops for lm, v in acc[k].items()} for k in keys}
 
 
 def _atom_orbits(atom_map):
@@ -1033,6 +1142,13 @@ def _atom_orbits(atom_map):
     return orbits
 
 
+def _solve_k_args(args):
+    """Picklable per-k secular solve for the k-point process pool (``kworkers``)."""
+    (kf, cell, acart, species, lmax, ecut, r, dx, nb_solve, v_nsph, chan, lodat, nsph_int) = args
+    return _lapw_multi_k(kf, cell, acart, species, lmax, ecut, r, dx, nb_solve,
+                         v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int)
+
+
 def _efg_density_pass(kdata, occ_by_k, keys, acart, El_by_key, vmt_by_key, R_by_key, rr_by_key,
                       lmax, r, dx, nb_solve, lodat=None):
     """One BZ pass building the l=2 (and l=0) aspherical sphere-density multipoles from the
@@ -1040,7 +1156,7 @@ def _efg_density_pass(kdata, occ_by_k, keys, acart, El_by_key, vmt_by_key, R_by_
     run pays the per-k ``sphere_density_multipoles`` cost once at convergence, not every iteration
     (the aspherical density does not enter the muffin-tin self-consistency). Mirrors the in-loop
     fullpot accumulation (LO-aware), so it matches an every-iteration accumulation."""
-    from gradwave.flapw.efg import sphere_density_multipoles_multi
+    from gradwave.flapw.efg import sphere_density_multipoles_bands
     lset2 = [(0, 0)] + [(2, m) for m in range(-2, 3)]
     us_by_key = {k: _us_ext(El_by_key[k], lmax, r, dx, vmt_by_key[k], R_by_key[k],
                             (lodat or {}).get(k)) for k in keys}
@@ -1062,12 +1178,9 @@ def _efg_density_pass(kdata, occ_by_k, keys, acart, El_by_key, vmt_by_key, R_by_
             nlo_k = sum(2 * lo["l"] + 1 for lo in los_k or [])
             lo_block = (c[npw_k + lo_off[k]:npw_k + lo_off[k] + nlo_k, :nb_solve]
                         if nlo_k else None)
-            amps = [(occl[n],
-                     _band_amps(cp[:, n], ks, abl_all[ai], lmax, vol,
-                                lo_coeff=(lo_block[:, n] if nlo_k else None), los=los_k,
-                                ylm_by_l=ylm_by_l))
-                    for n in range(nb_solve)]
-            rlm = sphere_density_multipoles_multi(amps, us_by_key[k], lmax, lset2)
+            amps_all = _bands_amps(cp, ks, abl_all[ai], lmax, vol, lo_block=lo_block,
+                                   los=los_k, ylm_by_l=ylm_by_l)
+            rlm = sphere_density_multipoles_bands(amps_all, occl, us_by_key[k], lmax, lset2)
             for lm in lset2:
                 rho_2m[k][lm] += w * rlm[lm]
     return rho_2m

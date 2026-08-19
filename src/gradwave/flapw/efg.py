@@ -61,6 +61,35 @@ def nonspherical_potential(rho_sph, rho_2m, rr, drw, lset=None, nx: int = 16, np
     return out
 
 
+def ylm_rotations_complex(sg, cell, big_ls):
+    """Per-op complex-harmonic rotation matrices ``{L: D^L}`` with
+    ``Y_LM(S⁻¹ r̂) = Σ_M' D^L_{M'M} Y_LM'(r̂)``, ``S = Aᵀ W A⁻ᵀ`` the Cartesian rotation of each
+    space-group op. Built by projecting on the Gauss-Legendre × uniform-φ grid (exact for
+    band-limited integrands) — the same convention-proof construction as
+    ``scf.paw_symmetry.ylm_rotation_matrices``, but in the complex basis the FLAPW multipoles use.
+    A sphere density ρ_a = Σ_M c_M Y_LM rotated by op ``g: a → b`` lands on b as ``c_b = D^L c_a``.
+    Improper operations are handled naturally (the quadrature just evaluates at S⁻¹r̂)."""
+    from scipy.special import sph_harm_y
+    a_t = np.asarray(cell, dtype=float).T
+    lmax = max(big_ls)
+    th, ph, wgt = _angular_grid(lmax + 2, 2 * lmax + 3)
+    dirs = np.stack([np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)], axis=-1)
+    out = []
+    for w_mat in sg.rotations:
+        s = a_t @ w_mat @ np.linalg.inv(a_t)
+        rd = dirs @ np.linalg.inv(s).T                     # S⁻¹ r̂ (rows)
+        rn = np.linalg.norm(rd, axis=-1)
+        th_r = np.arccos(np.clip(rd[..., 2] / rn, -1.0, 1.0))
+        ph_r = np.arctan2(rd[..., 1], rd[..., 0])
+        blocks = {}
+        for bl in big_ls:
+            y0 = np.stack([sph_harm_y(bl, m, th, ph) for m in range(-bl, bl + 1)], axis=-1)
+            yr = np.stack([sph_harm_y(bl, m, th_r, ph_r) for m in range(-bl, bl + 1)], axis=-1)
+            blocks[bl] = np.einsum("xyi,xyj,xy->ij", np.conj(y0), yr, wgt)
+        out.append(blocks)
+    return out
+
+
 _GAUNT_CACHE: dict = {}
 
 
@@ -139,6 +168,37 @@ def sphere_density_multipoles_multi(amps, us, lmax, lset, nx: int | None = None,
                 s = sum(vec[m + l] * ylm[(l, m)] for m in range(-l, l + 1))
                 psi += rad[:, None, None] * s[None]
         rho_ang += f * np.abs(psi) ** 2
+    out = {}
+    for (lang, m) in lset:
+        proj = (rho_ang * (wgt * np.conj(sph_harm_y(lang, m, th, ph)))[None]).sum(axis=(1, 2))
+        out[(lang, m)] = proj
+    return out
+
+
+def sphere_density_multipoles_bands(amps_all, occ, us, lmax, lset, nx: int | None = None,
+                                    nphi: int | None = None):
+    """All-band form of ``sphere_density_multipoles_multi``: ``amps_all`` = ``{l: [(nb, 2l+1) per
+    radial]}`` (from ``scf._bands_amps``), ``occ`` the per-band occupations. Builds every band's
+    in-sphere ψ on the angular grid in stacked tensor ops instead of a Python loop over states —
+    equivalent to machine precision (summation order differs)."""
+    from scipy.special import sph_harm_y
+    max_l = max((lang for (lang, _) in lset), default=0)
+    deg = 2 * lmax + max_l
+    if nx is None:
+        nx = deg // 2 + 1
+    if nphi is None:
+        nphi = deg + 1
+    th, ph, wgt = _angular_grid(nx, nphi)
+    occ_arr = np.asarray(occ, dtype=float)
+    nb = len(occ_arr)
+    nr = len(us[0][0])
+    psi = np.zeros((nb, nr) + th.shape, dtype=complex)
+    for l in range(lmax + 1):
+        yst = np.stack([sph_harm_y(l, m, th, ph) for m in range(-l, l + 1)], axis=0)
+        for rad, amp in zip(us[l], amps_all[l], strict=True):
+            ang = np.tensordot(amp, yst, axes=(1, 0))         # (nb, nx, nphi)
+            psi += rad[None, :, None, None] * ang[:, None, :, :]
+    rho_ang = np.einsum("n,nrxy->rxy", occ_arr, np.abs(psi) ** 2)
     out = {}
     for (lang, m) in lset:
         proj = (rho_ang * (wgt * np.conj(sph_harm_y(lang, m, th, ph)))[None]).sum(axis=(1, 2))

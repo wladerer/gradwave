@@ -195,3 +195,25 @@ The high-L (incl odd-L) potential alone fixes Ti's sign and reaches 35%/64% of E
 B-side with LOs (Ti 4.5 / O 3.9)! => the LO config (O 2p LO at +5eV, Ti semicore bookkeeping) may be
 hurting; needs an A/B isolating Ti-LOs-only vs O-LO. Odd-L crystal fields (missing before this
 session) are a first-order ingredient at the O 4f site.
+
+## ROOT CAUSE FOUND (2026-08-19): spontaneous symmetry breaking from winner-take-all occupations
+The metamorphic suite caught it on first execution: in a bct 2-O cell (translation-equivalent atoms,
+full mesh, NO symmetrization) the two atoms' EFG tensors came out axially identical (eta=0) but with
+DIFFERENT magnitudes (-11.28 vs -15.96) — charge disproportionation between identical sites.
+Mechanism: sm=0 filled the lowest nbands winner-take-all; when the filling boundary cuts a DEGENERATE
+manifold (O 2p4!), the diagonalizer's arbitrary in-subspace basis decides where charge goes and SCF
+feedback locks in a spuriously broken, floating-point-path-dependent state. This ONE mechanism
+explains: the smeared-TiO2 instability, the IBZ-vs-full 8 eV drift (symmetry machinery itself exact
+to 1e-15 — verified orbit cover, RhoSymmetrizer idempotency+invariance, Wigner-D unitarity/rotation/
+projector), the aug-lmax "instability" (different basis -> different arbitrary choice -> different
+basin), and the historic BeO breakdown. The BeO IBZ "validation" was vacuous (2-op group: IBZ==full).
+FIX: _occ_degenerate_aware — spread electrons EQUALLY over a boundary degenerate group (within 1e-3
+eV): the T->0 smearing limit = subspace-trace density = symmetry-invariant. Clean-gap insulators
+unchanged; insulator path now solves +4 pad bands so boundary degeneracy is visible.
+PREVENTION: (1) metamorphic MR suite (tests/integration/test_flapw_metamorphic.py) — equivalent-atom
+agreement, IBZ==full at a SHARED warm-started fixed point, warm-restart stability, pool bit-equality,
+EFG frame equivariance, resolution-knob stability; (2) runtime info["symmetry_dev"] (raw-density
+asymmetry across equivalent atoms + unfolding projector residual); (3) protocol: path comparisons
+only at shared fixed points; symmetry features validated only on groups with REAL reductions.
+ALL PRIOR COLD-START TiO2/BeO NUMBERS at coarse k are basin-suspect; the campaign must be re-run on
+the fixed stack (deg-aware occ + warm-started chains + IBZ + pool).
