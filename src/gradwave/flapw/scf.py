@@ -930,7 +930,8 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
 
     conv = None
     v_nsph = None                                          # non-spherical potential (fullpot)
-    r_nsph, beta_nsph = float("inf"), 0.3                  # aspherical-mix residual + step
+    r_nsph, beta_nsph = float("inf"), 0.3                  # aspherical residual (gate) + legacy
+    vns_new = None
     # staged start: a cold fullpot SCF couples the spherical and aspherical loops from iteration 0
     # and can diverge violently (observed: span bouncing 20 eV, r_v ~100). Converge the muffin-tin
     # problem first, then switch the aspherical potential on from that state (what every
@@ -938,7 +939,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     mt_phase = bool(fullpot)
     from gradwave.flapw.recorder import FLAPWRecorder
     recorder = FLAPWRecorder()
-    hist = {k: ([], []) for k in keys}
+    hist = ([], [])                                        # joint Anderson history
     c_prev_by_k = [None] * len(kfracs)
     for it in range(iters):
         # subspace reuse is safe in the muffin-tin phase but blind to states entering the
@@ -947,6 +948,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
         full_iter = (not subspace_reuse) or (it % 5 == 0) or (fullpot and not mt_phase)
         t_it = time.time()
         r_sph = 0.0
+        vnew_by_key = {}
         species, El_by_key, vmt_by_key, v0_by_key = {}, {}, {}, {}
         for k, s in zip(keys, syms, strict=True):
             R = R_by_key[k]
@@ -1114,26 +1116,17 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                 vns_new[k] = vns
             if v_nsph is None:
                 v_nsph = vns_new
+                vns_new = None                     # first fullpot iteration: seed, nothing to mix
                 r_nsph = float("inf")
             else:
-                # relative aspherical-potential residual, and adaptive damping: the l>0
-                # self-consistency had NO convergence check and a fixed 0.7/0.3 linear mix —
-                # a limit cycle or divergence there was invisible (endpoints swung 3x while the
-                # span-only criterion looked converged). Halve the step when the residual grows,
-                # recover it slowly when the loop contracts.
+                # relative aspherical residual (feeds the convergence gate); the mixing itself is
+                # the JOINT Anderson below — one history over (all v_sph ⊕ v_nsph), so the coupled
+                # spherical/aspherical fixed point is accelerated as one system instead of three
+                # loops fighting at different rates.
                 scale = max(max(float(np.abs(v).max()) for v in v_nsph[k2].values())
                             for k2 in keys) or 1.0
-                r_new = max(float(np.abs(vns_new[k2][lm] - v_nsph[k2][lm]).max())
-                            for k2 in keys for lm in vns_new[k2]) / scale
-                if r_new > r_nsph:
-                    beta_nsph = max(0.05, beta_nsph * 0.5)
-                elif r_new < 0.5 * r_nsph:
-                    beta_nsph = min(0.3, beta_nsph * 1.2)
-                r_nsph = r_new
-                for k in keys:
-                    for lm in vns_new[k]:
-                        v_nsph[k][lm] = ((1.0 - beta_nsph) * v_nsph[k][lm]
-                                         + beta_nsph * vns_new[k][lm])
+                r_nsph = max(float(np.abs(vns_new[k2][lm] - v_nsph[k2][lm]).max())
+                             for k2 in keys for lm in vns_new[k2]) / scale
 
         for ai, k in enumerate(keys):
             mask = mask_by_key[k]
@@ -1141,13 +1134,43 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
             vnew_np = np.full(r.shape[0], v_i0)
             vnew_np[mask] = vnew_sph
             vnew = torch.tensor(vnew_np)
-            hist[k][0].append(v_by_key[k])
-            hist[k][1].append(vnew - v_by_key[k])
+            vnew_by_key[k] = vnew
             r_sph = max(r_sph, float((vnew - v_by_key[k]).abs().max()))
-            if len(hist[k][1]) > 6:
-                hist[k] = (hist[k][0][-6:], hist[k][1][-6:])
+        # joint Anderson: one history over every spherical potential plus (in the fullpot phase)
+        # the aspherical components — the coupled fixed point accelerated as one vector.
+        nsph_now = fullpot and not mt_phase and v_nsph is not None and vns_new is not None
+        segs = [v_by_key[k] for k in keys] + ([
+            torch.from_numpy(np.ascontiguousarray(fn(v_nsph[k][lm])))
+            for k in keys for lm in sorted(v_nsph[k]) for fn in (np.real, np.imag)]
+            if nsph_now else [])
+        news = [vnew_by_key[k] for k in keys] + ([
+            torch.from_numpy(np.ascontiguousarray(fn(vns_new[k][lm])))
+            for k in keys for lm in sorted(vns_new[k]) for fn in (np.real, np.imag)]
+            if nsph_now else [])
+        x_old = torch.cat([t.reshape(-1) for t in segs])
+        x_new = torch.cat([t.reshape(-1) for t in news])
+        if hist and hist[0] and hist[0][-1].numel() != x_old.numel():
+            hist = ([], [])                        # phase switch changed the vector: fresh history
+        if not hist:
+            hist = ([], [])
+        hist[0].append(x_old)
+        hist[1].append(x_new - x_old)
+        if len(hist[1]) > 6:
+            hist = (hist[0][-6:], hist[1][-6:])
+        x_next = anderson_next(hist[0], hist[1], beta=0.3, m=5)
+        off = 0
         for k in keys:
-            v_by_key[k] = anderson_next(hist[k][0], hist[k][1], beta=0.3, m=5)
+            n = v_by_key[k].numel()
+            v_by_key[k] = x_next[off:off + n].clone()
+            off += n
+        if nsph_now:
+            for k in keys:
+                for lm in sorted(v_nsph[k]):
+                    n = v_nsph[k][lm].size
+                    re = x_next[off:off + n].numpy()
+                    im = x_next[off + n:off + 2 * n].numpy()
+                    v_nsph[k][lm] = re + 1j * im
+                    off += 2 * n
 
         span = float(ev_gamma[nbands - 1] - ev_gamma[0])
         new = {"span": span, "ev": ev_gamma[:nbands].tolist(), "e_fermi": e_fermi}
