@@ -217,3 +217,10 @@ asymmetry across equivalent atoms + unfolding projector residual); (3) protocol:
 only at shared fixed points; symmetry features validated only on groups with REAL reductions.
 ALL PRIOR COLD-START TiO2/BeO NUMBERS at coarse k are basin-suspect; the campaign must be re-run on
 the fixed stack (deg-aware occ + warm-started chains + IBZ + pool).
+
+## CAMPAIGN POINT 1 (degeneracy-fixed stack, k222 cold, fullpot fp4 aug3, IBZ+pool, 18 min):
+  O  [+17.75,-14.37,-3.39] eta 0.619 | Elk [-19.10,+16.60,+2.50] 0.74  -> |components| at 93%/87%!
+  Ti [-1.68,+1.52,+0.15]   eta 0.818 | Elk [+19.34,-13.16,-6.18] 0.36  -> still small (LO probe next)
+The spurious symmetry breaking WAS the O magnitude deficit: every basin-broken run gave 20-64%; the
+degeneracy-aware occupations recover ~90% at the COARSEST mesh. (symdev printout in this run is a
+normalization bug, fixed in e169633+1; physics unaffected.) k333/k444 warm points next.
