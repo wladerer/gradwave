@@ -426,6 +426,7 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
     abl_by_atom = []
     for tau, key in atoms_cart:
         R = species[key]["R"]
+        v0off = float(species[key].get("v0off", 0.0))
         # e^{i(k_G'-k_G)·τ} factorizes exactly: outer(conj(p), p) with p = e^{i k_G·τ} — npw
         # exponentials instead of npw² (the npw² exp was a top build cost).
         pvec = np.exp(1j * (ks @ np.asarray(tau, dtype=float)))
@@ -445,7 +446,11 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
             Tk = aa * ch["Tuu"] + ab_s * ch["Tuud"] + bbo * ch["Tudud"]
             Vk = aa * ch["Vuu"] + ab_s * ch["Vuud"] + bbo * ch["Vudud"]
             Saug += phase * (pref_l[lang] * Ms)
-            Haug += phase * (pref_l[lang] * (Tk + Vk))
+            # + the per-sphere constant (v0 - v̄_I): the l-channels carry v - v0(R) while the
+            # interstitial is referenced to the Θ-mean; once the interstitial warps and carries
+            # XC these references differ by ~eV per sphere, and omitting the constant skews the
+            # inter-sphere level alignment (charge transfer, hence the EFG).
+            Haug += phase * (pref_l[lang] * (Tk + Vk + v0off * Ms))
         abl_by_atom.append(abl)
     if v_nsph:
         if nsph_int is None:
@@ -488,13 +493,15 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
                 ylm = _ylm_star(lang, ks)
                 pf = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
                 a_g, b_g = abl_by_atom[ai][lang][:, 0], abl_by_atom[ai][lang][:, 1]
+                v0off_lo = float(species[key].get("v0off", 0.0))
                 base_s = pf * (a_g * lo["S_pu"] + b_g * lo["S_pud"]) * ph
-                base_h = pf * (a_g * lo["H_pu"] + b_g * lo["H_pud"]) * ph
+                base_h = pf * (a_g * (lo["H_pu"] + v0off_lo * lo["S_pu"])
+                               + b_g * (lo["H_pud"] + v0off_lo * lo["S_pud"])) * ph
                 for mi in range(2 * lang + 1):
                     rows_s.append(base_s * ylm[:, mi])
                     rows_h.append(base_h * ylm[:, mi])
                     diag_s.append(lo["S_pp"])
-                    diag_h.append(lo["H_pp"])
+                    diag_h.append(lo["H_pp"] + v0off_lo * lo["S_pp"])
         nlo = len(rows_s)
         if nlo:
             rows_s_arr, rows_h_arr = np.array(rows_s), np.array(rows_h)
@@ -768,13 +775,12 @@ def _weinert_multi(rho_I, spheres, L, nfft):
         R = sp["R"]
         rr = sp["rr"]
         drw = rr * sp["dx"]
-        pts = []
-        for axis in range(3):
-            for sgn in (+1, -1):
-                pf = (c + sgn * R * np.eye(3)[axis]) @ ainv       # a Cartesian surface point → frac
-                idx = tuple(int(round(pf[d] * nfft)) % nfft for d in range(3))
-                pts.append(v_hart[idx])
-        v_bc = float(np.mean(pts))
+        # proper l=0 surface average (exact Fourier evaluation on the sphere) — the old 6-axis-
+        # point sample was harmless over a flat interstitial but samples a warped one
+        # anisotropically
+        from gradwave.flapw.efg import interstitial_boundary_multi
+        v_bc = float(interstitial_boundary_multi(v_hart, c, R, A, [(0, 0)])[(0, 0)].real
+                     / math.sqrt(4 * math.pi))
         vpart = radial_poisson_to_R(sp["rho_sph"], rr, R, drw=drw) - sp["Z"] * E2 / rr
         v_sph_list.append(vpart + (v_bc - vpart[-1]))
     return v_sph_list, v_i0, v_grid, vbc_own
@@ -963,6 +969,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                                      @ _ainv, nfft, A) < R_by_key[kk2])
     warp_state = None                                     # (FFT of (v_grid-v_i0)·Θ_I, nfft)
     v_grid_prev = None                                    # mixed interstitial grid state
+    v_i0_prev = None                                      # interstitial reference of last iter
     v_by_key = {}
     for k, s in zip(keys, syms, strict=True):
         if v_start is not None and k in v_start:
@@ -1001,7 +1008,8 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                   for lang in range(max(lmax, 2) + 1)}
             for lang, spec in (el_override or {}).get(s, {}).items():
                 El[lang] = (at_by_sym[s][spec] if isinstance(spec, str) else float(spec)) - v0
-            species[k] = {"R": R, "v": vmt, "El": El}
+            species[k] = {"R": R, "v": vmt, "El": El,
+                          "v0off": (v0 - v_i0_prev) if v_i0_prev is not None else 0.0}
             El_by_key[k], vmt_by_key[k], v0_by_key[k] = El, vmt, v0
 
         # pass 1 — solve every k, keep the results; pass 2 — occupy and accumulate the density.
@@ -1136,6 +1144,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                             "rho_sph": rho_sph_by_key[k], "Z": CONFIG[s][0], "R": R_by_key[k],
                             "rho_2m": rho_2m[k] if fullpot and not mt_phase else None})
         v_sph_list, v_i0, v_grid, vbc_own = _weinert_multi(rho_I, spheres, A, nfft)
+        v_i0_prev = v_i0
 
         if fullpot and not mt_phase:
             from gradwave.flapw.efg import (
