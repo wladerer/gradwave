@@ -36,9 +36,9 @@ from gradwave.flapw.mixing import anderson_next
 from gradwave.flapw.radial import log_mesh, numerov_log_np, radial_eigs_tridiag
 from gradwave.kpoints import monkhorst_pack
 
-_CORE = {"He": [], "Be": [(0, 2)], "Ne": [(0, 2)]}
-_N_VAL_BANDS = {"He": 1, "Be": 1, "Ne": 4}
-_VAL_E = {"He": 2, "Be": 2, "Ne": 8}       # valence electron count (Z − frozen core)
+_CORE = {"He": [], "Be": [(0, 2)], "O": [(0, 2)], "Ne": [(0, 2)]}
+_N_VAL_BANDS = {"He": 1, "Be": 1, "O": 3, "Ne": 4}
+_VAL_E = {"He": 2, "Be": 2, "O": 6, "Ne": 8}       # valence electron count (Z − frozen core)
 
 
 def _ylm_star(l, ks):

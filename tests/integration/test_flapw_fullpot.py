@@ -77,3 +77,19 @@ def test_fullpot_cubic_reduces_to_muffin_tin():
     s_mt = np.array(mt["ev"])[1:4].mean() - np.array(mt["ev"])[0]
     s_fp = np.array(fp["ev"])[1:4].mean() - np.array(fp["ev"])[0]
     assert abs(float(s_fp - s_mt)) < 0.02
+
+
+@pytest.mark.slow
+def test_oxygen_efg_quadrupolar_coupling():
+    """Open-shell O (2p⁴) in a tetragonal cell has a nonzero EFG (a p-hole), unlike a closed-shell
+    atom. Compressed along z the p_x,p_y doublet fills, leaving an axial p_z hole (η≈0), giving a
+    physical ¹⁷O quadrupolar coupling — the end-to-end solid-state-NMR observable."""
+    from gradwave.flapw import crystal_scf_multi
+    from gradwave.flapw.nmr import quadrupolar_coupling
+    _, info = crystal_scf_multi([7.0, 7.0, 5.0], [((0.5, 0.5, 0.5), "O")], {"O": 1.3},
+                                ecut=200.0, iters=30, efg=True, smearing=0.15)
+    site = info["efg"]["a0"]
+    assert abs(site["V_zz"]) > 5.0                 # nonzero EFG (open shell)
+    assert site["eta"] < 0.05                      # axial (tetragonal, doublet-filled)
+    cq = quadrupolar_coupling(site["V_zz"], site["eta"], "17O")
+    assert 0.5 < cq["abs_C_Q_MHz"] < 20.0          # physical ¹⁷O range

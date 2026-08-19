@@ -27,6 +27,7 @@ from gradwave.flapw.radial import radial_eigs_tridiag
 CONFIG: dict[str, tuple[float, list[tuple[int, int, int]]]] = {
     "He": (2.0, [(1, 0, 2)]),
     "Be": (4.0, [(1, 0, 2), (2, 0, 2)]),
+    "O": (8.0, [(1, 0, 2), (2, 0, 2), (2, 1, 4)]),      # open-shell 2p⁴ (spherically averaged)
     "Ne": (10.0, [(1, 0, 2), (2, 0, 2), (2, 1, 6)]),
 }
 # NIST LDA atomic reference KS eigenvalues (eV), converted from Hartree.
