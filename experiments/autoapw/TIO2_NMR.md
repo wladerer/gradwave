@@ -263,3 +263,16 @@ Campaign complete; all its fullpot numbers are provisional pending converged-loo
 The subspace-blind-spot hypothesis CONFIRMED (exact-only converges cleanly; cadence fix 495d245:
 exact solves during fullpot). The earlier k333 "Ti 98.5%" was a transient. Ti search matrix running
 (aug4/fp6/k444/TiLO from the converged baseline, ~3-6 min per config with the full stack).
+
+## EXACT-SOLVE MATRIX VERDICT (2026-08-19 late): the aspherical loop has a RUNAWAY FIXED POINT
+fp6 CONVERGED (r_nsph 3.5e-4) to O [+115.3,-100.4,-14.9] eta 0.74 — Elk's exact SHAPE at 6x the
+magnitude; TiLO converged in 6 iters to the same runaway (O +129); base/aug4/k444 hit the cap
+partway to it. The earlier clean 13-iter run (O +13.6) and these are TWO fixed points of the same
+loop. HYPOTHESIS: self-interaction in the antishielding chain — a sphere's own l=2 field leaking
+into its own lattice term C_LM=(v_bc-V_part(R))/R^L (pseudocharge moment/normalization/sign
+breaking the own-field cancellation) -> loop gain >1 -> saturated structure-preserving runaway.
+UNIT TEST DESIGNED: single atom in a tetragonal box has no other spheres -> its C_LM must be ~0;
+any nonzero = the leak, isolated from SCF dynamics. Check sphere_pseudocharge_lm moments on the
+REAL grid (not the unit-test grid), the interstitial-inside subtraction (dv**bl term), and the
+v_bc evaluation at exactly R vs the pseudocharge support edge. FIX gain<1 -> single physical fixed
+point -> then rerun the matrix. All current TiO2 fullpot magnitudes are basin-dependent until then.
