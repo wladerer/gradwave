@@ -256,3 +256,10 @@ Campaign complete; all its fullpot numbers are provisional pending converged-loo
   a window-entry check in the gate); if it still blows up, the instability is occupation/crossing
   physics (next: larger degen tol, tiny smearing ramp, or occupation tracking across iterations).
 - FLAPWRecorder (3c86336) now captures every iteration (info["recorder"]) — no more lost histories.
+
+## FIRST TRUSTWORTHY CONVERGED TiO2 FULLPOT EFG (staged, exact solves, all gates green, 13 iters ~2min):
+  Ti [-1.76,+1.26,+0.50] eta 0.43 | Elk [+19.34,-13.16,-6.18]  -> Ti small/wrong sign (REAL, converged)
+  O  [+13.55,-11.29,-2.27] eta 0.67 | Elk [-19.10,+16.60,+2.50] -> O ~70%, shape good
+The subspace-blind-spot hypothesis CONFIRMED (exact-only converges cleanly; cadence fix 495d245:
+exact solves during fullpot). The earlier k333 "Ti 98.5%" was a transient. Ti search matrix running
+(aug4/fp6/k444/TiLO from the converged baseline, ~3-6 min per config with the full stack).
