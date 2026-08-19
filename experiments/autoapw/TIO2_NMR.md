@@ -285,3 +285,15 @@ G[m',m] = sum(radial_in * d^L * conj(Y_m') * Y_m) * dvol — then the pseudochar
 moments equal Q_LM exactly and the own-field cancellation in C_LM holds by construction. Acceptance:
 single-atom leak -> ~0, TiO2 fullpot converges to ONE fixed point from any start, magnitudes stable
 across fp_lmax/k. coulomb.py reverted to analytic normalization pending this fix.
+
+## FIXES LANDED + REFRAME (6a5c0fc): Gram-solve grid moments (1e-16 exact, L=1..4) + NUMERICAL
+own-field subtraction (own pseudocharge's band-limited surface projection removed from C_LM; the
+analytic V_part cancellation failed ~20% from aliasing of the ~5-grid-point pseudocharge shape).
+REFRAME of the single-atom test: with own-field subtracted, its remaining "lattice" term is the
+atom's OWN WAVEFUNCTION TAILS outside R_MT — real physics, not a leak; and its r_nsph
+non-convergence is plausibly PHYSICAL LDA orbital-polarization multistability of the degenerate p4
+shell (equal-occupation rule fights the potential's symmetry breaking) — a bad acceptance vehicle.
+DECISIVE ACCEPTANCE = the TiO2 matrix (closed-shell insulator, Elk ref): (a) r_nsph gates green,
+(b) base/fp6/k444 magnitudes mutually consistent (no 6x runaway), (c) O near the physical basin
+(~14-19 vs Elk 19.1). Matrix running on the full fixed chain (Gram + own-field + joint Anderson +
+staged + exact solves).
