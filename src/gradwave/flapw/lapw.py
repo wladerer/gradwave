@@ -38,7 +38,8 @@ def radial_channel(l, El, r, dx, v, R):
     drw = rr * dx
 
     hE = max(abs(El) * 1e-4, 1e-3)
-    uraw = numerov_log_np(l, np.array([El, El + hE, El - hE]), r, dx, v)   # (3, N), batched
+    n_cut = int(np.searchsorted(r_np, 2.0 * R)) + 5           # only integrate a little past R_MT
+    uraw = numerov_log_np(l, np.array([El, El + hE, El - hE]), r, dx, v, n_cut=n_cut)
     un = uraw / np.sqrt((uraw[:, inside] ** 2 * drw).sum(axis=1))[:, None]
     u = un[0]
     udot = (un[1] - un[2]) / (2 * hE)
@@ -173,13 +174,19 @@ def build_matrices_multi(kfrac, L, atoms, lmax, ecut, r, dx, species):
     return 0.5 * (H + H.conj().T), 0.5 * (S + S.conj().T), comps
 
 
-def solve_geneig(H, S, nbands, with_vecs=False):
-    """Generalized eigensolve ``H c = ε S c`` via Löwdin ``S^{-1/2}`` (real or complex Hermitian).
-    Returns sorted eigenvalues (eV); with ``with_vecs``, also the S-normalized eigenvectors."""
-    w, U = np.linalg.eigh(S)
-    Sinv2 = U @ np.diag(np.clip(w, 1e-12, None) ** -0.5) @ U.conj().T
-    ea, Va = np.linalg.eigh(Sinv2 @ H @ Sinv2)
+def solve_geneig(H, S, nbands, with_vecs=False, tol=1e-8):
+    """Generalized eigensolve ``H c = ε S c`` (real or complex Hermitian) by canonical
+    orthogonalization: diagonalize S and keep only the subspace with eigenvalue ``> tol·max``,
+    dropping the near-linearly-dependent directions of the augmented LAPW basis. Clipping those to a
+    floor (instead of dropping) turns a tiny S-eigenvalue into a huge ``w^{-1/2}`` amplification and
+    spurious "ghost" eigenvalues — catastrophic for multi-atom cells with large muffin tins. For a
+    well-conditioned S this is identical to Löwdin ``S^{-1/2}``. Returns sorted eigenvalues (eV);
+    with ``with_vecs`` also the S-normalized eigenvectors."""
+    w, u = np.linalg.eigh(S)
+    keep = w > tol * w[-1]                                # w ascending; w[-1] = largest
+    x = u[:, keep] * (w[keep] ** -0.5)                   # npw × nkeep, S-orthonormal columns
+    ea, va = np.linalg.eigh(x.conj().T @ H @ x)
     order = np.argsort(ea.real)[:nbands]
     if with_vecs:
-        return ea.real[order], Sinv2 @ Va[:, order]
+        return ea.real[order], x @ va[:, order]
     return ea.real[order]

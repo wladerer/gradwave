@@ -64,7 +64,8 @@ def _radial_u(l, El, r, dx, v, R):
     inside = r_np <= R
     drw = r_np[inside] * dx
     hE = max(abs(El) * 1e-4, 1e-3)
-    uraw = numerov_log_np(l, np.array([El, El + hE, El - hE]), r, dx, v)   # (3, N), batched
+    n_cut = int(np.searchsorted(r_np, 2.0 * R)) + 5           # only integrate a little past R_MT
+    uraw = numerov_log_np(l, np.array([El, El + hE, El - hE]), r, dx, v, n_cut=n_cut)
     un = uraw / np.sqrt((uraw[:, inside] ** 2 * drw).sum(axis=1))[:, None]
     u, ud = un[0], (un[1] - un[2]) / (2 * hE)
     return u[inside], ud[inside]
