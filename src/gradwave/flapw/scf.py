@@ -553,7 +553,12 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
 
         rho_I = np.zeros((nfft, nfft, nfft))
         rho_val = {k: np.zeros_like(rr_by_key[k]) for k in keys}
-        if fullpot or efg:
+        # The aspherical (l=2) density feeds the SCF only in the full-potential loop; for a plain
+        # muffin-tin EFG run it is a pure diagnostic (it does not change the spherical potential,
+        # and the l=2 Weinert pseudocharge has zero monopole so it leaves v_sph untouched). So
+        # accumulate it once after convergence (_efg_density_pass, below) instead of paying the
+        # per-k sphere_density_multipoles at every SCF iteration.
+        if fullpot:
             from gradwave.flapw.efg import sphere_density_multipoles
             us_by_key = {k: {lg: _radial_u(lg, El_by_key[k][lg], r, dx, vmt_by_key[k], R_by_key[k])
                              for lg in range(lmax + 1)} for k in keys}
@@ -570,7 +575,7 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
                 _, rk = _sphere_valence_density(cp, occl, ks, abl_all[ai], El_by_key[k], lmax,
                                                 vol, r, dx, vmt_by_key[k], R_by_key[k])
                 rho_val[k] += w * rk
-                if fullpot or efg:
+                if fullpot:
                     amps = [(occl[n], *_augment_amplitudes(cp[:, n], ks, abl_all[ai], lmax, vol))
                             for n in range(nb_solve)]
                     rlm = sphere_density_multipoles(amps, us_by_key[k], lmax, lset2)
@@ -587,7 +592,7 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
             rho_sph_by_key[k] = rho_val[k] + rho_core
             spheres.append({"tau": acart[ai][0], "rr": rr, "dx": dx,
                             "rho_sph": rho_sph_by_key[k], "Z": CONFIG[s][0], "R": R_by_key[k],
-                            "rho_2m": rho_2m[k] if (fullpot or efg) else None})
+                            "rho_2m": rho_2m[k] if fullpot else None})
         v_sph_list, v_i0, v_grid = _weinert_multi(rho_I, spheres, A, nfft)
 
         if fullpot:
@@ -623,8 +628,43 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
 
     info = {"nbands": nbands, "symbols": syms, "e_fermi": conv.get("e_fermi")}
     if efg:
+        if not fullpot:
+            # muffin-tin EFG: build the aspherical density once from the converged wavefunctions,
+            # then recompute the interstitial potential with the l=2 Weinert pseudocharge so its
+            # lattice term is present. (fullpot already holds the converged rho_2m/v_grid.)
+            rho_2m = _efg_density_pass(kdata, occ_by_k, keys, acart, El_by_key, vmt_by_key,
+                                       R_by_key, rr_by_key, lmax, r, dx, nb_solve)
+            for ai, k in enumerate(keys):
+                spheres[ai]["rho_2m"] = rho_2m[k]
+            _, _, v_grid = _weinert_multi(rho_I, spheres, A, nfft)
         info["efg"] = _efg_from_multipoles(rho_2m, v_grid, acart, keys, R_by_key, rr_by_key, dx, A)
     return conv, info
+
+
+def _efg_density_pass(kdata, occ_by_k, keys, acart, El_by_key, vmt_by_key, R_by_key, rr_by_key,
+                      lmax, r, dx, nb_solve):
+    """One BZ pass building the l=2 (and l=0) aspherical sphere-density multipoles from the
+    converged wavefunctions — the EFG diagnostic. Factored out of the SCF loop so a muffin-tin EFG
+    run pays the per-k ``sphere_density_multipoles`` cost once at convergence, not every iteration
+    (the aspherical density does not enter the muffin-tin self-consistency). Mirrors the in-loop
+    fullpot accumulation, so it matches an every-iteration accumulation on the same density."""
+    from gradwave.flapw.efg import sphere_density_multipoles
+    lset2 = [(0, 0)] + [(2, m) for m in range(-2, 3)]
+    us_by_key = {k: {lg: _radial_u(lg, El_by_key[k][lg], r, dx, vmt_by_key[k], R_by_key[k])
+                     for lg in range(lmax + 1)} for k in keys}
+    rho_2m = {k: {lm: np.zeros(rr_by_key[k].shape, dtype=complex) for lm in lset2} for k in keys}
+    for (_kf, w, res), occ in zip(kdata, occ_by_k, strict=True):
+        _, c, _mill, ks, abl_all, vol = res
+        occl = list(occ)
+        for ai, k in enumerate(keys):
+            phase = np.exp(1j * (ks @ np.asarray(acart[ai][0])))
+            cp = c[:, :nb_solve] * phase[:, None]
+            amps = [(occl[n], *_augment_amplitudes(cp[:, n], ks, abl_all[ai], lmax, vol))
+                    for n in range(nb_solve)]
+            rlm = sphere_density_multipoles(amps, us_by_key[k], lmax, lset2)
+            for lm in lset2:
+                rho_2m[k][lm] += w * rlm[lm]
+    return rho_2m
 
 
 def _efg_from_multipoles(rho_by_key, v_grid, acart, keys, R_by_key, rr_by_key, dx, A):
