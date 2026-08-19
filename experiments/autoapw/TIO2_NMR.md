@@ -224,3 +224,11 @@ the fixed stack (deg-aware occ + warm-started chains + IBZ + pool).
 The spurious symmetry breaking WAS the O magnitude deficit: every basin-broken run gave 20-64%; the
 degeneracy-aware occupations recover ~90% at the COARSEST mesh. (symdev printout in this run is a
 normalization bug, fixed in e169633+1; physics unaffected.) k333/k444 warm points next.
+
+## TI SOLVED (campaign k333 warm, fullpot fp4 aug3, NO LOs, NO core-Sternheimer):
+  Ti [+19.05,-13.41,-5.64] eta 0.408 | Elk [+19.34,-13.16,-6.18] 0.36  -> V_zz 98.5% of Elk,
+  C_Q(49Ti) 11.4 vs Elk 11.5 MHz (exp 13.4). The "missing deep-core Sternheimer" hypothesis was
+  WRONG: Ti needed (a) the general-L (odd-L incl.) crystal field and (b) the SYMMETRIC SCF basin
+  (degeneracy-aware occupations). All prior "Ti impossible" conclusions were broken-basin artifacts.
+  O at this point: [+13.17,-10.82,-2.35] (69%), still moving with k (k222 gave 93%) — k444 + LO
+  probe pending. symdev printout still the pre-fix normalization (cosmetic).
