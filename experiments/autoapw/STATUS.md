@@ -179,20 +179,21 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
           even at c/a=1) → V_zz≈-46 eV/Å², η tracks the c/a distortion (0 axial → 0.06), C_Q(¹⁷O)≈2.9
           MHz (physical 1-15 MHz range). Demo `examples/flapw_oxygen_nmr.py` (c/a scan + plot); unit +
           slow integration tests. NOTE: NOT yet calibrated vs WIEN2k on a real material.
-      [~] BeO-vs-Elk CALIBRATION ATTEMPT (2026-08-18) — reference workflow works, quantitative match
-          FAILS. Elk 11 (elk-11.0.2 on asus, task 0+115, lmaxi 2): BeO wurtzite O V_zz=-0.01717 a.u.
-          =-1.67 eV/Å², η≈0 (axial), C_Q(¹⁷O)≈0.10 MHz. Elk's EFG def (Coulomb-potential curvature,
-          l=0 removed) matches efg_tensor exactly, so it's apples-to-apples. But MY BeO gives V_zz
-          -28..-62 eV/Å² (20-40× too big), site-dependent (the 2 symmetry-equivalent O disagree),
-          η nonzero — because the muffin-tin SCF does NOT capture BeO's IONIC ground state: O comes
-          out with a spurious 2p-hole (large valence EFG -56..-73) instead of closed-shell O²⁻. Root
-          gaps: (a) ionic band-ordering/occupation (Be 2s→O 2p charge transfer not achieved), (b) the
-          incomplete l=0-pseudocharge lattice term. NOT a quick fix — quantitative ionic-crystal EFG
-          needs correct charge-transfer occupation + multipole-matched Weinert pseudocharge. TiO2
-          (more ionic + transition metal) is further out of reach.
-          BUT the attempt found+fixed 3 real bugs that unblock multi-atom convergence (were commits):
-          ghost states (solve_geneig canonical orthogonalization, not Löwdin clip), numerov overflow
-          (n_cut past R_MT), rank-deficient eigenvalue padding. Ne unchanged (22.6235).
+      [~] BeO-vs-Elk CALIBRATION (2026-08-18) — reference works; qualitatively RIGHT, ~4-5× off.
+          Elk 11 (elk-11.0.2 on asus, `tasks 0 115`, `lmaxi 2`, EFG.OUT in a.u.=Ha/bohr²×97.174→eV/Å²):
+          BeO wurtzite O V_zz=-1.67 eV/Å², η≈0 (axial), C_Q(¹⁷O)≈0.10 MHz. Elk's EFG def (Coulomb-
+          potential curvature, l=0 removed) matches efg_tensor exactly → apples-to-apples.
+          ROOT CAUSE of the initial garbage (V_zz -28..-62, sites disagree, ghosts): OVERLAPPING
+          muffin tins — R_MT is in Å, I passed Bohr-magnitude radii (R_O=1.6 read as 1.6Å=3.0 Bohr) so
+          Be+O spheres overlapped → interstitial overlap matrix S INDEFINITE (eig -1.75) → spurious
+          deep states. Fixed by an overlap guard (raises ValueError). With correct radii (Be 0.65, O
+          0.85 Å): sane bands, the 2 O sites AGREE, η=0 axial (matches Elk), V_zz=-7.6 eV/Å² vs Elk
+          -1.67 — right sign+symmetry, ~4.6× too big. Residual gap: O keeps a PARTIAL 2p-hole (O 2p
+          bands near E_F, not the fully-filled O²⁻ → valence EFG -8.4 still large) + the incomplete
+          l=0-pseudocharge lattice term. Improving: k-mesh occupation, then multipole pseudocharge.
+          The attempt found+fixed 4 real bugs (commits): overlap guard, ghost states (solve_geneig
+          canonical orthogonalization not Löwdin-clip), numerov overflow (n_cut), rank-deficient
+          eigenvalue padding. Ne unchanged (22.6235). TiO2 (transition metal + more ionic) still harder.
       [ ] plumbing/benchmark: correct ionic occupation (charge transfer) + multipole pseudocharge →
           then re-attempt BeO/TiO2 vs Elk. Then differentiable EFG (∂C_Q/∂structure).
 - [ ] Chemical shielding σ (all nuclei) — GIPAW magnetic linear response; a separate large subsystem.
