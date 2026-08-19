@@ -740,12 +740,14 @@ def _weinert_multi(rho_I, spheres, L, nfft):
                                                  geom=(dv, th, ph))
             rho_smooth += own_ps
             own_ps_by_sphere.append((own_ps, sorted({lm for lm in sp["rho_2m"] if lm[0] > 0})))
-    v_grid = fft_poisson(rho_smooth, A)
+    v_hart = fft_poisson(rho_smooth, A)
     # Interstitial XC: the spheres carry vxc(rho_sph) but the interstitial previously had NONE —
     # a potential discontinuity at every muffin-tin boundary and an O(eV) hole in the bonding
-    # region. The PW density at the sphere surface equals the augmented density there (value
-    # matching), so adding vxc(rho_I) makes the total potential continuous across R_MT.
-    v_grid = v_grid + vxc_lda(torch.tensor(np.clip(rho_I, 1e-12, None))).numpy()
+    # region. The TOTAL grid (Hartree+XC) feeds v_i0, the lattice boundary projections and the
+    # warped-interstitial term; the SPHERE MATCHING below stays Hartree-only because the caller
+    # adds vxc(rho_sph) inside the sphere itself — using the total there would double-count XC at
+    # the boundary (a reintroduced ~eV discontinuity that kept the aspherical loop oscillating).
+    v_grid = v_hart + vxc_lda(torch.tensor(np.clip(rho_I, 1e-12, None))).numpy()
     # The own-sphere L>0 field must be excluded from each sphere's lattice term. The analytic
     # cancellation (v_bc - V_part(R)) fails at the ~20% level because the ~5-grid-point pseudo-
     # charge ALIASES: its band-limited near-field at R differs from the analytic multipole value
@@ -771,7 +773,7 @@ def _weinert_multi(rho_I, spheres, L, nfft):
             for sgn in (+1, -1):
                 pf = (c + sgn * R * np.eye(3)[axis]) @ ainv       # a Cartesian surface point → frac
                 idx = tuple(int(round(pf[d] * nfft)) % nfft for d in range(3))
-                pts.append(v_grid[idx])
+                pts.append(v_hart[idx])
         v_bc = float(np.mean(pts))
         vpart = radial_poisson_to_R(sp["rho_sph"], rr, R, drw=drw) - sp["Z"] * E2 / rr
         v_sph_list.append(vpart + (v_bc - vpart[-1]))
@@ -824,7 +826,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                       iters: int = 40, tol: float = 3e-3, kmesh=(1, 1, 1), smearing: float = 0.0,
                       efg: bool = False, fullpot: bool = False, use_symmetry: bool = True,
                       fullpot_lmax: int = 2, los=None, val_e=None, core=None, el_override=None,
-                      v_start=None, kworkers: int = 1, subspace_reuse: bool = True,
+                      v_start=None, kworkers: int = 1, subspace_reuse: bool = False,
                       subspace_tol: float = 1e-5, cell=None, verbose: bool = False):
     """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
@@ -970,7 +972,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
 
     conv = None
     v_nsph = None                                          # non-spherical potential (fullpot)
-    r_nsph, beta_nsph = float("inf"), 0.3                  # aspherical residual (gate) + legacy
+    r_nsph = float("inf")                                  # aspherical residual (convergence gate)
     vns_new = None
     # staged start: a cold fullpot SCF couples the spherical and aspherical loops from iteration 0
     # and can diverge violently (observed: span bouncing 20 eV, r_v ~100). Converge the muffin-tin
@@ -1245,12 +1247,11 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
             sd = f"{sym_dev:.1e}" if atom_orbits is not None else "-"
             rn = f"{r_nsph:.1e}" if fullpot else "-"
             print(f"  flapw it={it:3d} span={span:9.4f} d={d_span:8.1e} r_v={r_sph:8.1e} "
-                  f"r_nsph={rn} symdev={sd} b_nsph={beta_nsph:.2f} "
+                  f"r_nsph={rn} symdev={sd} "
                   f"[{'exact' if full_iter else 'subsp'}] {time.time() - t_it:5.1f}s",
                   flush=True)
         recorder.record(it=it, span=span, d_span=(None if conv is None else d_span),
                         r_v=r_sph, r_nsph=(r_nsph if fullpot else None),
-                        beta_nsph=(beta_nsph if fullpot else None),
                         symmetry_dev=(sym_dev if atom_orbits is not None else None),
                         e_fermi=e_fermi, mt_phase=mt_phase, exact_solve=full_iter,
                         t_s=time.time() - t_it)
