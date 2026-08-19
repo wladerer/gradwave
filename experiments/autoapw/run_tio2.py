@@ -1,5 +1,5 @@
 """gradwave FLAPW EFG for rutile TiO2 — validate vs Elk (experiments/autoapw/TIO2_NMR.md).
-Usage: uv run python experiments/autoapw/run_tio2.py [ecut] [kx ky kz] [iters] [fp] [smear] [rO] [rTi]"""
+Args: [ecut] [kx ky kz] [iters] [fp] [smear] [rO] [rTi] (see the argv parsing below)."""
 import sys
 import time
 
@@ -10,7 +10,7 @@ from gradwave.flapw.nmr import quadrupolar_coupling
 
 
 def evals(site):
-    """The three EFG principal values (eV/Å^2), sorted by descending magnitude (V_zz, V_yy, V_xx)."""
+    """The three EFG principal values (eV/Å^2), sorted by descending magnitude: V_zz, V_yy, V_xx."""
     w = np.linalg.eigvalsh(site["tensor"])
     return w[np.argsort(-np.abs(w))]
 
