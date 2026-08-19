@@ -276,3 +276,12 @@ any nonzero = the leak, isolated from SCF dynamics. Check sphere_pseudocharge_lm
 REAL grid (not the unit-test grid), the interstitial-inside subtraction (dv**bl term), and the
 v_bc evaluation at exactly R vs the pseudocharge support edge. FIX gain<1 -> single physical fixed
 point -> then rerun the matrix. All current TiO2 fullpot magnitudes are basin-dependent until then.
+
+## LEAK CONFIRMED + FIX DESIGN (handoff): single-atom lattice term = 3.19 eV/A^2 (20% of V_zz, must
+be 0) -> self-interaction verified. Naive per-m grid normalization made it WORSE (5.17): on the
+coarse grid the Y_LM are NOT orthogonal, so per-m moments pick up cross terms. CORRECT FIX: solve
+the (2L+1)^2 grid Gram system G c = q per (atom, L) in sphere_pseudocharge_lm, with
+G[m',m] = sum(radial_in * d^L * conj(Y_m') * Y_m) * dvol — then the pseudocharge's MEASURED grid
+moments equal Q_LM exactly and the own-field cancellation in C_LM holds by construction. Acceptance:
+single-atom leak -> ~0, TiO2 fullpot converges to ONE fixed point from any start, magnitudes stable
+across fp_lmax/k. coulomb.py reverted to analytic normalization pending this fix.
