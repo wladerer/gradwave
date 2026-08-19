@@ -124,7 +124,7 @@ def _build_lo(l, e2, ch, u, ud, r, dx, v, R):
     s_pu, t_pu, v_pu = _pair_integrals(l, phi, u, rr, drw, dx, v_in)
     s_pud, t_pud, v_pud = _pair_integrals(l, phi, ud, rr, drw, dx, v_in)
     _, t_pp, v_pp = _pair_integrals(l, phi, phi, rr, drw, dx, v_in)
-    return {"l": l, "a": a, "b": b, "cn": cn, "u2": u2,
+    return {"l": l, "a": a, "b": b, "cn": cn, "u2": u2, "phi": phi,
             "S_pu": s_pu, "S_pud": s_pud, "H_pu": t_pu + v_pu, "H_pud": t_pud + v_pud,
             "S_pp": 1.0, "H_pp": t_pp + v_pp}
 
@@ -488,14 +488,22 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
                     diag_h.append(lo["H_pp"])
         nlo = len(rows_s)
         if nlo:
+            rows_s_arr, rows_h_arr = np.array(rows_s), np.array(rows_h)
+            lo_lo_h = np.diag(diag_h).astype(complex)
+            if v_nsph:
+                # the LOs' aspherical coupling — the semicore's response to the crystal field
+                dh_pw, dh_lo = _nonspherical_augment_lo(v_nsph, atoms_cart, abl_by_atom, ks,
+                                                        species, lmax, vol, r, dx, lodat)
+                rows_h_arr = rows_h_arr + dh_pw
+                lo_lo_h = lo_lo_h + dh_lo
             s_ext = np.zeros((npw + nlo, npw + nlo), dtype=complex)
             h_ext = np.zeros((npw + nlo, npw + nlo), dtype=complex)
             s_ext[:npw, :npw], h_ext[:npw, :npw] = S, Hm
-            s_ext[npw:, :npw], h_ext[npw:, :npw] = np.array(rows_s), np.array(rows_h)
-            s_ext[:npw, npw:] = np.array(rows_s).conj().T
-            h_ext[:npw, npw:] = np.array(rows_h).conj().T
+            s_ext[npw:, :npw], h_ext[npw:, :npw] = rows_s_arr, rows_h_arr
+            s_ext[:npw, npw:] = rows_s_arr.conj().T
+            h_ext[:npw, npw:] = rows_h_arr.conj().T
             s_ext[npw:, npw:] = np.diag(diag_s)
-            h_ext[npw:, npw:] = np.diag(diag_h)
+            h_ext[npw:, npw:] = lo_lo_h
             S, Hm = s_ext, h_ext
     ev, c = solve_geneig(Hm, S, nbands, with_vecs=True)
     return ev, c, mill, ks, abl_by_atom, vol
@@ -545,6 +553,72 @@ def _nonspherical_augment(v_nsph, atoms_cart, abl_by_atom, ks, species, lmax, vo
                     ha += (i_aa * (ca @ g @ b_a[lp].T) + i_ab * (ca @ g @ b_b[lp].T)
                            + i_ba * (cb @ g @ b_a[lp].T) + i_bb * (cb @ g @ b_b[lp].T))
     return ha
+
+
+def _nonspherical_augment_lo(v_nsph, atoms_cart, abl_by_atom, ks, species, lmax, vol, r, dx,
+                             lodat):
+    """The local orbitals' coupling to the non-spherical potential — ``ΔH[LO_lm, G] = Σ_{LM,l'm'}
+    [∫φ V_LM u_l' dr] G^{LM}_{lm,l'm'} B_l'm'(G)`` (+ u̇) and the same-atom LO-LO block
+    ``[∫φ_i V_LM φ_j dr] G``. This is the channel by which a semicore LO polarizes in the crystal
+    field (the Sternheimer antishielding of a d⁰ cation) — without it, an LO feels only the
+    spherical potential and cannot respond aspherically. Returns ``(ΔH_lo_pw (nlo,npw),
+    ΔH_lo_lo (nlo,nlo))`` in the matrix build's LO row order."""
+    from gradwave.flapw.efg import gaunt_matrix
+    r_np = r.numpy()
+    npw = len(ks)
+    nlo = sum(2 * lo["l"] + 1 for (_t, key) in atoms_cart for lo in (lodat or {}).get(key, []))
+    dh_pw = np.zeros((nlo, npw), dtype=complex)
+    dh_lo = np.zeros((nlo, nlo), dtype=complex)
+    row0 = 0
+    for ai, (tau, key) in enumerate(atoms_cart):
+        los = (lodat or {}).get(key, [])
+        n_at = sum(2 * lo["l"] + 1 for lo in los)
+        comps = v_nsph.get(key)
+        if not comps or not n_at:
+            row0 += n_at
+            continue
+        rr = r_np[r_np <= species[key]["R"]]
+        drw = rr * dx
+        el, vsph = species[key]["El"], species[key]["v"]
+        us = {lang: _radial_u(lang, el[lang], r, dx, vsph, species[key]["R"])
+              for lang in range(lmax + 1)}
+        ph = np.exp(1j * (ks @ np.asarray(tau, dtype=float)))
+        b_a, b_b = {}, {}
+        for lang in range(lmax + 1):
+            ylm = _ylm_star(lang, ks)
+            pf = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
+            b_a[lang] = pf * ylm * (abl_by_atom[ai][lang][:, 0] * ph)[:, None]
+            b_b[lang] = pf * ylm * (abl_by_atom[ai][lang][:, 1] * ph)[:, None]
+        offs = _lo_row_slices(los)
+        for (big_l, big_m), vlm in comps.items():
+            if big_l == 0:
+                continue
+            vlm = np.asarray(vlm)
+            for lo in los:
+                li = lo["l"]
+                sl0, _sl1, _ = offs[li]
+                # LO bra ↔ PW-augmentation ket
+                for lp in range(lmax + 1):
+                    if big_l < abs(li - lp) or big_l > li + lp or (li + lp + big_l) % 2:
+                        continue
+                    ulp, udlp = us[lp]
+                    i_pu = np.sum(lo["phi"] * vlm * ulp * drw)
+                    i_pud = np.sum(lo["phi"] * vlm * udlp * drw)
+                    g = gaunt_matrix(li, big_l, big_m, lp)
+                    dh_pw[row0 + sl0:row0 + sl0 + 2 * li + 1] += (
+                        i_pu * (g @ b_a[lp].T) + i_pud * (g @ b_b[lp].T))
+                # LO bra ↔ LO ket (same atom; different l couples via odd/even L)
+                for lo2 in los:
+                    lj = lo2["l"]
+                    if big_l < abs(li - lj) or big_l > li + lj or (li + lj + big_l) % 2:
+                        continue
+                    sl0j, _s, _ = offs[lj]
+                    i_pp = np.sum(lo["phi"] * vlm * lo2["phi"] * drw)
+                    g = gaunt_matrix(li, big_l, big_m, lj)
+                    dh_lo[row0 + sl0:row0 + sl0 + 2 * li + 1,
+                          row0 + sl0j:row0 + sl0j + 2 * lj + 1] += i_pp * g
+        row0 += n_at
+    return dh_pw, 0.5 * (dh_lo + dh_lo.conj().T)
 
 
 def _weinert_multi(rho_I, spheres, L, nfft):
