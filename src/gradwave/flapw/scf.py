@@ -526,13 +526,13 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
 
         rho_I = np.zeros((nfft, nfft, nfft))
         rho_val = {k: np.zeros_like(rr_by_key[k]) for k in keys}
-        if fullpot:
+        if fullpot or efg:
             from gradwave.flapw.efg import sphere_density_multipoles
             us_by_key = {k: {lg: _radial_u(lg, El_by_key[k][lg], r, dx, vmt_by_key[k], R_by_key[k])
                              for lg in range(lmax + 1)} for k in keys}
-            lset2 = [(2, m) for m in range(-2, 3)]
-            rho_2m = {k: {(2, m): np.zeros(rr_by_key[k].shape, dtype=complex)
-                          for m in range(-2, 3)} for k in keys}
+            lset2 = [(0, 0)] + [(2, m) for m in range(-2, 3)]
+            rho_2m = {k: {lm: np.zeros(rr_by_key[k].shape, dtype=complex) for lm in lset2}
+                      for k in keys}
         for (_kf, w, res), occ in zip(kdata, occ_by_k, strict=True):
             _, c, mill, ks, abl_all, vol = res
             occl = list(occ)
@@ -543,12 +543,12 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
                 _, rk = _sphere_valence_density(cp, occl, ks, abl_all[ai], El_by_key[k], lmax,
                                                 vol, r, dx, vmt_by_key[k], R_by_key[k])
                 rho_val[k] += w * rk
-                if fullpot:
+                if fullpot or efg:
                     amps = [(occl[n], *_augment_amplitudes(cp[:, n], ks, abl_all[ai], lmax, vol))
                             for n in range(nb_solve)]
                     rlm = sphere_density_multipoles(amps, us_by_key[k], lmax, lset2)
-                    for m in range(-2, 3):
-                        rho_2m[k][(2, m)] += w * rlm[(2, m)]
+                    for lm in lset2:
+                        rho_2m[k][lm] += w * rlm[lm]
 
         spheres, rho_sph_by_key = [], {}
         for ai, (k, s) in enumerate(zip(keys, syms, strict=True)):
@@ -595,40 +595,31 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
 
     info = {"nbands": nbands, "symbols": syms, "e_fermi": conv.get("e_fermi")}
     if efg:
-        info["efg"] = _sphere_efg_gamma(A, acart, keys, species, El_by_key, vmt_by_key, R_by_key,
-                                        rr_by_key, lmax, ecut, r, dx, nbands, v_grid, v_nsph)
+        info["efg"] = _efg_from_multipoles(rho_2m, v_grid, acart, keys, R_by_key, rr_by_key, dx, A)
     return conv, info
 
 
-def _sphere_efg_gamma(A, acart, keys, species, El_by_key, vmt_by_key, R_by_key, rr_by_key,
-                      lmax, ecut, r, dx, nbands, v_grid, v_nsph=None):
-    """Per-atom EFG at Γ from the converged potential: the aspherical l=2 density, its valence V_zz
-    (on-site l=2 sphere Poisson), and the full V_zz adding the lattice term (interstitial l=2
-    boundary matching against ``v_grid``). Cubic sites give ``V_zz ≈ 0`` (no l=2 invariant)."""
+def _efg_from_multipoles(rho_by_key, v_grid, acart, keys, R_by_key, rr_by_key, dx, A):
+    """Per-atom EFG from the converged BZ-averaged aspherical density (``rho_by_key`` = the l=2 (and
+    l=0) sphere-density multipoles accumulated over the k-mesh with the SCF occupations, i.e. the
+    same density that produced the potential — not a fresh Γ solve at occ=2). Returns the valence
+    V_zz (on-site l=2 sphere Poisson), the full V_zz adding the interstitial l=2 boundary (lattice)
+    term, the asymmetry η, the tensor, and the in-sphere valence charge."""
     from gradwave.flapw.efg import (
         efg_tensor,
         efg_tensor_full,
         interstitial_l2_boundary,
-        sphere_density_multipoles,
         valence_efg_moments,
     )
-    _, cg, _, ksg, ablg, volg = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx,
-                                              nbands, v_nsph=v_nsph)
-    lset = [(2, m) for m in range(-2, 3)]
     out = {}
     for ai, k in enumerate(keys):
-        us = {lang: _radial_u(lang, El_by_key[k][lang], r, dx, vmt_by_key[k], R_by_key[k])
-              for lang in range(lmax + 1)}
-        phase = np.exp(1j * (ksg @ np.asarray(acart[ai][0])))
-        amps = [(2.0, *_augment_amplitudes(cg[:, n] * phase, ksg, ablg[ai], lmax, volg))
-                for n in range(nbands)]
-        rho_lm = sphere_density_multipoles(amps, us, lmax, lset)
-        rr, drw = rr_by_key[k], rr_by_key[k] * dx
-        q, q2 = valence_efg_moments(rho_lm, rr, drw)
-        _, v_zz_val, eta_val = efg_tensor(rho_lm, rr, drw)
+        rho, rr, drw = rho_by_key[k], rr_by_key[k], rr_by_key[k] * dx
+        q, q2 = valence_efg_moments(rho, rr, drw)
+        _, v_zz_val, eta_val = efg_tensor(rho, rr, drw)
         v_bc = interstitial_l2_boundary(v_grid, acart[ai][0], R_by_key[k], A)
-        tensor, v_zz, eta = efg_tensor_full(rho_lm, rr, drw, v_bc, R_by_key[k])
+        tensor, v_zz, eta = efg_tensor_full(rho, rr, drw, v_bc, R_by_key[k])
+        charge = float(math.sqrt(4 * math.pi) * np.sum(rho[(0, 0)].real * rr**2 * drw))
         out[k] = {"Q2": q2, "V_zz": v_zz, "eta": eta, "V_zz_valence": v_zz_val,
-                  "eta_valence": eta_val, "tensor": tensor,
+                  "eta_valence": eta_val, "tensor": tensor, "sphere_charge": charge,
                   "q_moments": {m: complex(v) for m, v in q.items()}}
     return out
