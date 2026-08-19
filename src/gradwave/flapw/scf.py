@@ -15,6 +15,7 @@ a=6 Bohr crystal 2s-2p splitting matches Elk 11.0.2 (all-electron FLAPW) to 0.14
 
 from __future__ import annotations
 
+import itertools
 import math
 
 import numpy as np
@@ -474,6 +475,16 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     rr_by_key = {k: r_np[r_np <= R_by_key[k]] for k in keys}
     mask_by_key = {k: r_np <= R_by_key[k] for k in keys}
     acart = [(tau, key) for (tau, _), key in zip(atoms_cart, keys, strict=True)]
+    for i in range(len(acart)):                # muffin tins must not overlap (R_MT is Å): overlap
+        for j in range(i, len(acart)):         # makes the interstitial overlap matrix S indefinite
+            sep = min(float(np.linalg.norm(acart[j][0] + np.asarray(sh) @ A - acart[i][0]))
+                      for sh in itertools.product((-1, 0, 1), repeat=3)
+                      if not (i == j and sh == (0, 0, 0)))
+            if R_by_key[keys[i]] + R_by_key[keys[j]] > sep + 1e-9:
+                raise ValueError(
+                    f"muffin-tin spheres overlap ({keys[i]},{keys[j]}): "
+                    f"R={R_by_key[keys[i]]:.3f}+{R_by_key[keys[j]]:.3f} Å > separation {sep:.3f} Å "
+                    "(radii are in ångström)")
     v_by_key = {k: vat_by_sym[s].clone() for k, s in zip(keys, syms, strict=True)}
 
     conv = None
