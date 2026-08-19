@@ -1032,9 +1032,10 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
         if fullpot and d_ops is not None:               #   aspherical ρ_LM star-unfolded (Wigner-D)
             raw = rho_2m
             rho_2m = _symmetrize_rho_lm(rho_2m, keys, sg, d_ops)
-            for k in keys:                              # residual of the projector = asymmetry
+            for k in keys:                              # residual of the projector = asymmetry,
+                scale = max(max(float(np.abs(v).max())  # scaled per ATOM (a numerically-empty
+                                for v in rho_2m[k].values()), 1e-30)   # (L,M) is not a violation)
                 for lm, v in rho_2m[k].items():
-                    scale = max(float(np.abs(v).max()), 1e-30)
                     sym_dev = max(sym_dev, float(np.abs(raw[k][lm] - v).max()) / scale)
 
         spheres, rho_sph_by_key = [], {}
