@@ -187,6 +187,13 @@ def solve_geneig(H, S, nbands, with_vecs=False, tol=1e-8):
     x = u[:, keep] * (w[keep] ** -0.5)                   # npw × nkeep, S-orthonormal columns
     ea, va = np.linalg.eigh(x.conj().T @ H @ x)
     order = np.argsort(ea.real)[:nbands]
+    evals = ea.real[order]
+    if len(evals) < nbands:                              # rank-deficient: pad empty (high) states
+        evals = np.concatenate([evals, np.full(nbands - len(evals), 1e10)])
     if with_vecs:
-        return ea.real[order], x @ va[:, order]
-    return ea.real[order]
+        vecs = x @ va[:, order]
+        if vecs.shape[1] < nbands:
+            vecs = np.concatenate([vecs, np.zeros((x.shape[0], nbands - vecs.shape[1]),
+                                                  dtype=vecs.dtype)], axis=1)
+        return evals, vecs
+    return evals
