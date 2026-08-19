@@ -39,9 +39,18 @@ from gradwave.flapw.mixing import anderson_next
 from gradwave.flapw.radial import log_mesh, numerov_log_np, radial_eigs_tridiag
 from gradwave.kpoints import monkhorst_pack
 
-_CORE = {"He": [], "Be": [(0, 2)], "O": [(0, 2)], "Ne": [(0, 2)]}
-_N_VAL_BANDS = {"He": 1, "Be": 1, "O": 3, "Ne": 4}
-_VAL_E = {"He": 2, "Be": 2, "O": 6, "Ne": 8}       # valence electron count (Z − frozen core)
+# frozen-core states as (l, n_radial_index, occupation): n_radial_index=1 is the lowest l-state
+# (1s/2p/3d…), 2 the next (2s/3p…), so an element with several core states of the same l (Ti's
+# [Ar] core: 1s2s3s, 2p3p) lists one entry each.
+_CORE = {"He": [], "Be": [(0, 1, 2)], "O": [(0, 1, 2)], "Ne": [(0, 1, 2)],
+         "Ti": [(0, 1, 2), (0, 2, 2), (0, 3, 2), (1, 1, 6), (1, 2, 6)]}   # [Ar] frozen core
+_N_VAL_BANDS = {"He": 1, "Be": 1, "O": 3, "Ne": 4, "Ti": 6}
+_VAL_E = {"He": 2, "Be": 2, "O": 6, "Ne": 8, "Ti": 4}   # valence electron count (Z − frozen core)
+# LAPW energy-parameter orbital per angular momentum: the crystal valence linearization point for
+# each l (the atomic KS eigenvalue used to build u_l/u̇_l). Second-row atoms use 2s/2p; Ti's
+# valence is 4s/4p/3d. A missing l (e.g. an empty 4p) falls back to a default in the SCF.
+_VALENCE_NL = {"He": {0: "1s"}, "Be": {0: "2s"}, "O": {0: "2s", 1: "2p"},
+               "Ne": {0: "2s", 1: "2p"}, "Ti": {0: "4s", 1: "4p", 2: "3d"}}
 
 
 def _ylm_star(l, ks):
@@ -223,7 +232,8 @@ def crystal_scf(a_bohr: float, symbol: str = "Ne", R: float = 1.4, ecut: float =
     for _ in range(iters):
         v0 = float(v.numpy()[np.argmin(np.abs(r.numpy() - R))])
         v_mt = torch.where(r <= R, v - v0, torch.zeros_like(r))
-        El = {0: at.get("2s", -5.0) - v0, 1: at.get("2p", -5.0) - v0, 2: -5.0 - v0}
+        nl = _VALENCE_NL[symbol]
+        El = {lang: at.get(nl.get(lang, ""), -5.0) - v0 for lang in range(max(lmax, 2) + 1)}
         occb = [2.0] * n_val
         # BZ-integrate the valence density over the k-mesh; keep Γ eigenvalues for reporting.
         rho_I = np.zeros((nfft, nfft, nfft))
@@ -241,9 +251,9 @@ def crystal_scf(a_bohr: float, symbol: str = "Ne", R: float = 1.4, ecut: float =
             ea_gamma = _lapw_k((0.0, 0.0, 0.0), L, R, lmax, El, ecut, r, dx, v_mt)[0]
         ea = ea_gamma
         rho_core = np.zeros_like(rr)
-        for lc, fc in core:
-            _, uc = radial_eigs_tridiag(lc, r, dx, v, 1)
-            rho_core += fc * uc[rr_mask, 0] ** 2 / (4 * math.pi * rr**2)
+        for lc, nidx, fc in core:
+            _, uc = radial_eigs_tridiag(lc, r, dx, v, nidx)
+            rho_core += fc * uc[rr_mask, nidx - 1] ** 2 / (4 * math.pi * rr**2)
         rho_sph = rho_val + rho_core
 
         v_sph, v_i0 = _weinert_potential(rho_I, rr, dx, rho_sph, Z, R, L, nfft)
@@ -540,8 +550,9 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
             R = R_by_key[k]
             v0 = float(v_by_key[k].numpy()[np.argmin(np.abs(r_np - R))])
             vmt = torch.where(r <= R, v_by_key[k] - v0, torch.zeros_like(r))
-            El = {0: at_by_sym[s].get("2s", -5.0) - v0, 1: at_by_sym[s].get("2p", -5.0) - v0,
-                  2: -5.0 - v0}
+            nl = _VALENCE_NL[s]
+            El = {lang: at_by_sym[s].get(nl.get(lang, ""), -5.0) - v0
+                  for lang in range(max(lmax, 2) + 1)}
             species[k] = {"R": R, "v": vmt, "El": El}
             El_by_key[k], vmt_by_key[k] = El, vmt
 
@@ -617,9 +628,9 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
         for ai, (k, s) in enumerate(zip(keys, syms, strict=True)):
             rr, mask = rr_by_key[k], mask_by_key[k]
             rho_core = np.zeros_like(rr)
-            for lc, fc in _CORE[s]:
-                _, uc = radial_eigs_tridiag(lc, r, dx, v_by_key[k], 1)
-                rho_core += fc * uc[mask, 0] ** 2 / (4 * math.pi * rr**2)
+            for lc, nidx, fc in _CORE[s]:
+                _, uc = radial_eigs_tridiag(lc, r, dx, v_by_key[k], nidx)
+                rho_core += fc * uc[mask, nidx - 1] ** 2 / (4 * math.pi * rr**2)
             rho_sph_by_key[k] = rho_val[k] + rho_core
             spheres.append({"tau": acart[ai][0], "rr": rr, "dx": dx,
                             "rho_sph": rho_sph_by_key[k], "Z": CONFIG[s][0], "R": R_by_key[k],
