@@ -76,3 +76,16 @@ Solve by the radial Green's function G(r,r')=u_reg(r_<) u_irr(r_>)/W from two ho
 result is not degraded. This is the standard FLAPW/Blaha-Schwarz antishielding; it is the reason a
 d0-cation EFG needs full-potential + core response, and is a research-grade addition to build+validate
 carefully (not overnight without a reference for intermediate values).
+
+## Headline run + HONEST convergence caveat (must not over-claim)
+fullpot + Elk-matched R_MT (Ti 1.098/O 0.824 Å), ecut350, k(3,3,3), 40 iters, sm0.05:
+  Ti V_zz=-3.95 eta=0.016 ; O V_zz=+8.59 eta=0.658 C_Q(17O)=0.53 MHz.
+This is WORSE than the k222 run (-12.8/0.745/0.79) I first reported. Across all settings the O V_zz
+ranges +8.6..±16 eV/Å^2 with UNSTABLE SIGN (its two large eigenvalues are near-equal magnitude, like
+Elk's -19.1/+16.6, so the |V_zz| assignment flips), eta 0.66..0.75, C_Q 0.5..1.0. => the O EFG is NOT
+k-converged/stable in this scheme. Honest status: gradwave's fullpot FLAPW RUNS end-to-end on a TM
+oxide and yields EFG tensors of the RIGHT ORDER with eta in Elk's range (0.74), but it is a
+qualitative-to-semiquantitative result (|V_zz| ~45-70% of Elk, sign unstable), NOT a tight match. Needs
+proper k-convergence (k444+, each fullpot run ~35 min) + likely higher lmax before any quantitative
+claim. Ti remains wrong (core-Sternheimer). Do not claim "matches Elk"; claim "working pipeline,
+right order, eta in range, not yet converged".
