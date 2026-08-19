@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import time
 
 import numpy as np
 import torch
@@ -737,7 +738,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                       efg: bool = False, fullpot: bool = False, use_symmetry: bool = True,
                       fullpot_lmax: int = 2, los=None, val_e=None, core=None, el_override=None,
                       v_start=None, kworkers: int = 1, subspace_reuse: bool = True,
-                      subspace_tol: float = 1e-5, cell=None):
+                      subspace_tol: float = 1e-5, cell=None, verbose: bool = False):
     """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
     ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
@@ -874,10 +875,13 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
 
     conv = None
     v_nsph = None                                          # non-spherical potential (fullpot)
+    r_nsph, beta_nsph = float("inf"), 0.3                  # aspherical-mix residual + step
     hist = {k: ([], []) for k in keys}
     c_prev_by_k = [None] * len(kfracs)
     for it in range(iters):
         full_iter = (not subspace_reuse) or (it % 5 == 0)
+        t_it = time.time()
+        r_sph = 0.0
         species, El_by_key, vmt_by_key, v0_by_key = {}, {}, {}, {}
         for k, s in zip(keys, syms, strict=True):
             R = R_by_key[k]
@@ -1045,10 +1049,26 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                 vns_new[k] = vns
             if v_nsph is None:
                 v_nsph = vns_new
+                r_nsph = float("inf")
             else:
+                # relative aspherical-potential residual, and adaptive damping: the l>0
+                # self-consistency had NO convergence check and a fixed 0.7/0.3 linear mix —
+                # a limit cycle or divergence there was invisible (endpoints swung 3x while the
+                # span-only criterion looked converged). Halve the step when the residual grows,
+                # recover it slowly when the loop contracts.
+                scale = max(max(float(np.abs(v).max()) for v in v_nsph[k2].values())
+                            for k2 in keys) or 1.0
+                r_new = max(float(np.abs(vns_new[k2][lm] - v_nsph[k2][lm]).max())
+                            for k2 in keys for lm in vns_new[k2]) / scale
+                if r_new > r_nsph:
+                    beta_nsph = max(0.05, beta_nsph * 0.5)
+                elif r_new < 0.5 * r_nsph:
+                    beta_nsph = min(0.3, beta_nsph * 1.2)
+                r_nsph = r_new
                 for k in keys:
                     for lm in vns_new[k]:
-                        v_nsph[k][lm] = 0.7 * v_nsph[k][lm] + 0.3 * vns_new[k][lm]
+                        v_nsph[k][lm] = ((1.0 - beta_nsph) * v_nsph[k][lm]
+                                         + beta_nsph * vns_new[k][lm])
 
         for ai, k in enumerate(keys):
             mask = mask_by_key[k]
@@ -1058,6 +1078,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
             vnew = torch.tensor(vnew_np)
             hist[k][0].append(v_by_key[k])
             hist[k][1].append(vnew - v_by_key[k])
+            r_sph = max(r_sph, float((vnew - v_by_key[k]).abs().max()))
             if len(hist[k][1]) > 6:
                 hist[k] = (hist[k][0][-6:], hist[k][1][-6:])
         for k in keys:
@@ -1065,7 +1086,16 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
 
         span = float(ev_gamma[nbands - 1] - ev_gamma[0])
         new = {"span": span, "ev": ev_gamma[:nbands].tolist(), "e_fermi": e_fermi}
-        if conv is not None and full_iter and abs(new["span"] - conv["span"]) < tol:
+        d_span = abs(new["span"] - conv["span"]) if conv is not None else float("inf")
+        if verbose:
+            sd = f"{sym_dev:.1e}" if atom_orbits is not None else "-"
+            rn = f"{r_nsph:.1e}" if fullpot else "-"
+            print(f"  flapw it={it:3d} span={span:9.4f} d={d_span:8.1e} r_v={r_sph:8.1e} "
+                  f"r_nsph={rn} symdev={sd} b_nsph={beta_nsph:.2f} "
+                  f"[{'exact' if full_iter else 'subsp'}] {time.time() - t_it:5.1f}s",
+                  flush=True)
+        nsph_ok = (not fullpot) or (r_nsph < 0.05)
+        if conv is not None and full_iter and nsph_ok and d_span < tol:
             conv = new
             break
         conv = new

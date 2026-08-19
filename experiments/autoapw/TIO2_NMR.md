@@ -232,3 +232,13 @@ normalization bug, fixed in e169633+1; physics unaffected.) k333/k444 warm point
   (degeneracy-aware occupations). All prior "Ti impossible" conclusions were broken-basin artifacts.
   O at this point: [+13.17,-10.82,-2.35] (69%), still moving with k (k222 gave 93%) — k444 + LO
   probe pending. symdev printout still the pre-fix normalization (cosmetic).
+
+## SHARPENED DIAGNOSIS (telemetry, 2026-08-19): the fullpot aspherical loop was NEVER converged
+New per-iteration telemetry (verbose=True: span, r_v, r_nsph, symdev, beta_nsph) shows r_nsph —
+the v_nsph relative residual, previously UNMEASURED — decaying slowly (~10%/iter even for Ne
+fullpot) while the span-only criterion "converges" within 3 iterations. ALL fullpot TiO2 endpoints
+(k333 Ti 98.5% match, k444 collapse, aug4 300% O, TiLO probe) were snapshots of a still-moving
+aspherical self-consistency. Fixes landed: adaptive-damped v_nsph mixing (halve step on residual
+growth), r_nsph < 0.05 REQUIRED for convergence, telemetry to see it. The k333 Ti/Elk match must be
+re-established with an r_nsph-converged run (more iters and/or Anderson on v_nsph if slow).
+Campaign complete; all its fullpot numbers are provisional pending converged-loop reruns.
