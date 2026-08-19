@@ -187,3 +187,11 @@ ecut300 k222 sm0 Elk-R_MT aug-lmax3, 35 iters (4391s pre-pool):
 response) rather than site physics. Muffin-tin+LO for reference: Ti [-3.02,+1.98] eta 0.31.
 Next: k-convergence of the B config (k222->k333->k444) with the new fast stack (pool+IBZ+warm start);
 if magnitude climbs with k it is convergence, if flat ~23% it is structural.
+
+## hl2_l3: general-L potential ALONE (no LOs), fullpot fp_lmax=4 aug-lmax3 k222 sm0 ecut300
+  Ti [+6.79,-3.61,-3.18] eta 0.06 C_Q 4.05 | Elk [+19.34,-13.16,-6.18] 0.36 11.5  (35%, RIGHT SIGN)
+  O  [+12.19,-7.58,-4.62] eta 0.24 C_Q 0.75 | Elk [-19.10,+16.60,+2.50] 0.74 1.18 (64%)
+The high-L (incl odd-L) potential alone fixes Ti's sign and reaches 35%/64% of Elk — BETTER than the
+B-side with LOs (Ti 4.5 / O 3.9)! => the LO config (O 2p LO at +5eV, Ti semicore bookkeeping) may be
+hurting; needs an A/B isolating Ti-LOs-only vs O-LO. Odd-L crystal fields (missing before this
+session) are a first-order ingredient at the O 4f site.
