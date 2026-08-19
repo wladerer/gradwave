@@ -91,6 +91,21 @@ def sphere_density_multipoles(amps, us, lmax, lset, nx: int | None = None,
     ``2·lmax + max(L)`` — Gauss-Legendre ``nx`` is exact to ``2nx-1``, and the uniform ``φ`` rule is
     exact for azimuthal orders below ``nphi``. This is bit-exact vs an over-resolved grid.
     """
+    norm_amps = []
+    for f, a, b in amps:
+        norm_amps.append((f, {l: [a[l], b[l]] for l in range(lmax + 1)}))
+    norm_us = {l: list(us[l]) for l in range(lmax + 1)}
+    return sphere_density_multipoles_multi(norm_amps, norm_us, lmax, lset, nx=nx, nphi=nphi)
+
+
+def sphere_density_multipoles_multi(amps, us, lmax, lset, nx: int | None = None,
+                                    nphi: int | None = None):
+    """General-radial-set form of ``sphere_density_multipoles``: each l-channel carries an arbitrary
+    list of radial functions (u, u̇, plus any local orbitals' second-energy radials).
+
+    ``us[l]`` = list of radial arrays (each ``(nr,)``); ``amps`` = list over occupied states of
+    ``(f, coeffs)`` with ``coeffs[l]`` a list of ``(2l+1,)`` complex amplitude vectors aligned with
+    ``us[l]``. Returns ``{(L,M): ρ_LM(r)}`` for every ``(L,M)`` in ``lset``."""
     from scipy.special import sph_harm_y
     max_l = max((lang for (lang, _) in lset), default=0)
     deg = 2 * lmax + max_l
@@ -103,15 +118,14 @@ def sphere_density_multipoles(amps, us, lmax, lset, nx: int | None = None,
            for l in range(lmax + 1) for m in range(-l, l + 1)}
     nr = len(us[0][0])
     rho_ang = np.zeros((nr,) + th.shape)
-    for f, a, b in amps:
+    for f, coeffs in amps:
         if f == 0:
             continue
         psi = np.zeros((nr,) + th.shape, dtype=complex)
         for l in range(lmax + 1):
-            u, ud = us[l]
-            sa = sum(a[l][m + l] * ylm[(l, m)] for m in range(-l, l + 1))
-            sb = sum(b[l][m + l] * ylm[(l, m)] for m in range(-l, l + 1))
-            psi += u[:, None, None] * sa[None] + ud[:, None, None] * sb[None]
+            for rad, vec in zip(us[l], coeffs[l], strict=True):
+                s = sum(vec[m + l] * ylm[(l, m)] for m in range(-l, l + 1))
+                psi += rad[:, None, None] * s[None]
         rho_ang += f * np.abs(psi) ** 2
     out = {}
     for (lang, m) in lset:
