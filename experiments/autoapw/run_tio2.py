@@ -11,13 +11,15 @@ kmesh = tuple(int(x) for x in sys.argv[2:5]) if len(sys.argv) > 4 else (2, 2, 3)
 iters = int(sys.argv[5]) if len(sys.argv) > 5 else 40
 fullpot = len(sys.argv) > 6 and sys.argv[6].lower() in ("fp", "fullpot", "1", "true")
 smearing = float(sys.argv[7]) if len(sys.argv) > 7 else 0.15
+r_o = float(sys.argv[8]) if len(sys.argv) > 8 else 0.80      # O muffin-tin radius (Å)
+r_ti = float(sys.argv[9]) if len(sys.argv) > 9 else 0.95     # Ti muffin-tin radius (Å)
 
 u = 0.3048
 a_bohr = [8.68083, 8.68083, 5.59096]          # rutile a,a,c in Bohr
 atoms = [((0.0, 0.0, 0.0), "Ti"), ((0.5, 0.5, 0.5), "Ti"),
          ((u, u, 0.0), "O"), ((1 - u, 1 - u, 0.0), "O"),
          ((0.5 + u, 0.5 - u, 0.5), "O"), ((0.5 - u, 0.5 + u, 0.5), "O")]
-radii = {"Ti": 0.95, "O": 0.80}               # Ti-O min bond 1.946 Å; no MT overlap
+radii = {"Ti": r_ti, "O": r_o}                # Ti-O min bond 1.946 Å; no MT overlap
 
 t0 = time.time()
 bands, info = crystal_scf_multi(a_bohr, atoms, radii, ecut=ecut, lmax=2, iters=iters,
