@@ -936,6 +936,8 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     # problem first, then switch the aspherical potential on from that state (what every
     # well-behaved fullpot run implicitly did via warm-starting).
     mt_phase = bool(fullpot)
+    from gradwave.flapw.recorder import FLAPWRecorder
+    recorder = FLAPWRecorder()
     hist = {k: ([], []) for k in keys}
     c_prev_by_k = [None] * len(kfracs)
     for it in range(iters):
@@ -1154,6 +1156,12 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                   f"r_nsph={rn} symdev={sd} b_nsph={beta_nsph:.2f} "
                   f"[{'exact' if full_iter else 'subsp'}] {time.time() - t_it:5.1f}s",
                   flush=True)
+        recorder.record(it=it, span=span, d_span=(None if conv is None else d_span),
+                        r_v=r_sph, r_nsph=(r_nsph if fullpot else None),
+                        beta_nsph=(beta_nsph if fullpot else None),
+                        symmetry_dev=(sym_dev if atom_orbits is not None else None),
+                        e_fermi=e_fermi, mt_phase=mt_phase, exact_solve=full_iter,
+                        t_s=time.time() - t_it)
         if mt_phase and full_iter and d_span < 3 * tol:
             mt_phase = False                       # spherical loop settled -> enable fullpot
             if verbose:
@@ -1166,6 +1174,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
 
     info = {"nbands": nbands, "symbols": syms, "e_fermi": conv.get("e_fermi"),
             "v_by_key": {k: v_by_key[k].numpy().copy() for k in keys}}
+    info["recorder"] = recorder
     if atom_orbits is not None:
         # relative asymmetry of the RAW final-iteration density across symmetry-equivalent atoms
         # (and, for fullpot, the star-unfolding projector residual). Near convergence this should
