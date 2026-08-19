@@ -137,12 +137,14 @@ def _min_image_vec(cfrac, n, A):
     return disp
 
 
-def sphere_pseudocharge_l2(q2m, R: float, center, n: int, L, npow: int = 4) -> np.ndarray:
-    """Smooth l=2 pseudocharge on the grid matching the sphere's l=2 charge moments
-    ``q2m = {M: Q_2M}`` (M=-2..2): ``ρ̃(r,Ω) = Σ_M c_M d²(1-(d/R)²)^npow Y_2M(Ω)`` with
-    ``c_M = Q_2M / (R⁷ ∫_0^1 x⁶(1-x²)^npow dx)`` so its l=2 moment is ``Q_2M``. This is the l=2 part
-    of Weinert's pseudocharge — matching it (not just the l=0 monopole) makes the interstitial FFT
-    potential carry each sphere's quadrupole field, i.e. the inter-atomic l=2 (lattice) EFG term."""
+def sphere_pseudocharge_lm(qlm, R: float, center, n: int, L, big_l: int,
+                           npow: int = 4) -> np.ndarray:
+    """Smooth angular-momentum-``big_l`` pseudocharge on the grid matching the sphere's charge
+    moments ``qlm = {M: Q_LM}`` (M=-L..L): ``ρ̃(r,Ω) = Σ_M c_M d^L (1-(d/R)²)^npow Y_LM(Ω)`` with
+    ``c_M = Q_LM / (R^{2L+3} ∫_0^1 x^{2L+2}(1-x²)^npow dx)`` so its L-moment ``∫ρ̃ r^{L+2} Y*`` is
+    ``Q_LM``. This is the general-L part of Weinert's pseudocharge: matching every multipole in play
+    (not just the monopole) makes the interstitial FFT potential carry each sphere's full exterior
+    multipole field — the inter-atomic (lattice) terms of the aspherical potential and the EFG."""
     from scipy.special import sph_harm_y
     a = cell_matrix(L)
     disp = _min_image_vec(np.asarray(center) @ np.linalg.inv(a), n, a)
@@ -152,13 +154,18 @@ def sphere_pseudocharge_l2(q2m, R: float, center, n: int, L, npow: int = 4) -> n
     theta = np.arccos(np.clip(disp[..., 2] / ds, -1.0, 1.0))
     phi = np.arctan2(disp[..., 1], disp[..., 0])
     x = np.linspace(0.0, 1.0, 4000)
-    i_n = float(np.trapezoid(x**6 * (1 - x**2) ** npow, x))     # ∫_0^1 x⁶(1-x²)^npow dx
-    radial = np.where(inside, d**2 * (1 - (d / R) ** 2) ** npow, 0.0)
+    i_n = float(np.trapezoid(x ** (2 * big_l + 2) * (1 - x**2) ** npow, x))
+    radial = np.where(inside, d**big_l * (1 - (d / R) ** 2) ** npow, 0.0)
     out = np.zeros(d.shape)
-    for m in range(-2, 3):
-        c_m = q2m[m] / (R**7 * i_n)
-        out = out + (c_m * radial * sph_harm_y(2, m, theta, phi)).real
+    for m in range(-big_l, big_l + 1):
+        c_m = qlm[m] / (R ** (2 * big_l + 3) * i_n)
+        out = out + (c_m * radial * sph_harm_y(big_l, m, theta, phi)).real
     return out
+
+
+def sphere_pseudocharge_l2(q2m, R: float, center, n: int, L, npow: int = 4) -> np.ndarray:
+    """The l=2 case of ``sphere_pseudocharge_lm`` (kept as the historical entry point)."""
+    return sphere_pseudocharge_lm(q2m, R, center, n, L, 2, npow=npow)
 
 
 def radial_poisson_to_R(rho: np.ndarray, r: np.ndarray, R: float, drw=None) -> np.ndarray:

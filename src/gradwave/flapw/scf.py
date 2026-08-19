@@ -31,7 +31,7 @@ from gradwave.flapw.coulomb import (
     radial_poisson_to_R,
     reciprocal,
     sphere_pseudocharge,
-    sphere_pseudocharge_l2,
+    sphere_pseudocharge_lm,
 )
 from gradwave.flapw.functionals import vxc_lda
 from gradwave.flapw.lapw import ball_ff_np, match_ab_vec, radial_channel, solve_geneig
@@ -415,20 +415,24 @@ def _weinert_multi(rho_I, spheres, L, nfft):
         net = q_sph - sp["Z"] - q_i_in           # net charge: electrons − nucleus − interstitial-in
         rho_smooth += sphere_pseudocharge(net, sp["R"], sp["tau"], nfft, A, npow=4)
         if sp.get("rho_2m") is not None:
-            # Weinert l=2: match the sphere quadrupole moment so the interstitial FFT potential
-            # carries the inter-atomic l=2 (lattice EFG) field.
+            # Weinert L>0: match every sphere multipole moment present in rho_2m so the interstitial
+            # FFT potential carries each sphere's full exterior multipole field (the inter-atomic
+            # lattice terms of the non-spherical potential and the EFG).
             from scipy.special import sph_harm_y
-            rr4w = sp["rr"] ** 4 * drw
-            q2 = {mm: complex(np.sum(sp["rho_2m"][(2, mm)] * rr4w)) for mm in range(-2, 3)}
+            big_ls = sorted({lm[0] for lm in sp["rho_2m"] if lm[0] > 0})
             disp = _min_image_vec(cfrac, nfft, A)
             dv = np.linalg.norm(disp, axis=-1)
             dsafe = np.where(dv < 1e-12, 1.0, dv)
             th = np.arccos(np.clip(disp[..., 2] / dsafe, -1.0, 1.0))
             ph = np.arctan2(disp[..., 1], disp[..., 0])
-            for mm in range(-2, 3):              # subtract the interstitial density's l=2 inside R
-                yc = np.conj(sph_harm_y(2, mm, th, ph))
-                q2[mm] -= complex(np.sum(rho_I[inside] * dv[inside] ** 2 * yc[inside]) * dvol)
-            rho_smooth += sphere_pseudocharge_l2(q2, sp["R"], sp["tau"], nfft, A)
+            for bl in big_ls:
+                rlw = sp["rr"] ** (bl + 2) * drw
+                ql = {mm: complex(np.sum(sp["rho_2m"][(bl, mm)] * rlw))
+                      for mm in range(-bl, bl + 1)}
+                for mm in range(-bl, bl + 1):    # subtract the interstitial density's part inside R
+                    yc = np.conj(sph_harm_y(bl, mm, th, ph))
+                    ql[mm] -= complex(np.sum(rho_I[inside] * dv[inside] ** bl * yc[inside]) * dvol)
+                rho_smooth += sphere_pseudocharge_lm(ql, sp["R"], sp["tau"], nfft, A, bl)
     v_grid = fft_poisson(rho_smooth, A)
     v_i0 = float(v_grid[~inside_any].mean())
     v_sph_list = []
@@ -470,7 +474,8 @@ def _fermi_level(ev_all, w_all, nelec, kT):
 
 def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
                       iters: int = 40, tol: float = 3e-3, kmesh=(1, 1, 1), smearing: float = 0.0,
-                      efg: bool = False, fullpot: bool = False, use_symmetry: bool = True):
+                      efg: bool = False, fullpot: bool = False, use_symmetry: bool = True,
+                      fullpot_lmax: int = 2):
     """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
     ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
@@ -487,9 +492,11 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     vectors), all in Bohr.
 
     ``fullpot=True`` runs the self-consistent full-potential loop: each iteration computes the
-    non-spherical (l=2) sphere potential (on-site Hartree + XC) from the aspherical density and
-    feeds it back into the Hamiltonian, so the wavefunctions respond to the non-spherical field.
-    ``fullpot=False`` is the muffin-tin (spherical-potential) scheme.
+    non-spherical sphere potential (on-site Hartree + XC + the inter-atomic lattice field) from the
+    aspherical density for every ``(L,M)`` with ``1 ≤ L ≤ fullpot_lmax``, and feeds it back into the
+    Hamiltonian, so the wavefunctions respond to the non-spherical field. ``fullpot_lmax`` should be
+    checked for convergence (odd L are included — a site without inversion symmetry has L=1,3
+    components that polarize the valence). ``fullpot=False`` is the muffin-tin scheme.
 
     ``use_symmetry`` (default True, muffin-tin runs only) reduces the k-mesh to the irreducible
     wedge and resymmetrizes the density each iteration to restore the full-BZ symmetry the reduced
@@ -597,7 +604,10 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
             from gradwave.flapw.efg import sphere_density_multipoles
             us_by_key = {k: {lg: _radial_u(lg, El_by_key[k][lg], r, dx, vmt_by_key[k], R_by_key[k])
                              for lg in range(lmax + 1)} for k in keys}
-            lset2 = [(0, 0)] + [(2, m) for m in range(-2, 3)]
+            lset_pot = [(lg, m) for lg in range(1, fullpot_lmax + 1) for m in range(-lg, lg + 1)]
+            if (2, 0) not in lset_pot:                      # the EFG observable always needs l=2
+                lset_pot += [(2, m) for m in range(-2, 3)]
+            lset2 = [(0, 0)] + lset_pot
             rho_2m = {k: {lm: np.zeros(rr_by_key[k].shape, dtype=complex) for lm in lset2}
                       for k in keys}
         for (_kf, w, res), occ in zip(kdata, occ_by_k, strict=True):
@@ -642,22 +652,24 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
 
         if fullpot:
             from gradwave.flapw.efg import (
-                interstitial_l2_boundary,
-                l2_sphere_poisson,
+                interstitial_boundary_multi,
+                lx_sphere_poisson,
                 nonspherical_potential,
             )
             vns_new = {}
             for ai, k in enumerate(keys):
                 rr, drw, R = rr_by_key[k], rr_by_key[k] * dx, R_by_key[k]
-                vns = nonspherical_potential(rho_sph_by_key[k], rho_2m[k], rr, drw)
-                # Add the lattice l=2 field *inside* the sphere: the source-free r² harmonic whose
-                # value at R matches the interstitial l=2 boundary, (v_bc − V_part(R))/R².
-                # Without it the muffin-tin electrons never feel the crystal field, so the semicore
-                # cannot polarize in it — the Sternheimer antishielding that dominates a d⁰ Ti EFG.
-                v_bc = interstitial_l2_boundary(v_grid, acart[ai][0], R, A)
-                for m in range(-2, 3):
-                    vpart_r = l2_sphere_poisson(rho_2m[k][(2, m)], rr, drw)[-1]
-                    vns[(2, m)] = vns[(2, m)] + ((v_bc[m] - vpart_r) / R**2) * rr**2
+                vns = nonspherical_potential(rho_sph_by_key[k], rho_2m[k], rr, drw, lset=lset_pot)
+                # Add the lattice field *inside* the sphere for each (L,M): the source-free r^L
+                # harmonic whose value at R matches the interstitial boundary,
+                # (v_bc − V_part(R))/R^L. Without it the muffin-tin electrons never feel the
+                # crystal field, so the valence/semicore cannot polarize in it (the Sternheimer
+                # antishielding). The pseudocharges are moment-matched for every L in the lset, so
+                # v_bc's own-sphere part cancels V_part(R) exactly and C_LM is the others' field.
+                v_bc = interstitial_boundary_multi(v_grid, acart[ai][0], R, A, lset_pot)
+                for (bl, m) in lset_pot:
+                    vpart_r = lx_sphere_poisson(rho_2m[k][(bl, m)], rr, drw, bl)[-1]
+                    vns[(bl, m)] = vns[(bl, m)] + ((v_bc[(bl, m)] - vpart_r) / R**bl) * rr**bl
                 vns_new[k] = vns
             if v_nsph is None:
                 v_nsph = vns_new

@@ -35,26 +35,29 @@ def _angular_grid(nx: int, nphi: int):
     return th, ph, wgt
 
 
-def nonspherical_potential(rho_sph, rho_2m, rr, drw, nx: int = 16, nphi: int = 24):
-    """The non-spherical (l=2) sphere potential ``V_2M(r)`` = on-site Hartree + XC, for the full-
-    potential SCF. ``rho_sph`` is the spherical density (val+core, e/Å³); ``rho_2m = {(2,M): ρ_2M}``
-    the aspherical valence density. Hartree from ``l2_sphere_poisson``; XC by evaluating
-    ``V_xc[ρ(r,Ω)]`` on the angular grid (ρ = ρ_sph + Σ ρ_2M Y_2M) and projecting onto Y_2M."""
+def nonspherical_potential(rho_sph, rho_2m, rr, drw, lset=None, nx: int = 16, nphi: int = 24):
+    """The non-spherical sphere potential ``V_LM(r)`` = on-site Hartree + XC, for the full-potential
+    SCF, for every ``(L,M)`` in ``lset`` (default: the l=2 set, the historical behaviour).
+    ``rho_sph`` is the spherical density (val+core, e/Å³); ``rho_2m = {(L,M): ρ_LM}`` the aspherical
+    valence density (must cover ``lset``). Hartree from ``lx_sphere_poisson``; XC by evaluating
+    ``V_xc[ρ(r,Ω)]`` on the angular grid (ρ = ρ_sph + Σ ρ_LM Y_LM) and projecting onto each Y_LM."""
     import torch
     from scipy.special import sph_harm_y
 
     from gradwave.flapw.functionals import vxc_lda
+    if lset is None:
+        lset = [(2, m) for m in range(-2, 3)]
     th, ph, wgt = _angular_grid(nx, nphi)
-    y2 = {m: sph_harm_y(2, m, th, ph) for m in range(-2, 3)}
+    ylm = {(lang, m): sph_harm_y(lang, m, th, ph) for (lang, m) in lset}
     rho_ang = np.broadcast_to(np.asarray(rho_sph)[:, None, None], (len(rr),) + th.shape).copy()
-    for m in range(-2, 3):
-        rho_ang += (rho_2m[(2, m)][:, None, None] * y2[m][None]).real
+    for lm in lset:
+        rho_ang += (rho_2m[lm][:, None, None] * ylm[lm][None]).real
     vxc_ang = vxc_lda(torch.tensor(np.clip(rho_ang, 1e-10, None))).numpy()
     out = {}
-    for m in range(-2, 3):
-        v_h = l2_sphere_poisson(rho_2m[(2, m)], rr, drw)
-        v_xc = (vxc_ang * (wgt * np.conj(y2[m]))[None]).sum(axis=(1, 2))
-        out[(2, m)] = v_h + v_xc
+    for (lang, m) in lset:
+        v_h = lx_sphere_poisson(rho_2m[(lang, m)], rr, drw, lang)
+        v_xc = (vxc_ang * (wgt * np.conj(ylm[(lang, m)]))[None]).sum(axis=(1, 2))
+        out[(lang, m)] = v_h + v_xc
     return out
 
 
@@ -126,17 +129,24 @@ def valence_efg_moments(multipoles, rr, drw):
     return q, q2
 
 
-def l2_sphere_poisson(rho2m, rr, drw):
-    """The l=2 radial Poisson inside the sphere: ``V_2M(r)`` (eV) from the on-site l=2 density
-    (the particular solution, density contained in [0,R]):
+def lx_sphere_poisson(rho_lm, rr, drw, big_l):
+    """The general-L radial Poisson inside the sphere: ``V_LM(r)`` (eV) from the on-site L-component
+    density (the particular solution, density contained in [0,R]):
 
-        V_2M(r) = (4π E2 / 5) [ r⁻³ ∫_0^r ρ_2M r'⁴ dr' + r² ∫_r^R ρ_2M / r' dr' ].
+        V_LM(r) = (4π E2 / (2L+1)) [ r^{-(L+1)} ∫_0^r ρ_LM r'^{L+2} dr'
+                                     + r^L ∫_r^R ρ_LM r'^{1-L} dr' ].
 
-    Near the origin ``V_2M(r) → v_M r²`` with ``v_M = (4π E2/5) ∫_0^R ρ_2M/r' dr'`` — the r²
+    For L=2, near the origin ``V_2M(r) → v_M r²`` with ``v_M = (4πE2/5)∫ρ_2M/r' dr'`` — the r²
     coefficient that becomes the EFG. ``drw`` is the radial ``dr`` weight."""
-    inner = np.cumsum(rho2m * rr**4 * drw)
-    outer = np.cumsum((rho2m / rr * drw)[::-1])[::-1]
-    return (4 * math.pi * E2 / 5.0) * (inner / rr**3 + rr**2 * outer)
+    inner = np.cumsum(rho_lm * rr ** (big_l + 2) * drw)
+    outer = np.cumsum((rho_lm * rr ** (1 - big_l) * drw)[::-1])[::-1]
+    return (4 * math.pi * E2 / (2 * big_l + 1)) * (inner / rr ** (big_l + 1)
+                                                  + rr**big_l * outer)
+
+
+def l2_sphere_poisson(rho2m, rr, drw):
+    """The l=2 case of ``lx_sphere_poisson`` (kept as the historical entry point)."""
+    return lx_sphere_poisson(rho2m, rr, drw, 2)
 
 
 def _tensor_from_v(v):
@@ -167,11 +177,12 @@ def efg_tensor(multipoles, rr, drw):
     return _tensor_from_v(_valence_v(multipoles, rr, drw))
 
 
-def interstitial_l2_boundary(v_grid, center_cart, R, cell, nx: int = 16, nphi: int = 24):
-    """The l=2 components ``v_bc_2M = ∮ V_int(center + R Ω) Y*_2M(Ω) dΩ`` of the interstitial FFT
-    potential on the sphere surface. The potential is evaluated on the sphere by its exact
-    band-limited Fourier series ``V(r) = Σ_G v_G e^{iG·r}`` (no interpolation error, so a cubic-
-    symmetric grid projects to machine-zero l=2). ``center_cart`` is the atom in Å."""
+def interstitial_boundary_multi(v_grid, center_cart, R, cell, lset, nx: int = 16, nphi: int = 24):
+    """The ``(L,M)`` components ``v_bc_LM = ∮ V_int(center + R Ω) Y*_LM(Ω) dΩ`` of the interstitial
+    FFT potential on the sphere surface, for every ``(L,M)`` in ``lset``. The potential is evaluated
+    on the sphere by its exact band-limited Fourier series ``V(r) = Σ_G v_G e^{iG·r}`` (no
+    interpolation error, so a cubic-symmetric grid projects to machine-zero l=2). The surface values
+    are computed once and projected onto each harmonic. ``center_cart`` is the atom in Å."""
     from scipy.special import sph_harm_y
     a = cell_matrix(cell)
     b = reciprocal(a)
@@ -186,8 +197,15 @@ def interstitial_l2_boundary(v_grid, center_cart, R, cell, nx: int = 16, nphi: i
     dirs = np.stack([np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)], axis=-1)
     pts = (R * dirs + np.asarray(center_cart)).reshape(-1, 3)      # (npts,3) Cartesian
     vals = (np.exp(1j * (pts @ gvec.T)) @ vg).reshape(th.shape).real
-    return {m: complex(np.sum(vals * wgt * np.conj(sph_harm_y(2, m, th, ph))))
-            for m in range(-2, 3)}
+    return {(lang, m): complex(np.sum(vals * wgt * np.conj(sph_harm_y(lang, m, th, ph))))
+            for (lang, m) in lset}
+
+
+def interstitial_l2_boundary(v_grid, center_cart, R, cell, nx: int = 16, nphi: int = 24):
+    """The l=2 case of ``interstitial_boundary_multi`` (historical entry); returns ``{M: v}``."""
+    full = interstitial_boundary_multi(v_grid, center_cart, R, cell,
+                                       [(2, m) for m in range(-2, 3)], nx=nx, nphi=nphi)
+    return {m: full[(2, m)] for m in range(-2, 3)}
 
 
 def efg_tensor_full(multipoles, rr, drw, v_bc_2m, R):
