@@ -641,9 +641,24 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
         v_sph_list, v_i0, v_grid = _weinert_multi(rho_I, spheres, A, nfft)
 
         if fullpot:
-            from gradwave.flapw.efg import nonspherical_potential
-            vns_new = {k: nonspherical_potential(rho_sph_by_key[k], rho_2m[k], rr_by_key[k],
-                                                 rr_by_key[k] * dx) for k in keys}
+            from gradwave.flapw.efg import (
+                interstitial_l2_boundary,
+                l2_sphere_poisson,
+                nonspherical_potential,
+            )
+            vns_new = {}
+            for ai, k in enumerate(keys):
+                rr, drw, R = rr_by_key[k], rr_by_key[k] * dx, R_by_key[k]
+                vns = nonspherical_potential(rho_sph_by_key[k], rho_2m[k], rr, drw)
+                # Add the lattice l=2 field *inside* the sphere: the source-free r² harmonic whose
+                # value at R matches the interstitial l=2 boundary, (v_bc − V_part(R))/R².
+                # Without it the muffin-tin electrons never feel the crystal field, so the semicore
+                # cannot polarize in it — the Sternheimer antishielding that dominates a d⁰ Ti EFG.
+                v_bc = interstitial_l2_boundary(v_grid, acart[ai][0], R, A)
+                for m in range(-2, 3):
+                    vpart_r = l2_sphere_poisson(rho_2m[k][(2, m)], rr, drw)[-1]
+                    vns[(2, m)] = vns[(2, m)] + ((v_bc[m] - vpart_r) / R**2) * rr**2
+                vns_new[k] = vns
             if v_nsph is None:
                 v_nsph = vns_new
             else:
