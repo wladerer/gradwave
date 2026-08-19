@@ -295,12 +295,12 @@ def interstitial_l2_boundary(v_grid, center_cart, R, cell, nx: int = 16, nphi: i
 
 
 def efg_tensor_full(multipoles, rr, drw, v_bc_2m, R):
-    """The full EFG = valence (on-site sphere Poisson) + lattice (interstitial boundary matching).
-    ``v_M^full = v_M^valence + C_2M`` with ``C_2M = [v_bc_2M − V_2M^part(R)]/R²`` — the homogeneous
-    r² term matching the sphere l=2 potential to the interstitial value ``v_bc_2M`` at R_MT."""
+    """The full EFG = valence (on-site sphere Poisson) + lattice term. ``v_bc_2m`` is the OTHER
+    spheres' l=2 surface field (the caller subtracts the own sphere's band-limited contribution
+    numerically — the analytic own-field cancellation fails at the ~20% level from pseudocharge
+    aliasing on the coarse grid): ``v_M^full = v_M^valence + v_bc_2M/R²``."""
     v_val = _valence_v(multipoles, rr, drw)
     v_full = {}
     for m in range(-2, 3):
-        vpart_r = l2_sphere_poisson(multipoles[(2, m)], rr, drw)[-1]     # V_2M^part(R)
-        v_full[m] = v_val[m] + (v_bc_2m[m] - vpart_r) / R**2
+        v_full[m] = v_val[m] + v_bc_2m[m] / R**2
     return _tensor_from_v(v_full)

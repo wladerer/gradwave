@@ -696,6 +696,7 @@ def _weinert_multi(rho_I, spheres, L, nfft):
     ainv = np.linalg.inv(A)
     dvol = float(abs(np.linalg.det(A))) / nfft**3
     rho_smooth = rho_I.astype(float).copy()
+    own_ps_by_sphere = []                       # per sphere: (own L>0 pseudocharge grid, lset)
     inside_any = np.zeros((nfft, nfft, nfft), dtype=bool)
     for sp in spheres:
         cfrac = np.asarray(sp["tau"]) @ ainv
@@ -717,6 +718,7 @@ def _weinert_multi(rho_I, spheres, L, nfft):
             dsafe = np.where(dv < 1e-12, 1.0, dv)
             th = np.arccos(np.clip(disp[..., 2] / dsafe, -1.0, 1.0))
             ph = np.arctan2(disp[..., 1], disp[..., 0])
+            own_ps = np.zeros_like(rho_smooth)
             for bl in big_ls:
                 rlw = sp["rr"] ** (bl + 2) * drw
                 ql = {mm: complex(np.sum(sp["rho_2m"][(bl, mm)] * rlw))
@@ -724,9 +726,24 @@ def _weinert_multi(rho_I, spheres, L, nfft):
                 for mm in range(-bl, bl + 1):    # subtract the interstitial density's part inside R
                     yc = np.conj(sph_harm_y(bl, mm, th[inside], ph[inside]))
                     ql[mm] -= complex(np.sum(rho_I[inside] * dv[inside] ** bl * yc) * dvol)
-                rho_smooth += sphere_pseudocharge_lm(ql, sp["R"], sp["tau"], nfft, A, bl,
-                                                     geom=(dv, th, ph))
+                own_ps += sphere_pseudocharge_lm(ql, sp["R"], sp["tau"], nfft, A, bl,
+                                                 geom=(dv, th, ph))
+            rho_smooth += own_ps
+            own_ps_by_sphere.append((own_ps, sorted({lm for lm in sp["rho_2m"] if lm[0] > 0})))
     v_grid = fft_poisson(rho_smooth, A)
+    # The own-sphere L>0 field must be excluded from each sphere's lattice term. The analytic
+    # cancellation (v_bc - V_part(R)) fails at the ~20% level because the ~5-grid-point pseudo-
+    # charge ALIASES: its band-limited near-field at R differs from the analytic multipole value
+    # even with exact grid moments (verified: a single atom kept a 20%-of-V_zz "lattice" term,
+    # identical under two moment normalizations). Subtracting the own pseudocharge's ACTUAL
+    # band-limited surface field makes C_LM the others' field by construction.
+    vbc_own = []
+    if own_ps_by_sphere:
+        from gradwave.flapw.efg import interstitial_boundary_multi
+        for sp, (own_ps, lset) in zip(spheres, own_ps_by_sphere, strict=True):
+            v_own = fft_poisson(own_ps, A)
+            vbc_own.append(interstitial_boundary_multi(v_own, sp["tau"], sp["R"], A, lset)
+                           if lset else {})
     v_i0 = float(v_grid[~inside_any].mean())
     v_sph_list = []
     for sp in spheres:
@@ -743,7 +760,7 @@ def _weinert_multi(rho_I, spheres, L, nfft):
         v_bc = float(np.mean(pts))
         vpart = radial_poisson_to_R(sp["rho_sph"], rr, R, drw=drw) - sp["Z"] * E2 / rr
         v_sph_list.append(vpart + (v_bc - vpart[-1]))
-    return v_sph_list, v_i0, v_grid
+    return v_sph_list, v_i0, v_grid, vbc_own
 
 
 def _occ_degenerate_aware(ev, nbands, tol=1e-3):
@@ -1091,12 +1108,11 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
             spheres.append({"tau": acart[ai][0], "rr": rr, "dx": dx,
                             "rho_sph": rho_sph_by_key[k], "Z": CONFIG[s][0], "R": R_by_key[k],
                             "rho_2m": rho_2m[k] if fullpot and not mt_phase else None})
-        v_sph_list, v_i0, v_grid = _weinert_multi(rho_I, spheres, A, nfft)
+        v_sph_list, v_i0, v_grid, vbc_own = _weinert_multi(rho_I, spheres, A, nfft)
 
         if fullpot and not mt_phase:
             from gradwave.flapw.efg import (
                 interstitial_boundary_multi,
-                lx_sphere_poisson,
                 nonspherical_potential,
             )
             vns_new = {}
@@ -1110,9 +1126,10 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                 # antishielding). The pseudocharges are moment-matched for every L in the lset, so
                 # v_bc's own-sphere part cancels V_part(R) exactly and C_LM is the others' field.
                 v_bc = interstitial_boundary_multi(v_grid, acart[ai][0], R, A, lset_pot)
+                own = vbc_own[ai] if vbc_own else {}
                 for (bl, m) in lset_pot:
-                    vpart_r = lx_sphere_poisson(rho_2m[k][(bl, m)], rr, drw, bl)[-1]
-                    vns[(bl, m)] = vns[(bl, m)] + ((v_bc[(bl, m)] - vpart_r) / R**bl) * rr**bl
+                    c_lm = (v_bc[(bl, m)] - own.get((bl, m), 0.0)) / R**bl
+                    vns[(bl, m)] = vns[(bl, m)] + c_lm * rr**bl
                 vns_new[k] = vns
             if v_nsph is None:
                 v_nsph = vns_new
@@ -1219,8 +1236,9 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                 rho_2m = _symmetrize_rho_lm(rho_2m, keys, sg, d_ops)
             for ai, k in enumerate(keys):
                 spheres[ai]["rho_2m"] = rho_2m[k]
-            _, _, v_grid = _weinert_multi(rho_I, spheres, A, nfft)
-        info["efg"] = _efg_from_multipoles(rho_2m, v_grid, acart, keys, R_by_key, rr_by_key, dx, A)
+            _, _, v_grid, vbc_own = _weinert_multi(rho_I, spheres, A, nfft)
+        info["efg"] = _efg_from_multipoles(rho_2m, v_grid, acart, keys, R_by_key, rr_by_key,
+                                           dx, A, vbc_own=vbc_own)
     return conv, info
 
 
@@ -1312,7 +1330,8 @@ def _efg_density_pass(kdata, occ_by_k, keys, acart, El_by_key, vmt_by_key, R_by_
     return rho_2m
 
 
-def _efg_from_multipoles(rho_by_key, v_grid, acart, keys, R_by_key, rr_by_key, dx, A):
+def _efg_from_multipoles(rho_by_key, v_grid, acart, keys, R_by_key, rr_by_key, dx, A,
+                         vbc_own=None):
     """Per-atom EFG from the converged BZ-averaged aspherical density (``rho_by_key`` = the l=2 (and
     l=0) sphere-density multipoles accumulated over the k-mesh with the SCF occupations, i.e. the
     same density that produced the potential — not a fresh Γ solve at occ=2). Returns the valence
@@ -1330,6 +1349,8 @@ def _efg_from_multipoles(rho_by_key, v_grid, acart, keys, R_by_key, rr_by_key, d
         q, q2 = valence_efg_moments(rho, rr, drw)
         _, v_zz_val, eta_val = efg_tensor(rho, rr, drw)
         v_bc = interstitial_l2_boundary(v_grid, acart[ai][0], R_by_key[k], A)
+        own = vbc_own[ai] if vbc_own else {}
+        v_bc = {m: v_bc[m] - own.get((2, m), 0.0) for m in range(-2, 3)}
         tensor, v_zz, eta = efg_tensor_full(rho, rr, drw, v_bc, R_by_key[k])
         charge = float(math.sqrt(4 * math.pi) * np.sum(rho[(0, 0)].real * rr**2 * drw))
         out[k] = {"Q2": q2, "V_zz": v_zz, "eta": eta, "V_zz_valence": v_zz_val,

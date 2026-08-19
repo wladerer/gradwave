@@ -160,14 +160,26 @@ def sphere_pseudocharge_lm(qlm, R: float, center, n: int, L, big_l: int,
     else:
         d, theta, phi = geom
     inside = d < R
-    x = np.linspace(0.0, 1.0, 4000)
-    i_n = float(np.trapezoid(x ** (2 * big_l + 2) * (1 - x**2) ** npow, x))
     din, thin, phin = d[inside], theta[inside], phi[inside]
     radial_in = din**big_l * (1 - (din / R) ** 2) ** npow
-    acc = np.zeros(din.shape)
-    for m in range(-big_l, big_l + 1):
-        c_m = qlm[m] / (R ** (2 * big_l + 3) * i_n)
-        acc = acc + (c_m * radial_in * sph_harm_y(big_l, m, thin, phin)).real
+    ylm = np.stack([sph_harm_y(big_l, m, thin, phin) for m in range(-big_l, big_l + 1)],
+                   axis=1)                                # (npts, 2L+1)
+    a_cell = cell_matrix(L)
+    dvol = float(abs(np.linalg.det(a_cell))) / n**3
+    # Gram solve on the ACTUAL grid: demand the pseudocharge's measured grid moments equal Q_LM.
+    # The analytic normalization assumed continuum angular orthogonality; on the coarse FFT grid
+    # the sampled moments differ by 10-20%, which broke the own-field cancellation in the lattice
+    # term C_LM and fed a runaway aspherical fixed point (verified: a single atom carried a
+    # 20%-of-V_zz "lattice" term that must vanish). G[m',m] = Σ w·conj(Y_m')·Y_m with the moment
+    # weight w = radial·d^L·dvol; solving G c = q makes the same-L grid moments exact.
+    w = radial_in * din**big_l * dvol
+    gram = ylm.conj().T @ (w[:, None] * ylm)
+    q = np.array([qlm[m] for m in range(-big_l, big_l + 1)], dtype=complex)
+    try:
+        c = np.linalg.solve(gram, q)
+    except np.linalg.LinAlgError:                        # sphere barely resolved on the grid
+        c = np.linalg.lstsq(gram, q, rcond=None)[0]
+    acc = (ylm @ c * radial_in).real
     out = np.zeros(d.shape)
     out[inside] = acc
     return out
