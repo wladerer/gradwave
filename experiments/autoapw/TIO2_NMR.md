@@ -176,3 +176,14 @@ In flight on asus: hl_l3/hl_l4 (is the fullpot O EFG now lmax-STABLE with fp_lma
 Gaunt memoization + k-independent aspherical-integral hoist + ylm-per-k hoist + masked/shared-geometry
 pseudocharges. TiO2 fullpot+LO (ecut250 k222 aug-lmax3 fp_lmax4): 606 -> 226 s per 3 iters = 2.68x.
 Nulls and the muffin-tin span reproduce to the last digit; flapw suite green through the LO work.
+
+## B-side FULL TREATMENT result (fullpot fp_lmax=4 + Ti 3s/3p LOs + LO-crystal-field coupling)
+ecut300 k222 sm0 Elk-R_MT aug-lmax3, 35 iters (4391s pre-pool):
+  Ti evals [+4.47,-4.30,-0.17] eta 0.92 C_Q 2.67 | Elk [+19.34,-13.16,-6.18] 0.36 11.5
+  O  evals [+3.90,-3.64,-0.26] eta 0.87 C_Q 0.24 | Elk [-19.10,+16.60,+2.50] 0.74 1.18
+**Ti V_zz has the CORRECT SIGN (+) for the first time** — every variant without the LO coupling gave
+~-3. The semicore antishielding channel (LO + aspherical coupling) works qualitatively. Both sites now
+~20-25% of Elk magnitude UNIFORMLY -> suspect one common factor (k-convergence at k222, or residual
+response) rather than site physics. Muffin-tin+LO for reference: Ti [-3.02,+1.98] eta 0.31.
+Next: k-convergence of the B config (k222->k333->k444) with the new fast stack (pool+IBZ+warm start);
+if magnitude climbs with k it is convergence, if flat ~23% it is structural.
