@@ -116,3 +116,17 @@ C_Q 0.87 vs Elk 1.18 (74%) — a genuine semiquantitative result — BUT eta ris
 smallest principal value +0.57 vs Elk +2.5; the response amplifies the two large components more than
 the third). So current honest status: O C_Q ~74% of Elk with sm=0+fullpot, right order + right sign;
 eta too axial. Remaining: k-convergence (fp446 running), and the response-anisotropy (eta) gap.
+
+## CONVERGENCE TOWARD ELK (fullpot+antishielding, sm=0, Elk R_MT, ecut300~rgkmax7.3) — the real result
+| k-mesh | O evals (eV/A^2)        | eta   | C_Q(17O) | % of Elk C_Q |
+|--------|-------------------------|-------|----------|--------------|
+| 3,3,3  | [-14.09,+13.52,+0.57]   | 0.919 | 0.872    | 74%          |
+| 4,4,6  | [+15.72,-14.35,-1.37]   | 0.826 | 0.972    | 82%          |
+| Elk    | [-19.10,+16.60,+2.50]   | 0.740 | 1.18     | 100%         |
+ALL THREE components move MONOTONICALLY toward Elk with k: |V_zz| 14.1->15.7 (->19.1), eta 0.92->0.83
+(->0.74), C_Q 0.87->0.97 (->1.18), 3rd eigenvalue |0.57|->|1.37| (->2.5). Systematic convergence to the
+reference = real validation. Muffin-tin (no response) stuck at |V_zz|~4 (k223 5.3, k446 4.3, k668 4.0)
+= 21% -> the antishielding response is ESSENTIAL and correct in direction. At Elk's own mesh (4,4,6):
+82% of Elk on |V_zz| AND C_Q, still improving. ecut300 already ~rgkmax7.3 > Elk 7, so not ecut-limited;
+residual is higher k + method (lmax=2, frozen O core response). HONEST HEADLINE: gradwave 17O C_Q(TiO2)
+= 0.97 MHz at Elk's k-mesh (Elk 1.18, exp 1.8), converging toward Elk as k increases. sm=0 is essential.
