@@ -89,3 +89,15 @@ qualitative-to-semiquantitative result (|V_zz| ~45-70% of Elk, sign unstable), N
 proper k-convergence (k444+, each fullpot run ~35 min) + likely higher lmax before any quantitative
 claim. Ti remains wrong (core-Sternheimer). Do not claim "matches Elk"; claim "working pipeline,
 right order, eta in range, not yet converged".
+
+## KEY DIAGNOSIS (k-sweep, 2026-08-19): smearing was the instability; sm=0 gives correct SHAPE
+With smearing>0 on TiO2 (marginal LDA gap) the EFG was unstable/garbage (O evals jumped e.g.
+k222 [-5.3,+3.1,+2.2] vs k223 [+12.5,-6.3,-6.2], e_fermi jumping 6.4->4.5 eV) — partial occupation
+across the gap differs per k-mesh. WITH smearing=0 (exact insulator fill, 22 bands), muffin-tin k446
+gives O evals [-4.31,+3.73,+0.58] **eta=0.730 (=Elk 0.74)** — the SHAPE is right and stable. BUT the
+MAGNITUDE is only |V_zz|=4.3 vs Elk 19.1 (~22%). So the real deficit is MAGNITUDE not shape: muffin-tin
+under-captures the O 2p asphericity + antishielding (likely over-ionizes O2- toward spherical 2p6, cf
+BeO). Fullpot adds response (|V_zz| ~7-12) but must also use smearing=0 to be stable. ALWAYS use
+smearing=0 for TiO2 (insulator); the earlier "eta=0.745" fullpot number was a smeared partial-occ fluke.
+Remaining question: does fullpot+sm0 give correct eta AND larger (toward 19) magnitude, and does the
+muffin-tin magnitude converge up with k.
