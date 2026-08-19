@@ -41,18 +41,22 @@ _N_VAL_BANDS = {"He": 1, "Be": 1, "Ne": 4}
 _VAL_E = {"He": 2, "Be": 2, "Ne": 8}       # valence electron count (Z − frozen core)
 
 
-def _ylm_star(l, kg):
-    """conj(Y_lm(k̂)) for m=-l..l (scipy>=1.15 convention sph_harm_y(n,m,theta,phi))."""
+def _ylm_star(l, ks):
+    """conj(Y_lm(k̂)) for m=-l..l over all plane waves ``ks`` (npw,3) → ``(npw, 2l+1)``. Vectorized:
+    2l+1 array-valued scipy calls, not one per plane wave. G=0 maps to the l=0 constant."""
     from scipy.special import sph_harm_y
-    kn = np.linalg.norm(kg)
-    if kn < 1e-12:
-        out = np.zeros(2 * l + 1, dtype=complex)
+    ks = np.asarray(ks, dtype=float)
+    kn = np.linalg.norm(ks, axis=1)
+    small = kn < 1e-12
+    kns = np.where(small, 1.0, kn)
+    theta = np.arccos(np.clip(ks[:, 2] / kns, -1.0, 1.0))
+    phi = np.arctan2(ks[:, 1], ks[:, 0])
+    out = np.stack([np.conj(sph_harm_y(l, m, theta, phi)) for m in range(-l, l + 1)], axis=1)
+    if small.any():
+        out[small, :] = 0.0
         if l == 0:
-            out[0] = 1.0 / math.sqrt(4 * math.pi)
-        return out
-    theta = math.acos(max(-1.0, min(1.0, kg[2] / kn)))
-    phi = math.atan2(kg[1], kg[0])
-    return np.array([np.conj(sph_harm_y(l, m, theta, phi)) for m in range(-l, l + 1)])
+            out[small, 0] = 1.0 / math.sqrt(4 * math.pi)
+    return out
 
 
 def _radial_u(l, El, r, dx, v, R):
@@ -129,7 +133,7 @@ def _augment_amplitudes(cp, ks, abl, lmax, vol):
     ``(2l+1,)`` complex) — the u_l / udot_l coefficients ``A_lm = pfac Σ_G Y*_lm(k+G) c_G a_G``."""
     a_out, b_out = {}, {}
     for lang in range(lmax + 1):
-        ylm = np.array([_ylm_star(lang, ks[g]) for g in range(len(ks))])
+        ylm = _ylm_star(lang, ks)
         a, bb = abl[lang][:, 0], abl[lang][:, 1]
         pfac = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
         a_out[lang] = pfac * (ylm * (cp * a)[:, None]).sum(axis=0)
@@ -140,7 +144,7 @@ def _augment_amplitudes(cp, ks, abl, lmax, vol):
 def _sphere_valence_density(c_occ, occ, ks, abl, El, lmax, vol, r, dx, v_sphere, R):
     rr = r.numpy()[r.numpy() <= R]
     us = {lang: _radial_u(lang, El[lang], r, dx, v_sphere, R) for lang in range(lmax + 1)}
-    ylm = {lang: np.array([_ylm_star(lang, ks[g]) for g in range(len(ks))])
+    ylm = {lang: _ylm_star(lang, ks)
            for lang in range(lmax + 1)}
     rho = np.zeros_like(rr)
     for lang in range(lmax + 1):
@@ -344,7 +348,7 @@ def _nonspherical_augment(v_nsph, atoms_cart, abl_by_atom, ks, species, lmax, vo
         ph = np.exp(1j * (ks @ np.asarray(tau, dtype=float)))
         b_a, b_b = {}, {}
         for lang in range(lmax + 1):
-            ylm = np.array([_ylm_star(lang, ks[g]) for g in range(npw)])
+            ylm = _ylm_star(lang, ks)
             pf = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
             b_a[lang] = pf * ylm * (abl_by_atom[ai][lang][:, 0] * ph)[:, None]
             b_b[lang] = pf * ylm * (abl_by_atom[ai][lang][:, 1] * ph)[:, None]
