@@ -33,7 +33,7 @@ from gradwave.flapw.coulomb import (
 from gradwave.flapw.functionals import vxc_lda
 from gradwave.flapw.lapw import ball_ff_np, match_ab, radial_channel, solve_geneig
 from gradwave.flapw.mixing import anderson_next
-from gradwave.flapw.radial import log_mesh, numerov_log, radial_eigs_tridiag
+from gradwave.flapw.radial import log_mesh, numerov_log_np, radial_eigs_tridiag
 from gradwave.kpoints import monkhorst_pack
 
 _CORE = {"He": [], "Be": [(0, 2)], "Ne": [(0, 2)]}
@@ -59,14 +59,10 @@ def _radial_u(l, El, r, dx, v, R):
     r_np = r.numpy()
     inside = r_np <= R
     drw = r_np[inside] * dx
-
-    def norm_u(E):
-        u = numerov_log(l, torch.tensor(E, dtype=torch.float64), r, dx, v).detach().numpy()
-        return u / math.sqrt((u[inside] ** 2 * drw).sum())
-
-    u = norm_u(El)
     hE = max(abs(El) * 1e-4, 1e-3)
-    ud = (norm_u(El + hE) - norm_u(El - hE)) / (2 * hE)
+    uraw = numerov_log_np(l, np.array([El, El + hE, El - hE]), r, dx, v)   # (3, N), batched
+    un = uraw / np.sqrt((uraw[:, inside] ** 2 * drw).sum(axis=1))[:, None]
+    u, ud = un[0], (un[1] - un[2]) / (2 * hE)
     return u[inside], ud[inside]
 
 

@@ -46,6 +46,28 @@ def numerov_log(l: int, energy: Tensor, r: Tensor, dx: float, v: Tensor) -> Tens
     return torch.stack(qs) * torch.sqrt(r)
 
 
+def numerov_log_np(l: int, energies, r, dx: float, v) -> np.ndarray:
+    """Pure-numpy outward Numerov, batched over trial energies — the fast *forward* path for the SCF
+    (no autograd). Same recurrence as ``numerov_log``; ``energies`` is a scalar or ``(nE,)`` array,
+    returning ``u`` of shape ``(N,)`` or ``(nE, N)``. The N-step recurrence runs once, vectorized
+    over energies, in numpy — no per-element torch dispatch. Use ``numerov_log`` when a gradient in
+    ``E`` or the potential is needed."""
+    rn = (r.detach().numpy() if torch.is_tensor(r) else np.asarray(r)).astype(float)
+    vn = (v.detach().numpy() if torch.is_tensor(v) else np.asarray(v)).astype(float)
+    scalar = np.ndim(energies) == 0
+    e = np.atleast_1d(np.asarray(energies, dtype=float))
+    n = rn.shape[0]
+    f = 1.0 - (dx * dx / 12.0) * ((l + 0.5) ** 2
+                                  + (rn * rn)[None, :] * (vn[None, :] - e[:, None]) / HBAR2_2M)
+    q = np.empty((e.shape[0], n))
+    q[:, 0] = rn[0] ** (l + 0.5)
+    q[:, 1] = rn[1] ** (l + 0.5)
+    for i in range(2, n):
+        q[:, i] = ((12.0 - 10.0 * f[:, i - 1]) * q[:, i - 1] - f[:, i - 2] * q[:, i - 2]) / f[:, i]
+    u = q * np.sqrt(rn)[None, :]
+    return u[0] if scalar else u
+
+
 def numerov_log_batch(l: int, energies: Tensor, r: Tensor, dx: float, v: Tensor) -> Tensor:
     """Batched over trial energies: ``u(r_max)`` for each ``E`` (for eigenvalue scans)."""
     g = (l + 0.5) ** 2 + (r * r)[None, :] * (v[None, :] - energies[:, None]) / HBAR2_2M

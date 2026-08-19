@@ -18,11 +18,10 @@ from __future__ import annotations
 import math
 
 import numpy as np
-import torch
 
 from gradwave.constants import HBAR2_2M
 from gradwave.flapw.coulomb import ball_ff_np
-from gradwave.flapw.radial import numerov_log
+from gradwave.flapw.radial import numerov_log_np
 
 
 def sph_jn(l, x):
@@ -38,13 +37,11 @@ def radial_channel(l, El, r, dx, v, R):
     rr = r_np[inside]
     drw = rr * dx
 
-    def norm_u(E):
-        u = numerov_log(l, torch.tensor(E, dtype=torch.float64), r, dx, v).detach().numpy()
-        return u / np.sqrt((u[inside] ** 2 * drw).sum())
-
-    u = norm_u(El)
     hE = max(abs(El) * 1e-4, 1e-3)
-    udot = (norm_u(El + hE) - norm_u(El - hE)) / (2 * hE)
+    uraw = numerov_log_np(l, np.array([El, El + hE, El - hE]), r, dx, v)   # (3, N), batched
+    un = uraw / np.sqrt((uraw[:, inside] ** 2 * drw).sum(axis=1))[:, None]
+    u = un[0]
+    udot = (un[1] - un[2]) / (2 * hE)
 
     def val_slope(f):
         idx = np.sort(np.argsort(np.abs(r_np - R))[:7])
