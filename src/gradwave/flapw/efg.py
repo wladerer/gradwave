@@ -61,10 +61,20 @@ def nonspherical_potential(rho_sph, rho_2m, rr, drw, lset=None, nx: int = 16, np
     return out
 
 
+_GAUNT_CACHE: dict = {}
+
+
 def gaunt_matrix(l, big_l, big_m, lp, nx: int = 16, nphi: int = 24):
     """The Gaunt coupling block ``G[m,m'] = ∫ Y*_lm Y_LM Y_l'm' dΩ`` (complex harmonics), shape
     ``(2l+1, 2l'+1)``, computed by Gauss-Legendre angular quadrature. This is the angular factor of
-    the non-spherical potential matrix element ``⟨u_l Y_lm | V_LM Y_LM | u_l' Y_l'm'⟩``."""
+    the non-spherical potential matrix element ``⟨u_l Y_lm | V_LM Y_LM | u_l' Y_l'm'⟩``.
+
+    Pure constants — memoized (the fullpot secular build asks for the same blocks at every k-point
+    of every iteration). The cached array is returned read-only."""
+    key = (l, big_l, big_m, lp, nx, nphi)
+    hit = _GAUNT_CACHE.get(key)
+    if hit is not None:
+        return hit
     from scipy.special import sph_harm_y
     th, ph, wgt = _angular_grid(nx, nphi)
     ylm = [sph_harm_y(l, m, th, ph) for m in range(-l, l + 1)]
@@ -74,6 +84,8 @@ def gaunt_matrix(l, big_l, big_m, lp, nx: int = 16, nphi: int = 24):
     for i in range(2 * l + 1):
         for j in range(2 * lp + 1):
             g[i, j] = np.sum(np.conj(ylm[i]) * y_big * ylpm[j] * wgt)
+    g.setflags(write=False)
+    _GAUNT_CACHE[key] = g
     return g
 
 

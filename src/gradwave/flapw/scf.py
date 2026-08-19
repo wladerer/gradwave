@@ -232,14 +232,15 @@ def _lo_row_slices(los):
     return out
 
 
-def _band_amps(cp, ks, abl, lmax, vol, lo_coeff=None, los=None):
+def _band_amps(cp, ks, abl, lmax, vol, lo_coeff=None, los=None, ylm_by_l=None):
     """Per-band sphere amplitude lists ``{l: [amps per radial]}`` aligned with the radial lists
     ``[u, u̇ (, u₂ for an LO on this l)]``. ``cp`` = phased PW coefficients; ``lo_coeff`` = this
-    atom's LO-block coefficients for the band (matrix row order)."""
+    atom's LO-block coefficients for the band (matrix row order). ``ylm_by_l`` = precomputed
+    ``{l: _ylm_star(l, ks)}`` — band- and atom-independent, hoist it per k-point."""
     slices = _lo_row_slices(los)
     out = {}
     for lang in range(lmax + 1):
-        ylm = _ylm_star(lang, ks)
+        ylm = ylm_by_l[lang] if ylm_by_l is not None else _ylm_star(lang, ks)
         a, bb = abl[lang][:, 0], abl[lang][:, 1]
         pfac = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
         amp_a = pfac * (ylm * (cp * a)[:, None]).sum(axis=0)
@@ -266,7 +267,7 @@ def _us_ext(El, lmax, r, dx, v_sphere, R, los=None):
 
 
 def _sphere_valence_density(c_occ, occ, ks, abl, El, lmax, vol, r, dx, v_sphere, R,
-                            lo_block=None, los=None):
+                            lo_block=None, los=None, ylm_by_l=None):
     """The spherical (l=0-projected) valence density inside one sphere, LO-aware: each l-channel
     carries ``[u, u̇]`` plus an LO's second radial when present, and the density sums every radial
     pair ``ρ += (1/4π) Σ_ij P_ij f_i f_j / r²`` with ``P_ij = Σ_{n,m} occ·Re(A*_i A_j)``."""
@@ -274,9 +275,12 @@ def _sphere_valence_density(c_occ, occ, ks, abl, El, lmax, vol, r, dx, v_sphere,
     us = _us_ext(El, lmax, r, dx, v_sphere, R, los)
     rho = np.zeros_like(rr)
     nb = len(occ)
+    if ylm_by_l is None:
+        ylm_by_l = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
     amps_by_band = [
         _band_amps(c_occ[:, n], ks, abl, lmax, vol,
-                   lo_coeff=(lo_block[:, n] if lo_block is not None else None), los=los)
+                   lo_coeff=(lo_block[:, n] if lo_block is not None else None), los=los,
+                   ylm_by_l=ylm_by_l)
         for n in range(nb) if occ[n] != 0
     ]
     occs = [f for f in occ if f != 0]
@@ -396,7 +400,7 @@ def crystal_scf(a_bohr: float, symbol: str = "Ne", R: float = 1.4, ecut: float =
 
 
 def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=None, chan=None,
-                  lodat=None):
+                  lodat=None, nsph_int=None):
     """Multi-atom LAPW at wavevector k, exposing the density internals the SCF needs. Returns
     ``(eigvals, eigvecs, miller, ks, [abl per atom], vol)``. H,S are complex Hermitian (structure
     phases ``e^{i(k_G'-k_G)·τ_a}``). ``atoms_cart`` = ``[(τ_cart, species_key), ...]``.
@@ -460,7 +464,7 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
         abl_by_atom.append(abl)
     if v_nsph:
         Haug = Haug + _nonspherical_augment(v_nsph, atoms_cart, abl_by_atom, ks, species,
-                                            lmax, vol, r, dx)
+                                            lmax, vol, r, dx, nsph_int=nsph_int)
     S = 0.5 * (inter + Saug + (inter + Saug).conj().T)
     Hm = HBAR2_2M * kdot * inter + Haug
     Hm = 0.5 * (Hm + Hm.conj().T)
@@ -493,7 +497,8 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
             if v_nsph:
                 # the LOs' aspherical coupling — the semicore's response to the crystal field
                 dh_pw, dh_lo = _nonspherical_augment_lo(v_nsph, atoms_cart, abl_by_atom, ks,
-                                                        species, lmax, vol, r, dx, lodat)
+                                                        species, lmax, vol, r, dx, lodat,
+                                                        nsph_int=nsph_int)
                 rows_h_arr = rows_h_arr + dh_pw
                 lo_lo_h = lo_lo_h + dh_lo
             s_ext = np.zeros((npw + nlo, npw + nlo), dtype=complex)
@@ -509,17 +514,15 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
     return ev, c, mill, ks, abl_by_atom, vol
 
 
-def _nonspherical_augment(v_nsph, atoms_cart, abl_by_atom, ks, species, lmax, vol, r, dx):
-    """The full-potential non-spherical augmentation ``ΔH[g,g'] = Σ_{lm,l'm',LM>0}
-    B_lm(g)* [∫u_l V_LM u_l' dr] G^{LM}_{lm,l'm'} B_l'm'(g')`` (and the u̇ cross terms), where
-    ``B_lm(g) = (4π/√Ω) i^l Y*_lm(k+G) [a_l or b_l](g) e^{i(k+G)·τ}`` is the per-plane-wave
-    augmentation amplitude. Per-(L,M,l,l') radial integrals × Gaunt blocks contract to npw×npw."""
-    from gradwave.flapw.efg import gaunt_matrix
+def _nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=None):
+    """The k-independent radial integrals of the aspherical potential — ``∫u_l V_LM u_l' dr`` (and
+    the u̇/LO variants) per atom key. These were being recomputed at every k-point; a k-mesh sweep
+    builds them once per SCF iteration and passes them into the secular build (same pattern as the
+    ``chan`` hoist). Returns ``{key: {"uu": {(L,M,l,l'): (i_aa,i_ab,i_ba,i_bb)}, "lo_u": {...},
+    "lo_lo": {...}}}``."""
     r_np = r.numpy()
-    npw = len(ks)
-    ha = np.zeros((npw, npw), dtype=complex)
-    for ai, (tau, key) in enumerate(atoms_cart):
-        comps = v_nsph.get(key)
+    out = {}
+    for key, comps in v_nsph.items():
         if not comps:
             continue
         rr = r_np[r_np <= species[key]["R"]]
@@ -527,13 +530,8 @@ def _nonspherical_augment(v_nsph, atoms_cart, abl_by_atom, ks, species, lmax, vo
         el, vsph = species[key]["El"], species[key]["v"]
         us = {lang: _radial_u(lang, el[lang], r, dx, vsph, species[key]["R"])
               for lang in range(lmax + 1)}
-        ph = np.exp(1j * (ks @ np.asarray(tau, dtype=float)))
-        b_a, b_b = {}, {}
-        for lang in range(lmax + 1):
-            ylm = _ylm_star(lang, ks)
-            pf = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
-            b_a[lang] = pf * ylm * (abl_by_atom[ai][lang][:, 0] * ph)[:, None]
-            b_b[lang] = pf * ylm * (abl_by_atom[ai][lang][:, 1] * ph)[:, None]
+        los = (lodat or {}).get(key, [])
+        uu, lo_u, lo_lo = {}, {}, {}
         for (big_l, big_m), vlm in comps.items():
             if big_l == 0:
                 continue                                   # spherical part is in the muffin tin
@@ -544,79 +542,102 @@ def _nonspherical_augment(v_nsph, atoms_cart, abl_by_atom, ks, species, lmax, vo
                         continue
                     ul, udl = us[lang]
                     ulp, udlp = us[lp]
-                    i_aa = np.sum(ul * vlm * ulp * drw)
-                    i_ab = np.sum(ul * vlm * udlp * drw)
-                    i_ba = np.sum(udl * vlm * ulp * drw)
-                    i_bb = np.sum(udl * vlm * udlp * drw)
-                    g = gaunt_matrix(lang, big_l, big_m, lp)
-                    ca, cb = b_a[lang].conj(), b_b[lang].conj()
-                    ha += (i_aa * (ca @ g @ b_a[lp].T) + i_ab * (ca @ g @ b_b[lp].T)
-                           + i_ba * (cb @ g @ b_a[lp].T) + i_bb * (cb @ g @ b_b[lp].T))
+                    uu[(big_l, big_m, lang, lp)] = (
+                        np.sum(ul * vlm * ulp * drw), np.sum(ul * vlm * udlp * drw),
+                        np.sum(udl * vlm * ulp * drw), np.sum(udl * vlm * udlp * drw))
+            for i, lo in enumerate(los):
+                li = lo["l"]
+                for lp in range(lmax + 1):
+                    if big_l < abs(li - lp) or big_l > li + lp or (li + lp + big_l) % 2:
+                        continue
+                    ulp, udlp = us[lp]
+                    lo_u[(big_l, big_m, i, lp)] = (np.sum(lo["phi"] * vlm * ulp * drw),
+                                                   np.sum(lo["phi"] * vlm * udlp * drw))
+                for j, lo2 in enumerate(los):
+                    lj = lo2["l"]
+                    if big_l < abs(li - lj) or big_l > li + lj or (li + lj + big_l) % 2:
+                        continue
+                    lo_lo[(big_l, big_m, i, j)] = np.sum(lo["phi"] * vlm * lo2["phi"] * drw)
+        out[key] = {"uu": uu, "lo_u": lo_u, "lo_lo": lo_lo}
+    return out
+
+
+def _nonspherical_augment(v_nsph, atoms_cart, abl_by_atom, ks, species, lmax, vol, r, dx,
+                          nsph_int=None):
+    """The full-potential non-spherical augmentation ``ΔH[g,g'] = Σ_{lm,l'm',LM>0}
+    B_lm(g)* [∫u_l V_LM u_l' dr] G^{LM}_{lm,l'm'} B_l'm'(g')`` (and the u̇ cross terms), where
+    ``B_lm(g) = (4π/√Ω) i^l Y*_lm(k+G) [a_l or b_l](g) e^{i(k+G)·τ}`` is the per-plane-wave
+    augmentation amplitude. Per-(L,M,l,l') radial integrals × Gaunt blocks contract to npw×npw.
+    ``nsph_int`` = the precomputed ``_nsph_radial_integrals`` (built locally when ``None``)."""
+    from gradwave.flapw.efg import gaunt_matrix
+    if nsph_int is None:
+        nsph_int = _nsph_radial_integrals(v_nsph, species, lmax, r, dx)
+    npw = len(ks)
+    ha = np.zeros((npw, npw), dtype=complex)
+    ylm_by_l = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
+    for ai, (tau, key) in enumerate(atoms_cart):
+        ints = nsph_int.get(key)
+        if not ints:
+            continue
+        ph = np.exp(1j * (ks @ np.asarray(tau, dtype=float)))
+        b_a, b_b = {}, {}
+        for lang in range(lmax + 1):
+            pf = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
+            b_a[lang] = pf * ylm_by_l[lang] * (abl_by_atom[ai][lang][:, 0] * ph)[:, None]
+            b_b[lang] = pf * ylm_by_l[lang] * (abl_by_atom[ai][lang][:, 1] * ph)[:, None]
+        for (big_l, big_m, lang, lp), (i_aa, i_ab, i_ba, i_bb) in ints["uu"].items():
+            g = gaunt_matrix(lang, big_l, big_m, lp)
+            ca, cb = b_a[lang].conj(), b_b[lang].conj()
+            ha += (i_aa * (ca @ g @ b_a[lp].T) + i_ab * (ca @ g @ b_b[lp].T)
+                   + i_ba * (cb @ g @ b_a[lp].T) + i_bb * (cb @ g @ b_b[lp].T))
     return ha
 
 
 def _nonspherical_augment_lo(v_nsph, atoms_cart, abl_by_atom, ks, species, lmax, vol, r, dx,
-                             lodat):
+                             lodat, nsph_int=None):
     """The local orbitals' coupling to the non-spherical potential — ``ΔH[LO_lm, G] = Σ_{LM,l'm'}
     [∫φ V_LM u_l' dr] G^{LM}_{lm,l'm'} B_l'm'(G)`` (+ u̇) and the same-atom LO-LO block
     ``[∫φ_i V_LM φ_j dr] G``. This is the channel by which a semicore LO polarizes in the crystal
     field (the Sternheimer antishielding of a d⁰ cation) — without it, an LO feels only the
     spherical potential and cannot respond aspherically. Returns ``(ΔH_lo_pw (nlo,npw),
-    ΔH_lo_lo (nlo,nlo))`` in the matrix build's LO row order."""
+    ΔH_lo_lo (nlo,nlo))`` in the matrix build's LO row order. ``nsph_int`` = the precomputed
+    ``_nsph_radial_integrals`` (built locally when ``None``)."""
     from gradwave.flapw.efg import gaunt_matrix
-    r_np = r.numpy()
+    if nsph_int is None:
+        nsph_int = _nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=lodat)
     npw = len(ks)
     nlo = sum(2 * lo["l"] + 1 for (_t, key) in atoms_cart for lo in (lodat or {}).get(key, []))
     dh_pw = np.zeros((nlo, npw), dtype=complex)
     dh_lo = np.zeros((nlo, nlo), dtype=complex)
+    ylm_by_l = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
     row0 = 0
     for ai, (tau, key) in enumerate(atoms_cart):
         los = (lodat or {}).get(key, [])
         n_at = sum(2 * lo["l"] + 1 for lo in los)
-        comps = v_nsph.get(key)
-        if not comps or not n_at:
+        ints = nsph_int.get(key)
+        if not ints or not n_at:
             row0 += n_at
             continue
-        rr = r_np[r_np <= species[key]["R"]]
-        drw = rr * dx
-        el, vsph = species[key]["El"], species[key]["v"]
-        us = {lang: _radial_u(lang, el[lang], r, dx, vsph, species[key]["R"])
-              for lang in range(lmax + 1)}
         ph = np.exp(1j * (ks @ np.asarray(tau, dtype=float)))
         b_a, b_b = {}, {}
         for lang in range(lmax + 1):
-            ylm = _ylm_star(lang, ks)
             pf = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
-            b_a[lang] = pf * ylm * (abl_by_atom[ai][lang][:, 0] * ph)[:, None]
-            b_b[lang] = pf * ylm * (abl_by_atom[ai][lang][:, 1] * ph)[:, None]
+            b_a[lang] = pf * ylm_by_l[lang] * (abl_by_atom[ai][lang][:, 0] * ph)[:, None]
+            b_b[lang] = pf * ylm_by_l[lang] * (abl_by_atom[ai][lang][:, 1] * ph)[:, None]
         offs = _lo_row_slices(los)
-        for (big_l, big_m), vlm in comps.items():
-            if big_l == 0:
-                continue
-            vlm = np.asarray(vlm)
-            for lo in los:
-                li = lo["l"]
-                sl0, _sl1, _ = offs[li]
-                # LO bra ↔ PW-augmentation ket
-                for lp in range(lmax + 1):
-                    if big_l < abs(li - lp) or big_l > li + lp or (li + lp + big_l) % 2:
-                        continue
-                    ulp, udlp = us[lp]
-                    i_pu = np.sum(lo["phi"] * vlm * ulp * drw)
-                    i_pud = np.sum(lo["phi"] * vlm * udlp * drw)
-                    g = gaunt_matrix(li, big_l, big_m, lp)
-                    dh_pw[row0 + sl0:row0 + sl0 + 2 * li + 1] += (
-                        i_pu * (g @ b_a[lp].T) + i_pud * (g @ b_b[lp].T))
-                # LO bra ↔ LO ket (same atom; different l couples via odd/even L)
-                for lo2 in los:
-                    lj = lo2["l"]
-                    if big_l < abs(li - lj) or big_l > li + lj or (li + lj + big_l) % 2:
-                        continue
-                    sl0j, _s, _ = offs[lj]
-                    i_pp = np.sum(lo["phi"] * vlm * lo2["phi"] * drw)
-                    g = gaunt_matrix(li, big_l, big_m, lj)
-                    dh_lo[row0 + sl0:row0 + sl0 + 2 * li + 1,
-                          row0 + sl0j:row0 + sl0j + 2 * lj + 1] += i_pp * g
+        for (big_l, big_m, i, lp), (i_pu, i_pud) in ints["lo_u"].items():
+            li = los[i]["l"]
+            sl0, _sl1, _ = offs[li]
+            g = gaunt_matrix(li, big_l, big_m, lp)
+            dh_pw[row0 + sl0:row0 + sl0 + 2 * li + 1] += (
+                i_pu * (g @ b_a[lp].T) + i_pud * (g @ b_b[lp].T))
+        for (big_l, big_m, i, j), i_pp in ints["lo_lo"].items():
+            li, lj = los[i]["l"], los[j]["l"]
+            sl0, _s1, _ = offs[li]
+            sl0j, _s2, _ = offs[lj]
+            g = gaunt_matrix(li, big_l, big_m, lj)
+            dh_lo[row0 + sl0:row0 + sl0 + 2 * li + 1,
+                  row0 + sl0j:row0 + sl0j + 2 * lj + 1] += i_pp * g
         row0 += n_at
     return dh_pw, 0.5 * (dh_lo + dh_lo.conj().T)
 
@@ -655,9 +676,10 @@ def _weinert_multi(rho_I, spheres, L, nfft):
                 ql = {mm: complex(np.sum(sp["rho_2m"][(bl, mm)] * rlw))
                       for mm in range(-bl, bl + 1)}
                 for mm in range(-bl, bl + 1):    # subtract the interstitial density's part inside R
-                    yc = np.conj(sph_harm_y(bl, mm, th, ph))
-                    ql[mm] -= complex(np.sum(rho_I[inside] * dv[inside] ** bl * yc[inside]) * dvol)
-                rho_smooth += sphere_pseudocharge_lm(ql, sp["R"], sp["tau"], nfft, A, bl)
+                    yc = np.conj(sph_harm_y(bl, mm, th[inside], ph[inside]))
+                    ql[mm] -= complex(np.sum(rho_I[inside] * dv[inside] ** bl * yc) * dvol)
+                rho_smooth += sphere_pseudocharge_lm(ql, sp["R"], sp["tau"], nfft, A, bl,
+                                                     geom=(dv, th, ph))
     v_grid = fft_poisson(rho_smooth, A)
     v_i0 = float(v_grid[~inside_any].mean())
     v_sph_list = []
@@ -816,17 +838,21 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
                       for lang in range(lmax + 1)} for key, sp in species.items()}
         lodat = (_build_lodat(los_by_key, chan, El_by_key, vmt_by_key, R_by_key, at_by_sym,
                               key_sym, v0_by_key, r, dx) if los_by_key else None)
+        # aspherical radial integrals are k-independent — build once per iteration, like chan.
+        nsph_int = (_nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=lodat)
+                    if v_nsph else None)
         kdata, ev_all, ev_gamma = [], [], None
         for kf, w in zip(kfracs, kw, strict=True):
             res = _lapw_multi_k(kf, A, acart, species, lmax, ecut, r, dx, nb_solve,
-                                v_nsph=v_nsph, chan=chan, lodat=lodat)
+                                v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int)
             kdata.append((kf, w, res))
             ev_all.append(res[0])
             if np.all(np.abs(kf) < 1e-9):
                 ev_gamma = res[0]
         if ev_gamma is None:
             ev_gamma = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx, nb_solve,
-                                     v_nsph=v_nsph, chan=chan, lodat=lodat)[0]
+                                     v_nsph=v_nsph, chan=chan, lodat=lodat,
+                                     nsph_int=nsph_int)[0]
         ev_all = np.array(ev_all)
 
         e_fermi = None
@@ -864,6 +890,7 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
             occl = list(occ)
             npw_k = len(mill)
             rho_I += w * _interstitial_density(c[:npw_k, :nb_solve], occl, mill, vol, nfft)
+            ylm_by_l = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
             for ai, k in enumerate(keys):
                 phase = np.exp(1j * (ks @ np.asarray(acart[ai][0])))
                 cp = c[:npw_k, :nb_solve] * phase[:, None]
@@ -873,12 +900,13 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
                             if nlo_k else None)
                 _, rk = _sphere_valence_density(cp, occl, ks, abl_all[ai], El_by_key[k], lmax,
                                                 vol, r, dx, vmt_by_key[k], R_by_key[k],
-                                                lo_block=lo_block, los=los_k)
+                                                lo_block=lo_block, los=los_k, ylm_by_l=ylm_by_l)
                 rho_val[k] += w * rk
                 if fullpot:
                     amps = [(occl[n],
                              _band_amps(cp[:, n], ks, abl_all[ai], lmax, vol,
-                                        lo_coeff=(lo_block[:, n] if nlo_k else None), los=los_k))
+                                        lo_coeff=(lo_block[:, n] if nlo_k else None), los=los_k,
+                                        ylm_by_l=ylm_by_l))
                             for n in range(nb_solve)]
                     rlm = sphere_density_multipoles_multi(amps, us_by_key[k], lmax, lset2)
                     for lm in lset2:
@@ -1026,6 +1054,7 @@ def _efg_density_pass(kdata, occ_by_k, keys, acart, El_by_key, vmt_by_key, R_by_
         _, c, mill, ks, abl_all, vol = res
         occl = list(occ)
         npw_k = len(mill)
+        ylm_by_l = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
         for ai, k in enumerate(keys):
             phase = np.exp(1j * (ks @ np.asarray(acart[ai][0])))
             cp = c[:npw_k, :nb_solve] * phase[:, None]
@@ -1035,7 +1064,8 @@ def _efg_density_pass(kdata, occ_by_k, keys, acart, El_by_key, vmt_by_key, R_by_
                         if nlo_k else None)
             amps = [(occl[n],
                      _band_amps(cp[:, n], ks, abl_all[ai], lmax, vol,
-                                lo_coeff=(lo_block[:, n] if nlo_k else None), los=los_k))
+                                lo_coeff=(lo_block[:, n] if nlo_k else None), los=los_k,
+                                ylm_by_l=ylm_by_l))
                     for n in range(nb_solve)]
             rlm = sphere_density_multipoles_multi(amps, us_by_key[k], lmax, lset2)
             for lm in lset2:

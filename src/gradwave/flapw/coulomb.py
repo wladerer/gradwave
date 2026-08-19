@@ -138,28 +138,38 @@ def _min_image_vec(cfrac, n, A):
 
 
 def sphere_pseudocharge_lm(qlm, R: float, center, n: int, L, big_l: int,
-                           npow: int = 4) -> np.ndarray:
+                           npow: int = 4, geom=None) -> np.ndarray:
     """Smooth angular-momentum-``big_l`` pseudocharge on the grid matching the sphere's charge
     moments ``qlm = {M: Q_LM}`` (M=-L..L): ``ρ̃(r,Ω) = Σ_M c_M d^L (1-(d/R)²)^npow Y_LM(Ω)`` with
     ``c_M = Q_LM / (R^{2L+3} ∫_0^1 x^{2L+2}(1-x²)^npow dx)`` so its L-moment ``∫ρ̃ r^{L+2} Y*`` is
     ``Q_LM``. This is the general-L part of Weinert's pseudocharge: matching every multipole in play
     (not just the monopole) makes the interstitial FFT potential carry each sphere's full exterior
-    multipole field — the inter-atomic (lattice) terms of the aspherical potential and the EFG."""
+    multipole field — the inter-atomic (lattice) terms of the aspherical potential and the EFG.
+
+    ``geom`` = precomputed ``(d, theta, phi)`` grids for this centre (a caller placing several
+    L-components on the same sphere shares one min-image evaluation); the harmonics are evaluated
+    only on the in-sphere points (the pseudocharge's support, a few % of the grid)."""
     from scipy.special import sph_harm_y
-    a = cell_matrix(L)
-    disp = _min_image_vec(np.asarray(center) @ np.linalg.inv(a), n, a)
-    d = np.linalg.norm(disp, axis=-1)
+    if geom is None:
+        a = cell_matrix(L)
+        disp = _min_image_vec(np.asarray(center) @ np.linalg.inv(a), n, a)
+        d = np.linalg.norm(disp, axis=-1)
+        ds = np.where(d < 1e-12, 1.0, d)
+        theta = np.arccos(np.clip(disp[..., 2] / ds, -1.0, 1.0))
+        phi = np.arctan2(disp[..., 1], disp[..., 0])
+    else:
+        d, theta, phi = geom
     inside = d < R
-    ds = np.where(d < 1e-12, 1.0, d)
-    theta = np.arccos(np.clip(disp[..., 2] / ds, -1.0, 1.0))
-    phi = np.arctan2(disp[..., 1], disp[..., 0])
     x = np.linspace(0.0, 1.0, 4000)
     i_n = float(np.trapezoid(x ** (2 * big_l + 2) * (1 - x**2) ** npow, x))
-    radial = np.where(inside, d**big_l * (1 - (d / R) ** 2) ** npow, 0.0)
-    out = np.zeros(d.shape)
+    din, thin, phin = d[inside], theta[inside], phi[inside]
+    radial_in = din**big_l * (1 - (din / R) ** 2) ** npow
+    acc = np.zeros(din.shape)
     for m in range(-big_l, big_l + 1):
         c_m = qlm[m] / (R ** (2 * big_l + 3) * i_n)
-        out = out + (c_m * radial * sph_harm_y(big_l, m, theta, phi)).real
+        acc = acc + (c_m * radial_in * sph_harm_y(big_l, m, thin, phin)).real
+    out = np.zeros(d.shape)
+    out[inside] = acc
     return out
 
 
