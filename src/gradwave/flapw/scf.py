@@ -387,7 +387,7 @@ def crystal_scf(a_bohr: float | None = None, symbol: str = "Ne", R: float = 1.4,
 
 
 def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=None, chan=None,
-                  lodat=None, nsph_int=None, c_prev=None, subspace_tol=1e-5):
+                  lodat=None, nsph_int=None, c_prev=None, subspace_tol=1e-5, warp=None):
     """Multi-atom LAPW at wavevector k, exposing the density internals the SCF needs. Returns
     ``(eigvals, eigvecs, miller, ks, [abl per atom], vol)``. H,S are complex Hermitian (structure
     phases ``e^{i(k_G'-k_G)·τ_a}``). ``atoms_cart`` = ``[(τ_cart, species_key), ...]``.
@@ -462,6 +462,16 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
             Haug = Haug + cstk.conj() @ (ints["m_uu"] @ cstk.T)
     S = 0.5 * (inter + Saug + (inter + Saug).conj().T)
     Hm = HBAR2_2M * kdot * inter + Haug
+    if warp is not None:
+        # warped interstitial: <G|(V_I - v_i0)·Θ_I|G'> = FT[U](G-G') — the standard full-potential
+        # LAPW term this code lacked (the interstitial was Hamiltonian-flat while the spheres got
+        # l>0 refinement; TiO2's covalent bonding lives exactly in the interstitial). U is the
+        # FFT of (v_grid - v_i0)·Θ_I; Miller-difference indexed (Toeplitz in G).
+        u_fft, nfft_w = warp
+        dm0 = (mill[:, None, 0] - mill[None, :, 0]) % nfft_w
+        dm1 = (mill[:, None, 1] - mill[None, :, 1]) % nfft_w
+        dm2 = (mill[:, None, 2] - mill[None, :, 2]) % nfft_w
+        Hm = Hm + u_fft[dm0, dm1, dm2]
     Hm = 0.5 * (Hm + Hm.conj().T)
     if lodat:
         # LAPW+LO: extend the secular problem with the confined local orbitals. Row order (the
@@ -731,6 +741,11 @@ def _weinert_multi(rho_I, spheres, L, nfft):
             rho_smooth += own_ps
             own_ps_by_sphere.append((own_ps, sorted({lm for lm in sp["rho_2m"] if lm[0] > 0})))
     v_grid = fft_poisson(rho_smooth, A)
+    # Interstitial XC: the spheres carry vxc(rho_sph) but the interstitial previously had NONE —
+    # a potential discontinuity at every muffin-tin boundary and an O(eV) hole in the bonding
+    # region. The PW density at the sphere surface equals the augmented density there (value
+    # matching), so adding vxc(rho_I) makes the total potential continuous across R_MT.
+    v_grid = v_grid + vxc_lda(torch.tensor(np.clip(rho_I, 1e-12, None))).numpy()
     # The own-sphere L>0 field must be excluded from each sphere's lattice term. The analytic
     # cancellation (v_bc - V_part(R)) fails at the ~20% level because the ~5-grid-point pseudo-
     # charge ALIASES: its band-limited near-field at R differs from the analytic multipole value
@@ -938,6 +953,14 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                     f"muffin-tin spheres overlap ({keys[i]},{keys[j]}): "
                     f"R={R_by_key[keys[i]]:.3f}+{R_by_key[keys[j]]:.3f} Å > separation {sep:.3f} Å "
                     "(radii are in ångström)")
+    # static interstitial indicator for the warped-interstitial term (geometry only)
+    _ainv = np.linalg.inv(A)
+    theta_i = np.ones((nfft, nfft, nfft), dtype=bool)
+    for (tau_c, _sym2), kk2 in zip(atoms_cart, keys, strict=True):
+        theta_i &= ~(_min_image_dist(np.asarray(tau_c[0] if isinstance(tau_c, tuple) else tau_c)
+                                     @ _ainv, nfft, A) < R_by_key[kk2])
+    warp_state = None                                     # (FFT of (v_grid-v_i0)·Θ_I, nfft)
+    v_grid_prev = None                                    # mixed interstitial grid state
     v_by_key = {}
     for k, s in zip(keys, syms, strict=True):
         if v_start is not None and k in v_start:
@@ -996,7 +1019,8 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
             import multiprocessing as _mp
             from concurrent.futures import ProcessPoolExecutor
             argl = [(kf, A, acart, species, lmax, ecut, r, dx, nb_solve, v_nsph, chan, lodat,
-                     nsph_int, cprevs[ik], subspace_tol) for ik, kf in enumerate(kfracs)]
+                     nsph_int, cprevs[ik], subspace_tol, warp_state)
+                    for ik, kf in enumerate(kfracs)]
             # spawn, not fork: forked children inherit live OpenMP/BLAS state and can compute
             # silently wrong numbers (observed: a 6 eV span error). Spawned workers re-import
             # (~seconds per iteration) — negligible on the multi-minute fullpot iterations the
@@ -1007,7 +1031,8 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
         else:
             res_list = [_lapw_multi_k(kf, A, acart, species, lmax, ecut, r, dx, nb_solve,
                                       v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int,
-                                      c_prev=cprevs[ik], subspace_tol=subspace_tol)
+                                      c_prev=cprevs[ik], subspace_tol=subspace_tol,
+                                      warp=warp_state)
                         for ik, kf in enumerate(kfracs)]
         for ik, (kf, w, res) in enumerate(zip(kfracs, kw, res_list, strict=True)):
             kdata.append((kf, w, res))
@@ -1018,7 +1043,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
         if ev_gamma is None:
             ev_gamma = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx, nb_solve,
                                      v_nsph=v_nsph, chan=chan, lodat=lodat,
-                                     nsph_int=nsph_int)[0]
+                                     nsph_int=nsph_int, warp=warp_state)[0]
         ev_all = np.array(ev_all)
 
         e_fermi = None
@@ -1153,19 +1178,34 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
             vnew = torch.tensor(vnew_np)
             vnew_by_key[k] = vnew
             r_sph = max(r_sph, float((vnew - v_by_key[k]).abs().max()))
-        # joint Anderson: one history over every spherical potential plus (in the fullpot phase)
-        # the aspherical components — the coupled fixed point accelerated as one vector.
+        # Unified metric-weighted Anderson: EVERY component of the state — the spherical sphere
+        # potentials, the aspherical components, and the INTERSTITIAL grid (previously unmixed:
+        # it swung freely each iteration and drove the sphere boundary conditions at full
+        # amplitude) — in one history, in the physical L2 metric (√(r²dr) radial, √dvol grid).
+        # The metric is the principled form of "scale-weighting": without it the near-nucleus
+        # points of v_sph (|v|~1e5 at r~1e-5, measure→0) dominate the least squares meaninglessly.
         nsph_now = fullpot and not mt_phase and v_nsph is not None and vns_new is not None
-        segs = [v_by_key[k] for k in keys] + ([
-            torch.from_numpy(np.ascontiguousarray(fn(v_nsph[k][lm])))
-            for k in keys for lm in sorted(v_nsph[k]) for fn in (np.real, np.imag)]
-            if nsph_now else [])
-        news = [vnew_by_key[k] for k in keys] + ([
-            torch.from_numpy(np.ascontiguousarray(fn(vns_new[k][lm])))
-            for k in keys for lm in sorted(vns_new[k]) for fn in (np.real, np.imag)]
-            if nsph_now else [])
-        x_old = torch.cat([t.reshape(-1) for t in segs])
-        x_new = torch.cat([t.reshape(-1) for t in news])
+        sqdx = math.sqrt(dx)
+        w_segs = [torch.from_numpy(rr_by_key[k] ** 1.5 * sqdx) for k in keys]
+        segs = [v_by_key[k][torch.from_numpy(mask_by_key[k])] for k in keys]
+        news = [vnew_by_key[k][torch.from_numpy(mask_by_key[k])] for k in keys]
+        if nsph_now:
+            for k in keys:
+                wr = torch.from_numpy(rr_by_key[k] ** 1.5 * sqdx)
+                for lm in sorted(v_nsph[k]):
+                    for fn in (np.real, np.imag):
+                        segs.append(torch.from_numpy(np.ascontiguousarray(fn(v_nsph[k][lm]))))
+                        news.append(torch.from_numpy(np.ascontiguousarray(fn(vns_new[k][lm]))))
+                        w_segs.append(wr)
+        sqdv = math.sqrt(vol / nfft**3)
+        ti_flat = theta_i.reshape(-1)
+        w_segs.append(torch.full((int(ti_flat.sum()),), sqdv, dtype=torch.float64))
+        segs.append(torch.from_numpy((v_grid_prev if v_grid_prev is not None
+                                      else v_grid).reshape(-1)[ti_flat]))
+        news.append(torch.from_numpy(v_grid.reshape(-1)[ti_flat]))
+        w_vec = torch.cat(w_segs)
+        x_old = torch.cat([t.reshape(-1) for t in segs]) * w_vec
+        x_new = torch.cat([t.reshape(-1) for t in news]) * w_vec
         if hist and hist[0] and hist[0][-1].numel() != x_old.numel():
             hist = ([], [])                        # phase switch changed the vector: fresh history
         if not hist:
@@ -1174,11 +1214,13 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
         hist[1].append(x_new - x_old)
         if len(hist[1]) > 6:
             hist = (hist[0][-6:], hist[1][-6:])
-        x_next = anderson_next(hist[0], hist[1], beta=0.3, m=5)
+        x_next = anderson_next(hist[0], hist[1], beta=0.3, m=5) / w_vec
         off = 0
         for k in keys:
-            n = v_by_key[k].numel()
-            v_by_key[k] = x_next[off:off + n].clone()
+            n = int(mask_by_key[k].sum())
+            full_v = torch.full((r.shape[0],), v_i0, dtype=torch.float64)
+            full_v[torch.from_numpy(mask_by_key[k])] = x_next[off:off + n]
+            v_by_key[k] = full_v
             off += n
         if nsph_now:
             for k in keys:
@@ -1188,6 +1230,13 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                     im = x_next[off + n:off + 2 * n].numpy()
                     v_nsph[k][lm] = re + 1j * im
                     off += 2 * n
+        v_mix_i = x_next[off:].numpy()
+        v_grid_prev = v_grid.copy()
+        v_grid_prev.reshape(-1)[ti_flat] = v_mix_i
+        # warped interstitial for the NEXT iteration, from the MIXED grid, zero-mean over Θ_I so
+        # the interstitial-zero eigenvalue referencing is preserved
+        u = np.where(theta_i, v_grid_prev - float(v_mix_i.mean()), 0.0)
+        warp_state = (np.fft.fftn(u) / nfft**3, nfft)
 
         span = float(ev_gamma[nbands - 1] - ev_gamma[0])
         new = {"span": span, "ev": ev_gamma[:nbands].tolist(), "e_fermi": e_fermi}
@@ -1210,7 +1259,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
             if verbose:
                 print("  flapw: muffin-tin phase converged -> fullpot on", flush=True)
         nsph_ok = (not fullpot) or (r_nsph < 0.05)
-        if conv is not None and full_iter and nsph_ok and d_span < tol:
+        if conv is not None and full_iter and nsph_ok and d_span < tol and r_sph < 0.1:
             conv = new
             break
         conv = new
@@ -1287,10 +1336,10 @@ def _atom_orbits(atom_map):
 def _solve_k_args(args):
     """Picklable per-k secular solve for the k-point process pool (``kworkers``)."""
     (kf, cell, acart, species, lmax, ecut, r, dx, nb_solve, v_nsph, chan, lodat, nsph_int,
-     c_prev, subspace_tol) = args
+     c_prev, subspace_tol, warp) = args
     return _lapw_multi_k(kf, cell, acart, species, lmax, ecut, r, dx, nb_solve,
                          v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int,
-                         c_prev=c_prev, subspace_tol=subspace_tol)
+                         c_prev=c_prev, subspace_tol=subspace_tol, warp=warp)
 
 
 def _efg_density_pass(kdata, occ_by_k, keys, acart, El_by_key, vmt_by_key, R_by_key, rr_by_key,
