@@ -1165,8 +1165,8 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                         symmetry_dev=(sym_dev if atom_orbits is not None else None),
                         e_fermi=e_fermi, mt_phase=mt_phase, exact_solve=full_iter,
                         t_s=time.time() - t_it)
-        if mt_phase and full_iter and d_span < 3 * tol:
-            mt_phase = False                       # spherical loop settled -> enable fullpot
+        if mt_phase and ((full_iter and d_span < 3 * tol) or it >= max(20, iters // 2)):
+            mt_phase = False           # spherical loop settled (or capped) -> enable fullpot
             if verbose:
                 print("  flapw: muffin-tin phase converged -> fullpot on", flush=True)
         nsph_ok = (not fullpot) or (r_nsph < 0.05)
@@ -1185,7 +1185,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
         # multistable SCF basin or a symmetry bug. Surfaced so it can never fail silently.
         info["symmetry_dev"] = sym_dev
     if efg:
-        if not fullpot:
+        if not fullpot or mt_phase:
             # Build the aspherical density once from the converged wavefunctions. On an IBZ run the
             # reduced k-sum misses the star of each k, so the l=2 multipoles are star-unfolded with
             # the Wigner-D group average (_symmetrize_rho_lm) — no full-mesh re-solve needed. Then
