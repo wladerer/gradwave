@@ -130,3 +130,16 @@ reference = real validation. Muffin-tin (no response) stuck at |V_zz|~4 (k223 5.
 82% of Elk on |V_zz| AND C_Q, still improving. ecut300 already ~rgkmax7.3 > Elk 7, so not ecut-limited;
 residual is higher k + method (lmax=2, frozen O core response). HONEST HEADLINE: gradwave 17O C_Q(TiO2)
 = 0.97 MHz at Elk's k-mesh (Elk 1.18, exp 1.8), converging toward Elk as k increases. sm=0 is essential.
+
+## WALK-BACK (2026-08-19): the fullpot O magnitude is lmax-UNSTABLE — "82%" was likely an lmax=2 artifact
+CRITICAL: fullpot O |V_zz| at k333 is 14.1 (lmax=2) but 4.4 (lmax=3) — a 3x collapse, NOT convergence.
+The lmax=3 value (4.4) matches the muffin-tin (~4.0). So the k-convergence toward Elk I reported was
+converging in k at FIXED lmax=2, but lmax itself is not converged: the lmax=2 fullpot amplification to
+~14 is very likely a TRUNCATION ARTIFACT of the l=2-only non-spherical potential coupling only l<=2
+channels. The RELIABLE, lmax-consistent result is the MUFFIN-TIN: |V_zz| ~4-5 (stable across k: 5.3,
+4.3, 4.0), eta ~0.61-0.73 (right shape), = ~21-26% of Elk 19.1. So the honest O result is: correct
+SHAPE (eta~0.7=Elk), magnitude ~1/4 of Elk (large deficit), and the fullpot "response" that lifted it
+was an lmax artifact. Testing lmax=4 (decisive: if ~lmax3 then fullpot converges to ~4-5 and lmax2=14
+was the artifact; if different, fullpot is just lmax-broken). LESSON: always check lmax convergence for
+a full-potential EFG; a single lmax is not enough. My non-spherical potential is l=2-only (Elk uses
+lmax~8); mismatched potential-lmax vs augmentation-lmax is the likely instability source.
