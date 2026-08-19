@@ -941,7 +941,10 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     hist = {k: ([], []) for k in keys}
     c_prev_by_k = [None] * len(kfracs)
     for it in range(iters):
-        full_iter = (not subspace_reuse) or (it % 5 == 0)
+        # subspace reuse is safe in the muffin-tin phase but blind to states entering the
+        # window while the aspherical potential ramps (observed blow-ups at [subsp] iterations);
+        # fullpot iterations always solve exactly.
+        full_iter = (not subspace_reuse) or (it % 5 == 0) or (fullpot and not mt_phase)
         t_it = time.time()
         r_sph = 0.0
         species, El_by_key, vmt_by_key, v0_by_key = {}, {}, {}, {}
