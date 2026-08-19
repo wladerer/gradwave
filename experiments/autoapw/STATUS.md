@@ -162,9 +162,17 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
              reduces to the muffin-tin pref×Vuu (addition theorem). VALIDATED: empty v_nsph → H
              bit-identical to muffin-tin (Δ=0); a synthetic axial V_20 splits the Ne 2p triplet into
              a doublet+singlet matching first-order PT (0.7477 vs 0.7569 eV, 1.2%; correct sign/mult).
-      [ ] step 3b (self-consistent full-potential): compute V_LM from the aspherical density each
-             iteration (l>0 Poisson, have l=2) + non-spherical XC, feed v_nsph into the SCF; also the
-             multipole-matched Weinert pseudocharge (for the inter-atomic l=2 in step 2b).
+      [x] step 3b (self-consistent full-potential): `crystal_scf_multi(fullpot=True)`. Each iteration
+             BZ-sums the aspherical l=2 density, builds V_2M = `nonspherical_potential` (on-site l=2
+             Hartree `l2_sphere_poisson` + l=2 XC by evaluating V_xc[ρ(r,Ω)] on the angular grid and
+             projecting), mixes, and feeds v_nsph into the Hamiltonian next iteration. VALIDATED:
+             cubic Ne fullpot converges and == muffin-tin (22.6237, Δ=0; V_zz_val 3.5e-12 — non-sph
+             potential self-consistently vanishes for the cubic closed shell); nonspherical_potential
+             unit-tested (spherical→0, axial ρ_20→axial V). A NONZERO full-potential effect needs an
+             open-shell element (plumbing). REMAINING: multipole-matched Weinert pseudocharge (for the
+             step-2b inter-atomic l=2 term).
+      The EFG analytical pipeline is complete: aspherical density → l=2 Poisson + boundary → V_zz
+      tensor → non-spherical H → self-consistent full-potential. Only plumbing + benchmark remain.
       [ ] plumbing: real open-shell elements (Ti/O/Cu…) beyond He/Be/Ne; a benchmark (TiO2/Zn/Ti) vs
           WIEN2k/Elk. Then differentiable EFG (∂C_Q/∂structure) — the AutoAPW-specific payoff.
 - [ ] Chemical shielding σ (all nuclei) — GIPAW magnetic linear response; a separate large subsystem.

@@ -35,6 +35,29 @@ def _angular_grid(nx: int, nphi: int):
     return th, ph, wgt
 
 
+def nonspherical_potential(rho_sph, rho_2m, rr, drw, nx: int = 16, nphi: int = 24):
+    """The non-spherical (l=2) sphere potential ``V_2M(r)`` = on-site Hartree + XC, for the full-
+    potential SCF. ``rho_sph`` is the spherical density (val+core, e/Å³); ``rho_2m = {(2,M): ρ_2M}``
+    the aspherical valence density. Hartree from ``l2_sphere_poisson``; XC by evaluating
+    ``V_xc[ρ(r,Ω)]`` on the angular grid (ρ = ρ_sph + Σ ρ_2M Y_2M) and projecting onto Y_2M."""
+    import torch
+    from scipy.special import sph_harm_y
+
+    from gradwave.flapw.functionals import vxc_lda
+    th, ph, wgt = _angular_grid(nx, nphi)
+    y2 = {m: sph_harm_y(2, m, th, ph) for m in range(-2, 3)}
+    rho_ang = np.broadcast_to(np.asarray(rho_sph)[:, None, None], (len(rr),) + th.shape).copy()
+    for m in range(-2, 3):
+        rho_ang += (rho_2m[(2, m)][:, None, None] * y2[m][None]).real
+    vxc_ang = vxc_lda(torch.tensor(np.clip(rho_ang, 1e-10, None))).numpy()
+    out = {}
+    for m in range(-2, 3):
+        v_h = l2_sphere_poisson(rho_2m[(2, m)], rr, drw)
+        v_xc = (vxc_ang * (wgt * np.conj(y2[m]))[None]).sum(axis=(1, 2))
+        out[(2, m)] = v_h + v_xc
+    return out
+
+
 def gaunt_matrix(l, big_l, big_m, lp, nx: int = 16, nphi: int = 24):
     """The Gaunt coupling block ``G[m,m'] = ∫ Y*_lm Y_LM Y_l'm' dΩ`` (complex harmonics), shape
     ``(2l+1, 2l'+1)``, computed by Gauss-Legendre angular quadrature. This is the angular factor of

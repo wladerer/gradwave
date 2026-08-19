@@ -64,3 +64,16 @@ def test_axial_v20_crystal_field_splitting(neon):
     g = gaunt_matrix(1, 2, 0, 1)
     pt_split = i_aa * float((g[1, 1] - g[0, 0]).real)       # E(m=0) − E(m=±1)
     assert abs((p[2] - p[0]) - pt_split) < 0.1 * pt_split   # within 10% of perturbation theory
+
+
+@pytest.mark.slow
+def test_fullpot_cubic_reduces_to_muffin_tin():
+    """The self-consistent full-potential loop converges and reproduces the muffin-tin splitting
+    for cubic Ne; the non-spherical potential self-consistently vanishes at a cubic closed shell."""
+    from gradwave.flapw import crystal_scf_multi
+    mt, _ = crystal_scf_multi(6.0, [((0.5, 0.5, 0.5), "Ne")], {"Ne": 1.4}, ecut=140.0, iters=25)
+    fp, _ = crystal_scf_multi(6.0, [((0.5, 0.5, 0.5), "Ne")], {"Ne": 1.4},
+                              ecut=140.0, iters=25, fullpot=True)
+    s_mt = np.array(mt["ev"])[1:4].mean() - np.array(mt["ev"])[0]
+    s_fp = np.array(fp["ev"])[1:4].mean() - np.array(fp["ev"])[0]
+    assert abs(float(s_fp - s_mt)) < 0.02

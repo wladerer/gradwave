@@ -128,3 +128,29 @@ def test_interstitial_l2_boundary_isotropic_is_zero():
     vgrid = x**2 + y**2 + z**2                            # isotropic
     vbc = interstitial_l2_boundary(vgrid, center, 1.5, np.eye(3) * L)
     assert all(abs(vbc[m]) < 1e-3 * L**2 for m in range(-2, 3))
+
+
+def test_nonspherical_potential_spherical_gives_zero():
+    """The non-spherical (l=2) potential of a spherical density is zero (Hartree and XC)."""
+    from gradwave.flapw.efg import nonspherical_potential
+    rr = np.linspace(0.05, 1.3, 40)
+    drw = np.full_like(rr, float(rr[1] - rr[0]))
+    rho_sph = np.exp(-2.0 * rr)
+    rho_2m = {(2, m): np.zeros(rr.shape, complex) for m in range(-2, 3)}
+    v = nonspherical_potential(rho_sph, rho_2m, rr, drw)
+    for m in range(-2, 3):
+        assert np.abs(v[(2, m)]).max() < 1e-9
+
+
+def test_nonspherical_potential_axial_density_is_axial():
+    """An axial l=2 density perturbation gives an axial l=2 potential (V_20 only)."""
+    from gradwave.flapw.efg import nonspherical_potential
+    rr = np.linspace(0.05, 1.3, 40)
+    drw = np.full_like(rr, float(rr[1] - rr[0]))
+    rho_sph = np.exp(-2.0 * rr)
+    rho_2m = {(2, m): np.zeros(rr.shape, complex) for m in range(-2, 3)}
+    rho_2m[(2, 0)] = 0.02 * np.exp(-2.0 * rr)
+    v = nonspherical_potential(rho_sph, rho_2m, rr, drw)
+    assert np.abs(v[(2, 0)]).max() > 1e-6
+    for m in (-2, -1, 1, 2):
+        assert np.abs(v[(2, m)]).max() < 1e-9

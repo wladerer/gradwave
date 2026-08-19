@@ -432,7 +432,7 @@ def _fermi_level(ev_all, w_all, nelec, kT):
 
 def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
                       iters: int = 40, tol: float = 3e-3, kmesh=(1, 1, 1), smearing: float = 0.0,
-                      efg: bool = False):
+                      efg: bool = False, fullpot: bool = False):
     """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
     ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
@@ -446,7 +446,12 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     fractional occupations (``info['e_fermi']`` is returned). ``smearing=0`` fills exactly
     ``N_val/2`` bands two-per-state (insulators). ``a_bohr`` may be a scalar (cubic edge), a
     length-3 vector (orthorhombic edges), or a 3×3 matrix (triclinic cell, rows = lattice
-    vectors), all in Bohr."""
+    vectors), all in Bohr.
+
+    ``fullpot=True`` runs the self-consistent full-potential loop: each iteration computes the
+    non-spherical (l=2) sphere potential (on-site Hartree + XC) from the aspherical density and
+    feeds it back into the Hamiltonian, so the wavefunctions respond to the non-spherical field.
+    ``fullpot=False`` is the muffin-tin (spherical-potential) scheme."""
     A = cell_matrix(np.asarray(a_bohr, dtype=float) * BOHR_ANG)     # 3×3 cell in Å
     vol = float(abs(np.linalg.det(A)))
     amax = float(np.linalg.norm(A, axis=1).max())
@@ -471,6 +476,7 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     v_by_key = {k: vat_by_sym[s].clone() for k, s in zip(keys, syms, strict=True)}
 
     conv = None
+    v_nsph = None                                          # non-spherical potential (fullpot)
     hist = {k: ([], []) for k in keys}
     for _ in range(iters):
         species, El_by_key, vmt_by_key = {}, {}, {}
@@ -488,13 +494,14 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
         nb_solve = nbands + npad
         kdata, ev_all, ev_gamma = [], [], None
         for kf, w in zip(kfracs, kw, strict=True):
-            res = _lapw_multi_k(kf, A, acart, species, lmax, ecut, r, dx, nb_solve)
+            res = _lapw_multi_k(kf, A, acart, species, lmax, ecut, r, dx, nb_solve, v_nsph=v_nsph)
             kdata.append((kf, w, res))
             ev_all.append(res[0])
             if np.all(np.abs(kf) < 1e-9):
                 ev_gamma = res[0]
         if ev_gamma is None:
-            ev_gamma = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx, nb_solve)[0]
+            ev_gamma = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx, nb_solve,
+                                     v_nsph=v_nsph)[0]
         ev_all = np.array(ev_all)
 
         e_fermi = None
@@ -507,6 +514,13 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
 
         rho_I = np.zeros((nfft, nfft, nfft))
         rho_val = {k: np.zeros_like(rr_by_key[k]) for k in keys}
+        if fullpot:
+            from gradwave.flapw.efg import sphere_density_multipoles
+            us_by_key = {k: {lg: _radial_u(lg, El_by_key[k][lg], r, dx, vmt_by_key[k], R_by_key[k])
+                             for lg in range(lmax + 1)} for k in keys}
+            lset2 = [(2, m) for m in range(-2, 3)]
+            rho_2m = {k: {(2, m): np.zeros(rr_by_key[k].shape, dtype=complex)
+                          for m in range(-2, 3)} for k in keys}
         for (_kf, w, res), occ in zip(kdata, occ_by_k, strict=True):
             _, c, mill, ks, abl_all, vol = res
             occl = list(occ)
@@ -517,6 +531,12 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
                 _, rk = _sphere_valence_density(cp, occl, ks, abl_all[ai], El_by_key[k], lmax,
                                                 vol, r, dx, vmt_by_key[k], R_by_key[k])
                 rho_val[k] += w * rk
+                if fullpot:
+                    amps = [(occl[n], *_augment_amplitudes(cp[:, n], ks, abl_all[ai], lmax, vol))
+                            for n in range(nb_solve)]
+                    rlm = sphere_density_multipoles(amps, us_by_key[k], lmax, lset2)
+                    for m in range(-2, 3):
+                        rho_2m[k][(2, m)] += w * rlm[(2, m)]
 
         spheres, rho_sph_by_key = [], {}
         for ai, (k, s) in enumerate(zip(keys, syms, strict=True)):
@@ -529,6 +549,17 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
             spheres.append({"tau": acart[ai][0], "rr": rr, "dx": dx,
                             "rho_sph": rho_sph_by_key[k], "Z": CONFIG[s][0], "R": R_by_key[k]})
         v_sph_list, v_i0, v_grid = _weinert_multi(rho_I, spheres, A, nfft)
+
+        if fullpot:
+            from gradwave.flapw.efg import nonspherical_potential
+            vns_new = {k: nonspherical_potential(rho_sph_by_key[k], rho_2m[k], rr_by_key[k],
+                                                 rr_by_key[k] * dx) for k in keys}
+            if v_nsph is None:
+                v_nsph = vns_new
+            else:
+                for k in keys:
+                    for lm in vns_new[k]:
+                        v_nsph[k][lm] = 0.7 * v_nsph[k][lm] + 0.3 * vns_new[k][lm]
 
         for ai, k in enumerate(keys):
             mask = mask_by_key[k]
@@ -553,12 +584,12 @@ def crystal_scf_multi(a_bohr, atoms, radii, ecut: float = 200.0, lmax: int = 2,
     info = {"nbands": nbands, "symbols": syms, "e_fermi": conv.get("e_fermi")}
     if efg:
         info["efg"] = _sphere_efg_gamma(A, acart, keys, species, El_by_key, vmt_by_key, R_by_key,
-                                        rr_by_key, lmax, ecut, r, dx, nbands, v_grid)
+                                        rr_by_key, lmax, ecut, r, dx, nbands, v_grid, v_nsph)
     return conv, info
 
 
 def _sphere_efg_gamma(A, acart, keys, species, El_by_key, vmt_by_key, R_by_key, rr_by_key,
-                      lmax, ecut, r, dx, nbands, v_grid):
+                      lmax, ecut, r, dx, nbands, v_grid, v_nsph=None):
     """Per-atom EFG at Γ from the converged potential: the aspherical l=2 density, its valence V_zz
     (on-site l=2 sphere Poisson), and the full V_zz adding the lattice term (interstitial l=2
     boundary matching against ``v_grid``). Cubic sites give ``V_zz ≈ 0`` (no l=2 invariant)."""
@@ -570,7 +601,7 @@ def _sphere_efg_gamma(A, acart, keys, species, El_by_key, vmt_by_key, R_by_key, 
         valence_efg_moments,
     )
     _, cg, _, ksg, ablg, volg = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx,
-                                              nbands)
+                                              nbands, v_nsph=v_nsph)
     lset = [(2, m) for m in range(-2, 3)]
     out = {}
     for ai, k in enumerate(keys):
