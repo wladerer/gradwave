@@ -179,9 +179,22 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
           even at c/a=1) → V_zz≈-46 eV/Å², η tracks the c/a distortion (0 axial → 0.06), C_Q(¹⁷O)≈2.9
           MHz (physical 1-15 MHz range). Demo `examples/flapw_oxygen_nmr.py` (c/a scan + plot); unit +
           slow integration tests. NOTE: NOT yet calibrated vs WIEN2k on a real material.
-      [ ] plumbing/benchmark: more open-shell elements (Ti/Al/Na…); a real material (TiO2/α-quartz/
-          corundum) vs WIEN2k to calibrate C_Q quantitatively. Then differentiable EFG
-          (∂C_Q/∂structure) — the AutoAPW-specific payoff.
+      [~] BeO-vs-Elk CALIBRATION ATTEMPT (2026-08-18) — reference workflow works, quantitative match
+          FAILS. Elk 11 (elk-11.0.2 on asus, task 0+115, lmaxi 2): BeO wurtzite O V_zz=-0.01717 a.u.
+          =-1.67 eV/Å², η≈0 (axial), C_Q(¹⁷O)≈0.10 MHz. Elk's EFG def (Coulomb-potential curvature,
+          l=0 removed) matches efg_tensor exactly, so it's apples-to-apples. But MY BeO gives V_zz
+          -28..-62 eV/Å² (20-40× too big), site-dependent (the 2 symmetry-equivalent O disagree),
+          η nonzero — because the muffin-tin SCF does NOT capture BeO's IONIC ground state: O comes
+          out with a spurious 2p-hole (large valence EFG -56..-73) instead of closed-shell O²⁻. Root
+          gaps: (a) ionic band-ordering/occupation (Be 2s→O 2p charge transfer not achieved), (b) the
+          incomplete l=0-pseudocharge lattice term. NOT a quick fix — quantitative ionic-crystal EFG
+          needs correct charge-transfer occupation + multipole-matched Weinert pseudocharge. TiO2
+          (more ionic + transition metal) is further out of reach.
+          BUT the attempt found+fixed 3 real bugs that unblock multi-atom convergence (were commits):
+          ghost states (solve_geneig canonical orthogonalization, not Löwdin clip), numerov overflow
+          (n_cut past R_MT), rank-deficient eigenvalue padding. Ne unchanged (22.6235).
+      [ ] plumbing/benchmark: correct ionic occupation (charge transfer) + multipole pseudocharge →
+          then re-attempt BeO/TiO2 vs Elk. Then differentiable EFG (∂C_Q/∂structure).
 - [ ] Chemical shielding σ (all nuclei) — GIPAW magnetic linear response; a separate large subsystem.
 - [ ] Remaining for a real material vs Elk: a real ionic/metallic case + its Elk reference.
 - [ ] Then #1 DualBasis oxygen gate; then benchmark; then SlepianCore (slabs/molecular crystals).
