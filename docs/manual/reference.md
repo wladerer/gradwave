@@ -40,7 +40,7 @@ API, and the analysis helpers.
 | `uspp_density_loss_param_grads` (`postscf.uspp_implicit`) | density-loss adjoint |
 | `hybrid_scf`, `HybridExchangeParams` (`postscf.hybrid`, `postscf.exchange_multik`) | self-consistent hybrid, trainable α/ω |
 | `characterize_magnetism` (`postscf.magnetism`) | spin Hamiltonian (J, DMI) from the ground state |
-| `register`, `get`, `available` (`solvers.registry`) | block-eigensolver registry (davidson, chebyshev, lobpcg) |
+| `register`, `get`, `available` (`solvers.registry`) | block-eigensolver registry (davidson, chebyshev) |
 
 The [API reference](api/index.md) expands each of these with full signatures,
 grouped by subsystem.
