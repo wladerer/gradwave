@@ -152,3 +152,7 @@ a GPU SCF battery inflated 2-47x by a fast tier running in the test group). Rule
    safe under contention; only their reported wall times are not.
 3. Never `git commit --amend` + force-push a branch a queued job will pull —
    the remote checkout diverges and the next `git pull` breaks. Fixup commits only.
+4. Pass ABSOLUTE script paths in queued commands: `uv run --project <repo> python
+   relative.py` resolves the script against the project root, not the submission
+   cwd (a pipeline job failed instantly this way). Same for log paths and any
+   file the job reads.
