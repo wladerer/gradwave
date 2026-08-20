@@ -414,3 +414,12 @@ cuFFT) -> measured-closed, branch stays unmerged. TiO2 warm gate: k222+kerker GA
 1.8e-3 (best production point yet) but the k333 continuation DIVERGED even warm+screened — k333
 needs newton_polish from the k222 state, not more Anderson. (Diverged-state EFG printed O
 [-23.4,+18.3,+5.0] — Elk-like sign pattern but untrustworthy; do not quote.)
+
+## OVERNIGHT PERF+GIPAW (2026-08-20 early)
+Setup hoist (setup/init/iterate split, bit-identical x59 arrays) + surface-phase memo in efg.py
+(the profiled 67% -> 6%): per-F 2.09->0.72s (2.89x); warmup 3.2x. Next levers per fresh profile:
+nonspherical_potential angular XC (46%), radial integrations (~30%). GIPAW M6-M8 shipped on
+qgt-autograd-k: sign CALIBRATED (Peierls-flux anchor), k+-q velocity Sternheimer (1e-9 vs dense
+incl. umklapp), screened induced current (f-sum pinned, TR null 2e-13). Remaining for shielding:
+KB nonlocal current (div j=0 closure) + q->0 antisymmetric assembly — one physics step, fresh
+session.
