@@ -168,10 +168,15 @@ def _chi0_q_loop(res, q_frac, v_box, tol, max_iter, ks, kw, symmetrizer):
 
 def _reindex_bk(bk, idx: torch.Tensor):
     """BatchedK restricted/reordered to k-mesh indices ``idx`` (per-k fields only;
-    npw_max, atom index and the D-matrix are k-independent)."""
+    npw_max, atom index and the D-matrix are k-independent). The Toeplitz
+    difference-index cache is dropped, NOT inherited: it belongs to the parent's
+    flat_idx, and a table built for the parent's spheres is wrong for the
+    reindexed ones (the k+q Hamiltonian would silently apply the wrong local
+    term and the Sternheimer CG diverges to NaN)."""
     return dataclasses.replace(
         bk, mask=bk.mask[idx], flat_idx=bk.flat_idx[idx], kpg=bk.kpg[idx],
-        t=bk.t[idx], proj_phase_free=bk.proj_phase_free[idx])
+        t=bk.t[idx], proj_phase_free=bk.proj_phase_free[idx],
+        toep_idx_cache=None)
 
 
 def _chi0_q_batched(res, q_frac, v_box, tol, max_iter, ks, kw, symmetrizer):
