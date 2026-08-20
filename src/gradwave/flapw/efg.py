@@ -18,6 +18,7 @@ Poisson + interstitial matching) is the next step; the r^-3 valence moment here 
 from __future__ import annotations
 
 import math
+from collections import OrderedDict
 
 import numpy as np
 
@@ -263,26 +264,57 @@ def efg_tensor(multipoles, rr, drw):
     return _tensor_from_v(_valence_v(multipoles, rr, drw))
 
 
-def interstitial_boundary_multi(v_grid, center_cart, R, cell, lset, nx: int = 16, nphi: int = 24):
-    """The ``(L,M)`` components ``v_bc_LM = ∮ V_int(center + R Ω) Y*_LM(Ω) dΩ`` of the interstitial
-    FFT potential on the sphere surface, for every ``(L,M)`` in ``lset``. The potential is evaluated
-    on the sphere by its exact band-limited Fourier series ``V(r) = Σ_G v_G e^{iG·r}`` (no
-    interpolation error, so a cubic-symmetric grid projects to machine-zero l=2). The surface values
-    are computed once and projected onto each harmonic. ``center_cart`` is the atom in Å."""
-    from scipy.special import sph_harm_y
-    a = cell_matrix(cell)
+_PHASE_CACHE: OrderedDict = OrderedDict()      # geometry key -> surface phase matrix E[p, G]
+_PHASE_CACHE_BUDGET = 3 * 2**29                # 1.5 GiB cap on the cached phase matrices
+
+
+def _surface_phases(a, nfft, center_cart, R, nx: int, nphi: int):
+    """The potential-independent surface-evaluation matrix ``E[p,G] = exp(iG·(c + R Ω_p))`` of
+    ``interstitial_boundary_multi`` — the dominant cost of every boundary projection (a complex
+    exp over ``npts × nfft³``), depending only on geometry (cell, grid size, sphere center/radius,
+    angular grid), never on the potential. Memoized: the fullpot SCF asks for the same sphere's
+    matrix three times per iteration and the Newton F map re-evaluates the iteration ~30 times per
+    polish. The cached matrix is the bit-identical array the inline expression produced, so results
+    are unchanged. A byte-budget LRU bounds the memory; an over-budget matrix (huge grid) is
+    computed inline exactly as before and simply not retained."""
+    key = (a.tobytes(), nfft, np.asarray(center_cart, dtype=float).tobytes(), float(R), nx, nphi)
+    hit = _PHASE_CACHE.get(key)
+    if hit is not None:
+        _PHASE_CACHE.move_to_end(key)
+        return hit
     b = reciprocal(a)
-    nfft = v_grid.shape[0]
     fi = np.fft.fftfreq(nfft, d=1.0 / nfft)
     mx, my, mz = np.meshgrid(fi, fi, fi, indexing="ij")
     gvec = np.stack([mx * b[0, 0] + my * b[1, 0] + mz * b[2, 0],
                      mx * b[0, 1] + my * b[1, 1] + mz * b[2, 1],
                      mx * b[0, 2] + my * b[1, 2] + mz * b[2, 2]], axis=-1).reshape(-1, 3)
-    vg = (np.fft.fftn(v_grid) / nfft**3).reshape(-1)               # V(r) = Σ_G v_G e^{iG·r}
-    th, ph, wgt = _angular_grid(nx, nphi)
+    th, ph, _wgt = _angular_grid(nx, nphi)
     dirs = np.stack([np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)], axis=-1)
     pts = (R * dirs + np.asarray(center_cart)).reshape(-1, 3)      # (npts,3) Cartesian
-    vals = (np.exp(1j * (pts @ gvec.T)) @ vg).reshape(th.shape).real
+    e = np.exp(1j * (pts @ gvec.T))
+    if e.nbytes <= _PHASE_CACHE_BUDGET:
+        e.setflags(write=False)
+        _PHASE_CACHE[key] = e
+        total = sum(v.nbytes for v in _PHASE_CACHE.values())
+        while total > _PHASE_CACHE_BUDGET and len(_PHASE_CACHE) > 1:
+            _, old = _PHASE_CACHE.popitem(last=False)
+            total -= old.nbytes
+    return e
+
+
+def interstitial_boundary_multi(v_grid, center_cart, R, cell, lset, nx: int = 16, nphi: int = 24):
+    """The ``(L,M)`` components ``v_bc_LM = ∮ V_int(center + R Ω) Y*_LM(Ω) dΩ`` of the interstitial
+    FFT potential on the sphere surface, for every ``(L,M)`` in ``lset``. The potential is evaluated
+    on the sphere by its exact band-limited Fourier series ``V(r) = Σ_G v_G e^{iG·r}`` (no
+    interpolation error, so a cubic-symmetric grid projects to machine-zero l=2). The surface values
+    are computed once and projected onto each harmonic. ``center_cart`` is the atom in Å. The
+    surface phase matrix is geometry-only and memoized (``_surface_phases``)."""
+    from scipy.special import sph_harm_y
+    a = cell_matrix(cell)
+    nfft = v_grid.shape[0]
+    vg = (np.fft.fftn(v_grid) / nfft**3).reshape(-1)               # V(r) = Σ_G v_G e^{iG·r}
+    th, ph, wgt = _angular_grid(nx, nphi)
+    vals = (_surface_phases(a, nfft, center_cart, R, nx, nphi) @ vg).reshape(th.shape).real
     return {(lang, m): complex(np.sum(vals * wgt * np.conj(sph_harm_y(lang, m, th, ph))))
             for (lang, m) in lset}
 
