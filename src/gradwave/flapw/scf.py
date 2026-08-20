@@ -875,6 +875,11 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     ``v_start`` = ``{key: radial potential array}`` warm-starts the SCF from a previous run's
     converged spherical potentials (returned as ``info["v_by_key"]``) instead of the atomic ones —
     a convergence-sweep point then starts nearly converged (~2-3x fewer iterations).
+    Alternatively ``v_start = {"__full_state__": info["state"]}`` restores the COMPLETE
+    fixed-point state of a fullpot run — spherical + aspherical potentials, interstitial grid
+    and reference — so the resumed run continues the coupled fullpot iteration exactly (the
+    plain per-key form silently restarts the aspherical channel from zero). Every run returns
+    its final full state as ``info["state"]``.
 
     ``kworkers > 1`` solves the k-points of each iteration in a process pool (each k's secular
     build+solve is independent). Results are accumulated in mesh order, so the density is identical
@@ -970,10 +975,12 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     warp_state = None                                     # (FFT of (v_grid-v_i0)·Θ_I, nfft)
     v_grid_prev = None                                    # mixed interstitial grid state
     v_i0_prev = None                                      # interstitial reference of last iter
+    fs = v_start.get("__full_state__") if isinstance(v_start, dict) else None
+    _vsrc = fs["v_by_key"] if fs is not None else v_start
     v_by_key = {}
     for k, s in zip(keys, syms, strict=True):
-        if v_start is not None and k in v_start:
-            v_by_key[k] = torch.as_tensor(np.asarray(v_start[k]), dtype=torch.float64).clone()
+        if _vsrc is not None and k in _vsrc:
+            v_by_key[k] = torch.as_tensor(np.asarray(_vsrc[k]), dtype=torch.float64).clone()
         else:
             v_by_key[k] = vat_by_sym[s].clone()
 
@@ -986,6 +993,23 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     # problem first, then switch the aspherical potential on from that state (what every
     # well-behaved fullpot run implicitly did via warm-starting).
     mt_phase = bool(fullpot)
+    if fs is not None:
+        # full-state resume: restore the aspherical potential, interstitial grid
+        # and reference, rebuild the warp from the restored grid (zero-mean over
+        # Θ_I, same convention as the in-loop update), and skip the MT staging —
+        # a full state IS a coupled fullpot state.
+        if fs.get("v_nsph"):
+            v_nsph = {k2: {lm: np.asarray(v).astype(complex).copy()
+                           for lm, v in d.items()}
+                      for k2, d in fs["v_nsph"].items()}
+        if fs.get("v_grid") is not None:
+            v_grid_prev = np.asarray(fs["v_grid"], dtype=float).copy()
+            vi_mean = float(v_grid_prev.reshape(-1)[theta_i.reshape(-1)].mean())
+            u0 = np.where(theta_i, v_grid_prev - vi_mean, 0.0)
+            warp_state = (np.fft.fftn(u0) / nfft**3, nfft)
+        v_i0_prev = fs.get("v_i0")
+        if fullpot:
+            mt_phase = False
     from gradwave.flapw.recorder import FLAPWRecorder
     recorder = FLAPWRecorder()
     hist = ([], [])                                        # joint Anderson history
@@ -1276,6 +1300,15 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
 
     info = {"nbands": nbands, "symbols": syms, "e_fermi": conv.get("e_fermi"),
             "v_by_key": {k: v_by_key[k].numpy().copy() for k in keys}}
+    # complete fixed-point state (pass back as v_start={"__full_state__": ...})
+    info["state"] = {
+        "v_by_key": {k: v_by_key[k].numpy().copy() for k in keys},
+        "v_nsph": None if v_nsph is None else
+            {k: {lm: np.asarray(v).copy() for lm, v in d.items()}
+             for k, d in v_nsph.items()},
+        "v_grid": None if v_grid_prev is None else v_grid_prev.copy(),
+        "v_i0": v_i0_prev,
+    }
     info["recorder"] = recorder
     if atom_orbits is not None:
         # relative asymmetry of the RAW final-iteration density across symmetry-equivalent atoms
