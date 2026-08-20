@@ -68,6 +68,7 @@ from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.grids import build_gsphere, reciprocal_cell
 from gradwave.pseudo.radial_torch import jl_t, simpson_weights
+from gradwave.pseudo.upf import UPFData
 
 if TYPE_CHECKING:  # leaf module: no runtime scf import (import-linter layering)
     from gradwave.scf.loop import SCFResult
@@ -86,6 +87,35 @@ class _BetaChannel:
     l: int
     r: Tensor  # (nmesh,) radial mesh [bohr-scaled as parsed]
     gw: Tensor  # (nmesh,) (r·β)(r)·r · simpson weights — contract against j_l(qr)
+
+
+def _beta_channels(
+    upfs: Sequence[UPFData],
+) -> tuple[tuple[_BetaChannel, ...], list[list[int]]]:
+    """Unique (species, radial channel) quadratures + the species→channel map.
+
+    Shared by the scalar builder below and the spinor one (kgeometry_soc)."""
+    channels: list[_BetaChannel] = []
+    chan_of: list[list[int]] = []
+    for upf in upfs:
+        idxs = []
+        for beta in upf.betas:
+            nr = beta.cutoff_idx
+            r = torch.as_tensor(upf.r[:nr], dtype=RDTYPE)
+            w = torch.as_tensor(simpson_weights(upf.rab[:nr]), dtype=RDTYPE)
+            gw = torch.as_tensor(beta.rbeta, dtype=RDTYPE) * r * w
+            idxs.append(len(channels))
+            channels.append(_BetaChannel(l=beta.l, r=r, gw=gw))
+        chan_of.append(idxs)
+    return tuple(channels), chan_of
+
+
+def _toeplitz_index(miller: Tensor, shape: tuple[int, int, int]) -> Tensor:
+    """(npw, npw) flat FFT-box index of G_i − G_j (the dense local-term gather)."""
+    n1, n2, n3 = shape
+    nbox = torch.tensor((n1, n2, n3), device=miller.device)
+    diff = (miller[:, None, :] - miller[None, :, :]) % nbox
+    return diff[..., 0] * (n2 * n3) + diff[..., 1] * n3 + diff[..., 2]
 
 
 @dataclass(frozen=True)
@@ -138,24 +168,9 @@ class BlochHK:
         # everything is tiny, and the SCF tensors may live on CUDA.
         v = res.v_eff if res.v_eff.dim() == 3 else res.v_eff[spin]
         vhat = r_to_g(v.detach().cpu().to(CDTYPE)).reshape(-1)
-        n1, n2, n3 = grid.shape
-        m = sphere.miller
-        nbox = torch.tensor((n1, n2, n3), device=m.device)
-        diff = (m[:, None, :] - m[None, :, :]) % nbox  # (npw, npw, 3)
-        vmat = vhat[diff[..., 0] * (n2 * n3) + diff[..., 1] * n3 + diff[..., 2]]
+        vmat = vhat[_toeplitz_index(sphere.miller, grid.shape)]
 
-        channels: list[_BetaChannel] = []
-        chan_of: list[list[int]] = []  # species -> per-beta channel index
-        for upf in system.upfs:
-            idxs = []
-            for beta in upf.betas:
-                nr = beta.cutoff_idx
-                r = torch.as_tensor(upf.r[:nr], dtype=RDTYPE)
-                w = torch.as_tensor(simpson_weights(upf.rab[:nr]), dtype=RDTYPE)
-                gw = torch.as_tensor(beta.rbeta, dtype=RDTYPE) * r * w
-                idxs.append(len(channels))
-                channels.append(_BetaChannel(l=beta.l, r=r, gw=gw))
-            chan_of.append(idxs)
+        channels, chan_of = _beta_channels(system.upfs)
 
         col_atom, col_chan, col_lm = [], [], []
         blocks: list[Tensor] = []
@@ -194,7 +209,7 @@ class BlochHK:
             col_atom=torch.tensor(col_atom, dtype=torch.int64),
             col_chan=torch.tensor(col_chan, dtype=torch.int64),
             col_lm=torch.tensor(col_lm, dtype=torch.int64),
-            channels=tuple(channels),
+            channels=channels,
             lmax=max((c.l for c in channels), default=0),
             volume=grid.volume,
         )

@@ -419,6 +419,130 @@ def wcc_gap(
 
 
 # --------------------------------------------------------------------------- #
+# ℤ₂ invariant (Soluyanov–Vanderbilt WCC crossing parity)                     #
+# --------------------------------------------------------------------------- #
+
+
+def _largest_gap_center(x: np.ndarray) -> float:
+    """Midpoint of the largest circular gap of a WCC set on [0,1)."""
+    xs = np.sort(x)
+    gaps = np.diff(np.append(xs, xs[0] + 1.0))
+    i = int(np.argmax(gaps))
+    return float((xs[i] + gaps[i] / 2.0) % 1.0)
+
+
+@dataclass(frozen=True)
+class Z2Result:
+    z2: int  # crossings mod 2
+    crossings: int  # WCC crossings of the largest-gap line over the half cycle
+    k_perp: np.ndarray  # (n_perp+1,) fractional e_perp positions, 0 … ½
+    wcc: np.ndarray  # (n_perp+1, nb)
+    gap_center: np.ndarray  # (n_perp+1,) largest-gap midpoints
+
+
+def z2_invariant(
+    provider: LinkStates,
+    *,
+    e_loop: Sequence[float] | np.ndarray,
+    e_perp: Sequence[float] | np.ndarray,
+    origin: Sequence[float] | np.ndarray,
+    n_loop: int = 8,
+    n_perp: int = 8,
+) -> Z2Result:
+    """Soluyanov–Vanderbilt ℤ₂: WCC flow over HALF the e_perp cycle (k_perp
+    from 0 to ½, both TRIM lines included) and the parity of the number of
+    WCC crossings of the largest-gap line between consecutive loops.
+
+    The band group must be a Kramers-closed (even) set of occupied bands of a
+    time-reversal-symmetric H, and ``origin`` must put k_perp = 0 and ½ on
+    TRIM lines of the slice. The crossing parity is arc-choice independent
+    exactly because nb is even.
+    """
+    origin = np.asarray(origin, dtype=float)
+    e_perp = np.asarray(e_perp, dtype=float)
+    with torch.no_grad():
+        wccs = []
+        for j in range(n_perp + 1):
+            w = wilson_loop(
+                provider, origin + (j / (2.0 * n_perp)) * e_perp, e_loop, n_loop
+            )
+            wccs.append(wilson_wcc(w).numpy())
+    wcc = np.asarray(wccs)
+    gaps = np.array([_largest_gap_center(x) for x in wcc])
+    crossings = 0
+    for j in range(n_perp):
+        arc = (gaps[j + 1] - gaps[j]) % 1.0
+        rel = (wcc[j + 1] - gaps[j]) % 1.0
+        crossings += int(np.sum((rel > 0.0) & (rel < arc)))
+    return Z2Result(
+        z2=crossings % 2,
+        crossings=crossings,
+        k_perp=np.arange(n_perp + 1) / (2.0 * n_perp),
+        wcc=wcc,
+        gap_center=gaps,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# mirror sectors (mirror Chern)                                               #
+# --------------------------------------------------------------------------- #
+
+
+def mirror_sector_split(u: Tensor, m_op: Tensor, tol: float = 1e-6) -> tuple[Tensor, Tensor]:
+    """Split a band-group basis u (dim, nb) into (+i, −i) mirror sectors.
+
+    Requires [H, M] = 0 on the group (mirror-invariant k): S = u†Mu is then
+    unitary with eigenvalues ±i (spinful mirror, M² = −1), so −iS is
+    Hermitian with eigenvalues ±1. Returns (u₊, u₋); raises if any eigenvalue
+    strays from ±1 by > tol (the group is not mirror-closed)."""
+    s = u.mH @ m_op.to(u.dtype) @ u
+    a = -1j * s
+    a = (a + a.mH) / 2.0
+    vals, w = torch.linalg.eigh(a)
+    dev = (vals.abs() - 1.0).abs().max().item()
+    if dev > tol:
+        raise ValueError(
+            f"band group is not mirror-closed: sector eigenvalues deviate from ±1 by {dev:.2e}"
+        )
+    return u @ w[:, vals > 0], u @ w[:, vals < 0]
+
+
+class MirrorSectorStates:
+    """Model link states projected onto one mirror sector (±i).
+
+    For mirror Chern on a mirror-invariant slice of a k-periodic model whose
+    mirror representation ``m_op`` (a constant matrix with M² = −1) commutes
+    with H(k) on that slice: C_m = (C₊ − C₋)/2 with C_± = :func:`chern_fhs`
+    of the ``sector = +1`` / ``−1`` providers. (The plane-wave analogue is
+    ``kgeometry_soc.SpinorBlochLinkStates`` with ``mirror``/``sector`` set.)
+    """
+
+    def __init__(
+        self,
+        h_fn: HFun,
+        m_op: Tensor,
+        bands: Sequence[int],
+        sector: int,
+        *,
+        periodic: bool = True,
+    ) -> None:
+        self._base = ModelLinkStates(h_fn, bands, periodic=periodic)
+        self.m_op = m_op
+        self.sector = sector
+
+    def graph_scope(self) -> AbstractContextManager[None]:
+        return self._base.graph_scope()
+
+    def _states(self, k: object) -> Tensor:
+        u = self._base._states(k)
+        plus, minus = mirror_sector_split(u, self.m_op)
+        return plus if self.sector > 0 else minus
+
+    def overlap(self, k1: object, k2: object) -> Tensor:
+        return self._states(k1).mH @ self._states(k2)
+
+
+# --------------------------------------------------------------------------- #
 # Weyl-node chirality (open patches over a closed box)                        #
 # --------------------------------------------------------------------------- #
 
