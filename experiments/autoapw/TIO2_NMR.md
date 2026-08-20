@@ -310,3 +310,23 @@ nulls at a new 3e-5 floor (warp band-limitation); dilute Ne unchanged (empty int
 Pre-sledgehammer matrix (for the record): no config reached the gate, TiLO still found the
 runaway — incremental fixes necessary but insufficient. ACCEPTANCE = the TiO2 matrix now running:
 gates green + config-consistent magnitudes + O toward Elk 19.1.
+
+## PHYSICS-BLIND KERNEL ANALYSIS (sanitized-spec agent, no domain vocabulary) — speed roadmap
+Validated the method: it independently rediscovered the measured PW small-cell result (dense
+blocked applies beat FFT applies at N<~3000 = the gated ToeplitzApply finding). Ranked attacks:
+1. Iterative block pencil solver + p-mode B-deflation (small LOBPCG on B's low end -> projected
+   pencil; reproduces canonical orth on troubled modes only, NO full eigendecomposition): 10-40x
+   on the solve, N^3 -> N^2 n_b. Caveats: deflation-tol consistency with tol*max, safeguarded
+   ortho, B-positivity monitoring, iterate n_b+5-10 wide for clusters.
+2. AUGMENTED Rayleigh-Ritz warm start in span[V_prev, U]: inter-iteration perturbation is
+   U dM U^T with FIXED U -> augmenting with U captures it to ALL orders (the principled fix for
+   the subspace-reuse blindness that corrupted our runs); 1-2 refinement sweeps mop up the small
+   Toeplitz leak. 3-10x, composes with #1.
+3. Single-process K-batching + batched/fused scatter-FFT reductions (3-10x on density pass).
+4. Apply-only operators + once-per-run Woodbury factors for B (assembly -> ~0).
+5. Eisenstat-Walker tolerance forcing + widened regularized Anderson (history 15-25 + Tikhonov;
+   history 6 truncates the low-rank Jacobian).
+Compound: 5-15x wall now, ~10x N-ceiling; the apply-only representation is exactly the
+differentiable-torch substrate -> speed and autograd roadmaps CONVERGE. H structure that enables
+it all: H = Diag + 3-level-Toeplitz(G-G') + sum_atoms B_a M_a B_a^T (Gram/addition theorem),
+S identical; between iterations only ~200 scalars in M + the Toeplitz symbol change.
