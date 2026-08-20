@@ -447,7 +447,7 @@ def _geom_dm(geom, nfft_w):
 
 
 def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=None, chan=None,
-                  lodat=None, nsph_int=None, c_prev=None, subspace_tol=1e-5, warp=None,
+                  lodat=None, nsph_int=None, c_prev=None, subspace_tol=1e-4, warp=None,
                   geom=None):
     """Multi-atom LAPW at wavevector k, exposing the density internals the SCF needs. Returns
     ``(eigvals, eigvecs, miller, ks, [abl per atom], vol)``. H,S are complex Hermitian (structure
@@ -976,7 +976,7 @@ def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax:
                  kmesh=(1, 1, 1), smearing: float = 0.0, fullpot: bool = False,
                  use_symmetry: bool = True, fullpot_lmax: int = 2, los=None, val_e=None,
                  core=None, el_override=None, kworkers: int = 1, subspace_reuse: bool = False,
-                 subspace_tol: float = 1e-5, cell=None, kerker: float | None = None,
+                 subspace_tol: float = 1e-4, cell=None, kerker: float | None = None,
                  verbose: bool = False) -> _MultiCtx:
     """The state-independent setup phase of ``crystal_scf_multi`` (see ``_MultiCtx``).
     Argument semantics and validation are exactly the public entry point's."""
@@ -1519,7 +1519,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                       efg: bool = False, fullpot: bool = False, use_symmetry: bool = True,
                       fullpot_lmax: int = 2, los=None, val_e=None, core=None, el_override=None,
                       v_start=None, kworkers: int = 1, subspace_reuse: bool = False,
-                      subspace_tol: float = 1e-5, cell=None, kerker: float | None = None,
+                      subspace_tol: float = 1e-4, cell=None, kerker: float | None = None,
                       verbose: bool = False):
     """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
@@ -1585,7 +1585,10 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     Rayleigh-Ritz in span[previous eigenvectors, their current residuals] (residual-gated,
     exact-solve fallback), including fullpot iterations; every 5th iteration is a forced exact
     solve and convergence is only accepted on exact-solve iterations, so the reported state
-    never rests on a projected solve.
+    never rests on a projected solve. ``subspace_tol`` (eV) gates acceptance on the max
+    eigenvalue-error bound ``||Hc−εSc||/||Sc||`` over the solved bands; the 1e-4 default sits
+    10x under the degenerate-occupation tolerance (1e-3 eV), so a gated projected solve cannot
+    flip an occupation decision.
 
     Internally this is ``_multi_setup`` (state-independent context) + ``_multi_init_state`` +
     a loop over ``_multi_iterate`` (the fixed-point map) + ``_multi_finalize`` — split so the

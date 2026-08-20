@@ -285,9 +285,10 @@ def solve_geneig_subspace_aug(H, S, c_prev, nbands, tol=1e-8):
     span. Cost stays a handful of ``dim × dim × nkeep`` GEMMs + an ``O((2·nkeep)³)`` dense solve —
     far below the ``O(dim³)`` full diagonalization for ``nkeep ≪ dim``.
 
-    Returns ``(evals, vecs, resid)`` with ``resid`` the max relative residual over the ``nbands``
-    kept states — same acceptance contract as ``solve_geneig_subspace`` (the caller gates on it
-    and falls back to the exact dense solve)."""
+    Returns ``(evals, vecs, resid)`` with ``resid`` the max eV-scale residual
+    (``_pencil_resid``, a first-order bound on the eigenvalue error) over the ``nbands`` kept
+    states — same acceptance contract as ``solve_geneig_subspace`` (the caller gates on it and
+    falls back to the exact dense solve)."""
     hp = H @ c_prev
     sp = S @ c_prev
     hs = c_prev.conj().T @ hp
@@ -311,10 +312,20 @@ def solve_geneig_subspace_aug(H, S, c_prev, nbands, tol=1e-8):
     vecs = q @ y
     hv = hq @ y
     sv = sq @ y
+    return ev, vecs, _pencil_resid(hv, sv, ev)
+
+
+def _pencil_resid(hv, sv, ev):
+    """Max eV-scale residual ``||H c − ε S c|| / ||S c||`` over the kept states. Normalizing by
+    ``||S c||`` (not ``||H c||``) keeps the metric meaningful for eigenvalues near zero — FLAPW
+    eigenvalues are referenced to the interstitial zero, so bands DO cross ε≈0 and a
+    ``||r||/||H c||`` metric reports O(1) "relative residual" on them regardless of accuracy
+    (measured on a production TiO2 pencil: 0.97 at a 3.5e-3 eV true eigenvalue error — the old
+    gate could never engage). For S-normalized eigenvectors this bounds the eigenvalue error
+    (eV) to first order."""
     r = hv - sv * ev[None, :]
-    scale = np.maximum(np.linalg.norm(hv, axis=0), 1e-12)
-    resid = float((np.linalg.norm(r, axis=0) / scale).max())
-    return ev, vecs, resid
+    scale = np.maximum(np.linalg.norm(sv, axis=0), 1e-12)
+    return float((np.linalg.norm(r, axis=0) / scale).max())
 
 
 def solve_geneig_subspace(H, S, c_prev, nbands, tol=1e-8):
@@ -323,10 +334,11 @@ def solve_geneig_subspace(H, S, c_prev, nbands, tol=1e-8):
     eigenvectors barely rotate between iterations, so projecting into last iteration's subspace
     (two thin GEMMs + an nkeep×nkeep dense solve) replaces the O(dim³) full diagonalization.
 
-    Returns ``(evals, vecs, resid)`` where ``resid = max_n ||H c_n − ε_n S c_n|| / ||H c_n||``
-    over the ``nbands`` kept states — the caller accepts the step only when ``resid`` is below its
-    threshold and falls back to the exact solve otherwise, so a drifting subspace (band crossings,
-    early iterations, large mixing steps) can never silently corrupt the result."""
+    Returns ``(evals, vecs, resid)`` where ``resid`` is the max eV-scale residual
+    (``_pencil_resid``) over the ``nbands`` kept states — the caller accepts the step only when
+    ``resid`` is below its threshold and falls back to the exact solve otherwise, so a drifting
+    subspace (band crossings, early iterations, large mixing steps) can never silently corrupt
+    the result."""
     hp = H @ c_prev
     sp = S @ c_prev
     hs = c_prev.conj().T @ hp
@@ -337,7 +349,4 @@ def solve_geneig_subspace(H, S, c_prev, nbands, tol=1e-8):
     vecs = c_prev @ y
     hv = hp @ y
     sv = sp @ y
-    r = hv - sv * ev[None, :]
-    scale = np.maximum(np.linalg.norm(hv, axis=0), 1e-12)
-    resid = float((np.linalg.norm(r, axis=0) / scale).max())
-    return ev, vecs, resid
+    return ev, vecs, _pencil_resid(hv, sv, ev)
