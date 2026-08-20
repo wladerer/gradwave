@@ -136,7 +136,10 @@ def davidson_adapter(
     return EigResult(
         r.eigenvalues, r.eigenvectors, r.n_iter, r.residual_norms,
         {"solver": "davidson", "max_dim_factor": max_dim_factor,
-         "max_iter": max_iter, "hit_max_iter": r.n_iter >= max_iter},
+         "max_iter": max_iter, "hit_max_iter": r.n_iter >= max_iter,
+         # apply split in band-vector units — n_apply_low > 0 only in the
+         # fp64-certified fp32-expansion mode (GRADWAVE_FP32_EXPANSION)
+         "n_apply_low": r.n_apply_low, "n_apply_full": r.n_apply_full},
     )
 
 
