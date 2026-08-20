@@ -20,9 +20,9 @@ import sys
 import time
 
 import numpy as np
+from newton_probe import A_BOHR, ATOMS, RADII, Layout
 
 from gradwave.flapw import crystal_scf_multi
-from newton_probe import ATOMS, A_BOHR, RADII, Layout
 
 CFG = dict(ecut=float(os.environ.get("MA_ECUT", "150")),
            lmax=int(os.environ.get("MA_LMAX", "2")),
@@ -42,13 +42,16 @@ def segment_labels(lay, ref):
     spans, off = [], 0
     for k in lay.skeys:
         n = np.asarray(ref["v_by_key"][k]).size
-        spans.append((f"sph:{k}", off, off + n)); off += n
+        spans.append((f"sph:{k}", off, off + n))
+        off += n
     for k in lay.nkeys:
         for lm in lay.lms[k]:
             n = np.asarray(ref["v_nsph"][k][lm]).size
-            spans.append((f"nsph:{k}:{lm}", off, off + 2 * n)); off += 2 * n
+            spans.append((f"nsph:{k}:{lm}", off, off + 2 * n))
+            off += 2 * n
     n = int(np.prod(lay.gshape))
-    spans.append(("interstitial", off, off + n)); off += n
+    spans.append(("interstitial", off, off + n))
+    off += n
     spans.append(("v_i0", off, off + 1))
     return spans
 
