@@ -13,7 +13,8 @@ per-device fp64 microbenchmark, so the offload fires on fp64-crippled consumer
 cards and stays off on datacenter fp64 hardware. "on"/"off" force it either way,
 so a benchmark can toggle the path without monkeypatching. Read once at import.
 
-``GRADWAVE_CHOLQR`` in {"on", "off"} (default "on") controls whether
+``GRADWAVE_CHOLQR`` in {"on", "off"} (default "off" — measured neutral on
+CPU and neutral-to-negative on RTX 3050; retest on datacenter GPUs) controls whether
 ``_orthonormalize_b`` uses CholQR2 (Gram GEMM → fp64 Cholesky → triangular
 solve, twice) instead of the batched tall-skinny QR. CholQR2 is GEMM-shaped —
 fast on every device — and removes the D2H/H2D round trip of the CUDA QR
