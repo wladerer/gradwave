@@ -360,3 +360,14 @@ Elk (0.74) exactly; O magnitude is ~44% of Elk's 19.1. Ti is ~1 eV/A^2 vs Elk 19
 site is dominated by semicore/core polarization the current lmax=3 aug + no-O-LO basis doesn't
 capture; TiLO barely moves it, so the gap is basis (aug-lmax / LO set / fullpot_lmax), not
 convergence. Next lever: fullpot_lmax=4 with matched-L capped at 4, higher aug-lmax, O LOs.
+
+## MEASURED SPEEDUPS (asus uncontended, 8 threads CPU, 2026-08-19; benchmarks/results/asus/)
+Toeplitz auto-gate: si2 1.20x c2 1.25x gaas 1.21x al 1.30x cu 1.69x mgo 1.38x | si8/si64 1.00x
+(gate correctly declines) — strictly-positive vs the old always-on flag's 0.79-0.80x regressions.
+CholQR2: CPU-neutral (0.94-1.03x) as expected — its target is the consumer-GPU QR round trip; GPU
+check pending. Energies bit-match in all 32 runs; metal iteration parity holds (kill signal clear).
+
+## NEWTON PROBE, EASY CONFIG (asus): honest split verdict
+Mini-TiO2 gamma lmax=2 fp2: warm state already r_nsph 2.9e-2; Anderson gate=3/tight=7 iters vs
+NK 29 F-evals — ANDERSON WINS easy fixed points. NK quality itself confirmed (r_nsph 7.5e-9 in 3
+Newton steps). Decisive test = production-hard config (lmax=3 fp4 k222) queued (newton_probe_hard).
