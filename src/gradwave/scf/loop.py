@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -898,7 +897,6 @@ def _solve_bands(
     t_solve: torch.Tensor,
     device: torch.device,
     u_scale: float = 1.0,
-    coarse=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Eigensolve one spin channel of the NC standard problem H x = ε x.
 
@@ -911,16 +909,8 @@ def _solve_bands(
     ``u_scale`` (default 1.0) linearly scales the Hubbard V_U D-matrix for the
     U-ramp; the rigid manifold probe alpha is added AFTER scaling so the ramp
     never touches the linear-response probe.
-
-    ``coarse`` (a ``core.batch.CoarseDraft`` or None) enables the certified
-    coarse-box local apply: V_eff is truncated onto the coarse box and the
-    draft operator is used ONLY when the truncation's ℓ1 tail bound is
-    ≤ 0.1·tol_eff (Eisenstat-Walker-style — an error slaved to the tolerance
-    the solve already tolerates). Once the adaptive schedule tightens past
-    the bound, this falls back to the exact operator automatically, so the
-    converged fixed point is untouched.
     """
-    from gradwave.core.batch import BatchedHamiltonian, coarse_draft_veff
+    from gradwave.core.batch import BatchedHamiltonian
     from gradwave.solvers.registry import get as get_solver
 
     hub_dij = None
@@ -941,15 +931,14 @@ def _solve_bands(
                 )
         # apply convention wants D^T; D is Hermitian so D^T = conj(D)
         hub_dij = dij.conj()
-    smooth = None
-    if coarse is not None:
-        sm, eps = coarse_draft_veff(veff_sp, coarse)
-        if eps <= 0.1 * tol_eff:
-            smooth = sm
-            logger.debug("coarse draft active: eps=%.3e tol_eff=%.3e", eps, tol_eff)
-    h = BatchedHamiltonian(
-        bk, grid_shape, veff_sp, projs_b, hub_q=hub_q, hub_dij=hub_dij, smooth=smooth
-    )
+    # NOTE(measured no-go): a coarse-box "draft" local apply for the loose-
+    # tolerance iterations (truncating V_eff to a 0.75-linear box, certified
+    # against tol_eff) was built and measured on 2026-08-19: the ACTUAL
+    # per-band perturbation ‖(H_draft−H)ψ‖ is ~3.7e-3 Ha — 40× over the
+    # 0.1·tol_eff budget it must clear — set by V_eff's near-core Fourier
+    # tail, which does not shrink with system size. Removed rather than
+    # gated; don't re-propose without a fundamentally sharper certificate.
+    h = BatchedHamiltonian(bk, grid_shape, veff_sp, projs_b, hub_q=hub_q, hub_dij=hub_dij)
     apply = h.apply
     if fock_apply_sp is not None:
 
@@ -1532,21 +1521,6 @@ def scf(
     # instance; every System that reaches scf() came from setup_system(),
     # which always fills it via build_batched() (never returns None).
     assert bk is not None
-    # Certified coarse-box local apply for the loose-tolerance iterations
-    # (see CoarseDraft / _solve_bands' `coarse`). Default OFF: measured on
-    # diamond Si (ecut 12 Ry, 18³→14³ box), the certification never passes —
-    # the ℓ1 tail bound is ~15 Ha and even the ACTUAL per-band perturbation
-    # ‖(H_draft−H)ψ‖ is 3.7e-3 Ha on converged states, vs the 0.1·tol_eff =
-    # 1e-4 Ha it must clear (tol_eff's first-iteration value is 1e-3). The
-    # error is set by V_eff's near-core Fourier tail, which does not shrink
-    # with system size, so a 0.75 box can never certify; a box big enough to
-    # certify saves too little volume to pay. Kept behind the hatch
-    # (GRADWAVE_COARSE_DRAFT=on) for larger-box experiments only.
-    coarse_cd = None
-    if os.environ.get("GRADWAVE_COARSE_DRAFT", "off").strip().lower() == "on":
-        from gradwave.core.batch import build_coarse_draft
-
-        coarse_cd = build_coarse_draft(bk, grid.shape)
     # Opt-in, NOT auto: it drafts only the *early* Davidson iterations in fp32
     # and re-polishes in fp64 below MP_CROSSOVER, so it pays only when those
     # early solves are compute-bound. The RTX 3050 battery
@@ -1733,7 +1707,6 @@ def scf(
                 t_solve,
                 device,
                 u_scale,
-                coarse=coarse_cd,
             )
         _t_eig_s = time.perf_counter() - _t_eig0
 
