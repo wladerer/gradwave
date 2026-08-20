@@ -395,8 +395,60 @@ def crystal_scf(a_bohr: float | None = None, symbol: str = "Ne", R: float = 1.4,
     return conv, at
 
 
+def _k_geometry(kf, L, atoms_cart, radii, lmax, ecut):
+    """The potential-INDEPENDENT per-k pieces of the secular build: the k+G enumeration, the
+    pairwise |Δk| / cos matrices, the Legendre prefactors, the ball form factors per unique R,
+    and the per-atom structure-phase vectors. All of it is pure geometry — fixed for the whole
+    SCF — so the serial driver caches one of these per k-point and stops rebuilding them every
+    iteration (they were a top per-iteration cost after the radial hoists). ``radii`` = the
+    muffin-tin radius per atom of ``atoms_cart`` (order-aligned). Ylm / warp Miller-difference
+    blocks are filled lazily (``_geom_ylm`` / ``_geom_dm``) so a muffin-tin-phase call computes
+    exactly what the un-cached build did."""
+    from scipy.special import eval_legendre
+    A = cell_matrix(L)
+    B = reciprocal(A)                                     # rows = reciprocal vectors
+    vol = float(abs(np.linalg.det(A)))
+    mill, ks = enumerate_kg(kf, B, ecut)
+    ksafe = np.maximum(np.linalg.norm(ks, axis=1), 1e-12)
+    kdot = ks @ ks.T
+    kk = np.einsum("ij,ij->i", ks, ks)
+    # |k_G - k_G'| from kdot (no (npw,npw,3) displacement tensor): |dk|² = k² + k'² - 2 k·k'
+    dk_norm = np.sqrt(np.maximum(kk[:, None] + kk[None, :] - 2.0 * kdot, 0.0))
+    cost = np.clip(kdot / np.outer(ksafe, ksafe), -1.0, 1.0)
+    pref_l = {lang: (4 * math.pi / vol) * (2 * lang + 1) * eval_legendre(lang, cost)
+              for lang in range(lmax + 1)}
+    ballf = {}
+    for R in radii:
+        if R not in ballf:
+            ballf[R] = ball_ff_np(dk_norm, R) / vol
+    # e^{i(k_G'-k_G)·τ} factorizes exactly: outer(conj(p), p) with p = e^{i k_G·τ} — npw
+    # exponentials instead of npw² (the npw² exp was a top build cost).
+    pvec = [np.exp(1j * (ks @ np.asarray(tau, dtype=float))) for tau, _key in atoms_cart]
+    return {"A": A, "vol": vol, "mill": mill, "ks": ks, "ksafe": ksafe, "kdot": kdot,
+            "pref_l": pref_l, "ballf": ballf, "pvec": pvec}
+
+
+def _geom_ylm(geom, l):
+    """Lazily-cached ``conj(Y_lm)`` block of a ``_k_geometry`` dict (pure function of its ks)."""
+    y = geom.setdefault("ylm", {})
+    if l not in y:
+        y[l] = _ylm_star(l, geom["ks"])
+    return y[l]
+
+
+def _geom_dm(geom, nfft_w):
+    """Lazily-cached Miller-difference index triple for the warped-interstitial term."""
+    if geom.get("dm_nfft") != nfft_w:
+        mill = geom["mill"]
+        geom["dm"] = tuple(((mill[:, None, i] - mill[None, :, i]) % nfft_w).astype(np.int32)
+                           for i in range(3))
+        geom["dm_nfft"] = nfft_w
+    return geom["dm"]
+
+
 def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=None, chan=None,
-                  lodat=None, nsph_int=None, c_prev=None, subspace_tol=1e-5, warp=None):
+                  lodat=None, nsph_int=None, c_prev=None, subspace_tol=1e-5, warp=None,
+                  geom=None):
     """Multi-atom LAPW at wavevector k, exposing the density internals the SCF needs. Returns
     ``(eigvals, eigvecs, miller, ks, [abl per atom], vol)``. H,S are complex Hermitian (structure
     phases ``e^{i(k_G'-k_G)·τ_a}``). ``atoms_cart`` = ``[(τ_cart, species_key), ...]``.
@@ -409,40 +461,30 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
     ``chan`` (optional) = precomputed ``{species_key: {l: radial_channel}}``. The radial channels
     are k-independent, so a caller sweeping a k-mesh builds them once per SCF iteration and passes
     them in, instead of paying the Numerov + radial-integral cost again at every k. ``None`` →
-    build locally (backward compatible)."""
-    from scipy.special import eval_legendre
-    A = cell_matrix(L)
-    B = reciprocal(A)                                     # rows = reciprocal vectors
-    vol = float(abs(np.linalg.det(A)))
-    mill, ks = enumerate_kg(kf, B, ecut)
+    build locally (backward compatible).
+
+    ``geom`` (optional) = this k's ``_k_geometry`` (potential-independent — a caller iterating an
+    SCF builds it once per k per RUN and passes it back in every iteration). ``None`` → build
+    locally (backward compatible; the k-worker process pool ships no geometry)."""
+    if geom is None:
+        geom = _k_geometry(kf, L, atoms_cart, [species[key]["R"] for _t, key in atoms_cart],
+                           lmax, ecut)
+    vol, mill, ks = geom["vol"], geom["mill"], geom["ks"]
+    ksafe, kdot, pref_l = geom["ksafe"], geom["kdot"], geom["pref_l"]
     npw = len(ks)
-    ksafe = np.maximum(np.linalg.norm(ks, axis=1), 1e-12)
-    kdot = ks @ ks.T
-    kk = np.einsum("ij,ij->i", ks, ks)
-    # |k_G - k_G'| from kdot (no (npw,npw,3) displacement tensor): |dk|² = k² + k'² - 2 k·k'
-    dk_norm = np.sqrt(np.maximum(kk[:, None] + kk[None, :] - 2.0 * kdot, 0.0))
-    cost = np.clip(kdot / np.outer(ksafe, ksafe), -1.0, 1.0)
     if chan is None:
         chan = {key: radial_channels_all(lmax, sp["El"], r, dx, sp["v"], sp["R"])
                 for key, sp in species.items()}
     inter = np.eye(npw, dtype=complex)
     Saug = np.zeros((npw, npw), dtype=complex)
     Haug = np.zeros((npw, npw), dtype=complex)
-    # atom-independent geometry: Legendre prefactors per l, ball form factor per unique R
-    pref_l = {lang: (4 * math.pi / vol) * (2 * lang + 1) * eval_legendre(lang, cost)
-              for lang in range(lmax + 1)}
-    ballf = {}
     abl_by_atom = []
-    for tau, key in atoms_cart:
+    for ai, (_tau, key) in enumerate(atoms_cart):
         R = species[key]["R"]
         v0off = float(species[key].get("v0off", 0.0))
-        # e^{i(k_G'-k_G)·τ} factorizes exactly: outer(conj(p), p) with p = e^{i k_G·τ} — npw
-        # exponentials instead of npw² (the npw² exp was a top build cost).
-        pvec = np.exp(1j * (ks @ np.asarray(tau, dtype=float)))
+        pvec = geom["pvec"][ai]
         phase = np.conj(pvec)[:, None] * pvec[None, :]
-        if R not in ballf:
-            ballf[R] = ball_ff_np(dk_norm, R) / vol
-        inter -= ballf[R] * phase
+        inter -= geom["ballf"][R] * phase
         abl = {}
         for lang in range(lmax + 1):
             ch = chan[key][lang]
@@ -465,12 +507,12 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
         if nsph_int is None:
             nsph_int = _nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=lodat,
                                               chan=chan)
-        ylm_nsph = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
-        for ai, (tau, key) in enumerate(atoms_cart):
+        ylm_nsph = {lang: _geom_ylm(geom, lang) for lang in range(lmax + 1)}
+        for ai, (_tau, key) in enumerate(atoms_cart):
             ints = nsph_int.get(key)
             if not ints or not ints["uu"]:
                 continue
-            ph_a = np.exp(1j * (ks @ np.asarray(tau, dtype=float)))
+            ph_a = geom["pvec"][ai]
             cstk = _channel_stack(abl_by_atom[ai], ks, lmax, vol, ph_a, ylm_by_l=ylm_nsph)
             # ONE triple product per atom replaces the per-(L,M,l,l') chained GEMMs (109x
             # measured, equal to 2.5e-14; _nonspherical_augment kept as the reference impl)
@@ -483,9 +525,7 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
         # l>0 refinement; TiO2's covalent bonding lives exactly in the interstitial). U is the
         # FFT of (v_grid - v_i0)·Θ_I; Miller-difference indexed (Toeplitz in G).
         u_fft, nfft_w = warp
-        dm0 = (mill[:, None, 0] - mill[None, :, 0]) % nfft_w
-        dm1 = (mill[:, None, 1] - mill[None, :, 1]) % nfft_w
-        dm2 = (mill[:, None, 2] - mill[None, :, 2]) % nfft_w
+        dm0, dm1, dm2 = _geom_dm(geom, nfft_w)
         Hm = Hm + u_fft[dm0, dm1, dm2]
     Hm = 0.5 * (Hm + Hm.conj().T)
     if lodat:
@@ -496,11 +536,11 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
         # (φ(R)=φ'(R)=0 confines it, one LO per l, spherical V keeps m diagonal). The aspherical
         # v_nsph coupling of LO rows is neglected (deep semicore, second-order small).
         rows_s, rows_h, diag_s, diag_h = [], [], [], []
-        for ai, (tau, key) in enumerate(atoms_cart):
-            ph = np.exp(1j * (ks @ np.asarray(tau, dtype=float)))
+        for ai, (_tau, key) in enumerate(atoms_cart):
+            ph = geom["pvec"][ai]
             for lo in lodat.get(key, []):
                 lang = lo["l"]
-                ylm = _ylm_star(lang, ks)
+                ylm = _geom_ylm(geom, lang)
                 pf = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
                 a_g, b_g = abl_by_atom[ai][lang][:, 0], abl_by_atom[ai][lang][:, 1]
                 v0off_lo = float(species[key].get("v0off", 0.0))
@@ -889,6 +929,11 @@ class _MultiCtx(NamedTuple):
     subspace_reuse: bool
     subspace_tol: float
     verbose: bool
+    # mutable per-run caches of potential-INDEPENDENT data (the NamedTuple itself stays
+    # frozen): "geom" = per-k _k_geometry for the serial solve path (keyed by ik / "gamma"),
+    # "ylm" = per-k conj(Y_lm) blocks for the density pass. Reused across _multi_iterate
+    # calls — and across Newton F evaluations, which share one ctx.
+    caches: dict
 
 
 class _MultiState:
@@ -911,6 +956,7 @@ class _MultiState:
         self.recorder = None
         self.hist = ([], [])                   # joint Anderson history
         self.c_prev_by_k: list = []
+        self.c_prev_gamma = None               # warm start for the Γ reporting solve
         # last-iteration outputs consumed by _multi_finalize
         self.kdata = None
         self.occ_by_k = None
@@ -1023,7 +1069,16 @@ def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax:
                      ecut=ecut, smearing=smearing, fullpot=fullpot,
                      fullpot_lmax=fullpot_lmax, el_override=el_override, kworkers=kworkers,
                      subspace_reuse=subspace_reuse, subspace_tol=subspace_tol,
-                     verbose=verbose)
+                     verbose=verbose, caches={"geom": {}, "ylm": {}})
+
+
+def _shutdown_ctx_pool(ctx: _MultiCtx) -> None:
+    """Shut down a ctx's persistent k-worker pool (no-op when none is live)."""
+    pool = ctx.caches.get("pool")
+    if pool is not None:
+        pool.shutdown(wait=False)
+        ctx.caches["pool"] = None
+        ctx.caches["pool_nw"] = 0
 
 
 def _multi_init_state(ctx: _MultiCtx, v_start) -> _MultiState:
@@ -1120,6 +1175,17 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
                             (lodat or {}).get(k), chan_sp=chan[k]) for k in keys}
     kdata, ev_all, ev_gamma = [], [], None
     cprevs = [None if full_iter else c_prev_by_k[ik] for ik in range(len(kfracs))]
+    geom_cache = ctx.caches["geom"]
+
+    def _geom_for(gk, kf_g):
+        # per-k geometry is potential-independent: build once per RUN, not per iteration.
+        # Serial path only — shipping ~npw² matrices through the pool would cost more than
+        # the workers' rebuild.
+        if gk not in geom_cache:
+            geom_cache[gk] = _k_geometry(kf_g, A, acart,
+                                         [species[key]["R"] for _t, key in acart], lmax, ecut)
+        return geom_cache[gk]
+
     if kworkers > 1 and len(kfracs) > 1:
         import multiprocessing as _mp
         from concurrent.futures import ProcessPoolExecutor
@@ -1130,17 +1196,22 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
                            warp=warp_state)
                 for ik, kf in enumerate(kfracs)]
         # spawn, not fork: forked children inherit live OpenMP/BLAS state and can compute
-        # silently wrong numbers (observed: a 6 eV span error). Spawned workers re-import
-        # (~seconds per iteration) — negligible on the multi-minute fullpot iterations the
-        # pool exists for.
-        with ProcessPoolExecutor(max_workers=min(kworkers, len(argl)),
-                                 mp_context=_mp.get_context("spawn")) as ex:
-            res_list = list(ex.map(_solve_k_args, argl))
+        # silently wrong numbers (observed: a 6 eV span error). The pool lives on ctx.caches —
+        # created ONCE per run (and shared across Newton F evaluations) instead of per
+        # iteration: the spawn+re-import tax (~seconds) was negligible on multi-minute fullpot
+        # iterations but is not on ~10 s ones. _multi_finalize / newton_polish shut it down.
+        nw = min(kworkers, len(argl))
+        if ctx.caches.get("pool") is None or ctx.caches.get("pool_nw") != nw:
+            _shutdown_ctx_pool(ctx)
+            ctx.caches["pool"] = ProcessPoolExecutor(max_workers=nw,
+                                                     mp_context=_mp.get_context("spawn"))
+            ctx.caches["pool_nw"] = nw
+        res_list = list(ctx.caches["pool"].map(_solve_k_args, argl))
     else:
         res_list = [_lapw_multi_k(kf, A, acart, species, lmax, ecut, r, dx, nb_solve,
                                   v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int,
                                   c_prev=cprevs[ik], subspace_tol=subspace_tol,
-                                  warp=warp_state)
+                                  warp=warp_state, geom=_geom_for(ik, kf))
                     for ik, kf in enumerate(kfracs)]
     for ik, (kf, w, res) in enumerate(zip(kfracs, kw, res_list, strict=True)):
         kdata.append((kf, w, res))
@@ -1149,9 +1220,13 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
         if np.all(np.abs(kf) < 1e-9):
             ev_gamma = res[0]
     if ev_gamma is None:
-        ev_gamma = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx, nb_solve,
-                                 v_nsph=v_nsph, chan=chan, lodat=lodat,
-                                 nsph_int=nsph_int, warp=warp_state)[0]
+        res_g = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx, nb_solve,
+                              v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int,
+                              c_prev=(None if full_iter else st.c_prev_gamma),
+                              subspace_tol=subspace_tol, warp=warp_state,
+                              geom=_geom_for("gamma", (0, 0, 0)))
+        ev_gamma = res_g[0]
+        st.c_prev_gamma = res_g[1]
     ev_all = np.array(ev_all)
 
     e_fermi = None
@@ -1183,12 +1258,16 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
     for _tau, k in acart:
         lo_off[k] = off
         off += sum(2 * lo["l"] + 1 for lo in (lodat or {}).get(k, []))
-    for (_kf, w, res), occ in zip(kdata, occ_by_k, strict=True):
+    ylm_cache = ctx.caches["ylm"]
+    for ik, ((_kf, w, res), occ) in enumerate(zip(kdata, occ_by_k, strict=True)):
         _, c, mill, ks, abl_all, vol = res
         occl = list(occ)
         npw_k = len(mill)
         rho_I += w * _interstitial_density(c[:npw_k, :nb_solve], occl, mill, vol, nfft)
-        ylm_by_l = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
+        ylm_by_l = ylm_cache.get(ik)           # pure geometry — cached across iterations
+        if ylm_by_l is None or len(ylm_by_l) < lmax + 1:
+            ylm_by_l = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
+            ylm_cache[ik] = ylm_by_l
         for ai, k in enumerate(keys):
             phase = np.exp(1j * (ks @ np.asarray(acart[ai][0])))
             cp = c[:npw_k, :nb_solve] * phase[:, None]
@@ -1401,6 +1480,7 @@ def _full_state(ctx: _MultiCtx, st: _MultiState) -> dict:
 def _multi_finalize(ctx: _MultiCtx, st: _MultiState, efg: bool = False):
     """Build ``crystal_scf_multi``'s ``(bands, info)`` return from the final state — the
     result summary, the full fixed-point state, and (opt-in) the EFG diagnostic pass."""
+    _shutdown_ctx_pool(ctx)                    # release the persistent k-worker pool
     conv = st.conv
     info = {"nbands": ctx.nbands, "symbols": ctx.syms, "e_fermi": conv.get("e_fermi"),
             "v_by_key": {k: st.v_by_key[k].numpy().copy() for k in ctx.keys}}
