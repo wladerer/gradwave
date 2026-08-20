@@ -65,7 +65,8 @@ class Layout:
         st, off = {"v_by_key": {}, "v_nsph": {}, "v_grid": None, "v_i0": None}, 0
         for k in self.skeys:
             n = np.asarray(ref["v_by_key"][k]).size
-            st["v_by_key"][k] = x[off:off + n].copy(); off += n
+            st["v_by_key"][k] = x[off:off + n].copy()
+            off += n
         for k in self.nkeys:
             st["v_nsph"][k] = {}
             for lm in self.lms[k]:
@@ -73,7 +74,8 @@ class Layout:
                 st["v_nsph"][k][lm] = x[off:off + n] + 1j * x[off + n:off + 2 * n]
                 off += 2 * n
         n = int(np.prod(self.gshape))
-        st["v_grid"] = x[off:off + n].reshape(self.gshape).copy(); off += n
+        st["v_grid"] = x[off:off + n].reshape(self.gshape).copy()
+        off += n
         st["v_i0"] = float(x[off])
         return st
 
