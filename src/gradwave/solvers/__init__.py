@@ -16,7 +16,6 @@ from gradwave.solvers.davidson import (
     davidson_batched,
     davidson_batched_ms,
 )
-from gradwave.solvers.lobpcg import lobpcg_batched, lobpcg_batched_ms
 from gradwave.solvers.precond import teter, teter_b
 
 __all__ = [
@@ -27,8 +26,6 @@ __all__ = [
     "davidson",
     "davidson_batched",
     "davidson_batched_ms",
-    "lobpcg_batched",
-    "lobpcg_batched_ms",
     "teter",
     "teter_b",
 ]
