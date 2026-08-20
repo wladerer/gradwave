@@ -67,16 +67,20 @@ def main():
                               kmesh=(2, 2, 2), **cfg)
     r = iw["recorder"].summarize()
     n_tot = r["n_iter"]
-    while r["r_nsph"] >= 1e-3 and n_tot < 120:
+    while (r["r_nsph"] >= 1e-3 or r["r_v"] >= 0.15) and n_tot < 120:
         _, iw = crystal_scf_multi(A_BOHR, ATOMS, RADII, iters=20, tol=1e-3, efg=False,
                                   kmesh=(2, 2, 2),
                                   v_start={"__full_state__": iw["state"]}, **cfg)
         r = iw["recorder"].summarize()
         n_tot += r["n_iter"]
-        print(f"k222 continuation: n_it={n_tot} r_nsph={r['r_nsph']:.2e}", flush=True)
-    print(f"k222 ({time.time()-t0:.0f}s): n_it={n_tot} r_nsph={r['r_nsph']:.2e}",
-          flush=True)
-    if r["r_nsph"] >= 1e-3:
+        print(f"k222 continuation: n_it={n_tot} r_v={r['r_v']:.2e} "
+              f"r_nsph={r['r_nsph']:.2e}", flush=True)
+    print(f"k222 ({time.time()-t0:.0f}s): n_it={n_tot} r_v={r['r_v']:.2e} "
+          f"r_nsph={r['r_nsph']:.2e}", flush=True)
+    # both channels must be calm: r_nsph is the aspherical residual, but the measured
+    # unstable mode is 94% interstitial (r_v) — a hot-r_v state looks gated in r_nsph
+    # and still blows Newton up (rounds 1-2 of this A/B).
+    if r["r_nsph"] >= 1e-3 or r["r_v"] >= 0.15:
         if r["r_nsph"] < 1e-2:
             save_state(iw["state"], tag, "k222")
             efg_at(iw["state"], (2, 2, 2), f"{tag}-k222-MARGINAL", cfg)
