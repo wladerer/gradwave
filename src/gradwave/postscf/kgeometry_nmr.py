@@ -1164,10 +1164,20 @@ def sigma_shielding_dq(
     term omitted), but the (1/2q)[S(q) − S(−q)] finite difference is replaced
     by the exact q-derivative of the induced-current assembly
     (:class:`ShieldingDq`), removing the O(q²) finite-q error and the
-    mesh-commensurability constraint: any full (symmetry-unreduced) k-mesh
-    works, including Γ-only and single-axis meshes, with three Cartesian q̂
-    directions probed regardless of the mesh shape. The finite-q route
-    Richardson-extrapolated in q converges to this result.
+    q-commensurability constraint. The joint (mesh n, q = b/n) refinement of
+    the finite-q route converges to this result.
+
+    q̂ DIRECTIONS ARE THE SAMPLED MESH AXES (n_i > 1), as in the finite-q
+    driver — not free: the analytic column is a BZ sum of a k-DERIVATIVE,
+    and a uniform-mesh Riemann sum of ∂f/∂k along q̂ retains the spurious
+    terms i(q̂·R)f_R over the mesh SUPERLATTICE vectors R (f_R the
+    Wannier-decaying Fourier coefficients of the k-periodic integrand —
+    ∫∂f = 0 exactly, but the mesh sum only kills R off the superlattice).
+    Along a mesh axis q̂ = b̂_i every unsampled-direction R has q̂·R = 0
+    exactly and the residual is the n_i-cell-neighbor coefficient
+    (exponentially small in n_i for an insulator — measured directly as the
+    longitudinal gauge null); along an arbitrary q̂ the n = 1 axes leak at
+    O(1). Needs ≥ 2 sampled axes to determine the tensor.
 
     Bare (unscreened) responses only: the K_Hxc screening correction to the
     antisymmetric q-derivative vanishes at q = 0 for a TR-symmetric insulator
@@ -1177,11 +1187,21 @@ def sigma_shielding_dq(
     system = res.system
     if sites is None:
         sites = system.positions.detach().cpu().to(RDTYPE)
+    b = reciprocal_cell(system.grid.cell)
+    k_frac = np.stack([sph.k_frac for sph in system.spheres])
+    mesh_n = [len(np.unique(np.round(k_frac[:, i], 6))) for i in range(3)]
+    axes = [i for i in range(3) if mesh_n[i] > 1]
+    if len(axes) < 2:
+        raise ValueError(
+            f"sigma_shielding_dq needs >=2 k-mesh axes with n>1 (mesh {mesh_n}): "
+            "the tensor is underdetermined from a single q̂ direction, and the "
+            "BZ sum of the analytic q-derivative only converges along sampled "
+            "mesh axes (see docstring)")
     eng = ShieldingDq(res)
     b_rows: list[np.ndarray] = []
     m_rows: list[Tensor] = []
-    for i in range(3):
-        q_hat = np.eye(3)[i]
+    for i in axes:
+        q_hat = np.asarray(b[i], dtype=float) / np.linalg.norm(b[i])
         pols = list(_transverse_frame(q_hat))
         fields = eng.branch_fields_axis(q_hat, pols)
         for pol, (s0f, dsf) in zip(pols, fields, strict=True):
