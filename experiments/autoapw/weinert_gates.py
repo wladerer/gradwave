@@ -198,6 +198,48 @@ def bench_pair(nfft, lmax=6):
     print(f"    worst rel (significant comps): {worst:.2e}", flush=True)
 
 
+def bench_npow(nfft=64, R=0.824, lmax=6):
+    """N) npow policy scan: own-surface field residual per L for flat vs Elk-style
+    (fixed-Bessel-order, npow_L = lnpsd - L - 1) pseudocharge orders, at fixed grid.
+    Images are negligible for the high L that matter here."""
+    a = cell_matrix(CELL)
+    vol = float(abs(np.linalg.det(a)))
+    gvec, gnorm, ylm = gvec_ylm_tables(a, nfft, lmax)
+    tau = np.array([CELL / 2] * 3)
+    gmax = math.pi * nfft / CELL
+    print(f"  nfft={nfft} gmax*R={gmax*R:.1f}", flush=True)
+    qref = {}
+    for L in range(1, lmax + 1):
+        M = min(L, 2)
+        qref[(L, M)] = 1.0 + (0.3j if M else 0)
+        if M:
+            qref[(L, -M)] = (-1) ** M * np.conj(qref[(L, M)])
+    policies = {"flat2": {L: 2 for L in range(lmax + 1)},
+                "flat4": {L: 4 for L in range(lmax + 1)},
+                "flat6": {L: 6 for L in range(lmax + 1)},
+                "elk9": {L: max(1, 9 - L - 1) for L in range(lmax + 1)},
+                "elk11": {L: max(1, 11 - L - 1) for L in range(lmax + 1)},
+                "bord": {L: max(1, int(round(R * gmax / 2)) - L - 1)
+                         for L in range(lmax + 1)}}
+    lset = [(L, min(L, 2)) for L in range(1, lmax + 1)]
+    for name, pol in policies.items():
+        ps = np.zeros(nfft**3, dtype=complex)
+        for L in range(1, lmax + 1):
+            sub = {lm: q for lm, q in qref.items() if lm[0] == L}
+            ps += sphere_pseudocharge_ft(sub, R, tau, vol, pol[L], gvec, gnorm, ylm)
+        g2 = gnorm**2
+        v_g = np.where(g2 > 1e-12, 4 * math.pi * E2 * ps / np.where(g2 > 1e-12, g2, 1.0), 0.0)
+        v = np.fft.ifftn((v_g * nfft**3).reshape(nfft, nfft, nfft)).real
+        v_bc = interstitial_boundary_multi(v, tau, R, a, lset)
+        rels = []
+        for (L, M) in lset:
+            own = (4 * math.pi * E2 / (2 * L + 1)) * qref[(L, M)] / R ** (L + 1)
+            rels.append(abs(v_bc[(L, M)] - own) / abs(own))
+        print(f"  {name:6s} npow(L)={[pol[L] for L in range(1, lmax+1)]}: "
+              + " ".join(f"L{L}={r:.1e}" for L, r in zip(range(1, lmax + 1), rels,
+                                                         strict=True)), flush=True)
+
+
 if __name__ == "__main__":
     stages = sys.argv[1:] or ["A", "B", "C"]
     if "A" in stages:
@@ -212,6 +254,10 @@ if __name__ == "__main__":
         print("\nB2) retained-rho_I external-field identity (D2 gate)", flush=True)
         for n in (32, 48, 64):
             bench_rho_i(n)
+    if "N" in stages:
+        print("\nN) npow policy scan (own-surface residual per L)", flush=True)
+        for n in (48, 64, 80):
+            bench_npow(n)
     if "C" in stages:
         print("\nC) near-touching rutile pair (D4 gate)", flush=True)
         for n in (48, 64, 80):
