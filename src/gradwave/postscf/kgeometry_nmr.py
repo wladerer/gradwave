@@ -741,8 +741,12 @@ def sigma_shielding(
     - The G = 0 macroscopic shape/susceptibility term is omitted (standard
       bare-crystal convention).
     - Finite-q truncation: q = q_index/n_i per mesh axis; the residual error
-      is O(q²) (the antisymmetric combination cancels even orders) — check
-      stability by comparing ``q_index`` values on a finer mesh.
+      is O(q²) (the antisymmetric combination cancels even orders) PLUS a
+      slowly-decaying sphere-boundary term: δu lives on the k+q sphere,
+      which differs from the k sphere by an O(q) shell of tail-amplitude
+      plane waves, leaving an ecut-dependent non-q² component in the 1/q
+      assembly (measured — see :func:`sigma_shielding_dq`, which has
+      neither error, and the ecut scan in the milestone-10 PR).
 
     ``screen=True`` (with ``xc``) uses the K_Hxc-screened first-order
     responses. Requires an insulating, symmetry-unreduced SCF with at least
@@ -1183,10 +1187,13 @@ def sigma_shielding_dq(
     longitudinal gauge null); along an arbitrary q̂ the n = 1 axes leak at
     O(1). Needs ≥ 2 sampled axes to determine the tensor.
 
-    Bare (unscreened) responses only: the K_Hxc screening correction to the
-    antisymmetric q-derivative vanishes at q = 0 for a TR-symmetric insulator
-    (the density response linear in B is TR-odd), verified numerically
-    against the screened finite-q route — see the validation suite."""
+    Bare (unscreened) responses only: for a TR-symmetric insulator the K_Hxc
+    screening correction to the antisymmetric q-derivative vanishes at q = 0
+    (the density response linear in B is TR-odd). Measured on Si columns of
+    ~30–80 ppm: |screened − bare| decays monotonically 0.92 → 0.50 → 0.30 →
+    0.22 ppm over q = b/2 → b/16, and the screened vs bare q → 0
+    extrapolations agree to 0.2 ppm — any residual screening correction is
+    bounded below the finite-q route's own extrapolation uncertainty."""
     _guard(res)
     system = res.system
     if sites is None:

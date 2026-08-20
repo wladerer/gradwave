@@ -464,6 +464,45 @@ def test_dq_gauge_and_tr_null(si_mesh, dq_engine):
     assert tr_null < 1e-10  # measured ~2e-17
 
 
+def test_dq_lamb_prefactor_synthetic():
+    # The analytic-path twin of test_lamb_prefactor_synthetic: the same
+    # dia-only Gaussian branch field, but through the PRODUCT-RULE Biot–Savart
+    # (the diamagnetic/Lamb content sits entirely in the kernel-derivative
+    # terms acting on F̂⁰; Ŝ' = 0). Must reproduce the analytic Landau-gauge
+    # Lamb term with NO O(q²) error (the finite assembly measured +1.9% at
+    # q = L/8); the residual is pure grid/Gaussian truncation.
+    import math
+
+    from gradwave.constants import ALPHA_FS, E2, HBAR2_2M
+    from gradwave.dtypes import CDTYPE, RDTYPE
+    from gradwave.postscf.kgeometry_nmr import _biot_savart_sigma_cols_dq
+
+    length, n, sig, nelec = 10.0, 40, 0.6, 2.0
+    ax = torch.arange(n, dtype=torch.float64) / n * length
+    xx, yy, zz = torch.meshgrid(ax, ax, ax, indexing="ij")
+    r0 = torch.tensor([0.0, length / 2, length / 2], dtype=torch.float64)
+    r2 = (xx - r0[0]) ** 2 + (yy - r0[1]) ** 2 + (zz - r0[2]) ** 2
+    rho = torch.exp(-r2 / (2 * sig**2))
+    rho = rho / (rho.sum() * (length / n) ** 3) * nelec
+
+    m = torch.fft.fftfreq(n, d=1.0 / n).to(torch.float64)
+    mx, my, mz = torch.meshgrid(m, m, m, indexing="ij")
+    g_cart = torch.stack([mx, my, mz], dim=-1) * (2 * math.pi / length)
+
+    e_pol = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float64)
+    s_dia = torch.einsum("m,ijk->mijk", e_pol.to(CDTYPE),
+                         (2.0 * HBAR2_2M) * rho.to(CDTYPE))
+    q_hat = torch.tensor([1.0, 0.0, 0.0], dtype=RDTYPE)
+    cols, null = _biot_savart_sigma_cols_dq(
+        s_dia, torch.zeros_like(s_dia), q_hat, g_cart, r0[None, :].to(RDTYPE))
+    lamb = 2.0 * ALPHA_FS**2 * HBAR2_2M / (3.0 * E2) \
+        * nelec * math.sqrt(2.0 / math.pi) / sig
+    assert abs(float(cols[0, 2]) - lamb) / lamb < 0.02
+    assert abs(float(cols[0, 0])) < 1e-8 * lamb
+    assert abs(float(cols[0, 1])) < 1e-8 * lamb
+    assert float(null[0].abs().max()) < 1e-10 * lamb  # spherical rho: null
+
+
 def test_sigma_dq_underdetermined(si_mesh):
     # a single-axis mesh cannot determine the tensor (and the analytic
     # BZ-derivative only converges along sampled axes): ValueError
