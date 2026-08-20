@@ -27,6 +27,7 @@ from __future__ import annotations
 import itertools
 import math
 import time
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -1072,8 +1073,11 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
         if kworkers > 1 and len(kfracs) > 1:
             import multiprocessing as _mp
             from concurrent.futures import ProcessPoolExecutor
-            argl = [(kf, A, acart, species, lmax, ecut, r, dx, nb_solve, v_nsph, chan, lodat,
-                     nsph_int, cprevs[ik], subspace_tol, warp_state)
+            argl = [SolveKArgs(kf=kf, cell=A, acart=acart, species=species, lmax=lmax,
+                               ecut=ecut, r=r, dx=dx, nb_solve=nb_solve, v_nsph=v_nsph,
+                               chan=chan, lodat=lodat, nsph_int=nsph_int,
+                               c_prev=cprevs[ik], subspace_tol=subspace_tol,
+                               warp=warp_state)
                     for ik, kf in enumerate(kfracs)]
             # spawn, not fork: forked children inherit live OpenMP/BLAS state and can compute
             # silently wrong numbers (observed: a 6 eV span error). Spawned workers re-import
@@ -1408,13 +1412,37 @@ def _atom_orbits(atom_map):
     return orbits
 
 
-def _solve_k_args(args):
+class SolveKArgs(NamedTuple):
+    """Typed payload for the k-point process pool. A NamedTuple, not a bare
+    tuple: this crossed the spawn boundary as a positional 15-tuple once and
+    silently broke its test when the 16th element (warp) was added — keyword
+    construction makes any future drift a loud TypeError at every call site."""
+
+    kf: tuple
+    cell: object
+    acart: list
+    species: dict
+    lmax: int
+    ecut: float
+    r: object
+    dx: float
+    nb_solve: int
+    v_nsph: object
+    chan: object
+    lodat: object
+    nsph_int: object
+    c_prev: object
+    subspace_tol: float
+    warp: object
+
+
+def _solve_k_args(args: SolveKArgs):
     """Picklable per-k secular solve for the k-point process pool (``kworkers``)."""
-    (kf, cell, acart, species, lmax, ecut, r, dx, nb_solve, v_nsph, chan, lodat, nsph_int,
-     c_prev, subspace_tol, warp) = args
-    return _lapw_multi_k(kf, cell, acart, species, lmax, ecut, r, dx, nb_solve,
-                         v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int,
-                         c_prev=c_prev, subspace_tol=subspace_tol, warp=warp)
+    a = args
+    return _lapw_multi_k(a.kf, a.cell, a.acart, a.species, a.lmax, a.ecut, a.r, a.dx,
+                         a.nb_solve, v_nsph=a.v_nsph, chan=a.chan, lodat=a.lodat,
+                         nsph_int=a.nsph_int, c_prev=a.c_prev,
+                         subspace_tol=a.subspace_tol, warp=a.warp)
 
 
 def _efg_density_pass(kdata, occ_by_k, keys, acart, El_by_key, vmt_by_key, R_by_key, rr_by_key,

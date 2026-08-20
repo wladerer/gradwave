@@ -136,3 +136,19 @@ ssh homelab 'sudo tailscale serve --bg /home/wladerer/gwdash'
 The page is then at `https://homelab.<tailnet>.ts.net`. Re-run `make dashboard-push`
 (manually, from a `/loop`, or a user systemd timer) to refresh it; a sleeping laptop
 just means its panel shows the last data pushed, timestamped in the header.
+
+## Measurement quiescence (learned 2026-08-19)
+
+pueue's `test` and `bench` groups run CONCURRENTLY — a wall-clock measurement in
+one group is silently invalidated by an `-n8` pytest run in the other (measured:
+a GPU SCF battery inflated 2-47x by a fast tier running in the test group). Rules:
+
+1. Wall-clock measurements (benchmarks, A/Bs, anything whose *time* is the result)
+   run only when the ENTIRE queue is otherwise idle — check `pueue status` before
+   trusting a number, and prefer submitting them via `scripts/qrun`, whose log
+   header records host/commit/threads/queue-state so every result is
+   self-describing after the fact.
+2. Iteration-count / convergence-trajectory results (deterministic outputs) are
+   safe under contention; only their reported wall times are not.
+3. Never `git commit --amend` + force-push a branch a queued job will pull —
+   the remote checkout diverges and the next `git pull` breaks. Fixup commits only.

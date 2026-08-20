@@ -23,7 +23,7 @@ import torch
 
 from gradwave.flapw import crystal_scf_multi
 from gradwave.flapw.radial import log_mesh
-from gradwave.flapw.scf import _lapw_multi_k, _solve_k_args
+from gradwave.flapw.scf import SolveKArgs, _lapw_multi_k, _solve_k_args
 
 # a small tetragonal O crystal: open shell -> real, axial EFG; two body-centred atoms are
 # translation-equivalent, so their EFG tensors must match exactly by symmetry.
@@ -101,8 +101,10 @@ def test_pool_single_solve_bit_equal():
     v = torch.where(r <= 1.4, -8.0 / r + 3.0, torch.zeros_like(r))
     species = {"a0": {"R": 1.4, "v": v, "El": {0: -3.0, 1: -1.5, 2: -0.5}}}
     acart = [(np.array([3.0, 3.0, 3.0]), "a0")]
-    args = ((0.25, 0.0, 0.0), 6.0 * 0.529177, acart, species, 2, 120.0, r, dx, 4,
-            None, None, None, None, None, 1e-5, None)
+    args = SolveKArgs(kf=(0.25, 0.0, 0.0), cell=6.0 * 0.529177, acart=acart,
+                      species=species, lmax=2, ecut=120.0, r=r, dx=dx, nb_solve=4,
+                      v_nsph=None, chan=None, lodat=None, nsph_int=None, c_prev=None,
+                      subspace_tol=1e-5, warp=None)
     ev_local = _lapw_multi_k(*args[:9], v_nsph=None, chan=None, lodat=None, nsph_int=None)[0]
     with ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn")) as ex:
         ev_pool = list(ex.map(_solve_k_args, [args]))[0][0]

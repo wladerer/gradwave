@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# qrun <name> <cmd...> — run a (possibly queued/remote) job with a self-describing
+# log and a RELIABLE exit marker. Exists because two real failures came from
+# hand-rolled `bash -c "... > log; echo EXIT=$?"` strings nested through
+# ssh+pueue quoting: one masked a test failure for two runs ($? expanded in the
+# wrong shell), one lost five reports (quotes stripped by a heredoc layer).
+# Submit through this instead: `pueue add -g bench -- ~/github/gradwave/scripts/qrun name cmd args...`
+# — no inline quoting layer at all.
+#
+# Log: ~/gwq-logs/<name>.log, header records host/commit/threads/queue state so
+# every measurement is self-describing (a wall-clock number without its
+# contention context is not a measurement). Marker: final line `EXIT=<status>`
+# of the actual command. Poll with: grep -q '^EXIT=' ~/gwq-logs/<name>.log
+set -u
+name="$1"
+shift
+log="$HOME/gwq-logs/$name.log"
+mkdir -p "$HOME/gwq-logs"
+{
+    echo "# qrun: $name"
+    echo "# host: $(hostname)  date: $(date -Is)"
+    echo "# cwd: $PWD  commit: $(git rev-parse --short HEAD 2>/dev/null || echo n/a)"
+    echo "# OMP_NUM_THREADS=${OMP_NUM_THREADS:-unset}  threads: $(nproc)"
+    echo "# queue at launch: $(pueue status 2>/dev/null | grep -cE 'Running' || echo '?') running elsewhere"
+    echo "# cmd: $*"
+} > "$log"
+"$@" >> "$log" 2>&1
+echo "EXIT=$?" >> "$log"
