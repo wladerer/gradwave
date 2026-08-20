@@ -382,3 +382,15 @@ r_v plateau) while Newton with FD JVPs converges quadratically in 3 steps. Produ
 (hoist setup out of F, autograd JVPs later, Anderson steps as Krylov preconditioner) is now the
 top FLAPW convergence task; expected effect: the 40+-iteration tails of the acceptance matrix
 collapse to ~1 Newton solve from any gate-adjacent warm state.
+
+## DMD MODE ANALYSIS (asus jobs 112/113) — WHY Anderson stalls, measured
+Easy config: unstable complex pair |rho|=1.24 (sph+interstitial mix) + a few slow modes; 13
+modes |rho|>0.5. Anderson's m=5 window handles the low-dimensional instability -> converges.
+HARD config: unstable complex pair |rho|=1.02 that is 94% INTERSTITIAL, plus a second
+interstitial-dominated pair at |rho|=0.92 (27 it/decade) and a cluster of 0.68-0.75 modes; 12
+modes |rho|>0.5. The bare damped map is UNSTABLE via long-wavelength interstitial sloshing, and
+the slow/unstable cluster exceeds Anderson's window -> the measured r_v 0.46 stall.
+Implications: (a) Newton polish (shipped, flapw/newton.py) handles it outright — consistent with
+its 3-step convergence; (b) a targeted interstitial-channel Kerker screen G^2/(G^2+k0^2) in the
+joint Anderson is the cheap complementary fix — NOTE this is the FLAPW interstitial channel with
+direct evidence of sloshing, distinct from the measured-closed PW small-cell Kerker avenue.
