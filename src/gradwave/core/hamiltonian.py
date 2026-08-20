@@ -149,7 +149,10 @@ class HamiltonianK:
     def _toeplitz_eligible(self) -> bool:
         from gradwave.core import batch as _batch  # lazy: batch imports this module
 
-        if not _batch._TOEPLITZ_LOCAL_ENABLED:
+        # The measured auto-gate ("auto" runs a timing trial) lives in
+        # BatchedHamiltonian._use_toeplitz; this single-k path has no trial,
+        # so it activates only when the mode is forced on.
+        if _batch._TOEPLITZ_MODE != "on":
             return False
         if self.v_eff_r.device.type != "cpu" and not _batch._TOEPLITZ_ON_CUDA:
             return False

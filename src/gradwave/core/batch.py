@@ -15,6 +15,8 @@ Padded-slot invariants (everything relies on them):
 
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass
 
 import torch
@@ -41,13 +43,24 @@ _GPU_DENSE_BUDGET_BYTES = 4e8
 # matrix must fit the budget below (nk·npw²·elem ≤ budget), which restricts it to
 # small npw where npw² beats the box FFT's N·logN.
 #
-# OPT-IN (default OFF). The win is narrow: it needs many k (no symmetry), low ecut
-# (small npw), and a metal — e.g. ~1.5× on a 512-k Al SCF, or ~2× inside a batched
-# k+q Sternheimer solve. In the ROUTINE regime — symmetry on (few k), typical ecut
-# (larger npw), insulators (few Davidson iterations) — the per-iteration M-build +
-# GEMM is NOT repaid (the FFT apply is already efficient there) and it REGRESSES the
-# SCF ~20-25% (measured: Si 0.80×, GaAs 0.79×; Al neutral). So it stays off by
-# default and callers opt in for the regime where it wins (set the flag True).
+# AUTO-GATED (default "auto"). The win is size-dependent: dense GEMM beats the
+# box FFT at small npw (measured 14× per apply at npw≈190, ecut 12 Ry Si; ~1.5×
+# on a 512-k Al SCF) but LOSES at typical-ecut npw (measured whole-SCF Si 0.80×,
+# GaAs 0.79× at production cutoffs; Al neutral). The crossover is machine- and
+# geometry-dependent, so instead of a hand-tuned threshold the gate is a
+# MEASURED VERDICT: on the first apply for a given (device, nk, npw_max, shape,
+# dtype) signature, both local-term paths are timed on the real block and the
+# Toeplitz path is adopted only if it beats the FFT path by ≥30% (margin covers
+# the per-iteration M rebuild, amortized over the iteration's applies). The
+# verdict is cached per signature for the process lifetime; the trial costs one
+# extra local-term evaluation once per geometry. Both paths are exact (an
+# algebraic identity, agreement at fp round-off), so the trial's answer is
+# usable either way. ``GRADWAVE_TOEPLITZ`` in {"auto", "on", "off"} (read once
+# at import) forces the path for A/B benchmarks; "on" bypasses the trial.
+#
+# The difference-index table depends on geometry alone, so it is cached ON the
+# BatchedK (built at most once per SCF, not per Hamiltonian ctor — the ctor
+# runs every SCF iteration and the old per-ctor build was pure waste).
 #
 # The budget caps the cached matrix at nk·npw²·16 B (fp64 worst case); the
 # difference-index table adds ~half that again, both held for the Hamiltonian's
@@ -64,9 +77,16 @@ _GPU_DENSE_BUDGET_BYTES = 4e8
 # pure-fp64 GPU SCF would REGRESS. A data-center GPU (real fp64 / saturation) may
 # invert this — flip _TOEPLITZ_ON_CUDA to test there — but it stays off by default
 # until validated so the path never silently slows a GPU run.
-_TOEPLITZ_LOCAL_ENABLED = False  # opt-in: regresses routine symmetry-on insulator SCFs
+_TOEPLITZ_MODE = os.environ.get("GRADWAVE_TOEPLITZ", "auto").strip().lower()
 _TOEPLITZ_ON_CUDA = False  # opt-in: GPU whole-SCF win unproven; consumer fp64 regresses
 _TOEPLITZ_M_BUDGET_BYTES = 1 << 28  # 256 MiB cap on the cached local-potential matrix
+# measured verdicts: (device type, nk, npw_max, shape, dtype) → use Toeplitz?
+_TOEP_VERDICT: dict[
+    tuple[str, int, int, tuple[int, int, int], torch.dtype], bool
+] = {}
+# Toeplitz must beat the FFT path by this factor in the trial — the margin
+# covers the per-iteration M rebuild amortized over that iteration's applies.
+_TOEP_TRIAL_MARGIN = 0.7
 
 # Optional H-application instrumentation. BatchedHamiltonian.apply is the single
 # chokepoint every batched Davidson round (NC and USPP/PAW) funnels its H|ψ⟩
@@ -101,6 +121,10 @@ class BatchedK:
     proj_phase_free: torch.Tensor  # (nk, nproj, npw_max) complex
     proj_atom_index: torch.Tensor  # (nproj,)
     dij_full: torch.Tensor  # (nproj, nproj)
+    # Toeplitz difference-index tables keyed by dense-grid shape, filled
+    # lazily by BatchedHamiltonian._toeplitz_idx (geometry-only, so shared
+    # across the per-iteration Hamiltonian rebuilds of one SCF)
+    toep_idx_cache: dict[tuple[int, int, int], torch.Tensor] | None = None
 
     @property
     def nk(self) -> int:
@@ -218,19 +242,24 @@ class BatchedHamiltonian:
             bk.mask, flat_idx, torch.full_like(flat_idx, self.n)
         )
         self._box: torch.Tensor | None = None
-        # Toeplitz small-cell fast path (see _TOEPLITZ_LOCAL_ENABLED). Eligible
-        # only for the plain box (no USPP dual grid) and when the cached matrix
-        # fits the budget. The difference-index table depends on geometry alone
-        # (the Miller indices are fixed for the H's lifetime) so it is built once
-        # here; M itself is built lazily per working precision and reused across
-        # every apply (v_eff is fixed for this Hamiltonian).
+        # Toeplitz small-cell fast path (see _TOEPLITZ_MODE). Eligible only for
+        # the plain box (no USPP dual grid) and when the cached matrix fits the
+        # budget; whether it is USED is the per-geometry measured verdict
+        # (`_use_toeplitz`). The difference-index table is geometry-only and
+        # cached on the BatchedK across Hamiltonian rebuilds; M is built lazily
+        # per working precision and reused across every apply of this H.
         self._toep_idx: torch.Tensor | None = None
         self._toep_M_cache: dict[torch.dtype, torch.Tensor] = {}
         on_device = bk.mask.device.type == "cpu" or _TOEPLITZ_ON_CUDA
-        if _TOEPLITZ_LOCAL_ENABLED and on_device and smooth is None:
+        self._toep_eligible = False
+        # mode captured at construction so a caller forcing "on" around the
+        # ctor (e.g. the dfpt_q Sternheimer build) binds THIS H, apply-time
+        # global flips notwithstanding
+        self._toep_forced = _TOEPLITZ_MODE == "on"
+        if _TOEPLITZ_MODE != "off" and on_device and smooth is None:
             nk, npw = bk.mask.shape
             if nk * npw * npw * 16 <= _TOEPLITZ_M_BUDGET_BYTES:
-                self._toep_idx = self._build_toeplitz_index()
+                self._toep_eligible = True
         # cdtype → cast (t, v_eff, p, p_conj, dij)
         self._tab_cache: dict[
             torch.dtype, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
@@ -282,6 +311,23 @@ class BatchedHamiltonian:
         diff = (g[:, :, None, :] - g[:, None, :, :]) % n  # (nk, npw, npw, 3)
         return diff[..., 0] * s1s2 + diff[..., 1] * s2 + diff[..., 2]
 
+    def _toeplitz_idx(self) -> torch.Tensor:
+        """The (nk, npw, npw) difference-index table, cached on the BatchedK.
+
+        Geometry-only (Miller indices are fixed for the whole SCF), so it is
+        built at most once per BatchedK and shared across the per-iteration
+        Hamiltonian rebuilds — the old per-ctor build cost ~one FFT apply per
+        iteration for nothing."""
+        if self._toep_idx is None:
+            if self.bk.toep_idx_cache is None:
+                self.bk.toep_idx_cache = {}
+            idx = self.bk.toep_idx_cache.get(self.shape)
+            if idx is None:
+                idx = self._build_toeplitz_index()
+                self.bk.toep_idx_cache[self.shape] = idx
+            self._toep_idx = idx
+        return self._toep_idx
+
     def _toeplitz_M(self, cdtype: torch.dtype) -> torch.Tensor:
         """Local-potential matrix M[k,i,j]=V̂(G_i−G_j) at the working precision,
         cached for the H's lifetime (v_eff is fixed). V̂ is the FFT of v_eff on
@@ -291,11 +337,79 @@ class BatchedHamiltonian:
         if M is None:
             from gradwave.core.fftbox import r_to_g
 
-            assert self._toep_idx is not None
             vhat = r_to_g(self.v_eff_r.to(cdtype)).reshape(-1)
-            M = vhat[self._toep_idx]
+            M = vhat[self._toeplitz_idx()]
             self._toep_M_cache[cdtype] = M
         return M
+
+    def _local_toep(self, c: torch.Tensor) -> torch.Tensor:
+        """Local V·ψ as one dense GEMM per k: out(G_i) = Σ_j M[i,j] c(G_j).
+        Mask the input so padded columns (whose M entries are undefined) cannot
+        pollute valid rows; the caller masks the output as in the FFT path."""
+        M = self._toeplitz_M(c.dtype)
+        cm = c * self.bk.mask[:, None, :]
+        return torch.einsum("kij,kbj->kbi", M, cm)
+
+    def _local_fft_into(self, c: torch.Tensor, out: torch.Tensor,
+                        v_eff: torch.Tensor, count: bool = True) -> None:
+        """Local V·ψ via the dense-box FFT pair, added into `out` in place.
+        Chunked over bands to bound peak memory on the dense grid."""
+        nk, nb, m = c.shape
+        chunk = self._band_chunk(nk, c.device, c.element_size())
+        for lo in range(0, nb, chunk):
+            hi = min(lo + chunk, nb)
+            cc = c[:, lo:hi]
+            nbc = hi - lo
+            box = self._get_box(nk, nbc, cc.dtype, cc.device)
+            idx = self.idx_scatter[:, None, :].expand(nk, nbc, m)
+            box.scatter_(2, idx, cc)
+            if count:
+                opcount.bump("fft")
+            psi = torch.fft.ifftn(box[..., : self.n].reshape(nk, nbc, *self.shape),
+                                  dim=(-3, -2, -1))
+            # fftn(ifftn(·)) is norm-neutral: the 1/N and ×N of the fftbox
+            # conventions cancel, so no scaling factors here
+            if count:
+                opcount.bump("fft")
+            vg = torch.fft.fftn(psi * v_eff, dim=(-3, -2, -1)).reshape(nk, nbc, self.n)
+            gath = self.gather_idx[:, None, :].expand(nk, nbc, m)
+            out[:, lo:hi] += vg.gather(2, gath)
+
+    def _use_toeplitz(self, c: torch.Tensor, v_eff: torch.Tensor) -> bool:
+        """The measured per-geometry gate for the Toeplitz local apply.
+
+        "on" forces it (within eligibility); "auto" runs a one-time trial per
+        (device, nk, npw_max, shape, dtype) signature: both local-term paths
+        are timed on the real block and Toeplitz is adopted only if it beats
+        the FFT path by ≥(1−margin). The trial costs one extra local-term
+        evaluation once per process per signature; on a losing verdict the
+        trial's M and index table are freed immediately."""
+        if not self._toep_eligible:
+            return False
+        if self._toep_forced or _TOEPLITZ_MODE == "on":
+            return True
+        nk, nb, m = c.shape
+        key = (c.device.type, nk, m, self.shape, c.dtype)
+        verdict = _TOEP_VERDICT.get(key)
+        if verdict is None:
+
+            def timed(f) -> float:
+                f()  # warm (JIT allocations, M/idx builds land here)
+                t0 = time.perf_counter()
+                f()
+                return time.perf_counter() - t0
+
+            scratch = torch.zeros_like(c)
+            t_fft = timed(lambda: self._local_fft_into(c, scratch, v_eff, count=False))
+            t_toep = timed(lambda: self._local_toep(c))
+            verdict = t_toep < _TOEP_TRIAL_MARGIN * t_fft
+            _TOEP_VERDICT[key] = verdict
+            if not verdict:  # free the trial's M (+ shared idx) right away
+                self._toep_M_cache.clear()
+                self._toep_idx = None
+                if self.bk.toep_idx_cache is not None:
+                    self.bk.toep_idx_cache.pop(self.shape, None)
+        return verdict
 
     def _get_box(self, nk: int, nb: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
         if (
@@ -329,32 +443,12 @@ class BatchedHamiltonian:
         t_r, v_eff, p, p_conj, dij = self._tables(c.dtype)
         out = t_r[:, None, :] * c
 
-        if self._toep_idx is not None:
-            # Small-cell Toeplitz path: local V·ψ as one dense GEMM per k,
-            # out(G_i) += Σ_j M[i,j] c(G_j). Mask the input so padded columns
-            # (whose M entries are undefined) cannot pollute valid rows; the
-            # output is masked again at the return, as in the FFT path.
-            M = self._toeplitz_M(c.dtype)
-            cm = c * bk.mask[:, None, :]
-            out = out + torch.einsum("kij,kbj->kbi", M, cm)
+        if self._use_toeplitz(c, v_eff):
+            # Small-cell Toeplitz path (measured verdict, see _use_toeplitz):
+            # local V·ψ as one dense GEMM per k.
+            out = out + self._local_toep(c)
         else:
-            chunk = self._band_chunk(nk, c.device, c.element_size())
-            for lo in range(0, nb, chunk):
-                hi = min(lo + chunk, nb)
-                cc = c[:, lo:hi]
-                nbc = hi - lo
-                box = self._get_box(nk, nbc, cc.dtype, cc.device)
-                idx = self.idx_scatter[:, None, :].expand(nk, nbc, m)
-                box.scatter_(2, idx, cc)
-                opcount.bump("fft")
-                psi = torch.fft.ifftn(box[..., : self.n].reshape(nk, nbc, *self.shape),
-                                      dim=(-3, -2, -1))
-                # fftn(ifftn(·)) is norm-neutral: the 1/N and ×N of the fftbox
-                # conventions cancel, so no scaling factors here
-                opcount.bump("fft")
-                vg = torch.fft.fftn(psi * v_eff, dim=(-3, -2, -1)).reshape(nk, nbc, self.n)
-                gath = self.gather_idx[:, None, :].expand(nk, nbc, m)
-                out[:, lo:hi] += vg.gather(2, gath)
+            self._local_fft_into(c, out, v_eff)
 
         if p.shape[1]:
             b = becp_b(p, c, p_conj)

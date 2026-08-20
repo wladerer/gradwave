@@ -193,18 +193,18 @@ def _chi0_q_batched(res, q_frac, v_box, tol, max_iter, ks, kw, symmetrizer):
 
     bk_k = _reindex_bk(bk, ksel)                       # the k spheres (selected)
     bk_kq = _reindex_bk(bk, jsel)                      # the k+q spheres
-    # The Toeplitz local apply is opt-in (off by default — it regresses routine
-    # SCFs), but the batched many-k Sternheimer solve here is exactly the regime it
-    # WINS (~2×), so enable it for this Hamiltonian's construction. The memory gate
-    # still declines for large npw, falling back to the FFT apply.
+    # The batched many-k Sternheimer solve here is exactly the regime the
+    # Toeplitz local apply WINS (~2× measured), so force it for this
+    # Hamiltonian's construction rather than leaving it to the timing trial.
+    # The memory gate still declines for large npw, falling back to FFT.
     import gradwave.core.batch as _batch
 
-    _toep_prev = _batch._TOEPLITZ_LOCAL_ENABLED
-    _batch._TOEPLITZ_LOCAL_ENABLED = True
+    _toep_prev = _batch._TOEPLITZ_MODE
+    _batch._TOEPLITZ_MODE = "on"
     try:
         h_kq = BatchedHamiltonian(bk_kq, shape, res.v_eff, projectors_b(bk_kq, system.positions))
     finally:
-        _batch._TOEPLITZ_LOCAL_ENABLED = _toep_prev
+        _batch._TOEPLITZ_MODE = _toep_prev
 
     npw_max = bk.mask.shape[1]
     nocc = _occupied(res, 0, ks[0])[0].shape[0]

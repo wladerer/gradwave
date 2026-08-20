@@ -931,6 +931,13 @@ def _solve_bands(
                 )
         # apply convention wants D^T; D is Hermitian so D^T = conj(D)
         hub_dij = dij.conj()
+    # NOTE(measured no-go): a coarse-box "draft" local apply for the loose-
+    # tolerance iterations (truncating V_eff to a 0.75-linear box, certified
+    # against tol_eff) was built and measured on 2026-08-19: the ACTUAL
+    # per-band perturbation ‖(H_draft−H)ψ‖ is ~3.7e-3 Ha — 40× over the
+    # 0.1·tol_eff budget it must clear — set by V_eff's near-core Fourier
+    # tail, which does not shrink with system size. Removed rather than
+    # gated; don't re-propose without a fundamentally sharper certificate.
     h = BatchedHamiltonian(bk, grid_shape, veff_sp, projs_b, hub_q=hub_q, hub_dij=hub_dij)
     apply = h.apply
     if fock_apply_sp is not None:
