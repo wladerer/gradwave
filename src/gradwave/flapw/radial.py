@@ -46,12 +46,16 @@ def numerov_log(l: int, energy: Tensor, r: Tensor, dx: float, v: Tensor) -> Tens
     return torch.stack(qs) * torch.sqrt(r)
 
 
-def numerov_log_np(l: int, energies, r, dx: float, v, n_cut: int | None = None) -> np.ndarray:
+def numerov_log_np(l, energies, r, dx: float, v, n_cut: int | None = None) -> np.ndarray:
     """Pure-numpy outward Numerov, batched over trial energies — the fast *forward* path for the SCF
     (no autograd). Same recurrence as ``numerov_log``; ``energies`` is a scalar or ``(nE,)`` array,
     returning ``u`` of shape ``(N,)`` or ``(nE, N)``. The N-step recurrence runs once, vectorized
     over energies, in numpy — no per-element torch dispatch. Use ``numerov_log`` when a gradient in
     ``E`` or the potential is needed.
+
+    ``l`` may be a scalar or an ``(nE,)`` array (one angular momentum per row), so a caller can
+    integrate every (l, E) channel of a sphere in ONE recurrence loop — the per-row arithmetic is
+    elementwise, so a batched call is bit-identical to the per-l calls it replaces.
 
     ``n_cut``: integrate only the first ``n_cut`` mesh points (zeros beyond). The augmentation uses
     ``u`` only inside R_MT, so integrating out to r_max would just risk float overflow for deep
@@ -61,13 +65,16 @@ def numerov_log_np(l: int, energies, r, dx: float, v, n_cut: int | None = None) 
     vn = (v.detach().numpy() if torch.is_tensor(v) else np.asarray(v)).astype(float)
     scalar = np.ndim(energies) == 0
     e = np.atleast_1d(np.asarray(energies, dtype=float))
+    lhalf = np.asarray(l, dtype=float) + 0.5                  # scalar or per-row (nE,)
+    if lhalf.ndim:
+        lhalf = lhalf[:, None]
     n = rn.shape[0]
     nc = n if n_cut is None else min(int(n_cut), n)
-    f = 1.0 - (dx * dx / 12.0) * ((l + 0.5) ** 2
+    f = 1.0 - (dx * dx / 12.0) * (lhalf**2
                                   + (rn * rn)[None, :] * (vn[None, :] - e[:, None]) / HBAR2_2M)
     q = np.zeros((e.shape[0], n))
-    q[:, 0] = rn[0] ** (l + 0.5)
-    q[:, 1] = rn[1] ** (l + 0.5)
+    q[:, 0] = rn[0] ** np.squeeze(lhalf)
+    q[:, 1] = rn[1] ** np.squeeze(lhalf)
     for i in range(2, nc):
         q[:, i] = ((12.0 - 10.0 * f[:, i - 1]) * q[:, i - 1] - f[:, i - 2] * q[:, i - 2]) / f[:, i]
     u = q * np.sqrt(rn)[None, :]

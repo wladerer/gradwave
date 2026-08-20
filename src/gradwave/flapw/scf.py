@@ -50,6 +50,7 @@ from gradwave.flapw.lapw import (
     enumerate_kg,
     match_ab_vec,
     radial_channel,
+    radial_channels_all,
     solve_geneig,
     solve_geneig_subspace,
 )
@@ -163,7 +164,7 @@ def _build_lodat(los_by_key, chan, El_by_key, vmt_by_key, R_by_key, at_by_sym, k
             seen.add(l)
             e2 = (at_by_sym[key_sym[key]][spec] if isinstance(spec, str) else float(spec))
             e2 = e2 - v0_by_key[key]
-            u, ud = _radial_u(l, El_by_key[key][l], r, dx, vmt_by_key[key], R_by_key[key])
+            u, ud = chan[key][l]["u_in"], chan[key][l]["ud_in"]   # reuse the channel's Numerov
             out.append(_build_lo(l, e2, chan[key][l], u, ud, r, dx, vmt_by_key[key], R_by_key[key]))
         lodat[key] = out
     return lodat
@@ -250,23 +251,30 @@ def _bands_amps(c_pw, ks, abl, lmax, vol, lo_block=None, los=None, ylm_by_l=None
     return out
 
 
-def _us_ext(El, lmax, r, dx, v_sphere, R, los=None):
-    """The per-l radial-function lists ``[u, u̇ (, u₂)]`` matching ``_bands_amps``' amplitudes."""
+def _us_ext(El, lmax, r, dx, v_sphere, R, los=None, chan_sp=None):
+    """The per-l radial-function lists ``[u, u̇ (, u₂)]`` matching ``_bands_amps``' amplitudes.
+    ``chan_sp`` = this sphere's ``{l: radial_channel}`` — when given, the channel's stored
+    ``u_in``/``ud_in`` arrays are reused instead of re-running Numerov per l."""
     slices = _lo_row_slices(los)
     us = {}
     for lang in range(lmax + 1):
-        u, ud = _radial_u(lang, El[lang], r, dx, v_sphere, R)
+        if chan_sp is not None:
+            u, ud = chan_sp[lang]["u_in"], chan_sp[lang]["ud_in"]
+        else:
+            u, ud = _radial_u(lang, El[lang], r, dx, v_sphere, R)
         us[lang] = [u, ud] + ([slices[lang][2]["u2"]] if lang in slices else [])
     return us
 
 
 def _sphere_valence_density(c_occ, occ, ks, abl, El, lmax, vol, r, dx, v_sphere, R,
-                            lo_block=None, los=None, ylm_by_l=None):
+                            lo_block=None, los=None, ylm_by_l=None, us=None):
     """The spherical (l=0-projected) valence density inside one sphere, LO-aware: each l-channel
     carries ``[u, u̇]`` plus an LO's second radial when present, and the density sums every radial
-    pair ``ρ += (1/4π) Σ_ij P_ij f_i f_j / r²`` with ``P_ij = Σ_{n,m} occ·Re(A*_i A_j)``."""
+    pair ``ρ += (1/4π) Σ_ij P_ij f_i f_j / r²`` with ``P_ij = Σ_{n,m} occ·Re(A*_i A_j)``.
+    ``us`` = a precomputed ``_us_ext`` result (k-independent — a k-mesh sweep hoists it)."""
     rr = r.numpy()[r.numpy() <= R]
-    us = _us_ext(El, lmax, r, dx, v_sphere, R, los)
+    if us is None:
+        us = _us_ext(El, lmax, r, dx, v_sphere, R, los)
     rho = np.zeros_like(rr)
     if ylm_by_l is None:
         ylm_by_l = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
@@ -415,8 +423,8 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
     dk_norm = np.sqrt(np.maximum(kk[:, None] + kk[None, :] - 2.0 * kdot, 0.0))
     cost = np.clip(kdot / np.outer(ksafe, ksafe), -1.0, 1.0)
     if chan is None:
-        chan = {key: {lang: radial_channel(lang, sp["El"][lang], r, dx, sp["v"], sp["R"])
-                      for lang in range(lmax + 1)} for key, sp in species.items()}
+        chan = {key: radial_channels_all(lmax, sp["El"], r, dx, sp["v"], sp["R"])
+                for key, sp in species.items()}
     inter = np.eye(npw, dtype=complex)
     Saug = np.zeros((npw, npw), dtype=complex)
     Haug = np.zeros((npw, npw), dtype=complex)
@@ -455,7 +463,8 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
         abl_by_atom.append(abl)
     if v_nsph:
         if nsph_int is None:
-            nsph_int = _nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=lodat)
+            nsph_int = _nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=lodat,
+                                              chan=chan)
         ylm_nsph = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
         for ai, (tau, key) in enumerate(atoms_cart):
             ints = nsph_int.get(key)
@@ -533,12 +542,13 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
     return ev, c, mill, ks, abl_by_atom, vol
 
 
-def _nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=None):
+def _nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=None, chan=None):
     """The k-independent radial integrals of the aspherical potential — ``∫u_l V_LM u_l' dr`` (and
     the u̇/LO variants) per atom key. These were being recomputed at every k-point; a k-mesh sweep
     builds them once per SCF iteration and passes them into the secular build (same pattern as the
-    ``chan`` hoist). Returns ``{key: {"uu": {(L,M,l,l'): (i_aa,i_ab,i_ba,i_bb)}, "lo_u": {...},
-    "lo_lo": {...}}}``."""
+    ``chan`` hoist). ``chan`` = the per-key radial channels — when given, their stored
+    ``u_in``/``ud_in`` arrays are reused instead of re-running Numerov per l. Returns
+    ``{key: {"uu": {(L,M,l,l'): (i_aa,i_ab,i_ba,i_bb)}, "lo_u": {...}, "lo_lo": {...}}}``."""
     r_np = r.numpy()
     out = {}
     for key, comps in v_nsph.items():
@@ -547,8 +557,12 @@ def _nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=None):
         rr = r_np[r_np <= species[key]["R"]]
         drw = rr * dx
         el, vsph = species[key]["El"], species[key]["v"]
-        us = {lang: _radial_u(lang, el[lang], r, dx, vsph, species[key]["R"])
-              for lang in range(lmax + 1)}
+        if chan is not None and key in chan:
+            us = {lang: (chan[key][lang]["u_in"], chan[key][lang]["ud_in"])
+                  for lang in range(lmax + 1)}
+        else:
+            us = {lang: _radial_u(lang, el[lang], r, dx, vsph, species[key]["R"])
+                  for lang in range(lmax + 1)}
         los = (lodat or {}).get(key, [])
         uu, lo_u, lo_lo = {}, {}, {}
         for (big_l, big_m), vlm in comps.items():
@@ -1087,14 +1101,19 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
     # pass 1 — solve every k, keep the results; pass 2 — occupy and accumulate the density.
     npad = max(2, nbands // 2) if smearing > 0 else 4
     nb_solve = nbands + npad
-    # radial channels are k-independent — build once per iteration, reuse across the k-mesh.
-    chan = {key: {lang: radial_channel(lang, sp["El"][lang], r, dx, sp["v"], sp["R"])
-                  for lang in range(lmax + 1)} for key, sp in species.items()}
+    # radial channels are k-independent — build once per iteration, reuse across the k-mesh
+    # (one batched Numerov per species: every (l, E±h) row in a single recurrence loop).
+    chan = {key: radial_channels_all(lmax, sp["El"], r, dx, sp["v"], sp["R"])
+            for key, sp in species.items()}
     lodat = (_build_lodat(los_by_key, chan, El_by_key, vmt_by_key, R_by_key, at_by_sym,
                           key_sym, v0_by_key, r, dx) if los_by_key else None)
     # aspherical radial integrals are k-independent — build once per iteration, like chan.
-    nsph_int = (_nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=lodat)
+    nsph_int = (_nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=lodat, chan=chan)
                 if v_nsph else None)
+    # the sphere radial functions are k-independent too — hoist them out of the per-k density
+    # accumulation (they were re-Numerov'd for every (k, atom, l))
+    us_by_key = {k: _us_ext(El_by_key[k], lmax, r, dx, vmt_by_key[k], R_by_key[k],
+                            (lodat or {}).get(k), chan_sp=chan[k]) for k in keys}
     kdata, ev_all, ev_gamma = [], [], None
     cprevs = [None if full_iter else c_prev_by_k[ik] for ik in range(len(kfracs))]
     if kworkers > 1 and len(kfracs) > 1:
@@ -1149,8 +1168,6 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
     rho_2m = None
     if fullpot and not mt_phase:
         from gradwave.flapw.efg import sphere_density_multipoles_bands
-        us_by_key = {k: _us_ext(El_by_key[k], lmax, r, dx, vmt_by_key[k], R_by_key[k],
-                                (lodat or {}).get(k)) for k in keys}
         lset_pot = [(lg, m) for lg in range(1, fullpot_lmax + 1) for m in range(-lg, lg + 1)]
         if (2, 0) not in lset_pot:                      # the EFG observable always needs l=2
             lset_pot += [(2, m) for m in range(-2, 3)]
@@ -1177,7 +1194,8 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
                         if nlo_k else None)
             _, rk = _sphere_valence_density(cp, occl, ks, abl_all[ai], El_by_key[k], lmax,
                                             vol, r, dx, vmt_by_key[k], R_by_key[k],
-                                            lo_block=lo_block, los=los_k, ylm_by_l=ylm_by_l)
+                                            lo_block=lo_block, los=los_k, ylm_by_l=ylm_by_l,
+                                            us=us_by_key[k])
             rho_val[k] += w * rk
             if fullpot and not mt_phase:
                 amps_all = _bands_amps(cp, ks, abl_all[ai], lmax, vol, lo_block=lo_block,

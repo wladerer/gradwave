@@ -63,7 +63,43 @@ def radial_channel(l, El, r, dx, v, R):
     un = uraw / np.sqrt((uraw[:, inside] ** 2 * drw).sum(axis=1))[:, None]
     u = un[0]
     udot = (un[1] - un[2]) / (2 * hE)
+    return _finish_channel(l, El, r_np, inside, rr, drw, dx, v, R, u, udot)
 
+
+def radial_channels_all(lmax, El_by_l, r, dx, v, R):
+    """Every l-channel of one sphere in ONE batched Numerov call — ``{l: radial_channel dict}``.
+
+    The (lmax+1)·3 rows (each channel's E, E±h) share the mesh and the potential, so they run in a
+    single recurrence loop; the per-row arithmetic is elementwise, so the result is bit-identical to
+    looping ``radial_channel`` over l. This is the per-iteration builder for the SCF's ``chan``
+    (the per-l Numerov loops were ~30% of a production fullpot iteration)."""
+    r_np = r.detach().numpy()
+    inside = r_np <= R
+    rr = r_np[inside]
+    drw = rr * dx
+    n_cut = int(np.searchsorted(r_np, 2.0 * R)) + 5
+    ls, es, hes = [], [], {}
+    for lang in range(lmax + 1):
+        el = El_by_l[lang]
+        he = max(abs(el) * 1e-4, 1e-3)
+        hes[lang] = he
+        ls += [lang, lang, lang]
+        es += [el, el + he, el - he]
+    uraw = numerov_log_np(np.array(ls), np.array(es), r, dx, v, n_cut=n_cut)
+    un = uraw / np.sqrt((uraw[:, inside] ** 2 * drw).sum(axis=1))[:, None]
+    out = {}
+    for lang in range(lmax + 1):
+        u = un[3 * lang]
+        udot = (un[3 * lang + 1] - un[3 * lang + 2]) / (2 * hes[lang])
+        out[lang] = _finish_channel(lang, El_by_l[lang], r_np, inside, rr, drw, dx, v, R, u, udot)
+    return out
+
+
+def _finish_channel(l, El, r_np, inside, rr, drw, dx, v, R, u, udot):
+    """The post-Numerov tail of ``radial_channel``: boundary value/slope, overlaps, weak-form
+    kinetic and potential integrals from the normalized ``u``/``u̇`` mesh arrays. Also carries the
+    in-sphere radial arrays (``u_in``/``ud_in``) so downstream consumers (sphere density,
+    aspherical integrals, local orbitals) reuse them instead of re-running Numerov."""
     def val_slope(f):
         idx = np.sort(np.argsort(np.abs(r_np - R))[:7])
         c = np.polyfit(r_np[idx] - R, f[idx], 3)
@@ -71,7 +107,8 @@ def radial_channel(l, El, r, dx, v, R):
 
     uR, upR = val_slope(u)
     udR, udpR = val_slope(udot)
-    ui, udi, v_in = u[inside], udot[inside], v.detach().numpy()[inside]
+    ui, udi = u[inside], udot[inside]
+    v_in = (v.detach().numpy() if hasattr(v, "detach") else np.asarray(v))[inside]
     ov = {"uu": (ui * ui * drw).sum(), "uud": (ui * udi * drw).sum(),
           "udud": (udi * udi * drw).sum()}
     ll = l * (l + 1)
@@ -90,7 +127,8 @@ def radial_channel(l, El, r, dx, v, R):
             "Tuu": float(kin("u", "u")), "Tuud": float(kin("u", "ud")),
             "Tudud": float(kin("ud", "ud")),
             "Vuu": float(pot("u", "u")), "Vuud": float(pot("u", "ud")),
-            "Vudud": float(pot("ud", "ud")), "El": El, "l": l}
+            "Vudud": float(pot("ud", "ud")), "El": El, "l": l,
+            "u_in": ui, "ud_in": udi}
 
 
 def match_ab(ch, q, R):
