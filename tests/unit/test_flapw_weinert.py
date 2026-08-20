@@ -90,16 +90,17 @@ def test_interstitial_moments_match_dense_quadrature():
                                            list(range(lmax + 1)))
     th, ph, wgt = _angular_grid(20, 30)
     dirs = np.stack([np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)], -1)
-    rq = np.linspace(0, R, 801)[1:]
-    dr = rq[1] - rq[0]
+    xg_r, wg_r = np.polynomial.legendre.leggauss(120)          # radial GL on [0,R]
+    rq = 0.5 * R * (xg_r + 1.0)
+    wr = 0.5 * R * wg_r
     pts = tau[None, None] + rq[:, None, None] * dirs.reshape(1, -1, 3)
     rho_pts = 0.05 * np.cos(pts @ g1)
     for lang in range(lmax + 1):
         for m in range(-lang, lang + 1):
             yl = sph_harm_y(lang, m, th, ph).reshape(-1)
             q_dense = np.sum(rho_pts * np.conj(yl)[None, :] * wgt.reshape(-1)[None, :]
-                             * (rq ** (lang + 2))[:, None]) * dr
-            assert abs(q_bessel[(lang, m)] - q_dense) < 1e-6, (lang, m)
+                             * (wr * rq ** (lang + 2))[:, None])
+            assert abs(q_bessel[(lang, m)] - q_dense) < 1e-9, (lang, m)
 
 
 def test_isolated_sphere_boundary_null():
