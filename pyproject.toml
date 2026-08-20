@@ -145,6 +145,7 @@ include = [
     "src/gradwave/postscf/bands.py",
     "src/gradwave/postscf/composition_design.py",
     "src/gradwave/postscf/convergence_error.py",
+    "src/gradwave/postscf/convergence_noise.py",
     "src/gradwave/postscf/convex_hull.py",
     "src/gradwave/postscf/coulomb_kernel.py",
     "src/gradwave/postscf/dispersion_d4.py",
@@ -213,7 +214,7 @@ include = [
     "src/gradwave/solvers/registry.py",
     "src/gradwave/solvers/davidson.py",
     "src/gradwave/solvers/chebyshev.py",
-    "src/gradwave/solvers/lobpcg.py",
+    # (lobpcg.py was removed with #332 — measured 2-8x slower than Davidson)
     #
     # Phase 9: the three central SCF drivers left off in the scf/ pilot --
     # loop.py (NC), uspp_loop.py (USPP/PAW), noncollinear.py (spinor/SOC) --

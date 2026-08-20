@@ -141,7 +141,7 @@ def bootstrap_bm3(
     if n_samples < 2:
         raise ValueError("need n_samples >= 2 for a standard deviation")
     rng = np.random.default_rng(seed)
-    params = []
+    params: list[tuple[float, float, float, float]] = []
     n_failed = 0
     for _ in range(n_samples):
         noise = rng.standard_normal(e.shape) * sig
