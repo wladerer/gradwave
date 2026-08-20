@@ -179,7 +179,11 @@ def _qr_offload(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 # CholQR2 escape hatch, read once at import (module docstring). Default "on":
 # CholQR2 replaces the tall-skinny QR wherever it succeeds; breakdown falls
 # back to `_qr_offload` per call, so "off" only exists for A/B benchmarks.
-_CHOLQR_ENV = os.environ.get("GRADWAVE_CHOLQR", "on").strip().lower()
+# Default OFF: measured neutral on CPU (0.94-1.03x battery) and neutral-to-
+# slightly-negative on RTX 3050 whole-SCF (gaas/al 0.93x, rest 1.0x) — the
+# QR round is too small a wall-clock slice at these sizes. Kept for a
+# datacenter-GPU retest where batched QR genuinely bottlenecks.
+_CHOLQR_ENV = os.environ.get("GRADWAVE_CHOLQR", "off").strip().lower()
 
 
 def _cholqr2(x: torch.Tensor) -> torch.Tensor | None:

@@ -406,3 +406,11 @@ Same warm state, 40-iteration continuations (ecut300 lmax3 fp4 k222):
               per system class, do not blindly increase.
 Production recipe now: Anderson + kerker=0.7 for the trajectory, newton_polish to machine
 precision. Default remains opt-in until the easy-config matrix is re-validated with it.
+
+## CLEAN GPU VERDICTS + WARM-GATE (2026-08-19 late)
+CholQR2 RTX3050 whole-SCF: ~0.95-1.0x (neutral-negative) -> default flipped to OFF; retest on
+datacenter GPU only. Pruned FFT GPU: 0.27-0.67x SLOWER (torch strided-pass overhead persists on
+cuFFT) -> measured-closed, branch stays unmerged. TiO2 warm gate: k222+kerker GATED at r_nsph
+1.8e-3 (best production point yet) but the k333 continuation DIVERGED even warm+screened — k333
+needs newton_polish from the k222 state, not more Anderson. (Diverged-state EFG printed O
+[-23.4,+18.3,+5.0] — Elk-like sign pattern but untrustworthy; do not quote.)
