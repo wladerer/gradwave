@@ -5,7 +5,8 @@ out(G_i)=Σ_j V̂(G_i−G_j) c(G_j) = M @ c, so the Toeplitz GEMM path must repr
 the FFT scatter/gather path to machine precision for ANY real v_eff (the identity
 is a property of the discretized operator, not of converged physics — a random
 potential is a stronger test than a physical one). These gates lock that in and
-check the memory/flag gating that keeps the path confined to small cells.
+check the mode/memory gating plus the measured per-geometry verdict that decides
+when the path actually runs.
 """
 
 from pathlib import Path
@@ -25,15 +26,17 @@ FIX = Path(__file__).parents[1] / "fixtures" / "qe"
 
 
 @pytest.fixture(autouse=True)
-def _enable_toeplitz():
-    """The Toeplitz local path is opt-in (default off — it regresses routine
-    symmetry-on insulator SCFs); these tests exercise it, so enable it here and
-    restore the default afterwards. Tests that toggle the flag themselves still
-    save/restore the current (enabled) value."""
-    old = batch._TOEPLITZ_LOCAL_ENABLED
-    batch._TOEPLITZ_LOCAL_ENABLED = True
+def _force_toeplitz():
+    """Force the Toeplitz path ("on" bypasses the timing trial — a timed
+    verdict is machine-dependent and would make these gates flaky) and start
+    each test with a clean verdict cache. Tests that set the mode themselves
+    still save/restore the current (forced) value."""
+    old = batch._TOEPLITZ_MODE
+    batch._TOEPLITZ_MODE = "on"
+    batch._TOEP_VERDICT.clear()
     yield
-    batch._TOEPLITZ_LOCAL_ENABLED = old
+    batch._TOEPLITZ_MODE = old
+    batch._TOEP_VERDICT.clear()
 
 
 def _si_system(kmesh=(2, 2, 2), ecut=12):
@@ -58,7 +61,7 @@ def _random_veff_H(system):
 def test_toeplitz_matches_fft_bit_exact():
     system = _si_system()
     h, bk = _random_veff_H(system)
-    assert h._toep_idx is not None, "small cell should be Toeplitz-eligible"
+    assert h._toep_eligible, "small cell should be Toeplitz-eligible"
     assert not bk.mask.all(), "test needs padded slots to exercise masking"
 
     nk, npw = bk.mask.shape
@@ -68,11 +71,37 @@ def test_toeplitz_matches_fft_bit_exact():
     c = torch.randn(nk, 8, npw, dtype=CDTYPE)
 
     out_toep = h.apply(c)
-    h._toep_idx = None  # force the FFT scatter/gather path on the same operator
+    h._toep_eligible = False  # force the FFT path on the same operator
     out_fft = h.apply(c)
 
     assert torch.allclose(out_toep, out_fft, atol=1e-12, rtol=0), \
         f"max|Δ|={(out_toep - out_fft).abs().max().item():.2e}"
+
+
+def test_auto_verdict_caches_and_agrees():
+    """"auto" mode: the first apply runs the timing trial, caches a verdict
+    per geometry signature, and BOTH verdict outcomes give the same H·c (the
+    two paths are the same operator, so whichever the clock picks is right)."""
+    system = _si_system()
+    old = batch._TOEPLITZ_MODE
+    try:
+        batch._TOEPLITZ_MODE = "auto"
+        h, bk = _random_veff_H(system)
+        nk, npw = bk.mask.shape
+        torch.manual_seed(3)
+        c = torch.randn(nk, 8, npw, dtype=CDTYPE)
+        out_auto = h.apply(c)
+        assert len(batch._TOEP_VERDICT) == 1  # trial ran exactly once
+        key, verdict = next(iter(batch._TOEP_VERDICT.items()))
+        assert key == ("cpu", nk, npw, h.shape, CDTYPE)
+        out_auto2 = h.apply(c)  # cached verdict, no second trial
+        assert len(batch._TOEP_VERDICT) == 1
+        assert torch.allclose(out_auto, out_auto2, atol=1e-12, rtol=0)
+        # losing verdict must free the trial's cached tensors
+        if not verdict:
+            assert h._toep_idx is None and not h._toep_M_cache
+    finally:
+        batch._TOEPLITZ_MODE = old
 
 
 def test_toeplitz_is_hermitian_matrix():
@@ -84,6 +113,17 @@ def test_toeplitz_is_hermitian_matrix():
     assert err < 1e-13, f"M not Hermitian: {err.item():.2e}"
 
 
+def test_idx_cached_on_batchedk_across_rebuilds():
+    """The geometry-only difference-index table is built once per BatchedK and
+    shared across per-iteration Hamiltonian rebuilds (the old per-ctor build
+    cost ~one FFT apply per iteration for nothing)."""
+    system = _si_system(kmesh=(1, 1, 1))
+    h1, bk = _random_veff_H(system)
+    idx1 = h1._toeplitz_idx()
+    h2, _ = _random_veff_H(system)
+    assert h2._toeplitz_idx() is idx1  # same tensor object, not a rebuild
+
+
 def test_memory_gate_disables_large_or_budget():
     system = _si_system()
     # tiny budget ⇒ ineligible even for a small cell
@@ -91,28 +131,27 @@ def test_memory_gate_disables_large_or_budget():
     try:
         batch._TOEPLITZ_M_BUDGET_BYTES = 1
         h, _ = _random_veff_H(system)
-        assert h._toep_idx is None
+        assert not h._toep_eligible
     finally:
         batch._TOEPLITZ_M_BUDGET_BYTES = old
 
 
-def test_disabled_flag_falls_back_to_fft():
+def test_disabled_mode_falls_back_to_fft():
     system = _si_system(kmesh=(1, 1, 1))
-    old = batch._TOEPLITZ_LOCAL_ENABLED
+    old = batch._TOEPLITZ_MODE
     try:
-        batch._TOEPLITZ_LOCAL_ENABLED = False
+        batch._TOEPLITZ_MODE = "off"
         h, bk = _random_veff_H(system)
-        assert h._toep_idx is None  # gated off ⇒ pure FFT path
+        assert not h._toep_eligible  # gated off ⇒ pure FFT path
     finally:
-        batch._TOEPLITZ_LOCAL_ENABLED = old
+        batch._TOEPLITZ_MODE = old
     # and the FFT-only operator still applies correctly vs a Toeplitz one
-    batch._TOEPLITZ_LOCAL_ENABLED = True
     h2, _ = _random_veff_H(system)
     nk, npw = bk.mask.shape
     torch.manual_seed(2)
     c = torch.randn(nk, 8, npw, dtype=CDTYPE) * bk.mask[:, None, :]
     out_on = h2.apply(c)
-    h2._toep_idx = None
+    h2._toep_eligible = False
     out_off = h2.apply(c)
     assert torch.allclose(out_on, out_off, atol=1e-12, rtol=0)
 
@@ -130,4 +169,4 @@ def test_uspp_dual_grid_not_eligible(smooth_shape):
     v_smooth = torch.randn(*smooth_shape, dtype=RDTYPE)
     h = BatchedHamiltonian(bk, shape, v_eff, projs,
                            smooth=(smooth_shape, flat, v_smooth))
-    assert h._toep_idx is None
+    assert not h._toep_eligible

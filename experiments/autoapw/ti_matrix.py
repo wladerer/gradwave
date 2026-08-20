@@ -7,7 +7,8 @@ U = 0.3048
 ATOMS = [((0.0, 0.0, 0.0), "Ti"), ((0.5, 0.5, 0.5), "Ti"),
          ((U, U, 0.0), "O"), ((1 - U, 1 - U, 0.0), "O"),
          ((0.5 + U, 0.5 - U, 0.5), "O"), ((0.5 - U, 0.5 + U, 0.5), "O")]
-BASE = dict(ecut=300.0, smearing=0.0, efg=True, subspace_reuse=False, fullpot=True, use_symmetry=True, kworkers=5)
+BASE = dict(ecut=300.0, smearing=0.0, efg=True, subspace_reuse=False, fullpot=True,
+            use_symmetry=True, kworkers=5)
 LO = dict(los={"Ti": [(0, "3s"), (1, "3p")]},
           core={"Ti": [(0, 1, 2), (0, 2, 2), (1, 1, 6)]},
           val_e={"Ti": 12}, el_override={"Ti": {1: "3d"}})
@@ -22,7 +23,8 @@ def run(tag, **kw):
                f"symdev={rec['symmetry_dev']:.1e}"]
         for key, name in (("a0", "Ti"), ("a2", "O ")):
             s = i["efg"][key]
-            w = np.linalg.eigvalsh(s["tensor"]); w = w[np.argsort(-np.abs(w))]
+            w = np.linalg.eigvalsh(s["tensor"])
+            w = w[np.argsort(-np.abs(w))]
             out.append(f"  {name} [{w[0]:+.2f},{w[1]:+.2f},{w[2]:+.2f}] eta={s['eta']:.2f}")
         print("\n".join(out), flush=True)
         return i

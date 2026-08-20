@@ -347,3 +347,16 @@ Vetted, code-mapped, ranked (gain x p / effort), all honoring the measured-negat
 5. Convergence-cohorted lockstep: PROBE FIRST via existing history_out spread histogram.
 6. Toeplitz auto-gate (gating half only).
 The sanitize phase's spec was faithful incl. the AD constraint; workflow validated twice now.
+
+## ACCEPTANCE MATRIX FINAL (asus, 2026-08-19)
+base  k333 aug3 fp4:  n_it=40 r_nsph=9.7e-2 (NOT gated)  Ti [-0.75,+0.58,+0.17] eta .55 | O [+8.10,-7.15,-0.95] eta .77
+aug4  k333 warm:      n_it=30 r_nsph=1.7e-1 (NOT gated)  O [-5.53,+5.53,0] eta 1.00
+fp6   k333 warm:      r_nsph=4.0 DIVERGED — confirms unresolvable L=5,6 pseudocharges; cap matched L at 4
+k444  aug3 warm:      n_it=30 r_nsph=4.2e-3 GATED        Ti [-1.09,+0.80,+0.29] eta .47 | O [+8.33,-7.22,-1.11] eta .73
+TiLO  aug3 k333:      n_it=21 r_nsph=5.7e-4 GATED        Ti [-1.04,+0.89,+0.15] eta .70 | O [+8.58,-7.46,-1.12] eta .74
+
+Reading: the two GATED runs agree with each other (O 8.3-8.6, eta .73-.74) and O's eta matches
+Elk (0.74) exactly; O magnitude is ~44% of Elk's 19.1. Ti is ~1 eV/A^2 vs Elk 19.3 — the Ti
+site is dominated by semicore/core polarization the current lmax=3 aug + no-O-LO basis doesn't
+capture; TiLO barely moves it, so the gap is basis (aug-lmax / LO set / fullpot_lmax), not
+convergence. Next lever: fullpot_lmax=4 with matched-L capped at 4, higher aug-lmax, O LOs.

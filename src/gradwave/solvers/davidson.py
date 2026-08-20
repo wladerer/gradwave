@@ -12,6 +12,13 @@ CUDA batched-QR CPU offload (see ``_qr_offload``). "auto" gates it on a one-time
 per-device fp64 microbenchmark, so the offload fires on fp64-crippled consumer
 cards and stays off on datacenter fp64 hardware. "on"/"off" force it either way,
 so a benchmark can toggle the path without monkeypatching. Read once at import.
+
+``GRADWAVE_CHOLQR`` in {"on", "off"} (default "on") controls whether
+``_orthonormalize_b`` uses CholQR2 (Gram GEMM → fp64 Cholesky → triangular
+solve, twice) instead of the batched tall-skinny QR. CholQR2 is GEMM-shaped —
+fast on every device — and removes the D2H/H2D round trip of the CUDA QR
+offload entirely; a Cholesky breakdown (rank-deficient block) falls back to
+the QR path for that call. "off" forces the QR path. Read once at import.
 """
 
 from __future__ import annotations
@@ -169,6 +176,42 @@ def _qr_offload(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.linalg.qr(x, mode="reduced")
 
 
+# CholQR2 escape hatch, read once at import (module docstring). Default "on":
+# CholQR2 replaces the tall-skinny QR wherever it succeeds; breakdown falls
+# back to `_qr_offload` per call, so "off" only exists for A/B benchmarks.
+_CHOLQR_ENV = os.environ.get("GRADWAVE_CHOLQR", "on").strip().lower()
+
+
+def _cholqr2(x: torch.Tensor) -> torch.Tensor | None:
+    """Orthonormal Q spanning x (..., rows, cols) via CholQR2, or None on breakdown.
+
+    Two rounds of Gram → Cholesky → triangular solve. Everything is a batched
+    GEMM (fast on CPU and GPU alike, no cuSOLVER QR, no CPU offload round trip);
+    the only non-GEMM op is a tiny (cols, cols) Cholesky. The Gram matrix and
+    its factorization run in fp64 — the same "subspace reduction ALWAYS in
+    fp64" contract as the Rayleigh-Ritz (issue #136) — and the factor is
+    downcast to the block dtype for the solve; the second round mops up both
+    the downcast and the κ(x)² conditioning of the first Gram, giving
+    ‖QᴴQ − I‖ at fp64 round-off for any κ(x) ≲ 1e7 (far looser than the
+    unit-normalized, projected rows that arrive here). A non-positive-definite
+    Gram (rank-deficient block, κ beyond repair) reports as None so the caller
+    can fall back to Householder QR, which tolerates rank deficiency.
+
+    Physics-neutral by the same span-equivalence argument as the QR offload:
+    Rayleigh-Ritz depends only on the span of the orthonormal basis, and
+    CholQR2's Q spans x exactly as QR's does."""
+    cd = torch.complex128
+    for _ in range(2):
+        gram = x.mH.to(cd) @ x.to(cd)
+        lo, info = torch.linalg.cholesky_ex(gram)
+        if int(info.max()) != 0:  # one scalar sync; breakdown is rare
+            return None
+        x = torch.linalg.solve_triangular(
+            lo.mH.to(x.dtype), x, upper=True, left=False
+        )
+    return x
+
+
 @dataclass
 class DavidsonResult:
     eigenvalues: torch.Tensor  # (nb,) ascending [eV]
@@ -292,12 +335,22 @@ def _orthonormalize_b(
                 x = x - (x @ against.conj().transpose(-1, -2)) @ against
         return x
 
+    def orthonormalize(x):
+        """Row-orthonormalize x: CholQR2 first (GEMM-shaped, every device),
+        Householder QR on breakdown (rank-deficient blocks need QR's arbitrary
+        orthonormal complements for the padded slots to stay consistent)."""
+        if _CHOLQR_ENV != "off":
+            q = _cholqr2(x.transpose(-1, -2))
+            if q is not None:
+                return q.transpose(-1, -2)
+        q, _ = _qr_offload(x.transpose(-1, -2))
+        return q.transpose(-1, -2)
+
     if jitter is not None:
         v = v + 1e-10 * jitter[:, : v.shape[1]]
     v = project(v * mask[:, None, :])
     if jitter is not None:
-        q, _ = _qr_offload(v.transpose(-1, -2))
-        return q.transpose(-1, -2)
+        return orthonormalize(v)
     row_norm = torch.linalg.norm(v, dim=-1, keepdim=True).real
     degenerate = row_norm < 1e-8
     if bool(degenerate.any()):
@@ -305,8 +358,7 @@ def _orthonormalize_b(
         noise = torch.randn(*v.shape, 2, generator=gen, dtype=torch.float64)
         jit = torch.view_as_complex(noise).to(v.device).to(v.dtype)
         v = project((v + degenerate * jit) * mask[:, None, :])
-    q, _ = _qr_offload(v.transpose(-1, -2))
-    return q.transpose(-1, -2)
+    return orthonormalize(v)
 
 
 def _rr(q: torch.Tensor, hq: torch.Tensor, nw: int) -> tuple[torch.Tensor, torch.Tensor]:
