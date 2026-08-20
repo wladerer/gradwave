@@ -75,6 +75,33 @@ def jl_t(l: int, x: torch.Tensor) -> torch.Tensor:
     return torch.where(small, acc, big)
 
 
+def jl_scaled_x2_t(l: int, x2: torch.Tensor) -> torch.Tensor:
+    """j_l(x)/x^l as a function of x² (l ≤ 5, elementwise, x² ≥ 0).
+
+    An EVEN, analytic function of x, so parameterizing by x² keeps it (and
+    its autograd derivatives) exactly smooth at x = 0 — no √ at the origin.
+    The k-differentiable KB projector build (postscf.kgeometry) pairs this
+    with solid harmonics (``ylm_all(..., solid=True)``) so a projector column
+    F_l(|k+G|)·Y_lm(k+G^) is a smooth function of k straight through
+    k+G = 0. Small branch: :func:`jl_t`'s ascending series with the leading
+    x^l factor dropped; large branch: jl_t(x)/x^l (safe — x ≥ SERIES_X
+    there, so the √ and the division never see the origin).
+    """
+    if not 0 <= l <= 5:
+        raise ValueError(f"l={l} out of supported range 0..5")
+    small = x2 < SERIES_X * SERIES_X
+    x2s = torch.where(small, x2, torch.full_like(x2, 1.0))
+    term = torch.full_like(x2, 1.0 / DOUBLE_FACTORIAL[l])
+    acc = term
+    for k in range(1, SERIES_TERMS):
+        term = term * (-0.5 * x2s) / (k * (2 * l + 2 * k + 1))
+        acc = acc + term
+
+    xb = torch.sqrt(torch.where(small, torch.full_like(x2, SERIES_X * SERIES_X), x2))
+    big = jl_t(l, xb) / xb.pow(l) if l else jl_t(0, xb)
+    return torch.where(small, acc, big)
+
+
 def _djl_t(l: int, x: torch.Tensor) -> torch.Tensor:
     """j_l'(x) via the 1/x-free three-term identity (l ≤ 4; needs j_{l+1})."""
     if l == 0:
