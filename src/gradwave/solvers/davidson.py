@@ -464,9 +464,8 @@ def _rr(q: torch.Tensor, hq: torch.Tensor, nw: int) -> tuple[torch.Tensor, torch
     the conjugate on the bra, u used UNCONJUGATED in the combination. Returns the
     nw lowest Ritz values (nk, nw) and the (nk, dim, nw) coefficient block c whose
     columns combine `q` (or `hq`) into the Ritz vectors (or their images) via
-    ``_combine(c, q)``. Shared with CheFSI and the fp64 certification refresh
-    (davidson_batched's inner loop keeps its own s built from lazy-conj views
-    to avoid a large-nk memory spike).
+    ``_combine(c, q)``. Shared with CheFSI (davidson_batched keeps its own s
+    built from lazy-conj views to avoid a large-nk memory spike).
     """
     s = torch.einsum("kig,kjg->kij", q.conj(), hq)
     # Subspace reduction ALWAYS in fp64 (issue #136), same contract as
