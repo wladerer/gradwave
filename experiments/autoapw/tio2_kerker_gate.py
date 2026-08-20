@@ -4,14 +4,12 @@ The acceptance matrix's base config (k333 aug3 fp4) never gated in 40 iterations
 plain joint Anderson; the hard-config A/B showed kerker=0.7 reaching r_nsph ~1e-3 in 40.
 This runs the full production point cold with the screen on, gates via tol, and reports
 the EFG against Elk. Env: TK_K (default 3), TK_ITERS (default 60), TK_KERKER (default 0.7),
-TK_KWORKERS (default 5).
+TK_KWORKERS (default 5), plus the shared TK_ECUT/TK_LMAX/TK_FPLMAX knobs (see _common).
 """
-import os
 import sys
 import time
 
-import numpy as np
-from newton_probe import A_BOHR, ATOMS, RADII
+from _common import A_BOHR, ATOMS, RADII, efg_eigs, env_float, env_int, fullpot_cfg
 
 from gradwave.flapw import crystal_scf_multi
 
@@ -20,11 +18,8 @@ ELK = {"a0": ("Ti", "[+19.34,-13.16,-6.18] eta 0.36"),
 
 
 def main():
-    k = int(os.environ.get("TK_K", "3"))
-    cfg = dict(ecut=300.0, lmax=3, kmesh=(k,) * 3, smearing=0.0, efg=True, fullpot=True,
-               fullpot_lmax=4, use_symmetry=True, subspace_reuse=False,
-               kworkers=int(os.environ.get("TK_KWORKERS", "5")),
-               kerker=float(os.environ.get("TK_KERKER", "0.7")))
+    cfg = dict(fullpot_cfg("TK", ecut=300.0, lmax=3, k=3, fullpot_lmax=4, kworkers=5),
+               efg=True, kerker=env_float("TK", "KERKER", 0.7))
     t0 = time.time()
     # warm chain (cold k333 diverges even with the screen — kerker stabilizes
     # near-fixed-point dynamics, it does not pick the basin): k222 cold first,
@@ -36,15 +31,14 @@ def main():
     t0 = time.time()
     bands, info = crystal_scf_multi(A_BOHR, ATOMS, RADII, tol=1e-3,
                                     v_start={"__full_state__": iw["state"]},
-                                    iters=int(os.environ.get("TK_ITERS", "60")), **cfg)
+                                    iters=env_int("TK", "ITERS", 60), **cfg)
     rec = info["recorder"].summarize()
     print(f"({time.time()-t0:.0f}s) n_it={rec['n_iter']} r_v={rec['r_v']:.2e} "
           f"r_nsph={rec['r_nsph']:.2e} symdev={rec['symmetry_dev']:.1e} "
           f"span={bands['span']:.4f}", flush=True)
     for key, (name, elk) in ELK.items():
         s = info["efg"][key]
-        w = np.linalg.eigvalsh(s["tensor"])
-        w = w[np.argsort(-np.abs(w))]
+        w = efg_eigs(s["tensor"])
         print(f"  {name}: [{w[0]:+.2f},{w[1]:+.2f},{w[2]:+.2f}] eta={s['eta']:.3f} | Elk {elk}",
               flush=True)
 

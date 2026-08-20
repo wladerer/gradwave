@@ -2,10 +2,11 @@
 import sys
 import time
 
-from newton_probe import A_BOHR, ATOMS, RADII
+from _common import A_BOHR, ATOMS, RADII, efg_eigs
 
 from gradwave.flapw import crystal_scf_multi, newton_polish
 
+# no kmesh here: each stage of the pipeline supplies its own (k222 warm, k333 polish)
 CFG = dict(ecut=300.0, lmax=3, smearing=0.0, fullpot=True, fullpot_lmax=4,
            use_symmetry=True, subspace_reuse=False, kworkers=5, kerker=0.7)
 
@@ -14,9 +15,7 @@ def efg_at(state, kmesh, tag):
     _, i = crystal_scf_multi(A_BOHR, ATOMS, RADII, iters=1, tol=0.0, efg=True,
                              v_start={"__full_state__": state}, kmesh=kmesh, **CFG)
     for key, name in (("a0", "Ti"), ("a2", "O ")):
-        import numpy as np
-        w = np.linalg.eigvalsh(i["efg"][key]["tensor"])
-        w = w[np.argsort(-np.abs(w))]
+        w = efg_eigs(i["efg"][key]["tensor"])
         print(f"{tag} {name}: [{w[0]:+.2f},{w[1]:+.2f},{w[2]:+.2f}] "
               f"eta={i['efg'][key]['eta']:.3f}", flush=True)
 

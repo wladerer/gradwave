@@ -26,11 +26,18 @@ modest (the pool accumulates in mesh order, so it is bit-stable) and do not enab
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 
+from gradwave.flapw.recorder import FLAPWRecorder
 from gradwave.flapw.scf import crystal_scf_multi
 
 __all__ = ["StateLayout", "anderson_stalled", "newton_polish"]
+
+# The full fixed-point state dict (info["state"] from crystal_scf_multi):
+# v_by_key / v_nsph / v_grid / v_i0. Heterogeneous by construction.
+State = dict[str, Any]
 
 
 class StateLayout:
@@ -41,13 +48,13 @@ class StateLayout:
     the interstitial grid, then the interstitial reference scalar.
     """
 
-    def __init__(self, st: dict):
-        self.skeys = sorted(st["v_by_key"])
-        self.nkeys = sorted(st["v_nsph"] or {})
-        self.lms = {k: sorted(st["v_nsph"][k]) for k in self.nkeys}
-        self.gshape = st["v_grid"].shape
+    def __init__(self, st: State) -> None:
+        self.skeys: list[str] = sorted(st["v_by_key"])
+        self.nkeys: list[str] = sorted(st["v_nsph"] or {})
+        self.lms: dict[str, list[Any]] = {k: sorted(st["v_nsph"][k]) for k in self.nkeys}
+        self.gshape: tuple[int, ...] = st["v_grid"].shape
 
-    def flatten(self, st: dict) -> np.ndarray:
+    def flatten(self, st: State) -> np.ndarray:
         parts = [np.asarray(st["v_by_key"][k], dtype=float).ravel() for k in self.skeys]
         for k in self.nkeys:
             for lm in self.lms[k]:
@@ -57,8 +64,8 @@ class StateLayout:
         parts.append(np.array([st["v_i0"]], dtype=float))
         return np.concatenate(parts)
 
-    def unflatten(self, x: np.ndarray, ref: dict) -> dict:
-        st: dict = {"v_by_key": {}, "v_nsph": {}, "v_grid": None, "v_i0": None}
+    def unflatten(self, x: np.ndarray, ref: State) -> State:
+        st: State = {"v_by_key": {}, "v_nsph": {}, "v_grid": None, "v_i0": None}
         off = 0
         for k in self.skeys:
             n = np.asarray(ref["v_by_key"][k]).size
@@ -76,8 +83,32 @@ class StateLayout:
         st["v_i0"] = float(x[off])
         return st
 
+    def segments(self, ref: State) -> list[tuple[str, int, int]]:
+        """(label, start, stop) spans of the flattened vector, one per channel.
 
-def anderson_stalled(recorder, window: int = 8, gate: float = 0.1) -> bool:
+        Labels: ``sph:<key>``, ``nsph:<key>:<lm>`` (re+im, hence 2n wide),
+        ``interstitial``, ``v_i0`` — in the frozen ``flatten`` order, so a mode
+        vector can be attributed to physical channels by slicing.
+        """
+        spans: list[tuple[str, int, int]] = []
+        off = 0
+        for k in self.skeys:
+            n = np.asarray(ref["v_by_key"][k]).size
+            spans.append((f"sph:{k}", off, off + n))
+            off += n
+        for k in self.nkeys:
+            for lm in self.lms[k]:
+                n = np.asarray(ref["v_nsph"][k][lm]).size
+                spans.append((f"nsph:{k}:{lm}", off, off + 2 * n))
+                off += 2 * n
+        n = int(np.prod(self.gshape))
+        spans.append(("interstitial", off, off + n))
+        off += n
+        spans.append(("v_i0", off, off + 1))
+        return spans
+
+
+def anderson_stalled(recorder: FLAPWRecorder, window: int = 8, gate: float = 0.1) -> bool:
     """True when the Anderson loop's r_v has plateaued above the gate.
 
     The measured stall signature (hard TiO2) is r_v hovering at O(0.1-1) with no
@@ -94,21 +125,23 @@ def anderson_stalled(recorder, window: int = 8, gate: float = 0.1) -> bool:
     return min(tail) > 0.5 * best_before
 
 
-def newton_polish(a_bohr, atoms, radii, state, *, scf_kwargs, maxiter: int = 6,
-                  inner_maxiter: int = 12, f_tol: float = 1e-8, verbose: bool = False):
+def newton_polish(a_bohr: Any, atoms: Any, radii: dict[str, float], state: State, *,
+                  scf_kwargs: dict[str, Any], maxiter: int = 6, inner_maxiter: int = 12,
+                  f_tol: float = 1e-8, verbose: bool = False) -> tuple[State, dict[str, Any]]:
     """Polish a full FLAPW state to the coupled fixed point by Newton-Krylov.
 
-    ``state`` is ``info["state"]`` from a (possibly stalled) ``crystal_scf_multi``
-    run; ``scf_kwargs`` are that run's keyword arguments (ecut/lmax/kmesh/fullpot/...).
-    ``iters``/``tol``/``v_start`` are overridden internally. Returns
-    ``(polished_state, info)`` with info = {"f_evals", "converged", "residual_norm"}.
-    Raises ValueError for a non-fullpot state with no interstitial grid (nothing to
-    polish that Anderson cannot already do).
+    ``a_bohr``/``atoms``/``radii`` are passed through to ``crystal_scf_multi``
+    unchanged (same accepted forms). ``state`` is ``info["state"]`` from a
+    (possibly stalled) ``crystal_scf_multi`` run; ``scf_kwargs`` are that run's
+    keyword arguments (ecut/lmax/kmesh/fullpot/...). ``iters``/``tol``/``v_start``
+    are overridden internally. Returns ``(polished_state, info)`` with
+    info = {"f_evals", "converged", "residual_norm"}. Raises ValueError for a
+    non-fullpot state with no interstitial grid (nothing to polish that Anderson
+    cannot already do).
     """
     if state.get("v_grid") is None:
         raise ValueError("newton_polish needs a full (fullpot) state with v_grid")
-    from scipy.optimize import newton_krylov
-    from scipy.optimize._nonlin import NoConvergence
+    from scipy.optimize import NoConvergence, newton_krylov
 
     kw = dict(scf_kwargs)
     kw.pop("iters", None)
@@ -117,15 +150,16 @@ def newton_polish(a_bohr, atoms, radii, state, *, scf_kwargs, maxiter: int = 6,
     kw.setdefault("subspace_reuse", False)
     lay = StateLayout(state)
     x0 = lay.flatten(state)
-    nev = {"n": 0}
+    n_evals = 0
 
-    def F(x):
-        nev["n"] += 1
+    def F(x: np.ndarray) -> np.ndarray:
+        nonlocal n_evals
+        n_evals += 1
         _, ii = crystal_scf_multi(a_bohr, atoms, radii, iters=1, tol=0.0,
                                   v_start={"__full_state__": lay.unflatten(x, state)}, **kw)
         return lay.flatten(ii["state"])
 
-    def residual(x):
+    def residual(x: np.ndarray) -> np.ndarray:
         return F(x) - x
 
     converged = True
@@ -137,5 +171,5 @@ def newton_polish(a_bohr, atoms, radii, state, *, scf_kwargs, maxiter: int = 6,
         converged = False
         sol = np.asarray(e.args[0]) if e.args else x0
     rnorm = float(np.linalg.norm(residual(sol)))
-    return lay.unflatten(sol, state), {
-        "f_evals": nev["n"], "converged": converged, "residual_norm": rnorm}
+    return lay.unflatten(np.asarray(sol), state), {
+        "f_evals": n_evals, "converged": converged, "residual_norm": rnorm}

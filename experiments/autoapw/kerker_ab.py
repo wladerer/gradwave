@@ -8,20 +8,14 @@ closer for machine-precision, this is about making Anderson itself robust.
 
 Env: KA_ECUT/KA_LMAX/KA_FPLMAX/KA_K/KA_KWORKERS/KA_WARM/KA_ITERS override the config.
 """
-import os
 import sys
 import time
 
-from newton_probe import A_BOHR, ATOMS, RADII
+from _common import A_BOHR, ATOMS, RADII, env_int, fullpot_cfg
 
 from gradwave.flapw import crystal_scf_multi
 
-CFG = dict(ecut=float(os.environ.get("KA_ECUT", "300")),
-           lmax=int(os.environ.get("KA_LMAX", "3")),
-           kmesh=(int(os.environ.get("KA_K", "2")),) * 3,
-           smearing=0.0, efg=False, fullpot=True,
-           fullpot_lmax=int(os.environ.get("KA_FPLMAX", "4")), use_symmetry=True,
-           kworkers=int(os.environ.get("KA_KWORKERS", "4")), subspace_reuse=False)
+CFG = fullpot_cfg("KA", ecut=300.0, lmax=3, k=2, fullpot_lmax=4, kworkers=4)
 
 
 def tail(info, n=6):
@@ -33,8 +27,8 @@ def tail(info, n=6):
 
 
 def main():
-    n0 = int(os.environ.get("KA_WARM", "24"))
-    it = int(os.environ.get("KA_ITERS", "40"))
+    n0 = env_int("KA", "WARM", 24)
+    it = env_int("KA", "ITERS", 40)
     print(f"config: {CFG}", flush=True)
     t0 = time.time()
     _, i0 = crystal_scf_multi(A_BOHR, ATOMS, RADII, iters=n0, tol=0.0, **CFG)

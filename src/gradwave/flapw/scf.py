@@ -981,21 +981,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     warp_state = None                                     # (FFT of (v_grid-v_i0)·Θ_I, nfft)
     v_grid_prev = None                                    # mixed interstitial grid state
     v_i0_prev = None                                      # interstitial reference of last iter
-    # Interstitial Kerker screen (opt-in). DMD mode analysis of the hard TiO2 config
-    # (experiments/autoapw/mode_analysis.py, asus 2026-08-19) measured the bare map's
-    # dominant instability as a complex pair at |rho|=1.02 living 94% in the
-    # interstitial channel — classic long-wavelength sloshing. K(G)=G²/(G²+k0²)
-    # damps exactly that mode inside the joint Anderson (preconditioned residual,
-    # same fixed point). The 0.1 floor keeps the interstitial MEAN mobile (the G=0
-    # component is a real dof here, unlike a charge-neutral density mix).
-    kerker_K = None
-    if kerker is not None:
-        fr = np.fft.fftfreq(nfft) * nfft
-        mm = np.meshgrid(fr, fr, fr, indexing="ij")
-        gmat = 2.0 * np.pi * np.linalg.inv(A).T
-        g2 = sum((gmat[i, 0] * mm[0] + gmat[i, 1] * mm[1] + gmat[i, 2] * mm[2]) ** 2
-                 for i in range(3))
-        kerker_K = np.maximum(g2 / (g2 + float(kerker) ** 2), 0.1)
+    kerker_K = None if kerker is None else _kerker_screen(nfft, A, kerker)
     fs = v_start.get("__full_state__") if isinstance(v_start, dict) else None
     _vsrc = fs["v_by_key"] if fs is not None else v_start
     v_by_key = {}
@@ -1015,20 +1001,8 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     # well-behaved fullpot run implicitly did via warm-starting).
     mt_phase = bool(fullpot)
     if fs is not None:
-        # full-state resume: restore the aspherical potential, interstitial grid
-        # and reference, rebuild the warp from the restored grid (zero-mean over
-        # Θ_I, same convention as the in-loop update), and skip the MT staging —
-        # a full state IS a coupled fullpot state.
-        if fs.get("v_nsph"):
-            v_nsph = {k2: {lm: np.asarray(v).astype(complex).copy()
-                           for lm, v in d.items()}
-                      for k2, d in fs["v_nsph"].items()}
-        if fs.get("v_grid") is not None:
-            v_grid_prev = np.asarray(fs["v_grid"], dtype=float).copy()
-            vi_mean = float(v_grid_prev.reshape(-1)[theta_i.reshape(-1)].mean())
-            u0 = np.where(theta_i, v_grid_prev - vi_mean, 0.0)
-            warp_state = (np.fft.fftn(u0) / nfft**3, nfft)
-        v_i0_prev = fs.get("v_i0")
+        # full-state resume skips the MT staging: a full state IS a coupled fullpot state
+        v_nsph, v_grid_prev, warp_state, v_i0_prev = _restore_full_state(fs, theta_i, nfft)
         if fullpot:
             mt_phase = False
     from gradwave.flapw.recorder import FLAPWRecorder
@@ -1263,16 +1237,8 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                                       else v_grid).reshape(-1)[ti_flat]))
         vi_new = v_grid.reshape(-1)[ti_flat]
         if kerker_K is not None and v_grid_prev is not None:
-            # screen the interstitial residual in G-space (see kerker_K above);
-            # embedding the masked residual with zeros inside the spheres is the
-            # standard approximation — the screen only needs to damp the
-            # long-wavelength component, which the mask barely perturbs
-            vi_prev = v_grid_prev.reshape(-1)[ti_flat]
-            r_full = np.zeros(nfft * nfft * nfft)
-            r_full[np.flatnonzero(ti_flat)] = vi_new - vi_prev
-            r_scr = np.fft.ifftn(
-                kerker_K * np.fft.fftn(r_full.reshape(nfft, nfft, nfft))).real
-            vi_new = vi_prev + r_scr.reshape(-1)[ti_flat]
+            vi_new = _kerker_screened_interstitial(vi_new, v_grid_prev.reshape(-1)[ti_flat],
+                                                   ti_flat, kerker_K, nfft)
         news.append(torch.from_numpy(vi_new))
         w_vec = torch.cat(w_segs)
         x_old = torch.cat([t.reshape(-1) for t in segs]) * w_vec
@@ -1412,28 +1378,82 @@ def _atom_orbits(atom_map):
     return orbits
 
 
+def _kerker_screen(nfft: int, cell: np.ndarray, k0: float) -> np.ndarray:
+    """Interstitial Kerker screen K(G) = G²/(G²+k0²) on the (nfft,)*3 grid, floored at 0.1.
+
+    Opt-in via ``crystal_scf_multi(kerker=k0)``. DMD mode analysis of the hard TiO2
+    config (experiments/autoapw/mode_analysis.py, asus 2026-08-19) measured the bare
+    map's dominant instability as a complex pair at |rho|=1.02 living 94% in the
+    interstitial channel — classic long-wavelength sloshing. K(G) damps exactly that
+    mode inside the joint Anderson (preconditioned residual, same fixed point). The
+    0.1 floor keeps the interstitial MEAN mobile (the G=0 component is a real dof
+    here, unlike a charge-neutral density mix).
+    """
+    fr = np.fft.fftfreq(nfft) * nfft
+    mm = np.meshgrid(fr, fr, fr, indexing="ij")
+    gmat = 2.0 * np.pi * np.linalg.inv(cell).T
+    g2 = sum((gmat[i, 0] * mm[0] + gmat[i, 1] * mm[1] + gmat[i, 2] * mm[2]) ** 2
+             for i in range(3))
+    return np.maximum(g2 / (g2 + float(k0) ** 2), 0.1)
+
+
+def _kerker_screened_interstitial(vi_new: np.ndarray, vi_prev: np.ndarray,
+                                  ti_flat: np.ndarray, kerker_K: np.ndarray,
+                                  nfft: int) -> np.ndarray:
+    """Screen the interstitial residual vi_new - vi_prev in G-space (see _kerker_screen).
+
+    Embedding the masked residual with zeros inside the spheres is the standard
+    approximation — the screen only needs to damp the long-wavelength component,
+    which the mask barely perturbs.
+    """
+    r_full = np.zeros(nfft * nfft * nfft)
+    r_full[np.flatnonzero(ti_flat)] = vi_new - vi_prev
+    r_scr = np.fft.ifftn(kerker_K * np.fft.fftn(r_full.reshape(nfft, nfft, nfft))).real
+    return vi_prev + r_scr.reshape(-1)[ti_flat]
+
+
+def _restore_full_state(fs: dict, theta_i: np.ndarray, nfft: int):
+    """Unpack a ``v_start={"__full_state__": ...}`` resume into loop state.
+
+    Returns ``(v_nsph, v_grid_prev, warp_state, v_i0_prev)``, each None where the
+    saved state has no such component. The warp is rebuilt from the restored grid
+    (zero-mean over Θ_I, the same convention as the in-loop update).
+    """
+    v_nsph = None
+    if fs.get("v_nsph"):
+        v_nsph = {k: {lm: np.asarray(v).astype(complex).copy() for lm, v in d.items()}
+                  for k, d in fs["v_nsph"].items()}
+    v_grid_prev, warp_state = None, None
+    if fs.get("v_grid") is not None:
+        v_grid_prev = np.asarray(fs["v_grid"], dtype=float).copy()
+        vi_mean = float(v_grid_prev.reshape(-1)[theta_i.reshape(-1)].mean())
+        u0 = np.where(theta_i, v_grid_prev - vi_mean, 0.0)
+        warp_state = (np.fft.fftn(u0) / nfft**3, nfft)
+    return v_nsph, v_grid_prev, warp_state, fs.get("v_i0")
+
+
 class SolveKArgs(NamedTuple):
     """Typed payload for the k-point process pool. A NamedTuple, not a bare
     tuple: this crossed the spawn boundary as a positional 15-tuple once and
     silently broke its test when the 16th element (warp) was added — keyword
     construction makes any future drift a loud TypeError at every call site."""
 
-    kf: tuple
-    cell: object
-    acart: list
-    species: dict
+    kf: np.ndarray | tuple[float, float, float]
+    cell: np.ndarray | float                  # lattice rows, or the cubic edge (Å)
+    acart: list[tuple[np.ndarray, str]]
+    species: dict[str, dict]
     lmax: int
     ecut: float
-    r: object
+    r: torch.Tensor
     dx: float
     nb_solve: int
-    v_nsph: object
-    chan: object
-    lodat: object
-    nsph_int: object
-    c_prev: object
+    v_nsph: dict | None
+    chan: dict | None
+    lodat: dict | None
+    nsph_int: dict | None
+    c_prev: np.ndarray | None                 # previous eigvecs (subspace reuse)
     subspace_tol: float
-    warp: object
+    warp: tuple | None                        # (FFT of (v_grid-v_i0)·Θ_I, nfft)
 
 
 def _solve_k_args(args: SolveKArgs):

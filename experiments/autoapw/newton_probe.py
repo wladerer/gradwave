@@ -16,44 +16,30 @@ hoist it. Wall time is reported but F-evals are the verdict.
 
 Spawn-safe: nothing here uses process pools (kworkers=1), but keep the __main__ guard anyway.
 """
-import os
 import sys
 import time
 
 import numpy as np
+from _common import A_BOHR, ATOMS, RADII, env_int, fullpot_cfg
 
 from gradwave.flapw import crystal_scf_multi
+from gradwave.flapw.newton import StateLayout as Layout
 
-U = 0.3048
-A_BOHR = [8.68083, 8.68083, 5.59096]
-ATOMS = [((0.0, 0.0, 0.0), "Ti"), ((0.5, 0.5, 0.5), "Ti"),
-         ((U, U, 0.0), "O"), ((1 - U, 1 - U, 0.0), "O"),
-         ((0.5 + U, 0.5 - U, 0.5), "O"), ((0.5 - U, 0.5 + U, 0.5), "O")]
-RADII = {"Ti": 1.098, "O": 0.824}
-CFG = dict(ecut=float(os.environ.get("NP_ECUT", "150")),
-           lmax=int(os.environ.get("NP_LMAX", "2")),
-           kmesh=(int(os.environ.get("NP_K", "1")),) * 3,
-           smearing=0.0, efg=False, fullpot=True,
-           fullpot_lmax=int(os.environ.get("NP_FPLMAX", "2")), use_symmetry=True,
-           kworkers=int(os.environ.get("NP_KWORKERS", "1")), subspace_reuse=False)
+CFG = fullpot_cfg("NP")
 GATE, TIGHT = 5e-2, 1e-3
 
 
 def run(iters, v_start=None, tol=0.0):
-    b, i = crystal_scf_multi(A_BOHR, ATOMS, RADII, iters=iters, tol=tol,
+    return crystal_scf_multi(A_BOHR, ATOMS, RADII, iters=iters, tol=tol,
                              v_start=v_start, **CFG)
-    return b, i
-
-
-from gradwave.flapw.newton import StateLayout as Layout  # noqa: E402  (shipped home)
 
 
 def main():
     t_all = time.time()
     # warmup must clear the MT->fullpot flip (it >= max(20, iters//2) at tol=0)
     # plus a few coupled iterations so v_nsph exists in the start state
-    n0 = int(os.environ.get("NP_WARM", "24"))
-    nbase = int(os.environ.get("NP_BASE", "40"))
+    n0 = env_int("NP", "WARM", 24)
+    nbase = env_int("NP", "BASE", 40)
     print(f"config: {CFG}", flush=True)
 
     # --- shared start state: n0 iterations from cold (MT staging + fullpot switch-on)

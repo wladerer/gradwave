@@ -525,6 +525,9 @@ include = [
     "src/gradwave/core/xc/pbe.py",
     "src/gradwave/core/xc/r2scan.py",
     "src/gradwave/core/xc/spin.py",
+    # flapw: newton.py written fully typed from the start (its neighbors scf.py /
+    # lapw.py remain untyped; State stays dict[str, Any] until they are).
+    "src/gradwave/flapw/newton.py",
 ]
 
 [tool.ty.overrides.rules]
