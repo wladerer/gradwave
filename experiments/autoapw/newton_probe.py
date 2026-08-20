@@ -30,9 +30,12 @@ ATOMS = [((0.0, 0.0, 0.0), "Ti"), ((0.5, 0.5, 0.5), "Ti"),
          ((U, U, 0.0), "O"), ((1 - U, 1 - U, 0.0), "O"),
          ((0.5 + U, 0.5 - U, 0.5), "O"), ((0.5 - U, 0.5 + U, 0.5), "O")]
 RADII = {"Ti": 1.098, "O": 0.824}
-CFG = dict(ecut=float(os.environ.get("NP_ECUT", "150")), lmax=2, kmesh=(1, 1, 1),
-           smearing=0.0, efg=False, fullpot=True, fullpot_lmax=2, use_symmetry=True,
-           kworkers=1, subspace_reuse=False)
+CFG = dict(ecut=float(os.environ.get("NP_ECUT", "150")),
+           lmax=int(os.environ.get("NP_LMAX", "2")),
+           kmesh=(int(os.environ.get("NP_K", "1")),) * 3,
+           smearing=0.0, efg=False, fullpot=True,
+           fullpot_lmax=int(os.environ.get("NP_FPLMAX", "2")), use_symmetry=True,
+           kworkers=int(os.environ.get("NP_KWORKERS", "1")), subspace_reuse=False)
 GATE, TIGHT = 5e-2, 1e-3
 
 
