@@ -202,13 +202,13 @@ def test_gauge_longitudinal_null(si_mesh):
     # A longitudinal polarization (e_pol ∥ q̂) is a pure-gauge vector
     # potential: the antisymmetrized physical assembly must produce no
     # induced field. Measured ratio ~2.5e-14 vs the transverse response.
+    from gradwave.dtypes import RDTYPE
     from gradwave.grids import reciprocal_cell
     from gradwave.postscf.kgeometry_nmr import (
         _biot_savart_sigma_cols,
         induced_current_q,
         velocity_perturbation_q,
     )
-    from gradwave.dtypes import RDTYPE
 
     res = si_mesh
     system = res.system
@@ -269,3 +269,86 @@ def test_lamb_prefactor_synthetic():
     assert abs(float(cols[0, 2]) - lamb) / lamb < 0.05  # measured 0.019
     assert abs(float(cols[0, 0])) < 1e-8 * lamb
     assert abs(float(cols[0, 1])) < 1e-8 * lamb
+
+
+@pytest.mark.standard
+def test_sigma_cubic_isotropy():
+    # Full bare shielding tensor on a (2,2,2) Γ-centered mesh: the cubic
+    # (T_d site) symmetry demands an isotropic tensor — measured off-diag
+    # 4.9e-11 ppm and diagonal spread 1.4e-11 ppm on σ_iso ~ 34/59 ppm
+    # (machine-exact isotropy). The two sites differ at finite q (25.4 ppm
+    # at q = b/2, shrinking O(q²) as the mesh refines — the documented
+    # finite-q systematic of the commensurate Pickard–Mauri assembly), so
+    # site equivalence is NOT asserted here.
+    from gradwave.postscf.kgeometry_nmr import sigma_shielding
+
+    torch.set_num_threads(2)
+    cell, pos = si_fcc()
+    system = setup_system(cell, pos, [0, 0], [si_upf()], ecut=12 * RY,
+                          kmesh=(2, 2, 2), nbands=8, use_symmetry=False,
+                          fft_shape=(20, 20, 20))
+    res = scf(system, PBE(), etol=1e-9, rhotol=1e-8, verbose=False, max_iter=80)
+    assert res.converged
+    sig = sigma_shielding(res, cg_tol=1e-9)
+    assert sig.shape == (2, 3, 3)
+    assert torch.isfinite(sig).all()
+    diag = torch.diagonal(sig, dim1=1, dim2=2)
+    off = sig - torch.diag_embed(diag)
+    iso = float(diag.mean())
+    assert iso > 0  # diamagnetically-dominated bare σ for Si
+    assert float(off.abs().max()) < 1e-6 * abs(iso)  # measured ~1e-12 rel
+    for s in range(2):
+        spread = float(diag[s].max() - diag[s].min())
+        assert spread < 1e-6 * abs(iso)  # measured ~4e-13 rel
+
+
+@pytest.mark.standard
+def test_sigma_q_linearity_and_underdetermined():
+    # q-linearity of the antisymmetric extraction: the single-axis shielding
+    # column on a (4,1,1) TR=False mesh drifts by 4.8% between q = b/4 and
+    # b/2 (the even-order O(q²) tail); the longitudinal gauge null holds at
+    # 4.5e-13 also when +q and −q are genuinely different mesh points. A
+    # single-axis mesh cannot determine the full tensor: sigma_shielding
+    # raises.
+    from gradwave.dtypes import RDTYPE
+    from gradwave.grids import reciprocal_cell
+    from gradwave.postscf.kgeometry_nmr import (
+        _biot_savart_sigma_cols,
+        _transverse_frame,
+        induced_current_q,
+        sigma_shielding,
+        velocity_perturbation_q,
+    )
+
+    torch.set_num_threads(2)
+    cell, pos = si_fcc()
+    system = setup_system(cell, pos, [0, 0], [si_upf()], ecut=12 * RY,
+                          kmesh=(4, 1, 1), nbands=8, use_symmetry=False,
+                          time_reversal=False, fft_shape=(20, 20, 20))
+    res = scf(system, PBE(), etol=1e-9, rhotol=1e-8, verbose=False, max_iter=80)
+    assert res.converged
+    b = reciprocal_cell(cell)
+    sites = system.positions.detach().cpu().to(RDTYPE)
+
+    def col_at(qi, pol=None):
+        q_frac = np.array([qi, 0.0, 0.0])
+        q_cart = torch.as_tensor(q_frac @ b, dtype=RDTYPE)
+        q_hat = (q_frac @ b) / np.linalg.norm(q_frac @ b)
+        sol_p = velocity_perturbation_q(res, q_frac, cg_tol=1e-9)
+        sol_m = velocity_perturbation_q(res, -q_frac, cg_tol=1e-9)
+        if pol is None:
+            pol = _transverse_frame(q_hat)[0]
+        cp = induced_current_q(res, q_frac, pol, sol=sol_p, cg_tol=1e-9)
+        cm = induced_current_q(res, -q_frac, pol, sol=sol_m, cg_tol=1e-9)
+        return _biot_savart_sigma_cols(cp.j_total, cm.j_total, q_cart,
+                                       system.grid.g_cart, sites), q_hat
+
+    c14, q_hat = col_at(0.25)
+    c12, _ = col_at(0.5)
+    drift = float((c14 - c12).abs().max() / c14.abs().max())
+    assert drift < 0.15  # measured 0.048
+    cl, _ = col_at(0.25, pol=q_hat)
+    assert float(cl.abs().max() / c14.abs().max()) < 1e-9  # measured 4.5e-13
+
+    with pytest.raises(ValueError, match="underdetermined"):
+        sigma_shielding(res)

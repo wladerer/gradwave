@@ -442,9 +442,11 @@ def induced_current_q(
     shape = grid.shape
     bk = system.batch
     assert bk is not None
-    e_pol = np.zeros(3) if isinstance(nu, int) else np.asarray(nu, dtype=float)
-    if isinstance(nu, int):
-        e_pol[nu] = 1.0
+    if isinstance(nu, (int, np.integer)):
+        e_pol = np.zeros(3)
+        e_pol[int(nu)] = 1.0
+    else:
+        e_pol = np.asarray(nu, dtype=float)
     if sol is None:
         sol = velocity_perturbation_q(res, q_frac, cg_tol=cg_tol, max_iter=cg_max_iter)
     else:
