@@ -421,7 +421,13 @@ What worked, in profile order:
 Serial (kworkers=1) per-iteration wall went 21.9 → 13.8 s in back-to-back cProfile
 runs (1.59×); the contended bench medians moved 20.9 → 19.1 s with minima
 15.1 → 12.8 s. The cold 22-iteration warmup at production kworkers=5 went
-189 → 106 s (1.79×). Correctness gate: the serial path is **bit-identical** —
+189 → 106 s (1.79×). A later interleaved base/tip/base/tip rerun taken while the
+box was saturated (four concurrent jobs, ≥26 foreign threads on 22 cores) measured
+~55 s/iteration on BOTH sides — under saturation the iteration wall is pure
+scheduler contention and a 1.6× code delta is invisible, which is why the numbers
+above lean on matched-load pairs (the cProfile A/B, the coldwarmup A/B) and
+in-process ratios rather than cross-window medians. Correctness gate: the serial
+path is **bit-identical** —
 same `info["state"]` sha over 4 cold iterations and over an 11-iteration warm
 fullpot bench. The pooled path is bit-identical per solve (the metamorphic pool
 test) but its *trajectory* is a different ulp draw than the serial one — that was
