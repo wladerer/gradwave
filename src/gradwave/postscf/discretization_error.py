@@ -1649,6 +1649,102 @@ def estimate_gap_error(res: SCFResult | USPPResult, eigerr: EigenvalueError, *,
     }
 
 
+@dataclass
+class EcutErrorCurve:
+    """Estimated basis error of hypothetical LOWER cutoffs, from ONE high run.
+
+    ``denergy[i]`` >= 0 estimates E(ecuts[i]) - E(ecut_run): the energy the
+    run at ``ecut_run`` gained over a run truncated at ``ecuts[i]``. ``tail``
+    >= 0 is the run's own residual basis error |E(ecut_run) - E(inf)| from the
+    standard complement estimator (0.0 when not requested), and ``error`` is
+    their sum -- the estimated total basis error a run at ``ecuts[i]`` would
+    carry. All in eV per cell.
+    """
+
+    ecuts: list[float]      # eV, candidate cutoffs (ascending)
+    denergy: list[float]    # eV, >= 0: E(ecut') - E(ecut_run) estimate
+    tail: float             # eV, >= 0: |E(ecut_run) - E(inf)| estimate
+    error: list[float]      # eV, denergy + tail
+    ecut_run: float         # eV, the cutoff of the run scored against
+
+
+@torch.no_grad()
+def estimate_ecut_error_curve(
+    res: SCFResult,
+    ecuts: list[float],
+    *,
+    include_tail: bool = True,
+    ecut_large: float | None = None,
+    factor: float = 2.5,
+    renormalize: bool = True,
+) -> EcutErrorCurve:
+    """Score hypothetical lower cutoffs ecut' < ecut_run from ONE converged run.
+
+    The complement estimator normally treats [ecut_run, ecut_large] as the
+    annulus above the run. Here the run itself plays the large basis: for each
+    candidate ecut' the annulus is [ecut', ecut_run] INSIDE the run's own
+    sphere, so no enlarged Hamiltonian is needed. The converged orbitals
+    truncated to the ecut' sphere stand in for the (unrun) ecut' solution,
+
+        R_i = P_[ecut', ecut_run] H psi_i^trunc,
+        dpsi_i = -R_i / (T_G - eps_i)   on the annulus,
+        E(ecut') - E(ecut_run) ~= -sum_i f_i <dpsi_i | R_i> >= 0,
+
+    with H the run's converged Hamiltonian and eps_i its eigenvalues (the
+    self-consistency of the ecut' run is dropped -- this is the same
+    first-order-orbital / second-order-energy accuracy class as the base
+    estimator, good to a factor ~2 against an actual lower-ecut run).
+    ``renormalize`` restores unit norm to the truncated orbitals (cheap,
+    tightens the estimate when the truncation removes noticeable weight).
+
+    ``include_tail`` adds the run's own residual error |E(ecut_run) - E(inf)|
+    (one call to ``estimate_density_error`` with ``ecut_large``/``factor``), so
+    ``error`` estimates each candidate's distance to the infinite basis rather
+    than to the run. Norm-conserving collinear nspin=1 only (symmetry allowed:
+    the energy is a scalar IBZ-weighted sum, as in the base estimator).
+    """
+    if _result_formalism(res) != "nc" or int(getattr(res, "nspin", 1)) != 1:
+        raise NotImplementedError(
+            "the one-run ecut curve is implemented for the norm-conserving "
+            "collinear (nspin=1) result only")
+    system = res.system
+    grid = system.grid
+    ecut_run = float(system.ecut)
+    if not ecuts:
+        raise ValueError("ecuts must name at least one candidate cutoff")
+    ec_sorted = sorted(float(e) for e in ecuts)
+    if ec_sorted[0] <= 0.0 or ec_sorted[-1] >= ecut_run:
+        raise ValueError(
+            f"every candidate must satisfy 0 < ecut' < ecut_run={ecut_run:.1f}"
+            f" eV; got {ec_sorted}")
+
+    denergy = [0.0] * len(ec_sorted)
+    for ik, sph in enumerate(system.spheres):
+        c_occ, eps_occ, occ = _occupied(res, ik)
+        pd = system.proj_data[ik]
+        h = HamiltonianK(sph, grid.shape, res.v_eff, pd,
+                         projectors(pd, system.positions))
+        w = float(system.kweights[ik])
+        for j, ec in enumerate(ec_sorted):
+            low = (h.t <= ec * (1.0 + 1e-9)).unsqueeze(0)
+            c_low = torch.where(low, c_occ, torch.zeros_like(c_occ))
+            if renormalize:
+                nrm = torch.linalg.norm(c_low, dim=1, keepdim=True)
+                c_low = c_low / nrm.clamp_min(1e-12).to(c_low.dtype)
+            resid = h.apply(c_low) - eps_occ[:, None].to(c_low.dtype) * c_low
+            dpsi = _complement_correction(resid, h.t, eps_occ, ec)
+            de = (dpsi.conj() * resid).real.sum(dim=1)      # (n_occ,) <= 0
+            denergy[j] += -w * float((occ * de).sum())
+
+    tail = 0.0
+    if include_tail:
+        est = estimate_density_error(res, ecut_large=ecut_large, factor=factor)
+        tail = abs(est.denergy)
+    return EcutErrorCurve(
+        ecuts=ec_sorted, denergy=denergy, tail=tail,
+        error=[d + tail for d in denergy], ecut_run=ecut_run)
+
+
 # NOTE on stress. The naive fixed-δP linearization that works for forces,
 # δσ ≈ (∂σ/∂P) δP by one forward-mode pass, does NOT estimate the stress
 # discretization error: it comes out cleanly anti-correlated (corr ≈ -1 on

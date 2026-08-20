@@ -72,7 +72,14 @@ def _eos_spoke_worker(spoke: _EosSpoke) -> tuple[int, float, float, bool]:
     return spoke.idx, vol, e, bool(getattr(res, "converged", True))
 
 
-def run_eos(inp: Input, verbose: bool = True) -> dict[str, Any]:
+def run_eos(
+    inp: Input,
+    verbose: bool = True,
+    *,
+    sigma_e: float | None = None,
+    uq_samples: int = 200,
+    uq_seed: int = 0,
+) -> dict[str, Any]:
     """Isotropic volume scan + 3rd-order Birch-Murnaghan fit → V0, B0, B0'.
 
     For each factor in ``inp.eos.scales`` the cell is scaled isotropically
@@ -81,6 +88,14 @@ def run_eos(inp: Input, verbose: bool = True) -> dict[str, Any]:
     E(V) carries no grid-discontinuity steps; each volume warm-starts from the
     previous converged density (the cheap, branch-stable EOS chain). Returns the
     ``eos`` summary block.
+
+    ``sigma_e`` (eV/atom, optional) switches on the noise-aware uncertainty
+    pass: the per-atom E(V) points are Monte-Carlo bootstrapped through the
+    BM3 fit (``postscf.eos.bootstrap_bm3``, ``uq_samples`` draws seeded by
+    ``uq_seed``) and the summary block gains an ``uncertainty`` sub-dict with
+    sigma(V0), sigma(B0), sigma(E0), sigma(B0'). Feed it the measured noise
+    floor (``postscf.convergence_noise.estimate_noise_floor(...)
+    .sigma_e_per_atom``); the default None leaves the output unchanged.
 
     Under ``distributed: true`` each per-volume ``run_scf`` shards the k-mesh
     across ranks (the volume-scan chain is a series of warm-started SCFs, and
@@ -218,7 +233,28 @@ def run_eos(inp: Input, verbose: bool = True) -> dict[str, Any]:
         "ev_a3_to_gpa": EV_A3_TO_GPA,
         "all_converged": all(converged),
     }
+    if sigma_e is not None:
+        from gradwave.postscf.eos import bootstrap_bm3
+
+        uq = bootstrap_bm3(v_at, e_at, float(sigma_e),
+                           n_samples=uq_samples, seed=uq_seed)
+        block["uncertainty"] = {
+            "sigma_e_eV_per_atom": float(sigma_e),
+            "sigma_v0_ang3_per_atom": uq.sigma_v0,
+            "sigma_b0_GPa": uq.sigma_b0_GPa,
+            "sigma_b0_prime": uq.sigma_b0_prime,
+            "sigma_e0_eV_per_atom": uq.sigma_e0,
+            "n_samples": uq.n_samples,
+            "n_failed": uq.n_failed,
+            "seed": uq.seed,
+        }
     if verbose:
         print(f"eos: V0={fit.v0:.4f} Å³/at  B0={fit.b0_GPa:.2f} GPa  "
               f"B0'={fit.b0_prime:.3f}", flush=True)
+        if sigma_e is not None:
+            u = block["uncertainty"]
+            print(f"eos: sigma(V0)={u['sigma_v0_ang3_per_atom']:.2e} Å³/at  "
+                  f"sigma(B0)={u['sigma_b0_GPa']:.3f} GPa "
+                  f"(sigma_E={sigma_e:.2e} eV/at, {uq_samples} draws)",
+                  flush=True)
     return block
