@@ -833,7 +833,8 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                       efg: bool = False, fullpot: bool = False, use_symmetry: bool = True,
                       fullpot_lmax: int = 2, los=None, val_e=None, core=None, el_override=None,
                       v_start=None, kworkers: int = 1, subspace_reuse: bool = False,
-                      subspace_tol: float = 1e-5, cell=None, verbose: bool = False):
+                      subspace_tol: float = 1e-5, cell=None, kerker: float | None = None,
+                      verbose: bool = False):
     """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
     ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
@@ -875,6 +876,10 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     ``v_start`` = ``{key: radial potential array}`` warm-starts the SCF from a previous run's
     converged spherical potentials (returned as ``info["v_by_key"]``) instead of the atomic ones —
     a convergence-sweep point then starts nearly converged (~2-3x fewer iterations).
+    ``kerker`` (Å⁻¹, default None=off) screens the interstitial residual by G²/(G²+kerker²)
+    inside the joint Anderson — the measured cure for the long-wavelength interstitial
+    sloshing instability of hard fullpot configs (see the DMD note at kerker_K below).
+
     Alternatively ``v_start = {"__full_state__": info["state"]}`` restores the COMPLETE
     fixed-point state of a fullpot run — spherical + aspherical potentials, interstitial grid
     and reference — so the resumed run continues the coupled fullpot iteration exactly (the
@@ -975,6 +980,21 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     warp_state = None                                     # (FFT of (v_grid-v_i0)·Θ_I, nfft)
     v_grid_prev = None                                    # mixed interstitial grid state
     v_i0_prev = None                                      # interstitial reference of last iter
+    # Interstitial Kerker screen (opt-in). DMD mode analysis of the hard TiO2 config
+    # (experiments/autoapw/mode_analysis.py, asus 2026-08-19) measured the bare map's
+    # dominant instability as a complex pair at |rho|=1.02 living 94% in the
+    # interstitial channel — classic long-wavelength sloshing. K(G)=G²/(G²+k0²)
+    # damps exactly that mode inside the joint Anderson (preconditioned residual,
+    # same fixed point). The 0.1 floor keeps the interstitial MEAN mobile (the G=0
+    # component is a real dof here, unlike a charge-neutral density mix).
+    kerker_K = None
+    if kerker is not None:
+        fr = np.fft.fftfreq(nfft) * nfft
+        mm = np.meshgrid(fr, fr, fr, indexing="ij")
+        gmat = 2.0 * np.pi * np.linalg.inv(A).T
+        g2 = sum((gmat[i, 0] * mm[0] + gmat[i, 1] * mm[1] + gmat[i, 2] * mm[2]) ** 2
+                 for i in range(3))
+        kerker_K = np.maximum(g2 / (g2 + float(kerker) ** 2), 0.1)
     fs = v_start.get("__full_state__") if isinstance(v_start, dict) else None
     _vsrc = fs["v_by_key"] if fs is not None else v_start
     v_by_key = {}
@@ -1237,7 +1257,19 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
         w_segs.append(torch.full((int(ti_flat.sum()),), sqdv, dtype=torch.float64))
         segs.append(torch.from_numpy((v_grid_prev if v_grid_prev is not None
                                       else v_grid).reshape(-1)[ti_flat]))
-        news.append(torch.from_numpy(v_grid.reshape(-1)[ti_flat]))
+        vi_new = v_grid.reshape(-1)[ti_flat]
+        if kerker_K is not None and v_grid_prev is not None:
+            # screen the interstitial residual in G-space (see kerker_K above);
+            # embedding the masked residual with zeros inside the spheres is the
+            # standard approximation — the screen only needs to damp the
+            # long-wavelength component, which the mask barely perturbs
+            vi_prev = v_grid_prev.reshape(-1)[ti_flat]
+            r_full = np.zeros(nfft * nfft * nfft)
+            r_full[np.flatnonzero(ti_flat)] = vi_new - vi_prev
+            r_scr = np.fft.ifftn(
+                kerker_K * np.fft.fftn(r_full.reshape(nfft, nfft, nfft))).real
+            vi_new = vi_prev + r_scr.reshape(-1)[ti_flat]
+        news.append(torch.from_numpy(vi_new))
         w_vec = torch.cat(w_segs)
         x_old = torch.cat([t.reshape(-1) for t in segs]) * w_vec
         x_new = torch.cat([t.reshape(-1) for t in news]) * w_vec
