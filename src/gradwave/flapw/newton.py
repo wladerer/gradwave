@@ -134,7 +134,8 @@ def anderson_stalled(recorder: FLAPWRecorder, window: int = 8, gate: float = 0.1
 
 def newton_polish(a_bohr: Any, atoms: Any, radii: dict[str, float], state: State, *,
                   scf_kwargs: dict[str, Any], maxiter: int = 6, inner_maxiter: int = 12,
-                  f_tol: float = 1e-8, verbose: bool = False) -> tuple[State, dict[str, Any]]:
+                  f_tol: float = 1e-8, rounds: int = 3,
+                  verbose: bool = False) -> tuple[State, dict[str, Any]]:
     """Polish a full FLAPW state to the coupled fixed point by Newton-Krylov.
 
     ``a_bohr``/``atoms``/``radii`` are passed through to ``crystal_scf_multi``
@@ -142,9 +143,19 @@ def newton_polish(a_bohr: Any, atoms: Any, radii: dict[str, float], state: State
     (possibly stalled) ``crystal_scf_multi`` run; ``scf_kwargs`` are that run's
     keyword arguments (ecut/lmax/kmesh/fullpot/...). ``iters``/``tol``/``v_start``
     are overridden internally. Returns ``(polished_state, info)`` with
-    info = {"f_evals", "converged", "residual_norm"}. Raises ValueError for a
-    non-fullpot state with no interstitial grid (nothing to polish that Anderson
-    cannot already do).
+    info = {"f_evals", "converged", "residual_norm", "rounds"}. Raises ValueError
+    for a non-fullpot state with no interstitial grid (nothing to polish that
+    Anderson cannot already do).
+
+    Robustness (measured, TiO2 hard config, 2026-08-20): a single newton_krylov
+    call on this map is CHAOTIC-SENSITIVE — ulp-level rounding differences in F
+    flipped outcomes between residual 5e+3 (divergence) and 1.4e-3 (near-converged)
+    on the same input state. So the polish runs up to ``rounds`` restarts with
+    MONOTONE ACCEPTANCE: each round restarts newton_krylov from the best iterate
+    so far (never a worse one), later rounds jitter the FD step (``rdiff``) to
+    redraw the trajectory, and the returned state is never worse than the input.
+    A near-miss round (like the measured 1.4e-3) becomes the next round's start,
+    which is exactly the regime where the quadratic phase re-engages.
     """
     if state.get("v_grid") is None:
         raise ValueError("newton_polish needs a full (fullpot) state with v_grid")
@@ -176,14 +187,28 @@ def newton_polish(a_bohr: Any, atoms: Any, radii: dict[str, float], state: State
     def residual(x: np.ndarray) -> np.ndarray:
         return F(x) - x
 
-    converged = True
-    try:
-        sol = newton_krylov(residual, x0, method="lgmres", maxiter=maxiter,
-                            inner_maxiter=inner_maxiter, f_tol=f_tol,
-                            verbose=verbose)
-    except NoConvergence as e:
-        converged = False
-        sol = np.asarray(e.args[0]) if e.args else x0
-    rnorm = float(np.linalg.norm(residual(sol)))
-    return lay.unflatten(np.asarray(sol), state), {
-        "f_evals": n_evals, "converged": converged, "residual_norm": rnorm}
+    # None = scipy's default FD step; later rounds redraw the trajectory with a
+    # different rdiff (the measured chaos means the step size is a dice roll, so
+    # reroll it rather than repeating the same throw).
+    rdiffs = [None, 1e-6, 3e-8, 1e-5, 1e-7]
+    best_x, best_r = x0, float(np.linalg.norm(residual(x0)))
+    converged, n_rounds = False, 0
+    for rd in rdiffs[:max(1, rounds)]:
+        n_rounds += 1
+        kw_rd = {} if rd is None else {"rdiff": rd}
+        try:
+            sol = newton_krylov(residual, best_x, method="lgmres", maxiter=maxiter,
+                                inner_maxiter=inner_maxiter, f_tol=f_tol,
+                                verbose=verbose, **kw_rd)
+            converged = True
+        except NoConvergence as e:
+            sol = np.asarray(e.args[0]) if e.args else best_x
+        rn = float(np.linalg.norm(residual(sol)))
+        if converged:                       # scipy hit f_tol: this iterate IS the answer
+            best_x, best_r = np.asarray(sol), rn
+            break
+        if rn < best_r:
+            best_x, best_r = np.asarray(sol), rn
+    return lay.unflatten(best_x, state), {
+        "f_evals": n_evals, "converged": converged, "residual_norm": best_r,
+        "rounds": n_rounds}

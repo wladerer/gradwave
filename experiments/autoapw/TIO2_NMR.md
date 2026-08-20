@@ -466,3 +466,21 @@ The base control (== job 128 config) REPLICATED the gated-state physics (k222 EF
     r_nsph < 1e-3 (cap 120 it) and refuses to polish from a marginal state.
 Moral for the recipe: "Anderson+kerker then Newton" is production-valid only with an
 explicit basin gate between the legs; do not trust a single lucky trajectory.
+
+## NEWTON DISCRIMINATOR (asus 143) — CHAOS CONFIRMED, MEMO EXONERATED, FIX SHIPPED
+From the saved base_k222 state (healthy: k222 1-it resume r_v 4.0e-2, r_nsph 1.7e-3):
+  A: newton k222            -> res 5.0e+3 (diverged, 25 F-evals)
+  B: newton k333 (memo on)  -> res 25.3   (diverged, 25 F-evals)
+  C: newton k333 (memo OFF) -> res 1.4e-3 (CONVERGING, exhausted maxiter, 41 F-evals)
+B vs C differ at most at the ulp level (cached vs freshly-recomputed phase matrix; matmul
+alignment nondeterminism) — outcome spread 5e+3..1.4e-3 across ulp-different maps means
+FD-Newton-Krylov on this map is CHAOTIC-SENSITIVE, not bugged. Job 128's k333 success and
+the probe's k222 success were good draws (2/6 overall). The memo is exonerated (round-1's
+thrashing memo was provably bit-identical to job 128's F anyway). Also measured: the k333
+map kicks to r_v 1.67 on the FIRST iterate from a k222-converged state — k333 Newton always
+starts in rough territory. FIX (newton.py): newton_polish now runs up to `rounds`(=3)
+newton_krylov restarts with MONOTONE ACCEPTANCE (each round starts from the best iterate so
+far; never returns worse than its input) and re-rolls the FD step rdiff per round — C's
+1.4e-3 near-miss becomes round 2's start, the regime where quadratic convergence re-engages.
+Possible future lever (not built): 5-10 k333 Anderson+kerker pre-iterations to contract the
+smooth channel before Newton.
