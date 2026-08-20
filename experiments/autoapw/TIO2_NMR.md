@@ -394,3 +394,15 @@ Implications: (a) Newton polish (shipped, flapw/newton.py) handles it outright �
 its 3-step convergence; (b) a targeted interstitial-channel Kerker screen G^2/(G^2+k0^2) in the
 joint Anderson is the cheap complementary fix — NOTE this is the FLAPW interstitial channel with
 direct evidence of sloshing, distinct from the measured-closed PW small-cell Kerker avenue.
+
+## KERKER A/B, HARD CONFIG (asus job 117) — DRAMATIC WIN AT k0=0.7
+Same warm state, 40-iteration continuations (ecut300 lmax3 fp4 k222):
+  plain:      r_v ~2e+2, r_nsph ~3-7   -> the plain continuation actively DIVERGES (worse than the
+                                          earlier 0.46 stall; trajectory-dependent blowup)
+  kerker=0.7: r_v ~2-9e-2, r_nsph 3.4e-4..2e-3  -> GATED and near-tight within 40 iterations
+  kerker=1.5: diverges like plain — NOT monotonic in k0; over-screening (floor-dominated
+              interstitial, 10x slower channel) appears to destabilize the coupled system through
+              the sphere channels. k0~0.7 A^-1 is the working window; treat k0 as a knob to A/B
+              per system class, do not blindly increase.
+Production recipe now: Anderson + kerker=0.7 for the trajectory, newton_polish to machine
+precision. Default remains opt-in until the easy-config matrix is re-validated with it.
