@@ -26,7 +26,16 @@ def main():
                kworkers=int(os.environ.get("TK_KWORKERS", "5")),
                kerker=float(os.environ.get("TK_KERKER", "0.7")))
     t0 = time.time()
+    # warm chain (cold k333 diverges even with the screen — kerker stabilizes
+    # near-fixed-point dynamics, it does not pick the basin): k222 cold first,
+    # then k333 from its full state.
+    warm_cfg = dict(cfg, kmesh=(2, 2, 2), efg=False)
+    _, iw = crystal_scf_multi(A_BOHR, ATOMS, RADII, tol=1e-3, iters=30, **warm_cfg)
+    print(f"warm k222 ({time.time()-t0:.0f}s): "
+          f"r_nsph={iw['recorder'].summarize()['r_nsph']:.2e}", flush=True)
+    t0 = time.time()
     bands, info = crystal_scf_multi(A_BOHR, ATOMS, RADII, tol=1e-3,
+                                    v_start={"__full_state__": iw["state"]},
                                     iters=int(os.environ.get("TK_ITERS", "60")), **cfg)
     rec = info["recorder"].summarize()
     print(f"({time.time()-t0:.0f}s) n_it={rec['n_iter']} r_v={rec['r_v']:.2e} "
