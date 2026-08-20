@@ -41,6 +41,7 @@ from gradwave.flapw.efg import (
     valence_efg_moments,
 )
 from gradwave.flapw.lapw import build_matrices, build_matrices_multi, solve_geneig
+from gradwave.flapw.newton import anderson_stalled, newton_polish
 from gradwave.flapw.radial import (
     log_mesh,
     numerov_log,
@@ -52,6 +53,7 @@ from gradwave.flapw.scf import crystal_scf, crystal_scf_multi
 __all__ = [
     "CONFIG",
     "NIST_LDA_EV",
+    "anderson_stalled",
     "atomic_scf",
     "build_matrices",
     "build_matrices_multi",
@@ -63,6 +65,7 @@ __all__ = [
     "interstitial_l2_boundary",
     "l2_sphere_poisson",
     "log_mesh",
+    "newton_polish",
     "numerov_log",
     "numerov_log_batch",
     "radial_eigs_tridiag",

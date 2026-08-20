@@ -45,42 +45,7 @@ def run(iters, v_start=None, tol=0.0):
     return b, i
 
 
-class Layout:
-    """Flatten/unflatten the full state dict <-> one real vector."""
-
-    def __init__(self, st):
-        self.skeys = sorted(st["v_by_key"])
-        self.nkeys = sorted(st["v_nsph"] or {})
-        self.lms = {k: sorted(st["v_nsph"][k]) for k in self.nkeys}
-        self.gshape = st["v_grid"].shape
-
-    def flatten(self, st):
-        parts = [np.asarray(st["v_by_key"][k], dtype=float).ravel() for k in self.skeys]
-        for k in self.nkeys:
-            for lm in self.lms[k]:
-                v = np.asarray(st["v_nsph"][k][lm])
-                parts += [v.real.ravel(), v.imag.ravel()]
-        parts.append(np.asarray(st["v_grid"], dtype=float).ravel())
-        parts.append(np.array([st["v_i0"]], dtype=float))
-        return np.concatenate(parts)
-
-    def unflatten(self, x, ref):
-        st, off = {"v_by_key": {}, "v_nsph": {}, "v_grid": None, "v_i0": None}, 0
-        for k in self.skeys:
-            n = np.asarray(ref["v_by_key"][k]).size
-            st["v_by_key"][k] = x[off:off + n].copy()
-            off += n
-        for k in self.nkeys:
-            st["v_nsph"][k] = {}
-            for lm in self.lms[k]:
-                n = np.asarray(ref["v_nsph"][k][lm]).size
-                st["v_nsph"][k][lm] = x[off:off + n] + 1j * x[off + n:off + 2 * n]
-                off += 2 * n
-        n = int(np.prod(self.gshape))
-        st["v_grid"] = x[off:off + n].reshape(self.gshape).copy()
-        off += n
-        st["v_i0"] = float(x[off])
-        return st
+from gradwave.flapw.newton import StateLayout as Layout  # noqa: E402  (shipped home)
 
 
 def main():
