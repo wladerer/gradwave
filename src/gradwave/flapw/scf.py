@@ -775,9 +775,9 @@ def _weinert_multi(rho_I, spheres, L, nfft):
 
     The whole construction is in G-space (``sphere_interstitial_moments`` /
     ``sphere_pseudocharge_ft``): analytic Bessel moments of ρ_I inside each sphere, and analytic
-    Fourier synthesis of moment-matched pseudocharges of order ``npow ≈ R·Gmax/4`` (Weinert), so
-    every matched L — including the high L of a fullpot_lmax=6 run — is exact to Fourier
-    truncation. The earlier real-space-sampled pseudocharge left a ~20% own-field aliasing residue
+    Fourier synthesis of moment-matched pseudocharges (order policy below), so every matched L —
+    including the high L of a fullpot_lmax=6 run — is exact to Fourier truncation. The earlier
+    real-space-sampled pseudocharge left a ~20% own-field aliasing residue
     (retaining, worse, the fictitious ρ_I continuation inside the own sphere in the boundary term),
     which anti-fed the aspherical SCF (the measured runaway fixed point / |ρ|≈1.02 mode)."""
     A = cell_matrix(L)

@@ -42,23 +42,28 @@ def report(info, tag):
                   + " ".join(f"{lab}={v:+.1f}" for lab, v in ELK[name].items()), flush=True)
 
 
-def gated_run(cfg, kmesh=(2, 2, 2), cap=120):
-    """Cold chunked Anderson chain until r_nsph<1e-3 and r_v<0.15 (the validated recipe)."""
+def gated_run(cfg, kmesh=(2, 2, 2), iters=140):
+    """ONE unbroken cold Anderson chain (no chunk restarts: a restart resets the Anderson
+    history, and from a near-converged state the first bare damped steps re-excite the
+    marginal mode — measured: every chunk boundary near the fixed point diverged, every
+    in-chunk trajectory re-contracted). Then a monotone newton_polish at the same k."""
+    from gradwave.flapw import newton_polish
     t0 = time.time()
-    _, iw = crystal_scf_multi(A_BOHR, ATOMS, RADII, iters=40, tol=1e-3, efg=False,
+    _, iw = crystal_scf_multi(A_BOHR, ATOMS, RADII, iters=iters, tol=1e-3, efg=False,
                               kmesh=kmesh, **cfg)
     r = iw["recorder"].summarize()
-    n_tot = r["n_iter"]
-    while (r["r_nsph"] >= 1e-3 or r["r_v"] >= 0.15) and n_tot < cap:
-        _, iw = crystal_scf_multi(A_BOHR, ATOMS, RADII, iters=20, tol=1e-3, efg=False,
-                                  kmesh=kmesh, v_start={"__full_state__": iw["state"]}, **cfg)
-        r = iw["recorder"].summarize()
-        n_tot += r["n_iter"]
-        print(f"  cont: n_it={n_tot} r_v={r['r_v']:.2e} r_nsph={r['r_nsph']:.2e}", flush=True)
-    print(f"chain ({time.time()-t0:.0f}s): n_it={n_tot} r_v={r['r_v']:.2e} "
-          f"r_nsph={r['r_nsph']:.2e} gated={r['r_nsph'] < 1e-3 and r['r_v'] < 0.15}",
-          flush=True)
-    return iw, r
+    print(f"anderson ({time.time()-t0:.0f}s): n_it={r['n_iter']} r_v={r['r_v']:.2e} "
+          f"r_nsph={r['r_nsph']:.2e}", flush=True)
+    state = iw["state"]
+    if r["r_nsph"] >= 1e-4 and r["r_nsph"] < 1e-1:
+        t0 = time.time()
+        state, ni = newton_polish(A_BOHR, ATOMS, RADII, state,
+                                  scf_kwargs=dict(cfg, kmesh=kmesh),
+                                  maxiter=5, inner_maxiter=12, f_tol=1e-6)
+        print(f"newton ({time.time()-t0:.0f}s): {ni}", flush=True)
+    gated = r["r_nsph"] < 1e-3 and r["r_v"] < 0.15
+    print(f"gated(anderson)={gated}", flush=True)
+    return state, r
 
 
 def efg_of(state, cfg, kmesh):
@@ -88,9 +93,9 @@ def main():
 
     if mode == "fp6":
         cfg = base_cfg(fullpot_lmax=6)
-        iw, r = gated_run(cfg)
-        save_state(iw["state"], "fp6_k222")
-        i = efg_of(iw["state"], cfg, (2, 2, 2))
+        state, r = gated_run(cfg)
+        save_state(state, "fp6_k222")
+        i = efg_of(state, cfg, (2, 2, 2))
         report(i, "fp6-k222")
         return 0
 
@@ -108,9 +113,9 @@ def main():
                           ("aug4-fp6", dict(lmax=4, fullpot_lmax=6))):
             print(f"--- {tag} ---", flush=True)
             cfg = base_cfg(**over)
-            iw, r = gated_run(cfg)
-            save_state(iw["state"], tag.replace("-", "_") + "_k222")
-            i = efg_of(iw["state"], cfg, (2, 2, 2))
+            state, r = gated_run(cfg)
+            save_state(state, tag.replace("-", "_") + "_k222")
+            i = efg_of(state, cfg, (2, 2, 2))
             report(i, f"{tag}-k222")
         return 0
 
