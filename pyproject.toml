@@ -529,6 +529,9 @@ include = [
     "src/gradwave/core/xc/pbe.py",
     "src/gradwave/core/xc/r2scan.py",
     "src/gradwave/core/xc/spin.py",
+    # flapw: newton.py written fully typed from the start (its neighbors scf.py /
+    # lapw.py remain untyped; State stays dict[str, Any] until they are).
+    "src/gradwave/flapw/newton.py",
 ]
 
 [tool.ty.overrides.rules]
@@ -552,6 +555,20 @@ root_package = "gradwave"
 
 # Architecture boundaries, encoded from the layering the modules document in
 # prose. Run with: uv run lint-imports
+[[tool.importlinter.contracts]]
+name = "flapw is a self-contained leaf (constants/kpoints/symmetry only)"
+type = "forbidden"
+source_modules = ["gradwave.flapw"]
+forbidden_modules = [
+    "gradwave.scf",
+    "gradwave.postscf",
+    "gradwave.api",
+    "gradwave.solvers",
+    "gradwave.pseudo",
+    "gradwave.io",
+    "gradwave.inputs",
+]
+
 [[tool.importlinter.contracts]]
 name = "core stays independent of the SCF and analysis layers"
 type = "forbidden"

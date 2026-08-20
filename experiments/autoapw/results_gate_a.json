@@ -1,0 +1,113 @@
+{
+  "device": "cpu",
+  "L": 8.0,
+  "R_MT": 1.8,
+  "tau0": [
+    4.13,
+    3.87,
+    4.31
+  ],
+  "analytic": {
+    "E": -15.942336735762602,
+    "grad": [
+      6.366049027862237,
+      -3.0106274621971494,
+      3.2654167336194146
+    ]
+  },
+  "by_n": {
+    "40": {
+      "E_theta": -15.942336735762604,
+      "grad_theta_autograd": [
+        6.366049027862239,
+        -3.0106274621971565,
+        3.2654167336194213
+      ],
+      "grad_theta_fd": [
+        6.366049007384689,
+        -3.0106274581864767,
+        3.265416719626657
+      ],
+      "grad_mask_autograd": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grad_mask_fd": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "err_theta_autograd_vs_analytic": 9.900301382973689e-15,
+      "err_theta_fd_vs_analytic": 2.512394785066754e-08,
+      "err_theta_autograd_vs_fd": 2.5123954142811475e-08,
+      "norm_grad_mask_autograd": 0.0,
+      "err_mask_fd_vs_analytic": 7.762306640779085
+    },
+    "64": {
+      "E_theta": -15.942336735762606,
+      "grad_theta_autograd": [
+        6.366049027862234,
+        -3.0106274621971525,
+        3.2654167336194178
+      ],
+      "grad_theta_fd": [
+        6.3660490073935705,
+        -3.010627458177595,
+        3.265416719635539
+      ],
+      "grad_mask_autograd": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grad_mask_fd": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "err_theta_autograd_vs_analytic": 5.65233285126159e-15,
+      "err_theta_fd_vs_analytic": 2.5113182205342227e-08,
+      "err_theta_autograd_vs_fd": 2.511318153822674e-08,
+      "norm_grad_mask_autograd": 0.0,
+      "err_mask_fd_vs_analytic": 7.762306640779085
+    },
+    "96": {
+      "E_theta": -15.942336735762598,
+      "grad_theta_autograd": [
+        6.366049027862231,
+        -3.0106274621971494,
+        3.265416733619417
+      ],
+      "grad_theta_fd": [
+        6.3660490073935705,
+        -3.010627458177595,
+        3.2654167196444206
+      ],
+      "grad_mask_autograd": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grad_mask_fd": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "err_theta_autograd_vs_analytic": 6.6018607235733855e-15,
+      "err_theta_fd_vs_analytic": 2.510823760899993e-08,
+      "err_theta_autograd_vs_fd": 2.5108233776470405e-08,
+      "norm_grad_mask_autograd": 0.0,
+      "err_mask_fd_vs_analytic": 7.762306640779085
+    }
+  },
+  "fftbox_crosscheck": {
+    "available": true,
+    "max_abs_diff": 0.0
+  },
+  "verdict": {
+    "theta_matches_analytic": true,
+    "theta_autograd_matches_fd": true,
+    "gridmask_force_is_zero": true
+  }
+}
