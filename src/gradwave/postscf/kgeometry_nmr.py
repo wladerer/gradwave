@@ -1012,10 +1012,12 @@ class ShieldingDq:
             pref = dk.weight * f_occ / self.volume
             for ip, pol in enumerate(pols):
                 ep = np.asarray(pol, dtype=float)
-                o0u = sum(float(ep[mu]) * vu[mu] for mu in range(3))
+                o0u = ep[0] * vu[0] + ep[1] * vu[1] + ep[2] * vu[2]
                 du0 = _resolvent_apply(uc, wc, wo, o0u)
-                me_u = 0.5 * sum(
-                    float(ep[mu]) * (m_mats[mu] @ uo) for mu in range(3)
+                me_u = 0.5 * (
+                    ep[0] * (m_mats[0] @ uo)
+                    + ep[1] * (m_mats[1] @ uo)
+                    + ep[2] * (m_mats[2] @ uo)
                 )
                 inner = wmat @ du0 - dtu @ (uo.mH @ o0u) + me_u
                 du1 = _resolvent_apply(uc, wc, wo, inner) - uo @ (dtu.mH @ du0)
@@ -1073,8 +1075,10 @@ def _branch_field_fixed_sphere(
         ws, us = torch.linalg.eigh(dk.hk.h(ks))
     vs = _dense_velocity_matrices(dk.hk, ks)
     uo, wo = dk.u[:, :nocc], dk.w[:nocc]
-    o_u = 0.5 * sum(
-        float(ep[mu]) * ((dk.v[mu] + vs[mu]) @ uo) for mu in range(3)
+    o_u = 0.5 * (
+        ep[0] * ((dk.v[0] + vs[0]) @ uo)
+        + ep[1] * ((dk.v[1] + vs[1]) @ uo)
+        + ep[2] * ((dk.v[2] + vs[2]) @ uo)
     )
     du = _resolvent_apply(us[:, nocc:], ws[nocc:], wo, o_u)
 

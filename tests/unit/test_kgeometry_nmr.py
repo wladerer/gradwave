@@ -354,6 +354,157 @@ def test_sigma_q_linearity_and_underdetermined():
         sigma_shielding(res)
 
 
+# --------------------------------------------------------------------------- #
+# analytic ∂/∂q shielding (milestone 10)                                       #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module")
+def dq_engine(si_mesh):
+    from gradwave.postscf.kgeometry_nmr import ShieldingDq
+
+    return ShieldingDq(si_mesh)
+
+
+def test_dq_branch_field_matches_mesh_at_q0(si_mesh, dq_engine):
+    # S⁰ of the analytic engine equals the mesh route's conserved j_total at
+    # q = 0 (both gauge-invariant; dense eigh vs Davidson+CG states) —
+    # measured rel 3.5e-10 — and the fixed-sphere twin at s = 0 reproduces
+    # the S⁰ assembly minus the diamagnetic term to machine precision
+    # (measured 2.9e-16).
+    from gradwave.constants import HBAR2_2M
+    from gradwave.dtypes import CDTYPE, RDTYPE
+    from gradwave.postscf.kgeometry_nmr import (
+        _branch_field_fixed_sphere,
+        induced_current_q,
+    )
+
+    res = si_mesh
+    eng = dq_engine
+    q_hat = np.array([0.0, 1.0, 0.0])
+    pol = np.array([0.0, 0.0, 1.0])
+    ((s0, _ds),) = eng.branch_fields_axis(q_hat, [pol])
+    cur = induced_current_q(res, (0.0, 0.0, 0.0), pol, cg_tol=1e-11)
+    rel = float((s0 - cur.j_total).abs().max() / cur.j_total.abs().max())
+    assert rel < 1e-7
+    rho = res.rho if res.rho.dim() == 3 else res.rho[0]
+    dia = torch.einsum(
+        "m,ijk->mijk",
+        torch.as_tensor(pol, dtype=RDTYPE).to(CDTYPE),
+        (2.0 * HBAR2_2M) * rho.to(CDTYPE),
+    )
+    tw0 = sum(
+        _branch_field_fixed_sphere(eng, ik, q_hat, pol, 0.0)
+        for ik in range(len(eng.ks))
+    )
+    assert float(((s0 - dia) - tw0).abs().max() / tw0.abs().max()) < 1e-12
+
+
+def test_dq_derivative_matches_fd_twin(si_mesh, dq_engine):
+    # THE validation gate of the analytic derivative chain (M second
+    # derivatives, δu', covariant-derivative projections, Ā'): central
+    # differences of the finite-s fixed-sphere twin converge to the analytic
+    # ∂S/∂s as pure h² truncation — measured rel 1.2e-4 / 3.0e-5 / 7.4e-6 at
+    # h = 2e-3 / 1e-3 / 5e-4 (exact 4× per halving), so one small h bounds
+    # every term and the halved h certifies it is truncation, not a floor.
+    from gradwave.postscf.kgeometry_nmr import _branch_field_fixed_sphere
+
+    eng = dq_engine
+    q_hat = np.array([0.0, 1.0, 0.0])
+    pol = np.array([0.0, 0.0, 1.0])
+    ((_s0, ds),) = eng.branch_fields_axis(q_hat, [pol])
+    rels = []
+    for h in (1e-3, 5e-4):
+        sp = sum(
+            _branch_field_fixed_sphere(eng, ik, q_hat, pol, +h)
+            for ik in range(len(eng.ks))
+        )
+        sm = sum(
+            _branch_field_fixed_sphere(eng, ik, q_hat, pol, -h)
+            for ik in range(len(eng.ks))
+        )
+        fd = (sp - sm) / (2.0 * h)
+        rels.append(float((ds - fd).abs().max() / fd.abs().max()))
+    assert rels[0] < 5e-4
+    assert rels[1] < rels[0]  # shrinking with h: truncation, not a floor
+
+
+def test_dq_gauge_and_tr_null(si_mesh, dq_engine):
+    # Longitudinal (pure gauge) polarization along the SAMPLED mesh axis b̂1:
+    # the analytic column vanishes up to the mesh-superlattice Wannier
+    # residual (the BZ sum of a k-derivative retains i(q̂·R)f_R over
+    # superlattice vectors R; along b̂1 only R ∥ 2a₁ survives). The s = 0
+    # Biot–Savart term — the coefficient of a spurious 1/q divergence, the
+    # TR null — is machine-zero.
+    from gradwave.dtypes import RDTYPE
+    from gradwave.grids import reciprocal_cell
+    from gradwave.postscf.kgeometry_nmr import (
+        _biot_savart_sigma_cols_dq,
+        _transverse_frame,
+    )
+
+    res = si_mesh
+    eng = dq_engine
+    b = reciprocal_cell(res.system.grid.cell)
+    q_hat = np.asarray(b[0], dtype=float) / np.linalg.norm(b[0])
+    pol_t = _transverse_frame(q_hat)[0]
+    fields = eng.branch_fields_axis(q_hat, [pol_t, q_hat])
+    sites = res.system.positions.detach().cpu().to(RDTYPE)
+    qh_t = torch.as_tensor(q_hat, dtype=RDTYPE)
+    col_t, null_t = _biot_savart_sigma_cols_dq(
+        fields[0][0], fields[0][1], qh_t, res.system.grid.g_cart, sites
+    )
+    col_l, _ = _biot_savart_sigma_cols_dq(
+        fields[1][0], fields[1][1], qh_t, res.system.grid.g_cart, sites
+    )
+    scale = float(col_t.abs().max())
+    assert scale > 0
+    assert float(col_l.abs().max()) / scale < 1e-2  # n=2 axis: f_{2a} residual
+    tr_null = float(null_t.abs().max()) * float(np.linalg.norm(b[0])) / scale
+    assert tr_null < 1e-10  # measured ~2e-17
+
+
+def test_sigma_dq_underdetermined(si_mesh):
+    # a single-axis mesh cannot determine the tensor (and the analytic
+    # BZ-derivative only converges along sampled axes): ValueError
+    from gradwave.postscf.kgeometry_nmr import sigma_shielding_dq
+
+    with pytest.raises(ValueError, match="underdetermined"):
+        sigma_shielding_dq(si_mesh)
+
+
+@pytest.mark.standard
+def test_sigma_dq_cubic_isotropy_and_site_equivalence():
+    # The analytic route's headline: on the (2,2,2) mesh where the finite-q
+    # route's equivalent-site split is pure O(q²) error (25.4 ppm at 12 Ry),
+    # the analytic tensor is machine-isotropic AND site-symmetric — measured
+    # at 6 Ry: offdiag 3.3e-10 ppm, diag spread 6.2e-12 ppm, site split
+    # 2.0e-3 ppm on σ_iso ≈ 20.8 ppm (the residual split is the n=2
+    # mesh-superlattice Wannier term, not a q artifact).
+    from gradwave.postscf.kgeometry_nmr import sigma_shielding_dq
+
+    torch.set_num_threads(2)
+    cell, pos = si_fcc()
+    system = setup_system(cell, pos, [0, 0], [si_upf()], ecut=6 * RY,
+                          kmesh=(2, 2, 2), nbands=8, use_symmetry=False,
+                          fft_shape=(15, 15, 15))
+    res = scf(system, PBE(), etol=1e-9, rhotol=1e-8, verbose=False, max_iter=80)
+    assert res.converged
+    sig = sigma_shielding_dq(res)
+    assert sig.shape == (2, 3, 3)
+    assert torch.isfinite(sig).all()
+    diag = torch.diagonal(sig, dim1=1, dim2=2)
+    off = sig - torch.diag_embed(diag)
+    iso = float(diag.mean())
+    assert iso > 0
+    assert float(off.abs().max()) < 1e-6 * abs(iso)
+    for s in range(2):
+        spread = float(diag[s].max() - diag[s].min())
+        assert spread < 1e-6 * abs(iso)
+    split = float(abs(diag[0].mean() - diag[1].mean()))
+    assert split < 1e-3 * abs(iso)  # measured ~1e-4 relative
+
+
 @pytest.mark.standard
 def test_sigma_driver_small(si_mesh):
     # End-to-end sigma_shielding driver at deliberately small scale
