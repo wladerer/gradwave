@@ -371,3 +371,14 @@ check pending. Energies bit-match in all 32 runs; metal iteration parity holds (
 Mini-TiO2 gamma lmax=2 fp2: warm state already r_nsph 2.9e-2; Anderson gate=3/tight=7 iters vs
 NK 29 F-evals — ANDERSON WINS easy fixed points. NK quality itself confirmed (r_nsph 7.5e-9 in 3
 Newton steps). Decisive test = production-hard config (lmax=3 fp4 k222) queued (newton_probe_hard).
+
+## NEWTON PROBE, HARD CONFIG (asus job 109) — SLEDGEHAMMER VALIDATED
+TiO2 ecut300 lmax3 fp_lmax4 k222, 590k dof, from a 24-iter warm state (r_v 2.6, r_nsph 0.23):
+  Anderson baseline: 50 MORE iterations -> r_v STUCK at 4.6e-1, r_nsph 9.6e-3; tight NEVER reached
+  Newton-Krylov:     32 F-evals (3 Newton steps) -> r_v 1.2e-7, r_nsph 1.5e-9
+Wall even in the naive probe embedding: 549s (NK, converged) vs 722s (Anderson, NOT converged).
+On the production-hard config the damped/Anderson iteration effectively STALLS (limit-cycle-like
+r_v plateau) while Newton with FD JVPs converges quadratically in 3 steps. Production embedding
+(hoist setup out of F, autograd JVPs later, Anderson steps as Krylov preconditioner) is now the
+top FLAPW convergence task; expected effect: the 40+-iteration tails of the acceptance matrix
+collapse to ~1 Newton solve from any gate-adjacent warm state.
