@@ -252,12 +252,14 @@ def build_tau_toeplitz(v_tau_r: torch.Tensor, bk: BatchedK,
     which ``V_τ c = einsum('kij,kbj->kbi', Ṽ, c)·mask`` — the exact small-cell
     dense-GEMM form of ``metagga_tau_operator`` (the −½ prefactor and the two
     i(k+G) gradient factors fold into +½·(k+G_i)·(k+G_j)), collapsing its 6
-    FFTs/band into one bmm. Reuses the shipped Toeplitz gate: returns ``None``
-    when the flag is off, the device is CUDA without the opt-in, or the cached
-    matrix exceeds the memory budget — the caller then keeps the FFT path."""
+    FFTs/band into one bmm. Reuses the shipped Toeplitz flags: returns ``None``
+    unless the mode is forced ``"on"`` (the measured auto-gate lives in
+    ``BatchedHamiltonian``; this path has no trial), when the device is CUDA
+    without the opt-in, or when the cached matrix exceeds the memory budget —
+    the caller then keeps the FFT path."""
     from gradwave.core import batch as _batch
 
-    if not _batch._TOEPLITZ_LOCAL_ENABLED:
+    if _batch._TOEPLITZ_MODE != "on":
         return None
     if bk.mask.device.type != "cpu" and not _batch._TOEPLITZ_ON_CUDA:
         return None

@@ -23,12 +23,13 @@ FIX = Path(__file__).parents[1] / "fixtures" / "qe" / "pseudos"
 
 @pytest.fixture(autouse=True)
 def _enable_toeplitz():
-    """The Toeplitz local path is opt-in (default off — it regresses routine SCFs);
-    these tests exercise it, so enable it and restore the default afterwards."""
-    old = batch._TOEPLITZ_LOCAL_ENABLED
-    batch._TOEPLITZ_LOCAL_ENABLED = True
+    """The single-k/τ Toeplitz paths activate only when the mode is forced "on"
+    (the measured auto-gate covers BatchedHamiltonian only); these tests
+    exercise them, so force the mode and restore the default afterwards."""
+    old = batch._TOEPLITZ_MODE
+    batch._TOEPLITZ_MODE = "on"
     yield
-    batch._TOEPLITZ_LOCAL_ENABLED = old
+    batch._TOEPLITZ_MODE = old
 
 
 def _si_res(kmesh=(2, 2, 2)):
