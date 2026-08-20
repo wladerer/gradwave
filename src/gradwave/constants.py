@@ -22,6 +22,12 @@ E2 = HARTREE_EV * BOHR_ANG
 # Boltzmann constant in eV/K (for converting smearing widths quoted in K).
 KB_EV = 8.617333262e-5
 
+# Fine-structure constant α = e²/(ħc) (dimensionless, CODATA 2018). This is
+# the only way the speed of light enters the eV/Å unit system: magnetic
+# response prefactors collapse to α² combinations of the constants above,
+# e.g. e²/(mc²) = 2·ALPHA_FS²·HBAR2_2M/E2 and e²/(ħ²c²) = ALPHA_FS²/E2.
+ALPHA_FS = 7.2973525693e-3
+
 # (−i)^l phase for real-space projector/harmonic transforms, scalar-indexed as
 # MINUS_I_POW[l]. Tabulated to l = 4 (covers every caller); a longer table than
 # a given caller needs is harmless since it is only ever indexed.
