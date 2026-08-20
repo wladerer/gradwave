@@ -567,15 +567,22 @@ class VelocityApply:
                 self.dp[mu][ik, :, : kb.npw] = dp_k[mu]
         self.dij = bk.dij_full.to(CDTYPE)
 
-    def apply(self, c: Tensor, mu: int) -> Tensor:
-        """v_μ c for a batched block c (nk, nb, npw_max)."""
-        out = (2.0 * HBAR2_2M) * self.bk.kpg[:, None, :, mu] * c
-        if self.p.shape[1]:
-            b_p = torch.einsum("kpg,kbg->kbp", self.p.conj(), c)
-            b_dp = torch.einsum("kpg,kbg->kbp", self.dp[mu].conj(), c)
-            out = out + torch.einsum("kbp,pq,kqg->kbg", b_p, self.dij, self.dp[mu])
-            out = out + torch.einsum("kbp,pq,kqg->kbg", b_dp, self.dij, self.p)
-        return out * self.bk.mask[:, None, :]
+    def apply(self, c: Tensor, mu: int, k_index: Tensor | None = None) -> Tensor:
+        """v_μ c for a batched block c (nk, nb, npw_max).
+
+        ``k_index`` selects/reorders the mesh k of each batch row (the finite-q
+        machinery applies v at the k+q partner points); None means identity."""
+        kpg, mask = self.bk.kpg, self.bk.mask
+        p, dp = self.p, self.dp[mu]
+        if k_index is not None:
+            kpg, mask, p, dp = kpg[k_index], mask[k_index], p[k_index], dp[k_index]
+        out = (2.0 * HBAR2_2M) * kpg[:, None, :, mu] * c
+        if p.shape[1]:
+            b_p = torch.einsum("kpg,kbg->kbp", p.conj(), c)
+            b_dp = torch.einsum("kpg,kbg->kbp", dp.conj(), c)
+            out = out + torch.einsum("kbp,pq,kqg->kbg", b_p, self.dij, dp)
+            out = out + torch.einsum("kbp,pq,kqg->kbg", b_dp, self.dij, p)
+        return out * mask[:, None, :]
 
 
 def _sternheimer_ctvr(

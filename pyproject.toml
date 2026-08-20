@@ -160,6 +160,7 @@ include = [
     "src/gradwave/postscf/isdf.py",
     "src/gradwave/postscf/_kb.py",
     "src/gradwave/postscf/kgeometry.py",
+    "src/gradwave/postscf/kgeometry_nmr.py",
     "src/gradwave/postscf/kgeometry_soc.py",
     "src/gradwave/postscf/kgeometry_topo.py",
     "src/gradwave/postscf/lattice_mc.py",
