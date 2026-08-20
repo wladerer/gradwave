@@ -99,6 +99,7 @@ class BlochHK:
 
     b: Tensor  # (3,3) reciprocal-cell rows [Å⁻¹]
     k_ref_cart: Tensor  # (3,) the reference (sphere-defining) k [Å⁻¹]
+    miller: Tensor  # (npw, 3) int64 Miller indices of the fixed sphere
     g_cart: Tensor  # (npw, 3) Cartesian G of the fixed sphere [Å⁻¹]
     vmat: Tensor  # (npw, npw) complex V̂_eff(G−G') [eV]
     tau: Tensor  # (na, 3) atom positions [Å]
@@ -185,6 +186,7 @@ class BlochHK:
         return cls(
             b=torch.as_tensor(reciprocal_cell(grid.cell), dtype=RDTYPE),
             k_ref_cart=sphere.k_cart.to(RDTYPE),
+            miller=sphere.miller,
             g_cart=sphere.kpg.to(RDTYPE) - sphere.k_cart.to(RDTYPE),
             vmat=vmat,
             tau=system.positions.detach().cpu().to(RDTYPE),
