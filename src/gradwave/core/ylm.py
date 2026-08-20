@@ -42,31 +42,44 @@ C44 = 3.0 / 16.0 * math.sqrt(35.0 / math.pi)
 C44M = 3.0 / 4.0 * math.sqrt(35.0 / math.pi)
 
 
-def ylm_all(lmax: int, g: torch.Tensor, eps: float = 1e-14) -> torch.Tensor:
+def ylm_all(
+    lmax: int, g: torch.Tensor, eps: float = 1e-14, *, solid: bool = False
+) -> torch.Tensor:
     """All Y_lm for l = 0..lmax at directions ĝ.
 
     g: (..., 3) — need not be normalized (zero vectors allowed).
     Returns (..., (lmax+1)²), ordered (0,0),(1,0),(1,1),(1,-1),(2,0),...
+
+    ``solid=True`` skips the normalization and returns the SOLID harmonics
+    S_lm(g) = |g|^l·Y_lm(ĝ): the formulas below are homogeneous of degree l
+    in (x, y, z) once r² is the raw |g|², so every entry is a polynomial —
+    smooth at g = 0 with exact autograd derivatives there. This is what the
+    k-differentiable KB projector build (postscf.kgeometry) pairs with the
+    scaled Bessel kernel j_l(x)/x^l to make H(k) smooth across k+G = 0.
     """
     if lmax > 4:
         raise ValueError("ylm_all supports lmax <= 4")
-    # torch.linalg.norm's backward divides by the norm, so at the zero vector
-    # (the Γ / G=0 row an l>0 projector Hessian needs for an Hvp) it feeds
-    # 0/0 = NaN into the SECOND derivative — harmless at first order (that row is
-    # masked below) but fatal for double-backward. Take the norm of a
-    # zero-row-substituted copy so the division is never by zero; every real
-    # direction keeps ``torch.linalg.norm(g)`` bit-for-bit (so downstream SCF
-    # trajectories are unchanged), and the zero rows are masked out anyway.
-    n2 = (g * g).sum(dim=-1, keepdim=True)
-    zero = (n2 < eps * eps).squeeze(-1)
-    g_safe = torch.where(zero.unsqueeze(-1), torch.ones_like(g), g)
-    norm = torch.linalg.norm(g_safe, dim=-1, keepdim=True)
-    unit = g / norm
-    x, y, z = unit[..., 0], unit[..., 1], unit[..., 2]
-    x = torch.where(zero, torch.zeros_like(x), x)
-    y = torch.where(zero, torch.zeros_like(y), y)
-    z = torch.where(zero, torch.zeros_like(z), z)
-    r2 = x * x + y * y + z * z  # 1 for real directions, 0 for zero-vector rows
+    if solid:
+        x, y, z = g[..., 0], g[..., 1], g[..., 2]
+        r2 = x * x + y * y + z * z
+    else:
+        # torch.linalg.norm's backward divides by the norm, so at the zero vector
+        # (the Γ / G=0 row an l>0 projector Hessian needs for an Hvp) it feeds
+        # 0/0 = NaN into the SECOND derivative — harmless at first order (that row is
+        # masked below) but fatal for double-backward. Take the norm of a
+        # zero-row-substituted copy so the division is never by zero; every real
+        # direction keeps ``torch.linalg.norm(g)`` bit-for-bit (so downstream SCF
+        # trajectories are unchanged), and the zero rows are masked out anyway.
+        n2 = (g * g).sum(dim=-1, keepdim=True)
+        zero = (n2 < eps * eps).squeeze(-1)
+        g_safe = torch.where(zero.unsqueeze(-1), torch.ones_like(g), g)
+        norm = torch.linalg.norm(g_safe, dim=-1, keepdim=True)
+        unit = g / norm
+        x, y, z = unit[..., 0], unit[..., 1], unit[..., 2]
+        x = torch.where(zero, torch.zeros_like(x), x)
+        y = torch.where(zero, torch.zeros_like(y), y)
+        z = torch.where(zero, torch.zeros_like(z), z)
+        r2 = x * x + y * y + z * z  # 1 for real directions, 0 for zero-vector rows
 
     out = [torch.full_like(x, C00)]
     if lmax >= 1:

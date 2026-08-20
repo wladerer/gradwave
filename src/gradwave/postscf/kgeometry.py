@@ -14,13 +14,18 @@ Construction (all conventions inherited from the normative modules):
   ``core.hamiltonian.HamiltonianK._toeplitz_M``; constant in k.
 - nonlocal:  p_i(k+G) = (4π/√Ω)(−i)^l Y_lm(k+G^) F_i(|k+G|) e^{−i(k+G)·τ},
   H_NL = Σ_ij D_ij |p_i⟩⟨p_j| (core/hamiltonian.py phase conventions).
-  F_i is evaluated by a DIRECT spherical Bessel contraction with
-  ``pseudo.radial_torch.jl_t`` — plain tensor math, so it is traceable by
-  both reverse- and forward-mode autograd (``pseudo.radial_torch.sbt_t`` is a
+  F_i is evaluated by a DIRECT spherical Bessel contraction in the smooth
+  form [F_l(q)/q^l]·S_lm(k+G): scaled kernel ``pseudo.radial_torch.
+  jl_scaled_x2_t`` (a function of q², even/analytic at 0) × solid harmonics
+  (``ylm_all(..., solid=True)``), plain tensor math traceable by both
+  reverse- and forward-mode autograd (``pseudo.radial_torch.sbt_t`` is a
   custom Function without a jvp, so forward-mode cannot pass through it; at
   dense-H scale, npw·nmesh is tiny, so tracing the kernel is free). This
   matches the SCF's splined tables to ~1e-9 (the spline is fitted to the
-  same transform).
+  same transform), and — because nothing takes a √ or normalizes a direction
+  — H(k) and the projectors are smooth in k straight through k+G = 0 (the
+  earlier cusp-row masking is gone; the velocity apply's FD cross-check at Γ
+  pinned it).
 
 The G-sphere is FIXED at a reference k (basis of ``BlochHK.from_scf``'s
 ``k_frac``), so H(k) is a smooth function of k on a fixed basis — the
@@ -43,11 +48,9 @@ assembles the same tensor from first-order perturbation theory using only
 internal degeneracies of the group and needs only a gap between the group
 and its complement — use it at high-symmetry k.
 
-Caveat: H(k) is non-smooth where k+G = 0 for a sphere G (i.e. k on a
-reciprocal-lattice point, e.g. Γ for a Γ-centred sphere): |k+G| has a cusp
-there. Values are exact (l ≥ 1 channels vanish at q = 0) but the ∂/∂k
-contribution of that single row's l ≥ 1 projectors is masked to zero, like
-``core.ylm.ylm_all``'s zero-row guard. Evaluate derivatives at generic k.
+(The spinor builder in kgeometry_soc still uses the normalized-Ylm form with
+the k+G = 0 row guard — its derivatives at exactly Γ retain the M1 cusp
+caveat until it adopts the solid-harmonic assembly.)
 """
 
 from __future__ import annotations
@@ -55,7 +58,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import torch
@@ -66,12 +69,12 @@ from gradwave.constants import HBAR2_2M, MINUS_I_POW
 from gradwave.core.fftbox import r_to_g
 from gradwave.core.ylm import ylm_all
 from gradwave.dtypes import CDTYPE, RDTYPE
-from gradwave.grids import build_gsphere, reciprocal_cell
-from gradwave.pseudo.radial_torch import jl_t, simpson_weights
+from gradwave.grids import GSphere, build_gsphere, reciprocal_cell
+from gradwave.pseudo.radial_torch import jl_scaled_x2_t, simpson_weights
 from gradwave.pseudo.upf import UPFData
 
 if TYPE_CHECKING:  # leaf module: no runtime scf import (import-linter layering)
-    from gradwave.scf.loop import SCFResult
+    from gradwave.scf.loop import SCFResult, System
 
 HFun = Callable[[Tensor], Tensor]
 """A dense Bloch Hamiltonian: Cartesian k (3,) real → (n, n) Hermitian complex."""
@@ -82,11 +85,17 @@ _Q2_ZERO = 1e-24
 
 @dataclass(frozen=True)
 class _BetaChannel:
-    """One radial KB channel: l and the frozen quadrature for F(q) = Σ_r gw·j_l(qr)."""
+    """One radial KB channel: l and the frozen quadrature for F(q) = Σ_r gw·j_l(qr).
+
+    ``gw_solid`` = gw·r^l pairs with the scaled kernel j_l(qr)/(qr)^l:
+    F_l(q)/q^l = Σ_r gw_solid · jl_scaled_x2(q²r²) — the smooth-at-q=0 form
+    the projector build uses (with solid harmonics carrying the q^l)."""
 
     l: int
     r: Tensor  # (nmesh,) radial mesh [bohr-scaled as parsed]
     gw: Tensor  # (nmesh,) (r·β)(r)·r · simpson weights — contract against j_l(qr)
+    gw_solid: Tensor  # (nmesh,) gw · r^l — contract against j_l(qr)/(qr)^l
+    r2: Tensor  # (nmesh,) r² (the scaled kernel's argument is q²·r²)
 
 
 def _beta_channels(
@@ -105,7 +114,9 @@ def _beta_channels(
             w = torch.as_tensor(simpson_weights(upf.rab[:nr]), dtype=RDTYPE)
             gw = torch.as_tensor(beta.rbeta, dtype=RDTYPE) * r * w
             idxs.append(len(channels))
-            channels.append(_BetaChannel(l=beta.l, r=r, gw=gw))
+            channels.append(
+                _BetaChannel(l=beta.l, r=r, gw=gw, gw_solid=gw * r**beta.l, r2=r * r)
+            )
         chan_of.append(idxs)
     return tuple(channels), chan_of
 
@@ -116,6 +127,121 @@ def _toeplitz_index(miller: Tensor, shape: tuple[int, int, int]) -> Tensor:
     nbox = torch.tensor((n1, n2, n3), device=miller.device)
     diff = (miller[:, None, :] - miller[None, :, :]) % nbox
     return diff[..., 0] * (n2 * n3) + diff[..., 1] * n3 + diff[..., 2]
+
+
+@dataclass(frozen=True)
+class KBProjectors:
+    """Traceable KB projector assembly on one fixed G-sphere.
+
+    ``p(k_cart)`` rebuilds the full projector matrix at a continuous k —
+    radial F via the ``jl_t`` contraction, Ylm, and position phases all on
+    the autograd graph (forward or reverse mode). ``p_and_dp`` adds the
+    analytic k-derivatives by forward-mode dual passes: the matrix-free
+    velocity apply and the dense H(k) share exactly this object.
+    """
+
+    g_cart: Tensor  # (npw, 3) Cartesian G of the sphere [Å⁻¹]
+    tau: Tensor  # (na, 3) atom positions [Å]
+    dij_full: Tensor  # (nproj_tot, nproj_tot) m-expanded D matrix [eV]
+    col_atom: Tensor  # (nproj_tot,) atom of each projector column
+    col_chan: Tensor  # (nproj_tot,) radial-channel index into `channels`
+    col_lm: Tensor  # (nproj_tot,) index into ylm_all's (l,m) ordering
+    channels: tuple[_BetaChannel, ...]  # unique (species, radial channel) pairs
+    lmax: int
+    volume: float
+
+    @property
+    def npw(self) -> int:
+        return int(self.g_cart.shape[0])
+
+    @classmethod
+    def for_sphere(cls, system: System, sphere: GSphere) -> KBProjectors:
+        """Build for one ``grids.GSphere`` of an NC System."""
+        channels, chan_of = _beta_channels(system.upfs)
+        col_atom, col_chan, col_lm = [], [], []
+        blocks: list[Tensor] = []
+        for a, s in enumerate(system.species_of_atom):
+            upf = system.upfs[s]
+            ls = [beta.l for beta in upf.betas]
+            offs = np.cumsum([0, *(2 * l + 1 for l in ls)])
+            for i, l in enumerate(ls):
+                for mc in range(2 * l + 1):
+                    col_atom.append(a)
+                    col_chan.append(chan_of[s][i])
+                    col_lm.append(l * l + mc)  # ylm_all is dense in l²..(l+1)²−1
+            block = torch.zeros((offs[-1], offs[-1]), dtype=RDTYPE)
+            dij = torch.as_tensor(upf.dij, dtype=RDTYPE)
+            for i, li in enumerate(ls):
+                for j, lj in enumerate(ls):
+                    if li != lj:
+                        continue
+                    for mc in range(2 * li + 1):
+                        block[offs[i] + mc, offs[j] + mc] = dij[i, j]
+            blocks.append(block)
+        grid = system.grid
+        return cls(
+            g_cart=sphere.kpg.to(RDTYPE) - sphere.k_cart.to(RDTYPE),
+            tau=system.positions.detach().cpu().to(RDTYPE),
+            dij_full=(
+                torch.block_diag(*blocks)
+                if blocks
+                else torch.zeros((0, 0), dtype=RDTYPE)
+            ),
+            col_atom=torch.tensor(col_atom, dtype=torch.int64),
+            col_chan=torch.tensor(col_chan, dtype=torch.int64),
+            col_lm=torch.tensor(col_lm, dtype=torch.int64),
+            channels=channels,
+            lmax=max((c.l for c in channels), default=0),
+            volume=grid.volume,
+        )
+
+    def p(self, k_cart: Tensor) -> Tensor:
+        """KB projectors p (nproj_tot, npw) at continuous k, differentiable in k.
+
+        Assembled in the manifestly smooth form [F_l(q)/q^l]·S_lm(k+G) with
+        S_lm the solid harmonic and the scaled Bessel kernel a function of
+        q² — no √ or normalization anywhere, so the columns (and their
+        autograd derivatives, forward or reverse) are exact straight through
+        k+G = 0. Values coincide with the F_l·Y_lm form for q > 0."""
+        kpg = self.g_cart + k_cart  # (npw, 3)
+        q2 = (kpg * kpg).sum(-1)
+
+        fvals = [
+            ch.gw_solid @ jl_scaled_x2_t(ch.l, q2[None, :] * ch.r2[:, None])
+            for ch in self.channels
+        ]  # F_l(q)/q^l, smooth in q²
+        y = ylm_all(self.lmax, kpg, solid=True)  # (npw, (lmax+1)²): q^l·Y_lm
+        phase_arg = kpg @ self.tau.T  # (npw, na)
+        phases = torch.exp(torch.complex(torch.zeros_like(phase_arg), -phase_arg))
+
+        cols = []
+        for c in range(int(self.col_atom.shape[0])):
+            chan = self.channels[int(self.col_chan[c])]
+            pref = (4.0 * math.pi / math.sqrt(self.volume)) * MINUS_I_POW[chan.l]
+            radial_angular = fvals[int(self.col_chan[c])] * y[:, int(self.col_lm[c])]
+            cols.append(pref * radial_angular.to(CDTYPE) * phases[:, int(self.col_atom[c])])
+        if not cols:
+            return torch.zeros((0, self.npw), dtype=CDTYPE, device=kpg.device)
+        return torch.stack(cols, dim=0)
+
+    def p_and_dp(self, k_cart: Tensor) -> tuple[Tensor, list[Tensor]]:
+        """(p, [∂p/∂k_x, ∂p/∂k_y, ∂p/∂k_z]) at k — the derivatives by
+        forward-mode dual passes through the traceable build. Composes with
+        reverse-mode graphs on the frozen tensors (positions enter the
+        phases), so downstream ∂/∂params stays reachable."""
+        k = k_cart.to(RDTYPE)
+        p0: Tensor | None = None
+        dp = []
+        for mu in range(3):
+            tangent = torch.zeros(3, dtype=RDTYPE, device=k.device)
+            tangent[mu] = 1.0
+            with fwAD.dual_level():
+                pd = self.p(fwAD.make_dual(k, tangent))
+                prim, tang = fwAD.unpack_dual(pd)
+            p0 = prim
+            dp.append(tang if tang is not None else torch.zeros_like(prim))
+        assert p0 is not None
+        return p0, dp
 
 
 @dataclass(frozen=True)
@@ -170,48 +296,21 @@ class BlochHK:
         vhat = r_to_g(v.detach().cpu().to(CDTYPE)).reshape(-1)
         vmat = vhat[_toeplitz_index(sphere.miller, grid.shape)]
 
-        channels, chan_of = _beta_channels(system.upfs)
-
-        col_atom, col_chan, col_lm = [], [], []
-        blocks: list[Tensor] = []
-        for a, s in enumerate(system.species_of_atom):
-            upf = system.upfs[s]
-            ls = [beta.l for beta in upf.betas]
-            offs = np.cumsum([0, *(2 * l + 1 for l in ls)])
-            for i, l in enumerate(ls):
-                for mc in range(2 * l + 1):
-                    col_atom.append(a)
-                    col_chan.append(chan_of[s][i])
-                    col_lm.append(l * l + mc)  # ylm_all is dense in l²..(l+1)²−1
-            block = torch.zeros((offs[-1], offs[-1]), dtype=RDTYPE)
-            dij = torch.as_tensor(upf.dij, dtype=RDTYPE)
-            for i, li in enumerate(ls):
-                for j, lj in enumerate(ls):
-                    if li != lj:
-                        continue
-                    for mc in range(2 * li + 1):
-                        block[offs[i] + mc, offs[j] + mc] = dij[i, j]
-            blocks.append(block)
-        dij_full = (
-            torch.block_diag(*blocks)
-            if blocks
-            else torch.zeros((0, 0), dtype=RDTYPE)
-        )
-
+        kb = KBProjectors.for_sphere(system, sphere)
         return cls(
             b=torch.as_tensor(reciprocal_cell(grid.cell), dtype=RDTYPE),
             k_ref_cart=sphere.k_cart.to(RDTYPE),
             miller=sphere.miller,
-            g_cart=sphere.kpg.to(RDTYPE) - sphere.k_cart.to(RDTYPE),
+            g_cart=kb.g_cart,
             vmat=vmat,
-            tau=system.positions.detach().cpu().to(RDTYPE),
-            dij_full=dij_full,
-            col_atom=torch.tensor(col_atom, dtype=torch.int64),
-            col_chan=torch.tensor(col_chan, dtype=torch.int64),
-            col_lm=torch.tensor(col_lm, dtype=torch.int64),
-            channels=channels,
-            lmax=max((c.l for c in channels), default=0),
-            volume=grid.volume,
+            tau=kb.tau,
+            dij_full=kb.dij_full,
+            col_atom=kb.col_atom,
+            col_chan=kb.col_chan,
+            col_lm=kb.col_lm,
+            channels=kb.channels,
+            lmax=kb.lmax,
+            volume=kb.volume,
         )
 
     def k_cart(self, k_frac: Sequence[float] | np.ndarray | Tensor) -> Tensor:
@@ -225,26 +324,11 @@ class BlochHK:
 
     def projectors(self, k_cart: Tensor) -> Tensor:
         """KB projectors p (nproj_tot, npw) at continuous k, differentiable in k."""
-        kpg = self.g_cart + k_cart  # (npw, 3)
-        q2 = (kpg * kpg).sum(-1)
-        cusp = q2 < _Q2_ZERO
-        q = torch.sqrt(torch.where(cusp, torch.ones_like(q2), q2))
-        q = torch.where(cusp, torch.zeros_like(q), q)
-
-        fvals = [ch.gw @ jl_t(ch.l, q[None, :] * ch.r[:, None]) for ch in self.channels]
-        y = ylm_all(self.lmax, kpg)  # (npw, (lmax+1)²)
-        phase_arg = kpg @ self.tau.T  # (npw, na)
-        phases = torch.exp(torch.complex(torch.zeros_like(phase_arg), -phase_arg))
-
-        cols = []
-        for c in range(int(self.col_atom.shape[0])):
-            chan = self.channels[int(self.col_chan[c])]
-            pref = (4.0 * math.pi / math.sqrt(self.volume)) * MINUS_I_POW[chan.l]
-            radial_angular = fvals[int(self.col_chan[c])] * y[:, int(self.col_lm[c])]
-            cols.append(pref * radial_angular.to(CDTYPE) * phases[:, int(self.col_atom[c])])
-        if not cols:
-            return torch.zeros((0, self.npw), dtype=CDTYPE, device=kpg.device)
-        return torch.stack(cols, dim=0)
+        return KBProjectors(
+            g_cart=self.g_cart, tau=self.tau, dij_full=self.dij_full,
+            col_atom=self.col_atom, col_chan=self.col_chan, col_lm=self.col_lm,
+            channels=self.channels, lmax=self.lmax, volume=self.volume,
+        ).p(k_cart)
 
     def h(self, k_cart: Tensor) -> Tensor:
         """Dense Hermitian H(k) (npw, npw) [eV], differentiable in Cartesian k."""
@@ -354,6 +438,23 @@ def metric_curvature(q: Tensor) -> tuple[Tensor, Tensor]:
     return q.real, -2.0 * q.imag
 
 
+def _ctvr_tensor_dense(
+    h_fn: HFun, k_cart: Tensor, occ: Sequence[int] | Tensor, mu_chem: float
+) -> Tensor:
+    """The full (3, 3) complex CTVR tensor t_μν(k) = Σ_{n∈occ,m∉occ}
+    A_μ[m,n]*(ε_m + ε_n − 2μ)A_ν[m,n] — the dense-eigh twin of the
+    Sternheimer route's per-k tensor (route-equivalence tests compare these;
+    :func:`orbmag_tensor` antisymmetrizes the imaginary part)."""
+    w, u, dh = _eigh_and_dh(h_fn, k_cart)
+    a, e_out, e_in = _crossgap_a(w, u, dh, occ)
+    weight = (e_out[:, None] + e_in[None, :] - 2.0 * mu_chem).to(u.dtype)
+    t = torch.empty((3, 3), dtype=u.dtype, device=u.device)
+    for mu in range(3):
+        for nu in range(3):
+            t[mu, nu] = (a[mu].conj() * weight * a[nu]).sum()
+    return t
+
+
 def orbmag_tensor(
     h_fn: HFun, k_cart: Tensor, occ: Sequence[int] | Tensor, mu_chem: float
 ) -> Tensor:
@@ -373,13 +474,7 @@ def orbmag_tensor(
     Units: [H] · [k]⁻² — eV·Å² for a Bloch h_fn (k in Å⁻¹); model units for
     toys. Convert to a magnetic moment with :func:`orbital_magnetization`.
     """
-    w, u, dh = _eigh_and_dh(h_fn, k_cart)
-    a, e_out, e_in = _crossgap_a(w, u, dh, occ)
-    weight = (e_out[:, None] + e_in[None, :] - 2.0 * mu_chem).to(u.dtype)
-    t = torch.empty((3, 3), dtype=u.dtype, device=u.device)
-    for mu in range(3):
-        for nu in range(3):
-            t[mu, nu] = (a[mu].conj() * weight * a[nu]).sum()
+    t = _ctvr_tensor_dense(h_fn, k_cart, occ, mu_chem)
     return torch.stack(
         [
             (t[1, 2] - t[2, 1]).imag,
@@ -432,3 +527,149 @@ def orbital_magnetization(
                 hk = BlochHK.from_scf(res, kf, spin=spin, ecut=ecut)
                 acc = acc + orbmag_tensor(hk.h, hk.k_cart(kf), occ, mu_chem)
     return acc / (n1 * n2 * n3) / (2.0 * HBAR2_2M)
+
+
+# --------------------------------------------------------------------------- #
+# Sternheimer route: orbital magnetization without dense eigh                 #
+# --------------------------------------------------------------------------- #
+
+
+class VelocityApply:
+    """Matrix-free velocity v_μ|ψ⟩ = (∂H/∂k_μ)|ψ⟩ on the SCF's batched mesh.
+
+    The local potential is k-independent, so v_μ = analytic kinetic diagonal
+    2·HBAR2_2M·(k+G)_μ plus the KB nonlocal k-derivative
+    Σ_ij D_ij (|∂_μp_i⟩⟨p_j| + |p_i⟩⟨∂_μp_j|), with (p, ∂p) built ONCE per k
+    by :meth:`KBProjectors.p_and_dp` (analytic forward-mode derivative of the
+    traceable jl_t/Ylm/phase assembly — no finite differences) and padded to
+    the (nk, nproj, npw_max) batch layout. The p/∂p tensors keep any
+    reverse-mode graph of the frozen inputs (positions), so a later
+    ∂M/∂params can differentiate through the apply.
+    """
+
+    def __init__(self, system: System) -> None:
+        bk = system.batch
+        assert bk is not None, "System.batch required (setup_system builds it)"
+        self.bk = bk
+        nk, m = bk.nk, bk.npw_max
+        nproj = int(bk.dij_full.shape[0])
+        self.p = torch.zeros(nk, nproj, m, dtype=CDTYPE)
+        self.dp = [torch.zeros(nk, nproj, m, dtype=CDTYPE) for _ in range(3)]
+        for ik, sph in enumerate(system.spheres):
+            kb = KBProjectors.for_sphere(system, sph)
+            p_k, dp_k = kb.p_and_dp(sph.k_cart.to(RDTYPE))
+            self.p[ik, :, : kb.npw] = p_k
+            for mu in range(3):
+                self.dp[mu][ik, :, : kb.npw] = dp_k[mu]
+        self.dij = bk.dij_full.to(CDTYPE)
+
+    def apply(self, c: Tensor, mu: int) -> Tensor:
+        """v_μ c for a batched block c (nk, nb, npw_max)."""
+        out = (2.0 * HBAR2_2M) * self.bk.kpg[:, None, :, mu] * c
+        if self.p.shape[1]:
+            b_p = torch.einsum("kpg,kbg->kbp", self.p.conj(), c)
+            b_dp = torch.einsum("kpg,kbg->kbp", self.dp[mu].conj(), c)
+            out = out + torch.einsum("kbp,pq,kqg->kbg", b_p, self.dij, self.dp[mu])
+            out = out + torch.einsum("kbp,pq,kqg->kbg", b_dp, self.dij, self.p)
+        return out * self.bk.mask[:, None, :]
+
+
+def _sternheimer_ctvr(
+    res: SCFResult,
+    mu_chem: float,
+    *,
+    cg_tol: float = 1e-9,
+    cg_max_iter: int = 400,
+) -> tuple[Tensor, Tensor]:
+    """Per-k CTVR tensors t_μν(k) (nk, 3, 3) and the k-weights, by
+    conduction-projected Sternheimer solves at the SCF's own mesh:
+
+        (H − ε_n + s·P_occ)|∂̃_μu_n⟩ = (1−P_occ) v_μ|u_n⟩
+        t_μν(k) = Σ_n ⟨∂̃_μu_n|H|∂̃_νu_n⟩ + (ε_n − 2μ_chem)⟨∂̃_μu_n|∂̃_νu_n⟩
+
+    identical to the dense route's Σ_m A*_μ(ε_m + ε_n − 2μ)A_ν on the same
+    basis, but with no dense eigh — cost is 3 CG solves over the occupied
+    block. Insulators, nspin = 1, full (symmetry-unreduced) k-mesh.
+    """
+    from gradwave.core.batch import BatchedHamiltonian, projectors_b
+    from gradwave.postscf._response import (
+        cg_sternheimer,
+        insulator_window,
+        pad_coeffs,
+        sternheimer_shift,
+    )
+
+    system = res.system
+    if getattr(res, "nspin", 1) != 1:
+        raise NotImplementedError("orbital magnetization: nspin=1 only")
+    if system.sym is not None:
+        raise NotImplementedError(
+            "orbital magnetization needs the full k-mesh: M_orb is a "
+            "pseudovector, so IBZ star-unfolding is not implemented — run the "
+            "SCF with use_symmetry=False"
+        )
+    bk = system.batch
+    assert bk is not None
+
+    nocc = insulator_window(
+        res.occupations, 2.0, "orbital magnetization requires insulating occupations"
+    )
+    coeffs = res.coeffs
+    assert coeffs is not None
+    # SCFResult.coeffs is per-k ragged (list[Tensor]) for the NC formalism —
+    # the same cast precedent as postscf/dielectric.py's dielectric_born
+    c_occ = pad_coeffs(cast("list[Tensor]", coeffs), bk.npw_max)[:, :nocc]
+    eps_occ = res.eigenvalues[:, :nocc].to(RDTYPE)
+    shift = sternheimer_shift(eps_occ)
+    h = BatchedHamiltonian(
+        bk, system.grid.shape, res.v_eff, projectors_b(bk, system.positions)
+    )
+
+    def p_c(x: Tensor) -> Tensor:
+        ov = torch.einsum("kng,kbg->kbn", c_occ.conj(), x)
+        return x - torch.einsum("kbn,kng->kbg", ov, c_occ)
+
+    v = VelocityApply(system)
+    dpsi = []
+    for mu in range(3):
+        rhs = p_c(v.apply(c_occ, mu))
+        dpsi.append(
+            cg_sternheimer(h, bk, c_occ, eps_occ, rhs, torch.zeros_like(rhs),
+                           shift, tol=cg_tol, max_iter=cg_max_iter)
+        )
+    hd = [h.apply(d) for d in dpsi]
+    t = torch.zeros(bk.nk, 3, 3, dtype=CDTYPE)
+    e_w = (eps_occ - 2.0 * mu_chem).to(CDTYPE)  # (nk, nocc)
+    for mu in range(3):
+        for nu in range(3):
+            band = torch.einsum("kng,kng->kn", dpsi[mu].conj(), hd[nu])
+            band = band + e_w * torch.einsum("kng,kng->kn", dpsi[mu].conj(), dpsi[nu])
+            t[:, mu, nu] = band.sum(dim=1)
+    return t, system.kweights.to(RDTYPE)
+
+
+def orbital_magnetization_sternheimer(
+    res: SCFResult,
+    mu_chem: float,
+    *,
+    cg_tol: float = 1e-9,
+    cg_max_iter: int = 400,
+) -> Tensor:
+    """Modern-theory orbital magnetization, moment per cell (3,) in μ_B —
+    the Sternheimer route: no dense eigh, evaluated at the SCF's own k-mesh
+    with the matrix-free :class:`VelocityApply` and
+    ``postscf._response.cg_sternheimer``. Same integrand, units, and sign
+    convention as :func:`orbital_magnetization` (see the unit chain there);
+    agreement between the two routes is tested at low ecut. Scales as the
+    SCF itself (CG in the sphere basis) instead of O(npw³) eigh.
+    """
+    t, w = _sternheimer_ctvr(res, mu_chem, cg_tol=cg_tol, cg_max_iter=cg_max_iter)
+    t_avg = torch.einsum("k,kab->ab", w.to(CDTYPE), t)
+    i_vec = torch.stack(
+        [
+            (t_avg[1, 2] - t_avg[2, 1]).imag,
+            (t_avg[2, 0] - t_avg[0, 2]).imag,
+            (t_avg[0, 1] - t_avg[1, 0]).imag,
+        ]
+    )
+    return i_vec / (2.0 * HBAR2_2M)
