@@ -434,3 +434,17 @@ VERDICT: convergence error is now ELIMINATED as an explanation. O eta matches El
 0.74); magnitude ~44% of Elk, k-stable; leading-component sign opposite to Elk's listing (check
 Elk's sign convention before calling it a discrepancy). The remaining gap is BASIS (aug-lmax,
 O LOs, fullpot_lmax) — next lever: aug-lmax 4-5 + O LO A/B from these gated states (task #7).
+
+## ELK SIGN CONVENTION RESOLVED (2026-08-20) — the flip is REAL, and it is a clean -0.44x
+Elk's EFG.OUT is d^2(vclmt)/dr_i dr_j (writeefg.f90) where vclmt is the ELECTRON Coulomb
+potential (species files store spzn=-Z, confirmed O.in: -8.0) — i.e. -1x the electrostatic
+(NQR) convention. gradwave's _valence_v is +(4*pi*E2/5) Int rho_2M/r — the SAME
+electron-potential sign. Same convention => the opposite leading sign is NOT a convention
+artifact. Sharper: componentwise ours = -0.44x Elk almost exactly
+([+8.33,-7.37,-0.97] vs [-19.1,+16.6,+2.5]; ratios .436/.444/.388) — which is WHY eta
+matches while everything else disagrees. Two candidate explanations the basis A/B
+discriminates: (a) a missing opposite-sign contribution ~1.44x the current valence term
+(semicore/core polarization -> aug-lmax/LO variants should grow magnitude and flip the
+sign through a cancellation); (b) a global sign slip in one term of our chain (then the
+A/B magnitude grows but never flips). Elk raw a.u. eigenvalues, O: [-0.1967,+0.0257,+0.1710]
+(1 Ha/Bohr^2 = 97.17 eV/A^2).
