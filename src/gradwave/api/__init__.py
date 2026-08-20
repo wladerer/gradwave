@@ -16,6 +16,7 @@ plus the underscore helpers that tests and tooling import from the old
 from gradwave.api._common import SPIN_XC_REGISTRY as SPIN_XC_REGISTRY
 from gradwave.api._common import XC_REGISTRY as XC_REGISTRY
 from gradwave.api._common import _mixing_scheme as _mixing_scheme
+from gradwave.api.converge import recommend_convergence as recommend_convergence
 from gradwave.api.dispatch import run as run
 from gradwave.api.dispatch import run_magnetism as run_magnetism
 from gradwave.api.dispersion import _compute_dispersion as _compute_dispersion
@@ -40,6 +41,7 @@ __all__ = [
     "XC_REGISTRY",
     "build_summary",
     "build_system",
+    "recommend_convergence",
     "run",
     "run_eos",
     "run_elastic",
