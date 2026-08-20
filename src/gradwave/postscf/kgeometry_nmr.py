@@ -193,6 +193,168 @@ def paramagnetic_tensor(sol: VelocityQSolves) -> Tensor:
 # --------------------------------------------------------------------------- #
 
 
+# --------------------------------------------------------------------------- #
+# induced current density and K_Hxc screening (milestone 8)                    #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class CurrentResponseQ:
+    """First-order induced current density for the perturbation λ·O_{q,ν}
+    (per unit λ; the physical field adds the −q branch)."""
+
+    q_frac: np.ndarray
+    nu: int  # perturbation direction
+    j_para: Tensor  # (3, n1, n2, n3) complex: BZ-weighted canonical current
+    j_para_k: Tensor  # (nk, 3, n1, n2, n3): per-k, (f/Ω)-normalized, no w_k
+    j_dia: Tensor  # (3, n1, n2, n3): diamagnetic term 2·HBAR2_2M·δ_μν·ρ(r)
+    drho_bare: Tensor  # (n1, n2, n3) complex: bare induced density (periodic part)
+    drho: Tensor  # screened induced density (== bare when screen=False)
+    n_dyson: int
+    dpsi: Tensor  # (nk, nocc, npw_max): total (screened) first-order response
+
+
+def _drho_q(sol: VelocityQSolves, dpsi: Tensor, bk: BatchedK, shape, ph: Tensor,
+            volume: float) -> Tensor:
+    """Periodic part of the induced density: Σ_kn f w u*_nk δu_nk e^{−iG0r}/Ω."""
+    u_box = g_to_r_b(sol.c_occ_k, bk, shape)
+    du_box = g_to_r_b(dpsi, sol.bk_kq, shape)
+    contrib = (u_box.conj() * du_box * ph.conj()).sum(dim=1)  # (nk, *shape)
+    w = (2.0 * sol.weights).to(CDTYPE)
+    return torch.einsum("k,k...->...", w, contrib) / volume
+
+
+def induced_current_q(
+    res: SCFResult,
+    q_frac: np.ndarray | list[float] | tuple[float, float, float],
+    nu: int,
+    *,
+    xc: object | None = None,
+    screen: bool = False,
+    cg_tol: float = 1e-9,
+    cg_max_iter: int = 400,
+    dyson_beta: float = 0.4,
+    dyson_tol: float = 1e-7,
+    dyson_iter: int = 40,
+    history: int = 8,
+) -> CurrentResponseQ:
+    """Induced (canonical) current density of the perturbation λ·O_{q,ν}.
+
+    Paramagnetic part from the (u_nk, δu_nk) Sternheimer pairs with the
+    KINETIC current operator — the cell-periodic cross density
+    ½[ũ*(v_kin δu)~ + (v_kin u)~* δũ] referenced to (k, k+q) via the umklapp
+    phase; per-k means obey the exact f-sum d⟨v_μ⟩/dk_ν identity (tested).
+    Diamagnetic part 2·HBAR2_2M·δ_μν·ρ(r) (the A·A term of the same
+    coupling; at q = 0 its cell average cancels the paramagnetic one).
+    The KB nonlocal current contribution is NOT included — that is the
+    GIPAW reconstruction gap, tracked explicitly.
+
+    ``screen=True`` adds the self-consistent K_Hxc response: the induced
+    density is converged through the Dyson fixed point δρ = χ₀[O] +
+    χ₀[K_Hxc^q δρ] (reusing dfpt_q.chi0_q / _k_hxc_q with Anderson mixing)
+    and the final δu gains the local-field solve for the converged
+    δV_Hxc — the current is then assembled from the SCREENED δu. For a
+    time-reversal-symmetric ground state the q = 0 velocity perturbation
+    induces no density (δρ is TR-odd), so screening is inert there (tested).
+    """
+    _guard(res)
+    system = res.system
+    grid = system.grid
+    shape = grid.shape
+    bk = system.batch
+    assert bk is not None
+    sol = velocity_perturbation_q(res, q_frac, cg_tol=cg_tol, max_iter=cg_max_iter)
+    nk = sol.c_occ_k.shape[0]
+    ph = torch.stack(
+        [_g0_phase(shape, sol.g0[ik], sol.c_occ_k.device) for ik in range(nk)]
+    )[:, None]
+
+    dpsi = sol.dpsi[nu]
+    drho_bare = _drho_q(sol, dpsi, bk, shape, ph, grid.volume)
+    drho = drho_bare
+    n_dyson = 0
+
+    if screen:
+        assert xc is not None, "screen=True needs the xc functional"
+        from gradwave.core._anderson import AndersonMixer
+        from gradwave.postscf.dfpt_q import _k_hxc_q, chi0_q
+
+        b = 2.0 * np.pi * np.linalg.inv(np.asarray(grid.cell, float)).T
+        q_cart = torch.as_tensor(np.asarray(q_frac, float) @ b, dtype=RDTYPE)
+        # At q = 0 the ±q branches coincide and the perturbation λ·v_ν is
+        # itself Hermitian: the physical density response is 2·Re[Σ u*δu]
+        # (TR-odd ⇒ ≈ 0 for a TR ground state), while the imaginary part of
+        # the single-branch sum is a branch-splitting artifact that must NOT
+        # drive K_Hxc. At q ≠ 0 the branch is a genuine wavevector-q field.
+        at_gamma = float(np.abs(np.asarray(q_frac, float)).max()) < 1e-12
+
+        def phys(u: Tensor) -> Tensor:
+            return u.real.to(CDTYPE) if at_gamma else u
+
+        def g(u: Tensor) -> Tensor:
+            return drho_bare + chi0_q(
+                res, q_frac, _k_hxc_q(res, xc, phys(u), q_cart), tol=cg_tol
+            )
+
+        u = drho_bare.clone()
+        mixer = AndersonMixer(history, dyson_beta)
+        for it in range(dyson_iter):
+            r = g(u) - u
+            step = float(torch.linalg.norm(r)) / max(1.0, float(torch.linalg.norm(u)))
+            n_dyson = it + 1
+            if step < dyson_tol:
+                break
+            u = mixer.step(u.reshape(-1), r.reshape(-1)).reshape(u.shape)
+        else:
+            raise RuntimeError(f"current-response Dyson not converged after {dyson_iter}")
+        drho = u
+
+        # final local-field solve: δu gains the converged δV_Hxc response
+        dv = _k_hxc_q(res, xc, phys(drho), q_cart)
+        u_box = g_to_r_b(sol.c_occ_k, bk, shape)
+        rhs_s = box_to_sphere_b(u_box * dv[None, None] * ph, sol.bk_kq)
+        ov = torch.einsum("kng,kbg->kbn", sol.c_occ_kq.conj(), rhs_s)
+        rhs = -(rhs_s - torch.einsum("kbn,kng->kbg", ov, sol.c_occ_kq))
+        h_kq = BatchedHamiltonian(
+            sol.bk_kq, shape, res.v_eff, projectors_b(sol.bk_kq, system.positions)
+        )
+        shift = sternheimer_shift(sol.eps_k)
+        dpsi = dpsi + cg_sternheimer(h_kq, sol.bk_kq, sol.c_occ_kq, sol.eps_k,
+                                     rhs, torch.zeros_like(rhs), shift,
+                                     tol=cg_tol, max_iter=cg_max_iter)
+
+    # canonical paramagnetic current density, cell-periodic part at q
+    from gradwave.constants import HBAR2_2M
+
+    f_occ = 2.0
+    u_box = g_to_r_b(sol.c_occ_k, bk, shape)
+    du_box = g_to_r_b(dpsi, sol.bk_kq, shape) * ph.conj()
+    j_k = torch.empty(nk, 3, *shape, dtype=CDTYPE)
+    for mu in range(3):
+        wu = (2.0 * HBAR2_2M) * bk.kpg[:, None, :, mu] * sol.c_occ_k
+        wdu = (2.0 * HBAR2_2M) * sol.bk_kq.kpg[:, None, :, mu] * dpsi
+        wu_box = g_to_r_b(wu, bk, shape)
+        wdu_box = g_to_r_b(wdu, sol.bk_kq, shape) * ph.conj()
+        j_k[:, mu] = (f_occ / grid.volume) * 0.5 * (
+            u_box.conj() * wdu_box + wu_box.conj() * du_box
+        ).sum(dim=1)
+    j_para = torch.einsum("k,km...->m...", sol.weights.to(CDTYPE), j_k)
+    j_dia = torch.zeros(3, *shape, dtype=CDTYPE)
+    j_dia[nu] = (2.0 * HBAR2_2M) * res.rho.to(CDTYPE)
+
+    return CurrentResponseQ(
+        q_frac=np.asarray(q_frac, dtype=float),
+        nu=nu,
+        j_para=j_para,
+        j_para_k=j_k,
+        j_dia=j_dia,
+        drho_bare=drho_bare,
+        drho=drho,
+        n_dyson=n_dyson,
+        dpsi=dpsi,
+    )
+
+
 def _dense_velocity_matrices(hh: BlochHK, k_cart: Tensor) -> list[Tensor]:
     """[v_x, v_y, v_z] (npw, npw) at k on hh's sphere — the dense form of
     ``VelocityApply``: kinetic diagonal + dpᵀD p* + pᵀD dp*."""

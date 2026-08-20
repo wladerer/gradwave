@@ -70,6 +70,76 @@ def test_q_zero_reduces_to_velocity_solves(si_mesh):
     assert rel < 1e-7  # measured ~4e-10
 
 
+# --------------------------------------------------------------------------- #
+# induced current density + screening (milestone 8)                           #
+# --------------------------------------------------------------------------- #
+
+
+def test_current_fsum_per_k(si_mesh):
+    # exact per-k f-sum: 2Re[Ω·mean_r j_para,μ(k)/f] + 2·HBAR2_2M·δ_μν·nocc
+    # equals d/dk_ν Σ_occ⟨v_kin,μ⟩ (dense FD reference) — pins the whole
+    # (u, δu) → j(r) assembly including the covariant-derivative structure
+    from gradwave.constants import HBAR2_2M
+    from gradwave.postscf.kgeometry import BlochHK
+    from gradwave.postscf.kgeometry_nmr import induced_current_q
+
+    res = si_mesh
+    nocc = insulator_window(res.occupations, 2.0, "insulating")
+    vol = res.system.grid.volume
+    nu = 1
+    cur = induced_current_q(res, (0.0, 0.0, 0.0), nu, cg_tol=1e-10)
+
+    def g_vec(kf):
+        hk = BlochHK.from_scf(res, kf)
+        _, u = torch.linalg.eigh(hk.h(hk.k_cart(kf)))
+        kpg = hk.g_cart + hk.k_cart(kf)
+        occ = u[:, :nocc]
+        dens = (occ.conj() * occ).real.sum(dim=1)
+        return (2.0 * HBAR2_2M) * (dens[:, None] * kpg).sum(dim=0)
+
+    cell, _ = si_fcc()
+    b = 2.0 * np.pi * np.linalg.inv(cell).T
+    e_nu_frac = np.linalg.solve(b.T, np.eye(3)[nu])  # Cartesian step in frac
+    h = 1e-4
+    for ik, sph in enumerate(res.system.spheres):
+        kf = np.asarray(sph.k_frac, float)
+        dg = (g_vec(kf + h * e_nu_frac) - g_vec(kf - h * e_nu_frac)) / (2.0 * h)
+        for mu in range(3):
+            lhs = 2.0 * (vol * cur.j_para_k[ik, mu].mean() / 2.0).real.item()
+            lhs += 2.0 * HBAR2_2M * nocc * (1.0 if mu == nu else 0.0)
+            assert abs(lhs - dg[mu].item()) < 1e-3  # measured ≤ 2e-5 on |G'| ~ 100
+
+
+def test_q0_tr_null_and_inert_screening(si_mesh):
+    # TR: the physical density response to the q=0 velocity perturbation
+    # vanishes (Re of the branch sum); screening is then a no-op
+    from gradwave.core.xc.pbe import PBE as XC
+    from gradwave.postscf.kgeometry_nmr import induced_current_q
+
+    res = si_mesh
+    cur_b = induced_current_q(res, (0.0, 0.0, 0.0), 1, cg_tol=1e-10)
+    assert cur_b.drho_bare.real.abs().max().item() < 1e-10  # measured 2e-13
+    assert cur_b.drho_bare.imag.abs().max().item() > 0.1  # the branch artifact
+    cur_s = induced_current_q(res, (0.0, 0.0, 0.0), 1, xc=XC(), screen=True,
+                              cg_tol=1e-10)
+    assert cur_s.n_dyson <= 2
+    assert (cur_s.j_para - cur_b.j_para).abs().max().item() < 1e-8
+
+
+def test_finite_q_screening_converges(si_mesh):
+    from gradwave.core.xc.pbe import PBE as XC
+    from gradwave.postscf.kgeometry_nmr import induced_current_q
+
+    res = si_mesh
+    cur = induced_current_q(res, (0.5, 0.0, 0.0), 1, xc=XC(), screen=True,
+                            cg_tol=1e-9, dyson_tol=1e-7)
+    assert cur.n_dyson < 30
+    # genuine self-consistent screening at finite q (measured ~16% of bare)
+    rel = (cur.drho - cur.drho_bare).abs().max().item() / cur.drho_bare.abs().max().item()
+    assert 0.01 < rel < 1.0
+    assert torch.isfinite(cur.j_para).all() and torch.isfinite(cur.j_dia).all()
+
+
 def test_rejects_incommensurate_and_reduced():
     torch.set_num_threads(2)
     cell, pos = si_fcc()
