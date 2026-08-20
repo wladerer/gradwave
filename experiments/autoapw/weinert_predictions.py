@@ -108,6 +108,22 @@ def main():
               f"r_nsph={r['r_nsph']:.2e}", flush=True)
         return 0
 
+    if mode == "warm_plain":
+        # Prediction 2 proper: PLAIN Anderson (kerker=None) from a warm state. Pre-fix this
+        # stalled at r_v ~0.46 then diverged (the |rho|=1.02 interstitial mode); post-fix the
+        # bare map is contractive (DMD |rho|max < 1) so it must now converge.
+        cfg = base_cfg(kerker=None, verbose=True)
+        path = os.path.expanduser(os.environ.get("WP_STATE", "~/tio2_states/base_k222.pkl"))
+        with open(path, "rb") as f:
+            state = pickle.load(f)
+        print(f"warm state: {path}", flush=True)
+        _, iw = crystal_scf_multi(A_BOHR, ATOMS, RADII, iters=40, tol=1e-3, efg=False,
+                                  kmesh=(2, 2, 2), v_start={"__full_state__": state}, **cfg)
+        r = iw["recorder"].summarize()
+        print(f"warm_plain: n_it={r['n_iter']} r_v={r['r_v']:.2e} "
+              f"r_nsph={r['r_nsph']:.2e}", flush=True)
+        return 0
+
     if mode == "ab":
         for tag, over in (("aug4-fp4", dict(lmax=4, fullpot_lmax=4)),
                           ("aug4-fp6", dict(lmax=4, fullpot_lmax=6))):
