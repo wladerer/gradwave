@@ -330,3 +330,20 @@ Compound: 5-15x wall now, ~10x N-ceiling; the apply-only representation is exact
 differentiable-torch substrate -> speed and autograd roadmaps CONVERGE. H structure that enables
 it all: H = Diag + 3-level-Toeplitz(G-G') + sum_atoms B_a M_a B_a^T (Gram/addition theorem),
 S identical; between iterations only ~200 scalars in M + the Toeplitz symbol change.
+
+## PW PHYSICS-BLIND WORKFLOW RESULT (wf_2810c676-295; full text in the run journal)
+Vetted, code-mapped, ranked (gain x p / effort), all honoring the measured-negatives list:
+1. Coarse-operator draft slaved to adaptive-tau (S effort, 1.15-1.35x CPU, p.5): run the local
+   apply on a coarse box while tol_eff is loose (existing smooth= plumbing!); exact operator at
+   the convergence gate -> fixed point AND implicit-diff gradients unchanged. Kill signal: +1
+   outer iteration on Fe/Cr/Al in the bench_scf battery.
+2. CholQR2 for _orthonormalize_b (S, all devices, p.6): Gram+Cholesky x2 GEMMs replace batched
+   tall-skinny QR (the documented consumer-GPU round bottleneck) + removes the CPU-offload
+   roundtrip; span-equivalence physics argument; jitter/fallback rank safety.
+3. Sphere-aware pruned 3D FFT (M, 1.1-1.4x, p.4): 3x batched 1D passes pruning to the wfc-sphere
+   sub-box; bit-equality unit test vs fftn; benchmark-gated per size class.
+4. fp64-certified fp32-expansion Davidson (M-L, 1.5-3x consumer GPU, p.4): fp32 expansion applies,
+   fp64 RR/Gram + fp64-certified residuals (dodges the measured fp32-metal regression).
+5. Convergence-cohorted lockstep: PROBE FIRST via existing history_out spread histogram.
+6. Toeplitz auto-gate (gating half only).
+The sanitize phase's spec was faithful incl. the AD constraint; workflow validated twice now.
