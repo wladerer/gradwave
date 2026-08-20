@@ -423,3 +423,14 @@ qgt-autograd-k: sign CALIBRATED (Peierls-flux anchor), k+-q velocity Sternheimer
 incl. umklapp), screened induced current (f-sum pinned, TR null 2e-13). Remaining for shielding:
 KB nonlocal current (div j=0 closure) + q->0 antisymmetric assembly — one physics step, fresh
 session.
+
+## TRUSTWORTHY EFG (pipeline, asus job 128, 2026-08-20) — FIRST FULLY-CONVERGED PRODUCTION POINT
+k222+kerker: gated r_nsph 2.2e-4 in 32 it. newton_polish k333: CONVERGED (33 F-evals, res 1.5e-5)
+— Newton succeeds at the k-point where every Anderson variant diverged; production-validated.
+EFG k-stable across k222->k333:
+  O : [+8.33,-7.37,-0.97] eta 0.768   (k222: [+8.43,-7.39,-1.04] eta 0.754) | Elk 19.1, eta 0.74
+  Ti: [-1.01,+0.81,+0.20] eta 0.607                                          | Elk 19.3, eta 0.36
+VERDICT: convergence error is now ELIMINATED as an explanation. O eta matches Elk (0.75-0.77 vs
+0.74); magnitude ~44% of Elk, k-stable; leading-component sign opposite to Elk's listing (check
+Elk's sign convention before calling it a discrepancy). The remaining gap is BASIS (aug-lmax,
+O LOs, fullpot_lmax) — next lever: aug-lmax 4-5 + O LO A/B from these gated states (task #7).
