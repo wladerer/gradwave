@@ -23,6 +23,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, cast
 
+import numpy as np
+
 from gradwave.api._common import XC_REGISTRY
 from gradwave.api.scf import run_scf
 from gradwave.api.system import _as_upfs, _is_uspp, _species_upfs
@@ -68,8 +70,6 @@ def _apply_rule(
     noise floor is flagged unachievable. Returns ``(achievable, effective,
     rec_ecut, rec_mesh, k_extrapolated, notes)``.
     """
-    import numpy as np
-
     notes: list[str] = []
     achievable = target >= floor
     effective = max(target, floor)
@@ -157,8 +157,6 @@ def recommend_convergence(
     mildly as ecut/k shrink, so treat a recommendation sitting exactly at the
     floor as optimistic.
     """
-    import numpy as np
-
     from gradwave.postscf.convergence_error import estimate_kpoint_error
     from gradwave.postscf.convergence_noise import estimate_noise_floor
     from gradwave.postscf.discretization_error import estimate_ecut_error_curve
@@ -272,7 +270,7 @@ def recommend_convergence(
         "kpoint": {
             "meshes": [list(m) for m in meshes],
             "energies_eV": k_energies,
-            **{k: v for k, v in kp.items()},
+            **kp,
         },
         "noise": {
             "sigma_e_eV": noise.sigma_e,

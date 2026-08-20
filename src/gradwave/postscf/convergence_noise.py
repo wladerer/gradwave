@@ -38,7 +38,7 @@ from typing import Any
 import numpy as np
 
 from gradwave.core.xc.base import XCFunctional
-from gradwave.scf.loop import SCFResult, scf, setup_system
+from gradwave.scf.loop import SCFResult, System, scf, setup_system
 
 __all__ = ["NoiseFloor", "estimate_noise_floor", "translation_shifts"]
 
@@ -173,7 +173,7 @@ def estimate_noise_floor(
     use_symmetry = system.sym is not None
     kw = _probe_scf_kwargs(res, scf_kwargs)
 
-    def _build(positions: np.ndarray, cell_p: np.ndarray):
+    def _build(positions: np.ndarray, cell_p: np.ndarray) -> System:
         return setup_system(
             cell_p, positions, system.species_of_atom, system.upfs,
             ecut=float(system.ecut), kmesh=tuple(kmesh), kshift=tuple(kshift),
@@ -194,6 +194,8 @@ def estimate_noise_floor(
             print(f"  noise probe {i + 1}/{n_translations}: "
                   f"E={e_i:+.8f} eV ({res_i.n_iter} iters)", flush=True)
         if forces:
+            # lazy: the force probe is opt-in, and the import is cached after
+            # the first iteration
             from gradwave.postscf.forces import forces as compute_forces
 
             fxc = xc if system.rho_core is not None else None
@@ -227,7 +229,7 @@ def estimate_noise_floor(
     return NoiseFloor(
         sigma_e=sigma_e,
         sigma_e_per_atom=sigma_e / natoms,
-        spread_e=float(e_arr.max() - e_arr.min()),
+        spread_e=max(energies) - min(energies),
         e_base=float(getattr(res.energies, energy)),
         energies=energies,
         shifts_frac=[[float(x) for x in row] for row in shifts],

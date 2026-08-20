@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -32,6 +33,18 @@ from gradwave.grids import GSphere
 # temporaries the apply/density chain holds at once stay under this. Sizes a
 # band chunk as budget / (elem_bytes · n_grid · nk). CPU paths do not chunk.
 _GPU_DENSE_BUDGET_BYTES = 4e8
+
+
+def _dense_band_chunk(n_grid: int, nk: int, device: torch.device, elem_bytes: int) -> int:
+    """Bands per chunk so dense-box temporaries stay under the GPU budget
+    (the apply/density chain holds ~4 such temporaries at once). CPU: no limit.
+
+    elem_bytes scales the budget by the coefficient precision: the fp32 draft
+    (complex64, 8 B) fits twice as many bands as fp64 (complex128, 16 B),
+    giving larger — and thus more efficient — batched FFTs."""
+    if device.type != "cuda":
+        return 1_000_000
+    return max(1, int(_GPU_DENSE_BUDGET_BYTES / (elem_bytes * n_grid * max(nk, 1))))
 
 # Small-cell fast path for the local potential term V(r)·ψ(r). On the wavefunction
 # G-sphere this term is EXACTLY the convolution out(G_i)=Σ_j V̂(G_i−G_j) c(G_j) =
@@ -67,7 +80,8 @@ _GPU_DENSE_BUDGET_BYTES = 4e8
 # lifetime. The default (256 MiB) is deliberately conservative so the path never
 # surprises a memory-tight GPU: it covers small cells and modest k-meshes (e.g.
 # npw≈260 up to ~250 k-points). Raise it to extend coverage to finer meshes /
-# larger npw when memory allows; set the flag False to disable entirely.
+# larger npw when memory allows; GRADWAVE_TOEPLITZ=off disables the path
+# entirely.
 #
 # CUDA is opt-in (default off). The whole-SCF win is measured and verified on CPU
 # fp64 (dense GEMM beats the box FFT at small npw). On GPU the picture did NOT hold
@@ -84,8 +98,9 @@ _TOEPLITZ_M_BUDGET_BYTES = 1 << 28  # 256 MiB cap on the cached local-potential 
 _TOEP_VERDICT: dict[
     tuple[str, int, int, tuple[int, int, int], torch.dtype], bool
 ] = {}
-# Toeplitz must beat the FFT path by this factor in the trial — the margin
-# covers the per-iteration M rebuild amortized over that iteration's applies.
+# The trial adopts Toeplitz only when t_toep < margin·t_fft (i.e. ≥30% faster)
+# — the headroom covers the per-iteration M rebuild amortized over that
+# iteration's applies.
 _TOEP_TRIAL_MARGIN = 0.7
 
 # Optional H-application instrumentation. BatchedHamiltonian.apply is the single
@@ -403,8 +418,8 @@ class BatchedHamiltonian:
 
         "on" forces it (within eligibility); "auto" runs a one-time trial per
         (device, nk, npw_max, shape, dtype) signature: both local-term paths
-        are timed on the real block and Toeplitz is adopted only if it beats
-        the FFT path by ≥(1−margin). The trial costs one extra local-term
+        are timed on the real block and Toeplitz is adopted only if
+        t_toep < ``_TOEP_TRIAL_MARGIN`` · t_fft. The trial costs one extra local-term
         evaluation once per process per signature; on a losing verdict the
         trial's M and index table are freed immediately."""
         if not self._toep_eligible:
@@ -416,7 +431,7 @@ class BatchedHamiltonian:
         verdict = _TOEP_VERDICT.get(key)
         if verdict is None:
 
-            def timed(f) -> float:
+            def timed(f: Callable[[], object]) -> float:
                 f()  # warm (JIT allocations, M/idx builds land here)
                 t0 = time.perf_counter()
                 f()
@@ -445,15 +460,8 @@ class BatchedHamiltonian:
         return self._box[:, :nb]
 
     def _band_chunk(self, nk: int, device: torch.device, elem_bytes: int = 16) -> int:
-        """Bands per chunk so dense-box temporaries stay under ~380 MB on GPU
-        (the apply chain holds ~4 such temporaries at once). CPU: no limit.
-
-        elem_bytes scales the budget by the coefficient precision: the fp32
-        draft (complex64, 8 B) fits twice as many bands as fp64 (complex128,
-        16 B), giving larger — and thus more efficient — batched FFTs."""
-        if device.type != "cuda":
-            return 1_000_000
-        return max(1, int(_GPU_DENSE_BUDGET_BYTES / (elem_bytes * self.n * max(nk, 1))))
+        """`_dense_band_chunk` on this operator's dense grid."""
+        return _dense_band_chunk(self.n, nk, device, elem_bytes)
 
     def apply(self, c: torch.Tensor) -> torch.Tensor:
         """(nk, nb, npw_max) → H c, mask preserved. Chunked over bands to
@@ -506,10 +514,7 @@ def density_b(
     """ρ(r) on the dense grid [e/Å³]. Band-chunked to bound dense-grid memory."""
     nk, nb, _ = coeffs.shape
     n = shape[0] * shape[1] * shape[2]
-    if coeffs.device.type == "cuda":
-        chunk = max(1, int(_GPU_DENSE_BUDGET_BYTES / (coeffs.element_size() * n * max(nk, 1))))
-    else:
-        chunk = nb
+    chunk = _dense_band_chunk(n, nk, coeffs.device, coeffs.element_size())
     w = kweights[:, None] * occ
     rho: torch.Tensor | None = None
     for lo in range(0, nb, chunk):

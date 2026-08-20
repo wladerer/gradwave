@@ -93,8 +93,8 @@ def _eigh_subspace(s: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 # cols<=16 (worst case measured ratio 0.98x, typically 2-12x) and mixed
 # (sometimes GPU-favored) above that -- capped here at the safe boundary.
 # Davidson's own n_add is bounded by nb, comfortably under 16 for the systems
-# in this repo's benchmark battery; wider blocks (LOBPCG's stacked [X,W,P],
-# CheFSI's buffered block) fall through to the GPU unchanged, same as today.
+# in this repo's benchmark battery; wider blocks (e.g. CheFSI's buffered
+# block) fall through to the GPU unchanged, same as today.
 # This is the SIZE gate only. Whether the offload activates at all is a second,
 # device-dependent gate (`_qr_offload_active`): the whole trick only pays off on
 # a card whose fp64 units are slow enough that the D2H/H2D round trip beats them,
@@ -184,12 +184,11 @@ def _qr_offload(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.linalg.qr(x, mode="reduced")
 
 
-# CholQR2 escape hatch, read once at import (module docstring). Default "on":
-# CholQR2 replaces the tall-skinny QR wherever it succeeds; breakdown falls
-# back to `_qr_offload` per call, so "off" only exists for A/B benchmarks.
-# Default OFF: measured neutral on CPU (0.94-1.03x battery) and neutral-to-
-# slightly-negative on RTX 3050 whole-SCF — the QR round is too thin a slice
-# at these sizes. Kept for a datacenter-GPU retest.
+# CholQR2 escape hatch, read once at import (module docstring). Default "off":
+# measured neutral on CPU (0.94-1.03x battery) and neutral-to-slightly-negative
+# on RTX 3050 whole-SCF — the QR round is too thin a slice at these sizes; kept
+# for a datacenter-GPU retest. When "on", CholQR2 replaces the tall-skinny QR
+# wherever it succeeds, and a breakdown falls back to `_qr_offload` per call.
 _CHOLQR_ENV = os.environ.get("GRADWAVE_CHOLQR", "off").strip().lower()
 
 
@@ -302,8 +301,8 @@ def _certify_fp64(
     w, u = _eigh_subspace(s)
     eig = w.real.to(x.real.dtype)
     u = u.to(x.dtype)
-    x = torch.einsum("kja,kjg->kag", u, x)
-    hx = torch.einsum("kja,kjg->kag", u, hx)
+    x = _combine(u, x)
+    hx = _combine(u, hx)
     r = hx - eig[..., None] * x
     rn = torch.linalg.norm(r, dim=-1).real
     return eig, x, hx, r, rn
@@ -465,8 +464,8 @@ def _rr(q: torch.Tensor, hq: torch.Tensor, nw: int) -> tuple[torch.Tensor, torch
     the conjugate on the bra, u used UNCONJUGATED in the combination. Returns the
     nw lowest Ritz values (nk, nw) and the (nk, dim, nw) coefficient block c whose
     columns combine `q` (or `hq`) into the Ritz vectors (or their images) via
-    ``_combine(c, q)``. Shared by CheFSI and LOBPCG (davidson_batched keeps its
-    own s built from lazy-conj views to avoid a large-nk memory spike).
+    ``_combine(c, q)``. Shared with CheFSI (davidson_batched keeps its own s
+    built from lazy-conj views to avoid a large-nk memory spike).
     """
     s = torch.einsum("kig,kjg->kij", q.conj(), hq)
     # Subspace reduction ALWAYS in fp64 (issue #136), same contract as
@@ -489,8 +488,8 @@ def _combine(c: torch.Tensor, block: torch.Tensor) -> torch.Tensor:
 def _buffered_block(x0: torch.Tensor, n_buffer: int | None) -> tuple[torch.Tensor, int, int]:
     """Widen the initial block with `n_buffer` random buffer bands.
 
-    CheFSI and LOBPCG both carry extra bands above the requested nb so the top
-    wanted band does not stall on the block/filter edge (a real failure mode,
+    CheFSI carries extra bands above the requested nb so the top wanted band
+    does not stall on the block/filter edge (a real failure mode,
     not a bug); only the lowest nb are gated and returned. Returns
     (x0w, n_buffer, nw): `n_buffer` resolved from its default when None,
     nw = nb + n_buffer, and x0w = x0 padded with deterministic random bands
@@ -520,7 +519,7 @@ class BatchedDavidsonResult:
     # stored back in the block dtype); "full" counts block-dtype applies —
     # certification/refresh applies in fp32-expansion mode, every apply
     # otherwise. low/(low+full) bounds the fraction of apply work the mode can
-    # accelerate. Defaults keep positional construction by CheFSI/LOBPCG valid.
+    # accelerate. Defaults keep positional construction by CheFSI valid.
     n_apply_low: int = 0
     n_apply_full: int = 0
 
@@ -537,7 +536,13 @@ def davidson_batched(
     sync_free: bool = False,
     history_out: list[tuple[int, torch.Tensor, torch.Tensor]] | None = None,
 ) -> BatchedDavidsonResult:
-    """sync_free removes every per-round host readback: convergence stats
+    """Batched block Davidson over all k at once (the workhorse solver).
+
+    All k-points advance together with a uniform subspace size, so every step
+    is one batched tensor op (see the section comment above). The remainder of
+    this docstring documents the ``sync_free`` flag and its measured verdict.
+
+    sync_free removes every per-round host readback: convergence stats
     travel through a non-blocking copy into pinned memory and are judged
     one round late via a CUDA event query that never blocks; worst case
     is one extra expansion round whose Rayleigh–Ritz solution is strictly
