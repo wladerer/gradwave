@@ -500,3 +500,21 @@ lmaxo=6, semicore LOs; our aug4 +6% is the first step of this ladder), D1/D2 (in
 XC in the boundary; own-rho_I retention) as smaller systematics. Round-3 variant plan when
 the current A/B drains: aug6; O l=0 LO (Elk-style, NOT our +5eV l=1); fullpot_lmax=6 —
 which requires the deferred Weinert matched-L>4 cap fix first.
+
+## BASIS A/B ROUND 2 COMPLETE (asus 136-140) — Ti eta SOLVED; O magnitude needs D4
+k222-gated EFGs (all r_v/r_nsph healthy; states pickled to ~/tio2_states/):
+  variant  | O tensor (eV/A^2)       | O eta | Ti eta | d|O| vs base
+  base     | [+8.43,-7.39,-1.04]     | 0.754 | 0.981  |   --
+  aug4     | [+8.97,-7.90,-1.07]     | 0.762 | 0.381  | +6.4%
+  aug5     | [+9.22,-8.09,-1.14]     | 0.754 | 0.445  | +9.4%
+  olo(+5eV)| [+8.51,-7.45,-1.06]     | 0.752 | 0.972  | +1.0%
+  aug4olo  | [+9.05,-7.96,-1.09]     | 0.760 | 0.351  | +7.4%
+VERDICTS: (1) Ti eta is a pure aug-lmax effect — >=4 snaps 0.98 -> 0.35-0.45; aug4+OLO 0.351
+vs Elk 0.36: SOLVED. (2) The O in-plane magnitude ladder saturates ~+9% — in-sphere basis
+cannot close the ~2x deficit; D4 (fullpot_lmax 6 boundary matching, needs the Weinert
+matched-L cap fix) is the remaining lever, exactly as the forensics ranked. (3) The +5 eV
+O LO is confirmed dead (+1%); round 3 uses Elk's l=0 semicore-style LO at -0.87 Ha.
+(4) Robust newton_polish: 5/5 SAFE failures at k333 (residuals 1.6-760 vs the single-shot
+era's 2e3-7e4; never returned a worse state) but 0/5 convergence — k333 entry needs
+pre-contraction (a few k333 Anderson+kerker iterations) before Newton. Round-3 plan:
+fullpot_lmax=6 (post cap fix) x {aug4olo, aug6} + O l=0 LO, warm from saved k222 states.
