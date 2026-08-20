@@ -20,6 +20,13 @@ solve, twice) instead of the batched tall-skinny QR. CholQR2 is GEMM-shaped —
 fast on every device — and removes the D2H/H2D round trip of the CUDA QR
 offload entirely; a Cholesky breakdown (rank-deficient block) falls back to
 the QR path for that call. "off" forces the QR path. Read once at import.
+
+``GRADWAVE_FP32_EXPANSION`` in {"on", "off", "auto"} (default "off") controls the
+fp64-certified fp32-expansion mode of ``davidson_batched``: expansion-vector
+H-applies run in complex64 while every convergence-deciding quantity stays fp64
+(see ``_fp32_expansion_active``). Unlike the QR knob this one is read per solve,
+so a benchmark or test can A/B it inside one process. Default off: the win is
+GPU-targeted (crippled-fp64 cards) and not yet measured.
 """
 
 from __future__ import annotations
@@ -214,6 +221,92 @@ def _cholqr2(x: torch.Tensor) -> torch.Tensor | None:
             lo.mH.to(x.dtype), x, upper=True, left=False
         )
     return x
+
+
+# ---------------------------------------------------------------------------
+# fp64-certified fp32-expansion mode (vetted attack #4, physics-blind roadmap).
+#
+# The mixed-precision scheme that already exists (davidson_batched_ms and the
+# SCF loop's `mixed_precision`) drafts WHOLE SOLVES in complex64 and re-polishes
+# later; its measured failure mode is unconditioned fp32 noise on metals costing
+# extra SCF outer iterations (docs/manual/performance.md). This mode draws the
+# precision boundary INSIDE one solve instead:
+#
+#   fp32 (complex64):  H-applies of expansion vectors only — the O(npw) FFT
+#                      work that dominates a round. The results are cast back
+#                      and STORED in complex128, so they carry ~1e-7 relative
+#                      error but participate in exact-arithmetic reductions.
+#   fp64 (complex128): the basis and its orthonormalization (QR), the subspace
+#                      matrix and Rayleigh-Ritz eigensolve (the issue-#136
+#                      contract, unchanged), and — the certification — every
+#                      residual norm that decides convergence: before ANY
+#                      return, r = H·x − εx is recomputed for the retained
+#                      Ritz block against the FULL-precision operator, and the
+#                      block is refreshed by an exact nb×nb Rayleigh-Ritz.
+#
+# A band is therefore never declared converged by an fp32 measurement: the
+# fp32-sourced residual norms only steer the expansion (which directions to
+# add); the return gate sees fp64 residuals of an fp64-refreshed block.
+# ---------------------------------------------------------------------------
+
+# Certification trigger. fp32-sourced residual norms floor at roughly
+# eps32·‖H‖·√npw, so at tight tol the plain `rn < tol` gate would never fire;
+# certification is attempted when the measured norms drop under an estimated
+# floor (eps factor × the kinetic-diagonal max, a cheap ‖H‖ proxy) or when they
+# stall (an fp32 floor reads as stagnation). A spurious trigger costs one exact
+# nb-wide apply and injects exact residual directions into the expansion — it
+# cannot corrupt the answer, only spend time.
+_FP32_CERT_FLOOR_EPS = 32 * torch.finfo(torch.float32).eps
+_FP32_CERT_STALL = 0.7  # rn.max() improved by <30% over the previous round
+
+# fp64-penalty ratio above which "auto" activates on a CUDA device — same
+# measured gate (and threshold rationale) as the QR offload: the mode targets
+# cards whose fp64 units are crippled enough that complex64 FFT/GEMM applies
+# win big; on datacenter fp64 hardware it has nothing to sell.
+_FP32_EXP_PENALTY_THRESHOLD = _QR_OFFLOAD_PENALTY_THRESHOLD
+
+
+def _fp32_expansion_active(x0: torch.Tensor) -> bool:
+    """Whether the fp32-expansion mode applies to a solve seeded by `x0`.
+
+    Reads ``GRADWAVE_FP32_EXPANSION`` per call (cheap; enables in-process A/B).
+    Only a complex128 block qualifies — a complex64 block is already a
+    mixed-precision draft with nothing to certify. "auto" additionally requires
+    CUDA with measurably crippled fp64; "on" forces the mode anywhere (CPU
+    included — correct there too, just not expected to win)."""
+    mode = os.environ.get("GRADWAVE_FP32_EXPANSION", "off").strip().lower()
+    if mode not in ("auto", "on", "off"):
+        raise ValueError(
+            f"GRADWAVE_FP32_EXPANSION must be auto|on|off, got {mode!r}")
+    if mode == "off" or x0.dtype != torch.complex128:
+        return False
+    if mode == "on":
+        return True
+    return x0.is_cuda and _fp64_penalty(x0.device) >= _FP32_EXP_PENALTY_THRESHOLD
+
+
+def _certify_fp64(
+    h_apply: Callable[[torch.Tensor], torch.Tensor], x: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Exact refresh of a retained Ritz block against the full-precision operator.
+
+    x: (nk, nb, m), rows orthonormal (they come out of an fp64 QR basis and an
+    fp64 eigh rotation, so orthonormality holds to fp64 round-off regardless of
+    how H was applied). Applies the FULL-precision H once, re-solves the small
+    nb×nb Rayleigh-Ritz problem, and returns the refreshed
+    (eig, x, hx, r, rn) — eigenvalues, rotated Ritz vectors and images, and the
+    residuals/norms every convergence decision must be made from."""
+    hx = h_apply(x)
+    s = torch.matmul(x.conj(), hx.mT)
+    s = 0.5 * (s + s.conj().transpose(-1, -2))
+    w, u = _eigh_subspace(s)
+    eig = w.real.to(x.real.dtype)
+    u = u.to(x.dtype)
+    x = torch.einsum("kja,kjg->kag", u, x)
+    hx = torch.einsum("kja,kjg->kag", u, hx)
+    r = hx - eig[..., None] * x
+    rn = torch.linalg.norm(r, dim=-1).real
+    return eig, x, hx, r, rn
 
 
 @dataclass
@@ -422,6 +515,14 @@ class BatchedDavidsonResult:
     eigenvectors: torch.Tensor  # (nk, nb, npw_max), padded slots zero
     n_iter: int
     residual_norms: torch.Tensor  # (nk, nb)
+    # Apply bookkeeping in band-vector units (nk·rows per H call). "low" counts
+    # applies routed through the fp32-expansion cast (complex64 compute, result
+    # stored back in the block dtype); "full" counts block-dtype applies —
+    # certification/refresh applies in fp32-expansion mode, every apply
+    # otherwise. low/(low+full) bounds the fraction of apply work the mode can
+    # accelerate. Defaults keep positional construction by CheFSI/LOBPCG valid.
+    n_apply_low: int = 0
+    n_apply_full: int = 0
 
 
 @torch.no_grad()
@@ -466,6 +567,37 @@ def davidson_batched(
     max_dim = min(max_dim_factor * nb, int(mask.sum(dim=1).min()))
     rdtype = x0.real.dtype  # float32 in the mixed-precision draft phase, else float64
 
+    # fp64-certified fp32-expansion mode (see the module-level note). Only the
+    # synchronous gate supports it: sync_free's delayed convergence readback
+    # cannot interleave the certification recompute, and sync_free is a measured
+    # loss anyway (docstring below), so the combination is simply not taken.
+    # Requires a dtype-polymorphic h_apply (BatchedHamiltonian.apply is; a test
+    # operator must cast its matrix to c.dtype).
+    use_fp32_exp = (not sync_free) and _fp32_expansion_active(x0)
+    n_apply_low = 0
+    n_apply_full = 0
+
+    def _apply_full(z: torch.Tensor) -> torch.Tensor:
+        nonlocal n_apply_full
+        n_apply_full += z.shape[0] * z.shape[1]
+        return h_apply(z)
+
+    def _apply_exp(z: torch.Tensor) -> torch.Tensor:
+        """Expansion-vector apply: complex64 in fp32-expansion mode, else full."""
+        if not use_fp32_exp:
+            return _apply_full(z)
+        nonlocal n_apply_low
+        n_apply_low += z.shape[0] * z.shape[1]
+        return h_apply(z.to(torch.complex64)).to(z.dtype)
+
+    # Certification trigger state: the estimated fp32 residual-norm floor
+    # (kinetic-diagonal max as the ‖H‖ proxy) and the previous round's MEASURED
+    # max norm for the stall test. Both are heuristics for WHEN to pay an exact
+    # nb-wide apply; correctness never depends on them (every return path below
+    # re-measures in fp64).
+    cert_floor = _FP32_CERT_FLOOR_EPS * max(float(t.max()), 1.0) if use_fp32_exp else 0.0
+    prev_rnmax = float("inf")
+
     jitter = None
     ev = flag_host = pending_stats = None
     use_event = sync_free and x0.is_cuda
@@ -485,7 +617,7 @@ def davidson_batched(
     pending = False
 
     v = _orthonormalize_b(x0, mask, jitter=jitter)
-    hv = h_apply(v)
+    hv = _apply_exp(v)
     eig = torch.zeros(nk, nb, dtype=rdtype, device=x0.device)
     x = v[:, :nb]
     rn = torch.full((nk, nb), float("inf"), dtype=rdtype, device=x0.device)
@@ -518,12 +650,43 @@ def davidson_batched(
 
         r = hx - eig[..., None] * x
         rn = torch.linalg.norm(r, dim=-1).real
+        if use_fp32_exp:
+            # Certification: the rn just measured is fp32-sourced (hv carries
+            # the cast-apply error), so it may only STEER; when it suggests
+            # convergence (under max(tol, estimated fp32 floor)) or stalls at
+            # its noise floor, re-measure the retained block against the
+            # full-precision operator. The certified (eig, x, hx, r, rn)
+            # replace the fp32-sourced ones: the return gate below then judges
+            # fp64 residuals of an fp64-refreshed block, and a failed
+            # certification feeds exact residual directions to the expansion.
+            rnmax = float(rn.max())
+            stalled = it > 1 and rnmax > _FP32_CERT_STALL * prev_rnmax
+            prev_rnmax = rnmax
+            if rnmax < max(tol, cert_floor) or stalled:
+                eig, x, hx, r, rn = _certify_fp64(_apply_full, x)
+                if float(rn.max()) >= tol:
+                    # fp64 handoff on the first FAILED certification. The Ritz
+                    # rotation inherits the fp32 apply error of hv (the fp64
+                    # eigh is exact, but its input matrix is not), so the TRUE
+                    # residual of an fp32-imaged subspace floors near
+                    # eps32·‖H‖ regardless of how the reduction is done —
+                    # once fp32 rounds stop reaching tol, more of them only
+                    # thrash at that floor (measured: repeated cert+restart
+                    # cycles cost MORE fp64 applies than handing off at once).
+                    # Collapse to the certified block with its EXACT images
+                    # and finish the solve with full-precision expansion
+                    # applies — a draft→polish schedule INSIDE one solve whose
+                    # boundary is an fp64 certification, never an fp32
+                    # convergence claim.
+                    v, hv = x, hx
+                    use_fp32_exp = False
         if history_out is not None:  # opt-in per-band convergence telemetry (off by default)
             history_out.append((it, rn.detach().to("cpu").clone(),
                                 eig.detach().to("cpu").clone()))
         if not sync_free:
             if float(rn.max()) < tol:
-                return BatchedDavidsonResult(eig, x, it, rn)
+                return BatchedDavidsonResult(eig, x, it, rn,
+                                             n_apply_low, n_apply_full)
             # expand with the worst unconverged residuals only — uniform
             # count across k (max over k of the per-k unconverged tally)
             # keeps batching
@@ -543,7 +706,8 @@ def davidson_batched(
             if pending and ready:
                 assert flag_host is not None
                 if float(flag_host[0]) < tol:
-                    return BatchedDavidsonResult(eig, x, it, rn)
+                    return BatchedDavidsonResult(eig, x, it, rn,
+                                                 n_apply_low, n_apply_full)
                 n_add_cur = max(1, min(nb, int(flag_host[1])))
                 pending = False
             if not pending:
@@ -587,18 +751,22 @@ def davidson_batched(
             )
             d = _orthonormalize_b(d, mask, against=x_orth, jitter=jitter)
             v = torch.cat([x_orth, d], dim=1)
-            hv = torch.cat([hx_orth, h_apply(d)], dim=1)
+            hv = torch.cat([hx_orth, _apply_exp(d)], dim=1)
         else:
             d = _orthonormalize_b(d, mask, against=v, jitter=jitter)
             v = torch.cat([v, d], dim=1)
-            hv = torch.cat([hv, h_apply(d)], dim=1)
+            hv = torch.cat([hv, _apply_exp(d)], dim=1)
 
+    if use_fp32_exp:
+        # max_iter exit: the returned block must still be certified — one final
+        # full-precision apply refreshes the Ritz pairs and re-measures rn.
+        eig, x, hx, r, rn = _certify_fp64(_apply_full, x)
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "batched Davidson hit max_iter=%d: %d band·k unconverged "
             "(max res=%.3e > tol=%.1e)", max_iter, int((rn > tol).sum()),
             float(rn.max()), tol)
-    return BatchedDavidsonResult(eig, x, max_iter, rn)
+    return BatchedDavidsonResult(eig, x, max_iter, rn, n_apply_low, n_apply_full)
 
 
 @torch.no_grad()
