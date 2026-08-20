@@ -505,10 +505,14 @@ def orbital_magnetization(
     μ_B = eħ/2mₑ:  m/μ_B = (e·I/2ħ)/(eħ/2mₑ) = I·mₑ/ħ² = I / (2·HBAR2_2M),
     since constants.HBAR2_2M = ħ²/2mₑ in eV·Å² — no new unit constants.
 
-    Sign convention: this module's Ω = −2 Im Q; internal consistency
-    (dm/dμ_chem ∝ Chern) is exact under it, but the ABSOLUTE physical sign
-    (electron charge) has not yet been pinned against an external reference
-    — do that once against QE/GIPAW before quoting signed moments.
+    Sign convention — CALIBRATED: m = +avg(I)/(2·HBAR2_2M) is the physical
+    ELECTRON moment. Anchored thermodynamically (tests/unit/
+    test_orbmag_sign.py) against Peierls-flux magnetic supercells of a
+    Chern-trivial TR-broken lattice model with honest electron phases
+    (q = −e): the measured dE/dφ equals −avg(I)/2 in radian-k units to
+    ~1e-5 relative after Richardson extrapolation, so M = −∂E/∂B = +(e/2ħ)·
+    avg(I). Consistent with this module's Ω = −2 Im Q throughout
+    (dm/dμ_chem ∝ Chern is exact).
 
     A shifted (generic) mesh avoids band degeneracies at symmetry points;
     each mesh point gets its own G-sphere at its own k. ``occ`` is the
