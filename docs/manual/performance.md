@@ -276,6 +276,45 @@ time again.
 
 - **A structural GPU rewrite for small systems.** The small-system GPU gap is fp64
   precision, not launch latency or eager-mode overhead. See the GPU section.
+- **Ozaki-scheme emulated-fp64 GEMM for the CUDA Toeplitz local apply (built and
+  measured 2026-08-20, RTX 3050; avenue closed).** The idea: rebuild a
+  near-fp64 `M @ c` from true-fp32 SGEMMs by mantissa-slicing both operands
+  after a power-of-two row/column equilibration into integer-valued fp32
+  slices, computing every slice-pair product with TF32-off cuBLAS SGEMM, and
+  recombining in fp64 with a runtime-certified elementwise error bound —
+  fp64-class accuracy from the fast fp32 units, so no fp32 draft noise
+  perturbs the SCF and no crippled-fp64 polish phase remains. The accuracy
+  side works exactly as designed: measured error vs. the fp64 FFT path is
+  ~3e-16 relative with a certified bound of ~5e-15, SCF outer-iteration
+  parity held on the full si2/al/cu/mgo battery even with the path forced on
+  (d_iters = 0 everywhere, |dE| <= 2e-11 eV). The wall-clock side is a clean
+  structural loss: exactness of the fp32 accumulation demands slice width
+  `2t + ceil(log2 npw) <= 23`, so fp64 coverage costs p = 7-9 slices per
+  operand and roughly 4p^2 ~ 256x the FLOPs of a plain-fp32 GEMM, while plain
+  fp32 beats the fp64 FFT path by only ~10-20x at Toeplitz-eligible sizes —
+  the emulation overspends its entire budget several times over. Measured:
+  0.09-0.14x the FFT path at every battery signature (npw 64-588), so the
+  per-signature timed trial declined it everywhere. The decomposition pins
+  the blame on arithmetic, not implementation: the stacked batched SGEMM
+  itself ran at 3-4.3 TFLOP/s (near this card's practical fp32 peak), and
+  even at zero slicing/recombination cost the SGEMM alone could not clear the
+  trial's 0.7 adoption margin (the eager slice/recombine glue added a 5-19 ms
+  launch floor on top). Fewer slices are not an out — 2-3 legal-width slices
+  cover only ~2^-12..2^-24, i.e. fp32-class noise, the documented
+  extra-iterations-on-metals failure. A contributing structural fact: at the
+  small npw where the Toeplitz path lives, the complex128 dense GEMM is
+  closer to bandwidth- than ALU-bound (it even beat the FFT path ~2x at
+  npw <= 300 on this card), so there is little crippled-fp64 tax for an
+  emulation to reclaim in the first place. The negative is consumer-GPU-
+  specific *by construction* and is NOT an H100 avenue either: emulation
+  exists solely to dodge a crippled-fp64 ALU, and H100 fp64 is native-fast
+  (the same reversal as the fp32-subspace trick above). Full implementation
+  — slicing/recombination kernels with the certified bound, the three-way
+  `_use_toeplitz` trial, exact-operator convergence certification through
+  `davidson_batched(certify_apply=)`, tests and the apply/SCF/decomposition
+  benches — lives at branch tip `f236973a9c2541414c81b1e237e447fec607a1ca`
+  (`ozaki-toeplitz-cuda`, not merged) if other hardware ever wants a
+  re-trial.
 - **Sync-free Davidson.** Removing per-round host syncs (the convergence scalar and
   the expansion tally) with pinned async copies and event queries measures slower
   than the synchronous path at every size tested, and the delayed expansion count
