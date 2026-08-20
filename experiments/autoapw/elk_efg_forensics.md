@@ -289,3 +289,15 @@ fftn/ifftn pairing in `interstitial_boundary_multi` reconstructs V(c+RΩ) with t
 both use conj(Y_LM); `_tensor_from_v` verified against ∂²(r²Y_2M). No algebraic sign slip
 found anywhere in the assembly chain — which is precisely why the content-level inversion
 (D2/D4) is the operative hypothesis.
+
+---
+## ADDENDUM (post-decisive-test, asus job 148): executive verdict FALSIFIED, difference list stands
+The proposed T_xy test came back -7.915 eV/A^2 — same sign as Elk (-17.86), ratio 0.443.
+The boundary term is NOT anti-parallel; the beta=-2.16 fit was built on the eigenvalue
+pairing that the raw tensor now disproves (the "alternate axis pairing" this report
+rejected is reality — its inconsistency argument failed because the [001] component is
+small and trace-forced, not independently informative). What survives: the term-by-term
+difference list (D1-D5), now read as MAGNITUDE mechanisms for the ~2-2.5x in-plane
+deficit, with D4 (near-field moment truncation at the 0.024 A gap) and D5 (density/basis
+richness) promoted to prime suspects; and the basis checklist + literature anchors
+(Elk remains the right target vs experiment).

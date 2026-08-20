@@ -484,3 +484,19 @@ far; never returns worse than its input) and re-rolls the FD step rdiff per roun
 1.4e-3 near-miss becomes round 2's start, the regime where quadratic convergence re-engages.
 Possible future lever (not built): 5-10 k333 Anderson+kerker pre-iterations to contract the
 smooth channel before Newton.
+
+## SIGN TEST (asus 148) — INVERSION KILLED; the "sign discrepancy" was an ORDERING ARTIFACT
+Raw Cartesian O1 tensor from the gated base state: T_xy = -7.915 eV/A^2, SAME sign as Elk's
+-17.86 (ratio 0.443). Axis-resolved (O1 principal frame [110]/[-110]/[001]):
+  gradwave: (-7.5, +8.35, -0.97)   Elk: (-19.1, +16.6, +2.5)
+In-plane components have the RIGHT sign at 0.39x/0.50x; only the small trace-forced [001]
+flips. The celebrated "-0.44x with opposite sign" was |V_zz|-sorting under near-degeneracy
+picking different principal axes for ours vs Elk — the exact artifact the log warned about
+("the |V_zz| assignment flips"). The forensics beta=-2.16 anti-parallel mechanism is
+FALSIFIED by its own decisive test. Standing explanation of the remaining ~2-2.5x in-plane
+deficit (forensics difference list, magnitude reading): D4 near-field matching (Elk L<=6
+order-6 Weinert at 0.024 A O|Ti gap vs our L<=4), D5 density richness (Elk lmaxapw=8,
+lmaxo=6, semicore LOs; our aug4 +6% is the first step of this ladder), D1/D2 (interstitial
+XC in the boundary; own-rho_I retention) as smaller systematics. Round-3 variant plan when
+the current A/B drains: aug6; O l=0 LO (Elk-style, NOT our +5eV l=1); fullpot_lmax=6 —
+which requires the deferred Weinert matched-L>4 cap fix first.
