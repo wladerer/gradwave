@@ -264,20 +264,24 @@ def efg_tensor(multipoles, rr, drw):
     return _tensor_from_v(_valence_v(multipoles, rr, drw))
 
 
-_PHASE_CACHE: OrderedDict = OrderedDict()      # geometry key -> surface phase matrix E[p, G]
-_PHASE_CACHE_BUDGET = 3 * 2**29                # 1.5 GiB cap on the cached phase matrices
+_PHASE_CACHE: OrderedDict = OrderedDict()      # geometry key -> (E0[p, G], gvec[G, 3])
+_PHASE_CACHE_BUDGET = 2**32                    # 4 GiB cap on the cached phase matrices
 
 
-def _surface_phases(a, nfft, center_cart, R, nx: int, nphi: int):
-    """The potential-independent surface-evaluation matrix ``E[p,G] = exp(iG·(c + R Ω_p))`` of
-    ``interstitial_boundary_multi`` — the dominant cost of every boundary projection (a complex
-    exp over ``npts × nfft³``), depending only on geometry (cell, grid size, sphere center/radius,
-    angular grid), never on the potential. Memoized: the fullpot SCF asks for the same sphere's
-    matrix three times per iteration and the Newton F map re-evaluates the iteration ~30 times per
-    polish. The cached matrix is the bit-identical array the inline expression produced, so results
-    are unchanged. A byte-budget LRU bounds the memory; an over-budget matrix (huge grid) is
-    computed inline exactly as before and simply not retained."""
-    key = (a.tobytes(), nfft, np.asarray(center_cart, dtype=float).tobytes(), float(R), nx, nphi)
+def _surface_phases(a, nfft, R, nx: int, nphi: int):
+    """The center-independent surface phase matrix ``E0[p,G] = exp(iR G·Ω_p)`` (and its G-vector
+    table) of ``interstitial_boundary_multi`` — the dominant cost of every boundary projection (a
+    complex exp over ``npts × nfft³``), depending only on cell, grid size, sphere RADIUS and the
+    angular grid. The atom position enters as the rank-1 phase ``exp(iG·c)``, applied by the caller
+    as a cheap G-vector scaling — so the cache holds one matrix per SPECIES radius, not per atom.
+    (The first, per-center version of this memo thrashed at production scale: ~1 GiB per entry ×
+    one entry per atom cycling every iteration blew the byte budget, giving zero hits, ~1 GiB of
+    allocation churn per call, and a 6x wall regression on a 14 GiB box — caught by the A/B
+    campaign's control variant.) Factoring the center phase out changes the floating-point
+    association ``(E0 ⊙ c) @ v -> E0 @ (c ⊙ v)`` — mathematically identical, rounding differs at
+    the ulp level (validated ≤1e-13 relative against the inline expression). A byte-budget LRU
+    bounds the memory; an over-budget matrix is computed inline as before, not retained."""
+    key = (a.tobytes(), nfft, float(R), nx, nphi)
     hit = _PHASE_CACHE.get(key)
     if hit is not None:
         _PHASE_CACHE.move_to_end(key)
@@ -290,16 +294,16 @@ def _surface_phases(a, nfft, center_cart, R, nx: int, nphi: int):
                      mx * b[0, 2] + my * b[1, 2] + mz * b[2, 2]], axis=-1).reshape(-1, 3)
     th, ph, _wgt = _angular_grid(nx, nphi)
     dirs = np.stack([np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)], axis=-1)
-    pts = (R * dirs + np.asarray(center_cart)).reshape(-1, 3)      # (npts,3) Cartesian
-    e = np.exp(1j * (pts @ gvec.T))
-    if e.nbytes <= _PHASE_CACHE_BUDGET:
-        e.setflags(write=False)
-        _PHASE_CACHE[key] = e
-        total = sum(v.nbytes for v in _PHASE_CACHE.values())
+    e0 = np.exp(1j * (R * dirs.reshape(-1, 3) @ gvec.T))           # (npts, nfft^3)
+    if e0.nbytes <= _PHASE_CACHE_BUDGET:
+        e0.setflags(write=False)
+        gvec.setflags(write=False)
+        _PHASE_CACHE[key] = (e0, gvec)
+        total = sum(v[0].nbytes for v in _PHASE_CACHE.values())
         while total > _PHASE_CACHE_BUDGET and len(_PHASE_CACHE) > 1:
-            _, old = _PHASE_CACHE.popitem(last=False)
+            _, (old, _g) = _PHASE_CACHE.popitem(last=False)
             total -= old.nbytes
-    return e
+    return e0, gvec
 
 
 def interstitial_boundary_multi(v_grid, center_cart, R, cell, lset, nx: int = 16, nphi: int = 24):
@@ -314,7 +318,9 @@ def interstitial_boundary_multi(v_grid, center_cart, R, cell, lset, nx: int = 16
     nfft = v_grid.shape[0]
     vg = (np.fft.fftn(v_grid) / nfft**3).reshape(-1)               # V(r) = Σ_G v_G e^{iG·r}
     th, ph, wgt = _angular_grid(nx, nphi)
-    vals = (_surface_phases(a, nfft, center_cart, R, nx, nphi) @ vg).reshape(th.shape).real
+    e0, gvec = _surface_phases(a, nfft, R, nx, nphi)
+    cphase = np.exp(1j * (gvec @ np.asarray(center_cart, dtype=float)))
+    vals = (e0 @ (cphase * vg)).reshape(th.shape).real
     return {(lang, m): complex(np.sum(vals * wgt * np.conj(sph_harm_y(lang, m, th, ph))))
             for (lang, m) in lset}
 

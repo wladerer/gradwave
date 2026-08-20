@@ -448,3 +448,21 @@ discriminates: (a) a missing opposite-sign contribution ~1.44x the current valen
 sign through a cancellation); (b) a global sign slip in one term of our chain (then the
 A/B magnitude grows but never flips). Elk raw a.u. eigenvalues, O: [-0.1967,+0.0257,+0.1710]
 (1 Ha/Bohr^2 = 97.17 eV/A^2).
+
+## BASIS A/B ROUND 1 (asus 129) — CONTROL CAUGHT TWO REAL DEFECTS; queue killed+requeued
+The base control (== job 128 config) REPLICATED the gated-state physics (k222 EFG O
+[+8.40,-7.37,-1.03] eta 0.755 vs job 128's [+8.43,-7.39,-1.04] eta 0.754) but exposed:
+(1) The surface-phase memo (e42729e) THRASHED at production scale: ~1 GiB per PER-CENTER
+    entry x 6 spheres cycling vs a 1.5 GiB budget = zero hits + ~1 GiB alloc churn per
+    call on a 14 GiB box -> k222 263s (job 128, pre-memo) vs 1633s (with memo, plus
+    fp32-agent fast-tier contention). FIX: factor the center phase out (E = e^{iGc} * E0(R)),
+    cache per SPECIES radius (2 entries, not 6), budget 4 GiB; validated 2.7e-15 vs inline.
+    Rounding association changes at the ulp level — which matters because:
+(2) The cold k222 trajectory is RUN-TO-RUN FRAGILE (the measured |rho|~1.02 marginal mode
+    amplifies ulp/BLAS nondeterminism): job 128 gated at 32 it / 2.2e-4, the identical
+    config this round hit the 40-cap at 4.9e-3 — and newton_polish k333 DIVERGED (residual
+    2.3e3) from 4.9e-3 where it converged (33 F-evals) from 2.2e-4. Newton's k333 basin
+    needs r_nsph ~<1e-3. FIX: the A/B runner now continues k222 in warm chunks until
+    r_nsph < 1e-3 (cap 120 it) and refuses to polish from a marginal state.
+Moral for the recipe: "Anderson+kerker then Newton" is production-valid only with an
+explicit basin gate between the legs; do not trust a single lucky trajectory.

@@ -59,14 +59,29 @@ def main():
                kworkers=env_int("BA", "KWORKERS", 5), kerker=0.7, **var)
     print(f"variant {tag}: {var}", flush=True)
 
+    # Newton's k333 basin requires r_nsph ~<1e-3 (the base control diverged to residual
+    # 2.3e3 from a 4.9e-3 state where job 128 converged from 2.2e-4) — so the k222 leg
+    # continues in warm-started chunks until it truly gates, not just "close enough".
     t0 = time.time()
     _, iw = crystal_scf_multi(A_BOHR, ATOMS, RADII, iters=40, tol=1e-3, efg=False,
                               kmesh=(2, 2, 2), **cfg)
     r = iw["recorder"].summarize()
-    print(f"k222 ({time.time()-t0:.0f}s): n_it={r['n_iter']} r_nsph={r['r_nsph']:.2e}",
+    n_tot = r["n_iter"]
+    while r["r_nsph"] >= 1e-3 and n_tot < 120:
+        _, iw = crystal_scf_multi(A_BOHR, ATOMS, RADII, iters=20, tol=1e-3, efg=False,
+                                  kmesh=(2, 2, 2),
+                                  v_start={"__full_state__": iw["state"]}, **cfg)
+        r = iw["recorder"].summarize()
+        n_tot += r["n_iter"]
+        print(f"k222 continuation: n_it={n_tot} r_nsph={r['r_nsph']:.2e}", flush=True)
+    print(f"k222 ({time.time()-t0:.0f}s): n_it={n_tot} r_nsph={r['r_nsph']:.2e}",
           flush=True)
-    if r["r_nsph"] > 1e-2:
-        print(f"{tag}: k222 did NOT gate — EFG untrustworthy, stopping", flush=True)
+    if r["r_nsph"] >= 1e-3:
+        if r["r_nsph"] < 1e-2:
+            save_state(iw["state"], tag, "k222")
+            efg_at(iw["state"], (2, 2, 2), f"{tag}-k222-MARGINAL", cfg)
+        print(f"{tag}: k222 did not reach the Newton gate (1e-3) — stopping before "
+              f"a polish that would diverge", flush=True)
         return 1
     save_state(iw["state"], tag, "k222")
     efg_at(iw["state"], (2, 2, 2), f"{tag}-k222", cfg)
