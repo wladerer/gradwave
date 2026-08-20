@@ -13,7 +13,6 @@ import pickle
 import sys
 
 import numpy as np
-
 from _common import A_BOHR, ATOMS, RADII
 
 from gradwave.flapw import crystal_scf_multi
