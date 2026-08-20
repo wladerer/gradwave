@@ -274,6 +274,49 @@ def _canonical_solve(H, S, w, u, nbands, with_vecs, tol, scipy_eigh):
     return evals
 
 
+def solve_geneig_subspace_aug(H, S, c_prev, nbands, tol=1e-8):
+    """Augmented Rayleigh-Ritz solve of ``H c = ε S c`` in ``span[c_prev, R]`` where ``R`` is the
+    residual block of last iteration's eigenvectors under the CURRENT pencil.
+
+    ``solve_geneig_subspace`` projects into the previous span alone, which is blind to the
+    first-order rotation of the eigenvectors when the potential moves (the observed fullpot-ramp
+    blow-ups); one Davidson-style augmentation captures exactly that direction: Ritz-solve in
+    ``span[c_prev]``, form ``R = H c − S c ε`` for the Ritz pairs, and re-solve in the doubled
+    span. Cost stays a handful of ``dim × dim × nkeep`` GEMMs + an ``O((2·nkeep)³)`` dense solve —
+    far below the ``O(dim³)`` full diagonalization for ``nkeep ≪ dim``.
+
+    Returns ``(evals, vecs, resid)`` with ``resid`` the max relative residual over the ``nbands``
+    kept states — same acceptance contract as ``solve_geneig_subspace`` (the caller gates on it
+    and falls back to the exact dense solve)."""
+    hp = H @ c_prev
+    sp = S @ c_prev
+    hs = c_prev.conj().T @ hp
+    ss = c_prev.conj().T @ sp
+    hs = 0.5 * (hs + hs.conj().T)
+    ss = 0.5 * (ss + ss.conj().T)
+    nk = c_prev.shape[1]
+    ev0, y0 = solve_geneig(hs, ss, nk, with_vecs=True, tol=tol)
+    m = min(nk, len(ev0))
+    resid_blk = (hp @ y0[:, :m]) - (sp @ y0[:, :m]) * ev0[None, :m]
+    nrm = np.linalg.norm(resid_blk, axis=0)
+    keep = nrm > 1e-14 * max(float(nrm.max()), 1e-300)     # drop numerically-null residuals
+    q = np.concatenate([c_prev, resid_blk[:, keep] / nrm[keep]], axis=1)
+    hq = H @ q
+    sq = S @ q
+    hqq = q.conj().T @ hq
+    sqq = q.conj().T @ sq
+    hqq = 0.5 * (hqq + hqq.conj().T)
+    sqq = 0.5 * (sqq + sqq.conj().T)
+    ev, y = solve_geneig(hqq, sqq, nbands, with_vecs=True, tol=tol)
+    vecs = q @ y
+    hv = hq @ y
+    sv = sq @ y
+    r = hv - sv * ev[None, :]
+    scale = np.maximum(np.linalg.norm(hv, axis=0), 1e-12)
+    resid = float((np.linalg.norm(r, axis=0) / scale).max())
+    return ev, vecs, resid
+
+
 def solve_geneig_subspace(H, S, c_prev, nbands, tol=1e-8):
     """Rayleigh-Ritz solve of ``H c = ε S c`` inside the span of a previous iteration's
     eigenvectors ``c_prev`` (dim × nkeep, nkeep ≥ nbands). Near SCF self-consistency the

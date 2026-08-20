@@ -52,7 +52,7 @@ from gradwave.flapw.lapw import (
     radial_channel,
     radial_channels_all,
     solve_geneig,
-    solve_geneig_subspace,
+    solve_geneig_subspace_aug,
 )
 from gradwave.flapw.mixing import anderson_next
 from gradwave.flapw.radial import log_mesh, numerov_log_np, radial_eigs_tridiag
@@ -533,9 +533,10 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
             h_ext[npw:, npw:] = lo_lo_h
             S, Hm = s_ext, h_ext
     if c_prev is not None and c_prev.shape[0] == Hm.shape[0]:
-        # Rayleigh-Ritz in last iteration's subspace; the residual gate falls back to the exact
-        # dense solve whenever the subspace has drifted (band crossings, early SCF, mixing jumps).
-        ev, c, resid = solve_geneig_subspace(Hm, S, c_prev, nbands)
+        # Augmented Rayleigh-Ritz in span[last eigenvectors, their current residuals]; the
+        # residual gate falls back to the exact dense solve whenever the subspace has drifted
+        # (band crossings, early SCF, mixing jumps).
+        ev, c, resid = solve_geneig_subspace_aug(Hm, S, c_prev, nbands)
         if resid < subspace_tol:
             return ev, c, mill, ks, abl_by_atom, vol
     ev, c = solve_geneig(Hm, S, nbands, with_vecs=True)
@@ -1077,10 +1078,13 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
     v_nsph, vns_new, r_nsph = st.v_nsph, st.vns_new, st.r_nsph
     warp_state, v_grid_prev, v_i0_prev = st.warp_state, st.v_grid_prev, st.v_i0_prev
 
-    # subspace reuse is safe in the muffin-tin phase but blind to states entering the
-    # window while the aspherical potential ramps (observed blow-ups at [subsp] iterations);
-    # fullpot iterations always solve exactly.
-    full_iter = (not ctx.subspace_reuse) or (it % 5 == 0) or (fullpot and not mt_phase)
+    # The plain previous-span projection was blind to states entering the window while the
+    # aspherical potential ramps (observed blow-ups at [subsp] iterations), so fullpot
+    # iterations used to force exact solves. The AUGMENTED span (previous eigenvectors +
+    # their current residuals, solve_geneig_subspace_aug) carries the first-order rotation,
+    # so fullpot iterations may reuse too; every 5th iteration stays a forced exact solve
+    # and convergence is only ever accepted on an exact iteration (`done` below).
+    full_iter = (not ctx.subspace_reuse) or (it % 5 == 0)
     t_it = time.time()
     r_sph = 0.0
     vnew_by_key = {}
@@ -1496,10 +1500,12 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     CALLING script must be import-safe: guard its executable body with ``if __name__ ==
     "__main__":`` or the workers re-run it on import.
 
-    ``subspace_reuse`` (default True) solves most iterations by Rayleigh-Ritz in the previous
-    iteration's eigenvector subspace (residual-gated, exact-solve fallback); every 5th iteration
-    is a forced exact solve and convergence is only accepted on exact-solve iterations, so the
-    reported state never rests on a projected solve.
+    ``subspace_reuse`` (default False — exact solves keep the fixed-point map F deterministic
+    for the Newton machinery, see ``flapw.newton``) solves most iterations by AUGMENTED
+    Rayleigh-Ritz in span[previous eigenvectors, their current residuals] (residual-gated,
+    exact-solve fallback), including fullpot iterations; every 5th iteration is a forced exact
+    solve and convergence is only accepted on exact-solve iterations, so the reported state
+    never rests on a projected solve.
 
     Internally this is ``_multi_setup`` (state-independent context) + ``_multi_init_state`` +
     a loop over ``_multi_iterate`` (the fixed-point map) + ``_multi_finalize`` — split so the
