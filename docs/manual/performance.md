@@ -388,6 +388,92 @@ time again.
   accounted for, not just the one op that looks good in isolation. Same case
   study.
 
+## Case study, FLAPW per-iteration wall on production TiO2
+
+The `gradwave.flapw` stack (all-electron, numpy/scipy, separate from the plane-wave
+torch core) got its first dedicated perf pass on the production rutile-TiO2 fullpot
+config (ecut 300, lmax 3, fullpot_lmax 4, k222+kerker 0.7, 6 atoms, npw ≈ 740).
+Everything below was measured on asus from one shared warm full state,
+OMP_NUM_THREADS=2, and the box was carrying 2-3 unrelated jobs throughout (noted per
+number; medians of 10 iterations, plus a serial cProfile taken in a quieter window).
+
+What worked, in profile order:
+
+- **Batch the radial Numerov integrations and reuse their outputs.** The per-(l,
+  energy) `numerov_log_np` recurrences (~2200 sequential numpy steps each) ran
+  ~190 times per iteration: per l-channel in `radial_channel`, then *again* per
+  (k, atom, l) in the density pass (`_us_ext`), and again in the aspherical
+  integrals and LO build. Now one batched recurrence per sphere per iteration
+  integrates every (l, E±h) row at once (elementwise, bit-identical), and the
+  channel dict carries `u_in`/`ud_in` so every downstream consumer reuses them.
+- **Cache the potential-independent per-k geometry across iterations.** The k+G
+  enumeration, |Δk|/cos matrices, Legendre prefactors `P_l(cos)` (npw² × (lmax+1)),
+  ball form factors, structure phases, Ylm blocks, and warp Miller-difference
+  indices are pure geometry, but were rebuilt at every k every iteration.
+  `_k_geometry` builds them once per k per run for the serial path (~50 MB per
+  k-point at this size — the pool workers still rebuild locally, since shipping
+  npw² matrices through pickle costs more than recomputing them).
+- **Spawn the k-worker pool once per run, not once per iteration.** The
+  spawn+re-import tax (~2 s) was written off as negligible against multi-minute
+  fullpot iterations; at ~10 s/iteration it no longer is. The pool now lives on
+  the run context (shared across Newton F evaluations) with explicit shutdown.
+
+Serial (kworkers=1) per-iteration wall went 21.9 → 13.8 s in back-to-back cProfile
+runs (1.59×); the contended bench medians moved 20.9 → 19.1 s with minima
+15.1 → 12.8 s. The cold 22-iteration warmup at production kworkers=5 went
+189 → 106 s (1.79×). Correctness gate: the serial path is **bit-identical** —
+same `info["state"]` sha over 4 cold iterations and over an 11-iteration warm
+fullpot bench. The pooled path is bit-identical per solve (the metamorphic pool
+test) but its *trajectory* is a different ulp draw than the serial one — that was
+already true before this pass (the baseline kworkers=1 and kworkers=5 benches from
+the same warm state end at different shas), and this map's chaotic amplification of
+ulp noise is documented in the TiO2 campaign notes.
+
+The secular warm start (`subspace_reuse=True`) now uses an *augmented*
+Rayleigh-Ritz span — last iteration's eigenvectors plus their residuals under the
+current pencil, which carries the first-order eigenvector rotation the plain
+previous-span projection missed (the historical fullpot-ramp blow-ups) — so it is
+allowed on fullpot iterations too. On a real consecutive-iteration production
+pencil the projected solve costs 14-17 ms against the ~500 ms dense solve
+(28-38×). Its acceptance gate had to be rebuilt: the old `||Hc−εSc||/||Hc||`
+metric is scale-degenerate for bands near the interstitial zero (measured 0.97
+"relative residual" at 3.5e-3 eV true error — the gate could never engage and
+every subspace iteration silently fell back to dense, verified bit-identical to
+the exact run). The gate now uses the eV-scale bound `||Hc−εSc||/||Sc||` with a
+1e-4 eV default — 10× under the degenerate-occupation tolerance, and measured
+conservative (it reports 0.23 eV on an early re-equilibration pencil whose true
+eigenvalue error is 3.5e-3 eV, so it rejects exactly the iterations it should).
+With the fixed gate the warm start engages on the late, small-residual iterations
+of the production run and the trajectory stays on the fixed point (final span
+agrees with the all-exact run to 3e-5 eV; convergence is still only accepted on
+exact iterations). An end-to-end wall A/B for this knob could not be measured
+cleanly — the box was at load ~30 during that window — so the per-solve 28-38×
+and the ~28% solve share of a serial iteration bound the win at ≲1.3× serial.
+Exact solves remain the default (`subspace_reuse=False`): Newton's F must stay
+deterministic.
+
+Not pursued, with numbers (same pencils, warm production + cold ecut-500):
+
+- **LOBPCG on the (H, S) pencil loses at every relevant size** — 0.3× dense at
+  dim 737 and 1.2× at dim 1559, and it exits its 200-iteration cap short of
+  tolerance both times even warm-started from the previous iteration's
+  eigenvectors. Same verdict as the plane-wave-side LOBPCG that was removed
+  after measurement; do not rebuild it FLAPW-side.
+- **Shift-invert Lanczos (`eigsh`, dense LU of H−σS) beats the dense solve today**:
+  2.5× at dim 737 (4e-13 eV agreement), 5.4× at dim 1559 (3.5e-5 eV). It is the
+  obvious next exact-solve lever, but it needs σ placement, a deterministic
+  starting vector, and a robustness fallback before it can carry Newton's F — not
+  built in this pass.
+- **The dominant remaining cost is not in this pass's scope**:
+  `sphere_density_multipoles_bands` (the aspherical density accumulation on the
+  angular grid, efg.py) is ~40% of a serial fullpot iteration after these changes.
+  A Gaunt-contraction rewrite (density matrix in the (l,m)-channel basis against
+  precomputed Gaunt blocks, no angular grid) should collapse it by an order of
+  magnitude; it lives in the boundary-chain agent's files and is left to that
+  workstream. Parallelizing the per-k density accumulation would also help
+  kworkers>1 runs (it is the serial Amdahl floor that kept the pooled bench at
+  ~15 s/iteration).
+
 ## Case study, geometry relaxation vs QE
 
 Relaxing displaced diamond with an identical pseudo, cutoff, and k-mesh in both
