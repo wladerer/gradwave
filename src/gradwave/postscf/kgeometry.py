@@ -296,17 +296,10 @@ def qgt(h_fn: HFun, k_cart: Tensor, bands: Sequence[int] | Tensor) -> Tensor:
     )
 
 
-def qgt_sos(
-    h_fn: HFun, k_cart: Tensor, bands: Sequence[int] | Tensor
-) -> Tensor:
-    """QGT by first-order perturbation theory: autograd only through ∂H/∂k.
-
-        Q_μν = Σ_{n∈g} Σ_{m∉g} ⟨u_n|∂_μH|u_m⟩⟨u_m|∂_νH|u_n⟩ / (ε_n−ε_m)²
-
-    Exact on the dense basis (complete sum over states). Never differentiates
-    the eigendecomposition, so internal degeneracies of the band group are
-    fine; only a nonzero gap between the group and its complement is needed.
-    """
+def _eigh_and_dh(h_fn: HFun, k_cart: Tensor) -> tuple[Tensor, Tensor, list[Tensor]]:
+    """(ε, U, [∂H/∂k_x, ∂H/∂k_y, ∂H/∂k_z]) at k — eigh under no_grad, the
+    velocity matrices by one forward-mode dual pass per direction (never
+    differentiates the eigendecomposition)."""
     k = k_cart.detach().to(RDTYPE)
     with torch.no_grad():
         w, u = torch.linalg.eigh(h_fn(k))
@@ -318,16 +311,40 @@ def qgt_sos(
             hd = h_fn(fwAD.make_dual(k, tangent))
             _, tang = fwAD.unpack_dual(hd)
         dh.append(tang if tang is not None else torch.zeros_like(u))
+    return w, u, dh
+
+
+def _crossgap_a(
+    w: Tensor, u: Tensor, dh: list[Tensor], bands: Sequence[int] | Tensor
+) -> tuple[list[Tensor], Tensor, Tensor]:
+    """Cross-gap tangents A_μ[m,n] = ⟨u_m|∂_μH|u_n⟩/(ε_n−ε_m) = ⟨u_m|∂̃_μu_n⟩
+    (m outside the group, n inside), plus (ε_out, ε_in)."""
     idx = torch.as_tensor(bands, dtype=torch.int64, device=u.device)
     out_mask = torch.ones(w.shape[0], dtype=torch.bool, device=u.device)
     out_mask[idx] = False
     ug, uo = u[:, idx], u[:, out_mask]
-    denom = (w[idx][None, :] - w[out_mask][:, None]) ** 2  # (nout, ng)
-    a = [uo.mH @ dhm @ ug for dhm in dh]  # ⟨u_m|∂H|u_n⟩, (nout, ng)
+    denom = w[idx][None, :] - w[out_mask][:, None]  # (nout, ng): ε_n − ε_m
+    a = [(uo.mH @ dhm @ ug) / denom.to(u.dtype) for dhm in dh]
+    return a, w[out_mask], w[idx]
+
+
+def qgt_sos(
+    h_fn: HFun, k_cart: Tensor, bands: Sequence[int] | Tensor
+) -> Tensor:
+    """QGT by first-order perturbation theory: autograd only through ∂H/∂k.
+
+        Q_μν = Σ_{n∈g} Σ_{m∉g} ⟨u_n|∂_μH|u_m⟩⟨u_m|∂_νH|u_n⟩ / (ε_n−ε_m)²
+
+    Exact on the dense basis (complete sum over states). Never differentiates
+    the eigendecomposition, so internal degeneracies of the band group are
+    fine; only a nonzero gap between the group and its complement is needed.
+    """
+    w, u, dh = _eigh_and_dh(h_fn, k_cart)
+    a, _, _ = _crossgap_a(w, u, dh, bands)
     q = torch.empty((3, 3), dtype=u.dtype, device=u.device)
     for mu in range(3):
         for nu in range(3):
-            q[mu, nu] = (a[mu].conj() * a[nu] / denom).sum()
+            q[mu, nu] = (a[mu].conj() * a[nu]).sum()
     return q
 
 
@@ -335,3 +352,83 @@ def metric_curvature(q: Tensor) -> tuple[Tensor, Tensor]:
     """(g_μν, Ω_μν) [Å²] from a QGT: Fubini–Study metric Re Q and Berry
     curvature −2 Im Q."""
     return q.real, -2.0 * q.imag
+
+
+def orbmag_tensor(
+    h_fn: HFun, k_cart: Tensor, occ: Sequence[int] | Tensor, mu_chem: float
+) -> Tensor:
+    """Local orbital-magnetization integrand I_γ(k) of the modern theory
+    (Ceresoli–Thonhauser–Vanderbilt–Resta), gauge-invariant covariant form:
+
+        I_γ(k) = ε_γμν Im Σ_{n∈occ} ⟨∂̃_μu_n| (H_k + ε_n − 2 μ_chem) |∂̃_νu_n⟩
+               = ε_γμν Im Σ_{n∈occ, m∉occ} A_μ[m,n]* (ε_m + ε_n − 2 μ_chem) A_ν[m,n]
+
+    with ∂̃ = (1−P_occ)∂ the covariant derivative and A the cross-gap
+    tangents of :func:`qgt_sos` — degeneracy-safe (only cross-gap
+    denominators), gauge invariant under any mixing of the occupied states,
+    and exactly linear in μ_chem with slope dI_γ/dμ_chem = 2 Ω_γ(k) (our
+    Berry-curvature convention Ω = −2 Im Q; μ_chem drops entirely for an
+    insulator once the BZ integral of Ω vanishes, i.e. Chern-trivial planes).
+
+    Units: [H] · [k]⁻² — eV·Å² for a Bloch h_fn (k in Å⁻¹); model units for
+    toys. Convert to a magnetic moment with :func:`orbital_magnetization`.
+    """
+    w, u, dh = _eigh_and_dh(h_fn, k_cart)
+    a, e_out, e_in = _crossgap_a(w, u, dh, occ)
+    weight = (e_out[:, None] + e_in[None, :] - 2.0 * mu_chem).to(u.dtype)
+    t = torch.empty((3, 3), dtype=u.dtype, device=u.device)
+    for mu in range(3):
+        for nu in range(3):
+            t[mu, nu] = (a[mu].conj() * weight * a[nu]).sum()
+    return torch.stack(
+        [
+            (t[1, 2] - t[2, 1]).imag,
+            (t[2, 0] - t[0, 2]).imag,
+            (t[0, 1] - t[1, 0]).imag,
+        ]
+    )
+
+
+def orbital_magnetization(
+    res: SCFResult,
+    occ: Sequence[int],
+    mu_chem: float,
+    *,
+    mesh: tuple[int, int, int] = (2, 2, 2),
+    shift: tuple[float, float, float] = (0.11, 0.23, 0.37),
+    spin: int = 0,
+    ecut: float | None = None,
+) -> Tensor:
+    """Modern-theory orbital magnetization of a frozen-potential NC system:
+    the magnetic moment per cell (3,) in Bohr magnetons μ_B.
+
+    Unit chain (the classic silent-bug site, so spelled out): the k-space
+    formula gives the moment density M_γ = (e/2ħ) Im ∫ d³k/(2π)³ Σ_n^occ
+    ⟨∂̃u|×(H+ε−2μ)|∂̃u⟩. Per cell, with ∫d³k → ((2π)³/V_cell)·⟨mesh avg⟩,
+    the V_cell cancels: m_γ = (e/2ħ)·avg_k I_γ with I_γ in eV·Å²
+    (:func:`orbmag_tensor`; H in eV, ∂/∂k in Å). In Bohr magnetons
+    μ_B = eħ/2mₑ:  m/μ_B = (e·I/2ħ)/(eħ/2mₑ) = I·mₑ/ħ² = I / (2·HBAR2_2M),
+    since constants.HBAR2_2M = ħ²/2mₑ in eV·Å² — no new unit constants.
+
+    Sign convention: this module's Ω = −2 Im Q; internal consistency
+    (dm/dμ_chem ∝ Chern) is exact under it, but the ABSOLUTE physical sign
+    (electron charge) has not yet been pinned against an external reference
+    — do that once against QE/GIPAW before quoting signed moments.
+
+    A shifted (generic) mesh avoids band degeneracies at symmetry points;
+    each mesh point gets its own G-sphere at its own k. ``occ`` is the
+    occupied band-index group; ``mu_chem`` [eV] any energy in the gap.
+    """
+    n1, n2, n3 = mesh
+    acc = torch.zeros(3, dtype=RDTYPE)
+    for i in range(n1):
+        for j in range(n2):
+            for l3 in range(n3):
+                kf = (np.asarray([i, j, l3], dtype=float) + np.asarray(shift)) / (
+                    n1,
+                    n2,
+                    n3,
+                ) - 0.5
+                hk = BlochHK.from_scf(res, kf, spin=spin, ecut=ecut)
+                acc = acc + orbmag_tensor(hk.h, hk.k_cart(kf), occ, mu_chem)
+    return acc / (n1 * n2 * n3) / (2.0 * HBAR2_2M)
