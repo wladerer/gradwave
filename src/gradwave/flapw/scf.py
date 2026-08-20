@@ -829,76 +829,96 @@ def _fermi_level(ev_all, w_all, nelec, kT):
     return 0.5 * (lo + hi)
 
 
-def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax: int = 2,
-                      iters: int = 40, tol: float = 3e-3, kmesh=(1, 1, 1), smearing: float = 0.0,
-                      efg: bool = False, fullpot: bool = False, use_symmetry: bool = True,
-                      fullpot_lmax: int = 2, los=None, val_e=None, core=None, el_override=None,
-                      v_start=None, kworkers: int = 1, subspace_reuse: bool = False,
-                      subspace_tol: float = 1e-5, cell=None, kerker: float | None = None,
-                      verbose: bool = False):
-    """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
+class _MultiCtx(NamedTuple):
+    """Immutable per-run context of ``crystal_scf_multi`` — everything computed before the
+    iteration loop that does not depend on the evolving potential state: geometry (cell, FFT
+    grid, sphere meshes/masks, the interstitial Θ_I indicator), the symmetry machinery
+    (space group, ρ symmetrizer, atom orbits, Wigner-D blocks), the atomic references
+    (``atomic_scf`` per species) and the static knobs. Built once by ``_multi_setup`` and
+    shared read-only across ``_multi_iterate`` calls — the Newton fixed-point map evaluates
+    the iteration ~30 times per polish and must not re-pay this setup on every F evaluation."""
 
-    ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
-    ``atoms`` = ``[(frac (3,), symbol), ...]``; ``radii`` = ``{symbol: R_MT}``. Each atom gets its
-    own sphere potential (so inequivalent same-species atoms are handled). Returns
-    ``(bands, info)`` with ``bands['ev']`` the Γ valence eigenvalues (eV, referenced to the
-    interstitial zero — compare splittings, not absolute levels; see ``crystal_scf``).
+    A: object
+    vol: float
+    nfft: int
+    r: object
+    dx: float
+    r_np: object
+    keys: list
+    syms: list
+    key_sym: dict
+    los_by_key: dict
+    nbands: int
+    kfracs: object
+    kw: object
+    sg: object
+    rho_symm: object
+    atom_orbits: object
+    d_ops: object
+    at_by_sym: dict
+    vat_by_sym: dict
+    R_by_key: dict
+    rr_by_key: dict
+    mask_by_key: dict
+    acart: list
+    theta_i: object
+    kerker_K: object
+    core_map: dict
+    lmax: int
+    ecut: float
+    smearing: float
+    fullpot: bool
+    fullpot_lmax: int
+    el_override: object
+    kworkers: int
+    subspace_reuse: bool
+    subspace_tol: float
+    verbose: bool
 
-    ``smearing`` (eV) > 0 enables Fermi-Dirac occupations for metals: extra conduction bands are
-    solved, the Fermi level is found by charge conservation over the k-mesh, and the density uses
-    fractional occupations (``info['e_fermi']`` is returned). ``smearing=0`` fills exactly
-    ``N_val/2`` bands two-per-state (insulators). ``a_bohr`` may be a scalar (cubic edge), a
-    length-3 vector (orthorhombic edges), or a 3×3 matrix (triclinic cell, rows = lattice
-    vectors), all in Bohr.
 
-    ``fullpot=True`` runs the self-consistent full-potential loop: each iteration computes the
-    non-spherical sphere potential (on-site Hartree + XC + the inter-atomic lattice field) from the
-    aspherical density for every ``(L,M)`` with ``1 ≤ L ≤ fullpot_lmax``, and feeds it back into the
-    Hamiltonian, so the wavefunctions respond to the non-spherical field. ``fullpot_lmax`` should be
-    checked for convergence (odd L are included — a site without inversion symmetry has L=1,3
-    components that polarize the valence). ``fullpot=False`` is the muffin-tin scheme.
+class _MultiState:
+    """Mutable state of the ``crystal_scf_multi`` fixed-point iteration: the evolving
+    potentials (spherical, aspherical, interstitial grid + reference + warp), the mixing
+    history, the staging flag, and the last iteration's outputs that ``_multi_finalize``
+    consumes (density, k-solve results, EFG inputs). One instance per SCF run / per Newton
+    F evaluation; created by ``_multi_init_state``."""
 
-    ``use_symmetry`` (default True) reduces the k-mesh to the irreducible wedge and resymmetrizes
-    the density each iteration to restore the full-BZ symmetry the reduced sum drops — the
-    interstitial density in G-space (``RhoSymmetrizer``), the muffin-tin density by averaging
-    symmetry-equivalent atoms, and the aspherical multipoles by the Wigner-D group average
-    (``_symmetrize_rho_lm`` — the l>0 star-unfolding, so ``fullpot`` and the EFG run on the wedge
-    too). Falls back to the full mesh if the space group can't be built.
+    def __init__(self):
+        self.v_by_key: dict = {}
+        self.conv = None
+        self.v_nsph = None                     # non-spherical potential (fullpot)
+        self.r_nsph = float("inf")             # aspherical residual (convergence gate)
+        self.vns_new = None
+        self.mt_phase = False
+        self.warp_state = None                 # (FFT of (v_grid-v_i0)·Θ_I, nfft)
+        self.v_grid_prev = None                # mixed interstitial grid state
+        self.v_i0_prev = None                  # interstitial reference of last iter
+        self.recorder = None
+        self.hist = ([], [])                   # joint Anderson history
+        self.c_prev_by_k: list = []
+        # last-iteration outputs consumed by _multi_finalize
+        self.kdata = None
+        self.occ_by_k = None
+        self.lodat = None
+        self.El_by_key = None
+        self.vmt_by_key = None
+        self.rho_I = None
+        self.spheres = None
+        self.nb_solve = None
+        self.sym_dev = None
+        self.rho_2m = None
+        self.v_grid = None
+        self.vbc_own = None
 
-    ``los`` = ``{symbol: [(l, spec), ...]}`` adds LAPW+LO local orbitals per species — confined
-    ``φ = a·u(E_l)+b·u̇(E_l)+c·u(E₂)`` with ``φ(R)=φ'(R)=0`` — for semicore states (Ti 3s/3p) or
-    extra radial freedom. ``spec`` is an atomic orbital label ("3s") or an absolute energy (eV).
-    When an LO carries semicore electrons, raise that species' valence count with
-    ``val_e = {symbol: n}`` and drop the state from the frozen core with ``core = {symbol: [...]}``
-    (both override the module defaults) — the LO does not change electron bookkeeping by itself.
-    ``el_override = {symbol: {l: spec}}`` moves an energy parameter (e.g. Ti l=1 into the valence
-    region once a 3p LO carries the semicore).
 
-    ``v_start`` = ``{key: radial potential array}`` warm-starts the SCF from a previous run's
-    converged spherical potentials (returned as ``info["v_by_key"]``) instead of the atomic ones —
-    a convergence-sweep point then starts nearly converged (~2-3x fewer iterations).
-    ``kerker`` (Å⁻¹, default None=off) screens the interstitial residual by G²/(G²+kerker²)
-    inside the joint Anderson — the measured cure for the long-wavelength interstitial
-    sloshing instability of hard fullpot configs (see the DMD note at kerker_K below).
-
-    Alternatively ``v_start = {"__full_state__": info["state"]}`` restores the COMPLETE
-    fixed-point state of a fullpot run — spherical + aspherical potentials, interstitial grid
-    and reference — so the resumed run continues the coupled fullpot iteration exactly (the
-    plain per-key form silently restarts the aspherical channel from zero). Every run returns
-    its final full state as ``info["state"]``.
-
-    ``kworkers > 1`` solves the k-points of each iteration in a process pool (each k's secular
-    build+solve is independent). Results are accumulated in mesh order, so the density is identical
-    to the serial run. Divide the BLAS threads accordingly (e.g. ``OMP_NUM_THREADS=3`` with
-    ``kworkers=6`` on ~20 cores) — the pool multiplies whatever thread count each worker uses.
-    The workers are spawned (fork inherits live BLAS state and computes wrong numbers), so the
-    CALLING script must be import-safe: guard its executable body with ``if __name__ ==
-    "__main__":`` or the workers re-run it on import.
-
-    ``subspace_reuse`` (default True) solves most iterations by Rayleigh-Ritz in the previous
-    iteration's eigenvector subspace (residual-gated, exact-solve fallback); every 5th iteration
-    is a forced exact solve and convergence is only accepted on exact-solve iterations, so the
-    reported state never rests on a projected solve."""
+def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax: int = 2,
+                 kmesh=(1, 1, 1), smearing: float = 0.0, fullpot: bool = False,
+                 use_symmetry: bool = True, fullpot_lmax: int = 2, los=None, val_e=None,
+                 core=None, el_override=None, kworkers: int = 1, subspace_reuse: bool = False,
+                 subspace_tol: float = 1e-5, cell=None, kerker: float | None = None,
+                 verbose: bool = False) -> _MultiCtx:
+    """The state-independent setup phase of ``crystal_scf_multi`` (see ``_MultiCtx``).
+    Argument semantics and validation are exactly the public entry point's."""
     if (a_bohr is None) == (cell is None):
         raise ValueError("pass exactly one of a_bohr (Bohr, legacy) or cell (Å)")
     if atoms is None or radii is None:
@@ -978,362 +998,505 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     for (tau_c, _sym2), kk2 in zip(atoms_cart, keys, strict=True):
         theta_i &= ~(_min_image_dist(np.asarray(tau_c[0] if isinstance(tau_c, tuple) else tau_c)
                                      @ _ainv, nfft, A) < R_by_key[kk2])
-    warp_state = None                                     # (FFT of (v_grid-v_i0)·Θ_I, nfft)
-    v_grid_prev = None                                    # mixed interstitial grid state
-    v_i0_prev = None                                      # interstitial reference of last iter
     kerker_K = None if kerker is None else _kerker_screen(nfft, A, kerker)
+    return _MultiCtx(A=A, vol=vol, nfft=nfft, r=r, dx=dx, r_np=r_np, keys=keys, syms=syms,
+                     key_sym=key_sym, los_by_key=los_by_key, nbands=nbands, kfracs=kfracs,
+                     kw=kw, sg=sg, rho_symm=rho_symm, atom_orbits=atom_orbits, d_ops=d_ops,
+                     at_by_sym=at_by_sym, vat_by_sym=vat_by_sym, R_by_key=R_by_key,
+                     rr_by_key=rr_by_key, mask_by_key=mask_by_key, acart=acart,
+                     theta_i=theta_i, kerker_K=kerker_K, core_map=core_map, lmax=lmax,
+                     ecut=ecut, smearing=smearing, fullpot=fullpot,
+                     fullpot_lmax=fullpot_lmax, el_override=el_override, kworkers=kworkers,
+                     subspace_reuse=subspace_reuse, subspace_tol=subspace_tol,
+                     verbose=verbose)
+
+
+def _multi_init_state(ctx: _MultiCtx, v_start) -> _MultiState:
+    """Build the initial ``_MultiState`` from ``v_start`` (None, a per-key radial-potential
+    dict, or ``{"__full_state__": info["state"]}`` — semantics exactly as documented on
+    ``crystal_scf_multi``)."""
+    st = _MultiState()
     fs = v_start.get("__full_state__") if isinstance(v_start, dict) else None
     _vsrc = fs["v_by_key"] if fs is not None else v_start
-    v_by_key = {}
-    for k, s in zip(keys, syms, strict=True):
+    for k, s in zip(ctx.keys, ctx.syms, strict=True):
         if _vsrc is not None and k in _vsrc:
-            v_by_key[k] = torch.as_tensor(np.asarray(_vsrc[k]), dtype=torch.float64).clone()
+            st.v_by_key[k] = torch.as_tensor(np.asarray(_vsrc[k]), dtype=torch.float64).clone()
         else:
-            v_by_key[k] = vat_by_sym[s].clone()
+            st.v_by_key[k] = ctx.vat_by_sym[s].clone()
 
-    conv = None
-    v_nsph = None                                          # non-spherical potential (fullpot)
-    r_nsph = float("inf")                                  # aspherical residual (convergence gate)
-    vns_new = None
     # staged start: a cold fullpot SCF couples the spherical and aspherical loops from iteration 0
     # and can diverge violently (observed: span bouncing 20 eV, r_v ~100). Converge the muffin-tin
     # problem first, then switch the aspherical potential on from that state (what every
     # well-behaved fullpot run implicitly did via warm-starting).
-    mt_phase = bool(fullpot)
+    st.mt_phase = bool(ctx.fullpot)
     if fs is not None:
         # full-state resume skips the MT staging: a full state IS a coupled fullpot state
-        v_nsph, v_grid_prev, warp_state, v_i0_prev = _restore_full_state(fs, theta_i, nfft)
-        if fullpot:
-            mt_phase = False
+        st.v_nsph, st.v_grid_prev, st.warp_state, st.v_i0_prev = _restore_full_state(
+            fs, ctx.theta_i, ctx.nfft)
+        if ctx.fullpot:
+            st.mt_phase = False
     from gradwave.flapw.recorder import FLAPWRecorder
-    recorder = FLAPWRecorder()
-    hist = ([], [])                                        # joint Anderson history
-    c_prev_by_k = [None] * len(kfracs)
-    for it in range(iters):
-        # subspace reuse is safe in the muffin-tin phase but blind to states entering the
-        # window while the aspherical potential ramps (observed blow-ups at [subsp] iterations);
-        # fullpot iterations always solve exactly.
-        full_iter = (not subspace_reuse) or (it % 5 == 0) or (fullpot and not mt_phase)
-        t_it = time.time()
-        r_sph = 0.0
-        vnew_by_key = {}
-        species, El_by_key, vmt_by_key, v0_by_key = {}, {}, {}, {}
-        for k, s in zip(keys, syms, strict=True):
-            R = R_by_key[k]
-            v0 = float(v_by_key[k].numpy()[np.argmin(np.abs(r_np - R))])
-            vmt = torch.where(r <= R, v_by_key[k] - v0, torch.zeros_like(r))
-            nl = _VALENCE_NL[s]
-            El = {lang: at_by_sym[s].get(nl.get(lang, ""), -5.0) - v0
-                  for lang in range(max(lmax, 2) + 1)}
-            for lang, spec in (el_override or {}).get(s, {}).items():
-                El[lang] = (at_by_sym[s][spec] if isinstance(spec, str) else float(spec)) - v0
-            species[k] = {"R": R, "v": vmt, "El": El,
-                          "v0off": (v0 - v_i0_prev) if v_i0_prev is not None else 0.0}
-            El_by_key[k], vmt_by_key[k], v0_by_key[k] = El, vmt, v0
+    st.recorder = FLAPWRecorder()
+    st.c_prev_by_k = [None] * len(ctx.kfracs)
+    return st
 
-        # pass 1 — solve every k, keep the results; pass 2 — occupy and accumulate the density.
-        npad = max(2, nbands // 2) if smearing > 0 else 4
-        nb_solve = nbands + npad
-        # radial channels are k-independent — build once per iteration, reuse across the k-mesh.
-        chan = {key: {lang: radial_channel(lang, sp["El"][lang], r, dx, sp["v"], sp["R"])
-                      for lang in range(lmax + 1)} for key, sp in species.items()}
-        lodat = (_build_lodat(los_by_key, chan, El_by_key, vmt_by_key, R_by_key, at_by_sym,
-                              key_sym, v0_by_key, r, dx) if los_by_key else None)
-        # aspherical radial integrals are k-independent — build once per iteration, like chan.
-        nsph_int = (_nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=lodat)
-                    if v_nsph else None)
-        kdata, ev_all, ev_gamma = [], [], None
-        cprevs = [None if full_iter else c_prev_by_k[ik] for ik in range(len(kfracs))]
-        if kworkers > 1 and len(kfracs) > 1:
-            import multiprocessing as _mp
-            from concurrent.futures import ProcessPoolExecutor
-            argl = [SolveKArgs(kf=kf, cell=A, acart=acart, species=species, lmax=lmax,
-                               ecut=ecut, r=r, dx=dx, nb_solve=nb_solve, v_nsph=v_nsph,
-                               chan=chan, lodat=lodat, nsph_int=nsph_int,
-                               c_prev=cprevs[ik], subspace_tol=subspace_tol,
-                               warp=warp_state)
+
+def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: float) -> bool:
+    """One damped SCF iteration of ``crystal_scf_multi`` — the fixed-point map applied to the
+    evolving state ``st`` under the static context ``ctx``. Mutates ``st`` in place (potentials,
+    mixing history, and the last-iteration outputs ``_multi_finalize`` consumes) and returns
+    True when the convergence gate fires (the caller breaks). ``iters``/``tol`` are the
+    surrounding run's loop controls (the MT→fullpot staging cap and the convergence gate)."""
+    A, vol, nfft, r, dx, r_np = ctx.A, ctx.vol, ctx.nfft, ctx.r, ctx.dx, ctx.r_np
+    keys, syms, acart = ctx.keys, ctx.syms, ctx.acart
+    lmax, ecut, smearing, nbands = ctx.lmax, ctx.ecut, ctx.smearing, ctx.nbands
+    fullpot, fullpot_lmax = ctx.fullpot, ctx.fullpot_lmax
+    R_by_key, rr_by_key, mask_by_key = ctx.R_by_key, ctx.rr_by_key, ctx.mask_by_key
+    at_by_sym, core_map, el_override = ctx.at_by_sym, ctx.core_map, ctx.el_override
+    los_by_key, key_sym = ctx.los_by_key, ctx.key_sym
+    kfracs, kw = ctx.kfracs, ctx.kw
+    sg, rho_symm, atom_orbits, d_ops = ctx.sg, ctx.rho_symm, ctx.atom_orbits, ctx.d_ops
+    theta_i, kerker_K, verbose = ctx.theta_i, ctx.kerker_K, ctx.verbose
+    kworkers, subspace_tol = ctx.kworkers, ctx.subspace_tol
+    v_by_key, c_prev_by_k, recorder = st.v_by_key, st.c_prev_by_k, st.recorder
+    mt_phase, conv, hist = st.mt_phase, st.conv, st.hist
+    v_nsph, vns_new, r_nsph = st.v_nsph, st.vns_new, st.r_nsph
+    warp_state, v_grid_prev, v_i0_prev = st.warp_state, st.v_grid_prev, st.v_i0_prev
+
+    # subspace reuse is safe in the muffin-tin phase but blind to states entering the
+    # window while the aspherical potential ramps (observed blow-ups at [subsp] iterations);
+    # fullpot iterations always solve exactly.
+    full_iter = (not ctx.subspace_reuse) or (it % 5 == 0) or (fullpot and not mt_phase)
+    t_it = time.time()
+    r_sph = 0.0
+    vnew_by_key = {}
+    species, El_by_key, vmt_by_key, v0_by_key = {}, {}, {}, {}
+    for k, s in zip(keys, syms, strict=True):
+        R = R_by_key[k]
+        v0 = float(v_by_key[k].numpy()[np.argmin(np.abs(r_np - R))])
+        vmt = torch.where(r <= R, v_by_key[k] - v0, torch.zeros_like(r))
+        nl = _VALENCE_NL[s]
+        El = {lang: at_by_sym[s].get(nl.get(lang, ""), -5.0) - v0
+              for lang in range(max(lmax, 2) + 1)}
+        for lang, spec in (el_override or {}).get(s, {}).items():
+            El[lang] = (at_by_sym[s][spec] if isinstance(spec, str) else float(spec)) - v0
+        species[k] = {"R": R, "v": vmt, "El": El,
+                      "v0off": (v0 - v_i0_prev) if v_i0_prev is not None else 0.0}
+        El_by_key[k], vmt_by_key[k], v0_by_key[k] = El, vmt, v0
+
+    # pass 1 — solve every k, keep the results; pass 2 — occupy and accumulate the density.
+    npad = max(2, nbands // 2) if smearing > 0 else 4
+    nb_solve = nbands + npad
+    # radial channels are k-independent — build once per iteration, reuse across the k-mesh.
+    chan = {key: {lang: radial_channel(lang, sp["El"][lang], r, dx, sp["v"], sp["R"])
+                  for lang in range(lmax + 1)} for key, sp in species.items()}
+    lodat = (_build_lodat(los_by_key, chan, El_by_key, vmt_by_key, R_by_key, at_by_sym,
+                          key_sym, v0_by_key, r, dx) if los_by_key else None)
+    # aspherical radial integrals are k-independent — build once per iteration, like chan.
+    nsph_int = (_nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=lodat)
+                if v_nsph else None)
+    kdata, ev_all, ev_gamma = [], [], None
+    cprevs = [None if full_iter else c_prev_by_k[ik] for ik in range(len(kfracs))]
+    if kworkers > 1 and len(kfracs) > 1:
+        import multiprocessing as _mp
+        from concurrent.futures import ProcessPoolExecutor
+        argl = [SolveKArgs(kf=kf, cell=A, acart=acart, species=species, lmax=lmax,
+                           ecut=ecut, r=r, dx=dx, nb_solve=nb_solve, v_nsph=v_nsph,
+                           chan=chan, lodat=lodat, nsph_int=nsph_int,
+                           c_prev=cprevs[ik], subspace_tol=subspace_tol,
+                           warp=warp_state)
+                for ik, kf in enumerate(kfracs)]
+        # spawn, not fork: forked children inherit live OpenMP/BLAS state and can compute
+        # silently wrong numbers (observed: a 6 eV span error). Spawned workers re-import
+        # (~seconds per iteration) — negligible on the multi-minute fullpot iterations the
+        # pool exists for.
+        with ProcessPoolExecutor(max_workers=min(kworkers, len(argl)),
+                                 mp_context=_mp.get_context("spawn")) as ex:
+            res_list = list(ex.map(_solve_k_args, argl))
+    else:
+        res_list = [_lapw_multi_k(kf, A, acart, species, lmax, ecut, r, dx, nb_solve,
+                                  v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int,
+                                  c_prev=cprevs[ik], subspace_tol=subspace_tol,
+                                  warp=warp_state)
                     for ik, kf in enumerate(kfracs)]
-            # spawn, not fork: forked children inherit live OpenMP/BLAS state and can compute
-            # silently wrong numbers (observed: a 6 eV span error). Spawned workers re-import
-            # (~seconds per iteration) — negligible on the multi-minute fullpot iterations the
-            # pool exists for.
-            with ProcessPoolExecutor(max_workers=min(kworkers, len(argl)),
-                                     mp_context=_mp.get_context("spawn")) as ex:
-                res_list = list(ex.map(_solve_k_args, argl))
-        else:
-            res_list = [_lapw_multi_k(kf, A, acart, species, lmax, ecut, r, dx, nb_solve,
-                                      v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int,
-                                      c_prev=cprevs[ik], subspace_tol=subspace_tol,
-                                      warp=warp_state)
-                        for ik, kf in enumerate(kfracs)]
-        for ik, (kf, w, res) in enumerate(zip(kfracs, kw, res_list, strict=True)):
-            kdata.append((kf, w, res))
-            ev_all.append(res[0])
-            c_prev_by_k[ik] = res[1]
-            if np.all(np.abs(kf) < 1e-9):
-                ev_gamma = res[0]
-        if ev_gamma is None:
-            ev_gamma = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx, nb_solve,
-                                     v_nsph=v_nsph, chan=chan, lodat=lodat,
-                                     nsph_int=nsph_int, warp=warp_state)[0]
-        ev_all = np.array(ev_all)
+    for ik, (kf, w, res) in enumerate(zip(kfracs, kw, res_list, strict=True)):
+        kdata.append((kf, w, res))
+        ev_all.append(res[0])
+        c_prev_by_k[ik] = res[1]
+        if np.all(np.abs(kf) < 1e-9):
+            ev_gamma = res[0]
+    if ev_gamma is None:
+        ev_gamma = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx, nb_solve,
+                                 v_nsph=v_nsph, chan=chan, lodat=lodat,
+                                 nsph_int=nsph_int, warp=warp_state)[0]
+    ev_all = np.array(ev_all)
 
-        e_fermi = None
-        if smearing > 0:
-            e_fermi = _fermi_level(ev_all, kw, 2 * nbands, smearing)
-            occ_by_k = [2.0 / (1.0 + np.exp(np.clip((ev - e_fermi) / smearing, -60, 60)))
-                        for ev in ev_all]
-        else:
-            occ_by_k = [_occ_degenerate_aware(ev, nbands) for ev in ev_all]
+    e_fermi = None
+    if smearing > 0:
+        e_fermi = _fermi_level(ev_all, kw, 2 * nbands, smearing)
+        occ_by_k = [2.0 / (1.0 + np.exp(np.clip((ev - e_fermi) / smearing, -60, 60)))
+                    for ev in ev_all]
+    else:
+        occ_by_k = [_occ_degenerate_aware(ev, nbands) for ev in ev_all]
 
-        rho_I = np.zeros((nfft, nfft, nfft))
-        rho_val = {k: np.zeros_like(rr_by_key[k]) for k in keys}
-        # The aspherical (l=2) density feeds the SCF only in the full-potential loop; for a plain
-        # muffin-tin EFG run it is a pure diagnostic (it does not change the spherical potential,
-        # and the l=2 Weinert pseudocharge has zero monopole so it leaves v_sph untouched). So
-        # accumulate it once after convergence (_efg_density_pass, below) instead of paying the
-        # per-k sphere_density_multipoles at every SCF iteration.
-        if fullpot and not mt_phase:
-            from gradwave.flapw.efg import sphere_density_multipoles_bands
-            us_by_key = {k: _us_ext(El_by_key[k], lmax, r, dx, vmt_by_key[k], R_by_key[k],
-                                    (lodat or {}).get(k)) for k in keys}
-            lset_pot = [(lg, m) for lg in range(1, fullpot_lmax + 1) for m in range(-lg, lg + 1)]
-            if (2, 0) not in lset_pot:                      # the EFG observable always needs l=2
-                lset_pot += [(2, m) for m in range(-2, 3)]
-            lset2 = [(0, 0)] + lset_pot
-            rho_2m = {k: {lm: np.zeros(rr_by_key[k].shape, dtype=complex) for lm in lset2}
-                      for k in keys}
-        lo_off = {}                                         # each atom's LO-row offset past npw
-        off = 0
-        for _tau, k in acart:
-            lo_off[k] = off
-            off += sum(2 * lo["l"] + 1 for lo in (lodat or {}).get(k, []))
-        for (_kf, w, res), occ in zip(kdata, occ_by_k, strict=True):
-            _, c, mill, ks, abl_all, vol = res
-            occl = list(occ)
-            npw_k = len(mill)
-            rho_I += w * _interstitial_density(c[:npw_k, :nb_solve], occl, mill, vol, nfft)
-            ylm_by_l = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
-            for ai, k in enumerate(keys):
-                phase = np.exp(1j * (ks @ np.asarray(acart[ai][0])))
-                cp = c[:npw_k, :nb_solve] * phase[:, None]
-                los_k = (lodat or {}).get(k)
-                nlo_k = sum(2 * lo["l"] + 1 for lo in los_k or [])
-                lo_block = (c[npw_k + lo_off[k]:npw_k + lo_off[k] + nlo_k, :nb_solve]
-                            if nlo_k else None)
-                _, rk = _sphere_valence_density(cp, occl, ks, abl_all[ai], El_by_key[k], lmax,
-                                                vol, r, dx, vmt_by_key[k], R_by_key[k],
-                                                lo_block=lo_block, los=los_k, ylm_by_l=ylm_by_l)
-                rho_val[k] += w * rk
-                if fullpot and not mt_phase:
-                    amps_all = _bands_amps(cp, ks, abl_all[ai], lmax, vol, lo_block=lo_block,
-                                           los=los_k, ylm_by_l=ylm_by_l)
-                    rlm = sphere_density_multipoles_bands(amps_all, occl, us_by_key[k], lmax,
-                                                          lset2)
-                    for lm in lset2:
-                        rho_2m[k][lm] += w * rlm[lm]
-
-        if rho_symm is not None:                        # restore full-BZ symmetry lost to IBZ:
-            rho_I = np.fft.ifftn(                        #   interstitial ρ symmetrized in G-space,
-                rho_symm.apply(torch.tensor(np.fft.fftn(rho_I))).numpy()).real
-        if atom_orbits is not None:                     #   muffin-tin ρ averaged over equiv. atoms
-            sym_dev = 0.0
-            for orbit in atom_orbits:
-                ok = [keys[i] for i in orbit]
-                avg = sum(rho_val[k] for k in ok) / len(ok)
-                scale = max(float(np.abs(avg).max()), 1e-30)
-                for k in ok:
-                    sym_dev = max(sym_dev, float(np.abs(rho_val[k] - avg).max()) / scale)
-                    rho_val[k] = avg.copy()
-        if fullpot and not mt_phase and d_ops is not None:   # ρ_LM star-unfolded (Wigner-D)
-            raw = rho_2m
-            rho_2m = _symmetrize_rho_lm(rho_2m, keys, sg, d_ops)
-            for k in keys:                              # residual of the projector = asymmetry,
-                scale = max(max(float(np.abs(v).max())  # scaled per ATOM (a numerically-empty
-                                for v in rho_2m[k].values()), 1e-30)   # (L,M) is not a violation)
-                for lm, v in rho_2m[k].items():
-                    sym_dev = max(sym_dev, float(np.abs(raw[k][lm] - v).max()) / scale)
-
-        spheres, rho_sph_by_key = [], {}
-        for ai, (k, s) in enumerate(zip(keys, syms, strict=True)):
-            rr, mask = rr_by_key[k], mask_by_key[k]
-            rho_core = np.zeros_like(rr)
-            for lc, nidx, fc in core_map[s]:
-                _, uc = radial_eigs_tridiag(lc, r, dx, v_by_key[k], nidx)
-                rho_core += fc * uc[mask, nidx - 1] ** 2 / (4 * math.pi * rr**2)
-            rho_sph_by_key[k] = rho_val[k] + rho_core
-            spheres.append({"tau": acart[ai][0], "rr": rr, "dx": dx,
-                            "rho_sph": rho_sph_by_key[k], "Z": CONFIG[s][0], "R": R_by_key[k],
-                            "rho_2m": rho_2m[k] if fullpot and not mt_phase else None})
-        v_sph_list, v_i0, v_grid, vbc_own = _weinert_multi(rho_I, spheres, A, nfft)
-        v_i0_prev = v_i0
-
-        if fullpot and not mt_phase:
-            from gradwave.flapw.efg import (
-                interstitial_boundary_multi,
-                nonspherical_potential,
-            )
-            vns_new = {}
-            for ai, k in enumerate(keys):
-                rr, drw, R = rr_by_key[k], rr_by_key[k] * dx, R_by_key[k]
-                vns = nonspherical_potential(rho_sph_by_key[k], rho_2m[k], rr, drw, lset=lset_pot)
-                # Add the lattice field *inside* the sphere for each (L,M): the source-free r^L
-                # harmonic whose value at R matches the interstitial boundary,
-                # (v_bc − V_part(R))/R^L. Without it the muffin-tin electrons never feel the
-                # crystal field, so the valence/semicore cannot polarize in it (the Sternheimer
-                # antishielding). The pseudocharges are moment-matched for every L in the lset, so
-                # v_bc's own-sphere part cancels V_part(R) exactly and C_LM is the others' field.
-                v_bc = interstitial_boundary_multi(v_grid, acart[ai][0], R, A, lset_pot)
-                own = vbc_own[ai] if vbc_own else {}
-                for (bl, m) in lset_pot:
-                    c_lm = (v_bc[(bl, m)] - own.get((bl, m), 0.0)) / R**bl
-                    vns[(bl, m)] = vns[(bl, m)] + c_lm * rr**bl
-                vns_new[k] = vns
-            if v_nsph is None:
-                v_nsph = vns_new
-                vns_new = None                     # first fullpot iteration: seed, nothing to mix
-                r_nsph = float("inf")
-            else:
-                # relative aspherical residual (feeds the convergence gate); the mixing itself is
-                # the JOINT Anderson below — one history over (all v_sph ⊕ v_nsph), so the coupled
-                # spherical/aspherical fixed point is accelerated as one system instead of three
-                # loops fighting at different rates.
-                scale = max(max(float(np.abs(v).max()) for v in v_nsph[k2].values())
-                            for k2 in keys) or 1.0
-                r_nsph = max(float(np.abs(vns_new[k2][lm] - v_nsph[k2][lm]).max())
-                             for k2 in keys for lm in vns_new[k2]) / scale
-
+    rho_I = np.zeros((nfft, nfft, nfft))
+    rho_val = {k: np.zeros_like(rr_by_key[k]) for k in keys}
+    # The aspherical (l=2) density feeds the SCF only in the full-potential loop; for a plain
+    # muffin-tin EFG run it is a pure diagnostic (it does not change the spherical potential,
+    # and the l=2 Weinert pseudocharge has zero monopole so it leaves v_sph untouched). So
+    # accumulate it once after convergence (_efg_density_pass, below) instead of paying the
+    # per-k sphere_density_multipoles at every SCF iteration.
+    rho_2m = None
+    if fullpot and not mt_phase:
+        from gradwave.flapw.efg import sphere_density_multipoles_bands
+        us_by_key = {k: _us_ext(El_by_key[k], lmax, r, dx, vmt_by_key[k], R_by_key[k],
+                                (lodat or {}).get(k)) for k in keys}
+        lset_pot = [(lg, m) for lg in range(1, fullpot_lmax + 1) for m in range(-lg, lg + 1)]
+        if (2, 0) not in lset_pot:                      # the EFG observable always needs l=2
+            lset_pot += [(2, m) for m in range(-2, 3)]
+        lset2 = [(0, 0)] + lset_pot
+        rho_2m = {k: {lm: np.zeros(rr_by_key[k].shape, dtype=complex) for lm in lset2}
+                  for k in keys}
+    lo_off = {}                                         # each atom's LO-row offset past npw
+    off = 0
+    for _tau, k in acart:
+        lo_off[k] = off
+        off += sum(2 * lo["l"] + 1 for lo in (lodat or {}).get(k, []))
+    for (_kf, w, res), occ in zip(kdata, occ_by_k, strict=True):
+        _, c, mill, ks, abl_all, vol = res
+        occl = list(occ)
+        npw_k = len(mill)
+        rho_I += w * _interstitial_density(c[:npw_k, :nb_solve], occl, mill, vol, nfft)
+        ylm_by_l = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
         for ai, k in enumerate(keys):
-            mask = mask_by_key[k]
-            vnew_sph = v_sph_list[ai] + vxc_lda(torch.tensor(rho_sph_by_key[k])).numpy()
-            vnew_np = np.full(r.shape[0], v_i0)
-            vnew_np[mask] = vnew_sph
-            vnew = torch.tensor(vnew_np)
-            vnew_by_key[k] = vnew
-            r_sph = max(r_sph, float((vnew - v_by_key[k]).abs().max()))
-        # Unified metric-weighted Anderson: EVERY component of the state — the spherical sphere
-        # potentials, the aspherical components, and the INTERSTITIAL grid (previously unmixed:
-        # it swung freely each iteration and drove the sphere boundary conditions at full
-        # amplitude) — in one history, in the physical L2 metric (√(r²dr) radial, √dvol grid).
-        # The metric is the principled form of "scale-weighting": without it the near-nucleus
-        # points of v_sph (|v|~1e5 at r~1e-5, measure→0) dominate the least squares meaninglessly.
-        nsph_now = fullpot and not mt_phase and v_nsph is not None and vns_new is not None
-        sqdx = math.sqrt(dx)
-        w_segs = [torch.from_numpy(rr_by_key[k] ** 1.5 * sqdx) for k in keys]
-        segs = [v_by_key[k][torch.from_numpy(mask_by_key[k])] for k in keys]
-        news = [vnew_by_key[k][torch.from_numpy(mask_by_key[k])] for k in keys]
-        if nsph_now:
-            for k in keys:
-                wr = torch.from_numpy(rr_by_key[k] ** 1.5 * sqdx)
-                for lm in sorted(v_nsph[k]):
-                    for fn in (np.real, np.imag):
-                        segs.append(torch.from_numpy(np.ascontiguousarray(fn(v_nsph[k][lm]))))
-                        news.append(torch.from_numpy(np.ascontiguousarray(fn(vns_new[k][lm]))))
-                        w_segs.append(wr)
-        sqdv = math.sqrt(vol / nfft**3)
-        ti_flat = theta_i.reshape(-1)
-        w_segs.append(torch.full((int(ti_flat.sum()),), sqdv, dtype=torch.float64))
-        segs.append(torch.from_numpy((v_grid_prev if v_grid_prev is not None
-                                      else v_grid).reshape(-1)[ti_flat]))
-        vi_new = v_grid.reshape(-1)[ti_flat]
-        if kerker_K is not None and v_grid_prev is not None:
-            vi_new = _kerker_screened_interstitial(vi_new, v_grid_prev.reshape(-1)[ti_flat],
-                                                   ti_flat, kerker_K, nfft)
-        news.append(torch.from_numpy(vi_new))
-        w_vec = torch.cat(w_segs)
-        x_old = torch.cat([t.reshape(-1) for t in segs]) * w_vec
-        x_new = torch.cat([t.reshape(-1) for t in news]) * w_vec
-        if hist and hist[0] and hist[0][-1].numel() != x_old.numel():
-            hist = ([], [])                        # phase switch changed the vector: fresh history
-        if not hist:
-            hist = ([], [])
-        hist[0].append(x_old)
-        hist[1].append(x_new - x_old)
-        if len(hist[1]) > 6:
-            hist = (hist[0][-6:], hist[1][-6:])
-        x_next = anderson_next(hist[0], hist[1], beta=0.3, m=5) / w_vec
-        off = 0
+            phase = np.exp(1j * (ks @ np.asarray(acart[ai][0])))
+            cp = c[:npw_k, :nb_solve] * phase[:, None]
+            los_k = (lodat or {}).get(k)
+            nlo_k = sum(2 * lo["l"] + 1 for lo in los_k or [])
+            lo_block = (c[npw_k + lo_off[k]:npw_k + lo_off[k] + nlo_k, :nb_solve]
+                        if nlo_k else None)
+            _, rk = _sphere_valence_density(cp, occl, ks, abl_all[ai], El_by_key[k], lmax,
+                                            vol, r, dx, vmt_by_key[k], R_by_key[k],
+                                            lo_block=lo_block, los=los_k, ylm_by_l=ylm_by_l)
+            rho_val[k] += w * rk
+            if fullpot and not mt_phase:
+                amps_all = _bands_amps(cp, ks, abl_all[ai], lmax, vol, lo_block=lo_block,
+                                       los=los_k, ylm_by_l=ylm_by_l)
+                rlm = sphere_density_multipoles_bands(amps_all, occl, us_by_key[k], lmax,
+                                                      lset2)
+                for lm in lset2:
+                    rho_2m[k][lm] += w * rlm[lm]
+
+    if rho_symm is not None:                        # restore full-BZ symmetry lost to IBZ:
+        rho_I = np.fft.ifftn(                        #   interstitial ρ symmetrized in G-space,
+            rho_symm.apply(torch.tensor(np.fft.fftn(rho_I))).numpy()).real
+    if atom_orbits is not None:                     #   muffin-tin ρ averaged over equiv. atoms
+        sym_dev = 0.0
+        for orbit in atom_orbits:
+            ok = [keys[i] for i in orbit]
+            avg = sum(rho_val[k] for k in ok) / len(ok)
+            scale = max(float(np.abs(avg).max()), 1e-30)
+            for k in ok:
+                sym_dev = max(sym_dev, float(np.abs(rho_val[k] - avg).max()) / scale)
+                rho_val[k] = avg.copy()
+    if fullpot and not mt_phase and d_ops is not None:   # ρ_LM star-unfolded (Wigner-D)
+        raw = rho_2m
+        rho_2m = _symmetrize_rho_lm(rho_2m, keys, sg, d_ops)
+        for k in keys:                              # residual of the projector = asymmetry,
+            scale = max(max(float(np.abs(v).max())  # scaled per ATOM (a numerically-empty
+                            for v in rho_2m[k].values()), 1e-30)   # (L,M) is not a violation)
+            for lm, v in rho_2m[k].items():
+                sym_dev = max(sym_dev, float(np.abs(raw[k][lm] - v).max()) / scale)
+
+    spheres, rho_sph_by_key = [], {}
+    for ai, (k, s) in enumerate(zip(keys, syms, strict=True)):
+        rr, mask = rr_by_key[k], mask_by_key[k]
+        rho_core = np.zeros_like(rr)
+        for lc, nidx, fc in core_map[s]:
+            _, uc = radial_eigs_tridiag(lc, r, dx, v_by_key[k], nidx)
+            rho_core += fc * uc[mask, nidx - 1] ** 2 / (4 * math.pi * rr**2)
+        rho_sph_by_key[k] = rho_val[k] + rho_core
+        spheres.append({"tau": acart[ai][0], "rr": rr, "dx": dx,
+                        "rho_sph": rho_sph_by_key[k], "Z": CONFIG[s][0], "R": R_by_key[k],
+                        "rho_2m": rho_2m[k] if fullpot and not mt_phase else None})
+    v_sph_list, v_i0, v_grid, vbc_own = _weinert_multi(rho_I, spheres, A, nfft)
+    v_i0_prev = v_i0
+
+    if fullpot and not mt_phase:
+        from gradwave.flapw.efg import (
+            interstitial_boundary_multi,
+            nonspherical_potential,
+        )
+        vns_new = {}
+        for ai, k in enumerate(keys):
+            rr, drw, R = rr_by_key[k], rr_by_key[k] * dx, R_by_key[k]
+            vns = nonspherical_potential(rho_sph_by_key[k], rho_2m[k], rr, drw, lset=lset_pot)
+            # Add the lattice field *inside* the sphere for each (L,M): the source-free r^L
+            # harmonic whose value at R matches the interstitial boundary,
+            # (v_bc − V_part(R))/R^L. Without it the muffin-tin electrons never feel the
+            # crystal field, so the valence/semicore cannot polarize in it (the Sternheimer
+            # antishielding). The pseudocharges are moment-matched for every L in the lset, so
+            # v_bc's own-sphere part cancels V_part(R) exactly and C_LM is the others' field.
+            v_bc = interstitial_boundary_multi(v_grid, acart[ai][0], R, A, lset_pot)
+            own = vbc_own[ai] if vbc_own else {}
+            for (bl, m) in lset_pot:
+                c_lm = (v_bc[(bl, m)] - own.get((bl, m), 0.0)) / R**bl
+                vns[(bl, m)] = vns[(bl, m)] + c_lm * rr**bl
+            vns_new[k] = vns
+        if v_nsph is None:
+            v_nsph = vns_new
+            vns_new = None                     # first fullpot iteration: seed, nothing to mix
+            r_nsph = float("inf")
+        else:
+            # relative aspherical residual (feeds the convergence gate); the mixing itself is
+            # the JOINT Anderson below — one history over (all v_sph ⊕ v_nsph), so the coupled
+            # spherical/aspherical fixed point is accelerated as one system instead of three
+            # loops fighting at different rates.
+            scale = max(max(float(np.abs(v).max()) for v in v_nsph[k2].values())
+                        for k2 in keys) or 1.0
+            r_nsph = max(float(np.abs(vns_new[k2][lm] - v_nsph[k2][lm]).max())
+                         for k2 in keys for lm in vns_new[k2]) / scale
+
+    for ai, k in enumerate(keys):
+        mask = mask_by_key[k]
+        vnew_sph = v_sph_list[ai] + vxc_lda(torch.tensor(rho_sph_by_key[k])).numpy()
+        vnew_np = np.full(r.shape[0], v_i0)
+        vnew_np[mask] = vnew_sph
+        vnew = torch.tensor(vnew_np)
+        vnew_by_key[k] = vnew
+        r_sph = max(r_sph, float((vnew - v_by_key[k]).abs().max()))
+    # Unified metric-weighted Anderson: EVERY component of the state — the spherical sphere
+    # potentials, the aspherical components, and the INTERSTITIAL grid (previously unmixed:
+    # it swung freely each iteration and drove the sphere boundary conditions at full
+    # amplitude) — in one history, in the physical L2 metric (√(r²dr) radial, √dvol grid).
+    # The metric is the principled form of "scale-weighting": without it the near-nucleus
+    # points of v_sph (|v|~1e5 at r~1e-5, measure→0) dominate the least squares meaninglessly.
+    nsph_now = fullpot and not mt_phase and v_nsph is not None and vns_new is not None
+    sqdx = math.sqrt(dx)
+    w_segs = [torch.from_numpy(rr_by_key[k] ** 1.5 * sqdx) for k in keys]
+    segs = [v_by_key[k][torch.from_numpy(mask_by_key[k])] for k in keys]
+    news = [vnew_by_key[k][torch.from_numpy(mask_by_key[k])] for k in keys]
+    if nsph_now:
         for k in keys:
-            n = int(mask_by_key[k].sum())
-            full_v = torch.full((r.shape[0],), v_i0, dtype=torch.float64)
-            full_v[torch.from_numpy(mask_by_key[k])] = x_next[off:off + n]
-            v_by_key[k] = full_v
-            off += n
-        if nsph_now:
-            for k in keys:
-                for lm in sorted(v_nsph[k]):
-                    n = v_nsph[k][lm].size
-                    re = x_next[off:off + n].numpy()
-                    im = x_next[off + n:off + 2 * n].numpy()
-                    v_nsph[k][lm] = re + 1j * im
-                    off += 2 * n
-        v_mix_i = x_next[off:].numpy()
-        v_grid_prev = v_grid.copy()
-        v_grid_prev.reshape(-1)[ti_flat] = v_mix_i
-        # warped interstitial for the NEXT iteration, from the MIXED grid, zero-mean over Θ_I so
-        # the interstitial-zero eigenvalue referencing is preserved
-        u = np.where(theta_i, v_grid_prev - float(v_mix_i.mean()), 0.0)
-        warp_state = (np.fft.fftn(u) / nfft**3, nfft)
+            wr = torch.from_numpy(rr_by_key[k] ** 1.5 * sqdx)
+            for lm in sorted(v_nsph[k]):
+                for fn in (np.real, np.imag):
+                    segs.append(torch.from_numpy(np.ascontiguousarray(fn(v_nsph[k][lm]))))
+                    news.append(torch.from_numpy(np.ascontiguousarray(fn(vns_new[k][lm]))))
+                    w_segs.append(wr)
+    sqdv = math.sqrt(vol / nfft**3)
+    ti_flat = theta_i.reshape(-1)
+    w_segs.append(torch.full((int(ti_flat.sum()),), sqdv, dtype=torch.float64))
+    segs.append(torch.from_numpy((v_grid_prev if v_grid_prev is not None
+                                  else v_grid).reshape(-1)[ti_flat]))
+    vi_new = v_grid.reshape(-1)[ti_flat]
+    if kerker_K is not None and v_grid_prev is not None:
+        vi_new = _kerker_screened_interstitial(vi_new, v_grid_prev.reshape(-1)[ti_flat],
+                                               ti_flat, kerker_K, nfft)
+    news.append(torch.from_numpy(vi_new))
+    w_vec = torch.cat(w_segs)
+    x_old = torch.cat([t.reshape(-1) for t in segs]) * w_vec
+    x_new = torch.cat([t.reshape(-1) for t in news]) * w_vec
+    if hist and hist[0] and hist[0][-1].numel() != x_old.numel():
+        hist = ([], [])                        # phase switch changed the vector: fresh history
+    if not hist:
+        hist = ([], [])
+    hist[0].append(x_old)
+    hist[1].append(x_new - x_old)
+    if len(hist[1]) > 6:
+        hist = (hist[0][-6:], hist[1][-6:])
+    x_next = anderson_next(hist[0], hist[1], beta=0.3, m=5) / w_vec
+    off = 0
+    for k in keys:
+        n = int(mask_by_key[k].sum())
+        full_v = torch.full((r.shape[0],), v_i0, dtype=torch.float64)
+        full_v[torch.from_numpy(mask_by_key[k])] = x_next[off:off + n]
+        v_by_key[k] = full_v
+        off += n
+    if nsph_now:
+        for k in keys:
+            for lm in sorted(v_nsph[k]):
+                n = v_nsph[k][lm].size
+                re = x_next[off:off + n].numpy()
+                im = x_next[off + n:off + 2 * n].numpy()
+                v_nsph[k][lm] = re + 1j * im
+                off += 2 * n
+    v_mix_i = x_next[off:].numpy()
+    v_grid_prev = v_grid.copy()
+    v_grid_prev.reshape(-1)[ti_flat] = v_mix_i
+    # warped interstitial for the NEXT iteration, from the MIXED grid, zero-mean over Θ_I so
+    # the interstitial-zero eigenvalue referencing is preserved
+    u = np.where(theta_i, v_grid_prev - float(v_mix_i.mean()), 0.0)
+    warp_state = (np.fft.fftn(u) / nfft**3, nfft)
 
-        span = float(ev_gamma[nbands - 1] - ev_gamma[0])
-        new = {"span": span, "ev": ev_gamma[:nbands].tolist(), "e_fermi": e_fermi}
-        d_span = abs(new["span"] - conv["span"]) if conv is not None else float("inf")
+    span = float(ev_gamma[nbands - 1] - ev_gamma[0])
+    new = {"span": span, "ev": ev_gamma[:nbands].tolist(), "e_fermi": e_fermi}
+    d_span = abs(new["span"] - conv["span"]) if conv is not None else float("inf")
+    if verbose:
+        sd = f"{sym_dev:.1e}" if atom_orbits is not None else "-"
+        rn = f"{r_nsph:.1e}" if fullpot else "-"
+        print(f"  flapw it={it:3d} span={span:9.4f} d={d_span:8.1e} r_v={r_sph:8.1e} "
+              f"r_nsph={rn} symdev={sd} "
+              f"[{'exact' if full_iter else 'subsp'}] {time.time() - t_it:5.1f}s",
+              flush=True)
+    recorder.record(it=it, span=span, d_span=(None if conv is None else d_span),
+                    r_v=r_sph, r_nsph=(r_nsph if fullpot else None),
+                    symmetry_dev=(sym_dev if atom_orbits is not None else None),
+                    e_fermi=e_fermi, mt_phase=mt_phase, exact_solve=full_iter,
+                    t_s=time.time() - t_it)
+    if mt_phase and ((full_iter and d_span < 3 * tol) or it >= max(20, iters // 2)):
+        mt_phase = False           # spherical loop settled (or capped) -> enable fullpot
         if verbose:
-            sd = f"{sym_dev:.1e}" if atom_orbits is not None else "-"
-            rn = f"{r_nsph:.1e}" if fullpot else "-"
-            print(f"  flapw it={it:3d} span={span:9.4f} d={d_span:8.1e} r_v={r_sph:8.1e} "
-                  f"r_nsph={rn} symdev={sd} "
-                  f"[{'exact' if full_iter else 'subsp'}] {time.time() - t_it:5.1f}s",
-                  flush=True)
-        recorder.record(it=it, span=span, d_span=(None if conv is None else d_span),
-                        r_v=r_sph, r_nsph=(r_nsph if fullpot else None),
-                        symmetry_dev=(sym_dev if atom_orbits is not None else None),
-                        e_fermi=e_fermi, mt_phase=mt_phase, exact_solve=full_iter,
-                        t_s=time.time() - t_it)
-        if mt_phase and ((full_iter and d_span < 3 * tol) or it >= max(20, iters // 2)):
-            mt_phase = False           # spherical loop settled (or capped) -> enable fullpot
-            if verbose:
-                print("  flapw: muffin-tin phase converged -> fullpot on", flush=True)
-        nsph_ok = (not fullpot) or (r_nsph < 0.05)
-        if conv is not None and full_iter and nsph_ok and d_span < tol and r_sph < 0.1:
-            conv = new
-            break
-        conv = new
+            print("  flapw: muffin-tin phase converged -> fullpot on", flush=True)
+    nsph_ok = (not fullpot) or (r_nsph < 0.05)
+    done = conv is not None and full_iter and nsph_ok and d_span < tol and r_sph < 0.1
 
-    info = {"nbands": nbands, "symbols": syms, "e_fermi": conv.get("e_fermi"),
-            "v_by_key": {k: v_by_key[k].numpy().copy() for k in keys}}
-    # complete fixed-point state (pass back as v_start={"__full_state__": ...})
-    info["state"] = {
-        "v_by_key": {k: v_by_key[k].numpy().copy() for k in keys},
-        "v_nsph": None if v_nsph is None else
+    # write back the evolved state (rebound locals) + the last-iteration outputs
+    st.mt_phase, st.conv, st.hist = mt_phase, new, hist
+    st.v_nsph, st.vns_new, st.r_nsph = v_nsph, vns_new, r_nsph
+    st.warp_state, st.v_grid_prev, st.v_i0_prev = warp_state, v_grid_prev, v_i0_prev
+    st.kdata, st.occ_by_k, st.lodat = kdata, occ_by_k, lodat
+    st.El_by_key, st.vmt_by_key, st.nb_solve = El_by_key, vmt_by_key, nb_solve
+    st.rho_I, st.spheres, st.rho_2m = rho_I, spheres, rho_2m
+    st.v_grid, st.vbc_own = v_grid, vbc_own
+    st.sym_dev = sym_dev if atom_orbits is not None else None
+    return done
+
+
+def _full_state(ctx: _MultiCtx, st: _MultiState) -> dict:
+    """The complete fixed-point state dict (``info["state"]``; pass back as
+    ``v_start={"__full_state__": ...}``)."""
+    return {
+        "v_by_key": {k: st.v_by_key[k].numpy().copy() for k in ctx.keys},
+        "v_nsph": None if st.v_nsph is None else
             {k: {lm: np.asarray(v).copy() for lm, v in d.items()}
-             for k, d in v_nsph.items()},
-        "v_grid": None if v_grid_prev is None else v_grid_prev.copy(),
-        "v_i0": v_i0_prev,
+             for k, d in st.v_nsph.items()},
+        "v_grid": None if st.v_grid_prev is None else st.v_grid_prev.copy(),
+        "v_i0": st.v_i0_prev,
     }
-    info["recorder"] = recorder
-    if atom_orbits is not None:
+
+
+def _multi_finalize(ctx: _MultiCtx, st: _MultiState, efg: bool = False):
+    """Build ``crystal_scf_multi``'s ``(bands, info)`` return from the final state — the
+    result summary, the full fixed-point state, and (opt-in) the EFG diagnostic pass."""
+    conv = st.conv
+    info = {"nbands": ctx.nbands, "symbols": ctx.syms, "e_fermi": conv.get("e_fermi"),
+            "v_by_key": {k: st.v_by_key[k].numpy().copy() for k in ctx.keys}}
+    # complete fixed-point state (pass back as v_start={"__full_state__": ...})
+    info["state"] = _full_state(ctx, st)
+    info["recorder"] = st.recorder
+    if ctx.atom_orbits is not None:
         # relative asymmetry of the RAW final-iteration density across symmetry-equivalent atoms
         # (and, for fullpot, the star-unfolding projector residual). Near convergence this should
         # be small; an order-unity value means the wedge sum sits in a symmetry-broken state —
         # multistable SCF basin or a symmetry bug. Surfaced so it can never fail silently.
-        info["symmetry_dev"] = sym_dev
+        info["symmetry_dev"] = st.sym_dev
     if efg:
-        if not fullpot or mt_phase:
+        rho_2m, v_grid, vbc_own = st.rho_2m, st.v_grid, st.vbc_own
+        if not ctx.fullpot or st.mt_phase:
             # Build the aspherical density once from the converged wavefunctions. On an IBZ run the
             # reduced k-sum misses the star of each k, so the l=2 multipoles are star-unfolded with
             # the Wigner-D group average (_symmetrize_rho_lm) — no full-mesh re-solve needed. Then
             # recompute the interstitial potential with the l=2 Weinert pseudocharge (lattice term).
-            rho_2m = _efg_density_pass(kdata, occ_by_k, keys, acart, El_by_key, vmt_by_key,
-                                       R_by_key, rr_by_key, lmax, r, dx, nb_solve, lodat=lodat)
-            if d_ops is not None:
-                rho_2m = _symmetrize_rho_lm(rho_2m, keys, sg, d_ops)
-            for ai, k in enumerate(keys):
-                spheres[ai]["rho_2m"] = rho_2m[k]
-            _, _, v_grid, vbc_own = _weinert_multi(rho_I, spheres, A, nfft)
-        info["efg"] = _efg_from_multipoles(rho_2m, v_grid, acart, keys, R_by_key, rr_by_key,
-                                           dx, A, vbc_own=vbc_own)
+            rho_2m = _efg_density_pass(st.kdata, st.occ_by_k, ctx.keys, ctx.acart,
+                                       st.El_by_key, st.vmt_by_key, ctx.R_by_key,
+                                       ctx.rr_by_key, ctx.lmax, ctx.r, ctx.dx, st.nb_solve,
+                                       lodat=st.lodat)
+            if ctx.d_ops is not None:
+                rho_2m = _symmetrize_rho_lm(rho_2m, ctx.keys, ctx.sg, ctx.d_ops)
+            for ai, k in enumerate(ctx.keys):
+                st.spheres[ai]["rho_2m"] = rho_2m[k]
+            _, _, v_grid, vbc_own = _weinert_multi(st.rho_I, st.spheres, ctx.A, ctx.nfft)
+        info["efg"] = _efg_from_multipoles(rho_2m, v_grid, ctx.acart, ctx.keys, ctx.R_by_key,
+                                           ctx.rr_by_key, ctx.dx, ctx.A, vbc_own=vbc_own)
     return conv, info
+
+
+def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax: int = 2,
+                      iters: int = 40, tol: float = 3e-3, kmesh=(1, 1, 1), smearing: float = 0.0,
+                      efg: bool = False, fullpot: bool = False, use_symmetry: bool = True,
+                      fullpot_lmax: int = 2, los=None, val_e=None, core=None, el_override=None,
+                      v_start=None, kworkers: int = 1, subspace_reuse: bool = False,
+                      subspace_tol: float = 1e-5, cell=None, kerker: float | None = None,
+                      verbose: bool = False):
+    """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
+
+    ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
+    ``atoms`` = ``[(frac (3,), symbol), ...]``; ``radii`` = ``{symbol: R_MT}``. Each atom gets its
+    own sphere potential (so inequivalent same-species atoms are handled). Returns
+    ``(bands, info)`` with ``bands['ev']`` the Γ valence eigenvalues (eV, referenced to the
+    interstitial zero — compare splittings, not absolute levels; see ``crystal_scf``).
+
+    ``smearing`` (eV) > 0 enables Fermi-Dirac occupations for metals: extra conduction bands are
+    solved, the Fermi level is found by charge conservation over the k-mesh, and the density uses
+    fractional occupations (``info['e_fermi']`` is returned). ``smearing=0`` fills exactly
+    ``N_val/2`` bands two-per-state (insulators). ``a_bohr`` may be a scalar (cubic edge), a
+    length-3 vector (orthorhombic edges), or a 3×3 matrix (triclinic cell, rows = lattice
+    vectors), all in Bohr.
+
+    ``fullpot=True`` runs the self-consistent full-potential loop: each iteration computes the
+    non-spherical sphere potential (on-site Hartree + XC + the inter-atomic lattice field) from the
+    aspherical density for every ``(L,M)`` with ``1 ≤ L ≤ fullpot_lmax``, and feeds it back into the
+    Hamiltonian, so the wavefunctions respond to the non-spherical field. ``fullpot_lmax`` should be
+    checked for convergence (odd L are included — a site without inversion symmetry has L=1,3
+    components that polarize the valence). ``fullpot=False`` is the muffin-tin scheme.
+
+    ``use_symmetry`` (default True) reduces the k-mesh to the irreducible wedge and resymmetrizes
+    the density each iteration to restore the full-BZ symmetry the reduced sum drops — the
+    interstitial density in G-space (``RhoSymmetrizer``), the muffin-tin density by averaging
+    symmetry-equivalent atoms, and the aspherical multipoles by the Wigner-D group average
+    (``_symmetrize_rho_lm`` — the l>0 star-unfolding, so ``fullpot`` and the EFG run on the wedge
+    too). Falls back to the full mesh if the space group can't be built.
+
+    ``los`` = ``{symbol: [(l, spec), ...]}`` adds LAPW+LO local orbitals per species — confined
+    ``φ = a·u(E_l)+b·u̇(E_l)+c·u(E₂)`` with ``φ(R)=φ'(R)=0`` — for semicore states (Ti 3s/3p) or
+    extra radial freedom. ``spec`` is an atomic orbital label ("3s") or an absolute energy (eV).
+    When an LO carries semicore electrons, raise that species' valence count with
+    ``val_e = {symbol: n}`` and drop the state from the frozen core with ``core = {symbol: [...]}``
+    (both override the module defaults) — the LO does not change electron bookkeeping by itself.
+    ``el_override = {symbol: {l: spec}}`` moves an energy parameter (e.g. Ti l=1 into the valence
+    region once a 3p LO carries the semicore).
+
+    ``v_start`` = ``{key: radial potential array}`` warm-starts the SCF from a previous run's
+    converged spherical potentials (returned as ``info["v_by_key"]``) instead of the atomic ones —
+    a convergence-sweep point then starts nearly converged (~2-3x fewer iterations).
+    ``kerker`` (Å⁻¹, default None=off) screens the interstitial residual by G²/(G²+kerker²)
+    inside the joint Anderson — the measured cure for the long-wavelength interstitial
+    sloshing instability of hard fullpot configs (see the DMD note at kerker_K below).
+
+    Alternatively ``v_start = {"__full_state__": info["state"]}`` restores the COMPLETE
+    fixed-point state of a fullpot run — spherical + aspherical potentials, interstitial grid
+    and reference — so the resumed run continues the coupled fullpot iteration exactly (the
+    plain per-key form silently restarts the aspherical channel from zero). Every run returns
+    its final full state as ``info["state"]``.
+
+    ``kworkers > 1`` solves the k-points of each iteration in a process pool (each k's secular
+    build+solve is independent). Results are accumulated in mesh order, so the density is identical
+    to the serial run. Divide the BLAS threads accordingly (e.g. ``OMP_NUM_THREADS=3`` with
+    ``kworkers=6`` on ~20 cores) — the pool multiplies whatever thread count each worker uses.
+    The workers are spawned (fork inherits live BLAS state and computes wrong numbers), so the
+    CALLING script must be import-safe: guard its executable body with ``if __name__ ==
+    "__main__":`` or the workers re-run it on import.
+
+    ``subspace_reuse`` (default True) solves most iterations by Rayleigh-Ritz in the previous
+    iteration's eigenvector subspace (residual-gated, exact-solve fallback); every 5th iteration
+    is a forced exact solve and convergence is only accepted on exact-solve iterations, so the
+    reported state never rests on a projected solve.
+
+    Internally this is ``_multi_setup`` (state-independent context) + ``_multi_init_state`` +
+    a loop over ``_multi_iterate`` (the fixed-point map) + ``_multi_finalize`` — split so the
+    Newton polish (``flapw.newton``) can pay the setup once and call the map directly."""
+    ctx = _multi_setup(a_bohr=a_bohr, atoms=atoms, radii=radii, ecut=ecut, lmax=lmax,
+                       kmesh=kmesh, smearing=smearing, fullpot=fullpot,
+                       use_symmetry=use_symmetry, fullpot_lmax=fullpot_lmax, los=los,
+                       val_e=val_e, core=core, el_override=el_override, kworkers=kworkers,
+                       subspace_reuse=subspace_reuse, subspace_tol=subspace_tol, cell=cell,
+                       kerker=kerker, verbose=verbose)
+    st = _multi_init_state(ctx, v_start)
+    for it in range(iters):
+        if _multi_iterate(ctx, st, it, iters=iters, tol=tol):
+            break
+    return _multi_finalize(ctx, st, efg=efg)
 
 
 def _symmetrize_rho_lm(rho_2m, keys, sg, d_ops):

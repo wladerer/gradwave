@@ -16,8 +16,10 @@ F is one damped SCF iteration chained through the full state (``__full_state__``
 so this needs no new physics: Newton solves R(x) = F(x) − x = 0 matrix-free with
 finite-difference directional derivatives (each JVP = one F evaluation; an autograd JVP
 would be exact and cheaper — planned once the residual map is torch-clean end to end).
-Each F call currently re-runs the geometry/basis setup; hoisting that is the next
-optimization, not a correctness matter.
+The geometry/basis setup (atomic solves, space group, Θ_I mask) is paid ONCE per polish:
+F calls the hoisted iterate phase (``scf._multi_iterate``) on a shared ``scf._multi_setup``
+context instead of re-running ``crystal_scf_multi`` end to end — same map, bit-identical
+values, with the per-evaluation setup cost removed.
 
 Determinism: F must be deterministic for FD JVPs to be meaningful — keep ``kworkers``
 modest (the pool accumulates in mesh order, so it is bit-stable) and do not enable
@@ -31,7 +33,12 @@ from typing import Any
 import numpy as np
 
 from gradwave.flapw.recorder import FLAPWRecorder
-from gradwave.flapw.scf import crystal_scf_multi
+from gradwave.flapw.scf import (
+    _full_state,
+    _multi_init_state,
+    _multi_iterate,
+    _multi_setup,
+)
 
 __all__ = ["StateLayout", "anderson_stalled", "newton_polish"]
 
@@ -148,6 +155,13 @@ def newton_polish(a_bohr: Any, atoms: Any, radii: dict[str, float], state: State
     kw.pop("tol", None)
     kw.pop("v_start", None)
     kw.setdefault("subspace_reuse", False)
+    # F consumes only info["state"]; efg is a post-loop diagnostic that cannot change the
+    # state, so it is dropped rather than recomputed ~30 times.
+    kw.pop("efg", None)
+    # Fast path: pay the state-independent setup (atomic solves, space group, Θ_I mask, …)
+    # ONCE, then each F evaluation is init-state + one iterate on the shared context —
+    # bit-identical to a full crystal_scf_multi(iters=1, v_start={"__full_state__": ...}).
+    ctx = _multi_setup(a_bohr=a_bohr, atoms=atoms, radii=radii, **kw)
     lay = StateLayout(state)
     x0 = lay.flatten(state)
     n_evals = 0
@@ -155,9 +169,9 @@ def newton_polish(a_bohr: Any, atoms: Any, radii: dict[str, float], state: State
     def F(x: np.ndarray) -> np.ndarray:
         nonlocal n_evals
         n_evals += 1
-        _, ii = crystal_scf_multi(a_bohr, atoms, radii, iters=1, tol=0.0,
-                                  v_start={"__full_state__": lay.unflatten(x, state)}, **kw)
-        return lay.flatten(ii["state"])
+        st = _multi_init_state(ctx, {"__full_state__": lay.unflatten(x, state)})
+        _multi_iterate(ctx, st, 0, iters=1, tol=0.0)
+        return lay.flatten(_full_state(ctx, st))
 
     def residual(x: np.ndarray) -> np.ndarray:
         return F(x) - x
