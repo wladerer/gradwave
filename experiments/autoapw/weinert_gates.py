@@ -108,7 +108,7 @@ def bench_rho_i(nfft, R=0.824, lmax=4):
     from gradwave.flapw.coulomb import reciprocal
     r, dx = log_mesh(1e-5, 28.0, 2500)
     r_np = r.numpy()
-    sp = sphere(R, [CELL / 2] * 3, {(1, 0): 0.0}, r_np, dx, z=0.0)
+    sp = sphere(R, [CELL / 2] * 3, {(L, 0): 0.0 for L in range(1, lmax + 1)}, r_np, dx, z=0.0)
     a = cell_matrix(CELL)
     b = reciprocal(a)
     g1 = b[0] + 2 * b[1] + b[2]
@@ -215,6 +215,7 @@ def bench_npow(nfft=64, R=0.824, lmax=6):
         if M:
             qref[(L, -M)] = (-1) ** M * np.conj(qref[(L, M)])
     policies = {"flat2": {L: 2 for L in range(lmax + 1)},
+                "flat3": {L: 3 for L in range(lmax + 1)},
                 "flat4": {L: 4 for L in range(lmax + 1)},
                 "flat6": {L: 6 for L in range(lmax + 1)},
                 "elk9": {L: max(1, 9 - L - 1) for L in range(lmax + 1)},

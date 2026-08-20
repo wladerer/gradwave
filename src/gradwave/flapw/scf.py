@@ -808,7 +808,11 @@ def _weinert_multi(rho_I, spheres, L, nfft):
                 big_ls.append(bl)
         q_i = sphere_interstitial_moments(rho_g, sp["R"], sp["tau"], gvec, gnorm, ylm, big_ls)
         deficit = {lm: qmt[lm] - q_i[lm] for lm in qmt}
-        npow = int(np.clip(round(sp["R"] * gmax / 4.0), 2, 12))
+        # Order policy: Weinert's npow ≈ R·Gmax/4 assumes the asymptotic (GR)^-(npow+2) decay
+        # regime; at this code's bandwidths (R·Gmax ~ 12-24) the measured own-surface residual
+        # (weinert_gates.py stage N) is minimized by LOWER orders — a high npow concentrates
+        # the shape and pushes spectral weight past Nyquist before the asymptotic decay pays.
+        npow = int(np.clip(round(sp["R"] * gmax / 6.0), 2, 8))
         ps_g += sphere_pseudocharge_ft(deficit, sp["R"], sp["tau"], vol, npow,
                                        gvec, gnorm, ylm)
         qmt_list.append(qmt)
