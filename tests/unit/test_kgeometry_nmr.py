@@ -271,7 +271,7 @@ def test_lamb_prefactor_synthetic():
     assert abs(float(cols[0, 1])) < 1e-8 * lamb
 
 
-@pytest.mark.standard
+@pytest.mark.slow
 def test_sigma_cubic_isotropy():
     # Full bare shielding tensor on a (2,2,2) Γ-centered mesh: the cubic
     # (T_d site) symmetry demands an isotropic tensor — measured off-diag
@@ -302,7 +302,7 @@ def test_sigma_cubic_isotropy():
         assert spread < 1e-6 * abs(iso)  # measured ~4e-13 rel
 
 
-@pytest.mark.standard
+@pytest.mark.slow
 def test_sigma_q_linearity_and_underdetermined():
     # q-linearity of the antisymmetric extraction: the single-axis shielding
     # column on a (4,1,1) TR=False mesh drifts by 4.8% between q = b/4 and
@@ -352,3 +352,34 @@ def test_sigma_q_linearity_and_underdetermined():
 
     with pytest.raises(ValueError, match="underdetermined"):
         sigma_shielding(res)
+
+
+@pytest.mark.standard
+def test_sigma_driver_small(si_mesh):
+    # End-to-end sigma_shielding driver at deliberately small scale
+    # ((2,2,1) mesh, 6 Ry, loose CG): finite tensor, and the residual
+    # x↔y mirror symmetry of the anisotropic mesh holds (σ_xx = σ_yy,
+    # zero xz/yz blocks, symmetric xy) — measured to display precision;
+    # the full cubic isotropy at (2,2,2) is the slow-tier test. The
+    # single-axis si_mesh cannot determine the tensor: ValueError.
+    from gradwave.postscf.kgeometry_nmr import sigma_shielding
+
+    torch.set_num_threads(2)
+    cell, pos = si_fcc()
+    system = setup_system(cell, pos, [0, 0], [si_upf()], ecut=6 * RY,
+                          kmesh=(2, 2, 1), nbands=8, use_symmetry=False,
+                          fft_shape=(15, 15, 15))
+    res = scf(system, PBE(), etol=1e-8, rhotol=1e-7, verbose=False, max_iter=80)
+    assert res.converged
+    sig = sigma_shielding(res, cg_tol=1e-6, nl_quad=3)
+    assert sig.shape == (2, 3, 3)
+    assert torch.isfinite(sig).all()
+    scale = float(sig.abs().max())
+    for s in range(2):
+        assert abs(float(sig[s, 0, 0] - sig[s, 1, 1])) < 1e-3 * scale
+        assert float(sig[s, 0, 2].abs() + sig[s, 1, 2].abs()
+                     + sig[s, 2, 0].abs() + sig[s, 2, 1].abs()) < 1e-3 * scale
+        assert abs(float(sig[s, 0, 1] - sig[s, 1, 0])) < 1e-3 * scale
+
+    with pytest.raises(ValueError, match="underdetermined"):
+        sigma_shielding(si_mesh)
