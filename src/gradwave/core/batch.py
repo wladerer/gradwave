@@ -123,8 +123,15 @@ class BatchedK:
     dij_full: torch.Tensor  # (nproj, nproj)
     # Toeplitz difference-index tables keyed by dense-grid shape, filled
     # lazily by BatchedHamiltonian._toeplitz_idx (geometry-only, so shared
-    # across the per-iteration Hamiltonian rebuilds of one SCF)
-    toep_idx_cache: dict[tuple[int, int, int], torch.Tensor] | None = None
+    # across the per-iteration Hamiltonian rebuilds of one SCF). Each entry
+    # stores (flat_idx it was built from, table): a BatchedK derived via
+    # dataclasses.replace with a different flat_idx (e.g. the k+q reindex in
+    # postscf/dfpt_q) inherits this dict, and a table built for the parent's
+    # spheres is silently wrong physics on the derived one — the consumer
+    # revalidates before trusting a hit.
+    toep_idx_cache: (
+        dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor]] | None
+    ) = None
 
     @property
     def nk(self) -> int:
@@ -317,14 +324,30 @@ class BatchedHamiltonian:
         Geometry-only (Miller indices are fixed for the whole SCF), so it is
         built at most once per BatchedK and shared across the per-iteration
         Hamiltonian rebuilds — the old per-ctor build cost ~one FFT apply per
-        iteration for nothing."""
+        iteration for nothing.
+
+        A cache hit is trusted only if it was built from THIS operator's
+        gather_idx: a derived BatchedK (dataclasses.replace with a new
+        flat_idx — the k+q reindex in postscf/dfpt_q) shares the parent's
+        dict, and a foreign table is silently wrong physics (the Sternheimer
+        CG then diverges to NaN). The O(nk·npw) equality check is noise next
+        to the O(nk·npw²) table build; the identity fast path covers the
+        rebuild-per-iteration case."""
         if self._toep_idx is None:
             if self.bk.toep_idx_cache is None:
                 self.bk.toep_idx_cache = {}
-            idx = self.bk.toep_idx_cache.get(self.shape)
+            gather = self.gather_idx
+            idx: torch.Tensor | None = None
+            hit = self.bk.toep_idx_cache.get(self.shape)
+            if hit is not None:
+                src, cached = hit
+                if src is gather or (
+                    src.shape == gather.shape and bool(torch.equal(src, gather))
+                ):
+                    idx = cached
             if idx is None:
                 idx = self._build_toeplitz_index()
-                self.bk.toep_idx_cache[self.shape] = idx
+                self.bk.toep_idx_cache[self.shape] = (gather, idx)
             self._toep_idx = idx
         return self._toep_idx
 

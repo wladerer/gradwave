@@ -170,3 +170,38 @@ def test_uspp_dual_grid_not_eligible(smooth_shape):
     h = BatchedHamiltonian(bk, shape, v_eff, projs,
                            smooth=(smooth_shape, flat, v_smooth))
     assert not h._toep_eligible
+
+
+def test_reindexed_bk_never_reuses_foreign_idx_table():
+    """A BatchedK derived by dataclasses.replace with a different flat_idx (the
+    k+q reindex in postscf/dfpt_q) must not apply the parent's difference-index
+    table: it encodes the PARENT's spheres, so reusing it is silently wrong
+    physics — the CI-caught failure mode was the q≠0 Sternheimer CG diverging
+    to NaN whenever the preceding SCF's timing trial had populated the cache.
+    Two layers under test: _reindex_bk drops the cache outright, and
+    _toeplitz_idx revalidates a hit against its own gather_idx even when a
+    sharing site hands it a foreign dict."""
+    from gradwave.postscf.dfpt_q import _reindex_bk
+
+    system = _si_system()
+    h, bk = _random_veff_H(system)
+    nk, npw = bk.mask.shape
+    torch.manual_seed(4)
+    c = torch.randn(nk, 8, npw, dtype=CDTYPE)
+    h.apply(c)  # populates bk.toep_idx_cache for this grid shape
+
+    perm = torch.arange(nk - 1, -1, -1)  # reversed k order: rows all move
+    bk_r = _reindex_bk(bk, perm)
+    assert bk_r.toep_idx_cache is None  # layer 1: the reindex drops the cache
+    assert not torch.equal(bk_r.flat_idx, bk.flat_idx)  # rows really differ
+
+    # layer 2: even a sharing site (the parent's dict re-attached) must not
+    # let the reindexed operator trust the parent's table
+    bk_r.toep_idx_cache = bk.toep_idx_cache
+    h_r = BatchedHamiltonian(bk_r, system.grid.shape, h.v_eff_r,
+                             projectors_b(bk_r, system.positions))
+    out_toep = h_r.apply(c)
+    h_r._toep_eligible = False  # force the FFT path on the same operator
+    out_fft = h_r.apply(c)
+    assert torch.allclose(out_toep, out_fft, atol=1e-12, rtol=0), \
+        f"max|Δ|={(out_toep - out_fft).abs().max().item():.2e}"
