@@ -4,6 +4,15 @@
 - ``fft_poisson`` — the periodic interstitial Poisson ``V_H(G) = 4π E2 ρ(G)/|G|²`` on a cubic grid.
 - ``sphere_pseudocharge`` — a smooth l=0 pseudocharge with a prescribed monopole (Weinert's trick:
   the exterior potential depends only on the multipole moment, not the interior shape).
+- ``gvec_ylm_tables`` / ``sphere_interstitial_moments`` / ``sphere_pseudocharge_ft`` — the general-L
+  Weinert machinery, entirely in G-space: analytic in-sphere multipole moments of a band-limited
+  density (Bessel projection, exact for the Fourier series) and the analytic Fourier synthesis of
+  the smooth moment-matched pseudocharge ``r^L (1-(r/R)²)^N Y_LM``. No real-space sampling anywhere,
+  so there is no grid aliasing: the pseudocharge's moments are exact up to Fourier truncation, and
+  the own-sphere multipole field can be subtracted ANALYTICALLY from the sphere-boundary values
+  (Elk ``zpotcoul``'s ``z1 = (zlm − zvclmt(R))/R^l`` homogeneous-solution construction). The
+  earlier real-space-sampled per-M pseudocharge (Gram-corrected grid moments) left a ~20%
+  own-field residue from sampling aliasing that fed a runaway aspherical fixed point.
 - ``radial_poisson_to_R`` — the l=0 sphere radial Poisson with a Dirichlet boundary at R_MT.
 
 Together these solve the periodic FLAPW Coulomb: replace each sharp muffin-tin charge by a smooth
@@ -114,74 +123,91 @@ def sphere_pseudocharge(q00: float, R: float, center, n: int, L, npow: int = 4) 
     return shape * (q00 / norm)
 
 
-def _min_image_vec(cfrac, n, A):
-    """The Cartesian minimum-image displacement vector (n,n,n,3) from fractional centre ``cfrac`` to
-    each ``n³`` grid point — the vector form of ``_min_image_dist`` (needed for angular shapes)."""
-    fi = np.arange(n) / n
-    fx, fy, fz = np.meshgrid(fi, fi, fi, indexing="ij")
-    df = np.stack([fx - cfrac[0], fy - cfrac[1], fz - cfrac[2]], axis=-1)
-    df -= np.round(df)
-    metric = A @ A.T
-    if np.allclose(metric - np.diag(np.diag(metric)), 0.0):
-        return df @ A
-    disp = (df @ A)
-    best = (disp ** 2).sum(-1)
-    for s in itertools.product((-1, 0, 1), repeat=3):
-        if s == (0, 0, 0):
-            continue
-        rc = (df + np.asarray(s)) @ A
-        d2 = (rc ** 2).sum(-1)
-        m = d2 < best
-        disp = np.where(m[..., None], rc, disp)
-        best = np.minimum(best, d2)
-    return disp
+def _dfact(n: int) -> float:
+    """Odd double factorial ``n!!`` (``n ≥ -1``; ``(-1)!! = 1``)."""
+    return float(math.prod(range(n, 0, -2))) if n > 0 else 1.0
 
 
-def sphere_pseudocharge_lm(qlm, R: float, center, n: int, L, big_l: int,
-                           npow: int = 4, geom=None) -> np.ndarray:
-    """Smooth angular-momentum-``big_l`` pseudocharge on the grid matching the sphere's charge
-    moments ``qlm = {M: Q_LM}`` (M=-L..L): ``ρ̃(r,Ω) = Σ_M c_M d^L (1-(d/R)²)^npow Y_LM(Ω)`` with
-    ``c_M = Q_LM / (R^{2L+3} ∫_0^1 x^{2L+2}(1-x²)^npow dx)`` so its L-moment ``∫ρ̃ r^{L+2} Y*`` is
-    ``Q_LM``. This is the general-L part of Weinert's pseudocharge: matching every multipole in play
-    (not just the monopole) makes the interstitial FFT potential carry each sphere's full exterior
-    multipole field — the inter-atomic (lattice) terms of the aspherical potential and the EFG.
+_GTAB_CACHE: dict = {}
 
-    ``geom`` = precomputed ``(d, theta, phi)`` grids for this centre (a caller placing several
-    L-components on the same sphere shares one min-image evaluation); the harmonics are evaluated
-    only on the in-sphere points (the pseudocharge's support, a few % of the grid)."""
+
+def gvec_ylm_tables(cell, n: int, lmax: int):
+    """Flattened G-vector table of the ``n³`` FFT grid with harmonics: ``(gvec (n³,3), gnorm (n³,),
+    ylm {(L,M): Y_LM(Ĝ) (n³,)})`` for ``L ≤ lmax`` — the shared geometry of the G-space Weinert
+    machinery (``sphere_interstitial_moments`` / ``sphere_pseudocharge_ft``). Cached per
+    (cell, n, lmax), 2-entry LRU (a few tens of MB at production sizes)."""
+    a = cell_matrix(cell)
+    key = (a.tobytes(), n, lmax)
+    hit = _GTAB_CACHE.get(key)
+    if hit is not None:
+        return hit
     from scipy.special import sph_harm_y
-    if geom is None:
-        a = cell_matrix(L)
-        disp = _min_image_vec(np.asarray(center) @ np.linalg.inv(a), n, a)
-        d = np.linalg.norm(disp, axis=-1)
-        ds = np.where(d < 1e-12, 1.0, d)
-        theta = np.arccos(np.clip(disp[..., 2] / ds, -1.0, 1.0))
-        phi = np.arctan2(disp[..., 1], disp[..., 0])
-    else:
-        d, theta, phi = geom
-    inside = d < R
-    din, thin, phin = d[inside], theta[inside], phi[inside]
-    radial_in = din**big_l * (1 - (din / R) ** 2) ** npow
-    ylm = np.stack([sph_harm_y(big_l, m, thin, phin) for m in range(-big_l, big_l + 1)],
-                   axis=1)                                # (npts, 2L+1)
-    a_cell = cell_matrix(L)
-    dvol = float(abs(np.linalg.det(a_cell))) / n**3
-    # Gram solve on the ACTUAL grid: demand the pseudocharge's measured grid moments equal Q_LM.
-    # The analytic normalization assumed continuum angular orthogonality; on the coarse FFT grid
-    # the sampled moments differ by 10-20%, which broke the own-field cancellation in the lattice
-    # term C_LM and fed a runaway aspherical fixed point (verified: a single atom carried a
-    # 20%-of-V_zz "lattice" term that must vanish). G[m',m] = Σ w·conj(Y_m')·Y_m with the moment
-    # weight w = radial·d^L·dvol; solving G c = q makes the same-L grid moments exact.
-    w = radial_in * din**big_l * dvol
-    gram = ylm.conj().T @ (w[:, None] * ylm)
-    q = np.array([qlm[m] for m in range(-big_l, big_l + 1)], dtype=complex)
-    try:
-        c = np.linalg.solve(gram, q)
-    except np.linalg.LinAlgError:                        # sphere barely resolved on the grid
-        c = np.linalg.lstsq(gram, q, rcond=None)[0]
-    acc = (ylm @ c * radial_in).real
-    out = np.zeros(d.shape)
-    out[inside] = acc
+    b = reciprocal(a)
+    fi = np.fft.fftfreq(n, d=1.0 / n)
+    mx, my, mz = np.meshgrid(fi, fi, fi, indexing="ij")
+    gvec = np.stack([mx * b[0, 0] + my * b[1, 0] + mz * b[2, 0],
+                     mx * b[0, 1] + my * b[1, 1] + mz * b[2, 1],
+                     mx * b[0, 2] + my * b[1, 2] + mz * b[2, 2]], axis=-1).reshape(-1, 3)
+    gnorm = np.linalg.norm(gvec, axis=-1)
+    gs = np.where(gnorm < 1e-12, 1.0, gnorm)
+    th = np.arccos(np.clip(gvec[:, 2] / gs, -1.0, 1.0))
+    ph = np.arctan2(gvec[:, 1], gvec[:, 0])
+    ylm = {(lang, m): sph_harm_y(lang, m, th, ph)
+           for lang in range(lmax + 1) for m in range(-lang, lang + 1)}
+    while len(_GTAB_CACHE) >= 2:
+        _GTAB_CACHE.pop(next(iter(_GTAB_CACHE)))
+    _GTAB_CACHE[key] = (gvec, gnorm, ylm)
+    return gvec, gnorm, ylm
+
+
+def sphere_interstitial_moments(rho_g, R: float, center, gvec, gnorm, ylm, big_ls):
+    """Analytic multipole moments ``q^I_LM = ∫_{r<R} ρ(τ+r) r^L Y*_LM(r̂) d³r`` of a band-limited
+    density about the sphere centre ``τ`` (Weinert / Elk ``zpotcoul``):
+
+        q^I_LM = 4π i^L R^{L+3} Σ_G [j_{L+1}(GR)/(GR)] ρ_G e^{iG·τ} Y*_LM(Ĝ),
+
+    with the G=0 term ``(4π/3)R³ρ₀Y₀₀δ_L0``. ``rho_g`` = flattened Fourier coefficients
+    (``fftn(ρ)/n³``). Exact for the Fourier series — replaces jagged in-sphere grid sums (whose
+    sampling error broke the own-field cancellation). Returns ``{(L,M): complex}``."""
+    from scipy.special import spherical_jn
+    x = gnorm * R
+    g0 = gnorm < 1e-12
+    xs = np.where(g0, 1.0, x)
+    z = rho_g * np.exp(1j * (gvec @ np.asarray(center, dtype=float)))
+    out = {}
+    for bl in big_ls:
+        rad = spherical_jn(bl + 1, x) / xs
+        rad[g0] = (1.0 / 3.0) if bl == 0 else 0.0          # lim j_{L+1}(x)/x = δ_L0/3
+        base = (4 * math.pi) * (1j ** bl) * R ** (bl + 3) * (z * rad)
+        for m in range(-bl, bl + 1):
+            out[(bl, m)] = complex(np.sum(base * np.conj(ylm[(bl, m)])))
+    return out
+
+
+def sphere_pseudocharge_ft(qlm, R: float, center, vol: float, npow: int, gvec, gnorm, ylm):
+    """Fourier coefficients (flattened, ``fftn/n³`` convention) of Weinert's smooth in-sphere
+    pseudocharge with prescribed multipole moments ``qlm = {(L,M): Q_LM}`` — the shape
+    ``Σ_LM c_LM (r/R)^L (1-(r/R)²)^npow Y_LM`` synthesized ANALYTICALLY in G-space:
+
+        ρ̃(G) = (4π/Ω) e^{-iG·τ} Σ_LM (-i)^L [(2L+2npow+3)!!/(2L+1)!!]
+                · j_{L+npow+1}(GR)/((GR)^{npow+1} R^L) · Q_LM Y_LM(Ĝ),
+
+    G=0 → ``√4π Q_00/Ω``. No real-space sampling → no grid aliasing; the pseudocharge's moments
+    equal ``Q_LM`` exactly up to the Fourier truncation of the grid, which decays as
+    ``(GR)^{-(npow+2)}`` — choose ``npow ≈ R·Gmax/4`` (Weinert) so the series has converged at the
+    grid's Nyquist edge."""
+    from scipy.special import spherical_jn
+    x = gnorm * R
+    g0 = gnorm < 1e-12
+    xs = np.where(g0, 1.0, x)
+    acc = np.zeros(gnorm.shape, dtype=complex)
+    for bl in sorted({lm[0] for lm in qlm}):
+        pref = ((-1j) ** bl) * _dfact(2 * bl + 2 * npow + 3) / (_dfact(2 * bl + 1) * R ** bl)
+        rad = spherical_jn(bl + npow + 1, x) / xs ** (npow + 1)
+        ang = sum(qlm.get((bl, m), 0.0) * ylm[(bl, m)] for m in range(-bl, bl + 1))
+        acc += pref * rad * ang
+    out = (4 * math.pi / vol) * np.exp(-1j * (gvec @ np.asarray(center, dtype=float))) * acc
+    out[g0] = math.sqrt(4 * math.pi) * complex(qlm.get((0, 0), 0.0)) / vol
     return out
 
 
