@@ -64,10 +64,24 @@ def bench_moments(nfft, R=0.824, lmax=6):
               + " ".join(f"L{L}={errs[L]:.1e}" for L in range(lmax + 1)), flush=True)
 
 
+def hermitian_moments(lmax):
+    """A real (physical) aspherical density's moments: q_{L,-M} = (-1)^M conj(q_{L,M})."""
+    out = {}
+    for L in range(1, lmax + 1):
+        M = min(L, 2)
+        q = 1.0 + (0.3j if M else 0.0)
+        out[(L, M)] = q
+        if M:
+            out[(L, -M)] = (-1) ** M * np.conj(q)
+    return out
+
+
 def bench_null(nfft, R=0.824, lmax=6):
+    """B1: lone sphere with real aspherical density, rho_I = 0 — the external boundary field
+    (v_bc - analytic own multipole field) must vanish for ALL (L,M)."""
     r, dx = log_mesh(1e-5, 28.0, 2500)
     r_np = r.numpy()
-    moments = {(L, min(L, 2)): 1.0 + (0.3j if L > 0 else 0) for L in range(1, lmax + 1)}
+    moments = hermitian_moments(lmax)
     sp = sphere(R, [CELL / 2] * 3, moments, r_np, dx, z=6.0)
     rho_I = np.zeros((nfft, nfft, nfft))
     _, _, _, v_hart, qmt = _weinert_multi(rho_I, [sp], CELL, nfft)
@@ -84,6 +98,56 @@ def bench_null(nfft, R=0.824, lmax=6):
         ref = abs(own) if abs(own) > 1e-12 else 1.0
         print(f"    L={L} M={M}: own={abs(own):9.3e}  resid={abs(res):9.3e}  "
               f"rel={abs(res)/ref:9.2e}", flush=True)
+
+
+def bench_rho_i(nfft, R=0.824, lmax=4):
+    """B2 (the retained-rho_I D2 case): EMPTY sphere immersed in a plane-wave interstitial
+    density. q^MT = 0, so the external boundary field must equal
+    [analytic plane-wave surface projection] - [multipole field of the pw's in-sphere moments
+    q^I] — the second term is exactly what the old chain retained (its D2 defect)."""
+    from gradwave.flapw.coulomb import reciprocal
+    r, dx = log_mesh(1e-5, 28.0, 2500)
+    r_np = r.numpy()
+    sp = sphere(R, [CELL / 2] * 3, {(1, 0): 0.0}, r_np, dx, z=0.0)
+    a = cell_matrix(CELL)
+    b = reciprocal(a)
+    g1 = b[0] + 2 * b[1] + b[2]
+    amp = 0.05
+    ax = np.arange(nfft) * (CELL / nfft)
+    X, Y, Z = np.meshgrid(ax, ax, ax, indexing="ij")
+    pts_all = np.stack([X, Y, Z], -1)
+    rho_I = amp * np.cos(pts_all @ g1)
+    _, _, _, v_hart, qmt = _weinert_multi(rho_I, [sp], CELL, nfft)
+    lset = [(L, M) for L in range(lmax + 1) for M in range(-L, L + 1)]
+    v_bc = interstitial_boundary_multi(v_hart, sp["tau"], R, cell_matrix(CELL), lset)
+    # analytic total pw potential on the surface, projected
+    from scipy.special import sph_harm_y
+    th, ph, wgt = _angular_grid(24, 36)
+    dirs = np.stack([np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)], -1)
+    pts = sp["tau"] + R * dirs.reshape(-1, 3)
+    vpw = 4 * math.pi * E2 * amp * np.cos(pts @ g1) / (g1 @ g1)
+    v_tot_lm = {lm: complex(np.sum(vpw.reshape(th.shape) * wgt
+                                   * np.conj(sph_harm_y(lm[0], lm[1], th, ph))))
+                for lm in lset}
+    # q^I of the pw inside R (analytic Bessel = exact for the band-limited density)
+    gvec, gnorm, ylm = gvec_ylm_tables(a, nfft, lmax)
+    rho_g = (np.fft.fftn(rho_I) / nfft**3).reshape(-1)
+    q_i = sphere_interstitial_moments(rho_g, R, sp["tau"], gvec, gnorm, ylm,
+                                      list(range(lmax + 1)))
+    own_i = own_field(q_i, R)
+    print(f"  nfft={nfft}: external field vs [pw analytic - own(q^I)] "
+          f"(old chain retained own(q^I)):", flush=True)
+    for L in range(lmax + 1):
+        for M in range(-L, L + 1):
+            ref = v_tot_lm[(L, M)] - own_i.get((L, M), 0.0)
+            num = v_bc[(L, M)]
+            d2_term = abs(own_i.get((L, M), 0.0))
+            if abs(ref) < 1e-8 and d2_term < 1e-8:
+                continue
+            scale = max(abs(ref), 1e-12)
+            print(f"    L={L}M{M:+d}: ext_num={num:.5e} ext_ref={ref:.5e} "
+                  f"rel={abs(num-ref)/scale:.2e}  [retained-rho_I term was {d2_term:.3e}]",
+                  flush=True)
 
 
 def bench_pair(nfft, lmax=6):
@@ -144,6 +208,10 @@ if __name__ == "__main__":
         print("\nB) isolated-sphere boundary null (D2 gate)", flush=True)
         for n in (32, 48, 64):
             bench_null(n)
+    if "B2" in stages:
+        print("\nB2) retained-rho_I external-field identity (D2 gate)", flush=True)
+        for n in (32, 48, 64):
+            bench_rho_i(n)
     if "C" in stages:
         print("\nC) near-touching rutile pair (D4 gate)", flush=True)
         for n in (48, 64, 80):
