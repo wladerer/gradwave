@@ -50,8 +50,11 @@ def d5_cfg():
         kworkers=env_int("D5", "KWORKERS", 5),
     )
     if env_int("D5", "LO", 1):
+        los = {"Ti": [(0, "3s"), (1, "3p")]}
+        if env_int("D5", "OLO", 1):                          # O 2s semicore LO (D5_OLO=0 to drop it)
+            los["O"] = [(0, "2s")]
         cfg.update(
-            los={"Ti": [(0, "3s"), (1, "3p")], "O": [(0, "2s")]},
+            los=los,
             core={"Ti": [(0, 1, 2), (0, 2, 2), (1, 1, 6)]},  # freeze only 1s,2s,2p (3s→valence)
             val_e={"Ti": 12},                                # 3s² 3p⁶ 3d² 4s²
             el_override={"Ti": {1: "3d"}},                   # l=1 param moved to the valence
