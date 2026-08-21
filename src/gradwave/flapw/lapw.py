@@ -457,7 +457,13 @@ def _si_block_fom(op, sop, seed, sigma, k, n_conv, tol_ev, max_basis):
             res = op(ymat) - ymat * theta[low][None, :]          # batched direct residual
             sres = sop(res)
             resn = np.sqrt(np.maximum(np.einsum("ij,ij->j", res.conj(), sres).real, 0.0))
-            if float((resn / np.maximum(theta[low] ** 2, 1e-300)).max()) < tol_ev:
+            worst = float((resn / np.maximum(theta[low] ** 2, 1e-300)).max())
+            import os
+            if os.environ.get("GW_SI_DEBUG"):
+                print(f"[si] processed={processed} cur={cur} worst_errev={worst:.2e} "
+                      f"theta[low]=[{theta[low].min():.2e},{theta[low].max():.2e}] "
+                      f"resn=[{resn.min():.2e},{resn.max():.2e}]", flush=True)
+            if worst < tol_ev:
                 idx = np.argsort(eps_all)[:min(k, processed)]
                 return eps_all[idx].real, bmat[:, :processed] @ z[:, idx]
     return None
