@@ -76,6 +76,12 @@ _VAL_E = {"He": 2, "Be": 2, "O": 6, "Ne": 8, "Ti": 10}  # valence electron count
 _VALENCE_NL = {"He": {0: "1s"}, "Be": {0: "2s"}, "O": {0: "2s", 1: "2p"},
                "Ne": {0: "2s", 1: "2p"}, "Ti": {0: "4s", 1: "3p", 2: "3d"}}
 
+# Local-orbital overlap conditioning: valence-orthogonalize an LO when the fraction of its norm
+# orthogonal to span{u, u̇} falls below this (its confined form is then near-linearly-dependent on
+# the valence APW and the extended overlap S goes singular — see _build_lo). Chosen to trip the
+# shallow O 2s semicore LO while leaving the deep, well-separated Ti 3s/3p LOs untouched.
+_LO_COND_TOL = 0.5
+
 
 def _ylm_star(l, ks):
     """conj(Y_lm(k̂)) for m=-l..l over all plane waves ``ks`` (npw,3) → ``(npw, 2l+1)``. Vectorized:
@@ -119,11 +125,24 @@ def _pair_integrals(l, f, g, rr, drw, dx, v_in):
     return float((f * g * drw).sum()), float(t), float((f * v_in * g * drw).sum())
 
 
-def _build_lo(l, e2, ch, u, ud, r, dx, v, R):
+def _build_lo(l, e2, ch, u, ud, r, dx, v, R, cond_tol=_LO_COND_TOL):
     """One confined local orbital ``φ = a·u(E_l) + b·u̇(E_l) + c·u(E₂)`` with ``φ(R)=φ'(R)=0``,
     normalized to ``∫φ²dr=1``. ``ch`` is the l-channel ``radial_channel`` dict (supplies the u/u̇
     boundary values); ``u, ud`` the matching ``_radial_u`` arrays. Returns the radial data + the
-    S/H integrals against (u, u̇) and itself that the LAPW+LO matrix blocks need."""
+    S/H integrals against (u, u̇) and itself that the LAPW+LO matrix blocks need.
+
+    Conditioning (``cond_tol`` > 0): a semicore ``E₂`` close to the valence linearization energy
+    makes the confined ``φ`` near-linearly-dependent on the valence ``span{u, u̇}`` inside the
+    sphere — its augmentation overlap row is then a near-copy of the plane-wave augmentation, so
+    the extended LAPW+LO overlap ``S`` goes near-singular and the canonical ``S^{-1/2}`` NaNs
+    (observed for the O 2s LO on rutile TiO₂; Ti 3s/3p sit deep enough to stay well-conditioned).
+    ``resid_frac`` = the fraction of ``‖φ‖`` orthogonal to ``span{u, u̇}`` measures exactly this
+    near-dependence (→0 degenerate, →1 orthogonal). When ``resid_frac < cond_tol`` the LO is
+    Löwdin-projected onto the valence complement (``⟨φ|u⟩=⟨φ|u̇⟩=0`` by construction, so its
+    ``S`` rows vanish and it re-enters the pencil as an orthonormal direction coupling only
+    through ``H``) and renormalized — it stays a full variational basis function (the semicore
+    radial's component beyond valence), it is not dropped. Well-conditioned LOs are left as the
+    boundary-confined ``φ(R)=φ'(R)=0`` form (``cond_tol=0`` disables the check entirely)."""
     r_np = r.numpy()
     inside = r_np <= R
     rr = r_np[inside]
@@ -139,6 +158,19 @@ def _build_lo(l, e2, ch, u, ud, r, dx, v, R):
     u2 = u2n[inside]
     phi = a * u + b * ud + u2
     nrm = math.sqrt(float((phi**2 * drw).sum()))
+    # near-linear-dependence probe: project the confined φ onto span{u, u̇} (Gram of the valence
+    # subspace = the radial-channel overlaps) and measure the orthogonal residual fraction.
+    s_pu_raw = float((phi * u * drw).sum())
+    s_pud_raw = float((phi * ud * drw).sum())
+    guu = np.array([[ch["uu"], ch["uud"]], [ch["uud"], ch["udud"]]])
+    p = np.linalg.solve(guu, np.array([s_pu_raw, s_pud_raw]))
+    phi_orth = phi - p[0] * u - p[1] * ud
+    nrm_orth = math.sqrt(float((phi_orth**2 * drw).sum()))
+    resid_frac = nrm_orth / nrm
+    orthogonalized = bool(cond_tol > 0.0 and resid_frac < cond_tol)
+    if orthogonalized:                                        # valence-orthogonalize the LO
+        a, b = a - p[0], b - p[1]                             # (u₂ coefficient unchanged)
+        phi, nrm = phi_orth, nrm_orth
     a, b, cn = float(a / nrm), float(b / nrm), float(1.0 / nrm)
     phi = phi / nrm
     v_in = v.numpy()[inside]
@@ -147,15 +179,17 @@ def _build_lo(l, e2, ch, u, ud, r, dx, v, R):
     _, t_pp, v_pp = _pair_integrals(l, phi, phi, rr, drw, dx, v_in)
     return {"l": l, "a": a, "b": b, "cn": cn, "u2": u2, "phi": phi,
             "S_pu": s_pu, "S_pud": s_pud, "H_pu": t_pu + v_pu, "H_pud": t_pud + v_pud,
-            "S_pp": 1.0, "H_pp": t_pp + v_pp}
+            "S_pp": 1.0, "H_pp": t_pp + v_pp,
+            "resid_frac": resid_frac, "orthogonalized": orthogonalized}
 
 
 def _build_lodat(los_by_key, chan, El_by_key, vmt_by_key, R_by_key, at_by_sym, key_sym, v0_by_key,
-                 r, dx):
+                 r, dx, cond_tol=_LO_COND_TOL):
     """Per-iteration local-orbital data: for each atom key, build every requested LO against the
     current sphere potential. ``los_by_key[key]`` = list of ``(l, spec)`` with ``spec`` an atomic
     orbital label ("3p") or an absolute atomic energy (eV); either is shifted by the current
-    muffin-tin zero like the energy parameters. One LO per (key, l)."""
+    muffin-tin zero like the energy parameters. One LO per (key, l). ``cond_tol`` sets the
+    overlap-conditioning threshold passed to ``_build_lo`` (see there)."""
     lodat = {}
     for key, los in los_by_key.items():
         seen = set()
@@ -167,7 +201,8 @@ def _build_lodat(los_by_key, chan, El_by_key, vmt_by_key, R_by_key, at_by_sym, k
             e2 = (at_by_sym[key_sym[key]][spec] if isinstance(spec, str) else float(spec))
             e2 = e2 - v0_by_key[key]
             u, ud = chan[key][l]["u_in"], chan[key][l]["ud_in"]   # reuse the channel's Numerov
-            out.append(_build_lo(l, e2, chan[key][l], u, ud, r, dx, vmt_by_key[key], R_by_key[key]))
+            out.append(_build_lo(l, e2, chan[key][l], u, ud, r, dx, vmt_by_key[key],
+                                 R_by_key[key], cond_tol=cond_tol))
         lodat[key] = out
     return lodat
 
@@ -979,6 +1014,7 @@ class _MultiCtx(NamedTuple):
     subspace_reuse: bool
     subspace_tol: float
     shift_invert: bool | str
+    lo_cond_tol: float
     verbose: bool
     # mutable per-run caches of potential-INDEPENDENT data (the NamedTuple itself stays
     # frozen): "geom" = per-k _k_geometry for the serial solve path (keyed by ik / "gamma"),
@@ -1031,7 +1067,8 @@ def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax:
                  use_symmetry: bool = True, fullpot_lmax: int = 2, los=None, val_e=None,
                  core=None, el_override=None, kworkers: int = 1, subspace_reuse: bool = False,
                  subspace_tol: float = 1e-4, cell=None, kerker: float | None = None,
-                 shift_invert: bool | str = "auto", verbose: bool = False) -> _MultiCtx:
+                 shift_invert: bool | str = "auto", lo_cond_tol: float = _LO_COND_TOL,
+                 verbose: bool = False) -> _MultiCtx:
     """The state-independent setup phase of ``crystal_scf_multi`` (see ``_MultiCtx``).
     Argument semantics and validation are exactly the public entry point's."""
     if (a_bohr is None) == (cell is None):
@@ -1134,7 +1171,7 @@ def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax:
                      ecut=ecut, smearing=smearing, fullpot=fullpot,
                      fullpot_lmax=fullpot_lmax, el_override=el_override, kworkers=kworkers,
                      subspace_reuse=subspace_reuse, subspace_tol=subspace_tol,
-                     shift_invert=shift_invert,
+                     shift_invert=shift_invert, lo_cond_tol=lo_cond_tol,
                      verbose=verbose, caches={"geom": {}, "ylm": {}})
 
 
@@ -1232,7 +1269,8 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
     chan = {key: radial_channels_all(lmax, sp["El"], r, dx, sp["v"], sp["R"])
             for key, sp in species.items()}
     lodat = (_build_lodat(los_by_key, chan, El_by_key, vmt_by_key, R_by_key, at_by_sym,
-                          key_sym, v0_by_key, r, dx) if los_by_key else None)
+                          key_sym, v0_by_key, r, dx, cond_tol=ctx.lo_cond_tol)
+             if los_by_key else None)
     # aspherical radial integrals are k-independent — build once per iteration, like chan.
     nsph_int = (_nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=lodat, chan=chan)
                 if v_nsph else None)
@@ -1610,7 +1648,8 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                       fullpot_lmax: int = 2, los=None, val_e=None, core=None, el_override=None,
                       v_start=None, kworkers: int = 1, subspace_reuse: bool = False,
                       subspace_tol: float = 1e-4, cell=None, kerker: float | None = None,
-                      shift_invert: bool | str = "auto", verbose: bool = False):
+                      shift_invert: bool | str = "auto", lo_cond_tol: float = _LO_COND_TOL,
+                      verbose: bool = False):
     """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
     ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
@@ -1647,7 +1686,12 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     ``val_e = {symbol: n}`` and drop the state from the frozen core with ``core = {symbol: [...]}``
     (both override the module defaults) — the LO does not change electron bookkeeping by itself.
     ``el_override = {symbol: {l: spec}}`` moves an energy parameter (e.g. Ti l=1 into the valence
-    region once a 3p LO carries the semicore).
+    region once a 3p LO carries the semicore). ``lo_cond_tol`` (default ``_LO_COND_TOL``) is the
+    overlap-conditioning threshold: an LO whose norm fraction orthogonal to its valence ``{u, u̇}``
+    subspace falls below it is Löwdin-orthogonalized against that subspace before entering the
+    secular problem, curing the near-linear-dependence that otherwise makes the extended overlap
+    ``S`` singular (the shallow O 2s semicore LO); deep, well-separated LOs (Ti 3s/3p) are
+    untouched. ``lo_cond_tol=0`` disables the conditioning entirely.
 
     ``v_start`` = ``{key: radial potential array}`` warm-starts the SCF from a previous run's
     converged spherical potentials (returned as ``info["v_by_key"]``) instead of the atomic ones —
@@ -1703,7 +1747,8 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                        use_symmetry=use_symmetry, fullpot_lmax=fullpot_lmax, los=los,
                        val_e=val_e, core=core, el_override=el_override, kworkers=kworkers,
                        subspace_reuse=subspace_reuse, subspace_tol=subspace_tol, cell=cell,
-                       kerker=kerker, shift_invert=shift_invert, verbose=verbose)
+                       kerker=kerker, shift_invert=shift_invert, lo_cond_tol=lo_cond_tol,
+                       verbose=verbose)
     st = _multi_init_state(ctx, v_start)
     for it in range(iters):
         if _multi_iterate(ctx, st, it, iters=iters, tol=tol):
