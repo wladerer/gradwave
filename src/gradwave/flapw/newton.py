@@ -38,6 +38,7 @@ from gradwave.flapw.scf import (
     _multi_init_state,
     _multi_iterate,
     _multi_setup,
+    _shutdown_ctx_pool,
 )
 
 __all__ = ["StateLayout", "anderson_stalled", "newton_polish"]
@@ -191,24 +192,27 @@ def newton_polish(a_bohr: Any, atoms: Any, radii: dict[str, float], state: State
     # different rdiff (the measured chaos means the step size is a dice roll, so
     # reroll it rather than repeating the same throw).
     rdiffs = [None, 1e-6, 3e-8, 1e-5, 1e-7]
-    best_x, best_r = x0, float(np.linalg.norm(residual(x0)))
-    converged, n_rounds = False, 0
-    for rd in rdiffs[:max(1, rounds)]:
-        n_rounds += 1
-        kw_rd = {} if rd is None else {"rdiff": rd}
-        try:
-            sol = newton_krylov(residual, best_x, method="lgmres", maxiter=maxiter,
-                                inner_maxiter=inner_maxiter, f_tol=f_tol,
-                                verbose=verbose, **kw_rd)
-            converged = True
-        except NoConvergence as e:
-            sol = np.asarray(e.args[0]) if e.args else best_x
-        rn = float(np.linalg.norm(residual(sol)))
-        if converged:                       # scipy hit f_tol: this iterate IS the answer
-            best_x, best_r = np.asarray(sol), rn
-            break
-        if rn < best_r:
-            best_x, best_r = np.asarray(sol), rn
+    try:
+        best_x, best_r = x0, float(np.linalg.norm(residual(x0)))
+        converged, n_rounds = False, 0
+        for rd in rdiffs[:max(1, rounds)]:
+            n_rounds += 1
+            kw_rd = {} if rd is None else {"rdiff": rd}
+            try:
+                sol = newton_krylov(residual, best_x, method="lgmres", maxiter=maxiter,
+                                    inner_maxiter=inner_maxiter, f_tol=f_tol,
+                                    verbose=verbose, **kw_rd)
+                converged = True
+            except NoConvergence as e:
+                sol = np.asarray(e.args[0]) if e.args else best_x
+            rn = float(np.linalg.norm(residual(sol)))
+            if converged:                   # scipy hit f_tol: this iterate IS the answer
+                best_x, best_r = np.asarray(sol), rn
+                break
+            if rn < best_r:
+                best_x, best_r = np.asarray(sol), rn
+    finally:
+        _shutdown_ctx_pool(ctx)             # the F evaluations share one persistent pool
     return lay.unflatten(best_x, state), {
         "f_evals": n_evals, "converged": converged, "residual_norm": best_r,
         "rounds": n_rounds}

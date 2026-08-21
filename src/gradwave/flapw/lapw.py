@@ -63,7 +63,43 @@ def radial_channel(l, El, r, dx, v, R):
     un = uraw / np.sqrt((uraw[:, inside] ** 2 * drw).sum(axis=1))[:, None]
     u = un[0]
     udot = (un[1] - un[2]) / (2 * hE)
+    return _finish_channel(l, El, r_np, inside, rr, drw, dx, v, R, u, udot)
 
+
+def radial_channels_all(lmax, El_by_l, r, dx, v, R):
+    """Every l-channel of one sphere in ONE batched Numerov call — ``{l: radial_channel dict}``.
+
+    The (lmax+1)·3 rows (each channel's E, E±h) share the mesh and the potential, so they run in a
+    single recurrence loop; the per-row arithmetic is elementwise, so the result is bit-identical to
+    looping ``radial_channel`` over l. This is the per-iteration builder for the SCF's ``chan``
+    (the per-l Numerov loops were ~30% of a production fullpot iteration)."""
+    r_np = r.detach().numpy()
+    inside = r_np <= R
+    rr = r_np[inside]
+    drw = rr * dx
+    n_cut = int(np.searchsorted(r_np, 2.0 * R)) + 5
+    ls, es, hes = [], [], {}
+    for lang in range(lmax + 1):
+        el = El_by_l[lang]
+        he = max(abs(el) * 1e-4, 1e-3)
+        hes[lang] = he
+        ls += [lang, lang, lang]
+        es += [el, el + he, el - he]
+    uraw = numerov_log_np(np.array(ls), np.array(es), r, dx, v, n_cut=n_cut)
+    un = uraw / np.sqrt((uraw[:, inside] ** 2 * drw).sum(axis=1))[:, None]
+    out = {}
+    for lang in range(lmax + 1):
+        u = un[3 * lang]
+        udot = (un[3 * lang + 1] - un[3 * lang + 2]) / (2 * hes[lang])
+        out[lang] = _finish_channel(lang, El_by_l[lang], r_np, inside, rr, drw, dx, v, R, u, udot)
+    return out
+
+
+def _finish_channel(l, El, r_np, inside, rr, drw, dx, v, R, u, udot):
+    """The post-Numerov tail of ``radial_channel``: boundary value/slope, overlaps, weak-form
+    kinetic and potential integrals from the normalized ``u``/``u̇`` mesh arrays. Also carries the
+    in-sphere radial arrays (``u_in``/``ud_in``) so downstream consumers (sphere density,
+    aspherical integrals, local orbitals) reuse them instead of re-running Numerov."""
     def val_slope(f):
         idx = np.sort(np.argsort(np.abs(r_np - R))[:7])
         c = np.polyfit(r_np[idx] - R, f[idx], 3)
@@ -71,7 +107,8 @@ def radial_channel(l, El, r, dx, v, R):
 
     uR, upR = val_slope(u)
     udR, udpR = val_slope(udot)
-    ui, udi, v_in = u[inside], udot[inside], v.detach().numpy()[inside]
+    ui, udi = u[inside], udot[inside]
+    v_in = (v.detach().numpy() if hasattr(v, "detach") else np.asarray(v))[inside]
     ov = {"uu": (ui * ui * drw).sum(), "uud": (ui * udi * drw).sum(),
           "udud": (udi * udi * drw).sum()}
     ll = l * (l + 1)
@@ -90,7 +127,8 @@ def radial_channel(l, El, r, dx, v, R):
             "Tuu": float(kin("u", "u")), "Tuud": float(kin("u", "ud")),
             "Tudud": float(kin("ud", "ud")),
             "Vuu": float(pot("u", "u")), "Vuud": float(pot("u", "ud")),
-            "Vudud": float(pot("ud", "ud")), "El": El, "l": l}
+            "Vudud": float(pot("ud", "ud")), "El": El, "l": l,
+            "u_in": ui, "ud_in": udi}
 
 
 def match_ab(ch, q, R):
@@ -236,16 +274,71 @@ def _canonical_solve(H, S, w, u, nbands, with_vecs, tol, scipy_eigh):
     return evals
 
 
+def solve_geneig_subspace_aug(H, S, c_prev, nbands, tol=1e-8):
+    """Augmented Rayleigh-Ritz solve of ``H c = ε S c`` in ``span[c_prev, R]`` where ``R`` is the
+    residual block of last iteration's eigenvectors under the CURRENT pencil.
+
+    ``solve_geneig_subspace`` projects into the previous span alone, which is blind to the
+    first-order rotation of the eigenvectors when the potential moves (the observed fullpot-ramp
+    blow-ups); one Davidson-style augmentation captures exactly that direction: Ritz-solve in
+    ``span[c_prev]``, form ``R = H c − S c ε`` for the Ritz pairs, and re-solve in the doubled
+    span. Cost stays a handful of ``dim × dim × nkeep`` GEMMs + an ``O((2·nkeep)³)`` dense solve —
+    far below the ``O(dim³)`` full diagonalization for ``nkeep ≪ dim``.
+
+    Returns ``(evals, vecs, resid)`` with ``resid`` the max eV-scale residual
+    (``_pencil_resid``, a first-order bound on the eigenvalue error) over the ``nbands`` kept
+    states — same acceptance contract as ``solve_geneig_subspace`` (the caller gates on it and
+    falls back to the exact dense solve)."""
+    hp = H @ c_prev
+    sp = S @ c_prev
+    hs = c_prev.conj().T @ hp
+    ss = c_prev.conj().T @ sp
+    hs = 0.5 * (hs + hs.conj().T)
+    ss = 0.5 * (ss + ss.conj().T)
+    nk = c_prev.shape[1]
+    ev0, y0 = solve_geneig(hs, ss, nk, with_vecs=True, tol=tol)
+    m = min(nk, len(ev0))
+    resid_blk = (hp @ y0[:, :m]) - (sp @ y0[:, :m]) * ev0[None, :m]
+    nrm = np.linalg.norm(resid_blk, axis=0)
+    keep = nrm > 1e-14 * max(float(nrm.max()), 1e-300)     # drop numerically-null residuals
+    q = np.concatenate([c_prev, resid_blk[:, keep] / nrm[keep]], axis=1)
+    hq = H @ q
+    sq = S @ q
+    hqq = q.conj().T @ hq
+    sqq = q.conj().T @ sq
+    hqq = 0.5 * (hqq + hqq.conj().T)
+    sqq = 0.5 * (sqq + sqq.conj().T)
+    ev, y = solve_geneig(hqq, sqq, nbands, with_vecs=True, tol=tol)
+    vecs = q @ y
+    hv = hq @ y
+    sv = sq @ y
+    return ev, vecs, _pencil_resid(hv, sv, ev)
+
+
+def _pencil_resid(hv, sv, ev):
+    """Max eV-scale residual ``||H c − ε S c|| / ||S c||`` over the kept states. Normalizing by
+    ``||S c||`` (not ``||H c||``) keeps the metric meaningful for eigenvalues near zero — FLAPW
+    eigenvalues are referenced to the interstitial zero, so bands DO cross ε≈0 and a
+    ``||r||/||H c||`` metric reports O(1) "relative residual" on them regardless of accuracy
+    (measured on a production TiO2 pencil: 0.97 at a 3.5e-3 eV true eigenvalue error — the old
+    gate could never engage). For S-normalized eigenvectors this bounds the eigenvalue error
+    (eV) to first order."""
+    r = hv - sv * ev[None, :]
+    scale = np.maximum(np.linalg.norm(sv, axis=0), 1e-12)
+    return float((np.linalg.norm(r, axis=0) / scale).max())
+
+
 def solve_geneig_subspace(H, S, c_prev, nbands, tol=1e-8):
     """Rayleigh-Ritz solve of ``H c = ε S c`` inside the span of a previous iteration's
     eigenvectors ``c_prev`` (dim × nkeep, nkeep ≥ nbands). Near SCF self-consistency the
     eigenvectors barely rotate between iterations, so projecting into last iteration's subspace
     (two thin GEMMs + an nkeep×nkeep dense solve) replaces the O(dim³) full diagonalization.
 
-    Returns ``(evals, vecs, resid)`` where ``resid = max_n ||H c_n − ε_n S c_n|| / ||H c_n||``
-    over the ``nbands`` kept states — the caller accepts the step only when ``resid`` is below its
-    threshold and falls back to the exact solve otherwise, so a drifting subspace (band crossings,
-    early iterations, large mixing steps) can never silently corrupt the result."""
+    Returns ``(evals, vecs, resid)`` where ``resid`` is the max eV-scale residual
+    (``_pencil_resid``) over the ``nbands`` kept states — the caller accepts the step only when
+    ``resid`` is below its threshold and falls back to the exact solve otherwise, so a drifting
+    subspace (band crossings, early iterations, large mixing steps) can never silently corrupt
+    the result."""
     hp = H @ c_prev
     sp = S @ c_prev
     hs = c_prev.conj().T @ hp
@@ -256,7 +349,4 @@ def solve_geneig_subspace(H, S, c_prev, nbands, tol=1e-8):
     vecs = c_prev @ y
     hv = hp @ y
     sv = sp @ y
-    r = hv - sv * ev[None, :]
-    scale = np.maximum(np.linalg.norm(hv, axis=0), 1e-12)
-    resid = float((np.linalg.norm(r, axis=0) / scale).max())
-    return ev, vecs, resid
+    return ev, vecs, _pencil_resid(hv, sv, ev)

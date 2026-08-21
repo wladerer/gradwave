@@ -50,8 +50,9 @@ from gradwave.flapw.lapw import (
     enumerate_kg,
     match_ab_vec,
     radial_channel,
+    radial_channels_all,
     solve_geneig,
-    solve_geneig_subspace,
+    solve_geneig_subspace_aug,
 )
 from gradwave.flapw.mixing import anderson_next
 from gradwave.flapw.radial import log_mesh, numerov_log_np, radial_eigs_tridiag
@@ -163,7 +164,7 @@ def _build_lodat(los_by_key, chan, El_by_key, vmt_by_key, R_by_key, at_by_sym, k
             seen.add(l)
             e2 = (at_by_sym[key_sym[key]][spec] if isinstance(spec, str) else float(spec))
             e2 = e2 - v0_by_key[key]
-            u, ud = _radial_u(l, El_by_key[key][l], r, dx, vmt_by_key[key], R_by_key[key])
+            u, ud = chan[key][l]["u_in"], chan[key][l]["ud_in"]   # reuse the channel's Numerov
             out.append(_build_lo(l, e2, chan[key][l], u, ud, r, dx, vmt_by_key[key], R_by_key[key]))
         lodat[key] = out
     return lodat
@@ -250,23 +251,30 @@ def _bands_amps(c_pw, ks, abl, lmax, vol, lo_block=None, los=None, ylm_by_l=None
     return out
 
 
-def _us_ext(El, lmax, r, dx, v_sphere, R, los=None):
-    """The per-l radial-function lists ``[u, u̇ (, u₂)]`` matching ``_bands_amps``' amplitudes."""
+def _us_ext(El, lmax, r, dx, v_sphere, R, los=None, chan_sp=None):
+    """The per-l radial-function lists ``[u, u̇ (, u₂)]`` matching ``_bands_amps``' amplitudes.
+    ``chan_sp`` = this sphere's ``{l: radial_channel}`` — when given, the channel's stored
+    ``u_in``/``ud_in`` arrays are reused instead of re-running Numerov per l."""
     slices = _lo_row_slices(los)
     us = {}
     for lang in range(lmax + 1):
-        u, ud = _radial_u(lang, El[lang], r, dx, v_sphere, R)
+        if chan_sp is not None:
+            u, ud = chan_sp[lang]["u_in"], chan_sp[lang]["ud_in"]
+        else:
+            u, ud = _radial_u(lang, El[lang], r, dx, v_sphere, R)
         us[lang] = [u, ud] + ([slices[lang][2]["u2"]] if lang in slices else [])
     return us
 
 
 def _sphere_valence_density(c_occ, occ, ks, abl, El, lmax, vol, r, dx, v_sphere, R,
-                            lo_block=None, los=None, ylm_by_l=None):
+                            lo_block=None, los=None, ylm_by_l=None, us=None):
     """The spherical (l=0-projected) valence density inside one sphere, LO-aware: each l-channel
     carries ``[u, u̇]`` plus an LO's second radial when present, and the density sums every radial
-    pair ``ρ += (1/4π) Σ_ij P_ij f_i f_j / r²`` with ``P_ij = Σ_{n,m} occ·Re(A*_i A_j)``."""
+    pair ``ρ += (1/4π) Σ_ij P_ij f_i f_j / r²`` with ``P_ij = Σ_{n,m} occ·Re(A*_i A_j)``.
+    ``us`` = a precomputed ``_us_ext`` result (k-independent — a k-mesh sweep hoists it)."""
     rr = r.numpy()[r.numpy() <= R]
-    us = _us_ext(El, lmax, r, dx, v_sphere, R, los)
+    if us is None:
+        us = _us_ext(El, lmax, r, dx, v_sphere, R, los)
     rho = np.zeros_like(rr)
     if ylm_by_l is None:
         ylm_by_l = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
@@ -387,8 +395,60 @@ def crystal_scf(a_bohr: float | None = None, symbol: str = "Ne", R: float = 1.4,
     return conv, at
 
 
+def _k_geometry(kf, L, atoms_cart, radii, lmax, ecut):
+    """The potential-INDEPENDENT per-k pieces of the secular build: the k+G enumeration, the
+    pairwise |Δk| / cos matrices, the Legendre prefactors, the ball form factors per unique R,
+    and the per-atom structure-phase vectors. All of it is pure geometry — fixed for the whole
+    SCF — so the serial driver caches one of these per k-point and stops rebuilding them every
+    iteration (they were a top per-iteration cost after the radial hoists). ``radii`` = the
+    muffin-tin radius per atom of ``atoms_cart`` (order-aligned). Ylm / warp Miller-difference
+    blocks are filled lazily (``_geom_ylm`` / ``_geom_dm``) so a muffin-tin-phase call computes
+    exactly what the un-cached build did."""
+    from scipy.special import eval_legendre
+    A = cell_matrix(L)
+    B = reciprocal(A)                                     # rows = reciprocal vectors
+    vol = float(abs(np.linalg.det(A)))
+    mill, ks = enumerate_kg(kf, B, ecut)
+    ksafe = np.maximum(np.linalg.norm(ks, axis=1), 1e-12)
+    kdot = ks @ ks.T
+    kk = np.einsum("ij,ij->i", ks, ks)
+    # |k_G - k_G'| from kdot (no (npw,npw,3) displacement tensor): |dk|² = k² + k'² - 2 k·k'
+    dk_norm = np.sqrt(np.maximum(kk[:, None] + kk[None, :] - 2.0 * kdot, 0.0))
+    cost = np.clip(kdot / np.outer(ksafe, ksafe), -1.0, 1.0)
+    pref_l = {lang: (4 * math.pi / vol) * (2 * lang + 1) * eval_legendre(lang, cost)
+              for lang in range(lmax + 1)}
+    ballf = {}
+    for R in radii:
+        if R not in ballf:
+            ballf[R] = ball_ff_np(dk_norm, R) / vol
+    # e^{i(k_G'-k_G)·τ} factorizes exactly: outer(conj(p), p) with p = e^{i k_G·τ} — npw
+    # exponentials instead of npw² (the npw² exp was a top build cost).
+    pvec = [np.exp(1j * (ks @ np.asarray(tau, dtype=float))) for tau, _key in atoms_cart]
+    return {"A": A, "vol": vol, "mill": mill, "ks": ks, "ksafe": ksafe, "kdot": kdot,
+            "pref_l": pref_l, "ballf": ballf, "pvec": pvec}
+
+
+def _geom_ylm(geom, l):
+    """Lazily-cached ``conj(Y_lm)`` block of a ``_k_geometry`` dict (pure function of its ks)."""
+    y = geom.setdefault("ylm", {})
+    if l not in y:
+        y[l] = _ylm_star(l, geom["ks"])
+    return y[l]
+
+
+def _geom_dm(geom, nfft_w):
+    """Lazily-cached Miller-difference index triple for the warped-interstitial term."""
+    if geom.get("dm_nfft") != nfft_w:
+        mill = geom["mill"]
+        geom["dm"] = tuple(((mill[:, None, i] - mill[None, :, i]) % nfft_w).astype(np.int32)
+                           for i in range(3))
+        geom["dm_nfft"] = nfft_w
+    return geom["dm"]
+
+
 def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=None, chan=None,
-                  lodat=None, nsph_int=None, c_prev=None, subspace_tol=1e-5, warp=None):
+                  lodat=None, nsph_int=None, c_prev=None, subspace_tol=1e-4, warp=None,
+                  geom=None):
     """Multi-atom LAPW at wavevector k, exposing the density internals the SCF needs. Returns
     ``(eigvals, eigvecs, miller, ks, [abl per atom], vol)``. H,S are complex Hermitian (structure
     phases ``e^{i(k_G'-k_G)·τ_a}``). ``atoms_cart`` = ``[(τ_cart, species_key), ...]``.
@@ -401,40 +461,30 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
     ``chan`` (optional) = precomputed ``{species_key: {l: radial_channel}}``. The radial channels
     are k-independent, so a caller sweeping a k-mesh builds them once per SCF iteration and passes
     them in, instead of paying the Numerov + radial-integral cost again at every k. ``None`` →
-    build locally (backward compatible)."""
-    from scipy.special import eval_legendre
-    A = cell_matrix(L)
-    B = reciprocal(A)                                     # rows = reciprocal vectors
-    vol = float(abs(np.linalg.det(A)))
-    mill, ks = enumerate_kg(kf, B, ecut)
+    build locally (backward compatible).
+
+    ``geom`` (optional) = this k's ``_k_geometry`` (potential-independent — a caller iterating an
+    SCF builds it once per k per RUN and passes it back in every iteration). ``None`` → build
+    locally (backward compatible; the k-worker process pool ships no geometry)."""
+    if geom is None:
+        geom = _k_geometry(kf, L, atoms_cart, [species[key]["R"] for _t, key in atoms_cart],
+                           lmax, ecut)
+    vol, mill, ks = geom["vol"], geom["mill"], geom["ks"]
+    ksafe, kdot, pref_l = geom["ksafe"], geom["kdot"], geom["pref_l"]
     npw = len(ks)
-    ksafe = np.maximum(np.linalg.norm(ks, axis=1), 1e-12)
-    kdot = ks @ ks.T
-    kk = np.einsum("ij,ij->i", ks, ks)
-    # |k_G - k_G'| from kdot (no (npw,npw,3) displacement tensor): |dk|² = k² + k'² - 2 k·k'
-    dk_norm = np.sqrt(np.maximum(kk[:, None] + kk[None, :] - 2.0 * kdot, 0.0))
-    cost = np.clip(kdot / np.outer(ksafe, ksafe), -1.0, 1.0)
     if chan is None:
-        chan = {key: {lang: radial_channel(lang, sp["El"][lang], r, dx, sp["v"], sp["R"])
-                      for lang in range(lmax + 1)} for key, sp in species.items()}
+        chan = {key: radial_channels_all(lmax, sp["El"], r, dx, sp["v"], sp["R"])
+                for key, sp in species.items()}
     inter = np.eye(npw, dtype=complex)
     Saug = np.zeros((npw, npw), dtype=complex)
     Haug = np.zeros((npw, npw), dtype=complex)
-    # atom-independent geometry: Legendre prefactors per l, ball form factor per unique R
-    pref_l = {lang: (4 * math.pi / vol) * (2 * lang + 1) * eval_legendre(lang, cost)
-              for lang in range(lmax + 1)}
-    ballf = {}
     abl_by_atom = []
-    for tau, key in atoms_cart:
+    for ai, (_tau, key) in enumerate(atoms_cart):
         R = species[key]["R"]
         v0off = float(species[key].get("v0off", 0.0))
-        # e^{i(k_G'-k_G)·τ} factorizes exactly: outer(conj(p), p) with p = e^{i k_G·τ} — npw
-        # exponentials instead of npw² (the npw² exp was a top build cost).
-        pvec = np.exp(1j * (ks @ np.asarray(tau, dtype=float)))
+        pvec = geom["pvec"][ai]
         phase = np.conj(pvec)[:, None] * pvec[None, :]
-        if R not in ballf:
-            ballf[R] = ball_ff_np(dk_norm, R) / vol
-        inter -= ballf[R] * phase
+        inter -= geom["ballf"][R] * phase
         abl = {}
         for lang in range(lmax + 1):
             ch = chan[key][lang]
@@ -455,13 +505,14 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
         abl_by_atom.append(abl)
     if v_nsph:
         if nsph_int is None:
-            nsph_int = _nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=lodat)
-        ylm_nsph = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
-        for ai, (tau, key) in enumerate(atoms_cart):
+            nsph_int = _nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=lodat,
+                                              chan=chan)
+        ylm_nsph = {lang: _geom_ylm(geom, lang) for lang in range(lmax + 1)}
+        for ai, (_tau, key) in enumerate(atoms_cart):
             ints = nsph_int.get(key)
             if not ints or not ints["uu"]:
                 continue
-            ph_a = np.exp(1j * (ks @ np.asarray(tau, dtype=float)))
+            ph_a = geom["pvec"][ai]
             cstk = _channel_stack(abl_by_atom[ai], ks, lmax, vol, ph_a, ylm_by_l=ylm_nsph)
             # ONE triple product per atom replaces the per-(L,M,l,l') chained GEMMs (109x
             # measured, equal to 2.5e-14; _nonspherical_augment kept as the reference impl)
@@ -474,9 +525,7 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
         # l>0 refinement; TiO2's covalent bonding lives exactly in the interstitial). U is the
         # FFT of (v_grid - v_i0)·Θ_I; Miller-difference indexed (Toeplitz in G).
         u_fft, nfft_w = warp
-        dm0 = (mill[:, None, 0] - mill[None, :, 0]) % nfft_w
-        dm1 = (mill[:, None, 1] - mill[None, :, 1]) % nfft_w
-        dm2 = (mill[:, None, 2] - mill[None, :, 2]) % nfft_w
+        dm0, dm1, dm2 = _geom_dm(geom, nfft_w)
         Hm = Hm + u_fft[dm0, dm1, dm2]
     Hm = 0.5 * (Hm + Hm.conj().T)
     if lodat:
@@ -487,11 +536,11 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
         # (φ(R)=φ'(R)=0 confines it, one LO per l, spherical V keeps m diagonal). The aspherical
         # v_nsph coupling of LO rows is neglected (deep semicore, second-order small).
         rows_s, rows_h, diag_s, diag_h = [], [], [], []
-        for ai, (tau, key) in enumerate(atoms_cart):
-            ph = np.exp(1j * (ks @ np.asarray(tau, dtype=float)))
+        for ai, (_tau, key) in enumerate(atoms_cart):
+            ph = geom["pvec"][ai]
             for lo in lodat.get(key, []):
                 lang = lo["l"]
-                ylm = _ylm_star(lang, ks)
+                ylm = _geom_ylm(geom, lang)
                 pf = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
                 a_g, b_g = abl_by_atom[ai][lang][:, 0], abl_by_atom[ai][lang][:, 1]
                 v0off_lo = float(species[key].get("v0off", 0.0))
@@ -524,21 +573,23 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
             h_ext[npw:, npw:] = lo_lo_h
             S, Hm = s_ext, h_ext
     if c_prev is not None and c_prev.shape[0] == Hm.shape[0]:
-        # Rayleigh-Ritz in last iteration's subspace; the residual gate falls back to the exact
-        # dense solve whenever the subspace has drifted (band crossings, early SCF, mixing jumps).
-        ev, c, resid = solve_geneig_subspace(Hm, S, c_prev, nbands)
+        # Augmented Rayleigh-Ritz in span[last eigenvectors, their current residuals]; the
+        # residual gate falls back to the exact dense solve whenever the subspace has drifted
+        # (band crossings, early SCF, mixing jumps).
+        ev, c, resid = solve_geneig_subspace_aug(Hm, S, c_prev, nbands)
         if resid < subspace_tol:
             return ev, c, mill, ks, abl_by_atom, vol
     ev, c = solve_geneig(Hm, S, nbands, with_vecs=True)
     return ev, c, mill, ks, abl_by_atom, vol
 
 
-def _nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=None):
+def _nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=None, chan=None):
     """The k-independent radial integrals of the aspherical potential — ``∫u_l V_LM u_l' dr`` (and
     the u̇/LO variants) per atom key. These were being recomputed at every k-point; a k-mesh sweep
     builds them once per SCF iteration and passes them into the secular build (same pattern as the
-    ``chan`` hoist). Returns ``{key: {"uu": {(L,M,l,l'): (i_aa,i_ab,i_ba,i_bb)}, "lo_u": {...},
-    "lo_lo": {...}}}``."""
+    ``chan`` hoist). ``chan`` = the per-key radial channels — when given, their stored
+    ``u_in``/``ud_in`` arrays are reused instead of re-running Numerov per l. Returns
+    ``{key: {"uu": {(L,M,l,l'): (i_aa,i_ab,i_ba,i_bb)}, "lo_u": {...}, "lo_lo": {...}}}``."""
     r_np = r.numpy()
     out = {}
     for key, comps in v_nsph.items():
@@ -547,8 +598,12 @@ def _nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=None):
         rr = r_np[r_np <= species[key]["R"]]
         drw = rr * dx
         el, vsph = species[key]["El"], species[key]["v"]
-        us = {lang: _radial_u(lang, el[lang], r, dx, vsph, species[key]["R"])
-              for lang in range(lmax + 1)}
+        if chan is not None and key in chan:
+            us = {lang: (chan[key][lang]["u_in"], chan[key][lang]["ud_in"])
+                  for lang in range(lmax + 1)}
+        else:
+            us = {lang: _radial_u(lang, el[lang], r, dx, vsph, species[key]["R"])
+                  for lang in range(lmax + 1)}
         los = (lodat or {}).get(key, [])
         uu, lo_u, lo_lo = {}, {}, {}
         for (big_l, big_m), vlm in comps.items():
@@ -874,6 +929,11 @@ class _MultiCtx(NamedTuple):
     subspace_reuse: bool
     subspace_tol: float
     verbose: bool
+    # mutable per-run caches of potential-INDEPENDENT data (the NamedTuple itself stays
+    # frozen): "geom" = per-k _k_geometry for the serial solve path (keyed by ik / "gamma"),
+    # "ylm" = per-k conj(Y_lm) blocks for the density pass. Reused across _multi_iterate
+    # calls — and across Newton F evaluations, which share one ctx.
+    caches: dict
 
 
 class _MultiState:
@@ -896,6 +956,7 @@ class _MultiState:
         self.recorder = None
         self.hist = ([], [])                   # joint Anderson history
         self.c_prev_by_k: list = []
+        self.c_prev_gamma = None               # warm start for the Γ reporting solve
         # last-iteration outputs consumed by _multi_finalize
         self.kdata = None
         self.occ_by_k = None
@@ -915,7 +976,7 @@ def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax:
                  kmesh=(1, 1, 1), smearing: float = 0.0, fullpot: bool = False,
                  use_symmetry: bool = True, fullpot_lmax: int = 2, los=None, val_e=None,
                  core=None, el_override=None, kworkers: int = 1, subspace_reuse: bool = False,
-                 subspace_tol: float = 1e-5, cell=None, kerker: float | None = None,
+                 subspace_tol: float = 1e-4, cell=None, kerker: float | None = None,
                  verbose: bool = False) -> _MultiCtx:
     """The state-independent setup phase of ``crystal_scf_multi`` (see ``_MultiCtx``).
     Argument semantics and validation are exactly the public entry point's."""
@@ -1008,7 +1069,16 @@ def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax:
                      ecut=ecut, smearing=smearing, fullpot=fullpot,
                      fullpot_lmax=fullpot_lmax, el_override=el_override, kworkers=kworkers,
                      subspace_reuse=subspace_reuse, subspace_tol=subspace_tol,
-                     verbose=verbose)
+                     verbose=verbose, caches={"geom": {}, "ylm": {}})
+
+
+def _shutdown_ctx_pool(ctx: _MultiCtx) -> None:
+    """Shut down a ctx's persistent k-worker pool (no-op when none is live)."""
+    pool = ctx.caches.get("pool")
+    if pool is not None:
+        pool.shutdown(wait=False)
+        ctx.caches["pool"] = None
+        ctx.caches["pool_nw"] = 0
 
 
 def _multi_init_state(ctx: _MultiCtx, v_start) -> _MultiState:
@@ -1063,10 +1133,13 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
     v_nsph, vns_new, r_nsph = st.v_nsph, st.vns_new, st.r_nsph
     warp_state, v_grid_prev, v_i0_prev = st.warp_state, st.v_grid_prev, st.v_i0_prev
 
-    # subspace reuse is safe in the muffin-tin phase but blind to states entering the
-    # window while the aspherical potential ramps (observed blow-ups at [subsp] iterations);
-    # fullpot iterations always solve exactly.
-    full_iter = (not ctx.subspace_reuse) or (it % 5 == 0) or (fullpot and not mt_phase)
+    # The plain previous-span projection was blind to states entering the window while the
+    # aspherical potential ramps (observed blow-ups at [subsp] iterations), so fullpot
+    # iterations used to force exact solves. The AUGMENTED span (previous eigenvectors +
+    # their current residuals, solve_geneig_subspace_aug) carries the first-order rotation,
+    # so fullpot iterations may reuse too; every 5th iteration stays a forced exact solve
+    # and convergence is only ever accepted on an exact iteration (`done` below).
+    full_iter = (not ctx.subspace_reuse) or (it % 5 == 0)
     t_it = time.time()
     r_sph = 0.0
     vnew_by_key = {}
@@ -1087,16 +1160,32 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
     # pass 1 — solve every k, keep the results; pass 2 — occupy and accumulate the density.
     npad = max(2, nbands // 2) if smearing > 0 else 4
     nb_solve = nbands + npad
-    # radial channels are k-independent — build once per iteration, reuse across the k-mesh.
-    chan = {key: {lang: radial_channel(lang, sp["El"][lang], r, dx, sp["v"], sp["R"])
-                  for lang in range(lmax + 1)} for key, sp in species.items()}
+    # radial channels are k-independent — build once per iteration, reuse across the k-mesh
+    # (one batched Numerov per species: every (l, E±h) row in a single recurrence loop).
+    chan = {key: radial_channels_all(lmax, sp["El"], r, dx, sp["v"], sp["R"])
+            for key, sp in species.items()}
     lodat = (_build_lodat(los_by_key, chan, El_by_key, vmt_by_key, R_by_key, at_by_sym,
                           key_sym, v0_by_key, r, dx) if los_by_key else None)
     # aspherical radial integrals are k-independent — build once per iteration, like chan.
-    nsph_int = (_nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=lodat)
+    nsph_int = (_nsph_radial_integrals(v_nsph, species, lmax, r, dx, lodat=lodat, chan=chan)
                 if v_nsph else None)
+    # the sphere radial functions are k-independent too — hoist them out of the per-k density
+    # accumulation (they were re-Numerov'd for every (k, atom, l))
+    us_by_key = {k: _us_ext(El_by_key[k], lmax, r, dx, vmt_by_key[k], R_by_key[k],
+                            (lodat or {}).get(k), chan_sp=chan[k]) for k in keys}
     kdata, ev_all, ev_gamma = [], [], None
     cprevs = [None if full_iter else c_prev_by_k[ik] for ik in range(len(kfracs))]
+    geom_cache = ctx.caches["geom"]
+
+    def _geom_for(gk, kf_g):
+        # per-k geometry is potential-independent: build once per RUN, not per iteration.
+        # Serial path only — shipping ~npw² matrices through the pool would cost more than
+        # the workers' rebuild.
+        if gk not in geom_cache:
+            geom_cache[gk] = _k_geometry(kf_g, A, acart,
+                                         [species[key]["R"] for _t, key in acart], lmax, ecut)
+        return geom_cache[gk]
+
     if kworkers > 1 and len(kfracs) > 1:
         import multiprocessing as _mp
         from concurrent.futures import ProcessPoolExecutor
@@ -1107,17 +1196,22 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
                            warp=warp_state)
                 for ik, kf in enumerate(kfracs)]
         # spawn, not fork: forked children inherit live OpenMP/BLAS state and can compute
-        # silently wrong numbers (observed: a 6 eV span error). Spawned workers re-import
-        # (~seconds per iteration) — negligible on the multi-minute fullpot iterations the
-        # pool exists for.
-        with ProcessPoolExecutor(max_workers=min(kworkers, len(argl)),
-                                 mp_context=_mp.get_context("spawn")) as ex:
-            res_list = list(ex.map(_solve_k_args, argl))
+        # silently wrong numbers (observed: a 6 eV span error). The pool lives on ctx.caches —
+        # created ONCE per run (and shared across Newton F evaluations) instead of per
+        # iteration: the spawn+re-import tax (~seconds) was negligible on multi-minute fullpot
+        # iterations but is not on ~10 s ones. _multi_finalize / newton_polish shut it down.
+        nw = min(kworkers, len(argl))
+        if ctx.caches.get("pool") is None or ctx.caches.get("pool_nw") != nw:
+            _shutdown_ctx_pool(ctx)
+            ctx.caches["pool"] = ProcessPoolExecutor(max_workers=nw,
+                                                     mp_context=_mp.get_context("spawn"))
+            ctx.caches["pool_nw"] = nw
+        res_list = list(ctx.caches["pool"].map(_solve_k_args, argl))
     else:
         res_list = [_lapw_multi_k(kf, A, acart, species, lmax, ecut, r, dx, nb_solve,
                                   v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int,
                                   c_prev=cprevs[ik], subspace_tol=subspace_tol,
-                                  warp=warp_state)
+                                  warp=warp_state, geom=_geom_for(ik, kf))
                     for ik, kf in enumerate(kfracs)]
     for ik, (kf, w, res) in enumerate(zip(kfracs, kw, res_list, strict=True)):
         kdata.append((kf, w, res))
@@ -1126,9 +1220,13 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
         if np.all(np.abs(kf) < 1e-9):
             ev_gamma = res[0]
     if ev_gamma is None:
-        ev_gamma = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx, nb_solve,
-                                 v_nsph=v_nsph, chan=chan, lodat=lodat,
-                                 nsph_int=nsph_int, warp=warp_state)[0]
+        res_g = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx, nb_solve,
+                              v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int,
+                              c_prev=(None if full_iter else st.c_prev_gamma),
+                              subspace_tol=subspace_tol, warp=warp_state,
+                              geom=_geom_for("gamma", (0, 0, 0)))
+        ev_gamma = res_g[0]
+        st.c_prev_gamma = res_g[1]
     ev_all = np.array(ev_all)
 
     e_fermi = None
@@ -1149,8 +1247,6 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
     rho_2m = None
     if fullpot and not mt_phase:
         from gradwave.flapw.efg import sphere_density_multipoles_bands
-        us_by_key = {k: _us_ext(El_by_key[k], lmax, r, dx, vmt_by_key[k], R_by_key[k],
-                                (lodat or {}).get(k)) for k in keys}
         lset_pot = [(lg, m) for lg in range(1, fullpot_lmax + 1) for m in range(-lg, lg + 1)]
         if (2, 0) not in lset_pot:                      # the EFG observable always needs l=2
             lset_pot += [(2, m) for m in range(-2, 3)]
@@ -1162,12 +1258,16 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
     for _tau, k in acart:
         lo_off[k] = off
         off += sum(2 * lo["l"] + 1 for lo in (lodat or {}).get(k, []))
-    for (_kf, w, res), occ in zip(kdata, occ_by_k, strict=True):
+    ylm_cache = ctx.caches["ylm"]
+    for ik, ((_kf, w, res), occ) in enumerate(zip(kdata, occ_by_k, strict=True)):
         _, c, mill, ks, abl_all, vol = res
         occl = list(occ)
         npw_k = len(mill)
         rho_I += w * _interstitial_density(c[:npw_k, :nb_solve], occl, mill, vol, nfft)
-        ylm_by_l = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
+        ylm_by_l = ylm_cache.get(ik)           # pure geometry — cached across iterations
+        if ylm_by_l is None or len(ylm_by_l) < lmax + 1:
+            ylm_by_l = {lang: _ylm_star(lang, ks) for lang in range(lmax + 1)}
+            ylm_cache[ik] = ylm_by_l
         for ai, k in enumerate(keys):
             phase = np.exp(1j * (ks @ np.asarray(acart[ai][0])))
             cp = c[:npw_k, :nb_solve] * phase[:, None]
@@ -1177,7 +1277,8 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
                         if nlo_k else None)
             _, rk = _sphere_valence_density(cp, occl, ks, abl_all[ai], El_by_key[k], lmax,
                                             vol, r, dx, vmt_by_key[k], R_by_key[k],
-                                            lo_block=lo_block, los=los_k, ylm_by_l=ylm_by_l)
+                                            lo_block=lo_block, los=los_k, ylm_by_l=ylm_by_l,
+                                            us=us_by_key[k])
             rho_val[k] += w * rk
             if fullpot and not mt_phase:
                 amps_all = _bands_amps(cp, ks, abl_all[ai], lmax, vol, lo_block=lo_block,
@@ -1379,6 +1480,7 @@ def _full_state(ctx: _MultiCtx, st: _MultiState) -> dict:
 def _multi_finalize(ctx: _MultiCtx, st: _MultiState, efg: bool = False):
     """Build ``crystal_scf_multi``'s ``(bands, info)`` return from the final state — the
     result summary, the full fixed-point state, and (opt-in) the EFG diagnostic pass."""
+    _shutdown_ctx_pool(ctx)                    # release the persistent k-worker pool
     conv = st.conv
     info = {"nbands": ctx.nbands, "symbols": ctx.syms, "e_fermi": conv.get("e_fermi"),
             "v_by_key": {k: st.v_by_key[k].numpy().copy() for k in ctx.keys}}
@@ -1417,7 +1519,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                       efg: bool = False, fullpot: bool = False, use_symmetry: bool = True,
                       fullpot_lmax: int = 2, los=None, val_e=None, core=None, el_override=None,
                       v_start=None, kworkers: int = 1, subspace_reuse: bool = False,
-                      subspace_tol: float = 1e-5, cell=None, kerker: float | None = None,
+                      subspace_tol: float = 1e-4, cell=None, kerker: float | None = None,
                       verbose: bool = False):
     """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
@@ -1478,10 +1580,15 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     CALLING script must be import-safe: guard its executable body with ``if __name__ ==
     "__main__":`` or the workers re-run it on import.
 
-    ``subspace_reuse`` (default True) solves most iterations by Rayleigh-Ritz in the previous
-    iteration's eigenvector subspace (residual-gated, exact-solve fallback); every 5th iteration
-    is a forced exact solve and convergence is only accepted on exact-solve iterations, so the
-    reported state never rests on a projected solve.
+    ``subspace_reuse`` (default False — exact solves keep the fixed-point map F deterministic
+    for the Newton machinery, see ``flapw.newton``) solves most iterations by AUGMENTED
+    Rayleigh-Ritz in span[previous eigenvectors, their current residuals] (residual-gated,
+    exact-solve fallback), including fullpot iterations; every 5th iteration is a forced exact
+    solve and convergence is only accepted on exact-solve iterations, so the reported state
+    never rests on a projected solve. ``subspace_tol`` (eV) gates acceptance on the max
+    eigenvalue-error bound ``||Hc−εSc||/||Sc||`` over the solved bands; the 1e-4 default sits
+    10x under the degenerate-occupation tolerance (1e-3 eV), so a gated projected solve cannot
+    flip an occupation decision.
 
     Internally this is ``_multi_setup`` (state-independent context) + ``_multi_init_state`` +
     a loop over ``_multi_iterate`` (the fixed-point map) + ``_multi_finalize`` — split so the
