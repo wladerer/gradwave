@@ -23,15 +23,23 @@ Run on asus:  OMP_NUM_THREADS=2 uv run python experiments/autoapw/ibz_wedge_spee
 """
 from __future__ import annotations
 
+import os
+import sys
 import time
 
 import numpy as np
 import torch
 
-from gradwave.core.xc.pbe import PBE
-from gradwave.postscf.kgeometry_nmr import _plan_wedge_reduction, sigma_shielding_dq
-from gradwave.scf.loop import scf, setup_system
-from tests.helpers import RY, si_fcc, si_upf
+# make ``tests.helpers`` (Si fixture) importable when run as a plain script
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+from gradwave.core.xc.pbe import PBE  # noqa: E402
+from gradwave.postscf.kgeometry_nmr import (  # noqa: E402
+    _plan_wedge_reduction,
+    sigma_shielding_dq,
+)
+from gradwave.scf.loop import scf, setup_system  # noqa: E402
+from tests.helpers import RY, si_fcc, si_upf  # noqa: E402
 
 
 def _res(cell, pos, kmesh, ecut=6, fft=(15, 15, 15)):
