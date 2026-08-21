@@ -224,3 +224,26 @@ def test_near_touching_cross_field():
         if abs(ref) > 1e-2 * scale:
             worst = max(worst, abs(v_bc2[lm] - ref) / abs(ref))
     assert worst < 8e-2, f"worst significant cross-field rel err {worst:.2e}"
+
+
+def test_full_state_restore_across_nfft():
+    """A ``__full_state__`` warm start saved at one FFT grid must restore onto a run whose
+    pseudocharge-resolvability rule chose a different nfft (fp_lmax=6 bumps 28³→32³): the saved
+    v_grid is band-limited-resampled to the current grid, not boolean-masked at the wrong shape
+    (the measured fp4-state → fp6-run IndexError). Upsampling a band-limited field is exact."""
+    from gradwave.flapw.scf import _fft_resample_cube, _restore_full_state
+    n_old, n_new = 8, 12
+    ax = np.arange(n_old) * (2 * np.pi / n_old)
+    x, y, z = np.meshgrid(ax, ax, ax, indexing="ij")
+    v = 1.5 + np.cos(x) * np.sin(2 * y) + np.cos(z)       # band-limited well below Nyquist
+    fs = {"v_grid": v, "v_i0": 0.25, "v_nsph": None}
+    theta = np.ones((n_new,) * 3, dtype=bool)
+    theta[: n_new // 2] = False
+    _, v_rs, warp, v_i0 = _restore_full_state(fs, theta, n_new)
+    assert v_rs.shape == (n_new,) * 3 and warp is not None and v_i0 == 0.25
+    ax2 = np.arange(n_new) * (2 * np.pi / n_new)
+    x2, y2, z2 = np.meshgrid(ax2, ax2, ax2, indexing="ij")
+    v_exact = 1.5 + np.cos(x2) * np.sin(2 * y2) + np.cos(z2)
+    assert np.abs(v_rs - v_exact).max() < 1e-12           # exact band-limited upsample
+    rt = _fft_resample_cube(_fft_resample_cube(v, n_new), n_old)
+    assert np.abs(rt - v).max() < 1e-12                   # up-down round trip is the identity

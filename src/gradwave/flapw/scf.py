@@ -1748,13 +1748,33 @@ def _kerker_screened_interstitial(vi_new: np.ndarray, vi_prev: np.ndarray,
     return vi_prev + r_scr.reshape(-1)[ti_flat]
 
 
+def _fft_resample_cube(v: np.ndarray, n_new: int) -> np.ndarray:
+    """Band-limited resample of a periodic cube field ``(n_old,)*3 → (n_new,)*3`` by copying the
+    common signed-frequency block in G-space (exact for band-limited fields when upsampling;
+    Nyquist truncation when downsampling — fine for a warm-start seed, which mixing corrects)."""
+    n_old = v.shape[0]
+    if n_old == n_new:
+        return v
+    f_old = np.fft.fftn(v) / n_old**3
+    n = min(n_old, n_new)
+    ix = np.fft.fftfreq(n, 1.0 / n).astype(int)           # signed frequencies of the smaller cube
+    sel = np.ix_(ix, ix, ix)                              # negative indices wrap in both cubes
+    out = np.zeros((n_new,) * 3, dtype=complex)
+    out[sel] = f_old[sel]
+    return np.fft.ifftn(out).real * n_new**3
+
+
 def _restore_full_state(fs: dict, theta_i: np.ndarray, nfft: int):
     """Unpack a ``v_start={"__full_state__": ...}`` resume into loop state.
 
     Returns ``(v_nsph, v_grid_prev, warp_state, v_i0_prev)``, each None where the
     saved state has no such component. The warp is rebuilt from the restored grid
     (zero-mean over Θ_I, the same convention as the in-loop update).
-    """
+
+    The saved ``v_grid`` carries the *saving* run's nfft, which need not match this run's
+    (the pseudocharge-resolvability rule raises nfft with ``fullpot_lmax``, e.g. 28³→32³ at
+    fp_lmax=6) — resample it band-limited to the current grid instead of letting the Θ_I mask
+    fail on the shape mismatch."""
     v_nsph = None
     if fs.get("v_nsph"):
         v_nsph = {k: {lm: np.asarray(v).astype(complex).copy() for lm, v in d.items()}
@@ -1762,6 +1782,8 @@ def _restore_full_state(fs: dict, theta_i: np.ndarray, nfft: int):
     v_grid_prev, warp_state = None, None
     if fs.get("v_grid") is not None:
         v_grid_prev = np.asarray(fs["v_grid"], dtype=float).copy()
+        if v_grid_prev.shape != (nfft,) * 3:
+            v_grid_prev = _fft_resample_cube(v_grid_prev, nfft)
         vi_mean = float(v_grid_prev.reshape(-1)[theta_i.reshape(-1)].mean())
         u0 = np.where(theta_i, v_grid_prev - vi_mean, 0.0)
         warp_state = (np.fft.fftn(u0) / nfft**3, nfft)
