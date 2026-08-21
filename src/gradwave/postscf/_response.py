@@ -529,6 +529,18 @@ def cg_sternheimer(h: _AppliesH, bk: _HasKineticTable, c_occ: torch.Tensor,
         hx = h.apply(x) - eps_occ[..., None] * x
         return hx - p_occ(hx) + shift * p_occ(x)
 
+    # Defend the padding invariant against arbitrary drafts. On the ragged
+    # sphere the operator restricted to a padded plane-wave slot is just the
+    # indefinite diagonal −ε_n (``h.apply`` zeros padded outputs, the P_occ
+    # terms are zero-padded through ``c_occ``), so a draft carrying garbage in
+    # its masked slots would make CG diverge there to NaN. Honest drafts (and
+    # the zeros default) are already zero-padded, so this is a bit-for-bit
+    # no-op for every real caller; it only makes the certify contract ("wrong
+    # drafts are simply iterated") hold for a draft that violates the mask.
+    mask = getattr(bk, "mask", None)
+    if mask is not None:
+        x0 = x0 * mask[:, None, :].to(x0.dtype)
+
     t_band = torch.clamp(
         torch.einsum("kbg,kg,kbg->kb", c_occ.conj(), bk.t.to(c_occ.dtype), c_occ).real,
         min=1e-6,
