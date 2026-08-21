@@ -87,10 +87,10 @@ def main():
     print(f"LO anchors (eV): O 2s={o2s:.2f} (Elk −23.75)  Ti 3s={ti3s:.2f}  Ti 3p={ti3p:.2f}  "
           f"[Ha: O 2s={o2s/27.2114:.4f} (Elk −0.8727)]", flush=True)
 
-    # The D5 basis (Ti 3s in valence, O 2s LO, val_e 12) has a different electron partition than the
-    # saved aug4 (no-LO) states, so warm-starting their potentials is only approximate and plain
-    # Anderson diverged; default to a COLD kerker=0.7 run (tio2_basis_ab's proven fresh-basis recipe).
-    # Set D5_STATE to warm-start a same-basis continuation.
+    # The D5 basis (Ti 3s in valence, O 2s LO, val_e 12) has a different electron partition than
+    # the saved aug4 (no-LO) states, so warm-starting their potentials is only approximate and
+    # plain Anderson diverged; default to a COLD kerker=0.7 run (tio2_basis_ab's fresh-basis
+    # recipe). Set D5_STATE to warm-start a same-basis continuation.
     state_env = os.environ.get("D5_STATE", "")
     v_start = None
     if state_env:
