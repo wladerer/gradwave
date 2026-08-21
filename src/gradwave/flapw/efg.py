@@ -119,14 +119,16 @@ def gaunt_matrix(l, big_l, big_m, lp, nx: int = 16, nphi: int = 24):
     return g
 
 
-def sphere_density_multipoles(amps, us, lmax, lset, nx: int | None = None,
+def sphere_density_multipoles(amps, us, rr, lmax, lset, nx: int | None = None,
                               nphi: int | None = None):
     """Aspherical density components ``ρ_LM(r)`` inside a sphere by angular projection of ``|ψ|²``.
 
     ``amps`` = list over occupied states of ``(f, a, b)`` with occupation ``f`` and amplitude dicts
     ``a[l]``, ``b[l]`` each ``(2l+1,)`` complex (the ``u_l`` and ``u̇_l`` coefficients, m=-l..l).
-    ``us`` = ``{l: (u_l, u̇_l)}`` radial functions on the in-sphere mesh (each ``(nr,)``).
-    Returns ``{(L,M): ρ_LM(r)}`` (complex ``(nr,)``) for every ``(L,M)`` in ``lset``.
+    ``us`` = ``{l: (u_l, u̇_l)}`` **reduced** radial functions ``u = r·R`` on the in-sphere mesh
+    (each ``(nr,)``); ``rr`` = the radial mesh, used to recover the true radial ``R = u/r`` before
+    squaring (see ``sphere_density_multipoles_multi``). Returns ``{(L,M): ρ_LM(r)}`` (complex
+    ``(nr,)``) for every ``(L,M)`` in ``lset``.
 
     ``nx``/``nphi`` default (``None``) to the smallest grid that integrates the projector exactly:
     ``|ψ|²`` has angular degree ``2·lmax``, so ``|ψ|²·Y*_LM`` is a polynomial of degree
@@ -137,18 +139,25 @@ def sphere_density_multipoles(amps, us, lmax, lset, nx: int | None = None,
     for f, a, b in amps:
         norm_amps.append((f, {l: [a[l], b[l]] for l in range(lmax + 1)}))
     norm_us = {l: list(us[l]) for l in range(lmax + 1)}
-    return sphere_density_multipoles_multi(norm_amps, norm_us, lmax, lset, nx=nx, nphi=nphi)
+    return sphere_density_multipoles_multi(norm_amps, norm_us, rr, lmax, lset, nx=nx, nphi=nphi)
 
 
-def sphere_density_multipoles_multi(amps, us, lmax, lset, nx: int | None = None,
+def sphere_density_multipoles_multi(amps, us, rr, lmax, lset, nx: int | None = None,
                                     nphi: int | None = None):
     """General-radial-set form of ``sphere_density_multipoles``: each l-channel carries an arbitrary
     list of radial functions (u, u̇, plus any local orbitals' second-energy radials).
 
-    ``us[l]`` = list of radial arrays (each ``(nr,)``); ``amps`` = list over occupied states of
-    ``(f, coeffs)`` with ``coeffs[l]`` a list of ``(2l+1,)`` complex amplitude vectors aligned with
-    ``us[l]``. Returns ``{(L,M): ρ_LM(r)}`` for every ``(L,M)`` in ``lset``."""
+    ``us[l]`` = list of **reduced** radial arrays ``u = r·R`` (each ``(nr,)``); ``rr`` = the radial
+    mesh. The density is ``|ψ|²`` with ``ψ = Σ R_l(r) Y_lm``, so each radial is divided by ``r`` to
+    recover the true radial ``R = u/r`` **before** it enters ``ψ`` (mirrors
+    ``scf._sphere_valence_density``'s ``rads[i]·rads[j]/r²`` — without the ``/r`` the moments carry
+    an extra ``r²`` and every downstream consumer — the EFG Poisson and the non-spherical
+    potential — is mis-scaled). ``amps`` = list over occupied states of ``(f, coeffs)`` with
+    ``coeffs[l]`` a list of ``(2l+1,)`` complex amplitude vectors aligned with ``us[l]``. Returns
+    ``{(L,M): ρ_LM(r)}`` for every ``(L,M)`` in ``lset``."""
     from scipy.special import sph_harm_y
+    rr = np.asarray(rr, dtype=float)
+    us = {l: [np.asarray(rad) / rr for rad in us[l]] for l in range(lmax + 1)}
     max_l = max((lang for (lang, _) in lset), default=0)
     deg = 2 * lmax + max_l
     if nx is None:
@@ -176,12 +185,14 @@ def sphere_density_multipoles_multi(amps, us, lmax, lset, nx: int | None = None,
     return out
 
 
-def sphere_density_multipoles_bands(amps_all, occ, us, lmax, lset, nx: int | None = None,
+def sphere_density_multipoles_bands(amps_all, occ, us, rr, lmax, lset, nx: int | None = None,
                                     nphi: int | None = None):
     """All-band aspherical density components ``{(L,M): ρ_LM(r)}`` by a **Gaunt contraction** over
     the ``(l,m)`` channel products of ``|ψ|²`` — no angular grid. ``amps_all`` = ``{l: [(nb, 2l+1)
     per radial]}`` (from ``scf._bands_amps``), ``occ`` the per-band occupations, ``us`` = ``{l:
-    [radial arrays]}`` aligned with ``amps_all``.
+    [**reduced** radial arrays ``u = r·R``]}`` aligned with ``amps_all``, ``rr`` = the radial mesh
+    (each radial is divided by ``r`` to the true radial ``R = u/r`` before the density product; see
+    ``sphere_density_multipoles_multi``).
 
     Writing the in-sphere wavefunction ``ψ_n = Σ_{l,p} u^p_l(r) Σ_m A^{l,p}_{n,m} Y_lm`` gives, for
     the band-summed density,
@@ -201,6 +212,8 @@ def sphere_density_multipoles_bands(amps_all, occ, us, lmax, lset, nx: int | Non
     ulp; the floating summation order differs. ``nx``/``nphi`` (if given) set the ``gaunt_matrix``
     quadrature; ``None`` picks the exactness-guaranteeing grid (mirrors the old default). The
     angular-grid reference lives at ``_sphere_density_multipoles_bands_grid`` (parity gate)."""
+    rr = np.asarray(rr, dtype=float)
+    us = {l: [np.asarray(rad) / rr for rad in us[l]] for l in range(lmax + 1)}
     max_l = max((lang for (lang, _) in lset), default=0)
     deg = 2 * lmax + max_l
     ng_x = deg // 2 + 1 if nx is None else nx
@@ -233,13 +246,16 @@ def sphere_density_multipoles_bands(amps_all, occ, us, lmax, lset, nx: int | Non
     return out
 
 
-def _sphere_density_multipoles_bands_grid(amps_all, occ, us, lmax, lset, nx: int | None = None,
+def _sphere_density_multipoles_bands_grid(amps_all, occ, us, rr, lmax, lset, nx: int | None = None,
                                           nphi: int | None = None):
     """Angular-grid reference for ``sphere_density_multipoles_bands`` (the pre-Gaunt path). Builds
     every band's in-sphere ψ on the Gauss-Legendre×φ grid in stacked tensor ops and projects |ψ|²
-    onto each ``Y*_LM``. Retained only as the parity oracle for the Gaunt contraction; the SCF uses
-    the Gaunt path."""
+    onto each ``Y*_LM``. ``us[l]`` are the **reduced** radials ``u = r·R``; ``rr`` recovers the true
+    ``R = u/r`` before ψ (see ``sphere_density_multipoles_multi``). Retained only as the parity
+    oracle for the Gaunt contraction; the SCF uses the Gaunt path."""
     from scipy.special import sph_harm_y
+    rr = np.asarray(rr, dtype=float)
+    us = {l: [np.asarray(rad) / rr for rad in us[l]] for l in range(lmax + 1)}
     max_l = max((lang for (lang, _) in lset), default=0)
     deg = 2 * lmax + max_l
     if nx is None:

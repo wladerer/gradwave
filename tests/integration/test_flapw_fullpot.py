@@ -86,10 +86,16 @@ def test_oxygen_efg_quadrupolar_coupling():
     physical ¹⁷O quadrupolar coupling — the end-to-end solid-state-NMR observable."""
     from gradwave.flapw import crystal_scf_multi
     from gradwave.flapw.nmr import quadrupolar_coupling
-    _, info = crystal_scf_multi([7.0, 7.0, 5.0], [((0.5, 0.5, 0.5), "O")], {"O": 1.3},
+    # R=1.15 Å (not the historical 1.3): the muffin-tin/cell sanity guard caps the radius at 45%
+    # of the shortest cell edge (5.0 Bohr = 2.65 Å) — 1.3 Å made this test uncollectable on main.
+    _, info = crystal_scf_multi([7.0, 7.0, 5.0], [((0.5, 0.5, 0.5), "O")], {"O": 1.15},
                                 ecut=200.0, iters=30, efg=True, smearing=0.15)
     site = info["efg"]["a0"]
     assert abs(site["V_zz"]) > 5.0                 # nonzero EFG (open shell)
     assert site["eta"] < 0.05                      # axial (tetragonal, doublet-filled)
     cq = quadrupolar_coupling(site["V_zz"], site["eta"], "17O")
-    assert 0.5 < cq["abs_C_Q_MHz"] < 20.0          # physical ¹⁷O range
+    # Gate history: 0.5 < C_Q < 20 encoded the missing-/r² multipole bug (rho_2M = r²·rho_true
+    # damped the ∫ρ/r EFG moment by ~⟨r²⟩). With the true density the deep-interior weight is
+    # restored and this synthetic near-touching compressed-O lattice (a bare p_z hole in a huge
+    # crystal field — not a physical molecular ¹⁷O environment) measures C_Q ≈ 48 MHz.
+    assert 5.0 < cq["abs_C_Q_MHz"] < 100.0
