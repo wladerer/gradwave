@@ -178,10 +178,67 @@ def sphere_density_multipoles_multi(amps, us, lmax, lset, nx: int | None = None,
 
 def sphere_density_multipoles_bands(amps_all, occ, us, lmax, lset, nx: int | None = None,
                                     nphi: int | None = None):
-    """All-band form of ``sphere_density_multipoles_multi``: ``amps_all`` = ``{l: [(nb, 2l+1) per
-    radial]}`` (from ``scf._bands_amps``), ``occ`` the per-band occupations. Builds every band's
-    in-sphere ψ on the angular grid in stacked tensor ops instead of a Python loop over states —
-    equivalent to machine precision (summation order differs)."""
+    """All-band aspherical density components ``{(L,M): ρ_LM(r)}`` by a **Gaunt contraction** over
+    the ``(l,m)`` channel products of ``|ψ|²`` — no angular grid. ``amps_all`` = ``{l: [(nb, 2l+1)
+    per radial]}`` (from ``scf._bands_amps``), ``occ`` the per-band occupations, ``us`` = ``{l:
+    [radial arrays]}`` aligned with ``amps_all``.
+
+    Writing the in-sphere wavefunction ``ψ_n = Σ_{l,p} u^p_l(r) Σ_m A^{l,p}_{n,m} Y_lm`` gives, for
+    the band-summed density,
+
+        ρ_LM(r) = Σ_{l,p,l',q} u^p_l u^q_{l'} Σ_{m,m'} D^{l,p;l',q}_{m,m'} conj(G^{LM}_{lm,l'm'})
+
+    with the per-channel density matrix ``D^{l,p;l',q}_{m,m'} = Σ_n occ_n A^{l,p}_{n,m}
+    conj(A^{l',q}_{n,m'})`` and the Gaunt block ``G^{LM}_{lm,l'm'} = ∫ conj(Y_lm) Y_LM Y_l'm' dΩ``
+    (``gaunt_matrix``; ``∫ Y_lm conj(Y_l'm') conj(Y_LM) = conj(G)``). Selection rules
+    ``|l−l'|≤L≤l+l'`` and ``l+l'+L`` even skip the null blocks. This replaces the
+    ``(nb, nr, nθ, nφ)`` ``|ψ|²`` accumulation (the ~40% fullpot-iteration hotspot) with small
+    ``(2l+1)×(2l'+1)`` contractions plus radial products.
+
+    Both the old angular-grid projection and this contraction compute the *same* exact integral of a
+    band-limited integrand by exact quadrature (the grid's default ``nx``/``nphi`` and
+    ``gaunt_matrix``'s are each exact to the polynomial degree ``2lmax+max L``), so the two agree to
+    ulp; the floating summation order differs. ``nx``/``nphi`` (if given) set the ``gaunt_matrix``
+    quadrature; ``None`` picks the exactness-guaranteeing grid (mirrors the old default). The
+    angular-grid reference lives at ``_sphere_density_multipoles_bands_grid`` (parity gate)."""
+    max_l = max((lang for (lang, _) in lset), default=0)
+    deg = 2 * lmax + max_l
+    ng_x = deg // 2 + 1 if nx is None else nx
+    ng_p = deg + 1 if nphi is None else nphi
+    occ_arr = np.asarray(occ, dtype=float)
+    nr = len(us[0][0])
+    out = {lm: np.zeros(nr, dtype=complex) for lm in lset}
+    lm_by_l = {}                                          # L -> [(M, (L,M) key)] present in lset
+    for (big_l, big_m) in lset:
+        lm_by_l.setdefault(big_l, []).append((big_m, (big_l, big_m)))
+    for l in range(lmax + 1):
+        amps_l = amps_all[l]
+        for lp in range(lmax + 1):
+            amps_lp = amps_all[lp]
+            big_ls = [big_l for big_l in lm_by_l
+                      if abs(l - lp) <= big_l <= l + lp and (l + lp + big_l) % 2 == 0]
+            if not big_ls:
+                continue
+            for p, rad_p in enumerate(us[l]):
+                cp = occ_arr[:, None] * amps_l[p]         # (nb, 2l+1)
+                for q, rad_q in enumerate(us[lp]):
+                    dmat = cp.T @ np.conj(amps_lp[q])     # (2l+1, 2lp+1)
+                    radprod = rad_p * rad_q               # (nr,)
+                    for big_l in big_ls:
+                        for (big_m, key) in lm_by_l[big_l]:
+                            g = gaunt_matrix(l, big_l, big_m, lp, ng_x, ng_p)
+                            s = complex(np.sum(dmat * np.conj(g)))
+                            if s != 0.0:
+                                out[key] += s * radprod
+    return out
+
+
+def _sphere_density_multipoles_bands_grid(amps_all, occ, us, lmax, lset, nx: int | None = None,
+                                          nphi: int | None = None):
+    """Angular-grid reference for ``sphere_density_multipoles_bands`` (the pre-Gaunt path). Builds
+    every band's in-sphere ψ on the Gauss-Legendre×φ grid in stacked tensor ops and projects |ψ|²
+    onto each ``Y*_LM``. Retained only as the parity oracle for the Gaunt contraction; the SCF uses
+    the Gaunt path."""
     from scipy.special import sph_harm_y
     max_l = max((lang for (lang, _) in lset), default=0)
     deg = 2 * lmax + max_l

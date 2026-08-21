@@ -465,20 +465,42 @@ Not pursued, with numbers (same pencils, warm production + cold ecut-500):
   tolerance both times even warm-started from the previous iteration's
   eigenvectors. Same verdict as the plane-wave-side LOBPCG that was removed
   after measurement; do not rebuild it FLAPW-side.
-- **Shift-invert Lanczos (`eigsh`, dense LU of H−σS) beats the dense solve today**:
-  2.5× at dim 737 (4e-13 eV agreement), 5.4× at dim 1559 (3.5e-5 eV). It is the
-  obvious next exact-solve lever, but it needs σ placement, a deterministic
-  starting vector, and a robustness fallback before it can carry Newton's F — not
-  built in this pass.
-- **The dominant remaining cost is not in this pass's scope**:
-  `sphere_density_multipoles_bands` (the aspherical density accumulation on the
-  angular grid, efg.py) is ~40% of a serial fullpot iteration after these changes.
-  A Gaunt-contraction rewrite (density matrix in the (l,m)-channel basis against
-  precomputed Gaunt blocks, no angular grid) should collapse it by an order of
-  magnitude; it lives in the boundary-chain agent's files and is left to that
-  workstream. Parallelizing the per-k density accumulation would also help
-  kworkers>1 runs (it is the serial Amdahl floor that kept the pooled bench at
-  ~15 s/iteration).
+- **The hand-rolled Lanczos variants lose too** — a Python-loop
+  full-reorthogonalization Lanczos measured 0.22× dense (the
+  reorth-against-every-basis-vector loop dominates), and a block-seeded FOM
+  converges only linearly (FIFO block processing advances the Krylov depth once
+  per block, so the interior/top-occupied bands never reach tolerance). The win is
+  ARPACK's compiled implicitly-restarted Lanczos, not a Python inner loop.
+
+Now built (opt-in, default off):
+
+- **Shift-invert secular solves (`lapw.solve_geneig_shift_invert`,
+  `crystal_scf_multi(shift_invert=True)`)** wrap `scipy.sparse.linalg.eigsh`
+  (ARPACK implicitly-restarted Lanczos on `(H−σS)^{-1}S`, its own internal dense LU
+  of `H−σS`) with σ warmed just below the previous iteration's occupied window and
+  a deterministic start vector, guarded by a one-factorization **Sylvester-inertia
+  completeness certificate**: the LDL^H inertia `n_hi` at a midgap `σ_hi` must equal
+  `nbands`, which (with all returned eigenvalues below `σ_hi` and a real gap)
+  certifies the returned set is exactly the lowest `nbands` — a missed Γ multiplet
+  copy or a mis-placed σ breaks it and forces a LOUD dense fallback. Default stays
+  `shift_invert=False` so the exact dense solve keeps Newton's F deterministic and
+  the pool bit-equality metamorphic test untouched. Measured A/B on real captured
+  production pencils (asus, OMP=2, dense vs SI, medians): **2.29× at dim 737**
+  (warm, parity 6e-13 eV, 6/6 engaged), **~2.9× at dim 1559** (cold, 3.5–4.5× on the
+  uncontended iterations, parity 3e-5 eV — a 2.6e-4 eV outlier on the first
+  ill-conditioned cold-staging pencil) — the win grows with dim, and a deliberately
+  mis-placed σ is DECLINED by the certificate. The D5 aug6 config itself is dim~737
+  (ecut300; aug-lmax raises the augmentation channels, not npw), so the dim-737 A/B
+  is the D5-scale point. Harness: `experiments/autoapw/si_ab.py`.
+- **The `sphere_density_multipoles_bands` hotspot (~40% of a serial fullpot
+  iteration) is collapsed by a Gaunt-contraction rewrite** (`efg.py`): per-channel
+  density matrices contracted against precomputed Gaunt blocks in the
+  (l,m)-channel basis, no angular grid. Same exact integral of a band-limited
+  integrand, ulp-equivalent to the retained angular-grid reference (worst relative
+  `|Δρ_LM|` = 9.6e-16 over 288 real density-pass calls). Measured **30.8× per call**
+  (86.4→2.81 ms on the production amps) and **1.90× the whole serial fullpot
+  iteration** (8.53→4.48 s). Parallelizing the per-k density accumulation would
+  further help kworkers>1 runs (the serial Amdahl floor).
 
 ## Case study, geometry relaxation vs QE
 

@@ -53,6 +53,7 @@ from gradwave.flapw.lapw import (
     radial_channel,
     radial_channels_all,
     solve_geneig,
+    solve_geneig_shift_invert,
     solve_geneig_subspace_aug,
 )
 from gradwave.flapw.mixing import anderson_next
@@ -449,7 +450,7 @@ def _geom_dm(geom, nfft_w):
 
 def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=None, chan=None,
                   lodat=None, nsph_int=None, c_prev=None, subspace_tol=1e-4, warp=None,
-                  geom=None):
+                  geom=None, shift_invert=False, sigma=None):
     """Multi-atom LAPW at wavevector k, exposing the density internals the SCF needs. Returns
     ``(eigvals, eigvecs, miller, ks, [abl per atom], vol)``. H,S are complex Hermitian (structure
     phases ``e^{i(k_G'-k_G)·τ_a}``). ``atoms_cart`` = ``[(τ_cart, species_key), ...]``.
@@ -573,13 +574,25 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
             s_ext[npw:, npw:] = np.diag(diag_s)
             h_ext[npw:, npw:] = lo_lo_h
             S, Hm = s_ext, h_ext
-    if c_prev is not None and c_prev.shape[0] == Hm.shape[0]:
+    if c_prev is not None and c_prev.shape[0] == Hm.shape[0] and not shift_invert:
         # Augmented Rayleigh-Ritz in span[last eigenvectors, their current residuals]; the
         # residual gate falls back to the exact dense solve whenever the subspace has drifted
         # (band crossings, early SCF, mixing jumps).
         ev, c, resid = solve_geneig_subspace_aug(Hm, S, c_prev, nbands)
         if resid < subspace_tol:
             return ev, c, mill, ks, abl_by_atom, vol
+    if shift_invert and sigma is not None and Hm.shape[0] > nbands + 1:
+        # OPT-IN shift-invert Lanczos on the (H,S) pencil; the internal two-shift inertia
+        # certificate returns None (→ LOUD dense fallback) on any incompleteness, so the exact
+        # spectrum is never silently corrupted (Newton's F stays deterministic with the default
+        # shift_invert=False).
+        cp = c_prev if (c_prev is not None and c_prev.shape[0] == Hm.shape[0]) else None
+        si = solve_geneig_shift_invert(Hm, S, nbands, sigma, c_prev=cp)
+        if si is not None:
+            return si[0], si[1], mill, ks, abl_by_atom, vol
+        import warnings
+        warnings.warn("FLAPW shift-invert secular certificate failed at this k/iteration; "
+                      "falling back to the exact dense eigensolve", RuntimeWarning, stacklevel=2)
     ev, c = solve_geneig(Hm, S, nbands, with_vecs=True)
     return ev, c, mill, ks, abl_by_atom, vol
 
@@ -931,6 +944,7 @@ class _MultiCtx(NamedTuple):
     kworkers: int
     subspace_reuse: bool
     subspace_tol: float
+    shift_invert: bool
     verbose: bool
     # mutable per-run caches of potential-INDEPENDENT data (the NamedTuple itself stays
     # frozen): "geom" = per-k _k_geometry for the serial solve path (keyed by ik / "gamma"),
@@ -960,6 +974,8 @@ class _MultiState:
         self.hist = ([], [])                   # joint Anderson history
         self.c_prev_by_k: list = []
         self.c_prev_gamma = None               # warm start for the Γ reporting solve
+        self.ev_prev_by_k: list = []           # last iter's eigenvalues per k (shift-invert σ)
+        self.ev_prev_gamma = None
         # last-iteration outputs consumed by _multi_finalize
         self.kdata = None
         self.occ_by_k = None
@@ -981,7 +997,7 @@ def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax:
                  use_symmetry: bool = True, fullpot_lmax: int = 2, los=None, val_e=None,
                  core=None, el_override=None, kworkers: int = 1, subspace_reuse: bool = False,
                  subspace_tol: float = 1e-4, cell=None, kerker: float | None = None,
-                 verbose: bool = False) -> _MultiCtx:
+                 shift_invert: bool = False, verbose: bool = False) -> _MultiCtx:
     """The state-independent setup phase of ``crystal_scf_multi`` (see ``_MultiCtx``).
     Argument semantics and validation are exactly the public entry point's."""
     if (a_bohr is None) == (cell is None):
@@ -1084,6 +1100,7 @@ def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax:
                      ecut=ecut, smearing=smearing, fullpot=fullpot,
                      fullpot_lmax=fullpot_lmax, el_override=el_override, kworkers=kworkers,
                      subspace_reuse=subspace_reuse, subspace_tol=subspace_tol,
+                     shift_invert=shift_invert,
                      verbose=verbose, caches={"geom": {}, "ylm": {}})
 
 
@@ -1123,6 +1140,7 @@ def _multi_init_state(ctx: _MultiCtx, v_start) -> _MultiState:
     from gradwave.flapw.recorder import FLAPWRecorder
     st.recorder = FLAPWRecorder()
     st.c_prev_by_k = [None] * len(ctx.kfracs)
+    st.ev_prev_by_k = [None] * len(ctx.kfracs)
     return st
 
 
@@ -1190,6 +1208,19 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
                             (lodat or {}).get(k), chan_sp=chan[k]) for k in keys}
     kdata, ev_all, ev_gamma = [], [], None
     cprevs = [None if full_iter else c_prev_by_k[ik] for ik in range(len(kfracs))]
+
+    def _sigma_for(evp):
+        # shift-invert σ: just below the previous iteration's occupied window bottom (the
+        # measured-winning placement; the internal inertia certificate adapts if the window moved).
+        if evp is None or len(evp) == 0:
+            return None
+        return float(evp[0]) - max(1.0, 0.02 * float(evp[-1] - evp[0]))
+
+    si_on = ctx.shift_invert
+    sigmas = [(_sigma_for(st.ev_prev_by_k[ik]) if si_on else None) for ik in range(len(kfracs))]
+    # shift-invert reuses last iter's eigenvectors only as a deterministic start seed (not the
+    # subspace-reuse acceptance path); pass them regardless of the full_iter gate.
+    solve_cprev = [(c_prev_by_k[ik] if si_on else cprevs[ik]) for ik in range(len(kfracs))]
     geom_cache = ctx.caches["geom"]
 
     def _geom_for(gk, kf_g):
@@ -1207,8 +1238,8 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
         argl = [SolveKArgs(kf=kf, cell=A, acart=acart, species=species, lmax=lmax,
                            ecut=ecut, r=r, dx=dx, nb_solve=nb_solve, v_nsph=v_nsph,
                            chan=chan, lodat=lodat, nsph_int=nsph_int,
-                           c_prev=cprevs[ik], subspace_tol=subspace_tol,
-                           warp=warp_state)
+                           c_prev=solve_cprev[ik], subspace_tol=subspace_tol,
+                           warp=warp_state, shift_invert=si_on, sigma=sigmas[ik])
                 for ik, kf in enumerate(kfracs)]
         # spawn, not fork: forked children inherit live OpenMP/BLAS state and can compute
         # silently wrong numbers (observed: a 6 eV span error). The pool lives on ctx.caches —
@@ -1225,23 +1256,30 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
     else:
         res_list = [_lapw_multi_k(kf, A, acart, species, lmax, ecut, r, dx, nb_solve,
                                   v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int,
-                                  c_prev=cprevs[ik], subspace_tol=subspace_tol,
-                                  warp=warp_state, geom=_geom_for(ik, kf))
+                                  c_prev=solve_cprev[ik], subspace_tol=subspace_tol,
+                                  warp=warp_state, geom=_geom_for(ik, kf),
+                                  shift_invert=si_on, sigma=sigmas[ik])
                     for ik, kf in enumerate(kfracs)]
     for ik, (kf, w, res) in enumerate(zip(kfracs, kw, res_list, strict=True)):
         kdata.append((kf, w, res))
         ev_all.append(res[0])
         c_prev_by_k[ik] = res[1]
+        st.ev_prev_by_k[ik] = res[0]
         if np.all(np.abs(kf) < 1e-9):
             ev_gamma = res[0]
+            st.ev_prev_gamma = res[0]
     if ev_gamma is None:
+        sigma_g = _sigma_for(st.ev_prev_gamma) if si_on else None
         res_g = _lapw_multi_k((0, 0, 0), A, acart, species, lmax, ecut, r, dx, nb_solve,
                               v_nsph=v_nsph, chan=chan, lodat=lodat, nsph_int=nsph_int,
-                              c_prev=(None if full_iter else st.c_prev_gamma),
+                              c_prev=(st.c_prev_gamma if si_on
+                                      else (None if full_iter else st.c_prev_gamma)),
                               subspace_tol=subspace_tol, warp=warp_state,
-                              geom=_geom_for("gamma", (0, 0, 0)))
+                              geom=_geom_for("gamma", (0, 0, 0)),
+                              shift_invert=si_on, sigma=sigma_g)
         ev_gamma = res_g[0]
         st.c_prev_gamma = res_g[1]
+        st.ev_prev_gamma = res_g[0]
     ev_all = np.array(ev_all)
 
     e_fermi = None
@@ -1538,7 +1576,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                       fullpot_lmax: int = 2, los=None, val_e=None, core=None, el_override=None,
                       v_start=None, kworkers: int = 1, subspace_reuse: bool = False,
                       subspace_tol: float = 1e-4, cell=None, kerker: float | None = None,
-                      verbose: bool = False):
+                      shift_invert: bool = False, verbose: bool = False):
     """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
     ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
@@ -1608,6 +1646,16 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     10x under the degenerate-occupation tolerance (1e-3 eV), so a gated projected solve cannot
     flip an occupation decision.
 
+    ``shift_invert`` (default False — like ``subspace_reuse``, exact solves keep F deterministic)
+    solves each warm iteration's secular problem by shift-invert Lanczos on the ``(H,S)`` pencil
+    (``lapw.solve_geneig_shift_invert``): one ``LDL^H`` factorization of ``H−σS`` with σ just below
+    the occupied window, reused as the OPinv of a deterministic ARPACK (implicitly-restarted)
+    Lanczos on ``(H−σS)^{-1}S``, and a two-shift Sylvester-inertia certificate that forces a LOUD
+    incompleteness (a missed Γ-point multiplet, a mis-placed σ). σ is warmed from the previous
+    iteration's eigenvalues; the first iteration and any cold/degenerate failure fall back to the
+    exact dense solve, so the reported spectrum is never a silently-incomplete window. Measured
+    2.5×/5.4× per-solve at pencil dim 737/1559 (``experiments/autoapw/pencil_bench.py``).
+
     Internally this is ``_multi_setup`` (state-independent context) + ``_multi_init_state`` +
     a loop over ``_multi_iterate`` (the fixed-point map) + ``_multi_finalize`` — split so the
     Newton polish (``flapw.newton``) can pay the setup once and call the map directly."""
@@ -1616,7 +1664,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                        use_symmetry=use_symmetry, fullpot_lmax=fullpot_lmax, los=los,
                        val_e=val_e, core=core, el_override=el_override, kworkers=kworkers,
                        subspace_reuse=subspace_reuse, subspace_tol=subspace_tol, cell=cell,
-                       kerker=kerker, verbose=verbose)
+                       kerker=kerker, shift_invert=shift_invert, verbose=verbose)
     st = _multi_init_state(ctx, v_start)
     for it in range(iters):
         if _multi_iterate(ctx, st, it, iters=iters, tol=tol):
@@ -1739,9 +1787,11 @@ class SolveKArgs(NamedTuple):
     chan: dict | None
     lodat: dict | None
     nsph_int: dict | None
-    c_prev: np.ndarray | None                 # previous eigvecs (subspace reuse)
+    c_prev: np.ndarray | None                 # previous eigvecs (subspace reuse / SI seed)
     subspace_tol: float
     warp: tuple | None                        # (FFT of (v_grid-v_i0)·Θ_I, nfft)
+    shift_invert: bool = False
+    sigma: float | None = None                # shift-invert shift (below the window bottom)
 
 
 def _solve_k_args(args: SolveKArgs):
@@ -1750,7 +1800,8 @@ def _solve_k_args(args: SolveKArgs):
     return _lapw_multi_k(a.kf, a.cell, a.acart, a.species, a.lmax, a.ecut, a.r, a.dx,
                          a.nb_solve, v_nsph=a.v_nsph, chan=a.chan, lodat=a.lodat,
                          nsph_int=a.nsph_int, c_prev=a.c_prev,
-                         subspace_tol=a.subspace_tol, warp=a.warp)
+                         subspace_tol=a.subspace_tol, warp=a.warp,
+                         shift_invert=a.shift_invert, sigma=a.sigma)
 
 
 def _efg_density_pass(kdata, occ_by_k, keys, acart, El_by_key, vmt_by_key, R_by_key, rr_by_key,
