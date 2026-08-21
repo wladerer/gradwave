@@ -350,3 +350,198 @@ def solve_geneig_subspace(H, S, c_prev, nbands, tol=1e-8):
     hv = hp @ y
     sv = sp @ y
     return ev, vecs, _pencil_resid(hv, sv, ev)
+
+
+# ---------------------------------------------------------------------------
+# Shift-invert Lanczos secular path (OPT-IN; exact dense stays the default).
+# ---------------------------------------------------------------------------
+
+
+def _shift_factor(mmat):
+    """Bunch-Kaufman-style ``LDL^H`` factorization of the (Hermitian, indefinite) shift matrix
+    ``M = H − σS`` via ``scipy.linalg.ldl``, packaged for repeated solves plus the Sylvester
+    **inertia** (pencil eigenvalues below σ). Returns ``(fac, n_neg)`` where ``fac`` drives
+    ``_shift_solve`` and ``n_neg`` is the count of negative eigenvalues of the block-diagonal ``D``
+    (= eigenvalues of the pencil ``(H,S)`` below σ, by Sylvester's law of inertia — S is SPD)."""
+    from scipy.linalg import ldl
+    lu, d, perm = ldl(mmat, hermitian=True, lower=True)
+    lp = lu[perm]                                    # lower-triangular outer factor
+    n = d.shape[0]
+    dinv, n_neg, i = [], 0, 0
+    while i < n:
+        if i + 1 < n and abs(d[i + 1, i]) > 0.0:     # 2×2 pivot block
+            blk = d[i:i + 2, i:i + 2]
+            n_neg += int((np.linalg.eigvalsh(blk) < 0).sum())
+            dinv.append((i, 2, np.linalg.inv(blk)))
+            i += 2
+        else:                                        # 1×1 pivot
+            val = d[i, i].real
+            n_neg += int(val < 0.0)
+            dinv.append((i, 1, np.array([[1.0 / val]], dtype=complex)))
+            i += 1
+    return {"lp": lp, "perm": perm, "dinv": dinv}, n_neg
+
+
+def _shift_solve(fac, b):
+    """Solve ``M x = b`` from ``_shift_factor``'s ``LDL^H`` factors (``M = lu·d·lu^H`` with
+    ``lu[perm]`` lower-triangular). Handles 1-D and 2-D ``b``."""
+    from scipy.linalg import solve_triangular
+    lp, perm, dinv = fac["lp"], fac["perm"], fac["dinv"]
+    v = solve_triangular(lp, b[perm], lower=True)          # lu[perm] v = b[perm]
+    z = np.empty_like(v)
+    for (i0, sz, inv) in dinv:                             # z = d^{-1} v (block diagonal)
+        z[i0:i0 + sz] = inv @ v[i0:i0 + sz]
+    w = solve_triangular(lp.conj().T, z, lower=False)      # lu^H via (lu[perm])^H
+    x = np.empty_like(w)
+    x[perm] = w
+    return x
+
+
+def _si_lanczos(op, sdot, snorm, v0, sigma, k, tol_ev, max_basis, n_cycles):
+    """Full-reorthogonalization Lanczos (FOM form: the dense symmetric projected matrix is tracked
+    directly, so thick restart carries no arrow bookkeeping) for the ``k`` eigenpairs of the
+    S-self-adjoint operator ``op = (H−σS)^{-1}S`` nearest σ (largest ``|θ|``; ε = σ + 1/θ). With σ
+    just below the window bottom the ``k`` nearest σ ARE the lowest ``k`` bands. Returns the sorted
+    ``(eps[:k], vecs[:, :k])`` once those ``k`` Ritz pairs converge to ``tol_ev`` (eV), or ``None``
+    if the window fails within ``n_cycles`` thick-restart cycles. Deterministic given ``v0`` (fixed
+    start, no randomness). ``sdot(x,y)=x^H S y``; ``snorm(x)=√Re⟨x,x⟩_S``."""
+    dim = v0.shape[0]
+
+    def reorth(w, basis):
+        h = np.array([sdot(vi, w) for vi in basis]) if basis else np.zeros(0, complex)
+        for i, vi in enumerate(basis):
+            w = w - h[i] * vi
+        for vi in basis:                                  # second DGKS pass (stability only)
+            w = w - sdot(vi, w) * vi
+        return w, h
+
+    nb0 = snorm(v0)
+    if nb0 <= 0:
+        return None
+    basis = [v0 / nb0]
+    hmat = np.zeros((max_basis, max_basis), dtype=complex)
+    kept = 0                                               # locked Ritz vectors after a restart
+
+    def collect(theta, z, m):
+        eps_all = sigma + 1.0 / theta
+        idx = np.argsort(eps_all)[:min(k, m)]
+        vecs = np.column_stack([sum(z[i, t] * basis[i] for i in range(m)) for t in idx])
+        return eps_all[idx].real, vecs
+
+    for _cycle in range(n_cycles + 1):
+        j = kept
+        conv = None
+        while j < max_basis:
+            w = op(basis[j])
+            w, h = reorth(w, basis[:j + 1])               # true projection = first-pass coeffs
+            beta = snorm(w)
+            hmat[:j + 1, j] = h
+            hmat[j, :j + 1] = np.conj(h)
+            if j + 1 < max_basis:
+                hmat[j + 1, j] = beta
+                hmat[j, j + 1] = beta
+            m = j + 1
+            theta, z = np.linalg.eigh(hmat[:m, :m])
+            want = np.argsort(-np.abs(theta))[:min(k, m)]  # nearest σ (largest |θ|)
+            errev = beta * np.abs(z[m - 1, want]) / np.maximum(theta[want] ** 2, 1e-300)
+            if m >= min(k, dim - 1) and float(errev.max()) < tol_ev:
+                conv = (theta, z, m)
+                break
+            if beta < 1e-12:                              # invariant subspace exhausted
+                conv = (theta, z, m)
+                break
+            basis.append(w / beta)
+            j += 1
+        if conv is not None:
+            return collect(*conv)
+        # thick restart: keep the p Ritz vectors nearest σ as the new basis, continue
+        theta, z = np.linalg.eigh(hmat[:max_basis, :max_basis])
+        keep = np.argsort(-np.abs(theta))[:min(k + 6, max_basis - 2)]
+        yk = [sum(z[i, t] * basis[i] for i in range(max_basis)) for t in keep]
+        hmat[:] = 0.0
+        for a, t in enumerate(keep):
+            hmat[a, a] = theta[t]
+        basis = yk
+        kept = len(keep)
+    return None
+
+
+def solve_geneig_shift_invert(hmat, smat, nbands, sigma, c_prev=None, tol_ev=1e-7,
+                              buffer=None, max_basis=None, n_cycles=2):
+    """Shift-invert Lanczos generalized eigensolve for the lowest ``nbands`` of ``H c = ε S c``
+    (OPT-IN; the exact dense ``solve_geneig`` stays the SCF default). One ``LDL^H`` factorization of
+    ``M = H − σS`` drives a deterministic, fully-reorthogonalized Lanczos on ``M^{-1}S`` (S-inner
+    product), with thick restart for degenerate multiplets, and a **two-shift Sylvester-inertia
+    completeness certificate** guarding a LOUD dense fallback.
+
+    ``sigma`` is placed just BELOW the occupied+buffer window (the caller warms it from the
+    previous iteration's lowest eigenvalue, or an atomic estimate cold) — the measured-winning
+    shift (``pencil_bench``: 2.5× at dim 737, 5.4× at 1559; a window-CENTER shift instead leaves
+    the deep bands far from σ and slow, and the certificate would just reject). The certificate:
+    the LDL inertia ``n_lo`` counts pencil eigenvalues below σ, and after the solve a second cheap
+    factorization at a midgap shift ``σ_hi`` in the window's top gap gives ``n_hi``; completeness
+    requires the count of computed eigenvalues below σ to equal ``n_lo`` (nothing beneath σ was
+    missed) AND ``n_hi == nbands`` (exactly ``nbands`` eigenvalues sit below σ_hi, and we returned
+    that many) — a missed multiplet copy or mis-placed σ breaks one and returns ``None``.
+
+    ``c_prev`` (dim×nb) seeds the deterministic start vector (its column sum) so the Krylov space is
+    rich in the occupied subspace incl. degenerate multiplets. Returns ``(evals, vecs)`` matching
+    ``solve_geneig(..., with_vecs=True)``, or ``None`` on any certificate/robustness failure."""
+    dim = hmat.shape[0]
+    nb = min(nbands, dim)
+    if buffer is None:
+        buffer = max(8, nb // 4)
+    k = min(nb + buffer, dim - 1)
+    if dim < 48 or k >= dim - 1:                          # no headroom → let the caller use dense
+        return None
+    if max_basis is None:
+        max_basis = min(dim - 1, 4 * k + 40)
+    try:
+        fac, n_lo = _shift_factor(hmat - sigma * smat)
+    except (np.linalg.LinAlgError, ValueError):
+        return None
+    # verify the factorization actually solves (a permutation/pivot slip → loud fallback)
+    probe = np.zeros(dim, dtype=complex)
+    probe[0] = 1.0
+    xt = _shift_solve(fac, probe)
+    if not np.isfinite(xt).all() or np.linalg.norm((hmat - sigma * smat) @ xt - probe) > 1e-6:
+        return None
+
+    def op(y):
+        return _shift_solve(fac, smat @ y)
+
+    def sdot(x, y):
+        return complex(np.vdot(x, smat @ y))
+
+    def snorm(x):
+        return float(np.sqrt(max(np.vdot(x, smat @ x).real, 0.0)))
+
+    if c_prev is not None and c_prev.shape[0] == dim and c_prev.shape[1] > 0:
+        v0 = c_prev.sum(axis=1).astype(complex)
+    else:
+        v0 = np.ones(dim, dtype=complex)
+    out = _si_lanczos(op, sdot, snorm, v0, sigma, k, tol_ev, max_basis, n_cycles)
+    if out is None:
+        return None
+    eps_ext, vecs_ext = out                              # sorted, length min(k, m) ≥ nb+1 wanted
+    if len(eps_ext) <= nb:
+        return None
+    evals, vecs = eps_ext[:nb], vecs_ext[:, :nb]
+    # --- two-shift inertia completeness certificate ---
+    if int((eps_ext < sigma).sum()) != n_lo:             # every eigenvalue below σ was found
+        return None
+    gap = eps_ext[nb] - eps_ext[nb - 1]
+    if gap <= 1e-9 * max(1.0, abs(eps_ext[nb - 1])):     # window top not isolated → cannot certify
+        return None
+    sigma_hi = 0.5 * (eps_ext[nb - 1] + eps_ext[nb])
+    try:
+        _fac_hi, n_hi = _shift_factor(hmat - sigma_hi * smat)
+    except (np.linalg.LinAlgError, ValueError):
+        return None
+    if n_hi != nb:                                       # exactly nb eigenvalues below σ_hi
+        return None
+    for c in range(vecs.shape[1]):                       # S-normalize (solve_geneig convention)
+        nrm = snorm(vecs[:, c])
+        if nrm > 0:
+            vecs[:, c] /= nrm
+    return evals, vecs
