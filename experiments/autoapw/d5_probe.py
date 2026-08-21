@@ -51,7 +51,7 @@ def d5_cfg():
     )
     if env_int("D5", "LO", 1):
         los = {"Ti": [(0, "3s"), (1, "3p")]}
-        if env_int("D5", "OLO", 1):                          # O 2s semicore LO (D5_OLO=0 to drop it)
+        if env_int("D5", "OLO", 1):                          # O 2s semicore LO (D5_OLO=0 drops it)
             los["O"] = [(0, "2s")]
         cfg.update(
             los=los,
