@@ -597,7 +597,7 @@ def test_sigma_dq_wedge_route_equivalence_si():
     k_frac = np.stack([s.k_frac for s in res.system.spheres])
     mesh_n = [len(np.unique(np.round(k_frac[:, i], 6))) for i in range(3)]
     axes = [i for i in range(3) if mesh_n[i] > 1]
-    plan = _plan_wedge_reduction(res, axes, mesh_n, "auto")
+    plan = _plan_wedge_reduction(res, axes, "auto")
     assert plan is not None
     union_kfrac, per_axis = plan
     assert len(union_kfrac) < len(res.system.spheres)  # setup reduced
@@ -643,7 +643,7 @@ def test_sigma_dq_wedge_route_equivalence_tetragonal():
     k_frac = np.stack([s.k_frac for s in res.system.spheres])
     mesh_n = [len(np.unique(np.round(k_frac[:, i], 6))) for i in range(3)]
     axes = [i for i in range(3) if mesh_n[i] > 1]
-    assert _plan_wedge_reduction(res, axes, mesh_n, "auto") is not None
+    assert _plan_wedge_reduction(res, axes, "auto") is not None
 
     sig_full = sigma_shielding_dq(res, use_symmetry=False)
     sig_red = sigma_shielding_dq(res, use_symmetry="auto")
@@ -671,7 +671,7 @@ def test_sigma_dq_wedge_no_slowdown_low_symmetry():
     k_frac = np.stack([s.k_frac for s in res.system.spheres])
     mesh_n = [len(np.unique(np.round(k_frac[:, i], 6))) for i in range(3)]
     axes = [i for i in range(3) if mesh_n[i] > 1]
-    assert _plan_wedge_reduction(res, axes, mesh_n, "auto") is None  # falls back
+    assert _plan_wedge_reduction(res, axes, "auto") is None  # falls back
 
     sig_full = sigma_shielding_dq(res, use_symmetry=False)
     sig_auto = sigma_shielding_dq(res, use_symmetry="auto")

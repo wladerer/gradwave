@@ -1344,7 +1344,7 @@ def _build_axis_fold(shape, q_hat, tframe, lg, cell, dens_mask):
                             shape=tuple(shape))
 
 
-def _plan_wedge_reduction(res, axes, mesh_n, use_symmetry):
+def _plan_wedge_reduction(res, axes, use_symmetry):
     """Plan the per-axis little-group-of-q k-reduction of the analytic route.
 
     Returns ``None`` to run the exact full-mesh path (symmetry off, or no axis
@@ -1368,7 +1368,15 @@ def _plan_wedge_reduction(res, axes, mesh_n, use_symmetry):
     cell = np.asarray(system.grid.cell, dtype=float)
     frac = system.positions.detach().cpu().numpy() @ np.linalg.inv(cell)
     sg = system.sym or find_spacegroup(cell, frac, system.species_of_atom)
-    mesh: tuple[int, int, int] = (int(mesh_n[0]), int(mesh_n[1]), int(mesh_n[2]))
+    # True Monkhorst–Pack dimensions per axis. ``mesh_n`` (unique k per axis of
+    # the STORED spheres) undercounts when the route runs on the time-reversal
+    # folded mesh — e.g. a 4³ mesh folds to 3 unique kₓ (0, ¼, ½). Recover the
+    # full-BZ dims by TR-unfolding (∪ of k and −k is closed = the MP grid), so
+    # ``_orbit_reduce`` tiles the correct Γ-centered mesh.
+    k_all = np.stack([sph.k_frac for sph in system.spheres])
+    k_pm = np.concatenate([k_all, -k_all], axis=0) % 1.0
+    true_n = [len(np.unique(np.round(k_pm[:, i], 6))) for i in range(3)]
+    mesh: tuple[int, int, int] = (true_n[0], true_n[1], true_n[2])
     b = reciprocal_cell(cell)
     ident = np.eye(3, dtype=np.int64)
     tr_reps, tr_w = _orbit_reduce(mesh, [ident, -ident])  # TR-folded full mesh
@@ -1481,7 +1489,7 @@ def sigma_shielding_dq(
             "BZ sum of the analytic q-derivative only converges along sampled "
             "mesh axes (see docstring)")
 
-    plan = _plan_wedge_reduction(res, axes, mesh_n, use_symmetry)
+    plan = _plan_wedge_reduction(res, axes, use_symmetry)
     if plan is None:  # exact full-mesh path (symmetry off or nothing reduces)
         eng = ShieldingDq(res)
         axis_specs = [
