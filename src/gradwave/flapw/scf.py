@@ -79,8 +79,10 @@ _VALENCE_NL = {"He": {0: "1s"}, "Be": {0: "2s"}, "O": {0: "2s", 1: "2p"},
 # Local-orbital overlap conditioning: valence-orthogonalize an LO when the fraction of its norm
 # orthogonal to span{u, u̇} falls below this (its confined form is then near-linearly-dependent on
 # the valence APW and the extended overlap S goes singular — see _build_lo). Chosen to trip the
-# shallow O 2s semicore LO while leaving the deep, well-separated Ti 3s/3p LOs untouched.
-_LO_COND_TOL = 0.5
+# shallow O 2s semicore LO while leaving the deep, well-separated Ti 3s/3p LOs untouched: the
+# measured rutile-TiO2 iter-0 residual fractions are O 2s 0.13 (E₂ pinned at the valence 2s,
+# S_pu −0.99), Ti 3p 0.21, Ti 3s 0.53, so 0.18 trips only the O LO (which alone NaNs the pencil).
+_LO_COND_TOL = 0.18
 
 
 def _ylm_star(l, ks):
