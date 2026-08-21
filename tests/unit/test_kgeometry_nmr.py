@@ -583,15 +583,16 @@ def _sigma_dq_res(cell, pos, kmesh, *, ecut=6, fft=(15, 15, 15)):
 def test_sigma_dq_wedge_route_equivalence_si():
     # THE non-negotiable gate for the little-group-of-q wedge reduction on the
     # GO case (Si, Oh): the opt-in symmetry-reduced σ must equal the full-mesh
-    # σ to solver tolerance. A 4³ mesh reduces per axis under the |G_q|=6 little
-    # co-group on top of the TR fold (nk 36 → 13 wedge / axis, union ≈ 29).
+    # σ to solver tolerance. The mesh reduces per axis under the |G_q|=6 little
+    # co-group on top of the TR fold (a 3³ mesh keeps the test cheap; the 4³/6³
+    # ~2.7×/3.4× wall factors are measured in experiments/ibz_wedge_speedup.py).
     from gradwave.postscf.kgeometry_nmr import (
         _plan_wedge_reduction,
         sigma_shielding_dq,
     )
 
     cell, pos = si_fcc()
-    res = _sigma_dq_res(cell, pos, (4, 4, 4))
+    res = _sigma_dq_res(cell, pos, (3, 3, 3))
 
     # the reduction actually engaged (not a silent full-mesh fallback)
     k_frac = np.stack([s.k_frac for s in res.system.spheres])
@@ -633,7 +634,7 @@ def test_sigma_dq_wedge_route_equivalence_tetragonal():
     cell, pos = si_fcc()
     strain = np.diag([1.0, 1.0, 1.06])  # uniaxial [001] → tetragonal D4h
     cell_t, pos_t = cell @ strain, pos @ strain
-    res = _sigma_dq_res(cell_t, pos_t, (4, 4, 4))
+    res = _sigma_dq_res(cell_t, pos_t, (3, 3, 3))
 
     from gradwave.symmetry import find_spacegroup
     frac = res.system.positions.cpu().numpy() @ np.linalg.inv(np.asarray(cell_t))

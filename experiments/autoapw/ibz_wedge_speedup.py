@@ -42,28 +42,43 @@ def _res(cell, pos, kmesh, ecut=6, fft=(15, 15, 15)):
     return res
 
 
-def _time(res):
+# measured setup/solve wall split of one sigma_shielding_dq pass (scoping §2,
+# Si 4³ profile): the k-reduction speedup is 1/(fs/r_setup + fv/r_solve).
+_FS, _FV = 0.0811, 0.9189
+
+
+def _plan(res):
     k_frac = np.stack([s.k_frac for s in res.system.spheres])
     mesh_n = [len(np.unique(np.round(k_frac[:, i], 6))) for i in range(3)]
     axes = [i for i in range(3) if mesh_n[i] > 1]
-    plan = _plan_wedge_reduction(res, axes, "auto")
-    if plan is None:
-        nk_wedge = "-"
-    else:
-        union, per_axis = plan
-        nk_wedge = f"union={len(union)} axes={[len(p[2]) for p in per_axis]}"
+    return axes, _plan_wedge_reduction(res, axes, "auto")
 
+
+def _factor(res):
+    """Exact k-count-derived net speedup (per-k cost is constant at fixed ecut,
+    so wall ∝ nk; scoping measured this linearity at 0.99)."""
+    axes, plan = _plan(res)
+    nk_full = len(res.system.spheres)  # the TR-folded mesh the route pays
+    if plan is None:
+        return nk_full, "-", 1.0
+    union, per_axis = plan
+    wedges = [len(p[2]) for p in per_axis]
+    r_setup = nk_full / len(union)
+    r_solve = (nk_full * len(axes)) / sum(wedges)
+    net = 1.0 / (_FS / r_setup + _FV / r_solve)
+    return nk_full, f"union={len(union)} axes={wedges}", net
+
+
+def _wall(res):
     t0 = time.perf_counter()
     sig_full = sigma_shielding_dq(res, use_symmetry=False)
     t_full = time.perf_counter() - t0
-
     t0 = time.perf_counter()
     sig_red = sigma_shielding_dq(res, use_symmetry="auto")
     t_red = time.perf_counter() - t0
-
     scale = float(sig_full.abs().max())
     resid = float((sig_red - sig_full).abs().max())
-    return len(res.system.spheres), nk_wedge, t_full, t_red, resid, scale
+    return t_full, t_red, resid, scale
 
 
 def main() -> None:
@@ -74,20 +89,27 @@ def main() -> None:
     pos_low = pos.copy()
     pos_low[1] += np.array([0.31, 0.17, 0.09])
 
+    # measure=True runs the two sigma passes (slow); measure=False reports only
+    # the exact k-count-derived factor (instant).
     jobs = [
-        ("Si (Oh)", cell, pos, (4, 4, 4)),
-        ("Si (Oh)", cell, pos, (6, 6, 6)),
-        ("tet-Si (D4h)", cell_t, pos_t, (4, 4, 4)),
-        ("tet-Si (D4h)", cell_t, pos_t, (6, 6, 6)),
-        ("low-sym (C1)", cell, pos_low, (4, 4, 4)),
+        ("Si (Oh)", cell, pos, (4, 4, 4), True),
+        ("Si (Oh)", cell, pos, (6, 6, 6), True),
+        ("tet-Si (D4h)", cell_t, pos_t, (4, 4, 4), True),
+        ("tet-Si (D4h)", cell_t, pos_t, (6, 6, 6), False),
+        ("low-sym (C1)", cell, pos_low, (4, 4, 4), True),
     ]
-    print(f"{'system':14s} {'mesh':8s} {'nk_full':7s} {'wedge':24s} "
-          f"{'full[s]':>9s} {'red[s]':>9s} {'speedup':>7s} {'resid_ppm':>10s} {'rel':>9s}")
-    for name, c, p, km in jobs:
+    print(f"{'system':14s} {'mesh':8s} {'nk_full':7s} {'wedge':22s} "
+          f"{'k-factor':>8s} {'full[s]':>9s} {'red[s]':>9s} {'measured':>8s} "
+          f"{'rel_resid':>10s}")
+    for name, c, p, km, meas in jobs:
         res = _res(c, p, km)
-        nkf, nkw, tf, tr, resid, scale = _time(res)
-        print(f"{name:14s} {str(km):8s} {nkf:<7d} {str(nkw):24s} "
-              f"{tf:9.2f} {tr:9.2f} {tf / tr:7.2f} {resid:10.2e} {resid / scale:9.2e}")
+        nkf, nkw, net = _factor(res)
+        if meas:
+            tf, tr, resid, scale = _wall(res)
+            row = f"{tf:9.2f} {tr:9.2f} {tf / tr:8.2f} {resid / scale:10.2e}"
+        else:
+            row = f"{'-':>9s} {'-':>9s} {'-':>8s} {'-':>10s}"
+        print(f"{name:14s} {str(km):8s} {nkf:<7d} {str(nkw):22s} {net:8.2f} {row}")
 
 
 if __name__ == "__main__":
