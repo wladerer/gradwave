@@ -34,7 +34,7 @@ from gradwave.scf.loop import scf, setup_system
 from tests.helpers import RY, si_fcc, si_upf
 
 
-def _res(cell, pos, kmesh, ecut=8, fft=(18, 18, 18)):
+def _res(cell, pos, kmesh, ecut=6, fft=(15, 15, 15)):
     system = setup_system(cell, pos, [0, 0], [si_upf()], ecut=ecut * RY,
                           kmesh=kmesh, nbands=8, use_symmetry=False, fft_shape=fft)
     res = scf(system, PBE(), etol=1e-9, rhotol=1e-8, verbose=False, max_iter=80)
