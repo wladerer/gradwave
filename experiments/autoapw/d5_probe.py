@@ -37,22 +37,26 @@ AXES = {"[110]": np.array([1.0, 1.0, 0.0]) / np.sqrt(2),
 
 
 def d5_cfg():
-    return dict(
+    """The D5 config. ``D5_LO`` selects the local-orbital rung: 0 = aug-lmax only (a clean extension
+    of the aug4/aug5 ladder, warm-startable from an aug4 state); 1 = + Ti 3s/3p + O 2s semicore LOs
+    (the full D5 basis)."""
+    cfg = dict(
         ecut=env_float("D5", "ECUT", 300.0),
         lmax=env_int("D5", "LMAX", 6),
         fullpot=True, fullpot_lmax=4, smearing=0.0, use_symmetry=True,
         subspace_reuse=False,
-        # plain Anderson (kerker=None) diverged on the new lmax6+LO basis warm-started from the
-        # aug4 (no-LO) state — a basis mismatch the bare mixer can't absorb. kerker=0.7 is the
-        # campaign's proven recipe for a fresh basis (tio2_basis_ab); override with D5_KERKER.
-        kerker=env_float("D5", "KERKER", 0.7),
+        kerker=env_float("D5", "KERKER", 0.7),             # campaign fresh-basis recipe (kerker>0)
         shift_invert=bool(env_int("D5", "SI", 1)),
         kworkers=env_int("D5", "KWORKERS", 5),
-        los={"Ti": [(0, "3s"), (1, "3p")], "O": [(0, "2s")]},
-        core={"Ti": [(0, 1, 2), (0, 2, 2), (1, 1, 6)]},    # freeze only 1s,2s,2p (3s→valence)
-        val_e={"Ti": 12},                                  # 3s² 3p⁶ 3d² 4s²
-        el_override={"Ti": {1: "3d"}},                     # l=1 param moved to the valence
     )
+    if env_int("D5", "LO", 1):
+        cfg.update(
+            los={"Ti": [(0, "3s"), (1, "3p")], "O": [(0, "2s")]},
+            core={"Ti": [(0, 1, 2), (0, 2, 2), (1, 1, 6)]},  # freeze only 1s,2s,2p (3s→valence)
+            val_e={"Ti": 12},                                # 3s² 3p⁶ 3d² 4s²
+            el_override={"Ti": {1: "3d"}},                   # l=1 param moved to the valence
+        )
+    return cfg
 
 
 def report(info, tag):
@@ -82,10 +86,12 @@ def main():
 
     # confirm the LO linearization energies (the "2s" label must resolve near O's −0.87 Ha ⇒
     # −23.75 eV, Elk's O 2s LO anchor; Ti 3s/3p are the semicore anchors)
-    ctx = _multi_setup(a_bohr=A_BOHR, atoms=ATOMS, radii=RADII, **cfg)
-    o2s, ti3s, ti3p = ctx.at_by_sym["O"]["2s"], ctx.at_by_sym["Ti"]["3s"], ctx.at_by_sym["Ti"]["3p"]
-    print(f"LO anchors (eV): O 2s={o2s:.2f} (Elk −23.75)  Ti 3s={ti3s:.2f}  Ti 3p={ti3p:.2f}  "
-          f"[Ha: O 2s={o2s/27.2114:.4f} (Elk −0.8727)]", flush=True)
+    if cfg.get("los"):
+        ctx = _multi_setup(a_bohr=A_BOHR, atoms=ATOMS, radii=RADII, **cfg)
+        o2s = ctx.at_by_sym["O"]["2s"]
+        ti3s, ti3p = ctx.at_by_sym["Ti"]["3s"], ctx.at_by_sym["Ti"]["3p"]
+        print(f"LO anchors (eV): O 2s={o2s:.2f} (Elk −23.75)  Ti 3s={ti3s:.2f}  Ti 3p={ti3p:.2f}  "
+              f"[Ha: O 2s={o2s/27.2114:.4f} (Elk −0.8727)]", flush=True)
 
     # The D5 basis (Ti 3s in valence, O 2s LO, val_e 12) has a different electron partition than
     # the saved aug4 (no-LO) states, so warm-starting their potentials is only approximate and
@@ -120,13 +126,14 @@ def main():
     # EFG from the exact (dense) finalize density pass at the converged potential
     _, ie = crystal_scf_multi(A_BOHR, ATOMS, RADII, iters=1, tol=0.0, efg=True,
                               kmesh=(2, 2, 2), v_start={"__full_state__": iw["state"]}, **cfg)
-    tag = f"D5-aug{cfg['lmax']}{'-GATED' if gated else '-MARGINAL'}"
+    lo_tag = "LO" if cfg.get("los") else "noLO"
+    tag = f"D5-aug{cfg['lmax']}-{lo_tag}{'-GATED' if gated else '-MARGINAL'}"
     report(ie, tag)
     if not gated:
         print("WARNING: ungated — EFG is indicative only (ungated states are unquotable)",
               flush=True)
     # persist the D5 state for a possible aug8 warm continuation
-    out = os.path.expanduser(f"~/tio2_states/d5_aug{cfg['lmax']}_k222.pkl")
+    out = os.path.expanduser(f"~/tio2_states/d5_aug{cfg['lmax']}_{lo_tag}_k222.pkl")
     with open(out, "wb") as f:
         pickle.dump(iw["state"], f)
     print(f"state saved: {out}", flush=True)
