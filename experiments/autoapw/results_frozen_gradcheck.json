@@ -1,0 +1,100 @@
+{
+  "config": {
+    "a_bohr": [
+      8.68083,
+      8.68083,
+      5.59096
+    ],
+    "atoms": null,
+    "radii": {
+      "Ti": 1.098,
+      "O": 0.824
+    },
+    "ecut": 250.0,
+    "lmax": 3,
+    "kmesh": [
+      2,
+      2,
+      2
+    ],
+    "smearing": 0.0,
+    "fullpot": true,
+    "fullpot_lmax": 4,
+    "use_symmetry": true,
+    "kerker": 0.7,
+    "tol": 1e-05,
+    "iters": 160,
+    "efg": true,
+    "subspace_reuse": false
+  },
+  "U": 0.3048,
+  "a_ang": 4.59369740772309,
+  "atoms": [
+    {
+      "key": "a0",
+      "R": 1.098,
+      "center0_ang": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "v_zz_torch": 18.113350079654985,
+      "grad_autograd": [
+        1.054361776132445e-14,
+        -1.1588869484889858e-14,
+        -9.78070623401064e-15
+      ],
+      "grad_fd_delta": [
+        0.0,
+        -5.329070518200751e-12,
+        -1.7763568394002505e-12
+      ],
+      "grad_fd_halfdelta": [
+        7.105427357601002e-12,
+        0.0,
+        3.552713678800501e-12
+      ],
+      "err_autograd_vs_fd_delta": 5.603259184312112e-12,
+      "err_autograd_vs_fd_halfdelta": 7.939072730939036e-12,
+      "grad_norm": 1.846975868469164e-14,
+      "grad_nopulay_norm": 0.0,
+      "site": "Ti",
+      "v_zz_numpy_ref": 18.113350079654975,
+      "v_zz_torch_vs_numpy_abs": 1.0658141036401503e-14,
+      "dVzz_du_frozen_ownboundary": 0.0
+    },
+    {
+      "key": "a2",
+      "R": 0.824,
+      "center0_ang": [
+        1.4001589698739978,
+        1.4001589698739978,
+        0.0
+      ],
+      "v_zz_torch": 11.440663109769023,
+      "grad_autograd": [
+        -17.04271556525559,
+        -17.042715565255577,
+        -1.6331734295123624e-05
+      ],
+      "grad_fd_delta": [
+        -17.042721506991043,
+        -17.04272150699282,
+        -1.632916735161416e-05
+      ],
+      "grad_fd_halfdelta": [
+        -17.042717050692602,
+        -17.04271705070326,
+        -1.6331105356925946e-05
+      ],
+      "err_autograd_vs_fd_delta": 8.402884518591453e-06,
+      "err_autograd_vs_fd_halfdelta": 2.1007328072782636e-06,
+      "grad_norm": 24.102039492057028,
+      "grad_nopulay_norm": 0.0,
+      "site": "O",
+      "v_zz_numpy_ref": 11.44066310976904,
+      "v_zz_torch_vs_numpy_abs": 1.7763568394002505e-14,
+      "dVzz_du_frozen_ownboundary": -156.57815662535307
+    }
+  ]
+}
