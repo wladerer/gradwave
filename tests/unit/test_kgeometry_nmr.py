@@ -676,7 +676,10 @@ def test_sigma_dq_wedge_no_slowdown_low_symmetry():
 
     sig_full = sigma_shielding_dq(res, use_symmetry=False)
     sig_auto = sigma_shielding_dq(res, use_symmetry="auto")
-    assert torch.equal(sig_full, sig_auto)  # identical: same full-mesh code path
+    # same full-mesh code path — identical up to threaded-LAPACK ULP noise
+    # between the two independent eigh passes (torch.equal is too strict there)
+    scale = float(sig_full.abs().max())
+    assert float((sig_auto - sig_full).abs().max()) < 1e-9 * scale
 
 
 @pytest.mark.standard
