@@ -803,17 +803,29 @@ class DenseSternheimerSolver:
 
 
 def dense_sternheimer_for(res: Any) -> DenseSternheimerSolver | None:
-    """The gated factory for :class:`DenseSternheimerSolver`: returns None
-    when the dense path is off (``GRADWAVE_DENSE_STERNHEIMER=off``), when the
-    result is not the nspin=1 batched NC shape the solver assembles, or when
-    the factorization would blow the memory budget (auto mode). The solver is
-    cached on ``res`` so repeated response calls (the test battery's many
-    ``velocity_perturbation_q`` invocations) pay the eigh prepass once."""
+    """The gated factory for :class:`DenseSternheimerSolver`.
+
+    DEFAULT OFF (``auto`` returns None). The eigh-prepass draft was MEASURED A
+    NET NEGATIVE at every Si scale tested on asus (Si 12 Ry, unreduced,
+    ``time_reversal=False``): the factorization does not amortize over the
+    ~12-18 conduction-projected solve blocks when ``npw`` is only a few hundred
+    and ``nk`` <= 216 -- the CG path (with per-column active-set compaction) is
+    already fast enough that a full ``eigh`` per mesh Hamiltonian costs more
+    than it saves. Walls (``sigma_shielding``, finite-q): 2^3 dense 516 s vs CG
+    220 s; 4^3 dense 1726 s vs CG 1496 s. The machinery + its certification
+    tests are retained behind an explicit opt-in for the untested large-``npw``
+    / GPU regime the vet hypothesized; production never pays the regression.
+
+    Returns None unless ``GRADWAVE_DENSE_STERNHEIMER=on`` is set explicitly (or
+    the result is not the nspin=1 batched NC shape / would blow the memory
+    budget even then). The solver is cached on ``res`` so an opted-in run pays
+    the eigh prepass once across its many ``velocity_perturbation_q`` calls."""
     mode = os.environ.get("GRADWAVE_DENSE_STERNHEIMER", "auto").strip().lower()
     if mode not in ("auto", "on", "off"):
         raise ValueError(
             f"GRADWAVE_DENSE_STERNHEIMER must be auto|on|off, got {mode!r}")
-    if mode == "off":
+    if mode in ("off", "auto"):
+        # measured negative -> off by default; only explicit "on" builds it
         return None
     system = res.system
     bk = system.batch
@@ -830,7 +842,7 @@ def dense_sternheimer_for(res: Any) -> DenseSternheimerSolver | None:
     if cached is not None and cached[0] == key:
         return cached[1]
     solver: DenseSternheimerSolver | None
-    if mode != "on" and 2 * nk * m * m * 16 > budget:
+    if 2 * nk * m * m * 16 > budget:  # would blow the Q+Λ store even opted-in
         solver = None
     else:
         solver = DenseSternheimerSolver(bk, system.grid.shape, v_eff,

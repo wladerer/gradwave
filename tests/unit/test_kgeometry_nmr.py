@@ -600,15 +600,17 @@ def test_sigma_driver_small(si_mesh):
 # --------------------------------------------------------------------------- #
 
 
-def test_dense_draft_matches_cg_route(si_mesh):
+def test_dense_draft_matches_cg_route(si_mesh, monkeypatch):
     # The eigh-prepass draft + CG certification must land on the same solution
     # as the plain CG route to the shared tolerance, and the draft must
-    # actually be exercised (solve called once per Cartesian mu).
+    # actually be exercised (solve called once per Cartesian mu). The dense
+    # path is a measured-negative opt-in (default off), so force it on.
     from gradwave.postscf._response import (
         DenseSternheimerSolver,
         dense_sternheimer_for,
     )
 
+    monkeypatch.setenv("GRADWAVE_DENSE_STERNHEIMER", "on")
     res = si_mesh
     q = (0.5, 0.0, 0.0)
     sol_cg = velocity_perturbation_q(res, q, cg_tol=1e-9, dense=None)
@@ -634,7 +636,7 @@ def test_dense_draft_matches_cg_route(si_mesh):
     assert float((p_cg - p_d).abs().max() / p_cg.abs().max()) < 1e-7
 
 
-def test_dense_draft_certified_against_lying_solver(si_mesh):
+def test_dense_draft_certified_against_lying_solver(si_mesh, monkeypatch):
     # THE draft-then-certify contract (the fp32-expansion-Davidson style
     # deliberately-lying-operator check): a solver returning pure garbage
     # drafts must still produce the CG-route answer, because every column is
@@ -644,6 +646,7 @@ def test_dense_draft_certified_against_lying_solver(si_mesh):
         dense_sternheimer_for,
     )
 
+    monkeypatch.setenv("GRADWAVE_DENSE_STERNHEIMER", "on")
     res = si_mesh
     q = (0.5, 0.0, 0.0)
     sol_cg = velocity_perturbation_q(res, q, cg_tol=1e-9, dense=None)
@@ -670,16 +673,19 @@ def test_dense_gate_env(si_mesh, monkeypatch):
     res = si_mesh
     monkeypatch.setenv("GRADWAVE_DENSE_STERNHEIMER", "off")
     assert dense_sternheimer_for(res) is None
+    # measured-negative default: "auto" declines too — the dense path is
+    # opt-in only, never built on the production default.
+    monkeypatch.setenv("GRADWAVE_DENSE_STERNHEIMER", "auto")
+    assert dense_sternheimer_for(res) is None
     monkeypatch.setenv("GRADWAVE_DENSE_STERNHEIMER", "bogus")
     with pytest.raises(ValueError, match="GRADWAVE_DENSE_STERNHEIMER"):
         dense_sternheimer_for(res)
-    # auto declines when the factorization would blow the budget …
-    monkeypatch.setenv("GRADWAVE_DENSE_STERNHEIMER", "auto")
-    monkeypatch.setenv("GRADWAVE_DENSE_STERNHEIMER_BUDGET", "1")
-    assert dense_sternheimer_for(res) is None
-    # … "on" skips only the budget check
+    # explicit opt-in builds it …
     monkeypatch.setenv("GRADWAVE_DENSE_STERNHEIMER", "on")
     assert dense_sternheimer_for(res) is not None
+    # … but still declines when the factorization would blow the budget
+    monkeypatch.setenv("GRADWAVE_DENSE_STERNHEIMER_BUDGET", "1")
+    assert dense_sternheimer_for(res) is None
 
 
 def test_apply_cols_matches_apply(si_mesh):
