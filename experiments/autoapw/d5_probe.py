@@ -41,7 +41,11 @@ def d5_cfg():
         ecut=env_float("D5", "ECUT", 300.0),
         lmax=env_int("D5", "LMAX", 6),
         fullpot=True, fullpot_lmax=4, smearing=0.0, use_symmetry=True,
-        subspace_reuse=False, kerker=None,                 # warm plain Anderson (post-#335)
+        subspace_reuse=False,
+        # plain Anderson (kerker=None) diverged on the new lmax6+LO basis warm-started from the
+        # aug4 (no-LO) state — a basis mismatch the bare mixer can't absorb. kerker=0.7 is the
+        # campaign's proven recipe for a fresh basis (tio2_basis_ab); override with D5_KERKER.
+        kerker=env_float("D5", "KERKER", 0.7),
         shift_invert=bool(env_int("D5", "SI", 1)),
         kworkers=env_int("D5", "KWORKERS", 5),
         los={"Ti": [(0, "3s"), (1, "3p")], "O": [(0, "2s")]},
@@ -83,15 +87,22 @@ def main():
     print(f"LO anchors (eV): O 2s={o2s:.2f} (Elk −23.75)  Ti 3s={ti3s:.2f}  Ti 3p={ti3p:.2f}  "
           f"[Ha: O 2s={o2s/27.2114:.4f} (Elk −0.8727)]", flush=True)
 
-    state_path = os.path.expanduser(os.environ.get(
-        "D5_STATE", "~/tio2_states/weinert_aug4_fp4_k222.pkl"))
-    with open(state_path, "rb") as f:
-        state = pickle.load(f)
-    print(f"warm state: {state_path}", flush=True)
+    # The D5 basis (Ti 3s in valence, O 2s LO, val_e 12) has a different electron partition than the
+    # saved aug4 (no-LO) states, so warm-starting their potentials is only approximate and plain
+    # Anderson diverged; default to a COLD kerker=0.7 run (tio2_basis_ab's proven fresh-basis recipe).
+    # Set D5_STATE to warm-start a same-basis continuation.
+    state_env = os.environ.get("D5_STATE", "")
+    v_start = None
+    if state_env:
+        with open(os.path.expanduser(state_env), "rb") as f:
+            v_start = {"__full_state__": pickle.load(f)}
+        print(f"warm state: {state_env}", flush=True)
+    else:
+        print("cold start (kerker-stabilized)", flush=True)
 
     t0 = time.time()
-    _, iw = crystal_scf_multi(A_BOHR, ATOMS, RADII, iters=30, tol=1e-3, efg=False,
-                              kmesh=(2, 2, 2), v_start={"__full_state__": state}, **cfg)
+    _, iw = crystal_scf_multi(A_BOHR, ATOMS, RADII, iters=40, tol=1e-3, efg=False,
+                              kmesh=(2, 2, 2), v_start=v_start, **cfg)
     r = iw["recorder"].summarize()
     n_tot = r["n_iter"]
     cap = env_int("D5", "MAXIT", 90)

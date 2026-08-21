@@ -1649,8 +1649,8 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     ``shift_invert`` (default False — like ``subspace_reuse``, exact solves keep F deterministic)
     solves each warm iteration's secular problem by shift-invert Lanczos on the ``(H,S)`` pencil
     (``lapw.solve_geneig_shift_invert``): one ``LDL^H`` factorization of ``H−σS`` with σ just below
-    the occupied window, a deterministic fully-reorthogonalized Lanczos on ``(H−σS)^{-1}S``, and a
-    two-shift Sylvester-inertia completeness certificate that forces a LOUD dense fallback on any
+    the occupied window, reused as the OPinv of a deterministic ARPACK (implicitly-restarted)
+    Lanczos on ``(H−σS)^{-1}S``, and a two-shift Sylvester-inertia certificate that forces a LOUD
     incompleteness (a missed Γ-point multiplet, a mis-placed σ). σ is warmed from the previous
     iteration's eigenvalues; the first iteration and any cold/degenerate failure fall back to the
     exact dense solve, so the reported spectrum is never a silently-incomplete window. Measured
