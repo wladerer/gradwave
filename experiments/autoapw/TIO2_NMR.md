@@ -552,3 +552,14 @@ PREDICTION RESULTS (asus wp-*.log):
    (density richness: semicore LOs, lmaxapw 8, lmaxo=6 density expansion — our rho_2m stops at
    fullpot_lmax and aug-lmax caps the |psi|^2 cross terms) and the valence-term radial content.
    aug4 x {fp4,fp6} A/B from the exact chain pending (wp-ab).
+
+## ROUND-3 A/B COMPLETE (exact chain, k222-gated; wp-ab, wp-warm on asus 2026-08-21)
+  config    | O [110]/[-110]/[001] (eV/A^2) | O eta | Ti V_zz/eta
+  fp6-aug3  | -6.61 / +7.43 / -0.83         | 0.777 | 0.82 / 0.37
+  aug4-fp4  | -7.08 / +8.02 / -0.94         | 0.767 | 0.58 / 0.76
+  aug4-fp6  | -7.27 / +8.17 / -0.90         | 0.781 | 0.50 / 0.81
+  Elk       | -19.1 / +16.6 / +2.5          | 0.740 | 19.3 / 0.36
+aug4: fp4 vs fp6 agree to 2.6% — fullpot_lmax is CONVERGED and trustworthy end to end.
+Prediction-2 addendum: warm PLAIN Anderson (kerker=None) from base_k222 converged in 15 it
+to r_nsph=4.3e-4 (pre-fix: stall at r_v 0.46 then divergence). The magnitude lever is now
+unambiguously D5 (density richness / on-site valence term), not the boundary.
