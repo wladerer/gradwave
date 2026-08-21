@@ -134,11 +134,16 @@ def test_efg_rotation_equivariance():
 def test_resolution_knob_stability():
     """MR: a result quoted as converged must be stable under raising a resolution knob one notch
     past its quoted setting — here the aspherical-potential cutoff fullpot_lmax (the fullpot
-    lmax=2 EFG artifact was a 3x error invisible at a single setting)."""
+    lmax=2 EFG artifact was a 3x error invisible at a single setting).
+
+    Gate history: 35% under the real-space-sampled pseudocharge chain (own-field aliasing made
+    the L>2 boundary channels partly artifact); with the exact G-space Weinert chain (analytic
+    own-field subtraction, moment-exact high-L pseudocharges) fp2/fp3/fp4 agree to ~1e-5
+    relative on this cell (measured on asus, 2026-08-20) — gate tightened to 2%."""
     kw = dict(ecut=150.0, lmax=2, iters=14, kmesh=(1, 1, 2), smearing=0.0, efg=True,
               fullpot=True, use_symmetry=False)
     _, i2 = crystal_scf_multi(BCT_A, BCT_ATOMS, BCT_R, fullpot_lmax=2, **kw)
     _, i4 = crystal_scf_multi(BCT_A, BCT_ATOMS, BCT_R, fullpot_lmax=4, **kw)
     v2 = abs(i2["efg"]["a0"]["V_zz"])
     v4 = abs(i4["efg"]["a0"]["V_zz"])
-    assert abs(v2 - v4) < 0.35 * max(1.0, v2)   # flag order-unity artifacts, allow refinement
+    assert abs(v2 - v4) < 0.02 * max(1.0, v2)

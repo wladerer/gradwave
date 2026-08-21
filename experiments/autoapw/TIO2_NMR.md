@@ -518,3 +518,48 @@ O LO is confirmed dead (+1%); round 3 uses Elk's l=0 semicore-style LO at -0.87 
 era's 2e3-7e4; never returned a worse state) but 0/5 convergence — k333 entry needs
 pre-contraction (a few k333 Anderson+kerker iterations) before Newton. Round-3 plan:
 fullpot_lmax=6 (post cap fix) x {aug4olo, aug6} + O l=0 LO, warm from saved k222 states.
+
+## EXACT WEINERT CHAIN (weinert-exact-ownfield, 2026-08-20): D2+D4 fixed — stability solved, magnitude NOT
+Replaced the real-space-sampled pseudocharge machinery with Elk's exact G-space construction
+(coulomb.py sphere_pseudocharge_ft/sphere_interstitial_moments): analytic Bessel in-sphere moments
+of rho_I, analytic Fourier synthesis of the moment-matched pseudocharge, and the ANALYTIC own-field
+subtraction C_LM=(v_bc - 4piE2 q^MT/((2L+1)R^{L+1}))/R^L (Elk z1=(zlm-zvclmt(R))/R^l) from the
+HARTREE-ONLY grid (D1 fixed too: no interstitial-XC in the lattice term/EFG). Grid rule: nfft also
+satisfies R_min*Gmax >= (4/3)(Lmax_matched+7) (fp6 rutile: 28->32); npow=clip(round(R*Gmax/6),2,8)
+(measured optimum at our bandwidths; Weinert's /4 assumes deeper asymptotics).
+MACHINERY GATES (weinert_gates.py + tests/unit/test_flapw_weinert.py, asus):
+- retained-rho_I identity (the D2 term, was 100% error): removed to 3.5e-5 rel at nfft=64.
+- lone-sphere boundary null: rel residual 2e-3..3e-2 for L=1..6 (was ~20% at l=2 + O(1) rho_I term).
+- rutile 0.024 A near-touch cross-field (D4): 0.1% at L<=3, worst 1-6% at L5/6, converging in grid.
+PREDICTION RESULTS (asus wp-*.log):
+1. fp6 SANITY: cold fp6 k222 GATES (n_it=63 r_v=4.1e-2 r_nsph=5.6e-4 — the config that diverged at
+   r_nsph=4.0). Gated EFG: O [-6.61,+7.43,-0.83] on [110]/[-110]/[001], eta 0.777 == fp4's
+   [-7.5,+8.35,-0.97]/0.75-0.77 within ~12%. NO runaway (old fp6 fixed point: 115 at same eta).
+   CAVEAT: chunked warm restarts near the fixed point re-excite the marginal mode (measured: every
+   chunk boundary diverged, every in-chunk trajectory re-contracted) — run unbroken chains.
+   The first (chunk-blown, gated=False) fp6 EFG printed +31.9 on [110] (sign-swapped): ungated
+   states remain unquotable, as always.
+2. SCF STABILITY: DMD at the hard config (ecut300 lmax3 fp4 k222, bare damped map): the unstable
+   |rho|=1.02 interstitial pair is GONE — top mode now |rho|=0.952 (<1, same channel), rest <=0.79.
+   Plain-Anderson COLD start no longer actively diverges (bounded oscillation r_nsph~0.35 at it60
+   vs old r_nsph 3-7 divergence) but still needs kerker/warm start to actually converge (basin
+   finding, documented multistability). Warm plain-Anderson test pending (wp-warm).
+3. KNOB STABILITY: BCT fp2/fp3/fp4 V_zz = 36.4977/36.4977/36.4973 — 1.2e-5 relative (was the 35%
+   metamorphic gate; tightened to 2%).
+4. MAGNITUDE: the O in-plane ~2.3x deficit vs Elk PERSISTS at the exact-boundary gated points
+   (fp4 -7.5/+8.4, fp6 -6.6/+7.4 vs Elk -19.1/+16.6; eta right at 0.75-0.78). D2/D4 were the
+   stability/trustworthiness mechanisms, NOT the magnitude mechanism. Remaining suspects: D5
+   (density richness: semicore LOs, lmaxapw 8, lmaxo=6 density expansion — our rho_2m stops at
+   fullpot_lmax and aug-lmax caps the |psi|^2 cross terms) and the valence-term radial content.
+   aug4 x {fp4,fp6} A/B from the exact chain pending (wp-ab).
+
+## ROUND-3 A/B COMPLETE (exact chain, k222-gated; wp-ab, wp-warm on asus 2026-08-21)
+  config    | O [110]/[-110]/[001] (eV/A^2) | O eta | Ti V_zz/eta
+  fp6-aug3  | -6.61 / +7.43 / -0.83         | 0.777 | 0.82 / 0.37
+  aug4-fp4  | -7.08 / +8.02 / -0.94         | 0.767 | 0.58 / 0.76
+  aug4-fp6  | -7.27 / +8.17 / -0.90         | 0.781 | 0.50 / 0.81
+  Elk       | -19.1 / +16.6 / +2.5          | 0.740 | 19.3 / 0.36
+aug4: fp4 vs fp6 agree to 2.6% — fullpot_lmax is CONVERGED and trustworthy end to end.
+Prediction-2 addendum: warm PLAIN Anderson (kerker=None) from base_k222 converged in 15 it
+to r_nsph=4.3e-4 (pre-fix: stall at r_v 0.46 then divergence). The magnitude lever is now
+unambiguously D5 (density richness / on-site valence term), not the boundary.

@@ -72,6 +72,7 @@ def test_polish_converges_bcto():
     # eval budget scales with the monotone-restart rounds: a near-miss round plus a
     # retry legitimately spends >45 F-evals while still delivering the residual —
     # the residual assertion above is the real gate, this only bounds runaway cost
+    # (the exact-Weinert boundary moved the fixed point; CI measured 50 F-evals)
     assert ninfo["f_evals"] < 45 * ninfo.get("rounds", 1)
     # the polished state resumes as a fixed point: one plain iteration barely moves
     _, i1 = crystal_scf_multi(BCT_A, ATOMS, RADII, iters=1, tol=0.0,
