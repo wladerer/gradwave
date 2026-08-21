@@ -50,9 +50,9 @@ def mode_parity(c):
     ctx, st = make_ctx_state(c, warm)
     worst = []
 
-    def comparator(amps_all, occ, us, lmax, lset, nx=None, nphi=None):
-        rf = gaunt(amps_all, occ, us, lmax, lset, nx, nphi)
-        rg = grid_ref(amps_all, occ, us, lmax, lset, nx, nphi)
+    def comparator(amps_all, occ, us, rr, lmax, lset, nx=None, nphi=None):
+        rf = gaunt(amps_all, occ, us, rr, lmax, lset, nx, nphi)
+        rg = grid_ref(amps_all, occ, us, rr, lmax, lset, nx, nphi)
         scale = max(max(float(np.abs(v).max()) for v in rg.values()), 1e-30)
         d = max(float(np.abs(rf[lm] - rg[lm]).max()) for lm in lset)
         worst.append(d / scale)
@@ -88,10 +88,10 @@ def _capture_amps(c):
     warm = load_state(c)
     ctx, st = make_ctx_state(c, warm)
 
-    def grab(amps_all, occ, us, lmax, lset, nx=None, nphi=None):
+    def grab(amps_all, occ, us, rr, lmax, lset, nx=None, nphi=None):
         if not GRABBED:
-            GRABBED.append((amps_all, occ, us, lmax, lset))
-        return gaunt(amps_all, occ, us, lmax, lset, nx, nphi)
+            GRABBED.append((amps_all, occ, us, rr, lmax, lset))
+        return gaunt(amps_all, occ, us, rr, lmax, lset, nx, nphi)
 
     efg.sphere_density_multipoles_bands = grab
     _multi_iterate(ctx, st, 0, iters=200, tol=0.0)
@@ -112,9 +112,9 @@ def mode_bench(c):
     n = env_int("GA", "N", 8)
     # isolated per-call ratio on real production amps (contention-immune)
     _capture_amps(c)
-    amps_all, occ, us, lmax, lset = GRABBED[0]
-    t_g = _timeit(lambda: gaunt(amps_all, occ, us, lmax, lset), 25)
-    t_r = _timeit(lambda: grid_ref(amps_all, occ, us, lmax, lset), 25)
+    amps_all, occ, us, rr, lmax, lset = GRABBED[0]
+    t_g = _timeit(lambda: gaunt(amps_all, occ, us, rr, lmax, lset), 25)
+    t_r = _timeit(lambda: grid_ref(amps_all, occ, us, rr, lmax, lset), 25)
     print(f"per-call (dim lset={len(lset)}, lmax={lmax}, nb={len(occ)}): "
           f"grid {t_r*1e3:.2f} ms  gaunt {t_g*1e3:.2f} ms  x{t_r/t_g:.1f}", flush=True)
     # whole-iteration wall A/B

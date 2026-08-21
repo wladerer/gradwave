@@ -3,12 +3,15 @@ a pure s state has no l=2 asphericity, a p_z state does, and a filled p shell is
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from gradwave.flapw.efg import efg_tensor, sphere_density_multipoles
 
 NR = 8
 _US = {l: (np.ones(NR), np.zeros(NR)) for l in range(3)}     # flat radial parts (angular test only)
+_RR = np.linspace(0.1, 1.0, NR)                              # radial mesh (u->R = u/r in the build)
 _LSET = [(0, 0)] + [(2, m) for m in range(-2, 3)]
 
 
@@ -34,14 +37,14 @@ def _l2_magnitude(rho):
 
 def test_pure_s_has_no_l2_asphericity():
     """A pure s state is spherical: nonzero monopole, ~zero l=2 density."""
-    rho = sphere_density_multipoles([_amp(0, 0)], _US, 2, _LSET)
+    rho = sphere_density_multipoles([_amp(0, 0)], _US, _RR, 2, _LSET)
     assert abs(rho[(0, 0)][0]) > 0.1
     assert _l2_magnitude(rho) < 1e-10
 
 
 def test_pz_state_is_aspherical():
     """A p_z (l=1, m=0) state carries a real l=2, M=0 density and no M=±1, ±2."""
-    rho = sphere_density_multipoles([_amp(1, 0)], _US, 2, _LSET)
+    rho = sphere_density_multipoles([_amp(1, 0)], _US, _RR, 2, _LSET)
     assert abs(rho[(2, 0)][0]) > 0.05
     assert abs(rho[(2, 1)][0]) < 1e-10
     assert abs(rho[(2, 2)][0]) < 1e-10
@@ -50,7 +53,7 @@ def test_pz_state_is_aspherical():
 def test_filled_p_shell_is_spherical():
     """One electron in each of p_{-1}, p_0, p_{+1} (filled shell) is spherical again: ~zero l=2."""
     amps = [_amp(1, m) for m in (-1, 0, 1)]
-    rho = sphere_density_multipoles(amps, _US, 2, _LSET)
+    rho = sphere_density_multipoles(amps, _US, _RR, 2, _LSET)
     assert abs(rho[(0, 0)][0]) > 0.1
     assert _l2_magnitude(rho) < 1e-10
 
@@ -90,7 +93,7 @@ def test_efg_from_pz_amplitudes_is_axial():
     a = {0: np.zeros(1, complex), 1: np.zeros(3, complex), 2: np.zeros(5, complex)}
     a[1][1] = 1.0
     b = {ll: np.zeros(2 * ll + 1, complex) for ll in range(3)}
-    rho = sphere_density_multipoles([(1.0, a, b)], us, 2, [(2, m) for m in range(-2, 3)])
+    rho = sphere_density_multipoles([(1.0, a, b)], us, rr, 2, [(2, m) for m in range(-2, 3)])
     _, v_zz, eta = efg_tensor(rho, rr, drw)
     assert abs(v_zz) > 1e-6
     assert eta < 1e-6
@@ -157,13 +160,15 @@ def test_nonspherical_potential_axial_density_is_axial():
 
 
 def _random_bands_inputs(rng, lmax, nb, nr, n_rad):
-    """Synthetic (amps_all, occ, us) in the ``sphere_density_multipoles_bands`` layout: ``n_rad``
-    radial functions per l, random complex band amplitudes, positive occupations."""
+    """Synthetic (amps_all, occ, us, rr) in the ``sphere_density_multipoles_bands`` layout:
+    ``n_rad`` radial functions per l, random complex band amplitudes, positive occupations, and a
+    strictly-positive radial mesh (the build divides each reduced radial by ``r``)."""
     us = {l: [rng.standard_normal(nr) for _ in range(n_rad)] for l in range(lmax + 1)}
     amps_all = {l: [rng.standard_normal((nb, 2 * l + 1)) + 1j * rng.standard_normal((nb, 2 * l + 1))
                     for _ in range(n_rad)] for l in range(lmax + 1)}
     occ = rng.uniform(0.1, 2.0, size=nb)
-    return amps_all, occ, us
+    rr = np.linspace(0.05, 2.0, nr)
+    return amps_all, occ, us, rr
 
 
 def test_gaunt_multipoles_match_angular_grid():
@@ -177,9 +182,9 @@ def test_gaunt_multipoles_match_angular_grid():
     rng = np.random.default_rng(0)
     lmax, nb, nr = 3, 12, 20
     lset = [(0, 0)] + [(bl, m) for bl in range(1, 5) for m in range(-bl, bl + 1)]
-    amps_all, occ, us = _random_bands_inputs(rng, lmax, nb, nr, n_rad=3)
-    fast = sphere_density_multipoles_bands(amps_all, occ, us, lmax, lset)
-    ref = _sphere_density_multipoles_bands_grid(amps_all, occ, us, lmax, lset)
+    amps_all, occ, us, rr = _random_bands_inputs(rng, lmax, nb, nr, n_rad=3)
+    fast = sphere_density_multipoles_bands(amps_all, occ, us, rr, lmax, lset)
+    ref = _sphere_density_multipoles_bands_grid(amps_all, occ, us, rr, lmax, lset)
     scale = max(max(float(np.abs(v).max()) for v in ref.values()), 1e-30)
     for lm in lset:
         assert np.abs(fast[lm] - ref[lm]).max() < 1e-11 * scale, lm
@@ -192,9 +197,34 @@ def test_gaunt_multipoles_density_is_hermitian():
     rng = np.random.default_rng(1)
     lmax, nb, nr = 3, 10, 16
     lset = [(bl, m) for bl in range(0, 5) for m in range(-bl, bl + 1)]
-    amps_all, occ, us = _random_bands_inputs(rng, lmax, nb, nr, n_rad=2)
-    rho = sphere_density_multipoles_bands(amps_all, occ, us, lmax, lset)
+    amps_all, occ, us, rr = _random_bands_inputs(rng, lmax, nb, nr, n_rad=2)
+    rho = sphere_density_multipoles_bands(amps_all, occ, us, rr, lmax, lset)
     scale = max(max(float(np.abs(v).max()) for v in rho.values()), 1e-30)
     for (bl, m) in lset:
         if m > 0:
             assert np.abs(rho[(bl, m)] - (-1) ** m * np.conj(rho[(bl, -m)])).max() < 1e-11 * scale
+
+
+def test_monopole_recovers_in_sphere_valence_charge():
+    """Gate for the ``/r²`` in the multipole build: the monopole charge
+    ``√(4π)∫ρ_00 r² dr`` must equal the band-summed in-sphere charge
+    ``Σ_n occ_n ∫|ψ_n|² r² dr`` built independently from the TRUE radial ``R = u/r``.
+    Converting ``|u|² → |R|² = |ψ|²`` needs the ``/r²`` — the pre-fix build (``|u|²`` raw) reads a
+    charge too small by ``⟨r²⟩`` and this cheap invariant would have caught the bug at once."""
+    from gradwave.flapw.efg import sphere_density_multipoles_bands
+    rng = np.random.default_rng(7)
+    lmax, nb, nr = 3, 8, 48
+    amps_all, occ, us, rr = _random_bands_inputs(rng, lmax, nb, nr, n_rad=2)
+    lset = [(0, 0)] + [(bl, m) for bl in range(1, 5) for m in range(-bl, bl + 1)]
+    rho = sphere_density_multipoles_bands(amps_all, occ, us, rr, lmax, lset)
+    w = np.full_like(rr, float(rr[1] - rr[0]))
+    q_multipole = float(math.sqrt(4 * math.pi) * np.sum(rho[(0, 0)].real * rr**2 * w))
+    q_direct = 0.0                                    # Σ_n occ_n ∫ Σ_lm|Σ_p A^p_{nm} R^p_l|² r² dr
+    for lang in range(lmax + 1):
+        rad_r = [np.asarray(u) / rr for u in us[lang]]
+        for mi in range(2 * lang + 1):
+            c = sum(amps_all[lang][p][:, mi][:, None] * rad_r[p][None, :]
+                    for p in range(len(rad_r)))       # (nb, nr)
+            s = (occ[:, None] * np.abs(c) ** 2).sum(axis=0)
+            q_direct += float(np.sum(s * rr**2 * w))
+    assert abs(q_multipole - q_direct) < 1e-9 * abs(q_direct)

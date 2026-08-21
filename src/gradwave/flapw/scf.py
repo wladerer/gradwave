@@ -1336,8 +1336,8 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
             if fullpot and not mt_phase:
                 amps_all = _bands_amps(cp, ks, abl_all[ai], lmax, vol, lo_block=lo_block,
                                        los=los_k, ylm_by_l=ylm_by_l)
-                rlm = sphere_density_multipoles_bands(amps_all, occl, us_by_key[k], lmax,
-                                                      lset2)
+                rlm = sphere_density_multipoles_bands(amps_all, occl, us_by_key[k],
+                                                      rr_by_key[k], lmax, lset2)
                 for lm in lset2:
                     rho_2m[k][lm] += w * rlm[lm]
 
@@ -1835,7 +1835,8 @@ def _efg_density_pass(kdata, occ_by_k, keys, acart, El_by_key, vmt_by_key, R_by_
                         if nlo_k else None)
             amps_all = _bands_amps(cp, ks, abl_all[ai], lmax, vol, lo_block=lo_block,
                                    los=los_k, ylm_by_l=ylm_by_l)
-            rlm = sphere_density_multipoles_bands(amps_all, occl, us_by_key[k], lmax, lset2)
+            rlm = sphere_density_multipoles_bands(amps_all, occl, us_by_key[k],
+                                                  rr_by_key[k], lmax, lset2)
             for lm in lset2:
                 rho_2m[k][lm] += w * rlm[lm]
     return rho_2m
