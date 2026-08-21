@@ -156,6 +156,20 @@ class BatchedK:
     def npw_max(self) -> int:
         return int(self.mask.shape[1])
 
+    def reindex(self, idx: torch.Tensor) -> BatchedK:
+        """This batch restricted/reordered to k rows ``idx`` (per-k fields only;
+        npw_max, the atom index and the D-matrix are k-independent). The
+        Toeplitz difference-index cache is dropped, NOT inherited: it belongs
+        to the parent's flat_idx, and a table built for the parent's spheres is
+        wrong for the reindexed ones (the k+q Hamiltonian would silently apply
+        the wrong local term and a Sternheimer CG diverges to NaN)."""
+        import dataclasses
+
+        return dataclasses.replace(
+            self, npw=self.npw[idx], mask=self.mask[idx],
+            flat_idx=self.flat_idx[idx], kpg=self.kpg[idx], t=self.t[idx],
+            proj_phase_free=self.proj_phase_free[idx], toep_idx_cache=None)
+
 
 def build_batched(
     spheres: list[GSphere], proj_data: list[ProjectorData], device: torch.device | None = None
@@ -489,6 +503,48 @@ class BatchedHamiltonian:
             bh = torch.einsum("kpg,kbg->kbp", hq_conj, c)
             out = out + torch.einsum("kbp,pq,kqg->kbg", bh, hd, hq)
         return out * bk.mask[:, None, :]
+
+    def apply_cols(self, c: torch.Tensor, kcol: torch.Tensor) -> torch.Tensor:
+        """H applied to a compacted COLUMN batch: ``c`` (ncol, npw_max) with a
+        per-column k index ``kcol`` (ncol,) into this operator's BatchedK.
+
+        The active-set compaction path of ``postscf._response.cg_sternheimer``:
+        once most (k, band) Sternheimer columns have converged, the survivors
+        are gathered into one flat batch and applied here, so the per-iteration
+        cost tracks the ACTIVE column count instead of the full (nk, nb) block.
+        Math-identical to ``apply`` on the corresponding rows (same tables,
+        same FFT local term — the Toeplitz path is not used here: gathering
+        M[kcol] per apply would cost ncol·npw² memory traffic every iteration,
+        which defeats the compaction).
+        """
+        if _HAPPLY_TALLY["on"]:
+            _HAPPLY_TALLY["count"] += int(c.shape[0])
+        opcount.bump("hpsi", int(c.shape[0]))
+        t_r, v_eff, p, p_conj, dij = self._tables(c.dtype)
+        out = t_r[kcol] * c
+        # local term: dense-box FFT pair with per-column scatter/gather
+        ncol, m = c.shape
+        chunk = self._band_chunk(1, c.device, c.element_size())
+        for lo in range(0, ncol, chunk):
+            hi = min(lo + chunk, ncol)
+            cc = c[lo:hi]
+            box = torch.zeros(hi - lo, self.n + 1, dtype=c.dtype, device=c.device)
+            box.scatter_(1, self.idx_scatter[kcol[lo:hi]], cc)
+            opcount.bump("fft")
+            psi = torch.fft.ifftn(
+                box[:, : self.n].reshape(hi - lo, *self.shape), dim=(-3, -2, -1))
+            opcount.bump("fft")
+            vg = torch.fft.fftn(psi * v_eff, dim=(-3, -2, -1)).reshape(hi - lo, self.n)
+            out[lo:hi] += vg.gather(1, self.gather_idx[kcol[lo:hi]])
+        if p.shape[1]:
+            ps, ps_conj = p[kcol], p_conj[kcol]
+            b = torch.einsum("cpg,cg->cp", ps_conj, c)
+            out = out + torch.einsum("cp,pq,cqg->cg", b, dij, ps)
+        if self.hub_q is not None and self.hub_dij is not None:
+            hq, hq_conj, hd = self._hub_tables(c.dtype)
+            bh = torch.einsum("cpg,cg->cp", hq_conj[kcol], c)
+            out = out + torch.einsum("cp,pq,cqg->cg", bh, hd, hq[kcol])
+        return out * self.bk.mask[kcol]
 
     def _hub_tables(self, cdtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         cached = self._hub_cache.get(cdtype)

@@ -23,18 +23,20 @@ Import direction: this module depends only on ``gradwave.core``/
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Callable
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 import torch
 
 from gradwave.constants import E2
+from gradwave.core.batch import BatchedHamiltonian, BatchedK, projectors_b
 from gradwave.core.density import sigma_from_rho
 from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.xc.base import XCFunctional, xc_eager
 from gradwave.core.xc.noncollinear import NoncollinearXC
 from gradwave.core.xc.spin import SpinXC
-from gradwave.dtypes import CDTYPE
+from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.grids import FFTGrid
 from gradwave.solvers.precond import teter_b
 
@@ -485,26 +487,68 @@ def pad_coeffs(coeffs_per_k: list[torch.Tensor], npw_max: int,
     return out
 
 
+class _AppliesHCols(Protocol):
+    """The optional compaction contract of ``cg_sternheimer``: a batched
+    Hamiltonian that can additionally apply itself to a flat COLUMN batch with
+    a per-column k index (``core.batch.BatchedHamiltonian.apply_cols``).
+    Operators without it (e.g. the spinor ``SpinorHamiltonian``) take the
+    plain lockstep path unchanged."""
+
+    def apply(self, x: torch.Tensor, /) -> torch.Tensor: ...
+
+    def apply_cols(self, x: torch.Tensor, kcol: torch.Tensor, /) -> torch.Tensor: ...
+
+
 def cg_sternheimer(h: _AppliesH, bk: _HasKineticTable, c_occ: torch.Tensor,
                    eps_occ: torch.Tensor, rhs: torch.Tensor, x0: torch.Tensor, shift: float,
                    tol: float=1e-8, max_iter: int=400) -> torch.Tensor:
     """Batched conduction-projected Sternheimer: (H − ε_n + s·P_occ)δψ = rhs,
     for all occupied bands of all k at once ((nk, nocc, npw_max), masked).
     rhs must already lie in the conduction space; positive definite there
-    thanks to the gap — insulators only."""
+    thanks to the gap — insulators only.
 
-    def p_occ(x):
+    Convergence is PER (k, band) COLUMN when the operator supports compacted
+    applies (``apply_cols`` — ``BatchedHamiltonian`` does): the block-diagonal
+    CG couples columns only through the stop rule, so each column runs exactly
+    its own iteration count. Once the active fraction drops, the surviving
+    columns are gathered into one flat batch so the per-iteration cost tracks
+    the ACTIVE count (the lockstep max-norm rule paid every column the worst
+    column's iterations). A final true-residual pass re-measures every column
+    against the full operator and tops up any drifted one, so a returned
+    solution is certified to ``tol`` — which also makes a warm ``x0`` (e.g. a
+    :class:`DenseSternheimerSolver` draft) safe: columns already below ``tol``
+    cost one certification apply, wrong drafts are simply iterated.
+    Operators without ``apply_cols`` (the spinor shim) keep the historical
+    lockstep loop bit-for-bit."""
+
+    def p_occ(x: torch.Tensor) -> torch.Tensor:
         ov = torch.einsum("kng,kbg->kbn", c_occ.conj(), x)
         return torch.einsum("kbn,kng->kbg", ov, c_occ)
 
-    def a_apply(x):
+    def a_apply(x: torch.Tensor) -> torch.Tensor:
         hx = h.apply(x) - eps_occ[..., None] * x
         return hx - p_occ(hx) + shift * p_occ(x)
+
+    # Defend the padding invariant against arbitrary drafts. On the ragged
+    # sphere the operator restricted to a padded plane-wave slot is just the
+    # indefinite diagonal −ε_n (``h.apply`` zeros padded outputs, the P_occ
+    # terms are zero-padded through ``c_occ``), so a draft carrying garbage in
+    # its masked slots would make CG diverge there to NaN. Honest drafts (and
+    # the zeros default) are already zero-padded, so this is a bit-for-bit
+    # no-op for every real caller; it only makes the certify contract ("wrong
+    # drafts are simply iterated") hold for a draft that violates the mask.
+    mask = getattr(bk, "mask", None)
+    if mask is not None:
+        x0 = x0 * mask[:, None, :].to(x0.dtype)
 
     t_band = torch.clamp(
         torch.einsum("kbg,kg,kbg->kb", c_occ.conj(), bk.t.to(c_occ.dtype), c_occ).real,
         min=1e-6,
     )
+    if hasattr(h, "apply_cols"):
+        return _cg_percolumn(cast("_AppliesHCols", h), bk, c_occ, eps_occ, rhs,
+                             x0, shift, t_band, tol, max_iter)
+
     x = x0.clone()
     r = rhs - a_apply(x)
     z = teter_b(r, bk.t, t_band)
@@ -523,3 +567,285 @@ def cg_sternheimer(h: _AppliesH, bk: _HasKineticTable, c_occ: torch.Tensor,
         p = z + (rz_new / torch.clamp(rz, min=1e-300))[..., None] * p
         rz = rz_new
     return x - p_occ(x)
+
+
+def _cg_percolumn(h: _AppliesHCols, bk: _HasKineticTable, c_occ: torch.Tensor,
+                  eps_occ: torch.Tensor, rhs: torch.Tensor, x0: torch.Tensor,
+                  shift: float, t_band: torch.Tensor, tol: float,
+                  max_iter: int) -> torch.Tensor:
+    """Per-column CG body of :func:`cg_sternheimer` (operator supports
+    ``apply_cols``). Column trajectories are mathematically independent
+    (every CG reduction is per-(k, b)), so freezing/compacting converged
+    columns changes results only at round-off."""
+
+    def p_occ(x: torch.Tensor) -> torch.Tensor:
+        ov = torch.einsum("kng,kbg->kbn", c_occ.conj(), x)
+        return torch.einsum("kbn,kng->kbg", ov, c_occ)
+
+    def a_apply(x: torch.Tensor) -> torch.Tensor:
+        hx = h.apply(x) - eps_occ[..., None] * x
+        return hx - p_occ(hx) + shift * p_occ(x)
+
+    nk, nb, _ = rhs.shape
+    total = nk * nb
+    x = x0.clone()
+    used = 0
+    # up to 3 true-residual rounds: the initial certification apply, one
+    # top-up pass over recurrence-drifted columns, one safety repeat
+    for _round in range(3):
+        r = rhs - a_apply(x)
+        rn = torch.linalg.norm(r, dim=-1)  # (nk, nb) per-column true residual
+        if used >= max_iter or float(rn.max()) < tol:
+            break
+
+        # ---- lockstep phase: full-block iterations while most columns are
+        # active (the batched apply is cheapest per column there) ----
+        z = teter_b(r, bk.t, t_band)
+        p = z
+        rz = torch.einsum("kbg,kbg->kb", r.conj(), z).real
+        while used < max_iter and int((rn >= tol).sum()) > total // 4:
+            ap = a_apply(p)
+            pap = torch.einsum("kbg,kbg->kb", p.conj(), ap).real
+            a_cg = rz / torch.clamp(pap, min=1e-300)
+            x = x + a_cg[..., None] * p
+            r = r - a_cg[..., None] * ap
+            used += 1
+            rn = torch.linalg.norm(r, dim=-1)
+            if float(rn.max()) < tol:
+                break
+            z = teter_b(r, bk.t, t_band)
+            rz_new = torch.einsum("kbg,kbg->kb", r.conj(), z).real
+            p = z + (rz_new / torch.clamp(rz, min=1e-300))[..., None] * p
+            rz = rz_new
+        if used >= max_iter or float(rn.max()) < tol:
+            continue  # round loop re-measures the true residual
+
+        # ---- compacted phase: gather the surviving columns (with their CG
+        # state) into one flat (ncol, npw) batch ----
+        act = (rn >= tol).nonzero(as_tuple=True)
+        kcol, bcol = act[0], act[1]
+        xa, ra, pa = x[kcol, bcol], r[kcol, bcol], p[kcol, bcol]
+        rza = rz[kcol, bcol]
+        c_sel = c_occ[kcol]
+        eps_col = eps_occ[kcol, bcol]
+        t_sel = bk.t[kcol]
+        tb_sel = t_band[kcol, bcol]
+
+        while used < max_iter and kcol.numel():
+            hv = h.apply_cols(pa, kcol) - eps_col[:, None] * pa
+            ov = torch.einsum("cng,cg->cn", c_sel.conj(), hv)
+            hv = hv - torch.einsum("cn,cng->cg", ov, c_sel)
+            ov2 = torch.einsum("cng,cg->cn", c_sel.conj(), pa)
+            ap_a = hv + shift * torch.einsum("cn,cng->cg", ov2, c_sel)
+            pap_a = torch.einsum("cg,cg->c", pa.conj(), ap_a).real
+            al = rza / torch.clamp(pap_a, min=1e-300)
+            xa = xa + al[:, None] * pa
+            ra = ra - al[:, None] * ap_a
+            used += 1
+            rna = torch.linalg.norm(ra, dim=-1)
+            done = rna < tol
+            if bool(done.any()):
+                x[kcol[done], bcol[done]] = xa[done]
+                keep = ~done
+                kcol, bcol = kcol[keep], bcol[keep]
+                xa, ra, pa, rza = xa[keep], ra[keep], pa[keep], rza[keep]
+                c_sel, eps_col = c_sel[keep], eps_col[keep]
+                t_sel, tb_sel = t_sel[keep], tb_sel[keep]
+                if not kcol.numel():
+                    break
+            za = teter_b(ra[:, None, :], t_sel, tb_sel[:, None])[:, 0]
+            rz_new_a = torch.einsum("cg,cg->c", ra.conj(), za).real
+            pa = za + (rz_new_a / torch.clamp(rza, min=1e-300))[:, None] * pa
+            rza = rz_new_a
+        if kcol.numel():  # max_iter exhausted: keep the best iterates
+            x[kcol, bcol] = xa
+    return x - p_occ(x)
+
+
+# --------------------------------------------------------------------------- #
+#  Dense eigh-prepass Sternheimer (draft-then-certify)                         #
+# --------------------------------------------------------------------------- #
+
+
+# Diagonal pushed onto padded plane-wave slots before the eigh so their
+# eigenpairs are inert unit vectors far above the physical spectrum: the
+# resolvent denominator there is ~_PAD_EIG, and padded rhs slots are zero
+# anyway, so drafts carry exact zeros in the padding.
+_PAD_EIG = 1e8
+
+# Combined budget [bytes] for the stored factorization (Q + Λ) plus the
+# transient per-chunk assembly workspace — the ``_use_toeplitz``-style gate
+# that keeps the dense path from surprising a memory-tight box. ~216 k-points
+# at npw_max 800 fit in the default 4 GiB. GRADWAVE_DENSE_STERNHEIMER_BUDGET
+# overrides; GRADWAVE_DENSE_STERNHEIMER in {"auto", "on", "off"} forces the
+# path for A/B benchmarks ("on" skips only the budget check, never the
+# structural guards).
+_DENSE_STERN_BUDGET_BYTES = 1 << 32
+
+
+class DenseSternheimerSolver:
+    """One eigh prepass over the mesh Hamiltonians; every Sternheimer solve
+    becomes two batched GEMMs in the eigenbasis (a DRAFT, certified by the
+    caller through ``cg_sternheimer(x0=draft)`` — draft-then-certify, the
+    fp32-expansion-Davidson precedent).
+
+    Every conduction-projected solve in the finite-q NMR pipeline — all axes,
+    both ±q signs, every polarization, every Dyson screening iteration, and
+    ``dfpt_q.chi0_q`` itself — uses one of the SAME nk mesh Hamiltonians
+    (H_{k+q} is the mesh Hamiltonian at the fold point k_j), differing only by
+    the per-band scalar shift ε_nk and the rank-nocc occupied projector, which
+    is diagonal in the same eigenbasis. One factorization therefore amortizes
+    over every solve of a whole tensor evaluation.
+
+    The dense H(k) is assembled EXACTLY from the batched path's own
+    ingredients — diag(``bk.t``) + the Toeplitz local matrix V̂(G_i−G_j) (the
+    normative-exact dense form of the FFT apply) + pᴴ·D·p from
+    ``projectors_b`` (the SCF's splined tables; NOT ``BlochHK.h``, whose
+    direct-Bessel projectors differ at ~1e-9 — right at cg_tol) — so the
+    draft solves the certifying operator itself, and the only draft error is
+    the O(Davidson-residual) gauge mismatch between the dense occupied
+    eigenvectors and the SCF's ``c_occ``, which the certification pass
+    catches by construction.
+
+    Build through :func:`dense_sternheimer_for` (the size/memory gate);
+    ``h_for`` additionally memoizes one ``BatchedHamiltonian`` per fold
+    permutation so repeated Dyson/screening solves stop rebuilding it.
+    """
+
+    def __init__(self, bk: BatchedK, shape: tuple[int, int, int],
+                 v_eff_r: torch.Tensor, positions: torch.Tensor,
+                 *, kchunk: int = 8) -> None:
+        self.bk = bk
+        self.shape = shape
+        self.v_eff_r = v_eff_r
+        self.positions = positions
+        self.kchunk = int(kchunk)
+        nk, m = bk.mask.shape
+        n1, n2, n3 = shape
+        s12 = n2 * n3
+        nbox = torch.tensor(shape, device=bk.flat_idx.device)
+        p_all = projectors_b(bk, positions).detach()
+        dij = bk.dij_full.to(CDTYPE)
+        vhat = r_to_g(v_eff_r.to(CDTYPE)).reshape(-1)
+        self.evals = torch.empty(nk, m, dtype=RDTYPE)
+        self.evecs = torch.empty(nk, m, m, dtype=CDTYPE)
+        for lo in range(0, nk, self.kchunk):
+            hi = min(lo + self.kchunk, nk)
+            # Miller triples back from the box-flat index; wrapped pairwise
+            # difference -> the Toeplitz local matrix (BatchedHamiltonian's
+            # _build_toeplitz_index logic, chunked over k)
+            flat = bk.flat_idx[lo:hi].to(torch.long)
+            g = torch.stack(
+                [flat // s12, (flat % s12) // n3, flat % n3], dim=-1)
+            diff = (g[:, :, None, :] - g[:, None, :, :]) % nbox
+            hmat = vhat[diff[..., 0] * s12 + diff[..., 1] * n3 + diff[..., 2]]
+            mask = bk.mask[lo:hi]
+            hmat = hmat * (mask[:, :, None] & mask[:, None, :])
+            if p_all.shape[1]:
+                p = p_all[lo:hi]
+                hmat = hmat + torch.einsum("kqg,pq,kph->kgh", p, dij, p.conj())
+            diag = hmat.diagonal(dim1=-2, dim2=-1)
+            diag += bk.t[lo:hi].to(CDTYPE)
+            diag += (~mask).to(CDTYPE) * _PAD_EIG
+            hmat = 0.5 * (hmat + hmat.mH)
+            w, u = torch.linalg.eigh(hmat)
+            self.evals[lo:hi] = w
+            self.evecs[lo:hi] = u
+        self._h_cache: dict[tuple[int, ...], tuple[BatchedHamiltonian, BatchedK]] = {}
+
+    def solve(self, jsel: torch.Tensor, eps: torch.Tensor, rhs: torch.Tensor,
+              shift: float, nocc: int) -> torch.Tensor:
+        """Eigenbasis draft of ``cg_sternheimer``'s solution of
+        (H_{k_j} − ε_b + shift·P_occ)·x = rhs.
+
+        Row i of ``rhs`` (nrow, nb, npw_max) lives on the mesh sphere
+        ``jsel[i]``; ``eps`` (nrow, nb) are the per-column reference
+        energies. Chunked gathers keep the peak Q-workspace at
+        kchunk·npw_max² regardless of nrow."""
+        jsel = torch.as_tensor(jsel, dtype=torch.long)
+        nrow = rhs.shape[0]
+        m = rhs.shape[-1]
+        occ_shift = torch.zeros(m, dtype=RDTYPE)
+        occ_shift[:nocc] = shift
+        x = torch.empty_like(rhs)
+        for lo in range(0, nrow, self.kchunk):
+            hi = min(lo + self.kchunk, nrow)
+            q = self.evecs[jsel[lo:hi]]
+            lam = self.evals[jsel[lo:hi]]
+            y = torch.einsum("cgm,cbg->cbm", q.conj(), rhs[lo:hi])
+            denom = lam[:, None, :] - eps[lo:hi][..., None] + occ_shift
+            x[lo:hi] = torch.einsum("cgm,cbm->cbg", q, y / denom.to(y.dtype))
+        return x
+
+    def h_for(self, jsel: torch.Tensor) -> tuple[BatchedHamiltonian, BatchedK]:
+        """One (BatchedHamiltonian, BatchedK) per fold permutation, memoized —
+        the certification/polish operator for solves whose rows live on the
+        spheres ``jsel``. Toeplitz is forced for its construction (within the
+        memory gate) exactly as in ``dfpt_q._chi0_q_batched``: the batched
+        many-k Sternheimer apply is the regime where it wins."""
+        jsel = torch.as_tensor(jsel, dtype=torch.long)
+        key = tuple(int(i) for i in jsel)
+        hit = self._h_cache.get(key)
+        if hit is None:
+            import gradwave.core.batch as _batch
+
+            bk_kq = self.bk.reindex(jsel)
+            prev = _batch._TOEPLITZ_MODE
+            _batch._TOEPLITZ_MODE = "on"
+            try:
+                h = BatchedHamiltonian(bk_kq, self.shape, self.v_eff_r,
+                                       projectors_b(bk_kq, self.positions))
+            finally:
+                _batch._TOEPLITZ_MODE = prev
+            hit = (h, bk_kq)
+            self._h_cache[key] = hit
+        return hit
+
+
+def dense_sternheimer_for(res: Any) -> DenseSternheimerSolver | None:
+    """The gated factory for :class:`DenseSternheimerSolver`.
+
+    DEFAULT OFF (``auto`` returns None). The eigh-prepass draft was MEASURED A
+    NET NEGATIVE at every Si scale tested on asus (Si 12 Ry, unreduced,
+    ``time_reversal=False``): the factorization does not amortize over the
+    ~12-18 conduction-projected solve blocks when ``npw`` is only a few hundred
+    and ``nk`` <= 216 -- the CG path (with per-column active-set compaction) is
+    already fast enough that a full ``eigh`` per mesh Hamiltonian costs more
+    than it saves. Walls (``sigma_shielding``, finite-q): 2^3 dense 516 s vs CG
+    220 s; 4^3 dense 1726 s vs CG 1496 s. The machinery + its certification
+    tests are retained behind an explicit opt-in for the untested large-``npw``
+    / GPU regime the vet hypothesized; production never pays the regression.
+
+    Returns None unless ``GRADWAVE_DENSE_STERNHEIMER=on`` is set explicitly (or
+    the result is not the nspin=1 batched NC shape / would blow the memory
+    budget even then). The solver is cached on ``res`` so an opted-in run pays
+    the eigh prepass once across its many ``velocity_perturbation_q`` calls."""
+    mode = os.environ.get("GRADWAVE_DENSE_STERNHEIMER", "auto").strip().lower()
+    if mode not in ("auto", "on", "off"):
+        raise ValueError(
+            f"GRADWAVE_DENSE_STERNHEIMER must be auto|on|off, got {mode!r}")
+    if mode in ("off", "auto"):
+        # measured negative -> off by default; only explicit "on" builds it
+        return None
+    system = res.system
+    bk = system.batch
+    v_eff = res.v_eff
+    if bk is None or v_eff.dim() != 3 or getattr(res, "nspin", 1) != 1:
+        return None
+    if bk.mask.device.type != "cpu":
+        return None  # the factorization is assembled/stored on CPU
+    budget = int(os.environ.get("GRADWAVE_DENSE_STERNHEIMER_BUDGET",
+                                str(_DENSE_STERN_BUDGET_BYTES)))
+    nk, m = bk.mask.shape
+    key = (mode, budget)
+    cached = getattr(res, "_dense_sternheimer_cache", None)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    solver: DenseSternheimerSolver | None
+    if 2 * nk * m * m * 16 > budget:  # would blow the Q+Λ store even opted-in
+        solver = None
+    else:
+        solver = DenseSternheimerSolver(bk, system.grid.shape, v_eff,
+                                        system.positions)
+    res._dense_sternheimer_cache = (key, solver)
+    return solver
