@@ -74,7 +74,6 @@ with the mesh for the Sternheimer route (the dense twin and the analytic
 from __future__ import annotations
 
 import math
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
@@ -751,96 +750,6 @@ def _transverse_frame(q_hat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return t1, np.cross(q_hat, t1)
 
 
-@dataclass(frozen=True)
-class _BranchSpoke:
-    """Picklable spec of one (axis, ±q) branch pipeline of
-    :func:`sigma_shielding` for the spawn pool (everything a worker needs
-    beyond the shared result file)."""
-
-    res_path: str
-    q_frac: np.ndarray  # (3,) signed
-    pols: tuple[np.ndarray, ...]
-    xc: object | None
-    screen: bool
-    cg_tol: float
-    cg_max_iter: int
-    nl_quad: int
-
-
-# one loaded result (+ its hoisted VelocityApply) per worker process; keyed by
-# the result file so a stale entry can never leak across sigma_shielding calls
-_BRANCH_WORKER_CACHE: dict[str, tuple[SCFResult, VelocityApply]] = {}
-
-
-def _branch_worker(spoke: _BranchSpoke) -> list[Tensor]:
-    """One (axis, sign) branch of :func:`sigma_shielding` in a pool worker:
-    the three velocity Sternheimer solves, the KB pair velocity, and the
-    per-polarization induced currents — returning the conserved ``j_total``
-    fields in polarization order (small; the heavy solve state never crosses
-    the process boundary). The loaded result — and, cached on it, the dense
-    eigh factorization — persists in the worker across spokes."""
-    hit = _BRANCH_WORKER_CACHE.get(spoke.res_path)
-    if hit is None:
-        res_l = torch.load(spoke.res_path, weights_only=False)
-        _BRANCH_WORKER_CACHE.clear()
-        hit = (res_l, VelocityApply(res_l.system))
-        _BRANCH_WORKER_CACHE[spoke.res_path] = hit
-    res, v = hit
-    sol = velocity_perturbation_q(res, spoke.q_frac, cg_tol=spoke.cg_tol,
-                                  max_iter=spoke.cg_max_iter, v=v)
-    nl = _NLPairVelocity(res.system, sol, nquad=spoke.nl_quad)
-    return [
-        induced_current_q(res, spoke.q_frac, pol, sol=sol, _nl=nl,
-                          xc=spoke.xc, screen=spoke.screen,
-                          cg_tol=spoke.cg_tol,
-                          cg_max_iter=spoke.cg_max_iter).j_total
-        for pol in spoke.pols
-    ]
-
-
-def _branch_fields_pooled(
-    res: SCFResult,
-    axis_jobs: list[tuple[np.ndarray, Tensor, np.ndarray, list[np.ndarray]]],
-    *,
-    xc: object | None,
-    screen: bool,
-    cg_tol: float,
-    cg_max_iter: int,
-    nl_quad: int,
-    n_workers: int,
-) -> list[list[Tensor]]:
-    """Fan the (axis, ±q) branch pipelines of :func:`sigma_shielding` out to a
-    spawn pool (the ``flapw`` / ``seedpool`` shape: spawn, not fork — forked
-    children inherit live OpenMP/BLAS state and can compute silently wrong
-    numbers). The converged result is shipped once through a temp file, each
-    worker returns only the per-polarization ``j_total`` fields, and results
-    come back in submission order — the deterministic (axis, sign) key."""
-    import tempfile
-
-    from gradwave.postscf.seedpool import map_spokes
-
-    fd, path = tempfile.mkstemp(suffix=".pt", prefix="gw-sigma-res-")
-    os.close(fd)
-    # never ship a parent-side dense factorization (GBs) through the file;
-    # workers rebuild and cache their own
-    cache = res.__dict__.pop("_dense_sternheimer_cache", None)
-    try:
-        torch.save(res, path)
-        spokes = [
-            _BranchSpoke(res_path=path, q_frac=sign * q_frac,
-                         pols=tuple(pols), xc=xc, screen=screen,
-                         cg_tol=cg_tol, cg_max_iter=cg_max_iter,
-                         nl_quad=nl_quad)
-            for q_frac, _q_cart, _q_hat, pols in axis_jobs
-            for sign in (1.0, -1.0)
-        ]
-        return map_spokes(_branch_worker, spokes, n_workers=n_workers)
-    finally:
-        if cache is not None:
-            res.__dict__["_dense_sternheimer_cache"] = cache
-        os.unlink(path)
-
-
 def sigma_shielding(
     res: SCFResult,
     *,
@@ -851,7 +760,6 @@ def sigma_shielding(
     cg_max_iter: int = 400,
     nl_quad: int = 8,
     sites: Tensor | None = None,
-    n_workers: int | None = None,
 ) -> Tensor:
     """Bare (pseudo) NMR chemical-shielding tensor σ_ij per site, in ppm:
     σ_ij = −∂B_ind,i(r_site)/∂B_ext,j (positive = shielded), shape
@@ -889,12 +797,10 @@ def sigma_shielding(
     two mesh axes of more than one point (else the 3×3 tensor is
     underdetermined and a ValueError is raised).
 
-    ``n_workers > 1`` fans the independent (axis, ±q) branch pipelines out to
-    a spawn ProcessPoolExecutor (each worker capped at its share of the
-    parent's intra-op threads — the ``postscf.seedpool`` budget); results are
-    accumulated in a fixed (axis, sign, polarization) order, so at matched
-    per-op thread counts the pooled tensor is bit-identical to the serial
-    one. ``xc`` must be picklable when pooling a screened run.
+    This is the finite-q *validation* route (route-equivalence against the
+    dense twin). For production shielding use the analytic :func:`sigma_shielding_dq`,
+    which is ~3× faster at every mesh and carries neither the O(q²) nor the
+    sphere-boundary finite-q error.
     """
     _guard(res)
     system = res.system
@@ -920,27 +826,22 @@ def sigma_shielding(
 
     # per-branch conserved-current fields, in fixed (axis, sign) order with
     # (polarization) order inside — the deterministic accumulation key
-    if n_workers is not None and n_workers > 1:
-        j_branches = _branch_fields_pooled(
-            res, axis_jobs, xc=xc, screen=screen, cg_tol=cg_tol,
-            cg_max_iter=cg_max_iter, nl_quad=nl_quad, n_workers=n_workers)
-    else:
-        v = VelocityApply(system)
-        dense = dense_sternheimer_for(res)
-        j_branches = []
-        for q_frac, _q_cart, _q_hat, pols in axis_jobs:
-            for sign in (1.0, -1.0):
-                sol = velocity_perturbation_q(
-                    res, sign * q_frac, cg_tol=cg_tol, max_iter=cg_max_iter,
-                    dense=dense, v=v)
-                nl = _NLPairVelocity(system, sol, nquad=nl_quad)
-                j_branches.append([
-                    induced_current_q(res, sign * q_frac, pol, sol=sol,
-                                      _nl=nl, xc=xc, screen=screen,
-                                      cg_tol=cg_tol,
-                                      cg_max_iter=cg_max_iter).j_total
-                    for pol in pols
-                ])
+    v = VelocityApply(system)
+    dense = dense_sternheimer_for(res)
+    j_branches = []
+    for q_frac, _q_cart, _q_hat, pols in axis_jobs:
+        for sign in (1.0, -1.0):
+            sol = velocity_perturbation_q(
+                res, sign * q_frac, cg_tol=cg_tol, max_iter=cg_max_iter,
+                dense=dense, v=v)
+            nl = _NLPairVelocity(system, sol, nquad=nl_quad)
+            j_branches.append([
+                induced_current_q(res, sign * q_frac, pol, sol=sol,
+                                  _nl=nl, xc=xc, screen=screen,
+                                  cg_tol=cg_tol,
+                                  cg_max_iter=cg_max_iter).j_total
+                for pol in pols
+            ])
 
     b_rows: list[np.ndarray] = []
     m_rows: list[Tensor] = []

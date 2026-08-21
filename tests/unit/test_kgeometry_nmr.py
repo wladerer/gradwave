@@ -754,29 +754,3 @@ def test_percolumn_cg_matches_lockstep_and_certifies(si_mesh):
 
     rn = torch.linalg.norm(rhs - a_apply(x_new), dim=-1)
     assert float(rn.max()) < 5.0 * tol  # every column certified
-
-
-@pytest.mark.standard
-def test_sigma_pool_bitwise_identical():
-    # Spawn-pool gate: the pooled tensor must be BITWISE identical to the
-    # serial one. Thread parity makes that well-defined: both the serial
-    # reference and the pooled evaluation (parent + each worker) run at one
-    # intra-op thread — the pool's only difference is WHERE the branch
-    # pipelines run, never what they compute.
-    from gradwave.postscf.kgeometry_nmr import sigma_shielding
-
-    torch.set_num_threads(2)
-    cell, pos = si_fcc()
-    system = setup_system(cell, pos, [0, 0], [si_upf()], ecut=6 * RY,
-                          kmesh=(2, 2, 1), nbands=8, use_symmetry=False,
-                          fft_shape=(15, 15, 15))
-    res = scf(system, PBE(), etol=1e-8, rhotol=1e-7, verbose=False, max_iter=80)
-    assert res.converged
-    n_prev = torch.get_num_threads()
-    try:
-        torch.set_num_threads(1)  # workers inherit cap floor(1/2) -> 1 thread
-        sig_serial = sigma_shielding(res, cg_tol=1e-6, nl_quad=3)
-        sig_pool = sigma_shielding(res, cg_tol=1e-6, nl_quad=3, n_workers=2)
-    finally:
-        torch.set_num_threads(n_prev)
-    assert torch.equal(sig_serial, sig_pool)
