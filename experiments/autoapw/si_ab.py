@@ -28,6 +28,10 @@ from gradwave.flapw.scf import _multi_init_state, _multi_iterate, _multi_setup
 
 def capture_pencils(c, warm, n):
     """First (H, S, dense_evals) of the first k of each of ``n`` consecutive iterations."""
+    # the capture wraps solve_geneig for the DENSE reference; the captured SCF must therefore run
+    # all-dense (shift_invert=False) so every iteration's first-k pencil is grabbed — with the
+    # "auto" default an above-crossover iteration would take the SI path and bypass the wrap.
+    c = dict(c, shift_invert=False)
     ctx = _multi_setup(a_bohr=A_BOHR, atoms=ATOMS, radii=RADII, **c)
     st = _multi_init_state(ctx, warm)
     if warm is None:
@@ -73,12 +77,23 @@ def main():
     c["kworkers"] = 1
     n = env_int("SI", "N", 6)
     cold = env_int("SI", "COLD", 0)
-    warm = None if cold else {"__full_state__": load_state(c)}
+    if env_int("SI", "D5", 0):
+        # the aug6 D5 basis: the second parity gate at a richer in-sphere basis (lmax=6), warm-
+        # started from a saved aug6 state (cold aug6 diverges — NaN in the radial solve). Same
+        # geometry/dim ~737, but the l≤6 augmentation + fullpot l=4 Hamiltonian and Γ multiplets.
+        import pickle
+        c["lmax"] = 6
+        d5_state = os.path.expanduser(os.environ.get(
+            "SI_D5_STATE", "~/tio2_states/d5_aug6_noLO_k222.pkl"))
+        with open(d5_state, "rb") as f:
+            warm = {"__full_state__": pickle.load(f)}
+    else:
+        warm = None if cold else {"__full_state__": load_state(c)}
     pencils, nbands = capture_pencils(c, warm, n)
     dim = pencils[0][0].shape[0]
     print(f"# si_ab ecut={c['ecut']} lmax={c['lmax']} fp={c['fullpot_lmax']} k={c['kmesh'][0]} "
-          f"cold={cold} dim={dim} nbands={nbands} OMP={os.environ.get('OMP_NUM_THREADS')}",
-          flush=True)
+          f"d5={env_int('SI', 'D5', 0)} cold={cold} dim={dim} nbands={nbands} "
+          f"OMP={os.environ.get('OMP_NUM_THREADS')}", flush=True)
 
     worst = 0.0
     engaged = 0

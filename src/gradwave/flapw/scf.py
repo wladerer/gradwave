@@ -448,6 +448,32 @@ def _geom_dm(geom, nfft_w):
     return geom["dm"]
 
 
+# Measured shift-invert crossover (experiments/autoapw/si_crossover.py, asus, production rutile
+# TiO2, OMP=2): below this pencil dimension the dense generalized eigensolve (eigh(S) + MRRR
+# subset) is faster than ARPACK shift-invert + the two-shift inertia certificate; above it
+# shift-invert wins and the margin grows with the basis. Measured per-solve speedup vs dim:
+# 265→0.79× (loss), 439→1.75×, 705→1.73×, 1105→2.78× — break-even is ~dim 300. The threshold is
+# set with margin above break-even so "auto" engages only where the win is solidly ≥1.5×.
+# The "auto" policy (the crystal_scf_multi default) engages shift-invert only above this dim; below
+# it, and for the two determinism-required contexts (Newton's F, the pool bit-equality path), the
+# exact dense solve stays in force.
+_SHIFT_INVERT_CROSSOVER_DIM = 400
+
+
+def _resolve_shift_invert(mode, dim: int) -> bool:
+    """Resolve the ``shift_invert`` knob (``True`` / ``False`` / ``"auto"``) to an engage decision
+    for a secular pencil of size ``dim``. ``True`` = always attempt (the completeness certificate
+    still guards the loud dense fallback); ``False`` / ``None`` = never (exact dense only, the
+    determinism-preserving choice); ``"auto"`` = attempt only above the measured crossover dim
+    ``_SHIFT_INVERT_CROSSOVER_DIM``, where the win is real. The per-solve gate for a valid σ and
+    headroom (``sigma is not None and dim > nbands + 1``) stays at the call site."""
+    if mode is True:
+        return True
+    if not mode:                                    # False / None
+        return False
+    return dim > _SHIFT_INVERT_CROSSOVER_DIM        # "auto" (or any truthy non-True)
+
+
 def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=None, chan=None,
                   lodat=None, nsph_int=None, c_prev=None, subspace_tol=1e-4, warp=None,
                   geom=None, shift_invert=False, sigma=None):
@@ -574,6 +600,14 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
             s_ext[npw:, npw:] = np.diag(diag_s)
             h_ext[npw:, npw:] = lo_lo_h
             S, Hm = s_ext, h_ext
+    # ``shift_invert`` is True / False / "auto"; resolve it against the final pencil dim (after any
+    # LO extension) — "auto" engages only above the measured crossover, True always attempts (the
+    # certificate still guards), False/None never. subspace-aug and shift-invert are alternative
+    # warm paths that both reuse ``c_prev``: when shift_invert is truthy ``c_prev`` is the SI start
+    # seed (NOT a subspace-aug seed), so the aug branch is gated on the shift_invert MODE, not the
+    # per-dim engage decision — a below-crossover "auto" solve then falls straight to exact dense
+    # (the SI seed is simply unused), identical to the old shift_invert=False default.
+    si_engage = _resolve_shift_invert(shift_invert, Hm.shape[0])
     if c_prev is not None and c_prev.shape[0] == Hm.shape[0] and not shift_invert:
         # Augmented Rayleigh-Ritz in span[last eigenvectors, their current residuals]; the
         # residual gate falls back to the exact dense solve whenever the subspace has drifted
@@ -581,11 +615,11 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
         ev, c, resid = solve_geneig_subspace_aug(Hm, S, c_prev, nbands)
         if resid < subspace_tol:
             return ev, c, mill, ks, abl_by_atom, vol
-    if shift_invert and sigma is not None and Hm.shape[0] > nbands + 1:
-        # OPT-IN shift-invert Lanczos on the (H,S) pencil; the internal two-shift inertia
-        # certificate returns None (→ LOUD dense fallback) on any incompleteness, so the exact
-        # spectrum is never silently corrupted (Newton's F stays deterministic with the default
-        # shift_invert=False).
+    if si_engage and sigma is not None and Hm.shape[0] > nbands + 1:
+        # shift-invert Lanczos on the (H,S) pencil; the internal two-shift inertia certificate
+        # returns None (→ LOUD dense fallback) on any incompleteness, so the exact spectrum is
+        # never silently corrupted. Determinism-required contexts (Newton's F, the pool
+        # bit-equality path) pass shift_invert=False and never reach here.
         cp = c_prev if (c_prev is not None and c_prev.shape[0] == Hm.shape[0]) else None
         si = solve_geneig_shift_invert(Hm, S, nbands, sigma, c_prev=cp)
         if si is not None:
@@ -944,7 +978,7 @@ class _MultiCtx(NamedTuple):
     kworkers: int
     subspace_reuse: bool
     subspace_tol: float
-    shift_invert: bool
+    shift_invert: bool | str
     verbose: bool
     # mutable per-run caches of potential-INDEPENDENT data (the NamedTuple itself stays
     # frozen): "geom" = per-k _k_geometry for the serial solve path (keyed by ik / "gamma"),
@@ -997,7 +1031,7 @@ def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax:
                  use_symmetry: bool = True, fullpot_lmax: int = 2, los=None, val_e=None,
                  core=None, el_override=None, kworkers: int = 1, subspace_reuse: bool = False,
                  subspace_tol: float = 1e-4, cell=None, kerker: float | None = None,
-                 shift_invert: bool = False, verbose: bool = False) -> _MultiCtx:
+                 shift_invert: bool | str = "auto", verbose: bool = False) -> _MultiCtx:
     """The state-independent setup phase of ``crystal_scf_multi`` (see ``_MultiCtx``).
     Argument semantics and validation are exactly the public entry point's."""
     if (a_bohr is None) == (cell is None):
@@ -1576,7 +1610,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                       fullpot_lmax: int = 2, los=None, val_e=None, core=None, el_override=None,
                       v_start=None, kworkers: int = 1, subspace_reuse: bool = False,
                       subspace_tol: float = 1e-4, cell=None, kerker: float | None = None,
-                      shift_invert: bool = False, verbose: bool = False):
+                      shift_invert: bool | str = "auto", verbose: bool = False):
     """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
     ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
@@ -1646,15 +1680,20 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     10x under the degenerate-occupation tolerance (1e-3 eV), so a gated projected solve cannot
     flip an occupation decision.
 
-    ``shift_invert`` (default False — like ``subspace_reuse``, exact solves keep F deterministic)
-    solves each warm iteration's secular problem by shift-invert Lanczos on the ``(H,S)`` pencil
+    ``shift_invert`` (``True`` / ``False`` / ``"auto"``, default ``"auto"``) solves each warm
+    iteration's secular problem by shift-invert Lanczos on the ``(H,S)`` pencil
     (``lapw.solve_geneig_shift_invert``): one ``LDL^H`` factorization of ``H−σS`` with σ just below
     the occupied window, reused as the OPinv of a deterministic ARPACK (implicitly-restarted)
     Lanczos on ``(H−σS)^{-1}S``, and a two-shift Sylvester-inertia certificate that forces a LOUD
-    incompleteness (a missed Γ-point multiplet, a mis-placed σ). σ is warmed from the previous
-    iteration's eigenvalues; the first iteration and any cold/degenerate failure fall back to the
-    exact dense solve, so the reported spectrum is never a silently-incomplete window. Measured
-    2.5×/5.4× per-solve at pencil dim 737/1559 (``experiments/autoapw/pencil_bench.py``).
+    dense fallback on any incompleteness (a missed Γ-point multiplet, a mis-placed σ). σ is warmed
+    from the previous iteration's eigenvalues; the first iteration and any cold/degenerate failure
+    fall back to the exact dense solve, so the reported spectrum is never a silently-incomplete
+    window. ``"auto"`` engages it per-solve only when the pencil dim exceeds the measured crossover
+    ``_SHIFT_INVERT_CROSSOVER_DIM`` (below it dense eigh is faster); ``True`` always attempts it
+    (certificate-guarded), ``False`` never (exact dense only). Determinism-required contexts keep
+    exact solves: Newton's F forces ``shift_invert=False`` (``flapw.newton``), and the pool
+    bit-equality path constructs its solve with the ``False`` default. Measured per-solve win grows
+    with the basis: ~2.3×/2.9× at pencil dim 737/1559 (``experiments/autoapw/si_ab.py``).
 
     Internally this is ``_multi_setup`` (state-independent context) + ``_multi_init_state`` +
     a loop over ``_multi_iterate`` (the fixed-point map) + ``_multi_finalize`` — split so the
@@ -1812,7 +1851,7 @@ class SolveKArgs(NamedTuple):
     c_prev: np.ndarray | None                 # previous eigvecs (subspace reuse / SI seed)
     subspace_tol: float
     warp: tuple | None                        # (FFT of (v_grid-v_i0)·Θ_I, nfft)
-    shift_invert: bool = False
+    shift_invert: bool | str = False          # True / False / "auto" (default False = exact dense)
     sigma: float | None = None                # shift-invert shift (below the window bottom)
 
 

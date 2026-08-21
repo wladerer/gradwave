@@ -23,7 +23,10 @@ values, with the per-evaluation setup cost removed.
 
 Determinism: F must be deterministic for FD JVPs to be meaningful — keep ``kworkers``
 modest (the pool accumulates in mesh order, so it is bit-stable) and do not enable
-``subspace_reuse`` in scf_kwargs (exact solves only).
+``subspace_reuse`` in scf_kwargs (exact solves only). ``newton_polish`` additionally FORCES
+``shift_invert=False`` in F regardless of the caller's policy: the auto-default shift-invert
+secular solve is iterative (matches dense to solver tol, not bit-exact), so it must never be
+the solver inside F.
 """
 
 from __future__ import annotations
@@ -167,6 +170,11 @@ def newton_polish(a_bohr: Any, atoms: Any, radii: dict[str, float], state: State
     kw.pop("tol", None)
     kw.pop("v_start", None)
     kw.setdefault("subspace_reuse", False)
+    # F MUST be deterministic for the FD directional derivatives (each JVP = one F evaluation) to
+    # be meaningful. Shift-invert is iterative (matches dense only to solver tol, not bit-exact),
+    # so FORCE the exact dense solve regardless of the caller's auto/True policy — override, not
+    # setdefault: shift-invert must never be the solver inside Newton's F.
+    kw["shift_invert"] = False
     # F consumes only info["state"]; efg is a post-loop diagnostic that cannot change the
     # state, so it is dropped rather than recomputed ~30 times.
     kw.pop("efg", None)
