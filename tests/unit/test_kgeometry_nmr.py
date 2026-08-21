@@ -564,6 +564,120 @@ def test_sigma_dq_cubic_isotropy_and_site_equivalence():
     assert split < 1e-3 * abs(iso)  # measured ~1e-4 relative
 
 
+# --------------------------------------------------------------------------- #
+# little-group-of-q IBZ wedge reduction (opt-in, exact, symmetry-gated)        #
+# --------------------------------------------------------------------------- #
+
+
+def _sigma_dq_res(cell, pos, kmesh, *, ecut=6, fft=(15, 15, 15)):
+    torch.set_num_threads(2)
+    system = setup_system(cell, pos, [0, 0], [si_upf()], ecut=ecut * RY,
+                          kmesh=kmesh, nbands=8, use_symmetry=False,
+                          fft_shape=fft)
+    res = scf(system, PBE(), etol=1e-9, rhotol=1e-8, verbose=False, max_iter=80)
+    assert res.converged
+    return res
+
+
+@pytest.mark.slow
+def test_sigma_dq_wedge_route_equivalence_si():
+    # THE non-negotiable gate for the little-group-of-q wedge reduction on the
+    # GO case (Si, Oh): the opt-in symmetry-reduced σ must equal the full-mesh
+    # σ to solver tolerance. A 4³ mesh reduces per axis under the |G_q|=6 little
+    # co-group on top of the TR fold (nk 36 → 13 wedge / axis, union ≈ 29).
+    from gradwave.postscf.kgeometry_nmr import (
+        _plan_wedge_reduction,
+        sigma_shielding_dq,
+    )
+
+    cell, pos = si_fcc()
+    res = _sigma_dq_res(cell, pos, (4, 4, 4))
+
+    # the reduction actually engaged (not a silent full-mesh fallback)
+    k_frac = np.stack([s.k_frac for s in res.system.spheres])
+    mesh_n = [len(np.unique(np.round(k_frac[:, i], 6))) for i in range(3)]
+    axes = [i for i in range(3) if mesh_n[i] > 1]
+    plan = _plan_wedge_reduction(res, axes, mesh_n, "auto")
+    assert plan is not None
+    union_kfrac, per_axis = plan
+    assert len(union_kfrac) < len(res.system.spheres)  # setup reduced
+    assert all(len(idx) < len(res.system.spheres) for _i, _q, idx, _w, _f in per_axis)
+
+    sig_full = sigma_shielding_dq(res, use_symmetry=False)
+    sig_red = sigma_shielding_dq(res, use_symmetry="auto")
+    scale = float(sig_full.abs().max())
+    resid = float((sig_red - sig_full).abs().max())
+    assert resid < 1e-6 * scale  # bit-equivalent to the full-mesh route
+    # symmetry-protected invariants survive the fold
+    diag = torch.diagonal(sig_red, dim1=1, dim2=2)
+    off = sig_red - torch.diag_embed(diag)
+    iso = float(diag.mean())
+    assert float(off.abs().max()) < 1e-6 * abs(iso)  # cubic isotropy
+    assert float(abs(diag[0].mean() - diag[1].mean())) < 1e-3 * abs(iso)  # sites
+
+
+@pytest.mark.slow
+def test_sigma_dq_wedge_route_equivalence_tetragonal():
+    # Stronger symmetry test on a genuinely tetragonal (D4h) cell where the
+    # reciprocal axes are INEQUIVALENT (c-axis little group ≠ a-axis): the
+    # rutile-class gate. Real rutile TiO2 needs a Ti pseudo absent from the
+    # fixtures, so a [001]-strained diamond Si (space group I4₁/amd, D4h)
+    # stands in — same point-group class, same per-axis-inequivalent little
+    # groups, built from the available Si pseudo. Route-equivalence must still
+    # be exact even though the per-axis factor is marginal.
+    from gradwave.postscf.kgeometry_nmr import (
+        _plan_wedge_reduction,
+        sigma_shielding_dq,
+    )
+
+    cell, pos = si_fcc()
+    strain = np.diag([1.0, 1.0, 1.06])  # uniaxial [001] → tetragonal D4h
+    cell_t, pos_t = cell @ strain, pos @ strain
+    res = _sigma_dq_res(cell_t, pos_t, (4, 4, 4))
+
+    from gradwave.symmetry import find_spacegroup
+    frac = res.system.positions.cpu().numpy() @ np.linalg.inv(np.asarray(cell_t))
+    sg = find_spacegroup(np.asarray(cell_t), frac, res.system.species_of_atom)
+    assert sg.n_ops < 48  # genuinely lower than the cubic Oh (48)
+
+    k_frac = np.stack([s.k_frac for s in res.system.spheres])
+    mesh_n = [len(np.unique(np.round(k_frac[:, i], 6))) for i in range(3)]
+    axes = [i for i in range(3) if mesh_n[i] > 1]
+    assert _plan_wedge_reduction(res, axes, mesh_n, "auto") is not None
+
+    sig_full = sigma_shielding_dq(res, use_symmetry=False)
+    sig_red = sigma_shielding_dq(res, use_symmetry="auto")
+    scale = float(sig_full.abs().max())
+    assert float((sig_red - sig_full).abs().max()) < 1e-6 * scale
+
+
+@pytest.mark.standard
+def test_sigma_dq_wedge_no_slowdown_low_symmetry():
+    # The auto-fallback guarantee: on a cell whose symmetry is broken (an atom
+    # displaced off the diamond site → trivial point group), the planner
+    # returns None and the reduced call runs the EXACT full-mesh path — so σ is
+    # identical and no reduction machinery is engaged (never slower than
+    # use_symmetry=False).
+    from gradwave.postscf.kgeometry_nmr import (
+        _plan_wedge_reduction,
+        sigma_shielding_dq,
+    )
+
+    cell, pos = si_fcc()
+    pos = pos.copy()
+    pos[1] += np.array([0.31, 0.17, 0.09])  # break every point-group op
+    res = _sigma_dq_res(cell, pos, (2, 2, 2))
+
+    k_frac = np.stack([s.k_frac for s in res.system.spheres])
+    mesh_n = [len(np.unique(np.round(k_frac[:, i], 6))) for i in range(3)]
+    axes = [i for i in range(3) if mesh_n[i] > 1]
+    assert _plan_wedge_reduction(res, axes, mesh_n, "auto") is None  # falls back
+
+    sig_full = sigma_shielding_dq(res, use_symmetry=False)
+    sig_auto = sigma_shielding_dq(res, use_symmetry="auto")
+    assert torch.equal(sig_full, sig_auto)  # identical: same full-mesh code path
+
+
 @pytest.mark.standard
 def test_sigma_driver_small(si_mesh):
     # End-to-end sigma_shielding driver at deliberately small scale
