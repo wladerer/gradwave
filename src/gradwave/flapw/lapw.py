@@ -397,77 +397,71 @@ def _shift_solve(fac, b):
     return x
 
 
-def _si_lanczos(op, sdot, snorm, v0, sigma, k, tol_ev, max_basis, n_cycles):
-    """Full-reorthogonalization Lanczos (FOM form: the dense symmetric projected matrix is tracked
-    directly, so thick restart carries no arrow bookkeeping) for the ``k`` eigenpairs of the
-    S-self-adjoint operator ``op = (H−σS)^{-1}S`` nearest σ (largest ``|θ|``; ε = σ + 1/θ). With σ
-    just below the window bottom the ``k`` nearest σ ARE the lowest ``k`` bands. Returns the sorted
-    ``(eps[:k], vecs[:, :k])`` once those ``k`` Ritz pairs converge to ``tol_ev`` (eV), or ``None``
-    if the window fails within ``n_cycles`` thick-restart cycles. Deterministic given ``v0`` (fixed
-    start, no randomness). ``sdot(x,y)=x^H S y``; ``snorm(x)=√Re⟨x,x⟩_S``."""
-    dim = v0.shape[0]
+def _si_block_fom(op, sop, seed, sigma, k, tol_ev, max_basis):
+    """Block-seeded full-orthogonalization Lanczos for the ``k`` eigenpairs of the S-self-adjoint
+    operator ``op = (H−σS)^{-1}S`` nearest σ (largest ``|θ|``; ε = σ + 1/θ). The Krylov space is
+    started from a BLOCK (the warm occupied vectors, or a deterministic block) so a degenerate
+    eigenspace — spanned by the block — is captured with full multiplicity (single-vector Lanczos
+    would find only one copy). The dense Hermitian projected matrix is tracked honestly (FOM), and
+    the wanted window's convergence is the DIRECT batched S-residual ``||op Y − Y diag θ||_S``.
 
-    def reorth(w, basis):
-        h = np.array([sdot(vi, w) for vi in basis]) if basis else np.zeros(0, complex)
-        for i, vi in enumerate(basis):
-            w = w - h[i] * vi
-        for vi in basis:                                  # second DGKS pass (stability only)
-            w = w - sdot(vi, w) * vi
-        return w, h
+    All inner work is BLAS (the basis lives in one contiguous ``dim×max_basis`` array; reorth and
+    projection are GEMMs, not Python loops over vectors — the loop form measured 0.22× dense, i.e.
+    slower). ``op``/``sop`` accept 2-D blocks. Deterministic given ``seed``. Returns sorted
+    ``(eps[:k], vecs[:, :k])`` or ``None`` if the window fails to converge."""
+    dim = seed.shape[0]
+    bmat = np.zeros((dim, max_basis), dtype=complex)       # S-orthonormal basis (contiguous)
+    hproj = np.zeros((max_basis, max_basis), dtype=complex)
+    cur = 0
 
-    nb0 = snorm(v0)
-    if nb0 <= 0:
+    def s_ortho_append(w):
+        nonlocal cur
+        if cur >= max_basis:
+            return -1.0
+        for _ in range(2):                                 # DGKS: two reorth passes (GEMMs)
+            if cur:
+                w = w - bmat[:, :cur] @ (bmat[:, :cur].conj().T @ sop(w))
+        nrm = float(np.sqrt(max(np.vdot(w, sop(w)).real, 0.0)))
+        if nrm < 1e-9:
+            return -1.0
+        bmat[:, cur] = w / nrm
+        cur += 1
+        return nrm
+
+    for col in seed.T:                                     # S-orthonormalize the seed block
+        s_ortho_append(np.ascontiguousarray(col, dtype=complex))
+    if cur == 0:
         return None
-    basis = [v0 / nb0]
-    hmat = np.zeros((max_basis, max_basis), dtype=complex)
-    kept = 0                                               # locked Ritz vectors after a restart
-
-    def collect(theta, z, m):
-        eps_all = sigma + 1.0 / theta
-        idx = np.argsort(eps_all)[:min(k, m)]
-        vecs = np.column_stack([sum(z[i, t] * basis[i] for i in range(m)) for t in idx])
-        return eps_all[idx].real, vecs
-
-    for _cycle in range(n_cycles + 1):
-        j = kept
-        conv = None
-        while j < max_basis:
-            w = op(basis[j])
-            w, h = reorth(w, basis[:j + 1])               # true projection = first-pass coeffs
-            beta = snorm(w)
-            hmat[:j + 1, j] = h
-            hmat[j, :j + 1] = np.conj(h)
-            if j + 1 < max_basis:
-                hmat[j + 1, j] = beta
-                hmat[j, j + 1] = beta
-            m = j + 1
-            theta, z = np.linalg.eigh(hmat[:m, :m])
-            want = np.argsort(-np.abs(theta))[:min(k, m)]  # nearest σ (largest |θ|)
-            errev = beta * np.abs(z[m - 1, want]) / np.maximum(theta[want] ** 2, 1e-300)
-            if m >= min(k, dim - 1) and float(errev.max()) < tol_ev:
-                conv = (theta, z, m)
-                break
-            if beta < 1e-12:                              # invariant subspace exhausted
-                conv = (theta, z, m)
-                break
-            basis.append(w / beta)
-            j += 1
-        if conv is not None:
-            return collect(*conv)
-        # thick restart: keep the p Ritz vectors nearest σ as the new basis, continue
-        theta, z = np.linalg.eigh(hmat[:max_basis, :max_basis])
-        keep = np.argsort(-np.abs(theta))[:min(k + 6, max_basis - 2)]
-        yk = [sum(z[i, t] * basis[i] for i in range(max_basis)) for t in keep]
-        hmat[:] = 0.0
-        for a, t in enumerate(keep):
-            hmat[a, a] = theta[t]
-        basis = yk
-        kept = len(keep)
+    processed, last_check = 0, -10
+    while processed < cur and cur < max_basis:
+        j = processed
+        w = op(bmat[:, j])
+        coeffs = bmat[:, :cur].conj().T @ sop(w)           # honest H column j (GEMV)
+        hproj[:cur, j] = coeffs
+        hproj[j, :cur] = np.conj(coeffs)
+        r = w - bmat[:, :cur] @ coeffs
+        beta = s_ortho_append(r)
+        if beta > 0:
+            hproj[cur - 1, j] = beta
+            hproj[j, cur - 1] = beta
+        processed += 1
+        if processed >= min(k, cur) and (processed - last_check >= 4 or processed == cur):
+            last_check = processed
+            theta, z = np.linalg.eigh(hproj[:processed, :processed])
+            want = np.argsort(-np.abs(theta))[:min(k, processed)]
+            ymat = bmat[:, :processed] @ z[:, want]        # dim × |want|
+            res = op(ymat) - ymat * theta[want][None, :]   # batched direct residual
+            sres = sop(res)
+            resn = np.sqrt(np.maximum(np.einsum("ij,ij->j", res.conj(), sres).real, 0.0))
+            if float((resn / np.maximum(theta[want] ** 2, 1e-300)).max()) < tol_ev:
+                eps_all = sigma + 1.0 / theta
+                idx = np.argsort(eps_all)[:min(k, processed)]
+                return eps_all[idx].real, bmat[:, :processed] @ z[:, idx]
     return None
 
 
 def solve_geneig_shift_invert(hmat, smat, nbands, sigma, c_prev=None, tol_ev=1e-7,
-                              buffer=None, max_basis=None, n_cycles=2):
+                              buffer=None, max_basis=None):
     """Shift-invert Lanczos generalized eigensolve for the lowest ``nbands`` of ``H c = ε S c``
     (OPT-IN; the exact dense ``solve_geneig`` stays the SCF default). One ``LDL^H`` factorization of
     ``M = H − σS`` drives a deterministic, fully-reorthogonalized Lanczos on ``M^{-1}S`` (S-inner
@@ -494,8 +488,6 @@ def solve_geneig_shift_invert(hmat, smat, nbands, sigma, c_prev=None, tol_ev=1e-
     k = min(nb + buffer, dim - 1)
     if dim < 48 or k >= dim - 1:                          # no headroom → let the caller use dense
         return None
-    if max_basis is None:
-        max_basis = min(dim - 1, 4 * k + 40)
     try:
         fac, n_lo = _shift_factor(hmat - sigma * smat)
     except (np.linalg.LinAlgError, ValueError):
@@ -507,20 +499,23 @@ def solve_geneig_shift_invert(hmat, smat, nbands, sigma, c_prev=None, tol_ev=1e-
     if not np.isfinite(xt).all() or np.linalg.norm((hmat - sigma * smat) @ xt - probe) > 1e-6:
         return None
 
+    def sop(x):
+        return smat @ x
+
     def op(y):
         return _shift_solve(fac, smat @ y)
 
-    def sdot(x, y):
-        return complex(np.vdot(x, smat @ y))
-
-    def snorm(x):
-        return float(np.sqrt(max(np.vdot(x, smat @ x).real, 0.0)))
-
+    # BLOCK seed so a degenerate eigenspace is captured with full multiplicity: the warm occupied
+    # block when available, else a deterministic fixed-seed block that generically spans multiplets.
     if c_prev is not None and c_prev.shape[0] == dim and c_prev.shape[1] > 0:
-        v0 = c_prev.sum(axis=1).astype(complex)
+        seed = c_prev.astype(complex)
     else:
-        v0 = np.ones(dim, dtype=complex)
-    out = _si_lanczos(op, sdot, snorm, v0, sigma, k, tol_ev, max_basis, n_cycles)
+        rng = np.random.default_rng(0)
+        b0 = min(k, 16)
+        seed = rng.standard_normal((dim, b0)) + 1j * rng.standard_normal((dim, b0))
+    if max_basis is None:
+        max_basis = min(dim - 1, seed.shape[1] + 6 * k + 40)
+    out = _si_block_fom(op, sop, seed, sigma, k, tol_ev, max_basis)
     if out is None:
         return None
     eps_ext, vecs_ext = out                              # sorted, length min(k, m) ≥ nb+1 wanted
@@ -540,8 +535,4 @@ def solve_geneig_shift_invert(hmat, smat, nbands, sigma, c_prev=None, tol_ev=1e-
         return None
     if n_hi != nb:                                       # exactly nb eigenvalues below σ_hi
         return None
-    for c in range(vecs.shape[1]):                       # S-normalize (solve_geneig convention)
-        nrm = snorm(vecs[:, c])
-        if nrm > 0:
-            vecs[:, c] /= nrm
-    return evals, vecs
+    return evals, vecs                                   # vecs already S-orthonormal (Ritz)

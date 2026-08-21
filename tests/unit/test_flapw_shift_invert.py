@@ -41,20 +41,21 @@ def test_shift_invert_matches_dense():
 
 
 def test_shift_invert_resolves_degenerate_multiplet():
-    """A planted 3-fold degenerate level inside the window is recovered with the right
-    multiplicity (the certificate would reject a missed copy) and matches dense to tol."""
+    """A planted 3-fold degenerate level INSIDE the occupied window is recovered with the right
+    multiplicity — the block seed spans the degenerate eigenspace where single-vector Lanczos would
+    find only one copy (the block/thick-restart requirement for the Γ-point multiplets)."""
     rng = np.random.default_rng(5)
     dim, nb = 80, 12
     eigs = np.sort(rng.uniform(-4.0, 15.0, dim))
-    eigs[4] = eigs[5] = eigs[6] = 2.5                       # exact 3-fold multiplet in-window
-    eigs = np.sort(eigs)
+    eigs[4] = eigs[5] = eigs[6] = float(eigs[5])           # exact 3-fold multiplet, bands 4–6
+    lvl = eigs[5]
     h, s = _pencil(dim, eigs, rng)
     ref = solve_geneig(h, s, nb)
     out = solve_geneig_shift_invert(h, s, nb, sigma=float(ref[0]) - 1.0)
-    assert out is not None
+    assert out is not None, "block seed must capture the in-window multiplet, not fall back"
     ev = np.sort(out[0])
     assert np.abs(ev - ref).max() < 1e-7
-    assert int(np.sum(np.abs(ev - 2.5) < 1e-6)) == 3        # all three copies present
+    assert int(np.sum(np.abs(ev - lvl) < 1e-6)) == 3       # all three copies present
 
 
 def test_shift_invert_misplaced_sigma_falls_back():

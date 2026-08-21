@@ -102,11 +102,13 @@ def main():
             print(f"it={i} dim={h.shape[0]} max|Δε|={d:.2e} eV  dense {t_dense*1e3:.1f}ms "
                   f"SI {t_si*1e3:.1f}ms  x{t_dense/t_si:.2f}", flush=True)
         prev_ev = ev_dense
-    # mis-placed σ → must decline (certificate)
+    # mis-placed σ (far ABOVE the occupied window → the deep bands are far from σ and get missed)
+    # must be caught by the inertia certificate and DECLINED (None → the SCF's loud dense fallback)
     h0, s0, ev0 = pencils[0]
-    bad = solve_geneig_shift_invert(h0, s0, nbands, sigma=float(ev0[len(ev0) // 2]))
-    print(f"MISPLACED-σ certificate: {'DECLINED (None)' if bad is None else 'ENGAGED (BAD!)'}",
-          flush=True)
+    bad_sigma = float(ev0[-1]) + 50.0
+    bad = solve_geneig_shift_invert(h0, s0, nbands, sigma=bad_sigma)
+    print(f"MISPLACED-σ certificate (σ={bad_sigma:.1f}, window top {ev0[nbands-1]:.1f}): "
+          f"{'DECLINED (None)' if bad is None else 'ENGAGED (BAD!)'}", flush=True)
     print(f"SUMMARY dim={dim} engaged={engaged}/{len(pencils)} worst|Δε|={worst:.2e} eV "
           f"median_speedup={np.median(ratios) if ratios else float('nan'):.2f}x "
           f"({'PARITY-OK' if worst < 1e-6 else 'PARITY-FAIL'})", flush=True)
