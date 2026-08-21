@@ -410,8 +410,8 @@ def solve_geneig_shift_invert(hmat, smat, nbands, sigma, c_prev=None, buffer=Non
         v0 = c_prev.sum(axis=1).astype(complex)          # deterministic warm start
     else:
         v0 = np.ones(dim, dtype=complex)
-    try:                                                 # ARPACK shift-invert: its own fast dense LU
-        w, vecs = eigsh(hmat, k=k, M=smat, sigma=sigma,  # of H−σS internally; which='LM' ⇒ near σ
+    try:                                                 # ARPACK shift-invert (own dense LU of H−σS
+        w, vecs = eigsh(hmat, k=k, M=smat, sigma=sigma,  # internally); which='LM' ⇒ nearest σ
                         which="LM", v0=v0, tol=0.0, maxiter=maxiter or dim * 20)
     except Exception:                                    # ARPACK non-convergence → dense fallback
         return None
