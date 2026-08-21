@@ -160,6 +160,15 @@ def _build_lo(l, e2, ch, u, ud, r, dx, v, R, cond_tol=_LO_COND_TOL):
     u2 = u2n[inside]
     phi = a * u + b * ud + u2
     nrm = math.sqrt(float((phi**2 * drw).sum()))
+    if nrm < 1e-9 * math.sqrt(float((u2**2 * drw).sum())):
+        # confined LO collapsed to ~zero norm: E₂ coincides with the channel's linearization
+        # energy E_l, so u₂ ≈ u and the φ(R)=φ'(R)=0 fit yields φ ≈ u₂ − u ≈ 0. Conditioning
+        # cannot rescue a null basis function; the l channel must be linearized away from E₂
+        # (el_override) so the LO carries a radial distinct from the valence u.
+        raise ValueError(
+            f"local orbital (l={l}, E₂={e2:.3f} eV) is degenerate with the valence linearization "
+            f"(E_l≈E₂): its confined form has ~zero norm. Move the l={l} energy parameter off E₂ "
+            f"with el_override so the LO adds a distinct radial (semicore-LO setup).")
     # near-linear-dependence probe: project the confined φ onto span{u, u̇} (Gram of the valence
     # subspace = the radial-channel overlaps) and measure the orthogonal residual fraction.
     s_pu_raw = float((phi * u * drw).sum())
