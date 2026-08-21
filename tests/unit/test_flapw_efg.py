@@ -154,3 +154,47 @@ def test_nonspherical_potential_axial_density_is_axial():
     assert np.abs(v[(2, 0)]).max() > 1e-6
     for m in (-2, -1, 1, 2):
         assert np.abs(v[(2, m)]).max() < 1e-9
+
+
+def _random_bands_inputs(rng, lmax, nb, nr, n_rad):
+    """Synthetic (amps_all, occ, us) in the ``sphere_density_multipoles_bands`` layout: ``n_rad``
+    radial functions per l, random complex band amplitudes, positive occupations."""
+    us = {l: [rng.standard_normal(nr) for _ in range(n_rad)] for l in range(lmax + 1)}
+    amps_all = {l: [rng.standard_normal((nb, 2 * l + 1)) + 1j * rng.standard_normal((nb, 2 * l + 1))
+                    for _ in range(n_rad)] for l in range(lmax + 1)}
+    occ = rng.uniform(0.1, 2.0, size=nb)
+    return amps_all, occ, us
+
+
+def test_gaunt_multipoles_match_angular_grid():
+    """MR: the Gaunt-contraction ``sphere_density_multipoles_bands`` reproduces the angular-grid
+    reference to ulp on random band amplitudes — same exact integral, different summation order.
+    Covers even AND odd L (the l≠l' cross terms) and multiple radials per channel (LO-like)."""
+    from gradwave.flapw.efg import (
+        _sphere_density_multipoles_bands_grid,
+        sphere_density_multipoles_bands,
+    )
+    rng = np.random.default_rng(0)
+    lmax, nb, nr = 3, 12, 20
+    lset = [(0, 0)] + [(bl, m) for bl in range(1, 5) for m in range(-bl, bl + 1)]
+    amps_all, occ, us = _random_bands_inputs(rng, lmax, nb, nr, n_rad=3)
+    fast = sphere_density_multipoles_bands(amps_all, occ, us, lmax, lset)
+    ref = _sphere_density_multipoles_bands_grid(amps_all, occ, us, lmax, lset)
+    scale = max(max(float(np.abs(v).max()) for v in ref.values()), 1e-30)
+    for lm in lset:
+        assert np.abs(fast[lm] - ref[lm]).max() < 1e-11 * scale, lm
+
+
+def test_gaunt_multipoles_density_is_hermitian():
+    """MR: a real density has ``ρ_{L,-M} = (−1)^M conj(ρ_LM)`` — a structural identity the Gaunt
+    contraction must satisfy independently of the reference path."""
+    from gradwave.flapw.efg import sphere_density_multipoles_bands
+    rng = np.random.default_rng(1)
+    lmax, nb, nr = 3, 10, 16
+    lset = [(bl, m) for bl in range(0, 5) for m in range(-bl, bl + 1)]
+    amps_all, occ, us = _random_bands_inputs(rng, lmax, nb, nr, n_rad=2)
+    rho = sphere_density_multipoles_bands(amps_all, occ, us, lmax, lset)
+    scale = max(max(float(np.abs(v).max()) for v in rho.values()), 1e-30)
+    for (bl, m) in lset:
+        if m > 0:
+            assert np.abs(rho[(bl, m)] - (-1) ** m * np.conj(rho[(bl, -m)])).max() < 1e-11 * scale
