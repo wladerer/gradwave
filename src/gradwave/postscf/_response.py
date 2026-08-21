@@ -808,6 +808,8 @@ def dense_sternheimer_for(res: Any) -> DenseSternheimerSolver | None:
     v_eff = res.v_eff
     if bk is None or v_eff.dim() != 3 or getattr(res, "nspin", 1) != 1:
         return None
+    if bk.mask.device.type != "cpu":
+        return None  # the factorization is assembled/stored on CPU
     budget = int(os.environ.get("GRADWAVE_DENSE_STERNHEIMER_BUDGET",
                                 str(_DENSE_STERN_BUDGET_BYTES)))
     nk, m = bk.mask.shape
