@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
@@ -155,8 +155,22 @@ class KBProjectors:
         return int(self.g_cart.shape[0])
 
     @classmethod
-    def for_sphere(cls, system: System, sphere: GSphere) -> KBProjectors:
-        """Build for one ``grids.GSphere`` of an NC System."""
+    def for_sphere(
+        cls, system: System, sphere: GSphere, template: KBProjectors | None = None
+    ) -> KBProjectors:
+        """Build for one ``grids.GSphere`` of an NC System.
+
+        Everything except ``g_cart`` is k-independent (the radial quadratures,
+        the m-expanded D matrix, the column maps), so a per-k loop should build
+        one instance and pass it back as ``template`` for the rest — the
+        rebuild of ``_beta_channels`` + the dij blocks per k was a measured
+        constructor hotspot of the NMR pipeline's ``VelocityApply`` /
+        ``_NLPairVelocity``."""
+        if template is not None:
+            return replace(
+                template,
+                g_cart=sphere.kpg.to(RDTYPE) - sphere.k_cart.to(RDTYPE),
+            )
         channels, chan_of = _beta_channels(system.upfs)
         col_atom, col_chan, col_lm = [], [], []
         blocks: list[Tensor] = []
@@ -559,8 +573,9 @@ class VelocityApply:
         nproj = int(bk.dij_full.shape[0])
         self.p = torch.zeros(nk, nproj, m, dtype=CDTYPE)
         self.dp = [torch.zeros(nk, nproj, m, dtype=CDTYPE) for _ in range(3)]
+        kb: KBProjectors | None = None
         for ik, sph in enumerate(system.spheres):
-            kb = KBProjectors.for_sphere(system, sph)
+            kb = KBProjectors.for_sphere(system, sph, template=kb)
             p_k, dp_k = kb.p_and_dp(sph.k_cart.to(RDTYPE))
             self.p[ik, :, : kb.npw] = p_k
             for mu in range(3):

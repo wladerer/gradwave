@@ -593,3 +593,184 @@ def test_sigma_driver_small(si_mesh):
 
     with pytest.raises(ValueError, match="underdetermined"):
         sigma_shielding(si_mesh)
+
+
+# --------------------------------------------------------------------------- #
+# perf machinery: dense eigh-prepass drafts, per-column CG, spawn pool         #
+# --------------------------------------------------------------------------- #
+
+
+def test_dense_draft_matches_cg_route(si_mesh):
+    # The eigh-prepass draft + CG certification must land on the same solution
+    # as the plain CG route to the shared tolerance, and the draft must
+    # actually be exercised (solve called once per Cartesian mu).
+    from gradwave.postscf._response import (
+        DenseSternheimerSolver,
+        dense_sternheimer_for,
+    )
+
+    res = si_mesh
+    q = (0.5, 0.0, 0.0)
+    sol_cg = velocity_perturbation_q(res, q, cg_tol=1e-9, dense=None)
+    solver = dense_sternheimer_for(res)
+    assert solver is not None
+    calls = {"n": 0}
+    orig = DenseSternheimerSolver.solve
+
+    def counting(self, jsel, eps, rhs, shift, nocc):
+        calls["n"] += 1
+        return orig(self, jsel, eps, rhs, shift, nocc)
+
+    try:
+        DenseSternheimerSolver.solve = counting
+        sol_d = velocity_perturbation_q(res, q, cg_tol=1e-9, dense=solver)
+    finally:
+        DenseSternheimerSolver.solve = orig
+    assert calls["n"] == 3
+    scale = float(sol_cg.dpsi.abs().max())
+    assert float((sol_d.dpsi - sol_cg.dpsi).abs().max()) < 1e-6 * max(scale, 1.0)
+    p_cg = paramagnetic_tensor(sol_cg)
+    p_d = paramagnetic_tensor(sol_d)
+    assert float((p_cg - p_d).abs().max() / p_cg.abs().max()) < 1e-7
+
+
+def test_dense_draft_certified_against_lying_solver(si_mesh):
+    # THE draft-then-certify contract (the fp32-expansion-Davidson style
+    # deliberately-lying-operator check): a solver returning pure garbage
+    # drafts must still produce the CG-route answer, because every column is
+    # re-measured against the true batched operator and iterated to cg_tol.
+    from gradwave.postscf._response import (
+        DenseSternheimerSolver,
+        dense_sternheimer_for,
+    )
+
+    res = si_mesh
+    q = (0.5, 0.0, 0.0)
+    sol_cg = velocity_perturbation_q(res, q, cg_tol=1e-9, dense=None)
+    solver = dense_sternheimer_for(res)
+    assert solver is not None
+    orig = DenseSternheimerSolver.solve
+
+    def lying(self, jsel, eps, rhs, shift, nocc):
+        torch.manual_seed(0)
+        return torch.randn_like(rhs)  # garbage draft, O(1) amplitude
+
+    try:
+        DenseSternheimerSolver.solve = lying
+        sol_lie = velocity_perturbation_q(res, q, cg_tol=1e-9, dense=solver)
+    finally:
+        DenseSternheimerSolver.solve = orig
+    scale = float(sol_cg.dpsi.abs().max())
+    assert float((sol_lie.dpsi - sol_cg.dpsi).abs().max()) < 1e-6 * max(scale, 1.0)
+
+
+def test_dense_gate_env(si_mesh, monkeypatch):
+    from gradwave.postscf._response import dense_sternheimer_for
+
+    res = si_mesh
+    monkeypatch.setenv("GRADWAVE_DENSE_STERNHEIMER", "off")
+    assert dense_sternheimer_for(res) is None
+    monkeypatch.setenv("GRADWAVE_DENSE_STERNHEIMER", "bogus")
+    with pytest.raises(ValueError, match="GRADWAVE_DENSE_STERNHEIMER"):
+        dense_sternheimer_for(res)
+    # auto declines when the factorization would blow the budget …
+    monkeypatch.setenv("GRADWAVE_DENSE_STERNHEIMER", "auto")
+    monkeypatch.setenv("GRADWAVE_DENSE_STERNHEIMER_BUDGET", "1")
+    assert dense_sternheimer_for(res) is None
+    # … "on" skips only the budget check
+    monkeypatch.setenv("GRADWAVE_DENSE_STERNHEIMER", "on")
+    assert dense_sternheimer_for(res) is not None
+
+
+def test_apply_cols_matches_apply(si_mesh):
+    from gradwave.core.batch import BatchedHamiltonian, projectors_b
+
+    res = si_mesh
+    system = res.system
+    bk = system.batch
+    h = BatchedHamiltonian(bk, system.grid.shape, res.v_eff,
+                           projectors_b(bk, system.positions))
+    torch.manual_seed(3)
+    c = torch.randn(bk.nk, 3, bk.npw_max, dtype=torch.complex128)
+    c = c * bk.mask[:, None, :]
+    full = h.apply(c)
+    kcol = torch.tensor([0, 0, 1, 1, 1], dtype=torch.long)
+    bcol = torch.tensor([0, 2, 0, 1, 2], dtype=torch.long)
+    cols = h.apply_cols(c[kcol, bcol], kcol)
+    assert float((cols - full[kcol, bcol]).abs().max()) < 1e-10
+
+
+def test_percolumn_cg_matches_lockstep_and_certifies(si_mesh):
+    # The per-column/compaction path (BatchedHamiltonian has apply_cols) must
+    # agree with the historical lockstep loop (forced via an apply-only shim)
+    # AND return solutions whose TRUE per-column residuals all sit below tol
+    # (the final top-up pass makes this structural).
+    from types import SimpleNamespace
+
+    from gradwave.core.batch import BatchedHamiltonian, projectors_b
+    from gradwave.postscf._response import (
+        cg_sternheimer,
+        insulator_window,
+        pad_coeffs,
+        sternheimer_shift,
+    )
+    from gradwave.postscf.kgeometry import VelocityApply
+
+    res = si_mesh
+    system = res.system
+    bk = system.batch
+    nocc = insulator_window(res.occupations, 2.0, "insulating")
+    c_occ = pad_coeffs(res.coeffs, bk.npw_max)[:, :nocc]
+    eps = res.eigenvalues[:, :nocc].double()
+    shift = sternheimer_shift(eps)
+    h = BatchedHamiltonian(bk, system.grid.shape, res.v_eff,
+                           projectors_b(bk, system.positions))
+
+    def p_occ(x):
+        ov = torch.einsum("kng,kbg->kbn", c_occ.conj(), x)
+        return torch.einsum("kbn,kng->kbg", ov, c_occ)
+
+    v = VelocityApply(system)
+    rhs = v.apply(c_occ, 0)
+    rhs = -(rhs - p_occ(rhs))
+    tol = 1e-9
+    x_new = cg_sternheimer(h, bk, c_occ, eps, rhs, torch.zeros_like(rhs),
+                           shift, tol=tol)
+    shim = SimpleNamespace(apply=h.apply)  # no apply_cols -> legacy lockstep
+    x_old = cg_sternheimer(shim, bk, c_occ, eps, rhs, torch.zeros_like(rhs),
+                           shift, tol=tol)
+    scale = float(x_old.abs().max())
+    assert float((x_new - x_old).abs().max()) < 1e-6 * max(scale, 1.0)
+
+    def a_apply(x):
+        hx = h.apply(x) - eps[..., None] * x
+        return hx - p_occ(hx) + shift * p_occ(x)
+
+    rn = torch.linalg.norm(rhs - a_apply(x_new), dim=-1)
+    assert float(rn.max()) < 5.0 * tol  # every column certified
+
+
+@pytest.mark.standard
+def test_sigma_pool_bitwise_identical():
+    # Spawn-pool gate: the pooled tensor must be BITWISE identical to the
+    # serial one. Thread parity makes that well-defined: both the serial
+    # reference and the pooled evaluation (parent + each worker) run at one
+    # intra-op thread — the pool's only difference is WHERE the branch
+    # pipelines run, never what they compute.
+    from gradwave.postscf.kgeometry_nmr import sigma_shielding
+
+    torch.set_num_threads(2)
+    cell, pos = si_fcc()
+    system = setup_system(cell, pos, [0, 0], [si_upf()], ecut=6 * RY,
+                          kmesh=(2, 2, 1), nbands=8, use_symmetry=False,
+                          fft_shape=(15, 15, 15))
+    res = scf(system, PBE(), etol=1e-8, rhotol=1e-7, verbose=False, max_iter=80)
+    assert res.converged
+    n_prev = torch.get_num_threads()
+    try:
+        torch.set_num_threads(1)  # workers inherit cap floor(1/2) -> 1 thread
+        sig_serial = sigma_shielding(res, cg_tol=1e-6, nl_quad=3)
+        sig_pool = sigma_shielding(res, cg_tol=1e-6, nl_quad=3, n_workers=2)
+    finally:
+        torch.set_num_threads(n_prev)
+    assert torch.equal(sig_serial, sig_pool)

@@ -74,6 +74,7 @@ with the mesh for the Sternheimer route (the dense twin and the analytic
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
@@ -94,7 +95,9 @@ from gradwave.core.fftbox import g_to_r, r_to_g
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.grids import reciprocal_cell
 from gradwave.postscf._response import (
+    DenseSternheimerSolver,
     cg_sternheimer,
+    dense_sternheimer_for,
     insulator_window,
     pad_coeffs,
     sternheimer_shift,
@@ -122,6 +125,11 @@ class VelocityQSolves:
     g0: np.ndarray  # (nk, 3) umklapp
     weights: Tensor  # (nk,) k-weights (sum 1)
     bk_kq: BatchedK  # the reindexed k+q batch
+    # frozen solve context reused by the downstream current/screening
+    # assembly (each was rebuilt per induced_current_q call before):
+    ph: Tensor | None = None  # (nk, 1, *shape) e^{iG0·r} stack
+    h_kq: BatchedHamiltonian | None = None  # the k+q Hamiltonian of the solve
+    dense: DenseSternheimerSolver | None = None  # eigh-prepass drafter (or None)
 
 
 def _guard(res: SCFResult) -> None:
@@ -134,18 +142,41 @@ def _guard(res: SCFResult) -> None:
         )
 
 
+def _g0_phase_stack(shape: tuple[int, int, int], g0: np.ndarray,
+                    device: torch.device) -> Tensor:
+    """(nk, 1, n1, n2, n3) stack of e^{iG0·r} phases. The distinct G0 rows are
+    computed once and broadcast (on any commensurate q most rows are zero —
+    the previous per-k rebuild was a measured setup hotspot)."""
+    uniq, inv = np.unique(g0, axis=0, return_inverse=True)
+    phases = torch.stack([_g0_phase(shape, row, device) for row in uniq])
+    return phases[torch.as_tensor(inv.reshape(-1), dtype=torch.long)][:, None]
+
+
 def velocity_perturbation_q(
     res: SCFResult,
     q_frac: np.ndarray | list[float] | tuple[float, float, float],
     *,
     cg_tol: float = 1e-9,
     max_iter: int = 400,
+    dense: DenseSternheimerSolver | str | None = "auto",
+    v: VelocityApply | None = None,
 ) -> VelocityQSolves:
     """Solve the k+q Sternheimer equations for the three symmetrized velocity
     perturbations ½{v_μ, e^{iqr}} at every mesh k (see module docstring).
 
     q must be commensurate with the SCF mesh (kpq_map raises otherwise);
-    q = 0 reduces exactly to the M5 velocity solves."""
+    q = 0 reduces exactly to the M5 velocity solves.
+
+    ``dense`` selects the eigh-prepass draft path: "auto" (default) builds or
+    reuses a size-gated :class:`~gradwave.postscf._response.
+    DenseSternheimerSolver` for the mesh (see ``dense_sternheimer_for``),
+    ``None`` forces plain CG, or pass a prebuilt solver (``sigma_shielding``
+    shares one across all its axis/sign/polarization solves). Drafts are
+    always certified: the CG polish re-measures every (k, band) column
+    against the true batched operator and iterates any column above
+    ``cg_tol``. ``v`` reuses a prebuilt :class:`~gradwave.postscf.kgeometry.
+    VelocityApply` (its constructor is a serial per-k projector build worth
+    hoisting across the 4-6 calls of a tensor evaluation)."""
     _guard(res)
     system = res.system
     grid = system.grid
@@ -156,9 +187,7 @@ def velocity_perturbation_q(
 
     k_frac = np.stack([sph.k_frac for sph in system.spheres])
     jidx, g0 = kpq_map(k_frac, q_frac)
-    nk = len(k_frac)
     jsel = torch.as_tensor(jidx, dtype=torch.long)
-    bk_kq = _reindex_bk(bk, jsel)
 
     nocc = insulator_window(res.occupations, 2.0, "insulating occupations required")
     c_all = pad_coeffs(cast("list[Tensor]", res.coeffs), bk.npw_max)
@@ -167,10 +196,15 @@ def velocity_perturbation_q(
     eps_k = res.eigenvalues[:, :nocc].to(RDTYPE)
     shift = sternheimer_shift(eps_k)
 
-    h_kq = BatchedHamiltonian(bk_kq, shape, res.v_eff, projectors_b(bk_kq, system.positions))
-    ph = torch.stack(
-        [_g0_phase(shape, g0[ik], c_all.device) for ik in range(nk)]
-    )[:, None]  # (nk, 1, *shape): e^{iG0·r}
+    solver = dense_sternheimer_for(res) if dense == "auto" else dense
+    assert not isinstance(solver, str)
+    if solver is not None:
+        h_kq, bk_kq = solver.h_for(jsel)
+    else:
+        bk_kq = _reindex_bk(bk, jsel)
+        h_kq = BatchedHamiltonian(
+            bk_kq, shape, res.v_eff, projectors_b(bk_kq, system.positions))
+    ph = _g0_phase_stack(shape, g0, c_all.device)  # (nk, 1, *shape): e^{iG0·r}
 
     def transfer(w: Tensor) -> Tensor:
         """k-sphere coefficients → the same plane waves on the k_j spheres."""
@@ -180,15 +214,18 @@ def velocity_perturbation_q(
         ov = torch.einsum("kng,kbg->kbn", c_occ_kq.conj(), x)
         return x - torch.einsum("kbn,kng->kbg", ov, c_occ_kq)
 
-    v = VelocityApply(system)
+    if v is None:
+        v = VelocityApply(system)
     c_t = transfer(c_occ_k)
     o_list, d_list = [], []
     for mu in range(3):
         o_mu = 0.5 * (transfer(v.apply(c_occ_k, mu)) + v.apply(c_t, mu, k_index=jsel))
         rhs = -p_c(o_mu)
+        x0 = (solver.solve(jsel, eps_k, rhs, shift, nocc)
+              if solver is not None else torch.zeros_like(rhs))
         d_list.append(
             cg_sternheimer(h_kq, bk_kq, c_occ_kq, eps_k, rhs,
-                           torch.zeros_like(rhs), shift, tol=cg_tol, max_iter=max_iter)
+                           x0, shift, tol=cg_tol, max_iter=max_iter)
         )
         o_list.append(o_mu)
     return VelocityQSolves(
@@ -202,6 +239,9 @@ def velocity_perturbation_q(
         g0=g0,
         weights=system.kweights.to(RDTYPE),
         bk_kq=bk_kq,
+        ph=ph,
+        h_kq=h_kq,
+        dense=solver,
     )
 
 
@@ -291,6 +331,10 @@ class _NLPairVelocity:
         self.nproj = int(self.dij.shape[0])
 
         n1, n2, n3 = self.shape
+        # the k-independent projector context (radial quadratures, D blocks,
+        # column maps) is built once and reused for every k's union sphere
+        kb0 = (KBProjectors.for_sphere(system, system.spheres[0])
+               if self.nproj else None)
         for ik, sph in enumerate(system.spheres):
             m_k = sph.miller.numpy()
             m_d = system.spheres[int(sol.jidx[ik])].miller.numpy() - sol.g0[ik][None, :]
@@ -306,8 +350,7 @@ class _NLPairVelocity:
             self.flat.append(torch.as_tensor(
                 (mod[:, 0] * n2 + mod[:, 1]) * n3 + mod[:, 2], dtype=torch.int64))
 
-            if self.nproj:
-                kb0 = KBProjectors.for_sphere(system, sph)
+            if kb0 is not None:
                 kb = KBProjectors(
                     g_cart=torch.as_tensor(union.astype(float) @ b, dtype=RDTYPE),
                     tau=kb0.tau, dij_full=kb0.dij_full, col_atom=kb0.col_atom,
@@ -467,9 +510,8 @@ def induced_current_q(
         assert np.allclose(sol.q_frac, np.asarray(q_frac, dtype=float)), \
             "sol was solved at a different q"
     nk = sol.c_occ_k.shape[0]
-    ph = torch.stack(
-        [_g0_phase(shape, sol.g0[ik], sol.c_occ_k.device) for ik in range(nk)]
-    )[:, None]
+    ph = sol.ph if sol.ph is not None else _g0_phase_stack(
+        shape, sol.g0, sol.c_occ_k.device)
 
     e_pol_t = torch.as_tensor(e_pol, dtype=RDTYPE).to(CDTYPE)
     dpsi = torch.einsum("m,mkng->kng", e_pol_t, sol.dpsi)
@@ -496,7 +538,8 @@ def induced_current_q(
 
         def g(u: Tensor) -> Tensor:
             return drho_bare + chi0_q(
-                res, q_frac, _k_hxc_q(res, xc, phys(u), q_cart), tol=cg_tol
+                res, q_frac, _k_hxc_q(res, xc, phys(u), q_cart), tol=cg_tol,
+                dense=sol.dense,
             )
 
         u = drho_bare.clone()
@@ -518,12 +561,16 @@ def induced_current_q(
         rhs_s = box_to_sphere_b(u_box * dv[None, None] * ph, sol.bk_kq)
         ov = torch.einsum("kng,kbg->kbn", sol.c_occ_kq.conj(), rhs_s)
         rhs = -(rhs_s - torch.einsum("kbn,kng->kbg", ov, sol.c_occ_kq))
-        h_kq = BatchedHamiltonian(
+        h_kq = sol.h_kq if sol.h_kq is not None else BatchedHamiltonian(
             sol.bk_kq, shape, res.v_eff, projectors_b(sol.bk_kq, system.positions)
         )
         shift = sternheimer_shift(sol.eps_k)
+        nocc = sol.c_occ_kq.shape[1]
+        x0 = (sol.dense.solve(torch.as_tensor(sol.jidx, dtype=torch.long),
+                              sol.eps_k, rhs, shift, nocc)
+              if sol.dense is not None else torch.zeros_like(rhs))
         dpsi = dpsi + cg_sternheimer(h_kq, sol.bk_kq, sol.c_occ_kq, sol.eps_k,
-                                     rhs, torch.zeros_like(rhs), shift,
+                                     rhs, x0, shift,
                                      tol=cg_tol, max_iter=cg_max_iter)
 
     # canonical paramagnetic current density, cell-periodic part at q
@@ -645,10 +692,8 @@ def continuity_source_q(res: SCFResult, sol: VelocityQSolves,
     shape = system.grid.shape
     bk = system.batch
     assert bk is not None
-    nk = sol.c_occ_k.shape[0]
-    ph = torch.stack(
-        [_g0_phase(shape, sol.g0[ik], sol.c_occ_k.device) for ik in range(nk)]
-    )[:, None]
+    ph = sol.ph if sol.ph is not None else _g0_phase_stack(
+        shape, sol.g0, sol.c_occ_k.device)
     e_pol_t = torch.as_tensor(np.asarray(e_pol, dtype=float), dtype=RDTYPE).to(CDTYPE)
     o_pol = torch.einsum("m,mkng->kng", e_pol_t, sol.o_c)
     ov = torch.einsum("kng,kbg->kbn", sol.c_occ_kq.conj(), o_pol)
@@ -706,6 +751,96 @@ def _transverse_frame(q_hat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return t1, np.cross(q_hat, t1)
 
 
+@dataclass(frozen=True)
+class _BranchSpoke:
+    """Picklable spec of one (axis, ±q) branch pipeline of
+    :func:`sigma_shielding` for the spawn pool (everything a worker needs
+    beyond the shared result file)."""
+
+    res_path: str
+    q_frac: np.ndarray  # (3,) signed
+    pols: tuple[np.ndarray, ...]
+    xc: object | None
+    screen: bool
+    cg_tol: float
+    cg_max_iter: int
+    nl_quad: int
+
+
+# one loaded result (+ its hoisted VelocityApply) per worker process; keyed by
+# the result file so a stale entry can never leak across sigma_shielding calls
+_BRANCH_WORKER_CACHE: dict[str, tuple[SCFResult, VelocityApply]] = {}
+
+
+def _branch_worker(spoke: _BranchSpoke) -> list[Tensor]:
+    """One (axis, sign) branch of :func:`sigma_shielding` in a pool worker:
+    the three velocity Sternheimer solves, the KB pair velocity, and the
+    per-polarization induced currents — returning the conserved ``j_total``
+    fields in polarization order (small; the heavy solve state never crosses
+    the process boundary). The loaded result — and, cached on it, the dense
+    eigh factorization — persists in the worker across spokes."""
+    hit = _BRANCH_WORKER_CACHE.get(spoke.res_path)
+    if hit is None:
+        res_l = torch.load(spoke.res_path, weights_only=False)
+        _BRANCH_WORKER_CACHE.clear()
+        hit = (res_l, VelocityApply(res_l.system))
+        _BRANCH_WORKER_CACHE[spoke.res_path] = hit
+    res, v = hit
+    sol = velocity_perturbation_q(res, spoke.q_frac, cg_tol=spoke.cg_tol,
+                                  max_iter=spoke.cg_max_iter, v=v)
+    nl = _NLPairVelocity(res.system, sol, nquad=spoke.nl_quad)
+    return [
+        induced_current_q(res, spoke.q_frac, pol, sol=sol, _nl=nl,
+                          xc=spoke.xc, screen=spoke.screen,
+                          cg_tol=spoke.cg_tol,
+                          cg_max_iter=spoke.cg_max_iter).j_total
+        for pol in spoke.pols
+    ]
+
+
+def _branch_fields_pooled(
+    res: SCFResult,
+    axis_jobs: list[tuple[np.ndarray, Tensor, np.ndarray, list[np.ndarray]]],
+    *,
+    xc: object | None,
+    screen: bool,
+    cg_tol: float,
+    cg_max_iter: int,
+    nl_quad: int,
+    n_workers: int,
+) -> list[list[Tensor]]:
+    """Fan the (axis, ±q) branch pipelines of :func:`sigma_shielding` out to a
+    spawn pool (the ``flapw`` / ``seedpool`` shape: spawn, not fork — forked
+    children inherit live OpenMP/BLAS state and can compute silently wrong
+    numbers). The converged result is shipped once through a temp file, each
+    worker returns only the per-polarization ``j_total`` fields, and results
+    come back in submission order — the deterministic (axis, sign) key."""
+    import tempfile
+
+    from gradwave.postscf.seedpool import map_spokes
+
+    fd, path = tempfile.mkstemp(suffix=".pt", prefix="gw-sigma-res-")
+    os.close(fd)
+    # never ship a parent-side dense factorization (GBs) through the file;
+    # workers rebuild and cache their own
+    cache = res.__dict__.pop("_dense_sternheimer_cache", None)
+    try:
+        torch.save(res, path)
+        spokes = [
+            _BranchSpoke(res_path=path, q_frac=sign * q_frac,
+                         pols=tuple(pols), xc=xc, screen=screen,
+                         cg_tol=cg_tol, cg_max_iter=cg_max_iter,
+                         nl_quad=nl_quad)
+            for q_frac, _q_cart, _q_hat, pols in axis_jobs
+            for sign in (1.0, -1.0)
+        ]
+        return map_spokes(_branch_worker, spokes, n_workers=n_workers)
+    finally:
+        if cache is not None:
+            res.__dict__["_dense_sternheimer_cache"] = cache
+        os.unlink(path)
+
+
 def sigma_shielding(
     res: SCFResult,
     *,
@@ -716,6 +851,7 @@ def sigma_shielding(
     cg_max_iter: int = 400,
     nl_quad: int = 8,
     sites: Tensor | None = None,
+    n_workers: int | None = None,
 ) -> Tensor:
     """Bare (pseudo) NMR chemical-shielding tensor σ_ij per site, in ppm:
     σ_ij = −∂B_ind,i(r_site)/∂B_ext,j (positive = shielded), shape
@@ -752,6 +888,13 @@ def sigma_shielding(
     responses. Requires an insulating, symmetry-unreduced SCF with at least
     two mesh axes of more than one point (else the 3×3 tensor is
     underdetermined and a ValueError is raised).
+
+    ``n_workers > 1`` fans the independent (axis, ±q) branch pipelines out to
+    a spawn ProcessPoolExecutor (each worker capped at its share of the
+    parent's intra-op threads — the ``postscf.seedpool`` budget); results are
+    accumulated in a fixed (axis, sign, polarization) order, so at matched
+    per-op thread counts the pooled tensor is bit-identical to the serial
+    one. ``xc`` must be picklable when pooling a screened run.
     """
     _guard(res)
     system = res.system
@@ -767,28 +910,45 @@ def sigma_shielding(
     if sites is None:
         sites = system.positions.detach().cpu().to(RDTYPE)
 
-    b_rows: list[np.ndarray] = []
-    m_rows: list[Tensor] = []
+    axis_jobs: list[tuple[np.ndarray, Tensor, np.ndarray, list[np.ndarray]]] = []
     for i in axes:
         q_frac = np.zeros(3)
         q_frac[i] = q_index / mesh_n[i]
         q_cart = torch.as_tensor(q_frac @ b, dtype=RDTYPE)
         q_hat = (q_frac @ b) / np.linalg.norm(q_frac @ b)
-        sol_p = velocity_perturbation_q(res, q_frac, cg_tol=cg_tol,
-                                        max_iter=cg_max_iter)
-        sol_m = velocity_perturbation_q(res, -q_frac, cg_tol=cg_tol,
-                                        max_iter=cg_max_iter)
-        nl_p = _NLPairVelocity(system, sol_p, nquad=nl_quad)
-        nl_m = _NLPairVelocity(system, sol_m, nquad=nl_quad)
-        for pol in _transverse_frame(q_hat):
-            cur_p = induced_current_q(res, q_frac, pol, sol=sol_p, _nl=nl_p,
-                                      xc=xc, screen=screen, cg_tol=cg_tol,
-                                      cg_max_iter=cg_max_iter)
-            cur_m = induced_current_q(res, -q_frac, pol, sol=sol_m, _nl=nl_m,
-                                      xc=xc, screen=screen, cg_tol=cg_tol,
-                                      cg_max_iter=cg_max_iter)
+        axis_jobs.append((q_frac, q_cart, q_hat, list(_transverse_frame(q_hat))))
+
+    # per-branch conserved-current fields, in fixed (axis, sign) order with
+    # (polarization) order inside — the deterministic accumulation key
+    if n_workers is not None and n_workers > 1:
+        j_branches = _branch_fields_pooled(
+            res, axis_jobs, xc=xc, screen=screen, cg_tol=cg_tol,
+            cg_max_iter=cg_max_iter, nl_quad=nl_quad, n_workers=n_workers)
+    else:
+        v = VelocityApply(system)
+        dense = dense_sternheimer_for(res)
+        j_branches = []
+        for q_frac, _q_cart, _q_hat, pols in axis_jobs:
+            for sign in (1.0, -1.0):
+                sol = velocity_perturbation_q(
+                    res, sign * q_frac, cg_tol=cg_tol, max_iter=cg_max_iter,
+                    dense=dense, v=v)
+                nl = _NLPairVelocity(system, sol, nquad=nl_quad)
+                j_branches.append([
+                    induced_current_q(res, sign * q_frac, pol, sol=sol,
+                                      _nl=nl, xc=xc, screen=screen,
+                                      cg_tol=cg_tol,
+                                      cg_max_iter=cg_max_iter).j_total
+                    for pol in pols
+                ])
+
+    b_rows: list[np.ndarray] = []
+    m_rows: list[Tensor] = []
+    for a, (_q_frac, q_cart, q_hat, pols) in enumerate(axis_jobs):
+        j_p, j_m = j_branches[2 * a], j_branches[2 * a + 1]
+        for ip, pol in enumerate(pols):
             m_rows.append(_biot_savart_sigma_cols(
-                cur_p.j_total, cur_m.j_total, q_cart, grid.g_cart, sites))
+                j_p[ip], j_m[ip], q_cart, grid.g_cart, sites))
             b_rows.append(np.cross(q_hat, pol))
 
     bmat = torch.as_tensor(np.stack(b_rows), dtype=RDTYPE)  # (nr, 3)
@@ -829,6 +989,7 @@ def continuity_truncation_term(res: SCFResult, sol: VelocityQSolves,
     v_eff = v_eff.to(CDTYPE)
     f_occ = 2.0
     total = torch.zeros((), dtype=CDTYPE)
+    kb0 = KBProjectors.for_sphere(system, system.spheres[0])
     for ik, sph in enumerate(system.spheres):
         m_k = sph.miller.numpy()
         m_d = system.spheres[int(sol.jidx[ik])].miller.numpy() - sol.g0[ik][None, :]
@@ -857,7 +1018,6 @@ def continuity_truncation_term(res: SCFResult, sol: VelocityQSolves,
             box = g_to_r(c, flat, shape) * v_eff  # noqa: B023
             return r_to_g(box).reshape(*c.shape[:-1], -1).index_select(-1, flat)  # noqa: B023
 
-        kb0 = KBProjectors.for_sphere(system, sph)
         kb = KBProjectors(
             g_cart=torch.as_tensor(union.astype(float) @ b, dtype=RDTYPE),
             tau=kb0.tau, dij_full=kb0.dij_full, col_atom=kb0.col_atom,

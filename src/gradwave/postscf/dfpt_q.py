@@ -20,8 +20,6 @@ Insulator, nspin=1 (matching the q=0 insulator χ₀ path). Requires a
 
 from __future__ import annotations
 
-import dataclasses
-
 import numpy as np
 import torch
 
@@ -106,7 +104,7 @@ def _sternheimer_kq(h_kq, c_occ_kq, eps_k, rhs_r, sphere_kq, alpha, tol, max_ite
 
 def chi0_q(res: SCFResult, q_frac, v_box: torch.Tensor, tol: float = 1e-8,
            max_iter: int = 200, *, k_indices=None, k_weights=None,
-           symmetrizer=None, _impl: str = "batched") -> torch.Tensor:
+           symmetrizer=None, dense=None, _impl: str = "batched") -> torch.Tensor:
     """Bare density response δρ_q = χ₀[δV_q] for wavevector q (nspin=1 insulator).
 
     ``v_box`` is the cell-periodic part v(r) of δV_q(r) = e^{iq·r} v(r), a complex
@@ -119,7 +117,13 @@ def chi0_q(res: SCFResult, q_frac, v_box: torch.Tensor, tol: float = 1e-8,
     ``_impl="batched"`` (default) solves every k's k+q Sternheimer system as one
     masked block against a batched k+q Hamiltonian — amortizing the per-k kernel
     launches and inheriting the small-cell Toeplitz apply. ``_impl="loop"`` is the
-    reference per-k Python loop; the two agree to the CG tolerance."""
+    reference per-k Python loop; the two agree to the CG tolerance.
+
+    ``dense`` (a ``postscf._response.DenseSternheimerSolver`` built on this
+    result's mesh, batched path only) drafts each solve in the mesh
+    eigenbasis and reuses the memoized fold-permutation Hamiltonian; the CG
+    then only certifies/polishes (draft-then-certify). The NMR screening
+    Dyson loop passes its per-tensor-evaluation solver here."""
     if getattr(res, "nspin", 1) != 1:
         raise NotImplementedError("chi0_q: nspin=1 only")
     if getattr(res.system, "sym", None) is not None:
@@ -127,8 +131,10 @@ def chi0_q(res: SCFResult, q_frac, v_box: torch.Tensor, tol: float = 1e-8,
     system = res.system
     ks = list(range(len(system.spheres))) if k_indices is None else list(k_indices)
     kw = system.kweights if k_weights is None else k_weights
-    impl = _chi0_q_batched if _impl == "batched" else _chi0_q_loop
-    return impl(res, q_frac, v_box, tol, max_iter, ks, kw, symmetrizer)
+    if _impl == "batched":
+        return _chi0_q_batched(res, q_frac, v_box, tol, max_iter, ks, kw,
+                               symmetrizer, dense=dense)
+    return _chi0_q_loop(res, q_frac, v_box, tol, max_iter, ks, kw, symmetrizer)
 
 
 def _chi0_q_loop(res, q_frac, v_box, tol, max_iter, ks, kw, symmetrizer):
@@ -167,23 +173,21 @@ def _chi0_q_loop(res, q_frac, v_box, tol, max_iter, ks, kw, symmetrizer):
 
 
 def _reindex_bk(bk, idx: torch.Tensor):
-    """BatchedK restricted/reordered to k-mesh indices ``idx`` (per-k fields only;
-    npw_max, atom index and the D-matrix are k-independent). The Toeplitz
-    difference-index cache is dropped, NOT inherited: it belongs to the parent's
-    flat_idx, and a table built for the parent's spheres is wrong for the
-    reindexed ones (the k+q Hamiltonian would silently apply the wrong local
-    term and the Sternheimer CG diverges to NaN)."""
-    return dataclasses.replace(
-        bk, mask=bk.mask[idx], flat_idx=bk.flat_idx[idx], kpg=bk.kpg[idx],
-        t=bk.t[idx], proj_phase_free=bk.proj_phase_free[idx],
-        toep_idx_cache=None)
+    """BatchedK restricted/reordered to k-mesh indices ``idx`` — now the
+    canonical ``core.batch.BatchedK.reindex`` (which also drops the Toeplitz
+    difference-index cache: a table built for the parent's spheres is wrong
+    for the reindexed ones)."""
+    return bk.reindex(idx)
 
 
-def _chi0_q_batched(res, q_frac, v_box, tol, max_iter, ks, kw, symmetrizer):
+def _chi0_q_batched(res, q_frac, v_box, tol, max_iter, ks, kw, symmetrizer,
+                    dense=None):
     """One masked block Sternheimer solve over all selected k (R1), against a
     batched k+q Hamiltonian whose apply carries the Toeplitz path (R3). The k+q
     operator is exactly ``cg_sternheimer``'s (H − ε_{n,k} + s·P_occ), so this is a
-    reindex-and-batch of the reference loop, not a new solver."""
+    reindex-and-batch of the reference loop, not a new solver. ``dense``
+    (optional ``DenseSternheimerSolver``) drafts the solve in the mesh
+    eigenbasis and supplies the memoized fold-permutation Hamiltonian."""
     system = res.system
     grid = system.grid
     shape = grid.shape
@@ -197,19 +201,23 @@ def _chi0_q_batched(res, q_frac, v_box, tol, max_iter, ks, kw, symmetrizer):
     jsel = torch.as_tensor([int(jidx[ik]) for ik in ks], dtype=torch.long, device=dev)
 
     bk_k = _reindex_bk(bk, ksel)                       # the k spheres (selected)
-    bk_kq = _reindex_bk(bk, jsel)                      # the k+q spheres
-    # The batched many-k Sternheimer solve here is exactly the regime the
-    # Toeplitz local apply WINS (~2× measured), so force it for this
-    # Hamiltonian's construction rather than leaving it to the timing trial.
-    # The memory gate still declines for large npw, falling back to FFT.
-    import gradwave.core.batch as _batch
+    if dense is not None:
+        h_kq, bk_kq = dense.h_for(jsel)                # memoized per fold permutation
+    else:
+        bk_kq = _reindex_bk(bk, jsel)                  # the k+q spheres
+        # The batched many-k Sternheimer solve here is exactly the regime the
+        # Toeplitz local apply WINS (~2× measured), so force it for this
+        # Hamiltonian's construction rather than leaving it to the timing trial.
+        # The memory gate still declines for large npw, falling back to FFT.
+        import gradwave.core.batch as _batch
 
-    _toep_prev = _batch._TOEPLITZ_MODE
-    _batch._TOEPLITZ_MODE = "on"
-    try:
-        h_kq = BatchedHamiltonian(bk_kq, shape, res.v_eff, projectors_b(bk_kq, system.positions))
-    finally:
-        _batch._TOEPLITZ_MODE = _toep_prev
+        _toep_prev = _batch._TOEPLITZ_MODE
+        _batch._TOEPLITZ_MODE = "on"
+        try:
+            h_kq = BatchedHamiltonian(bk_kq, shape, res.v_eff,
+                                      projectors_b(bk_kq, system.positions))
+        finally:
+            _batch._TOEPLITZ_MODE = _toep_prev
 
     npw_max = bk.mask.shape[1]
     nocc = _occupied(res, 0, ks[0])[0].shape[0]
@@ -237,8 +245,10 @@ def _chi0_q_batched(res, q_frac, v_box, tol, max_iter, ks, kw, symmetrizer):
         return torch.einsum("kbn,kng->kbg", ov, c_occ_kq)
 
     rhs = -(rhs_s - p_occ(rhs_s))                      # −P_c^{k+q}(δV_q·ψ_k)
+    x0 = (dense.solve(jsel, eps_k, rhs, shift, nocc) if dense is not None
+          else torch.zeros_like(rhs))
     dpsi = cg_sternheimer(h_kq, bk_kq, c_occ_kq, eps_k, rhs,
-                          torch.zeros_like(rhs), shift, tol=tol, max_iter=max_iter)
+                          x0, shift, tol=tol, max_iter=max_iter)
     dpsi_box = g_to_r_b(dpsi, bk_kq, shape)            # (nsel, nocc, *box)
 
     w = torch.tensor([2.0 * float(kw[ik]) for ik in ks], dtype=RDTYPE, device=dev)
