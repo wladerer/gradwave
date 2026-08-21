@@ -38,6 +38,8 @@ ITERS = int(sys.argv[7]) if len(sys.argv) > 7 else 80
 TOL = float(sys.argv[8]) if len(sys.argv) > 8 else 1e-6
 KW = int(sys.argv[9]) if len(sys.argv) > 9 else 4
 MODE = sys.argv[10] if len(sys.argv) > 10 else "fp"  # "fp" (fullpot) or "mt" (muffin-tin)
+KERKER = float(sys.argv[11]) if len(sys.argv) > 11 else 0.7  # interstitial screen (Å⁻¹); the
+# campaign's validated convergence recipe — plain Anderson on TiO2 k222 is chaotically fragile.
 
 FULLPOT = MODE == "fp"
 KMESH = (KK, KK, KK)
@@ -49,16 +51,19 @@ def atoms_for(u):
             ((0.5 + u, 0.5 - u, 0.5), "O"), ((0.5 - u, 0.5 + u, 0.5), "O")]
 
 
-def run(u, c, tag=""):
-    # COLD each point (v_start=None): a full-state warm start skips the muffin-tin staging and
-    # a cold-fullpot-from-iter-0 run diverges. Cold => MT staging => robust convergence.
+def run(u, c, tag="", v_sph=None):
+    # Warm-start each perturbed point from the base's SPHERICAL potentials (per-key dict, NOT
+    # __full_state__): a per-key v_start keeps mt_phase=True (re-stages the muffin-tin loop) while
+    # seeding the spherical potential near converged — this biases every point to the base's basin
+    # (the fullpot k222 fixed point is chaotically multistable; cold runs land in different basins,
+    # a __full_state__ warm start skips staging and diverges). v_sph=None => cold (the base).
     a_bohr = [A, A, c]
     atoms = atoms_for(u)
     t0 = time.time()
     bands, info = crystal_scf_multi(
         a_bohr, atoms, RADII, ecut=ECUT, lmax=LMAX, iters=ITERS, tol=TOL,
         kmesh=KMESH, smearing=SMEAR, efg=True, fullpot=FULLPOT, fullpot_lmax=FP_LMAX,
-        kworkers=KW, v_start=None, verbose=False)
+        kworkers=KW, v_start=v_sph, kerker=(KERKER if KERKER > 0 else None), verbose=False)
     dt = time.time() - t0
     rec = info.get("recorder")
     niter = len(rec.iters) if rec is not None else -1
@@ -89,25 +94,27 @@ def central(fp, fm, h):
 
 def main():
     print(f"CONFIG mode={MODE} ecut={ECUT} lmax={LMAX} fp_lmax={FP_LMAX} kmesh={KMESH} "
-          f"smear={SMEAR} delta={DELTA} iters={ITERS} tol={TOL} kworkers={KW}", flush=True)
-    print("=== base ===", flush=True)
+          f"smear={SMEAR} kerker={KERKER} delta={DELTA} iters={ITERS} tol={TOL} "
+          f"kworkers={KW}", flush=True)
+    print("=== base (cold) ===", flush=True)
     base = run(U0, C0, tag="base")
+    vsph = {k: np.asarray(v).copy() for k, v in base["v_by_key"].items()}  # base spherical seed
 
     d1 = DELTA
     d2 = DELTA / 2
 
-    print("=== u sweep (cold) ===", flush=True)
-    up1 = run(U0 + d1, C0, tag="u+d")
-    um1 = run(U0 - d1, C0, tag="u-d")
-    up2 = run(U0 + d2, C0, tag="u+d/2")
-    um2 = run(U0 - d2, C0, tag="u-d/2")
+    print("=== u sweep (warm from base spherical) ===", flush=True)
+    up1 = run(U0 + d1, C0, tag="u+d", v_sph=vsph)
+    um1 = run(U0 - d1, C0, tag="u-d", v_sph=vsph)
+    up2 = run(U0 + d2, C0, tag="u+d/2", v_sph=vsph)
+    um2 = run(U0 - d2, C0, tag="u-d/2", v_sph=vsph)
 
-    print("=== c/a sweep (cold; a fixed, vary c) ===", flush=True)
+    print("=== c/a sweep (warm; a fixed, vary c) ===", flush=True)
     # c/a -> (c/a) +/- delta  <=>  c -> c +/- delta*A  (a fixed)
-    cp1 = run(U0, C0 + d1 * A, tag="ca+d")
-    cm1 = run(U0, C0 - d1 * A, tag="ca-d")
-    cp2 = run(U0, C0 + d2 * A, tag="ca+d/2")
-    cm2 = run(U0, C0 - d2 * A, tag="ca-d/2")
+    cp1 = run(U0, C0 + d1 * A, tag="ca+d", v_sph=vsph)
+    cm1 = run(U0, C0 - d1 * A, tag="ca-d", v_sph=vsph)
+    cp2 = run(U0, C0 + d2 * A, tag="ca+d/2", v_sph=vsph)
+    cm2 = run(U0, C0 - d2 * A, tag="ca-d/2", v_sph=vsph)
 
     print("\n===== FINITE-DIFFERENCE GRADIENTS =====", flush=True)
     for site, lbl in (("a0", "Ti"), ("a2", "O")):
