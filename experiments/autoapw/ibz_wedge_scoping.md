@@ -171,15 +171,70 @@ reducible fraction ≈ 1, so the ceiling is the reduction factor itself, degrade
 only by the setup/solve factor split — landing at **~3.1–3.7× for Si and
 ~1.9–2.4× for rutile TiO2**.
 
-**The TR bracket (analytic route only).** Because `sigma_shielding_dq` already
-runs on the TR-folded mesh (nk 64→36 at 4³ ≈ 1.8× banked for free), part of
-these ceilings may already be realized today. If the little-group wedge composes
-cleanly with the existing TR fold, the ceilings above stand; if TR and the axis
-little group substantially overlap (for Si, `inversion∘TR` fixes q̂, so TR adds
-little the point group didn't already offer along an axis), the *incremental*
-gain over today's TR-folded behavior could be as low as ~1.7–2× on Si. The
-route-equivalence test (§5d) is what pins which end of this bracket is real; it
-cannot be settled from the k-counts alone.
+The ceilings above are relative to the **point-group-only full mesh**. But the
+analytic route silently runs on the **time-reversal-folded** mesh already (§1;
+nk 64→36 at Si 4³), so the honest question for the GO is the **incremental**
+factor — the little-group reduction *on top of* the TR fold — not the raw factor.
+That is §3b, and it is the number the GO actually turns on.
+
+## 3b. The incremental factor: little group AFTER the TR fold
+
+Script `ibz_wedge_littlegroups.py` (extended). Baseline = the mesh the analytic
+route pays today, orbits under `{I, TR}`. Reduced wedge = orbits under
+`⟨G_q, TR⟩` per axis. Incremental = ratio of the two k-counts.
+
+| | TR-folded nk (route pays) | ⟨G_q,TR⟩ IBZ per axis | **incremental / axis** |
+|---|---|---|---|
+| Si 4³ | 36 | 13 (all axes) | **2.77×** |
+| Si 6³ | 112 | 32 (all axes) | **3.50×** |
+| TiO2 4³ | 36 | 27 / 27 / 18 | **1.33× / 1.33× / 2.00×** |
+| TiO2 6³ | 112 | 64 / 64 / 40 | **1.75× / 1.75× / 2.80×** |
+
+TR overlaps the axis little group modestly for Si (raw 3.20/3.86× → incremental
+2.77/3.50×) and heavily for the TiO2 a-axes (raw 1.78/2.25× → incremental
+1.33/1.75×). Folding the measured 8 %/92 % setup/solve split and the
+union-of-wedges setup factor into these incremental factors gives the **net
+analytic-route ceiling relative to what the route pays today**:
+
+| system / mesh | net incremental ceiling (vs TR-folded) |
+|---|---|
+| Si 4³ | **2.69×** |
+| Si 6³ | **3.36×** |
+| TiO2 4³ | **1.48×** |
+| TiO2 6³ | **1.98×** |
+
+**Wall confirmation (the incremental k-count converts to wall).** `npw` is
+kmesh-independent at fixed ecut, so per-k cost is constant and wall ∝ nk. Measured
+`sigma_shielding_dq` on Si (asus, OMP=2): 2³ nk=8 → 73.9 s (9.24 s/k); 4³ nk=36 →
+329.3 s (9.15 s/k). `wall(4³)/wall(2³) = 4.46` vs `nk(4³)/nk(2³) = 4.50` →
+**linearity 0.99**. So a reduced wedge of `nk/incr` k-points cuts wall by ~`incr`
+with no per-k penalty — the incremental factors above *are* the wall speedups.
+
+**One caveat, measured directly.** All of §3b assumes the analytic route is
+*correct* on the TR-folded mesh (nk=36) — otherwise its baseline is the unfolded
+nk=64 and the incremental factor reverts to the raw §3 factor (a *stronger* GO).
+No test exercises `sigma_shielding_dq` on an actually-TR-folded mesh
+(`test_sigma_cubic_isotropy` runs at 2³, where every point is TR-invariant so
+nk=8=full). Observed σ_iso (Si, this bare pseudo route): analytic gives −22 ppm
+(2³) and −0.15 ppm (4³ TR-folded) vs the finite-q route's +34–59 ppm — a
+mismatch that hints the TR fold may *not* be valid for the analytic q-derivative.
+Resolved by direct route-equivalence, `ibz_wedge_tr_equiv.py`:
+
+| Si 4³ | σ_iso[Si] | wall |
+|---|---|---|
+| `sigma_shielding_dq`, TR-folded (nk=36) | −0.154 ppm | 527 s |
+| `sigma_shielding_dq`, unfolded (nk=64, `time_reversal=False`) | −0.154 ppm | 924 s |
+| **‖σ(TR) − σ(unfold)‖_max** | **1.07e-08 ppm** | |
+
+**The two σ are identical to solver tolerance (1e-8 ppm).** The analytic route
+is TR-valid: the TR fold is already correctly banked, so the baseline the GO must
+beat is the TR-folded nk (36/112), and the incremental factors above (§3b table)
+are the operative ones — **not** the raw §3 factors. (Aside: the analytic route's
+σ_iso ≈ −0.15 ppm differs from the finite-q route's +34–59 ppm quoted in
+`test_sigma_cubic_isotropy`; since *both* TR-folded and unfolded analytic runs
+agree at −0.154, this is a route-to-route difference, not a TR artifact, and is
+orthogonal to the k-reduction scoped here — the wedge oracle is the full-mesh
+*analytic* result, which the −0.154 pins.)
 
 ---
 
@@ -188,47 +243,51 @@ cannot be settled from the k-counts alone.
 **QUALIFIED GO for the analytic (production) route via the low-risk
 output-tensor variant; NO-GO (defer) for the finite-q/screening route.**
 
-The two decision numbers land in the middle of the vet's band, not the top:
+The incremental factor (§3b) — little group *after* the TR fold the analytic
+route already pays — is the number the GO turns on, and it **splits by system**:
 
-- **Reduction factor: 2–4× at practical meshes** (Si 3.2–3.9×, TiO2 1.8–3.6×
-  per axis), not the 8×/4×/2× asymptotic prize. Above the "~1–2× ⇒ skip" floor,
-  below the "4–8× ⇒ obvious" ceiling.
-- **Reducible fraction ≈ 1.000** (fixed tail 15 ms). So the factor converts to
-  wall almost losslessly — **net ceiling ~3.1–3.7× (Si), ~1.9–2.4× (TiO2)**.
+- **Si: GO stands.** Net incremental ceiling **2.69× (4³), 3.36× (6³)** — above
+  the coordinator's 2.5× GO line at 6³, close at 4³, and comfortably above the
+  1.7× NO-GO floor. Even in the pessimistic reading where TR is invalid for the
+  analytic route (baseline nk=64), the factor only *rises* to the raw 3.1–3.7×.
+  Si is a GO under both baselines.
+- **TiO2: NO-GO.** Net incremental ceiling **1.48× (4³), 1.98× (6³)**. The two
+  a-axes reduce only 1.33–1.75× on top of TR — below the 1.7× floor — and drag
+  the whole-tensor ceiling under 2×. Rutile gets essentially nothing the TR fold
+  did not already give.
+- **Amdahl tax negligible** (fixed tail 15 ms; reducible ≈ 1.000) and the
+  **wall-scaling is linear in nk** (measured 0.99), so these k-count ceilings are
+  the real wall speedups, not optimistic bounds.
 
-On the factor alone this is marginal. What tips it to GO is **build cost, not
-factor**: the reduction is not "a major feature touching `_guard`" — the
-k-reduction backbone is **already landed and verified** (`little_group_ibz`,
-`star_of_q`, `QFieldSymmetrizer`, and the fully worked `chi0_q_reduced`
-star-unfold that reproduces the full-mesh response to <1e-6). For the analytic
-route specifically, the response field is a **q=0 vector field**, so it reuses
-only *already-shipped q=0 primitives* (`VectorFieldSymmetrizer` /
-`symmetrize_atom_tensor`, the dielectric IBZ recipe) — no new symmetry class,
-no umklapp, no projective-rep trap. A ~2–4 day, low-risk change buying ~3× on
-Si (the campaign's main test system) clears the bar.
+**Verdict: GO, scoped to Si-like cubic systems; NO-GO for rutile TiO2.** What
+carries the Si GO is **build cost, not factor**: the reduction is not "a major
+feature touching `_guard`" — the k-reduction backbone is **already landed and
+verified** (`little_group_ibz`, `star_of_q`, `QFieldSymmetrizer`, and the fully
+worked `chi0_q_reduced` star-unfold, <1e-6 vs full mesh). For the analytic route
+the response is a **q=0 vector field**, so it reuses only *already-shipped q=0
+primitives* (`VectorFieldSymmetrizer` / `symmetrize_atom_tensor`, the dielectric
+IBZ recipe) — no new class, no umklapp, no projective-rep trap. A ~2–4 day,
+low-risk change buying ~2.7–3.4× on Si (the campaign's main test system) clears
+the bar; the same change buys ~1.5–2× on rutile and is not worth targeting there.
 
-It is a **NO-GO for the finite-q/screening route's reduction**: that path needs a
+**NO-GO for the finite-q/screening route's reduction** independently: it needs a
 genuinely new q≠0 vector field symmetrizer (~1–2 weeks, medium risk) to speed up
-a **validation** route, at the smaller rutile factor. Not worth it until the
-analytic reduction is proven and a real need appears.
+a **validation** route, at the smaller rutile factor. Defer.
 
-**Two gates before committing even the analytic build:**
-
-1. **The TR bracket must be resolved** (§3). If the analytic route's default
-   TR fold already banks most of the win, the *incremental* gain could be ~1.7×
-   and the GO flips to NO-GO. This is a one-script check: run
-   `sigma_shielding_dq` on the TR-folded mesh (nk=36) vs the unfolded mesh
-   (nk=64, `time_reversal=False`) and compare both σ (correctness) and wall.
-2. **Confirm `sigma_shielding_dq` is the route the campaign actually runs.** If
-   the campaign has moved to the finite-q route for some systems, re-weight
-   toward the NO-GO side.
+**The one correctness gate before building — measured and passed (§3b).** The Si
+GO's incremental factor assumes `sigma_shielding_dq` is *correct* on the
+TR-folded mesh. Direct route-equivalence confirms it: σ(TR-folded nk=36) equals
+σ(unfolded nk=64) to **1.07e-08 ppm**. So the TR fold is validly banked, the
+incremental factors (§3b) are the operative ones, and the wedge build inherits
+`time_reversal=True` as its baseline. (Had this failed, the baseline would revert
+to nk=64 and the factor would only *increase* — Si was GO either way.)
 
 The coordinator's "shared-with-phonon-DFPT value" point is **real but narrower
 than stated**: the k-reduction plumbing phonons need (`chi0_q_reduced`) is
 *already built*. The only genuinely-new shared artifact is the q≠0 vector field
 symmetrizer — and that belongs to the NO-GO finite-q route, not the GO analytic
-one. So the shared-value argument does not itself lift the analytic build; the
-analytic build stands on its own cheap ~3× or not at all.
+one. So the shared-value argument does not itself lift the analytic build; it
+stands on its own cheap Si-shaped ~3× or not at all.
 
 ---
 
@@ -358,9 +417,12 @@ as the default and the validation oracle; the reduced path is opt-in, mirroring
 
 ## Appendix — scripts & provenance
 
-- `experiments/autoapw/ibz_wedge_littlegroups.py` — computes §1 (spglib via
-  `find_spacegroup`; `little_cogroup` / `star_of_q` / `little_group_ibz`).
+- `experiments/autoapw/ibz_wedge_littlegroups.py` — §1 (raw factors) and §3b
+  (incremental-after-TR factors + net ceilings); spglib via `find_spacegroup`,
+  `little_cogroup` / `star_of_q` / `little_group_ibz`, and `⟨G_q,TR⟩` orbits.
 - `experiments/autoapw/ibz_wedge_profile.py` — §2 profile (Si 12 Ry 4³, asus).
+- `experiments/autoapw/ibz_wedge_tr_equiv.py` — §3b TR-validity route-equivalence
+  (analytic σ, TR-folded nk=36 vs unfolded nk=64, Si 4³, asus).
 - Little-group numbers reproduce the orbit–stabilizer identity
   `|star|·|G_q| = |G|` exactly for every axis (printed by the script).
 - Cells: Si `si_fcc()` (a=5.43 Å, `tests/helpers.py`); rutile TiO2 from
