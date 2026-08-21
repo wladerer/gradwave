@@ -397,13 +397,16 @@ def _shift_solve(fac, b):
     return x
 
 
-def _si_block_fom(op, sop, seed, sigma, k, tol_ev, max_basis):
+def _si_block_fom(op, sop, seed, sigma, k, n_conv, tol_ev, max_basis):
     """Block-seeded full-orthogonalization Lanczos for the ``k`` eigenpairs of the S-self-adjoint
     operator ``op = (H−σS)^{-1}S`` nearest σ (largest ``|θ|``; ε = σ + 1/θ). The Krylov space is
     started from a BLOCK (the warm occupied vectors, or a deterministic block) so a degenerate
     eigenspace — spanned by the block — is captured with full multiplicity (single-vector Lanczos
     would find only one copy). The dense Hermitian projected matrix is tracked honestly (FOM), and
-    the wanted window's convergence is the DIRECT batched S-residual ``||op Y − Y diag θ||_S``.
+    the window's convergence is the DIRECT batched S-residual ``||op Y − Y diag θ||_S`` on the
+    lowest ``n_conv`` Ritz pairs by ε (only those need to be accurate eigenvalues — the buffer up to
+    ``k`` sits far from σ, converges slowest under the 1/θ² eV-error scaling, and is needed only to
+    isolate the window's top for the caller's certificate).
 
     All inner work is BLAS (the basis lives in one contiguous ``dim×max_basis`` array; reorth and
     projection are GEMMs, not Python loops over vectors — the loop form measured 0.22× dense, i.e.
@@ -445,16 +448,16 @@ def _si_block_fom(op, sop, seed, sigma, k, tol_ev, max_basis):
             hproj[cur - 1, j] = beta
             hproj[j, cur - 1] = beta
         processed += 1
-        if processed >= min(k, cur) and (processed - last_check >= 4 or processed == cur):
+        if processed >= min(n_conv, cur) and (processed - last_check >= 4 or processed == cur):
             last_check = processed
             theta, z = np.linalg.eigh(hproj[:processed, :processed])
-            want = np.argsort(-np.abs(theta))[:min(k, processed)]
-            ymat = bmat[:, :processed] @ z[:, want]        # dim × |want|
-            res = op(ymat) - ymat * theta[want][None, :]   # batched direct residual
+            eps_all = sigma + 1.0 / theta
+            low = np.argsort(eps_all)[:min(n_conv, processed)]   # lowest n_conv by ε
+            ymat = bmat[:, :processed] @ z[:, low]
+            res = op(ymat) - ymat * theta[low][None, :]          # batched direct residual
             sres = sop(res)
             resn = np.sqrt(np.maximum(np.einsum("ij,ij->j", res.conj(), sres).real, 0.0))
-            if float((resn / np.maximum(theta[want] ** 2, 1e-300)).max()) < tol_ev:
-                eps_all = sigma + 1.0 / theta
+            if float((resn / np.maximum(theta[low] ** 2, 1e-300)).max()) < tol_ev:
                 idx = np.argsort(eps_all)[:min(k, processed)]
                 return eps_all[idx].real, bmat[:, :processed] @ z[:, idx]
     return None
@@ -515,7 +518,8 @@ def solve_geneig_shift_invert(hmat, smat, nbands, sigma, c_prev=None, tol_ev=1e-
         seed = rng.standard_normal((dim, b0)) + 1j * rng.standard_normal((dim, b0))
     if max_basis is None:
         max_basis = min(dim - 1, seed.shape[1] + 6 * k + 40)
-    out = _si_block_fom(op, sop, seed, sigma, k, tol_ev, max_basis)
+    n_conv = min(nb + 4, k)                               # bands 0..nb must be accurate (σ_hi gap)
+    out = _si_block_fom(op, sop, seed, sigma, k, n_conv, tol_ev, max_basis)
     if out is None:
         return None
     eps_ext, vecs_ext = out                              # sorted, length min(k, m) ≥ nb+1 wanted
