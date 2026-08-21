@@ -397,104 +397,34 @@ def _shift_solve(fac, b):
     return x
 
 
-def _si_block_fom(op, sop, seed, sigma, k, n_conv, tol_ev, max_basis):
-    """Block-seeded full-orthogonalization Lanczos for the ``k`` eigenpairs of the S-self-adjoint
-    operator ``op = (H−σS)^{-1}S`` nearest σ (largest ``|θ|``; ε = σ + 1/θ). The Krylov space is
-    started from a BLOCK (the warm occupied vectors, or a deterministic block) so a degenerate
-    eigenspace — spanned by the block — is captured with full multiplicity (single-vector Lanczos
-    would find only one copy). The dense Hermitian projected matrix is tracked honestly (FOM), and
-    the window's convergence is the DIRECT batched S-residual ``||op Y − Y diag θ||_S`` on the
-    lowest ``n_conv`` Ritz pairs by ε (only those need to be accurate eigenvalues — the buffer up to
-    ``k`` sits far from σ, converges slowest under the 1/θ² eV-error scaling, and is needed only to
-    isolate the window's top for the caller's certificate).
-
-    All inner work is BLAS (the basis lives in one contiguous ``dim×max_basis`` array; reorth and
-    projection are GEMMs, not Python loops over vectors — the loop form measured 0.22× dense, i.e.
-    slower). ``op``/``sop`` accept 2-D blocks. Deterministic given ``seed``. Returns sorted
-    ``(eps[:k], vecs[:, :k])`` or ``None`` if the window fails to converge."""
-    dim = seed.shape[0]
-    bmat = np.zeros((dim, max_basis), dtype=complex)       # S-orthonormal basis (contiguous)
-    hproj = np.zeros((max_basis, max_basis), dtype=complex)
-    cur = 0
-
-    def s_ortho_append(w):
-        nonlocal cur
-        if cur >= max_basis:
-            return -1.0
-        for _ in range(2):                                 # DGKS: two reorth passes (GEMMs)
-            if cur:
-                w = w - bmat[:, :cur] @ (bmat[:, :cur].conj().T @ sop(w))
-        nrm = float(np.sqrt(max(np.vdot(w, sop(w)).real, 0.0)))
-        if nrm < 1e-9:
-            return -1.0
-        bmat[:, cur] = w / nrm
-        cur += 1
-        return nrm
-
-    for col in seed.T:                                     # S-orthonormalize the seed block
-        s_ortho_append(np.ascontiguousarray(col, dtype=complex))
-    if cur == 0:
-        return None
-    processed, last_check = 0, -10
-    while processed < cur and cur < max_basis:
-        j = processed
-        w = op(bmat[:, j])
-        coeffs = bmat[:, :cur].conj().T @ sop(w)           # honest H column j (GEMV)
-        hproj[:cur, j] = coeffs
-        hproj[j, :cur] = np.conj(coeffs)
-        r = w - bmat[:, :cur] @ coeffs
-        beta = s_ortho_append(r)
-        if beta > 0:
-            hproj[cur - 1, j] = beta
-            hproj[j, cur - 1] = beta
-        processed += 1
-        if processed >= min(n_conv, cur) and (processed - last_check >= 4 or processed == cur):
-            last_check = processed
-            theta, z = np.linalg.eigh(hproj[:processed, :processed])
-            eps_all = sigma + 1.0 / theta
-            low = np.argsort(eps_all)[:min(n_conv, processed)]   # lowest n_conv by ε
-            ymat = bmat[:, :processed] @ z[:, low]
-            res = op(ymat) - ymat * theta[low][None, :]          # batched direct residual
-            sres = sop(res)
-            resn = np.sqrt(np.maximum(np.einsum("ij,ij->j", res.conj(), sres).real, 0.0))
-            worst = float((resn / np.maximum(theta[low] ** 2, 1e-300)).max())
-            import os
-            if os.environ.get("GW_SI_DEBUG"):
-                print(f"[si] processed={processed} cur={cur} worst_errev={worst:.2e} "
-                      f"theta[low]=[{theta[low].min():.2e},{theta[low].max():.2e}] "
-                      f"resn=[{resn.min():.2e},{resn.max():.2e}]", flush=True)
-            if worst < tol_ev:
-                idx = np.argsort(eps_all)[:min(k, processed)]
-                return eps_all[idx].real, bmat[:, :processed] @ z[:, idx]
-    return None
-
-
-def solve_geneig_shift_invert(hmat, smat, nbands, sigma, c_prev=None, tol_ev=1e-7,
-                              buffer=None, max_basis=None):
+def solve_geneig_shift_invert(hmat, smat, nbands, sigma, c_prev=None, buffer=None, maxiter=None):
     """Shift-invert Lanczos generalized eigensolve for the lowest ``nbands`` of ``H c = ε S c``
     (OPT-IN; the exact dense ``solve_geneig`` stays the SCF default). One ``LDL^H`` factorization of
-    ``M = H − σS`` drives a deterministic, fully-reorthogonalized Lanczos on ``M^{-1}S`` (S-inner
-    product), with thick restart for degenerate multiplets, and a **two-shift Sylvester-inertia
-    completeness certificate** guarding a LOUD dense fallback.
+    ``M = H − σS`` (``_shift_factor``) is reused BOTH as the ARPACK shift-invert operator
+    ``(H−σS)^{-1}`` (implicitly-restarted Lanczos on ``M^{-1}S`` in the S-inner product,
+    ``scipy.sparse.linalg.eigsh``, deterministic under a fixed start vector) AND for the Sylvester
+    inertia of the completeness certificate — so the accelerated solve costs one factorization, not
+    a fresh dense diagonalization.
 
-    ``sigma`` is placed just BELOW the occupied+buffer window (the caller warms it from the
-    previous iteration's lowest eigenvalue, or an atomic estimate cold) — the measured-winning
-    shift (``pencil_bench``: 2.5× at dim 737, 5.4× at 1559; a window-CENTER shift instead leaves
-    the deep bands far from σ and slow, and the certificate would just reject). The certificate:
-    the LDL inertia ``n_lo`` counts pencil eigenvalues below σ, and after the solve a second cheap
-    factorization at a midgap shift ``σ_hi`` in the window's top gap gives ``n_hi``; completeness
+    ``sigma`` is placed just BELOW the occupied+buffer window (the caller warms it from the previous
+    iteration's lowest eigenvalue, or an atomic estimate cold) — the measured-winning shift
+    (``pencil_bench``: 2.5× at dim 737, 5.4× at 1559; ARPACK converges the lowest bands, the
+    largest ``|1/(ε−σ)|``, first). The **two-shift Sylvester-inertia completeness certificate**
+    guards a LOUD dense fallback: the LDL inertia ``n_lo`` at σ counts eigenvalues below σ, a second
+    cheap factorization at a midgap ``σ_hi`` in the window's top gap gives ``n_hi``; completeness
     requires the count of computed eigenvalues below σ to equal ``n_lo`` (nothing beneath σ was
-    missed) AND ``n_hi == nbands`` (exactly ``nbands`` eigenvalues sit below σ_hi, and we returned
-    that many) — a missed multiplet copy or mis-placed σ breaks one and returns ``None``.
+    missed) AND ``n_hi == nbands`` (exactly ``nbands`` eigenvalues below σ_hi, and we returned that
+    many). A missed Γ multiplet copy or a mis-placed σ breaks one and returns ``None``.
 
-    ``c_prev`` (dim×nb) seeds the deterministic start vector (its column sum) so the Krylov space is
-    rich in the occupied subspace incl. degenerate multiplets. Returns ``(evals, vecs)`` matching
-    ``solve_geneig(..., with_vecs=True)``, or ``None`` on any certificate/robustness failure."""
+    ``c_prev`` (dim×nb) seeds a deterministic start vector rich in the occupied subspace. Returns
+    ``(evals, vecs)`` matching ``solve_geneig(..., with_vecs=True)``, or ``None`` on any
+    certificate/robustness failure."""
+    from scipy.sparse.linalg import LinearOperator, eigsh
     dim = hmat.shape[0]
     nb = min(nbands, dim)
     if buffer is None:
         buffer = max(8, nb // 4)
-    k = min(nb + buffer, dim - 1)
+    k = min(nb + buffer, dim - 2)
     if dim < 48 or k >= dim - 1:                          # no headroom → let the caller use dense
         return None
     try:
@@ -507,28 +437,18 @@ def solve_geneig_shift_invert(hmat, smat, nbands, sigma, c_prev=None, tol_ev=1e-
     xt = _shift_solve(fac, probe)
     if not np.isfinite(xt).all() or np.linalg.norm((hmat - sigma * smat) @ xt - probe) > 1e-6:
         return None
-
-    def sop(x):
-        return smat @ x
-
-    def op(y):
-        return _shift_solve(fac, smat @ y)
-
-    # BLOCK seed so a degenerate eigenspace is captured with full multiplicity: the warm occupied
-    # block when available, else a deterministic fixed-seed block that generically spans multiplets.
+    opinv = LinearOperator((dim, dim), matvec=lambda b: _shift_solve(fac, b), dtype=complex)
     if c_prev is not None and c_prev.shape[0] == dim and c_prev.shape[1] > 0:
-        seed = c_prev.astype(complex)
+        v0 = c_prev.sum(axis=1).astype(complex)          # deterministic warm start
     else:
-        rng = np.random.default_rng(0)
-        b0 = min(k, 16)
-        seed = rng.standard_normal((dim, b0)) + 1j * rng.standard_normal((dim, b0))
-    if max_basis is None:
-        max_basis = min(dim - 1, seed.shape[1] + 6 * k + 40)
-    n_conv = min(nb + 4, k)                               # bands 0..nb must be accurate (σ_hi gap)
-    out = _si_block_fom(op, sop, seed, sigma, k, n_conv, tol_ev, max_basis)
-    if out is None:
+        v0 = np.ones(dim, dtype=complex)
+    try:                                                 # ARPACK shift-invert (which='LM' near σ)
+        w, vecs_ext = eigsh(hmat, k=k, M=smat, sigma=sigma, which="LM", v0=v0, OPinv=opinv,
+                            tol=0.0, maxiter=maxiter or dim * 20)
+    except Exception:                                    # ARPACK non-convergence → dense fallback
         return None
-    eps_ext, vecs_ext = out                              # sorted, length min(k, m) ≥ nb+1 wanted
+    order = np.argsort(w.real)
+    eps_ext, vecs_ext = w.real[order], vecs_ext[:, order]
     if len(eps_ext) <= nb:
         return None
     evals, vecs = eps_ext[:nb], vecs_ext[:, :nb]
