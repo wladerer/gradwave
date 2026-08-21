@@ -357,44 +357,23 @@ def solve_geneig_subspace(H, S, c_prev, nbands, tol=1e-8):
 # ---------------------------------------------------------------------------
 
 
-def _shift_factor(mmat):
-    """Bunch-Kaufman-style ``LDL^H`` factorization of the (Hermitian, indefinite) shift matrix
-    ``M = H − σS`` via ``scipy.linalg.ldl``, packaged for repeated solves plus the Sylvester
-    **inertia** (pencil eigenvalues below σ). Returns ``(fac, n_neg)`` where ``fac`` drives
-    ``_shift_solve`` and ``n_neg`` is the count of negative eigenvalues of the block-diagonal ``D``
-    (= eigenvalues of the pencil ``(H,S)`` below σ, by Sylvester's law of inertia — S is SPD)."""
+def _inertia_below(mmat):
+    """Sylvester inertia of the Hermitian shift matrix ``M = H − σS``: the number of NEGATIVE
+    eigenvalues of ``M``, which by Sylvester's law of inertia (S is SPD) equals the number of
+    generalized eigenvalues of the pencil ``(H, S)`` below σ. Computed from the block-diagonal ``D``
+    of the Bunch-Kaufman ``LDL^H`` factorization (``scipy.linalg.ldl`` → LAPACK ``hetrf``): a
+    single ``O(dim³/3)`` factorization, and only the 1×1/2×2 pivot blocks' signs are inspected."""
     from scipy.linalg import ldl
-    lu, d, perm = ldl(mmat, hermitian=True, lower=True)
-    lp = lu[perm]                                    # lower-triangular outer factor
-    n = d.shape[0]
-    dinv, n_neg, i = [], 0, 0
+    _lu, d, _perm = ldl(mmat, hermitian=True)
+    n, neg, i = d.shape[0], 0, 0
     while i < n:
-        if i + 1 < n and abs(d[i + 1, i]) > 0.0:     # 2×2 pivot block
-            blk = d[i:i + 2, i:i + 2]
-            n_neg += int((np.linalg.eigvalsh(blk) < 0).sum())
-            dinv.append((i, 2, np.linalg.inv(blk)))
+        if i + 1 < n and abs(d[i + 1, i]) > 0.0:              # 2×2 pivot block
+            neg += int((np.linalg.eigvalsh(d[i:i + 2, i:i + 2]) < 0).sum())
             i += 2
-        else:                                        # 1×1 pivot
-            val = d[i, i].real
-            n_neg += int(val < 0.0)
-            dinv.append((i, 1, np.array([[1.0 / val]], dtype=complex)))
+        else:                                                 # 1×1 pivot
+            neg += int(d[i, i].real < 0.0)
             i += 1
-    return {"lp": lp, "perm": perm, "dinv": dinv}, n_neg
-
-
-def _shift_solve(fac, b):
-    """Solve ``M x = b`` from ``_shift_factor``'s ``LDL^H`` factors (``M = lu·d·lu^H`` with
-    ``lu[perm]`` lower-triangular). Handles 1-D and 2-D ``b``."""
-    from scipy.linalg import solve_triangular
-    lp, perm, dinv = fac["lp"], fac["perm"], fac["dinv"]
-    v = solve_triangular(lp, b[perm], lower=True)          # lu[perm] v = b[perm]
-    z = np.empty_like(v)
-    for (i0, sz, inv) in dinv:                             # z = d^{-1} v (block diagonal)
-        z[i0:i0 + sz] = inv @ v[i0:i0 + sz]
-    w = solve_triangular(lp.conj().T, z, lower=False)      # lu^H via (lu[perm])^H
-    x = np.empty_like(w)
-    x[perm] = w
-    return x
+    return neg
 
 
 def solve_geneig_shift_invert(hmat, smat, nbands, sigma, c_prev=None, buffer=None, maxiter=None):
@@ -403,23 +382,23 @@ def solve_geneig_shift_invert(hmat, smat, nbands, sigma, c_prev=None, buffer=Non
     ``M = H − σS`` (``_shift_factor``) is reused BOTH as the ARPACK shift-invert operator
     ``(H−σS)^{-1}`` (implicitly-restarted Lanczos on ``M^{-1}S`` in the S-inner product,
     ``scipy.sparse.linalg.eigsh``, deterministic under a fixed start vector) AND for the Sylvester
-    inertia of the completeness certificate — so the accelerated solve costs one factorization, not
-    a fresh dense diagonalization.
+    inertia of the completeness certificate.
 
     ``sigma`` is placed just BELOW the occupied+buffer window (the caller warms it from the previous
     iteration's lowest eigenvalue, or an atomic estimate cold) — the measured-winning shift
     (``pencil_bench``: 2.5× at dim 737, 5.4× at 1559; ARPACK converges the lowest bands, the
-    largest ``|1/(ε−σ)|``, first). The **two-shift Sylvester-inertia completeness certificate**
-    guards a LOUD dense fallback: the LDL inertia ``n_lo`` at σ counts eigenvalues below σ, a second
-    cheap factorization at a midgap ``σ_hi`` in the window's top gap gives ``n_hi``; completeness
-    requires the count of computed eigenvalues below σ to equal ``n_lo`` (nothing beneath σ was
-    missed) AND ``n_hi == nbands`` (exactly ``nbands`` eigenvalues below σ_hi, and we returned that
-    many). A missed Γ multiplet copy or a mis-placed σ breaks one and returns ``None``.
+    largest ``|1/(ε−σ)|``, first). The **Sylvester-inertia completeness certificate** guards a LOUD
+    dense fallback: one factorization at a midgap ``σ_hi`` in the window's top gap gives the inertia
+    ``n_hi`` = number of pencil eigenvalues below σ_hi; requiring ``n_hi == nbands`` (with all
+    returned eigenvalues below σ_hi and a real gap) certifies the returned set is *exactly* the
+    lowest ``nbands`` — a missed Γ multiplet copy (ARPACK returns fewer than ``nbands`` below σ_hi ⇒
+    ``n_hi > nbands``) or a set that isn't the bottom (``n_hi ≠ nbands``) breaks it, and it returns
+    ``None``. ARPACK is deterministic under the fixed start vector ``v0``.
 
     ``c_prev`` (dim×nb) seeds a deterministic start vector rich in the occupied subspace. Returns
     ``(evals, vecs)`` matching ``solve_geneig(..., with_vecs=True)``, or ``None`` on any
     certificate/robustness failure."""
-    from scipy.sparse.linalg import LinearOperator, eigsh
+    from scipy.sparse.linalg import eigsh
     dim = hmat.shape[0]
     nb = min(nbands, dim)
     if buffer is None:
@@ -427,42 +406,28 @@ def solve_geneig_shift_invert(hmat, smat, nbands, sigma, c_prev=None, buffer=Non
     k = min(nb + buffer, dim - 2)
     if dim < 48 or k >= dim - 1:                          # no headroom → let the caller use dense
         return None
-    try:
-        fac, n_lo = _shift_factor(hmat - sigma * smat)
-    except (np.linalg.LinAlgError, ValueError):
-        return None
-    # verify the factorization actually solves (a permutation/pivot slip → loud fallback)
-    probe = np.zeros(dim, dtype=complex)
-    probe[0] = 1.0
-    xt = _shift_solve(fac, probe)
-    if not np.isfinite(xt).all() or np.linalg.norm((hmat - sigma * smat) @ xt - probe) > 1e-6:
-        return None
-    opinv = LinearOperator((dim, dim), matvec=lambda b: _shift_solve(fac, b), dtype=complex)
     if c_prev is not None and c_prev.shape[0] == dim and c_prev.shape[1] > 0:
         v0 = c_prev.sum(axis=1).astype(complex)          # deterministic warm start
     else:
         v0 = np.ones(dim, dtype=complex)
-    try:                                                 # ARPACK shift-invert (which='LM' near σ)
-        w, vecs_ext = eigsh(hmat, k=k, M=smat, sigma=sigma, which="LM", v0=v0, OPinv=opinv,
-                            tol=0.0, maxiter=maxiter or dim * 20)
+    try:                                                 # ARPACK shift-invert: its own fast dense LU
+        w, vecs = eigsh(hmat, k=k, M=smat, sigma=sigma,  # of H−σS internally; which='LM' ⇒ near σ
+                        which="LM", v0=v0, tol=0.0, maxiter=maxiter or dim * 20)
     except Exception:                                    # ARPACK non-convergence → dense fallback
         return None
     order = np.argsort(w.real)
-    eps_ext, vecs_ext = w.real[order], vecs_ext[:, order]
-    if len(eps_ext) <= nb:
+    eps_ext, vecs = w.real[order], vecs[:, order]
+    if len(eps_ext) <= nb or not np.isfinite(eps_ext).all():
         return None
-    evals, vecs = eps_ext[:nb], vecs_ext[:, :nb]
-    # --- two-shift inertia completeness certificate ---
-    if int((eps_ext < sigma).sum()) != n_lo:             # every eigenvalue below σ was found
-        return None
+    # --- Sylvester-inertia completeness certificate (one factorization) ---
     gap = eps_ext[nb] - eps_ext[nb - 1]
     if gap <= 1e-9 * max(1.0, abs(eps_ext[nb - 1])):     # window top not isolated → cannot certify
         return None
     sigma_hi = 0.5 * (eps_ext[nb - 1] + eps_ext[nb])
     try:
-        _fac_hi, n_hi = _shift_factor(hmat - sigma_hi * smat)
+        n_hi = _inertia_below(hmat - sigma_hi * smat)
     except (np.linalg.LinAlgError, ValueError):
         return None
-    if n_hi != nb:                                       # exactly nb eigenvalues below σ_hi
-        return None
-    return evals, vecs                                   # vecs already S-orthonormal (Ritz)
+    if n_hi != nb:                                       # exactly nb eigenvalues below σ_hi ⇒ the
+        return None                                      # returned nb (all < σ_hi) are the lowest
+    return eps_ext[:nb], vecs[:, :nb]                    # vecs already S-orthonormal (ARPACK)
