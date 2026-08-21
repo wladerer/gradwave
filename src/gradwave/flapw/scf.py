@@ -522,7 +522,7 @@ def _resolve_shift_invert(mode, dim: int) -> bool:
 
 def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=None, chan=None,
                   lodat=None, nsph_int=None, c_prev=None, subspace_tol=1e-4, warp=None,
-                  geom=None, shift_invert=False, sigma=None):
+                  geom=None, shift_invert=False, sigma=None, return_HS=False):
     """Multi-atom LAPW at wavevector k, exposing the density internals the SCF needs. Returns
     ``(eigvals, eigvecs, miller, ks, [abl per atom], vol)``. H,S are complex Hermitian (structure
     phases ``e^{i(k_G'-k_G)·τ_a}``). ``atoms_cart`` = ``[(τ_cart, species_key), ...]``.
@@ -653,6 +653,14 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
     # seed (NOT a subspace-aug seed), so the aug branch is gated on the shift_invert MODE, not the
     # per-dim engage decision — a below-crossover "auto" solve then falls straight to exact dense
     # (the SI seed is simply unused), identical to the old shift_invert=False default.
+    if return_HS:
+        # FLAPW-DFPT (Phase 2): the linear-response machinery needs the assembled secular
+        # matrices (and the full eigenbasis) at the frozen fixed-point potentials, not just the
+        # occupied window. Force the exact dense solve over the WHOLE pencil so the sum-over-states
+        # chi_0 has the complete unoccupied manifold, and hand back (Hm, S). Warm/SI paths are
+        # bypassed (they return a truncated window and no matrices).
+        ev, c = solve_geneig(Hm, S, Hm.shape[0], with_vecs=True)
+        return ev, c, mill, ks, abl_by_atom, vol, Hm, S
     si_engage = _resolve_shift_invert(shift_invert, Hm.shape[0])
     if c_prev is not None and c_prev.shape[0] == Hm.shape[0] and not shift_invert:
         # Augmented Rayleigh-Ritz in span[last eigenvectors, their current residuals]; the
