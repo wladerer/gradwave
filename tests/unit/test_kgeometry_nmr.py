@@ -464,24 +464,35 @@ def test_dq_gauge_and_tr_null(si_mesh, dq_engine):
     assert tr_null < 1e-10  # measured ~2e-17
 
 
-def test_dq_lamb_prefactor_synthetic():
-    # The analytic-path twin of test_lamb_prefactor_synthetic: the same
-    # dia-only Gaussian branch field, but through the PRODUCT-RULE Biot–Savart
-    # (the diamagnetic/Lamb content sits entirely in the kernel-derivative
-    # terms acting on F̂⁰; Ŝ' = 0). Must reproduce the analytic Landau-gauge
-    # Lamb term with NO O(q²) error (the finite assembly measured +1.9% at
-    # q = L/8); the residual is pure grid/Gaussian truncation.
+def test_dq_biot_savart_route_equivalence_synthetic():
+    # The analytic product-rule Biot–Savart is the EXACT q → 0 limit of the
+    # validated finite ±q assembly — pinned on a synthetic dia-only field
+    # (clean periodic Gaussian, minimum-image, so the box has no unpaired
+    # Nyquist content; a boundary-truncated density puts weight on the
+    # m = −n/2 planes, which have no +n/2 partner and pollute BOTH
+    # assemblies with a spurious 1/q term — the trap the min-image build
+    # avoids). Sites both at the Gaussian center (q̂·r_s = 0) and off-center
+    # (q̂·r_s ≠ 0 — exercises the phase-derivative i(q̂·r_s) kernel term).
+    # Measured: |analytic − finite| rel 6.2e-3 at q = L/8 → 3.9e-4 at L/32
+    # (O(q²) approach), null 5e-18.
     import math
 
-    from gradwave.constants import ALPHA_FS, E2, HBAR2_2M
+    from gradwave.constants import HBAR2_2M
     from gradwave.dtypes import CDTYPE, RDTYPE
-    from gradwave.postscf.kgeometry_nmr import _biot_savart_sigma_cols_dq
+    from gradwave.postscf.kgeometry_nmr import (
+        _biot_savart_sigma_cols,
+        _biot_savart_sigma_cols_dq,
+    )
 
     length, n, sig, nelec = 10.0, 40, 0.6, 2.0
     ax = torch.arange(n, dtype=torch.float64) / n * length
     xx, yy, zz = torch.meshgrid(ax, ax, ax, indexing="ij")
     r0 = torch.tensor([0.0, length / 2, length / 2], dtype=torch.float64)
-    r2 = (xx - r0[0]) ** 2 + (yy - r0[1]) ** 2 + (zz - r0[2]) ** 2
+
+    def mi(d):
+        return (d + length / 2) % length - length / 2
+
+    r2 = mi(xx - r0[0]) ** 2 + mi(yy - r0[1]) ** 2 + mi(zz - r0[2]) ** 2
     rho = torch.exp(-r2 / (2 * sig**2))
     rho = rho / (rho.sum() * (length / n) ** 3) * nelec
 
@@ -492,15 +503,24 @@ def test_dq_lamb_prefactor_synthetic():
     e_pol = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float64)
     s_dia = torch.einsum("m,ijk->mijk", e_pol.to(CDTYPE),
                          (2.0 * HBAR2_2M) * rho.to(CDTYPE))
+    sites = torch.stack(
+        [r0, torch.tensor([2.0, 3.0, 4.0], dtype=torch.float64)]
+    ).to(RDTYPE)
     q_hat = torch.tensor([1.0, 0.0, 0.0], dtype=RDTYPE)
-    cols, null = _biot_savart_sigma_cols_dq(
-        s_dia, torch.zeros_like(s_dia), q_hat, g_cart, r0[None, :].to(RDTYPE))
-    lamb = 2.0 * ALPHA_FS**2 * HBAR2_2M / (3.0 * E2) \
-        * nelec * math.sqrt(2.0 / math.pi) / sig
-    assert abs(float(cols[0, 2]) - lamb) / lamb < 0.02
-    assert abs(float(cols[0, 0])) < 1e-8 * lamb
-    assert abs(float(cols[0, 1])) < 1e-8 * lamb
-    assert float(null[0].abs().max()) < 1e-10 * lamb  # spherical rho: null
+    col_a, null = _biot_savart_sigma_cols_dq(
+        s_dia, torch.zeros_like(s_dia), q_hat, g_cart, sites)
+    scale = float(col_a.abs().max())
+    assert scale > 0
+    assert float(null.abs().max()) < 1e-12 * scale  # measured 5e-18 abs
+
+    def fin(f):
+        q_cart = torch.tensor([f * 2 * math.pi / length, 0.0, 0.0], dtype=RDTYPE)
+        return _biot_savart_sigma_cols(s_dia, s_dia, q_cart, g_cart, sites)
+
+    d8 = float((fin(0.125) - col_a).abs().max()) / scale
+    d32 = float((fin(0.03125) - col_a).abs().max()) / scale
+    assert d32 < 2e-3  # measured 3.9e-4
+    assert d32 < 0.5 * d8  # O(q²) approach to the analytic limit
 
 
 def test_sigma_dq_underdetermined(si_mesh):
