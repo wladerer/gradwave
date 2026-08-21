@@ -54,13 +54,27 @@ pieces on top of the M8 induced current:
   extraction), Biot–Savart'ed to B_ind at the nuclei, prefactor
   4π·ALPHA_FS²/E2 validated against the analytic Lamb term.
 
+Milestone 10 replaces the finite ±q antisymmetric difference by the ANALYTIC
+∂S/∂q at q = 0 (:func:`sigma_shielding_dq` / :class:`ShieldingDq`): per mesh
+k a dense fixed-sphere context (eigh, ∂H/∂k by forward-mode AD, the mixed
+second derivatives q̂·∇(∂H/∂k) by nested ``torch.func.jvp``), the response
+derivative δu' = dδu/ds taken implicitly through the Sternheimer
+characterization (never differentiating the eigendecomposition — the
+``qgt_sos`` degeneracy-safe pattern), and the Biot–Savart assembled by the
+exact product rule at s = 0, whose kernel-derivative terms carry the
+diamagnetic (Lamb) content. This removes the O(q²) finite-q error and the
+mesh-commensurability constraint entirely; the finite-q route above stays
+as the cross-validation reference (Richardson q → 0 extrapolation).
+
 Insulators, nspin = 1, full (symmetry-unreduced) k-mesh, q commensurate
-with the mesh for the Sternheimer route (the dense twin takes any q).
+with the mesh for the Sternheimer route (the dense twin and the analytic
+∂/∂q route take any q / any full mesh).
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -86,7 +100,7 @@ from gradwave.postscf._response import (
     sternheimer_shift,
 )
 from gradwave.postscf.dfpt_q import _g0_phase, _reindex_bk, kpq_map
-from gradwave.postscf.kgeometry import BlochHK, KBProjectors, VelocityApply
+from gradwave.postscf.kgeometry import BlochHK, KBProjectors, VelocityApply, _eigh_and_dh
 from gradwave.postscf.kgeometry_topo import _pack_miller
 
 if TYPE_CHECKING:
@@ -727,8 +741,12 @@ def sigma_shielding(
     - The G = 0 macroscopic shape/susceptibility term is omitted (standard
       bare-crystal convention).
     - Finite-q truncation: q = q_index/n_i per mesh axis; the residual error
-      is O(q²) (the antisymmetric combination cancels even orders) — check
-      stability by comparing ``q_index`` values on a finer mesh.
+      is O(q²) (the antisymmetric combination cancels even orders) PLUS a
+      slowly-decaying sphere-boundary term: δu lives on the k+q sphere,
+      which differs from the k sphere by an O(q) shell of tail-amplitude
+      plane waves, leaving an ecut-dependent non-q² component in the 1/q
+      assembly (measured — see :func:`sigma_shielding_dq`, which has
+      neither error, and the ecut scan in the milestone-10 PR).
 
     ``screen=True`` (with ``xc``) uses the K_Hxc-screened first-order
     responses. Requires an insulating, symmetry-unreduced SCF with at least
@@ -868,3 +886,345 @@ def continuity_truncation_term(res: SCFResult, sol: VelocityQSolves,
         total = total + float(sol.weights[ik]) * (f_occ / grid.volume) * (
             piece1 - piece2)
     return total
+
+
+# --------------------------------------------------------------------------- #
+# analytic ∂/∂q shielding: the O(q²) finite-q error removed (milestone 10)     #
+# --------------------------------------------------------------------------- #
+
+
+def _resolvent_apply(uc: Tensor, wc: Tensor, eps: Tensor, x: Tensor) -> Tensor:
+    """y_j = Σ_{m∈cond} |u_m⟩⟨u_m|x_j⟩/(ε_j − ε_m), column-wise.
+
+    ``x`` (npw, ncol) with per-column reference energies ``eps`` (ncol,);
+    (uc, wc) the conduction eigenpairs. The conduction-projected Green's
+    function G(ε)P_c of the dense eigensystem — gauge invariant under
+    degenerate conduction rotations (only the subspace enters)."""
+    a = uc.mH @ x
+    return uc @ (a / (eps[None, :] - wc[:, None]).to(a.dtype))
+
+
+def _d2h_mats(hk: BlochHK, kc: Tensor, q_hat: Tensor) -> list[Tensor]:
+    """Mixed second derivatives M_μ = q̂·∇_k(∂H/∂k_μ) at kc (3 × (npw, npw)).
+
+    By nested forward-mode ``torch.func.jvp`` through the traceable dense H
+    build (equality of mixed partials: M_μ = ∂_μ(q̂·∇H), so the inner pass is
+    along q̂ and the outer along ê_μ). Complex outputs compose cleanly; no
+    eigendecomposition is ever differentiated."""
+
+    def w_fn(k: Tensor) -> Tensor:
+        return torch.func.jvp(hk.h, (k,), (q_hat,))[1]
+
+    out = []
+    for mu in range(3):
+        e_mu = torch.zeros(3, dtype=RDTYPE, device=kc.device)
+        e_mu[mu] = 1.0
+        out.append(torch.func.jvp(w_fn, (kc,), (e_mu,))[1])
+    return out
+
+
+@dataclass(frozen=True)
+class _DenseKCtx:
+    """Frozen per-k dense context of the analytic ∂/∂q route."""
+
+    hk: BlochHK
+    kc: Tensor  # (3,) Cartesian k [Å⁻¹]
+    w: Tensor  # (npw,) eigenvalues [eV]
+    u: Tensor  # (npw, npw) eigenvector columns
+    v: list[Tensor]  # 3 × (npw, npw): ∂H/∂k_μ at kc
+    kpg: Tensor  # (npw, 3) Cartesian k+G
+    flat: Tensor  # (npw,) FFT-box flat index of the sphere Millers
+    weight: float  # k-weight (mesh weights sum to 1)
+
+
+class ShieldingDq:
+    """Analytic q → 0 machinery for the bare shielding: the exact s-derivative
+    of the single-branch induced current S(s) of O_{sq̂,pol} at s = 0.
+
+    Per mesh k a dense fixed-sphere context: eigh of H(k) (never
+    differentiated), velocity matrices ∂H/∂k by forward-mode AD, and — per q̂
+    direction — the mixed second derivatives M_μ = q̂·∇(∂H/∂k_μ) by nested
+    jvp. The response derivative comes from differentiating the Sternheimer
+    characterization of δu(s) = G_{k+sq̂}(ε_nk) P_c(s) O(s) u_nk implicitly:
+
+        δu'_n = R(ε_n)[W δu⁰_n − Σ_j d̃u_j⟨u_j|O₀u_n⟩ + ½M_pol u_n]
+                − Σ_j u_j⟨d̃u_j|δu⁰_n⟩,
+
+    with R(ε) = G(ε)P_c the conduction resolvent, W = q̂·v, d̃u_j = R(ε_j)Wu_j
+    the covariant k-derivative (cross-gap denominators only — degenerate
+    occupied or conduction manifolds are safe, the ``qgt_sos`` pattern), and
+    ½M_pol = O'(0) from O(s) = ½Σ_μ pol_μ(v_μ(0) + v_μ(s)). The field
+    derivative adds the explicit operator derivatives: the δu-side kinetic
+    weight 2·HBAR2_2M·(k+sq̂+G)_μ contributes 2·HBAR2_2M·q̂_μ, and the
+    line-averaged KB pair velocity Ā_μ(s) = ∫₀¹dt ∂V_NL/∂k_μ|_{k+tsq̂}
+    contributes Ā'_μ(0) = ½ q̂·∇(∂V_NL/∂k_μ) on BOTH sides of the cross
+    density; the diamagnetic term is s-independent. Everything on the fixed
+    k-sphere — the s → 0 limit of the finite-q machinery, where the k+q
+    sphere and the umklapp embedding reduce to the identity.
+    """
+
+    def __init__(self, res: SCFResult) -> None:
+        _guard(res)
+        self.res = res
+        system = res.system
+        self.shape: tuple[int, int, int] = system.grid.shape
+        self.volume = float(system.grid.volume)
+        self.nocc = insulator_window(
+            res.occupations, 2.0, "insulating occupations required"
+        )
+        n1, n2, n3 = self.shape
+        nbox = np.array([n1, n2, n3])
+        self.ks: list[_DenseKCtx] = []
+        for ik, sph in enumerate(system.spheres):
+            hk = BlochHK.from_scf(res, sph.k_frac)
+            kc = hk.k_ref_cart
+            w, u, dh = _eigh_and_dh(hk.h, kc)
+            mod = hk.miller.numpy() % nbox
+            flat = torch.as_tensor(
+                (mod[:, 0] * n2 + mod[:, 1]) * n3 + mod[:, 2], dtype=torch.int64
+            )
+            self.ks.append(
+                _DenseKCtx(hk=hk, kc=kc, w=w, u=u, v=dh, kpg=hk.g_cart + kc,
+                           flat=flat, weight=float(system.kweights[ik]))
+            )
+
+    def branch_fields_axis(
+        self, q_hat: np.ndarray | list[float], pols: Sequence[np.ndarray]
+    ) -> list[tuple[Tensor, Tensor]]:
+        """[(S⁰, ∂S/∂s), …] per polarization for the direction q̂: the
+        BZ-weighted single-branch conserved current field (kinetic + KB
+        nonlocal + diamagnetic, each (3, n1, n2, n3)) of λ·O_{sq̂,pol} and
+        its exact s-derivative at s = 0. The per-axis second derivatives and
+        covariant k-derivatives are computed once and shared across ``pols``."""
+        qh = torch.as_tensor(np.asarray(q_hat, dtype=float), dtype=RDTYPE)
+        f_occ = 2.0
+        out = [
+            (torch.zeros(3, *self.shape, dtype=CDTYPE),
+             torch.zeros(3, *self.shape, dtype=CDTYPE))
+            for _ in pols
+        ]
+        nocc = self.nocc
+        for dk in self.ks:
+            uo, wo = dk.u[:, :nocc], dk.w[:nocc]
+            uc, wc = dk.u[:, nocc:], dk.w[nocc:]
+            m_mats = _d2h_mats(dk.hk, dk.kc, qh)
+            wmat = torch.einsum("m,mij->ij", qh.to(CDTYPE), torch.stack(dk.v))
+            dtu = _resolvent_apply(uc, wc, wo, wmat @ uo)
+            u_box = g_to_r(uo.mT, dk.flat, self.shape)
+            vu = [dk.v[mu] @ uo for mu in range(3)]
+            vu_box = [g_to_r(x.mT, dk.flat, self.shape) for x in vu]
+            pref = dk.weight * f_occ / self.volume
+            for ip, pol in enumerate(pols):
+                ep = np.asarray(pol, dtype=float)
+                o0u = ep[0] * vu[0] + ep[1] * vu[1] + ep[2] * vu[2]
+                du0 = _resolvent_apply(uc, wc, wo, o0u)
+                me_u = 0.5 * (
+                    ep[0] * (m_mats[0] @ uo)
+                    + ep[1] * (m_mats[1] @ uo)
+                    + ep[2] * (m_mats[2] @ uo)
+                )
+                inner = wmat @ du0 - dtu @ (uo.mH @ o0u) + me_u
+                du1 = _resolvent_apply(uc, wc, wo, inner) - uo @ (dtu.mH @ du0)
+                du0_box = g_to_r(du0.mT, dk.flat, self.shape)
+                du1_box = g_to_r(du1.mT, dk.flat, self.shape)
+                s0_acc, ds_acc = out[ip]
+                for mu in range(3):
+                    kq = HBAR2_2M * float(qh[mu])
+                    vdu0_box = g_to_r((dk.v[mu] @ du0).mT, dk.flat, self.shape)
+                    vdu1_box = g_to_r((dk.v[mu] @ du1).mT, dk.flat, self.shape)
+                    # δu-side operator derivative ½M_μ + κq̂_μ (kinetic + ½Ā'),
+                    # u-side ½M_μ − κq̂_μ (½Ā' only), κ = HBAR2_2M
+                    dop_du0 = 0.5 * (m_mats[mu] @ du0) + kq * du0
+                    dop_u = 0.5 * (m_mats[mu] @ uo) - kq * uo
+                    dop_du0_box = g_to_r(dop_du0.mT, dk.flat, self.shape)
+                    dop_u_box = g_to_r(dop_u.mT, dk.flat, self.shape)
+                    s0_acc[mu] += pref * 0.5 * (
+                        u_box.conj() * vdu0_box + vu_box[mu].conj() * du0_box
+                    ).sum(dim=0)
+                    ds_acc[mu] += pref * 0.5 * (
+                        u_box.conj() * (dop_du0_box + vdu1_box)
+                        + dop_u_box.conj() * du0_box
+                        + vu_box[mu].conj() * du1_box
+                    ).sum(dim=0)
+        rho = self.res.rho if self.res.rho.dim() == 3 else self.res.rho[0]
+        for ip, pol in enumerate(pols):
+            ep_t = torch.as_tensor(np.asarray(pol, dtype=float), dtype=RDTYPE)
+            out[ip][0].add_(torch.einsum(
+                "m,ijk->mijk", ep_t.to(CDTYPE),
+                (2.0 * HBAR2_2M) * rho.to(CDTYPE)))
+        return out
+
+
+def _branch_field_fixed_sphere(
+    eng: ShieldingDq,
+    ik: int,
+    q_hat: np.ndarray | list[float],
+    e_pol: np.ndarray | list[float],
+    s: float,
+    nquad: int = 8,
+) -> Tensor:
+    """Validation twin: the single-k single-branch conserved current field
+    S(s) (3, n1, n2, n3) of O_{sq̂,pol} at FINITE s on the FIXED k-sphere —
+    dense eigh at k+sq̂ for the resolvent, the two-point symmetrized velocity
+    operator, k / k+sq̂ kinetic weights, Gauss–Legendre line-averaged KB Ā(s);
+    no diamagnetic term (s-independent). Central differences of this twin pin
+    every term of :meth:`ShieldingDq.branch_fields_axis`'s analytic ∂S/∂s;
+    at s = 0 it reproduces the S⁰ assembly (minus dia) exactly."""
+    dk = eng.ks[ik]
+    nocc = eng.nocc
+    qh = torch.as_tensor(np.asarray(q_hat, dtype=float), dtype=RDTYPE)
+    ep = np.asarray(e_pol, dtype=float)
+    ks = dk.kc + s * qh
+    with torch.no_grad():
+        ws, us = torch.linalg.eigh(dk.hk.h(ks))
+    vs = _dense_velocity_matrices(dk.hk, ks)
+    uo, wo = dk.u[:, :nocc], dk.w[:nocc]
+    o_u = 0.5 * (
+        ep[0] * ((dk.v[0] + vs[0]) @ uo)
+        + ep[1] * ((dk.v[1] + vs[1]) @ uo)
+        + ep[2] * ((dk.v[2] + vs[2]) @ uo)
+    )
+    du = _resolvent_apply(us[:, nocc:], ws[nocc:], wo, o_u)
+
+    x, wq = np.polynomial.legendre.leggauss(nquad)
+    abar = [torch.zeros_like(dk.v[0]) for _ in range(3)]
+    for xi, wi in zip(x, wq, strict=True):
+        t = 0.5 * (float(xi) + 1.0)
+        kt = dk.kc + (t * s) * qh
+        vt = _dense_velocity_matrices(dk.hk, kt)
+        kin_t = (2.0 * HBAR2_2M) * (dk.hk.g_cart + kt)
+        for mu in range(3):
+            abar[mu] += (0.5 * float(wi)) * (
+                vt[mu] - torch.diag_embed(kin_t[:, mu].to(CDTYPE))
+            )
+
+    kpg_d = dk.kpg + s * qh
+    u_box = g_to_r(uo.mT, dk.flat, eng.shape)
+    du_box = g_to_r(du.mT, dk.flat, eng.shape)
+    out = torch.zeros(3, *eng.shape, dtype=CDTYPE)
+    pref = dk.weight * 2.0 / eng.volume
+    for mu in range(3):
+        wu = (2.0 * HBAR2_2M) * dk.kpg[:, mu].to(CDTYPE)[:, None] * uo \
+            + abar[mu] @ uo
+        wdu = (2.0 * HBAR2_2M) * kpg_d[:, mu].to(CDTYPE)[:, None] * du \
+            + abar[mu] @ du
+        out[mu] = pref * 0.5 * (
+            u_box.conj() * g_to_r(wdu.mT, dk.flat, eng.shape)
+            + g_to_r(wu.mT, dk.flat, eng.shape).conj() * du_box
+        ).sum(dim=0)
+    return out
+
+
+def _biot_savart_sigma_cols_dq(
+    s0: Tensor, ds: Tensor, q_hat_cart: Tensor, g_cart: Tensor, sites: Tensor
+) -> tuple[Tensor, Tensor]:
+    """Analytic q → 0 shielding column σ·(q̂×e_pol) at each site: (nsite, 3),
+    plus the s = 0 null (the coefficient of the spurious 1/q divergence).
+
+    The finite-q column is C·Φ̃(q)/q with C = 4π·ALPHA_FS²/E2 and Φ̃ the ±q
+    antisymmetrized Biot–Savart sum; Φ̃(0) = 0 exactly (the q = 0 A-wave is
+    pure gauge / TR-null), so the limit is C·Φ̃'(0) by the product rule:
+
+        col = C·2 Re Σ_{G≠0} e^{iG·r_s}/G² { iG×F̂'(G) + iq̂×F̂⁰(G)
+                + [i(q̂·r_s) − 2(G·q̂)/G²]·iG×F̂⁰(G) },
+
+    with F̂⁰(G) = [Ŝ⁰(G) + conj(Ŝ⁰(−G))]/2i the s = 0 antisymmetric field
+    (its own Biot–Savart sum is the returned null — measured ~0) and
+    F̂'(G) = [Ŝ'(G) − conj(Ŝ'(−G))]/2i its s-derivative (S₋(s) = S₊(−s)).
+    The kernel-derivative terms carry the diamagnetic (Lamb) content that
+    the finite-q route picks up from the O(q) kernel expansion. G = 0
+    (macroscopic shape term) omitted as in the finite-q assembly."""
+    f0 = _antisym_field_g(s0, s0).permute(1, 2, 3, 0)  # (n1, n2, n3, 3)
+    f1 = _antisym_field_g(ds, -ds).permute(1, 2, 3, 0)
+    g = g_cart.to(RDTYPE)
+    g2 = (g * g).sum(dim=-1)
+    g2[0, 0, 0] = 1.0  # dummy; the G = 0 slot is zeroed below
+    qh = q_hat_cart.to(RDTYPE)
+    cross0 = 1j * torch.linalg.cross(g.to(CDTYPE), f0, dim=-1)
+    cross1 = 1j * torch.linalg.cross(g.to(CDTYPE), f1, dim=-1)
+    crossq = 1j * torch.linalg.cross(qh.to(CDTYPE).expand_as(f0), f0, dim=-1)
+    g2c = g2[..., None].to(CDTYPE)
+    a_field = (cross1 + crossq
+               - (2.0 * (g @ qh) / g2)[..., None].to(CDTYPE) * cross0) / g2c
+    b_field = cross0 / g2c
+    a_field[0, 0, 0] = 0.0
+    b_field[0, 0, 0] = 0.0
+    pref = 4.0 * math.pi * ALPHA_FS**2 / E2
+    phases = torch.exp(
+        1j * torch.einsum("sa,ijka->sijk", sites.to(RDTYPE), g).to(CDTYPE)
+    )
+    sum_a = torch.einsum("sijk,ijkm->sm", phases, a_field)
+    sum_b = torch.einsum("sijk,ijkm->sm", phases, b_field)
+    qdotr = (sites.to(RDTYPE) @ qh).to(CDTYPE)
+    col = pref * 2.0 * (sum_a + 1j * qdotr[:, None] * sum_b).real
+    null = pref * 2.0 * sum_b.real
+    return col, null
+
+
+def sigma_shielding_dq(
+    res: SCFResult, *, sites: Tensor | None = None
+) -> Tensor:
+    """Bare (pseudo) NMR shielding tensor by the ANALYTIC ∂/∂q at q = 0:
+    σ_ij = −∂B_ind,i(r_site)/∂B_ext,j in ppm, shape (nsite, 3, 3).
+
+    Same physical content and conventions as :func:`sigma_shielding` (bare
+    valence only — no GIPAW core reconstruction; the G = 0 macroscopic shape
+    term omitted), but the (1/2q)[S(q) − S(−q)] finite difference is replaced
+    by the exact q-derivative of the induced-current assembly
+    (:class:`ShieldingDq`), removing the O(q²) finite-q error and the
+    q-commensurability constraint. The joint (mesh n, q = b/n) refinement of
+    the finite-q route converges to this result.
+
+    q̂ DIRECTIONS ARE THE SAMPLED MESH AXES (n_i > 1), as in the finite-q
+    driver — not free: the analytic column is a BZ sum of a k-DERIVATIVE,
+    and a uniform-mesh Riemann sum of ∂f/∂k along q̂ retains the spurious
+    terms i(q̂·R)f_R over the mesh SUPERLATTICE vectors R (f_R the
+    Wannier-decaying Fourier coefficients of the k-periodic integrand —
+    ∫∂f = 0 exactly, but the mesh sum only kills R off the superlattice).
+    Along a mesh axis q̂ = b̂_i every unsampled-direction R has q̂·R = 0
+    exactly and the residual is the n_i-cell-neighbor coefficient
+    (exponentially small in n_i for an insulator — measured directly as the
+    longitudinal gauge null); along an arbitrary q̂ the n = 1 axes leak at
+    O(1). Needs ≥ 2 sampled axes to determine the tensor.
+
+    Bare (unscreened) responses only: for a TR-symmetric insulator the K_Hxc
+    screening correction to the antisymmetric q-derivative vanishes at q = 0
+    (the density response linear in B is TR-odd). Measured on Si columns of
+    ~30–80 ppm: |screened − bare| decays monotonically 0.92 → 0.50 → 0.30 →
+    0.22 ppm over q = b/2 → b/16, and the screened vs bare q → 0
+    extrapolations agree to 0.2 ppm — any residual screening correction is
+    bounded below the finite-q route's own extrapolation uncertainty."""
+    _guard(res)
+    system = res.system
+    if sites is None:
+        sites = system.positions.detach().cpu().to(RDTYPE)
+    b = reciprocal_cell(system.grid.cell)
+    k_frac = np.stack([sph.k_frac for sph in system.spheres])
+    mesh_n = [len(np.unique(np.round(k_frac[:, i], 6))) for i in range(3)]
+    axes = [i for i in range(3) if mesh_n[i] > 1]
+    if len(axes) < 2:
+        raise ValueError(
+            f"sigma_shielding_dq needs >=2 k-mesh axes with n>1 (mesh {mesh_n}): "
+            "the tensor is underdetermined from a single q̂ direction, and the "
+            "BZ sum of the analytic q-derivative only converges along sampled "
+            "mesh axes (see docstring)")
+    eng = ShieldingDq(res)
+    b_rows: list[np.ndarray] = []
+    m_rows: list[Tensor] = []
+    for i in axes:
+        q_hat = np.asarray(b[i], dtype=float) / np.linalg.norm(b[i])
+        pols = list(_transverse_frame(q_hat))
+        fields = eng.branch_fields_axis(q_hat, pols)
+        for pol, (s0f, dsf) in zip(pols, fields, strict=True):
+            col, _ = _biot_savart_sigma_cols_dq(
+                s0f, dsf, torch.as_tensor(q_hat, dtype=RDTYPE),
+                system.grid.g_cart, sites)
+            m_rows.append(col)
+            b_rows.append(np.cross(q_hat, pol))
+    bmat = torch.as_tensor(np.stack(b_rows), dtype=RDTYPE)
+    mmat = torch.stack(m_rows)
+    ns = mmat.shape[1]
+    out = torch.empty(ns, 3, 3, dtype=RDTYPE)
+    for s in range(ns):
+        out[s] = torch.linalg.lstsq(bmat, mmat[:, s, :]).solution.mT
+    return out * 1e6
