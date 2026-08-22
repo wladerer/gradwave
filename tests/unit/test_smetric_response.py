@@ -178,35 +178,40 @@ def si_paw():
 
 def test_overlap_velocity_matches_finite_difference(si_paw):
     """OverlapVelocity's ∂S/∂k_μ apply matches a central finite difference of
-    the nonlocal overlap S_nl(k) c = Σ_ij q_ij⟨β_i(k)|c⟩ β_j(k) at a mesh k."""
+    the nonlocal overlap S_nl(k) c = Σ_ij q_ij⟨β_i(k)|c⟩ β_j(k) at every mesh
+    k (the batched apply carries per-k projectors, so ``c`` is the full
+    (nk, nb, npw_max) block)."""
     res = si_paw
     system = res["system"]
     ov = OverlapVelocity(system)
-    ik = 1
-    sph = system.spheres[ik]
-    npw = int(ov.npw[ik])
-    torch.manual_seed(0)
+    nk = len(system.spheres)
     nb = 3
-    c = torch.zeros(1, nb, ov.npw_max, dtype=CDTYPE)
-    c[0, :, :npw] = torch.randn(nb, npw, dtype=CDTYPE)
-
-    kb = _overlap_kbprojectors(system, sph)
-    q = kb.dij_full.to(CDTYPE)
-    k0 = sph.k_cart.to(RDTYPE)
-
-    def s_nl(k_cart):
-        p = kb.p(k_cart)  # (nproj, npw)
-        b = torch.einsum("pg,bg->bp", p.conj(), c[0, :, :npw])
-        return torch.einsum("bp,pq,qg->bg", b, q, p)
+    torch.manual_seed(0)
+    c = torch.zeros(nk, nb, ov.npw_max, dtype=CDTYPE)
+    for ik in range(nk):
+        c[ik, :, : ov.npw[ik]] = torch.randn(nb, ov.npw[ik], dtype=CDTYPE)
 
     h = 1e-5
     for mu in range(3):
+        an = ov.apply(c, mu)  # (nk, nb, npw_max)
         e = torch.zeros(3, dtype=RDTYPE)
         e[mu] = 1.0
-        fd = (s_nl(k0 + h * e) - s_nl(k0 - h * e)) / (2 * h)
-        an = ov.apply(c, mu)[0, :, :npw]
-        rel = (an - fd).abs().max().item() / max(fd.abs().max().item(), 1e-30)
-        assert rel < 1e-6, f"∂S/∂k_{mu} vs FD rel {rel:.3e}"
+        for ik in range(nk):
+            sph = system.spheres[ik]
+            npw = int(ov.npw[ik])
+            kb = _overlap_kbprojectors(system, sph)
+            q = kb.dij_full.to(CDTYPE)
+            k0 = sph.k_cart.to(RDTYPE)
+
+            def s_nl(k_cart, _kb=kb, _q=q, _ik=ik, _npw=npw):
+                p = _kb.p(k_cart)  # (nproj, npw)
+                b = torch.einsum("pg,bg->bp", p.conj(), c[_ik, :, :_npw])
+                return torch.einsum("bp,pq,qg->bg", b, _q, p)
+
+            fd = (s_nl(k0 + h * e) - s_nl(k0 - h * e)) / (2 * h)
+            rel = (an[ik, :, :npw] - fd).abs().max().item() / max(
+                fd.abs().max().item(), 1e-30)
+            assert rel < 1e-6, f"∂S/∂k_{mu} k={ik} vs FD rel {rel:.3e}"
 
 
 def test_smetric_sternheimer_runs_on_paw(si_paw):
