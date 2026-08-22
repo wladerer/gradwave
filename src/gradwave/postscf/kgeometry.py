@@ -75,6 +75,7 @@ from gradwave.pseudo.upf import UPFData
 
 if TYPE_CHECKING:  # leaf module: no runtime scf import (import-linter layering)
     from gradwave.scf.loop import SCFResult, System
+    from gradwave.scf.uspp_setup import USPPSystem
 
 HFun = Callable[[Tensor], Tensor]
 """A dense Bloch Hamiltonian: Cartesian k (3,) real → (n, n) Hermitian complex."""
@@ -598,6 +599,110 @@ class VelocityApply:
             out = out + torch.einsum("kbp,pq,kqg->kbg", b_p, self.dij, dp)
             out = out + torch.einsum("kbp,pq,kqg->kbg", b_dp, self.dij, p)
         return out * mask[:, None, :]
+
+
+def _overlap_kbprojectors(system: USPPSystem, sphere: GSphere) -> KBProjectors:
+    """A :class:`KBProjectors` carrying the augmentation-charge matrix q
+    (the ∫Q d³r overlap weights) in place of D, for the ultrasoft/PAW overlap
+
+        S = 1 + Σ_a Σ_ij q_ij |β^a_i⟩⟨β^a_j|.
+
+    Built from a ``scf.uspp_setup.USPPSystem`` (``system.paws`` carry the same
+    radial β as an NC UPF, so :func:`_beta_channels` reads them unchanged; the
+    per-species ``system.aug[s].q_int`` is the m-expanded ∫Q in exactly the
+    (channel, m) column order :meth:`KBProjectors.for_sphere` builds). The
+    returned object's ``p``/``p_and_dp`` then give β(k) and its analytic
+    ∂β/∂k on the sphere — the pieces of ∂S/∂k. A norm-conserving system has no
+    augmentation and never reaches this path (S = I, ∂S/∂k = 0)."""
+    paws = system.paws
+    aug = system.aug
+    species_of_atom = system.species_of_atom
+    # PAWData carries the same .betas/.r/.rab surface _beta_channels reads off a
+    # UPFData (the β radials are the shared PP_BETA); the cast states that
+    # structural compatibility (the augmentation q, not the β, is what USPP adds).
+    channels, chan_of = _beta_channels(cast("Sequence[UPFData]", paws))
+    col_atom: list[int] = []
+    col_chan: list[int] = []
+    col_lm: list[int] = []
+    blocks: list[Tensor] = []
+    for a, s in enumerate(species_of_atom):
+        ls = [b.l for b in paws[s].betas]
+        for i, l in enumerate(ls):
+            for mc in range(2 * l + 1):
+                col_atom.append(a)
+                col_chan.append(chan_of[s][i])
+                col_lm.append(l * l + mc)
+        blocks.append(aug[s].q_int.to(RDTYPE))
+    grid = system.grid
+    return KBProjectors(
+        g_cart=sphere.kpg.to(RDTYPE) - sphere.k_cart.to(RDTYPE),
+        tau=system.positions.detach().cpu().to(RDTYPE),
+        dij_full=(
+            torch.block_diag(*blocks) if blocks else torch.zeros((0, 0), dtype=RDTYPE)
+        ),
+        col_atom=torch.tensor(col_atom, dtype=torch.int64),
+        col_chan=torch.tensor(col_chan, dtype=torch.int64),
+        col_lm=torch.tensor(col_lm, dtype=torch.int64),
+        channels=channels,
+        lmax=max((c.l for c in channels), default=0),
+        volume=grid.volume,
+    )
+
+
+class OverlapVelocity:
+    """Matrix-free overlap velocity ∂S/∂k_μ |ψ⟩ for the ultrasoft/PAW
+    S = 1 + Σ_ij q_ij|β_i⟩⟨β_j|.
+
+    The identity part of S is k-independent, so
+
+        ∂S/∂k_μ = Σ_ij q_ij (|∂_μβ_i⟩⟨β_j| + |β_i⟩⟨∂_μβ_j|),
+
+    structurally the KB nonlocal derivative of :class:`VelocityApply` with the
+    augmentation-charge matrix q in place of D and no kinetic diagonal (S has
+    none). The projectors β(k) and their analytic ∂β/∂k are built ONCE per
+    mesh k by :meth:`KBProjectors.p_and_dp` (forward-mode through the traceable
+    jl/Ylm/phase assembly) and padded to the per-sphere layout.
+
+    This is the ∂S/∂k term of the generalized (S-metric) velocity
+    v = ∂H/∂k − ε ∂S/∂k. A norm-conserving system has S = I, ∂S/∂k = 0, so the
+    generalized velocity recovers ``VelocityApply`` exactly and this object is
+    never built.
+    """
+
+    def __init__(self, system: USPPSystem) -> None:
+        spheres = system.spheres
+        nk = len(spheres)
+        kb0 = _overlap_kbprojectors(system, spheres[0])
+        nproj = int(kb0.dij_full.shape[0])
+        self.npw = [int(_overlap_kbprojectors(system, s).npw) for s in spheres]
+        npw_max = max(self.npw) if self.npw else 0
+        self.p = torch.zeros(nk, nproj, npw_max, dtype=CDTYPE)
+        self.dp = [torch.zeros(nk, nproj, npw_max, dtype=CDTYPE) for _ in range(3)]
+        for ik, sph in enumerate(spheres):
+            kb = _overlap_kbprojectors(system, sph)
+            p_k, dp_k = kb.p_and_dp(sph.k_cart.to(RDTYPE))
+            n = kb.npw
+            self.p[ik, :, :n] = p_k
+            for mu in range(3):
+                self.dp[mu][ik, :, :n] = dp_k[mu]
+        self.dij = kb0.dij_full.to(CDTYPE)  # the (real, symmetric) q matrix
+        self.npw_max = npw_max
+        self.nk = nk
+
+    def apply(self, c: Tensor, mu: int, k_index: Tensor | None = None) -> Tensor:
+        """∂S/∂k_μ c for a batched block c (nk, nb, npw_max). ``k_index``
+        selects/reorders the mesh k of each batch row (the finite-q partner
+        points), mirroring :meth:`VelocityApply.apply`."""
+        p, dp = self.p, self.dp[mu]
+        if k_index is not None:
+            p, dp = p[k_index], dp[k_index]
+        out = torch.zeros_like(c)
+        if p.shape[1]:
+            b_p = torch.einsum("kpg,kbg->kbp", p.conj(), c)
+            b_dp = torch.einsum("kpg,kbg->kbp", dp.conj(), c)
+            out = out + torch.einsum("kbp,pq,kqg->kbg", b_p, self.dij, dp)
+            out = out + torch.einsum("kbp,pq,kqg->kbg", b_dp, self.dij, p)
+        return out
 
 
 def _sternheimer_ctvr(

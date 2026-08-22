@@ -501,7 +501,9 @@ class _AppliesHCols(Protocol):
 
 def cg_sternheimer(h: _AppliesH, bk: _HasKineticTable, c_occ: torch.Tensor,
                    eps_occ: torch.Tensor, rhs: torch.Tensor, x0: torch.Tensor, shift: float,
-                   tol: float=1e-8, max_iter: int=400) -> torch.Tensor:
+                   tol: float=1e-8, max_iter: int=400,
+                   s_apply: Callable[[torch.Tensor], torch.Tensor] | None = None,
+                   s_occ: torch.Tensor | None = None) -> torch.Tensor:
     """Batched conduction-projected Sternheimer: (H − ε_n + s·P_occ)δψ = rhs,
     for all occupied bands of all k at once ((nk, nocc, npw_max), masked).
     rhs must already lie in the conduction space; positive definite there
@@ -519,7 +521,31 @@ def cg_sternheimer(h: _AppliesH, bk: _HasKineticTable, c_occ: torch.Tensor,
     :class:`DenseSternheimerSolver` draft) safe: columns already below ``tol``
     cost one certification apply, wrong drafts are simply iterated.
     Operators without ``apply_cols`` (the spinor shim) keep the historical
-    lockstep loop bit-for-bit."""
+    lockstep loop bit-for-bit.
+
+    S-metric (ultrasoft/PAW) path — opt-in via ``s_apply``; the default
+    ``s_apply is None`` leaves every branch above bit-for-bit unchanged for
+    the norm-conserving callers. When ``s_apply`` (the overlap operator S) and
+    ``s_occ`` = S c_occ are given, the generalized eigenproblem H|ψ⟩ = ε S|ψ⟩
+    response is solved,
+
+        [(1 − P_S^†)(H − ε_n S) + s·Π] δψ = rhs,
+
+    with the S-metric occupied projector P_S = Σ|ψ_o⟩⟨ψ_o|S (so
+    P_S^† = Σ S|ψ_o⟩⟨ψ_o| and Π = Σ|Sψ_o⟩⟨Sψ_o|), returning the S-conduction
+    part (1 − P_S) δψ. That operator is plain-Hermitian and positive definite
+    on the S-conduction subspace where the iterates live — the batched twin of
+    ``postscf.uspp_implicit._sternheimer_k`` (validated by the USPP adjoint).
+    The reduction is EXACT: with an explicit identity S and ``s_occ = c_occ``
+    the projectors collapse to the plain P_occ and every float operation
+    coincides with the norm-conserving arithmetic (verified bit-for-bit). The
+    S-metric solve runs the lockstep loop (correctness first; the per-column
+    active-set compaction stays the norm-conserving fast path — extending it to
+    the S-metric is a follow-up)."""
+    if s_apply is not None:
+        assert s_occ is not None, "S-metric cg_sternheimer needs s_occ = S c_occ"
+        return _cg_smetric(h, bk, c_occ, s_occ, eps_occ, rhs, x0, shift,
+                           s_apply, tol, max_iter)
 
     def p_occ(x: torch.Tensor) -> torch.Tensor:
         ov = torch.einsum("kng,kbg->kbn", c_occ.conj(), x)
@@ -660,6 +686,63 @@ def _cg_percolumn(h: _AppliesHCols, bk: _HasKineticTable, c_occ: torch.Tensor,
         if kcol.numel():  # max_iter exhausted: keep the best iterates
             x[kcol, bcol] = xa
     return x - p_occ(x)
+
+
+def _cg_smetric(h: _AppliesH, bk: _HasKineticTable, c_occ: torch.Tensor,
+                s_occ: torch.Tensor, eps_occ: torch.Tensor, rhs: torch.Tensor,
+                x0: torch.Tensor, shift: float,
+                s_apply: Callable[[torch.Tensor], torch.Tensor],
+                tol: float, max_iter: int) -> torch.Tensor:
+    """S-metric (ultrasoft/PAW) lockstep body of :func:`cg_sternheimer`.
+
+    Solves [(1 − P_S^†)(H − ε_n S) + s·Π] δψ = rhs on the S-conduction
+    subspace (P_S = Σ|ψ_o⟩⟨ψ_o|S), returning (1 − P_S) δψ. Plain-Hermitian and
+    positive definite there, so the same Teter-preconditioned CG as the
+    norm-conserving path drives it. With ``s_apply`` the identity and
+    ``s_occ ≡ c_occ`` every operation below is bit-identical to the plain
+    lockstep solve — the exact NC-limit reduction."""
+
+    def pcd(y: torch.Tensor) -> torch.Tensor:  # (1 − Σ S|ψ⟩⟨ψ|) y  =  P_S^† complement
+        ov = torch.einsum("kng,kbg->kbn", c_occ.conj(), y)
+        return y - torch.einsum("kbn,kng->kbg", ov, s_occ)
+
+    def pc(x: torch.Tensor) -> torch.Tensor:  # (1 − Σ|ψ⟩⟨ψ|S) x  =  P_S complement
+        ov = torch.einsum("kng,kbg->kbn", s_occ.conj(), x)
+        return x - torch.einsum("kbn,kng->kbg", ov, c_occ)
+
+    def pi_apply(x: torch.Tensor) -> torch.Tensor:  # Σ|Sψ⟩⟨Sψ| x — the PD lift
+        ov = torch.einsum("kng,kbg->kbn", s_occ.conj(), x)
+        return torch.einsum("kbn,kng->kbg", ov, s_occ)
+
+    def a_apply(x: torch.Tensor) -> torch.Tensor:
+        hsx = h.apply(x) - eps_occ[..., None] * s_apply(x)  # (H − ε_n S) x
+        return pcd(hsx) + shift * pi_apply(x)
+
+    mask = getattr(bk, "mask", None)
+    if mask is not None:
+        x0 = x0 * mask[:, None, :].to(x0.dtype)
+    t_band = torch.clamp(
+        torch.einsum("kbg,kg,kbg->kb", c_occ.conj(), bk.t.to(c_occ.dtype), c_occ).real,
+        min=1e-6,
+    )
+    x = x0.clone()
+    r = rhs - a_apply(x)
+    z = teter_b(r, bk.t, t_band)
+    p = z
+    rz = torch.einsum("kbg,kbg->kb", r.conj(), z).real
+    for _ in range(max_iter):
+        ap = a_apply(p)
+        pap = torch.einsum("kbg,kbg->kb", p.conj(), ap).real
+        a_cg = rz / torch.clamp(pap, min=1e-300)
+        x = x + a_cg[..., None] * p
+        r = r - a_cg[..., None] * ap
+        if float(torch.linalg.norm(r, dim=-1).max()) < tol:
+            break
+        z = teter_b(r, bk.t, t_band)
+        rz_new = torch.einsum("kbg,kbg->kb", r.conj(), z).real
+        p = z + (rz_new / torch.clamp(rz, min=1e-300))[..., None] * p
+        rz = rz_new
+    return pc(x)
 
 
 # --------------------------------------------------------------------------- #

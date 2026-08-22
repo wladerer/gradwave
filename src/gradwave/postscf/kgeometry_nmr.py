@@ -74,7 +74,7 @@ with the mesh for the Sternheimer route (the dense twin and the analytic
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -102,7 +102,13 @@ from gradwave.postscf._response import (
     sternheimer_shift,
 )
 from gradwave.postscf.dfpt_q import _g0_phase, _reindex_bk, kpq_map
-from gradwave.postscf.kgeometry import BlochHK, KBProjectors, VelocityApply, _eigh_and_dh
+from gradwave.postscf.kgeometry import (
+    BlochHK,
+    KBProjectors,
+    OverlapVelocity,
+    VelocityApply,
+    _eigh_and_dh,
+)
 from gradwave.postscf.kgeometry_topo import _pack_miller
 
 if TYPE_CHECKING:
@@ -160,12 +166,31 @@ def velocity_perturbation_q(
     max_iter: int = 400,
     dense: DenseSternheimerSolver | str | None = "auto",
     v: VelocityApply | None = None,
+    s_apply: Callable[[Tensor], Tensor] | None = None,
+    dsvel: OverlapVelocity | None = None,
 ) -> VelocityQSolves:
     """Solve the k+q Sternheimer equations for the three symmetrized velocity
     perturbations ½{v_μ, e^{iqr}} at every mesh k (see module docstring).
 
     q must be commensurate with the SCF mesh (kpq_map raises otherwise);
     q = 0 reduces exactly to the M5 velocity solves.
+
+    S-metric (ultrasoft/PAW) hooks — both default off, so norm-conserving
+    callers are byte-unchanged:
+
+    - ``s_apply``: the batched overlap operator S (on the folded k+q spheres).
+      When given, the RHS conduction projector, the occupied projector, and
+      the Sternheimer resolvent switch to the S-metric via
+      ``_response.cg_sternheimer(..., s_apply=, s_occ=)`` (which forces the
+      plain-CG path; the NC-only dense eigh draft is skipped), and the
+      returned δu is S-orthogonal to the occupied block (⟨ψ_o|S|δu⟩ = 0).
+    - ``dsvel``: a :class:`kgeometry.OverlapVelocity` supplying ∂S/∂k, so the
+      elementary velocity becomes the generalized v = ∂H/∂k − ε ∂S/∂k. Absent
+      (norm-conserving) the perturbation is the plain kinetic+KB velocity.
+
+    With an explicit identity S (``s_apply`` = the identity, ``dsvel`` = None)
+    the projectors and solve reduce to the norm-conserving arithmetic — the
+    NC-limit reduction gate for the S-metric machinery.
 
     ``dense`` selects the eigh-prepass draft path: "auto" (default) builds or
     reuses a size-gated :class:`~gradwave.postscf._response.
@@ -196,7 +221,10 @@ def velocity_perturbation_q(
     eps_k = res.eigenvalues[:, :nocc].to(RDTYPE)
     shift = sternheimer_shift(eps_k)
 
-    solver = dense_sternheimer_for(res) if dense == "auto" else dense
+    # The S-metric solve uses plain CG (the dense eigh draft factorizes the
+    # NORM-CONSERVING operator only); force it off when an overlap is given.
+    solver = None if s_apply is not None else (
+        dense_sternheimer_for(res) if dense == "auto" else dense)
     assert not isinstance(solver, str)
     if solver is not None:
         h_kq, bk_kq = solver.h_for(jsel)
@@ -206,26 +234,39 @@ def velocity_perturbation_q(
             bk_kq, shape, res.v_eff, projectors_b(bk_kq, system.positions))
     ph = _g0_phase_stack(shape, g0, c_all.device)  # (nk, 1, *shape): e^{iG0·r}
 
+    # S-metric occupied block (≡ c_occ_kq when S = I, so p_c and the solver
+    # collapse to the norm-conserving path).
+    s_occ_kq = c_occ_kq if s_apply is None else s_apply(c_occ_kq)
+
     def transfer(w: Tensor) -> Tensor:
         """k-sphere coefficients → the same plane waves on the k_j spheres."""
         return box_to_sphere_b(g_to_r_b(w, bk, shape) * ph, bk_kq)
 
     def p_c(x: Tensor) -> Tensor:
+        """(1 − Σ S|ψ⟩⟨ψ|) x — the S-metric conduction projector on the RHS;
+        the plain 1 − Σ|ψ⟩⟨ψ| when S = I (s_occ_kq ≡ c_occ_kq)."""
         ov = torch.einsum("kng,kbg->kbn", c_occ_kq.conj(), x)
-        return x - torch.einsum("kbn,kng->kbg", ov, c_occ_kq)
+        return x - torch.einsum("kbn,kng->kbg", ov, s_occ_kq)
 
     if v is None:
         v = VelocityApply(system)
     c_t = transfer(c_occ_k)
     o_list, d_list = [], []
     for mu in range(3):
-        o_mu = 0.5 * (transfer(v.apply(c_occ_k, mu)) + v.apply(c_t, mu, k_index=jsel))
+        vg_k = v.apply(c_occ_k, mu)
+        vg_t = v.apply(c_t, mu, k_index=jsel)
+        if dsvel is not None:  # generalized velocity v = ∂H/∂k − ε ∂S/∂k
+            e = eps_k[..., None].to(CDTYPE)
+            vg_k = vg_k - e * dsvel.apply(c_occ_k, mu)
+            vg_t = vg_t - e * dsvel.apply(c_t, mu, k_index=jsel)
+        o_mu = 0.5 * (transfer(vg_k) + vg_t)
         rhs = -p_c(o_mu)
         x0 = (solver.solve(jsel, eps_k, rhs, shift, nocc)
               if solver is not None else torch.zeros_like(rhs))
         d_list.append(
             cg_sternheimer(h_kq, bk_kq, c_occ_kq, eps_k, rhs,
-                           x0, shift, tol=cg_tol, max_iter=max_iter)
+                           x0, shift, tol=cg_tol, max_iter=max_iter,
+                           s_apply=s_apply, s_occ=s_occ_kq)
         )
         o_list.append(o_mu)
     return VelocityQSolves(
