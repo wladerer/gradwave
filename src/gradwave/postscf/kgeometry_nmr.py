@@ -761,6 +761,7 @@ def sigma_shielding(
     cg_max_iter: int = 400,
     nl_quad: int = 8,
     sites: Tensor | None = None,
+    core_ppm: Tensor | np.ndarray | list[float] | None = None,
 ) -> Tensor:
     """Bare (pseudo) NMR chemical-shielding tensor σ_ij per site, in ppm:
     σ_ij = −∂B_ind,i(r_site)/∂B_ext,j (positive = shielded), shape
@@ -802,6 +803,13 @@ def sigma_shielding(
     dense twin). For production shielding use the analytic :func:`sigma_shielding_dq`,
     which is ~3× faster at every mesh and carries neither the O(q²) nor the
     sphere-boundary finite-q error.
+
+    ``core_ppm`` (opt-in): a per-site frozen-core Lamb shielding [ppm], added as
+    an isotropic constant σ_ij += core_ppm[s]·δ_ij to each site's tensor — the
+    GIPAW σ_core term (:func:`postscf.gipaw.core_lamb_shielding`). Turns the bare
+    layer's *relative* shielding into a physically meaningful *absolute* one; it
+    cancels in chemical-shift differences. The diamagnetic/paramagnetic
+    augmentation are added separately (see ``postscf.gipaw``).
     """
     _guard(res)
     system = res.system
@@ -859,7 +867,14 @@ def sigma_shielding(
     out = torch.empty(ns, 3, 3, dtype=RDTYPE)
     for s in range(ns):
         out[s] = torch.linalg.lstsq(bmat, mmat[:, s, :]).solution.mT
-    return out * 1e6
+    out = out * 1e6
+    if core_ppm is not None:
+        core = torch.as_tensor(core_ppm, dtype=RDTYPE)
+        if core.shape != (ns,):
+            raise ValueError(
+                f"core_ppm must have one value per site ({ns}); got {tuple(core.shape)}")
+        out = out + core[:, None, None] * torch.eye(3, dtype=RDTYPE)
+    return out
 
 
 def continuity_truncation_term(res: SCFResult, sol: VelocityQSolves,
