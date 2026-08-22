@@ -57,3 +57,49 @@ The prior confined l=1 O LO **diverged** the SCF at kerker=0.7 (r_v → 1e1) and
 The unconfined HELO **gates at the production kerker=0.7** (r_nsph < 1e-3) — the aspherical channel
 is well-behaved because the HELO is a genuinely distinct direction, not a near-null orthonormal one.
 This is the second decisive difference from the confined negative.
+
+## Step 2: multi-material validation (full EFG tensor vs Elk vs experiment)
+
+`helo_rutile.py` (TiO₂, warm from the #344 state), `helo_hbn.py` (h-BN, cold `converge_efg`), all
+kerker=0.7 aug4/fp4 k222. C_Q via `nmr.quadrupolar_coupling`.
+
+| system | site | metric | baseline | + l=1 HELO | Elk 11 | experiment |
+|---|---|---|---|---|---|---|
+| corundum | O (anion) | on-site V_zz | +17.76 | **+25.56** | +27.08 | — |
+| corundum | O | full C_Q(¹⁷O) | 1.63 MHz | **2.11 MHz** | 2.19 MHz | — |
+| corundum | Al (cation) | on-site V_zz | −7.26 | **−6.83** | −6.185 | — |
+| corundum | Al | full C_Q(²⁷Al) | 2.48 MHz | **2.33 MHz** | 2.19 MHz | 2.38 MHz |
+| rutile | O (anion) | on-site η | 0.913 | **0.147** | 0.099 | — |
+| rutile | O | full V_zz (sign/frame) | +13.9 [001] | **−15.1 [110]** | −19.1 [110] | — |
+| rutile | Ti | full V_zz | +18.1 | +17.2 | +19.3 | — |
+| h-BN | B (cation) | full C_Q(¹¹B) | 3.62 MHz | 3.95 MHz | 2.95 MHz | 2.934 MHz |
+
+**Anions (the dominant error) — decisively fixed.** Corundum O undershoot 0.66→0.94 on-site;
+rutile O η 0.91→0.15 (Elk 0.10) and the full O tensor recovers Elk's [110] frame and negative sign,
+both of which the confined l=1 LO could not (it left η at 0.89 on the wrong [001] frame and diverged
+at kerker=0.7).
+
+**Cations — material-specific, not a universal lever.** Corundum Al closes toward Elk (1.17→1.10,
+C_Q 2.48→2.33 MHz, toward the 2.38 MHz experiment). But light B (h-BN) gets *worse* with a B HELO
+(C_Q 3.62→3.95 MHz, away from the 2.934 MHz experiment) — its on-site is already over-captured and a
+high-E p-radial over-enriches it further (though it did improve convergence, GATED vs baseline
+MARGINAL). The production recipe is therefore: **apply the l=1 HELO to anion sites** (where it is a
+clean, decisive fix) and to Al-type semicore-frozen cations; do **not** blanket-apply it to light
+main-group cations. The HELO is opt-in per (species, l), so this selectivity is a config choice, not
+a code branch.
+
+## Bottom line
+
+The unconfined second-energy l=1 HELO is the radial-basis fix for the on-site EFG **anion**
+undershoot — the term the partition diagnosis proved carries the dominant bias — moving corundum O
+and rutile O decisively to the Elk all-electron reference and gating at production damping where the
+confined LO failed. It also improves the corundum Al cation. It is **not** a universal cation fix
+(light B worsens), so the diagnosis's "one lever moves both directions" holds for the dominant
+(anion) channel and for Al, but not for every cation.
+
+## Files
+
+- src: `scf._build_lo(confine=False)` + the `{"e":…, "confine":False}` LO spec in `_build_lodat`;
+  unit test `tests/unit/test_flapw_radial.py::test_helo_is_unconfined_and_confined_to_sphere`.
+- probes: `helo_probe.py` (conditioning ladder, confined vs unconfined), `helo_decisive.py`
+  (corundum on-site decomposition), `helo_rutile.py`, `helo_hbn.py`.
