@@ -64,7 +64,7 @@ def main():
                                    scf_kwargs=dict(cfg, kmesh=K, efg=False),
                                    maxiter=6, inner_maxiter=14, f_tol=1e-7, rounds=3)
             print(f"[newton {time.time()-t0:.0f}s] res={ni['residual_norm']:.2e} "
-                  f"f_evals={ni['f_evals']} converged={ni['converged']}", flush=True)
+                  f"f_ev={ni['f_evals']} conv={ni['converged']}", flush=True)
             if ni["residual_norm"] < 5e-3:
                 final = st
                 gated = ni["residual_norm"] < 1e-3
