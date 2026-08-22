@@ -73,17 +73,22 @@ current — a null the diagonal-L structure realizes exactly.
 **Status of the end-to-end paramagnetic number (honest scope).** The on-site
 operator (angular L, radial 1/r³, AE−PS, contraction, null tests) is built and
 validated here. The *input* cross density X_β needs the PAW-consistent first-order
-response ψ̃^(1) — the S-orthonormal ⟨p̃_n|ψ̃^(0)⟩ (already available as
-``USPPResult.becps``) and ⟨p̃_m|δu⟩ from a magnetic Sternheimer solve. The shipped
-``kgeometry_nmr.velocity_perturbation_q`` is *norm-conserving only*: its velocity
-is ∂H/∂k with no −ε∂S/∂k, its resolvent (H−ε)⁻¹ not (H−εS)⁻¹, and it dereferences
-``System.batch``/``res.v_eff`` that ``USPPSystem``/``USPPResult`` do not carry — so
-running it on a PAW SCF is both mechanically broken and physically wrong. A
-correct δu therefore needs an S-aware velocity operator and an S-metric Sternheimer
-(the PAW/GIPAW magnetic-response bridge, comparable to FLAPW-DFPT), which is *not*
-built. Consequently the absolute σ_para_aug (and hence the calibration of the
-overall prefactor and the covariant-position/gauge term) is deferred; this module
-ships the validated operator and the contraction API it plugs into.
+response ψ̃^(1) — the S-orthonormal ⟨p̃_n|ψ̃^(0)⟩ (available as
+``USPPResult.becps``) and ⟨p̃_m|δu⟩ from a magnetic Sternheimer solve. The S-aware
+velocity operator and S-metric Sternheimer that δu requires — the PAW/GIPAW
+magnetic-response bridge, comparable to FLAPW-DFPT — are now built (#349 Phase 1,
+#351 Phase 2): ``kgeometry_nmr.velocity_perturbation_q`` takes the generalized
+velocity ∂H/∂k − ε∂S/∂k (``uspp=``/``s_apply=``/``dsvel=``, tested on PAW Si) and
+``_response.cg_sternheimer`` the S-metric resolvent (H−εS)⁻¹ (``s_apply=``/
+``s_occ=``), with the frozen-effective-potential / screened-D USPP context from
+``kgeometry_nmr.build_uspp_response_ctx``. What remains for the absolute
+σ_para_aug is (a) assembling X_β from ``becps`` ⊗ ⟨p̃|δu⟩ and (b) calibrating the
+overall prefactor — the one genuine open unknown — then routing it through the
+production analytic ∂/∂q shielding path (``kgeometry_nmr.sigma_shielding_dq``; the
+analytic-USPP generalization is a measured GO). The covariant-position/gauge term
+is already carried by the route-agnostic on-site operator here (su(2)-validated),
+not a separate deferred lift. This module ships the validated operator and the
+contraction API it plugs into.
 
 PAW-path bridge
 ---------------
@@ -362,9 +367,11 @@ class PAWOnSite:
         ``pref`` is the overall paramagnetic scale (default the classical electron
         radius r_e, the literature σ^p ∝ e²/mc² form). Its calibration and the
         field-normalization of ``X`` are fixed by the PAW-consistent magnetic
-        response (the S-aware velocity Sternheimer, not yet built — see the module
-        docstring); until then ``para_aug_tensor`` is the validated *operator*
-        awaiting that response as input, not an absolute number."""
+        response (the S-aware velocity Sternheimer, built in #349/#351 — see the
+        module docstring); the prefactor calibration is the one remaining open
+        unknown, so until it is pinned ``para_aug_tensor`` is the validated
+        *operator* awaiting the assembled X_β as input, not yet an absolute
+        number."""
         x = torch.as_tensor(np.asarray(cross.detach().cpu().numpy(), dtype=complex))
         n = self.n_mexp
         if tuple(x.shape) != (3, n, n):
