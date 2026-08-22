@@ -55,7 +55,7 @@ def main():
         if r["r_v"] > 20 * best_rv and r["r_v"] > 1.0:
             print("[warm] diverging; stop", flush=True)
             break
-    print(f"[warm {time.time()-t0:.0f}s] best_rv={best_rv:.2e} best_rnsph={best_rn:.2e}", flush=True)
+    print(f"[warm {time.time()-t0:.0f}s] best_rv={best_rv:.2e} best_rn={best_rn:.2e}", flush=True)
     final, gated = best, (best_rv < 1.2e-2 and best_rn < 1e-3)
     if int(os.environ.get("NEWTON", "1")):
         t0 = time.time()
