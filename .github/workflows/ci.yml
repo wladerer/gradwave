@@ -113,10 +113,16 @@ jobs:
         run: uv sync --all-extras
 
       - name: Standard test tier (shard ${{ matrix.group }}/6)
+        # --timeout: per-test wall cap (pytest-timeout). No legitimate standard-tier
+        # test approaches 15 min (heaviest are minutes-class SCFs), but a genuine hang
+        # (e.g. a multiprocessing deadlock on the 2-core public runner) then fails fast
+        # with a traceback naming the test, instead of running out the 6h job default.
+        # thread method survives the xdist workers.
         run: >-
           uv run pytest -m "not slow and not torture and not gpu"
           --dist loadscope --splits 6 --group ${{ matrix.group }}
           --splitting-algorithm least_duration
+          --timeout=900 --timeout-method=thread
 
   # Single required-status gate. Always runs (so the required check is reported
   # even when lint/test are skipped), and is green iff neither lint nor test
