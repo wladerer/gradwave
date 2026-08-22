@@ -50,6 +50,41 @@ M^αβ_IJ = ∫ Y_I(Ω)[δ_αβ − r̂_α r̂_β]Y_J(Ω) dΩ over the real sphe
 in which the becsum is indexed. Environment-dependent through D_ij; no magnetic
 response, so FLAPW/literature-validatable as a ground-state quantity.
 
+**Paramagnetic augmentation** [Pickard & Mauri, PRB 63, 245101 (2001); Yates,
+Pickard & Mauri, PRB 76, 024401 (2007), Eq. (85)-(86)]. The response (hard) piece:
+the induced field at nucleus R from the AE−PS on-site *orbital-current* operator
+L_R/|r−R|³ contracted with the *first-order* (in B) wavefunction. In the
+projector sum,
+
+    B^para_α(R) = Σ_o Σ_{nm} ⟨ψ̃^(0)_o|p̃_n⟩ f^α_{nm} ⟨p̃_m|ψ̃^(1)_o⟩ + c.c.,
+    f^α_{nm} = ⟨φ_n| (L_R)_α/r³ |φ_m⟩ − ⟨φ̃_n| (L_R)_α/r³ |φ̃_m⟩,
+
+with L_R = (r−R)×p the angular momentum about the nucleus. L_R is block-diagonal
+in l (mixes only m within a shell), so f^α factorizes into the on-site angular
+tensor L^α_IJ = ⟨Y_I|L_α|Y_J⟩ (imaginary, anti-Hermitian in the real-harmonic
+basis; :func:`_ang_L_matrices`) and the more-singular radial AE−PS difference
+R³_ij = ∫[(rφ_i)(rφ_j) − (rφ̃_i)(rφ̃_j)]/r³ dr (integrable for l ≥ 1, the only
+channels L couples). σ^para_αβ = −∂B^para_α/∂B_β is assembled from the per-field
+ground×response cross density X_β[n,m] = Σ_o ⟨ψ̃^(0)_o|p̃_n⟩⟨p̃_m|ψ̃^(1),β_o⟩
+(:meth:`PAWOnSite.para_aug_tensor`). It vanishes for a spherical (m-diagonal)
+cross density — Lamb's theorem that a closed shell carries no paramagnetic
+current — a null the diagonal-L structure realizes exactly.
+
+**Status of the end-to-end paramagnetic number (honest scope).** The on-site
+operator (angular L, radial 1/r³, AE−PS, contraction, null tests) is built and
+validated here. The *input* cross density X_β needs the PAW-consistent first-order
+response ψ̃^(1) — the S-orthonormal ⟨p̃_n|ψ̃^(0)⟩ (already available as
+``USPPResult.becps``) and ⟨p̃_m|δu⟩ from a magnetic Sternheimer solve. The shipped
+``kgeometry_nmr.velocity_perturbation_q`` is *norm-conserving only*: its velocity
+is ∂H/∂k with no −ε∂S/∂k, its resolvent (H−ε)⁻¹ not (H−εS)⁻¹, and it dereferences
+``System.batch``/``res.v_eff`` that ``USPPSystem``/``USPPResult`` do not carry — so
+running it on a PAW SCF is both mechanically broken and physically wrong. A
+correct δu therefore needs an S-aware velocity operator and an S-metric Sternheimer
+(the PAW/GIPAW magnetic-response bridge, comparable to FLAPW-DFPT), which is *not*
+built. Consequently the absolute σ_para_aug (and hence the calibration of the
+overall prefactor and the covariant-position/gauge term) is deferred; this module
+ships the validated operator and the contraction API it plugs into.
+
 PAW-path bridge
 ---------------
 :class:`PAWOnSite` reads the AE/PS partial waves (r·φ_i, r·φ̃_i), the projector
@@ -144,6 +179,59 @@ def _dia_angular_tensor(lmax: int, nx: int = 20, nphi: int = 40) -> np.ndarray:
     return np.einsum("p,pab,pI,pJ->abIJ", wgt, ang, y, y)
 
 
+def _rot(axis: int, th: float) -> np.ndarray:
+    """3×3 rotation by angle ``th`` about Cartesian ``axis``."""
+    c, s = math.cos(th), math.sin(th)
+    if axis == 0:
+        return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+    if axis == 1:
+        return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+def _ang_L_matrices(lmax: int, nx: int = 24, nphi: int | None = None,
+                    delta: float = 1e-4) -> np.ndarray:
+    """L[α, I, J] = ⟨Y_I|L_α|Y_J⟩ (α = x, y, z) over the REAL spherical harmonics
+    (``core.gaunt.ylm_np`` convention, index l²+m), I, J ≤ (lmax+1)², complex.
+
+    L_α is the generator of rotations about axis α: a rotation R(θ) acts on the
+    real-harmonic coefficient vector as a real orthogonal, block-in-l matrix
+    M_α(θ) = exp(−iθ L_α), so L_α = −i·dM_α/dθ|₀ — a purely imaginary,
+    anti-symmetric (hence Hermitian) generator obtained here by a central
+    finite difference of the numerically-projected rotation matrix
+
+        M_α(θ)_IJ = ∫ Y_I(R(θ)Ω) Y_J(Ω) dΩ = Σ_p w_p Y_I(R(θ)r̂_p) Y_J(r̂_p)
+
+    (Gauss-Legendre(cosθ)×uniform-φ, exact for the band-limited harmonics). This
+    is convention-locked to ``ylm_np`` by construction — no complex-harmonic
+    transform to get a Condon-Shortley phase wrong. Validated internally
+    (:func:`test_ang_L_algebra`) against the su(2) algebra [L_α, L_β] = i ε L_γ,
+    L² = l(l+1) block-diagonal, Hermiticity, and the analytic L_z action."""
+    nphi = nphi or (2 * lmax + 8)
+    xg, wx = np.polynomial.legendre.leggauss(nx)
+    theta = np.arccos(xg)
+    phi = 2.0 * np.pi * np.arange(nphi) / nphi
+    th, ph = np.meshgrid(theta, phi, indexing="ij")
+    wgt = (wx[:, None] * np.full(nphi, 2.0 * np.pi / nphi)[None, :]).reshape(-1)
+    st = np.sin(th).reshape(-1)
+    dirs = np.stack(
+        [st * np.cos(ph).reshape(-1), st * np.sin(ph).reshape(-1),
+         np.cos(th).reshape(-1)],
+        axis=-1,
+    )  # (npt, 3)
+    nlm = (lmax + 1) ** 2
+    yj = ylm_np(lmax, dirs)[:, :nlm] * wgt[:, None]  # Y_J(r̂) w  (npt, nlm)
+    out = np.empty((3, nlm, nlm), dtype=complex)
+    for a in range(3):
+        yp = ylm_np(lmax, (_rot(a, delta) @ dirs.T).T)[:, :nlm]
+        ym = ylm_np(lmax, (_rot(a, -delta) @ dirs.T).T)[:, :nlm]
+        # M(±δ)_IJ = Σ_p w Y_I(r̂_p) Y_J(R r̂_p);  L = −i (M(δ)−M(−δ))/2δ
+        m_plus = yj.T @ yp
+        m_minus = yj.T @ ym
+        out[a] = -1j * (m_plus - m_minus) / (2.0 * delta)
+    return out
+
+
 @dataclass(frozen=True)
 class PAWOnSite:
     """PAW-path bridge for the on-site GIPAW terms of one species.
@@ -164,6 +252,8 @@ class PAWOnSite:
     idx: list[tuple[int, int, int]]  # (channel, l, m-slot) per becsum column
     r_diff: np.ndarray  # (nproj, nproj) ∫[(rφ_i)(rφ_j) − (rφ̃_i)(rφ̃_j)]/r dr
     dia_ang: np.ndarray  # (3, 3, nlm, nlm) angular tensor M^αβ_IJ
+    r3_diff: np.ndarray  # (nproj, nproj) ∫[…]/r³ dr (same-l, l≥1; else 0)
+    ang_L: np.ndarray  # (3, nlm, nlm) angular momentum L^α_IJ = ⟨Y_I|L_α|Y_J⟩
 
     @property
     def n_mexp(self) -> int:
@@ -186,8 +276,16 @@ class PAWOnSite:
         # radial AE−PS ⟨1/r⟩ difference (compactly supported: φ = φ̃ for r>r_c)
         w = (rab / r)[None, :]
         r_diff = (rphi_ae * w) @ rphi_ae.T - (rphi_ps * w) @ rphi_ps.T
+        # paramagnetic radial AE−PS ⟨1/r³⟩; only same-l, l≥1 channels survive the
+        # L contraction (L is block-diagonal in l and zero on l=0), so mask the
+        # rest — that also discards the 1/r³-singular l=0 integrand harmlessly.
+        w3 = (rab / r**3)[None, :]
+        r3_full = (rphi_ae * w3) @ rphi_ae.T - (rphi_ps * w3) @ rphi_ps.T
+        same_l = (ch_l[:, None] == ch_l[None, :]) & (ch_l[:, None] >= 1)
+        r3_diff = r3_full * same_l
         lmax = int(ch_l.max()) if nproj else 0
         dia_ang = _dia_angular_tensor(lmax)
+        ang_L = _ang_L_matrices(lmax)
         return cls(
             element=paw.element,
             r=r,
@@ -199,6 +297,8 @@ class PAWOnSite:
             idx=_index_map(paw),
             r_diff=r_diff,
             dia_ang=dia_ang,
+            r3_diff=r3_diff,
+            ang_L=ang_L,
         )
 
     def dia_aug_tensor(self, becsum: Tensor) -> Tensor:
@@ -229,6 +329,51 @@ class PAWOnSite:
         for one atom — the literature-comparable magnitude. Equivalent to the
         direct l=0 (Lamb-like) form (1/3)r_e Σ_{a,b:(l,m)=(l',m')} D_ab R^diff."""
         return float(torch.einsum("ii->", self.dia_aug_tensor(becsum)) / 3.0)
+
+    def para_aug_operator(self) -> np.ndarray:
+        """On-site paramagnetic current operator F^α_{ab} = ⟨φ_a|(L_α)/r³|φ_b⟩
+        − ⟨φ̃_a|·|φ̃_b⟩ in the m-expanded (becsum) projector layout, (3, n, n)
+        complex — the angular momentum tensor times the AE−PS radial ⟨1/r³⟩.
+
+        Anti-Hermitian imaginary in (a, b) (L_α is; the radial factor is real
+        symmetric), so its diagonal is zero: a purely m-diagonal (spherical)
+        cross density contracts to nothing (Lamb's closed-shell null)."""
+        lm = np.array([l * l + m for (_, l, m) in self.idx], dtype=int)
+        ch = np.array([i for (i, _, _) in self.idx], dtype=int)
+        radial = self.r3_diff[ch[:, None], ch[None, :]]  # (n, n)
+        ang = self.ang_L[:, lm[:, None], lm[None, :]]  # (3, n, n)
+        return ang * radial[None]
+
+    def para_aug_tensor(self, cross: Tensor, *, pref: float = R_E_ANG) -> Tensor:
+        """Paramagnetic-augmentation shielding tensor (3, 3) [ppm] for one atom
+        from its per-field ground×response cross density ``cross`` (3, n, n),
+
+            X_β[a, b] = Σ_o ⟨ψ̃^(0)_o|p̃_a⟩ ⟨p̃_b|ψ̃^(1),β_o⟩
+
+        (m-expanded ``rho_ij_atoms`` layout; index a pairs the ground state, b the
+        first-order response to field component β). The tensor is
+
+            σ^para_αβ = −pref · 2 Re Σ_{ab} F^α_{ab} X_β[a, b],
+
+        with F^α the :meth:`para_aug_operator`. Real for any input (F anti-Hermitian
+        imaginary ⇒ 2Re projects the physical part); zero for an m-diagonal
+        (spherical) X (the closed-shell paramagnetic null).
+
+        ``pref`` is the overall paramagnetic scale (default the classical electron
+        radius r_e, the literature σ^p ∝ e²/mc² form). Its calibration and the
+        field-normalization of ``X`` are fixed by the PAW-consistent magnetic
+        response (the S-aware velocity Sternheimer, not yet built — see the module
+        docstring); until then ``para_aug_tensor`` is the validated *operator*
+        awaiting that response as input, not an absolute number."""
+        x = torch.as_tensor(np.asarray(cross.detach().cpu().numpy(), dtype=complex))
+        n = self.n_mexp
+        if tuple(x.shape) != (3, n, n):
+            raise ValueError(
+                f"cross shape {tuple(x.shape)} != (3, {n}, {n}) for {self.element}")
+        f = torch.as_tensor(self.para_aug_operator())  # (3, n, n) complex
+        b_field = torch.einsum("anm,bnm->ab", f, x)  # B^para_α per field β
+        sig = -pref * 2.0 * b_field.real
+        return (sig * 1e6).to(RDTYPE)
 
 
 def augmentation_charge_residual(paw: PAWData) -> float:
