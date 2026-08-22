@@ -14,6 +14,19 @@ from torch import Tensor
 from gradwave.constants import BOHR_ANG, E2, HARTREE_EV
 
 
+def _pw92_ec(rs: Tensor) -> Tensor:
+    """Perdew-Wang 1992 correlation energy per particle ε_c(r_s) in Hartree (spin-unpolarized).
+
+    The shared kernel of :func:`vxc_lda` and :func:`fxc_lda`; each caller prepares ``rs`` with its
+    own autograd wiring (a detached leaf for the potential, a ρ-chained graph for the kernel) and
+    handles the ``r_s`` derivative itself — this returns only ε_c(r_s), bit-identically for both.
+    """
+    A, a1 = 0.031091, 0.21370
+    b1, b2, b3, b4 = 7.5957, 3.5876, 1.6382, 0.49294
+    denom = 2 * A * (b1 * rs**0.5 + b2 * rs + b3 * rs**1.5 + b4 * rs**2)
+    return -2 * A * (1 + a1 * rs) * torch.log(1 + 1.0 / denom)
+
+
 def vxc_lda(rho: Tensor) -> Tensor:
     """LDA XC potential (eV): Slater exchange + PW92 correlation. ``rho`` in e/Å³.
 
@@ -25,10 +38,7 @@ def vxc_lda(rho: Tensor) -> Tensor:
     rho_au = rho * BOHR_ANG**3
     rs = (3.0 / (4.0 * math.pi * rho_au)) ** (1.0 / 3.0)
     rs = rs.detach().clone().requires_grad_(True)
-    A, a1 = 0.031091, 0.21370
-    b1, b2, b3, b4 = 7.5957, 3.5876, 1.6382, 0.49294
-    denom = 2 * A * (b1 * rs**0.5 + b2 * rs + b3 * rs**1.5 + b4 * rs**2)
-    ec = -2 * A * (1 + a1 * rs) * torch.log(1 + 1.0 / denom)
+    ec = _pw92_ec(rs)
     (dec,) = torch.autograd.grad(ec.sum(), rs)
     vc_ha = (ec - (rs / 3.0) * dec).detach()
     return vx + vc_ha * HARTREE_EV
