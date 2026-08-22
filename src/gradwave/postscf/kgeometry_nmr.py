@@ -93,7 +93,7 @@ from gradwave.core.batch import (
 )
 from gradwave.core.fftbox import g_to_r, g_to_r_box, r_to_g
 from gradwave.dtypes import CDTYPE, RDTYPE
-from gradwave.grids import reciprocal_cell
+from gradwave.grids import build_gsphere, reciprocal_cell
 from gradwave.postscf._response import (
     DenseSternheimerSolver,
     cg_sternheimer,
@@ -110,6 +110,7 @@ from gradwave.postscf.kgeometry import (
     VelocityApply,
     _eigh_and_dh,
     _overlap_kbprojectors,
+    _toeplitz_index,
 )
 from gradwave.postscf.kgeometry_topo import _pack_miller
 
@@ -1276,16 +1277,20 @@ def _resolvent_apply(uc: Tensor, wc: Tensor, eps: Tensor, x: Tensor) -> Tensor:
     return uc @ (a / (eps[None, :] - wc[:, None]).to(a.dtype))
 
 
-def _d2h_mats(hk: BlochHK, kc: Tensor, q_hat: Tensor) -> list[Tensor]:
-    """Mixed second derivatives M_μ = q̂·∇_k(∂H/∂k_μ) at kc (3 × (npw, npw)).
+def _d2_mats(
+    mat_fn: Callable[[Tensor], Tensor], kc: Tensor, q_hat: Tensor
+) -> list[Tensor]:
+    """Mixed second derivatives M_μ = q̂·∇_k(∂mat/∂k_μ) at kc (3 × (npw, npw))
+    of any traceable dense matrix ``mat_fn(k)`` (H or S).
 
-    By nested forward-mode ``torch.func.jvp`` through the traceable dense H
-    build (equality of mixed partials: M_μ = ∂_μ(q̂·∇H), so the inner pass is
-    along q̂ and the outer along ê_μ). Complex outputs compose cleanly; no
-    eigendecomposition is ever differentiated."""
+    By nested forward-mode ``torch.func.jvp`` (equality of mixed partials:
+    M_μ = ∂_μ(q̂·∇mat), so the inner pass is along q̂ and the outer along ê_μ).
+    Complex outputs compose cleanly; no eigendecomposition is differentiated.
+    The overlap-second-derivative ∂²S/∂k² is this same machinery on the
+    traceable ``S(k)`` (scoping-measured FD-matched at ~1e-9)."""
 
     def w_fn(k: Tensor) -> Tensor:
-        return torch.func.jvp(hk.h, (k,), (q_hat,))[1]
+        return torch.func.jvp(mat_fn, (k,), (q_hat,))[1]
 
     out = []
     for mu in range(3):
@@ -1295,11 +1300,193 @@ def _d2h_mats(hk: BlochHK, kc: Tensor, q_hat: Tensor) -> list[Tensor]:
     return out
 
 
+def _d2h_mats(hk: BlochHK, kc: Tensor, q_hat: Tensor) -> list[Tensor]:
+    """Mixed second derivatives M_μ = q̂·∇_k(∂H/∂k_μ) at kc (3 × (npw, npw))."""
+    return _d2_mats(hk.h, kc, q_hat)
+
+
+def _gen_velocity(
+    v: list[Tensor], dsv: list[Tensor], x: Tensor, e: Tensor, coef: Tensor
+) -> Tensor:
+    """Generalized velocity Σ_μ coef_μ (∂H/∂k_μ x − ε ∂S/∂k_μ x), with ``e`` the
+    per-column reference energy of ``x`` (broadcast over its columns). ``v`` is
+    the screened-D ∂H/∂k, ``dsv`` the ∂S/∂k; ``coef`` picks the direction
+    (q̂ for the covariant k-derivative, ê_pol for the perturbation O)."""
+    acc = coef[0] * (v[0] @ x - (dsv[0] @ x) * e)
+    acc = acc + coef[1] * (v[1] @ x - (dsv[1] @ x) * e)
+    return acc + coef[2] * (v[2] @ x - (dsv[2] @ x) * e)
+
+
+def _resolvent_apply_s(
+    uc: Tensor, wc: Tensor, eps: Tensor, x: Tensor, s_mat: Tensor
+) -> Tensor:
+    """S-metric conduction resolvent y_j = Σ_{m∈cond} |u_m⟩⟨u_m|S|x_j⟩/(ε_j−ε_m).
+
+    The generalized-eigenproblem twin of :func:`_resolvent_apply`: the
+    conduction columns ``uc`` are S-orthonormal (uc.mH @ S @ uc = I) and the
+    projection onto them uses the S inner product ⟨u_m|S|x⟩ = (uc.mH S x), so
+    G(ε)P_c is the S-orthogonal conduction Green's function. Reduces to
+    :func:`_resolvent_apply` exactly when S = I."""
+    a = uc.mH @ (s_mat @ x)
+    return uc @ (a / (eps[None, :] - wc[:, None]).to(a.dtype))
+
+
+# --------------------------------------------------------------------------- #
+# USPP/PAW S-metric dense context for the analytic ∂/∂q shielding (PR-A)        #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class BlochHKS:
+    """Dense differentiable H(k) AND overlap S(k) at a frozen USPP/PAW ground
+    state — the S-metric generalization of :class:`~gradwave.postscf.kgeometry.
+    BlochHK` used by the analytic shielding route.
+
+        H(k) = V̂_loc(G−G') + kinetic + Σ_ij Dscr_ij |β_i(k)⟩⟨β_j(k)|
+        S(k) = I                       + Σ_ij q_ij   |β_i(k)⟩⟨β_j(k)|
+
+    with ``Dscr`` the SCREENED descreened D (``uspp_frozen.screened_dscr``) and
+    ``q`` the ∫Q augmentation overlap weights. Both are Hermitian and traceable
+    in Cartesian k through the shared β source ``kb`` (a
+    :class:`~gradwave.postscf.kgeometry.KBProjectors`), so ∂H/∂k, ∂S/∂k, ∂²H/∂k²
+    and ∂²S/∂k² all come from the same forward-mode AD the NC route uses for
+    ∂²H (no new augmentation second-derivative — scoping §3).
+
+    Two builders: :meth:`from_uspp_ctx` (a real USPP/PAW result, via the shipped
+    :class:`USPPResponseCtx`) and :meth:`from_nc` (a norm-conserving result with
+    q = 0 ⇒ S = I, Dscr = D — the NC-limit reduction gate, exercising every
+    S-metric code path while reducing to the plain-NC arithmetic)."""
+
+    b: Tensor  # (3,3) reciprocal-cell rows [Å⁻¹]
+    k_ref_cart: Tensor  # (3,) reference (sphere-defining) k [Å⁻¹]
+    miller: Tensor  # (npw, 3) int64 Miller indices of the fixed sphere
+    g_cart: Tensor  # (npw, 3) Cartesian G of the fixed sphere [Å⁻¹]
+    vmat: Tensor  # (npw, npw) complex V̂_loc(G−G') [eV]
+    kb: KBProjectors  # β source (NC or USPP overlap projectors)
+    dscr: Tensor  # (nproj, nproj) screened D (= D for NC) [eV]
+    qint: Tensor  # (nproj, nproj) ∫Q overlap weights (= 0 for NC)
+    volume: float
+
+    @property
+    def npw(self) -> int:
+        return int(self.g_cart.shape[0])
+
+    @classmethod
+    def from_nc(cls, res: SCFResult, k_frac: Sequence[float] | np.ndarray) -> BlochHKS:
+        """NC-limit gate context: q = 0 ⇒ S = I, Dscr = D. Reuses
+        :meth:`BlochHK.from_scf` so H(k) is byte-identical to the NC route's."""
+        hk = BlochHK.from_scf(res, k_frac)
+        kb = KBProjectors(
+            g_cart=hk.g_cart, tau=hk.tau, dij_full=hk.dij_full,
+            col_atom=hk.col_atom, col_chan=hk.col_chan, col_lm=hk.col_lm,
+            channels=hk.channels, lmax=hk.lmax, volume=hk.volume,
+        )
+        return cls(
+            b=hk.b, k_ref_cart=hk.k_ref_cart, miller=hk.miller, g_cart=hk.g_cart,
+            vmat=hk.vmat, kb=kb, dscr=hk.dij_full,
+            qint=torch.zeros_like(hk.dij_full), volume=hk.volume,
+        )
+
+    @classmethod
+    def from_uspp_ctx(
+        cls, ctx: USPPResponseCtx, k_frac: Sequence[float] | np.ndarray
+    ) -> BlochHKS:
+        """Real USPP/PAW context from the shipped :class:`USPPResponseCtx`
+        (``build_uspp_response_ctx``): β + ∫Q on the sphere at ``k_frac`` from
+        ``_overlap_kbprojectors``, the screened D and frozen local potential
+        from the frozen ground state. The screened-D column order matches
+        ``_overlap_kbprojectors`` (both are the (atom, channel, m) order the
+        ctx built ``dscr`` in), so the two share one projector layout."""
+        system = ctx.system
+        grid = system.grid
+        sphere = build_gsphere(grid, system.ecut, np.asarray(k_frac, dtype=float))
+        kb = _overlap_kbprojectors(system, sphere)
+        vhat = r_to_g(ctx.v_eff_r.detach().cpu().to(CDTYPE)).reshape(-1)
+        vmat = vhat[_toeplitz_index(sphere.miller, grid.shape)]
+        return cls(
+            b=torch.as_tensor(reciprocal_cell(grid.cell), dtype=RDTYPE),
+            k_ref_cart=sphere.k_cart.to(RDTYPE),
+            miller=sphere.miller,
+            g_cart=kb.g_cart,
+            vmat=vmat,
+            kb=kb,
+            dscr=ctx.dscr.to(RDTYPE),
+            qint=kb.dij_full,
+            volume=float(grid.volume),
+        )
+
+    def k_cart(self, k_frac: Sequence[float] | np.ndarray | Tensor) -> Tensor:
+        kf = (
+            k_frac.to(RDTYPE)
+            if isinstance(k_frac, Tensor)
+            else torch.as_tensor(np.asarray(k_frac, dtype=float), dtype=RDTYPE)
+        )
+        return kf @ self.b
+
+    def h(self, k_cart: Tensor) -> Tensor:
+        """Dense Hermitian H(k) (npw, npw) [eV], differentiable in Cartesian k."""
+        kpg = self.g_cart + k_cart
+        kin = HBAR2_2M * (kpg * kpg).sum(-1)
+        hmat = self.vmat + torch.diag_embed(kin.to(CDTYPE))
+        if self.kb.dij_full.shape[0]:
+            p = self.kb.p(k_cart)
+            hmat = hmat + p.mT @ (self.dscr.to(CDTYPE) @ p.conj())
+        return hmat
+
+    def s(self, k_cart: Tensor) -> Tensor:
+        """Dense Hermitian overlap S(k) (npw, npw), differentiable in k.
+        S = I + Σ_ij q_ij |β_i⟩⟨β_j| (= I exactly when q = 0)."""
+        npw = self.npw
+        eye = torch.eye(npw, dtype=CDTYPE, device=self.g_cart.device)
+        if self.kb.dij_full.shape[0]:
+            p = self.kb.p(k_cart)
+            eye = eye + p.mT @ (self.qint.to(CDTYPE) @ p.conj())
+        return eye
+
+
+def _geigh_and_dhds(
+    hks: BlochHKS, k_cart: Tensor
+) -> tuple[Tensor, Tensor, list[Tensor], list[Tensor]]:
+    """(ε, U, [∂H/∂k_μ], [∂S/∂k_μ]) of the generalized eigenproblem H U = S U ε.
+
+    The eigensolve is Cholesky-whitened (S = L Lᴴ; eigh of L⁻¹ H L⁻ᴴ) so the
+    returned U is S-ORTHONORMAL (Uᴴ S U = I) — under ``no_grad`` exactly like
+    :func:`_eigh_and_dh` (the eigendecomposition is never differentiated; the
+    S-orthonormal back-transform does not touch the forward ∂/∂k passes). The
+    velocity matrices ∂H/∂k (screened D) and ∂S/∂k come from one forward-mode
+    dual pass per direction through the traceable ``h``/``s``. With S = I,
+    Cholesky(I) = I and this reduces to :func:`_eigh_and_dh` with ∂S/∂k = 0."""
+    k = k_cart.detach().to(RDTYPE)
+    with torch.no_grad():
+        hmat = hks.h(k)
+        smat = hks.s(k)
+        ell = torch.linalg.cholesky(smat)
+        ell_inv = torch.linalg.solve_triangular(
+            ell, torch.eye(hks.npw, dtype=CDTYPE, device=k.device), upper=False
+        )
+        a = ell_inv @ hmat @ ell_inv.mH
+        a = 0.5 * (a + a.mH)
+        w, y = torch.linalg.eigh(a)
+        u = ell_inv.mH @ y  # S-orthonormal eigenvectors
+    dh, ds = [], []
+    for mu in range(3):
+        tangent = torch.zeros(3, dtype=RDTYPE, device=k.device)
+        tangent[mu] = 1.0
+        dh.append(torch.func.jvp(hks.h, (k,), (tangent,))[1])
+        ds.append(torch.func.jvp(hks.s, (k,), (tangent,))[1])
+    return w, u, dh, ds
+
+
 @dataclass(frozen=True)
 class _DenseKCtx:
-    """Frozen per-k dense context of the analytic ∂/∂q route."""
+    """Frozen per-k dense context of the analytic ∂/∂q route.
 
-    hk: BlochHK
+    NC route: ``hk`` a :class:`~gradwave.postscf.kgeometry.BlochHK`, ``ds``/``s0``
+    ``None`` (S = I implicit). S-metric (USPP/PAW) route: ``hk`` a
+    :class:`BlochHKS`, ``v`` the screened-D ∂H/∂k, ``ds`` the ∂S/∂k, ``s0`` the
+    dense S(kc), ``u`` S-orthonormal."""
+
+    hk: BlochHK | BlochHKS
     kc: Tensor  # (3,) Cartesian k [Å⁻¹]
     w: Tensor  # (npw,) eigenvalues [eV]
     u: Tensor  # (npw, npw) eigenvector columns
@@ -1307,6 +1494,8 @@ class _DenseKCtx:
     kpg: Tensor  # (npw, 3) Cartesian k+G
     flat: Tensor  # (npw,) FFT-box flat index of the sphere Millers
     weight: float  # k-weight (mesh weights sum to 1)
+    ds: list[Tensor] | None = None  # 3 × (npw, npw): ∂S/∂k_μ (None ⇒ S = I)
+    s0: Tensor | None = None  # (npw, npw) S(kc) (None ⇒ S = I)
 
 
 class ShieldingDq:
@@ -1340,6 +1529,7 @@ class ShieldingDq:
         res: SCFResult,
         *,
         k_frac: np.ndarray | Sequence[np.ndarray] | None = None,
+        uspp: USPPResponseCtx | str | None = None,
     ) -> None:
         """Build the per-k dense contexts (eigh + ∂H/∂k) at each mesh k.
 
@@ -1349,10 +1539,21 @@ class ShieldingDq:
         explicit ``k_frac`` carry no meaningful k-weight (``branch_fields_axis``
         is then always passed the per-axis star weights); default weights are the
         full-mesh ``system.kweights`` for the unreduced route.
+
+        ``uspp`` selects the S-metric (ultrasoft/PAW) build for the SMOOTH
+        (valence) shielding: a :class:`USPPResponseCtx` from
+        :func:`build_uspp_response_ctx` (real USPP/PAW), or the string
+        ``"nc-gate"`` (build the S-metric context from ``res``'s NC pseudo with
+        q = 0 ⇒ S = I, Dscr = D — the machine-precision reduction gate). Each
+        per-k context then carries the screened-D ∂H/∂k, ∂S/∂k and the dense
+        S(kc); the generalized eigenproblem H U = S U ε gives S-orthonormal U.
+        With ``uspp=None`` the plain norm-conserving (S = I) route is unchanged.
         """
         _guard(res)
         self.res = res
-        system = res.system
+        self.uspp = uspp
+        ctx = uspp if isinstance(uspp, USPPResponseCtx) else None
+        system = ctx.system if ctx is not None else res.system
         self.shape: tuple[int, int, int] = system.grid.shape
         self.volume = float(system.grid.volume)
         self.nocc = insulator_window(
@@ -1368,16 +1569,28 @@ class ShieldingDq:
             weights = [float("nan")] * len(kfs)
         self.ks: list[_DenseKCtx] = []
         for kf, wk in zip(kfs, weights, strict=True):
-            hk = BlochHK.from_scf(res, kf)
-            kc = hk.k_ref_cart
-            w, u, dh = _eigh_and_dh(hk.h, kc)
+            if uspp is None:
+                hk: BlochHK | BlochHKS = BlochHK.from_scf(res, kf)
+                kc = hk.k_ref_cart
+                w, u, dh = _eigh_and_dh(hk.h, kc)
+                ds: list[Tensor] | None = None
+                s0: Tensor | None = None
+            else:
+                hk = (
+                    BlochHKS.from_nc(res, kf)
+                    if ctx is None
+                    else BlochHKS.from_uspp_ctx(ctx, kf)
+                )
+                kc = hk.k_ref_cart
+                w, u, dh, ds = _geigh_and_dhds(hk, kc)
+                s0 = hk.s(kc)
             mod = hk.miller.numpy() % nbox
             flat = torch.as_tensor(
                 (mod[:, 0] * n2 + mod[:, 1]) * n3 + mod[:, 2], dtype=torch.int64
             )
             self.ks.append(
                 _DenseKCtx(hk=hk, kc=kc, w=w, u=u, v=dh, kpg=hk.g_cart + kc,
-                           flat=flat, weight=wk)
+                           flat=flat, weight=wk, ds=ds, s0=s0)
             )
 
     def branch_fields_axis(
@@ -1421,24 +1634,87 @@ class ShieldingDq:
         for dk, w_k in zip(ks, ws, strict=True):
             uo, wo = dk.u[:, :nocc], dk.w[:nocc]
             uc, wc = dk.u[:, nocc:], dk.w[nocc:]
-            m_mats = _d2h_mats(dk.hk, dk.kc, qh)
-            wmat = torch.einsum("m,mij->ij", qh.to(CDTYPE), torch.stack(dk.v))
-            dtu = _resolvent_apply(uc, wc, wo, wmat @ uo)
-            u_box = g_to_r(uo.mT, dk.flat, self.shape)
-            vu = [dk.v[mu] @ uo for mu in range(3)]
-            vu_box = [g_to_r(x.mT, dk.flat, self.shape) for x in vu]
             pref = w_k * f_occ / self.volume
+            if dk.ds is None:
+                # ---- norm-conserving (S = I) route (unchanged) ----
+                m_mats = _d2h_mats(cast("BlochHK", dk.hk), dk.kc, qh)
+                wmat = torch.einsum("m,mij->ij", qh.to(CDTYPE), torch.stack(dk.v))
+                dtu = _resolvent_apply(uc, wc, wo, wmat @ uo)
+                u_box = g_to_r(uo.mT, dk.flat, self.shape)
+                vu = [dk.v[mu] @ uo for mu in range(3)]
+                vu_box = [g_to_r(x.mT, dk.flat, self.shape) for x in vu]
+                for ip, pol in enumerate(pols):
+                    ep = np.asarray(pol, dtype=float)
+                    o0u = ep[0] * vu[0] + ep[1] * vu[1] + ep[2] * vu[2]
+                    du0 = _resolvent_apply(uc, wc, wo, o0u)
+                    me_u = 0.5 * (
+                        ep[0] * (m_mats[0] @ uo)
+                        + ep[1] * (m_mats[1] @ uo)
+                        + ep[2] * (m_mats[2] @ uo)
+                    )
+                    inner = wmat @ du0 - dtu @ (uo.mH @ o0u) + me_u
+                    du1 = _resolvent_apply(uc, wc, wo, inner) - uo @ (dtu.mH @ du0)
+                    du0_box = g_to_r(du0.mT, dk.flat, self.shape)
+                    du1_box = g_to_r(du1.mT, dk.flat, self.shape)
+                    s0_acc, ds_acc = out[ip]
+                    for mu in range(3):
+                        kq = HBAR2_2M * float(qh[mu])
+                        vdu0_box = g_to_r((dk.v[mu] @ du0).mT, dk.flat, self.shape)
+                        vdu1_box = g_to_r((dk.v[mu] @ du1).mT, dk.flat, self.shape)
+                        # δu-side operator derivative ½M_μ + κq̂_μ (kinetic + ½Ā'),
+                        # u-side ½M_μ − κq̂_μ (½Ā' only), κ = HBAR2_2M
+                        dop_du0 = 0.5 * (m_mats[mu] @ du0) + kq * du0
+                        dop_u = 0.5 * (m_mats[mu] @ uo) - kq * uo
+                        dop_du0_box = g_to_r(dop_du0.mT, dk.flat, self.shape)
+                        dop_u_box = g_to_r(dop_u.mT, dk.flat, self.shape)
+                        s0_acc[mu] += pref * 0.5 * (
+                            u_box.conj() * vdu0_box + vu_box[mu].conj() * du0_box
+                        ).sum(dim=0)
+                        ds_acc[mu] += pref * 0.5 * (
+                            u_box.conj() * (dop_du0_box + vdu1_box)
+                            + dop_u_box.conj() * du0_box
+                            + vu_box[mu].conj() * du1_box
+                        ).sum(dim=0)
+                continue
+            # ---- S-metric (USPP/PAW smooth) route ----
+            # The generalized eigenproblem's covariant velocity and perturbation
+            # use v_gen = ∂H/∂k − ε ∂S/∂k (per-column reference energy ε), the
+            # S-orthogonal resolvent projects with ⟨u_m|S|·⟩, and O'(0) carries
+            # the −ε ∂²S piece; the PHYSICAL current operator stays the plain
+            # screened-D ∂H/∂k (scoping L2/L3/L4/L6/L7). All reduce to the NC
+            # arithmetic above when S = I, ∂S = 0 (the NC-limit gate).
+            hks = cast("BlochHKS", dk.hk)
+            dsv = dk.ds
+            s0m = cast("Tensor", dk.s0)
+            wo_c = wo.to(CDTYPE)
+            qh_c = qh.to(CDTYPE)
+            m_h = _d2_mats(hks.h, dk.kc, qh)  # ∂²H/∂k²
+            m_s = _d2_mats(hks.s, dk.kc, qh)  # ∂²S/∂k²
+
+            dtu = _resolvent_apply_s(
+                uc, wc, wo, _gen_velocity(dk.v, dsv, uo, wo_c, qh_c), s0m
+            )
+            u_box = g_to_r(uo.mT, dk.flat, self.shape)
+            vcur = [dk.v[mu] @ uo for mu in range(3)]  # current op (screened-D ∂H/∂k)
+            vcur_box = [g_to_r(x.mT, dk.flat, self.shape) for x in vcur]
             for ip, pol in enumerate(pols):
-                ep = np.asarray(pol, dtype=float)
-                o0u = ep[0] * vu[0] + ep[1] * vu[1] + ep[2] * vu[2]
-                du0 = _resolvent_apply(uc, wc, wo, o0u)
+                ep = torch.as_tensor(np.asarray(pol, dtype=float), dtype=CDTYPE)
+                o0u = _gen_velocity(dk.v, dsv, uo, wo_c, ep)  # perturbation O u
+                du0 = _resolvent_apply_s(uc, wc, wo, o0u, s0m)
+                # O'(0) u = ½ Σ ep_μ (M^H_μ uo − ε M^S_μ uo)
                 me_u = 0.5 * (
-                    ep[0] * (m_mats[0] @ uo)
-                    + ep[1] * (m_mats[1] @ uo)
-                    + ep[2] * (m_mats[2] @ uo)
+                    ep[0] * (m_h[0] @ uo - (m_s[0] @ uo) * wo_c)
+                    + ep[1] * (m_h[1] @ uo - (m_s[1] @ uo) * wo_c)
+                    + ep[2] * (m_h[2] @ uo - (m_s[2] @ uo) * wo_c)
                 )
-                inner = wmat @ du0 - dtu @ (uo.mH @ o0u) + me_u
-                du1 = _resolvent_apply(uc, wc, wo, inner) - uo @ (dtu.mH @ du0)
+                inner = (
+                    _gen_velocity(dk.v, dsv, du0, wo_c, qh_c)
+                    - dtu @ (uo.mH @ (s0m @ o0u))
+                    + me_u
+                )
+                du1 = _resolvent_apply_s(uc, wc, wo, inner, s0m) - uo @ (
+                    dtu.mH @ (s0m @ du0)
+                )
                 du0_box = g_to_r(du0.mT, dk.flat, self.shape)
                 du1_box = g_to_r(du1.mT, dk.flat, self.shape)
                 s0_acc, ds_acc = out[ip]
@@ -1446,19 +1722,19 @@ class ShieldingDq:
                     kq = HBAR2_2M * float(qh[mu])
                     vdu0_box = g_to_r((dk.v[mu] @ du0).mT, dk.flat, self.shape)
                     vdu1_box = g_to_r((dk.v[mu] @ du1).mT, dk.flat, self.shape)
-                    # δu-side operator derivative ½M_μ + κq̂_μ (kinetic + ½Ā'),
-                    # u-side ½M_μ − κq̂_μ (½Ā' only), κ = HBAR2_2M
-                    dop_du0 = 0.5 * (m_mats[mu] @ du0) + kq * du0
-                    dop_u = 0.5 * (m_mats[mu] @ uo) - kq * uo
+                    # current-operator s-derivative: ½M^H_μ (screened-D ∂H/∂k,
+                    # NOT generalized) + κq̂_μ (kinetic) on δu, −κq̂_μ on u.
+                    dop_du0 = 0.5 * (m_h[mu] @ du0) + kq * du0
+                    dop_u = 0.5 * (m_h[mu] @ uo) - kq * uo
                     dop_du0_box = g_to_r(dop_du0.mT, dk.flat, self.shape)
                     dop_u_box = g_to_r(dop_u.mT, dk.flat, self.shape)
                     s0_acc[mu] += pref * 0.5 * (
-                        u_box.conj() * vdu0_box + vu_box[mu].conj() * du0_box
+                        u_box.conj() * vdu0_box + vcur_box[mu].conj() * du0_box
                     ).sum(dim=0)
                     ds_acc[mu] += pref * 0.5 * (
                         u_box.conj() * (dop_du0_box + vdu1_box)
                         + dop_u_box.conj() * du0_box
-                        + vu_box[mu].conj() * du1_box
+                        + vcur_box[mu].conj() * du1_box
                     ).sum(dim=0)
         rho = self.res.rho if self.res.rho.dim() == 3 else self.res.rho[0]
         for ip, pol in enumerate(pols):
@@ -1490,10 +1766,12 @@ def _branch_field_fixed_sphere(
     nocc = eng.nocc
     qh = torch.as_tensor(np.asarray(q_hat, dtype=float), dtype=RDTYPE)
     ep = np.asarray(e_pol, dtype=float)
+    # The finite-s twin is the NC (S = I) validation reference only.
+    hk_nc = cast("BlochHK", dk.hk)
     ks = dk.kc + s * qh
     with torch.no_grad():
-        ws, us = torch.linalg.eigh(dk.hk.h(ks))
-    vs = _dense_velocity_matrices(dk.hk, ks)
+        ws, us = torch.linalg.eigh(hk_nc.h(ks))
+    vs = _dense_velocity_matrices(hk_nc, ks)
     uo, wo = dk.u[:, :nocc], dk.w[:nocc]
     o_u = 0.5 * (
         ep[0] * ((dk.v[0] + vs[0]) @ uo)
@@ -1507,8 +1785,8 @@ def _branch_field_fixed_sphere(
     for xi, wi in zip(x, wq, strict=True):
         t = 0.5 * (float(xi) + 1.0)
         kt = dk.kc + (t * s) * qh
-        vt = _dense_velocity_matrices(dk.hk, kt)
-        kin_t = (2.0 * HBAR2_2M) * (dk.hk.g_cart + kt)
+        vt = _dense_velocity_matrices(hk_nc, kt)
+        kin_t = (2.0 * HBAR2_2M) * (hk_nc.g_cart + kt)
         for mu in range(3):
             abar[mu] += (0.5 * float(wi)) * (
                 vt[mu] - torch.diag_embed(kin_t[:, mu].to(CDTYPE))
@@ -1741,6 +2019,7 @@ def sigma_shielding_dq(
     *,
     sites: Tensor | None = None,
     use_symmetry: bool | str = "auto",
+    uspp: USPPResponseCtx | str | None = None,
 ) -> Tensor:
     """Bare (pseudo) NMR shielding tensor by the ANALYTIC ∂/∂q at q = 0:
     σ_ij = −∂B_ind,i(r_site)/∂B_ext,j in ppm, shape (nsite, 3, 3).
@@ -1785,7 +2064,7 @@ def sigma_shielding_dq(
     ``use_symmetry=False``. Measured ~2.7×/3.4× on Si (4³/6³) and ~1.5×/2.0× on
     rutile TiO₂; a cell with trivial symmetry falls back with no slowdown."""
     _guard(res)
-    system = res.system
+    system = uspp.system if isinstance(uspp, USPPResponseCtx) else res.system
     if sites is None:
         sites = system.positions.detach().cpu().to(RDTYPE)
     b = reciprocal_cell(system.grid.cell)
@@ -1799,9 +2078,12 @@ def sigma_shielding_dq(
             "BZ sum of the analytic q-derivative only converges along sampled "
             "mesh axes (see docstring)")
 
-    plan = _plan_wedge_reduction(res, axes, use_symmetry)
+    # The little-group wedge reduction folds the current field only (it is
+    # orthogonal to the H/S metric); keep the S-metric route on the exact full
+    # mesh (the smooth-USPP build is validated by the NC-limit gate there).
+    plan = None if uspp is not None else _plan_wedge_reduction(res, axes, use_symmetry)
     if plan is None:  # exact full-mesh path (symmetry off or nothing reduces)
-        eng = ShieldingDq(res)
+        eng = ShieldingDq(res, uspp=uspp)
         axis_specs = [
             (np.asarray(b[i], dtype=float) / np.linalg.norm(b[i]), None, None, None)
             for i in axes
