@@ -32,3 +32,26 @@ def vxc_lda(rho: Tensor) -> Tensor:
     (dec,) = torch.autograd.grad(ec.sum(), rs)
     vc_ha = (ec - (rs / 3.0) * dec).detach()
     return vx + vc_ha * HARTREE_EV
+
+
+def fxc_lda(rho: Tensor) -> Tensor:
+    """LDA XC kernel ``f_xc = dV_xc/dρ`` (eV·Å³), elementwise — the density-response kernel that
+    screens the FLAPW-DFPT density perturbation (``K_Hxc`` = Hartree ⊕ this). Same Slater-x + PW92-c
+    parametrization as :func:`vxc_lda`; unlike ``vxc_lda`` (which detaches the internal ``r_s``
+    derivative and so is not a clean autograd path to the kernel) the correlation second
+    derivative is taken here through a *connected* graph — ``ρ`` is the leaf, ``r_s(ρ)`` chains,
+    and the inner ``dε_c/dr_s`` is built with ``create_graph=True`` so the outer ``d/dρ`` sees it.
+    Validated elementwise against a central finite difference of :func:`vxc_lda` to ~1e-10."""
+    rho = rho.clamp_min(1e-12).detach().clone().requires_grad_(True)
+    vx = -((3.0 / math.pi) ** (1.0 / 3.0)) * E2 * rho ** (1.0 / 3.0)
+    rho_au = rho * BOHR_ANG**3
+    rs = (3.0 / (4.0 * math.pi * rho_au)) ** (1.0 / 3.0)
+    A, a1 = 0.031091, 0.21370
+    b1, b2, b3, b4 = 7.5957, 3.5876, 1.6382, 0.49294
+    denom = 2 * A * (b1 * rs**0.5 + b2 * rs + b3 * rs**1.5 + b4 * rs**2)
+    ec = -2 * A * (1 + a1 * rs) * torch.log(1 + 1.0 / denom)
+    (dec,) = torch.autograd.grad(ec.sum(), rs, create_graph=True)
+    vc_ha = ec - (rs / 3.0) * dec
+    vxc = vx + vc_ha * HARTREE_EV
+    (fxc,) = torch.autograd.grad(vxc.sum(), rho)
+    return fxc.detach()

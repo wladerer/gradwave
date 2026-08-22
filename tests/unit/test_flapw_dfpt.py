@@ -159,5 +159,47 @@ def test_multipole_response_is_derivative():
         assert np.abs(dr_an[lm] - dr_fd).max() < 1e-6 * max(np.abs(dr_fd).max(), 1e-30)
 
 
+def test_fxc_lda_matches_fd_of_vxc():
+    """The LDA XC kernel f_xc = dV_xc/drho (functionals.fxc_lda) equals a central finite
+    difference of vxc_lda, elementwise, over a wide density range — the K_Hxc XC building block."""
+    import torch
+
+    from gradwave.flapw.functionals import fxc_lda, vxc_lda
+    rho = torch.tensor([0.02, 0.1, 0.5, 2.0, 10.0, 50.0], dtype=torch.float64)
+    an = fxc_lda(rho)
+    h = 1e-6
+    fd = (vxc_lda(rho * (1 + h)) - vxc_lda(rho * (1 - h))) / (2 * h * rho)
+    assert torch.abs(an - fd).max() < 1e-7 * float(torch.abs(fd).max())
+
+
+def test_khxc_response_matches_fd_of_nonspherical_potential():
+    """K_Hxc (dfpt.khxc_response) is the exact JVP of efg.nonspherical_potential: the induced
+    aspherical potential response dV_LM to a density response drho_LM reproduces a central finite
+    difference of the forward density->potential map, for every l=2 channel."""
+    from gradwave.flapw.dfpt import khxc_response
+    from gradwave.flapw.efg import nonspherical_potential
+    rng = np.random.default_rng(11)
+    nr = 160
+    rr = np.linspace(0.02, 1.0, nr)
+    drw = np.gradient(rr)
+    rho_sph = 3.0 * np.exp(-2.0 * rr) + 0.2                # positive spherical background
+    lset = [(2, m) for m in range(-2, 3)]
+    rho_2m = {lm: (0.15 * np.exp(-1.5 * rr) * rng.standard_normal()
+                   + 0.05j * np.exp(-1.5 * rr) * rng.standard_normal()) for lm in lset}
+    rho_2m[(2, 0)] = 0.15 * np.exp(-1.5 * rr)             # real m=0
+    drho = {lm: 0.1 * np.exp(-1.8 * rr) * (rng.standard_normal() + 1j * rng.standard_normal())
+            for lm in lset}
+    drho[(2, 0)] = 0.1 * np.exp(-1.8 * rr) * rng.standard_normal()
+    an = khxc_response(drho, rho_sph, rho_2m, rr, drw, lset)
+    h = 1e-6
+    vp = nonspherical_potential(rho_sph, {lm: rho_2m[lm] + h * drho[lm] for lm in lset},
+                                rr, drw, lset=lset)
+    vm = nonspherical_potential(rho_sph, {lm: rho_2m[lm] - h * drho[lm] for lm in lset},
+                                rr, drw, lset=lset)
+    for lm in lset:
+        fd = (vp[lm] - vm[lm]) / (2 * h)
+        assert np.abs(an[lm] - fd).max() < 1e-5 * max(np.abs(fd).max(), 1e-30)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

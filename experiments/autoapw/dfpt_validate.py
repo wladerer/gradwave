@@ -33,6 +33,7 @@ from gradwave.flapw import dfpt
 from gradwave.flapw.efg import (
     _valence_v,
     interstitial_l2_boundary,
+    nonspherical_potential,
     sphere_density_multipoles_bands,
 )
 from gradwave.flapw.scf import (
@@ -41,6 +42,7 @@ from gradwave.flapw.scf import (
     _multi_init_state,
     _multi_iterate,
     _multi_setup,
+    _nonspherical_augment,
     _nsph_radial_integrals,
     _us_ext,
     _ylm_star,
@@ -130,6 +132,81 @@ def report(tag, an, fd):
     return relmax
 
 
+def chi0_apply(dv_nsph, base_res, ctx, species, chan, acart, us_by_key, occ_full,
+               kfracs, kw, nb_solve, lset_out):
+    """The ANALYTIC Gate-A χ₀ operator: an aspherical potential perturbation ``dv_nsph``
+    (``{key: {(L,M): dV_LM(r)}}``, L≥1) → the aspherical density response ``drho``
+    (``{key: {(L,M): drho_LM(r)}}`` over ``lset_out``). Same calculus the Gate-A FD path validated
+    to 5.5e-7, but the perturbed Hamiltonian is built ANALYTICALLY: a pure aspherical-potential
+    change moves only the non-spherical augmentation, and that augmentation is LINEAR in ``v_nsph``,
+    so ``dH = _nonspherical_augment(dv_nsph)`` exactly (dS = 0 — a potential change leaves the
+    overlap untouched). This is the operator the Dyson screening iterates."""
+    nsph_int_d = _nsph_radial_integrals(dv_nsph, species, ctx.lmax, ctx.r, ctx.dx, chan=chan)
+    drho = {k: {lm: np.zeros(ctx.rr_by_key[k].shape, dtype=complex) for lm in lset_out}
+            for k in ctx.keys}
+    for res, _kf, w in zip(base_res, kfracs, kw, strict=False):
+        ev, C, mill, ks, abl_all, vol = res[0], res[1], res[2], res[3], res[4], res[5]
+        dH = _nonspherical_augment(dv_nsph, acart, abl_all, ks, species, ctx.lmax, vol,
+                                   ctx.r, ctx.dx, nsph_int=nsph_int_d)
+        dS = np.zeros_like(dH)
+        dC, occ_idx = dfpt.eig_response_occupied(ev, C, dH, dS, occ_full)
+        npw = len(mill)
+        for ai, k in enumerate(ctx.keys):
+            tau = np.asarray(acart[ai][0])
+            amps, damps = dfpt.sphere_amp_response_k(C[:npw], dC[:npw], occ_idx, ks,
+                                                     abl_all[ai], ctx.lmax, vol, tau, None)
+            dd = dfpt.dmats_response(amps, damps, occ_full[occ_idx], ctx.lmax)
+            dr = dfpt.multipoles_from_dmats(dd, us_by_key[k], ctx.rr_by_key[k], ctx.lmax, lset_out)
+            for lm in lset_out:
+                drho[k][lm] += w * dr[lm]
+    return drho
+
+
+def khxc_apply(drho, st, ctx, lset):
+    """K_Hxc on a density response: ``drho`` (``{key: {(L,M): drho_LM}}``, over ``lset``) → the
+    induced aspherical potential ``dv_nsph`` (same layout), per atom, at the base density
+    (spherical ``st.spheres[ai].rho_sph`` = val+core, aspherical ``st.rho_2m``). Delegates to the
+    validated JVP :func:`gradwave.flapw.dfpt.khxc_response`."""
+    dv = {}
+    for ai, k in enumerate(ctx.keys):
+        rr = ctx.rr_by_key[k]
+        drw = rr * ctx.dx
+        rho_sph = st.spheres[ai]["rho_sph"]
+        rho_2m = st.rho_2m[k]
+        dv[k] = dfpt.khxc_response({lm: drho[k][lm] for lm in lset}, rho_sph, rho_2m,
+                                   rr, drw, lset)
+    return dv
+
+
+def dyson_screen(drho0, st, ctx, species, chan, base_res, acart, us_by_key, occ_full,
+                 kfracs, kw, nb_solve, lset, tol=1e-7, maxit=60):
+    """Solve the Dyson equation ``drho = drho0 + χ₀ K_Hxc drho`` for the SELF-CONSISTENT
+    (screened) aspherical density response by Richardson fixed-point iteration of the operator
+    ``L = χ₀ K_Hxc`` (both already validated). ``drho0`` is the bare structural response (Gate-B).
+    Convergence is on the max relative change of the response across ``lset``; for a small screening
+    (Ti) ρ(L)≪1 so Richardson converges geometrically in a handful of iterates. Returns the
+    screened ``drho`` and the iteration count."""
+    drho = {k: {lm: drho0[k][lm].copy() for lm in lset} for k in ctx.keys}
+    for it in range(1, maxit + 1):
+        dv = khxc_apply(drho, st, ctx, lset)
+        dscr = chi0_apply(dv, base_res, ctx, species, chan, acart, us_by_key, occ_full,
+                          kfracs, kw, nb_solve, lset)
+        num = den = 0.0
+        newd = {k: {} for k in ctx.keys}
+        for k in ctx.keys:
+            for lm in lset:
+                nv = drho0[k][lm] + dscr[k][lm]
+                num = max(num, float(np.abs(nv - drho[k][lm]).max()))
+                den = max(den, float(np.abs(nv).max()))
+                newd[k][lm] = nv
+        drho = newd
+        rel = num / max(den, 1e-30)
+        print(f"    dyson it{it}: max rel change = {rel:.3e}", flush=True)
+        if rel < tol:
+            return drho, it
+    return drho, maxit
+
+
 def main():
     t0 = time.time()
     print(f"CONFIG ecut={ECUT} lmax={LMAX} fp_lmax={FP_LMAX} k={KK} delta={DELTA} eps={EPS}",
@@ -182,11 +259,18 @@ def main():
                for k in ctx.keys}
     drho_fd = {k: {lm: np.zeros(ctx.rr_by_key[k].shape, dtype=complex) for lm in lset2}
                for k in ctx.keys}
-    for res, kf, w in zip(base_res, kfracs, kw, strict=False):
+    for ik, (res, kf, w) in enumerate(zip(base_res, kfracs, kw, strict=False)):
         ev, C, mill, ks, abl_all, vol = res[0], res[1], res[2], res[3], res[4], res[5]
         Hm, S = res[6], res[7]
         res_p = solve_k(ctx, species, chan, v_nsph_p, nsph_int_p, warp, acart, kf, nb_solve, True)
         dH = (res_p[6] - Hm) / EPS
+        if ik == 0:
+            # the analytic χ₀-on-potential dH (Dyson's operator) == the FD dH: the aspherical
+            # augmentation is the only v_nsph-dependent part of H and is LINEAR in v_nsph.
+            dH_an = _nonspherical_augment(dv_nsph, acart, abl_all, ks, species, ctx.lmax, vol,
+                                          ctx.r, ctx.dx)
+            rel = np.abs(dH_an - dH).max() / max(np.abs(dH).max(), 1e-30)
+            print(f"  [analytic dH vs FD dH] max rel = {rel:.3e}", flush=True)
         dS = np.zeros_like(S)
         dC, occ_idx = dfpt.eig_response_occupied(ev, C, dH, dS, occ_full)
         npw = len(mill)
@@ -208,6 +292,29 @@ def main():
         an = np.concatenate([drho_an[k][(2, m)] for m in range(-2, 3)])
         fd = np.concatenate([drho_fd[k][(2, m)] for m in range(-2, 3)])
         report(f"GateA {lbl} drho_2M", an, fd)
+
+    # ---- GATE C: K_Hxc JVP standalone (real base density) vs FD of nonspherical_potential ----
+    print("=== GATE C: K_Hxc JVP (dV_Hxc/drho vs FD, real base density) ===", flush=True)
+    lset_pot = [(lg, m) for lg in range(1, FP_LMAX + 1) for m in range(-lg, lg + 1)]
+    rng2 = np.random.default_rng(7)
+    epsk = 1e-6
+    for k, lbl in (("a0", "Ti"), ("a2", "O")):
+        ai = ctx.keys.index(k)
+        rr = ctx.rr_by_key[k]
+        drw = rr * ctx.dx
+        rho_sph = st.spheres[ai]["rho_sph"]
+        rho_2m = st.rho_2m[k]
+        amp = 0.01 * max(float(np.abs(rho_2m[(2, 0)]).max()), 1e-12)
+        drho = {lm: amp * (rng2.standard_normal(rr.shape) + 1j * rng2.standard_normal(rr.shape))
+                for lm in lset_pot}
+        an = dfpt.khxc_response(drho, rho_sph, rho_2m, rr, drw, lset_pot)
+        vp = nonspherical_potential(rho_sph, {lm: rho_2m[lm] + epsk * drho[lm] for lm in lset_pot},
+                                    rr, drw, lset=lset_pot)
+        vm = nonspherical_potential(rho_sph, {lm: rho_2m[lm] - epsk * drho[lm] for lm in lset_pot},
+                                    rr, drw, lset=lset_pot)
+        a = np.concatenate([an[lm] for lm in lset_pot])
+        fd = np.concatenate([(vp[lm] - vm[lm]) / (2 * epsk) for lm in lset_pot])
+        report(f"GateC {lbl} K_Hxc dV/drho", a, fd)
 
     gate_b(ctx, st, species, chan, v_nsph, nsph_int, base_res, occ_full, us_by_key,
            acart, kfracs, kw, nb_solve, nbands, rho2m_base)
@@ -253,7 +360,9 @@ def gate_b(ctx, st, species, chan, v_nsph, nsph_int, base_res, occ_full, us_by_k
     warp_m = warp_for(v_grid, theta_i_for(U0 - d), nfft)
 
     lset2 = [(0, 0)] + [(2, m) for m in range(-2, 3)]
-    drho_an = {k: {lm: np.zeros(ctx.rr_by_key[k].shape, dtype=complex) for lm in lset2}
+    lset_pot = [(lg, m) for lg in range(1, FP_LMAX + 1) for m in range(-lg, lg + 1)]
+    lset_all = [(0, 0)] + lset_pot                      # bare response over ALL aspherical channels
+    drho_an = {k: {lm: np.zeros(ctx.rr_by_key[k].shape, dtype=complex) for lm in lset_all}
                for k in ctx.keys}
     drho_fd = {k: {lm: np.zeros(ctx.rr_by_key[k].shape, dtype=complex) for lm in lset2}
                for k in ctx.keys}
@@ -271,8 +380,8 @@ def gate_b(ctx, st, species, chan, v_nsph, nsph_int, base_res, occ_full, us_by_k
                                                      abl_all[ai], ctx.lmax, vol, tau,
                                                      dtau_du[ai])
             dd = dfpt.dmats_response(amps, damps, occ_full[occ_idx], ctx.lmax)
-            dr = dfpt.multipoles_from_dmats(dd, us_by_key[k], ctx.rr_by_key[k], ctx.lmax, lset2)
-            for lm in lset2:
+            dr = dfpt.multipoles_from_dmats(dd, us_by_key[k], ctx.rr_by_key[k], ctx.lmax, lset_all)
+            for lm in lset_all:
                 drho_an[k][lm] += w * dr[lm]
         r2p = rho2m_from_solve(ctx, rp, occ_full[:nb_solve], us_by_key, acart_p, nb_solve)
         r2m = rho2m_from_solve(ctx, rm, occ_full[:nb_solve], us_by_key, acart_m, nb_solve)
@@ -284,8 +393,15 @@ def gate_b(ctx, st, species, chan, v_nsph, nsph_int, base_res, occ_full, us_by_k
         fd = np.concatenate([drho_fd[k][(2, m)] for m in range(-2, 3)])
         report(f"GateB {lbl} drho_2M/du", an, fd)
 
-    # ---- bare dV_zz/du = valence (chi_0) + boundary (Phase-1 explicit, frozen v_hart) ----
-    print("=== bare dV_zz/du (unscreened) vs FD reference ===", flush=True)
+    # ---- Dyson screening: drho = drho0 + χ₀ K_Hxc drho over the aspherical channels ----
+    print("=== Dyson screening (drho = drho0 + chi0 K_Hxc drho, aspherical L>=1) ===", flush=True)
+    drho0_pot = {k: {lm: drho_an[k][lm] for lm in lset_pot} for k in ctx.keys}
+    drho_scr, nit = dyson_screen(drho0_pot, st, ctx, species, chan, base_res, acart, us_by_key,
+                                 occ_full, kfracs, kw, nb_solve, lset_pot)
+    print(f"    dyson converged in {nit} iterations", flush=True)
+
+    # ---- dV_zz/du: bare (chi_0) and SCREENED (Dyson), + Phase-1 boundary (frozen v_hart) ----
+    print("=== dV_zz/du bare vs SCREENED vs FD reference ===", flush=True)
     ref = {"a0": 2510.0, "a2": 1485.0}
     for k, lbl in (("a0", "Ti"), ("a2", "O")):
         rr = ctx.rr_by_key[k]
@@ -298,23 +414,23 @@ def gate_b(ctx, st, species, chan, v_nsph, nsph_int, base_res, occ_full, us_by_k
         vval = _valence_v(rho2m_base[k], rr, drw)
         vbc = interstitial_l2_boundary(st.v_hart, tau, R, ctx.A)
         vbase = {m: vval[m] + vbc[m] / R**2 for m in range(-2, 3)}
-        # chi_0 valence tangent
+        # chi_0 valence tangents: bare vs screened
         dvval = dfpt.valence_v_coeffs(drho_an[k], rr, drw)
+        dvval_scr = dfpt.valence_v_coeffs(drho_scr[k], rr, drw)
         # Phase-1 explicit boundary tangent (frozen v_hart): central FD of the surface projection
         bcp = interstitial_l2_boundary(st.v_hart, tau + d * dtau, R, ctx.A)
         bcm = interstitial_l2_boundary(st.v_hart, tau - d * dtau, R, ctx.A)
         dvbc = {m: (bcp[m] - bcm[m]) / (2 * d) / R**2 for m in range(-2, 3)}
-        dv_chi0 = {i: dvval[i] for i in range(3)}                        # v_m, m=0,1,2
         dv_expl = {i: dvbc[i] for i in range(3)}
-        dv_tot = {i: dv_chi0[i] + dv_expl[i] for i in range(3)}
-        dvzz_chi0, _ = dfpt.dvzz_du_jvp(vbase, dv_chi0)
-        dvzz_expl, _ = dfpt.dvzz_du_jvp(vbase, dv_expl)
-        dvzz_bare, vzz0 = dfpt.dvzz_du_jvp(vbase, dv_tot)
-        print(f"    [{lbl}] |dvval|={ {m: round(abs(dvval[m]),2) for m in range(-2,3)} } "
-              f"|dvbc/R2|={ {m: round(abs(dvbc[m]),2) for m in range(-2,3)} }", flush=True)
-        print(f"  {lbl}: V_zz={vzz0:+.3f}  dV_zz/du bare={dvzz_bare:+.1f} "
-              f"(chi0={dvzz_chi0:+.1f} explicit={dvzz_expl:+.1f})  "
-              f"FD_ref(screened)={ref[k]:+.0f}  bare/ref={dvzz_bare/ref[k]:+.2f}", flush=True)
+        dv_tot_bare = {i: dvval[i] + dv_expl[i] for i in range(3)}
+        dv_tot_scr = {i: dvval_scr[i] + dv_expl[i] for i in range(3)}
+        dvzz_bare, vzz0 = dfpt.dvzz_du_jvp(vbase, dv_tot_bare)
+        dvzz_scr, _ = dfpt.dvzz_du_jvp(vbase, dv_tot_scr)
+        print(f"    [{lbl}] |dvval bare|={ {m: round(abs(dvval[m]),2) for m in range(-2,3)} } "
+              f"|dvval scr|={ {m: round(abs(dvval_scr[m]),2) for m in range(-2,3)} }", flush=True)
+        print(f"  {lbl}: V_zz={vzz0:+.3f}  bare={dvzz_bare:+.1f}  SCREENED={dvzz_scr:+.1f}  "
+              f"FD_ref={ref[k]:+.0f}  bare/ref={dvzz_bare/ref[k]:+.3f}  "
+              f"scr/ref={dvzz_scr/ref[k]:+.3f}", flush=True)
 
 
 if __name__ == "__main__":

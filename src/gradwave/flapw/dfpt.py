@@ -196,6 +196,47 @@ def dvzz_du_jvp(v_base, dv_du):
     return float(grad), float(v_zz.detach())
 
 
+def khxc_response(drho, rho_sph, rho_2m, rr, drw, lset, nx: int = 16, nphi: int = 24):
+    """The ``K_Hxc`` Dyson kernel applied to a density response: the aspherical potential change
+    ``dV_LM(r)`` induced by an aspherical density change ``drho_LM(r)`` at the base density
+    ``(rho_sph, rho_2m)``. The linearisation (JVP) of
+    :func:`gradwave.flapw.efg.nonspherical_potential`, so the screening iterate reuses the exact
+    forward density→potential map:
+
+      * Hartree (Weinert on-site sphere Poisson :func:`gradwave.flapw.efg.lx_sphere_poisson`) is
+        LINEAR in ``rho_LM``, so its response is itself applied to ``drho_LM`` (diagonal in L,M).
+      * XC is nonlinear: ``dV_xc_LM = ∮ f_xc[ρ(r,Ω)] · dρ(r,Ω) Y*_LM dΩ`` with the base angular
+        density ``ρ(r,Ω) = rho_sph + Σ_{lset} rho_LM Y_LM``, the tangent
+        ``dρ(r,Ω) = Σ_{lset} drho_LM Y_LM``, and the elementwise kernel
+        ``f_xc = dV_xc/dρ`` (:func:`gradwave.flapw.functionals.fxc_lda`) — the SAME angular
+        quadrature + Y_LM projection ``nonspherical_potential`` uses for the forward XC.
+
+    ``drho``/``rho_2m`` are ``{(L,M): radial}`` (``drho`` must cover ``lset``; missing keys are 0),
+    ``rho_sph`` the spherical (val+core) density, ``lset`` the aspherical channels (L≥1). Returns
+    ``{(L,M): dV_LM(r)}`` over ``lset``. Cross-``L`` XC coupling (an anisotropic ``f_xc`` mixing
+    channels) is retained exactly by the shared angular grid; the Hartree stays diagonal."""
+    import torch
+    from scipy.special import sph_harm_y
+
+    from gradwave.flapw.efg import _angular_grid, lx_sphere_poisson
+    from gradwave.flapw.functionals import fxc_lda
+    th, ph, wgt = _angular_grid(nx, nphi)
+    ylm = {(lang, m): sph_harm_y(lang, m, th, ph) for (lang, m) in lset}
+    rho_ang = np.broadcast_to(np.asarray(rho_sph)[:, None, None], (len(rr),) + th.shape).copy()
+    drho_ang = np.zeros((len(rr),) + th.shape)
+    for lm in lset:
+        rho_ang += (rho_2m[lm][:, None, None] * ylm[lm][None]).real
+        drho_ang += (np.asarray(drho[lm])[:, None, None] * ylm[lm][None]).real
+    fxc = fxc_lda(torch.tensor(np.clip(rho_ang, 1e-10, None))).numpy()
+    dvxc_ang = fxc * drho_ang
+    out = {}
+    for (lang, m) in lset:
+        v_h = lx_sphere_poisson(np.asarray(drho[(lang, m)]), rr, drw, lang)
+        v_xc = (dvxc_ang * (wgt * np.conj(ylm[(lang, m)]))[None]).sum(axis=(1, 2))
+        out[(lang, m)] = v_h + v_xc
+    return out
+
+
 def valence_v_coeffs(multipoles, rr, drw):
     """The l=2 valence r^2 coefficients ``v_m = (4 pi E2/5) sum(rho_2m/r) dr`` (numpy), matching
     :func:`gradwave.flapw.efg._valence_v`. Used to turn a multipole response ``drho_2m/du`` into the
