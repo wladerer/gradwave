@@ -254,8 +254,11 @@ class USPPResponseCtx:
 
     Holds the batched smooth-sphere kinematics (``bk``), the frozen local
     potential (``v_eff_r``) and screened D (``dscr``), the ∫Q weights
-    (``q_full``), and the shared β source for H/S and their velocities:
-    ``ov`` (an :class:`OverlapVelocity`, ≡ ∂S/∂k = ``dsvel``) and ``v_h`` (∂H/∂k).
+    (``q_full``), the smooth valence density (``rho_smooth``, the diamagnetic
+    ρ of the finite-q magnetic current — the AE−PS augmentation correction is
+    the on-site σ_dia_aug, handled separately in ``postscf.gipaw``), and the
+    shared β source for H/S and their velocities: ``ov`` (an
+    :class:`OverlapVelocity`, ≡ ∂S/∂k = ``dsvel``) and ``v_h`` (∂H/∂k).
     """
 
     system: USPPSystem
@@ -266,6 +269,7 @@ class USPPResponseCtx:
     q_full: Tensor
     ov: OverlapVelocity
     v_h: _USPPHVelocity
+    rho_smooth: Tensor
 
     def build_hkq(self, jsel: Tensor) -> tuple[_USPPBatchedHS, BatchedK]:
         """(H/S operator, BatchedK) on the folded k+q spheres ``jsel``."""
@@ -283,6 +287,7 @@ def build_uspp_response_ctx(res: Any, xc: Any) -> USPPResponseCtx:
     Rebuilds the frozen ground-state operator the way ``uspp_implicit`` /
     ``uspp_frozen`` do: ``v_eff = v_H + v_loc + v_xc`` on the dense grid and the
     screened D (bare D + ∫v_eff Q + PAW one-center ddd). nspin = 1 only."""
+    from gradwave.core.batch import density_b
     from gradwave.postscf.uspp_frozen import frozen_veff, screened_dscr
 
     system = res["system"]
@@ -293,9 +298,16 @@ def build_uspp_response_ctx(res: Any, xc: Any) -> USPPResponseCtx:
     bk = build_batched(system.spheres, system.proj_data)
     ov = OverlapVelocity(system)
     v_h = _USPPHVelocity(system, dscr[0], ov=ov)
+    shape = tuple(system.grid.shape)
+    # smooth valence density ñ = Σ_k w_k Σ_n f_n |ψ̃_nk(r)|² (the diamagnetic ρ;
+    # the augmentation part is the on-site σ_dia_aug in postscf.gipaw)
+    c_pad = pad_coeffs(cast("list[Tensor]", res["coeffs"]), bk.npw_max)
+    rho_smooth = density_b(c_pad, res["occupations"], system.kweights, bk,
+                           shape, system.grid.volume)
     return USPPResponseCtx(
-        system=system, bk=bk, shape=tuple(system.grid.shape),
-        v_eff_r=veff[0], dscr=dscr[0], q_full=system.q_full, ov=ov, v_h=v_h)
+        system=system, bk=bk, shape=shape,
+        v_eff_r=veff[0], dscr=dscr[0], q_full=system.q_full, ov=ov, v_h=v_h,
+        rho_smooth=rho_smooth)
 
 
 def velocity_perturbation_q(
@@ -507,7 +519,8 @@ class _NLPairVelocity:
     phase is absorbed and no coefficients are truncated.
     """
 
-    def __init__(self, system: System, sol: VelocityQSolves, nquad: int = 8) -> None:
+    def __init__(self, system: System, sol: VelocityQSolves, nquad: int = 8,
+                 dscr: Tensor | None = None) -> None:
         self.shape = system.grid.shape
         self.volume = system.grid.volume
         b = reciprocal_cell(system.grid.cell)
@@ -523,15 +536,32 @@ class _NLPairVelocity:
         self.p: list[Tensor] = []  # (nq, nproj, npwU) quadrature projectors
         self.dp: list[Tensor] = []  # (nq, 3, nproj, npwU)
         self.w_s = torch.as_tensor(s_w, dtype=RDTYPE)
-        self.dij = system.batch.dij_full.to(CDTYPE) if system.batch is not None \
-            else torch.zeros((0, 0), dtype=CDTYPE)
+        # The mean-value KB current is Σ_ij D_ij(|∂β_i⟩⟨β_j| + …). ``dscr`` (given
+        # for USPP/PAW) is the SCREENED descreened D — exactly as
+        # ``uspp_smooth_continuity``'s nonlocal divergence uses it; norm-conserving
+        # callers pass none and it falls back to the bare D. The β SOURCE is chosen
+        # by the system type (independent of D): a ``USPPSystem`` carries the PAW β
+        # (``_overlap_kbprojectors``), a plain ``System`` the KB β
+        # (``KBProjectors.for_sphere``) — so the NC-limit ctx (an NC ``System`` with
+        # the bare D as ``dscr``) reproduces the plain NC nonlocal current exactly.
+        if dscr is not None:
+            self.dij = dscr.to(CDTYPE)
+        elif system.batch is not None:
+            self.dij = system.batch.dij_full.to(CDTYPE)
+        else:
+            self.dij = torch.zeros((0, 0), dtype=CDTYPE)
         self.nproj = int(self.dij.shape[0])
 
         n1, n2, n3 = self.shape
         # the k-independent projector context (radial quadratures, D blocks,
         # column maps) is built once and reused for every k's union sphere
-        kb0 = (KBProjectors.for_sphere(system, system.spheres[0])
-               if self.nproj else None)
+        paw_beta = hasattr(system, "paws")  # USPPSystem vs norm-conserving System
+        if not self.nproj:
+            kb0 = None
+        elif paw_beta:
+            kb0 = _overlap_kbprojectors(cast("USPPSystem", system), system.spheres[0])
+        else:
+            kb0 = KBProjectors.for_sphere(system, system.spheres[0])
         for ik, sph in enumerate(system.spheres):
             m_k = sph.miller.numpy()
             m_d = system.spheres[int(sol.jidx[ik])].miller.numpy() - sol.g0[ik][None, :]
@@ -661,6 +691,7 @@ def induced_current_q(
     sol: VelocityQSolves | None = None,
     nl_quad: int = 8,
     _nl: _NLPairVelocity | None = None,
+    uspp: USPPResponseCtx | None = None,
 ) -> CurrentResponseQ:
     """Induced (canonical) current density of the perturbation λ·O_{q,pol},
     O_{q,pol} = Σ_ν e_pol[ν]·½{v_ν, e^{iqr}}. ``nu`` is either a Cartesian
@@ -682,6 +713,11 @@ def induced_current_q(
     shielding assembly evaluates several polarizations per q); it must match
     ``q_frac``.
 
+    ``uspp`` (a :class:`USPPResponseCtx`) routes the smooth USPP/PAW current: the
+    kinematics come from ``ctx.bk``, the diamagnetic ρ is the smooth valence
+    ``ctx.rho_smooth``, and the KB nonlocal current carries the screened D
+    (``ctx.dscr``). ``screen`` is unsupported there (norm-conserving only).
+
     ``screen=True`` adds the self-consistent K_Hxc response: the induced
     density is converged through the Dyson fixed point δρ = χ₀[O] +
     χ₀[K_Hxc^q δρ] (reusing dfpt_q.chi0_q / _k_hxc_q with Anderson mixing)
@@ -691,18 +727,28 @@ def induced_current_q(
     induces no density (δρ is TR-odd), so screening is inert there (tested).
     """
     _guard(res)
-    system = res.system
+    # USPP/PAW (``uspp`` given): system kinematics + smooth-valence density come
+    # from the frozen-ground-state context (USPPResult carries no System.batch);
+    # the diamagnetic ρ is the SMOOTH ñ (the augmentation part is σ_dia_aug).
+    if uspp is not None:
+        system = cast("System", uspp.system)
+        bk = uspp.bk
+        rho_dia = uspp.rho_smooth
+    else:
+        system = res.system
+        bk = system.batch
+        assert bk is not None
+        rho_dia = res.rho
     grid = system.grid
     shape = grid.shape
-    bk = system.batch
-    assert bk is not None
     if isinstance(nu, (int, np.integer)):
         e_pol = np.zeros(3)
         e_pol[int(nu)] = 1.0
     else:
         e_pol = np.asarray(nu, dtype=float)
     if sol is None:
-        sol = velocity_perturbation_q(res, q_frac, cg_tol=cg_tol, max_iter=cg_max_iter)
+        sol = velocity_perturbation_q(res, q_frac, cg_tol=cg_tol,
+                                      max_iter=cg_max_iter, uspp=uspp)
     else:
         assert np.allclose(sol.q_frac, np.asarray(q_frac, dtype=float)), \
             "sol was solved at a different q"
@@ -718,6 +764,11 @@ def induced_current_q(
 
     if screen:
         assert xc is not None, "screen=True needs the xc functional"
+        if uspp is not None:
+            raise NotImplementedError(
+                "K_Hxc screening of the finite-q current is norm-conserving only "
+                "(chi0_q/_k_hxc_q); it is inert at q→0 for a TR ground state, so "
+                "the USPP smooth shielding runs screen=False")
         from gradwave.core._anderson import AndersonMixer
         from gradwave.postscf.dfpt_q import _k_hxc_q, chi0_q
 
@@ -785,8 +836,13 @@ def induced_current_q(
         ).sum(dim=1)
     j_para = torch.einsum("k,km...->m...", sol.weights.to(CDTYPE), j_k)
     j_dia = torch.einsum(
-        "m,...->m...", e_pol_t, (2.0 * HBAR2_2M) * res.rho.to(CDTYPE))
-    nl = _NLPairVelocity(system, sol, nquad=nl_quad) if _nl is None else _nl
+        "m,...->m...", e_pol_t, (2.0 * HBAR2_2M) * rho_dia.to(CDTYPE))
+    if _nl is None:
+        nl = _NLPairVelocity(
+            system, sol, nquad=nl_quad,
+            dscr=(uspp.dscr if uspp is not None else None))
+    else:
+        nl = _nl
     j_nl = nl.field(sol, dpsi)
 
     return CurrentResponseQ(
@@ -959,6 +1015,7 @@ def sigma_shielding(
     nl_quad: int = 8,
     sites: Tensor | None = None,
     core_ppm: Tensor | np.ndarray | list[float] | None = None,
+    uspp: USPPResponseCtx | None = None,
 ) -> Tensor:
     """Bare (pseudo) NMR chemical-shielding tensor σ_ij per site, in ppm:
     σ_ij = −∂B_ind,i(r_site)/∂B_ext,j (positive = shielded), shape
@@ -1007,9 +1064,20 @@ def sigma_shielding(
     layer's *relative* shielding into a physically meaningful *absolute* one; it
     cancels in chemical-shift differences. The diamagnetic/paramagnetic
     augmentation are added separately (see ``postscf.gipaw``).
+
+    ``uspp`` (a :class:`USPPResponseCtx` from :func:`build_uspp_response_ctx`)
+    routes the whole finite-q assembly through the USPP/PAW S-metric backend for
+    a converged ultrasoft/PAW ``res``: the generalized velocity v = ∂H/∂k − ε∂S/∂k
+    and the S-metric Sternheimer (H−εS)⁻¹ (#349/#351), the smooth valence
+    diamagnetic ρ, and the KB nonlocal current with the SCREENED D. This is the
+    SMOOTH (pseudo) valence shielding of the ultrasoft/PAW states — the on-site
+    augmentation (σ_dia_aug, σ_para_aug, σ_core in ``postscf.gipaw``) is added
+    separately. Validated by the NC-limit reduction gate: with S = I (∂S/∂k = 0,
+    dscr = bare D) the ``uspp``-routed σ reproduces the plain norm-conserving σ
+    to the CG-certification tolerance.
     """
     _guard(res)
-    system = res.system
+    system = cast("System", uspp.system) if uspp is not None else res.system
     grid = system.grid
     b = reciprocal_cell(grid.cell)
     k_frac = np.stack([sph.k_frac for sph in system.spheres])
@@ -1031,21 +1099,26 @@ def sigma_shielding(
         axis_jobs.append((q_frac, q_cart, q_hat, list(_transverse_frame(q_hat))))
 
     # per-branch conserved-current fields, in fixed (axis, sign) order with
-    # (polarization) order inside — the deterministic accumulation key
-    v = VelocityApply(system)
-    dense = dense_sternheimer_for(res)
+    # (polarization) order inside — the deterministic accumulation key.
+    # USPP/PAW (``uspp`` given): the S-metric velocity (∂H/∂k − ε∂S/∂k) and the
+    # S-metric Sternheimer run off the frozen-ground-state ctx (its prebuilt
+    # ``v_h``/``ov`` are hoisted here across every axis/sign/pol solve); the KB
+    # nonlocal current carries the SCREENED D (``ctx.dscr``). No NC dense draft.
+    v = cast("VelocityApply", uspp.v_h) if uspp is not None else VelocityApply(system)
+    dense = None if uspp is not None else dense_sternheimer_for(res)
+    dscr = uspp.dscr if uspp is not None else None
     j_branches = []
     for q_frac, _q_cart, _q_hat, pols in axis_jobs:
         for sign in (1.0, -1.0):
             sol = velocity_perturbation_q(
                 res, sign * q_frac, cg_tol=cg_tol, max_iter=cg_max_iter,
-                dense=dense, v=v)
-            nl = _NLPairVelocity(system, sol, nquad=nl_quad)
+                dense=dense, v=v, uspp=uspp)
+            nl = _NLPairVelocity(system, sol, nquad=nl_quad, dscr=dscr)
             j_branches.append([
                 induced_current_q(res, sign * q_frac, pol, sol=sol,
                                   _nl=nl, xc=xc, screen=screen,
                                   cg_tol=cg_tol,
-                                  cg_max_iter=cg_max_iter).j_total
+                                  cg_max_iter=cg_max_iter, uspp=uspp).j_total
                 for pol in pols
             ])
 

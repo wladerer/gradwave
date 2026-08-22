@@ -351,3 +351,79 @@ def test_uspp_smooth_continuity_closure(si_paw):
     rel_full = abs(c["q_j_kin"] + c["q_j_nl"] - c["source"]) / scale
     assert rel_kin > 1e-2, f"KB term should matter (kin-only rel {rel_kin:.2e})"
     assert rel_full < 3e-3, f"smooth continuity not closed (rel {rel_full:.2e})"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2: the USPP-routed sigma_shielding NC-limit reduction (the PR-A gate)   #
+# --------------------------------------------------------------------------- #
+
+
+class _ZeroOverlapVel:
+    """∂S/∂k stand-in for a norm-conserving system (S = I ⇒ ∂S/∂k = 0). Carries
+    the batched KB β-projectors ``p`` (the source ``USPPResponseCtx.build_hkq``
+    reads for the folded k+q Hamiltonian) and returns 0 for its apply."""
+
+    def __init__(self, p: torch.Tensor) -> None:
+        self.p = p  # (nk, nproj, npw_max)
+
+    def apply(self, c, mu, k_index=None):
+        return torch.zeros_like(c)
+
+
+def _nc_uspp_ctx(res):
+    """A :class:`USPPResponseCtx` built from a norm-conserving SCF result whose
+    every operator IS the NC operator: S = I (``q_full`` = 0 ⇒ ``s_apply`` = id),
+    the bare D as the "screened" D, the NC batched β-projectors (in the shared
+    atom→channel→m column order, so ``Σ p†·dscr·p`` reproduces the NC KB term),
+    the NC velocity ∂H/∂k (``VelocityApply``), ∂S/∂k = 0, and the smooth ρ = the
+    NC density. Routing ``sigma_shielding`` through this ctx must reproduce the
+    plain NC ``sigma_shielding`` — the machine-precision NC-limit reduction gate
+    (the #349 pattern, one layer up at the shielding assembly)."""
+    from gradwave.core.batch import projectors_b
+    from gradwave.postscf.kgeometry import VelocityApply
+    from gradwave.postscf.kgeometry_nmr import USPPResponseCtx
+
+    system = res.system
+    bk = system.batch
+    assert bk is not None
+    p = projectors_b(bk, system.positions)  # (nk, nproj, npw_max)
+    veff = res.v_eff if res.v_eff.dim() == 3 else res.v_eff[0]
+    return USPPResponseCtx(
+        system=system, bk=bk, shape=tuple(system.grid.shape),
+        v_eff_r=veff, dscr=bk.dij_full, q_full=torch.zeros_like(bk.dij_full),
+        ov=_ZeroOverlapVel(p), v_h=VelocityApply(system), rho_smooth=res.rho)
+
+
+@pytest.fixture(scope="module")
+def si_nc_mesh_2axis():
+    """Si NC SCF on a 2×2×1 unreduced mesh — the smallest mesh with ≥2 axes of
+    n>1, so ``sigma_shielding`` is well-determined. Tight rho tol so the stored
+    density equals the coeff-built one (the uspp diamagnetic ρ) to ~round-off."""
+    torch.set_num_threads(2)
+    cell, pos = si_fcc()
+    system = setup_system(cell, pos, [0, 0], [si_upf()], ecut=10 * RY,
+                          kmesh=(2, 2, 1), nbands=8, use_symmetry=False,
+                          fft_shape=(18, 18, 18))
+    res = scf(system, PBE(), etol=1e-10, rhotol=1e-9, verbose=False, max_iter=120)
+    assert res.converged
+    return res
+
+
+@pytest.mark.standard
+def test_uspp_sigma_shielding_nc_limit_reduction(si_nc_mesh_2axis):
+    """PR-A correctness gate: the USPP/PAW-routed ``sigma_shielding`` (S-metric
+    velocity + Sternheimer, screened-D KB nonlocal current, smooth diamagnetic ρ)
+    reduces to the plain norm-conserving ``sigma_shielding`` when the ctx encodes
+    S = I / bare D. Reproduces the NC shielding tensor to the CG-certification
+    tolerance — no external reference needed (the #349 NC-limit pattern, applied
+    end-to-end at the shielding assembly)."""
+    from gradwave.postscf.kgeometry_nmr import sigma_shielding
+
+    res = si_nc_mesh_2axis
+    ref = sigma_shielding(res, cg_tol=1e-10, cg_max_iter=800)
+    ctx = _nc_uspp_ctx(res)
+    got = sigma_shielding(res, cg_tol=1e-10, cg_max_iter=800, uspp=ctx)
+
+    scale = ref.abs().max().item()
+    rel = (got - ref).abs().max().item() / scale
+    assert rel < 1e-6, f"USPP-routed σ vs NC σ rel {rel:.3e} (scale {scale:.3e} ppm)"
