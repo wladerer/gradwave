@@ -76,7 +76,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -87,6 +87,7 @@ from gradwave.core.batch import (
     BatchedHamiltonian,
     BatchedK,
     box_to_sphere_b,
+    build_batched,
     g_to_r_b,
     projectors_b,
 )
@@ -108,11 +109,13 @@ from gradwave.postscf.kgeometry import (
     OverlapVelocity,
     VelocityApply,
     _eigh_and_dh,
+    _overlap_kbprojectors,
 )
 from gradwave.postscf.kgeometry_topo import _pack_miller
 
 if TYPE_CHECKING:
     from gradwave.scf.loop import SCFResult, System
+    from gradwave.scf.uspp_setup import USPPSystem
     from gradwave.symmetry import RhoSymmetrizer
 
 
@@ -158,6 +161,143 @@ def _g0_phase_stack(shape: tuple[int, int, int], g0: np.ndarray,
     return phases[torch.as_tensor(inv.reshape(-1), dtype=torch.long)][:, None]
 
 
+# --------------------------------------------------------------------------- #
+# USPP/PAW S-metric response backend (Phase 2): batched H/S on the smooth       #
+# valence spheres from the frozen ground state, feeding velocity_perturbation_q #
+# --------------------------------------------------------------------------- #
+
+
+class _USPPBatchedHS:
+    """Batched USPP/PAW Hamiltonian H and overlap S on one set of (folded)
+    smooth-valence spheres, the batched twin of ``scf.uspp_loop._HkS``.
+
+        H c = t·c + V̂_loc[c] + Σ_ij Dscr_ij |β_i⟩⟨β_j| c
+        S c = c   +           Σ_ij q_ij   |β_i⟩⟨β_j| c
+
+    ``p`` are the KB β-projectors on these spheres (the same
+    :class:`~gradwave.postscf.kgeometry.OverlapVelocity`/``_overlap_kbprojectors``
+    build the ∂S/∂k from, so H, S and their k-derivatives share one β source),
+    ``dscr`` the per-spin SCREENED descreened D (``uspp_frozen.screened_dscr``),
+    ``q_full`` the m-expanded ∫Q overlap weights. ``.apply`` is H (the
+    ``cg_sternheimer`` operator); ``.s_apply`` is S (its ``s_apply`` hook)."""
+
+    def __init__(self, bk: BatchedK, shape: tuple[int, int, int],
+                 v_eff_r: Tensor, p: Tensor, dscr: Tensor, q_full: Tensor) -> None:
+        self.bk = bk
+        self.shape = shape
+        self.v_eff_r = v_eff_r.to(CDTYPE)
+        self.p = p  # (nk, nproj, npw_max)
+        self.dscr = dscr.to(CDTYPE)
+        self.q = q_full.to(CDTYPE)
+        self.mask = bk.mask
+
+    def apply(self, c: Tensor) -> Tensor:
+        out = self.bk.t[:, None, :].to(c.dtype) * c
+        psi = g_to_r_b(c, self.bk, self.shape)
+        out = out + box_to_sphere_b(psi * self.v_eff_r, self.bk)
+        if self.p.shape[1]:
+            b = torch.einsum("kpg,kbg->kbp", self.p.conj(), c)
+            out = out + torch.einsum("kbp,pq,kqg->kbg", b, self.dscr, self.p)
+        return out * self.mask[:, None, :]
+
+    def s_apply(self, c: Tensor) -> Tensor:
+        out = c
+        if self.p.shape[1]:
+            b = torch.einsum("kpg,kbg->kbp", self.p.conj(), c)
+            out = out + torch.einsum("kbp,pq,kqg->kbg", b, self.q, self.p)
+        return out * self.mask[:, None, :]
+
+
+class _USPPHVelocity:
+    """∂H/∂k_μ for the USPP smooth Hamiltonian: the analytic kinetic diagonal
+    2·HBAR2_2M·(k+G)_μ plus the screened KB nonlocal derivative
+    Σ_ij Dscr_ij(|∂_μβ_i⟩⟨β_j| + |β_i⟩⟨∂_μβ_j|) — the ``VelocityApply`` structure
+    with the SCREENED D and the PAW β. It shares the β/∂β mesh tensors of an
+    :class:`~gradwave.postscf.kgeometry.OverlapVelocity` (same
+    ``_overlap_kbprojectors`` build), so ∂H/∂k and ∂S/∂k use one projector
+    source. ``k_index`` selects/reorders the mesh k of each batch row exactly
+    like ``VelocityApply``/``OverlapVelocity``."""
+
+    def __init__(self, system: USPPSystem, dscr: Tensor,
+                 ov: OverlapVelocity | None = None) -> None:
+        ov = OverlapVelocity(system) if ov is None else ov
+        self.p, self.dp = ov.p, ov.dp
+        self.dij = dscr.to(CDTYPE)
+        nk, m = ov.nk, ov.npw_max
+        self.kpg = torch.zeros(nk, m, 3, dtype=RDTYPE)
+        self.mask = torch.zeros(nk, m, dtype=torch.bool)
+        for ik, sph in enumerate(system.spheres):
+            n = int(sph.kpg.shape[0])
+            self.kpg[ik, :n] = sph.kpg.to(RDTYPE)
+            self.mask[ik, :n] = True
+
+    def apply(self, c: Tensor, mu: int, k_index: Tensor | None = None) -> Tensor:
+        p, dp, kpg, mask = self.p, self.dp[mu], self.kpg, self.mask
+        if k_index is not None:
+            p, dp, kpg, mask = p[k_index], dp[k_index], kpg[k_index], mask[k_index]
+        out = (2.0 * HBAR2_2M) * kpg[:, None, :, mu].to(c.dtype) * c
+        if p.shape[1]:
+            b_p = torch.einsum("kpg,kbg->kbp", p.conj(), c)
+            b_dp = torch.einsum("kpg,kbg->kbp", dp.conj(), c)
+            out = out + torch.einsum("kbp,pq,kqg->kbg", b_p, self.dij, dp)
+            out = out + torch.einsum("kbp,pq,kqg->kbg", b_dp, self.dij, p)
+        return out * mask[:, None, :]
+
+
+@dataclass
+class USPPResponseCtx:
+    """Frozen-ground-state backend that lets :func:`velocity_perturbation_q`
+    run the S-metric magnetic Sternheimer on a USPP/PAW SCF result (which
+    carries no ``System.batch``/``v_eff``). Build with
+    :func:`build_uspp_response_ctx`; pass as ``velocity_perturbation_q(...,
+    uspp=ctx)``.
+
+    Holds the batched smooth-sphere kinematics (``bk``), the frozen local
+    potential (``v_eff_r``) and screened D (``dscr``), the ∫Q weights
+    (``q_full``), and the shared β source for H/S and their velocities:
+    ``ov`` (an :class:`OverlapVelocity`, ≡ ∂S/∂k = ``dsvel``) and ``v_h`` (∂H/∂k).
+    """
+
+    system: USPPSystem
+    bk: BatchedK
+    shape: tuple[int, int, int]
+    v_eff_r: Tensor
+    dscr: Tensor
+    q_full: Tensor
+    ov: OverlapVelocity
+    v_h: _USPPHVelocity
+
+    def build_hkq(self, jsel: Tensor) -> tuple[_USPPBatchedHS, BatchedK]:
+        """(H/S operator, BatchedK) on the folded k+q spheres ``jsel``."""
+        bk_kq = self.bk.reindex(jsel)
+        p_kq = self.ov.p[jsel]
+        h = _USPPBatchedHS(bk_kq, self.shape, self.v_eff_r, p_kq,
+                           self.dscr, self.q_full)
+        return h, bk_kq
+
+
+def build_uspp_response_ctx(res: Any, xc: Any) -> USPPResponseCtx:
+    """Assemble the :class:`USPPResponseCtx` for a converged USPP/PAW ``res``
+    (a ``USPPResult`` or the equivalent dict) at the SCF's own ``xc``.
+
+    Rebuilds the frozen ground-state operator the way ``uspp_implicit`` /
+    ``uspp_frozen`` do: ``v_eff = v_H + v_loc + v_xc`` on the dense grid and the
+    screened D (bare D + ∫v_eff Q + PAW one-center ddd). nspin = 1 only."""
+    from gradwave.postscf.uspp_frozen import frozen_veff, screened_dscr
+
+    system = res["system"]
+    if getattr(res, "get", None) is not None and res.get("nspin", 1) != 1:
+        raise NotImplementedError("USPP magnetic response: nspin=1 only")
+    veff = frozen_veff(res, xc)
+    dscr = screened_dscr(res, xc, veff)
+    bk = build_batched(system.spheres, system.proj_data)
+    ov = OverlapVelocity(system)
+    v_h = _USPPHVelocity(system, dscr[0], ov=ov)
+    return USPPResponseCtx(
+        system=system, bk=bk, shape=tuple(system.grid.shape),
+        v_eff_r=veff[0], dscr=dscr[0], q_full=system.q_full, ov=ov, v_h=v_h)
+
+
 def velocity_perturbation_q(
     res: SCFResult,
     q_frac: np.ndarray | list[float] | tuple[float, float, float],
@@ -168,6 +308,7 @@ def velocity_perturbation_q(
     v: VelocityApply | None = None,
     s_apply: Callable[[Tensor], Tensor] | None = None,
     dsvel: OverlapVelocity | None = None,
+    uspp: USPPResponseCtx | None = None,
 ) -> VelocityQSolves:
     """Solve the k+q Sternheimer equations for the three symmetrized velocity
     perturbations ½{v_μ, e^{iqr}} at every mesh k (see module docstring).
@@ -203,11 +344,15 @@ def velocity_perturbation_q(
     VelocityApply` (its constructor is a serial per-k projector build worth
     hoisting across the 4-6 calls of a tensor evaluation)."""
     _guard(res)
-    system = res.system
+    if uspp is not None:
+        system = cast("System", uspp.system)
+        bk = uspp.bk
+    else:
+        system = res.system
+        bk = system.batch
+        assert bk is not None
     grid = system.grid
     shape = grid.shape
-    bk = system.batch
-    assert bk is not None
     q_frac = np.asarray(q_frac, dtype=float)
 
     k_frac = np.stack([sph.k_frac for sph in system.spheres])
@@ -221,17 +366,28 @@ def velocity_perturbation_q(
     eps_k = res.eigenvalues[:, :nocc].to(RDTYPE)
     shift = sternheimer_shift(eps_k)
 
-    # The S-metric solve uses plain CG (the dense eigh draft factorizes the
-    # NORM-CONSERVING operator only); force it off when an overlap is given.
-    solver = None if s_apply is not None else (
-        dense_sternheimer_for(res) if dense == "auto" else dense)
-    assert not isinstance(solver, str)
-    if solver is not None:
-        h_kq, bk_kq = solver.h_for(jsel)
+    if uspp is not None:
+        # USPP/PAW S-metric backend: batched H/S on the folded spheres from the
+        # frozen ground state; the generalized velocity v = ∂H/∂k − ε ∂S/∂k.
+        solver = None
+        h_kq, bk_kq = uspp.build_hkq(jsel)
+        s_apply = h_kq.s_apply
+        if dsvel is None:
+            dsvel = uspp.ov
+        if v is None:
+            v = cast("VelocityApply", uspp.v_h)
     else:
-        bk_kq = _reindex_bk(bk, jsel)
-        h_kq = BatchedHamiltonian(
-            bk_kq, shape, res.v_eff, projectors_b(bk_kq, system.positions))
+        # The S-metric solve uses plain CG (the dense eigh draft factorizes the
+        # NORM-CONSERVING operator only); force it off when an overlap is given.
+        solver = None if s_apply is not None else (
+            dense_sternheimer_for(res) if dense == "auto" else dense)
+        assert not isinstance(solver, str)
+        if solver is not None:
+            h_kq, bk_kq = solver.h_for(jsel)
+        else:
+            bk_kq = _reindex_bk(bk, jsel)
+            h_kq = BatchedHamiltonian(
+                bk_kq, shape, res.v_eff, projectors_b(bk_kq, system.positions))
     ph = _g0_phase_stack(shape, g0, c_all.device)  # (nk, 1, *shape): e^{iG0·r}
 
     # S-metric occupied block (≡ c_occ_kq when S = I, so p_c and the solver
@@ -281,7 +437,7 @@ def velocity_perturbation_q(
         weights=system.kweights.to(RDTYPE),
         bk_kq=bk_kq,
         ph=ph,
-        h_kq=h_kq,
+        h_kq=cast("BatchedHamiltonian | None", h_kq),
         dense=solver,
     )
 
@@ -1004,6 +1160,104 @@ def continuity_truncation_term(res: SCFResult, sol: VelocityQSolves,
         total = total + float(sol.weights[ik]) * (f_occ / grid.volume) * (
             piece1 - piece2)
     return total
+
+
+def uspp_smooth_continuity(
+    res: Any, ctx: USPPResponseCtx, sol: VelocityQSolves,
+    e_pol: np.ndarray | list[float],
+) -> dict[str, complex]:
+    """Continuity closure of the USPP/PAW SMOOTH+nonlocal induced current at
+    the cell-average (G = 0) Fourier component — the physical validation of the
+    S-metric PAW δu (the Phase-2 twin of the norm-conserving KB closure, #330).
+
+    For the single-branch response pair (u_nk, δu_{n,k+q}) of the polarization
+    ``e_pol`` the exact identity is
+
+        q · mean[j_kin + j_nl] = mean s + (augmentation current + truncation),
+
+    with ``s`` the smooth cross density of the occupied states and the
+    Sternheimer RHS χ = −P_c^S O u (:func:`_drho_q` of χ), and the KB nonlocal
+    current carrying the SCREENED D (``ctx.dscr``). Returns
+    ``{"source", "q_j_kin", "q_j_nl"}`` (all complex, the G = 0 values), so
+    ``q_j_kin`` alone is broken by the [V_NL, e^{-iqr}] commutator while
+    ``q_j_kin + q_j_nl`` closes to ``mean s`` up to the (ecut-vanishing) basis
+    truncation and the on-site augmentation-charge current — the small remainder
+    that quantifies the PAW augmentation piece. The nonlocal divergence uses the
+    exact mean-value form q·mean[j_nl] = Σ f w/Ω ⟨u|(V_NL^{k+q} − V_NL^{k})|δu⟩
+    on the k-referenced union Millers (no line integral needed for the
+    divergence)."""
+    system = ctx.system
+    grid = system.grid
+    shape = grid.shape
+    vol = grid.volume
+    b = reciprocal_cell(grid.cell)
+    q_cart = torch.as_tensor(sol.q_frac @ b, dtype=RDTYPE)
+    e_t = torch.as_tensor(np.asarray(e_pol, dtype=float), dtype=RDTYPE).to(CDTYPE)
+    dpsi = torch.einsum("m,mkng->kng", e_t, sol.dpsi)
+    o_pol = torch.einsum("m,mkng->kng", e_t, sol.o_c)
+    ph = sol.ph
+    assert ph is not None
+
+    # source: smooth cross density of u_nk and χ = −P_c^S O u
+    hkq, _ = ctx.build_hkq(torch.as_tensor(sol.jidx, dtype=torch.long))
+    s_occ_kq = hkq.s_apply(sol.c_occ_kq)
+    ov = torch.einsum("kng,kbg->kbn", sol.c_occ_kq.conj(), o_pol)
+    chi = -(o_pol - torch.einsum("kbn,kng->kbg", ov, s_occ_kq))
+    source = complex(_drho_q(sol, chi, ctx.bk, shape, ph, vol).mean())
+
+    # kinetic current field mean (the induced_current_q j_para assembly)
+    npts = shape[0] * shape[1] * shape[2]
+    u_box = g_to_r_b(sol.c_occ_k, ctx.bk, shape)
+    du_box = g_to_r_b(dpsi, sol.bk_kq, shape) * ph.conj()
+    q_j_kin = 0.0 + 0.0j
+    for mu in range(3):
+        wu = (2.0 * HBAR2_2M) * ctx.bk.kpg[:, None, :, mu] * sol.c_occ_k
+        wdu = (2.0 * HBAR2_2M) * sol.bk_kq.kpg[:, None, :, mu] * dpsi
+        wu_box = g_to_r_b(wu, ctx.bk, shape)
+        wdu_box = g_to_r_b(wdu, sol.bk_kq, shape) * ph.conj()
+        jk = (2.0 / vol) * 0.5 * (
+            u_box.conj() * wdu_box + wu_box.conj() * du_box).sum(dim=1)
+        jm = torch.einsum("k,k...->", sol.weights.to(CDTYPE), jk) / npts
+        q_j_kin = q_j_kin + complex(q_cart[mu].to(CDTYPE) * jm)
+
+    # nonlocal divergence q·mean[j_nl] via union-sphere matrix elements (dscr)
+    dscr = ctx.dscr.to(CDTYPE)
+    n1, n2, n3 = shape
+    q_j_nl = 0.0 + 0.0j
+    for ik, sph in enumerate(system.spheres):
+        kb = _overlap_kbprojectors(system, sph)  # KBProjectors carrying paws β
+        m_k = sph.miller.numpy()
+        m_d = system.spheres[int(sol.jidx[ik])].miller.numpy() - sol.g0[ik][None, :]
+        union = np.unique(np.concatenate([m_k, m_d], axis=0), axis=0)
+        keys_u = _pack_miller(union)
+        order = np.argsort(keys_u)
+        ks = keys_u[order]
+        u_pos = order[np.searchsorted(ks, _pack_miller(m_k))]
+        d_pos = order[np.searchsorted(ks, _pack_miller(m_d))]
+        nu, nocc = union.shape[0], dpsi.shape[1]
+        u_u = torch.zeros(nocc, nu, dtype=CDTYPE)
+        d_u = torch.zeros(nocc, nu, dtype=CDTYPE)
+        u_u[:, torch.as_tensor(u_pos)] = sol.c_occ_k[ik, :, : len(u_pos)]
+        d_u[:, torch.as_tensor(d_pos)] = dpsi[ik, :, : len(d_pos)]
+        kbu = KBProjectors(
+            g_cart=torch.as_tensor(union.astype(float) @ b, dtype=RDTYPE),
+            tau=kb.tau, dij_full=kb.dij_full, col_atom=kb.col_atom,
+            col_chan=kb.col_chan, col_lm=kb.col_lm, channels=kb.channels,
+            lmax=kb.lmax, volume=kb.volume)
+        k_cart = sph.k_cart.to(RDTYPE)
+        p_k, p_q = kbu.p(k_cart), kbu.p(k_cart + q_cart)
+
+        def vnl(p: Tensor, c: Tensor) -> Tensor:
+            if not p.shape[0]:
+                return torch.zeros_like(c)
+            beta = torch.einsum("jg,bg->bj", p.conj(), c)
+            return torch.einsum("ij,bj,ig->bg", dscr, beta, p)  # noqa: B023
+
+        diff = vnl(p_q, d_u) - vnl(p_k, d_u)
+        me = (u_u.conj() * diff).sum()
+        q_j_nl = q_j_nl + float(sol.weights[ik]) * (2.0 / vol) * complex(me)
+
+    return {"source": source, "q_j_kin": q_j_kin, "q_j_nl": q_j_nl}
 
 
 # --------------------------------------------------------------------------- #
