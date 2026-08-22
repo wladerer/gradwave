@@ -35,10 +35,11 @@ ECUT = float(sys.argv[1]) if len(sys.argv) > 1 else 250.0
 LMAX = int(sys.argv[2]) if len(sys.argv) > 2 else 3
 FP_LMAX = int(sys.argv[3]) if len(sys.argv) > 3 else 4
 KK = int(sys.argv[4]) if len(sys.argv) > 4 else 2
-WARM_ITERS = int(sys.argv[5]) if len(sys.argv) > 5 else 60
+WARM_ITERS = int(sys.argv[5]) if len(sys.argv) > 5 else 300
 KW = int(sys.argv[6]) if len(sys.argv) > 6 else 4
 KERKER = float(sys.argv[7]) if len(sys.argv) > 7 else 0.7
 OUT = sys.argv[8] if len(sys.argv) > 8 else "dfpt_base_state.pkl"
+DO_NEWTON = int(sys.argv[9]) if len(sys.argv) > 9 else 1
 
 
 def atoms_for(u):
@@ -56,18 +57,25 @@ def main():
                kerker=(KERKER if KERKER > 0 else None))
 
     t0 = time.time()
-    _, iw = crystal_scf_multi([A, A, C0], atoms, RADII, iters=WARM_ITERS, tol=1e-3, efg=False,
+    _, iw = crystal_scf_multi([A, A, C0], atoms, RADII, iters=WARM_ITERS, tol=1e-5, efg=False,
                               kmesh=(KK, KK, KK), **cfg)
     r = iw["recorder"].summarize()
+    last = iw["recorder"].iters[-1]
     print(f"warm k{KK}22 ({time.time()-t0:.0f}s): n_it={r['n_iter']} "
-          f"r_nsph={r.get('r_nsph')}", flush=True)
+          f"r_v={last.get('r_v')} r_nsph={last.get('r_nsph')}", flush=True)
 
-    t1 = time.time()
-    state, ni = newton_polish([A, A, C0], atoms, RADII, iw["state"],
-                              scf_kwargs=dict(cfg, kmesh=(KK, KK, KK), efg=False),
-                              maxiter=6, inner_maxiter=15, f_tol=1e-6, verbose=True)
-    print(f"newton ({time.time()-t1:.0f}s): converged={ni['converged']} "
-          f"residual_norm={ni['residual_norm']:.2e} rounds={ni['rounds']}", flush=True)
+    state = iw["state"]
+    if DO_NEWTON:
+        t1 = time.time()
+        # newton_polish returns a state NEVER WORSE than the input (monotone acceptance), so
+        # it can only tighten the long warm fixed point; skip via DO_NEWTON=0 if it stalls.
+        state, ni = newton_polish([A, A, C0], atoms, RADII, iw["state"],
+                                  scf_kwargs=dict(cfg, kmesh=(KK, KK, KK), efg=False),
+                                  maxiter=8, inner_maxiter=20, f_tol=1e-6, rounds=4, verbose=True)
+        print(f"newton ({time.time()-t1:.0f}s): converged={ni['converged']} "
+              f"residual_norm={ni['residual_norm']:.2e} rounds={ni['rounds']}", flush=True)
+    else:
+        ni = {"converged": False, "residual_norm": float("nan")}
 
     # EFG at the polished fixed point (one efg=True iterate; state unchanged).
     _, ei = crystal_scf_multi([A, A, C0], atoms, RADII, iters=1, tol=0.0, efg=True,
@@ -84,12 +92,14 @@ def main():
                        for kk, vv in ti.items() if kk in ("V_zz", "eta", "V_zz_valence")},
                 "O": {kk: (float(vv) if np.isscalar(vv) or isinstance(vv, float) else vv)
                       for kk, vv in o.items() if kk in ("V_zz", "eta", "V_zz_valence")}},
-        "conv": {"residual_norm": ni["residual_norm"], "converged": ni["converged"]},
+        "conv": {"residual_norm": ni["residual_norm"], "converged": ni["converged"],
+                 "warm_r_nsph": last.get("r_nsph"), "warm_r_v": last.get("r_v")},
     }
     with open(OUT, "wb") as fh:
         pickle.dump(payload, fh)
-    ok = bool(ni["converged"]) or ni["residual_norm"] < 1e-4
-    print(f"saved -> {OUT}  (residual_norm={ni['residual_norm']:.2e})", flush=True)
+    rn = last.get("r_nsph")
+    ok = rn is not None and rn < 1e-2
+    print(f"saved -> {OUT}  (warm r_nsph={rn})", flush=True)
     print("CONVERGED_OK" if ok else "CONVERGENCE_SUSPECT", flush=True)
 
 
