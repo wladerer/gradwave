@@ -1,3 +1,4 @@
+# ruff: noqa: E402, I001, F401, B007, E501  # scratch probe script (hardcoded paths / sys.path insert)
 """Analytic-USPP scoping de-risk probe.
 
 (1) NC-limit reference: the analytic sigma_shielding_dq on small NC Si — the

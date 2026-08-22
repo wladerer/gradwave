@@ -1,3 +1,4 @@
+# ruff: noqa: E402, I001, F401, B007, E501  # scratch probe script (hardcoded paths / sys.path insert)
 """Dump gw's B-sphere l=2 density rho_2M(r) via a warm efg pass (monkeypatch), then compare the
 cumulative on-site V_zz buildup vs radius against Elk's rhomt l=2 (localizes interior vs near-R
 tail). src-free: monkeypatches the experiment-side call only.
