@@ -1,3 +1,4 @@
+# ruff: noqa: E402, I001, F401, B007, E501  # scratch probe script (hardcoded paths / sys.path insert)
 """Elk rhomt l=2 (m=0) cumulative on-site-moment buildup vs r/R, to compare radial shape vs gw.
 Usage: python elk_cum.py STATE.OUT "B:2,N:2" ias
 Prints fractional cumulative int_0^r rho_20/r' dr' at r/R fractions + the absolute moment.

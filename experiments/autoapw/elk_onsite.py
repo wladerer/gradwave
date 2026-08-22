@@ -1,3 +1,4 @@
+# ruff: noqa: E402, I001, F401, B007, E501  # scratch probe script (hardcoded paths / sys.path insert)
 """Generalized Elk STATE.OUT on-site EFG + in-sphere-charge decomposition.
 
 Ports the validated ``elk_onsite_corundum.py`` reader (validated vs EFG.OUT on TiO2/corundum)
