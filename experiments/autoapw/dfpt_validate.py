@@ -148,6 +148,7 @@ def chi0_apply(dv_nsph, base_res, ctx, species, chan, acart, us_by_key, occ_full
         ev, C, mill, ks, abl_all, vol = res[0], res[1], res[2], res[3], res[4], res[5]
         dH = _nonspherical_augment(dv_nsph, acart, abl_all, ks, species, ctx.lmax, vol,
                                    ctx.r, ctx.dx, nsph_int=nsph_int_d)
+        dH = 0.5 * (dH + dH.conj().T)          # the secular build returns a symmetrized Hm
         dS = np.zeros_like(dH)
         dC, occ_idx = dfpt.eig_response_occupied(ev, C, dH, dS, occ_full)
         npw = len(mill)
@@ -269,6 +270,9 @@ def main():
             # augmentation is the only v_nsph-dependent part of H and is LINEAR in v_nsph.
             dH_an = _nonspherical_augment(dv_nsph, acart, abl_all, ks, species, ctx.lmax, vol,
                                           ctx.r, ctx.dx)
+            dH_an = 0.5 * (dH_an + dH_an.conj().T)      # match the solve's symmetrized Hm (the
+            # random test dv_nsph breaks V_{L,-M}=(-1)^M conj(V_LM); the physical Dyson dv respects
+            # it — the chi0 operator symmetrizes dH either way, as the secular build does)
             rel = np.abs(dH_an - dH).max() / max(np.abs(dH).max(), 1e-30)
             print(f"  [analytic dH vs FD dH] max rel = {rel:.3e}", flush=True)
         dS = np.zeros_like(S)
