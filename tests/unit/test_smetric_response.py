@@ -29,6 +29,7 @@ Supporting checks:
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -278,3 +279,75 @@ def test_smetric_sternheimer_runs_on_paw(si_paw):
     assert res_cond.norm().item() < 1e-6 * rhs.norm().item()
     sortho = torch.einsum("kng,kbg->kbn", s_occ.conj(), dpsi).abs().max().item()
     assert sortho < 1e-7 * dpsi.abs().max().item(), f"S-ortho {sortho:.3e}"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2: velocity_perturbation_q end-to-end on the PAW path (USPP backend)    #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("q", [(0.0, 0.0, 0.0), (0.5, 0.0, 0.0)])
+def test_uspp_velocity_perturbation_q_runs(si_paw, q):
+    """Phase-2 gate 1: the full ``velocity_perturbation_q`` entry point runs on
+    a real PAW ground state through the USPP S-metric backend (dsvel/s_apply on)
+    and returns an S-orthogonal δu. The eigen residual of the batched operator
+    on the SCF state certifies that the KBProjectors β + screened D + q_full
+    reproduce the SCF Hamiltonian/overlap (consistent column orderings)."""
+    from gradwave.postscf.kgeometry_nmr import (
+        build_uspp_response_ctx,
+        velocity_perturbation_q,
+    )
+
+    res = si_paw
+    system = res["system"]
+    ctx = build_uspp_response_ctx(res, PBE())
+    nocc = insulator_window(res["occupations"], 2.0, "insulating")
+
+    # eigen residual ||H c − ε S c|| / ||ε S c|| on the k-spheres (q=0 fold=id)
+    c_all = torch.zeros(len(system.spheres), res["coeffs"][0].shape[0],
+                        ctx.bk.npw_max, dtype=CDTYPE)
+    for ik, c in enumerate(res["coeffs"]):
+        c_all[ik, :, : c.shape[1]] = c
+    c_occ = c_all[:, :nocc]
+    eps = res["eigenvalues"][:, :nocc].to(RDTYPE)
+    h0, _ = ctx.build_hkq(torch.arange(len(system.spheres)))
+    resid = h0.apply(c_occ) - eps[..., None].to(CDTYPE) * h0.s_apply(c_occ)
+    denom = (eps[..., None].to(CDTYPE) * h0.s_apply(c_occ)).norm().item()
+    assert resid.norm().item() / denom < 1e-6, "operator does not reproduce SCF state"
+
+    sol = velocity_perturbation_q(res, q, cg_tol=1e-9, max_iter=600, uspp=ctx)
+    assert torch.isfinite(sol.dpsi).all()
+    assert sol.dpsi.abs().max().item() > 1e-6  # nontrivial response
+    hkq, _ = ctx.build_hkq(torch.as_tensor(sol.jidx, dtype=torch.long))
+    s_occ_kq = hkq.s_apply(sol.c_occ_kq)
+    for mu in range(3):
+        sortho = torch.einsum(
+            "kng,kbg->kbn", s_occ_kq.conj(), sol.dpsi[mu]).abs().max().item()
+        assert sortho < 1e-6 * sol.dpsi[mu].abs().max().item(), \
+            f"S-ortho μ={mu} {sortho:.3e}"
+
+
+def test_uspp_smooth_continuity_closure(si_paw):
+    """Phase-2 gate 2: the PAW smooth+nonlocal induced current satisfies the
+    continuity equation q·mean[j_kin + j_nl] = mean s at G=0. The kinetic
+    current ALONE is broken by the [V_NL, e^{-iqr}] commutator; adding the KB
+    nonlocal current (with the SCREENED D) closes it to the ecut-vanishing
+    truncation + augmentation-charge remainder — the physical validation of the
+    S-metric PAW δu."""
+    from gradwave.postscf.kgeometry_nmr import (
+        build_uspp_response_ctx,
+        uspp_smooth_continuity,
+        velocity_perturbation_q,
+    )
+
+    res = si_paw
+    ctx = build_uspp_response_ctx(res, PBE())
+    q_frac = np.array([0.5, 0.0, 0.0])
+    e_pol = np.array([0.0, 1.0, 0.0])
+    sol = velocity_perturbation_q(res, q_frac, cg_tol=1e-11, max_iter=800, uspp=ctx)
+    c = uspp_smooth_continuity(res, ctx, sol, e_pol)
+    scale = abs(c["source"])
+    rel_kin = abs(c["q_j_kin"] - c["source"]) / scale
+    rel_full = abs(c["q_j_kin"] + c["q_j_nl"] - c["source"]) / scale
+    assert rel_kin > 1e-2, f"KB term should matter (kin-only rel {rel_kin:.2e})"
+    assert rel_full < 3e-3, f"smooth continuity not closed (rel {rel_full:.2e})"
