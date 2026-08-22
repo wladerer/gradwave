@@ -127,11 +127,30 @@ def _pair_integrals(l, f, g, rr, drw, dx, v_in):
     return float((f * g * drw).sum()), float(t), float((f * v_in * g * drw).sum())
 
 
-def _build_lo(l, e2, ch, u, ud, r, dx, v, R, cond_tol=_LO_COND_TOL):
-    """One confined local orbital ``φ = a·u(E_l) + b·u̇(E_l) + c·u(E₂)`` with ``φ(R)=φ'(R)=0``,
-    normalized to ``∫φ²dr=1``. ``ch`` is the l-channel ``radial_channel`` dict (supplies the u/u̇
-    boundary values); ``u, ud`` the matching ``_radial_u`` arrays. Returns the radial data + the
-    S/H integrals against (u, u̇) and itself that the LAPW+LO matrix blocks need.
+def _build_lo(l, e2, ch, u, ud, r, dx, v, R, cond_tol=_LO_COND_TOL, confine=True):
+    """One local orbital built from a second-energy radial ``u(E₂)``, normalized to ``∫φ²dr=1``.
+    ``ch`` is the l-channel ``radial_channel`` dict (supplies the u/u̇ boundary values); ``u, ud``
+    the matching ``_radial_u`` arrays. Returns the radial data + the S/H integrals against (u, u̇)
+    and itself that the LAPW+LO matrix blocks need.
+
+    Two constructions, selected by ``confine``:
+
+    * ``confine=True`` (default, the semicore LO): ``φ = a·u(E_l) + b·u̇(E_l) + c·u(E₂)`` with the
+      two boundary conditions ``φ(R)=φ'(R)=0``. Standard for a deep semicore radial (Ti 3s/3p, O
+      2s) that sits well below the valence window — there its ``u(E₂)`` is distinct from
+      ``span{u, u̇}`` and the confined ``φ`` is a genuine extra degree of freedom.
+
+    * ``confine=False`` (the HELO, high-energy local orbital): ``φ = a·u(E_l) + c·u(E₂)`` with the
+      single boundary condition ``φ(R)=0`` (the ``u̇`` term is dropped, ``b=0``; the slope ``φ'(R)``
+      is free). This is the fix for a channel whose confined LO is near-redundant with the valence
+      p-span: forcing ``φ'(R)=0`` as well pulls in a large ``u̇`` component that collapses ``φ`` back
+      into ``span{u, u̇}`` (measured resid_frac ~0.15 for the O 2p sphere at every E₂ tried,
+      confined). Dropping that constraint and taking ``E₂`` high — a scattering-like ``u(E₂)`` with
+      an extra radial node — keeps ``φ`` genuinely distinct (resid_frac → ~1), which is exactly the
+      in-sphere aspherical (l=2) radial freedom the on-site EFG density needs. ``φ(R)=0`` alone is
+      sufficient for the LO to stay strictly inside the muffin tin (no interstitial matching); the
+      in-sphere kinetic element uses the gradient-square weak form (``_pair_integrals``), finite for
+      a free ``φ'(R)``.
 
     Conditioning (``cond_tol`` > 0): a semicore ``E₂`` close to the valence linearization energy
     makes the confined ``φ`` near-linearly-dependent on the valence ``span{u, u̇}`` inside the
@@ -155,8 +174,11 @@ def _build_lo(l, e2, ch, u, ud, r, dx, v, R, cond_tol=_LO_COND_TOL):
     idx = np.sort(np.argsort(np.abs(r_np - R))[:7])           # value+slope at R (cubic fit,
     c3 = np.polyfit(r_np[idx] - R, u2n[idx], 3)               #  same scheme as radial_channel)
     u2R, u2pR = float(c3[-1]), float(c3[-2])
-    mat = np.array([[ch["uR"], ch["udR"]], [ch["upR"], ch["udpR"]]])
-    a, b = np.linalg.solve(mat, -np.array([u2R, u2pR]))       # φ(R)=0, φ'(R)=0 with c=1
+    if confine:
+        mat = np.array([[ch["uR"], ch["udR"]], [ch["upR"], ch["udpR"]]])
+        a, b = np.linalg.solve(mat, -np.array([u2R, u2pR]))   # φ(R)=0, φ'(R)=0 with c=1
+    else:
+        a, b = -u2R / ch["uR"], 0.0                           # HELO: φ(R)=0 only (φ'(R) free)
     u2 = u2n[inside]
     phi = a * u + b * ud + u2
     nrm = math.sqrt(float((phi**2 * drw).sum()))
@@ -199,8 +221,10 @@ def _build_lodat(los_by_key, chan, El_by_key, vmt_by_key, R_by_key, at_by_sym, k
     """Per-iteration local-orbital data: for each atom key, build every requested LO against the
     current sphere potential. ``los_by_key[key]`` = list of ``(l, spec)`` with ``spec`` an atomic
     orbital label ("3p") or an absolute atomic energy (eV); either is shifted by the current
-    muffin-tin zero like the energy parameters. One LO per (key, l). ``cond_tol`` sets the
-    overlap-conditioning threshold passed to ``_build_lo`` (see there)."""
+    muffin-tin zero like the energy parameters. One LO per (key, l). ``spec`` may also be a
+    ``{"e": <label-or-eV>, "confine": False}`` mapping to request an unconfined HELO
+    (``_build_lo(confine=False)``, φ(R)=0 only, high E₂) instead of the default confined semicore
+    LO. ``cond_tol`` sets the overlap-conditioning threshold passed to ``_build_lo`` (see there)."""
     lodat = {}
     for key, los in los_by_key.items():
         seen = set()
@@ -209,11 +233,15 @@ def _build_lodat(los_by_key, chan, El_by_key, vmt_by_key, R_by_key, at_by_sym, k
             if l in seen:
                 raise ValueError(f"one local orbital per l per atom (duplicate l={l} on {key})")
             seen.add(l)
+            confine = True
+            if isinstance(spec, dict):
+                confine = bool(spec.get("confine", True))
+                spec = spec["e"]
             e2 = (at_by_sym[key_sym[key]][spec] if isinstance(spec, str) else float(spec))
             e2 = e2 - v0_by_key[key]
             u, ud = chan[key][l]["u_in"], chan[key][l]["ud_in"]   # reuse the channel's Numerov
             out.append(_build_lo(l, e2, chan[key][l], u, ud, r, dx, vmt_by_key[key],
-                                 R_by_key[key], cond_tol=cond_tol))
+                                 R_by_key[key], cond_tol=cond_tol, confine=confine))
         lodat[key] = out
     return lodat
 
@@ -1701,6 +1729,13 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     ``los`` = ``{symbol: [(l, spec), ...]}`` adds LAPW+LO local orbitals per species — confined
     ``φ = a·u(E_l)+b·u̇(E_l)+c·u(E₂)`` with ``φ(R)=φ'(R)=0`` — for semicore states (Ti 3s/3p) or
     extra radial freedom. ``spec`` is an atomic orbital label ("3s") or an absolute energy (eV).
+    ``spec`` may instead be a ``{"e": <label-or-eV>, "confine": False}`` mapping, which builds an
+    unconfined **HELO** (high-energy local orbital): ``φ = a·u(E_l)+c·u(E₂)`` with ``φ(R)=0`` only
+    (slope free) at a high ``E₂``. Where the confined LO is near-redundant with the valence span
+    (e.g. the l=1 p-channel of a small anion sphere), the HELO supplies the genuinely distinct
+    in-sphere aspherical radial the on-site EFG density needs — it corrects the anion-undershoot /
+    cation-overshoot on-site l=2 bias and gates at production damping (see
+    ``experiments/autoapw/efg_helo_l1_fix.md``).
     When an LO carries semicore electrons, raise that species' valence count with
     ``val_e = {symbol: n}`` and drop the state from the frozen core with ``core = {symbol: [...]}``
     (both override the module defaults) — the LO does not change electron bookkeeping by itself.
