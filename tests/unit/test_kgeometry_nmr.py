@@ -872,3 +872,44 @@ def test_percolumn_cg_matches_lockstep_and_certifies(si_mesh):
 
     rn = torch.linalg.norm(rhs - a_apply(x_new), dim=-1)
     assert float(rn.max()) < 5.0 * tol  # every column certified
+
+
+# --------------------------------------------------------------------------- #
+# analytic-USPP smooth shielding (PR-A): NC-limit reduction gate               #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.standard
+def test_sigma_dq_uspp_nc_limit_reduction():
+    """The S-metric (USPP/PAW smooth) analytic-σ path reduces to the plain
+    norm-conserving analytic σ to machine precision.
+
+    Routing ``sigma_shielding_dq`` through the generalized (H U = S U ε)
+    machinery with a context built from an NC pseudo (q_int = 0 ⇒ S = I,
+    Dscr = D) exercises every new code path — the Cholesky-whitened generalized
+    eigensolver, the S-orthogonal resolvent ⟨u_m|S|·⟩, the generalized velocity
+    v = ∂H/∂k − ε ∂S/∂k, the screened-D current operator, and the −ε ∂²S/∂k²
+    term of the mixed second derivative — while every S-metric correction is
+    identically zero, so the result must match the S = I route bit-for-bit
+    (measured ≲1e-12). This is the whole correctness argument of PR-analytic-A:
+    no external reference, no finite-q code. NC reference σ_iso ≈ 20.82 ppm."""
+    from gradwave.postscf.kgeometry_nmr import sigma_shielding_dq
+
+    torch.set_num_threads(2)
+    cell, pos = si_fcc()
+    system = setup_system(cell, pos, [0, 0], [si_upf()], ecut=6 * RY,
+                          kmesh=(2, 2, 2), nbands=8, use_symmetry=False,
+                          fft_shape=(15, 15, 15))
+    res = scf(system, PBE(), etol=1e-9, rhotol=1e-8, verbose=False, max_iter=80)
+    assert res.converged
+
+    sig_nc = sigma_shielding_dq(res, use_symmetry=False)
+    sig_gate = sigma_shielding_dq(res, uspp="nc-gate", use_symmetry=False)
+
+    assert sig_gate.shape == sig_nc.shape == (2, 3, 3)
+    assert torch.isfinite(sig_gate).all()
+    iso = float(torch.diagonal(sig_nc, dim1=1, dim2=2).mean())
+    assert 15.0 < iso < 27.0  # the analytic NC σ_iso ≈ 20.82 ppm
+    resid = float((sig_gate - sig_nc).abs().max())
+    scale = max(abs(iso), 1.0)
+    assert resid < 1e-9 * scale, f"S-metric route drifts from NC by {resid:.3e} ppm"
