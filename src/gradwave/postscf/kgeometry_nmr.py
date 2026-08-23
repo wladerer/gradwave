@@ -103,6 +103,7 @@ from gradwave.postscf._response import (
     sternheimer_shift,
 )
 from gradwave.postscf.dfpt_q import _g0_phase, _reindex_bk, kpq_map
+from gradwave.postscf.gipaw import R_E_ANG, PAWOnSite, ground_state_shielding
 from gradwave.postscf.kgeometry import (
     BlochHK,
     KBProjectors,
@@ -2114,3 +2115,180 @@ def sigma_shielding_dq(
     for s in range(ns):
         out[s] = torch.linalg.lstsq(bmat, mmat[:, s, :]).solution.mT
     return out * 1e6
+
+
+# --------------------------------------------------------------------------- #
+# On-site paramagnetic augmentation (GIPAW σ_para_aug): X_β cross density + σ   #
+# --------------------------------------------------------------------------- #
+
+_ParaBranch = tuple[np.ndarray, np.ndarray, np.ndarray, Tensor, Tensor, float]
+
+
+def _para_branch_cross(
+    res: SCFResult,
+    ctx: USPPResponseCtx,
+    *,
+    cg_tol: float = 1e-9,
+    max_iter: int = 800,
+) -> tuple[list[_ParaBranch], np.ndarray, "USPPSystem"]:
+    """Per-(axis, pol) raw ±q on-site cross densities for the magnetic response.
+
+    For every sampled mesh axis the ±q generalized-velocity Sternheimer solves
+    (:func:`velocity_perturbation_q` with the USPP ctx, v = ∂H/∂k − ε ∂S/∂k)
+    give the first-order response δu; projected onto the on-site overlap
+    projectors ⟨p̃(k±q)|δu⟩ and contracted (BZ- and occupation-weighted) with
+    the ground projection ⟨p̃(k)|ψ̃⁰⟩ (≡ ``becps``) this yields the raw ±q
+    cross densities per transverse polarization
+
+        x_±[a, b] = Σ_{k,o} f w_k ⟨ψ̃⁰_o|p̃_a(k)⟩ ⟨p̃_b(k±q)|δu_o^{pol,±q}⟩
+
+    in the full m-expanded projector layout (all atoms). The per-nucleus gauge
+    referencing and the (1/2iq) linear-in-q extraction are applied downstream in
+    :func:`para_augmentation_shielding`. Returns the branch list
+    ``[(q_cart, q_hat, pol, x_p, x_m, q_mag)]``, the projector→atom column map,
+    and the (USPP) system.
+    """
+    system = ctx.system
+    nocc = insulator_window(res.occupations, 2.0, "insulating occupations required")
+    ov = ctx.ov
+    nk, npw_ov = ov.nk, ov.npw_max
+    c_occ = torch.zeros(nk, nocc, npw_ov, dtype=CDTYPE)
+    for ik, c in enumerate(cast("list[Tensor]", res.coeffs)):
+        n = min(c.shape[1], npw_ov)
+        c_occ[ik, :, :n] = c[:nocc, :n]
+    g_gnd = torch.einsum("kag,kog->koa", ov.p.conj(), c_occ)  # ⟨p̃_a(k)|ψ̃⁰_o⟩
+
+    kb = _overlap_kbprojectors(system, system.spheres[0])
+    col_atom = kb.col_atom.numpy()
+    b = reciprocal_cell(system.grid.cell)
+    k_frac = np.stack([sph.k_frac for sph in system.spheres])
+    mesh_n = [len(np.unique(np.round(k_frac[:, i], 6))) for i in range(3)]
+    axes = [i for i in range(3) if mesh_n[i] > 1]
+    if len(axes) < 2:
+        raise ValueError(
+            "para augmentation needs >=2 k-mesh axes with n>1 to determine the "
+            "shielding tensor (run the SCF on a >=2-axis unreduced mesh)")
+    wf = (2.0 * system.kweights.to(RDTYPE))[:, None, None].to(CDTYPE)  # f_occ·w_k
+    gw = (wf * g_gnd).conj()
+
+    branches: list[_ParaBranch] = []
+    for i in axes:
+        q_frac = np.zeros(3)
+        q_frac[i] = 1.0 / mesh_n[i]
+        q_cart = q_frac @ b
+        q_mag = float(np.linalg.norm(q_cart))
+        q_hat = q_cart / q_mag
+        pols = list(_transverse_frame(q_hat))
+        contrib: dict[float, Tensor] = {}
+        for sgn in (+1.0, -1.0):
+            sol = velocity_perturbation_q(
+                res, sgn * q_frac, cg_tol=cg_tol, max_iter=max_iter, uspp=ctx)
+            jsel = torch.as_tensor(sol.jidx, dtype=torch.long)
+            p_kq = ov.p[jsel]
+            npw = min(p_kq.shape[-1], sol.dpsi.shape[-1])
+            contrib[sgn] = torch.einsum(
+                "kbg,mkog->mkob", p_kq[:, :, :npw].conj(), sol.dpsi[..., :npw])
+        for pol in pols:
+            pol_t = torch.as_tensor(pol, dtype=CDTYPE)
+            r_p = torch.einsum("m,mkob->kob", pol_t, contrib[+1.0])
+            r_m = torch.einsum("m,mkob->kob", pol_t, contrib[-1.0])
+            x_p = torch.einsum("koa,kob->ab", gw, r_p)
+            x_m = torch.einsum("koa,kob->ab", gw, r_m)
+            branches.append((q_cart, q_hat, np.asarray(pol, dtype=float),
+                             x_p, x_m, q_mag))
+    return branches, col_atom, system
+
+
+def para_augmentation_shielding(
+    res: SCFResult,
+    ctx: USPPResponseCtx,
+    onsites: dict[int, PAWOnSite],
+    *,
+    pref: float = R_E_ANG,
+    cg_tol: float = 1e-9,
+    max_iter: int = 800,
+) -> Tensor:
+    """On-site paramagnetic-augmentation shielding tensor σ_para_aug
+    (nsite, 3, 3) in ppm — the hard GIPAW magnetic-response term
+    [Yates–Pickard–Mauri, PRB 76, 024401 (2007), Eq. (85)-(86)].
+
+    Assembles the per-field ground×response on-site cross density X_β (the
+    ``becps`` ⊗ ⟨p̃|δu⟩ product, :func:`_para_branch_cross`), references the
+    vector potential A(r) = pol·sin(q·(r−R))/q to each nucleus R by the gauge
+    phase e^{∓iq·R} on the ±q branches (so off-origin sites are treated on the
+    same footing as the origin — the covariant-position term), extracts the
+    uniform-field (1/2iq) linear-in-q part, least-squares reconstructs the
+    Cartesian field response X_β from the (q̂×pol) branches, and contracts it
+    with the on-site current operator via :meth:`PAWOnSite.para_aug_tensor`.
+
+    ``onsites`` maps species index → :class:`~gradwave.postscf.gipaw.PAWOnSite`;
+    a species absent from the map (a norm-conserving atom with no partial waves)
+    contributes a zero tensor. ``pref`` is the paramagnetic prefactor: the
+    classical electron radius R_E (the same constant carrying the
+    diamagnetic/Lamb terms) reproduces the diamond ²⁹Si absolute σ with no free
+    scale — the two symmetry-equivalent Si sites agree to <1 ppm as the internal
+    consistency gate (see the PR-analytic-B notes)."""
+    branches, col_atom, system = _para_branch_cross(
+        res, ctx, cg_tol=cg_tol, max_iter=max_iter)
+    tau = system.positions.detach().cpu().numpy()
+    species_of_atom = [int(s) for s in system.species_of_atom]
+    nsite = len(species_of_atom)
+    out = torch.zeros(nsite, 3, 3, dtype=RDTYPE)
+    for a in range(nsite):
+        onsite = onsites.get(species_of_atom[a])
+        if onsite is None:
+            continue
+        idx = np.where(col_atom == a)[0]
+        rows: list[Tensor] = []
+        bmat_rows: list[np.ndarray] = []
+        for (q_cart, q_hat, pol, x_p, x_m, q_mag) in branches:
+            # gauge-reference to nucleus R (A ∝ sin(q·(r−R))/q ⇒ e^{∓iq·R} on
+            # the ±q responses) and the (1/2iq) uniform-field extraction.
+            ph = np.exp(-1j * float(q_cart @ tau[a]))
+            block = 1j * (ph * x_p[np.ix_(idx, idx)]
+                          - np.conj(ph) * x_m[np.ix_(idx, idx)]) / (2.0 * q_mag)
+            rows.append(block)
+            bmat_rows.append(np.cross(q_hat, pol))
+        bmat = torch.as_tensor(np.stack(bmat_rows), dtype=CDTYPE)
+        xs = torch.stack(rows)
+        nbr, n, _ = xs.shape
+        xcart = torch.linalg.lstsq(
+            bmat, xs.reshape(nbr, -1)).solution.reshape(3, n, n)
+        out[a] = onsite.para_aug_tensor(xcart, pref=pref)
+    return out
+
+
+def sigma_shielding_gipaw(
+    res: SCFResult,
+    ctx: USPPResponseCtx,
+    paws: Sequence[Any],
+    *,
+    pref: float = R_E_ANG,
+    use_symmetry: bool | str = False,
+    cg_tol: float = 1e-9,
+    max_iter: int = 800,
+) -> dict[str, Tensor]:
+    """Full absolute GIPAW chemical-shielding tensor per site (nsite, 3, 3) ppm,
+
+        σ = σ_bare + σ_core + σ_dia_aug + σ_para_aug,
+
+    for an all-PAW USPP ground state. Sums the smooth (bare valence) analytic-
+    USPP shielding (:func:`sigma_shielding_dq` through the S-metric ctx), the
+    frozen-core Lamb + on-site diamagnetic augmentation
+    (:func:`gradwave.postscf.gipaw.ground_state_shielding`), and the on-site
+    paramagnetic augmentation (:func:`para_augmentation_shielding`). ``paws`` is
+    one :class:`~gradwave.pseudo.upf_paw.PAWData` per species. Returns a dict
+    ``{"total", "bare", "core", "dia_aug", "para_aug"}`` (all nsite, 3, 3)."""
+    system = ctx.system
+    species_of_atom = [int(s) for s in system.species_of_atom]
+    sig_bare = sigma_shielding_dq(res, uspp=ctx, use_symmetry=use_symmetry)
+    gs = ground_state_shielding(
+        list(paws), species_of_atom, cast("Any", res).rho_ij_atoms)
+    onsites = {sp: PAWOnSite.from_paw(p) for sp, p in enumerate(paws)}
+    sig_para = para_augmentation_shielding(
+        res, ctx, onsites, pref=pref, cg_tol=cg_tol, max_iter=max_iter)
+    eye = torch.eye(3, dtype=RDTYPE)
+    core = gs["core"][:, None, None] * eye
+    total = sig_bare + core + gs["dia_aug"] + sig_para
+    return {"total": total, "bare": sig_bare, "core": core,
+            "dia_aug": gs["dia_aug"], "para_aug": sig_para}
