@@ -537,6 +537,9 @@ include = [
     # flapw: newton.py written fully typed from the start (its neighbors scf.py /
     # lapw.py remain untyped; State stays dict[str, Any] until they are).
     "src/gradwave/flapw/newton.py",
+    # functionals.py (LDA/GGA radial kernels) is a pure-numeric leaf and
+    # type-checks clean; nmr.py / recorder.py still carry error-level gaps.
+    "src/gradwave/flapw/functionals.py",
 ]
 
 [tool.ty.overrides.rules]

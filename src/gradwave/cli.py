@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from gradwave._version import __version__
 
@@ -119,8 +119,36 @@ def _banner() -> str:
             f"  ╲╱╲╱╲╱   differentiable plane-wave DFT\n")
 
 
+def _flapw_summary_lines(inp: Input) -> list[str]:
+    """The at-a-glance block for the all-electron FLAPW / EFG tasks, whose
+    knobs live in the ``flapw`` block rather than the plane-wave ``ecut`` and
+    pseudopotentials."""
+    import numpy as np
+
+    a = inp.atoms
+    fp = inp.flapw
+    task = inp.task + (f"  ({inp.nmr.task})" if inp.task == "nmr" else "")
+    lines = [
+        f"  task        {task}",
+        f"  structure   {a.get_chemical_formula()}  ({len(a)} atoms)",
+        f"  cell [Å]    {np.array2string(a.cell.array, precision=4)}",
+        f"  flapw ecut  {fp.ecut:g}   lmax {fp.lmax}   "
+        + ("full-potential" if fp.fullpot else "muffin-tin"),
+        f"  mt radii Å  {dict(fp.radii)}",
+        f"  kpoints     mesh {list(inp.kpoints.mesh)}",
+        f"  smearing    {fp.smearing:g} eV",
+        f"  device      {inp.device}",
+        f"  output_dir  {inp.output_dir}",
+    ]
+    if inp.task == "nmr" and inp.nmr.task == "efg" and inp.nmr.isotopes:
+        lines.append(f"  isotopes    {inp.nmr.isotopes}")
+    return lines
+
+
 def _summary_lines(inp: Input) -> list[str]:
     """The input at a glance — shared by `validate` and the `run` startup block."""
+    if inp.task == "flapw" or (inp.task == "nmr" and inp.nmr.task == "efg"):
+        return _flapw_summary_lines(inp)
     import numpy as np
 
     a = inp.atoms
@@ -155,6 +183,30 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     for line in _summary_lines(inp):
         print(line)
     return 0
+
+
+def _print_nmr(nmr: dict[str, Any]) -> int:
+    """Render the per-site NMR table to stdout: an EFG (V_zz / η / C_Q) or a
+    magnetic-shielding (σ_iso / Δσ / η) block, mirroring the ``nmr.out`` report."""
+    if nmr.get("observable") == "shielding":
+        print(f"NMR magnetic shielding (bare, plane-wave GIPAW): "
+              f"{nmr['n_sites']} sites")
+        for s in nmr["sites"]:
+            print(f"  site {s['site']:>3d} {(s.get('species') or '?'):>3s}  "
+                  f"σ_iso = {s['sigma_iso_ppm']:10.3f} ppm  "
+                  f"Δσ = {s['sigma_aniso_ppm']:10.3f} ppm  "
+                  f"η = {s['sigma_eta']:.3f}")
+        return 0
+    conv = bool(nmr.get("converged"))
+    print(f"{'converged' if conv else 'NOT CONVERGED'}: electric field "
+          f"gradient, {nmr['n_sites']} sites")
+    for s in nmr["sites"]:
+        line = (f"  site {s['site']:>3d} {s['species']:>3s}  "
+                f"V_zz = {s['V_zz_eV_ang2']:11.4f} eV/Å²  η = {s['eta']:.4f}")
+        if "C_Q_MHz" in s:
+            line += f"  C_Q = {s['C_Q_MHz']:9.4f} MHz ({s['isotope']})"
+        print(line)
+    return 0 if conv else 1
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -234,6 +286,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
               f"min ω = {fmin:.1f} cm⁻¹ "
               f"({'all real' if fmin > -1.0 else 'IMAGINARY modes'})")
         return 0 if fmin > -1.0 else 1
+    flapw = summary.get("flapw")
+    if flapw is not None:
+        span = flapw.get("band_span_eV")
+        print(f"{'converged' if flapw['converged'] else 'NOT CONVERGED'}: "
+              f"FLAPW SCF, {flapw.get('n_bands')} bands"
+              + (f", band span {span:.4f} eV" if span is not None else ""))
+        return 0 if flapw["converged"] else 1
+    nmr = summary.get("nmr")
+    if nmr is not None:
+        return _print_nmr(nmr)
     return 0
 
 
