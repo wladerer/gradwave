@@ -46,6 +46,7 @@ dev = [
     "pytest>=8",
     "pytest-xdist",
     "pytest-split>=0.8",  # shard the CI standard tier across parallel runners
+    "pytest-timeout",  # per-test wall cap so a hung test fails fast (traceback) instead of the 6h job default
     "ruff>=0.6",
     "sympy>=1.12",
     "pre-commit>=3.5",
@@ -78,6 +79,9 @@ packages = ["src/gradwave"]
 testpaths = ["tests"]
 # -n auto parallelizes across cores via pytest-xdist; pass -n0 to disable when
 # debugging a single test and interleaved output gets in the way.
+# NOTE: the per-test wall cap (--timeout, pytest-timeout) is applied in the CI
+# workflow command, NOT here — a global addopts timeout would also fire on the
+# manual `torture` tier (tests intentionally >10 min). See .github/workflows/ci.yml.
 addopts = "-q -n auto"
 markers = [
     "standard: seconds-class integration tests, excluded from the fast gate",
@@ -541,6 +545,11 @@ all = "error"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# experiments/ holds throwaway probe/scratch scripts (not shipped, not imported).
+# They are exempt from lint so a docs-ish PR that adds one can't turn main lint-red
+# repo-wide (the lint CI job is path-filtered off for docs-only changes, so an
+# unlinted scratch .py otherwise sneaks in and every later code PR inherits it).
+extend-exclude = ["experiments"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "NPY", "B"]

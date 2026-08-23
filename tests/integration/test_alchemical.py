@@ -319,6 +319,8 @@ def _si_diamond(a=5.43):
     return cell, pos
 
 
+# two full SCFs (full mesh + IBZ), minutes-class on the slow 2-core CI runner → nightly (slow) tier
+@pytest.mark.slow
 def test_alchemical_star_unfolding_matches_full_mesh():
     """IBZ-reduced Si→Ge alchemical response == full-mesh, via star-unfolding.
 

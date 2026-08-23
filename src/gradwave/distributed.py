@@ -137,6 +137,15 @@ def init_from_env(backend: str = "gloo") -> tuple[int, int, Any] | None:
     (``RANK``, ``WORLD_SIZE``, ``MASTER_ADDR``, ``MASTER_PORT`` — the
     ``env://`` rendezvous ``torch.distributed`` reads by default).
 
+    Rendezvous override: if ``GRADWAVE_DIST_INIT_METHOD`` is set it is used as
+    the ``init_method`` instead of ``env://`` (with ``rank``/``world_size`` read
+    from the env). This selects a ``FileStore`` (``file:///shared/path``) on a
+    shared-filesystem launch, or a fixed ``tcp://host:port`` endpoint, without a
+    ``MASTER_ADDR``/``MASTER_PORT`` pair. It is also what the distributed test
+    harness uses: a unique per-test ``file://`` store is collision-proof, where
+    a "free" TCP port drawn by ``bind(0)``/close is not (that TOCTOU race let two
+    concurrent tests reuse one port and deadlock the ``env://`` rendezvous).
+
     Returns ``(rank, world_size, group)``, or ``None`` when ``WORLD_SIZE`` is
     absent or ``1`` (an ordinary single-process run — callers should fall back
     to the non-distributed path, not fail). Idempotent: a process group
@@ -148,7 +157,16 @@ def init_from_env(backend: str = "gloo") -> tuple[int, int, Any] | None:
     import torch.distributed as dist
 
     if not dist.is_initialized():
-        dist.init_process_group(backend=backend)
+        init_method = os.environ.get("GRADWAVE_DIST_INIT_METHOD")
+        if init_method:
+            dist.init_process_group(
+                backend=backend,
+                init_method=init_method,
+                rank=current_rank(),
+                world_size=int(os.environ["WORLD_SIZE"]),
+            )
+        else:
+            dist.init_process_group(backend=backend)
     return dist.get_rank(), dist.get_world_size(), dist.group.WORLD
 
 

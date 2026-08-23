@@ -17,22 +17,13 @@ have. See docs/manual/distributed.md for that follow-up.
 
 from __future__ import annotations
 
-import os
-import socket
-
 import numpy as np
 import pytest
 import torch.multiprocessing as mp
 
-from tests.helpers import RY, si_fcc, si_upf
+from tests.helpers import RY, dist_file_init_method, set_dist_worker_env, si_fcc, si_upf
 
 pytestmark = pytest.mark.standard
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def _build_system(use_symmetry: bool = False):
@@ -57,13 +48,9 @@ _SCF_KWARGS = dict(
 )
 
 
-def _worker(rank: int, world_size: int, port: int, out: dict,
+def _worker(rank: int, world_size: int, init_method: str, out: dict,
             use_symmetry: bool = False) -> None:
-    os.environ["GRADWAVE_NUM_THREADS"] = "1"  # 2 worker processes share this box
-    os.environ["RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = str(port)
+    set_dist_worker_env(rank, world_size, init_method)
 
     from gradwave.core.xc.pbe import PBE
     from gradwave.distributed import init_from_env, shard_system
@@ -93,10 +80,10 @@ def _worker(rank: int, world_size: int, port: int, out: dict,
 
 
 def test_distributed_matches_single_rank():
-    port = _free_port()
+    init_method = dist_file_init_method()
     manager = mp.Manager()
     out = manager.dict()
-    mp.spawn(_worker, args=(2, port, out), nprocs=2, join=True)
+    mp.spawn(_worker, args=(2, init_method, out), nprocs=2, join=True)
 
     from gradwave.core.xc.pbe import PBE
     from gradwave.scf.loop import scf
@@ -123,10 +110,10 @@ def test_distributed_symmetric_scf_matches_single_rank():
     single-process SYMMETRIC run. The rho_symmetrizer rides on each shard and
     is applied to the post-all_reduce global density, so the result must match
     to the same tolerances as the unsymmetrized test above."""
-    port = _free_port()
+    init_method = dist_file_init_method()
     manager = mp.Manager()
     out = manager.dict()
-    mp.spawn(_worker, args=(2, port, out, True), nprocs=2, join=True)
+    mp.spawn(_worker, args=(2, init_method, out, True), nprocs=2, join=True)
 
     from gradwave.core.xc.pbe import PBE
     from gradwave.scf.loop import scf

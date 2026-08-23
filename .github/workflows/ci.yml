@@ -113,10 +113,21 @@ jobs:
         run: uv sync --all-extras
 
       - name: Standard test tier (shard ${{ matrix.group }}/6)
+        # --timeout=1800: per-test wall cap (pytest-timeout). The heaviest integration
+        # tests (ESM constant-mu, alchemical star-unfolding — two full fp64 SCFs) run
+        # ~15-25 min on the SLOW 2-core public runner when several land in one shard and
+        # contend, so 900s was too tight and flaked them. 30 min gives real headroom;
+        # a genuine hang (e.g. an mp.spawn/ProcessPool deadlock) still fails fast with a
+        # traceback instead of running out the 6h job default. signal method (SIGALRM),
+        # not thread: thread cannot interrupt a blocked mp.spawn(join=True) wait, so it
+        # could not have killed the torch.distributed rendezvous deadlock this shard used
+        # to wedge on (now prevented at the source by a collision-proof file:// store —
+        # see gradwave.distributed.init_from_env — this timeout is belt-and-suspenders).
         run: >-
           uv run pytest -m "not slow and not torture and not gpu"
           --dist loadscope --splits 6 --group ${{ matrix.group }}
           --splitting-algorithm least_duration
+          --timeout=1800 --timeout-method=signal
 
   # Single required-status gate. Always runs (so the required check is reported
   # even when lint/test are skipped), and is green iff neither lint nor test
