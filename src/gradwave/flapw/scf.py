@@ -674,6 +674,20 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
             s_ext[npw:, npw:] = np.diag(diag_s)
             h_ext[npw:, npw:] = lo_lo_h
             S, Hm = s_ext, h_ext
+            import os
+            if os.environ.get("GRADWAVE_FLAPW_LO_DIAG"):
+                # In-context LO conditioning: which LO is redundant given the FULL APW basis at
+                # this k/potential (the per-LO cond_tol only sees each LO's own {u,u̇}). Exact,
+                # opt-in (off the hot path). See flapw.lo_schur.
+                from gradwave.flapw.lo_schur import lo_conditioning_report, lo_labels
+                labels = lo_labels(atoms_cart, lodat)
+                redundant, report = lo_conditioning_report(S, npw, labels)
+                print(f"[LO-DIAG] npw={npw} nlo={nlo} in-context resid_frac per LO direction:\n"
+                      f"{report}", flush=True)
+                if redundant:
+                    worst = ", ".join(f"{lbl} (resid_frac={f:.2e})" for f, lbl in redundant)
+                    print(f"[LO-DIAG] REDUNDANT LO directions (spanned by the APW basis): {worst}",
+                          flush=True)
     # ``shift_invert`` is True / False / "auto"; resolve it against the final pencil dim (after any
     # LO extension) — "auto" engages only above the measured crossover, True always attempts (the
     # certificate still guards), False/None never. subspace-aug and shift-invert are alternative
