@@ -194,11 +194,27 @@ The whole build hangs on one make-or-break claim (the deep-dive's "smallest de-r
           The attempt found+fixed 4 real bugs (commits): overlap guard, ghost states (solve_geneig
           canonical orthogonalization not Löwdin-clip), numerov overflow (n_cut), rank-deficient
           eigenvalue padding. Ne unchanged (22.6235). TiO2 (transition metal + more ionic) still harder.
-      [ ] plumbing/benchmark: correct ionic occupation (charge transfer) + multipole pseudocharge →
-          then re-attempt BeO/TiO2 vs Elk. Then differentiable EFG (∂C_Q/∂structure).
-- [ ] Chemical shielding σ (all nuclei) — GIPAW magnetic linear response; a separate large subsystem.
-- [ ] Remaining for a real material vs Elk: a real ionic/metallic case + its Elk reference.
-- [ ] Then #1 DualBasis oxygen gate; then benchmark; then SlepianCore (slabs/molecular crystals).
+
+### Remaining — see the forward plan, not this list
+
+This "remaining" section is superseded. The campaign since shipped the GIPAW
+bare-shielding stack (`postscf.gipaw`, `kgeometry_nmr.sigma_shielding_dq`; task:
+nmr, observable: shielding) and the driver/CLI surface (`api.run_nmr`,
+`gradwave run` rendering) — several bullets below were closed. Two live references
+replace it:
+
+- **Forward plan:** `docs/plans/flapw-nmr-consolidation.md` — the bucketed
+  consolidation plan (driver/CLI, USPP/PAW shielding generalization, retiring the
+  finite-q route, packaging). It explicitly supersedes this section.
+- **The EFG-accuracy blocker is now diagnosed:** `fullpot_convergence.md` (PR #368)
+  — the rutile/anatase EFG deficit is SCF-convergence-limited, NOT a basis/LO gap.
+  The fix is a fullpot-continuation/mixing methodology investment; the cells that DO
+  converge (corundum O/Al, MgF2 F) hit 0.95-0.98 of Elk. The autodiff-basis track and
+  the Mg-2p sign fix are both gated on this convergence fix.
+
+Still genuinely open (tracked in the plan): correct ionic occupation + multipole
+pseudocharge -> re-attempt BeO/TiO2 vs Elk; differentiable EFG; absolute (not bare)
+shielding; the DualBasis oxygen gate; SlepianCore.
 
 Prototypes/tests run on asus per user request (`ssh asus`), heavy runs via ./scripts/gwq.
 
