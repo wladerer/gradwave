@@ -56,14 +56,24 @@ def _run_crystal_scf(inp: Input, *, efg: bool, verbose: bool) -> tuple[Any, dict
             f"flapw.radii is missing a muffin-tin radius (Å) for {sorted(missing)}; "
             f"give one per element under flapw.radii")
     kw: dict[str, Any] = {}
-    if fp.los is not None:
-        kw["los"] = fp.los
+    # The validated EFG anion recipe (l=1 HELO + l=0 2s→2p) as the base, with any
+    # explicit per-species los/el_override overriding it (flapw.basis.merge_basis).
+    if fp.efg_anion_basis is not None:
+        from gradwave.flapw.basis import efg_anion_basis, merge_basis
+        base = efg_anion_basis(list(fp.efg_anion_basis))
+        merged = merge_basis(base, {"los": fp.los, "el_override": fp.el_override})
+        kw["los"] = merged["los"]
+        if merged.get("el_override"):
+            kw["el_override"] = merged["el_override"]
+    else:
+        if fp.los is not None:
+            kw["los"] = fp.los
+        if fp.el_override is not None:
+            kw["el_override"] = fp.el_override
     if fp.val_e is not None:
         kw["val_e"] = fp.val_e
     if fp.core is not None:
         kw["core"] = fp.core
-    if fp.el_override is not None:
-        kw["el_override"] = fp.el_override
     if fp.kerker is not None:
         kw["kerker"] = fp.kerker
     return crystal_scf_multi(
