@@ -70,3 +70,52 @@ already exists to receive it), and it is bit-preserving.
 - `flapw/scf.py:551 _lapw_multi_k` (~165 lines) — the single-iteration multi-k secular build; candidate to split the LO / non-spherical-augmentation branches.
 - `postscf/kgeometry_nmr.py:648 induced_current_q` (~158 lines) and `:951 sigma_shielding` (~126 lines) — long but linear-response assembly with distinct physical stages; split by stage if touched.
 - `flapw/scf.py:1112 _multi_setup` (~113) and `:1692 crystal_scf_multi` (~121) — orchestration; acceptable, lower priority.
+
+
+---
+
+## Phase-2 radial-numerics dedup — DONE / deferred (2026-08-23, branch `flapw-radial-dedup`)
+
+Assessed the deferred radial-numerics candidates against the strict **bit-preserving**
+bar (every consolidation must be numerically identical to ≤1e-12, verified by a fast
+unit test, or it is not done). One genuine byte-identical duplicate was found and
+consolidated; the two headline candidates (accurate-Bessel routing, composite Simpson)
+both *change numbers* and are left deferred with the reason recorded.
+
+### DONE — `coulomb.grid_gvectors`: the shared FFT-grid G-vector build (bit-preserving)
+
+Three sites carried a byte-identical `reciprocal(cell_matrix(...))` → `fftfreq` →
+`meshgrid` → `G = m·B` component build:
+- `coulomb.g2_grid` (unflattened `(Gx,Gy,Gz)` + `|G|²`),
+- `coulomb.gvec_ylm_tables` (flattened `(n³,3)` gvec for the Weinert G-space machinery),
+- `efg._surface_phases` (flattened `(n³,3)` gvec for the EFG surface projection).
+
+Extracted `coulomb.grid_gvectors(a, n) -> (n³,3)` and routed all three through it.
+`g2_grid` reshapes the flattened components back to `(n,n,n)` — a C-order round-trip, so
+its `(g2, (Gx,Gy,Gz))` return is unchanged. **Verified bit-for-bit** (`np.array_equal`,
+exact) against the inline expression on cubic / orthorhombic / triclinic cells in
+`tests/unit/test_review_dedup.py::{test_grid_gvectors_matches_inline,
+test_g2_grid_bitidentical_after_dedup, test_gvec_ylm_tables_gvec_bitidentical,
+test_efg_surface_phases_gvec_bitidentical}` — residual is exactly 0. Existing
+`test_flapw_weinert.py` / `test_flapw_efg.py` fast guards stay green.
+
+### DEFERRED — not bit-preserving (would move numbers)
+
+- **D2 accurate spherical Bessel (`lapw` scipy → `pseudo.radial.sph_jl`).** `sph_jl` is
+  *more* accurate than `scipy.spherical_jn` (~1e-14 vs ~1e-9 at small x), so routing
+  `lapw.match_ab` / `match_ab_vec` through it **changes the LAPW match coefficients by up
+  to ~1e-9** at small `x=|k+G|R` — an improvement, but NOT bit-preserving, and guarded
+  only by slow-tier SCF. The coulomb sites need l=11–15, past `sph_jl`'s l≤4 cap
+  (infeasible without extending the series impl). Left as-is; revisit under an asus SCF
+  regression, not a bit-preserving pass.
+- **Composite Simpson (`pseudo.radial.simpson`) into flapw radial integrals.** The flapw
+  radial integrals (`coulomb.hartree`, `coulomb.radial_poisson_to_R`,
+  `efg.lx_sphere_poisson`) are **cumulative** rectangle integrals (running `cumsum`), not
+  single definite integrals, so `simpson` (which returns a scalar) does not fit them.
+  `radial_eigs_tridiag`'s normalization *is* a single `Σu²·(r·dx)` integral, but swapping
+  the rectangle sum for Simpson changes the normalization constant well above 1e-12.
+  Higher-order quadrature here is a numerical *change*, not a dedup → not done.
+- **Ylm / sph_harm.** The only shared complex-Ylm-on-directions core (inventory S3) spans
+  `scf.py` (`_ylm_star`), which is **out of scope** (SCF-convergence agent's turf) — not
+  touched. Within coulomb/efg the Ylm uses are legitimately distinct (evaluation vs
+  surface-direction phases), per the inventory's Ylm audit. Left as-is.

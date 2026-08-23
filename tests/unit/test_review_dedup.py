@@ -193,3 +193,69 @@ def test_davidson_singlek_batched_conjugation_agree():
                           torch.ones(1, m, dtype=torch.bool), tol=1e-10)
     assert torch.allclose(sk.eigenvalues, ref, atol=1e-8)
     assert torch.allclose(sk.eigenvalues, bk.eigenvalues[0], atol=1e-8)
+
+
+# --------------------------------------------------------------------------- #
+# Finding: shared FFT-grid G-vector construction
+#   coulomb.grid_gvectors is the one flattened ``G = m·B`` build behind
+#   coulomb.{g2_grid, gvec_ylm_tables} and efg._surface_phases — the three
+#   sites previously carried a byte-identical meshgrid/component copy each.
+#   These pin the refactor bit-for-bit against the inline expression so the
+#   copies cannot silently reappear or drift.
+# --------------------------------------------------------------------------- #
+def _inline_gvecs(a, n):
+    from gradwave.flapw.coulomb import reciprocal
+    b = reciprocal(a)
+    fi = np.fft.fftfreq(n, d=1.0 / n)
+    mx, my, mz = np.meshgrid(fi, fi, fi, indexing="ij")
+    return np.stack([mx * b[0, 0] + my * b[1, 0] + mz * b[2, 0],
+                     mx * b[0, 1] + my * b[1, 1] + mz * b[2, 1],
+                     mx * b[0, 2] + my * b[1, 2] + mz * b[2, 2]], axis=-1).reshape(-1, 3)
+
+
+@pytest.mark.parametrize("cell", [
+    5.4,                                         # cubic scalar
+    np.array([4.0, 5.0, 6.0]),                   # orthorhombic edges
+    np.array([[4.0, 0.3, 0.0],                   # triclinic
+              [0.5, 4.2, 0.1],
+              [0.2, 0.4, 3.8]]),
+])
+def test_grid_gvectors_matches_inline(cell):
+    from gradwave.flapw.coulomb import cell_matrix, grid_gvectors
+    a = cell_matrix(cell)
+    n = 12
+    # helper is byte-for-byte the inline meshgrid/component build
+    assert np.array_equal(grid_gvectors(a, n), _inline_gvecs(a, n))
+
+
+def test_g2_grid_bitidentical_after_dedup():
+    from gradwave.flapw.coulomb import cell_matrix, g2_grid
+    for cell in (5.4, np.array([[4.0, 0.3, 0.0], [0.5, 4.2, 0.1], [0.2, 0.4, 3.8]])):
+        n = 12
+        g = _inline_gvecs(cell_matrix(cell), n)
+        Gx = g[:, 0].reshape(n, n, n)
+        Gy = g[:, 1].reshape(n, n, n)
+        Gz = g[:, 2].reshape(n, n, n)
+        g2, (gx, gy, gz) = g2_grid(n, cell)
+        # exact equality: pure re-association of the same arithmetic
+        assert np.array_equal(g2, Gx**2 + Gy**2 + Gz**2)
+        assert np.array_equal(gx, Gx) and np.array_equal(gy, Gy) and np.array_equal(gz, Gz)
+
+
+def test_gvec_ylm_tables_gvec_bitidentical():
+    from gradwave.flapw.coulomb import cell_matrix, gvec_ylm_tables
+    a = cell_matrix(np.array([[4.0, 0.3, 0.0], [0.5, 4.2, 0.1], [0.2, 0.4, 3.8]]))
+    n, lmax = 10, 2
+    gvec, gnorm, _ylm = gvec_ylm_tables(a, n, lmax)
+    ref = _inline_gvecs(a, n)
+    assert np.array_equal(gvec, ref)
+    assert np.array_equal(gnorm, np.linalg.norm(ref, axis=-1))
+
+
+def test_efg_surface_phases_gvec_bitidentical():
+    from gradwave.flapw.coulomb import cell_matrix
+    from gradwave.flapw.efg import _surface_phases
+    a = cell_matrix(np.array([[4.0, 0.3, 0.0], [0.5, 4.2, 0.1], [0.2, 0.4, 3.8]]))
+    nfft = 10
+    _e0, gvec = _surface_phases(a, nfft, R=1.3, nx=6, nphi=8)
+    assert np.array_equal(gvec, _inline_gvecs(a, nfft))
