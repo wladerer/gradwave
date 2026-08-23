@@ -73,6 +73,20 @@ def reciprocal(A: np.ndarray) -> np.ndarray:
     return 2 * math.pi * np.linalg.inv(A).T
 
 
+def grid_gvectors(a: np.ndarray, n: int) -> np.ndarray:
+    """Flattened Cartesian G-vectors ``(n³, 3)`` of the ``n³`` FFT grid over cell matrix ``a``
+    (rows = lattice vectors, Å): ``G = m·B`` with ``B = reciprocal(a)`` and ``m`` the ``fftfreq``
+    Miller indices in C order. The one G-vector construction shared by the G-space Weinert
+    machinery (:func:`g2_grid`, :func:`gvec_ylm_tables`) and the EFG surface projection
+    (``efg._surface_phases``)."""
+    b = reciprocal(a)
+    fi = np.fft.fftfreq(n, d=1.0 / n)
+    mx, my, mz = np.meshgrid(fi, fi, fi, indexing="ij")
+    return np.stack([mx * b[0, 0] + my * b[1, 0] + mz * b[2, 0],
+                     mx * b[0, 1] + my * b[1, 1] + mz * b[2, 1],
+                     mx * b[0, 2] + my * b[1, 2] + mz * b[2, 2]], axis=-1).reshape(-1, 3)
+
+
 def _min_image_dist(cfrac, n, A):
     """Cartesian minimum-image distance from fractional centre ``cfrac`` to every ``n³`` grid point.
     Per-component wrap suffices for orthogonal axes; general cells search neighbour images."""
@@ -92,12 +106,8 @@ def _min_image_dist(cfrac, n, A):
 def g2_grid(n: int, L):
     """``|G|²`` (Å⁻²) and the G-vector components on an ``n³`` FFT grid over the fractional cell.
     ``L`` is a cubic side, length-3 orthorhombic edges, or a 3×3 triclinic cell; ``G = m·B``."""
-    B = reciprocal(cell_matrix(L))
-    fi = np.fft.fftfreq(n, d=1.0 / n)
-    MX, MY, MZ = np.meshgrid(fi, fi, fi, indexing="ij")
-    Gx = MX * B[0, 0] + MY * B[1, 0] + MZ * B[2, 0]
-    Gy = MX * B[0, 1] + MY * B[1, 1] + MZ * B[2, 1]
-    Gz = MX * B[0, 2] + MY * B[1, 2] + MZ * B[2, 2]
+    gvec = grid_gvectors(cell_matrix(L), n)
+    Gx, Gy, Gz = (gvec[:, i].reshape(n, n, n) for i in range(3))
     return Gx**2 + Gy**2 + Gz**2, (Gx, Gy, Gz)
 
 
@@ -142,12 +152,7 @@ def gvec_ylm_tables(cell, n: int, lmax: int):
     if hit is not None:
         return hit
     from scipy.special import sph_harm_y
-    b = reciprocal(a)
-    fi = np.fft.fftfreq(n, d=1.0 / n)
-    mx, my, mz = np.meshgrid(fi, fi, fi, indexing="ij")
-    gvec = np.stack([mx * b[0, 0] + my * b[1, 0] + mz * b[2, 0],
-                     mx * b[0, 1] + my * b[1, 1] + mz * b[2, 1],
-                     mx * b[0, 2] + my * b[1, 2] + mz * b[2, 2]], axis=-1).reshape(-1, 3)
+    gvec = grid_gvectors(a, n)
     gnorm = np.linalg.norm(gvec, axis=-1)
     gs = np.where(gnorm < 1e-12, 1.0, gnorm)
     th = np.arccos(np.clip(gvec[:, 2] / gs, -1.0, 1.0))

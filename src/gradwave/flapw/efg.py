@@ -23,7 +23,7 @@ from collections import OrderedDict
 import numpy as np
 
 from gradwave.constants import E2
-from gradwave.flapw.coulomb import cell_matrix, reciprocal
+from gradwave.flapw.coulomb import cell_matrix, grid_gvectors
 
 
 def _angular_grid(nx: int, nphi: int):
@@ -359,12 +359,7 @@ def _surface_phases(a, nfft, R, nx: int, nphi: int):
     if hit is not None:
         _PHASE_CACHE.move_to_end(key)
         return hit
-    b = reciprocal(a)
-    fi = np.fft.fftfreq(nfft, d=1.0 / nfft)
-    mx, my, mz = np.meshgrid(fi, fi, fi, indexing="ij")
-    gvec = np.stack([mx * b[0, 0] + my * b[1, 0] + mz * b[2, 0],
-                     mx * b[0, 1] + my * b[1, 1] + mz * b[2, 1],
-                     mx * b[0, 2] + my * b[1, 2] + mz * b[2, 2]], axis=-1).reshape(-1, 3)
+    gvec = grid_gvectors(a, nfft)
     th, ph, _wgt = _angular_grid(nx, nphi)
     dirs = np.stack([np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)], axis=-1)
     e0 = np.exp(1j * (R * dirs.reshape(-1, 3) @ gvec.T))           # (npts, nfft^3)
