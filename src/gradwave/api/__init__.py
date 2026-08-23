@@ -22,6 +22,8 @@ from gradwave.api.dispatch import run_magnetism as run_magnetism
 from gradwave.api.dispersion import _compute_dispersion as _compute_dispersion
 from gradwave.api.elastic import run_elastic as run_elastic
 from gradwave.api.eos import run_eos as run_eos
+from gradwave.api.flapw import run_flapw as run_flapw
+from gradwave.api.flapw import run_nmr as run_nmr
 from gradwave.api.phonons import run_phonons as run_phonons
 from gradwave.api.relax import _build_relax_calc as _build_relax_calc
 from gradwave.api.relax import _joint_supported as _joint_supported
@@ -45,7 +47,9 @@ __all__ = [
     "run",
     "run_eos",
     "run_elastic",
+    "run_flapw",
     "run_magnetism",
+    "run_nmr",
     "run_phonons",
     "run_relax",
     "run_scf",

@@ -18,6 +18,7 @@ from gradwave.inputs.models import (
     DispersionParams,
     ElasticParams,
     EOSParams,
+    FlapwParams,
     HubbardManifoldSpec,
     HubbardParams,
     HybridParams,
@@ -27,6 +28,7 @@ from gradwave.inputs.models import (
     MagneticParams,
     MagnetismParams,
     MixingParams,
+    NmrParams,
     PhononParams,
     ProjectionsParams,
     RelaxParams,
@@ -256,6 +258,7 @@ _ALLOWED_TOP = {
     "kpoints", "smearing", "nbands", "symmetry", "nspin", "noncollinear",
     "nonmagnetic", "start_mag", "tot_magnetization",
     "scf", "task", "relax", "bands", "magnetism", "eos", "elastic", "phonons",
+    "flapw", "nmr",
     "projections", "dispersion", "device", "distributed",
     "verbose", "output", "error_estimate", "restart",
 }
@@ -503,6 +506,32 @@ def _build_hubbard(
                          occ_mix=occ_mix, u_ramp_iters=u_ramp_iters)
 
 
+def _build_flapw(raw: dict[str, Any], symbols: Iterable[str]) -> FlapwParams:
+    """Parse the ``flapw`` block (all-electron muffin-tin controls). ``radii`` is
+    a per-species muffin-tin radius map (Å) and must cover every element in the
+    structure for an EFG/FLAPW run; the LO/basis overrides pass through opaque."""
+    _check_keys("flapw", raw, {f.name for f in dataclasses.fields(FlapwParams)})
+    radii = {str(k): float(v) for k, v in dict(raw.get("radii", {})).items()}
+    present = set(symbols)
+    missing = present - set(radii)
+    if radii and missing:
+        raise InputError(
+            f"flapw.radii is missing a muffin-tin radius for {sorted(missing)} "
+            f"(every element needs one)")
+    kw = {k: raw[k] for k in raw if k not in ("radii",)}
+    return FlapwParams(radii=radii, **kw)
+
+
+def _build_nmr(raw: dict[str, Any]) -> NmrParams:
+    """Parse the ``nmr`` block: the observable ``task`` (efg | shielding) and an
+    optional per-species ``isotopes`` map for the EFG quadrupolar coupling."""
+    _check_keys("nmr", raw, {f.name for f in dataclasses.fields(NmrParams)})
+    iso = raw.get("isotopes")
+    if iso is not None:
+        iso = {str(k): str(v) for k, v in dict(iso).items()}
+    return NmrParams(task=str(raw.get("task", "efg")), isotopes=iso)
+
+
 def _load_input(path: Path) -> Input:
     raw_yaml: Any = yaml.safe_load(path.read_text())
     base = path.parent
@@ -511,13 +540,29 @@ def _load_input(path: Path) -> Input:
         raise InputError("input must be a YAML mapping of keywords")
     raw: dict[str, Any] = raw_yaml
     _check_keys("input", raw, _ALLOWED_TOP)
-    for req in ("structure", "pseudopotentials", "ecut"):
-        if req not in raw:
+
+    # All-electron FLAPW tasks (task: flapw, and task: nmr with the EFG
+    # observable) carry no plane-wave pseudopotentials and no top-level ecut —
+    # the muffin-tin stack has its own interstitial cutoff in the `flapw` block.
+    # The plane-wave shielding NMR observable (task: nmr, nmr.task: shielding)
+    # runs the ordinary PW SCF, so it DOES need pseudopotentials and ecut.
+    task = raw.get("task", "scf")
+    nmr_raw = dict(raw.get("nmr", {}))
+    nmr_task = str(nmr_raw.get("task", "efg"))
+    all_electron = task == "flapw" or (task == "nmr" and nmr_task == "efg")
+
+    if "structure" not in raw:
+        raise InputError("missing required key 'structure'")
+    for req in ("pseudopotentials", "ecut"):
+        if req not in raw and not all_electron:
             raise InputError(f"missing required key {req!r}")
 
     atoms, fixed = _load_structure(raw["structure"], base)
-    pseudo_dir, pseudo_map = _resolve_pseudopotentials(
-        raw["pseudopotentials"], base, atoms.get_chemical_symbols())
+    if all_electron and "pseudopotentials" not in raw:
+        pseudo_dir, pseudo_map = base, {}
+    else:
+        pseudo_dir, pseudo_map = _resolve_pseudopotentials(
+            raw["pseudopotentials"], base, atoms.get_chemical_symbols())
 
     kp = raw.get("kpoints", {})
     _check_keys("kpoints", kp, {"mesh", "shift"})
@@ -535,12 +580,12 @@ def _load_input(path: Path) -> Input:
     _check_keys("scf.diago", diago, {"tol"})
 
     xc, hybrid = _resolve_xc(raw)
-    task = raw.get("task", "scf")
     if task not in ("scf", "relax", "bands", "magnetism", "eos", "elastic",
-                    "phonons"):
+                    "phonons", "flapw", "nmr"):
         raise InputError(
             f"unknown task {task!r} "
-            f"(scf | relax | bands | magnetism | eos | elastic | phonons)")
+            f"(scf | relax | bands | magnetism | eos | elastic | phonons | "
+            f"flapw | nmr)")
     nspin = int(raw.get("nspin", 1))
     if nspin not in (1, 2):
         raise InputError(f"nspin must be 1 or 2, got {nspin}")
@@ -641,7 +686,10 @@ def _load_input(path: Path) -> Input:
     restart = raw.get("restart")
 
     nbands = raw.get("nbands", "auto")
-    ecut = float(raw["ecut"])
+    # An all-electron FLAPW/EFG run has no plane-wave ecut (its cutoff lives in
+    # the `flapw` block); a placeholder keeps the Input field populated and
+    # unused. Every other task requires a positive ecut.
+    ecut = float(raw["ecut"]) if "ecut" in raw else (1.0 if all_electron else 0.0)
     if ecut <= 0.0:
         raise InputError(f"ecut must be > 0 eV, got {ecut}")
     ecutrho = raw.get("ecutrho")
@@ -693,6 +741,9 @@ def _load_input(path: Path) -> Input:
         eos=_build(EOSParams, raw.get("eos", {}), "eos"),
         elastic=_build(ElasticParams, raw.get("elastic", {}), "elastic"),
         phonons=_build(PhononParams, raw.get("phonons", {}), "phonons"),
+        flapw=_build_flapw(dict(raw.get("flapw", {})),
+                           atoms.get_chemical_symbols()),
+        nmr=_build_nmr(nmr_raw),
         projections=projections,
         dispersion=dispersion,
         device=raw.get("device", "cpu"),
