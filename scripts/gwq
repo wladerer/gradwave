@@ -2,7 +2,7 @@
 """gwq — gradwave job queue.
 
 A thin wrapper over `pueue` that gives every agent (and you) one shared,
-load-limited way to run tests and benchmarks across the thinkpad + asus fleet.
+load-limited way to run tests and benchmarks across the thinkpad + asus + p1 fleet.
 The point is admission control: no matter how many agents submit at once, the
 per-host `pueued` daemon enforces a fixed slot budget per group, so the boxes
 never thrash. See docs/queue.md for the full picture.
@@ -58,6 +58,8 @@ REPO = os.path.expanduser("~/github/gradwave")
 HOST_GROUPS: dict[str, dict[str, int]] = {
     "thinkpad": {"default": 2, "test": 1, "bench": 1, "sweep": 1},
     "asus": {"default": 4, "test": 2, "bench": 1, "sweep": 1, "gpu": 1},
+    # p1: ThinkPad P1, 12 cores / 30 GB (Quadro) — between the thinkpad and asus.
+    "p1": {"default": 3, "test": 2, "bench": 1, "sweep": 1, "gpu": 1},
 }
 # Fallback for an unrecognised host: conservative, laptop-like.
 DEFAULT_GROUPS = {"default": 2, "test": 1, "bench": 1, "sweep": 1}
