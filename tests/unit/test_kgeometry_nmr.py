@@ -22,7 +22,7 @@ from gradwave.postscf.kgeometry_nmr import (
     velocity_perturbation_q,
 )
 from gradwave.scf.loop import scf, setup_system
-from tests.helpers import RY, si_fcc, si_upf
+from tests.helpers import RY, pseudo, si_fcc, si_upf
 
 
 @pytest.fixture(scope="module")
@@ -913,3 +913,90 @@ def test_sigma_dq_uspp_nc_limit_reduction():
     resid = float((sig_gate - sig_nc).abs().max())
     scale = max(abs(iso), 1.0)
     assert resid < 1e-9 * scale, f"S-metric route drifts from NC by {resid:.3e} ppm"
+
+
+# --------------------------------------------------------------------------- #
+# PR-analytic-B: on-site paramagnetic augmentation (σ_para_aug)                 #
+# --------------------------------------------------------------------------- #
+
+
+def _si_paw_222():
+    """Converged Si PAW ground state on an unreduced 2×2×2 mesh (>=2 axes so the
+    shielding tensor is determined)."""
+    from gradwave.pseudo.upf_paw import parse_upf_paw
+    from gradwave.scf.uspp import scf_uspp, setup_uspp
+
+    torch.set_num_threads(2)
+    paw = parse_upf_paw(pseudo("Si.pbe-n-kjpaw_psl.1.0.0.UPF"))
+    cell, pos = si_fcc()
+    system = setup_uspp(cell, pos, [0, 0], [paw], ecut=12 * RY,
+                        kmesh=(2, 2, 2), ecutrho=48 * RY, nbands=8)
+    res = scf_uspp(system, PBE(), etol=1e-8, rhotol=1e-7, diago_tol=1e-9,
+                   verbose=False, max_iter=60)
+    assert res["converged"]
+    return paw, res
+
+
+@pytest.mark.standard
+def test_para_augmentation_si_site_consistency():
+    """On-site paramagnetic-augmentation shielding, assembled end to end from the
+    S-metric magnetic Sternheimer response.
+
+    ``para_augmentation_shielding`` runs ``velocity_perturbation_q`` (generalized
+    velocity ∂H/∂k − ε∂S/∂k, USPP ctx) on the ±q pair of each mesh axis, projects
+    δu onto the on-site overlap projectors, contracts with the ground projection
+    (X_β = ``becps`` ⊗ ⟨p̃|δu⟩), gauge-references each nucleus, and feeds X_β to
+    ``gipaw.para_aug_tensor``. On cubic diamond Si the per-site tensor must be
+    isotropic AND the two symmetry-equivalent sites must agree — the internal
+    consistency gate that validates the per-nucleus gauge referencing (an
+    off-origin atom is only correct once its vector potential is referenced to its
+    own site). With ``pref = R_E`` (no free scale) the isotropic on-site
+    paramagnetic term is ≈ −436 ppm at 12 Ry: the deshielding that brings the
+    core (≈838) + smooth-valence sum down to the ≈400 ppm absolute ²⁹Si σ."""
+    from gradwave.postscf.gipaw import R_E_ANG, PAWOnSite
+    from gradwave.postscf.kgeometry_nmr import (
+        build_uspp_response_ctx,
+        para_augmentation_shielding,
+    )
+
+    paw, res = _si_paw_222()
+    ctx = build_uspp_response_ctx(res, PBE())
+    onsites = {0: PAWOnSite.from_paw(paw)}
+    sig = para_augmentation_shielding(res, ctx, onsites, pref=R_E_ANG, cg_tol=1e-8)
+
+    assert sig.shape == (2, 3, 3)
+    assert torch.isfinite(sig).all()
+    for a in range(2):
+        d = torch.diagonal(sig[a])
+        off = (sig[a] - torch.diag_embed(d)).abs().max()
+        assert float(off) < 1e-2  # cubic site → isotropic tensor
+        assert float(d.std()) < 1e-2
+    iso = [float(torch.diagonal(sig[a]).mean()) for a in range(2)]
+    assert abs(iso[0] - iso[1]) < 1.0  # equivalent sites agree (gauge-ref gate)
+    assert -600.0 < iso[0] < -300.0  # order + sign (deshielding), ≈ −436
+
+    # a species absent from `onsites` (e.g. a norm-conserving atom) is a zero
+    # tensor, not an error.
+    sig_none = para_augmentation_shielding(res, ctx, {}, pref=R_E_ANG, cg_tol=1e-8)
+    assert float(sig_none.abs().max()) == 0.0
+
+
+@pytest.mark.slow
+def test_sigma_shielding_gipaw_si_absolute():
+    """Full absolute GIPAW σ = σ_bare + σ_core + σ_dia_aug + σ_para_aug for
+    diamond Si lands near the ≈400 ppm absolute ²⁹Si isotropic shielding, with
+    ``pref = R_E`` and no free scale. Slow: the smooth analytic-USPP bare route
+    (``sigma_shielding_dq`` through the S-metric dense-eigh path) dominates the
+    wall time. Reference numbers at 12 Ry / 2×2×2: core ≈ 838, bare ≈ −5.7,
+    dia_aug ≈ 2.2, para_aug ≈ −436 ⇒ total ≈ 398 ppm."""
+    from gradwave.postscf.kgeometry_nmr import (
+        build_uspp_response_ctx,
+        sigma_shielding_gipaw,
+    )
+
+    paw, res = _si_paw_222()
+    ctx = build_uspp_response_ctx(res, PBE())
+    out = sigma_shielding_gipaw(res, ctx, [paw], use_symmetry=False, cg_tol=1e-8)
+    total_iso = [float(torch.diagonal(out["total"][a]).mean()) for a in range(2)]
+    assert abs(total_iso[0] - total_iso[1]) < 1.0
+    assert 360.0 < total_iso[0] < 440.0  # ≈ 398 ppm vs the ≈400 ppm target
