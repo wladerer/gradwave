@@ -22,7 +22,6 @@ import sys
 import numpy as np
 from scipy.special import sph_harm_y
 
-sys.path.insert(0, "/home/wladerer/github/gradwave/.claude/worktrees/lightcation-efg-diag/src")
 from gradwave.flapw.efg import _tensor_from_v  # noqa: E402
 
 HA_EV = 97.173654
