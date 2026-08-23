@@ -319,8 +319,8 @@ def _si_diamond(a=5.43):
     return cell, pos
 
 
-@pytest.mark.timeout(1800)  # two full SCFs (full mesh + IBZ) — exceeds the 900s CI
-# per-test cap on the slow 2-core public runner; not a hang (dies mid-FFT), so give it 30 min
+# two full SCFs (full mesh + IBZ), minutes-class on the slow 2-core CI runner → nightly (slow) tier
+@pytest.mark.slow
 def test_alchemical_star_unfolding_matches_full_mesh():
     """IBZ-reduced Si→Ge alchemical response == full-mesh, via star-unfolding.
 

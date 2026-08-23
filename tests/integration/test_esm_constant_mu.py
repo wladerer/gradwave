@@ -16,7 +16,9 @@ from gradwave.scf.loop import scf, setup_system
 from tests.helpers import RY, pseudo
 
 
-@pytest.mark.standard
+# minutes-class on the slow 2-core CI runner (a constant-mu SCF that floats charge
+# needs many Davidson iters) — exceeded even the 1800s cap; nightly (slow) tier, not the PR gate.
+@pytest.mark.slow
 def test_constant_mu_scf_floats_charge():
     na = parse_upf(pseudo("Na_ONCV_PBE_sr.upf"))
     cell = np.diag([6.0, 6.0, 16.0])
