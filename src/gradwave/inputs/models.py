@@ -611,7 +611,14 @@ class FlapwParams:
     ``{"e": <label-or-eV>, "confine": false}`` (an unconfined HELO); ``val_e =
     {species: n}`` raises the valence count when an LO carries semicore, ``core =
     {species: [[l, n, occ], ...]}`` overrides the frozen core, and
-    ``el_override = {species: {l: spec}}`` moves a linearization energy."""
+    ``el_override = {species: {l: spec}}`` moves a linearization energy.
+
+    ``efg_anion_basis = [species, ...]`` opts the named anion species into the
+    validated EFG anion recipe (an unconfined l=1 HELO + the l=0 2s→2p semicore LO;
+    see ``flapw.basis.efg_anion_basis``) — the accuracy recipe for the on-site
+    aspherical EFG density and biaxial frame. It is merged as the base; any explicit
+    ``los``/``el_override`` for the same species overrides it. It is opt-in per named
+    species (anion role is compound-dependent), not applied by element."""
 
     radii: dict[str, float] = field(default_factory=dict)  # {species: R_MT} in Å
     ecut: float = 200.0        # interstitial plane-wave cutoff (FLAPW units)
@@ -627,6 +634,9 @@ class FlapwParams:
     val_e: dict[str, int] | None = None    # per-species valence-electron count
     core: dict[str, Any] | None = None     # per-species frozen-core override
     el_override: dict[str, Any] | None = None  # per-species linearization energy
+    efg_anion_basis: list[str] | None = None   # anion species → apply the validated EFG
+    #                                            anion recipe (l=1 HELO + l=0 2s→2p);
+    #                                            explicit los/el_override override it per species
 
     def __post_init__(self):
         if self.ecut <= 0.0:
@@ -642,6 +652,14 @@ class FlapwParams:
         if any(r <= 0.0 for r in self.radii.values()):
             raise InputError(
                 "flapw.radii muffin-tin radii must be positive (Å)")
+        if self.efg_anion_basis is not None:
+            if len(set(self.efg_anion_basis)) != len(self.efg_anion_basis):
+                raise InputError("flapw.efg_anion_basis has duplicate species")
+            unknown = set(self.efg_anion_basis) - set(self.radii)
+            if unknown:
+                raise InputError(
+                    f"flapw.efg_anion_basis names species with no flapw.radii: "
+                    f"{sorted(unknown)}")
 
 
 @dataclass(frozen=True)
