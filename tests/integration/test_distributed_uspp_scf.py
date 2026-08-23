@@ -19,15 +19,13 @@ docs/manual/distributed.md).
 
 from __future__ import annotations
 
-import os
-import socket
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch.multiprocessing as mp
 
-from tests.helpers import RY
+from tests.helpers import RY, dist_file_init_method, set_dist_worker_env
 
 # nightly: distributed-vs-single-rank is a structural-equivalence guard on the
 # k-sharding path, which changes rarely; a refactor that touches it runs the full
@@ -38,12 +36,6 @@ FIX = Path(__file__).parents[1] / "fixtures" / "qe"
 SI_CELL = 5.43 / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
 SI_POS_DISP = np.array([[0.0, 0.0, 0.0], [1.4075, 1.3175, 1.3775]])
 SI_POS_IDEAL = np.array([[0.0, 0.0, 0.0], [1.3575, 1.3575, 1.3575]])
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def _build_system(use_symmetry: bool = False):
@@ -66,13 +58,9 @@ def _build_system(use_symmetry: bool = False):
 _SCF_KWARGS = dict(etol=1e-10, rhotol=1e-9, max_iter=80, verbose=False)
 
 
-def _worker(rank: int, world_size: int, port: int, hubbard: bool, out: dict,
+def _worker(rank: int, world_size: int, init_method: str, hubbard: bool, out: dict,
             use_symmetry: bool = False) -> None:
-    os.environ["GRADWAVE_NUM_THREADS"] = "1"  # 2 worker processes share this box
-    os.environ["RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = str(port)
+    set_dist_worker_env(rank, world_size, init_method)
 
     from gradwave.core.xc.pbe import PBE
     from gradwave.distributed import init_from_env, shard_uspp_system
@@ -107,10 +95,10 @@ def _worker(rank: int, world_size: int, port: int, hubbard: bool, out: dict,
 
 
 def _run(hubbard: bool, use_symmetry: bool = False):
-    port = _free_port()
+    init_method = dist_file_init_method()
     manager = mp.Manager()
     out = manager.dict()
-    mp.spawn(_worker, args=(2, port, hubbard, out, use_symmetry), nprocs=2, join=True)
+    mp.spawn(_worker, args=(2, init_method, hubbard, out, use_symmetry), nprocs=2, join=True)
 
     from gradwave.core.xc.pbe import PBE
     from gradwave.scf.uspp import scf_uspp

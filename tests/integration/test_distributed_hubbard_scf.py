@@ -17,22 +17,13 @@ rather than inventing a new fixture.
 
 from __future__ import annotations
 
-import os
-import socket
-
 import numpy as np
 import pytest
 import torch.multiprocessing as mp
 
-from tests.helpers import RY, pseudo
+from tests.helpers import RY, dist_file_init_method, pseudo, set_dist_worker_env
 
 pytestmark = pytest.mark.standard
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def _diamond_c_system():
@@ -67,12 +58,8 @@ _SCF_KWARGS = dict(
 )
 
 
-def _worker(rank: int, world_size: int, port: int, out: dict) -> None:
-    os.environ["GRADWAVE_NUM_THREADS"] = "1"  # 2 worker processes share this box
-    os.environ["RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = str(port)
+def _worker(rank: int, world_size: int, init_method: str, out: dict) -> None:
+    set_dist_worker_env(rank, world_size, init_method)
 
     from gradwave.core.xc.pbe import PBE
     from gradwave.distributed import init_from_env, shard_system
@@ -104,10 +91,10 @@ def _worker(rank: int, world_size: int, port: int, out: dict) -> None:
 
 
 def test_distributed_hubbard_matches_single_rank():
-    port = _free_port()
+    init_method = dist_file_init_method()
     manager = mp.Manager()
     out = manager.dict()
-    mp.spawn(_worker, args=(2, port, out), nprocs=2, join=True)
+    mp.spawn(_worker, args=(2, init_method, out), nprocs=2, join=True)
 
     from gradwave.core.xc.pbe import PBE
     from gradwave.scf.loop import scf

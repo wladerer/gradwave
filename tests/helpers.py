@@ -69,3 +69,51 @@ def fept_l10(a: float = 2.723, c: float = 3.712):
     cell = np.diag([a, a, c])
     pos = np.array([[0.0, 0, 0], [0.5, 0.5, 0.5]]) @ cell
     return cell, pos
+
+
+# --- Distributed (torch.multiprocessing) test rendezvous ---------------------
+#
+# The `tests/integration/test_distributed_*.py` suite spawns local Gloo ranks
+# with ``torch.multiprocessing`` and rendezvous them through
+# ``gradwave.distributed.init_from_env``. These two helpers are the ONE place
+# that decides *how* those ranks find each other; every distributed test uses
+# them so the scheme stays consistent and DRY.
+
+
+def dist_file_init_method() -> str:
+    """A collision-proof ``torch.distributed`` ``file://`` rendezvous URL.
+
+    Each call returns a URL naming a fresh, unique, not-yet-existing temp file
+    (torch's ``FileStore`` creates it on first use). A spawned worker passes
+    this to ``init_from_env`` (via ``GRADWAVE_DIST_INIT_METHOD``) instead of a
+    TCP ``MASTER_PORT``.
+
+    Why not a "free" TCP port: the old ``_free_port()`` — ``bind(('',0))`` then
+    *close* — is a TOCTOU race. The port is released before the spawned workers
+    bind it, and under xdist ``--dist loadscope`` the distributed test modules
+    run on different workers CONCURRENTLY, so two can draw the SAME reused port.
+    Their ``env://`` rendezvous then collides with no timeout and
+    ``mp.spawn(join=True)`` blocks forever, wedging the CI shard. A per-test
+    file lives in its own filesystem namespace and cannot collide.
+    """
+    import tempfile
+    import uuid
+
+    return f"file://{Path(tempfile.gettempdir()) / f'gw_pg_{uuid.uuid4().hex}'}"
+
+
+def set_dist_worker_env(rank: int, world_size: int, init_method: str) -> None:
+    """Set the environment a spawned distributed-test worker needs before it
+    calls ``gradwave.distributed.init_from_env()``.
+
+    Uses a ``file://`` rendezvous (``GRADWAVE_DIST_INIT_METHOD``) rather than a
+    TCP ``MASTER_ADDR``/``MASTER_PORT`` so concurrent tests can never collide on
+    a reused port (see :func:`dist_file_init_method`). ``GRADWAVE_NUM_THREADS``
+    is pinned to 1 because the workers share one box.
+    """
+    import os
+
+    os.environ["GRADWAVE_NUM_THREADS"] = "1"
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["GRADWAVE_DIST_INIT_METHOD"] = init_method

@@ -117,12 +117,16 @@ jobs:
         # test approaches 15 min (heaviest are minutes-class SCFs), but a genuine hang
         # (e.g. a multiprocessing deadlock on the 2-core public runner) then fails fast
         # with a traceback naming the test, instead of running out the 6h job default.
-        # thread method survives the xdist workers.
+        # signal method (SIGALRM in the main thread), not thread: the thread method
+        # cannot interrupt a blocked mp.spawn(join=True) / ProcessPool wait, so it
+        # could not kill the torch.distributed rendezvous deadlock this shard used to
+        # wedge on (now prevented at the source by a collision-proof file:// store —
+        # see gradwave.distributed.init_from_env — this is belt-and-suspenders).
         run: >-
           uv run pytest -m "not slow and not torture and not gpu"
           --dist loadscope --splits 6 --group ${{ matrix.group }}
           --splitting-algorithm least_duration
-          --timeout=900 --timeout-method=thread
+          --timeout=900 --timeout-method=signal
 
   # Single required-status gate. Always runs (so the required check is reported
   # even when lint/test are skipped), and is green iff neither lint nor test

@@ -18,14 +18,13 @@ caveat as tests/integration/test_distributed_scf.py.
 from __future__ import annotations
 
 import os
-import socket
 import tempfile
 
 import numpy as np
 import pytest
 import torch.multiprocessing as mp
 
-from tests.helpers import RY, pseudo
+from tests.helpers import RY, dist_file_init_method, pseudo, set_dist_worker_env
 
 pytestmark = pytest.mark.standard
 
@@ -39,10 +38,6 @@ SI_POS_DISP = np.array([[0.0, 0.0, 0.0], [1.30, 1.42, 1.35]])
 SI_POS_IDEAL = np.array([[0.0, 0.0, 0.0], [_A / 4, _A / 4, _A / 4]])
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def _relax_input():
@@ -113,12 +108,8 @@ scf:
     return load_input(path)
 
 
-def _relax_worker(rank: int, world_size: int, port: int, out: dict) -> None:
-    os.environ["GRADWAVE_NUM_THREADS"] = "1"  # 2 worker processes share this box
-    os.environ["RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = str(port)
+def _relax_worker(rank: int, world_size: int, init_method: str, out: dict) -> None:
+    set_dist_worker_env(rank, world_size, init_method)
 
     from gradwave.api import run_relax
 
@@ -135,12 +126,8 @@ def _relax_worker(rank: int, world_size: int, port: int, out: dict) -> None:
     maybe_destroy_process_group()
 
 
-def _eos_worker(rank: int, world_size: int, port: int, out: dict) -> None:
-    os.environ["GRADWAVE_NUM_THREADS"] = "1"
-    os.environ["RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = str(port)
+def _eos_worker(rank: int, world_size: int, init_method: str, out: dict) -> None:
+    set_dist_worker_env(rank, world_size, init_method)
 
     from gradwave.api import run_eos
 
@@ -157,10 +144,10 @@ def _eos_worker(rank: int, world_size: int, port: int, out: dict) -> None:
 
 
 def test_distributed_relax_matches_single_rank():
-    port = _free_port()
+    init_method = dist_file_init_method()
     manager = mp.Manager()
     out = manager.dict()
-    mp.spawn(_relax_worker, args=(2, port, out), nprocs=2, join=True)
+    mp.spawn(_relax_worker, args=(2, init_method, out), nprocs=2, join=True)
 
     from gradwave.api import run_relax
 
@@ -185,10 +172,10 @@ def test_distributed_relax_matches_single_rank():
 
 
 def test_distributed_eos_matches_single_rank():
-    port = _free_port()
+    init_method = dist_file_init_method()
     manager = mp.Manager()
     out = manager.dict()
-    mp.spawn(_eos_worker, args=(2, port, out), nprocs=2, join=True)
+    mp.spawn(_eos_worker, args=(2, init_method, out), nprocs=2, join=True)
 
     from gradwave.api import run_eos
 

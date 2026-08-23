@@ -14,19 +14,13 @@ source device, so a GPU is not needed to exercise the new code path.
 
 from __future__ import annotations
 
-import socket
-
 import pytest
 import torch
 import torch.multiprocessing as mp
 
+from tests.helpers import dist_file_init_method, set_dist_worker_env
+
 pytestmark = pytest.mark.standard
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 # Global, deterministic per-k coefficient block: shape and contents depend only
@@ -67,14 +61,8 @@ def _make_ctx(rank: int, world: int, group, k_start: int, k_end: int):
     )
 
 
-def _worker(rank: int, world: int, port: int, out: dict) -> None:
-    import os
-
-    os.environ["GRADWAVE_NUM_THREADS"] = "1"
-    os.environ["RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world)
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = str(port)
+def _worker(rank: int, world: int, init_method: str, out: dict) -> None:
+    set_dist_worker_env(rank, world, init_method)
 
     import torch.distributed as dist
 
@@ -140,10 +128,10 @@ def _worker(rank: int, world: int, port: int, out: dict) -> None:
 
 
 def test_large_payload_gather_two_ranks():
-    port = _free_port()
+    init_method = dist_file_init_method()
     manager = mp.Manager()
     out = manager.dict()
-    mp.spawn(_worker, args=(2, port, out), nprocs=2, join=True)
+    mp.spawn(_worker, args=(2, init_method, out), nprocs=2, join=True)
 
     assert out.get("ok_len"), "gathered global list has wrong length"
     assert out.get("ok_vals"), "gathered values differ from the expected blocks"
