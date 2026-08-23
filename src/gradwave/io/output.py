@@ -133,6 +133,33 @@ def _parameters_lines(par):
     return lines
 
 
+def _flapw_parameters_lines(par):
+    """Parameters block for the all-electron FLAPW / NMR tasks (own schema — no
+    plane-wave ecut/nspin/pseudopotentials)."""
+    lines = [_sec("parameters")]
+    pairs = [
+        ("formalism", par.get("formalism", "all-electron FLAPW")),
+        ("xc", str(par.get("xc", "lda")).upper()),
+        ("k-mesh", "×".join(str(n) for n in par.get("kmesh", []))),
+        ("symmetry", "on" if par.get("symmetry") else "off"),
+    ]
+    if par.get("nmr_observable"):
+        pairs.append(("observable", par["nmr_observable"]))
+    if "ecut_eV" in par:  # plane-wave shielding branch
+        pairs.append(("ecut", f"{par['ecut_eV']:.2f} eV"))
+    if "flapw_ecut" in par:  # all-electron FLAPW branch
+        pairs.append(("FLAPW ecut", f"{par['flapw_ecut']:.1f}"))
+        pairs.append(("lmax", str(par.get("lmax"))))
+        pairs.append(("fullpot", "on (L≤%d)" % par["fullpot_lmax"]
+                      if par.get("fullpot") else "off (muffin-tin)"))
+        pairs.append(("smearing", f"{par.get('smearing_eV', 0.0)} eV"
+                      if par.get("smearing_eV") else "0 (insulator fill)"))
+    lines += _cols(pairs)
+    for sym, r in (par.get("muffin_tin_radii_ang") or {}).items():
+        lines.append(f"   {'R_MT ' + sym:<12s}{r} Å")
+    return lines
+
+
 def _scf_trace_lines(trace):
     """Per-iteration table (F, ΔE, |Δρ|, and t when the trace was timed)."""
     timed = any("t_s" in h for h in trace)
@@ -655,6 +682,62 @@ def _tail_lines(summary):
     return ["", "   " + "  |  ".join(tail)] if tail else []
 
 
+def _flapw_lines(flapw):
+    """All-electron FLAPW SCF block: convergence + Γ eigenvalue span/Fermi."""
+    conv = flapw.get("convergence", {}) or {}
+    tag = "converged" if flapw.get("converged") else "NOT converged"
+    lines = [_sec("FLAPW (all-electron muffin-tin)")]
+    lines += _cols([
+        ("status", tag),
+        ("iterations", str(conv.get("n_iter", "—"))),
+        ("band span", f"{flapw['band_span_eV']:.4f} eV"
+            if flapw.get("band_span_eV") is not None else "—"),
+        ("E_Fermi", f"{flapw['e_fermi_eV']:.4f} eV"
+            if flapw.get("e_fermi_eV") is not None else "— (insulator fill)"),
+        ("r_v", f"{conv['r_v']:.1e}" if conv.get("r_v") is not None else "—"),
+        ("r_nsph", f"{conv['r_nsph']:.1e}"
+            if conv.get("r_nsph") is not None else "—"),
+    ])
+    lines.append("   eigenvalues referenced to the interstitial zero "
+                 "(compare splittings, not absolute levels)")
+    lines.append("")
+    return lines
+
+
+def _nmr_lines(nmr):
+    """NMR block: an EFG (V_zz/η/C_Q) or shielding (σ_iso/Δσ/η) per-site table."""
+    if nmr.get("observable") == "shielding":
+        lines = [_sec("NMR magnetic shielding (bare, plane-wave GIPAW)")]
+        lines.append(f"   {'site':>4s} {'elem':>4s} {'σ_iso [ppm]':>13s} "
+                     f"{'Δσ [ppm]':>10s} {'η':>6s}")
+        for s in nmr.get("sites", []):
+            lines.append(
+                f"   {s['site']:>4d} {str(s.get('species') or ''):>4s} "
+                f"{s['sigma_iso_ppm']:>13.3f} {s['sigma_aniso_ppm']:>10.3f} "
+                f"{s['sigma_eta']:>6.3f}")
+        lines.append("")
+        return lines
+    # EFG
+    conv = nmr.get("convergence", {}) or {}
+    tag = "converged" if nmr.get("converged") else "NOT converged"
+    lines = [_sec("NMR electric field gradient (all-electron FLAPW)")]
+    lines += _cols([
+        ("SCF", tag),
+        ("iterations", str(conv.get("n_iter", "—"))),
+        ("fullpot", "yes" if nmr.get("fullpot") else "no (muffin-tin)"),
+    ])
+    lines.append(f"   {'site':>4s} {'elem':>4s} {'V_zz [eV/Å²]':>13s} "
+                 f"{'η':>6s} {'isotope':>8s} {'|C_Q| [MHz]':>12s}")
+    for s in nmr.get("sites", []):
+        cq = f"{s['abs_C_Q_MHz']:>12.4f}" if "abs_C_Q_MHz" in s else f"{'—':>12s}"
+        iso = f"{s.get('isotope', '—'):>8s}"
+        lines.append(
+            f"   {s['site']:>4d} {s['species']:>4s} {s['V_zz_eV_ang2']:>13.4f} "
+            f"{s['eta']:>6.3f} {iso} {cq}")
+    lines.append("")
+    return lines
+
+
 # Optional report sections, in output order. Each entry is (summary key,
 # renderer, needs_full_summary): renderers flagged True receive the whole
 # summary because they read sibling keys (e.g. "error_estimate"); the rest
@@ -671,6 +754,8 @@ _SECTIONS = (
     ("eos", _eos_lines, False),
     ("elastic", _elastic_lines, False),
     ("phonons", _phonon_lines, False),
+    ("flapw", _flapw_lines, False),
+    ("nmr", _nmr_lines, False),
     ("provenance", _provenance_lines, False),
 )
 
@@ -682,7 +767,10 @@ def format_output(summary: dict) -> str:
     head = f"gradwave {code['version']} · {summary['task']} run · {created}"
     lines = [head, "─" * min(len(head), _W)]
     lines += _structure_lines(summary["structure"])
-    lines += _parameters_lines(summary["parameters"])
+    if summary["task"] in ("flapw", "nmr"):
+        lines += _flapw_parameters_lines(summary["parameters"])
+    else:
+        lines += _parameters_lines(summary["parameters"])
     for key, render, needs_full in _SECTIONS:
         if key in summary:
             lines += render(summary if needs_full else summary[key])

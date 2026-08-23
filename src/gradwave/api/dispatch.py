@@ -12,6 +12,7 @@ from gradwave.api._common import SPIN_XC_REGISTRY
 from gradwave.api.dispersion import _apply_dispersion
 from gradwave.api.elastic import run_elastic
 from gradwave.api.eos import run_eos
+from gradwave.api.flapw import run_flapw, run_nmr
 from gradwave.api.phonons import run_phonons
 from gradwave.api.relax import run_relax
 from gradwave.api.scf import run_scf
@@ -20,6 +21,7 @@ from gradwave.api.summary import (
     _base_summary,
     _cohp_summary_block,
     _error_estimate_block,
+    _flapw_base_summary,
     _pdos_summary_block,
     _write_volumetric,
     build_summary,
@@ -138,10 +140,21 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
         summary = _base_summary(inp, inp.task)
         summary[inp.task] = block
         summary["runtime_s"] = round(time.time() - t0, 2)
+    elif inp.task == "flapw":
+        # all-electron muffin-tin FLAPW SCF; no plane-wave SCFResult (res stays
+        # None so no checkpoint/volumetric is written below)
+        summary = _flapw_base_summary(inp, "flapw")
+        summary["flapw"] = run_flapw(inp, verbose=verbose)
+        summary["runtime_s"] = round(time.time() - t0, 2)
+    elif inp.task == "nmr":
+        summary = _flapw_base_summary(inp, "nmr")
+        summary["nmr"] = run_nmr(inp, verbose=verbose)
+        summary["runtime_s"] = round(time.time() - t0, 2)
     else:
         raise ValueError(
             f"unknown task {inp.task!r} "
-            f"(scf | relax | bands | magnetism | eos | elastic | phonons)")
+            f"(scf | relax | bands | magnetism | eos | elastic | phonons | "
+            f"flapw | nmr)")
 
     if inp.distributed:
         from gradwave.distributed import current_rank, maybe_destroy_process_group

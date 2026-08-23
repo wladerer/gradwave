@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from ase import Atoms
@@ -594,6 +594,82 @@ class HubbardParams:
 
 
 @dataclass(frozen=True)
+class FlapwParams:
+    """All-electron FLAPW muffin-tin system controls (task: flapw, and the EFG
+    NMR task). FLAPW is all-electron: the plane-wave ``pseudopotentials``, the
+    top-level ``ecut`` and the ``smearing`` block do NOT apply — the muffin-tin
+    stack carries its own interstitial plane-wave cutoff (``ecut`` here, in FLAPW
+    units, distinct from the PW ecut in eV), per-species muffin-tin radii, and
+    its own Fermi width. Drives ``flapw.crystal_scf_multi``; the cell comes from
+    the top-level ``structure`` (Å, converted to Bohr) and the k-mesh from
+    ``kpoints``.
+
+    ``radii`` maps each species to its muffin-tin radius R_MT (Å) and must cover
+    every element. ``los``/``val_e``/``core``/``el_override`` are the LAPW+LO
+    basis overrides passed straight through: ``los = {species: [[l, spec], ...]}``
+    where ``spec`` is an orbital label (``"3p"``), an energy [eV], or a mapping
+    ``{"e": <label-or-eV>, "confine": false}`` (an unconfined HELO); ``val_e =
+    {species: n}`` raises the valence count when an LO carries semicore, ``core =
+    {species: [[l, n, occ], ...]}`` overrides the frozen core, and
+    ``el_override = {species: {l: spec}}`` moves a linearization energy."""
+
+    radii: dict[str, float] = field(default_factory=dict)  # {species: R_MT} in Å
+    ecut: float = 200.0        # interstitial plane-wave cutoff (FLAPW units)
+    lmax: int = 2              # augmentation angular-momentum cutoff
+    fullpot: bool = False      # self-consistent non-spherical (full) potential
+    fullpot_lmax: int = 2      # non-spherical potential L cutoff (odd L included)
+    iters: int = 40            # SCF iteration cap
+    tol: float = 3.0e-3        # SCF residual convergence gate
+    smearing: float = 0.0      # Fermi-Dirac width [eV]; 0 = exact insulator fill
+    kerker: float | None = None  # interstitial Kerker screen [Å⁻¹] (fullpot aid)
+    kworkers: int = 1          # k-point process-pool size
+    los: dict[str, Any] | None = None      # per-species LAPW+LO specs
+    val_e: dict[str, int] | None = None    # per-species valence-electron count
+    core: dict[str, Any] | None = None     # per-species frozen-core override
+    el_override: dict[str, Any] | None = None  # per-species linearization energy
+
+    def __post_init__(self):
+        if self.ecut <= 0.0:
+            raise InputError(f"flapw.ecut must be > 0, got {self.ecut}")
+        if self.lmax < 0 or self.fullpot_lmax < 0:
+            raise InputError("flapw.lmax and flapw.fullpot_lmax must be >= 0")
+        if self.iters < 1:
+            raise InputError(f"flapw.iters must be >= 1, got {self.iters}")
+        if self.smearing < 0.0:
+            raise InputError(f"flapw.smearing must be >= 0 eV, got {self.smearing}")
+        if self.kworkers < 1:
+            raise InputError(f"flapw.kworkers must be >= 1, got {self.kworkers}")
+        if any(r <= 0.0 for r in self.radii.values()):
+            raise InputError(
+                "flapw.radii muffin-tin radii must be positive (Å)")
+
+
+@dataclass(frozen=True)
+class NmrParams:
+    """NMR-observable selection (task: nmr).
+
+    ``task='efg'`` computes the electric field gradient tensor per site through
+    the all-electron FLAPW stack (needs a ``flapw`` block; ``pseudopotentials``
+    are not used) and, for the selected isotopes, the quadrupolar coupling C_Q =
+    2.4180·Q[barn]·V_zz[eV/Å²]. ``task='shielding'`` computes the bare (pseudo)
+    magnetic shielding tensor per site through the plane-wave GIPAW analytic
+    q→0 route (``kgeometry_nmr.sigma_shielding_dq``; needs ``pseudopotentials``,
+    ``ecut`` and a k-mesh with ≥2 axes of length > 1).
+
+    ``isotopes`` maps a species to the isotope whose Q gives C_Q (e.g.
+    ``{"Ti": "49Ti", "O": "17O"}``); a species left unmapped reports V_zz/η only.
+    None auto-selects the first tabulated isotope for each element (EFG only)."""
+
+    task: str = "efg"  # efg | shielding
+    isotopes: dict[str, str] | None = None
+
+    def __post_init__(self):
+        if self.task not in ("efg", "shielding"):
+            raise InputError(
+                f"nmr.task must be 'efg' or 'shielding', got {self.task!r}")
+
+
+@dataclass(frozen=True)
 class Input:
     atoms: Atoms
     pseudo_dir: Path
@@ -614,13 +690,15 @@ class Input:
     # element -> initial moment fraction (nspin=2/NC seed)
     start_mag: dict[str, float] | None = None
     tot_magnetization: float | None = None  # fix M=N↑−N↓ (nspin=2, no smearing)
-    task: str = "scf"  # scf | relax | bands | magnetism | eos | elastic | phonons
+    task: str = "scf"  # scf | relax | bands | magnetism | eos | elastic | phonons | flapw | nmr
     relax: RelaxParams = field(default_factory=RelaxParams)
     bands: BandsParams = field(default_factory=BandsParams)
     magnetism: MagnetismParams = field(default_factory=MagnetismParams)
     eos: EOSParams = field(default_factory=EOSParams)
     elastic: ElasticParams = field(default_factory=ElasticParams)
     phonons: PhononParams = field(default_factory=PhononParams)
+    flapw: FlapwParams = field(default_factory=FlapwParams)  # all-electron FLAPW
+    nmr: NmrParams = field(default_factory=NmrParams)  # EFG / shielding (task: nmr)
     projections: ProjectionsParams = field(default_factory=ProjectionsParams)
     dispersion: DispersionParams = field(default_factory=DispersionParams)
     device: str = "cpu"

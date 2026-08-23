@@ -14,6 +14,7 @@ from gradwave.inputs.models import CohpParams as CohpParams
 from gradwave.inputs.models import DispersionParams as DispersionParams
 from gradwave.inputs.models import ElasticParams as ElasticParams
 from gradwave.inputs.models import EOSParams as EOSParams
+from gradwave.inputs.models import FlapwParams as FlapwParams
 from gradwave.inputs.models import HubbardManifoldSpec as HubbardManifoldSpec
 from gradwave.inputs.models import HubbardParams as HubbardParams
 from gradwave.inputs.models import HybridParams as HybridParams
@@ -23,6 +24,7 @@ from gradwave.inputs.models import KPointsParams as KPointsParams
 from gradwave.inputs.models import MagneticParams as MagneticParams
 from gradwave.inputs.models import MagnetismParams as MagnetismParams
 from gradwave.inputs.models import MixingParams as MixingParams
+from gradwave.inputs.models import NmrParams as NmrParams
 from gradwave.inputs.models import PhononParams as PhononParams
 from gradwave.inputs.models import ProjectionsParams as ProjectionsParams
 from gradwave.inputs.models import RelaxParams as RelaxParams
@@ -39,6 +41,7 @@ __all__ = [
     "DispersionParams",
     "EOSParams",
     "ElasticParams",
+    "FlapwParams",
     "HubbardManifoldSpec",
     "HubbardParams",
     "HybridParams",
@@ -48,6 +51,7 @@ __all__ = [
     "MagneticParams",
     "MagnetismParams",
     "MixingParams",
+    "NmrParams",
     "PhononParams",
     "ProjectionsParams",
     "RelaxParams",

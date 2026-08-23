@@ -581,6 +581,52 @@ def _base_summary(inp: Input, task: str) -> dict[str, Any]:
     }
 
 
+def _flapw_base_summary(inp: Input, task: str) -> dict[str, Any]:
+    """Summary scaffold for the all-electron FLAPW / NMR tasks (flapw, nmr). Unlike
+    _base_summary it does NOT resolve pseudopotentials (FLAPW/EFG is all-electron
+    and carries none), so it never touches _species_upfs. The driver appends its
+    result block under summary[task] and a trailing runtime_s."""
+    from gradwave._version import __version__
+
+    return {
+        "code": {"name": "gradwave", "version": __version__,
+                 "created": datetime.datetime.now().isoformat(timespec="seconds")},
+        "task": task,
+        "structure": _structure_block(inp),
+        "parameters": _flapw_parameters_block(inp),
+    }
+
+
+def _flapw_parameters_block(inp: Input) -> dict[str, Any]:
+    """Parameters block for the FLAPW/NMR tasks. The all-electron EFG/flapw branch
+    reports the muffin-tin/basis knobs (LDA internally); the plane-wave shielding
+    branch reports the PW SCF knobs."""
+    import math
+
+    block: dict[str, Any] = {
+        "kmesh": list(inp.kpoints.mesh),
+        "nk_total": int(math.prod(inp.kpoints.mesh)),
+        "symmetry": bool(inp.symmetry),
+    }
+    if inp.task == "nmr" and inp.nmr.task == "shielding":
+        block["formalism"] = "plane-wave GIPAW"
+        block["xc"] = _xc_label(inp)
+        block["ecut_eV"] = float(inp.ecut)
+        block["nmr_observable"] = "shielding"
+    else:
+        block["formalism"] = "all-electron FLAPW"
+        block["xc"] = "lda"  # the FLAPW stack is LDA (Slater + PW92) internally
+        block["flapw_ecut"] = float(inp.flapw.ecut)
+        block["lmax"] = int(inp.flapw.lmax)
+        block["fullpot"] = bool(inp.flapw.fullpot)
+        block["fullpot_lmax"] = int(inp.flapw.fullpot_lmax)
+        block["muffin_tin_radii_ang"] = dict(inp.flapw.radii)
+        block["smearing_eV"] = float(inp.flapw.smearing)
+        if inp.task == "nmr":
+            block["nmr_observable"] = "efg"
+    return block
+
+
 def _structure_block(inp: Input) -> dict[str, Any]:
     import numpy as np
 
