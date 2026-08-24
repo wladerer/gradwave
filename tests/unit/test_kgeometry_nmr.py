@@ -579,6 +579,37 @@ def test_sigma_dq_cubic_isotropy_and_site_equivalence():
     assert split < 1e-3 * abs(iso)  # measured ~1e-4 relative
 
 
+def test_symmetrize_site_tensors_projector():
+    # The equivalent-site fix: _symmetrize_site_tensors projects the per-atom
+    # tensors onto the space group so (a) crystallographically equivalent atoms
+    # carry equal isotropic σ, (b) it is idempotent (a projector), and (c) it
+    # conserves the total trace (an orthogonal projection — the mean σ_iso is
+    # untouched). Diamond Si's two atoms are one orbit.
+    from types import SimpleNamespace
+
+    from gradwave.postscf.kgeometry_nmr import _symmetrize_site_tensors
+
+    cell, pos = si_fcc()
+    # grid.cell is a numpy array on the api/run_scf path (a tensor only from
+    # setup_system); positions is a tensor. Mirror the api shapes so the helper
+    # is exercised the way production calls it.
+    sysobj = SimpleNamespace(
+        grid=SimpleNamespace(cell=np.asarray(cell, dtype=float)),
+        positions=torch.as_tensor(pos, dtype=torch.float64),
+        species_of_atom=[14, 14])
+    torch.manual_seed(0)
+    raw = torch.randn(2, 3, 3, dtype=torch.float64)
+    sym = _symmetrize_site_tensors(raw, sysobj)
+    iso = [float(torch.trace(sym[i]) / 3) for i in range(2)]
+    assert abs(iso[0] - iso[1]) < 1e-12  # equivalent atoms -> equal σ_iso
+    sym2 = _symmetrize_site_tensors(sym, sysobj)
+    assert float((sym2 - sym).abs().max()) < 1e-12  # idempotent projector
+    # total trace conserved (projection, not a rescaling)
+    tr_raw = float(torch.diagonal(raw, dim1=1, dim2=2).sum())
+    tr_sym = float(torch.diagonal(sym, dim1=1, dim2=2).sum())
+    assert abs(tr_raw - tr_sym) < 1e-12
+
+
 # --------------------------------------------------------------------------- #
 # little-group-of-q IBZ wedge reduction (opt-in, exact, symmetry-gated)        #
 # --------------------------------------------------------------------------- #
