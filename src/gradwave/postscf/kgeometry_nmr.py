@@ -2190,6 +2190,47 @@ def _plan_wedge_reduction(res, axes, use_symmetry):
     return np.stack(union), per_axis
 
 
+def _symmetrize_site_tensors(out: Tensor, system: object) -> Tensor:
+    """Project the per-atom shielding tensors onto the crystal space group:
+
+        σ_sym[a] = (1/N) Σ_g Rᵀ_g σ_raw[g·a] R_g,   R_g = Cᵀ W_g C⁻ᵀ,
+
+    with W_g the fractional rotation, C the cell (rows = lattice vectors), and
+    g·a = ``atom_map[g, a]``. R_g is the Cartesian image of W_g; the shielding
+    is an ordinary rank-2 Cartesian tensor under it (the two axial-vector signs
+    of an improper op cancel), so σ' = R σ Rᵀ for every operation. The average
+    enforces that symmetry-equivalent atoms carry equal (rotated) tensors and
+    symmetrizes each atom under its own site group — removing the residual the
+    2-axis analytic reconstruction leaves on rotation-related sites. Identity
+    for a P1 cell."""
+    from gradwave.symmetry import find_spacegroup
+
+    sysa: Any = cast("Any", system)  # System | USPPSystem; attrs read below
+
+    def _np(x: Any) -> np.ndarray:  # grid.cell is a numpy array on the api path,
+        # a tensor from setup_system; positions is a tensor — accept both.
+        if hasattr(x, "detach"):
+            x = x.detach().cpu()
+        return np.asarray(x, dtype=float)
+
+    cell = _np(sysa.grid.cell)
+    pos = _np(sysa.positions)
+    if pos.shape[0] != out.shape[0]:  # custom site subset — cannot map to atoms
+        return out
+    frac = pos @ np.linalg.inv(cell)
+    species = [int(s) for s in sysa.species_of_atom]
+    sg = find_spacegroup(cell, frac, species)
+    ct = cell.T
+    ct_inv = np.linalg.inv(ct)
+    sig = out.detach().cpu().numpy()
+    acc = np.zeros_like(sig)
+    for op in range(sg.n_ops):
+        r = ct @ sg.rotations[op].astype(float) @ ct_inv
+        acc += np.einsum("ji,ajk,kl->ail", r, sig[sg.atom_map[op]], r)
+    acc /= sg.n_ops
+    return torch.as_tensor(acc, dtype=out.dtype, device=out.device)
+
+
 def sigma_shielding_dq(
     res: SCFResult,
     *,
@@ -2197,6 +2238,7 @@ def sigma_shielding_dq(
     use_symmetry: bool | str = "auto",
     uspp: USPPResponseCtx | str | None = None,
     chunk_k: int | None = None,
+    symmetrize: bool = True,
 ) -> Tensor:
     """Bare (pseudo) NMR shielding tensor by the ANALYTIC ∂/∂q at q = 0:
     σ_ij = −∂B_ind,i(r_site)/∂B_ext,j in ppm, shape (nsite, 3, 3).
@@ -2248,9 +2290,22 @@ def sigma_shielding_dq(
     axis BZ sum, dropping the peak from nk dense contexts to one at the cost of
     rebuilding each context once per sampled axis. Bit-identical to the full-
     mesh build (each context is a pure function of its k); the memory route for
-    many-atom cells whose full-mesh contexts do not fit."""
+    many-atom cells whose full-mesh contexts do not fit.
+
+    ``symmetrize`` (default True) projects the per-site tensors onto the crystal
+    space group — σ_sym[a] = (1/N) Σ_g Rᵀ_g σ_raw[g·a] R_g with R_g = Cᵀ W_g C⁻ᵀ
+    the Cartesian image of the fractional rotation. The analytic reconstruction
+    uses only the ≥2 sampled mesh axes, so sites related by a rotation whose
+    image direction is not itself sampled (a hexagonal 3-fold, an orthorhombic
+    screw) otherwise pick up a site-dependent residual and come out UNEQUAL even
+    though they are crystallographically equivalent (measured: α-quartz Si-site
+    spread ~8 ppm, flat in k, present with the wedge off — cubic Si is immune).
+    Symmetrization enforces the exact equivalence and is a no-op for a P1 cell.
+    Only applied to the default all-atom site list; an explicit ``sites`` subset
+    (which cannot be mapped to the atom permutation) skips it."""
     _guard(res)
     system = uspp.system if isinstance(uspp, USPPResponseCtx) else res.system
+    sites_is_default = sites is None
     if sites is None:
         sites = system.positions.detach().cpu().to(RDTYPE)
     b = reciprocal_cell(system.grid.cell)
@@ -2307,6 +2362,8 @@ def sigma_shielding_dq(
     out = torch.empty(ns, 3, 3, dtype=RDTYPE)
     for s in range(ns):
         out[s] = torch.linalg.lstsq(bmat, mmat[:, s, :]).solution.mT
+    if symmetrize and sites_is_default:
+        out = _symmetrize_site_tensors(out, system)
     return out * 1e6
 
 
