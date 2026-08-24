@@ -56,6 +56,10 @@ def main():
     ecut = float(os.environ.get("ECUT", "600"))
     k = int(os.environ.get("K", "2"))
     chunk = int(os.environ.get("CHUNK", "1"))
+    # SYM: "auto" (little-group wedge, default), "off" (exact full mesh), "on"
+    sym_env = os.environ.get("SYM", "auto")
+    use_sym: bool | str = False if sym_env == "off" else (
+        True if sym_env == "on" else "auto")
     pdir = Path(os.path.expanduser(os.environ.get(
         "PDIR", "~/github/gradwave/tests/fixtures/qe/pseudos")))
     atoms = structures()[name]
@@ -72,9 +76,9 @@ def main():
 
     kw = {} if chunk == 0 else {"chunk_k": chunk}
     t1 = time.time()
-    sig = sigma_shielding_dq(res, **kw).detach().cpu().numpy()  # (nsite,3,3) ppm
+    sig = sigma_shielding_dq(res, use_symmetry=use_sym, **kw).detach().cpu().numpy()
     print(f"# shielding {time.time()-t1:.0f}s peak={_peak_gb():.1f}GB "
-          f"(CHUNK={chunk})", flush=True)
+          f"(CHUNK={chunk} SYM={sym_env})", flush=True)
 
     syms = atoms.get_chemical_symbols()
     si_iso = []
@@ -87,7 +91,9 @@ def main():
         if syms[i] == "Si":
             si_iso.append(iso)
     if si_iso:
+        spread = max(si_iso) - min(si_iso)
         print(f"  => mean sigma_iso(29Si)={sum(si_iso)/len(si_iso):+.2f} ppm  "
+              f"Si-site spread={spread:.2f} ppm  "
               f"(exp delta {EXP_29SI.get(name, '?')} ppm)", flush=True)
 
 
