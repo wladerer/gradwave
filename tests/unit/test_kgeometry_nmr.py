@@ -70,6 +70,21 @@ def test_q_zero_reduces_to_velocity_solves(si_mesh):
     assert rel < 1e-7  # measured ~4e-10
 
 
+def test_velocity_perturbation_q_chunk_k_bit_reproducible(si_mesh):
+    # Streaming the Sternheimer solve over k-blocks (chunk_k) must reproduce the
+    # whole-mesh solve to CG tolerance: each mesh k is an independent system, so
+    # o_c is bit-identical and dpsi matches to cg_tol. chunk_k=1 on the 2-k mesh
+    # forces two single-k blocks (and the q=(½,0,0) wrap into the umklapp path).
+    res = si_mesh
+    q = (0.5, 0.0, 0.0)
+    sol_full = velocity_perturbation_q(res, q, cg_tol=1e-10)
+    sol_chunk = velocity_perturbation_q(res, q, cg_tol=1e-10, chunk_k=1)
+    o_scale = sol_full.o_c.abs().max().item()
+    d_scale = sol_full.dpsi.abs().max().item()
+    assert (sol_chunk.o_c - sol_full.o_c).abs().max().item() < 1e-12 * o_scale
+    assert (sol_chunk.dpsi - sol_full.dpsi).abs().max().item() < 1e-8 * d_scale
+
+
 # --------------------------------------------------------------------------- #
 # induced current density + screening (milestone 8)                           #
 # --------------------------------------------------------------------------- #
@@ -680,6 +695,24 @@ def test_sigma_dq_wedge_no_slowdown_low_symmetry():
     # between the two independent eigh passes (torch.equal is too strict there)
     scale = float(sig_full.abs().max())
     assert float((sig_auto - sig_full).abs().max()) < 1e-9 * scale
+
+
+@pytest.mark.standard
+def test_sigma_dq_chunk_k_bit_reproducible():
+    # Streaming the per-k dense contexts (chunk_k) must reproduce the whole-mesh
+    # σ exactly — each context is a pure function of its k. Covers BOTH
+    # ShieldingDq construction branches: the little-group wedge (use_symmetry
+    # "auto" → k_frac=union build) and the exact full mesh (use_symmetry=False →
+    # uspp=None build). A 2³ Si mesh keeps both cheap.
+    from gradwave.postscf.kgeometry_nmr import sigma_shielding_dq
+
+    cell, pos = si_fcc()
+    res = _sigma_dq_res(cell, pos, (2, 2, 2))
+    for use_sym in (False, "auto"):
+        sig_eager = sigma_shielding_dq(res, use_symmetry=use_sym)
+        sig_stream = sigma_shielding_dq(res, use_symmetry=use_sym, chunk_k=1)
+        scale = float(sig_eager.abs().max())
+        assert float((sig_stream - sig_eager).abs().max()) < 1e-9 * scale
 
 
 @pytest.mark.standard
