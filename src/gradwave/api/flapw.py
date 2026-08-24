@@ -109,6 +109,10 @@ def _flapw_meta(inp: Input, bands: Any, info: dict[str, Any]) -> dict[str, Any]:
         "flapw_ecut": float(inp.flapw.ecut),
         "kmesh": list(inp.kpoints.mesh),
         "smearing_eV": float(inp.flapw.smearing),
+        # initial-state core levels (eV, referenced to the interstitial zero —
+        # only the within-cell shifts are physical) + the same-element shifts
+        "core_levels": info.get("core_levels"),
+        "core_level_shifts": info.get("core_level_shifts"),
     }
 
 
