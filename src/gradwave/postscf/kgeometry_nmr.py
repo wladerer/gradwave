@@ -1695,13 +1695,11 @@ class ShieldingDq:
         NOT the full field on its own). With all three ``None`` this is the
         exact full-mesh route (every context, its own k-weight, no fold)."""
         qh = torch.as_tensor(np.asarray(q_hat, dtype=float), dtype=RDTYPE)
-        f_occ = 2.0
         out = [
             (torch.zeros(3, *self.shape, dtype=CDTYPE),
              torch.zeros(3, *self.shape, dtype=CDTYPE))
             for _ in pols
         ]
-        nocc = self.nocc
         n_all = len(self.ks) if self.ks is not None else len(self._kfs)
         idxs = list(range(n_all)) if k_indices is None else list(k_indices)
         if weights is not None:
@@ -1716,89 +1714,47 @@ class ShieldingDq:
         for i, w_k in zip(idxs, ws, strict=True):
             dk = (self.ks[i] if self.ks is not None
                   else self._build_ctx(self._kfs[i], self._weights[i]))
-            uo, wo = dk.u[:, :nocc], dk.w[:nocc]
-            uc, wc = dk.u[:, nocc:], dk.w[nocc:]
-            pref = w_k * f_occ / self.volume
-            if dk.ds is None:
-                # ---- norm-conserving (S = I) route (unchanged) ----
-                m_mats = _d2h_mats(cast("BlochHK", dk.hk), dk.kc, qh)
-                wmat = torch.einsum("m,mij->ij", qh.to(CDTYPE), torch.stack(dk.v))
-                dtu = _resolvent_apply(uc, wc, wo, wmat @ uo)
-                u_box = g_to_r(uo.mT, dk.flat, self.shape)
-                vu = [dk.v[mu] @ uo for mu in range(3)]
-                vu_box = [g_to_r(x.mT, dk.flat, self.shape) for x in vu]
-                for ip, pol in enumerate(pols):
-                    ep = np.asarray(pol, dtype=float)
-                    o0u = ep[0] * vu[0] + ep[1] * vu[1] + ep[2] * vu[2]
-                    du0 = _resolvent_apply(uc, wc, wo, o0u)
-                    me_u = 0.5 * (
-                        ep[0] * (m_mats[0] @ uo)
-                        + ep[1] * (m_mats[1] @ uo)
-                        + ep[2] * (m_mats[2] @ uo)
-                    )
-                    inner = wmat @ du0 - dtu @ (uo.mH @ o0u) + me_u
-                    du1 = _resolvent_apply(uc, wc, wo, inner) - uo @ (dtu.mH @ du0)
-                    du0_box = g_to_r(du0.mT, dk.flat, self.shape)
-                    du1_box = g_to_r(du1.mT, dk.flat, self.shape)
-                    s0_acc, ds_acc = out[ip]
-                    for mu in range(3):
-                        kq = HBAR2_2M * float(qh[mu])
-                        vdu0_box = g_to_r((dk.v[mu] @ du0).mT, dk.flat, self.shape)
-                        vdu1_box = g_to_r((dk.v[mu] @ du1).mT, dk.flat, self.shape)
-                        # δu-side operator derivative ½M_μ + κq̂_μ (kinetic + ½Ā'),
-                        # u-side ½M_μ − κq̂_μ (½Ā' only), κ = HBAR2_2M
-                        dop_du0 = 0.5 * (m_mats[mu] @ du0) + kq * du0
-                        dop_u = 0.5 * (m_mats[mu] @ uo) - kq * uo
-                        dop_du0_box = g_to_r(dop_du0.mT, dk.flat, self.shape)
-                        dop_u_box = g_to_r(dop_u.mT, dk.flat, self.shape)
-                        s0_acc[mu] += pref * 0.5 * (
-                            u_box.conj() * vdu0_box + vu_box[mu].conj() * du0_box
-                        ).sum(dim=0)
-                        ds_acc[mu] += pref * 0.5 * (
-                            u_box.conj() * (dop_du0_box + vdu1_box)
-                            + dop_u_box.conj() * du0_box
-                            + vu_box[mu].conj() * du1_box
-                        ).sum(dim=0)
-                continue
-            # ---- S-metric (USPP/PAW smooth) route ----
-            # The generalized eigenproblem's covariant velocity and perturbation
-            # use v_gen = ∂H/∂k − ε ∂S/∂k (per-column reference energy ε), the
-            # S-orthogonal resolvent projects with ⟨u_m|S|·⟩, and O'(0) carries
-            # the −ε ∂²S piece; the PHYSICAL current operator stays the plain
-            # screened-D ∂H/∂k (scoping L2/L3/L4/L6/L7). All reduce to the NC
-            # arithmetic above when S = I, ∂S = 0 (the NC-limit gate).
-            hks = cast("BlochHKS", dk.hk)
-            dsv = dk.ds
-            s0m = cast("Tensor", dk.s0)
-            wo_c = wo.to(CDTYPE)
-            qh_c = qh.to(CDTYPE)
-            m_h = _d2_mats(hks.h, dk.kc, qh)  # ∂²H/∂k²
-            m_s = _d2_mats(hks.s, dk.kc, qh)  # ∂²S/∂k²
+            self._accumulate_k(dk, w_k, qh, pols, out)
+        return self._finish_axis(out, pols, fold)
 
-            dtu = _resolvent_apply_s(
-                uc, wc, wo, _gen_velocity(dk.v, dsv, uo, wo_c, qh_c), s0m
-            )
+    def _accumulate_k(
+        self,
+        dk: _DenseKCtx,
+        w_k: float,
+        qh: Tensor,
+        pols: Sequence[np.ndarray],
+        out: list[tuple[Tensor, Tensor]],
+    ) -> None:
+        """Add one k-context's single-branch current contribution to the per-pol
+        (S⁰, ∂S/∂s) accumulators ``out``. ``qh`` is the RDTYPE q̂ tensor; ``pols``
+        the polarization list; ``w_k`` the k-weight. Pure accumulation (mutates
+        ``out``) — the per-k body factored out of :meth:`branch_fields_axis` so a
+        single context can be contributed to many axes (see
+        :meth:`branch_fields_all_axes`)."""
+        nocc = self.nocc
+        f_occ = 2.0
+        uo, wo = dk.u[:, :nocc], dk.w[:nocc]
+        uc, wc = dk.u[:, nocc:], dk.w[nocc:]
+        pref = w_k * f_occ / self.volume
+        if dk.ds is None:
+            # ---- norm-conserving (S = I) route (unchanged) ----
+            m_mats = _d2h_mats(cast("BlochHK", dk.hk), dk.kc, qh)
+            wmat = torch.einsum("m,mij->ij", qh.to(CDTYPE), torch.stack(dk.v))
+            dtu = _resolvent_apply(uc, wc, wo, wmat @ uo)
             u_box = g_to_r(uo.mT, dk.flat, self.shape)
-            vcur = [dk.v[mu] @ uo for mu in range(3)]  # current op (screened-D ∂H/∂k)
-            vcur_box = [g_to_r(x.mT, dk.flat, self.shape) for x in vcur]
+            vu = [dk.v[mu] @ uo for mu in range(3)]
+            vu_box = [g_to_r(x.mT, dk.flat, self.shape) for x in vu]
             for ip, pol in enumerate(pols):
-                ep = torch.as_tensor(np.asarray(pol, dtype=float), dtype=CDTYPE)
-                o0u = _gen_velocity(dk.v, dsv, uo, wo_c, ep)  # perturbation O u
-                du0 = _resolvent_apply_s(uc, wc, wo, o0u, s0m)
-                # O'(0) u = ½ Σ ep_μ (M^H_μ uo − ε M^S_μ uo)
+                ep = np.asarray(pol, dtype=float)
+                o0u = ep[0] * vu[0] + ep[1] * vu[1] + ep[2] * vu[2]
+                du0 = _resolvent_apply(uc, wc, wo, o0u)
                 me_u = 0.5 * (
-                    ep[0] * (m_h[0] @ uo - (m_s[0] @ uo) * wo_c)
-                    + ep[1] * (m_h[1] @ uo - (m_s[1] @ uo) * wo_c)
-                    + ep[2] * (m_h[2] @ uo - (m_s[2] @ uo) * wo_c)
+                    ep[0] * (m_mats[0] @ uo)
+                    + ep[1] * (m_mats[1] @ uo)
+                    + ep[2] * (m_mats[2] @ uo)
                 )
-                inner = (
-                    _gen_velocity(dk.v, dsv, du0, wo_c, qh_c)
-                    - dtu @ (uo.mH @ (s0m @ o0u))
-                    + me_u
-                )
-                du1 = _resolvent_apply_s(uc, wc, wo, inner, s0m) - uo @ (
-                    dtu.mH @ (s0m @ du0)
-                )
+                inner = wmat @ du0 - dtu @ (uo.mH @ o0u) + me_u
+                du1 = _resolvent_apply(uc, wc, wo, inner) - uo @ (dtu.mH @ du0)
                 du0_box = g_to_r(du0.mT, dk.flat, self.shape)
                 du1_box = g_to_r(du1.mT, dk.flat, self.shape)
                 s0_acc, ds_acc = out[ip]
@@ -1806,20 +1762,92 @@ class ShieldingDq:
                     kq = HBAR2_2M * float(qh[mu])
                     vdu0_box = g_to_r((dk.v[mu] @ du0).mT, dk.flat, self.shape)
                     vdu1_box = g_to_r((dk.v[mu] @ du1).mT, dk.flat, self.shape)
-                    # current-operator s-derivative: ½M^H_μ (screened-D ∂H/∂k,
-                    # NOT generalized) + κq̂_μ (kinetic) on δu, −κq̂_μ on u.
-                    dop_du0 = 0.5 * (m_h[mu] @ du0) + kq * du0
-                    dop_u = 0.5 * (m_h[mu] @ uo) - kq * uo
+                    # δu-side operator derivative ½M_μ + κq̂_μ (kinetic + ½Ā'),
+                    # u-side ½M_μ − κq̂_μ (½Ā' only), κ = HBAR2_2M
+                    dop_du0 = 0.5 * (m_mats[mu] @ du0) + kq * du0
+                    dop_u = 0.5 * (m_mats[mu] @ uo) - kq * uo
                     dop_du0_box = g_to_r(dop_du0.mT, dk.flat, self.shape)
                     dop_u_box = g_to_r(dop_u.mT, dk.flat, self.shape)
                     s0_acc[mu] += pref * 0.5 * (
-                        u_box.conj() * vdu0_box + vcur_box[mu].conj() * du0_box
+                        u_box.conj() * vdu0_box + vu_box[mu].conj() * du0_box
                     ).sum(dim=0)
                     ds_acc[mu] += pref * 0.5 * (
                         u_box.conj() * (dop_du0_box + vdu1_box)
                         + dop_u_box.conj() * du0_box
-                        + vcur_box[mu].conj() * du1_box
+                        + vu_box[mu].conj() * du1_box
                     ).sum(dim=0)
+            return
+        # ---- S-metric (USPP/PAW smooth) route ----
+        # The generalized eigenproblem's covariant velocity and perturbation
+        # use v_gen = ∂H/∂k − ε ∂S/∂k (per-column reference energy ε), the
+        # S-orthogonal resolvent projects with ⟨u_m|S|·⟩, and O'(0) carries
+        # the −ε ∂²S piece; the PHYSICAL current operator stays the plain
+        # screened-D ∂H/∂k (scoping L2/L3/L4/L6/L7). All reduce to the NC
+        # arithmetic above when S = I, ∂S = 0 (the NC-limit gate).
+        hks = cast("BlochHKS", dk.hk)
+        dsv = dk.ds
+        s0m = cast("Tensor", dk.s0)
+        wo_c = wo.to(CDTYPE)
+        qh_c = qh.to(CDTYPE)
+        m_h = _d2_mats(hks.h, dk.kc, qh)  # ∂²H/∂k²
+        m_s = _d2_mats(hks.s, dk.kc, qh)  # ∂²S/∂k²
+
+        dtu = _resolvent_apply_s(
+            uc, wc, wo, _gen_velocity(dk.v, dsv, uo, wo_c, qh_c), s0m
+        )
+        u_box = g_to_r(uo.mT, dk.flat, self.shape)
+        vcur = [dk.v[mu] @ uo for mu in range(3)]  # current op (screened-D ∂H/∂k)
+        vcur_box = [g_to_r(x.mT, dk.flat, self.shape) for x in vcur]
+        for ip, pol in enumerate(pols):
+            ep = torch.as_tensor(np.asarray(pol, dtype=float), dtype=CDTYPE)
+            o0u = _gen_velocity(dk.v, dsv, uo, wo_c, ep)  # perturbation O u
+            du0 = _resolvent_apply_s(uc, wc, wo, o0u, s0m)
+            # O'(0) u = ½ Σ ep_μ (M^H_μ uo − ε M^S_μ uo)
+            me_u = 0.5 * (
+                ep[0] * (m_h[0] @ uo - (m_s[0] @ uo) * wo_c)
+                + ep[1] * (m_h[1] @ uo - (m_s[1] @ uo) * wo_c)
+                + ep[2] * (m_h[2] @ uo - (m_s[2] @ uo) * wo_c)
+            )
+            inner = (
+                _gen_velocity(dk.v, dsv, du0, wo_c, qh_c)
+                - dtu @ (uo.mH @ (s0m @ o0u))
+                + me_u
+            )
+            du1 = _resolvent_apply_s(uc, wc, wo, inner, s0m) - uo @ (
+                dtu.mH @ (s0m @ du0)
+            )
+            du0_box = g_to_r(du0.mT, dk.flat, self.shape)
+            du1_box = g_to_r(du1.mT, dk.flat, self.shape)
+            s0_acc, ds_acc = out[ip]
+            for mu in range(3):
+                kq = HBAR2_2M * float(qh[mu])
+                vdu0_box = g_to_r((dk.v[mu] @ du0).mT, dk.flat, self.shape)
+                vdu1_box = g_to_r((dk.v[mu] @ du1).mT, dk.flat, self.shape)
+                # current-operator s-derivative: ½M^H_μ (screened-D ∂H/∂k,
+                # NOT generalized) + κq̂_μ (kinetic) on δu, −κq̂_μ on u.
+                dop_du0 = 0.5 * (m_h[mu] @ du0) + kq * du0
+                dop_u = 0.5 * (m_h[mu] @ uo) - kq * uo
+                dop_du0_box = g_to_r(dop_du0.mT, dk.flat, self.shape)
+                dop_u_box = g_to_r(dop_u.mT, dk.flat, self.shape)
+                s0_acc[mu] += pref * 0.5 * (
+                    u_box.conj() * vdu0_box + vcur_box[mu].conj() * du0_box
+                ).sum(dim=0)
+                ds_acc[mu] += pref * 0.5 * (
+                    u_box.conj() * (dop_du0_box + vdu1_box)
+                    + dop_u_box.conj() * du0_box
+                    + vcur_box[mu].conj() * du1_box
+                ).sum(dim=0)
+
+    def _finish_axis(
+        self,
+        out: list[tuple[Tensor, Tensor]],
+        pols: Sequence[np.ndarray],
+        fold: _LittleGroupFold | None,
+    ) -> list[tuple[Tensor, Tensor]]:
+        """Add the s-independent diamagnetic (Lamb) term 2κ ê ⊗ ρ to each pol's
+        S⁰ accumulator and apply the little-group ``fold`` (if any), returning the
+        finished [(S⁰, ∂S/∂s), …]. Shared by :meth:`branch_fields_axis` and
+        :meth:`branch_fields_all_axes` so the post-processing stays identical."""
         rho = self.res.rho if self.res.rho.dim() == 3 else self.res.rho[0]
         for ip, pol in enumerate(pols):
             ep_t = torch.as_tensor(np.asarray(pol, dtype=float), dtype=RDTYPE)
@@ -1829,6 +1857,69 @@ class ShieldingDq:
         if fold is not None:
             out = fold.apply(out)
         return out
+
+    def branch_fields_all_axes(
+        self,
+        specs: Sequence[
+            tuple[
+                np.ndarray | list[float],
+                Sequence[np.ndarray],
+                Sequence[int] | None,
+                Sequence[float] | None,
+                _LittleGroupFold | None,
+            ]
+        ],
+    ) -> list[list[tuple[Tensor, Tensor]]]:
+        """specs: list of (q_hat, pols, k_indices, weights, fold). Build each
+        union-k context ONCE and contribute it to every axis that includes it,
+        then free it — the single-pass twin of calling :meth:`branch_fields_axis`
+        per axis, so streaming (chunk_k) rebuilds nothing. Returns a list (one per
+        spec) of the :meth:`branch_fields_axis` result."""
+        n_all = len(self.ks) if self.ks is not None else len(self._kfs)
+        pols_a = [pols for (_q, pols, _ki, _w, _f) in specs]
+        qh_a = [
+            torch.as_tensor(np.asarray(q_hat, dtype=float), dtype=RDTYPE)
+            for (q_hat, _p, _ki, _w, _f) in specs
+        ]
+        out_a: list[list[tuple[Tensor, Tensor]]] = [
+            [
+                (torch.zeros(3, *self.shape, dtype=CDTYPE),
+                 torch.zeros(3, *self.shape, dtype=CDTYPE))
+                for _ in pols
+            ]
+            for (_q, pols, _ki, _w, _f) in specs
+        ]
+        # Per-axis membership: union-context index -> k-weight. Same weight rule
+        # as branch_fields_axis (explicit star weights on the reduced wedge, else
+        # the stored per-k weight — self._weights[i] == self.ks[i].weight).
+        mem_a: list[dict[int, float]] = []
+        for (_q, _p, k_indices, weights, _f) in specs:
+            if k_indices is None:
+                mem = {i: self._weights[i] for i in range(n_all)}
+            else:
+                k_idx = list(k_indices)
+                mem = {
+                    k_idx[j]: (
+                        float(weights[j]) if weights is not None
+                        else self._weights[k_idx[j]]
+                    )
+                    for j in range(len(k_idx))
+                }
+            mem_a.append(mem)
+        # ONE outer pass over the union of contexts: build (or index) each once,
+        # contribute to every axis that includes it, then let it fall out of
+        # scope. Streaming therefore builds each context exactly once total, not
+        # once per axis.
+        for i in range(n_all):
+            dk = (self.ks[i] if self.ks is not None
+                  else self._build_ctx(self._kfs[i], self._weights[i]))
+            for a in range(len(specs)):
+                if i in mem_a[a]:
+                    self._accumulate_k(dk, mem_a[a][i], qh_a[a], pols_a[a], out_a[a])
+        return [
+            self._finish_axis(out_a[a], pols_a[a], specs[a][4])
+            for a in range(len(specs))
+        ]
 
 
 def _branch_field_fixed_sphere(
@@ -2190,12 +2281,20 @@ def sigma_shielding_dq(
             (q_hat, k_idx, w, fold) for _i, q_hat, k_idx, w, fold in per_axis
         ]
 
+    # Single all-axes pass: build each union-k context ONCE and contribute it to
+    # every axis (branch_fields_all_axes), so the streamed (chunk_k) path rebuilds
+    # each context once TOTAL rather than once per sampled axis. _transverse_frame
+    # is computed once per axis and reused for both the spec and the b_rows below
+    # so the pol ordering matches the returned fields.
+    specs = [
+        (q_hat, list(_transverse_frame(q_hat)), k_idx, w, fold)
+        for q_hat, k_idx, w, fold in axis_specs
+    ]
+    all_fields = eng.branch_fields_all_axes(specs)
+
     b_rows: list[np.ndarray] = []
     m_rows: list[Tensor] = []
-    for q_hat, k_idx, w, fold in axis_specs:
-        pols = list(_transverse_frame(q_hat))
-        fields = eng.branch_fields_axis(
-            q_hat, pols, k_indices=k_idx, weights=w, fold=fold)
+    for (q_hat, pols, _k_idx, _w, _fold), fields in zip(specs, all_fields, strict=True):
         for pol, (s0f, dsf) in zip(pols, fields, strict=True):
             col, _ = _biot_savart_sigma_cols_dq(
                 s0f, dsf, torch.as_tensor(q_hat, dtype=RDTYPE),
