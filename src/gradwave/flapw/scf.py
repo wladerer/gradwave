@@ -1765,6 +1765,16 @@ def _multi_finalize(ctx: _MultiCtx, st: _MultiState, efg: bool = False):
             _, _, _, v_hart, qmt = _weinert_multi(st.rho_I, st.spheres, ctx.A, ctx.nfft)
         info["efg"] = _efg_from_multipoles(rho_2m, v_hart, ctx.acart, ctx.keys, ctx.R_by_key,
                                            ctx.rr_by_key, ctx.dx, ctx.A, qmt_by_sphere=qmt)
+    # Initial-state core levels: re-solve each site's core states in its converged
+    # spherical MT potential and keep the eigenvalues (the SCF already does this
+    # solve to build ρ_core, then discards them). Cheap; always on. Only the
+    # within-cell SHIFT is physical — see flapw.core_levels.
+    from gradwave.flapw.core_levels import core_level_shifts, core_levels_from_state
+
+    cl = core_levels_from_state(st.v_by_key, ctx.syms, ctx.keys, ctx.core_map,
+                                ctx.r, ctx.dx)
+    info["core_levels"] = cl
+    info["core_level_shifts"] = core_level_shifts(cl)
     return conv, info
 
 
