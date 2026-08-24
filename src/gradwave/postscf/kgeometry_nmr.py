@@ -311,6 +311,7 @@ def velocity_perturbation_q(
     s_apply: Callable[[Tensor], Tensor] | None = None,
     dsvel: OverlapVelocity | None = None,
     uspp: USPPResponseCtx | None = None,
+    chunk_k: int | None = None,
 ) -> VelocityQSolves:
     """Solve the k+q Sternheimer equations for the three symmetrized velocity
     perturbations ½{v_μ, e^{iqr}} at every mesh k (see module docstring).
@@ -344,7 +345,16 @@ def velocity_perturbation_q(
     against the true batched operator and iterates any column above
     ``cg_tol``. ``v`` reuses a prebuilt :class:`~gradwave.postscf.kgeometry.
     VelocityApply` (its constructor is a serial per-k projector build worth
-    hoisting across the 4-6 calls of a tensor evaluation)."""
+    hoisting across the 4-6 calls of a tensor evaluation).
+
+    ``chunk_k`` streams the Sternheimer solve over blocks of at most that many
+    mesh-k at a time (``None`` = the whole mesh at once, the historical path).
+    Each mesh-k is an independent Sternheimer system, so the chunked result is
+    bit-identical to the full solve up to ``cg_tol``; the win is that the CG /
+    Hamiltonian-apply real-space FFT boxes (the peak transient for many-atom
+    cells) are held for one block rather than the whole mesh. The returned
+    ``o_c``/``dpsi`` are still the full-mesh stacks (reassembled from the
+    blocks) — chunking bounds only the solve's peak, not the stored result."""
     _guard(res)
     if uspp is not None:
         system = cast("System", uspp.system)
@@ -360,6 +370,7 @@ def velocity_perturbation_q(
     k_frac = np.stack([sph.k_frac for sph in system.spheres])
     jidx, g0 = kpq_map(k_frac, q_frac)
     jsel = torch.as_tensor(jidx, dtype=torch.long)
+    nk = len(k_frac)
 
     nocc = insulator_window(res.occupations, 2.0, "insulating occupations required")
     c_all = pad_coeffs(cast("list[Tensor]", res.coeffs), bk.npw_max)
@@ -392,45 +403,90 @@ def velocity_perturbation_q(
                 bk_kq, shape, res.v_eff, projectors_b(bk_kq, system.positions))
     ph = _g0_phase_stack(shape, g0, c_all.device)  # (nk, 1, *shape): e^{iG0·r}
 
-    # S-metric occupied block (≡ c_occ_kq when S = I, so p_c and the solver
-    # collapse to the norm-conserving path).
+    # S-metric occupied block (≡ c_occ_kq when S = I, so the conduction
+    # projector and the solver collapse to the norm-conserving path).
     s_occ_kq = c_occ_kq if s_apply is None else s_apply(c_occ_kq)
-
-    def transfer(w: Tensor) -> Tensor:
-        """k-sphere coefficients → the same plane waves on the k_j spheres."""
-        return box_to_sphere_b(g_to_r_b(w, bk, shape) * ph, bk_kq)
-
-    def p_c(x: Tensor) -> Tensor:
-        """(1 − Σ S|ψ⟩⟨ψ|) x — the S-metric conduction projector on the RHS;
-        the plain 1 − Σ|ψ⟩⟨ψ| when S = I (s_occ_kq ≡ c_occ_kq)."""
-        ov = torch.einsum("kng,kbg->kbn", c_occ_kq.conj(), x)
-        return x - torch.einsum("kbn,kng->kbg", ov, s_occ_kq)
 
     if v is None:
         v = VelocityApply(system)
-    c_t = transfer(c_occ_k)
-    o_list, d_list = [], []
-    for mu in range(3):
-        vg_k = v.apply(c_occ_k, mu)
-        vg_t = v.apply(c_t, mu, k_index=jsel)
-        if dsvel is not None:  # generalized velocity v = ∂H/∂k − ε ∂S/∂k
-            e = eps_k[..., None].to(CDTYPE)
-            vg_k = vg_k - e * dsvel.apply(c_occ_k, mu)
-            vg_t = vg_t - e * dsvel.apply(c_t, mu, k_index=jsel)
-        o_mu = 0.5 * (transfer(vg_k) + vg_t)
-        rhs = -p_c(o_mu)
-        x0 = (solver.solve(jsel, eps_k, rhs, shift, nocc)
-              if solver is not None else torch.zeros_like(rhs))
-        d_list.append(
-            cg_sternheimer(h_kq, bk_kq, c_occ_kq, eps_k, rhs,
-                           x0, shift, tol=cg_tol, max_iter=max_iter,
-                           s_apply=s_apply, s_occ=s_occ_kq)
-        )
-        o_list.append(o_mu)
+
+    def _solve_block(idx_k: Tensor | None, jsel_x: Tensor, c_k: Tensor,
+                     c_kq: Tensor, eps_x: Tensor, ph_x: Tensor, bk_k: BatchedK,
+                     bk_kq_x: BatchedK,
+                     h_kq_x: "BatchedHamiltonian | _USPPBatchedHS",
+                     s_occ_x: Tensor,
+                     s_apply_x: Callable[[Tensor], Tensor] | None,
+                     ) -> tuple[Tensor, Tensor]:
+        """The three velocity Sternheimer axes for one k-subset, returning the
+        (3, nsub, nocc, npw) ``o``/``δu`` stacks. ``idx_k`` is the mesh-k gather
+        for :meth:`VelocityApply.apply` (``None`` = the whole mesh, identity, so
+        the ``chunk_k=None`` call is byte-for-byte the historical loop)."""
+
+        def transfer_x(w: Tensor) -> Tensor:
+            return box_to_sphere_b(g_to_r_b(w, bk_k, shape) * ph_x, bk_kq_x)
+
+        def p_c_x(x: Tensor) -> Tensor:
+            ov = torch.einsum("kng,kbg->kbn", c_kq.conj(), x)
+            return x - torch.einsum("kbn,kng->kbg", ov, s_occ_x)
+
+        c_t = transfer_x(c_k)
+        o_l, d_l = [], []
+        for mu in range(3):
+            vg_k = v.apply(c_k, mu, k_index=idx_k)
+            vg_t = v.apply(c_t, mu, k_index=jsel_x)
+            if dsvel is not None:  # generalized velocity v = ∂H/∂k − ε ∂S/∂k
+                e = eps_x[..., None].to(CDTYPE)
+                vg_k = vg_k - e * dsvel.apply(c_k, mu, k_index=idx_k)
+                vg_t = vg_t - e * dsvel.apply(c_t, mu, k_index=jsel_x)
+            o_mu = 0.5 * (transfer_x(vg_k) + vg_t)
+            rhs = -p_c_x(o_mu)
+            x0 = (solver.solve(jsel_x, eps_x, rhs, shift, nocc)
+                  if solver is not None else torch.zeros_like(rhs))
+            d_l.append(
+                cg_sternheimer(h_kq_x, bk_kq_x, c_kq, eps_x, rhs,
+                               x0, shift, tol=cg_tol, max_iter=max_iter,
+                               s_apply=s_apply_x, s_occ=s_occ_x)
+            )
+            o_l.append(o_mu)
+        return torch.stack(o_l), torch.stack(d_l)
+
+    if chunk_k is None:
+        o_c, dpsi = _solve_block(None, jsel, c_occ_k, c_occ_kq, eps_k, ph, bk,
+                                 bk_kq, h_kq, s_occ_kq, s_apply)
+    else:
+        o_parts: list[Tensor] = []
+        d_parts: list[Tensor] = []
+        for lo in range(0, nk, int(chunk_k)):
+            hi = min(lo + int(chunk_k), nk)
+            idx = torch.arange(lo, hi)
+            jsel_c = jsel[idx]
+            bk_c = _reindex_bk(bk, idx)  # this block's k spheres
+            if uspp is not None:
+                h_c, bk_kq_c = uspp.build_hkq(jsel_c)
+                s_apply_c = h_c.s_apply
+            elif solver is not None:
+                h_c, bk_kq_c = solver.h_for(jsel_c)
+                s_apply_c = s_apply
+            else:
+                bk_kq_c = _reindex_bk(bk, jsel_c)
+                h_c = BatchedHamiltonian(
+                    bk_kq_c, shape, res.v_eff,
+                    projectors_b(bk_kq_c, system.positions))
+                s_apply_c = s_apply
+            c_kq_c = c_occ_kq[idx]
+            s_occ_c = c_kq_c if s_apply_c is None else s_apply_c(c_kq_c)
+            o_b, d_b = _solve_block(idx, jsel_c, c_occ_k[idx], c_kq_c,
+                                    eps_k[idx], ph[idx], bk_c, bk_kq_c, h_c,
+                                    s_occ_c, s_apply_c)
+            o_parts.append(o_b)
+            d_parts.append(d_b)
+        o_c = torch.cat(o_parts, dim=1)
+        dpsi = torch.cat(d_parts, dim=1)
+
     return VelocityQSolves(
         q_frac=q_frac,
-        o_c=torch.stack(o_list),
-        dpsi=torch.stack(d_list),
+        o_c=o_c,
+        dpsi=dpsi,
         c_occ_k=c_occ_k,
         c_occ_kq=c_occ_kq,
         eps_k=eps_k,
@@ -1531,6 +1587,7 @@ class ShieldingDq:
         *,
         k_frac: np.ndarray | Sequence[np.ndarray] | None = None,
         uspp: USPPResponseCtx | str | None = None,
+        chunk_k: int | None = None,
     ) -> None:
         """Build the per-k dense contexts (eigh + ∂H/∂k) at each mesh k.
 
@@ -1568,31 +1625,51 @@ class ShieldingDq:
         else:
             kfs = [np.asarray(k, dtype=float) for k in np.asarray(k_frac, dtype=float)]
             weights = [float("nan")] * len(kfs)
-        self.ks: list[_DenseKCtx] = []
-        for kf, wk in zip(kfs, weights, strict=True):
-            if uspp is None:
-                hk: BlochHK | BlochHKS = BlochHK.from_scf(res, kf)
-                kc = hk.k_ref_cart
-                w, u, dh = _eigh_and_dh(hk.h, kc)
-                ds: list[Tensor] | None = None
-                s0: Tensor | None = None
-            else:
-                hk = (
-                    BlochHKS.from_nc(res, kf)
-                    if ctx is None
-                    else BlochHKS.from_uspp_ctx(ctx, kf)
-                )
-                kc = hk.k_ref_cart
-                w, u, dh, ds = _geigh_and_dhds(hk, kc)
-                s0 = hk.s(kc)
-            mod = hk.miller.numpy() % nbox
-            flat = torch.as_tensor(
-                (mod[:, 0] * n2 + mod[:, 1]) * n3 + mod[:, 2], dtype=torch.int64
+        self._kfs = kfs
+        self._weights = weights
+        self._ctx = ctx
+        self._nbox = nbox
+        self._chunk_k = None if chunk_k is None else int(chunk_k)
+        # Eager (chunk_k=None) holds every mesh k's dense context at once — the
+        # historical path, byte-for-byte. Streaming (chunk_k set) defers the
+        # per-k build to branch_fields_axis, which builds and frees one context
+        # at a time, so the peak is O(1) dense (npw×npw) velocity matrices
+        # rather than nk of them — the memory route for many-atom cells. Each
+        # context is a pure function of its k, so the streamed and eager fields
+        # are bit-identical (the per-axis rebuild is the only cost).
+        self.ks: list[_DenseKCtx] | None = (
+            None if self._chunk_k is not None
+            else [self._build_ctx(kf, wk)
+                  for kf, wk in zip(kfs, weights, strict=True)])
+
+    def _build_ctx(self, kf: np.ndarray, wk: float) -> _DenseKCtx:
+        """One frozen dense per-k context: eigh of H(k) (never differentiated)
+        and ∂H/∂k, plus the S-metric ∂S/∂k and S(kc) on the USPP/PAW route.
+        A pure function of ``kf`` — building it lazily (streaming) yields the
+        same w/u/v as the eager build."""
+        res, ctx, uspp = self.res, self._ctx, self.uspp
+        _n1, n2, n3 = self.shape
+        if uspp is None:
+            hk: BlochHK | BlochHKS = BlochHK.from_scf(res, kf)
+            kc = hk.k_ref_cart
+            w, u, dh = _eigh_and_dh(hk.h, kc)
+            ds: list[Tensor] | None = None
+            s0: Tensor | None = None
+        else:
+            hk = (
+                BlochHKS.from_nc(res, kf)
+                if ctx is None
+                else BlochHKS.from_uspp_ctx(ctx, kf)
             )
-            self.ks.append(
-                _DenseKCtx(hk=hk, kc=kc, w=w, u=u, v=dh, kpg=hk.g_cart + kc,
-                           flat=flat, weight=wk, ds=ds, s0=s0)
-            )
+            kc = hk.k_ref_cart
+            w, u, dh, ds = _geigh_and_dhds(hk, kc)
+            s0 = hk.s(kc)
+        mod = hk.miller.numpy() % self._nbox
+        flat = torch.as_tensor(
+            (mod[:, 0] * n2 + mod[:, 1]) * n3 + mod[:, 2], dtype=torch.int64
+        )
+        return _DenseKCtx(hk=hk, kc=kc, w=w, u=u, v=dh, kpg=hk.g_cart + kc,
+                          flat=flat, weight=wk, ds=ds, s0=s0)
 
     def branch_fields_axis(
         self,
@@ -1625,14 +1702,20 @@ class ShieldingDq:
             for _ in pols
         ]
         nocc = self.nocc
-        if k_indices is None:
-            ks = self.ks
-            ws = [dk.weight for dk in self.ks]
+        n_all = len(self.ks) if self.ks is not None else len(self._kfs)
+        idxs = list(range(n_all)) if k_indices is None else list(k_indices)
+        if weights is not None:
+            ws = list(weights)
+        elif self.ks is not None:
+            ws = [self.ks[i].weight for i in idxs]
         else:
-            ks = [self.ks[i] for i in k_indices]
-            ws = ([self.ks[i].weight for i in k_indices]
-                  if weights is None else list(weights))
-        for dk, w_k in zip(ks, ws, strict=True):
+            ws = [self._weights[i] for i in idxs]
+        # Eager: index the prebuilt contexts. Streaming (self.ks is None): build
+        # each dense context here and let it fall out of scope after its k, so
+        # only one is alive at a time.
+        for i, w_k in zip(idxs, ws, strict=True):
+            dk = (self.ks[i] if self.ks is not None
+                  else self._build_ctx(self._kfs[i], self._weights[i]))
             uo, wo = dk.u[:, :nocc], dk.w[:nocc]
             uc, wc = dk.u[:, nocc:], dk.w[nocc:]
             pref = w_k * f_occ / self.volume
@@ -1763,6 +1846,7 @@ def _branch_field_fixed_sphere(
     no diamagnetic term (s-independent). Central differences of this twin pin
     every term of :meth:`ShieldingDq.branch_fields_axis`'s analytic ∂S/∂s;
     at s = 0 it reproduces the S⁰ assembly (minus dia) exactly."""
+    assert eng.ks is not None, "the finite-s twin needs the eager (chunk_k=None) build"
     dk = eng.ks[ik]
     nocc = eng.nocc
     qh = torch.as_tensor(np.asarray(q_hat, dtype=float), dtype=RDTYPE)
@@ -2021,6 +2105,7 @@ def sigma_shielding_dq(
     sites: Tensor | None = None,
     use_symmetry: bool | str = "auto",
     uspp: USPPResponseCtx | str | None = None,
+    chunk_k: int | None = None,
 ) -> Tensor:
     """Bare (pseudo) NMR shielding tensor by the ANALYTIC ∂/∂q at q = 0:
     σ_ij = −∂B_ind,i(r_site)/∂B_ext,j in ppm, shape (nsite, 3, 3).
@@ -2063,7 +2148,16 @@ def sigma_shielding_dq(
     reduced only when G_q is non-trivial and buys ≥1.1× on top of TR, otherwise
     it runs the exact full mesh, so the reduced path is never slower than
     ``use_symmetry=False``. Measured ~2.7×/3.4× on Si (4³/6³) and ~1.5×/2.0× on
-    rutile TiO₂; a cell with trivial symmetry falls back with no slowdown."""
+    rutile TiO₂; a cell with trivial symmetry falls back with no slowdown.
+
+    ``chunk_k`` streams the per-k dense contexts (eigh of H(k) + the ∂H/∂k
+    velocity matrices, the (npw×npw) blocks that dominate the footprint):
+    ``None`` (default) holds all mesh k at once — the historical path — while a
+    positive value builds and frees one k's context at a time inside the per-
+    axis BZ sum, dropping the peak from nk dense contexts to one at the cost of
+    rebuilding each context once per sampled axis. Bit-identical to the full-
+    mesh build (each context is a pure function of its k); the memory route for
+    many-atom cells whose full-mesh contexts do not fit."""
     _guard(res)
     system = uspp.system if isinstance(uspp, USPPResponseCtx) else res.system
     if sites is None:
@@ -2084,14 +2178,14 @@ def sigma_shielding_dq(
     # mesh (the smooth-USPP build is validated by the NC-limit gate there).
     plan = None if uspp is not None else _plan_wedge_reduction(res, axes, use_symmetry)
     if plan is None:  # exact full-mesh path (symmetry off or nothing reduces)
-        eng = ShieldingDq(res, uspp=uspp)
+        eng = ShieldingDq(res, uspp=uspp, chunk_k=chunk_k)
         axis_specs = [
             (np.asarray(b[i], dtype=float) / np.linalg.norm(b[i]), None, None, None)
             for i in axes
         ]
     else:  # opt-in little-group-of-q wedge reduction
         union_kfrac, per_axis = plan
-        eng = ShieldingDq(res, k_frac=union_kfrac)
+        eng = ShieldingDq(res, k_frac=union_kfrac, chunk_k=chunk_k)
         axis_specs = [
             (q_hat, k_idx, w, fold) for _i, q_hat, k_idx, w, fold in per_axis
         ]
