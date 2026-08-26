@@ -417,9 +417,18 @@ def _phonon_lines(ph):
     ]
     if "dos" in ph:
         pairs.append(("DOS mesh", "×".join(str(m) for m in ph["dos"]["mesh"])))
+    th = ph.get("thermo")
+    if th is not None:
+        pairs.append(("ZPE", f"{th['zero_point_energy_eV']:.4f} eV/cell"))
+        pairs.append(("Debye T", f"{th['debye_temperature_K']:.0f} K"))
+        temps = th["temperatures_K"]
+        i300 = min(range(len(temps)), key=lambda j: abs(temps[j] - 300.0), default=None)
+        if i300 is not None:
+            pairs.append((f"F_vib({temps[i300]:.0f} K)",
+                          f"{th['free_energy_eV'][i300]:.4f} eV/cell"))
     lines += _cols(pairs)
-    lines.append("   dispersion + DOS in the JSON · "
-                 "plot with `gradwave plot phonons.json`")
+    tail = "dispersion + DOS" + (" + thermo (F,U,Cv,S vs T)" if th is not None else "")
+    lines.append(f"   {tail} in the JSON · plot with `gradwave plot phonons.json`")
     return lines
 
 

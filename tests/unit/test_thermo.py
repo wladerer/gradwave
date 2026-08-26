@@ -105,3 +105,45 @@ def test_electronic_heat_capacity_spin_resolved_sums_channels():
     assert thermo.electronic_heat_capacity(energy, states_2d, 0.0, T) == pytest.approx(
         thermo.electronic_heat_capacity(energy, states_1d, 0.0, T), rel=1e-12
     )
+
+
+def test_thermo_table_shape_and_scalars():
+    grid, g = _einstein_dos(omega0_cm=200.0, n_modes=6)
+    temps = (0.0, 100.0, 300.0, 1000.0)
+    t = thermo.thermo_table(grid, g, temps)
+    # scalars
+    assert t["mode_count"] == pytest.approx(6.0, rel=1e-4)
+    assert t["zero_point_energy_eV"] > 0.0
+    assert t["debye_temperature_K"] > 0.0
+    # each T-dependent series matches the requested temperatures elementwise
+    assert t["temperatures_K"] == [0.0, 100.0, 300.0, 1000.0]
+    for key in ("free_energy_eV", "internal_energy_eV", "heat_capacity_eV_K", "entropy_eV_K"):
+        assert len(t[key]) == len(temps)
+
+
+def test_thermo_table_matches_single_quantity_functions():
+    grid, g = _einstein_dos(omega0_cm=250.0, n_modes=6)
+    temps = (0.0, 150.0, 600.0)
+    t = thermo.thermo_table(grid, g, temps)
+    assert t["zero_point_energy_eV"] == pytest.approx(thermo.zero_point_energy(grid, g))
+    for i, T in enumerate(temps):
+        assert t["free_energy_eV"][i] == pytest.approx(thermo.free_energy_vib(grid, g, T))
+        assert t["internal_energy_eV"][i] == pytest.approx(thermo.internal_energy_vib(grid, g, T))
+        assert t["heat_capacity_eV_K"][i] == pytest.approx(thermo.heat_capacity(grid, g, T))
+        assert t["entropy_eV_K"][i] == pytest.approx(thermo.entropy(grid, g, T))
+
+
+def test_thermo_table_thermodynamic_identities():
+    grid, g = _einstein_dos(omega0_cm=200.0, n_modes=6)
+    temps = (0.0, 100.0, 300.0, 800.0)
+    t = thermo.thermo_table(grid, g, temps)
+    for i, T in enumerate(temps):
+        # F = U − T·S holds to rounding (shared discretization)
+        f, u, s = t["free_energy_eV"][i], t["internal_energy_eV"][i], t["entropy_eV_K"][i]
+        assert f == pytest.approx(u - T * s, abs=1e-9)
+    # T=0: U = ZPE, S = 0, Cv = 0
+    assert t["internal_energy_eV"][0] == pytest.approx(t["zero_point_energy_eV"])
+    assert t["entropy_eV_K"][0] == 0.0
+    assert t["heat_capacity_eV_K"][0] == 0.0
+    # Dulong–Petit: Cv/k_B → 3N at high T
+    assert t["heat_capacity_eV_K"][-1] / K_B == pytest.approx(6.0, rel=0.05)

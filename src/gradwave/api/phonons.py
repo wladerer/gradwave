@@ -300,6 +300,15 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
                                width=inp.phonons.dos_width)
         block["dos"] = {"frequency_cm1": grid.tolist(), "dos": dos.tolist(),
                         "mesh": list(inp.phonons.dos_mesh)}
+        # Harmonic thermodynamics from the DOS we just built (F, U, Cv, S vs T,
+        # plus ZPE and θ_D). The thermo integrals drop imaginary branches, so
+        # flag them from the raw mode frequencies — the numbers are only
+        # meaningful for a dynamically stable (all-real) structure.
+        from gradwave.postscf.thermo import thermo_table
+
+        thermo_block = thermo_table(grid, dos, inp.phonons.thermo_temperatures)
+        thermo_block["imaginary_modes_present"] = bool(freqs.min() < -1.0)
+        block["thermo"] = thermo_block
     if verbose:
         print(f"phonons: min frequency {freqs.min():.1f} cm⁻¹ "
               f"({'has imaginary modes' if freqs.min() < -1.0 else 'all real'})",

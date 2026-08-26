@@ -97,6 +97,16 @@ drivers call their own module globals.
 | Warm-start an SCF from a checkpoint | `io.checkpoint.load_checkpoint` → `io.checkpoint.as_start_from` (pass as `scf(..., start_from=)`) | |
 | Load results into pandas frames / plot | `io.analysis.{load, scf_frame, bands_frame, plot_bands, …}` (needs the `analysis` extra) | parse the JSON by hand |
 
+**Built but not task-wired (library-only).** These `postscf` modules are
+importable and unit-tested but have **no Input / CLI / JSON surface** — `api.run`
+does not reach them, so don't assume a task exists: `qha`, `convex_hull`,
+`phase_diagram`, `composition_design`, `lattice_mc` (`lattice_mc` is a fixed-J
+Ising model, not a fitted cluster expansion). Harmonic `thermo` **is** wired —
+`run_phonons` emits an F/U/Cv/S(T) + ZPE + θ_D `thermo` block whenever it builds
+a DOS. Natural next finishes: `qha` (reuses the phonon `thermo` bridge across
+volumes) and `convex_hull` formation energies (blocked on reference-energy
+provenance — needs caller-supplied elemental refs).
+
 ## Running commands efficiently
 
 Long-lived commands (test runs, SCFs) should be launched in the background writing to a
