@@ -62,6 +62,15 @@ def find_spacegroup(
     # plain Sequences; spglib itself casts at this exact seam internally (spg.py)
     # rather than widen the stub, since the numpy arrays built just above satisfy
     # the runtime contract (row-iterable) but not the stub's nested-Sequence shape.
+    # spglib ≥2.7 warns (DeprecationWarning) that OLD_ERROR_HANDLING defaults to
+    # True; 2.8 flips the default and 3.0 removes it. Under the NEW regime spglib
+    # RAISES spglib.SpglibError on a degenerate cell instead of returning None,
+    # so silencing the warning is NOT behavior-preserving here — this None-check
+    # (and the same pattern in api/flapw.py) would stop firing. Migration when
+    # bumping: catch SpglibError at every None-return site and map it to the
+    # existing None-path outcome (this ValueError; flapw's (0,0)/[] fallback),
+    # THEN set spglib.error.OLD_ERROR_HANDLING = False once centrally. Validate
+    # against a degenerate-cell fixture. (api/summary.py already handles both.)
     ds = spglib.get_symmetry_dataset(cast(SpgCell, (cell, frac, numbers)), symprec=symprec)
     if ds is None:
         raise ValueError(
