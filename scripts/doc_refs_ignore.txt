@@ -1,0 +1,10 @@
+# Allow-list for scripts/check_doc_refs.py — repo-relative path references that
+# are intentionally absent from a clean checkout (generated/local artifacts, or
+# provenance notes about outputs that are not committed). One path per line;
+# '#' starts a comment. Prefer FIXING a stale reference over ignoring it; add an
+# entry here only when the reference is deliberately to a non-tracked file.
+
+# Provenance note in benchmarks/pulay_accuracy/RESULTS.md: the geometry came from
+# a local relax run whose output under benchmarks/results/ is generated, not
+# committed.
+benchmarks/results/sio2-elastic/out_relax/relax.json

@@ -226,11 +226,17 @@ fast gate on push). Before opening a PR, from the worktree:
    `[tool.importlinter]`, where `scf -> postscf._response` goes through the
    shared-response-kernel exception list).
 4. `uv run pytest -m "not standard and not slow and not torture and not gpu"` passes.
-5. The branch is rebased on `main` so conflicts surface locally rather than at merge.
-6. Regenerate `uv.lock` (`uv lock`) only if dependencies changed, and commit it last.
+5. `make doc-refs` is clean (the doc-truth-decay guard: fails on stale file-path
+   references in the docs — a doc pointing at a file that has moved or been
+   deleted. If a reference is intentionally to a non-tracked/generated file, add
+   it to `scripts/doc_refs_ignore.txt`).
+6. The branch is rebased on `main` so conflicts surface locally rather than at merge.
+7. Regenerate `uv.lock` (`uv lock`) only if dependencies changed, and commit it last.
 
-CI runs ruff, ty, and the standard tier on every PR, so let the green check
-stand in for re-running the standard suite by hand.
+CI runs ruff, ty, the doc-refs guard, and the standard tier on every PR, so let
+the green check stand in for re-running the standard suite by hand. The doc-refs
+job runs even on docs-only PRs (which skip lint/test), since that is exactly when
+stale references are introduced.
 
 ## Typing
 

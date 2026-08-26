@@ -67,7 +67,7 @@ gwq lint
 gwq bench bench_scf cpu 8 nosym          # captured — writes benchmarks/results/<host>/
 gwq --host asus bench bench_scf cpu 8 nosym
 gwq run --group bench -- uv run python benchmarks/mixer_rig.py
-gwq sweep -- uv run python benchmarks/delta_gauge/run.py   # exclusive; then `gwq resume`
+gwq sweep -- uv run python benchmarks/delta_gauge/run_gw.py   # exclusive; then `gwq resume`
 gwq status                    # live queue across both hosts
 gwq log <id>                  # tail a job's output (forwards to `pueue log`)
 gwq pueue -- kill <id>        # forward raw args to pueue on --host

@@ -267,6 +267,42 @@ contraction vs E_NL, on the doubled plane-wave axis). Remaining:
   forces Hellmann-Feynman forces of F (Mermin) and the classic trap for
   Methfessel-Paxton / Marzari-Vanderbilt entropy expressions.
 
+## Documentation integrity (doc-truth-decay guard)
+
+A different failure mode from numerical incorrectness: docs that were true when
+written and quietly rot as the code moves. In a high-velocity, many-worktree
+repo the docs, the capability map, and the agent memory accumulate point-in-time
+claims. A stale claim is worse than a missing one — it actively sends the next
+reader (or agent) to the wrong place. This bit us concretely: a memory note
+saying a shipped, wired feature was "not yet wired into `core/batch.py`" nearly
+triggered a rebuild of code that already existed.
+
+`scripts/check_doc_refs.py` (`make doc-refs`, and a standalone CI job that runs
+even on docs-only PRs) is the first, highest-precision guard against this:
+
+- **Phase 1 (shipped): path references.** Every backtick-quoted or bare token
+  in the markdown surface that looks like a repo file (`src/…`, `tests/…`,
+  `scripts/…`, `docs/…`, …) must resolve to a real file. Catches the common rot
+  of a doc naming a file that has moved, been renamed, or deleted. Glob/
+  placeholder tokens and URLs are skipped; intentional references to
+  generated/non-tracked files go in `scripts/doc_refs_ignore.txt`. Run with
+  `--extra-dir <dir>` to also scan an out-of-repo memory directory (references
+  resolve relative to the repo root).
+
+Planned extensions, in order of value and difficulty:
+
+- **Phase 2: symbol references.** Verify that backtick-quoted `module.symbol`
+  API references (especially the CLAUDE.md capability-map table — the onboarding
+  single-source-of-truth) resolve to a defined symbol, checking package
+  `__init__` re-exports (`api`/`inputs`). Higher false-positive risk (dynamic/
+  re-exported names), so scope conservatively: flag only unambiguous misses.
+- **Phase 3: semantic staleness.** The hard case the ToeplitzApply note actually
+  was — a claim about an *existing* file that is no longer true ("not yet
+  wired"). No pure static path/symbol check sees this; it needs usage modelling
+  (is the symbol actually imported/called where the prose says?) and is best
+  treated as a targeted lint on a small set of load-bearing claims, not a
+  blanket scan.
+
 ## Citations
 
 - Oberkampf, Trucano, Prog. Aerosp. Sci. 38, 209 (2002).

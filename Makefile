@@ -33,6 +33,9 @@ lint: ## ruff, concise output
 imports: ## enforce package-boundary contracts (import-linter)
 	uv run lint-imports
 
+doc-refs: ## fail on stale file-path references in the docs (doc-truth-decay guard)
+	uv run python scripts/check_doc_refs.py
+
 typecheck: ## ty: error on the typed file list (pyproject [[tool.ty.overrides]]), warn-only elsewhere
 	uv run ty check
 
@@ -48,7 +51,7 @@ fmt: ## ruff autofix + format
 lock: ## refresh uv.lock after a dependency change
 	uv lock
 
-check: lint imports typecheck test-fast ## pre-push gate: lint + import contracts + typecheck + fast tests
+check: lint imports typecheck doc-refs test-fast ## pre-push gate: lint + import contracts + typecheck + doc refs + fast tests
 
 hooks: ## install git hooks (ruff on commit, fast gate on push)
 	uv run pre-commit install
