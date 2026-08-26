@@ -1,0 +1,36 @@
+name: uv setup
+description: >-
+  Install uv (with its cache), Python 3.12, and sync dependencies — retrying the
+  network-bound steps so a transient PyPI / index hiccup does not fail the whole
+  job. (uv sync --all-extras pulls torch and the full dev set, so it is the most
+  flake-prone step on the public runners.)
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        enable-cache: true
+
+    - name: Set up Python (retry on transient failure)
+      shell: bash
+      run: |
+        for i in 1 2 3; do
+          uv python install 3.12 && exit 0
+          echo "::warning::uv python install failed (attempt $i/3); retrying in 10s"
+          sleep 10
+        done
+        echo "::error::uv python install failed after 3 attempts"
+        exit 1
+
+    - name: Sync dependencies (retry on transient failure)
+      shell: bash
+      run: |
+        for i in 1 2 3; do
+          uv sync --all-extras && exit 0
+          echo "::warning::uv sync failed (attempt $i/3); retrying in 15s"
+          sleep 15
+        done
+        echo "::error::uv sync failed after 3 attempts"
+        exit 1
