@@ -17,8 +17,10 @@ density-level warm start and only re-seeds atomic moments via nc_mag_seed).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import torch
 
@@ -26,7 +28,7 @@ FORMAT = "gradwave-checkpoint"
 VERSION = 1
 
 
-def energies_eV_dict(e) -> dict:
+def energies_eV_dict(e) -> dict[str, float]:
     """The 11-term energy breakdown (eV) shared by the checkpoint payload and
     the api summary. build_summary adds the derived e0 on top."""
     return {
@@ -61,7 +63,7 @@ def save_checkpoint(res, path, *, wavefunctions: bool = False) -> Path:
 
     from gradwave._version import __version__
 
-    get = (res.get if isinstance(res, dict)
+    get: Callable[..., Any] = (res.get if isinstance(res, dict)
            else lambda k, d=None: getattr(res, k, d))
     # The checkpoint kind is the result's formalism tag ("nc" |
     # "noncollinear" | "uspp"). Legacy shims (plain dicts / duck-typed
@@ -159,7 +161,7 @@ def _allow_numpy_globals() -> None:
         [_reconstruct, np.ndarray, np.dtype, *dtype_classes])
 
 
-def load_checkpoint(path) -> dict:
+def load_checkpoint(path) -> dict[str, Any]:
     """Load a checkpoint payload: a plain dict of CPU tensors + metadata,
     with payload["kind"] the saved result's formalism tag. This is the
     archive view, not a live result object — feed it to as_start_from /
@@ -175,7 +177,7 @@ def load_checkpoint(path) -> dict:
     return payload
 
 
-def nc_mag_seed(payload: dict, system) -> torch.Tensor:
+def nc_mag_seed(payload: dict[str, Any], system) -> torch.Tensor:
     """Per-atom moment seed (na, 3) [μB] for warm-starting a non-collinear
     SCF from a checkpoint.
 
@@ -203,7 +205,7 @@ def nc_mag_seed(payload: dict, system) -> torch.Tensor:
     return torch.einsum("axyz,ixyz->ai", w, m) * cf  # (na, 3) [μB]
 
 
-def as_start_from(payload: dict) -> dict:
+def as_start_from(payload: dict[str, Any]) -> dict[str, Any]:
     """The start_from view of a loaded checkpoint: a shim dict carrying
     grid shape/volume, densities and (USPP/PAW) the becsum. The solvers
     validate grid compatibility and rescale ρ by the volume ratio.

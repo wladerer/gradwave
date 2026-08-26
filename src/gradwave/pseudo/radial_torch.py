@@ -23,6 +23,7 @@ from typing import Any, cast
 
 import numpy as np
 import torch
+from typing_extensions import override
 
 from gradwave.pseudo._bessel_data import DOUBLE_FACTORIAL, SERIES_TERMS, SERIES_X
 from gradwave.pseudo.radial import _simpson_index_weights
@@ -167,7 +168,11 @@ class _SBT(torch.autograd.Function):
     # FunctionCtx's dynamic ctx.l/ctx.saved_tensors attributes are real at
     # runtime (the documented save_for_backward/saved_tensors contract) but
     # not part of the stub, a genuine base-class typing gap, not a quick fix.
+    # backward's fixed (ctx, grad_out) arity is narrower than the base's
+    # variadic (ctx, *grad_outputs), an unavoidable LSP mismatch for a single-
+    # output Function — suppressed narrowly below.
     @staticmethod
+    @override
     def forward(ctx, q, gw, r, l):
         ctx.l = l
         ctx.save_for_backward(q, gw, r)
@@ -175,7 +180,8 @@ class _SBT(torch.autograd.Function):
             return _contract(l, q, r, gw, deriv=False)
 
     @staticmethod
-    def backward(ctx, grad_out):
+    @override
+    def backward(ctx, grad_out):  # ty: ignore[invalid-method-override]
         q, gw, r = ctx.saved_tensors
         if torch.is_grad_enabled() and q.requires_grad:
             # second-order pass (Hvp): keep the contraction on the graph

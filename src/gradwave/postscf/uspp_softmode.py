@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 
@@ -100,7 +101,10 @@ class UsppScreening:
     apply: LinOp
     ref: Field
     pack: Callable[[torch.Tensor], Field]
-    split: Callable[[Field], tuple]
+    split: Callable[
+        [Field],
+        tuple[list[torch.Tensor], list[list[torch.Tensor]], list[list[torch.Tensor]] | None],
+    ]
     join: Callable[..., Field]
     cs: _ConvergedUSPP
 
@@ -201,7 +205,7 @@ def build_uspp_screening(res: USPPResult, xc: XCFunctional | SpinXC, *,
                      for isp in range(nsp)]
         drho, dbec, dnh = cs.apply_chi0(w_sp, d_bare_sp, dpsi_warm, cg_tol,
                                         cg_max_iter, d_hub_sp=d_hub_sp)
-        hub_term = cs.k_hub(dnh) if nsh else None
+        hub_term = cs.k_hub(cast("list[list[torch.Tensor]]", dnh)) if nsh else None
         out = join(_k_hxc_grid_scaled(cs, drho, fxc_scale),
                    cs.hvp_onecenter(dbec), hub_term)
         return coupling * out if coupling != 1.0 else out

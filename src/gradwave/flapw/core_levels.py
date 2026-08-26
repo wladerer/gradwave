@@ -17,6 +17,8 @@ is exactly zero and the inequivalent-site shift is the observable.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import torch
 
@@ -25,8 +27,8 @@ from gradwave.flapw.radial import radial_eigs_tridiag
 _ORB = "spdf"
 
 
-def core_levels_from_state(v_by_key: dict, syms: list[str], keys: list[str],
-                           core_map: dict, r, dx: float) -> dict:
+def core_levels_from_state(v_by_key: dict[str, Any], syms: list[str], keys: list[str],
+                           core_map: dict[str, Any], r, dx: float) -> dict[str, Any]:
     """Per-site all-electron core eigenvalues (eV).
 
     ``v_by_key[key]`` is the converged spherical MT potential on the radial mesh
@@ -37,7 +39,7 @@ def core_levels_from_state(v_by_key: dict, syms: list[str], keys: list[str],
     2p: l=1/nidx=1)."""
     rt = torch.as_tensor(np.asarray(r), dtype=torch.float64)
     dxf = float(dx)
-    out: dict = {}
+    out: dict[str, Any] = {}
     for i, s in enumerate(syms):
         k = keys[i]
         v = torch.as_tensor(np.asarray(v_by_key[k]), dtype=torch.float64)
@@ -49,17 +51,17 @@ def core_levels_from_state(v_by_key: dict, syms: list[str], keys: list[str],
     return out
 
 
-def core_level_shifts(levels: dict) -> list[dict]:
+def core_level_shifts(levels: dict[str, Any]) -> list[dict[str, Any]]:
     """Within-cell same-element, same-orbital core-level shifts (eV).
 
     For every element present on ≥2 sites, Δε(site_j − site_ref) per shared
     orbital, with ``site_ref`` the first site of that element (both share the
     interstitial reference, so the shift is physical). Returns a list of
     ``{species, orbital, site, ref_site, delta_eV, e_site_eV, e_ref_eV}``."""
-    by_species: dict[str, list[tuple[str, dict]]] = {}
+    by_species: dict[str, list[tuple[str, dict[str, Any]]]] = {}
     for k, rec in levels.items():
         by_species.setdefault(rec["symbol"], []).append((k, rec["levels"]))
-    shifts: list[dict] = []
+    shifts: list[dict[str, Any]] = []
     for s, sites in by_species.items():
         if len(sites) < 2:
             continue

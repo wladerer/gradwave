@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 from collections import OrderedDict
+from typing import Any
 
 import numpy as np
 
@@ -91,7 +92,7 @@ def ylm_rotations_complex(sg, cell, big_ls):
     return out
 
 
-_GAUNT_CACHE: dict = {}
+_GAUNT_CACHE: dict[Any, Any] = {}
 
 
 def gaunt_matrix(l, big_l, big_m, lp, nx: int = 16, nphi: int = 24):
@@ -337,7 +338,7 @@ def efg_tensor(multipoles, rr, drw):
     return _tensor_from_v(_valence_v(multipoles, rr, drw))
 
 
-_PHASE_CACHE: OrderedDict = OrderedDict()      # geometry key -> (E0[p, G], gvec[G, 3])
+_PHASE_CACHE: OrderedDict[Any, Any] = OrderedDict()      # geometry key -> (E0[p, G], gvec[G, 3])
 _PHASE_CACHE_BUDGET = 2**32                    # 4 GiB cap on the cached phase matrices
 
 

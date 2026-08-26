@@ -14,6 +14,7 @@ was invisible because runs kept only endpoint numbers. The per-iteration story I
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 TRACE_VERSION = 1
 
@@ -22,14 +23,14 @@ TRACE_VERSION = 1
 class FLAPWRecorder:
     """Append-only per-iteration telemetry for ``crystal_scf_multi``."""
 
-    iters: list[dict] = field(default_factory=list)
+    iters: list[dict[str, Any]] = field(default_factory=list)
 
     def record(self, **kw) -> None:
         """One iteration's scalars: it, span, d_span, r_v, r_nsph, beta_nsph, symmetry_dev,
         e_fermi, mt_phase, exact_solve, t_s (all floats/bools/ints; None where not applicable)."""
         self.iters.append(dict(kw))
 
-    def summarize(self) -> dict:
+    def summarize(self) -> dict[str, Any]:
         """The convergence story in one dict (consumed by the summary block)."""
         if not self.iters:
             return {}
@@ -46,7 +47,7 @@ class FLAPWRecorder:
             "wall_s": sum(it.get("t_s") or 0.0 for it in self.iters),
         }
 
-    def to_trace_dict(self) -> dict:
+    def to_trace_dict(self) -> dict[str, Any]:
         """Column-oriented trace for the runinfo sidecar / analysis frames."""
         keys = sorted({k for it in self.iters for k in it})
         return {"trace_version": TRACE_VERSION,

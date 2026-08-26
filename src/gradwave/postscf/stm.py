@@ -36,6 +36,7 @@ benchmarked on an SOC surface.
 from __future__ import annotations
 
 import math
+from typing import cast
 
 import torch
 
@@ -52,7 +53,8 @@ def _formalism(result: SCFResult) -> str:
 
 
 def _coeffs(result: SCFResult, ispin: int, ik: int) -> torch.Tensor:
-    return result.coeffs[ispin][ik] if result.nspin == 2 else result.coeffs[ik]  # type: ignore[index]
+    c = result.coeffs[ispin][ik] if result.nspin == 2 else result.coeffs[ik]  # type: ignore[index]
+    return cast("torch.Tensor", c)
 
 
 def _eigs(result: SCFResult, ispin: int, ik: int) -> torch.Tensor:

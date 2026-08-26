@@ -32,6 +32,7 @@ detached BEFORE passing arguments.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -85,7 +86,7 @@ def total_energy(
     coeffs_per_k: list[torch.Tensor],
     occ: torch.Tensor,
     kweights: torch.Tensor,
-    spheres: list,
+    spheres: list[Any],
     grid,  # grids.FFTGrid
     rho: torch.Tensor,  # (n1,n2,n3) [e/Å³] — pass the SCF density (detached or not)
     positions: torch.Tensor,  # (na,3) Å

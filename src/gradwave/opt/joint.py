@@ -42,6 +42,7 @@ import contextlib
 import logging
 import math
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -334,7 +335,7 @@ class JointResult:
     energy: float            # eV — joint functional at the final point
     cell: np.ndarray         # (3,3) Å, relaxed
     positions: np.ndarray    # (na,3) Cartesian Å, relaxed
-    coeffs: list             # per-k orthonormal occupied orbitals (final basis)
+    coeffs: list[torch.Tensor]  # per-k orthonormal occupied orbitals (final basis)
     system: System           # system at the final (rebuilt) cell
     n_closures: int = 0      # energy+gradient evaluations
     h_seed: int = 0          # exact H-applies spent in seed/rebuild SCF passes
@@ -342,7 +343,7 @@ class JointResult:
     n_cycles: int = 0        # basis rebuild cycles used
     fmax: float = 0.0        # max |force| at exit [eV/Å]
     smax: float = 0.0        # max |σ| at exit [eV/Å³]
-    history: list = field(default_factory=list)  # (closure, E) trace
+    history: list[tuple[int, float]] = field(default_factory=list)  # (closure, E) trace
 
 
 def _grad_metrics(eps_p, frac_p, z_params, a_e_np, omega0):
@@ -366,7 +367,7 @@ def joint_relax(
     cell: np.ndarray,
     positions: np.ndarray,     # (na,3) Cartesian Å
     species_of_atom: list[int],
-    upfs: list,
+    upfs: list[Any],
     xc: XCFunctional,
     *,
     ecut: float,
@@ -401,11 +402,18 @@ def joint_relax(
     """
     cell = np.asarray(cell, dtype=np.float64)
     positions = np.asarray(positions, dtype=np.float64)
-    coeffs_init = None
+    coeffs_init: list[torch.Tensor] | None = None
     prev_spheres = None
     h_seed = 0
     n_closures = 0
-    history: list = []
+    history: list[tuple[int, float]] = []
+    # Loop-carried results, declared up front so their post-loop use type-checks
+    # (the rebuild loop always runs at least once — max_rebuilds >= 0).
+    system: System | None = None
+    nk = 0
+    cycle = 0
+    converged_inner = False
+    eps_p = frac_p = z_params = None
 
     for cycle in range(max_rebuilds + 1):
         system = setup_system(
@@ -427,7 +435,8 @@ def joint_relax(
                 res = scf(system, xc, max_iter=seed_scf_iters, verbose=False,
                           etol=0.0, rhotol=0.0, diago_tol=1e-4)
             h_seed += counter.count
-            coeffs_init = [lowdin(c[:n_occ].to(CDTYPE)) for c in res.coeffs]
+            coeffs_init = [lowdin(cast("torch.Tensor", c)[:n_occ].to(CDTYPE))
+                           for c in res.coeffs]
         else:
             coeffs_init = [lowdin(c) for c in
                            _transfer_coeffs(prev_spheres, system.spheres,
@@ -518,6 +527,9 @@ def joint_relax(
         if n_closures >= max_closures:
             break
 
+    assert system is not None  # the rebuild loop always runs at least once
+    assert n_occ is not None
+    assert coeffs_init is not None
     f_final, s_final, _ = _grad_metrics(
         eps_p, frac_p, z_params, cell, system.grid.volume)
     return JointResult(

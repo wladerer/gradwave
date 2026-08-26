@@ -34,13 +34,15 @@ import numpy as np
 __all__ = ["lo_labels", "lo_overlap_schur", "lo_resid_fracs", "lo_conditioning_report"]
 
 
-def lo_labels(atoms_cart: list[tuple[Any, str]], lodat: dict[str, list]) -> list[tuple]:
+def lo_labels(
+    atoms_cart: list[tuple[Any, str]], lodat: dict[str, list[Any]]
+) -> list[tuple[Any, ...]]:
     """``(atom_index, species, l, m)`` per LO row, in the secular build order.
 
     Matches ``scf._solve_secular``'s extension exactly: atoms outer, ``lodat[key]`` LOs in
     list order, ``m = −l..l`` innermost.
     """
-    labels: list[tuple] = []
+    labels: list[tuple[Any, ...]] = []
     for ai, (_tau, key) in enumerate(atoms_cart):
         for lo in lodat.get(key, []):
             ell = int(lo["l"])
@@ -80,7 +82,7 @@ def lo_resid_fracs(S: np.ndarray, npw: int) -> tuple[np.ndarray, np.ndarray]:
     return np.real(lam), vecs
 
 
-def lo_conditioning_report(S: np.ndarray, npw: int, labels: list | None = None,
+def lo_conditioning_report(S: np.ndarray, npw: int, labels: list[Any] | None = None,
                            tol: float = 0.05) -> tuple[list[tuple[float, Any]], str]:
     """Localize redundant LO directions. Returns ``(redundant, report)``.
 

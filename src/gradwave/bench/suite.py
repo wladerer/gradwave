@@ -14,6 +14,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -43,8 +44,8 @@ class BenchCase:
     name: str
     hardness: str                       # insulator | simple-metal | transition-metal
     _build: Callable[[], object]
-    scf_kwargs: dict                    # smearing/width/max_iter/etol/rhotol/nspin
-    descriptor: dict = field(default_factory=dict)
+    scf_kwargs: dict[str, Any]          # smearing/width/max_iter/etol/rhotol/nspin
+    descriptor: dict[str, Any] = field(default_factory=dict)
 
     def build(self):
         return self._build()

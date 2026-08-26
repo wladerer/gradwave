@@ -24,6 +24,8 @@ isolated limit.
 
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 import torch
 
@@ -42,7 +44,9 @@ def madelung_energy(cell) -> float:
     cell_t = torch.as_tensor(np.asarray(cell), dtype=RDTYPE)
     pos = torch.zeros((1, 3), dtype=RDTYPE)
     q = torch.ones(1, dtype=RDTYPE)
-    return float(ewald_energy(pos, q, cell_t))
+    # ewald_energy declares cell: np.ndarray but does np.asarray(cell) first, so a
+    # CPU tensor is accepted at runtime (kept as a tensor here for dtype parity).
+    return float(ewald_energy(pos, q, cast("np.ndarray", cell_t)))
 
 
 def makov_payne_correction(q: float, cell, epsilon: float = 1.0) -> float:

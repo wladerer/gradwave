@@ -156,6 +156,8 @@ def init_from_env(backend: str = "gloo") -> tuple[int, int, Any] | None:
         return None
     import torch.distributed as dist
 
+    dist = cast("Any", dist)  # members are gated behind is_available(), loosely typed
+
     if not dist.is_initialized():
         init_method = os.environ.get("GRADWAVE_DIST_INIT_METHOD")
         if init_method:
@@ -351,15 +353,16 @@ def shard_start_from(start_from: _T, ctx: DistKContext) -> _T:
         return coeffs[lo:hi]
 
     if isinstance(start_from, dict):
-        if start_from.get("coeffs") is None:
+        d = cast("dict[str, Any]", start_from)
+        if d.get("coeffs") is None:
             return start_from
-        out = dict(start_from)
-        out["coeffs"] = _slice(start_from["coeffs"])
+        out = dict(d)
+        out["coeffs"] = _slice(d["coeffs"])
         return cast("_T", out)
     coeffs = getattr(start_from, "coeffs", None)
     if coeffs is None:
         return start_from
-    return dataclasses.replace(start_from, coeffs=_slice(coeffs))
+    return cast("_T", dataclasses.replace(cast("Any", start_from), coeffs=_slice(coeffs)))
 
 
 def all_reduce_(tensor: torch.Tensor, ctx: DistKContext) -> torch.Tensor:
@@ -380,6 +383,8 @@ def all_reduce_(tensor: torch.Tensor, ctx: DistKContext) -> torch.Tensor:
     input being mutated; every current call site already does
     (``x = all_reduce_(x, ctx)``)."""
     import torch.distributed as dist
+
+    dist = cast("Any", dist)  # members are gated behind is_available(), loosely typed
 
     t = tensor if tensor.is_contiguous() else tensor.contiguous()
     dist.all_reduce(t, op=dist.ReduceOp.SUM, group=ctx.group)
@@ -408,6 +413,8 @@ def _gather_var_tensor_lists(
     complex coefficients and real becp/eigenvalue arrays round-trip losslessly.
     """
     import torch.distributed as dist
+
+    dist = cast("Any", dist)  # members are gated behind is_available(), loosely typed
 
     # 1. Metadata (shape, dtype) per local tensor — small, so the object path
     #    is fine here (this is NOT the large-payload pathology).
@@ -486,6 +493,8 @@ def gather_list_cat(local: list[_T], ctx: DistKContext) -> list[_T]:
     (avoiding a path-divergence deadlock)."""
     import torch.distributed as dist
 
+    dist = cast("Any", dist)  # members are gated behind is_available(), loosely typed
+
     is_tensor_local = bool(local) and isinstance(local[0], torch.Tensor)
     flags: list[bool | None] = [None] * ctx.world_size
     dist.all_gather_object(flags, is_tensor_local, group=ctx.group)
@@ -514,6 +523,8 @@ def maybe_destroy_process_group() -> None:
     end of a run — single-process paths never initialize a group, so they never
     touch it. Idempotent: a second call after teardown does nothing."""
     import torch.distributed as dist
+
+    dist = cast("Any", dist)  # members are gated behind is_available(), loosely typed
 
     if dist.is_available() and dist.is_initialized():
         dist.destroy_process_group()
