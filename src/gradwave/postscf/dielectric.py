@@ -66,6 +66,7 @@ from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.grids import FFTGrid
 from gradwave.postscf._kb import projector_data_at_k, species_projector_tables
 from gradwave.postscf._response import (
+    ResolventSternheimer,
     cg_sternheimer,
     fxc_hvp,
     fxc_hvp_noncollinear_nonmagnetic,
@@ -167,8 +168,14 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
                     dk: float = 1e-3, cg_tol: float = 1e-9,
                     beta: float = 0.5, outer_tol: float = 1e-7,
                     max_outer: int = 80, history: int = 8,
-                    verbose: bool = False) -> dict[str, Any]:
+                    solver: str = "cg", verbose: bool = False) -> dict[str, Any]:
     """ε∞ (3,3) and Born effective charges Z* (na,3,3) from E-field DFPT.
+
+    ``solver`` picks the conduction-projected Sternheimer solve: ``"cg"`` (default,
+    warm-started iterative CG) or ``"resolvent"`` (one dense eigh of the fixed H per
+    k, reused across all field directions and screening iterations — faster for
+    small insulators where the many solves amortize the eigh; collinear nspin=1,
+    non-spin-orbit only).
 
     Collinear spin (nspin=2) is threaded per channel: the Sternheimer solve runs
     independently for each spin (H is block-diagonal in spin), and the screening
@@ -182,6 +189,11 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
     see that function and the module docstring.
     """
     system = res.system
+    if solver not in ("cg", "resolvent"):
+        raise ValueError(f"unknown Sternheimer solver {solver!r}; use 'cg' or 'resolvent'")
+    if solver == "resolvent" and (system.is_fr or int(getattr(res, "nspin", 1)) == 2):
+        raise NotImplementedError(
+            "resolvent Sternheimer solver: collinear nspin=1 (non-spin-orbit) only")
     if system.is_fr:
         # is_fr is only ever true on a fully-relativistic NCResult, run with
         # its NoncollinearXC.
@@ -235,6 +247,17 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
 
     h = BatchedHamiltonian(bk, grid.shape, res.v_eff, projectors_b(bk, system.positions))
 
+    # one Sternheimer callable (rhs, x0) → δψ; the resolvent factorizes the fixed H
+    # once here and reuses it for every field direction and screening iteration.
+    if solver == "resolvent":
+        _rsolve = ResolventSternheimer(h, bk, c_occ, eps_occ)
+
+        def _sternheimer(rhs, x0):
+            return _rsolve.solve(rhs)
+    else:
+        def _sternheimer(rhs, x0):
+            return cg_sternheimer(h, bk, c_occ, eps_occ, rhs, x0, shift, tol=cg_tol)
+
     def p_c(x):
         ov = torch.einsum("kng,kbg->kbn", c_occ.conj(), x)
         return x - torch.einsum("kbn,kng->kbg", ov, c_occ)
@@ -243,8 +266,7 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
     xi = []
     for a in range(3):
         rhs = -1j * p_c(_dhdk_psi(system, c_occ, a, dk))
-        xi.append(cg_sternheimer(h, bk, c_occ, eps_occ, rhs,
-                                 torch.zeros_like(rhs), shift, tol=cg_tol))
+        xi.append(_sternheimer(rhs, torch.zeros_like(rhs)))
 
     psi_r = g_to_r_b(c_occ, bk, grid.shape)
     n_pts = grid.n_points
@@ -280,8 +302,7 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
                 if it > 1:
                     u_r = u_flat.reshape(grid.shape)
                     rhs = rhs - p_c(box_to_sphere_b(psi_r * u_r.to(psi_r.dtype), bk))
-                dpsi = cg_sternheimer(h, bk, c_occ, eps_occ, rhs, dpsi, shift,
-                                      tol=cg_tol)
+                dpsi = _sternheimer(rhs, dpsi)
                 dpsi_r = g_to_r_b(dpsi, bk, grid.shape)
                 drho = 4.0 * (kw[:, None, None, None, None]
                               * (psi_r.conj() * dpsi_r).real).sum(dim=(0, 1)) / vol
@@ -310,9 +331,9 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
 
         dpsi_all, drho_all, col_mat = _field_response_symmetrized(
             h, bk, grid, c_occ, eps_occ, shift, psi_r, xi, p_c, kw, vol,
-            vsym, res, xc, n_pts, beta=beta, history=history,
-            outer_tol=outer_tol, max_outer=max_outer, cg_tol=cg_tol,
-            verbose=verbose)
+            vsym, res, xc, n_pts, sternheimer=_sternheimer, beta=beta,
+            history=history, outer_tol=outer_tol, max_outer=max_outer,
+            cg_tol=cg_tol, verbose=verbose)
         # vsym is built from system.sym under the same `is not None` check.
         assert system.sym is not None
         eps_mat = symmetrize_tensor(
@@ -367,8 +388,8 @@ def _field_response_symmetrized(h: BatchedHamiltonian, bk: BatchedK, grid: FFTGr
                                 psi_r: torch.Tensor, xi: list[torch.Tensor],
                                 p_c: Callable[[torch.Tensor], torch.Tensor],
                                 kw: torch.Tensor, vol: float, vsym: VectorFieldSymmetrizer,
-                                res: SCFResult, xc: XCFunctional, n_pts: int, *, beta, history,
-                                outer_tol, max_outer, cg_tol, verbose,
+                                res: SCFResult, xc: XCFunctional, n_pts: int, *, sternheimer,
+                                beta, history, outer_tol, max_outer, cg_tol, verbose,
                                 ) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
     """Joint 3-direction self-consistent E-field response on the IBZ.
 
@@ -394,8 +415,7 @@ def _field_response_symmetrized(h: BatchedHamiltonian, bk: BatchedK, grid: FFTGr
             if it > 1:
                 u_r = u_flat[b * n_pts:(b + 1) * n_pts].reshape(grid.shape)
                 rhs = rhs - p_c(box_to_sphere_b(psi_r * u_r.to(psi_r.dtype), bk))
-            dpsi[b] = cg_sternheimer(h, bk, c_occ, eps_occ, rhs, dpsi[b], shift,
-                                     tol=cg_tol)
+            dpsi[b] = sternheimer(rhs, dpsi[b])
             dpsi_r = g_to_r_b(dpsi[b], bk, grid.shape)
             drho_raw[b] = 4.0 * (kw[:, None, None, None, None]
                                  * (psi_r.conj() * dpsi_r).real).sum(dim=(0, 1)) / vol
