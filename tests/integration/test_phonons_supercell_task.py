@@ -66,6 +66,24 @@ def test_phonon_dos_present(si_phonons):
     assert g[d > d.max() * 0.01].max() < 600.0
 
 
+def test_phonon_thermo_present(si_phonons):
+    """The DOS is now bridged to harmonic thermodynamics (F, U, Cv, S vs T)."""
+    th = si_phonons["thermo"]
+    # Si primitive cell has 2 atoms → 6 modes; the DOS integrates to that.
+    assert th["mode_count"] == pytest.approx(6.0, rel=0.05)
+    assert th["zero_point_energy_eV"] > 0.0
+    assert th["debye_temperature_K"] > 0.0
+    assert th["imaginary_modes_present"] is False
+    temps = th["temperatures_K"]
+    cv = th["heat_capacity_eV_K"]
+    assert cv[0] == 0.0                       # Cv(0 K) = 0
+    assert cv[-1] > cv[1] > 0.0               # rises with T toward Dulong–Petit
+    # F = U − T·S at every tabulated temperature
+    for T, f, u, s in zip(temps, th["free_energy_eV"], th["internal_energy_eV"],
+                          th["entropy_eV_K"], strict=True):
+        assert f == pytest.approx(u - T * s, abs=1e-9)
+
+
 def _si_phonon_input(nspin: int):
     """Diamond Si supercell phonons, coarse and shared between nspin 1 and 2.
     A 1×1×1 supercell keeps the SCF count small (Γ dynamical matrix only); the

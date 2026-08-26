@@ -16,6 +16,9 @@ caller controls the mode budget through the DOS weights.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Any
+
 import numpy as np
 
 from gradwave.constants import KB_EV as K_B
@@ -204,3 +207,32 @@ def electronic_heat_capacity(
     else:
         g_ef = np.interp(e_fermi, energy, states)
     return float((np.pi ** 2 / 3.0) * K_B ** 2 * T * g_ef)
+
+
+def thermo_table(
+    freqs_cm: np.ndarray, dos: np.ndarray, temperatures: Sequence[float]
+) -> dict[str, Any]:
+    """Harmonic thermodynamics from a phonon DOS at each requested temperature.
+
+    Aggregates the single-quantity functions into the block emitted by
+    ``api.run_phonons``: the T-independent zero-point energy, Debye temperature,
+    and mode count, plus the four T-dependent quantities — Helmholtz free energy
+    F, internal energy U, heat capacity Cv, entropy S — sampled at
+    ``temperatures`` [K]. Energies are eV per cell; Cv and S are eV/K per cell.
+
+    ``mode_count`` is reported so the caller can check the DOS normalization: it
+    equals 3·N_atoms for a clean DOS, and falls short when imaginary branches
+    (dropped by every integral here — see ``_positive_grid``) carry weight, so it
+    doubles as a soft dynamical-stability check on the thermodynamics.
+    """
+    temps = [float(t) for t in temperatures]
+    return {
+        "mode_count": mode_count(freqs_cm, dos),
+        "zero_point_energy_eV": zero_point_energy(freqs_cm, dos),
+        "debye_temperature_K": debye_temperature(freqs_cm, dos),
+        "temperatures_K": temps,
+        "free_energy_eV": [free_energy_vib(freqs_cm, dos, T) for T in temps],
+        "internal_energy_eV": [internal_energy_vib(freqs_cm, dos, T) for T in temps],
+        "heat_capacity_eV_K": [heat_capacity(freqs_cm, dos, T) for T in temps],
+        "entropy_eV_K": [entropy(freqs_cm, dos, T) for T in temps],
+    }

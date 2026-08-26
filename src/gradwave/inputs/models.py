@@ -335,6 +335,10 @@ class PhononParams:
     npoints: int = 120             # q-points along the dispersion path
     dos_mesh: tuple[int, int, int] = (8, 8, 8)    # MP q-mesh for the phonon DOS ((0,0,0) = skip)
     dos_width: float = 6.0         # Gaussian broadening for the DOS [cm⁻¹]
+    # Temperatures [K] at which harmonic thermodynamics (F, U, Cv, S) are
+    # tabulated from the DOS. Emitted only when a DOS is computed (dos_mesh > 0).
+    thermo_temperatures: tuple[float, ...] = (
+        0.0, 100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0, 900.0, 1000.0)
     use_displacement_symmetry: bool = False  # run only point-group-irreducible displacements
     # SeedPool: run the 6·N_prim displacement SCFs across this many worker
     # processes (each warm-started from the shared undisplaced reference). 1 =
@@ -344,6 +348,9 @@ class PhononParams:
     def __post_init__(self):
         object.__setattr__(self, "supercell", tuple(int(n) for n in self.supercell))
         object.__setattr__(self, "dos_mesh", tuple(int(n) for n in self.dos_mesh))
+        object.__setattr__(
+            self, "thermo_temperatures",
+            tuple(float(t) for t in self.thermo_temperatures))
         if len(self.supercell) != 3 or min(self.supercell) < 1:
             raise InputError(
                 f"phonons.supercell must be 3 positive ints, got {self.supercell}")
@@ -353,6 +360,10 @@ class PhononParams:
         if len(self.dos_mesh) != 3 or min(self.dos_mesh) < 0:
             raise InputError(
                 f"phonons.dos_mesh must be 3 non-negative ints, got {self.dos_mesh}")
+        if any(t < 0.0 for t in self.thermo_temperatures):
+            raise InputError(
+                "phonons.thermo_temperatures must be non-negative, got "
+                f"{self.thermo_temperatures}")
         if self.n_workers < 1:
             raise InputError(
                 f"phonons.n_workers must be >= 1, got {self.n_workers}")
