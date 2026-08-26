@@ -13,6 +13,8 @@ m-expanded UPF blocks on the diagonal.
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 
 
@@ -28,4 +30,4 @@ def nonlocal_energy(
         quad = torch.einsum("bi,ij,bj->b", b.conj(), dij.to(b.dtype), b).real
         term = (kweights[ik] * occ[ik, : b.shape[0]] * quad).sum()
         e = term if e is None else e + term
-    return e
+    return cast("torch.Tensor", e)

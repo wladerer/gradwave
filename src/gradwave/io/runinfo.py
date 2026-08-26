@@ -21,6 +21,7 @@ import resource
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 
 def _read(path) -> str | None:
@@ -39,7 +40,7 @@ def _run(cmd, timeout=3) -> str | None:
         return None
 
 
-def cpu_info() -> dict:
+def cpu_info() -> dict[str, Any]:
     import torch
 
     model = None
@@ -53,7 +54,7 @@ def cpu_info() -> dict:
             "torch_threads": torch.get_num_threads()}
 
 
-def memory_info() -> dict:
+def memory_info() -> dict[str, Any]:
     fields = {}
     meminfo = _read("/proc/meminfo")
     if meminfo:
@@ -65,7 +66,7 @@ def memory_info() -> dict:
             "available_gb": fields.get("MemAvailable")}
 
 
-def load_info() -> dict:
+def load_info() -> dict[str, Any]:
     """Load averages plus the busiest OTHER processes — the contested-
     machine indicator. Sampled at run start (before this process spins
     its threads) the 1-minute load is other people's work; sampled at
@@ -88,7 +89,7 @@ def load_info() -> dict:
             "busy_other_processes": others}
 
 
-def thermal_info() -> dict:
+def thermal_info() -> dict[str, Any]:
     """Best-effort temperatures from /sys/class/thermal (laptops expose
     CPU package zones there) — absent on hosts without the sysfs zones."""
     zones = {}
@@ -103,7 +104,7 @@ def thermal_info() -> dict:
             "max_c": max(zones.values()) if zones else None}
 
 
-def gpu_info() -> dict | None:
+def gpu_info() -> dict[str, Any] | None:
     import torch
 
     if not torch.cuda.is_available():
@@ -131,7 +132,7 @@ def _git_commit() -> str | None:
     return out.strip() if out else None
 
 
-def machine_snapshot() -> dict:
+def machine_snapshot() -> dict[str, Any]:
     """Full static + dynamic machine state; take one at run start."""
     import torch
 
@@ -170,7 +171,7 @@ class ProcessMeter:
         if self._cuda:
             torch.cuda.reset_peak_memory_stats()
 
-    def stop(self) -> dict:
+    def stop(self) -> dict[str, Any]:
         import torch
 
         wall = time.perf_counter() - self._t0
@@ -190,7 +191,7 @@ class ProcessMeter:
         return out
 
 
-def provenance_block(start_snapshot: dict, meter: ProcessMeter) -> dict:
+def provenance_block(start_snapshot: dict[str, Any], meter: ProcessMeter) -> dict[str, Any]:
     """The block written into every <task>.json: the start-of-run machine
     snapshot, an end-of-run resample of the volatile parts (load and
     temperature drift over a run; the delta is the throttling/contention

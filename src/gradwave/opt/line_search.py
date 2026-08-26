@@ -45,9 +45,10 @@ import os
 import shutil
 import tempfile
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
+from typing_extensions import override
 
 # ---------------------------------------------------------------------------
 # Pure math: alpha schedule, cubic fit from (E, g), interpolated minimum.
@@ -276,7 +277,9 @@ def make_line_search_bfgs(target: Any, *, inp: Any, verbose: bool) -> Any:
 try:  # ASE is a hard dependency of the relax path; import lazily-safe for tools
     from ase.optimize import BFGS as _BFGS
 except Exception:  # pragma: no cover - ASE always present in the relax context
-    _BFGS = object  # type: ignore[assignment,misc]
+    # Fallback base when ASE is unavailable (tooling-only); the class is never
+    # instantiated on this path. ``object`` is not a ``type[BFGS]``.
+    _BFGS = object  # ty: ignore[invalid-assignment]
 
 
 class ParallelLineSearchBFGS(_BFGS):  # type: ignore[valid-type,misc]
@@ -384,6 +387,7 @@ class ParallelLineSearchBFGS(_BFGS):  # type: ignore[valid-type,misc]
         except Exception:  # pragma: no cover - interpreter-teardown races
             pass
 
+    @override
     def step(self, gradient=None):  # type: ignore[override]
         gradient = self._get_gradient(gradient)
         optimizable = self.optimizable
@@ -410,11 +414,14 @@ class ParallelLineSearchBFGS(_BFGS):  # type: ignore[valid-type,misc]
         optimizable.set_x(pos + alpha * dpos)
         from ase.optimize.optimize import UnitCellFilter
 
+        # ``state`` is populated by the base BFGS update above; ASE types it
+        # loosely (``None | BFGSMethod``), so reach ``hessian`` through Any.
+        hessian = cast("Any", self.state).hessian
         if isinstance(self.atoms, UnitCellFilter):
-            self.dump((self.state.hessian, self.pos0, self.forces0,
+            self.dump((hessian, self.pos0, self.forces0,
                        self.maxstep, self.atoms.orig_cell))
         else:
-            self.dump((self.state.hessian, self.pos0, self.forces0,
+            self.dump((hessian, self.pos0, self.forces0,
                        self.maxstep))
 
     def _line_search(

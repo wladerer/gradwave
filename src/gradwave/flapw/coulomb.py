@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import itertools
 import math
+from typing import Any
 
 import numpy as np
 import torch
@@ -138,7 +139,7 @@ def _dfact(n: int) -> float:
     return float(math.prod(range(n, 0, -2))) if n > 0 else 1.0
 
 
-_GTAB_CACHE: dict = {}
+_GTAB_CACHE: dict[Any, Any] = {}
 
 
 def gvec_ylm_tables(cell, n: int, lmax: int):

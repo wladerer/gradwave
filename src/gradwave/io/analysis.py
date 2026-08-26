@@ -17,13 +17,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 
 
 def _pd():
     try:
-        import pandas
+        import pandas  # ty: ignore[unresolved-import]  # optional analysis extra
     except ImportError as err:  # pragma: no cover
         raise ImportError("gradwave.io.analysis needs pandas "
                           "(uv pip install pandas)") from err
@@ -42,7 +43,7 @@ def _plt():
     return plt
 
 
-def load(source) -> dict:
+def load(source) -> dict[str, Any]:
     """A summary dict from a path to <task>.json (dicts pass through)."""
     if isinstance(source, dict):
         return source
@@ -161,7 +162,7 @@ def _is_noncollinear_block(b) -> bool:
     return isinstance(b, dict) and (b.get("noncollinear") or "m_z" in b)
 
 
-def _pdos_block(source) -> dict:
+def _pdos_block(source) -> dict[str, Any]:
     """Extract the projected-DOS dict from a ProjectedDOS/SOC ProjectedDOS, a raw
     block, or a JSON summary that carries a top-level ``pdos`` key. Collinear and
     j-resolved share the (total, groups) schema; the noncollinear spin-texture
@@ -181,7 +182,7 @@ def _pdos_block(source) -> dict:
     return block
 
 
-def _noncollinear_block(source) -> dict:
+def _noncollinear_block(source) -> dict[str, Any]:
     """The noncollinear PDOS dict from a NoncollinearPDOS, a raw block, or a JSON
     summary carrying a top-level ``pdos`` that is noncollinear."""
     if hasattr(source, "to_dict") and hasattr(source, "m_z"):
@@ -192,7 +193,7 @@ def _noncollinear_block(source) -> dict:
     block = s.get("pdos")
     if not _is_noncollinear_block(block):
         raise ValueError("no noncollinear projected DOS in this result")
-    return block
+    return cast("dict[str, Any]", block)
 
 
 def pdos_frame(source):
@@ -340,6 +341,7 @@ def plot_phonons(source, path=None):
     freqs = np.asarray(ph["frequencies_cm1"], dtype=float)  # (nq, nbranch)
     labels = ph["labels"]
     has_dos = "dos" in ph
+    axd: Any = None
     if has_dos:
         fig, (ax, axd) = plt.subplots(
             1, 2, figsize=(6.8, 4.2), sharey=True,
@@ -488,7 +490,7 @@ def plot_pdos(source, path=None, ax=None, total=True):
     return _finish(ax.figure, ax, path)
 
 
-def _cohp_block(source) -> dict:
+def _cohp_block(source) -> dict[str, Any]:
     """The COHP dict from a COHP (`.to_dict()`), a raw block, or a JSON summary
     carrying a top-level ``cohp`` key."""
     if hasattr(source, "to_dict") and hasattr(source, "pair_cohp"):

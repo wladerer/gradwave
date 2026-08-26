@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 
 def _iter_records(run_dir):
@@ -24,7 +25,7 @@ def _iter_records(run_dir):
             continue
 
 
-def _run_features(rec: dict) -> dict:
+def _run_features(rec: dict[str, Any]) -> dict[str, Any]:
     """Run-level columns broadcast onto every iteration row."""
     d, m, o = rec.get("descriptor", {}), rec.get("method", {}), rec.get("outcome", {})
     prov = rec.get("provenance", {})
@@ -61,7 +62,7 @@ def _run_features(rec: dict) -> dict:
 
 def load_runs(run_dir):
     """One row per SCF iteration, run-level features broadcast across. → DataFrame."""
-    import pandas as pd
+    import pandas as pd  # ty: ignore[unresolved-import]  # optional analysis extra
 
     rows = []
     for rec in _iter_records(run_dir):
@@ -82,7 +83,7 @@ def load_runs(run_dir):
 
 def load_runs_summary(run_dir):
     """One row per run — the outcome/method/descriptor table. → DataFrame."""
-    import pandas as pd
+    import pandas as pd  # ty: ignore[unresolved-import]  # optional analysis extra
 
     return pd.DataFrame([_run_features(rec) for rec in _iter_records(run_dir)])
 

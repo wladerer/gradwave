@@ -27,6 +27,8 @@ first-step size (ASE's ``maxstep`` caps it further).
 """
 from __future__ import annotations
 
+from typing import Any, cast
+
 import numpy as np
 
 from gradwave.constants import BOHR_ANG, HARTREE_EV
@@ -104,9 +106,11 @@ def seed_bfgs_hessian(optimizer: object, h0: np.ndarray) -> bool:
     cover) — the caller then keeps the ASE default. Tolerant of ASE-version
     differences in how the Hessian state is stored.
     """
+    # ASE's optimizer is untyped third-party state — reach through an Any view.
+    opt = cast("Any", optimizer)
     ndof = None
     try:
-        ndof = optimizer.optimizable.ndofs()  # type: ignore[attr-defined]
+        ndof = opt.optimizable.ndofs()
     except Exception:  # pragma: no cover - older ASE without .optimizable
         ndof = None
     if ndof is not None and int(h0.shape[0]) != int(ndof):
@@ -116,11 +120,11 @@ def seed_bfgs_hessian(optimizer: object, h0: np.ndarray) -> bool:
         # guarded by ``state is None``. Set only ``H0`` and leave ``state`` unset so
         # that guard still fires — installing a live state here defeats it and
         # crashes updating from the (None) previous forces.
-        optimizer.H0 = h0                 # type: ignore[attr-defined]
+        opt.H0 = h0
         if hasattr(optimizer, "state"):
-            optimizer.state = None        # type: ignore[attr-defined]
+            opt.state = None
         return True
     if hasattr(optimizer, "H"):  # pragma: no cover - very old ASE stored H directly
-        optimizer.H = h0                  # type: ignore[attr-defined]
+        opt.H = h0
         return True
     return False

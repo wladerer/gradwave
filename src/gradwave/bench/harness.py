@@ -36,11 +36,11 @@ class RunRecord:
     run_id: str
     case: str
     hardness: str
-    method: dict
-    descriptor: dict
-    provenance: dict
-    outcome: dict
-    trace: dict = field(default_factory=dict)
+    method: dict[str, Any]
+    descriptor: dict[str, Any]
+    provenance: dict[str, Any]
+    outcome: dict[str, Any]
+    trace: dict[str, Any] = field(default_factory=dict)
 
 
 def _git_sha() -> str | None:
@@ -52,7 +52,7 @@ def _git_sha() -> str | None:
         return None
 
 
-def _provenance() -> dict:
+def _provenance() -> dict[str, Any]:
     prov: dict[str, Any] = {
         "git_sha": _git_sha(),
         "host": socket.gethostname(),
@@ -71,7 +71,7 @@ def _provenance() -> dict:
     return prov
 
 
-def sweep_methods(axes: dict | None = None) -> list[dict]:
+def sweep_methods(axes: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Cartesian product of the method axes → a list of scf() keyword configs."""
     axes = axes or DEFAULT_METHODS
     keys = list(axes)
@@ -79,7 +79,8 @@ def sweep_methods(axes: dict | None = None) -> list[dict]:
             for combo in itertools.product(*(axes[k] for k in keys))]
 
 
-def run_case(case: BenchCase, method: dict, *, run_dir: str | Path | None = None) -> RunRecord:
+def run_case(case: BenchCase, method: dict[str, Any], *,
+             run_dir: str | Path | None = None) -> RunRecord:
     """Run one (case × method) SCF with the recorder on; return its RunRecord.
 
     A non-converging or failing solve is captured as an outcome, not raised, so a
@@ -91,7 +92,7 @@ def run_case(case: BenchCase, method: dict, *, run_dir: str | Path | None = None
     run_id = f"{case.name}__{tag}__{stamp}"
 
     outcome: dict[str, Any] = {"converged": False, "error": None}
-    trace: dict = {}
+    trace: dict[str, Any] = {}
     t0 = time.perf_counter()
     try:
         system = case.build()

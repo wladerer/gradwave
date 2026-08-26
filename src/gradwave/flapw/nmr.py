@@ -17,6 +17,8 @@ follows the sign of ``Q·V_zz`` but experiments report ``|C_Q|``.
 
 from __future__ import annotations
 
+from typing import Any
+
 # isotope -> (quadrupole moment Q [barn], nuclear spin I)
 NUCLEAR_Q: dict[str, tuple[float, float]] = {
     "2H": (0.00286, 1.0),
@@ -34,7 +36,7 @@ NUCLEAR_Q: dict[str, tuple[float, float]] = {
 _MHZ_PER_BARN_EV_A2 = 2.4180        # C_Q[MHz] = k · Q[barn] · V_zz[eV/Å²]
 
 
-def quadrupolar_coupling(v_zz: float, eta: float, isotope: str) -> dict:
+def quadrupolar_coupling(v_zz: float, eta: float, isotope: str) -> dict[str, Any]:
     """The NMR quadrupolar parameters for ``isotope`` in an EFG with principal component ``v_zz``
     (eV/Å²) and asymmetry ``eta``. Returns ``C_Q`` (MHz), ``|C_Q|``, ``η``, the quadrupolar
     frequency ``ν_Q`` (MHz), the nuclear spin, and ``Q`` (barn)."""

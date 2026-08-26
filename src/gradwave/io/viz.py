@@ -24,13 +24,13 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    import plotly.graph_objects as go
+    import plotly.graph_objects as go  # ty: ignore[unresolved-import]  # optional viz extra
 
 
 def _pmv():
     """Import pymatviz lazily, with an actionable error if the extra is missing."""
     try:
-        import pymatviz
+        import pymatviz  # ty: ignore[unresolved-import]  # optional viz extra
     except ImportError as err:  # pragma: no cover - exercised only without the extra
         raise ImportError(
             "gradwave.io.viz needs pymatviz (uv pip install gradwave[viz])"
@@ -41,7 +41,7 @@ def _pmv():
 def _go():
     """Import plotly.graph_objects lazily (bundled with the ``viz`` extra)."""
     try:
-        import plotly.graph_objects as go
+        import plotly.graph_objects as go  # ty: ignore[unresolved-import]  # optional viz extra
     except ImportError as err:  # pragma: no cover - exercised only without the extra
         raise ImportError(
             "gradwave.io.viz needs plotly (uv pip install gradwave[viz])"
@@ -89,7 +89,7 @@ def structure_view(obj: Any, *, mode: str = "3d", **kwargs: Any) -> go.Figure:
 
 
 def ptable_delta(
-    source: str | Path | dict,
+    source: str | Path | dict[str, Any],
     *,
     key: str = "delta_wien2k",
     colorscale: str = "viridis",

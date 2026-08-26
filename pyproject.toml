@@ -581,6 +581,45 @@ include = [
     "src/gradwave/scf/__init__.py",
     "src/gradwave/scf/soft_mode.py",
     "src/gradwave/solvers/deflation.py",
+
+    # Phase 13 (2026-08-26): the last 31 ungated modules, typed to zero
+    # diagnostics — the gate is now the WHOLE of src/gradwave (206/206). Fixes
+    # were annotation + narrowing only (parametrized generics, `cast`/`assert`
+    # narrowing, a few ty-native `# ty: ignore[...]` for genuine limitations —
+    # note ty does NOT honor the mypy `# type: ignore[...]` bracket form). The
+    # big one was flapw/scf.py: real types on the `_MultiCtx` NamedTuple's
+    # object-typed geometry/state fields cleared most of its cascade.
+    "src/gradwave/flapw/scf.py",
+    "src/gradwave/flapw/core_levels.py",
+    "src/gradwave/flapw/lo_schur.py",
+    "src/gradwave/flapw/recorder.py",
+    "src/gradwave/flapw/efg.py",
+    "src/gradwave/flapw/radial.py",
+    "src/gradwave/flapw/nmr.py",
+    "src/gradwave/flapw/lapw.py",
+    "src/gradwave/flapw/coulomb.py",
+    "src/gradwave/io/checkpoint.py",
+    "src/gradwave/io/analysis.py",
+    "src/gradwave/io/runinfo.py",
+    "src/gradwave/io/viz.py",
+    "src/gradwave/io/output.py",
+    "src/gradwave/bench/harness.py",
+    "src/gradwave/bench/analyze.py",
+    "src/gradwave/bench/suite.py",
+    "src/gradwave/opt/newton.py",
+    "src/gradwave/opt/joint.py",
+    "src/gradwave/opt/model_hessian.py",
+    "src/gradwave/opt/line_search.py",
+    "src/gradwave/distributed.py",
+    "src/gradwave/pseudo/radial_torch.py",
+    "src/gradwave/core/energies/kinetic.py",
+    "src/gradwave/core/energies/nl_pp.py",
+    "src/gradwave/core/energies/total.py",
+    "src/gradwave/core/energies/esm.py",
+    "src/gradwave/postscf/uspp_softmode.py",
+    "src/gradwave/postscf/stm.py",
+    "src/gradwave/postscf/alchemical_response.py",
+    "src/gradwave/postscf/charged.py",
 ]
 
 [tool.ty.overrides.rules]

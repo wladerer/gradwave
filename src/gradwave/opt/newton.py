@@ -39,6 +39,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -148,7 +149,7 @@ def _newton_inner(system, xc, tabs, precond_cols, npws, occ, a0_np, omega0,
     eye3 = torch.eye(3, dtype=RDTYPE, device=dev)
     eps_zero = torch.zeros(3, 3, dtype=RDTYPE, device=dev)
     n_grad = n_hvp = n_trial = 0
-    history: list = []
+    history: list[float] = []
 
     def energy(_leaves):
         if fix_cell:
@@ -268,7 +269,7 @@ class NewtonResult:
     energy: float
     cell: np.ndarray
     positions: np.ndarray
-    coeffs: list
+    coeffs: list[torch.Tensor]
     system: System
     n_newton: int = 0        # accepted trust-region steps
     n_grad: int = 0          # energy+gradient evaluations
@@ -279,7 +280,7 @@ class NewtonResult:
     n_cycles: int = 0
     fmax: float = 0.0
     smax: float = 0.0
-    history: list = field(default_factory=list)
+    history: list[tuple[int, float]] = field(default_factory=list)
 
 
 # --------------------------------------------------------------- driver
@@ -287,7 +288,7 @@ def newton_cg_relax(
     cell: np.ndarray,
     positions: np.ndarray,
     species_of_atom: list[int],
-    upfs: list,
+    upfs: list[Any],
     xc: XCFunctional,
     *,
     ecut: float,
@@ -320,10 +321,18 @@ def newton_cg_relax(
     fall back to the nested engine, exactly as the first-order path does."""
     cell = np.asarray(cell, dtype=np.float64)
     positions = np.asarray(positions, dtype=np.float64)
-    coeffs_init = None
+    coeffs_init: list[torch.Tensor] | None = None
     prev_spheres = None
     h_seed = n_grad = n_hvp = n_trial = 0
-    history: list = []
+    history: list[tuple[int, float]] = []
+    # Loop-carried results, declared up front so their post-loop use type-checks
+    # (the rebuild loop always runs at least once — max_rebuilds >= 0).
+    system: System | None = None
+    nk = 0
+    cycle = 0
+    newton_steps = 0
+    converged_inner = False
+    energy_final = f_final = s_final = 0.0
 
     for cycle in range(max_rebuilds + 1):
         system = setup_system(
@@ -345,7 +354,8 @@ def newton_cg_relax(
                 res = scf(system, xc, max_iter=seed_scf_iters, verbose=False,
                           etol=0.0, rhotol=0.0, diago_tol=1e-4)
             h_seed += counter.count
-            coeffs_init = [lowdin(c[:n_occ].to(CDTYPE)) for c in res.coeffs]
+            coeffs_init = [lowdin(cast("torch.Tensor", c)[:n_occ].to(CDTYPE))
+                           for c in res.coeffs]
         else:
             coeffs_init = [lowdin(c) for c in
                            _transfer_coeffs(prev_spheres, system.spheres,
@@ -404,6 +414,9 @@ def newton_cg_relax(
         if (fix_cell or strain_step < rebuild_tol) and converged_inner:
             break
 
+    assert system is not None  # the rebuild loop always runs at least once
+    assert n_occ is not None
+    assert coeffs_init is not None
     h_equiv = h_seed + round(
         (n_grad + 2 * n_hvp + 0.5 * n_trial) * nk * n_occ)
     return NewtonResult(

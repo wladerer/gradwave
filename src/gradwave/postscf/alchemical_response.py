@@ -29,7 +29,7 @@ def alchemical_dielectric_gradient(
     *,
     h: float = 0.02,
     **dielectric_kw: Any,
-) -> dict[str, torch.Tensor | float]:
+) -> dict[str, torch.Tensor | float | dict[str, Any]]:
     """d(ε∞, Z*)/dλ: the composition derivative of the macroscopic dielectric
     tensor and the Born effective charges, by central FD of the E-field DFPT.
 

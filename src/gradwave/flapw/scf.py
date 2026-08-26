@@ -27,7 +27,7 @@ from __future__ import annotations
 import itertools
 import math
 import time
-from typing import NamedTuple
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import torch
@@ -319,7 +319,7 @@ def _bands_amps(c_pw, ks, abl, lmax, vol, lo_block=None, los=None, ylm_by_l=None
         amps = [amp_a, amp_b]
         if lang in slices:
             lo0, lo1, lo = slices[lang]
-            cv = lo_block[lo0:lo1, :].T                       # (nb, 2l+1)
+            cv = cast("torch.Tensor", lo_block)[lo0:lo1, :].T  # (nb, 2l+1)
             amps[0] = amps[0] + cv * lo["a"]
             amps[1] = amps[1] + cv * lo["b"]
             amps.append(cv * lo["cn"])
@@ -411,7 +411,7 @@ def crystal_scf(a_bohr: float | None = None, symbol: str = "Ne", R: float = 1.4,
     stable and physical. Compare splittings, not absolute eigenvalues, as against any FLAPW code."""
     if (a_bohr is None) == (cell is None):
         raise ValueError("pass exactly one of a_bohr (Bohr, legacy) or cell (Å cubic edge)")
-    L = float(cell) if cell is not None else a_bohr * BOHR_ANG
+    L = float(cell) if cell is not None else cast("float", a_bohr) * BOHR_ANG
     nfft = 2 * int(math.ceil(math.sqrt(4 * ecut / HBAR2_2M) * L / (2 * math.pi))) + 2
     nfft = min(max(nfft, 24), 72)
     r, dx = log_mesh(1e-5, 28.0, 2500)
@@ -1039,38 +1039,38 @@ class _MultiCtx(NamedTuple):
     shared read-only across ``_multi_iterate`` calls — the Newton fixed-point map evaluates
     the iteration ~30 times per polish and must not re-pay this setup on every F evaluation."""
 
-    A: object
+    A: np.ndarray
     vol: float
     nfft: int
-    r: object
+    r: torch.Tensor
     dx: float
-    r_np: object
-    keys: list
-    syms: list
-    key_sym: dict
-    los_by_key: dict
+    r_np: np.ndarray
+    keys: list[str]
+    syms: list[str]
+    key_sym: dict[str, str]
+    los_by_key: dict[str, Any]
     nbands: int
-    kfracs: object
-    kw: object
-    sg: object
-    rho_symm: object
-    atom_orbits: object
-    d_ops: object
-    at_by_sym: dict
-    vat_by_sym: dict
-    R_by_key: dict
-    rr_by_key: dict
-    mask_by_key: dict
-    acart: list
-    theta_i: object
-    kerker_K: object
-    core_map: dict
+    kfracs: np.ndarray
+    kw: np.ndarray
+    sg: Any
+    rho_symm: Any
+    atom_orbits: Any
+    d_ops: Any
+    at_by_sym: dict[str, Any]
+    vat_by_sym: dict[str, Any]
+    R_by_key: dict[str, float]
+    rr_by_key: dict[str, np.ndarray]
+    mask_by_key: dict[str, np.ndarray]
+    acart: list[tuple[np.ndarray, str]]
+    theta_i: np.ndarray
+    kerker_K: np.ndarray | None
+    core_map: dict[str, Any]
     lmax: int
     ecut: float
     smearing: float
     fullpot: bool
     fullpot_lmax: int
-    el_override: object
+    el_override: dict[str, Any] | None
     kworkers: int
     subspace_reuse: bool
     subspace_tol: float
@@ -1081,7 +1081,7 @@ class _MultiCtx(NamedTuple):
     # frozen): "geom" = per-k _k_geometry for the serial solve path (keyed by ik / "gamma"),
     # "ylm" = per-k conj(Y_lm) blocks for the density pass. Reused across _multi_iterate
     # calls — and across Newton F evaluations, which share one ctx.
-    caches: dict
+    caches: dict[str, Any]
 
 
 class _MultiState:
@@ -1092,35 +1092,35 @@ class _MultiState:
     F evaluation; created by ``_multi_init_state``."""
 
     def __init__(self):
-        self.v_by_key: dict = {}
-        self.conv = None
-        self.v_nsph = None                     # non-spherical potential (fullpot)
-        self.r_nsph = float("inf")             # aspherical residual (convergence gate)
-        self.vns_new = None
-        self.mt_phase = False
-        self.warp_state = None                 # (FFT of (v_grid-v_i0)·Θ_I, nfft)
-        self.v_grid_prev = None                # mixed interstitial grid state
-        self.v_i0_prev = None                  # interstitial reference of last iter
-        self.recorder = None
-        self.hist = ([], [])                   # joint Anderson history
-        self.c_prev_by_k: list = []
-        self.c_prev_gamma = None               # warm start for the Γ reporting solve
-        self.ev_prev_by_k: list = []           # last iter's eigenvalues per k (shift-invert σ)
-        self.ev_prev_gamma = None
+        self.v_by_key: dict[str, torch.Tensor] = {}
+        self.conv: dict[str, Any] | None = None
+        self.v_nsph: dict[Any, Any] | None = None   # non-spherical potential (fullpot)
+        self.r_nsph: float = float("inf")      # aspherical residual (convergence gate)
+        self.vns_new: dict[Any, Any] | None = None
+        self.mt_phase: bool = False
+        self.warp_state: tuple[Any, int] | None = None  # (FFT of (v_grid-v_i0)·Θ_I, nfft)
+        self.v_grid_prev: np.ndarray | None = None      # mixed interstitial grid state
+        self.v_i0_prev: float | None = None    # interstitial reference of last iter
+        self.recorder: Any = None
+        self.hist: tuple[list[Any], list[Any]] = ([], [])  # joint Anderson history
+        self.c_prev_by_k: list[Any] = []
+        self.c_prev_gamma: Any = None          # warm start for the Γ reporting solve
+        self.ev_prev_by_k: list[Any] = []      # last iter's eigenvalues per k (shift-invert σ)
+        self.ev_prev_gamma: Any = None
         # last-iteration outputs consumed by _multi_finalize
-        self.kdata = None
-        self.occ_by_k = None
-        self.lodat = None
-        self.El_by_key = None
-        self.vmt_by_key = None
-        self.rho_I = None
-        self.spheres = None
-        self.nb_solve = None
-        self.sym_dev = None
-        self.rho_2m = None
-        self.v_grid = None
-        self.v_hart = None                     # Coulomb-only grid (boundary/EFG projections)
-        self.qmt = None                        # per-sphere analytic multipole moments q^MT_LM
+        self.kdata: Any = None
+        self.occ_by_k: Any = None
+        self.lodat: dict[Any, Any] | None = None
+        self.El_by_key: Any = None
+        self.vmt_by_key: Any = None
+        self.rho_I: np.ndarray | None = None
+        self.spheres: list[dict[str, Any]] | None = None
+        self.nb_solve: Any = None
+        self.sym_dev: float | None = None
+        self.rho_2m: dict[Any, Any] | None = None
+        self.v_grid: np.ndarray | None = None
+        self.v_hart: Any = None                # Coulomb-only grid (boundary/EFG projections)
+        self.qmt: Any = None                   # per-sphere analytic multipole moments q^MT_LM
 
 
 def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax: int = 2,
@@ -1164,7 +1164,8 @@ def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax:
     core_map = dict(_CORE)
     core_map.update(core or {})
     nbands = sum(val_e_map[s] for s in syms) // 2
-    los_by_key = {k: los[s] for k, s in zip(keys, syms, strict=True) if s in (los or {})}
+    los_by_key = {k: cast("dict[str, Any]", los)[s]
+                  for k, s in zip(keys, syms, strict=True) if s in (los or {})}
     key_sym = dict(zip(keys, syms, strict=True))
     kfracs, kw = monkhorst_pack(tuple(kmesh))
     kw = kw / kw.sum()
@@ -1448,9 +1449,11 @@ def _accumulate_density(ctx: _MultiCtx, st: _MultiState, kdata, occ_by_k, El_by_
     # and the l=2 Weinert pseudocharge has zero monopole so it leaves v_sph untouched). So
     # accumulate it once after convergence (_efg_density_pass, below) instead of paying the
     # per-k sphere_density_multipoles at every SCF iteration.
-    rho_2m = None
+    from gradwave.flapw.efg import sphere_density_multipoles_bands
+
+    rho_2m: dict[Any, Any] | None = None
+    lset2: list[tuple[int, int]] = []
     if fullpot and not mt_phase:
-        from gradwave.flapw.efg import sphere_density_multipoles_bands
         lset_pot = [(lg, m) for lg in range(1, fullpot_lmax + 1) for m in range(-lg, lg + 1)]
         if (2, 0) not in lset_pot:                      # the EFG observable always needs l=2
             lset_pot += [(2, m) for m in range(-2, 3)]
@@ -1485,6 +1488,7 @@ def _accumulate_density(ctx: _MultiCtx, st: _MultiState, kdata, occ_by_k, El_by_
                                             us=us_by_key[k])
             rho_val[k] += w * rk
             if fullpot and not mt_phase:
+                assert rho_2m is not None      # bound together with lset2 under this guard
                 amps_all = _bands_amps(cp, ks, abl_all[ai], lmax, vol, lo_block=lo_block,
                                        los=los_k, ylm_by_l=ylm_by_l)
                 rlm = sphere_density_multipoles_bands(amps_all, occl, us_by_key[k],
@@ -1498,13 +1502,14 @@ def _accumulate_density(ctx: _MultiCtx, st: _MultiState, kdata, occ_by_k, El_by_
     if atom_orbits is not None:                     #   muffin-tin ρ averaged over equiv. atoms
         for orbit in atom_orbits:
             ok = [keys[i] for i in orbit]
-            avg = sum(rho_val[k] for k in ok) / len(ok)
+            avg = cast("np.ndarray", sum(rho_val[k] for k in ok) / len(ok))
             scale = max(float(np.abs(avg).max()), 1e-30)
             for k in ok:
                 sym_dev = max(sym_dev, float(np.abs(rho_val[k] - avg).max()) / scale)
                 rho_val[k] = avg.copy()
     if fullpot and not mt_phase and d_ops is not None:   # ρ_LM star-unfolded (Wigner-D)
         raw = rho_2m
+        assert raw is not None                       # a dict whenever this guard holds
         rho_2m = _symmetrize_rho_lm(rho_2m, keys, sg, d_ops)
         for k in keys:                              # residual of the projector = asymmetry,
             scale = max(max(float(np.abs(v).max())  # scaled per ATOM (a numerically-empty
@@ -1522,7 +1527,8 @@ def _accumulate_density(ctx: _MultiCtx, st: _MultiState, kdata, occ_by_k, El_by_
         rho_sph_by_key[k] = rho_val[k] + rho_core
         spheres.append({"tau": acart[ai][0], "rr": rr, "dx": dx,
                         "rho_sph": rho_sph_by_key[k], "Z": CONFIG[s][0], "R": R_by_key[k],
-                        "rho_2m": rho_2m[k] if fullpot and not mt_phase else None})
+                        "rho_2m": (cast("dict[Any, Any]", rho_2m)[k]
+                                   if fullpot and not mt_phase else None)})
     return rho_I, rho_2m, spheres, rho_sph_by_key, sym_dev, lset_pot
 
 
@@ -1718,7 +1724,7 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
     return done
 
 
-def _full_state(ctx: _MultiCtx, st: _MultiState) -> dict:
+def _full_state(ctx: _MultiCtx, st: _MultiState) -> dict[str, Any]:
     """The complete fixed-point state dict (``info["state"]``; pass back as
     ``v_start={"__full_state__": ...}``)."""
     return {
@@ -1736,7 +1742,8 @@ def _multi_finalize(ctx: _MultiCtx, st: _MultiState, efg: bool = False):
     result summary, the full fixed-point state, and (opt-in) the EFG diagnostic pass."""
     _shutdown_ctx_pool(ctx)                    # release the persistent k-worker pool
     conv = st.conv
-    info = {"nbands": ctx.nbands, "symbols": ctx.syms, "e_fermi": conv.get("e_fermi"),
+    info = {"nbands": ctx.nbands, "symbols": ctx.syms,
+            "e_fermi": cast("dict[str, Any]", conv).get("e_fermi"),
             "v_by_key": {k: st.v_by_key[k].numpy().copy() for k in ctx.keys}}
     # complete fixed-point state (pass back as v_start={"__full_state__": ...})
     info["state"] = _full_state(ctx, st)
@@ -1760,8 +1767,9 @@ def _multi_finalize(ctx: _MultiCtx, st: _MultiState, efg: bool = False):
                                        lodat=st.lodat)
             if ctx.d_ops is not None:
                 rho_2m = _symmetrize_rho_lm(rho_2m, ctx.keys, ctx.sg, ctx.d_ops)
+            spheres = cast("list[dict[str, Any]]", st.spheres)
             for ai, k in enumerate(ctx.keys):
-                st.spheres[ai]["rho_2m"] = rho_2m[k]
+                spheres[ai]["rho_2m"] = rho_2m[k]
             _, _, _, v_hart, qmt = _weinert_multi(st.rho_I, st.spheres, ctx.A, ctx.nfft)
         info["efg"] = _efg_from_multipoles(rho_2m, v_hart, ctx.acart, ctx.keys, ctx.R_by_key,
                                            ctx.rr_by_key, ctx.dx, ctx.A, qmt_by_sphere=qmt)
@@ -1991,7 +1999,7 @@ def _fft_resample_cube(v: np.ndarray, n_new: int) -> np.ndarray:
     return np.fft.ifftn(out).real * n_new**3
 
 
-def _restore_full_state(fs: dict, theta_i: np.ndarray, nfft: int):
+def _restore_full_state(fs: dict[str, Any], theta_i: np.ndarray, nfft: int):
     """Unpack a ``v_start={"__full_state__": ...}`` resume into loop state.
 
     Returns ``(v_nsph, v_grid_prev, warp_state, v_i0_prev)``, each None where the
@@ -2026,19 +2034,19 @@ class SolveKArgs(NamedTuple):
     kf: np.ndarray | tuple[float, float, float]
     cell: np.ndarray | float                  # lattice rows, or the cubic edge (Å)
     acart: list[tuple[np.ndarray, str]]
-    species: dict[str, dict]
+    species: dict[str, dict[str, Any]]
     lmax: int
     ecut: float
     r: torch.Tensor
     dx: float
     nb_solve: int
-    v_nsph: dict | None
-    chan: dict | None
-    lodat: dict | None
-    nsph_int: dict | None
+    v_nsph: dict[Any, Any] | None
+    chan: dict[Any, Any] | None
+    lodat: dict[Any, Any] | None
+    nsph_int: dict[Any, Any] | None
     c_prev: np.ndarray | None                 # previous eigvecs (subspace reuse / SI seed)
     subspace_tol: float
-    warp: tuple | None                        # (FFT of (v_grid-v_i0)·Θ_I, nfft)
+    warp: tuple[Any, int] | None              # (FFT of (v_grid-v_i0)·Θ_I, nfft)
     shift_invert: bool | str = False          # True / False / "auto" (default False = exact dense)
     sigma: float | None = None                # shift-invert shift (below the window bottom)
 

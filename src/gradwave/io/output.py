@@ -10,6 +10,7 @@ still render.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from gradwave.constants import EV_A3_TO_KBAR
 
@@ -769,7 +770,7 @@ _SECTIONS = (
 )
 
 
-def format_output(summary: dict) -> str:
+def format_output(summary: dict[str, Any]) -> str:
     """The full human-readable report for a task summary dict."""
     code = summary["code"]
     created = code["created"].replace("T", " ")
@@ -788,7 +789,7 @@ def format_output(summary: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_output(summary: dict, path) -> Path:
+def write_output(summary: dict[str, Any], path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(format_output(summary))
