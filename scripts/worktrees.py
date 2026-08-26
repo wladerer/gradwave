@@ -6,7 +6,8 @@ Worktrees isolate files — agents cannot clobber each other's tracked code — 
 three things still cause pain, and this surfaces all three:
 
   * drift    — how far each branch is behind origin/main (rebase before it hurts)
-  * stale    — worktrees whose branch is already merged (safe to prune)
+  * stale    — worktrees whose PR has landed or been abandoned (safe to prune)
+  * idle     — worktrees with no new commits for a while (likely forgotten)
   * overlap  — a file edited in more than one active worktree (a coming conflict)
 
 Only `overlap` is otherwise invisible; it's the early warning that two agents are
@@ -19,17 +20,21 @@ Usage:
                                        #   (only under .claude/worktrees/, never
                                        #    the primary checkout or the current one)
 
-Staleness uses two signals: no commits unique to the branch (ahead==0), or — for
-squash-merged branches, whose commits differ from main — a merged PR reported by
-`gh` (best-effort; skipped if gh is unavailable/offline).
+Staleness uses two signals: no commits unique to the branch (ahead==0), or a
+finished PR reported by `gh` — MERGED (incl. squash-merges, whose commits differ
+from main so ahead>0) or CLOSED (rejected / superseded / parked; the worktree is
+just as stale as a merged one). A branch with an OPEN PR is never reaped. The gh
+lookup is one batched call, best-effort (skipped if gh is unavailable/offline).
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
+import time
 from functools import lru_cache
 
 
@@ -64,19 +69,62 @@ def list_worktrees() -> list[dict]:
     return wts
 
 
-@lru_cache(maxsize=None)
-def pr_merged(branch: str) -> bool:
-    """Best-effort: has this branch's PR been merged? (catches squash-merges)."""
-    if not branch or branch == "(detached)":
-        return False
+@lru_cache(maxsize=1)
+def pr_states() -> dict[str, str]:
+    """Map branch name -> its PR state (OPEN | MERGED | CLOSED), from ONE `gh` call.
+
+    Best-effort: empty dict if gh is unavailable/offline. Catches squash-merges
+    (whose commits differ from main, so the ahead==0 test misses them) AND
+    closed-but-unmerged PRs (rejected / superseded / parked) — a worktree left
+    behind by a PR that will never land is just as stale as a merged one. When a
+    branch carries more than one PR, an OPEN one wins (never reap an active
+    branch), otherwise MERGED outranks CLOSED.
+    """
     try:
         r = subprocess.run(
-            ["gh", "pr", "list", "--head", branch, "--state", "merged",
-             "--json", "number", "-q", "length"],
-            capture_output=True, text=True, timeout=15)
+            ["gh", "pr", "list", "--state", "all", "--limit", "500",
+             "--json", "headRefName,state"],
+            capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.TimeoutExpired):
-        return False
-    return r.returncode == 0 and r.stdout.strip() not in ("", "0")
+        return {}
+    if r.returncode != 0:
+        return {}
+    return _pick_states(json.loads(r.stdout or "[]"))
+
+
+def _pick_states(prs: list[dict]) -> dict[str, str]:
+    """Reduce a `gh pr list` payload to one state per branch (OPEN>MERGED>CLOSED)."""
+    prio = {"OPEN": 3, "MERGED": 2, "CLOSED": 1}
+    out: dict[str, str] = {}
+    for pr in prs:
+        branch, state = pr.get("headRefName", ""), pr.get("state", "")
+        if branch and prio.get(state, 0) > prio.get(out.get(branch, ""), 0):
+            out[branch] = state
+    return out
+
+
+def _classify(pr_state: str, ahead: str, behind: str) -> tuple[bool, str]:
+    """(is_stale, reason) for a worktree from its PR state and ahead/behind counts.
+
+    An OPEN PR is never reaped (it pins the branch as active). A MERGED or CLOSED
+    PR is always stale. With no landed/abandoned PR, a branch is an 'orphan' —
+    stale — when it has no unique commits (ahead==0) yet main has moved past it.
+    """
+    if pr_state == "MERGED":
+        return True, "merged"
+    if pr_state == "CLOSED":
+        return True, "PR closed"
+    if pr_state != "OPEN" and ahead == "0" and behind not in ("0", "?"):
+        return True, "orphan"
+    return False, ""
+
+
+def head_age_days(path: str) -> int | None:
+    """Whole days since this worktree's HEAD commit was authored (None if unknown)."""
+    ts = git("log", "-1", "--format=%ct", cwd=path)
+    if not ts.isdigit():
+        return None
+    return int((time.time() - int(ts)) // 86400)
 
 
 def changed_files(path: str, base: str) -> set[str]:
@@ -111,6 +159,7 @@ def procs_in(path: str) -> list[str]:
 
 def gather(mref: str, use_gh: bool = True) -> list[dict]:
     rows = []
+    states = pr_states() if use_gh else {}
     primary_common = git("rev-parse", "--path-format=absolute", "--git-common-dir")
     for wt in list_worktrees():
         path, branch = wt["path"], wt.get("branch", "(detached)")
@@ -119,11 +168,13 @@ def gather(mref: str, use_gh: bool = True) -> list[dict]:
         behind, ahead = (lr.split() + ["?", "?"])[:2]
         dirty = len(git("status", "--porcelain", cwd=path).splitlines())
         is_wt = "/.claude/worktrees/" in path
-        stale = (ahead == "0" and behind not in ("0", "?")) or (use_gh and pr_merged(branch))
+        pr_state = states.get(branch, "")
+        stale, reason = _classify(pr_state, ahead, behind)
         rows.append({
             "path": path, "name": os.path.basename(path), "branch": branch,
             "behind": behind, "ahead": ahead, "dirty": dirty,
-            "base": base[:8], "is_wt": is_wt, "stale": stale,
+            "base": base[:8], "is_wt": is_wt, "stale": stale, "reason": reason,
+            "idle_days": head_age_days(path) if is_wt else None,
             "has_agent": bool(procs_in(path)) if is_wt else False,
             "files": changed_files(path, base) if is_wt else set(),
         })
@@ -140,7 +191,7 @@ def report(rows: list[dict], mref: str) -> None:
         if not r["is_wt"]:
             state = "primary"
         elif r["stale"]:
-            state = "STALE (merged)"
+            state = f"STALE ({r['reason']})"
         elif r["dirty"]:
             state = "active*"
         else:
@@ -150,9 +201,9 @@ def report(rows: list[dict], mref: str) -> None:
 
     stale = [r for r in rows if r["is_wt"] and r["stale"]]
     if stale:
-        print("\nstale (branch merged — safe to prune):")
+        print("\nstale (PR landed/abandoned or orphaned — safe to prune):")
         for r in stale:
-            print(f"  {r['name']}  [{r['branch']}]")
+            print(f"  {r['name']}  [{r['branch']}]  · {r['reason']}")
         print("  → prune with: make worktrees-prune")
 
     # overlap across ACTIVE worktrees only
@@ -174,6 +225,12 @@ def report(rows: list[dict], mref: str) -> None:
         print("\n↯ drifting ≥10 commits behind — rebase on main soon:")
         for r in drifters:
             print(f"  {r['name']}  ({r['behind']} behind)")
+
+    idle = [r for r in active if isinstance(r["idle_days"], int) and r["idle_days"] >= 14]
+    if idle:
+        print("\n⏾ idle ≥14 days (no new commits — likely forgotten, no PR to reap it):")
+        for r in sorted(idle, key=lambda r: -r["idle_days"]):
+            print(f"  {r['name']}  ({r['idle_days']}d idle, {r['behind']} behind)")
 
 
 def prune(rows: list[dict]) -> int:
@@ -200,7 +257,8 @@ def prune(rows: list[dict]) -> int:
         if rm.returncode != 0:
             print(f"  FAIL {name}: {rm.stderr.strip().splitlines()[-1:] or ['?']}")
             continue
-        # merged branch: safe to delete (force covers squash-merges)
+        # stale branch (merged / closed PR / orphan): -D force-deletes it, which
+        # covers squash-merges and closed-but-unmerged branches alike.
         if branch and branch != "(detached)":
             subprocess.run(["git", "branch", "-D", branch],
                            capture_output=True, text=True)
