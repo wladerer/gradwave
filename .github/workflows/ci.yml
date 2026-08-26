@@ -87,12 +87,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2, 3, 4, 5, 6]
+        group: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/uv-setup
 
-      - name: Standard test tier (shard ${{ matrix.group }}/6)
+      - name: Standard test tier (shard ${{ matrix.group }}/10)
         # --timeout=1800: per-test wall cap (pytest-timeout). The heaviest integration
         # tests (ESM constant-mu, alchemical star-unfolding — two full fp64 SCFs) run
         # ~15-25 min on the SLOW 2-core public runner when several land in one shard and
@@ -105,7 +105,7 @@ jobs:
         # see gradwave.distributed.init_from_env — this timeout is belt-and-suspenders).
         run: >-
           uv run pytest -m "not slow and not torture and not gpu"
-          --dist loadscope --splits 6 --group ${{ matrix.group }}
+          --dist loadscope --splits 10 --group ${{ matrix.group }}
           --splitting-algorithm least_duration
           --timeout=1800 --timeout-method=signal
 

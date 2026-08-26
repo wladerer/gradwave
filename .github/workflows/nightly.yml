@@ -17,13 +17,41 @@ jobs:
   nightly-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 350       # under the 360-min hosted-runner ceiling
+    permissions:
+      contents: write          # push the refreshed-durations branch
+      pull-requests: write      # open the refresh PR
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/uv-setup
-      - name: Nightly test tier
+      - name: Nightly test tier (+ re-record split durations)
         # everything except the >10-min torture monsters and GPU-only tests;
-        # --durations surfaces the slowest tests for triage
-        run: uv run pytest -m "not torture and not gpu" --durations=25
+        # --durations surfaces the slowest tests for triage. --store-durations
+        # re-records per-test costs into .test_durations on THIS 2-core runner —
+        # runner-accurate, so the pytest-split shard balancing in ci.yml never
+        # drifts stale (a stale file is what let one shard balloon to ~38 min).
+        run: uv run pytest -m "not torture and not gpu" --durations=25 --store-durations
+
+      - name: Open a PR if durations drifted
+        # Runs only if the tier passed (a failed nightly gives skewed timings).
+        # Needs the repo setting "Allow GitHub Actions to create and approve pull
+        # requests" (Settings → Actions → General); the push still succeeds
+        # without it, only the PR-open step no-ops.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet -- .test_durations; then
+            echo "durations unchanged — nothing to refresh"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B chore/refresh-test-durations
+          git add .test_durations
+          git commit -m "chore: refresh .test_durations (nightly, runner-accurate)"
+          git push -f origin chore/refresh-test-durations
+          gh pr create --base main --head chore/refresh-test-durations \
+            --title "chore: refresh .test_durations (nightly)" \
+            --body "Automated: the nightly tier re-recorded per-test durations on the 2-core runner. Keeps the ci.yml pytest-split shards balanced so no single shard balloons. Review the diff and merge." \
+            2>/dev/null || echo "refresh PR already open — the force-push updated it"
 
   nightly-profile:
     runs-on: ubuntu-latest
