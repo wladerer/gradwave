@@ -129,24 +129,36 @@ jobs:
           --splitting-algorithm least_duration
           --timeout=1800 --timeout-method=signal
 
-  # Single required-status gate. Always runs (so the required check is reported
-  # even when lint/test are skipped), and is green iff neither lint nor test
-  # FAILED — a `skipped` result (docs/benchmark-only PR, no code touched) counts
-  # as OK. Failure or cancellation of either fails the gate.
-  ci-ok:
-    if: always()
-    needs: [changes, lint, test]
+  # Doc-truth-decay guard: fail on stale file-path references in the docs. Runs
+  # on EVERY change (no `changes` gate) because docs-only PRs — which skip lint
+  # and test — are exactly when stale references get introduced. The checker is
+  # pure stdlib, so no `uv sync`; the runner's Python is enough (~seconds).
+  doc-refs:
     runs-on: ubuntu-latest
     steps:
-      - name: Verify lint and all test shards succeeded (or were skipped)
+      - uses: actions/checkout@v4
+      - name: Check doc references
+        run: python scripts/check_doc_refs.py
+
+  # Single required-status gate. Always runs (so the required check is reported
+  # even when lint/test are skipped), and is green iff none of lint/test/doc-refs
+  # FAILED — a `skipped` result (docs/benchmark-only PR, no code touched) counts
+  # as OK. Failure or cancellation of any fails the gate.
+  ci-ok:
+    if: always()
+    needs: [changes, lint, test, doc-refs]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify lint, test shards, and doc-refs succeeded (or were skipped)
         run: |
           lint='${{ needs.lint.result }}'
           test='${{ needs.test.result }}'
-          echo "run_tests=${{ needs.changes.outputs.run_tests }}  lint=$lint  test=$test"
-          for result in "$lint" "$test"; do
+          docrefs='${{ needs.doc-refs.result }}'
+          echo "run_tests=${{ needs.changes.outputs.run_tests }}  lint=$lint  test=$test  doc-refs=$docrefs"
+          for result in "$lint" "$test" "$docrefs"; do
             case "$result" in
               success|skipped) ;;
-              *) echo "::error::CI gate failed (lint=$lint test=$test)"; exit 1 ;;
+              *) echo "::error::CI gate failed (lint=$lint test=$test doc-refs=$docrefs)"; exit 1 ;;
             esac
           done
           echo "CI gate passed."
