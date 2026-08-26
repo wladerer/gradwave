@@ -166,11 +166,13 @@ Rules that keep the fleet from tangling:
 - **Keep branches short-lived and rebase on `origin/main` before opening/merging**
   the PR, so conflicts surface locally. Long-lived branches drift and rot.
 - **Check for collisions before and during work:** `make worktrees` shows every
-  worktree's drift, flags stale (merged) branches, and — the part that's otherwise
-  invisible — lists files edited in more than one active worktree. If your file
-  shows up there, coordinate before both sides diverge further.
-- **Prune merged worktrees** with `make worktrees-prune` (removes only stale, clean,
-  idle worktrees under `.claude/worktrees/`; never the primary checkout or a busy one).
+  worktree's drift, flags stale branches — merged (incl. squash-merges), **closed
+  PR** (rejected/superseded/parked), or orphaned — plus **idle ≥14 days**, and —
+  the part that's otherwise invisible — lists files edited in more than one active
+  worktree. If your file shows up there, coordinate before both sides diverge.
+- **Prune stale worktrees** with `make worktrees-prune` (removes stale — merged or
+  closed-PR — clean, idle worktrees under `.claude/worktrees/`; never the primary
+  checkout, the current one, or one with uncommitted changes or a live process).
 - **Shared state is NOT worktree-isolated** — the git stash stack (never bare
   `git stash`; use a WIP commit), the primary `~/github/gradwave` checkout, and the
   `willnix` config repo (treat as single-writer; two agents editing it *will* clobber).
