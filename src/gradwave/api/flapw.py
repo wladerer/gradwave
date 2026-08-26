@@ -185,13 +185,67 @@ def _run_efg(inp: Input, verbose: bool) -> dict[str, Any]:
     return block
 
 
+def _kmesh_symmetry_broken(atoms: Any, mesh: Any) -> tuple[int, int]:
+    """Count crystal point-group ops that a Γ-centred MP mesh ``mesh`` does NOT respect.
+
+    A Γ-centred grid with subdivisions ``n`` is invariant under a reciprocal rotation ``g``
+    iff ``n_i·g_ij/n_j ∈ ℤ`` ∀ i,j — so an *un-equal* subdivision on symmetry-equivalent axes
+    (e.g. [3,3,2] on a cubic crystal, [2,2,4] on a hexagonal one) breaks the point group, and
+    symmetry-equivalent sites then sample the BZ inequivalently → split NMR parameters. Returns
+    ``(n_broken, n_total)``; ``(0, ·)`` = suitable. Requires spglib; returns ``(0, 0)`` without it.
+    """
+    try:
+        import numpy as np
+        import spglib
+    except ImportError:
+        return (0, 0)
+    cell = (atoms.cell[:], atoms.get_scaled_positions(), atoms.get_atomic_numbers())
+    sym = spglib.get_symmetry(cell, symprec=1e-4)
+    if sym is None:
+        return (0, 0)
+    n = np.asarray(mesh, dtype=int)
+    broken = 0
+    for R in sym["rotations"]:
+        g = np.rint(np.linalg.inv(R).T).astype(int)              # reciprocal rotation
+        if not np.all((n[:, None] * g) % n[None, :] == 0):
+            broken += 1
+    return (broken, len(sym["rotations"]))
+
+
+def _equivalent_site_groups(atoms: Any) -> list[list[int]]:
+    """Symmetry-equivalent atom orbits (list of index lists) via spglib; [] if unavailable."""
+    try:
+        import spglib
+    except ImportError:
+        return []
+    cell = (atoms.cell[:], atoms.get_scaled_positions(), atoms.get_atomic_numbers())
+    ds = spglib.get_symmetry_dataset(cell, symprec=1e-4)
+    if ds is None:
+        return []
+    eq = ds["equivalent_atoms"] if isinstance(ds, dict) else ds.equivalent_atoms
+    groups: dict[int, list[int]] = {}
+    for i, e in enumerate(eq):
+        groups.setdefault(int(e), []).append(i)
+    return [g for g in groups.values() if len(g) > 1]
+
+
 def _run_shielding(inp: Input, verbose: bool) -> dict[str, Any]:
+    import warnings
+
     import numpy as np
 
     from gradwave.api.scf import run_scf
     from gradwave.postscf.kgeometry_nmr import sigma_shielding_dq
     from gradwave.scf.loop import SCFResult
 
+    broken, total = _kmesh_symmetry_broken(inp.atoms, inp.kpoints.mesh)
+    if broken:
+        warnings.warn(
+            f"NMR shielding: the k-mesh {list(inp.kpoints.mesh)} breaks {broken} of {total} "
+            f"crystal point-group operations, so symmetry-equivalent sites can come out "
+            f"inequivalent (split) — use equal subdivisions on symmetry-equivalent axes "
+            f"(e.g. a cubic n×n×n, a hexagonal n_a=n_b). ",
+            stacklevel=2)
     res = run_scf(inp, verbose=verbose)
     if not isinstance(res, SCFResult):
         raise NotImplementedError(
@@ -219,6 +273,19 @@ def _run_shielding(inp: Input, verbose: bool) -> dict[str, Any]:
             "span_ppm": float(eig.max() - eig.min()),
             "tensor_ppm": s.tolist(),
         })
+    # Post-hoc: symmetry-equivalent sites must give equal σ_iso; a split (whatever the cause —
+    # unsuitable/coarse k-mesh, unconverged ecut, or a broken structure) is a red flag.
+    for grp in _equivalent_site_groups(inp.atoms):
+        vals = [sites[i]["sigma_iso_ppm"] for i in grp]
+        spread = max(vals) - min(vals)
+        if spread > 1.0:                    # ppm; equivalent sites should agree to well under this
+            sp = sites[grp[0]]["species"]
+            warnings.warn(
+                f"NMR shielding: symmetry-equivalent {sp} sites {grp} give σ_iso spread "
+                f"{spread:.1f} ppm (should be ~0) — the result is not converged/consistent; "
+                f"check the structure (bond lengths), the k-mesh suitability, and ecut/k "
+                f"convergence before trusting the numbers.",
+                stacklevel=2)
     return {
         "observable": "shielding",
         "method": "bare_analytic_dq",
