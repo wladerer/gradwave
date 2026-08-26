@@ -24,7 +24,7 @@ import numpy as np
 
 def _pd():
     try:
-        import pandas  # ty: ignore[unresolved-import]  # optional analysis extra
+        import pandas  # optional analysis extra (resolved in CI via --all-extras)
     except ImportError as err:  # pragma: no cover
         raise ImportError("gradwave.io.analysis needs pandas "
                           "(uv pip install pandas)") from err

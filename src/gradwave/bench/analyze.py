@@ -62,7 +62,7 @@ def _run_features(rec: dict[str, Any]) -> dict[str, Any]:
 
 def load_runs(run_dir):
     """One row per SCF iteration, run-level features broadcast across. → DataFrame."""
-    import pandas as pd  # ty: ignore[unresolved-import]  # optional analysis extra
+    import pandas as pd  # optional analysis extra (resolved in CI via --all-extras)
 
     rows = []
     for rec in _iter_records(run_dir):
@@ -83,7 +83,7 @@ def load_runs(run_dir):
 
 def load_runs_summary(run_dir):
     """One row per run — the outcome/method/descriptor table. → DataFrame."""
-    import pandas as pd  # ty: ignore[unresolved-import]  # optional analysis extra
+    import pandas as pd  # optional analysis extra (resolved in CI via --all-extras)
 
     return pd.DataFrame([_run_features(rec) for rec in _iter_records(run_dir)])
 

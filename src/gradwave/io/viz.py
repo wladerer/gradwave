@@ -24,13 +24,13 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    import plotly.graph_objects as go  # ty: ignore[unresolved-import]  # optional viz extra
+    import plotly.graph_objects as go  # optional viz extra (resolved in CI via --all-extras)
 
 
 def _pmv():
     """Import pymatviz lazily, with an actionable error if the extra is missing."""
     try:
-        import pymatviz  # ty: ignore[unresolved-import]  # optional viz extra
+        import pymatviz  # optional viz extra (resolved in CI via --all-extras)
     except ImportError as err:  # pragma: no cover - exercised only without the extra
         raise ImportError(
             "gradwave.io.viz needs pymatviz (uv pip install gradwave[viz])"
@@ -41,7 +41,7 @@ def _pmv():
 def _go():
     """Import plotly.graph_objects lazily (bundled with the ``viz`` extra)."""
     try:
-        import plotly.graph_objects as go  # ty: ignore[unresolved-import]  # optional viz extra
+        import plotly.graph_objects as go  # optional viz extra (resolved in CI via --all-extras)
     except ImportError as err:  # pragma: no cover - exercised only without the extra
         raise ImportError(
             "gradwave.io.viz needs plotly (uv pip install gradwave[viz])"
