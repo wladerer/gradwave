@@ -117,6 +117,7 @@ class BroydenMixer(_DampedMixerBase):
     sequentially each step, so dropping the oldest pair is exact
     limited-memory Broyden on the window (m² dot products per step)."""
 
+    @override
     def __init__(self, g2: torch.Tensor, **kw) -> None:
         super().__init__(g2, **kw)
         self._pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
@@ -188,6 +189,7 @@ class JohnsonMixer(_DampedMixerBase):
     default (saturation); Kerker ON beats OFF (44 vs 58); the Coulomb
     metric option does not converge this system and stays non-default."""
 
+    @override
     def __init__(self, g2: torch.Tensor, history: int = 12, w0: float = 0.01,
                  metric_w: torch.Tensor | None = None, **kw) -> None:
         # metric_w: per-component inner-product weights (QE rho_ddot uses
@@ -246,6 +248,7 @@ class JohnsonMixer(_DampedMixerBase):
 
 
 class PulayMixer(_DampedMixerBase):
+    @override
     def __init__(
         self,
         g2: torch.Tensor,
