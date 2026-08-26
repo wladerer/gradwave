@@ -540,6 +540,47 @@ include = [
     # functionals.py (LDA/GGA radial kernels) is a pure-numeric leaf and
     # type-checks clean; nmr.py / recorder.py still carry error-level gaps.
     "src/gradwave/flapw/functionals.py",
+
+    # Phase 12 (2026-08-26): 32 already-clean modules promoted in bulk. Each was
+    # verified to type-check with ZERO diagnostics at error severity before being
+    # listed (checked by adding it and running `ty check` — do not infer
+    # cleanliness from a file's absence). Mostly leaf/data/glue: package roots and
+    # __init__s, constants/dtypes, the _d3/_d4 dispersion parameter tables,
+    # io/templates, and a set of flapw/postscf/scf leaves. Takes the error gate
+    # from 143 → 175 of 206 modules. The 31 remaining ungated files carry real
+    # error-level diagnostics and are left for follow-on typing work.
+    "src/gradwave/__init__.py",
+    "src/gradwave/_logging.py",
+    "src/gradwave/_threads.py",
+    "src/gradwave/_version.py",
+    "src/gradwave/bench/__init__.py",
+    "src/gradwave/constants.py",
+    "src/gradwave/core/opcount.py",
+    "src/gradwave/core/sphere_ff.py",
+    "src/gradwave/dtypes.py",
+    "src/gradwave/flapw/__init__.py",
+    "src/gradwave/flapw/atom.py",
+    "src/gradwave/flapw/basis.py",
+    "src/gradwave/flapw/dfpt.py",
+    "src/gradwave/flapw/efg_torch.py",
+    "src/gradwave/flapw/mixing.py",
+    "src/gradwave/io/__init__.py",
+    "src/gradwave/io/templates.py",
+    "src/gradwave/opt/__init__.py",
+    "src/gradwave/postscf/__init__.py",
+    "src/gradwave/postscf/_d3_params.py",
+    "src/gradwave/postscf/_d4_params.py",
+    "src/gradwave/postscf/_dispersion_geom.py",
+    "src/gradwave/postscf/dfpt_q.py",
+    "src/gradwave/postscf/gipaw.py",
+    "src/gradwave/postscf/heisenberg_mc.py",
+    "src/gradwave/postscf/seedpool.py",
+    "src/gradwave/postscf/transport.py",
+    "src/gradwave/postscf/work_function.py",
+    "src/gradwave/pseudo/sto_basis.py",
+    "src/gradwave/scf/__init__.py",
+    "src/gradwave/scf/soft_mode.py",
+    "src/gradwave/solvers/deflation.py",
 ]
 
 [tool.ty.overrides.rules]
