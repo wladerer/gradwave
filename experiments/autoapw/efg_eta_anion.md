@@ -4,12 +4,17 @@ Goal: close the anion η gap without giving back the C_Q magnitude (96–106% of
 visibly distorts second-order MAS lineshapes, so this is the accuracy lever for quadrupolar
 spectra. Two independent fronts, both measured on asus.
 
-**Reference correction (from `efg_converged_k_validation.md`, the authoritative gw-vs-Elk table).**
-The corundum-O η "gap" in the original framing was a mis-anchor: **corundum O Elk η = 0.51**, and
-gw already sits at **0.48** (FLAPW HELO) / 0.48 (PW/PAW #394) — 94 % of Elk, essentially solved.
-The genuine anion-η gap is **rutile O: gw 0.654 (FLAPW HELO) vs Elk 0.740** (rutile's planar-
-tricoordinate O is the stringent biaxial case). Front B therefore targets rutile O; corundum O is
-the *transferability control* (an already-good η that a HELO-energy change must not overshoot).
+**Reference correction — pinned across three independent repo sources.** The corundum-O η used to
+anchor this task (0.74) was a **mis-label of the rutile value**. The correct **corundum O Elk η =
+0.51**: `efg_converged_k_validation.md` (k6/k8 gated) gives Elk 0.51, `efg_multimaterial_validation.md`
+gives Elk 0.512, and the **experiment** (Brun, Derighetti, Hundt & Niebuhr, *Phys. Lett. A* **31**,
+416 (1970)) gives η 0.517 — Elk and experiment agree at ~0.51. The corundum O site is Wyckoff 18e,
+site symmetry C₂ (twofold), so η is symmetry-unconstrained and 0.51 is allowed. gw already sits at
+**0.48** (FLAPW HELO) / **0.481** (PW/PAW #394) — 94 % of Elk, within ~7 % of experiment:
+**corundum O η is essentially solved, not a 65 % gap.** The genuine anion-η gap is **rutile O: gw
+0.654 (FLAPW HELO) vs Elk 0.740** — rutile's planar-tricoordinate O is the stringent biaxial case.
+Front B therefore targets rutile O; corundum O is the *transferability control* (an already-good η
+that a raised HELO energy must not overshoot).
 
 ## Front A — PW/PAW: O-dataset completeness (corundum, `efg_eta_paw_datasets.py`)
 
@@ -30,11 +35,26 @@ Datasets are fetched, not committed: `experiments/autoapw/efg_fetch_o_datasets.s
 
 ### Results (corundum Al₂O₃, ecut 60 Ry / ecutrho 480 Ry, k 2×2×2, PBE; Al fixed psl 1.0.0)
 
-| O dataset | O η | O C_Q(¹⁷O) MHz | O on-site V_zz | Al C_Q MHz | note |
-|---|---|---|---|---|---|
-| (pending) | | | | | |
+Elk 11 anchor (`efg_converged_k_validation.md`, k6/k8): O **η 0.51**, C_Q(¹⁷O) 2.20 MHz,
+on-site V_zz +27.08. (Not the 0.74 rutile value — see the reference correction above.)
 
-Elk 11 anchor: O η 0.740, C_Q(¹⁷O) 2.19 MHz, on-site V_zz +27.08.
+| O dataset | gen. | O η | O C_Q(¹⁷O) MHz | O on-site V_zz | Al C_Q MHz | conv |
+|---|---|---|---|---|---|---|
+| O.pbe-n-kjpaw_psl.1.0.0 (baseline) | psl 1.0.0 | 0.481 | 2.314 | +26.67 | 2.097 | ✅ 21 it |
+| O.pbe-n-kjpaw_psl.0.1 | psl 0.1 | 0.480 | 2.291 | +26.42 | 2.095 | ✅ 22 it |
+| O.pbe-kjpaw (GIPAW-era) | psl 0.x | 0.475 | 2.293 | +28.94 | 2.017 | ✅ 18 it |
+| O.pbe-n-rrkjus_psl.1.0.0 (USPP) | — | — | — | — | — | ❌ IndexError |
+
+**Front A verdict: measured NULL.** Three parseable O PAW *generations* spanning ~a decade give
+**η ∈ [0.475, 0.481]** — indistinguishable, and all already **93–94 % of the correct Elk 0.51**;
+C_Q sits at 104–105 % of Elk. Dataset generation does not move the anion η, because every
+parseable O PAW ships the same 4 projectors (2s ×2, 2p ×2, `l_max_rho=2`) — the on-site l=2
+completeness is fixed by the UPF-PAW format, not purchasable. The rrkjus **USPP fails structurally**
+(`is_paw=False` → zero AE/PS partial waves → the Petrilli–Blöchl `EFGOnSite.from_paw` throws
+`IndexError`): a non-PAW / GBRV-style dataset cannot produce the on-site EFG at all. JTH/ATOMPAW
+XML-PAW is unparsed and RRKJ-refit (`nqf>0`) USPPs are rejected, so no richer set is reachable
+without a new parser. **Recommendation shipped as a warning** (see below): flag when a non-PAW
+(no-partial-wave) dataset is handed to `efg_paw`, since it silently loses the on-site term.
 
 ## Front B — FLAPW: finite-difference scan of the l=1 HELO energy (`efg_eta_helo_scan.py`)
 
