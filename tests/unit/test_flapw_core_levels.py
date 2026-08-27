@@ -108,10 +108,15 @@ def test_core_level_shift_equivalent_sites_null():
 
 @pytest.mark.slow
 def test_core_level_shift_inequivalent_oxygen():
-    # A real initial-state O 1s chemical shift: Ti(4+) with two O at DIFFERENT
-    # Ti-O distances. The O nearer the cation sits in a more positive potential
-    # -> its 1s is LESS bound (higher, less-negative) -> the short−long shift is
-    # POSITIVE, ~1-3 eV (measured ~+1.7 eV at 1.75 vs 2.30 A).
+    # REPRODUCIBILITY GUARD, not a physical-correctness check. Two O at different
+    # Ti-O distances (1.75/2.30 A) in a vacuum box: a within-cell shift whose ONLY
+    # source is a long-range Madelung difference living in the interstitial BETWEEN
+    # the small spheres. gradwave flattens the interstitial to a shared zero and so
+    # discards it, leaving a small wrong-signed residual (gw -1.67 eV; Elk 11.0.2
+    # gives +1 to +3 eV, opposite sign — see experiments/autoapw/xps_validation.md).
+    # This is the documented open-geometry failure mode; the method is trustworthy
+    # for ON-SITE shifts (close-packed crystals, oxidation states). We pin gradwave's
+    # own number so a regression is visible, NOT because the sign is physical.
     import numpy as _np
 
     from gradwave.flapw import crystal_scf_multi
@@ -128,6 +133,6 @@ def test_core_level_shift_inequivalent_oxygen():
     o = [s for s in info["core_level_shifts"] if s["species"] == "O" and s["orbital"] == "1s"]
     assert len(o) == 1
     d = o[0]["delta_eV"]  # a1 (short) is the ref; a2 (long) − short
-    # long is MORE bound than short -> (long − short) is negative, ~1-3 eV
+    # gradwave's (wrong-signed) value is ~-1.67 eV; pin the band, not the physics.
     assert -3.5 < d < -0.5
     assert not np.isnan(d)

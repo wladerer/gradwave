@@ -95,12 +95,17 @@ def main() -> None:
         vbm_ox = _vbm(b_ox, nocc=16)         # (2 Si x 4 + 4 O x 6) / 2
         print(f"  SiO2 VBM(Gamma) = {vbm_ox:.4f} eV")
     if what == "headline":
-        shift = cross_cell_binding_shift(i_si["core_levels"], vbm_si,
-                                         i_ox["core_levels"], vbm_ox, "Si", "2p")
-        print("=== Si 2p cross-cell shift (SiO2 - Si), VBM-referenced ===")
-        print(f"  BE(Si)   = {shift['BE_a_eV']:.3f} eV")
-        print(f"  BE(SiO2) = {shift['BE_b_eV']:.3f} eV")
-        print(f"  Delta BE = {shift['delta_BE_eV']:+.3f} eV   (experiment ~ +4 eV)")
+        # Potential alignment (interstitial-zero frame: e_ref=0) — the physical
+        # reference for a core-level chemical shift. This is the headline number.
+        pot = cross_cell_binding_shift(i_si["core_levels"], 0.0,
+                                       i_ox["core_levels"], 0.0, "Si", "2p")
+        # VBM referencing — an uncertainty bracket; over-corrects by the gap difference.
+        vbm = cross_cell_binding_shift(i_si["core_levels"], vbm_si,
+                                       i_ox["core_levels"], vbm_ox, "Si", "2p")
+        print("=== Si 2p cross-cell shift (SiO2 - Si) ===")
+        print(f"  potential-aligned (e_ref=0): Delta BE = {pot['delta_BE_eV']:+.3f} eV"
+              "   <-- headline (experiment ~ +4 eV)")
+        print(f"  VBM-referenced (bracket)   : Delta BE = {vbm['delta_BE_eV']:+.3f} eV")
 
 
 if __name__ == "__main__":

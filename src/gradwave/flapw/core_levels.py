@@ -13,6 +13,17 @@ FLAPW absolute eigenvalues are referenced to the flat interstitial zero and
 that single interstitial reference, and the systematic radial-mesh error is the
 same at every site, so both cancel in the difference: the equivalent-site shift
 is exactly zero and the inequivalent-site shift is the observable.
+
+Validation (vs Elk 11.0.2 and experiment; see ``experiments/autoapw/xps_validation.md``):
+equivalent-site nulls are exact in both codes (rutile TiO₂ O/Ti, β-cristobalite SiO₂ O).
+The cross-cell Si-2p Si-vs-SiO₂ shift comes out +4.4 eV (gradwave) / +5.5 eV (Elk) vs
+~+4 eV experiment when the cells are aligned on the interstitial zero (average-potential
+reference; ``cross_cell_binding_shift`` with ``e_ref=0``) — the physical reference for a
+core-level chemical shift. NOTE the reliability boundary: gradwave's flat interstitial
+zero discards inter-site potential differences that live BETWEEN the muffin tins, so the
+shift is trustworthy only when the site-distinguishing potential is ON-SITE (close-packed
+crystals, oxidation-state changes). A within-cell shift sourced purely by a long-range
+interstitial Madelung term (two far-apart O in a vacuum box) comes out wrong-signed vs Elk.
 """
 
 from __future__ import annotations
@@ -54,14 +65,19 @@ def core_levels_from_state(v_by_key: dict[str, Any], syms: list[str], keys: list
 def referenced_binding_energies(levels: dict[str, Any], e_ref: float) -> dict[str, Any]:
     """Per-site core binding energies referenced to a per-cell energy ``e_ref`` (eV).
 
-    Cross-cell comparison of absolute FLAPW core eigenvalues is meaningless because
-    each cell's levels float on its own interstitial zero. Referencing every level in
-    a cell to a physical marker OF THAT CELL — the valence-band maximum or Fermi level
-    ``e_ref`` (both in the same interstitial-zero frame as the cores) — removes the
-    common wander, because the SCF adds any interstitial shift ``c`` to the cores and
-    to ``e_ref`` alike, so ``BE = e_ref − e_core`` is invariant under ``c``. ``BE`` is
-    the initial-state XPS binding energy (positive for a bound core), directly
-    comparable across cells and to experiment (which references to E_F). Returns
+    Cross-cell comparison of absolute FLAPW core eigenvalues needs a common energy
+    zero because each cell's levels float on its own interstitial zero. ``BE = e_ref −
+    e_core`` picks the reference: any interstitial shift ``c`` moves the cores and a
+    same-frame ``e_ref`` together, so ``BE`` is invariant under ``c``. ``BE > 0`` is the
+    initial-state XPS binding energy.
+
+    Choice of ``e_ref`` matters (see ``experiments/autoapw/xps_validation.md``): for a
+    core-level CHEMICAL SHIFT the physical reference is the **average electrostatic
+    potential**, for which the FLAPW **interstitial zero itself** is the proxy — pass
+    ``e_ref = 0`` (potential alignment). This reproduces the ~4 eV Si-2p Si-vs-SiO₂
+    shift. Referencing to each cell's **VBM/E_F** instead folds the (large, material-
+    dependent) valence-band/gap difference into the number and over-corrects — useful
+    only as an uncertainty bracket, not the physical shift. Returns
     ``{key: {"symbol": s, "binding": {"1s": BE, …}}}``."""
     out: dict[str, Any] = {}
     for k, rec in levels.items():
