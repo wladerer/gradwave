@@ -69,8 +69,11 @@ def main() -> None:
     print(f"CG solves: {n}", flush=True)
     print(f"cold: total={tc}  mean={tc / n:.1f}  max={max(cold)}", flush=True)
     print(f"warm: total={tw}  mean={tw / n:.1f}  max={max(warm)}", flush=True)
-    print(f"reduction: {tc - tw} iters  ({100.0 * (tc - tw) / tc:.1f}% fewer)",
-          flush=True)
+    # signed change of warm relative to cold: positive => warm is SLOWER (more
+    # iterations), negative => warm saves. Measured positive on MgO (a null).
+    delta = tw - tc
+    print(f"warm - cold: {delta:+d} iters  ({100.0 * delta / tc:+.1f}%; "
+          f"{'warm SLOWER' if delta > 0 else 'warm saves'})", flush=True)
     print("WARMSTART_DONE", flush=True)
 
 

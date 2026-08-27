@@ -1714,12 +1714,12 @@ class ShieldingDq:
 
         ``warm_start`` seeds each CG solve from a nearby already-computed
         response (previous q̂ pol → δu⁰, δu⁰ → δu¹); opt-in and OFF by default
-        because it MEASURED NEGATIVE on MgO ¹⁷O (−10.8%, i.e. ~11% MORE
-        iterations: the intra-k seeds are not close enough to beat a zero start
-        under Teter preconditioning — a non-matching seed only enlarges the
-        initial residual). It never changes the converged result, only the
-        iteration count. With ``uspp=None`` the plain norm-conserving (S = I)
-        route is unchanged.
+        because it MEASURED NULL on MgO ¹⁷O — +11% (289 MORE iterations over 120
+        solves: cold total 2676 → warm 2965). The nearby-perturbation seed starts
+        the S-orthogonality-projected CG in a worse residual than a clean zero
+        start, a legitimate DFPT/Sternheimer phenomenon. It never changes the
+        converged result, only the iteration count. With ``uspp=None`` the plain
+        norm-conserving (S = I) route is unchanged.
         """
         _guard(res)
         self.res = res
@@ -2558,8 +2558,8 @@ def sigma_shielding_dq(
     :class:`USPPShieldingConditioningWarning` when it routes to CG). So the easy
     majority keeps the dense speed and only the diverging regime pays for CG.
     ``cg_tol`` / ``max_iter`` bound the CG solve; ``warm_start`` (opt-in, OFF by
-    default — it measured a ~11% iteration INCREASE on MgO) seeds each solve from
-    the adjacent ∂/∂q stage. :func:`uspp_overlap_conditioning` remains a
+    default — a measured NULL: ~11% MORE CG iterations on MgO) seeds each solve
+    from the adjacent ∂/∂q stage. :func:`uspp_overlap_conditioning` remains a
     basis-health diagnostic (no longer a divergence predictor)."""
     _guard(res)
     system = uspp.system if isinstance(uspp, USPPResponseCtx) else res.system
@@ -2803,7 +2803,10 @@ def sigma_shielding_gipaw(
     solves) over blocks of at most that many k-points — bit-identical to the
     eager ``None`` default (each context is a pure function of its k), at the
     cost of rebuilding contexts once per sampled axis. The memory route for
-    many-atom cells whose full-mesh dense contexts do not fit."""
+    many-atom cells whose full-mesh dense contexts do not fit. It composes with
+    the bare term's ``response_backend`` (the matrix-free CG resolvent is built
+    per-k inside the streamed context, so a streamed CG run works unchanged) and
+    ``warm_start``, both threaded to :func:`sigma_shielding_dq`."""
     system = ctx.system
     species_of_atom = [int(s) for s in system.species_of_atom]
     sig_bare = sigma_shielding_dq(
