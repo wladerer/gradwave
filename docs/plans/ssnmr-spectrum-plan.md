@@ -1,8 +1,8 @@
 # Solid-state NMR spectrum plan
 
-Status: **in progress** (written 2026-08-26). Phase 1 is this PR; Phases 2 and 3
-are being built in parallel on their own branches; the final wiring lands once
-all three are in.
+Status: **in progress** (written 2026-08-26). Phase 1 is this PR; Phase 2 merged
+in parallel (#393, `src/gradwave/postscf/nmr_spectrum.py`); Phase 3 is in flight
+on its own branch; the final wiring lands once all three are in.
 
 The goal is a driveable path from a crystal structure to a solid-state NMR
 spectrum: absolute chemical shieldings and quadrupolar couplings out of the DFT
