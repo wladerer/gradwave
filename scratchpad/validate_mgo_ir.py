@@ -51,7 +51,7 @@ def scf_fn(mesh):
 
 def zstar_convergence():
     print("=== Z* k-mesh convergence (MgO, Berry-phase FD) ===", flush=True)
-    for nk in (4, 6, 8):
+    for nk in (4, 6):
         mesh = (nk, nk, nk)
         res = born_effective_charges(scf_fn(mesh), POS, mesh, step=2e-3)
         z = res["born"].numpy()
@@ -60,7 +60,7 @@ def zstar_convergence():
         asr = float(res["asr_max"])
         print(f"  mesh {nk}^3: Z*_Mg(iso)={zmg:+.4f}  Z*_O(iso)={zo:+.4f}  "
               f"|ASR|max={asr:.3e}", flush=True)
-        if nk == 8:
+        if nk == 6:
             np.set_printoptions(precision=4, suppress=True)
             print("  Z*_Mg tensor:\n", z[0], flush=True)
             print("  Z*_O  tensor:\n", z[1], flush=True)

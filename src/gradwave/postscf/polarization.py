@@ -111,20 +111,24 @@ def string_berry_phase(
     wrap-around link from the last point back to the first closes across the
     reciprocal-lattice vector ``e_dir``.
 
-    Returns ``-Im ln prod_j det M`` as a real 0-dim tensor (gauge invariant under
-    any per-k-point U(N) rotation of the occupied bands, up to the 2*pi branch).
+    Returns the principal value ``-Im ln prod_j det M`` in (-pi, pi] as a real
+    0-dim tensor (gauge invariant under any per-k-point U(N) rotation of the
+    occupied bands, up to the 2*pi branch). The principal value is taken from the
+    PRODUCT of link determinants (so the result is a single well-defined phase,
+    safe to average over parallel strings), not the raw sum of link angles.
     """
     n = len(coeffs)
     wrap: tuple[int, int, int] = (-e_dir[0], -e_dir[1], -e_dir[2])
-    phase = coeffs[0].new_zeros((), dtype=RDTYPE)
+    sign_prod = coeffs[0].new_ones((), dtype=CDTYPE)
     for j in range(n):
         a, b = j, (j + 1) % n
         gshift: tuple[int, int, int] = (0, 0, 0) if b != 0 else wrap
         ia, ib = _match_indices(millers[a], millers[b], gshift)
         m = _overlap_matrix(coeffs[a], coeffs[b], ia, ib)
-        sign, _ = torch.linalg.slogdet(m)
-        phase = phase + torch.angle(sign)
-    return -phase
+        sign, _ = torch.linalg.slogdet(m)  # unit-modulus complex phase of det M
+        sign_prod = sign_prod * sign
+    # principal value of -Im ln(prod det) in (-pi, pi]
+    return -torch.angle(sign_prod)
 
 
 # --------------------------------------------------------------------------- #
