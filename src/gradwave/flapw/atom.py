@@ -29,6 +29,8 @@ CONFIG: dict[str, tuple[float, list[tuple[int, int, int]]]] = {
     "Be": (4.0, [(1, 0, 2), (2, 0, 2)]),
     "O": (8.0, [(1, 0, 2), (2, 0, 2), (2, 1, 4)]),      # open-shell 2p⁴ (spherically averaged)
     "Ne": (10.0, [(1, 0, 2), (2, 0, 2), (2, 1, 6)]),
+    # Si 3p² spherically averaged (open shell), like O's 2p⁴.
+    "Si": (14.0, [(1, 0, 2), (2, 0, 2), (2, 1, 6), (3, 0, 2), (3, 1, 2)]),
     "Ti": (22.0, [(1, 0, 2), (2, 0, 2), (2, 1, 6), (3, 0, 2), (3, 1, 6), (3, 2, 2), (4, 0, 2)]),
 }
 # NIST LDA atomic reference KS eigenvalues (eV), converted from Hartree.
@@ -36,6 +38,9 @@ NIST_LDA_EV: dict[str, dict[str, float]] = {
     "He": {"1s": -0.5704 * HARTREE_EV},
     "Be": {"1s": -3.8551 * HARTREE_EV, "2s": -0.20565 * HARTREE_EV},
     "Ne": {"1s": -30.305 * HARTREE_EV, "2s": -1.3230 * HARTREE_EV, "2p": -0.49928 * HARTREE_EV},
+    "Si": {"1s": -65.184426 * HARTREE_EV, "2s": -5.075056 * HARTREE_EV,
+           "2p": -3.514938 * HARTREE_EV, "3s": -0.398139 * HARTREE_EV,
+           "3p": -0.153293 * HARTREE_EV},
     "Ti": {"1s": -177.276643 * HARTREE_EV, "2s": -19.457901 * HARTREE_EV,
            "2p": -16.285339 * HARTREE_EV, "3s": -2.258007 * HARTREE_EV,
            "3p": -1.422947 * HARTREE_EV, "3d": -0.170010 * HARTREE_EV,

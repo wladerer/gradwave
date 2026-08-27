@@ -51,6 +51,51 @@ def core_levels_from_state(v_by_key: dict[str, Any], syms: list[str], keys: list
     return out
 
 
+def referenced_binding_energies(levels: dict[str, Any], e_ref: float) -> dict[str, Any]:
+    """Per-site core binding energies referenced to a per-cell energy ``e_ref`` (eV).
+
+    Cross-cell comparison of absolute FLAPW core eigenvalues is meaningless because
+    each cell's levels float on its own interstitial zero. Referencing every level in
+    a cell to a physical marker OF THAT CELL — the valence-band maximum or Fermi level
+    ``e_ref`` (both in the same interstitial-zero frame as the cores) — removes the
+    common wander, because the SCF adds any interstitial shift ``c`` to the cores and
+    to ``e_ref`` alike, so ``BE = e_ref − e_core`` is invariant under ``c``. ``BE`` is
+    the initial-state XPS binding energy (positive for a bound core), directly
+    comparable across cells and to experiment (which references to E_F). Returns
+    ``{key: {"symbol": s, "binding": {"1s": BE, …}}}``."""
+    out: dict[str, Any] = {}
+    for k, rec in levels.items():
+        binding = {orb: float(e_ref) - float(e) for orb, e in rec["levels"].items()}
+        out[k] = {"symbol": rec["symbol"], "binding": binding}
+    return out
+
+
+def cross_cell_binding_shift(levels_a: dict[str, Any], e_ref_a: float,
+                             levels_b: dict[str, Any], e_ref_b: float,
+                             symbol: str, orbital: str) -> dict[str, Any]:
+    """Cross-cell initial-state binding-energy shift ΔBE(b − a) for ``symbol``/``orbital``.
+
+    Each cell's core level is referenced to its own ``e_ref`` (VBM/E_F), then averaged
+    over the sites of ``symbol`` (equivalent sites agree; inequivalent sites are meaned).
+    ``ΔBE = BE_b − BE_a > 0`` means the core is MORE bound in cell b (the textbook
+    Si-2p-in-SiO₂ chemical shift, ≈ +4 eV vs bulk Si). This is the initial-state
+    (Koopmans) estimate — it omits final-state core-hole screening, which for Si/SiO₂
+    adds ≲1 eV of the observed shift. Returns ``{species, orbital, delta_BE_eV,
+    BE_a_eV, BE_b_eV, n_sites_a, n_sites_b}``."""
+    def _mean_be(levels: dict[str, Any], e_ref: float) -> tuple[float, int]:
+        be = referenced_binding_energies(levels, e_ref)
+        vals = [rec["binding"][orbital] for rec in be.values()
+                if rec["symbol"] == symbol and orbital in rec["binding"]]
+        if not vals:
+            raise ValueError(f"no {symbol} site carries orbital {orbital}")
+        return float(np.mean(vals)), len(vals)
+
+    be_a, na = _mean_be(levels_a, e_ref_a)
+    be_b, nb = _mean_be(levels_b, e_ref_b)
+    return {"species": symbol, "orbital": orbital, "delta_BE_eV": be_b - be_a,
+            "BE_a_eV": be_a, "BE_b_eV": be_b, "n_sites_a": na, "n_sites_b": nb}
+
+
 def core_level_shifts(levels: dict[str, Any]) -> list[dict[str, Any]]:
     """Within-cell same-element, same-orbital core-level shifts (eV).
 
