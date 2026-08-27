@@ -40,6 +40,18 @@ bench = [
     "pyarrow>=17",
     "duckdb>=1.1",
 ]
+# gradwave.profiling (deep-profile harness + self-contained HTML report).
+# torch.profiler needs no extra dep; py-spy (sampling flamegraph) and memray
+# (allocation flamegraph) are the process-level samplers, and matplotlib/pandas/
+# pyarrow render the report + machine-readable op table. The harness degrades
+# gracefully if py-spy/memray are absent. Install with: gradwave[profiling].
+profiling = [
+    "py-spy>=0.3.14",
+    "memray>=1.12",
+    "matplotlib>=3.8",
+    "pandas>=3.0.3",
+    "pyarrow>=17",
+]
 
 [dependency-groups]
 dev = [
@@ -611,6 +623,11 @@ include = [
     "src/gradwave/bench/harness.py",
     "src/gradwave/bench/analyze.py",
     "src/gradwave/bench/suite.py",
+    # profiling harness + report (written fully typed from the start).
+    "src/gradwave/profiling/__init__.py",
+    "src/gradwave/profiling/_runner.py",
+    "src/gradwave/profiling/harness.py",
+    "src/gradwave/profiling/report.py",
     "src/gradwave/opt/newton.py",
     "src/gradwave/opt/joint.py",
     "src/gradwave/opt/model_hessian.py",

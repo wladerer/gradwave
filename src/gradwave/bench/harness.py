@@ -13,7 +13,6 @@ from __future__ import annotations
 import itertools
 import json
 import socket
-import subprocess
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -44,12 +43,11 @@ class RunRecord:
 
 
 def _git_sha() -> str | None:
-    try:
-        return subprocess.run(["git", "rev-parse", "--short", "HEAD"],
-                              capture_output=True, text=True, timeout=3,
-                              cwd=Path(__file__).resolve().parent).stdout.strip() or None
-    except Exception:
-        return None
+    # One source of truth for the short SHA: gradwave.io.runinfo (which also
+    # backs machine_snapshot's provenance and the profiling harness).
+    from gradwave.io import runinfo
+
+    return runinfo._git_commit()
 
 
 def _provenance() -> dict[str, Any]:
