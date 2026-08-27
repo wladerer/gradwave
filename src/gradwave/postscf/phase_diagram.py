@@ -15,6 +15,7 @@ binodal of a miscibility gap that closes at the critical temperature.
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Callable
 
 import numpy as np
@@ -36,7 +37,7 @@ def two_phase_regions(
     verts = sorted(verts, key=lambda i: x[i])
     dx = np.min(np.diff(x))
     regions = []
-    for a, b in zip(verts[:-1], verts[1:], strict=True):
+    for a, b in itertools.pairwise(verts):
         if x[b] - x[a] > gap_factor * dx:
             regions.append((float(x[a]), float(x[b])))
     return regions

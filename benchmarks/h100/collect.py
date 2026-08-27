@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import socket
 import tarfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -107,7 +107,7 @@ def build_markdown(recs: dict[str, dict]) -> str:
     lines: list[str] = []
     lines.append(f"# H100 benchmark pack -- results ({HOST})")
     lines.append("")
-    lines.append(f"Generated {datetime.now(timezone.utc).isoformat()} from "
+    lines.append(f"Generated {datetime.now(UTC).isoformat()} from "
                  f"`benchmarks/results/{HOST}/`.")
     lines.append("")
 
@@ -177,7 +177,7 @@ def build_markdown(recs: dict[str, dict]) -> str:
         if wall and n_vol:
             h100_sper = f"{wall / n_vol:.1f}"
         if eos and eos.get("it"):
-            its = [v for v in eos["it"].values()]
+            its = list(eos["it"].values())
             if its:
                 h100_it = f"{min(its)}"
         lines.append(f"| {el} | {struct} | {DELTA_REF_PDOJO[el]:.3f} | "
@@ -255,7 +255,7 @@ def build_markdown(recs: dict[str, dict]) -> str:
 
 
 def main() -> int:
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     if not RESULTS.exists():
         print(f"[collect] no results dir at {RESULTS} -- nothing to bundle")
         return 1

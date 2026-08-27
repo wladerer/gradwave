@@ -91,7 +91,7 @@ def _esm_geom(cell, shape: tuple[int, ...], open_axis: int, device, dtype):
     return torch.linalg.norm(gvec, dim=-1), dz, lz
 
 
-def hartree_potential_esm(rho_r: torch.Tensor, cell: "np.ndarray | torch.Tensor",
+def hartree_potential_esm(rho_r: torch.Tensor, cell: np.ndarray | torch.Tensor,
                           open_axis: int = 2, *,
                           neutralize_g0: bool = True) -> torch.Tensor:
     """Open-boundary Hartree potential v_H(r) [eV] for a slab.
@@ -154,7 +154,7 @@ def hartree_potential_esm(rho_r: torch.Tensor, cell: "np.ndarray | torch.Tensor"
     return torch.movedim(v_r, -1, open_axis)
 
 
-def hartree_potential_capacitor(rho_r: torch.Tensor, cell: "np.ndarray | torch.Tensor",
+def hartree_potential_capacitor(rho_r: torch.Tensor, cell: np.ndarray | torch.Tensor,
                                 open_axis: int = 2, *, bias: float = 0.0) -> torch.Tensor:
     """Hartree v_H(r) [eV] with METAL (Dirichlet) planes at both z-box edges — the
     ESM capacitor / metal-metal mode.
@@ -267,7 +267,7 @@ def _default_beta(grid, open_axis: int) -> float:
     return 2.0 * dz
 
 
-def esm_delta_potential(rho_r: torch.Tensor, cell: "np.ndarray | torch.Tensor",
+def esm_delta_potential(rho_r: torch.Tensor, cell: np.ndarray | torch.Tensor,
                         open_axis: int = 2) -> torch.Tensor:
     """v_H^open(r) − v_H^periodic(r) [eV] — the open-minus-periodic field.
 

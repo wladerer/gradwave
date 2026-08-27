@@ -90,8 +90,8 @@ def test_hessian_reuses_phonons_constant():
     # the FD route's constant IS the analytic route's derived value (identity,
     # not merely close) — the 8th-digit literal is gone
     assert hessian.SQRT_EV_AMU_ANG2_TO_CM1 == phonons._SQRT_EV_AMU_ANG2_TO_CM1
-    assert hessian.SQRT_EV_AMU_ANG2_TO_CM1 == pytest.approx(
-        521.4708983727718, rel=1e-12)
+    assert pytest.approx(
+        521.4708983727718, rel=1e-12) == hessian.SQRT_EV_AMU_ANG2_TO_CM1
 
 
 def test_gamma_phonons_matches_gamma_frequencies():
@@ -117,8 +117,7 @@ def _hermitian(m, seed=7):
     a = (torch.randn(m, m, generator=g, dtype=torch.float64)
          + 1j * torch.randn(m, m, generator=g, dtype=torch.float64))
     a = a + a.conj().T
-    a = a + m * torch.eye(m, dtype=torch.complex128)  # push spectrum positive
-    return a
+    return a + m * torch.eye(m, dtype=torch.complex128)  # push spectrum positive
 
 
 def _batched_apply(a):

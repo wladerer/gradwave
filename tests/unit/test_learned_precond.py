@@ -23,8 +23,7 @@ torch.manual_seed(0)
 
 def _g2_grid(n=200, gmax=40.0):
     """A density-sphere-like |G|² vector including the pinned G=0 component."""
-    g2 = torch.linspace(0.0, gmax, n, dtype=RDTYPE)
-    return g2
+    return torch.linspace(0.0, gmax, n, dtype=RDTYPE)
 
 
 def test_kerker_special_case_matches_bare_filter():

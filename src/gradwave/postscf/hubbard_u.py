@@ -228,9 +228,7 @@ def _use_full_matrix(sites: list[_HubbardSite], species_of_atom: list[int]) -> b
     ns = len(sites)
     if ns == 1:
         return False
-    if ns == 2 and _all_sites_equivalent(sites, species_of_atom):
-        return False
-    return True
+    return not (ns == 2 and _all_sites_equivalent(sites, species_of_atom))
 
 
 def _assemble_u(chi_col: torch.Tensor, chi0_col: torch.Tensor, site: int,

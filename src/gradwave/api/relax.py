@@ -380,7 +380,7 @@ def _relax_nested(
             try:
                 ase_write(str(traj_path), frame, format="extxyz",
                           append=len(frames) > 1)
-            except Exception as exc:  # noqa: BLE001 — best-effort progress dump
+            except Exception as exc:
                 logger.warning("could not append relax step to %s: %s",
                                traj_path, exc)
 

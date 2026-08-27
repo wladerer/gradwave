@@ -2,10 +2,10 @@
 import pytest
 
 pytest.importorskip("spglib")
-from ase.build import bulk  # noqa: E402
-from ase.spacegroup import crystal  # noqa: E402
+from ase.build import bulk
+from ase.spacegroup import crystal
 
-from gradwave.api.flapw import _equivalent_site_groups, _kmesh_symmetry_broken  # noqa: E402
+from gradwave.api.flapw import _equivalent_site_groups, _kmesh_symmetry_broken
 
 
 def test_cubic_equal_mesh_is_suitable():

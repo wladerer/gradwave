@@ -57,7 +57,7 @@ from gradwave.scf.noncollinear import scf_noncollinear
 
 # reuse the plotting + collinear fat-band machinery from the sibling example
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from examples.cohp_fatbands import (  # noqa: E402
+from examples.cohp_fatbands import (
     PSEUDOS,
     cohp_fatbands,
     irreps_at_specials,
@@ -260,8 +260,8 @@ def _spinor_parity_gamma(system, coeffs_gamma, eig_gamma, ne, ref):
     on both spin components). Returns plot-ready clusters near the gap; Kramers
     pairs share a parity, so plot_material's proximity dedup collapses them.
     """
-    ig = [i for i, sp in enumerate(system.spheres)
-          if np.abs(sp.k_frac).max() < 1e-9][0]
+    ig = next(i for i, sp in enumerate(system.spheres)
+          if np.abs(sp.k_frac).max() < 1e-9)
     sph = system.spheres[ig]
     miller = sph.miller.cpu().numpy()
     index = {tuple(m): i for i, m in enumerate(miller)}
@@ -307,8 +307,8 @@ def run_soc(outdir: pathlib.Path, npoints: int) -> dict:
           f"({len(bp.kpts)} k, {nb_path} bands) ...", flush=True)
     eig, wgt = spinor_cohp_fatbands(res, xc, bp.kpts, bond, nb_path)
 
-    ig = [i for i, sp in enumerate(system.spheres)
-          if np.abs(sp.k_frac).max() < 1e-9][0]
+    ig = next(i for i, sp in enumerate(system.spheres)
+          if np.abs(sp.k_frac).max() < 1e-9)
     irr = _spinor_parity_gamma(system, res.coeffs[ig],
                                res.eigenvalues[ig].cpu().numpy(), ne, ref)
     print("    G parity (g/u) near gap: "

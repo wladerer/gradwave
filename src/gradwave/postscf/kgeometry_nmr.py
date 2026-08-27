@@ -413,7 +413,7 @@ def velocity_perturbation_q(
     def _solve_block(idx_k: Tensor | None, jsel_x: Tensor, c_k: Tensor,
                      c_kq: Tensor, eps_x: Tensor, ph_x: Tensor, bk_k: BatchedK,
                      bk_kq_x: BatchedK,
-                     h_kq_x: "BatchedHamiltonian | _USPPBatchedHS",
+                     h_kq_x: BatchedHamiltonian | _USPPBatchedHS,
                      s_occ_x: Tensor,
                      s_apply_x: Callable[[Tensor], Tensor] | None,
                      ) -> tuple[Tensor, Tensor]:
@@ -628,8 +628,7 @@ class _NLPairVelocity:
         b_p = torch.einsum("spg,bg->sbp", p.conj(), c)
         b_dp = torch.einsum("spg,bg->sbp", dp.conj(), c)
         out = torch.einsum("s,sbp,pq,sqg->bg", w, b_p, self.dij, dp)
-        out = out + torch.einsum("s,sbp,pq,sqg->bg", w, b_dp, self.dij, p)
-        return out
+        return out + torch.einsum("s,sbp,pq,sqg->bg", w, b_dp, self.dij, p)
 
     def field(self, sol: VelocityQSolves, dpsi: Tensor) -> Tensor:
         """BZ-weighted nonlocal current density (3, n1, n2, n3), the periodic
@@ -1309,7 +1308,7 @@ def uspp_smooth_continuity(
             if not p.shape[0]:
                 return torch.zeros_like(c)
             beta = torch.einsum("jg,bg->bj", p.conj(), c)
-            return torch.einsum("ij,bj,ig->bg", dscr, beta, p)  # noqa: B023
+            return torch.einsum("ij,bj,ig->bg", dscr, beta, p)
 
         diff = vnl(p_q, d_u) - vnl(p_k, d_u)
         me = (u_u.conj() * diff).sum()
@@ -2380,7 +2379,7 @@ def _para_branch_cross(
     *,
     cg_tol: float = 1e-9,
     max_iter: int = 800,
-) -> tuple[list[_ParaBranch], np.ndarray, "USPPSystem"]:
+) -> tuple[list[_ParaBranch], np.ndarray, USPPSystem]:
     """Per-(axis, pol) raw ±q on-site cross densities for the magnetic response.
 
     For every sampled mesh axis the ±q generalized-velocity Sternheimer solves

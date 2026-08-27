@@ -16,7 +16,7 @@ import socket
 import subprocess
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +48,7 @@ def _git_sha() -> str | None:
         return subprocess.run(["git", "rev-parse", "--short", "HEAD"],
                               capture_output=True, text=True, timeout=3,
                               cwd=Path(__file__).resolve().parent).stdout.strip() or None
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 
@@ -56,7 +56,7 @@ def _provenance() -> dict[str, Any]:
     prov: dict[str, Any] = {
         "git_sha": _git_sha(),
         "host": socket.gethostname(),
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "timestamp_utc": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     try:
         from gradwave.io import runinfo
@@ -66,7 +66,7 @@ def _provenance() -> dict[str, Any]:
         gpu = runinfo.gpu_info()
         if gpu:
             prov["gpu"] = gpu
-    except Exception:  # noqa: BLE001 — provenance is best-effort, never fatal
+    except Exception:
         pass
     return prov
 
@@ -88,7 +88,7 @@ def run_case(case: BenchCase, method: dict[str, Any], *,
     signal for a model). ``run_dir`` (if given) persists the record immediately.
     """
     tag = "_".join(f"{k}{method[k]}" for k in sorted(method))
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
     run_id = f"{case.name}__{tag}__{stamp}"
 
     outcome: dict[str, Any] = {"converged": False, "error": None}
@@ -109,7 +109,7 @@ def run_case(case: BenchCase, method: dict[str, Any], *,
             "diagnosis": summary.get("diagnosis", []),
             "error": None,
         }
-    except Exception as exc:  # noqa: BLE001 — a blown-up solve is a recorded outcome
+    except Exception as exc:
         outcome = {"converged": False, "wall_s": round(time.perf_counter() - t0, 4),
                    "error": f"{type(exc).__name__}: {exc}"}
 

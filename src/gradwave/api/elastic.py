@@ -284,7 +284,9 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
         state: dict[str, Any] = {"prev": ref, "res": None}
 
         class _FixedCellCalc(Calculator):
-            implemented_properties = ["energy", "forces"]
+            # ASE API contract (see calculator.GradWave): base declares a plain
+            # class list, so RUF012's ClassVar fix is an invalid override per ty.
+            implemented_properties = ["energy", "forces"]  # noqa: RUF012
 
             # ASE's signature (atoms/properties/system_changes defaults) — the
             # base class drives this; only the SCF+forces body is ours.

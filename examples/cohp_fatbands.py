@@ -171,7 +171,7 @@ def irreps_at_specials(res, special_points, names, nbands):
             continue
         try:
             ki = band_irreps(res, special_points[name], nbands=nbands)
-        except Exception as exc:                               # noqa: BLE001
+        except Exception as exc:
             print(f"    irreps at {name} failed: {exc}")
             continue
         out[name] = [{"e": float(np.mean(c.energies)), "label": c.label,

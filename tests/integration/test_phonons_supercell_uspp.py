@@ -120,7 +120,7 @@ def test_run_phonons_uspp_end_to_end():
     ph = run_phonons(inp, verbose=False)
     freqs = np.array(ph["frequencies_cm1"])
     labels, x = ph["labels"], np.array(ph["x"])
-    gx = [xt for xt, lab in labels if lab in ("G", "Γ")][0]
+    gx = next(xt for xt, lab in labels if lab in ("G", "Γ"))
     at_g = np.sort(freqs[int(np.argmin(np.abs(x - gx)))])
     assert np.abs(at_g[:3]).max() < 10.0            # acoustic ≈ 0
     assert at_g[3:].std() < 8.0                     # threefold degenerate

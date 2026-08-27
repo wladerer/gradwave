@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "minerals"))  # structures.py
-import structures as S  # noqa: E402
+import structures as S
 
 RY = 13.605693122994
 
@@ -34,7 +34,7 @@ def _to_py(x):
         import torch
         if isinstance(x, torch.Tensor):
             return x.detach().cpu().item() if x.numel() == 1 else x.detach().cpu().tolist()
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     if isinstance(x, (np.floating, np.integer)):
         return float(x)
@@ -102,7 +102,7 @@ def main():
         out["autodiff"] = ad
         print("AUTODIFF  U_eV=%.4f  chi0=%.4f chi=%.4f  wall=%.1fs" %
               (float(ad["U_eV"]), float(ad["chi0"]), float(ad["chi"]), ad["wall_s"]))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         out["autodiff"] = {"error": repr(e), "trace": traceback.format_exc()[-2500:]}
         print("AUTODIFF FAILED:", repr(e))
 
@@ -117,7 +117,7 @@ def main():
             out["conventional"] = cv
             print("CONVENTIONAL  U_eV=%.4f  chi0=%.4f chi=%.4f  wall=%.1fs" %
                   (float(cv["U_eV"]), float(cv["chi0"]), float(cv["chi"]), cv["wall_s"]))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             out["conventional"] = {"error": repr(e), "trace": traceback.format_exc()[-2500:]}
             print("CONVENTIONAL FAILED:", repr(e))
 

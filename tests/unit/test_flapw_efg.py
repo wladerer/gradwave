@@ -196,7 +196,7 @@ def test_gaunt_multipoles_density_is_hermitian():
     from gradwave.flapw.efg import sphere_density_multipoles_bands
     rng = np.random.default_rng(1)
     lmax, nb, nr = 3, 10, 16
-    lset = [(bl, m) for bl in range(0, 5) for m in range(-bl, bl + 1)]
+    lset = [(bl, m) for bl in range(5) for m in range(-bl, bl + 1)]
     amps_all, occ, us, rr = _random_bands_inputs(rng, lmax, nb, nr, n_rad=2)
     rho = sphere_density_multipoles_bands(amps_all, occ, us, rr, lmax, lset)
     scale = max(max(float(np.abs(v).max()) for v in rho.values()), 1e-30)

@@ -370,8 +370,7 @@ def _eeq_amat_periodic(
     a_bg = -math.pi / (kappa * kappa * omega)
 
     a = a_real + a_recip + a_bg
-    a = a + torch.diag_embed(T["eta"])  # atomic hardness on the diagonal
-    return a
+    return a + torch.diag_embed(T["eta"])  # atomic hardness on the diagonal
 
 
 def _eeq_solve(

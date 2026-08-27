@@ -51,7 +51,7 @@ def nonspherical_potential(rho_sph, rho_2m, rr, drw, lset=None, nx: int = 16, np
         lset = [(2, m) for m in range(-2, 3)]
     th, ph, wgt = _angular_grid(nx, nphi)
     ylm = {(lang, m): sph_harm_y(lang, m, th, ph) for (lang, m) in lset}
-    rho_ang = np.broadcast_to(np.asarray(rho_sph)[:, None, None], (len(rr),) + th.shape).copy()
+    rho_ang = np.broadcast_to(np.asarray(rho_sph)[:, None, None], (len(rr), *th.shape)).copy()
     for lm in lset:
         rho_ang += (rho_2m[lm][:, None, None] * ylm[lm][None]).real
     vxc_ang = vxc_lda(torch.tensor(np.clip(rho_ang, 1e-10, None))).numpy()
@@ -169,11 +169,11 @@ def sphere_density_multipoles_multi(amps, us, rr, lmax, lset, nx: int | None = N
     ylm = {(l, m): sph_harm_y(l, m, th, ph)
            for l in range(lmax + 1) for m in range(-l, l + 1)}
     nr = len(us[0][0])
-    rho_ang = np.zeros((nr,) + th.shape)
+    rho_ang = np.zeros((nr, *th.shape))
     for f, coeffs in amps:
         if f == 0:
             continue
-        psi = np.zeros((nr,) + th.shape, dtype=complex)
+        psi = np.zeros((nr, *th.shape), dtype=complex)
         for l in range(lmax + 1):
             for rad, vec in zip(us[l], coeffs[l], strict=True):
                 s = sum(vec[m + l] * ylm[(l, m)] for m in range(-l, l + 1))
@@ -267,7 +267,7 @@ def _sphere_density_multipoles_bands_grid(amps_all, occ, us, rr, lmax, lset, nx:
     occ_arr = np.asarray(occ, dtype=float)
     nb = len(occ_arr)
     nr = len(us[0][0])
-    psi = np.zeros((nb, nr) + th.shape, dtype=complex)
+    psi = np.zeros((nb, nr, *th.shape), dtype=complex)
     for l in range(lmax + 1):
         yst = np.stack([sph_harm_y(l, m, th, ph) for m in range(-l, l + 1)], axis=0)
         for rad, amp in zip(us[l], amps_all[l], strict=True):

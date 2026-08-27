@@ -31,7 +31,7 @@ import argparse
 import json
 import platform
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -292,7 +292,7 @@ def run_system(name, spec, solvers, device="cpu", mixed=False):
             print(f"      iters={res.n_iter} conv={res.converged} "
                   f"wall={wall:.1f}s eigh%={entry['eigh_share']} "
                   f"E={E:.9f}{flag}", flush=True)
-        except Exception as exc:  # noqa: BLE001 - record and continue the battery
+        except Exception as exc:
             entry = dict(error=f"{type(exc).__name__}: {exc}")
             print(f"      ERROR: {entry['error']}", flush=True)
         rec["solvers"][solver] = entry
@@ -398,7 +398,7 @@ def run_system_mp(name, spec, solvers, device="cpu"):
                       f"conv={r['converged']} wall={r['wall_s']:.1f}s "
                       f"|Δρ|={_fmt(r['final_res'], '{:.1e}')} "
                       f"E={r['energy_eV']:.9f}", flush=True)
-            except Exception as exc:  # noqa: BLE001 - record and continue
+            except Exception as exc:
                 # OOM is expected on a 6 GB GPU for the larger k-meshes (fp64
                 # doubles memory). Record "OOM" and free the cache so the next
                 # system starts from a clean allocator instead of cascading.
@@ -565,7 +565,7 @@ def run_warm_start(names, meta, device="cpu", mixed=False, solver="davidson"):
                   f"warm iters={rec['warm']['scf_iters']} wall={ww:.1f}s | "
                   f"saved={rec['iters_saved']} speedup={rec['speedup']}x | "
                   f"ΔE(warm−cold)={de:.2e} eV", flush=True)
-        except Exception as exc:  # noqa: BLE001 - record and continue
+        except Exception as exc:
             rec = dict(system=name, error=f"{type(exc).__name__}: {exc}")
             print(f"      ERROR: {rec['error']}", flush=True)
         rec["meta"] = meta
@@ -732,7 +732,7 @@ def main():
                        else [n for n in WARM_SYSTEMS if n in names]))
         out_dir = RESULTS / "matrix" / f"{platform.node()}_{device}_{mp_tag}"
         meta = dict(
-            timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            timestamp=datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
             host=platform.node(), torch=torch.__version__, device=device,
             gpu=(torch.cuda.get_device_name(0) if device == "cuda" else None),
             threads=torch.get_num_threads(), solvers=solvers, systems=names,
@@ -749,7 +749,7 @@ def main():
     if args.mixed_precision:
         solvers = _mp_solvers(args.solvers)
         meta = dict(
-            timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            timestamp=datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
             host=platform.node(), torch=torch.__version__, device=device,
             gpu=(torch.cuda.get_device_name(0) if device == "cuda" else None),
             threads=torch.get_num_threads(), solvers=solvers, systems=names,
@@ -768,7 +768,7 @@ def main():
 
     RESULTS.mkdir(parents=True, exist_ok=True)
     meta = dict(
-        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        timestamp=datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
         host=platform.node(), torch=torch.__version__, device=device,
         gpu=(torch.cuda.get_device_name(0) if device == "cuda" else None),
         threads=torch.get_num_threads(), solvers=solvers, systems=names,

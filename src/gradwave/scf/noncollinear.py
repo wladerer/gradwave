@@ -29,8 +29,9 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, TypedDict
+from typing import TypedDict
 
 import numpy as np
 import torch

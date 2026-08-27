@@ -40,10 +40,10 @@ __all__ = [
     "SoftModeEstimate",
     "SoftSubspace",
     "SolveResult",
-    "arnoldi_factorization",
-    "soft_subspace_from_operator",
     "anderson_solve",
+    "arnoldi_factorization",
     "deflated_solve",
+    "soft_subspace_from_operator",
 ]
 
 # A response field is whatever the concrete operator acts on: a real grid tensor

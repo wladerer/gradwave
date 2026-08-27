@@ -13,8 +13,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-from structures import EOS_SCALES as SCALES  # noqa: E402,F401
-from structures import RY, a_from_v0, fcc_geometry  # noqa: E402,F401
+from structures import EOS_SCALES as SCALES  # noqa: F401
+from structures import RY, a_from_v0, fcc_geometry
 
 # WIEN2k v13.1: V0 (A^3/atom), B0 (GPa), B1. Cubic members only — the
 # reference C is graphite (V0 11.64 A^3/atom is the PBE interlayer, not

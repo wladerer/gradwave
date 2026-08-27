@@ -232,7 +232,7 @@ def _mulliken(chis: list[complex | np.complex128], ops: list[_Op], dim: int) -> 
         elif dim == 1:
             base = "A" if (chi_cn is None or chi_cn > 0) else "B"
             disc = chi_c2p if chi_c2p is not None else chi_sv
-            if disc is not None and n > 2 or disc is not None and n == 2:
+            if (disc is not None and n > 2) or (disc is not None and n == 2):
                 base += "1" if disc > 0 else "2"
         elif dim == 2:
             base = "E"

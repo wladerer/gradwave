@@ -235,7 +235,7 @@ if __name__ == "__main__":
         m = build(key)
         dset = spglib.get_symmetry_dataset(
             (m.cell, m.positions @ np.linalg.inv(m.cell),
-             [s for s in m.species]))
+             list(m.species)))
         sg = dset.international if hasattr(dset, "international") else dset["international"]
         nmag = int(sum(1 for r in m.magmoms if np.linalg.norm(r) > 0))
         net = float(np.sum([r[2] for r in m.magmoms]))

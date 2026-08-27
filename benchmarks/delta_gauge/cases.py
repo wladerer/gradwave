@@ -20,8 +20,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from lattices import geometry as _geom  # noqa: E402
-from lattices import natoms as _natoms  # noqa: E402
+from lattices import geometry as _geom
+from lattices import natoms as _natoms
 
 RY = 13.605693122994
 

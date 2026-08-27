@@ -42,8 +42,8 @@ timings = {}
 
 def spinor_parity(system, coeffs_gamma, band):
     """<psi|P|psi> for a spinor state at Gamma (inversion about the origin)."""
-    ig = [i for i, sp in enumerate(system.spheres)
-          if np.abs(sp.k_frac).max() < 1e-9][0]
+    ig = next(i for i, sp in enumerate(system.spheres)
+          if np.abs(sp.k_frac).max() < 1e-9)
     sph = system.spheres[ig]
     miller = sph.miller.cpu().numpy()
     index = {tuple(m): i for i, m in enumerate(miller)}
@@ -120,8 +120,8 @@ timings["FR iters"] = r_fr.n_iter
 print(f"  conv={r_fr.converged} iters={r_fr.n_iter}", flush=True)
 
 t0 = time.time()
-ig = [i for i, sp in enumerate(sys_fr.spheres)
-      if np.abs(sp.k_frac).max() < 1e-9][0]
+ig = next(i for i, sp in enumerate(sys_fr.spheres)
+      if np.abs(sp.k_frac).max() < 1e-9)
 eg = r_fr.eigenvalues[ig].cpu().numpy()
 print(f"  Gamma gap-edge states (occupied spinor states: {ne}):")
 for band in range(ne - 4, ne + 4):

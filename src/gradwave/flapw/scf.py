@@ -1457,7 +1457,7 @@ def _accumulate_density(ctx: _MultiCtx, st: _MultiState, kdata, occ_by_k, El_by_
         lset_pot = [(lg, m) for lg in range(1, fullpot_lmax + 1) for m in range(-lg, lg + 1)]
         if (2, 0) not in lset_pot:                      # the EFG observable always needs l=2
             lset_pot += [(2, m) for m in range(-2, 3)]
-        lset2 = [(0, 0)] + lset_pot
+        lset2 = [(0, 0), *lset_pot]
         rho_2m = {k: {lm: np.zeros(rr_by_key[k].shape, dtype=complex) for lm in lset2}
                   for k in keys}
     lo_off = {}                                         # each atom's LO-row offset past npw

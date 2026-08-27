@@ -21,7 +21,7 @@ RY = 13.605693122994
 
 
 def _tiny_system():
-    from tests.helpers import pseudo  # noqa: PLC0415
+    from tests.helpers import pseudo
     cell = np.eye(3) * 5.0
     pos = np.array([[0.0, 0.0, 0.0]])
     upf = parse_upf(pseudo("Si_ONCV_PBE-1.2.upf"))
@@ -61,7 +61,7 @@ def test_symmetry_reduced_ldos_is_space_group_symmetric():
     """A symmetry-reduced SCF sums over the IBZ; ldos_grid symmetrizes the map over
     the space group, so the result is invariant under the group (re-symmetrizing is
     a no-op) — this is what makes an IBZ STM match a full-BZ one."""
-    from tests.helpers import pseudo  # noqa: PLC0415
+    from tests.helpers import pseudo
     cell = 5.43 / 2 * np.array([[0, 1, 1], [1, 0, 1], [1, 1, 0]])  # fcc Si primitive
     pos = np.array([[0.0, 0, 0], [0.25, 0.25, 0.25]]) @ cell
     upf = parse_upf(pseudo("Si_ONCV_PBE-1.2.upf"))

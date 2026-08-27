@@ -803,7 +803,7 @@ def hessian_column(res: USPPResult, xc: XCFunctional | SpinXC, a: int, alpha: in
     # per-spin-per-atom ddd — re-nested per spin after the backward
     c_flat = [c for ch in c_leaves_s for c in ch]
     ddd_flat = [d for ch in ddd_leaves_s for d in ch]
-    leaves = [pos] + rho_s_leaves + eps_leaves + c_flat + ddd_flat
+    leaves = [pos, *rho_s_leaves, *eps_leaves, *c_flat, *ddd_flat]
     grads = torch.autograd.grad(e, leaves, create_graph=True)
     g_pos = grads[0]
     off = 1

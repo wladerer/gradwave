@@ -84,7 +84,7 @@ class HessianSymmetry:
                          else np.zeros((0, 3)))
                 if np.linalg.matrix_rank(stack, tol=_RANK_TOL) == 3:
                     break
-                new = self._spread(disp + [(a, alpha)])[a]
+                new = self._spread([*disp, (a, alpha)])[a]
                 if (np.linalg.matrix_rank(np.array(new).reshape(-1, 3),
                                           tol=_RANK_TOL)
                         > np.linalg.matrix_rank(stack, tol=_RANK_TOL)):

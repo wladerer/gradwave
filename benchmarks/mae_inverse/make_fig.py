@@ -6,8 +6,8 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt
+import numpy as np
 
 SP = Path(__file__).parent
 BLUE, AQUA, GRAY = "#2a78d6", "#1baf7a", "#52514e"

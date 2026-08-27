@@ -182,7 +182,7 @@ def main() -> int:
     print("-" * 78)
     for r in results:
         d_scf = 100.0 * (r["scf_total"] - base["scf_total"]) / base["scf_total"]
-        print(f"{r['name']:<12} {str(r['converged']):<5} {r['n_steps']:>5} "
+        print(f"{r['name']:<12} {r['converged']!s:<5} {r['n_steps']:>5} "
               f"{r['scf_total']:>8} {r['final_resolve']:>8} {r['energy']:>14.6f} "
               f"{r['fmax']:>8.4f} {r['wall']:>8.1f} {d_scf:>+7.1f}")
     print("-" * 78)

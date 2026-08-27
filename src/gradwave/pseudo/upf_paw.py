@@ -117,10 +117,7 @@ def parse_upf_paw(path: str | Path) -> PAWData:
     if int(a.get("nqf", "0")) != 0:
         raise ValueError(f"{path}: polynomial augmentation refit (nqf>0) not supported")
     # bare USPP files carry nqlc = l_max_aug + 1 instead of l_max_aug
-    if "l_max_aug" in a:
-        l_max_aug = int(float(a["l_max_aug"]))
-    else:
-        l_max_aug = int(a["nqlc"]) - 1
+    l_max_aug = int(float(a["l_max_aug"])) if "l_max_aug" in a else int(a["nqlc"]) - 1
     cutoff_idx = int(a.get("cutoff_r_index", len(r)))
     q = _parse_floats(_find_text(aug, "PP_Q")).reshape(nproj, nproj)
     qijl: dict[tuple[int, int, int], np.ndarray] = {}

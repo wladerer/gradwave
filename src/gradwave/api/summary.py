@@ -496,10 +496,9 @@ def _pdos_summary_block(res: SCFLike, inp: Input) -> dict[str, Any]:
         # NotImplementedError for anything else (NCResult/USPPNCResult) via
         # its own _unpack_result — caught below, so the wider SCFLike here
         # is a safe runtime seam, not a real type mismatch.
-        block = projected_dos(cast("SCFResult | USPPResult", res),
+        return projected_dos(cast("SCFResult | USPPResult", res),
                               group_by=p.group_by, width=p.width,
                               npoints=p.npoints).to_dict()
-        return block
     except (ValueError, NotImplementedError) as err:
         return {"available": False, "reason": str(err)}
 

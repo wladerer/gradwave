@@ -3,8 +3,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-from structures import EOS_SCALES as SCALES  # noqa: E402,F401
-from structures import RY, fcc_geometry, scaled_a  # noqa: E402,F401
+from structures import EOS_SCALES as SCALES  # noqa: F401
+from structures import RY, fcc_geometry, scaled_a  # noqa: F401
 
 CASES = {
     "si":   dict(a=5.43,  elems=["Si", "Si"], frac=[[0, 0, 0], [0.25] * 3],

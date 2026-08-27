@@ -13,8 +13,8 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt
+import numpy as np
 
 SP = Path(__file__).parent
 Z = {"Li": 3, "Na": 11, "K": 19, "Ca": 20, "Sr": 38, "Al": 13, "Si": 14,

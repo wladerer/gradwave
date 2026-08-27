@@ -99,8 +99,8 @@ def _fft_grid(system: System | USPPSystem) -> FFTGrid:
 
 @jaxtyped(typechecker=beartype)
 def _resample_fft_axis(
-    box: Complex[torch.Tensor, "..."], axis: int, n_old: int, n_new: int
-) -> Complex[torch.Tensor, "..."]:
+    box: Complex[torch.Tensor, ...], axis: int, n_old: int, n_new: int
+) -> Complex[torch.Tensor, ...]:
     """Move an FFT-box axis from n_old to n_new points, matching by integer
     Miller index. Both boxes use numpy/torch FFT ordering (fftfreq): the
     coefficient with Miller index m lives at array position m mod n. Copy every
@@ -250,7 +250,10 @@ def _extrapolation_coeffs(
 
 
 class GradWave(Calculator):
-    implemented_properties = ["energy", "free_energy", "forces", "stress",
+    # ASE API contract: the base Calculator declares implemented_properties as a
+    # plain class-level list, so RUF012's ClassVar annotation is an invalid
+    # attribute override against the (untyped) base per ty. Keep the bare list.
+    implemented_properties = ["energy", "free_energy", "forces", "stress",  # noqa: RUF012
                               "magmom"]
     # ase.calculators.calculator.Calculator declares these as `None` at
     # __init__ time (its BaseCalculator sets `self.atoms = None` before

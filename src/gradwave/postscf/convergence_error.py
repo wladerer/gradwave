@@ -436,8 +436,7 @@ def _extrapolate_fit(pts: list[float], en: list[float], p: float) -> float:
     det = m * saa - sa * sa
     if abs(det) < 1e-300:
         return en[-1]
-    e_inf = (saa * se - sa * sae) / det
-    return e_inf
+    return (saa * se - sa * sae) / det
 
 
 def _fit_exponent(pts: list[float], en: list[float]) -> float:

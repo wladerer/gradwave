@@ -151,7 +151,7 @@ def _flapw_parameters_lines(par):
     if "flapw_ecut" in par:  # all-electron FLAPW branch
         pairs.append(("FLAPW ecut", f"{par['flapw_ecut']:.1f}"))
         pairs.append(("lmax", str(par.get("lmax"))))
-        pairs.append(("fullpot", "on (L≤%d)" % par["fullpot_lmax"]
+        pairs.append(("fullpot", f"on (L≤{par['fullpot_lmax']})"
                       if par.get("fullpot") else "off (muffin-tin)"))
         pairs.append(("smearing", f"{par.get('smearing_eV', 0.0)} eV"
                       if par.get("smearing_eV") else "0 (insulator fill)"))
@@ -722,7 +722,7 @@ def _nmr_lines(nmr):
                      f"{'Δσ [ppm]':>10s} {'η':>6s}")
         for s in nmr.get("sites", []):
             lines.append(
-                f"   {s['site']:>4d} {str(s.get('species') or ''):>4s} "
+                f"   {s['site']:>4d} {s.get('species') or ''!s:>4s} "
                 f"{s['sigma_iso_ppm']:>13.3f} {s['sigma_aniso_ppm']:>10.3f} "
                 f"{s['sigma_eta']:>6.3f}")
         lines.append("")

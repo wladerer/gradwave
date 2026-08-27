@@ -44,9 +44,10 @@ the same integer with the same sign.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterator, Protocol, Sequence
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 import torch

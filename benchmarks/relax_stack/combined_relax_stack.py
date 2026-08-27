@@ -143,7 +143,7 @@ def main() -> int:
                      tmp=tmp, tag=f"{name}_naive_cpu")
             rows.insert(0, ("naive (CPU)", rc))
         for lab, r in rows:
-            print(f"  {lab:18s} steps {str(r['steps']):>3}  scf_iter {str(r['scf_iter']):>4}  "
+            print(f"  {lab:18s} steps {r['steps']!s:>3}  scf_iter {r['scf_iter']!s:>4}  "
                   f"wall {r['wall']:8.1f}s  E={r['E']:.6f} eV  conv={r['conv']}")
         print(f"  -> everything vs naive (GPU, algorithmic): {rn['wall'] / re['wall']:.2f}x "
               f"| steps {rn['steps']}->{re['steps']} | scf_iter {rn['scf_iter']}->{re['scf_iter']} "

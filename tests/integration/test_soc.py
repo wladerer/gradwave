@@ -49,8 +49,8 @@ def test_gaas_so_splitting_vs_qe():
     f = float(res.energies.free_energy)
     assert abs(f - ref["etot_eV"]) / 2 * 1000 < 0.1  # meV/atom
 
-    ig = [i for i, sp in enumerate(system.spheres)
-          if np.abs(sp.k_frac).max() < 1e-9][0]
+    ig = next(i for i, sp in enumerate(system.spheres)
+          if np.abs(sp.k_frac).max() < 1e-9)
     eg = np.sort(res.eigenvalues[ig].cpu().numpy())
     gamma8 = eg[14:18]  # 4-fold valence top
     gamma7 = eg[12:14]  # 2-fold split-off

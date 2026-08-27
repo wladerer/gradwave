@@ -51,7 +51,7 @@ _RATTLED_XYZ = [
 _RATTLED_E = -0.0037772102634709686  # pbe0
 
 # water–peptide dimer (same geometry as the D3 external-reference test)
-_DIMER_SYMBOLS = "O H H C H H H C O N H C H H H".split()
+_DIMER_SYMBOLS = ["O", "H", "H", "C", "H", "H", "H", "C", "O", "N", "H", "C", "H", "H", "H"]
 _DIMER_XYZ = [
     [-3.2939688, 0.4402024, 0.1621802], [-3.8134112, 1.2387332, 0.2637577],
     [-2.3770466, 0.7564365, 0.1766203], [-0.6611637, -1.4159110, -0.1449409],

@@ -113,7 +113,7 @@ def main() -> None:
     for fn in FUNCTIONALS:
         try:
             p = d4.get_params(method="d4", functional=fn)
-        except Exception:  # noqa: BLE001
+        except Exception:
             continue
         bj[fn] = (1.0, float(p["s8"]), float(p["a1"]), float(p["a2"]))
 

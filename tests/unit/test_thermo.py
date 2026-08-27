@@ -7,6 +7,8 @@ own flat-DOS closed form. No SCF runs here, so the whole file is a fast unit
 test.
 """
 
+import itertools
+
 import numpy as np
 import pytest
 
@@ -59,7 +61,7 @@ def test_entropy_nonnegative_and_monotonic():
     temps = [50.0, 100.0, 200.0, 400.0, 800.0]
     s = [thermo.entropy(grid, g, T) for T in temps]
     assert all(v >= 0.0 for v in s)
-    assert all(b > a for a, b in zip(s, s[1:], strict=False))
+    assert all(b > a for a, b in itertools.pairwise(s))
     assert thermo.entropy(grid, g, T=0.0) == 0.0
 
 

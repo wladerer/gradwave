@@ -54,7 +54,7 @@ def test_entropy_shapes():
         assert s.argmax() == 50
     # mp1: negative beyond |x| = 1/√2 by construction
     s_mp = SCHEMES["mp1"].entropy(x)
-    assert s_mp[50] > 0 and s_mp[0] <= 0 or abs(s_mp[0]) < 1e-12
+    assert (s_mp[50] > 0 and s_mp[0] <= 0) or abs(s_mp[0]) < 1e-12
     assert float(SCHEMES["mp1"].entropy(torch.tensor([1.0], dtype=torch.float64))) < 0
     # cold: odd-like around u = 0 (x = −1/√2), vanishing at that point
     assert abs(float(SCHEMES["cold"].entropy(

@@ -148,11 +148,9 @@ def map_spokes(
         fut_to_idx = {
             executor.submit(worker, s): i for i, s in enumerate(spoke_list)
         }
-        done = 0
-        for fut in cf.as_completed(fut_to_idx):
+        for done, fut in enumerate(cf.as_completed(fut_to_idx), start=1):
             idx = fut_to_idx[fut]
             results[idx] = fut.result()
-            done += 1
             if verbose:
                 print(
                     f"  seedpool: {done}/{len(spoke_list)} spokes done",

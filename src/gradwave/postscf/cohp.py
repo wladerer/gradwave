@@ -396,8 +396,7 @@ def _select_pairs(system: System | USPPSystem, pairs: list[tuple[int, int]] | No
     else:
         chosen = {(i, j) for i in range(na) for j in range(i + 1, na)
                   if _min_image_dist(system, i, j) <= rcut}
-    out = [(i, j, _min_image_dist(system, i, j)) for i, j in sorted(chosen)]
-    return out
+    return [(i, j, _min_image_dist(system, i, j)) for i, j in sorted(chosen)]
 
 
 def _iao_projectors_k(phi: torch.Tensor, psi_occ: torch.Tensor, floor: float=1e-8) -> torch.Tensor:
