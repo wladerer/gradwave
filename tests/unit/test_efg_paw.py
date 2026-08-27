@@ -258,3 +258,18 @@ def test_tensor_observables_axial_eta_zero():
     v_zz, eta = _tensor_observables(v)
     assert abs(v_zz - 2.0) < 1e-12
     assert eta < 1e-12
+
+
+# ---------------------------------------------------------------------------
+# non-PAW dataset guard (measured: experiments/autoapw/efg_eta_anion.md Front A)
+# ---------------------------------------------------------------------------
+def test_efg_onsite_rejects_non_paw_dataset():
+    """A bare ultrasoft/GBRV dataset (is_paw=False, no AE partial waves) carries no on-site l=2
+    density: EFGOnSite.from_paw must raise a clear ValueError, not a deep IndexError."""
+    from types import SimpleNamespace
+
+    import pytest
+
+    stub = SimpleNamespace(element="O", is_paw=False, aewfc=())
+    with pytest.raises(ValueError, match="needs a PAW dataset"):
+        EFGOnSite.from_paw(stub)  # type: ignore[arg-type]
