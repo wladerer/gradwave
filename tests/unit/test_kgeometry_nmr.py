@@ -10,8 +10,6 @@ conj(P(−q)); at q = 0 the tensor is Hermitian and the machinery reduces to
 the M5 velocity solves.
 """
 
-import warnings
-
 import numpy as np
 import pytest
 import torch
@@ -1068,43 +1066,38 @@ def test_sigma_shielding_gipaw_si_absolute():
     assert 360.0 < total_iso[0] < 440.0  # ≈ 398 ppm vs the ≈400 ppm target
 
 
-def test_uspp_shielding_conditioning_guard_logic():
-    """The analytic-USPP bare-shielding ecut-instability guard fires only for an
-    ill-conditioned augmentation overlap, and never on the NC / NC-gate routes.
+def test_smetric_resolvent_cg_reduces_to_dense_conduction_resolvent():
+    """The matrix-free S-metric CG resolvent (:class:`_SMetricResolventCG`, the
+    ecut-stable replacement for the dense-eigh ``_resolvent_apply_s``) reproduces
+    the plain dense conduction resolvent when S = I — the linear-algebra core of
+    the ShieldingDq CG reroute (PR #399 fix), with no SCF.
 
-    Root cause (experiments/autoapw/analytic_uspp_ecut_divergence.md): the
-    dense-eigh S-metric bare shielding diverges with ecut for hard-augmentation
-    anions because the augmentation overlap S(k) becomes overcomplete (cond(S)
-    426→3245 on MgO ¹⁷O 40→60 Ry, tracking the bare σ blow-up −1912→−3758 ppm),
-    while soft PAW (Si, cond(S)≈2) and the matrix-free CG response stay stable.
-    The guard warns above cond(S) = 50 — this test pins the branch logic without
-    an SCF by patching the conditioning probe."""
-    from unittest.mock import patch
-
+    A synthetic gapped Hermitian H (occupied ≪ conduction) stands in for H(k);
+    the CG solve of (H − ε_j) δu = −P_c z on the conduction subspace must match
+    ``_resolvent_apply(uc, wc, ε_o, z)`` = Σ_{m∈cond} u_m⟨u_m|z⟩/(ε_o−ε_m) to CG
+    tolerance for every occupied reference column. cond(S) never enters (S = I),
+    so this pins the reduction the NC-limit gate exercises end to end."""
+    from gradwave.dtypes import CDTYPE, RDTYPE
     from gradwave.postscf.kgeometry_nmr import (
-        USPPResponseCtx,
-        USPPShieldingConditioningWarning,
-        _warn_if_ill_conditioned_uspp,
+        _resolvent_apply,
+        _SMetricResolventCG,
     )
 
-    # NC route (None) and NC-limit gate ("nc-gate", S = I) never touch the probe.
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        _warn_if_ill_conditioned_uspp(None)
-        _warn_if_ill_conditioned_uspp("nc-gate")
+    torch.manual_seed(0)
+    npw, nocc = 24, 4
+    q, _ = torch.linalg.qr(torch.randn(npw, npw, dtype=CDTYPE))  # unitary basis
+    w_occ = torch.linspace(-5.0, -1.0, nocc, dtype=RDTYPE)
+    w_con = torch.linspace(3.0, 12.0, npw - nocc, dtype=RDTYPE)  # clear gap
+    w = torch.cat([w_occ, w_con])
+    h0 = (q * w.to(CDTYPE)) @ q.mH
+    h0 = 0.5 * (h0 + h0.mH)
+    s0 = torch.eye(npw, dtype=CDTYPE)  # S = I
+    uo, uc = q[:, :nocc], q[:, nocc:]
+    wo, wc = w[:nocc], w[nocc:]
+    t_kin = torch.ones(npw, dtype=RDTYPE)  # preconditioner only
 
-    # A real ctx (bypass __init__ — the probe is patched, ctx internals unused).
-    fake_ctx = object.__new__(USPPResponseCtx)
-    with (
-        patch("gradwave.postscf.kgeometry_nmr.uspp_overlap_conditioning",
-              return_value={"max": 2.0, "min": 1.9, "mean": 2.0}),
-        warnings.catch_warnings(),
-    ):
-        warnings.simplefilter("error")
-        _warn_if_ill_conditioned_uspp(fake_ctx)  # soft: no warning
-    with (
-        patch("gradwave.postscf.kgeometry_nmr.uspp_overlap_conditioning",
-              return_value={"max": 3245.0, "min": 1.0, "mean": 800.0}),
-        pytest.warns(USPPShieldingConditioningWarning, match="cond"),
-    ):
-        _warn_if_ill_conditioned_uspp(fake_ctx)  # hard: warns
+    z = torch.randn(npw, nocc, dtype=CDTYPE)
+    ref = _resolvent_apply(uc, wc, wo, z)
+    cg = _SMetricResolventCG(h0, s0, uo, wo, t_kin, tol=1e-12, max_iter=400)
+    got = cg.apply(z)
+    assert torch.allclose(got, ref, atol=1e-8, rtol=0.0)

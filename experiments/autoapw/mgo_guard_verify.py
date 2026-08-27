@@ -1,8 +1,14 @@
-"""End-to-end verify: the conditioning guard fires on a real MgO PAW context."""
+"""Report cond(S(k)) on a real MgO PAW context.
+
+Historically (PR #399) this verified that the ecut-instability *guard* fired on
+the ill-conditioned MgO overlap. The guard is gone: :class:`ShieldingDq` now
+solves the ∂/∂q resolvents matrix-free by the S-metric CG Sternheimer, which is
+ecut-stable regardless of cond(S), so cond(S) is no longer a divergence
+predictor — only a basis-health diagnostic. This script now just prints it.
+"""
 from __future__ import annotations
 
 import sys
-import warnings
 
 import numpy as np
 import torch
@@ -29,12 +35,4 @@ ctx = kg.build_uspp_response_ctx(res, PBE())
 
 cond = kg.uspp_overlap_conditioning(ctx)
 print(f"cond(S) over mesh: {cond}", flush=True)
-
-with warnings.catch_warnings(record=True) as w:
-    warnings.simplefilter("always")
-    kg._warn_if_ill_conditioned_uspp(ctx)
-fired = [x for x in w if issubclass(x.category, kg.USPPShieldingConditioningWarning)]
-print(f"guard fired: {len(fired) == 1}", flush=True)
-if fired:
-    print(f"message: {fired[0].message}", flush=True)
 print("VERIFY_DONE", flush=True)
