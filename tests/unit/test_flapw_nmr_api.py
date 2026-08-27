@@ -253,8 +253,129 @@ def test_api_run_shielding_dispatch(tmp_path, monkeypatch):
         nmr=NmrParams(task="shielding"), output_dir=tmp_path, verbose=False)
     nmr = api.run(inp, verbose=False)["nmr"]
     assert nmr["observable"] == "shielding"
+    assert nmr["method"] == "bare_analytic_dq"
+    assert nmr["shielding_level"] == "bare"
     assert nmr["n_sites"] == 2
     s = nmr["sites"][0]
     assert s["sigma_iso_ppm"] == pytest.approx((100 + 100 + 130) / 3)
     assert s["sigma_aniso_ppm"] == pytest.approx(130 - 100)  # σ_zz − (σxx+σyy)/2
+    assert "delta_iso_ppm" not in s  # no reference given → no shift emitted
     assert (tmp_path / "nmr.out").exists()
+
+
+def _fake_bare_scf(monkeypatch):
+    """Fake an NC SCFResult + a two-site axial bare shielding tensor."""
+    import torch
+
+    from gradwave.scf.loop import SCFResult
+
+    def _fake_run_scf(inp, verbose=True, **kw):
+        return object.__new__(SCFResult)
+
+    def _fake_sigma(res, **kw):
+        t = torch.zeros(2, 3, 3, dtype=torch.float64)
+        for i in range(2):
+            t[i] = torch.diag(torch.tensor([100.0, 100.0, 130.0], dtype=torch.float64))
+        return t
+
+    monkeypatch.setattr("gradwave.api.scf.run_scf", _fake_run_scf)
+    monkeypatch.setattr(
+        "gradwave.postscf.kgeometry_nmr.sigma_shielding_dq", _fake_sigma)
+
+
+def test_shielding_reference_shift(tmp_path, monkeypatch):
+    """nmr.sigma_ref keyed by species emits δ_iso = σ_ref − σ_iso per matching
+    site (and only for matching sites)."""
+    _fake_bare_scf(monkeypatch)
+    atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.75]], cell=np.eye(3) * 5.0,
+                  pbc=True)
+    inp = Input(
+        atoms=atoms, pseudo_dir=Path("."), pseudo_map={"H": "H.upf"}, ecut=400.0,
+        task="nmr", kpoints=KPointsParams(mesh=(2, 2, 2)),
+        nmr=NmrParams(task="shielding", sigma_ref={"H": 30.0}),
+        output_dir=tmp_path, verbose=False)
+    nmr = api.run(inp, verbose=False)["nmr"]
+    iso = (100 + 100 + 130) / 3
+    assert nmr["sigma_ref_ppm"] == {"H": 30.0}
+    for s in nmr["sites"]:
+        assert s["delta_iso_ppm"] == pytest.approx(30.0 - iso)
+
+
+def test_reference_sigma_iso_helper(tmp_path, monkeypatch):
+    """reference_sigma_iso runs the shielding task and averages σ_iso over the
+    named species' sites."""
+    _fake_bare_scf(monkeypatch)
+    atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.75]], cell=np.eye(3) * 5.0,
+                  pbc=True)
+    inp = Input(
+        atoms=atoms, pseudo_dir=Path("."), pseudo_map={"H": "H.upf"}, ecut=400.0,
+        task="nmr", kpoints=KPointsParams(mesh=(2, 2, 2)),
+        nmr=NmrParams(task="shielding"), output_dir=tmp_path, verbose=False)
+    assert api.reference_sigma_iso(inp, "H") == pytest.approx((100 + 100 + 130) / 3)
+    with pytest.raises(ValueError, match="no 'Li' site"):
+        api.reference_sigma_iso(inp, "Li")
+
+
+def test_shielding_gipaw_dispatch_and_breakdown(tmp_path, monkeypatch):
+    """A PAW ground state auto-selects the absolute GIPAW assembly; the per-term
+    breakdown (bare/core/dia_aug/para_aug) and total-tensor CSA are reported, and
+    the shift references off the total σ_iso."""
+    import torch
+
+    from gradwave.scf.results import USPPResult
+
+    def _fake_run_scf(inp, verbose=True, **kw):
+        return object.__new__(USPPResult)
+
+    def _fake_gipaw(res, ctx, paws, **kw):
+        eye = torch.eye(3, dtype=torch.float64)
+        bare = 40.0 * eye.expand(1, 3, 3).clone()
+        core = 100.0 * eye.expand(1, 3, 3).clone()
+        dia = 10.0 * eye.expand(1, 3, 3).clone()
+        para = torch.diag(torch.tensor([5.0, 5.0, 35.0], dtype=torch.float64))[None]
+        return {"total": bare + core + dia + para, "bare": bare, "core": core,
+                "dia_aug": dia, "para_aug": para}
+
+    monkeypatch.setattr("gradwave.api.scf.run_scf", _fake_run_scf)
+    monkeypatch.setattr("gradwave.api.system._species_upfs",
+                        lambda inp: (["Si"], [object()], [0]))
+    monkeypatch.setattr("gradwave.api.system._as_paws", lambda upfs: list(upfs))
+    monkeypatch.setattr("gradwave.api._common.build_xc", lambda inp: None)
+    monkeypatch.setattr(
+        "gradwave.postscf.kgeometry_nmr.build_uspp_response_ctx",
+        lambda res, xc: object())
+    monkeypatch.setattr(
+        "gradwave.postscf.kgeometry_nmr.sigma_shielding_gipaw", _fake_gipaw)
+
+    atoms = Atoms("Si", positions=[[0, 0, 0]], cell=np.eye(3) * 5.0, pbc=True)
+    inp = Input(
+        atoms=atoms, pseudo_dir=Path("."), pseudo_map={"Si": "Si.paw.UPF"},
+        ecut=400.0, task="nmr", kpoints=KPointsParams(mesh=(2, 2, 2)),
+        nmr=NmrParams(task="shielding", sigma_ref={"Si": 337.0}),
+        output_dir=tmp_path, verbose=False)
+    nmr = api.run(inp, verbose=False)["nmr"]
+    assert nmr["method"] == "gipaw_absolute"
+    assert nmr["shielding_level"] == "gipaw"
+    s = nmr["sites"][0]
+    assert s["sigma_bare_ppm"] == pytest.approx(40.0)
+    assert s["sigma_core_ppm"] == pytest.approx(100.0)
+    assert s["sigma_dia_aug_ppm"] == pytest.approx(10.0)
+    assert s["sigma_para_aug_ppm"] == pytest.approx((5 + 5 + 35) / 3)
+    # total σ_iso = 40 + 100 + 10 + 15 = 165
+    assert s["sigma_iso_ppm"] == pytest.approx(165.0)
+    assert s["delta_iso_ppm"] == pytest.approx(337.0 - 165.0)
+
+
+def test_shielding_level_gipaw_on_nc_rejected(tmp_path, monkeypatch):
+    """An explicit shielding_level='gipaw' with a norm-conserving ground state
+    is a clear error, not a silent bare fallback."""
+    _fake_bare_scf(monkeypatch)
+    atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.75]], cell=np.eye(3) * 5.0,
+                  pbc=True)
+    inp = Input(
+        atoms=atoms, pseudo_dir=Path("."), pseudo_map={"H": "H.upf"}, ecut=400.0,
+        task="nmr", kpoints=KPointsParams(mesh=(2, 2, 2)),
+        nmr=NmrParams(task="shielding", shielding_level="gipaw"),
+        output_dir=tmp_path, verbose=False)
+    with pytest.raises(ValueError, match="needs an all-PAW ground state"):
+        api.run(inp, verbose=False)
