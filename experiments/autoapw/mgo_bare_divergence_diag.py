@@ -18,7 +18,7 @@ import sys
 import numpy as np
 import torch
 
-from gradwave.constants import RY
+from gradwave.constants import RY_EV as RY
 from gradwave.pseudo.upf_paw import parse_upf_paw
 from gradwave.scf.uspp import scf_uspp, setup_uspp
 from gradwave.xc import PBE
