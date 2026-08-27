@@ -503,7 +503,8 @@ def cg_sternheimer(h: _AppliesH, bk: _HasKineticTable, c_occ: torch.Tensor,
                    eps_occ: torch.Tensor, rhs: torch.Tensor, x0: torch.Tensor, shift: float,
                    tol: float=1e-8, max_iter: int=400,
                    s_apply: Callable[[torch.Tensor], torch.Tensor] | None = None,
-                   s_occ: torch.Tensor | None = None) -> torch.Tensor:
+                   s_occ: torch.Tensor | None = None,
+                   iters_out: list[int] | None = None) -> torch.Tensor:
     """Batched conduction-projected Sternheimer: (H − ε_n + s·P_occ)δψ = rhs,
     for all occupied bands of all k at once ((nk, nocc, npw_max), masked).
     rhs must already lie in the conduction space; positive definite there
@@ -545,7 +546,7 @@ def cg_sternheimer(h: _AppliesH, bk: _HasKineticTable, c_occ: torch.Tensor,
     if s_apply is not None:
         assert s_occ is not None, "S-metric cg_sternheimer needs s_occ = S c_occ"
         return _cg_smetric(h, bk, c_occ, s_occ, eps_occ, rhs, x0, shift,
-                           s_apply, tol, max_iter)
+                           s_apply, tol, max_iter, iters_out=iters_out)
 
     def p_occ(x: torch.Tensor) -> torch.Tensor:
         ov = torch.einsum("kng,kbg->kbn", c_occ.conj(), x)
@@ -692,7 +693,8 @@ def _cg_smetric(h: _AppliesH, bk: _HasKineticTable, c_occ: torch.Tensor,
                 s_occ: torch.Tensor, eps_occ: torch.Tensor, rhs: torch.Tensor,
                 x0: torch.Tensor, shift: float,
                 s_apply: Callable[[torch.Tensor], torch.Tensor],
-                tol: float, max_iter: int) -> torch.Tensor:
+                tol: float, max_iter: int,
+                iters_out: list[int] | None = None) -> torch.Tensor:
     """S-metric (ultrasoft/PAW) lockstep body of :func:`cg_sternheimer`.
 
     Solves [(1 − P_S^†)(H − ε_n S) + s·Π] δψ = rhs on the S-conduction
@@ -700,7 +702,11 @@ def _cg_smetric(h: _AppliesH, bk: _HasKineticTable, c_occ: torch.Tensor,
     positive definite there, so the same Teter-preconditioned CG as the
     norm-conserving path drives it. With ``s_apply`` the identity and
     ``s_occ ≡ c_occ`` every operation below is bit-identical to the plain
-    lockstep solve — the exact NC-limit reduction."""
+    lockstep solve — the exact NC-limit reduction.
+
+    ``iters_out`` (opt-in) appends the CG iteration count of this solve — the
+    telemetry the analytic-shielding warm-start uses to report cold-vs-warm
+    savings; ``None`` (default) is a byte-for-byte no-op."""
 
     def pcd(y: torch.Tensor) -> torch.Tensor:  # (1 − Σ S|ψ⟩⟨ψ|) y  =  P_S^† complement
         ov = torch.einsum("kng,kbg->kbn", c_occ.conj(), y)
@@ -730,18 +736,22 @@ def _cg_smetric(h: _AppliesH, bk: _HasKineticTable, c_occ: torch.Tensor,
     z = teter_b(r, bk.t, t_band)
     p = z
     rz = torch.einsum("kbg,kbg->kb", r.conj(), z).real
+    used = 0
     for _ in range(max_iter):
         ap = a_apply(p)
         pap = torch.einsum("kbg,kbg->kb", p.conj(), ap).real
         a_cg = rz / torch.clamp(pap, min=1e-300)
         x = x + a_cg[..., None] * p
         r = r - a_cg[..., None] * ap
+        used += 1
         if float(torch.linalg.norm(r, dim=-1).max()) < tol:
             break
         z = teter_b(r, bk.t, t_band)
         rz_new = torch.einsum("kbg,kbg->kb", r.conj(), z).real
         p = z + (rz_new / torch.clamp(rz, min=1e-300))[..., None] * p
         rz = rz_new
+    if iters_out is not None:
+        iters_out.append(used)
     return pc(x)
 
 

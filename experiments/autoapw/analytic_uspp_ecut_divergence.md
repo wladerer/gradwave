@@ -140,3 +140,36 @@ and second-order (`du1`, `M_μ`) assembly must be re-expressed on the matrix-fre
 solves (differentiate the CG solution implicitly rather than the eigenbasis
 resolvent). Re-validate against the NC-limit gate (bit-reduction to the plain-NC
 analytic σ), Si ≈ 398 ppm, and the MgO ¹⁷O ecut-stability + ≈215 ppm anchor.
+
+---
+
+## 6. Fix landed — matrix-free S-metric CG backend (cond(S)-gated)
+
+The fix plan above is implemented. `ShieldingDq`'s three ∂/∂q resolvent solves
+(`d̃u`, `δu⁰`, `δu¹`) route through a matrix-free S-metric CG Sternheimer
+(`_SMetricResolventCG` on `_response.cg_sternheimer`) instead of
+`_resolvent_apply_s`. It is selected by a **cond(S)-gated auto-switch**
+(`response_backend="auto"`): the fast dense-eigh path stays the default on
+well-conditioned overlaps (soft PAW Si cond(S) ≈ 2), and CG engages only above
+cond(S) > 50 — so the easy majority keeps the #25 dense speed.
+
+**MgO ¹⁷O ecut-stability (CG backend, `Mg.pbe-n-kjpaw` + the same hard
+`O.pbe-n-kjpaw`; the semicore `Mg.pbe-spnl` of §0 is not on the box):**
+
+| ecut | npw | cond(S) | O bare σ_iso | O total (GIPAW) |
+|---|---|---|---|---|
+| 40/160 | 537 | 2186 | −70.5 | +282.0 |
+| 60/400 | 965 | 5588 | −61.8 | +298.5 |
+
+Bare O now moves ~12% (same sign, no divergence) while cond(S) climbs 2186 →
+5588 — the ×2 dense-eigh blow-up is gone; the total moves toward the ≈ +215 ppm
+anchor. NC-limit gate (CG with S = I → plain-NC resolvent to CG tol) and the
+backend selector (dense ≤ 50, CG > 50) pass.
+
+**Warm-starting the CG measured NULL (left off by default).** Seeding each solve
+from the adjacent ∂/∂q stage (previous q̂ pol → δu⁰, δu⁰ → δu¹) over 120 MgO CG
+solves: cold total 2676 (mean 22.3) → warm total 2965 (mean 24.7) — **+11%,
+i.e. 289 MORE iterations**. The nearby-perturbation seed starts the
+S-orthogonality-projected CG in a worse residual than a clean zero start (a
+legitimate DFPT/Sternheimer phenomenon), so warm-start is shipped opt-in and OFF
+by default; the converged result is seed-independent regardless.
