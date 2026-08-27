@@ -23,6 +23,15 @@ repos:
         types_or: [python, pyi]
         require_serial: true
 
+      - id: codespell
+        name: codespell
+        # Spell-check for code/comments/docstrings/docs. Uses the project's
+        # pinned codespell via `uv run` (same pattern as ruff); ignore-words
+        # and skip globs live in pyproject's [tool.codespell].
+        entry: uv run codespell
+        language: system
+        require_serial: true
+
       - id: fast-gate
         name: fast test gate
         # -n4 (not the addopts `-n auto`): the pre-push gate runs on the dev's

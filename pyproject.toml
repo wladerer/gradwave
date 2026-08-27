@@ -48,6 +48,7 @@ dev = [
     "pytest-split>=0.8",  # shard the CI standard tier across parallel runners
     "pytest-timeout",  # per-test wall cap so a hung test fails fast (traceback) instead of the 6h job default
     "ruff>=0.6",
+    "codespell>=2.3",  # spell-check code/comments/docstrings (pre-commit hook; config in [tool.codespell])
     "sympy>=1.12",
     "pre-commit>=3.5",
     # libxc oracle for the r2SCAN pointwise tests (bundles libxc via its wheel);
@@ -707,6 +708,26 @@ ignore = [
 # at 43) so this BLOCKS new complexity while grandfathering existing
 # god-functions. Lower it as those functions get decomposed; never raise it.
 max-complexity = 44
+
+[tool.codespell]
+# Spell-check for code/comments/docstrings. Run: uv run codespell (wired as a
+# pre-commit hook). The ignore list is deliberately small and each entry is a
+# real domain token, a code identifier, a proper name, or a load-bearing typo
+# *fixture* — NOT a licence to leave real typos unfixed.
+#   physics / notation : precessing (spin precession), braket (bra-ket),
+#                        ontop (adsorption site), fom (figure of merit),
+#                        oint (contour integral ∮), sme
+#   proper names       : cances (Cancès), soler (J. Soler), botton (G. Botton)
+#   journal abbrevs    : mater (Comput. Mater.), commun, numer
+#   code identifiers   : bu, ois, gud, acn, abl, cna, nd, rin, te, ba, als,
+#                        hda, iterm, nin, ket, bra
+#   typo-detection     : optimzer, convergance  (intentional bad keys that the
+#     fixtures            input validator/tests assert are rejected with a hint)
+#   valid word         : pre-empts
+ignore-words-list = "precessing,braket,ontop,fom,oint,sme,cances,soler,botton,mater,commun,numer,bu,ois,gud,acn,abl,cna,nd,rin,te,ba,als,hda,iterm,nin,ket,bra,optimzer,convergance,pre-empts"
+# *.upf pseudopotentials ship a "discription" typo in their UPF headers (vendor
+# data, not ours to edit); locks/generated/binary assets have nothing to check.
+skip = "*.json,*.lock,uv.lock,*.svg,*.upf,.git,*.test_durations,docs/symbols.txt"
 
 [tool.importlinter]
 root_package = "gradwave"
