@@ -21,7 +21,7 @@ import torch
 from gradwave.constants import RY_EV as RY
 from gradwave.pseudo.upf_paw import parse_upf_paw
 from gradwave.scf.uspp import scf_uspp, setup_uspp
-from gradwave.xc import PBE
+from gradwave.core.xc.pbe import PBE
 
 MG = sys.argv[1] if len(sys.argv) > 1 else "Mg.pbe-spnl-kjpaw_psl.1.0.0.UPF"
 O = "tests/fixtures/qe/pseudos/O.pbe-n-kjpaw_psl.1.0.0.UPF"
