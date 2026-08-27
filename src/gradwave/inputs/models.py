@@ -792,7 +792,13 @@ class NmrParams:
     only when the ground state is PAW. It feeds the quadrupolar spectrum path.
 
     ``spectrum`` (:class:`NmrSpectrumParams`) synthesizes a powder lineshape from
-    the per-site δ_iso + CSA (+ C_Q/η_Q for quadrupolar nuclei); off by default."""
+    the per-site δ_iso + CSA (+ C_Q/η_Q for quadrupolar nuclei); off by default.
+
+    ``chunk_k`` (``task='shielding'``, PW route) streams the dense per-k
+    response contexts over blocks of at most that many k-points — bit-identical
+    to the eager default (None) but with an O(1)-in-nk peak memory footprint,
+    at the cost of rebuilding each context once per sampled axis. The memory
+    route for cells whose full-mesh contexts do not fit in RAM."""
 
     task: str = "efg"  # efg | shielding
     isotopes: dict[str, str] | None = None
@@ -801,6 +807,7 @@ class NmrParams:
     sigma_ref: dict[str, float] | None = None
     efg: bool | str = False  # False | True | 'auto': PW/PAW EFG within task='shielding'
     spectrum: NmrSpectrumParams = field(default_factory=NmrSpectrumParams)
+    chunk_k: int | None = None  # stream dense response contexts (memory route)
 
     def __post_init__(self):
         if self.task not in ("efg", "shielding"):
@@ -813,6 +820,9 @@ class NmrParams:
         if self.efg not in (True, False, "auto"):
             raise InputError(
                 f"nmr.efg must be true, false or 'auto', got {self.efg!r}")
+        if self.chunk_k is not None and self.chunk_k < 1:
+            raise InputError(
+                f"nmr.chunk_k must be >= 1 (or null for eager), got {self.chunk_k}")
 
 
 @dataclass(frozen=True)

@@ -2470,6 +2470,7 @@ def _para_branch_cross(
     *,
     cg_tol: float = 1e-9,
     max_iter: int = 800,
+    chunk_k: int | None = None,
 ) -> tuple[list[_ParaBranch], np.ndarray, USPPSystem]:
     """Per-(axis, pol) raw ±q on-site cross densities for the magnetic response.
 
@@ -2522,7 +2523,8 @@ def _para_branch_cross(
         contrib: dict[float, Tensor] = {}
         for sgn in (+1.0, -1.0):
             sol = velocity_perturbation_q(
-                res, sgn * q_frac, cg_tol=cg_tol, max_iter=max_iter, uspp=ctx)
+                res, sgn * q_frac, cg_tol=cg_tol, max_iter=max_iter, uspp=ctx,
+                chunk_k=chunk_k)
             jsel = torch.as_tensor(sol.jidx, dtype=torch.long)
             p_kq = ov.p[jsel]
             npw = min(p_kq.shape[-1], sol.dpsi.shape[-1])
@@ -2547,6 +2549,7 @@ def para_augmentation_shielding(
     pref: float = R_E_ANG,
     cg_tol: float = 1e-9,
     max_iter: int = 800,
+    chunk_k: int | None = None,
 ) -> Tensor:
     """On-site paramagnetic-augmentation shielding tensor σ_para_aug
     (nsite, 3, 3) in ppm — the hard GIPAW magnetic-response term
@@ -2569,7 +2572,7 @@ def para_augmentation_shielding(
     scale — the two symmetry-equivalent Si sites agree to <1 ppm as the internal
     consistency gate (see the PR-analytic-B notes)."""
     branches, col_atom, system = _para_branch_cross(
-        res, ctx, cg_tol=cg_tol, max_iter=max_iter)
+        res, ctx, cg_tol=cg_tol, max_iter=max_iter, chunk_k=chunk_k)
     tau = system.positions.detach().cpu().numpy()
     species_of_atom = [int(s) for s in system.species_of_atom]
     nsite = len(species_of_atom)
@@ -2607,6 +2610,7 @@ def sigma_shielding_gipaw(
     use_symmetry: bool | str = False,
     cg_tol: float = 1e-9,
     max_iter: int = 800,
+    chunk_k: int | None = None,
 ) -> dict[str, Tensor]:
     """Full absolute GIPAW chemical-shielding tensor per site (nsite, 3, 3) ppm,
 
@@ -2618,15 +2622,24 @@ def sigma_shielding_gipaw(
     (:func:`gradwave.postscf.gipaw.ground_state_shielding`), and the on-site
     paramagnetic augmentation (:func:`para_augmentation_shielding`). ``paws`` is
     one :class:`~gradwave.pseudo.upf_paw.PAWData` per species. Returns a dict
-    ``{"total", "bare", "core", "dia_aug", "para_aug"}`` (all nsite, 3, 3)."""
+    ``{"total", "bare", "core", "dia_aug", "para_aug"}`` (all nsite, 3, 3).
+
+    ``chunk_k`` streams the dense per-k contexts of both response terms (the
+    bare :class:`ShieldingDq` build and the para-augmentation Sternheimer
+    solves) over blocks of at most that many k-points — bit-identical to the
+    eager ``None`` default (each context is a pure function of its k), at the
+    cost of rebuilding contexts once per sampled axis. The memory route for
+    many-atom cells whose full-mesh dense contexts do not fit."""
     system = ctx.system
     species_of_atom = [int(s) for s in system.species_of_atom]
-    sig_bare = sigma_shielding_dq(res, uspp=ctx, use_symmetry=use_symmetry)
+    sig_bare = sigma_shielding_dq(
+        res, uspp=ctx, use_symmetry=use_symmetry, chunk_k=chunk_k)
     gs = ground_state_shielding(
         list(paws), species_of_atom, cast("Any", res).rho_ij_atoms)
     onsites = {sp: PAWOnSite.from_paw(p) for sp, p in enumerate(paws)}
     sig_para = para_augmentation_shielding(
-        res, ctx, onsites, pref=pref, cg_tol=cg_tol, max_iter=max_iter)
+        res, ctx, onsites, pref=pref, cg_tol=cg_tol, max_iter=max_iter,
+        chunk_k=chunk_k)
     eye = torch.eye(3, dtype=RDTYPE)
     core = gs["core"][:, None, None] * eye
     total = sig_bare + core + gs["dia_aug"] + sig_para

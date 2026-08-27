@@ -563,10 +563,11 @@ def _build_nmr(raw: dict[str, Any]) -> NmrParams:
     spec_raw = raw.get("spectrum")
     spectrum = (_build_nmr_spectrum(dict(spec_raw))
                 if isinstance(spec_raw, dict) else NmrSpectrumParams())
+    ck = raw.get("chunk_k")
     return NmrParams(
         task=str(raw.get("task", "efg")), isotopes=iso,
         shielding_level=str(raw.get("shielding_level", "auto")), sigma_ref=sref,
-        efg=efg, spectrum=spectrum)
+        efg=efg, spectrum=spectrum, chunk_k=None if ck is None else int(ck))
 
 
 def _load_input(path: Path) -> Input:

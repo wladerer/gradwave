@@ -99,6 +99,17 @@ def test_efg_bool_roundtrip(tmp_path):
     assert load_input(p).nmr.efg is True
 
 
+def test_chunk_k_roundtrip_and_validation(tmp_path):
+    """nmr.chunk_k (k-streaming memory route) survives the parse; default None."""
+    p = tmp_path / "si.yaml"
+    p.write_text(_si_shield_yaml("  chunk_k: 1\n"))
+    assert load_input(p).nmr.chunk_k == 1
+    p.write_text(_si_shield_yaml(""))
+    assert load_input(p).nmr.chunk_k is None
+    with pytest.raises(InputError, match="chunk_k"):
+        NmrParams(task="shielding", chunk_k=0)
+
+
 def test_nmr_efg_validation():
     with pytest.raises(InputError, match="nmr.efg"):
         NmrParams(task="shielding", efg="sometimes")

@@ -311,7 +311,8 @@ def _apply_shift_reference(
 def _shielding_bare_block(inp: Input, res: Any) -> dict[str, Any]:
     from gradwave.postscf.kgeometry_nmr import sigma_shielding_dq
 
-    sig = sigma_shielding_dq(res).detach().cpu().numpy()  # (nsite, 3, 3) ppm
+    sig = sigma_shielding_dq(
+        res, chunk_k=inp.nmr.chunk_k).detach().cpu().numpy()  # (nsite, 3, 3) ppm
     symbols = inp.atoms.get_chemical_symbols()
     sites: list[dict[str, Any]] = [
         {
@@ -346,7 +347,8 @@ def _shielding_gipaw_block(inp: Input, res: Any) -> dict[str, Any]:
     paws = _as_paws(upfs)
     ctx = build_uspp_response_ctx(res, build_xc(inp))
     out = {k: v.detach().cpu().numpy()
-           for k, v in sigma_shielding_gipaw(res, ctx, paws).items()}
+           for k, v in sigma_shielding_gipaw(
+               res, ctx, paws, chunk_k=inp.nmr.chunk_k).items()}
     symbols = inp.atoms.get_chemical_symbols()
     sites: list[dict[str, Any]] = []
     for i in range(out["total"].shape[0]):
