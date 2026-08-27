@@ -44,6 +44,9 @@ profile: ## sample-profile a benchmark -> speedscope json (BENCH=bench_scf ARGS=
 	  --output profile.speedscope.json -- \
 	  $$(uv run python -c "import sys; print(sys.executable)") benchmarks/$(BENCH).py $(ARGS)
 
+mutation: ## on-demand mutation probe of one module (run on asus, NOT in CI): TARGET=src/... TESTS="tests/..."
+	uv run python scripts/mutation_probe.py --target $(TARGET) --tests $(TESTS)
+
 fmt: ## ruff autofix + format
 	uv run ruff check --fix
 	uv run ruff format
