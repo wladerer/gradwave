@@ -72,7 +72,7 @@ def main() -> int:
 
     sites = efg_paw(r, isotopes=ISOTOPES)
     for s in sites:
-        vsm = _vzz(s["V_smooth"]); vio = _vzz(s["V_ion"]); vos = _vzz(s["V_onsite"])
+        vsm, vio, vos = _vzz(s["V_smooth"]), _vzz(s["V_ion"]), _vzz(s["V_onsite"])
         cq = s.get("C_Q", {})
         line = (f"{s['element']}{s['site']:<2d} V_zz={s['V_zz']:+8.3f} eta={s['eta']:.3f}  "
                 f"[smooth {vsm:+7.2f} | ion {vio:+7.2f} | onsite {vos:+7.2f}]")
