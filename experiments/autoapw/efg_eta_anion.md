@@ -1,9 +1,15 @@
 # Anion EFG asymmetry (η) — dataset & basis-parameter fronts (2026-08)
 
-Goal: close the anion η gap (corundum O η = 0.48 PW/PAW (#394), 0.65 FLAPW vs Elk 0.74;
-rutile O η = 0.65 FLAPW vs Elk 0.74) without giving back the C_Q magnitude (96–106% of Elk).
-A wrong η visibly distorts second-order MAS lineshapes, so this is the accuracy lever for
-quadrupolar spectra. Two independent fronts, both measured on asus.
+Goal: close the anion η gap without giving back the C_Q magnitude (96–106% of Elk). A wrong η
+visibly distorts second-order MAS lineshapes, so this is the accuracy lever for quadrupolar
+spectra. Two independent fronts, both measured on asus.
+
+**Reference correction (from `efg_converged_k_validation.md`, the authoritative gw-vs-Elk table).**
+The corundum-O η "gap" in the original framing was a mis-anchor: **corundum O Elk η = 0.51**, and
+gw already sits at **0.48** (FLAPW HELO) / 0.48 (PW/PAW #394) — 94 % of Elk, essentially solved.
+The genuine anion-η gap is **rutile O: gw 0.654 (FLAPW HELO) vs Elk 0.740** (rutile's planar-
+tricoordinate O is the stringent biaxial case). Front B therefore targets rutile O; corundum O is
+the *transferability control* (an already-good η that a HELO-energy change must not overshoot).
 
 ## Front A — PW/PAW: O-dataset completeness (corundum, `efg_eta_paw_datasets.py`)
 
@@ -72,8 +78,39 @@ reporting the actual residual and converged flag per point.
 
 | E₂ (eV) | V_zz (eV/Å²) | % Elk | η | C_Q(¹⁷O) MHz | resid | converged |
 |---|---|---|---|---|---|---|
-| (running) | | | | | | |
+| 110 | −14.87 | 77.8 | 0.689 | 0.920 | 1.1e−2 | ✅ (14 it, gate) |
+| 120 | −14.66 | 76.7 | **0.724** | 0.906 | 1.0e−2 | ✅ (37 it, gate) |
+| 130 | −14.36 | 75.2 | 0.773 | 0.888 | 8.4e−1 | ❌ diverged |
+| 140 | −14.09 | 73.8 | 0.817 | 0.872 | 4.2e−5 | ✅ (32 it, tight) |
+| 150 | +14.45 | −75.7 | 0.880 | 0.894 | 5.1e+1 | ❌ blew up (sign flip) |
+
+**With trustworthy convergence the story flips from the coarse scan.** The three cleanly-
+converged points (110, 120, 140 — 140 polished to a tight 4e−5 residual) are strictly
+**monotonic**: as E₂ rises, η climbs (0.689 → 0.724 → 0.817) and |V_zz| falls (77.8 →
+76.7 → 73.8 %). The coarse scan's non-monotonic η and V_zz sign-flips were **convergence
+artifacts** (MAXIT cap + 56 shift-invert certificate failures), not physics — e.g. coarse
+E₂=120 gave η 0.478, the converged value is 0.724. So there is **no decoupling**: E₂ is a
+clean magnitude↔η trade-off coordinate, dη/dE₂ > 0 and d|V_zz|/dE₂ < 0.
+
+Convergence is fragile above E₂≈120 (130 and 150 diverge even with newton_polish); the
+reliably-gating window is E₂ ≤ ~120–140.
+
+**Where it crosses Elk.** Interpolating the converged points, η = 0.740 (Elk) at **E₂ ≈ 123 eV**,
+with |V_zz| ≈ 76.2 % of Elk there. Versus the shipped default E₂=90 (η 0.654, |V_zz| 79 % — the
+#370 gated validation), reaching Elk's η costs **Δη +0.086 for −2.8 % magnitude**. That is a
+*shallow, favorable* slope — the opposite sense and a gentler rate than the aug-lmax-6 lever
+(which bought +10 % magnitude for −0.30 η). But it is still the trade-off, not a free η fix: you
+buy a correct asymmetry with a small, known magnitude sacrifice. The 76–79 % rutile-O magnitude
+floor itself is the separate structural residual (O–Ti spheres nearly touch, support ratio 0.98;
+elk_efg_forensics D4) and is *not* what E₂ governs.
 
 ## Verdict
 
-(pending the tight rerun + Front A)
+**Front B is a measured trade-off with a favorable slope, shipped as a documented tunable, not a
+default change.** The l=1 HELO energy E₂ is a genuine, monotonic η lever (dη/dE₂ > 0) that can
+place rutile-O η anywhere from 0.65 (E₂=90) to Elk's 0.74 (E₂≈123) at a ~3 % |V_zz| cost — useful
+when the second-order MAS *lineshape* (η-driven) matters more than C_Q magnitude. It is **not** a
+decoupling that fixes η for free, and above E₂≈120 the fullpot SCF stops gating, so raising the
+*default* would trade a validated, robustly-converging recipe for a fragile one. Decision: keep
+`efg_anion_basis(helo_e=90.0)` as the default and expose the trade-off in the docstring so an
+η-sensitive user can dial E₂ up knowingly. (Front A verdict below.)

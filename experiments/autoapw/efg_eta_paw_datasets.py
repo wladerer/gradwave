@@ -51,7 +51,10 @@ FRAC = np.array([
 ])
 SPECIES = [0, 0, 0, 0, 1, 1, 1, 1, 1, 1]  # 0=Al, 1=O
 ISOTOPES = {"O": "17O", "Al": "27Al"}
-ELK = dict(O_eta=0.740, O_cq=2.19, O_vzz_onsite=27.08, Al_cq=2.19)
+# corundum O Elk anchor from efg_converged_k_validation.md (k6/k8): eta 0.51 (NOT the 0.74 rutile
+# value), C_Q(17O) 2.20, on-site V_zz 27.08. gw already sits at eta 0.48 -> the corundum O eta is
+# essentially solved; this scan asks whether the dataset generation moves it at all.
+ELK = dict(O_eta=0.51, O_cq=2.20, O_vzz_onsite=27.08, Al_cq=2.09)
 
 
 def _vzz(tensor: torch.Tensor) -> float:
