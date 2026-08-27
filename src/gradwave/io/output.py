@@ -717,14 +717,24 @@ def _flapw_lines(flapw):
 def _nmr_lines(nmr):
     """NMR block: an EFG (V_zz/η/C_Q) or shielding (σ_iso/Δσ/η) per-site table."""
     if nmr.get("observable") == "shielding":
-        lines = [_sec("NMR magnetic shielding (bare, plane-wave GIPAW)")]
-        lines.append(f"   {'site':>4s} {'elem':>4s} {'σ_iso [ppm]':>13s} "
-                     f"{'Δσ [ppm]':>10s} {'η':>6s}")
-        for s in nmr.get("sites", []):
-            lines.append(
-                f"   {s['site']:>4d} {s.get('species') or ''!s:>4s} "
-                f"{s['sigma_iso_ppm']:>13.3f} {s['sigma_aniso_ppm']:>10.3f} "
-                f"{s['sigma_eta']:>6.3f}")
+        kind = ("absolute GIPAW" if nmr.get("method") == "gipaw_absolute"
+                else "bare valence")
+        sites = nmr.get("sites", [])
+        has_shift = any("delta_iso_ppm" in s for s in sites)
+        lines = [_sec(f"NMR magnetic shielding ({kind}, plane-wave GIPAW)")]
+        hdr = (f"   {'site':>4s} {'elem':>4s} {'σ_iso [ppm]':>13s} "
+               f"{'Δσ [ppm]':>10s} {'η':>6s}")
+        if has_shift:
+            hdr += f" {'δ_iso [ppm]':>13s}"
+        lines.append(hdr)
+        for s in sites:
+            row = (f"   {s['site']:>4d} {s.get('species') or ''!s:>4s} "
+                   f"{s['sigma_iso_ppm']:>13.3f} {s['sigma_aniso_ppm']:>10.3f} "
+                   f"{s['sigma_eta']:>6.3f}")
+            if has_shift:
+                row += (f" {s['delta_iso_ppm']:>13.3f}"
+                        if "delta_iso_ppm" in s else f" {'—':>13s}")
+            lines.append(row)
         lines.append("")
         return lines
     # EFG

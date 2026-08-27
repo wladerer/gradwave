@@ -4,8 +4,12 @@
 ``Input`` and reports the Γ eigenvalues + convergence. ``run_nmr`` computes an NMR
 observable: ``nmr.task='efg'`` takes the all-electron electric field gradient per
 site (and, per isotope, the quadrupolar coupling C_Q) through the same FLAPW
-stack; ``nmr.task='shielding'`` takes the bare magnetic shielding tensor per site
-through the plane-wave GIPAW analytic q→0 route (``kgeometry_nmr.sigma_shielding_dq``).
+stack; ``nmr.task='shielding'`` takes the magnetic shielding tensor per site
+through the plane-wave GIPAW route — either the bare valence term alone
+(``kgeometry_nmr.sigma_shielding_dq``, norm-conserving) or the full absolute
+σ = σ_bare + σ_core + σ_dia_aug + σ_para_aug (``sigma_shielding_gipaw``, all-PAW),
+selected by ``nmr.shielding_level`` (default ``auto``: gipaw for PAW pseudos).
+With ``nmr.sigma_ref`` each site also reports the chemical shift δ_iso.
 
 The FLAPW geometry is all-electron and takes a different form from the plane-wave
 System: a cell in Bohr (rows = lattice vectors), fractional (coord, symbol) atoms,
@@ -229,14 +233,32 @@ def _equivalent_site_groups(atoms: Any) -> list[list[int]]:
     return [g for g in groups.values() if len(g) > 1]
 
 
-def _run_shielding(inp: Input, verbose: bool) -> dict[str, Any]:
-    import warnings
-
+def _haeberlen_site(tensor: np.ndarray) -> dict[str, Any]:
+    """The Haeberlen CSA quantities of one shielding tensor (3×3, ppm): σ_iso,
+    anisotropy, asymmetry η, span, and the raw tensor. Symmetrized before the
+    eigenanalysis; the principal values are ordered by ascending |σ_ii − σ_iso|
+    (xx, yy, zz)."""
     import numpy as np
 
-    from gradwave.api.scf import run_scf
-    from gradwave.postscf.kgeometry_nmr import sigma_shielding_dq
-    from gradwave.scf.loop import SCFResult
+    s = np.asarray(tensor, dtype=float)
+    s_sym = 0.5 * (s + s.T)
+    iso = float(np.trace(s_sym) / 3.0)
+    eig = np.linalg.eigvalsh(s_sym)
+    order = np.argsort(np.abs(eig - iso))
+    s_xx, s_yy, s_zz = (float(eig[order[0]]), float(eig[order[1]]),
+                        float(eig[order[2]]))
+    denom = s_zz - iso
+    return {
+        "sigma_iso_ppm": iso,
+        "sigma_aniso_ppm": float(s_zz - 0.5 * (s_xx + s_yy)),
+        "sigma_eta": float((s_yy - s_xx) / denom) if abs(denom) > 1e-12 else 0.0,
+        "span_ppm": float(eig.max() - eig.min()),
+        "tensor_ppm": s.tolist(),
+    }
+
+
+def _warn_kmesh_symmetry(inp: Input) -> None:
+    import warnings
 
     broken, total = _kmesh_symmetry_broken(inp.atoms, inp.kpoints.mesh)
     if broken:
@@ -246,35 +268,14 @@ def _run_shielding(inp: Input, verbose: bool) -> dict[str, Any]:
             f"inequivalent (split) — use equal subdivisions on symmetry-equivalent axes "
             f"(e.g. a cubic n×n×n, a hexagonal n_a=n_b). ",
             stacklevel=2)
-    res = run_scf(inp, verbose=verbose)
-    if not isinstance(res, SCFResult):
-        raise NotImplementedError(
-            "nmr shielding (sigma_shielding_dq) is wired for the norm-conserving "
-            "SCF only; noncollinear / USPP-PAW shielding is not yet plumbed here")
-    sig = sigma_shielding_dq(res).detach().cpu().numpy()  # (nsite, 3, 3) ppm
-    symbols = inp.atoms.get_chemical_symbols()
-    sites: list[dict[str, Any]] = []
-    for i in range(sig.shape[0]):
-        s = np.asarray(sig[i], dtype=float)
-        s_sym = 0.5 * (s + s.T)
-        iso = float(np.trace(s_sym) / 3.0)
-        eig = np.linalg.eigvalsh(s_sym)
-        # Haeberlen ordering by ascending |σ_ii − σ_iso|: xx, yy, zz
-        order = np.argsort(np.abs(eig - iso))
-        s_xx, s_yy, s_zz = (float(eig[order[0]]), float(eig[order[1]]),
-                            float(eig[order[2]]))
-        denom = s_zz - iso
-        sites.append({
-            "site": i,
-            "species": symbols[i] if i < len(symbols) else None,
-            "sigma_iso_ppm": iso,
-            "sigma_aniso_ppm": float(s_zz - 0.5 * (s_xx + s_yy)),
-            "sigma_eta": float((s_yy - s_xx) / denom) if abs(denom) > 1e-12 else 0.0,
-            "span_ppm": float(eig.max() - eig.min()),
-            "tensor_ppm": s.tolist(),
-        })
-    # Post-hoc: symmetry-equivalent sites must give equal σ_iso; a split (whatever the cause —
-    # unsuitable/coarse k-mesh, unconverged ecut, or a broken structure) is a red flag.
+
+
+def _warn_equivalent_split(inp: Input, sites: list[dict[str, Any]]) -> None:
+    """Post-hoc red flag: symmetry-equivalent sites must give equal σ_iso; a
+    split (unsuitable/coarse k-mesh, unconverged ecut, or a broken structure)
+    means the numbers are not trustworthy."""
+    import warnings
+
     for grp in _equivalent_site_groups(inp.atoms):
         vals = [sites[i]["sigma_iso_ppm"] for i in grp]
         spread = max(vals) - min(vals)
@@ -286,6 +287,41 @@ def _run_shielding(inp: Input, verbose: bool) -> dict[str, Any]:
                 f"check the structure (bond lengths), the k-mesh suitability, and ecut/k "
                 f"convergence before trusting the numbers.",
                 stacklevel=2)
+
+
+def _apply_shift_reference(
+    block: dict[str, Any], sigma_ref: dict[str, float] | None
+) -> None:
+    """Add ``delta_iso_ppm = σ_ref − σ_iso`` to each site whose species or
+    isotope is keyed in ``sigma_ref`` (ppm). A no-op when ``sigma_ref`` is None
+    or a site has no matching key, so unreferenced runs stay byte-identical."""
+    if not sigma_ref:
+        return
+    for site in block["sites"]:
+        ref: float | None = None
+        for key in (site.get("isotope"), site.get("species")):
+            if key is not None and key in sigma_ref:
+                ref = float(sigma_ref[key])
+                break
+        if ref is not None:
+            site["delta_iso_ppm"] = ref - float(site["sigma_iso_ppm"])
+    block["sigma_ref_ppm"] = dict(sigma_ref)
+
+
+def _shielding_bare_block(inp: Input, res: Any) -> dict[str, Any]:
+    from gradwave.postscf.kgeometry_nmr import sigma_shielding_dq
+
+    sig = sigma_shielding_dq(res).detach().cpu().numpy()  # (nsite, 3, 3) ppm
+    symbols = inp.atoms.get_chemical_symbols()
+    sites: list[dict[str, Any]] = [
+        {
+            "site": i,
+            "species": symbols[i] if i < len(symbols) else None,
+            **_haeberlen_site(sig[i]),
+        }
+        for i in range(sig.shape[0])
+    ]
+    _warn_equivalent_split(inp, sites)
     return {
         "observable": "shielding",
         "method": "bare_analytic_dq",
@@ -296,13 +332,108 @@ def _run_shielding(inp: Input, verbose: bool) -> dict[str, Any]:
     }
 
 
+def _shielding_gipaw_block(inp: Input, res: Any) -> dict[str, Any]:
+    import numpy as np
+
+    from gradwave.api._common import build_xc
+    from gradwave.api.system import _as_paws, _species_upfs
+    from gradwave.postscf.kgeometry_nmr import (
+        build_uspp_response_ctx,
+        sigma_shielding_gipaw,
+    )
+
+    _species, upfs, _soa = _species_upfs(inp)
+    paws = _as_paws(upfs)
+    ctx = build_uspp_response_ctx(res, build_xc(inp))
+    out = {k: v.detach().cpu().numpy()
+           for k, v in sigma_shielding_gipaw(res, ctx, paws).items()}
+    symbols = inp.atoms.get_chemical_symbols()
+    sites: list[dict[str, Any]] = []
+    for i in range(out["total"].shape[0]):
+        entry: dict[str, Any] = {
+            "site": i,
+            "species": symbols[i] if i < len(symbols) else None,
+            "sigma_bare_ppm": float(np.trace(out["bare"][i]) / 3.0),
+            "sigma_core_ppm": float(np.trace(out["core"][i]) / 3.0),
+            "sigma_dia_aug_ppm": float(np.trace(out["dia_aug"][i]) / 3.0),
+            "sigma_para_aug_ppm": float(np.trace(out["para_aug"][i]) / 3.0),
+        }
+        entry.update(_haeberlen_site(out["total"][i]))
+        sites.append(entry)
+    _warn_equivalent_split(inp, sites)
+    return {
+        "observable": "shielding",
+        "method": "gipaw_absolute",
+        "n_sites": len(sites),
+        "sites": sites,
+        "ecut_eV": float(inp.ecut),
+        "kmesh": list(inp.kpoints.mesh),
+    }
+
+
+def _run_shielding(inp: Input, verbose: bool) -> dict[str, Any]:
+    """Plane-wave GIPAW shielding. The concrete assembly is chosen by
+    ``inp.nmr.shielding_level`` against the SCF ground state actually produced:
+    ``auto`` → 'gipaw' for a USPP/PAW ground state, 'bare' for norm-conserving;
+    an explicit level is validated against that ground state."""
+    from gradwave.api.scf import run_scf
+    from gradwave.scf.results import USPPResult
+
+    req = inp.nmr.shielding_level
+    _warn_kmesh_symmetry(inp)
+    res = run_scf(inp, verbose=verbose)
+    is_paw = isinstance(res, USPPResult)
+    if req == "gipaw" and not is_paw:
+        raise ValueError(
+            "nmr.shielding_level='gipaw' needs an all-PAW ground state (the "
+            "absolute σ = σ_bare + σ_core + σ_dia_aug + σ_para_aug assembles the "
+            "on-site augmentation from PAWData); this run is norm-conserving — "
+            "use 'bare' or 'auto'.")
+    if req == "bare" and is_paw:
+        raise NotImplementedError(
+            "nmr.shielding_level='bare' on a USPP/PAW ground state is not wired "
+            "(the smooth-only sigma_shielding_dq bare path is norm-conserving) — "
+            "use 'gipaw' or 'auto' for the absolute GIPAW σ on PAW.")
+    level = req if req != "auto" else ("gipaw" if is_paw else "bare")
+    block = (_shielding_gipaw_block(inp, res) if level == "gipaw"
+             else _shielding_bare_block(inp, res))
+    block["shielding_level"] = level
+    _apply_shift_reference(block, inp.nmr.sigma_ref)
+    return block
+
+
+def reference_sigma_iso(
+    inp: Input, species: str, *, verbose: bool = False
+) -> float:
+    """Absolute isotropic shielding σ_iso (ppm) of ``species`` in a reference
+    solid, for use as ``nmr.sigma_ref`` in δ_iso = σ_ref − σ_iso.
+
+    Runs the shielding task on the reference ``Input`` at its own
+    ``nmr.shielding_level`` (use the SAME level as the sample) and averages
+    σ_iso over the sites of ``species`` (crystallographically equivalent sites
+    agree; the mean cancels residual mesh noise). The caller supplies the
+    reference structure/pseudopotentials in ``inp`` — e.g. the primary IUPAC
+    reference for the nucleus, or a well-characterized secondary standard."""
+    block = _run_shielding(inp, verbose)
+    vals = [float(s["sigma_iso_ppm"]) for s in block["sites"]
+            if s["species"] == species]
+    if not vals:
+        raise ValueError(
+            f"reference_sigma_iso: no {species!r} site in the reference input "
+            f"(species present: {sorted({s['species'] for s in block['sites']})})")
+    return sum(vals) / len(vals)
+
+
 def run_nmr(inp: Input, verbose: bool = True) -> dict[str, Any]:
     """Compute the NMR observable selected by ``inp.nmr.task`` (task: nmr).
 
     ``efg`` returns the all-electron FLAPW electric field gradient per site (V_zz,
     η, tensor) plus the quadrupolar coupling C_Q for the selected isotopes.
-    ``shielding`` returns the bare plane-wave GIPAW shielding tensor per site
-    (σ_iso, anisotropy, η). Returns the ``nmr`` summary block."""
+    ``shielding`` returns the plane-wave GIPAW shielding tensor per site (σ_iso,
+    anisotropy, η); with ``nmr.shielding_level='gipaw'`` (auto for PAW pseudos)
+    it is the full absolute σ with the per-term breakdown, and with
+    ``nmr.sigma_ref`` each site carries the chemical shift δ_iso. Returns the
+    ``nmr`` summary block."""
     if inp.nmr.task == "efg":
         return _run_efg(inp, verbose)
     return _run_shielding(inp, verbose)

@@ -680,10 +680,22 @@ class NmrParams:
     ``task='efg'`` computes the electric field gradient tensor per site through
     the all-electron FLAPW stack (needs a ``flapw`` block; ``pseudopotentials``
     are not used) and, for the selected isotopes, the quadrupolar coupling C_Q =
-    2.4180·Q[barn]·V_zz[eV/Å²]. ``task='shielding'`` computes the bare (pseudo)
-    magnetic shielding tensor per site through the plane-wave GIPAW analytic
-    q→0 route (``kgeometry_nmr.sigma_shielding_dq``; needs ``pseudopotentials``,
-    ``ecut`` and a k-mesh with ≥2 axes of length > 1).
+    2.4180·Q[barn]·V_zz[eV/Å²]. ``task='shielding'`` computes the magnetic
+    shielding tensor per site through the plane-wave GIPAW route (needs
+    ``pseudopotentials``, ``ecut`` and a k-mesh with ≥2 axes of length > 1).
+
+    ``shielding_level`` selects the shielding assembly (``task='shielding'``
+    only): ``'bare'`` is the smooth valence term alone (the analytic q→0 route
+    ``kgeometry_nmr.sigma_shielding_dq``; a norm-conserving ground state),
+    ``'gipaw'`` is the full absolute σ = σ_bare + σ_core + σ_dia_aug + σ_para_aug
+    (``kgeometry_nmr.sigma_shielding_gipaw``; needs an all-PAW ground state), and
+    ``'auto'`` (default) picks ``'gipaw'`` when the pseudopotentials are PAW and
+    ``'bare'`` otherwise.
+
+    ``sigma_ref`` maps a species or isotope label to a reference absolute
+    shielding σ_ref (ppm); when given, each matching site also reports the
+    chemical shift δ_iso = σ_ref − σ_iso. Obtain σ_ref for a species by running
+    the same-level shielding on a reference solid (``api.reference_sigma_iso``).
 
     ``isotopes`` maps a species to the isotope whose Q gives C_Q (e.g.
     ``{"Ti": "49Ti", "O": "17O"}``); a species left unmapped reports V_zz/η only.
@@ -691,11 +703,18 @@ class NmrParams:
 
     task: str = "efg"  # efg | shielding
     isotopes: dict[str, str] | None = None
+    shielding_level: str = "auto"  # auto | bare | gipaw (task: shielding)
+    # species/isotope -> reference σ (ppm) for the chemical shift δ_iso = σ_ref − σ_iso
+    sigma_ref: dict[str, float] | None = None
 
     def __post_init__(self):
         if self.task not in ("efg", "shielding"):
             raise InputError(
                 f"nmr.task must be 'efg' or 'shielding', got {self.task!r}")
+        if self.shielding_level not in ("auto", "bare", "gipaw"):
+            raise InputError(
+                "nmr.shielding_level must be 'auto', 'bare' or 'gipaw', got "
+                f"{self.shielding_level!r}")
 
 
 @dataclass(frozen=True)
