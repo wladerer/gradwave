@@ -366,6 +366,37 @@ def test_shielding_gipaw_dispatch_and_breakdown(tmp_path, monkeypatch):
     assert s["delta_iso_ppm"] == pytest.approx(337.0 - 165.0)
 
 
+def test_shielding_level_yaml_roundtrip(tmp_path):
+    """shielding_level and sigma_ref survive the YAML parse (task-schema check
+    only; no SCF)."""
+    pseudo_dir = Path(__file__).parents[1] / "fixtures" / "qe" / "pseudos"
+    yml = textwrap.dedent(f"""
+    task: nmr
+    structure:
+      cell: [[0.0, 2.715, 2.715], [2.715, 0.0, 2.715], [2.715, 2.715, 0.0]]
+      positions: {{frac: [[0, 0, 0], [0.25, 0.25, 0.25]]}}
+      species: [Si, Si]
+    pseudopotentials:
+      dir: {pseudo_dir}
+      map: {{Si: Si.pbe-n-kjpaw_psl.1.0.0.UPF}}
+    ecut: 163.3
+    kpoints: {{mesh: [2, 2, 2]}}
+    nmr:
+      task: shielding
+      shielding_level: gipaw
+      sigma_ref: {{Si: 337.4}}
+    """)
+    p = tmp_path / "si_shield.yaml"
+    p.write_text(yml)
+    inp = load_input(p)
+    assert inp.nmr.shielding_level == "gipaw"
+    assert inp.nmr.sigma_ref == {"Si": 337.4}
+    p2 = tmp_path / "bad_level.yaml"
+    p2.write_text(yml.replace("shielding_level: gipaw", "shielding_level: full"))
+    with pytest.raises(InputError, match="shielding_level"):
+        load_input(p2)
+
+
 def test_shielding_level_gipaw_on_nc_rejected(tmp_path, monkeypatch):
     """An explicit shielding_level='gipaw' with a norm-conserving ground state
     is a clear error, not a silent bare fallback."""

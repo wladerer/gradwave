@@ -189,13 +189,18 @@ def _print_nmr(nmr: dict[str, Any]) -> int:
     """Render the per-site NMR table to stdout: an EFG (V_zz / η / C_Q) or a
     magnetic-shielding (σ_iso / Δσ / η) block, mirroring the ``nmr.out`` report."""
     if nmr.get("observable") == "shielding":
-        print(f"NMR magnetic shielding (bare, plane-wave GIPAW): "
+        kind = ("absolute GIPAW" if nmr.get("method") == "gipaw_absolute"
+                else "bare valence")
+        print(f"NMR magnetic shielding ({kind}, plane-wave GIPAW): "
               f"{nmr['n_sites']} sites")
         for s in nmr["sites"]:
-            print(f"  site {s['site']:>3d} {(s.get('species') or '?'):>3s}  "
-                  f"σ_iso = {s['sigma_iso_ppm']:10.3f} ppm  "
-                  f"Δσ = {s['sigma_aniso_ppm']:10.3f} ppm  "
-                  f"η = {s['sigma_eta']:.3f}")
+            line = (f"  site {s['site']:>3d} {(s.get('species') or '?'):>3s}  "
+                    f"σ_iso = {s['sigma_iso_ppm']:10.3f} ppm  "
+                    f"Δσ = {s['sigma_aniso_ppm']:10.3f} ppm  "
+                    f"η = {s['sigma_eta']:.3f}")
+            if "delta_iso_ppm" in s:
+                line += f"  δ_iso = {s['delta_iso_ppm']:10.3f} ppm"
+            print(line)
         return 0
     conv = bool(nmr.get("converged"))
     print(f"{'converged' if conv else 'NOT CONVERGED'}: electric field "

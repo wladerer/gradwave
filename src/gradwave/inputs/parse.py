@@ -523,13 +523,20 @@ def _build_flapw(raw: dict[str, Any], symbols: Iterable[str]) -> FlapwParams:
 
 
 def _build_nmr(raw: dict[str, Any]) -> NmrParams:
-    """Parse the ``nmr`` block: the observable ``task`` (efg | shielding) and an
-    optional per-species ``isotopes`` map for the EFG quadrupolar coupling."""
+    """Parse the ``nmr`` block: the observable ``task`` (efg | shielding), an
+    optional per-species ``isotopes`` map for the EFG quadrupolar coupling, the
+    shielding assembly ``shielding_level`` (auto | bare | gipaw), and an optional
+    ``sigma_ref`` species/isotope → σ_ref [ppm] map for chemical shifts."""
     _check_keys("nmr", raw, {f.name for f in dataclasses.fields(NmrParams)})
     iso = raw.get("isotopes")
     if iso is not None:
         iso = {str(k): str(v) for k, v in dict(iso).items()}
-    return NmrParams(task=str(raw.get("task", "efg")), isotopes=iso)
+    sref = raw.get("sigma_ref")
+    if sref is not None:
+        sref = {str(k): float(v) for k, v in dict(sref).items()}
+    return NmrParams(
+        task=str(raw.get("task", "efg")), isotopes=iso,
+        shielding_level=str(raw.get("shielding_level", "auto")), sigma_ref=sref)
 
 
 def _load_input(path: Path) -> Input:
