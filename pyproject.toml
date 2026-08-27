@@ -573,6 +573,7 @@ include = [
     "src/gradwave/postscf/_d4_params.py",
     "src/gradwave/postscf/_dispersion_geom.py",
     "src/gradwave/postscf/dfpt_q.py",
+    "src/gradwave/postscf/efg_paw.py",
     "src/gradwave/postscf/gipaw.py",
     "src/gradwave/postscf/heisenberg_mc.py",
     "src/gradwave/postscf/seedpool.py",
