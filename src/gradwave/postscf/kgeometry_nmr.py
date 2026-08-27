@@ -74,6 +74,7 @@ with the mesh for the Sternheimer route (the dense twin and the analytic
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -1448,18 +1449,28 @@ class _SMetricResolventCG:
     def _s_apply(self, x: Tensor) -> Tensor:
         return x @ self._s0.mT
 
-    def apply(self, z: Tensor) -> Tensor:
+    def apply(
+        self, z: Tensor, *, x0: Tensor | None = None,
+        iters_out: list[int] | None = None,
+    ) -> Tensor:
         """R(ε_o)P_c z for z (npw, nocc) with per-column reference energies ε_o;
         returns the S-conduction response (npw, nocc). The RHS is projected onto
         the S-conduction range (1 − P_S^†) before the solve, exactly as
-        :func:`velocity_perturbation_q` projects its ½{v, e^{iqr}} source."""
+        :func:`velocity_perturbation_q` projects its ½{v, e^{iqr}} source.
+
+        ``x0`` (npw, nocc) warm-starts the CG from a nearby already-computed
+        response (a prior ∂/∂q stage or the adjacent q̂ pol); it only changes the
+        iteration count, never the converged solution. ``iters_out`` appends the
+        solve's CG iteration count (warm-start telemetry)."""
         rhs_full = z.mT[None]  # (1, nocc, npw)
         ov = torch.einsum("kng,kbg->kbn", self._c_occ.conj(), rhs_full)
         rhs = -(rhs_full - torch.einsum("kbn,kng->kbg", ov, self._s_occ))
+        x0_b = torch.zeros_like(rhs) if x0 is None else x0.mT[None].contiguous()
         sol = cg_sternheimer(
             self._h, self._bk, self._c_occ, self._eps, rhs,
-            torch.zeros_like(rhs), self._shift, tol=self._tol,
+            x0_b, self._shift, tol=self._tol,
             max_iter=self._max_iter, s_apply=self._s_apply, s_occ=self._s_occ,
+            iters_out=iters_out,
         )
         return sol[0].mT  # (npw, nocc)
 
@@ -1666,6 +1677,8 @@ class ShieldingDq:
         chunk_k: int | None = None,
         cg_tol: float = 1e-10,
         max_iter: int = 400,
+        response_backend: str = "auto",
+        warm_start: bool = True,
     ) -> None:
         """Build the per-k dense contexts (eigh + ∂H/∂k) at each mesh k.
 
@@ -1683,19 +1696,36 @@ class ShieldingDq:
         q = 0 ⇒ S = I, Dscr = D — the machine-precision reduction gate). Each
         per-k context then carries the screened-D ∂H/∂k, ∂S/∂k and the dense
         S(kc); the generalized eigenproblem H U = S U ε gives the occupied
-        eigenpairs, but the ∂/∂q response resolvents are solved matrix-free by
-        the S-metric CG Sternheimer (:class:`_SMetricResolventCG`) rather than
-        the ill-conditioned S-orthonormal conduction eigenbasis — ``cg_tol`` /
-        ``max_iter`` bound that solve (tight defaults so the NC-limit reduction
-        gate stays well inside tolerance). With ``uspp=None`` the plain
-        norm-conserving (S = I) route is unchanged (dense conduction resolvent).
+        eigenpairs.
+
+        ``response_backend`` picks how the ∂/∂q response resolvents are solved:
+
+        - ``"dense"`` — the fast dense-eigh S-orthonormal conduction resolvent
+          (the PR #25 speed win). Ecut-UNSTABLE when the augmentation overlap
+          S(k) is ill-conditioned (hard-augmentation anions).
+        - ``"cg"`` — the matrix-free S-metric CG Sternheimer
+          (:class:`_SMetricResolventCG`), ecut-stable regardless of cond(S) but
+          trading memory for more H-applies. ``cg_tol`` / ``max_iter`` bound it.
+        - ``"auto"`` (default) — dense on soft datasets (cond(S) ≤
+          :data:`_USPP_COND_CG_THRESHOLD`), CG only above it, so the easy
+          majority keeps the dense speed and only the diverging regime pays for
+          CG. Emits :class:`USPPShieldingConditioningWarning` when it routes to
+          CG. ``uspp="nc-gate"`` (S = I ⇒ cond 1) resolves to dense under auto.
+
+        ``warm_start`` seeds each CG solve from a nearby already-computed
+        response (previous q̂ pol → δu⁰, δu⁰ → δu¹) to cut iterations; it only
+        affects the CG backend's iteration count, never the converged result.
+        With ``uspp=None`` the plain norm-conserving (S = I) route is unchanged.
         """
         _guard(res)
         self.res = res
         self.uspp = uspp
         self._cg_tol = cg_tol
         self._max_iter = max_iter
+        self._warm_start = warm_start
+        self._cg_iters: list[int] = []  # per-solve CG iteration counts (telemetry)
         ctx = uspp if isinstance(uspp, USPPResponseCtx) else None
+        self._backend, self._cond_max = self._resolve_backend(response_backend, ctx)
         system = ctx.system if ctx is not None else res.system
         self.shape: tuple[int, int, int] = system.grid.shape
         self.volume = float(system.grid.volume)
@@ -1726,6 +1756,39 @@ class ShieldingDq:
             None if self._chunk_k is not None
             else [self._build_ctx(kf, wk)
                   for kf, wk in zip(kfs, weights, strict=True)])
+
+    def _resolve_backend(
+        self, response_backend: str, ctx: USPPResponseCtx | None
+    ) -> tuple[str, float | None]:
+        """Resolve ``response_backend`` (``"auto"|"dense"|"cg"``) to the concrete
+        S-metric resolvent backend and the mesh max cond(S(k)) (``None`` when not
+        computed). ``"auto"`` keeps the fast dense-eigh path on soft datasets and
+        routes to the ecut-stable matrix-free CG only above
+        :data:`_USPP_COND_CG_THRESHOLD`; the NC route (``uspp is None``) and the
+        S = I NC-gate (``ctx is None``) resolve to dense. Explicit choices skip
+        the cond(S) probe (one ``eigvalsh`` per mesh k)."""
+        if response_backend not in ("auto", "dense", "cg"):
+            raise ValueError(
+                "response_backend must be 'auto', 'dense', or 'cg'; got "
+                f"{response_backend!r}")
+        if self.uspp is None or response_backend != "auto":
+            return (response_backend if response_backend != "auto" else "dense"), None
+        if ctx is None:  # nc-gate: S = I ⇒ cond 1 ⇒ dense (bit-exact NC reduction)
+            return "dense", 1.0
+        cond_max = float(uspp_overlap_conditioning(ctx)["max"])
+        if cond_max > _USPP_COND_CG_THRESHOLD:
+            warnings.warn(
+                "analytic-USPP bare shielding: augmentation overlap is "
+                f"ill-conditioned (max cond(S(k)) = {cond_max:.0f} > "
+                f"{_USPP_COND_CG_THRESHOLD:.0f}); auto-routing the ∂/∂q resolvent "
+                "to the matrix-free CG backend (the dense-eigh route is "
+                "ecut-unstable here — see "
+                "experiments/autoapw/analytic_uspp_ecut_divergence.md). Pass "
+                "response_backend='dense' to override.",
+                USPPShieldingConditioningWarning, stacklevel=3,
+            )
+            return "cg", cond_max
+        return "dense", cond_max
 
     def _build_ctx(self, kf: np.ndarray, wk: float) -> _DenseKCtx:
         """One frozen dense per-k context: eigh of H(k) (never differentiated)
@@ -1877,27 +1940,41 @@ class ShieldingDq:
         m_h = _d2_mats(hks.h, dk.kc, qh)  # ∂²H/∂k²
         m_s = _d2_mats(hks.s, dk.kc, qh)  # ∂²S/∂k²
 
-        # Matrix-free S-metric conduction resolvent (ecut-stable): replaces the
-        # dense-eigh _resolvent_apply_s, which expands in the ill-conditioned
-        # S-orthonormal conduction eigenbasis and diverges with ecut for hard
-        # anions (experiments/autoapw/analytic_uspp_ecut_divergence.md). One
-        # frozen context per k reused by every resolvent solve below; the
-        # occupied eigenpairs (uo, wo) and the physical current operator stay
-        # exactly as in the dense route, so with S = I this reduces to the plain
-        # conduction resolvent (the NC-limit gate).
-        t_kin = HBAR2_2M * (dk.kpg * dk.kpg).sum(-1)
-        res_cg = _SMetricResolventCG(
-            hks.h(dk.kc), s0m, uo, wo, t_kin,
-            tol=self._cg_tol, max_iter=self._max_iter,
-        )
-        dtu = res_cg.apply(_gen_velocity(dk.v, dsv, uo, wo_c, qh_c))
+        # The S-metric conduction resolvent R(ε)P_c has two backends (see
+        # :meth:`_resolve_backend`): the fast dense-eigh S-orthonormal
+        # _resolvent_apply_s (default on well-conditioned S), and the ecut-stable
+        # matrix-free CG _SMetricResolventCG (auto-selected when S(k) is
+        # ill-conditioned, where the dense expansion diverges with ecut —
+        # experiments/autoapw/analytic_uspp_ecut_divergence.md). ``solve``
+        # abstracts the choice; both use the same occupied eigenpairs (uo, wo)
+        # and physical current operator and reduce to the plain conduction
+        # resolvent when S = I (the NC-limit gate).
+        if self._backend == "cg":
+            t_kin = HBAR2_2M * (dk.kpg * dk.kpg).sum(-1)
+            res_cg = _SMetricResolventCG(
+                hks.h(dk.kc), s0m, uo, wo, t_kin,
+                tol=self._cg_tol, max_iter=self._max_iter,
+            )
+
+            def solve(z: Tensor, x0: Tensor | None = None) -> Tensor:
+                return res_cg.apply(
+                    z, x0=(x0 if self._warm_start else None),
+                    iters_out=self._cg_iters,
+                )
+        else:
+            def solve(z: Tensor, x0: Tensor | None = None) -> Tensor:
+                return _resolvent_apply_s(uc, wc, wo, z, s0m)
+
+        dtu = solve(_gen_velocity(dk.v, dsv, uo, wo_c, qh_c))
         u_box = g_to_r(uo.mT, dk.flat, self.shape)
         vcur = [dk.v[mu] @ uo for mu in range(3)]  # current op (screened-D ∂H/∂k)
         vcur_box = [g_to_r(x.mT, dk.flat, self.shape) for x in vcur]
+        prev_du0: Tensor | None = None  # warm-start seed: adjacent q̂ pol's δu⁰
         for ip, pol in enumerate(pols):
             ep = torch.as_tensor(np.asarray(pol, dtype=float), dtype=CDTYPE)
             o0u = _gen_velocity(dk.v, dsv, uo, wo_c, ep)  # perturbation O u
-            du0 = res_cg.apply(o0u)
+            du0 = solve(o0u, x0=prev_du0)
+            prev_du0 = du0
             # O'(0) u = ½ Σ ep_μ (M^H_μ uo − ε M^S_μ uo)
             me_u = 0.5 * (
                 ep[0] * (m_h[0] @ uo - (m_s[0] @ uo) * wo_c)
@@ -1909,7 +1986,7 @@ class ShieldingDq:
                 - dtu @ (uo.mH @ (s0m @ o0u))
                 + me_u
             )
-            du1 = res_cg.apply(inner) - uo @ (dtu.mH @ (s0m @ du0))
+            du1 = solve(inner, x0=du0) - uo @ (dtu.mH @ (s0m @ du0))
             du0_box = g_to_r(du0.mT, dk.flat, self.shape)
             du1_box = g_to_r(du1.mT, dk.flat, self.shape)
             s0_acc, ds_acc = out[ip]
@@ -2326,8 +2403,25 @@ def _symmetrize_site_tensors(out: Tensor, system: object) -> Tensor:
 
 
 # --------------------------------------------------------------------------- #
-# analytic-USPP augmentation-overlap conditioning (pure diagnostic)             #
+# analytic-USPP augmentation-overlap conditioning + backend selection           #
 # --------------------------------------------------------------------------- #
+
+# cond(S) above which the "auto" backend routes the analytic ∂/∂q resolvent to
+# the matrix-free CG Sternheimer instead of the faster dense-eigh S-orthonormal
+# resolvent. Calibrated between soft PAW (Si cond(S) ≈ 2, stays dense — no CG
+# cost) and the hard-augmentation anions whose dense-eigh σ diverged with ecut
+# (MgO ¹⁷O cond(S) ≥ 426). See experiments/autoapw/analytic_uspp_ecut_divergence.md.
+_USPP_COND_CG_THRESHOLD = 50.0
+
+
+class USPPShieldingConditioningWarning(UserWarning):
+    """Annotates that :func:`sigma_shielding_dq` auto-routed the analytic bare
+    shielding to the matrix-free CG backend because the augmentation overlap
+    S(k) is ill-conditioned (cond(S) > :data:`_USPP_COND_CG_THRESHOLD`) — the
+    regime where the faster dense-eigh S-orthonormal resolvent is ecut-unstable
+    (experiments/autoapw/analytic_uspp_ecut_divergence.md). Not an error: the CG
+    backend it selects is the ecut-stable fix. Pass ``response_backend='dense'``
+    to override (and accept the instability) or ``'cg'`` to silence by forcing."""
 
 
 def uspp_overlap_conditioning(
@@ -2384,6 +2478,8 @@ def sigma_shielding_dq(
     symmetrize: bool = True,
     cg_tol: float = 1e-10,
     max_iter: int = 400,
+    response_backend: str = "auto",
+    warm_start: bool = True,
 ) -> Tensor:
     """Bare (pseudo) NMR shielding tensor by the ANALYTIC ∂/∂q at q = 0:
     σ_ij = −∂B_ind,i(r_site)/∂B_ext,j in ppm, shape (nsite, 3, 3).
@@ -2449,12 +2545,17 @@ def sigma_shielding_dq(
     Only applied to the default all-atom site list; an explicit ``sites`` subset
     (which cannot be mapped to the atom permutation) skips it.
 
-    On the USPP/PAW route the ∂/∂q response resolvents are solved matrix-free by
-    the S-metric CG Sternheimer (:class:`_SMetricResolventCG`), which is
-    ecut-stable even for hard-augmentation anions where the earlier dense-eigh
-    S-orthonormal expansion diverged (PR #399 → this fix); ``cg_tol`` /
-    ``max_iter`` bound that solve. :func:`uspp_overlap_conditioning` remains a
-    basis-health diagnostic but is no longer a divergence predictor."""
+    On the USPP/PAW route ``response_backend`` chooses how the ∂/∂q response
+    resolvent is solved: ``"dense"`` (the fast dense-eigh S-orthonormal
+    resolvent, ecut-UNSTABLE on ill-conditioned overlaps), ``"cg"`` (the
+    matrix-free S-metric CG Sternheimer :class:`_SMetricResolventCG`, ecut-stable
+    but with more H-applies), or ``"auto"`` (default — dense on soft datasets,
+    CG only when max cond(S(k)) > threshold, emitting
+    :class:`USPPShieldingConditioningWarning` when it routes to CG). So the easy
+    majority keeps the dense speed and only the diverging regime pays for CG.
+    ``cg_tol`` / ``max_iter`` bound the CG solve; ``warm_start`` seeds it from
+    the adjacent ∂/∂q stage to cut iterations. :func:`uspp_overlap_conditioning`
+    remains a basis-health diagnostic (no longer a divergence predictor)."""
     _guard(res)
     system = uspp.system if isinstance(uspp, USPPResponseCtx) else res.system
     sites_is_default = sites is None
@@ -2477,15 +2578,17 @@ def sigma_shielding_dq(
     plan = None if uspp is not None else _plan_wedge_reduction(res, axes, use_symmetry)
     if plan is None:  # exact full-mesh path (symmetry off or nothing reduces)
         eng = ShieldingDq(res, uspp=uspp, chunk_k=chunk_k,
-                          cg_tol=cg_tol, max_iter=max_iter)
+                          cg_tol=cg_tol, max_iter=max_iter,
+                          response_backend=response_backend, warm_start=warm_start)
         axis_specs = [
             (np.asarray(b[i], dtype=float) / np.linalg.norm(b[i]), None, None, None)
             for i in axes
         ]
-    else:  # opt-in little-group-of-q wedge reduction
+    else:  # opt-in little-group-of-q wedge reduction (NC route only)
         union_kfrac, per_axis = plan
         eng = ShieldingDq(res, k_frac=union_kfrac, chunk_k=chunk_k,
-                          cg_tol=cg_tol, max_iter=max_iter)
+                          cg_tol=cg_tol, max_iter=max_iter,
+                          response_backend=response_backend, warm_start=warm_start)
         axis_specs = [
             (q_hat, k_idx, w, fold) for _i, q_hat, k_idx, w, fold in per_axis
         ]
@@ -2675,6 +2778,8 @@ def sigma_shielding_gipaw(
     cg_tol: float = 1e-9,
     max_iter: int = 800,
     chunk_k: int | None = None,
+    response_backend: str = "auto",
+    warm_start: bool = True,
 ) -> dict[str, Tensor]:
     """Full absolute GIPAW chemical-shielding tensor per site (nsite, 3, 3) ppm,
 
@@ -2698,7 +2803,8 @@ def sigma_shielding_gipaw(
     species_of_atom = [int(s) for s in system.species_of_atom]
     sig_bare = sigma_shielding_dq(
         res, uspp=ctx, use_symmetry=use_symmetry, chunk_k=chunk_k,
-        cg_tol=cg_tol, max_iter=max_iter)
+        cg_tol=cg_tol, max_iter=max_iter,
+        response_backend=response_backend, warm_start=warm_start)
     gs = ground_state_shielding(
         list(paws), species_of_atom, cast("Any", res).rho_ij_atoms)
     onsites = {sp: PAWOnSite.from_paw(p) for sp, p in enumerate(paws)}

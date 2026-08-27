@@ -10,6 +10,8 @@ conj(P(−q)); at q = 0 the tensor is Hermitian and the machinery reduces to
 the M5 velocity solves.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 import torch
@@ -945,18 +947,21 @@ def test_percolumn_cg_matches_lockstep_and_certifies(si_mesh):
 
 @pytest.mark.standard
 def test_sigma_dq_uspp_nc_limit_reduction():
-    """The S-metric (USPP/PAW smooth) analytic-σ path reduces to the plain
-    norm-conserving analytic σ to machine precision.
+    """The S-metric (USPP/PAW smooth) analytic-σ path, solved through the
+    matrix-free CG backend, reduces to the plain norm-conserving analytic σ to
+    CG solver tolerance.
 
     Routing ``sigma_shielding_dq`` through the generalized (H U = S U ε)
     machinery with a context built from an NC pseudo (q_int = 0 ⇒ S = I,
-    Dscr = D) exercises every new code path — the Cholesky-whitened generalized
-    eigensolver, the S-orthogonal resolvent ⟨u_m|S|·⟩, the generalized velocity
-    v = ∂H/∂k − ε ∂S/∂k, the screened-D current operator, and the −ε ∂²S/∂k²
-    term of the mixed second derivative — while every S-metric correction is
-    identically zero, so the result must match the S = I route bit-for-bit
-    (measured ≲1e-12). This is the whole correctness argument of PR-analytic-A:
-    no external reference, no finite-q code. NC reference σ_iso ≈ 20.82 ppm."""
+    Dscr = D) and ``response_backend="cg"`` exercises every S-metric code path —
+    the Cholesky-whitened generalized eigensolver (occupied eigenpairs), the
+    generalized velocity v = ∂H/∂k − ε ∂S/∂k, the screened-D current operator,
+    the −ε ∂²S/∂k² mixed-second-derivative term, and the matrix-free S-metric CG
+    Sternheimer resolvent (:class:`_SMetricResolventCG`) — while every S-metric
+    correction is identically zero, so the CG response must reduce to the plain
+    conduction resolvent and the result match the S = I route to CG tolerance
+    (tight ``cg_tol`` ⇒ ≲1e-9·σ). This is the whole correctness argument of the
+    CG reroute: no external reference, no finite-q code. NC σ_iso ≈ 20.82 ppm."""
     from gradwave.postscf.kgeometry_nmr import sigma_shielding_dq
 
     torch.set_num_threads(2)
@@ -968,7 +973,10 @@ def test_sigma_dq_uspp_nc_limit_reduction():
     assert res.converged
 
     sig_nc = sigma_shielding_dq(res, use_symmetry=False)
-    sig_gate = sigma_shielding_dq(res, uspp="nc-gate", use_symmetry=False)
+    # Force the matrix-free CG backend so the gate validates the CG path's
+    # reduction to the plain-NC dense resolvent (auto would pick dense for S = I).
+    sig_gate = sigma_shielding_dq(res, uspp="nc-gate", use_symmetry=False,
+                                  response_backend="cg")
 
     assert sig_gate.shape == sig_nc.shape == (2, 3, 3)
     assert torch.isfinite(sig_gate).all()
@@ -1054,12 +1062,23 @@ def test_sigma_shielding_gipaw_si_absolute():
     wall time. Reference numbers at 12 Ry / 2×2×2: core ≈ 838, bare ≈ −5.7,
     dia_aug ≈ 2.2, para_aug ≈ −436 ⇒ total ≈ 398 ppm."""
     from gradwave.postscf.kgeometry_nmr import (
+        ShieldingDq,
         build_uspp_response_ctx,
         sigma_shielding_gipaw,
     )
 
     paw, res = _si_paw_222()
     ctx = build_uspp_response_ctx(res, PBE())
+    # Speed-preservation gate: soft PAW Si (cond(S) ≈ 2) must auto-select the
+    # fast dense-eigh backend — no CG cost, so σ is byte-unchanged from the
+    # dense path — not the matrix-free CG (reserved for the ill-conditioned
+    # regime). Assert the selector's choice directly (cheap: no per-k build).
+    probe = object.__new__(ShieldingDq)
+    probe.uspp = ctx
+    backend, cond = probe._resolve_backend("auto", ctx)
+    assert backend == "dense", f"soft-PAW Si should stay dense, got {backend}"
+    assert cond < 50.0, f"Si cond(S) unexpectedly high: {cond}"
+
     out = sigma_shielding_gipaw(res, ctx, [paw], use_symmetry=False, cg_tol=1e-8)
     total_iso = [float(torch.diagonal(out["total"][a]).mean()) for a in range(2)]
     assert abs(total_iso[0] - total_iso[1]) < 1.0
@@ -1099,5 +1118,55 @@ def test_smetric_resolvent_cg_reduces_to_dense_conduction_resolvent():
     z = torch.randn(npw, nocc, dtype=CDTYPE)
     ref = _resolvent_apply(uc, wc, wo, z)
     cg = _SMetricResolventCG(h0, s0, uo, wo, t_kin, tol=1e-12, max_iter=400)
-    got = cg.apply(z)
+    cold_it: list[int] = []
+    got = cg.apply(z, iters_out=cold_it)
     assert torch.allclose(got, ref, atol=1e-8, rtol=0.0)
+
+    # warm-start from the (nearby) converged solution: same answer, fewer iters.
+    warm_it: list[int] = []
+    got_warm = cg.apply(z, x0=got, iters_out=warm_it)
+    assert torch.allclose(got_warm, ref, atol=1e-8, rtol=0.0)
+    assert warm_it[0] < cold_it[0]  # warm start cuts the CG iteration count
+
+
+def test_shielding_dq_backend_selector():
+    """``ShieldingDq._resolve_backend`` keeps the fast dense-eigh resolvent on
+    soft (well-conditioned) datasets and routes to the ecut-stable matrix-free CG
+    only when the augmentation overlap is ill-conditioned — the speed-preserving
+    auto-switch. Pins the branch logic without an SCF by patching the cond(S)
+    probe (the calibration: soft PAW cond ≈ 2 stays dense, diverging anions
+    ≥ 426 go CG; threshold 50)."""
+    from unittest.mock import patch
+
+    from gradwave.postscf.kgeometry_nmr import (
+        ShieldingDq,
+        USPPResponseCtx,
+        USPPShieldingConditioningWarning,
+    )
+
+    eng = object.__new__(ShieldingDq)  # bypass __init__: only .uspp is read
+    fake_ctx = object.__new__(USPPResponseCtx)
+    eng.uspp = fake_ctx
+    probe = "gradwave.postscf.kgeometry_nmr.uspp_overlap_conditioning"
+
+    with patch(probe, return_value={"max": 2.0, "min": 1.9, "mean": 2.0}):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            backend, cond = eng._resolve_backend("auto", fake_ctx)  # soft → dense
+        assert backend == "dense" and cond == 2.0
+    with patch(probe, return_value={"max": 3245.0, "min": 1.0, "mean": 800.0}):
+        with pytest.warns(USPPShieldingConditioningWarning, match="CG"):
+            backend, cond = eng._resolve_backend("auto", fake_ctx)  # hard → CG
+        assert backend == "cg" and cond == 3245.0
+    # explicit overrides skip the (patched-to-explode) probe entirely.
+    with patch(probe, side_effect=AssertionError("probe must not run")):
+        assert eng._resolve_backend("dense", fake_ctx) == ("dense", None)
+        assert eng._resolve_backend("cg", fake_ctx) == ("cg", None)
+    # nc-gate (ctx None, S = I ⇒ cond 1) resolves to dense under auto.
+    assert eng._resolve_backend("auto", None) == ("dense", 1.0)
+    # NC route (uspp None) is always dense (no S-metric branch runs).
+    eng_nc = object.__new__(ShieldingDq)
+    eng_nc.uspp = None
+    assert eng_nc._resolve_backend("auto", None) == ("dense", None)
+    with pytest.raises(ValueError, match="response_backend"):
+        eng._resolve_backend("bogus", fake_ctx)
