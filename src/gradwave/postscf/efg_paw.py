@@ -151,6 +151,16 @@ class EFGOnSite:
 
     @classmethod
     def from_paw(cls, paw: PAWData) -> EFGOnSite:
+        # A bare ultrasoft / GBRV dataset (is_paw=False) carries no AE/PS partial waves, so the
+        # Petrilli-Blöchl on-site l=2 term cannot be reconstructed — and the raw failure is an
+        # opaque IndexError deep in the index-map read. Fail early with an actionable message:
+        # EFG requires a PAW dataset (measured — see experiments/autoapw/efg_eta_anion.md Front A).
+        if not paw.is_paw or not paw.aewfc:
+            raise ValueError(
+                f"efg_paw needs a PAW dataset for '{paw.element}': this dataset has "
+                f"is_paw={paw.is_paw} and {len(paw.aewfc)} AE partial waves, so it carries no "
+                "on-site l=2 density for the electric-field-gradient. Use a PAW (kjpaw) "
+                "pseudopotential, not a bare ultrasoft/GBRV one.")
         base = PAWOnSite.from_paw(paw)  # reuse the partial-wave / index-map reading
         r = base.r
         rab = base.rab
