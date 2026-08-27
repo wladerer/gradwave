@@ -19,6 +19,15 @@ def test_efg_anion_basis_multiple_species_and_helo_energy():
         assert spec["el_override"][sp] == {0: "2p"}
 
 
+def test_efg_anion_basis_per_species_helo_energy():
+    """Opt-in structure-specific HELO energy: a {species: eV} mapping raises E₂ on the hard anion
+    (rutile-class O) while leaving another anion at the robust 90 eV default (absent species fall
+    back to 90). Measured recipe — experiments/autoapw/efg_eta_anion.md."""
+    spec = efg_anion_basis(["O", "F"], helo_e={"O": 120.0})
+    assert spec["los"]["O"][1] == (1, {"e": 120.0, "confine": False})   # hard site raised
+    assert spec["los"]["F"][1] == (1, {"e": 90.0, "confine": False})    # absent -> 90 default
+
+
 def test_efg_anion_basis_helo_only():
     """semicore=False drops the l=0 LO / el_override, leaving the decisive l=1 HELO."""
     spec = efg_anion_basis(["O"], semicore=False)

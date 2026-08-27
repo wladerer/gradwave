@@ -124,13 +124,60 @@ buy a correct asymmetry with a small, known magnitude sacrifice. The 76–79 % r
 floor itself is the separate structural residual (O–Ti spheres nearly touch, support ratio 0.98;
 elk_efg_forensics D4) and is *not* what E₂ governs.
 
+### Transferability control (corundum Al₂O₃ O, `efg_eta_helo_corundum.py`, cold converge_efg, dense)
+
+Does the raised E₂ that helps rutile *overshoot* the anion whose η is already good? Corundum O
+Elk η = 0.51, gw ≈ 0.46–0.48. Two points, both gated:
+
+| E₂ (eV) | V_zz (eV/Å²) | \|r\| vs Elk | η | C_Q(¹⁷O) MHz | gate |
+|---|---|---|---|---|---|
+| 90 | +34.16 | 0.959 | 0.460 | 2.113 | ✅ GATED |
+| 120 | +33.90 | 0.951 | **0.462** | 2.097 | ✅ GATED |
+
+**Corundum O η is E₂-insensitive: Δη = +0.002 over E₂ 90→120** (vs rutile's +0.07 over the same
+step), magnitude flat at 95–96 %. So the raised E₂ neither helps nor *overshoots* the already-good
+anion — it simply does nothing there. The E₂→η coupling strength is **structure-dependent**: strong
+exactly on the stringent biaxial site where η is hard (rutile's planar-tricoordinate O), null on
+the well-described one (corundum's C₂ O).
+
 ## Verdict
 
-**Front B is a measured trade-off with a favorable slope, shipped as a documented tunable, not a
-default change.** The l=1 HELO energy E₂ is a genuine, monotonic η lever (dη/dE₂ > 0) that can
-place rutile-O η anywhere from 0.65 (E₂=90) to Elk's 0.74 (E₂≈123) at a ~3 % |V_zz| cost — useful
-when the second-order MAS *lineshape* (η-driven) matters more than C_Q magnitude. It is **not** a
-decoupling that fixes η for free, and above E₂≈120 the fullpot SCF stops gating, so raising the
-*default* would trade a validated, robustly-converging recipe for a fragile one. Decision: keep
-`efg_anion_basis(helo_e=90.0)` as the default and expose the trade-off in the docstring so an
-η-sensitive user can dial E₂ up knowingly. (Front A verdict below.)
+**Front B — a real but structure-specific η lever, shipped as documented guidance on
+`efg_anion_basis(helo_e=…)`, default kept at 90.** Measured facts:
+
+- E₂ is a genuine, monotonic η knob on the hard case (rutile O: dη/dE₂ ≈ +0.007 eV⁻¹; η reaches
+  Elk's 0.74 at E₂ ≈ 123, at a ~3 % |V_zz| cost — the same magnitude↔η trade-off as aug-lmax-6 but
+  in the opposite, gentler sense).
+- It is **null on the easy case** (corundum O flat 0.46→0.462) — so it does not overshoot an
+  already-correct η; it is safe to raise where needed.
+- It is **not a free η fix or a decoupling**, and it does **not** touch the separate rutile-O
+  magnitude floor (76–79 %, the O–Ti touching-sphere D4 residual).
+- Convergence turns fragile above E₂ ≈ 120 on rutile (130/150 diverge even with newton_polish), so
+  a raised *default* would trade the validated, robustly-gating E₂ = 90 recipe (and its MgF₂ /
+  corundum / rutile validations) for a fragile one for a modest, single-material gain.
+
+Decision: **keep `helo_e=90.0` as the default** (robust, validated) and document E₂ as the η lever
+so a user chasing a correct second-order MAS *lineshape* on a stringent biaxial anion can dial it
+toward ~120 knowingly, accepting the ~3 % magnitude cost and the convergence caveat. The coarse
+scan's earlier "non-monotonic / sign-flipping" read was pure convergence noise — corrected here.
+
+## Front A verdict (summary)
+
+**Measured NULL.** PAW O-dataset generation does not move the anion η (corundum O η 0.475–0.481
+across psl 1.0.0 / 0.1 / GIPAW-era kjpaw; all already 93–94 % of Elk 0.51), because every parseable
+O PAW ships the same 4 projectors — on-site l=2 completeness is fixed by the UPF-PAW format. A
+non-PAW / GBRV dataset carries no partial waves and cannot produce the on-site EFG at all (now a
+clear error, not an IndexError — `postscf.efg_paw`). JTH XML-PAW and RRKJ-refit USPPs are
+unreachable by the parser. So "richer dataset" is not an available anion-η lever in this ecosystem.
+
+## What shipped
+
+- **Front A**: a clear `ValueError` in `EFGOnSite.from_paw` when handed a non-PAW dataset (was an
+  opaque IndexError), with a unit test — the actionable form of "don't use USPP/GBRV for EFG".
+- **Front B**: `efg_anion_basis(helo_e=…)` now accepts a **per-species** `{species: eV}` mapping
+  (opt-in; absent species fall back to the robust 90 eV default), so the E₂ lever can be raised on
+  a hard/near-touching anion site alone — a no-op elsewhere. Measured E₂→η guidance added to the
+  docstring; default `helo_e` unchanged (90 eV). A unit test covers the per-species path. Both scan
+  drivers + the dataset fetch script live in `experiments/autoapw/`.
+- **Honest nulls** documented above: dataset generation (Front A) and a universal raised-E₂ default
+  (Front B) both fail to close η beyond what the shipped recipe already achieves.

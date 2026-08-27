@@ -29,8 +29,8 @@ from typing import Any
 __all__ = ["efg_anion_basis", "merge_basis"]
 
 
-def efg_anion_basis(anions: list[str], *, helo_e: float = 90.0, semicore: bool = True,
-                    s_label: str = "2s", s_energy_label: str = "2p"
+def efg_anion_basis(anions: list[str], *, helo_e: float | dict[str, float] = 90.0,
+                    semicore: bool = True, s_label: str = "2s", s_energy_label: str = "2p"
                     ) -> dict[str, dict[str, Any]]:
     """Build the validated EFG anion basis recipe for the named ``anions``.
 
@@ -41,6 +41,22 @@ def efg_anion_basis(anions: list[str], *, helo_e: float = 90.0, semicore: bool =
     (O/F/N) recipe; pass ``s_label``/``s_energy_label`` for a different period, or
     ``semicore=False`` for the HELO alone.
 
+    ``helo_e`` — the HELO energy E₂ (eV) — is a **structure-specific η lever**, measured on
+    rutile-TiO₂ O and corundum-Al₂O₃ O (``experiments/autoapw/efg_eta_anion.md``). It may be a
+    single float (applied to every anion) or a ``{species: eV}`` mapping (per-species; species
+    absent from the mapping fall back to 90 eV). Measured guidance:
+
+    * **Default 90 eV is the robust, validated value** — keep it for the general case and for
+      well-separated / already-biaxially-correct anion sites, where E₂ is a **no-op** (corundum O:
+      η 0.460 → 0.462 over E₂ 90 → 120, magnitude flat at ~96 %; raising E₂ neither helps nor
+      overshoots).
+    * On a **stringent biaxial anion whose muffin-tin spheres nearly touch** (rutile-class O, where
+      the standard basis leaves η badly low), E₂ tunes η **monotonically upward**: rutile O
+      η 0.654 → 0.724 over E₂ 90 → 120, crossing the Elk reference (0.74) near E₂ ≈ 123. The cost
+      is a ~3 % drop in |V_zz| (the magnitude↔η trade-off) and a fullpot SCF that stops gating
+      cleanly above E₂ ≈ 120 — so raise E₂ deliberately, per hard species, when a correct
+      second-order MAS *lineshape* (η-driven) matters more than the last few % of C_Q magnitude.
+
     Raises ``ValueError`` on an empty/duplicate anion list.
     """
     if not anions:
@@ -50,11 +66,12 @@ def efg_anion_basis(anions: list[str], *, helo_e: float = 90.0, semicore: bool =
     los: dict[str, list[Any]] = {}
     el_override: dict[str, dict[int, Any]] = {}
     for sp in anions:
+        e2 = helo_e.get(sp, 90.0) if isinstance(helo_e, dict) else helo_e
         specs: list[Any] = []
         if semicore:
             specs.append((0, s_label))
             el_override[sp] = {0: s_energy_label}
-        specs.append((1, {"e": float(helo_e), "confine": False}))
+        specs.append((1, {"e": float(e2), "confine": False}))
         los[sp] = specs
     out: dict[str, dict[str, Any]] = {"los": los}
     if el_override:
