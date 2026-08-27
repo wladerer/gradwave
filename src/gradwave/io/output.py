@@ -735,6 +735,31 @@ def _nmr_lines(nmr):
                 row += (f" {s['delta_iso_ppm']:>13.3f}"
                         if "delta_iso_ppm" in s else f" {'—':>13s}")
             lines.append(row)
+        efg = nmr.get("efg")
+        if efg:
+            lines.append(_sec("NMR electric field gradient (plane-wave PAW)"))
+            lines.append(f"   {'site':>4s} {'elem':>4s} {'V_zz [eV/Å²]':>13s} "
+                         f"{'η':>6s} {'isotope':>8s} {'|C_Q| [MHz]':>12s}")
+            for s in efg.get("sites", []):
+                cq = (f"{s['abs_C_Q_MHz']:>12.4f}"
+                      if "abs_C_Q_MHz" in s else f"{'—':>12s}")
+                iso = f"{s.get('isotope', '—'):>8s}"
+                lines.append(f"   {s['site']:>4d} {s.get('species') or ''!s:>4s} "
+                             f"{s['V_zz_eV_ang2']:>13.4f} {s['eta']:>6.3f} {iso} {cq}")
+        spec = nmr.get("spectrum")
+        if spec:
+            nuc = spec.get("nucleus")
+            nuc_s = ",".join(nuc) if isinstance(nuc, list) else str(nuc)
+            lines.append(_sec(f"NMR simulated spectrum ({spec['mode']}, {spec['kind']})"))
+            det = [("nucleus", nuc_s), ("sites", str(spec.get("n_sites", 0)))]
+            if spec.get("larmor_mhz"):
+                det.append(("Larmor/MHz", f"{spec['larmor_mhz']:.3f}"))
+            if spec.get("spin_rate_hz"):
+                det.append(("MAS/kHz", f"{spec['spin_rate_hz'] / 1e3:.2f}"))
+            det.append(("peak/ppm", f"{spec['peak_ppm']:.2f}"))
+            rng = spec.get("ppm_range", [0.0, 0.0])
+            det.append(("axis/ppm", f"{rng[0]:.1f} … {rng[1]:.1f}"))
+            lines += _cols(det)
         lines.append("")
         return lines
     # EFG

@@ -311,7 +311,8 @@ def _apply_shift_reference(
 def _shielding_bare_block(inp: Input, res: Any) -> dict[str, Any]:
     from gradwave.postscf.kgeometry_nmr import sigma_shielding_dq
 
-    sig = sigma_shielding_dq(res).detach().cpu().numpy()  # (nsite, 3, 3) ppm
+    sig = sigma_shielding_dq(
+        res, chunk_k=inp.nmr.chunk_k).detach().cpu().numpy()  # (nsite, 3, 3) ppm
     symbols = inp.atoms.get_chemical_symbols()
     sites: list[dict[str, Any]] = [
         {
@@ -346,7 +347,8 @@ def _shielding_gipaw_block(inp: Input, res: Any) -> dict[str, Any]:
     paws = _as_paws(upfs)
     ctx = build_uspp_response_ctx(res, build_xc(inp))
     out = {k: v.detach().cpu().numpy()
-           for k, v in sigma_shielding_gipaw(res, ctx, paws).items()}
+           for k, v in sigma_shielding_gipaw(
+               res, ctx, paws, chunk_k=inp.nmr.chunk_k).items()}
     symbols = inp.atoms.get_chemical_symbols()
     sites: list[dict[str, Any]] = []
     for i in range(out["total"].shape[0]):
@@ -371,11 +373,184 @@ def _shielding_gipaw_block(inp: Input, res: Any) -> dict[str, Any]:
     }
 
 
+def _resolve_pw_efg(want: bool | str, is_paw: bool) -> bool:
+    """Whether to compute the PW/PAW EFG in the shielding task. ``'auto'`` → on for
+    a PAW ground state; ``True`` requires PAW (else a clear error); ``False`` off."""
+    if want == "auto":
+        return is_paw
+    if want and not is_paw:
+        raise ValueError(
+            "nmr.efg=true needs an all-PAW ground state (the Petrilli–Blöchl PAW "
+            "EFG reconstructs the on-site l=2 field gradient from PAWData); this "
+            "run is norm-conserving — use false or 'auto'.")
+    return bool(want)
+
+
+def _efg_pw_block(inp: Input, res: Any, iso_map: dict[str, str]) -> dict[str, Any]:
+    """Per-site plane-wave/PAW EFG (``postscf.efg_paw``) on the shielding ground
+    state: V_zz/η and, for the ``iso_map`` isotopes, the quadrupolar coupling C_Q.
+    Every value is JSON-native (tensors → nested lists)."""
+    from gradwave.postscf.efg_paw import efg_paw
+
+    entries = efg_paw(res, isotopes=iso_map or None)
+    sites: list[dict[str, Any]] = []
+    for e in entries:
+        v = e["V"]
+        entry: dict[str, Any] = {
+            "site": int(e["site"]),
+            "species": e["element"],
+            "V_zz_eV_ang2": float(e["V_zz"]),
+            "eta": float(e["eta"]),
+            "tensor_eV_ang2": v.detach().cpu().numpy().tolist()
+            if hasattr(v, "detach") else v,
+        }
+        cq = e.get("C_Q")
+        if cq is not None:
+            entry.update({
+                "isotope": cq["isotope"],
+                "C_Q_MHz": float(cq["C_Q_MHz"]),
+                "abs_C_Q_MHz": float(cq["abs_C_Q_MHz"]),
+                "nu_Q_MHz": float(cq["nu_Q_MHz"]),
+                "spin": float(cq["spin"]),
+                "Q_barn": float(cq["Q_barn"]),
+            })
+        sites.append(entry)
+    return {"method": "paw_petrilli_blochl", "n_sites": len(sites), "sites": sites}
+
+
+def _assemble_nmr_sites(block: dict[str, Any]) -> list[Any]:
+    """Map the REFERENCED shielding sites (those carrying ``delta_iso_ppm``) to
+    ``postscf.nmr_spectrum.NMRSite`` records: δ_iso, the Haeberlen CSA (δ_aniso,
+    η_csa) from the shielding tensor, and — when the ``block['efg']`` block covers
+    the site with a quadrupolar isotope — C_Q (Hz)/η_Q/spin. Unreferenced sites
+    (no δ_iso) are skipped: a spectrum is a chemical-shift axis."""
+    from gradwave.postscf.nmr_spectrum import NMRSite
+
+    efg_by_site: dict[int, dict[str, Any]] = {}
+    efg_block = block.get("efg")
+    if efg_block is not None:
+        for e in efg_block["sites"]:
+            efg_by_site[int(e["site"])] = e
+
+    sites: list[Any] = []
+    for s in block["sites"]:
+        if "delta_iso_ppm" not in s:
+            continue
+        # Haeberlen reduced anisotropy in the SHIFT convention:
+        #   δ_aniso = δ_zz − δ_iso = −(σ_zz − σ_iso) = −(2/3)·(σ_zz − ½(σ_xx+σ_yy)),
+        # i.e. minus two-thirds of the stored full shielding anisotropy. η is
+        # convention-invariant under δ = σ_ref − σ (numerator and denominator both
+        # flip sign), so it carries over unchanged.
+        delta_aniso = -(2.0 / 3.0) * float(s["sigma_aniso_ppm"])
+        c_q, eta_q, spin = 0.0, 0.0, 0.5
+        e = efg_by_site.get(int(s["site"]))
+        if e is not None and "spin" in e:
+            c_q = float(e["C_Q_MHz"]) * 1.0e6   # MHz → Hz
+            eta_q = float(e["eta"])
+            spin = float(e["spin"])
+        sites.append(NMRSite(
+            delta_iso=float(s["delta_iso_ppm"]),
+            delta_aniso=delta_aniso,
+            eta_csa=float(s["sigma_eta"]),
+            c_q=c_q, eta_q=eta_q, spin=spin, weight=1.0,
+            label=f"{s.get('species') or ''}{s['site']}"))
+    return sites
+
+
+def _spectrum_kind(mode: str, sites: list[Any]) -> str:
+    """Lineshape family for the assembled ``sites`` at ``mode`` (static | mas).
+    Spin-½ → CSA (``csa_static`` | ``mas``); half-integer I ≥ 3/2 → second-order
+    central transition (``quad2_ct_static`` | ``quad2_ct_mas``). A mix of nuclei
+    (different spins), or an unsupported integer spin, is a clear error."""
+    spins = {s.spin for s in sites}
+    if len(spins) != 1:
+        raise ValueError(
+            f"nmr.spectrum: the referenced sites carry mixed nuclear spins {sorted(spins)}; "
+            "a single powder spectrum observes one nucleus — reference one element at a time.")
+    spin = next(iter(spins))
+    if spin == 0.5:
+        return "mas" if mode == "mas" else "csa_static"
+    if spin < 1.5 or int(round(2.0 * spin)) % 2 != 1:
+        raise ValueError(
+            f"nmr.spectrum: unsupported nuclear spin I={spin} (only spin-½ CSA and "
+            "half-integer I ≥ 3/2 central-transition lineshapes are wired).")
+    return "quad2_ct_mas" if mode == "mas" else "quad2_ct_static"
+
+
+def _resolve_nu0_hz(
+    larmor: float | dict[str, float] | None,
+    species: list[str],
+    isotopes: list[str],
+) -> float | None:
+    """Observed-nucleus Larmor frequency (Hz) from ``nmr.spectrum.larmor_mhz``: a
+    scalar applies directly; a map is keyed by isotope first, then species."""
+    if larmor is None:
+        return None
+    if not isinstance(larmor, dict):
+        return float(larmor) * 1.0e6
+    for key in (*isotopes, *species):
+        if key in larmor:
+            return float(larmor[key]) * 1.0e6
+    raise ValueError(
+        f"nmr.spectrum.larmor_mhz has no entry for the observed nucleus "
+        f"(species {species}, isotopes {isotopes}); keys present: {sorted(larmor)}.")
+
+
+def _spectrum_block(cfg: Any, block: dict[str, Any]) -> dict[str, Any]:
+    """Synthesize the powder lineshape from the referenced shielding sites and,
+    for quadrupolar nuclei, the EFG block. Returns a JSON-native block carrying
+    the config echo and the ``(ppm_axis, intensity)`` arrays as lists."""
+    import numpy as np
+
+    from gradwave.postscf.nmr_spectrum import spectrum
+
+    sites = _assemble_nmr_sites(block)
+    if not sites:
+        raise ValueError(
+            "nmr.spectrum.enabled needs referenced sites: set nmr.sigma_ref so each "
+            "observed site carries δ_iso (the spectrum axis is a chemical-shift scale). "
+            "No site had delta_iso_ppm.")
+    kind = _spectrum_kind(cfg.mode, sites)
+    ref_species = sorted({s["species"] for s in block["sites"]
+                          if "delta_iso_ppm" in s and s.get("species")})
+    efg_sites = block.get("efg", {}).get("sites", []) if block.get("efg") else []
+    isotopes = sorted({e["isotope"] for e in efg_sites
+                       if "isotope" in e and e.get("species") in ref_species})
+    nu0_hz = _resolve_nu0_hz(cfg.larmor_mhz, ref_species, isotopes)
+    if kind != "csa_static" and (nu0_hz is None or nu0_hz <= 0.0):
+        raise ValueError(
+            f"nmr.spectrum: the {kind!r} lineshape needs a positive "
+            "nmr.spectrum.larmor_mhz (the observed-nucleus Larmor frequency, MHz).")
+    fwhm_g = cfg.broadening_ppm if cfg.lineshape == "gauss" else 0.0
+    fwhm_l = cfg.broadening_ppm if cfg.lineshape == "lorentz" else 0.0
+    ppm_axis, intensity = spectrum(
+        sites, kind=kind, nu0_hz=nu0_hz or 0.0, nu_r_hz=cfg.spin_rate_hz,
+        n_orientations=cfg.n_orientations, n_points=cfg.n_points,
+        fwhm_gauss=fwhm_g, fwhm_lorentz=fwhm_l)
+    return {
+        "mode": cfg.mode,
+        "kind": kind,
+        "nucleus": isotopes or ref_species,
+        "larmor_mhz": (nu0_hz / 1.0e6) if nu0_hz else None,
+        "spin_rate_hz": cfg.spin_rate_hz if cfg.mode == "mas" else None,
+        "broadening_ppm": cfg.broadening_ppm,
+        "lineshape": cfg.lineshape,
+        "n_orientations": int(cfg.n_orientations),
+        "n_sites": len(sites),
+        "peak_ppm": float(ppm_axis[int(np.argmax(intensity))]),
+        "ppm_range": [float(np.min(ppm_axis)), float(np.max(ppm_axis))],
+        "ppm_axis": ppm_axis.tolist(),
+        "intensity": intensity.tolist(),
+    }
+
+
 def _run_shielding(inp: Input, verbose: bool) -> dict[str, Any]:
     """Plane-wave GIPAW shielding. The concrete assembly is chosen by
     ``inp.nmr.shielding_level`` against the SCF ground state actually produced:
     ``auto`` → 'gipaw' for a USPP/PAW ground state, 'bare' for norm-conserving;
-    an explicit level is validated against that ground state."""
+    an explicit level is validated against that ground state. When ``nmr.efg`` is
+    on (auto for PAW) the same ground state also yields the PW/PAW EFG, and
+    ``nmr.spectrum`` synthesizes a powder lineshape from the referenced sites."""
     from gradwave.api.scf import run_scf
     from gradwave.scf.results import USPPResult
 
@@ -399,6 +574,12 @@ def _run_shielding(inp: Input, verbose: bool) -> dict[str, Any]:
              else _shielding_bare_block(inp, res))
     block["shielding_level"] = level
     _apply_shift_reference(block, inp.nmr.sigma_ref)
+
+    iso_map = _resolve_isotopes(inp.nmr.isotopes, inp.atoms.get_chemical_symbols())
+    if _resolve_pw_efg(inp.nmr.efg, is_paw):
+        block["efg"] = _efg_pw_block(inp, res, iso_map)
+    if inp.nmr.spectrum.enabled:
+        block["spectrum"] = _spectrum_block(inp.nmr.spectrum, block)
     return block
 
 

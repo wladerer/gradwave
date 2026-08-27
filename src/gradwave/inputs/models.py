@@ -707,6 +707,57 @@ class FlapwParams:
 
 
 @dataclass(frozen=True)
+class NmrSpectrumParams:
+    """Powder-lineshape synthesis for the shielding NMR task (``postscf.nmr_spectrum``).
+
+    Off by default (``enabled=False``), so a shielding run stays byte-identical
+    unless a spectrum is asked for. When enabled the driver assembles one
+    :class:`gradwave.postscf.nmr_spectrum.NMRSite` per referenced site — the
+    chemical shift δ_iso (from ``nmr.sigma_ref``; the spectrum needs a reference),
+    the CSA (δ_aniso, η_csa) from the shielding tensor, and — for a quadrupolar
+    half-integer nucleus — C_Q/η_Q/spin from the ``nmr.efg`` block — then calls the
+    powder-average synthesis and emits ``(ppm_axis, intensity)``.
+
+    ``mode`` selects the lineshape family: ``'static'`` (a static powder pattern)
+    or ``'mas'`` (magic-angle spinning at ``spin_rate_hz``). A spin-½ observed
+    nucleus uses the CSA lineshape (the shielding alone sets it); a quadrupolar
+    half-integer nucleus uses the second-order central-transition lineshape.
+    ``larmor_mhz`` is the observed-nucleus Larmor frequency (a single value, or a
+    species/isotope → MHz map) — required for MAS and quadrupolar lineshapes,
+    unused for a spin-½ static CSA pattern. ``broadening_ppm`` convolves a
+    ``lineshape`` (``'gauss'`` | ``'lorentz'``) line; the powder average uses
+    ``n_orientations`` orientations over ``n_points`` axis bins."""
+
+    enabled: bool = False
+    mode: str = "static"  # static | mas
+    spin_rate_hz: float = 0.0  # MAS rotor frequency (mode='mas')
+    # observed-nucleus Larmor frequency (MHz): a single value or a species/isotope map
+    larmor_mhz: float | dict[str, float] | None = None
+    broadening_ppm: float = 0.0
+    lineshape: str = "gauss"  # gauss | lorentz
+    n_orientations: int = 2000
+    n_points: int = 2048
+
+    def __post_init__(self):
+        if self.mode not in ("static", "mas"):
+            raise InputError(
+                f"nmr.spectrum.mode must be 'static' or 'mas', got {self.mode!r}")
+        if self.lineshape not in ("gauss", "lorentz"):
+            raise InputError(
+                "nmr.spectrum.lineshape must be 'gauss' or 'lorentz', got "
+                f"{self.lineshape!r}")
+        if self.enabled and self.mode == "mas" and self.spin_rate_hz <= 0.0:
+            raise InputError(
+                "nmr.spectrum.spin_rate_hz must be > 0 Hz for mode='mas'")
+        if self.n_orientations < 1:
+            raise InputError("nmr.spectrum.n_orientations must be >= 1")
+        if self.n_points < 2:
+            raise InputError("nmr.spectrum.n_points must be >= 2")
+        if self.broadening_ppm < 0.0:
+            raise InputError("nmr.spectrum.broadening_ppm must be >= 0 ppm")
+
+
+@dataclass(frozen=True)
 class NmrParams:
     """NMR-observable selection (task: nmr).
 
@@ -732,13 +783,31 @@ class NmrParams:
 
     ``isotopes`` maps a species to the isotope whose Q gives C_Q (e.g.
     ``{"Ti": "49Ti", "O": "17O"}``); a species left unmapped reports V_zz/η only.
-    None auto-selects the first tabulated isotope for each element (EFG only)."""
+    None auto-selects the first tabulated isotope for each element (EFG only).
+
+    ``efg`` (``task='shielding'`` only) also computes the plane-wave/PAW electric
+    field gradient (Petrilli–Blöchl, ``postscf.efg_paw``) on the SAME ground state
+    as the shielding, reporting per-site V_zz/η and — for the ``isotopes`` — C_Q:
+    ``False`` off, ``True`` on (requires an all-PAW ground state), ``'auto'`` on
+    only when the ground state is PAW. It feeds the quadrupolar spectrum path.
+
+    ``spectrum`` (:class:`NmrSpectrumParams`) synthesizes a powder lineshape from
+    the per-site δ_iso + CSA (+ C_Q/η_Q for quadrupolar nuclei); off by default.
+
+    ``chunk_k`` (``task='shielding'``, PW route) streams the dense per-k
+    response contexts over blocks of at most that many k-points — bit-identical
+    to the eager default (None) but with an O(1)-in-nk peak memory footprint,
+    at the cost of rebuilding each context once per sampled axis. The memory
+    route for cells whose full-mesh contexts do not fit in RAM."""
 
     task: str = "efg"  # efg | shielding
     isotopes: dict[str, str] | None = None
     shielding_level: str = "auto"  # auto | bare | gipaw (task: shielding)
     # species/isotope -> reference σ (ppm) for the chemical shift δ_iso = σ_ref − σ_iso
     sigma_ref: dict[str, float] | None = None
+    efg: bool | str = False  # False | True | 'auto': PW/PAW EFG within task='shielding'
+    spectrum: NmrSpectrumParams = field(default_factory=NmrSpectrumParams)
+    chunk_k: int | None = None  # stream dense response contexts (memory route)
 
     def __post_init__(self):
         if self.task not in ("efg", "shielding"):
@@ -748,6 +817,12 @@ class NmrParams:
             raise InputError(
                 "nmr.shielding_level must be 'auto', 'bare' or 'gipaw', got "
                 f"{self.shielding_level!r}")
+        if self.efg not in (True, False, "auto"):
+            raise InputError(
+                f"nmr.efg must be true, false or 'auto', got {self.efg!r}")
+        if self.chunk_k is not None and self.chunk_k < 1:
+            raise InputError(
+                f"nmr.chunk_k must be >= 1 (or null for eager), got {self.chunk_k}")
 
 
 @dataclass(frozen=True)
