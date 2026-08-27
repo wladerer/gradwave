@@ -74,6 +74,7 @@ with the mesh for the Sternheimer route (the dense twin and the analytic
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -2230,6 +2231,90 @@ def _symmetrize_site_tensors(out: Tensor, system: object) -> Tensor:
     return torch.as_tensor(acc, dtype=out.dtype, device=out.device)
 
 
+# --------------------------------------------------------------------------- #
+# analytic-USPP bare-term ecut-instability guard (hard-augmentation datasets)   #
+# --------------------------------------------------------------------------- #
+
+# Above this augmentation-overlap condition number the dense-eigh S-metric
+# analytic bare shielding (:class:`ShieldingDq` USPP path) is ecut-UNSTABLE and
+# the returned σ_bare is untrustworthy — see the root-cause note
+# ``experiments/autoapw/analytic_uspp_ecut_divergence.md``. Calibrated to sit far
+# above every soft PAW dataset (Si PAW cond(S) ≈ 1.7–2.0, flat in ecut) and far
+# below the hard first-row anions that diverge (MgO O: cond(S) = 426 at 40 Ry →
+# 3245 at 60 Ry, tracking the bare-σ blow-up −1912 → −3758 ppm 1:1).
+_USPP_OVERLAP_COND_WARN = 50.0
+
+
+class USPPShieldingConditioningWarning(UserWarning):
+    """The augmentation overlap S(k) of a USPP/PAW ground state is too
+    ill-conditioned for the dense-eigh analytic bare shielding to be
+    ecut-stable (:func:`uspp_overlap_conditioning`)."""
+
+
+def uspp_overlap_conditioning(
+    ctx: USPPResponseCtx, *, k_frac: np.ndarray | Sequence[np.ndarray] | None = None
+) -> dict[str, float]:
+    """Condition number of the augmentation overlap S(k) = I + Σ_ij q_ij|β_i⟩⟨β_j|
+    over the mesh k of a USPP/PAW response context — the measured predictor of the
+    dense-eigh analytic-USPP bare-shielding ecut divergence.
+
+    The dense-eigh analytic route (:class:`ShieldingDq`, ``uspp=`` set) expands
+    the magnetic perturbation in the S-ORTHONORMAL eigenbasis of the generalized
+    problem H U = S U ε. When S(k) is well conditioned (soft PAW: cond ≈ 2) that
+    basis is benign; for hard first-row anions the plane-wave/augmentation basis
+    becomes progressively overcomplete as ecut grows (min-eig S → 0), the
+    S-orthonormal expansion develops large denominator-reweighted terms, and the
+    bare σ diverges with ecut even though the *physical* velocity coupling and the
+    matrix-free CG response are ecut-stable (measured — see the note). cond(S)
+    tracks the blow-up 1:1, so it is a cheap pre-flight trust check.
+
+    Returns ``{"max", "min", "mean"}`` of cond(S(k)) across the mesh (one
+    ``eigvalsh`` of the dense per-k overlap). ``k_frac`` overrides the mesh with an
+    explicit k-set. Pure diagnostic — no autograd, no SCF."""
+    system = ctx.system
+    if k_frac is None:
+        kfs = [sph.k_frac for sph in system.spheres]
+    else:
+        kfs = [np.asarray(k, dtype=float) for k in np.asarray(k_frac, dtype=float)]
+    conds: list[float] = []
+    for kf in kfs:
+        sphere = build_gsphere(system.grid, system.ecut, np.asarray(kf, dtype=float))
+        kb = _overlap_kbprojectors(system, sphere)
+        npw = int(kb.g_cart.shape[0])
+        if kb.dij_full.shape[0] == 0:
+            conds.append(1.0)
+            continue
+        p = kb.p(sphere.k_cart.to(RDTYPE))
+        smat = torch.eye(npw, dtype=CDTYPE) + p.mT @ (kb.dij_full.to(CDTYPE) @ p.conj())
+        ev = torch.linalg.eigvalsh(0.5 * (smat + smat.mH))
+        lo = float(ev[0])
+        conds.append(float(ev[-1]) / lo if lo > 0 else float("inf"))
+    arr = np.asarray(conds, dtype=float)
+    return {"max": float(arr.max()), "min": float(arr.min()),
+            "mean": float(arr.mean())}
+
+
+def _warn_if_ill_conditioned_uspp(uspp: USPPResponseCtx | str | None) -> None:
+    """Emit :class:`USPPShieldingConditioningWarning` when the analytic-USPP bare
+    shielding is about to run on an ecut-unstable (ill-conditioned) overlap. A
+    no-op for the NC route (``uspp is None``) and the NC-limit gate
+    (``uspp == "nc-gate"``, S = I ⇒ cond = 1)."""
+    if not isinstance(uspp, USPPResponseCtx):
+        return
+    cond = uspp_overlap_conditioning(uspp)
+    if cond["max"] > _USPP_OVERLAP_COND_WARN:
+        warnings.warn(
+            "analytic-USPP bare shielding on an ill-conditioned augmentation "
+            f"overlap: max cond(S(k)) = {cond['max']:.1f} > "
+            f"{_USPP_OVERLAP_COND_WARN:.0f}. The dense-eigh σ_bare is NOT "
+            "ecut-stable for this (hard-augmentation) dataset and must be treated "
+            "as unvalidated — cross-check against a lower ecut or the matrix-free "
+            "route (see experiments/autoapw/analytic_uspp_ecut_divergence.md).",
+            USPPShieldingConditioningWarning,
+            stacklevel=3,
+        )
+
+
 def sigma_shielding_dq(
     res: SCFResult,
     *,
@@ -2301,8 +2386,14 @@ def sigma_shielding_dq(
     spread ~8 ppm, flat in k, present with the wedge off — cubic Si is immune).
     Symmetrization enforces the exact equivalence and is a no-op for a P1 cell.
     Only applied to the default all-atom site list; an explicit ``sites`` subset
-    (which cannot be mapped to the atom permutation) skips it."""
+    (which cannot be mapped to the atom permutation) skips it.
+
+    On the USPP/PAW route a :class:`USPPShieldingConditioningWarning` is raised
+    when the augmentation overlap S(k) is too ill-conditioned for the dense-eigh
+    assembly to be ecut-stable (:func:`uspp_overlap_conditioning`) — the returned
+    σ_bare is then untrustworthy for that (hard-augmentation) dataset."""
     _guard(res)
+    _warn_if_ill_conditioned_uspp(uspp)
     system = uspp.system if isinstance(uspp, USPPResponseCtx) else res.system
     sites_is_default = sites is None
     if sites is None:

@@ -10,6 +10,8 @@ conj(P(−q)); at q = 0 the tensor is Hermitian and the machinery reduces to
 the M5 velocity solves.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 import torch
@@ -1064,3 +1066,45 @@ def test_sigma_shielding_gipaw_si_absolute():
     total_iso = [float(torch.diagonal(out["total"][a]).mean()) for a in range(2)]
     assert abs(total_iso[0] - total_iso[1]) < 1.0
     assert 360.0 < total_iso[0] < 440.0  # ≈ 398 ppm vs the ≈400 ppm target
+
+
+def test_uspp_shielding_conditioning_guard_logic():
+    """The analytic-USPP bare-shielding ecut-instability guard fires only for an
+    ill-conditioned augmentation overlap, and never on the NC / NC-gate routes.
+
+    Root cause (experiments/autoapw/analytic_uspp_ecut_divergence.md): the
+    dense-eigh S-metric bare shielding diverges with ecut for hard-augmentation
+    anions because the augmentation overlap S(k) becomes overcomplete (cond(S)
+    426→3245 on MgO ¹⁷O 40→60 Ry, tracking the bare σ blow-up −1912→−3758 ppm),
+    while soft PAW (Si, cond(S)≈2) and the matrix-free CG response stay stable.
+    The guard warns above cond(S) = 50 — this test pins the branch logic without
+    an SCF by patching the conditioning probe."""
+    from unittest.mock import patch
+
+    from gradwave.postscf.kgeometry_nmr import (
+        USPPResponseCtx,
+        USPPShieldingConditioningWarning,
+        _warn_if_ill_conditioned_uspp,
+    )
+
+    # NC route (None) and NC-limit gate ("nc-gate", S = I) never touch the probe.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _warn_if_ill_conditioned_uspp(None)
+        _warn_if_ill_conditioned_uspp("nc-gate")
+
+    # A real ctx (bypass __init__ — the probe is patched, ctx internals unused).
+    fake_ctx = object.__new__(USPPResponseCtx)
+    with (
+        patch("gradwave.postscf.kgeometry_nmr.uspp_overlap_conditioning",
+              return_value={"max": 2.0, "min": 1.9, "mean": 2.0}),
+        warnings.catch_warnings(),
+    ):
+        warnings.simplefilter("error")
+        _warn_if_ill_conditioned_uspp(fake_ctx)  # soft: no warning
+    with (
+        patch("gradwave.postscf.kgeometry_nmr.uspp_overlap_conditioning",
+              return_value={"max": 3245.0, "min": 1.0, "mean": 800.0}),
+        pytest.warns(USPPShieldingConditioningWarning, match="cond"),
+    ):
+        _warn_if_ill_conditioned_uspp(fake_ctx)  # hard: warns
