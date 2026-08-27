@@ -29,6 +29,7 @@ from gradwave.inputs.models import (
     MagnetismParams,
     MixingParams,
     NmrParams,
+    NmrSpectrumParams,
     PhononParams,
     ProjectionsParams,
     RelaxParams,
@@ -522,11 +523,34 @@ def _build_flapw(raw: dict[str, Any], symbols: Iterable[str]) -> FlapwParams:
     return FlapwParams(radii=radii, **kw)
 
 
+def _build_nmr_spectrum(raw: dict[str, Any]) -> NmrSpectrumParams:
+    """Parse the ``nmr.spectrum`` block (powder-lineshape synthesis). ``larmor_mhz``
+    is either a scalar or a species/isotope → MHz map; the rest are simple scalars."""
+    _check_keys(
+        "nmr.spectrum", raw, {f.name for f in dataclasses.fields(NmrSpectrumParams)})
+    larmor: float | dict[str, float] | None = raw.get("larmor_mhz")
+    if isinstance(larmor, dict):
+        larmor = {str(k): float(v) for k, v in larmor.items()}
+    elif larmor is not None:
+        larmor = float(larmor)
+    return NmrSpectrumParams(
+        enabled=bool(raw.get("enabled", False)),
+        mode=str(raw.get("mode", "static")),
+        spin_rate_hz=float(raw.get("spin_rate_hz", 0.0)),
+        larmor_mhz=larmor,
+        broadening_ppm=float(raw.get("broadening_ppm", 0.0)),
+        lineshape=str(raw.get("lineshape", "gauss")),
+        n_orientations=int(raw.get("n_orientations", 2000)),
+        n_points=int(raw.get("n_points", 2048)))
+
+
 def _build_nmr(raw: dict[str, Any]) -> NmrParams:
     """Parse the ``nmr`` block: the observable ``task`` (efg | shielding), an
     optional per-species ``isotopes`` map for the EFG quadrupolar coupling, the
-    shielding assembly ``shielding_level`` (auto | bare | gipaw), and an optional
-    ``sigma_ref`` species/isotope → σ_ref [ppm] map for chemical shifts."""
+    shielding assembly ``shielding_level`` (auto | bare | gipaw), an optional
+    ``sigma_ref`` species/isotope → σ_ref [ppm] map for chemical shifts, the
+    ``efg`` gate (PW/PAW EFG within the shielding task), and the ``spectrum``
+    lineshape-synthesis block."""
     _check_keys("nmr", raw, {f.name for f in dataclasses.fields(NmrParams)})
     iso = raw.get("isotopes")
     if iso is not None:
@@ -534,9 +558,15 @@ def _build_nmr(raw: dict[str, Any]) -> NmrParams:
     sref = raw.get("sigma_ref")
     if sref is not None:
         sref = {str(k): float(v) for k, v in dict(sref).items()}
+    efg_raw = raw.get("efg", False)
+    efg: bool | str = efg_raw if isinstance(efg_raw, str) else bool(efg_raw)
+    spec_raw = raw.get("spectrum")
+    spectrum = (_build_nmr_spectrum(dict(spec_raw))
+                if isinstance(spec_raw, dict) else NmrSpectrumParams())
     return NmrParams(
         task=str(raw.get("task", "efg")), isotopes=iso,
-        shielding_level=str(raw.get("shielding_level", "auto")), sigma_ref=sref)
+        shielding_level=str(raw.get("shielding_level", "auto")), sigma_ref=sref,
+        efg=efg, spectrum=spectrum)
 
 
 def _load_input(path: Path) -> Input:

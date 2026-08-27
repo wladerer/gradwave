@@ -25,6 +25,7 @@ from gradwave.inputs.models import MagneticParams as MagneticParams
 from gradwave.inputs.models import MagnetismParams as MagnetismParams
 from gradwave.inputs.models import MixingParams as MixingParams
 from gradwave.inputs.models import NmrParams as NmrParams
+from gradwave.inputs.models import NmrSpectrumParams as NmrSpectrumParams
 from gradwave.inputs.models import PhononParams as PhononParams
 from gradwave.inputs.models import ProjectionsParams as ProjectionsParams
 from gradwave.inputs.models import RelaxParams as RelaxParams
@@ -52,6 +53,7 @@ __all__ = [
     "MagnetismParams",
     "MixingParams",
     "NmrParams",
+    "NmrSpectrumParams",
     "PhononParams",
     "ProjectionsParams",
     "RelaxParams",
