@@ -155,6 +155,89 @@ def _phonons_fc_parallel(
     return force_constants_from_forces(force_map, scmap, h)
 
 
+def _ir_primitive_scf_fn(
+    inp: Input, upfs: Any, xc: Any, mags: Any, cell: Any,
+    species_of_atom: list[int], kmesh: tuple[int, int, int],
+) -> Callable[[Any], SCFResult]:
+    """A callable ``positions -> converged NC SCFResult`` on the PRIMITIVE cell,
+    run on the FULL unshifted ``kmesh`` (use_symmetry=False) so the Berry-phase
+    string formula sees every k-string. Norm-conserving only."""
+    from gradwave.scf.loop import scf, setup_system
+
+    def scf_fn(positions: Any) -> SCFResult:
+        system = setup_system(
+            cell, positions, species_of_atom, _as_upfs(upfs),
+            ecut=inp.ecut, kmesh=kmesh, kshift=(0, 0, 0), use_symmetry=False)
+        if inp.device != "cpu":
+            system = system.to(inp.device)
+        spin_kw: dict[str, Any] = (
+            {"tot_magnetization": inp.tot_magnetization}
+            if inp.nspin == 2 and inp.tot_magnetization is not None else {})
+        return scf(
+            system, cast("XCFunctional", xc), nspin=inp.nspin, start_mag=mags,
+            smearing=inp.smearing.type, width=inp.smearing.width,
+            etol=inp.scf.etol, rhotol=inp.scf.rhotol,
+            mixing_alpha=inp.scf.mixing.alpha,
+            mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
+            precond=inp.scf.mixing.precond, diago_tol=inp.scf.diago_tol,
+            verbose=False, **spin_kw)
+
+    return scf_fn
+
+
+def _compute_ir_block(
+    inp: Input, scmap: Any, phi: Any, masses: Any, species_of_atom: list[int],
+    upfs: Any, uspp: bool, xc: Any, mags: Any, verbose: bool,
+) -> dict[str, Any]:
+    """Born effective charges Z* (Berry-phase finite differences on the primitive
+    cell) → per-mode IR intensities on the Γ modes + a Lorentzian spectrum."""
+    import numpy as np
+
+    from gradwave.postscf.born import born_effective_charges
+    from gradwave.postscf.ir import ir_intensities, lorentzian_spectrum
+
+    if uspp:
+        raise NotImplementedError(
+            "IR/Born via the Berry phase is norm-conserving only (the "
+            "ultrasoft/PAW overlap-augmentation term in ⟨u|u⟩ is not implemented)")
+    ir_km = inp.phonons.ir_kmesh
+    km = ir_km if min(ir_km) > 0 else inp.kpoints.mesh
+    kmesh: tuple[int, int, int] = (int(km[0]), int(km[1]), int(km[2]))
+    cell = np.asarray(inp.atoms.cell.array, dtype=float)
+    positions = inp.atoms.get_positions()
+    scf_fn = _ir_primitive_scf_fn(inp, upfs, xc, mags, cell, species_of_atom, kmesh)
+    if verbose:
+        na = len(positions)
+        print(f"IR: Born Z* via Berry phase (k-mesh {kmesh}), "
+              f"{1 + 6 * na} primitive-cell SCFs", flush=True)
+    bres = born_effective_charges(
+        scf_fn, positions, kmesh,
+        step=inp.phonons.born_displacement, verbose=verbose)
+    born = bres["born"].detach().cpu().numpy()
+    ir = ir_intensities(phi, scmap, masses, born)
+    grid, spec = lorentzian_spectrum(
+        ir["frequency_cm1"], ir["intensity"], width=inp.phonons.ir_broadening)
+    if verbose:
+        print(f"IR: ASR |ΣZ*| max {float(bres['asr_max']):.3e}, "
+              f"{int(ir['ir_active'].sum())} IR-active modes", flush=True)
+    return {
+        "born_charges": born.tolist(),
+        "born_asr": bres["asr"].detach().cpu().numpy().tolist(),
+        "born_asr_max": float(bres["asr_max"]),
+        "kmesh": list(kmesh),
+        "born_displacement_ang": inp.phonons.born_displacement,
+        "frequency_cm1": ir["frequency_cm1"].tolist(),
+        "intensity": ir["intensity"].tolist(),
+        "intensity_relative": ir["intensity_relative"].tolist(),
+        "ir_active": [bool(x) for x in ir["ir_active"]],
+        "spectrum": {
+            "frequency_cm1": grid.tolist(),
+            "intensity": spec.tolist(),
+            "broadening_cm1": inp.phonons.ir_broadening,
+        },
+    }
+
+
 def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
     """Supercell finite-displacement phonons: dispersion along a q-path + a
     phonon DOS on a q-mesh.
@@ -309,6 +392,11 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
         thermo_block = thermo_table(grid, dos, inp.phonons.thermo_temperatures)
         thermo_block["imaginary_modes_present"] = bool(freqs.min() < -1.0)
         block["thermo"] = thermo_block
+    if inp.phonons.ir:
+        # Infrared: Born Z* (Berry-phase FD on the primitive cell) → Γ-mode IR
+        # intensities + a Lorentzian spectrum. Norm-conserving insulators only.
+        block["ir"] = _compute_ir_block(
+            inp, scmap, phi, masses, species_of_atom, upfs, uspp, xc, mags, verbose)
     if verbose:
         print(f"phonons: min frequency {freqs.min():.1f} cm⁻¹ "
               f"({'has imaginary modes' if freqs.min() < -1.0 else 'all real'})",

@@ -148,6 +148,7 @@ include = [
     # shows an error[...]" discipline as the note above):
     "src/gradwave/postscf/bader.py",
     "src/gradwave/postscf/bands.py",
+    "src/gradwave/postscf/born.py",
     "src/gradwave/postscf/composition_design.py",
     "src/gradwave/postscf/convergence_error.py",
     "src/gradwave/postscf/convergence_noise.py",
@@ -164,6 +165,7 @@ include = [
     "src/gradwave/postscf/hybrid.py",
     "src/gradwave/postscf/isdf_k.py",
     "src/gradwave/postscf/isdf.py",
+    "src/gradwave/postscf/ir.py",
     "src/gradwave/postscf/_kb.py",
     "src/gradwave/postscf/kgeometry.py",
     "src/gradwave/postscf/kgeometry_nmr.py",
@@ -175,6 +177,7 @@ include = [
     "src/gradwave/postscf/phase_diagram.py",
     "src/gradwave/postscf/phonons.py",
     "src/gradwave/postscf/phonons_supercell.py",
+    "src/gradwave/postscf/polarization.py",
     "src/gradwave/postscf/qha.py",
     "src/gradwave/postscf/_response.py",
     "src/gradwave/postscf/response.py",

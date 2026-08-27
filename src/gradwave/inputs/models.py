@@ -345,12 +345,33 @@ class PhononParams:
     # serial (default). forward-only — a differentiable phonon run must stay at 1.
     n_workers: int = 1
 
+    # Infrared spectrum: Born effective charges Z* (Berry-phase finite differences
+    # on the PRIMITIVE cell) → per-mode IR intensities on the Γ modes, plus a
+    # Lorentzian-broadened spectrum. Norm-conserving, insulators only. Emits an
+    # "ir" block from run_phonons. The extra 1 + 6·N_prim primitive-cell SCFs run
+    # on a full (symmetry-unreduced) k-mesh: ir_kmesh, or inp.kpoints.mesh if 0.
+    ir: bool = False
+    ir_kmesh: tuple[int, int, int] = (0, 0, 0)  # Berry-phase mesh; (0,0,0) = kpoints.mesh
+    born_displacement: float = 2.0e-3  # Z* finite-difference step [Å]
+    ir_broadening: float = 8.0         # Lorentzian HWHM for the IR spectrum [cm⁻¹]
+
     def __post_init__(self):
         object.__setattr__(self, "supercell", tuple(int(n) for n in self.supercell))
         object.__setattr__(self, "dos_mesh", tuple(int(n) for n in self.dos_mesh))
         object.__setattr__(
             self, "thermo_temperatures",
             tuple(float(t) for t in self.thermo_temperatures))
+        object.__setattr__(self, "ir_kmesh", tuple(int(n) for n in self.ir_kmesh))
+        if len(self.ir_kmesh) != 3 or min(self.ir_kmesh) < 0:
+            raise InputError(
+                f"phonons.ir_kmesh must be 3 non-negative ints, got {self.ir_kmesh}")
+        if not 0.0 < self.born_displacement < 0.5:
+            raise InputError(
+                "phonons.born_displacement must be in (0, 0.5) Å, got "
+                f"{self.born_displacement}")
+        if self.ir_broadening <= 0.0:
+            raise InputError(
+                f"phonons.ir_broadening must be > 0, got {self.ir_broadening}")
         if len(self.supercell) != 3 or min(self.supercell) < 1:
             raise InputError(
                 f"phonons.supercell must be 3 positive ints, got {self.supercell}")
