@@ -63,6 +63,7 @@ nav:
       - Exchange–correlation: api/xc.md
       - Pseudopotentials: api/pseudopotentials.md
   - Performance: performance.md
+  - Profiling: profiling.md
   - Distributed k-point parallelism: distributed.md
   - Wisdom: wisdom.md
   - Bibliography: bibliography.md

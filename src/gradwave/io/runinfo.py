@@ -132,6 +132,25 @@ def _git_commit() -> str | None:
     return out.strip() if out else None
 
 
+def _git_commit_full() -> str | None:
+    """The full 40-char SHA — the durable join key for cross-commit diffing
+    (the short SHA can collide across a long-lived history)."""
+    src = Path(__file__).resolve().parent
+    out = _run(["git", "-C", str(src), "rev-parse", "HEAD"])
+    return out.strip() if out else None
+
+
+def _git_dirty() -> bool | None:
+    """True if the tree has uncommitted changes (``git status --porcelain``
+    non-empty), so a profile of dirty work is never mistaken for a clean commit.
+    None if git could not be queried (not a checkout / git absent)."""
+    src = Path(__file__).resolve().parent
+    out = _run(["git", "-C", str(src), "status", "--porcelain"])
+    if out is None:
+        return None
+    return bool(out.strip())
+
+
 def machine_snapshot() -> dict[str, Any]:
     """Full static + dynamic machine state; take one at run start."""
     import torch
@@ -146,6 +165,7 @@ def machine_snapshot() -> dict[str, Any]:
                  "os": f"{uname.system} {uname.release}",
                  "arch": uname.machine},
         "code": {"gradwave": __version__, "git": _git_commit(),
+                 "git_full": _git_commit_full(), "git_dirty": _git_dirty(),
                  "python": platform.python_version(),
                  "torch": torch.__version__},
         "cpu": cpu_info(),
