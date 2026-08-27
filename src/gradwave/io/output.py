@@ -753,12 +753,12 @@ def _nmr_lines(nmr):
             lines.append(_sec(f"NMR simulated spectrum ({spec['mode']}, {spec['kind']})"))
             det = [("nucleus", nuc_s), ("sites", str(spec.get("n_sites", 0)))]
             if spec.get("larmor_mhz"):
-                det.append(("Larmor [MHz]", f"{spec['larmor_mhz']:.3f}"))
+                det.append(("Larmor/MHz", f"{spec['larmor_mhz']:.3f}"))
             if spec.get("spin_rate_hz"):
-                det.append(("MAS rate [kHz]", f"{spec['spin_rate_hz'] / 1e3:.2f}"))
-            det.append(("peak δ [ppm]", f"{spec['peak_ppm']:.2f}"))
+                det.append(("MAS/kHz", f"{spec['spin_rate_hz'] / 1e3:.2f}"))
+            det.append(("peak/ppm", f"{spec['peak_ppm']:.2f}"))
             rng = spec.get("ppm_range", [0.0, 0.0])
-            det.append(("axis [ppm]", f"{rng[0]:.1f} … {rng[1]:.1f}"))
+            det.append(("axis/ppm", f"{rng[0]:.1f} … {rng[1]:.1f}"))
             lines += _cols(det)
         lines.append("")
         return lines
