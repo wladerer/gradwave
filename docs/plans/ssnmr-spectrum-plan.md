@@ -1,8 +1,12 @@
 # Solid-state NMR spectrum plan
 
-Status: **in progress** (written 2026-08-26). Phase 1 is this PR; Phase 2 merged
-in parallel (#393, `src/gradwave/postscf/nmr_spectrum.py`); Phase 3 is in flight
-on its own branch; the final wiring lands once all three are in.
+Status: **complete** (written 2026-08-26; final wiring landed 2026-08-27).
+Phase 1 merged (#392); Phase 2 merged (#393,
+`src/gradwave/postscf/nmr_spectrum.py`); Phase 3 merged (#394,
+`src/gradwave/postscf/efg_paw.py`). The final wiring — the `nmr.efg` and
+`nmr.spectrum` driver blocks, the `nmr.chunk_k` k-streaming memory route, and
+the ²⁹Si MAS headline demo (`experiments/autoapw/ssnmr_quartz_si29.md`) — is
+the `feat/nmr-spectrum-wiring` PR.
 
 The goal is a driveable path from a crystal structure to a solid-state NMR
 spectrum: absolute chemical shieldings and quadrupolar couplings out of the DFT
