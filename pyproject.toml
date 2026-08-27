@@ -621,6 +621,7 @@ include = [
     "src/gradwave/postscf/stm.py",
     "src/gradwave/postscf/alchemical_response.py",
     "src/gradwave/postscf/charged.py",
+    "src/gradwave/postscf/nmr_spectrum.py",
 ]
 
 [tool.ty.overrides.rules]

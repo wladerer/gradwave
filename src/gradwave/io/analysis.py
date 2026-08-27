@@ -552,3 +552,20 @@ def plot_spin_texture(source, path=None, ax=None, group="total", component="z"):
     ax.set_ylabel("PDOS / spin texture [states/eV]")
     ax.legend(frameon=False, fontsize=8)
     return _finish(ax.figure, ax, path)
+
+
+def plot_nmr_spectrum(ppm_axis, intensity, path=None, ax=None, label=None):
+    """Plot a simulated ssNMR lineshape ``(ppm_axis, intensity)`` from
+    :func:`gradwave.postscf.nmr_spectrum.spectrum` with the conventional
+    reversed chemical-shift axis (high ppm on the left)."""
+    plt = _plt()
+    if ax is None:
+        _fig, ax = plt.subplots(figsize=(5.8, 3.4))
+    ax.plot(ppm_axis, intensity, color="#2a78d6", lw=1.2, label=label)
+    ax.set_xlabel("δ [ppm]")
+    ax.set_ylabel("intensity [a.u.]")
+    ax.set_xlim(float(np.max(ppm_axis)), float(np.min(ppm_axis)))
+    ax.set_yticks([])
+    if label is not None:
+        ax.legend(frameon=False, fontsize=8)
+    return _finish(ax.figure, ax, path)
