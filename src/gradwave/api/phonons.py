@@ -189,15 +189,56 @@ def _ir_primitive_scf_fn(
     return scf_fn
 
 
+def _born_and_eps(
+    inp: Input, scf_fn: Callable[[Any], SCFResult], positions: Any,
+    kmesh: tuple[int, int, int], xc: Any, verbose: bool,
+) -> tuple[Any, Any, Any, float, str]:
+    """Born charges Z* (na,3,3) and — when ``phonons.lo_to`` — the electronic
+    dielectric tensor ε∞ (3,3), returned as ``(born, eps, asr, asr_max, method)``.
+
+    Default (``lo_to=False``): Berry-phase finite differences on the primitive
+    cell (``eps`` is None). With ``lo_to=True`` both ε∞ and Z* come from ONE
+    clamped-ion E-field DFPT response (``dielectric.dielectric_born``) on a single
+    reference SCF — cheaper than 1+6·N_prim Berry SCFs and mutually self-consistent
+    with the ε∞ the LO–TO term needs."""
+    import numpy as np
+
+    if inp.phonons.lo_to:
+        from gradwave.postscf.dielectric import dielectric_born
+
+        if verbose:
+            print("IR/LO–TO: ε∞ + Z* via E-field DFPT (one reference SCF)",
+                  flush=True)
+        ref = scf_fn(positions)
+        dres = dielectric_born(ref, xc, verbose=verbose)
+        born = dres["born"].detach().cpu().numpy()
+        eps = dres["eps"].detach().cpu().numpy()
+        asr = dres["asr"].detach().cpu().numpy()
+        return born, eps, asr, float(np.abs(asr).max()), "dfpt"
+
+    from gradwave.postscf.born import born_effective_charges
+
+    if verbose:
+        na = len(positions)
+        print(f"IR: Born Z* via Berry phase (k-mesh {kmesh}), "
+              f"{1 + 6 * na} primitive-cell SCFs", flush=True)
+    bres = born_effective_charges(
+        scf_fn, positions, kmesh,
+        step=inp.phonons.born_displacement, verbose=verbose)
+    born = bres["born"].detach().cpu().numpy()
+    asr = bres["asr"].detach().cpu().numpy()
+    return born, None, asr, float(bres["asr_max"]), "berry"
+
+
 def _compute_ir_block(
     inp: Input, scmap: Any, phi: Any, masses: Any, species_of_atom: list[int],
     upfs: Any, uspp: bool, xc: Any, mags: Any, verbose: bool,
 ) -> dict[str, Any]:
-    """Born effective charges Z* (Berry-phase finite differences on the primitive
-    cell) → per-mode IR intensities on the Γ modes + a Lorentzian spectrum."""
+    """Born effective charges Z* → per-mode IR intensities on the Γ modes + a
+    Lorentzian spectrum. With ``phonons.lo_to`` the E-field DFPT ε∞ is added and
+    the non-analytic q̂→0 term splits off the LO branch (``lo_to`` sub-block)."""
     import numpy as np
 
-    from gradwave.postscf.born import born_effective_charges
     from gradwave.postscf.ir import ir_intensities, lorentzian_spectrum
 
     if uspp:
@@ -208,26 +249,23 @@ def _compute_ir_block(
     km = ir_km if min(ir_km) > 0 else inp.kpoints.mesh
     kmesh: tuple[int, int, int] = (int(km[0]), int(km[1]), int(km[2]))
     cell = np.asarray(inp.atoms.cell.array, dtype=float)
+    volume = float(abs(np.linalg.det(cell)))
     positions = inp.atoms.get_positions()
     scf_fn = _ir_primitive_scf_fn(inp, upfs, xc, mags, cell, species_of_atom, kmesh)
-    if verbose:
-        na = len(positions)
-        print(f"IR: Born Z* via Berry phase (k-mesh {kmesh}), "
-              f"{1 + 6 * na} primitive-cell SCFs", flush=True)
-    bres = born_effective_charges(
-        scf_fn, positions, kmesh,
-        step=inp.phonons.born_displacement, verbose=verbose)
-    born = bres["born"].detach().cpu().numpy()
+
+    born, eps, asr, asr_max, method = _born_and_eps(
+        inp, scf_fn, positions, kmesh, xc, verbose)
     ir = ir_intensities(phi, scmap, masses, born)
     grid, spec = lorentzian_spectrum(
         ir["frequency_cm1"], ir["intensity"], width=inp.phonons.ir_broadening)
     if verbose:
-        print(f"IR: ASR |ΣZ*| max {float(bres['asr_max']):.3e}, "
+        print(f"IR: ASR |ΣZ*| max {asr_max:.3e}, "
               f"{int(ir['ir_active'].sum())} IR-active modes", flush=True)
-    return {
+    block: dict[str, Any] = {
+        "born_method": method,
         "born_charges": born.tolist(),
-        "born_asr": bres["asr"].detach().cpu().numpy().tolist(),
-        "born_asr_max": float(bres["asr_max"]),
+        "born_asr": asr.tolist(),
+        "born_asr_max": asr_max,
         "kmesh": list(kmesh),
         "born_displacement_ang": inp.phonons.born_displacement,
         "frequency_cm1": ir["frequency_cm1"].tolist(),
@@ -240,6 +278,23 @@ def _compute_ir_block(
             "broadening_cm1": inp.phonons.ir_broadening,
         },
     }
+    if eps is not None:
+        from gradwave.postscf.ir import lo_to_analysis
+
+        qd = inp.phonons.ir_qdir
+        qdir = None if max(abs(x) for x in qd) == 0.0 else np.asarray(qd, dtype=float)
+        lt = lo_to_analysis(
+            phi, scmap, masses, born, eps, volume,
+            qdir=qdir, broadening=inp.phonons.ir_broadening)
+        block["eps_infinity"] = eps.tolist()
+        block["eps_infinity_iso"] = float(np.trace(eps) / 3.0)
+        block["lo_to"] = lt
+        lo_freqs = cast("list[float]", lt["lo_frequency_cm1"])
+        if verbose and lo_freqs:
+            los = ", ".join(f"{f:.1f}" for f in lo_freqs)
+            print(f"IR: ε∞(iso) {block['eps_infinity_iso']:.4f}, "
+                  f"LO {los} cm⁻¹", flush=True)
+    return block
 
 
 def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:

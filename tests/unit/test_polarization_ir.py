@@ -15,8 +15,17 @@ the end-to-end IR spectrum) is validated on asus — see the PR description.
 import numpy as np
 import torch
 
+from gradwave.constants import E2
 from gradwave.postscf.born import born_charges_autograd
-from gradwave.postscf.ir import gamma_modes, ir_intensities, lorentzian_spectrum
+from gradwave.postscf.ir import (
+    gamma_modes,
+    gamma_modes_lo_to,
+    ir_intensities,
+    lo_to_analysis,
+    lorentzian_spectrum,
+    nonanalytic_force_constants,
+)
+from gradwave.postscf.phonons import _SQRT_EV_AMU_ANG2_TO_CM1
 from gradwave.postscf.phonons_supercell import build_supercell
 from gradwave.postscf.polarization import (
     _match_indices,
@@ -172,3 +181,111 @@ def test_born_autograd_linear_polarization():
     # z[kappa,a,b] = V * dP_a/du_{kappa,b} = V * cmat[a, 3*kappa+b]
     expected = vol * cmat.reshape(3, na, 3).permute(1, 0, 2)
     assert torch.allclose(z, expected, atol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# LO--TO non-analytic correction
+# ---------------------------------------------------------------------------
+
+
+def _cubic_born(z_val: float) -> np.ndarray:
+    """ASR-clean isotropic Born tensor for the diatomic toy: Z*_Mg=+z, Z*_O=-z."""
+    born = np.zeros((2, 3, 3))
+    born[0] = z_val * np.eye(3)
+    born[1] = -z_val * np.eye(3)
+    return born
+
+
+def test_lo_to_zero_born_reduces_to_bare():
+    # Z* -> 0: the non-analytic term vanishes identically, so gamma_modes_lo_to
+    # must reproduce the bare gamma_modes to machine precision along any q̂.
+    phi, scmap, masses = _diatomic_toy()
+    eps = 3.0 * np.eye(3)
+    bare, _ = gamma_modes(phi, scmap, masses)
+    for q in ([1.0, 0.0, 0.0], [1.0, 2.0, -3.0]):
+        f, _ = gamma_modes_lo_to(phi, scmap, masses, np.zeros((2, 3, 3)),
+                                 eps, np.array(q), volume=64.0)
+        assert np.allclose(f, bare, atol=1e-12)
+
+
+def test_lo_to_cubic_split_2to_1lo_any_qdir():
+    # Cubic isotropic Z*: along ANY q̂ the optic triplet splits into a degenerate
+    # TO doublet (unshifted) + one LO (upshifted); acoustic modes stay at ~0.
+    phi, scmap, masses = _diatomic_toy()
+    born = _cubic_born(2.0)
+    eps = 3.0 * np.eye(3)
+    bare, _ = gamma_modes(phi, scmap, masses)
+    to = bare[3]  # degenerate bare optic (TO) frequency
+    for q in ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 1.0], [2.0, -1.0, 3.0]):
+        f, _ = gamma_modes_lo_to(phi, scmap, masses, born, eps,
+                                 np.array(q, dtype=float), volume=64.0)
+        assert np.all(np.abs(f[:3]) < 1e-3)               # acoustic ~0, unaffected
+        assert np.allclose(f[:3], bare[:3], atol=1e-3)    # unshifted vs bare
+        assert np.allclose(f[3], f[4], atol=1e-6)         # 2 degenerate TO
+        assert np.allclose(f[3], to, atol=1e-6)           # TO == bare optic
+        assert f[5] > f[4] + 1.0                          # 1 LO, upshifted
+
+
+def test_lo_to_analytic_split_matches_two_atom_formula():
+    # For the 2-atom cubic cell the LO upshift has a closed form:
+    #   ω_LO² - ω_TO² = (4π E2 / Ω ε∞) Z² (1/M_Mg + 1/M_O)   [eV/(amu·Å²)]
+    phi, scmap, masses = _diatomic_toy()
+    z_val, eps_iso, vol = 2.0, 3.0, 64.0
+    born = _cubic_born(z_val)
+    eps = eps_iso * np.eye(3)
+    f, _ = gamma_modes_lo_to(phi, scmap, masses, born, eps,
+                             np.array([1.0, 0.0, 0.0]), volume=vol)
+    bare, _ = gamma_modes(phi, scmap, masses)
+    lam_to = (bare[5] / _SQRT_EV_AMU_ANG2_TO_CM1) ** 2
+    lam_lo = (f[5] / _SQRT_EV_AMU_ANG2_TO_CM1) ** 2
+    delta = 4.0 * np.pi * E2 / (vol * eps_iso) * z_val**2 * (1 / masses[0] + 1 / masses[1])
+    assert abs((lam_lo - lam_to) - delta) < 1e-9
+
+
+def test_lo_to_lst_diagnostic_synthetic():
+    # Lyddane–Sachs–Teller: ω_LO²/ω_TO² = ε0/ε∞, with the static ε0 built from the
+    # SAME oscillator the split uses, ε0 = ε∞ + (4π E2/Ω) Z²(1/M_Mg+1/M_O)/ω_TO².
+    phi, scmap, masses = _diatomic_toy()
+    z_val, eps_iso, vol = 2.0, 3.0, 64.0
+    born = _cubic_born(z_val)
+    eps = eps_iso * np.eye(3)
+    f, _ = gamma_modes_lo_to(phi, scmap, masses, born, eps,
+                             np.array([1.0, 0.0, 0.0]), volume=vol)
+    w_to = gamma_modes(phi, scmap, masses)[0][5]
+    w_lo = f[5]
+    lam_to = (w_to / _SQRT_EV_AMU_ANG2_TO_CM1) ** 2
+    delta = 4.0 * np.pi * E2 / (vol * eps_iso) * z_val**2 * (1 / masses[0] + 1 / masses[1])
+    # the mode plasma contribution to the static constant (ε∞·δ/λ_TO gives the
+    # oscillator strength in these units), so ε0 = ε∞(1 + δ/λ_TO)
+    eps0 = eps_iso * (1.0 + delta / lam_to)
+    lst_ratio = (w_lo / w_to) ** 2
+    assert abs(lst_ratio - eps0 / eps_iso) < 1e-8
+
+
+def test_lo_to_analysis_isotropic_average():
+    # The whole-analysis entry point: isotropic average over the default q̂ set.
+    phi, scmap, masses = _diatomic_toy()
+    born = _cubic_born(2.0)
+    eps = 3.0 * np.eye(3)
+    out = lo_to_analysis(phi, scmap, masses, born, eps, volume=64.0)
+    assert out["isotropic"] is True
+    # every direction yields exactly one LO for this cubic cell
+    assert all(len(d["lo_frequency_cm1"]) == 1 for d in out["per_direction"])
+    # all directions give the SAME LO (cubic isotropy)
+    los = [d["lo_frequency_cm1"][0] for d in out["per_direction"]]
+    assert np.allclose(los, los[0], atol=1e-6)
+    assert out["lo_frequency_cm1"][0] > gamma_modes(phi, scmap, masses)[0][5] + 1.0
+    grid = np.asarray(out["spectrum"]["frequency_cm1"])
+    spec = np.asarray(out["spectrum"]["intensity"])
+    assert grid.shape == spec.shape and spec.max() > 0.0
+
+
+def test_nonanalytic_force_constants_asr_translational_invariance():
+    # A rigid translation carries no dipole ONLY if Z* is ASR-clean: sum over κ of
+    # the non-analytic force constant then vanishes (acoustic mode protection).
+    phi, scmap, masses = _diatomic_toy()
+    born = _cubic_born(2.0)  # ASR-clean by construction
+    na = nonanalytic_force_constants(born, 3.0 * np.eye(3),
+                                     np.array([1.0, 1.0, 0.0]), volume=64.0)
+    # Σ_κ Φ^NA_{κ a, κ' b} = 0 for every (a, κ', b)
+    assert np.allclose(na.sum(axis=0), 0.0, atol=1e-12)
