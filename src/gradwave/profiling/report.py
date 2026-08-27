@@ -141,6 +141,36 @@ def _esc(x: Any) -> str:
     return html.escape(str(x))
 
 
+def _human_bytes(v: Any) -> str:
+    """Bytes → human-readable string (base-1024: B/KB/MB/GB/TB). Non-numeric
+    values pass through :func:`_esc` unchanged."""
+    if not isinstance(v, int | float) or v != v:  # non-numeric or NaN
+        return _esc(v)
+    n = abs(float(v))
+    sign = "-" if v < 0 else ""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024.0 or unit == "TB":
+            prec = 0 if unit == "B" else 2
+            return f"{sign}{n:.{prec}f} {unit}"
+        n /= 1024.0
+    return f"{sign}{n:.2f} TB"
+
+
+def _fmt_cell(v: Any, kind: str) -> str:
+    """Display formatting by column kind — the raw value stays in ``data-v`` for
+    numeric sorting, so only the shown text changes. time → scientific notation,
+    bytes → human-readable, int → plain integer."""
+    if kind != "text" and not isinstance(v, int | float):
+        return _esc(v)
+    if kind == "time":
+        return f"{float(v):.3e}"
+    if kind == "bytes":
+        return _human_bytes(v)
+    if kind == "int":
+        return f"{float(v):.0f}"
+    return _esc(v)
+
+
 def _provenance_table(prov: dict[str, Any], spec: dict[str, Any]) -> str:
     code = prov.get("code", {})
     host = prov.get("host", {})
@@ -188,23 +218,23 @@ def _headline_html(headline: dict[str, Any]) -> str:
 
 
 def _op_table_html(op_rows: list[dict[str, Any]], limit: int = 25) -> str:
-    cols = [("name", "op", False), ("count", "count", True),
-            ("self_cpu_time_us", "self CPU (µs)", True),
-            ("cpu_time_us", "CPU total (µs)", True),
-            ("self_cuda_time_us", "self CUDA (µs)", True),
-            ("self_cpu_mem_bytes", "self CPU mem (B)", True)]
+    # (key, label, kind) — kind drives display: time→scientific, bytes→human-readable
+    cols = [("name", "op", "text"), ("count", "count", "int"),
+            ("self_cpu_time_us", "self CPU (µs)", "time"),
+            ("cpu_time_us", "CPU total (µs)", "time"),
+            ("self_cuda_time_us", "self CUDA (µs)", "time"),
+            ("self_cpu_mem_bytes", "self CPU mem", "bytes")]
     rows = sorted(op_rows, key=lambda r: r.get("self_cpu_time_us", 0.0),
                   reverse=True)[:limit]
     head = "".join(
         f'<th onclick="sortTable(this.closest(\'table\'),{i})">{_esc(lbl)}</th>'
-        for i, (_, lbl, _num) in enumerate(cols))
+        for i, (_, lbl, _kind) in enumerate(cols))
     body_rows = []
     for r in rows:
         cells = []
-        for key, _lbl, num in cols:
+        for key, _lbl, kind in cols:
             v = r.get(key)
-            disp = f"{v:.0f}" if (num and isinstance(v, int | float)) else _esc(v)
-            cells.append(f'<td data-v="{_esc(v)}">{disp}</td>')
+            cells.append(f'<td data-v="{_esc(v)}">{_fmt_cell(v, kind)}</td>')
         body_rows.append("<tr>" + "".join(cells) + "</tr>")
     return (f'<table data-sc=""><thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(body_rows)}</tbody></table>')
