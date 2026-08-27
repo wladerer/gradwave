@@ -288,8 +288,9 @@ def berry_phase_polarization(
     if len(spheres) != n1 * n2 * n3:
         raise ValueError(
             f"berry_phase_polarization: SCF has {len(spheres)} k-points but mesh "
-            f"{mesh} needs {n1 * n2 * n3}; run the SCF with use_symmetry=False on "
-            "the full unshifted mesh."
+            f"{mesh} needs {n1 * n2 * n3}; run the SCF with use_symmetry=False AND "
+            "time_reversal=False on the full unshifted mesh (time reversal still "
+            "folds k → -k otherwise)."
         )
     k_frac = [np.asarray(s.k_frac, dtype=float) for s in spheres]
     gmap = _grid_index_map(k_frac, (n1, n2, n3))

@@ -165,9 +165,13 @@ def _ir_primitive_scf_fn(
     from gradwave.scf.loop import scf, setup_system
 
     def scf_fn(positions: Any) -> SCFResult:
+        # time_reversal=False keeps the FULL unshifted mesh (k and -k both
+        # present): the Berry-phase string formula needs every k-string, and TR
+        # folding (still applied under use_symmetry=False) would drop half.
         system = setup_system(
             cell, positions, species_of_atom, _as_upfs(upfs),
-            ecut=inp.ecut, kmesh=kmesh, kshift=(0, 0, 0), use_symmetry=False)
+            ecut=inp.ecut, kmesh=kmesh, kshift=(0, 0, 0),
+            use_symmetry=False, time_reversal=False)
         if inp.device != "cpu":
             system = system.to(inp.device)
         spin_kw: dict[str, Any] = (
