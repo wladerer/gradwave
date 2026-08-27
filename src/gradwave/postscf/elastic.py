@@ -266,7 +266,7 @@ class ElasticStrainSymmetry:
             r = np.linalg.matrix_rank(self._orbit(chosen), tol=_RANK_TOL)
             if r == 6:
                 break
-            if np.linalg.matrix_rank(self._orbit(chosen + [j]),
+            if np.linalg.matrix_rank(self._orbit([*chosen, j]),
                                      tol=_RANK_TOL) > r:
                 chosen.append(j)
         spans = np.linalg.matrix_rank(self._orbit(chosen), tol=_RANK_TOL) == 6
@@ -307,10 +307,7 @@ def _grid_compatible(sg: SpaceGroup,
     caller keeps the full strain set."""
     if fft_shape is None:
         return True
-    for group in coupled_axis_groups(sg):
-        if len({int(fft_shape[a]) for a in group}) != 1:
-            return False
-    return True
+    return all(len({int(fft_shape[a]) for a in group}) == 1 for group in coupled_axis_groups(sg))
 
 
 @dataclass(frozen=True)

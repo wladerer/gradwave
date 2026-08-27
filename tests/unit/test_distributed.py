@@ -130,8 +130,7 @@ def test_sharded_density_sums_to_full_density():
 
     def _rand_coeffs(bk):
         c = torch.randn(bk.nk, nb, bk.npw_max, dtype=CDTYPE)
-        c = c * bk.mask[:, None, :]
-        return c
+        return c * bk.mask[:, None, :]
 
     def _rand_occ(nk):
         return torch.rand(nk, nb, dtype=RDTYPE)

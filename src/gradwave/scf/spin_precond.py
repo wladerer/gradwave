@@ -69,7 +69,7 @@ class StonerSpinPrecond:
 def build_stoner_precond(system, coeffs_s, eigs_s, mu, scheme,
                          width, rho_tot, m_r, xc, fp_cut: float=1e-8,
                          max_bands: int=96,
-                         dist_ctx: "DistKContext | None" = None):
+                         dist_ctx: DistKContext | None = None):
     """Assemble the preconditioner from the current SCF iteration's state.
 
     coeffs_s/eigs_s: per-spin lists as in the scf_uspp loop. Returns None
@@ -186,7 +186,7 @@ def _stoner_kernel_diag(rho_tot, m_r, xc, grid, vol, rho_core):
 def build_stoner_precond_nc(system, coeffs, eigs, mu, scheme, width,
                             rho_tot, m_vec, nc_xc, m_pw, fp_cut: float=1e-8,
                             max_bands: int=96,
-                            dist_ctx: "DistKContext | None" = None):
+                            dist_ctx: DistKContext | None = None):
     """Stoner preconditioner for the NON-COLLINEAR moment channel.
 
     The non-collinear analogue of ``build_stoner_precond``. Near a

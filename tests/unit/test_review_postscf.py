@@ -156,9 +156,9 @@ def test_magnetism_moment_tol_single_constant():
 def test_gamma_frequencies_constant_derivation():
     # derived-from-constants value matches the older explicit-SI form to ~13
     # significant digits and the sibling hessian.py copy to ~1e-7 relative
-    assert _SQRT_EV_AMU_ANG2_TO_CM1 == pytest.approx(521.4708983725066, rel=1e-12)
-    assert _SQRT_EV_AMU_ANG2_TO_CM1 == pytest.approx(
-        SQRT_EV_AMU_ANG2_TO_CM1, rel=1e-7)
+    assert pytest.approx(521.4708983725066, rel=1e-12) == _SQRT_EV_AMU_ANG2_TO_CM1
+    assert pytest.approx(
+        SQRT_EV_AMU_ANG2_TO_CM1, rel=1e-7) == _SQRT_EV_AMU_ANG2_TO_CM1
 
 
 def test_gamma_frequencies_diagonal_hessian():

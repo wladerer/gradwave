@@ -10,10 +10,10 @@ import pytest
 
 pytest.importorskip("pymatviz")
 
-import plotly.graph_objects as go  # noqa: E402
-from ase.build import bulk  # noqa: E402
+import plotly.graph_objects as go
+from ase.build import bulk
 
-from gradwave.io import viz  # noqa: E402
+from gradwave.io import viz
 
 
 def test_structure_view_from_atoms():

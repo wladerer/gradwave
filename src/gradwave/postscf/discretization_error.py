@@ -1597,10 +1597,8 @@ def estimate_gap_error(res: SCFResult | USPPResult, eigerr: EigenvalueError, *,
     band is available to resolve the CBM.
     """
     system = res.system
-    if occupations is not None:
-        occs = occupations                       # explicit override (band-aligned)
-    else:
-        occs = res.occupations
+    # explicit override (band-aligned) when given, else the SCF occupations
+    occs = occupations if occupations is not None else res.occupations
     nspin = int(getattr(res, "nspin", 1))
     full = 2.0 if nspin == 1 else 1.0
     thr = 0.5 * full if occ_threshold is None else occ_threshold

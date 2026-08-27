@@ -41,6 +41,7 @@ without any SCF.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import tempfile
@@ -179,9 +180,8 @@ def struggle_trigger(
     if e_cur > e_prev + 1e-12:  # energy increased on the last accepted step
         return True
     window = progress[-(int(patience) + 1):]
-    if len(window) >= 2 and window[-1][1] >= window[0][1]:  # max|F| stalled
-        return True
-    return False
+    # max|F| stalled
+    return len(window) >= 2 and window[-1][1] >= window[0][1]
 
 
 # ---------------------------------------------------------------------------
@@ -382,10 +382,9 @@ class ParallelLineSearchBFGS(_BFGS):  # type: ignore[valid-type,misc]
             self._ls_pool = None
 
     def __del__(self) -> None:
-        try:
+        # pragma: no cover - interpreter-teardown races
+        with contextlib.suppress(Exception):
             self._ls_close_pool()
-        except Exception:  # pragma: no cover - interpreter-teardown races
-            pass
 
     @override
     def step(self, gradient=None):  # type: ignore[override]
@@ -455,7 +454,7 @@ class ParallelLineSearchBFGS(_BFGS):  # type: ignore[valid-type,misc]
             cands = [_Candidate(self.ls_inp, base + a * d, ckpt) for a in alphas]
             try:
                 out = self._ls_map(cands)
-            except Exception:  # noqa: BLE001 - worker/pool failure → serial step
+            except Exception:
                 return 1.0, "serial(worker-error)"
             # α=0 anchor is free: the current point's E and projected gradient
             #   g(α) = dE/dα = ∇E·d = −F·d  (descent direction ⇒ g(0) < 0)

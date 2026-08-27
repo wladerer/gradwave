@@ -119,7 +119,7 @@ def phase_smoke():
             f"(path runs on CUDA)")
         RES["smoke_ok"] = True
         return True
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log(f"[smoke] FAILED — USPP/PAW+U is not GPU-ready: {e!r}")
         log("[smoke] " + traceback.format_exc().replace("\n", " | "))
         RES["smoke_ok"] = False
@@ -156,7 +156,7 @@ def phase_derisk(gpu_ok):
             scf_pi, ap = _time_apply(dev)
             out[dev] = {"scf_s_per_iter": scf_pi, "apply_s": ap}
             log(f"[derisk] {dev}: SCF {scf_pi:.2f}s/iter | apply {ap:.2f}s")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log(f"[derisk] {dev} FAILED: {e!r}")
             out[dev] = {"error": repr(e)}
     if "cpu" in out and "cuda" in out and "apply_s" in out["cuda"]:
@@ -223,7 +223,7 @@ def phase_bench(gpu_ok):
             f"{base.n_iter} ({t_base:.0f}s)  |  deflated: "
             f"{'OK' if defl.converged else 'STALL'}:{defl.n_iter} "
             f"({t_defl:.0f}s, k={len(crit)})  |  peak VRAM {peak:.1f} GB")
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log(f"[bench] FAILED: {e!r}")
         log("[bench] " + traceback.format_exc().replace("\n", " | "))
         RES.setdefault("bench", {})["error"] = repr(e)

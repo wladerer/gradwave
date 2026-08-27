@@ -101,10 +101,7 @@ def band_structure(
     occ = res.occupations
     g = 2.0 if nspin == 1 else 1.0
     is_metal = bool(((occ > _OCC_TOL) & (occ < g - _OCC_TOL)).any())
-    if is_metal:
-        reference = res.fermi
-    else:
-        reference = float(res.eigenvalues[occ > _OCC_TOL].max())
+    reference = res.fermi if is_metal else float(res.eigenvalues[occ > _OCC_TOL].max())
     eigenvalues = eigs[0] if nspin == 1 else eigs
     return BandStructure(
         kpts_frac=np.asarray(kpts_frac), eigenvalues=eigenvalues, reference=reference)

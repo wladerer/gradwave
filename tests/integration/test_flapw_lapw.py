@@ -27,7 +27,7 @@ def test_empty_lattice_free_electron():
     L, R, lmax, ecut = 6.0, 1.0, 6, 60.0
     r, dx = log_mesh(1e-4, R + 1.0, 1200)
     v = torch.zeros_like(r)
-    El = {lg: 2.5 for lg in range(lmax + 1)}       # linearization energy in the band range
+    El = dict.fromkeys(range(lmax + 1), 2.5)       # linearization energy in the band range
     for kfrac in ([0.0, 0.0, 0.0], [0.1, 0.0, 0.0]):
         H, S, _ = build_matrices(kfrac, L, R, lmax, El, ecut, r, dx, v)
         ev = solve_geneig(0.5 * (H + H.T), S, 6)
@@ -41,7 +41,7 @@ def test_multi_atom_empty_lattice_free_electron():
     L, R, lmax, ecut = 6.0, 1.0, 6, 55.0
     r, dx = log_mesh(1e-4, R + 1.0, 1200)
     v = torch.zeros_like(r)
-    El = {lg: 2.5 for lg in range(lmax + 1)}
+    El = dict.fromkeys(range(lmax + 1), 2.5)
     species = {"A": {"R": R, "v": v, "El": El}}
     atoms = [([0.0, 0.0, 0.0], "A"), ([0.5 * L, 0.5 * L, 0.5 * L], "A")]
     for kfrac in ([0.0, 0.0, 0.0], [0.1, 0.2, 0.0]):

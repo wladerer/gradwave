@@ -44,7 +44,7 @@ def test_phonon_gamma_and_stability(si_phonons):
     x = np.array(ph["x"])
     labels = ph["labels"]
     # locate Γ (label "G") on the path
-    gx = [xt for xt, lab in labels if lab in ("G", "Γ")][0]
+    gx = next(xt for xt, lab in labels if lab in ("G", "Γ"))
     ig = int(np.argmin(np.abs(x - gx)))
     at_gamma = np.sort(freqs[ig])
     # 3 acoustic near zero, 3 optical near the Si Γ optical phonon (~520 cm⁻¹)

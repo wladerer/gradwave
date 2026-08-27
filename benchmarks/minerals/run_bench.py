@@ -195,7 +195,7 @@ def main():
     if not a.skip_qe:
         try:
             qe = QE.run(m, nbands, pdir, outdir / "qe", nranks=a.ranks)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             qe = {"error": repr(e)}
     row["qe"] = qe
     fft_shape = qe.get("fft_dims") if qe and qe.get("job_done") else None
@@ -208,7 +208,7 @@ def main():
         else:
             row["gradwave"] = run_gradwave(m, upfs, nbands, fft_shape,
                                            a.threads, a.device)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         import traceback
         row["gradwave"] = {"error": repr(e), "trace": traceback.format_exc()[-2000:]}
 

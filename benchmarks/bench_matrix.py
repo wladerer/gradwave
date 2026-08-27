@@ -103,7 +103,7 @@ def main():
         e_per_atom = float(res.energies.free_energy) / nat
         flag = "" if res.converged else "  ***NOT CONVERGED***"
         print(f"{name:6s} {nat:4d} {system.n_electrons:5.0f} {len(system.spheres):4d} "
-              f"{system.spheres[0].npw:6d} {str(system.grid.shape):>12s} "
+              f"{system.spheres[0].npw:6d} {system.grid.shape!s:>12s} "
               f"{t_setup:6.1f}s {t_scf:7.1f}s {res.n_iter:3d} {e_per_atom:14.6f}{flag}",
               flush=True)
 

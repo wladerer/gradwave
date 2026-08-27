@@ -117,7 +117,7 @@ class DistKContext:
     k_start: int  # this rank's slice into the GLOBAL k-ordered arrays
     k_end: int
     nk_global: int
-    full_system: "System | USPPSystem"
+    full_system: System | USPPSystem
 
 
 def current_rank() -> int:
@@ -185,8 +185,8 @@ def shard_range(n: int, rank: int, world_size: int) -> tuple[int, int]:
 
 
 def shard_system(
-    system: "System", rank: int, world_size: int, group: Any
-) -> tuple["System", DistKContext]:
+    system: System, rank: int, world_size: int, group: Any
+) -> tuple[System, DistKContext]:
     """Slice a fully-built ``System`` to this rank's contiguous k-shard.
 
     Only the per-k fields move (``spheres``, ``kweights``, ``proj_data``, and
@@ -244,8 +244,8 @@ def shard_system(
 
 
 def shard_uspp_system(
-    system: "USPPSystem", rank: int, world_size: int, group: Any
-) -> tuple["USPPSystem", DistKContext]:
+    system: USPPSystem, rank: int, world_size: int, group: Any
+) -> tuple[USPPSystem, DistKContext]:
     """Slice a fully-built ``USPPSystem`` to this rank's contiguous k-shard.
 
     Only the per-k fields move (``spheres``, ``kweights``, ``proj_data``, and

@@ -26,7 +26,7 @@ def test_template_parses(name, tmp_path):
     atoms, _fixed = _load_structure(raw["structure"], Path("."))
     species = set(atoms.get_chemical_symbols())
     raw["pseudopotentials"] = {"dir": str(PSEUDOS),
-                               "map": {s: _FIXTURE_UPF for s in species}}
+                               "map": dict.fromkeys(species, _FIXTURE_UPF)}
     p = tmp_path / "in.yaml"
     p.write_text(yaml.safe_dump(raw))
     inp = load_input(p)                 # raises InputError on any schema drift

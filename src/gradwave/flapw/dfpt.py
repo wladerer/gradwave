@@ -222,8 +222,8 @@ def khxc_response(drho, rho_sph, rho_2m, rr, drw, lset, nx: int = 16, nphi: int 
     from gradwave.flapw.functionals import fxc_lda
     th, ph, wgt = _angular_grid(nx, nphi)
     ylm = {(lang, m): sph_harm_y(lang, m, th, ph) for (lang, m) in lset}
-    rho_ang = np.broadcast_to(np.asarray(rho_sph)[:, None, None], (len(rr),) + th.shape).copy()
-    drho_ang = np.zeros((len(rr),) + th.shape)
+    rho_ang = np.broadcast_to(np.asarray(rho_sph)[:, None, None], (len(rr), *th.shape)).copy()
+    drho_ang = np.zeros((len(rr), *th.shape))
     for lm in lset:
         rho_ang += (rho_2m[lm][:, None, None] * ylm[lm][None]).real
         drho_ang += (np.asarray(drho[lm])[:, None, None] * ylm[lm][None]).real

@@ -107,7 +107,7 @@ def test_pool_single_solve_bit_equal():
                       subspace_tol=1e-5, warp=None)
     ev_local = _lapw_multi_k(*args[:9], v_nsph=None, chan=None, lodat=None, nsph_int=None)[0]
     with ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn")) as ex:
-        ev_pool = list(ex.map(_solve_k_args, [args]))[0][0]
+        ev_pool = next(iter(ex.map(_solve_k_args, [args])))[0]
     assert np.abs(ev_local - ev_pool).max() == 0.0
 
 

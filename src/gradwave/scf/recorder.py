@@ -399,5 +399,5 @@ try:  # resolve the true page size once; fall back to the 4 KiB assumption
     import resource as _resource
 
     _PAGE_MB = _resource.getpagesize() / 1e6
-except Exception:  # noqa: BLE001 — any failure keeps the 4 KiB default
+except Exception:
     pass

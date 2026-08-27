@@ -31,7 +31,7 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["lo_labels", "lo_overlap_schur", "lo_resid_fracs", "lo_conditioning_report"]
+__all__ = ["lo_conditioning_report", "lo_labels", "lo_overlap_schur", "lo_resid_fracs"]
 
 
 def lo_labels(

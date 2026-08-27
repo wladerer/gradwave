@@ -112,7 +112,7 @@ def bands_frame(source):
     labels ride along as df.attrs['labels']."""
     s = load(source)
     pd = _pd()
-    b = s["bands"] if "bands" in s else s
+    b = s.get("bands", s)
     eig = np.asarray(b["eigenvalues_eV"], dtype=float)
     x = np.asarray(b["x"], dtype=float)
     ref = b.get("reference_eV") or 0.0
@@ -248,7 +248,7 @@ def eos_frame(source):
 
     pd = _pd()
     s = load(source)
-    b = s["eos"] if "eos" in s else s
+    b = s.get("eos", s)
     v = np.asarray(b["volumes_ang3_per_atom"], dtype=float)
     e = np.asarray(b["energies_eV_per_atom"], dtype=float)
     fit_e = birch_murnaghan(v, b["e0_eV_per_atom"], b["v0_ang3_per_atom"],
@@ -273,7 +273,7 @@ def elastic_frame(source):
     elastic.json path/summary or a bare elastic block."""
     pd = _pd()
     s = load(source)
-    b = s["elastic"] if "elastic" in s else s
+    b = s.get("elastic", s)
     c = np.asarray(b["c_GPa"], dtype=float)
     idx = list(range(1, 7))
     df = pd.DataFrame(c, index=idx, columns=idx)
@@ -336,7 +336,7 @@ def plot_phonons(source, path=None):
     axis, ω = 0 marked (imaginary modes plot as negative)."""
     plt = _plt()
     s = load(source)
-    ph = s["phonons"] if "phonons" in s else s
+    ph = s.get("phonons", s)
     x = np.asarray(ph["x"], dtype=float)
     freqs = np.asarray(ph["frequencies_cm1"], dtype=float)  # (nq, nbranch)
     labels = ph["labels"]
@@ -541,7 +541,7 @@ def plot_spin_texture(source, path=None, ax=None, group="total", component="z"):
     e = df["energy_eV"]
     charge = df["total_charge"] if group == "total" else df[f"charge_{group}"]
     mcol = "total" if group == "total" else group
-    m = df[f"m{component}_{mcol}"] if f"m{component}_{mcol}" in df else None
+    m = df.get(f"m{component}_{mcol}", None)
     ax.fill_between(e, charge, color="#c9c9c9", label=f"charge ({group})")
     if m is not None:
         ax.plot(e, m, color="#d64b6b", lw=1.3, label=f"m_{component} ({group})")

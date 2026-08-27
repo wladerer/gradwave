@@ -16,7 +16,7 @@ import json
 import socket
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 # asus's OS hostname is "nixos"; map it to the logical name used by callers.
 HOST_ALIASES = {"nixos": "asus"}
@@ -33,7 +33,7 @@ def fetch(host: str) -> dict | None:
         ["ssh", host, "pueue status --json"]
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=15)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"  ({host} unreachable: {e})")
         return None
     if r.returncode != 0:
@@ -87,7 +87,7 @@ def _elapsed(task, kind) -> str:
             end = _parse_ts(inner.get("end"))
     if start is None:
         return "-"
-    stop = end or datetime.now(timezone.utc)
+    stop = end or datetime.now(UTC)
     try:
         secs = (stop - start).total_seconds()
     except TypeError:
@@ -156,7 +156,7 @@ def render(host: str, data: dict) -> None:
 
 def main(argv: list[str]) -> int:
     hosts = argv or ["thinkpad", "asus"]
-    print(f"gradwave queue — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    print(f"gradwave queue — {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}")
     any_ok = False
     for host in hosts:
         data = fetch(host)

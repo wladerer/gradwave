@@ -10,7 +10,7 @@ import matplotlib as mpl
 import numpy as np
 
 mpl.use("Agg")  # non-interactive backend; must be set before pyplot import
-import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.pyplot as plt
 
 mpl.rcParams.update({
     "font.size": 10, "axes.titlesize": 11, "axes.labelsize": 10,

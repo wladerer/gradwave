@@ -229,7 +229,7 @@ def test_all_vendored_elements_self_pair_present():
 # The one external anchor (Tier-3): the simple-dftd3 CLI tutorial's water–peptide
 # dimer, PBE0-D3(BJ), two-body only. Independent code, exact published geometry
 # and energy — https://dftd3.readthedocs.io/en/latest/tutorial/first-steps-cli.html
-_DIMER_SYMBOLS = "O H H C H H H C O N H C H H H".split()
+_DIMER_SYMBOLS = ["O", "H", "H", "C", "H", "H", "H", "C", "O", "N", "H", "C", "H", "H", "H"]
 _DIMER_XYZ = [
     [-3.2939688, 0.4402024, 0.1621802], [-3.8134112, 1.2387332, 0.2637577],
     [-2.3770466, 0.7564365, 0.1766203], [-0.6611637, -1.4159110, -0.1449409],

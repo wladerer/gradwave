@@ -635,13 +635,78 @@ target-version = "py311"
 extend-exclude = ["experiments"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "NPY", "B"]
+# High-value, low-noise families for a perf-sensitive numerical codebase.
+# Deliberately EXCLUDES opinionated/noisy families (ARG, FBT, TRY, PLR*, ANN,
+# D, EM, TD, ERA, COM) that false-positive heavily on scientific code.
+select = [
+    "E", "F", "W", "I", "NPY", "B",
+    "PERF",  # perflint — real wins for numerical hot paths
+    "SIM",   # flake8-simplify
+    "C4",    # flake8-comprehensions
+    "RET",   # flake8-return
+    "UP",    # pyupgrade
+    "RUF",   # ruff-specific
+    "PIE",   # flake8-pie
+    "FLY",   # flynt (static str-join → f-string)
+    "ISC",   # implicit-str-concat
+    "C901",  # mccabe complexity (ratchet, see [tool.ruff.lint.mccabe])
+]
 ignore = [
     "E741",  # l is a perfectly good angular momentum variable
     # jaxtyping shape annotations ("n1 n2 n3") are a DSL, not Python
     # expressions — ruff's forward-annotation parser always flags them.
     "F722",
+    # Ambiguous-unicode rules are pure false-positives here: this is a physics
+    # codebase whose docstrings/comments/strings deliberately use U+2212 MINUS,
+    # Greek letters (α, χ, τ, …), ×, →, ℏ and other math glyphs. Renaming them
+    # to ASCII look-alikes would corrupt the science being documented.
+    "RUF001",  # ambiguous char in string
+    "RUF002",  # ambiguous char in docstring
+    "RUF003",  # ambiguous char in comment
+    # RUF059: unused unpacked variable (`a, b = f()` with b unused). Unpacking
+    # to descriptive names documents a multi-return API even when one value is
+    # unused at a given call site; forcing `_` hurts readability. Noisy here.
+    "RUF059",
+    # C408: unnecessary-collection-call (`dict(a=1)` -> `{"a": 1}`). This code
+    # deliberately uses the keyword `dict(...)` form as a compact, aligned
+    # config-table idiom in ~260 places (benchmark/test case tables, option
+    # dicts). The rewrite is behaviour-preserving but pure churn and breaks the
+    # visual alignment. Keep the rest of C4 (comprehension rules) on.
+    "C408",
+    # RUF046: unnecessary-cast-to-int (`int(math.ceil(...))`). Every hit is in
+    # numerical grid-sizing code (FLAPW/FFT box dimensions, occupation counts)
+    # where the explicit int() documents that a grid *count* is intended; the
+    # fix is unsafe-marked and touches arithmetic we will not perturb without
+    # running the suite. Deferred; behaviour must stay bit-identical here.
+    "RUF046",
+    # PERF401: manual-list-comprehension. A real perf lever, but all 21 src hits
+    # are numerical accumulation loops in scf/postscf; a mechanical loop->comp
+    # rewrite is only provably behaviour-preserving with test coverage, which
+    # this lint pass does not run. Left for a focused, test-backed PR. The rest
+    # of PERF (PERF101/102/203/402, …) stays on.
+    "PERF401",
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# The non-library tree (benchmark drivers, runnable examples, one-off scripts,
+# and tests) is held to the same correctness rules but exempted from a few
+# style/refactor rules that only ever fire there and would be churn:
+#   UP031  printf-style % formatting in log/plot strings
+#   SIM105 bare try/except/pass (contextlib.suppress adds no value in a script)
+#   SIM115 open() without a context manager (short-lived read/plot scripts)
+#   RUF034 useless if-else in a benchmark data table
+#   RUF043 / ISC002 pytest match= metacharacters / multi-line implicit concat
+#          in assertion-message strings — test-authoring conveniences
+"benchmarks/**" = ["UP031", "SIM115", "RUF034"]
+"examples/**" = ["SIM115"]
+"scripts/**" = ["UP031", "SIM105", "SIM115"]
+"tests/**" = ["SIM115", "RUF043", "ISC002"]
+
+[tool.ruff.lint.mccabe]
+# Ratchet: set just above the current worst offenders (_relax_nested / scf_uspp
+# at 43) so this BLOCKS new complexity while grandfathering existing
+# god-functions. Lower it as those functions get decomposed; never raise it.
+max-complexity = 44
 
 [tool.importlinter]
 root_package = "gradwave"

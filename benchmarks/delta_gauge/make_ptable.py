@@ -36,7 +36,7 @@ def main():
     try:
         fig.write_image(png, width=1100, height=640, scale=2)
         print(f"wrote {png}")
-    except Exception as err:  # noqa: BLE001 - static export is optional
+    except Exception as err:
         print(
             f"skipped PNG ({type(err).__name__}): install a Plotly image backend "
             "(kaleido>=1 + Chrome, e.g. `nix shell nixpkgs#chromium`)"

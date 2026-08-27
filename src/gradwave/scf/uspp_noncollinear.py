@@ -327,7 +327,7 @@ def scf_uspp_noncollinear(
         gvecs = pack_grid_channels((rho_, m_[0], m_[1], m_[2]), mask_flat)
         bflat = [torch.cat([c.reshape(-1).to(CDTYPE) for c in bec_[i]])
                  for i in range(4)]
-        return torch.cat([gvecs] + bflat)
+        return torch.cat([gvecs, *bflat])
 
     def unpack(v):
         fields = unpack_grid_channels(v, 4, ng, mask_flat, shape,

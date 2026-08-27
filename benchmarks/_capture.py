@@ -24,7 +24,7 @@ import socket
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -67,7 +67,7 @@ def main() -> int:
 
     host = this_host()
     sha = git_sha()
-    started = datetime.now(timezone.utc)
+    started = datetime.now(UTC)
 
     t0 = time.time()
     try:

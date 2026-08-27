@@ -165,7 +165,7 @@ def gather(mref: str, use_gh: bool = True) -> list[dict]:
         path, branch = wt["path"], wt.get("branch", "(detached)")
         base = git("merge-base", mref, "HEAD", cwd=path)
         lr = git("rev-list", "--left-right", "--count", f"{mref}...HEAD", cwd=path)
-        behind, ahead = (lr.split() + ["?", "?"])[:2]
+        behind, ahead = ([*lr.split(), "?", "?"])[:2]
         dirty = len(git("status", "--porcelain", cwd=path).splitlines())
         is_wt = "/.claude/worktrees/" in path
         pr_state = states.get(branch, "")

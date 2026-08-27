@@ -31,12 +31,12 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from statistics import median
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import gwq_status as qs  # noqa: E402
+import gwq_status as qs
 
 REPO = Path(__file__).resolve().parents[1]
 RESULTS = REPO / "benchmarks" / "results"
@@ -70,7 +70,7 @@ true  # keep the script's exit status 0 even on no-GPU hosts (nvidia check fails
 def run(argv: list[str], timeout: int = 20) -> str | None:
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
     return r.stdout if r.returncode == 0 else None
 
@@ -178,7 +178,7 @@ def fetch_worktrees(host: str) -> list[dict]:
 
 def throughput(data: dict) -> dict:
     """Count done/failed in the last 24h + current running/queued from pueue json."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     done = failed = running = queued = 0
     for t in (data.get("tasks", {}) or {}).values():
         kind, result = qs._status_kind(t.get("status"))
@@ -487,7 +487,7 @@ section>h2{margin-top:.8rem}
 
 
 def build_html(host_cards, queues, wts, results) -> str:
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     cards = '<div class="cards">' + "".join(host_cards) + "</div>"
     qcols = '<div class="qgrid">' + "".join(queues) + "</div>"
     return (

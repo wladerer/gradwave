@@ -59,7 +59,7 @@ def test_density_grid_holds_wavefunction_products():
         torch.randn(sph.npw, generator=gen, dtype=torch.float64),
     )
     psi = g_to_r(c, sph.flat_idx, grid.shape)
-    rho_g = r_to_g((psi.conj() * psi))
+    rho_g = r_to_g(psi.conj() * psi)
     outside = rho_g[~grid.dens_mask]
     assert outside.abs().max() < 1e-12 * rho_g.abs().max()
 

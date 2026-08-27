@@ -229,10 +229,9 @@ def force_theorem_mae(
             "reference magnetic group is not a valid quadrature for a rotated "
             "moment. Converge the reference with use_symmetry=False, "
             "time_reversal=False (or pass system= built that way)")
-    if not eval_system.is_fr:
-        if verbose:
-            print("force_theorem_mae: no SOC (scalar-relativistic pseudos) — "
-                  "band sums will be direction-independent", flush=True)
+    if not eval_system.is_fr and verbose:
+        print("force_theorem_mae: no SOC (scalar-relativistic pseudos) — "
+              "band sums will be direction-independent", flush=True)
     if res.coeffs is None:
         raise ValueError("res carries no spinor coefficients")
     if system is not None and tuple(system.grid.shape) != tuple(res.system.grid.shape):

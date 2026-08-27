@@ -1147,7 +1147,7 @@ def _hubbard_occ_update(
     system: System,
     nspin: int,
     device: torch.device,
-    dist_ctx: "DistKContext | None" = None,
+    dist_ctx: DistKContext | None = None,
     n_hub_prev: list[list[torch.Tensor]] | None = None,
     occ_mix: float = 1.0,
     u_scale: float = 1.0,
@@ -1409,10 +1409,10 @@ def scf(
     hub_alpha: list[float] | None = None,  # per-site rigid manifold potential α [eV], lin-response
     start_from: _StartFrom = None,  # previous SCFResult (or checkpoint view) on the SAME FFT grid
     fock: MultiKFockExchange | None = None,  # optional orbital-dep. operator (hybrid Fock exchange)
-    dist_ctx: "DistKContext | None" = None,  # k-point-sharded distributed SCF (see
+    dist_ctx: DistKContext | None = None,  # k-point-sharded distributed SCF (see
     # gradwave.distributed): `system` is THIS RANK's local k-shard; None (default) runs
     # the ordinary single-process path, byte-for-byte unchanged.
-    recorder: "SCFRecorder | None" = None,  # per-iteration flight recorder (scf.recorder);
+    recorder: SCFRecorder | None = None,  # per-iteration flight recorder (scf.recorder);
     # None (default) builds a fresh cheap-path recorder — detached, off the autograd graph
     energy_metric: bool = False,  # opt-in energy-metric convergence gate: converge on the
     # residual's exact second-order energy error 1/2<r|K_Hxc|r> < entol instead of

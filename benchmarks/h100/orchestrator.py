@@ -32,7 +32,7 @@ import subprocess
 import sys
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -73,7 +73,7 @@ SHA = _sha()
 def _write_record(name: str, record: dict) -> Path:
     outdir = RESULTS / HOST
     outdir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     path = outdir / f"{name}-{SHA}-{ts}.json"
     path.write_text(json.dumps(record, indent=1))
     print(f"[rec] {name}: {record.get('status', '?')} -> {path}", flush=True)
@@ -83,7 +83,7 @@ def _write_record(name: str, record: dict) -> Path:
 def _base_record(name: str, extra: dict | None = None) -> dict:
     rec = {
         "name": name, "host": HOST, "git_sha": SHA,
-        "started_utc": datetime.now(timezone.utc).isoformat(),
+        "started_utc": datetime.now(UTC).isoformat(),
         "cpu_threads_cap": CPU_THREADS,
     }
     if extra:
@@ -107,7 +107,7 @@ def _run_subprocess(name: str, cmd: list[str], timeout_s: int,
         stdout = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
         stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
         rc = 124
-    except Exception as e:  # noqa: BLE001 -- never let one run kill the lane
+    except Exception as e:
         status, stdout, stderr, rc = f"ERR({type(e).__name__})", "", repr(e), 1
     wall = time.time() - t0
     lines = [ln for ln in (stdout or "").splitlines() if ln.strip()]
@@ -246,9 +246,9 @@ def lane1(dry_run: bool) -> None:
 #   * it is the fastest-converging of the 10-atom corundum minerals (1128 s CPU
 #     on asus vs hematite's 2275 s), keeping six SCF arms inside the budget.
 def _build_eskolaite():
-    import structures as S  # noqa: PLC0415
+    import structures as S
 
-    from gradwave.pseudo.upf import parse_upf  # noqa: PLC0415
+    from gradwave.pseudo.upf import parse_upf
     m = S.build("eskolaite")
     pdir = REPO / "tests" / "fixtures" / "qe" / "pseudos"
     upfs = [parse_upf(pdir / p) for p in m.pseudos]
@@ -256,7 +256,7 @@ def _build_eskolaite():
 
 
 def _eskolaite_system(device: str):
-    from gradwave.scf.loop import setup_system  # noqa: PLC0415
+    from gradwave.scf.loop import setup_system
     m, upfs = _build_eskolaite()
     system = setup_system(
         m.cell, m.positions, m.species, upfs, ecut=m.ecut_ry * RY,
@@ -269,10 +269,10 @@ def _eskolaite_system(device: str):
 
 
 def _run_eskolaite_scf(system, m, eigensolver: str, device: str, max_iter: int):
-    import torch  # noqa: PLC0415
+    import torch
 
-    from gradwave.core.xc.spin import SpinPBE  # noqa: PLC0415
-    from gradwave.scf.loop import scf  # noqa: PLC0415
+    from gradwave.core.xc.spin import SpinPBE
+    from gradwave.scf.loop import scf
     if device != "cpu":
         torch.cuda.reset_peak_memory_stats()
     t0 = time.perf_counter()
@@ -302,9 +302,9 @@ def lane2(dry_run: bool) -> None:
         return
 
     sys.path.insert(0, str(REPO / "benchmarks" / "minerals"))
-    import importlib  # noqa: PLC0415
+    import importlib
 
-    import torch  # noqa: PLC0415
+    import torch
 
     # gradwave.solvers.__init__ re-exports a `davidson` FUNCTION, which shadows
     # the submodule attribute, so `import ... as dv` would bind the function.
@@ -331,7 +331,7 @@ def lane2(dry_run: bool) -> None:
             res = _run_eskolaite_scf(system, m, "davidson", device, max_iter)
             res.update(arm=label, pair="qr_offload", eigensolver="davidson",
                        device=device, qr_cpu_max_cols=max_cols, status="ok")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             res = {"arm": label, "pair": "qr_offload", "status": f"ERR({type(e).__name__})",
                    "error": repr(e), "trace": traceback.format_exc()[-1500:], "device": device}
         finally:
@@ -347,7 +347,7 @@ def lane2(dry_run: bool) -> None:
             res = _run_eskolaite_scf(system, m, solver, device, max_iter)
             res.update(arm=solver, pair="eigensolver", eigensolver=solver,
                        device=device, status="ok")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             res = {"arm": solver, "pair": "eigensolver", "status": f"ERR({type(e).__name__})",
                    "error": repr(e), "trace": traceback.format_exc()[-1500:], "device": device}
         arms.append(res)
@@ -374,7 +374,7 @@ def lane2(dry_run: bool) -> None:
     try:
         res = _rrgemm_microbench(device)
         res.update(status="ok")
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         res = {"status": f"ERR({type(e).__name__})", "error": repr(e),
                "trace": traceback.format_exc()[-1500:]}
     _write_record(name, _base_record(name, res))
@@ -382,7 +382,7 @@ def lane2(dry_run: bool) -> None:
 
 def _rrgemm_microbench(device: str, nk: int = 13, dim: int = 240,
                        npw: int = 6746, reps: int = 20) -> dict:
-    import torch  # noqa: PLC0415
+    import torch
 
     def _time(fn) -> float:
         for _ in range(3):  # warmup
@@ -438,11 +438,11 @@ def lane3(dry_run: bool) -> None:
 
 
 def _lane3_ladder(ecut_ry: float, max_iter: int) -> None:
-    import torch  # noqa: PLC0415
+    import torch
 
-    from gradwave.core.xc.pbe import PBE  # noqa: PLC0415
-    from gradwave.pseudo.upf import parse_upf  # noqa: PLC0415
-    from gradwave.scf.loop import scf, setup_system  # noqa: PLC0415
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.pseudo.upf import parse_upf
+    from gradwave.scf.loop import scf, setup_system
 
     if not torch.cuda.is_available():
         _write_record("lane3_ladder_skip", _base_record(
@@ -489,7 +489,7 @@ def _lane3_ladder(ecut_ry: float, max_iter: int) -> None:
                     {"status": "ok", "oom_at_natoms": nat, "tiling": list(tiling)}))
                 return
             continue
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             rec.update(status=f"ERR({type(e).__name__})", error=repr(e)[:800],
                        trace=traceback.format_exc()[-1200:])
         _write_record(name, rec)
@@ -512,9 +512,9 @@ def _physical_gpu_count() -> int:
                 if ln.strip().startswith("GPU "))
         if n:
             return n
-    except Exception:  # noqa: BLE001 -- no nvidia-smi -> fall back to torch
+    except Exception:
         pass
-    import torch  # noqa: PLC0415
+    import torch
 
     return torch.cuda.device_count() if torch.cuda.is_available() else 0
 
@@ -573,11 +573,11 @@ def _lane3_multigpu_probe() -> None:
 # smoke -- tiny CPU Si SCF through the JSON-writing path
 # ==========================================================================  #
 def smoke() -> int:
-    import torch  # noqa: PLC0415
+    import torch
 
-    from gradwave.core.xc.lda_pw92 import LDA_PW92  # noqa: PLC0415
-    from gradwave.pseudo.upf import parse_upf  # noqa: PLC0415
-    from gradwave.scf.loop import scf, setup_system  # noqa: PLC0415
+    from gradwave.core.xc.lda_pw92 import LDA_PW92
+    from gradwave.pseudo.upf import parse_upf
+    from gradwave.scf.loop import scf, setup_system
     torch.set_num_threads(2)
     a = 5.43
     cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])

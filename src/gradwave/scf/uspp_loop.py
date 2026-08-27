@@ -274,7 +274,7 @@ class _IterOps:
     nk: int
     nb: int
     mixed_precision: bool = False
-    dist_ctx: "DistKContext | None" = None  # k-point-sharded distributed SCF (see
+    dist_ctx: DistKContext | None = None  # k-point-sharded distributed SCF (see
     # gradwave.distributed): `system` is THIS RANK's local k-shard; None (default)
     # runs the ordinary single-process path, byte-for-byte unchanged.
     kweights_global: torch.Tensor | None = None  # full-mesh kweights, gathered once
@@ -430,7 +430,7 @@ def _bootstrap_tau_uspp(
 
 
 def _uspp_vtau_fields(
-    ops: "_IterOps",
+    ops: _IterOps,
     rho_s: list[torch.Tensor],
     tau_s: list[torch.Tensor] | None,
 ) -> list[torch.Tensor] | None:
@@ -467,7 +467,7 @@ def _build_iter_ops(
     batched: bool = True,
     hubbard: list[HubbardManifold] | None = None,
     mixed_precision: bool = False,
-    dist_ctx: "DistKContext | None" = None,
+    dist_ctx: DistKContext | None = None,
     hub_occ_mix: float = 1.0,
     hub_u_ramp_iters: int = 0,
     boundary: str = "periodic",
@@ -1422,13 +1422,13 @@ def scf_uspp(
     precond: str = "kerker",
     opts: SCFOptions | None = None,
     verbose: bool = True,
-    dist_ctx: "DistKContext | None" = None,  # k-point-sharded distributed SCF (see
+    dist_ctx: DistKContext | None = None,  # k-point-sharded distributed SCF (see
     # gradwave.distributed): `system` is THIS RANK's local k-shard (built by
     # gradwave.distributed.shard_uspp_system); None (default) runs the ordinary
     # single-process path, byte-for-byte unchanged. DFT+U (`hubbard`) IS
     # supported under dist_ctx (unlike the NC driver's dist_ctx, which rejects
     # it) -- see _hubbard_occ_update's all_reduce over the occupation matrices.
-    recorder: "SCFRecorder | None" = None,  # per-iteration flight recorder (scf.recorder);
+    recorder: SCFRecorder | None = None,  # per-iteration flight recorder (scf.recorder);
     # None (default) builds a fresh cheap-path recorder. NOT part of SCFOptions — an
     # internal diagnostics object, so it is exempt from the opts-vs-flat-kwarg guard below.
     boundary: str = "periodic",  # periodic | open_z | open_z_metal — open-boundary

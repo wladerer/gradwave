@@ -40,9 +40,10 @@ the contraction over both spin blocks.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterator, Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch

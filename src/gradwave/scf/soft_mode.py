@@ -53,18 +53,18 @@ __all__ = [
     "SoftModeEstimate",
     "SoftSubspace",
     "SolveResult",
-    "arnoldi_factorization",
-    "soft_subspace_from_operator",
     "anderson_solve",
+    "arnoldi_factorization",
+    "critical_coupling",
     "deflated_solve",
-    # norm-conserving screening operator + diagnostics
-    "screening_apply",
     "dielectric_apply",
     "dominant_screening_eigenvalue",
     "max_real_screening_eigenvalue",
     "plain_fixed_point_rate",
+    # norm-conserving screening operator + diagnostics
+    "screening_apply",
     "soft_subspace",
-    "critical_coupling",
+    "soft_subspace_from_operator",
     "solve_adjoint_deflated",
 ]
 

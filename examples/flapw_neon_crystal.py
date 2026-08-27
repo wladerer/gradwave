@@ -82,7 +82,7 @@ def stage_empty_lattice():
     L, R, lmax, ecut = 6.0, 1.0, 6, 60.0
     r, dx = log_mesh(1e-4, R + 1.0, 1200)
     v = torch.zeros_like(r)
-    El = {lg: 2.5 for lg in range(lmax + 1)}
+    El = dict.fromkeys(range(lmax + 1), 2.5)
     H, S, _ = build_matrices([0.1, 0.0, 0.0], L, R, lmax, El, ecut, r, dx, v)
     ev = solve_geneig(0.5 * (H + H.T), S, 6)
     ref = _free_electron([0.1, 0.0, 0.0], L, ecut, 6)

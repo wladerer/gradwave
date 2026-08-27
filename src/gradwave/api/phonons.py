@@ -151,7 +151,7 @@ def _phonons_fc_parallel(
                   for (a, i, sign, pos) in displacement_list(scmap, h)]
         out = map_spokes(_phonon_spoke_worker, spokes,
                          n_workers=n_workers, verbose=verbose)
-    force_map = {tag: f for tag, f in out}
+    force_map = dict(out)
     return force_constants_from_forces(force_map, scmap, h)
 
 
@@ -246,7 +246,7 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
         _zsuper = [_sp2z[s] for s in scmap.species_super]
         _base_ff = force_fn
 
-        def force_fn(res: Any) -> Any:  # noqa: F811
+        def force_fn(res: Any) -> Any:
             f = _base_ff(res) if _base_ff is not None else _nc_forces(res, xc=xc)
             system = res.system
             pos = system.positions.detach().to(_torch.float64)
