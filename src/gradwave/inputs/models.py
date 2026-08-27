@@ -354,6 +354,14 @@ class PhononParams:
     ir_kmesh: tuple[int, int, int] = (0, 0, 0)  # Berry-phase mesh; (0,0,0) = kpoints.mesh
     born_displacement: float = 2.0e-3  # Z* finite-difference step [Å]
     ir_broadening: float = 8.0         # Lorentzian HWHM for the IR spectrum [cm⁻¹]
+    # LO–TO splitting: add the q̂→0 non-analytic term to the Γ dynamical matrix
+    # (needs ε∞). When on, ε∞ AND the Born charges are taken from the clamped-ion
+    # E-field DFPT dielectric response (postscf.dielectric.dielectric_born, one
+    # reference primitive SCF) rather than the Berry-phase FD, so ε∞/Z*/LO are
+    # mutually self-consistent. Norm-conserving insulators only.
+    lo_to: bool = False
+    # q̂ direction for the LO–TO split; (0,0,0) = isotropic (powder) average.
+    ir_qdir: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def __post_init__(self):
         object.__setattr__(self, "supercell", tuple(int(n) for n in self.supercell))
@@ -362,6 +370,10 @@ class PhononParams:
             self, "thermo_temperatures",
             tuple(float(t) for t in self.thermo_temperatures))
         object.__setattr__(self, "ir_kmesh", tuple(int(n) for n in self.ir_kmesh))
+        object.__setattr__(self, "ir_qdir", tuple(float(x) for x in self.ir_qdir))
+        if len(self.ir_qdir) != 3:
+            raise InputError(
+                f"phonons.ir_qdir must be 3 floats, got {self.ir_qdir}")
         if len(self.ir_kmesh) != 3 or min(self.ir_kmesh) < 0:
             raise InputError(
                 f"phonons.ir_kmesh must be 3 non-negative ints, got {self.ir_kmesh}")
