@@ -20,7 +20,7 @@ Env:
   STATE=~/tio2_states/aug4olo_k222.pkl   (rutile no-HELO warm start)
 
 Run on asus (respecting the 5-core budget: kworkers*OMP ~ 4):
-  OMP_NUM_THREADS=1 KWORKERS=4 uv run python experiments/autoapw/efg_eta_helo_scan.py 2>&1 | tee scan.log
+  OMP_NUM_THREADS=1 KWORKERS=4 uv run python experiments/autoapw/efg_eta_helo_scan.py | tee scan.log
 """
 from __future__ import annotations
 
@@ -90,7 +90,7 @@ def main():
     print(f"# FRONT B rutile-O HELO_E scan  es={es}  warm={state_env} "
           f"kw={os.environ.get('KWORKERS')} OMP={os.environ.get('OMP_NUM_THREADS')}",
           flush=True)
-    print(f"# Elk 11: O full V_zz={RUTILE_ELK['full']:+.2f} eta={RUTILE_ELK['eta']:.3f}", flush=True)
+    print(f"# Elk 11: O V_zz={RUTILE_ELK['full']:+.2f} eta={RUTILE_ELK['eta']:.3f}", flush=True)
     with open(state_env, "rb") as f:
         state = pickle.load(f)
     rows = []
