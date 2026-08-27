@@ -1678,7 +1678,7 @@ class ShieldingDq:
         cg_tol: float = 1e-10,
         max_iter: int = 400,
         response_backend: str = "auto",
-        warm_start: bool = True,
+        warm_start: bool = False,
     ) -> None:
         """Build the per-k dense contexts (eigh + ∂H/∂k) at each mesh k.
 
@@ -1713,9 +1713,13 @@ class ShieldingDq:
           CG. ``uspp="nc-gate"`` (S = I ⇒ cond 1) resolves to dense under auto.
 
         ``warm_start`` seeds each CG solve from a nearby already-computed
-        response (previous q̂ pol → δu⁰, δu⁰ → δu¹) to cut iterations; it only
-        affects the CG backend's iteration count, never the converged result.
-        With ``uspp=None`` the plain norm-conserving (S = I) route is unchanged.
+        response (previous q̂ pol → δu⁰, δu⁰ → δu¹); opt-in and OFF by default
+        because it MEASURED NEGATIVE on MgO ¹⁷O (−10.8%, i.e. ~11% MORE
+        iterations: the intra-k seeds are not close enough to beat a zero start
+        under Teter preconditioning — a non-matching seed only enlarges the
+        initial residual). It never changes the converged result, only the
+        iteration count. With ``uspp=None`` the plain norm-conserving (S = I)
+        route is unchanged.
         """
         _guard(res)
         self.res = res
@@ -2479,7 +2483,7 @@ def sigma_shielding_dq(
     cg_tol: float = 1e-10,
     max_iter: int = 400,
     response_backend: str = "auto",
-    warm_start: bool = True,
+    warm_start: bool = False,
 ) -> Tensor:
     """Bare (pseudo) NMR shielding tensor by the ANALYTIC ∂/∂q at q = 0:
     σ_ij = −∂B_ind,i(r_site)/∂B_ext,j in ppm, shape (nsite, 3, 3).
@@ -2553,9 +2557,10 @@ def sigma_shielding_dq(
     CG only when max cond(S(k)) > threshold, emitting
     :class:`USPPShieldingConditioningWarning` when it routes to CG). So the easy
     majority keeps the dense speed and only the diverging regime pays for CG.
-    ``cg_tol`` / ``max_iter`` bound the CG solve; ``warm_start`` seeds it from
-    the adjacent ∂/∂q stage to cut iterations. :func:`uspp_overlap_conditioning`
-    remains a basis-health diagnostic (no longer a divergence predictor)."""
+    ``cg_tol`` / ``max_iter`` bound the CG solve; ``warm_start`` (opt-in, OFF by
+    default — it measured a ~11% iteration INCREASE on MgO) seeds each solve from
+    the adjacent ∂/∂q stage. :func:`uspp_overlap_conditioning` remains a
+    basis-health diagnostic (no longer a divergence predictor)."""
     _guard(res)
     system = uspp.system if isinstance(uspp, USPPResponseCtx) else res.system
     sites_is_default = sites is None
@@ -2779,7 +2784,7 @@ def sigma_shielding_gipaw(
     max_iter: int = 800,
     chunk_k: int | None = None,
     response_backend: str = "auto",
-    warm_start: bool = True,
+    warm_start: bool = False,
 ) -> dict[str, Tensor]:
     """Full absolute GIPAW chemical-shielding tensor per site (nsite, 3, 3) ppm,
 
