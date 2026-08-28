@@ -1,36 +1,25 @@
-"""Deep-profile one MgO GIPAW shielding evaluation (the profiling proxy).
+"""Deep-profile ONE isolated shielding kernel — a single CG Sternheimer solve.
 
-The memory/time BREAKDOWN of the GIPAW shielding pipeline — where bytes and
-cycles go across the CG response resolvent, the FFT boxes, and the band buffers
-— is a STRUCTURAL property of the code paths, not of the material. alpha-quartz
-(9 atoms) costs ~3 h per shielding eval; MgO (2-atom rocksalt) exercises the
-IDENTICAL hard-augmentation code paths — it is the cell the S-metric CG reroute
-was validated on (``mgo_cg_ecut_validate.py``, PR #401): hard-O PAW
-augmentation, the ill-conditioned overlap, the matrix-free CG resolvent, the
-same FFT boxes at ecutrho and the same band buffers — cheaply.
+Profiling a FULL GIPAW shielding eval is impossible on a 14 GB box in ANY
+torch.profiler config: the eval issues millions of aten ops (per-k x per-q x
+per-band x per-site CG), and the profiler's in-RAM event buffer (even with
+``profile_memory`` only, ``with_stack``/``record_shapes`` off — the ``light``
+mode) grew past 12-13 GB and the box OOM-killed the process (measured; see
+``shielding_profile_note.md`` and ``docs/profiling.md``).
 
-Two things make this profileable on a 14 GB box:
+The RIGHT granularity for "where do a response solve's cycles and bytes go" is
+ONE kernel invocation, not the whole multi-k/q/band eval. This profiles a
+single :class:`~gradwave.postscf.kgeometry_nmr._SMetricResolventCG` ``apply`` —
+one matrix-free S-metric CG Sternheimer resolvent solve, THE inner operator the
+full shielding drives thousands of times. One solve is a few thousand ops:
+fits trivially, and is more informative for the kernel-level question (which
+ops dominate a single resolvent solve, and where its transient memory lives).
 
-* **Low-level, CG-forced, iteration-capped eval.** ``single_eval`` calls
-  ``kgeometry_nmr.sigma_shielding_gipaw`` directly with
-  ``response_backend='cg'`` (so the CG resolvent is exercised regardless of the
-  cond(S) gate) and a LOW ``max_iter`` / loose ``cg_tol``. The default driver
-  runs CG to 1e-9 (hundreds of iterations, millions of tensor allocations);
-  ``torch.profiler(profile_memory=True)`` records every allocation, so the
-  full run OOMs the box (measured 12-13 GB). Capping the CG iteration count
-  caps the allocation count and keeps the profiled pass in RAM. The shielding
-  NUMBER is meaningless at this cap — this is a structural profile, not an
-  accuracy run; use ``ssnmr_quartz_gate.py`` / ``quartz_sigma_cg.py`` for real
-  numbers.
-* **light-mode profiler.** ``deep_profile(..., light=True)`` drops
-  ``with_stack`` / ``record_shapes`` (a full call stack + input shapes per op)
-  while keeping ``profile_memory`` — the per-op memory column that answers
-  "where do the bytes go". ``command=None`` skips py-spy/memray (their
-  allocation tracking OOMs on the same allocation count).
-
-Settings: ecut 25 Ry (ecutrho 100 Ry), k 2x2x1 (the cheapest mesh the q->0
-assembly accepts — >=2 axes with n>1), ``chunk_k=1``, all-PAW pseudos (light
-non-semicore Mg + O ``kjpaw``).
+The context (a cheap MgO SCF + one dense per-k S-metric context) is built ONCE,
+unprofiled; only the single CG apply is timed and profiled. MgO is the cell the
+CG reroute was validated on (PR #401); the numbers here are structural, not
+converged (the RHS is a random conduction-space source of the right shape, so
+the op/byte breakdown is faithful while the solve itself is not physical).
 
 The Mg PAW pseudo is not in the committed fixtures; fetch it once into
 ``tests/fixtures/qe/pseudos/`` from the QE pseudo library
@@ -38,7 +27,7 @@ The Mg PAW pseudo is not in the committed fixtures; fetch it once into
 
 Run modes::
 
-    python shielding_profile_workload.py --single   # one capped eval, standalone
+    python shielding_profile_workload.py --single   # one CG solve, standalone timing
     python shielding_profile_workload.py            # driver: deep_profile + summary.html
 """
 
@@ -54,44 +43,38 @@ import numpy as np
 from gradwave.constants import RY_EV
 
 PSEUDOS = Path("tests/fixtures/qe/pseudos").resolve()
-# Light non-semicore Mg PAW (3s valence only, 2 e-): the profile is a STRUCTURAL
-# breakdown, not an accuracy run, so we skip the semicore spnl (10 e-, ~5x the
-# band cost). The O site is the hard-augmentation one whose CG resolvent the
-# profile is meant to exercise.
-MG_PSEUDO = "Mg.pbe-n-kjpaw_psl.0.3.0.UPF"  # fetch into PSEUDOS from the QE library
+MG_PSEUDO = "Mg.pbe-n-kjpaw_psl.0.3.0.UPF"  # light non-semicore Mg PAW (3s, 2 e-)
 O_PSEUDO = "O.pbe-n-kjpaw_psl.1.0.0.UPF"
 
 ECUT_RY = 25.0
 ECUTRHO_RY = 100.0
 KMESH = (2, 2, 1)
-NBANDS = 10  # 1 Mg (2 e-) + 1 O (6 e-) = 8 e- -> 4 occupied + buffer
+NBANDS = 10
 THREADS = 8
-# CG iteration cap: bounds the allocation count so profile_memory fits in RAM.
-# The resolvent/FFT/band code paths are the SAME at any cap; only the number of
-# iterations (hence the converged number) changes.
-CG_TOL = 1e-3
-CG_MAX_ITER = 20
-SCF_MAX_ITER = 80
+# The single CG solve's iteration budget: a random RHS will not converge, so it
+# runs the full budget — a representative sample of the resolvent op mix.
+CG_TOL = 1e-8
+CG_MAX_ITER = 100
 
 
 def _mgo_cell_pos() -> tuple[np.ndarray, np.ndarray]:
-    """2-atom rocksalt MgO (a = 4.21 Å): fcc primitive cell, Mg at 0, O at (1/2)³."""
     a = 4.21
     cell = 0.5 * a * np.array([[0.0, 1.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 0.0]])
     pos = np.array([[0.0, 0.0, 0.0], [0.5, 0.5, 0.5]]) @ cell
     return cell, pos
 
 
-def single_eval() -> dict[str, Any]:
-    """One CG-forced, iteration-capped GIPAW shielding solve on MgO.
-
-    Low-level so the CG backend and its iteration cap are explicit — this is the
-    resolvent / FFT / band pipeline the profile attributes, run cheaply enough
-    that ``profile_memory`` stays in RAM."""
+def build_cg_kernel() -> tuple[Any, Any, dict[str, int]]:
+    """Cheap MgO SCF + one dense S-metric k-context → a ready
+    ``_SMetricResolventCG`` and a random conduction-space RHS ``z`` (npw, nocc).
+    Returns ``(res_cg, z, sizes)``; everything here is the UNPROFILED setup."""
     import torch
 
+    from gradwave.constants import HBAR2_2M
     from gradwave.core.xc.pbe import PBE
+    from gradwave.dtypes import CDTYPE
     from gradwave.postscf import kgeometry_nmr as kg
+    from gradwave.postscf.kgeometry_nmr import ShieldingDq, _SMetricResolventCG
     from gradwave.pseudo.upf_paw import parse_upf_paw
     from gradwave.scf.uspp import scf_uspp, setup_uspp
 
@@ -104,62 +87,80 @@ def single_eval() -> dict[str, Any]:
         ecut=ECUT_RY * RY_EV, kmesh=KMESH, ecutrho=ECUTRHO_RY * RY_EV,
         nbands=NBANDS)
     res = scf_uspp(system, PBE(), etol=1e-7, rhotol=1e-6, diago_tol=1e-8,
-                   verbose=False, max_iter=SCF_MAX_ITER)
+                   verbose=False, max_iter=80)
     ctx = kg.build_uspp_response_ctx(res, PBE())
-    out = kg.sigma_shielding_gipaw(
-        res, ctx, [paw_mg, paw_o], response_backend="cg",
-        cg_tol=CG_TOL, max_iter=CG_MAX_ITER, use_symmetry=False, chunk_k=1)
-    return {"n_sites": int(out["total"].shape[0])}
+
+    # Force the CG backend; build ONE dense per-k S-metric context and lift the
+    # exact _SMetricResolventCG the full shielding builds per k (lines that make
+    # res_cg in ShieldingDq._accumulate_k).
+    eng = ShieldingDq(res, uspp=ctx, response_backend="cg",
+                      cg_tol=CG_TOL, max_iter=CG_MAX_ITER)
+    dk = eng._build_ctx(eng._kfs[0], eng._weights[0])
+    nocc = eng.nocc
+    uo = dk.u[:, :nocc]
+    wo = dk.w[:nocc]
+    t_kin = HBAR2_2M * (dk.kpg * dk.kpg).sum(-1)
+    res_cg = _SMetricResolventCG(
+        dk.hk.h(dk.kc), dk.s0, uo, wo, t_kin, tol=CG_TOL, max_iter=CG_MAX_ITER)
+
+    npw = int(uo.shape[0])
+    torch.manual_seed(0)
+    z = torch.randn(npw, nocc, dtype=CDTYPE)
+    return res_cg, z, {"npw": npw, "nocc": int(nocc), "max_iter": CG_MAX_ITER}
 
 
-def build_workload():
+def build_workload(res_cg: Any, z: Any, sizes: dict[str, int]):
     from gradwave.profiling import Workload
 
     spec = {
-        "system": "MgO (rocksalt, profiling proxy for quartz hard-O paths)",
-        "n_atoms": 2,
-        "composition": "1 Mg + 1 O",
+        "system": "MgO (rocksalt) — one S-metric CG Sternheimer solve",
+        "kernel": "_SMetricResolventCG.apply (matrix-free CG resolvent, PR #401)",
+        "npw": sizes["npw"],
+        "nocc": sizes["nocc"],
+        "cg_max_iter": sizes["max_iter"],
         "ecut_Ry": ECUT_RY,
-        "ecutrho_Ry": ECUTRHO_RY,
         "kmesh": list(KMESH),
-        "pseudos": "PAW (light non-semicore Mg + O kjpaw)",
-        "shielding_level": "gipaw (low-level, CG-forced)",
-        "response_backend": f"cg (forced); cg_tol={CG_TOL}, max_iter={CG_MAX_ITER}",
-        "chunk_k": 1,
-        "profiled": ("one iteration-capped GIPAW shielding eval (structural "
-                     "breakdown, NOT a converged number)"),
+        "profiled": ("ONE CG resolvent solve — the inner kernel the full "
+                     "shielding drives thousands of times (structural, not "
+                     "converged)"),
     }
-    # command=None: py-spy/memray SKIPPED — their allocation tracking OOMs on a
-    # shielding eval's allocation count. The op-level memory breakdown comes from
-    # torch.profiler profile_memory (light mode) instead.
+    # command=None: the process-level samplers profile a fresh SCF-and-solve
+    # subprocess, not this in-process pre-built kernel; the op/memory table from
+    # torch.profiler is the deliverable here.
     return Workload(
-        name="mgo-shielding", spec=spec, run=single_eval, command=None)
+        name="shielding-cg-kernel", spec=spec,
+        run=lambda: res_cg.apply(z), command=None)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--single", action="store_true",
-        help="run one capped shielding eval and exit (standalone timing)")
+        help="build the kernel, run one CG solve, and exit (standalone timing)")
     args = parser.parse_args()
+
+    import time
 
     import torch
 
     torch.set_num_threads(THREADS)
 
+    print("building CG kernel (cheap MgO SCF + one k-context, unprofiled)...",
+          flush=True)
+    res_cg, z, sizes = build_cg_kernel()
+    print(f"  kernel ready: npw={sizes['npw']} nocc={sizes['nocc']} "
+          f"max_iter={sizes['max_iter']}", flush=True)
+
     if args.single:
-        block = single_eval()
-        print(f"single_eval done: {block['n_sites']} sites", flush=True)
+        t0 = time.time()
+        _ = res_cg.apply(z)
+        print(f"single CG solve done in {time.time() - t0:.3f}s", flush=True)
         return 0
 
     from gradwave.profiling import deep_profile, write_summary
 
-    wl = build_workload()
-    # light=True: torch.profiler without per-op stacks/shapes (those balloon the
-    # trace); profile_memory stays on so the op table keeps the per-op memory
-    # column. The CG iteration cap in single_eval keeps that column's allocation
-    # count in RAM.
-    result = deep_profile(wl, n_timed=2, warmup=0, threads=THREADS, light=True)
+    wl = build_workload(res_cg, z, sizes)
+    result = deep_profile(wl, n_timed=5, warmup=1, threads=THREADS, light=True)
     path = write_summary(result)
     print(f"\nSUMMARY_HTML {path}", flush=True)
     print(f"OUT_DIR {result.out_dir}", flush=True)
