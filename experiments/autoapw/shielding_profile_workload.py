@@ -13,8 +13,9 @@ matrix-free CG resolvent, the same FFT boxes at ecutrho and the same band
 buffers — but one eval is ~1-3 min, so the full deep_profile with memray is
 tractable (~30-60 min).
 
-Settings: ecut 40 Ry (ecutrho 160 Ry), k 2x2x2, ``chunk_k=1``, all-PAW pseudos
-(light non-semicore Mg + O ``kjpaw``) so ``shielding_level`` auto-selects
+Settings: ecut 25 Ry (ecutrho 100 Ry), k 2x2x1 (the cheapest mesh the q->0
+assembly accepts — >=2 axes with n>1), ``chunk_k=1``, all-PAW pseudos (light
+non-semicore Mg + O ``kjpaw``) so ``shielding_level`` auto-selects
 ``gipaw`` and ``response_backend='auto'`` cond(S)-routes the hard O site onto
 the ecut-stable CG resolvent (PR #401). This is the SAME regime the quartz O
 sites live in; the profile answers "where do the bytes/cycles go", not a
@@ -51,9 +52,9 @@ PSEUDOS = Path("tests/fixtures/qe/pseudos").resolve()
 MG_PSEUDO = "Mg.pbe-n-kjpaw_psl.0.3.0.UPF"  # fetch into PSEUDOS from the QE library
 O_PSEUDO = "O.pbe-n-kjpaw_psl.1.0.0.UPF"
 
-ECUT_RY = 40.0
-ECUTRHO_RY = 160.0
-KMESH = (2, 2, 2)
+ECUT_RY = 25.0
+ECUTRHO_RY = 100.0
+KMESH = (2, 2, 1)
 THREADS = 8
 
 
