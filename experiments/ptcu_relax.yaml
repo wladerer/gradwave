@@ -34,15 +34,21 @@ ecut: 680.28          # eV (50 Ry, wavefunctions)
 ecutrho: 5442.28      # eV (400 Ry, PAW density/augmentation)
 xc: pbe
 nspin: 1              # PtCu L1_0 is non-magnetic
-symmetry: true        # reduce k to the IBZ + symmetrize the density each step
+# Symmetry OFF for tractability (the shipped example uses symmetry: true). With
+# symmetry on, the IBZ mesh + density symmetrizer are position-dependent, so the
+# calculator rebuilds the system AND the expensive PAW form-factor tables
+# (ecutrho 400 Ry) on EVERY ionic step — ~20 min/step here. With symmetry off
+# the phase-free tables are cached and reused across positions-only moves (only
+# structure factors rebuild per solve), so step 1 pays the one-time build and
+# the rest are fast. The relaxed geometry is unchanged; the cost is a full-BZ
+# k-sum instead of the IBZ. See the report's caveats.
+symmetry: false
 
 kpoints:
-  # Validation-grade reduced mesh (the shipped example uses 8x8x8). A denser
-  # mesh multiplies the per-ionic-step PAW SCF cost, and with symmetry: true the
-  # system + form factors rebuild every step; 4x4x4 keeps the symmetric out-of-
-  # plane Cu relaxation tractable in a single session. The relaxed geometry (Cu
-  # returning to its ideal L1_0 site) is symmetry-determined and robust to the
-  # k-mesh; see the report's caveats.
+  # Validation-grade reduced mesh (the shipped example uses 8x8x8). Cheap here
+  # because the SCF cost is dominated by the one-time PAW form-factor build, not
+  # the k-sum. The relaxed geometry (Cu returning to its ideal L1_0 site) is
+  # symmetry-determined and robust to the k-mesh; see the report's caveats.
   mesh: [4, 4, 4]
 
 smearing:

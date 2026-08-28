@@ -1,0 +1,42 @@
+# bcc-Fe FM anchor (nspin=2) — the exact CI-validated configuration used to
+# drive the error_estimate (numerical-error UQ) block via the supported api
+# path, and to cross-check the low-level moment. Matches
+# tests/integration/test_spin_vs_qe.py::test_ferromagnetic_iron_vs_qe:
+# k=(6,6,6), ecut 60 Ry, gaussian width 0.1 eV, start_mag 0.4 -> 2.22 uB.
+structure:
+  cell: [[-1.435, 1.435, 1.435], [1.435, -1.435, 1.435], [1.435, 1.435, -1.435]]
+  positions:
+    cart:
+      - [0.0, 0.0, 0.0]
+  species: [Fe]
+
+pseudopotentials:
+  dir: ../tests/fixtures/qe/pseudos
+  map:
+    Fe: Fe_ONCV_PBE-1.2.upf
+
+ecut: 816.3416        # eV (60 Ry)
+xc: pbe
+nspin: 2
+start_mag:
+  Fe: 0.4
+symmetry: false
+nbands: 12
+
+kpoints:
+  mesh: [6, 6, 6]
+
+smearing:
+  type: gaussian
+  width: 0.1
+
+scf:
+  etol: 1.0e-9
+  rhotol: 1.0e-8
+  mixing:
+    scheme: johnson
+
+task: scf
+
+output:
+  dir: ./out_fe_anchor

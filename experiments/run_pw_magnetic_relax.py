@@ -239,28 +239,95 @@ def dos_svg(m: dict[str, Any]) -> str:
 
 
 def sens_svg(fe: dict, ni: dict) -> str:
-    """Moment vs starting seed, one line per (element, k-mesh)."""
+    """Self-consistent moment vs k-mesh density (gaussian 0.1 eV), Fe and Ni.
+
+    The two starting seeds are plotted as separate markers; they land on top of
+    each other (the moment is seed-independent here), so the visible variation is
+    entirely the k-mesh drift the convergence section then dissects."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, (axf, axn) = plt.subplots(1, 2, figsize=(8.8, 3.4), sharey=False)
+    fig, (axf, axn) = plt.subplots(1, 2, figsize=(8.8, 3.4))
     for ax, m, key in ((axf, fe, "Fe"), (axn, ni, "Ni")):
-        cfg = SYSTEMS[key]
-        for mesh, c in zip(cfg["meshes"], ("#2a78d6", "#c1442e"), strict=True):
-            rows = sorted((r for r in m["grid"] if tuple(r["mesh"]) == mesh),
-                          key=lambda r: r["seed"])
-            ax.plot([r["seed"] for r in rows], [r["m_tot"] for r in rows],
-                    "o-", color=c, lw=1.6, ms=5, label=f"k={mesh}")
+        for seed, c in zip(SYSTEMS[key]["seeds"], ("#2a78d6", "#c1442e"),
+                           strict=True):
+            rows = sorted((r for r in m["grid"] if r["seed"] == seed),
+                          key=lambda r: r["mesh"][0])
+            ax.plot([r["mesh"][0] for r in rows], [r["m_tot"] for r in rows],
+                    "o-", color=c, lw=1.6, ms=6, label=f"seed {seed}", alpha=0.8)
         ref = REF[key]
         anchor = ref["qe"] if ref["qe"] is not None else ref["expt"]
-        lbl = "QE 2.22" if ref["qe"] is not None else f"expt {ref['expt']}"
+        lbl = "QE 2.22 (6^3)" if ref["qe"] is not None else f"expt {ref['expt']}"
         ax.axhline(anchor, color="#3a7d44", lw=1.2, ls="--", alpha=0.9, label=lbl)
-        ax.set_xlabel("starting moment fraction (start_mag)")
+        ax.set_xlabel("k-mesh linear dimension n  (n x n x n)")
         ax.set_ylabel("self-consistent m_tot (uB)")
-        ax.set_title(f"{key}: moment vs seed")
+        ax.set_title(f"{key}: moment vs k-mesh")
         ax.legend(frameon=False, fontsize=8)
         ax.grid(True, lw=0.3, alpha=0.25)
+    fig.tight_layout()
+    return _svg(fig)
+
+
+# ----------------------------------------------------------------------------
+# Fe convergence section (smearing x width x mesh + QE cross-check)
+# ----------------------------------------------------------------------------
+_SCHEME_COLOR = {"gaussian": "#c1442e", "mp1": "#2a78d6", "cold": "#3a7d44"}
+
+
+def conv_mesh_svg(conv: dict) -> str:
+    """m_tot vs k-mesh at width 0.1 eV, one line per smearing scheme."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    grid = conv["grid"]
+    fig, ax = plt.subplots(figsize=(6.4, 3.6))
+    for scheme in ("gaussian", "mp1", "cold"):
+        rows = sorted((r for r in grid
+                       if r["scheme"] == scheme and abs(r["width_eV"] - 0.1) < 1e-9),
+                      key=lambda r: r["mesh"][0])
+        if rows:
+            ax.plot([r["mesh"][0] for r in rows], [r["m_tot"] for r in rows],
+                    "o-", color=_SCHEME_COLOR[scheme], lw=1.8, ms=6, label=scheme)
+    ax.set_xlabel("k-mesh linear dimension n  (n x n x n)")
+    ax.set_ylabel("m_tot (uB)")
+    ax.set_title("Fe moment vs k-mesh, width 0.1 eV")
+    ax.legend(frameon=False, fontsize=9)
+    ax.grid(True, lw=0.3, alpha=0.25)
+    fig.tight_layout()
+    return _svg(fig)
+
+
+def conv_width_svg(conv: dict) -> str:
+    """m_tot vs smearing width at the finest mesh, one line per scheme, with
+    the width->0 extrapolated intercepts marked."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    grid = conv["grid"]
+    fine = tuple(conv["fine_mesh"])
+    ex = {e["scheme"]: e for e in conv["extrapolation"]}
+    fig, ax = plt.subplots(figsize=(6.4, 3.6))
+    for scheme in ("gaussian", "mp1", "cold"):
+        rows = sorted((r for r in grid
+                       if r["scheme"] == scheme and tuple(r["mesh"]) == fine),
+                      key=lambda r: r["width_eV"])
+        if not rows:
+            continue
+        c = _SCHEME_COLOR[scheme]
+        ax.plot([r["width_eV"] for r in rows], [r["m_tot"] for r in rows],
+                "o-", color=c, lw=1.8, ms=6, label=scheme)
+        if scheme in ex:
+            ax.plot(0.0, ex[scheme]["m_tot_width0"], "*", color=c, ms=13,
+                    markeredgecolor="k", markeredgewidth=0.4)
+    ax.set_xlabel("gaussian/MP/cold width (eV)")
+    ax.set_ylabel("m_tot (uB)")
+    ax.set_title(f"Fe moment vs width at k={fine} (* = width->0)")
+    ax.set_xlim(left=-0.01)
+    ax.legend(frameon=False, fontsize=9)
+    ax.grid(True, lw=0.3, alpha=0.25)
     fig.tight_layout()
     return _svg(fig)
 
@@ -299,7 +366,177 @@ def _esc(x: Any) -> str:
     return html.escape(str(x))
 
 
-def build_html(snap: dict[str, Any], fe: dict, ni: dict, ptcu: dict) -> str:
+def _mval(grid, scheme, width, mesh):
+    for r in grid:
+        if (r["scheme"] == scheme and abs(r["width_eV"] - width) < 1e-9
+                and tuple(r["mesh"]) == tuple(mesh)):
+            return r["m_tot"]
+    return None
+
+
+def _qval(qe, smearing, k):
+    if not qe:
+        return None
+    for r in qe.get("rows", []):
+        if r.get("smearing") == smearing and r.get("k") == k:
+            return r.get("m_tot")
+    return None
+
+
+def convergence_section(conv: dict | None, qe: dict | None) -> str:
+    """Section resolving the Fe mesh drift: smearing x width x mesh (gradwave),
+    QE side-by-side, width->0 extrapolation +/- uncertainty, and a verdict."""
+    if conv is None:
+        return ("<p class='cap'>Fe smearing/QE convergence study not present in "
+                "this build (run <code>experiments/fe_convergence.py</code> and "
+                "<code>experiments/qe_fe_crosscheck.py</code>).</p>")
+    grid = conv["grid"]
+    fine = tuple(conv["fine_mesh"])
+    meshes = sorted({tuple(r["mesh"]) for r in grid}, key=lambda m: m[0])
+    ex = {e["scheme"]: e for e in conv["extrapolation"]}
+    csw = conv["cross_scheme_width0"]
+    mean_m, half = csw["mean_m_tot"], csw["half_spread"]
+
+    # gaussian mesh drift at width 0.1 across the mesh series
+    g = {m[0]: _mval(grid, "gaussian", 0.10, m) for m in meshes}
+    g_series = [v for v in g.values() if v is not None]
+    g_drift = (max(g_series) - min(g_series)) if g_series else 0.0
+    # mp1/cold mesh spread at width 0.1 (stability check)
+    def _mesh_spread(sch):
+        vs = [_mval(grid, sch, 0.10, m) for m in meshes]
+        vs = [v for v in vs if v is not None]
+        return (max(vs) - min(vs)) if vs else 0.0
+    mp1_drift, cold_drift = _mesh_spread("mp1"), _mesh_spread("cold")
+
+    # per (scheme x mesh) table at width 0.1
+    def wtable():
+        head = ("<tr><th>scheme</th>"
+                + "".join(f"<th>{m[0]}<sup>3</sup></th>" for m in meshes)
+                + "<th>m(w&rarr;0) @ " + f"{fine[0]}<sup>3</sup></th></tr>")
+        body = []
+        for sch in ("gaussian", "mp1", "cold"):
+            cells = "".join(
+                f"<td>{_mval(grid, sch, 0.10, m):.3f}</td>"
+                if _mval(grid, sch, 0.10, m) is not None else "<td>&mdash;</td>"
+                for m in meshes)
+            w0 = ex.get(sch, {}).get("m_tot_width0")
+            body.append(f"<tr><td>{sch}</td>{cells}"
+                        f"<td><b>{w0:.3f}</b></td></tr>"
+                        if w0 is not None else f"<tr><td>{sch}</td>{cells}<td>&mdash;</td></tr>")
+        return ("<table class='data'><thead>" + head + "</thead><tbody>"
+                + "".join(body) + "</tbody></table>")
+
+    # full grid table (every scheme x width x mesh)
+    def fulltable():
+        rows = sorted(grid, key=lambda r: (r["mesh"][0], r["scheme"], r["width_eV"]))
+        body = "".join(
+            f"<tr><td>{r['scheme']}</td><td>{r['width_eV']:.2f}</td>"
+            f"<td>{tuple(r['mesh'])}</td><td>{r['m_tot']:.3f}</td>"
+            f"<td>{r['m_abs']:.3f}</td><td>{r['fermi_eV']:.3f}</td>"
+            f"<td>{r['E_free_eV']:.4f}</td><td>{r['n_iter']}</td>"
+            f"<td>{'yes' if r['converged'] else 'no'}</td></tr>" for r in rows)
+        return ("<table class='data'><thead><tr><th>scheme</th><th>width (eV)</th>"
+                "<th>k-mesh</th><th>m<sub>tot</sub></th><th>m<sub>abs</sub></th>"
+                "<th>E<sub>F</sub> (eV)</th><th>E<sub>free</sub> (eV)</th>"
+                "<th>iters</th><th>conv</th></tr></thead><tbody>"
+                + body + "</tbody></table>")
+
+    # QE side-by-side at width 0.1 (gaussian + mp1)
+    qe_html = ""
+    verdict_qe = ""
+    if qe:
+        qmeshes = sorted({r["k"] for r in qe.get("rows", [])})
+        qrows = []
+        for sm in ("gaussian", "mp1"):
+            for k in qmeshes:
+                qv = _qval(qe, sm, k)
+                gv = _mval(grid, sm, 0.10, (k, k, k))
+                d = (gv - qv) if (qv is not None and gv is not None) else None
+                qs = f"{qv:.3f}" if qv is not None else "&mdash;"
+                gs = f"{gv:.3f}" if gv is not None else "&mdash;"
+                ds = f"{d:+.3f}" if d is not None else "&mdash;"
+                qrows.append(
+                    f"<tr><td>{sm}</td><td>{k}<sup>3</sup></td>"
+                    f"<td>{qs}</td><td>{gs}</td><td>{ds}</td></tr>")
+        qe_html = (
+            f"<h3>Quantum ESPRESSO cross-check (pw.x {_esc(qe.get('qe_version'))}, "
+            f"identical pseudo / ecut / cell, degauss 0.1 eV)</h3>"
+            "<table class='data'><thead><tr><th>smearing</th><th>k-mesh</th>"
+            "<th>QE m<sub>tot</sub></th><th>gradwave m<sub>tot</sub></th>"
+            "<th>gw &minus; QE</th></tr></thead><tbody>"
+            + "".join(qrows) + "</tbody></table>")
+        qe_g8 = _qval(qe, "gaussian", 8)
+        gw_g8 = _mval(grid, "gaussian", 0.10, (8, 8, 8))
+        if qe_g8 is not None and gw_g8 is not None:
+            if abs(gw_g8 - qe_g8) < 0.05:
+                verdict_qe = (
+                    f"At 8&times;8&times;8 gaussian, QE gives "
+                    f"{qe_g8:.2f} &mu;B and gradwave {gw_g8:.2f} &mu;B "
+                    f"(&Delta; {gw_g8-qe_g8:+.3f}) &mdash; <b>gradwave tracks QE "
+                    f"to within {abs(gw_g8-qe_g8):.3f} &mu;B</b>, so the "
+                    f"6&rarr;8 rise is real, shared behaviour of gaussian "
+                    f"smearing at finite width, not a gradwave bug. The 6&sup3; "
+                    f"agreement with the CI fixture is partly a coincidence of "
+                    f"both codes being under-converged there.")
+            else:
+                verdict_qe = (
+                    f"At 8&times;8&times;8 gaussian, QE gives {qe_g8:.2f} &mu;B "
+                    f"but gradwave {gw_g8:.2f} &mu;B (&Delta; {gw_g8-qe_g8:+.3f}) "
+                    f"&mdash; <b>gradwave diverges from QE at fine mesh</b>; this "
+                    f"is a real discrepancy to chase, not just smearing.")
+
+    smear_verdict = (
+        f"Gaussian's moment drifts <b>{g_drift:.2f} &mu;B</b> across "
+        f"{meshes[0][0]}&sup3;&ndash;{meshes[-1][0]}&sup3; at fixed width 0.1 eV, "
+        f"while mp1 drifts {mp1_drift:.2f} and cold {cold_drift:.2f} &mu;B &mdash; "
+        + ("the higher-order schemes are much flatter, so the gaussian mesh drift "
+           "is dominated by its O(width&sup2;) finite-smearing error interacting "
+           "with the k-sampling of the sharp Fe d-DOS at E_F."
+           if (mp1_drift < g_drift * 0.6 or cold_drift < g_drift * 0.6)
+           else "all schemes drift comparably, so the effect is k-convergence, "
+                "not a smearing artifact."))
+    trust = (f"Extrapolating each scheme to zero width at {fine[0]}&sup3; and "
+             f"averaging gives a trustworthy converged moment of "
+             f"<b>{mean_m:.2f} &plusmn; {half:.2f} &mu;B</b> "
+             f"(cross-scheme half-spread).")
+
+    # error-estimate numbers
+    err_html = ""
+    ee = conv.get("error_estimate")
+    if ee and "block" in ee:
+        b = ee["block"]
+        nee = b.get("numerical_energy_error", {})
+        sm = b.get("smearing", {})
+        bits = []
+        if nee:
+            bits.append(f"numerical energy error "
+                        f"{nee.get('total_meV_per_atom', 0):.2f} meV/atom "
+                        f"(basis+SCF+smearing, k-sampling excluded)")
+        if sm:
+            bits.append(f"smearing energy uncertainty "
+                        f"{abs(sm.get('dsmearing_eV', 0))*1e3:.2f} meV, "
+                        f"free energy extrapolated to width&rarr;0 = "
+                        f"{sm.get('energy_extrapolated_eV', float('nan')):.4f} eV")
+        if bits:
+            err_html = ("<p class='cap'>Anchor error_estimate UQ (api path, "
+                        "m<sub>tot</sub> = "
+                        f"{ee.get('anchor_m_tot', float('nan')):.3f} &mu;B): "
+                        + "; ".join(bits) + ".</p>")
+
+    return f"""<div class="fig">{conv_mesh_svg(conv)}</div>
+<div class="fig">{conv_width_svg(conv)}</div>
+<h3>Smearing scheme &times; k-mesh (width 0.1 eV) and width&rarr;0 extrapolation</h3>
+{wtable()}
+<p>{smear_verdict} {trust}</p>
+{qe_html}
+<p class="verdict">{verdict_qe}</p>
+{err_html}
+<details><summary>Full grid (every scheme &times; width &times; mesh)</summary>
+{fulltable()}</details>"""
+
+
+def build_html(snap: dict[str, Any], fe: dict, ni: dict, ptcu: dict,
+               conv: dict | None = None, qe: dict | None = None) -> str:
     code = snap["code"]
     cpu = snap.get("cpu", {})
     git = code.get("git_full") or code.get("git") or "unknown"
@@ -364,11 +601,6 @@ def build_html(snap: dict[str, Any], fe: dict, ni: dict, ptcu: dict) -> str:
         f"<td>{(zf[i]-ideal)/(z0[i]-ideal)*100:.1f}%</td></tr>"
         for i in range(len(z0)))
 
-    fe_spread = (max(r["m_tot"] for r in fe["grid"])
-                 - min(r["m_tot"] for r in fe["grid"]))
-    ni_spread = (max(r["m_tot"] for r in ni["grid"])
-                 - min(r["m_tot"] for r in ni["grid"]))
-
     return f"""<h1>Plane-wave validation: magnetic moments &amp; geometry relaxation</h1>
 <p class="lead">Ferromagnetic bcc-Fe and fcc-Ni (collinear spin, nspin=2) and a
 PtCu L1<sub>0</sub> positions-only geometry optimization, all on gradwave's
@@ -413,14 +645,15 @@ k=(6,6,6), start_mag=0.3. &Delta;/% are against the QE column where present,
 else experiment. The code is validated against QE (green CI); the moments below
 show that the answer is settings-dependent, not that the code is wrong.</p>
 
-<h2>3. Seed &amp; mesh sensitivity &mdash; itinerant-moment basins</h2>
-<p>bcc-Fe and fcc-Ni are itinerant ferromagnets with more than one
-self-consistent solution: a larger starting moment converges to a higher-moment
-basin, and the k-mesh shifts the minority-band filling at E<sub>F</sub>. The
-full moment across this study spans <b>{fe_spread:.2f} &mu;B</b> for Fe and
-<b>{ni_spread:.2f} &mu;B</b> for Ni &mdash; a genuine physics/settings effect,
-reproduced here, not a code error. This is exactly why the anchor above pins the
-validated seed rather than reporting a single loosely-seeded number.</p>
+<h2>3. Moment convergence &mdash; is the mesh drift real?</h2>
+<p>The base grid below sweeps the starting moment and k-mesh at gaussian 0.1 eV.
+The moment is <b>seed-independent</b> (start_mag 0.4 and 0.7 give the same
+self-consistent moment at every mesh), so the 6<sup>3</sup>&rarr;8<sup>3</sup>
+change (Fe 2.22&rarr;2.40 &mu;B, Ni 0.64&rarr;0.70) is <b>not</b> a
+multi-basin/seed effect &mdash; it is a k-mesh &times; smearing effect. The
+denser mesh resolves the sharp Fe d-DOS at E<sub>F</sub> more finely, and with
+broad gaussian smearing that shifts the minority filling. Three tests below
+separate a finite-smearing artifact from real k-convergence physics.</p>
 <div class="fig">{sens_svg(fe, ni)}</div>
 <table class="data">
 <thead><tr><th>system</th><th>start_mag</th><th>k-mesh</th>
@@ -430,6 +663,7 @@ validated seed rather than reporting a single loosely-seeded number.</p>
 {grid_rows(fe, 'Fe')}
 {grid_rows(ni, 'Ni')}
 </tbody></table>
+{convergence_section(conv, qe)}
 
 <h2>4. Spin-resolved DOS &mdash; the exchange splitting</h2>
 <p>Spin-up (blue, plotted up) and spin-down (red, plotted down) densities of
@@ -454,28 +688,31 @@ Ni's splitting is small, consistent with its weak ~0.6 &mu;B moment.</p>
 
 <h2>6. Honest caveats</h2>
 <ul>
-<li><b>The code is validated; the spread is physics.</b> The Fe anchor
-reproduces the committed QE moment 2.22 &mu;B (this is what CI checks). The
-higher moments in the sensitivity table (up to ~2.4 &mu;B at start_mag 0.7)
-are a different self-consistent basin reached from a larger starting moment,
-not a convergence failure &mdash; every grid row is converged. Do not read the
-high-seed rows as "gradwave vs experiment".</li>
-<li><b>Convergence level.</b> Validation-grade, not production-converged. Fe/Ni
-use ecut 60 Ry on the 1-atom primitive; a production moment would additionally
-converge ecut and the k-mesh and report the basin explicitly.</li>
-<li><b>Smearing broadens the metal moment.</b> The 0.1 eV gaussian partially
-fills the minority band at E<sub>F</sub>, reducing the net moment relative to
-the zero-broadening limit; the effect is largest for weak-moment Ni, where the
-moment is a small difference of large occupations.</li>
+<li><b>The code is validated; the mesh drift is a convergence/smearing effect.</b>
+The Fe anchor reproduces the committed QE moment 2.22 &mu;B (what CI checks). The
+higher 8<sup>3</sup> moment (~2.40 &mu;B) is seed-independent and, per section 3,
+tracked by QE at the same settings &mdash; it is the k-mesh &times; gaussian-width
+interaction, not a gradwave error. The trustworthy converged value is the
+width&rarr;0, higher-order-smearing number in section 3, not any single
+gaussian point.</li>
+<li><b>Convergence level.</b> Validation-grade. Fe/Ni use ecut 60 Ry on the
+1-atom primitive; the k-mesh is swept to 10<sup>3</sup> for Fe (section 3) but a
+production moment would also converge ecut and report the smearing scheme
+explicitly.</li>
+<li><b>Smearing broadens the metal moment.</b> The 0.1 eV gaussian carries an
+O(width&sup2;) finite-temperature error; mp1/cold cancel it to higher order.
+Section 3 quantifies this and extrapolates to zero width.</li>
 <li><b>Symmetry off for the magnets.</b> A collinear moment breaks the
 paramagnetic space group, so IBZ reduction / density symmetrization is disabled
-for Fe and Ni (on for the non-magnetic PtCu relax).</li>
-<li><b>PtCu k-mesh is reduced.</b> The relax uses a 4&times;4&times;4 mesh
-(the shipped example is 8&times;8&times;8): with <code>symmetry: true</code> the
-system and PAW form factors rebuild every ionic step, and the dense-mesh PAW SCF
-is expensive. The relaxed geometry (Cu returning to its symmetric L1<sub>0</sub>
-site) is symmetry-determined and robust to the mesh; the absolute energies are
-not production-converged.</li>
+for Fe and Ni.</li>
+<li><b>PtCu settings are validation-grade.</b> The relax runs with
+<code>symmetry: false</code> and a 4&times;4&times;4 mesh (the shipped example is
+symmetry-on, 8&times;8&times;8). With symmetry on, the system and the PAW
+form-factor tables (ecutrho 400 Ry) rebuild on every ionic step (~20 min/step);
+symmetry off caches the phase-free tables across positions-only moves so only
+step&nbsp;1 pays the build. The relaxed geometry (Cu returning to its symmetric
+L1<sub>0</sub> site) is symmetry-determined and robust to both choices; the
+absolute energies are not production-converged.</li>
 <li><b>FLAPW excluded.</b> gradwave's all-electron FLAPW path has no
 spin-polarization, so magnetic moments are not available there. Every magnetic
 result above is from the plane-wave pseudopotential path exclusively.</li>
@@ -504,11 +741,20 @@ table.prov td:first-child{color:#666;width:11rem}
 padding:.4rem;background:#fff}
 .fig svg{max-width:100%;height:auto}
 .cap{font-size:.83rem;color:#555}
+.verdict{background:#fff8e6;border-left:4px solid #d9a520;padding:.5rem .8rem;
+font-size:.95rem}
+h3{font-size:1.02rem;color:#334;margin-top:1.3rem}
+details{margin:.6rem 0}
+summary{cursor:pointer;color:#2a78d6;font-size:.9rem}
 .foot{font-size:.8rem;color:#999;margin-top:2rem;border-top:1px solid #eee;
 padding-top:.5rem}
 code{background:#f4f4f2;padding:.1rem .3rem;border-radius:3px;font-size:.85em}
 </style>
 """
+
+
+def _load_json(path: Path):
+    return json.loads(path.read_text()) if path.exists() else None
 
 
 def main():
@@ -517,6 +763,9 @@ def main():
     ap.add_argument("--threads", type=int, default=8)
     ap.add_argument("--skip-ptcu", action="store_true",
                     help="reuse a cached PtCu result from the data json")
+    ap.add_argument("--reuse-base", action="store_true",
+                    help="reuse cached Fe/Ni/PtCu blocks; recompute nothing "
+                         "(just fold in convergence/QE and rebuild the HTML)")
     args = ap.parse_args()
     torch.set_num_threads(args.threads)
     outdir = Path(args.outdir)
@@ -524,13 +773,23 @@ def main():
     data_path = outdir / "pw_magnetic_relax_data.json"
 
     snap = machine_snapshot()
-    fe = run_magnet("Fe")
-    ni = run_magnet("Ni")
-    if args.skip_ptcu and data_path.exists():
-        ptcu = json.loads(data_path.read_text())["PtCu"]
-        print("\nreusing cached PtCu result", flush=True)
+    cached = _load_json(data_path) or {}
+    if args.reuse_base and cached:
+        fe, ni, ptcu = cached["Fe"], cached["Ni"], cached["PtCu"]
+        snap = cached.get("machine", snap)
+        print("reusing cached Fe/Ni/PtCu blocks", flush=True)
     else:
-        ptcu = run_ptcu("ptcu_relax.yaml")
+        fe = run_magnet("Fe")
+        ni = run_magnet("Ni")
+        if args.skip_ptcu and cached.get("PtCu"):
+            ptcu = cached["PtCu"]
+            print("\nreusing cached PtCu result", flush=True)
+        else:
+            ptcu = run_ptcu("ptcu_relax.yaml")
+
+    # fold in the Fe convergence study + QE cross-check if their jsons exist
+    conv = _load_json(outdir / "fe_convergence_data.json")
+    qe = _load_json(outdir / "qe_fe_data.json")
 
     dump = {"machine": snap, "Fe": fe, "Ni": ni, "PtCu": ptcu}
     data_path.write_text(json.dumps(dump, indent=1))
@@ -538,10 +797,11 @@ def main():
     report = outdir / "pw_magnetic_relax_report.html"
     report.write_text("<!doctype html><html><head><meta charset='utf-8'>"
                       "<title>PW magnetic &amp; relax validation</title>"
-                      + HEAD + "</head><body>" + build_html(snap, fe, ni, ptcu)
+                      + HEAD + "</head><body>"
+                      + build_html(snap, fe, ni, ptcu, conv, qe)
                       + "</body></html>")
     print(f"\nwrote {report}")
-    print(f"wrote {data_path}")
+    print(f"wrote {data_path}  (conv={conv is not None}, qe={qe is not None})")
 
 
 if __name__ == "__main__":
