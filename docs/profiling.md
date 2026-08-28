@@ -104,12 +104,42 @@ If `command` is `None`, py-spy and memray are skipped with a note (a
 process-level sampler cannot profile an in-process closure); torch.profiler and
 the timed loop still run.
 
-### The heavy worked example (quartz ²⁹Si shielding)
+### `light` mode for op-heavy workloads
 
-Run the memory-heavy real workload on `asus` (not the laptop), one at a time,
-after checking the box has room (`ssh asus 'free -g; uptime'`), and using the
-`chunk_k` streaming path. Wire it as a `Workload` whose `command` reproduces the
-shielding run, then `deep_profile(wl, threads=5)`.
+`deep_profile(wl, light=True)` runs the torch.profiler pass with
+`with_stack=False` and `record_shapes=False` (the two per-op trace-size
+multipliers — a full Python call stack and the input shapes recorded for every
+op) while KEEPING `profile_memory=True`, so the per-op memory column survives. A
+note records the trade-off (no call-stack / shape attribution). Use it for
+moderately op-heavy workloads whose full trace would otherwise grow too large.
+
+### Limitation: a full GIPAW shielding eval cannot be profiled on a 14 GB box
+
+torch.profiler holds an in-RAM event buffer for every op executed inside the
+`profile()` context. A full GIPAW magnetic-shielding evaluation issues *millions*
+of aten ops (per-k × per-q × per-band × per-site CG/Sternheimer resolvent
+solves), and that buffer grows past **12–13 GB** — the box OOM-kills the process.
+This is true in **every** configuration measured, `light` mode included:
+`with_stack`/`record_shapes` off gets further, but the raw op-event **count** is
+the wall, and `profile_memory` alone (recording every tensor allocation) still
+overflows. The un-instrumented eval itself is under 1 GB — the memory is
+entirely the profiler's trace, not the workload.
+
+Two ways to profile shielding-scale work anyway:
+
+1. **Profile one kernel invocation, not the whole eval.** A single resolvent
+   solve (e.g. `_SMetricResolventCG.apply` — one matrix-free CG Sternheimer
+   solve) is a few thousand ops, fits trivially, and is the *right* granularity
+   for "which ops dominate a response solve, and where its bytes live". Build the
+   context once (unprofiled) and wrap the single call as the `Workload.run`. See
+   `experiments/autoapw/shielding_profile_workload.py`.
+2. **Use the bench RSS telemetry** (`gradwave.bench`, per-iteration RSS + phase
+   counts) for the whole-eval memory picture, which does not retain a per-op
+   buffer.
+
+Run any heavy real workload on `asus` (not the laptop), one at a time, after
+checking the box has room (`ssh asus 'free -g; uptime'`), and use the `chunk_k`
+streaming path.
 
 ## How to diff two commits
 
