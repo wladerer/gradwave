@@ -5,7 +5,7 @@ This is BOTH the in-process ``Workload.run`` target and the subprocess
 py-spy flamegraph, and the memray allocation flamegraph all describe the SAME
 single shielding solve.
 
-Settings are deliberately CHEAP, not converged: ecut 25 Ry (ecutrho 100 Ry),
+Settings are deliberately CHEAP, not converged: ecut 14 Ry (ecutrho 56 Ry),
 k 2x2x1 (the cheapest mesh the q->0 shielding assembly accepts — it needs >=2
 mesh axes with n>1), ``chunk_k=1`` (stream the dense per-k response contexts,
 O(1)-in-nk peak memory), all-PAW pseudos so ``shielding_level`` auto-selects
@@ -38,8 +38,8 @@ from gradwave.inputs import Input, KPointsParams, NmrParams
 
 PSEUDOS = Path("tests/fixtures/qe/pseudos").resolve()
 
-ECUT_RY = 25.0
-ECUTRHO_RY = 100.0
+ECUT_RY = 14.0
+ECUTRHO_RY = 56.0
 KMESH = (2, 2, 1)
 THREADS = 8
 
