@@ -37,7 +37,13 @@ nspin: 1              # PtCu L1_0 is non-magnetic
 symmetry: true        # reduce k to the IBZ + symmetrize the density each step
 
 kpoints:
-  mesh: [8, 8, 8]
+  # Validation-grade reduced mesh (the shipped example uses 8x8x8). A denser
+  # mesh multiplies the per-ionic-step PAW SCF cost, and with symmetry: true the
+  # system + form factors rebuild every step; 4x4x4 keeps the symmetric out-of-
+  # plane Cu relaxation tractable in a single session. The relaxed geometry (Cu
+  # returning to its ideal L1_0 site) is symmetry-determined and robust to the
+  # k-mesh; see the report's caveats.
+  mesh: [4, 4, 4]
 
 smearing:
   type: gaussian      # PtCu is a metal
