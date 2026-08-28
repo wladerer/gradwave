@@ -3,23 +3,34 @@
 The memory/time BREAKDOWN of the GIPAW shielding pipeline — where bytes and
 cycles go across the CG response resolvent, the FFT boxes, and the band buffers
 — is a STRUCTURAL property of the code paths, not of the material. alpha-quartz
-(9 atoms) costs ~3 h per shielding eval, and ``deep_profile`` runs the workload
-~4x (2 timed + torch.profiler + py-spy + memray), so profiling quartz directly
-is a ~15 h job and memray never finishes. MgO (2-atom rocksalt) exercises the
-IDENTICAL hard-augmentation code paths — it is literally the cell the S-metric
-CG reroute was validated on (``mgo_cg_ecut_validate.py``, PR #401): hard-O PAW
-augmentation, the ill-conditioned overlap that trips the cond(S) gate onto the
-matrix-free CG resolvent, the same FFT boxes at ecutrho and the same band
-buffers — but one eval is ~1-3 min, so the full deep_profile with memray is
-tractable (~30-60 min).
+(9 atoms) costs ~3 h per shielding eval; MgO (2-atom rocksalt) exercises the
+IDENTICAL hard-augmentation code paths — it is the cell the S-metric CG reroute
+was validated on (``mgo_cg_ecut_validate.py``, PR #401): hard-O PAW
+augmentation, the ill-conditioned overlap, the matrix-free CG resolvent, the
+same FFT boxes at ecutrho and the same band buffers — cheaply.
+
+Two things make this profileable on a 14 GB box:
+
+* **Low-level, CG-forced, iteration-capped eval.** ``single_eval`` calls
+  ``kgeometry_nmr.sigma_shielding_gipaw`` directly with
+  ``response_backend='cg'`` (so the CG resolvent is exercised regardless of the
+  cond(S) gate) and a LOW ``max_iter`` / loose ``cg_tol``. The default driver
+  runs CG to 1e-9 (hundreds of iterations, millions of tensor allocations);
+  ``torch.profiler(profile_memory=True)`` records every allocation, so the
+  full run OOMs the box (measured 12-13 GB). Capping the CG iteration count
+  caps the allocation count and keeps the profiled pass in RAM. The shielding
+  NUMBER is meaningless at this cap — this is a structural profile, not an
+  accuracy run; use ``ssnmr_quartz_gate.py`` / ``quartz_sigma_cg.py`` for real
+  numbers.
+* **light-mode profiler.** ``deep_profile(..., light=True)`` drops
+  ``with_stack`` / ``record_shapes`` (a full call stack + input shapes per op)
+  while keeping ``profile_memory`` — the per-op memory column that answers
+  "where do the bytes go". ``command=None`` skips py-spy/memray (their
+  allocation tracking OOMs on the same allocation count).
 
 Settings: ecut 25 Ry (ecutrho 100 Ry), k 2x2x1 (the cheapest mesh the q->0
 assembly accepts — >=2 axes with n>1), ``chunk_k=1``, all-PAW pseudos (light
-non-semicore Mg + O ``kjpaw``) so ``shielding_level`` auto-selects
-``gipaw`` and ``response_backend='auto'`` cond(S)-routes the hard O site onto
-the ecut-stable CG resolvent (PR #401). This is the SAME regime the quartz O
-sites live in; the profile answers "where do the bytes/cycles go", not a
-converged MgO shielding number.
+non-semicore Mg + O ``kjpaw``).
 
 The Mg PAW pseudo is not in the committed fixtures; fetch it once into
 ``tests/fixtures/qe/pseudos/`` from the QE pseudo library
@@ -27,8 +38,8 @@ The Mg PAW pseudo is not in the committed fixtures; fetch it once into
 
 Run modes::
 
-    python quartz_shielding_profile_workload.py --single   # one eval (sampler target)
-    python quartz_shielding_profile_workload.py            # driver: deep_profile + summary.html
+    python shielding_profile_workload.py --single   # one capped eval, standalone
+    python shielding_profile_workload.py            # driver: deep_profile + summary.html
 """
 
 from __future__ import annotations
@@ -39,54 +50,66 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from ase import Atoms
 
 from gradwave.constants import RY_EV
-from gradwave.inputs import Input, KPointsParams, NmrParams
 
 PSEUDOS = Path("tests/fixtures/qe/pseudos").resolve()
 # Light non-semicore Mg PAW (3s valence only, 2 e-): the profile is a STRUCTURAL
 # breakdown, not an accuracy run, so we skip the semicore spnl (10 e-, ~5x the
-# band cost, >10 min/eval). The O site is the hard-augmentation one that trips
-# the cond(S) gate onto CG — the code path the profile is meant to exercise.
+# band cost). The O site is the hard-augmentation one whose CG resolvent the
+# profile is meant to exercise.
 MG_PSEUDO = "Mg.pbe-n-kjpaw_psl.0.3.0.UPF"  # fetch into PSEUDOS from the QE library
 O_PSEUDO = "O.pbe-n-kjpaw_psl.1.0.0.UPF"
 
 ECUT_RY = 25.0
 ECUTRHO_RY = 100.0
 KMESH = (2, 2, 1)
+NBANDS = 10  # 1 Mg (2 e-) + 1 O (6 e-) = 8 e- -> 4 occupied + buffer
 THREADS = 8
+# CG iteration cap: bounds the allocation count so profile_memory fits in RAM.
+# The resolvent/FFT/band code paths are the SAME at any cap; only the number of
+# iterations (hence the converged number) changes.
+CG_TOL = 1e-3
+CG_MAX_ITER = 20
+SCF_MAX_ITER = 80
 
 
-def mgo_rocksalt() -> Atoms:
-    """2-atom rocksalt MgO primitive cell (a = 4.21 Å): Mg at 0, O at (1/2)³."""
+def _mgo_cell_pos() -> tuple[np.ndarray, np.ndarray]:
+    """2-atom rocksalt MgO (a = 4.21 Å): fcc primitive cell, Mg at 0, O at (1/2)³."""
     a = 4.21
     cell = 0.5 * a * np.array([[0.0, 1.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 0.0]])
-    return Atoms(
-        symbols=["Mg", "O"],
-        scaled_positions=[[0.0, 0.0, 0.0], [0.5, 0.5, 0.5]],
-        cell=cell, pbc=True)
-
-
-def _build_input(atoms: Atoms) -> Input:
-    return Input(
-        atoms=atoms, pseudo_dir=PSEUDOS,
-        pseudo_map={"Mg": MG_PSEUDO, "O": O_PSEUDO},
-        ecut=ECUT_RY * RY_EV, ecutrho=ECUTRHO_RY * RY_EV, xc="pbe",
-        kpoints=KPointsParams(mesh=KMESH), task="nmr", symmetry=False,
-        nmr=NmrParams(
-            task="shielding", shielding_level="gipaw",
-            # response_backend defaults to 'auto': the cond(S) gate routes the
-            # hard O site onto the matrix-free CG resolvent (PR #401).
-            chunk_k=1),
-        verbose=False)
+    pos = np.array([[0.0, 0.0, 0.0], [0.5, 0.5, 0.5]]) @ cell
+    return cell, pos
 
 
 def single_eval() -> dict[str, Any]:
-    """One GIPAW shielding solve on MgO. Returns the shielding block."""
-    from gradwave.api import run_nmr
+    """One CG-forced, iteration-capped GIPAW shielding solve on MgO.
 
-    return run_nmr(_build_input(mgo_rocksalt()), verbose=False)
+    Low-level so the CG backend and its iteration cap are explicit — this is the
+    resolvent / FFT / band pipeline the profile attributes, run cheaply enough
+    that ``profile_memory`` stays in RAM."""
+    import torch
+
+    from gradwave.core.xc.pbe import PBE
+    from gradwave.postscf import kgeometry_nmr as kg
+    from gradwave.pseudo.upf_paw import parse_upf_paw
+    from gradwave.scf.uspp import scf_uspp, setup_uspp
+
+    torch.set_num_threads(THREADS)
+    paw_mg = parse_upf_paw(str(PSEUDOS / MG_PSEUDO))
+    paw_o = parse_upf_paw(str(PSEUDOS / O_PSEUDO))
+    cell, pos = _mgo_cell_pos()
+    system = setup_uspp(
+        cell, pos, [0, 1], [paw_mg, paw_o],
+        ecut=ECUT_RY * RY_EV, kmesh=KMESH, ecutrho=ECUTRHO_RY * RY_EV,
+        nbands=NBANDS)
+    res = scf_uspp(system, PBE(), etol=1e-7, rhotol=1e-6, diago_tol=1e-8,
+                   verbose=False, max_iter=SCF_MAX_ITER)
+    ctx = kg.build_uspp_response_ctx(res, PBE())
+    out = kg.sigma_shielding_gipaw(
+        res, ctx, [paw_mg, paw_o], response_backend="cg",
+        cg_tol=CG_TOL, max_iter=CG_MAX_ITER, use_symmetry=False, chunk_k=1)
+    return {"n_sites": int(out["total"].shape[0])}
 
 
 def build_workload():
@@ -99,18 +122,16 @@ def build_workload():
         "ecut_Ry": ECUT_RY,
         "ecutrho_Ry": ECUTRHO_RY,
         "kmesh": list(KMESH),
-        "pseudos": "PAW (Mg spnl semicore + O kjpaw)",
-        "shielding_level": "gipaw",
-        "response_backend": "auto (cond(S) gate -> CG on the hard O site, PR #401)",
+        "pseudos": "PAW (light non-semicore Mg + O kjpaw)",
+        "shielding_level": "gipaw (low-level, CG-forced)",
+        "response_backend": f"cg (forced); cg_tol={CG_TOL}, max_iter={CG_MAX_ITER}",
         "chunk_k": 1,
-        "profiled": "one GIPAW magnetic-shielding evaluation (both sites)",
+        "profiled": ("one iteration-capped GIPAW shielding eval (structural "
+                     "breakdown, NOT a converged number)"),
     }
-    # command=None: py-spy/memray are SKIPPED. A GIPAW shielding eval issues
-    # millions of tensor allocations (per-k x per-q x per-band CG iters); memray's
-    # allocation tracking OOMs a 14 GB box on that count. The op-level memory
-    # breakdown instead comes from torch.profiler's profile_memory column (run in
-    # light mode), which answers the "where do the bytes go" question without the
-    # allocation-site flamegraph.
+    # command=None: py-spy/memray SKIPPED — their allocation tracking OOMs on a
+    # shielding eval's allocation count. The op-level memory breakdown comes from
+    # torch.profiler profile_memory (light mode) instead.
     return Workload(
         name="mgo-shielding", spec=spec, run=single_eval, command=None)
 
@@ -119,7 +140,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--single", action="store_true",
-        help="run one shielding eval and exit (py-spy / memray subprocess target)")
+        help="run one capped shielding eval and exit (standalone timing)")
     args = parser.parse_args()
 
     import torch
@@ -128,16 +149,16 @@ def main() -> int:
 
     if args.single:
         block = single_eval()
-        n = block.get("n_sites", len(block.get("sites", [])))
-        print(f"single_eval done: {n} sites", flush=True)
+        print(f"single_eval done: {block['n_sites']} sites", flush=True)
         return 0
 
     from gradwave.profiling import deep_profile, write_summary
 
     wl = build_workload()
-    # light=True: torch.profiler without per-op stacks/shapes (those OOM the box
-    # on a shielding eval's millions of aten ops); profile_memory stays on so the
-    # op table keeps the per-op memory column.
+    # light=True: torch.profiler without per-op stacks/shapes (those balloon the
+    # trace); profile_memory stays on so the op table keeps the per-op memory
+    # column. The CG iteration cap in single_eval keeps that column's allocation
+    # count in RAM.
     result = deep_profile(wl, n_timed=2, warmup=0, threads=THREADS, light=True)
     path = write_summary(result)
     print(f"\nSUMMARY_HTML {path}", flush=True)
