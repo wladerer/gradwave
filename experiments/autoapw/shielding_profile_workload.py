@@ -14,15 +14,15 @@ buffers — but one eval is ~1-3 min, so the full deep_profile with memray is
 tractable (~30-60 min).
 
 Settings: ecut 40 Ry (ecutrho 160 Ry), k 2x2x2, ``chunk_k=1``, all-PAW pseudos
-(Mg semicore ``spnl`` + O ``kjpaw``) so ``shielding_level`` auto-selects
+(light non-semicore Mg + O ``kjpaw``) so ``shielding_level`` auto-selects
 ``gipaw`` and ``response_backend='auto'`` cond(S)-routes the hard O site onto
 the ecut-stable CG resolvent (PR #401). This is the SAME regime the quartz O
 sites live in; the profile answers "where do the bytes/cycles go", not a
 converged MgO shielding number.
 
-The Mg semicore PAW pseudo is not in the committed fixtures; fetch it once into
+The Mg PAW pseudo is not in the committed fixtures; fetch it once into
 ``tests/fixtures/qe/pseudos/`` from the QE pseudo library
-(``Mg.pbe-spnl-kjpaw_psl.1.0.0.UPF``).
+(``Mg.pbe-n-kjpaw_psl.0.3.0.UPF``).
 
 Run modes::
 
@@ -44,7 +44,11 @@ from gradwave.constants import RY_EV
 from gradwave.inputs import Input, KPointsParams, NmrParams
 
 PSEUDOS = Path("tests/fixtures/qe/pseudos").resolve()
-MG_PSEUDO = "Mg.pbe-spnl-kjpaw_psl.1.0.0.UPF"  # semicore 2s2p PAW; fetch into PSEUDOS
+# Light non-semicore Mg PAW (3s valence only, 2 e-): the profile is a STRUCTURAL
+# breakdown, not an accuracy run, so we skip the semicore spnl (10 e-, ~5x the
+# band cost, >10 min/eval). The O site is the hard-augmentation one that trips
+# the cond(S) gate onto CG — the code path the profile is meant to exercise.
+MG_PSEUDO = "Mg.pbe-n-kjpaw_psl.0.3.0.UPF"  # fetch into PSEUDOS from the QE library
 O_PSEUDO = "O.pbe-n-kjpaw_psl.1.0.0.UPF"
 
 ECUT_RY = 40.0
