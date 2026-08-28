@@ -226,10 +226,19 @@ def _timed_runs(workload: Workload, *, n_timed: int, warmup: int) -> dict[str, A
 
 
 def _profiled_run(workload: Workload, *, row_limit: int, trace_path: Path | None,
-                  notes: list[str]) -> tuple[list[dict[str, Any]], str, str | None]:
+                  notes: list[str], light: bool = False,
+                  ) -> tuple[list[dict[str, Any]], str, str | None]:
     """torch.profiler pass: op table (structured + string) + Perfetto trace.
 
-    ``trace_path`` None (e.g. ``write=False``) skips the chrome-trace export."""
+    ``trace_path`` None (e.g. ``write=False``) skips the chrome-trace export.
+
+    ``light`` disables the two trace-size killers — ``with_stack`` (a full Python
+    call stack captured per op) and ``record_shapes`` (input shapes per op) —
+    while KEEPING ``profile_memory=True`` so the per-op memory column (which ops
+    hold the bytes) survives. Op-heavy workloads (an iterative Sternheimer/CG
+    resolvent issues millions of aten ops) otherwise accumulate a multi-GB
+    in-RAM trace and OOM the box; light mode makes them profileable at the cost
+    of call-stack attribution and shape records."""
     import torch
     from torch.profiler import ProfilerActivity, profile
 
@@ -237,7 +246,7 @@ def _profiled_run(workload: Workload, *, row_limit: int, trace_path: Path | None
     if torch.cuda.is_available():
         activities.append(ProfilerActivity.CUDA)
     with profile(activities=activities, profile_memory=True,
-                 record_shapes=True, with_stack=True) as prof:
+                 record_shapes=not light, with_stack=not light) as prof:
         workload.run()
 
     ka = prof.key_averages()
@@ -364,6 +373,7 @@ def deep_profile(
     row_limit: int = 25,
     run_pyspy: bool = True,
     run_memray: bool = True,
+    light: bool = False,
     write: bool = True,
 ) -> ProfileResult:
     """Deep-profile ``workload`` and (optionally) write the full artifact set.
@@ -374,6 +384,11 @@ def deep_profile(
     ``threads`` to pin ``torch.set_num_threads`` for comparability across
     commits; py-spy/memray are opt-out via their flags (and always skip
     gracefully if the tool or ptrace permission is missing).
+
+    ``light`` runs the torch.profiler pass without per-op call stacks or shape
+    records (``with_stack=False``, ``record_shapes=False``) while keeping the
+    per-op memory column; use it for op-heavy workloads (e.g. an iterative
+    shielding/response resolvent) whose full trace would otherwise OOM the box.
     """
     import torch
 
@@ -407,7 +422,14 @@ def deep_profile(
     # 2. torch.profiler op-level view + Perfetto trace (trace only when writing).
     trace_path = (out_dir / "trace.json.gz") if write else None
     op_rows, table_str, written_trace = _profiled_run(
-        workload, row_limit=row_limit, trace_path=trace_path, notes=notes)
+        workload, row_limit=row_limit, trace_path=trace_path, notes=notes,
+        light=light)
+    if light:
+        notes.append(
+            "torch.profiler ran in LIGHT mode (with_stack=False, "
+            "record_shapes=False) to keep the trace in RAM on an op-heavy "
+            "workload; per-op memory attribution is kept but call-stack / "
+            "input-shape records are not available.")
     phase_times = phase_breakdown(op_rows)
 
     # 3+4. Process-level samplers (graceful degrade).

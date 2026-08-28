@@ -117,6 +117,17 @@ def test_deep_profile_end_to_end_no_write():
     assert any("no reproducible subprocess" in n for n in res.notes)
 
 
+def test_deep_profile_light_mode_still_builds_op_table_with_a_note():
+    # light=True drops with_stack/record_shapes (the trace-size killers that OOM
+    # op-heavy workloads) but keeps profile_memory, so the op table — including
+    # the per-op memory column — must still build, and a note must document it.
+    res = deep_profile(_fake_workload(), n_timed=1, warmup=0, write=False,
+                       run_pyspy=False, run_memray=False, light=True)
+    assert res.op_rows, "light mode should still capture ops"
+    assert all("self_cpu_mem_bytes" in r for r in res.op_rows)
+    assert any("LIGHT mode" in n for n in res.notes)
+
+
 def test_summary_html_is_self_contained_and_has_provenance():
     res = deep_profile(_fake_workload(), n_timed=2, warmup=1, write=False,
                        run_pyspy=False, run_memray=False)

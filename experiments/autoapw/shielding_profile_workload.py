@@ -105,9 +105,14 @@ def build_workload():
         "chunk_k": 1,
         "profiled": "one GIPAW magnetic-shielding evaluation (both sites)",
     }
-    command = [sys.executable, str(Path(__file__).resolve()), "--single"]
+    # command=None: py-spy/memray are SKIPPED. A GIPAW shielding eval issues
+    # millions of tensor allocations (per-k x per-q x per-band CG iters); memray's
+    # allocation tracking OOMs a 14 GB box on that count. The op-level memory
+    # breakdown instead comes from torch.profiler's profile_memory column (run in
+    # light mode), which answers the "where do the bytes go" question without the
+    # allocation-site flamegraph.
     return Workload(
-        name="mgo-shielding", spec=spec, run=single_eval, command=command)
+        name="mgo-shielding", spec=spec, run=single_eval, command=None)
 
 
 def main() -> int:
@@ -130,7 +135,10 @@ def main() -> int:
     from gradwave.profiling import deep_profile, write_summary
 
     wl = build_workload()
-    result = deep_profile(wl, n_timed=2, warmup=0, threads=THREADS)
+    # light=True: torch.profiler without per-op stacks/shapes (those OOM the box
+    # on a shielding eval's millions of aten ops); profile_memory stays on so the
+    # op table keeps the per-op memory column.
+    result = deep_profile(wl, n_timed=2, warmup=0, threads=THREADS, light=True)
     path = write_summary(result)
     print(f"\nSUMMARY_HTML {path}", flush=True)
     print(f"OUT_DIR {result.out_dir}", flush=True)
