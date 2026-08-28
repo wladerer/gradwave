@@ -5,12 +5,18 @@ This is BOTH the in-process ``Workload.run`` target and the subprocess
 py-spy flamegraph, and the memray allocation flamegraph all describe the SAME
 single shielding solve.
 
-Settings are tractable-but-representative: ecut 40 Ry (ecutrho 320 Ry matched),
-k 2x2x2, ``chunk_k=1`` (stream the dense per-k response contexts, O(1)-in-nk
-peak memory), all-PAW pseudos so ``shielding_level`` auto-selects ``gipaw`` and
-the ``response_backend='auto'`` cond(S) gate routes the hard-augmentation O
-sites onto the ecut-stable matrix-free CG resolvent (PR #401). This exercises
-the real hard-augmentation code paths without a multi-hour / OOM cost.
+Settings are deliberately CHEAP, not converged: ecut 25 Ry (ecutrho 100 Ry),
+k 2x2x1 (the cheapest mesh the q->0 shielding assembly accepts — it needs >=2
+mesh axes with n>1), ``chunk_k=1`` (stream the dense per-k response contexts,
+O(1)-in-nk peak memory), all-PAW pseudos so ``shielding_level`` auto-selects
+``gipaw`` and the ``response_backend='auto'`` cond(S) gate routes the
+hard-augmentation O sites onto the ecut-stable matrix-free CG resolvent (PR
+#401). The memory/time BREAKDOWN across resolvent / FFT boxes / bands is a
+STRUCTURAL property visible at any convergence level, so these cheap settings
+still exercise the real hard-augmentation code paths — at production settings
+(ecut 40 / k 2x2x2) one eval is ~3 h, and deep_profile runs it ~4x, so cheap
+settings are required to profile at all. NOT a converged shielding number; use
+``ssnmr_quartz_gate.py`` for that.
 
 Run modes::
 
@@ -32,9 +38,9 @@ from gradwave.inputs import Input, KPointsParams, NmrParams
 
 PSEUDOS = Path("tests/fixtures/qe/pseudos").resolve()
 
-ECUT_RY = 40.0
-ECUTRHO_RY = 320.0
-KMESH = (2, 2, 2)
+ECUT_RY = 25.0
+ECUTRHO_RY = 100.0
+KMESH = (2, 2, 1)
 THREADS = 8
 
 
@@ -110,8 +116,9 @@ def main() -> int:
     from gradwave.profiling import deep_profile, write_summary
 
     wl = build_workload()
-    # One eval is heavy, so n_timed=2 / warmup=0 (low-N timing, noted in report).
-    result = deep_profile(wl, n_timed=2, warmup=0, threads=THREADS)
+    # One eval is heavy even at cheap settings, so n_timed=1 / warmup=0
+    # (single-shot timing — LOW-N, no median; noted in the report header).
+    result = deep_profile(wl, n_timed=1, warmup=0, threads=THREADS)
     path = write_summary(result)
     print(f"\nSUMMARY_HTML {path}", flush=True)
     print(f"OUT_DIR {result.out_dir}", flush=True)
