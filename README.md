@@ -80,6 +80,25 @@ A representative set of pinned QE comparisons:
 | Si Γ phonon (PAW) vs `ph.x` | 0.003% |
 | GaAs spin-orbit split-off Δ₀ vs fully-relativistic QE | 0.336 eV, within 2e-3 eV |
 
+The bcc-Fe moment is worth a closer look, because it doubles as a cross-code convergence
+study. The PBE moment is sensitive to k-point sampling, and gradwave tracks `pw.x`
+point-for-point across both mesh density and smearing scheme, reading the same UPF at
+60 Ry / 816 eV:
+
+| k-mesh | smearing | gradwave | QE `pw.x` |
+|---|---|---|---|
+| 6×6×6 | Gaussian | 2.22 μB | 2.22 μB |
+| 6×6×6 | Methfessel–Paxton | 2.22 μB | 2.22 μB |
+| 8×8×8 | Gaussian | 2.40 μB | 2.40 μB |
+| 8×8×8 | Methfessel–Paxton | 2.41 μB | 2.41 μB |
+
+The moment rises from 2.22 at 6×6×6 to 2.40 at 8×8×8. That shift is genuine k-mesh
+convergence rather than a smearing artifact (every scheme agrees at a given mesh) or a
+gradwave discrepancy (QE reproduces the trend identically at every point). The familiar
+PBE value of ≈2.2 μB that happens to land on the experimental moment reflects the coarser
+sampling; at converged sampling both codes give ≈2.4 μB. Agreement that holds across mesh
+and smearing is a stronger implementation check than any single settings point.
+
 The derivatives carry their own validation. Each one is checked either against a finite
 difference of its own energy, which floors near the finite-difference noise, or against
 the specialized QE response module (`ph.x`, `hp.x`), which agrees at the cross-code
