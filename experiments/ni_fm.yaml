@@ -1,0 +1,40 @@
+# fcc-Ni ferromagnetic (nspin=2) — PseudoDojo NC PBE. 1-atom fcc primitive,
+# a = 3.52 Å. Symmetry OFF. Weak-moment case: target ~0.6 muB (expt 0.61) — a
+# more sensitive test of the spin channel than strongly-split Fe.
+structure:
+  cell: [[0.0, 1.76, 1.76], [1.76, 0.0, 1.76], [1.76, 1.76, 0.0]]
+  positions:
+    cart:
+      - [0.0, 0.0, 0.0]
+  species: [Ni]
+
+pseudopotentials:
+  dir: ../tests/fixtures/qe/pseudos
+  map:
+    Ni: PD_Ni_PBE.upf
+
+ecut: 816.3416        # eV (60 Ry)
+xc: pbe
+nspin: 2
+start_mag:
+  Ni: 0.5
+symmetry: false
+nbands: 24
+
+kpoints:
+  mesh: [8, 8, 8]
+
+smearing:
+  type: gaussian
+  width: 0.1          # eV
+
+scf:
+  etol: 1.0e-8
+  rhotol: 1.0e-7
+  mixing:
+    scheme: johnson
+
+task: scf
+
+output:
+  dir: ./out_ni

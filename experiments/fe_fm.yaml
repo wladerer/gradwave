@@ -1,0 +1,40 @@
+# bcc-Fe ferromagnetic (nspin=2) — SG15 ONCV PBE, magnetic-validated pseudo.
+# 1-atom bcc primitive, a = 2.87 Å. Symmetry OFF (a moment breaks the
+# paramagnetic space group). Target total moment ~2.2 muB (WIEN2k/expt ~2.22).
+structure:
+  cell: [[-1.435, 1.435, 1.435], [1.435, -1.435, 1.435], [1.435, 1.435, -1.435]]
+  positions:
+    cart:
+      - [0.0, 0.0, 0.0]
+  species: [Fe]
+
+pseudopotentials:
+  dir: ../tests/fixtures/qe/pseudos
+  map:
+    Fe: Fe_ONCV_PBE-1.2.upf
+
+ecut: 816.3416        # eV (60 Ry)
+xc: pbe
+nspin: 2
+start_mag:
+  Fe: 0.7
+symmetry: false       # a moment breaks the paramagnetic bcc space group
+nbands: 20
+
+kpoints:
+  mesh: [8, 8, 8]
+
+smearing:
+  type: gaussian
+  width: 0.1          # eV
+
+scf:
+  etol: 1.0e-8
+  rhotol: 1.0e-7
+  mixing:
+    scheme: johnson
+
+task: scf
+
+output:
+  dir: ./out_fe
