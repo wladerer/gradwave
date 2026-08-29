@@ -12,6 +12,13 @@ structure:
   positions:
     cart: [[0.0, 0.0, 0.0], [0.9518, 0.8618, 0.9318]]   # ideal: 0.89175 each
   species: [C, C]
+  # Pin the first C at the origin (selective dynamics). Both C are otherwise free,
+  # so an asymmetric displacement lets the whole pair translate to a force-zero
+  # with the correct C-C bond but a drifted centre of mass -- the relative bond
+  # returns to ideal but atom 1's absolute coordinate does not. Fixing atom 0
+  # removes that translational freedom so the displaced atom 1 returns exactly to
+  # its ideal (a/4)^3 site, making the demo unambiguous.
+  fixed: [0]
 
 pseudopotentials:
   dir: ../tests/fixtures/qe/pseudos

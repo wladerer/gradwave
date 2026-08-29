@@ -188,14 +188,17 @@ def run_relax_demo(yaml: str = "diamond_relax.yaml") -> dict[str, Any]:
     Captures the displaced atom's distance from its ideal site (init -> final)."""
     print(f"\n=== relax demo: {yaml} ===", flush=True)
     inp = load_input(str(HERE / yaml))
-    idx = 1                                     # the displaced C
-    ideal = np.array([0.89175, 0.89175, 0.89175])   # a/4 in each Cartesian axis
+    ideal = np.array([0.89175, 0.89175, 0.89175])   # ideal C-C bond, a/4 each axis
     t0 = time.perf_counter()
     relax, atoms, _frames = run_relax(inp, verbose=True)
     wall = time.perf_counter() - t0
     traj = relax["trajectory"]
-    r0 = np.asarray(inp.atoms.get_positions()[idx])
-    rf = np.asarray(atoms.get_positions()[idx])
+    # measure the C-C bond (atom1 - atom0): translation-invariant, so a drifting
+    # centre of mass (both atoms free) cannot masquerade as a residual. atom 0 is
+    # pinned in this input, so the bond and atom 1's absolute position coincide.
+    pi, pf = inp.atoms.get_positions(), atoms.get_positions()
+    r0 = np.asarray(pi[1] - pi[0])
+    rf = np.asarray(pf[1] - pf[0])
     d0 = float(np.linalg.norm(r0 - ideal))
     df = float(np.linalg.norm(rf - ideal))
     print(f"diamond: converged={relax['converged']} n_steps={relax['n_steps']} "
@@ -206,7 +209,7 @@ def run_relax_demo(yaml: str = "diamond_relax.yaml") -> dict[str, Any]:
         "converged": bool(relax["converged"]), "n_steps": int(relax["n_steps"]),
         "optimizer": relax.get("optimizer", inp.relax.optimizer),
         "fmax_target": float(inp.relax.fmax), "wall_s": float(wall),
-        "atom_label": "displaced C",
+        "atom_label": "C-C bond",
         "ideal_cart": ideal.tolist(),
         "r_initial": r0.tolist(), "r_final": rf.tolist(),
         "dist_initial": d0, "dist_final": df,
@@ -711,21 +714,23 @@ Ni's splitting is small, consistent with its weak ~0.6 &mu;B moment.</p>
 <div class="fig">{dos_svg(ni)}</div>
 
 <h2>5. Geometry optimization &mdash; diamond</h2>
-<p>The {_esc(ptcu['atom_label'])} in diamond starts ~0.08 &Aring; off its ideal
-(a/4)<sup>3</sup> site; positions-only BFGS relaxes it back. Diamond is an
-insulator with a norm-conserving pseudo, so the forces are clean and the relax
-converges in a handful of steps &mdash; a trustworthy example. (The originally
-planned PtCu L1<sub>0</sub> metal relax was dropped: its affordable
-4&times;4&times;4 PAW relax converged to a spurious off-symmetry Cu site from
-coarse-mesh force noise, and each SCF step ran ~50 min at ecutrho 400 Ry &mdash;
-see caveats.)</p>
+<p>The second C in diamond starts with its bond to the first C displaced
+~0.08 &Aring; off the ideal tetrahedral (a/4)<sup>3</sup> geometry; BFGS relaxes
+it back. Diamond is an insulator with a norm-conserving pseudo, so the forces are
+clean and the relax converges tightly (fmax &rarr; 10<sup>-4</sup> eV/&Aring;) in
+a few steps &mdash; a trustworthy example. We report the translation-invariant
+<b>C&ndash;C bond</b> (atom 1 &minus; atom 0); atom 0 is pinned, so the bond and
+atom 1's absolute site coincide. (The originally planned PtCu L1<sub>0</sub>
+metal relax was dropped: its affordable 4&times;4&times;4 PAW relax converged to a
+spurious off-symmetry Cu site from coarse-mesh force noise, and each SCF step ran
+~50 min at ecutrho 400 Ry &mdash; see caveats.)</p>
 <div class="fig">{relax_svg(ptcu)}</div>
 <table class="data">
-<thead><tr><th>{_esc(ptcu['atom_label'])} axis</th>
+<thead><tr><th>C&ndash;C bond axis</th>
 <th>initial (&Aring;)</th><th>final (&Aring;)</th><th>ideal (&Aring;)</th>
 <th>residual (&Aring;)</th></tr></thead>
 <tbody>{relax_geo}</tbody></table>
-<p class="cap">Distance from the ideal site
+<p class="cap">Bond deviation from ideal
 <b>{d0:.4f} &rarr; {df:.4f} &Aring;</b> ({removed:.1f}% of the displacement
 removed). converged = <b>{ptcu['converged']}</b> / n_steps = {ptcu['n_steps']}
 / optimizer {ptcu['optimizer']} / fmax {ptcu['fmax'][0]:.4f} &rarr;
