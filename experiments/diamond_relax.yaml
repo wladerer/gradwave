@@ -1,0 +1,36 @@
+# Diamond geometry optimization (validated relax demo for the report).
+# The second carbon starts ~0.08 A off its ideal (a/4, a/4, a/4) site; BFGS
+# relaxes it back. Diamond is an insulator with norm-conserving C_ONCV, so the
+# forces are clean and the relax converges in a few steps -- a trustworthy
+# geometry-optimization example (unlike the PAW metal PtCu, whose affordable
+# 4x4x4 relax converged to a spurious off-symmetry site from coarse-mesh force
+# noise and whose per-step SCF is ~50 min). Copied from
+# examples/input_diamond_relax.yaml with a hard SCF-iteration cap so nothing
+# hangs silently.
+structure:
+  cell: [[0.0, 1.7835, 1.7835], [1.7835, 0.0, 1.7835], [1.7835, 1.7835, 0.0]]
+  positions:
+    cart: [[0.0, 0.0, 0.0], [0.9518, 0.8618, 0.9318]]   # ideal: 0.89175 each
+  species: [C, C]
+
+pseudopotentials:
+  dir: ../tests/fixtures/qe/pseudos
+  map: {C: C_ONCV_PBE-1.2.upf}
+
+ecut: 680.28          # eV (50 Ry — hard C ONCV pseudo)
+xc: pbe
+kpoints: {mesh: [4, 4, 4]}
+
+scf:
+  etol: 1.0e-8
+  rhotol: 1.0e-7
+  max_iter: 100       # hard cap: a non-converging step fails fast, never hangs
+
+task: relax
+relax:
+  optimizer: bfgs
+  fmax: 0.01          # eV/Å
+  max_steps: 40
+
+output:
+  dir: ./out_diamond
