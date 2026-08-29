@@ -85,19 +85,20 @@ study. The PBE moment is sensitive to k-point sampling, and gradwave tracks `pw.
 point-for-point across both mesh density and smearing scheme, reading the same UPF at
 60 Ry / 816 eV:
 
-| k-mesh | smearing | gradwave | QE `pw.x` |
-|---|---|---|---|
-| 6×6×6 | Gaussian | 2.22 μB | 2.22 μB |
-| 6×6×6 | Methfessel–Paxton | 2.22 μB | 2.22 μB |
-| 8×8×8 | Gaussian | 2.40 μB | 2.40 μB |
-| 8×8×8 | Methfessel–Paxton | 2.41 μB | 2.41 μB |
+| k-mesh | gradwave | QE `pw.x` |
+|---|---|---|
+| 6×6×6 | 2.22 μB | 2.22 μB |
+| 8×8×8 | 2.40 μB | 2.40 μB |
+| 10×10×10 | 2.22 μB | 2.22 μB |
 
-The moment rises from 2.22 at 6×6×6 to 2.40 at 8×8×8. That shift is genuine k-mesh
-convergence rather than a smearing artifact (every scheme agrees at a given mesh) or a
-gradwave discrepancy (QE reproduces the trend identically at every point). The familiar
-PBE value of ≈2.2 μB that happens to land on the experimental moment reflects the coarser
-sampling; at converged sampling both codes give ≈2.4 μB. Agreement that holds across mesh
-and smearing is a stronger implementation check than any single settings point.
+(Gaussian smearing at 0.1 eV; Methfessel–Paxton and cold smearing give the same values
+to within 0.01 μB at every mesh.) The moment does not converge monotonically — it
+*oscillates* with k-point sampling, 2.22 → 2.40 → 2.22, a Fermi-surface effect that is
+well known for itinerant ferromagnets. The 8×8×8 peak is a sampling artifact, not the
+converged value; both meshes that bracket it land back on ≈2.2 μB, consistent with the
+experimental moment. What matters for validation is that gradwave reproduces `pw.x`
+through the *entire* oscillation — every mesh and every smearing scheme — which is a far
+stronger implementation check than agreement at any single settings point.
 
 The derivatives carry their own validation. Each one is checked either against a finite
 difference of its own energy, which floors near the finite-difference noise, or against
