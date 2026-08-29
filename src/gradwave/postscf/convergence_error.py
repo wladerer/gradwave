@@ -270,20 +270,33 @@ def estimate_scf_error(res: SCFResult, xc: XCFunctional | None = None, *,
         grid = res.system.grid
         cell = grid.volume / grid.n_points
         r = res.drho_scf.to(RDTYPE)
-        kr = apply_k_hxc(res, xc, r)                 # physical potential [eV] of r
-        denergy_unscreened = 0.5 * float((r * kr).sum()) * cell
-        denergy_response = denergy_unscreened
-        if screened is not False:
-            try:
-                x = _dyson_solve(res, xc, r, beta=dyson_beta, tol=dyson_tol,
-                                 max_iter=dyson_max_iter)
-                denergy_response = 0.5 * float((x * kr).sum()) * cell
-                used_screened = True
-            except (NotImplementedError, DysonNotConverged):
-                if screened is True:
-                    raise
         nelec = float(res.system.n_electrons)
         res_norm = float(r.abs().sum()) * cell / nelec
+        # The K_Hxc / chi0 response diagnostic needs the per-spin residual: for
+        # nspin=2 apply_k_hxc consumes a stacked (2, *grid) field, but drho_scf
+        # stores only the TOTAL residual (the per-spin pair is not kept), so the
+        # second-order diagnostic is available for nspin=1 only. nspin=2 keeps
+        # the trajectory-extrapolation headline (the robust denergy) and the
+        # residual norm; the diagnostic fields stay None.
+        nspin = int(getattr(res, "nspin", 1))
+        if nspin == 1:
+            kr = apply_k_hxc(res, xc, r)             # physical potential [eV] of r
+            denergy_unscreened = 0.5 * float((r * kr).sum()) * cell
+            denergy_response = denergy_unscreened
+            if screened is not False:
+                try:
+                    x = _dyson_solve(res, xc, r, beta=dyson_beta, tol=dyson_tol,
+                                     max_iter=dyson_max_iter)
+                    denergy_response = 0.5 * float((x * kr).sum()) * cell
+                    used_screened = True
+                except (NotImplementedError, DysonNotConverged):
+                    if screened is True:
+                        raise
+        elif screened is True:
+            raise ValueError(
+                "the screened SCF-error response diagnostic is nspin=1 only: "
+                "drho_scf stores the total residual, not the per-spin pair the "
+                "response kernel needs")
     elif screened is True:
         raise ValueError(
             "screened=True needs xc and a stored residual (res.drho_scf); "
