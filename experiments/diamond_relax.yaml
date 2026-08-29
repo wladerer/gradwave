@@ -19,18 +19,18 @@ pseudopotentials:
 
 ecut: 680.28          # eV (50 Ry — hard C ONCV pseudo)
 xc: pbe
-kpoints: {mesh: [4, 4, 4]}
+kpoints: {mesh: [6, 6, 6]}   # clean insulator forces; still fast (~0.3s/SCF)
 
 scf:
   etol: 1.0e-8
-  rhotol: 1.0e-7
+  rhotol: 1.0e-8
   max_iter: 100       # hard cap: a non-converging step fails fast, never hangs
 
 task: relax
 relax:
   optimizer: bfgs
-  fmax: 0.01          # eV/Å
-  max_steps: 40
+  fmax: 0.001         # eV/Å — tight, so the C returns fully to its ideal site
+  max_steps: 60
 
 output:
   dir: ./out_diamond
