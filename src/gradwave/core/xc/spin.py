@@ -119,6 +119,18 @@ class SpinPBE(SpinXC):
     kappa = KAPPA
     mu = MU
 
+    def _exchange_kappa_mu(
+        self, zeta: torch.Tensor
+    ) -> tuple[float | torch.Tensor, float | torch.Tensor]:
+        """The (κ, μ) that enter the per-channel exchange enhancement F_x(s²).
+
+        Base case: the global (ζ-independent) parameters, so the enhancement is
+        the same at every grid point (exact spin-scaled PBE exchange). The single
+        seam a ζ-adaptive functional overrides to make (κ, μ) depend on the local
+        spin polarization ζ(r); the enclosing energy_density body is otherwise
+        shared verbatim. ``zeta`` is the per-point ζ = (ρ↑−ρ↓)/(ρ↑+ρ↓)."""
+        return self.kappa, self.mu
+
     @override
     def energy_density(
         self,
@@ -135,7 +147,7 @@ class SpinPBE(SpinXC):
         ru, rd = _to_au(rho_up), _to_au(rho_dn)
         rho = ru + rd
         zeta = (ru - rd) / rho
-        kappa, mu = self.kappa, self.mu
+        kappa, mu = self._exchange_kappa_mu(zeta)
 
         # exchange: spin scaling, per channel with its own gradient;
         # accumulate ρ_au·ε_x [Ha·bohr⁻³], divide by ρ_au at the end

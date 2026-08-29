@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from gradwave.core.xc.base import XCFunctional
 from gradwave.core.xc.lda_pw92 import LDA_PW92
+from gradwave.core.xc.learnable import LearnableSpinXZeta
 from gradwave.core.xc.pbe import PBE
 from gradwave.core.xc.r2scan import R2SCAN, SpinR2SCAN
 from gradwave.core.xc.spin import LSDA_PW92, SpinPBE, SpinXC
@@ -31,7 +32,13 @@ XC_REGISTRY: dict[str, type[XCFunctional]] = {"lda": LDA_PW92, "pbe": PBE,
 
 
 SPIN_XC_REGISTRY: dict[str, type[SpinXC]] = {"lda": LSDA_PW92, "pbe": SpinPBE,
-                                             "r2scan": SpinR2SCAN}
+                                             "r2scan": SpinR2SCAN,
+                                             # ζ-adaptive learnable spin-PBE
+                                             # exchange; default-constructs
+                                             # (κ₁=μ₁=0) to exact PBE, the
+                                             # spin-adaptation parameters are set
+                                             # by a trainer/probe post-build.
+                                             "learnable_spinx_zeta": LearnableSpinXZeta}
 
 
 _OCC_TOL = 1e-6
