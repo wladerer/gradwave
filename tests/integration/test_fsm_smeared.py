@@ -35,9 +35,20 @@ def _fe_bcc():
 def test_fsm_smeared_consistency_gate_fe():
     """Unconstrained smeared SCF gives moment m₀; FSM at M=m₀ reproduces the
     free energy to ~1e-6 Ha, pins the moment exactly, and gives μ↑ ≈ μ↓
-    (∂F/∂M = 0 at the free minimum)."""
+    (∂F/∂M = 0 at the free minimum).
+
+    Fermi-Dirac smearing on purpose: its counting function is strictly
+    monotone, so each channel's Fermi level is unique and the consistency
+    property is EXACT at any mesh (measured here: dF ~ 5e-12 eV, μ↑−μ↓ ~ 1e-7,
+    FSM converges in 2 iterations from the free state). mp1's negative kernel
+    makes N_σ(μ) locally non-monotone on coarse meshes — the free solution's
+    μ↓ can sit on a decreasing branch, an unstable root under the per-channel
+    constraint (measured on this 3³ cell: the FSM fixed point then lands
+    6.7e-4 eV above the free run). On production meshes (14³) the channel DOS
+    is dense enough that mp1 behaves; the E(M) campaign checks that with its
+    argmin-vs-unconstrained sanity gate rather than this unit-style test."""
     torch.set_num_threads(4)
-    kw = dict(nspin=2, smearing="mp1", width=0.1, start_mag=[0.5],
+    kw = dict(nspin=2, smearing="fermi-dirac", width=0.1, start_mag=[0.5],
               mixing_scheme="pulay", max_iter=120, etol=1e-10, rhotol=1e-9,
               verbose=False)
     r_free = scf(_fe_bcc(), SpinPBE(), **kw)
@@ -59,9 +70,9 @@ def test_fsm_smeared_consistency_gate_fe():
     # (c) two Fermi levels reported, coinciding at the free minimum
     assert r_fsm.fermi_spin is not None
     mu_up, mu_dn = r_fsm.fermi_spin
-    assert abs(mu_up - mu_dn) < 0.02  # eV; ∂F/∂M = (μ↑−μ↓)/2 ≈ 0 at M=m₀
+    assert abs(mu_up - mu_dn) < 1e-3  # eV; ∂F/∂M = (μ↑−μ↓)/2 = 0 at M=m₀
     assert r_fsm.fermi == pytest.approx(0.5 * (mu_up + mu_dn), abs=1e-12)
-    assert abs(r_fsm.fermi - r_free.fermi) < 0.02
+    assert abs(r_fsm.fermi - r_free.fermi) < 1e-3
 
 
 def test_fsm_smeared_zero_moment_matches_unconstrained_si():
