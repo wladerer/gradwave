@@ -933,9 +933,32 @@ def davidson_batched(
             )
             d = _orthonormalize_b(d, mask, against=x_orth, jitter=jitter)
             hd = _apply_exp(d)
+            if _RR_INCREMENTAL:
+                # Piece 3: the retained subspace block is exactly diag(eig) in the
+                # pre-QR Ritz basis (x are Ritz vectors, so <x_a|H|x_b>=eig_a δ_ab
+                # to round-off); under the drift-killing QR factor R (rmat) it
+                # becomes s_ret = R^-H diag(eig) R^-1 — two tiny batched triangular
+                # solves, NO npw contraction. On the fp64-crippled 3050 this beats
+                # the fat retained-block GEMM by 2.4x-340x (measured probe sweep),
+                # so the restart round is incremental too: only the d-involving
+                # cross blocks pay an npw GEMM. Carry the result as s_carry for the
+                # next round's BUILD instead of forcing a full rebuild.
+                rmat_c = rmat.to(torch.complex128)
+                diag_e = torch.diag_embed(eig.to(torch.complex128))
+                z = torch.linalg.solve_triangular(
+                    rmat_c, diag_e, upper=True, left=False)
+                s_ret = torch.linalg.solve_triangular(
+                    rmat_c.mH, z, upper=False, left=True).to(x.dtype)
+                # cross blocks with the new directions d (npw GEMMs; d is new)
+                r_tr = torch.matmul(x_orth.conj(), hd.mT)
+                r_bl = torch.matmul(d.conj(), hx_orth.mT)
+                r_co = torch.matmul(d.conj(), hd.mT)
+                s_carry = torch.cat([torch.cat([s_ret, r_tr], dim=2),
+                                     torch.cat([r_bl, r_co], dim=2)], dim=1)
+            else:
+                s_carry = None  # A/B seam: full RR rebuild next round
             v = torch.cat([x_orth, d], dim=1)
             hv = torch.cat([hx_orth, hd], dim=1)
-            s_carry = None  # basis rebuilt at restart — force a full RR rebuild
             if rr3m_on:  # basis rebuilt at restart — recompute planes fully
                 vr, vi = _planes(v)
                 hvr, hvi = _planes(hv)
