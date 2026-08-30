@@ -75,6 +75,19 @@ def test_fsm_smeared_consistency_gate_fe():
     assert abs(r_fsm.fermi - r_free.fermi) < 1e-3
 
 
+def test_fsm_rejects_target_mu_combination():
+    """Grand-canonical (target_mu) and fixed-moment are mutually exclusive —
+    the moment pin would otherwise be silently dropped."""
+    cell, pos = si_fcc()
+    si = parse_upf(str(PSEUDOS / "Si_ONCV_PBE-1.2.upf"))
+    system = setup_system(cell, pos, [0, 0], [si], ecut=15 * RY,
+                          kmesh=(2, 2, 2), nbands=12)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        scf(system, SpinPBE(), nspin=2, smearing="mp1", width=0.1,
+            tot_magnetization=0.0, target_mu=5.0, boundary="open_z_metal",
+            max_iter=2, verbose=False)
+
+
 def test_fsm_smeared_zero_moment_matches_unconstrained_si():
     """Nonmagnetic Si: FSM at M=0 with smearing must equal the unconstrained
     smeared nspin=2 run (identical channels ⇒ μ↑ = μ↓ = shared μ exactly)."""
