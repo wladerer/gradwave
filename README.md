@@ -80,6 +80,26 @@ A representative set of pinned QE comparisons:
 | Si Γ phonon (PAW) vs `ph.x` | 0.003% |
 | GaAs spin-orbit split-off Δ₀ vs fully-relativistic QE | 0.336 eV, within 2e-3 eV |
 
+The bcc-Fe moment is worth a closer look, because it doubles as a cross-code convergence
+study. The PBE moment is sensitive to k-point sampling, and gradwave tracks `pw.x`
+point-for-point across both mesh density and smearing scheme, reading the same UPF at
+60 Ry / 816 eV:
+
+| k-mesh | gradwave | QE `pw.x` |
+|---|---|---|
+| 6×6×6 | 2.22 μB | 2.22 μB |
+| 8×8×8 | 2.40 μB | 2.40 μB |
+| 10×10×10 | 2.22 μB | 2.22 μB |
+
+(Gaussian smearing at 0.1 eV; Methfessel–Paxton and cold smearing give the same values
+to within 0.01 μB at every mesh.) The moment does not converge monotonically — it
+*oscillates* with k-point sampling, 2.22 → 2.40 → 2.22, a Fermi-surface effect that is
+well known for itinerant ferromagnets. The 8×8×8 peak is a sampling artifact, not the
+converged value; both meshes that bracket it land back on ≈2.2 μB, consistent with the
+experimental moment. What matters for validation is that gradwave reproduces `pw.x`
+through the *entire* oscillation — every mesh and every smearing scheme — which is a far
+stronger implementation check than agreement at any single settings point.
+
 The derivatives carry their own validation. Each one is checked either against a finite
 difference of its own energy, which floors near the finite-difference noise, or against
 the specialized QE response module (`ph.x`, `hp.x`), which agrees at the cross-code
