@@ -138,6 +138,42 @@ class LearnableSpinXZeta(_LearnableKappaMu, SpinPBE):
         return kappa, mu
 
 
+# Trained spin-adaptation parameters for the shipped SpinAdaptedPBE preset,
+# fit to the experimental magnetic moments of the itinerant 3d ferromagnets
+# bcc-Fe, fcc-Ni, fcc-Co (see experiments/spin_adapted_pbe/). κ₀, μ₀ stay at
+# the PBE values; only the ζ² spin-adaptation terms κ₁, μ₁ are fit. Filled from
+# results.json by the training run.
+# κ₁ is pinned at 0: PBE saturates the Lieb-Oxford bound (κ₀=0.804), so κ(ζ) is
+# LO-clamped for κ₁>0 and only weakly (dm/dκ₁≈0.04) affected for κ₁<0 — a dead
+# handle (see the results note). μ₁ carries the whole fit.
+SPIN_ADAPTED_PBE_KAPPA1 = 0.0
+SPIN_ADAPTED_PBE_MU1 = -0.0610205  # fit to Fe/Ni/Co moments (14³, mp1, 60 Ry)
+
+
+class SpinAdaptedPBE(LearnableSpinXZeta):
+    """PBE exchange with ζ-adapted enhancement, the ζ² spin-adaptation
+    parameters (κ₁, μ₁) FIT to the experimental magnetic moments of the
+    itinerant 3d ferromagnets Fe, Ni, Co (least-squares, 14³ MP mesh, mp1
+    smearing, ecut 60 Ry; see experiments/spin_adapted_pbe/README.md and
+    results.json). Zero-argument so it registers as ``spin_adapted_pbe`` and
+    default-constructs to the shipped preset.
+
+    Because the ζ-dependence enters only through ζ², a closed-shell system
+    (ζ≡0 everywhere) is EXACTLY PBE for these parameters — non-magnetic
+    transferability is preserved by construction; the fit only shifts the
+    moments of spin-polarized systems. Honest caveat: the ζ-term deliberately
+    breaks the exact exchange spin-scaling identity (see LearnableSpinXZeta),
+    and the parameters are fit to only three ferromagnetic metals — a modest
+    training set. The parameters remain nn.Parameters, so the preset can be
+    fine-tuned further if desired."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            kappa=PBE_KAPPA, mu=PBE_MU,
+            kappa1=SPIN_ADAPTED_PBE_KAPPA1, mu1=SPIN_ADAPTED_PBE_MU1,
+        )
+
+
 def _inv_softplus(y: float) -> torch.Tensor:
     yt = torch.tensor(float(y), dtype=torch.float64)
     return yt + torch.log(-torch.expm1(-yt))

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from gradwave.core.xc.base import XCFunctional
 from gradwave.core.xc.lda_pw92 import LDA_PW92
-from gradwave.core.xc.learnable import LearnableSpinXZeta
+from gradwave.core.xc.learnable import LearnableSpinXZeta, SpinAdaptedPBE
 from gradwave.core.xc.pbe import PBE
 from gradwave.core.xc.r2scan import R2SCAN, SpinR2SCAN
 from gradwave.core.xc.spin import LSDA_PW92, SpinPBE, SpinXC
@@ -28,7 +28,13 @@ logger = logging.getLogger(__name__)
 
 
 XC_REGISTRY: dict[str, type[XCFunctional]] = {"lda": LDA_PW92, "pbe": PBE,
-                                              "r2scan": R2SCAN}
+                                              "r2scan": R2SCAN,
+                                              # closed-shell (nspin=1) has ζ≡0,
+                                              # so the spin-adapted preset is
+                                              # exactly PBE there — map to PBE so
+                                              # `xc: spin_adapted_pbe` is also a
+                                              # valid nonmagnetic run.
+                                              "spin_adapted_pbe": PBE}
 
 
 SPIN_XC_REGISTRY: dict[str, type[SpinXC]] = {"lda": LSDA_PW92, "pbe": SpinPBE,
@@ -38,7 +44,10 @@ SPIN_XC_REGISTRY: dict[str, type[SpinXC]] = {"lda": LSDA_PW92, "pbe": SpinPBE,
                                              # (κ₁=μ₁=0) to exact PBE, the
                                              # spin-adaptation parameters are set
                                              # by a trainer/probe post-build.
-                                             "learnable_spinx_zeta": LearnableSpinXZeta}
+                                             "learnable_spinx_zeta": LearnableSpinXZeta,
+                                             # the shipped preset: κ₁, μ₁ fit to
+                                             # the moments of Fe/Ni/Co.
+                                             "spin_adapted_pbe": SpinAdaptedPBE}
 
 
 _OCC_TOL = 1e-6
