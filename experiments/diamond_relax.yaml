@@ -1,0 +1,43 @@
+# Diamond geometry optimization (validated relax demo for the report).
+# The second carbon starts ~0.08 A off its ideal (a/4, a/4, a/4) site; BFGS
+# relaxes it back. Diamond is an insulator with norm-conserving C_ONCV, so the
+# forces are clean and the relax converges in a few steps -- a trustworthy
+# geometry-optimization example (unlike the PAW metal PtCu, whose affordable
+# 4x4x4 relax converged to a spurious off-symmetry site from coarse-mesh force
+# noise and whose per-step SCF is ~50 min). Copied from
+# examples/input_diamond_relax.yaml with a hard SCF-iteration cap so nothing
+# hangs silently.
+structure:
+  cell: [[0.0, 1.7835, 1.7835], [1.7835, 0.0, 1.7835], [1.7835, 1.7835, 0.0]]
+  positions:
+    cart: [[0.0, 0.0, 0.0], [0.9518, 0.8618, 0.9318]]   # ideal: 0.89175 each
+  species: [C, C]
+  # Pin the first C at the origin (selective dynamics). Both C are otherwise free,
+  # so an asymmetric displacement lets the whole pair translate to a force-zero
+  # with the correct C-C bond but a drifted centre of mass -- the relative bond
+  # returns to ideal but atom 1's absolute coordinate does not. Fixing atom 0
+  # removes that translational freedom so the displaced atom 1 returns exactly to
+  # its ideal (a/4)^3 site, making the demo unambiguous.
+  fixed: [0]
+
+pseudopotentials:
+  dir: ../tests/fixtures/qe/pseudos
+  map: {C: C_ONCV_PBE-1.2.upf}
+
+ecut: 680.28          # eV (50 Ry — hard C ONCV pseudo)
+xc: pbe
+kpoints: {mesh: [6, 6, 6]}   # clean insulator forces; still fast (~0.3s/SCF)
+
+scf:
+  etol: 1.0e-8
+  rhotol: 1.0e-8
+  max_iter: 100       # hard cap: a non-converging step fails fast, never hangs
+
+task: relax
+relax:
+  optimizer: bfgs
+  fmax: 0.001         # eV/Å — tight, so the C returns fully to its ideal site
+  max_steps: 60
+
+output:
+  dir: ./out_diamond

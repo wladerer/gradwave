@@ -1,0 +1,70 @@
+{
+ "qe_version": "v.7.5",
+ "degauss_Ry": 0.007349864435130998,
+ "degauss_eV": 0.1,
+ "pseudo": "Fe_ONCV_PBE-1.2.upf",
+ "ecutwfc_Ry": 60.0,
+ "a_ang": 2.87,
+ "rows": [
+  {
+   "m_tot": 2.22,
+   "m_abs": 2.38,
+   "fermi_eV": 18.2241,
+   "etot_eV": -3220.568238355285,
+   "converged": true,
+   "smearing": "gaussian",
+   "qe_smearing": "gaussian",
+   "k": 6
+  },
+  {
+   "m_tot": 2.22,
+   "m_abs": 2.38,
+   "fermi_eV": 18.2507,
+   "etot_eV": -3220.5675266414773,
+   "converged": true,
+   "smearing": "mp1",
+   "qe_smearing": "methfessel-paxton",
+   "k": 6
+  },
+  {
+   "m_tot": 2.4,
+   "m_abs": 2.56,
+   "fermi_eV": 18.1466,
+   "etot_eV": -3220.5339590835756,
+   "converged": true,
+   "smearing": "gaussian",
+   "qe_smearing": "gaussian",
+   "k": 8
+  },
+  {
+   "m_tot": 2.41,
+   "m_abs": 2.57,
+   "fermi_eV": 18.1326,
+   "etot_eV": -3220.5317149605517,
+   "converged": true,
+   "smearing": "mp1",
+   "qe_smearing": "methfessel-paxton",
+   "k": 8
+  },
+  {
+   "m_tot": 2.22,
+   "m_abs": 2.39,
+   "fermi_eV": 18.1403,
+   "etot_eV": -3220.5343141921658,
+   "converged": true,
+   "smearing": "gaussian",
+   "qe_smearing": "gaussian",
+   "k": 10
+  },
+  {
+   "m_tot": 2.22,
+   "m_abs": 2.39,
+   "fermi_eV": 18.1225,
+   "etot_eV": -3220.5312837961364,
+   "converged": true,
+   "smearing": "mp1",
+   "qe_smearing": "methfessel-paxton",
+   "k": 10
+  }
+ ]
+}
