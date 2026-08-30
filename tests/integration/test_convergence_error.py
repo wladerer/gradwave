@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from gradwave.core.xc.pbe import PBE
+from gradwave.core.xc.spin import SpinPBE
 from gradwave.postscf.convergence_error import (
     _extrapolate_energy_tail,
     estimate_kpoint_error,
@@ -222,3 +223,78 @@ def test_scf_error_requires_history():
     stripped = dataclasses.replace(res, history=[])
     with pytest.raises(ValueError, match="no SCF history"):
         estimate_scf_error(stripped)
+
+
+# --------------------------------------------------------------------------- #
+#  nspin=2 metal: the response diagnostic must degrade, not crash             #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module")
+def fe_magnetic_metal():
+    """One converged ferromagnetic bcc-Fe result (nspin=2, gaussian smearing,
+    symmetry off) — the exact setting that surfaced the nspin=2 error-estimate
+    IndexError. Genuinely spin-split (|m| > 1), so the two channels carry
+    different occupied-band counts and drho_scf is the TOTAL residual only."""
+    torch.set_num_threads(4)
+    fe = parse_upf(FIX / "Fe_ONCV_PBE-1.2.upf")
+    cell = 2.87 * np.eye(3)
+    pos = np.zeros((1, 3))
+    system = setup_system(cell, pos, [0], [fe], ecut=22 * RY, kmesh=(2, 2, 2),
+                          nbands=12, use_symmetry=False)
+    res = scf(system, SpinPBE(), smearing="gaussian", width=0.1, nspin=2,
+              start_mag=[0.5], etol=1e-6, rhotol=1e-5, max_iter=60, verbose=False)
+    assert res.converged and abs(res.mag_total) > 1.0
+    return res
+
+
+def test_scf_error_nspin2_metal_skips_response_diagnostic(fe_magnetic_metal):
+    """Regression (nspin=2 metal): the K_Hxc response diagnostic needs the
+    per-spin residual, but nspin=2 stores only the TOTAL drho_scf (a 3-D grid,
+    not the stacked (2, *grid) pair apply_k_hxc consumes). It must skip the
+    diagnostic and keep the trajectory headline, instead of crashing with
+    ``IndexError: tuple index out of range`` inside apply_k_hxc → r_to_g."""
+    res = fe_magnetic_metal
+    est = estimate_scf_error(res, SpinPBE())          # SpinXC + nspin=2: no crash
+    assert np.isfinite(est.denergy) and est.denergy >= 0.0   # robust headline
+    assert np.isfinite(est.residual_norm)             # total-residual L1 still set
+    assert est.denergy_response is None               # diagnostic gated off
+    assert est.denergy_unscreened is None
+    # an explicit screened request names the nspin=1 restriction, not IndexError
+    with pytest.raises(ValueError, match="nspin=1 only"):
+        estimate_scf_error(res, SpinPBE(), screened=True)
+
+
+def test_error_estimate_block_nspin2_metal(fe_magnetic_metal, tmp_path):
+    """The full post-SCF error-estimate block returns a valid dict on the
+    ferromagnetic bcc-Fe metal that used to raise IndexError: a finite basis-set
+    energy error, a finite density error, and an SCF-convergence sub-block with
+    no (nspin=1-only) response-diagnostic field."""
+    from gradwave.api.summary import _error_estimate_block
+    from gradwave.inputs import load_input
+
+    res = fe_magnetic_metal
+    (tmp_path / "fe.yaml").write_text(f"""
+structure:
+  cell: {(2.87 * np.eye(3)).tolist()}
+  positions: {{cart: [[0.0, 0.0, 0.0]]}}
+  species: [Fe]
+pseudopotentials:
+  dir: {FIX}
+  map: {{Fe: Fe_ONCV_PBE-1.2.upf}}
+ecut: {22 * RY}
+xc: pbe
+nspin: 2
+start_mag: [0.5]
+symmetry: false
+smearing: {{type: gaussian, width: 0.1}}
+kpoints: {{mesh: [2, 2, 2]}}
+""")
+    inp = load_input(tmp_path / "fe.yaml")
+    block = _error_estimate_block(res, inp)
+    assert block["available"] is True
+    assert np.isfinite(block["denergy_eV"])
+    assert np.isfinite(block["drho_L1_per_electron"])
+    sc = block["scf_convergence"]
+    assert np.isfinite(sc["denergy_eV"]) and sc["denergy_eV"] >= 0.0
+    assert "denergy_response_eV" not in sc            # nspin=2: no diagnostic
