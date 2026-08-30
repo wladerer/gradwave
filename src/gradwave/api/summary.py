@@ -77,6 +77,10 @@ def build_summary(res: SCFLike, inp: Input, task: str,
         "n_iter": int(_get(res, "n_iter")),
         "fermi_eV": None if _get(res, "fermi") is None
         else float(_get(res, "fermi")),
+        # smeared fixed-spin-moment runs carry the per-channel Fermi pair;
+        # the constraining field is h = (μ↑ − μ↓)/2 = ∂F/∂M
+        **({"fermi_spin_eV": [float(m) for m in _get(res, "fermi_spin")]}
+           if _get(res, "fermi_spin") is not None else {}),
         "gap_eV": None if occ is None else _gap(eig.tolist(), occ.tolist(), nspin),
         "energies_eV": {
             **energies_eV_dict(e),

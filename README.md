@@ -76,6 +76,7 @@ A representative set of pinned QE comparisons:
 | Si forces (displaced, vs `tprnfor`) | < 5 meV/Å |
 | Si band structure L–Γ–X–U–Γ (occupied) | < 10 meV |
 | bcc Fe magnetic moment (spin-PBE, 60 Ry / 816 eV) | 2.2244 vs 2.22 μB (exp. 2.22) |
+| Co₂MnSi half-metal moment (spin-PBE, FSM campaign, 60 Ry) | 5.0000 μB vs the Slater-Pauling integer 5.00, at 10³ and 12³ meshes |
 | NiO Hubbard U vs `hp.x` DFPT | 6.449 vs 6.431 eV (0.3%) |
 | Si Γ phonon (PAW) vs `ph.x` | 0.003% |
 | GaAs spin-orbit split-off Δ₀ vs fully-relativistic QE | 0.336 eV, within 2e-3 eV |
