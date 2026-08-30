@@ -97,7 +97,11 @@ SPECS: dict[str, dict] = {
                     pseudos={"Co": "Co_ONCV_PBE-1.0.upf",
                              "Mn": "PD_Mn_PBE.upf",
                              "Si": "Si_ONCV_PBE-1.2.upf"}, exp=5.00,
-                    start_mag={"Co": 0.6, "Mn": 0.8, "Si": 0.0},
+                    # physical-scale seeds (start_mag is a fraction of Z_val:
+                    # Mn 0.25·15 ≈ 3.8 μB, Co 0.1·17 ≈ 1.7 μB) — the elemental
+                    # overspin-hard trick seeds ~12 μB here and can land the
+                    # free run in a wrong (ferri) basin
+                    start_mag={"Co": 0.1, "Mn": 0.25, "Si": 0.0},
                     kmesh=(10, 10, 10), kconv=[(10, 10, 10), (12, 12, 12)],
                     # dense near the Slater-Pauling integer (half-metal kink)
                     mgrid=[4.4, 4.7, 4.9, 4.95, 5.0, 5.05, 5.1, 5.3]),
