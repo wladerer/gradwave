@@ -116,6 +116,23 @@ non-magnetic systems, as the ζ² construction guarantees.
   The ζ² weighting mitigates this (low-moment Ni sees a smaller correction than
   high-moment Fe/Co) but does not remove it — see the per-system table.
 
+## Update: FSM E(M) campaign refit (5 systems) — see `fsm/`
+
+The follow-up FSM campaign (`fsm/README.md`) multiplied the training signal
+with fixed-spin-moment E(M) curves at three μ₁ values per system and broadened
+the chemistry with B2 FeCo and the half-metallic Heusler Co₂MnSi (Slater-
+Pauling M = 5.00, which plain PBE reproduces EXACTLY here — 5.0000 μB — and
+which is insensitive to μ₁ across the fitted range, anchoring the fit against
+breaking the half-metal). The 5-system refit moves the shipped constant:
+
+    μ₁ = −0.0610 (this 3-system fit)  →  **−0.0475** (5-system FSM refit)
+
+MAE 0.049 → 0.027 μB on the 5 targets; all-5 leave-one-out MAE 0.034 vs PBE
+0.049. The shift is comparable to the experimental-target uncertainty of B2
+FeCo (4.5–4.7 μB/cell spread ⇒ μ₁* ∈ [−0.066, −0.036]), which now bounds the
+parameter's honest uncertainty. Full tables, E(M) stiffnesses, and the
+second-parameter analysis: `fsm/README.md` + `fsm/results.json`.
+
 ## Reproduce
 
 ```bash

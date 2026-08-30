@@ -139,23 +139,27 @@ class LearnableSpinXZeta(_LearnableKappaMu, SpinPBE):
 
 
 # Trained spin-adaptation parameters for the shipped SpinAdaptedPBE preset,
-# fit to the experimental magnetic moments of the itinerant 3d ferromagnets
-# bcc-Fe, fcc-Ni, fcc-Co (see experiments/spin_adapted_pbe/). κ₀, μ₀ stay at
-# the PBE values; only the ζ² spin-adaptation terms κ₁, μ₁ are fit. Filled from
-# results.json by the training run.
-# κ₁ is pinned at 0: PBE saturates the Lieb-Oxford bound (κ₀=0.804), so κ(ζ) is
-# LO-clamped for κ₁>0 and only weakly (dm/dκ₁≈0.04) affected for κ₁<0 — a dead
-# handle (see the results note). μ₁ carries the whole fit.
+# fit to experimental magnetic moments (see experiments/spin_adapted_pbe/).
+# κ₀, μ₀ stay at the PBE values; only the ζ² spin-adaptation terms κ₁, μ₁ are
+# fit. κ₁ is pinned at 0: PBE saturates the Lieb-Oxford bound (κ₀=0.804), so
+# κ(ζ) is LO-clamped for κ₁>0 and only weakly (dm/dκ₁≈0.04) affected for κ₁<0
+# — a dead handle (see the results note). μ₁ carries the whole fit.
+# History: −0.0610 from the 3-system fit (bcc-Fe/fcc-Ni/fcc-Co, PR #408);
+# refit to −0.0475 by the FSM E(M) campaign on the 5-system set adding B2 FeCo
+# and the half-metal Co₂MnSi (experiments/spin_adapted_pbe/fsm/ — MAE
+# 0.049 → 0.027 μB, all-5 LOO in results.json). Settings unchanged
+# (mp1 0.1 eV, 60 Ry, converged meshes).
 SPIN_ADAPTED_PBE_KAPPA1 = 0.0
-SPIN_ADAPTED_PBE_MU1 = -0.0610205  # fit to Fe/Ni/Co moments (14³, mp1, 60 Ry)
+SPIN_ADAPTED_PBE_MU1 = -0.0475  # 5-system FSM refit (was -0.0610205 in #408)
 
 
 class SpinAdaptedPBE(LearnableSpinXZeta):
     """PBE exchange with ζ-adapted enhancement, the ζ² spin-adaptation
-    parameters (κ₁, μ₁) FIT to the experimental magnetic moments of the
-    itinerant 3d ferromagnets Fe, Ni, Co (least-squares, 14³ MP mesh, mp1
-    smearing, ecut 60 Ry; see experiments/spin_adapted_pbe/README.md and
-    results.json). Zero-argument so it registers as ``spin_adapted_pbe`` and
+    parameters (κ₁, μ₁) FIT to experimental magnetic moments (least-squares;
+    bcc-Fe, fcc-Ni, fcc-Co, B2 FeCo, and the half-metal Co₂MnSi via the FSM
+    E(M) campaign — mp1 smearing, ecut 60 Ry, converged meshes; see
+    experiments/spin_adapted_pbe/README.md and fsm/results.json).
+    Zero-argument so it registers as ``spin_adapted_pbe`` and
     default-constructs to the shipped preset.
 
     Because the ζ-dependence enters only through ζ², a closed-shell system
