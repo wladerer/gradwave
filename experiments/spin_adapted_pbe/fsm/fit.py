@@ -89,6 +89,17 @@ def curve_minimum(rec: dict) -> dict:
     else:  # minimum at the grid edge — flagged below
         m_field, stiff = float(ms[j]), None
 
+    # prefer the second-difference stiffness from the ±δ refinement points
+    # (scan.py --refine): k = [F(m₀+δ) + F(m₀−δ) − 2F_free]/δ² with SCF-exact
+    # energies — far less interpolation-sensitive than the PCHIP derivative
+    if rec.get("free") is not None and not kink:
+        m0, f0 = abs(rec["free"]["m"]), rec["free"]["F"]
+        delta = 0.05
+        i_m = [i for i in range(len(ms)) if abs((ms[i] - m0) + delta) < 2e-3]
+        i_p = [i for i in range(len(ms)) if abs((ms[i] - m0) - delta) < 2e-3]
+        if i_m and i_p:
+            stiff = float((fs[i_p[0]] + fs[i_m[0]] - 2.0 * f0) / delta**2)
+
     # --- cross-checks: F-spline argmin + local quartic --------------------
     spl = CubicSpline(ms, fs)
     grid = np.linspace(ms[0], ms[-1], 4001)
