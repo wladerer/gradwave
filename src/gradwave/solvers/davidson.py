@@ -284,6 +284,120 @@ def _fp32_expansion_active(x0: torch.Tensor) -> bool:
     return x0.is_cuda and _fp64_penalty(x0.device) >= _FP32_EXP_PENALTY_THRESHOLD
 
 
+# ---------------------------------------------------------------------------
+# Exact fp64 Rayleigh-Ritz stack (3M/Karatsuba complex GEMM behind a measured
+# per-signature gate). The RR subspace algebra (BUILD s = v.conj()@hv.mT and the
+# two COMBINE einsums x,hx) is all-complex128 and dominates the batched Davidson
+# wall on cards whose fp64 ALU is crippled (RTX 3050: ~1/64 of fp32). PyTorch
+# dispatches complex128 matmul to cuBLAS's 4-multiply ZGEMM; Gauss's 3-multiply
+# complex product does the same contraction with 3 real fp64 GEMMs — a lossless
+# 25% fp64-FLOP cut. It REGRESSES in the wide-many-k / small-block regime, so it
+# ships behind a per-(device,nk,m,npw,dtype) measured A/B gate, exactly mirroring
+# core/batch.py's `_use_toeplitz`: a one-time timed trial of 3M vs native ZGEMM
+# on the real block, cached verdict, native fallback. Result is NOT bit-exact vs
+# native (rel-err ~1e-14) but the eigensolve upcasts s to fp64 anyway and the
+# convergence iteration count is unchanged (asserted in tests).
+# ---------------------------------------------------------------------------
+
+# GRADWAVE_RR3M in {"auto", "on", "off"} (default "auto"): "on" forces 3M wherever
+# eligible (complex128); "off" always uses native ZGEMM; "auto" gates on the
+# per-signature timed trial and is restricted to CUDA (CPU fp64 GEMM is not
+# crippled, so the native path is left untouched with zero overhead there). Read
+# once at import, like the toeplitz/QR knobs.
+_RR3M_ENV = os.environ.get("GRADWAVE_RR3M", "auto").strip().lower()
+
+# Adopt 3M only if t_3m < margin * t_native on the trial (a small guard band so a
+# statistical tie stays on the native path). Matches _TOEP_TRIAL_MARGIN.
+_RR3M_TRIAL_MARGIN = 0.95
+
+# Per-signature verdict cache, keyed on (device.type, nk, m, npw, dtype). Plain
+# dict, GIL-guarded; a rare double-trial on first concurrent use is harmless.
+_RR3M_VERDICT: dict[tuple[str, int, int, int, torch.dtype], bool] = {}
+
+
+def _gemm3(ar: torch.Tensor, ai: torch.Tensor, br: torch.Tensor,
+           bi: torch.Tensor) -> torch.Tensor:
+    """(ar + i·ai) @ (br + i·bi) via 3 real fp64 GEMMs (Gauss/Karatsuba).
+
+    Cr = ar@br − ai@bi, Ci = ar@bi + ai@br, computed from three products
+    t1 = ar@(br+bi), t2 = (ar+ai)@bi, t3 = (ai−ar)@br as Cr = t1−t2, Ci = t1+t3.
+    Batched real matmul (cuBLAS DGEMM / MKL) on the real/imag planes; 25% fewer
+    fp64 GEMM FLOPs than the native 4-multiply ZGEMM, lossless to ~1e-14."""
+    t1 = ar @ (br + bi)
+    t2 = (ar + ai) @ bi
+    t3 = (ai - ar) @ br
+    return torch.complex(t1 - t2, t1 + t3)
+
+
+def _gemm3_conjl(ar: torch.Tensor, ai: torch.Tensor, br: torch.Tensor,
+                 bi: torch.Tensor) -> torch.Tensor:
+    """conj(ar + i·ai) @ (br + i·bi) via 3 real fp64 GEMMs (the BUILD bra is
+    conjugated). Cr = ar@br + ai@bi, Ci = ar@bi − ai@br. The conjugation is
+    folded into Gauss's three pre-sums at zero extra cost (no plane negation)."""
+    t1 = ar @ (br + bi)
+    t2 = (ar - ai) @ bi
+    t3 = -(ar + ai) @ br
+    return torch.complex(t1 - t2, t1 + t3)
+
+
+def _planes(z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Contiguous (real, imag) planes of a complex tensor — one deinterleave.
+
+    ``view_as_real`` interleaves as [...,2]; the split planes are made
+    contiguous so the downstream real GEMMs hit the fast path. Called on the
+    n_add NEW columns only on a grow round (cached planes carry the old ones)."""
+    zri = torch.view_as_real(z.contiguous())
+    return zri[..., 0].contiguous(), zri[..., 1].contiguous()
+
+
+def _rr3m_eligible(x0: torch.Tensor) -> bool:
+    """Solve-level 3M eligibility (whether to maintain the real/imag plane cache).
+
+    Only complex128 qualifies (the win targets the fp64 ALU; a complex64 draft
+    runs on the fast fp32 path). "on" forces it anywhere (CPU included, for
+    tests); "auto" restricts to CUDA so the CPU native path keeps zero overhead;
+    "off" disables it. The per-signature timed gate below still decides 3M vs
+    native each round on an eligible solve."""
+    if _RR3M_ENV == "off" or x0.dtype != torch.complex128:
+        return False
+    if _RR3M_ENV == "on":
+        return True
+    return x0.is_cuda  # auto: trial per signature on CUDA only
+
+
+def _rr3m_verdict(v: torch.Tensor, hv: torch.Tensor, vr: torch.Tensor,
+                  vi: torch.Tensor, hvr: torch.Tensor, hvi: torch.Tensor) -> bool:
+    """Per-signature timed A/B: 3M BUILD vs native ZGEMM, cached (mirrors
+    ``_use_toeplitz``). "on" forces True. The BUILD is the dominant (~2/3) RR
+    GEMM, so its verdict also governs the two COMBINE GEMMs — they share the
+    fp64-ALU-roofline regime and flip together. The trial costs one extra BUILD
+    per (device, nk, m, npw, dtype) signature per process."""
+    if _RR3M_ENV == "on":
+        return True
+    nk, m, npw = v.shape
+    key = (v.device.type, nk, m, npw, v.dtype)
+    verdict = _RR3M_VERDICT.get(key)
+    if verdict is None:
+        brt, bit = hvr.transpose(-1, -2), hvi.transpose(-1, -2)
+        is_cuda = v.is_cuda
+
+        def timed(f: Callable[[], torch.Tensor]) -> float:
+            f()  # warm
+            if is_cuda:
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            f()
+            if is_cuda:
+                torch.cuda.synchronize()
+            return time.perf_counter() - t0
+
+        t_nat = timed(lambda: torch.matmul(v.conj(), hv.mT))
+        t_3m = timed(lambda: _gemm3_conjl(vr, vi, brt, bit))
+        verdict = t_3m < _RR3M_TRIAL_MARGIN * t_nat
+        _RR3M_VERDICT[key] = verdict
+    return verdict
+
+
 def _certify_fp64(
     h_apply: Callable[[torch.Tensor], torch.Tensor], x: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -623,6 +737,14 @@ def davidson_batched(
 
     v = _orthonormalize_b(x0, mask, jitter=jitter)
     hv = _apply_exp(v)
+    # 3M complex-GEMM plane cache (Piece 1). Maintained only on an eligible solve
+    # (complex128; CUDA under "auto"); one deinterleave of the NEW columns per
+    # grow round carries the old-column planes forward, so a single view_as_real
+    # feeds all three RR GEMMs (BUILD + two COMBINE). Native path leaves these
+    # None and pays nothing.
+    rr3m_on = _rr3m_eligible(x0)
+    vr, vi = _planes(v) if rr3m_on else (None, None)
+    hvr, hvi = _planes(hv) if rr3m_on else (None, None)
     eig = torch.zeros(nk, nb, dtype=rdtype, device=x0.device)
     x = v[:, :nb]
     rn = torch.full((nk, nb), float("inf"), dtype=rdtype, device=x0.device)
@@ -645,13 +767,36 @@ def davidson_batched(
         # eigensolve; the long v/hv basis and the Ritz combination stay
         # complex64. A no-op in the fp64 polish, mirroring the generalized
         # reduction in scf/uspp_batch.py.
-        s = torch.matmul(v.conj(), hv.mT)
+        # 3M/Karatsuba complex GEMM (Piece 1) behind the per-signature measured
+        # gate: the BUILD s = conj(v)@hv.mT and the two COMBINE contractions run
+        # as 3 real fp64 GEMMs on the cached planes when the trial says 3M wins
+        # for this (device, nk, m, npw, dtype); native ZGEMM otherwise (the
+        # wide-many-k / small-block fallback). Verdict shared across all three.
+        use3m = False
+        if rr3m_on:
+            assert vr is not None and vi is not None
+            assert hvr is not None and hvi is not None
+            use3m = _rr3m_verdict(v, hv, vr, vi, hvr, hvi)
+        if use3m:
+            assert vr is not None and vi is not None
+            assert hvr is not None and hvi is not None
+            s = _gemm3_conjl(vr, vi, hvr.transpose(-1, -2), hvi.transpose(-1, -2))
+        else:
+            s = torch.matmul(v.conj(), hv.mT)
         s = (0.5 * (s + s.conj().transpose(-1, -2))).to(torch.complex128)
         w, u = _eigh_subspace(s)
         u = u[:, :, :nb].to(v.dtype)  # rotation back to the block dtype
         eig = w[:, :nb].real.to(rdtype)
-        x = torch.einsum("kja,kjg->kag", u, v)
-        hx = torch.einsum("kja,kjg->kag", u, hv)
+        if use3m:
+            assert vr is not None and vi is not None
+            assert hvr is not None and hvi is not None
+            ur, ui = _planes(u)  # small (nk, m, nb); rebuilt every round
+            urt, uit = ur.transpose(-1, -2), ui.transpose(-1, -2)
+            x = _gemm3(urt, uit, vr, vi)
+            hx = _gemm3(urt, uit, hvr, hvi)
+        else:
+            x = torch.einsum("kja,kjg->kag", u, v)
+            hx = torch.einsum("kja,kjg->kag", u, hv)
 
         r = hx - eig[..., None] * x
         rn = torch.linalg.norm(r, dim=-1).real
@@ -685,6 +830,9 @@ def davidson_batched(
                     # convergence claim.
                     v, hv = x, hx
                     use_fp32_exp = False
+                    if rr3m_on:  # basis replaced wholesale — rebuild planes
+                        vr, vi = _planes(v)
+                        hvr, hvi = _planes(hv)
         if history_out is not None:  # opt-in per-band convergence telemetry (off by default)
             history_out.append((it, rn.detach().to("cpu").clone(),
                                 eig.detach().to("cpu").clone()))
@@ -755,12 +903,25 @@ def davidson_batched(
                 rmat.transpose(-1, -2), hx, upper=False
             )
             d = _orthonormalize_b(d, mask, against=x_orth, jitter=jitter)
+            hd = _apply_exp(d)
             v = torch.cat([x_orth, d], dim=1)
-            hv = torch.cat([hx_orth, _apply_exp(d)], dim=1)
+            hv = torch.cat([hx_orth, hd], dim=1)
+            if rr3m_on:  # basis rebuilt at restart — recompute planes fully
+                vr, vi = _planes(v)
+                hvr, hvi = _planes(hv)
         else:
             d = _orthonormalize_b(d, mask, against=v, jitter=jitter)
+            hd = _apply_exp(d)
             v = torch.cat([v, d], dim=1)
-            hv = torch.cat([hv, _apply_exp(d)], dim=1)
+            hv = torch.cat([hv, hd], dim=1)
+            if rr3m_on:  # incremental: deinterleave only the n_add new columns
+                assert vr is not None and vi is not None
+                assert hvr is not None and hvi is not None
+                dr, di = _planes(d)
+                hdr, hdi = _planes(hd)
+                vr, vi = torch.cat([vr, dr], dim=1), torch.cat([vi, di], dim=1)
+                hvr = torch.cat([hvr, hdr], dim=1)
+                hvi = torch.cat([hvi, hdi], dim=1)
 
     if use_fp32_exp:
         # max_iter exit: the returned block must still be certified — one final
