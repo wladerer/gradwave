@@ -194,6 +194,35 @@ def run_system(key: str, out_dir: Path, mu1_list: list[float],
         _log(f"{key} mu1={mu1:+.2f} DONE ({rec['wall_s']:.0f}s) -> {out}")
 
 
+def run_refine(key: str, out_dir: Path, mu1_list: list[float],
+               delta: float = 0.05) -> None:
+    """Densify existing curves near the minimum: two extra FSM points at
+    M = m_free ± delta per (system, mu1), merged into the existing raw JSON.
+    The 0.15–0.3 μB production grids limit the field-root interpolation to
+    ~0.05 μB on the stiffer curves; these two warm points pin the crossing."""
+    spec = SPECS[key]  # noqa: F841  (validates the key)
+    system, start_mag = build(key)
+    base = dict(nspin=2, smearing=SMEAR, width=WIDTH, start_mag=start_mag,
+                max_iter=MAX_ITER, verbose=False)
+    warm = None
+    for mu1 in mu1_list:
+        path = out_dir / f"{key}_mu1_{mu1:+.3f}.json"
+        rec = json.loads(path.read_text())
+        m0 = abs(rec["free"]["m"])
+        xc = LearnableSpinXZeta(kappa1=0.0, mu1=float(mu1))
+        for m in (m0 - delta, m0 + delta):
+            r = scf(system, xc, tot_magnetization=float(m), start_from=warm,
+                    **base)
+            warm = r
+            rec["curve"][f"{m:.3f}"] = _point(r)
+            p = rec["curve"][f"{m:.3f}"]
+            _log(f"  {key} mu1={mu1:+.2f} REFINE M={m:.3f}: F={p['F']:.6f} "
+                 f"dmu={p['mu_up'] - p['mu_dn']:+.4f} conv={p['converged']} "
+                 f"it={p['n_iter']}")
+        path.write_text(json.dumps(rec, indent=2))
+        _log(f"{key} mu1={mu1:+.2f} REFINED -> {path}")
+
+
 def run_kconv(key: str, out_dir: Path) -> None:
     """Unconstrained PBE moment at the candidate meshes (moment stability)."""
     spec = SPECS[key]
@@ -217,6 +246,8 @@ def main() -> None:
     ap.add_argument("--out", default="experiments/spin_adapted_pbe/fsm/raw")
     ap.add_argument("--kconv", action="store_true",
                     help="run only the k-mesh moment-stability probe")
+    ap.add_argument("--refine", action="store_true",
+                    help="add two FSM points at m_free±0.05 to existing curves")
     ap.add_argument("--mu1", type=float, nargs="*", default=None,
                     help="override the mu1 list (default 0, -0.06, -0.10)")
     ap.add_argument("--kmesh", type=int, default=None,
@@ -228,6 +259,8 @@ def main() -> None:
     km = (args.kmesh,) * 3 if args.kmesh else None
     if args.kconv:
         run_kconv(args.system, out_dir)
+    elif args.refine:
+        run_refine(args.system, out_dir, args.mu1 or MU1_GRID)
     else:
         run_system(args.system, out_dir, args.mu1 or MU1_GRID, kmesh=km,
                    tag=f"_k{args.kmesh}" if args.kmesh else "")
