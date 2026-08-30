@@ -256,6 +256,48 @@ def assemble_pw_energies(coeffs_s, occ_s, kweights, spheres, grid, vol,
     )
 
 
+def fsm_smeared_occupations(eigs_s, kweights, smearing, width, n_electrons,
+                            tot_magnetization, device):
+    """Fixed-spin-moment (FSM) occupations WITH smearing: two Fermi levels.
+
+    The moment M = N↑ − N↓ is pinned by giving each collinear spin channel its
+    own Fermi level — μ↑ solves Σ_k w_k Σ_n f((ε↑_nk − μ↑)/σ) = N↑ = (N_e+M)/2
+    and μ↓ likewise for N↓ = (N_e−M)/2 — with per-channel smeared occupations
+    (degeneracy 1) and the two channels' entropy terms summed. This is QE's
+    ``tot_magnetization`` mode with smearing (two Fermi energies), the E(M)
+    fixed-spin-moment method.
+
+    Physics validation built into the construction: along the fixed-moment
+    energy curve, ∂F/∂M = (μ↑ − μ↓)/2, so at the E(M) minimum the two Fermi
+    levels COINCIDE and the FSM run reproduces the unconstrained SCF (same
+    occupations, same free energy). μ↑ ≈ μ↓ at M = m₀ (the unconstrained
+    moment) is the consistency check, and (μ↑ − μ↓)/2 is the magnetic field
+    h(M) conjugate to the constrained moment.
+
+    Returns ``(occ_s, (mu_up, mu_dn), entropy_term)``.
+    """
+    scheme = SCHEMES[smearing]
+    n_up = (n_electrons + tot_magnetization) / 2.0
+    n_dn = (n_electrons - tot_magnetization) / 2.0
+    if n_up < 0 or n_dn < 0:
+        raise ValueError(
+            f"tot_magnetization={tot_magnetization} exceeds n_electrons="
+            f"{n_electrons} (would give a negative channel count)")
+    occ_s, mus = [], []
+    ent = torch.zeros((), dtype=RDTYPE, device=device)
+    for isp, n_ch in ((0, n_up), (1, n_dn)):
+        mu_ch = float(find_fermi(eigs_s[isp], kweights, scheme, width, n_ch,
+                                 degeneracy=1.0))
+        # NB: bare torch.tensor(mu) would be float32 and shift N by ~1e-7
+        mu_t = torch.tensor(mu_ch, dtype=RDTYPE, device=device)
+        o, s_ent = occupations_and_entropy(eigs_s[isp], mu_t, scheme, width,
+                                           degeneracy=1.0)
+        occ_s.append(o)
+        ent = ent - width * (kweights[:, None] * s_ent).sum()
+        mus.append(mu_ch)
+    return occ_s, (mus[0], mus[1]), ent
+
+
 def shared_fermi_occupations(eigs_s, kweights, smearing, width, n_electrons,
                              nspin, device, tot_magnetization=None):
     """Occupations, Fermi level, and entropy term for per-spin eigenvalue
@@ -266,7 +308,12 @@ def shared_fermi_occupations(eigs_s, kweights, smearing, width, n_electrons,
     gives fixed occupations: for nspin=1 the lowest N_e/2 bands; for nspin=2 a
     fixed spin moment (FSM) run — the per-channel electron counts come from
     tot_magnetization M via N↑=(N_e+M)/2, N↓=(N_e−M)/2, so the moment is held
-    fixed instead of found from a shared μ (which smearing would need)."""
+    fixed instead of found from a shared μ (which smearing would need).
+
+    nspin=2 WITH smearing AND tot_magnetization is the smeared FSM: two
+    per-channel Fermi levels (see fsm_smeared_occupations); the returned mu is
+    their mean (a float, so existing consumers are unchanged) — callers that
+    need the (μ↑, μ↓) pair call fsm_smeared_occupations directly."""
     g_spin = 2 if nspin == 1 else 1
     if smearing == "none":
         if nspin == 1:
@@ -294,6 +341,11 @@ def shared_fermi_occupations(eigs_s, kweights, smearing, width, n_electrons,
         mu = max(vbms) if vbms else float(eigs_s[0].min())
         entropy_term = torch.zeros((), dtype=RDTYPE, device=device)
         return occ_s, mu, entropy_term
+    if nspin == 2 and tot_magnetization is not None:
+        occ_s, (mu_up, mu_dn), ent = fsm_smeared_occupations(
+            eigs_s, kweights, smearing, width, n_electrons,
+            tot_magnetization, device)
+        return occ_s, 0.5 * (mu_up + mu_dn), ent
     scheme = SCHEMES[smearing]
     eigs_cat = torch.cat(eigs_s, dim=0)  # (nspin·nk, nb)
     kw_cat = torch.cat([kweights] * nspin)

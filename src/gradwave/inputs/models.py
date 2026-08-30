@@ -845,7 +845,8 @@ class Input:
     nonmagnetic: bool = False  # with noncollinear: pin m⃗ ≡ 0 (spin-orbit only, keeps symmetry)
     # element -> initial moment fraction (nspin=2/NC seed)
     start_mag: dict[str, float] | None = None
-    tot_magnetization: float | None = None  # fix M=N↑−N↓ (nspin=2, no smearing)
+    tot_magnetization: float | None = None  # fix M=N↑−N↓ (nspin=2): integer fill
+    # without smearing, two-Fermi-level smeared FSM with smearing
     task: str = "scf"  # scf | relax | bands | magnetism | eos | elastic | phonons | flapw | nmr
     relax: RelaxParams = field(default_factory=RelaxParams)
     bands: BandsParams = field(default_factory=BandsParams)

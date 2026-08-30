@@ -47,6 +47,7 @@ from gradwave.scf.common import (
     assemble_pw_energies,
     constant_mu_occupations,
     convergence_gate,
+    fsm_smeared_occupations,
     hubbard_u_ramp_scale,
     mix_hubbard_occ,
     record_iteration,
@@ -465,6 +466,10 @@ class SCFResult:
     esm_bias: float = 0.0  # applied capacitor bias [V] (open_z_metal); forces read it
     n_electrons: float = 0.0  # electron count (floats under constant-µ / target_mu);
     # the grand potential is Ω = free_energy − fermi·n_electrons
+    fermi_spin: tuple[float, float] | None = None  # (μ↑, μ↓) [eV] on a smeared
+    # fixed-spin-moment run (nspin=2, smearing, tot_magnetization set) — the two
+    # per-channel Fermi levels; `fermi` is their mean. (μ↑−μ↓)/2 = ∂F/∂M is the
+    # field conjugate to the pinned moment; None on every other path.
 
 
 # A warm-start source for scf(): either a converged SCFResult, or the plainer
@@ -1262,42 +1267,51 @@ def _scf_residual_and_record(
 def _fermi_occupations(eigs_s, system, smearing, width, nspin, device, *,
                        target_mu, tot_magnetization, dist_ctx, kweights_global):
     """Fermi level + occupations from the current eigenvalues, returning
-    ``(occ_s, mu, entropy_term, n_float, eigs_global_s, occ_global_s)`` where
-    ``occ_s`` is THIS rank's slice and ``eigs_global_s`` / ``occ_global_s`` are
-    the full-mesh gathered eigenvalues/occupations (equal to the local arrays
+    ``(occ_s, mu, mu_spin, entropy_term, n_float, eigs_global_s, occ_global_s)``
+    where ``occ_s`` is THIS rank's slice and ``eigs_global_s`` / ``occ_global_s``
+    are the full-mesh gathered eigenvalues/occupations (equal to the local arrays
     off the distributed path). The caller carries the globals forward so the
     final reassembled SCFResult reports full-mesh eigenvalues/occupations rather
-    than one rank's shard.
+    than one rank's shard. ``mu_spin`` is the (μ↑, μ↓) pair on the smeared
+    fixed-spin-moment path (nspin=2, smearing, tot_magnetization set — μ is
+    then their mean), None otherwise.
 
-    Three regimes: constant-µ (``target_mu`` set), the default shared-Fermi
-    search, and the k-point-sharded distributed path — where the Fermi level
-    depends on eigenvalues from EVERY k-point, so the eigenvalues are gathered
-    for the search and only the local shard's occupations are sliced back."""
+    Regimes: constant-µ (``target_mu`` set), the default shared-Fermi search,
+    the smeared FSM two-Fermi-level solve, and the k-point-sharded distributed
+    path — where the Fermi level depends on eigenvalues from EVERY k-point, so
+    the eigenvalues are gathered for the search and only the local shard's
+    occupations are sliced back."""
+    fsm_smeared = (nspin == 2 and smearing != "none"
+                   and tot_magnetization is not None and target_mu is None)
+
+    def _occupy(eigs_full_s, kweights):
+        """(occ_full_s, mu, mu_spin, entropy_term, n_float) on the full mesh."""
+        if target_mu is not None:
+            occ_full_s, mu, ent, n_float = constant_mu_occupations(
+                eigs_full_s, kweights, smearing, width, target_mu, nspin, device)
+            return occ_full_s, mu, None, ent, n_float
+        if fsm_smeared:
+            occ_full_s, mu_spin, ent = fsm_smeared_occupations(
+                eigs_full_s, kweights, smearing, width, system.n_electrons,
+                tot_magnetization, device)
+            return (occ_full_s, 0.5 * (mu_spin[0] + mu_spin[1]), mu_spin, ent,
+                    float(system.n_electrons))
+        occ_full_s, mu, ent = shared_fermi_occupations(
+            eigs_full_s, kweights, smearing, width, system.n_electrons, nspin,
+            device, tot_magnetization=tot_magnetization)
+        return occ_full_s, mu, None, ent, float(system.n_electrons)
+
     if dist_ctx is not None:
         from gradwave.distributed import gather_cat
 
         eigs_global_s = [gather_cat(eigs_s[sp], dist_ctx) for sp in range(nspin)]
-        if target_mu is not None:
-            occ_global_s, mu, entropy_term, n_float = constant_mu_occupations(
-                eigs_global_s, kweights_global, smearing, width, target_mu,
-                nspin, device)
-        else:
-            occ_global_s, mu, entropy_term = shared_fermi_occupations(
-                eigs_global_s, kweights_global, smearing, width,
-                system.n_electrons, nspin, device,
-                tot_magnetization=tot_magnetization)
-            n_float = float(system.n_electrons)
+        occ_global_s, mu, mu_spin, entropy_term, n_float = _occupy(
+            eigs_global_s, kweights_global)
         occ_s = [occ_global_s[sp][dist_ctx.k_start : dist_ctx.k_end]
                  for sp in range(nspin)]
-        return occ_s, mu, entropy_term, n_float, eigs_global_s, occ_global_s
-    if target_mu is not None:
-        occ_s, mu, entropy_term, n_float = constant_mu_occupations(
-            eigs_s, system.kweights, smearing, width, target_mu, nspin, device)
-        return occ_s, mu, entropy_term, n_float, eigs_s, occ_s
-    occ_s, mu, entropy_term = shared_fermi_occupations(
-        eigs_s, system.kweights, smearing, width, system.n_electrons, nspin,
-        device, tot_magnetization=tot_magnetization)
-    return occ_s, mu, entropy_term, float(system.n_electrons), eigs_s, occ_s
+        return occ_s, mu, mu_spin, entropy_term, n_float, eigs_global_s, occ_global_s
+    occ_s, mu, mu_spin, entropy_term, n_float = _occupy(eigs_s, system.kweights)
+    return occ_s, mu, mu_spin, entropy_term, n_float, eigs_s, occ_s
 
 
 def _output_density(coeffs_b_s, occ_s, system, bk, grid, vol, nspin, *,
@@ -1381,9 +1395,13 @@ def scf(
     verbose: bool = True,
     nspin: int = 1,
     start_mag: list[float] | None = None,  # initial moment fractions: per-species OR per-atom
-    tot_magnetization: float | None = None,  # fix the spin moment M=N↑−N↓ (nspin=2, no smearing);
-    # per-channel integer occupations instead of a shared-μ fill — see
-    # shared_fermi_occupations. None (default) uses smearing to find the moment.
+    tot_magnetization: float | None = None,  # fix the spin moment M=N↑−N↓ (nspin=2).
+    # Without smearing: per-channel integer occupations (see
+    # shared_fermi_occupations). With smearing: two per-channel Fermi levels
+    # μ↑/μ↓ solved so each channel holds its own electron count — the smeared
+    # fixed-spin-moment (FSM) mode for E(M) curves; the result carries the pair
+    # as fermi_spin (see fsm_smeared_occupations). None (default) finds the
+    # moment from the shared Fermi level.
     mixed_precision: bool = False,  # opt-in fp32 draft (see note at resolution below)
     eigensolver: str = "davidson",  # davidson | chebyshev (NC standard problem only)
     precond: str = "kerker",  # kerker | local_tf (position-dependent TF screening)
@@ -1609,6 +1627,7 @@ def scf(
     eigs_global_s = eigs_s
     occ_global_s = occ_s
     mu, entropy_term = 0.0, torch.zeros((), dtype=RDTYPE, device=device)
+    mu_spin = None  # (μ↑, μ↓) on the smeared FSM path, None otherwise
     n_float = float(system.n_electrons)  # floats each iteration under target_mu
     veff_s = [torch.zeros(grid.shape, dtype=RDTYPE, device=device) for _ in range(nspin)]
 
@@ -1721,7 +1740,7 @@ def scf(
             )
         _t_eig_s = time.perf_counter() - _t_eig0
 
-        occ_s, mu, entropy_term, n_float, eigs_global_s, occ_global_s = _fermi_occupations(
+        occ_s, mu, mu_spin, entropy_term, n_float, eigs_global_s, occ_global_s = _fermi_occupations(
             eigs_s, system, smearing, width, nspin, device,
             target_mu=target_mu, tot_magnetization=tot_magnetization,
             dist_ctx=dist_ctx, kweights_global=kweights_global)
@@ -1908,6 +1927,8 @@ def scf(
             _md = rho_s[0] - rho_s[1]
             _extra = f" · m = {float(_md.mean()) * vol:+.4f} muB"
         _fm = "" if mu is None else f" · Fermi = {mu:.4f} eV"
+        if mu_spin is not None:
+            _fm += f" (mu_up = {mu_spin[0]:.4f}, mu_dn = {mu_spin[1]:.4f})"
         print(f"SCF {_tag} in {it} iterations · F = {e_free:+.10f} eV{_fm}{_extra}", flush=True)
 
     opcount.disable()   # restore the default-off tally state after the run
@@ -1980,6 +2001,7 @@ def scf(
         boundary=boundary,
         esm_bias=esm_bias,
         n_electrons=n_float,
+        fermi_spin=mu_spin,
     )
 
 

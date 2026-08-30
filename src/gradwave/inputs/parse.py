@@ -680,8 +680,9 @@ def _load_input(path: Path) -> Input:
                 f"don't route through the k-point-sharded SCF path yet (see "
                 f"docs/manual/distributed.md)")
 
-    # fixed spin moment: an integer-occupation pin, so only a collinear nspin=2
-    # run without smearing consumes it (the calculator/SCF requirement).
+    # fixed spin moment: a collinear nspin=2 pin. Without smearing it is the
+    # integer-occupation fill; with smearing the SCF solves two per-channel
+    # Fermi levels (the smeared FSM mode for E(M) curves).
     tot_mag = raw.get("tot_magnetization")
     if tot_mag is not None:
         tot_mag = float(tot_mag)

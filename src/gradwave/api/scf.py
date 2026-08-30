@@ -122,8 +122,9 @@ def run_scf(
         common["hub_occ_mix"] = inp.hubbard.occ_mix
         common["hub_u_ramp_iters"] = inp.hubbard.u_ramp_iters
     if inp.tot_magnetization is not None and not uspp:
-        # fixed spin moment: a collinear nspin=2, no-smearing pin (see
-        # scf/loop.py:_check_scf_args). The USPP path has no such argument.
+        # fixed spin moment: a collinear nspin=2 pin — integer occupations
+        # without smearing, two-Fermi-level smeared FSM with smearing (see
+        # scf/common.py:fsm_smeared_occupations). scf_uspp has no such kwarg.
         common["tot_magnetization"] = inp.tot_magnetization
     # uspp (from _is_uspp(upfs) above) already tells us which concrete type
     # `system` is — the two branches below just name that for the checker.

@@ -282,8 +282,9 @@ class GradWave(Calculator):
         use_symmetry: bool = True,
         nspin: int = 1,  # 1 (restricted) or 2 (collinear); auto-bumps to 2 when
         # the atoms carry nonzero initial magnetic moments (see _resolve_spin)
-        tot_magnetization: float | None = None,  # fix M=N↑−N↓ for a no-smearing
-        # nspin=2 run; None → derive from the initial moments (smearing="none")
+        tot_magnetization: float | None = None,  # fix M=N↑−N↓ for an nspin=2 run
+        # (integer fill without smearing; two-Fermi-level smeared FSM with
+        # smearing); None → derive from the initial moments (smearing="none")
         # or let the shared Fermi level find it when a smearing is set
         max_iter: int = 100,
         etol: float = 1e-8,
