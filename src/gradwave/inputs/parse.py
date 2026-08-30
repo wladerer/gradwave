@@ -424,9 +424,10 @@ def _resolve_xc(raw: dict[str, Any]) -> tuple[str, HybridParams]:
     xc = str(raw.get("xc", "pbe")).lower()
     hyb_raw = raw.get("hybrid", {})
     if xc not in _HYBRID_PRESETS:
-        if xc not in ("lda", "pbe", "r2scan"):
+        if xc not in ("lda", "pbe", "r2scan", "spin_adapted_pbe"):
             raise InputError(
-                f"unknown xc {xc!r} (lda | pbe | r2scan | pbe0 | hse)")
+                f"unknown xc {xc!r} "
+                "(lda | pbe | r2scan | spin_adapted_pbe | pbe0 | hse)")
         if hyb_raw:
             raise InputError(
                 "a hybrid block needs a hybrid functional (xc: pbe0 or hse)")
