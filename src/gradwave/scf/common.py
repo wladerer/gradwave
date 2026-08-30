@@ -14,6 +14,7 @@ from gradwave.core.fftbox import g_to_r_box, r_to_g
 from gradwave.core.occupations import (
     SCHEMES,
     find_fermi,
+    find_fermi_near,
     fixed_occupations,
     occupations_and_entropy,
 )
@@ -274,6 +275,12 @@ def fsm_smeared_occupations(eigs_s, kweights, smearing, width, n_electrons,
     moment) is the consistency check, and (μ↑ − μ↓)/2 is the magnetic field
     h(M) conjugate to the constrained moment.
 
+    Root selection: mp1/cold counting is locally non-monotone, so a channel's
+    N(μ) = N_target can have several roots; the per-channel solve picks the
+    root nearest the SHARED Fermi level (find_fermi_near) — the branch
+    continuously connected to the unconstrained solution, which is what makes
+    the μ↑ = μ↓ consistency property exact rather than bracket-luck.
+
     Returns ``(occ_s, (mu_up, mu_dn), entropy_term)``.
     """
     scheme = SCHEMES[smearing]
@@ -283,11 +290,14 @@ def fsm_smeared_occupations(eigs_s, kweights, smearing, width, n_electrons,
         raise ValueError(
             f"tot_magnetization={tot_magnetization} exceeds n_electrons="
             f"{n_electrons} (would give a negative channel count)")
+    mu_ref = float(find_fermi(torch.cat(eigs_s, dim=0),
+                              torch.cat([kweights, kweights]), scheme, width,
+                              n_electrons, degeneracy=1.0))
     occ_s, mus = [], []
     ent = torch.zeros((), dtype=RDTYPE, device=device)
     for isp, n_ch in ((0, n_up), (1, n_dn)):
-        mu_ch = float(find_fermi(eigs_s[isp], kweights, scheme, width, n_ch,
-                                 degeneracy=1.0))
+        mu_ch = find_fermi_near(eigs_s[isp], kweights, scheme, width, n_ch,
+                                mu_ref, degeneracy=1.0)
         # NB: bare torch.tensor(mu) would be float32 and shift N by ~1e-7
         mu_t = torch.tensor(mu_ch, dtype=RDTYPE, device=device)
         o, s_ent = occupations_and_entropy(eigs_s[isp], mu_t, scheme, width,

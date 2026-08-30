@@ -154,6 +154,59 @@ def find_fermi(
     return (0.5 * (lo + hi)).to(device)
 
 
+def find_fermi_near(
+    eigs: torch.Tensor,
+    kweights: torch.Tensor,
+    smearing: Smearing,
+    width: float,
+    n_electrons: float,
+    mu_ref: float,
+    tol: float = 1e-12,
+    max_iter: int = 200,
+    degeneracy: float = 1.0,
+) -> float:
+    """The root of Σ_k w_k Σ_n g·f((ε−μ)/σ) = N_e NEAREST a reference μ.
+
+    Plain full-bracket bisection (find_fermi) is fine for monotone occupations,
+    but Methfessel–Paxton counting is locally non-monotone, so N(μ) = N_target
+    can have SEVERAL roots — on coarse k-meshes they sit up to ~σ apart with
+    genuinely different occupation distributions (measured: bcc-Fe 3³, two μ↓
+    roots 0.10 eV apart redistributing 0.13 of a state). The fixed-spin-moment
+    per-channel solve needs the root continuously connected to the shared-Fermi
+    solution — that is what makes an FSM run at the unconstrained moment
+    reproduce the unconstrained SCF. This routine grows a bracket outward from
+    ``mu_ref`` (doubling from σ/4) until it contains the target count, then
+    bisects inside it, deterministically selecting the nearest crossing.
+    """
+    eigs = eigs.detach().cpu()
+    kweights = kweights.detach().cpu()
+
+    def count(mu):
+        f = smearing.occupation((eigs - mu) / width)
+        return float((degeneracy * kweights[:, None] * f).sum())
+
+    span = float(eigs.max() - eigs.min()) + 20.0 * width + 2.0
+    delta = 0.25 * width
+    lo = hi = float(mu_ref)
+    while True:
+        lo, hi = mu_ref - delta, mu_ref + delta
+        if count(lo) <= n_electrons <= count(hi):
+            break
+        if delta > 4.0 * span:
+            raise RuntimeError(
+                "Fermi bracket around mu_ref failed — not enough bands?")
+        delta *= 2.0
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        if count(mid) < n_electrons:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < tol:
+            break
+    return 0.5 * (lo + hi)
+
+
 def occupations_and_entropy(
     eigs: torch.Tensor,
     mu: torch.Tensor,
