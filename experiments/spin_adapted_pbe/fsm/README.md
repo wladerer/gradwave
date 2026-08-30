@@ -99,16 +99,17 @@ squares on the 5 experimental moments:
 **μ₁\* = −0.0475** (#408: −0.0610 — moved +0.0135, a material shift; the
 FSM-field-root cross-check interpolants give −0.0432). MAE 0.049 → 0.027 μB.
 
-| system | PBE | refit (interp) | refit (direct SCF) | exp | err |
+| system | PBE | refit (interp) | refit (direct SCF) | exp | err (interp) |
 |---|---|---|---|---|---|
 | Fe | 2.3187 | 2.2230 | 2.2142 | 2.22 | +0.003 |
-| Ni | 0.6012 | 0.5734 | — | 0.61 | −0.037 |
-| Co | 1.7157 | 1.6405 | — | 1.60 | +0.041 |
-| FeCo | 4.5794 | 4.5451 | — | 4.60 | −0.055 |
-| Co₂MnSi | 5.0000 | 5.0000 | — | 5.00 | −0.000 |
+| Ni | 0.6012 | 0.5734 | 0.5716 | 0.61 | −0.037 |
+| Co | 1.7157 | 1.6405 | 1.6537 | 1.60 | +0.041 |
+| FeCo | 4.5794 | 4.5451 | 4.5435 | 4.60 | −0.055 |
+| Co₂MnSi | 5.0000 | 5.0000 | 5.0000 | 5.00 | −0.000 |
 
-(direct-SCF column filled from the residual.py confirmation runs at
-μ₁=−0.0475; see results.json / raw/residual.json.)
+Direct unconstrained SCFs at μ₁=−0.0475 (residual.py) confirm the quadratic
+interpolants to ≤0.013 μB (direct-SCF MAE 0.031 vs interpolated 0.027 — the
+difference is interpolation error of the response model, not SCF physics).
 
 Leave-one-out (5 systems, 1 parameter — now meaningful):
 
@@ -136,9 +137,45 @@ the band at FeCo exp ≈ 4.52. We ship the point estimate at the adopted 4.60
 
 ## 2nd-parameter verdict (Phase 3)
 
-See `raw/residual.json` (filled by residual.py at μ₁=−0.0475): per-system
-spatial means of the reduced gradient s, |ζ|, and the iso-orbital indicator α
-over the magnetization-carrying (|ρ↑−ρ↓|-weighted) and correction-carrying
-(|Δe_xc|-weighted) regions.
+For each system at its equilibrium state under the fitted functional
+(`raw/residual.json`): spatial means of the reduced gradient s, |ζ|, and the
+iso-orbital indicator α = (τ−τ_W)/τ_unif (τ from the converged orbitals via
+`core.metagga.tau_b`), weighted by the spin density |ρ↑−ρ↓| ("mag") and by
+the exchange-correction magnitude |e_xc^fit − e_xc^PBE| ("Δexc"):
 
-VERDICT-PLACEHOLDER
+| system | refit err (μB) | ⟨s⟩_mag | ⟨\|ζ\|⟩_mag | ⟨α⟩_mag | ⟨s⟩_Δexc | ⟨\|ζ\|⟩_Δexc | ⟨α⟩_Δexc |
+|---|---|---|---|---|---|---|---|
+| Fe | +0.003 | 0.533 | 0.176 | 0.911 | 0.763 | 0.210 | 0.947 |
+| Ni | −0.037 | 0.539 | 0.042 | 0.832 | 0.712 | 0.051 | 0.839 |
+| Co | +0.041 | 0.530 | 0.127 | 0.900 | 0.763 | 0.151 | 0.949 |
+| FeCo | −0.055 | 0.537 | 0.187 | 0.913 | 0.770 | 0.229 | 0.960 |
+| Co₂MnSi | −0.000 | 0.563 | 0.166 | 0.872 | 0.728 | 0.230 | 0.903 |
+
+**Verdict: a second parameter is NOT justified by this data.**
+
+1. **No ingredient separates the residual signs.** The decisive pair is
+   Fe (+0.003) vs FeCo (−0.055): indistinguishable in every measured local
+   ingredient (Δ⟨s⟩ = 0.004, Δ⟨ζ⟩ = 0.011, Δ⟨α⟩ = 0.002, and equally so under
+   the Δexc weighting). Any semilocal cross-term f(s, ζ, α) acts nearly
+   identically on both, so it cannot pull FeCo up without pushing Fe off its
+   near-exact value. ⟨s⟩ is flat across all five systems (0.53–0.56 mag-
+   weighted) — an s-ζ cross-term has nothing to grab. The ζ² correction acts
+   entirely at |ζ| < 0.5 in all five systems (dexc_frac_zeta>0.5 = 0.000), so
+   higher powers of ζ modulate the same regions with the same ordering.
+2. **The Ni residual is a response property, not a local one.** Ni does have
+   the most distinct fields (lowest ζ 0.042, lowest α 0.832), and the ζ²
+   weighting already suppresses its local correction ~15× below Fe's — yet its
+   shallow well (stiffness 0.55 eV/μB², argmin flat to ±0.1 μB within 4 meV)
+   makes the moment respond to even the suppressed correction. Sparing Ni is a
+   susceptibility problem a static semilocal ingredient cannot address.
+3. **The remaining MAE is at the target noise floor.** 0.027 μB (interp) /
+   0.031 (direct) against: the ±0.03 μB k-jitter baseline carried since #408,
+   the FeCo experimental spread (4.5–4.7 μB/cell, and saturation measurements
+   include ~0.1–0.2 μB/cell of orbital moment a spin-only DFT moment cannot
+   reproduce), and the ±0.01 interpolation error of the response model. A
+   second parameter fit to these five targets would fit noise.
+
+What WOULD move the needle: more targets of genuinely new physics classes
+(antiferromagnets — FSM E(M) generalizes; itinerant weak magnets like ZrZn₂
+where the μ₁ response is huge), or a per-channel response-aware form —
+both beyond a static ζ-local second parameter.
