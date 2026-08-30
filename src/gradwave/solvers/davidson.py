@@ -314,6 +314,17 @@ _RR3M_TRIAL_MARGIN = 0.95
 # dict, GIL-guarded; a rare double-trial on first concurrent use is harmless.
 _RR3M_VERDICT: dict[tuple[str, int, int, int, torch.dtype], bool] = {}
 
+# Incremental RR build (Piece 2): on a grow round the old v/hv columns are
+# bit-identical, so the old block of the raw subspace matrix is carried forward
+# and only the new column blocks are recomputed. Round-off exact vs a full
+# rebuild (~1e-14 — the reused block is a matmul over the same rows, but a GEMM's
+# tiling depends on the matrix dimensions, so a sub-block and the corner of the
+# larger product differ at fp64 round-off; converged eigenvalues agree to
+# round-off, iteration count can drift by a few near a flat convergence tail).
+# Module flag rather than an env knob — always on in production; tests toggle it
+# to A/B against the full-rebuild path.
+_RR_INCREMENTAL = True
+
 
 def _gemm3(ar: torch.Tensor, ai: torch.Tensor, br: torch.Tensor,
            bi: torch.Tensor) -> torch.Tensor:
@@ -748,6 +759,10 @@ def davidson_batched(
     eig = torch.zeros(nk, nb, dtype=rdtype, device=x0.device)
     x = v[:, :nb]
     rn = torch.full((nk, nb), float("inf"), dtype=rdtype, device=x0.device)
+    # Carried raw (un-symmetrized) subspace matrix for the incremental RR build
+    # (Piece 2). None forces a full rebuild; the grow branch sets it to the
+    # extended matrix, restart/handoff reset it to None.
+    s_carry: torch.Tensor | None = None
 
     for it in range(1, max_iter + 1):
         # Convention here is the opposite of single-k davidson()'s: s conjugates
@@ -777,13 +792,21 @@ def davidson_batched(
             assert vr is not None and vi is not None
             assert hvr is not None and hvi is not None
             use3m = _rr3m_verdict(v, hv, vr, vi, hvr, hvi)
-        if use3m:
+        # Incremental RR build (Piece 2): on a grow round the old columns of v/hv
+        # are bit-identical, so the old (m_old x m_old) block of the RAW subspace
+        # matrix is unchanged; the grow branch below carries it forward in
+        # `s_carry` and recomputes only the new column blocks. A full rebuild
+        # runs on the first round and after every restart / fp32 handoff (where
+        # the basis is replaced wholesale), gated by 3M exactly as before.
+        if s_carry is not None and _RR_INCREMENTAL:
+            s_raw = s_carry
+        elif use3m:
             assert vr is not None and vi is not None
             assert hvr is not None and hvi is not None
-            s = _gemm3_conjl(vr, vi, hvr.transpose(-1, -2), hvi.transpose(-1, -2))
+            s_raw = _gemm3_conjl(vr, vi, hvr.transpose(-1, -2), hvi.transpose(-1, -2))
         else:
-            s = torch.matmul(v.conj(), hv.mT)
-        s = (0.5 * (s + s.conj().transpose(-1, -2))).to(torch.complex128)
+            s_raw = torch.matmul(v.conj(), hv.mT)
+        s = (0.5 * (s_raw + s_raw.conj().transpose(-1, -2))).to(torch.complex128)
         w, u = _eigh_subspace(s)
         u = u[:, :, :nb].to(v.dtype)  # rotation back to the block dtype
         eig = w[:, :nb].real.to(rdtype)
@@ -830,6 +853,12 @@ def davidson_batched(
                     # convergence claim.
                     v, hv = x, hx
                     use_fp32_exp = False
+                    s_carry = None  # basis replaced — force a full RR rebuild
+                    # v/hv just shrank to the nb-column certified block; the grow
+                    # branch below reuses `s_raw` as its top-left, so it must now
+                    # match the NEW basis (the BUILD above built it for the old,
+                    # wider basis). Recompute for the nb block (small, native).
+                    s_raw = torch.matmul(v.conj(), hv.mT)
                     if rr3m_on:  # basis replaced wholesale — rebuild planes
                         vr, vi = _planes(v)
                         hvr, hvi = _planes(hv)
@@ -906,19 +935,46 @@ def davidson_batched(
             hd = _apply_exp(d)
             v = torch.cat([x_orth, d], dim=1)
             hv = torch.cat([hx_orth, hd], dim=1)
+            s_carry = None  # basis rebuilt at restart — force a full RR rebuild
             if rr3m_on:  # basis rebuilt at restart — recompute planes fully
                 vr, vi = _planes(v)
                 hvr, hvi = _planes(hv)
         else:
             d = _orthonormalize_b(d, mask, against=v, jitter=jitter)
             hd = _apply_exp(d)
-            v = torch.cat([v, d], dim=1)
-            hv = torch.cat([hv, hd], dim=1)
-            if rr3m_on:  # incremental: deinterleave only the n_add new columns
-                assert vr is not None and vi is not None
-                assert hvr is not None and hvi is not None
+            # Incremental RR build (Piece 2): recompute only the new column blocks
+            # of the raw subspace matrix (old block is `s_raw`, carried forward).
+            # top-right = conj(v_old)@hd.mT, bottom-left = conj(d)@hv_old.mT,
+            # corner = conj(d)@hd.mT (v/hv still hold the OLD columns here).
+            dr = di = hdr = hdi = None
+            if rr3m_on:
                 dr, di = _planes(d)
                 hdr, hdi = _planes(hd)
+            if use3m:
+                assert vr is not None and vi is not None
+                assert hvr is not None and hvi is not None
+                assert dr is not None and di is not None
+                assert hdr is not None and hdi is not None
+                hdrt, hdit = hdr.transpose(-1, -2), hdi.transpose(-1, -2)
+                s_tr = _gemm3_conjl(vr, vi, hdrt, hdit)
+                s_bl = _gemm3_conjl(dr, di, hvr.transpose(-1, -2),
+                                    hvi.transpose(-1, -2))
+                s_co = _gemm3_conjl(dr, di, hdrt, hdit)
+            else:
+                s_tr = torch.matmul(v.conj(), hd.mT)
+                s_bl = torch.matmul(d.conj(), hv.mT)
+                s_co = torch.matmul(d.conj(), hd.mT)
+            s_carry = torch.cat([torch.cat([s_raw, s_tr], dim=2),
+                                 torch.cat([s_bl, s_co], dim=2)], dim=1)
+            if not _RR_INCREMENTAL:
+                s_carry = None  # A/B seam: force a full rebuild next round
+            v = torch.cat([v, d], dim=1)
+            hv = torch.cat([hv, hd], dim=1)
+            if rr3m_on:  # extend planes with the n_add new columns
+                assert vr is not None and vi is not None
+                assert hvr is not None and hvi is not None
+                assert dr is not None and di is not None
+                assert hdr is not None and hdi is not None
                 vr, vi = torch.cat([vr, dr], dim=1), torch.cat([vi, di], dim=1)
                 hvr = torch.cat([hvr, hdr], dim=1)
                 hvi = torch.cat([hvi, hdi], dim=1)
