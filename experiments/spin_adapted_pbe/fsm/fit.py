@@ -87,6 +87,9 @@ def main() -> None:
     ap.add_argument("--mu1-grid", type=float, nargs="*", default=MU1_GRID)
     args = ap.parse_args()
     raw = Path(args.raw)
+    if 0.0 not in args.mu1_grid:
+        raise SystemExit("--mu1-grid must include 0.0 — the PBE (mu1=0) curve "
+                         "anchors the sanity gate and the PBE columns")
 
     out: dict = {"exp": EXP, "mu1_grid": args.mu1_grid,
                  "ref_mu1_408": REF_MU1_408, "curves": {}, "sanity": {}}

@@ -121,10 +121,16 @@ def run_scf(
         # defaults (β=1.0, ramp off) leave today's numbers bit-for-bit
         common["hub_occ_mix"] = inp.hubbard.occ_mix
         common["hub_u_ramp_iters"] = inp.hubbard.u_ramp_iters
-    if inp.tot_magnetization is not None and not uspp:
+    if inp.tot_magnetization is not None:
         # fixed spin moment: a collinear nspin=2 pin — integer occupations
         # without smearing, two-Fermi-level smeared FSM with smearing (see
-        # scf/common.py:fsm_smeared_occupations). scf_uspp has no such kwarg.
+        # scf/common.py:fsm_smeared_occupations). scf_uspp has no such kwarg;
+        # error rather than silently running an unconstrained SCF that would
+        # masquerade as a fixed-moment result.
+        if uspp:
+            raise NotImplementedError(
+                "tot_magnetization (fixed spin moment) is norm-conserving only "
+                "— the USPP/PAW SCF driver has no fixed-moment mode yet")
         common["tot_magnetization"] = inp.tot_magnetization
     # uspp (from _is_uspp(upfs) above) already tells us which concrete type
     # `system` is — the two branches below just name that for the checker.

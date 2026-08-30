@@ -419,9 +419,15 @@ def apply_chi0(res: SCFResult, w_r: torch.Tensor, tol: float = 1e-8,
             out = _chi0_channel_metal(res, cast("list[HamiltonianK]", hs), 0, w_r, 2.0,
                                       mu, scheme, res.width, tol, max_iter)
         else:
+            # smeared FSM (fermi_spin set): each channel's occupations came from
+            # ITS OWN Fermi level and each channel's electron count is pinned, so
+            # the occupation derivatives and the number-conserving δμ term must
+            # use μ_σ, not the reported mean.
+            mu_s = getattr(res, "fermi_spin", None) or (mu, mu)
             hs_spin = cast("list[list[HamiltonianK]]", hs)
             out = torch.stack([
-                _chi0_channel_metal(res, hs_spin[isp], isp, w_r[isp], 1.0, mu, scheme,
+                _chi0_channel_metal(res, hs_spin[isp], isp, w_r[isp], 1.0,
+                                    float(mu_s[isp]), scheme,
                                     res.width, tol, max_iter) for isp in range(nspin)])
     if sym is not None:
         out = _sym_fold(symmetrizer, out, res.system.grid, nspin)  # fold the star

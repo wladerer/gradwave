@@ -157,7 +157,8 @@ def run_system(key: str, out_dir: Path, mu1_list: list[float],
         xc = LearnableSpinXZeta(kappa1=0.0, mu1=float(mu1))
         rec: dict = {"system": key, "mu1": mu1, "exp": spec["exp"],
                      "settings": {"ecut_Ry": 60.0, "smearing": SMEAR,
-                                  "width_eV": WIDTH, "kmesh": list(spec["kmesh"]),
+                                  "width_eV": WIDTH,
+                                  "kmesh": list(kmesh or spec["kmesh"]),
                                   "max_iter": MAX_ITER}}
         # 1. unconstrained SCF (warm-started along the mu1 chain)
         r_free = scf(system, xc, start_from=free_prev, **base)

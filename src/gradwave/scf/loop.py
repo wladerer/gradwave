@@ -1475,6 +1475,11 @@ def scf(
                 "capacitor plates carry the floating counter-charge")
         if smearing == "none":
             raise ValueError("target_mu (constant-µ) requires a smearing scheme")
+        if tot_magnetization is not None:
+            raise ValueError(
+                "target_mu (constant-µ) and tot_magnetization (fixed spin "
+                "moment) are mutually exclusive — a grand-canonical run has no "
+                "fixed per-channel electron counts to pin the moment with")
     if hubbard:
         validate_hubbard_conv(hub_occ_mix, hub_u_ramp_iters)
     if dist_ctx is not None:

@@ -175,10 +175,15 @@ def find_fermi_near(
     per-channel solve needs the root continuously connected to the shared-Fermi
     solution — that is what makes an FSM run at the unconstrained moment
     reproduce the unconstrained SCF. This routine grows a bracket outward from
-    ``mu_ref`` (doubling from an infinitesimal δ, so when mu_ref is itself a
-    root it is returned exactly rather than a neighbouring crossing) until it
-    contains the target count, then bisects inside it — deterministically
-    selecting the nearest crossing.
+    ``mu_ref`` (doubling from an infinitesimal δ) until it contains the target
+    count, then bisects inside it — deterministically selecting the nearest
+    crossing WITH INCREASING orientation (count rising through the target).
+    When mu_ref is itself such a root it is returned exactly. A root sitting on
+    a locally DECREASING mp1 wiggle (negative kernel weight dominating on a
+    coarse mesh) is not representable by this bisection and the nearest
+    increasing crossing is returned instead; on dense meshes N_σ(μ) is monotone
+    and the root is unique. Monotone schemes (gaussian, fermi-dirac) are exact
+    at any mesh.
     """
     eigs = eigs.detach().cpu()
     kweights = kweights.detach().cpu()

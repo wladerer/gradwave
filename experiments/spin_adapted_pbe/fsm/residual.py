@@ -25,12 +25,17 @@ import argparse
 import json
 import math
 import os
+import sys
 import time
 from pathlib import Path
 
 import torch
 
-from experiments.spin_adapted_pbe.fsm.scan import SPECS, _log, build
+# runnable as a plain script from the repo root (sys.path[0] is this file's
+# directory, and `experiments` is not an installed package)
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from experiments.spin_adapted_pbe.fsm.scan import SPECS, _log, build  # noqa: E402
 from gradwave.constants import BOHR_ANG
 from gradwave.core.metagga import tau_b
 from gradwave.core.xc.learnable import LearnableSpinXZeta
