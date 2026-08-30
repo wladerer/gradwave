@@ -81,12 +81,10 @@ def curve_minimum(rec: dict) -> dict:
         slope_c = (dmu[i + 1] - dmu[i]) / (ms[i + 1] - ms[i])
         typical = float(np.median(np.abs(np.diff(dmu) / np.diff(ms))))
         kink = bool(slope_c > 5.0 * typical)
-        if kink:
-            # half-metal: ∂F/∂M jumps through zero — the sampled lowest-F
-            # point IS the minimum (the Slater-Pauling plateau edge)
-            m_field = float(ms[j])
-        else:
-            m_field = float(brentq(field, ms[i], ms[i + 1]))
+        # half-metal kink: ∂F/∂M jumps through zero — the sampled lowest-F
+        # point IS the minimum (the Slater-Pauling plateau edge)
+        m_field = (float(ms[j]) if kink
+                   else float(brentq(field, ms[i], ms[i + 1])))
         stiff = 0.5 * (float(field(m_field, 1)) if not kink else slope_c)
     else:  # minimum at the grid edge — flagged below
         m_field, stiff = float(ms[j]), None
