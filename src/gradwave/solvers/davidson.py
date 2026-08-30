@@ -325,6 +325,16 @@ _RR3M_VERDICT: dict[tuple[str, int, int, int, torch.dtype], bool] = {}
 # to A/B against the full-rebuild path.
 _RR_INCREMENTAL = True
 
+# Hermitian half-build rider (Piece 4): under the incremental build the two new
+# cross blocks satisfy C' = C.conj().mT exactly by Hermiticity, so compute ONE
+# cross GEMM and mirror it instead of two -> halves the incremental cross-block
+# FLOPs. PROBE-GATED and measured GO on the asus RTX 3050: one GEMM + conj-
+# transpose write is ~1.95x the two-GEMM path (>= the 1.6x GO threshold), because
+# each cross GEMM contracts over npw on the crippled fp64 ALU while the mirror is
+# a cheap transpose. Definitionally Hermitian (the BUILD symmetrization is kept as
+# a cheap safety net for the corner/retained blocks). Module flag for the A/B.
+_RR_HALFBUILD = True
+
 
 def _gemm3(ar: torch.Tensor, ai: torch.Tensor, br: torch.Tensor,
            bi: torch.Tensor) -> torch.Tensor:
@@ -951,8 +961,10 @@ def davidson_batched(
                     rmat_c.mH, z, upper=False, left=True).to(x.dtype)
                 # cross blocks with the new directions d (npw GEMMs; d is new)
                 r_tr = torch.matmul(x_orth.conj(), hd.mT)
-                r_bl = torch.matmul(d.conj(), hx_orth.mT)
                 r_co = torch.matmul(d.conj(), hd.mT)
+                # Piece 4: bottom-left = top-right^H by Hermiticity (one GEMM saved)
+                r_bl = (r_tr.conj().transpose(-1, -2).contiguous() if _RR_HALFBUILD
+                        else torch.matmul(d.conj(), hx_orth.mT))
                 s_carry = torch.cat([torch.cat([s_ret, r_tr], dim=2),
                                      torch.cat([r_bl, r_co], dim=2)], dim=1)
             else:
@@ -980,13 +992,16 @@ def davidson_batched(
                 assert hdr is not None and hdi is not None
                 hdrt, hdit = hdr.transpose(-1, -2), hdi.transpose(-1, -2)
                 s_tr = _gemm3_conjl(vr, vi, hdrt, hdit)
-                s_bl = _gemm3_conjl(dr, di, hvr.transpose(-1, -2),
-                                    hvi.transpose(-1, -2))
                 s_co = _gemm3_conjl(dr, di, hdrt, hdit)
+                # Piece 4: bottom-left = top-right^H by Hermiticity (one GEMM saved)
+                s_bl = (s_tr.conj().transpose(-1, -2).contiguous() if _RR_HALFBUILD
+                        else _gemm3_conjl(dr, di, hvr.transpose(-1, -2),
+                                          hvi.transpose(-1, -2)))
             else:
                 s_tr = torch.matmul(v.conj(), hd.mT)
-                s_bl = torch.matmul(d.conj(), hv.mT)
                 s_co = torch.matmul(d.conj(), hd.mT)
+                s_bl = (s_tr.conj().transpose(-1, -2).contiguous() if _RR_HALFBUILD
+                        else torch.matmul(d.conj(), hv.mT))
             s_carry = torch.cat([torch.cat([s_raw, s_tr], dim=2),
                                  torch.cat([s_bl, s_co], dim=2)], dim=1)
             if not _RR_INCREMENTAL:
