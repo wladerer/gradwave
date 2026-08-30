@@ -175,8 +175,10 @@ def find_fermi_near(
     per-channel solve needs the root continuously connected to the shared-Fermi
     solution — that is what makes an FSM run at the unconstrained moment
     reproduce the unconstrained SCF. This routine grows a bracket outward from
-    ``mu_ref`` (doubling from σ/4) until it contains the target count, then
-    bisects inside it, deterministically selecting the nearest crossing.
+    ``mu_ref`` (doubling from an infinitesimal δ, so when mu_ref is itself a
+    root it is returned exactly rather than a neighbouring crossing) until it
+    contains the target count, then bisects inside it — deterministically
+    selecting the nearest crossing.
     """
     eigs = eigs.detach().cpu()
     kweights = kweights.detach().cpu()
@@ -186,7 +188,7 @@ def find_fermi_near(
         return float((degeneracy * kweights[:, None] * f).sum())
 
     span = float(eigs.max() - eigs.min()) + 20.0 * width + 2.0
-    delta = 0.25 * width
+    delta = max(tol, 1e-10)
     lo = hi = float(mu_ref)
     while True:
         lo, hi = mu_ref - delta, mu_ref + delta
