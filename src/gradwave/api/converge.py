@@ -45,7 +45,13 @@ _KMESH_EXTRAP_FACTORS = tuple(0.5 * n for n in range(1, 17))
 
 
 def _scaled_mesh(base: tuple[int, ...], f: float) -> tuple[int, ...]:
-    return tuple(max(1, round(f * m)) for m in base)
+    # Preserve a pinned axis: an axis the caller already set to 1 is a slab's
+    # vacuum direction (sampled only at Γ — bands do not disperse across a
+    # vacuum-separated image). Scaling it up with the periodic axes samples that
+    # dead direction and multiplies the k-count for no accuracy (a (6,6,1) slab
+    # refined uniformly to (9,9,2) is ~2x waste; a 1D wire (1,1,n) up to ~6x). A
+    # bulk mesh (no unit axis) is scaled on every axis, unchanged.
+    return tuple(1 if m == 1 else max(1, round(f * m)) for m in base)
 
 
 def _apply_rule(

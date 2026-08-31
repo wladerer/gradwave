@@ -605,13 +605,14 @@ def _load_input(path: Path) -> Input:
             raw["pseudopotentials"], base, atoms.get_chemical_symbols())
 
     kp = raw.get("kpoints", {})
-    _check_keys("kpoints", kp, {"mesh", "shift"})
+    _check_keys("kpoints", kp, {"mesh", "shift", "kspacing"})
     sm = raw.get("smearing", {})
     _check_keys("smearing", sm, {"type", "width"})
     scf_raw = dict(raw.get("scf", {}))
     _check_keys("scf", scf_raw,
                 {"max_iter", "etol", "rhotol", "mixing", "diago", "trace",
-                 "convergence", "entol", "eigensolver", "magnetic"})
+                 "convergence", "entol", "eigensolver", "magnetic",
+                 "boundary", "esm_bias", "target_mu"})
     mix_raw = dict(scf_raw.pop("mixing", {}))
     mag_raw = dict(scf_raw.pop("magnetic", {}))
     _check_keys("scf.magnetic", mag_raw,
@@ -753,7 +754,9 @@ def _load_input(path: Path) -> Input:
         hybrid=hybrid,
         hubbard=hubbard,
         kpoints=KPointsParams(
-            mesh=mesh, shift=tuple(kp.get("shift", (0, 0, 0)))
+            mesh=mesh, shift=tuple(kp.get("shift", (0, 0, 0))),
+            kspacing=(None if kp.get("kspacing") is None
+                      else float(kp["kspacing"])),
         ),
         smearing=SmearingParams(type=smtype, width=float(sm.get("width", 0.1))),
         nbands=None if nbands == "auto" else int(nbands),
@@ -773,6 +776,10 @@ def _load_input(path: Path) -> Input:
             convergence=str(scf_raw.get("convergence", "density")),
             entol=float(scf_raw.get("entol", 1e-6)),
             eigensolver=str(scf_raw.get("eigensolver", "davidson")),
+            boundary=str(scf_raw.get("boundary", "periodic")),
+            esm_bias=float(scf_raw.get("esm_bias", 0.0)),
+            target_mu=(None if scf_raw.get("target_mu") is None
+                       else float(scf_raw["target_mu"])),
             magnetic=MagneticParams(**mag_raw) if mag_raw else MagneticParams(),
         ),
         slab=_build(SlabParams, raw.get("slab", {}), "slab"),
