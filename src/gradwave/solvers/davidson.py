@@ -27,6 +27,22 @@ H-applies run in complex64 while every convergence-deciding quantity stays fp64
 (see ``_fp32_expansion_active``). Unlike the QR knob this one is read per solve,
 so a benchmark or test can A/B it inside one process. Default off: the win is
 GPU-targeted (crippled-fp64 cards) and not yet measured.
+
+Subspace-footprint knobs (large-nk / slab GPU-memory relief; see the note above
+``_resolve_max_dim_factor``). All read per solve, all default to the historical
+behaviour:
+
+``GRADWAVE_MAX_DIM_FACTOR`` (int ≥ 2) forces the grown-subspace multiple that
+sets the V/HV byte peak; halving it from 4 to 2 halves those bytes and is EXACT
+in the converged eigenpairs. ``GRADWAVE_SUBSPACE_BUDGET_GB`` (float) is an opt-in
+auto-gate that drops the factor toward 2 once the projected V+HV bytes exceed the
+budget. ``GRADWAVE_SUBSPACE_STORAGE`` in {"complex128", "complex64"} stores V/HV
+in complex64 (half the bytes) with the apply and RR eigensolve kept in fp64 — a
+precision lever whose residuals plateau near the fp32 floor (~1e-6 eV), distinct
+from the fp32-expansion APPLY downcast above.
+
+The companion ``GRADWAVE_GPU_DENSE_BUDGET`` (bytes, in core/batch.py) shrinks the
+dense-grid FFT-box peak the apply stacks on top of the subspace; bit-exact.
 """
 
 from __future__ import annotations
@@ -308,6 +324,96 @@ def _certify_fp64(
     return eig, x, hx, r, rn
 
 
+# ---------------------------------------------------------------------------
+# Subspace-footprint knobs (large-nk / slab GPU-memory relief).
+#
+# davidson_batched holds V and HV, each (nk, max_dim_factor·nb, npw_max)
+# complex128 — for a (6,6,1)=36-k slab with max_dim_factor·nb ≈ 240 and
+# npw ≈ 13k that pair is ~5.7 GB, the diagnosed RTX-3050 OOM. Two opt-in knobs
+# cut that pair's bytes; both are read per solve (in-process A/B) and default to
+# the historical behaviour. A third knob (`_gpu_dense_budget_bytes`, in
+# core/batch.py) shrinks the FFT-box peak the apply stacks on top.
+#
+#   GRADWAVE_MAX_DIM_FACTOR      halve the grown subspace (V/HV bytes ×0.5),
+#                                EXACT in the converged eigenpairs.
+#   GRADWAVE_SUBSPACE_BUDGET_GB  auto-gate that drops the factor toward 2 once
+#                                the projected V+HV bytes exceed the budget.
+#   GRADWAVE_SUBSPACE_STORAGE    store V/HV in complex64 (bytes ×0.5) with the
+#                                apply and RR eigensolve kept in fp64 (precision
+#                                lever — see `_subspace_storage_c64`).
+#
+# Composed, max_dim_factor=2 × complex64 storage is a 4× smaller subspace
+# (5.7 GB → ~1.4 GB).
+# ---------------------------------------------------------------------------
+
+
+def _resolve_max_dim_factor(
+    nk: int, nb: int, npw_max: int, elem_bytes: int, requested: int
+) -> int:
+    """Effective max_dim_factor after the env override / memory auto-gate.
+
+    ``GRADWAVE_MAX_DIM_FACTOR`` (int ≥ 2), when set, forces the factor — the
+    subspace grows to that multiple of nb before restart. Halving it from the
+    default 4 to 2 halves the V/HV byte footprint and converges to the SAME
+    eigenpairs by a different path (a few more restarts), so it is EXACT in the
+    result. Otherwise, if ``GRADWAVE_SUBSPACE_BUDGET_GB`` is set, an opt-in
+    auto-gate estimates the peak V+HV bytes (2 arrays · nk · factor·nb ·
+    npw_max · elem_bytes) at the requested factor and halves the factor toward a
+    floor of 2 while it exceeds the budget. Never below 2 (nb + n_add must fit).
+    Default: `requested` unchanged."""
+    forced = os.environ.get("GRADWAVE_MAX_DIM_FACTOR")
+    if forced is not None:
+        val = int(forced)
+        if val < 2:
+            raise ValueError(f"GRADWAVE_MAX_DIM_FACTOR must be >= 2, got {val}")
+        return val
+    budget_gb = os.environ.get("GRADWAVE_SUBSPACE_BUDGET_GB")
+    if budget_gb is None:
+        return requested
+    budget = float(budget_gb) * (1 << 30)
+
+    def peak(factor: int) -> float:
+        return 2.0 * nk * factor * nb * npw_max * elem_bytes
+
+    factor = requested
+    while factor > 2 and peak(factor) > budget:
+        factor //= 2
+    return max(2, factor)
+
+
+def _subspace_storage_c64(x0: torch.Tensor) -> bool:
+    """Whether V/HV are STORED in complex64 (half the bytes) while the H-apply
+    and the Rayleigh-Ritz eigensolve stay in fp64.
+
+    ``GRADWAVE_SUBSPACE_STORAGE`` in {"complex128" (default), "complex64"}. Only
+    a complex128 solve qualifies — a complex64 x0 is already a low-precision
+    draft. Read per solve.
+
+    DISTINCT from ``GRADWAVE_FP32_EXPANSION``: that downcasts the APPLY COMPUTE
+    and certifies the result back to the fp64 residual tol; this downcasts the
+    STORED basis and does NOT certify. Because the stored H·V carries the
+    complex64 truncation, residual norms plateau near the fp32 floor
+    (~1e-6 eV eigenvalues), not the fp64 tol — the solve stops at that plateau
+    (`_C64_STALL*`). A memory lever, opt-in, default off; mutually exclusive with
+    the fp32-expansion mode (they attack the same buffers on different axes)."""
+    mode = os.environ.get("GRADWAVE_SUBSPACE_STORAGE", "complex128").strip().lower()
+    if mode not in ("complex64", "complex128"):
+        raise ValueError(
+            "GRADWAVE_SUBSPACE_STORAGE must be complex64|complex128, "
+            f"got {mode!r}")
+    return mode == "complex64" and x0.dtype == torch.complex128
+
+
+# complex64-storage plateau detection. The stored H·V is fp32-truncated, so
+# residual norms cannot reach a tight fp64 tol; they flatten at the fp32 floor.
+# Once rn.max() is already small (< _C64_STALL_GATE) and a round improves it by
+# < 30% (rn.max() > _C64_STALL·previous), the block has plateaued — return it
+# rather than spin to max_iter. The gate keeps the check off during the initial
+# fast descent so it never stops a still-converging solve early.
+_C64_STALL = 0.7
+_C64_STALL_GATE = 1e-3
+
+
 @dataclass
 class DavidsonResult:
     eigenvalues: torch.Tensor  # (nb,) ascending [eV]
@@ -569,22 +675,36 @@ def davidson_batched(
     CPU-offload pattern issue #133 used for the subspace eigh; it needs no
     flag and is not conditioned on sync_free."""
     nk, nb, m = x0.shape
+    # Subspace-footprint knobs (see the module note above this function). Storage
+    # dtype and the resolved max_dim_factor set the V/HV byte peak. `m` is the
+    # padded plane-wave count (npw_max), the long axis of V/HV.
+    store_c64 = _subspace_storage_c64(x0)
+    elem_bytes = 8 if store_c64 else x0.element_size()
+    max_dim_factor = _resolve_max_dim_factor(nk, nb, m, elem_bytes, max_dim_factor)
     max_dim = min(max_dim_factor * nb, int(mask.sum(dim=1).min()))
     rdtype = x0.real.dtype  # float32 in the mixed-precision draft phase, else float64
+    sdtype = torch.complex64 if store_c64 else x0.dtype  # V/HV storage dtype
+    cdtype = x0.dtype  # fp64 compute/return dtype (complex128 for the fp64 solve)
+    prev_c64 = float("inf")  # previous rn.max() for the complex64-storage plateau test
 
     # fp64-certified fp32-expansion mode (see the module-level note). Only the
     # synchronous gate supports it: sync_free's delayed convergence readback
     # cannot interleave the certification recompute, and sync_free is a measured
     # loss anyway (docstring below), so the combination is simply not taken.
     # Requires a dtype-polymorphic h_apply (BatchedHamiltonian.apply is; a test
-    # operator must cast its matrix to c.dtype).
-    use_fp32_exp = (not sync_free) and _fp32_expansion_active(x0)
+    # operator must cast its matrix to c.dtype). Never stacks on complex64
+    # storage — that mode already draws a precision boundary through V/HV.
+    use_fp32_exp = (not sync_free) and (not store_c64) and _fp32_expansion_active(x0)
     n_apply_low = 0
     n_apply_full = 0
 
     def _apply_full(z: torch.Tensor) -> torch.Tensor:
         nonlocal n_apply_full
         n_apply_full += z.shape[0] * z.shape[1]
+        if store_c64:
+            # Storage is complex64 but the apply COMPUTE stays fp64: upcast the
+            # (small, n_add-wide) block, apply, store the image back in c64.
+            return h_apply(z.to(cdtype)).to(sdtype)
         return h_apply(z)
 
     def _apply_exp(z: torch.Tensor) -> torch.Tensor:
@@ -594,6 +714,21 @@ def davidson_batched(
         nonlocal n_apply_low
         n_apply_low += z.shape[0] * z.shape[1]
         return h_apply(z.to(torch.complex64)).to(z.dtype)
+
+    def _result(
+        eig_: torch.Tensor, x_: torch.Tensor, it_: int, rn_: torch.Tensor
+    ) -> BatchedDavidsonResult:
+        """Package a result. Complex64 storage leaves the Ritz rows unit-norm only
+        to ~1e-6, so restore complex128 AND renormalize each row in fp64 — the
+        density's electron count (ρ at G=0) must be conserved to the mixer's
+        tolerance, the same fix the SCF loop applies to its low-precision path
+        (off-diagonal overlaps, which don't touch G=0, stay at the c64 floor)."""
+        if store_c64:
+            x_ = x_.to(cdtype)
+            x_ = x_ / torch.linalg.norm(
+                x_, dim=-1, keepdim=True).real.clamp_min(1e-30)
+        return BatchedDavidsonResult(
+            eig_, x_, it_, rn_, n_apply_low, n_apply_full)
 
     # Certification trigger state: the estimated fp32 residual-norm floor
     # (kinetic-diagonal max as the ‖H‖ proxy) and the previous round's MEASURED
@@ -621,7 +756,11 @@ def davidson_batched(
     n_add_cur = nb
     pending = False
 
+    # Orthonormalize in fp64 (x0 is complex128) then store in the subspace dtype:
+    # complex64 storage keeps the basis half-size while the apply above stays fp64.
     v = _orthonormalize_b(x0, mask, jitter=jitter)
+    if store_c64:
+        v = v.to(sdtype)
     hv = _apply_exp(v)
     eig = torch.zeros(nk, nb, dtype=rdtype, device=x0.device)
     x = v[:, :nb]
@@ -685,13 +824,22 @@ def davidson_batched(
                     # convergence claim.
                     v, hv = x, hx
                     use_fp32_exp = False
+        if store_c64:
+            # complex64 storage: the stored H·V is fp32-truncated, so rn cannot
+            # reach a tight fp64 tol — it flattens at the fp32 floor. Once rn is
+            # already small and a round improves it < 30%, the block has
+            # plateaued; return it rather than spin to max_iter (eigenpairs are
+            # good to ~1e-6 eV). Not a convergence CLAIM against tol — a floor.
+            rnmax_c64 = float(rn.max())
+            if it > 1 and rnmax_c64 < _C64_STALL_GATE and rnmax_c64 > _C64_STALL * prev_c64:
+                return _result(eig, x, it, rn)
+            prev_c64 = rnmax_c64
         if history_out is not None:  # opt-in per-band convergence telemetry (off by default)
             history_out.append((it, rn.detach().to("cpu").clone(),
                                 eig.detach().to("cpu").clone()))
         if not sync_free:
             if float(rn.max()) < tol:
-                return BatchedDavidsonResult(eig, x, it, rn,
-                                             n_apply_low, n_apply_full)
+                return _result(eig, x, it, rn)
             # expand with the worst unconverged residuals only — uniform
             # count across k (max over k of the per-k unconverged tally)
             # keeps batching
@@ -711,8 +859,7 @@ def davidson_batched(
             if pending and ready:
                 assert flag_host is not None
                 if float(flag_host[0]) < tol:
-                    return BatchedDavidsonResult(eig, x, it, rn,
-                                                 n_apply_low, n_apply_full)
+                    return _result(eig, x, it, rn)
                 n_add_cur = max(1, min(nb, int(flag_host[1])))
                 pending = False
             if not pending:
@@ -741,6 +888,11 @@ def davidson_batched(
         # 1.4 s of torch.randn in a 21 s profile).
         dn = torch.linalg.norm(d, dim=-1, keepdim=True).real
         d = torch.where(dn > 1e-300, d / dn.clamp_min(1e-300), d)
+        if store_c64:
+            # r (and hence d) promoted to complex128 via the fp64 eig·x term;
+            # bring the new directions back to the storage dtype before they are
+            # orthonormalized against / concatenated onto the c64 basis.
+            d = d.to(sdtype)
 
         if v.shape[1] + n_add > max_dim:
             # Restart reusing hx (no H re-application) — but the Ritz block
@@ -771,7 +923,7 @@ def davidson_batched(
             "batched Davidson hit max_iter=%d: %d band·k unconverged "
             "(max res=%.3e > tol=%.1e)", max_iter, int((rn > tol).sum()),
             float(rn.max()), tol)
-    return BatchedDavidsonResult(eig, x, max_iter, rn, n_apply_low, n_apply_full)
+    return _result(eig, x, max_iter, rn)
 
 
 @torch.no_grad()
