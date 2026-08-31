@@ -470,6 +470,11 @@ class GradWave(Calculator):
         # standalone/relax behaviour is unchanged. Consumed (reset to None) by
         # the first _warm_start call so only the first SCF uses the injected seed.
         self._warm_start_override: dict[str, Any] | None = None
+        # One-shot clean-slab warm-start request for adsorbate site/coverage
+        # screens: (loaded clean-slab checkpoint payload, adsorbate atom indices).
+        # Set via warm_start_from_clean_slab(); consumed by the first _warm_start,
+        # which builds the ρ_clean + SAD(adsorbate) seed against the built system.
+        self._clean_slab_seed_request: tuple[dict[str, Any], list[int]] | None = None
         self._scf_state: _StateKey | None = None  # the geometry/params the
         # stored SCF state was built at
         self._cached_results: dict[str, Any] = {}  # full results dict paired
@@ -648,6 +653,28 @@ class GradWave(Calculator):
         self._system, self._system_key = system, key
         return system
 
+    def warm_start_from_clean_slab(
+        self, checkpoint: str | dict[str, Any], adsorbate_indices: Sequence[int]
+    ) -> None:
+        """Seed the NEXT SCF from a converged clean-slab checkpoint plus a SAD
+        superposition of the adsorbate atoms — the warm start for an adsorbate
+        site/coverage screen. Converge and checkpoint the clean slab once, then
+        for each adsorbate placement call this on a calculator whose Atoms is the
+        slab + adsorbate (same cell) before the energy/force evaluation. Only the
+        perturbed top layers re-converge.
+
+        ``checkpoint`` is a checkpoint path (or a loaded payload).
+        ``adsorbate_indices`` are the indices of the adsorbate atoms in the
+        slab+adsorbate Atoms. See io.checkpoint.adsorbate_warm_start_seed for the
+        exactness argument (the ρ_clean + SAD term restores N_slab + N_ads, so
+        the run does not start an electron short) and the shared-cell/grid
+        requirement. The seed is consumed by the first calculate() only; warm
+        start changes the starting point, never the converged fixed point."""
+        from gradwave.io.checkpoint import load_checkpoint
+        payload = (checkpoint if isinstance(checkpoint, dict)
+                   else load_checkpoint(checkpoint))
+        self._clean_slab_seed_request = (payload, [int(i) for i in adsorbate_indices])
+
     def _warm_start(
         self, system: System | USPPSystem, nspin: int = 1
     ) -> SCFResult | USPPResult | dict[str, Any] | None:
@@ -682,6 +709,15 @@ class GradWave(Calculator):
             seed = self._warm_start_override
             self._warm_start_override = None
             return seed
+
+        # One-shot clean-slab seed for adsorbate screens: build ρ_clean +
+        # SAD(adsorbate) against the freshly built adsorbate-slab system. Consumed
+        # on first use so subsequent SCFs in this calc warm-start normally.
+        if self._clean_slab_seed_request is not None:
+            from gradwave.io.checkpoint import adsorbate_warm_start_seed
+            payload, ads_idx = self._clean_slab_seed_request
+            self._clean_slab_seed_request = None
+            return adsorbate_warm_start_seed(payload, system, ads_idx)
 
         prev = self.last_result
         if prev is None or nspin != 1 or getattr(prev, "nspin", 1) != 1:

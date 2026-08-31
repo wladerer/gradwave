@@ -235,3 +235,97 @@ def as_start_from(payload: dict[str, Any]) -> dict[str, Any]:
     elif payload.get("coeffs") is not None:
         out["coeffs"] = payload["coeffs"]  # NC orbital reuse when archived
     return out
+
+
+def adsorbate_warm_start_seed(
+    payload: dict[str, Any],
+    system,
+    adsorbate_indices,
+    *,
+    clamp_positive: bool = True,
+) -> dict[str, Any]:
+    """Clean-slab warm-start seed for an adsorbate-on-slab SCF: the start_from
+    view of ``ρ_clean + SAD(adsorbate atoms only)`` on the adsorbate-slab grid.
+
+    A site/coverage screen re-converges the SAME clean slab under every
+    adsorbate placement. Converge the clean slab once, checkpoint it, and seed
+    each adsorbate SCF from that density so only the perturbed top layers
+    re-converge. The one load-bearing subtlety is the electron count: the
+    checkpoint density integrates to N_slab, but the adsorbate-slab system has
+    N_slab + N_ads electrons. Bare clean-slab reuse therefore starts iteration 1
+    with the adsorbate's valence electrons MISSING — the seed is short by N_ads
+    and the first steps fight an electron hole. Adding the superposition of
+    atomic densities (SAD) of ONLY the adsorbate atoms, normalized to their
+    valence electron count N_ads, restores the correct N_slab + N_ads and
+    pre-places the adsorbate charge. This is exact by construction: warm-start
+    changes only the SCF starting point, never the converged fixed point.
+
+    ``payload`` is a loaded clean-slab checkpoint (``load_checkpoint``).
+    ``system`` is the fully built adsorbate-slab ``System`` (grid, positions,
+    species_of_atom, upfs). ``adsorbate_indices`` are the indices, into that
+    system's atoms, of the adsorbate atoms.
+
+    REQUIREMENT: the clean slab and the slab+adsorbate must share the same cell
+    and FFT grid (same ecut, same slab dimensions). Build every adsorbate config
+    by ADDING atoms to the clean-slab cell — never by re-deriving the cell — so
+    ρ_clean lives on the adsorbate-slab grid unchanged. The grid check below
+    enforces this.
+
+    Norm-conserving only: a USPP/PAW clean-slab checkpoint carries a per-atom
+    becsum for the slab atoms alone, so it cannot seed the adsorbate augmentation
+    channels — those runs must cold-start (or extend this helper)."""
+    kind = payload.get("kind", "nc")
+    if kind != "nc":
+        raise ValueError(
+            f"adsorbate_warm_start_seed supports norm-conserving checkpoints "
+            f"only (got kind={kind!r}); a USPP/PAW clean-slab becsum omits the "
+            "adsorbate augmentation channels")
+
+    grid = system.grid
+    if tuple(payload["grid_shape"]) != tuple(grid.shape):
+        raise ValueError(
+            "clean-slab seed requires the same FFT grid as the adsorbate slab "
+            f"({tuple(payload['grid_shape'])} vs {tuple(grid.shape)}); build the "
+            "adsorbate config by adding atoms to the clean-slab cell")
+    if abs(float(payload["volume_ang3"]) - float(grid.volume)) > 1e-6 * float(grid.volume):
+        raise ValueError(
+            "clean-slab seed requires the same cell volume as the adsorbate slab "
+            f"({payload['volume_ang3']} vs {grid.volume} Å³)")
+
+    from gradwave.scf.guess import sad_density
+
+    ads = [int(i) for i in adsorbate_indices]
+    if not ads:
+        raise ValueError("adsorbate_indices is empty — nothing to seed")
+    ads_pos = system.positions[ads]
+    ads_species = [system.species_of_atom[i] for i in ads]
+    # Valence electron count of the adsorbate atoms alone — the exact N_ads the
+    # SAD term must integrate to so the seed carries N_slab + N_ads.
+    n_ads = float(sum(system.upfs[s].z_valence for s in ads_species))
+    # sad_density picks, per species index, the atoms whose species matches; we
+    # hand it the full upfs list but only the adsorbate positions/species, so
+    # only the adsorbate contributes. n_electrons=N_ads renormalizes the term to
+    # integrate to exactly N_ads on the grid.
+    sad_ads = sad_density(
+        grid, ads_pos, ads_species, system.upfs, n_ads,
+        clamp_positive=clamp_positive)
+
+    nspin = int(payload["nspin"])
+    shim_grid = SimpleNamespace(shape=tuple(payload["grid_shape"]),
+                                volume=float(payload["volume_ang3"]))
+    out: dict[str, Any] = {
+        "system": SimpleNamespace(grid=shim_grid),
+        "nspin": nspin,
+    }
+    if nspin == 1:
+        out["rho"] = payload["rho"].to(sad_ads) + sad_ads
+        out["rho_spin"] = None
+    else:
+        # Split the adsorbate SAD half/half into the spin channels so the total
+        # gains N_ads electrons while the seed magnetization (M = N↑ − N↓) is
+        # unchanged — the adsorbate enters non-magnetic.
+        half = 0.5 * sad_ads
+        rho_spin = [r.to(sad_ads) + half for r in payload["rho_spin"]]
+        out["rho_spin"] = rho_spin
+        out["rho"] = payload["rho"].to(sad_ads) + sad_ads
+    return out
