@@ -541,3 +541,67 @@ def test_fixed_with_explicit_symmetry_true_rejected(tmp_path):
 
     with pytest.raises(InputError, match="selective dynamics"):
         load_input(_write(tmp_path, _with_fixed("fixed: [0]", "symmetry: true\n")))
+
+
+def _write_final(tmp_path) -> str:
+    """Write a diamond-C final-state xyz next to the input, return its filename."""
+    fin = Atoms(
+        "C2",
+        cell=[[0, 1.7835, 1.7835], [1.7835, 0, 1.7835], [1.7835, 1.7835, 0]],
+        scaled_positions=[[0, 0, 0], [0.3, 0.3, 0.3]],
+        pbc=True,
+    )
+    ase_write(str(tmp_path / "final.xyz"), fin)
+    return "final.xyz"
+
+
+def test_neb_task_parses_and_resolves_final(tmp_path):
+    from gradwave.inputs import load_input
+
+    fname = _write_final(tmp_path)
+    inp = load_input(_write(tmp_path, _base(
+        f"task: neb\nneb: {{final: {fname}, n_images: 5, spring_k: 0.2}}\n")))
+    assert inp.task == "neb"
+    assert inp.neb.final.name == "final.xyz"
+    assert inp.neb.final.is_absolute() and inp.neb.final.exists()
+    assert inp.neb.n_images == 5
+    assert inp.neb.spring_k == pytest.approx(0.2)
+
+
+def test_transition_state_alias_maps_to_neb(tmp_path):
+    from gradwave.inputs import load_input
+
+    fname = _write_final(tmp_path)
+    inp = load_input(_write(tmp_path, _base(
+        f"task: transition_state\nneb: {{final: {fname}}}\n")))
+    assert inp.task == "neb"
+
+
+def test_neb_requires_final(tmp_path):
+    from gradwave.inputs import InputError, load_input
+
+    with pytest.raises(InputError, match="requires neb.final"):
+        load_input(_write(tmp_path, _base("task: neb\n")))
+
+
+def test_neb_final_rejected_off_task(tmp_path):
+    from gradwave.inputs import InputError, load_input
+
+    fname = _write_final(tmp_path)
+    with pytest.raises(InputError, match="only valid for task: neb"):
+        load_input(_write(tmp_path, _base(f"neb: {{final: {fname}}}\n")))
+
+
+@pytest.mark.parametrize("neb_block, needle", [
+    ("{final: final.xyz, n_images: 2}", "n_images must be >= 3"),
+    ("{final: final.xyz, spring_k: 0}", "spring_k must be > 0"),
+    ("{final: final.xyz, interpolation: spline}", "interpolation must be"),
+    ("{final: final.xyz, optimizer: cg}", "optimizer must be"),
+    ("{final: final.xyz, n_workers: 0}", "n_workers must be >= 1"),
+])
+def test_neb_param_validation(tmp_path, neb_block, needle):
+    from gradwave.inputs import InputError, load_input
+
+    _write_final(tmp_path)
+    with pytest.raises(InputError, match=needle):
+        load_input(_write(tmp_path, _base(f"task: neb\nneb: {neb_block}\n")))

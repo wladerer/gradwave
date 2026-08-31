@@ -13,6 +13,7 @@ from gradwave.api.dispersion import _apply_dispersion
 from gradwave.api.elastic import run_elastic
 from gradwave.api.eos import run_eos
 from gradwave.api.flapw import run_flapw, run_nmr
+from gradwave.api.neb import run_neb
 from gradwave.api.phonons import run_phonons
 from gradwave.api.relax import run_relax
 from gradwave.api.scf import run_scf
@@ -107,6 +108,11 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
         res_final = getattr(_atoms.calc, "last_result", None)
         if inp.error_estimate and res_final is not None:
             summary["error_estimate"] = _error_estimate_block(res_final, inp)
+    elif inp.task == "neb":
+        neb_block, _frames = run_neb(inp, verbose=verbose)
+        summary = _base_summary(inp, "neb")
+        summary["neb"] = neb_block
+        summary["runtime_s"] = round(time.time() - t0, 2)
     elif inp.task == "bands":
         res = run_scf(inp, verbose=verbose)
         summary = build_summary(res, inp, "bands",
@@ -153,7 +159,7 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
     else:
         raise ValueError(
             f"unknown task {inp.task!r} "
-            f"(scf | relax | bands | magnetism | eos | elastic | phonons | "
+            f"(scf | relax | neb | bands | magnetism | eos | elastic | phonons | "
             f"flapw | nmr)")
 
     if inp.distributed:
@@ -182,6 +188,12 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
 
         ase_write(str(outdir / "relax.xyz"), _frames, format="extxyz")
         outputs["trajectory"] = "relax.xyz"
+    if inp.task == "neb" and _frames:
+        from ase.io import write as ase_write
+
+        # the relaxed minimum-energy path, one frame per image (energy+forces)
+        ase_write(str(outdir / "neb.xyz"), _frames, format="extxyz")
+        outputs["mep"] = "neb.xyz"
     if res is not None and inp.output_volumetric.any():
         outputs.update(_write_volumetric(res, inp.output_volumetric, outdir, verbose))
     # SCF flight-recorder sidecar: the full per-iteration trace, opted in via
