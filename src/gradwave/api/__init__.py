@@ -38,12 +38,40 @@ from gradwave.api.summary import build_summary as build_summary
 from gradwave.api.system import _is_uspp as _is_uspp
 from gradwave.api.system import _load_upf as _load_upf
 from gradwave.api.system import build_system as build_system
+from gradwave.api.thermochem import (
+    adsorption_free_energy as adsorption_free_energy,
+)
+from gradwave.api.thermochem import (
+    adsorption_free_energy_from_atoms as adsorption_free_energy_from_atoms,
+)
+from gradwave.api.thermochem import (
+    electrode_potential_shift as electrode_potential_shift,
+)
+from gradwave.api.thermochem import (
+    harmonic_thermo as harmonic_thermo,
+)
+from gradwave.api.thermochem import (
+    hydrogen_reference as hydrogen_reference,
+)
+from gradwave.api.thermochem import (
+    ideal_gas_thermo as ideal_gas_thermo,
+)
+from gradwave.api.thermochem import (
+    molecule_ideal_gas_thermo as molecule_ideal_gas_thermo,
+)
 
 __all__ = [
     "SPIN_XC_REGISTRY",
     "XC_REGISTRY",
+    "adsorption_free_energy",
+    "adsorption_free_energy_from_atoms",
     "build_summary",
     "build_system",
+    "electrode_potential_shift",
+    "harmonic_thermo",
+    "hydrogen_reference",
+    "ideal_gas_thermo",
+    "molecule_ideal_gas_thermo",
     "recommend_convergence",
     "reference_sigma_iso",
     "run",
