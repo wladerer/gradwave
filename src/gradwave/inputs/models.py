@@ -112,6 +112,48 @@ class SCFParams:
 
 
 @dataclass(frozen=True)
+class SlabParams:
+    """Density-tail vacuum auto-sizer for open-boundary (ESM) slabs.
+
+    ESM makes the open-axis electrostatics box-independent, so the vacuum only
+    has to hold the physical density tail (~4–6 Å/face), not decouple periodic
+    images (the habitual 10–20 Å). Trimming the open (c) axis to the SAD-density
+    tail plus a margin shrinks both the FFT box ``Nz`` and the plane-wave count
+    ``npw`` (both ∝ open-axis length), cutting the FFT H-apply and the O(nb²·npw)
+    Rayleigh–Ritz together. The box is a forward hyperparameter (set once, frozen
+    for the solve — like ``ecut``), so there is no autograd interaction.
+    Opt-in; a no-op unless ``scf.boundary`` is an open mode and both gates pass.
+    See ``api._slab.resolve_slab_box``.
+    """
+
+    vacuum_autosize: bool = False  # trim the open axis to the SAD density tail
+    # margin discipline keyed to the requested observable: "energy"/"forces" are
+    # tail-limited (aggressive ρ<1e-4, thin margin); "workfunction"/dipole are
+    # plateau-limited (vacuum_level needs a flat plateau — larger margin). The
+    # conservative "workfunction" is the default.
+    vacuum_target: str = "workfunction"  # energy | workfunction
+    vacuum_tol: float | None = None  # override the tail tolerance [e/Å³]
+    vacuum_margin: float | None = None  # override the vacuum margin [Å]
+    min_vacuum: float = 3.0  # safety floor of vacuum per face [Å] (warns if it binds)
+    # gates: below either, the box is left exactly as the user set it. A slab
+    # satisfies both; a small bulk-ish cell violates them (a clean flip).
+    npw_gate: int = 8000  # only trim when arithmetic-bound (npw ≳ this)
+    vacuum_fraction_gate: float = 0.3  # only trim when vacuum-dominated
+
+    def __post_init__(self):
+        if self.vacuum_target not in ("energy", "workfunction"):
+            raise InputError(
+                "slab.vacuum_target must be 'energy' or 'workfunction', got "
+                f"{self.vacuum_target!r}")
+        if self.vacuum_tol is not None and self.vacuum_tol <= 0.0:
+            raise InputError(
+                f"slab.vacuum_tol must be > 0, got {self.vacuum_tol}")
+        if self.min_vacuum < 0.0:
+            raise InputError(
+                f"slab.min_vacuum must be ≥ 0, got {self.min_vacuum}")
+
+
+@dataclass(frozen=True)
 class SmearingParams:
     type: str = "none"  # none | fermi-dirac | gaussian | mp1 | cold
     width: float = 0.1  # eV
@@ -839,6 +881,7 @@ class Input:
     smearing: SmearingParams = field(default_factory=SmearingParams)
     nbands: int | None = None
     scf: SCFParams = field(default_factory=SCFParams)
+    slab: SlabParams = field(default_factory=SlabParams)  # ESM vacuum auto-sizer
     symmetry: bool = True  # IBZ reduction + density symmetrization
     nspin: int = 1  # 1 | 2 (collinear)
     noncollinear: bool = False  # spinor (non-collinear) SCF for task: scf

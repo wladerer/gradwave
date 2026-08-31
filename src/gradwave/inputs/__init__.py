@@ -30,6 +30,7 @@ from gradwave.inputs.models import PhononParams as PhononParams
 from gradwave.inputs.models import ProjectionsParams as ProjectionsParams
 from gradwave.inputs.models import RelaxParams as RelaxParams
 from gradwave.inputs.models import SCFParams as SCFParams
+from gradwave.inputs.models import SlabParams as SlabParams
 from gradwave.inputs.models import SmearingParams as SmearingParams
 from gradwave.inputs.models import VolumetricParams as VolumetricParams
 from gradwave.inputs.parse import _load_structure as _load_structure
@@ -58,6 +59,7 @@ __all__ = [
     "ProjectionsParams",
     "RelaxParams",
     "SCFParams",
+    "SlabParams",
     "SmearingParams",
     "VolumetricParams",
     "load_input",
