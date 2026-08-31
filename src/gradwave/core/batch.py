@@ -32,7 +32,26 @@ from gradwave.grids import GSphere
 # GPU dense-grid temporary budget [bytes]: bands are chunked so the ~4 dense-box
 # temporaries the apply/density chain holds at once stay under this. Sizes a
 # band chunk as budget / (elem_bytes · n_grid · nk). CPU paths do not chunk.
+# Tunable via GRADWAVE_GPU_DENSE_BUDGET (bytes) so a memory-tight card (e.g. a
+# 6 GB RTX 3050 running a large-k slab) can shrink the FFT-box peak: a smaller
+# budget → fewer bands per chunk → smaller transient dense boxes, BIT-EXACT
+# (identical arithmetic, only the batch tiling changes). Read per call so a test
+# or benchmark can A/B it in-process; default is the historical 4e8.
 _GPU_DENSE_BUDGET_BYTES = 4e8
+
+
+def _gpu_dense_budget_bytes() -> float:
+    """Dense-grid band-chunk budget in bytes: GRADWAVE_GPU_DENSE_BUDGET when set
+    (must be > 0), else the 4e8 default. Lowering it shrinks the per-chunk FFT-box
+    peak without changing any result (see `_dense_band_chunk`)."""
+    raw = os.environ.get("GRADWAVE_GPU_DENSE_BUDGET")
+    if raw is None:
+        return _GPU_DENSE_BUDGET_BYTES
+    budget = float(raw)
+    if budget <= 0:
+        raise ValueError(
+            f"GRADWAVE_GPU_DENSE_BUDGET must be > 0 bytes, got {budget!r}")
+    return budget
 
 
 def _dense_band_chunk(n_grid: int, nk: int, device: torch.device, elem_bytes: int) -> int:
@@ -41,10 +60,11 @@ def _dense_band_chunk(n_grid: int, nk: int, device: torch.device, elem_bytes: in
 
     elem_bytes scales the budget by the coefficient precision: the fp32 draft
     (complex64, 8 B) fits twice as many bands as fp64 (complex128, 16 B),
-    giving larger — and thus more efficient — batched FFTs."""
+    giving larger — and thus more efficient — batched FFTs. The budget itself is
+    tunable (`_gpu_dense_budget_bytes`)."""
     if device.type != "cuda":
         return 1_000_000
-    return max(1, int(_GPU_DENSE_BUDGET_BYTES / (elem_bytes * n_grid * max(nk, 1))))
+    return max(1, int(_gpu_dense_budget_bytes() / (elem_bytes * n_grid * max(nk, 1))))
 
 # Small-cell fast path for the local potential term V(r)·ψ(r). On the wavefunction
 # G-sphere this term is EXACTLY the convolution out(G_i)=Σ_j V̂(G_i−G_j) c(G_j) =
