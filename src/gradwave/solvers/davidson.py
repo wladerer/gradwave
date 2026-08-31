@@ -718,11 +718,17 @@ def davidson_batched(
     def _result(
         eig_: torch.Tensor, x_: torch.Tensor, it_: int, rn_: torch.Tensor
     ) -> BatchedDavidsonResult:
-        """Package a result, restoring complex128 eigenvectors when storage was
-        complex64 so downstream (density build) sees the expected dtype."""
+        """Package a result. Complex64 storage leaves the Ritz rows unit-norm only
+        to ~1e-6, so restore complex128 AND renormalize each row in fp64 — the
+        density's electron count (ρ at G=0) must be conserved to the mixer's
+        tolerance, the same fix the SCF loop applies to its low-precision path
+        (off-diagonal overlaps, which don't touch G=0, stay at the c64 floor)."""
+        if store_c64:
+            x_ = x_.to(cdtype)
+            x_ = x_ / torch.linalg.norm(
+                x_, dim=-1, keepdim=True).real.clamp_min(1e-30)
         return BatchedDavidsonResult(
-            eig_, x_.to(cdtype) if store_c64 else x_, it_, rn_,
-            n_apply_low, n_apply_full)
+            eig_, x_, it_, rn_, n_apply_low, n_apply_full)
 
     # Certification trigger state: the estimated fp32 residual-norm floor
     # (kinetic-diagonal max as the ‖H‖ proxy) and the previous round's MEASURED
