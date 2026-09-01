@@ -426,6 +426,41 @@ on GPU.
 already in-tree) and **IBZ symmetry reduction** (fewer k/q). The block-diagonalizer,
 useful for dense full-spectrum diagonalization elsewhere, is not the GW lever.
 
+## THC-GW exploration — step 1 (χ₀ factorization) + the honest walltime picture
+
+`thc_gw.py` (asus GPU). Built the THC-factored χ₀ = ζ_G·P·ζ_G† and validated it
+against the direct build, sweeping the ISDF rank (Si, Γ, N_G=1363):
+
+| N_μ | N_μ/N_orb | χ₀ rel err | THC χ₀ | direct χ₀ | speedup |
+|---|---|---|---|---|---|
+| 150 | 3.1× | 21% | 21 ms | 37 ms | 1.7× |
+| 400 | 8.3× | 2.3% | 63 ms | 37 ms | 0.6× |
+| 600 | 12.5× | 0.6% | 106 ms | 37 ms | **0.4×** |
+
+**Correctness: yes** — THC χ₀ converges to the direct one (0.6% at rank 12.5×N_orb).
+**Walltime at Si scale: no** — at the rank needed for accuracy the THC build is
+*slower*, and the one-time ISDF cost was **10–40 s even on GPU**.
+
+**This corrects the earlier "216×".** That number (thc_chi0_bench) measured only the
+μ-basis polarizability `P_{μν}` (N_G-independent) vs the direct χ₀_GG'. It is real —
+but only if the *entire* RPA/GW stays in the N_μ×N_μ point basis (ε = 1 − W_μν P,
+Σ_c contracted through ζ), **never materializing χ₀_GG'**. The moment you form χ₀ in
+the G-basis (as here, for validation), the advantage is gone.
+
+**The real THC/ISDF win is a SYSTEM-SIZE SCALING win, not a fixed-system one.** It
+takes RPA/GW from O(N⁴–N⁵) to O(N³) by collapsing the N_pair (~N²) sum onto N_μ ~
+O(N) points and avoiding N_G² intermediates. At a fixed *small* system (Si: N_orb=48,
+N_μ≈600 for 0.6% accuracy is not ≪ N_G=1363), the constants — ISDF setup, and N_μ/N_G
+not small — dominate and THC loses. The crossover is at **many-atom systems**, which
+the 6 GB laptop GPU can't reach for a clean demonstration.
+
+**Honest verdict on THC-GW:** viable and correct (χ₀ factorization works), and it is
+the standard route to *large-system* GW — but (a) the win is asymptotic in the number
+of atoms, not visible on Si; (b) it requires the full μ-basis reformulation (ε=1−W_μν P,
+Σ_c in μ-basis), not just factorizing χ₀; (c) the ISDF setup is a real fixed cost.
+Next: implement the μ-basis RPA/Σ_c (never form χ₀_GG'), and test on a multi-atom
+supercell on a larger GPU.
+
 ## Honest scorecard
 
 - **Biggest sure win:** Track 1 (92% sparsity, exact, self-contained).
