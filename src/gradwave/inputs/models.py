@@ -928,7 +928,7 @@ class Input:
     start_mag: dict[str, float] | None = None
     tot_magnetization: float | None = None  # fix M=N↑−N↓ (nspin=2): integer fill
     # without smearing, two-Fermi-level smeared FSM with smearing
-    task: str = "scf"  # scf | relax | bands | optics | magnetism | eos | elastic | phonons | flapw | nmr
+    task: str = "scf"  # scf|relax|bands|optics|magnetism|eos|elastic|phonons|flapw|nmr
     relax: RelaxParams = field(default_factory=RelaxParams)
     bands: BandsParams = field(default_factory=BandsParams)
     optics: OpticsParams = field(default_factory=OpticsParams)

@@ -18,11 +18,11 @@ from gradwave.api.relax import run_relax
 from gradwave.api.scf import run_scf
 from gradwave.api.summary import (
     _bands_extra,
-    _optics_extra,
     _base_summary,
     _cohp_summary_block,
     _error_estimate_block,
     _flapw_base_summary,
+    _optics_extra,
     _pdos_summary_block,
     _write_volumetric,
     build_summary,

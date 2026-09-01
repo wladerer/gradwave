@@ -47,12 +47,12 @@ def test_optics_epsilon_si():
 
 def test_optics_params_and_output():
     """OpticsParams validation + the `.out` renderer."""
-    from gradwave.inputs.models import OpticsParams
+    from gradwave.inputs.models import InputError, OpticsParams
     from gradwave.io.output import _optics_lines
 
     for bad in (dict(eta=0.0), dict(n_omega=1), dict(omega_max=-1.0),
                 dict(n_extra_bands=0)):
-        with pytest.raises(Exception):
+        with pytest.raises(InputError):
             OpticsParams(**bad)
 
     optics = {"omega_eV": [0.0, 10.0], "eps1": [12.0, 1.0], "eps2": [0.0, 5.0],
