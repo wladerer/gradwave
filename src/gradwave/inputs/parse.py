@@ -28,6 +28,7 @@ from gradwave.inputs.models import (
     MagneticParams,
     MagnetismParams,
     MixingParams,
+    NebParams,
     NmrParams,
     NmrSpectrumParams,
     OpticsParams,
@@ -260,7 +261,8 @@ _ALLOWED_TOP = {
     "structure", "pseudopotentials", "ecut", "ecutrho", "xc", "hybrid", "hubbard",
     "kpoints", "smearing", "nbands", "symmetry", "nspin", "noncollinear",
     "nonmagnetic", "start_mag", "tot_magnetization",
-    "scf", "slab", "task", "relax", "bands", "optics", "magnetism", "eos", "elastic",
+    "scf", "slab", "task", "relax", "neb", "bands", "optics", "magnetism", "eos",
+    "elastic",
     "phonons", "flapw", "nmr",
     "projections", "dispersion", "device", "distributed",
     "verbose", "output", "error_estimate", "restart",
@@ -573,6 +575,24 @@ def _build_nmr(raw: dict[str, Any]) -> NmrParams:
         efg=efg, spectrum=spectrum, chunk_k=None if ck is None else int(ck))
 
 
+def _build_neb(raw: dict[str, Any], base: Path, task: str) -> NebParams:
+    """Parse the ``neb`` block, resolving ``final`` (the final-state geometry
+    file) relative to the input file's directory. ``final`` is required for a
+    ``neb`` task and rejected for any other task (a stray block is a typo)."""
+    _check_keys("neb", raw, {f.name for f in dataclasses.fields(NebParams)})
+    raw = dict(raw)
+    final = raw.get("final")
+    if task == "neb":
+        if final is None:
+            raise InputError(
+                "task: neb requires neb.final (the final-state structure file; "
+                "the top-level `structure` is the initial state)")
+        raw["final"] = base / str(final)
+    elif final is not None:
+        raise InputError("neb.final is only valid for task: neb")
+    return _build(NebParams, raw, "neb")
+
+
 def _load_input(path: Path) -> Input:
     raw_yaml: Any = yaml.safe_load(path.read_text())
     base = path.parent
@@ -588,6 +608,8 @@ def _load_input(path: Path) -> Input:
     # The plane-wave shielding NMR observable (task: nmr, nmr.task: shielding)
     # runs the ordinary PW SCF, so it DOES need pseudopotentials and ecut.
     task = raw.get("task", "scf")
+    if task == "transition_state":  # friendly alias for the CI-NEB task
+        task = "neb"
     nmr_raw = dict(raw.get("nmr", {}))
     nmr_task = str(nmr_raw.get("task", "efg"))
     all_electron = task == "flapw" or (task == "nmr" and nmr_task == "efg")
@@ -622,11 +644,12 @@ def _load_input(path: Path) -> Input:
     _check_keys("scf.diago", diago, {"tol"})
 
     xc, hybrid = _resolve_xc(raw)
-    if task not in ("scf", "relax", "bands", "optics", "magnetism", "eos", "elastic",
+    if task not in ("scf", "relax", "neb", "bands", "optics", "magnetism", "eos",
+                    "elastic",
                     "phonons", "flapw", "nmr"):
         raise InputError(
             f"unknown task {task!r} "
-            f"(scf | relax | bands | optics | magnetism | eos | elastic | phonons | "
+            f"(scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons | "
             f"flapw | nmr)")
     nspin = int(raw.get("nspin", 1))
     if nspin not in (1, 2):
@@ -786,6 +809,7 @@ def _load_input(path: Path) -> Input:
         slab=_build(SlabParams, raw.get("slab", {}), "slab"),
         task=task,
         relax=_build(RelaxParams, raw.get("relax", {}), "relax"),
+        neb=_build_neb(dict(raw.get("neb", {})), base, task),
         bands=_build(BandsParams, raw.get("bands", {}), "bands"),
         optics=_build(OpticsParams, raw.get("optics", {}), "optics"),
         magnetism=_build(MagnetismParams, raw.get("magnetism", {}), "magnetism"),

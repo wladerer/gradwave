@@ -24,6 +24,7 @@ from gradwave.inputs.models import KPointsParams as KPointsParams
 from gradwave.inputs.models import MagneticParams as MagneticParams
 from gradwave.inputs.models import MagnetismParams as MagnetismParams
 from gradwave.inputs.models import MixingParams as MixingParams
+from gradwave.inputs.models import NebParams as NebParams
 from gradwave.inputs.models import NmrParams as NmrParams
 from gradwave.inputs.models import NmrSpectrumParams as NmrSpectrumParams
 from gradwave.inputs.models import PhononParams as PhononParams
@@ -53,6 +54,7 @@ __all__ = [
     "MagneticParams",
     "MagnetismParams",
     "MixingParams",
+    "NebParams",
     "NmrParams",
     "NmrSpectrumParams",
     "PhononParams",

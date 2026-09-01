@@ -492,6 +492,62 @@ class PhononParams:
 
 
 @dataclass(frozen=True)
+class NebParams:
+    """CI-NEB transition-state search between two relaxed endpoints (task: neb).
+
+    The top-level ``structure`` is the initial state (IS); ``final`` names the
+    final-state (FS) geometry file — same cell, species and atom order. A band of
+    ``n_images`` (endpoints included) is built between them by ``interpolation``,
+    each interior image is driven by its own GradWave calculator (the slab stack
+    — slab k-mesh, per-image density warm-start across band steps — is inherited
+    from the ordinary SCF calculator), and the band is relaxed to the
+    minimum-energy path by the climbing-image nudged elastic band. The reported
+    barrier is ``E_a = E(TS) − E(IS)`` with the TS the highest-energy image.
+    """
+
+    # final-state structure file; resolved relative to the input file's directory
+    # in the parser (stored as an absolute Path). Required for a neb run.
+    final: Path | None = None
+    final_format: str | None = None  # ASE format override for the FS file
+    final_index: int = -1            # frame to read from a multi-frame FS file
+    n_images: int = 7                # TOTAL images, the two fixed endpoints included
+    spring_k: float = 0.1            # band spring constant [eV/Å²]
+    climb: bool = True               # climbing image: the barrier-top image climbs
+    interpolation: str = "idpp"      # idpp | linear initial band
+    optimizer: str = "fire"          # fire | bfgs band optimizer
+    fmax: float = 0.05               # band force convergence [eV/Å]
+    max_steps: int = 200
+    # SeedPool: evaluate the interior images' SCFs across this many worker
+    # processes per band step (each warm-started from that image's own previous
+    # checkpoint). 1 = serial (default). forward-only — the parallel path returns
+    # plain forces, so a differentiable NEB must stay at 1.
+    n_workers: int = 1
+
+    def __post_init__(self):
+        if self.final is not None:
+            object.__setattr__(self, "final", Path(self.final))
+        if self.n_images < 3:
+            raise InputError(
+                f"neb.n_images must be >= 3 (two endpoints + a moving image), "
+                f"got {self.n_images}")
+        if self.spring_k <= 0.0:
+            raise InputError(f"neb.spring_k must be > 0, got {self.spring_k}")
+        if self.interpolation not in ("idpp", "linear"):
+            raise InputError(
+                f"neb.interpolation must be 'idpp' or 'linear', got "
+                f"{self.interpolation!r}")
+        if self.optimizer not in ("fire", "bfgs"):
+            raise InputError(
+                f"neb.optimizer must be 'fire' or 'bfgs', got {self.optimizer!r}")
+        if self.fmax <= 0.0:
+            raise InputError(f"neb.fmax must be > 0, got {self.fmax}")
+        if self.max_steps < 1:
+            raise InputError(f"neb.max_steps must be >= 1, got {self.max_steps}")
+        if self.n_workers < 1:
+            raise InputError(f"neb.n_workers must be >= 1, got {self.n_workers}")
+
+
+@dataclass(frozen=True)
 class CohpParams:
     """Crystal Orbital Hamilton Population, computed alongside the PDOS.
 
@@ -937,8 +993,10 @@ class Input:
     start_mag: dict[str, float] | None = None
     tot_magnetization: float | None = None  # fix M=N↑−N↓ (nspin=2): integer fill
     # without smearing, two-Fermi-level smeared FSM with smearing
-    task: str = "scf"  # scf|relax|bands|optics|magnetism|eos|elastic|phonons|flapw|nmr
+    # scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons | flapw | nmr
+    task: str = "scf"
     relax: RelaxParams = field(default_factory=RelaxParams)
+    neb: NebParams = field(default_factory=NebParams)  # CI-NEB transition state
     bands: BandsParams = field(default_factory=BandsParams)
     optics: OpticsParams = field(default_factory=OpticsParams)
     magnetism: MagnetismParams = field(default_factory=MagnetismParams)
