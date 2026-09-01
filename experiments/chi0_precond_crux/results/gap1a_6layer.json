@@ -1,0 +1,284 @@
+{
+  "meta": {
+    "args": {
+      "system": "al_slab",
+      "layers": 6,
+      "nx": 1,
+      "ny": 1,
+      "vacuum": 8.0,
+      "kmesh": 4,
+      "ecut": 25.0,
+      "steps": 10,
+      "fmax": 0.05,
+      "rattle": 0.08,
+      "seed": 1,
+      "threads": 8,
+      "out": "results/gap1a_6layer.json"
+    },
+    "natoms": 6,
+    "nbands": 36,
+    "formula": "Al6",
+    "verdict": {
+      "dE_eV": 3.755485522560775e-08,
+      "d_pos_ang": 1.3555799505127197e-07,
+      "same_answer": true,
+      "fft_off": 23434,
+      "fft_on": 15926,
+      "fft_ratio_off_over_on": 1.471,
+      "wall_ratio_off_over_on": 1.609,
+      "scf_iters_off": 314,
+      "scf_iters_on": 189,
+      "iter_ratio_off_over_on": 1.661,
+      "chi0_engaged": true,
+      "chi0_rho": null,
+      "crossover_curve": [
+        {
+          "step": 1,
+          "cum_fft_off": 2192,
+          "cum_fft_on": 5274,
+          "fft_ratio_off_over_on": 0.416,
+          "cum_iter_off": 31,
+          "cum_iter_on": 31,
+          "iter_ratio_off_over_on": 1.0
+        },
+        {
+          "step": 2,
+          "cum_fft_off": 4398,
+          "cum_fft_on": 6198,
+          "fft_ratio_off_over_on": 0.71,
+          "cum_iter_off": 61,
+          "cum_iter_on": 45,
+          "iter_ratio_off_over_on": 1.356
+        },
+        {
+          "step": 3,
+          "cum_fft_off": 6883,
+          "cum_fft_on": 7342,
+          "fft_ratio_off_over_on": 0.937,
+          "cum_iter_off": 90,
+          "cum_iter_on": 60,
+          "iter_ratio_off_over_on": 1.5
+        },
+        {
+          "step": 4,
+          "cum_fft_off": 9109,
+          "cum_fft_on": 8516,
+          "fft_ratio_off_over_on": 1.07,
+          "cum_iter_off": 117,
+          "cum_iter_on": 75,
+          "iter_ratio_off_over_on": 1.56
+        },
+        {
+          "step": 5,
+          "cum_fft_off": 11129,
+          "cum_fft_on": 9740,
+          "fft_ratio_off_over_on": 1.143,
+          "cum_iter_off": 144,
+          "cum_iter_on": 92,
+          "iter_ratio_off_over_on": 1.565
+        },
+        {
+          "step": 6,
+          "cum_fft_off": 13265,
+          "cum_fft_on": 10814,
+          "fft_ratio_off_over_on": 1.227,
+          "cum_iter_off": 173,
+          "cum_iter_on": 108,
+          "iter_ratio_off_over_on": 1.602
+        },
+        {
+          "step": 7,
+          "cum_fft_off": 15236,
+          "cum_fft_on": 11716,
+          "fft_ratio_off_over_on": 1.3,
+          "cum_iter_off": 200,
+          "cum_iter_on": 123,
+          "iter_ratio_off_over_on": 1.626
+        },
+        {
+          "step": 8,
+          "cum_fft_off": 17366,
+          "cum_fft_on": 12756,
+          "fft_ratio_off_over_on": 1.361,
+          "cum_iter_off": 228,
+          "cum_iter_on": 139,
+          "iter_ratio_off_over_on": 1.64
+        },
+        {
+          "step": 9,
+          "cum_fft_off": 19316,
+          "cum_fft_on": 13782,
+          "fft_ratio_off_over_on": 1.402,
+          "cum_iter_off": 255,
+          "cum_iter_on": 155,
+          "iter_ratio_off_over_on": 1.645
+        },
+        {
+          "step": 10,
+          "cum_fft_off": 21555,
+          "cum_fft_on": 14922,
+          "fft_ratio_off_over_on": 1.445,
+          "cum_iter_off": 285,
+          "cum_iter_on": 173,
+          "iter_ratio_off_over_on": 1.647
+        },
+        {
+          "step": 11,
+          "cum_fft_off": 23434,
+          "cum_fft_on": 15926,
+          "fft_ratio_off_over_on": 1.471,
+          "cum_iter_off": 314,
+          "cum_iter_on": 189,
+          "iter_ratio_off_over_on": 1.661
+        }
+      ]
+    }
+  },
+  "rows": [
+    {
+      "tag": "OFF",
+      "converged": false,
+      "n_steps": 10,
+      "energy_eV": -11179.919877893937,
+      "fmax_eV_ang": 0.23489137953529698,
+      "scf_total_iter": 314,
+      "scf_iter_per_step": [
+        31,
+        30,
+        29,
+        27,
+        27,
+        29,
+        27,
+        28,
+        27,
+        30,
+        29
+      ],
+      "fft_per_step": [
+        2192,
+        2206,
+        2485,
+        2226,
+        2020,
+        2136,
+        1971,
+        2130,
+        1950,
+        2239,
+        1879
+      ],
+      "total_fft": 23434,
+      "wall_s": 1146.7,
+      "positions_ang": [
+        [
+          1.4826970873246046,
+          1.4268813406590473,
+          7.607681322333444
+        ],
+        [
+          0.06978015992755196,
+          0.028895107757507157,
+          10.07234757422252
+        ],
+        [
+          1.4377921082722682,
+          1.47746905794388,
+          12.1069136442493
+        ],
+        [
+          0.0004716226414176253,
+          -0.0005988896414830475,
+          13.964298438262489
+        ],
+        [
+          1.429132943102378,
+          1.4405183835359217,
+          15.891189165228049
+        ],
+        [
+          -0.0742394528464575,
+          -0.04564572937814703,
+          18.38737777265055
+        ]
+      ],
+      "chi0": null
+    },
+    {
+      "tag": "ON",
+      "converged": false,
+      "n_steps": 10,
+      "energy_eV": -11179.919877931492,
+      "fmax_eV_ang": 0.23489029886445376,
+      "scf_total_iter": 189,
+      "scf_iter_per_step": [
+        31,
+        14,
+        15,
+        15,
+        17,
+        16,
+        15,
+        16,
+        16,
+        18,
+        16
+      ],
+      "fft_per_step": [
+        5274,
+        924,
+        1144,
+        1174,
+        1224,
+        1074,
+        902,
+        1040,
+        1026,
+        1140,
+        1004
+      ],
+      "total_fft": 15926,
+      "wall_s": 712.9,
+      "positions_ang": [
+        [
+          1.4826971079655016,
+          1.426881331492789,
+          7.607681398044411
+        ],
+        [
+          0.06978010100709137,
+          0.028895115793436205,
+          10.072347489645928
+        ],
+        [
+          1.437792157570855,
+          1.4774690242367288,
+          12.106913582049907
+        ],
+        [
+          0.00047162809311008386,
+          -0.0005988497804135254,
+          13.964298478526016
+        ],
+        [
+          1.4291329257326437,
+          1.440518365504199,
+          15.891189300786044
+        ],
+        [
+          -0.07423945194743926,
+          -0.04564571637001433,
+          18.387377667894008
+        ]
+      ],
+      "chi0": {
+        "engaged": true,
+        "rho": null,
+        "n_col": 512,
+        "gate_ffts": 0,
+        "build_ffts": 3082,
+        "precond_calls": 148
+      }
+    }
+  ]
+}

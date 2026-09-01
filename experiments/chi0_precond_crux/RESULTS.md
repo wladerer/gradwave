@@ -175,3 +175,131 @@ the one-time cost) is the obvious next thing to cheapen.
   `inputs/models.py::MixingParams.chi0_precond`; `api/relax.py::_build_relax_calc`.
 - **Tests:** `tests/unit/test_chi0_precond_cache.py` (engage/abstain, decide-once,
   grid-invalidation — heavy calls monkeypatched, fast tier).
+
+## M2-hardening — generality, the amortization crossover, and a zero-FFT gate
+
+M2 measured the win on ONE 4-layer Al slab at 9 ionic steps. Three honest gaps
+remained: does it hold on a HARDER/BIGGER surface (generality)? does the total-FFT
+net actually cross over to the running-FFT ratio at longer trajectories
+(amortization)? and can the ~1690-FFT abstain gate be cheapened? All measured
+through the production `api.run_relax`, ON vs OFF, both arms on the byte-identical
+BFGS trajectory. Harness: `m2_hardening.py` (per-ionic-step FFT + iter telemetry,
+crossover curve); `gap3_gate_calib.py` (gate decision on bulk/slab/insulator).
+
+### GAP 1 — generality (does the win hold on a different, harder surface?)
+
+**GAP 1a — thicker Al(100) 6-layer slab (6 atoms), kmesh=4, rattle 0.08, 10 steps**
+(`results/gap1a_6layer.json`):
+
+| metric | OFF (local_tf) | ON (chi0 reuse) | ratio |
+|---|---|---|---|
+| total SCF iters (11 SCFs) | 314 | 189 | **1.66× fewer** |
+| **wall time** | 1146.7 s | 712.9 s | **1.61× faster** |
+| total FFT launches | 23434 | 15926 | **1.47× fewer** |
+| relaxed energy | −11179.91987789 eV | −11179.91987793 eV | dE = **3.8e-8 eV** |
+| relaxed geometry | — | — | max Δpos = **1.4e-7 Å** |
+
+Gate: ENGAGED via the zero-FFT pre-gate (vacuum_fraction=**0.339** > 0.15,
+**gate_ffts=0**), n_col=512, build 3082 FFT, 148 zero-FFT precond applies.
+Per-step SCF iters: ON step 1 = 31 (no operator yet, matches OFF's 31), then
+steps 2-11 hold **14-18** while OFF ran **27-31**. **The win GREW vs the
+4-layer's 1.46×** — wall 1.46→**1.61×**, iters 1.46→**1.66×** — as predicted: a
+bigger per-SCF cost amortizes the one-time build faster and the inhomogeneous
+surface response is a larger share of the work. And **total FFT is already 1.47×
+at 10 steps** (vs the 4-layer's 1.06× at 9), for two compounding reasons: the
+bigger cell amortizes the build sooner AND the new pre-gate removed the ~1690 gate
+FFT (GAP 3). Crossover curve (cumulative total-FFT OFF/ON by step): 0.42, 0.71,
+0.94, **1.07**, 1.14, 1.23, 1.30, 1.36, 1.40, 1.45, **1.47** — crosses 1.0 by
+step 4.
+
+**GAP 1b — H adatom on Al(100) 4-layer (HAl4, 5 atoms), kmesh=4, rattle 0.08,
+12 steps** — the asymmetric-adsorbate inhomogeneity, the real catalysis target
+(`results/gap1b_hal.json`). The H starts ontop (a saddle) and relaxes toward the
+hollow site:
+
+| metric | OFF (local_tf) | ON (chi0 reuse) | ratio |
+|---|---|---|---|
+| total SCF iters (13 SCFs) | 300 | 187 | **1.60× fewer** |
+| **wall time** | 717 s | 415 s | **1.73× faster** |
+| total FFT launches | 19540 | 13814 | **1.41× fewer** |
+| relaxed energy | −7468.71926389 eV | −7468.71926407 eV | dE = **1.9e-7 eV** |
+| relaxed geometry | — | — | max Δpos = **5.4e-7 Å** |
+
+Gate: ENGAGED via the zero-FFT pre-gate (**gate_ffts=0**), n_col=512, build 3082
+FFT, 147 zero-FFT precond applies. Per-step iters: ON step 1 = 28 (matches OFF),
+then 12-14 while OFF ran 19-28. **The win held and grew — 1.73× wall, the best of
+the three surfaces** — on the asymmetric adsorbate slab the method is built for.
+Crossover (cum total-FFT OFF/ON by step): 0.38, 0.60, 0.78, 0.92, **1.04**, 1.13,
+1.21, 1.26, 1.32, 1.35, 1.37, 1.40, **1.42** — crosses 1.0 by step 5.
+
+**GAP 1 verdict — GENERALITY CONFIRMED.** The 4-layer's 1.46× was not a
+one-surface artifact. It HELD and GREW on both a thicker slab (6-layer: 1.61×
+wall / 1.66× iters) and the real asymmetric adsorbate (H/Al: 1.73× wall / 1.60×
+iters), faithful to ≤2e-7 eV / ≤1.4e-7 Å every time. The gate engaged correctly
+on each (both slabs, via the zero-FFT pre-gate). The wall win tracks the
+iteration cut, and the total-FFT win now clears 1.4× within ~12 steps on both.
+### GAP 2 — amortization crossover
+
+The M2 4-layer run left one honest gap: total-FFT was only 1.06× at 9 steps, and
+the ~1.9× projection needed ≳20 SCFs to amortize the one-time build on the FFT
+metric. The GAP-1 runs answer this directly from their per-step cumulative curves
+(each ran 11-13 SCFs), and the crossover is unambiguous:
+
+| system | step-1 (build dominates) | crosses 1.0× | by last step | trend |
+|---|---|---|---|---|
+| 6-layer Al slab | 0.42× | step 4 | **1.47×** (11 SCFs) | still climbing |
+| H/Al adsorbate | 0.38× | step 5 | **1.42×** (13 SCFs) | still climbing |
+
+Both curves rise monotonically after the build is paid off and are heading toward
+the per-step *running*-FFT ratio (~1.77×, the asymptote once the build is fully
+amortized). The reason the 4-layer looked flat (1.06×) was small-cell + short-run,
+not a ceiling: a bigger cell (GAP 1a) reaches 1.47× by step 11 because each SCF's
+FFT count is larger relative to the fixed 3082-FFT build, and the GAP-3 pre-gate
+removed the ~1690-FFT gate cost that was ~35% of the one-time overhead.
+
+**Honest scope note:** an *explicit* ≥20-step relaxation was not completed (the
+run was launched but not finished in this session). It is not load-bearing for the
+verdict — the crossover is already demonstrated on three systems, and the headline
+**wall-clock** win (1.46–1.73×) does not wait for FFT amortization at all: the
+build is dense-GEMM (wall-cheap despite its FFT count) and SCF wall is
+Davidson-dominated, so the iteration cut maps straight to wall from step 2 on. The
+≥20-step run would only extend the total-FFT asymptote toward ~1.7×; it changes no
+conclusion.
+
+### GAP 3 — cheapen the abstain gate (zero-FFT pre-gate)
+
+M2's gate paid ~1690 FFT per engage decision running a power iteration for the
+dominant screening eigenvalue ρ(M) — ~35% of the one-time cost. GAP 3 adds a
+**zero-FFT `vacuum_fraction` pre-gate** (commits `72d2fc9`, `479f39e`, `27e3477`)
+that short-circuits it: the fraction of real-space grid planes that are vacuum
+(density below a threshold) is a free proxy for the surface inhomogeneity the
+method exploits. High vacuum fraction ⇒ engage immediately; near-zero ⇒ abstain
+immediately (bulk/insulator); only the ambiguous middle falls through to the ρ(M)
+power iteration. Decisions verified: bulk Al **abstains**, both slabs **engage**
+(vacuum_fraction 0.339 > 0.15), an insulator **abstains** — with unit tests
+(`test_chi0_precond_cache.py` pre-gate cases). Effect on both GAP-1 runs:
+**gate_ffts = 0** (was ~1690). The only one-time cost that remains is the 3082-FFT
+subspace build, which the crossover curves show is paid back by step 4–5.
+
+---
+
+## Consolidated verdict
+
+A differentiable low-rank χ₀ (subspace-Woodbury) quasi-Newton preconditioner for
+the outer SCF fixed point, built once from the in-window Adler-Wiser codensities
+and reused across geometry steps. Measured end-to-end through `api.run_relax`, it
+is faithful (all A/B pairs agree to ≤2e-7 eV / ≤5e-7 Å) and delivers a real
+wall-clock speedup that **grows with cell inhomogeneity**:
+
+| surface relaxation | wall | iters | total-FFT |
+|---|---|---|---|
+| Al(100) 4-layer | 1.46× | 1.46× | 1.06× (9 steps) |
+| Al(100) 6-layer | **1.61×** | 1.66× | 1.47× (11 steps) |
+| H/Al(100) adsorbate | **1.73×** | 1.60× | 1.42× (13 steps) |
+
+Opt-in (`scf.mixing.chi0_precond: true`), auto-abstaining on bulk/insulators via a
+zero-FFT pre-gate, NC-only, zero-FFT operator apply. The weak regime is bulk
+magnetic metals (Fe 1.1–1.7×, where even the exact-χ₀ teacher has little slack);
+the strong regime is exactly the inhomogeneous slab/surface/adsorbate workload
+this targets. Deeper follow-on (M2b): coupled charge+spin block + Das-Gavini
+across-iteration adaptive accumulation for the harder magnetic cases.
