@@ -8,3 +8,14 @@
 # a local relax run whose output under benchmarks/results/ is generated, not
 # committed.
 benchmarks/results/sio2-elastic/out_relax/relax.json
+
+# docs/h100_backlog.md forward-references. The BUILD-FIRST items name the driver
+# path they will land at once built (TODO markers in the doc); the other two live
+# on named branches (feat/h100-test-plan, worktree-phonon-config-batching), not on
+# main. All are intentional pointers, not stale references.
+benchmarks/h100/H100_TEST_PLAN.md
+benchmarks/phonon_batch/config_batch_probe.py
+experiments/surface_efficiency/vacuum_ladder.py
+experiments/surface_efficiency/tt_rank.py
+experiments/stochastic_dft/variance_probe.py
+experiments/dmi/fege_full_vector.py
