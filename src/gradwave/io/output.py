@@ -406,10 +406,13 @@ def _bands_lines(bands):
 def _optics_lines(optics):
     lines = [_sec("optical dielectric ε(ω)")]
     ncond = optics["n_bands"] - optics["n_occ"]
+    level = "RPA (local fields)" if optics.get("local_fields") else "independent particle"
     pairs = [("ω range", f"0 – {optics['omega_eV'][-1]:.1f} eV"),
              ("points", str(len(optics["omega_eV"]))),
              ("broadening η", f"{optics['eta_eV']:.3f} eV"),
              ("bands", f"{optics['n_occ']} occ + {ncond} cond"),
+             ("level", level),
+             ("velocity", optics.get("velocity", "full")),
              ("ε₁(0)", f"{optics['eps_static']:.3f}")]
     lines += _cols(pairs)
     lines.append("   ε₁/ε₂/α spectra in the JSON · "

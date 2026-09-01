@@ -392,6 +392,9 @@ class OpticsParams:
     n_omega: int = 600        # points on the ω grid
     eta: float = 0.1          # eV — Lorentzian broadening
     n_extra_bands: int = 8    # conduction bands added above the occupied set
+    velocity: str = "full"    # full (∂H/∂k incl. nonlocal [V_nl,r]) | local (kinetic only)
+    local_fields: bool = False  # RPA local-field effects via the Dyson ε=1−vχ₀
+    dk: float = 1.0e-3        # Å⁻¹ — finite-difference step for the nonlocal velocity
 
     def __post_init__(self):
         if self.omega_max <= 0.0:
@@ -403,6 +406,11 @@ class OpticsParams:
         if self.n_extra_bands < 1:
             raise InputError(
                 f"optics.n_extra_bands must be >= 1, got {self.n_extra_bands}")
+        if self.velocity not in ("full", "local"):
+            raise InputError(
+                f"optics.velocity must be 'full' or 'local', got {self.velocity!r}")
+        if self.dk <= 0.0:
+            raise InputError(f"optics.dk must be > 0, got {self.dk}")
 
 
 @dataclass(frozen=True)
