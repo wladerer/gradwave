@@ -262,6 +262,41 @@ def build_woodbury_subspace(res: SCFResult, xc, *, fp_cut: float = 1e-8,
 # 2.2×.
 _CHI0_ENGAGE_RHO = 2.0
 
+# Zero-FFT inhomogeneity PRE-gate (M2-hardening, GAP 3). The ρ(M) power
+# iteration above is FFT-heavy (each apply is a Sternheimer χ₀ solve; ~700-1700
+# FFT one-time, ~35% of the whole build). But the engage/abstain decision only
+# needs to know which SIDE of the gap a cell is on, and the crux stage0 ladder
+# showed the deciding physics is inhomogeneity: a slab's vacuum region is what
+# lifts ρ(M) from ~0.8 (bulk) to ~8-30 (slab). The *vacuum fraction* of the
+# already-converged total density measures that directly at ZERO FFT — no χ₀, no
+# power iteration — so it short-circuits both clear cases and the ρ(M) solve is
+# paid only in the ambiguous middle band. ``vacuum_fraction`` = fraction of
+# real-space grid points whose total density is below ``_VAC_REL``× the mean; a
+# delocalized bulk metal is everywhere-finite (≈0), a slab with several Å of
+# vacuum is ~0.3-0.6. Calibrated (see experiments/chi0_precond_crux, GAP 3):
+# fcc-Al bulk 0.000, Si bulk (insulator) 0.00x, Al(100) slab ~0.4. Below
+# ``_VAC_ABSTAIN_BELOW`` = clear bulk → ABSTAIN (no FFT); above
+# ``_VAC_ENGAGE_ABOVE`` = clear slab/inhomogeneous → ENGAGE (the subspace build
+# still returns None, i.e. abstains, for an insulator slab with no Fermi-surface
+# weight); in between = ambiguous → fall through to the ρ(M) gate. A false
+# abstain only forfeits a possible win (safe: the base precond still converges);
+# a false engage only wastes the one-time build (amortized, correctness intact).
+_VAC_ABSTAIN_BELOW = 0.05
+_VAC_ENGAGE_ABOVE = 0.15
+_VAC_REL = 1e-3
+
+
+def vacuum_fraction(res: SCFResult, rel: float = _VAC_REL) -> float:
+    """Fraction of real-space grid points whose TOTAL density is below ``rel``×
+    the mean — a zero-FFT proxy for cell inhomogeneity (a slab's vacuum region
+    vs a bulk metal's everywhere-finite density). Reads the converged
+    ``res.rho`` already in hand; no FFT, no χ₀ solve."""
+    rho = res.rho.reshape(-1)
+    mean = float(rho.mean())
+    if mean <= 0.0:
+        return 0.0
+    return float((rho < rel * mean).to(torch.float64).mean())
+
 
 class Chi0PrecondCache:
     """Build-once / reuse-across-geometry holder for a :class:`WoodburyPrecond`.
@@ -302,7 +337,8 @@ class Chi0PrecondCache:
         self.precond: WoodburyPrecond | None = None
         self.decided = False       # gate evaluated (engage or abstain)?
         self.engaged = False
-        self.rho: float | None = None
+        self.rho: float | None = None       # ρ(M), None if pre-gate decided
+        self.vac_frac: float | None = None  # zero-FFT inhomogeneity pre-gate
         # one-time cost telemetry (FFT launches), for the amortization bookkeeping
         self.gate_ffts = 0
         self.build_ffts = 0
@@ -327,13 +363,34 @@ class Chi0PrecondCache:
     def update(self, res: SCFResult, xc, nspin: int) -> None:
         """After a converged SCF, decide once and (if engaged) build the frozen
         subspace. A no-op after the first decision — the operator is frozen at
-        the FIRST converged reference and reused, never rebuilt per step."""
+        the FIRST converged reference and reused, never rebuilt per step.
+
+        A zero-FFT vacuum-fraction PRE-gate short-circuits the FFT-heavy ρ(M)
+        power iteration on obvious bulk (abstain) and obvious slab (engage); the
+        ρ(M) gate is paid only in the ambiguous middle band."""
         if self.decided:
             return
+        # --- zero-FFT inhomogeneity pre-gate (no χ₀, no power iteration) ---
+        self.vac_frac = vacuum_fraction(res)
+        if self.vac_frac < _VAC_ABSTAIN_BELOW:
+            self.decided = True
+            if self.verbose:
+                print(f"  chi0_precond: ABSTAIN — vacuum_fraction="
+                      f"{self.vac_frac:.3f} < {_VAC_ABSTAIN_BELOW:.2f} "
+                      "(homogeneous bulk; no ρ(M) FFT paid)", flush=True)
+            return
+        if self.vac_frac > _VAC_ENGAGE_ABOVE:
+            self.decided = True
+            self._build_and_freeze(res, xc, nspin,
+                                   why=f"vacuum_fraction={self.vac_frac:.3f} > "
+                                       f"{_VAC_ENGAGE_ABOVE:.2f} (inhomogeneous "
+                                       "slab; no ρ(M) FFT paid)")
+            return
+        # --- ambiguous band: fall through to the shipped ρ(M) gate ---
         # scf() leaves the process FFT tally disabled on return; re-enable it so
-        # this one-time gate+build cost is itself counted (both in the caller's
-        # cumulative tally and in the self-reported gate_ffts/build_ffts), then
-        # restore the default-off state — the same contract scf() honours.
+        # this one-time gate cost is itself counted (both in the caller's
+        # cumulative tally and in the self-reported gate_ffts), then restore the
+        # default-off state — the same contract scf() honours.
         from gradwave.core import opcount
         opcount.enable()
         prev = opcount.snapshot()
@@ -346,15 +403,27 @@ class Chi0PrecondCache:
             res, xc, n_iter=self.gate_n_iter, tol=self.gate_tol,
             chi0_tol=self.gate_chi0_tol)
         self.gate_ffts = int(opcount.since(prev)["fft"])
+        opcount.disable()
         self.rho = abs(float(est.eigenvalue))
         self.decided = True
         if self.rho < self.engage_rho:
-            opcount.disable()
             if self.verbose:
-                print(f"  chi0_precond: ABSTAIN — ρ(M)={self.rho:.2f} < "
-                      f"{self.engage_rho:.2f} (homogeneous/well-conditioned; "
-                      "base precond kept)", flush=True)
+                print(f"  chi0_precond: ABSTAIN — vac={self.vac_frac:.3f} "
+                      f"(ambiguous) → ρ(M)={self.rho:.2f} < "
+                      f"{self.engage_rho:.2f} (well-conditioned; base precond "
+                      "kept)", flush=True)
             return
+        self._build_and_freeze(res, xc, nspin,
+                               why=f"vac={self.vac_frac:.3f} (ambiguous) → "
+                                   f"ρ(M)={self.rho:.2f} ≥ {self.engage_rho:.2f}")
+
+    def _build_and_freeze(self, res: SCFResult, xc, nspin: int, *,
+                          why: str) -> None:
+        """Build the frozen subspace and mark engaged, unless the reference
+        carries no Fermi-surface weight (insulating limit → build returns None,
+        abstain). Counts the one-time build FFTs into ``build_ffts``."""
+        from gradwave.core import opcount
+        opcount.enable()
         prev_b = opcount.snapshot()
         op = build_woodbury_subspace(res, xc, pair_cut=self.pair_cut,
                                      max_cols=self.max_cols)
@@ -363,17 +432,16 @@ class Chi0PrecondCache:
         if op is None:
             # insulating limit: no Fermi-surface weight — nothing to build
             if self.verbose:
-                print(f"  chi0_precond: ABSTAIN — ρ(M)={self.rho:.2f} but the "
-                      "subspace carries no Fermi-surface weight (insulator)",
-                      flush=True)
+                print(f"  chi0_precond: ABSTAIN — {why} but the subspace "
+                      "carries no Fermi-surface weight (insulator)", flush=True)
             return
         self.precond = op
         self.engaged = True
         self._grid_key = self._key_of(res.system.grid, nspin)
         if self.verbose:
-            print(f"  chi0_precond: ENGAGE — ρ(M)={self.rho:.2f} ≥ "
-                  f"{self.engage_rho:.2f}; frozen subspace n_col={op.n_col} "
-                  "(reused on every later geometry)", flush=True)
+            print(f"  chi0_precond: ENGAGE — {why}; frozen subspace "
+                  f"n_col={op.n_col} (reused on every later geometry)",
+                  flush=True)
 
 
 # --------------------------------------------------------------------------
