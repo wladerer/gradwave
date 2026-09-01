@@ -88,6 +88,38 @@ def test_open_z_forces_match_total_energy_finite_difference():
 
 
 @pytest.mark.standard
+def test_open_z_al_slab_scf_runs_clean():
+    """Stability guard for the Al open_z path (regression for a reported native
+    heap-corruption abort, ``malloc(): corrupted top size``, on an Al(100)-like
+    ESM slab). An aluminium column in a vacuum box runs a full open_z SCF to
+    completion with no abort, and the loop ΔE matches the standalone correction
+    on the converged density — proof the ESM electrostatics executed correctly.
+
+    Aluminium (3-e ONCV) with a metallic, delocalized valence density in a tall
+    vacuum box exercises the same esm.py path (``esm_potential`` each step,
+    ``esm_energy`` in the breakdown, the O(Nz) ``_decay_conv`` recursion and its
+    backward) that the crash report implicated. Kept small (Γ-only, modest ecut)
+    so it is a cheap always-on guard rather than a full surface calculation."""
+    al = parse_upf(pseudo("Al_ONCV_PBE-1.2.upf"))
+    # Al(100)-like 1x1 column: c ⊥ a,b, vacuum along z, atoms placed
+    # asymmetrically in the box so the open-vs-periodic correction is nonzero.
+    a = 4.05 / np.sqrt(2.0)
+    cell = np.diag([a, a, 15.0])
+    pos = np.array([[0.0, 0.0, 5.0], [0.0, 0.0, 7.0], [0.0, 0.0, 9.0]])
+    common = dict(smearing="gaussian", width=0.2, etol=1e-5, rhotol=1e-4,
+                  max_iter=60, verbose=False)
+
+    sys_o = setup_system(cell, pos, [0, 0, 0], [al], ecut=20 * RY)
+    res_o = scf(sys_o, LDA_PW92(), boundary="open_z", **common)
+
+    # completing at all is the heap-corruption guard; convergence + consistency
+    # confirm the ESM path ran correctly (not silently corrupted).
+    assert res_o.converged, "Al open_z SCF did not converge"
+    de_direct = esm_energy(res_o.rho, sys_o.positions, sys_o.charges, sys_o.grid)
+    assert float(res_o.energies.esm) == pytest.approx(float(de_direct), abs=1e-6)
+
+
+@pytest.mark.standard
 def test_open_z_metal_capacitor_scf_and_bias():
     """The metal/capacitor mode (boundary=open_z_metal) runs end-to-end: the SCF
     converges, the loop ΔE matches the standalone capacitor energy on the
