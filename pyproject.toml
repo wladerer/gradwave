@@ -196,6 +196,7 @@ include = [
     "src/gradwave/postscf/spin_exchange.py",
     "src/gradwave/postscf/stress_error.py",
     "src/gradwave/postscf/thermo.py",
+    "src/gradwave/postscf/adsorbate_thermo.py",
     "src/gradwave/postscf/uspp_bands.py",
     "src/gradwave/postscf/uspp_frozen.py",
     "src/gradwave/postscf/cohp.py",
