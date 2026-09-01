@@ -1,0 +1,21 @@
+# Conventional cubic diamond (8 C, Fd-3m) — 4× the primitive cell → larger N at
+# fixed cutoff, to reach the walltime crossover for dense diagonalization.
+structure:
+  cell: [[3.567, 0.0, 0.0], [0.0, 3.567, 0.0], [0.0, 0.0, 3.567]]
+  positions:
+    frac: [[0.0, 0.0, 0.0], [0.0, 0.5, 0.5], [0.5, 0.0, 0.5], [0.5, 0.5, 0.0],
+           [0.25, 0.25, 0.25], [0.25, 0.75, 0.75], [0.75, 0.25, 0.75], [0.75, 0.75, 0.25]]
+  species: [C, C, C, C, C, C, C, C]
+
+pseudopotentials:
+  dir: /home/wladerer/github/gradwave/tests/fixtures/qe/pseudos
+  map: {C: C_ONCV_PBE-1.2.upf}
+
+ecut: 600.0
+xc: pbe
+kpoints: {mesh: [2, 2, 2]}
+smearing: {type: none}
+
+scf: {etol: 1.0e-5, rhotol: 1.0e-4}
+task: scf
+output: {dir: /home/wladerer/github/gradwave/experiments/symbolic/out_diamond_conv}

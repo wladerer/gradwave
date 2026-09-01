@@ -1,0 +1,20 @@
+# bcc Fe (Im-3m — SYMMORPHIC, 48-op Oh point group) for the block-diag demo.
+# Non-magnetic (nspin=1): this is a symmetry demonstration of H(Γ), not the
+# magnetic ground state. Metallic → Gaussian smearing.
+structure:
+  cell: [[-1.435, 1.435, 1.435], [1.435, -1.435, 1.435], [1.435, 1.435, -1.435]]
+  positions: {frac: [[0.0, 0.0, 0.0]]}
+  species: [Fe]
+
+pseudopotentials:
+  dir: /home/wladerer/github/gradwave/benchmarks/delta_gauge/pseudos
+  map: {Fe: Fe.upf}
+
+ecut: 900.0
+xc: pbe
+kpoints: {mesh: [8, 8, 8]}
+smearing: {type: gaussian, width: 0.2}
+
+scf: {etol: 1.0e-5, rhotol: 1.0e-4}
+task: scf
+output: {dir: /home/wladerer/github/gradwave/experiments/symbolic/out_fe_bench}
