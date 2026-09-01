@@ -41,7 +41,7 @@ def test_woodbury_identity():
     w = torch.randn(ncol, ng, dtype=CDTYPE)
     c = torch.randn(ncol, dtype=torch.float64) * 0.1  # small → (1−M) well-posed
 
-    pre = WoodburyPrecond(u, w, c, vol, nspin=1, ng=ng)
+    pre = WoodburyPrecond(u, w, c, vol, nspin=1, ng=ng, g0_idx=0)
     # M[g,g'] = Σ_p u[p,g] (vol c_p) conj(w[p,g'])  (the bare-G Woodbury operator)
     m = torch.einsum("pg,p,ph->gh", u, (vol * c).to(CDTYPE), w.conj())
     r = torch.randn(ng, dtype=CDTYPE)
@@ -58,8 +58,9 @@ def test_woodbury_totmag_roundtrip():
     u = torch.randn(2, 2 * ng, dtype=CDTYPE)
     w = torch.zeros(2, 2 * ng, dtype=CDTYPE)  # W=0 ⇒ M=0 ⇒ (1−M)⁻¹ = 1
     c = torch.ones(2, dtype=torch.float64)
-    pre = WoodburyPrecond(u, w, c, 1.0, nspin=2, ng=ng)
+    pre = WoodburyPrecond(u, w, c, 1.0, nspin=2, ng=ng, g0_idx=0)
     r = torch.randn(2 * ng, dtype=CDTYPE)  # mixer residual ρ(G) is complex
+    r[0] = 0.0  # total-channel G=0 is pinned (charge conservation), as in the SCF
     assert torch.allclose(pre(r), r, atol=1e-12)
 
 

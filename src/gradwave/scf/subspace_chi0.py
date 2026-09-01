@@ -78,10 +78,12 @@ class WoodburyPrecond:
     acts_on = "grid"
 
     def __init__(self, u_g: torch.Tensor, w_g: torch.Tensor,
-                 cvals: torch.Tensor, volume: float, nspin: int, ng: int) -> None:
+                 cvals: torch.Tensor, volume: float, nspin: int, ng: int,
+                 g0_idx: int) -> None:
         self.nspin = nspin
         self.ng = ng
         self.volume = volume
+        self.g0_idx = g0_idx  # position of G=0 in the density sphere
         self._u = u_g
         self._w = w_g
         self.cvals = cvals
@@ -101,13 +103,19 @@ class WoodburyPrecond:
     def __call__(self, r_grid: torch.Tensor) -> torch.Tensor:
         self.n_calls += 1
         if self.nspin == 1:
-            return self._apply_updn(r_grid.to(CDTYPE)).to(r_grid.dtype)
+            out = self._apply_updn(r_grid.to(CDTYPE))
+            out[self.g0_idx] = 0.0  # conserve N_e: total-channel G=0 stays pinned
+            return out.to(r_grid.dtype)
         ng = self.ng
         tot, mag = r_grid[:ng], r_grid[ng:2 * ng]
         updn = torch.cat([(tot + mag) / 2.0, (tot - mag) / 2.0]).to(CDTYPE)
         out = self._apply_updn(updn)
         up, dn = out[:ng], out[ng:2 * ng]
-        return torch.cat([up + dn, up - dn]).to(r_grid.dtype)
+        res = torch.cat([up + dn, up - dn]).to(r_grid.dtype)
+        # conserve total electron number: pin the total-channel G=0. The
+        # magnetization G=0 (total moment) is free — it is not a fixed count.
+        res[self.g0_idx] = 0.0
+        return res
 
 
 # --------------------------------------------------------------------------
@@ -233,7 +241,8 @@ def build_woodbury_subspace(res: SCFResult, xc, *, fp_cut: float = 1e-8,
             w_g[i, :ng] = r_to_g(khxc[0].to(CDTYPE)).reshape(-1)[mask]
             w_g[i, ng:] = r_to_g(khxc[1].to(CDTYPE)).reshape(-1)[mask]
 
-    return WoodburyPrecond(u_g, w_g, cvals, vol, nspin, ng)
+    g0_idx = int((grid.g2.reshape(-1)[mask] == 0).nonzero().flatten()[0])
+    return WoodburyPrecond(u_g, w_g, cvals, vol, nspin, ng, g0_idx)
 
 
 # --------------------------------------------------------------------------
