@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from gradwave.pseudo.upf_paw import PAWData
     from gradwave.scf.loop import SCFResult
     from gradwave.scf.results import USPPResult
+    from gradwave.scf.subspace_chi0 import Chi0PrecondCache
     from gradwave.scf.uspp_setup import USPPSystem
 
 # The api's canonical name→class registries (api/_common.py) — the calculator
@@ -301,6 +302,13 @@ class GradWave(Calculator):
         compile_xc: bool = False,
         eigensolver: str = "davidson",  # davidson | chebyshev (NC path only)
         precond: str = "kerker",  # kerker | local_tf (NC and USPP/PAW paths)
+        chi0_precond: bool = False,  # opt-in subspace-χ₀ Woodbury dielectric
+        # preconditioner (NC path only). Frozen at the first converged SCF and
+        # reused as the density preconditioner on every later geometry (relax/
+        # EOS/phonon/MD), so its one-time build amortizes. Auto-abstains (falls
+        # back to `precond` above) on homogeneous/well-conditioned cells via the
+        # ρ(M) screening-eigenvalue gate — see scf.subspace_chi0.Chi0PrecondCache.
+        # Default off. USPP/PAW and single isolated SCFs ignore it.
         reuse_wavefunctions: bool = True,  # seed the Davidson eigensolver from the
         # previous ionic step's eigenvectors (alongside the density warm start);
         # False falls back to a density-only warm start (cold orbital seed)
@@ -445,6 +453,12 @@ class GradWave(Calculator):
         self._system_key: tuple[tuple[float, ...], tuple[str, ...]] | None = None
         self._device = device
         self._compile_xc = compile_xc
+        # Subspace-χ₀ Woodbury preconditioner: build once at the first converged
+        # SCF, reuse across geometries. The cache holder (with its auto-abstain
+        # gate) is created lazily in _calculate_nc, where the spin-matched xc is
+        # known. NC path only.
+        self._chi0_precond = bool(chi0_precond)
+        self._chi0_cache: Chi0PrecondCache | None = None
         self._distributed = bool(distributed)
         self._verbose = verbose
         # called once just before each FRESH SCF (not on a cached re-entry) —
@@ -1027,6 +1041,13 @@ class GradWave(Calculator):
         local_system, dist_ctx = self._maybe_shard(system)
         rhotol_eff, etol_eff = self._effective_tols()
         self.last_rhotol_used = rhotol_eff
+        # Subspace-χ₀ Woodbury preconditioner (opt-in): reuse the operator frozen
+        # at the first converged geometry as precond_op; None until it is built
+        # (first step, gate abstained, or the grid changed) → scf falls back to
+        # the base `precond`. It acts_on="grid", so scf routes it verbatim.
+        chi0_op = (self._chi0_cache.operator_for(local_system, nspin)
+                   if (self._chi0_precond and self._chi0_cache is not None)
+                   else None)
         # scf()/forces() declare xc: XCFunctional (nspin=1 only in their own
         # signature); the nspin=2 SpinXC variants both share XCFunctional's
         # interface (CompilableXC, torch.nn.Module) and are the SCF's own
@@ -1039,6 +1060,7 @@ class GradWave(Calculator):
             mixing_alpha=p["mixing_alpha"], kerker=p["mixing_kerker"],
             diago_tol=p["diago_tol"], verbose=self._verbose,
             eigensolver=p["eigensolver"], precond=p["precond"],
+            precond_op=chi0_op,
             nspin=nspin, start_mag=start_mag, tot_magnetization=tot_mag,
             hubbard=manifolds,
             hub_occ_mix=self._hub_occ_mix, hub_u_ramp_iters=self._hub_u_ramp_iters,
@@ -1048,6 +1070,15 @@ class GradWave(Calculator):
         if not res.converged:
             raise RuntimeError("gradwave SCF did not converge")
         self.last_result = res
+        # Build-once/reuse: after the FIRST converged SCF, evaluate the abstain
+        # gate and (if engaged) freeze the subspace-χ₀ operator for every later
+        # geometry. A no-op on later steps (decided once). +U changes the
+        # response kernel the frozen operator assumes, so skip it there.
+        if self._chi0_precond and manifolds is None:
+            if self._chi0_cache is None:
+                from gradwave.scf.subspace_chi0 import Chi0PrecondCache
+                self._chi0_cache = Chi0PrecondCache(verbose=self._verbose)
+            self._chi0_cache.update(res, cast("XCFunctional", xc), nspin)
         self._push_history(system, res, nspin)
         self.results["energy"] = float(res.energies.free_energy)  # consistent forces
         self.results["free_energy"] = float(res.energies.free_energy)
