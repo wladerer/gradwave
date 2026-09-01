@@ -303,6 +303,9 @@ class Chi0PrecondCache:
         self.decided = False       # gate evaluated (engage or abstain)?
         self.engaged = False
         self.rho: float | None = None
+        # one-time cost telemetry (FFT launches), for the amortization bookkeeping
+        self.gate_ffts = 0
+        self.build_ffts = 0
         # (nspin, ng, shape) the operator is frozen on
         self._grid_key: tuple[int, int, tuple[int, ...]] | None = None
 
@@ -327,6 +330,13 @@ class Chi0PrecondCache:
         the FIRST converged reference and reused, never rebuilt per step."""
         if self.decided:
             return
+        # scf() leaves the process FFT tally disabled on return; re-enable it so
+        # this one-time gate+build cost is itself counted (both in the caller's
+        # cumulative tally and in the self-reported gate_ffts/build_ffts), then
+        # restore the default-off state — the same contract scf() honours.
+        from gradwave.core import opcount
+        opcount.enable()
+        prev = opcount.snapshot()
         # ρ(M): the shipped screening-operator spectral radius (the measured
         # engage/abstain signal). Cheap, one-time: a loose χ₀ tol and a low
         # power-iteration cap suffice because the bulk↔slab ρ separation is
@@ -335,16 +345,21 @@ class Chi0PrecondCache:
         est = dominant_screening_eigenvalue(
             res, xc, n_iter=self.gate_n_iter, tol=self.gate_tol,
             chi0_tol=self.gate_chi0_tol)
+        self.gate_ffts = int(opcount.since(prev)["fft"])
         self.rho = abs(float(est.eigenvalue))
         self.decided = True
         if self.rho < self.engage_rho:
+            opcount.disable()
             if self.verbose:
                 print(f"  chi0_precond: ABSTAIN — ρ(M)={self.rho:.2f} < "
                       f"{self.engage_rho:.2f} (homogeneous/well-conditioned; "
                       "base precond kept)", flush=True)
             return
+        prev_b = opcount.snapshot()
         op = build_woodbury_subspace(res, xc, pair_cut=self.pair_cut,
                                      max_cols=self.max_cols)
+        self.build_ffts = int(opcount.since(prev_b)["fft"])
+        opcount.disable()
         if op is None:
             # insulating limit: no Fermi-surface weight — nothing to build
             if self.verbose:
