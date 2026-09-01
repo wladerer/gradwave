@@ -23,6 +23,7 @@ from gradwave.api.summary import (
     _cohp_summary_block,
     _error_estimate_block,
     _flapw_base_summary,
+    _optics_extra,
     _pdos_summary_block,
     _write_volumetric,
     build_summary,
@@ -120,6 +121,11 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
                                 runtime_s=time.time() - t0)
         if inp.error_estimate:
             summary["error_estimate"] = _error_estimate_block(res, inp)
+    elif inp.task == "optics":
+        res = run_scf(inp, verbose=verbose)
+        summary = build_summary(res, inp, "optics",
+                                extra=_optics_extra(inp, res, verbose),
+                                runtime_s=time.time() - t0)
     elif inp.task == "magnetism":
         # no error_estimate block here: magnetism runs are spinor SCFs,
         # outside every estimator's coverage (it would always be
@@ -159,7 +165,7 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
     else:
         raise ValueError(
             f"unknown task {inp.task!r} "
-            f"(scf | relax | neb | bands | magnetism | eos | elastic | phonons | "
+            f"(scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons | "
             f"flapw | nmr)")
 
     if inp.distributed:

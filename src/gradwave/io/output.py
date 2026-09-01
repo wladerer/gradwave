@@ -403,6 +403,28 @@ def _bands_lines(bands):
     return lines
 
 
+def _optics_lines(optics):
+    lines = [_sec("optical dielectric ε(ω)")]
+    ncond = optics["n_bands"] - optics["n_occ"]
+    level = "RPA (local fields)" if optics.get("local_fields") else "independent particle"
+    spin = {"noncollinear": "noncollinear (spinor)", "uspp_noncollinear":
+            "noncollinear (spinor)"}.get(optics.get("formalism", ""),
+            f"nspin={optics.get('nspin', 1)}")
+    pairs = [("ω range", f"0 – {optics['omega_eV'][-1]:.1f} eV"),
+             ("points", str(len(optics["omega_eV"]))),
+             ("broadening η", f"{optics['eta_eV']:.3f} eV"),
+             ("bands", f"{optics['n_occ']} occ + {ncond} cond"),
+             ("spin", spin),
+             ("level", level),
+             ("velocity", optics.get("velocity", "full")),
+             ("scissor", f"{optics.get('scissor_eV', 0.0):.2f} eV"),
+             ("ε₁(0)", f"{optics['eps_static']:.3f}")]
+    lines += _cols(pairs)
+    lines.append("   ε₁/ε₂/α spectra in the JSON · "
+                 "plot with `gradwave plot optics.json`")
+    return lines
+
+
 def _phonon_lines(ph):
     lines = [_sec("phonons")]
     labels = " – ".join(lab for _x, lab in ph["labels"])
@@ -795,6 +817,7 @@ _SECTIONS = (
     ("cohp", _cohp_lines, False),
     ("relax", _relax_report, True),
     ("bands", _bands_lines, False),
+    ("optics", _optics_lines, False),
     ("magnetism", _magnetism_lines, False),
     ("eos", _eos_lines, False),
     ("elastic", _elastic_lines, False),

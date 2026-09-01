@@ -291,6 +291,47 @@ def _bands_extra(inp: Input, res: SCFLike, verbose: bool) -> dict[str, Any]:
     return {"bands": bands}
 
 
+def _optics_extra(inp: Input, res: SCFLike, verbose: bool) -> dict[str, Any]:
+    from gradwave.postscf.optics import optical_epsilon
+
+    _species, upfs, _soa = _species_upfs(inp)
+    if _is_uspp(upfs):
+        raise NotImplementedError("task: optics is norm-conserving only")
+
+    # the noncollinear/spinor path rebuilds the potential from (ρ, m⃗) and so needs
+    # the XC functional (NCResult carries no v_eff); collinear reads res.v_eff and
+    # ignores xc.
+    xc = build_xc(inp) if inp.noncollinear else None
+    om, eps1, eps2, alpha, info = optical_epsilon(
+        cast("SCFResult", res), xc=xc,
+        omega_max=inp.optics.omega_max, n_omega=inp.optics.n_omega,
+        eta=inp.optics.eta, n_extra_bands=inp.optics.n_extra_bands,
+        velocity=inp.optics.velocity, local_fields=inp.optics.local_fields,
+        scissor=inp.optics.scissor, dk=inp.optics.dk, verbose=verbose,
+    )
+    optics: dict[str, Any] = {
+        "omega_eV": om.tolist(),
+        "eps1": eps1.tolist(),
+        "eps2": eps2.tolist(),
+        "absorption_inv_cm": alpha.tolist(),
+        "eta_eV": inp.optics.eta,
+        "n_bands": info["n_bands"],
+        "n_occ": info["n_occ"],
+        "nspin": info["nspin"],
+        "formalism": info["formalism"],
+        "eps_static": info["eps_static"],
+        "velocity": info["velocity"],
+        "local_fields": info["local_fields"],
+        "scissor_eV": info["scissor_eV"],
+        "eps2_tensor": info["eps2_tensor"],  # (xx, yy, zz) diagonal components
+        "eps1_tensor": info["eps1_tensor"],
+    }
+    if info["local_fields"]:
+        optics["eps1_nolfe"] = info["eps1_nolfe"]  # same convention, no local fields
+        optics["eps2_nolfe"] = info["eps2_nolfe"]
+    return {"optics": optics}
+
+
 def _error_estimate_xc(inp: Input) -> NoncollinearXC | SpinXC | XCFunctional:
     """The functional object the post-SCF estimators need to rebuild operators.
 

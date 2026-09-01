@@ -31,6 +31,7 @@ from gradwave.inputs.models import (
     NebParams,
     NmrParams,
     NmrSpectrumParams,
+    OpticsParams,
     PhononParams,
     ProjectionsParams,
     RelaxParams,
@@ -260,7 +261,8 @@ _ALLOWED_TOP = {
     "structure", "pseudopotentials", "ecut", "ecutrho", "xc", "hybrid", "hubbard",
     "kpoints", "smearing", "nbands", "symmetry", "nspin", "noncollinear",
     "nonmagnetic", "start_mag", "tot_magnetization",
-    "scf", "slab", "task", "relax", "neb", "bands", "magnetism", "eos", "elastic",
+    "scf", "slab", "task", "relax", "neb", "bands", "optics", "magnetism", "eos",
+    "elastic",
     "phonons", "flapw", "nmr",
     "projections", "dispersion", "device", "distributed",
     "verbose", "output", "error_estimate", "restart",
@@ -642,11 +644,12 @@ def _load_input(path: Path) -> Input:
     _check_keys("scf.diago", diago, {"tol"})
 
     xc, hybrid = _resolve_xc(raw)
-    if task not in ("scf", "relax", "neb", "bands", "magnetism", "eos", "elastic",
+    if task not in ("scf", "relax", "neb", "bands", "optics", "magnetism", "eos",
+                    "elastic",
                     "phonons", "flapw", "nmr"):
         raise InputError(
             f"unknown task {task!r} "
-            f"(scf | relax | neb | bands | magnetism | eos | elastic | phonons | "
+            f"(scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons | "
             f"flapw | nmr)")
     nspin = int(raw.get("nspin", 1))
     if nspin not in (1, 2):
@@ -808,6 +811,7 @@ def _load_input(path: Path) -> Input:
         relax=_build(RelaxParams, raw.get("relax", {}), "relax"),
         neb=_build_neb(dict(raw.get("neb", {})), base, task),
         bands=_build(BandsParams, raw.get("bands", {}), "bands"),
+        optics=_build(OpticsParams, raw.get("optics", {}), "optics"),
         magnetism=_build(MagnetismParams, raw.get("magnetism", {}), "magnetism"),
         eos=_build(EOSParams, raw.get("eos", {}), "eos"),
         elastic=_build(ElasticParams, raw.get("elastic", {}), "elastic"),

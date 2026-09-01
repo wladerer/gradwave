@@ -385,6 +385,36 @@ class BandsParams:
 
 
 @dataclass(frozen=True)
+class OpticsParams:
+    """Independent-particle / RPA optical dielectric function ε(ω) over the SCF
+    k-mesh (insulators, norm-conserving, nspin=1)."""
+    omega_max: float = 20.0   # eV — top of the ω grid
+    n_omega: int = 600        # points on the ω grid
+    eta: float = 0.1          # eV — Lorentzian broadening
+    n_extra_bands: int = 8    # conduction bands added above the occupied set
+    velocity: str = "full"    # full (∂H/∂k incl. nonlocal [V_nl,r]) | local (kinetic only)
+    local_fields: bool = False  # RPA local-field effects via the Dyson ε=1−vχ₀
+    scissor: float = 0.0      # eV — rigid conduction-band shift to correct the DFT gap
+    dk: float = 1.0e-3        # Å⁻¹ — finite-difference step for the nonlocal velocity
+
+    def __post_init__(self):
+        if self.omega_max <= 0.0:
+            raise InputError(f"optics.omega_max must be > 0, got {self.omega_max}")
+        if self.n_omega < 2:
+            raise InputError(f"optics.n_omega must be >= 2, got {self.n_omega}")
+        if self.eta <= 0.0:
+            raise InputError(f"optics.eta must be > 0, got {self.eta}")
+        if self.n_extra_bands < 1:
+            raise InputError(
+                f"optics.n_extra_bands must be >= 1, got {self.n_extra_bands}")
+        if self.velocity not in ("full", "local"):
+            raise InputError(
+                f"optics.velocity must be 'full' or 'local', got {self.velocity!r}")
+        if self.dk <= 0.0:
+            raise InputError(f"optics.dk must be > 0, got {self.dk}")
+
+
+@dataclass(frozen=True)
 class PhononParams:
     """Supercell finite-displacement phonons: dispersion along a q-path + DOS."""
 
@@ -963,11 +993,12 @@ class Input:
     start_mag: dict[str, float] | None = None
     tot_magnetization: float | None = None  # fix M=N↑−N↓ (nspin=2): integer fill
     # without smearing, two-Fermi-level smeared FSM with smearing
-    # scf | relax | neb | bands | magnetism | eos | elastic | phonons | flapw | nmr
+    # scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons | flapw | nmr
     task: str = "scf"
     relax: RelaxParams = field(default_factory=RelaxParams)
     neb: NebParams = field(default_factory=NebParams)  # CI-NEB transition state
     bands: BandsParams = field(default_factory=BandsParams)
+    optics: OpticsParams = field(default_factory=OpticsParams)
     magnetism: MagnetismParams = field(default_factory=MagnetismParams)
     eos: EOSParams = field(default_factory=EOSParams)
     elastic: ElasticParams = field(default_factory=ElasticParams)
