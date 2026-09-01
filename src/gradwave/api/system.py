@@ -116,6 +116,13 @@ def _fft_grid(system: System | USPPSystem) -> FFTGrid:
 def build_system(inp: Input) -> System | USPPSystem:
     """The Layer-B system for this input, NC or USPP/PAW by UPF kind."""
     species, upfs, species_of_atom = _species_upfs(inp)
+    # Slab vacuum auto-sizer (opt-in, ESM only): trim the open axis to the SAD
+    # density tail before the grid is built, so the box is frozen for the whole
+    # solve. A no-op unless enabled and both gates pass (see api._slab).
+    from gradwave.api._slab import resolve_slab_box
+
+    box = resolve_slab_box(inp, upfs, species_of_atom)
+    cell, positions = box.cell, box.positions
     # DFT+U builds the correlated occupation matrix n^I_{mm'} from only the
     # k-points in the mesh. An IBZ-folded mesh under-counts it: the manifold
     # projector's m-components mix under the star's rotations, so a single IBZ
@@ -129,7 +136,7 @@ def build_system(inp: Input) -> System | USPPSystem:
         from gradwave.scf.uspp import setup_uspp
 
         return setup_uspp(
-            inp.atoms.cell.array, inp.atoms.get_positions(), species_of_atom,
+            cell, positions, species_of_atom,
             _as_paws(upfs), ecut=inp.ecut, kmesh=inp.kpoints.mesh,
             ecutrho=inp.ecutrho, nbands=inp.nbands,
             use_symmetry=inp.symmetry and not hubbard,
@@ -142,8 +149,8 @@ def build_system(inp: Input) -> System | USPPSystem:
     # breaks k ≡ −k (TR flips m⃗); a nonmagnetic spinor (SOC only) keeps Kramers.
     hybrid = inp.hybrid.enabled
     return setup_system(
-        cell=inp.atoms.cell.array,
-        positions=inp.atoms.get_positions(),
+        cell=cell,
+        positions=positions,
         species_of_atom=species_of_atom,
         upfs=_as_upfs(upfs),
         ecut=inp.ecut,
