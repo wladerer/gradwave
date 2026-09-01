@@ -126,6 +126,8 @@ def main() -> None:
     ap.add_argument("--kmesh-xy", type=int, default=4)
     ap.add_argument("--threads", type=int, default=8)
     ap.add_argument("--with-bulk", action="store_true")
+    ap.add_argument("--bulk-kmesh", type=int, default=4)  # use_symmetry=False:
+    # full BZ, so keep the homogeneous control's mesh modest
     ap.add_argument("--out", type=str,
                     default="experiments/chi0_precond_crux/results/stage0.json")
     args = ap.parse_args()
@@ -143,8 +145,9 @@ def main() -> None:
               max_iter=args.max_iter)
 
     if args.with_bulk:
-        system, natoms = al_bulk_system(ecut_ry=args.ecut,
-                                        kmesh=(8, 8, 8), use_symmetry=False)
+        system, natoms = al_bulk_system(
+            ecut_ry=args.ecut, kmesh=(args.bulk_kmesh,) * 3,
+            use_symmetry=False)
         rows.append(run_case("fcc Al bulk (homog.)", system, natoms, 1, **kw))
         save()
 
