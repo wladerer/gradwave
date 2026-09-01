@@ -122,9 +122,14 @@ def main() -> None:
     ap.add_argument("--layers", type=int, default=8)
     ap.add_argument("--ecut", type=float, default=45.0)
     ap.add_argument("--etol", type=float, default=1e-9)
-    ap.add_argument("--rhotol", type=float, default=1e-8)
+    # Density-residual gate (energy_metric OFF): the density is the binding
+    # criterion so every arm lands on the IDENTICAL fixed-point density, not
+    # merely the same energy. rhotol is ‖ρ_out−ρ_in‖·Ω/N_G (electrons scale);
+    # 1e-9 pins the max pointwise density difference between runs below 1e-6.
+    ap.add_argument("--rhotol", type=float, default=1e-9)
     ap.add_argument("--entol", type=float, default=1e-9)
-    ap.add_argument("--max-iter", type=int, default=80)
+    ap.add_argument("--energy-metric", action="store_true")
+    ap.add_argument("--max-iter", type=int, default=120)
     ap.add_argument("--alpha", type=float, default=0.7)
     ap.add_argument("--teacher-alpha", type=float, default=0.7)
     ap.add_argument("--chi0-tol", type=float, default=1e-6)
@@ -147,14 +152,27 @@ def main() -> None:
     system_fn, nspin, phys_kw = build_system_fn(args)
     xc = xc_for(nspin)
     conv_kw = dict(etol=args.etol, rhotol=args.rhotol, max_iter=args.max_iter,
-                   energy_metric=True, entol=args.entol, verbose=False)
+                   energy_metric=args.energy_metric, entol=args.entol,
+                   verbose=False)
     base_kw = {**phys_kw, **conv_kw}
 
     rows: list[dict] = []
     meta = {"args": vars(args), "nspin": nspin}
 
+    def _json_default(o):
+        if isinstance(o, torch.Tensor):
+            return o.item() if o.ndim == 0 else o.tolist()
+        try:
+            import numpy as _np
+            if isinstance(o, _np.generic):
+                return o.item()
+        except ImportError:
+            pass
+        raise TypeError(f"not serializable: {type(o).__name__}")
+
     def save():
-        out.write_text(json.dumps({"meta": meta, "rows": rows}, indent=2))
+        out.write_text(json.dumps({"meta": meta, "rows": rows}, indent=2,
+                                  default=_json_default))
 
     print(f"=== {args.system} (kmesh={args.kmesh}, ecut={args.ecut}) ===",
           flush=True)
@@ -176,7 +194,10 @@ def main() -> None:
               flush=True)
     save()
 
-    # ---- build the cheap Woodbury preconditioner (one-time) + its FFT cost
+    # ---- build the cheap Woodbury preconditioner (one-time) + its FFT cost.
+    # scf() toggles opcount off on return (its own recorder owns it), so
+    # re-enable before snapshotting the build's one-time FFTs.
+    opcount.enable()
     prev = opcount.snapshot()
     t0 = time.time()
     cheap = build_woodbury_subspace(ref, xc, pair_cut=args.pair_cut,
@@ -234,13 +255,18 @@ def main() -> None:
         rows.append(row)
         save()
 
-    # ---- fixed-point identity (vs the pulay control) + M1 verdict
+    # ---- fixed-point identity + M1 verdict.
+    # The identity is checked against the CONVERGED pulay control (same mixer),
+    # not the production arm — production may fail to converge at a tight tol,
+    # and comparing to a non-converged density is meaningless. A preconditioner
+    # cannot move the true fixed point, so cheap/teacher/ctrl must coincide.
     meta["identity"] = {}
     if res_teach is not None:
         meta["identity"]["teacher_vs_ctrl"] = _identity(res_teach, res_ctrl)
     if res_cheap is not None:
         meta["identity"]["cheap_vs_ctrl"] = _identity(res_cheap, res_ctrl)
-        meta["identity"]["cheap_vs_prod"] = _identity(res_cheap, res_prod)
+        if res_teach is not None:
+            meta["identity"]["cheap_vs_teacher"] = _identity(res_cheap, res_teach)
 
     def _row(tag):
         for r in rows:
@@ -249,36 +275,45 @@ def main() -> None:
         return None
 
     prod, ctrl = _row("baseline_prod"), _row("baseline_ctrl")
+    prod_conv = bool(prod["converged"])
     verdict = {}
     if res_cheap is not None:
         ch = _row("cheap_woodbury")
+        # The fair, same-mixer baseline is the pulay control. Production is the
+        # real thing to beat; when it converges we compare to it, when it does
+        # NOT the student is a rescue (report both).
+        base = prod if prod_conv else ctrl
+        base_tag = "prod" if prod_conv else "ctrl(prod DIVERGED)"
         verdict["cheap_iters"] = ch["iters"]
         verdict["prod_iters"] = prod["iters"]
+        verdict["prod_converged"] = prod_conv
         verdict["ctrl_iters"] = ctrl["iters"]
-        verdict["cut_vs_prod"] = round(prod["iters"] / max(1, ch["iters"]), 3)
+        verdict["baseline_for_verdict"] = base_tag
+        verdict["cut_vs_prod"] = (round(prod["iters"] / max(1, ch["iters"]), 3)
+                                  if prod_conv else "rescue(prod diverged)")
         verdict["cut_vs_ctrl"] = round(ctrl["iters"] / max(1, ch["iters"]), 3)
         verdict["fft_overhead_vs_prod"] = round(
             ch["fft_launches"] / max(1, prod["fft_launches"]), 3)
         verdict["fft_overhead_vs_ctrl"] = round(
             ch["fft_launches"] / max(1, ctrl["fft_launches"]), 3)
+        cut_primary = base["iters"] / max(1, ch["iters"])
+        fft_primary = ch["fft_launches"] / max(1, base["fft_launches"])
         if res_teach is not None:
             te = _row("teacher_exact")
             verdict["teacher_iters"] = te["iters"]
-            verdict["teacher_cut_vs_prod"] = round(
-                prod["iters"] / max(1, te["iters"]), 3)
-            verdict["teacher_fft_overhead_vs_prod"] = round(
-                te["fft_launches"] / max(1, prod["fft_launches"]), 3)
-            # fraction of the teacher's cut the student retains
-            tc = prod["iters"] / max(1, te["iters"]) - 1.0
-            cc = prod["iters"] / max(1, ch["iters"]) - 1.0
+            verdict["teacher_cut_vs_ctrl"] = round(
+                ctrl["iters"] / max(1, te["iters"]), 3)
+            verdict["teacher_fft_overhead_vs_ctrl"] = round(
+                te["fft_launches"] / max(1, ctrl["fft_launches"]), 3)
+            tc = ctrl["iters"] / max(1, te["iters"]) - 1.0
+            cc = ctrl["iters"] / max(1, ch["iters"]) - 1.0
             verdict["frac_teacher_cut_retained"] = (
                 round(cc / tc, 3) if abs(tc) > 1e-9 else None)
-        # M1 GO gate: ≥1.5× cut vs prod at ≤1.3× FFT overhead, identical fp
-        idc = meta["identity"].get("cheap_vs_prod", {})
+        idc = meta["identity"].get("cheap_vs_ctrl", {})
         verdict["M1_GO"] = bool(
-            verdict["cut_vs_prod"] >= 1.5
-            and verdict["fft_overhead_vs_prod"] <= 1.3
+            ch["converged"] and cut_primary >= 1.5 and fft_primary <= 1.3
             and idc.get("same_fixed_point", False))
+        verdict["M1_rescue"] = bool(ch["converged"] and not prod_conv)
     meta["verdict"] = verdict
     save()
 
@@ -288,14 +323,16 @@ def main() -> None:
               f"  SAME={v['same_fixed_point']}")
     if verdict:
         print(f"  cheap: {verdict['cheap_iters']} it  "
-              f"cut_vs_prod={verdict['cut_vs_prod']}x  "
-              f"fft_overhead_vs_prod={verdict['fft_overhead_vs_prod']}x")
+              f"cut_vs_ctrl={verdict['cut_vs_ctrl']}x  "
+              f"fft_overhead_vs_ctrl={verdict['fft_overhead_vs_ctrl']}x  "
+              f"cut_vs_prod={verdict['cut_vs_prod']}")
         if "teacher_iters" in verdict:
             print(f"  teacher: {verdict['teacher_iters']} it  "
-                  f"cut={verdict['teacher_cut_vs_prod']}x  "
-                  f"fft_overhead={verdict['teacher_fft_overhead_vs_prod']}x  "
+                  f"cut_vs_ctrl={verdict['teacher_cut_vs_ctrl']}x  "
+                  f"fft_overhead_vs_ctrl={verdict['teacher_fft_overhead_vs_ctrl']}x  "
                   f"student retains {verdict['frac_teacher_cut_retained']} of cut")
-        print(f"  >>> M1_GO = {verdict.get('M1_GO')}")
+        print(f"  >>> M1_GO = {verdict.get('M1_GO')}  "
+              f"(rescue={verdict.get('M1_rescue')})")
     print(f"\nsaved -> {out}")
 
 
