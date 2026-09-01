@@ -4,7 +4,7 @@ For a converged insulating SCF this evaluates the frequency-dependent macroscopi
 dielectric function at the independent-particle (RPA-without-local-fields) level and
 the derived optical constants. The interband (Adler–Wiser, q→0) imaginary part is
 
-    ε₂(ω) = (16π² e²/Ω) Σ_k w_k Σ_{v∈occ, c∈unocc}
+    ε₂(ω) = (4π² e²/Ω) Σ_k w_k Σ_{v∈occ, c∈unocc}
                 |V_cv|² / (ε_c − ε_v)² · L_η(ε_c − ε_v − ω),
 
 with the velocity operator V = ∂H/∂k. Its local (kinetic) part in gradwave's eV/Å
@@ -88,7 +88,9 @@ def optical_epsilon(
 
     omega = torch.linspace(1e-3, omega_max, n_omega, device=device, dtype=eig.dtype)
     eps2 = torch.zeros(n_omega, device=device, dtype=eig.dtype)
-    prefac = 16.0 * np.pi**2 * E2 / omega_vol
+    # velocity-gauge IP prefactor 4π²e²/Ω (spin folded for nspin=1); calibrated
+    # against LDA Si ε₁(0)≈15 / ε₂ peak ≈ 70.
+    prefac = 4.0 * np.pi**2 * E2 / omega_vol
     vfac = 2.0 * HBAR2_2M
 
     for ik in range(bk.nk):

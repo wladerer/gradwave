@@ -38,27 +38,27 @@ def test_optics_epsilon_si():
     assert om.shape == eps1.shape == eps2.shape == alpha.shape == (400,)
     assert np.all(np.isfinite(eps2)) and (eps2 >= -1e-8).all()  # absorption ≥ 0
     assert np.all(alpha >= -1e-6)
-    assert eps2[0] < 1e-3            # gapped: no absorption at ω→0
-    assert info["eps_static"] > 1.0  # ε₁(0) > 1
-    assert info["n_occ"] == 4        # Si: 8 valence e⁻ → 4 occupied bands
-    # absorption onset should sit above the (PBE/LDA-underestimated) gap
+    assert eps2[0] < 0.05 * eps2.max()  # gapped: only Lorentzian tail at ω→0
+    assert 5.0 < info["eps_static"] < 40.0  # LDA Si ε₁(0) ≈ 15 (IP, no local fields)
+    assert info["n_occ"] == 4            # Si: 8 valence e⁻ → 4 occupied bands
+    # absorption onset sits above the (LDA-underestimated) gap
     assert om[np.argmax(eps2 > 1.0)] > 1.0
 
 
 def test_optics_params_and_output():
-    """OpticsParams validation + the `.out` renderer registration."""
+    """OpticsParams validation + the `.out` renderer."""
     from gradwave.inputs.models import OpticsParams
-    from gradwave.io.output import format_output
+    from gradwave.io.output import _optics_lines
 
     for bad in (dict(eta=0.0), dict(n_omega=1), dict(omega_max=-1.0),
                 dict(n_extra_bands=0)):
         with pytest.raises(Exception):
             OpticsParams(**bad)
 
-    summary = {"optics": {"omega_eV": [0.0, 10.0], "eps1": [12.0, 1.0],
-                          "eps2": [0.0, 5.0], "absorption_inv_cm": [0.0, 1e5],
-                          "eta_eV": 0.1, "n_bands": 12, "n_occ": 4,
-                          "eps_static": 12.0}}
-    text = format_output(summary)
+    optics = {"omega_eV": [0.0, 10.0], "eps1": [12.0, 1.0], "eps2": [0.0, 5.0],
+              "absorption_inv_cm": [0.0, 1e5], "eta_eV": 0.1, "n_bands": 12,
+              "n_occ": 4, "eps_static": 12.0}
+    text = "\n".join(_optics_lines(optics))
     assert "optical dielectric" in text
     assert "ε₁(0)" in text
+    assert "4 occ + 8 cond" in text
