@@ -10,8 +10,11 @@ import pytest
 import torch
 
 from gradwave.core.xc.lda_pw92 import LDA_PW92
+from gradwave.core.xc.noncollinear import NoncollinearXC
+from gradwave.core.xc.spin import LSDA_PW92
 from gradwave.postscf.optics import optical_epsilon
 from gradwave.scf.loop import scf, setup_system
+from gradwave.scf.noncollinear import scf_noncollinear
 from tests.helpers import RY, si_fcc, si_upf
 
 pytestmark = pytest.mark.standard
@@ -27,6 +30,11 @@ def _si_scf():
               verbose=False)
     assert res.converged
     return res
+
+
+def _si_system():
+    return setup_system(CELL, POS, [0, 0], [si_upf()], ecut=15 * RY,
+                        kmesh=(4, 4, 4), nbands=8)
 
 
 def test_optics_epsilon_si():
@@ -85,6 +93,65 @@ def test_optics_scissor():
     # oscillator strengths preserved, gap opened → static ε₁(0) drops
     assert info_s["eps_static"] < info0["eps_static"]
     assert info_s["scissor_eV"] == 1.0
+
+
+def test_optics_nspin2_matches_spin_restricted():
+    """Collinear nspin=2 on non-magnetic Si (start_mag=0) reproduces the nspin=1
+    spectrum — the two-channel sum and the halved spin fold cancel exactly."""
+    torch.set_num_threads(8)
+    r1 = _si_scf()
+    # small gaussian smearing (the spinor/collinear-spin drivers require a smearing
+    # scheme); Si's gap ≫ width so occupations stay integer and the comparison holds
+    r2 = scf(_si_system(), LSDA_PW92(), smearing="gaussian", width=0.05, nspin=2,
+             start_mag=[0.0, 0.0], etol=1e-8, rhotol=1e-7, verbose=False)
+    assert r2.converged
+    kw = dict(omega_max=16.0, n_omega=240, eta=0.15, n_extra_bands=6)
+    _, e1_1, e2_1, _, info1 = optical_epsilon(r1, **kw)
+    _, e1_2, e2_2, _, info2 = optical_epsilon(r2, **kw)
+    assert info2["nspin"] == 2 and info1["nspin"] == 1
+    assert info2["n_occ"] == 4                       # per-channel occupied count
+    # non-magnetic: the two spin channels are identical to the spin-paired result
+    assert abs(info2["eps_static"] - info1["eps_static"]) < 0.2
+    assert np.abs(e2_2 - e2_1).max() < 0.3 * e2_1.max()
+    assert np.allclose(e1_2, e1_1, atol=0.4)
+
+
+def test_optics_noncollinear_matches_spin_restricted():
+    """Noncollinear/spinor optics on non-magnetic Si (m⃗≡0 seed) reduces to the
+    nspin=1 spectrum: the spinor path (rebuilt potential, doubled bands, g=1) is
+    the same physics with the spin fold bookkept."""
+    torch.set_num_threads(8)
+    r1 = _si_scf()
+    xc = NoncollinearXC(LSDA_PW92())
+    rnc = scf_noncollinear(_si_system(), xc, mag_vec_init=[[0, 0, 0], [0, 0, 0]],
+                           smearing="gaussian", width=0.05, etol=1e-8, rhotol=1e-7,
+                           verbose=False)
+    assert rnc.converged
+    assert float(rnc.m.abs().max()) < 1e-6          # stayed non-magnetic
+    kw = dict(omega_max=16.0, n_omega=240, eta=0.15)
+    _, e1_1, e2_1, _, info1 = optical_epsilon(r1, n_extra_bands=6, **kw)
+    # spinor bands are Kramers-doubled, so 2× the conduction bands cover the same
+    # spatial-orbital manifold as the nspin=1 reference (a fair truncation match)
+    _, e1_n, e2_n, _, info_n = optical_epsilon(rnc, xc=xc, n_extra_bands=12, **kw)
+    assert info_n["formalism"] == "noncollinear"
+    assert info_n["n_occ"] == 8                       # 8 filled spinor bands (Si)
+    assert abs(info_n["eps_static"] - info1["eps_static"]) < 0.3
+    assert np.abs(e2_n - e2_1).max() < 0.35 * e2_1.max()
+    assert np.allclose(e1_n, e1_1, atol=0.5)
+
+
+def test_optics_noncollinear_needs_xc():
+    """The spinor path errors clearly without the XC functional (NCResult carries
+    no v_eff to rebuild the potential from)."""
+    xc = NoncollinearXC(LSDA_PW92())
+    rnc = scf_noncollinear(_si_system(), xc, mag_vec_init=[[0, 0, 0], [0, 0, 0]],
+                           smearing="gaussian", width=0.05, etol=1e-8, rhotol=1e-7,
+                           verbose=False)
+    with pytest.raises(ValueError, match="needs the XC functional"):
+        optical_epsilon(rnc, omega_max=12.0, n_omega=80, n_extra_bands=4)
+    with pytest.raises(NotImplementedError, match="local fields.*noncollinear"):
+        optical_epsilon(rnc, xc=xc, local_fields=True, omega_max=12.0, n_omega=80,
+                        n_extra_bands=4)
 
 
 def test_optics_params_and_output():

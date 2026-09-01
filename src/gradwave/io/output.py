@@ -407,10 +407,14 @@ def _optics_lines(optics):
     lines = [_sec("optical dielectric ε(ω)")]
     ncond = optics["n_bands"] - optics["n_occ"]
     level = "RPA (local fields)" if optics.get("local_fields") else "independent particle"
+    spin = {"noncollinear": "noncollinear (spinor)", "uspp_noncollinear":
+            "noncollinear (spinor)"}.get(optics.get("formalism", ""),
+            f"nspin={optics.get('nspin', 1)}")
     pairs = [("ω range", f"0 – {optics['omega_eV'][-1]:.1f} eV"),
              ("points", str(len(optics["omega_eV"]))),
              ("broadening η", f"{optics['eta_eV']:.3f} eV"),
              ("bands", f"{optics['n_occ']} occ + {ncond} cond"),
+             ("spin", spin),
              ("level", level),
              ("velocity", optics.get("velocity", "full")),
              ("scissor", f"{optics.get('scissor_eV', 0.0):.2f} eV"),

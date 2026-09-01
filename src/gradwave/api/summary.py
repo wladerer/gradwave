@@ -298,8 +298,12 @@ def _optics_extra(inp: Input, res: SCFLike, verbose: bool) -> dict[str, Any]:
     if _is_uspp(upfs):
         raise NotImplementedError("task: optics is norm-conserving only")
 
+    # the noncollinear/spinor path rebuilds the potential from (ρ, m⃗) and so needs
+    # the XC functional (NCResult carries no v_eff); collinear reads res.v_eff and
+    # ignores xc.
+    xc = build_xc(inp) if inp.noncollinear else None
     om, eps1, eps2, alpha, info = optical_epsilon(
-        cast("SCFResult", res),
+        cast("SCFResult", res), xc=xc,
         omega_max=inp.optics.omega_max, n_omega=inp.optics.n_omega,
         eta=inp.optics.eta, n_extra_bands=inp.optics.n_extra_bands,
         velocity=inp.optics.velocity, local_fields=inp.optics.local_fields,
@@ -313,6 +317,8 @@ def _optics_extra(inp: Input, res: SCFLike, verbose: bool) -> dict[str, Any]:
         "eta_eV": inp.optics.eta,
         "n_bands": info["n_bands"],
         "n_occ": info["n_occ"],
+        "nspin": info["nspin"],
+        "formalism": info["formalism"],
         "eps_static": info["eps_static"],
         "velocity": info["velocity"],
         "local_fields": info["local_fields"],
