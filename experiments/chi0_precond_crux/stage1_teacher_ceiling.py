@@ -128,6 +128,8 @@ def main() -> None:
     ap.add_argument("--inner-max", type=int, default=30)
     ap.add_argument("--threads", type=int, default=8)
     ap.add_argument("--skip-prod", action="store_true")
+    ap.add_argument("--ref-scheme", choices=["pulay", "johnson", "broyden"],
+                    default="pulay")  # frozen-χ₀ reference converger
     ap.add_argument("--out", type=str, required=True)
     args = ap.parse_args()
 
@@ -153,15 +155,23 @@ def main() -> None:
           flush=True)
     print("building frozen reference (converged χ₀ + fixed point)...", flush=True)
     t0 = time.time()
-    ref = scf(system_fn(), xc, mixing_scheme="johnson", precond="local_tf",
-              spin_precond=(nspin == 2), **base_kw)
+    # the frozen χ₀ must come from a CONVERGED density; use the robust converger
+    # for the reference (johnson can stall on bcc-Fe FM at tight tol). A
+    # non-converged reference makes the frozen operator meaningless.
+    ref = scf(system_fn(), xc, mixing_scheme=args.ref_scheme, precond="local_tf",
+              spin_precond=(nspin == 2), mixing_alpha=args.alpha, **base_kw)
     meta["ref"] = {"iters": int(ref.n_iter), "converged": bool(ref.converged),
+                   "scheme": args.ref_scheme,
                    "energy_eV": float(ref.energies.total),
                    "mag_total": (None if getattr(ref, "mag_total", None) is None
                                  else float(ref.mag_total)),
                    "wall_s": round(time.time() - t0, 1)}
-    print(f"  reference {ref.n_iter} iters  conv={ref.converged}  "
-          f"E={ref.energies.total:.9f}  {meta['ref']['wall_s']:.0f}s", flush=True)
+    print(f"  reference[{args.ref_scheme}] {ref.n_iter} iters  "
+          f"conv={ref.converged}  E={ref.energies.total:.9f}  "
+          f"{meta['ref']['wall_s']:.0f}s", flush=True)
+    if not ref.converged:
+        print("  WARNING: reference did NOT converge — frozen χ₀ is unreliable",
+              flush=True)
     save()
 
     precond = ExactDielectricPrecond(ref, xc, chi0_tol=args.chi0_tol,
