@@ -98,7 +98,16 @@ def test_subspace_factors_match_matrixfree():
     mask = grid.dens_mask.reshape(-1)
     vol = float(grid.volume)
     torch.manual_seed(2)
-    w = torch.randn(grid.shape, dtype=torch.float64)  # real potential-like field
+    # A physical density residual: band-limited to the density sphere (the only
+    # thing the mixer ever hands the preconditioner). A full-spectrum random
+    # field would carry high-G noise the density-sphere projection legitimately
+    # drops but the matrix-free product-then-FFT folds back in — an artefact of
+    # the probe, not the operator.
+    from gradwave.core.fftbox import g_to_r_box
+    wg = torch.zeros(grid.n_points, dtype=CDTYPE)
+    wg[mask] = r_to_g(torch.randn(grid.shape, dtype=torch.float64).to(CDTYPE)
+                      ).reshape(-1)[mask]
+    w = g_to_r_box(wg.reshape(grid.shape), real=True)
 
     # direct: χ₀_sub(K_Hxc w)
     z = apply_k_hxc(res, xc, w)

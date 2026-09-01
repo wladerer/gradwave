@@ -124,7 +124,13 @@ def _channel_dyads(res: SCFResult, isp: int, mu: float, scheme, width: float,
     system = res.system
     grid = system.grid
     ng_shape = grid.shape
-    vol = grid.volume
+    vol = float(grid.volume)
+    # Two 1/Ω factors: one is the physical χ₀ measure (the /volume in
+    # _chi0_channel_metal), the other converts the density-sphere physical
+    # projection ⟨φ_p, ·⟩ = Ω Σ_G φ̂* (·) used by the Woodbury apply into the
+    # bare wavefunction-sphere G-sum V = (1/Ω)∫ that the matrix-free response
+    # uses. Validated bit-for-bit against apply_chi0_subspace.
+    v2 = vol * vol
 
     dyads: list[tuple[torch.Tensor, float]] = []
     # δμ accumulators (per channel): Q_σ = Σ_kn w_k f'_n |ψ_n|², den = Σ w_k f'_n
@@ -154,18 +160,18 @@ def _channel_dyads(res: SCFResult, isp: int, mu: float, scheme, width: float,
         for n in range(nb):
             bnn = float(beta[n, n])
             if abs(kw * bnn) > pair_cut:
-                dyads.append((dens_n[n], kw * bnn / vol))
+                dyads.append((dens_n[n], kw * bnn / v2))
             for m in range(n):
                 bnm = float(beta[n, m])
                 if abs(kw * bnm) <= pair_cut:
                     continue
                 gnm = psi_r[n].conj() * psi_r[m]  # ψ_n* ψ_m
-                w = 2.0 * kw * bnm / vol
+                w = 2.0 * kw * bnm / v2
                 dyads.append((gnm.real.contiguous(), w))
                 dyads.append((gnm.imag.contiguous(), w))
 
     if abs(den) > 1e-30:
-        dyads.append((q_field, -1.0 / (vol * den)))
+        dyads.append((q_field, -1.0 / (v2 * den)))
     return dyads
 
 
