@@ -320,8 +320,8 @@ def _optics_extra(inp: Input, res: SCFLike, verbose: bool) -> dict[str, Any]:
         "eps1_tensor": info["eps1_tensor"],
     }
     if info["local_fields"]:
-        optics["eps1_ip"] = info["eps1_ip"]  # IP values for comparison
-        optics["eps2_ip"] = info["eps2_ip"]
+        optics["eps1_nolfe"] = info["eps1_nolfe"]  # same convention, no local fields
+        optics["eps2_nolfe"] = info["eps2_nolfe"]
     return {"optics": optics}
 
 

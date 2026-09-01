@@ -116,12 +116,16 @@ def _optical_lfe(res, om, eta, nocc, n_extra_bands, diago_tol, verbose,
 
     eye = torch.eye(n_lfe, dtype=CDTYPE, device=dev)
     eps_m = torch.empty(len(om), dtype=CDTYPE, device=dev)
+    eps_h = torch.empty(len(om), dtype=CDTYPE, device=dev)
     for w in range(len(om)):
-        eps_m[w] = 1.0 / torch.linalg.inv(eye - vG[:, None] * chi[w])[0, 0]
-    e = eps_m.cpu().numpy()
+        eps_mat = eye - vG[:, None] * chi[w]
+        eps_h[w] = eps_mat[0, 0]                           # head only (no local fields)
+        eps_m[w] = 1.0 / torch.linalg.inv(eps_mat)[0, 0]   # macroscopic, with LFE
+    em, eh = eps_m.cpu().numpy(), eps_h.cpu().numpy()
     if verbose:
-        print(f"[optics/LFE] finite-q={q0}, n_LFE={n_lfe}: ε₁(0)={e.real[0]:.2f}")
-    return e.real, e.imag
+        print(f"[optics/LFE] finite-q={q0}, n_LFE={n_lfe}: "
+              f"ε₁(0) {eh.real[0]:.2f} (no LFE) → {em.real[0]:.2f} (LFE)")
+    return em.real, em.imag, eh.real, eh.imag
 
 
 def _kramers_kronig(omega: np.ndarray, eps2: np.ndarray) -> np.ndarray:
@@ -227,8 +231,11 @@ def optical_epsilon(
     }
 
     if local_fields:
-        e1, e2 = _optical_lfe(res, om, eta, nocc, n_extra_bands, diago_tol, verbose)
+        e1, e2, e1_nolfe, e2_nolfe = _optical_lfe(
+            res, om, eta, nocc, n_extra_bands, diago_tol, verbose)
         info["eps_static"] = float(e1[0])
+        info["eps1_nolfe"] = e1_nolfe.tolist()  # same convention, no local fields
+        info["eps2_nolfe"] = e2_nolfe.tolist()
 
     modulus = np.sqrt(e1**2 + e2**2)
     kappa = np.sqrt(np.maximum((modulus - e1) / 2.0, 0.0))

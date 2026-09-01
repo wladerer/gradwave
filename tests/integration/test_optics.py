@@ -67,8 +67,9 @@ def test_optics_velocity_and_local_fields():
         res, omega_max=16.0, n_omega=120, eta=0.2, n_extra_bands=6, local_fields=True)
     assert info_lfe["local_fields"] is True
     assert np.all(np.isfinite(e2_lfe))
-    # local fields screen the response down (ε₁(0)_LFE < ε₁(0)_IP)
-    assert info_lfe["eps_static"] < info_lfe["eps1_ip"][0] + 0.5
+    # local fields screen the response DOWN vs the same-convention no-LFE head
+    assert info_lfe["eps_static"] > 1.0
+    assert info_lfe["eps_static"] <= info_lfe["eps1_nolfe"][0] * 1.02
 
 
 def test_optics_params_and_output():
