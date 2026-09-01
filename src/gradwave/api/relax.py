@@ -121,6 +121,7 @@ def _build_relax_calc(
         mixing_kerker=kerker,
         eigensolver=inp.scf.eigensolver,
         precond=inp.scf.mixing.precond,
+        chi0_precond=inp.scf.mixing.chi0_precond,
         hubbard=list(inp.hubbard.manifolds) if inp.hubbard.enabled else None,
         hub_occ_mix=inp.hubbard.occ_mix,
         hub_u_ramp_iters=inp.hubbard.u_ramp_iters,

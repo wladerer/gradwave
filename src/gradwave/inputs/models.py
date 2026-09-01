@@ -32,6 +32,13 @@ class MixingParams:
 
     # dependent Thomas-Fermi preconditioner; it replaces the constant Kerker
     # filter on the charge channel, so `kerker` no longer applies there.
+    chi0_precond: bool = False  # opt-in subspace-χ₀ Woodbury dielectric
+    # preconditioner (norm-conserving path only). Built once at the first
+    # converged SCF of a multi-geometry task (relaxation) and reused on every
+    # later step, so its one-time cost amortizes; auto-abstains to `precond`
+    # above on homogeneous/well-conditioned cells (the ρ(M) screening-eigenvalue
+    # gate — see scf.subspace_chi0.Chi0PrecondCache). Default off. Targets
+    # inhomogeneous metals/surfaces/slabs (the M1 crux regime).
 
 
 @dataclass(frozen=True)

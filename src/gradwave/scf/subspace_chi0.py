@@ -246,6 +246,122 @@ def build_woodbury_subspace(res: SCFResult, xc, *, fp_cut: float = 1e-8,
 
 
 # --------------------------------------------------------------------------
+# Build-once / reuse-across-geometry cache + auto-abstain gate (M2).
+# --------------------------------------------------------------------------
+# Engage the subspace-χ₀ Woodbury preconditioner only above this spectral radius
+# ρ(M) = |λ_max| of the screening operator M = K_Hxc·χ₀ (the shipped
+# ``scf.soft_mode.dominant_screening_eigenvalue`` power-iteration signal). Below
+# it the base local_tf/Kerker filter already conditions the fixed point, so the
+# one-time subspace build is wasted overhead. Calibrated on the crux stage0
+# inhomogeneity ladder (``research/chi0-precond-crux``): homogeneous bulk fcc-Al
+# ρ(M)=0.82 with a single charge-sloshing mode (n>0.7=1) — ABSTAIN — vs the
+# Al(100) slab ρ(M)=7.89-29.73 with 5-6 inhomogeneous surface modes (n>0.7=5-6)
+# — ENGAGE. 2.0 sits cleanly in the gap. The M1 A/B corroborates it: the
+# well-conditioned bulk-metal Fe at kmesh=4 gained only 1.11× over the pulay
+# control (the weak regime this gate rejects), while the slab cut running FFTs
+# 2.2×.
+_CHI0_ENGAGE_RHO = 2.0
+
+
+class Chi0PrecondCache:
+    """Build-once / reuse-across-geometry holder for a :class:`WoodburyPrecond`.
+
+    A multi-geometry driver (relaxation, EOS, phonon stencils, MD) runs one SCF
+    per geometry. The subspace-χ₀ Woodbury operator is frozen at the first
+    converged reference and reused as ``precond_op`` on every later step, so its
+    one-time build (~one ``apply_k_hxc`` per column) amortizes across the whole
+    trajectory — the M1 amortization result (break-even ≈ 4.5 SCFs, advantage
+    GROWS with displacement out to 0.20 Å).
+
+    Lifecycle, driven by the calculator:
+
+    * :meth:`operator_for` — the operator to pass to the NEXT SCF (``None`` until
+      the gate has engaged and the subspace is built → the SCF falls back to the
+      base local_tf/Kerker precond);
+    * :meth:`update` — after each converged SCF, decide ONCE (auto-abstain gate
+      on ρ(M)) and, if the cell is inhomogeneous enough, build the frozen
+      subspace.
+
+    The frozen operator lives on one G-sphere, so :meth:`operator_for`
+    invalidates it (returns ``None``, base-precond fallback) whenever a later
+    geometry changes the grid — e.g. a variable-cell relax that rebuilds the FFT
+    box, or a species/cutoff change.
+    """
+
+    def __init__(self, *, engage_rho: float = _CHI0_ENGAGE_RHO,
+                 pair_cut: float = 1e-6, max_cols: int = 512,
+                 gate_n_iter: int = 20, gate_tol: float = 1e-2,
+                 gate_chi0_tol: float = 1e-4, verbose: bool = False) -> None:
+        self.engage_rho = float(engage_rho)
+        self.pair_cut = pair_cut
+        self.max_cols = max_cols
+        self.gate_n_iter = int(gate_n_iter)
+        self.gate_tol = float(gate_tol)
+        self.gate_chi0_tol = float(gate_chi0_tol)
+        self.verbose = bool(verbose)
+        self.precond: WoodburyPrecond | None = None
+        self.decided = False       # gate evaluated (engage or abstain)?
+        self.engaged = False
+        self.rho: float | None = None
+        # (nspin, ng, shape) the operator is frozen on
+        self._grid_key: tuple[int, int, tuple[int, ...]] | None = None
+
+    @staticmethod
+    def _key_of(grid, nspin: int) -> tuple[int, int, tuple[int, ...]]:
+        return (int(nspin), int(grid.dens_mask.reshape(-1).sum().item()),
+                tuple(int(s) for s in grid.shape))
+
+    def operator_for(self, system, nspin: int):
+        """The cached operator to use on ``system``'s SCF, or ``None`` to fall
+        back to the base precond (not yet built, gate abstained, or the grid
+        changed since the freeze)."""
+        if self.precond is None:
+            return None
+        if self._key_of(system.grid, nspin) != self._grid_key:
+            return None
+        return self.precond
+
+    def update(self, res: SCFResult, xc, nspin: int) -> None:
+        """After a converged SCF, decide once and (if engaged) build the frozen
+        subspace. A no-op after the first decision — the operator is frozen at
+        the FIRST converged reference and reused, never rebuilt per step."""
+        if self.decided:
+            return
+        # ρ(M): the shipped screening-operator spectral radius (the measured
+        # engage/abstain signal). Cheap, one-time: a loose χ₀ tol and a low
+        # power-iteration cap suffice because the bulk↔slab ρ separation is
+        # ~0.8 vs ~8-30 (an order of magnitude).
+        from gradwave.scf.soft_mode import dominant_screening_eigenvalue
+        est = dominant_screening_eigenvalue(
+            res, xc, n_iter=self.gate_n_iter, tol=self.gate_tol,
+            chi0_tol=self.gate_chi0_tol)
+        self.rho = abs(float(est.eigenvalue))
+        self.decided = True
+        if self.rho < self.engage_rho:
+            if self.verbose:
+                print(f"  chi0_precond: ABSTAIN — ρ(M)={self.rho:.2f} < "
+                      f"{self.engage_rho:.2f} (homogeneous/well-conditioned; "
+                      "base precond kept)", flush=True)
+            return
+        op = build_woodbury_subspace(res, xc, pair_cut=self.pair_cut,
+                                     max_cols=self.max_cols)
+        if op is None:
+            # insulating limit: no Fermi-surface weight — nothing to build
+            if self.verbose:
+                print(f"  chi0_precond: ABSTAIN — ρ(M)={self.rho:.2f} but the "
+                      "subspace carries no Fermi-surface weight (insulator)",
+                      flush=True)
+            return
+        self.precond = op
+        self.engaged = True
+        self._grid_key = self._key_of(res.system.grid, nspin)
+        if self.verbose:
+            print(f"  chi0_precond: ENGAGE — ρ(M)={self.rho:.2f} ≥ "
+                  f"{self.engage_rho:.2f}; frozen subspace n_col={op.n_col} "
+                  "(reused on every later geometry)", flush=True)
+
+
+# --------------------------------------------------------------------------
 # Matrix-free reference (validation): χ₀_sub w = pieces (2)+(3), no Sternheimer.
 # --------------------------------------------------------------------------
 @torch.no_grad()
