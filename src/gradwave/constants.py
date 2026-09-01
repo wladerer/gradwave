@@ -39,3 +39,7 @@ MINUS_I_POW = (1.0 + 0.0j, -1.0j, -1.0 + 0.0j, 1.0j, 1.0 + 0.0j)
 # (api/relax.py) drifted to the CODATA-2014 value.
 EV_A3_TO_GPA = 160.2176634
 EV_A3_TO_KBAR = 10.0 * EV_A3_TO_GPA
+
+# 1 eV/Å² in J/m² (surface-energy conversion): 1.602176634e-19 J / 1e-20 m²
+# = 16.02176634 J/m², same exact SI-2018 elementary charge as EV_A3_TO_GPA.
+EV_A2_TO_JM2 = 16.02176634
