@@ -141,9 +141,10 @@ def _gate_must_not_be_called(monkeypatch):
 
 
 def test_vacuum_fraction_measures_emptiness():
-    # exactly 40% of the grid at zero density → vacuum_fraction == 0.40
+    # ~40% of the grid at zero density → vacuum_fraction ≈ 0.40 (to grid
+    # granularity: (4,4,4)=64 points, so 26/64=0.40625)
     res = _fake_res(vac=0.40)
-    assert abs(vacuum_fraction(res) - 0.40) < 1e-9
+    assert abs(vacuum_fraction(res) - 0.40) < 1.0 / 64
     # a strictly-positive-everywhere (bulk-like) density → 0
     res.rho = torch.ones_like(res.rho)
     assert vacuum_fraction(res) == 0.0
