@@ -37,7 +37,7 @@ _HBARC = 1973.269804  # eV·Å  (ħc), for α(ω) = 2ω κ / ħc
 
 @torch.no_grad()
 def _optical_lfe(res, om, eta, nocc, n_extra_bands, diago_tol, verbose,
-                 q0=0.05, n_lfe=27):
+                 scissor=0.0, q0=0.05, n_lfe=27):
     """Macroscopic ε(ω) with RPA local fields via the finite-q Dyson ε = 1 − vχ₀.
 
     Builds the microscopic χ₀_{GG'}(q,ω) at a small finite q along a reciprocal
@@ -108,6 +108,7 @@ def _optical_lfe(res, om, eta, nocc, n_extra_bands, diago_tol, verbose,
         de = (ec[None, :] - ev[:, None]).reshape(-1)
         gd = de > 1e-5
         mf, de = mf[gd], de[gd]
+        de = de + scissor / HARTREE_EV   # rigid conduction-band shift (a.u.)
         denom = (1.0 / (om_au[:, None] - de[None, :] + 1j * eta_au)
                  - 1.0 / (om_au[:, None] + de[None, :] + 1j * eta_au))
         chi = chi + float(kw[ik]) * torch.einsum("wv,vg,vh->wgh",
@@ -144,7 +145,8 @@ def _kramers_kronig(omega: np.ndarray, eps2: np.ndarray) -> np.ndarray:
 def optical_epsilon(
     res: Any, *, omega_max: float = 20.0, n_omega: int = 600, eta: float = 0.1,
     n_extra_bands: int = 8, velocity: str = "full", local_fields: bool = False,
-    dk: float = 1e-3, diago_tol: float = 1e-9, verbose: bool = False,
+    scissor: float = 0.0, dk: float = 1e-3, diago_tol: float = 1e-9,
+    verbose: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     """(ω, ε₁, ε₂, α_cm, info) for a converged insulating SCFResult ``res``.
 
@@ -156,6 +158,9 @@ def optical_epsilon(
     local_fields: add RPA local-field effects via the Dyson ε=1−vχ₀ (a small
       finite-q microscopic dielectric, inverted) — then ε₁/ε₂ are the
       local-field-corrected macroscopic dielectric and info carries the IP values.
+    scissor: rigid conduction-band shift [eV] to correct the DFT gap (Del
+      Sole–Girlanda: the oscillator strengths are preserved and only the
+      transition energies shift, so the ε₂ peaks blue-shift by the scissor).
     info also carries the diagonal ε tensor components (eps{1,2}_tensor: xx,yy,zz).
     """
     system = res.system
@@ -212,8 +217,11 @@ def optical_epsilon(
         de_f = de[good]                                   # (npair,)
         vcv = vmat[:, ik, nocc:nbands, :nocc][:, good]    # (3, npair)
         # ε₂ tensor: Σ Re(V^a V^b*)/Δ² · Lorentzian
+        # scissor (Del Sole–Girlanda): oscillator strength |V|²/Δ² is preserved
+        # (DFT Δ), only the transition energy in the Lorentzian shifts by `scissor`.
         mab = torch.einsum("ap,bp->abp", vcv, vcv.conj()).real / de_f**2
-        lor = (eta / np.pi) / ((omega[:, None] - de_f[None, :]) ** 2 + eta**2)
+        de_q = de_f + scissor
+        lor = (eta / np.pi) / ((omega[:, None] - de_q[None, :]) ** 2 + eta**2)
         eps2_t = eps2_t + prefac * float(kw[ik]) * torch.einsum("wp,abp->abw", lor, mab)
 
     om = omega.cpu().numpy()
@@ -237,11 +245,12 @@ def optical_epsilon(
         "eps1_ip": e1.tolist(), "eps2_ip": e2.tolist(),
         "eps2_tensor": eps2_diag.tolist(), "eps1_tensor": eps1_diag.tolist(),
         "velocity": velocity, "local_fields": bool(local_fields),
+        "scissor_eV": float(scissor),
     }
 
     if local_fields:
         e1, e2, e1_nolfe, e2_nolfe = _optical_lfe(
-            res, om, eta, nocc, n_extra_bands, diago_tol, verbose)
+            res, om, eta, nocc, n_extra_bands, diago_tol, verbose, scissor=scissor)
         info["eps_static"] = float(e1[0])
         info["eps1_nolfe"] = e1_nolfe.tolist()  # same convention, no local fields
         info["eps2_nolfe"] = e2_nolfe.tolist()

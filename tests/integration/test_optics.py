@@ -72,6 +72,21 @@ def test_optics_velocity_and_local_fields():
     assert info_lfe["eps_static"] <= info_lfe["eps1_nolfe"][0] * 1.02
 
 
+def test_optics_scissor():
+    """A scissor shift blue-shifts the ε₂ peak by ~Δ and lowers ε₁(0)."""
+    res = _si_scf()
+    om, _, e2_0, _, info0 = optical_epsilon(
+        res, omega_max=16.0, n_omega=320, eta=0.15, n_extra_bands=6, scissor=0.0)
+    _, _, e2_s, _, info_s = optical_epsilon(
+        res, omega_max=16.0, n_omega=320, eta=0.15, n_extra_bands=6, scissor=1.0)
+    peak0, peak_s = om[e2_0.argmax()], om[e2_s.argmax()]
+    assert peak_s - peak0 > 0.5              # peak moves up
+    assert abs((peak_s - peak0) - 1.0) < 0.4  # by ~ the scissor
+    # oscillator strengths preserved, gap opened → static ε₁(0) drops
+    assert info_s["eps_static"] < info0["eps_static"]
+    assert info_s["scissor_eV"] == 1.0
+
+
 def test_optics_params_and_output():
     """OpticsParams validation + the `.out` renderer."""
     from gradwave.inputs.models import InputError, OpticsParams

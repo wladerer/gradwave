@@ -303,7 +303,7 @@ def _optics_extra(inp: Input, res: SCFLike, verbose: bool) -> dict[str, Any]:
         omega_max=inp.optics.omega_max, n_omega=inp.optics.n_omega,
         eta=inp.optics.eta, n_extra_bands=inp.optics.n_extra_bands,
         velocity=inp.optics.velocity, local_fields=inp.optics.local_fields,
-        dk=inp.optics.dk, verbose=verbose,
+        scissor=inp.optics.scissor, dk=inp.optics.dk, verbose=verbose,
     )
     optics: dict[str, Any] = {
         "omega_eV": om.tolist(),
@@ -316,6 +316,7 @@ def _optics_extra(inp: Input, res: SCFLike, verbose: bool) -> dict[str, Any]:
         "eps_static": info["eps_static"],
         "velocity": info["velocity"],
         "local_fields": info["local_fields"],
+        "scissor_eV": info["scissor_eV"],
         "eps2_tensor": info["eps2_tensor"],  # (xx, yy, zz) diagonal components
         "eps1_tensor": info["eps1_tensor"],
     }

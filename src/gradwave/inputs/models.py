@@ -394,6 +394,7 @@ class OpticsParams:
     n_extra_bands: int = 8    # conduction bands added above the occupied set
     velocity: str = "full"    # full (∂H/∂k incl. nonlocal [V_nl,r]) | local (kinetic only)
     local_fields: bool = False  # RPA local-field effects via the Dyson ε=1−vχ₀
+    scissor: float = 0.0      # eV — rigid conduction-band shift to correct the DFT gap
     dk: float = 1.0e-3        # Å⁻¹ — finite-difference step for the nonlocal velocity
 
     def __post_init__(self):

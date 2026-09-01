@@ -413,6 +413,7 @@ def _optics_lines(optics):
              ("bands", f"{optics['n_occ']} occ + {ncond} cond"),
              ("level", level),
              ("velocity", optics.get("velocity", "full")),
+             ("scissor", f"{optics.get('scissor_eV', 0.0):.2f} eV"),
              ("ε₁(0)", f"{optics['eps_static']:.3f}")]
     lines += _cols(pairs)
     lines.append("   ε₁/ε₂/α spectra in the JSON · "
