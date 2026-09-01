@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -968,6 +969,105 @@ def _solve_bands(
     return eigenvalues, c
 
 
+def _resolve_k_chunk(k_chunk: int | None, nk: int) -> int | None:
+    """Resolve the k-streaming chunk size (k-points solved per Davidson call).
+
+    An explicit ``k_chunk`` wins; otherwise the ``GRADWAVE_K_CHUNK`` env var
+    supplies a default (the "config knob"). Returns None when streaming is OFF —
+    ``k_chunk`` unset, non-positive, or ``>= nk`` — which selects the all-k
+    batched path, byte-for-byte the historical behavior. Otherwise returns the
+    chunk size in ``[1, nk)``. Streaming caps the resident Davidson subspace at
+    ``nk_chunk·m·npw`` instead of ``nk·m·npw`` (see _solve_bands_streamed)."""
+    if k_chunk is None:
+        env = os.environ.get("GRADWAVE_K_CHUNK")
+        if env is not None and env.strip():
+            try:
+                k_chunk = int(env)
+            except ValueError:
+                raise ValueError(
+                    f"GRADWAVE_K_CHUNK must be an integer, got {env!r}"
+                ) from None
+    if k_chunk is None or k_chunk <= 0 or k_chunk >= nk:
+        return None
+    return int(k_chunk)
+
+
+def _solve_bands_streamed(
+    veff_sp: torch.Tensor,
+    coeffs_sp: torch.Tensor,
+    bk: BatchedK,
+    grid_shape: tuple[int, int, int],
+    projs_b: torch.Tensor,
+    hub: HubbardData | None,
+    hub_q: torch.Tensor | None,
+    n_hub_sp: list[torch.Tensor] | None,
+    hub_alpha: list[float] | None,
+    v_tau_s: list[torch.Tensor] | None,
+    sp: int,
+    nspin: int,
+    eigensolver: str,
+    tol_eff: float,
+    use_low: bool,
+    cdtype: torch.dtype,
+    t_solve: torch.Tensor,
+    device: torch.device,
+    u_scale: float,
+    k_chunk: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Eigensolve one spin channel in k-CHUNKS of ``k_chunk`` k-points, so the
+    resident Davidson subspace is ``nk_chunk·m·npw`` instead of ``nk·m·npw`` (the
+    k-streaming memory lever — the decisive factor for many-k slabs on a small
+    GPU). Each chunk reindexes the per-k data (BatchedK, projectors, DFT+U
+    projectors, the kinetic preconditioner ``t_solve``, and — for meta-GGA — the
+    τ-operator) to its k-slice, runs the SAME ``_solve_bands`` as the all-k path,
+    and writes the converged eigenpairs back into the full ``(nk, nb)`` /
+    ``(nk, nb, npw_max)`` output arrays; the subspace of every prior chunk is
+    freed before the next allocates.
+
+    Sequential single-device analogue of ``gradwave.distributed``'s k-sharding:
+    the per-chunk solves are independent (the shared Fermi level is applied later
+    over the FULL gathered eigenvalues, and the density is the k-sum
+    ``Σ_k`` either way), so this is algebraically identical to the all-k solve.
+    Meta-GGA rebuilds only the cheap per-chunk apply from the precomputed,
+    k-independent ``v_tau_s``. Hybrid Fock (which couples orbitals across k) is
+    not streamed — the caller rejects it up front."""
+    nk = coeffs_sp.shape[0]
+    eigs_out = torch.empty(nk, coeffs_sp.shape[1], dtype=RDTYPE, device=device)
+    coeffs_out = torch.empty_like(coeffs_sp)
+    idx_device = bk.mask.device
+    for lo in range(0, nk, k_chunk):
+        hi = min(lo + k_chunk, nk)
+        idx = torch.arange(lo, hi, device=idx_device)
+        bk_c = bk.reindex(idx)
+        hub_q_c = hub_q[lo:hi] if hub_q is not None else None
+        mgga_c = (
+            None
+            if v_tau_s is None
+            else _metagga_ops_from_vtau(v_tau_s, bk_c, grid_shape, nspin)[sp]
+        )
+        eigs_out[lo:hi], coeffs_out[lo:hi] = _solve_bands(
+            veff_sp,
+            coeffs_sp[lo:hi],
+            bk_c,
+            grid_shape,
+            projs_b[lo:hi],
+            hub,
+            hub_q_c,
+            n_hub_sp,
+            hub_alpha,
+            None,  # fock is not streamed (rejected up front); no per-chunk op
+            mgga_c,
+            eigensolver,
+            tol_eff,
+            use_low,
+            cdtype,
+            t_solve[lo:hi],
+            device,
+            u_scale,
+        )
+    return eigs_out, coeffs_out
+
+
 def _bootstrap_tau(
     xc: XCFunctional | SpinXC,
     coeffs_b_s: list[torch.Tensor],
@@ -997,6 +1097,69 @@ def _bootstrap_tau(
     ]
 
 
+def _metagga_vtau(
+    xc: XCFunctional | SpinXC,
+    rho_s: list[torch.Tensor],
+    rho_tot: torch.Tensor,
+    tau_list: list[torch.Tensor] | None,
+    system: System,
+    nspin: int,
+    grid: FFTGrid,
+) -> list[torch.Tensor] | None:
+    """Per-spin scaled v_τσ = ∂e_xc/∂τ_σ grid fields from the current (ρ, τ), or
+    None for a non-τ functional. This is the k-INDEPENDENT half of the meta-GGA
+    operator (a pure grid autograd through the XC functional); it is split out so
+    the k-streaming path computes it ONCE per SCF step and rebuilds only the cheap
+    per-chunk apply from it (see _metagga_ops_from_vtau)."""
+    if not xc.needs_tau:
+        return None
+    # tau_list is bootstrapped/rebuilt in lockstep with xc.needs_tau by the
+    # caller (_bootstrap_tau before the loop, then the `if xc.needs_tau:`
+    # rebuild each iteration — see scf()) so it's never None here.
+    assert tau_list is not None
+    if nspin == 1:
+        assert isinstance(xc, XCFunctional)
+        rho_for_xc = rho_tot if system.rho_core is None else rho_tot + system.rho_core
+        return [vtau_potential(xc, rho_for_xc, tau_list[0], grid)]
+    cu2 = None if system.rho_core is None else 0.5 * system.rho_core
+    r_u = rho_s[0] if cu2 is None else rho_s[0] + cu2
+    r_d = rho_s[1] if cu2 is None else rho_s[1] + cu2
+    return list(vtau_spin_potential(xc, r_u, r_d, tau_list[0], tau_list[1], grid))
+
+
+def _metagga_ops_from_vtau(
+    v_tau_s: list[torch.Tensor],
+    bk: BatchedK,
+    shape: tuple[int, int, int],
+    nspin: int,
+) -> list[Callable[[torch.Tensor], torch.Tensor]]:
+    """Per-spin meta-GGA generalized-KS operators −½∇·(v_τσ∇ψ_σ) bound to ``bk``,
+    from the precomputed v_τ fields. Each spin's operator (and its ``bk``) is
+    captured by DEFAULT ARGUMENT so the spin solve binds this v_τ, not a later
+    one. The k-streaming eigensolve calls this per chunk with the chunk's
+    reindexed BatchedK, so the τ-operator's sphere↔box transforms cover only the
+    chunk's k-points."""
+    from gradwave.core.metagga import (
+        apply_tau_toeplitz,
+        build_tau_toeplitz,
+        metagga_tau_operator,
+    )
+
+    # Small-cell fast path: build the weighted-Toeplitz matrix once per spin (v_τ
+    # is fixed for this iteration's solve) so V_τ c is one GEMM instead of 6
+    # FFTs/band. build_tau_toeplitz returns None when the gate declines → FFT.
+    ops: list[Callable[[torch.Tensor], torch.Tensor]] = []
+    for sp in range(nspin):
+        vt_mat = build_tau_toeplitz(v_tau_s[sp], bk, shape)
+        if vt_mat is not None:
+            ops.append(lambda c, _V=vt_mat, _bk=bk: apply_tau_toeplitz(_V, c, _bk))
+        else:
+            ops.append(
+                lambda c, _v=v_tau_s[sp], _bk=bk, _sh=shape: metagga_tau_operator(c, _v, _bk, _sh)
+            )
+    return ops
+
+
 def _build_metagga_apply(
     xc: XCFunctional | SpinXC,
     rho_s: list[torch.Tensor],
@@ -1008,41 +1171,14 @@ def _build_metagga_apply(
     grid: FFTGrid,
 ) -> list[Callable[[torch.Tensor], torch.Tensor]] | None:
     """Per-spin meta-GGA generalized-KS operator −½∇·(v_τσ∇ψ_σ), or None when the
-    functional is not τ-dependent. v_τσ = ∂e_xc/∂τ_σ from the current (ρ, τ); each
-    spin's operator is captured by DEFAULT ARGUMENT so the spin solve binds this
-    v_τ, not a later one."""
-    if not xc.needs_tau:
+    functional is not τ-dependent. Thin composition of _metagga_vtau (the
+    k-independent v_τ fields) and _metagga_ops_from_vtau (the per-bk apply) — the
+    all-k path; the k-streaming path calls the two halves separately so v_τ is
+    computed once and only the apply is rebuilt per chunk."""
+    v_tau_s = _metagga_vtau(xc, rho_s, rho_tot, tau_list, system, nspin, grid)
+    if v_tau_s is None:
         return None
-    from gradwave.core.metagga import (
-        apply_tau_toeplitz,
-        build_tau_toeplitz,
-        metagga_tau_operator,
-    )
-
-    # tau_list is bootstrapped/rebuilt in lockstep with xc.needs_tau by the
-    # caller (_bootstrap_tau before the loop, then the `if xc.needs_tau:`
-    # rebuild each iteration — see scf()) so it's never None here.
-    assert tau_list is not None
-    if nspin == 1:
-        assert isinstance(xc, XCFunctional)
-        rho_for_xc = rho_tot if system.rho_core is None else rho_tot + system.rho_core
-        v_tau_s = [vtau_potential(xc, rho_for_xc, tau_list[0], grid)]
-    else:
-        cu2 = None if system.rho_core is None else 0.5 * system.rho_core
-        r_u = rho_s[0] if cu2 is None else rho_s[0] + cu2
-        r_d = rho_s[1] if cu2 is None else rho_s[1] + cu2
-        v_tau_s = list(vtau_spin_potential(xc, r_u, r_d, tau_list[0], tau_list[1], grid))
-    # Small-cell fast path: build the weighted-Toeplitz matrix once per spin (v_τ
-    # is fixed for this iteration's solve) so V_τ c is one GEMM instead of 6
-    # FFTs/band. build_tau_toeplitz returns None when the gate declines → FFT.
-    ops: list[Callable[[torch.Tensor], torch.Tensor]] = []
-    for sp in range(nspin):
-        vt_mat = build_tau_toeplitz(v_tau_s[sp], bk, grid.shape)
-        if vt_mat is not None:
-            ops.append(lambda c, _V=vt_mat: apply_tau_toeplitz(_V, c, bk))
-        else:
-            ops.append(lambda c, _v=v_tau_s[sp]: metagga_tau_operator(c, _v, bk, grid.shape))
-    return ops
+    return _metagga_ops_from_vtau(v_tau_s, bk, grid.shape, nspin)
 
 
 def _assemble_scf_energies(
@@ -1449,6 +1585,15 @@ def scf(
     # the Fermi level µ [eV] fixed and let the electron count N float. Requires a
     # smearing scheme and boundary="open_z_metal" (the plates source/sink the charge).
     # None (default) runs the ordinary fixed-N SCF.
+    k_chunk: int | None = None,  # k-STREAMING: solve the bands in sequential chunks
+    # of at most this many k-points per Davidson call, so the resident subspace is
+    # nk_chunk·m·npw regardless of the total k-count (the memory lever that fits a
+    # many-k slab SCF on a small GPU). Sequential single-device analogue of the
+    # distributed k-sharding: eigenvalues are collected across chunks for the shared
+    # Fermi level, the density accumulates over chunks — algebraically identical to
+    # the all-k solve. None (default) — or GRADWAVE_K_CHUNK when unset — runs the
+    # all-k batched path, byte-for-byte unchanged. Not compatible with hybrid Fock
+    # (which couples orbitals across k). See _solve_bands_streamed.
 ) -> SCFResult:
     # `fock`, when given, adds an orbital-dependent operator to the Hamiltonian
     # each SCF step (a hybrid functional's Fock exchange). It must expose
@@ -1464,6 +1609,17 @@ def scf(
     _validate_scf_args(
         system, nspin, eigensolver, smearing, mixing_scheme, precond, tot_magnetization
     )
+    # k-streaming (sequential per-device k-sharding): resolve the chunk size
+    # (None → all-k, byte-for-byte). Hybrid Fock couples orbitals across k, so a
+    # per-chunk solve cannot see the full-BZ exchange — reject the combination up
+    # front, mirroring the distributed path's fock exclusion.
+    k_chunk_res = _resolve_k_chunk(k_chunk, nk)
+    if k_chunk_res is not None and fock is not None:
+        raise NotImplementedError(
+            "k_chunk (k-streaming) does not support hybrid Fock exchange — the "
+            "Fock operator couples orbitals across the whole BZ, which a per-chunk "
+            "Davidson solve cannot see (same reason the distributed SCF excludes it)"
+        )
     if target_mu is not None:
         # Constant-potential (grand-canonical) SCF: the electron count floats to
         # hold µ, so the cell is charged — the metal plates must source/sink the
@@ -1686,8 +1842,15 @@ def scf(
 
         # meta-GGA generalized-KS operator: v_τσ = ∂e_xc/∂τ_σ from the current
         # (ρ, τ), applied additively as −½∇·(v_τσ∇ψ_σ) per spin in the H-apply.
-        metagga_apply_s = _build_metagga_apply(
-            xc, rho_s, rho_tot, tau_list, system, nspin, bk, grid
+        # Split into the k-independent v_τ fields (computed once here) and the
+        # per-bk apply (built below): the all-k path builds it once against the
+        # full bk; k-streaming rebuilds only the cheap apply against each chunk's
+        # reindexed bk (see _solve_bands_streamed).
+        v_tau_s = _metagga_vtau(xc, rho_s, rho_tot, tau_list, system, nspin, grid)
+        metagga_apply_s = (
+            None
+            if v_tau_s is None or k_chunk_res is not None
+            else _metagga_ops_from_vtau(v_tau_s, bk, grid.shape, nspin)
         )
 
         # adaptive diagonalization tolerance, quadratic schedule (see
@@ -1715,7 +1878,6 @@ def scf(
         _t_eig0 = time.perf_counter()
         for sp in range(nspin):
             fock_sp = fock_apply_s[sp] if fock_apply_s is not None else None
-            mgga_sp = metagga_apply_s[sp] if metagga_apply_s is not None else None
             n_hub_sp = None
             if hub is not None:
                 # n_hub_s is set together with hub (the `if hubbard:` block
@@ -1723,26 +1885,54 @@ def scf(
                 # below), so it's never None when hub isn't.
                 assert n_hub_s is not None
                 n_hub_sp = n_hub_s[sp]
-            eigs_s[sp], coeffs_b_s[sp] = _solve_bands(
-                veff_s[sp],
-                coeffs_b_s[sp],
-                bk,
-                grid.shape,
-                projs_b,
-                hub,
-                hub_q,
-                n_hub_sp,
-                hub_alpha,
-                fock_sp,
-                mgga_sp,
-                eigensolver,
-                tol_eff,
-                use_low,
-                cdtype,
-                t_solve,
-                device,
-                u_scale,
-            )
+            if k_chunk_res is None:
+                # all-k batched solve (default): the resident subspace is nk·m·npw.
+                mgga_sp = metagga_apply_s[sp] if metagga_apply_s is not None else None
+                eigs_s[sp], coeffs_b_s[sp] = _solve_bands(
+                    veff_s[sp],
+                    coeffs_b_s[sp],
+                    bk,
+                    grid.shape,
+                    projs_b,
+                    hub,
+                    hub_q,
+                    n_hub_sp,
+                    hub_alpha,
+                    fock_sp,
+                    mgga_sp,
+                    eigensolver,
+                    tol_eff,
+                    use_low,
+                    cdtype,
+                    t_solve,
+                    device,
+                    u_scale,
+                )
+            else:
+                # k-streaming: solve k in chunks so the resident subspace is
+                # nk_chunk·m·npw regardless of total nk (fock excluded up front).
+                eigs_s[sp], coeffs_b_s[sp] = _solve_bands_streamed(
+                    veff_s[sp],
+                    coeffs_b_s[sp],
+                    bk,
+                    grid.shape,
+                    projs_b,
+                    hub,
+                    hub_q,
+                    n_hub_sp,
+                    hub_alpha,
+                    v_tau_s,
+                    sp,
+                    nspin,
+                    eigensolver,
+                    tol_eff,
+                    use_low,
+                    cdtype,
+                    t_solve,
+                    device,
+                    u_scale,
+                    k_chunk_res,
+                )
         _t_eig_s = time.perf_counter() - _t_eig0
 
         occ_s, mu, mu_spin, entropy_term, n_float, eigs_global_s, occ_global_s = _fermi_occupations(
