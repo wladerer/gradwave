@@ -461,6 +461,63 @@ of atoms, not visible on Si; (b) it requires the full μ-basis reformulation (ε
 Next: implement the μ-basis RPA/Σ_c (never form χ₀_GG'), and test on a multi-atom
 supercell on a larger GPU.
 
+## Symbolic algebra for runtime/overhead — Gaunt, f_xc, velocity
+
+### Gaunt sparse tables — no real win (already exploited)
+Investigated the actual consumers. The dense Gaunt table is built **once** at setup
+(~16 KB), the USPP consumer (`uspp_setup.py`) is one-time, and the per-SCF PAW hot
+path (`paw_onsite.rho_lm`) **already** does `np.nonzero(|cy|>1e-12)` and loops only
+over nonzeros. So the "92% sparse / 12.5×" headline is about the tiny one-time table,
+and the skip-zero flop win is already in place. A "sparse Gaunt" refactor would touch
+the PAW hot path for negligible gain. **Skipped** (correctness is covered by the
+merged oracle test).
+
+### f_xc codegen (PBE) — validated; modest eager win, compile env-blocked ✅
+`fxc_codegen.py`. Symbolic PBE `e_xc(ρ,σ)` (matching `pbe.py`/`_pbe_kernels`) → CSE
+(138 shared subexpressions) → flat kernel returning `e, v_ρ, v_σ, f_ρρ, f_ρσ, f_σσ`
+analytically. **Matches gradwave's autograd (single + double backward) to 7e-13.**
+
+| path | GPU time (200k pts, e+5 derivs) | vs autograd |
+|---|---|---|
+| autograd (fwd + double backward, forced eager) | 28.2 ms | 1.0× |
+| symbolic kernel, eager | 20.4 ms | **1.4×** |
+| symbolic kernel, torch.compile | — | blocked* |
+
+*`torch.compile` fails on this box: NixOS has no `/sbin/ldconfig`, which torch's
+Inductor shells out to (CPU **and** CUDA backends). That's an **environment** issue,
+not the method — the kernel now traces cleanly through Dynamo. On a standard toolchain
+the LDA prototype compiled to ~48×, and note the autograd f_xc **cannot be compiled at
+all** (double-backward), so the symbolic kernel is the *only* compilable f_xc — exactly
+the path `base.py` documents as forced-eager for DFPT/phonons/response.
+
+**Value even without compile:** 1.4× eager + **tape-free** (no retained autograd graph
+per grid batch → lower memory on the response path). Fix the toolchain (add glibc's
+`ldconfig` to the env) and the compiled win is unlocked. Next: generate r2SCAN (the
+deep functional where the autograd double-backward is most expensive).
+
+### Analytic velocity operator ∂H/∂k — marginal runtime, real accuracy (`velocity_probe.py`)
+`dielectric.py` builds ∂H/∂k with a central finite difference of the KB projectors in
+k. But the form factors are a **prebuilt cubic spline** (`beta_form_factors`), so a
+projector rebuild at a shifted k is cheap — measured **0.52 ms** (Si, npw=731,
+nproj=16). So finite-diff ∂H/∂k ≈ 3.1 ms (6 rebuilds) vs analytic ≈ 0.8 ms (1
+assembly + the spline-derivative F′(q)): a ~4× speedup, but on a sub-ms op — **~2.3
+ms/k saved**. That only matters over a *dense k-mesh* (transport, Berry curvature),
+and even there the velocity assembly isn't the bottleneck (the eigensolve is).
+
+**Verdict:** the analytic ∂H/∂k is a marginal *runtime* win. Its real value is
+**accuracy** — exact vs the O(δk²) finite difference, and it gives the analytic
+nonlocal `[V_nl, r]` commutator that a proper velocity-gauge optical/transport matrix
+element needs (the piece `rpa_absorption.py` omitted). Worth building for correctness,
+not for speed.
+
+### Summary — symbolic algebra for runtime in gradwave
+gradwave is already well-optimized, so the symbolic-algebra *runtime* wins are modest:
+Gaunt is already sparse-exploited (no win); the velocity operator's finite diff is
+cheap and accurate (marginal); **f_xc is the only real one** — 1.4× eager + tape-free,
+and the *only* compilable f_xc (the big win, gated on fixing the compile toolchain, is
+compiled r2SCAN f_xc for phonons/DFPT). The higher-value symbolic uses are accuracy/
+capability (the nonlocal-commutator velocity), not raw speed.
+
 ## Honest scorecard
 
 - **Biggest sure win:** Track 1 (92% sparsity, exact, self-contained).
