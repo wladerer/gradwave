@@ -250,6 +250,27 @@ def _extrapolation_coeffs(
     return coeffs  # fully degenerate → all zeros (plain reuse)
 
 
+def _validate_esm_geometry(cell: np.ndarray, boundary: str) -> None:
+    """Fail fast (before building the plane-wave basis) when an ESM boundary is
+    requested on a cell whose open axis is not orthogonal to the two periodic
+    axes. ESM separates "in-plane" from "z" only for slab geometry (c ⊥ a,b);
+    the ESM engine (core/energies/esm.py) uses open_axis=2 (the c/third axis).
+    Mirrors the deeper esm.py check but raises up front with the calculator
+    context, so a mis-set cell doesn't surface only mid-SCF."""
+    if boundary == "periodic":
+        return
+    cell = np.asarray(cell, dtype=np.float64).reshape(3, 3)
+    c = cell[2]
+    for a in (0, 1):
+        denom = np.linalg.norm(c) * np.linalg.norm(cell[a])
+        cos = 0.0 if denom == 0.0 else abs(float(np.dot(c, cell[a]))) / denom
+        if cos > 1e-8:
+            raise ValueError(
+                f"boundary={boundary!r} (ESM) requires an orthogonal slab cell: "
+                f"the open (c/third) axis must be ⊥ the periodic axes, but axis "
+                f"{a} has |cos|={cos:.2e}. Orient the vacuum along c with c ⊥ a,b.")
+
+
 class GradWave(Calculator):
     # ASE API contract: the base Calculator declares implemented_properties as a
     # plain class-level list, so RUF012's ClassVar annotation is an invalid
@@ -348,6 +369,17 @@ class GradWave(Calculator):
         # calculator always evaluates stress for a cell).
         hub_occ_mix: float = 1.0,  # DFT+U occupation-matrix damping β in (0,1] (1.0 = raw lag)
         hub_u_ramp_iters: int = 0,  # DFT+U linear U-ramp length in iterations (0 = off)
+        boundary: str = "periodic",  # electrostatic boundary condition (slab
+        # geometry, c ⊥ a,b): "periodic" (default, 3D-periodic) | "open_z"
+        # (open-boundary / ESM vacuum both sides — no dipole correction,
+        # box-independent surfaces) | "open_z_metal" (metal Dirichlet planes at
+        # both z-box edges — a capacitor; pair with esm_bias). ESM is opt-in;
+        # the default stays plain-periodic. See core/energies/esm.py. Requires an
+        # orthogonal slab cell (c ⊥ a,b) — validated at calculate().
+        esm_bias: float = 0.0,  # applied capacitor bias [V] for boundary="open_z_metal"
+        target_mu: float | None = None,  # constant-potential (grand-canonical) SCF:
+        # hold the Fermi level µ [eV] fixed and let the electron count float.
+        # Requires boundary="open_z_metal" and a smearing (NC path). None → off.
         distributed: bool = False,  # opt into k-point-sharded distributed SCF
         # (gradwave.distributed) for every ionic step. Under an active torchrun
         # launch (WORLD_SIZE>1) each calculate() diagonalizes only this rank's
@@ -386,8 +418,14 @@ class GradWave(Calculator):
                  precond=precond, reuse_wavefunctions=reuse_wavefunctions,
                  pulay_stress_correction=bool(pulay_stress_correction),
                  pulay_solver=str(pulay_solver),
-                 extrapolation=str(extrapolation))
+                 extrapolation=str(extrapolation),
+                 boundary=str(boundary), esm_bias=float(esm_bias),
+                 target_mu=(None if target_mu is None else float(target_mu)))
         )
+        if boundary not in ("periodic", "open_z", "open_z_metal"):
+            raise ValueError(
+                "boundary must be 'periodic', 'open_z' or 'open_z_metal', got "
+                f"{boundary!r}")
         if pulay_solver not in ("diagonal", "cg"):
             raise ValueError(
                 f"pulay_solver must be 'diagonal' or 'cg', got {pulay_solver!r}")
@@ -978,6 +1016,7 @@ class GradWave(Calculator):
             return
         if self._scf_step_hook is not None:
             self._scf_step_hook()
+        _validate_esm_geometry(self.atoms.cell.array, self.parameters["boundary"])
         symbols = self.atoms.get_chemical_symbols()
         if self._is_uspp(sorted(set(symbols))):
             self._calculate_uspp()
@@ -1065,6 +1104,8 @@ class GradWave(Calculator):
             hubbard=manifolds,
             hub_occ_mix=self._hub_occ_mix, hub_u_ramp_iters=self._hub_u_ramp_iters,
             dist_ctx=dist_ctx,
+            boundary=p["boundary"], esm_bias=p["esm_bias"],
+            target_mu=p["target_mu"],
             start_from=start, **mix_kw,
         )
         if not res.converged:
@@ -1225,6 +1266,12 @@ class GradWave(Calculator):
             raise ValueError(
                 "eigensolver='chebyshev' is norm-conserving only; the USPP/PAW "
                 "generalized S-metric problem is not supported yet")
+        if p["target_mu"] is not None:
+            raise NotImplementedError(
+                "target_mu (constant-µ / grand-canonical SCF) is norm-conserving "
+                "only; the USPP/PAW path has no floating-charge grand-canonical "
+                "mode. Use boundary='open_z'/'open_z_metal' with a fixed electron "
+                "count on this formalism.")
         if p["pulay_stress_correction"]:
             raise NotImplementedError(
                 "pulay_stress_correction is norm-conserving only; the "
@@ -1260,6 +1307,7 @@ class GradWave(Calculator):
                        hub_u_ramp_iters=self._hub_u_ramp_iters,
                        verbose=self._verbose,
                        dist_ctx=dist_ctx,
+                       boundary=p["boundary"], esm_bias=p["esm_bias"],
                        # _warm_start is shared with the NC path; scf_uspp only
                        # ever receives the USPP-shaped subset here (is_uspp
                        # gates it internally) — the cast documents that.

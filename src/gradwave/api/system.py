@@ -113,6 +113,21 @@ def _fft_grid(system: System | USPPSystem) -> FFTGrid:
     return system.grid
 
 
+def _resolve_kmesh(inp: Input) -> tuple[int, int, int]:
+    """The effective Monkhorst–Pack mesh for this input.
+
+    ``kpoints.kspacing`` (when set) derives a slab-aware anisotropic mesh from the
+    cell via ``kpoints.slab_kmesh`` — the detected vacuum axis is pinned to a
+    single Γ point. Otherwise the explicit ``kpoints.mesh`` is used verbatim."""
+    if inp.kpoints.kspacing is None:
+        return tuple(inp.kpoints.mesh)
+    from gradwave.kpoints import slab_kmesh
+
+    return slab_kmesh(
+        inp.atoms.cell.array, inp.atoms.get_positions(),
+        float(inp.kpoints.kspacing))
+
+
 def build_system(inp: Input) -> System | USPPSystem:
     """The Layer-B system for this input, NC or USPP/PAW by UPF kind."""
     species, upfs, species_of_atom = _species_upfs(inp)
@@ -123,6 +138,7 @@ def build_system(inp: Input) -> System | USPPSystem:
 
     box = resolve_slab_box(inp, upfs, species_of_atom)
     cell, positions = box.cell, box.positions
+    kmesh = _resolve_kmesh(inp)
     # DFT+U builds the correlated occupation matrix n^I_{mm'} from only the
     # k-points in the mesh. An IBZ-folded mesh under-counts it: the manifold
     # projector's m-components mix under the star's rotations, so a single IBZ
@@ -137,7 +153,7 @@ def build_system(inp: Input) -> System | USPPSystem:
 
         return setup_uspp(
             cell, positions, species_of_atom,
-            _as_paws(upfs), ecut=inp.ecut, kmesh=inp.kpoints.mesh,
+            _as_paws(upfs), ecut=inp.ecut, kmesh=kmesh,
             ecutrho=inp.ecutrho, nbands=inp.nbands,
             use_symmetry=inp.symmetry and not hubbard,
         )
@@ -154,7 +170,7 @@ def build_system(inp: Input) -> System | USPPSystem:
         species_of_atom=species_of_atom,
         upfs=_as_upfs(upfs),
         ecut=inp.ecut,
-        kmesh=inp.kpoints.mesh,
+        kmesh=kmesh,
         kshift=inp.kpoints.shift,
         nbands=inp.nbands,
         use_symmetry=inp.symmetry and not hybrid and not hubbard,

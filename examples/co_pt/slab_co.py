@@ -81,17 +81,26 @@ def build_slab_co(a0, site):
     return slab
 
 
-def calc(kpts):
+def calc(kpts, boundary="periodic"):
+    # The slab calculations use boundary="open_z" (Otani–Sugino ESM open-boundary
+    # electrostatics): a plain 3D-periodic run puts a spurious dipole field between
+    # the asymmetric slab's periodic z-images (CO on one face only), washing out the
+    # work-function asymmetry and biasing E_ads. ESM removes the z-images with no
+    # dipole correction, so the two faces come out correctly asymmetric and the
+    # binding energy is image-free. The vacuum axis is c (fcc111 puts it along z,
+    # ⊥ the in-plane pair), which is what ESM requires. Gas-phase CO stays periodic
+    # in a large box (no surface to break z-symmetry).
     return GradWave(ecut=ECUT, ecutrho=ECUTRHO, pseudopotentials=PSEUDOS,
                     xc="pbe", kpts=kpts, smearing="gaussian", width=WIDTH,
-                    etol=1e-7, rhotol=1e-6, device=DEVICE, verbose=False)
+                    boundary=boundary, etol=1e-7, rhotol=1e-6, device=DEVICE,
+                    verbose=False)
 
 
-def relax(atoms, kpts, tag, results, *, single_point=False):
+def relax(atoms, kpts, tag, results, *, single_point=False, boundary="periodic"):
     if tag in results:
         print(f"  [skip] {tag} (done: E={results[tag]['energy']:.4f})", flush=True)
         return
-    atoms.calc = calc(kpts)
+    atoms.calc = calc(kpts, boundary=boundary)
     t0 = time.time()
     if not single_point:
         BFGS(atoms, logfile=None).run(fmax=FMAX, steps=MAXSTEP)
@@ -118,12 +127,16 @@ def main():
     gas.center()
     relax(gas, GAS_K, "CO_gas", results)
 
-    # clean slab (rigid, single-point)
-    relax(build_slab(a0), SLAB_K, "slab", results, single_point=True)
+    # clean slab (rigid, single-point) — open-boundary (ESM) electrostatics
+    relax(build_slab(a0), SLAB_K, "slab", results, single_point=True,
+          boundary="open_z")
 
-    # slab + CO at the two sites (relax CO only)
+    # slab + CO at the two sites (relax CO only) — open-boundary (ESM): the CO on
+    # one face makes the slab asymmetric, so a periodic run's z-image dipole would
+    # bias E_ads; open_z removes it.
     for site in ("ontop", "fcc"):
-        relax(build_slab_co(a0, site), SLAB_K, f"slab_CO_{site}", results)
+        relax(build_slab_co(a0, site), SLAB_K, f"slab_CO_{site}", results,
+              boundary="open_z")
 
     # binding energies
     if all(k in results for k in ("CO_gas", "slab", "slab_CO_ontop", "slab_CO_fcc")):

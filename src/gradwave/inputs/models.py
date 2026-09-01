@@ -170,6 +170,16 @@ class SmearingParams:
 class KPointsParams:
     mesh: tuple[int, int, int] = (1, 1, 1)
     shift: tuple[int, int, int] = (0, 0, 0)
+    # target reciprocal-space k-spacing [Å⁻¹]; when set (not None), the mesh is
+    # derived at build time from the cell via kpoints.slab_kmesh — anisotropic and
+    # slab-aware (the detected vacuum axis is pinned to a single Γ point). Overrides
+    # `mesh`. Pair with a Γ-centered shift (0,0,0). None → use `mesh` verbatim.
+    kspacing: float | None = None
+
+    def __post_init__(self):
+        if self.kspacing is not None and self.kspacing <= 0.0:
+            raise InputError(
+                f"kpoints.kspacing must be positive, got {self.kspacing!r}")
 
 
 @dataclass(frozen=True)

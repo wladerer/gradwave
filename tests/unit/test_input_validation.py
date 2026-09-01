@@ -71,12 +71,40 @@ def test_unknown_key_suggests_the_right_one(tmp_path, extra, needle):
     ("ecutrho: 100\n", "ecutrho must exceed ecut"),
     ("scf: {eigensolver: lobpcg}\n", "scf.eigensolver"),
     ("relax: {pulay_solver: gmres}\n", "relax.pulay_solver"),
+    ("scf: {boundary: open_x}\n", "scf.boundary"),
+    ("kpoints: {mesh: [4, 4, 4], kspacing: 0}\n", "kpoints.kspacing"),
+    ("kpoints: {mesh: [4, 4, 4], kspacing: -0.2}\n", "kpoints.kspacing"),
 ])
 def test_value_range_errors(tmp_path, extra, needle):
     from gradwave.inputs import InputError, load_input
 
     with pytest.raises(InputError, match=needle):
         load_input(_write(tmp_path, _base(extra)))
+
+
+def test_esm_boundary_parses(tmp_path):
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _base()))
+    assert inp.scf.boundary == "periodic"  # default unchanged
+    assert inp.scf.esm_bias == 0.0
+    assert inp.scf.target_mu is None
+
+    inp = load_input(_write(tmp_path, _base(
+        "scf: {boundary: open_z_metal, esm_bias: 1.25}\n")))
+    assert inp.scf.boundary == "open_z_metal"
+    assert inp.scf.esm_bias == pytest.approx(1.25)
+
+
+def test_kspacing_parses(tmp_path):
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _base()))
+    assert inp.kpoints.kspacing is None  # default: use mesh verbatim
+
+    inp = load_input(_write(tmp_path, _base(
+        "kpoints: {mesh: [1, 1, 1], kspacing: 0.25}\n")))
+    assert inp.kpoints.kspacing == pytest.approx(0.25)
 
 
 def test_elastic_mode_parses(tmp_path):

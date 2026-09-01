@@ -45,7 +45,19 @@ _KMESH_EXTRAP_FACTORS = tuple(0.5 * n for n in range(1, 17))
 
 
 def _scaled_mesh(base: tuple[int, ...], f: float) -> tuple[int, ...]:
-    return tuple(max(1, round(f * m)) for m in base)
+    # Preserve a pinned axis: in an ANISOTROPIC mesh, an axis the caller set to 1
+    # is a slab's vacuum (or a wire's aperiodic) direction — sampled only at Γ,
+    # since bands do not disperse across a vacuum-separated image. Scaling it up
+    # with the periodic axes samples that dead direction and multiplies the
+    # k-count for no accuracy (a (6,6,1) slab refined uniformly to (9,9,2) is ~2x
+    # waste; a 1D wire (1,1,n) up to ~6x). A bulk mesh (no unit axis) is scaled on
+    # every axis. But a degenerate Γ-only base (1,1,1) is NOT a slab — it is a
+    # coarse bulk/molecular seed (e.g. the convergence driver's k-refinement
+    # start); pinning every axis would leave it stuck at Γ forever, so scale all
+    # axes and let the refinement actually densify.
+    if all(m == 1 for m in base):
+        return tuple(max(1, round(f * m)) for m in base)
+    return tuple(1 if m == 1 else max(1, round(f * m)) for m in base)
 
 
 def _apply_rule(
