@@ -33,6 +33,7 @@ from gradwave.api.relax import run_relax as run_relax
 from gradwave.api.scf import _run_scf_noncollinear as _run_scf_noncollinear
 from gradwave.api.scf import run_scf as run_scf
 from gradwave.api.summary import _bands_extra as _bands_extra
+from gradwave.api.summary import _optics_extra as _optics_extra
 from gradwave.api.summary import _write_volumetric as _write_volumetric
 from gradwave.api.summary import build_summary as build_summary
 from gradwave.api.system import _is_uspp as _is_uspp

@@ -291,6 +291,31 @@ def _bands_extra(inp: Input, res: SCFLike, verbose: bool) -> dict[str, Any]:
     return {"bands": bands}
 
 
+def _optics_extra(inp: Input, res: SCFLike, verbose: bool) -> dict[str, Any]:
+    from gradwave.postscf.optics import optical_epsilon
+
+    _species, upfs, _soa = _species_upfs(inp)
+    if _is_uspp(upfs):
+        raise NotImplementedError("task: optics is norm-conserving only")
+
+    om, eps1, eps2, alpha, info = optical_epsilon(
+        cast("SCFResult", res),
+        omega_max=inp.optics.omega_max, n_omega=inp.optics.n_omega,
+        eta=inp.optics.eta, n_extra_bands=inp.optics.n_extra_bands, verbose=verbose,
+    )
+    optics: dict[str, Any] = {
+        "omega_eV": om.tolist(),
+        "eps1": eps1.tolist(),
+        "eps2": eps2.tolist(),
+        "absorption_inv_cm": alpha.tolist(),
+        "eta_eV": inp.optics.eta,
+        "n_bands": info["n_bands"],
+        "n_occ": info["n_occ"],
+        "eps_static": info["eps_static"],
+    }
+    return {"optics": optics}
+
+
 def _error_estimate_xc(inp: Input) -> NoncollinearXC | SpinXC | XCFunctional:
     """The functional object the post-SCF estimators need to rebuild operators.
 
