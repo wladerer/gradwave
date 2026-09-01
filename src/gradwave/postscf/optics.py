@@ -218,6 +218,15 @@ def optical_epsilon(
 
     om = omega.cpu().numpy()
     eps2_t = eps2_t.cpu().numpy()                         # (3, 3, nω)
+    # symmetrize the tensor over the crystal point group: the IBZ sum gives the
+    # correct trace (rotation-invariant) but not the individual Cartesian
+    # components — each IBZ k stands for its whole star.
+    from gradwave.postscf.irreps import _cartesian_rotation
+    from gradwave.symmetry import find_spacegroup
+    frac = system.positions.cpu().numpy() @ np.linalg.inv(grid.cell)
+    sg = find_spacegroup(grid.cell, frac, system.species_of_atom)
+    rots = [_cartesian_rotation(np.asarray(w, float), grid.cell) for w in sg.rotations]
+    eps2_t = sum(np.einsum("ai,bj,ijw->abw", s, s, eps2_t) for s in rots) / len(rots)
     e2 = (eps2_t[0, 0] + eps2_t[1, 1] + eps2_t[2, 2]) / 3.0
     e1 = _kramers_kronig(om, e2)
     eps2_diag = np.stack([eps2_t[0, 0], eps2_t[1, 1], eps2_t[2, 2]])   # (3, nω)
