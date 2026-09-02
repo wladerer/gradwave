@@ -81,7 +81,7 @@ def _read_final(inp: Input) -> Atoms:
 
 def _mep_block(images: list[Atoms], energies: list[float],
                e_ini: float, e_fin: float, fmax: float, converged: bool,
-               n_steps: int, inp: Input) -> dict[str, Any]:
+               n_steps: int, inp: Input, optimizer: str | None = None) -> dict[str, Any]:
     """Assemble the MEP / barrier summary block from a relaxed band."""
     n = len(images)
     ts = int(np.argmax(energies))
@@ -96,7 +96,7 @@ def _mep_block(images: list[Atoms], energies: list[float],
         "interpolation": inp.neb.interpolation,
         "spring_k": inp.neb.spring_k,
         "climb": inp.neb.climb,
-        "optimizer": inp.neb.optimizer,
+        "optimizer": optimizer if optimizer is not None else inp.neb.optimizer,
         "converged": bool(converged),
         "n_steps": int(n_steps),
         "fmax_target_eV_ang": inp.neb.fmax,
@@ -141,10 +141,13 @@ def run_neb(inp: Input, verbose: bool = True) -> tuple[dict[str, Any], list[Atom
 
     from gradwave.api.relax import _build_relax_calc
 
-    if inp.nspin == 2 and inp.neb.n_workers > 1:
-        # the SeedPool workers rebuild an nspin=1 SCF only in v1; keep spin serial
-        logger.info("neb: n_workers>1 not wired for nspin=2 — running serially")
     p = inp.neb
+    # the SeedPool workers rebuild an nspin=1 SCF only in v1, so force serial for
+    # spin-polarized bands rather than silently computing spin-unpolarized energies.
+    n_workers = p.n_workers
+    if inp.nspin == 2 and n_workers > 1:
+        logger.info("neb: n_workers>1 not wired for nspin=2 — running serially")
+        n_workers = 1
     ini = inp.atoms.copy()
     fin = _read_final(inp)
     n = p.n_images
@@ -160,7 +163,7 @@ def run_neb(inp: Input, verbose: bool = True) -> tuple[dict[str, Any], list[Atom
               f"climbing image {'on' if p.climb else 'off'}, k={p.spring_k} "
               f"eV/Å², optimizer {p.optimizer}", flush=True)
 
-    if p.n_workers > 1:
+    if n_workers > 1:
         from gradwave.api.neb_parallel import run_neb_parallel
 
         return run_neb_parallel(inp, images, band, verbose=verbose)

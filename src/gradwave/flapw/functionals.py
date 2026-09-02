@@ -56,10 +56,7 @@ def fxc_lda(rho: Tensor) -> Tensor:
     vx = -((3.0 / math.pi) ** (1.0 / 3.0)) * E2 * rho ** (1.0 / 3.0)
     rho_au = rho * BOHR_ANG**3
     rs = (3.0 / (4.0 * math.pi * rho_au)) ** (1.0 / 3.0)
-    A, a1 = 0.031091, 0.21370
-    b1, b2, b3, b4 = 7.5957, 3.5876, 1.6382, 0.49294
-    denom = 2 * A * (b1 * rs**0.5 + b2 * rs + b3 * rs**1.5 + b4 * rs**2)
-    ec = -2 * A * (1 + a1 * rs) * torch.log(1 + 1.0 / denom)
+    ec = _pw92_ec(rs)  # shared PW92 kernel; rs chains ρ so the outer d/dρ sees it
     (dec,) = torch.autograd.grad(ec.sum(), rs, create_graph=True)
     vc_ha = ec - (rs / 3.0) * dec
     vxc = vx + vc_ha * HARTREE_EV

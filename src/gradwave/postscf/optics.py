@@ -190,7 +190,7 @@ def _spinor_velocity(system: Any, evec: torch.Tensor, velocity: str, dk: float,
 
 
 @torch.no_grad()
-def _optical_lfe(res, om, eta, n_extra_bands, diago_tol, verbose,
+def _optical_lfe(res, om, eta, n_extra_bands, verbose,
                  scissor=0.0, q0=0.05, n_lfe=27):
     """Macroscopic ε(ω) with RPA local fields via the finite-q Dyson ε = 1 − vχ₀.
 
@@ -418,7 +418,7 @@ def optical_epsilon(
 
     if local_fields:
         e1, e2, e1_nolfe, e2_nolfe = _optical_lfe(
-            res, om, eta, n_extra_bands, diago_tol, verbose, scissor=scissor)
+            res, om, eta, n_extra_bands, verbose, scissor=scissor)
         info["eps_static"] = float(e1[0])
         info["eps1_nolfe"] = e1_nolfe.tolist()  # same convention, no local fields
         info["eps2_nolfe"] = e2_nolfe.tolist()

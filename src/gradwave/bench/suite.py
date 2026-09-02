@@ -18,11 +18,10 @@ from typing import Any
 
 import numpy as np
 
+from gradwave.constants import RY_EV as RY
 from gradwave.core.xc.pbe import PBE
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import setup_system
-
-RY = 13.605693122994
 
 # committed fixture pseudopotentials; override for an installed (non-repo) run
 _DEFAULT_PSEUDO_DIR = Path(__file__).resolve().parents[3] / "tests/fixtures/qe/pseudos"

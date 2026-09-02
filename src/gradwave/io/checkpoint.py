@@ -153,7 +153,7 @@ def _allow_numpy_globals() -> None:
     positions); weights_only never executes arbitrary pickles, so this stays
     safe while covering the array reconstruct path."""
     import numpy as np
-    from numpy.core.multiarray import _reconstruct
+    from numpy._core.multiarray import _reconstruct
 
     dtype_classes = [getattr(np.dtypes, n) for n in dir(np.dtypes)
                      if n.endswith("DType")]

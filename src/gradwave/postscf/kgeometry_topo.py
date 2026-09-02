@@ -244,10 +244,13 @@ class ChernResult:
     chern: int
     residual: float  # |ΣF/2π − chern|: floating-error scale unless undersampled
     fluxes: np.ndarray  # (n, n) per-plaquette Berry flux [rad]
-    min_link: float  # smallest normalized |det M| seen (isolation diagnostic)
+    min_link: float  # smallest raw |det M| seen (isolation margin; ≥ _DET_TOL by construction)
 
 
-def _link_det(provider: LinkStates, k1: np.ndarray, k2: np.ndarray) -> complex:
+def _link_det(provider: LinkStates, k1: np.ndarray, k2: np.ndarray) -> tuple[complex, float]:
+    """The unit-modulus link variable ``det M / |det M|`` and the raw magnitude
+    ``|det M|`` (an isolation margin — small means the band group is nearly
+    degenerate with a neighbour across the link)."""
     d = complex(torch.linalg.det(provider.overlap(k1, k2)).item())
     a = abs(d)
     if a < _DET_TOL:
@@ -255,7 +258,7 @@ def _link_det(provider: LinkStates, k1: np.ndarray, k2: np.ndarray) -> complex:
             f"link |det M| = {a:.2e} < {_DET_TOL}: band group not isolated across "
             "the link (or mesh far too coarse) — its phase is meaningless"
         )
-    return d / a
+    return d / a, a
 
 
 def chern_fhs(
@@ -285,10 +288,12 @@ def chern_fhs(
         # so modulo indexing into the link arrays is legitimate
         ux = np.empty((n, n), dtype=complex)
         uy = np.empty((n, n), dtype=complex)
+        min_link = float("inf")
         for i in range(n):
             for j in range(n):
-                ux[i, j] = _link_det(provider, kat(i, j), kat(i + 1, j))
-                uy[i, j] = _link_det(provider, kat(i, j), kat(i, j + 1))
+                ux[i, j], ax = _link_det(provider, kat(i, j), kat(i + 1, j))
+                uy[i, j], ay = _link_det(provider, kat(i, j), kat(i, j + 1))
+                min_link = min(min_link, ax, ay)
         # orientation: conjugate loop, so that C agrees with the Berry-curvature
         # integral (1/2π)∫Ω of kgeometry.qgt (Ω = −2 Im Q) and with the WCC
         # winding of wcc_flow — verified on the QWZ model in the tests
@@ -298,7 +303,6 @@ def chern_fhs(
             * np.conj(np.roll(ux, -1, axis=1))
             * np.conj(uy)
         )
-    min_link = 1.0  # normalized dets — magnitude checked in _link_det
     total = float(fluxes.sum()) / (2.0 * np.pi)
     chern = round(total)
     return ChernResult(
@@ -561,10 +565,10 @@ def _patch_flux(
     with torch.no_grad():
         for i in range(n):
             for j in range(n + 1):
-                ux[i, j] = _link_det(provider, kat(i, j), kat(i + 1, j))
+                ux[i, j], _ = _link_det(provider, kat(i, j), kat(i + 1, j))
         for i in range(n + 1):
             for j in range(n):
-                uy[i, j] = _link_det(provider, kat(i, j), kat(i, j + 1))
+                uy[i, j], _ = _link_det(provider, kat(i, j), kat(i, j + 1))
     # same conjugated orientation as chern_fhs (see the comment there)
     f = -np.angle(ux[:, :-1] * uy[1:, :] * np.conj(ux[:, 1:]) * np.conj(uy[:-1, :]))
     return float(f.sum())

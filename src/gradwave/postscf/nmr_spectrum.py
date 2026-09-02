@@ -500,17 +500,24 @@ def broaden(
     """
     if axis_ppm.ndim != 1 or axis_ppm.shape[0] < 2:
         raise ValueError("axis_ppm must be a 1-D grid with >= 2 points")
-    step = float(axis_ppm[1] - axis_ppm[0])
-    edges = np.empty(axis_ppm.shape[0] + 1, dtype=np.float64)
-    edges[1:-1] = 0.5 * (axis_ppm[1:] + axis_ppm[:-1])
-    edges[0] = axis_ppm[0] - 0.5 * step
-    edges[-1] = axis_ppm[-1] + 0.5 * step
+    diffs = np.diff(axis_ppm)
+    if not (np.all(diffs > 0) or np.all(diffs < 0)):
+        raise ValueError("axis_ppm must be strictly monotonic (ascending or descending)")
+    # the histogram/kernel math needs an ascending grid; NMR axes are conventionally
+    # plotted descending, so flip to ascending here and flip the density back to match.
+    descending = diffs[0] < 0
+    axis_asc = axis_ppm[::-1] if descending else axis_ppm
+    step = float(axis_asc[1] - axis_asc[0])
+    edges = np.empty(axis_asc.shape[0] + 1, dtype=np.float64)
+    edges[1:-1] = 0.5 * (axis_asc[1:] + axis_asc[:-1])
+    edges[0] = axis_asc[0] - 0.5 * step
+    edges[-1] = axis_asc[-1] + 0.5 * step
     counts, _ = np.histogram(positions_ppm, bins=edges, weights=weights)
     density = counts.astype(np.float64) / step
     ker = _kernel(step, fwhm_gauss, fwhm_lorentz, (density.shape[0] - 1) // 2)
     if ker is not None:
         density = np.convolve(density, ker, mode="same") * step
-    return density
+    return density[::-1] if descending else density
 
 
 def _auto_axis(

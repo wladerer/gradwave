@@ -48,7 +48,8 @@ from typing import Any, Literal
 import torch
 from torch import Tensor
 
-from gradwave.constants import KB_EV
+from gradwave.constants import CM1_TO_EV, KB_EV
+from gradwave.dtypes import RDTYPE as _RDTYPE
 
 # --- physical constants in SI (CODATA 2018, consistent with gradwave.constants) ---
 _KB_J = 1.380649e-23  # Boltzmann constant, J/K
@@ -57,13 +58,7 @@ _AMU_KG = 1.66053906660e-27  # atomic mass unit, kg
 _P_REF = 1.0e5  # reference pressure, Pa (1 bar) — the standard state
 _LN10 = math.log(10.0)
 
-# One cm⁻¹ as an energy in eV, so ħω[eV] = freq[cm⁻¹]·CM1_TO_EV. Matches
-# postscf.thermo.CM1_TO_EV so the two thermo modules share one convention.
-CM1_TO_EV = 1.239841984e-4
-
 _Geometry = Literal["monatomic", "linear", "nonlinear"]
-
-_RDTYPE = torch.float64
 
 
 def cm1_to_ev(freqs_cm: Any) -> Tensor:
@@ -255,8 +250,15 @@ def ideal_gas_thermo(
     e_pot = _as_tensor(potentialenergy)
     zpe = zero_point_energy(e_real)
 
-    if geometry in ("linear", "nonlinear") and symmetrynumber is None:
-        raise ValueError("symmetrynumber is required for a linear/nonlinear gas.")
+    if masses_amu is None:
+        raise ValueError("masses_amu is required for an ideal gas "
+                         "(the translational entropy needs the total mass).")
+    if geometry in ("linear", "nonlinear"):
+        if symmetrynumber is None:
+            raise ValueError("symmetrynumber is required for a linear/nonlinear gas.")
+        if moments_of_inertia_amu_a2 is None:
+            raise ValueError("moments_of_inertia_amu_a2 is required for a "
+                             "linear/nonlinear gas (the rotational entropy needs it).")
 
     # --- internal energy U = E + ZPE + Cv_trans·T + Cv_rot·T + ΔU_vib ---
     cv_trans_t = 1.5 * KB_EV * temperature
@@ -274,12 +276,9 @@ def ideal_gas_thermo(
 
     # --- entropy S = S_trans + S_rot + S_elec + S_vib + S_pressure ---
     s_trans = _translational_entropy(masses_amu, temperature, _P_REF)
-    s_rot = (
-        _rotational_entropy(
-            geometry, moments_of_inertia_amu_a2, symmetrynumber or 1, temperature
-        )
-        if geometry != "monatomic"
-        else torch.zeros((), dtype=_RDTYPE)
+    # _rotational_entropy already returns 0 for a monatomic gas, so no guard needed.
+    s_rot = _rotational_entropy(
+        geometry, moments_of_inertia_amu_a2, symmetrynumber or 1, temperature
     )
     s_elec = KB_EV * math.log(2.0 * spin + 1.0)
     s_vib = vib_entropy(e_real, temperature)
