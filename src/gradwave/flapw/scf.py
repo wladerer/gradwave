@@ -27,6 +27,7 @@ from __future__ import annotations
 import itertools
 import math
 import time
+import warnings
 from typing import Any, NamedTuple, cast
 
 import numpy as np
@@ -724,7 +725,6 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
         si = solve_geneig_shift_invert(Hm, S, nbands, sigma, c_prev=cp)
         if si is not None:
             return si[0], si[1], mill, ks, abl_by_atom, vol
-        import warnings
         warnings.warn("FLAPW shift-invert secular certificate failed at this k/iteration; "
                       "falling back to the exact dense eigensolve", RuntimeWarning, stacklevel=2)
     ev, c = solve_geneig(Hm, S, nbands, with_vecs=True)
@@ -1188,7 +1188,11 @@ def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax:
             # rotation blocks for the aspherical multipoles (fullpot / EFG star-unfolding)
             big_ls = sorted({2} | set(range(1, fullpot_lmax + 1)))
             d_ops = ylm_rotations_complex(sg, A, big_ls)
-        except Exception:                               # any failure → full mesh (set above)
+        except Exception as exc:                        # any failure → full mesh (set above)
+            warnings.warn(
+                f"FLAPW symmetry reduction failed ({exc!r}); falling back to the "
+                "full k-mesh — the run is correct but slower with symmetry off.",
+                RuntimeWarning, stacklevel=2)
             kfracs, kw = monkhorst_pack(tuple(kmesh))
             kw = kw / kw.sum()
             sg, rho_symm, atom_orbits, d_ops = None, None, None, None
@@ -1204,7 +1208,6 @@ def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax:
                          f"({min_edge:.2f} Å) — check the cell/radii units (cell in Å via cell=, "
                          "Bohr via a_bohr; radii always Å)")
     if r_min < 0.02 * min_edge:
-        import warnings
         warnings.warn(f"muffin-tin radius {r_min:.2f} Å is <2% of the shortest cell edge "
                       f"({min_edge:.2f} Å) — an Å radius mistakenly converted to Bohr?",
                       stacklevel=2)

@@ -21,10 +21,8 @@ from typing import Any
 
 import numpy as np
 
+from gradwave.constants import CM1_TO_EV
 from gradwave.constants import KB_EV as K_B
-
-# One cm⁻¹ expressed in eV, so ħω[eV] = freq[cm⁻¹]·CM1_TO_EV.
-CM1_TO_EV = 1.239841984e-4
 
 
 def _positive_grid(freqs_cm: np.ndarray, dos: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

@@ -171,17 +171,3 @@ def efg_vzz_torch(multipoles, rr, drw, ctx: BoundaryContext, center_cart, R, qmt
     return v_zz
 
 
-def efg_tensor_full_torch(multipoles, rr, drw, ctx: BoundaryContext, center_cart, R, qmt=None,
-                          include_pulay: bool = True):
-    """Like :func:`efg_vzz_torch` but returns ``(tensor, V_zz, eta)`` (all torch)."""
-    lset2 = [(2, m) for m in range(-2, 3)]
-    v_val = _valence_v_torch(multipoles, rr, drw)
-    center = center_cart if include_pulay else center_cart.detach()
-    v_bc_raw = interstitial_boundary_torch(ctx, center, lset2)
-    qmt = qmt or {}
-    r2 = float(R) ** 2
-    r3 = float(R) ** 3
-    v0 = v_val[0] + (v_bc_raw[(2, 0)] - _VAL_PREF * complex(qmt.get((2, 0), 0.0)) / r3) / r2
-    v1 = v_val[1] + (v_bc_raw[(2, 1)] - _VAL_PREF * complex(qmt.get((2, 1), 0.0)) / r3) / r2
-    v2 = v_val[2] + (v_bc_raw[(2, 2)] - _VAL_PREF * complex(qmt.get((2, 2), 0.0)) / r3) / r2
-    return _tensor_from_v_torch(v0, v1, v2)

@@ -178,7 +178,10 @@ def _channel_dyads(res: SCFResult, isp: int, mu: float, scheme, width: float,
                 dyads.append((gnm.real.contiguous(), w))
                 dyads.append((gnm.imag.contiguous(), w))
 
-    if abs(den) > 1e-30:
+    # the δμ dyad weight is 1/den, which blows up as the Fermi-surface weight
+    # den -> 0 (insulating limit); fp_cut drops that near-singular column. A no-op
+    # for metals, where den is O(1) and far above the cutoff.
+    if abs(den) > fp_cut:
         dyads.append((q_field, -1.0 / (v2 * den)))
     return dyads
 

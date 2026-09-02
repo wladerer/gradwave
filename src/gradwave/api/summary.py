@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from gradwave.api._common import _OCC_TOL, SPIN_XC_REGISTRY, XC_REGISTRY, _gap, _get, build_xc
-from gradwave.api.system import _is_uspp, _species_upfs
+from gradwave.api.system import _is_uspp, _resolve_kmesh, _species_upfs
 from gradwave.core.xc.base import XCFunctional
 from gradwave.core.xc.spin import SpinXC
 from gradwave.inputs import Input, VolumetricParams
@@ -144,9 +144,9 @@ def build_summary(res: SCFLike, inp: Input, task: str,
             "xc": _xc_label(inp),
             "ecut_eV": float(inp.ecut),
             "ecutrho_eV": float(inp.ecutrho) if (uspp and inp.ecutrho) else None,
-            "kmesh": list(inp.kpoints.mesh),
+            "kmesh": list(_resolve_kmesh(inp)),
             "nk": len(system.kweights),
-            "nk_total": int(math.prod(inp.kpoints.mesh)),
+            "nk_total": int(math.prod(_resolve_kmesh(inp))),
             "kweights": [float(w) for w in system.kweights],
             "nspin": nspin,
             "smearing": inp.smearing.type,
@@ -648,8 +648,8 @@ def _flapw_parameters_block(inp: Input) -> dict[str, Any]:
     import math
 
     block: dict[str, Any] = {
-        "kmesh": list(inp.kpoints.mesh),
-        "nk_total": int(math.prod(inp.kpoints.mesh)),
+        "kmesh": list(_resolve_kmesh(inp)),
+        "nk_total": int(math.prod(_resolve_kmesh(inp))),
         "symmetry": bool(inp.symmetry),
     }
     if inp.task == "nmr" and inp.nmr.task == "shielding":
@@ -721,9 +721,9 @@ def _parameters_block(inp: Input) -> dict[str, Any]:
         "xc": _xc_label(inp),
         "ecut_eV": float(inp.ecut),
         "ecutrho_eV": None,
-        "kmesh": list(inp.kpoints.mesh),
+        "kmesh": list(_resolve_kmesh(inp)),
         "nk": None,
-        "nk_total": int(math.prod(inp.kpoints.mesh)),
+        "nk_total": int(math.prod(_resolve_kmesh(inp))),
         "kweights": None,
         "nspin": inp.nspin,
         "smearing": inp.smearing.type,

@@ -196,8 +196,10 @@ def run_neb_parallel(
             img.set_positions(pos[i])
 
     e_ini, e_fin = float(energies[0]), float(energies[-1])
+    # the parallel path always FIRE-integrates the projected forces, regardless of
+    # inp.neb.optimizer (which only drives the serial ASE optimizer).
     block = _mep_block(images, [float(e) for e in energies], e_ini, e_fin,
-                       fmax, converged, step + 1, inp)
+                       fmax, converged, step + 1, inp, optimizer="fire")
     if verbose:
         print(f"neb: barrier E_a = {block['barrier_eV']:+.4f} eV "
               f"(TS = image {block['ts_image']}/{n - 1}), reaction ΔE = "

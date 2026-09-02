@@ -42,7 +42,7 @@ that function's docstring and the gate in ``dielectric_born``).
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -163,6 +163,30 @@ def _dhdk_psi(system: System, c_occ: torch.Tensor, alpha: int, dk: float) -> tor
     return kin + dnl
 
 
+def _born_charges(system: System, grid: FFTGrid, vol: float,
+                  drho_all: Sequence[torch.Tensor], na: int,
+                  nonlocal_t: Callable[[torch.Tensor, int], torch.Tensor]) -> torch.Tensor:
+    """Born effective charges ``Z*_{s,αβ} = ∂²E/∂E_α∂τ_{s,β}`` via one autograd
+    backward per field direction α over the τ-differentiable pseudopotential, plus
+    the ``+Z_ion`` diagonal. ``drho_all[a]`` is the density response to field a and
+    ``nonlocal_t(pos, a)`` returns the (real) nonlocal energy term at trial positions
+    ``pos`` for direction a — the only piece that differs across the scalar / spin /
+    SOC formalisms."""
+    born = torch.zeros(na, 3, 3, dtype=RDTYPE)
+    for a in range(3):
+        pos = system.positions.detach().clone().requires_grad_(True)
+        with torch.enable_grad():
+            vloc_g = local_potential_g(pos, system.species_index,
+                                       system.vloc_tables, grid.g_cart, vol)
+            t_loc = local_energy(r_to_g(drho_all[a].to(CDTYPE)), vloc_g, vol)
+            t_nl = nonlocal_t(pos, a)
+            (grad,) = torch.autograd.grad(t_loc + t_nl, pos)
+        for s in range(na):
+            born[s, a] = -grad[s]
+            born[s, a, a] += float(system.charges[s])
+    return born
+
+
 @torch.no_grad()
 def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | NoncollinearXC, *,
                     dk: float = 1e-3, cg_tol: float = 1e-9,
@@ -280,8 +304,6 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
     # iteration; the ε and Born tensors are star-summed after convergence.
     vsym = None
     if system.sym is not None:
-        from gradwave.symmetry import VectorFieldSymmetrizer
-
         vsym = VectorFieldSymmetrizer(
             grid.shape, system.sym, grid.cell, dens_mask=grid.dens_mask
         ).to(c_occ.device)
@@ -345,23 +367,16 @@ def dielectric_born(res: SCFResult | NCResult, xc: XCFunctional | SpinXC | Nonco
     # the raw (IBZ-representative) responses; the tensor's point-group star sum
     # is taken by symmetrize_atom_tensor below (consistently reconstructing the
     # local part from Δρ and the nonlocal part from the IBZ k-sum).
-    born = torch.zeros(na, 3, 3, dtype=RDTYPE)
     dij_c = bk.dij_full.to(CDTYPE)
-    for a in range(3):
-        pos = system.positions.detach().clone().requires_grad_(True)
-        with torch.enable_grad():
-            vloc_g = local_potential_g(pos, system.species_index,
-                                       system.vloc_tables, grid.g_cart, vol)
-            t_loc = local_energy(r_to_g(drho_all[a].to(CDTYPE)), vloc_g, vol)
-            p = projectors_b(bk, pos)
-            b_c = torch.einsum("kpg,kbg->kbp", p.conj(), c_occ)
-            b_d = torch.einsum("kpg,kbg->kbp", p.conj(), dpsi_all[a])
-            t_nl = 4.0 * torch.einsum("k,kbp,pq,kbq->", kw.to(CDTYPE),
-                                      b_d.conj(), dij_c, b_c).real
-            (grad,) = torch.autograd.grad(t_loc + t_nl, pos)
-        for s in range(na):
-            born[s, a] = -grad[s]
-            born[s, a, a] += float(system.charges[s])
+
+    def _nonlocal_t(pos: torch.Tensor, a: int) -> torch.Tensor:
+        p = projectors_b(bk, pos)
+        b_c = torch.einsum("kpg,kbg->kbp", p.conj(), c_occ)
+        b_d = torch.einsum("kpg,kbg->kbp", p.conj(), dpsi_all[a])
+        return 4.0 * torch.einsum("k,kbp,pq,kbq->", kw.to(CDTYPE),
+                                  b_d.conj(), dij_c, b_c).real
+
+    born = _born_charges(system, grid, vol, drho_all, na, _nonlocal_t)
     if vsym is not None:
         from gradwave.symmetry import symmetrize_atom_tensor
 
@@ -579,25 +594,19 @@ def _dielectric_born_spin(res: SCFResult, xc: SpinXC, *, dk, cg_tol, beta, outer
     # field direction. Local part sees the total Δρ; the nonlocal part sums the
     # two spin channels (factor 2 per channel = f·c.c.).
     na = len(system.species_of_atom)
-    born = torch.zeros(na, 3, 3, dtype=RDTYPE)
     dij_c = bk.dij_full.to(CDTYPE)
-    for a in range(3):
-        pos = system.positions.detach().clone().requires_grad_(True)
-        with torch.enable_grad():
-            vloc_g = local_potential_g(pos, system.species_index,
-                                       system.vloc_tables, grid.g_cart, vol)
-            t_loc = local_energy(r_to_g(drho_tot_all[a].to(CDTYPE)), vloc_g, vol)
-            p = projectors_b(bk, pos)
-            t_nl = 0.0
-            for sp in range(2):
-                b_c = torch.einsum("kpg,kbg->kbp", p.conj(), c_occ[sp])
-                b_d = torch.einsum("kpg,kbg->kbp", p.conj(), dpsi_all[sp][a])
-                t_nl = t_nl + 2.0 * torch.einsum(
-                    "k,kbp,pq,kbq->", kw.to(CDTYPE), b_d.conj(), dij_c, b_c).real
-            (grad,) = torch.autograd.grad(t_loc + t_nl, pos)
-        for s in range(na):
-            born[s, a] = -grad[s]
-            born[s, a, a] += float(system.charges[s])
+
+    def _nonlocal_t(pos: torch.Tensor, a: int) -> torch.Tensor:
+        p = projectors_b(bk, pos)
+        terms: list[torch.Tensor] = []
+        for sp in range(2):
+            b_c = torch.einsum("kpg,kbg->kbp", p.conj(), c_occ[sp])
+            b_d = torch.einsum("kpg,kbg->kbp", p.conj(), dpsi_all[sp][a])
+            terms.append(2.0 * torch.einsum(
+                "k,kbp,pq,kbq->", kw.to(CDTYPE), b_d.conj(), dij_c, b_c).real)
+        return terms[0] + terms[1]
+
+    born = _born_charges(system, grid, vol, drho_tot_all, na, _nonlocal_t)
     asr = born.sum(dim=0)
     return {"eps": eps_mat, "born": born, "asr": asr,
             "eps_iso": float(torch.diagonal(eps_mat).mean())}
@@ -832,23 +841,16 @@ def _dielectric_born_soc(res: NCResult, xc: NoncollinearXC, *, dk, cg_tol, beta,
     # the position-differentiable SOC projectors (_so_projectors_at at
     # dkvec=0, pos requiring grad) — the SOC analogue of the scalar/spin
     # paths' ``projectors_b(bk, pos)``.
-    born = torch.zeros(na, 3, 3, dtype=RDTYPE)
     zero_dk = torch.zeros(3, dtype=RDTYPE, device=dev)
-    for a in range(3):
-        pos = system.positions.detach().clone().requires_grad_(True)
-        with torch.enable_grad():
-            vloc_g_p = local_potential_g(pos, system.species_index,
-                                        system.vloc_tables, grid.g_cart, vol)
-            t_loc = local_energy(r_to_g(drho_all[a].to(CDTYPE)), vloc_g_p, vol)
-            q_pos = _so_projectors_at(system, tabs, col_meta, lmax, zero_dk, pos)
-            b_c = torch.einsum("kpg,kbg->kbp", q_pos.conj(), c_occ)
-            b_d = torch.einsum("kpg,kbg->kbp", q_pos.conj(), dpsi_all[a])
-            t_nl = 2.0 * torch.einsum("k,kbp,pq,kbq->", kw.to(CDTYPE),
-                                      b_d.conj(), dij_c, b_c).real
-            (grad,) = torch.autograd.grad(t_loc + t_nl, pos)
-        for s in range(na):
-            born[s, a] = -grad[s]
-            born[s, a, a] += float(system.charges[s])
+
+    def _nonlocal_t(pos: torch.Tensor, a: int) -> torch.Tensor:
+        q_pos = _so_projectors_at(system, tabs, col_meta, lmax, zero_dk, pos)
+        b_c = torch.einsum("kpg,kbg->kbp", q_pos.conj(), c_occ)
+        b_d = torch.einsum("kpg,kbg->kbp", q_pos.conj(), dpsi_all[a])
+        return 2.0 * torch.einsum("k,kbp,pq,kbq->", kw.to(CDTYPE),
+                                  b_d.conj(), dij_c, b_c).real
+
+    born = _born_charges(system, grid, vol, drho_all, na, _nonlocal_t)
     asr = born.sum(dim=0)
     return {"eps": eps_mat, "born": born, "asr": asr,
             "eps_iso": float(torch.diagonal(eps_mat).mean())}

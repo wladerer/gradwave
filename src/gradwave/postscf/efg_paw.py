@@ -73,7 +73,7 @@ from gradwave.core.fftbox import r_to_g
 from gradwave.core.gaunt import ylm_np
 from gradwave.dtypes import CDTYPE, RDTYPE
 from gradwave.flapw.nmr import NUCLEAR_Q, quadrupolar_coupling
-from gradwave.postscf.gipaw import PAWOnSite
+from gradwave.postscf.gipaw import PAWOnSite, _angular_grid
 from gradwave.postscf.uspp_frozen import aug_density_from_becsum, screen_phase
 from gradwave.pseudo.upf_paw import PAWData
 
@@ -112,16 +112,7 @@ def _efg_angular_tensor(lmax: int, nx: int = 20, nphi: int = 40) -> np.ndarray:
     The angular factor of the on-site EFG operator (l=2 spherical tensor). Direct Gauss-
     Legendre(cosθ)×uniform(φ) quadrature, exact for the band-limited integrand (|Y_I Y_J| has
     degree 2·lmax, the r̂r̂ factor adds 2). Traceless in (a, b): Σ_a M[a,a] = ∫Y_I(3−3)Y_J = 0."""
-    xg, wx = np.polynomial.legendre.leggauss(nx)
-    theta = np.arccos(xg)
-    phi = 2.0 * np.pi * np.arange(nphi) / nphi
-    th, ph = np.meshgrid(theta, phi, indexing="ij")
-    wgt = (wx[:, None] * np.full(nphi, 2.0 * np.pi / nphi)[None, :]).reshape(-1)
-    st = np.sin(th).reshape(-1)
-    rhat = np.stack(
-        [st * np.cos(ph).reshape(-1), st * np.sin(ph).reshape(-1), np.cos(th).reshape(-1)],
-        axis=-1,
-    )  # (npt, 3)
+    rhat, wgt = _angular_grid(nx, nphi)
     nlm = (lmax + 1) ** 2
     y = ylm_np(lmax, rhat)[:, :nlm]  # (npt, nlm)
     ang = 3.0 * rhat[:, :, None] * rhat[:, None, :] - np.eye(3)[None]  # (npt, 3, 3)

@@ -158,13 +158,12 @@ def _index_map(paw: PAWData) -> list[tuple[int, int, int]]:
     return out
 
 
-def _dia_angular_tensor(lmax: int, nx: int = 20, nphi: int = 40) -> np.ndarray:
-    """M[α, β, I, J] = ∫ Y_I(Ω)[δ_αβ − r̂_α r̂_β]Y_J(Ω) dΩ over the REAL spherical
-    harmonics (``core.gaunt.ylm_np`` convention, index l²+m), I, J ≤ (lmax+1)².
-
-    Direct Gauss-Legendre(cosθ)×uniform(φ) quadrature (exact for the band-limited
-    integrand: |Y_I Y_J| has degree 2·lmax, the r̂r̂ factor adds 2). The isotropic
-    trace (1/3)Σ_α M[α,α] = (2/3)δ_IJ (used as a self-consistency check)."""
+def _angular_grid(nx: int, nphi: int) -> tuple[np.ndarray, np.ndarray]:
+    """Unit directions ``r̂`` (npt, 3) and quadrature weights (npt,) for a
+    Gauss-Legendre(cosθ)×uniform(φ) sphere grid — exact for band-limited
+    integrands to the (nx, nphi) order. Shared by the on-site angular tensors
+    (``_dia_angular_tensor`` / ``_ang_L_matrices`` here, ``_efg_angular_tensor``
+    in ``efg_paw``)."""
     xg, wx = np.polynomial.legendre.leggauss(nx)
     theta = np.arccos(xg)
     phi = 2.0 * np.pi * np.arange(nphi) / nphi
@@ -176,6 +175,17 @@ def _dia_angular_tensor(lmax: int, nx: int = 20, nphi: int = 40) -> np.ndarray:
          np.cos(th).reshape(-1)],
         axis=-1,
     )  # (npt, 3)
+    return rhat, wgt
+
+
+def _dia_angular_tensor(lmax: int, nx: int = 20, nphi: int = 40) -> np.ndarray:
+    """M[α, β, I, J] = ∫ Y_I(Ω)[δ_αβ − r̂_α r̂_β]Y_J(Ω) dΩ over the REAL spherical
+    harmonics (``core.gaunt.ylm_np`` convention, index l²+m), I, J ≤ (lmax+1)².
+
+    Direct Gauss-Legendre(cosθ)×uniform(φ) quadrature (exact for the band-limited
+    integrand: |Y_I Y_J| has degree 2·lmax, the r̂r̂ factor adds 2). The isotropic
+    trace (1/3)Σ_α M[α,α] = (2/3)δ_IJ (used as a self-consistency check)."""
+    rhat, wgt = _angular_grid(nx, nphi)
     y = ylm_np(lmax, rhat)  # (npt, (lmax+1)²)
     nlm = (lmax + 1) ** 2
     y = y[:, :nlm]
@@ -213,17 +223,7 @@ def _ang_L_matrices(lmax: int, nx: int = 24, nphi: int | None = None,
     (:func:`test_ang_L_algebra`) against the su(2) algebra [L_α, L_β] = i ε L_γ,
     L² = l(l+1) block-diagonal, Hermiticity, and the analytic L_z action."""
     nphi = nphi or (2 * lmax + 8)
-    xg, wx = np.polynomial.legendre.leggauss(nx)
-    theta = np.arccos(xg)
-    phi = 2.0 * np.pi * np.arange(nphi) / nphi
-    th, ph = np.meshgrid(theta, phi, indexing="ij")
-    wgt = (wx[:, None] * np.full(nphi, 2.0 * np.pi / nphi)[None, :]).reshape(-1)
-    st = np.sin(th).reshape(-1)
-    dirs = np.stack(
-        [st * np.cos(ph).reshape(-1), st * np.sin(ph).reshape(-1),
-         np.cos(th).reshape(-1)],
-        axis=-1,
-    )  # (npt, 3)
+    dirs, wgt = _angular_grid(nx, nphi)
     nlm = (lmax + 1) ** 2
     yj = ylm_np(lmax, dirs)[:, :nlm] * wgt[:, None]  # Y_J(r̂) w  (npt, nlm)
     out = np.empty((3, nlm, nlm), dtype=complex)

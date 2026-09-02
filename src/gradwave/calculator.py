@@ -989,13 +989,18 @@ class GradWave(Calculator):
         call with no ladder — it just re-solves at the (already-full) tol."""
         if self.atoms is None:
             raise RuntimeError("resolve_full_tol() before any calculate()")
+        # scope the disable to this re-solve so the ladder is restored for any
+        # later use of the calculator (a second relax segment, a reused instance).
         self._ladder_disabled = True
-        atoms = self.atoms
-        self.reset()          # clear results + self.atoms so ASE recomputes
-        self._scf_state = None  # bypass the geometry-match SCF-reuse guard
-        self.calculate(atoms, properties=("energy", "forces", "stress"),
-                       system_changes=all_changes)
-        return int(getattr(self.last_result, "n_iter", 0))
+        try:
+            atoms = self.atoms
+            self.reset()          # clear results + self.atoms so ASE recomputes
+            self._scf_state = None  # bypass the geometry-match SCF-reuse guard
+            self.calculate(atoms, properties=("energy", "forces", "stress"),
+                           system_changes=all_changes)
+            return int(getattr(self.last_result, "n_iter", 0))
+        finally:
+            self._ladder_disabled = False
 
     @override
     def calculate(

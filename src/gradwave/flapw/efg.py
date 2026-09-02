@@ -300,7 +300,11 @@ def lx_sphere_poisson(rho_lm, rr, drw, big_l):
     For L=2, near the origin ``V_2M(r) → v_M r²`` with ``v_M = (4πE2/5)∫ρ_2M/r' dr'`` — the r²
     coefficient that becomes the EFG. ``drw`` is the radial ``dr`` weight."""
     inner = np.cumsum(rho_lm * rr ** (big_l + 2) * drw)
-    outer = np.cumsum((rho_lm * rr ** (1 - big_l) * drw)[::-1])[::-1]
+    # exclude the diagonal point from the outer integral so each mesh point falls in
+    # exactly one of ∫_0^r / ∫_r^R (otherwise point i is double-counted). Mirrors the
+    # sibling radial_poisson_to_R in coulomb.py.
+    outer_w = rho_lm * rr ** (1 - big_l) * drw
+    outer = np.cumsum(outer_w[::-1])[::-1] - outer_w
     return (4 * math.pi * E2 / (2 * big_l + 1)) * (inner / rr ** (big_l + 1)
                                                   + rr**big_l * outer)
 

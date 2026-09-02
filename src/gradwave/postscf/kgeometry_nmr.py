@@ -780,7 +780,7 @@ def induced_current_q(
         from gradwave.core._anderson import AndersonMixer
         from gradwave.postscf.dfpt_q import _k_hxc_q, chi0_q
 
-        b = 2.0 * np.pi * np.linalg.inv(np.asarray(grid.cell, float)).T
+        b = reciprocal_cell(grid.cell)
         q_cart = torch.as_tensor(np.asarray(q_frac, float) @ b, dtype=RDTYPE)
         # At q = 0 the ±q branches coincide and the perturbation λ·v_ν is
         # itself Hermitian: the physical density response is 2·Re[Σ u*δu]

@@ -278,7 +278,7 @@ def solve_geneig_subspace_aug(H, S, c_prev, nbands, tol=1e-8):
     """Augmented Rayleigh-Ritz solve of ``H c = ε S c`` in ``span[c_prev, R]`` where ``R`` is the
     residual block of last iteration's eigenvectors under the CURRENT pencil.
 
-    ``solve_geneig_subspace`` projects into the previous span alone, which is blind to the
+    Projecting into the previous span alone is blind to the
     first-order rotation of the eigenvectors when the potential moves (the observed fullpot-ramp
     blow-ups); one Davidson-style augmentation captures exactly that direction: Ritz-solve in
     ``span[c_prev]``, form ``R = H c − S c ε`` for the Ritz pairs, and re-solve in the doubled
@@ -287,8 +287,7 @@ def solve_geneig_subspace_aug(H, S, c_prev, nbands, tol=1e-8):
 
     Returns ``(evals, vecs, resid)`` with ``resid`` the max eV-scale residual
     (``_pencil_resid``, a first-order bound on the eigenvalue error) over the ``nbands`` kept
-    states — same acceptance contract as ``solve_geneig_subspace`` (the caller gates on it and
-    falls back to the exact dense solve)."""
+    states — the caller gates on it and falls back to the exact dense solve when it drifts."""
     hp = H @ c_prev
     sp = S @ c_prev
     hs = c_prev.conj().T @ hp
@@ -326,30 +325,6 @@ def _pencil_resid(hv, sv, ev):
     r = hv - sv * ev[None, :]
     scale = np.maximum(np.linalg.norm(sv, axis=0), 1e-12)
     return float((np.linalg.norm(r, axis=0) / scale).max())
-
-
-def solve_geneig_subspace(H, S, c_prev, nbands, tol=1e-8):
-    """Rayleigh-Ritz solve of ``H c = ε S c`` inside the span of a previous iteration's
-    eigenvectors ``c_prev`` (dim × nkeep, nkeep ≥ nbands). Near SCF self-consistency the
-    eigenvectors barely rotate between iterations, so projecting into last iteration's subspace
-    (two thin GEMMs + an nkeep×nkeep dense solve) replaces the O(dim³) full diagonalization.
-
-    Returns ``(evals, vecs, resid)`` where ``resid`` is the max eV-scale residual
-    (``_pencil_resid``) over the ``nbands`` kept states — the caller accepts the step only when
-    ``resid`` is below its threshold and falls back to the exact solve otherwise, so a drifting
-    subspace (band crossings, early iterations, large mixing steps) can never silently corrupt
-    the result."""
-    hp = H @ c_prev
-    sp = S @ c_prev
-    hs = c_prev.conj().T @ hp
-    ss = c_prev.conj().T @ sp
-    hs = 0.5 * (hs + hs.conj().T)
-    ss = 0.5 * (ss + ss.conj().T)
-    ev, y = solve_geneig(hs, ss, nbands, with_vecs=True, tol=tol)
-    vecs = c_prev @ y
-    hv = hp @ y
-    sv = sp @ y
-    return ev, vecs, _pencil_resid(hv, sv, ev)
 
 
 # ---------------------------------------------------------------------------

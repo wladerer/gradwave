@@ -22,6 +22,10 @@ E2 = HARTREE_EV * BOHR_ANG
 # Boltzmann constant in eV/K (for converting smearing widths quoted in K).
 KB_EV = 8.617333262e-5
 
+# One cm⁻¹ expressed in eV, so a harmonic mode energy is ħω[eV] = freq[cm⁻¹]·CM1_TO_EV.
+# Shared by the harmonic-thermo modules (postscf.thermo, postscf.adsorbate_thermo).
+CM1_TO_EV = 1.239841984e-4
+
 # Fine-structure constant α = e²/(ħc) (dimensionless, CODATA 2018). This is
 # the only way the speed of light enters the eV/Å unit system: magnetic
 # response prefactors collapse to α² combinations of the constants above,

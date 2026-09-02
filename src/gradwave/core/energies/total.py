@@ -44,6 +44,7 @@ from gradwave.core.energies.local_pp import local_energy, local_potential_g
 from gradwave.core.energies.nl_pp import nonlocal_energy
 from gradwave.core.fftbox import r_to_g
 from gradwave.core.xc.base import XCFunctional
+from gradwave.dtypes import CDTYPE
 
 
 @dataclass
@@ -109,7 +110,7 @@ def total_energy(
     # function w.r.t. positions) they are recomputed so both terms stay on the
     # autograd graph — do not cache them unconditionally.
     volume = grid.volume
-    rho_g = r_to_g(rho.to(torch.complex128))
+    rho_g = r_to_g(rho.to(CDTYPE))
 
     e_kin = kinetic_energy(coeffs_per_k, occ, kweights, spheres)
     e_h = hartree_energy(rho_g, grid.g2, volume)

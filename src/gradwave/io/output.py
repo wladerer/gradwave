@@ -710,7 +710,12 @@ def _tail_lines(summary):
     if "runtime_s" in summary and "scf" not in summary:
         tail.append(f"wall time {summary['runtime_s']:.1f} s")
     if "outputs" in summary:
-        tail.append("files " + " · ".join(summary["outputs"].values()))
+        # a writer may emit several files for one label (spin-resolved ELF -> up/dn),
+        # stored as a list; flatten those so str.join never sees a non-string value.
+        names: list[str] = []
+        for value in summary["outputs"].values():
+            names.extend(value if isinstance(value, (list, tuple)) else [value])
+        tail.append("files " + " · ".join(names))
     return ["", "   " + "  |  ".join(tail)] if tail else []
 
 

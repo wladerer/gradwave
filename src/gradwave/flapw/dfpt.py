@@ -238,12 +238,9 @@ def khxc_response(drho, rho_sph, rho_2m, rr, drw, lset, nx: int = 16, nphi: int 
 
 
 def valence_v_coeffs(multipoles, rr, drw):
-    """The l=2 valence r^2 coefficients ``v_m = (4 pi E2/5) sum(rho_2m/r) dr`` (numpy), matching
-    :func:`gradwave.flapw.efg._valence_v`. Used to turn a multipole response ``drho_2m/du`` into the
-    valence part of ``dv_m/du``."""
-    import math
+    """The l=2 valence r^2 coefficients ``v_m = (4 pi E2/5) sum(rho_2m/r) dr`` (numpy). Delegates
+    to :func:`gradwave.flapw.efg._valence_v` (the canonical on-site l=2 sphere-Poisson coefficient)
+    to turn a multipole response ``drho_2m/du`` into the valence part of ``dv_m/du``."""
+    from gradwave.flapw.efg import _valence_v
 
-    from gradwave.constants import E2
-    pref = 4 * math.pi * E2 / 5.0
-    return {m: pref * complex(np.sum(np.asarray(multipoles[(2, m)]) / rr * drw))
-            for m in range(-2, 3)}
+    return _valence_v(multipoles, rr, drw)
