@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import os
 import time
 import warnings
 from typing import Any, NamedTuple, cast
@@ -553,6 +554,76 @@ def _resolve_shift_invert(mode, dim: int) -> bool:
     return dim > _SHIFT_INVERT_CROSSOVER_DIM        # "auto" (or any truthy non-True)
 
 
+def _lo_conditioning_diag(S, npw, nlo, atoms_cart, lodat):
+    """Opt-in (``GRADWAVE_FLAPW_LO_DIAG``) report of which local orbitals are redundant
+    given the FULL APW basis at this k/potential (the per-LO cond_tol only sees each LO's
+    own {u, u̇}). Exact, off the hot path. See ``flapw.lo_schur``."""
+    from gradwave.flapw.lo_schur import lo_conditioning_report, lo_labels
+    labels = lo_labels(atoms_cart, lodat)
+    redundant, report = lo_conditioning_report(S, npw, labels)
+    print(f"[LO-DIAG] npw={npw} nlo={nlo} in-context resid_frac per LO direction:\n"
+          f"{report}", flush=True)
+    if redundant:
+        worst = ", ".join(f"{lbl} (resid_frac={f:.2e})" for f, lbl in redundant)
+        print(f"[LO-DIAG] REDUNDANT LO directions (spanned by the APW basis): {worst}",
+              flush=True)
+
+
+def _extend_secular_with_los(S, Hm, npw, atoms_cart, geom, lodat, abl_by_atom, vol,
+                             species, v_nsph, lmax, r, dx, ks, nsph_int):
+    """Extend the (S, Hm) LAPW secular pencil with the confined local orbitals.
+
+    Row order (the density pass replicates it): atoms outer, this atom's LO defs inner, m
+    innermost. The LO couples only to its own sphere's augmentation — S/H[LO,G] =
+    amp_lm(G)·(a_G·⟨φ|u⟩ + b_G·⟨φ|u̇⟩) with amp_lm(G) = (4π/√Ω) iˡ Y*_lm(k̂_G) e^{i k_G·τ};
+    LO-LO is diagonal (φ(R)=φ'(R)=0 confines it, one LO per l, spherical V keeps m diagonal).
+    The aspherical v_nsph coupling of LO rows is neglected (deep semicore, second-order small).
+    Returns the (possibly extended) ``(S, Hm)`` — unchanged if there are no local orbitals."""
+    if not lodat:
+        return S, Hm
+    rows_s, rows_h, diag_s, diag_h = [], [], [], []
+    for ai, (_tau, key) in enumerate(atoms_cart):
+        ph = geom["pvec"][ai]
+        for lo in lodat.get(key, []):
+            lang = lo["l"]
+            ylm = _geom_ylm(geom, lang)
+            pf = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
+            a_g, b_g = abl_by_atom[ai][lang][:, 0], abl_by_atom[ai][lang][:, 1]
+            v0off_lo = float(species[key].get("v0off", 0.0))
+            base_s = pf * (a_g * lo["S_pu"] + b_g * lo["S_pud"]) * ph
+            base_h = pf * (a_g * (lo["H_pu"] + v0off_lo * lo["S_pu"])
+                           + b_g * (lo["H_pud"] + v0off_lo * lo["S_pud"])) * ph
+            for mi in range(2 * lang + 1):
+                rows_s.append(base_s * ylm[:, mi])
+                rows_h.append(base_h * ylm[:, mi])
+                diag_s.append(lo["S_pp"])
+                diag_h.append(lo["H_pp"] + v0off_lo * lo["S_pp"])
+    nlo = len(rows_s)
+    if not nlo:
+        return S, Hm
+    rows_s_arr, rows_h_arr = np.array(rows_s), np.array(rows_h)
+    lo_lo_h = np.diag(diag_h).astype(complex)
+    if v_nsph:
+        # the LOs' aspherical coupling — the semicore's response to the crystal field
+        dh_pw, dh_lo = _nonspherical_augment_lo(v_nsph, atoms_cart, abl_by_atom, ks,
+                                                species, lmax, vol, r, dx, lodat,
+                                                nsph_int=nsph_int)
+        rows_h_arr = rows_h_arr + dh_pw
+        lo_lo_h = lo_lo_h + dh_lo
+    s_ext = np.zeros((npw + nlo, npw + nlo), dtype=complex)
+    h_ext = np.zeros((npw + nlo, npw + nlo), dtype=complex)
+    s_ext[:npw, :npw], h_ext[:npw, :npw] = S, Hm
+    s_ext[npw:, :npw], h_ext[npw:, :npw] = rows_s_arr, rows_h_arr
+    s_ext[:npw, npw:] = rows_s_arr.conj().T
+    h_ext[:npw, npw:] = rows_h_arr.conj().T
+    s_ext[npw:, npw:] = np.diag(diag_s)
+    h_ext[npw:, npw:] = lo_lo_h
+    S, Hm = s_ext, h_ext
+    if os.environ.get("GRADWAVE_FLAPW_LO_DIAG"):
+        _lo_conditioning_diag(S, npw, nlo, atoms_cart, lodat)
+    return S, Hm
+
+
 def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=None, chan=None,
                   lodat=None, nsph_int=None, c_prev=None, subspace_tol=1e-4, warp=None,
                   geom=None, shift_invert=False, sigma=None, return_HS=False):
@@ -635,64 +706,8 @@ def _lapw_multi_k(kf, L, atoms_cart, species, lmax, ecut, r, dx, nbands, v_nsph=
         dm0, dm1, dm2 = _geom_dm(geom, nfft_w)
         Hm = Hm + u_fft[dm0, dm1, dm2]
     Hm = 0.5 * (Hm + Hm.conj().T)
-    if lodat:
-        # LAPW+LO: extend the secular problem with the confined local orbitals. Row order (the
-        # density pass replicates it): atoms outer, this atom's LO defs inner, m innermost. The
-        # LO couples only to its own sphere's augmentation — S/H[LO,G] = amp_lm(G)·(a_G·⟨φ|u⟩ +
-        # b_G·⟨φ|u̇⟩) with amp_lm(G) = (4π/√Ω) iˡ Y*_lm(k̂_G) e^{i k_G·τ}; LO-LO is diagonal
-        # (φ(R)=φ'(R)=0 confines it, one LO per l, spherical V keeps m diagonal). The aspherical
-        # v_nsph coupling of LO rows is neglected (deep semicore, second-order small).
-        rows_s, rows_h, diag_s, diag_h = [], [], [], []
-        for ai, (_tau, key) in enumerate(atoms_cart):
-            ph = geom["pvec"][ai]
-            for lo in lodat.get(key, []):
-                lang = lo["l"]
-                ylm = _geom_ylm(geom, lang)
-                pf = (4 * math.pi / math.sqrt(vol)) * (1j ** lang)
-                a_g, b_g = abl_by_atom[ai][lang][:, 0], abl_by_atom[ai][lang][:, 1]
-                v0off_lo = float(species[key].get("v0off", 0.0))
-                base_s = pf * (a_g * lo["S_pu"] + b_g * lo["S_pud"]) * ph
-                base_h = pf * (a_g * (lo["H_pu"] + v0off_lo * lo["S_pu"])
-                               + b_g * (lo["H_pud"] + v0off_lo * lo["S_pud"])) * ph
-                for mi in range(2 * lang + 1):
-                    rows_s.append(base_s * ylm[:, mi])
-                    rows_h.append(base_h * ylm[:, mi])
-                    diag_s.append(lo["S_pp"])
-                    diag_h.append(lo["H_pp"] + v0off_lo * lo["S_pp"])
-        nlo = len(rows_s)
-        if nlo:
-            rows_s_arr, rows_h_arr = np.array(rows_s), np.array(rows_h)
-            lo_lo_h = np.diag(diag_h).astype(complex)
-            if v_nsph:
-                # the LOs' aspherical coupling — the semicore's response to the crystal field
-                dh_pw, dh_lo = _nonspherical_augment_lo(v_nsph, atoms_cart, abl_by_atom, ks,
-                                                        species, lmax, vol, r, dx, lodat,
-                                                        nsph_int=nsph_int)
-                rows_h_arr = rows_h_arr + dh_pw
-                lo_lo_h = lo_lo_h + dh_lo
-            s_ext = np.zeros((npw + nlo, npw + nlo), dtype=complex)
-            h_ext = np.zeros((npw + nlo, npw + nlo), dtype=complex)
-            s_ext[:npw, :npw], h_ext[:npw, :npw] = S, Hm
-            s_ext[npw:, :npw], h_ext[npw:, :npw] = rows_s_arr, rows_h_arr
-            s_ext[:npw, npw:] = rows_s_arr.conj().T
-            h_ext[:npw, npw:] = rows_h_arr.conj().T
-            s_ext[npw:, npw:] = np.diag(diag_s)
-            h_ext[npw:, npw:] = lo_lo_h
-            S, Hm = s_ext, h_ext
-            import os
-            if os.environ.get("GRADWAVE_FLAPW_LO_DIAG"):
-                # In-context LO conditioning: which LO is redundant given the FULL APW basis at
-                # this k/potential (the per-LO cond_tol only sees each LO's own {u,u̇}). Exact,
-                # opt-in (off the hot path). See flapw.lo_schur.
-                from gradwave.flapw.lo_schur import lo_conditioning_report, lo_labels
-                labels = lo_labels(atoms_cart, lodat)
-                redundant, report = lo_conditioning_report(S, npw, labels)
-                print(f"[LO-DIAG] npw={npw} nlo={nlo} in-context resid_frac per LO direction:\n"
-                      f"{report}", flush=True)
-                if redundant:
-                    worst = ", ".join(f"{lbl} (resid_frac={f:.2e})" for f, lbl in redundant)
-                    print(f"[LO-DIAG] REDUNDANT LO directions (spanned by the APW basis): {worst}",
-                          flush=True)
+    S, Hm = _extend_secular_with_los(S, Hm, npw, atoms_cart, geom, lodat, abl_by_atom,
+                                     vol, species, v_nsph, lmax, r, dx, ks, nsph_int)
     # ``shift_invert`` is True / False / "auto"; resolve it against the final pencil dim (after any
     # LO extension) — "auto" engages only above the measured crossover, True always attempts (the
     # certificate still guards), False/None never. subspace-aug and shift-invert are alternative
