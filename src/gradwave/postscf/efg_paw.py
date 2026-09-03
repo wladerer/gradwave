@@ -153,15 +153,14 @@ class EFGOnSite:
                 "on-site l=2 density for the electric-field-gradient. Use a PAW (kjpaw) "
                 "pseudopotential, not a bare ultrasoft/GBRV one.")
         base = PAWOnSite.from_paw(paw)  # reuse the partial-wave / index-map reading
-        r = base.r
-        rab = base.rab
         ch_l = base.ch_l
-        w3 = (rab / r**3)[None, :]
-        r3_full = (base.rphi_ae * w3) @ base.rphi_ae.T - (base.rphi_ps * w3) @ base.rphi_ps.T
         li = ch_l[:, None]
         lj = ch_l[None, :]
+        # reuse the base's unmasked ⟨1/r³⟩ AE−PS difference; apply the EFG l=2
+        # coupling mask (|l_i−l_j|≤2≤l_i+l_j, l_i+l_j even) rather than gipaw's
+        # same-l paramagnetic mask.
         couple = (np.abs(li - lj) <= 2) & (li + lj >= 2) & ((li + lj) % 2 == 0)
-        r3_diff = r3_full * couple
+        r3_diff = base.r3_full * couple
         lmax = int(ch_l.max()) if len(ch_l) else 0
         return cls(element=base.element, idx=base.idx, r3_diff=r3_diff,
                    ang=_efg_angular_tensor(lmax))

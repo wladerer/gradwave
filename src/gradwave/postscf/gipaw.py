@@ -257,6 +257,7 @@ class PAWOnSite:
     idx: list[tuple[int, int, int]]  # (channel, l, m-slot) per becsum column
     r_diff: np.ndarray  # (nproj, nproj) ∫[(rφ_i)(rφ_j) − (rφ̃_i)(rφ̃_j)]/r dr
     dia_ang: np.ndarray  # (3, 3, nlm, nlm) angular tensor M^αβ_IJ
+    r3_full: np.ndarray  # (nproj, nproj) unmasked ∫[…]/r³ dr (EFG applies its own l=2 mask)
     r3_diff: np.ndarray  # (nproj, nproj) ∫[…]/r³ dr (same-l, l≥1; else 0)
     ang_L: np.ndarray  # (3, nlm, nlm) angular momentum L^α_IJ = ⟨Y_I|L_α|Y_J⟩
 
@@ -302,6 +303,7 @@ class PAWOnSite:
             idx=_index_map(paw),
             r_diff=r_diff,
             dia_ang=dia_ang,
+            r3_full=r3_full,
             r3_diff=r3_diff,
             ang_L=ang_L,
         )
