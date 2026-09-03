@@ -31,7 +31,8 @@ from gradwave.grids import GSphere
 
 # GPU dense-grid temporary budget [bytes]: bands are chunked so the ~4 dense-box
 # temporaries the apply/density chain holds at once stay under this. Sizes a
-# band chunk as budget / (elem_bytes · n_grid · nk). CPU paths do not chunk.
+# band chunk as budget / (elem_bytes · n_grid · nk). CPU paths do not chunk by
+# default (opt in with GRADWAVE_CPU_DENSE_BUDGET — see _cpu_dense_budget_bytes).
 # Tunable via GRADWAVE_GPU_DENSE_BUDGET (bytes) so a memory-tight card (e.g. a
 # 6 GB RTX 3050 running a large-k slab) can shrink the FFT-box peak: a smaller
 # budget → fewer bands per chunk → smaller transient dense boxes, BIT-EXACT
@@ -54,17 +55,43 @@ def _gpu_dense_budget_bytes() -> float:
     return budget
 
 
+def _cpu_dense_budget_bytes() -> float | None:
+    """Optional CPU dense-box band-chunk budget in bytes: ``GRADWAVE_CPU_DENSE_BUDGET``
+    when set (must be > 0), else ``None`` meaning *no chunking* (the historical CPU
+    behaviour — one batched FFT over all bands). Set it to fit a large slab's dense
+    FFT box on a memory-tight host (e.g. ~5e8 bounds the box near 0.5 GB so a
+    ~200-atom slab SCF fits a 16 GB laptop). BIT-EXACT — identical arithmetic, only
+    the band tiling changes — so it never affects results, and unset (the default)
+    leaves every cell byte-for-byte as today."""
+    raw = os.environ.get("GRADWAVE_CPU_DENSE_BUDGET")
+    if raw is None:
+        return None
+    budget = float(raw)
+    if budget <= 0:
+        raise ValueError(
+            f"GRADWAVE_CPU_DENSE_BUDGET must be > 0 bytes, got {budget!r}")
+    return budget
+
+
 def _dense_band_chunk(n_grid: int, nk: int, device: torch.device, elem_bytes: int) -> int:
-    """Bands per chunk so dense-box temporaries stay under the GPU budget
-    (the apply/density chain holds ~4 such temporaries at once). CPU: no limit.
+    """Bands per chunk so dense-box temporaries stay under the memory budget (the
+    apply/density chain holds ~4 such temporaries at once).
+
+    GPU: always chunked to the `_gpu_dense_budget_bytes` budget. CPU: unchunked by
+    default (returns a large sentinel → one batched FFT over all bands, historical
+    behaviour), UNLESS `GRADWAVE_CPU_DENSE_BUDGET` is set, which turns on the same
+    bit-exact chunking to fit a big slab's box on a memory-tight host.
 
     elem_bytes scales the budget by the coefficient precision: the fp32 draft
     (complex64, 8 B) fits twice as many bands as fp64 (complex128, 16 B),
-    giving larger — and thus more efficient — batched FFTs. The budget itself is
-    tunable (`_gpu_dense_budget_bytes`)."""
-    if device.type != "cuda":
-        return 1_000_000
-    return max(1, int(_gpu_dense_budget_bytes() / (elem_bytes * n_grid * max(nk, 1))))
+    giving larger — and thus more efficient — batched FFTs."""
+    if device.type == "cuda":
+        budget: float | None = _gpu_dense_budget_bytes()
+    else:
+        budget = _cpu_dense_budget_bytes()
+        if budget is None:
+            return 1_000_000
+    return max(1, int(budget / (elem_bytes * n_grid * max(nk, 1))))
 
 # Small-cell fast path for the local potential term V(r)·ψ(r). On the wavefunction
 # G-sphere this term is EXACTLY the convolution out(G_i)=Σ_j V̂(G_i−G_j) c(G_j) =
