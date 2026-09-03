@@ -644,6 +644,17 @@ include = [
     "src/gradwave/postscf/alchemical_response.py",
     "src/gradwave/postscf/charged.py",
     "src/gradwave/postscf/nmr_spectrum.py",
+    #
+    # Phase 12: the last ungated leaves — closes the src/gradwave error gate (all
+    # 227 files at error severity; the api/ and inputs/ subpackages are covered by
+    # the directory entries above).
+    "src/gradwave/core/energies/solvation.py",
+    "src/gradwave/opt/neb.py",
+    "src/gradwave/postscf/band_center.py",
+    "src/gradwave/postscf/barrier.py",
+    "src/gradwave/postscf/optics.py",
+    "src/gradwave/postscf/surface_energy.py",
+    "src/gradwave/scf/subspace_chi0.py",
 ]
 
 [tool.ty.overrides.rules]
