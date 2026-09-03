@@ -321,7 +321,7 @@ class GradWave(Calculator):
         mixing_kerker: bool | None = None,  # None → auto (on iff smeared)
         device: str = "cpu",
         compile_xc: bool = False,
-        eigensolver: str = "davidson",  # davidson | chebyshev (NC path only)
+        eigensolver: str = "auto",  # auto | davidson | chebyshev (NC path only)
         precond: str = "kerker",  # kerker | local_tf (NC and USPP/PAW paths)
         chi0_precond: bool = False,  # opt-in subspace-χ₀ Woodbury dielectric
         # preconditioner (NC path only). Frozen at the first converged SCF and
@@ -1267,7 +1267,7 @@ class GradWave(Calculator):
         # forces_uspp, and stress_uspp all thread nspin=2 (per-spin becsum /
         # rho / occupation channels), so the calculator just passes it through.
         nspin, start_mag, _tot_mag = self._resolve_spin(self.atoms, system)
-        if p["eigensolver"] != "davidson":
+        if p["eigensolver"] == "chebyshev":
             raise ValueError(
                 "eigensolver='chebyshev' is norm-conserving only; the USPP/PAW "
                 "generalized S-metric problem is not supported yet")

@@ -159,9 +159,11 @@ def test_eigensolver_defaults_and_parses(tmp_path):
     from gradwave.inputs import load_input
 
     inp = load_input(_write(tmp_path, _base()))
-    assert inp.scf.eigensolver == "davidson"  # the workhorse default
+    assert inp.scf.eigensolver == "auto"  # size-gated default (CheFSI at large-N, else Davidson)
     inp = load_input(_write(tmp_path, _base("scf: {eigensolver: chebyshev}\n")))
     assert inp.scf.eigensolver == "chebyshev"
+    inp = load_input(_write(tmp_path, _base("scf: {eigensolver: davidson}\n")))
+    assert inp.scf.eigensolver == "davidson"
 
 
 def test_pulay_solver_defaults_and_parses(tmp_path):
