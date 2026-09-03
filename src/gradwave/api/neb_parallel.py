@@ -115,9 +115,7 @@ def run_neb_parallel(
     inp: Input, images: list[Atoms], band: NEB, verbose: bool = True,
 ) -> tuple[dict[str, Any], list[Atoms]]:
     """FIRE-drive the interpolated ``band`` with per-step parallel image SCFs."""
-    from ase.calculators.singlepoint import SinglePointCalculator
-
-    from gradwave.api.neb import _mep_block
+    from gradwave.api.neb import _frames, _mep_block
     from gradwave.opt.neb import neb_forces
     from gradwave.postscf.seedpool import map_spokes
 
@@ -206,11 +204,5 @@ def run_neb_parallel(
               f"{block['reaction_energy_eV']:+.4f} eV — "
               f"{'converged' if converged else 'NOT converged'} "
               f"[{p.n_workers}-worker SeedPool]", flush=True)
-    frames: list[Atoms] = []
-    for i, img in enumerate(images):
-        fr = img.copy()
-        fr.calc = SinglePointCalculator(fr, energy=float(energies[i]),
-                                        forces=forces[i])
-        fr.info["image"] = i
-        frames.append(fr)
+    frames = _frames(images, [float(e) for e in energies], forces=forces)
     return block, frames

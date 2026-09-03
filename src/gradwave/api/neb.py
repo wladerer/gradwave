@@ -115,15 +115,20 @@ def _mep_block(images: list[Atoms], energies: list[float],
     }
 
 
-def _frames(images: list[Atoms], energies: list[float]) -> list[Atoms]:
-    """One ASE frame per image, energy/forces frozen for an extxyz MEP write."""
+def _frames(images: list[Atoms], energies: list[float],
+            forces: np.ndarray | None = None) -> list[Atoms]:
+    """One ASE frame per image, energy/forces frozen for an extxyz MEP write.
+
+    ``forces`` supplies precomputed per-image forces (the parallel path, which already
+    has them from the worker pool); when ``None`` they are recomputed from each image's
+    attached calculator (the serial path)."""
     from ase.calculators.singlepoint import SinglePointCalculator
 
     out: list[Atoms] = []
     for i, img in enumerate(images):
         fr = img.copy()
-        forces = img.get_forces(apply_constraint=False)
-        fr.calc = SinglePointCalculator(fr, energy=energies[i], forces=forces)
+        f = img.get_forces(apply_constraint=False) if forces is None else forces[i]
+        fr.calc = SinglePointCalculator(fr, energy=float(energies[i]), forces=f)
         fr.info["image"] = i
         out.append(fr)
     return out
