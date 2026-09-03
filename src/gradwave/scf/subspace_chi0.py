@@ -44,6 +44,8 @@ apples-to-apples measurement the M1 crux asks for.
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 
 from gradwave.core.fftbox import g_to_r, r_to_g
@@ -147,7 +149,12 @@ def _channel_dyads(res: SCFResult, isp: int, mu: float, scheme, width: float,
 
     for ik, sph in enumerate(system.spheres):
         if res.nspin == 1:
-            c_all, eps, occ = res.coeffs[ik], res.eigenvalues[ik], res.occupations[ik]
+            # coeffs is list[Tensor] | list[list[Tensor]]; a single index leaves the
+            # element as Tensor | list[Tensor], which nspin==1 resolves to Tensor at
+            # runtime but the type checker can't narrow — so cast. (The nspin==2 branch
+            # double-indexes and ty already narrows it to Tensor.)
+            c_all = cast("torch.Tensor", res.coeffs[ik])
+            eps, occ = res.eigenvalues[ik], res.occupations[ik]
         else:
             c_all = res.coeffs[isp][ik]
             eps = res.eigenvalues[isp][ik]
