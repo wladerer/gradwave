@@ -13,6 +13,7 @@ directly when needed.
 """
 
 from gradwave._logging import _install_null_handler, configure_logging
+from gradwave._matmul import apply_default_matmul_precision
 from gradwave._threads import apply_default_threads, set_num_threads
 from gradwave._version import __version__
 from gradwave.api import run
@@ -28,6 +29,11 @@ _install_null_handler()
 # cores of a many-core / hybrid CPU. Honours GRADWAVE_NUM_THREADS and never
 # clobbers an explicit OMP/MKL/OpenBLAS choice. See gradwave._threads.
 apply_default_threads()
+
+# Enable TF32 for float32 matmuls (a no-op for the fp64 physics path and on CPU;
+# a measured ~2x on the opt-in reduced-precision GPU draft GEMMs, which are
+# fp64-re-certified). Honours GRADWAVE_TF32. See gradwave._matmul.
+apply_default_matmul_precision()
 
 __all__ = ["GradWave", "Input", "InputError", "__version__", "configure_logging",
            "load_input", "run", "set_num_threads"]

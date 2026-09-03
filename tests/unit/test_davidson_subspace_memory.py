@@ -22,7 +22,11 @@ import numpy as np
 import pytest
 import torch
 
-from gradwave.core.batch import _dense_band_chunk, _gpu_dense_budget_bytes
+from gradwave.core.batch import (
+    _cpu_dense_budget_bytes,
+    _dense_band_chunk,
+    _gpu_dense_budget_bytes,
+)
 from gradwave.solvers.davidson import (
     _resolve_max_dim_factor,
     _subspace_storage_c64,
@@ -143,8 +147,35 @@ def test_gpu_dense_budget_lowers_chunk(monkeypatch):
     chunk_small = _dense_band_chunk(n_grid, nk, dev, elem)
     assert chunk_small < chunk_default
     assert chunk_small == pytest.approx(chunk_default / 4, rel=0.02)
-    # CPU path never chunks regardless of the budget.
+    # CPU path never chunks by default (env unset).
+    monkeypatch.delenv("GRADWAVE_CPU_DENSE_BUDGET", raising=False)
     assert _dense_band_chunk(n_grid, nk, torch.device("cpu"), elem) >= 1_000_000
+
+
+def test_cpu_dense_budget_opt_in(monkeypatch):
+    """CPU box-chunk is off by default (unchunked, byte-identical) and turns on,
+    bit-exactly, only via GRADWAVE_CPU_DENSE_BUDGET — so small/bulk cells are
+    unaffected unless the knob is set to fit a big slab on a memory-tight host."""
+    dev = torch.device("cpu")
+    n_grid, nk, elem = 200_000, 4, 16  # slab-scale box
+
+    monkeypatch.delenv("GRADWAVE_CPU_DENSE_BUDGET", raising=False)
+    assert _cpu_dense_budget_bytes() is None
+    assert _dense_band_chunk(n_grid, nk, dev, elem) >= 1_000_000  # unchunked
+
+    monkeypatch.setenv("GRADWAVE_CPU_DENSE_BUDGET", "5e8")  # ~0.5 GB box cap
+    assert _cpu_dense_budget_bytes() == pytest.approx(5e8)
+    chunk = _dense_band_chunk(n_grid, nk, dev, elem)
+    assert 1 <= chunk < 1_000_000  # now chunked
+    assert chunk == max(1, int(5e8 / (elem * n_grid * nk)))
+
+    # a tiny (bulk-cell-scale) box stays unchunked even with the budget set:
+    # its whole band block is under the budget, so the chunk exceeds any nb.
+    assert _dense_band_chunk(20_000, 8, dev, elem) >= 1000
+
+    monkeypatch.setenv("GRADWAVE_CPU_DENSE_BUDGET", "0")
+    with pytest.raises(ValueError, match="GRADWAVE_CPU_DENSE_BUDGET"):
+        _cpu_dense_budget_bytes()
 
 
 # ---------------------------------------------------------------------------
