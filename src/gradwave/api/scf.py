@@ -138,9 +138,10 @@ def run_scf(
         from gradwave.scf.uspp import scf_uspp
 
         # scf_uspp has no eigensolver knob — the S-metric problem is Davidson-only.
-        # Reject a chebyshev request here, mirroring the calculator's rejection
-        # (calculator.calculate), rather than silently ignoring it.
-        if inp.scf.eigensolver != "davidson":
+        # Reject an explicit chebyshev request here, mirroring the calculator's
+        # rejection (calculator.calculate). "auto" is fine: it resolves to davidson
+        # for the USPP path (CheFSI only gates in on the NC standard problem).
+        if inp.scf.eigensolver == "chebyshev":
             raise InputError(
                 "scf.eigensolver='chebyshev' is norm-conserving only; the "
                 "USPP/PAW generalized S-metric problem is not supported yet")

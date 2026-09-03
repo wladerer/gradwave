@@ -112,3 +112,26 @@ def test_mixed_precision_polishes_to_full():
     )
     # the fp64 polish removes the draft error
     assert float((res.eigenvalues - ref).abs().max()) < 1e-7
+
+
+def test_resolve_eigensolver_gate(monkeypatch):
+    """The ``auto`` size gate: CheFSI above the band-count threshold, Davidson
+    below; explicit names pass through; the env override wins over everything."""
+    import gradwave.scf.loop as loop
+
+    monkeypatch.setattr(loop, "_EIGENSOLVER_ENV", "")
+    monkeypatch.setattr(loop, "_CHEFSI_MIN_NB", 640)
+
+    # auto: gated on nb
+    assert loop._resolve_eigensolver("auto", nb=256) == "davidson"
+    assert loop._resolve_eigensolver("auto", nb=639) == "davidson"
+    assert loop._resolve_eigensolver("auto", nb=640) == "chebyshev"
+    assert loop._resolve_eigensolver("auto", nb=2000) == "chebyshev"
+    # explicit names are never overridden by the gate
+    assert loop._resolve_eigensolver("davidson", nb=2000) == "davidson"
+    assert loop._resolve_eigensolver("chebyshev", nb=8) == "chebyshev"
+
+    # env override pins the solver regardless of nb or the requested mode
+    monkeypatch.setattr(loop, "_EIGENSOLVER_ENV", "davidson")
+    assert loop._resolve_eigensolver("auto", nb=5000) == "davidson"
+    assert loop._resolve_eigensolver("chebyshev", nb=5000) == "davidson"

@@ -799,7 +799,7 @@ def _load_input(path: Path) -> Input:
             trace=bool(scf_raw.get("trace", False)),
             convergence=str(scf_raw.get("convergence", "density")),
             entol=float(scf_raw.get("entol", 1e-6)),
-            eigensolver=str(scf_raw.get("eigensolver", "davidson")),
+            eigensolver=str(scf_raw.get("eigensolver", "auto")),
             boundary=str(scf_raw.get("boundary", "periodic")),
             esm_bias=float(scf_raw.get("esm_bias", 0.0)),
             target_mu=(None if scf_raw.get("target_mu") is None

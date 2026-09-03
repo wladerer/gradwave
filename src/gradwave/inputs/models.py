@@ -86,10 +86,12 @@ class SCFParams:
     # rhotol (docs/manual/convergence.md).
     convergence: str = "density"
     entol: float = 1.0e-6  # eV, energy-error threshold used when convergence="energy"
-    # block eigensolver: "davidson" (the workhorse) | "chebyshev" (Chebyshev-
-    # filtered subspace iteration). Norm-conserving only; the USPP/PAW generalized
-    # S-metric problem rejects a non-davidson choice (see api / calculator).
-    eigensolver: str = "davidson"  # davidson | chebyshev
+    # block eigensolver: "auto" (size-gated: CheFSI for large-N slabs, else
+    # Davidson), "davidson" (the workhorse), or "chebyshev" (Chebyshev-filtered
+    # subspace iteration, forced). CheFSI is norm-conserving only; the USPP/PAW
+    # generalized S-metric problem rejects an explicit chebyshev choice, and
+    # "auto" resolves to davidson there (see api / calculator).
+    eigensolver: str = "auto"  # auto | davidson | chebyshev
     # electrostatic boundary (slab geometry, c ⊥ a,b): "periodic" (default) |
     # "open_z" (open-boundary / ESM vacuum both sides — no dipole correction,
     # box-independent surfaces) | "open_z_metal" (metal Dirichlet planes at both
@@ -108,9 +110,9 @@ class SCFParams:
             raise InputError(
                 "scf.convergence must be 'density' or 'energy', got "
                 f"{self.convergence!r}")
-        if self.eigensolver not in ("davidson", "chebyshev"):
+        if self.eigensolver not in ("auto", "davidson", "chebyshev"):
             raise InputError(
-                "scf.eigensolver must be 'davidson' or 'chebyshev', got "
+                "scf.eigensolver must be 'auto', 'davidson' or 'chebyshev', got "
                 f"{self.eigensolver!r}")
         if self.boundary not in ("periodic", "open_z", "open_z_metal"):
             raise InputError(

@@ -104,6 +104,35 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# ``eigensolver="auto"`` picks CheFSI once the band count is large enough that its
+# fixed, reduction-free filtered subspace beats Davidson's growing Rayleigh-Ritz
+# (whose O(nb³) projected eigh + O(nb²·npw) QR/orthogonalization dominate the apply
+# at large nb — the slab/defect regime with hundreds of occupied bands). Below the
+# threshold Davidson's warm-started subspace wins. The default is set ABOVE any
+# band count reachable today (gradwave's practical max is ~64 atoms ⇒ nb≈256), so
+# "auto" is a no-op on every current cell — Davidson, byte-for-byte — and only
+# engages CheFSI for genuinely large slabs. The crossover value is an estimate
+# (memory note: nb≈500-800 for 12-layer Al / 6-layer Pt); the production-scale
+# measurement is the large-nb RR campaign. GRADWAVE_EIGENSOLVER overrides the
+# resolved choice; GRADWAVE_CHEFSI_MIN_NB tunes the threshold.
+_EIGENSOLVER_ENV = os.environ.get("GRADWAVE_EIGENSOLVER", "").strip().lower()
+_CHEFSI_MIN_NB = int(os.environ.get("GRADWAVE_CHEFSI_MIN_NB", "640"))
+
+
+def _resolve_eigensolver(eigensolver: str, nb: int) -> str:
+    """Resolve ``eigensolver`` to a concrete registered solver name.
+
+    An explicit ``"davidson"`` / ``"chebyshev"`` passes through unchanged.
+    ``"auto"`` (the default) selects ``"chebyshev"`` once ``nb`` crosses the
+    large-N threshold ``_CHEFSI_MIN_NB``, else ``"davidson"``. The
+    ``GRADWAVE_EIGENSOLVER`` env var, when set, overrides everything (including an
+    ``"auto"`` request) so a run can be pinned to one solver for benchmarking."""
+    mode = _EIGENSOLVER_ENV or eigensolver
+    if mode != "auto":
+        return mode
+    return "chebyshev" if nb >= _CHEFSI_MIN_NB else "davidson"
+
+
 @dataclass
 class System:
     """Frozen per-geometry setup (Layer B product)."""
@@ -1539,7 +1568,7 @@ def scf(
     # as fermi_spin (see fsm_smeared_occupations). None (default) finds the
     # moment from the shared Fermi level.
     mixed_precision: bool = False,  # opt-in fp32 draft (see note at resolution below)
-    eigensolver: str = "davidson",  # davidson | chebyshev (NC standard problem only)
+    eigensolver: str = "auto",  # auto | davidson | chebyshev (NC standard problem only)
     precond: str = "kerker",  # kerker | local_tf (position-dependent TF screening)
     spin_precond: bool = False,  # Stoner m-channel preconditioner (smeared nspin=2
     # only; scf/spin_precond.py) — the physics-informed damping of the Stoner-
@@ -1605,6 +1634,13 @@ def scf(
     grid, spheres = system.grid, system.spheres
     vol = grid.volume
     nk, nb = len(spheres), system.nbands
+    # resolve "auto" to a concrete solver from the (fixed-for-this-run) band count
+    # before validation, so the rest of the loop and _validate_scf_args see a
+    # registered name. Logs when the large-N gate hands off to CheFSI.
+    requested_eigensolver = eigensolver
+    eigensolver = _resolve_eigensolver(eigensolver, nb)
+    if requested_eigensolver == "auto" and eigensolver == "chebyshev":
+        logger.info("eigensolver=auto: nb=%d ≥ %d → CheFSI (large-N gate)", nb, _CHEFSI_MIN_NB)
     mixing_scheme = _resolve_mixing_scheme(mixing_scheme, nspin)
     _validate_scf_args(
         system, nspin, eigensolver, smearing, mixing_scheme, precond, tot_magnetization
