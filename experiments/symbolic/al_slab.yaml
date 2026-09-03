@@ -1,0 +1,20 @@
+# Al(100) 3-layer slab (metal, D4h) — large N (vacuum) + few k: the slab regime.
+# Layers: (0,0)/(½,½)/(0,0) stacked along z, centered, ~12 Å vacuum.
+structure:
+  cell: [[4.05, 0.0, 0.0], [0.0, 4.05, 0.0], [0.0, 0.0, 16.2]]
+  positions:
+    cart: [[0.0, 0.0, 6.075], [2.025, 2.025, 8.1], [0.0, 0.0, 10.125]]
+  species: [Al, Al, Al]
+
+pseudopotentials:
+  dir: /home/wladerer/github/gradwave/benchmarks/delta_gauge/pseudos
+  map: {Al: Al.upf}
+
+ecut: 250.0
+xc: pbe
+kpoints: {mesh: [4, 4, 1]}
+smearing: {type: gaussian, width: 0.1}
+
+scf: {etol: 1.0e-5, rhotol: 1.0e-4}
+task: scf
+output: {dir: /home/wladerer/github/gradwave/experiments/symbolic/out_al_slab}

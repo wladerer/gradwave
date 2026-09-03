@@ -1,0 +1,6 @@
+# generated artifacts — regenerable, not source
+__pycache__/
+*.npz
+*.log
+out_*/
+run_slab.py
