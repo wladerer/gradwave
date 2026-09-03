@@ -169,9 +169,11 @@ def test_cpu_dense_budget_opt_in(monkeypatch):
     assert 1 <= chunk < 1_000_000  # now chunked
     assert chunk == max(1, int(5e8 / (elem * n_grid * nk)))
 
-    # a tiny (bulk-cell-scale) box stays unchunked even with the budget set:
-    # its whole band block is under the budget, so the chunk exceeds any nb.
-    assert _dense_band_chunk(20_000, 8, dev, elem) >= 1000
+    # a bulk-cell-scale box gives a chunk far larger than any bulk band count
+    # (nb ~ 8-64), so min(chunk, nb) == nb — those cells stay unchunked in
+    # practice even with the budget set, while the slab box above chunks small.
+    assert _dense_band_chunk(20_000, 8, dev, elem) > 64
+    assert _dense_band_chunk(20_000, 8, dev, elem) > chunk  # bulk >> slab chunk
 
     monkeypatch.setenv("GRADWAVE_CPU_DENSE_BUDGET", "0")
     with pytest.raises(ValueError, match="GRADWAVE_CPU_DENSE_BUDGET"):
