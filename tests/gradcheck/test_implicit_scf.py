@@ -9,6 +9,7 @@ exercises every piece of scf/implicit.py.
 
 from pathlib import Path
 
+import pytest
 import torch
 
 from gradwave.core.xc.learnable import LearnableX
@@ -35,6 +36,7 @@ def run_scf(kappa, mu):
     return res, xc
 
 
+@pytest.mark.standard
 def test_density_loss_gradient_vs_scf_finite_differences():
     torch.set_num_threads(4)
     k0, m0 = 0.70, 0.20

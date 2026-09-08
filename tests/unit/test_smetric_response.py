@@ -177,6 +177,7 @@ def si_paw():
     return res
 
 
+@pytest.mark.standard
 def test_overlap_velocity_matches_finite_difference(si_paw):
     """OverlapVelocity's ∂S/∂k_μ apply matches a central finite difference of
     the nonlocal overlap S_nl(k) c = Σ_ij q_ij⟨β_i(k)|c⟩ β_j(k) at every mesh

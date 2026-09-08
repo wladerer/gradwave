@@ -17,8 +17,6 @@ from gradwave.symmetry import (
     star_of_q,
 )
 
-pytestmark = pytest.mark.standard
-
 RY = 13.605693122994
 
 
