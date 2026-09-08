@@ -60,6 +60,9 @@ from gradwave.api.thermochem import (
 from gradwave.api.thermochem import (
     molecule_ideal_gas_thermo as molecule_ideal_gas_thermo,
 )
+from gradwave.api.thermochem import (
+    run_thermochem as run_thermochem,
+)
 
 __all__ = [
     "SPIN_XC_REGISTRY",
@@ -84,4 +87,5 @@ __all__ = [
     "run_phonons",
     "run_relax",
     "run_scf",
+    "run_thermochem",
 ]

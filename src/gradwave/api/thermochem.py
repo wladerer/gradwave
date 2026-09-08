@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from gradwave.inputs import Input
 from gradwave.postscf.adsorbate_thermo import (
     adsorption_free_energy as adsorption_free_energy,
 )
@@ -144,3 +145,95 @@ def adsorption_free_energy_from_atoms(
         pressure=pressure,
         ignore_imag_modes=ignore_imag_modes,
     )
+
+
+def _f(x: Any) -> float:
+    """A torch scalar / python number → plain float for the JSON summary."""
+    return float(x.item() if hasattr(x, "item") else x)
+
+
+def run_thermochem(inp: Input, verbose: bool = True) -> dict[str, Any]:
+    """Free-energy thermochemistry (task: thermochem) — no SCF.
+
+    Turns the DFT energies and harmonic frequency lists carried in
+    ``inp.thermochem`` into temperature-dependent free energies via
+    :mod:`gradwave.postscf.adsorbate_thermo`. The three modes (``adsorption`` /
+    ``ideal_gas`` / ``harmonic``) map to :func:`adsorption_free_energy_from_atoms`,
+    :func:`molecule_ideal_gas_thermo`, and :func:`harmonic_thermo`; the top-level
+    ``structure`` is the gas / molecule whose mass and moments of inertia feed the
+    ideal-gas rotational and translational entropy. Returns the ``thermochem``
+    summary block (all energies eV, entropy eV/K, temperature K)."""
+    tc = inp.thermochem
+    t = tc.temperature
+    block: dict[str, Any] = {"mode": tc.mode, "temperature_K": t}
+
+    if tc.mode == "harmonic":
+        res = harmonic_thermo(
+            cm1_to_ev(tc.freqs_cm), temperature=t, potentialenergy=tc.energy,
+            ignore_imag_modes=tc.ignore_imag_modes)
+        block.update({
+            "zero_point_energy_eV": _f(res["zero_point_energy"]),
+            "internal_energy_eV": _f(res["internal_energy"]),
+            "entropy_eV_per_K": _f(res["entropy"]),
+            "helmholtz_energy_eV": _f(res["helmholtz_energy"]),
+            "free_energy_eV": _f(res["helmholtz_energy"]),
+            "n_imag": int(res["n_imag"]),
+        })
+    elif tc.mode == "ideal_gas":
+        res = molecule_ideal_gas_thermo(
+            inp.atoms, cm1_to_ev(tc.freqs_cm), temperature=t,
+            symmetrynumber=tc.symmetrynumber, spin=tc.spin,
+            geometry=tc.geometry, potentialenergy=tc.energy,
+            pressure=tc.pressure, ignore_imag_modes=tc.ignore_imag_modes)
+        block.update({
+            "pressure_Pa": tc.pressure,
+            "geometry": tc.geometry or _detect_geometry(inp.atoms),
+            "zero_point_energy_eV": _f(res["zero_point_energy"]),
+            "internal_energy_eV": _f(res["internal_energy"]),
+            "enthalpy_eV": _f(res["enthalpy"]),
+            "entropy_eV_per_K": _f(res["entropy"]),
+            "gibbs_energy_eV": _f(res["gibbs_energy"]),
+            "free_energy_eV": _f(res["gibbs_energy"]),
+            "n_imag": int(res["n_imag"]),
+        })
+    else:  # adsorption
+        res = adsorption_free_energy_from_atoms(
+            energy_slab_ads=tc.energy_slab_ads, energy_slab=tc.energy_slab,
+            energy_gas=tc.energy_gas, temperature=t,
+            ads_vib_energies_ev=cm1_to_ev(tc.ads_freqs_cm),
+            gas_vib_energies_ev=cm1_to_ev(tc.gas_freqs_cm),
+            gas_atoms=inp.atoms, gas_symmetrynumber=tc.gas_symmetrynumber,
+            gas_spin=tc.gas_spin, gas_geometry=tc.gas_geometry,
+            slab_vib_energies_ev=(None if tc.slab_freqs_cm is None
+                                  else cm1_to_ev(tc.slab_freqs_cm)),
+            stoich_gas=tc.stoich_gas, pressure=tc.pressure,
+            ignore_imag_modes=tc.ignore_imag_modes)
+        block.update({
+            "pressure_Pa": tc.pressure,
+            "stoich_gas": tc.stoich_gas,
+            "delta_g_eV": _f(res["delta_g"]),
+            "free_energy_eV": _f(res["delta_g"]),
+            "g_slab_ads_eV": _f(res["g_slab_ads"]),
+            "g_slab_eV": _f(res["g_slab"]),
+            "g_gas_eV": _f(res["g_gas"]),
+            "n_imag_ads": int(res["n_imag_ads"]),
+            "n_imag_slab": int(res["n_imag_slab"]),
+        })
+
+    # computational-hydrogen-electrode shift ΔG(U, pH), applied to the reported
+    # free energy (adsorption ΔG or a single-species G) when a potential is set.
+    if tc.electrode_potential_v is not None:
+        shifted = electrode_potential_shift(
+            block["free_energy_eV"], potential_v=tc.electrode_potential_v,
+            ph=tc.ph, temperature=t, n_electrons=tc.n_electrons)
+        block["electrode"] = {
+            "potential_v": tc.electrode_potential_v,
+            "ph": tc.ph,
+            "n_electrons": tc.n_electrons,
+            "free_energy_shifted_eV": _f(shifted),
+        }
+
+    if verbose:
+        print(f"thermochem ({tc.mode}): G = {block['free_energy_eV']:+.6f} eV "
+              f"at {t:.2f} K", flush=True)
+    return block

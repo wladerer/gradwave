@@ -145,10 +145,25 @@ def _flapw_summary_lines(inp: Input) -> list[str]:
     return lines
 
 
+def _thermochem_summary_lines(inp: Input) -> list[str]:
+    """The at-a-glance block for the thermochem free-energy task, whose inputs
+    are DFT energies + frequency lists rather than plane-wave SCF knobs."""
+    tc = inp.thermochem
+    return [
+        f"  task        thermochem  ({tc.mode})",
+        f"  molecule    {inp.atoms.get_chemical_formula()}  ({len(inp.atoms)} atoms)",
+        f"  temperature {tc.temperature:g} K",
+        f"  pressure    {tc.pressure:g} Pa",
+        f"  output_dir  {inp.output_dir}",
+    ]
+
+
 def _summary_lines(inp: Input) -> list[str]:
     """The input at a glance — shared by `validate` and the `run` startup block."""
     if inp.task == "flapw" or (inp.task == "nmr" and inp.nmr.task == "efg"):
         return _flapw_summary_lines(inp)
+    if inp.task == "thermochem":
+        return _thermochem_summary_lines(inp)
     import numpy as np
 
     a = inp.atoms
@@ -301,6 +316,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     nmr = summary.get("nmr")
     if nmr is not None:
         return _print_nmr(nmr)
+    thermochem = summary.get("thermochem")
+    if thermochem is not None:
+        print(f"thermochem ({thermochem['mode']}): "
+              f"G = {thermochem['free_energy_eV']:+.6f} eV at "
+              f"{thermochem['temperature_K']:.2f} K")
+        return 0
     return 0
 
 

@@ -93,6 +93,7 @@ drivers call their own module globals.
 | Forces / stress | `postscf.forces.forces`, `postscf.stress.stress` (`stress_kbar` to convert) | recompute Hellmann-Feynman/Pulay terms |
 | Bands / DOS / PDOS / phonons / EOS | `postscf.{bands.band_structure, dos.kpm_dos, pdos.projected_dos, phonons, eos.fit_bm3}` | |
 | Bader (QTAIM) per-atom charges | `bader: enabled` on the scf task → `summary["bader"]` (driver: `postscf.bader.bader`) | |
+| Free-energy thermochemistry (ΔG_ads / ideal-gas / harmonic) | `task: thermochem` (`api.run_thermochem`; numbers-in, no SCF) | |
 | Load a pseudopotential (NC or PAW) | `pseudo.upf.parse_upf`, `pseudo.upf_paw.parse_upf_paw` (unified: `api._load_upf`, path-cached) | re-parse UPF XML; re-implement the radial FT (`pseudo.radial.sbt`) |
 | Build the result summary / serialize / render | `api.build_summary`, `io.checkpoint.save_checkpoint`, `io.output.format_output` | hand-roll the summary-dict schema |
 | Warm-start an SCF from a checkpoint | `io.checkpoint.load_checkpoint` → `io.checkpoint.as_start_from` (pass as `scf(..., start_from=)`) | |

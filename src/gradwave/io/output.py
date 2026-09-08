@@ -161,6 +161,57 @@ def _flapw_parameters_lines(par):
     return lines
 
 
+def _thermochem_lines(tc):
+    """Free-energy thermochemistry block: the mode's component free energies and
+    the headline free energy (ΔG_ads, or a molecule's G / F), plus the optional
+    computational-hydrogen-electrode shift."""
+    mode = tc.get("mode", "?")
+    lines = [_sec(f"thermochemistry ({mode})")]
+    rows = [("T", f"{tc.get('temperature_K', 0.0):.2f} K")]
+    if mode == "adsorption":
+        rows += [
+            ("G[slab+ads]", f"{tc['g_slab_ads_eV']:+.6f} eV"),
+            ("G[slab]", f"{tc['g_slab_eV']:+.6f} eV"),
+            ("G[gas]", f"{tc['g_gas_eV']:+.6f} eV"),
+            ("ν (stoich)", f"{tc.get('stoich_gas', 1.0):g}"),
+            ("ΔG_ads", f"{tc['delta_g_eV']:+.6f} eV"),
+        ]
+    elif mode == "ideal_gas":
+        rows += [
+            ("geometry", tc.get("geometry", "?")),
+            ("ZPE", f"{tc['zero_point_energy_eV']:+.6f} eV"),
+            ("H", f"{tc['enthalpy_eV']:+.6f} eV"),
+            ("S", f"{tc['entropy_eV_per_K']:.6e} eV/K"),
+            ("G", f"{tc['gibbs_energy_eV']:+.6f} eV"),
+        ]
+    else:  # harmonic
+        rows += [
+            ("ZPE", f"{tc['zero_point_energy_eV']:+.6f} eV"),
+            ("U", f"{tc['internal_energy_eV']:+.6f} eV"),
+            ("S", f"{tc['entropy_eV_per_K']:.6e} eV/K"),
+            ("F", f"{tc['helmholtz_energy_eV']:+.6f} eV"),
+        ]
+    lines += _cols(rows)
+    elec = tc.get("electrode")
+    if elec:
+        lines.append(f"   CHE shift: U = {elec['potential_v']:+.3f} V, "
+                     f"pH = {elec['ph']:.1f}, n = {elec['n_electrons']} → "
+                     f"G = {elec['free_energy_shifted_eV']:+.6f} eV")
+    return lines
+
+
+def _thermochem_parameters_lines(par):
+    """Parameters block for the thermochem free-energy task (own schema — no
+    plane-wave / SCF knobs, just the thermodynamic state)."""
+    lines = [_sec("parameters")]
+    lines += _cols([
+        ("mode", par.get("mode", "?")),
+        ("temperature", f"{par.get('temperature_K', 0.0):.2f} K"),
+        ("pressure", f"{par.get('pressure_Pa', 0.0):.4g} Pa"),
+    ])
+    return lines
+
+
 def _scf_trace_lines(trace):
     """Per-iteration table (F, ΔE, |Δρ|, and t when the trace was timed)."""
     timed = any("t_s" in h for h in trace)
@@ -858,6 +909,7 @@ _SECTIONS = (
     ("optics", _optics_lines, False),
     ("magnetism", _magnetism_lines, False),
     ("eos", _eos_lines, False),
+    ("thermochem", _thermochem_lines, False),
     ("elastic", _elastic_lines, False),
     ("phonons", _phonon_lines, False),
     ("flapw", _flapw_lines, False),
@@ -875,6 +927,8 @@ def format_output(summary: dict[str, Any]) -> str:
     lines += _structure_lines(summary["structure"])
     if summary["task"] in ("flapw", "nmr"):
         lines += _flapw_parameters_lines(summary["parameters"])
+    elif summary["task"] == "thermochem":
+        lines += _thermochem_parameters_lines(summary["parameters"])
     else:
         lines += _parameters_lines(summary["parameters"])
     for key, render, needs_full in _SECTIONS:

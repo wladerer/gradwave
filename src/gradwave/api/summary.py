@@ -662,6 +662,28 @@ def _base_summary(inp: Input, task: str) -> dict[str, Any]:
     }
 
 
+def _thermochem_base_summary(inp: Input, task: str) -> dict[str, Any]:
+    """Summary scaffold for the thermochem free-energy task. Like
+    _flapw_base_summary it resolves no pseudopotentials (thermochem runs no SCF
+    and carries none); the parameters block records only the thermodynamic knobs.
+    The driver appends its result block under summary[task] and a trailing
+    runtime_s."""
+    from gradwave._version import __version__
+
+    tc = inp.thermochem
+    return {
+        "code": {"name": "gradwave", "version": __version__,
+                 "created": datetime.datetime.now().isoformat(timespec="seconds")},
+        "task": task,
+        "structure": _structure_block(inp),
+        "parameters": {
+            "mode": tc.mode,
+            "temperature_K": float(tc.temperature),
+            "pressure_Pa": float(tc.pressure),
+        },
+    }
+
+
 def _flapw_base_summary(inp: Input, task: str) -> dict[str, Any]:
     """Summary scaffold for the all-electron FLAPW / NMR tasks (flapw, nmr). Unlike
     _base_summary it does NOT resolve pseudopotentials (FLAPW/EFG is all-electron

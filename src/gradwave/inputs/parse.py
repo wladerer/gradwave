@@ -39,6 +39,7 @@ from gradwave.inputs.models import (
     SCFParams,
     SlabParams,
     SmearingParams,
+    ThermochemParams,
     VolumetricParams,
 )
 
@@ -264,7 +265,7 @@ _ALLOWED_TOP = {
     "nonmagnetic", "start_mag", "tot_magnetization",
     "scf", "slab", "task", "relax", "neb", "bands", "optics", "magnetism", "eos",
     "elastic",
-    "phonons", "flapw", "nmr",
+    "phonons", "thermochem", "flapw", "nmr",
     "projections", "bader", "dispersion", "device", "distributed",
     "verbose", "output", "error_estimate", "restart",
 }
@@ -631,15 +632,20 @@ def _load_input(path: Path) -> Input:
     nmr_raw = dict(raw.get("nmr", {}))
     nmr_task = str(nmr_raw.get("task", "efg"))
     all_electron = task == "flapw" or (task == "nmr" and nmr_task == "efg")
+    # thermochem is a numbers-in free-energy task: no plane-wave SCF, so no
+    # pseudopotentials and no ecut (the structure is only the gas molecule whose
+    # mass / moments of inertia feed the ideal-gas rotational/translational
+    # entropy). Shares the all-electron "no PW inputs required" gate.
+    pw_free = all_electron or task == "thermochem"
 
     if "structure" not in raw:
         raise InputError("missing required key 'structure'")
     for req in ("pseudopotentials", "ecut"):
-        if req not in raw and not all_electron:
+        if req not in raw and not pw_free:
             raise InputError(f"missing required key {req!r}")
 
     atoms, fixed = _load_structure(raw["structure"], base)
-    if all_electron and "pseudopotentials" not in raw:
+    if pw_free and "pseudopotentials" not in raw:
         pseudo_dir, pseudo_map = base, {}
     else:
         pseudo_dir, pseudo_map = _resolve_pseudopotentials(
@@ -664,11 +670,11 @@ def _load_input(path: Path) -> Input:
     xc, hybrid = _resolve_xc(raw)
     if task not in ("scf", "relax", "neb", "bands", "optics", "magnetism", "eos",
                     "elastic",
-                    "phonons", "flapw", "nmr"):
+                    "phonons", "thermochem", "flapw", "nmr"):
         raise InputError(
             f"unknown task {task!r} "
             f"(scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons | "
-            f"flapw | nmr)")
+            f"thermochem | flapw | nmr)")
     nspin = int(raw.get("nspin", 1))
     if nspin not in (1, 2):
         raise InputError(f"nspin must be 1 or 2, got {nspin}")
@@ -770,10 +776,10 @@ def _load_input(path: Path) -> Input:
     restart = raw.get("restart")
 
     nbands = raw.get("nbands", "auto")
-    # An all-electron FLAPW/EFG run has no plane-wave ecut (its cutoff lives in
-    # the `flapw` block); a placeholder keeps the Input field populated and
-    # unused. Every other task requires a positive ecut.
-    ecut = float(raw["ecut"]) if "ecut" in raw else (1.0 if all_electron else 0.0)
+    # An all-electron FLAPW/EFG run (or a thermochem free-energy task) has no
+    # plane-wave ecut; a placeholder keeps the Input field populated and unused.
+    # Every plane-wave task requires a positive ecut.
+    ecut = float(raw["ecut"]) if "ecut" in raw else (1.0 if pw_free else 0.0)
     if ecut <= 0.0:
         raise InputError(f"ecut must be > 0 eV, got {ecut}")
     ecutrho = raw.get("ecutrho")
@@ -833,6 +839,7 @@ def _load_input(path: Path) -> Input:
         optics=_build(OpticsParams, raw.get("optics", {}), "optics"),
         magnetism=_build(MagnetismParams, raw.get("magnetism", {}), "magnetism"),
         eos=_build(EOSParams, raw.get("eos", {}), "eos"),
+        thermochem=_build(ThermochemParams, raw.get("thermochem", {}), "thermochem"),
         elastic=_build(ElasticParams, raw.get("elastic", {}), "elastic"),
         phonons=_build(PhononParams, raw.get("phonons", {}), "phonons"),
         flapw=_build_flapw(dict(raw.get("flapw", {})),
