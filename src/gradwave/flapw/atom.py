@@ -31,6 +31,8 @@ CONFIG: dict[str, tuple[float, list[tuple[int, int, int]]]] = {
     "Ne": (10.0, [(1, 0, 2), (2, 0, 2), (2, 1, 6)]),
     # Si 3p² spherically averaged (open shell), like O's 2p⁴.
     "Si": (14.0, [(1, 0, 2), (2, 0, 2), (2, 1, 6), (3, 0, 2), (3, 1, 2)]),
+    # Ar: closed-shell noble gas (the second FLAPW-vs-Elk cross-check solid; 3s-3p splitting).
+    "Ar": (18.0, [(1, 0, 2), (2, 0, 2), (2, 1, 6), (3, 0, 2), (3, 1, 6)]),
     "Ti": (22.0, [(1, 0, 2), (2, 0, 2), (2, 1, 6), (3, 0, 2), (3, 1, 6), (3, 2, 2), (4, 0, 2)]),
 }
 # NIST LDA atomic reference KS eigenvalues (eV), converted from Hartree.
