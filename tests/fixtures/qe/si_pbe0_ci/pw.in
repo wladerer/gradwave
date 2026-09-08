@@ -1,0 +1,33 @@
+&control
+  calculation = 'scf'
+  prefix = 'si_pbe0_ci'
+  pseudo_dir = '../pseudos'
+  outdir = './tmp'
+  verbosity = 'high'
+/
+&system
+  ibrav = 0
+  nat = 2
+  ntyp = 1
+  ecutwfc = 20.0
+  nbnd = 8
+  occupations = 'fixed'
+  input_dft = 'pbe0'
+  nqx1 = 1, nqx2 = 1, nqx3 = 1
+  exxdiv_treatment = 'none'
+  x_gamma_extrapolation = .false.
+/
+&electrons
+  conv_thr = 1.0d-11
+  adaptive_thr = .false.
+/
+ATOMIC_SPECIES
+Si 28.0855 Si_ONCV_PBE-1.2.upf
+CELL_PARAMETERS angstrom
+0.000 2.715 2.715
+2.715 0.000 2.715
+2.715 2.715 0.000
+ATOMIC_POSITIONS crystal
+Si 0.00 0.00 0.00
+Si 0.25 0.25 0.25
+K_POINTS gamma
