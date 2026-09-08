@@ -364,6 +364,42 @@ output:
   dir: ./out
 """
 
+_THERMOCHEM = """\
+# Free-energy thermochemistry (task: thermochem) — NO SCF. Turns DFT energies +
+# harmonic frequency lists (cm⁻¹) from prior runs into ΔG(T). This example is the
+# CHE adsorption step ΔG_ads for H on a metal, referenced to ½ H₂(g).
+# Run:  gradwave input.yaml -o out/   ->  reports ΔG_ads [eV] at T
+# The `structure` is the GAS reference molecule (its mass / moments of inertia
+# feed the ideal-gas rotational + translational entropy).
+
+structure:
+  cell: [[12.0, 0.0, 0.0], [0.0, 12.0, 0.0], [0.0, 0.0, 12.0]]   # H₂ in a box
+  positions:
+    cart: [[0.0, 0.0, 0.0], [0.0, 0.0, 0.741]]
+  species: [H, H]
+
+task: thermochem
+thermochem:
+  mode: adsorption               # adsorption | ideal_gas | harmonic
+  temperature: 298.15            # K
+  # DFT total energies [eV] (EDIT: from your SCF runs)
+  energy_slab_ads: -100.0        # slab + adsorbed H
+  energy_slab: -98.0             # clean slab
+  energy_gas: -6.8               # H₂ molecule
+  stoich_gas: 0.5                # ν: ½ H₂ per adsorbed H (CHE reference)
+  # harmonic mode lists [cm⁻¹] (EDIT: from a partial Hessian / phonon run)
+  ads_freqs_cm: [1000.0, 800.0, 800.0]     # adsorbed H frustrated modes
+  gas_freqs_cm: [4400.0]                    # H₂ stretch
+  gas_symmetrynumber: 2          # σ for homonuclear H₂
+  # optional computational-hydrogen-electrode shift ΔG(U, pH):
+  # electrode_potential_v: -0.2  # V vs RHE  (omit for U = 0)
+  # ph: 0.0
+  # n_electrons: 1
+
+output:
+  dir: ./out
+"""
+
 _ELASTIC = """\
 # Elastic constants: FD of the analytic stress over the six Voigt strains ->
 # the 6x6 stiffness C plus Voigt-Reuss-Hill bulk/shear/Young/Poisson moduli.
@@ -600,6 +636,8 @@ _TEMPLATES: dict[str, tuple[str, str]] = {
     "magnetism": ("Collinear magnetism + exchange couplings.", _MAGNETISM),
     "noncollinear": ("Noncollinear SCF with spin-orbit coupling.", _NONCOLLINEAR),
     "eos": ("Equation of state (bulk modulus via Birch-Murnaghan).", _EOS),
+    "thermochem": ("Free-energy thermochemistry (ΔG_ads / ideal-gas / harmonic).",
+                   _THERMOCHEM),
     "elastic": ("Elastic constants (6×6 stiffness + VRH moduli).", _ELASTIC),
     "phonons": ("Supercell phonon dispersion + DOS.", _PHONONS),
 }

@@ -26,10 +26,12 @@ from gradwave.api.summary import (
     _flapw_base_summary,
     _optics_extra,
     _pdos_summary_block,
+    _thermochem_base_summary,
     _write_volumetric,
     build_summary,
 )
 from gradwave.api.system import build_system
+from gradwave.api.thermochem import run_thermochem
 from gradwave.inputs import Input
 
 if TYPE_CHECKING:
@@ -155,6 +157,12 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
         summary = _base_summary(inp, inp.task)
         summary[inp.task] = block
         summary["runtime_s"] = round(time.time() - t0, 2)
+    elif inp.task == "thermochem":
+        # numbers-in free-energy task: no SCF, no plane-wave result (res stays
+        # None so no checkpoint/volumetric is written below)
+        summary = _thermochem_base_summary(inp, "thermochem")
+        summary["thermochem"] = run_thermochem(inp, verbose=verbose)
+        summary["runtime_s"] = round(time.time() - t0, 2)
     elif inp.task == "flapw":
         # all-electron muffin-tin FLAPW SCF; no plane-wave SCFResult (res stays
         # None so no checkpoint/volumetric is written below)
@@ -169,7 +177,7 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
         raise ValueError(
             f"unknown task {inp.task!r} "
             f"(scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons | "
-            f"flapw | nmr)")
+            f"thermochem | flapw | nmr)")
 
     if inp.distributed:
         from gradwave.distributed import current_rank, maybe_destroy_process_group

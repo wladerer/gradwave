@@ -690,6 +690,86 @@ class EOSParams:
 
 
 @dataclass(frozen=True)
+class ThermochemParams:
+    """Free-energy thermochemistry (task: thermochem) — a numbers-in / free-energy
+    -out post-processing task over ``postscf.adsorbate_thermo``.
+
+    Given DFT energies and harmonic frequency lists (cm⁻¹) from prior runs, it
+    computes temperature-dependent free energies without an SCF. ``mode`` selects:
+
+    * ``ideal_gas`` — a gas molecule (RRHO + Sackur-Tetrode). The top-level
+      ``structure`` is the molecule (its mass / moments of inertia feed the
+      translational / rotational entropy); ``freqs_cm`` are its modes and
+      ``energy`` its DFT total energy. ``geometry`` (monatomic|linear|nonlinear)
+      is auto-detected from the structure when omitted.
+    * ``harmonic`` — an adsorbate: every mode a harmonic oscillator. ``freqs_cm``
+      + ``energy`` only; the structure is ignored.
+    * ``adsorption`` (default) — ΔG_ads = G[slab+ads] − G[slab] − ν·G[gas]. The
+      three ``energy_*`` DFT energies, the ``ads_freqs_cm`` / ``gas_freqs_cm``
+      (and optional ``slab_freqs_cm``) mode lists, and ``stoich_gas`` (ν) drive
+      it; the top-level ``structure`` is the gas reference molecule.
+
+    ``electrode_potential_v`` (None → off) applies the computational-hydrogen-
+    electrode shift ΔG(U, pH) = ΔG + n·(eU + k_BT·ln10·pH) to the reported free
+    energy (Nørskov 2004), with ``ph`` and ``n_electrons``."""
+
+    mode: str = "adsorption"          # adsorption | ideal_gas | harmonic
+    temperature: float = 298.15       # K
+    pressure: float = 1.0e5           # Pa (ideal_gas partial pressure)
+    ignore_imag_modes: bool = False
+    # ideal_gas / harmonic single-species inputs
+    freqs_cm: tuple[float, ...] = ()  # cm⁻¹ mode list
+    energy: float = 0.0               # eV DFT total energy (potentialenergy)
+    geometry: str | None = None       # monatomic | linear | nonlinear (auto if None)
+    symmetrynumber: int | None = None  # rotational σ (ideal_gas linear/nonlinear)
+    spin: float = 0.0                 # total electronic spin S (degeneracy 2S+1)
+    # adsorption-mode inputs
+    energy_slab_ads: float | None = None
+    energy_slab: float | None = None
+    energy_gas: float | None = None
+    ads_freqs_cm: tuple[float, ...] = ()
+    gas_freqs_cm: tuple[float, ...] = ()
+    slab_freqs_cm: tuple[float, ...] | None = None  # None → frozen slab
+    stoich_gas: float = 1.0           # ν; 0.5 for ½ H₂ (CHE)
+    gas_symmetrynumber: int | None = None
+    gas_spin: float = 0.0
+    gas_geometry: str | None = None   # auto from structure if None
+    # computational hydrogen electrode (CHE) shift; None → no shift
+    electrode_potential_v: float | None = None  # U [V vs RHE]
+    ph: float = 0.0
+    n_electrons: int = 1
+
+    def __post_init__(self):
+        if self.mode not in ("adsorption", "ideal_gas", "harmonic"):
+            raise InputError(
+                f"unknown thermochem.mode {self.mode!r} "
+                f"(adsorption | ideal_gas | harmonic)")
+        # coerce YAML lists to tuples (frozen dataclass hashability)
+        for name in ("freqs_cm", "ads_freqs_cm", "gas_freqs_cm"):
+            object.__setattr__(
+                self, name, tuple(float(f) for f in getattr(self, name)))
+        if self.slab_freqs_cm is not None:
+            object.__setattr__(
+                self, "slab_freqs_cm",
+                tuple(float(f) for f in self.slab_freqs_cm))
+        if self.temperature <= 0.0:
+            raise InputError("thermochem.temperature must be > 0 K")
+        if self.pressure <= 0.0:
+            raise InputError("thermochem.pressure must be > 0 Pa")
+        for g in (self.geometry, self.gas_geometry):
+            if g is not None and g not in ("monatomic", "linear", "nonlinear"):
+                raise InputError(
+                    f"thermochem geometry must be monatomic | linear | "
+                    f"nonlinear, got {g!r}")
+        if self.mode == "adsorption":
+            missing = [n for n in ("energy_slab_ads", "energy_slab", "energy_gas")
+                       if getattr(self, n) is None]
+            if missing:
+                raise InputError(
+                    f"thermochem.mode: adsorption requires {', '.join(missing)}")
+
+
+@dataclass(frozen=True)
 class ElasticParams:
     """Elastic constants: FD of the analytic stress over the six Voigt strains
     → the 6×6 stiffness C (and Voigt–Reuss–Hill moduli).
@@ -1021,7 +1101,8 @@ class Input:
     start_mag: dict[str, float] | None = None
     tot_magnetization: float | None = None  # fix M=N↑−N↓ (nspin=2): integer fill
     # without smearing, two-Fermi-level smeared FSM with smearing
-    # scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons | flapw | nmr
+    # scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons |
+    # thermochem | flapw | nmr
     task: str = "scf"
     relax: RelaxParams = field(default_factory=RelaxParams)
     neb: NebParams = field(default_factory=NebParams)  # CI-NEB transition state
@@ -1029,6 +1110,7 @@ class Input:
     optics: OpticsParams = field(default_factory=OpticsParams)
     magnetism: MagnetismParams = field(default_factory=MagnetismParams)
     eos: EOSParams = field(default_factory=EOSParams)
+    thermochem: ThermochemParams = field(default_factory=ThermochemParams)
     elastic: ElasticParams = field(default_factory=ElasticParams)
     phonons: PhononParams = field(default_factory=PhononParams)
     flapw: FlapwParams = field(default_factory=FlapwParams)  # all-electron FLAPW
