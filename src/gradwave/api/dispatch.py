@@ -18,6 +18,7 @@ from gradwave.api.phonons import run_phonons
 from gradwave.api.relax import run_relax
 from gradwave.api.scf import run_scf
 from gradwave.api.summary import (
+    _bader_summary_block,
     _bands_extra,
     _base_summary,
     _cohp_summary_block,
@@ -99,6 +100,8 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
             summary["pdos"] = _pdos_summary_block(res, inp)
         if inp.projections.cohp.enabled:
             summary["cohp"] = _cohp_summary_block(res, inp)
+        if inp.bader.enabled:
+            summary["bader"] = _bader_summary_block(res, inp)
     elif inp.task == "relax":
         relax, _atoms, _frames = run_relax(inp, verbose=verbose)
         summary = _base_summary(inp, "relax")

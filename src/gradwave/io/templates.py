@@ -475,6 +475,38 @@ output:
   dir: ./out
 """
 
+_BADER = """\
+# Bader (QTAIM) charge partitioning: an SCF, then an on-grid steepest-ascent
+# partition of the valence density into atomic basins → per-atom charges. Any
+# pseudopotential works (charges are valence-referenced; PAW gives the sharpest
+# basins). Run:  gradwave input.yaml -o out/  (charges print in scf.out / scf.json)
+
+structure:
+  cell: [[0.0, 2.715, 2.715], [2.715, 0.0, 2.715], [2.715, 2.715, 0.0]]
+  positions:
+    frac: [[0.0, 0.0, 0.0], [0.25, 0.25, 0.25]]
+  species: [Si, Si]
+
+pseudopotentials:
+  dir: ./pseudos
+  map:
+    Si: Si_ONCV_PBE-1.2.upf
+
+ecut: 500.0
+xc: pbe
+kpoints:
+  mesh: [8, 8, 8]
+
+bader:
+  enabled: true
+  add_core: false                # fold NLCC partial-core density to sharpen maxima
+  nna_tol: 0.5                   # Å; flag attractors farther than this from a nucleus
+  # vacuum_threshold: 0.01       # e/Å³; drop low-density basins (slabs/molecules)
+
+output:
+  dir: ./out
+"""
+
 _HUBBARD = """\
 # DFT+U (Dudarev, rotationally invariant): a Hubbard U on the correlated shell of
 # each listed species, applied inside the SCF so the localized d/f states shift.
@@ -562,6 +594,7 @@ _TEMPLATES: dict[str, tuple[str, str]] = {
     "bands-soc": ("Spin-orbit band structure (noncollinear, FR pseudo).", _BANDS_SOC),
     "pdos": ("Projected density of states.", _PDOS),
     "cohp": ("Crystal orbital Hamilton population (bonding analysis).", _COHP),
+    "bader": ("Bader (QTAIM) per-atom charges from the SCF density.", _BADER),
     "hybrid": ("Self-consistent hybrid functional (PBE0/HSE).", _HYBRID),
     "hubbard": ("DFT+U (Dudarev) on a correlated d/f shell.", _HUBBARD),
     "magnetism": ("Collinear magnetism + exchange couplings.", _MAGNETISM),
