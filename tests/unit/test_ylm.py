@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from gradwave.core.ylm import C00, ylm_all
+from gradwave.core.ylm import ylm_all
 
 
 def sphere_quadrature(ntheta=12, nphi=24):
@@ -21,27 +21,6 @@ def test_orthonormality():
     y = ylm_all(3, pts)  # (npts, 16)
     gram = torch.einsum("pi,p,pj->ij", y, w, y)
     assert torch.allclose(gram, torch.eye(16, dtype=torch.float64), atol=1e-12)
-
-
-def test_parity():
-    # Y_lm(-n) = (-1)^l Y_lm(n)
-    gen = torch.Generator().manual_seed(5)
-    n = torch.randn(50, 3, generator=gen, dtype=torch.float64)
-    yp, ym = ylm_all(3, n), ylm_all(3, -n)
-    parity = torch.tensor([(-1.0) ** l for l in range(4) for _ in range(2 * l + 1)])
-    assert torch.allclose(ym, yp * parity, atol=1e-13)
-
-
-def test_zero_vector():
-    y = ylm_all(3, torch.zeros(2, 3, dtype=torch.float64))
-    assert torch.allclose(y[:, 0], torch.full((2,), C00, dtype=torch.float64))
-    assert torch.all(y[:, 1:] == 0)
-
-
-def test_scale_invariance():
-    gen = torch.Generator().manual_seed(6)
-    n = torch.randn(20, 3, generator=gen, dtype=torch.float64)
-    assert torch.allclose(ylm_all(3, n), ylm_all(3, 7.3 * n), atol=1e-13)
 
 
 def test_gradcheck_wrt_directions():

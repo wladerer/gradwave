@@ -15,7 +15,6 @@ import pytest
 import torch
 
 from gradwave.postscf import magnetism
-from gradwave.postscf.hessian import SQRT_EV_AMU_ANG2_TO_CM1
 from gradwave.postscf.hubbard_u import (
     _all_sites_equivalent,
     _assemble_u,
@@ -155,10 +154,9 @@ def test_magnetism_moment_tol_single_constant():
 
 def test_gamma_frequencies_constant_derivation():
     # derived-from-constants value matches the older explicit-SI form to ~13
-    # significant digits and the sibling hessian.py copy to ~1e-7 relative
+    # significant digits (the cross-module identity with hessian.py's copy is
+    # covered by test_review_dedup.test_hessian_reuses_phonons_constant)
     assert pytest.approx(521.4708983725066, rel=1e-12) == _SQRT_EV_AMU_ANG2_TO_CM1
-    assert pytest.approx(
-        SQRT_EV_AMU_ANG2_TO_CM1, rel=1e-7) == _SQRT_EV_AMU_ANG2_TO_CM1
 
 
 def test_gamma_frequencies_diagonal_hessian():

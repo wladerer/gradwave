@@ -92,6 +92,7 @@ def test_velocity_perturbation_q_chunk_k_bit_reproducible(si_mesh):
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.standard
 def test_current_fsum_per_k(si_mesh):
     # exact per-k f-sum: 2Re[Ω·mean_r j_para,μ(k)/f] + 2·HBAR2_2M·δ_μν·nocc
     # equals d/dk_ν Σ_occ⟨v_kin,μ⟩ (dense FD reference) — pins the whole
@@ -127,6 +128,7 @@ def test_current_fsum_per_k(si_mesh):
             assert abs(lhs - dg[mu].item()) < 1e-3  # measured ≤ 2e-5 on |G'| ~ 100
 
 
+@pytest.mark.standard
 def test_q0_tr_null_and_inert_screening(si_mesh):
     # TR: the physical density response to the q=0 velocity perturbation
     # vanishes (Re of the branch sum); screening is then a no-op
@@ -143,6 +145,7 @@ def test_q0_tr_null_and_inert_screening(si_mesh):
     assert (cur_s.j_para - cur_b.j_para).abs().max().item() < 1e-8
 
 
+@pytest.mark.standard
 def test_finite_q_screening_converges(si_mesh):
     from gradwave.core.xc.pbe import PBE as XC
     from gradwave.postscf.kgeometry_nmr import induced_current_q
@@ -173,6 +176,7 @@ def test_rejects_incommensurate_and_reduced():
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.standard
 def test_continuity_closure_kb(si_mesh):
     # THE validation gate of the KB nonlocal current: for the single-branch
     # response pair at finite q the exact identity is
@@ -215,6 +219,7 @@ def test_continuity_closure_kb(si_mesh):
     assert rel_closed < 1e-4 * rel_broken
 
 
+@pytest.mark.standard
 def test_gauge_longitudinal_null(si_mesh):
     # A longitudinal polarization (e_pol ∥ q̂) is a pure-gauge vector
     # potential: the antisymmetrized physical assembly must produce no
@@ -383,6 +388,7 @@ def dq_engine(si_mesh):
     return ShieldingDq(si_mesh)
 
 
+@pytest.mark.standard
 def test_dq_branch_field_matches_mesh_at_q0(si_mesh, dq_engine):
     # S⁰ of the analytic engine equals the mesh route's conserved j_total at
     # q = 0 (both gauge-invariant; dense eigh vs Davidson+CG states) —
@@ -417,6 +423,7 @@ def test_dq_branch_field_matches_mesh_at_q0(si_mesh, dq_engine):
     assert float(((s0 - dia) - tw0).abs().max() / tw0.abs().max()) < 1e-12
 
 
+@pytest.mark.standard
 def test_dq_derivative_matches_fd_twin(si_mesh, dq_engine):
     # THE validation gate of the analytic derivative chain (M second
     # derivatives, δu', covariant-derivative projections, Ā'): central

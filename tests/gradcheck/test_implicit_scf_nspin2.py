@@ -46,6 +46,7 @@ def _system():
     return setup_system(CELL, POS, [0, 0], [upf], ecut=12 * RY, kmesh=(2, 2, 2))
 
 
+@pytest.mark.standard
 def test_nspin2_nonmagnetic_limit_matches_spin_restricted():
     """nspin=2 (start_mag=0) density-loss gradient reproduces the spin-restricted
     (nspin=1) gradient on a nonmagnetic Si insulator."""
