@@ -9,6 +9,7 @@ schema, ``parse`` the loading/validation. This __init__ re-exports the full
 historical ``gradwave.inputs`` surface.
 """
 
+from gradwave.inputs.models import BaderParams as BaderParams
 from gradwave.inputs.models import BandsParams as BandsParams
 from gradwave.inputs.models import CohpParams as CohpParams
 from gradwave.inputs.models import DispersionParams as DispersionParams
@@ -39,6 +40,7 @@ from gradwave.inputs.parse import _normalize_kerker as _normalize_kerker
 from gradwave.inputs.parse import load_input as load_input
 
 __all__ = [
+    "BaderParams",
     "BandsParams",
     "CohpParams",
     "DispersionParams",

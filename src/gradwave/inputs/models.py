@@ -588,6 +588,32 @@ class ProjectionsParams:
 
 
 @dataclass(frozen=True)
+class BaderParams:
+    """Bader (QTAIM) charge partitioning of ρ(r), computed after an SCF.
+
+    Mirrors ``postscf.bader.bader``: an on-grid steepest-ascent partition of the
+    valence density into atomic basins → per-atom electrons, net charge, volume
+    and (spin-polarised) moment. Off by default; enable it as a post-SCF analysis
+    block of the ``scf`` task (like ``projections``). ``add_core`` folds the NLCC
+    partial-core density back onto the grid to sharpen the nuclear maxima (the
+    extra charge is not counted, so charges stay valence-referenced);
+    ``nna_tol`` flags attractors farther than this (Å) from every nucleus as
+    candidate non-nuclear attractors; ``vacuum_threshold`` (e/Å³, ``None`` → off)
+    drops low-density basins from the atom assignment (slabs / molecules-in-a-box)."""
+
+    enabled: bool = False
+    add_core: bool = False
+    nna_tol: float = 0.5              # Å; attractor→nucleus distance flag
+    vacuum_threshold: float | None = None  # e/Å³; None → assign every basin
+
+    def __post_init__(self):
+        if self.nna_tol < 0.0:
+            raise InputError("bader.nna_tol must be >= 0")
+        if self.vacuum_threshold is not None and self.vacuum_threshold < 0.0:
+            raise InputError("bader.vacuum_threshold must be >= 0 (or omitted)")
+
+
+@dataclass(frozen=True)
 class DispersionParams:
     """Opt-in Grimme D3(BJ)/D4(BJ) dispersion correction (energy+forces+stress).
 
@@ -1008,6 +1034,7 @@ class Input:
     flapw: FlapwParams = field(default_factory=FlapwParams)  # all-electron FLAPW
     nmr: NmrParams = field(default_factory=NmrParams)  # EFG / shielding (task: nmr)
     projections: ProjectionsParams = field(default_factory=ProjectionsParams)
+    bader: BaderParams = field(default_factory=BaderParams)  # QTAIM charges
     dispersion: DispersionParams = field(default_factory=DispersionParams)
     device: str = "cpu"
     distributed: bool = False  # k-point-sharded SCF across torchrun ranks (see

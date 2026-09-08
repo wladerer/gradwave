@@ -570,6 +570,43 @@ def _cohp_summary_block(res: SCFLike, inp: Input) -> dict[str, Any]:
         return {"available": False, "reason": str(err)}
 
 
+def _bader_summary_block(res: SCFLike, inp: Input) -> dict[str, Any]:
+    """Bader (QTAIM) per-atom charge block for the summary JSON, computed from
+    the converged density when ``bader`` is enabled on an SCF task. Returns a
+    graceful ``{'available': False, ...}`` when the result formalism is out of
+    coverage (the noncollinear/spinor path carries no scalar valence density the
+    on-grid partition consumes)."""
+    from gradwave.postscf.bader import bader
+    b = inp.bader
+    try:
+        # bader declares SCFResult | USPPResult; a noncollinear NCResult has no
+        # scalar rho/charges the partition needs, so it raises AttributeError,
+        # caught below (the wider SCFLike here is a safe runtime seam).
+        out = bader(cast("SCFResult | USPPResult", res), add_core=b.add_core,
+                    nna_tol=b.nna_tol, vacuum_threshold=b.vacuum_threshold)
+    except (AttributeError, ValueError, NotImplementedError) as err:
+        return {"available": False, "reason": str(err)}
+    symbols = inp.atoms.get_chemical_symbols()  # SCF holds the geometry fixed
+    return {
+        "available": True,
+        "method": "on-grid steepest ascent (Henkelman 2006)",
+        "add_core": bool(b.add_core),
+        "total_electrons": round(out.total_electrons, 6),
+        "n_attractors": int(out.n_attractors),
+        "atoms": [
+            {"index": a, "species": symbols[a],
+             "valence": round(float(out.valence[a]), 4),
+             "electrons": round(float(out.electrons[a]), 4),
+             "charge": round(float(out.charges[a]), 4),
+             "volume_ang3": round(float(out.volumes[a]), 4),
+             **({"moment_muB": round(float(out.moments[a]), 4)}
+                if out.moments is not None else {})}
+            for a in range(len(out.charges))
+        ],
+        "n_nonnuclear_attractors": int(len(out.nonnuclear)),
+    }
+
+
 def _write_volumetric(
     res: SCFLike, spec: VolumetricParams, outdir: Path, verbose: bool
 ) -> dict[str, Any]:

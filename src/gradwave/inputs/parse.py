@@ -13,6 +13,7 @@ import yaml
 from ase import Atoms
 
 from gradwave.inputs.models import (
+    BaderParams,
     BandsParams,
     CohpParams,
     DispersionParams,
@@ -264,7 +265,7 @@ _ALLOWED_TOP = {
     "scf", "slab", "task", "relax", "neb", "bands", "optics", "magnetism", "eos",
     "elastic",
     "phonons", "flapw", "nmr",
-    "projections", "dispersion", "device", "distributed",
+    "projections", "bader", "dispersion", "device", "distributed",
     "verbose", "output", "error_estimate", "restart",
 }
 
@@ -386,6 +387,23 @@ def _build_projections(proj_raw: bool | dict[str, Any]) -> ProjectionsParams:
         width=float(proj_raw.get("width", 0.1)),
         npoints=int(proj_raw.get("npoints", 800)),
         cohp=_build_cohp(proj_raw.get("cohp", False)),
+    )
+
+
+def _build_bader(bader_raw: bool | dict[str, Any]) -> BaderParams:
+    """Parse the `bader` block. `true`/`false` is the enabled shorthand; a
+    mapping selects the core-augmentation, the non-nuclear-attractor flag, and
+    the vacuum-density threshold."""
+    if isinstance(bader_raw, bool):
+        return BaderParams(enabled=bader_raw)
+    _check_keys("bader", bader_raw,
+                {"enabled", "add_core", "nna_tol", "vacuum_threshold"})
+    vt = bader_raw.get("vacuum_threshold")
+    return BaderParams(
+        enabled=bool(bader_raw.get("enabled", True)),
+        add_core=bool(bader_raw.get("add_core", False)),
+        nna_tol=float(bader_raw.get("nna_tol", 0.5)),
+        vacuum_threshold=None if vt is None else float(vt),
     )
 
 
@@ -767,6 +785,7 @@ def _load_input(path: Path) -> Input:
                 f"than the wavefunction cutoff), got ecutrho={ecutrho} eV, "
                 f"ecut={ecut} eV")
     projections = _build_projections(raw.get("projections", False))
+    bader = _build_bader(raw.get("bader", False))
     dispersion = _build_dispersion(raw.get("dispersion", False))
     return Input(
         atoms=atoms,
@@ -820,6 +839,7 @@ def _load_input(path: Path) -> Input:
                            atoms.get_chemical_symbols()),
         nmr=_build_nmr(nmr_raw),
         projections=projections,
+        bader=bader,
         dispersion=dispersion,
         device=raw.get("device", "cpu"),
         distributed=distributed,

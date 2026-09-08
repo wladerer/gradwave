@@ -600,6 +600,38 @@ def _cohp_lines(cohp):
     return lines
 
 
+def _bader_lines(bader):
+    """Bader charge summary: per-atom valence electrons, net QTAIM charge (+ is
+    cationic), basin volume, and — when spin-polarised — the integrated moment.
+    The attractor decomposition and any non-nuclear attractors ride in the JSON."""
+    lines = ["", "   Bader charges (QTAIM, valence-referenced)"]
+    if not bader.get("available", True):
+        lines.append(f"   unavailable · {bader.get('reason', '')}")
+        return lines
+    atoms = bader.get("atoms", [])
+    has_mom = any("moment_muB" in a for a in atoms)
+    hdr = (f"   {'atom':>4s} {'elem':>4s} {'Z_val':>7s} {'electrons':>11s} "
+           f"{'charge':>9s} {'vol [Å³]':>10s}")
+    if has_mom:
+        hdr += f" {'moment':>9s}"
+    lines.append(hdr)
+    for a in atoms:
+        row = (f"   {a['index']:>4d} {a['species']:>4s} {a['valence']:>7.2f} "
+               f"{a['electrons']:>11.4f} {a['charge']:>+9.4f} "
+               f"{a['volume_ang3']:>10.3f}")
+        if has_mom:
+            row += (f" {a['moment_muB']:>+9.4f}" if "moment_muB" in a
+                    else f" {'—':>9s}")
+        lines.append(row)
+    lines.append(f"   Σe⁻ = {sum(a['electrons'] for a in atoms):.4f} "
+                 f"(∫ρ = {bader.get('total_electrons', 0.0):.4f}) · "
+                 f"{bader.get('n_attractors', 0)} attractors")
+    nna = bader.get("n_nonnuclear_attractors", 0)
+    if nna:
+        lines.append(f"   ⚠ {nna} non-nuclear attractor(s)")
+    return lines
+
+
 def _provenance_pairs(prov):
     """(label, value) rows for the machine block; optional fields are omitted
     when the recording platform could not read them."""
@@ -820,6 +852,7 @@ _SECTIONS = (
     ("dispersion", _dispersion_lines, False),
     ("pdos", _pdos_lines, False),
     ("cohp", _cohp_lines, False),
+    ("bader", _bader_lines, False),
     ("relax", _relax_report, True),
     ("bands", _bands_lines, False),
     ("optics", _optics_lines, False),
