@@ -50,6 +50,8 @@ def _write(
     mem: str = "",
     mesh: tuple[int, int, int] = (1, 1, 1),
     symmetry: bool = True,
+    etol: float = 1.0e-10,
+    rhotol: float = 1.0e-9,
 ) -> Path:
     """A Si-diamond SCF input with a tight-convergence scf block and an optional
     scf.memory sub-block. Written through YAML so the test exercises the real
@@ -72,8 +74,8 @@ kpoints:
   mesh: [{mesh[0]}, {mesh[1]}, {mesh[2]}]
 scf:
   max_iter: 120
-  etol: 1.0e-10
-  rhotol: 1.0e-9
+  etol: {etol}
+  rhotol: {rhotol}
   diago:
     tol: 1.0e-10
 {mem_block}"""
@@ -190,34 +192,43 @@ def test_max_dim_factor_matches_default_through_api(tmp_path, monkeypatch, multi
 # ---------------------------------------------------------------------------
 
 
-def test_subspace_storage_c64_precision_through_api(tmp_path, monkeypatch, multik_reference):
+def test_subspace_storage_c64_precision_through_api(tmp_path, monkeypatch):
     """complex64 subspace storage keeps the apply + Rayleigh–Ritz in fp64 but
-    stores V/HV in fp32 — a ~1e-6 eV precision lever, NOT bit-exact. Assert the
-    converged energy agrees to that documented floor and NO WORSE (a regression
-    that loosened the floor must fail), while the spy confirms c64 storage was
-    actually selected during the solve (else a silent no-op would match the fp64
-    baseline to ~0 and slip through)."""
+    stores V/HV in fp32 — a ~1e-6 eV PRECISION lever, NOT bit-exact. Because c64
+    storage plateaus near the fp32 floor (~1e-6 eV eigenpairs) and cannot reach a
+    tight density residual, both storages are run at a moderate rhotol both can
+    reach and compared energy-to-energy: the converged energies must agree to the
+    documented ~1e-6 eV floor and NO WORSE (a regression that loosened that floor
+    must fail here, so the bound is kept tight). The spy confirms c64 storage was
+    actually selected during the c64 solve — else a silent no-op would run fp64
+    and match to ~0, slipping a broken knob through."""
     import importlib
 
     # the real submodule, not the re-exported `davidson` function (shadowing)
     davmod = importlib.import_module("gradwave.solvers.davidson")
     real = davmod._subspace_storage_c64
-    seen: dict = {}
+    seen: dict = {"modes": []}
 
     def spy(x0):
         out = real(x0)
-        seen["c64"] = bool(out)
+        seen["modes"].append(bool(out))
         return out
 
     monkeypatch.setattr(davmod, "_subspace_storage_c64", spy)
-    res = _run(_write(tmp_path, mem="subspace_storage: complex64", **_MULTIK))
 
-    assert res.converged
-    assert seen["c64"] is True  # c64 storage genuinely engaged this solve
+    # a rhotol c64 storage can actually reach (its fp32 plateau is ~a few e-7)
+    kw = dict(etol=1.0e-8, rhotol=1.0e-6, **_MULTIK)
+    res128 = _run(_write(tmp_path, mem="subspace_storage: complex128", **kw))
+    assert all(m is False for m in seen["modes"])  # fp64 storage on the c128 run
+    seen["modes"].clear()
+    res64 = _run(_write(tmp_path, mem="subspace_storage: complex64", **kw))
+    assert res64.gamma_real is False and res128.gamma_real is False
+    assert seen["modes"] and all(m is True for m in seen["modes"])  # c64 engaged
 
-    e_ref = float(multik_reference.energies.free_energy)
-    e64 = float(res.energies.free_energy)
-    de = abs(e64 - e_ref)
+    assert res128.converged and res64.converged
+    e128 = float(res128.energies.free_energy)
+    e64 = float(res64.energies.free_energy)
+    de = abs(e64 - e128)
     # NOT bit-exact, but must sit within the documented ~1e-6 eV c64 floor. The
     # bound is deliberately tight so a regression that degraded c64 precision
     # (e.g. dropping the fp64 RR eigensolve) fails here instead of passing loose.
