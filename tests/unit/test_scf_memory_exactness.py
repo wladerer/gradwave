@@ -156,8 +156,11 @@ def test_max_dim_factor_matches_default_through_api(tmp_path, monkeypatch, multi
     independent (~1e-8). The spy proves the api env bridge (GRADWAVE_MAX_DIM_FACTOR)
     was LIVE during the real solve and forced factor 2 — a silently-ignored knob
     would run factor 4 and match trivially, which this catches."""
-    import gradwave.solvers.davidson as davmod
+    import importlib
 
+    # the real submodule, not the `davidson` FUNCTION that solvers/__init__
+    # re-exports under the same dotted name (attribute shadowing)
+    davmod = importlib.import_module("gradwave.solvers.davidson")
     real = davmod._resolve_max_dim_factor
     seen: dict = {}
 
@@ -194,8 +197,10 @@ def test_subspace_storage_c64_precision_through_api(tmp_path, monkeypatch, multi
     that loosened the floor must fail), while the spy confirms c64 storage was
     actually selected during the solve (else a silent no-op would match the fp64
     baseline to ~0 and slip through)."""
-    import gradwave.solvers.davidson as davmod
+    import importlib
 
+    # the real submodule, not the re-exported `davidson` function (shadowing)
+    davmod = importlib.import_module("gradwave.solvers.davidson")
     real = davmod._subspace_storage_c64
     seen: dict = {}
 
