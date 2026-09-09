@@ -36,8 +36,16 @@ from gradwave.constants import RY_EV as RY  # noqa: E402
 from gradwave.core.xc.pbe import PBE  # noqa: E402
 from gradwave.pseudo.upf import parse_upf  # noqa: E402
 from gradwave.scf.loop import scf, setup_system  # noqa: E402
-import gradwave.solvers.davidson as dav  # noqa: E402
-import gradwave.solvers.registry as reg  # noqa: E402
+
+# NB: `import gradwave.solvers.davidson as dav` returns the FUNCTION `davidson`,
+# not the module — gradwave/solvers/__init__.py does `from .davidson import
+# davidson`, shadowing the submodule attribute on the package. import_module
+# returns the real module object from sys.modules (the same one the registry
+# adapter's `from gradwave.solvers.davidson import davidson_batched` reads), so
+# patching its attribute below is visible to the SCF path.
+import importlib  # noqa: E402
+
+dav = importlib.import_module("gradwave.solvers.davidson")
 
 torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", "8")))
 
