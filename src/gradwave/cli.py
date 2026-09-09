@@ -305,6 +305,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
               f"({surf['gamma_J_m2']:.4f} J/m²), "
               f"E_bulk = {surf['e_bulk_eV_per_layer']:+.6f} eV/layer")
         return 0 if surf.get("all_converged", True) else 1
+    qha = summary.get("qha")
+    if qha is not None:
+        import numpy as np
+
+        t = qha["temperatures_K"]
+        v300 = float(np.interp(300.0, t, qha["volume_T_ang3"]))
+        print(f"qha: {len(qha['scales'])} volumes × {len(t)} T, "
+              f"V(300K) ≈ {v300:.4f} Å³")
+        return 0 if qha.get("all_converged", True) else 1
     phonons = summary.get("phonons")
     if phonons is not None:
         fmin = phonons["min_frequency_cm1"]

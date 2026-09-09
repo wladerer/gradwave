@@ -862,6 +862,40 @@ class SurfaceEnergyParams:
 
 
 @dataclass(frozen=True)
+class QHAParams:
+    """Quasi-harmonic thermodynamics (task: qha): G(T), V(T), thermal expansion.
+
+    Runs a phonon calculation at each of a set of isotropically-scaled volumes
+    (``scales``, relative to the input cell — like an EOS scan), then fits the
+    quasi-harmonic Gibbs free energy G(T,p) = min_V [E(V) + F_vib(V,T) + pV] over
+    a temperature grid (``postscf.qha.qha``). Every volume reuses the ``phonons``
+    block's supercell / DOS-mesh settings, so a DOS mesh must be enabled
+    (``phonons.dos_mesh`` > 0). ``energy`` selects the static E(V) SCF energy;
+    ``pressure_GPa`` is the external pressure. Needs ≥4 volumes for the per-
+    temperature Birch-Murnaghan fit, spanning the thermal-expanded range."""
+
+    scales: tuple[float, ...] = (0.96, 0.98, 1.00, 1.02, 1.04)
+    temperatures: tuple[float, ...] = (
+        0.0, 100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0)
+    pressure_GPa: float = 0.0
+    energy: str = "total"  # total | free_energy | e0 — the static E(V)
+
+    def __post_init__(self):
+        object.__setattr__(self, "scales", tuple(float(s) for s in self.scales))
+        object.__setattr__(
+            self, "temperatures", tuple(float(t) for t in self.temperatures))
+        if len(self.scales) < 4:
+            raise InputError(
+                f"qha.scales needs >=4 volume factors for the per-temperature "
+                f"Birch-Murnaghan fit, got {len(self.scales)}")
+        if len(self.temperatures) < 1:
+            raise InputError("qha.temperatures must list at least one temperature")
+        if self.energy not in ("total", "free_energy", "e0"):
+            raise InputError(
+                f"unknown qha.energy {self.energy!r} (total | free_energy | e0)")
+
+
+@dataclass(frozen=True)
 class ElasticParams:
     """Elastic constants: FD of the analytic stress over the six Voigt strains
     → the 6×6 stiffness C (and Voigt–Reuss–Hill moduli).
@@ -1194,7 +1228,7 @@ class Input:
     tot_magnetization: float | None = None  # fix M=N↑−N↓ (nspin=2): integer fill
     # without smearing, two-Fermi-level smeared FSM with smearing
     # scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons |
-    # thermochem | surface_energy | flapw | nmr
+    # thermochem | surface_energy | qha | flapw | nmr
     task: str = "scf"
     relax: RelaxParams = field(default_factory=RelaxParams)
     neb: NebParams = field(default_factory=NebParams)  # CI-NEB transition state
@@ -1205,6 +1239,7 @@ class Input:
     thermochem: ThermochemParams = field(default_factory=ThermochemParams)
     surface_energy: SurfaceEnergyParams = field(
         default_factory=SurfaceEnergyParams)  # slab-thickness γ sweep
+    qha: QHAParams = field(default_factory=QHAParams)  # quasi-harmonic G(T),V(T)
     elastic: ElasticParams = field(default_factory=ElasticParams)
     phonons: PhononParams = field(default_factory=PhononParams)
     flapw: FlapwParams = field(default_factory=FlapwParams)  # all-electron FLAPW
