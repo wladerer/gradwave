@@ -579,12 +579,42 @@ class CohpParams:
 
 
 @dataclass(frozen=True)
+class BandCenterParams:
+    """d-band-center / width descriptor (Hammer-Nørskov), computed from the PDOS.
+
+    Mirrors ``postscf.band_center.band_center``: the 1st moment (center) and the
+    sqrt of the 2nd central moment (width) of the ``l``-projected DOS, in eV.
+    ``l`` is the angular channel (``'d'`` by default, or s/p/f, or an int);
+    ``atoms`` restricts to 0-based atom indices (``None`` → all). ``ref`` is the
+    energy zero: ``'fermi'`` (the default; needs a Fermi level), ``'none'`` for
+    the absolute mean, or an explicit float [eV]. Needs the PDOS grouped by
+    ``l``/``lm`` (``projections.group_by``), so it is a sub-block of
+    ``projections``; off by default."""
+
+    enabled: bool = False
+    l: str = "d"                      # s | p | d | f (or an int)
+    atoms: tuple[int, ...] | None = None  # 0-based; None → all atoms
+    ref: str = "fermi"                # fermi | none | <float eV>
+
+    def __post_init__(self):
+        if self.atoms is not None:
+            try:
+                atoms = tuple(int(a) for a in self.atoms)
+            except (TypeError, ValueError) as exc:
+                raise InputError(
+                    "projections.band_center.atoms must be a list of 0-based "
+                    "atom indices") from exc
+            object.__setattr__(self, "atoms", atoms)
+
+
+@dataclass(frozen=True)
 class ProjectionsParams:
     enabled: bool = False
     group_by: str = "l"      # atom | l | lm | total (j | jmj for FR)
     width: float = 0.1       # gaussian broadening [eV]
     npoints: int = 800
     cohp: CohpParams = field(default_factory=CohpParams)
+    band_center: BandCenterParams = field(default_factory=BandCenterParams)
 
 
 @dataclass(frozen=True)

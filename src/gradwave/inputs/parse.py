@@ -14,6 +14,7 @@ from ase import Atoms
 
 from gradwave.inputs.models import (
     BaderParams,
+    BandCenterParams,
     BandsParams,
     CohpParams,
     DispersionParams,
@@ -375,20 +376,37 @@ def _build_cohp(cohp_raw: bool | dict[str, Any]) -> CohpParams:
     )
 
 
+def _build_band_center(bc_raw: bool | dict[str, Any]) -> BandCenterParams:
+    """Parse the `projections.band_center` sub-block. `true`/`false` is the
+    enabled shorthand; a mapping selects the angular channel, atom subset, and
+    energy reference."""
+    if isinstance(bc_raw, bool):
+        return BandCenterParams(enabled=bc_raw)
+    _check_keys("projections.band_center", bc_raw,
+                {"enabled", "l", "atoms", "ref"})
+    return BandCenterParams(
+        enabled=bool(bc_raw.get("enabled", True)),
+        l=str(bc_raw.get("l", "d")),
+        atoms=bc_raw.get("atoms"),  # BandCenterParams.__post_init__ coerces/validates
+        ref=str(bc_raw.get("ref", "fermi")),
+    )
+
+
 def _build_projections(proj_raw: bool | dict[str, Any]) -> ProjectionsParams:
     """Parse the `projections` block. `true`/`false` is the enabled shorthand;
-    a mapping selects the grouping and broadening, plus an optional `cohp`
-    sub-block computed alongside the PDOS."""
+    a mapping selects the grouping and broadening, plus optional `cohp` and
+    `band_center` sub-blocks computed alongside the PDOS."""
     if isinstance(proj_raw, bool):
         return ProjectionsParams(enabled=proj_raw)
     _check_keys("projections", proj_raw,
-                {"enabled", "group_by", "width", "npoints", "cohp"})
+                {"enabled", "group_by", "width", "npoints", "cohp", "band_center"})
     return ProjectionsParams(
         enabled=bool(proj_raw.get("enabled", True)),
         group_by=str(proj_raw.get("group_by", "l")),
         width=float(proj_raw.get("width", 0.1)),
         npoints=int(proj_raw.get("npoints", 800)),
         cohp=_build_cohp(proj_raw.get("cohp", False)),
+        band_center=_build_band_center(proj_raw.get("band_center", False)),
     )
 
 

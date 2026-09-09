@@ -621,6 +621,14 @@ def _pdos_lines(pdos):
         lines.append(f"   {'group':<28s}{'weight':>12s}")
         for lab, arr in sorted(pdos["groups"].items()):
             lines.append(f"   {lab:<28s}{float(integ(arr)):>12.4f}")
+    bc = pdos.get("band_center")
+    if bc is not None:
+        if bc.get("available", True):
+            ref = "E_F" if bc["ref"] in ("fermi", "ef", "E_F") else bc["ref"]
+            lines.append(f"   {bc['l']}-band center {bc['center_eV']:+.4f} eV · "
+                         f"width {bc['width_eV']:.4f} eV (ref {ref})")
+        else:
+            lines.append(f"   band center: unavailable · {bc.get('reason', '')}")
     return lines
 
 
