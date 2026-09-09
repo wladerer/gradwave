@@ -74,7 +74,7 @@ scf:
   max_iter: 120
   etol: 1.0e-10
   rhotol: 1.0e-9
-  diago_tol: 1.0e-10
+  diago: 1.0e-10
 {mem_block}"""
     p = tmp_path / "in.yaml"
     p.write_text(body)
