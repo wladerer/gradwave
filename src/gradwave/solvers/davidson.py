@@ -61,6 +61,24 @@ from gradwave.solvers.precond import teter, teter_b
 logger = logging.getLogger(__name__)
 
 
+# --- PROBE-ONLY instrumentation (probe/rr-vs-apply-split, NOT for merge) -----
+# Env-gated wall-time accounting inside davidson_batched, separating the true
+# H-apply from the Rayleigh-Ritz subspace linear algebra (Gram / eigh / Ritz
+# reconstruction) and the orthonormalization. Zero overhead when the flag is
+# unset (a single module-level bool test per timed op). Read once at import.
+_RR_PROF_ON = os.environ.get("GRADWAVE_RR_PROFILE", "").strip() == "1"
+_RR_PROF: dict[str, float] = {}
+
+
+def _rrp(key: str, t0: float) -> None:
+    _RR_PROF[key] = _RR_PROF.get(key, 0.0) + (time.perf_counter() - t0)
+
+
+def _rrp_reset() -> None:
+    _RR_PROF.clear()
+# -----------------------------------------------------------------------------
+
+
 # Square subspace dim at/below which a CUDA subspace eigensolve is offloaded to
 # CPU LAPACK (issue #133). The batched Davidson Rayleigh-Ritz reductions are
 # tiny (nk, n, n) Hermitian solves, but on CUDA each cuSOLVER call reads a
@@ -701,11 +719,16 @@ def davidson_batched(
     def _apply_full(z: torch.Tensor) -> torch.Tensor:
         nonlocal n_apply_full
         n_apply_full += z.shape[0] * z.shape[1]
+        t0 = time.perf_counter() if _RR_PROF_ON else 0.0
         if store_c64:
             # Storage is complex64 but the apply COMPUTE stays fp64: upcast the
             # (small, n_add-wide) block, apply, store the image back in c64.
-            return h_apply(z.to(cdtype)).to(sdtype)
-        return h_apply(z)
+            out = h_apply(z.to(cdtype)).to(sdtype)
+        else:
+            out = h_apply(z)
+        if _RR_PROF_ON:
+            _rrp("apply", t0)
+        return out
 
     def _apply_exp(z: torch.Tensor) -> torch.Tensor:
         """Expansion-vector apply: complex64 in fp32-expansion mode, else full."""
@@ -784,13 +807,22 @@ def davidson_batched(
         # eigensolve; the long v/hv basis and the Ritz combination stay
         # complex64. A no-op in the fp64 polish, mirroring the generalized
         # reduction in scf/uspp_batch.py.
+        _tg = time.perf_counter() if _RR_PROF_ON else 0.0
         s = torch.matmul(v.conj(), hv.mT)
         s = (0.5 * (s + s.conj().transpose(-1, -2))).to(torch.complex128)
+        if _RR_PROF_ON:
+            _rrp("gram", _tg)
+            _te = time.perf_counter()
         w, u = _eigh_subspace(s)
+        if _RR_PROF_ON:
+            _rrp("eigh", _te)
+            _tr = time.perf_counter()
         u = u[:, :, :nb].to(v.dtype)  # rotation back to the block dtype
         eig = w[:, :nb].real.to(rdtype)
         x = torch.einsum("kja,kjg->kag", u, v)
         hx = torch.einsum("kja,kjg->kag", u, hv)
+        if _RR_PROF_ON:
+            _rrp("ritz", _tr)
 
         r = hx - eig[..., None] * x
         rn = torch.linalg.norm(r, dim=-1).real
@@ -901,16 +933,22 @@ def davidson_batched(
             # ~1 eV energy jump on CUDA). Kill the drift with a QR of x and
             # transform hx by the same triangular factor: x_old = Rᵀ·x_new ⇒
             # hx_new = (Rᵀ)⁻¹·hx_old. Cost: one (nb × nb) triangular solve.
+            _to = time.perf_counter() if _RR_PROF_ON else 0.0
             q, rmat = _qr_offload(x.transpose(-1, -2))
             x_orth = q.transpose(-1, -2)
             hx_orth = torch.linalg.solve_triangular(
                 rmat.transpose(-1, -2), hx, upper=False
             )
             d = _orthonormalize_b(d, mask, against=x_orth, jitter=jitter)
+            if _RR_PROF_ON:
+                _rrp("ortho", _to)
             v = torch.cat([x_orth, d], dim=1)
             hv = torch.cat([hx_orth, _apply_exp(d)], dim=1)
         else:
+            _to = time.perf_counter() if _RR_PROF_ON else 0.0
             d = _orthonormalize_b(d, mask, against=v, jitter=jitter)
+            if _RR_PROF_ON:
+                _rrp("ortho", _to)
             v = torch.cat([v, d], dim=1)
             hv = torch.cat([hv, _apply_exp(d)], dim=1)
 
