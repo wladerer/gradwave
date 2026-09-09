@@ -121,6 +121,53 @@ def coulomb_potential_q(
     return v_r.reshape(*batch, -1)
 
 
+def multik_exchange_operator_on(
+    psi_occ_per_k: list[torch.Tensor],
+    psi_test_per_k: list[torch.Tensor],
+    kcart_per_k: list[torch.Tensor],
+    kweights: torch.Tensor,
+    g_cart: torch.Tensor,
+    volume: float,
+    *,
+    mode: str = "full",
+    omega: torch.Tensor | float | None = None,
+) -> list[torch.Tensor]:
+    """Multi-k Fock operator (defined by the occupied set) applied to a *separate*
+    test set at each k.
+
+    Generalizes ``multik_exchange_operator`` (which is the ``psi_test = psi_occ``
+    special case). The occupied set ``psi_occ_per_k[k′]`` defines V_x through the
+    BZ sum; ``psi_test_per_k[k]`` is what V_x acts on. V_x is diagonal in the test
+    k-index, so a test vector at k stays at k. Both hold *physical* periodic
+    orbital parts ψ̂ = u/√Ω (``exchange.physical_orbitals``). Returns ``w_per_k``,
+    a list of (n_test_k, N_r): W_{tk} = (V_x ψ̂_test_{tk}) with
+
+        W_{tk}(r) = −Σ_{k′} w_{k′} Σ_{j∈occ(k′)} ψ̂_{jk′}(r) ṽ_{jk′,tk}(r),
+
+    ṽ the periodic potential (``coulomb_potential_q``) of the co-density
+    ψ̂*_{jk′}ψ̂_test_{tk} at momentum q = k − k′. Post-SCF corrections use this to
+    apply the exact Fock operator to the *unoccupied* Ritz vectors, which the
+    occupied-only ``multik_exchange_operator`` cannot reach. Differentiable in
+    ``omega``."""
+    n_k = len(psi_occ_per_k)
+    w_per_k = [torch.zeros_like(p) for p in psi_test_per_k]
+    for ka in range(n_k):
+        pa = psi_test_per_k[ka]                            # test set at k
+        if pa.shape[0] == 0:
+            continue
+        wa = w_per_k[ka]
+        for kb in range(n_k):
+            pb = psi_occ_per_k[kb]                         # occupied at k′
+            if pb.shape[0] == 0:
+                continue
+            q = kcart_per_k[ka] - kcart_per_k[kb]          # k − k′
+            for t in range(pa.shape[0]):
+                sigma = pb.conj() * pa[t][None, :]         # (n_occ_kb, N_r) ψ̂*_{jk′}ψ̂_{tk}
+                v = coulomb_potential_q(sigma, q, g_cart, mode, omega)
+                wa[t] = wa[t] - kweights[kb] * (pb * v).sum(dim=0)
+    return w_per_k
+
+
 def multik_exchange_operator(
     psi_per_k: list[torch.Tensor],
     kcart_per_k: list[torch.Tensor],
@@ -144,24 +191,11 @@ def multik_exchange_operator(
     ψ̂*_{jk′}ψ̂_{tk} at momentum q = k − k′. At a single k-point (q=0, full kernel)
     this is exactly ``exchange.exchange_operator_direct``; its energy trace
     ½ Σ_k w_k Σ_t ⟨ψ̂_{tk}|W_{tk}⟩ matches ``multik_exchange_energy``. This is the
-    O(N_k²·N_occ²) reference the per-k ACE compresses. Differentiable in ``omega``."""
-    n_k = len(psi_per_k)
-    w_per_k = [torch.zeros_like(p) for p in psi_per_k]
-    for ka in range(n_k):
-        pa = psi_per_k[ka]                                 # test set at k
-        if pa.shape[0] == 0:
-            continue
-        wa = w_per_k[ka]
-        for kb in range(n_k):
-            pb = psi_per_k[kb]                             # occupied at k′
-            if pb.shape[0] == 0:
-                continue
-            q = kcart_per_k[ka] - kcart_per_k[kb]          # k − k′
-            for t in range(pa.shape[0]):
-                sigma = pb.conj() * pa[t][None, :]         # (n_occ_kb, N_r) ψ̂*_{jk′}ψ̂_{tk}
-                v = coulomb_potential_q(sigma, q, g_cart, mode, omega)
-                wa[t] = wa[t] - kweights[kb] * (pb * v).sum(dim=0)
-    return w_per_k
+    O(N_k²·N_occ²) reference the per-k ACE compresses. The ``psi_test = psi_occ``
+    special case of ``multik_exchange_operator_on``. Differentiable in ``omega``."""
+    return multik_exchange_operator_on(
+        psi_per_k, psi_per_k, kcart_per_k, kweights, g_cart, volume,
+        mode=mode, omega=omega)
 
 
 def physical_periodic_orbitals(

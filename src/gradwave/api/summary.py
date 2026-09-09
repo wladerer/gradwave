@@ -99,6 +99,28 @@ def build_summary(res: SCFLike, inp: Input, task: str,
         scf_block["total_magnetization_muB"] = float((sum(x * x for x in mv)) ** 0.5)
         scf_block["absolute_magnetization_muB"] = float(_get(res, "mag_abs", 0.0))
 
+    # Hybrid (PBE0/HSE) exact-Fock eigenvalue correction. The SCF's Fock operator
+    # is ACE-compressed: exact on the occupied subspace (so the total energy and
+    # occupied eigenvalues are exact) but only approximate on the virtual states,
+    # which makes the raw `gap_eV` above an ACE artifact rather than a cross-code
+    # quantity. Re-diagonalize the converged subspace with the un-compressed Fock
+    # operator to correct the conduction eigenvalues, and expose the corrected gap
+    # / eigenvalues clearly labelled. nspin=1 plain-SCFResult path only (the
+    # hybrid SCF's formalism); occupied levels are provably unchanged.
+    if (inp.hybrid.enabled and occ is not None and eig is not None
+            and nspin == 1 and _get(res, "formalism") == "nc"):
+        try:
+            from gradwave.postscf.hybrid import exact_fock_corrected_eigenvalues
+
+            hy = inp.hybrid
+            omega = hy.omega if hy.mode != "full" else None
+            eig_corr = exact_fock_corrected_eigenvalues(
+                cast("SCFResult", res), alpha=hy.alpha, mode=hy.mode, omega=omega)
+            scf_block["eigenvalues_corrected_eV"] = eig_corr.tolist()
+            scf_block["gap_corrected_eV"] = _gap(eig_corr.tolist(), occ.tolist(), nspin)
+        except (RuntimeError, ValueError, AttributeError) as exc:
+            logger.debug("exact-Fock gap correction skipped: %r", exc)
+
     # convergence diagnostics: final residuals against the thresholds, the
     # geometric decay rate q of the energy residual (small q = fast, clean
     # convergence), and whether the run warm-started from a checkpoint
