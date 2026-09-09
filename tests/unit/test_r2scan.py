@@ -20,8 +20,16 @@ import torch
 from gradwave.constants import BOHR_ANG, HARTREE_EV
 from gradwave.core.xc.r2scan import R2SCAN, SpinR2SCAN
 
-libxc = pytest.importorskip("pyscf.dft.libxc",
-                            reason="pyscf/libxc oracle not installed")
+
+def _libxc():
+    """Import the pyscf/libxc oracle, skipping the caller if it is absent.
+
+    Deliberately NOT a module-level importorskip: that skips the WHOLE module
+    when the fragile native wheel fails to load, silently taking the frozen
+    self-regression pins (test_r2scan_frozen_pins / _autograd_vs_fd below) down
+    with it. Those must run without any oracle."""
+    return pytest.importorskip("pyscf.dft.libxc",
+                               reason="pyscf/libxc oracle not installed")
 
 
 def _rel(a, b):
@@ -43,6 +51,7 @@ def _grids():
 
 def test_unpolarized_matches_libxc():
     """e_xc and all partials (vρ, vσ, vτ) equal libxc r2scan to machine precision."""
+    libxc = _libxc()
     den, gmag, sigma, tau = _grids()
     n = len(den)
     rho6 = np.vstack([den, gmag, np.zeros(n), np.zeros(n), np.zeros(n), tau])
@@ -65,6 +74,7 @@ def test_unpolarized_matches_libxc():
 
 def test_exchange_and_correlation_separately():
     """Each channel matches libxc's standalone mgga_x/mgga_c_r2scan."""
+    libxc = _libxc()
     from gradwave.core.xc import r2scan as R
 
     den, gmag, sigma, tau = _grids()
@@ -83,6 +93,7 @@ def test_exchange_and_correlation_separately():
 
 def test_spin_polarized_matches_libxc():
     """Collinear r2SCAN equals libxc spin=1 (energy and vτ per channel)."""
+    libxc = _libxc()
     nu = np.array([0.30, 0.05, 0.4, 0.02, 0.25, 0.5])
     nd = np.array([0.10, 0.05, 0.25, 0.015, 0.25, 0.1])
     gu = np.array([0.04, 0.01, 0.15, 0.001, 0.06, 0.2])
@@ -115,3 +126,60 @@ def test_spin_polarized_matches_libxc():
     assert _rel(e_haub.detach().numpy(), exc * n).max() < 1e-12
     assert _rel((g_tu / BOHR_ANG**5).numpy(), vtau[:, 0]).max() < 1e-10
     assert _rel((g_td / BOHR_ANG**5).numpy(), vtau[:, 1]).max() < 1e-10
+
+
+# ---------------------------------------------------------------------------
+# Oracle-free self-regression: frozen e_xc pins + autograd-vs-FD potentials.
+# These run WITHOUT pyscf/libxc, so r2SCAN keeps pointwise coverage even when
+# the native oracle wheel fails to load (the exact silent-blind-spot the
+# per-test _libxc() skip above is meant to leave open). The pins are generated
+# from the current implementation; they lock the three ᾱ regions against an
+# accidental change, and the FD check independently proves vρ/vσ/vτ are the
+# exact analytic derivatives of the pinned energy (not just internally
+# consistent numbers).
+# ---------------------------------------------------------------------------
+
+# (ρ [e/Å³], σ [e²/Å⁸], τ [e/Å⁵]) at ᾱ ≈ 0.5, 1.0, 3.0 — the slowly-varying,
+# single-orbital-boundary, and overlapped-density regions. ᾱ=3.0 sits in the
+# f(ᾱ) decay branch (ᾱ>2.5), 0.5/1.0 in the polynomial branch, none on the
+# ᾱ=2.5 kink (so the central-difference derivative check is well posed).
+_R2SCAN_RHO = [2.0245003483801125, 0.6748334494600375, 3.3741672473001874]
+_R2SCAN_SIG = [1.0408086916482933, 0.14636372226304123, 6.505054322801834]
+_R2SCAN_TAU = [4.715531185069684, 1.5178588062681064, 65.62511307741592]
+# frozen e_xc [eV/Å³] from R2SCAN().energy_density on the above
+_R2SCAN_EXC = [-32.09255007071598, -7.261479903907491, -53.2262749477195]
+
+
+def _r2scan_inputs(requires_grad=False):
+    def leaf(v):
+        return torch.tensor(v, dtype=torch.float64, requires_grad=requires_grad)
+    return leaf(_R2SCAN_RHO), leaf(_R2SCAN_SIG), leaf(_R2SCAN_TAU)
+
+
+def test_r2scan_frozen_pins():
+    """e_xc at the three ᾱ regions matches the frozen reference (rtol 1e-12).
+    A drift in any branch's constants or the α assembly trips this."""
+    rho, sig, tau = _r2scan_inputs()
+    e = R2SCAN().energy_density(rho, sig, tau).detach().numpy()
+    assert np.allclose(e, _R2SCAN_EXC, rtol=1e-12, atol=0.0)
+
+
+def test_r2scan_autograd_vs_fd():
+    """vρ, vσ, vτ from autograd equal central finite differences of the pinned
+    energy — the analytic potentials are exactly d(e_xc)/d{ρ,σ,τ}."""
+    rho, sig, tau = _r2scan_inputs(requires_grad=True)
+    e = R2SCAN().energy_density(rho, sig, tau).sum()
+    g_rho, g_sig, g_tau = torch.autograd.grad(e, (rho, sig, tau))
+
+    base = _r2scan_inputs()  # detached copies for FD
+    for k, (b, g) in enumerate(zip(base, (g_rho, g_sig, g_tau), strict=True)):
+        for i in range(3):
+            h = 1e-6 * max(1.0, abs(float(b[i])))
+            args_p = [t.clone() for t in base]
+            args_m = [t.clone() for t in base]
+            args_p[k][i] += h
+            args_m[k][i] -= h
+            ep = R2SCAN().energy_density(*args_p).sum().item()
+            em = R2SCAN().energy_density(*args_m).sum().item()
+            fd = (ep - em) / (2.0 * h)
+            assert abs(fd - g[i].item()) < 1e-6 * max(1.0, abs(fd)), (k, i)

@@ -229,7 +229,9 @@ def test_complex64_storage_matches_fp64_storage(monkeypatch):
     r64 = davidson_batched(apply, x0.clone(), t, mask, tol=1e-6, max_iter=200)
 
     assert r64.eigenvectors.dtype == torch.complex128  # upcast on return
-    assert float((r64.eigenvalues - r128.eigenvalues).abs().max()) < 1e-4
+    # documented floor is ~1e-6 eV; pin below the loose 1e-4 with headroom
+    # (measured max |Δλ| ≈ 2e-6 here) so a regression above the fp32 floor bites
+    assert float((r64.eigenvalues - r128.eigenvalues).abs().max()) < 1e-5
 
 
 def test_complex64_storage_does_not_certify_to_fp64(monkeypatch):
@@ -250,8 +252,9 @@ def test_complex64_storage_does_not_certify_to_fp64(monkeypatch):
 
     assert float(r128.residual_norms.max()) < TOL  # fp64 storage reaches tol
     assert float(r64.residual_norms.max()) > TOL   # c64 storage plateaus above
-    # but the eigenvalues still agree to the fp32 floor
-    assert float((r64.eigenvalues - r128.eigenvalues).abs().max()) < 1e-4
+    # but the eigenvalues still agree to the fp32 floor (measured ≈1e-6 here;
+    # pinned below the loose 1e-4, above the ~1e-6 documented floor)
+    assert float((r64.eigenvalues - r128.eigenvalues).abs().max()) < 1e-5
 
 
 # ---------------------------------------------------------------------------

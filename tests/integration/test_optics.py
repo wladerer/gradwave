@@ -5,10 +5,13 @@ absorption is non-negative, vanishes below the gap (ε₂(0)≈0), and the stati
 ε₁(0) > 1. Also checks the full task wiring via api.run.
 """
 
+import math
+
 import numpy as np
 import pytest
 import torch
 
+from gradwave.constants import E2, HBAR2_2M
 from gradwave.core.xc.lda_pw92 import LDA_PW92
 from gradwave.core.xc.noncollinear import NoncollinearXC
 from gradwave.core.xc.spin import LSDA_PW92
@@ -47,7 +50,9 @@ def test_optics_epsilon_si():
     assert np.all(np.isfinite(eps2)) and (eps2 >= -1e-8).all()  # absorption ≥ 0
     assert np.all(alpha >= -1e-6)
     assert eps2[0] < 0.05 * eps2.max()  # gapped: only Lorentzian tail at ω→0
-    assert 5.0 < info["eps_static"] < 40.0  # LDA Si ε₁(0) ≈ 15 (IP, no local fields)
+    # LDA IP Si ε₁(0): measured 13.8 here (experiment ~11.7; IP-without-local-
+    # fields overestimates). Snug physical window, not the old factor-8 5<ε<40.
+    assert 12.0 < info["eps_static"] < 16.0
     assert info["n_occ"] == 4            # Si: 8 valence e⁻ → 4 occupied bands
     # absorption onset sits above the (LDA-underestimated) gap
     assert om[np.argmax(eps2 > 1.0)] > 1.0
@@ -56,6 +61,51 @@ def test_optics_epsilon_si():
     assert np.allclose(exx, eyy, atol=0.2) and np.allclose(exx, ezz, atol=0.2)
     assert np.allclose((exx + eyy + ezz) / 3.0, eps2, atol=1e-9)
     assert info["velocity"] == "full"
+
+
+def test_optics_fsum_rule_si():
+    """f-sum rule on the returned ε₂(ω): ∫₀^∞ ω ε₂ dω = (π/2)(ħω_p)² with
+    (ħω_p)² = 8π·E2·(ħ²/2mₑ)·n_val (the plasma frequency of the n_val valence
+    electrons in the cell). Two facts are asserted as *physically correct*:
+
+      (1) The absolute prefactor / valence-electron bookkeeping is right — the
+          sum saturates to a definite fraction of the sum-rule target, not an
+          arbitrary number. A wrong Ω, E2, spin-fold g_occ, or n_val would move
+          the ratio out of the band below.
+      (2) The sum is monotone-increasing as the conduction manifold grows
+          (each interband transition adds positive oscillator strength).
+
+    It does NOT reach unity: a norm-conserving valence-only IP calculation with
+    a finite conduction manifold recovers only part of the sum (the [r,V_NL]
+    commutator and the core/high-lying oscillator strength are missing). ~0.6
+    for pseudopotential Si is expected — this is a *partial-saturation* pin, not
+    an all-electron f-sum. See the report if this ever exceeds ~unity.
+    """
+    torch.set_num_threads(8)
+    res = _si_scf()
+    vol = float(res.system.grid.volume)
+
+    def fsum_ratio(n_extra_bands, omega_max):
+        om, _e1, e2, _a, info = optical_epsilon(
+            res, omega_max=omega_max, n_omega=1500, eta=0.1,
+            n_extra_bands=n_extra_bands, verbose=False)
+        n_val = info["n_occ"] * (2.0 / info["nspin"])   # spin fold: g_occ = 2/nspin
+        lhs = float(np.trapezoid(om * e2, om))          # ∫ ω ε₂ dω
+        wp2 = 8.0 * math.pi * E2 * HBAR2_2M * n_val / vol   # (ħω_p)² [eV²]
+        rhs = 0.5 * math.pi * wp2
+        return lhs / rhs, n_val
+
+    r_small, n_val = fsum_ratio(8, 30.0)
+    r_large, _ = fsum_ratio(24, 45.0)
+
+    assert n_val == 8.0                                  # Si: 8 valence e⁻
+    # partial saturation, centered on the measured ~0.59; a prefactor/fold/Ω
+    # error of any size leaves this band. Upper bound well under unity flags a
+    # spurious over-count for review.
+    assert 0.50 < r_small < 0.72
+    assert 0.50 < r_large < 0.75
+    # more conduction bands + wider window ⇒ strictly more captured weight
+    assert r_large > r_small
 
 
 def test_optics_velocity_and_local_fields():
