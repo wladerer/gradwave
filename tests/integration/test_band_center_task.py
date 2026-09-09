@@ -67,17 +67,48 @@ def test_band_center_input_runs_and_reports(tmp_path):
 
     summary = run(inp, verbose=False)
     assert summary["scf"]["converged"]
-    bc = summary["pdos"]["band_center"]
+    pdos = summary["pdos"]
+    bc = pdos["band_center"]
     assert bc["available"]
     assert bc["l"] == "p"
     # center and width are finite; width is a positive spread in eV
     import math
+
+    import numpy as np
+
     assert math.isfinite(bc["center_eV"])
     assert bc["width_eV"] > 0.0
-    # referenced to E_F: the occupied p states sit below the Fermi level, so the
-    # p-band center (weighted over the whole projected band) is well within a few
-    # tens of eV of the reference — a sanity bound, not a physics assertion
-    assert abs(bc["center_eV"]) < 60.0
+
+    # --- exact recompute of the descriptor from summary["pdos"] itself ---
+    # The driver's band_center is the 1st/2nd moment of the l='p' projected DOS
+    # referenced to E_F. Redo that integral directly from the summary's own energy
+    # grid + p-projected group arrays and require equality. This catches a wrong
+    # E_F reference (ref='fermi' not applied, or a Ry/Ha-scaled fermi), the wrong
+    # angular channel being selected, or a bad grid↔weight pairing — none of which
+    # the loose |center|<60 null bound (the grid runs to +32 eV) could see.
+    energy = np.asarray(pdos["energy_eV"], dtype=float)
+    fermi = float(pdos["fermi_eV"])
+    p_dos = np.zeros_like(energy)
+    for key, arr in pdos["groups"].items():
+        # group keys look like 'atom1:2P'; take the trailing angular letter
+        label = key.split(":", 1)[1].split("_", 1)[0] if ":" in key else ""
+        letters = [c for c in label if c.isalpha()]
+        if letters and letters[-1].upper() == "P":
+            p_dos = p_dos + np.asarray(arr, dtype=float)
+    assert p_dos.sum() > 0.0, "no p-projected weight found in summary['pdos']"
+    abs_center = (p_dos * energy).sum() / p_dos.sum()
+    center_recomp = abs_center - fermi                      # 1st moment about E_F
+    width_recomp = math.sqrt((p_dos * (energy - abs_center) ** 2).sum() / p_dos.sum())
+    assert center_recomp == pytest.approx(bc["center_eV"], rel=1e-6, abs=1e-6)
+    assert width_recomp == pytest.approx(bc["width_eV"], rel=1e-6, abs=1e-6)
+
+    # d-band-center literature anchor (Cu-like ε_d a few eV below E_F) is SKIPPED
+    # here with reason: this task's fixture is diamond C — an insulator exercised
+    # on the p band, not a transition metal — and no small d-band-metal PSWFC
+    # system is already run by this test, so a sign/offset anchor would require a
+    # brand-new metal SCF. The exact recompute above is the load-bearing plumbing
+    # check; the physical accuracy of ε_d is covered in tests/unit/test_band_center.py.
+
     # the human report carries the band-center line
     assert "band center" in (tmp_path / "scf.out").read_text()
 

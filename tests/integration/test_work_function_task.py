@@ -71,8 +71,18 @@ def test_open_boundary_auto_emits_work_function(tmp_path):
     assert wf["open_axis"] == 2
     # Φ = E_vac − E_F is a finite, physically sane work function (a few eV)
     phi = wf["work_function_eV"]
-    assert phi == pytest.approx(wf["vacuum_level_eV"] - wf["fermi_eV"], abs=1e-6)
-    assert 0.0 < phi < 12.0
+    evac = wf["vacuum_level_eV"]
+    efermi = wf["fermi_eV"]
+    assert phi == pytest.approx(evac - efermi, abs=1e-6)
+    # UNIT + MAGNITUDE pin (regression, not a literature value): NaH is not a
+    # standard work-function reference, but the geometry/pseudos are fixed, so Φ is
+    # a well-defined number in eV. A Ry (×13.6) or Ha (×27.2) unit slip in E_vac or
+    # E_F — the classic driver bug this gate must catch — would throw Φ far outside
+    # this window; the loose 0<Φ<12 admitted any material and could not. The two
+    # ingredients are likewise single-digit-eV, not tens (another unit tell).
+    assert phi == pytest.approx(5.13, abs=0.6)
+    assert -15.0 < efermi < 5.0
+    assert -10.0 < evac < 10.0
     # electrode potential on the SHE scale is reported
     assert wf["potential_vs_she_V"] == pytest.approx(
         wf["potential_vs_vacuum_V"] - wf["u_she_abs_V"], abs=1e-6)
@@ -94,5 +104,22 @@ def test_both_faces_split_for_dipolar_slab(tmp_path):
     assert wf["available"]
     evac = wf["vacuum_level_eV"]
     assert isinstance(evac, list) and len(evac) == 2
-    # NaH points an ionic dipole along z → the two vacuum levels differ
-    assert abs(evac[0] - evac[1]) > 1e-3
+    # NaH points an ionic dipole along z → the two vacuum levels differ. Pin both
+    # the MAGNITUDE and the SIGN of the surface-dipole step, not just inequality:
+    #  - positions put Na⁺ at low z (z=6.5) and H⁻ at high z (z=9.0), so the
+    #    electron effective potential (v_eff) is raised on the electron-rich H⁻
+    #    face → the HIGH-z face vacuum level exceeds the LOW-z face one. Ordering
+    #    of vacuum_level_eV is (low-z, high-z), so evac[1] > evac[0]. A dipole-sign
+    #    flip in the plane-averaging/face-splitting would invert this.
+    #  - the split size (~3.1 eV) is the physical dipole step; a collapse toward 0
+    #    (dipole not resolved) or a wildly different value would fail the abs band.
+    split = evac[1] - evac[0]
+    assert split == pytest.approx(3.14, abs=0.6)   # signed → pins sign AND size
+    # per-face Φ = E_vac(face) − E_F is internally consistent, and each face is a
+    # physically sane few-eV work function.
+    fermi = wf["fermi_eV"]
+    phi = wf["work_function_eV"]
+    assert isinstance(phi, list) and len(phi) == 2
+    for i in range(2):
+        assert phi[i] == pytest.approx(evac[i] - fermi, abs=1e-6)
+        assert 0.0 < phi[i] < 12.0

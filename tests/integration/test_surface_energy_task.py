@@ -94,6 +94,37 @@ def test_surface_energy_sweep_runs_and_fits(tmp_path):
     assert se["n_layers"] == [2.0, 3.0, 4.0]
     # J/m² conversion is consistent with the eV/Å² value
     assert se["gamma_J_m2"] == pytest.approx(se["gamma_eV_ang2"] * 16.021766, rel=1e-4)
+
+    # --- correct-physics plumbing checks (independent recompute of the fit) ---
+    # NOTE ON SIGN: this fixture is a *deliberately unphysical* toy slab (isolated
+    # Si atoms stacked at 2.5 Å, not a bonded surface — see module docstring), so
+    # the fitted intercept 2γA is slightly negative and γ comes out < 0. That is a
+    # correct output of the Fiorentini-Methfessel fit for these energies, not a
+    # bug, so we do NOT assert γ>0 or a Si literature band here; we instead pin the
+    # driver's fit→γ plumbing against a from-scratch recompute of the same math.
+    n = np.asarray(se["n_layers"], dtype=float)
+    e = np.asarray(se["energies_eV"], dtype=float)
+    n_surf = se["n_surfaces"]
+    area = se["area_ang2"]
+    # (a) refit E_slab(N) = intercept + slope·N ourselves and confirm the reported
+    #     slope (E_bulk/layer) and intercept match — catches a mis-assembled fit.
+    slope_r, intercept_r = np.polyfit(n, e, 1)
+    assert slope_r == pytest.approx(se["e_bulk_eV_per_layer"], rel=1e-9, abs=1e-9)
+    assert intercept_r == pytest.approx(se["intercept_eV"], rel=1e-9, abs=1e-9)
+    # (b) γ = intercept / (n_surfaces · area): recompute the intercept→γ map from
+    #     OUR intercept and the reported divisor. A wrong n_surfaces divisor (e.g.
+    #     dividing by 1 instead of 2) or a dropped area would break this equality.
+    gamma_from_intercept = intercept_r / (n_surf * area)
+    assert gamma_from_intercept == pytest.approx(se["gamma_eV_ang2"], rel=1e-9, abs=1e-12)
+    # (c) direct-subtraction cross-check on the SAME converged slab energies (no
+    #     external bulk reference): with E_bulk read from the sweep, the mean of the
+    #     per-slab γ_i = (E_i − N_i·E_bulk)/(n_surf·A) equals the FM intercept γ
+    #     exactly (a least-squares identity), so this is a tight, independent pin on
+    #     the whole slope-intercept → γ pipeline.
+    e_bulk = se["e_bulk_eV_per_layer"]
+    gamma_direct = float(np.mean((e - n * e_bulk) / (n_surf * area)))
+    assert gamma_direct == pytest.approx(se["gamma_eV_ang2"], rel=1e-9, abs=1e-12)
+
     # the human report carries the section
     assert "surface energy" in (tmp_path / "surface_energy.out").read_text()
 
