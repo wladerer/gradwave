@@ -24,6 +24,7 @@ def run_surface_energy(inp: Input, verbose: bool = True) -> dict[str, Any]:
     geometry), so set a slab-appropriate k-mesh (n_z = 1). Returns the
     ``surface_energy`` summary block."""
     import numpy as np
+    from ase import Atoms
     from ase.io import read as ase_read
 
     from gradwave.postscf.surface_energy import EV_A2_TO_JM2, surface_energy_fm
@@ -40,6 +41,7 @@ def run_surface_energy(inp: Input, verbose: bool = True) -> dict[str, Any]:
         atoms = ase_read(str(point.structure))
         if isinstance(atoms, list):  # ase_read may return a trajectory; take the last frame
             atoms = atoms[-1]
+        assert isinstance(atoms, Atoms)  # narrow the read union for the type checker
         # build this slab's system from the shared pseudos/ecut/kmesh — only the
         # geometry changes (task forced to scf so run_scf takes the plain path)
         sub = dataclasses.replace(inp, atoms=atoms, task="scf")
