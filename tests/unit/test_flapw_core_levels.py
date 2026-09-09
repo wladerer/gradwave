@@ -110,15 +110,21 @@ def test_core_level_shift_equivalent_sites_null():
 def test_core_level_shift_inequivalent_oxygen():
     # Two chemically-identical O at different Ti-O distances (1.75/2.30 A) in a vacuum
     # box: a within-cell shift whose ONLY source is the inter-site electrostatic
-    # (Madelung) field. The correct initial-state observable is the on-site Madelung
-    # potential difference `delta_madelung_eV` (C0_ext, from onsite_madelung_potentials):
-    # Elk 11.0.2 gives the O NEARER the net-positive Ti MORE bound, Δ(long-short) = +1..+3
-    # eV growing with R_MT (+0.951/+1.380/+2.860 at R_MT 0.70/1.00/1.40 Bohr). gradwave's
-    # C0_ext reproduces this — at the O R_MT used here (0.70 A = 1.32 Bohr) it gives
-    # ~+2.2 eV vs Elk's interpolated ~+2.5, and matches Elk to <0.1 eV at 1.40 Bohr.
-    # The RAW muffin-tin eigenvalue `delta_eV` stays wrong-signed here (~-1.67 eV): its
-    # spherical in-sphere own term (-3.81) swamps the correct external C0_ext (+2.19) it
-    # already contains. See experiments/autoapw/xps_validation.md for the decomposition.
+    # (Madelung) field. Elk 11.0.2 gives the O NEARER the net-positive Ti MORE bound,
+    # ΔC0_ext(long-short) = +2.90/+4.79 eV at O R_MT 1.00/1.40 Bohr (matched-basis
+    # decomposition, experiments/autoapw/xps_madelung_stage2a.md).
+    #
+    # Reproducing that — and flipping the RAW muffin-tin eigenvalue `delta_eV` to the
+    # correct positive sign — needs the two levers of the stage-2 fix:
+    #   (b) mask_interstitial=True: band-limited interstitial ρ_I mask (Elk rhoir) — removes
+    #       the small-Ti-sphere catastrophic-cancellation corruption of the Weinert v_hart.
+    #   (a) Ti 3s as a valence semicore local orbital (los/val_e/core) instead of frozen
+    #       core, so the Ti in-sphere charge matches Elk's (18.75 e, not 19.52 e); a correct
+    #       cation charge is the DOMINANT lever for the Madelung field difference.
+    # With both, delta_madelung_eV → Elk's ballpark and the raw delta_eV flips POSITIVE
+    # (measured on the Ti+2O demo: -1.19 → +1.19 at O R_MT 1.40 Bohr; the corundum ²⁷Al
+    # V_zz EFG is unchanged by masking, -6.996 → -6.992 eV/Å²). Left at the defaults both
+    # numbers are wrong-signed — see xps_madelung_stage2a.md for the attribution.
     import numpy as _np
 
     from gradwave.flapw import crystal_scf_multi
@@ -129,17 +135,21 @@ def test_core_level_shift_inequivalent_oxygen():
     o_short = ti + _np.array([1.75 / bohr, 0.0, 0.0])
     o_long = ti + _np.array([0.0, 2.30 / bohr, 0.0])
     atoms = [(tuple(ti / ll), "Ti"), (tuple(o_short / ll), "O"), (tuple(o_long / ll), "O")]
-    _, info = crystal_scf_multi(float(ll), atoms, {"Ti": 0.90, "O": 0.70},
-                                ecut=200.0, iters=40, kmesh=(1, 1, 1),
-                                use_symmetry=False, smearing=0.10)
+    _, info = crystal_scf_multi(
+        float(ll), atoms, {"Ti": 0.90, "O": 0.70},
+        ecut=200.0, iters=40, kmesh=(1, 1, 1), use_symmetry=False, smearing=0.10,
+        mask_interstitial=True,                                    # lever (b)
+        los={"Ti": [(0, "3s")]}, val_e={"Ti": 12},                 # lever (a): Ti 3s LO
+        core={"Ti": [(0, 1, 2), (0, 2, 2), (1, 1, 6)]})            # drop 3s from frozen core
     o = [s for s in info["core_level_shifts"] if s["species"] == "O" and s["orbital"] == "1s"]
     assert len(o) == 1
     # Physically-correct initial-state shift: POSITIVE, in Elk's ballpark (a2 long − a1
-    # short). gradwave ~+2.2 vs Elk interp ~+2.5 at this R_MT.
+    # short). At O R_MT 0.70 A (1.32 Bohr) gradwave gives ~+4.3 (Elk interp ~+4.4).
     d_mad = o[0]["delta_madelung_eV"]
     assert d_mad is not None and not np.isnan(d_mad)
-    assert 1.0 < d_mad < 3.5  # Elk: +1..+3 eV, O nearer Ti more bound
-    # The raw muffin-tin eigenvalue shift remains the documented wrong-signed artifact.
+    assert 3.0 < d_mad < 5.5  # Elk interp ~+4.4 eV at this R_MT, O nearer Ti more bound
+    # The raw muffin-tin eigenvalue shift now FLIPS POSITIVE with the two levers (was the
+    # documented ~-1.67 eV wrong-signed artifact at the defaults).
     d_eig = o[0]["delta_eV"]
-    assert -3.5 < d_eig < -0.5
+    assert 0.5 < d_eig < 2.0
     assert not np.isnan(d_eig)

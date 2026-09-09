@@ -180,13 +180,22 @@ def core_level_shifts(levels: dict[str, Any]) -> list[dict[str, Any]]:
     boundary):
 
     * ``delta_eV`` — the raw muffin-tin core-eigenvalue difference. Right for ON-SITE
-      (oxidation-state) shifts; wrong-signed for a shift sourced purely by an inter-site
-      Madelung field, where the spherical in-sphere own term swamps the (correct) external
-      reference.
+      (oxidation-state) shifts. For a shift sourced purely by an inter-site Madelung field
+      its sign depends on two upstream choices that used to be wrong (``xps_madelung_stage2a.md``):
+      the interstitial density fed to the Weinert Hartree continuation, and the cation
+      core/valence partition. With ``crystal_scf_multi(mask_interstitial=True)`` (band-limited
+      interstitial ρ_I mask, Elk ``rhoir`` — kills the small-sphere catastrophic-cancellation
+      corruption of ``v_hart``) AND the cation semicore in the valence (e.g. Ti 3s as a
+      local orbital, ``los``/``val_e``/``core``, so the in-sphere charge matches Elk's), the raw
+      ``delta_eV`` recovers the physically-correct POSITIVE sign and lands near Elk (Ti+2O demo:
+      −1.19 → +1.19 at O R_MT 1.40 Bohr). Left at the defaults (unmasked ρ_I, cation semicore
+      frozen) it stays wrong-signed — the spherical in-sphere own term swamps the (correct)
+      external reference.
     * ``delta_madelung_eV`` — the on-site external electrostatic (Madelung) potential
       difference (from each record's ``v_madelung_eV``; ``None`` if not supplied). The
       physically-correct initial-state quantity for a same-element inter-site shift; matches
-      Elk for R_MT ≳ 1.0 Bohr.
+      Elk for R_MT ≳ 1.0 Bohr once the interstitial ρ_I is masked and the cation semicore is
+      in the valence (Ti+2O demo, O R_MT 1.00/1.40 Bohr: +3.09/+5.07 vs Elk +2.90/+4.79).
 
     Returns a list of ``{species, orbital, site, ref_site, delta_eV, delta_madelung_eV,
     e_site_eV, e_ref_eV}``."""

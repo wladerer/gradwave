@@ -924,7 +924,28 @@ def _nonspherical_augment_lo(v_nsph, atoms_cart, abl_by_atom, ks, species, lmax,
     return dh_pw, 0.5 * (dh_lo + dh_lo.conj().T)
 
 
-def _weinert_multi(rho_I, spheres, L, nfft):
+def _bandlimited_interstitial_theta(spheres, A, nfft, gvec, gnorm):
+    """Elk's ``cfunir``: the band-limited characteristic function of the interstitial region —
+    ``Θ_I(r) ≈ 1`` outside every muffin tin, ``≈ 0`` inside — Fourier-truncated to the FFT grid.
+
+    Analytic in G-space so it carries no real-space step (a sharp ``np.where`` mask aliases; the
+    ringing swings the masked ``ΔC0_ext`` ~0.5 eV grid-to-grid — see ``xps_madelung_stage2a.md``)::
+
+        Θ_MT(G) = (1/Ω) Σ_a W(|G|, R_a) e^{-iG·τ_a},   Θ_I = 1 − IFFT(Θ_MT),
+
+    with ``W`` the solid-ball form factor (``ball_ff_np``). The flat-coefficient → real-space map
+    is the same ``IFFT((c·n³).reshape(n,n,n))`` convention ``v_hart`` uses, so ``gvec``/``gnorm``
+    are the caller's ``gvec_ylm_tables`` tables in the ``fftn`` order of ``rho_g``."""
+    vol = float(abs(np.linalg.det(A)))
+    theta_mt_g = np.zeros(nfft**3, dtype=complex)
+    for sp in spheres:
+        phase = np.exp(-1j * (gvec @ np.asarray(sp["tau"], dtype=float)))
+        theta_mt_g += ball_ff_np(gnorm, sp["R"]) * phase / vol
+    theta_mt = np.fft.ifftn((theta_mt_g * nfft**3).reshape(nfft, nfft, nfft)).real
+    return 1.0 - theta_mt
+
+
+def _weinert_multi(rho_I, spheres, L, nfft, mask_interstitial=False):
     """Weinert Hartree for several muffin tins. ``spheres`` = list of
     ``{tau (cart), rr, dx, rho_sph, Z, R}`` (+ optional ``rho_2m`` aspherical multipole densities).
     ``L`` is any cell (cubic side, orthorhombic edges, or a 3×3 triclinic matrix). Returns
@@ -941,13 +962,26 @@ def _weinert_multi(rho_I, spheres, L, nfft):
     including the high L of a fullpot_lmax=6 run — is exact to Fourier truncation. The earlier
     real-space-sampled pseudocharge left a ~20% own-field aliasing residue
     (retaining, worse, the fictitious ρ_I continuation inside the own sphere in the boundary term),
-    which anti-fed the aspherical SCF (the measured runaway fixed point / |ρ|≈1.02 mode)."""
+    which anti-fed the aspherical SCF (the measured runaway fixed point / |ρ|≈1.02 mode).
+
+    ``mask_interstitial`` (default False) multiplies ρ_I by the band-limited interstitial
+    characteristic function ``Θ_I`` (``_bandlimited_interstitial_theta``) before the pseudocharge
+    continuation, matching Elk's ``rhoir`` (zero inside every muffin tin). Without it the smooth
+    plane-wave ρ_I continues to +25..+32 e inside a small (Ti) sphere, so the moment-matched
+    deficit pseudocharge is a huge ≈ −27 e — a catastrophic cancellation that corrupts the
+    interstitial Coulomb grid ``v_hart`` (the O1s within-cell Madelung deficit; see
+    ``xps_madelung_stage2a.md``). Masked, the in-sphere ρ_I moments are ~0 and the deficit is just
+    the true moment. Weinert's theorem makes the two variants identical in exact arithmetic (the
+    potential outside the spheres depends only on the moments), but only the masked one is
+    numerically well-conditioned at these bandwidths."""
     A = cell_matrix(L)
     ainv = np.linalg.inv(A)
     vol = float(abs(np.linalg.det(A)))
     lmax_match = max((lm[0] for sp in spheres if sp.get("rho_2m") is not None
                       for lm in sp["rho_2m"]), default=0)
     gvec, gnorm, ylm = gvec_ylm_tables(A, nfft, lmax_match)
+    if mask_interstitial:
+        rho_I = rho_I * _bandlimited_interstitial_theta(spheres, A, nfft, gvec, gnorm)
     rho_g = (np.fft.fftn(rho_I) / nfft**3).reshape(-1)
     gmax = math.pi * nfft / float(np.linalg.norm(A, axis=1).max())   # min per-axis Nyquist
     ps_g = np.zeros(nfft**3, dtype=complex)
@@ -1096,6 +1130,7 @@ class _MultiCtx(NamedTuple):
     shift_invert: bool | str
     lo_cond_tol: float
     verbose: bool
+    mask_interstitial: bool
     # mutable per-run caches of potential-INDEPENDENT data (the NamedTuple itself stays
     # frozen): "geom" = per-k _k_geometry for the serial solve path (keyed by ik / "gamma"),
     # "ylm" = per-k conj(Y_lm) blocks for the density pass. Reused across _multi_iterate
@@ -1148,9 +1183,11 @@ def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax:
                  core=None, el_override=None, kworkers: int = 1, subspace_reuse: bool = False,
                  subspace_tol: float = 1e-4, cell=None, kerker: float | None = None,
                  shift_invert: bool | str = "auto", lo_cond_tol: float = _LO_COND_TOL,
-                 verbose: bool = False) -> _MultiCtx:
+                 verbose: bool = False, mask_interstitial: bool = False) -> _MultiCtx:
     """The state-independent setup phase of ``crystal_scf_multi`` (see ``_MultiCtx``).
     Argument semantics and validation are exactly the public entry point's."""
+    mask_interstitial = bool(mask_interstitial
+                             or os.environ.get("GRADWAVE_FLAPW_MASK_RHOI"))
     if (a_bohr is None) == (cell is None):
         raise ValueError("pass exactly one of a_bohr (Bohr, legacy) or cell (Å)")
     if atoms is None or radii is None:
@@ -1256,7 +1293,8 @@ def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax:
                      fullpot_lmax=fullpot_lmax, el_override=el_override, kworkers=kworkers,
                      subspace_reuse=subspace_reuse, subspace_tol=subspace_tol,
                      shift_invert=shift_invert, lo_cond_tol=lo_cond_tol,
-                     verbose=verbose, caches={"geom": {}, "ylm": {}})
+                     verbose=verbose, mask_interstitial=mask_interstitial,
+                     caches={"geom": {}, "ylm": {}})
 
 
 def _shutdown_ctx_pool(ctx: _MultiCtx) -> None:
@@ -1599,7 +1637,8 @@ def _multi_iterate(ctx: _MultiCtx, st: _MultiState, it: int, iters: int, tol: fl
     rho_I, rho_2m, spheres, rho_sph_by_key, sym_dev, lset_pot = _accumulate_density(
         ctx, st, kdata, occ_by_k, El_by_key, vmt_by_key, us_by_key, lodat, nb_solve)
 
-    v_sph_list, v_i0, v_grid, v_hart, qmt_by_sphere = _weinert_multi(rho_I, spheres, A, nfft)
+    v_sph_list, v_i0, v_grid, v_hart, qmt_by_sphere = _weinert_multi(
+        rho_I, spheres, A, nfft, mask_interstitial=ctx.mask_interstitial)
     v_i0_prev = v_i0
 
     if fullpot and not mt_phase:
@@ -1792,7 +1831,9 @@ def _multi_finalize(ctx: _MultiCtx, st: _MultiState, efg: bool = False):
             spheres = cast("list[dict[str, Any]]", st.spheres)
             for ai, k in enumerate(ctx.keys):
                 spheres[ai]["rho_2m"] = rho_2m[k]
-            _, _, _, v_hart, qmt = _weinert_multi(st.rho_I, st.spheres, ctx.A, ctx.nfft)
+            _, _, _, v_hart, qmt = _weinert_multi(
+                st.rho_I, st.spheres, ctx.A, ctx.nfft,
+                mask_interstitial=ctx.mask_interstitial)
         info["efg"] = _efg_from_multipoles(rho_2m, v_hart, ctx.acart, ctx.keys, ctx.R_by_key,
                                            ctx.rr_by_key, ctx.dx, ctx.A, qmt_by_sphere=qmt)
     # Initial-state core levels: re-solve each site's core states in its converged
@@ -1826,7 +1867,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                       v_start=None, kworkers: int = 1, subspace_reuse: bool = False,
                       subspace_tol: float = 1e-4, cell=None, kerker: float | None = None,
                       shift_invert: bool | str = "auto", lo_cond_tol: float = _LO_COND_TOL,
-                      verbose: bool = False):
+                      verbose: bool = False, mask_interstitial: bool = False):
     """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
     ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
@@ -1923,6 +1964,12 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     bit-equality path constructs its solve with the ``False`` default. Measured per-solve win grows
     with the basis: ~2.3×/2.9× at pencil dim 737/1559 (``experiments/autoapw/si_ab.py``).
 
+    ``mask_interstitial`` (default False; env override ``GRADWAVE_FLAPW_MASK_RHOI``) masks the
+    plane-wave interstitial density to zero inside every muffin tin (band-limited, Elk ``rhoir``)
+    before the Weinert pseudocharge continuation — see ``_weinert_multi``. Removes the small-sphere
+    catastrophic-cancellation corruption of the interstitial Coulomb grid that gives the wrong
+    within-cell O1s Madelung shift (``xps_madelung_stage2a.md``).
+
     Internally this is ``_multi_setup`` (state-independent context) + ``_multi_init_state`` +
     a loop over ``_multi_iterate`` (the fixed-point map) + ``_multi_finalize`` — split so the
     Newton polish (``flapw.newton``) can pay the setup once and call the map directly."""
@@ -1932,7 +1979,7 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                        val_e=val_e, core=core, el_override=el_override, kworkers=kworkers,
                        subspace_reuse=subspace_reuse, subspace_tol=subspace_tol, cell=cell,
                        kerker=kerker, shift_invert=shift_invert, lo_cond_tol=lo_cond_tol,
-                       verbose=verbose)
+                       verbose=verbose, mask_interstitial=mask_interstitial)
     st = _multi_init_state(ctx, v_start)
     for it in range(iters):
         if _multi_iterate(ctx, st, it, iters=iters, tol=tol):
