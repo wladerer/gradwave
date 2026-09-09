@@ -59,6 +59,7 @@ dev = [
     "pytest-xdist",
     "pytest-split>=0.8",  # shard the CI standard tier across parallel runners
     "pytest-timeout",  # per-test wall cap so a hung test fails fast (traceback) instead of the 6h job default
+    "pytest-rerunfailures>=14",  # CI-only: retry INFRA/timeout-flavoured failures (2-core-runner contention) via --only-rerun; never masks assertion/numerical failures
     "ruff>=0.6",
     "codespell>=2.3",  # spell-check code/comments/docstrings (pre-commit hook; config in [tool.codespell])
     "sympy>=1.12",
