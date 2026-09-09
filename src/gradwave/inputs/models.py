@@ -614,6 +614,33 @@ class BaderParams:
 
 
 @dataclass(frozen=True)
+class WorkFunctionParams:
+    """Vacuum-plateau work function Φ = E_vac − E_F for a slab, computed after an
+    SCF (``postscf.work_function``).
+
+    Meaningful only when the cell has a vacuum region: it is emitted
+    automatically for an open-boundary (ESM) SCF (``scf.boundary`` = ``open_z`` /
+    ``open_z_metal``), and can be forced on for a periodic slab (with enough
+    vacuum) via ``enabled: true``. ``open_axis`` is the surface-normal axis
+    (0/1/2; default 2 = c). ``frac`` is the fraction of lowest-density planes
+    averaged as the vacuum level. ``both_faces`` reports the two faces separately
+    (a dipolar/asymmetric slab). ``u_she_abs`` is the absolute SHE potential [V]
+    used for the electrode-potential (vs-SHE) readout."""
+
+    enabled: bool = False
+    open_axis: int = 2
+    frac: float = 0.1
+    both_faces: bool = False
+    u_she_abs: float = 4.44
+
+    def __post_init__(self):
+        if self.open_axis not in (0, 1, 2):
+            raise InputError("work_function.open_axis must be 0, 1 or 2")
+        if not 0.0 < self.frac <= 0.5:
+            raise InputError("work_function.frac must be in (0, 0.5]")
+
+
+@dataclass(frozen=True)
 class DispersionParams:
     """Opt-in Grimme D3(BJ)/D4(BJ) dispersion correction (energy+forces+stress).
 
@@ -1116,6 +1143,8 @@ class Input:
     nmr: NmrParams = field(default_factory=NmrParams)  # EFG / shielding (task: nmr)
     projections: ProjectionsParams = field(default_factory=ProjectionsParams)
     bader: BaderParams = field(default_factory=BaderParams)  # QTAIM charges
+    work_function: WorkFunctionParams = field(
+        default_factory=WorkFunctionParams)  # slab/ESM vacuum-plateau Φ
     dispersion: DispersionParams = field(default_factory=DispersionParams)
     device: str = "cpu"
     distributed: bool = False  # k-point-sharded SCF across torchrun ranks (see

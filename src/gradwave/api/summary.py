@@ -607,6 +607,49 @@ def _bader_summary_block(res: SCFLike, inp: Input) -> dict[str, Any]:
     }
 
 
+def _work_function_summary_block(res: SCFLike, inp: Input) -> dict[str, Any]:
+    """Vacuum-plateau work function Φ = E_vac − E_F block for the summary JSON,
+    computed from the plane-averaged effective potential of a slab/ESM run
+    (``postscf.work_function``). Returns a graceful ``{'available': False, ...}``
+    when the result carries no v_eff (e.g. the noncollinear/spinor path) or has
+    no Fermi level."""
+    from gradwave.postscf.work_function import (
+        electrode_potential,
+        vacuum_level,
+        work_function,
+    )
+    wf = inp.work_function
+    axis = wf.open_axis
+    try:
+        # work_function reads res.v_eff / res.rho / res.fermi; NCResult carries
+        # no v_eff → AttributeError, caught below (wider SCFLike is a safe seam).
+        if _get(res, "fermi") is None:
+            raise ValueError("work function needs a Fermi level (metallic/smeared "
+                             "run); this run has none")
+        e_vac = vacuum_level(res, axis, frac=wf.frac, both_faces=wf.both_faces)
+        phi = work_function(res, axis, both_faces=wf.both_faces)
+    except (AttributeError, ValueError, NotImplementedError, RuntimeError) as err:
+        return {"available": False, "reason": str(err)}
+    block: dict[str, Any] = {
+        "available": True,
+        "open_axis": axis,
+        "fermi_eV": float(_get(res, "fermi")),
+        "boundary": _get(res, "boundary", "periodic"),
+    }
+    if wf.both_faces:
+        block["vacuum_level_eV"] = [float(x) for x in e_vac]
+        block["work_function_eV"] = [float(x) for x in phi]
+    else:
+        block["vacuum_level_eV"] = float(e_vac)
+        block["work_function_eV"] = float(phi)
+        # electrode potential (vacuum / SHE scales) for a single-face read
+        ep = electrode_potential(res, u_she_abs=wf.u_she_abs, open_axis=axis)
+        block["potential_vs_vacuum_V"] = float(ep.potential_vs_vacuum)
+        block["potential_vs_she_V"] = float(ep.potential_vs_she)
+        block["u_she_abs_V"] = float(wf.u_she_abs)
+    return block
+
+
 def _write_volumetric(
     res: SCFLike, spec: VolumetricParams, outdir: Path, verbose: bool
 ) -> dict[str, Any]:

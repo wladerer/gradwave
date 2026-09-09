@@ -36,6 +36,7 @@ from gradwave.inputs.models import SlabParams as SlabParams
 from gradwave.inputs.models import SmearingParams as SmearingParams
 from gradwave.inputs.models import ThermochemParams as ThermochemParams
 from gradwave.inputs.models import VolumetricParams as VolumetricParams
+from gradwave.inputs.models import WorkFunctionParams as WorkFunctionParams
 from gradwave.inputs.parse import _load_structure as _load_structure
 from gradwave.inputs.parse import _normalize_kerker as _normalize_kerker
 from gradwave.inputs.parse import load_input as load_input
@@ -68,5 +69,6 @@ __all__ = [
     "SmearingParams",
     "ThermochemParams",
     "VolumetricParams",
+    "WorkFunctionParams",
     "load_input",
 ]
