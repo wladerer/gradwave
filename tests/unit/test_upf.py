@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from gradwave.constants import BOHR_ANG, E2, RY_EV
-from gradwave.pseudo.atomic import rhoatom_of_q
+from gradwave.pseudo.atomic import core_density_of_q, rhoatom_of_q
 from gradwave.pseudo.kb import beta_form_factors
 from gradwave.pseudo.local import alpha_z, vloc_of_g
 from gradwave.pseudo.radial import sbt
@@ -137,3 +137,54 @@ def test_beta_form_factors_shapes_and_l_behavior(si):
     # l>0 projectors vanish at q=0 (j_l(0)=0 for l≥1); l=0 do not
     assert abs(F[2, 0]) < 1e-12 and abs(F[3, 0]) < 1e-12
     assert abs(F[0, 0]) > 1e-3
+
+
+# --- NLCC partial-core charge regression pin --------------------------------
+# The integrated NLCC core charge Q = ∫ 4π r² ρc(r) dr equals the l=0 core form
+# factor at q=0 (core_density_of_q(upf, 0)). gradwave stores densities in e/Å³,
+# so parse_upf/parse_upf_paw divide PP_NLCC by BOHR_ANG**3 on read. These
+# ground-truth Q (electrons) pin that conversion and the NLCC parse against a
+# future units/parse regression. Dropping the /BOHR_ANG**3 factor would shrink Q
+# by ~1/BOHR_ANG**3 ≈ 6.75×, which the rtol pin rejects (see test below).
+#
+# Only the pseudos that actually ship a PP_NLCC block are pinned: among the NC
+# ONCV fixtures only the scalar-/fully-relativistic Si (_sr/_fr) carry a core
+# correction — the SG15 "-1.2" Cu/Al/Fe/Si and Fe_FR pseudos have
+# core_correction="F" (no NLCC), so there is nothing to pin for those elements
+# here. The PAW kjpaw pseudos pin the smooth ρ̃_core (PP_NLCC) transform.
+# _sr/_fr Si Q verified against core_density_of_q: 0.72414 / 0.72425.
+_NLCC_CASES = [
+    pytest.param("Si_ONCV_PBE_sr.upf", parse_upf, 0.7241, id="Si_ONCV_sr(NC)"),
+    pytest.param("Si_ONCV_PBE_fr.upf", parse_upf, 0.7242, id="Si_ONCV_fr(NC)"),
+    pytest.param("Fe.pbe-spn-kjpaw_psl.1.0.0.UPF", parse_upf_paw, 0.4500, id="Fe_kjpaw(PAW)"),
+    pytest.param("Si.pbe-n-kjpaw_psl.1.0.0.UPF", parse_upf_paw, 2.6047, id="Si_kjpaw(PAW)"),
+    pytest.param("Cu.pbe-dn-kjpaw_psl.1.0.0.UPF", parse_upf_paw, 9.7716, id="Cu_kjpaw(PAW)"),
+]
+
+
+@pytest.mark.parametrize("name, parser, q_ref", _NLCC_CASES)
+def test_nlcc_core_charge(name, parser, q_ref):
+    """Pin the integrated NLCC partial-core charge to its ground truth."""
+    path = PSEUDO_DIR / name
+    if not path.exists():
+        pytest.skip(f"NLCC fixture {name} not committed")
+    upf = parser(path)
+    assert upf.core_rho is not None, f"{name} unexpectedly has no NLCC core density"
+    q = core_density_of_q(upf, np.array([0.0]))[0]
+    assert np.isclose(q, q_ref, rtol=1e-3), f"{name}: Q={q:.6f} vs ref {q_ref}"
+
+
+def test_nlcc_pin_bites_on_dropped_bohr_conversion():
+    """Guard the guard: without the e/Å³ conversion (÷BOHR_ANG³ on read) Q would
+    be ~6.75× too small, and the rtol=1e-3 pin must reject that. This proves the
+    pin above actually bites rather than passing vacuously."""
+    path = PSEUDO_DIR / "Si_ONCV_PBE_sr.upf"
+    if not path.exists():
+        pytest.skip("Si_ONCV_PBE_sr.upf not committed")
+    upf = parse_upf(path)
+    q_correct = core_density_of_q(upf, np.array([0.0]))[0]
+    # emulate the pre-fix parse (density left in e/Bohr³): Q scales by BOHR_ANG³
+    q_broken = q_correct * BOHR_ANG**3
+    assert np.isclose(q_correct, 0.7241, rtol=1e-3)
+    assert 6.0 < q_correct / q_broken < 7.5  # ≈ 1/BOHR_ANG³ ≈ 6.75×
+    assert not np.isclose(q_broken, 0.7241, rtol=1e-3)
