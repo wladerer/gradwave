@@ -683,6 +683,31 @@ def _bader_lines(bader):
     return lines
 
 
+def _work_function_lines(wf):
+    """Work-function summary: Φ = E_vac − E_F for a slab/ESM run, plus the
+    electrode potential on the vacuum and SHE scales (single-face reads)."""
+    lines = ["", "   work function (vacuum-plateau)"]
+    if not wf.get("available", True):
+        lines.append(f"   unavailable · {wf.get('reason', '')}")
+        return lines
+    axis = "abc"[wf.get("open_axis", 2)]
+    phi = wf.get("work_function_eV")
+    evac = wf.get("vacuum_level_eV")
+    if isinstance(phi, list):  # both faces
+        lines.append(f"   surface-normal axis {axis} · E_F = "
+                     f"{wf['fermi_eV']:.4f} eV · two faces")
+        for i, (e, p) in enumerate(zip(evac, phi, strict=True)):
+            lines.append(f"   face {i}:  E_vac = {e:+.4f} eV   Φ = {p:.4f} eV")
+    else:
+        lines.append(f"   surface-normal axis {axis} · E_F = "
+                     f"{wf['fermi_eV']:.4f} eV")
+        lines.append(f"   E_vac = {evac:+.4f} eV   Φ = {phi:.4f} eV")
+        if "potential_vs_she_V" in wf:
+            lines.append(f"   U vs vacuum = {wf['potential_vs_vacuum_V']:+.4f} V"
+                         f"   U vs SHE = {wf['potential_vs_she_V']:+.4f} V")
+    return lines
+
+
 def _provenance_pairs(prov):
     """(label, value) rows for the machine block; optional fields are omitted
     when the recording platform could not read them."""
@@ -904,6 +929,7 @@ _SECTIONS = (
     ("pdos", _pdos_lines, False),
     ("cohp", _cohp_lines, False),
     ("bader", _bader_lines, False),
+    ("work_function", _work_function_lines, False),
     ("relax", _relax_report, True),
     ("bands", _bands_lines, False),
     ("optics", _optics_lines, False),

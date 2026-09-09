@@ -41,6 +41,7 @@ from gradwave.inputs.models import (
     SmearingParams,
     ThermochemParams,
     VolumetricParams,
+    WorkFunctionParams,
 )
 
 if TYPE_CHECKING:
@@ -266,7 +267,7 @@ _ALLOWED_TOP = {
     "scf", "slab", "task", "relax", "neb", "bands", "optics", "magnetism", "eos",
     "elastic",
     "phonons", "thermochem", "flapw", "nmr",
-    "projections", "bader", "dispersion", "device", "distributed",
+    "projections", "bader", "work_function", "dispersion", "device", "distributed",
     "verbose", "output", "error_estimate", "restart",
 }
 
@@ -405,6 +406,23 @@ def _build_bader(bader_raw: bool | dict[str, Any]) -> BaderParams:
         add_core=bool(bader_raw.get("add_core", False)),
         nna_tol=float(bader_raw.get("nna_tol", 0.5)),
         vacuum_threshold=None if vt is None else float(vt),
+    )
+
+
+def _build_work_function(wf_raw: bool | dict[str, Any]) -> WorkFunctionParams:
+    """Parse the `work_function` block. `true`/`false` is the enabled shorthand;
+    a mapping selects the surface-normal axis, vacuum-plane fraction, per-face
+    split, and the absolute SHE reference."""
+    if isinstance(wf_raw, bool):
+        return WorkFunctionParams(enabled=wf_raw)
+    _check_keys("work_function", wf_raw,
+                {"enabled", "open_axis", "frac", "both_faces", "u_she_abs"})
+    return WorkFunctionParams(
+        enabled=bool(wf_raw.get("enabled", True)),
+        open_axis=int(wf_raw.get("open_axis", 2)),
+        frac=float(wf_raw.get("frac", 0.1)),
+        both_faces=bool(wf_raw.get("both_faces", False)),
+        u_she_abs=float(wf_raw.get("u_she_abs", 4.44)),
     )
 
 
@@ -792,6 +810,7 @@ def _load_input(path: Path) -> Input:
                 f"ecut={ecut} eV")
     projections = _build_projections(raw.get("projections", False))
     bader = _build_bader(raw.get("bader", False))
+    work_function = _build_work_function(raw.get("work_function", False))
     dispersion = _build_dispersion(raw.get("dispersion", False))
     return Input(
         atoms=atoms,
@@ -847,6 +866,7 @@ def _load_input(path: Path) -> Input:
         nmr=_build_nmr(nmr_raw),
         projections=projections,
         bader=bader,
+        work_function=work_function,
         dispersion=dispersion,
         device=raw.get("device", "cpu"),
         distributed=distributed,

@@ -27,6 +27,7 @@ from gradwave.api.summary import (
     _optics_extra,
     _pdos_summary_block,
     _thermochem_base_summary,
+    _work_function_summary_block,
     _write_volumetric,
     build_summary,
 )
@@ -104,6 +105,11 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
             summary["cohp"] = _cohp_summary_block(res, inp)
         if inp.bader.enabled:
             summary["bader"] = _bader_summary_block(res, inp)
+        # work function: on request, or automatically for an open-boundary (ESM)
+        # slab run where the vacuum plateau is physically meaningful
+        if inp.work_function.enabled or inp.scf.boundary in (
+                "open_z", "open_z_metal"):
+            summary["work_function"] = _work_function_summary_block(res, inp)
     elif inp.task == "relax":
         relax, _atoms, _frames = run_relax(inp, verbose=verbose)
         summary = _base_summary(inp, "relax")
