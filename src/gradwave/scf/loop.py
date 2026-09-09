@@ -33,6 +33,7 @@ from gradwave.core.energies.hartree import hartree_potential_r
 from gradwave.core.energies.local_pp import local_potential_g
 from gradwave.core.energies.total import EnergyBreakdown, total_energy
 from gradwave.core.fftbox import g_to_r_box, r_to_g
+from gradwave.core.gamma import GammaBasis, build_gamma_basis
 from gradwave.core.hamiltonian import ProjectorData, build_projector_data
 from gradwave.core.hubbard import HubbardData, HubbardManifold
 from gradwave.core.xc.base import XCFunctional
@@ -117,6 +118,26 @@ logger = logging.getLogger(__name__)
 # resolved choice; GRADWAVE_CHEFSI_MIN_NB tunes the threshold.
 _EIGENSOLVER_ENV = os.environ.get("GRADWAVE_EIGENSOLVER", "").strip().lower()
 _CHEFSI_MIN_NB = int(os.environ.get("GRADWAVE_CHEFSI_MIN_NB", "640"))
+
+# Γ-point real-wavefunction fast path (core.gamma). At a single k-point at Γ the
+# plane-wave sphere is closed under G→−G and a real V_eff admits real eigenstates
+# (c(−G)=c(G)*), so the eigensolve runs on the real HALF sphere (~½ the
+# wavefunction bytes) with a real half-box FFT local term — the memory lever for
+# large Γ-only slabs.
+#
+# OPT-IN (default OFF). GRADWAVE_GAMMA_REAL in {auto,1,0}: UNSET (the default)
+# ⇒ "0" ⇒ the complex path, byte-for-byte unchanged; "auto" engages the real
+# path whenever provably safe and silently falls back otherwise; "1" forces it
+# on and raises if a correctness blocker is present or the sphere is not Γ; "0"
+# disables it. It defaults OFF (not "auto") deliberately: the real path routes
+# H|ψ⟩ through GammaHamiltonian, which the BatchedHamiltonian.apply monkeypatch
+# behind opt.joint.count_h_applies cannot observe, and the density-warm-start
+# iteration reduction the calculator relies on across grid changes is not
+# reproduced there — auto-engaging silently changed those observable contracts
+# on existing Γ-only runs. Opting in with "auto"/"1" is exact either way (the
+# converged numbers match the complex path to machine precision). See
+# `_resolve_gamma_real`.
+_GAMMA_REAL_ENV = os.environ.get("GRADWAVE_GAMMA_REAL", "0").strip().lower()
 
 
 def _resolve_eigensolver(eigensolver: str, nb: int) -> str:
@@ -500,6 +521,10 @@ class SCFResult:
     # fixed-spin-moment run (nspin=2, smearing, tot_magnetization set) — the two
     # per-channel Fermi levels; `fermi` is their mean. (μ↑−μ↓)/2 = ∂F/∂M is the
     # field conjugate to the pinned moment; None on every other path.
+    gamma_real: bool = False  # True when the Γ-point real-wavefunction fast path
+    # (core.gamma, half-sphere real solve) ran instead of the complex Davidson;
+    # the converged numbers are byte-for-byte the complex path's (exact), this
+    # only records which arithmetic route produced them (see _resolve_gamma_real)
 
 
 # A warm-start source for scf(): either a converged SCFResult, or the plainer
@@ -846,6 +871,75 @@ def _resolve_kerker(kerker: bool | None, smearing: str, grid: FFTGrid) -> bool:
     return (smearing != "none") or (g2_min < 0.64)
 
 
+def _resolve_gamma_real(
+    system: System,
+    xc: XCFunctional,
+    fock: MultiKFockExchange | None,
+    hubbard: list[HubbardManifold] | None,
+    mixed_precision: bool,
+    dist_ctx: DistKContext | None,
+) -> GammaBasis | None:
+    """Resolve the Γ-point real-wavefunction fast path (core.gamma).
+
+    Returns a frozen ``GammaBasis`` when a single-k Γ calculation is PROVABLY
+    safe for the real path, else ``None`` (the complex path runs unchanged).
+    ``GRADWAVE_GAMMA_REAL`` in {auto,1,0}: "0" (unset — the default) disables it,
+    running the complex path byte-for-byte; "1" forces it on and RAISES on any
+    correctness blocker or a non-Γ sphere (never silently runs an inexact path);
+    "auto" engages it silently when eligible and silently falls back otherwise.
+
+    Eligibility is deliberately conservative — every condition below must hold:
+
+    * exactly one k-point, at Γ (``k_frac == 0``);
+    * the sphere is closed under G→−G with a single G=0 vector
+      (``build_gamma_basis``'s own check — the definition of a Γ sphere);
+    * NONE of the operators the real ``GammaHamiltonian`` does not implement:
+      hybrid Fock exchange, DFT+U, a τ-dependent (meta-GGA) functional, the
+      fp32 mixed-precision draft, or a distributed k-shard.
+
+    The local V_eff is real on the NC path and each collinear spin channel is
+    real, so nspin ∈ {1, 2} are both eligible (each channel solved on its own
+    real half sphere). USPP/PAW and the spinor SOC path never reach here — they
+    run their own drivers (``scf_uspp`` / ``scf_noncollinear``)."""
+    if _GAMMA_REAL_ENV == "0":
+        return None
+    force = _GAMMA_REAL_ENV == "1"
+
+    def refuse(why: str) -> None:
+        if force:
+            raise ValueError(
+                f"GRADWAVE_GAMMA_REAL=1 forces the Γ real-wavefunction path, "
+                f"but {why} — unset it (or use 'auto') to run the complex path."
+            )
+
+    blockers = []
+    if fock is not None:
+        blockers.append("hybrid Fock exchange")
+    if hubbard:
+        blockers.append("DFT+U")
+    if getattr(xc, "needs_tau", False):
+        blockers.append("a meta-GGA (τ-dependent) functional")
+    if mixed_precision:
+        blockers.append("the fp32 mixed-precision draft")
+    if dist_ctx is not None:
+        blockers.append("a distributed k-shard")
+    if blockers:
+        refuse("it is incompatible with " + ", ".join(blockers))
+        return None
+    if len(system.spheres) != 1:
+        refuse(f"the calculation has {len(system.spheres)} k-points (needs 1 at Γ)")
+        return None
+    sphere = system.spheres[0]
+    if not bool(np.allclose(np.asarray(sphere.k_frac, dtype=float), 0.0)):
+        refuse("the single k-point is not Γ")
+        return None
+    try:
+        return build_gamma_basis(sphere, system.grid.shape, device=system.positions.device)
+    except ValueError as e:
+        refuse(f"the Γ sphere is not closed under G→−G ({e})")
+        return None
+
+
 def _build_mixer_precond(
     grid: FFTGrid,
     nspin: int,
@@ -996,6 +1090,46 @@ def _solve_bands(
         # tolerance (off-diagonal overlaps don't touch G=0)
         c = c / torch.linalg.norm(c, dim=-1, keepdim=True).clamp_min(1e-30)
     return eigenvalues, c
+
+
+def _solve_bands_gamma(
+    gb: GammaBasis,
+    veff_sp: torch.Tensor,  # (n1,n2,n3) real
+    coeffs_sp: torch.Tensor,  # (1, nb, npw_max) complex — warm-start guess
+    p_full: torch.Tensor,  # (nproj, npw_max) full-sphere KB projectors at Γ
+    dij: torch.Tensor,  # (nproj, nproj) real
+    tol_eff: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Eigensolve one spin channel on the Γ real half sphere (core.gamma).
+
+    Runs ``davidson_gamma`` on the real half sphere — half the wavefunction
+    bytes and a real half-box FFT local term (the memory/throughput lever) —
+    then re-expands the converged eigenvectors to the FULL Hermitian-symmetric
+    complex sphere the rest of the SCF consumes. The half-metric-orthonormal
+    eigenvectors expand to complex-orthonormal full vectors, so the density,
+    energy, forces and stress paths see byte-for-byte the same shapes and
+    normalization as the complex path — only the arithmetic route into them
+    differs (validated exact against the complex Davidson in tests/unit/
+    test_gamma.py and end-to-end in the Γ real-vs-complex SCF test).
+
+    nk is 1 (the eligibility gate requires a single Γ k-point). The warm start
+    is ``full_to_half`` of the incoming coefficients — lossless once they are
+    the previous step's (Hermitian-symmetric) Γ output; a cold identity seed is
+    a valid, if rougher, guess that davidson_gamma orthonormalizes/pads."""
+    from gradwave.core.gamma import (
+        GammaHamiltonian,
+        davidson_gamma,
+        full_to_half,
+        half_to_full,
+    )
+
+    npw = gb.npw
+    ham = GammaHamiltonian(gb, veff_sp, p_full[:, :npw], dij)
+    x0h = full_to_half(gb, coeffs_sp[0, :, :npw])
+    res = davidson_gamma(ham, x0h, tol=tol_eff)
+    coeffs_out = torch.zeros_like(coeffs_sp)
+    coeffs_out[0, :, :npw] = half_to_full(gb, res.eigenvectors)
+    return res.eigenvalues.to(RDTYPE)[None], coeffs_out
 
 
 def _resolve_k_chunk(k_chunk: int | None, nk: int) -> int | None:
@@ -1699,6 +1833,16 @@ def scf(
             start_from = shard_start_from(start_from, dist_ctx)
     kerker = _resolve_kerker(kerker, smearing, grid)
 
+    # Γ-point real-wavefunction fast path: engage the real half-sphere solve
+    # when a single Γ k-point is provably safe (see _resolve_gamma_real), else
+    # None (complex path unchanged). Resolved once — the basis is frozen per
+    # geometry — and threaded into the per-iteration eigensolve below.
+    gamma_gb = _resolve_gamma_real(system, xc, fock, hubbard, mixed_precision, dist_ctx)
+    if gamma_gb is not None:
+        logger.info(
+            "Γ real-wavefunction path engaged: half sphere nhalf=%d of npw=%d "
+            "(real half-box FFT + real subspace)", gamma_gb.nhalf, gamma_gb.npw)
+
     rho_s = _seed_density(system, nspin, start_from, start_mag, grid, vol)
 
     # MixLayout owns the packed-vector structure (density-sphere channels in
@@ -1921,7 +2065,16 @@ def scf(
                 # below), so it's never None when hub isn't.
                 assert n_hub_s is not None
                 n_hub_sp = n_hub_s[sp]
-            if k_chunk_res is None:
+            if gamma_gb is not None:
+                # Γ real-wavefunction path (single Γ k-point, eligibility gate
+                # in _resolve_gamma_real): real half-sphere eigensolve, then
+                # re-expand to the full complex sphere. Hubbard/Fock/meta-GGA and
+                # the fp32 draft are excluded by the gate, so only the plain NC
+                # H (kinetic + real V_loc + KB nonlocal) is applied here.
+                eigs_s[sp], coeffs_b_s[sp] = _solve_bands_gamma(
+                    gamma_gb, veff_s[sp], coeffs_b_s[sp], projs_b[0],
+                    bk.dij_full, tol_eff)
+            elif k_chunk_res is None:
                 # all-k batched solve (default): the resident subspace is nk·m·npw.
                 mgga_sp = metagga_apply_s[sp] if metagga_apply_s is not None else None
                 eigs_s[sp], coeffs_b_s[sp] = _solve_bands(
@@ -2205,6 +2358,7 @@ def scf(
             boundary=boundary,
             esm_bias=esm_bias,
             n_electrons=n_float,
+            gamma_real=gamma_gb is not None,
         )
     m_density = rho_s[0] - rho_s[1]
     return SCFResult(
@@ -2233,6 +2387,7 @@ def scf(
         esm_bias=esm_bias,
         n_electrons=n_float,
         fermi_spin=mu_spin,
+        gamma_real=gamma_gb is not None,
     )
 
 
