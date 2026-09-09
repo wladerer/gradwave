@@ -14,10 +14,18 @@ torch.manual_seed(0)
 
 def _setup(q0=1.1):
     """A small box with a plane-wave-like Laplacian and a density sphere that
-    includes G=0 (flat index 0) and a scattered subset of the box."""
+    includes G=0 (flat index 0) and a scattered subset of the box.
+
+    ``g2`` is drawn from a LOCAL, fixed-seed generator rather than the global
+    RNG: the spectrum must be reproducible independent of test order and of how
+    much the global stream other tests/xdist workers consumed before this call.
+    A drifting spectrum made ``test_inhomogeneous_is_neither_limit`` flaky — its
+    ``low_g = g2[mask] < 1.0`` mask could, ~0.6% of the time, contain only the
+    pinned G=0 entry, collapsing its damping assertion to ``0.0 < 0.0``."""
+    gen = torch.Generator().manual_seed(20240607)
     shape = (10, 10, 10)
     npts = 10 ** 3
-    g2 = torch.rand(npts, dtype=torch.float64) * 50.0  # Å⁻², wide spectrum
+    g2 = torch.rand(npts, dtype=torch.float64, generator=gen) * 50.0  # Å⁻², wide spectrum
     g2[0] = 0.0                                          # G=0
     mask = torch.zeros(npts, dtype=torch.bool)
     mask[torch.arange(npts)[::4]] = True
@@ -73,7 +81,8 @@ def test_inhomogeneous_is_neither_limit():
     n = torch.zeros(shape, dtype=torch.float64)
     n[:5] = 5.0  # half dense (capped screening), half vacuum (no screening)
     pc.set_density(n)
-    r = torch.randn(int(mask.sum()), dtype=torch.complex128)
+    gen = torch.Generator().manual_seed(101)
+    r = torch.randn(int(mask.sum()), dtype=torch.complex128, generator=gen)
     r[0] = 0.0
     pr = pc(r)
     kerker = (g2[mask] / (g2[mask] + q0 ** 2)) * r
@@ -81,6 +90,9 @@ def test_inhomogeneous_is_neither_limit():
     assert (pr - r).abs().max() > 1e-6       # not the identity (screening acts)
     assert (pr - kerker).abs().max() > 1e-6  # not the constant Kerker filter
     # low-G (long-wavelength) residual is damped relative to the identity, which
-    # is the whole point of a charge-sloshing preconditioner
-    low_g = g2[mask] < 1.0
-    assert (pr[low_g].abs().sum() < r[low_g].abs().sum())
+    # is the whole point of a charge-sloshing preconditioner. Exclude the pinned
+    # G=0 (zero on both sides) so the comparison is over genuine low-G modes; the
+    # fixed-seed spectrum in _setup guarantees this set is non-empty.
+    low_g = (g2[mask] < 1.0) & (g2[mask] > 0.0)
+    assert low_g.sum() > 0
+    assert pr[low_g].abs().sum() < r[low_g].abs().sum()

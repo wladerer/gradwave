@@ -38,6 +38,8 @@ def run_surface_energy(inp: Input, verbose: bool = True) -> dict[str, Any]:
 
     for point in se.slabs:
         atoms = ase_read(str(point.structure))
+        if isinstance(atoms, list):  # ase_read may return a trajectory; take the last frame
+            atoms = atoms[-1]
         # build this slab's system from the shared pseudos/ecut/kmesh — only the
         # geometry changes (task forced to scf so run_scf takes the plain path)
         sub = dataclasses.replace(inp, atoms=atoms, task="scf")
