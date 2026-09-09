@@ -52,6 +52,7 @@ from gradwave.postscf.exchange_multik import (
     HybridExchangeParams,
     multik_exchange_energy,
     multik_exchange_operator,
+    multik_exchange_operator_on,
     occupied_periodic_orbitals,
 )
 from gradwave.scf.loop import SCFResult, System, scf
@@ -320,3 +321,76 @@ def hybrid_energy_gradient(res: SCFResult, params: HybridExchangeParams, *,
     assert params.raw_omega.grad is not None  # populated by the backward above
     d_omega = float(params.raw_omega.grad) / (1.0 - math.exp(-omega))
     return d_alpha, d_omega
+
+
+def exact_fock_corrected_eigenvalues(
+    res: SCFResult, alpha: float = 0.25, *, mode: str = "full",
+    omega: float | None = None, occ_tol: float = 1e-6,
+) -> torch.Tensor:
+    """Post-SCF eigenvalues with the ACE virtual-state artifact removed, (nk, nb) [eV].
+
+    A hybrid SCF diagonalizes H = H₀ + α·V_x^ACE. ACE reproduces the *exact* Fock
+    operator on the occupied subspace — so the occupied eigenvalues and the total
+    energy are exact — but only approximates it on the unoccupied (virtual)
+    states, which makes the ACE conduction eigenvalues, and hence the band gap, a
+    code-dependent quantity rather than a physical one. This rebuilds the exact
+    (un-compressed) Fock operator on the converged orbitals and re-diagonalizes H
+    in the converged Ritz subspace (a Rayleigh–Ritz correction), fixing each k's
+    virtual eigenvalues to their exact-Fock value while leaving the occupied ones
+    unchanged (their correction is provably zero).
+
+    It touches neither the SCF nor H₀: in the converged subspace the Ritz vectors
+    ψ_n satisfy ⟨ψ_m|H|ψ_n⟩ = ε_n^ACE δ_mn, so ⟨ψ_m|H₀|ψ_n⟩ = ε_n^ACE δ_mn −
+    α⟨ψ_m|V_x^ACE|ψ_n⟩ and the corrected subspace Hamiltonian is
+
+        H_corr[m,n] = ε_n^ACE δ_mn + α (⟨ψ_m|V_x^Fock|ψ_n⟩ − ⟨ψ_m|V_x^ACE|ψ_n⟩).
+
+    Because ACE is exact whenever either index is occupied, the correction matrix
+    is nonzero only in the virtual–virtual block; the occupied levels and the
+    occupied↔virtual couplings are untouched. Returns the per-k eigenvalues sorted
+    ascending. nspin=1 only (the hybrid SCF path). ``mode``/``omega`` must match
+    the SCF's kernel (``"full"`` → PBE0; ``"short_range"``/``"long_range"`` → HSE
+    with the same ω)."""
+    if getattr(res, "nspin", 1) != 1:
+        raise ValueError(
+            "exact_fock_corrected_eigenvalues supports nspin=1 (the hybrid SCF path)")
+    system = res.system
+    shape = system.grid.shape
+    vol = system.grid.volume
+    n_r = int(shape[0] * shape[1] * shape[2])
+    w = vol / n_r                                          # (Ω/N) inner-product weight
+
+    # physical Ritz vectors: all bands, and the occupied subset, per k
+    psi_all, psi_occ = [], []
+    for ik, sph in enumerate(system.spheres):
+        c_all = res.coeffs[ik][:, : sph.npw]
+        psi_all.append(physical_orbitals(c_all, sph.flat_idx, shape, vol))     # (nb, N_r)
+        occ = res.occupations[ik] > occ_tol
+        psi_occ.append(
+            physical_orbitals(res.coeffs[ik][occ][:, : sph.npw], sph.flat_idx, shape, vol))
+
+    kcart = [sph.k_cart for sph in system.spheres]
+    kw = system.kweights
+    g_cart = system.grid.g_cart
+    # exact (un-compressed) Fock applied to all Ritz vectors and to the occupied
+    # set (the latter rebuilds the ACE the SCF used at convergence)
+    w_all = multik_exchange_operator_on(
+        psi_occ, psi_all, kcart, kw, g_cart, vol, mode=mode, omega=omega)
+    w_occ = multik_exchange_operator_on(
+        psi_occ, psi_occ, kcart, kw, g_cart, vol, mode=mode, omega=omega)
+
+    corrected = torch.empty_like(res.eigenvalues)
+    for ik in range(len(system.spheres)):
+        pa = psi_all[ik]                                   # (nb, N_r)
+        nb = pa.shape[0]
+        m_fock = w * (pa.conj() @ w_all[ik].transpose(0, 1))          # ⟨ψ_m|V_x^Fock|ψ_n⟩
+        po = psi_occ[ik]
+        if po.shape[0] == 0:
+            m_ace = torch.zeros((nb, nb), dtype=m_fock.dtype, device=m_fock.device)
+        else:
+            ace = build_ace(po, w_occ[ik], vol)
+            m_ace = w * (pa.conj() @ ace.apply(pa).transpose(0, 1))   # ⟨ψ_m|V_x^ACE|ψ_n⟩
+        h = torch.diag(res.eigenvalues[ik].to(m_fock.dtype)) + alpha * (m_fock - m_ace)
+        h = 0.5 * (h + h.conj().transpose(0, 1))                      # Hermitize
+        corrected[ik] = torch.linalg.eigvalsh(h).to(res.eigenvalues.dtype)
+    return corrected
