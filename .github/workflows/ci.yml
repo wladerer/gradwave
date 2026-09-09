@@ -103,11 +103,50 @@ jobs:
         # could not have killed the torch.distributed rendezvous deadlock this shard used
         # to wedge on (now prevented at the source by a collision-proof file:// store —
         # see gradwave.distributed.init_from_env — this timeout is belt-and-suspenders).
+        # --reruns: retry ONLY infra/transient failures (pytest-rerunfailures).
+        # The 2-core public runner flakes on contention — a heavy test that runs
+        # out its wall cap under load, a transient PyPI/network blip in a test, a
+        # distributed rendezvous port collision. --only-rerun scopes the retry to
+        # those failure signatures by regex; an AssertionError / numerical
+        # tolerance failure does NOT match any pattern, so a real bug still fails
+        # on the first attempt and is never masked. One retry is enough for
+        # contention (a genuinely-broken test fails both times).
         run: >-
           uv run pytest -m "not slow and not torture and not gpu"
           --dist loadscope --splits 10 --group ${{ matrix.group }}
           --splitting-algorithm least_duration
           --timeout=1800 --timeout-method=signal
+          --reruns 1 --reruns-delay 5
+          --only-rerun "Timeout"
+          --only-rerun "TimeoutError"
+          --only-rerun "Connection"
+          --only-rerun "Read timed out"
+          --only-rerun "Temporary failure"
+          --only-rerun "Address already in use"
+          --only-rerun "Resource temporarily unavailable"
+          --only-rerun "Broken pipe"
+
+  # Fast fail-early gate. The sharded standard tier takes ~50 min; a change that
+  # breaks *collection* (a bad default dataclass whose __post_init__ raises at
+  # parse time, a broken import, a malformed parametrize) should not have to wait
+  # 9 min into a shard to surface — that is exactly how a parse-time regression
+  # (#439: a default `ThermochemParams` that raised) rode a merge in. `pytest
+  # --collect-only` imports and collects every test WITHOUT running it, so it
+  # catches the whole import/collection/parse-time class in ~1-2 min; the fast
+  # tier (~80 s, no marker) then gives a quick behavioural signal. This job is in
+  # ci-ok's `needs`, so the merge gate can never go green while collection is
+  # broken, regardless of where the sharded matrix is.
+  smoke:
+    needs: changes
+    if: ${{ needs.changes.outputs.run_tests == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/uv-setup
+      - name: Collect-only (fail fast on any import/collection/parse error)
+        run: uv run pytest --collect-only -q
+      - name: Fast tier
+        run: uv run pytest -m "not standard and not slow and not torture and not gpu"
 
   # Doc-truth-decay guard: fail on stale file-path references in the docs. Runs
   # on EVERY change (no `changes` gate) because docs-only PRs — which skip lint
@@ -126,19 +165,20 @@ jobs:
   # as OK. Failure or cancellation of any fails the gate.
   ci-ok:
     if: always()
-    needs: [changes, lint, test, doc-refs]
+    needs: [changes, lint, test, smoke, doc-refs]
     runs-on: ubuntu-latest
     steps:
-      - name: Verify lint, test shards, and doc-refs succeeded (or were skipped)
+      - name: Verify lint, test shards, smoke, and doc-refs succeeded (or were skipped)
         run: |
           lint='${{ needs.lint.result }}'
           test='${{ needs.test.result }}'
+          smoke='${{ needs.smoke.result }}'
           docrefs='${{ needs.doc-refs.result }}'
-          echo "run_tests=${{ needs.changes.outputs.run_tests }}  lint=$lint  test=$test  doc-refs=$docrefs"
-          for result in "$lint" "$test" "$docrefs"; do
+          echo "run_tests=${{ needs.changes.outputs.run_tests }}  lint=$lint  test=$test  smoke=$smoke  doc-refs=$docrefs"
+          for result in "$lint" "$test" "$smoke" "$docrefs"; do
             case "$result" in
               success|skipped) ;;
-              *) echo "::error::CI gate failed (lint=$lint test=$test doc-refs=$docrefs)"; exit 1 ;;
+              *) echo "::error::CI gate failed (lint=$lint test=$test smoke=$smoke doc-refs=$docrefs)"; exit 1 ;;
             esac
           done
           echo "CI gate passed."
