@@ -161,6 +161,34 @@ def _flapw_parameters_lines(par):
     return lines
 
 
+def _qha_lines(qha):
+    """Quasi-harmonic block: V(T), G(T), thermal expansion and Cp at a few
+    representative temperatures (the full curves live in the JSON)."""
+    lines = [_sec("quasi-harmonic thermodynamics")]
+    lines += _cols([
+        ("volumes", f"{len(qha.get('scales', []))} "
+                    f"(p = {qha.get('pressure_GPa', 0.0):g} GPa)"),
+        ("energy", qha.get("energy_kind", "total")),
+    ])
+    t = qha.get("temperatures_K", [])
+    v = qha.get("volume_T_ang3", [])
+    g = qha.get("gibbs_T_eV", [])
+    a = qha.get("thermal_expansion_T_per_K", [])
+    cp = qha.get("cp_T_eV_per_K", [])
+    lines.append(f"   {'T [K]':>8s}{'V [Å³]':>12s}{'G [eV]':>14s}"
+                 f"{'α [1/K]':>13s}{'Cp [eV/K]':>13s}")
+    n = len(t)
+    # a handful of rows: first, ~middle, last
+    idx = sorted({0, n // 2, n - 1}) if n else []
+    for i in idx:
+        lines.append(f"   {t[i]:>8.1f}{v[i]:>12.4f}{g[i]:>14.6f}"
+                     f"{a[i]:>13.3e}{cp[i]:>13.3e}")
+    if not qha.get("all_converged", True):
+        lines.append("   note: some per-volume SCFs did NOT converge")
+    lines.append("")
+    return lines
+
+
 def _surface_energy_lines(se):
     """Surface-energy block: γ (eV/Å² and J/m²), the per-layer bulk energy read
     off the fit slope, the area, and the sweep points with the RMS residual."""
@@ -966,6 +994,7 @@ _SECTIONS = (
     ("eos", _eos_lines, False),
     ("thermochem", _thermochem_lines, False),
     ("surface_energy", _surface_energy_lines, False),
+    ("qha", _qha_lines, False),
     ("elastic", _elastic_lines, False),
     ("phonons", _phonon_lines, False),
     ("flapw", _flapw_lines, False),

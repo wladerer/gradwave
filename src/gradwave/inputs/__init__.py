@@ -31,6 +31,7 @@ from gradwave.inputs.models import NmrParams as NmrParams
 from gradwave.inputs.models import NmrSpectrumParams as NmrSpectrumParams
 from gradwave.inputs.models import PhononParams as PhononParams
 from gradwave.inputs.models import ProjectionsParams as ProjectionsParams
+from gradwave.inputs.models import QHAParams as QHAParams
 from gradwave.inputs.models import RelaxParams as RelaxParams
 from gradwave.inputs.models import SCFParams as SCFParams
 from gradwave.inputs.models import SlabParams as SlabParams
@@ -67,6 +68,7 @@ __all__ = [
     "NmrSpectrumParams",
     "PhononParams",
     "ProjectionsParams",
+    "QHAParams",
     "RelaxParams",
     "SCFParams",
     "SlabParams",

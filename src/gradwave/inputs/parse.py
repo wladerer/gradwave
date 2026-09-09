@@ -36,6 +36,7 @@ from gradwave.inputs.models import (
     OpticsParams,
     PhononParams,
     ProjectionsParams,
+    QHAParams,
     RelaxParams,
     SCFParams,
     SlabParams,
@@ -269,7 +270,7 @@ _ALLOWED_TOP = {
     "nonmagnetic", "start_mag", "tot_magnetization",
     "scf", "slab", "task", "relax", "neb", "bands", "optics", "magnetism", "eos",
     "elastic",
-    "phonons", "thermochem", "surface_energy", "flapw", "nmr",
+    "phonons", "thermochem", "surface_energy", "qha", "flapw", "nmr",
     "projections", "bader", "work_function", "dispersion", "device", "distributed",
     "verbose", "output", "error_estimate", "restart",
 }
@@ -747,11 +748,12 @@ def _load_input(path: Path) -> Input:
     xc, hybrid = _resolve_xc(raw)
     if task not in ("scf", "relax", "neb", "bands", "optics", "magnetism", "eos",
                     "elastic",
-                    "phonons", "thermochem", "surface_energy", "flapw", "nmr"):
+                    "phonons", "thermochem", "surface_energy", "qha", "flapw",
+                    "nmr"):
         raise InputError(
             f"unknown task {task!r} "
             f"(scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons | "
-            f"thermochem | surface_energy | flapw | nmr)")
+            f"thermochem | surface_energy | qha | flapw | nmr)")
     nspin = int(raw.get("nspin", 1))
     if nspin not in (1, 2):
         raise InputError(f"nspin must be 1 or 2, got {nspin}")
@@ -920,6 +922,7 @@ def _load_input(path: Path) -> Input:
         thermochem=_build(ThermochemParams, raw.get("thermochem", {}), "thermochem"),
         surface_energy=_build_surface_energy(
             dict(raw.get("surface_energy", {})), base, task),
+        qha=_build(QHAParams, raw.get("qha", {}), "qha"),
         elastic=_build(ElasticParams, raw.get("elastic", {}), "elastic"),
         phonons=_build(PhononParams, raw.get("phonons", {}), "phonons"),
         flapw=_build_flapw(dict(raw.get("flapw", {})),

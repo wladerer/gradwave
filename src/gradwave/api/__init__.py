@@ -26,6 +26,7 @@ from gradwave.api.flapw import reference_sigma_iso as reference_sigma_iso
 from gradwave.api.flapw import run_flapw as run_flapw
 from gradwave.api.flapw import run_nmr as run_nmr
 from gradwave.api.phonons import run_phonons as run_phonons
+from gradwave.api.qha import run_qha as run_qha
 from gradwave.api.relax import _build_relax_calc as _build_relax_calc
 from gradwave.api.relax import _joint_supported as _joint_supported
 from gradwave.api.relax import _resolve_pulay_correction as _resolve_pulay_correction
@@ -86,6 +87,7 @@ __all__ = [
     "run_magnetism",
     "run_nmr",
     "run_phonons",
+    "run_qha",
     "run_relax",
     "run_scf",
     "run_surface_energy",

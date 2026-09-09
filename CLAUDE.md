@@ -97,6 +97,7 @@ drivers call their own module globals.
 | Slab work function Φ = E_vac − E_F (+ electrode potential vs SHE) | `work_function: enabled` on the scf task (auto for open-boundary ESM runs) → `summary["work_function"]` (driver: `postscf.work_function`) | |
 | d-band center & width (Hammer-Nørskov) | `projections.band_center: enabled` (rides the PDOS; needs group_by l/lm + PSWFC pseudo) → `summary["pdos"]["band_center"]` (driver: `postscf.band_center`) | |
 | Surface energy γ from a slab-thickness sweep | `task: surface_energy` with `surface_energy.slabs` (`api.run_surface_energy`; multi-SCF fit like eos) | |
+| Quasi-harmonic G(T), V(T), thermal expansion | `task: qha` (`api.run_qha`; phonon DOS per volume → QHA fit; needs phonons.dos_mesh > 0) | |
 | Load a pseudopotential (NC or PAW) | `pseudo.upf.parse_upf`, `pseudo.upf_paw.parse_upf_paw` (unified: `api._load_upf`, path-cached) | re-parse UPF XML; re-implement the radial FT (`pseudo.radial.sbt`) |
 | Build the result summary / serialize / render | `api.build_summary`, `io.checkpoint.save_checkpoint`, `io.output.format_output` | hand-roll the summary-dict schema |
 | Warm-start an SCF from a checkpoint | `io.checkpoint.load_checkpoint` → `io.checkpoint.as_start_from` (pass as `scf(..., start_from=)`) | |
@@ -104,13 +105,14 @@ drivers call their own module globals.
 
 **Built but not task-wired (library-only).** These `postscf` modules are
 importable and unit-tested but have **no Input / CLI / JSON surface** — `api.run`
-does not reach them, so don't assume a task exists: `qha`, `convex_hull`,
+does not reach them, so don't assume a task exists: `convex_hull`,
 `phase_diagram`, `composition_design`, `lattice_mc` (`lattice_mc` is a fixed-J
-Ising model, not a fitted cluster expansion). Harmonic `thermo` **is** wired —
-`run_phonons` emits an F/U/Cv/S(T) + ZPE + θ_D `thermo` block whenever it builds
-a DOS. Natural next finishes: `qha` (reuses the phonon `thermo` bridge across
-volumes) and `convex_hull` formation energies (blocked on reference-energy
-provenance — needs caller-supplied elemental refs).
+Ising model, not a fitted cluster expansion). Recently wired (now first-class
+tasks / blocks): `bader` (scf sub-mode), `adsorbate_thermo` (`task: thermochem`),
+`work_function` (scf block, auto for ESM), `band_center` (projections sub-block),
+`surface_energy` (`task: surface_energy`), `qha` (`task: qha`); harmonic `thermo`
+rides `run_phonons`. Remaining natural finish: `convex_hull` formation energies
+(blocked on reference-energy provenance — needs caller-supplied elemental refs).
 
 ## Running commands efficiently
 
