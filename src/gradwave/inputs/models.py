@@ -826,6 +826,42 @@ class ThermochemParams:
 
 
 @dataclass(frozen=True)
+class SlabPoint:
+    """One point of a surface-energy slab-thickness sweep: a slab geometry file
+    and the integer count of repeat units (atomic layers / formula units) it
+    holds. ``structure`` is resolved to an absolute path at parse time."""
+
+    structure: Path
+    n_layers: float
+
+
+@dataclass(frozen=True)
+class SurfaceEnergyParams:
+    """Surface energy γ from a slab-thickness sweep (task: surface_energy).
+
+    Fiorentini-Methfessel: run the SCF on a series of slabs of increasing
+    thickness (each a geometry file listed under ``slabs`` with its layer count),
+    fit ``E_slab(N) = 2·γ·A + N·E_bulk`` by least squares, and read γ off the
+    intercept (``postscf.surface_energy.surface_energy_fm``). All slabs must share
+    the same in-plane cell (same surface area A). ``energy`` selects which SCF
+    energy is fitted; ``n_surfaces`` is 2 for the usual two-faced slab (1 for a
+    one-sided/passivated construction). Needs ≥2 thicknesses; ≥3 lets the RMS
+    residual diagnose non-linearity (quantum-size oscillations / thin slabs)."""
+
+    slabs: tuple[SlabPoint, ...] = ()
+    n_surfaces: int = 2
+    energy: str = "free_energy"  # free_energy | total | e0
+
+    def __post_init__(self):
+        if self.energy not in ("free_energy", "total", "e0"):
+            raise InputError(
+                f"unknown surface_energy.energy {self.energy!r} "
+                f"(free_energy | total | e0)")
+        if self.n_surfaces < 1:
+            raise InputError("surface_energy.n_surfaces must be >= 1")
+
+
+@dataclass(frozen=True)
 class ElasticParams:
     """Elastic constants: FD of the analytic stress over the six Voigt strains
     → the 6×6 stiffness C (and Voigt–Reuss–Hill moduli).
@@ -1158,7 +1194,7 @@ class Input:
     tot_magnetization: float | None = None  # fix M=N↑−N↓ (nspin=2): integer fill
     # without smearing, two-Fermi-level smeared FSM with smearing
     # scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons |
-    # thermochem | flapw | nmr
+    # thermochem | surface_energy | flapw | nmr
     task: str = "scf"
     relax: RelaxParams = field(default_factory=RelaxParams)
     neb: NebParams = field(default_factory=NebParams)  # CI-NEB transition state
@@ -1167,6 +1203,8 @@ class Input:
     magnetism: MagnetismParams = field(default_factory=MagnetismParams)
     eos: EOSParams = field(default_factory=EOSParams)
     thermochem: ThermochemParams = field(default_factory=ThermochemParams)
+    surface_energy: SurfaceEnergyParams = field(
+        default_factory=SurfaceEnergyParams)  # slab-thickness γ sweep
     elastic: ElasticParams = field(default_factory=ElasticParams)
     phonons: PhononParams = field(default_factory=PhononParams)
     flapw: FlapwParams = field(default_factory=FlapwParams)  # all-electron FLAPW

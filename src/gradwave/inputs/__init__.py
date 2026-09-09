@@ -34,7 +34,9 @@ from gradwave.inputs.models import ProjectionsParams as ProjectionsParams
 from gradwave.inputs.models import RelaxParams as RelaxParams
 from gradwave.inputs.models import SCFParams as SCFParams
 from gradwave.inputs.models import SlabParams as SlabParams
+from gradwave.inputs.models import SlabPoint as SlabPoint
 from gradwave.inputs.models import SmearingParams as SmearingParams
+from gradwave.inputs.models import SurfaceEnergyParams as SurfaceEnergyParams
 from gradwave.inputs.models import ThermochemParams as ThermochemParams
 from gradwave.inputs.models import VolumetricParams as VolumetricParams
 from gradwave.inputs.models import WorkFunctionParams as WorkFunctionParams
@@ -68,7 +70,9 @@ __all__ = [
     "RelaxParams",
     "SCFParams",
     "SlabParams",
+    "SlabPoint",
     "SmearingParams",
+    "SurfaceEnergyParams",
     "ThermochemParams",
     "VolumetricParams",
     "WorkFunctionParams",

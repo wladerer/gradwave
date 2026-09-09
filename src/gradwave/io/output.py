@@ -161,6 +161,27 @@ def _flapw_parameters_lines(par):
     return lines
 
 
+def _surface_energy_lines(se):
+    """Surface-energy block: γ (eV/Å² and J/m²), the per-layer bulk energy read
+    off the fit slope, the area, and the sweep points with the RMS residual."""
+    lines = [_sec("surface energy (slab-thickness fit)")]
+    lines += _cols([
+        ("γ", f"{se['gamma_eV_ang2']:.6f} eV/Å²  ({se['gamma_J_m2']:.4f} J/m²)"),
+        ("E_bulk", f"{se['e_bulk_eV_per_layer']:+.6f} eV/layer"),
+        ("area", f"{se['area_ang2']:.4f} Å²"),
+        ("n_surfaces", str(se.get("n_surfaces", 2))),
+        ("RMS residual", f"{se['rms_residual_eV']:.4e} eV"),
+    ])
+    lines.append(f"   {'slab':<24s}{'N':>6s}{'E [eV]':>16s}")
+    for f, n, e in zip(se.get("slabs", []), se["n_layers"], se["energies_eV"],
+                       strict=True):
+        lines.append(f"   {f:<24s}{n:>6g}{e:>16.6f}")
+    if not se.get("all_converged", True):
+        lines.append("   note: some slab SCFs did NOT converge")
+    lines.append("")
+    return lines
+
+
 def _thermochem_lines(tc):
     """Free-energy thermochemistry block: the mode's component free energies and
     the headline free energy (ΔG_ads, or a molecule's G / F), plus the optional
@@ -944,6 +965,7 @@ _SECTIONS = (
     ("magnetism", _magnetism_lines, False),
     ("eos", _eos_lines, False),
     ("thermochem", _thermochem_lines, False),
+    ("surface_energy", _surface_energy_lines, False),
     ("elastic", _elastic_lines, False),
     ("phonons", _phonon_lines, False),
     ("flapw", _flapw_lines, False),

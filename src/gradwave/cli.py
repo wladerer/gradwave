@@ -299,6 +299,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
               f"ν = {elastic['poisson_ratio']:.3f} "
               f"({'stable' if elastic['mechanically_stable'] else 'UNSTABLE'})")
         return 0 if elastic.get("all_converged", True) else 1
+    surf = summary.get("surface_energy")
+    if surf is not None:
+        print(f"surface energy: γ = {surf['gamma_eV_ang2']:.6f} eV/Å² "
+              f"({surf['gamma_J_m2']:.4f} J/m²), "
+              f"E_bulk = {surf['e_bulk_eV_per_layer']:+.6f} eV/layer")
+        return 0 if surf.get("all_converged", True) else 1
     phonons = summary.get("phonons")
     if phonons is not None:
         fmin = phonons["min_frequency_cm1"]

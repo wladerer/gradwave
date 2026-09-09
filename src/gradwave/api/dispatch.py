@@ -31,6 +31,7 @@ from gradwave.api.summary import (
     _write_volumetric,
     build_summary,
 )
+from gradwave.api.surface_energy import run_surface_energy
 from gradwave.api.system import build_system
 from gradwave.api.thermochem import run_thermochem
 from gradwave.inputs import Input
@@ -65,7 +66,8 @@ def run_magnetism(inp: Input, verbose: bool = True) -> MagneticReport:
 # post-SCF tasks whose run() branch is a bare "run it, wrap the result" —
 # collapsed into one data-driven branch below
 _POSTSCF_RUNNERS = {"eos": run_eos, "elastic": run_elastic,
-                    "phonons": run_phonons}
+                    "phonons": run_phonons,
+                    "surface_energy": run_surface_energy}
 
 
 def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
@@ -183,7 +185,7 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
         raise ValueError(
             f"unknown task {inp.task!r} "
             f"(scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons | "
-            f"thermochem | flapw | nmr)")
+            f"thermochem | surface_energy | flapw | nmr)")
 
     if inp.distributed:
         from gradwave.distributed import current_rank, maybe_destroy_process_group
