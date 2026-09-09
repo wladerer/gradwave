@@ -75,11 +75,18 @@ def test_optics_fsum_rule_si():
       (2) The sum is monotone-increasing as the conduction manifold grows
           (each interband transition adds positive oscillator strength).
 
-    It does NOT reach unity: a norm-conserving valence-only IP calculation with
-    a finite conduction manifold recovers only part of the sum (the [r,V_NL]
-    commutator and the core/high-lying oscillator strength are missing). ~0.6
-    for pseudopotential Si is expected — this is a *partial-saturation* pin, not
-    an all-electron f-sum. See the report if this ever exceeds ~unity.
+    It does NOT reach unity, and that is CORRECT physics, not a missing term.
+    The velocity operator already carries the nonlocal [r,V_NL] commutator
+    (optics.py default ``velocity="full"`` = ∂H/∂k built with the FD-in-k
+    KB-projector term); adding that commutator LOWERS the f-sum (and fixes
+    ε₁(0) to ~13.8, the correct Si LDA-IP value), it does not raise it. The
+    ~0.6-0.66 plateau persists even at complete basis (all bands, no ω cutoff)
+    and the velocity operator satisfies the 2nd-order-PT sum-rule identity, so
+    the shortfall is the genuine norm-conserving-pseudopotential oscillator-
+    strength deficit (nodeless pseudo-wavefunctions miss core-region strength).
+    Recovering ~unity needs an all-electron / PAW core reconstruction, not a
+    velocity-operator change — so this is a *partial-saturation* pin and must
+    NOT be tightened toward 1 (verified 2026-09-09, see the campaign report).
     """
     torch.set_num_threads(8)
     res = _si_scf()
