@@ -6,6 +6,7 @@ it against the existing complex machinery restricted to the Gamma point, so a
 regression that changes the physics fails immediately.
 """
 
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +25,8 @@ from gradwave.core.gamma import (
     unembed_real,
 )
 from gradwave.core.xc.pbe import PBE
+from gradwave.dtypes import RDTYPE
+from gradwave.grids import build_fft_grid, build_gsphere
 from gradwave.pseudo.upf import parse_upf
 from gradwave.scf.loop import scf, setup_system
 from gradwave.solvers.davidson import davidson_batched
@@ -212,3 +215,152 @@ def test_eigenvalues_match_complex(o2_gamma):
     assert float((gres.eigenvalues - cres.eigenvalues[0]).abs().max()) < 1e-8
     g = metric_inner(gb, gres.eigenvectors, gres.eigenvectors)
     assert float((g - torch.eye(nb, dtype=g.dtype, device=g.device)).abs().max()) < 1e-10
+
+
+# --- triclinic (non-orthogonal) frozen-potential equivalence ----------------
+# The O2 fixture above uses a diagonal cubic box, where the sphere is closed
+# under G -> -G trivially and the FFT axes are symmetric. A general triclinic
+# cell with unequal, mixed-parity FFT dimensions is where the lexicographic
+# G -> -G tie-break (gamma.py rep selection) and the rfft half-box gather
+# (back_flat / back_conj, keyed on n3//2+1) actually have to be right. This
+# builds the geometry only (no SCF) and freezes a smooth synthetic real
+# potential, so it stays light while still exercising the full H-apply path.
+
+
+def _smooth_real_field(shape, seed, scale=3.0):
+    """A frozen, smooth, strictly real V_eff(r) on the FFT box (shape n1,n2,n3).
+
+    irfftn always returns a real tensor; damping the high-|G| spectrum keeps the
+    field smooth so the frozen-potential Davidson converges cleanly. The apply
+    equivalence itself holds for ANY real field — smoothness is only for the
+    eigenvalue test's convergence."""
+    n1, n2, n3 = shape
+    gen = torch.Generator().manual_seed(seed)
+    nh3 = n3 // 2 + 1
+    spec = torch.randn(n1, n2, nh3, dtype=torch.complex128, generator=gen)
+    f1 = torch.fft.fftfreq(n1)[:, None, None]
+    f2 = torch.fft.fftfreq(n2)[None, :, None]
+    f3 = torch.fft.rfftfreq(n3)[None, None, :]
+    damp = torch.exp(-8.0 * (f1**2 + f2**2 + f3**2))
+    field = torch.fft.irfftn(spec * damp, s=shape, dim=(-3, -2, -1))
+    field = field - field.mean()
+    field = scale * field / field.abs().max()
+    return field.to(RDTYPE)
+
+
+@pytest.fixture(scope="module")
+def tri_gamma():
+    """Single O atom in a triclinic cell, Gamma-only, geometry-only (no SCF)."""
+    torch.set_num_threads(4)
+    upf = parse_upf(FIX / "pseudos" / "O_ONCV_PBE-1.2.upf")
+    # genuinely non-orthogonal, unequal edge lengths -> unequal FFT dims of
+    # mixed parity (the rfft half-box gather boundary is n3//2+1)
+    cell = np.array([[4.3, 0.0, 0.0], [1.1, 4.9, 0.0], [0.7, 1.3, 5.6]])
+    pos = np.array([[0.9, 1.2, 1.5]])  # off-origin -> nontrivial projector phases
+    system = setup_system(cell, pos, [0], [upf], ecut=20 * RY,
+                          kmesh=(1, 1, 1), nbands=6)
+    grid, sphere, bk = system.grid, system.spheres[0], system.batch
+    # the FFT box must be genuinely anisotropic for this to test anything
+    assert len(set(grid.shape)) > 1, f"want anisotropic box, got {grid.shape}"
+    gb = build_gamma_basis(sphere, grid.shape)
+    p_full = projectors_b(bk, system.positions)[0]
+    veff = _smooth_real_field(grid.shape, seed=7)
+    return dict(system=system, grid=grid, sphere=sphere, bk=bk, gb=gb,
+                veff=veff, p_full=p_full, dij=bk.dij_full)
+
+
+def test_triclinic_apply_matches_complex(tri_gamma):
+    """Frozen-potential H-apply equivalence on a non-orthogonal box."""
+    d = tri_gamma
+    gb, bk, grid = d["gb"], d["bk"], d["grid"]
+    dev = gb.src_half.device
+    torch.manual_seed(11)
+    chalf = torch.randn(8, gb.nhalf, dtype=torch.complex128).to(dev)
+    chalf[:, 0] = chalf[:, 0].real.to(torch.complex128)
+    cfull = half_to_full(gb, chalf)
+
+    gh = GammaHamiltonian(gb, d["veff"], d["p_full"], d["dij"])
+    hb = BatchedHamiltonian(bk, grid.shape, d["veff"], d["p_full"][None])
+    out_gamma = gh.apply(chalf)
+    out_full = hb.apply(cfull[None])[0]
+    partner = _herm_partner(d["sphere"], grid.shape)
+    assert float((out_full - out_full[:, partner].conj()).abs().max()) < 1e-11
+    assert float((out_gamma - full_to_half(gb, out_full)).abs().max()) < 1e-11
+
+
+def test_triclinic_eigenvalues_match_complex(tri_gamma):
+    """Frozen-potential eigenvalues match the complex Davidson on a triclinic box.
+
+    The apply test above already proves H_gamma == H_complex exactly (<1e-11), so
+    the two eigenproblems are the SAME operator and their *converged* eigenvalues
+    must coincide to ~machine eps. A weak, smooth potential in a triclinic box is
+    nearly free-electron, so the top of a finite block stays clustered and never
+    reaches tol; comparing an unconverged Ritz value is meaningless. We solve with
+    headroom (nb_solve) and compare the lowest `ncmp` bands, gating on the complex
+    Davidson residual as the converged reference (the real-embedding gamma solve
+    uses a different residual-norm convention, so only its eigenvalues — which do
+    match the reference to <1e-8 — are compared, not its residuals)."""
+    d = tri_gamma
+    gb, bk, grid = d["gb"], d["bk"], d["grid"]
+    ncmp = d["system"].nbands  # bands we assert equivalence on
+    nb_solve = ncmp + 6  # block, with headroom above the compared window
+    dev = gb.src_half.device
+    gh = GammaHamiltonian(gb, d["veff"], d["p_full"], d["dij"])
+    hb = BatchedHamiltonian(bk, grid.shape, d["veff"], d["p_full"][None])
+
+    x0h = torch.zeros(nb_solve, gb.nhalf, dtype=torch.complex128, device=dev)
+    order = torch.argsort(gb.t_half)
+    for i in range(nb_solve):
+        x0h[i, order[i]] = 1.0
+    gres = davidson_gamma(gh, x0h, tol=1e-9, max_iter=120)
+
+    x0c = torch.zeros(1, nb_solve, bk.npw_max, dtype=torch.complex128, device=dev)
+    torder = torch.argsort(bk.t[0])
+    for i in range(nb_solve):
+        x0c[0, i, torder[i]] = 1.0
+    cres = davidson_batched(hb.apply, x0c, bk.t, bk.mask, tol=1e-9, max_iter=120)
+
+    # the reference (complex) solve must be genuinely converged on the window
+    assert float(cres.residual_norms[0, :ncmp].max()) < 1e-8
+    diff = (gres.eigenvalues[:ncmp] - cres.eigenvalues[0, :ncmp]).abs().max()
+    assert float(diff) < 1e-8
+    g = metric_inner(gb, gres.eigenvectors, gres.eigenvectors)
+    eye = torch.eye(nb_solve, dtype=g.dtype, device=g.device)
+    assert float((g - eye).abs().max()) < 1e-10
+
+
+# --- eligibility-gate rejection guards --------------------------------------
+# build_gamma_basis is only correct at a time-reversal-invariant k-point where
+# the sphere is closed under G -> -G. It must refuse anything else rather than
+# silently build a wrong half-sphere map. The nspin=2 / forces / USPP-on-Gamma
+# gates live in the heavy-SCF wave (they need a full solve) and are not built here.
+
+
+def test_gate_rejects_shifted_kpoint():
+    """A shifted (non-Gamma) k-point sphere is not G -> -G closed: must raise."""
+    cell = np.diag([6.0, 6.0, 6.0])
+    grid = build_fft_grid(cell, 20 * RY)
+    sphere = build_gsphere(grid, 20 * RY, (0.25, 0.0, 0.0))
+    with pytest.raises(ValueError, match="closed under G"):
+        build_gamma_basis(sphere, grid.shape)
+
+
+def test_gate_rejects_non_closed_sphere():
+    """Dropping one member of a {G,-G} pair from a Gamma sphere breaks closure;
+    build_gamma_basis must detect the missing partner and raise."""
+    cell = np.diag([6.0, 6.0, 6.0])
+    grid = build_fft_grid(cell, 20 * RY)
+    sphere = build_gsphere(grid, 20 * RY, (0.0, 0.0, 0.0))
+    # index 0 is G=0 (kept); index 1 is the first nonzero G — dropping it leaves
+    # its partner -G with no match, so the sphere is no longer G -> -G closed.
+    keep = torch.ones(sphere.npw, dtype=torch.bool)
+    keep[1] = False
+    broken = dataclasses.replace(
+        sphere,
+        miller=sphere.miller[keep],
+        kpg=sphere.kpg[keep],
+        kpg2=sphere.kpg2[keep],
+        flat_idx=sphere.flat_idx[keep],
+    )
+    with pytest.raises(ValueError, match="closed under G"):
+        build_gamma_basis(broken, grid.shape)
