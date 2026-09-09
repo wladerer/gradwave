@@ -107,8 +107,12 @@ def test_spin_adapted_pbe_ferromagnetic_moment_fe():
 
     Also runs plain SpinPBE on the same cell as a companion so a regression can
     tell a preset-specific bug from a shared-loop bug: both must land in the band.
+
+    Fermi-Dirac smearing (width 0.1) mirrors the committed ``test_fsm_smeared``
+    recipe: its counting function is strictly monotone, so this coarse 3³ mesh
+    converges, whereas gaussian/mp1's non-monotone counting sloshes here.
     """
-    kw = dict(nspin=2, smearing="gaussian", width=0.1, start_mag=[0.5],
+    kw = dict(nspin=2, smearing="fermi-dirac", width=0.1, start_mag=[0.5],
               mixing_scheme="pulay", max_iter=150, etol=1e-8, rhotol=1e-7,
               verbose=False)
     r_pbe = scf(_fe_bcc(), SpinPBE(), **kw)
