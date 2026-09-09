@@ -1173,6 +1173,9 @@ def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax:
     gmax_req = (4.0 / 3.0) * (lmax_match + 7) / r_mt_min
     nfft_psd = 2 * int(math.ceil(gmax_req * amax / (2 * math.pi)))
     nfft = min(max(nfft, nfft_psd, 24), 72)
+    _nfft_env = os.environ.get("GRADWAVE_FLAPW_NFFT")
+    if _nfft_env:                                   # experimental interstitial-grid override
+        nfft = int(_nfft_env)
     r, dx = log_mesh(1e-5, 28.0, 2500)
     r_np = r.numpy()
     atoms_cart = [(np.asarray(f, dtype=float) @ A, sym) for f, sym in atoms]
