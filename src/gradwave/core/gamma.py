@@ -178,6 +178,8 @@ class GammaHamiltonian:
         self.dij = dij  # (nproj, nproj)
 
     def apply(self, chalf: torch.Tensor) -> torch.Tensor:
+        from gradwave.core.batch import _dense_band_chunk
+
         gb = self.gb
         nb = chalf.shape[0]
         cfull = half_to_full(gb, chalf)  # (nb, npw)
@@ -185,15 +187,25 @@ class GammaHamiltonian:
         # kinetic (diagonal, real)
         out = gb.t_half * chalf
 
-        # local potential via a real-space transform on the half-box
-        box = torch.zeros(nb, self.n, dtype=chalf.dtype, device=chalf.device)
-        box.index_add_(1, gb.full_flat_idx, cfull)
-        box = box.reshape(nb, *self.shape)[..., : gb.nh3]
-        psi = torch.fft.irfftn(box, s=self.shape, dim=(-3, -2, -1))  # real
-        vg = torch.fft.rfftn(psi * self.v_eff_r, dim=(-3, -2, -1)).reshape(nb, -1)
-        loc = vg[:, gb.back_flat]
-        loc = torch.where(gb.back_conj[None, :], loc.conj(), loc)
-        out = out + loc
+        # local potential via a real-space transform on the half-box, band-
+        # chunked so the dense-box temporaries (a complex box + a real psi, each
+        # nbc·n) stay under the memory budget — the same lever BatchedHamiltonian
+        # uses. BIT-EXACT to the whole-block transform (identical arithmetic,
+        # only the band tiling changes); CPU is unchunked by default (the
+        # `_dense_band_chunk` sentinel), so the historical path is byte-for-byte
+        # unchanged unless GRADWAVE_CPU_DENSE_BUDGET is set.
+        chunk = _dense_band_chunk(self.n, 1, chalf.device, chalf.element_size())
+        for lo in range(0, nb, chunk):
+            hi = min(lo + chunk, nb)
+            nbc = hi - lo
+            box = torch.zeros(nbc, self.n, dtype=chalf.dtype, device=chalf.device)
+            box.index_add_(1, gb.full_flat_idx, cfull[lo:hi])
+            box = box.reshape(nbc, *self.shape)[..., : gb.nh3]
+            psi = torch.fft.irfftn(box, s=self.shape, dim=(-3, -2, -1))  # real
+            vg = torch.fft.rfftn(psi * self.v_eff_r, dim=(-3, -2, -1)).reshape(nbc, -1)
+            loc = vg[:, gb.back_flat]
+            loc = torch.where(gb.back_conj[None, :], loc.conj(), loc)
+            out[lo:hi] = out[lo:hi] + loc
 
         # nonlocal KB: Hermitian-symmetric result, project to the half sphere
         if self.p.shape[0]:
