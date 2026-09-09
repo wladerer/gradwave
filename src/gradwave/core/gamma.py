@@ -57,6 +57,14 @@ class GammaBasis:
     conj_full: torch.Tensor  # (npw,) bool, conjugate on reconstruction
     back_flat: torch.Tensor  # (nhalf,) half -> rfft-half-box flat index
     back_conj: torch.Tensor  # (nhalf,) bool, conjugate on back-gather
+    # Direct full-sphere -> rfft-half-box scatter (the field-memory lever). The
+    # subset of full-sphere points whose box i3 <= n3//2 lands in the retained
+    # rfft half-box; the rest are the Hermitian-redundant conjugate half that
+    # irfftn reconstructs. Scattering this subset builds the SAME half-box that
+    # slicing a full complex box [..., :nh3] would (bit-exact), at half the box
+    # memory — no full (n1,n2,n3) complex box is ever materialized.
+    full_keep_idx: torch.Tensor  # (nkeep,) full-sphere index, box i3 <= n3//2
+    half_box_flat: torch.Tensor  # (nkeep,) target (n1,n2,nh3) flat index
 
     @property
     def nhalf(self) -> int:
@@ -128,6 +136,14 @@ def build_gamma_basis(
     back_flat = (src_box[:, 0] * n2 + src_box[:, 1]) * nh3 + src_box[:, 2]
     back_conj = ~keep
 
+    # full-sphere -> rfft-half-box scatter map: the subset of ALL sphere points
+    # (both {G,-G} members, so the i3=0 and Nyquist planes stay Hermitian) whose
+    # box i3 <= n3//2. sphere->box is injective, so these targets are unique and
+    # index_add == scatter. Identical to slicing the full box's last axis to nh3.
+    full_keep = np.where(box[:, 2] <= n3 // 2)[0]
+    keep_box = box[full_keep]
+    half_box_flat = (keep_box[:, 0] * n2 + keep_box[:, 1]) * nh3 + keep_box[:, 2]
+
     t_half = HBAR2_2M * sphere.kpg2.detach().cpu().numpy()[rep_full]
     metric_w = np.full(nhalf, 2.0)
     metric_w[0] = 1.0  # G=0 slot
@@ -144,6 +160,8 @@ def build_gamma_basis(
         conj_full=ai(conj_full, torch.bool),
         back_flat=ai(back_flat, torch.int64),
         back_conj=ai(back_conj, torch.bool),
+        full_keep_idx=ai(full_keep, torch.int64),
+        half_box_flat=ai(half_box_flat, torch.int64),
     )
 
 
@@ -156,6 +174,53 @@ def half_to_full(gb: GammaBasis, chalf: torch.Tensor) -> torch.Tensor:
 def full_to_half(gb: GammaBasis, cfull: torch.Tensor) -> torch.Tensor:
     """(nb, npw) -> (nb, nhalf). Lossless only for a Hermitian-symmetric cfull."""
     return cfull[:, gb.rep_full_idx]
+
+
+def half_box_psi(gb: GammaBasis, cfull_chunk: torch.Tensor) -> torch.Tensor:
+    """Real-space ψ(r) for a band chunk, via the rfft half-box (nbc, n1,n2,n3).
+
+    Scatters the Hermitian-symmetric full-sphere coefficients directly into the
+    rfft half-box — half the box memory of a full complex (n1,n2,n3) box — and
+    inverts with ``irfftn`` to a REAL field (ψ is real at Γ). Bit-exact to
+    ``irfftn`` of a full complex box sliced to its retained half: it builds the
+    identical half-box (``full_keep_idx``/``half_box_flat`` are the sphere points
+    whose box i3 <= n3//2; both {G,-G} members on the i3=0 / Nyquist planes are
+    kept, so those planes stay Hermitian and ψ comes out real)."""
+    n1, n2, n3 = gb.shape
+    nbc = cfull_chunk.shape[0]
+    hb = torch.zeros(nbc, n1 * n2 * gb.nh3, dtype=cfull_chunk.dtype,
+                     device=cfull_chunk.device)
+    hb.index_add_(1, gb.half_box_flat, cfull_chunk[:, gb.full_keep_idx])
+    return torch.fft.irfftn(hb.reshape(nbc, n1, n2, gb.nh3), s=gb.shape,
+                            dim=(-3, -2, -1))
+
+
+def density_gamma(
+    gb: GammaBasis,
+    cfull: torch.Tensor,  # (nb, npw) full Hermitian-symmetric sphere at Γ
+    w: torch.Tensor,  # (nb,) per-band weight = kweight * occupation
+    volume: float,
+) -> torch.Tensor:
+    """ρ(r) [e/Å³] on the dense grid for the Γ real path, band-chunked.
+
+    ψ is real at Γ, so this uses the real half-box transform (`half_box_psi`) —
+    the real-space field is stored real, not complex, halving the density
+    build's peak field memory vs the complex `core.batch.density_b` (which forms
+    a complex ψ box and ψ.real²+ψ.imag²). Bit-exact to it up to the irfftn-vs-
+    ifftn round-off (~1e-15, the imaginary part the complex path discards)."""
+    from gradwave.core.batch import _dense_band_chunk
+
+    nb = cfull.shape[0]
+    chunk = _dense_band_chunk(gb.shape[0] * gb.shape[1] * gb.shape[2], 1,
+                              cfull.device, cfull.element_size())
+    rho: torch.Tensor | None = None
+    for lo in range(0, nb, chunk):
+        hi = min(lo + chunk, nb)
+        psi = half_box_psi(gb, cfull[lo:hi])  # real (nbc, n1, n2, n3)
+        contrib = torch.einsum("b,bxyz->xyz", w[lo:hi].to(psi.dtype), psi * psi)
+        rho = contrib if rho is None else rho + contrib
+    assert rho is not None  # nb >= 1 always (an SCF needs at least one band)
+    return rho / volume
 
 
 class GammaHamiltonian:
@@ -198,21 +263,20 @@ class GammaHamiltonian:
         # kinetic (diagonal, real)
         out = gb.t_half * chalf
 
-        # local potential via a real-space transform on the half-box, band-
-        # chunked so the dense-box temporaries (a complex box + a real psi, each
-        # nbc·n) stay under the memory budget — the same lever BatchedHamiltonian
-        # uses. BIT-EXACT to the whole-block transform (identical arithmetic,
-        # only the band tiling changes); CPU is unchunked by default (the
-        # `_dense_band_chunk` sentinel), so the historical path is byte-for-byte
+        # local potential via a real-space transform on the rfft half-box, band-
+        # chunked so the dense-box temporaries (one complex half-box + one real
+        # psi, each ~nbc·n/2 and nbc·n) stay under the memory budget — the same
+        # lever BatchedHamiltonian uses. `half_box_psi` scatters straight into
+        # the half-box (no full complex (n1,n2,n3) box is ever built), halving
+        # the box memory vs the earlier slice-of-full-box form; the arithmetic is
+        # identical (bit-exact). CPU is unchunked by default (the
+        # `_dense_band_chunk` sentinel), so the historical band tiling is
         # unchanged unless GRADWAVE_CPU_DENSE_BUDGET is set.
         chunk = _dense_band_chunk(self.n, 1, chalf.device, chalf.element_size())
         for lo in range(0, nb, chunk):
             hi = min(lo + chunk, nb)
             nbc = hi - lo
-            box = torch.zeros(nbc, self.n, dtype=chalf.dtype, device=chalf.device)
-            box.index_add_(1, gb.full_flat_idx, cfull[lo:hi])
-            box = box.reshape(nbc, *self.shape)[..., : gb.nh3]
-            psi = torch.fft.irfftn(box, s=self.shape, dim=(-3, -2, -1))  # real
+            psi = half_box_psi(gb, cfull[lo:hi])  # real (nbc, n1, n2, n3)
             vg = torch.fft.rfftn(psi * self.v_eff_r, dim=(-3, -2, -1)).reshape(nbc, -1)
             loc = vg[:, gb.back_flat]
             loc = torch.where(gb.back_conj[None, :], loc.conj(), loc)

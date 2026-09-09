@@ -1614,19 +1614,33 @@ def _fermi_occupations(eigs_s, system, smearing, width, nspin, device, *,
 
 
 def _output_density(coeffs_b_s, occ_s, system, bk, grid, vol, nspin, *,
-                    dist_ctx, collinear_mag):
+                    dist_ctx, collinear_mag, gamma_gb=None):
     """Output density ρ_out from the fresh orbitals: per-spin ``density_b``, a
     distributed all-reduce that completes the k-sum across shards, then
     symmetrization. A collinear magnetic (Shubnikov) system folds ρ↑/ρ↓ JOINTLY
     (anti-unitary ops swap the spin channels, so they cannot be symmetrized
     separately); otherwise each channel folds independently. Returns
-    ``(rho_out_s, rho_tot_out)``."""
+    ``(rho_out_s, rho_tot_out)``.
+
+    On the Γ real-wavefunction path (``gamma_gb`` set) ψ is real, so the density
+    is built with the real half-box transform (``core.gamma.density_gamma``) —
+    half the peak field memory of the complex ``density_b``, bit-exact to it."""
     from gradwave.core.batch import density_b
 
-    rho_raw_s = [
-        density_b(coeffs_b_s[sp], occ_s[sp], system.kweights, bk, grid.shape, vol)
-        for sp in range(nspin)
-    ]
+    if gamma_gb is not None:
+        from gradwave.core.gamma import density_gamma
+
+        npw = gamma_gb.npw
+        rho_raw_s = [
+            density_gamma(gamma_gb, coeffs_b_s[sp][0, :, :npw],
+                          system.kweights[0] * occ_s[sp][0], vol)
+            for sp in range(nspin)
+        ]
+    else:
+        rho_raw_s = [
+            density_b(coeffs_b_s[sp], occ_s[sp], system.kweights, bk, grid.shape, vol)
+            for sp in range(nspin)
+        ]
     if dist_ctx is not None:
         from gradwave.distributed import all_reduce_
 
@@ -2144,7 +2158,7 @@ def scf(
 
         rho_out_s, rho_tot_out = _output_density(
             coeffs_b_s, occ_s, system, bk, grid, vol, nspin,
-            dist_ctx=dist_ctx, collinear_mag=collinear_mag)
+            dist_ctx=dist_ctx, collinear_mag=collinear_mag, gamma_gb=gamma_gb)
 
         # meta-GGA: rebuild τ_σ from the fresh orbitals — this iteration's energy
         # uses it, and it lags into next iteration's v_τ (like the Fock and DFT+U
