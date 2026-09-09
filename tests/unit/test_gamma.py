@@ -134,6 +134,46 @@ def test_apply_matches_complex(o2_gamma):
     assert float((out_gamma - full_to_half(gb, out_full)).abs().max()) < 1e-11
 
 
+def test_half_box_psi_matches_ifftn(o2_gamma):
+    """The direct full-sphere→rfft-half-box scatter reproduces ifftn of the full
+    complex box (validates full_keep_idx/half_box_flat), at half the box memory."""
+    from gradwave.core.gamma import half_box_psi
+
+    gb, sphere, grid = o2_gamma["gb"], o2_gamma["sphere"], o2_gamma["grid"]
+    shape = grid.shape
+    n = shape[0] * shape[1] * shape[2]
+    dev = gb.src_half.device
+    torch.manual_seed(6)
+    chalf = torch.randn(5, gb.nhalf, dtype=torch.complex128).to(dev)
+    chalf[:, 0] = chalf[:, 0].real.to(torch.complex128)
+    cfull = half_to_full(gb, chalf)
+    box = torch.zeros(5, n, dtype=torch.complex128, device=dev)
+    box.index_add_(1, sphere.flat_idx, cfull)
+    psi_c = torch.fft.ifftn(box.reshape(5, *shape), dim=(-3, -2, -1))
+    psi_r = half_box_psi(gb, cfull)  # ifftn-scaled, real
+    assert float((psi_r - psi_c.real).abs().max()) < 1e-14
+
+
+def test_density_gamma_matches_density_b(o2_gamma):
+    """The real Γ density (half-box, ρ=Σ w ψ²) reproduces the complex density_b
+    (complex ψ box, ψ.real²+ψ.imag²) to machine precision."""
+    from gradwave.core.batch import density_b
+    from gradwave.core.gamma import density_gamma
+
+    d = o2_gamma
+    gb, bk, grid = d["gb"], d["bk"], d["grid"]
+    dev = gb.src_half.device
+    torch.manual_seed(7)
+    chalf = torch.randn(6, gb.nhalf, dtype=torch.complex128).to(dev)
+    chalf[:, 0] = chalf[:, 0].real.to(torch.complex128)
+    cfull = half_to_full(gb, chalf)
+    w = torch.rand(6, dtype=torch.float64, device=dev)
+    kw = torch.ones(1, dtype=torch.float64, device=dev)
+    rho_c = density_b(cfull[None], w[None], kw, bk, grid.shape, 1.0)
+    rho_g = density_gamma(gb, cfull, w, 1.0)
+    assert float((rho_g - rho_c).abs().max()) < 1e-11 * float(rho_c.abs().max())
+
+
 def test_embed_roundtrip_and_metric(o2_gamma):
     """The real embedding is invertible and turns the metric into a dot product."""
     gb = o2_gamma["gb"]
