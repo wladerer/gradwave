@@ -883,10 +883,10 @@ def _resolve_gamma_real(
 
     Returns a frozen ``GammaBasis`` when a single-k Γ calculation is PROVABLY
     safe for the real path, else ``None`` (the complex path runs unchanged).
-    ``GRADWAVE_GAMMA_REAL`` in {auto,1,0}: "0" disables; "1" forces it on and
-    RAISES on any correctness blocker or a non-Γ sphere (never silently runs an
-    inexact path); "auto" (the default) engages it silently when eligible and
-    silently falls back otherwise.
+    ``GRADWAVE_GAMMA_REAL`` in {auto,1,0}: "0" (unset — the default) disables it,
+    running the complex path byte-for-byte; "1" forces it on and RAISES on any
+    correctness blocker or a non-Γ sphere (never silently runs an inexact path);
+    "auto" engages it silently when eligible and silently falls back otherwise.
 
     Eligibility is deliberately conservative — every condition below must hold:
 
