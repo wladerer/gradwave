@@ -56,9 +56,12 @@ def _build_input(tmp_path: Path):
         slab = fcc100("Al", size=(1, 1, n), a=a, vacuum=8.0)
         ase_write(str(tmp_path / f"al{n}.vasp"), slab, format="vasp")
 
+    # placeholder top-level structure (replaced per-slab by the driver); make it
+    # self-consistent — one Al per position of the thinnest slab.
     ref = fcc100("Al", size=(1, 1, layers[0]), a=a, vacuum=8.0)
     cell = np.asarray(ref.cell.array).tolist()
     pos = ref.get_positions().tolist()
+    species = list(ref.get_chemical_symbols())
     slab_lines = "\n".join(
         f"    - {{structure: al{n}.vasp, n_layers: {n}}}" for n in layers)
     body = f"""
@@ -66,7 +69,7 @@ structure:
   cell: {cell}
   positions:
     cart: {pos}
-  species: [Al]
+  species: {species}
 pseudopotentials:
   dir: {PSEUDOS}
   map: {{Al: {AL_PAW}}}
