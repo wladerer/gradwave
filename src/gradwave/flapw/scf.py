@@ -933,9 +933,9 @@ def _bandlimited_interstitial_theta(spheres, A, nfft, gvec, gnorm):
 
         Θ_MT(G) = (1/Ω) Σ_a W(|G|, R_a) e^{-iG·τ_a},   Θ_I = 1 − IFFT(Θ_MT),
 
-    with ``W`` the solid-ball form factor (``ball_ff_np``). The flat-coefficient → real-space map is
-    the same ``IFFT((c·n³).reshape(n,n,n))`` convention ``v_hart`` uses, so ``gvec``/``gnorm`` are the
-    caller's ``gvec_ylm_tables`` tables in the ``fftn`` order of ``rho_g``."""
+    with ``W`` the solid-ball form factor (``ball_ff_np``). The flat-coefficient → real-space map
+    is the same ``IFFT((c·n³).reshape(n,n,n))`` convention ``v_hart`` uses, so ``gvec``/``gnorm``
+    are the caller's ``gvec_ylm_tables`` tables in the ``fftn`` order of ``rho_g``."""
     vol = float(abs(np.linalg.det(A)))
     theta_mt_g = np.zeros(nfft**3, dtype=complex)
     for sp in spheres:
