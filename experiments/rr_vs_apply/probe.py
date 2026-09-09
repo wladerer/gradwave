@@ -30,20 +30,20 @@ import numpy as np
 os.environ.setdefault("GRADWAVE_RR_PROFILE", "1")
 os.environ.setdefault("GRADWAVE_EIGENSOLVER", "davidson")  # not CheFSI
 
-import torch  # noqa: E402
-
-from gradwave.constants import RY_EV as RY  # noqa: E402
-from gradwave.core.xc.pbe import PBE  # noqa: E402
-from gradwave.pseudo.upf import parse_upf  # noqa: E402
-from gradwave.scf.loop import scf, setup_system  # noqa: E402
-
 # NB: `import gradwave.solvers.davidson as dav` returns the FUNCTION `davidson`,
 # not the module — gradwave/solvers/__init__.py does `from .davidson import
 # davidson`, shadowing the submodule attribute on the package. import_module
 # returns the real module object from sys.modules (the same one the registry
 # adapter's `from gradwave.solvers.davidson import davidson_batched` reads), so
 # patching its attribute below is visible to the SCF path.
-import importlib  # noqa: E402
+import importlib
+
+import torch
+
+from gradwave.constants import RY_EV as RY
+from gradwave.core.xc.pbe import PBE
+from gradwave.pseudo.upf import parse_upf
+from gradwave.scf.loop import scf, setup_system
 
 dav = importlib.import_module("gradwave.solvers.davidson")
 
@@ -91,13 +91,14 @@ def main():
         histories.append(h)
         return r
 
+    scf_max_iter = int(os.environ.get("PROBE_SCF_MAX_ITER", "80"))
     dav.davidson_batched = _wrapped
     try:
         dav._rrp_reset()
         t0 = time.perf_counter()
         result = scf(
             sys_, PBE(), smearing="gaussian", width=0.15,
-            max_iter=80, etol=1e-6, rhotol=1e-5,
+            max_iter=scf_max_iter, etol=1e-6, rhotol=1e-5,
             eigensolver="davidson", verbose=True,
         )
         wall = time.perf_counter() - t0
@@ -141,7 +142,7 @@ def main():
         return float((rn < tol).float().mean())
 
     fracs = []
-    for h, tol in zip(histories, diag_tols):
+    for h, tol in zip(histories, diag_tols, strict=False):
         f = round2_frac(h, tol)
         if f is not None:
             fracs.append(f)
@@ -156,6 +157,40 @@ def main():
         print(f"  step {len(fracs)} (last)     : {fracs[-1]:.3f}", flush=True)
         print(f"  mean over steps    : {np.mean(fracs):.3f}", flush=True)
         print(f"  min over steps     : {np.min(fracs):.3f}", flush=True)
+
+    # --- by-round, by-threshold lock curve (rules out "locks by round 3-4") ---
+    # For a locking scheme, a band can be deflated from round r onward once its
+    # residual is below the LOCK threshold at round r. The frozen-deflation model
+    # the ceiling assumes is only SAFE at the final tol (a band frozen at 1e-4 is
+    # returned wrong); looser thresholds are shown to bound the optimistic case.
+    thresholds = [1e-9, 1e-6, 1e-4, 1e-2]
+    max_r = max((it for h in histories for (it, _r, _e) in h), default=0)
+    print("\n==== BY-ROUND LOCK CURVE (mean frac of bands with res<thr, "
+          "averaged over solves that reached that round) ====", flush=True)
+    print(f"rounds-per-solve: min={min(len(h) for h in histories)} "
+          f"max={max(len(h) for h in histories)} "
+          f"mean={np.mean([len(h) for h in histories]):.1f}", flush=True)
+    curve: dict = {}
+    hdr = "round | " + " | ".join(f"<{t:.0e}" for t in thresholds)
+    print("  " + hdr, flush=True)
+    for r in range(1, max_r + 1):
+        rns = [rn for h in histories for (it, rn, _e) in h if it == r]
+        if not rns:
+            continue
+        row = []
+        for thr in thresholds:
+            fr = float(np.mean([float((rn < thr).float().mean()) for rn in rns]))
+            row.append(fr)
+        curve[r] = row
+        print("  " + f"{r:5d} | " + " | ".join(f"{x:5.3f}" for x in row),
+              flush=True)
+
+    # Cold solve (step 1) full per-round curve at the final tol — the longest
+    # solve, the MOST opportunity for deep bands to lock.
+    cold = histories[0]
+    print("\n  cold-solve (step 1) frac<1e-9 by round: " +
+          ", ".join(f"r{it}={float((rn<1e-9).float().mean()):.3f}"
+                    for (it, rn, _e) in cold), flush=True)
 
     lock = float(np.mean(fracs)) if fracs else 0.0
     rr_share = rr / wall
@@ -177,6 +212,8 @@ def main():
         wall_s=wall, prof=prof, rr_gemm_s=rr, rr_share_wall=rr_share,
         rr_share_dav=rr / dav_total, rr_over_apply=rr / apply,
         lockable_round2=dict(per_step=fracs, mean=lock),
+        lock_curve=dict(thresholds=thresholds, by_round=curve,
+                        rounds_per_solve=[len(h) for h in histories]),
         ceiling_savings=ceiling_savings, ceiling_speedup=ceiling_speedup,
         energy=float(energy) if energy is not None else None,
         n_scf_steps=len(histories), diag_tol=diag_tols[-1] if diag_tols else None,
