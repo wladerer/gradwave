@@ -19,6 +19,12 @@ from gradwave.flapw import atomic_scf, build_matrices_multi, crystal_scf, log_me
 # Elk 11.0.2 (all-electron FLAPW), simple-cubic Ne a=6 Bohr, LSDA (PW92): 2s-2p splitting 22.77 eV.
 ELK_NE_SPLIT_EV = 22.77
 
+# Elk 11.0.2 (all-electron FLAPW), simple-cubic Ar a=12 Bohr, LDA (PW92, xctype 3), R_MT 1.7 Bohr,
+# rgkmax 6, ngridk 2×2×2. Valence Γ eigenvalues: 3s −0.8714693 Ha, 3p −0.3570473 Ha (3-fold), so
+# the 3s-3p splitting is 0.5144221 Ha = 13.998 eV. A SECOND external solid beyond Ne (a heavier
+# noble gas, 3s/3p not 2s/2p), so the FLAPW cross-code check no longer rests on one crystal.
+ELK_AR_SPLIT_EV = 13.998
+
 
 def _lapw_neon_gamma_split(a_bohr, R=1.4, ecut=300.0):
     """Single-shot LAPW 2s-2p splitting at Γ for simple-cubic Ne with the atomic potential.
@@ -36,10 +42,38 @@ def _lapw_neon_gamma_split(a_bohr, R=1.4, ecut=300.0):
     return float(ev[1:4].mean() - ev[0])       # 2p (3-fold) minus 2s
 
 
+def _lapw_argon_gamma_split(a_bohr, R=1.7, ecut=300.0):
+    """Single-shot LAPW 3s-3p splitting at Γ for simple-cubic Ar with the atomic potential.
+
+    Mirrors ``_lapw_neon_gamma_split`` for a heavier closed-shell noble gas — one generalized
+    eigensolve, deterministic (no SCF, no wandering interstitial zero)."""
+    L = a_bohr * BOHR_ANG
+    r, dx = log_mesh(1e-5, 28.0, 2500)
+    at, v_at = atomic_scf("Ar", r, dx)
+    v0 = float(v_at.numpy()[np.argmin(np.abs(r.numpy() - R))])
+    v_mt = torch.where(r <= R, v_at - v0, torch.zeros_like(r))
+    el = {0: at["3s"] - v0, 1: at["3p"] - v0, 2: -1.0 - v0}
+    species = {"Ar": {"R": R, "v": v_mt, "El": el}}
+    ev = solve_geneig(*build_matrices_multi([0.0, 0.0, 0.0], L, [([0.0, 0.0, 0.0], "Ar")],
+                                            2, ecut, r, dx, species)[:2], 8)
+    return float(ev[1:4].mean() - ev[0])       # 3p (3-fold) minus 3s
+
+
 def test_lapw_neon_splitting_vs_elk():
     """The a=6 Bohr Ne 2s-2p splitting from a single LAPW solve matches Elk 11 to <0.5 eV."""
     split = _lapw_neon_gamma_split(6.0)
     assert abs(split - ELK_NE_SPLIT_EV) < 0.5
+
+
+def test_lapw_argon_splitting_vs_elk():
+    """The a=12 Bohr Ar 3s-3p splitting from a single LAPW solve matches Elk 11 (a SECOND external
+    solid beyond Ne). gradwave gives 13.51 eV vs Elk's 13.998 eV — a 0.49 eV / 3.5% cross-code
+    agreement. The residual is larger than Ne's (0.15 eV) as expected: it is the single-shot atomic
+    potential vs Elk's self-consistent crystal, plus scalar-relativistic 3s/3p contraction (Elk is
+    scalar-relativistic, this LAPW solve is non-relativistic), which grows with Z (18 vs Ne's 10).
+    The 0.7 eV tolerance brackets that residual with margin for platform/mesh variation."""
+    split = _lapw_argon_gamma_split(12.0)
+    assert abs(split - ELK_AR_SPLIT_EV) < 0.7
 
 
 @pytest.mark.slow
