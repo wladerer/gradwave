@@ -39,7 +39,9 @@ from gradwave.inputs.models import (
     RelaxParams,
     SCFParams,
     SlabParams,
+    SlabPoint,
     SmearingParams,
+    SurfaceEnergyParams,
     ThermochemParams,
     VolumetricParams,
     WorkFunctionParams,
@@ -267,7 +269,7 @@ _ALLOWED_TOP = {
     "nonmagnetic", "start_mag", "tot_magnetization",
     "scf", "slab", "task", "relax", "neb", "bands", "optics", "magnetism", "eos",
     "elastic",
-    "phonons", "thermochem", "flapw", "nmr",
+    "phonons", "thermochem", "surface_energy", "flapw", "nmr",
     "projections", "bader", "work_function", "dispersion", "device", "distributed",
     "verbose", "output", "error_estimate", "restart",
 }
@@ -648,6 +650,45 @@ def _build_neb(raw: dict[str, Any], base: Path, task: str) -> NebParams:
     return _build(NebParams, raw, "neb")
 
 
+def _build_surface_energy(
+    raw: dict[str, Any], base: Path, task: str
+) -> SurfaceEnergyParams:
+    """Parse the ``surface_energy`` block, resolving each slab geometry file
+    relative to the input file's directory. ``slabs`` (≥2 thicknesses) is
+    required for a ``surface_energy`` task and rejected for any other task."""
+    _check_keys("surface_energy", raw, {"slabs", "n_surfaces", "energy"})
+    raw = dict(raw)
+    slabs_raw = raw.get("slabs")
+    if task == "surface_energy":
+        if not slabs_raw:
+            raise InputError(
+                "task: surface_energy requires surface_energy.slabs (a list of "
+                "{structure, n_layers} slab points; at least two thicknesses)")
+        points = []
+        for i, entry in enumerate(slabs_raw):
+            if not isinstance(entry, dict) or "structure" not in entry \
+                    or "n_layers" not in entry:
+                raise InputError(
+                    f"surface_energy.slabs[{i}] must be a mapping with "
+                    f"'structure' (a geometry file) and 'n_layers'")
+            _check_keys(f"surface_energy.slabs[{i}]", entry,
+                        {"structure", "n_layers"})
+            points.append(SlabPoint(structure=base / str(entry["structure"]),
+                                    n_layers=float(entry["n_layers"])))
+        if len(points) < 2:
+            raise InputError(
+                f"surface_energy.slabs needs >=2 thicknesses to fit a slope, "
+                f"got {len(points)}")
+        raw["slabs"] = tuple(points)
+    elif slabs_raw is not None:
+        raise InputError("surface_energy.slabs is only valid for task: surface_energy")
+    return SurfaceEnergyParams(
+        slabs=raw.get("slabs", ()),
+        n_surfaces=int(raw.get("n_surfaces", 2)),
+        energy=str(raw.get("energy", "free_energy")),
+    )
+
+
 def _load_input(path: Path) -> Input:
     raw_yaml: Any = yaml.safe_load(path.read_text())
     base = path.parent
@@ -706,11 +747,11 @@ def _load_input(path: Path) -> Input:
     xc, hybrid = _resolve_xc(raw)
     if task not in ("scf", "relax", "neb", "bands", "optics", "magnetism", "eos",
                     "elastic",
-                    "phonons", "thermochem", "flapw", "nmr"):
+                    "phonons", "thermochem", "surface_energy", "flapw", "nmr"):
         raise InputError(
             f"unknown task {task!r} "
             f"(scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons | "
-            f"thermochem | flapw | nmr)")
+            f"thermochem | surface_energy | flapw | nmr)")
     nspin = int(raw.get("nspin", 1))
     if nspin not in (1, 2):
         raise InputError(f"nspin must be 1 or 2, got {nspin}")
@@ -877,6 +918,8 @@ def _load_input(path: Path) -> Input:
         magnetism=_build(MagnetismParams, raw.get("magnetism", {}), "magnetism"),
         eos=_build(EOSParams, raw.get("eos", {}), "eos"),
         thermochem=_build(ThermochemParams, raw.get("thermochem", {}), "thermochem"),
+        surface_energy=_build_surface_energy(
+            dict(raw.get("surface_energy", {})), base, task),
         elastic=_build(ElasticParams, raw.get("elastic", {}), "elastic"),
         phonons=_build(PhononParams, raw.get("phonons", {}), "phonons"),
         flapw=_build_flapw(dict(raw.get("flapw", {})),

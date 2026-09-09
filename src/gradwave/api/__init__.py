@@ -36,6 +36,7 @@ from gradwave.api.summary import _bands_extra as _bands_extra
 from gradwave.api.summary import _optics_extra as _optics_extra
 from gradwave.api.summary import _write_volumetric as _write_volumetric
 from gradwave.api.summary import build_summary as build_summary
+from gradwave.api.surface_energy import run_surface_energy as run_surface_energy
 from gradwave.api.system import _is_uspp as _is_uspp
 from gradwave.api.system import _load_upf as _load_upf
 from gradwave.api.system import build_system as build_system
@@ -87,5 +88,6 @@ __all__ = [
     "run_phonons",
     "run_relax",
     "run_scf",
+    "run_surface_energy",
     "run_thermochem",
 ]
