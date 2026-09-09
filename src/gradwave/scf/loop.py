@@ -129,14 +129,23 @@ _CHEFSI_MIN_NB = int(os.environ.get("GRADWAVE_CHEFSI_MIN_NB", "640"))
 # ⇒ "0" ⇒ the complex path, byte-for-byte unchanged; "auto" engages the real
 # path whenever provably safe and silently falls back otherwise; "1" forces it
 # on and raises if a correctness blocker is present or the sphere is not Γ; "0"
-# disables it. It defaults OFF (not "auto") deliberately: the real path routes
-# H|ψ⟩ through GammaHamiltonian, which the BatchedHamiltonian.apply monkeypatch
-# behind opt.joint.count_h_applies cannot observe, and the density-warm-start
-# iteration reduction the calculator relies on across grid changes is not
-# reproduced there — auto-engaging silently changed those observable contracts
-# on existing Γ-only runs. Opting in with "auto"/"1" is exact either way (the
-# converged numbers match the complex path to machine precision). See
-# `_resolve_gamma_real`.
+# disables it. H-apply telemetry is now transparent across both paths
+# (GammaHamiltonian bumps the shared core.batch._HAPPLY_TALLY, which
+# opt.joint.count_h_applies reads), so that contract no longer blocks auto.
+#
+# It STILL defaults OFF (not "auto") for one honest reason: the SCF *iteration
+# count* near the convergence boundary is not bit-reproducible between the two
+# eigensolvers. Si's degenerate valence top under smearing has a gauge-ambiguous
+# density from a partially-occupied degenerate subspace, and the real embedded
+# Davidson picks a different (equally valid) orthonormal basis than the complex
+# batched Davidson, so the SCF residual differs at ~1e-10. That is below the
+# ~-30 eV energy agreement (matches the complex path to machine precision) but
+# right at the rhotol=1e-9 boundary, so a warm start that saves one SCF iteration
+# on the complex path can converge in the same count on the Γ path
+# (tests/integration/test_calculator_warmstart_grid.py). The warm DENSITY seed
+# is threaded identically on both paths — this is a boundary effect, not a
+# missing warm start — so it cannot be cleanly removed by threading coefficients.
+# Opting in with "auto"/"1" is exact either way. See `_resolve_gamma_real`.
 _GAMMA_REAL_ENV = os.environ.get("GRADWAVE_GAMMA_REAL", "0").strip().lower()
 
 

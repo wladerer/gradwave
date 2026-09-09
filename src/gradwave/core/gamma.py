@@ -257,9 +257,8 @@ class GammaHamiltonian:
         # module-level happly tally (reset_happly_tally / happly_tally) and
         # opcount("hpsi") the complex path bumps, so H-apply telemetry is
         # transparent whichever path runs. nk is 1 at Γ, so the band-vector
-        # count is nb. (opt.joint.count_h_applies patches BatchedHamiltonian.apply
-        # itself rather than reading this tally, so it does not observe the Γ
-        # path — the reason the path is opt-in; see loop._GAMMA_REAL_ENV.)
+        # count is nb. (opt.joint.count_h_applies reads this shared tally, so it
+        # observes the Γ path as well as the complex BatchedHamiltonian.apply.)
         if _HAPPLY_TALLY["on"]:
             _HAPPLY_TALLY["count"] += nb
         opcount.bump("hpsi", nb)

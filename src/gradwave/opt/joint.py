@@ -29,7 +29,8 @@ harmless — the insulator gap is what protects the subspace itself).
 
 H-application accounting: one "H-apply" = Ĥ acting on one band vector
 (≈ 2 sphere↔grid FFTs + one projector contraction). The SCF/Davidson side is
-counted exactly by ``count_h_applies`` (patches ``BatchedHamiltonian.apply``).
+counted exactly by ``count_h_applies`` (reads the shared ``_HAPPLY_TALLY`` that
+both the complex and the Γ-real eigensolve paths bump).
 One joint closure (energy + backward) costs, per band and k, one ψ FFT for ρ
 plus its adjoint in backward, i.e. ≈ 1 H-apply per (band, k); the Hartree/XC/
 local pieces are band-independent (a handful of dense-box FFTs, amortized).
@@ -79,26 +80,34 @@ class HApplyCounter:
 
 @contextlib.contextmanager
 def count_h_applies():
-    """Patch ``BatchedHamiltonian.apply`` to count band-vector applications.
+    """Count band-vector H-applications over the ``with`` block.
 
-    Yields an ``HApplyCounter`` whose ``count`` is Σ over calls of nk·nb of the
-    applied block — the exact number of single-band H·ψ products the
-    eigensolvers performed inside the ``with`` block.
+    Yields an ``HApplyCounter`` whose ``count`` is Σ over calls of the applied
+    block's band-vector count — the number of single-band H·ψ products the
+    eigensolvers performed. Reads the shared module tally
+    ``core.batch._HAPPLY_TALLY`` that BOTH the complex ``BatchedHamiltonian``
+    and the Γ-point real path (``core.gamma.GammaHamiltonian``) bump, so the
+    count is transparent whichever eigensolve route ran (the earlier
+    monkeypatch of ``BatchedHamiltonian.apply`` alone missed the Γ path). Nests
+    correctly: an inner block's applies fold back into an enclosing counter on
+    exit.
     """
-    from gradwave.core.batch import BatchedHamiltonian
+    from gradwave.core.batch import _HAPPLY_TALLY
 
     counter = HApplyCounter()
-    orig = BatchedHamiltonian.apply
-
-    def counting_apply(self, c):
-        counter.count += c.shape[0] * c.shape[1]
-        return orig(self, c)
-
-    BatchedHamiltonian.apply = counting_apply
+    saved_on = _HAPPLY_TALLY["on"]
+    saved_count = _HAPPLY_TALLY["count"]
+    _HAPPLY_TALLY["on"] = True
+    _HAPPLY_TALLY["count"] = 0
     try:
         yield counter
     finally:
-        BatchedHamiltonian.apply = orig
+        inner = _HAPPLY_TALLY["count"]
+        counter.count = inner
+        # restore the enclosing context; add ours so an outer counter still sees
+        # the applies performed inside this block
+        _HAPPLY_TALLY["on"] = saved_on
+        _HAPPLY_TALLY["count"] = saved_count + inner
 
 
 # ------------------------------------------------------------- orbital param
