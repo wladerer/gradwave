@@ -50,6 +50,63 @@ def test_woodbury_identity():
     assert torch.allclose(got, dense, atol=1e-10, rtol=1e-8)
 
 
+def test_woodbury_identity_nspin2():
+    """nspin=2 analogue of ``test_woodbury_identity`` with a NONZERO low-rank M.
+
+    The full ``WoodburyPrecond.__call__`` for nspin=2 is a composition:
+    convert the mixer residual (tot,mag) → (up,dn), apply (1 − M)⁻¹ on the
+    stacked 2·ng (up,dn) vector, convert back, then pin the total-channel G=0.
+    The trivial W=0 test cannot see a transposed/mis-indexed spin block because
+    (1 − M)⁻¹ = 1 collapses the middle. Here M ≠ 0 with the up- and dn-blocks
+    deliberately DIFFERENT, so the (tot,mag)↔(up,dn) wrapping is exercised, and
+    the result is checked against a dense reference built from the SAME layout.
+    """
+    torch.manual_seed(3)
+    ng, ncol, vol = 6, 4, 1.3
+    nvec = 2 * ng
+    # low-rank columns live in the stacked (up,dn) space (nvec = 2·ng); make the
+    # up/dn halves of every column different so the spin wrapping is non-trivial.
+    u = torch.randn(ncol, nvec, dtype=CDTYPE)
+    w = torch.randn(ncol, nvec, dtype=CDTYPE)
+    c = torch.randn(ncol, dtype=torch.float64) * 0.1  # small → (1−M) well-posed
+    g0 = 2  # G=0 slot inside the ng-length total channel
+
+    pre = WoodburyPrecond(u, w, c, vol, nspin=2, ng=ng, g0_idx=g0)
+
+    # dense operator in the SAME (tot,mag) basis the SCF hands over:
+    #   updn = T_fwd @ x         updn[:ng]=(tot+mag)/2, updn[ng:]=(tot-mag)/2
+    #   y    = (1 − M)⁻¹ updn    M[g,h] = Σ_p u[p,g] (vol c_p) conj(w[p,h])
+    #   res  = T_back @ y        res[:ng]=up+dn, res[ng:]=up-dn
+    #   res[g0] = 0              (total-channel charge conservation)
+    eye_ng = torch.eye(ng, dtype=CDTYPE)
+    t_fwd = 0.5 * torch.cat([torch.cat([eye_ng, eye_ng], 1),
+                             torch.cat([eye_ng, -eye_ng], 1)], 0)
+    t_back = torch.cat([torch.cat([eye_ng, eye_ng], 1),
+                        torch.cat([eye_ng, -eye_ng], 1)], 0)
+    m = torch.einsum("pg,p,ph->gh", u, (vol * c).to(CDTYPE), w.conj())
+
+    x = torch.randn(nvec, dtype=CDTYPE)  # mixer residual ρ(G), (tot,mag), complex
+
+    def dense_ref(t_fwd_, t_back_):
+        updn = t_fwd_ @ x
+        y = torch.linalg.solve(torch.eye(nvec, dtype=CDTYPE) - m, updn)
+        res = t_back_ @ y
+        res[g0] = 0.0
+        return res
+
+    ref = dense_ref(t_fwd, t_back)
+    got = pre(x)
+    assert torch.allclose(got, ref, atol=1e-10, rtol=1e-8)
+
+    # The test has teeth: a mis-indexed spin block — up/dn halves of the (tot,mag)
+    # transform swapped — gives a materially different answer, so a transposed
+    # spin block in the real apply WOULD be caught (not silently absorbed).
+    t_fwd_bad = 0.5 * torch.cat([torch.cat([eye_ng, -eye_ng], 1),
+                                 torch.cat([eye_ng, eye_ng], 1)], 0)
+    ref_bad = dense_ref(t_fwd_bad, t_back)
+    assert not torch.allclose(got, ref_bad, atol=1e-6)
+
+
 def test_woodbury_totmag_roundtrip():
     """nspin=2 (tot,mag)↔(up,dn) transform is FFT-free and self-inverse when
     the operator is identity (cvals → 0 ⇒ WoodburyPrecond ≈ 1)."""

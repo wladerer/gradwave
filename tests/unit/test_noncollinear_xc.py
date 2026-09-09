@@ -107,6 +107,137 @@ def test_bxc_parallel_to_m():
     assert float(cross.abs().max()) < 1e-10 * float(bxc.abs().max())
 
 
+def test_noncollinear_vxc_bxc_finite_difference():
+    """(v_xc, B⃗_xc) = ∂E_xc/∂(ρ, m⃗) MAGNITUDE check by central finite
+    difference — not just B⃗_xc's direction.
+
+    ``test_bxc_parallel_to_m`` only checks that B⃗_xc ∥ m⃗ (cross product ≈ 0), so
+    a wrong ½ or a wrong |m|-Jacobian magnitude would slip through. Here the
+    analytic potentials from ``vxc_and_bxc`` are compared, entry by entry, to the
+    central difference of the total E_xc w.r.t. ρ and each Cartesian component
+    m_x, m_y, m_z of a genuinely NON-collinear density (all three moments
+    nonzero, varying per point). LSDA (no gradient) keeps E a pure pointwise sum,
+    so the FD is exact to O(h²) with no neighbour coupling.
+
+    ``vxc_and_bxc`` scales the raw autograd gradient ∂E/∂(field-value) by
+    n_points/volume to the pointwise potential; undo that (×volume/n_points =
+    the volume element dV) to compare against ΔE/Δfield directly.
+    """
+    from gradwave.core.xc.noncollinear import vxc_and_bxc
+
+    class FakeGrid:
+        volume = 3.0
+        n_points = 5
+
+    gen = torch.Generator().manual_seed(11)
+    npts = FakeGrid.n_points
+    rho = 0.2 + 0.4 * torch.rand(npts, generator=gen, dtype=torch.float64)
+    # |m| kept comfortably below ρ so ρ_dn = (ρ − |m|)/2 stays positive; all
+    # three components nonzero and per-point varying (a real non-collinear field)
+    m_vec = 0.25 * rho * (torch.rand(3, npts, generator=gen, dtype=torch.float64) - 0.4)
+
+    nc = NoncollinearXC(LSDA_PW92())
+    vxc, bxc, _ = vxc_and_bxc(nc, rho, m_vec, FakeGrid())
+    dV = FakeGrid.volume / FakeGrid.n_points
+    # raw energy-derivatives ∂E/∂field = pointwise-potential × dV
+    dE_drho = vxc * dV
+    dE_dm = bxc * dV
+
+    def e_of(r, m):
+        return float(nc.energy(r, m, FakeGrid.volume))
+
+    h = 1e-6
+    # ∂E/∂ρ_i
+    for i in range(npts):
+        rp = rho.clone()
+        rp[i] += h
+        rm = rho.clone()
+        rm[i] -= h
+        fd = (e_of(rp, m_vec) - e_of(rm, m_vec)) / (2 * h)
+        assert abs(fd - float(dE_drho[i])) <= 1e-6 * max(1.0, abs(fd)), (
+            f"v_xc FD mismatch at i={i}: fd={fd:.10e} analytic={float(dE_drho[i]):.10e}")
+    # ∂E/∂m_{a,i}
+    for a in range(3):
+        for i in range(npts):
+            mp = m_vec.clone()
+            mp[a, i] += h
+            mm = m_vec.clone()
+            mm[a, i] -= h
+            fd = (e_of(rho, mp) - e_of(rho, mm)) / (2 * h)
+            assert abs(fd - float(dE_dm[a, i])) <= 1e-6 * max(1.0, abs(fd)), (
+                f"B_xc FD mismatch at ({a},{i}): fd={fd:.10e} "
+                f"analytic={float(dE_dm[a, i]):.10e}")
+
+
+def test_learnable_functionals_gradcheck():
+    """torch.autograd.gradcheck on the learnable / spin-adapted XC potentials.
+
+    These functionals are validated by energy LIMITS only (PBE-recovery,
+    ζ→0). The SCF potential is ∂E_xc/∂ρ, so a ζ²-term sign/scaling bug would
+    shift the potential while every energy-limit test still passes. gradcheck
+    on ``energy_density`` w.r.t. (ρ, σ) — and, for the ζ-adaptive functionals,
+    with the ζ²-enhancement ACTIVE (nonzero κ₁/μ₁, ζ derived from ρ↑,ρ↓) —
+    verifies the analytic potential matches the numeric Jacobian, catching
+    exactly such a bug. gradgradcheck on the cheap charge-only case as well.
+    """
+    from gradwave.core.xc.learnable import (
+        LearnableSpinX,
+        LearnableSpinXZeta,
+        LearnableX,
+        SpinAdaptedPBE,
+    )
+
+    gen = torch.Generator().manual_seed(7)
+
+    def _rho(n):
+        return (0.2 + 0.5 * torch.rand(n, generator=gen, dtype=torch.float64)
+                ).requires_grad_(True)
+
+    def _sig(n):
+        return (0.01 + 0.05 * torch.rand(n, generator=gen, dtype=torch.float64)
+                ).requires_grad_(True)
+
+    n = 4
+    # --- charge-only LearnableX: ∂e/∂(ρ, σ) ---
+    xc = LearnableX()
+    rho, sigma = _rho(n), _sig(n)
+    assert torch.autograd.gradcheck(
+        lambda r, s: xc.energy_density(r, s), (rho, sigma), eps=1e-6,
+        atol=1e-6, rtol=1e-4)
+    assert torch.autograd.gradgradcheck(
+        lambda r, s: xc.energy_density(r, s), (rho, sigma), eps=1e-6,
+        atol=1e-5, rtol=1e-3)
+
+    # --- spin LearnableSpinX (ζ-independent κ,μ): ∂e/∂(ρ↑,ρ↓,σ's) ---
+    xs = LearnableSpinX()
+    ru, rd = _rho(n), _rho(n)
+    suu, sdd, stt = _sig(n), _sig(n), _sig(n)
+    assert torch.autograd.gradcheck(
+        lambda a, b, p, q, t: xs.energy_density(a, b, p, q, t),
+        (ru, rd, suu, sdd, stt), eps=1e-6, atol=1e-6, rtol=1e-4)
+
+    # --- ζ-adaptive functionals with the ζ² term ACTIVE ---
+    # explicit nonzero κ₁, μ₁ (kept inside the Lieb–Oxford / positivity bounds so
+    # the clamps are inactive and the map is smooth for gradcheck)
+    xz = LearnableSpinXZeta(kappa1=-0.05, mu1=-0.03)
+    ru, rd = _rho(n), _rho(n)
+    suu, sdd, stt = _sig(n), _sig(n), _sig(n)
+    assert torch.autograd.gradcheck(
+        lambda a, b, p, q, t: xz.energy_density(a, b, p, q, t),
+        (ru, rd, suu, sdd, stt), eps=1e-6, atol=1e-6, rtol=1e-4)
+    assert torch.autograd.gradgradcheck(
+        lambda a, b, p, q, t: xz.energy_density(a, b, p, q, t),
+        (ru, rd, suu, sdd, stt), eps=1e-6, atol=1e-5, rtol=1e-3)
+
+    # --- the shipped preset (μ₁ = −0.0475) ---
+    xp = SpinAdaptedPBE()
+    ru, rd = _rho(n), _rho(n)
+    suu, sdd, stt = _sig(n), _sig(n), _sig(n)
+    assert torch.autograd.gradcheck(
+        lambda a, b, p, q, t: xp.energy_density(a, b, p, q, t),
+        (ru, rd, suu, sdd, stt), eps=1e-6, atol=1e-6, rtol=1e-4)
+
+
 def test_complex_ylm_vs_scipy():
     import numpy as np
     from scipy.special import sph_harm_y
