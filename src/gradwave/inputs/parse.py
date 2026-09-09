@@ -29,6 +29,7 @@ from gradwave.inputs.models import (
     KPointsParams,
     MagneticParams,
     MagnetismParams,
+    MemoryParams,
     MixingParams,
     NebParams,
     NmrParams,
@@ -737,11 +738,14 @@ def _load_input(path: Path) -> Input:
     _check_keys("scf", scf_raw,
                 {"max_iter", "etol", "rhotol", "mixing", "diago", "trace",
                  "convergence", "entol", "eigensolver", "magnetic",
-                 "boundary", "esm_bias", "target_mu"})
+                 "boundary", "esm_bias", "target_mu", "memory"})
     mix_raw = dict(scf_raw.pop("mixing", {}))
     mag_raw = dict(scf_raw.pop("magnetic", {}))
     _check_keys("scf.magnetic", mag_raw,
                 {"mixer", "spin_precond", "mixing_alpha", "diago_schedule"})
+    mem_raw = dict(scf_raw.pop("memory", {}))
+    _check_keys("scf.memory", mem_raw,
+                {f.name for f in dataclasses.fields(MemoryParams)})
     diago = scf_raw.pop("diago", {})
     _check_keys("scf.diago", diago, {"tol"})
 
@@ -910,6 +914,7 @@ def _load_input(path: Path) -> Input:
             target_mu=(None if scf_raw.get("target_mu") is None
                        else float(scf_raw["target_mu"])),
             magnetic=MagneticParams(**mag_raw) if mag_raw else MagneticParams(),
+            memory=MemoryParams(**mem_raw) if mem_raw else MemoryParams(),
         ),
         slab=_build(SlabParams, raw.get("slab", {}), "slab"),
         task=task,

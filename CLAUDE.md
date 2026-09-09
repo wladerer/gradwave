@@ -90,6 +90,7 @@ drivers call their own module globals.
 | Space group / symmetrize density / forces | `symmetry.find_spacegroup`, `symmetry.RhoSymmetrizer`, `symmetry.symmetrize_forces` | call spglib directly |
 | The SCF loop (pick the formalism explicitly) | `scf.loop.scf` (NC), `scf.uspp_loop.scf_uspp` (USPP/PAW), `scf.noncollinear.scf_noncollinear` (spinor/SOC) | write a mixing/diagonalization loop |
 | Eigensolver | `solvers.davidson_batched` (workhorse), `solvers.chebyshev_filtered_batched` | hand-code Davidson |
+| Cap SCF peak memory for a big slab (k-streaming + Davidson subspace) | `scf.memory` block on the Input: `k_chunk`, `max_dim_factor`, `subspace_budget_gb`, `subspace_storage` (`inputs.models.MemoryParams`; bridged in `api.scf.run_scf` — `k_chunk` kwarg + the `GRADWAVE_*` env via `api._common._davidson_memory_env`) | set the `GRADWAVE_K_CHUNK`/`GRADWAVE_MAX_DIM_FACTOR`/… env vars by hand |
 | Forces / stress | `postscf.forces.forces`, `postscf.stress.stress` (`stress_kbar` to convert) | recompute Hellmann-Feynman/Pulay terms |
 | Bands / DOS / PDOS / phonons / EOS | `postscf.{bands.band_structure, dos.kpm_dos, pdos.projected_dos, phonons, eos.fit_bm3}` | |
 | Bader (QTAIM) per-atom charges | `bader: enabled` on the scf task → `summary["bader"]` (driver: `postscf.bader.bader`) | |
