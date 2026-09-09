@@ -1798,11 +1798,22 @@ def _multi_finalize(ctx: _MultiCtx, st: _MultiState, efg: bool = False):
     # Initial-state core levels: re-solve each site's core states in its converged
     # spherical MT potential and keep the eigenvalues (the SCF already does this
     # solve to build ρ_core, then discards them). Cheap; always on. Only the
-    # within-cell SHIFT is physical — see flapw.core_levels.
-    from gradwave.flapw.core_levels import core_level_shifts, core_levels_from_state
+    # within-cell SHIFT is physical — see flapw.core_levels. Alongside the raw
+    # eigenvalue we attach the on-site external (Madelung) electrostatic potential
+    # C0_ext per site, from the converged interstitial Hartree grid (st.v_hart) and
+    # sphere charges (st.spheres) — the physically-correct reference for a same-element
+    # inter-site shift, which the muffin-tin eigenvalue gets wrong-signed.
+    from gradwave.flapw.core_levels import (
+        core_level_shifts,
+        core_levels_from_state,
+        onsite_madelung_potentials,
+    )
 
+    v_mad = None
+    if st.v_hart is not None and st.spheres is not None:
+        v_mad = onsite_madelung_potentials(st.v_hart, st.spheres, ctx.keys, ctx.A)
     cl = core_levels_from_state(st.v_by_key, ctx.syms, ctx.keys, ctx.core_map,
-                                ctx.r, ctx.dx)
+                                ctx.r, ctx.dx, v_madelung=v_mad)
     info["core_levels"] = cl
     info["core_level_shifts"] = core_level_shifts(cl)
     return conv, info

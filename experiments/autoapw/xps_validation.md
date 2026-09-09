@@ -75,27 +75,52 @@ A controlled inequivalent-O case: one Ti with two O at DIFFERENT Ti-O distances
 | 1.00 | -18.59966385 | -18.54894916 | +1.380 |
 | 1.40 | -18.64178795 | -18.53667882 | +2.860 |
 
-gradwave (O R_MT 0.70 Angstrom = 1.32 Bohr): **Delta(long-short) = -1.667 eV**.
+gradwave raw muffin-tin eigenvalue shift (O R_MT 0.70 Angstrom = 1.32 Bohr):
+**delta_eV(long-short) = -1.667 eV** (wrong-signed). gradwave on-site Madelung shift
+(`delta_madelung_eV`, added in this PR): **+2.19 eV** (right-signed, Elk's ballpark).
 
-**Finding — this open geometry is a poor benchmark and it maps the method's limit.**
-Elk robustly makes the O NEARER the (net-positive) Ti MORE bound (Delta > 0, growing
-with R_MT as more of the site-distinguishing potential falls inside the sphere); the
-standard core-level "potential model" (BE rises with a more positive Madelung
-potential, i.e. nearer a cation) agrees with Elk. gradwave gives the OPPOSITE sign.
-The mechanism is specific: here the two O sites are chemically identical and differ
-ONLY by a long-range Madelung difference that lives in the region BETWEEN the spheres.
-gradwave represents its spherical muffin-tin potentials on a FLAT shared interstitial
-zero, so a purely inter-site interstitial potential difference is discarded; only the
-small in-sphere residual survives, and it comes out wrong-signed. Elk carries the full
-interstitial potential in plane waves and keeps it. Note this is the opposite regime
-from the Si/SiO2 headline below, which gradwave gets RIGHT: there the shift is an
-ON-SITE chemical-state change (Si0 -> Si4+, valence charge leaving the Si sphere),
-captured inside the muffin tin. The takeaway: gradwave's core-level shifts are
-trustworthy when the distinguishing potential is on-site (close-packed crystals,
-oxidation-state changes) and unreliable when it is a bare interstitial Madelung term
-(open cells, tiny spheres). The bundled `test_core_level_shift_inequivalent_oxygen`
-guards reproducibility of the -1.67 eV number but is NOT a physical-correctness check
-(its sign disagrees with Elk); its comment has been corrected to say so.
+**Root cause (re-diagnosed — the earlier "discarded Madelung reference" story was
+wrong).** The spherical muffin-tin core eigenvalue is NOT referenced to a flat
+interstitial zero that drops the Madelung field. The sphere's l=0 potential is matched
+at R_MT to the Weinert-reconstructed interstitial Coulomb (`scf._weinert_multi`), which
+adds the external constant `C0_ext = v_bc(R) - v_own(R)` INSIDE the sphere, so the
+eigenvalue = (in-sphere own term) + C0_ext. Driving the SCF via the internal `_multi_*`
+functions and re-solving the O 1s in each candidate potential gives the exact
+decomposition (O R_MT 1.32 Bohr, `experiments/autoapw/xps_madelung_decomposition.py`):
+
+| term (long - short) | value (eV) |
+|---|---|
+| in-sphere own (vpart + vxc, no boundary constant) | **-3.810** |
+| external Madelung constant C0_ext | **+2.216** |
+| raw eigenvalue (their sum) | **-1.667** |
+
+So the wrong sign is NOT a missing reference — it is that the muffin-tin SPHERICAL
+in-sphere own term picks up a large, wrong-signed spurious difference between the two
+inequivalent sites (their spherically-averaged in-sphere densities differ) that SWAMPS
+the correct C0_ext the eigenvalue already carries. `fullpot=True` does not change the
+core levels (they are byte-identical; the l=0 core sees only the spherical potential).
+
+**The fix — report the on-site Madelung potential C0_ext (`delta_madelung_eV`).** For a
+same-element inter-site shift the physically-correct initial-state quantity is the
+on-site external electrostatic potential difference, computed by
+`core_levels.onsite_madelung_potentials`. It reproduces Elk in sign, magnitude, AND the
+R_MT trend (gradwave C0_ext vs Elk, this exact geometry):
+
+| O R_MT (Bohr) | Elk Delta(long-short) eV | gradwave C0_ext Delta eV |
+|---|---|---|
+| 0.70 | +0.951 | -0.856 |
+| 1.00 | +1.380 | +0.736 |
+| 1.32 | ~+2.5 (interp) | +2.193 |
+| 1.40 | +2.860 | +2.814 |
+
+At R_MT 1.40 Bohr gradwave's C0_ext matches Elk's TOTAL to <0.1 eV — confirming Elk's own
+in-sphere difference for these chemically-identical O is ~0. The reliability floor:
+C0_ext degrades and goes wrong-signed below R_MT ~1.0 Bohr (the coarse interstitial FFT
+under-resolves the field at the tiny sphere). The raw eigenvalue `delta_eV` stays right
+for ON-SITE (oxidation-state) shifts captured inside the muffin tin (Si/SiO2 headline
+below, +4.4). Both numbers are now reported per within-cell pair;
+`test_core_level_shift_inequivalent_oxygen` asserts the corrected positive
+`delta_madelung_eV` and keeps the eigenvalue value as a documented-limitation guard.
 
 ## Task 2 — cross-cell headline: Si 2p, bulk Si vs SiO2
 

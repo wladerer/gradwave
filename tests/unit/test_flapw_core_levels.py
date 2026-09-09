@@ -108,15 +108,17 @@ def test_core_level_shift_equivalent_sites_null():
 
 @pytest.mark.slow
 def test_core_level_shift_inequivalent_oxygen():
-    # REPRODUCIBILITY GUARD, not a physical-correctness check. Two O at different
-    # Ti-O distances (1.75/2.30 A) in a vacuum box: a within-cell shift whose ONLY
-    # source is a long-range Madelung difference living in the interstitial BETWEEN
-    # the small spheres. gradwave flattens the interstitial to a shared zero and so
-    # discards it, leaving a small wrong-signed residual (gw -1.67 eV; Elk 11.0.2
-    # gives +1 to +3 eV, opposite sign — see experiments/autoapw/xps_validation.md).
-    # This is the documented open-geometry failure mode; the method is trustworthy
-    # for ON-SITE shifts (close-packed crystals, oxidation states). We pin gradwave's
-    # own number so a regression is visible, NOT because the sign is physical.
+    # Two chemically-identical O at different Ti-O distances (1.75/2.30 A) in a vacuum
+    # box: a within-cell shift whose ONLY source is the inter-site electrostatic
+    # (Madelung) field. The correct initial-state observable is the on-site Madelung
+    # potential difference `delta_madelung_eV` (C0_ext, from onsite_madelung_potentials):
+    # Elk 11.0.2 gives the O NEARER the net-positive Ti MORE bound, Δ(long-short) = +1..+3
+    # eV growing with R_MT (+0.951/+1.380/+2.860 at R_MT 0.70/1.00/1.40 Bohr). gradwave's
+    # C0_ext reproduces this — at the O R_MT used here (0.70 A = 1.32 Bohr) it gives
+    # ~+2.2 eV vs Elk's interpolated ~+2.5, and matches Elk to <0.1 eV at 1.40 Bohr.
+    # The RAW muffin-tin eigenvalue `delta_eV` stays wrong-signed here (~-1.67 eV): its
+    # spherical in-sphere own term (-3.81) swamps the correct external C0_ext (+2.19) it
+    # already contains. See experiments/autoapw/xps_validation.md for the decomposition.
     import numpy as _np
 
     from gradwave.flapw import crystal_scf_multi
@@ -132,7 +134,12 @@ def test_core_level_shift_inequivalent_oxygen():
                                 use_symmetry=False, smearing=0.10)
     o = [s for s in info["core_level_shifts"] if s["species"] == "O" and s["orbital"] == "1s"]
     assert len(o) == 1
-    d = o[0]["delta_eV"]  # a1 (short) is the ref; a2 (long) − short
-    # gradwave's (wrong-signed) value is ~-1.67 eV; pin the band, not the physics.
-    assert -3.5 < d < -0.5
-    assert not np.isnan(d)
+    # Physically-correct initial-state shift: POSITIVE, in Elk's ballpark (a2 long − a1
+    # short). gradwave ~+2.2 vs Elk interp ~+2.5 at this R_MT.
+    d_mad = o[0]["delta_madelung_eV"]
+    assert d_mad is not None and not np.isnan(d_mad)
+    assert 1.0 < d_mad < 3.5  # Elk: +1..+3 eV, O nearer Ti more bound
+    # The raw muffin-tin eigenvalue shift remains the documented wrong-signed artifact.
+    d_eig = o[0]["delta_eV"]
+    assert -3.5 < d_eig < -0.5
+    assert not np.isnan(d_eig)
