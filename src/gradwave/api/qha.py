@@ -52,7 +52,7 @@ def run_qha(inp: Input, verbose: bool = True) -> dict[str, Any]:
         # static E(V)
         res = run_scf(dataclasses.replace(sub, task="scf"), verbose=False)
         e = float(getattr(res.energies, q.energy))
-        all_conv = all_conv and bool(getattr(res, "converged", True))
+        all_conv = all_conv and bool(res.converged)
         # phonon DOS at this volume (reuses the phonons block settings)
         ph = run_phonons(dataclasses.replace(sub, task="phonons"), verbose=False)
         dos = ph.get("dos")

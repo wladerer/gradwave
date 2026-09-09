@@ -101,7 +101,7 @@ def _elastic_spoke_worker(
     start_from = as_start_from(load_checkpoint(spoke.ckpt_path))
     res = run_scf(spoke.inp, system=system, verbose=False, start_from=start_from)
     sigma = _elastic_stress(res, xc, uspp).detach().cpu().numpy()
-    return spoke.key, sigma, bool(getattr(res, "converged", True))
+    return spoke.key, sigma, bool(res.converged)
 
 
 def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
@@ -240,7 +240,7 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
 
     # reference SCF once — warm-start seed and residual-stress readout
     ref = run_scf(inp, system=_build(cell0, fixed), verbose=False)
-    converged = [bool(getattr(ref, "converged", True))]
+    converged = [bool(ref.converged)]
     # _stress is stress_uspp (res: USPPResult, xc: XCFunctional | SpinXC) or
     # stress (res: SCFResult | NCResult, xc: XCFunctional | SpinXC |
     # NoncollinearXC) depending on the branch above; ty can't correlate which
@@ -300,7 +300,7 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
                     inp, system=_build(cell, fixed, pos=pos),
                     verbose=False, start_from=state["prev"])
                 state["prev"] = state["res"] = res
-                converged.append(bool(getattr(res, "converged", True)))
+                converged.append(bool(res.converged))
                 self.results = {
                     "energy": float(res.energies.total),
                     "forces": _forces(res),
@@ -327,7 +327,7 @@ def run_elastic(inp: Input, verbose: bool = True) -> dict[str, Any]:
         else:
             res = run_scf(inp, system=_build(cell, fixed), verbose=False,
                           start_from=ref)
-            converged.append(bool(getattr(res, "converged", True)))
+            converged.append(bool(res.converged))
         return _stress(cast(Any, res), cast(Any, xc)).detach().cpu().numpy()
 
     # SeedPool: the 12 clamped-ion strain SCFs are independent forward runs, so

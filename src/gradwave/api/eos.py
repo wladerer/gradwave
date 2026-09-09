@@ -69,7 +69,7 @@ def _eos_spoke_worker(spoke: _EosSpoke) -> tuple[int, float, float, bool]:
     res = run_scf(spoke.inp, system=system, verbose=False, start_from=start_from)
     e = float(getattr(res.energies, spoke.inp.eos.energy))
     vol = float(abs(np.linalg.det(cell)))
-    return spoke.idx, vol, e, bool(getattr(res, "converged", True))
+    return spoke.idx, vol, e, bool(res.converged)
 
 
 def run_eos(
@@ -184,7 +184,7 @@ def run_eos(
         converged = [False] * len(scales)
         volumes[ref_idx] = float(abs(np.linalg.det(ref_cell)))
         energies[ref_idx] = float(getattr(ref.energies, ekind))
-        converged[ref_idx] = bool(getattr(ref, "converged", True))
+        converged[ref_idx] = bool(ref.converged)
         with tempfile.TemporaryDirectory(prefix="gw_seedpool_") as td:
             ckpt = os.path.join(td, "ref.ckpt")
             save_checkpoint(ref, ckpt)
@@ -208,7 +208,7 @@ def run_eos(
             prev = res
             e = float(getattr(res.energies, ekind))
             vol = float(abs(np.linalg.det(cell)))
-            conv = bool(getattr(res, "converged", True))
+            conv = bool(res.converged)
             volumes.append(vol)
             energies.append(e)
             converged.append(conv)

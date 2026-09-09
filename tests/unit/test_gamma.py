@@ -217,6 +217,37 @@ def test_eigenvalues_match_complex(o2_gamma):
     assert float((g - torch.eye(nb, dtype=g.dtype, device=g.device)).abs().max()) < 1e-10
 
 
+def test_residual_norm_convention_matches_batched(o2_gamma):
+    """davidson_gamma reports residuals in davidson_batched's convention.
+
+    The real embedding folds the half-sphere metric (weight 2 on the G>0 slots)
+    into the plain dot product, so the embedded-space residual norm the wrapped
+    Davidson returns already equals the full complex-sphere L2 norm
+    ‖(H − ε)ψ‖₂ that davidson_batched reports — NOT the naive (unweighted)
+    half-sphere norm. This pins that convention so a future refactor of the
+    embedding can't silently make the Γ residuals read on a different (larger)
+    scale, which would mislead SCF/eigensolve convergence diagnostics."""
+    d = o2_gamma
+    gb, bk, grid = d["gb"], d["bk"], d["grid"]
+    nb = d["system"].nbands
+    dev = gb.src_half.device
+    gh = GammaHamiltonian(gb, d["veff"], d["p_full"], d["dij"])
+    hb = BatchedHamiltonian(bk, grid.shape, d["veff"], d["p_full"][None])
+
+    x0h = torch.zeros(nb, gb.nhalf, dtype=torch.complex128, device=dev)
+    order = torch.argsort(gb.t_half)
+    for i in range(nb):
+        x0h[i, order[i]] = 1.0
+    gres = davidson_gamma(gh, x0h, tol=1e-9, max_iter=80)
+
+    # independent full-sphere residual of the returned Γ eigenvectors, formed
+    # with the complex batched Hamiltonian — exactly davidson_batched's r norm
+    cfull = half_to_full(gb, gres.eigenvectors)  # (nb, npw), ‖·‖_full = 1
+    r = hb.apply(cfull[None])[0] - gres.eigenvalues[:, None] * cfull
+    rn_full = torch.linalg.norm(r, dim=1).real
+    assert float((gres.residual_norms / rn_full - 1.0).abs().max()) < 1e-3
+
+
 # --- triclinic (non-orthogonal) frozen-potential equivalence ----------------
 # The O2 fixture above uses a diagonal cubic box, where the sphere is closed
 # under G -> -G trivially and the FFT axes are symmetric. A general triclinic
