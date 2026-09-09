@@ -1,8 +1,10 @@
+import dataclasses
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy.integrate import simpson
 
 from gradwave.constants import BOHR_ANG, E2, RY_EV
 from gradwave.pseudo.atomic import core_density_of_q, rhoatom_of_q
@@ -137,6 +139,81 @@ def test_beta_form_factors_shapes_and_l_behavior(si):
     # l>0 projectors vanish at q=0 (j_l(0)=0 for l≥1); l=0 do not
     assert abs(F[2, 0]) < 1e-12 and abs(F[3, 0]) < 1e-12
     assert abs(F[0, 0]) > 1e-3
+
+
+# --- KB projector radial normalization -------------------------------------
+# The tests above pin the β form-factor SHAPES and the j_l(0)=0 behavior but
+# never pin the projector AMPLITUDE, so a normalization error in the radial β
+# (a dropped/extra scale factor, a wrong √-power in the BOHR conversion) would
+# pass silently. These pin it two ways, both parse-only (no SCF):
+#
+#  1. The radial norm  N_i = ∫ β_i(r)² r² dr = ∫ (r·β_i)(r)² dr.  For a
+#     norm-conserving ONCV pseudo the projectors are normalized to UNITY, so
+#     this is a physically-correct value, not merely a regression constant:
+#     N_i = 1 to ~3e-7 for every Si projector.
+#  2. beta_form_factors(q) — the quantity the KB energy actually consumes —
+#     at a few q, frozen to its verified value (rtol below the spline-vs-exact
+#     ~1e-11 and well inside a 2× scaling).
+#
+# A uniform 2× scaling of β sends N_i → 4 and F → 2F, which both pins reject
+# (proven by test_kb_norm_pin_bites_on_beta_rescale).
+
+# beta_form_factors(si, [0.5, 1.0, 2.0]); verified on asus, matches the direct
+# radial SBT (_beta_form_factors_exact) to 8e-12.
+_SI_BETA_FF_Q = np.array([0.5, 1.0, 2.0])
+_SI_BETA_FF_REF = np.array([
+    [-0.212783990849919, -0.210076724585821, -0.198790778582415],
+    [0.397616152765118, 0.370866137370578, 0.275315648881791],
+    [0.018363415904703, 0.036514301761989, 0.071355897363715],
+    [-0.076828137657762, -0.145526842460631, -0.226487568281246],
+])
+
+
+def _kb_radial_norms(upf):
+    """∫ β_i(r)² r² dr per projector, integrated over the radial mesh up to the
+    projector's own cutoff index (β is r·β on the mesh, so β²r² = (rβ)²)."""
+    return np.array([
+        simpson(b.rbeta[: b.cutoff_idx] ** 2, x=upf.r[: b.cutoff_idx])
+        for b in upf.betas
+    ])
+
+
+def test_kb_projector_radial_norm_is_unity(si):
+    """The four ONCV Si KB projectors are normalized: ∫ β² r² dr = 1. Pins the
+    radial-β amplitude (the √BOHR conversion and mesh integration) to its
+    norm-conserving ground truth."""
+    norms = _kb_radial_norms(si)
+    assert norms.shape == (4,)
+    np.testing.assert_allclose(norms, 1.0, rtol=0, atol=1e-5)
+
+
+def test_kb_beta_form_factor_values(si):
+    """Pin beta_form_factors (the amplitude the KB energy consumes) at a few q
+    to its verified value — the SHAPE tests above never pinned the magnitude."""
+    F = beta_form_factors(si, _SI_BETA_FF_Q)
+    np.testing.assert_allclose(F, _SI_BETA_FF_REF, rtol=1e-5, atol=1e-8)
+
+
+def test_kb_norm_pin_bites_on_beta_rescale(si):
+    """Guard the guard: a uniform 2× scaling of the radial β must break both the
+    unity-norm pin (N → 4) and the form-factor pin (F → 2F). Proves the two
+    tests above bite on a real normalization error rather than passing
+    vacuously. Parse-only — builds a scaled UPF in memory, no SCF."""
+    scaled_betas = tuple(
+        dataclasses.replace(b, rbeta=2.0 * b.rbeta) for b in si.betas
+    )
+    bad = dataclasses.replace(si, betas=scaled_betas)
+
+    # norm quadruples — the unity pin rejects it
+    bad_norms = _kb_radial_norms(bad)
+    np.testing.assert_allclose(bad_norms, 4.0, rtol=0, atol=1e-4)
+    assert not np.allclose(bad_norms, 1.0, rtol=0, atol=1e-5)
+
+    # form factors double — the value pin rejects it (fresh UPF id ⇒ no spline
+    # cache collision with `si`)
+    F_bad = beta_form_factors(bad, _SI_BETA_FF_Q)
+    np.testing.assert_allclose(F_bad, 2.0 * _SI_BETA_FF_REF, rtol=1e-5, atol=1e-8)
+    assert not np.allclose(F_bad, _SI_BETA_FF_REF, rtol=1e-5, atol=1e-8)
 
 
 # --- NLCC partial-core charge regression pin --------------------------------

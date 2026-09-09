@@ -18,6 +18,8 @@ resolution helpers, a small dense synthetic operator). The convergence-
 preservation check on a real tiny SCF is `test_complex64_storage_scf_energy`.
 """
 
+import math
+
 import numpy as np
 import pytest
 import torch
@@ -178,6 +180,72 @@ def test_cpu_dense_budget_opt_in(monkeypatch):
     monkeypatch.setenv("GRADWAVE_CPU_DENSE_BUDGET", "0")
     with pytest.raises(ValueError, match="GRADWAVE_CPU_DENSE_BUDGET"):
         _cpu_dense_budget_bytes()
+
+
+def test_dense_band_chunk_apply_is_bit_exact(monkeypatch):
+    """The band-chunk (CPU #433 / GPU #418) tiles the dense-box local V·ψ over
+    bands to bound the FFT-box peak. The tests above pin only that the CHUNK
+    SIZE shrinks with the budget — nothing checks that the chunked H-apply
+    equals the unchunked one. It must be BIT-EXACT (atol=0): each band's
+    scatter → ifftn → ·v_eff → fftn → gather is independent of the batch it
+    rides in, so tiling changes only the batching, never the arithmetic.
+
+    This guards a future `_get_box`/scatter/gather change that would couple
+    bands across chunks (e.g. reusing a box slot, an index_add that aliases).
+    If it is ever not bit-exact, that is a real correctness bug in a shipped
+    perf path — do NOT loosen the tolerance.
+
+    Parse + one frozen H-apply, no SCF. The FFT local path is forced (Toeplitz
+    off) so the band-chunked dense box is the code under test."""
+    from gradwave.core import batch as batch_mod
+    from gradwave.core.batch import BatchedHamiltonian, projectors_b
+    from gradwave.dtypes import CDTYPE, RDTYPE
+    from gradwave.pseudo.upf import parse_upf
+    from gradwave.scf.loop import setup_system
+    from tests.helpers import PSEUDOS, RY
+
+    torch.set_num_threads(2)
+    # Force the FFT local term (not the Toeplitz dense-GEMM path, which is NOT
+    # band-chunked) so the apply exercises `_local_fft_into`.
+    monkeypatch.setattr(batch_mod, "_TOEPLITZ_MODE", "off")
+    monkeypatch.delenv("GRADWAVE_CPU_DENSE_BUDGET", raising=False)
+
+    up = parse_upf(str(PSEUDOS / "Si_ONCV_PBE-1.2.upf"))
+    a = 5.43
+    cell = a / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]])
+    pos = np.array([[0.0, 0.0, 0.0], [0.25, 0.25, 0.25]])
+    system = setup_system(cell, pos, [0, 0], [up], ecut=12 * RY, kmesh=(2, 2, 2))
+    bk = system.batch
+    shape = tuple(int(s) for s in system.grid.shape)
+    nk, npw_max, n_grid = bk.nk, bk.npw_max, shape[0] * shape[1] * shape[2]
+
+    torch.manual_seed(0)
+    v_eff_r = torch.rand(shape, dtype=RDTYPE)  # physics irrelevant to tiling
+    p = projectors_b(bk, system.positions)
+    h = BatchedHamiltonian(bk, shape, v_eff_r, p)
+    assert not h._toep_eligible  # Toeplitz off => FFT local path is what runs
+
+    nb = 12  # enough bands to force >1 chunk at the budgets below
+    torch.manual_seed(1)
+    c = torch.randn(nk, nb, npw_max, dtype=CDTYPE) * bk.mask[:, None, :]
+
+    dev = torch.device("cpu")
+    # unchunked reference: CPU budget unset => one batched FFT over all bands
+    assert _dense_band_chunk(n_grid, nk, dev, 16) >= 1_000_000
+    out_ref = h.apply(c)
+
+    # chunk=6 -> 2 chunks, chunk=4 -> 3 chunks. Size the budget to land on the
+    # target chunk exactly (chunk = floor(budget / (16·n_grid·nk))).
+    for target_chunk, n_chunks in ((6, 2), (4, 3)):
+        budget = (target_chunk + 0.5) * 16 * n_grid * nk
+        monkeypatch.setenv("GRADWAVE_CPU_DENSE_BUDGET", repr(budget))
+        assert _dense_band_chunk(n_grid, nk, dev, 16) == target_chunk
+        assert math.ceil(nb / target_chunk) == n_chunks
+        out_chunked = h.apply(c)
+        max_abs_diff = float((out_chunked - out_ref).abs().max())
+        assert max_abs_diff == 0.0, (
+            f"{n_chunks}-chunk apply not bit-exact: max|Δ|={max_abs_diff:.3e}")
+        assert torch.equal(out_chunked, out_ref)
 
 
 # ---------------------------------------------------------------------------
