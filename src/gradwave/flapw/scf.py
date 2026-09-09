@@ -975,6 +975,9 @@ def _weinert_multi(rho_I, spheres, L, nfft):
         # (weinert_gates.py stage N) is minimized by LOWER orders — a high npow concentrates
         # the shape and pushes spectral weight past Nyquist before the asymptotic decay pays.
         npow = int(np.clip(round(sp["R"] * gmax / 6.0), 2, 8))
+        _npow_env = os.environ.get("GRADWAVE_FLAPW_NPOW")   # experimental pseudocharge-order override
+        if _npow_env:
+            npow = int(_npow_env)
         ps_g += sphere_pseudocharge_ft(deficit, sp["R"], sp["tau"], vol, npow,
                                        gvec, gnorm, ylm)
         qmt_list.append(qmt)
