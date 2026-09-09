@@ -123,11 +123,21 @@ _CHEFSI_MIN_NB = int(os.environ.get("GRADWAVE_CHEFSI_MIN_NB", "640"))
 # plane-wave sphere is closed under G→−G and a real V_eff admits real eigenstates
 # (c(−G)=c(G)*), so the eigensolve runs on the real HALF sphere (~½ the
 # wavefunction bytes) with a real half-box FFT local term — the memory lever for
-# large Γ-only slabs. GRADWAVE_GAMMA_REAL in {auto,1,0}: "auto" (default) engages
-# it whenever provably safe and silently falls back to the complex path
-# otherwise; "1" forces it on and raises if a correctness blocker is present or
-# the sphere is not Γ; "0" disables it. See `_resolve_gamma_real`.
-_GAMMA_REAL_ENV = os.environ.get("GRADWAVE_GAMMA_REAL", "auto").strip().lower()
+# large Γ-only slabs.
+#
+# OPT-IN (default OFF). GRADWAVE_GAMMA_REAL in {auto,1,0}: UNSET (the default)
+# ⇒ "0" ⇒ the complex path, byte-for-byte unchanged; "auto" engages the real
+# path whenever provably safe and silently falls back otherwise; "1" forces it
+# on and raises if a correctness blocker is present or the sphere is not Γ; "0"
+# disables it. It defaults OFF (not "auto") deliberately: the real path routes
+# H|ψ⟩ through GammaHamiltonian, which the BatchedHamiltonian.apply monkeypatch
+# behind opt.joint.count_h_applies cannot observe, and the density-warm-start
+# iteration reduction the calculator relies on across grid changes is not
+# reproduced there — auto-engaging silently changed those observable contracts
+# on existing Γ-only runs. Opting in with "auto"/"1" is exact either way (the
+# converged numbers match the complex path to machine precision). See
+# `_resolve_gamma_real`.
+_GAMMA_REAL_ENV = os.environ.get("GRADWAVE_GAMMA_REAL", "0").strip().lower()
 
 
 def _resolve_eigensolver(eigensolver: str, nb: int) -> str:

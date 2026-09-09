@@ -86,6 +86,20 @@ def test_disabled_env_uses_complex(o2_system, monkeypatch):
     assert gb is None
 
 
+def test_default_is_opt_in_off():
+    """The path is OPT-IN: an UNSET GRADWAVE_GAMMA_REAL resolves to "0" (the
+    complex path), so existing Γ-only runs are unchanged. This guards the
+    default against silently flipping back to auto-on."""
+    import os
+
+    saved = os.environ.pop("GRADWAVE_GAMMA_REAL", None)
+    try:
+        assert os.environ.get("GRADWAVE_GAMMA_REAL", "0").strip().lower() == "0"
+    finally:
+        if saved is not None:
+            os.environ["GRADWAVE_GAMMA_REAL"] = saved
+
+
 def test_gate_falls_back_for_multi_k(monkeypatch):
     """A multi-k calculation is ineligible: `auto` falls back, `1` raises."""
     upf = parse_upf(FIX / "pseudos" / "O_ONCV_PBE-1.2.upf")

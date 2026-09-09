@@ -178,10 +178,21 @@ class GammaHamiltonian:
         self.dij = dij  # (nproj, nproj)
 
     def apply(self, chalf: torch.Tensor) -> torch.Tensor:
-        from gradwave.core.batch import _dense_band_chunk
+        from gradwave.core import opcount
+        from gradwave.core.batch import _HAPPLY_TALLY, _dense_band_chunk
 
         gb = self.gb
         nb = chalf.shape[0]
+        # Instrumentation parity with BatchedHamiltonian.apply: bump the same
+        # module-level happly tally (reset_happly_tally / happly_tally) and
+        # opcount("hpsi") the complex path bumps, so H-apply telemetry is
+        # transparent whichever path runs. nk is 1 at Γ, so the band-vector
+        # count is nb. (opt.joint.count_h_applies patches BatchedHamiltonian.apply
+        # itself rather than reading this tally, so it does not observe the Γ
+        # path — the reason the path is opt-in; see loop._GAMMA_REAL_ENV.)
+        if _HAPPLY_TALLY["on"]:
+            _HAPPLY_TALLY["count"] += nb
+        opcount.bump("hpsi", nb)
         cfull = half_to_full(gb, chalf)  # (nb, npw)
 
         # kinetic (diagonal, real)
