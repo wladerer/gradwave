@@ -1,0 +1,32 @@
+Full-SCF run, asus, OMP_NUM_THREADS=8, GRADWAVE_RR_PROFILE=1, commit probe/rr-vs-apply-split.
+
+natoms=12 zval=19.0 nelec=228.0 nbands=150
+SCF  12 atoms · 3 k(IBZ) · 150 bands · ecut 40 Ry · grid 40×40×120 · nspin 1 · cpu
+  ... (26 iterations) ...
+SCF converged in 26 iterations · F = -59170.9497956797 eV · Fermi = 3.2413 eV
+
+==== TIMING (summed over all SCF steps) ====
+total scf wall        :  1465.749 s
+  apply (true H·ψ)      :   570.674 s  ( 38.9% wall)
+  gram (v.conj@hv)      :   205.644 s  ( 14.0% wall)
+  eigh                  :    73.005 s  (  5.0% wall)
+  ritz (u·v, u·hv)      :   136.449 s  (  9.3% wall)
+  ortho/restart QR      :   235.672 s  ( 16.1% wall)
+  RR-GEMM (gram+eigh+ritz):   415.098 s  ( 28.3% wall)
+  davidson-internal total:  1221.443 s  ( 83.3% wall)
+
+RR-GEMM share of wall               :  28.3%
+RR-GEMM share of davidson-internal  :  34.0%
+RR-GEMM as fraction of apply bucket  :  72.7%
+
+==== LOCKABLE FRACTION (bands with res<tol by round 2) ====
+n_scf_steps=26 diag_tol≈1e-09
+  step 1 (cold)      : 0.000
+  step 14 (mid)      : 0.000
+  step 26 (last)     : 0.000
+  mean over steps    : 0.000
+  min over steps     : 0.000
+
+==== DEEP-BAND-LOCKING CEILING ====
+lockable_fraction × RR-GEMM-share = 0.000 × 0.283 = 0.0000 of wall
+optimistic ceiling speedup ≈ 1.000x
