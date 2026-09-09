@@ -9,6 +9,7 @@ from gradwave.api._common import (
     _DEFAULT_MIXING_HISTORY,
     SPIN_XC_REGISTRY,
     XC_REGISTRY,
+    _davidson_memory_env,
     _mixing_scheme,
 )
 from gradwave.api.system import (
@@ -44,6 +45,21 @@ def run_scf(
     ``start_from`` warm-starts the density from a previous converged result
     (the volume-scan chain in ``run_eos`` uses it); when None the checkpoint in
     ``inp.restart`` is used instead, if any."""
+    # scf.memory bridge: export the Davidson subspace knobs (max_dim_factor /
+    # subspace budget / storage) to the environment that solvers.davidson reads
+    # per solve, for the duration of THIS SCF only (restored on exit, so an EOS/
+    # relax chain of run_scf calls does not leak). k_chunk is threaded as an
+    # explicit kwarg to scf() below (see _run_scf). A default Input sets nothing.
+    with _davidson_memory_env(inp):
+        return _run_scf(inp, system, verbose, start_from)
+
+
+def _run_scf(
+    inp: Input,
+    system: System | USPPSystem | None = None,
+    verbose: bool = True,
+    start_from: Any = None,
+) -> SCFResult | NCResult | USPPResult:
     _species, upfs, _soa = _species_upfs(inp)
     uspp = _is_uspp(upfs)
     system = system or build_system(inp)
@@ -162,6 +178,10 @@ def run_scf(
                boundary=inp.scf.boundary,
                esm_bias=inp.scf.esm_bias,
                target_mu=inp.scf.target_mu,
+               # k-streaming (scf.memory.k_chunk): cap the resident Davidson
+               # subspace at k_chunk·m·npw. None → all-k solve (or the
+               # GRADWAVE_K_CHUNK env default when set — _resolve_k_chunk).
+               k_chunk=inp.scf.memory.k_chunk,
                **common)
 
 

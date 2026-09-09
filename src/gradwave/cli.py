@@ -170,7 +170,7 @@ def _summary_lines(inp: Input) -> list[str]:
     task = inp.task
     if task == "relax":
         task += "  (variable cell)" if inp.relax.cell else "  (positions only)"
-    return [
+    lines = [
         f"  task        {task}",
         f"  structure   {a.get_chemical_formula()}  ({len(a)} atoms)",
         f"  cell [Å]    {np.array2string(a.cell.array, precision=4)}",
@@ -187,6 +187,27 @@ def _summary_lines(inp: Input) -> list[str]:
         f"  device      {inp.device}",
         f"  output_dir  {inp.output_dir}",
     ]
+    mem_line = _memory_summary_line(inp)
+    if mem_line is not None:
+        lines.append(mem_line)
+    return lines
+
+
+def _memory_summary_line(inp: Input) -> str | None:
+    """One-line echo of the resolved scf.memory footprint knobs, shown only when
+    the user set at least one (defaults leave the run unchanged, so a silent
+    block prints nothing)."""
+    mem = inp.scf.memory
+    bits: list[str] = []
+    if mem.k_chunk is not None:
+        bits.append(f"k_chunk {mem.k_chunk}")
+    if mem.max_dim_factor is not None:
+        bits.append(f"max_dim_factor {mem.max_dim_factor}")
+    if mem.subspace_budget_gb is not None:
+        bits.append(f"subspace_budget {mem.subspace_budget_gb:g} GB")
+    if mem.subspace_storage != "complex128":
+        bits.append(f"subspace_storage {mem.subspace_storage}")
+    return None if not bits else "  memory      " + " · ".join(bits)
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:

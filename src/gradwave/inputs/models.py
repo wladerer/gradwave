@@ -68,6 +68,63 @@ class MagneticParams:
 
 
 @dataclass(frozen=True)
+class MemoryParams:
+    """SCF memory-footprint knobs for large slabs. All opt-in; every default
+    leaves the run byte-for-byte the historical behaviour. They trade a little
+    wall time for peak-memory headroom, so a cell whose Davidson subspace or
+    per-k bands do not fit in RAM/VRAM can still run.
+
+    * ``k_chunk`` — solve the bands in sequential chunks of at most this many
+      k-points, capping the resident Davidson subspace at ``k_chunk·m·npw``
+      instead of ``nk·m·npw`` (norm-conserving path). None → the all-k batched
+      solve, or the ``GRADWAVE_K_CHUNK`` env default when that is set (a None
+      field does not clobber the env fallback).
+    * ``max_dim_factor`` — force the Davidson grown-subspace multiple (max
+      subspace = factor·nb; ≥ 2). Halving it from the solver default (4) to 2
+      halves the V/HV byte footprint and is EXACT in the converged eigenpairs (a
+      few more restarts, same result). None → the solver default.
+    * ``subspace_budget_gb`` — opt-in auto-gate: estimate the peak V+HV bytes and
+      drop ``max_dim_factor`` toward 2 while it exceeds this budget [GB]. None →
+      off. Ignored when ``max_dim_factor`` is forced.
+    * ``subspace_storage`` — ``"complex128"`` (default) or ``"complex64"``; the
+      latter stores V/HV in single precision (bytes ×0.5) with the H-apply and
+      Rayleigh–Ritz eigensolve kept in fp64. A precision lever, not exact:
+      residual norms plateau near the fp32 floor (~1e-6 eV eigenvalues), so pair
+      it with a looser ``scf.diago.tol``.
+
+    Bridged to the solver by the api layer (no solver edit): ``k_chunk`` is
+    threaded as the ``scf.loop.scf(k_chunk=)`` kwarg, and the three Davidson
+    knobs are exported to the ``GRADWAVE_MAX_DIM_FACTOR`` /
+    ``GRADWAVE_SUBSPACE_BUDGET_GB`` / ``GRADWAVE_SUBSPACE_STORAGE`` environment
+    variables around the SCF call (``solvers.davidson`` reads them per solve).
+    See ``api._common._davidson_memory_env`` and ``api.scf.run_scf``.
+    """
+
+    k_chunk: int | None = None
+    max_dim_factor: int | None = None
+    subspace_budget_gb: float | None = None
+    subspace_storage: str = "complex128"  # complex128 | complex64
+
+    def __post_init__(self):
+        if self.k_chunk is not None and self.k_chunk < 1:
+            raise InputError(
+                f"scf.memory.k_chunk must be >= 1 (or null for all-k), got "
+                f"{self.k_chunk}")
+        if self.max_dim_factor is not None and self.max_dim_factor < 2:
+            raise InputError(
+                "scf.memory.max_dim_factor must be >= 2 (nb + n_add must fit; or "
+                f"null for the solver default), got {self.max_dim_factor}")
+        if self.subspace_budget_gb is not None and self.subspace_budget_gb <= 0.0:
+            raise InputError(
+                "scf.memory.subspace_budget_gb must be > 0 (or null for off), "
+                f"got {self.subspace_budget_gb}")
+        if self.subspace_storage not in ("complex128", "complex64"):
+            raise InputError(
+                "scf.memory.subspace_storage must be 'complex128' or "
+                f"'complex64', got {self.subspace_storage!r}")
+
+
+@dataclass(frozen=True)
 class SCFParams:
     max_iter: int = 100
     etol: float = 1.0e-7
@@ -104,6 +161,9 @@ class SCFParams:
     # boundary="open_z_metal" and a smearing. None = ordinary fixed-N SCF.
     # magnetic-channel SCF controls for the noncollinear/spinor path only
     magnetic: MagneticParams = field(default_factory=MagneticParams)
+    # memory-footprint knobs (k-streaming + Davidson subspace) for large slabs;
+    # all opt-in, defaults leave the run byte-for-byte unchanged
+    memory: MemoryParams = field(default_factory=MemoryParams)
 
     def __post_init__(self):
         if self.convergence not in ("density", "energy"):
