@@ -761,12 +761,11 @@ class ThermochemParams:
                 raise InputError(
                     f"thermochem geometry must be monatomic | linear | "
                     f"nonlinear, got {g!r}")
-        if self.mode == "adsorption":
-            missing = [n for n in ("energy_slab_ads", "energy_slab", "energy_gas")
-                       if getattr(self, n) is None]
-            if missing:
-                raise InputError(
-                    f"thermochem.mode: adsorption requires {', '.join(missing)}")
+        # NOTE: the adsorption-mode "requires the three DFT energies" check is a
+        # run-time check in api.thermochem.run_thermochem, NOT here — the default
+        # mode is 'adsorption' and every Input constructs a default
+        # ThermochemParams(), so a construction-time raise would reject every
+        # input that omits a thermochem block.
 
 
 @dataclass(frozen=True)

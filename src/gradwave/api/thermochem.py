@@ -197,6 +197,12 @@ def run_thermochem(inp: Input, verbose: bool = True) -> dict[str, Any]:
             "n_imag": int(res["n_imag"]),
         })
     else:  # adsorption
+        missing = [n for n in ("energy_slab_ads", "energy_slab", "energy_gas")
+                   if getattr(tc, n) is None]
+        if missing:
+            from gradwave.inputs import InputError
+            raise InputError(
+                f"thermochem.mode: adsorption requires {', '.join(missing)}")
         res = adsorption_free_energy_from_atoms(
             energy_slab_ads=tc.energy_slab_ads, energy_slab=tc.energy_slab,
             energy_gas=tc.energy_gas, temperature=t,
