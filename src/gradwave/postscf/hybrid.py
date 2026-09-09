@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
+from typing import cast
 
 import torch
 from typing_extensions import override
@@ -363,11 +364,12 @@ def exact_fock_corrected_eigenvalues(
     # physical Ritz vectors: all bands, and the occupied subset, per k
     psi_all, psi_occ = [], []
     for ik, sph in enumerate(system.spheres):
-        c_all = res.coeffs[ik][:, : sph.npw]
-        psi_all.append(physical_orbitals(c_all, sph.flat_idx, shape, vol))     # (nb, N_r)
+        coeffs_k = cast(torch.Tensor, res.coeffs[ik])     # nspin=1 → list[Tensor]
+        psi_all.append(
+            physical_orbitals(coeffs_k[:, : sph.npw], sph.flat_idx, shape, vol))   # (nb, N_r)
         occ = res.occupations[ik] > occ_tol
         psi_occ.append(
-            physical_orbitals(res.coeffs[ik][occ][:, : sph.npw], sph.flat_idx, shape, vol))
+            physical_orbitals(coeffs_k[occ][:, : sph.npw], sph.flat_idx, shape, vol))
 
     kcart = [sph.k_cart for sph in system.spheres]
     kw = system.kweights
