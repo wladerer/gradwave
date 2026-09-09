@@ -541,11 +541,34 @@ def _pdos_summary_block(res: SCFLike, inp: Input) -> dict[str, Any]:
         # NotImplementedError for anything else (NCResult/USPPNCResult) via
         # its own _unpack_result — caught below, so the wider SCFLike here
         # is a safe runtime seam, not a real type mismatch.
-        return projected_dos(cast("SCFResult | USPPResult", res),
-                              group_by=p.group_by, width=p.width,
-                              npoints=p.npoints).to_dict()
+        pdos = projected_dos(cast("SCFResult | USPPResult", res),
+                             group_by=p.group_by, width=p.width,
+                             npoints=p.npoints)
     except (ValueError, NotImplementedError) as err:
         return {"available": False, "reason": str(err)}
+    block = pdos.to_dict()
+    # d-band-center / width descriptor (Hammer-Nørskov), riding the same
+    # ProjectedDOS. Needs the l/lm grouping; a group_by='atom'/'total' run raises
+    # inside band_center → recorded as available:False under the sub-key.
+    if p.band_center.enabled:
+        from gradwave.postscf.band_center import band_center as _band_center
+        bc = p.band_center
+        try:
+            center = _band_center(pdos, l=bc.l, atoms=bc.atoms, ref=bc.ref,
+                                  moment=1)
+            width = _band_center(pdos, l=bc.l, atoms=bc.atoms, ref=bc.ref,
+                                 moment=2)
+            block["band_center"] = {
+                "available": True,
+                "l": bc.l,
+                "ref": bc.ref,
+                "atoms": None if bc.atoms is None else list(bc.atoms),
+                "center_eV": float(center),
+                "width_eV": float(width),
+            }
+        except (ValueError, NotImplementedError) as err:
+            block["band_center"] = {"available": False, "reason": str(err)}
+    return block
 
 
 def _cohp_summary_block(res: SCFLike, inp: Input) -> dict[str, Any]:
