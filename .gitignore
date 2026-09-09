@@ -29,3 +29,6 @@ benchmarks/delta_gauge/results/delta_ptable.html
 
 # generated SCF-telemetry benchmark datasets (gradwave.bench)
 bench_runs/
+
+# local measurement scratch (never commit)
+scratchpad_*.py
