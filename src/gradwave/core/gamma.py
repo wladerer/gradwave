@@ -207,17 +207,22 @@ def density_gamma(
     the real-space field is stored real, not complex, halving the density
     build's peak field memory vs the complex `core.batch.density_b` (which forms
     a complex ψ box and ψ.real²+ψ.imag²). Bit-exact to it up to the irfftn-vs-
-    ifftn round-off (~1e-15, the imaginary part the complex path discards)."""
+    ifftn round-off (~1e-15, the imaginary part the complex path discards).
+
+    `half_box_psi` returns the ifftn-scaled field (the apply's round-trip
+    convention); the physical ψ(r)=Σ_G c(G)e^{iG·r} that `g_to_r_box` (hence
+    `density_b`) uses is N× that, so the |ψ|² weight carries N²."""
     from gradwave.core.batch import _dense_band_chunk
 
+    n = gb.shape[0] * gb.shape[1] * gb.shape[2]
     nb = cfull.shape[0]
-    chunk = _dense_band_chunk(gb.shape[0] * gb.shape[1] * gb.shape[2], 1,
-                              cfull.device, cfull.element_size())
+    chunk = _dense_band_chunk(n, 1, cfull.device, cfull.element_size())
+    n2 = float(n) * float(n)
     rho: torch.Tensor | None = None
     for lo in range(0, nb, chunk):
         hi = min(lo + chunk, nb)
-        psi = half_box_psi(gb, cfull[lo:hi])  # real (nbc, n1, n2, n3)
-        contrib = torch.einsum("b,bxyz->xyz", w[lo:hi].to(psi.dtype), psi * psi)
+        psi = half_box_psi(gb, cfull[lo:hi])  # real (nbc, n1, n2, n3), ifftn-scaled
+        contrib = n2 * torch.einsum("b,bxyz->xyz", w[lo:hi].to(psi.dtype), psi * psi)
         rho = contrib if rho is None else rho + contrib
     assert rho is not None  # nb >= 1 always (an SCF needs at least one band)
     return rho / volume
