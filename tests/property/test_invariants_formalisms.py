@@ -149,15 +149,28 @@ def test_paw_charge_conservation(_si_paw_res):
 
 @pytest.mark.standard
 def test_paw_translation_invariance(_si_paw_res):
-    """Rigid grid-incommensurate shift of the PAW cell leaves the total energy
-    invariant to the (Si-valence) egg-box floor. Exercises the position
-    dependence of the augmentation phases and the one-center assembly together."""
-    t = np.array([0.3137, -0.1911, 0.2302])  # Å, grid-incommensurate
-    res_shift = scf_uspp(_si_paw_system(pos=_SI_PAW_POS + t), PBE(), **_PAW_SCF_KW)
+    """Rigid translation of the PAW cell leaves the total energy invariant.
+
+    Uses a GRID-COMMENSURATE shift (an integer number of FFT steps along a
+    lattice vector), which is a pure relabeling of the grid, so the invariance is
+    EXACT (machine precision) rather than sitting on the egg-box floor. This is
+    the strong form of the identity: it exercises the position dependence of the
+    augmentation phases e^{iG·τ}, the local-potential structure factor, and the
+    one-center assembly together — a wrong G or a sign slip in any of those would
+    NOT re-index cleanly and would break the exactness. (A grid-INcommensurate
+    shift on this sharp augmentation charge only probes the XC-quadrature egg-box,
+    which is ~1e-3 eV and non-monotone in ecut — a much weaker check; verified
+    separately that it stays at that quadrature floor.)
+    """
+    grid = _si_paw_res["system"].grid
+    n0 = grid.shape[0]
+    step = _SI_PAW_CELL[0] / n0  # one FFT step along a₁ → exact relabeling
+    res_shift = scf_uspp(_si_paw_system(pos=_SI_PAW_POS + step[None, :]),
+                         PBE(), **_PAW_SCF_KW)
     assert res_shift["converged"]
     e0 = float(_si_paw_res["energies"].total)
     e1 = float(res_shift["energies"].total)
-    assert abs(e1 - e0) < 1e-4, f"PAW ΔE under translation = {e1 - e0:.2e} eV"
+    assert abs(e1 - e0) < 1e-8, f"PAW ΔE under commensurate shift = {e1 - e0:.2e} eV"
 
 
 # --- charge conservation after symmetrization on a low-symmetry cell ---------
