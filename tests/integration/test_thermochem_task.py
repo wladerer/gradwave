@@ -122,13 +122,18 @@ thermochem:
 
 
 def test_adsorption_requires_energies(tmp_path):
+    from gradwave.api import run
     from gradwave.inputs import InputError
 
-    with pytest.raises(InputError, match="requires"):
-        _write(tmp_path, _BOX + """
+    # the input parses (the default mode is adsorption, so the energy requirement
+    # is a run-time check — a construction-time raise would reject every input
+    # that omits a thermochem block), but running it fails with a clear message.
+    inp = _write(tmp_path, _BOX + """
 task: thermochem
 thermochem:
   mode: adsorption
   ads_freqs_cm: [1000.0]
   gas_freqs_cm: [4400.0]
 """)
+    with pytest.raises(InputError, match="requires"):
+        run(inp, verbose=False)
