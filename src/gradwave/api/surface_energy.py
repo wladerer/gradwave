@@ -49,7 +49,7 @@ def run_surface_energy(inp: Input, verbose: bool = True) -> dict[str, Any]:
         e = float(getattr(res.energies, ekind))
         cell = np.asarray(atoms.cell.array, dtype=float)
         area = float(np.linalg.norm(np.cross(cell[0], cell[1])))
-        conv = bool(getattr(res, "converged", True))
+        conv = bool(res.converged)
         n_layers.append(float(point.n_layers))
         energies.append(e)
         areas.append(area)
