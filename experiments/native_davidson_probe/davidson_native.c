@@ -46,15 +46,29 @@ extern void openblas_set_num_threads(int);
 static fftw_plan s_plan_f = NULL, s_plan_b = NULL;
 static int s_dims[3] = {0, 0, 0};
 
+/* FFTW_MEASURE with wisdom persisted to a per-user cache: the first plan of a
+ * given box shape pays the measurement (~0.1-2 s), every later process reads
+ * the wisdom and plans in microseconds. Wisdom is keyed by shape internally
+ * by FFTW, so one file accumulates every box ever planned. */
 static void ensure_plans(int n1, int n2, int n3) {
     if (s_plan_f && s_dims[0] == n1 && s_dims[1] == n2 && s_dims[2] == n3)
         return;
     if (s_plan_f) { fftw_destroy_plan(s_plan_f); fftw_destroy_plan(s_plan_b); }
+    static int wisdom_loaded = 0;
+    char wpath[512];
+    const char *home = getenv("HOME");
+    snprintf(wpath, sizeof wpath, "%s/.cache/gradwave_fftw_wisdom",
+             home ? home : "/tmp");
+    if (!wisdom_loaded) {
+        fftw_import_wisdom_from_filename(wpath);  /* missing file: harmless */
+        wisdom_loaded = 1;
+    }
     int64_t n = (int64_t)n1 * n2 * n3;
     c128 *a = fftw_alloc_complex(n), *b = fftw_alloc_complex(n);
     int dims[3] = {n1, n2, n3};
-    s_plan_f = fftw_plan_dft(3, dims, a, b, FFTW_FORWARD, FFTW_ESTIMATE);
-    s_plan_b = fftw_plan_dft(3, dims, a, b, FFTW_BACKWARD, FFTW_ESTIMATE);
+    s_plan_f = fftw_plan_dft(3, dims, a, b, FFTW_FORWARD, FFTW_MEASURE);
+    s_plan_b = fftw_plan_dft(3, dims, a, b, FFTW_BACKWARD, FFTW_MEASURE);
+    fftw_export_wisdom_to_filename(wpath);
     s_dims[0] = n1; s_dims[1] = n2; s_dims[2] = n3;
     fftw_free(a); fftw_free(b);
 }
