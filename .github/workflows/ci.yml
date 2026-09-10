@@ -92,6 +92,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/uv-setup
 
+      - name: Build native Davidson solver (fftw+openblas)
+        # The davidson-native tests exercise the compiled solver end-to-end;
+        # without the library they would skip, and a skipped correctness gate
+        # is a silent hole. ~10 s: apt + one gcc invocation.
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            libfftw3-dev libopenblas-dev liblapacke-dev
+          scripts/build_native_solver.sh
+
       - name: Standard test tier (shard ${{ matrix.group }}/10)
         # --timeout=1800: per-test wall cap (pytest-timeout). The heaviest integration
         # tests (ESM constant-mu, alchemical star-unfolding — two full fp64 SCFs) run
