@@ -209,6 +209,8 @@ def _memory_summary_line(inp: Input) -> str | None:
         bits.append(f"subspace_storage {mem.subspace_storage}")
     if mem.k_parallel is not None:
         bits.append(f"k_parallel {mem.k_parallel}")
+    if mem.band_parallel is not None:
+        bits.append(f"band_parallel {mem.band_parallel}")
     return None if not bits else "  memory      " + " · ".join(bits)
 
 

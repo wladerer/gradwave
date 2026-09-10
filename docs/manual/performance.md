@@ -82,6 +82,36 @@ full win there needs the out-of-GIL native loop, which is research-branch
 only). Composes with `k_chunk` (task size = `k_chunk`; peak resident
 subspace ≈ `k_parallel·k_chunk·m·npw`).
 
+### band-parallel FFT apply (`scf.memory.band_parallel`)
+
+`k_parallel` distributes whole k-solves across cores, so it strands when there
+are fewer k-points than cores — exactly the few-k large-cell regime a small
+supercell on a coarse mesh lands in (a 2×2×2 conventional-cell supercell on a
+2³ mesh reduces to a handful of IBZ k with ~130 bands). At that size the wall
+inside one k is the batched Davidson's H-applies, and within an H-apply it is
+the FFT local term (`scatter → ifftn → ·v_eff → fftn → gather`, one transform
+per band). Those per-band transforms are independent, and torch FFTs release
+the GIL, so they parallelize on a thread pool over the band axis.
+
+`band_parallel: N` (on the `scf.memory` block, or `GRADWAVE_BAND_PARALLEL`, or
+the `scf(band_parallel=)` kwarg) splits the bands into N contiguous chunks and
+runs each `BatchedHamiltonian` FFT local term on its own thread, with torch
+intra-op threading pinned to 1 for the duration. It is **bit-exact** — each
+band is computed by the identical ops; only which thread runs a chunk changes,
+and each chunk writes a disjoint output slice with its own scatter buffer, so
+there is no race and no arithmetic reordering (asserted in
+`tests/unit/test_band_parallel.py` with `torch.equal` on the eigenvalues and
+wavefunctions). CPU-only (ignored on CUDA; the GPU kernels are already
+back-to-back on one stream). The Rayleigh–Ritz `eigh`/`qr` stay serial — at
+nb≈130 they are a minority of the round; thread those next only if a profile
+says so.
+
+Composes with `k_parallel`: when both are set, `k_parallel` wins whenever it
+can fill its pool (`nk >= workers`), and `band_parallel` takes over for the
+few-k case (`nk < workers`) — exactly one pool is active, so the cores are
+never oversubscribed by nested pools. It also rides the `k_chunk` k-streamed
+path (per-chunk H-apply).
+
 ### IBZ symmetry
 
 Reducing the k-mesh to the irreducible wedge with G-space density symmetrization is

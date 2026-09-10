@@ -302,8 +302,18 @@ class BatchedHamiltonian:
         hub_q: torch.Tensor | None = None,
         hub_dij: torch.Tensor | None = None,
         smooth: tuple[tuple[int, int, int], torch.Tensor, torch.Tensor] | None = None,
+        band_parallel: int | None = None,
     ) -> None:
         self.bk = bk
+        # Band-level parallelism for the FFT local term (CPU few-k large-cell
+        # lever, opt-in). When set (an int ≥ 2) and the block is on CPU, the
+        # per-band scatter→ifftn→·v_eff→fftn→gather chain — embarrassingly
+        # parallel over bands, and torch FFTs release the GIL — is thread-pooled
+        # over contiguous band chunks instead of run as one batched op. BIT-EXACT
+        # (each band is computed by the identical ops; only which thread runs a
+        # chunk changes). None → the historical single batched FFT. See
+        # _local_fft_parallel and scf.loop._resolve_band_parallel.
+        self._band_parallel = band_parallel if band_parallel and band_parallel >= 2 else None
         # dual grid (USPP/PAW): run the local-potential FFT on the smaller
         # smooth box. Exact for ⟨ψ|V|ψ⟩ (see uspp_setup). The kinetic and
         # nonlocal terms are sphere-based and untouched.
@@ -449,11 +459,64 @@ class BatchedHamiltonian:
         cm = c * self.bk.mask[:, None, :]
         return torch.einsum("kij,kbj->kbi", M, cm)
 
+    def _local_fft_band(self, c: torch.Tensor, out: torch.Tensor, v_eff: torch.Tensor,
+                        lo: int, hi: int, box: torch.Tensor | None) -> None:
+        """The FFT local term for band slice ``[lo:hi]``, written into ``out``.
+        ``box`` is a caller-supplied scatter buffer (shape (nk, hi-lo, n+1)); when
+        None a fresh one is allocated (the parallel path, where a shared buffer
+        would race). The arithmetic is identical for either buffer choice."""
+        nk, _, m = c.shape
+        nbc = hi - lo
+        cc = c[:, lo:hi]
+        if box is None:
+            box = torch.zeros(nk, nbc, self.n + 1, dtype=cc.dtype, device=cc.device)
+        idx = self.idx_scatter[:, None, :].expand(nk, nbc, m)
+        box.scatter_(2, idx, cc)
+        psi = torch.fft.ifftn(box[..., : self.n].reshape(nk, nbc, *self.shape),
+                              dim=(-3, -2, -1))
+        # fftn(ifftn(·)) is norm-neutral: the 1/N and ×N of the fftbox
+        # conventions cancel, so no scaling factors here
+        vg = torch.fft.fftn(psi * v_eff, dim=(-3, -2, -1)).reshape(nk, nbc, self.n)
+        gath = self.gather_idx[:, None, :].expand(nk, nbc, m)
+        out[:, lo:hi] += vg.gather(2, gath)
+
+    def _local_fft_parallel(self, c: torch.Tensor, out: torch.Tensor,
+                            v_eff: torch.Tensor, workers: int, count: bool) -> None:
+        """Band-parallel FFT local term: split the bands into ``workers``
+        contiguous chunks and run each on its own thread (torch FFTs release the
+        GIL). Each worker allocates its own scatter box and writes a DISJOINT
+        ``out[:, lo:hi]`` slice, so there is no shared-buffer race and the result
+        is bit-identical to the sequential path (same ops per band). torch
+        intra-op threading is pinned to 1 for the duration so the pool — not
+        nested BLAS/FFT threads — owns the cores."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        nk, nb, m = c.shape
+        n_tasks = min(workers, nb)
+        # near-even contiguous band bounds: round(i·nb/n_tasks)
+        bounds = [(nb * i) // n_tasks for i in range(n_tasks + 1)]
+        chunks = [(bounds[i], bounds[i + 1]) for i in range(n_tasks)
+                  if bounds[i + 1] > bounds[i]]
+        prev_threads = torch.get_num_threads()
+        torch.set_num_threads(1)
+        try:
+            with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
+                # drain so the first exception propagates; the pool still joins
+                list(ex.map(lambda b: self._local_fft_band(c, out, v_eff, b[0], b[1], None),
+                            chunks))
+        finally:
+            torch.set_num_threads(prev_threads)
+        if count:  # telemetry only (ifftn + fftn per chunk); bumped off-thread
+            opcount.bump("fft", 2 * len(chunks))
+
     def _local_fft_into(self, c: torch.Tensor, out: torch.Tensor,
                         v_eff: torch.Tensor, count: bool = True) -> None:
         """Local V·ψ via the dense-box FFT pair, added into `out` in place.
         Chunked over bands to bound peak memory on the dense grid."""
         nk, nb, m = c.shape
+        if self._band_parallel and c.device.type == "cpu" and nb >= 2:
+            self._local_fft_parallel(c, out, v_eff, self._band_parallel, count)
+            return
         chunk = self._band_chunk(nk, c.device, c.element_size())
         for lo in range(0, nb, chunk):
             hi = min(lo + chunk, nb)

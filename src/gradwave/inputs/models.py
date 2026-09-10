@@ -103,6 +103,17 @@ class MemoryParams:
       Fock, composes with ``k_chunk`` (task size = ``k_chunk``, peak subspace ≈
       ``k_parallel·k_chunk·m·npw``). None → off, or the ``GRADWAVE_K_PARALLEL``
       env default when that is set.
+    * ``band_parallel`` — the second WALL-TIME knob, for the FEW-k large cell that
+      ``k_parallel`` cannot help: run the FFT H-apply's per-band transforms on a
+      CPU thread pool of this many workers (torch intra-op threading pinned to 1
+      inside). k_parallel distributes whole k-solves and strands when
+      ``nk < workers`` (e.g. a 2³-mesh supercell — few IBZ k, many bands); this
+      instead parallelizes over the BAND axis INSIDE one k, where the FFT local
+      term is the wall. BIT-EXACT (each band is the identical arithmetic; only
+      which thread runs a chunk changes), so it never affects results. CPU-only
+      (ignored on CUDA). Composes with ``k_parallel``: k_parallel wins when it can
+      fill its pool (``nk >= workers``), band_parallel takes the few-k case. None
+      → off, or the ``GRADWAVE_BAND_PARALLEL`` env default when that is set.
 
     Bridged to the solver by the api layer (no solver edit): ``k_chunk`` is
     threaded as the ``scf.loop.scf(k_chunk=)`` kwarg, and the three Davidson
@@ -117,6 +128,7 @@ class MemoryParams:
     subspace_budget_gb: float | None = None
     subspace_storage: str = "complex128"  # complex128 | complex64
     k_parallel: int | None = None
+    band_parallel: int | None = None
 
     def __post_init__(self):
         if self.k_chunk is not None and self.k_chunk < 1:
@@ -127,6 +139,10 @@ class MemoryParams:
             raise InputError(
                 "scf.memory.k_parallel must be >= 2 (a 1-worker pool is the "
                 f"serial path; or null for off), got {self.k_parallel}")
+        if self.band_parallel is not None and self.band_parallel < 2:
+            raise InputError(
+                "scf.memory.band_parallel must be >= 2 (a 1-worker pool is the "
+                f"serial path; or null for off), got {self.band_parallel}")
         if self.max_dim_factor is not None and self.max_dim_factor < 2:
             raise InputError(
                 "scf.memory.max_dim_factor must be >= 2 (nb + n_add must fit; or "

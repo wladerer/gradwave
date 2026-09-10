@@ -206,6 +206,10 @@ def _run_scf(
                # tasks on a CPU thread pool. None → serial (or the
                # GRADWAVE_K_PARALLEL env default — _resolve_k_parallel).
                k_parallel=inp.scf.memory.k_parallel,
+               # band-parallel FFT apply (scf.memory.band_parallel): thread-pool
+               # the FFT H-apply over bands inside one k, for few-k large cells.
+               # None → off (or the GRADWAVE_BAND_PARALLEL env — _resolve_band_parallel).
+               band_parallel=inp.scf.memory.band_parallel,
                **common)
 
 

@@ -1038,6 +1038,7 @@ def _solve_bands(
     t_solve: torch.Tensor,
     device: torch.device,
     u_scale: float = 1.0,
+    band_parallel: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Eigensolve one spin channel of the NC standard problem H x = ε x.
 
@@ -1079,7 +1080,8 @@ def _solve_bands(
     # 0.1·tol_eff budget it must clear — set by V_eff's near-core Fourier
     # tail, which does not shrink with system size. Removed rather than
     # gated; don't re-propose without a fundamentally sharper certificate.
-    h = BatchedHamiltonian(bk, grid_shape, veff_sp, projs_b, hub_q=hub_q, hub_dij=hub_dij)
+    h = BatchedHamiltonian(bk, grid_shape, veff_sp, projs_b, hub_q=hub_q, hub_dij=hub_dij,
+                           band_parallel=band_parallel)
     apply = h.apply
     if fock_apply_sp is not None:
 
@@ -1194,6 +1196,38 @@ def _resolve_k_parallel(k_parallel: int | None, nk: int, device: torch.device) -
     if k_parallel is None or k_parallel <= 1 or nk < 2 or device.type != "cpu":
         return None
     return min(int(k_parallel), nk)
+
+
+def _resolve_band_parallel(band_parallel: int | None, device: torch.device) -> int | None:
+    """Resolve the band-parallel worker count (per-band thread-pool FFT apply).
+
+    An explicit ``band_parallel`` wins; otherwise the ``GRADWAVE_BAND_PARALLEL``
+    env var supplies a default. Returns None when the pool is OFF — unset,
+    ``<= 1``, or a non-CPU device — which keeps the single batched FFT apply,
+    byte-for-byte the historical behavior. Otherwise returns the worker count
+    (``>= 2``).
+
+    CPU-only, and the DUAL of ``k_parallel`` for the few-k large-cell regime:
+    k_parallel distributes whole k-solves across cores and strands when
+    ``nk < workers``, so a 2³-mesh supercell (few IBZ k, many bands) gets no
+    core scaling from it. band_parallel instead parallelizes the FFT H-apply
+    over the BAND axis INSIDE one k — the FFT local term is the wall at that
+    size and its per-band transforms are independent (torch FFTs release the
+    GIL). Bit-exact (see BatchedHamiltonian._local_fft_parallel). The compose
+    rule with k_parallel is decided in ``scf`` (k_parallel wins when it can fill
+    its pool, band_parallel takes the few-k case)."""
+    if band_parallel is None:
+        env = os.environ.get("GRADWAVE_BAND_PARALLEL")
+        if env is not None and env.strip():
+            try:
+                band_parallel = int(env)
+            except ValueError:
+                raise ValueError(
+                    f"GRADWAVE_BAND_PARALLEL must be an integer, got {env!r}"
+                ) from None
+    if band_parallel is None or band_parallel <= 1 or device.type != "cpu":
+        return None
+    return int(band_parallel)
 
 
 def _solve_bands_kpool(
@@ -1323,6 +1357,7 @@ def _solve_bands_streamed(
     device: torch.device,
     u_scale: float,
     k_chunk: int,
+    band_parallel: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Eigensolve one spin channel in k-CHUNKS of ``k_chunk`` k-points, so the
     resident Davidson subspace is ``nk_chunk·m·npw`` instead of ``nk·m·npw`` (the
@@ -1374,6 +1409,7 @@ def _solve_bands_streamed(
             t_solve[lo:hi],
             device,
             u_scale,
+            band_parallel,
         )
     return eigs_out, coeffs_out
 
@@ -1929,6 +1965,14 @@ def scf(
     # (ignored on CUDA); not compatible with hybrid Fock. Composes with k_chunk
     # (task size = k_chunk, peak subspace ≈ k_parallel·k_chunk·m·npw). See
     # _solve_bands_kpool.
+    band_parallel: int | None = None,  # BAND-PARALLEL FFT apply (CPU): thread-pool
+    # the FFT local term over the band axis inside one k, for few-k large cells
+    # where k_parallel strands (nk < ncores). The FFT H-apply is the wall at that
+    # size and its per-band transforms are independent. Bit-exact. None (default)
+    # — or GRADWAVE_BAND_PARALLEL when unset — keeps the single batched FFT apply.
+    # CPU-only. Composes with k_parallel: k_parallel wins when it can fill its pool
+    # (nk >= its workers), band_parallel takes the few-k case. See
+    # _resolve_band_parallel / BatchedHamiltonian._local_fft_parallel.
 ) -> SCFResult:
     # `fock`, when given, adds an orbital-dependent operator to the Hamiltonian
     # each SCF step (a hybrid functional's Fock exchange). It must expose
@@ -1972,6 +2016,25 @@ def scf(
             "Fock exchange — the Fock operator couples orbitals across the whole "
             "BZ, which a per-k solve cannot see (same exclusion as k_chunk)"
         )
+    # band-parallel FFT apply (CPU-only): the few-k dual of k_parallel. Compose
+    # rule when both are requested — k_parallel wins when it can fill its pool
+    # (nk >= its worker count), else it is dropped and band_parallel handles the
+    # few-k case. Nesting the two thread pools would oversubscribe the cores, so
+    # exactly one is active. band_parallel rides the all-k and k-streamed paths
+    # (the H-apply is shared); it is disabled under k_parallel (that path already
+    # owns the cores). The Γ real-wavefunction path has its own apply and ignores
+    # it (excluded by the gamma gate below).
+    band_par_res = _resolve_band_parallel(band_parallel, system.positions.device)
+    if band_par_res is not None and k_par_res is not None:
+        # Compare nk to the band_parallel worker count (a proxy for the core
+        # count): with at least that many k-points, k_parallel can fill the pool
+        # and wins; with fewer, k_parallel would strand cores, so band_parallel
+        # takes over. (k_par_res itself is already clamped to nk, so it is the
+        # wrong thing to compare against here.)
+        if nk >= band_par_res:
+            band_par_res = None  # enough k for the pool — k_parallel wins
+        else:
+            k_par_res = None  # too few k to fill the pool — band_parallel wins
     if target_mu is not None:
         # Constant-potential (grand-canonical) SCF: the electron count floats to
         # hold µ, so the cell is charged — the metal plates must source/sink the
@@ -2305,6 +2368,7 @@ def scf(
                     t_solve,
                     device,
                     u_scale,
+                    band_par_res,
                 )
             else:
                 # k-streaming: solve k in chunks so the resident subspace is
@@ -2330,6 +2394,7 @@ def scf(
                     device,
                     u_scale,
                     k_chunk_res,
+                    band_par_res,
                 )
         _t_eig_s = time.perf_counter() - _t_eig0
 
