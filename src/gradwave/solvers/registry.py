@@ -181,5 +181,15 @@ def chebyshev_adapter(
 # docs/manual/performance.md ("What does not help") and the static-subspace
 # memory note; reintroduce only with new measured evidence, not a new hardware
 # hope.
+def _native_adapter(*args: Any, **kw: Any) -> EigResult:
+    """Lazy import shim for the native (FFTW+CBLAS+LAPACKE) Davidson: the
+    module probes for the compiled library, so it loads on first solve, not
+    at registry import. See solvers/native_davidson.py for scope + fallback."""
+    from gradwave.solvers.native_davidson import native_davidson_adapter
+
+    return native_davidson_adapter(*args, **kw)
+
+
 register("davidson", davidson_adapter)
 register("chebyshev", chebyshev_adapter)
+register("davidson-native", _native_adapter)

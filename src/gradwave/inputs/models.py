@@ -161,11 +161,16 @@ class SCFParams:
     convergence: str = "density"
     entol: float = 1.0e-6  # eV, energy-error threshold used when convergence="energy"
     # block eigensolver: "auto" (size-gated: CheFSI for large-N slabs, else
-    # Davidson), "davidson" (the workhorse), or "chebyshev" (Chebyshev-filtered
-    # subspace iteration, forced). CheFSI is norm-conserving only; the USPP/PAW
-    # generalized S-metric problem rejects an explicit chebyshev choice, and
-    # "auto" resolves to davidson there (see api / calculator).
-    eigensolver: str = "auto"  # auto | davidson | chebyshev
+    # Davidson), "davidson" (the workhorse), "chebyshev" (Chebyshev-filtered
+    # subspace iteration, forced), or "davidson-native" (the compiled
+    # FFTW+CBLAS+LAPACKE Davidson with OpenMP over k and per-k retirement —
+    # measured 4-8x the eager solver on multi-k CPU runs; needs the library
+    # from scripts/build_native_solver.sh, and falls back to eager per solve
+    # outside its scope — see solvers/native_davidson.py). CheFSI is
+    # norm-conserving only; the USPP/PAW generalized S-metric problem rejects
+    # an explicit chebyshev choice, and "auto" resolves to davidson there
+    # (see api / calculator).
+    eigensolver: str = "auto"  # auto | davidson | chebyshev | davidson-native
     # electrostatic boundary (slab geometry, c ⊥ a,b): "periodic" (default) |
     # "open_z" (open-boundary / ESM vacuum both sides — no dipole correction,
     # box-independent surfaces) | "open_z_metal" (metal Dirichlet planes at both
@@ -187,10 +192,11 @@ class SCFParams:
             raise InputError(
                 "scf.convergence must be 'density' or 'energy', got "
                 f"{self.convergence!r}")
-        if self.eigensolver not in ("auto", "davidson", "chebyshev"):
+        if self.eigensolver not in (
+                "auto", "davidson", "chebyshev", "davidson-native"):
             raise InputError(
-                "scf.eigensolver must be 'auto', 'davidson' or 'chebyshev', got "
-                f"{self.eigensolver!r}")
+                "scf.eigensolver must be 'auto', 'davidson', 'chebyshev' or "
+                f"'davidson-native', got {self.eigensolver!r}")
         if self.boundary not in ("periodic", "open_z", "open_z_metal"):
             raise InputError(
                 "scf.boundary must be 'periodic', 'open_z' or 'open_z_metal', got "
