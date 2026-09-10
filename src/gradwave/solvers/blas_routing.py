@@ -74,7 +74,7 @@ def _load_zbmm() -> Callable[..., None] | None:
     fn.restype = None
     fn.argtypes = (
         [ctypes.c_int64] * 4        # batch, M, N, K
-        + [ctypes.c_int] * 2        # transa, transb
+        + [ctypes.c_int] * 3        # transa, transb, nthreads
         + [ctypes.c_int64] * 5      # lda, ldb, stride_a, stride_b, stride_c
         + [ctypes.c_void_p] * 3     # A, B, C
     )
@@ -168,8 +168,13 @@ def zbmm(
     transb = 2 if conj_b_t else 0
 
     out = torch.empty(batch, m_, n_, dtype=torch.complex128)
+    # BLAS threading follows torch's intra-op setting: the SCF k-parallel
+    # thread pool pins torch to 1 inside its tasks, so concurrent zbmm calls
+    # stay serial there (no workers x cores oversubscription); a plain serial
+    # solve hands OpenBLAS torch's full thread count.
     fn(
         int(batch), int(m_), int(n_), int(k_), int(transa), int(transb),
+        int(torch.get_num_threads()),
         int(a1), int(b1), int(a0 * a1), int(b0 * b1), int(m_ * n_),
         ctypes.c_void_p(a.data_ptr()),
         ctypes.c_void_p(b.data_ptr()),

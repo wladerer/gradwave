@@ -41,9 +41,15 @@ static CBLAS_TRANSPOSE trans_of(int code) {
 
 /* C[b] = op(A[b]) @ op(B[b]) for b in [0, batch), each op(A) is (M, K),
  * op(B) is (K, N), C is (M, N). lda/ldb are the physical column counts of the
- * stored A/B matrices; strides are element counts between batch elements. */
+ * stored A/B matrices; strides are element counts between batch elements.
+ *
+ * nthreads: OpenBLAS thread count for these GEMMs (<= 0 leaves it alone).
+ * The Python caller passes torch.get_num_threads() so BLAS threading follows
+ * torch's intra-op setting: the SCF k-parallel thread pool pins torch to 1
+ * inside its tasks, so concurrent zbmm calls stay serial (no workers x cores
+ * thread oversubscription); a plain serial solve gets torch's full count. */
 void blas_zbmm(int64_t batch, int64_t M, int64_t N, int64_t K,
-               int transa, int transb, int64_t lda, int64_t ldb,
+               int transa, int transb, int nthreads, int64_t lda, int64_t ldb,
                int64_t stride_a, int64_t stride_b, int64_t stride_c,
                const void *A, const void *B, void *C) {
     const c128 one = 1.0, zero = 0.0;
@@ -52,10 +58,7 @@ void blas_zbmm(int64_t batch, int64_t M, int64_t N, int64_t K,
     c128 *c = (c128 *)C;
     const CBLAS_TRANSPOSE ta = trans_of(transa);
     const CBLAS_TRANSPOSE tb = trans_of(transb);
-    /* The RR shapes are large enough per call that OpenBLAS threading helps;
-     * unlike davidson_native.c (which pins serial inside an OpenMP-over-k
-     * region), here there is no outer parallel region, so leave OpenBLAS to
-     * use its own thread pool — do not force it to 1. */
+    if (nthreads > 0) openblas_set_num_threads(nthreads);
     for (int64_t i = 0; i < batch; i++) {
         cblas_zgemm(CblasRowMajor, ta, tb, (int)M, (int)N, (int)K, &one,
                     a + i * stride_a, (int)lda, b + i * stride_b, (int)ldb,
