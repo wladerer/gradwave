@@ -33,10 +33,13 @@ HERE = Path(__file__).parent
 TAG = sys.argv[1] if len(sys.argv) > 1 else "small"
 REPS = int(sys.argv[2]) if len(sys.argv) > 2 else 20
 THREADS = int(sys.argv[3]) if len(sys.argv) > 3 else 8
+TOL_OVERRIDE = float(sys.argv[4]) if len(sys.argv) > 4 else None
 
 
 def load_state():
-    z = np.load(HERE / f"state_{TAG}.npz")
+    z = dict(np.load(HERE / f"state_{TAG}.npz"))
+    if TOL_OVERRIDE is not None:
+        z["tol"] = np.array(TOL_OVERRIDE)
     return z
 
 
@@ -190,8 +193,10 @@ def main():
         "d_eig": d_eig, "d_rn": d_rn, "agreement_ok": bool(ok),
         "profiler_wall_ms": wall_prof * 1e3, "profiler_op_ms": op_time * 1e3,
     }
-    (HERE / f"result_{TAG}_t{THREADS}.json").write_text(json.dumps(out, indent=2))
-    print(f"wrote result_{TAG}_t{THREADS}.json")
+    suffix = f"_tol{TOL_OVERRIDE:.0e}" if TOL_OVERRIDE is not None else ""
+    (HERE / f"result_{TAG}_t{THREADS}{suffix}.json").write_text(
+        json.dumps(out, indent=2))
+    print(f"wrote result_{TAG}_t{THREADS}{suffix}.json")
 
 
 if __name__ == "__main__":
