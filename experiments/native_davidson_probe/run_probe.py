@@ -81,6 +81,59 @@ def eager_solve(h, z, tally=False):
     return res, napply
 
 
+def eager_k_parallel(z, workers, k_per_task=1):
+    """Stage D: the SAME eager davidson_batched, but split over k and run on a
+    thread pool with torch intra-op threading pinned to 1. Pure shipped code —
+    no C. Convergence is per-chunk (early exit + n_add local to the chunk), so
+    the H-apply tally is expected to DROP vs the globally-uniform batch (per-k
+    retirement); eigenpairs stay exact per k."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from gradwave.core import batch as batchmod
+    from gradwave.core.batch import BatchedHamiltonian, BatchedK
+    from gradwave.solvers.davidson import davidson_batched
+
+    nk, nb, m = z["x0"].shape
+    mask_t = torch.from_numpy(z["mask"])
+    bk = BatchedK(
+        npw=mask_t.sum(dim=1), mask=mask_t,
+        flat_idx=torch.from_numpy(z["gather_idx"]),
+        kpg=torch.zeros(nk, m, 3, dtype=torch.float64),
+        t=torch.from_numpy(z["bk_t"]),
+        proj_phase_free=torch.from_numpy(z["p"]),
+        proj_atom_index=torch.zeros(z["p"].shape[1], dtype=torch.int64),
+        dij_full=torch.from_numpy(z["dij"]))
+    shape = tuple(int(s) for s in z["shape"])
+    v_eff = torch.from_numpy(z["v_eff"])
+    p_all = torch.from_numpy(z["p"])
+    x0_all = torch.from_numpy(z["x0"])
+    t_all = torch.from_numpy(z["t_solve"])
+    tol = float(z["tol"])
+
+    chunks = [list(range(lo, min(lo + k_per_task, nk)))
+              for lo in range(0, nk, k_per_task)]
+    hs = []
+    for idx in chunks:
+        ix = torch.tensor(idx)
+        hs.append((BatchedHamiltonian(bk.reindex(ix), shape, v_eff, p_all[ix]),
+                   x0_all[ix].clone(), t_all[ix], mask_t[ix]))
+
+    def solve_chunk(args):
+        h, x0c, tc, mc = args
+        return davidson_batched(h.apply, x0c.clone(), tc, mc, tol=tol)
+
+    torch.set_num_threads(1)
+    batchmod.reset_happly_tally()
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            results = list(ex.map(solve_chunk, hs))
+    finally:
+        napply = batchmod.happly_tally()
+    eig = np.concatenate([r.eigenvalues.numpy() for r in results], axis=0)
+    n_iter = max(r.n_iter for r in results)
+    return eig, n_iter, napply, hs
+
+
 def native_lib():
     lib = ctypes.CDLL(str(HERE / "libdavnative.so"))
     lib.davidson_native.restype = ctypes.c_int
@@ -182,6 +235,22 @@ def main():
           f"  -> {'OK' if ok else 'MISMATCH'}")
     print(f"SPEEDUP native/eager: {tb / tc:.2f}x")
 
+    # ---- D: eager per-k thread-pool (shipped code, no C) ----
+    eig_d, n_iter_d, napply_d, _hs = eager_k_parallel(z, THREADS)  # warm
+    times_d = []
+    for _ in range(REPS):
+        t0 = time.perf_counter()
+        eager_k_parallel(z, THREADS)
+        times_d.append(time.perf_counter() - t0)
+    torch.set_num_threads(THREADS)
+    td = min(times_d)
+    d_eig_d = float(np.abs(eig_b - eig_d).max())
+    print(f"D. eager k-thread-pool:    n_iter<={n_iter_d} "
+          f"napply={napply_d} best={td * 1e3:.2f} ms "
+          f"(median {np.median(times_d) * 1e3:.2f})  "
+          f"max|d eig|={d_eig_d:.2e}")
+    print(f"SPEEDUP k-pool/eager: {tb / td:.2f}x")
+
     out = {
         "tag": TAG, "nk": int(nk), "nb": int(nb), "m": int(m),
         "threads": THREADS, "reps": REPS,
@@ -191,6 +260,10 @@ def main():
         "speedup_best": tb / tc, "n_iter": int(res_b.n_iter),
         "napply_eager": int(napply_b), "napply_native": int(napply_c),
         "d_eig": d_eig, "d_rn": d_rn, "agreement_ok": bool(ok),
+        "kpool_ms_best": td * 1e3,
+        "kpool_ms_median": float(np.median(times_d)) * 1e3,
+        "kpool_speedup_best": tb / td, "napply_kpool": int(napply_d),
+        "kpool_d_eig": d_eig_d,
         "profiler_wall_ms": wall_prof * 1e3, "profiler_op_ms": op_time * 1e3,
     }
     suffix = f"_tol{TOL_OVERRIDE:.0e}" if TOL_OVERRIDE is not None else ""
