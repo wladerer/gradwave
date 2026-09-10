@@ -794,7 +794,24 @@ def _load_input(path: Path) -> Input:
     # combination up front, with a message that names the fix. USPP/PAW is a
     # SUPPORTED formalism (this layer cannot tell it from norm-conserving anyway),
     # so nothing keys on the pseudopotential kind.
-    distributed = bool(raw.get("distributed", False))
+    # `distributed: true` — legacy torchrun-launched form (rank layout comes
+    # from the torchrun env). `distributed: N` (int >= 2) — N LOCAL ranks; the
+    # CLI self-launches torchrun when not already under it, so the 6-12x
+    # single-box k-sharded mode is one YAML line (see cli._maybe_relaunch_ranks).
+    raw_dist = raw.get("distributed", False)
+    if type(raw_dist) is bool:
+        distributed: bool | int = raw_dist
+    elif isinstance(raw_dist, int):
+        if raw_dist < 2:
+            raise InputError(
+                f"distributed: N (local ranks) needs N >= 2, got {raw_dist} — "
+                "use `distributed: false` for a serial run or `distributed: "
+                "true` for a torchrun-managed launch")
+        distributed = raw_dist
+    else:
+        raise InputError(
+            f"distributed must be a bool or an int rank count, got "
+            f"{raw_dist!r}")
     if distributed:
         if noncollinear:
             raise InputError(

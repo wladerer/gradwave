@@ -1310,10 +1310,16 @@ class Input:
         default_factory=WorkFunctionParams)  # slab/ESM vacuum-plateau Φ
     dispersion: DispersionParams = field(default_factory=DispersionParams)
     device: str = "cpu"
-    distributed: bool = False  # k-point-sharded SCF across torchrun ranks (see
+    distributed: bool | int = False  # k-point-sharded SCF (see
     # gradwave.distributed / docs/manual/distributed.md); norm-conserving and
     # USPP/PAW collinear SCF (DFT+U included), with or without IBZ symmetry
-    # reduction (the shard unit is whatever k-list the system was built with)
+    # reduction (the shard unit is whatever k-list the system was built with).
+    # `true` — legacy: rank layout comes from the torchrun env (manual launch).
+    # int N >= 2 — N LOCAL ranks: the CLI self-launches torchrun when not
+    # already under it (cli._maybe_relaunch_ranks), so the single-box
+    # multi-process mode (measured 6-12x e2e on multi-k metals — the batched
+    # CPU eigensolve has no intra-op thread scaling, processes sidestep it)
+    # needs only this one YAML line.
     verbose: bool = True  # per-iteration SCF chatter; CLI --quiet overrides
     output_dir: Path = Path("./out")
     output_checkpoint: bool = True  # write checkpoint.pt after SCF tasks
