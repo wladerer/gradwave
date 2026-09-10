@@ -237,7 +237,7 @@ int davidson_native(
             }
             if (sqrt(s) < 1e-8) { ret = -1; goto done; }
         }
-        if (qr_rows(Vk, nb, m, qr_ws) != 0) { ret = -2; goto done; }
+        if (qr_rows(Vk, nb, m, qr_ws, NULL) != 0) { ret = -2; goto done; }
     }
     /* NOTE: V rows for k are stored at stride max_dim*m per k; H-apply and
      * GEMMs below always address the (dim) leading rows via Vk pointers, so
