@@ -503,16 +503,30 @@ class BatchedHamiltonian:
         that path runs at the ambient thread count, and some threaded kernel in
         the local term rounds thread-count-dependently at ~1e-14 — a round-off
         difference, not a chunking artifact. The batched FFT itself IS chunk- and
-        thread-invariant.)"""
+        thread-invariant.)
+
+        Composes with ``GRADWAVE_CPU_DENSE_BUDGET``: ``workers`` tasks hold their
+        dense-box temporaries CONCURRENTLY, so bands per task are additionally
+        capped at budget/(elem·n·nk·workers) — the same peak bound as the serial
+        chunked path. Extra tasks beyond ``workers`` queue on the pool."""
         from concurrent.futures import ThreadPoolExecutor
 
         nk, nb, m = c.shape
-        chunks = self._band_bounds(nb, min(workers, nb))
+        n_tasks = min(workers, nb)
+        budget = _cpu_dense_budget_bytes()
+        if budget is not None:
+            per_task = max(
+                1, int(budget / (c.element_size() * self.n * max(nk, 1) * workers)))
+            n_tasks = max(n_tasks, -(-nb // per_task))  # ceil-div caps bands/task
+        chunks = self._band_bounds(nb, min(n_tasks, nb))
         prev_threads = torch.get_num_threads()
         torch.set_num_threads(1)
         try:
             if parallel:
-                with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
+                # max_workers=workers, not len(chunks): the budget may create
+                # more chunks than workers, and only `workers` of them may hold
+                # dense-box temporaries at once (the queue bounds the peak).
+                with ThreadPoolExecutor(max_workers=min(workers, len(chunks))) as ex:
                     # drain so the first exception propagates; the pool still joins
                     list(ex.map(
                         lambda b: self._local_fft_band(c, out, v_eff, b[0], b[1], None),

@@ -145,6 +145,27 @@ def test_apply_close_to_default(workers):
     assert max_abs < 1e-11, f"band_parallel={workers} drift {max_abs:.3e} exceeds round-off"
 
 
+def test_budget_caps_bands_per_task(monkeypatch):
+    """GRADWAVE_CPU_DENSE_BUDGET composes with the pool: workers hold their
+    dense-box temporaries concurrently, so bands per task are capped at
+    budget/(elem·n·nk·workers) — more (queued) tasks, same peak bound — and the
+    result is still exact vs the serial same-tiling reference."""
+    system = _si_system()
+    h, bk = _fft_H(system, 2)
+    nk, npw = bk.mask.shape
+    torch.manual_seed(4)
+    c = torch.randn(nk, 12, npw, dtype=CDTYPE)
+    # budget sized so per_task = 2 bands with 2 workers -> 6 tasks (> workers)
+    budget = 2.5 * 16 * h.n * nk * 2
+    monkeypatch.setenv("GRADWAVE_CPU_DENSE_BUDGET", repr(budget))
+    out_par = torch.zeros_like(c)
+    out_ser = torch.zeros_like(c)
+    v_eff = h._tables(c.dtype)[1]
+    h._local_fft_parallel(c, out_par, v_eff, 2, count=False, parallel=True)
+    h._local_fft_parallel(c, out_ser, v_eff, 2, count=False, parallel=False)
+    assert torch.equal(out_par, out_ser)
+
+
 def test_torch_thread_count_restored():
     """The pooled apply pins torch to 1 thread internally and restores the
     caller's setting afterwards."""
