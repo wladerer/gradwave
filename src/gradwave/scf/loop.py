@@ -116,7 +116,6 @@ logger = logging.getLogger(__name__)
 # (memory note: nb≈500-800 for 12-layer Al / 6-layer Pt); the production-scale
 # measurement is the large-nb RR campaign. GRADWAVE_EIGENSOLVER overrides the
 # resolved choice; GRADWAVE_CHEFSI_MIN_NB tunes the threshold.
-_EIGENSOLVER_ENV = os.environ.get("GRADWAVE_EIGENSOLVER", "").strip().lower()
 _CHEFSI_MIN_NB = int(os.environ.get("GRADWAVE_CHEFSI_MIN_NB", "640"))
 
 # Γ-point real-wavefunction fast path (core.gamma). At a single k-point at Γ the
@@ -156,8 +155,12 @@ def _resolve_eigensolver(eigensolver: str, nb: int) -> str:
     ``"auto"`` (the default) selects ``"chebyshev"`` once ``nb`` crosses the
     large-N threshold ``_CHEFSI_MIN_NB``, else ``"davidson"``. The
     ``GRADWAVE_EIGENSOLVER`` env var, when set, overrides everything (including an
-    ``"auto"`` request) so a run can be pinned to one solver for benchmarking."""
-    mode = _EIGENSOLVER_ENV or eigensolver
+    ``"auto"`` request) so a run can be pinned to one solver for benchmarking.
+    Read at call time, not import time: an import-frozen copy silently ignores
+    ``os.environ`` set after ``import gradwave`` — a measured-benchmark footgun
+    (every "native" arm of a ladder ran eager and the A/B was meaningless)."""
+    env = os.environ.get("GRADWAVE_EIGENSOLVER", "").strip().lower()
+    mode = env or eigensolver
     if mode != "auto":
         return mode
     return "chebyshev" if nb >= _CHEFSI_MIN_NB else "davidson"

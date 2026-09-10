@@ -21,7 +21,11 @@
  * davidson_batched exactly (verified: identical n_iter, identical band*k
  * H-apply tally, eigenvalues to ~1e-13).
  *
- * Memory layout: row-major everywhere, complex128 interleaved.
+ * Memory layout: row-major everywhere, complex128 interleaved. The QR
+ * orthonormalizations exploit that a row-major (rows, m) basis block is
+ * byte-identical to the col-major (m, rows) matrix whose columns are the
+ * basis vectors, so zgeqrf/zungqr run directly on the buffers with zero
+ * transpose copies (see qr_rows).
  */
 
 #include <complex.h>
@@ -92,27 +96,50 @@ typedef struct {
     int nthreads;
 } ctx_t;
 
-/* H-apply for the rows of ONE k: out = H_k c, (nbc, m). box/work are caller
- * thread-local FFT buffers (box has n+1 slots: trash slot == n). */
+/* H-apply for the rows of ONE k: out = H_k c, (nbc, m).
+ *
+ * box/work/gbox are caller thread-local FFT buffers (box and gbox have n+1
+ * slots: trash slot == n). box is the scatter buffer and is kept all-zero
+ * outside the m sphere slots between calls (zeroed at alloc; the sphere
+ * slots are cleared after each band) — that replaces a full (n+1)-point
+ * memset per band with 2m sphere writes (m/n ~ 0.06-0.1). Hot elementwise
+ * loops run on planar double views so gcc vectorizes them instead of going
+ * through C99 interleaved-complex arithmetic. */
 static void h_apply_k(const ctx_t *cx, int64_t k, const c128 *c, c128 *out,
-                      int64_t nbc, c128 *box, c128 *work, c128 *becp_ws,
-                      c128 *tmp_ws) {
+                      int64_t nbc, c128 *box, c128 *work, c128 *gbox,
+                      c128 *becp_ws, c128 *tmp_ws) {
     const int64_t m = cx->m, n = cx->n, np = cx->nproj;
     const double *tk = cx->t + k * m;
     const uint8_t *mk = cx->mask + k * m;
     const int64_t *sc = cx->idx_sc + k * m;
     const int64_t *ga = cx->idx_ga + k * m;
     const double invn = 1.0 / (double)n;
+    gbox[n] = 0.0;  /* trash-slot reads are masked later; keep them finite */
     for (int64_t b = 0; b < nbc; b++) {
         const c128 *cb = c + b * m;
         c128 *ob = out + b * m;
-        for (int64_t g = 0; g < m; g++) ob[g] = tk[g] * cb[g];
-        memset(box, 0, sizeof(c128) * (size_t)(n + 1));
+        const double *restrict cbd = (const double *)cb;
+        double *restrict obd = (double *)ob;
+#pragma omp simd
+        for (int64_t g = 0; g < m; g++) {
+            obd[2 * g] = tk[g] * cbd[2 * g];
+            obd[2 * g + 1] = tk[g] * cbd[2 * g + 1];
+        }
         for (int64_t g = 0; g < m; g++) box[sc[g]] = cb[g];
         fftw_execute_dft(s_plan_b, box, work);
-        for (int64_t i = 0; i < n; i++) work[i] *= cx->v_eff[i] * invn;
-        fftw_execute_dft(s_plan_f, work, box);
-        for (int64_t g = 0; g < m; g++) ob[g] += box[ga[g]];
+        for (int64_t g = 0; g < m; g++) box[sc[g]] = 0.0;
+        {
+            double *restrict wd = (double *)work;
+            const double *restrict vd = cx->v_eff;
+#pragma omp simd
+            for (int64_t i = 0; i < n; i++) {
+                const double v = vd[i] * invn;
+                wd[2 * i] *= v;
+                wd[2 * i + 1] *= v;
+            }
+        }
+        fftw_execute_dft(s_plan_f, work, gbox);
+        for (int64_t g = 0; g < m; g++) ob[g] += gbox[ga[g]];
     }
     if (np > 0) {
         const c128 one = 1.0, zero = 0.0;
@@ -151,26 +178,28 @@ static void h_apply_k(const ctx_t *cx, int64_t k, const c128 *c, c128 *out,
     }
 }
 
-/* per-k QR row-orthonormalization (rows, m) in place via qr(x^T) -> q^T.
- * Optionally returns R (rows, rows). 0 ok, -1 LAPACK failure. */
-static int qr_rows(c128 *x, int64_t rows, int64_t m, c128 *ws_t, c128 *r_out) {
-    for (int64_t j = 0; j < rows; j++)
-        for (int64_t g = 0; g < m; g++) ws_t[g * rows + j] = x[j * m + g];
+/* per-k QR row-orthonormalization (rows, m) in place.
+ *
+ * Zero-copy: the row-major (rows, m) block with row stride m IS the
+ * col-major (m, rows) matrix with lda = m whose columns are the basis
+ * vectors — so qr(x^T) is a direct col-major zgeqrf/zungqr on the buffer.
+ * The previous LAPACK_ROW_MAJOR version paid two explicit transposes here
+ * plus LAPACKE's own hidden transpose copies (~6 full passes per call);
+ * this does zero. Optionally returns R (rows, rows) row-major upper.
+ * 0 ok, -1 LAPACK failure. */
+static int qr_rows(c128 *x, int64_t rows, int64_t m, c128 *r_out) {
     c128 tau[512];
     if (rows > 512) return -1;
-    int info = LAPACKE_zgeqrf(LAPACK_ROW_MAJOR, (int)m, (int)rows, ws_t,
-                              (int)rows, tau);
+    int info = LAPACKE_zgeqrf(LAPACK_COL_MAJOR, (int)m, (int)rows, x, (int)m,
+                              tau);
     if (info == 0 && r_out != NULL)
         for (int64_t i = 0; i < rows; i++)
             for (int64_t j = 0; j < rows; j++)
-                r_out[i * rows + j] = j >= i ? ws_t[i * rows + j] : 0.0;
+                r_out[i * rows + j] = j >= i ? x[j * m + i] : 0.0;
     if (info == 0)
-        info = LAPACKE_zungqr(LAPACK_ROW_MAJOR, (int)m, (int)rows, (int)rows,
-                              ws_t, (int)rows, tau);
-    if (info != 0) return -1;
-    for (int64_t j = 0; j < rows; j++)
-        for (int64_t g = 0; g < m; g++) x[j * m + g] = ws_t[g * rows + j];
-    return 0;
+        info = LAPACKE_zungqr(LAPACK_COL_MAJOR, (int)m, (int)rows, (int)rows,
+                              x, (int)m, tau);
+    return info != 0 ? -1 : 0;
 }
 
 static void project_out(c128 *d, const c128 *v, int64_t nd, int64_t dim,
@@ -188,7 +217,7 @@ static void project_out(c128 *d, const c128 *v, int64_t nd, int64_t dim,
 
 /* per-thread scratch bundle */
 typedef struct {
-    c128 *box, *work, *becp, *tmp, *gram, *qrt, *rmat;
+    c128 *box, *work, *gbox, *becp, *tmp, *gram, *rmat;
     double *W, *tband;
     int64_t *sel;
 } scratch_t;
@@ -198,11 +227,12 @@ static scratch_t scratch_alloc(const ctx_t *cx, int64_t max_dim) {
     int64_t npz = cx->nproj > cx->nhub ? cx->nproj : cx->nhub;
     if (npz < 1) npz = 1;
     s.box = fftw_alloc_complex(cx->n + 1);
+    memset(s.box, 0, sizeof(c128) * (size_t)(cx->n + 1));  /* h_apply_k invariant */
     s.work = fftw_alloc_complex(cx->n);
+    s.gbox = fftw_alloc_complex(cx->n + 1);
     s.becp = malloc(sizeof(c128) * (size_t)(cx->nb * npz));
     s.tmp = malloc(sizeof(c128) * (size_t)(cx->nb * npz));
     s.gram = malloc(sizeof(c128) * (size_t)(cx->nb * max_dim));
-    s.qrt = malloc(sizeof(c128) * (size_t)(cx->m * max_dim));
     s.rmat = malloc(sizeof(c128) * (size_t)(cx->nb * cx->nb));
     s.W = malloc(sizeof(double) * (size_t)max_dim);
     s.tband = malloc(sizeof(double) * (size_t)cx->nb);
@@ -211,8 +241,8 @@ static scratch_t scratch_alloc(const ctx_t *cx, int64_t max_dim) {
 }
 
 static void scratch_free(scratch_t *s) {
-    fftw_free(s->box); fftw_free(s->work);
-    free(s->becp); free(s->tmp); free(s->gram); free(s->qrt); free(s->rmat);
+    fftw_free(s->box); fftw_free(s->work); fftw_free(s->gbox);
+    free(s->becp); free(s->tmp); free(s->gram); free(s->rmat);
     free(s->W); free(s->tband); free(s->sel);
 }
 
@@ -280,9 +310,9 @@ int davidson_native(
                 if (sqrt(s2) < 1e-8) { err = -1; break; }
             }
             if (err) continue;
-            if (qr_rows(Vk, nb, m, ws.qrt, NULL) != 0) { err = -2; continue; }
+            if (qr_rows(Vk, nb, m, NULL) != 0) { err = -2; continue; }
             h_apply_k(&cx, k, Vk, HV + k * max_dim * m, nb, ws.box, ws.work,
-                      ws.becp, ws.tmp);
+                      ws.gbox, ws.becp, ws.tmp);
         }
         scratch_free(&ws);
     }
@@ -326,12 +356,14 @@ int davidson_native(
                             (int)m, (int)dim, &one, Sk, (int)dim, HVk, (int)m,
                             &zero, HXk, (int)m);
                 for (int64_t b = 0; b < nb; b++) {
-                    double s2 = 0, e = ws.W[b];
-                    c128 *xb = Xk + b * m, *hb = HXk + b * m;
-                    for (int64_t g = 0; g < m; g++) {
-                        c128 r = hb[g] - e * xb[g];
-                        double re = creal(r), im = cimag(r);
-                        s2 += re * re + im * im;
+                    double s2 = 0;
+                    const double e = ws.W[b];
+                    const double *restrict xb = (const double *)(Xk + b * m);
+                    const double *restrict hb = (const double *)(HXk + b * m);
+#pragma omp simd reduction(+ : s2)
+                    for (int64_t g = 0; g < 2 * m; g++) {
+                        const double r = hb[g] - e * xb[g];
+                        s2 += r * r;
                     }
                     rn[k * nb + b] = sqrt(s2);
                 }
@@ -393,35 +425,43 @@ int davidson_native(
                 for (int64_t i = 0; i < n_add; i++) {
                     int64_t b = ws.sel[i];
                     double tb = 0;
-                    c128 *xb = Xk + b * m;
-                    for (int64_t g = 0; g < m; g++) {
-                        double re = creal(xb[g]), im = cimag(xb[g]);
-                        tb += tk[g] * (re * re + im * im);
-                    }
+                    const double *restrict xb =
+                        (const double *)(Xk + b * m);
+#pragma omp simd reduction(+ : tb)
+                    for (int64_t g = 0; g < m; g++)
+                        tb += tk[g] * (xb[2 * g] * xb[2 * g] +
+                                       xb[2 * g + 1] * xb[2 * g + 1]);
                     if (tb < 1e-12) tb = 1e-12;
-                    double e = eig_out[k * nb + b];
-                    c128 *hb = HXk + b * m, *db = Dk + i * m;
+                    const double e = eig_out[k * nb + b];
+                    const double *restrict hb =
+                        (const double *)(HXk + b * m);
+                    double *restrict db = (double *)(Dk + i * m);
                     double nrm2 = 0;
+#pragma omp simd reduction(+ : nrm2)
                     for (int64_t g = 0; g < m; g++) {
                         double xx = tk[g] / tb;
                         double x2 = xx * xx;
                         double num = 27.0 + 18.0 * xx + 12.0 * x2 + 8.0 * x2 * xx;
                         double coeff = num / (num + 16.0 * x2 * x2);
-                        c128 r = hb[g] - e * xb[g];
-                        db[g] = r * coeff;
-                        double re = creal(db[g]), im = cimag(db[g]);
-                        nrm2 += re * re + im * im;
+                        double rr = hb[2 * g] - e * xb[2 * g];
+                        double ri = hb[2 * g + 1] - e * xb[2 * g + 1];
+                        db[2 * g] = rr * coeff;
+                        db[2 * g + 1] = ri * coeff;
+                        nrm2 += db[2 * g] * db[2 * g] +
+                                db[2 * g + 1] * db[2 * g + 1];
                     }
                     double nrm = sqrt(nrm2);
-                    if (nrm > 1e-300)
-                        for (int64_t g = 0; g < m; g++) db[g] /= nrm;
+                    if (nrm > 1e-300) {
+#pragma omp simd
+                        for (int64_t g = 0; g < 2 * m; g++) db[g] /= nrm;
+                    }
                 }
                 int64_t against_dim = dim;
                 if (restart) {
                     /* collapse to re-orthonormalized Ritz block; repair images
                      * by the triangular factor: hx_new = (R^T)^{-1} hx */
                     memcpy(Vk, Xk, sizeof(c128) * (size_t)(nb * m));
-                    if (qr_rows(Vk, nb, m, ws.qrt, ws.rmat) != 0) {
+                    if (qr_rows(Vk, nb, m, ws.rmat) != 0) {
                         err = -2; continue;
                     }
                     memcpy(HVk, HXk, sizeof(c128) * (size_t)(nb * m));
@@ -445,13 +485,13 @@ int davidson_native(
                     if (sqrt(s2) < 1e-8) { err = -1; break; }
                 }
                 if (err) continue;
-                if (qr_rows(Dk, n_add, m, ws.qrt, NULL) != 0) {
+                if (qr_rows(Dk, n_add, m, NULL) != 0) {
                     err = -2; continue;
                 }
                 memcpy(Vk + against_dim * m, Dk,
                        sizeof(c128) * (size_t)(n_add * m));
                 h_apply_k(&cx, k, Vk + against_dim * m, HVk + against_dim * m,
-                          n_add, ws.box, ws.work, ws.becp, ws.tmp);
+                          n_add, ws.box, ws.work, ws.gbox, ws.becp, ws.tmp);
                 dim_k[k] = against_dim + n_add;
             }
             scratch_free(&ws);
