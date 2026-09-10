@@ -82,7 +82,7 @@ def native_lib():
     lib = ctypes.CDLL(str(HERE / "libdavnative.so"))
     lib.davidson_native.restype = ctypes.c_int
     lib.davidson_native.argtypes = (
-        [ctypes.c_int64] * 10 + [ctypes.c_double, ctypes.c_int]
+        [ctypes.c_int64] * 9 + [ctypes.c_double, ctypes.c_int]
         + [ctypes.c_void_p] * 8
         + [ctypes.c_void_p] * 4)
     return lib
