@@ -56,6 +56,7 @@ from dataclasses import dataclass
 import torch
 
 from gradwave.core import opcount
+from gradwave.solvers.blas_routing import zbmm
 from gradwave.solvers.precond import teter, teter_b
 
 logger = logging.getLogger(__name__)
@@ -534,7 +535,9 @@ def _orthonormalize_b(
     def project(x):
         if against is not None and against.shape[1]:
             for _ in range(2):  # two passes for stability
-                x = x - (x @ against.conj().transpose(-1, -2)) @ against
+                # x - (x @ against^H) @ against, both GEMMs routed through
+                # OpenBLAS zgemm (falls back to torch.matmul when unavailable).
+                x = x - zbmm(zbmm(x, against, conj_b_t=True), against)
         return x
 
     def orthonormalize(x):
@@ -784,13 +787,19 @@ def davidson_batched(
         # eigensolve; the long v/hv basis and the Ritz combination stay
         # complex64. A no-op in the fp64 polish, mirroring the generalized
         # reduction in scf/uspp_batch.py.
-        s = torch.matmul(v.conj(), hv.mT)
+        # s = v.conj() @ hv.mT, routed through OpenBLAS zgemm: zbmm computes
+        # v @ hv^H (= conj(s)), then .conj() recovers s. The GEMM contracts over
+        # the long plane-wave axis; the trailing conj is a cheap (nk, dim, dim)
+        # elementwise op. Falls back to torch.matmul when the .so is absent or
+        # the block is not contiguous complex128 CPU (e.g. complex64 storage).
+        s = zbmm(v, hv, conj_b_t=True).conj()
         s = (0.5 * (s + s.conj().transpose(-1, -2))).to(torch.complex128)
         w, u = _eigh_subspace(s)
         u = u[:, :, :nb].to(v.dtype)  # rotation back to the block dtype
         eig = w[:, :nb].real.to(rdtype)
-        x = torch.einsum("kja,kjg->kag", u, v)
-        hx = torch.einsum("kja,kjg->kag", u, hv)
+        # Ritz combine x = u^T @ v, hx = u^T @ hv (einsum "kja,kjg->kag").
+        x = zbmm(u, v, t_a=True)
+        hx = zbmm(u, hv, t_a=True)
 
         r = hx - eig[..., None] * x
         rn = torch.linalg.norm(r, dim=-1).real
