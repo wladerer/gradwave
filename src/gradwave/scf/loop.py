@@ -1164,6 +1164,141 @@ def _resolve_k_chunk(k_chunk: int | None, nk: int) -> int | None:
     return int(k_chunk)
 
 
+def _resolve_k_parallel(k_parallel: int | None, nk: int, device: torch.device) -> int | None:
+    """Resolve the k-parallel worker count (per-k thread-pool eigensolve).
+
+    An explicit ``k_parallel`` wins; otherwise the ``GRADWAVE_K_PARALLEL`` env
+    var supplies a default. Returns None when the pool is OFF — unset,
+    ``<= 1``, fewer than 2 k-points, or a non-CPU device — which selects the
+    batched (or k-streamed) path, byte-for-byte the historical behavior.
+    Otherwise returns the worker count clamped to ``[2, nk]``.
+
+    CPU-only by design: the lever exists because the batched CPU path gets no
+    intra-op thread scaling at small/medium sizes (batched LAPACK loops run
+    serially — measured eager 8t == 1t, experiments/native_davidson_probe/
+    RESULTS.md), while the per-k problems are embarrassingly parallel. On CUDA
+    the kernels are already back-to-back on one stream and a host thread pool
+    would only interleave streams to no benefit."""
+    if k_parallel is None:
+        env = os.environ.get("GRADWAVE_K_PARALLEL")
+        if env is not None and env.strip():
+            try:
+                k_parallel = int(env)
+            except ValueError:
+                raise ValueError(
+                    f"GRADWAVE_K_PARALLEL must be an integer, got {env!r}"
+                ) from None
+    if k_parallel is None or k_parallel <= 1 or nk < 2 or device.type != "cpu":
+        return None
+    return min(int(k_parallel), nk)
+
+
+def _solve_bands_kpool(
+    veff_sp: torch.Tensor,
+    coeffs_sp: torch.Tensor,
+    bk: BatchedK,
+    grid_shape: tuple[int, int, int],
+    projs_b: torch.Tensor,
+    hub: HubbardData | None,
+    hub_q: torch.Tensor | None,
+    n_hub_sp: list[torch.Tensor] | None,
+    hub_alpha: list[float] | None,
+    v_tau_s: list[torch.Tensor] | None,
+    sp: int,
+    nspin: int,
+    eigensolver: str,
+    tol_eff: float,
+    use_low: bool,
+    cdtype: torch.dtype,
+    t_solve: torch.Tensor,
+    device: torch.device,
+    u_scale: float,
+    workers: int,
+    k_task: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Eigensolve one spin channel with per-k tasks on a thread pool of
+    ``workers`` threads, torch intra-op threading pinned to 1 inside.
+
+    The parallel sibling of ``_solve_bands_streamed``: the same per-chunk
+    reindexing (BatchedK, projectors, DFT+U projectors, the kinetic
+    preconditioner, the meta-GGA τ-operator), the same ``_solve_bands`` per
+    task — but tasks run concurrently. Two measured effects compose
+    (experiments/native_davidson_probe/RESULTS.md):
+
+    * the per-k solves actually use the cores (the batched path's CPU thread
+      scaling is zero at small/medium sizes), and
+    * per-k retirement — each task's Davidson stops when ITS k-points meet
+      ``tol_eff`` instead of riding the uniform batch to the slowest k's
+      round count (measured 39 → ≤21 rounds on a smeared Al cell).
+
+    Every returned band satisfies the same ``rn <= tol_eff`` contract as the
+    batch; the trajectory differs (the batch over-polishes already-converged
+    k), so eigenvalues agree to ~tol, not to round-off. Algebraically the
+    chunk split is exact for the same reason streaming is: the shared Fermi
+    level is applied later over the full gathered eigenvalues, and the
+    density is the k-sum either way. Hybrid Fock is rejected up front (it
+    couples orbitals across k).
+
+    ``k_task`` k-points per task (``scf.memory.k_chunk`` when set, else 1):
+    peak resident subspace ≈ ``workers·k_task·m·npw``. Per-task
+    Hamiltonians are built inside the task so at most ``workers`` are alive.
+
+    Threading notes: torch ops release the GIL, so ThreadPoolExecutor
+    parallelism is real for the kernel time; the op-dispatch fraction
+    serializes, which is why the win needs per-task work that is not tiny
+    (many tiny-npw tasks can even lose — see RESULTS.md; the knob is opt-in).
+    ``core.opcount`` bumps from concurrent tasks may under-count (benign,
+    telemetry only). The global torch thread count is restored on exit."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    nk = coeffs_sp.shape[0]
+    eigs_out = torch.empty(nk, coeffs_sp.shape[1], dtype=RDTYPE, device=device)
+    coeffs_out = torch.empty_like(coeffs_sp)
+    idx_device = bk.mask.device
+
+    def solve_task(lo: int) -> None:
+        hi = min(lo + k_task, nk)
+        idx = torch.arange(lo, hi, device=idx_device)
+        bk_c = bk.reindex(idx)
+        hub_q_c = hub_q[lo:hi] if hub_q is not None else None
+        mgga_c = (
+            None
+            if v_tau_s is None
+            else _metagga_ops_from_vtau(v_tau_s, bk_c, grid_shape, nspin)[sp]
+        )
+        eigs_out[lo:hi], coeffs_out[lo:hi] = _solve_bands(
+            veff_sp,
+            coeffs_sp[lo:hi],
+            bk_c,
+            grid_shape,
+            projs_b[lo:hi],
+            hub,
+            hub_q_c,
+            n_hub_sp,
+            hub_alpha,
+            None,  # fock rejected up front — couples orbitals across k
+            mgga_c,
+            eigensolver,
+            tol_eff,
+            use_low,
+            cdtype,
+            t_solve[lo:hi],
+            device,
+            u_scale,
+        )
+
+    prev_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            # list() drains the iterator so the first exception propagates
+            # (and the pool still joins every task via the context manager)
+            list(ex.map(solve_task, range(0, nk, k_task)))
+    finally:
+        torch.set_num_threads(prev_threads)
+    return eigs_out, coeffs_out
+
+
 def _solve_bands_streamed(
     veff_sp: torch.Tensor,
     coeffs_sp: torch.Tensor,
@@ -1780,6 +1915,17 @@ def scf(
     # the all-k solve. None (default) — or GRADWAVE_K_CHUNK when unset — runs the
     # all-k batched path, byte-for-byte unchanged. Not compatible with hybrid Fock
     # (which couples orbitals across k). See _solve_bands_streamed.
+    k_parallel: int | None = None,  # k-PARALLEL eigensolve (CPU): run per-k Davidson
+    # tasks on a thread pool of this many workers, torch intra-op threading pinned
+    # to 1 inside. The batched CPU path gets no thread scaling at small/medium
+    # sizes (measured eager 8t == 1t), so distributing whole independent k-solves
+    # across cores is the wall-clock lever (measured 1.9-5.4x, plus per-k
+    # convergence retirement). Same rn <= tol contract per band; trajectory-level
+    # eigenvalue differences ~tol vs the batch. None (default) — or
+    # GRADWAVE_K_PARALLEL when unset — keeps the historical path. CPU-only
+    # (ignored on CUDA); not compatible with hybrid Fock. Composes with k_chunk
+    # (task size = k_chunk, peak subspace ≈ k_parallel·k_chunk·m·npw). See
+    # _solve_bands_kpool.
 ) -> SCFResult:
     # `fock`, when given, adds an orbital-dependent operator to the Hamiltonian
     # each SCF step (a hybrid functional's Fock exchange). It must expose
@@ -1812,6 +1958,16 @@ def scf(
             "k_chunk (k-streaming) does not support hybrid Fock exchange — the "
             "Fock operator couples orbitals across the whole BZ, which a per-chunk "
             "Davidson solve cannot see (same reason the distributed SCF excludes it)"
+        )
+    # k-parallel eigensolve: per-k Davidson tasks on a thread pool (CPU-only —
+    # the resolve gates on the device). Same per-chunk independence argument as
+    # streaming, so the same Fock exclusion.
+    k_par_res = _resolve_k_parallel(k_parallel, nk, system.positions.device)
+    if k_par_res is not None and fock is not None:
+        raise NotImplementedError(
+            "k_parallel (per-k thread-pool eigensolve) does not support hybrid "
+            "Fock exchange — the Fock operator couples orbitals across the whole "
+            "BZ, which a per-k solve cannot see (same exclusion as k_chunk)"
         )
     if target_mu is not None:
         # Constant-potential (grand-canonical) SCF: the electron count floats to
@@ -2052,7 +2208,7 @@ def scf(
         v_tau_s = _metagga_vtau(xc, rho_s, rho_tot, tau_list, system, nspin, grid)
         metagga_apply_s = (
             None
-            if v_tau_s is None or k_chunk_res is not None
+            if v_tau_s is None or k_chunk_res is not None or k_par_res is not None
             else _metagga_ops_from_vtau(v_tau_s, bk, grid.shape, nspin)
         )
 
@@ -2097,6 +2253,33 @@ def scf(
                 eigs_s[sp], coeffs_b_s[sp] = _solve_bands_gamma(
                     gamma_gb, veff_s[sp], coeffs_b_s[sp], projs_b[0],
                     bk.dij_full, tol_eff)
+            elif k_par_res is not None:
+                # k-parallel: per-k Davidson tasks on a thread pool (task size =
+                # k_chunk when also set, else 1 k). CPU wall-clock lever; peak
+                # subspace ≈ workers·k_task·m·npw.
+                eigs_s[sp], coeffs_b_s[sp] = _solve_bands_kpool(
+                    veff_s[sp],
+                    coeffs_b_s[sp],
+                    bk,
+                    grid.shape,
+                    projs_b,
+                    hub,
+                    hub_q,
+                    n_hub_sp,
+                    hub_alpha,
+                    v_tau_s,
+                    sp,
+                    nspin,
+                    eigensolver,
+                    tol_eff,
+                    use_low,
+                    cdtype,
+                    t_solve,
+                    device,
+                    u_scale,
+                    k_par_res,
+                    k_chunk_res or 1,
+                )
             elif k_chunk_res is None:
                 # all-k batched solve (default): the resident subspace is nk·m·npw.
                 mgga_sp = metagga_apply_s[sp] if metagga_apply_s is not None else None
