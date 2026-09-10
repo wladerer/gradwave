@@ -108,19 +108,45 @@ def test_auto_without_so_falls_back(monkeypatch):
 
 
 @needs_blas
-def test_non_contiguous_and_wrong_dtype_fall_back(monkeypatch):
-    """'on' still falls back (correctly) when operands are outside native scope:
-    a non-contiguous view or a complex64 block routes through torch, no error."""
+def test_view_layouts_route_natively(monkeypatch):
+    """The exact non-contiguous layouts davidson_batched produces still route
+    natively via GEMM's lda/trans arguments: a transpose view (what
+    _orthonormalize_b returns) and a last-dim slice (the Ritz rotation
+    u[:, :, :nb]) — both must hit the .so and match torch."""
     monkeypatch.setenv("GRADWAVE_BLAS_GEMM", "on")
-    a = _rand(2, 4, 4, seed=7)
-    b = _rand(2, 4, 4, seed=8)
-    # non-contiguous a (transpose view)
-    got = zbmm(a.transpose(-1, -2).contiguous().transpose(-1, -2), b)
-    assert torch.allclose(got, _ref(a.transpose(-1, -2).contiguous().transpose(-1, -2), b))
+    nk, dim, m, nb = 3, 9, 21, 4
+    # transpose view on the a side of the subspace build (v @ hv^H)
+    v = _rand(nk, m, dim, seed=20).transpose(-1, -2)  # (nk, dim, m) view
+    hv = _rand(nk, dim, m, seed=21)
+    n0 = br._N_NATIVE
+    got = zbmm(v, hv, conj_b_t=True)
+    assert n0 + 1 == br._N_NATIVE
+    assert torch.allclose(got, _ref(v, hv, conj_b_t=True), rtol=1e-12, atol=1e-12)
+    # last-dim slice on the a side + transpose view on the b side (Ritz combine)
+    u = _rand(nk, dim, dim, seed=22)[:, :, :nb]  # (nk, dim, nb) slice
+    got = zbmm(u, v, t_a=True)
+    assert n0 + 2 == br._N_NATIVE
+    assert torch.allclose(got, _ref(u, v, t_a=True), rtol=1e-12, atol=1e-12)
+
+
+@needs_blas
+def test_out_of_scope_layouts_fall_back(monkeypatch):
+    """'on' still falls back (correctly) when operands are outside native scope:
+    conj-transpose of transposed storage (would need the nonstandard
+    conj-no-trans op) and complex64 blocks route through torch, no error."""
+    monkeypatch.setenv("GRADWAVE_BLAS_GEMM", "on")
+    a = _rand(2, 4, 5, seed=7)
+    b = _rand(2, 6, 5, seed=8)
+    bt = _rand(2, 5, 4, seed=9).transpose(-1, -2)  # (2, 4, 5) transposed storage
+    nf = br._N_FALLBACK
+    got = zbmm(a, bt, conj_b_t=True)
+    assert nf + 1 == br._N_FALLBACK
+    assert torch.allclose(got, _ref(a, bt, conj_b_t=True))
     # complex64 operands
-    got64 = zbmm(a.to(torch.complex64), b.to(torch.complex64))
+    got64 = zbmm(a.to(torch.complex64), b.to(torch.complex64), conj_b_t=True)
     assert got64.dtype == torch.complex64
-    assert torch.allclose(got64, _ref(a.to(torch.complex64), b.to(torch.complex64)))
+    assert torch.allclose(
+        got64, _ref(a.to(torch.complex64), b.to(torch.complex64), conj_b_t=True))
 
 
 def _hermitian_operator(m, seed):

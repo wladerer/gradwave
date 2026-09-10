@@ -44,10 +44,15 @@ import torch
 
 _ZBMM: Callable[..., None] | None = None  # bound C function, or None if unavailable
 _ZBMM_TRIED = False
-# One-time availability record for diagnostics: True once the native path has
-# actually served a call, False once a fallback has occurred. None until first
-# use. Not load-bearing for correctness — purely observability.
+# Dispatch record for diagnostics (a bench must be able to PROVE the native
+# path engaged — a silent fallback makes an A/B meaningless): _N_NATIVE counts
+# calls served by the .so, _N_FALLBACK calls that fell back to torch.matmul in
+# auto/on mode ("off" counts in neither — it never dispatches). _ROUTED is the
+# last dispatch decision (None until first use). Observability only, never
+# load-bearing for correctness.
 _ROUTED: bool | None = None
+_N_NATIVE = 0
+_N_FALLBACK = 0
 
 
 def _mode() -> str:
@@ -90,9 +95,11 @@ def blas_available() -> bool:
 def _native_ok(a: torch.Tensor, b: torch.Tensor) -> bool:
     """Whether the native zgemm path applies to these operands.
 
-    Contiguous complex128 CPU 3-D batched tensors, matching batch, and NOT
-    tracking gradients (the caller is under no_grad, but guard anyway so a
-    grad-tracked matmul is never silently detached)."""
+    complex128 CPU 3-D batched tensors, matching batch, and NOT tracking
+    gradients (the caller is under no_grad, but guard anyway so a grad-tracked
+    matmul is never silently detached). Layout is checked separately per
+    operand by :func:`_plan` — GEMM's lda/stride arguments express more than
+    plain contiguity (last-dim slices, transpose views)."""
     if torch.is_grad_enabled() and (a.requires_grad or b.requires_grad):
         return False
     return (
@@ -103,9 +110,35 @@ def _native_ok(a: torch.Tensor, b: torch.Tensor) -> bool:
         and a.dim() == 3
         and b.dim() == 3
         and a.shape[0] == b.shape[0]
-        and a.is_contiguous()
-        and b.is_contiguous()
     )
+
+
+def _plan(x: torch.Tensor, trans: int) -> tuple[int, int, int] | None:
+    """Map one (batch, R, C) operand to zgemm arguments, or None if it can't.
+
+    Returns (trans_code, lda, batch_stride) against the operand's UNDERLYING
+    storage — GEMM's leading-dimension argument expresses two layouts torch
+    views produce that ``is_contiguous`` rejects:
+
+    * direct rows (``stride(-1) == 1``): the stored matrix is (R, C) at
+      lda = stride(-2). Covers contiguous tensors AND last-dim slices like the
+      Ritz rotation ``u[:, :, :nb]`` (rows with a gap). trans passes through.
+    * transposed storage (``stride(-2) == 1``): the stored matrix is (C, R) at
+      lda = stride(-1) — exactly what ``q.transpose(-1, -2)`` views produce
+      (``_orthonormalize_b`` returns these). NoTrans flips to Trans and vice
+      versa; ConjTrans on transposed storage would need the nonstandard
+      conj-no-trans op, so it reports None (torch fallback).
+
+    trans: 0 = NoTrans, 1 = Trans, 2 = ConjTrans (of the LOGICAL operand).
+    """
+    r, c = x.shape[-2], x.shape[-1]
+    if x.stride(-1) == 1 and x.stride(-2) >= max(c, 1):
+        return trans, x.stride(-2), x.stride(0)
+    if x.stride(-2) == 1 and x.stride(-1) >= max(r, 1):
+        if trans == 2:
+            return None
+        return (1 - trans), x.stride(-1), x.stride(0)
+    return None
 
 
 def _torch_zbmm(
@@ -130,7 +163,7 @@ def zbmm(
     requires the ``.so`` (raises if missing), "auto" (default) uses it when
     loadable and the operands qualify, else falls back to torch silently.
     """
-    global _ROUTED
+    global _ROUTED, _N_NATIVE, _N_FALLBACK
     mode = _mode()
     if mode == "off":
         return _torch_zbmm(a, b, conj_b_t=conj_b_t, t_a=t_a)
@@ -144,17 +177,21 @@ def zbmm(
                 "GRADWAVE_BLAS_GEMM=on but the native library is not built at "
                 f"{_so_path()} — {_BUILD_HINT}")
         _ROUTED = False
+        _N_FALLBACK += 1
         return _torch_zbmm(a, b, conj_b_t=conj_b_t, t_a=t_a)
 
-    if not _native_ok(a, b):
+    plan_a = _plan(a, 1 if t_a else 0) if _native_ok(a, b) else None
+    plan_b = _plan(b, 2 if conj_b_t else 0) if plan_a is not None else None
+    if plan_a is None or plan_b is None:
         _ROUTED = False
+        _N_FALLBACK += 1
         return _torch_zbmm(a, b, conj_b_t=conj_b_t, t_a=t_a)
 
     batch = a.shape[0]
     a0, a1 = a.shape[1], a.shape[2]
     b0, b1 = b.shape[1], b.shape[2]
-    # op(a) is (M, K), op(b) is (K, N). Physical column counts (row strides for
-    # row-major storage) are a1 / b1 regardless of the trans flag.
+    # LOGICAL op(a) is (M, K), op(b) is (K, N); the trans codes and lda in the
+    # plans are already expressed against each operand's underlying storage.
     m_ = a1 if t_a else a0
     k_ = a0 if t_a else a1
     n_ = b0 if conj_b_t else b1
@@ -164,8 +201,8 @@ def zbmm(
             f"zbmm shape mismatch: op(a) inner {k_} != op(b) inner {kb} "
             f"(a={tuple(a.shape)}, b={tuple(b.shape)}, "
             f"t_a={t_a}, conj_b_t={conj_b_t})")
-    transa = 1 if t_a else 0
-    transb = 2 if conj_b_t else 0
+    transa, lda, stride_a = plan_a
+    transb, ldb, stride_b = plan_b
 
     out = torch.empty(batch, m_, n_, dtype=torch.complex128)
     # BLAS threading follows torch's intra-op setting: the SCF k-parallel
@@ -175,10 +212,11 @@ def zbmm(
     fn(
         int(batch), int(m_), int(n_), int(k_), int(transa), int(transb),
         int(torch.get_num_threads()),
-        int(a1), int(b1), int(a0 * a1), int(b0 * b1), int(m_ * n_),
+        int(lda), int(ldb), int(stride_a), int(stride_b), int(m_ * n_),
         ctypes.c_void_p(a.data_ptr()),
         ctypes.c_void_p(b.data_ptr()),
         ctypes.c_void_p(out.data_ptr()),
     )
     _ROUTED = True
+    _N_NATIVE += 1
     return out
