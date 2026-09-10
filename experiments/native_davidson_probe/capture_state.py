@@ -40,11 +40,14 @@ HERE = Path(__file__).parent
 
 # small: 2-atom fcc Si primitive cell (deep latency-bound regime)
 # medium: 8-atom conventional diamond cell
+# al-small / al-medium: fcc Al, smeared Fermi-Dirac (the metal control —
+# more bands per atom, more Davidson rounds, smearing-driven occupations)
+A_AL = 4.05
 CONFIGS = {
     "small": dict(
         cell=A / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]]),
         pos=np.array([[0.0, 0, 0], [A / 4] * 3]),
-        kmesh=(4, 4, 4),
+        kmesh=(4, 4, 4), pseudo="Si_ONCV_PBE-1.2.upf", smearing="none",
     ),
     "medium": dict(
         cell=A * np.eye(3),
@@ -52,7 +55,18 @@ CONFIGS = {
             [[0.0, 0, 0], [0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0.5, 0],
              [0.25, 0.25, 0.25], [0.25, 0.75, 0.75], [0.75, 0.25, 0.75],
              [0.75, 0.75, 0.25]]),
-        kmesh=(2, 2, 2),
+        kmesh=(2, 2, 2), pseudo="Si_ONCV_PBE-1.2.upf", smearing="none",
+    ),
+    "al-small": dict(
+        cell=A_AL / 2 * np.array([[0.0, 1, 1], [1, 0, 1], [1, 1, 0]]),
+        pos=np.array([[0.0, 0, 0]]),
+        kmesh=(8, 8, 8), pseudo="Al_ONCV_PBE-1.2.upf", smearing="fermi-dirac",
+    ),
+    "al-medium": dict(
+        cell=A_AL * np.eye(3),
+        pos=A_AL * np.array(
+            [[0.0, 0, 0], [0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0.5, 0]]),
+        kmesh=(4, 4, 4), pseudo="Al_ONCV_PBE-1.2.upf", smearing="fermi-dirac",
     ),
 }
 
@@ -65,9 +79,9 @@ class _Stop(Exception):
 
 def capture(tag: str) -> None:
     cfg = CONFIGS[tag]
-    si = parse_upf(ROOT / "tests/fixtures/qe/pseudos/Si_ONCV_PBE-1.2.upf")
+    pp = parse_upf(ROOT / "tests/fixtures/qe/pseudos" / cfg["pseudo"])
     system = setup_system(
-        cfg["cell"], cfg["pos"], [0] * len(cfg["pos"]), [si],
+        cfg["cell"], cfg["pos"], [0] * len(cfg["pos"]), [pp],
         ecut=30 * RY, kmesh=cfg["kmesh"])
 
     import gradwave.solvers.registry as registry
@@ -96,7 +110,8 @@ def capture(tag: str) -> None:
 
     registry.get = hooked_get
     try:
-        scf(system, PBE(), max_iter=CAPTURE_AT_CALL + 2, verbose=False)
+        scf(system, PBE(), smearing=cfg["smearing"], width=0.1,
+            max_iter=CAPTURE_AT_CALL + 2, verbose=False)
     except _Stop:
         pass
     finally:
