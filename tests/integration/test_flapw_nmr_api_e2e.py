@@ -60,10 +60,14 @@ def test_rutile_tio2_efg_end_to_end(tmp_path):
     o = next(s for s in nmr["sites"] if s["species"] == "O")
 
     # regression pin (deterministic muffin-tin smoke config; rtol tolerates
-    # cross-machine BLAS drift while catching a real wiring/physics regression)
-    assert o["V_zz_eV_ang2"] == pytest.approx(224.648, rel=2e-2)
-    assert o["eta"] == pytest.approx(0.5254, rel=2e-2)
-    assert ti["V_zz_eV_ang2"] == pytest.approx(-27.675, rel=2e-2)
+    # cross-machine BLAS drift while catching a real wiring/physics regression).
+    # Re-pinned to the Ti-3s-valence DEFAULT (PR #464 follow-up): Ti now freezes
+    # only the [Ne] core and carries 3s/3p semicore LOs by default (n_bands 22→24),
+    # which shifts these self-recorded muffin-tin smoke numbers (they are NOT the
+    # physical EFG — that needs fullpot; sign structure Ti<0, O>0 is preserved).
+    assert o["V_zz_eV_ang2"] == pytest.approx(19.661, rel=2e-2)
+    assert o["eta"] == pytest.approx(0.4281, rel=2e-2)
+    assert ti["V_zz_eV_ang2"] == pytest.approx(-125.836, rel=2e-2)
     assert o["isotope"] == "17O" and ti["isotope"] == "49Ti"
 
     # C_Q wiring reproduces flapw.nmr.quadrupolar_coupling exactly
