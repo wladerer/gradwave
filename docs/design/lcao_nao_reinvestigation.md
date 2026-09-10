@@ -78,21 +78,75 @@ Two structural observations beyond the headline gap:
   the SAD→converged density relaxation dominates the iteration count in both
   regimes.
 
-**Verdict (Door A): the ceiling is large — 6–7 of 10–11 iterations (~60%) are
-density relaxation.** Well above the ≤2-iter kill threshold; the door is alive.
-Caveats before celebrating: (a) this is the *perfect*-density limit — an
-LCAO-quality draft density lands somewhere between SAD and converged (a minimal
-basis has no interstitial variational freedom), so the realizable fraction of
-the 6–7 iters is unknown and could plausibly be half or less; (b) the iterations
-saved are the *early, cheap* ones (loose adaptive Davidson tolerances), so
-wall-time savings < iteration savings; (c) the LCAO draft SCF is cheap on the
-eigensolve side (dim ~50–500) but still pays grid-side Hartree/XC FFTs per draft
-iteration, which must be counted. The honest next probe, if pursued: measure the
-realizable fraction with a *cheap approximate* density that needs no new code —
-e.g. a 3–4-iteration half-ecut PW draft SCF on the same FFT grid, density handed
-over via the same `start_from` dict. If a sloppy draft density recovers most of
-the 6-iter gap, an LCAO basis is unnecessary; if it recovers little, LCAO won't
-do better either.
+**Interim verdict (ceiling): 6–7 of 10–11 iterations (~60%) are density
+relaxation** — well above the ≤2-iter kill threshold, so the ceiling alone left
+the door open, pending the realizable-fraction probe below.
+
+### The realizable-fraction probe (the decider) — measured, and it kills the door
+
+The ceiling is the *perfect*-density limit. The decider is how much of it an
+*imperfect* cheap draft density recovers. Probe (same systems, same
+iteration-count-only discipline, asus nice 19, no wall-time claim), two draft
+flavors handed over via the same density-only `start_from` dict:
+
+- **F1** — full-ecut draft capped at 2/3 SCF iterations (no resampling), then a
+  fresh full-tolerance polish.
+- **F2** — half-ecut draft run to (loose 1e-6) convergence on its own coarser
+  grid, density Fourier-resampled onto the full grid (`r_to_g` → G-embed →
+  `g_to_r_box`, clamped positive, electron count renormalized), then polished.
+
+| system | flavor | draft it | polish it | total vs cold | gap recovered |
+|---|---|---|---|---|---|
+| Al-4 | F1 cap=2 | 2 | 8 | 10 vs 10 | 2/6 |
+| Al-4 | F1 cap=3 | 3 | 7 | 10 vs 10 | 3/6 |
+| Al-4 | F2 20 Ry (21³→32³) | 9 | **49** | 58 vs 10 | **−39/6** |
+| Si-8 | F1 cap=2 | 2 | 10 | 12 vs 11 | 1/7 |
+| Si-8 | F1 cap=3 | 3 | 9 | 12 vs 11 | 2/7 |
+| Si-8 | F2 15 Ry (25³→35³) | 10 | 11 | 21 vs 11 | **0/7** |
+
+All polishes converge to the same E as cold (Al −7529.504954, Si −857.107038 eV).
+
+Readings:
+
+- **F1: draft iterations convert one-for-one (or worse) into polish
+  iterations.** Al totals exactly cold's 10 either way; Si is cold+1. A capped
+  full-ecut draft *is* the cold trajectory's own first iterations — there is
+  nothing to skip and no cheaper way to buy them. Zero net win before any wall
+  accounting.
+- **F2: a *fully self-consistent* density at half ecut recovers NOTHING** —
+  Si's polish takes exactly the cold count (11), and on the metal it is
+  actively harmful (49 iterations; a charge-sloshing-prone metal handed a
+  density whose high-G content is zeroed). Mechanism: the resampled draft
+  density is spectrally truncated — no components beyond the coarse box —
+  while SAD is spectrally *complete* (atomic densities carry the full
+  near-core high-G structure). The SCF evidently cares more about that
+  high-G/near-core content than about low-G self-consistency, so a low-cutoff
+  draft is a *worse* start than SAD despite being "self-consistent". (Caveat:
+  F2's clamp+renormalize could contribute to the Al pathology; Si's clean 0/7
+  is the load-bearing null either way.)
+
+Wall accounting (rough, not a claim): F1 needs none — iteration totals are
+already ≥ cold at equal per-iteration cost, so no wall saving is possible. F2's
+coarse draft iterations are ~3.5× cheaper (grid-point ratio), so 9–10 coarse ≈
+3 fine-equivalents, set against a polish that is 1× (Si) to 5× (Al) the
+*entire* cold run. Nothing here plausibly survives as any wall saving, let
+alone >20%. The `bandpar` ladder lock was live throughout (box load ~9), so no
+timed A/B was run; none is needed for this verdict.
+
+**Verdict (Door A): NO-GO — measured closed.** The 60% perfect-density ceiling
+is real but unreachable by any cheap draft: the basin around the converged
+density is narrow, and a draft density must be accurate *including its high-G
+near-core structure* to beat SAD at all. A minimal-basis LCAO density is far
+cruder than a converged half-ecut PW density (no interstitial variational
+freedom, shape-constrained radials) — if half-ecut PW recovers 0/7, LCAO will
+not do better. This also disposes of the fallback of shipping the cheap draft
+itself as a `scf.draft` convenience knob: it is neutral-to-negative, so there
+is nothing to ship. What the ceiling experiment *actually* certifies is the
+value of a **full-accuracy donor density** — the already-shipped warm-start
+uses (checkpoint restarts, `adsorbate_warm_start_seed`, density carry-over
+across adjacent EOS/phonon configurations), whose donors are full-ecut
+self-consistent densities and do collect the 6–7-iteration win (full-restart =
+4 and 2 above).
 
 ### What other codes report
 
@@ -181,30 +235,29 @@ exist in the loop yet.
 
 ## Recommendations (ranked)
 
-1. **Door A — measured ceiling is 6–7 of 10–11 iterations (~60%): PROBE NEXT,
-   but with the zero-code draft first.** The plumbing is already 100% present
-   (`start_from` + `warm_start_densities` accept a density-only dict). Before
-   writing any LCAO code, run the half-ecut PW draft probe above to measure the
-   *realizable* fraction of the ceiling with an imperfect density. Build the
-   LCAO draft only if (i) the cheap draft leaves most of the gap on the table
-   AND (ii) a wall-time (not just iteration-count) projection survives the
-   early-iterations-are-cheap caveat. Effort: probe ~half a day on asus;
-   LCAO draft SCF proper ~1–2 weeks (radial NAO generator + crystal S/H
-   assembly + generalized eigensolve + density on the FFT grid).
-2. **Door B — confined-NAO generator. BUILD (conditional).** A genuine
-   capability win (PDOS/COHP/d-band-center for any pseudo), not perf, so it is
-   not subject to any warm-start ceiling. Recommended scope: frozen-potential
-   radial solver + SIESTA-style confinement first (~200–400 LOC), validated
-   against PSWFC-bearing pseudos; escalate to atomic SCF only if the
-   frozen-potential orbitals miss the projection bar. Condition: confirm real
-   user demand for projections on PSWFC-less pseudos beyond the current
-   PseudoDojo workaround. Effort: ~2–4 days frozen-potential, ~1–1.5 weeks with
-   atomic SCF + validation.
+1. **Door B — confined-NAO generator. BUILD (conditional) — the only live
+   door.** A genuine capability win (PDOS/COHP/d-band-center for any pseudo),
+   not perf, so it is untouched by the Door-A negative. Recommended scope:
+   frozen-potential radial solver + SIESTA-style confinement first (~200–400
+   LOC), validated against PSWFC-bearing pseudos; escalate to atomic SCF only
+   if the frozen-potential orbitals miss the projection bar. Condition:
+   confirm real user demand for projections on PSWFC-less pseudos beyond the
+   current PseudoDojo workaround. Effort: ~2–4 days frozen-potential, ~1–1.5
+   weeks with atomic SCF + validation.
+2. **Door A — LCAO draft-density → PW handoff. NO-GO, measured closed (both
+   halves).** The perfect-density ceiling is large (6–7 of 10–11 iterations),
+   but the realizable-fraction probe shows no cheap draft collects it: capped
+   full-ecut drafts convert one-for-one (zero net), and a converged half-ecut
+   density recovers 0/7 (Si) and is harmful on the metal. Do not build the
+   LCAO draft SCF; do not ship a `scf.draft` knob. The measured gap instead
+   quantifies the value of the *existing* full-accuracy warm-start paths
+   (restarts, adsorbate seeding, sweep carry-over) — invest there, not in
+   drafts.
 3. **Door C — CheFSI NAO bootstrap. DO NOT BUILD.** First-step-only ceiling +
    unreachable regime. Reassess only when large-nb slab CheFSI is benchmarkable.
 
-Note that Doors A and B **share the same missing component** — a radial
-pseudo-atom solver with confinement. If Door B is built, Door A's incremental
-cost drops to just the crystal-level LCAO assembly + generalized eigensolve, so
-the two decisions are coupled: build B first, and B's radial solver de-risks and
-cheapens any later A prototype.
+(Doors A and B would have shared a radial pseudo-atom solver, but with Door A
+measured closed the coupling is moot: build Door B's solver for the projection
+layer on its own merits, and do not treat it as a stepping stone toward an LCAO
+draft SCF — the realizable-fraction probe already showed there is nothing on
+the other side.)
