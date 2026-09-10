@@ -138,6 +138,23 @@ sees `WORLD_SIZE=1` and runs the ordinary single-process path unchanged.
 
 ## How to launch
 
+**One YAML line (single box).** `distributed: N` (an int rank count, N ≥ 2)
+makes the CLI self-launch: `gradwave input.yaml` re-execs itself through
+`torch.distributed.run --standalone --nproc_per_node=N` and the child ranks
+run the sharded SCF — no torchrun invocation to remember. This is the
+recommended way to use a multi-core box: the batched CPU eigensolve has no
+intra-op thread scaling at small/medium sizes (measured 8 threads == 1
+thread), while N single-thread-pinned rank processes parallelize the whole
+iteration — measured 6.6× (Al-4, 4³ mesh) to 12× (Al-1, 8³ mesh) end-to-end
+wall with converged free energies identical to the serial run. Per-rank
+threads default to `cores//N` (capped 8) via `GRADWAVE_NUM_THREADS` unless
+you set it. N must not exceed the (IBZ-reduced) k-point count — the shard
+step fails fast with the count in the message. `distributed: true` keeps the
+legacy contract below (you launch torchrun; the env decides the layout).
+
+Everything below — the manual torchrun forms — remains for multi-node runs
+and for launcher environments that manage torchrun themselves.
+
 Distributed mode is driven by `torchrun`'s environment variables
 (`RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT`), read by
 `gradwave.distributed.init_from_env()` exactly the way any other torchrun job

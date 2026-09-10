@@ -77,8 +77,28 @@ def _run_scf(
         from gradwave.distributed import init_from_env, shard_system, shard_uspp_system
 
         info = init_from_env()
+        if info is None and type(inp.distributed) is not bool:
+            # int rank count reached the api WITHOUT a torchrun env: only the
+            # CLI self-launches (cli._maybe_relaunch_ranks). Refuse rather
+            # than silently running serial — the user asked for N ranks.
+            raise RuntimeError(
+                f"distributed: {inp.distributed} (local ranks) requires the "
+                "CLI (`gradwave input.yaml`, which self-launches torchrun) "
+                "or an explicit torchrun launch — a plain api.run()/run_scf() "
+                "call has no rank environment to shard over")
         if info is not None:
             rank, world_size, group = info
+            # `distributed: N` (int local-rank count) under an EXISTING
+            # torchrun env must agree with the launched world size — a
+            # mismatch means the user asked for one layout and launched
+            # another (the CLI self-launch always matches; a manual torchrun
+            # with a stale YAML is the case this catches).
+            if type(inp.distributed) is not bool and int(inp.distributed) != world_size:
+                raise ValueError(
+                    f"distributed: {inp.distributed} (local ranks) does not "
+                    f"match the launched torchrun world size {world_size} — "
+                    "either fix the YAML to the launched rank count or use "
+                    "`distributed: true` to accept the env's layout")
             # symmetry (IBZ) composes with the sharding: shard_* slices the
             # IBZ k-list and the symmetrizers ride along — nothing to gate.
             if uspp:

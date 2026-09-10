@@ -380,8 +380,12 @@ class GradWave(Calculator):
         target_mu: float | None = None,  # constant-potential (grand-canonical) SCF:
         # hold the Fermi level µ [eV] fixed and let the electron count float.
         # Requires boundary="open_z_metal" and a smearing (NC path). None → off.
-        distributed: bool = False,  # opt into k-point-sharded distributed SCF
-        # (gradwave.distributed) for every ionic step. Under an active torchrun
+        distributed: bool | int = False,  # opt into k-point-sharded distributed
+        # SCF (gradwave.distributed) for every ionic step. An int rank count
+        # (the Input's `distributed: N` self-launch form) is accepted and
+        # treated by truthiness — by the time a calculator exists the CLI has
+        # already re-exec'd through torchrun, so the env decides the layout
+        # here exactly as with True. Under an active torchrun
         # launch (WORLD_SIZE>1) each calculate() diagonalizes only this rank's
         # k-shard, all-reduces the density/energy, and reassembles a full-mesh
         # result so forces/stress come out identical on every rank. A no-op

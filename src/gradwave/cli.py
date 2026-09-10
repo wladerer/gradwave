@@ -252,6 +252,44 @@ def _print_nmr(nmr: dict[str, Any]) -> int:
     return 0 if conv else 1
 
 
+def _maybe_relaunch_ranks(inp: Input) -> int | None:
+    """Self-launch torchrun for ``distributed: N`` (int local-rank count).
+
+    ``distributed: true`` (bool) is the legacy contract — the user launched
+    torchrun themselves and the rank layout comes from its env. An int N asks
+    for N LOCAL ranks: when this process is not already under torchrun
+    (no rank env), re-exec the identical CLI invocation through
+    ``torch.distributed.run --standalone --nproc_per_node=N``; the child
+    processes see the same YAML, land in this same code path WITH the rank
+    env set, and proceed straight into the sharded SCF. Returns None to
+    continue in-process (already under torchrun, or not requested); os.execv
+    does not return.
+
+    Per-rank thread default: torchrun exports OMP_NUM_THREADS=1; gradwave's
+    own thread default is set explicitly to cores//N (floor 1, cap 8 — the
+    measured intra-op sweet spot) unless the user already chose."""
+    import os
+
+    n = inp.distributed
+    if type(n) is bool or not isinstance(n, int) or n < 2:
+        return None
+    from gradwave.distributed import is_distributed_env
+
+    if is_distributed_env():
+        return None
+    if os.environ.get("GRADWAVE_NUM_THREADS") is None:
+        per_rank = max(1, min(8, (os.cpu_count() or n) // n))
+        os.environ["GRADWAVE_NUM_THREADS"] = str(per_rank)
+    argv = [
+        sys.executable, "-m", "torch.distributed.run", "--standalone",
+        f"--nproc_per_node={n}", "-m", "gradwave.cli", *sys.argv[1:],
+    ]
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(sys.executable, argv)
+    raise AssertionError("unreachable: os.execv returned")  # pragma: no cover
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     import dataclasses
 
@@ -263,6 +301,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if rc is not None:
         return rc
     assert inp is not None
+    _maybe_relaunch_ranks(inp)
     if args.output:
         inp = dataclasses.replace(inp, output_dir=Path(args.output))
     if args.restart:
