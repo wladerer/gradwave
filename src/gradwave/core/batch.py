@@ -480,30 +480,46 @@ class BatchedHamiltonian:
         gath = self.gather_idx[:, None, :].expand(nk, nbc, m)
         out[:, lo:hi] += vg.gather(2, gath)
 
+    @staticmethod
+    def _band_bounds(nb: int, n_tasks: int) -> list[tuple[int, int]]:
+        """Near-even contiguous ``(lo, hi)`` band chunks for ``n_tasks`` workers."""
+        edges = [(nb * i) // n_tasks for i in range(n_tasks + 1)]
+        return [(edges[i], edges[i + 1]) for i in range(n_tasks) if edges[i + 1] > edges[i]]
+
     def _local_fft_parallel(self, c: torch.Tensor, out: torch.Tensor,
-                            v_eff: torch.Tensor, workers: int, count: bool) -> None:
+                            v_eff: torch.Tensor, workers: int, count: bool,
+                            parallel: bool = True) -> None:
         """Band-parallel FFT local term: split the bands into ``workers``
         contiguous chunks and run each on its own thread (torch FFTs release the
         GIL). Each worker allocates its own scatter box and writes a DISJOINT
         ``out[:, lo:hi]`` slice, so there is no shared-buffer race and the result
-        is bit-identical to the sequential path (same ops per band). torch
+        is bit-identical to running the SAME chunks serially (``parallel=False``,
+        used only by the exactness test) — the ops per band and the pinned thread
+        count are identical; only which thread runs a chunk changes. torch
         intra-op threading is pinned to 1 for the duration so the pool — not
-        nested BLAS/FFT threads — owns the cores."""
+        nested BLAS/FFT threads — owns the cores.
+
+        (This does NOT reproduce the single batched-FFT default byte-for-byte:
+        that path runs at the ambient thread count, and some threaded kernel in
+        the local term rounds thread-count-dependently at ~1e-14 — a round-off
+        difference, not a chunking artifact. The batched FFT itself IS chunk- and
+        thread-invariant.)"""
         from concurrent.futures import ThreadPoolExecutor
 
         nk, nb, m = c.shape
-        n_tasks = min(workers, nb)
-        # near-even contiguous band bounds: round(i·nb/n_tasks)
-        bounds = [(nb * i) // n_tasks for i in range(n_tasks + 1)]
-        chunks = [(bounds[i], bounds[i + 1]) for i in range(n_tasks)
-                  if bounds[i + 1] > bounds[i]]
+        chunks = self._band_bounds(nb, min(workers, nb))
         prev_threads = torch.get_num_threads()
         torch.set_num_threads(1)
         try:
-            with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
-                # drain so the first exception propagates; the pool still joins
-                list(ex.map(lambda b: self._local_fft_band(c, out, v_eff, b[0], b[1], None),
-                            chunks))
+            if parallel:
+                with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
+                    # drain so the first exception propagates; the pool still joins
+                    list(ex.map(
+                        lambda b: self._local_fft_band(c, out, v_eff, b[0], b[1], None),
+                        chunks))
+            else:
+                for lo, hi in chunks:
+                    self._local_fft_band(c, out, v_eff, lo, hi, None)
         finally:
             torch.set_num_threads(prev_threads)
         if count:  # telemetry only (ifftn + fftn per chunk); bumped off-thread

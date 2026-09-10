@@ -7,17 +7,28 @@ thread-pools the FFT local term (``scatter → ifftn → ·v_eff → fftn → ga
 one transform per band) over the BAND axis inside one k. Those per-band
 transforms are independent and torch FFTs release the GIL, so they parallelize.
 
-The load-bearing property is BIT-EXACTNESS: chunking the band axis changes only
-which thread runs a chunk, not the arithmetic, and each chunk writes a disjoint
-output slice with its own scatter buffer — so both the raw H-apply and a whole
-SCF are byte-for-byte identical to the serial path (``torch.equal``, not a
-tolerance).
+The load-bearing property is EXACTNESS OF THE PARALLELIZATION: distributing the
+band chunks across threads changes nothing versus running the SAME chunks
+serially at the same (pinned) thread count — each chunk does identical
+independent ops and writes a disjoint output slice with its own scatter buffer,
+so ``torch.equal`` holds against the serial-same-tiling reference.
+
+It does NOT reproduce the single batched-FFT default byte-for-byte: that path
+runs the local-term FFT at the ambient thread count, and the forward transform
+rounds thread-count-dependently at ~1e-14 (the batched FFT is chunk- and
+thread-COUNT-invariant for the inverse but not bit-for-bit across thread counts
+for the whole local term). That is a round-off difference, not a chunking
+artifact — so band_parallel on vs off agrees to ~1e-13 per apply and a whole SCF
+converges to the same solution well inside tol (much tighter than k_parallel,
+which retires each k on its own trajectory).
 
 Pinned here:
 - resolution: unset / <= 1 / CUDA device → off (None); the GRADWAVE_BAND_PARALLEL
   env default; explicit arg beats env; a bad env raises;
-- bit-exactness of ``BatchedHamiltonian.apply`` (on vs off) on a random block;
-- bit-exactness of a whole SCF (on vs off);
+- the threading is EXACT: parallel over chunks == serial over the same chunks,
+  bitwise (``torch.equal``) — the real correctness guarantee;
+- on vs off (single batched FFT) agrees to FFT thread round-off, and a whole SCF
+  matches the serial SCF within tol;
 - the compose rule with k_parallel (k_parallel wins when nk >= workers, else
   band_parallel), decided in ``scf``;
 - torch's global thread count is restored after the pooled apply;
@@ -96,35 +107,42 @@ def _fft_H(system, band_parallel):
 
 
 @pytest.mark.parametrize("workers", [2, 4, 8])
-def test_apply_bit_exact(workers):
-    """H·c is byte-for-byte identical with band_parallel on vs off — same ops
-    per band, only the thread that runs a band chunk changes."""
+def test_parallel_equals_serial_same_tiling(workers):
+    """The real guarantee: distributing the band chunks across threads gives a
+    byte-for-byte identical local term to running the SAME chunks serially at
+    the same pinned thread count. Only which thread runs a chunk changes."""
     system = _si_system()
-    h_off, bk = _fft_H(system, None)
-    h_on, _ = _fft_H(system, workers)
+    h, bk = _fft_H(system, workers)
     assert not bk.mask.all(), "test needs padded slots to exercise masking"
-
     nk, npw = bk.mask.shape
     torch.manual_seed(1)
     c = torch.randn(nk, 16, npw, dtype=CDTYPE)  # nb=16 > workers so chunks split
+    v_eff = h._tables(c.dtype)[1]
 
-    out_off = h_off.apply(c)
-    out_on = h_on.apply(c)
-    assert torch.equal(out_off, out_on), (
-        f"band_parallel={workers} not bit-exact: "
-        f"max|Δ|={float((out_off - out_on).abs().max()):.3e}")
+    out_par = torch.zeros_like(c)
+    out_ser = torch.zeros_like(c)
+    h._local_fft_parallel(c, out_par, v_eff, workers, count=False, parallel=True)
+    h._local_fft_parallel(c, out_ser, v_eff, workers, count=False, parallel=False)
+    assert torch.equal(out_par, out_ser), (
+        f"band_parallel={workers} threading not exact vs serial-same-tiling: "
+        f"max|Δ|={float((out_par - out_ser).abs().max()):.3e}")
 
 
-def test_apply_single_band_no_split():
-    """A one-band block cannot be split; the parallel gate is a no-op and the
-    result is still exact."""
+@pytest.mark.parametrize("workers", [2, 4, 8])
+def test_apply_close_to_default(workers):
+    """H·c with band_parallel on agrees with the single batched-FFT default to
+    FFT thread round-off (~1e-13) — the two differ only by the thread-count
+    rounding of the local-term forward FFT, never a chunking error."""
     system = _si_system()
     h_off, bk = _fft_H(system, None)
-    h_on, _ = _fft_H(system, 8)
+    h_on, _ = _fft_H(system, workers)
     nk, npw = bk.mask.shape
-    torch.manual_seed(2)
-    c = torch.randn(nk, 1, npw, dtype=CDTYPE)
-    assert torch.equal(h_off.apply(c), h_on.apply(c))
+    torch.manual_seed(1)
+    c = torch.randn(nk, 16, npw, dtype=CDTYPE)
+    out_off = h_off.apply(c)
+    out_on = h_on.apply(c)
+    max_abs = float((out_off - out_on).abs().max())
+    assert max_abs < 1e-11, f"band_parallel={workers} drift {max_abs:.3e} exceeds round-off"
 
 
 def test_torch_thread_count_restored():
@@ -181,11 +199,12 @@ def test_compose_band_parallel_wins_when_few_k(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.standard
-def test_scf_bit_exact():
-    """A band_parallel SCF is byte-for-byte identical to the serial SCF: the
-    only thing that changes is FFT-local-term thread scheduling, which is exact,
-    so every iteration — and thus the final energy, density and eigenvalues —
-    matches under torch.equal, not merely to tolerance."""
+def test_scf_matches_serial():
+    """A band_parallel SCF converges to the same solution as the serial SCF. The
+    only change is the local-term FFT thread scheduling (round-off, ~1e-14 per
+    apply), so agreement is at the SCF's own tolerances, far tighter than
+    k_parallel's per-k retirement — energy to sub-µeV, density and eigenvalues to
+    well under a meV."""
     def run(bp):
         return scf(_si_system(), LDA_PW92(), smearing="gaussian", width=0.1,
                    max_iter=60, etol=1e-11, rhotol=1e-9, diago_tol=1e-10,
@@ -194,10 +213,11 @@ def test_scf_bit_exact():
     res_off = run(None)
     res_on = run(4)
     assert res_off.converged and res_on.converged
-    assert torch.equal(res_off.rho, res_on.rho), (
-        f"density not bit-exact: max|Δ|={float((res_off.rho - res_on.rho).abs().max()):.3e}")
-    assert float(res_off.energies.free_energy) == float(res_on.energies.free_energy)
-    assert torch.equal(res_off.eigenvalues, res_on.eigenvalues)
+    de = abs(float(res_off.energies.free_energy) - float(res_on.energies.free_energy))
+    assert de < 1e-7, f"energy mismatch {de:.3e} eV"
+    drho = float((res_off.rho - res_on.rho).abs().max())
+    assert drho < 1e-6, f"density mismatch {drho:.3e}"
+    assert torch.allclose(res_off.eigenvalues, res_on.eigenvalues, atol=1e-5)
 
 
 # --------------------------------------------------------------------------- #

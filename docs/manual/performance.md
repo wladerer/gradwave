@@ -96,15 +96,19 @@ the GIL, so they parallelize on a thread pool over the band axis.
 `band_parallel: N` (on the `scf.memory` block, or `GRADWAVE_BAND_PARALLEL`, or
 the `scf(band_parallel=)` kwarg) splits the bands into N contiguous chunks and
 runs each `BatchedHamiltonian` FFT local term on its own thread, with torch
-intra-op threading pinned to 1 for the duration. It is **bit-exact** — each
-band is computed by the identical ops; only which thread runs a chunk changes,
-and each chunk writes a disjoint output slice with its own scatter buffer, so
-there is no race and no arithmetic reordering (asserted in
-`tests/unit/test_band_parallel.py` with `torch.equal` on the eigenvalues and
-wavefunctions). CPU-only (ignored on CUDA; the GPU kernels are already
-back-to-back on one stream). The Rayleigh–Ritz `eigh`/`qr` stay serial — at
-nb≈130 they are a minority of the round; thread those next only if a profile
-says so.
+intra-op threading pinned to 1 for the duration. Each chunk writes a disjoint
+output slice with its own scatter buffer, so there is no race and no arithmetic
+reordering: **distributing the chunks across threads is bit-exact against
+running the same chunks serially** (`torch.equal`, `tests/unit/test_band_parallel.py`).
+It does not reproduce the single batched-FFT default byte-for-byte, though — that
+path runs the local-term FFT at the ambient thread count, and the forward
+transform rounds thread-count-dependently at ~1e-14 (a round-off difference, not
+a chunking error). So on vs off agrees to ~1e-13 per apply, and a whole SCF
+converges to the same solution within tol — far tighter than k_parallel, which
+retires each k on its own trajectory. CPU-only (ignored on CUDA; the GPU kernels
+are already back-to-back on one stream). The Rayleigh–Ritz `eigh`/`qr` stay
+serial — at nb≈130 they are a minority of the round; thread those next only if a
+profile says so.
 
 Composes with `k_parallel`: when both are set, `k_parallel` wins whenever it
 can fill its pool (`nk >= workers`), and `band_parallel` takes over for the
