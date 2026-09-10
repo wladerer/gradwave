@@ -1,0 +1,21 @@
+{
+  "tag": "medium",
+  "nk": 8,
+  "nb": 20,
+  "m": 3016,
+  "threads": 8,
+  "reps": 6,
+  "eager_ms_best": 2051.021746126935,
+  "native_ms_best": 933.3070260472596,
+  "eager_ms_median": 2056.660535512492,
+  "native_ms_median": 937.3571336036548,
+  "speedup_best": 2.1975852413898767,
+  "n_iter": 40,
+  "napply_eager": 3736,
+  "napply_native": 3696,
+  "d_eig": 1.5576873124700796e-11,
+  "d_rn": 8.62164195486522e-06,
+  "agreement_ok": false,
+  "profiler_wall_ms": 2834.6753648947924,
+  "profiler_op_ms": 1893.1259920000111
+}

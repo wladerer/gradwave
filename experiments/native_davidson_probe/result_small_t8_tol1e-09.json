@@ -1,0 +1,21 @@
+{
+  "tag": "small",
+  "nk": 36,
+  "nb": 8,
+  "m": 754,
+  "threads": 8,
+  "reps": 10,
+  "eager_ms_best": 876.4612760860473,
+  "native_ms_best": 224.74376298487186,
+  "eager_ms_median": 884.1737100156024,
+  "native_ms_median": 227.08702646195889,
+  "speedup_best": 3.899824691219771,
+  "n_iter": 32,
+  "napply_eager": 5976,
+  "napply_native": 5976,
+  "d_eig": 9.237055564881302e-14,
+  "d_rn": 1.2627944984524726e-11,
+  "agreement_ok": true,
+  "profiler_wall_ms": 1597.0640981104225,
+  "profiler_op_ms": 760.1301720000008
+}
