@@ -127,13 +127,17 @@ static void h_apply(const ctx_t *cx, const c128 *c, c128 *out, int64_t nbc,
  * (m, rows) transpose. Returns 0, or -1 on a (near-)zero row (jitter path
  * in the reference — out of probe scope).                              */
 
-static int qr_rows(c128 *x, int64_t rows, int64_t m, c128 *ws_t) {
-    /* transpose into ws_t (m, rows) row-major */
+static int qr_rows(c128 *x, int64_t rows, int64_t m, c128 *ws_t, c128 *r_out) {
+    /* transpose into ws_t (m, rows) row-major; optionally return R (rows,rows) */
     for (int64_t j = 0; j < rows; j++)
         for (int64_t g = 0; g < m; g++) ws_t[g * rows + j] = x[j * m + g];
     c128 *tau = malloc(sizeof(c128) * (size_t)rows);
     int info = LAPACKE_zgeqrf(LAPACK_ROW_MAJOR, (int)m, (int)rows, ws_t,
                               (int)rows, tau);
+    if (info == 0 && r_out != NULL)
+        for (int64_t i = 0; i < rows; i++)
+            for (int64_t j = 0; j < rows; j++)
+                r_out[i * rows + j] = j >= i ? ws_t[i * rows + j] : 0.0;
     if (info == 0)
         info = LAPACKE_zungqr(LAPACK_ROW_MAJOR, (int)m, (int)rows, (int)rows,
                               ws_t, (int)rows, tau);
@@ -309,7 +313,7 @@ int davidson_native(
             if (cnt > n_add) n_add = cnt;
         }
         if (rnmax < tol) break;
-        if (dim + n_add > max_dim) { ret = -3; goto done; }
+        int restart = (dim + n_add > max_dim);
 
         /* ---- expansion: top-n_add residuals, Teter, ortho, append ---- */
         for (int64_t k = 0; k < nk; k++) {
@@ -351,12 +355,31 @@ int davidson_native(
                 if (nrm > 1e-300)
                     for (int64_t g = 0; g < m; g++) db[g] /= nrm;
             }
-            /* mask, project against V (2 passes), degenerate check, QR */
+            /* restart: collapse the basis to the (re-orthonormalized) Ritz
+             * block, transform its images by the same triangular factor
+             * (x_old = R^T x_new  =>  hx_new = (R^T)^{-1} hx_old), and ortho
+             * d against the collapsed block instead of the full V. */
+            c128 *Vk = V + k * max_dim * m;
+            c128 *HVk = HV + k * max_dim * m;
+            int64_t against_dim = dim;
+            if (restart) {
+                memcpy(Vk, Xk, sizeof(c128) * (size_t)(nb * m));
+                if (qr_rows(Vk, nb, m, qr_ws, gram_ws /* R (nb,nb) */) != 0) {
+                    ret = -2; goto done;
+                }
+                memcpy(HVk, HXk, sizeof(c128) * (size_t)(nb * m));
+                const c128 done_ = 1.0;
+                cblas_ztrsm(CblasRowMajor, CblasLeft, CblasUpper, CblasTrans,
+                            CblasNonUnit, (int)nb, (int)m, &done_, gram_ws,
+                            (int)nb, HVk, (int)m);
+                against_dim = nb;
+            }
+            /* mask, project (2 passes), degenerate check, QR */
             const uint8_t *mk = mask + k * m;
             for (int64_t i = 0; i < n_add; i++)
                 for (int64_t g = 0; g < m; g++)
                     if (!mk[g]) Dk[i * m + g] = 0.0;
-            project_out(Dk, V + k * max_dim * m, n_add, dim, m, gram_ws);
+            project_out(Dk, Vk, n_add, against_dim, m, gram_ws);
             for (int64_t i = 0; i < n_add; i++) {
                 double s = 0;
                 for (int64_t g = 0; g < m; g++) {
@@ -365,19 +388,19 @@ int davidson_native(
                 }
                 if (sqrt(s) < 1e-8) { ret = -1; goto done; }
             }
-            if (qr_rows(Dk, n_add, m, qr_ws) != 0) { ret = -2; goto done; }
+            if (qr_rows(Dk, n_add, m, qr_ws, NULL) != 0) { ret = -2; goto done; }
             /* append to V; H-apply into HV */
-            memcpy(V + (k * max_dim + dim) * m, Dk,
+            memcpy(Vk + against_dim * m, Dk,
                    sizeof(c128) * (size_t)(n_add * m));
             ctx_t ck1 = cx; ck1.nk = 1;
             ck1.t = tk; ck1.mask = mk;
             ck1.idx_sc = idx_sc + k * m; ck1.idx_ga = idx_ga + k * m;
             ck1.p = p + k * nproj * m;
-            h_apply(&ck1, V + (k * max_dim + dim) * m,
-                    HV + (k * max_dim + dim) * m, n_add, becp_ws, tmp_ws);
+            h_apply(&ck1, Vk + against_dim * m, HVk + against_dim * m,
+                    n_add, becp_ws, tmp_ws);
         }
         napply += nk * n_add;
-        dim += n_add;
+        dim = (restart ? nb : dim) + n_add;
     }
 
     memcpy(x_out, X, sizeof(c128) * (size_t)(nk * nb * m));
