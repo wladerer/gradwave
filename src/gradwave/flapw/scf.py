@@ -69,18 +69,96 @@ _CORE = {"He": [], "Be": [(0, 1, 2)], "O": [(0, 1, 2)], "Ne": [(0, 1, 2)],
          # Si: freeze the [Ne] core (1s,2s,2p); 3s,3p are valence. The frozen 2p is the XPS
          # Si 2p core level (l=1, nidx=1 -> label "2p") used for the Si-vs-SiO2 chemical shift.
          "Si": [(0, 1, 2), (0, 2, 2), (1, 1, 6)],
-         # Ti: freeze 1s2s3s2p; 3p is SEMICORE and stays in the valence (its EFG contribution is
-         # comparable to the valence one — frozen 3p gives a badly wrong Ti EFG). Only the l=1
-         # energy parameter linearizes at 3p (Ti 4p is empty), which captures the 3p response.
-         "Ti": [(0, 1, 2), (0, 2, 2), (0, 3, 2), (1, 1, 6)]}
+         # Ti (3s-valence default, PR #464 follow-up): freeze only the [Ne] core (1s,2s,2p); 3s
+         # AND 3p are SEMICORE and stay in the valence, each carried by a confined local orbital
+         # (see SEMICORE_LO / flapw_semicore_defaults, auto-injected for Ti in _multi_setup).
+         # Elk's Ti.in freezes exactly 1s/2s/2p and keeps 3s/3p/3d/4s valence with semicore LOs;
+         # treating 3s as valence reproduces Elk's Ti in-sphere charge (18.75 e, not 19.52 e) and
+         # flips the within-cell O1s XPS Madelung shift to the correct positive sign.
+         "Ti": [(0, 1, 2), (0, 2, 2), (1, 1, 6)]}
 _N_VAL_BANDS = {"He": 1, "Be": 1, "O": 3, "Ne": 4, "Si": 4, "Ti": 9}
-_VAL_E = {"He": 2, "Be": 2, "O": 6, "Ne": 8, "Si": 4, "Ti": 10}  # valence e⁻ (Z − frozen core)
+# valence e⁻ (Z − frozen core). Ti = 3s²3p⁶3d²4s² = 12 (3s-valence default; was 10 with a frozen
+# 3s). The multi-sphere path reads this; single-atom crystal_scf uses _N_VAL_BANDS instead.
+_VAL_E = {"He": 2, "Be": 2, "O": 6, "Ne": 8, "Si": 4, "Ti": 12}
 # LAPW energy-parameter orbital per angular momentum: the crystal valence linearization point for
 # each l (the atomic KS eigenvalue used to build u_l/u̇_l). Second-row atoms use 2s/2p; Ti uses
-# 4s/3p/3d (l=1 at the 3p semicore, since 4p is empty). A missing l falls back to a default.
+# 4s/3p/3d. With the 3s-valence default the l=1 point moves off the now-LO-carried 3p up to 3d
+# (Ti 4p is empty) — supplied as the el_override in SEMICORE_LO, so this base entry is unchanged
+# and a run without the semicore LOs still linearizes l=1 at 3p. A missing l falls back to −5 eV.
 _VALENCE_NL = {"He": {0: "1s"}, "Be": {0: "2s"}, "O": {0: "2s", 1: "2p"},
                "Ne": {0: "2s", 1: "2p"}, "Si": {0: "3s", 1: "3p"},
                "Ti": {0: "4s", 1: "3p", 2: "3d"}}
+
+# Curated semicore-local-orbital table. ONE declarative per-element statement — which closed
+# semicore shells become valence (each as a confined LAPW+LO), over which frozen core, with which
+# l-channel linearization moved up — from which flapw_semicore_defaults derives the four coupled
+# crystal_scf_multi kwargs (los / core / val_e / el_override). Curated, NOT a runtime energy-gap
+# rule: a blind gap rule over-promotes (it flags Si 2p, which must stay frozen). Only Ti is
+# tabulated (and default-on, see _SEMICORE_DEFAULT_SPECIES); multi-element expansion is a separate
+# per-element conditioning exercise — e.g. the O 2s semicore LO hard-errors (E_l≈E₂ zero-norm) on
+# the current radial solver, so O is deliberately absent.
+SEMICORE_LO: dict[str, dict[str, Any]] = {
+    "Ti": {
+        "z": 22,
+        "core": [(0, 1, 2), (0, 2, 2), (1, 1, 6)],   # freeze the [Ne] core (1s,2s,2p) only
+        "los": [(0, "3s"), (1, "3p")],               # 3s,3p promoted to valence as confined LOs
+        "el_override": {1: "3d"},                    # l=1 linearizes at 3d once 3p is an LO
+    },
+}
+# Species whose SEMICORE_LO entry is applied by DEFAULT (a plain FLAPW run is 3s-valence for them).
+_SEMICORE_DEFAULT_SPECIES: frozenset[str] = frozenset({"Ti"})
+
+
+def flapw_semicore_defaults(
+    symbol: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Derive the four coupled ``crystal_scf_multi`` kwargs for a semicore-valence FLAPW setup of
+    ``symbol`` from its curated ``SEMICORE_LO`` entry — the Blaha/Schwarz-style treatment where the
+    closed semicore shells are promoted from the frozen core into the valence, each carried by a
+    confined local orbital. Returns ``(los, core, val_e, el_override)``, each a ``{symbol: ...}``
+    dict ready to pass (or merge) into ``crystal_scf_multi``:
+
+    * ``los`` — ``{symbol: [(l, shell), ...]}`` a confined LO per promoted semicore shell,
+    * ``core`` — ``{symbol: [...]}`` the reduced frozen core (the promoted shells removed),
+    * ``val_e`` — ``{symbol: Z − frozen}`` the raised valence-electron count,
+    * ``el_override`` — ``{symbol: {l: shell}}`` the moved l-channel linearization energies.
+
+    For Ti this reproduces the manual semicore config byte-for-byte
+    (``experiments/autoapw/run_tio2.py``). Raises ``KeyError`` for an untabulated element."""
+    spec = SEMICORE_LO[symbol]
+    frozen_e = sum(occ for _, _, occ in spec["core"])
+    return (
+        {symbol: [tuple(lo) for lo in spec["los"]]},
+        {symbol: [tuple(c) for c in spec["core"]]},
+        {symbol: spec["z"] - frozen_e},
+        {symbol: dict(spec["el_override"])},
+    )
+
+
+def _apply_semicore_defaults(present, los, core, val_e, el_override, auto_semicore):
+    """Layer the curated semicore-LO defaults under the caller's kwargs. Ti is default-on
+    (``_SEMICORE_DEFAULT_SPECIES``); ``auto_semicore=True`` additionally opts in every other
+    ``SEMICORE_LO`` species present. A species the caller already referenced in ANY of
+    ``los``/``core``/``val_e``/``el_override`` is left ENTIRELY to the caller — explicit control
+    wins with no partial layering (so a manual semicore config is untouched, and a manual
+    frozen-core config is honoured). Returns the possibly-augmented four kwargs."""
+    want = set(_SEMICORE_DEFAULT_SPECIES)
+    if auto_semicore:
+        want |= set(SEMICORE_LO)
+    want &= set(present)
+    if not want:
+        return los, core, val_e, el_override
+    los, core = dict(los or {}), dict(core or {})
+    val_e, el_override = dict(val_e or {}), dict(el_override or {})
+    for s in sorted(want):
+        if s not in SEMICORE_LO or s in los or s in core or s in val_e or s in el_override:
+            continue
+        d_los, d_core, d_val_e, d_el = flapw_semicore_defaults(s)
+        los.update(d_los)
+        core.update(d_core)
+        val_e.update(d_val_e)
+        el_override.update(d_el)
+    return (los or None, core or None, val_e or None, el_override or None)
 
 # Local-orbital overlap conditioning: valence-orthogonalize an LO when the fraction of its norm
 # orthogonal to span{u, u̇} falls below this (its confined form is then near-linearly-dependent on
@@ -1183,7 +1261,8 @@ def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax:
                  core=None, el_override=None, kworkers: int = 1, subspace_reuse: bool = False,
                  subspace_tol: float = 1e-4, cell=None, kerker: float | None = None,
                  shift_invert: bool | str = "auto", lo_cond_tol: float = _LO_COND_TOL,
-                 verbose: bool = False, mask_interstitial: bool = False) -> _MultiCtx:
+                 verbose: bool = False, mask_interstitial: bool = False,
+                 auto_semicore: bool = False) -> _MultiCtx:
     """The state-independent setup phase of ``crystal_scf_multi`` (see ``_MultiCtx``).
     Argument semantics and validation are exactly the public entry point's."""
     mask_interstitial = bool(mask_interstitial
@@ -1215,6 +1294,10 @@ def _multi_setup(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, lmax:
     atoms_cart = [(np.asarray(f, dtype=float) @ A, sym) for f, sym in atoms]
     keys = [f"a{i}" for i in range(len(atoms))]
     syms = [sym for _, sym in atoms]
+    # Layer the curated semicore-LO defaults (Ti default-on; auto_semicore opts in others) UNDER
+    # the caller's explicit kwargs — a species already referenced by the caller is left untouched.
+    los, core, val_e, el_override = _apply_semicore_defaults(
+        set(syms), los, core, val_e, el_override, auto_semicore)
     val_e_map = dict(_VAL_E)
     val_e_map.update(val_e or {})
     core_map = dict(_CORE)
@@ -1867,7 +1950,8 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                       v_start=None, kworkers: int = 1, subspace_reuse: bool = False,
                       subspace_tol: float = 1e-4, cell=None, kerker: float | None = None,
                       shift_invert: bool | str = "auto", lo_cond_tol: float = _LO_COND_TOL,
-                      verbose: bool = False, mask_interstitial: bool = False):
+                      verbose: bool = False, mask_interstitial: bool = False,
+                      auto_semicore: bool = False):
     """Multi-sphere self-consistent muffin-tin FLAPW, cubic or orthorhombic cell.
 
     ``a_bohr`` is the cubic edge, or a length-3 vector of orthorhombic edge lengths (Bohr).
@@ -1911,7 +1995,16 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
     ``val_e = {symbol: n}`` and drop the state from the frozen core with ``core = {symbol: [...]}``
     (both override the module defaults) — the LO does not change electron bookkeeping by itself.
     ``el_override = {symbol: {l: spec}}`` moves an energy parameter (e.g. Ti l=1 into the valence
-    region once a 3p LO carries the semicore). ``lo_cond_tol`` (default ``_LO_COND_TOL``) is the
+    region once a 3p LO carries the semicore).
+
+    The curated ``SEMICORE_LO`` table supplies these four coupled kwargs for a semicore-valence
+    setup automatically (``flapw_semicore_defaults``). Tabulated default species (**Ti**) get their
+    semicore LOs by DEFAULT — a plain Ti run is 3s-valence (frozen [Ne] core, 3s/3p as confined
+    LOs). ``auto_semicore=True`` additionally opts in every other tabulated species present. In
+    both cases an explicit ``los``/``core``/``val_e``/``el_override`` entry for a species turns the
+    auto layering off for THAT species (the caller keeps full control).
+
+    ``lo_cond_tol`` (default ``_LO_COND_TOL``) is the
     overlap-conditioning threshold: an LO whose norm fraction orthogonal to its valence ``{u, u̇}``
     subspace falls below it is Löwdin-orthogonalized against that subspace before entering the
     secular problem, curing the near-linear-dependence that otherwise makes the extended overlap
@@ -1979,7 +2072,8 @@ def crystal_scf_multi(a_bohr=None, atoms=None, radii=None, ecut: float = 200.0, 
                        val_e=val_e, core=core, el_override=el_override, kworkers=kworkers,
                        subspace_reuse=subspace_reuse, subspace_tol=subspace_tol, cell=cell,
                        kerker=kerker, shift_invert=shift_invert, lo_cond_tol=lo_cond_tol,
-                       verbose=verbose, mask_interstitial=mask_interstitial)
+                       verbose=verbose, mask_interstitial=mask_interstitial,
+                       auto_semicore=auto_semicore)
     st = _multi_init_state(ctx, v_start)
     for it in range(iters):
         if _multi_iterate(ctx, st, it, iters=iters, tol=tol):

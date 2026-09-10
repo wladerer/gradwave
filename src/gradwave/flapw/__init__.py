@@ -48,11 +48,17 @@ from gradwave.flapw.radial import (
     numerov_log_batch,
     radial_eigs_tridiag,
 )
-from gradwave.flapw.scf import crystal_scf, crystal_scf_multi
+from gradwave.flapw.scf import (
+    SEMICORE_LO,
+    crystal_scf,
+    crystal_scf_multi,
+    flapw_semicore_defaults,
+)
 
 __all__ = [
     "CONFIG",
     "NIST_LDA_EV",
+    "SEMICORE_LO",
     "anderson_stalled",
     "atomic_scf",
     "build_matrices",
@@ -61,6 +67,7 @@ __all__ = [
     "crystal_scf_multi",
     "efg_tensor",
     "efg_tensor_full",
+    "flapw_semicore_defaults",
     "gaunt_matrix",
     "interstitial_l2_boundary",
     "l2_sphere_poisson",
