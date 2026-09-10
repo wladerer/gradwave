@@ -1,0 +1,109 @@
+=== al4 cpu eager 8t ===
+case=al4 device=cpu mode=time threads=8 nk=10 npw=1935 grid=(32, 32, 32) ne=44.0
+setup 0.3s  SCF 8.04s  iters=10 conv=True
+F = -7529.71228680 eV
+DONE
+=== al4 cpu native 8t ===
+case=al4 device=cpu mode=time threads=8 nk=10 npw=1935 grid=(32, 32, 32) ne=44.0
+setup 0.2s  SCF 2.91s  iters=10 conv=True
+F = -7529.71228680 eV
+DONE
+=== al4 cuda time ===
+case=al4 device=cuda mode=time threads=8 nk=10 npw=1935 grid=(32, 32, 32) ne=44.0
+setup 0.2s  SCF 5.77s  iters=10 conv=True
+F = -7529.71228680 eV
+peak CUDA mem: 0.67 GiB
+DONE
+=== si8 cpu eager 8t ===
+case=si8 device=cpu mode=time threads=8 nk=4 npw=2969 grid=(35, 35, 35) ne=32.0
+setup 0.4s  SCF 5.84s  iters=10 conv=True
+F = -855.67041416 eV
+DONE
+=== si8 cpu native 8t ===
+case=si8 device=cpu mode=time threads=8 nk=4 npw=2969 grid=(35, 35, 35) ne=32.0
+setup 0.4s  SCF 3.85s  iters=10 conv=True
+F = -855.67041416 eV
+DONE
+=== si8 cuda time ===
+case=si8 device=cuda mode=time threads=8 nk=4 npw=2969 grid=(35, 35, 35) ne=32.0
+setup 0.4s  SCF 6.36s  iters=10 conv=True
+F = -855.67041416 eV
+peak CUDA mem: 0.38 GiB
+DONE
+=== al4 cuda profile ===
+/home/wladerer/gradwave-fftemu/.venv/lib/python3.12/site-packages/torch/profiler/profiler.py:272: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+USDT:2026-09-10 08:06:54 1327863:1327863 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-10 08:06:59 1327863:1327863 ActivityProfilerController.cpp:455] profiler_stop
+case=al4 device=cuda mode=profile threads=8 nk=10 npw=1935 grid=(32, 32, 32) ne=44.0
+profiled SCF wall 8.64s (profiler overhead included)  iters=10 conv=True  F=-7529.712287
+
+== CUDA kernel time by category (total 9.88s) ==
+  other                      4.34s   43.9%
+  gemm                       2.61s   26.4%
+  fft                        1.85s   18.8%
+  elemwise/copy/reduce       1.02s   10.3%
+  eigh/qr/chol               0.06s    0.6%
+
+== top 20 kernels ==
+     2.095s  [               other]  aten::bmm
+     1.037s  [                gemm]  void cutlass::Kernel2<cutlass_80_tensorop_z884gemm_32x16_16x3_nn_align1>(cutlass_80_tensor
+     0.978s  [               other]  aten::linalg_qr
+     0.926s  [                 fft]  aten::_fft_c2c
+     0.801s  [                gemm]  void cutlass::Kernel2<cutlass_80_tensorop_z884gemm_32x16_16x3_tn_align1>(cutlass_80_tensor
+     0.615s  [                 fft]  void regular_fft<32u, EPT<8u>, 32u, 6u, (padding_t)6, (twiddle_t)0, (loadstore_modifier_t)
+     0.449s  [               other]  void geqr2_smem_domino_fast<double2, double, 8, 2048>(int, int, double2*, int, double2*, i
+     0.382s  [                gemm]  void cutlass::Kernel2<cutlass_80_tensorop_z884gemm_32x16_16x3_hn_align1>(cutlass_80_tensor
+     0.346s  [               other]  aten::mul
+     0.315s  [                gemm]  void cutlass::Kernel2<cutlass_80_tensorop_z884gemm_32x32_16x4_hn_align1>(cutlass_80_tensor
+     0.311s  [                 fft]  void vector_fft<32u, EPT<8u>, 32u, 8u, (padding_t)6, (twiddle_t)0, (loadstore_modifier_t)2
+     0.171s  [               other]  Lazy Function Loading
+     0.153s  [elemwise/copy/reduce]  void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::Binary
+     0.143s  [elemwise/copy/reduce]  void at::native::unrolled_elementwise_kernel<at::native::AUnaryFunctor<c10::complex<double
+     0.117s  [elemwise/copy/reduce]  aten::copy_
+     0.050s  [elemwise/copy/reduce]  void at::native::unrolled_elementwise_kernel<at::native::CUDAFunctor_add<c10::complex<doub
+     0.044s  [               other]  aten::cat
+     0.042s  [               other]  aten::linalg_vector_norm
+     0.042s  [elemwise/copy/reduce]  void at::native::reduce_kernel<256, 1, at::native::ReduceOp<c10::complex<double>, at::nati
+     0.042s  [elemwise/copy/reduce]  void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized<at::native::(anonym
+peak CUDA mem: 0.67 GiB
+DONE
+=== si8 cuda profile ===
+/home/wladerer/gradwave-fftemu/.venv/lib/python3.12/site-packages/torch/profiler/profiler.py:272: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+USDT:2026-09-10 08:07:10 1327962:1327962 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-10 08:07:16 1327962:1327962 ActivityProfilerController.cpp:455] profiler_stop
+case=si8 device=cuda mode=profile threads=8 nk=4 npw=2969 grid=(35, 35, 35) ne=32.0
+profiled SCF wall 7.50s (profiler overhead included)  iters=10 conv=True  F=-855.670414
+
+== CUDA kernel time by category (total 11.18s) ==
+  other                      4.87s   43.5%
+  gemm                       3.61s   32.3%
+  fft                        1.81s   16.2%
+  elemwise/copy/reduce       0.85s    7.6%
+  eigh/qr/chol               0.03s    0.3%
+
+== top 20 kernels ==
+     3.320s  [               other]  aten::bmm
+     1.345s  [                gemm]  void cutlass::Kernel2<cutlass_80_tensorop_z884gemm_32x16_16x3_tn_align1>(cutlass_80_tensor
+     1.271s  [                gemm]  void cutlass::Kernel2<cutlass_80_tensorop_z884gemm_32x16_16x3_nn_align1>(cutlass_80_tensor
+     0.906s  [                 fft]  aten::_fft_c2c
+     0.777s  [                gemm]  void cutlass::Kernel2<cutlass_80_tensorop_z884gemm_32x16_16x3_hn_align1>(cutlass_80_tensor
+     0.593s  [               other]  aten::linalg_qr
+     0.529s  [                 fft]  void regular_fft<35u, EPT<5u, 7u>, 32u, 5u, (padding_t)6, (twiddle_t)0, (loadstore_modifie
+     0.377s  [                 fft]  void regular_fft<35u, EPT<5u, 7u>, 16u, 7u, (padding_t)14, (twiddle_t)0, (loadstore_modifi
+     0.322s  [               other]  void geqr2_gmem_domino<double2, double, 9>(int, int, double2*, int, double2*, int*, int*)
+     0.236s  [               other]  aten::mul
+     0.134s  [                gemm]  void cutlass::Kernel2<cutlass_80_tensorop_z884gemm_32x32_16x4_hn_align1>(cutlass_80_tensor
+     0.112s  [elemwise/copy/reduce]  aten::copy_
+     0.106s  [elemwise/copy/reduce]  void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::Binary
+     0.086s  [elemwise/copy/reduce]  void at::native::unrolled_elementwise_kernel<at::native::AUnaryFunctor<c10::complex<double
+     0.081s  [               other]  Lazy Function Loading
+     0.081s  [               other]  aten::linalg_vector_norm
+     0.081s  [elemwise/copy/reduce]  void at::native::reduce_kernel<256, 1, at::native::ReduceOp<c10::complex<double>, at::nati
+     0.053s  [               other]  aten::cat
+     0.051s  [elemwise/copy/reduce]  void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized<at::native::(anonym
+     0.044s  [elemwise/copy/reduce]  void at::native::unrolled_elementwise_kernel<at::native::CUDAFunctor_add<c10::complex<doub
+peak CUDA mem: 0.38 GiB
+DONE
+EXIT=0
