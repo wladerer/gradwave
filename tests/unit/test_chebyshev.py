@@ -119,7 +119,7 @@ def test_resolve_eigensolver_gate(monkeypatch):
     below; explicit names pass through; the env override wins over everything."""
     import gradwave.scf.loop as loop
 
-    monkeypatch.setattr(loop, "_EIGENSOLVER_ENV", "")
+    monkeypatch.delenv("GRADWAVE_EIGENSOLVER", raising=False)
     monkeypatch.setattr(loop, "_CHEFSI_MIN_NB", 640)
 
     # auto: gated on nb
@@ -131,7 +131,9 @@ def test_resolve_eigensolver_gate(monkeypatch):
     assert loop._resolve_eigensolver("davidson", nb=2000) == "davidson"
     assert loop._resolve_eigensolver("chebyshev", nb=8) == "chebyshev"
 
-    # env override pins the solver regardless of nb or the requested mode
-    monkeypatch.setattr(loop, "_EIGENSOLVER_ENV", "davidson")
+    # env override pins the solver regardless of nb or the requested mode,
+    # and is read at CALL time — setting os.environ after import must take
+    # effect (an import-frozen read silently no-ops in-process overrides)
+    monkeypatch.setenv("GRADWAVE_EIGENSOLVER", "davidson")
     assert loop._resolve_eigensolver("auto", nb=5000) == "davidson"
     assert loop._resolve_eigensolver("chebyshev", nb=5000) == "davidson"
