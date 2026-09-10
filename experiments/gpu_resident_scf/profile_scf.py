@@ -58,6 +58,29 @@ elif case == "si8":
     kw = dict(ecut=30 * RY, kmesh=(2, 2, 2), nbands=None, use_symmetry=True)
     scf_kw = dict(smearing="none", width=0.1)
     xc = LDA_PW92()
+elif case in ("si64", "al32"):
+    # exact /tmp/gw_size.py configs (comparable to the band-parallel agent's CPU arms)
+    import itertools
+    if case == "si64":
+        a = 10.86
+        base = np.array(
+            [[0, 0, 0], [0, .5, .5], [.5, 0, .5], [.5, .5, 0],
+             [.25, .25, .25], [.25, .75, .75], [.75, .25, .75], [.75, .75, .25]])
+        upfs = [parse_upf(PSE / "Si_ONCV_PBE-1.2.upf")]
+        scf_kw = dict(smearing="none", width=0.1)
+    else:
+        a = 8.10
+        base = np.array([[0, 0, 0], [0, .5, .5], [.5, 0, .5], [.5, .5, 0]])
+        upfs = [parse_upf(PSE / "Al_ONCV_PBE-1.2.upf")]
+        scf_kw = dict(smearing="fermi-dirac", width=0.1)
+    frac = np.array([(p + np.array([i, j, k])) / 2
+                     for i, j, k in itertools.product(range(2), repeat=3)
+                     for p in base])
+    cell = a * np.eye(3)
+    pos = frac @ cell
+    soa = [0] * len(frac)
+    kw = dict(ecut=30 * RY, kmesh=(2, 2, 2))  # setup defaults, as in gw_size.py
+    xc = PBE()
 else:
     raise SystemExit(f"unknown case {case}")
 
@@ -91,13 +114,24 @@ def classify(name):
             return cat
     return "other"
 
+MAX_ITER = 3 if mode in ("smoke", "profile3") else 100
+
 def run():
-    res = scf(system, xc, etol=1e-8, rhotol=1e-7, verbose=False, **scf_kw)
+    import os
+    mp = os.environ.get("GW_PROBE_MP", "") == "1"
+    res = scf(system, xc, etol=1e-8, rhotol=1e-7, verbose=False,
+              max_iter=MAX_ITER, mixed_precision=mp, **scf_kw)
     if device != "cpu":
         torch.cuda.synchronize()
     return res
 
-if mode == "time":
+if mode == "smoke":
+    t0 = time.time()
+    res = run()
+    print(f"SMOKE (3 iters, untimed conditions): {time.time()-t0:.1f}s wall")
+    if device != "cpu":
+        print(f"peak CUDA mem: {torch.cuda.max_memory_allocated()/2**30:.2f} GiB")
+elif mode == "time":
     t0 = time.time()
     res = run()
     t = time.time() - t0
@@ -107,9 +141,14 @@ if mode == "time":
         print(f"peak CUDA mem: {torch.cuda.max_memory_allocated()/2**30:.2f} GiB")
 else:
     from torch.profiler import ProfilerActivity, profile
-    acts = [ProfilerActivity.CPU]
-    if device != "cpu":
-        acts.append(ProfilerActivity.CUDA)
+    # profile3 on cuda: CUDA activity ONLY — the CPU-op trace of a large-cell
+    # 3-iter run post-processes at >12 GB host RSS and gets OOM-killed.
+    if device != "cpu" and mode == "profile3":
+        acts = [ProfilerActivity.CUDA]
+    else:
+        acts = [ProfilerActivity.CPU]
+        if device != "cpu":
+            acts.append(ProfilerActivity.CUDA)
     t0 = time.time()
     with profile(activities=acts) as prof:
         res = run()

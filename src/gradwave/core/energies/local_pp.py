@@ -32,9 +32,16 @@ def local_potential_g(
     vloc_atom overrides the per-species gather with a per-atom table. The
     alchemical composition channel passes a lambda-blended table there, so
     V_loc stays differentiable in composition (scf/alchemical.py)."""
-    s = structure_factors(positions, g_cart)  # (na, n1,n2,n3)
-    tab = vloc_atom if vloc_atom is not None else vloc_tables[species_index]
-    v = torch.einsum("axyz,axyz->xyz", s, tab.to(s.dtype))
+    # RESEARCH-BRANCH memory fix (exact, same sum order as einsum over a):
+    # accumulate per atom to avoid (na, n1,n2,n3) transients (0.4 GiB x3 at
+    # Si-64/72^3 on a 6 GB card).
+    v = None
+    for a in range(positions.shape[0]):
+        sa = structure_factors(positions[a : a + 1], g_cart)[0]
+        ta = (vloc_atom[a] if vloc_atom is not None
+              else vloc_tables[species_index[a]])
+        va = sa * ta.to(sa.dtype)
+        v = va if v is None else v + va
     return v / volume
 
 

@@ -1,0 +1,171 @@
+=== si64 gpu time RETRY (projectors per-k; K1 DB1e8) [12:44:26] ===
+case=si64 device=cuda mode=time threads=8 nk=8 npw=23871 grid=(72, 72, 72) ne=256.0
+Traceback (most recent call last):
+  File "/home/wladerer/gradwave-fftemu/experiments/gpu_resident_scf/profile_scf.py", line 136, in <module>
+    res = run()
+          ^^^^^
+  File "/home/wladerer/gradwave-fftemu/experiments/gpu_resident_scf/profile_scf.py", line 122, in run
+    res = scf(system, xc, etol=1e-8, rhotol=1e-7, verbose=False,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/.venv/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/src/gradwave/scf/loop.py", line 2110, in scf
+    vloc_g = local_potential_g(
+             ^^^^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/src/gradwave/core/energies/local_pp.py", line 37, in local_potential_g
+    v = torch.einsum("axyz,axyz->xyz", s, tab.to(s.dtype))
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/.venv/lib/python3.12/site-packages/torch/functional.py", line 373, in einsum
+    return _VF.einsum(equation, operands)  # type: ignore[attr-defined]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 366.00 MiB. GPU 0 has a total capacity of 5.67 GiB of which 129.38 MiB is free. Including non-PyTorch memory, this process has 5.54 GiB memory in use. Of the allocated memory 5.36 GiB is allocated by PyTorch, and 69.03 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+--- arm exit=1 [12:44:31] ---
+=== al4 gpu MP-draft [12:44:31] ===
+case=al4 device=cuda mode=time threads=8 nk=10 npw=1935 grid=(32, 32, 32) ne=44.0
+setup 0.2s  SCF 9.38s  iters=12 conv=True
+F = -7529.71228680 eV
+peak CUDA mem: 0.67 GiB
+DONE
+--- arm exit=0 [12:44:42] ---
+=== si8 gpu MP-draft [12:46:42] ===
+case=si8 device=cuda mode=time threads=8 nk=4 npw=2969 grid=(35, 35, 35) ne=32.0
+setup 0.3s  SCF 8.31s  iters=10 conv=True
+F = -855.67041416 eV
+peak CUDA mem: 0.38 GiB
+DONE
+--- arm exit=0 [12:46:53] ---
+=== al4 gpu fp32-expansion [12:48:53] ===
+case=al4 device=cuda mode=time threads=8 nk=10 npw=1935 grid=(32, 32, 32) ne=44.0
+setup 0.2s  SCF 12.24s  iters=10 conv=True
+F = -7529.71228680 eV
+peak CUDA mem: 0.68 GiB
+DONE
+--- arm exit=0 [12:49:07] ---
+=== si8 gpu fp32-expansion [12:51:07] ===
+case=si8 device=cuda mode=time threads=8 nk=4 npw=2969 grid=(35, 35, 35) ne=32.0
+setup 0.3s  SCF 8.82s  iters=10 conv=True
+F = -855.67041416 eV
+peak CUDA mem: 0.39 GiB
+DONE
+--- arm exit=0 [12:51:18] ---
+=== al4 gpu subspace-c64 [12:53:18] ===
+case=al4 device=cuda mode=time threads=8 nk=10 npw=1935 grid=(32, 32, 32) ne=44.0
+setup 0.2s  SCF 135.33s  iters=100 conv=False
+F = -7529.71106588 eV
+peak CUDA mem: 0.64 GiB
+DONE
+--- arm exit=0 [12:55:35] ---
+=== si64 gpu MP-draft (K1 DB1e8) [12:59:35] ===
+case=si64 device=cuda mode=time threads=8 nk=8 npw=23871 grid=(72, 72, 72) ne=256.0
+Traceback (most recent call last):
+  File "/home/wladerer/gradwave-fftemu/experiments/gpu_resident_scf/profile_scf.py", line 136, in <module>
+    res = run()
+          ^^^^^
+  File "/home/wladerer/gradwave-fftemu/experiments/gpu_resident_scf/profile_scf.py", line 122, in run
+    res = scf(system, xc, etol=1e-8, rhotol=1e-7, verbose=False,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/.venv/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/src/gradwave/scf/loop.py", line 2312, in scf
+    eigs_s[sp], coeffs_b_s[sp] = _solve_bands_streamed(
+                                 ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/src/gradwave/scf/loop.py", line 1351, in _solve_bands_streamed
+    bk_c = bk.reindex(idx)
+           ^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/src/gradwave/core/batch.py", line 218, in reindex
+    proj_phase_free=self.proj_phase_free[idx], toep_idx_cache=None)
+                    ~~~~~~~~~~~~~~~~~~~~^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 188.00 MiB. GPU 0 has a total capacity of 5.67 GiB of which 145.38 MiB is free. Including non-PyTorch memory, this process has 5.52 GiB memory in use. Of the allocated memory 5.36 GiB is allocated by PyTorch, and 50.29 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+--- arm exit=1 [12:59:39] ---
+=== si64 gpu fp32-expansion (K1 DB1e8) [12:59:39] ===
+case=si64 device=cuda mode=time threads=8 nk=8 npw=23871 grid=(72, 72, 72) ne=256.0
+Traceback (most recent call last):
+  File "/home/wladerer/gradwave-fftemu/experiments/gpu_resident_scf/profile_scf.py", line 136, in <module>
+    res = run()
+          ^^^^^
+  File "/home/wladerer/gradwave-fftemu/experiments/gpu_resident_scf/profile_scf.py", line 122, in run
+    res = scf(system, xc, etol=1e-8, rhotol=1e-7, verbose=False,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/.venv/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/src/gradwave/scf/loop.py", line 2312, in scf
+    eigs_s[sp], coeffs_b_s[sp] = _solve_bands_streamed(
+                                 ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/src/gradwave/scf/loop.py", line 1351, in _solve_bands_streamed
+    bk_c = bk.reindex(idx)
+           ^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/src/gradwave/core/batch.py", line 218, in reindex
+    proj_phase_free=self.proj_phase_free[idx], toep_idx_cache=None)
+                    ~~~~~~~~~~~~~~~~~~~~^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 188.00 MiB. GPU 0 has a total capacity of 5.67 GiB of which 147.38 MiB is free. Including non-PyTorch memory, this process has 5.52 GiB memory in use. Of the allocated memory 5.36 GiB is allocated by PyTorch, and 49.02 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+--- arm exit=1 [12:59:42] ---
+=== al32 gpu profile3 cuda-only [12:59:42] ===
+/home/wladerer/gradwave-fftemu/.venv/lib/python3.12/site-packages/torch/profiler/profiler.py:272: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+USDT:2026-09-10 12:59:45 1387374:1387374 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-10 13:03:13 1387374:1387374 ActivityProfilerController.cpp:455] profiler_stop
+case=al32 device=cuda mode=profile3 threads=8 nk=8 npw=9939 grid=(54, 54, 54) ne=352.0
+profiled SCF wall 216.05s (profiler overhead included)  iters=3 conv=False  F=-60055.278088
+
+== CUDA kernel time by category (total 206.34s) ==
+  gemm                     159.14s   77.1%
+  fft                       20.30s    9.8%
+  other                     14.98s    7.3%
+  elemwise/copy/reduce      10.35s    5.0%
+  eigh/qr/chol               1.57s    0.8%
+
+== top 20 kernels ==
+    72.089s  [                gemm]  void cutlass::Kernel2<cutlass_80_tensorop_z884gemm_32x16_16x3_nn_align1>(cutlass_80_tensor
+    42.387s  [                gemm]  void cutlass::Kernel2<cutlass_80_tensorop_z884gemm_32x16_16x3_tn_align1>(cutlass_80_tensor
+    19.154s  [                gemm]  void cutlass::Kernel2<cutlass_80_tensorop_z884gemm_32x16_16x3_hn_align1>(cutlass_80_tensor
+    13.474s  [                gemm]  void zgemm_largek<true, false, true, false, 4, 3, 4, 3, 3, 17>(double2*, double2 const*, d
+    12.344s  [               other]  void geqr2_gmem_domino<double2, double, 9>(int, int, double2*, int, double2*, int*, int*)
+    11.824s  [                 fft]  void regular_fft<54u, EPT<6u, 9u>, 16u, 4u, (padding_t)6, (twiddle_t)0, (loadstore_modifie
+     8.474s  [                 fft]  void regular_fft<54u, EPT<6u, 9u>, 16u, 7u, (padding_t)6, (twiddle_t)0, (loadstore_modifie
+     3.412s  [                gemm]  void trsm_left_kernel<int, double2, 256, 4, false, false, true, true, false>(cublasTrsmPar
+     2.847s  [                gemm]  void gemmcn_skinny_kernel<double2, 2, 4>(int, int, int, double2 const*, long, long, double
+     2.351s  [elemwise/copy/reduce]  void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::Binary
+     2.053s  [                gemm]  void cutlass::Kernel2<cutlass_80_tensorop_z884gemm_32x32_16x4_hn_align1>(cutlass_80_tensor
+     1.873s  [elemwise/copy/reduce]  void at::native::unrolled_elementwise_kernel<at::native::AUnaryFunctor<c10::complex<double
+     0.876s  [                gemm]  std::enable_if<true, void>::type internal::gemvx::kernel<int, int, double2, double2, doubl
+     0.791s  [                gemm]  void cutlass::Kernel2<cutlass_80_tensorop_z884gemm_32x32_16x4_tn_align1>(cutlass_80_tensor
+     0.745s  [               other]  void cuds_symv_alg7_stage1_lower<double2, 4>(long, double2 const*, long, long, double2 con
+     0.671s  [elemwise/copy/reduce]  void at::native::_scatter_gather_elementwise_kernel<128, 8, at::native::_cuda_scatter_gath
+     0.629s  [elemwise/copy/reduce]  void at::native::unrolled_elementwise_kernel<at::native::CUDAFunctor_add<c10::complex<doub
+     0.565s  [                gemm]  void cutlass::Kernel2<cutlass_80_tensorop_z884gemm_32x16_16x3_nh_align1>(cutlass_80_tensor
+     0.424s  [elemwise/copy/reduce]  void at::native::reduce_kernel<256, 1, at::native::ReduceOp<c10::complex<double>, at::nati
+     0.417s  [elemwise/copy/reduce]  void at::native::unrolled_elementwise_kernel<at::native::conj_kernel_cuda(at::TensorIterat
+peak CUDA mem: 3.30 GiB
+DONE
+--- arm exit=0 [13:04:32] ---
+=== si64 gpu profile3 cuda-only (K1 DB1e8) [13:06:32] ===
+/home/wladerer/gradwave-fftemu/.venv/lib/python3.12/site-packages/torch/profiler/profiler.py:272: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+USDT:2026-09-10 13:06:35 1387958:1387958 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-09-10 13:06:36 1387958:1387958 ActivityProfilerController.cpp:455] profiler_stop
+case=si64 device=cuda mode=profile3 threads=8 nk=8 npw=23871 grid=(72, 72, 72) ne=256.0
+Traceback (most recent call last):
+  File "/home/wladerer/gradwave-fftemu/experiments/gpu_resident_scf/profile_scf.py", line 154, in <module>
+    res = run()
+          ^^^^^
+  File "/home/wladerer/gradwave-fftemu/experiments/gpu_resident_scf/profile_scf.py", line 122, in run
+    res = scf(system, xc, etol=1e-8, rhotol=1e-7, verbose=False,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/.venv/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/src/gradwave/scf/loop.py", line 2312, in scf
+    eigs_s[sp], coeffs_b_s[sp] = _solve_bands_streamed(
+                                 ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/src/gradwave/scf/loop.py", line 1351, in _solve_bands_streamed
+    bk_c = bk.reindex(idx)
+           ^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/src/gradwave/core/batch.py", line 218, in reindex
+    proj_phase_free=self.proj_phase_free[idx], toep_idx_cache=None)
+                    ~~~~~~~~~~~~~~~~~~~~^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 188.00 MiB. GPU 0 has a total capacity of 5.67 GiB of which 135.38 MiB is free. Including non-PyTorch memory, this process has 5.53 GiB memory in use. Of the allocated memory 5.36 GiB is allocated by PyTorch, and 49.02 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+--- arm exit=1 [13:06:36] ---
+MASTER-EXIT=0

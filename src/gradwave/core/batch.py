@@ -279,7 +279,12 @@ def projectors_b(bk: BatchedK, positions: torch.Tensor) -> torch.Tensor:
         return bk.proj_phase_free
     phase_arg = torch.einsum("kgi,ai->kga", bk.kpg, positions)  # (nk, npw, na)
     phases = torch.exp(torch.complex(torch.zeros_like(phase_arg), -phase_arg))
-    return bk.proj_phase_free * phases[:, :, bk.proj_atom_index].permute(0, 2, 1)
+    # RESEARCH-BRANCH memory fix (exact, byte-identical): materialize per k to
+    # avoid the transient (nk, npw, nproj) gather (1.5 GiB at Si-64 on 6 GB).
+    out = torch.empty_like(bk.proj_phase_free)
+    for k in range(bk.proj_phase_free.shape[0]):
+        out[k] = bk.proj_phase_free[k] * phases[k][:, bk.proj_atom_index].permute(1, 0)
+    return out
 
 
 class BatchedHamiltonian:

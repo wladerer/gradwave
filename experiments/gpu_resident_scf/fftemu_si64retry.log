@@ -1,0 +1,24 @@
+=== si64 gpu time RETRY2 (projectors+localpp per-atom patches; K1 DB1e8) [13:09:28] ===
+case=si64 device=cuda mode=time threads=8 nk=8 npw=23871 grid=(72, 72, 72) ne=256.0
+Traceback (most recent call last):
+  File "/home/wladerer/gradwave-fftemu/experiments/gpu_resident_scf/profile_scf.py", line 136, in <module>
+    res = run()
+          ^^^^^
+  File "/home/wladerer/gradwave-fftemu/experiments/gpu_resident_scf/profile_scf.py", line 122, in run
+    res = scf(system, xc, etol=1e-8, rhotol=1e-7, verbose=False,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/.venv/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/src/gradwave/scf/loop.py", line 2312, in scf
+    eigs_s[sp], coeffs_b_s[sp] = _solve_bands_streamed(
+                                 ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/src/gradwave/scf/loop.py", line 1351, in _solve_bands_streamed
+    bk_c = bk.reindex(idx)
+           ^^^^^^^^^^^^^^^
+  File "/home/wladerer/gradwave-fftemu/src/gradwave/core/batch.py", line 218, in reindex
+    proj_phase_free=self.proj_phase_free[idx], toep_idx_cache=None)
+                    ~~~~~~~~~~~~~~~~~~~~^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 188.00 MiB. GPU 0 has a total capacity of 5.67 GiB of which 147.38 MiB is free. Including non-PyTorch memory, this process has 5.52 GiB memory in use. Of the allocated memory 5.36 GiB is allocated by PyTorch, and 49.02 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+--- retry2 exit=1 [13:09:31] ---
+SI64-RETRY2-EXIT=0

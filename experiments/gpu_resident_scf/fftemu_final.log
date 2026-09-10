@@ -1,0 +1,15 @@
+=== al32 gpu fp32-expansion (K2 DB2e8) [13:10:26] ===
+case=al32 device=cuda mode=time threads=8 nk=8 npw=9939 grid=(54, 54, 54) ne=352.0
+setup 0.3s  SCF 1799.37s  iters=13 conv=True
+F = -60055.27829773 eV
+peak CUDA mem: 3.39 GiB
+DONE
+--- arm exit=0 [13:40:28] ---
+=== al32 gpu MP-draft (K2 DB2e8) [13:41:58] ===
+case=al32 device=cuda mode=time threads=8 nk=8 npw=9939 grid=(54, 54, 54) ne=352.0
+setup 0.3s  SCF 1637.95s  iters=16 conv=True
+F = -60055.27829773 eV
+peak CUDA mem: 3.32 GiB
+DONE
+--- arm exit=0 [14:09:18] ---
+FINAL-EXIT=0
