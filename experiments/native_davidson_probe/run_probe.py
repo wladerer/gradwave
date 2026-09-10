@@ -138,13 +138,13 @@ def native_lib():
     lib = ctypes.CDLL(str(HERE / "libdavnative.so"))
     lib.davidson_native.restype = ctypes.c_int
     lib.davidson_native.argtypes = (
-        [ctypes.c_int64] * 9 + [ctypes.c_double, ctypes.c_int]
+        [ctypes.c_int64] * 9 + [ctypes.c_double, ctypes.c_int, ctypes.c_int]
         + [ctypes.c_void_p] * 8
         + [ctypes.c_void_p] * 4)
     return lib
 
 
-def native_solve(lib, z, max_dim):
+def native_solve(lib, z, max_dim, retire=0):
     nk, nb, m = z["x0"].shape
     n1, n2, n3 = (int(s) for s in z["shape"])
     nproj = z["p"].shape[1]
@@ -167,8 +167,8 @@ def native_solve(lib, z, max_dim):
     t0 = time.perf_counter()
     ret = lib.davidson_native(
         nk, nb, m, n1, n2, n3, nproj, max_dim, 40, float(z["tol"]), THREADS,
-        ptr(x0), ptr(t), ptr(mask), ptr(isc), ptr(iga), ptr(veff), ptr(p),
-        ptr(dij), ptr(eig), ptr(x), ptr(rn), ptr(napply))
+        retire, ptr(x0), ptr(t), ptr(mask), ptr(isc), ptr(iga), ptr(veff),
+        ptr(p), ptr(dij), ptr(eig), ptr(x), ptr(rn), ptr(napply))
     dt = time.perf_counter() - t0
     if ret < 0:
         raise RuntimeError(f"davidson_native error {ret} "
@@ -235,6 +235,20 @@ def main():
           f"  -> {'OK' if ok else 'MISMATCH'}")
     print(f"SPEEDUP native/eager: {tb / tc:.2f}x")
 
+    # ---- C2: native with per-k retirement (composite: substrate x retirement)
+    n_iter_c2, eig_c2, rn_c2, napply_c2, _ = native_solve(lib, z, max_dim, 1)
+    times_c2 = []
+    for _ in range(REPS):
+        _, _, _, _, dt = native_solve(lib, z, max_dim, 1)
+        times_c2.append(dt)
+    tc2 = min(times_c2)
+    d_eig_c2 = float(np.abs(eig_b - eig_c2).max())
+    print(f"C2. native + per-k retire: n_iter<={n_iter_c2} "
+          f"napply={napply_c2} best={tc2 * 1e3:.2f} ms "
+          f"(median {np.median(times_c2) * 1e3:.2f})  "
+          f"max|d eig|={d_eig_c2:.2e}  rn_max={float(rn_c2.max()):.2e}")
+    print(f"SPEEDUP native-retire/eager: {tb / tc2:.2f}x")
+
     # ---- D: eager per-k thread-pool (shipped code, no C) ----
     eig_d, n_iter_d, napply_d, _hs = eager_k_parallel(z, THREADS)  # warm
     times_d = []
@@ -264,6 +278,9 @@ def main():
         "kpool_ms_median": float(np.median(times_d)) * 1e3,
         "kpool_speedup_best": tb / td, "napply_kpool": int(napply_d),
         "kpool_d_eig": d_eig_d,
+        "retire_ms_best": tc2 * 1e3, "retire_speedup_best": tb / tc2,
+        "napply_retire": int(napply_c2), "retire_d_eig": d_eig_c2,
+        "retire_rn_max": float(rn_c2.max()),
         "profiler_wall_ms": wall_prof * 1e3, "profiler_op_ms": op_time * 1e3,
     }
     suffix = f"_tol{TOL_OVERRIDE:.0e}" if TOL_OVERRIDE is not None else ""

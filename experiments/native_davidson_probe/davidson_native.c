@@ -188,7 +188,7 @@ static void scratch_free(scratch_t *s) {
 int davidson_native(
     int64_t nk, int64_t nb, int64_t m, int64_t n1, int64_t n2, int64_t n3,
     int64_t nproj, int64_t max_dim, int64_t max_iter, double tol,
-    int nthreads,
+    int nthreads, int per_k_retire,
     const c128 *x0, const double *t, const uint8_t *mask,
     const int64_t *idx_sc, const int64_t *idx_ga, const double *v_eff,
     const c128 *p, const c128 *dij,
@@ -212,7 +212,15 @@ int davidson_native(
     double *rn = malloc(sizeof(double) * (size_t)(nk * nb));
     int64_t napply = 0;
     volatile int err = 0;
-    int64_t dim = nb;
+    /* per-k subspace dims + activity. Batch mode (per_k_retire=0) keeps them
+     * lockstep — bit-for-bit the reference davidson_batched. Retire mode lets
+     * each k converge and drop out independently (the "per-k retirement"
+     * contract: every returned band satisfies rn <= tol at ITS OWN final RR;
+     * trajectories differ from the uniform batch by construction). */
+    int64_t *dim_k = malloc(sizeof(int64_t) * (size_t)nk);
+    int64_t *n_add_k = malloc(sizeof(int64_t) * (size_t)nk);
+    uint8_t *active = malloc(sizeof(uint8_t) * (size_t)nk);
+    for (int64_t k = 0; k < nk; k++) { dim_k[k] = nb; active[k] = 1; }
 
     /* ---- init: V = qr(x0 * mask); HV = H V ---- */
 #pragma omp parallel num_threads(nthreads)
@@ -246,7 +254,6 @@ int davidson_native(
     napply += nk * nb;
 
     int64_t it;
-    int64_t n_add = 0;
     for (it = 1; it <= max_iter; it++) {
         /* ---- Rayleigh-Ritz (parallel over k) ---- */
 #pragma omp parallel num_threads(nthreads)
@@ -255,7 +262,8 @@ int davidson_native(
             const c128 one = 1.0, zero = 0.0;
 #pragma omp for schedule(dynamic)
             for (int64_t k = 0; k < nk; k++) {
-                if (err) continue;
+                if (err || !active[k]) continue;
+                const int64_t dim = dim_k[k];
                 const c128 *Vk = V + k * max_dim * m;
                 const c128 *HVk = HV + k * max_dim * m;
                 c128 *Sk = S + k * max_dim * max_dim;
@@ -296,19 +304,29 @@ int davidson_native(
         }
         if (err) goto done;
 
-        /* ---- convergence / n_add ---- */
+        /* ---- convergence / n_add (global-uniform or per-k) ---- */
         double rnmax = 0;
-        n_add = 0;
+        int64_t n_add_max = 0, n_active = 0;
         for (int64_t k = 0; k < nk; k++) {
+            if (!active[k]) { n_add_k[k] = 0; continue; }
             int64_t cnt = 0;
+            double rnk = 0;
             for (int64_t b = 0; b < nb; b++) {
-                if (rn[k * nb + b] > rnmax) rnmax = rn[k * nb + b];
+                if (rn[k * nb + b] > rnk) rnk = rn[k * nb + b];
                 if (rn[k * nb + b] > tol) cnt++;
             }
-            if (cnt > n_add) n_add = cnt;
+            if (rnk > rnmax) rnmax = rnk;
+            if (per_k_retire && rnk < tol) { active[k] = 0; n_add_k[k] = 0; continue; }
+            n_add_k[k] = cnt;
+            if (cnt > n_add_max) n_add_max = cnt;
+            n_active++;
         }
-        if (rnmax < tol) break;
-        const int restart = (dim + n_add > max_dim);
+        if (per_k_retire) {
+            if (n_active == 0) break;
+        } else {
+            if (rnmax < tol) break;
+            for (int64_t k = 0; k < nk; k++) n_add_k[k] = n_add_max;
+        }
 
         /* ---- expansion (parallel over k) ---- */
 #pragma omp parallel num_threads(nthreads)
@@ -316,7 +334,10 @@ int davidson_native(
             scratch_t ws = scratch_alloc(&cx, max_dim);
 #pragma omp for schedule(dynamic)
             for (int64_t k = 0; k < nk; k++) {
-                if (err) continue;
+                if (err || !active[k] || n_add_k[k] == 0) continue;
+                const int64_t n_add = n_add_k[k];
+                const int64_t dim = dim_k[k];
+                const int restart = (dim + n_add > max_dim);
                 const double *tk = t + k * m;
                 const uint8_t *mk = mask + k * m;
                 c128 *Xk = X + k * nb * m, *HXk = HX + k * nb * m;
@@ -395,12 +416,12 @@ int davidson_native(
                        sizeof(c128) * (size_t)(n_add * m));
                 h_apply_k(&cx, k, Vk + against_dim * m, HVk + against_dim * m,
                           n_add, ws.box, ws.work, ws.becp, ws.tmp);
+                dim_k[k] = against_dim + n_add;
             }
             scratch_free(&ws);
         }
         if (err) goto done;
-        napply += nk * n_add;
-        dim = (restart ? nb : dim) + n_add;
+        for (int64_t k = 0; k < nk; k++) napply += n_add_k[k];
     }
 
     memcpy(x_out, X, sizeof(c128) * (size_t)(nk * nb * m));
@@ -410,5 +431,6 @@ int davidson_native(
 
 done:
     free(V); free(HV); free(X); free(HX); free(D); free(S); free(rn);
+    free(dim_k); free(n_add_k); free(active);
     return err;
 }
