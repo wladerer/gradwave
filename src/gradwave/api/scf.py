@@ -182,6 +182,10 @@ def _run_scf(
                # subspace at k_chunk·m·npw. None → all-k solve (or the
                # GRADWAVE_K_CHUNK env default when set — _resolve_k_chunk).
                k_chunk=inp.scf.memory.k_chunk,
+               # k-parallel eigensolve (scf.memory.k_parallel): per-k Davidson
+               # tasks on a CPU thread pool. None → serial (or the
+               # GRADWAVE_K_PARALLEL env default — _resolve_k_parallel).
+               k_parallel=inp.scf.memory.k_parallel,
                **common)
 
 

@@ -91,6 +91,18 @@ class MemoryParams:
       Rayleigh–Ritz eigensolve kept in fp64. A precision lever, not exact:
       residual norms plateau near the fp32 floor (~1e-6 eV eigenvalues), so pair
       it with a looser ``scf.diago.tol``.
+    * ``k_parallel`` — the one WALL-TIME (not memory) knob here, co-located
+      because it shares the k-chunking machinery with ``k_chunk``: run per-k
+      Davidson tasks on a CPU thread pool of this many workers (torch intra-op
+      threading pinned to 1 inside). The batched CPU eigensolve gets no thread
+      scaling at small/medium sizes, so this is where multi-core wall-clock
+      comes from (measured 1.9–5.4×, plus per-k convergence retirement; see
+      ``scf.loop._solve_bands_kpool``). Every band meets the same
+      ``rn <= diago_tol`` contract; eigenvalues agree with the batched path to
+      ~tol, not round-off. CPU-only (ignored on CUDA), incompatible with hybrid
+      Fock, composes with ``k_chunk`` (task size = ``k_chunk``, peak subspace ≈
+      ``k_parallel·k_chunk·m·npw``). None → off, or the ``GRADWAVE_K_PARALLEL``
+      env default when that is set.
 
     Bridged to the solver by the api layer (no solver edit): ``k_chunk`` is
     threaded as the ``scf.loop.scf(k_chunk=)`` kwarg, and the three Davidson
@@ -104,12 +116,17 @@ class MemoryParams:
     max_dim_factor: int | None = None
     subspace_budget_gb: float | None = None
     subspace_storage: str = "complex128"  # complex128 | complex64
+    k_parallel: int | None = None
 
     def __post_init__(self):
         if self.k_chunk is not None and self.k_chunk < 1:
             raise InputError(
                 f"scf.memory.k_chunk must be >= 1 (or null for all-k), got "
                 f"{self.k_chunk}")
+        if self.k_parallel is not None and self.k_parallel < 2:
+            raise InputError(
+                "scf.memory.k_parallel must be >= 2 (a 1-worker pool is the "
+                f"serial path; or null for off), got {self.k_parallel}")
         if self.max_dim_factor is not None and self.max_dim_factor < 2:
             raise InputError(
                 "scf.memory.max_dim_factor must be >= 2 (nb + n_add must fit; or "

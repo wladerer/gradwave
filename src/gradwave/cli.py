@@ -207,6 +207,8 @@ def _memory_summary_line(inp: Input) -> str | None:
         bits.append(f"subspace_budget {mem.subspace_budget_gb:g} GB")
     if mem.subspace_storage != "complex128":
         bits.append(f"subspace_storage {mem.subspace_storage}")
+    if mem.k_parallel is not None:
+        bits.append(f"k_parallel {mem.k_parallel}")
     return None if not bits else "  memory      " + " · ".join(bits)
 
 

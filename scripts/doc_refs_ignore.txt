@@ -19,3 +19,5 @@ experiments/surface_efficiency/vacuum_ladder.py
 experiments/surface_efficiency/tt_rank.py
 experiments/stochastic_dft/variance_probe.py
 experiments/dmi/fege_full_vector.py
+# research-branch ground truth for scf.memory.k_parallel (branch research/native-davidson-probe)
+experiments/native_davidson_probe/RESULTS.md

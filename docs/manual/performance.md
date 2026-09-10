@@ -52,6 +52,36 @@ overridable three ways:
 Otherwise the auto-default stands. Reach for a higher count only if a benchmark
 on your own hardware shows the crossover sits above 8 for your systems.
 
+### k-parallel eigensolve (`scf.memory.k_parallel`)
+
+The reason more intra-op threads stop helping is not that the cores have
+nothing to do — it is that the batched CPU eigensolve cannot feed them. A
+measured control (a bit-exact native-C reimplementation of the batched
+Davidson, `experiments/native_davidson_probe/RESULTS.md` on the
+`research/native-davidson-probe` branch) showed the eager batched path runs
+at the SAME wall clock on 8 threads as on 1: batched `eigh`/`qr` loop LAPACK
+serially, and the many small ops between never engage intra-op parallelism.
+The k axis, meanwhile, is embarrassingly parallel.
+
+`k_parallel: N` (on the `scf.memory` block, or `GRADWAVE_K_PARALLEL`, or the
+`scf(k_parallel=)` kwarg) runs per-k Davidson tasks on a thread pool of N
+workers with torch intra-op threading pinned to 1 inside. torch ops release
+the GIL, so the kernel time genuinely parallelizes. Two effects compose:
+the cores are actually used, and each k RETIRES at its own convergence
+instead of riding the uniform batch to the slowest k's round count (measured
+39 → ≤21 rounds on a smeared Al cell, ~9–33% fewer H-applies). Measured
+1.9–5.4× on 8 cores at medium sizes (Si-8/2×2×2, Al-4/4×4×4).
+
+Opt-in, and honest about its edges: per-band convergence meets the same
+`rn ≤ diago_tol` contract, but the trajectory differs from the batch (the
+batch over-polishes already-converged k), so eigenvalues agree to ~tol, not
+round-off. CPU-only (ignored on CUDA). Incompatible with hybrid Fock. And it
+LOSES when the per-task work is tiny (many small-npw k: measured 0.86× at
+nk=260/npw=331 — the GIL serializes op dispatch of 260 small solves; the
+full win there needs the out-of-GIL native loop, which is research-branch
+only). Composes with `k_chunk` (task size = `k_chunk`; peak resident
+subspace ≈ `k_parallel·k_chunk·m·npw`).
+
 ### IBZ symmetry
 
 Reducing the k-mesh to the irreducible wedge with G-space density symmetrization is
