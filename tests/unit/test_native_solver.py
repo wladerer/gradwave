@@ -144,6 +144,90 @@ def test_retire_env_validation(monkeypatch):
     assert _retire_on() is True
 
 
+def test_subspace_env_validation(monkeypatch):
+    """GRADWAVE_NATIVE_SUBSPACE parsing + the tol-based auto-promote gate."""
+    from gradwave.solvers.native_davidson import _C64_PROMOTE_TOL, _subspace_c64
+
+    monkeypatch.setenv("GRADWAVE_NATIVE_SUBSPACE", "banana")
+    with pytest.raises(ValueError, match="GRADWAVE_NATIVE_SUBSPACE"):
+        _subspace_c64(1e-3)
+    monkeypatch.delenv("GRADWAVE_NATIVE_SUBSPACE")
+    assert _subspace_c64(1e-3) is False  # default complex128
+    for name in ("complex64", "c64"):
+        monkeypatch.setenv("GRADWAVE_NATIVE_SUBSPACE", name)
+        assert _subspace_c64(1e-3) is True  # loose tol: c64 active
+        # tighter than the fp32 residual floor: auto-promote to fp64
+        assert _subspace_c64(_C64_PROMOTE_TOL / 10) is False
+    for name in ("complex128", "c128"):
+        monkeypatch.setenv("GRADWAVE_NATIVE_SUBSPACE", name)
+        assert _subspace_c64(1e-3) is False
+
+
+@needs_native
+def test_c64_subspace_engages_and_agrees_at_loose_tol(monkeypatch):
+    """A captured mid-SCF solve run with complex64 storage engages the c64
+    kernel (diagnostics say so) and, at a loose tol both storages reach,
+    agrees with the complex128 kernel on the eigenvalues. The fp32 floor
+    caps the achievable accuracy (~1e-6 Ha) — this asserts correctness, not
+    fp64 parity; the tight tail auto-promotes (see the gate test)."""
+    from gradwave.solvers import registry
+    from gradwave.solvers.native_davidson import native_davidson_adapter
+    from gradwave.solvers.registry import davidson_adapter
+
+    cap: dict = {}
+
+    def capture(apply_H, X0, precond, mask, **kw):
+        cap["n"] = cap.get("n", 0) + 1
+        r = davidson_adapter(apply_H, X0, precond, mask, **kw)
+        if cap["n"] == 3:
+            cap["args"] = (apply_H, X0.clone(), precond.clone(), mask.clone())
+        return r
+
+    registry.register("capture", capture, overwrite=True)
+    scf(_si_system(), LDA_PW92(), smearing="gaussian", width=0.1, max_iter=3,
+        etol=1e-11, rhotol=1e-12, diago_tol=1e-10, verbose=False,
+        eigensolver="capture")
+    apply_H, X0, precond, mask = cap["args"]
+
+    monkeypatch.setenv("GRADWAVE_NATIVE_SUBSPACE", "complex128")
+    ref = native_davidson_adapter(apply_H, X0, precond, mask, tol=1e-4)
+    assert ref.diagnostics["subspace"] == "complex128"
+    monkeypatch.setenv("GRADWAVE_NATIVE_SUBSPACE", "complex64")
+    got = native_davidson_adapter(apply_H, X0, precond, mask, tol=1e-4)
+    assert got.diagnostics["subspace"] == "complex64"
+    assert "fallback_reason" not in got.diagnostics
+    de = (got.eigenvalues - ref.eigenvalues).abs().max().item()
+    assert de < 1e-2, f"c64 eigenvalues disagree by {de:.3e} eV"
+
+
+@needs_native
+def test_c64_auto_promotes_at_tight_tol(monkeypatch):
+    """With complex64 requested, a tight-tol solve auto-promotes to the fp64
+    kernel (diagnostics report complex128) so it can reach the tolerance."""
+    from gradwave.solvers import registry
+    from gradwave.solvers.native_davidson import native_davidson_adapter
+    from gradwave.solvers.registry import davidson_adapter
+
+    cap: dict = {}
+
+    def capture(apply_H, X0, precond, mask, **kw):
+        cap["n"] = cap.get("n", 0) + 1
+        r = davidson_adapter(apply_H, X0, precond, mask, **kw)
+        if cap["n"] == 3:
+            cap["args"] = (apply_H, X0.clone(), precond.clone(), mask.clone())
+        return r
+
+    registry.register("capture", capture, overwrite=True)
+    scf(_si_system(), LDA_PW92(), smearing="gaussian", width=0.1, max_iter=3,
+        etol=1e-11, rhotol=1e-12, diago_tol=1e-10, verbose=False,
+        eigensolver="capture")
+    apply_H, X0, precond, mask = cap["args"]
+    monkeypatch.setenv("GRADWAVE_NATIVE_SUBSPACE", "complex64")
+    got = native_davidson_adapter(apply_H, X0, precond, mask, tol=1e-9)
+    assert got.diagnostics["subspace"] == "complex128"  # promoted
+    assert float(got.residual_norms.max()) < 1e-8  # reached the tight tol
+
+
 @needs_native
 def test_env_threads_respected():
     """The native solve uses torch.get_num_threads() — the same knob the rest

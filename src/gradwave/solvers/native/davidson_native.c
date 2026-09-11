@@ -635,6 +635,12 @@ int davidson_native_c64(
     int64_t *n_add_k = malloc(sizeof(int64_t) * (size_t)nk);
     uint8_t *active = malloc(sizeof(uint8_t) * (size_t)nk);
     for (int64_t k = 0; k < nk; k++) { dim_k[k] = nb; active[k] = 1; }
+    /* complex64 residual plateau (mirrors solvers/davidson._C64_STALL): the
+     * fp32-truncated stored H·V caps the achievable rn near the fp32 floor, so
+     * a tol tighter than that floor would otherwise spin to max_iter. Once
+     * rn.max() is small (< gate) and a round improves it by < 30%, stop. */
+    double prev_rnmax = INFINITY;
+    const double C64_STALL = 0.7, C64_STALL_GATE = 1e-3;
 
     /* ---- init: V = qr(x0 * mask); HV = H V (apply in fp64) ---- */
 #pragma omp parallel num_threads(nthreads)
@@ -752,6 +758,9 @@ int davidson_native_c64(
             if (rnmax < tol) break;
             for (int64_t k = 0; k < nk; k++) n_add_k[k] = n_add_max;
         }
+        /* fp32 plateau: stop rather than spin to max_iter (see prev_rnmax) */
+        if (rnmax < C64_STALL_GATE && rnmax > C64_STALL * prev_rnmax) break;
+        prev_rnmax = rnmax;
 
         /* ---- expansion (parallel over k) ---- */
 #pragma omp parallel num_threads(nthreads)
