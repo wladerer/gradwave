@@ -78,9 +78,37 @@ batch over-polishes already-converged k), so eigenvalues agree to ~tol, not
 round-off. CPU-only (ignored on CUDA). Incompatible with hybrid Fock. And it
 LOSES when the per-task work is tiny (many small-npw k: measured 0.86× at
 nk=260/npw=331 — the GIL serializes op dispatch of 260 small solves; the
-full win there needs the out-of-GIL native loop, which is research-branch
-only). Composes with `k_chunk` (task size = `k_chunk`; peak resident
+full win there needs the out-of-GIL native loop, `davidson-native` below).
+Composes with `k_chunk` (task size = `k_chunk`; peak resident
 subspace ≈ `k_parallel·k_chunk·m·npw`).
+
+### The native eigensolver (`scf.eigensolver: davidson-native`)
+
+The compiled (FFTW + CBLAS + LAPACKE) block Davidson runs the whole inner
+loop as one C call with OpenMP over k and zero framework dispatch — measured
+4–8× the eager solver on medium cells, and it is the piece that removes the
+GIL ceiling the k-parallel section describes. Build once per machine with
+`scripts/build_native_solver.sh` (`GRADWAVE_NATIVE_SO` overrides the library
+path). Out-of-scope solves (hybrid Fock, USPP, non-CPU, low-precision modes)
+fall back to the eager solver explicitly, recorded in the diagnostics.
+
+Knobs, all environment variables read per solve:
+
+- `GRADWAVE_NATIVE_RETIRE` in `{on (default), off}` — per-k retirement:
+  each k drops out of the batch at its own convergence. `off` reproduces the
+  uniform-batch trajectory for A/B debugging.
+- `GRADWAVE_NATIVE_RR` in `{auto (default), classic, incremental}` — the
+  Rayleigh–Ritz kernel. `classic` rebuilds the full reduced matrix and
+  rotates the full Ritz block every round (the reference trajectory).
+  `incremental` is the cegterg-style kernel (QE's block Davidson): the
+  reduced `hc`/Gram `sc` grow by new columns only, the basis stays
+  non-orthonormal (generalized `zhegvd` solve, no per-round QR), and Ritz
+  vectors materialize only at restart/exit — measured ~1.9× e2e and
+  2.2–2.5× per-solve on Si-64, where dense subspace algebra dominates.
+  Both kernels honour the same per-band `rn ≤ diago_tol` contract (the
+  incremental exit re-verifies every band's true residual and polishes any
+  that fail). `auto` picks incremental above a measured `nbands·npw`
+  threshold (override with `GRADWAVE_NATIVE_RR_GATE`).
 
 ### IBZ symmetry
 
