@@ -139,8 +139,12 @@ An isotropic volume scan and a fit to the third-order Birch-Murnaghan equation o
 state[[39]](bibliography.md#birch) give the equilibrium volume V₀, the bulk
 modulus B₀, and its pressure derivative B₀'. `run_eos` runs the scan, warm-starts
 each SCF from the previous volume, and pins every volume to one shared FFT grid so
-the energy differences are clean. `gradwave.postscf.eos` does the fit and the
-Delta gauge. `examples/eos_silicon.py` runs it for Si:
+the energy differences are clean. The warm start (`eos.warm_start`, default on)
+is a pure iteration accelerator — the previous volume's converged density is a
+near-exact donor for the next, so it only cuts SCF iterations; the fixed point,
+and every E(V) point and fit, is byte-for-byte independent of the seed. Set
+`eos.warm_start: false` to cold-start every volume. `gradwave.postscf.eos` does
+the fit and the Delta gauge. `examples/eos_silicon.py` runs it for Si:
 
 ```bash
 uv run python examples/eos_silicon.py --outdir examples
@@ -214,6 +218,11 @@ the real-space force constants $\Phi_{\mu\nu}(R) = \partial^2 E / \partial
 constants have the periodicity of the primitive lattice, only the primitive
 home-cell atoms are displaced, so the SCF count is $6 N_\text{prim}$ and
 independent of supercell size (Si $2\times2\times2$ costs 12 SCFs, not 96).
+Each displaced-geometry SCF warm-starts from the undisplaced reference density
+(`phonons.warm_start`, default on) — the atoms move only $\pm h$, so the
+reference is a near-exact donor and only the SCF iteration count drops; the
+converged forces, and every frequency, are independent of the seed. Set
+`phonons.warm_start: false` to cold-start each displacement.
 
 Fourier interpolation of the force constants gives the dynamical matrix at any q,
 so one set of supercell forces yields the full dispersion along a q-path and the

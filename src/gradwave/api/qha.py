@@ -43,14 +43,39 @@ def run_qha(inp: Input, verbose: bool = True) -> dict[str, Any]:
     volumes: list[float] = []
     energies: list[float] = []
     dos_per_volume: list[tuple[Any, Any]] = []
+    n_iter_static: list[int] = []
+    warm_applied: list[bool] = []
     all_conv = True
 
+    # warm-start the static E(V) chain: the previous volume's converged density
+    # is a near-exact donor for the next (adjacent volumes, uniform scaling). The
+    # seed only applies when the two volumes land on the same FFT grid — a smaller
+    # cell can pick coarser build_fft_grid dims — so we build each system first,
+    # compare its grid to the donor's, and cold-start (logged) on a mismatch
+    # rather than let warm_start_densities raise mid-SCF. The per-volume phonon
+    # runs warm-start their own displacements internally (force_constants_home).
+    from gradwave.api.system import build_system
+
+    prev = None
     for s in q.scales:
         cell = cell0 * s ** (1.0 / 3.0)
         atoms = Atoms(symbols, scaled_positions=frac, cell=cell, pbc=True)
         sub = dataclasses.replace(inp, atoms=atoms)
-        # static E(V)
-        res = run_scf(dataclasses.replace(sub, task="scf"), verbose=False)
+        # static E(V) — build the system so we can gate the seed on grid match
+        scf_sub = dataclasses.replace(sub, task="scf")
+        system = build_system(scf_sub)
+        seed = None
+        if q.warm_start and prev is not None:
+            if tuple(system.grid.shape) == tuple(prev.system.grid.shape):
+                seed = prev
+            elif verbose:
+                print(f"  s={s:.3f}: FFT grid {tuple(system.grid.shape)} != "
+                      f"donor {tuple(prev.system.grid.shape)} — cold-starting",
+                      flush=True)
+        res = run_scf(scf_sub, system=system, verbose=False, start_from=seed)
+        prev = res
+        n_iter_static.append(int(getattr(res, "n_iter", 0)))
+        warm_applied.append(seed is not None)
         e = float(getattr(res.energies, q.energy))
         all_conv = all_conv and bool(res.converged)
         # phonon DOS at this volume (reuses the phonons block settings)
@@ -93,6 +118,9 @@ def run_qha(inp: Input, verbose: bool = True) -> dict[str, Any]:
         "thermal_expansion_T_per_K": alpha.tolist(),
         "gruneisen_T": gamma.tolist(),
         "all_converged": all_conv,
+        "warm_start": bool(q.warm_start),
+        "n_iter_static_per_volume": n_iter_static,
+        "warm_start_applied": warm_applied,
     }
     if verbose:
         print(f"qha: {len(q.scales)} volumes × {len(temps)} T; "
