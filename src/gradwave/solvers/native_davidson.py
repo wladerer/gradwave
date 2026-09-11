@@ -35,10 +35,11 @@ Coverage and fallback are explicit, not silent:
   project-out contractions against them as ``cgemm`` (half the bytes, ~2x the
   single-core flop rate). The FFT H-apply, the RR eigensolve, the residual
   norms, and the returned Ritz vectors X/HX all stay fp64; only the stored
-  basis is truncated, so residual norms floor near the fp32 plateau (~1e-6).
-  The adapter auto-promotes to the fp64 kernel for any solve whose ``tol`` is
-  below ``_C64_PROMOTE_TOL`` (~1e-6), so the tight tail of the SCF's adaptive
-  schedule stays fp64-exact. Mirrors the eager ``GRADWAVE_SUBSPACE_STORAGE``
+  basis is truncated, so residual norms floor at an fp32 plateau that grows
+  with basis size (measured ~1e-4 at m=768, ~1e-3 at m=8480). The adapter
+  auto-promotes to the fp64 kernel for any solve whose ``tol`` is below
+  ``_C64_PROMOTE_TOL`` (1e-3 — the measured large-shape floor), so everything
+  but a genuinely loose solve runs fp64-exact. Mirrors the eager ``GRADWAVE_SUBSPACE_STORAGE``
   knob's naming/precision contract; the two never stack (native runs this
   path, the eager knob routes a fallback — see ``_unsupported_reason``).
 * Transparent per-solve fallback to the eager ``davidson_batched`` (recorded
@@ -157,12 +158,18 @@ def _retire_on() -> bool:
 
 # complex64 subspace storage auto-promotes to the fp64 kernel once the requested
 # tolerance is tighter than the fp32 residual floor. The stored V/HV carry a
-# ~1e-7-relative (complex64 machine-eps) truncation, so residual norms plateau
-# near ~1e-6 (see solvers/davidson._C64_STALL); a tighter tol cannot be reached
-# in fp32 and would spin to max_iter. The SCF's adaptive schedule requests loose
-# tolerances early (where c64 wins) and tightens toward diago_tol near
-# convergence (where this promotes back to fp64), so the tail stays fp64-exact.
-_C64_PROMOTE_TOL = 1e-6
+# ~1e-7-relative (complex64 machine-eps) truncation, and the resulting residual
+# floor GROWS with the basis size: measured ~1e-4 at m=768 but ~1e-3 (with
+# oscillation up to ~7e-3) at the Si-64 shape (m=8480, nb=154). A tol below the
+# floor cannot be reached in fp32; the solve spins toward max_iter (the in-kernel
+# plateau stop only catches the sub-1e-3 regime), which is a measured e2e LOSS
+# (Si-64 15 Ry full SCF: 622 s with a 1e-6 gate vs 472 s c128). The gate
+# therefore sits at 1e-3 — c64 serves only tolerances where it is measured
+# faster (1.60x per solve at tol=1e-3, Si-64 shape); everything tighter runs the
+# fp64 kernel. In a standard SCF that is the loose first solve(s) only, so the
+# knob is for genuinely loose-tolerance workloads (screening, drafts), not a
+# production speedup.
+_C64_PROMOTE_TOL = 1e-3
 
 
 def _subspace_c64(tol: float) -> bool:

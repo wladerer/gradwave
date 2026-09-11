@@ -190,10 +190,10 @@ def test_c64_subspace_engages_and_agrees_at_loose_tol(monkeypatch):
     apply_H, X0, precond, mask = cap["args"]
 
     monkeypatch.setenv("GRADWAVE_NATIVE_SUBSPACE", "complex128")
-    ref = native_davidson_adapter(apply_H, X0, precond, mask, tol=1e-4)
+    ref = native_davidson_adapter(apply_H, X0, precond, mask, tol=1e-3)
     assert ref.diagnostics["subspace"] == "complex128"
     monkeypatch.setenv("GRADWAVE_NATIVE_SUBSPACE", "complex64")
-    got = native_davidson_adapter(apply_H, X0, precond, mask, tol=1e-4)
+    got = native_davidson_adapter(apply_H, X0, precond, mask, tol=1e-3)
     assert got.diagnostics["subspace"] == "complex64"
     assert "fallback_reason" not in got.diagnostics
     de = (got.eigenvalues - ref.eigenvalues).abs().max().item()
