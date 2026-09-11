@@ -29,6 +29,16 @@ Coverage and fallback are explicit, not silent:
   complex128, CPU, the restart path, per-k retirement
   (``GRADWAVE_NATIVE_RETIRE`` in {"on" (default), "off"} — "off" reproduces
   the uniform-batch trajectory bit-for-bit-in-structure for A/B debugging).
+* Two Rayleigh–Ritz kernels, selected by ``GRADWAVE_NATIVE_RR`` in
+  {"auto" (default), "classic", "incremental"}. ``classic`` rebuilds the full
+  reduced matrix and rotates the full Ritz block every round; ``incremental``
+  is the cegterg-style kernel (incremental hc/sc, non-orthonormal generalized
+  ``zhegvd`` solve, late Ritz materialization, per-k independent loops) that
+  wins on large ``nb*m`` subspaces. ``auto`` gates on ``nb*m`` (threshold
+  overridable via ``GRADWAVE_NATIVE_RR_GATE``). Both honour the same
+  ``rn ≤ tol`` per-band contract — the incremental kernel's inner criterion is
+  the exact residual (free from the correction step) and it re-verifies all
+  bands at exit, polishing any that fail.
 * Transparent per-solve fallback to the eager ``davidson_batched`` (recorded
   in the returned diagnostics as ``fallback_reason``) when the solve is
   outside the native scope: a composed apply (hybrid Fock / meta-GGA wrap the
@@ -92,8 +102,11 @@ def _load() -> ctypes.CDLL | None:
         return None
     lib = ctypes.CDLL(path)
     lib.davidson_native.restype = ctypes.c_int
+    # 10×int64, tol(double), nthreads(int), per_k_retire(int), rr_mode(int),
+    # then 10 input pointers + 4 output pointers.
     lib.davidson_native.argtypes = (
-        [ctypes.c_int64] * 10 + [ctypes.c_double, ctypes.c_int, ctypes.c_int]
+        [ctypes.c_int64] * 10
+        + [ctypes.c_double, ctypes.c_int, ctypes.c_int, ctypes.c_int]
         + [ctypes.c_void_p] * 10
         + [ctypes.c_void_p] * 4)
     _lib, _lib_path = lib, path
@@ -135,6 +148,30 @@ def _retire_on() -> bool:
         raise ValueError(
             f"GRADWAVE_NATIVE_RETIRE must be on|off, got {mode!r}")
     return mode == "on"
+
+
+# Auto-gate threshold on the subspace-algebra size nb*m: above it the
+# incremental (cegterg-style) RR wins (its saving is the full-block rotation +
+# QR it removes, which grows with nb*m); at small cells classic is at least as
+# fast and stays the default. Calibrated on asus (see the PR table); overridable
+# via GRADWAVE_NATIVE_RR_GATE for A/B.
+_RR_AUTO_GATE_NBM = 1_000_000
+
+
+def _rr_mode(nb: int, m: int) -> int:
+    """Resolve GRADWAVE_NATIVE_RR to the C kernel's rr_mode int (0 classic,
+    1 incremental). Default 'auto' picks by problem size; 'classic'/'incremental'
+    force a mode for A/B."""
+    mode = os.environ.get("GRADWAVE_NATIVE_RR", "auto").strip().lower()
+    if mode == "classic":
+        return 0
+    if mode == "incremental":
+        return 1
+    if mode != "auto":
+        raise ValueError(
+            f"GRADWAVE_NATIVE_RR must be auto|classic|incremental, got {mode!r}")
+    gate = int(os.environ.get("GRADWAVE_NATIVE_RR_GATE", _RR_AUTO_GATE_NBM))
+    return 1 if nb * m >= gate else 0
 
 
 def native_davidson_adapter(
@@ -201,9 +238,10 @@ def native_davidson_adapter(
         return ctypes.c_void_p(a.data_ptr())
 
     retire = 1 if _retire_on() else 0
+    rr_mode = _rr_mode(nb, m)
     ret = lib.davidson_native(
         nk, nb, m, n1, n2, n3, nproj, nhub, max_dim, max_iter, float(tol),
-        torch.get_num_threads(), retire,
+        torch.get_num_threads(), retire, rr_mode,
         ptr(x0_np), ptr(t_np), ptr(mask_np), ptr(isc_np), ptr(iga_np),
         ptr(veff_np), ptr(p_np), ptr(dij_np), ptr(hq_np), ptr(hdij_np),
         ptr(eig), ptr(x), ptr(rn), ptr(napply))
@@ -222,6 +260,7 @@ def native_davidson_adapter(
     return EigResult(
         eig, x, int(ret), rn,
         {"solver": "davidson-native", "retire": bool(retire),
+         "rr_mode": "incremental" if rr_mode else "classic",
          "max_dim_factor": max_dim_factor, "max_iter": max_iter,
          "hit_max_iter": int(ret) >= max_iter,
          "n_apply_low": 0, "n_apply_full": int(napply.item())},

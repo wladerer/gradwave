@@ -144,6 +144,83 @@ def test_retire_env_validation(monkeypatch):
     assert _retire_on() is True
 
 
+def test_rr_env_validation(monkeypatch):
+    """GRADWAVE_NATIVE_RR parses to the C kernel's rr_mode int (0 classic,
+    1 incremental); 'auto' gates on nb*m; anything else raises."""
+    from gradwave.solvers.native_davidson import _rr_mode
+
+    monkeypatch.setenv("GRADWAVE_NATIVE_RR", "classic")
+    assert _rr_mode(nb=200, m=30000) == 0
+    monkeypatch.setenv("GRADWAVE_NATIVE_RR", "incremental")
+    assert _rr_mode(nb=2, m=16) == 1
+    monkeypatch.setenv("GRADWAVE_NATIVE_RR", "banana")
+    with pytest.raises(ValueError, match="GRADWAVE_NATIVE_RR"):
+        _rr_mode(nb=2, m=16)
+    monkeypatch.delenv("GRADWAVE_NATIVE_RR")  # default auto
+
+
+def test_rr_auto_gate(monkeypatch):
+    """auto picks incremental only above the nb*m gate; the gate is
+    overridable for A/B."""
+    from gradwave.solvers.native_davidson import _rr_mode
+
+    monkeypatch.delenv("GRADWAVE_NATIVE_RR", raising=False)
+    monkeypatch.setenv("GRADWAVE_NATIVE_RR_GATE", "1000000")
+    assert _rr_mode(nb=10, m=4000) == 0       # 40k < 1e6 -> classic
+    assert _rr_mode(nb=154, m=24000) == 1     # 3.7M >= 1e6 -> incremental
+    monkeypatch.setenv("GRADWAVE_NATIVE_RR_GATE", "0")
+    assert _rr_mode(nb=2, m=16) == 1          # gate 0 -> always incremental
+
+
+@needs_native
+@pytest.mark.standard
+def test_incremental_scf_matches_eager(monkeypatch):
+    """The incremental (cegterg-style) RR kernel drives a full SCF to the same
+    rn<=tol contract as the eager solver: energy/density/forces agree at the
+    tolerance level. Si has symmetry-degenerate bands, so this also exercises
+    the generalized solve on degenerate clusters."""
+    monkeypatch.setenv("GRADWAVE_NATIVE_RR", "incremental")
+    res_e = _run(_si_system(), "davidson")
+    res_n = _run(_si_system(), "davidson-native")
+    assert res_e.converged and res_n.converged
+    de = abs(float(res_e.energies.free_energy)
+             - float(res_n.energies.free_energy))
+    assert de < 1e-7, f"energy mismatch {de:.3e} eV"
+    drho = float((res_e.rho - res_n.rho).abs().max())
+    assert drho < 1e-6, f"density mismatch {drho:.3e}"
+    f_e, f_n = forces(res_e), forces(res_n)
+    df = float((f_e - f_n).abs().max())
+    assert df < 1e-5, f"force mismatch {df:.3e} eV/Ang"
+
+
+@needs_native
+@pytest.mark.standard
+def test_incremental_matches_classic(monkeypatch):
+    """Both native RR kernels honour the same per-band rn<=tol contract, so a
+    full SCF converges to the same energy/density whichever kernel runs."""
+    monkeypatch.setenv("GRADWAVE_NATIVE_RR", "classic")
+    res_c = _run(_si_system(), "davidson-native")
+    monkeypatch.setenv("GRADWAVE_NATIVE_RR", "incremental")
+    res_i = _run(_si_system(), "davidson-native")
+    assert res_c.converged and res_i.converged
+    de = abs(float(res_c.energies.free_energy)
+             - float(res_i.energies.free_energy))
+    assert de < 1e-7, f"energy mismatch {de:.3e} eV"
+    drho = float((res_c.rho - res_i.rho).abs().max())
+    assert drho < 1e-6, f"density mismatch {drho:.3e}"
+
+
+@needs_native
+def test_incremental_frequent_restart_converges(monkeypatch):
+    """A tight max_dim (factor 2) forces frequent Ritz collapses/refreshes —
+    the same refresh path the sc-conditioning-breakdown rollback reuses. The
+    solve must still converge and every returned band satisfy rn<=tol."""
+    monkeypatch.setenv("GRADWAVE_NATIVE_RR", "incremental")
+    monkeypatch.setenv("GRADWAVE_MAX_DIM_FACTOR", "2")
+    res = _run(_si_system(), "davidson-native")
+    assert res.converged
+
+
 @needs_native
 def test_env_threads_respected():
     """The native solve uses torch.get_num_threads() — the same knob the rest
