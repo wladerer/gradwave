@@ -518,6 +518,11 @@ class PhononParams:
     # processes (each warm-started from the shared undisplaced reference). 1 =
     # serial (default). forward-only — a differentiable phonon run must stay at 1.
     n_workers: int = 1
+    # Warm-start every displaced-geometry SCF from the undisplaced reference
+    # density (the reference is the near-exact donor — the atoms move only ±h).
+    # A converged force does not depend on the seed, so this only cuts
+    # iterations. Set False to cold-start each displacement. Default on.
+    warm_start: bool = True
 
     # Infrared spectrum: Born effective charges Z* (Berry-phase finite differences
     # on the PRIMITIVE cell) → per-mode IR intensities on the Γ modes, plus a
@@ -812,6 +817,13 @@ class EOSParams:
     # a shared seed, so E(V) matches the serial fit to SCF tolerance, not
     # bit-for-bit. forward-only — a differentiable EOS must stay at 1.
     n_workers: int = 1
+    # Warm-start each volume's SCF from the previous converged density (serial:
+    # the neighbour chain; parallel: the shared reference-volume seed). A
+    # converged SCF's fixed point does not depend on its seed, so this only cuts
+    # iterations — near-exact donors (the previous volume on the shared FFT grid)
+    # collect the discount. Set False to cold-start every volume (the reference
+    # for the cold-vs-warm A/B). Default on.
+    warm_start: bool = True
 
     def __post_init__(self):
         # coerce a YAML list to a tuple (frozen dataclass hashability) and
@@ -962,6 +974,13 @@ class QHAParams:
         0.0, 100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0)
     pressure_GPa: float = 0.0
     energy: str = "total"  # total | free_energy | e0 — the static E(V)
+    # Warm-start the static E(V) SCF at each volume from the previous volume's
+    # converged density (the volume ladder is ordered from the reference outward
+    # so every seed is a near-exact donor). Skipped with a logged reason when a
+    # volume lands on a different FFT grid than its donor (build_fft_grid may
+    # pick coarser dims for a smaller cell); never crashes. The per-volume phonon
+    # runs already warm-start their own displacements internally. Default on.
+    warm_start: bool = True
 
     def __post_init__(self):
         object.__setattr__(self, "scales", tuple(float(s) for s in self.scales))

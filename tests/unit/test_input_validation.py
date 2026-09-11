@@ -130,6 +130,29 @@ def test_extrapolation_defaults_and_parses(tmp_path):
     assert inp.relax.extrapolation == "quadratic"
 
 
+def test_warm_start_toggle_defaults_on_and_parses(tmp_path):
+    # cross-SCF density warm-starting defaults ON for the sweep tasks and
+    # accepts an explicit False (the cold arm of the cold-vs-warm A/B).
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _base()))
+    assert inp.eos.warm_start is True
+    assert inp.phonons.warm_start is True
+    assert inp.qha.warm_start is True
+
+    inp = load_input(_write(tmp_path, _base(
+        "task: eos\neos: {warm_start: false}\n")))
+    assert inp.eos.warm_start is False
+
+    inp = load_input(_write(tmp_path, _base(
+        "task: phonons\nphonons: {warm_start: false}\n")))
+    assert inp.phonons.warm_start is False
+
+    inp = load_input(_write(tmp_path, _base(
+        "task: qha\nqha: {warm_start: false}\n")))
+    assert inp.qha.warm_start is False
+
+
 @pytest.mark.parametrize("ecut", ["0", "-5", "-680.28"])
 def test_nonpositive_ecut_rejected(tmp_path, ecut):
     from gradwave.inputs import InputError, load_input

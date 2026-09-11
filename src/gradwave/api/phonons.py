@@ -108,17 +108,19 @@ class _PhononSpoke(NamedTuple):
     scmap: Any
     ksuper: tuple[int, int, int]
     pos_sc: Any            # (N_sc, 3) displaced positions [Å], numpy
-    ckpt_path: str
+    ckpt_path: str | None  # None cold-starts the spoke (warm_start off)
     tag: tuple[int, int, int]   # (home atom a, axis i, sign)
 
 
 def _phonon_spoke_worker(spoke: _PhononSpoke) -> tuple[tuple[int, int, int], Any]:
     """Worker: build the displaced supercell, warm-start from the reference
-    checkpoint, run the SCF and return ``(tag, force[N_sc,3])`` (numpy)."""
+    checkpoint (when ``spoke.ckpt_path`` is set), run the SCF and return
+    ``(tag, force[N_sc,3])`` (numpy)."""
     from gradwave.io.checkpoint import as_start_from, load_checkpoint
 
     upfs, uspp, xc, mags = _phonon_rebuild(spoke.inp)
-    start_from = as_start_from(load_checkpoint(spoke.ckpt_path))
+    start_from = (as_start_from(load_checkpoint(spoke.ckpt_path))
+                  if spoke.ckpt_path is not None else None)
     res = _phonon_run_scf(spoke.inp, spoke.scmap, spoke.ksuper, upfs, uspp,
                           xc, mags, spoke.pos_sc, start_from)
     return spoke.tag, _phonon_force(res, xc, uspp).detach().cpu().numpy()
@@ -126,12 +128,15 @@ def _phonon_spoke_worker(spoke: _PhononSpoke) -> tuple[tuple[int, int, int], Any
 
 def _phonons_fc_parallel(
     inp: Input, scmap: Any, ksuper: Any, upfs: Any, uspp: bool, xc: Any,
-    mags: Any, *, h: float, n_workers: int, verbose: bool,
+    mags: Any, *, h: float, n_workers: int, warm_start: bool, verbose: bool,
 ) -> Any:
     """Force constants Φ_home via SeedPool: reference SCF serially, then the
     6·N_prim displacement SCFs across worker processes, each warm-started from
     the reference checkpoint. The FD/symmetrize/ASR assembly is shared with the
-    serial path (postscf.phonons_supercell.force_constants_from_forces)."""
+    serial path (postscf.phonons_supercell.force_constants_from_forces).
+
+    ``warm_start=False`` skips the reference checkpoint and cold-starts every
+    displacement (the cold arm of the cold-vs-warm A/B)."""
     import os
     import tempfile
 
@@ -142,6 +147,13 @@ def _phonons_fc_parallel(
     )
     from gradwave.postscf.seedpool import map_spokes
 
+    if not warm_start:
+        # cold every displacement: no reference checkpoint to seed from
+        spokes = [_PhononSpoke(inp, scmap, ksuper, pos, None, (a, i, sign))
+                  for (a, i, sign, pos) in displacement_list(scmap, h)]
+        out = map_spokes(_phonon_spoke_worker, spokes,
+                         n_workers=n_workers, verbose=verbose)
+        return force_constants_from_forces(dict(out), scmap, h)
     ref = _phonon_run_scf(inp, scmap, ksuper, upfs, uspp, xc, mags,
                           scmap.positions_super.copy(), None)
     with tempfile.TemporaryDirectory(prefix="gw_seedpool_") as td:
@@ -410,9 +422,12 @@ def run_phonons(inp: Input, verbose: bool = True) -> dict[str, Any]:
     if n_workers > 1:
         phi = _phonons_fc_parallel(inp, scmap, ksuper, upfs, uspp, xc, mags,
                                    h=inp.phonons.displacement,
-                                   n_workers=n_workers, verbose=verbose)
+                                   n_workers=n_workers,
+                                   warm_start=inp.phonons.warm_start,
+                                   verbose=verbose)
     else:
         phi = force_constants_home(make_scf, scmap, h=inp.phonons.displacement,
+                                   warm_start=inp.phonons.warm_start,
                                    xc=xc, force_fn=force_fn,
                                    use_displacement_symmetry=(
                                        inp.phonons.use_displacement_symmetry),

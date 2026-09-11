@@ -54,22 +54,26 @@ class _EosSpoke(NamedTuple):
     fixed: Any
     ckpt_path: str
     idx: int
+    warm_start: bool
 
 
-def _eos_spoke_worker(spoke: _EosSpoke) -> tuple[int, float, float, bool]:
+def _eos_spoke_worker(spoke: _EosSpoke) -> tuple[int, float, float, bool, int, bool]:
     """Worker: build the scaled volume, warm-start from the reference volume's
-    checkpoint, run the SCF and return ``(idx, volume, energy, converged)``."""
+    checkpoint (when ``spoke.warm_start``), run the SCF and return
+    ``(idx, volume, energy, converged, n_iter, warm_start_applied)``."""
     import numpy as np
 
     from gradwave.io.checkpoint import as_start_from, load_checkpoint
 
     upfs, uspp, soa = _eos_rebuild(spoke.inp)
     system, cell = _eos_build(spoke.inp, upfs, uspp, soa, spoke.scale, spoke.fixed)
-    start_from = as_start_from(load_checkpoint(spoke.ckpt_path))
+    start_from = (as_start_from(load_checkpoint(spoke.ckpt_path))
+                  if spoke.warm_start else None)
     res = run_scf(spoke.inp, system=system, verbose=False, start_from=start_from)
     e = float(getattr(res.energies, spoke.inp.eos.energy))
     vol = float(abs(np.linalg.det(cell)))
-    return spoke.idx, vol, e, bool(res.converged)
+    return (spoke.idx, vol, e, bool(res.converged),
+            int(getattr(res, "n_iter", 0)), start_from is not None)
 
 
 def run_eos(
@@ -182,29 +186,37 @@ def run_eos(
         volumes = [0.0] * len(scales)
         energies = [0.0] * len(scales)
         converged = [False] * len(scales)
+        niters = [0] * len(scales)
+        applied = [False] * len(scales)
         volumes[ref_idx] = float(abs(np.linalg.det(ref_cell)))
         energies[ref_idx] = float(getattr(ref.energies, ekind))
         converged[ref_idx] = bool(ref.converged)
+        niters[ref_idx] = int(getattr(ref, "n_iter", 0))
         with tempfile.TemporaryDirectory(prefix="gw_seedpool_") as td:
             ckpt = os.path.join(td, "ref.ckpt")
             save_checkpoint(ref, ckpt)
-            spokes = [_EosSpoke(inp, s, fixed, ckpt, i)
+            spokes = [_EosSpoke(inp, s, fixed, ckpt, i, inp.eos.warm_start)
                       for i, s in enumerate(scales) if i != ref_idx]
             out = map_spokes(_eos_spoke_worker, spokes,
                              n_workers=n_workers, verbose=verbose)
-        for idx, vol, e, conv in out:
+        for idx, vol, e, conv, nit, appl in out:
             volumes[idx] = vol
             energies[idx] = e
             converged[idx] = conv
+            niters[idx] = nit
+            applied[idx] = appl
         for s, vol, e, conv in zip(scales, volumes, energies, converged,
                                    strict=True):
             _eos_print(s, vol, e, conv)
     else:
         prev = None
-        volumes, energies, converged = [], [], []
+        volumes, energies, converged, niters, applied = [], [], [], [], []
         for s in scales:
             sysd, cell = _build_at(s, fixed)
-            res = run_scf(inp, system=sysd, verbose=False, start_from=prev)
+            seed = prev if inp.eos.warm_start else None
+            res = run_scf(inp, system=sysd, verbose=False, start_from=seed)
+            applied.append(seed is not None)
+            niters.append(int(getattr(res, "n_iter", 0)))
             prev = res
             e = float(getattr(res.energies, ekind))
             vol = float(abs(np.linalg.det(cell)))
@@ -232,6 +244,10 @@ def run_eos(
         "b0_eV_ang3": fit.b0,
         "ev_a3_to_gpa": EV_A3_TO_GPA,
         "all_converged": all(converged),
+        "warm_start": bool(inp.eos.warm_start),
+        "n_iter_per_volume": [int(n) for n in niters],
+        "warm_start_applied": [bool(a) for a in applied],
+        "n_iter_total": int(sum(niters)),
     }
     if sigma_e is not None:
         from gradwave.postscf.eos import bootstrap_bm3
