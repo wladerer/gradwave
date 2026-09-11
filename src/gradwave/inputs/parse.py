@@ -717,24 +717,34 @@ def _build_magnons(raw: dict[str, Any], task: str) -> MagnonParams:
                     f"magnons.bonds[{k}] must be a mapping with 'i', 'j', 'r' "
                     f"([nx,ny,nz]) and 'j_iso' (meV)")
             _check_keys(f"magnons.bonds[{k}]", entry, {"i", "j", "r", "j_iso", "dm"})
+            r = [int(x) for x in entry["r"]]
+            d = [float(x) for x in entry.get("dm", (0.0, 0.0, 0.0))]
+            if len(r) != 3 or len(d) != 3:
+                raise InputError(
+                    f"magnons.bonds[{k}]: r must be 3 integers and dm a 3-vector")
             bonds.append(MagnonBondSpec(
                 i=int(entry["i"]), j=int(entry["j"]),
-                r=tuple(int(x) for x in entry["r"]),  # type: ignore[arg-type]
-                j_iso=float(entry["j_iso"]),
-                dm=tuple(float(x) for x in entry.get("dm", (0.0, 0.0, 0.0))),  # type: ignore[arg-type]
+                r=(r[0], r[1], r[2]), j_iso=float(entry["j_iso"]),
+                dm=(d[0], d[1], d[2]),
             ))
     elif bonds_raw is not None or raw.get("spins"):
         raise InputError("magnons.spins / magnons.bonds are only valid for task: magnons")
     else:
         bonds = []
+    ea = [float(x) for x in raw.get("easy_axis", (0.0, 0.0, 1.0))]
+    if len(ea) != 3:
+        raise InputError(f"magnons.easy_axis must be a 3-vector, got {ea}")
+    moments = None
+    if raw.get("moments") is not None:
+        moments = tuple(
+            (float(m[0]), float(m[1]), float(m[2])) for m in raw["moments"])
     return MagnonParams(
         spins=tuple(float(s) for s in raw.get("spins", ())),
         bonds=tuple(bonds),
-        moments=(None if raw.get("moments") is None
-                 else tuple(tuple(float(x) for x in m) for m in raw["moments"])),
+        moments=moments,
         anisotropy_k_meV=(None if raw.get("anisotropy_k_meV") is None
                           else tuple(float(k) for k in raw["anisotropy_k_meV"])),
-        easy_axis=tuple(float(x) for x in raw.get("easy_axis", (0.0, 0.0, 1.0))),
+        easy_axis=(ea[0], ea[1], ea[2]),
         path=str(raw.get("path", "")),
         npoints=int(raw.get("npoints", 200)),
     )
