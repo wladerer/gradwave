@@ -25,14 +25,14 @@ from gradwave.inputs.models import InputError as InputError
 from gradwave.inputs.models import KPointsParams as KPointsParams
 from gradwave.inputs.models import MagneticParams as MagneticParams
 from gradwave.inputs.models import MagnetismParams as MagnetismParams
+from gradwave.inputs.models import MagnonBondSpec as MagnonBondSpec
+from gradwave.inputs.models import MagnonParams as MagnonParams
 from gradwave.inputs.models import MixingParams as MixingParams
 from gradwave.inputs.models import NebParams as NebParams
 from gradwave.inputs.models import NmrParams as NmrParams
 from gradwave.inputs.models import NmrSpectrumParams as NmrSpectrumParams
 from gradwave.inputs.models import PhononParams as PhononParams
 from gradwave.inputs.models import ProjectionsParams as ProjectionsParams
-from gradwave.inputs.models import MagnonBondSpec as MagnonBondSpec
-from gradwave.inputs.models import MagnonParams as MagnonParams
 from gradwave.inputs.models import QHAParams as QHAParams
 from gradwave.inputs.models import RelaxParams as RelaxParams
 from gradwave.inputs.models import SCFParams as SCFParams
@@ -64,14 +64,14 @@ __all__ = [
     "KPointsParams",
     "MagneticParams",
     "MagnetismParams",
+    "MagnonBondSpec",
+    "MagnonParams",
     "MixingParams",
     "NebParams",
     "NmrParams",
     "NmrSpectrumParams",
     "PhononParams",
     "ProjectionsParams",
-    "MagnonBondSpec",
-    "MagnonParams",
     "QHAParams",
     "RelaxParams",
     "SCFParams",

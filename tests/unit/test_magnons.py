@@ -179,6 +179,41 @@ def test_magnon_bands_dataclass_shape_and_units():
     assert bs.frequencies.max() == pytest.approx(4.0 * 10.0, abs=1e-3)
 
 
+def test_magnons_task_end_to_end(tmp_path):
+    # the full numbers-in task: YAML -> api.run -> magnons.json, no SCF. A simple
+    # cubic FM (bcc-Fe-like lattice, J1 only) exercises the driver, summary block
+    # and stiffness report.
+    from gradwave.api import run
+    from gradwave.inputs import load_input
+
+    body = """
+structure:
+  cell: [[2.87, 0, 0], [0, 2.87, 0], [0, 0, 2.87]]
+  positions: {cart: [[0, 0, 0]]}
+  species: [Fe]
+task: magnons
+magnons:
+  spins: [1.1]
+  bonds:
+    - {i: 0, j: 0, r: [1, 0, 0], j_iso: 15.0}
+    - {i: 0, j: 0, r: [0, 1, 0], j_iso: 15.0}
+    - {i: 0, j: 0, r: [0, 0, 1], j_iso: 15.0}
+  npoints: 80
+output_dir: %s
+""" % str(tmp_path / "out")
+    p = tmp_path / "in.yaml"
+    p.write_text(body)
+    inp = load_input(p)
+    summary = run(inp, verbose=False)
+    mg = summary["magnons"]
+    assert mg["n_sublattices"] == 1
+    assert mg["min_frequency_meV"] < 1e-2  # gapless FM Goldstone
+    # stiffness of a NN simple-cubic FM: D = S J a² = 1.1·15·2.87² meV·Å²
+    expect_d = 1.1 * 15.0 * 2.87**2
+    assert abs(mg["stiffness_meV_A2"] - expect_d) / expect_d < 5e-3
+    assert (tmp_path / "out" / "magnons.json").exists()
+
+
 def test_dispersion_is_differentiable_free_of_nans():
     # a moderately complex 2-sublattice case runs clean end to end
     m = HeisenbergModel.from_shells(

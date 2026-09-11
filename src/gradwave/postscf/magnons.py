@@ -238,7 +238,6 @@ def _grand_matrix(
     𝓗(q) = [[A(q)+diag(C),   B(q)          ],
             [B(q)†,           conj(A(−q))+diag(C)]]
     (u_iᵀ … u_j* here means Σ_ab conj(u_i^a) 𝒥^ab u_j^b — the Hermitian form.)"""
-    n = model.n_sub
     s = torch.as_tensor(model.spins, dtype=torch.float64)
     sqrt_ss = torch.sqrt(torch.outer(s, s)).to(torch.complex128)  # (n,n)
     uc = u.conj()
