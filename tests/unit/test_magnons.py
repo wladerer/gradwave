@@ -199,8 +199,9 @@ magnons:
     - {i: 0, j: 0, r: [0, 1, 0], j_iso: 15.0}
     - {i: 0, j: 0, r: [0, 0, 1], j_iso: 15.0}
   npoints: 80
-output_dir: %s
-""" % str(tmp_path / "out")
+output:
+  dir: out
+"""
     p = tmp_path / "in.yaml"
     p.write_text(body)
     inp = load_input(p)
