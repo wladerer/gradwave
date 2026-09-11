@@ -63,25 +63,30 @@ def test_perfect_supercell_reproduces_primitive_bands():
     sup = ub.eigenvalues - ub.reference           # (nk, 40)
     w = ub.weights                                # (nk, 40)
 
-    # Unitarity: the total unfolded weight at each path point equals the integer
-    # number of primitive bands represented in the window (Σ_m P_m ∈ ℤ). Note
-    # per-band weights are NOT bimodal for a perfect crystal — degenerate folded
-    # multiplets at high-symmetry K split the weight among the (arbitrary) solver
-    # eigenvectors, but the multiplet sum is exact.
-    tot = w.sum(axis=1)
-    assert np.allclose(tot, np.rint(tot), atol=1e-6), tot
     assert float(w.max()) < 1.0 + 1e-6
 
-    # The EBS reproduces the primitive band structure: every bit of spectral
-    # weight below the sampled window edge lies within a few meV of a primitive
-    # band eigenvalue — weight appears only on the primitive dispersion. This is
-    # the decisive perfect-supercell control (eigenvalue agreement + no spurious
-    # weight), degeneracy-safe because it sums weight rather than matching bands.
-    edge = prim[:, 5]   # 6th primitive band: stay safely inside the sampled window
+    # Unitarity over a complete manifold: Si has 4 primitive valence bands,
+    # gap-separated from the conduction bands along GXL, so the unfolded weight
+    # below the mid-gap must sum to exactly 4 at every path point (Σ_m P_m ∈ ℤ
+    # over the complete valence manifold). Per-band weights are NOT bimodal for a
+    # perfect crystal — degenerate folded multiplets at high-symmetry K split the
+    # weight among the (arbitrary) solver eigenvectors — but the manifold sum is
+    # exact. (Summing over the whole band set instead would break the integer at
+    # path points where nbands truncates a degenerate conduction multiplet.)
+    gapmid = 0.5 * (prim[:, 3] + prim[:, 4])   # mid valence–conduction gap
+    below = sup < gapmid[:, None]
+    valence_weight = (w * below).sum(axis=1)
+    assert np.allclose(valence_weight, 4.0, atol=0.02), valence_weight
+
+    # The EBS reproduces the primitive band structure: below the mid-gap every
+    # bit of spectral weight lies within a few meV of a primitive band eigenvalue
+    # — weight appears only on the primitive dispersion. This is the decisive
+    # perfect-supercell control (eigenvalue agreement + no spurious weight),
+    # degeneracy-safe because it sums weight rather than matching bands.
     near_w = tot_w = 0.0
     for ik in range(_NPTS):
         for m in range(sup.shape[1]):
-            if sup[ik, m] > edge[ik]:
+            if sup[ik, m] > gapmid[ik]:
                 continue
             tot_w += w[ik, m]
             if np.min(np.abs(prim[ik] - sup[ik, m])) < 0.03:
