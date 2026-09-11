@@ -302,26 +302,32 @@ def _colpa(h: torch.Tensor, *, imag_tol: float = 1e-6) -> torch.Tensor:
     n = n2 // 2
     g = torch.diag(torch.cat([
         torch.ones(n, dtype=h.dtype), -torch.ones(n, dtype=h.dtype)]))
-    try:
+
+    # Positive-(semi)definiteness is the Colpa precondition and the physical
+    # stability test in one: a strictly-negative eigenvalue of 𝓗 means the
+    # ordered state is a saddle/maximum of the spin Hamiltonian (unstable),
+    # while a zero eigenvalue is a Goldstone mode (gapless but stable).
+    h_evals = torch.linalg.eigvalsh(h)
+    scale = float(h_evals.abs().max()) + 1e-30
+    if float(h_evals.min()) < -imag_tol * scale:
+        raise MagnonInstabilityError(
+            "the magnon grand matrix 𝓗(q) is not positive definite: the supplied "
+            "ordered state is not a stable minimum of the spin Hamiltonian. "
+            "Likely causes — wrong ground-state moment directions (e.g. "
+            "ferromagnetic directions on an antiferromagnet), or a coupling set "
+            "truncated to too few shells. "
+            f"min eig(𝓗)/scale = {float(h_evals.min()) / scale:.2e}")
+
+    if float(h_evals.min()) > 1e-9 * scale:
+        # strictly positive definite -> Colpa via Cholesky (accurate + stable)
         ell = torch.linalg.cholesky(h)          # h = L L†, L lower
         kmat = ell.conj().transpose(0, 1)       # upper K, h = K† K
         w = kmat @ g @ kmat.conj().transpose(0, 1)
         w = 0.5 * (w + w.conj().transpose(0, 1))
         evals = torch.linalg.eigvalsh(w)        # real, ascending, ± paired
         return evals[n:].clamp_min(0.0)         # top N = +ω, ascending
-    except torch.linalg.LinAlgError:
-        pass
-    # semidefinite / instability path: eigenvalues of g𝓗 are ±ω
-    gh = g @ h
-    ev = torch.linalg.eigvals(gh)
-    scale = float(h.diagonal().abs().max()) + 1e-30
-    if float(ev.imag.abs().max()) > imag_tol * scale:
-        raise MagnonInstabilityError(
-            "the magnon grand matrix 𝓗(q) is not positive definite (complex "
-            "spin-wave frequencies): the supplied ordered state is not a stable "
-            "minimum of the spin Hamiltonian. Likely causes — wrong ground-state "
-            "moment directions, or a coupling set truncated to too few shells. "
-            f"max|Im ω²|/scale = {float(ev.imag.abs().max()) / scale:.2e}")
+    # positive semidefinite (Goldstone): Cholesky fails, so read ±ω off g𝓗
+    ev = torch.linalg.eigvals(g @ h)
     real = torch.sort(ev.real).values
     return real[n:].clamp_min(0.0)
 
