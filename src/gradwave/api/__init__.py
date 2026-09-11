@@ -35,6 +35,7 @@ from gradwave.api.scf import _run_scf_noncollinear as _run_scf_noncollinear
 from gradwave.api.scf import run_scf as run_scf
 from gradwave.api.summary import _bands_extra as _bands_extra
 from gradwave.api.summary import _optics_extra as _optics_extra
+from gradwave.api.magnons import run_magnons as run_magnons
 from gradwave.api.summary import _write_volumetric as _write_volumetric
 from gradwave.api.summary import build_summary as build_summary
 from gradwave.api.surface_energy import run_surface_energy as run_surface_energy
@@ -90,6 +91,7 @@ __all__ = [
     "run_qha",
     "run_relax",
     "run_scf",
+    "run_magnons",
     "run_surface_energy",
     "run_thermochem",
 ]

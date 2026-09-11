@@ -29,6 +29,8 @@ from gradwave.inputs.models import (
     KPointsParams,
     MagneticParams,
     MagnetismParams,
+    MagnonBondSpec,
+    MagnonParams,
     MemoryParams,
     MixingParams,
     NebParams,
@@ -271,7 +273,7 @@ _ALLOWED_TOP = {
     "nonmagnetic", "start_mag", "tot_magnetization",
     "scf", "slab", "task", "relax", "neb", "bands", "optics", "magnetism", "eos",
     "elastic",
-    "phonons", "thermochem", "surface_energy", "qha", "flapw", "nmr",
+    "phonons", "thermochem", "surface_energy", "qha", "magnons", "flapw", "nmr",
     "projections", "bader", "work_function", "dispersion", "device", "distributed",
     "verbose", "output", "error_estimate", "restart",
 }
@@ -691,6 +693,53 @@ def _build_surface_energy(
     )
 
 
+def _build_magnons(raw: dict[str, Any], task: str) -> MagnonParams:
+    """Parse the ``magnons`` block: the Heisenberg model (spins, exchange bonds,
+    moment directions, single-ion anisotropy) plus the q-path controls. ``spins``
+    and ``bonds`` are required for a ``magnons`` task and rejected otherwise."""
+    _check_keys("magnons", raw,
+                {"spins", "bonds", "moments", "anisotropy_k_meV", "easy_axis",
+                 "path", "npoints"})
+    bonds_raw = raw.get("bonds")
+    if task == "magnons":
+        if not raw.get("spins"):
+            raise InputError(
+                "task: magnons requires magnons.spins (the spin length S per "
+                "magnetic sublattice, one per atom in the structure)")
+        if not bonds_raw:
+            raise InputError(
+                "task: magnons requires magnons.bonds (a list of exchange bonds "
+                "{i, j, r: [nx,ny,nz], j_iso, dm?})")
+        bonds = []
+        for k, entry in enumerate(bonds_raw):
+            if not isinstance(entry, dict) or not {"i", "j", "r", "j_iso"} <= set(entry):
+                raise InputError(
+                    f"magnons.bonds[{k}] must be a mapping with 'i', 'j', 'r' "
+                    f"([nx,ny,nz]) and 'j_iso' (meV)")
+            _check_keys(f"magnons.bonds[{k}]", entry, {"i", "j", "r", "j_iso", "dm"})
+            bonds.append(MagnonBondSpec(
+                i=int(entry["i"]), j=int(entry["j"]),
+                r=tuple(int(x) for x in entry["r"]),  # type: ignore[arg-type]
+                j_iso=float(entry["j_iso"]),
+                dm=tuple(float(x) for x in entry.get("dm", (0.0, 0.0, 0.0))),  # type: ignore[arg-type]
+            ))
+    elif bonds_raw is not None or raw.get("spins"):
+        raise InputError("magnons.spins / magnons.bonds are only valid for task: magnons")
+    else:
+        bonds = []
+    return MagnonParams(
+        spins=tuple(float(s) for s in raw.get("spins", ())),
+        bonds=tuple(bonds),
+        moments=(None if raw.get("moments") is None
+                 else tuple(tuple(float(x) for x in m) for m in raw["moments"])),
+        anisotropy_k_meV=(None if raw.get("anisotropy_k_meV") is None
+                          else tuple(float(k) for k in raw["anisotropy_k_meV"])),
+        easy_axis=tuple(float(x) for x in raw.get("easy_axis", (0.0, 0.0, 1.0))),
+        path=str(raw.get("path", "")),
+        npoints=int(raw.get("npoints", 200)),
+    )
+
+
 def _load_input(path: Path) -> Input:
     raw_yaml: Any = yaml.safe_load(path.read_text())
     base = path.parent
@@ -715,7 +764,7 @@ def _load_input(path: Path) -> Input:
     # pseudopotentials and no ecut (the structure is only the gas molecule whose
     # mass / moments of inertia feed the ideal-gas rotational/translational
     # entropy). Shares the all-electron "no PW inputs required" gate.
-    pw_free = all_electron or task == "thermochem"
+    pw_free = all_electron or task in ("thermochem", "magnons")
 
     if "structure" not in raw:
         raise InputError("missing required key 'structure'")
@@ -752,12 +801,12 @@ def _load_input(path: Path) -> Input:
     xc, hybrid = _resolve_xc(raw)
     if task not in ("scf", "relax", "neb", "bands", "optics", "magnetism", "eos",
                     "elastic",
-                    "phonons", "thermochem", "surface_energy", "qha", "flapw",
-                    "nmr"):
+                    "phonons", "thermochem", "surface_energy", "qha", "magnons",
+                    "flapw", "nmr"):
         raise InputError(
             f"unknown task {task!r} "
             f"(scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons | "
-            f"thermochem | surface_energy | qha | flapw | nmr)")
+            f"thermochem | surface_energy | qha | magnons | flapw | nmr)")
     nspin = int(raw.get("nspin", 1))
     if nspin not in (1, 2):
         raise InputError(f"nspin must be 1 or 2, got {nspin}")
@@ -945,6 +994,7 @@ def _load_input(path: Path) -> Input:
         surface_energy=_build_surface_energy(
             dict(raw.get("surface_energy", {})), base, task),
         qha=_build(QHAParams, raw.get("qha", {}), "qha"),
+        magnons=_build_magnons(dict(raw.get("magnons", {})), task),
         elastic=_build(ElasticParams, raw.get("elastic", {}), "elastic"),
         phonons=_build(PhononParams, raw.get("phonons", {}), "phonons"),
         flapw=_build_flapw(dict(raw.get("flapw", {})),
