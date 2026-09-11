@@ -64,6 +64,21 @@ def _supercell(prim: np.ndarray, nrep: int):
     return cell, pos
 
 
+def _conventional_supercell(a: float, ncell: int):
+    """(cell, cart positions) of an ncell³ supercell of the 2-atom cubic bcc cell.
+    Cleaner minimum-image geometry than the rhombohedral primitive supercell, so
+    the first neighbour shells resolve as full sets of distinct atoms."""
+    cell = ncell * a * np.eye(3)
+    basis = np.array([[0.0, 0, 0], [0.5, 0.5, 0.5]])
+    pos = []
+    for i in range(ncell):
+        for j in range(ncell):
+            for k in range(ncell):
+                for b in basis:
+                    pos.append((np.array([i, j, k]) + b) / ncell)
+    return cell, (np.array(pos) @ cell)
+
+
 def _shell_distances(cell: np.ndarray, pos: np.ndarray, center: int):
     """Minimum-image distance from ``center`` to every other atom (Å)."""
     inv = np.linalg.inv(cell)
@@ -77,15 +92,20 @@ def _shell_distances(cell: np.ndarray, pos: np.ndarray, center: int):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--nrep", type=int, default=2, help="primitive-cell repeats")
+    ap.add_argument("--conventional", type=int, default=0,
+                    help="if >0, use an ncell³ conventional (2-atom cubic) bcc "
+                         "supercell instead of the primitive one")
     ap.add_argument("--kmesh", type=int, default=3)
     ap.add_argument("--ecut_ry", type=float, default=50.0)
     ap.add_argument("--threads", type=int, default=8)
     args = ap.parse_args()
     torch.set_num_threads(args.threads)
-    dev = "cpu"  # fp64 SCF: CPU beats the fp64-crippled 3050
 
     prim = _bcc_primitive(A_BCC)
-    cell, pos = _supercell(prim, args.nrep)
+    if args.conventional > 0:
+        cell, pos = _conventional_supercell(A_BCC, args.conventional)
+    else:
+        cell, pos = _supercell(prim, args.nrep)
     natom = len(pos)
     center = int(np.argmin(np.linalg.norm(pos - pos.mean(0), axis=1)))
     dists = _shell_distances(cell, pos, center)
