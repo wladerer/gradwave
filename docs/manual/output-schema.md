@@ -215,6 +215,18 @@ along a k-path. The SCF block above rides in the same file.
 | `reference_eV` | float | the energy zero (Fermi level for a metal, else the valence-band maximum) |
 | `irreps` | list | per-tick point-group irrep annotations, present when `bands.irreps: true` (norm-conserving only) |
 
+When `bands.unfold` is set (supercell unfolding), the block instead reports the
+**primitive** path and adds the Bloch spectral weights. `kpts_frac`, `x`,
+`labels`, and `eigenvalues_eV` are then the primitive-path quantities, and:
+
+| key | type | meaning |
+|---|---|---|
+| `unfolded` | bool | `true` — marks an unfolded (EBS) bands block |
+| `supercell_matrix` | 3×3 | the integer `M` (`A_super = M @ A_prim`) |
+| `kpts_frac_super` | Nk×3 | reduced supercell-fractional image of each primitive path point |
+| `weights` | array | per-point per-band Bloch spectral weight `P ∈ [0, 1]` (same shape as `eigenvalues_eV`) |
+| `folded` | object | raw supercell eigenvalues at the **unique** folded K: `unique_K` (nK×3), `image` (path point → unique-K index), `eigenvalues_eV` |
+
 ## magnetism
 
 The `magnetism` task fills `summary["magnetism"]` from `postscf.magnetism`.

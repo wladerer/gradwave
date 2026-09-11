@@ -118,6 +118,42 @@ Set `irreps: true` to label bands at the special points with Mulliken symbols.
 *Graphene along Γ-M-K-Γ, each state at a special point labeled with its
 point-group irrep.*
 
+### Supercell band unfolding (effective band structure)
+
+When the SCF cell is a **supercell** of a smaller primitive cell (a defect
+supercell, an alloy special quasirandom structure, a reconstructed surface), the
+folded supercell bands are hard to read. `bands.unfold` recovers the primitive
+Bloch character: it maps the supercell eigenstates back onto a **primitive-cell**
+band path and tags each with a Bloch spectral weight `P ∈ [0, 1]` — the
+Popescu–Zunger effective band structure (EBS). A perfect (defect-free) supercell
+reproduces the primitive band structure with weights 0 or 1; symmetry breaking
+fractionalizes and broadens them.
+
+`unfold` is the integer supercell matrix `M` relating the two cells,
+`A_super = M @ A_prim` (rows = lattice vectors). Give the diagonal shorthand
+`[2, 2, 2]` or a full 3×3 matrix. The band `path` is generated on the
+**primitive** cell `M⁻¹ @ (SCF cell)` — that is the whole point, so specify path
+labels for the primitive lattice, not the supercell.
+
+```yaml
+task: bands
+bands: {unfold: [2, 2, 2], path: GXWKGL, npoints: 120}
+```
+
+`summary["bands"]` then carries the primitive path/labels, per-point per-band
+`weights`, and the raw supercell eigenvalues at the unique folded K under
+`bands["folded"]`. Only the unique supercell images of the path are diagonalized
+(many primitive path points share one), so unfolding a dense path is cheap. Plot
+the weighted EBS with `analysis.plot_unfolded` (points shaded/sized by weight):
+
+```python
+from gradwave.io import analysis
+analysis.plot_unfolded("out/bands.json", path="ebs.png")
+```
+
+Norm-conserving, collinear (nspin=1 or 2); USPP/PAW and noncollinear are
+follow-ups.
+
 ## Density of states
 
 A total DOS comes from any SCF result at plot time.

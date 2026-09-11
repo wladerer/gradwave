@@ -8,16 +8,21 @@ valence-band maximum (fixed occupations) by the caller.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 from ase.atoms import Atoms
 
 from gradwave.dtypes import CDTYPE
-from gradwave.grids import build_gsphere
+from gradwave.grids import GSphere, build_gsphere
 from gradwave.postscf._kb import projector_data_at_k, species_projector_tables
 from gradwave.scf.loop import SCFResult
+
+if TYPE_CHECKING:
+    from gradwave.solvers.davidson import BatchedDavidsonResult
 
 # A state counts as partially occupied (⇒ metal) when its occupation lands
 # meaningfully inside (0, 2). One consistent tolerance for both the metal gate
@@ -36,16 +41,23 @@ class BandStructure:
 
 
 @torch.no_grad()
-def band_structure(
+def _diagonalize_at_kpts(
     res: SCFResult,
     kpts_frac: np.ndarray,
-    nbands: int | None = None,
-    diago_tol: float = 1e-9,
-    verbose: bool = False,
-) -> BandStructure:
+    nbands: int,
+    diago_tol: float,
+    verbose: bool,
+) -> Iterator[tuple[int, int, int, int, list[GSphere], BatchedDavidsonResult]]:
+    """Frozen-V_eff Davidson at explicit k-points — the one diagonalization
+    engine shared by ``band_structure`` and ``postscf.unfold``.
+
+    Yields ``(lo, hi, sp, nspin, spheres, out)`` per (k-chunk, spin channel):
+    the plane-wave ``spheres`` for k-points ``[lo:hi]`` (so callers can read the
+    per-k Miller indices) and the ``BatchedDavidsonResult`` ``out`` carrying both
+    eigenvalues and eigenvectors on those spheres. Numerics are identical to the
+    previous inline loop in ``band_structure``."""
     system = res.system
     grid = system.grid
-    nbands = nbands or system.nbands
     # Collinear nspin=2 shares projectors/D_ij across channels; only the local
     # potential splits. Band structure is then the frozen-potential solve run
     # once per spin with that channel's v_eff. Normalize to a leading spin axis
@@ -58,7 +70,6 @@ def band_structure(
     beta_ls, dij_species = species_projector_tables(system.upfs, device)
 
     kpts = np.asarray(kpts_frac, dtype=float)
-    eigs = np.empty((nspin, len(kpts), nbands))
 
     # batch path points through the k-batched solver (the v0 per-k loop was
     # ~10x slower); chunk count bounded by dense-box memory (~1.5 GB budget)
@@ -87,24 +98,48 @@ def band_structure(
             c0[:, torch.arange(nbands), torch.arange(nbands)] = 1.0
             out = davidson_batched_ms(h.apply, c0, bk.t, bk.mask, tol=diago_tol,
                                       max_iter=80, mixed_precision=mixed_precision)
-            eigs[sp, lo:hi] = out.eigenvalues.cpu().numpy()
             if verbose:
                 tag = f" spin {sp}" if nspin == 2 else ""
                 print(f"  band chunk {lo}-{hi - 1}/{len(kpts) - 1}{tag}  "
                       f"max|res| = {float(out.residual_norms.max()):.1e}", flush=True)
+            yield lo, hi, sp, nspin, spheres, out
 
-    # reference energy: Fermi (metal) or VBM (fixed/insulating occupations).
-    # SCFResult carries no smearing scheme/width, so decide from the
-    # occupations themselves: a metal has at least one partially-filled state.
-    # Full occupancy per state is 2 for nspin=1 (spin-paired) but 1 for nspin=2
-    # (one electron per channel), so the metal gate scales with nspin.
-    occ = res.occupations
-    g = 2.0 if nspin == 1 else 1.0
-    is_metal = bool(((occ > _OCC_TOL) & (occ < g - _OCC_TOL)).any())
-    reference = res.fermi if is_metal else float(res.eigenvalues[occ > _OCC_TOL].max())
+
+@torch.no_grad()
+def band_structure(
+    res: SCFResult,
+    kpts_frac: np.ndarray,
+    nbands: int | None = None,
+    diago_tol: float = 1e-9,
+    verbose: bool = False,
+) -> BandStructure:
+    nbands = nbands or res.system.nbands
+    nspin = getattr(res, "nspin", 1)
+    kpts = np.asarray(kpts_frac, dtype=float)
+    eigs = np.empty((nspin, len(kpts), nbands))
+
+    for lo, hi, sp, _nspin, _spheres, out in _diagonalize_at_kpts(
+        res, kpts, nbands, diago_tol, verbose):
+        eigs[sp, lo:hi] = out.eigenvalues.cpu().numpy()
+
+    reference = _bands_reference_energy(res)
     eigenvalues = eigs[0] if nspin == 1 else eigs
     return BandStructure(
         kpts_frac=np.asarray(kpts_frac), eigenvalues=eigenvalues, reference=reference)
+
+
+def _bands_reference_energy(res: SCFResult) -> float:
+    """Band-plot energy zero: Fermi (metal) or VBM (fixed/insulating occupations).
+
+    SCFResult carries no smearing scheme/width, so decide from the occupations
+    themselves: a metal has at least one partially-filled state. Full occupancy
+    per state is 2 for nspin=1 (spin-paired) but 1 for nspin=2 (one electron per
+    channel), so the metal gate scales with nspin."""
+    occ = res.occupations
+    nspin = getattr(res, "nspin", 1)
+    g = 2.0 if nspin == 1 else 1.0
+    is_metal = bool(((occ > _OCC_TOL) & (occ < g - _OCC_TOL)).any())
+    return float(res.fermi if is_metal else float(res.eigenvalues[occ > _OCC_TOL].max()))
 
 
 def bands_along_ase_path(res: SCFResult, atoms: Atoms, path: str = "", npoints: int = 120,

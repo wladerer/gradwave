@@ -96,6 +96,35 @@ def test_esm_boundary_parses(tmp_path):
     assert inp.scf.esm_bias == pytest.approx(1.25)
 
 
+def test_bands_unfold_parses_and_normalizes(tmp_path):
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _base()))
+    assert inp.bands.unfold is None  # default: ordinary (non-unfolded) bands
+
+    # diagonal shorthand → nested int tuple
+    inp = load_input(_write(tmp_path, _base(
+        "task: bands\nbands: {unfold: [2, 2, 2]}\n")))
+    assert inp.bands.unfold == ((2, 0, 0), (0, 2, 0), (0, 0, 2))
+
+    # full 3×3 matrix preserved
+    inp = load_input(_write(tmp_path, _base(
+        "task: bands\nbands: {unfold: [[1, 1, 0], [0, 1, 0], [0, 0, 2]]}\n")))
+    assert inp.bands.unfold == ((1, 1, 0), (0, 1, 0), (0, 0, 2))
+
+
+@pytest.mark.parametrize("spec, needle", [
+    ("[2, 2]", "3"),                                 # wrong length
+    ("[[1.5, 0, 0], [0, 1, 0], [0, 0, 1]]", "integer"),  # non-integer
+    ("[[1, 0, 0], [2, 0, 0], [0, 0, 1]]", "singular"),   # det 0
+])
+def test_bands_unfold_rejects(tmp_path, spec, needle):
+    from gradwave.inputs import InputError, load_input
+
+    with pytest.raises(InputError, match=needle):
+        load_input(_write(tmp_path, _base(f"task: bands\nbands: {{unfold: {spec}}}\n")))
+
+
 def test_kspacing_parses(tmp_path):
     from gradwave.inputs import load_input
 

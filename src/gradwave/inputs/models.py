@@ -467,6 +467,34 @@ class BandsParams:
     npoints: int = 120
     nbands: int | None = None
     irreps: bool = False  # label bands at special points with Mulliken symbols
+    # Supercell band-structure unfolding (Popescu–Zunger EBS). When set, the SCF
+    # cell is treated as a SUPERCELL of a primitive cell related by the integer
+    # matrix M (A_super = M @ A_prim); the band path is built on the PRIMITIVE
+    # cell (M⁻¹ @ supercell) and the supercell eigenvalues are unfolded onto it
+    # with per-band Bloch spectral weights. Accepts a diagonal shorthand
+    # [2, 2, 2] or a full 3×3 integer matrix. Normalized to a nested int tuple.
+    unfold: Any = None
+
+    def __post_init__(self):
+        if self.unfold is None:
+            return
+        arr = np.asarray(self.unfold)
+        if arr.ndim == 1:
+            if arr.shape != (3,):
+                raise InputError(
+                    "bands.unfold diagonal shorthand must have 3 entries, "
+                    f"got {list(self.unfold)}")
+            arr = np.diag(arr)
+        if arr.shape != (3, 3):
+            raise InputError(
+                "bands.unfold must be a 3×3 integer matrix or a 3-vector "
+                f"diagonal shorthand, got shape {arr.shape}")
+        if not np.allclose(arr, np.rint(arr), atol=1e-8):
+            raise InputError(f"bands.unfold must be integer-valued, got {arr.tolist()}")
+        if int(round(float(np.linalg.det(arr)))) == 0:
+            raise InputError("bands.unfold matrix is singular (det = 0)")
+        norm = tuple(tuple(int(round(v)) for v in row) for row in arr)
+        object.__setattr__(self, "unfold", norm)
 
 
 @dataclass(frozen=True)
