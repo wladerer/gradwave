@@ -25,6 +25,7 @@ from gradwave.api.eos import run_eos as run_eos
 from gradwave.api.flapw import reference_sigma_iso as reference_sigma_iso
 from gradwave.api.flapw import run_flapw as run_flapw
 from gradwave.api.flapw import run_nmr as run_nmr
+from gradwave.api.magnons import run_magnons as run_magnons
 from gradwave.api.phonons import run_phonons as run_phonons
 from gradwave.api.qha import run_qha as run_qha
 from gradwave.api.relax import _build_relax_calc as _build_relax_calc
@@ -35,7 +36,6 @@ from gradwave.api.scf import _run_scf_noncollinear as _run_scf_noncollinear
 from gradwave.api.scf import run_scf as run_scf
 from gradwave.api.summary import _bands_extra as _bands_extra
 from gradwave.api.summary import _optics_extra as _optics_extra
-from gradwave.api.magnons import run_magnons as run_magnons
 from gradwave.api.summary import _write_volumetric as _write_volumetric
 from gradwave.api.summary import build_summary as build_summary
 from gradwave.api.surface_energy import run_surface_energy as run_surface_energy
@@ -86,12 +86,12 @@ __all__ = [
     "run_eos",
     "run_flapw",
     "run_magnetism",
+    "run_magnons",
     "run_nmr",
     "run_phonons",
     "run_qha",
     "run_relax",
     "run_scf",
-    "run_magnons",
     "run_surface_energy",
     "run_thermochem",
 ]

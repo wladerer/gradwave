@@ -261,6 +261,37 @@ def _thermochem_parameters_lines(par):
     return lines
 
 
+def _magnons_lines(mg):
+    """Magnon (LSWT) block: branch count, the frequency window, and the
+    ferromagnetic spin-wave stiffness when reported."""
+    lines = [_sec("magnons (linear spin-wave theory)")]
+    rows = [
+        ("sublattices", str(mg.get("n_sublattices", "?"))),
+        ("bonds", str(mg.get("n_bonds", "?"))),
+        ("path", mg.get("path", "?")),
+        ("ω range", f"{mg.get('min_frequency_meV', 0.0):.3f} … "
+                    f"{mg.get('max_frequency_meV', 0.0):.3f} meV"),
+    ]
+    if mg.get("stiffness_meV_A2") is not None:
+        rows.append(("stiffness D", f"{mg['stiffness_meV_A2']:.1f} meV·Å²"))
+    lines += _cols(rows)
+    return lines
+
+
+def _magnons_parameters_lines(par):
+    """Parameters block for the magnons LSWT task (own schema — no plane-wave /
+    SCF knobs, just the spin-model dimensions and q-path)."""
+    lines = [_sec("parameters")]
+    lines += _cols([
+        ("formalism", par.get("formalism", "linear spin-wave theory")),
+        ("sublattices", str(par.get("n_sublattices", "?"))),
+        ("bonds", str(par.get("n_bonds", "?"))),
+        ("path", par.get("path", "?")),
+        ("npoints", str(par.get("npoints", "?"))),
+    ])
+    return lines
+
+
 def _scf_trace_lines(trace):
     """Per-iteration table (F, ΔE, |Δρ|, and t when the trace was timed)."""
     timed = any("t_s" in h for h in trace)
@@ -995,6 +1026,7 @@ _SECTIONS = (
     ("thermochem", _thermochem_lines, False),
     ("surface_energy", _surface_energy_lines, False),
     ("qha", _qha_lines, False),
+    ("magnons", _magnons_lines, False),
     ("elastic", _elastic_lines, False),
     ("phonons", _phonon_lines, False),
     ("flapw", _flapw_lines, False),
@@ -1014,6 +1046,8 @@ def format_output(summary: dict[str, Any]) -> str:
         lines += _flapw_parameters_lines(summary["parameters"])
     elif summary["task"] == "thermochem":
         lines += _thermochem_parameters_lines(summary["parameters"])
+    elif summary["task"] == "magnons":
+        lines += _magnons_parameters_lines(summary["parameters"])
     else:
         lines += _parameters_lines(summary["parameters"])
     for key, render, needs_full in _SECTIONS:
