@@ -330,6 +330,50 @@ def plot_bands(source, path=None, ax=None, window=None):
     return _finish(ax.figure, ax, path)
 
 
+def plot_unfolded(source, path=None, ax=None, window=None, cmap="viridis",
+                  size=18.0, spin=0):
+    """Effective band structure (unfolded supercell bands) from a bands.json
+    written with bands.unfold set: eigenvalues along the PRIMITIVE path, each
+    (k, band) point shaded and sized by its Bloch spectral weight P ∈ [0, 1].
+    A perfect supercell reproduces the primitive bands as solid P≈1 points;
+    defects fractionalize the weight (fainter, smaller points)."""
+    plt = _plt()
+    s = load(source)
+    b = s.get("bands", s)
+    if not b.get("unfolded"):
+        raise ValueError("plot_unfolded needs a bands result with unfolding "
+                         "enabled (bands.unfold); use plot_bands otherwise")
+    eig = np.asarray(b["eigenvalues_eV"], dtype=float)
+    w = np.asarray(b["weights"], dtype=float)
+    x = np.asarray(b["x"], dtype=float)
+    ref = b.get("reference_eV") or 0.0
+    if eig.ndim == 3:  # (nspin, nk, nb) — pick a channel
+        eig, w = eig[spin], w[spin]
+    nk, nb = eig.shape
+    xx = np.repeat(x[:, None], nb, axis=1).ravel()
+    yy = (eig - ref).ravel()
+    ww = np.clip(w.ravel(), 0.0, 1.0)
+    if ax is None:
+        _fig, ax = plt.subplots(figsize=(5.4, 4.2))
+    # weight → alpha and marker area; drop near-zero-weight points so the plot
+    # shows the effective bands, not a full supercell-band haze.
+    keep = ww > 1e-3
+    sc = ax.scatter(xx[keep], yy[keep], c=ww[keep], s=size * ww[keep],
+                    cmap=cmap, vmin=0.0, vmax=1.0, edgecolors="none")
+    ax.figure.colorbar(sc, ax=ax, label="spectral weight")
+    labels = b["labels"]
+    for xt, _lab in labels:
+        ax.axvline(xt, color="#52514e", lw=0.5, alpha=0.5)
+    ax.axhline(0.0, color="#52514e", lw=0.5, ls="--", alpha=0.7)
+    ax.set_xticks([xt for xt, _ in labels])
+    ax.set_xticklabels([lab.replace("G", "Γ") for _, lab in labels])
+    ax.set_ylabel("E − E_ref [eV]")
+    ax.set_xlim(x.min(), x.max())
+    if window is not None:
+        ax.set_ylim(*window)
+    return _finish(ax.figure, ax, path)
+
+
 def plot_phonons(source, path=None):
     """Phonon dispersion (with a DOS side panel when present) from a
     phonons.json: branches along the q-path, high-symmetry labels on the x

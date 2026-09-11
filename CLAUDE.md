@@ -94,6 +94,7 @@ drivers call their own module globals.
 | Use the CPU cores on a multi-k SCF (per-k thread-pool eigensolve + per-k retirement) | `scf.memory.k_parallel: N` (or `GRADWAVE_K_PARALLEL` / `scf(k_parallel=)`; CPU-only, no Fock; driver: `scf.loop._solve_bands_kpool`) | raise torch intra-op threads (measured no scaling: the batched CPU eigensolve runs one-core-equivalent) |
 | Forces / stress | `postscf.forces.forces`, `postscf.stress.stress` (`stress_kbar` to convert) | recompute Hellmann-Feynman/Pulay terms |
 | Bands / DOS / PDOS / phonons / EOS | `postscf.{bands.band_structure, dos.kpm_dos, pdos.projected_dos, phonons, eos.fit_bm3}` | |
+| Supercell band unfolding (Popescu–Zunger EBS) → primitive path + Bloch weights | `bands.unfold: [[..3×3..]]` (or diagonal `[2,2,2]`) on the `bands` task → `summary["bands"]["weights"]` + `["folded"]` (driver: `postscf.unfold.unfold_bands`; plot `io.analysis.plot_unfolded`) | reimplement the fold map / residue mask |
 | Bader (QTAIM) per-atom charges | `bader: enabled` on the scf task → `summary["bader"]` (driver: `postscf.bader.bader`) | |
 | Free-energy thermochemistry (ΔG_ads / ideal-gas / harmonic) | `task: thermochem` (`api.run_thermochem`; numbers-in, no SCF) | |
 | Slab work function Φ = E_vac − E_F (+ electrode potential vs SHE) | `work_function: enabled` on the scf task (auto for open-boundary ESM runs) → `summary["work_function"]` (driver: `postscf.work_function`) | |

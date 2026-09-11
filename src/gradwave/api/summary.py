@@ -257,10 +257,54 @@ def _bands_uspp_block(inp: Input, res: SCFLike, verbose: bool) -> dict[str, Any]
     return {"bands": bands}
 
 
+def _unfold_block(inp: Input, res: SCFLike, verbose: bool) -> dict[str, Any]:
+    """Supercell band-structure unfolding (Popescu–Zunger EBS). The SCF cell is a
+    supercell of a primitive cell related by bands.unfold = M; the primitive band
+    path carries per-band Bloch spectral weights, and the raw supercell
+    eigenvalues at the unique folded K live under bands["folded"]."""
+    from gradwave.postscf.unfold import unfold_bands
+
+    # the norm-conserving frozen-V_eff Davidson path underpins unfolding; the
+    # USPP/PAW and noncollinear formalisms are documented follow-ups.
+    ub = unfold_bands(
+        cast("SCFResult", res), inp.bands.unfold, path=inp.bands.path,
+        npoints=inp.bands.npoints, nbands=inp.bands.nbands, verbose=verbose)
+    assert ub.x is not None
+    assert ub.labels is not None
+    bands: dict[str, Any] = {
+        "unfolded": True,
+        "supercell_matrix": [list(r) for r in inp.bands.unfold],
+        "kpts_frac": ub.kpts_prim.tolist(),          # PRIMITIVE path
+        "kpts_frac_super": ub.kpts_super.tolist(),   # reduced supercell images
+        "x": ub.x.tolist(),
+        "labels": ub.labels,
+        "eigenvalues_eV": ub.eigenvalues.tolist(),
+        "weights": ub.weights.tolist(),              # Bloch spectral weight P ∈ [0,1]
+        "reference_eV": ub.reference,
+        # raw supercell eigenvalues at the unique diagonalized K set
+        "folded": {
+            "unique_K": ub.unique_K.tolist(),
+            "image": ub.image.tolist(),              # path point → unique-K index
+            "eigenvalues_eV": ub.folded_eigenvalues.tolist(),
+        },
+    }
+    return {"bands": bands}
+
+
 def _bands_extra(inp: Input, res: SCFLike, verbose: bool) -> dict[str, Any]:
     from gradwave.postscf.bands import bands_along_ase_path
 
     _species, upfs, _soa = _species_upfs(inp)
+    if inp.bands.unfold is not None:
+        if _is_uspp(upfs):
+            raise NotImplementedError(
+                "bands.unfold (supercell unfolding) is norm-conserving only — "
+                "the USPP/PAW band path is a documented follow-up")
+        if inp.noncollinear:
+            raise NotImplementedError(
+                "bands.unfold (supercell unfolding) does not support the "
+                "noncollinear/spinor formalism yet")
+        return _unfold_block(inp, res, verbose)
     if _is_uspp(upfs):
         return _bands_uspp_block(inp, res, verbose)
 
