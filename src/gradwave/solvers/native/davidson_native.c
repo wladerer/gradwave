@@ -267,11 +267,16 @@ static void scratch_free(scratch_t *s) {
 /*      residual directions get only a per-vector norm (no QR, no      */
 /*      projection pass). The reduced problem is the generalized       */
 /*      Hermitian one, hc c = ew sc c, solved with LAPACKE_zhegvd       */
-/*      each round (cegterg calls diaghg). Conditioning is guarded:    */
-/*      if zhegvd reports sc not positive-definite (info > dim, the     */
-/*      Cholesky of the Gram broke down) we roll back — refresh to the  */
-/*      last good Ritz block and drop the offending directions, which  */
-/*      is cegterg's refresh cadence made reactive.                    */
+/*      each round (cegterg calls diaghg). Conditioning is guarded     */
+/*      PROACTIVELY: before every generalized solve the Gram is        */
+/*      Cholesky-factored and its reciprocal condition number          */
+/*      estimated (zpotrf + zpocon); on breakdown (not pos-def or      */
+/*      rcond < I_RCOND_MIN) we collapse to an exactly re-orthonorm-   */
+/*      alized Ritz block and continue — cegterg's refresh cadence     */
+/*      made reactive, with a QR repair that halts drift. (A reactive  */
+/*      info>dim catch alone was measured insufficient: zhegvd can     */
+/*      return info=0 with a garbage eigenbasis on a numerically       */
+/*      singular Gram, which broke SCF density normalization.)         */
 /*                                                                     */
 /*  (3) LATE Ritz materialization. Residual vectors are formed only    */
 /*      for the still-unconverged roots (a dim×nu combine, not the      */
@@ -353,18 +358,41 @@ static void iscratch_free(iscratch_t *s) {
     free(s->becp); free(s->tmp); free(s->sel); free(s->conv);
 }
 
-/* copy the active dim×dim col-major (lda=max_dim) reduced matrices into
- * contiguous lda=dim scratch and solve the generalized problem. Returns the
- * LAPACKE info: 0 ok; 0<info<=dim eigensolver did not converge; info>dim the
- * Gram sc failed Cholesky (leading minor info-dim not positive definite). */
+/* Solve the generalized reduced problem hc c = ew sc c on contiguous lda=dim
+ * copies, with a PROACTIVE conditioning guard on the Gram. zhegvd can return
+ * info=0 with a garbage eigenbasis when sc is numerically singular but its
+ * internal Cholesky still "succeeds" (measured on Al: non-orthonormal
+ * returned Ritz vectors broke SCF density normalization). So the Gram is
+ * first Cholesky-factored and its reciprocal condition number estimated; a
+ * breakdown means a (near-)linear dependence entered the basis and the
+ * caller must collapse/refresh instead of trusting the solve.
+ * Returns 0 ok, 1 Gram breakdown (collapse+continue), -2 hard failure. */
+#define I_RCOND_MIN 1e-11
+
 static int isolve_reduced(iscratch_t *ws, int64_t dim, int64_t ld) {
+    for (int64_t j = 0; j < dim; j++)
+        for (int64_t i = 0; i < dim; i++)
+            ws->Bc[i + j * dim] = ws->sc[i + j * ld];
+    double anorm = LAPACKE_zlanhe(LAPACK_COL_MAJOR, '1', 'L', (int)dim,
+                                  ws->Bc, (int)dim);
+    int info = LAPACKE_zpotrf(LAPACK_COL_MAJOR, 'L', (int)dim, ws->Bc,
+                              (int)dim);
+    if (info > 0) return 1;   /* Gram not positive definite */
+    if (info < 0) return -2;
+    double rcond = 0.0;
+    if (LAPACKE_zpocon(LAPACK_COL_MAJOR, 'L', (int)dim, ws->Bc, (int)dim,
+                       anorm, &rcond) != 0)
+        return -2;
+    if (rcond < I_RCOND_MIN) return 1;
     for (int64_t j = 0; j < dim; j++)
         for (int64_t i = 0; i < dim; i++) {
             ws->Ac[i + j * dim] = ws->hc[i + j * ld];
             ws->Bc[i + j * dim] = ws->sc[i + j * ld];
         }
-    return LAPACKE_zhegvd(LAPACK_COL_MAJOR, 1, 'V', 'L', (int)dim, ws->Ac,
+    info = LAPACKE_zhegvd(LAPACK_COL_MAJOR, 1, 'V', 'L', (int)dim, ws->Ac,
                           (int)dim, ws->Bc, (int)dim, ws->W);
+    if (info == 0) return 0;
+    return info > 0 ? 1 : -2;
 }
 
 /* Ritz combine for a selected set of `ns` eigenvector columns (bands in
@@ -396,22 +424,66 @@ static void icommit(iscratch_t *ws, int64_t dim, int64_t ld, int64_t nb,
     *dimc = dim;
 }
 
-/* refresh/collapse: materialize the nb committed Ritz vectors and their images
- * into V[0:nb], HV[0:nb]; reset the reduced problem to hc=diag(Wc), sc=I,
- * Cc=I. Returns the new (collapsed) basis dim = nb. Mirrors cegterg:last. */
-static int64_t irefresh(iscratch_t *ws, int64_t dimc, int64_t ld, int64_t nb,
-                        int64_t m) {
+/* EXACT collapse: materialize the nb committed Ritz vectors + images, QR
+ * re-orthonormalize (repairing the images by the triangular factor, as the
+ * classic restart does), then Rayleigh-Ritz in the nb-space so the basis is
+ * exactly L2-orthonormal Ritz vectors with exact eigenvalues and exact
+ * per-band residual norms (written to ws->rnb, Wc updated). Resets the
+ * reduced problem to hc=diag(Wc), sc=I, Cc=I. This is cegterg:last plus the
+ * QR drift repair — used at restarts, on Gram breakdown, and at exit, so the
+ * returned eigenvectors are always orthonormal with true residuals.
+ * Returns 0 ok, -2 LAPACK failure. Uses Ac (nb×nb H-projection) and Bc
+ * (nb×nb R factor) as scratch. */
+static int icollapse_exact(iscratch_t *ws, int64_t dimc, int64_t ld,
+                           int64_t nb, int64_t m) {
+    const c128 one = 1.0, zero = 0.0;
     for (int64_t b = 0; b < nb; b++) ws->sel[b] = b;
     iritz(ws, ws->sel, nb, dimc, ld, m, ws->Xu, ws->HXu);
-    memcpy(ws->V, ws->Xu, sizeof(c128) * (size_t)(nb * m));
-    memcpy(ws->HV, ws->HXu, sizeof(c128) * (size_t)(nb * m));
+    if (qr_rows(ws->Xu, nb, m, ws->Bc) != 0) return -2;
+    cblas_ztrsm(CblasRowMajor, CblasLeft, CblasUpper, CblasTrans,
+                CblasNonUnit, (int)nb, (int)m, &one, ws->Bc, (int)nb,
+                ws->HXu, (int)m);
+    /* nb×nb projected H: Ac = conj(Xu · HXu^H), hermitized (classic layout) */
+    cblas_zgemm(CblasRowMajor, CblasNoTrans, CblasConjTrans, (int)nb, (int)nb,
+                (int)m, &one, ws->Xu, (int)m, ws->HXu, (int)m, &zero, ws->Ac,
+                (int)nb);
+    for (int64_t i = 0; i < nb; i++)
+        for (int64_t j = i; j < nb; j++) {
+            c128 sij = conj(ws->Ac[i * nb + j]);
+            c128 sji = conj(ws->Ac[j * nb + i]);
+            c128 hij = 0.5 * (sij + conj(sji));
+            ws->Ac[i * nb + j] = hij;
+            ws->Ac[j * nb + i] = conj(hij);
+        }
+    if (LAPACKE_zheevd(LAPACK_ROW_MAJOR, 'V', 'U', (int)nb, ws->Ac, (int)nb,
+                       ws->W) != 0)
+        return -2;
+    cblas_zgemm(CblasRowMajor, CblasTrans, CblasNoTrans, (int)nb, (int)m,
+                (int)nb, &one, ws->Ac, (int)nb, ws->Xu, (int)m, &zero, ws->V,
+                (int)m);
+    cblas_zgemm(CblasRowMajor, CblasTrans, CblasNoTrans, (int)nb, (int)m,
+                (int)nb, &one, ws->Ac, (int)nb, ws->HXu, (int)m, &zero,
+                ws->HV, (int)m);
+    for (int64_t b = 0; b < nb; b++) {
+        ws->Wc[b] = ws->W[b];
+        const double e = ws->W[b];
+        const double *restrict xb = (const double *)(ws->V + b * m);
+        const double *restrict hb = (const double *)(ws->HV + b * m);
+        double s2 = 0;
+#pragma omp simd reduction(+ : s2)
+        for (int64_t g = 0; g < 2 * m; g++) {
+            const double r = hb[g] - e * xb[g];
+            s2 += r * r;
+        }
+        ws->rnb[b] = sqrt(s2);
+    }
     for (int64_t j = 0; j < nb; j++)
         for (int64_t i = 0; i < nb; i++) {
             ws->hc[i + j * ld] = (i == j) ? (c128)ws->Wc[j] : 0.0;
             ws->sc[i + j * ld] = (i == j) ? 1.0 : 0.0;
             ws->Cc[i + j * ld] = (i == j) ? 1.0 : 0.0;
         }
-    return nb;
+    return 0;
 }
 
 /* one k, run to convergence. Returns n_iter (>0), or -1 degenerate init row,
@@ -452,10 +524,12 @@ static int incremental_one_k(const ctx_t *cx, int64_t k, iscratch_t *ws,
         hc[i + i * ld] = creal(hc[i + i * ld]);
         sc[i + i * ld] = creal(sc[i + i * ld]);
     }
-    if (isolve_reduced(ws, dim, ld) != 0) return -2;
+    if (isolve_reduced(ws, dim, ld) != 0) return -2;  /* Gram = I at init:
+                                                         breakdown impossible */
     int64_t dimc;
     icommit(ws, dim, ld, nb, &dimc);
     for (int64_t b = 0; b < nb; b++) ws->conv[b] = 0;
+    int bd_consec = 0;  /* consecutive Gram breakdowns -> eager fallback at 3 */
 
     int64_t it;
     for (it = 1; it <= max_iter; it++) {
@@ -488,37 +562,27 @@ static int incremental_one_k(const ctx_t *cx, int64_t k, iscratch_t *ws,
         for (int64_t b = 0; b < nb; b++)
             if (!ws->conv[b]) rem++;
         if (rem == 0) {
-            for (int64_t b = 0; b < nb; b++) ws->sel[b] = b;
-            iritz(ws, ws->sel, nb, dimc, ld, m, ws->Xu, ws->HXu);
+            /* exact collapse: orthonormal Ritz basis + exact eigenvalues +
+             * exact residual norms for ALL nb bands (locked ones included —
+             * their rn was last measured against an older subspace). */
+            if (icollapse_exact(ws, dimc, ld, nb, m) != 0) return -2;
+            dim = dimc = nb;
             double rmax = 0;
-            for (int64_t b = 0; b < nb; b++) {
-                const double e = ws->Wc[b];
-                const double *restrict xb = (const double *)(ws->Xu + b * m);
-                const double *restrict hb = (const double *)(ws->HXu + b * m);
-                double s2 = 0;
-#pragma omp simd reduction(+ : s2)
-                for (int64_t g = 0; g < 2 * m; g++) {
-                    const double r = hb[g] - e * xb[g];
-                    s2 += r * r;
-                }
-                ws->rnb[b] = sqrt(s2);
+            for (int64_t b = 0; b < nb; b++)
                 if (ws->rnb[b] > rmax) rmax = ws->rnb[b];
-            }
             if (rmax <= tol) {
                 for (int64_t b = 0; b < nb; b++) {
                     eig_out[k * nb + b] = ws->Wc[b];
                     rn_out[k * nb + b] = ws->rnb[b];
                 }
-                memcpy(x_out + k * nb * m, ws->Xu,
-                       sizeof(c128) * (size_t)(nb * m));
+                memcpy(x_out + k * nb * m, V, sizeof(c128) * (size_t)(nb * m));
                 *napply_k = napply;
                 return (int)it;
             }
-            /* polish: unlock the bands that failed the exact test, refresh */
+            /* polish: unlock the bands that failed the exact test and keep
+             * iterating on the freshly collapsed (exactly orthonormal) basis */
             for (int64_t b = 0; b < nb; b++)
                 ws->conv[b] = (ws->rnb[b] <= tol);
-            dim = irefresh(ws, dimc, ld, nb, m);
-            dimc = nb;
             continue;
         }
 
@@ -558,10 +622,12 @@ static int incremental_one_k(const ctx_t *cx, int64_t k, iscratch_t *ws,
             notcnv++;
         }
 
-        /* ---- restart if the basis would overflow: collapse to nb Ritz ---- */
+        /* ---- restart if the basis would overflow: exact collapse to nb.
+         * The pending directions in Rb stay valid (the collapse preserves
+         * the committed Ritz span; they are appended to the fresh basis). ---- */
         if (dim + notcnv > max_dim) {
-            dim = irefresh(ws, dimc, ld, nb, m);
-            dimc = nb;
+            if (icollapse_exact(ws, dimc, ld, nb, m) != 0) return -2;
+            dim = dimc = nb;
         }
 
         /* ---- append directions (NO orthogonalization); apply H ---- */
@@ -590,40 +656,38 @@ static int incremental_one_k(const ctx_t *cx, int64_t k, iscratch_t *ws,
         }
         dim = newdim;
 
-        /* ---- generalized solve; on Gram breakdown roll back via refresh ---- */
-        int info = isolve_reduced(ws, dim, ld);
-        if (info == 0) {
+        /* ---- generalized solve with the proactive Gram guard ---- */
+        int rc = isolve_reduced(ws, dim, ld);
+        if (rc == 0) {
             icommit(ws, dim, ld, nb, &dimc);
-        } else if (info > (int)dim) {
-            /* sc not positive-definite: the new directions made the basis
-             * linearly dependent. Drop them — refresh to the last good Ritz
-             * block (cegterg's refresh cadence, made reactive). */
-            dim = irefresh(ws, dimc, ld, nb, m);
-            dimc = nb;
+            bd_consec = 0;
+        } else if (rc == 1) {
+            /* Gram breakdown (singular / ill-conditioned): the new directions
+             * carry a (near-)linear dependence. Drop them — exact collapse to
+             * the last good Ritz block (cegterg's refresh cadence made
+             * reactive, with QR repair so drift cannot accumulate). Repeated
+             * breakdowns mean the k cannot make progress in this scheme
+             * (residuals at the noise floor) -> eager fallback. */
+            if (++bd_consec >= 3) return -2;
+            if (icollapse_exact(ws, dimc, ld, nb, m) != 0) return -2;
+            dim = dimc = nb;
+            for (int64_t b = 0; b < nb; b++)
+                ws->conv[b] = (ws->rnb[b] <= tol);
         } else {
             return -2;  /* hard eigensolver failure -> eager fallback */
         }
     }
 
-    /* max_iter without full convergence: materialize + return what we have
-     * (the SCF's adaptive diago tol tolerates a not-fully-converged block, and
-     * hit_max_iter is surfaced in diagnostics — same as the classic path). */
-    for (int64_t b = 0; b < nb; b++) ws->sel[b] = b;
-    iritz(ws, ws->sel, nb, dimc, ld, m, ws->Xu, ws->HXu);
+    /* max_iter without full convergence: exact collapse + return what we have
+     * with true residual norms (the SCF's adaptive diago tol tolerates a
+     * not-fully-converged block; hit_max_iter is surfaced in diagnostics —
+     * same as the classic path). */
+    if (icollapse_exact(ws, dimc, ld, nb, m) != 0) return -2;
     for (int64_t b = 0; b < nb; b++) {
-        const double e = ws->Wc[b];
-        const double *restrict xb = (const double *)(ws->Xu + b * m);
-        const double *restrict hb = (const double *)(ws->HXu + b * m);
-        double s2 = 0;
-#pragma omp simd reduction(+ : s2)
-        for (int64_t g = 0; g < 2 * m; g++) {
-            const double r = hb[g] - e * xb[g];
-            s2 += r * r;
-        }
-        eig_out[k * nb + b] = e;
-        rn_out[k * nb + b] = sqrt(s2);
+        eig_out[k * nb + b] = ws->Wc[b];
+        rn_out[k * nb + b] = ws->rnb[b];
     }
-    memcpy(x_out + k * nb * m, ws->Xu, sizeof(c128) * (size_t)(nb * m));
+    memcpy(x_out + k * nb * m, V, sizeof(c128) * (size_t)(nb * m));
     *napply_k = napply;
     return (int)max_iter;
 }
