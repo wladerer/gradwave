@@ -863,6 +863,21 @@ int davidson_native_c64(
         for (int64_t k = 0; k < nk; k++) napply += n_add_k[k];
     }
 
+    /* fp64-renormalize the returned Ritz rows: the fp32-stored basis leaves
+     * each row's norm off unity by ~1e-7, which the SCF's charge-conservation
+     * check (G=0 density residual, threshold 1e-8) rejects. The density's G=0
+     * component depends only on these norms, so exact fp64 unit rows restore
+     * electron-count conservation; the ~1e-7 subspace rotation error stays
+     * within the loose-tol contract this kernel serves. */
+    for (int64_t kb = 0; kb < nk * nb; kb++) {
+        double *restrict xb = (double *)(X + kb * m);
+        double s2 = 0;
+#pragma omp simd reduction(+ : s2)
+        for (int64_t g = 0; g < 2 * m; g++) s2 += xb[g] * xb[g];
+        const double inv = 1.0 / sqrt(s2);
+#pragma omp simd
+        for (int64_t g = 0; g < 2 * m; g++) xb[g] *= inv;
+    }
     memcpy(x_out, X, sizeof(c128) * (size_t)(nk * nb * m));
     memcpy(rn_out, rn, sizeof(double) * (size_t)(nk * nb));
     *napply_out = napply;
