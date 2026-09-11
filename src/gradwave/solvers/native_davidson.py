@@ -29,6 +29,18 @@ Coverage and fallback are explicit, not silent:
   complex128, CPU, the restart path, per-k retirement
   (``GRADWAVE_NATIVE_RETIRE`` in {"on" (default), "off"} — "off" reproduces
   the uniform-batch trajectory bit-for-bit-in-structure for A/B debugging).
+* ``GRADWAVE_NATIVE_SUBSPACE`` in {"complex128" (default), "complex64"} stores
+  the (nk, max_dim, m) V/HV blocks — the dominant per-iteration memory traffic
+  — in complex64 and runs the bandwidth-heavy Rayleigh-Ritz / Ritz-combine /
+  project-out contractions against them as ``cgemm`` (half the bytes, ~2x the
+  single-core flop rate). The FFT H-apply, the RR eigensolve, the residual
+  norms, and the returned Ritz vectors X/HX all stay fp64; only the stored
+  basis is truncated, so residual norms floor near the fp32 plateau (~1e-6).
+  The adapter auto-promotes to the fp64 kernel for any solve whose ``tol`` is
+  below ``_C64_PROMOTE_TOL`` (~1e-6), so the tight tail of the SCF's adaptive
+  schedule stays fp64-exact. Mirrors the eager ``GRADWAVE_SUBSPACE_STORAGE``
+  knob's naming/precision contract; the two never stack (native runs this
+  path, the eager knob routes a fallback — see ``_unsupported_reason``).
 * Transparent per-solve fallback to the eager ``davidson_batched`` (recorded
   in the returned diagnostics as ``fallback_reason``) when the solve is
   outside the native scope: a composed apply (hybrid Fock / meta-GGA wrap the
@@ -91,11 +103,17 @@ def _load() -> ctypes.CDLL | None:
     if not Path(path).exists():
         return None
     lib = ctypes.CDLL(path)
-    lib.davidson_native.restype = ctypes.c_int
-    lib.davidson_native.argtypes = (
+    _argtypes = (
         [ctypes.c_int64] * 10 + [ctypes.c_double, ctypes.c_int, ctypes.c_int]
         + [ctypes.c_void_p] * 10
         + [ctypes.c_void_p] * 4)
+    lib.davidson_native.restype = ctypes.c_int
+    lib.davidson_native.argtypes = _argtypes
+    # complex64 subspace-storage variant (identical signature; internal V/HV
+    # in fp32). Present in builds since the subspace-traffic campaign.
+    if hasattr(lib, "davidson_native_c64"):
+        lib.davidson_native_c64.restype = ctypes.c_int
+        lib.davidson_native_c64.argtypes = _argtypes
     _lib, _lib_path = lib, path
     return lib
 
@@ -135,6 +153,34 @@ def _retire_on() -> bool:
         raise ValueError(
             f"GRADWAVE_NATIVE_RETIRE must be on|off, got {mode!r}")
     return mode == "on"
+
+
+# complex64 subspace storage auto-promotes to the fp64 kernel once the requested
+# tolerance is tighter than the fp32 residual floor. The stored V/HV carry a
+# ~1e-7-relative (complex64 machine-eps) truncation, so residual norms plateau
+# near ~1e-6 (see solvers/davidson._C64_STALL); a tighter tol cannot be reached
+# in fp32 and would spin to max_iter. The SCF's adaptive schedule requests loose
+# tolerances early (where c64 wins) and tightens toward diago_tol near
+# convergence (where this promotes back to fp64), so the tail stays fp64-exact.
+_C64_PROMOTE_TOL = 1e-6
+
+
+def _subspace_c64(tol: float) -> bool:
+    """Whether to run the complex64-storage native kernel for this solve.
+
+    ``GRADWAVE_NATIVE_SUBSPACE`` in {"complex128"/"c128" (default),
+    "complex64"/"c64"}. Mirrors the eager ``GRADWAVE_SUBSPACE_STORAGE`` knob's
+    naming and precision contract (V/HV stored fp32, apply + eigensolve fp64)
+    but is native-only and adds an auto-promote: even when c64 is requested, a
+    solve whose ``tol`` is below ``_C64_PROMOTE_TOL`` runs the fp64 kernel."""
+    mode = os.environ.get("GRADWAVE_NATIVE_SUBSPACE", "complex128").strip().lower()
+    if mode not in ("complex128", "c128", "complex64", "c64"):
+        raise ValueError(
+            "GRADWAVE_NATIVE_SUBSPACE must be complex128|complex64, "
+            f"got {mode!r}")
+    if mode in ("complex128", "c128"):
+        return False
+    return tol >= _C64_PROMOTE_TOL
 
 
 def native_davidson_adapter(
@@ -201,7 +247,9 @@ def native_davidson_adapter(
         return ctypes.c_void_p(a.data_ptr())
 
     retire = 1 if _retire_on() else 0
-    ret = lib.davidson_native(
+    use_c64 = _subspace_c64(float(tol)) and hasattr(lib, "davidson_native_c64")
+    kernel = lib.davidson_native_c64 if use_c64 else lib.davidson_native
+    ret = kernel(
         nk, nb, m, n1, n2, n3, nproj, nhub, max_dim, max_iter, float(tol),
         torch.get_num_threads(), retire,
         ptr(x0_np), ptr(t_np), ptr(mask_np), ptr(isc_np), ptr(iga_np),
@@ -222,6 +270,7 @@ def native_davidson_adapter(
     return EigResult(
         eig, x, int(ret), rn,
         {"solver": "davidson-native", "retire": bool(retire),
+         "subspace": "complex64" if use_c64 else "complex128",
          "max_dim_factor": max_dim_factor, "max_iter": max_iter,
          "hit_max_iter": int(ret) >= max_iter,
          "n_apply_low": 0, "n_apply_full": int(napply.item())},

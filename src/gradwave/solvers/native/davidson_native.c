@@ -41,6 +41,7 @@
 #include <lapacke.h>
 
 typedef double complex c128;
+typedef float complex c64;  /* complex64 subspace storage (lever 2) */
 
 extern void openblas_set_num_threads(int);
 
@@ -506,6 +507,359 @@ int davidson_native(
     err = (int)(it > max_iter ? max_iter : it);
 
 done:
+    free(V); free(HV); free(X); free(HX); free(D); free(S); free(rn);
+    free(dim_k); free(n_add_k); free(active);
+    return err;
+}
+
+/* ================================================================== */
+/* Lever 2: complex64 subspace storage.                                */
+/*                                                                     */
+/* V and HV — the (nk, max_dim, m) blocks that dominate the per-iter   */
+/* memory traffic — are stored in complex64 (half the bytes). Every    */
+/* bandwidth-heavy contraction against them (the Rayleigh-Ritz S-build,*/
+/* the two Ritz-combine GEMMs, and the project-out Gram passes) runs as */
+/* cblas_cgemm: half the bytes AND ~2x the single-core flop rate of    */
+/* the zgemm it replaces. The FFT H-apply stays fp64 (upcast on read,  */
+/* downcast on store — the fp32 FFT apply is measured NO-GO). The RR    */
+/* eigensolve (zheevd), the residual norms, and the returned Ritz       */
+/* vectors X/HX stay complex128; only the STORED basis is truncated, so */
+/* residual norms floor near the fp32 machine-eps plateau (~1e-6). The  */
+/* adapter runs THIS path only for loose diago tolerances and auto-     */
+/* promotes to the fp64 davidson_native above once tol < ~1e-6.        */
+
+static int qr_rows_c64(c64 *x, int64_t rows, int64_t m, c64 *r_out) {
+    c64 tau[512];
+    if (rows > 512) return -1;
+    int info = LAPACKE_cgeqrf(LAPACK_COL_MAJOR, (int)m, (int)rows, x, (int)m,
+                              tau);
+    if (info == 0 && r_out != NULL)
+        for (int64_t i = 0; i < rows; i++)
+            for (int64_t j = 0; j < rows; j++)
+                r_out[i * rows + j] = j >= i ? x[j * m + i] : 0.0f;
+    if (info == 0)
+        info = LAPACKE_cungqr(LAPACK_COL_MAJOR, (int)m, (int)rows, (int)rows,
+                              x, (int)m, tau);
+    return info != 0 ? -1 : 0;
+}
+
+static void project_out_c64(c64 *d, const c64 *v, int64_t nd, int64_t dim,
+                            int64_t m, c64 *gram) {
+    const c64 one = 1.0f, zero = 0.0f, neg = -1.0f;
+    for (int pass = 0; pass < 2; pass++) {
+        cblas_cgemm(CblasRowMajor, CblasNoTrans, CblasConjTrans, (int)nd,
+                    (int)dim, (int)m, &one, d, (int)m, v, (int)m, &zero,
+                    gram, (int)dim);
+        cblas_cgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, (int)nd,
+                    (int)m, (int)dim, &neg, gram, (int)dim, v, (int)m,
+                    &one, d, (int)m);
+    }
+}
+
+/* per-thread scratch for the c64 path (adds fp32 subspace temporaries and
+ * the fp64 apply I/O buffers; the FFT/nonlocal scratch mirrors scratch_t). */
+typedef struct {
+    c128 *box, *work, *gbox, *becp, *tmp;  /* FFT + nonlocal, stay fp64 */
+    c128 *az, *ao;                         /* apply input/output (nb*m fp64) */
+    c64 *cbig;                             /* direction/Ritz temp (nb*m) */
+    c64 *sc64;                             /* RR / eigenvector cast (max_dim^2) */
+    c64 *gc64;                             /* project-out Gram (nb*max_dim) */
+    c64 *rc64;                             /* restart R factor (nb*nb) */
+    double *W, *tband;
+    int64_t *sel;
+} scratch64_t;
+
+static scratch64_t scratch64_alloc(const ctx_t *cx, int64_t max_dim) {
+    scratch64_t s;
+    int64_t npz = cx->nproj > cx->nhub ? cx->nproj : cx->nhub;
+    if (npz < 1) npz = 1;
+    s.box = fftw_alloc_complex(cx->n + 1);
+    memset(s.box, 0, sizeof(c128) * (size_t)(cx->n + 1));
+    s.work = fftw_alloc_complex(cx->n);
+    s.gbox = fftw_alloc_complex(cx->n + 1);
+    s.becp = malloc(sizeof(c128) * (size_t)(cx->nb * npz));
+    s.tmp = malloc(sizeof(c128) * (size_t)(cx->nb * npz));
+    s.az = malloc(sizeof(c128) * (size_t)(cx->nb * cx->m));
+    s.ao = malloc(sizeof(c128) * (size_t)(cx->nb * cx->m));
+    s.cbig = malloc(sizeof(c64) * (size_t)(cx->nb * cx->m));
+    s.sc64 = malloc(sizeof(c64) * (size_t)(max_dim * max_dim));
+    s.gc64 = malloc(sizeof(c64) * (size_t)(cx->nb * max_dim));
+    s.rc64 = malloc(sizeof(c64) * (size_t)(cx->nb * cx->nb));
+    s.W = malloc(sizeof(double) * (size_t)max_dim);
+    s.tband = malloc(sizeof(double) * (size_t)cx->nb);
+    s.sel = malloc(sizeof(int64_t) * (size_t)cx->nb);
+    return s;
+}
+
+static void scratch64_free(scratch64_t *s) {
+    fftw_free(s->box); fftw_free(s->work); fftw_free(s->gbox);
+    free(s->becp); free(s->tmp); free(s->az); free(s->ao);
+    free(s->cbig); free(s->sc64); free(s->gc64); free(s->rc64);
+    free(s->W); free(s->tband); free(s->sel);
+}
+
+int davidson_native_c64(
+    int64_t nk, int64_t nb, int64_t m, int64_t n1, int64_t n2, int64_t n3,
+    int64_t nproj, int64_t nhub, int64_t max_dim, int64_t max_iter, double tol,
+    int nthreads, int per_k_retire,
+    const c128 *x0, const double *t, const uint8_t *mask,
+    const int64_t *idx_sc, const int64_t *idx_ga, const double *v_eff,
+    const c128 *p, const c128 *dij, const c128 *hub_q, const c128 *hub_dij,
+    double *eig_out, c128 *x_out, double *rn_out, int64_t *napply_out)
+{
+    if (nb > 512) return -4;
+    if (getenv("GRADWAVE_NATIVE_VERBOSE")) {
+        static int announced = 0;
+        if (!announced) { fprintf(stderr, "[native] C64 subspace storage engaged\n");
+                          announced = 1; }
+    }
+    ensure_plans((int)n1, (int)n2, (int)n3);
+    ctx_t cx = {.nk = nk, .nb = nb, .m = m, .n = (int64_t)n1 * n2 * n3,
+                .nproj = nproj, .nhub = nhub, .t = t, .mask = mask,
+                .idx_sc = idx_sc, .idx_ga = idx_ga, .v_eff = v_eff, .p = p,
+                .dij = dij, .hub_q = hub_q, .hub_dij = hub_dij,
+                .nthreads = nthreads};
+
+    openblas_set_num_threads(1);
+
+    c64 *V = malloc(sizeof(c64) * (size_t)(nk * max_dim * m));
+    c64 *HV = malloc(sizeof(c64) * (size_t)(nk * max_dim * m));
+    c128 *X = malloc(sizeof(c128) * (size_t)(nk * nb * m));
+    c128 *HX = malloc(sizeof(c128) * (size_t)(nk * nb * m));
+    c128 *D = malloc(sizeof(c128) * (size_t)(nk * nb * m));
+    c128 *S = malloc(sizeof(c128) * (size_t)(nk * max_dim * max_dim));
+    double *rn = malloc(sizeof(double) * (size_t)(nk * nb));
+    int64_t napply = 0;
+    volatile int err = 0;
+    int64_t *dim_k = malloc(sizeof(int64_t) * (size_t)nk);
+    int64_t *n_add_k = malloc(sizeof(int64_t) * (size_t)nk);
+    uint8_t *active = malloc(sizeof(uint8_t) * (size_t)nk);
+    for (int64_t k = 0; k < nk; k++) { dim_k[k] = nb; active[k] = 1; }
+
+    /* ---- init: V = qr(x0 * mask); HV = H V (apply in fp64) ---- */
+#pragma omp parallel num_threads(nthreads)
+    {
+        scratch64_t ws = scratch64_alloc(&cx, max_dim);
+#pragma omp for schedule(dynamic)
+        for (int64_t k = 0; k < nk; k++) {
+            if (err) continue;
+            c64 *Vk = V + k * max_dim * m;
+            c64 *HVk = HV + k * max_dim * m;
+            const c128 *xk = x0 + k * nb * m;
+            const uint8_t *mk = mask + k * m;
+            for (int64_t b = 0; b < nb; b++)
+                for (int64_t g = 0; g < m; g++)
+                    Vk[b * m + g] = mk[g] ? (c64)xk[b * m + g] : 0.0f;
+            for (int64_t b = 0; b < nb; b++) {
+                double s2 = 0;
+                for (int64_t g = 0; g < m; g++) {
+                    double re = crealf(Vk[b * m + g]), im = cimagf(Vk[b * m + g]);
+                    s2 += re * re + im * im;
+                }
+                if (sqrt(s2) < 1e-8) { err = -1; break; }
+            }
+            if (err) continue;
+            if (qr_rows_c64(Vk, nb, m, NULL) != 0) { err = -2; continue; }
+            for (int64_t i = 0; i < nb * m; i++) ws.az[i] = (c128)Vk[i];
+            h_apply_k(&cx, k, ws.az, ws.ao, nb, ws.box, ws.work, ws.gbox,
+                      ws.becp, ws.tmp);
+            for (int64_t i = 0; i < nb * m; i++) HVk[i] = (c64)ws.ao[i];
+        }
+        scratch64_free(&ws);
+    }
+    if (err) goto done64;
+    napply += nk * nb;
+
+    int64_t it;
+    for (it = 1; it <= max_iter; it++) {
+        /* ---- Rayleigh-Ritz (parallel over k) ---- */
+#pragma omp parallel num_threads(nthreads)
+        {
+            scratch64_t ws = scratch64_alloc(&cx, max_dim);
+            const c64 cone = 1.0f, czero = 0.0f;
+#pragma omp for schedule(dynamic)
+            for (int64_t k = 0; k < nk; k++) {
+                if (err || !active[k]) continue;
+                const int64_t dim = dim_k[k];
+                const c64 *Vk = V + k * max_dim * m;
+                const c64 *HVk = HV + k * max_dim * m;
+                c128 *Sk = S + k * max_dim * max_dim;
+                /* S = V HV^H in fp32, promote to fp64 for the eigensolve */
+                cblas_cgemm(CblasRowMajor, CblasNoTrans, CblasConjTrans,
+                            (int)dim, (int)dim, (int)m, &cone, Vk, (int)m,
+                            HVk, (int)m, &czero, ws.sc64, (int)dim);
+                for (int64_t i = 0; i < dim * dim; i++)
+                    Sk[i] = (c128)ws.sc64[i];
+                for (int64_t i = 0; i < dim; i++)
+                    for (int64_t j = i; j < dim; j++) {
+                        c128 sij = conj(Sk[i * dim + j]);
+                        c128 sji = conj(Sk[j * dim + i]);
+                        c128 hij = 0.5 * (sij + conj(sji));
+                        Sk[i * dim + j] = hij;
+                        Sk[j * dim + i] = conj(hij);
+                    }
+                if (LAPACKE_zheevd(LAPACK_ROW_MAJOR, 'V', 'U', (int)dim, Sk,
+                                   (int)dim, ws.W) != 0) { err = -2; continue; }
+                for (int64_t b = 0; b < nb; b++) eig_out[k * nb + b] = ws.W[b];
+                c128 *Xk = X + k * nb * m, *HXk = HX + k * nb * m;
+                /* cast eigenvectors to fp32; Ritz combine in fp32, promote */
+                for (int64_t i = 0; i < dim * dim; i++) ws.sc64[i] = (c64)Sk[i];
+                cblas_cgemm(CblasRowMajor, CblasTrans, CblasNoTrans, (int)nb,
+                            (int)m, (int)dim, &cone, ws.sc64, (int)dim, Vk,
+                            (int)m, &czero, ws.cbig, (int)m);
+                for (int64_t i = 0; i < nb * m; i++) Xk[i] = (c128)ws.cbig[i];
+                cblas_cgemm(CblasRowMajor, CblasTrans, CblasNoTrans, (int)nb,
+                            (int)m, (int)dim, &cone, ws.sc64, (int)dim, HVk,
+                            (int)m, &czero, ws.cbig, (int)m);
+                for (int64_t i = 0; i < nb * m; i++) HXk[i] = (c128)ws.cbig[i];
+                for (int64_t b = 0; b < nb; b++) {
+                    double s2 = 0;
+                    const double e = ws.W[b];
+                    const double *restrict xb = (const double *)(Xk + b * m);
+                    const double *restrict hb = (const double *)(HXk + b * m);
+#pragma omp simd reduction(+ : s2)
+                    for (int64_t g = 0; g < 2 * m; g++) {
+                        const double r = hb[g] - e * xb[g];
+                        s2 += r * r;
+                    }
+                    rn[k * nb + b] = sqrt(s2);
+                }
+            }
+            scratch64_free(&ws);
+        }
+        if (err) goto done64;
+
+        /* ---- convergence / n_add (identical to the fp64 path) ---- */
+        double rnmax = 0;
+        int64_t n_add_max = 0, n_active = 0;
+        for (int64_t k = 0; k < nk; k++) {
+            if (!active[k]) { n_add_k[k] = 0; continue; }
+            int64_t cnt = 0;
+            double rnk = 0;
+            for (int64_t b = 0; b < nb; b++) {
+                if (rn[k * nb + b] > rnk) rnk = rn[k * nb + b];
+                if (rn[k * nb + b] > tol) cnt++;
+            }
+            if (rnk > rnmax) rnmax = rnk;
+            if (per_k_retire && rnk < tol) { active[k] = 0; n_add_k[k] = 0; continue; }
+            n_add_k[k] = cnt;
+            if (cnt > n_add_max) n_add_max = cnt;
+            n_active++;
+        }
+        if (per_k_retire) {
+            if (n_active == 0) break;
+        } else {
+            if (rnmax < tol) break;
+            for (int64_t k = 0; k < nk; k++) n_add_k[k] = n_add_max;
+        }
+
+        /* ---- expansion (parallel over k) ---- */
+#pragma omp parallel num_threads(nthreads)
+        {
+            scratch64_t ws = scratch64_alloc(&cx, max_dim);
+#pragma omp for schedule(dynamic)
+            for (int64_t k = 0; k < nk; k++) {
+                if (err || !active[k] || n_add_k[k] == 0) continue;
+                const int64_t n_add = n_add_k[k];
+                const int64_t dim = dim_k[k];
+                const int restart = (dim + n_add > max_dim);
+                const double *tk = t + k * m;
+                const uint8_t *mk = mask + k * m;
+                c128 *Xk = X + k * nb * m, *HXk = HX + k * nb * m;
+                c64 *Vk = V + k * max_dim * m, *HVk = HV + k * max_dim * m;
+                c128 *Dk = D + k * nb * m;
+                for (int64_t b = 0; b < nb; b++) ws.sel[b] = b;
+                for (int64_t i = 0; i < n_add; i++) {
+                    int64_t best = i;
+                    for (int64_t j = i + 1; j < nb; j++)
+                        if (rn[k * nb + ws.sel[j]] > rn[k * nb + ws.sel[best]])
+                            best = j;
+                    int64_t tv = ws.sel[i]; ws.sel[i] = ws.sel[best];
+                    ws.sel[best] = tv;
+                }
+                /* Teter-preconditioned unit directions (fp64, from fp64 X/HX) */
+                for (int64_t i = 0; i < n_add; i++) {
+                    int64_t b = ws.sel[i];
+                    double tb = 0;
+                    const double *restrict xb = (const double *)(Xk + b * m);
+#pragma omp simd reduction(+ : tb)
+                    for (int64_t g = 0; g < m; g++)
+                        tb += tk[g] * (xb[2 * g] * xb[2 * g] +
+                                       xb[2 * g + 1] * xb[2 * g + 1]);
+                    if (tb < 1e-12) tb = 1e-12;
+                    const double e = eig_out[k * nb + b];
+                    const double *restrict hb = (const double *)(HXk + b * m);
+                    double *restrict db = (double *)(Dk + i * m);
+                    double nrm2 = 0;
+#pragma omp simd reduction(+ : nrm2)
+                    for (int64_t g = 0; g < m; g++) {
+                        double xx = tk[g] / tb;
+                        double x2 = xx * xx;
+                        double num = 27.0 + 18.0 * xx + 12.0 * x2 + 8.0 * x2 * xx;
+                        double coeff = num / (num + 16.0 * x2 * x2);
+                        double rr = hb[2 * g] - e * xb[2 * g];
+                        double ri = hb[2 * g + 1] - e * xb[2 * g + 1];
+                        db[2 * g] = rr * coeff;
+                        db[2 * g + 1] = ri * coeff;
+                        nrm2 += db[2 * g] * db[2 * g] +
+                                db[2 * g + 1] * db[2 * g + 1];
+                    }
+                    double nrm = sqrt(nrm2);
+                    if (nrm > 1e-300) {
+#pragma omp simd
+                        for (int64_t g = 0; g < 2 * m; g++) db[g] /= nrm;
+                    }
+                }
+                int64_t against_dim = dim;
+                if (restart) {
+                    /* collapse to re-orthonormalized Ritz block (fp32 QR),
+                     * repair HV images by the triangular factor */
+                    for (int64_t i = 0; i < nb * m; i++) Vk[i] = (c64)Xk[i];
+                    if (qr_rows_c64(Vk, nb, m, ws.rc64) != 0) { err = -2; continue; }
+                    for (int64_t i = 0; i < nb * m; i++) HVk[i] = (c64)HXk[i];
+                    const c64 cone = 1.0f;
+                    cblas_ctrsm(CblasRowMajor, CblasLeft, CblasUpper,
+                                CblasTrans, CblasNonUnit, (int)nb, (int)m,
+                                &cone, ws.rc64, (int)nb, HVk, (int)m);
+                    against_dim = nb;
+                }
+                /* directions -> fp32, mask, project out V, QR, store */
+                for (int64_t i = 0; i < n_add; i++)
+                    for (int64_t g = 0; g < m; g++)
+                        ws.cbig[i * m + g] = mk[g] ? (c64)Dk[i * m + g] : 0.0f;
+                project_out_c64(ws.cbig, Vk, n_add, against_dim, m, ws.gc64);
+                for (int64_t i = 0; i < n_add; i++) {
+                    double s2 = 0;
+                    for (int64_t g = 0; g < m; g++) {
+                        double re = crealf(ws.cbig[i * m + g]);
+                        double im = cimagf(ws.cbig[i * m + g]);
+                        s2 += re * re + im * im;
+                    }
+                    if (sqrt(s2) < 1e-8) { err = -1; break; }
+                }
+                if (err) continue;
+                if (qr_rows_c64(ws.cbig, n_add, m, NULL) != 0) { err = -2; continue; }
+                memcpy(Vk + against_dim * m, ws.cbig,
+                       sizeof(c64) * (size_t)(n_add * m));
+                for (int64_t i = 0; i < n_add * m; i++) ws.az[i] = (c128)ws.cbig[i];
+                h_apply_k(&cx, k, ws.az, ws.ao, n_add, ws.box, ws.work,
+                          ws.gbox, ws.becp, ws.tmp);
+                for (int64_t i = 0; i < n_add * m; i++)
+                    HVk[against_dim * m + i] = (c64)ws.ao[i];
+                dim_k[k] = against_dim + n_add;
+            }
+            scratch64_free(&ws);
+        }
+        if (err) goto done64;
+        for (int64_t k = 0; k < nk; k++) napply += n_add_k[k];
+    }
+
+    memcpy(x_out, X, sizeof(c128) * (size_t)(nk * nb * m));
+    memcpy(rn_out, rn, sizeof(double) * (size_t)(nk * nb));
+    *napply_out = napply;
+    err = (int)(it > max_iter ? max_iter : it);
+
+done64:
     free(V); free(HV); free(X); free(HX); free(D); free(S); free(rn);
     free(dim_k); free(n_add_k); free(active);
     return err;
