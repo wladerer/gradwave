@@ -569,8 +569,15 @@ impact order.
   difference. A differentiable, magnitude-conserving DMI extractor is methodologically
   novel and connects small-cell plane-wave DFT to device-scale spin dynamics. The code
   cannot simulate a 50 nm skyrmion but can hand a clean spin Hamiltonian to a code that
-  can. Second derivatives of the penalty scalar are within reach of the autograd path;
-  the work is wiring the site-pair Hessian and validating J against a known magnet.
+  can. This is SHIPPED today as a finite-difference extractor (`postscf/spin_exchange.py`):
+  one FD order over the *analytic* torque, correct at tight etol. **The FD-free
+  analytic 𝒥 was investigated and is blocked** (Gate A, 2026-09-11,
+  `docs/design/analytic-exchange-couplings.md`): the claim that "second derivatives of
+  the penalty scalar are within reach of the autograd path" is refuted — the second
+  derivative *through the density* is a **metallic spinor χ₀** (transverse spin
+  susceptibility), and `scf_noncollinear` is `@torch.no_grad` while the shipped
+  `apply_chi0` is collinear-only. Reviving it means building that spinor response
+  kernel (second-code-project scope), not a second autograd pass.
 - **Chiral textures and the micromagnetic DMI from spin-spiral asymmetry.** The Fe
   spin-spiral demo (`examples/fe_spin_spiral.py`) traces E(theta) with inversion
   symmetry, so E(+q) = E(−q). Break inversion (an interface Co/Pt, Fe/Ir, or a B20 bulk
