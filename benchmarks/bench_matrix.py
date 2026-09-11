@@ -63,8 +63,15 @@ CASES = {
                 smearing="none", width=0.1, nbands=None),
     "si8": dict(geom=si_supercell(1), ecut=30 * RY, kmesh=(2, 2, 2),
                 xc=LDA_PW92, smearing="none", width=0.1, nbands=None),
-    "si64": dict(geom=si_supercell(2), ecut=30 * RY, kmesh=(1, 1, 1),
-                 xc=LDA_PW92, smearing="none", width=0.1, nbands=None),
+    # Si-64 apples-to-apples with QE: a 2×2×2 MP mesh (use_symmetry=True below
+    # folds the perfect Fd-3m supercell 8 → 4 irreducible k-points, matching QE),
+    # and nbands=128 = the exact occupied count of an insulator (256 valence
+    # e⁻ / 2), which QE uses; the default heuristic (default_nbands) would add a
+    # 20% buffer (→154) that an insulator with `smearing="none"` does not need.
+    # A benchmark that leaves kmesh=(1,1,1) OR use_symmetry=False measures a
+    # config QE never ran and inflates the gap (see docs/benchmarking.md).
+    "si64": dict(geom=si_supercell(2), ecut=30 * RY, kmesh=(2, 2, 2),
+                 xc=LDA_PW92, smearing="none", width=0.1, nbands=128),
 }
 
 
