@@ -152,10 +152,8 @@ def _resolve_thread_split(nk: int, nthreads: int) -> tuple[int, int]:
         return nthreads, 1
     # fewk
     outer_env = os.environ.get("GRADWAVE_NATIVE_FEWK_OUTER", "").strip()
-    if outer_env:
-        outer = max(1, min(int(outer_env), nthreads))
-    else:
-        outer = max(1, min(nk, nthreads))
+    requested = int(outer_env) if outer_env else nk
+    outer = max(1, min(requested, nthreads))
     blas = max(1, nthreads // outer)
     return outer, blas
 
