@@ -29,6 +29,17 @@ Coverage and fallback are explicit, not silent:
   complex128, CPU, the restart path, per-k retirement
   (``GRADWAVE_NATIVE_RETIRE`` in {"on" (default), "off"} — "off" reproduces
   the uniform-batch trajectory bit-for-bit-in-structure for A/B debugging).
+* Thread split (``GRADWAVE_NATIVE_KMODE`` in {"auto" (default), "kpar",
+  "fewk"}, see ``_resolve_thread_split``): "kpar" fans OpenMP threads out over
+  k with OpenBLAS pinned serial — the historical, byte-identical path.
+  "fewk" runs fewer k concurrently and threads each k's dense subspace algebra
+  inside OpenBLAS across the otherwise-idle cores (``GRADWAVE_NATIVE_FEWK_OUTER``
+  overrides the outer/inner split for A/B sweeps). "auto" always resolves to
+  "kpar": MEASURED (Si-64, nk=8, asus) the fewk path is neutral-to-worse — the
+  per-k dense algebra is memory-bandwidth-bound, so the k-parallel kpar path
+  already saturates the memory system and the stranded cores cannot accelerate
+  it. fewk is retained only as an explicit opt-in, never an auto default, so no
+  solve regresses relative to the pre-split kernel.
 * Transparent per-solve fallback to the eager ``davidson_batched`` (recorded
   in the returned diagnostics as ``fallback_reason``) when the solve is
   outside the native scope: a composed apply (hybrid Fock / meta-GGA wrap the
@@ -117,20 +128,27 @@ def _resolve_thread_split(nk: int, nthreads: int) -> tuple[int, int]:
       ``outer = min(nk, nthreads)`` (all k in one wave), ``blas = nthreads //
       outer``. ``GRADWAVE_NATIVE_FEWK_OUTER`` overrides ``outer`` (for A/B
       sweeps of the outer/inner split); ``blas`` is then ``nthreads // outer``.
-    * ``auto`` — pick ``fewk`` when ``2*nk <= nthreads`` (enough stranded cores
-      to be worth threading the BLAS), else ``kpar``.
+    * ``auto`` (the default) — always ``kpar``. The few-k lever was measured a
+      NON-win (see below), so ``auto`` never selects it: no solve regresses
+      relative to the pre-split kernel. ``fewk`` must be requested explicitly.
 
-    The many-k / regression path always resolves to ``kpar`` under ``auto``, so
-    the default behaviour of a many-k solve is unchanged.
+    Why ``auto`` stays on ``kpar``: on Si-64 (nk=8, nb=154, asus 16 threads)
+    the ``fewk`` split is neutral-to-worse in a clean monotonic ladder —
+    ms/solve 44507 (kpar) ≈ 44062 (outer8/blas2) < 47079 (outer4/blas4) <
+    71820 (outer2/blas8). The per-k dense subspace algebra (tall-skinny QR +
+    Rayleigh-Ritz GEMMs) is memory-bandwidth-bound, so the 8-way k-parallel
+    ``kpar`` path already saturates the memory system; handing the stranded
+    cores to OpenBLAS cannot accelerate it (OpenBLAS itself plateaus at ~4
+    threads and regresses past ~11 at these shapes). ``fewk`` is retained as an
+    explicit opt-in for A/B study and for future higher-memory-bandwidth
+    hardware where the ceiling may lift.
     """
     mode = os.environ.get("GRADWAVE_NATIVE_KMODE", "auto").strip().lower()
     if mode not in ("auto", "kpar", "fewk"):
         raise ValueError(
             f"GRADWAVE_NATIVE_KMODE must be auto|kpar|fewk, got {mode!r}")
     nthreads = max(1, nthreads)
-    if mode == "auto":
-        mode = "fewk" if (nk > 0 and 2 * nk <= nthreads) else "kpar"
-    if mode == "kpar":
+    if mode in ("auto", "kpar"):
         return nthreads, 1
     # fewk
     outer_env = os.environ.get("GRADWAVE_NATIVE_FEWK_OUTER", "").strip()

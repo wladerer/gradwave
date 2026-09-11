@@ -144,6 +144,55 @@ def test_retire_env_validation(monkeypatch):
     assert _retire_on() is True
 
 
+def test_resolve_thread_split_gate(monkeypatch):
+    """The few-k mode gate (solver-agnostic pure logic, no library needed).
+
+    auto always resolves to kpar (fewk was measured a non-win — memory-
+    bandwidth-bound — so it is never auto-selected and no solve regresses
+    relative to the pre-split kernel). kpar always resolves to (nthreads, 1),
+    byte-identical to that kernel. fewk is an explicit opt-in only."""
+    from gradwave.solvers.native_davidson import _resolve_thread_split
+
+    monkeypatch.delenv("GRADWAVE_NATIVE_KMODE", raising=False)
+    monkeypatch.delenv("GRADWAVE_NATIVE_FEWK_OUTER", raising=False)
+    # auto -> kpar regardless of nk vs nthreads (few-k or many-k alike).
+    assert _resolve_thread_split(8, 16) == (16, 1)   # few k: still kpar
+    assert _resolve_thread_split(16, 16) == (16, 1)
+    assert _resolve_thread_split(36, 16) == (16, 1)  # al 4^3-mesh regression
+
+    monkeypatch.setenv("GRADWAVE_NATIVE_KMODE", "kpar")
+    assert _resolve_thread_split(8, 16) == (16, 1)   # forced kpar
+
+    monkeypatch.setenv("GRADWAVE_NATIVE_KMODE", "fewk")
+    assert _resolve_thread_split(8, 16) == (8, 2)
+    monkeypatch.setenv("GRADWAVE_NATIVE_FEWK_OUTER", "4")
+    assert _resolve_thread_split(8, 16) == (4, 4)    # A/B split override
+    monkeypatch.setenv("GRADWAVE_NATIVE_FEWK_OUTER", "1")
+    assert _resolve_thread_split(8, 16) == (1, 16)   # serial-outer, full BLAS
+    monkeypatch.setenv("GRADWAVE_NATIVE_FEWK_OUTER", "99")
+    assert _resolve_thread_split(8, 16) == (16, 1)   # capped at nthreads
+
+    monkeypatch.setenv("GRADWAVE_NATIVE_KMODE", "banana")
+    with pytest.raises(ValueError, match="GRADWAVE_NATIVE_KMODE"):
+        _resolve_thread_split(8, 16)
+
+
+@needs_native
+@pytest.mark.standard
+def test_fewk_mode_matches_eager(monkeypatch):
+    """The few-k thread split changes only which cores do the arithmetic, not
+    the algorithm: a fewk solve (outer=1, all BLAS threads) agrees with the
+    eager reference to the same contract as the default kpar native path."""
+    monkeypatch.setenv("GRADWAVE_NATIVE_KMODE", "fewk")
+    monkeypatch.setenv("GRADWAVE_NATIVE_FEWK_OUTER", "1")  # serial-outer path
+    res_e = _run(_si_system(), "davidson")
+    res_n = _run(_si_system(), "davidson-native")
+    assert res_e.converged and res_n.converged
+    de = abs(float(res_e.energies.free_energy)
+             - float(res_n.energies.free_energy))
+    assert de < 1e-7, f"energy mismatch {de:.3e} eV"
+
+
 @needs_native
 def test_env_threads_respected():
     """The native solve uses torch.get_num_threads() — the same knob the rest
