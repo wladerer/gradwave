@@ -105,7 +105,7 @@ def main() -> None:
         _ = apply_chi0(res, wfield)
         chi0_call = "returned (unexpected)"
         f2 = False
-    except Exception as e:  # noqa: BLE001 - probe: any failure is the point
+    except Exception as e:  # probe: any failure is the point
         chi0_call = f"{type(e).__name__}: {str(e)[:80]}"
         f2 = True
     print("FACT 2 — apply_chi0 is collinear-only; cannot take the spinor NCResult")
