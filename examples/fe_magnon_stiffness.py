@@ -143,7 +143,6 @@ def main():
     # (center, i) pair that sits at the shell radius. In a small box several
     # images land on the same shell (e.g. +a x̂ and −a x̂ are the same atom in a
     # 2a box), so the extracted J is fold × J_bond. Count the images and divide.
-    inv_cell = np.linalg.inv(cell)
     z_bcc = {1: 8, 2: 6, 3: 12}
     per_shell: dict[int, list[float]] = {1: [], 2: [], 3: []}
     fold_used: dict[int, int] = {}
