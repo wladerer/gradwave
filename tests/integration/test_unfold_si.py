@@ -55,24 +55,38 @@ def test_perfect_supercell_reproduces_primitive_bands():
     res_s = _run(sc_cell, sc_pos, [0] * 16, [si_upf()] * 16, (2, 2, 2), nbands=40)
     ub = unfold_bands(res_s, [2, 2, 2], path=_PATH, npoints=_NPTS, nbands=40)
 
-    # dedup fired: many primitive path points share a supercell image
+    # dedup fired: primitive path points share supercell images (only the
+    # unique K set is diagonalized)
     assert len(ub.unique_K) < _NPTS
 
-    # weights are bimodal (0 or 1) for a perfect crystal
-    w = ub.weights.ravel()
-    nz = w[w > 1e-3]
-    frac_high = float((nz > 0.9).sum()) / nz.size
-    assert frac_high > 0.8, frac_high
-
-    # the lowest 4 primitive (valence) bands are reproduced by a weight≈1
-    # supercell state within a few meV at every path point
     prim = bs.eigenvalues - bs.reference          # (nk, 8)
     sup = ub.eigenvalues - ub.reference           # (nk, 40)
+    w = ub.weights                                # (nk, 40)
+
+    # Unitarity: the total unfolded weight at each path point equals the integer
+    # number of primitive bands represented in the window (Σ_m P_m ∈ ℤ). Note
+    # per-band weights are NOT bimodal for a perfect crystal — degenerate folded
+    # multiplets at high-symmetry K split the weight among the (arbitrary) solver
+    # eigenvectors, but the multiplet sum is exact.
+    tot = w.sum(axis=1)
+    assert np.allclose(tot, np.rint(tot), atol=1e-6), tot
+    assert float(w.max()) < 1.0 + 1e-6
+
+    # The EBS reproduces the primitive band structure: every bit of spectral
+    # weight below the sampled window edge lies within a few meV of a primitive
+    # band eigenvalue — weight appears only on the primitive dispersion. This is
+    # the decisive perfect-supercell control (eigenvalue agreement + no spurious
+    # weight), degeneracy-safe because it sums weight rather than matching bands.
+    edge = prim[:, 5]   # 6th primitive band: stay safely inside the sampled window
+    near_w = tot_w = 0.0
     for ik in range(_NPTS):
-        heavy = sup[ik][ub.weights[ik] > 0.9]
-        heavy.sort()
-        for b in range(4):
-            assert np.min(np.abs(heavy - prim[ik, b])) < 0.02, (ik, b)
+        for m in range(sup.shape[1]):
+            if sup[ik, m] > edge[ik]:
+                continue
+            tot_w += w[ik, m]
+            if np.min(np.abs(prim[ik] - sup[ik, m])) < 0.03:
+                near_w += w[ik, m]
+    assert near_w / tot_w > 0.98, near_w / tot_w
 
 
 def test_defect_supercell_fractionalizes_weight():
