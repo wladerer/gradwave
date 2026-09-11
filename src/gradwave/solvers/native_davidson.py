@@ -93,11 +93,53 @@ def _load() -> ctypes.CDLL | None:
     lib = ctypes.CDLL(path)
     lib.davidson_native.restype = ctypes.c_int
     lib.davidson_native.argtypes = (
-        [ctypes.c_int64] * 10 + [ctypes.c_double, ctypes.c_int, ctypes.c_int]
+        [ctypes.c_int64] * 10
+        + [ctypes.c_double, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+           ctypes.c_int]
         + [ctypes.c_void_p] * 10
         + [ctypes.c_void_p] * 4)
     _lib, _lib_path = lib, path
     return lib
+
+
+def _resolve_thread_split(nk: int, nthreads: int) -> tuple[int, int]:
+    """(outer_threads, blas_threads) for the C kernel — the mode gate.
+
+    ``GRADWAVE_NATIVE_KMODE`` in {auto (default), kpar, fewk}:
+
+    * ``kpar`` — the historical path: ``outer=nthreads`` OpenMP threads fan out
+      over k, OpenBLAS pinned to 1 thread. This is byte-identical in behaviour
+      to the pre-split kernel and is the right choice when there are at least as
+      many k-points as cores (each core owns ≥1 k, all BLAS stays serial).
+    * ``fewk`` — for ``nk < nthreads``: run fewer k concurrently and let each
+      k's dense subspace algebra (QR / Rayleigh-Ritz / Ritz-combine / ztrsm
+      GEMMs) thread inside OpenBLAS across the otherwise-idle cores.
+      ``outer = min(nk, nthreads)`` (all k in one wave), ``blas = nthreads //
+      outer``. ``GRADWAVE_NATIVE_FEWK_OUTER`` overrides ``outer`` (for A/B
+      sweeps of the outer/inner split); ``blas`` is then ``nthreads // outer``.
+    * ``auto`` — pick ``fewk`` when ``2*nk <= nthreads`` (enough stranded cores
+      to be worth threading the BLAS), else ``kpar``.
+
+    The many-k / regression path always resolves to ``kpar`` under ``auto``, so
+    the default behaviour of a many-k solve is unchanged.
+    """
+    mode = os.environ.get("GRADWAVE_NATIVE_KMODE", "auto").strip().lower()
+    if mode not in ("auto", "kpar", "fewk"):
+        raise ValueError(
+            f"GRADWAVE_NATIVE_KMODE must be auto|kpar|fewk, got {mode!r}")
+    nthreads = max(1, nthreads)
+    if mode == "auto":
+        mode = "fewk" if (nk > 0 and 2 * nk <= nthreads) else "kpar"
+    if mode == "kpar":
+        return nthreads, 1
+    # fewk
+    outer_env = os.environ.get("GRADWAVE_NATIVE_FEWK_OUTER", "").strip()
+    if outer_env:
+        outer = max(1, min(int(outer_env), nthreads))
+    else:
+        outer = max(1, min(nk, nthreads))
+    blas = max(1, nthreads // outer)
+    return outer, blas
 
 
 def _unsupported_reason(
@@ -201,9 +243,11 @@ def native_davidson_adapter(
         return ctypes.c_void_p(a.data_ptr())
 
     retire = 1 if _retire_on() else 0
+    nthreads = torch.get_num_threads()
+    outer, blas = _resolve_thread_split(nk, nthreads)
     ret = lib.davidson_native(
         nk, nb, m, n1, n2, n3, nproj, nhub, max_dim, max_iter, float(tol),
-        torch.get_num_threads(), retire,
+        nthreads, retire, outer, blas,
         ptr(x0_np), ptr(t_np), ptr(mask_np), ptr(isc_np), ptr(iga_np),
         ptr(veff_np), ptr(p_np), ptr(dij_np), ptr(hq_np), ptr(hdij_np),
         ptr(eig), ptr(x), ptr(rn), ptr(napply))
@@ -223,6 +267,7 @@ def native_davidson_adapter(
         eig, x, int(ret), rn,
         {"solver": "davidson-native", "retire": bool(retire),
          "max_dim_factor": max_dim_factor, "max_iter": max_iter,
-         "hit_max_iter": int(ret) >= max_iter,
-         "n_apply_low": 0, "n_apply_full": int(napply.item())},
+         "hit_max_iter": int(ret) >= max_iter, "outer_threads": outer,
+         "blas_threads": blas, "n_apply_low": 0,
+         "n_apply_full": int(napply.item())},
     )

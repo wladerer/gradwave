@@ -253,7 +253,7 @@ static void scratch_free(scratch_t *s) {
 int davidson_native(
     int64_t nk, int64_t nb, int64_t m, int64_t n1, int64_t n2, int64_t n3,
     int64_t nproj, int64_t nhub, int64_t max_dim, int64_t max_iter, double tol,
-    int nthreads, int per_k_retire,
+    int nthreads, int per_k_retire, int outer_threads, int blas_threads,
     const c128 *x0, const double *t, const uint8_t *mask,
     const int64_t *idx_sc, const int64_t *idx_ga, const double *v_eff,
     const c128 *p, const c128 *dij, const c128 *hub_q, const c128 *hub_dij,
@@ -267,7 +267,22 @@ int davidson_native(
                 .dij = dij, .hub_q = hub_q, .hub_dij = hub_dij,
                 .nthreads = nthreads};
 
-    openblas_set_num_threads(1);  /* all BLAS inside omp-over-k regions */
+    /* Thread split (mode selection lives in the Python adapter, passed in):
+     *   kpar  (many-k, default):  outer_threads=nthreads, blas_threads=1.
+     *         The k loops fan out over all cores, OpenBLAS pinned serial —
+     *         byte-identical to the historical single-argument kernel.
+     *   fewk  (nk < cores):       outer_threads small, blas_threads>1.
+     *         Fewer k run at once, each k's dense algebra (RR/QR/Ritz/ztrsm
+     *         GEMMs) threads inside OpenBLAS. outer_threads==1 runs the k loop
+     *         serially in the master thread via the `if(outer_threads>1)`
+     *         clause below, so the multithreaded BLAS is a plain level-1 OMP
+     *         region (no nesting). outer_threads>1 with blas_threads>1 nests,
+     *         which OpenBLAS (USE_OPENMP build) honours only with two active
+     *         levels. */
+    if (outer_threads < 1) outer_threads = nthreads;   /* legacy callers */
+    if (blas_threads < 1) blas_threads = 1;
+    if (blas_threads > 1) omp_set_max_active_levels(2);
+    openblas_set_num_threads(blas_threads);
 
     c128 *V = malloc(sizeof(c128) * (size_t)(nk * max_dim * m));
     c128 *HV = malloc(sizeof(c128) * (size_t)(nk * max_dim * m));
@@ -289,7 +304,7 @@ int davidson_native(
     for (int64_t k = 0; k < nk; k++) { dim_k[k] = nb; active[k] = 1; }
 
     /* ---- init: V = qr(x0 * mask); HV = H V ---- */
-#pragma omp parallel num_threads(nthreads)
+#pragma omp parallel num_threads(outer_threads) if(outer_threads > 1)
     {
         scratch_t ws = scratch_alloc(&cx, max_dim);
 #pragma omp for schedule(dynamic)
@@ -322,7 +337,7 @@ int davidson_native(
     int64_t it;
     for (it = 1; it <= max_iter; it++) {
         /* ---- Rayleigh-Ritz (parallel over k) ---- */
-#pragma omp parallel num_threads(nthreads)
+#pragma omp parallel num_threads(outer_threads) if(outer_threads > 1)
         {
             scratch_t ws = scratch_alloc(&cx, max_dim);
             const c128 one = 1.0, zero = 0.0;
@@ -397,7 +412,7 @@ int davidson_native(
         }
 
         /* ---- expansion (parallel over k) ---- */
-#pragma omp parallel num_threads(nthreads)
+#pragma omp parallel num_threads(outer_threads) if(outer_threads > 1)
         {
             scratch_t ws = scratch_alloc(&cx, max_dim);
 #pragma omp for schedule(dynamic)
