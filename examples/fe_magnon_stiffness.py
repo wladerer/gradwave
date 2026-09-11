@@ -98,6 +98,9 @@ def main():
     ap.add_argument("--kmesh", type=int, default=3)
     ap.add_argument("--ecut_ry", type=float, default=50.0)
     ap.add_argument("--threads", type=int, default=8)
+    ap.add_argument("--bands_per_atom", type=int, default=10,
+                    help="system nbands per atom (spinor bands = 2x this; Fe "
+                         "ONCV has 16 valence e/atom = 8 filled per atom)")
     args = ap.parse_args()
     torch.set_num_threads(args.threads)
 
@@ -112,7 +115,9 @@ def main():
 
     # theoretical bcc shell radii (Å): 1nn √3/2 a, 2nn a, 3nn √2 a
     shell_r = {1: np.sqrt(3) / 2 * A_BCC, 2: A_BCC, 3: np.sqrt(2) * A_BCC}
-    print(f"supercell {args.nrep}^3 = {natom} atoms; center atom {center}")
+    kind = (f"conventional {args.conventional}^3" if args.conventional > 0
+            else f"primitive {args.nrep}^3")
+    print(f"supercell {kind} = {natom} atoms; center atom {center}")
     for n, r in shell_r.items():
         cnt = int(np.sum(np.abs(dists - r) < 0.05))
         print(f"  shell {n}: r={r:.3f} Å, resolved neighbours in cell = {cnt}")
@@ -120,7 +125,8 @@ def main():
     fe = parse_upf(f"{PSE}/Fe_ONCV_PBE-1.2.upf")
     species = [0] * natom
     system = setup_system(cell, pos, species, [fe] * natom, ecut=args.ecut_ry * RY,
-                          kmesh=(args.kmesh,) * 3, nbands=int(natom * 12),
+                          kmesh=(args.kmesh,) * 3,
+                          nbands=int(natom * args.bands_per_atom),
                           time_reversal=False)
     xc = NoncollinearXC(LSDA_PW92())
     m0 = torch.full((natom,), M_MOMENT, dtype=torch.float64)
@@ -131,20 +137,37 @@ def main():
         smearing="gaussian", width=0.1, etol=1e-7, rhotol=1e-6, max_iter=200,
         mixing_alpha=0.4, verbose=False)
 
-    # bin the isotropic exchange by shell distance (curvature, eV per pair)
+    # Bin the isotropic exchange by shell distance (curvature, eV per pair).
+    # IMAGE-FOLD CORRECTION: tilting the center atom tilts all its periodic
+    # images, so the torque read on atom i sums the bond to EVERY image of the
+    # (center, i) pair that sits at the shell radius. In a small box several
+    # images land on the same shell (e.g. +a x̂ and −a x̂ are the same atom in a
+    # 2a box), so the extracted J is fold × J_bond. Count the images and divide.
+    inv_cell = np.linalg.inv(cell)
+    z_bcc = {1: 8, 2: 6, 3: 12}
     per_shell: dict[int, list[float]] = {1: [], 2: [], 3: []}
+    fold_used: dict[int, int] = {}
     for i, J in tensors.items():
         j_iso = decompose(J)[0]
+        d0 = pos[i] - pos[center]
         for n, r in shell_r.items():
-            if abs(dists[i] - r) < 0.05:
-                per_shell[n].append(j_iso)
+            if abs(dists[i] - r) >= 0.05:
+                continue
+            fold = 0
+            for m1 in range(-2, 3):
+                for m2 in range(-2, 3):
+                    for m3 in range(-2, 3):
+                        img = d0 + np.array([m1, m2, m3], dtype=float) @ cell
+                        if abs(float(np.linalg.norm(img)) - r) < 0.05:
+                            fold += 1
+            per_shell[n].append(j_iso / max(fold, 1))
+            fold_used[n] = fold
     j_shell = {n: (float(np.mean(v)) if v else 0.0) for n, v in per_shell.items()}
-    z_bcc = {1: 8, 2: 6, 3: 12}
     print("per-shell exchange (curvature, eV per unit-moment pair):")
     for n in (1, 2, 3):
         got = len(per_shell[n])
         print(f"  J{n} = {j_shell[n] * 1000:+.2f} meV   "
-              f"(z={z_bcc[n]}, resolved {got} bonds)")
+              f"(z={z_bcc[n]}, resolved {got} atoms x fold {fold_used.get(n, 0)})")
 
     # LSWT stiffness on the bcc primitive cell, cumulative over shells.
     # Model convention H = -1/2 Σ J_model S_i·S_j; the extracted curvature is
@@ -167,16 +190,19 @@ def main():
     for n in (1, 2, 3):
         assert len(shell_rs[n]) == z_bcc[n], \
             f"shell {n}: generated {len(shell_rs[n])} vecs, expected {z_bcc[n]}"
-    print("\ncumulative magnon stiffness D (frozen-magnon 4/M convention):")
-    for upto in (1, 2, 3):
+    # The LSWT ω of the model with J_model = J_curv/S² IS the adiabatic
+    # (frozen-magnon) magnon energy: ω(q) = S[J_m(0) − J_m(q)] = (2/M)[J_c(0) −
+    # J_c(q)], the standard convention the measured stiffness compares to. No
+    # extra factor.
+    resolved = [n for n in (1, 2, 3) if per_shell[n]]
+    print("\ncumulative magnon stiffness D (small-q fit of the LSWT dispersion):")
+    for upto in resolved:
         bonds = []
         for n in range(1, upto + 1):
             jm = j_shell[n] / s**2  # model coupling (eV)
             for r in shell_rs[n]:
                 bonds.append(ExchangeBond(0, 0, r, jm))
         model = HeisenbergModel(cell=prim, spins=[s], bonds=bonds)
-        # small-q stiffness along x, in the frozen-magnon convention (= 2× the
-        # S-length LSWT ω, since M = 2S): fit ω[meV] vs q²[Å⁻²].
         recip = 2 * np.pi * np.linalg.inv(prim).T
         qmax = 0.02 * float(np.linalg.norm(recip[0]))
         qs = np.linspace(0, qmax, 13)[1:]
@@ -184,12 +210,12 @@ def main():
         w = []
         for qm in qs:
             qf = (qm * np.array([1.0, 0, 0])) @ inv_recip
-            w.append(magnon_dispersion(model, qf[None])[0, 0] * 1e3)  # meV (S-model)
-        w = np.asarray(w) * 2.0  # -> frozen-magnon (4/M) convention
+            w.append(magnon_dispersion(model, qf[None])[0, 0] * 1e3)  # meV
+        w = np.asarray(w)
         d_stiff = float((qs**2 @ w) / (qs**2 @ qs**2))
         tag = "+".join(f"J{k}" for k in range(1, upto + 1))
         print(f"  {tag:<10s} D = {d_stiff:7.1f} meV·Å²")
-    print("  (experiment: D ≈ 280–310 meV·Å²)")
+    print("  (experiment: D ≈ 280–310 meV·Å² for bcc Fe)")
 
 
 if __name__ == "__main__":
