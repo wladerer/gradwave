@@ -43,7 +43,18 @@ Scope and caveats
   along n̂ gives the DMI component D·n̂ (the antisymmetric torque in the plane ⊥ n̂);
   repeat along x̂, ŷ, ẑ for the whole vector.
 * The fully-analytic route — differentiating the torque through the SCF fixed point
-  for 𝒥 without any finite step — is future work (see docs/ideas.md).
+  for 𝒥 without any finite step — was investigated and is **blocked** (measured
+  2026-09-11; docs/design/analytic-exchange-couplings.md). It reduces to χ₀ applied
+  through the constrained *noncollinear* path, and the shipped response kernel
+  (`scf.implicit.apply_chi0`) is collinear-only (spin-block-diagonal) while
+  `scf.noncollinear.scf_noncollinear` is `@torch.no_grad` (no autograd/adjoint
+  route). Both the linear-response and the double-backward formulations need a
+  **metallic spinor χ₀** (the transverse spin susceptibility of a magnetic metal),
+  which does not exist in the tree — a second-code-project-sized build. The FD path
+  here stays the production route; it is correct at tight etol, the ÷δ noise is the
+  cost, not a bug. For individual-shell J / the q→0 DMI slope, prefer the
+  reciprocal-space spin-spiral E(+q)−E(−q) route (docs/ideas.md), which stays on the
+  forward SCF.
 
 Convention: (1) uses unit ê, so J is returned in eV as the energy curvature
 d²W/dθ². Comparing to a reference that folds the spin magnitude S into J (many quote
