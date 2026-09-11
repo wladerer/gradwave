@@ -101,6 +101,7 @@ drivers call their own module globals.
 | d-band center & width (Hammer-Nørskov) | `projections.band_center: enabled` (rides the PDOS; needs group_by l/lm + PSWFC pseudo) → `summary["pdos"]["band_center"]` (driver: `postscf.band_center`) | |
 | Surface energy γ from a slab-thickness sweep | `task: surface_energy` with `surface_energy.slabs` (`api.run_surface_energy`; multi-SCF fit like eos) | |
 | Quasi-harmonic G(T), V(T), thermal expansion | `task: qha` (`api.run_qha`; phonon DOS per volume → QHA fit; needs phonons.dos_mesh > 0) | |
+| Magnon bands from Heisenberg exchange (LSWT) | `task: magnons` (`api.run_magnons`; numbers-in couplings → Bogoliubov/Colpa dispersion, no SCF; driver: `postscf.magnons.magnon_bands`) | |
 | Load a pseudopotential (NC or PAW) | `pseudo.upf.parse_upf`, `pseudo.upf_paw.parse_upf_paw` (unified: `api._load_upf`, path-cached) | re-parse UPF XML; re-implement the radial FT (`pseudo.radial.sbt`) |
 | Build the result summary / serialize / render | `api.build_summary`, `io.checkpoint.save_checkpoint`, `io.output.format_output` | hand-roll the summary-dict schema |
 | Warm-start an SCF from a checkpoint | `io.checkpoint.load_checkpoint` → `io.checkpoint.as_start_from` (pass as `scf(..., start_from=)`) | |
@@ -113,8 +114,8 @@ does not reach them, so don't assume a task exists: `convex_hull`,
 Ising model, not a fitted cluster expansion). Recently wired (now first-class
 tasks / blocks): `bader` (scf sub-mode), `adsorbate_thermo` (`task: thermochem`),
 `work_function` (scf block, auto for ESM), `band_center` (projections sub-block),
-`surface_energy` (`task: surface_energy`), `qha` (`task: qha`); harmonic `thermo`
-rides `run_phonons`. Remaining natural finish: `convex_hull` formation energies
+`surface_energy` (`task: surface_energy`), `qha` (`task: qha`), `magnons`
+(`task: magnons`); harmonic `thermo` rides `run_phonons`. Remaining natural finish: `convex_hull` formation energies
 (blocked on reference-energy provenance — needs caller-supplied elemental refs).
 
 ## Running commands efficiently

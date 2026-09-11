@@ -145,6 +145,21 @@ bcc Fe benchmark against Pajda 2001 in `examples/fe_exchange.py`.
 
 ::: gradwave.postscf.spin_exchange.heisenberg_couplings
 
+## Magnon band structure (LSWT)
+
+`magnon_bands` diagonalizes the Heisenberg model — the exchange constants above,
+plus spin lengths, ordered-moment directions, and single-ion anisotropy — with
+linear spin-wave theory (bosonic Bogoliubov / Colpa), returning the magnon
+dispersion along an ASE band path. It is a numbers-in library (couplings in eV)
+and a first-class task (`task: magnons`, `api.run_magnons`, couplings in meV);
+see the magnetism manual for the YAML surface and the bcc-Fe stiffness anchor.
+
+::: gradwave.postscf.magnons.HeisenbergModel
+
+::: gradwave.postscf.magnons.magnon_bands
+
+::: gradwave.postscf.magnons.magnon_dispersion
+
 ## Magnetic characterization (one call)
 
 `characterize_magnetism` is the high-level entry point: it runs a non-collinear

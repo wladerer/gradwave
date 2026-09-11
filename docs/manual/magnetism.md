@@ -231,6 +231,78 @@ reported as ~0 without spin-orbit coupling, as symmetry requires. They become
 nonzero once a fully-relativistic magnetic pseudopotential is supplied. See the
 anisotropy notes in `docs/ideas.md`.
 
+## Magnon band structure (linear spin-wave theory)
+
+The exchange constants above parametrize a classical Heisenberg model; its
+low-energy excitations are magnons, and `postscf.magnons` diagonalizes them with
+linear spin-wave theory (LSWT). The model is Holstein-Primakoff–linearized about
+a supplied ordered state and the quadratic boson Hamiltonian is diagonalized by
+the bosonic Bogoliubov (Colpa) method — a Cholesky of the grand-dynamical matrix
+plus a Hermitian eigenproblem — which handles the general multi-sublattice,
+non-collinear, DM-canted case. For a one-sublattice ferromagnet it collapses to
+the textbook $\omega(q) = S[J(0) - J(q)]$ (plus an anisotropy gap); a
+non-positive-definite grand matrix raises an error naming the likely cause (an
+unstable ordered state, or too few shells).
+
+The library takes couplings directly (numbers-in, like the thermochem task), so
+a magnon dispersion needs no SCF once the exchange is known:
+
+```python
+import numpy as np
+from gradwave.postscf.magnons import HeisenbergModel, magnon_bands
+
+# a nearest-neighbour ferromagnet on a cubic cell, J1 = 15 meV, S = 1.1
+model = HeisenbergModel.from_shells(
+    cell=np.diag([2.87, 2.87, 2.87]), spins=[1.1],
+    shells=[{"i": 0, "j": 0, "rs": [(1, 0, 0), (0, 1, 0), (0, 0, 1)],
+             "j_iso": 0.015}])          # eV; reverse bonds added automatically
+bands = magnon_bands(model, npoints=200)
+bands.frequencies    # (nq, n_branch) magnon energies [meV]
+```
+
+Antiferromagnets and canted states pass explicit `moments` (the ordered-state
+directions); a Dzyaloshinskii-Moriya vector on a bond makes the dispersion
+nonreciprocal, $\omega(q) \neq \omega(-q)$. The five analytic cases in
+`tests/unit/test_magnons.py` — the FM Goldstone mode and its single-ion gap, the
+cubic-FM closed form, the linear AFM dispersion, the DM nonreciprocity, and the
+Colpa stability guard — pin the assembly to machine precision.
+
+The same model runs as a first-class task (`task: magnons`, driver
+`api.run_magnons`), reading the couplings from a YAML block. The top-level
+`structure` is the magnetic primitive cell, whose Brillouin zone defines the
+q-path:
+
+```yaml
+task: magnons
+structure: { ... }        # the magnetic primitive cell
+magnons:
+  spins: [1.1]            # S per magnetic sublattice
+  bonds:                  # J and DM in meV; reverse bonds are generated
+    - {i: 0, j: 0, r: [1, 0, 0], j_iso: 15.0}
+    - {i: 0, j: 0, r: [0, 1, 0], j_iso: 15.0}
+    - {i: 0, j: 0, r: [0, 0, 1], j_iso: 15.0}
+  path: GHNGP             # ASE band-path string (lattice default if omitted)
+```
+
+The `magnons.json` summary carries the branch frequencies along the path (meV),
+and — for a collinear ferromagnet — the spin-wave stiffness $D$ from a small-$q$
+parabolic fit. `io.analysis.plot_magnons` draws the dispersion.
+
+### Validation: the spin-wave stiffness of bcc Fe
+
+Feeding gradwave's own exchange constants through the LSWT stiffness anchors the
+whole pipeline against experiment. `examples/fe_magnon_stiffness.py` extracts the
+isotropic exchange of ferromagnetic bcc Fe on a supercell of the primitive cell
+(so the first neighbour shells are distinct atoms rather than the folded
+inter-sublattice sum of `examples/fe_exchange.py`), bins it into per-shell $J_n$,
+and reads the stiffness cumulatively. In the standard frozen-magnon convention
+$\hbar\omega(q) = (4/M)[J(0) - J(q)]$ (with $M$ the moment in $\mu_B$), the
+first-shell exchange alone already lands at the right order and the shell sum
+converges toward the measured $D \approx 280\text{–}310$ meV·Å²; PBE/LSDA
+exchange overestimates the couplings somewhat (the same reason $J_1$ sits just
+above the LKAG range above), so the gate is the order and the shell-convergence
+shape, not exact agreement.
+
 ## Magnetocrystalline anisotropy
 
 With fully-relativistic pseudopotentials the total energy depends on the
