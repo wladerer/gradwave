@@ -50,8 +50,8 @@ from gradwave.scf.common import (
     constant_mu_occupations,
     convergence_gate,
     fsm_smeared_occupations,
+    hubbard_occ_refresh,
     hubbard_u_ramp_scale,
-    mix_hubbard_occ,
     record_iteration,
     shared_fermi_occupations,
     spin_sigmas,
@@ -1694,52 +1694,27 @@ def _hubbard_occ_update(
     lockstep with the D-matrix scaling in ``_solve_bands``. β=1.0 AND u_scale=1.0
     reproduce today's numbers bit-for-bit.
 
-    Under ``dist_ctx`` (distributed k-point-sharded SCF), ``system``/``occ_s``/
-    ``coeffs_b_s``/``hub_q`` are all THIS RANK's local k-shard, so
-    ``occupation_matrices``' k-weighted sum below is only a PARTIAL sum over
-    the local shard — exactly like ``core.batch.density_b``'s partial density.
-    ``n_hub`` is therefore ``all_reduce``-SUMmed across ranks to the full-mesh
-    value before ``e_hub`` is computed. Unlike kinetic/nonlocal energy, e_hub
-    is NOT itself k-extensive-linear — ``hubbard_energy`` is a NONLINEAR
-    (Tr[n(1−n)]) function of n_hub, so summing each rank's LOCAL e_hub would
-    be wrong (Tr[(nA+nB)(1−nA−nB)] ≠ Tr[nA(1−nA)] + Tr[nB(1−nB)]). e_hub is
-    instead recomputed from the already-reduced, full-mesh n_hub_s."""
-    e_hub = torch.zeros((), dtype=RDTYPE, device=device)
+    The refresh core (occupation matrices → distributed all_reduce + e_hub
+    recompute → U-ramp scale → occ-mix damping) is the shared
+    ``scf.common.hubbard_occ_refresh``; this wrapper owns the NC-specific
+    projector plumbing (``hub_q`` against the k-batched ``coeffs_b_s``)."""
     if hub is None:
-        return None, e_hub
-    from gradwave.core.hubbard import hubbard_energy, hubbard_occ_and_energy, occupation_matrices
+        return None, torch.zeros((), dtype=RDTYPE, device=device)
+    from gradwave.core.hubbard import occupation_matrices
 
     assert hub_q is not None  # set together with hub (scf()'s `if hubbard:` block)
-    n_hub_s, e_hub = hubbard_occ_and_energy(
+    return hubbard_occ_refresh(
         lambda isp, w: occupation_matrices(hub_q, coeffs_b_s[isp], w, system.kweights, hub.sites),
         occ_s,
         hub.sites,
         nspin,
+        device,
+        dist_ctx=dist_ctx,
+        n_hub_prev=n_hub_prev,
+        occ_mix=occ_mix,
+        u_scale=u_scale,
+        split_nspin1=True,
     )
-    if dist_ctx is not None:
-        from gradwave.distributed import all_reduce_
-
-        n_hub_s = [[all_reduce_(m, dist_ctx) for m in mats] for mats in n_hub_s]
-        # e_hub above was computed from this rank's PARTIAL (local-shard)
-        # n_hub_s — recompute from the just-reduced, full-mesh matrices,
-        # mirroring hubbard_occ_and_energy's own e_hub formula (nspin=2:
-        # sum of the two channels' Dudarev traces; nspin=1: half-filled
-        # single channel doubled).
-        if nspin == 2:
-            e_hub = torch.zeros((), dtype=RDTYPE, device=device)
-            for mats in n_hub_s:
-                e_hub = e_hub + hubbard_energy(mats, hub.sites)
-        else:
-            e_hub = 2.0 * hubbard_energy(n_hub_s[0], hub.sites)
-    if nspin == 1:
-        n_hub_s = [n_hub_s[0], n_hub_s[0]]  # loop returns BOTH spin channels
-    # U-ramp: E_U is linear in U_eff, so scaling the full-U energy by u_scale
-    # matches the ramped-U D-matrix built in _solve_bands this same iteration.
-    if u_scale != 1.0:
-        e_hub = e_hub * u_scale
-    # occupation-matrix damping for the NEXT iteration's V_U (energy stays fresh)
-    n_hub_s = mix_hubbard_occ(n_hub_prev, n_hub_s, occ_mix)
-    return n_hub_s, e_hub
 
 
 def _scf_residual_and_record(

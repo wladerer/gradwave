@@ -53,8 +53,8 @@ from gradwave.scf.common import (
     adaptive_diago_tol,
     assemble_pw_energies,
     convergence_gate,
+    hubbard_occ_refresh,
     hubbard_u_ramp_scale,
-    mix_hubbard_occ,
     record_iteration,
     shared_fermi_occupations,
     spin_xc_energy,
@@ -647,23 +647,22 @@ def _hubbard_occ_update(
     ``_solve_bands_uspp``). β=1.0 AND u_scale=1.0 reproduce today's numbers
     bit-for-bit — the NC driver's ``_hubbard_occ_update`` mirrors this exactly.
 
-    Under a distributed (dist_ctx) run, occupation_matrices' k-sum
-    (core/hubbard.py's ``einsum("kb,kbp,kbq->pq", ...)``) is only a sum over
-    THIS RANK's k-shard; the per-site matrices are all_reduce-summed across
-    ranks (a LINEAR operation, safe before the nonlinear Dudarev trace) before
-    Tr[n(1−n)] is evaluated, mirroring the density/becsum reduction in
-    _build_output_density below — hubbard_occ_and_energy's own e_hub (computed
-    from the un-reduced, rank-local matrices) is discarded and recomputed from
-    the globally-reduced ones via hubbard_energy directly."""
+    The refresh core (occupation matrices → distributed all_reduce + e_hub
+    recompute → U-ramp scale → occ-mix damping) is the shared
+    ``scf.common.hubbard_occ_refresh``; this wrapper owns the USPP-specific
+    plumbing (the S-metric ``hub.sphi`` projectors against padded
+    coefficients). Unlike the NC driver, nspin=1 keeps the single-channel
+    layout (``split_nspin1=False``). ``all_reduce_`` itself hardens against
+    the non-contiguous per-site diagonal-block views (the PR #196 fix), so
+    the core needs no ``.contiguous()`` at its call site."""
     system, nspin, batched = ops.system, ops.nspin, ops.batched
     bk, dev, nk, nb = ops.bk, ops.dev, ops.nk, ops.nb
-    e_hub = torch.zeros((), dtype=RDTYPE, device=dev)
     if hub is None:
         # n_hub_s is set together with hub at scf_uspp's setup (`n_hub_s =
         # None; if hubbard: n_hub_s = [...]`), so it's None here too.
         assert n_hub_s is None
-        return n_hub_s, e_hub
-    from gradwave.core.hubbard import hubbard_energy, hubbard_occ_and_energy, occupation_matrices
+        return n_hub_s, torch.zeros((), dtype=RDTYPE, device=dev)
+    from gradwave.core.hubbard import occupation_matrices
 
     # _build_iter_ops only ever builds bk/p_b when `batched or hubbard` was
     # true; hub is not None here means hubbard was, so bk is real regardless
@@ -678,39 +677,20 @@ def _hubbard_occ_update(
             cp[ik, :, : sph.npw] = coeffs[isp][ik]
         return cp
 
-    n_hub_new, e_hub = hubbard_occ_and_energy(
+    return hubbard_occ_refresh(
         lambda isp, w: occupation_matrices(
             hub.sphi, _padded_coeffs(isp), w, system.kweights, hub.sites
         ),
         occ_s,
         hub.sites,
         nspin,
+        dev,
+        dist_ctx=ops.dist_ctx,
+        n_hub_prev=n_hub_s,
+        occ_mix=ops.hub_occ_mix,
+        u_scale=u_scale,
+        split_nspin1=False,
     )
-    if ops.dist_ctx is not None:
-        from gradwave.distributed import all_reduce_
-
-        # occupation_matrices (core/hubbard.py) returns n_full[s0:s1, s0:s1]
-        # PER SITE -- a non-contiguous view into the shared (nproj, nproj)
-        # n_full whenever more than one site shares that tensor (two Si
-        # atoms of the same manifold here: dim < nproj). Gloo's all_reduce
-        # silently reduces the WRONG bytes on a non-contiguous view (no
-        # exception -- see the sibling NC+U distributed fix, PR #196, which
-        # hardens all_reduce_ itself against this for the shared primitive);
-        # until that lands, force a contiguous copy at this call site so this
-        # driver's own DFT+U reduction is correct regardless of merge order.
-        n_hub_new = [[all_reduce_(m.contiguous(), ops.dist_ctx) for m in ch] for ch in n_hub_new]
-        e_hub = (
-            hubbard_energy(n_hub_new[0], hub.sites) + hubbard_energy(n_hub_new[1], hub.sites)
-            if nspin == 2
-            else 2.0 * hubbard_energy(n_hub_new[0], hub.sites)
-        )
-    # U-ramp: E_U is linear in U_eff, so scaling the full-U energy by u_scale
-    # matches the ramped-U D-matrix built in _solve_bands_uspp this iteration.
-    if u_scale != 1.0:
-        e_hub = e_hub * u_scale
-    # occupation-matrix damping for the NEXT iteration's V_U (energy stays fresh)
-    n_hub_new = mix_hubbard_occ(n_hub_s, n_hub_new, ops.hub_occ_mix)
-    return n_hub_new, e_hub
 
 
 def _build_output_density(

@@ -119,6 +119,71 @@ def mix_hubbard_occ(n_prev, n_new, occ_mix: float):
     ]
 
 
+def hubbard_occ_refresh(
+    occ_matrices_fn,
+    occ_s,
+    sites,
+    nspin: int,
+    device: torch.device,
+    dist_ctx=None,
+    n_hub_prev=None,
+    occ_mix: float = 1.0,
+    u_scale: float = 1.0,
+    *,
+    split_nspin1: bool,
+) -> tuple[list[list[torch.Tensor]], torch.Tensor]:
+    """The DFT+U occupation-matrix refresh core shared by the NC and USPP/PAW
+    drivers' ``_hubbard_occ_update`` wrappers (which own the driver-specific
+    projector/coefficient plumbing and the no-Hubbard early return). Computes
+    the fresh per-spin occupation matrices via ``occ_matrices_fn`` and returns
+    ``(n_hub_s, e_hub)``: the ``occ_mix``-damped carry-forward matrices and the
+    FRESH-orbital Hubbard energy (Dudarev), scaled by ``u_scale`` for the
+    U-ramp in lockstep with the D-matrix scaling in the drivers' band solves.
+    ``split_nspin1=True`` (the NC driver) duplicates the single nspin=1 channel
+    so the loop always sees BOTH spin channels; the USPP driver keeps the
+    single-channel layout throughout.
+
+    Under ``dist_ctx`` (distributed k-point-sharded SCF), the inputs are THIS
+    RANK's local k-shard, so ``occ_matrices_fn``'s k-weighted sum is only a
+    PARTIAL sum over the local shard — exactly like ``core.batch.density_b``'s
+    partial density. ``n_hub`` is therefore ``all_reduce``-SUMmed across ranks
+    (a LINEAR operation, safe before the nonlinear Dudarev trace) to the
+    full-mesh value before ``e_hub`` is computed. Unlike kinetic/nonlocal
+    energy, e_hub is NOT itself k-extensive-linear — ``hubbard_energy`` is a
+    NONLINEAR (Tr[n(1−n)]) function of n_hub, so summing each rank's LOCAL
+    e_hub would be wrong (Tr[(nA+nB)(1−nA−nB)] ≠ Tr[nA(1−nA)] + Tr[nB(1−nB)]).
+    e_hub is instead recomputed from the already-reduced, full-mesh matrices.
+    ``all_reduce_`` itself hardens against non-contiguous views (the per-site
+    diagonal-block slices of a shared manifold tensor — see its docstring), so
+    no ``.contiguous()`` is needed at this call site."""
+    from gradwave.core.hubbard import hubbard_energy, hubbard_occ_and_energy
+
+    n_hub_s, e_hub = hubbard_occ_and_energy(occ_matrices_fn, occ_s, sites, nspin)
+    if dist_ctx is not None:
+        from gradwave.distributed import all_reduce_
+
+        n_hub_s = [[all_reduce_(m, dist_ctx) for m in mats] for mats in n_hub_s]
+        # e_hub above was computed from this rank's PARTIAL (local-shard)
+        # n_hub_s — recompute from the just-reduced, full-mesh matrices,
+        # mirroring hubbard_occ_and_energy's own e_hub formula (nspin=2:
+        # sum of the two channels' Dudarev traces; nspin=1: half-filled
+        # single channel doubled).
+        if nspin == 2:
+            e_hub = torch.zeros((), dtype=RDTYPE, device=device)
+            for mats in n_hub_s:
+                e_hub = e_hub + hubbard_energy(mats, sites)
+        else:
+            e_hub = 2.0 * hubbard_energy(n_hub_s[0], sites)
+    if split_nspin1 and nspin == 1:
+        n_hub_s = [n_hub_s[0], n_hub_s[0]]  # loop returns BOTH spin channels
+    # U-ramp: E_U is linear in U_eff, so scaling the full-U energy by u_scale
+    # matches the ramped-U D-matrix built in the band solve this iteration.
+    if u_scale != 1.0:
+        e_hub = e_hub * u_scale
+    # occupation-matrix damping for the NEXT iteration's V_U (energy stays fresh)
+    return mix_hubbard_occ(n_hub_prev, n_hub_s, occ_mix), e_hub
+
+
 def adaptive_diago_tol(it, history, diago_tol, n_electrons, *, schedule,
                        first_tol: float=1e-3):
     """Adaptive diagonalization tolerance (QE-style): loose while the density

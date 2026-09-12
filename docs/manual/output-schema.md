@@ -40,6 +40,7 @@ writes files.
 
 | key | type | meaning |
 |---|---|---|
+| `schema_version` | int | version of this top-level schema (`api.summary.SCHEMA_VERSION`, currently 1); bumped when a top-level key is renamed/removed or changes meaning, not when an optional block is added |
 | `code` | object | `{name, version, created}`, the writer identity and ISO timestamp |
 | `task` | str | the task that produced this file |
 | `structure` | object | cell, positions, species, and derived facts (below) |
