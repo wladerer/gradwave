@@ -233,3 +233,53 @@ def test_env_threads_respected():
         assert res.n_iter <= 3
     finally:
         torch.set_num_threads(prev)
+
+
+# ---------------------------------------------------------------------------
+# .so source-hash stamp guard (campaign: projector dedup). A library built from
+# a different davidson_native.c must be refused with a clear rebuild error, not
+# called with a mismatched ABI (the #479 stale-.so segfault).
+# ---------------------------------------------------------------------------
+
+def test_src_hash_is_stable_16hex():
+    from gradwave.solvers.native_davidson import _src_hash
+
+    h = _src_hash()
+    assert isinstance(h, str) and len(h) == 16
+    assert all(ch in "0123456789abcdef" for ch in h)
+
+
+def test_stamp_guard_rejects_mismatch():
+    """A library reporting a wrong build hash is refused with a clear error."""
+    from gradwave.solvers import native_davidson as nd
+
+    class _Stub:
+        # the adapter does getattr(lib, "davidson_native_build_hash"), sets
+        # .restype, then calls it and decodes the bytes; a plain function
+        # attribute satisfies all three.
+        @staticmethod
+        def davidson_native_build_hash():
+            return b"deadbeefdeadbeef"
+
+    with pytest.raises(RuntimeError, match="stale"):
+        nd._verify_stamp(_Stub(), "/fake/path.so")
+
+
+def test_stamp_guard_rejects_missing_symbol():
+    """A pre-guard library without the stamp symbol is treated as stale."""
+    from gradwave.solvers import native_davidson as nd
+
+    class _NoSym:
+        pass
+
+    with pytest.raises(RuntimeError, match="stale"):
+        nd._verify_stamp(_NoSym(), "/fake/old.so")
+
+
+@needs_native
+def test_current_library_stamp_matches_source():
+    """The built library on this machine matches the checked-out source (i.e.
+    it was rebuilt for this branch — a green native tier depends on it)."""
+    from gradwave.solvers.native_davidson import _load
+
+    assert _load() is not None  # would raise "stale" if the stamp mismatched

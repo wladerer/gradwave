@@ -88,6 +88,37 @@ def _so_path() -> Path:
     return Path.home() / ".cache" / "gradwave" / "libdavnative.so"
 
 
+def _src_hash() -> str:
+    """Short hash of the checked-out C source, matching what the build script
+    bakes into the .so (sha256 of the raw bytes, first 16 hex chars)."""
+    import hashlib
+
+    src = Path(__file__).parent / "native" / "davidson_native.c"
+    return hashlib.sha256(src.read_bytes()).hexdigest()[:16]
+
+
+def _verify_stamp(lib: ctypes.CDLL, path: str) -> None:
+    """Refuse a library whose source stamp does not match the checked-out C.
+
+    The #479 footgun: a `.so` built before a `davidson_native.c` signature
+    change is called with a mismatched ABI → memory corruption → SIGSEGV. The
+    build script bakes a source hash; here we compare it to the current source
+    and raise a clear rebuild error instead of segfaulting. An old library
+    without the stamp symbol (or one stamped "unknown") predates the guard and
+    is treated as stale."""
+    want = _src_hash()
+    fn = getattr(lib, "davidson_native_build_hash", None)
+    got = None
+    if fn is not None:
+        fn.restype = ctypes.c_char_p
+        got = fn().decode()
+    if got != want:
+        raise RuntimeError(
+            f"native solver library at {path} is stale: built from source hash "
+            f"{got!r}, current source is {want!r}. Rebuild it — {_BUILD_HINT}."
+        )
+
+
 def native_available() -> bool:
     """Whether the native library can be loaded (cheap after first call)."""
     return _load() is not None
@@ -101,6 +132,7 @@ def _load() -> ctypes.CDLL | None:
     if not Path(path).exists():
         return None
     lib = ctypes.CDLL(path)
+    _verify_stamp(lib, path)
     lib.davidson_native.restype = ctypes.c_int
     # 10×int64, tol(double), nthreads(int), per_k_retire(int), rr_mode(int),
     # then 10 input pointers + 4 output pointers.

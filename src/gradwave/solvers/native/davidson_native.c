@@ -44,6 +44,17 @@ typedef double complex c128;
 
 extern void openblas_set_num_threads(int);
 
+/* Source-hash stamp. The build script (scripts/build_native_solver.sh) bakes a
+ * short hash of THIS .c file in via -DGW_NATIVE_SRC_HASH; the Python adapter
+ * (solvers/native_davidson.py) hashes the checked-out source at load time and
+ * refuses a mismatched library with a clear "rebuild" error instead of calling
+ * a stale ABI and segfaulting (the #479 footgun). "unknown" marks a build that
+ * predates the stamp (also treated as stale). */
+#ifndef GW_NATIVE_SRC_HASH
+#define GW_NATIVE_SRC_HASH "unknown"
+#endif
+const char *davidson_native_build_hash(void) { return GW_NATIVE_SRC_HASH; }
+
 /* ------------------------------------------------------------------ */
 /* cached single-box plans (per box shape, kept across calls)          */
 

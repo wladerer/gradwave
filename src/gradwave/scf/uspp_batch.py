@@ -45,16 +45,15 @@ class BatchedHS:
         # None for GGA/LDA. Same additive H-apply composition as the NC path
         # (scf.loop._solve_bands).
         self.metagga_v = metagga_v
-        # cdtype → (p, p_conj, q) for mixed precision
-        self._pq_cache: dict[torch.dtype, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        # cdtype → (p, q) for mixed precision. No resident p.conj(): becp_b
+        # folds the conjugation into its BLAS matmul (see core.batch.becp_b), so
+        # the overlap S apply needs no materialized conjugate table.
+        self._pq_cache: dict[torch.dtype, tuple[torch.Tensor, torch.Tensor]] = {}
 
     def _pq(self, cdtype):
         cached = self._pq_cache.get(cdtype)
         if cached is None:
-            p = self.p.to(cdtype)
-            # conjugate cached: S is applied every Davidson round and a fresh
-            # p.conj() there re-materializes the whole projector table
-            cached = (p, p.conj().resolve_conj(), self.q.to(cdtype))
+            cached = (self.p.to(cdtype), self.q.to(cdtype))
             self._pq_cache[cdtype] = cached
         return cached
 
@@ -67,8 +66,8 @@ class BatchedHS:
         return out
 
     def s(self, c):
-        p, p_conj, q = self._pq(c.dtype)
-        b = becp_b(p, c, p_conj=p_conj)
+        p, q = self._pq(c.dtype)
+        b = becp_b(p, c)
         return (c + torch.einsum("kbp,pq,kqg->kbg", b, q, p)
                 ) * self.bk.mask[:, None, :]
 
