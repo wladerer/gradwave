@@ -159,3 +159,171 @@ native `.so` must be rebuilt whenever `davidson_native.c` changes — a machine
 with a stale `.so` shows a red fast tier and a segfaulting native solver. A
 future hardening could stamp the `.c` hash into the build and have the adapter
 refuse a mismatched library instead of segfaulting.
+## Projector-table dedup: one BLAS-folded conjugate instead of a resident copy
+
+Follow-up to the profile above (campaign task #24). The #479 note flagged, as
+the deepest remaining resident cost after dense-box chunking, "several resident
+copies of the `(n_k, nproj, npw_max)` projector table (phase-free, phased, and
+the `p`/`p.conj()` working cache — ~2.9 GB together at 30 Ry)". This pass
+adjudicates that claim and removes the one copy that was pure redundancy.
+
+### What is actually resident, and where
+
+At Si-64 / 30 Ry a single `(n_k=4, nproj, npw_max=23984)` complex128 projector
+table is ~0.73 GiB. Three forms appeared in the accounting:
+
+1. **`bk.proj_phase_free`** — the position-independent generator
+   `f_ylm · e^{-iG·(r_atom-origin)}`-free table, resident on `System.batch`.
+   It is the source `projectors_b(bk, positions)` phases at the fixed atomic
+   positions, and it is **required after the SCF loop**: `postscf.forces` (and
+   the alchemical path) rebuild the phased projectors *with grad* from it. Not
+   redundant.
+2. **The phased table `projs_b`** — `projectors_b` evaluated once at the fixed
+   positions, handed to `BatchedHamiltonian` as `p` and consumed every apply.
+   The native C solver reads exactly this (`h.p` → `cx->p`) for the whole
+   solve, so it is unavoidably resident during a native solve. Not redundant.
+3. **`p.conj()` cache** — `BatchedHamiltonian._tables` cached
+   `p.conj().resolve_conj()`, a full second table, for the H's lifetime. This
+   existed **only because `torch.einsum` cannot fold a conjugation into the
+   BLAS call** — the becp contraction `⟨β|ψ⟩ = Σ_g conj(p) c` was written as
+   `einsum("kpg,kbg->kbp", p.conj(), c)`, and materializing `p.conj()` fresh
+   every Davidson round (many applies) was slower than caching it once. Pure
+   redundancy in the information sense: it is a bitwise function of (2).
+
+The native path never built (3): `davidson_native.c`'s KB term is a
+`cblas_zgemm(..., CblasConjTrans, ...)` against `cx->p` — the conjugation is a
+BLAS flag, no second table. So the "~2.9 GB" figure is the *eager*-path
+accounting; a **native** Si-64 solve holds only (1)+(2) ≈ 1.46 GiB of projector
+tables plus whatever the C kernel's per-thread becp scratch adds.
+
+### The change
+
+Make the eager path mirror the C kernel. `becp_b` now computes
+`torch.matmul(c, p.conj().transpose(-2,-1))`; on CPU the conj-transpose *view*
+folds into the cgemm call (ConjTrans), so there is no materialized conjugate —
+neither resident nor per-round transient. `BatchedHamiltonian._tables` drops the
+cached conjugate (returns `(t, v_eff, p, dij)`); the USPP overlap `_pq` cache
+drops its conjugate the same way. The retained `becp_b(p, c, p_conj=...)`
+argument is accepted but ignored.
+
+The contraction is mathematically identical; `tests/unit/test_dense_chunk_streaming.py`
+pins `becp_b` bit-level (≤1e-14) against the pre-dedup
+`einsum(p.conj().resolve_conj(), c)` in complex128 and ≤1e-6 in complex64, plus
+the grad-path preservation. Scope is the norm-conserving collinear
+`BatchedHamiltonian` (which both Si-64 and Cu/Al slabs use) and the trivial
+USPP overlap; the spinor/SOC noncollinear path keeps its own `p_conj`/`q_conj`
+caches (a separate follow-up — it is neither the Si-64 nor the slab regime).
+
+### A stale-`.so` guard, while here
+
+The #479 note asked for it: the build script now bakes a source hash of
+`davidson_native.c` into the library (`-DGW_NATIVE_SRC_HASH`, stringized), and
+the adapter (`solvers/native_davidson.py`) hashes the checked-out source at load
+and **refuses a mismatched library with a clear rebuild error** instead of
+calling a stale ABI and segfaulting. A library predating the stamp reports
+`"unknown"` and is treated as stale.
+
+### Measured (asus, 8 threads, this branch vs its base `main`@3c6a4327)
+
+Converged unless marked; E agrees to ALL printed digits (8 decimals) and the
+iteration counts are identical in every A/B pair — the conj-fold does not move
+any fixed point. "eager4" arms are 4 fixed iterations (the eager peak recurs
+every iteration, and converged eager Si-64 is ~2.3× slower than native, so 4
+iterations bound the peak honestly).
+
+| case | arm | peak RSS | wall | iters | E (eV) |
+|---|---|---|---|---|---|
+| Si-64 / 30 Ry native | main | 6.321 GB | 729.5 s | 28 | −6852.55482302 |
+| | **branch** | **6.290 GB** | 731.4 s | 28 | −6852.55482302 |
+| Si-64 / 30 Ry eager, 4 it | main | 8.935 / 8.952 GB | 234.8 / 233.3 s | 4 | −6848.51911433 |
+| | **branch** | **8.070 / 8.142 GB** | 243.4 / 243.6 s | 4 | −6848.51911433 |
+| Si-64 / 15 Ry native | main | 5.791 GB | 287.0 s | 37 | −6847.81040259 |
+| | **branch** | 5.796 GB | 287.1 s | 37 | −6847.81040259 |
+| Al-32 / 30 Ry native | main | 3.457 GB | 170.8 s | 13 | −59901.24050616 |
+| | **branch** | 3.454 GB | 171.4 s | 13 | −59901.24050616 |
+| Al-4 guard (native) | main | 0.995 GB | 4.5 s | 11 | −7487.65506327 |
+| | **branch** | 1.005 GB | 4.5 s | 11 | −7487.65506327 |
+| Al-1 guard (native) | main | 0.669 GB | 0.4 s | 9 | −1871.87393042 |
+| | **branch** | 0.671 GB | 0.5 s | 9 | −1871.87393042 |
+
+Reading:
+
+- **Eager Si-64: −0.83…0.87 GB peak (the conj table + allocator slack), at a
+  reproducible +4% wall** (two independent A/B pairs, order alternated). The
+  wall cost is the PyTorch *conjugate fallback*: CPU matmul cannot consume a
+  conj view directly, so it materializes `p.conj()` as a transient **per
+  apply** (~40 applies × 0.73 GiB of memcpy over a 4-iteration run ≈ the
+  observed +10 s). The transient lives under the solve-phase peak, which is
+  why peak still drops by the full resident copy.
+- **Native: unchanged in RSS and wall** (±0.03 GB, ±0.3%), as predicted — the
+  C kernel never held the copy. The dedup's only native-path effect is
+  removing the per-iteration transient conj in the energy-assembly `becp_b`.
+- **Small cells: unchanged** (guards identical A/B) — nproj is tiny, the
+  fallback is noise.
+
+Verdict on the design choice: **(b) keep the per-k phased table, drop the conj
+cache and nothing else** — option (a) (phase-free only, re-phase per use) was
+not taken: it would add the same fallback-materialization to every consumer
+including the native adapter boundary, for at most one more table (~0.73 GiB)
+of savings, and the phase-free table cannot be dropped anyway (it is the
+autograd source for forces). The +4% eager wall on projector-heavy cells is
+accepted and documented: eager is the fallback path at this scale (converged
+eager Si-64 ≈ 1700 s vs 731 s native), and under memory pressure −0.87 GB is
+worth more than +4% wall. If it ever matters, the surgical fix is a
+`negative()`-on-the-imag-view kernel or a fused conj-GEMM, not a resident copy.
+
+## Slab memory profile (Part 2): what binds after #479 + the dedup
+
+Same RSS-timeline + phase instrumentation, on the slab regime the prior
+campaigns quoted at 7.5–10.4 GB (12–16 atoms + realistic vacuum). Configs
+(4×4×1 MP → nk=6, 30 Ry, LDA, gaussian 0.1, 10 Å vacuum both sides):
+Cu(100) 2×2×3 (12 atoms, ONCV 19e ⇒ nb=140, grid 35×35×160, npw_max 11 569),
+Al(100) 2×2×4 (16 atoms, ONCV 11e ⇒ nb=110, grid 40×40×175, npw_max 16 051).
+
+| slab case | arm | peak RSS | wall | phase peaks (solve / density / projectors) |
+|---|---|---|---|---|
+| Cu-12 eager, 8 it | main | 5.845 GB | 355.3 s | 5.85 / 3.25 / 1.39 GB |
+| | branch | **5.648 GB** | 363.6 s | 5.65 / 3.26 / 1.37 GB |
+| Al-16 eager, 8 it | main | 5.950 GB | 360.9 s | 5.95 / 3.27 / 1.33 GB |
+| | branch | **5.784 GB** | 361.9 s | 5.78 / 3.25 / 1.37 GB |
+| Cu-12 native, converged (71 it) | main | 3.683 GB | 987.0 s | 3.68 / 3.50 / 1.41 GB |
+| | branch | **3.662 GB** | 978.2 s | 3.66 / 3.48 / 1.38 GB |
+
+E identical to all 8 digits in every pair (eager at fixed 8 iterations,
+native converged: −57917.57771247 eV Cu, −29946.36808510 eV Al at 8 it).
+
+**Phase → peak → top sites, and the verdict.** On slabs of this size, with
+current main's auto dense-box chunking active:
+
+1. The **dense FFT box is no longer the binding term** — it is chunked, and
+   the whole dense-grid field set is small anyway (n_grid ≈ 0.2–0.3 M points;
+   a complex128 scalar field is ~3–4 MB, so even the ~60–64% vacuum fraction
+   of the grid is memory-noise at this scale, ~1–2 dozen MB of waste).
+2. **Projector residue is minor here**: one table is 0.18–0.22 GiB (nproj
+   128–216); the dedup trims ~0.17–0.20 GB (~3% of peak).
+3. The binding term is the **per-k padded solve state**. Eager peaks 5.6–5.9 GB
+   entirely inside the solve phase: the grown Davidson subspace over all k at
+   once (`nk · 4nb · npw_max` complex128 for V and HV — ~0.6 GiB *each* for
+   these slabs, ~2.4 GiB with W/HW — plus the projected matrices), on top of the resident
+   padded wavefunction block (0.15 GiB) and density/mixing state (~3.2 GB
+   plateau). The native solver, which streams the eigensolve per k, holds its
+   converged peak at 3.66–3.68 GB — only ~0.2 GB above the density-phase
+   plateau. The eager−native gap (≈2.1 GB) IS the all-k subspace.
+
+**Streaming-SCF v1 recommendation: deprioritized as a new build.** What a
+streaming loop would stream first is the per-k solve state — and that already
+exists twice: the native solver streams it in C (measured: the slab peak is
+within 0.2 GB of the no-solver floor), and the eager path has `k_chunk`
+(`scf.memory`) for the same effect. The remaining ~3.2 GB slab floor is
+density/mixing history + padded wfc + the resident tables — dominated by
+Pulay/Broyden mixing history on the dense grid and the wavefunction block,
+each individually well under 1 GB. Nothing left at this scale justifies a new
+streaming subsystem; revisit only for the 100+-atom slab regime, where the
+padded `(nk, nb, npw_max)` wavefunction block itself (the term the dedup
+campaign explicitly scoped OUT) becomes the next structural rung, as the #479
+"what remains vs QE" section already concluded.
+
+One more slab datum: these 12–16-atom eager peaks are **5.6–5.9 GB where the
+pre-#479 campaigns measured 7.5–10.4 GB** — the dense-box chunking (#479) plus
+the incremental-RR native default (#477) already moved the slab ceiling, which
+is exactly why the streaming build lost its urgency.
