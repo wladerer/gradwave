@@ -90,6 +90,32 @@ Chunking does not cost wall time (it removes allocator/paging pressure), and the
 solve-phase floor (~8.2 GB) is set by the resident projector tables + the eager
 Davidson subspace, not the dense box.
 
+### Converged headline (native solver, exact)
+
+Once the native `.so` was rebuilt (see the closing note), the `davidson-native`
+solver runs Si-64 and is the memory-lightest path (its C eigensolve streams per
+k). The decisive exactness + memory result — auto dense-box chunking ON (branch
+default) vs OFF (`GRADWAVE_CPU_DENSE_AUTO=off`, the pre-fix behaviour), **same
+solver, full convergence**:
+
+| Si-64 / 30 Ry, native, converged | iters | peak RSS | E (eV) |
+|---|---|---|---|
+| auto-chunk **OFF** (unchunked) | 23 | **10.64 GB** | −6852.55482302 |
+| auto-chunk **ON** (branch) | 23 | **6.39 GB** | −6852.55482302 |
+
+Identical iteration count, energy identical to all 8 printed digits — the
+density band-sum's ~ulp reorder does not move the converged fixed point. Peak
+RSS cut 40% with no change to the result. (Eager `davidson` at 4 iters: 11.4 GB
+unchunked → 8.3 GB chunked, same trend; peak recurs every iteration so the
+4-iter peak is the run peak.)
+
+### Al-32, the many-k stressor (correctness)
+
+A 32-atom fcc Al supercell (`nk=10` IBZ, `nb=212`, 63³ grid, metal) has an
+unchunked dense box of **33.9 GB** — an unconditional OOM on any workstation.
+With auto chunking it completes at 10.7 GB peak. This is the slab-relevant
+regime (many bands × large grid) where the win matters most.
+
 ## The fix
 
 1. **Auto CPU dense-box budget** (`scf.loop._auto_cpu_dense_budget` →
@@ -115,14 +141,21 @@ recomputes. Closing it further means shrinking the resident projector footprint
 (share one copy, drop the cached conjugate under memory pressure) and the padded
 subspace storage — a deeper change than this bit-exact chunking pass.
 
-## Note: the native Davidson segfaults at Si-64
+## Note: a STALE native `.so` (not a code bug) — rebuild after #469/#477
 
-`GRADWAVE_EIGENSOLVER=davidson-native` (the `davidson_native.c` kernel, #469 /
-#477) **segfaults (SIGSEGV) within seconds of the first solve** on Si-64 at both
-15 and 30 Ry, in *both* RR modes (`classic` and `incremental`), reproducibly and
-outside any profiling harness (`n_k=4, nb=128, m∈{8480,23984}, nproj=512`). This
-is a pre-existing bug independent of this campaign; it means the native solver —
-which the memory campaign expected to be the default at this size — cannot
-currently run Si-64, and all numbers here are the eager `davidson` default. The
-memory fixes are solver-agnostic (they live in the shared eager H-apply /
-density path). The native crash is filed separately.
+While profiling, `GRADWAVE_EIGENSOLVER=davidson-native` **segfaulted (SIGSEGV)**
+on Si-64 at both cutoffs in both RR modes, AND two `tests/unit/test_native_solver.py`
+tests failed the fast tier identically on `main` and this branch. Root cause: the
+cached `~/.cache/gradwave/libdavnative.so` on the box was built **2026-09-09**,
+before #469/#477 changed `davidson_native.c`'s signature (#477 added the
+`rr_mode` argument). The Python adapter called the stale library with a
+mismatched ABI → memory corruption → segfault. **This is a stale build artifact,
+not a code bug.**
+
+Rebuilding it (`scripts/build_native_solver.sh`) fixed both the segfault and the
+fast-tier failures, and the native solver then runs Si-64 cleanly and is the
+memory-lightest path (the converged headline above). Operational takeaway: the
+native `.so` must be rebuilt whenever `davidson_native.c` changes — a machine
+with a stale `.so` shows a red fast tier and a segfaulting native solver. A
+future hardening could stamp the `.c` hash into the build and have the adapter
+refuse a mismatched library instead of segfaulting.
