@@ -275,6 +275,7 @@ def test_env_still_overrides_passed_options(monkeypatch):
     assert _subspace_storage_mode("complex64") == "complex64"
     monkeypatch.setenv("GRADWAVE_SUBSPACE_STORAGE", "complex128")
     assert _subspace_storage_mode("complex64") == "complex128"
+    monkeypatch.delenv("GRADWAVE_SUBSPACE_STORAGE")
     with pytest.raises(ValueError, match="SUBSPACE_STORAGE"):
         _subspace_storage_mode("float32")
 

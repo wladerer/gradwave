@@ -187,7 +187,9 @@ def test_precond_reaches_the_scf_call(tmp_path, monkeypatch, pseudo, target_mod,
 
     monkeypatch.setattr(mod, fname, fake_loop)
     api.run_scf(inp, verbose=False)
-    assert captured["precond"] == "local_tf"
+    # the api now configures the loop through the SCFOptions object; the knob
+    # must land on its mixer group (the loop unpacks it to the same precond=)
+    assert captured["opts"].mixer.precond == "local_tf"
 
 
 def test_precond_omitted_defaults_to_kerker_at_the_scf_call(tmp_path, monkeypatch):
@@ -209,7 +211,7 @@ def test_precond_omitted_defaults_to_kerker_at_the_scf_call(tmp_path, monkeypatc
 
     monkeypatch.setattr(loop, "scf", fake_scf)
     api.run_scf(inp, verbose=False)
-    assert captured["precond"] == "kerker"
+    assert captured["opts"].mixer.precond == "kerker"
 
 
 # --------------------------------------------------------------------------- #
