@@ -55,17 +55,43 @@ def _gpu_dense_budget_bytes() -> float:
     return budget
 
 
+# Process-local CPU dense-box band-chunk budget set by the SCF's auto memory
+# estimator (scf.loop._auto_cpu_dense_budget). It is a fallback BELOW the
+# explicit GRADWAVE_CPU_DENSE_BUDGET env var: an operator forcing a budget by
+# hand still wins, and clearing the override (set None) restores the historical
+# unchunked CPU path. The estimator only sets it for cells whose unchunked dense
+# box would be a large fraction of RAM, so small/medium cells keep the override
+# None and run byte-for-byte as before (see set_cpu_dense_budget_override).
+_CPU_DENSE_BUDGET_OVERRIDE: float | None = None
+
+
+def set_cpu_dense_budget_override(budget: float | None) -> None:
+    """Set (or clear, with ``None``) the process-local CPU dense-box budget the
+    SCF auto estimator computes for a large cell. Consulted by
+    ``_cpu_dense_budget_bytes`` only when ``GRADWAVE_CPU_DENSE_BUDGET`` is unset,
+    so an explicit env var always wins. The SCF sets this in a try/finally so a
+    chain of runs (relax/EOS) never leaks one cell's budget into the next."""
+    global _CPU_DENSE_BUDGET_OVERRIDE
+    if budget is not None and budget <= 0:
+        raise ValueError(f"CPU dense budget override must be > 0, got {budget!r}")
+    _CPU_DENSE_BUDGET_OVERRIDE = budget
+
+
 def _cpu_dense_budget_bytes() -> float | None:
-    """Optional CPU dense-box band-chunk budget in bytes: ``GRADWAVE_CPU_DENSE_BUDGET``
-    when set (must be > 0), else ``None`` meaning *no chunking* (the historical CPU
-    behaviour — one batched FFT over all bands). Set it to fit a large slab's dense
-    FFT box on a memory-tight host (e.g. ~5e8 bounds the box near 0.5 GB so a
-    ~200-atom slab SCF fits a 16 GB laptop). BIT-EXACT — identical arithmetic, only
-    the band tiling changes — so it never affects results, and unset (the default)
-    leaves every cell byte-for-byte as today."""
+    """CPU dense-box band-chunk budget in bytes, or ``None`` for *no chunking*
+    (the historical CPU behaviour — one batched FFT over all bands).
+
+    Resolution order: the explicit ``GRADWAVE_CPU_DENSE_BUDGET`` env var (must be
+    > 0) wins; else the process-local override the SCF auto estimator set for a
+    large cell (``set_cpu_dense_budget_override``); else ``None``. Band-chunking
+    bounds a large slab's dense FFT box (e.g. ~5e8 keeps it near 0.5 GB so a
+    ~200-atom slab SCF fits a 16 GB laptop). Chunking a band loop that carries NO
+    cross-band reduction (the H-apply local term) is bit-identical; the density
+    build's per-chunk partial sum reorders the band reduction at the ~1e-16 ulp
+    level (documented in ``density_b``)."""
     raw = os.environ.get("GRADWAVE_CPU_DENSE_BUDGET")
     if raw is None:
-        return None
+        return _CPU_DENSE_BUDGET_OVERRIDE
     budget = float(raw)
     if budget <= 0:
         raise ValueError(
@@ -279,7 +305,23 @@ def projectors_b(bk: BatchedK, positions: torch.Tensor) -> torch.Tensor:
         return bk.proj_phase_free
     phase_arg = torch.einsum("kgi,ai->kga", bk.kpg, positions)  # (nk, npw, na)
     phases = torch.exp(torch.complex(torch.zeros_like(phase_arg), -phase_arg))
-    return bk.proj_phase_free * phases[:, :, bk.proj_atom_index].permute(0, 2, 1)
+    idx = bk.proj_atom_index
+    if positions.requires_grad or torch.is_grad_enabled():
+        # Differentiable path (forces rebuild this with grad): the batched gather
+        # keeps a single clean autograd node. The SCF itself calls under
+        # no_grad, so this branch runs only where the graph is needed.
+        return bk.proj_phase_free * phases[:, :, idx].permute(0, 2, 1)
+    # Memory-light no-grad path: materialize per k rather than gathering all k at
+    # once. The all-k gather `phases[:, :, idx].permute(0,2,1)` builds a transient
+    # (nk, nproj, npw_max) complex block on TOP of the (equally large)
+    # proj_phase_free and the returned table — three copies of the projector at
+    # once (measured 0.73 GiB each at Si-64/30 Ry). The per-k loop holds one
+    # k-slice transient instead, byte-identical to the batched gather (same
+    # indexing, same multiply, per-k independent — no cross-k reduction).
+    out = torch.empty_like(bk.proj_phase_free)
+    for k in range(bk.proj_phase_free.shape[0]):
+        out[k] = bk.proj_phase_free[k] * phases[k][:, idx].permute(1, 0)
+    return out
 
 
 class BatchedHamiltonian:

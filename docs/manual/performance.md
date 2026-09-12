@@ -52,6 +52,45 @@ overridable three ways:
 Otherwise the auto-default stands. Reach for a higher count only if a benchmark
 on your own hardware shows the crossover sits above 8 for your systems.
 
+### Peak memory on a large cell (`scf.memory`, auto dense-box chunking)
+
+The binding transient of a large-cell SCF is not the Davidson subspace — it is
+the **dense-grid FFT box** the batched H-apply local term and the density build
+materialize over all bands at once. During Davidson the apply runs on up to
+`max_dim_factor·nb` subspace vectors, so the unchunked box is
+`n_k · max_dim_factor·nb · ∏nᵢ` complex128. On Si-64 (2×2×2 diamond, `n_k=4`
+IBZ, `nb=128`) at 30 Ry (72³ grid) that box is ~11 GiB and it is what pushes
+peak RSS to 11.4 GB — an out-of-memory on a 12 GB box, and 39.9 M major page
+faults (2554 s, paging-bound) on a box that swaps rather than kills.
+
+gradwave now **band-chunks these transforms automatically** on CPU. When the
+unchunked box would exceed roughly half of available RAM (read from
+`/proc/meminfo`), the SCF caps each dense temporary at a small budget and
+processes the bands in chunks — no all-band box is ever built. The chunking is
+bit-identical for the H-apply (the band loop carries no cross-band reduction)
+and reorders the density band-sum only at the ~1e-16 ulp level. Small and medium
+cells stay byte-for-byte unchunked (one batched FFT), so nothing that already
+fit changes. Measured on Si-64 / 30 Ry (asus, 12 GB free): peak RSS **11.4 → 8.2
+GB with no wall-time penalty**, zero paging.
+
+Levers (all on the `scf.memory` block; every default is safe):
+
+- `dense_budget_gb: <G>` — force the per-temporary CPU dense-box cap in GB
+  (bridged to `GRADWAVE_CPU_DENSE_BUDGET` in bytes, which still wins over the
+  auto estimator). `GRADWAVE_CPU_DENSE_AUTO=off` disables the auto path
+  entirely, restoring the historical unchunked CPU behaviour.
+- `max_dim_factor: 2` — halve the Davidson grown-subspace ceiling (from the
+  default 4). Halves the V/HV footprint AND the worst-case apply box;
+  exact in the converged eigenpairs (a few more restarts). Si-64 / 30 Ry: a
+  further 8.9 → 8.3 GB on top of the dense chunking.
+- `k_chunk: <c>` — solve the bands in chunks of `c` k-points, capping the
+  resident subspace at `c·m·npw`. The lever for a **many-k** slab; on a few-k
+  cell like Si-64 (`n_k=4`) it barely moves peak (the dense box, not the
+  per-k subspace, is the hog) and the dense-box chunking is what matters.
+
+The CUDA path keeps its own always-on dense-box budget
+(`GRADWAVE_GPU_DENSE_BUDGET`, default 4e8) for the same reason.
+
 ### k-parallel eigensolve (`scf.memory.k_parallel`)
 
 The reason more intra-op threads stop helping is not that the cores have

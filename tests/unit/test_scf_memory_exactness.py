@@ -188,6 +188,51 @@ def test_max_dim_factor_matches_default_through_api(tmp_path, monkeypatch, multi
 
 
 # ---------------------------------------------------------------------------
+# 2b. dense_budget_gb — band-chunk the dense-grid FFT boxes, same fixed point.
+# ---------------------------------------------------------------------------
+
+
+def test_dense_budget_matches_default_through_api(tmp_path, monkeypatch, multik_reference):
+    """An explicit scf.memory.dense_budget_gb band-chunks the H-apply / density
+    dense-grid FFT boxes. Chunking is bit-identical for the apply (no cross-band
+    reduction) and reorders the density band-sum at the ~ulp level, so the
+    converged SCF reaches the SAME fixed point (~1e-8). The spy on
+    core.batch._dense_band_chunk proves the budget was LIVE and actually chunked
+    the bands during the real solve (returned a small chunk, not the unchunked
+    sentinel) — a silently-dropped budget would run unchunked and match
+    trivially, which this catches."""
+    import gradwave.core.batch as batch
+
+    real = batch._dense_band_chunk
+    seen: dict = {"chunks": []}
+
+    def spy(n_grid, nk, device, elem_bytes):
+        out = real(n_grid, nk, device, elem_bytes)
+        seen["chunks"].append(out)
+        return out
+
+    monkeypatch.setattr(batch, "_dense_band_chunk", spy)
+    # a deliberately tiny budget forces chunk == 1 on this small cell (the value
+    # is bridged GB→bytes → GRADWAVE_CPU_DENSE_BUDGET, which forces chunking
+    # regardless of the auto estimator's size trigger).
+    res = _run(_write(tmp_path, mem="dense_budget_gb: 1.0e-6", **_MULTIK))
+
+    assert res.converged
+    # the budget was live and genuinely chunked (a real chunk below the unchunked
+    # sentinel appeared during the solve/density build)
+    assert seen["chunks"], "the dense band-chunk helper was never called"
+    assert min(seen["chunks"]) < 1_000_000, (
+        f"dense_budget_gb did not chunk the bands: min chunk {min(seen['chunks'])}")
+
+    e_ref = float(multik_reference.energies.free_energy)
+    e_c = float(res.energies.free_energy)
+    assert abs(e_c - e_ref) < 1e-8, (
+        f"dense_budget_gb shifted the converged energy: dE = {e_c - e_ref:.3e} eV")
+    drho = float((res.rho - multik_reference.rho).abs().max())
+    assert drho < 1e-8, f"dense_budget_gb density drift {drho:.3e}"
+
+
+# ---------------------------------------------------------------------------
 # 3. subspace_storage complex64 — a PRECISION tradeoff (NOT bit-exact).
 # ---------------------------------------------------------------------------
 

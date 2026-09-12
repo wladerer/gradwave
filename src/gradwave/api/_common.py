@@ -132,6 +132,10 @@ def _davidson_memory_env(inp: Input) -> Iterator[None]:
         overrides["GRADWAVE_SUBSPACE_BUDGET_GB"] = str(float(mem.subspace_budget_gb))
     if mem.subspace_storage != "complex128":
         overrides["GRADWAVE_SUBSPACE_STORAGE"] = mem.subspace_storage
+    if mem.dense_budget_gb is not None:
+        # GB → bytes: core.batch reads GRADWAVE_CPU_DENSE_BUDGET in bytes and it
+        # takes precedence over the SCF's automatic estimator.
+        overrides["GRADWAVE_CPU_DENSE_BUDGET"] = str(float(mem.dense_budget_gb) * 1e9)
     if not overrides:
         yield
         return

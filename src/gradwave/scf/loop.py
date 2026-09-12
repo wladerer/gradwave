@@ -1167,6 +1167,84 @@ def _resolve_k_chunk(k_chunk: int | None, nk: int) -> int | None:
     return int(k_chunk)
 
 
+def _available_ram_bytes() -> int | None:
+    """MemAvailable [bytes] from /proc/meminfo, or None when it can't be read
+    (non-Linux, sandboxed /proc). None makes the auto memory estimator fail open
+    to the historical unchunked path."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        return None
+    return None
+
+
+# The auto CPU dense-box estimator engages only when the unchunked dense box
+# would exceed this fraction of currently-available RAM (below it, small/medium
+# cells keep the override None and run byte-for-byte unchunked — one batched
+# FFT). When it engages it caps each dense temporary at _AUTO_DENSE_TARGET_FRAC
+# of available RAM, clamped to [_AUTO_DENSE_MIN, _AUTO_DENSE_MAX] bytes. The
+# trigger scaling on *available* RAM means the same cell chunks on a tight box
+# and stays unchunked on a roomy one; the target was measured on Si-64 / 30 Ry
+# (asus, 12 GB free): ~3e8 lands the peak near 8 GB with no wall penalty vs the
+# 11.4 GB unchunked OOM.
+_AUTO_DENSE_TRIGGER_FRAC = 0.50
+_AUTO_DENSE_TARGET_FRAC = 0.03
+_AUTO_DENSE_MIN = 1.5e8
+_AUTO_DENSE_MAX = 6.0e8
+
+
+def _auto_cpu_dense_budget(
+    nk: int, nb: int, ngrid: int, max_dim_factor: int, device: torch.device
+) -> float | None:
+    """A byte budget for the CPU dense-box band-chunk (``core.batch`` reads it via
+    ``set_cpu_dense_budget_override``), or None to leave the run unchunked.
+
+    The binding SCF transient on a large cell is the dense FFT box the batched
+    H-apply / density build materialize over ALL bands at once: during Davidson
+    the apply runs on up to ``max_dim_factor·nb`` subspace vectors, so the
+    unchunked box is ``nk · max_dim_factor·nb · ngrid · 16 B`` (measured ~11 GiB
+    at Si-64 / 30 Ry, the OOM). Band-chunking bounds it (bit-identical for the
+    apply; ~1e-16 ulp reorder for the density reduction, see ``density_b``).
+
+    Estimate cheaply and fail OPEN:
+
+    * CPU only (the GPU path has its own always-on budget), and only when neither
+      ``GRADWAVE_CPU_DENSE_BUDGET`` nor ``GRADWAVE_CPU_DENSE_AUTO=off`` is set.
+    * If available RAM can't be read, return None (unchunked).
+    * If the unchunked box is below ``_AUTO_DENSE_TRIGGER_FRAC`` of available RAM,
+      return None — small/medium cells stay byte-for-byte unchunked (one FFT),
+      so the fast tests and fits-in-RAM guards are untouched.
+    * Otherwise cap each temporary at ``_AUTO_DENSE_TARGET_FRAC`` of available
+      RAM (never below one band's worth), logging the decision.
+    """
+    if device.type != "cpu":
+        return None
+    if os.environ.get("GRADWAVE_CPU_DENSE_BUDGET") is not None:
+        return None  # explicit budget already in force (env wins)
+    if os.environ.get("GRADWAVE_CPU_DENSE_AUTO", "on").strip().lower() == "off":
+        return None
+    avail = _available_ram_bytes()
+    if avail is None:
+        return None
+    unchunked_box = nk * max(max_dim_factor, 1) * nb * ngrid * 16
+    if unchunked_box <= _AUTO_DENSE_TRIGGER_FRAC * avail:
+        return None
+    one_band = float(nk * ngrid * 16)
+    budget = min(_AUTO_DENSE_MAX, max(_AUTO_DENSE_TARGET_FRAC * avail, _AUTO_DENSE_MIN))
+    budget = max(budget, one_band)  # always fit at least one band
+    logger.info(
+        "auto CPU dense-box budget: %.2f GB (unchunked box ~%.2f GB > %.0f%% of "
+        "%.2f GB available); H-apply/density band-chunked, bit-identical apply / "
+        "~ulp density",
+        budget / 1e9, unchunked_box / 1e9, _AUTO_DENSE_TRIGGER_FRAC * 100,
+        avail / 1e9,
+    )
+    return budget
+
+
 def _resolve_k_parallel(k_parallel: int | None, nk: int, device: torch.device) -> int | None:
     """Resolve the k-parallel worker count (per-k thread-pool eigensolve).
 
@@ -1962,6 +2040,20 @@ def scf(
             "Fock operator couples orbitals across the whole BZ, which a per-chunk "
             "Davidson solve cannot see (same reason the distributed SCF excludes it)"
         )
+    # Auto CPU dense-box budget for a large cell: band-chunk the H-apply / density
+    # FFT boxes (the binding SCF transient — ~11 GiB unchunked at Si-64/30 Ry)
+    # when they would take a large fraction of RAM. Bit-identical for the apply,
+    # ~1e-16 ulp for the density reduction; small/medium cells stay unchunked
+    # (None). Overwrite semantics: every scf() recomputes it for THIS cell, so a
+    # chain of runs (relax/EOS) never inherits a stale budget. GPU keeps its own
+    # always-on budget. See _auto_cpu_dense_budget / core.batch.
+    from gradwave.core.batch import set_cpu_dense_budget_override
+
+    _ngrid = grid.shape[0] * grid.shape[1] * grid.shape[2]
+    _mdf_est = int(os.environ.get("GRADWAVE_MAX_DIM_FACTOR", "4") or "4")
+    set_cpu_dense_budget_override(
+        _auto_cpu_dense_budget(nk, nb, _ngrid, _mdf_est, system.positions.device)
+    )
     # k-parallel eigensolve: per-k Davidson tasks on a thread pool (CPU-only —
     # the resolve gates on the device). Same per-chunk independence argument as
     # streaming, so the same Fock exclusion.

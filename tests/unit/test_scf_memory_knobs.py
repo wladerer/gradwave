@@ -87,6 +87,7 @@ _ENV_KEYS = (
     "GRADWAVE_MAX_DIM_FACTOR",
     "GRADWAVE_SUBSPACE_BUDGET_GB",
     "GRADWAVE_SUBSPACE_STORAGE",
+    "GRADWAVE_CPU_DENSE_BUDGET",
 )
 
 
@@ -125,6 +126,32 @@ def test_env_bridge_budget_is_a_float_string():
 
     with _davidson_memory_env(_mk_input(subspace_budget_gb=1.5)):
         assert float(os.environ["GRADWAVE_SUBSPACE_BUDGET_GB"]) == pytest.approx(1.5)
+
+
+def test_env_bridge_dense_budget_converts_gb_to_bytes():
+    from gradwave.api._common import _davidson_memory_env
+
+    # dense_budget_gb is specified in GB; core.batch reads the env var in BYTES,
+    # so the bridge must multiply by 1e9.
+    with _davidson_memory_env(_mk_input(dense_budget_gb=0.5)):
+        assert float(os.environ["GRADWAVE_CPU_DENSE_BUDGET"]) == pytest.approx(0.5e9)
+    assert "GRADWAVE_CPU_DENSE_BUDGET" not in os.environ  # restored on exit
+
+
+def test_dense_budget_default_none_is_a_noop():
+    from gradwave.api._common import _davidson_memory_env
+    from gradwave.inputs.models import SCFParams
+
+    assert SCFParams().memory.dense_budget_gb is None
+    with _davidson_memory_env(_mk_input()):
+        assert "GRADWAVE_CPU_DENSE_BUDGET" not in os.environ
+
+
+def test_dense_budget_nonpositive_rejected(tmp_path):
+    from gradwave.inputs.models import InputError, MemoryParams
+
+    with pytest.raises(InputError, match="dense_budget_gb must be > 0"):
+        MemoryParams(dense_budget_gb=0.0)
 
 
 def test_env_bridge_default_input_is_a_noop():
