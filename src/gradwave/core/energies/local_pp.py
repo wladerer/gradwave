@@ -32,9 +32,25 @@ def local_potential_g(
     vloc_atom overrides the per-species gather with a per-atom table. The
     alchemical composition channel passes a lambda-blended table there, so
     V_loc stays differentiable in composition (scf/alchemical.py)."""
-    s = structure_factors(positions, g_cart)  # (na, n1,n2,n3)
-    tab = vloc_atom if vloc_atom is not None else vloc_tables[species_index]
-    v = torch.einsum("axyz,axyz->xyz", s, tab.to(s.dtype))
+    if positions.requires_grad or torch.is_grad_enabled():
+        # Differentiable path (forces / alchemical composition rebuild this with
+        # grad): one batched structure-factor block + a single einsum keeps a
+        # clean autograd node. The SCF's V_loc build runs under no_grad.
+        s = structure_factors(positions, g_cart)  # (na, n1,n2,n3)
+        tab = vloc_atom if vloc_atom is not None else vloc_tables[species_index]
+        v = torch.einsum("axyz,axyz->xyz", s, tab.to(s.dtype))
+        return v / volume
+    # Memory-light no-grad path: accumulate per atom to avoid the full
+    # (na, n1,n2,n3) structure-factor block (measured 0.36 GiB at Si-64/30 Ry).
+    # Same accumulation order as the einsum over `a`, so agreement is at the
+    # ~1e-16 ulp level (the sequential add vs the einsum's internal reduction).
+    v = None
+    for a in range(positions.shape[0]):
+        sa = structure_factors(positions[a : a + 1], g_cart)[0]
+        ta = vloc_atom[a] if vloc_atom is not None else vloc_tables[species_index[a]]
+        va = sa * ta.to(sa.dtype)
+        v = va if v is None else v + va
+    assert v is not None  # >=1 atom always
     return v / volume
 
 

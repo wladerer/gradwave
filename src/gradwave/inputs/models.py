@@ -91,6 +91,17 @@ class MemoryParams:
       Rayleigh–Ritz eigensolve kept in fp64. A precision lever, not exact:
       residual norms plateau near the fp32 floor (~1e-6 eV eigenvalues), so pair
       it with a looser ``scf.diago.tol``.
+    * ``dense_budget_gb`` — cap [GB] on each CPU dense-grid FFT temporary
+      (H-apply local term + density build): the batched transforms are band-
+      chunked so no all-band dense box (nk·nb·n_grid complex128) is ever
+      materialized at once. This is the binding SCF transient on a large cell
+      (~11 GiB unchunked at Si-64 / 30 Ry, the OOM). Band-chunking is bit-
+      identical for the apply and reorders the density band-sum at the ~1e-16
+      ulp level. None → the SCF's *automatic* estimator picks a budget when the
+      unchunked box would be a large fraction of RAM and leaves small/medium
+      cells unchunked (byte-for-byte); an explicit value (or the
+      ``GRADWAVE_CPU_DENSE_BUDGET`` env in bytes, which wins) forces it. CPU
+      only — the CUDA path has its own always-on dense budget.
     * ``k_parallel`` — the one WALL-TIME (not memory) knob here, co-located
       because it shares the k-chunking machinery with ``k_chunk``: run per-k
       Davidson tasks on a CPU thread pool of this many workers (torch intra-op
@@ -105,11 +116,12 @@ class MemoryParams:
       env default when that is set.
 
     Bridged to the solver by the api layer (no solver edit): ``k_chunk`` is
-    threaded as the ``scf.loop.scf(k_chunk=)`` kwarg, and the three Davidson
-    knobs are exported to the ``GRADWAVE_MAX_DIM_FACTOR`` /
-    ``GRADWAVE_SUBSPACE_BUDGET_GB`` / ``GRADWAVE_SUBSPACE_STORAGE`` environment
-    variables around the SCF call (``solvers.davidson`` reads them per solve).
-    See ``api._common._davidson_memory_env`` and ``api.scf.run_scf``.
+    threaded as the ``scf.loop.scf(k_chunk=)`` kwarg, and the Davidson knobs are
+    exported to the ``GRADWAVE_MAX_DIM_FACTOR`` / ``GRADWAVE_SUBSPACE_BUDGET_GB``
+    / ``GRADWAVE_SUBSPACE_STORAGE`` / ``GRADWAVE_CPU_DENSE_BUDGET`` environment
+    variables around the SCF call (``solvers.davidson`` / ``core.batch`` read
+    them per solve; ``dense_budget_gb`` is converted GB→bytes). See
+    ``api._common._davidson_memory_env`` and ``api.scf.run_scf``.
     """
 
     k_chunk: int | None = None
@@ -117,6 +129,7 @@ class MemoryParams:
     subspace_budget_gb: float | None = None
     subspace_storage: str = "complex128"  # complex128 | complex64
     k_parallel: int | None = None
+    dense_budget_gb: float | None = None
 
     def __post_init__(self):
         if self.k_chunk is not None and self.k_chunk < 1:
@@ -139,6 +152,10 @@ class MemoryParams:
             raise InputError(
                 "scf.memory.subspace_storage must be 'complex128' or "
                 f"'complex64', got {self.subspace_storage!r}")
+        if self.dense_budget_gb is not None and self.dense_budget_gb <= 0.0:
+            raise InputError(
+                "scf.memory.dense_budget_gb must be > 0 (or null for the "
+                f"automatic estimator), got {self.dense_budget_gb}")
 
 
 @dataclass(frozen=True)
