@@ -15,11 +15,18 @@ cd "$(dirname "$0")/.."
 src=src/gradwave/solvers/native/davidson_native.c
 out="${GRADWAVE_NATIVE_SO:-$HOME/.cache/gradwave/libdavnative.so}"
 mkdir -p "$(dirname "$out")"
-flags="-O3 -march=x86-64-v3 -funroll-loops -fopenmp -shared -fPIC"
+# Bake a short hash of the source into the .so; the adapter refuses a library
+# whose stamp does not match the checked-out source (stale-.so segfault guard,
+# see solvers/native_davidson.py). Must match the adapter's hash: sha256 of the
+# raw file bytes, first 16 hex chars.
+srchash=$(sha256sum "$src" | cut -c1-16)
+# bare token (no quotes) — the .c stringizes it; quotes would not survive the
+# nested nix-shell --run word-splitting.
+flags="-O3 -march=x86-64-v3 -funroll-loops -fopenmp -shared -fPIC -DGW_NATIVE_SRC_HASH=$srchash"
 if command -v nix-shell >/dev/null 2>&1; then
   nix-shell -p gcc fftw openblas --run \
     "gcc $flags $src -o '$out' -lfftw3 -lopenblas -lm"
 else
   gcc $flags "$src" -o "$out" -lfftw3 -lopenblas -llapacke -lm
 fi
-echo "built $out"
+echo "built $out (src hash $srchash)"

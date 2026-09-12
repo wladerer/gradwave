@@ -967,7 +967,7 @@ class ResolventSternheimer:
     def __init__(self, h, bk, c_occ: torch.Tensor,
                  eps_occ: torch.Tensor) -> None:
         cdtype = c_occ.dtype
-        t_r, _v_eff, p, _p_conj, dij = h._tables(cdtype)
+        t_r, _v_eff, p, dij = h._tables(cdtype)
         shape = h.shape
         s1s2, s2 = shape[1] * shape[2], shape[2]
         vhat = r_to_g(h.v_eff_r.to(cdtype)).reshape(-1)

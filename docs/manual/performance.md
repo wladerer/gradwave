@@ -91,6 +91,27 @@ Levers (all on the `scf.memory` block; every default is safe):
 The CUDA path keeps its own always-on dense-box budget
 (`GRADWAVE_GPU_DENSE_BUDGET`, default 4e8) for the same reason.
 
+### Resident projector tables: conj folded into BLAS, one copy fewer
+
+After the dense boxes are chunked, the next rung is *resident* state: the
+`(n_k, nproj, npw_max)` projector tables. The eager H-apply used to hold three
+full copies for the whole SCF — the phase-free generator on `System.batch`
+(needed after the loop: forces rebuild the phased projectors from it *with
+grad*), the phased table the Hamiltonian consumes, and a cached
+`p.conj().resolve_conj()` that existed only because `torch.einsum` cannot fold
+a conjugation into BLAS. The conjugate copy is gone: `becp_b` now computes
+`matmul(c, p.conj().mT)`, mirroring the native C kernel's
+`zgemm(CblasConjTrans)` — same contraction, bit-level identical (pinned in
+`tests/unit/test_dense_chunk_streaming.py`). Measured on Si-64 / 30 Ry (asus,
+8 threads): eager peak RSS **8.94 → 8.07 GB**; the native solver is unchanged
+(6.32 → 6.29 GB — it never held the copy). Energies and iteration counts are
+identical in every A/B pair. The one documented cost: on projector-heavy cells
+the eager apply pays ~4% wall for the fallback that materializes the conj
+transient per apply — eager is the fallback path at that scale (native is
+~2.3× faster there), and the two remaining copies are not redundant (autograd
+source + the table every solver apply reads). See
+`docs/design/memory-profile-si64.md` for the full A/B and the slab profile.
+
 ### k-parallel eigensolve (`scf.memory.k_parallel`)
 
 The reason more intra-op threads stop helping is not that the cores have

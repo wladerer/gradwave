@@ -385,35 +385,39 @@ class BatchedHamiltonian:
             nk, npw = bk.mask.shape
             if nk * npw * npw * 16 <= _TOEPLITZ_M_BUDGET_BYTES:
                 self._toep_eligible = True
-        # cdtype → cast (t, v_eff, p, p_conj, dij)
+        # cdtype → cast (t, v_eff, p, dij). No resident p.conj() copy: the
+        # becp contraction folds the conjugation into the BLAS call (matmul on
+        # a conj-transpose VIEW → cgemm ConjTrans), exactly as the native C
+        # kernel does with zgemm(CblasConjTrans). Materializing p.conj() cost a
+        # second full (nk, nproj, npw_max) projector table resident for the H's
+        # lifetime (~0.73 GiB at Si-64/30 Ry) for no arithmetic benefit.
         self._tab_cache: dict[
-            torch.dtype, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+            torch.dtype, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
         ] = {}
         # cdtype → cast (hub_q, hub_q_conj, hub_dij)
         self._hub_cache: dict[torch.dtype, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
     def _tables(
         self, cdtype: torch.dtype
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Cast tables to the working precision of the coefficients (cached).
 
         Feeding complex64 coefficients is not enough on its own: multiplying by
         an fp64 table promotes the result back to complex128. Precomputing
-        matching-precision copies keeps the whole apply in fp32 when asked."""
+        matching-precision copies keeps the whole apply in fp32 when asked.
+
+        Returns ``(t, v_eff, p, dij)``. There is no resident ``p.conj()`` copy:
+        ``becp_b`` folds the conjugation into the BLAS matmul (see its docstring),
+        so a materialized conjugate table is pure resident overhead."""
         cached = self._tab_cache.get(cdtype)
         if cached is None:
             from gradwave.dtypes import real_of
 
             rdtype = real_of(cdtype)
-            p = self.p.to(cdtype)
             cached = (
                 self.bk.t.to(rdtype),
                 self.v_eff_r.to(rdtype),
-                p,
-                # cached resolved conjugate: constant for the H's lifetime but
-                # consumed every apply — materializing p.conj() per Davidson
-                # round re-allocates the full projector table twice per round
-                p.conj().resolve_conj(),
+                self.p.to(cdtype),
                 self.bk.dij_full.to(cdtype),
             )
             self._tab_cache[cdtype] = cached
@@ -574,7 +578,7 @@ class BatchedHamiltonian:
         if _HAPPLY_TALLY["on"]:
             _HAPPLY_TALLY["count"] += nk * nb
         opcount.bump("hpsi", nk * nb)
-        t_r, v_eff, p, p_conj, dij = self._tables(c.dtype)
+        t_r, v_eff, p, dij = self._tables(c.dtype)
         out = t_r[:, None, :] * c
 
         if self._use_toeplitz(c, v_eff):
@@ -585,7 +589,7 @@ class BatchedHamiltonian:
             self._local_fft_into(c, out, v_eff)
 
         if p.shape[1]:
-            b = becp_b(p, c, p_conj)
+            b = becp_b(p, c)
             out = out + torch.einsum("kbp,pq,kqg->kbg", b, dij, p)
         if self.hub_q is not None and self.hub_dij is not None:
             hq, hq_conj, hd = self._hub_tables(c.dtype)
@@ -609,7 +613,7 @@ class BatchedHamiltonian:
         if _HAPPLY_TALLY["on"]:
             _HAPPLY_TALLY["count"] += int(c.shape[0])
         opcount.bump("hpsi", int(c.shape[0]))
-        t_r, v_eff, p, p_conj, dij = self._tables(c.dtype)
+        t_r, v_eff, p, dij = self._tables(c.dtype)
         out = t_r[kcol] * c
         # local term: dense-box FFT pair with per-column scatter/gather
         ncol, m = c.shape
@@ -626,8 +630,12 @@ class BatchedHamiltonian:
             vg = torch.fft.fftn(psi * v_eff, dim=(-3, -2, -1)).reshape(hi - lo, self.n)
             out[lo:hi] += vg.gather(1, self.gather_idx[kcol[lo:hi]])
         if p.shape[1]:
-            ps, ps_conj = p[kcol], p_conj[kcol]
-            b = torch.einsum("cpg,cg->cp", ps_conj, c)
+            ps = p[kcol]  # (ncol, nproj, npw_max)
+            # ⟨β|ψ⟩ per column with the conj folded into the matmul (see becp_b);
+            # c is (ncol, npw_max) so unsqueeze to a length-1 band batch.
+            b = torch.matmul(
+                c.unsqueeze(1), ps.conj().transpose(-2, -1)
+            ).squeeze(1)  # (ncol, nproj)
             out = out + torch.einsum("cp,pq,cqg->cg", b, dij, ps)
         if self.hub_q is not None and self.hub_dij is not None:
             hq, hq_conj, hd = self._hub_tables(c.dtype)
@@ -678,7 +686,17 @@ def density_b(
 
 def becp_b(p: torch.Tensor, c: torch.Tensor,
            p_conj: torch.Tensor | None = None) -> torch.Tensor:
-    """⟨p|ψ⟩ overlaps (nk, nb, nproj). Pass a cached resolved conjugate via
-    p_conj in per-round hot paths to skip re-materializing p.conj()."""
-    pc = p.conj() if p_conj is None else p_conj
-    return torch.einsum("kpg,kbg->kbp", pc, c)
+    """⟨p|ψ⟩ overlaps (nk, nb, nproj) = Σ_g conj(p) c.
+
+    Computed as a batched matmul against a conjugate-transpose VIEW of ``p``:
+    ``matmul(c, p.conj().mT)``. On CPU this folds the conjugation into the BLAS
+    call (cgemm with the ConjTrans flag) — no materialized conjugate table,
+    mirroring the native C kernel's ``zgemm(CblasConjTrans)``. The einsum form
+    this replaced could not fold the conj, so hot callers cached a resolved
+    ``p.conj()`` (a second full projector table resident for the H's lifetime,
+    ~0.73 GiB at Si-64/30 Ry); the matmul removes both the resident copy and the
+    per-round re-materialization.
+
+    ``p_conj`` is retained for call-site compatibility and IGNORED — the conj is
+    now folded, so no precomputed conjugate is needed."""
+    return torch.matmul(c, p.conj().transpose(-2, -1))

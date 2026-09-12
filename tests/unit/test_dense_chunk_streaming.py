@@ -201,3 +201,87 @@ def test_dense_band_chunk_honors_override():
     set_cpu_dense_budget_override(2e8)
     chunk = _dense_band_chunk(373248, 4, torch.device("cpu"), 16)
     assert 1 <= chunk < 1_000_000
+
+
+# ---------------------------------------------------------------------------
+# projector-table dedup: becp_b conj-fold (campaign: one resident projector
+# representation). becp_b now folds the conjugation into a BLAS matmul instead
+# of consuming a materialized/cached p.conj() table; the result must match the
+# old einsum-with-resolved-conjugate contraction to bit level, and stay
+# differentiable for the forces / alchemical grad paths.
+# ---------------------------------------------------------------------------
+
+def _becp_ref(p, c):
+    """The pre-dedup contraction: einsum against a resolved conjugate table."""
+    return torch.einsum("kpg,kbg->kbp", p.conj().resolve_conj(), c)
+
+
+def test_becp_b_matmul_matches_resolved_einsum():
+    from gradwave.core.batch import becp_b
+
+    nk, nproj, m, nb = 3, 6, 11, 5
+    p = torch.randn(nk, nproj, m, dtype=CDTYPE)
+    c = torch.randn(nk, nb, m, dtype=CDTYPE)
+    got = becp_b(p, c)
+    ref = _becp_ref(p, c)
+    # same contraction, conj folded into BLAS — bit-level (well under 1e-14)
+    assert torch.allclose(got, ref, rtol=0.0, atol=1e-14)
+
+
+def test_becp_b_ignores_passed_conj():
+    """The retained p_conj argument must not change the result (it is ignored;
+    the conj is folded regardless of what is passed)."""
+    from gradwave.core.batch import becp_b
+
+    nk, nproj, m, nb = 2, 4, 9, 3
+    p = torch.randn(nk, nproj, m, dtype=CDTYPE)
+    c = torch.randn(nk, nb, m, dtype=CDTYPE)
+    a = becp_b(p, c)
+    b = becp_b(p, c, p_conj=torch.zeros_like(p))  # bogus conj — must be ignored
+    assert torch.equal(a, b)
+
+
+def test_becp_b_complex64_matches_reference():
+    from gradwave.core.batch import becp_b
+
+    nk, nproj, m, nb = 2, 5, 8, 4
+    p = torch.randn(nk, nproj, m, dtype=torch.complex64)
+    c = torch.randn(nk, nb, m, dtype=torch.complex64)
+    got = becp_b(p, c)
+    ref = torch.einsum("kpg,kbg->kbp", p.conj().resolve_conj(), c)
+    assert torch.allclose(got, ref, rtol=0.0, atol=1e-6)
+
+
+def test_becp_b_grad_path_preserved():
+    from gradwave.core.batch import becp_b
+
+    nk, nproj, m, nb = 2, 3, 7, 4
+    p = torch.randn(nk, nproj, m, dtype=CDTYPE, requires_grad=True)
+    c = torch.randn(nk, nb, m, dtype=CDTYPE, requires_grad=True)
+    becp_b(p, c).abs().pow(2).sum().backward()
+    assert p.grad is not None and torch.isfinite(p.grad).all()
+    assert c.grad is not None and torch.isfinite(c.grad).all()
+
+
+def test_tables_no_resident_conj():
+    """_tables returns (t, v_eff, p, dij) — four entries, no resident conj."""
+    from gradwave.core.batch import BatchedHamiltonian, BatchedK
+
+    nk, nproj, m = 2, 3, 5
+    shape = (4, 4, 4)
+    n = shape[0] * shape[1] * shape[2]
+    bk = BatchedK(
+        npw=torch.full((nk,), m, dtype=torch.int64),
+        mask=torch.ones(nk, m, dtype=torch.bool),
+        flat_idx=torch.arange(m).expand(nk, m).contiguous(),
+        kpg=torch.randn(nk, m, 3, dtype=RDTYPE),
+        t=torch.rand(nk, m, dtype=RDTYPE),
+        proj_phase_free=torch.randn(nk, nproj, m, dtype=CDTYPE),
+        proj_atom_index=torch.zeros(nproj, dtype=torch.int64),
+        dij_full=torch.randn(nproj, nproj, dtype=RDTYPE),
+    )
+    p = torch.randn(nk, nproj, m, dtype=CDTYPE)
+    v_eff = torch.randn(n, dtype=RDTYPE).reshape(shape)
+    h = BatchedHamiltonian(bk, shape, v_eff, p)
+    tab = h._tables(CDTYPE)
+    assert len(tab) == 4  # (t, v_eff, p, dij) — the conj entry is gone
