@@ -1,0 +1,18 @@
+# Silicon (diamond structure) — the textbook optical-absorption benchmark.
+structure:
+  cell: [[0.0, 2.715, 2.715], [2.715, 0.0, 2.715], [2.715, 2.715, 0.0]]
+  positions: {frac: [[0.0, 0.0, 0.0], [0.25, 0.25, 0.25]]}
+  species: [Si, Si]
+
+pseudopotentials:
+  dir: /home/wladerer/github/gradwave/tests/fixtures/qe/pseudos
+  map: {Si: Si_ONCV_PBE-1.2.upf}
+
+ecut: 400.0
+xc: pbe
+kpoints: {mesh: [8, 8, 8]}
+smearing: {type: none}
+
+scf: {etol: 1.0e-7, rhotol: 1.0e-6}
+task: scf
+output: {dir: /home/wladerer/github/gradwave/experiments/symbolic/out_si_abs}

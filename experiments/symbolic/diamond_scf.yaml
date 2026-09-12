@@ -1,0 +1,18 @@
+# Diamond (C, Fd-3m — NONSYMMORPHIC: (1/4,1/4,1/4) glide) for the block-diag demo.
+structure:
+  cell: [[0.0, 1.7835, 1.7835], [1.7835, 0.0, 1.7835], [1.7835, 1.7835, 0.0]]
+  positions: {frac: [[0.0, 0.0, 0.0], [0.25, 0.25, 0.25]]}
+  species: [C, C]
+
+pseudopotentials:
+  dir: /home/wladerer/github/gradwave/tests/fixtures/qe/pseudos
+  map: {C: C_ONCV_PBE-1.2.upf}
+
+ecut: 400.0          # eV — modest for a quick demo; symmetry is exact at any ecut
+xc: pbe
+kpoints: {mesh: [4, 4, 4]}
+smearing: {type: none}   # insulator
+
+scf: {etol: 1.0e-7, rhotol: 1.0e-6}
+task: scf
+output: {dir: /home/wladerer/github/gradwave/experiments/symbolic/out_diamond_scf}
