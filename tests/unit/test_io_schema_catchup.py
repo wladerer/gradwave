@@ -187,3 +187,60 @@ def test_format_output_still_labels_d3_block():
     text = format_output(_summary_with_dispersion("d3-bj"))
     assert "D3(BJ) dispersion" in text
     assert "D4(BJ)" not in text
+
+
+# ------------------------------------------- schema_version on every summary
+
+def test_schema_version_on_all_base_summaries(tmp_path):
+    """Every non-SCF summary scaffold carries the top-level schema_version as
+    its leading key (the single injection point is api.summary._summary_head)."""
+    from gradwave.api.summary import (
+        SCHEMA_VERSION,
+        _base_summary,
+        _flapw_base_summary,
+        _magnons_base_summary,
+        _thermochem_base_summary,
+    )
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _base()))
+    for builder in (_base_summary, _thermochem_base_summary,
+                    _magnons_base_summary, _flapw_base_summary):
+        summary = builder(inp, "sometask")
+        assert summary["schema_version"] == SCHEMA_VERSION == 1
+        # dicts serialize in insertion order, so this is the first JSON key
+        assert next(iter(summary)) == "schema_version"
+        assert summary["task"] == "sometask"
+
+
+def test_schema_version_on_build_summary(tmp_path):
+    """The SCF-derived scaffold (api.build_summary) carries schema_version too,
+    exercised with a minimal duck-typed result."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from gradwave.api import build_summary
+    from gradwave.api.summary import SCHEMA_VERSION
+    from gradwave.core.energies.total import EnergyBreakdown
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _base()))
+    z = torch.zeros((), dtype=torch.float64)
+    res = SimpleNamespace(
+        system=SimpleNamespace(
+            kweights=torch.tensor([1.0]), n_electrons=8.0, nbands=4,
+            grid=SimpleNamespace(shape=(9, 9, 9)),
+            spheres=[SimpleNamespace(npw=59)],
+            positions=torch.zeros(2, 3)),
+        energies=EnergyBreakdown(kinetic=z, hartree=z, xc=z, local=z,
+                                 nonlocal_=z, ewald=z, smearing=z),
+        nspin=1,
+        eigenvalues=torch.zeros(1, 4),
+        occupations=torch.full((1, 4), 2.0),
+        history=[], converged=True, n_iter=3, fermi=None,
+        fermi_spin=None, mag_vec=None, formalism="nc",
+        recorder=None, kerker_used=None)
+    summary = build_summary(res, inp, "scf", runtime_s=0.1)
+    assert summary["schema_version"] == SCHEMA_VERSION == 1
+    assert next(iter(summary)) == "schema_version"

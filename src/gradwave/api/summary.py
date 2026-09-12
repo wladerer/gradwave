@@ -23,6 +23,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Version of the top-level summary-JSON schema (docs/manual/output-schema.md).
+# Bump when a top-level key is renamed/removed or its meaning changes; adding
+# a new optional block is NOT a schema break and does not bump it.
+SCHEMA_VERSION = 1
+
+
+def _summary_head(task: str) -> dict[str, Any]:
+    """The leading keys shared by EVERY task summary — schema_version, the
+    writer-identity ``code`` block, and ``task``. The single injection point
+    for ``schema_version``: all five scaffolds (``build_summary`` and the four
+    ``*_base_summary`` builders) spread this dict first, so the serialized key
+    order stays schema_version/code/task/structure/parameters/…"""
+    from gradwave._version import __version__
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "code": {"name": "gradwave", "version": __version__,
+                 "created": datetime.datetime.now().isoformat(
+                     timespec="seconds")},
+        "task": task,
+    }
+
 
 def _xc_label(inp: Input) -> str:
     """The functional name for the report: the hybrid label (pbe0/hse) when a
@@ -34,7 +56,6 @@ def build_summary(res: SCFLike, inp: Input, task: str,
                   runtime_s: float | None = None,
                   extra: dict[str, Any] | None = None) -> dict[str, Any]:
     """The unified machine-readable summary for a task run."""
-    from gradwave._version import __version__
     from gradwave.io.checkpoint import energies_eV_dict
 
     system = _get(res, "system")
@@ -156,9 +177,7 @@ def build_summary(res: SCFLike, inp: Input, task: str,
     }
 
     summary = {
-        "code": {"name": "gradwave", "version": __version__,
-                 "created": datetime.datetime.now().isoformat(timespec="seconds")},
-        "task": task,
+        **_summary_head(task),
         "structure": _structure_block(inp),
         "parameters": {
             "formalism": "noncollinear" if is_ncmag else (
@@ -781,14 +800,9 @@ def _base_summary(inp: Input, task: str) -> dict[str, Any]:
     SCFResult (relax, magnetism, eos, elastic, phonons). SCF-derived tasks
     use build_summary() instead. Callers append their per-task result block
     and a trailing "runtime_s" so the serialized key order stays
-    code/task/structure/parameters/<block>/runtime_s."""
-    from gradwave._version import __version__
-
+    schema_version/code/task/structure/parameters/<block>/runtime_s."""
     return {
-        "code": {"name": "gradwave", "version": __version__,
-                 "created": datetime.datetime.now().isoformat(
-                     timespec="seconds")},
-        "task": task,
+        **_summary_head(task),
         "structure": _structure_block(inp),
         "parameters": _parameters_block(inp),
     }
@@ -800,13 +814,10 @@ def _thermochem_base_summary(inp: Input, task: str) -> dict[str, Any]:
     and carries none); the parameters block records only the thermodynamic knobs.
     The driver appends its result block under summary[task] and a trailing
     runtime_s."""
-    from gradwave._version import __version__
 
     tc = inp.thermochem
     return {
-        "code": {"name": "gradwave", "version": __version__,
-                 "created": datetime.datetime.now().isoformat(timespec="seconds")},
-        "task": task,
+        **_summary_head(task),
         "structure": _structure_block(inp),
         "parameters": {
             "mode": tc.mode,
@@ -821,13 +832,10 @@ def _magnons_base_summary(inp: Input, task: str) -> dict[str, Any]:
     it resolves no pseudopotentials (magnons runs no SCF and carries none); the
     parameters block records the spin-model dimensions and q-path. The driver
     appends its result block under summary[task] and a trailing runtime_s."""
-    from gradwave._version import __version__
 
     mp = inp.magnons
     return {
-        "code": {"name": "gradwave", "version": __version__,
-                 "created": datetime.datetime.now().isoformat(timespec="seconds")},
-        "task": task,
+        **_summary_head(task),
         "structure": _structure_block(inp),
         "parameters": {
             "formalism": "linear spin-wave theory",
@@ -844,12 +852,9 @@ def _flapw_base_summary(inp: Input, task: str) -> dict[str, Any]:
     _base_summary it does NOT resolve pseudopotentials (FLAPW/EFG is all-electron
     and carries none), so it never touches _species_upfs. The driver appends its
     result block under summary[task] and a trailing runtime_s."""
-    from gradwave._version import __version__
 
     return {
-        "code": {"name": "gradwave", "version": __version__,
-                 "created": datetime.datetime.now().isoformat(timespec="seconds")},
-        "task": task,
+        **_summary_head(task),
         "structure": _structure_block(inp),
         "parameters": _flapw_parameters_block(inp),
     }

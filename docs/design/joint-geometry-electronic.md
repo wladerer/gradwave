@@ -35,8 +35,11 @@ printed under `verbose`). The joint relax reports `method`, `h_applies`,
 scalar `fmax`. The final energy/forces/stress are recomputed with one calculator
 SCF at the relaxed geometry, so the reported numbers are ASE-consistent (not the
 joint functional's fixed-basis value) and `last_result` is populated for
-downstream error estimates. On non-convergence within `40·max_steps` closures
-the engine returns to nested rather than shipping a half-relaxed geometry.
+downstream error estimates. On non-convergence within the closure budget the
+engine returns to nested rather than shipping a half-relaxed geometry; the api
+driver sets that budget to `40·relax.max_steps` closures (`api/relax.py` passes
+`max_closures=40 * inp.relax.max_steps`), overriding `joint_relax`'s own flat
+`max_closures=800` library default.
 
 ## Problem
 
