@@ -51,9 +51,14 @@ extern void openblas_set_num_threads(int);
  * a stale ABI and segfaulting (the #479 footgun). "unknown" marks a build that
  * predates the stamp (also treated as stale). */
 #ifndef GW_NATIVE_SRC_HASH
-#define GW_NATIVE_SRC_HASH "unknown"
+#define GW_NATIVE_SRC_HASH unknown
 #endif
-const char *davidson_native_build_hash(void) { return GW_NATIVE_SRC_HASH; }
+/* stringize the bare -D token so the build script passes -DGW_NATIVE_SRC_HASH=<hex>
+ * without shell-quoting a string literal (quotes do not survive the nested
+ * nix-shell --run). */
+#define GW_STR2(x) #x
+#define GW_STR(x) GW_STR2(x)
+const char *davidson_native_build_hash(void) { return GW_STR(GW_NATIVE_SRC_HASH); }
 
 /* ------------------------------------------------------------------ */
 /* cached single-box plans (per box shape, kept across calls)          */
