@@ -294,14 +294,23 @@ Feeding gradwave's own exchange constants through the LSWT stiffness anchors the
 whole pipeline against experiment. `examples/fe_magnon_stiffness.py` extracts the
 isotropic exchange of ferromagnetic bcc Fe on a supercell of the primitive cell
 (so the first neighbour shells are distinct atoms rather than the folded
-inter-sublattice sum of `examples/fe_exchange.py`), bins it into per-shell $J_n$,
-and reads the stiffness cumulatively. In the standard frozen-magnon convention
-$\hbar\omega(q) = (4/M)[J(0) - J(q)]$ (with $M$ the moment in $\mu_B$), the
-first-shell exchange alone already lands at the right order and the shell sum
-converges toward the measured $D \approx 280\text{–}310$ meV·Å²; PBE/LSDA
-exchange overestimates the couplings somewhat (the same reason $J_1$ sits just
-above the LKAG range above), so the gate is the order and the shell-convergence
-shape, not exact agreement.
+inter-sublattice sum of `examples/fe_exchange.py`, with the residual image-fold
+multiplicity divided out), bins it into per-shell $J_n$, and reads the stiffness
+cumulatively from the small-$q$ LSWT fit. Measured (asus CPU, 8-atom primitive
+supercell, LSDA, 40 Ry, k = (2,2,2), $|M| = 2.222\,\mu_B$):
+
+| shells | shell $J_n$ [meV] | cumulative $D$ [meV·Å²] |
+|---|---|---|
+| $J_1$ | $+22.6$ | 168 |
+| $J_1 + J_2$ | $J_2 = +14.0$ | **271** |
+
+against the measured $D \approx 280\text{–}310$ meV·Å² — the right order at one
+shell and within 3–13% of the experimental window at two ($J_3$ in bcc Fe is
+small), with $J_1$ consistent with the validated 2-atom extraction (22.4 meV,
+LKAG 15–19 meV). The dispersion peaks near 325 meV at H, where experiment sees
+the magnon branch enter the Stoner continuum:
+
+![bcc Fe magnon dispersion](img/fe_magnon_bands.png)
 
 ## Magnetocrystalline anisotropy
 
