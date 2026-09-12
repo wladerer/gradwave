@@ -155,9 +155,10 @@ def test_k_chunk_is_bit_exact_through_api(tmp_path, monkeypatch, multik_referenc
 def test_max_dim_factor_matches_default_through_api(tmp_path, monkeypatch, multik_reference):
     """Halving the Davidson subspace ceiling (4 → 2) is a different restart path
     to the SAME fixed point, so the converged SCF energy is subspace-ceiling
-    independent (~1e-8). The spy proves the api env bridge (GRADWAVE_MAX_DIM_FACTOR)
-    was LIVE during the real solve and forced factor 2 — a silently-ignored knob
-    would run factor 4 and match trivially, which this catches."""
+    independent (~1e-8). The spy proves the knob arrived as an explicit
+    `force=` argument during the real solve (no env bridge) and forced factor
+    2 — a silently-ignored knob would run factor 4 and match trivially, which
+    this catches."""
     import importlib
 
     # the real submodule, not the `davidson` FUNCTION that solvers/__init__
@@ -166,11 +167,13 @@ def test_max_dim_factor_matches_default_through_api(tmp_path, monkeypatch, multi
     real = davmod._resolve_max_dim_factor
     seen: dict = {}
 
-    def spy(nk, nb, m, elem_bytes, requested):
+    def spy(nk, nb, m, elem_bytes, requested, force=None, budget_gb=None):
         import os
 
-        out = real(nk, nb, m, elem_bytes, requested)
+        out = real(nk, nb, m, elem_bytes, requested,
+                   force=force, budget_gb=budget_gb)
         seen["env"] = os.environ.get("GRADWAVE_MAX_DIM_FACTOR")
+        seen["force"] = force
         seen["resolved"] = out
         return out
 
@@ -178,8 +181,9 @@ def test_max_dim_factor_matches_default_through_api(tmp_path, monkeypatch, multi
     res = _run(_write(tmp_path, mem="max_dim_factor: 2", **_MULTIK))
 
     assert res.converged
-    # the env bridge was live during the solve and the factor was forced to 2
-    assert seen["env"] == "2"
+    # the knob arrived as an explicit argument (env untouched — the bridge is gone)
+    assert seen["env"] is None
+    assert seen["force"] == 2
     assert seen["resolved"] == 2
 
     e_ref = float(multik_reference.energies.free_energy)
@@ -213,8 +217,8 @@ def test_dense_budget_matches_default_through_api(tmp_path, monkeypatch, multik_
 
     monkeypatch.setattr(batch, "_dense_band_chunk", spy)
     # a deliberately tiny budget forces chunk == 1 on this small cell (the value
-    # is bridged GB→bytes → GRADWAVE_CPU_DENSE_BUDGET, which forces chunking
-    # regardless of the auto estimator's size trigger).
+    # flows GB→bytes as an argument via set_cpu_dense_budget_override, which
+    # forces chunking regardless of the auto estimator's size trigger).
     res = _run(_write(tmp_path, mem="dense_budget_gb: 1.0e-6", **_MULTIK))
 
     assert res.converged
