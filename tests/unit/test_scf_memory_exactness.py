@@ -258,8 +258,8 @@ def test_subspace_storage_c64_precision_through_api(tmp_path, monkeypatch):
     real = davmod._subspace_storage_c64
     seen: dict = {"modes": []}
 
-    def spy(x0):
-        out = real(x0)
+    def spy(x0, subspace_storage=None):
+        out = real(x0, subspace_storage)
         seen["modes"].append(bool(out))
         return out
 
