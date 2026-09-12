@@ -1366,6 +1366,67 @@ def _seed_scf_density(
 
 
 @torch.no_grad()
+def _uspp_group_overrides(opts: SCFOptions) -> dict[str, Any]:
+    """Validate and unpack SCFOptions' grouped sub-objects for the USPP driver.
+
+    Returns overrides for the fields scf_uspp consumes (nspin, start_mag,
+    boundary, esm_bias, hub_occ_mix, hub_u_ramp_iters). Norm-conserving-only
+    fields — eigensolver='chebyshev', tot_magnetization, target_mu,
+    hubbard.alpha, and every MemoryOptions knob but dense_budget_gb (the USPP
+    generalized Davidson never read the subspace/k levers) — are rejected
+    loudly rather than silently ignored. dense_budget_gb is applied here as
+    the core.batch process-local override (the ambient
+    GRADWAVE_CPU_DENSE_BUDGET env var still wins at the single read point,
+    core.batch._cpu_dense_budget_bytes)."""
+    if opts.eigensolver == "chebyshev":
+        raise ValueError(
+            "SCFOptions.eigensolver='chebyshev' is norm-conserving only; "
+            "the USPP/PAW generalized S-metric problem is Davidson-only")
+    out: dict[str, Any] = {}
+    if opts.spin is not None:
+        if opts.spin.tot_magnetization is not None:
+            raise NotImplementedError(
+                "tot_magnetization (fixed spin moment) is norm-conserving "
+                "only — the USPP/PAW SCF driver has no fixed-moment mode yet")
+        out["nspin"] = opts.spin.nspin
+        out["start_mag"] = opts.spin.start_mag
+    if opts.boundary is not None:
+        if opts.boundary.target_mu is not None:
+            raise NotImplementedError(
+                "target_mu (constant-µ SCF) is norm-conserving only — the "
+                "USPP/PAW driver has no grand-canonical mode yet")
+        out["boundary"] = opts.boundary.kind
+        out["esm_bias"] = opts.boundary.esm_bias
+    if opts.hubbard is not None:
+        if opts.hubbard.alpha is not None:
+            raise NotImplementedError(
+                "hubbard.alpha (rigid manifold probe) is norm-conserving "
+                "only — the USPP/PAW +U path has no hub_alpha kwarg")
+        out["hub_occ_mix"] = opts.hubbard.occ_mix
+        out["hub_u_ramp_iters"] = opts.hubbard.u_ramp_iters
+    if opts.memory is not None:
+        mem = opts.memory
+        unsupported = sorted(
+            name for name, val in (
+                ("k_chunk", mem.k_chunk),
+                ("k_parallel", mem.k_parallel),
+                ("max_dim_factor", mem.max_dim_factor),
+                ("subspace_budget_gb", mem.subspace_budget_gb),
+                ("subspace_storage", mem.subspace_storage),
+            ) if val is not None)
+        if unsupported:
+            raise NotImplementedError(
+                "scf_uspp supports only MemoryOptions.dense_budget_gb — "
+                "the k-streaming/k-parallel/Davidson-subspace knobs are "
+                "norm-conserving only (the USPP generalized Davidson never "
+                f"read them); got: {unsupported}")
+        if mem.dense_budget_gb is not None:
+            from gradwave.core.batch import set_cpu_dense_budget_override
+
+            set_cpu_dense_budget_override(mem.dense_budget_gb * 1e9)
+    return out
+
+
 def scf_uspp(
     system: USPPSystem,
     xc: XCFunctional | SpinXC,
@@ -1499,6 +1560,16 @@ def scf_uspp(
             "mixed_precision": False,
             "precond": "kerker",
             "verbose": True,
+            # group-covered flat kwargs (stage-2 grouped options): when opts is
+            # given these must ride in opts.spin / opts.boundary / opts.hubbard,
+            # not as flat kwargs (the hubbard manifold LIST stays flat — it is a
+            # runtime input, like start_from/dist_ctx/recorder)
+            "nspin": 1,
+            "start_mag": None,
+            "hub_occ_mix": 1.0,
+            "hub_u_ramp_iters": 0,
+            "boundary": "periodic",
+            "esm_bias": 0.0,
         }
         _supplied = {
             k
@@ -1525,6 +1596,12 @@ def scf_uspp(
                 ("mixed_precision", mixed_precision),
                 ("precond", precond),
                 ("verbose", verbose),
+                ("nspin", nspin),
+                ("start_mag", start_mag),
+                ("hub_occ_mix", hub_occ_mix),
+                ("hub_u_ramp_iters", hub_u_ramp_iters),
+                ("boundary", boundary),
+                ("esm_bias", esm_bias),
             )
             if v != _flat_defaults[k]
         }
@@ -1547,6 +1624,17 @@ def scf_uspp(
         adapt_step, spin_precond = mx.adapt_step, mx.spin_precond
         mixing_w0, bec_step_scale = mx.w0, mx.bec_step_scale
         precond = mx.precond
+        # stage-2 grouped options: spin / boundary / hubbard / memory. The
+        # helper validates (NC-only fields are rejected loudly, never silently
+        # ignored), applies the dense-box budget, and returns only the fields
+        # this driver consumes; a group left None yields no overrides.
+        _grp = _uspp_group_overrides(opts)
+        nspin = _grp.get("nspin", nspin)
+        start_mag = _grp.get("start_mag", start_mag)
+        boundary = _grp.get("boundary", boundary)
+        esm_bias = _grp.get("esm_bias", esm_bias)
+        hub_occ_mix = _grp.get("hub_occ_mix", hub_occ_mix)
+        hub_u_ramp_iters = _grp.get("hub_u_ramp_iters", hub_u_ramp_iters)
     mixing_scheme = _resolve_uspp_mixing_scheme(mixing_scheme, nspin)
     if criterion not in ("drho", "energy"):
         raise ValueError("criterion must be 'drho' or 'energy'")

@@ -11,7 +11,10 @@ Environment
 CUDA batched-QR CPU offload (see ``_qr_offload``). "auto" gates it on a one-time
 per-device fp64 microbenchmark, so the offload fires on fp64-crippled consumer
 cards and stays off on datacenter fp64 hardware. "on"/"off" force it either way,
-so a benchmark can toggle the path without monkeypatching. Read once at import.
+so a benchmark can toggle the path without monkeypatching. Read per call
+(``_qr_offload_mode``) — an import-frozen copy silently ignores ``os.environ``
+set after ``import gradwave``, the measured-benchmark footgun the eigensolver
+knob already eliminated (see scf.loop._resolve_eigensolver).
 
 ``GRADWAVE_CHOLQR`` in {"on", "off"} (default "off" — measured neutral on
 CPU and neutral-to-negative on RTX 3050; retest on datacenter GPUs) controls whether
@@ -19,7 +22,8 @@ CPU and neutral-to-negative on RTX 3050; retest on datacenter GPUs) controls whe
 solve, twice) instead of the batched tall-skinny QR. CholQR2 is GEMM-shaped —
 fast on every device — and removes the D2H/H2D round trip of the CUDA QR
 offload entirely; a Cholesky breakdown (rank-deficient block) falls back to
-the QR path for that call. "off" forces the QR path. Read once at import.
+the QR path for that call. "off" forces the QR path. Read per round
+(``_cholqr_mode``, same import-freeze rationale as the QR knob).
 
 ``GRADWAVE_FP32_EXPANSION`` in {"on", "off", "auto"} (default "off") controls the
 fp64-certified fp32-expansion mode of ``davidson_batched``: expansion-vector
@@ -30,7 +34,14 @@ GPU-targeted (crippled-fp64 cards) and not yet measured.
 
 Subspace-footprint knobs (large-nk / slab GPU-memory relief; see the note above
 ``_resolve_max_dim_factor``). All read per solve, all default to the historical
-behaviour:
+behaviour. Each knob is ALSO an explicit ``davidson_batched`` argument
+(``force_dim_factor`` / ``subspace_budget_gb`` / ``subspace_storage``) — the
+route the ``scf.memory`` Input block takes (Input → scf.options.MemoryOptions →
+scf()/scf_uspp() → here), replacing the retired api → environment bridge. The
+env var, when set, is layered OVER the passed argument at solve time (the
+documented user-facing override); each var is read in exactly one resolver
+below (``forced_dim_factor`` / ``_resolve_max_dim_factor`` /
+``_subspace_storage_mode``):
 
 ``GRADWAVE_MAX_DIM_FACTOR`` (int ≥ 2) forces the grown-subspace multiple that
 sets the V/HV byte peak; halving it from 4 to 2 halves those bytes and is EXACT
@@ -93,44 +104,28 @@ def _eigh_subspace(s: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 # Column count at/below which a CUDA batched tall-skinny QR (the (nk, npw,
 # cols) reduced QR that orthonormalizes new Davidson directions, and, on
-# restart, re-orthonormalizes the Ritz block) is offloaded to CPU LAPACK. Found
-# while investigating whether CUDA-graph capture could speed up a Davidson
-# round (docs/manual/performance.md, "What does not help"): a graphed replay
-# of the round's Rayleigh-Ritz/expansion math is bit-identical to eager at
-# 1.0x -- no launch-overhead gap anywhere in the round, apply included -- but
-# this QR call, isolated, was the single biggest cost in the round on an RTX
-# 3050, BIGGER than the two-FFT Hamiltonian apply next to it (measured: ~3.9 ms
-# vs ~2.3 ms for a diamond-C, 50 Ry, nk=8, npw=465, cols=8 round). A D2H + CPU
-# LAPACK QR + H2D round trip runs that same shape in ~0.3 ms, a >10x win, for
-# the same reason issue #133 CPU-offloaded eigh: cuSOLVER's batched
-# geqrf/orgqr pays a fixed per-call tax that swamps a tiny problem, and the
-# tensors here are a few MB. A parameter sweep (nk in 8..112, npw in
-# 465..2500, cols in 8..64) shows CPU offload is a clear-to-break-even win at
-# cols<=16 (worst case measured ratio 0.98x, typically 2-12x) and mixed
-# (sometimes GPU-favored) above that -- capped here at the safe boundary.
-# Davidson's own n_add is bounded by nb, comfortably under 16 for the systems
-# in this repo's benchmark battery; wider blocks (e.g. CheFSI's buffered
-# block) fall through to the GPU unchanged, same as today.
-# This is the SIZE gate only. Whether the offload activates at all is a second,
-# device-dependent gate (`_qr_offload_active`): the whole trick only pays off on
-# a card whose fp64 units are slow enough that the D2H/H2D round trip beats them,
-# which the RTX 3050 sweep above assumed but datacenter fp64 hardware breaks.
+# restart, re-orthonormalizes the Ritz block) is offloaded to CPU LAPACK —
+# cuSOLVER's batched geqrf/orgqr pays a fixed per-call tax that swamps a tiny
+# problem (same reason issue #133 CPU-offloaded eigh). SIZE gate only; the
+# device gate is `_qr_offload_active`.
+# [D-007] measured evidence (RTX 3050 sweep, safe cols boundary) —
+# docs/design/decision-records.md
 _QR_CPU_MAX_COLS = 16
 
-# fp64/fp32 GEMM time ratio above which the CUDA batched-QR offload activates in
-# "auto" mode. Two measurement sources bracket the threshold with a wide margin.
-# On the RTX 3050 that PR #174 tuned, fp64 runs at ~1/64 of fp32 (docs/manual/
-# performance.md), so the measured ratio is tens (~20-60) and the offload is a
-# clear win. On the 4x H100 session (issue #206, benchmarks/results/h100-session)
-# the same A/B measured the offload as a ~13% PENALTY -- Cr2O3 eskolaite, offload
-# on 37.1 s vs off 32.7 s, identical energy to 1.8e-10 meV/atom and identical 16
-# iterations -- because a datacenter fp64 GPU (ratio ~1-2) has no cuSOLVER tax to
-# escape. A threshold of 8 sits an order of magnitude clear of both regimes.
+# fp64/fp32 GEMM time ratio above which the CUDA batched-QR offload activates
+# in "auto" mode: fires on fp64-crippled consumer cards, stays off on real
+# fp64 hardware. [D-007] threshold bracketing (RTX 3050 win vs H100 penalty)
+# — docs/design/decision-records.md
 _QR_OFFLOAD_PENALTY_THRESHOLD = 8.0
 
-# One-shot escape hatch, read once at import (see module docstring). "auto" (the
-# default) uses the microbenchmark gate; "on"/"off" force the offload either way.
-_QR_OFFLOAD_ENV = os.environ.get("GRADWAVE_QR_OFFLOAD", "auto").strip().lower()
+
+def _qr_offload_mode() -> str:
+    """``GRADWAVE_QR_OFFLOAD`` in {"auto", "on", "off"} (default "auto" — the
+    microbenchmark gate; "on"/"off" force the offload either way). Read per
+    call, not at import: an import-frozen copy silently ignores env set after
+    ``import gradwave`` (the measured-benchmark footgun class). An unrecognized
+    value falls through to the "auto" branch, exactly as it always did."""
+    return os.environ.get("GRADWAVE_QR_OFFLOAD", "auto").strip().lower()
 
 # fp64 penalty ratio per CUDA device index. Plain dict, GIL-guarded like the rest
 # of this module -- the microbenchmark is idempotent, so a rare double-measure on
@@ -180,9 +175,10 @@ def _qr_offload_active(device: torch.device) -> bool:
     directions; "auto" defers to the fp64 microbenchmark against the threshold."""
     if device.type != "cuda":
         return False
-    if _QR_OFFLOAD_ENV == "on":
+    mode = _qr_offload_mode()
+    if mode == "on":
         return True
-    if _QR_OFFLOAD_ENV == "off":
+    if mode == "off":
         return False
     return _fp64_penalty(device) >= _QR_OFFLOAD_PENALTY_THRESHOLD
 
@@ -200,12 +196,14 @@ def _qr_offload(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.linalg.qr(x, mode="reduced")
 
 
-# CholQR2 escape hatch, read once at import (module docstring). Default "off":
-# measured neutral on CPU (0.94-1.03x battery) and neutral-to-slightly-negative
-# on RTX 3050 whole-SCF — the QR round is too thin a slice at these sizes; kept
-# for a datacenter-GPU retest. When "on", CholQR2 replaces the tall-skinny QR
-# wherever it succeeds, and a breakdown falls back to `_qr_offload` per call.
-_CHOLQR_ENV = os.environ.get("GRADWAVE_CHOLQR", "off").strip().lower()
+def _cholqr_mode() -> str:
+    """``GRADWAVE_CHOLQR`` in {"on", "off"} (default "off"). When "on", CholQR2
+    replaces the tall-skinny QR wherever it succeeds; a breakdown falls back to
+    `_qr_offload` per call. Read per round (same import-freeze rationale as
+    `_qr_offload_mode`). [D-008] why it defaults off (measured neutral CPU /
+    neutral-to-negative RTX 3050; datacenter-GPU retest pending) —
+    docs/design/decision-records.md"""
+    return os.environ.get("GRADWAVE_CHOLQR", "off").strip().lower()
 
 
 def _cholqr2(x: torch.Tensor) -> torch.Tensor | None:
@@ -281,6 +279,17 @@ _FP32_CERT_STALL = 0.7  # rn.max() improved by <30% over the previous round
 _FP32_EXP_PENALTY_THRESHOLD = _QR_OFFLOAD_PENALTY_THRESHOLD
 
 
+def _fp32_expansion_mode() -> str:
+    """``GRADWAVE_FP32_EXPANSION`` in {"auto", "on", "off"}, validated. THE
+    single read point for this knob (per call; the native adapter's scope
+    check shares it)."""
+    mode = os.environ.get("GRADWAVE_FP32_EXPANSION", "off").strip().lower()
+    if mode not in ("auto", "on", "off"):
+        raise ValueError(
+            f"GRADWAVE_FP32_EXPANSION must be auto|on|off, got {mode!r}")
+    return mode
+
+
 def _fp32_expansion_active(x0: torch.Tensor) -> bool:
     """Whether the fp32-expansion mode applies to a solve seeded by `x0`.
 
@@ -289,10 +298,7 @@ def _fp32_expansion_active(x0: torch.Tensor) -> bool:
     mixed-precision draft with nothing to certify. "auto" additionally requires
     CUDA with measurably crippled fp64; "on" forces the mode anywhere (CPU
     included — correct there too, just not expected to win)."""
-    mode = os.environ.get("GRADWAVE_FP32_EXPANSION", "off").strip().lower()
-    if mode not in ("auto", "on", "off"):
-        raise ValueError(
-            f"GRADWAVE_FP32_EXPANSION must be auto|on|off, got {mode!r}")
+    mode = _fp32_expansion_mode()
     if mode == "off" or x0.dtype != torch.complex128:
         return False
     if mode == "on":
@@ -347,27 +353,47 @@ def _certify_fp64(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_max_dim_factor(
-    nk: int, nb: int, npw_max: int, elem_bytes: int, requested: int
-) -> int:
-    """Effective max_dim_factor after the env override / memory auto-gate.
+def forced_dim_factor(force: int | None = None) -> int | None:
+    """The forced Davidson subspace factor, or None when nothing forces one.
 
-    ``GRADWAVE_MAX_DIM_FACTOR`` (int ≥ 2), when set, forces the factor — the
-    subspace grows to that multiple of nb before restart. Halving it from the
-    default 4 to 2 halves the V/HV byte footprint and converges to the SAME
-    eigenpairs by a different path (a few more restarts), so it is EXACT in the
-    result. Otherwise, if ``GRADWAVE_SUBSPACE_BUDGET_GB`` is set, an opt-in
-    auto-gate estimates the peak V+HV bytes (2 arrays · nk · factor·nb ·
-    npw_max · elem_bytes) at the requested factor and halves the factor toward a
-    floor of 2 while it exceeds the budget. Never below 2 (nb + n_add must fit).
-    Default: `requested` unchanged."""
-    forced = os.environ.get("GRADWAVE_MAX_DIM_FACTOR")
-    if forced is not None:
-        val = int(forced)
+    ``GRADWAVE_MAX_DIM_FACTOR`` (the documented user-facing env override) is
+    layered over the explicitly passed ``force`` (the ``scf.memory``
+    ``max_dim_factor`` field, threaded here as an argument). THE single read
+    point for this env var, called per solve — also used by scf.loop's dense-
+    box estimator so both consumers resolve the factor identically."""
+    env = os.environ.get("GRADWAVE_MAX_DIM_FACTOR")
+    if env is not None and env.strip():
+        val = int(env)
         if val < 2:
             raise ValueError(f"GRADWAVE_MAX_DIM_FACTOR must be >= 2, got {val}")
         return val
-    budget_gb = os.environ.get("GRADWAVE_SUBSPACE_BUDGET_GB")
+    if force is not None and force < 2:
+        raise ValueError(f"max_dim_factor must be >= 2, got {force}")
+    return force
+
+
+def _resolve_max_dim_factor(
+    nk: int, nb: int, npw_max: int, elem_bytes: int, requested: int,
+    force: int | None = None, budget_gb: float | None = None,
+) -> int:
+    """Effective max_dim_factor after the forced value / memory auto-gate.
+
+    A forced factor (``GRADWAVE_MAX_DIM_FACTOR`` env over the passed ``force``
+    — see ``forced_dim_factor``) wins outright: the subspace grows to that
+    multiple of nb before restart. Halving it from the default 4 to 2 halves
+    the V/HV byte footprint and converges to the SAME eigenpairs by a
+    different path (a few more restarts), so it is EXACT in the result.
+    Otherwise a subspace budget (``GRADWAVE_SUBSPACE_BUDGET_GB`` env over the
+    passed ``budget_gb``) is an opt-in auto-gate: estimate the peak V+HV bytes
+    (2 arrays · nk · factor·nb · npw_max · elem_bytes) at the requested factor
+    and halve the factor toward a floor of 2 while it exceeds the budget.
+    Never below 2 (nb + n_add must fit). Default: `requested` unchanged."""
+    forced = forced_dim_factor(force)
+    if forced is not None:
+        return forced
+    env_budget = os.environ.get("GRADWAVE_SUBSPACE_BUDGET_GB")
+    if env_budget is not None:
+        budget_gb = float(env_budget)
     if budget_gb is None:
         return requested
     budget = float(budget_gb) * (1 << 30)
@@ -381,13 +407,29 @@ def _resolve_max_dim_factor(
     return max(2, factor)
 
 
-def _subspace_storage_c64(x0: torch.Tensor) -> bool:
+def _subspace_storage_mode(requested: str | None = None) -> str:
+    """V/HV storage dtype name: ``GRADWAVE_SUBSPACE_STORAGE`` env layered over
+    the passed ``requested`` (the ``scf.memory`` ``subspace_storage`` field),
+    default "complex128". THE single read point for this env var (per solve;
+    the native adapter's scope check shares it)."""
+    mode = os.environ.get("GRADWAVE_SUBSPACE_STORAGE")
+    if mode is None:
+        mode = requested if requested is not None else "complex128"
+    mode = mode.strip().lower()
+    if mode not in ("complex64", "complex128"):
+        raise ValueError(
+            "GRADWAVE_SUBSPACE_STORAGE must be complex64|complex128, "
+            f"got {mode!r}")
+    return mode
+
+
+def _subspace_storage_c64(x0: torch.Tensor, requested: str | None = None) -> bool:
     """Whether V/HV are STORED in complex64 (half the bytes) while the H-apply
     and the Rayleigh-Ritz eigensolve stay in fp64.
 
-    ``GRADWAVE_SUBSPACE_STORAGE`` in {"complex128" (default), "complex64"}. Only
-    a complex128 solve qualifies — a complex64 x0 is already a low-precision
-    draft. Read per solve.
+    ``GRADWAVE_SUBSPACE_STORAGE`` env layered over the passed ``requested``
+    (see ``_subspace_storage_mode``). Only a complex128 solve qualifies — a
+    complex64 x0 is already a low-precision draft. Read per solve.
 
     DISTINCT from ``GRADWAVE_FP32_EXPANSION``: that downcasts the APPLY COMPUTE
     and certifies the result back to the fp64 residual tol; this downcasts the
@@ -396,12 +438,10 @@ def _subspace_storage_c64(x0: torch.Tensor) -> bool:
     (~1e-6 eV eigenvalues), not the fp64 tol — the solve stops at that plateau
     (`_C64_STALL*`). A memory lever, opt-in, default off; mutually exclusive with
     the fp32-expansion mode (they attack the same buffers on different axes)."""
-    mode = os.environ.get("GRADWAVE_SUBSPACE_STORAGE", "complex128").strip().lower()
-    if mode not in ("complex64", "complex128"):
-        raise ValueError(
-            "GRADWAVE_SUBSPACE_STORAGE must be complex64|complex128, "
-            f"got {mode!r}")
-    return mode == "complex64" and x0.dtype == torch.complex128
+    return (
+        _subspace_storage_mode(requested) == "complex64"
+        and x0.dtype == torch.complex128
+    )
 
 
 # complex64-storage plateau detection. The stored H·V is fp32-truncated, so
@@ -541,7 +581,7 @@ def _orthonormalize_b(
         """Row-orthonormalize x: CholQR2 first (GEMM-shaped, every device),
         Householder QR on breakdown (rank-deficient blocks need QR's arbitrary
         orthonormal complements for the padded slots to stay consistent)."""
-        if _CHOLQR_ENV != "off":
+        if _cholqr_mode() != "off":
             q = _cholqr2(x.transpose(-1, -2))
             if q is not None:
                 return q.transpose(-1, -2)
@@ -641,8 +681,17 @@ def davidson_batched(
     max_dim_factor: int = 4,
     sync_free: bool = False,
     history_out: list[tuple[int, torch.Tensor, torch.Tensor]] | None = None,
+    force_dim_factor: int | None = None,
+    subspace_budget_gb: float | None = None,
+    subspace_storage: str | None = None,
 ) -> BatchedDavidsonResult:
     """Batched block Davidson over all k at once (the workhorse solver).
+
+    ``force_dim_factor`` / ``subspace_budget_gb`` / ``subspace_storage`` are
+    the ``scf.memory`` subspace knobs threaded as explicit arguments (Input →
+    MemoryOptions → scf() → here); the matching ``GRADWAVE_*`` env vars are
+    layered over them per solve (see the module docstring). All default to
+    None — the historical behaviour.
 
     All k-points advance together with a uniform subspace size, so every step
     is one batched tensor op (see the section comment above). The remainder of
@@ -678,9 +727,11 @@ def davidson_batched(
     # Subspace-footprint knobs (see the module note above this function). Storage
     # dtype and the resolved max_dim_factor set the V/HV byte peak. `m` is the
     # padded plane-wave count (npw_max), the long axis of V/HV.
-    store_c64 = _subspace_storage_c64(x0)
+    store_c64 = _subspace_storage_c64(x0, subspace_storage)
     elem_bytes = 8 if store_c64 else x0.element_size()
-    max_dim_factor = _resolve_max_dim_factor(nk, nb, m, elem_bytes, max_dim_factor)
+    max_dim_factor = _resolve_max_dim_factor(
+        nk, nb, m, elem_bytes, max_dim_factor,
+        force=force_dim_factor, budget_gb=subspace_budget_gb)
     max_dim = min(max_dim_factor * nb, int(mask.sum(dim=1).min()))
     rdtype = x0.real.dtype  # float32 in the mixed-precision draft phase, else float64
     sdtype = torch.complex64 if store_c64 else x0.dtype  # V/HV storage dtype
@@ -937,6 +988,9 @@ def davidson_batched_ms(
     max_dim_factor: int = 4,
     crossover: float = 1e-5,
     mixed_precision: bool = True,
+    force_dim_factor: int | None = None,
+    subspace_budget_gb: float | None = None,
+    subspace_storage: str | None = None,
 ) -> BatchedDavidsonResult:
     """Two-stage Davidson: a fast low-precision draft to `crossover`, then a
     full-precision polish to `tol` warm-started from it.
@@ -952,7 +1006,10 @@ def davidson_batched_ms(
 
     def solve(x, t_, tl):
         return davidson_batched(h_apply, x, t_, mask, tol=tl, max_iter=max_iter,
-                                max_dim_factor=max_dim_factor)
+                                max_dim_factor=max_dim_factor,
+                                force_dim_factor=force_dim_factor,
+                                subspace_budget_gb=subspace_budget_gb,
+                                subspace_storage=subspace_storage)
 
     return mixed_precision_solve(
         x0, tol, crossover, mixed_precision,

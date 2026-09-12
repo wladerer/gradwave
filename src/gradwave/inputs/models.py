@@ -115,13 +115,15 @@ class MemoryParams:
       ``k_parallel·k_chunk·m·npw``). None → off, or the ``GRADWAVE_K_PARALLEL``
       env default when that is set.
 
-    Bridged to the solver by the api layer (no solver edit): ``k_chunk`` is
-    threaded as the ``scf.loop.scf(k_chunk=)`` kwarg, and the Davidson knobs are
-    exported to the ``GRADWAVE_MAX_DIM_FACTOR`` / ``GRADWAVE_SUBSPACE_BUDGET_GB``
-    / ``GRADWAVE_SUBSPACE_STORAGE`` / ``GRADWAVE_CPU_DENSE_BUDGET`` environment
-    variables around the SCF call (``solvers.davidson`` / ``core.batch`` read
-    them per solve; ``dense_budget_gb`` is converted GB→bytes). See
-    ``api._common._davidson_memory_env`` and ``api.scf.run_scf``.
+    Threaded to the solver as ARGUMENTS: the api layer maps this block onto
+    ``gradwave.scf.options.MemoryOptions`` (``api.scf._memory_options``) and
+    the SCF drivers hand the values to ``solvers.davidson`` / ``core.batch``
+    per solve (``dense_budget_gb`` is converted GB→bytes). The matching
+    ``GRADWAVE_MAX_DIM_FACTOR`` / ``GRADWAVE_SUBSPACE_BUDGET_GB`` /
+    ``GRADWAVE_SUBSPACE_STORAGE`` / ``GRADWAVE_CPU_DENSE_BUDGET`` environment
+    variables remain user-facing overrides, layered over the passed values at
+    each knob's single per-solve read point (the former api → environment
+    bridge is retired).
     """
 
     k_chunk: int | None = None

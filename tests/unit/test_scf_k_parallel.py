@@ -189,7 +189,10 @@ def test_run_scf_threads_k_parallel(monkeypatch):
     captured: dict = {}
 
     def fake_scf(system, xc, **kwargs):
-        captured["k_parallel"] = kwargs.get("k_parallel")
+        opts = kwargs.get("opts")
+        mem = opts.memory if opts is not None else None
+        captured["k_parallel"] = (mem.k_parallel if mem is not None
+                                  else kwargs.get("k_parallel"))
         return "SENTINEL"
 
     monkeypatch.setattr(api_scf, "build_system", lambda inp: object())

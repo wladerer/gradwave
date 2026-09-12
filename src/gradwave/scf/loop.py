@@ -65,6 +65,7 @@ from gradwave.scf.layout import MixLayout
 from gradwave.scf.learned_precond import MultipoleKerkerPrecond
 from gradwave.scf.local_tf import LocalTFPrecond
 from gradwave.scf.mixing import BroydenMixer, JohnsonMixer, PulayMixer
+from gradwave.scf.options import MemoryOptions, SCFOptions
 from gradwave.scf.setup_common import (
     _unique_shells,
     build_core_density,
@@ -115,8 +116,10 @@ logger = logging.getLogger(__name__)
 # engages CheFSI for genuinely large slabs. The crossover value is an estimate
 # (memory note: nb≈500-800 for 12-layer Al / 6-layer Pt); the production-scale
 # measurement is the large-nb RR campaign. GRADWAVE_EIGENSOLVER overrides the
-# resolved choice; GRADWAVE_CHEFSI_MIN_NB tunes the threshold.
-_CHEFSI_MIN_NB = int(os.environ.get("GRADWAVE_CHEFSI_MIN_NB", "640"))
+# resolved choice; GRADWAVE_CHEFSI_MIN_NB tunes the threshold (read per call in
+# _resolve_eigensolver — this constant is only the default, so the env var is
+# never frozen at import).
+_CHEFSI_MIN_NB = 640
 
 # Γ-point real-wavefunction fast path (core.gamma). At a single k-point at Γ the
 # plane-wave sphere is closed under G→−G and a real V_eff admits real eigenstates
@@ -128,24 +131,18 @@ _CHEFSI_MIN_NB = int(os.environ.get("GRADWAVE_CHEFSI_MIN_NB", "640"))
 # ⇒ "0" ⇒ the complex path, byte-for-byte unchanged; "auto" engages the real
 # path whenever provably safe and silently falls back otherwise; "1" forces it
 # on and raises if a correctness blocker is present or the sphere is not Γ; "0"
-# disables it. H-apply telemetry is now transparent across both paths
-# (GammaHamiltonian bumps the shared core.batch._HAPPLY_TALLY, which
-# opt.joint.count_h_applies reads), so that contract no longer blocks auto.
-#
-# It STILL defaults OFF (not "auto") for one honest reason: the SCF *iteration
-# count* near the convergence boundary is not bit-reproducible between the two
-# eigensolvers. Si's degenerate valence top under smearing has a gauge-ambiguous
-# density from a partially-occupied degenerate subspace, and the real embedded
-# Davidson picks a different (equally valid) orthonormal basis than the complex
-# batched Davidson, so the SCF residual differs at ~1e-10. That is below the
-# ~-30 eV energy agreement (matches the complex path to machine precision) but
-# right at the rhotol=1e-9 boundary, so a warm start that saves one SCF iteration
-# on the complex path can converge in the same count on the Γ path
-# (tests/integration/test_calculator_warmstart_grid.py). The warm DENSITY seed
-# is threaded identically on both paths — this is a boundary effect, not a
-# missing warm start — so it cannot be cleanly removed by threading coefficients.
-# Opting in with "auto"/"1" is exact either way. See `_resolve_gamma_real`.
-_GAMMA_REAL_ENV = os.environ.get("GRADWAVE_GAMMA_REAL", "0").strip().lower()
+# disables it. Opting in with "auto"/"1" is exact either way.
+# [D-009] why it defaults OFF, not "auto" (SCF iteration count near the
+# convergence boundary is not bit-reproducible between the two eigensolvers) —
+# docs/design/decision-records.md. See `_resolve_gamma_real`.
+
+
+def _gamma_real_mode() -> str:
+    """``GRADWAVE_GAMMA_REAL`` in {"0" (default), "auto", "1"}. Read per call,
+    not at import — an import-frozen copy silently ignores ``os.environ`` set
+    after ``import gradwave`` (the same measured-benchmark footgun class
+    ``_resolve_eigensolver`` documents)."""
+    return os.environ.get("GRADWAVE_GAMMA_REAL", "0").strip().lower()
 
 
 def _resolve_eigensolver(eigensolver: str, nb: int) -> str:
@@ -163,7 +160,8 @@ def _resolve_eigensolver(eigensolver: str, nb: int) -> str:
     mode = env or eigensolver
     if mode != "auto":
         return mode
-    return "chebyshev" if nb >= _CHEFSI_MIN_NB else "davidson"
+    min_nb = int(os.environ.get("GRADWAVE_CHEFSI_MIN_NB", "") or _CHEFSI_MIN_NB)
+    return "chebyshev" if nb >= min_nb else "davidson"
 
 
 @dataclass
@@ -913,9 +911,10 @@ def _resolve_gamma_real(
     real, so nspin ∈ {1, 2} are both eligible (each channel solved on its own
     real half sphere). USPP/PAW and the spinor SOC path never reach here — they
     run their own drivers (``scf_uspp`` / ``scf_noncollinear``)."""
-    if _GAMMA_REAL_ENV == "0":
+    mode = _gamma_real_mode()
+    if mode == "0":
         return None
-    force = _GAMMA_REAL_ENV == "1"
+    force = mode == "1"
 
     def refuse(why: str) -> None:
         if force:
@@ -1038,6 +1037,9 @@ def _solve_bands(
     t_solve: torch.Tensor,
     device: torch.device,
     u_scale: float = 1.0,
+    solver_kw: dict[str, Any] | None = None,  # scf.memory subspace knobs, forwarded to
+    # the registered solver verbatim (see scf()'s solver_kw; {} / None = the
+    # historical solve, byte-for-byte)
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Eigensolve one spin channel of the NC standard problem H x = ε x.
 
@@ -1092,7 +1094,8 @@ def _solve_bands(
             return _base(c) + _m(c)
 
     dav = get_solver(eigensolver)(
-        apply, coeffs_sp.to(cdtype), t_solve, bk.mask, tol=tol_eff, nbands=coeffs_sp.shape[1]
+        apply, coeffs_sp.to(cdtype), t_solve, bk.mask, tol=tol_eff,
+        nbands=coeffs_sp.shape[1], **(solver_kw or {})
     )
     eigenvalues = dav.eigenvalues.to(RDTYPE)
     c = dav.eigenvectors.to(CDTYPE)
@@ -1296,6 +1299,7 @@ def _solve_bands_kpool(
     u_scale: float,
     workers: int,
     k_task: int,
+    solver_kw: dict[str, Any] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Eigensolve one spin channel with per-k tasks on a thread pool of
     ``workers`` threads, torch intra-op threading pinned to 1 inside.
@@ -1366,6 +1370,7 @@ def _solve_bands_kpool(
             t_solve[lo:hi],
             device,
             u_scale,
+            solver_kw,
         )
 
     prev_threads = torch.get_num_threads()
@@ -1401,6 +1406,7 @@ def _solve_bands_streamed(
     device: torch.device,
     u_scale: float,
     k_chunk: int,
+    solver_kw: dict[str, Any] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Eigensolve one spin channel in k-CHUNKS of ``k_chunk`` k-points, so the
     resident Davidson subspace is ``nk_chunk·m·npw`` instead of ``nk·m·npw`` (the
@@ -1452,6 +1458,7 @@ def _solve_bands_streamed(
             t_solve[lo:hi],
             device,
             u_scale,
+            solver_kw,
         )
     return eigs_out, coeffs_out
 
@@ -1888,6 +1895,117 @@ def _apply_spin_precond(mixer, system, coeffs_list_s, eigs_s, mu, smearing,
 
 
 @torch.no_grad()
+def _nc_kwargs_from_opts(
+    opts: SCFOptions,
+    flat_state: dict[str, tuple[Any, Any]],
+    memory: MemoryOptions | None,
+) -> dict[str, Any]:
+    """Translate an SCFOptions into ``scf()``'s flat config kwargs.
+
+    Guard first (mirrors scf_uspp): a flat kwarg left non-default alongside
+    ``opts`` is ambiguous and raises rather than being silently overwritten
+    (``flat_state`` maps name → (passed value, default)). SCFOptions fields
+    with no norm-conserving counterpart (the USPP-only mixer/convergence
+    knobs) are rejected loudly. Group sub-objects left None keep the flat
+    defaults — byte-for-byte the historical behaviour."""
+    supplied = sorted(k for k, (v, d) in flat_state.items() if v != d)
+    if supplied:
+        raise ValueError(
+            "scf: configure through `opts` OR the flat keyword arguments, "
+            f"not both (conflicting flat kwargs: {supplied})")
+    unsupported = sorted(
+        name for name, val, default in (
+            ("criterion", opts.criterion, "drho"),
+            ("rho_safety", opts.rho_safety, 1e-2),
+            ("batched", opts.batched, True),
+            ("mixer.trust_factor", opts.mixer.trust_factor, 20.0),
+            ("mixer.metric", opts.mixer.metric, "plain"),
+            ("mixer.w0", opts.mixer.w0, 0.01),
+            ("mixer.adapt_step", opts.mixer.adapt_step, False),
+            ("mixer.bec_step_scale", opts.mixer.bec_step_scale, None),
+        ) if val != default)
+    if unsupported:
+        raise ValueError(
+            "scf (norm-conserving) does not support these SCFOptions "
+            f"fields (USPP/PAW only): {unsupported}")
+    if opts.memory is not None and memory is not None:
+        raise ValueError(
+            "scf: pass the memory knobs as `memory=` OR `opts.memory`, not both")
+    mx = opts.mixer
+    kw: dict[str, Any] = dict(
+        smearing=opts.smearing, width=opts.width, max_iter=opts.max_iter,
+        etol=opts.etol, rhotol=opts.rhotol, diago_tol=opts.diago_tol,
+        verbose=opts.verbose, energy_metric=opts.energy_metric,
+        entol=opts.entol, mixed_precision=opts.mixed_precision,
+        eigensolver=opts.eigensolver, mixing_alpha=mx.alpha,
+        mixing_scheme=mx.scheme,
+        # the NC mixers take a fixed integer history; None keeps the
+        # historical default 8 (lifted to 12 for johnson in
+        # _build_mixer_precond)
+        mixing_history=mx.history if mx.history is not None else 8,
+        kerker=mx.kerker, precond=mx.precond, spin_precond=mx.spin_precond,
+        memory=opts.memory if opts.memory is not None else memory,
+    )
+    if opts.spin is not None:
+        kw.update(nspin=opts.spin.nspin, start_mag=opts.spin.start_mag,
+                  tot_magnetization=opts.spin.tot_magnetization)
+    if opts.boundary is not None:
+        kw.update(boundary=opts.boundary.kind, esm_bias=opts.boundary.esm_bias,
+                  target_mu=opts.boundary.target_mu)
+    if opts.hubbard is not None:
+        kw.update(hub_occ_mix=opts.hubbard.occ_mix,
+                  hub_u_ramp_iters=opts.hubbard.u_ramp_iters,
+                  hub_alpha=opts.hubbard.alpha)
+    return kw
+
+
+def _memory_solver_kwargs(
+    mem: MemoryOptions | None,
+) -> tuple[dict[str, int | float | str], float | None]:
+    """(solver_kw, explicit dense budget [bytes]) from a MemoryOptions.
+
+    solver_kw holds only the non-None Davidson subspace knobs so a default
+    group hands the solver zero kwargs — byte-for-byte the historical solve.
+    The dense budget is returned separately: it feeds core.batch's process-
+    local override, not the eigensolver."""
+    solver_kw: dict[str, int | float | str] = {}
+    dense: float | None = None
+    if mem is None:
+        return solver_kw, dense
+    if mem.max_dim_factor is not None:
+        solver_kw["force_dim_factor"] = mem.max_dim_factor
+    if mem.subspace_budget_gb is not None:
+        solver_kw["subspace_budget_gb"] = mem.subspace_budget_gb
+    if mem.subspace_storage is not None:
+        solver_kw["subspace_storage"] = mem.subspace_storage
+    if mem.dense_budget_gb is not None:
+        dense = mem.dense_budget_gb * 1e9
+    return solver_kw, dense
+
+
+def _merge_memory_k_levers(
+    mem: MemoryOptions | None, k_chunk: int | None, k_parallel: int | None
+) -> tuple[int | None, int | None]:
+    """Fold MemoryOptions' k levers onto the flat kwargs; both routes at once
+    is ambiguous and raises. None fields keep the flat values (and thus the
+    GRADWAVE_K_CHUNK / GRADWAVE_K_PARALLEL env-default fallbacks downstream)."""
+    if mem is None:
+        return k_chunk, k_parallel
+    if mem.k_chunk is not None:
+        if k_chunk is not None:
+            raise ValueError(
+                "scf: k_chunk was passed both as the flat kwarg and inside "
+                "the memory options — pass one")
+        k_chunk = mem.k_chunk
+    if mem.k_parallel is not None:
+        if k_parallel is not None:
+            raise ValueError(
+                "scf: k_parallel was passed both as the flat kwarg and "
+                "inside the memory options — pass one")
+        k_parallel = mem.k_parallel
+    return k_chunk, k_parallel
+
+
 def scf(
     system: System,
     xc: XCFunctional,
@@ -1982,6 +2100,19 @@ def scf(
     # (ignored on CUDA); not compatible with hybrid Fock. Composes with k_chunk
     # (task size = k_chunk, peak subspace ≈ k_parallel·k_chunk·m·npw). See
     # _solve_bands_kpool.
+    memory: MemoryOptions | None = None,  # the scf.memory knob group as ONE
+    # object for flat-style callers (hybrid_scf's **scf_kwargs, the api's
+    # noncollinear branch peer, tests). Subsumes k_chunk/k_parallel (passing
+    # both the group and the matching flat kwarg raises) and adds the Davidson
+    # subspace + dense-box budget knobs, which flow to the solver as
+    # ARGUMENTS; the GRADWAVE_* env vars remain the user-facing overrides,
+    # layered over these values per solve (see solvers/davidson.py).
+    opts: SCFOptions | None = None,  # the readable, grouped form of the config
+    # kwargs above (scf/options.py) — same contract as scf_uspp: configure
+    # through `opts` OR the flat keyword arguments, never a conflicting mix
+    # (a non-default flat kwarg alongside opts raises). Runtime objects
+    # (start_from, fock, dist_ctx, recorder, precond_op, mixer_hook, hubbard
+    # manifolds) stay flat kwargs — they are inputs, not configuration.
 ) -> SCFResult:
     # `fock`, when given, adds an orbital-dependent operator to the Hamiltonian
     # each SCF step (a hybrid functional's Fock exchange). It must expose
@@ -1990,6 +2121,39 @@ def scf(
     # exchange energy scalar. Like DFT+U, the operator lags one iteration (built
     # from the previous step's orbitals) and converges as the density does; the
     # matching semilocal-exchange down-scaling lives in the passed-in `xc`.
+    if opts is not None:
+        # opts is the readable form of every flat config kwarg; the guard in
+        # _nc_kwargs_from_opts rejects a non-default flat kwarg alongside opts
+        # (same contract as scf_uspp), then the resolved flat kwargs re-enter
+        # this function with opts=None — one code path for the loop itself.
+        flat_state = {
+            "smearing": (smearing, "none"), "width": (width, 0.1),
+            "max_iter": (max_iter, 100), "etol": (etol, 1e-8),
+            "rhotol": (rhotol, 1e-7), "mixing_alpha": (mixing_alpha, 0.7),
+            "mixing_history": (mixing_history, 8),
+            "mixing_scheme": (mixing_scheme, None), "kerker": (kerker, None),
+            "diago_tol": (diago_tol, 1e-9), "verbose": (verbose, True),
+            "mixed_precision": (mixed_precision, False),
+            "eigensolver": (eigensolver, "auto"), "precond": (precond, "kerker"),
+            "spin_precond": (spin_precond, False),
+            "energy_metric": (energy_metric, False), "entol": (entol, 1e-6),
+            "nspin": (nspin, 1), "start_mag": (start_mag, None),
+            "tot_magnetization": (tot_magnetization, None),
+            "hub_occ_mix": (hub_occ_mix, 1.0),
+            "hub_u_ramp_iters": (hub_u_ramp_iters, 0),
+            "hub_alpha": (hub_alpha, None), "boundary": (boundary, "periodic"),
+            "esm_bias": (esm_bias, 0.0), "target_mu": (target_mu, None),
+            "k_chunk": (k_chunk, None), "k_parallel": (k_parallel, None),
+        }
+        return scf(
+            system, xc,
+            precond_op=precond_op, mixer_hook=mixer_hook, hubbard=hubbard,
+            start_from=start_from, fock=fock, dist_ctx=dist_ctx,
+            recorder=recorder,
+            **_nc_kwargs_from_opts(opts, flat_state, memory),
+        )
+    mem_opts: MemoryOptions | None = memory
+    k_chunk, k_parallel = _merge_memory_k_levers(mem_opts, k_chunk, k_parallel)
     grid, spheres = system.grid, system.spheres
     vol = grid.volume
     nk, nb = len(spheres), system.nbands
@@ -2023,11 +2187,26 @@ def scf(
     # chain of runs (relax/EOS) never inherits a stale budget. GPU keeps its own
     # always-on budget. See _auto_cpu_dense_budget / core.batch.
     from gradwave.core.batch import set_cpu_dense_budget_override
+    from gradwave.solvers.davidson import forced_dim_factor
 
     _ngrid = grid.shape[0] * grid.shape[1] * grid.shape[2]
-    _mdf_est = int(os.environ.get("GRADWAVE_MAX_DIM_FACTOR", "4") or "4")
+    # the estimator sizes the box at the same subspace factor the solver will
+    # use: env (GRADWAVE_MAX_DIM_FACTOR) over the passed memory option over
+    # the solver default 4 — one resolver (solvers.davidson.forced_dim_factor)
+    # for both consumers, no separate env read here.
+    _mdf_est = forced_dim_factor(
+        mem_opts.max_dim_factor if mem_opts is not None else None) or 4
+    # an explicit scf.memory.dense_budget_gb wins over the automatic estimator
+    # (GRADWAVE_CPU_DENSE_BUDGET, when set, still wins over both — resolved in
+    # core.batch._cpu_dense_budget_bytes, the single read point for that var).
+    # solver_kw carries the Davidson subspace knobs to the eigensolver as
+    # ARGUMENTS (env layered over them per solve in solvers.davidson), handed
+    # through the _solve_bands* family untouched.
+    solver_kw, _dense_explicit = _memory_solver_kwargs(mem_opts)
     set_cpu_dense_budget_override(
-        _auto_cpu_dense_budget(nk, nb, _ngrid, _mdf_est, system.positions.device)
+        _dense_explicit
+        if _dense_explicit is not None
+        else _auto_cpu_dense_budget(nk, nb, _ngrid, _mdf_est, system.positions.device)
     )
     # k-parallel eigensolve: per-k Davidson tasks on a thread pool (CPU-only —
     # the resolve gates on the device). Same per-chunk independence argument as
@@ -2349,6 +2528,7 @@ def scf(
                     u_scale,
                     k_par_res,
                     k_chunk_res or 1,
+                    solver_kw,
                 )
             elif k_chunk_res is None:
                 # all-k batched solve (default): the resident subspace is nk·m·npw.
@@ -2372,6 +2552,7 @@ def scf(
                     t_solve,
                     device,
                     u_scale,
+                    solver_kw,
                 )
             else:
                 # k-streaming: solve k in chunks so the resident subspace is
@@ -2397,6 +2578,7 @@ def scf(
                     device,
                     u_scale,
                     k_chunk_res,
+                    solver_kw,
                 )
         _t_eig_s = time.perf_counter() - _t_eig0
 

@@ -8,10 +8,9 @@ real half-sphere solve must reproduce the complex path to machine precision
 (`_resolve_gamma_real`) must fall back to the complex path for every case that
 is not provably safe.
 
-Selection is via `GRADWAVE_GAMMA_REAL` (auto|1|0), read into the module global
-`gradwave.scf.loop._GAMMA_REAL_ENV` at import — the tests monkeypatch that
-global (env vars are captured once at import, so patching os.environ would not
-take effect).
+Selection is via `GRADWAVE_GAMMA_REAL` (auto|1|0), read per call by
+`gradwave.scf.loop._gamma_real_mode` — the tests set the env var directly
+(the former import-frozen module global is gone).
 """
 
 from pathlib import Path
@@ -44,7 +43,7 @@ def o2_system():
 
 
 def _run(system, monkeypatch, mode):
-    monkeypatch.setattr(loop, "_GAMMA_REAL_ENV", mode)
+    monkeypatch.setenv("GRADWAVE_GAMMA_REAL", mode)
     return scf(system, PBE(), smearing="gaussian", width=0.2, etol=1e-9,
                rhotol=1e-8, verbose=False, max_iter=80)
 
@@ -81,7 +80,7 @@ def test_auto_engages_on_gamma(o2_system, monkeypatch):
 
 def test_disabled_env_uses_complex(o2_system, monkeypatch):
     """`0` keeps the complex path even on an eligible Γ system."""
-    monkeypatch.setattr(loop, "_GAMMA_REAL_ENV", "0")
+    monkeypatch.setenv("GRADWAVE_GAMMA_REAL", "0")
     gb = loop._resolve_gamma_real(o2_system, PBE(), None, None, False, None)
     assert gb is None
 
@@ -110,10 +109,10 @@ def test_gate_falls_back_for_multi_k(monkeypatch):
                           nbands=6, use_symmetry=False)
     assert len(multik.spheres) > 1  # genuinely multi-k
 
-    monkeypatch.setattr(loop, "_GAMMA_REAL_ENV", "auto")
+    monkeypatch.setenv("GRADWAVE_GAMMA_REAL", "auto")
     assert loop._resolve_gamma_real(multik, PBE(), None, None, False, None) is None
 
-    monkeypatch.setattr(loop, "_GAMMA_REAL_ENV", "1")
+    monkeypatch.setenv("GRADWAVE_GAMMA_REAL", "1")
     with pytest.raises(ValueError, match="k-points"):
         loop._resolve_gamma_real(multik, PBE(), None, None, False, None)
 
@@ -121,11 +120,11 @@ def test_gate_falls_back_for_multi_k(monkeypatch):
 def test_gate_falls_back_for_blockers(o2_system, monkeypatch):
     """Operators the real GammaHamiltonian does not implement disqualify it:
     `auto` falls back, `1` raises with the blocker named."""
-    monkeypatch.setattr(loop, "_GAMMA_REAL_ENV", "auto")
+    monkeypatch.setenv("GRADWAVE_GAMMA_REAL", "auto")
     # fp32 mixed-precision draft
     assert loop._resolve_gamma_real(o2_system, PBE(), None, None, True, None) is None
 
-    monkeypatch.setattr(loop, "_GAMMA_REAL_ENV", "1")
+    monkeypatch.setenv("GRADWAVE_GAMMA_REAL", "1")
     with pytest.raises(ValueError, match="mixed-precision"):
         loop._resolve_gamma_real(o2_system, PBE(), None, None, True, None)
 
@@ -133,7 +132,7 @@ def test_gate_falls_back_for_blockers(o2_system, monkeypatch):
 def test_gate_builds_gamma_basis(o2_system, monkeypatch):
     """On an eligible Γ system the gate returns a half-sphere basis roughly
     half the size of the full sphere (the memory lever)."""
-    monkeypatch.setattr(loop, "_GAMMA_REAL_ENV", "auto")
+    monkeypatch.setenv("GRADWAVE_GAMMA_REAL", "auto")
     gb = loop._resolve_gamma_real(o2_system, PBE(), None, None, False, None)
     assert gb is not None
     assert gb.nhalf == (gb.npw + 1) // 2
