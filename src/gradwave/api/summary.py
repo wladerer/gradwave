@@ -816,6 +816,29 @@ def _thermochem_base_summary(inp: Input, task: str) -> dict[str, Any]:
     }
 
 
+def _magnons_base_summary(inp: Input, task: str) -> dict[str, Any]:
+    """Summary scaffold for the magnons LSWT task. Like _thermochem_base_summary
+    it resolves no pseudopotentials (magnons runs no SCF and carries none); the
+    parameters block records the spin-model dimensions and q-path. The driver
+    appends its result block under summary[task] and a trailing runtime_s."""
+    from gradwave._version import __version__
+
+    mp = inp.magnons
+    return {
+        "code": {"name": "gradwave", "version": __version__,
+                 "created": datetime.datetime.now().isoformat(timespec="seconds")},
+        "task": task,
+        "structure": _structure_block(inp),
+        "parameters": {
+            "formalism": "linear spin-wave theory",
+            "n_sublattices": len(mp.spins),
+            "n_bonds": len(mp.bonds),
+            "path": mp.path or "(lattice default)",
+            "npoints": int(mp.npoints),
+        },
+    }
+
+
 def _flapw_base_summary(inp: Input, task: str) -> dict[str, Any]:
     """Summary scaffold for the all-electron FLAPW / NMR tasks (flapw, nmr). Unlike
     _base_summary it does NOT resolve pseudopotentials (FLAPW/EFG is all-electron

@@ -13,6 +13,7 @@ from gradwave.api.dispersion import _apply_dispersion
 from gradwave.api.elastic import run_elastic
 from gradwave.api.eos import run_eos
 from gradwave.api.flapw import run_flapw, run_nmr
+from gradwave.api.magnons import run_magnons
 from gradwave.api.neb import run_neb
 from gradwave.api.phonons import run_phonons
 from gradwave.api.qha import run_qha
@@ -25,6 +26,7 @@ from gradwave.api.summary import (
     _cohp_summary_block,
     _error_estimate_block,
     _flapw_base_summary,
+    _magnons_base_summary,
     _optics_extra,
     _pdos_summary_block,
     _thermochem_base_summary,
@@ -173,6 +175,12 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
         summary = _thermochem_base_summary(inp, "thermochem")
         summary["thermochem"] = run_thermochem(inp, verbose=verbose)
         summary["runtime_s"] = round(time.time() - t0, 2)
+    elif inp.task == "magnons":
+        # numbers-in linear-spin-wave task: no SCF, no plane-wave result (res
+        # stays None so no checkpoint/volumetric is written below)
+        summary = _magnons_base_summary(inp, "magnons")
+        summary["magnons"] = run_magnons(inp, verbose=verbose)
+        summary["runtime_s"] = round(time.time() - t0, 2)
     elif inp.task == "flapw":
         # all-electron muffin-tin FLAPW SCF; no plane-wave SCFResult (res stays
         # None so no checkpoint/volumetric is written below)
@@ -187,7 +195,7 @@ def run(inp: Input, verbose: bool = True) -> dict[str, Any]:
         raise ValueError(
             f"unknown task {inp.task!r} "
             f"(scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons | "
-            f"thermochem | surface_energy | qha | flapw | nmr)")
+            f"thermochem | surface_energy | qha | magnons | flapw | nmr)")
 
     if inp.distributed:
         from gradwave.distributed import current_rank, maybe_destroy_process_group

@@ -1043,6 +1043,84 @@ class QHAParams:
 
 
 @dataclass(frozen=True)
+class MagnonBondSpec:
+    """One exchange bond (shell) of the Heisenberg model for the magnons task:
+    the coupling from magnetic sublattice ``i`` (home cell) to sublattice ``j``
+    in the cell displaced by integer lattice-vector triple ``r``. ``j_iso`` is
+    the isotropic Heisenberg scalar in **meV** (>0 ferromagnetic); ``dm`` the
+    optional Dzyaloshinskii-Moriya 3-vector (meV). The reverse bond (j, i, −r)
+    with the transposed tensor is generated automatically, so list each bond
+    once."""
+
+    i: int
+    j: int
+    r: tuple[int, int, int]
+    j_iso: float
+    dm: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+    def __post_init__(self):
+        object.__setattr__(self, "r", tuple(int(x) for x in self.r))
+        object.__setattr__(self, "dm", tuple(float(x) for x in self.dm))
+        if len(self.r) != 3:
+            raise InputError(f"magnons bond r must be 3 integers, got {self.r!r}")
+        if len(self.dm) != 3:
+            raise InputError(f"magnons bond dm must be a 3-vector, got {self.dm!r}")
+
+
+@dataclass(frozen=True)
+class MagnonParams:
+    """Magnon band structure via linear spin-wave theory (task: magnons) — a
+    numbers-in / dispersion-out post-processing task over
+    :mod:`gradwave.postscf.magnons`, in the spirit of ``thermochem``.
+
+    The top-level ``structure`` is the **magnetic primitive cell**; its lattice
+    supplies the q-path Brillouin zone and its atoms are the magnetic
+    sublattices. The classical Heisenberg model (see the module docstring for the
+    sign convention: J>0 ferromagnetic, K>0 easy-axis) is given by:
+
+    * ``spins`` — the spin length S_i per sublattice (one per atom in the
+      structure), e.g. S = M/2 in μ_B.
+    * ``bonds`` — the exchange shells (:class:`MagnonBondSpec`), J and DM in meV.
+    * ``moments`` — the ordered-state moment directions ê_i (unit 3-vectors, one
+      per sublattice); default all +ẑ (a collinear ferromagnet). Antiferromagnets
+      / canted states set these explicitly.
+    * ``anisotropy_k_meV`` / ``easy_axis`` — the single-ion easy-axis term K_i
+      (meV) and its axis n̂ (default +ẑ), which opens the magnon gap.
+
+    ``path`` / ``npoints`` select the ASE band path exactly as the phonon and
+    electronic-band tasks do. Frequencies are reported in meV."""
+
+    spins: tuple[float, ...] = ()
+    bonds: tuple[MagnonBondSpec, ...] = ()
+    moments: tuple[tuple[float, float, float], ...] | None = None
+    anisotropy_k_meV: tuple[float, ...] | None = None
+    easy_axis: tuple[float, float, float] = (0.0, 0.0, 1.0)
+    path: str = ""
+    npoints: int = 200
+
+    def __post_init__(self):
+        object.__setattr__(self, "spins", tuple(float(s) for s in self.spins))
+        object.__setattr__(self, "easy_axis",
+                           tuple(float(x) for x in self.easy_axis))
+        if self.moments is not None:
+            object.__setattr__(
+                self, "moments",
+                tuple(tuple(float(x) for x in m) for m in self.moments))
+        if self.anisotropy_k_meV is not None:
+            object.__setattr__(
+                self, "anisotropy_k_meV",
+                tuple(float(k) for k in self.anisotropy_k_meV))
+        if self.npoints < 2:
+            raise InputError(f"magnons.npoints must be >= 2, got {self.npoints}")
+        if any(s < 0 for s in self.spins):
+            raise InputError("magnons.spins must be non-negative")
+        # spins/moments length vs the structure's atom count is checked at run
+        # time in api.magnons.run_magnons (the default MagnonParams() carries no
+        # spins, so a construction-time raise would reject every non-magnons
+        # input).
+
+
+@dataclass(frozen=True)
 class ElasticParams:
     """Elastic constants: FD of the analytic stress over the six Voigt strains
     → the 6×6 stiffness C (and Voigt–Reuss–Hill moduli).
@@ -1375,7 +1453,7 @@ class Input:
     tot_magnetization: float | None = None  # fix M=N↑−N↓ (nspin=2): integer fill
     # without smearing, two-Fermi-level smeared FSM with smearing
     # scf | relax | neb | bands | optics | magnetism | eos | elastic | phonons |
-    # thermochem | surface_energy | qha | flapw | nmr
+    # thermochem | surface_energy | qha | magnons | flapw | nmr
     task: str = "scf"
     relax: RelaxParams = field(default_factory=RelaxParams)
     neb: NebParams = field(default_factory=NebParams)  # CI-NEB transition state
@@ -1387,6 +1465,7 @@ class Input:
     surface_energy: SurfaceEnergyParams = field(
         default_factory=SurfaceEnergyParams)  # slab-thickness γ sweep
     qha: QHAParams = field(default_factory=QHAParams)  # quasi-harmonic G(T),V(T)
+    magnons: MagnonParams = field(default_factory=MagnonParams)  # LSWT dispersion
     elastic: ElasticParams = field(default_factory=ElasticParams)
     phonons: PhononParams = field(default_factory=PhononParams)
     flapw: FlapwParams = field(default_factory=FlapwParams)  # all-electron FLAPW

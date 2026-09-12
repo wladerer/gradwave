@@ -25,6 +25,7 @@ from gradwave.api.eos import run_eos as run_eos
 from gradwave.api.flapw import reference_sigma_iso as reference_sigma_iso
 from gradwave.api.flapw import run_flapw as run_flapw
 from gradwave.api.flapw import run_nmr as run_nmr
+from gradwave.api.magnons import run_magnons as run_magnons
 from gradwave.api.phonons import run_phonons as run_phonons
 from gradwave.api.qha import run_qha as run_qha
 from gradwave.api.relax import _build_relax_calc as _build_relax_calc
@@ -85,6 +86,7 @@ __all__ = [
     "run_eos",
     "run_flapw",
     "run_magnetism",
+    "run_magnons",
     "run_nmr",
     "run_phonons",
     "run_qha",

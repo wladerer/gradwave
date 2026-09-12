@@ -687,3 +687,64 @@ def test_neb_param_validation(tmp_path, neb_block, needle):
     _write_final(tmp_path)
     with pytest.raises(InputError, match=needle):
         load_input(_write(tmp_path, _base(f"task: neb\nneb: {neb_block}\n")))
+
+
+# --- magnons (LSWT) task -------------------------------------------------------
+def _magnon_body(extra_magnons: str = "") -> str:
+    """A magnons-task input: numbers-in, so no pseudopotentials / ecut. A simple
+    cubic magnetic primitive cell (one sublattice)."""
+    return f"""
+structure:
+  cell: [[2.87, 0, 0], [0, 2.87, 0], [0, 0, 2.87]]
+  positions: {{cart: [[0, 0, 0]]}}
+  species: [Fe]
+task: magnons
+magnons:
+  spins: [1.1]
+  bonds:
+    - {{i: 0, j: 0, r: [1, 0, 0], j_iso: 15.0}}
+    - {{i: 0, j: 0, r: [0, 1, 0], j_iso: 15.0}}
+    - {{i: 0, j: 0, r: [0, 0, 1], j_iso: 15.0}}
+{extra_magnons}"""
+
+
+def test_magnons_parses_without_pseudopotentials(tmp_path):
+    from gradwave.inputs import load_input
+
+    inp = load_input(_write(tmp_path, _magnon_body("  npoints: 60\n")))
+    assert inp.task == "magnons"
+    assert inp.magnons.spins == (1.1,)
+    assert len(inp.magnons.bonds) == 3
+    assert inp.magnons.npoints == 60
+    assert inp.magnons.bonds[0].j_iso == pytest.approx(15.0)
+
+
+def test_magnons_requires_spins_and_bonds(tmp_path):
+    from gradwave.inputs import InputError, load_input
+
+    body = """
+structure:
+  cell: [[2.87, 0, 0], [0, 2.87, 0], [0, 0, 2.87]]
+  positions: {cart: [[0, 0, 0]]}
+  species: [Fe]
+task: magnons
+"""
+    with pytest.raises(InputError, match="requires magnons.spins"):
+        load_input(_write(tmp_path, body))
+
+
+def test_magnons_block_rejected_off_task(tmp_path):
+    from gradwave.inputs import InputError, load_input
+
+    extra = ("magnons:\n  spins: [1.0]\n"
+             "  bonds:\n    - {i: 0, j: 0, r: [1,0,0], j_iso: 10.0}\n")
+    with pytest.raises(InputError, match="only valid for task: magnons"):
+        load_input(_write(tmp_path, _base(extra)))
+
+
+def test_magnons_bond_key_typo_is_caught(tmp_path):
+    from gradwave.inputs import InputError, load_input
+
+    bad = _magnon_body().replace("j_iso: 15.0", "jiso: 15.0")
+    with pytest.raises(InputError):
+        load_input(_write(tmp_path, bad))

@@ -411,6 +411,29 @@ def plot_phonons(source, path=None):
     return _finish(fig, ax, path)
 
 
+def plot_magnons(source, path=None, ax=None):
+    """Magnon dispersion (LSWT) from a magnons.json: the branches ω(q) [meV]
+    along the q-path, high-symmetry labels on the x axis, ω = 0 marked."""
+    plt = _plt()
+    s = load(source)
+    mg = s.get("magnons", s)
+    x = np.asarray(mg["x"], dtype=float)
+    freqs = np.asarray(mg["frequencies_meV"], dtype=float)  # (nq, nbranch)
+    labels = mg["labels"]
+    if ax is None:
+        _fig, ax = plt.subplots(figsize=(5.4, 4.2))
+    for j in range(freqs.shape[1]):
+        ax.plot(x, freqs[:, j], color="#2a78d6", lw=1.1)
+    for xt, _lab in labels:
+        ax.axvline(xt, color="#52514e", lw=0.5, alpha=0.5)
+    ax.axhline(0.0, color="#52514e", lw=0.5, ls="--", alpha=0.7)
+    ax.set_xticks([xt for xt, _ in labels])
+    ax.set_xticklabels([lab.replace("G", "Γ") for _, lab in labels])
+    ax.set_ylabel("ω [meV]")
+    ax.set_xlim(x.min(), x.max())
+    return _finish(ax.figure, ax, path)
+
+
 def plot_dos(source, path=None, ax=None, width: float = 0.1):
     """Broadened DOS; spin-down plotted negative for nspin=2."""
     plt = _plt()
