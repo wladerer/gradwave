@@ -33,11 +33,9 @@ from gradwave.grids import GSphere
 # temporaries the apply/density chain holds at once stay under this. Sizes a
 # band chunk as budget / (elem_bytes · n_grid · nk). CPU paths do not chunk by
 # default (opt in with GRADWAVE_CPU_DENSE_BUDGET — see _cpu_dense_budget_bytes).
-# Tunable via GRADWAVE_GPU_DENSE_BUDGET (bytes) so a memory-tight card (e.g. a
-# 6 GB RTX 3050 running a large-k slab) can shrink the FFT-box peak: a smaller
-# budget → fewer bands per chunk → smaller transient dense boxes, BIT-EXACT
-# (identical arithmetic, only the batch tiling changes). Read per call so a test
-# or benchmark can A/B it in-process; default is the historical 4e8.
+# GRADWAVE_GPU_DENSE_BUDGET overrides (bytes, read per call); chunking is
+# BIT-EXACT — only the batch tiling changes.
+# [D-003] budget defaults & precedence rationale — docs/design/decision-records.md
 _GPU_DENSE_BUDGET_BYTES = 4e8
 
 
@@ -56,12 +54,10 @@ def _gpu_dense_budget_bytes() -> float:
 
 
 # Process-local CPU dense-box band-chunk budget set by the SCF's auto memory
-# estimator (scf.loop._auto_cpu_dense_budget). It is a fallback BELOW the
-# explicit GRADWAVE_CPU_DENSE_BUDGET env var: an operator forcing a budget by
-# hand still wins, and clearing the override (set None) restores the historical
-# unchunked CPU path. The estimator only sets it for cells whose unchunked dense
-# box would be a large fraction of RAM, so small/medium cells keep the override
-# None and run byte-for-byte as before (see set_cpu_dense_budget_override).
+# estimator (scf.loop._auto_cpu_dense_budget). A fallback BELOW the explicit
+# GRADWAVE_CPU_DENSE_BUDGET env var: a hand-forced budget still wins, and None
+# restores the historical unchunked CPU path.
+# [D-003] why env > override > None — docs/design/decision-records.md
 _CPU_DENSE_BUDGET_OVERRIDE: float | None = None
 
 
@@ -83,12 +79,10 @@ def _cpu_dense_budget_bytes() -> float | None:
 
     Resolution order: the explicit ``GRADWAVE_CPU_DENSE_BUDGET`` env var (must be
     > 0) wins; else the process-local override the SCF auto estimator set for a
-    large cell (``set_cpu_dense_budget_override``); else ``None``. Band-chunking
-    bounds a large slab's dense FFT box (e.g. ~5e8 keeps it near 0.5 GB so a
-    ~200-atom slab SCF fits a 16 GB laptop). Chunking a band loop that carries NO
-    cross-band reduction (the H-apply local term) is bit-identical; the density
-    build's per-chunk partial sum reorders the band reduction at the ~1e-16 ulp
-    level (documented in ``density_b``)."""
+    large cell (``set_cpu_dense_budget_override``); else ``None``. Chunking the
+    H-apply local term is bit-identical (no cross-band reduction); the density
+    build's per-chunk partial sum reorders the band sum at the ~1e-16 ulp level.
+    [D-003] slab sizing evidence — docs/design/decision-records.md"""
     raw = os.environ.get("GRADWAVE_CPU_DENSE_BUDGET")
     if raw is None:
         return _CPU_DENSE_BUDGET_OVERRIDE
@@ -122,58 +116,29 @@ def _dense_band_chunk(n_grid: int, nk: int, device: torch.device, elem_bytes: in
 # Small-cell fast path for the local potential term V(r)·ψ(r). On the wavefunction
 # G-sphere this term is EXACTLY the convolution out(G_i)=Σ_j V̂(G_i−G_j) c(G_j) =
 # M @ c, with M[i,j]=V̂(G_i−G_j) (a Toeplitz/difference matrix; V̂=FFT of v_eff).
-# One dense GEMM replaces the scatter → ifftn → ·v_eff → fftn → gather chain,
-# deleting both FFTs and the irregular scatter/gather that dominate the small-cell
-# apply. Bit-identical to the FFT path (it's an algebraic identity, not an
-# approximation). M is npw²·16 B, so the path is memory-gated: the cached per-k
-# matrix must fit the budget below (nk·npw²·elem ≤ budget), which restricts it to
-# small npw where npw² beats the box FFT's N·logN.
+# One dense GEMM replaces the scatter → ifftn → ·v_eff → fftn → gather chain.
+# Bit-identical to the FFT path (an algebraic identity, not an approximation).
+# M is npw²·16 B, so the path is memory-gated (nk·npw²·elem ≤ budget below).
 #
-# AUTO-GATED (default "auto"). The win is size-dependent: dense GEMM beats the
-# box FFT at small npw (measured 14× per apply at npw≈190, ecut 12 Ry Si; ~1.5×
-# on a 512-k Al SCF) but LOSES at typical-ecut npw (measured whole-SCF Si 0.80×,
-# GaAs 0.79× at production cutoffs; Al neutral). The crossover is machine- and
-# geometry-dependent, so instead of a hand-tuned threshold the gate is a
-# MEASURED VERDICT: on the first apply for a given (device, nk, npw_max, shape,
-# dtype) signature, both local-term paths are timed on the real block and the
-# Toeplitz path is adopted only if it beats the FFT path by ≥30% (margin covers
-# the per-iteration M rebuild, amortized over the iteration's applies). The
-# verdict is cached per signature for the process lifetime; the trial costs one
-# extra local-term evaluation once per geometry. Both paths are exact (an
-# algebraic identity, agreement at fp round-off), so the trial's answer is
-# usable either way. ``GRADWAVE_TOEPLITZ`` in {"auto", "on", "off"} (read once
-# at import) forces the path for A/B benchmarks; "on" bypasses the trial.
-#
-# The difference-index table depends on geometry alone, so it is cached ON the
-# BatchedK (built at most once per SCF, not per Hamiltonian ctor — the ctor
-# runs every SCF iteration and the old per-ctor build was pure waste).
-#
-# The budget caps the cached matrix at nk·npw²·16 B (fp64 worst case); the
-# difference-index table adds ~half that again, both held for the Hamiltonian's
-# lifetime. The default (256 MiB) is deliberately conservative so the path never
-# surprises a memory-tight GPU: it covers small cells and modest k-meshes (e.g.
-# npw≈260 up to ~250 k-points). Raise it to extend coverage to finer meshes /
-# larger npw when memory allows; GRADWAVE_TOEPLITZ=off disables the path
-# entirely.
-#
-# CUDA is opt-in (default off). The whole-SCF win is measured and verified on CPU
-# fp64 (dense GEMM beats the box FFT at small npw). On GPU the picture did NOT hold
-# end-to-end on the tested hardware (RTX 3050): the isolated fp32 M@c is tensor-
-# core-fast, but the non-apply fp64 FFTs (density build, Hartree, XC) dominate the
-# SCF and Amdahl-dilute the gain, while fp64 GEMM is crippled on consumer GPUs so a
-# pure-fp64 GPU SCF would REGRESS. A data-center GPU (real fp64 / saturation) may
-# invert this — flip _TOEPLITZ_ON_CUDA to test there — but it stays off by default
-# until validated so the path never silently slows a GPU run.
+# AUTO-GATED: whether it is USED is a one-time timed trial per (device, nk,
+# npw_max, shape, dtype) signature, not a size threshold. ``GRADWAVE_TOEPLITZ``
+# in {"auto", "on", "off"} (read once at import) forces the path for A/B
+# benchmarks; "on" bypasses the trial.
+# [D-001] measured verdict gate (14× small-npw win / 0.8× production-ecut loss)
+# — docs/design/decision-records.md
 _TOEPLITZ_MODE = os.environ.get("GRADWAVE_TOEPLITZ", "auto").strip().lower()
-_TOEPLITZ_ON_CUDA = False  # opt-in: GPU whole-SCF win unproven; consumer fp64 regresses
-_TOEPLITZ_M_BUDGET_BYTES = 1 << 28  # 256 MiB cap on the cached local-potential matrix
+# [D-002] off on consumer GPUs (fp64 FFTs dominate; would regress) — see
+# docs/design/decision-records.md; flip to validate on a data-center GPU.
+_TOEPLITZ_ON_CUDA = False
+# 256 MiB cap on the cached per-k matrix (+~half again for the index table);
+# deliberately conservative — raise to extend coverage ([D-001]).
+_TOEPLITZ_M_BUDGET_BYTES = 1 << 28
 # measured verdicts: (device type, nk, npw_max, shape, dtype) → use Toeplitz?
 _TOEP_VERDICT: dict[
     tuple[str, int, int, tuple[int, int, int], torch.dtype], bool
 ] = {}
-# The trial adopts Toeplitz only when t_toep < margin·t_fft (i.e. ≥30% faster)
-# — the headroom covers the per-iteration M rebuild amortized over that
-# iteration's applies.
+# Adopt only when t_toep < margin·t_fft (≥30% faster): headroom covers the
+# per-iteration M rebuild amortized over the iteration's applies ([D-001]).
 _TOEP_TRIAL_MARGIN = 0.7
 
 # Optional H-application instrumentation. BatchedHamiltonian.apply is the single
@@ -210,13 +175,11 @@ class BatchedK:
     proj_atom_index: torch.Tensor  # (nproj,)
     dij_full: torch.Tensor  # (nproj, nproj)
     # Toeplitz difference-index tables keyed by dense-grid shape, filled
-    # lazily by BatchedHamiltonian._toeplitz_idx (geometry-only, so shared
+    # lazily by BatchedHamiltonian._toeplitz_idx (geometry-only, shared
     # across the per-iteration Hamiltonian rebuilds of one SCF). Each entry
-    # stores (flat_idx it was built from, table): a BatchedK derived via
-    # dataclasses.replace with a different flat_idx (e.g. the k+q reindex in
-    # postscf/dfpt_q) inherits this dict, and a table built for the parent's
-    # spheres is silently wrong physics on the derived one — the consumer
-    # revalidates before trusting a hit.
+    # stores (flat_idx it was built from, table); the consumer revalidates
+    # before trusting a hit — a foreign table is silently wrong physics.
+    # [D-006] cache placement & revalidation — docs/design/decision-records.md
     toep_idx_cache: (
         dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor]] | None
     ) = None
@@ -233,9 +196,8 @@ class BatchedK:
         """This batch restricted/reordered to k rows ``idx`` (per-k fields only;
         npw_max, the atom index and the D-matrix are k-independent). The
         Toeplitz difference-index cache is dropped, NOT inherited: it belongs
-        to the parent's flat_idx, and a table built for the parent's spheres is
-        wrong for the reindexed ones (the k+q Hamiltonian would silently apply
-        the wrong local term and a Sternheimer CG diverges to NaN)."""
+        to the parent's flat_idx and would be wrong physics on the reindexed
+        spheres ([D-006], docs/design/decision-records.md)."""
         import dataclasses
 
         return dataclasses.replace(
@@ -311,13 +273,10 @@ def projectors_b(bk: BatchedK, positions: torch.Tensor) -> torch.Tensor:
         # keeps a single clean autograd node. The SCF itself calls under
         # no_grad, so this branch runs only where the graph is needed.
         return bk.proj_phase_free * phases[:, :, idx].permute(0, 2, 1)
-    # Memory-light no-grad path: materialize per k rather than gathering all k at
-    # once. The all-k gather `phases[:, :, idx].permute(0,2,1)` builds a transient
-    # (nk, nproj, npw_max) complex block on TOP of the (equally large)
-    # proj_phase_free and the returned table — three copies of the projector at
-    # once (measured 0.73 GiB each at Si-64/30 Ry). The per-k loop holds one
-    # k-slice transient instead, byte-identical to the batched gather (same
-    # indexing, same multiply, per-k independent — no cross-k reduction).
+    # Memory-light no-grad path: materialize per k rather than gathering all k
+    # at once — byte-identical (per-k independent, no cross-k reduction), one
+    # k-slice transient instead of a third full projector-table copy.
+    # [D-005] measured 3×0.73 GiB peak at Si-64/30 Ry — docs/design/decision-records.md
     out = torch.empty_like(bk.proj_phase_free)
     for k in range(bk.proj_phase_free.shape[0]):
         out[k] = bk.proj_phase_free[k] * phases[k][:, idx].permute(1, 0)
@@ -385,12 +344,9 @@ class BatchedHamiltonian:
             nk, npw = bk.mask.shape
             if nk * npw * npw * 16 <= _TOEPLITZ_M_BUDGET_BYTES:
                 self._toep_eligible = True
-        # cdtype → cast (t, v_eff, p, dij). No resident p.conj() copy: the
-        # becp contraction folds the conjugation into the BLAS call (matmul on
-        # a conj-transpose VIEW → cgemm ConjTrans), exactly as the native C
-        # kernel does with zgemm(CblasConjTrans). Materializing p.conj() cost a
-        # second full (nk, nproj, npw_max) projector table resident for the H's
-        # lifetime (~0.73 GiB at Si-64/30 Ry) for no arithmetic benefit.
+        # cdtype → cast (t, v_eff, p, dij). No resident p.conj() copy: becp_b
+        # folds the conjugation into the BLAS matmul.
+        # [D-004] why no conjugate table — docs/design/decision-records.md
         self._tab_cache: dict[
             torch.dtype, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
         ] = {}
@@ -445,16 +401,11 @@ class BatchedHamiltonian:
 
         Geometry-only (Miller indices are fixed for the whole SCF), so it is
         built at most once per BatchedK and shared across the per-iteration
-        Hamiltonian rebuilds — the old per-ctor build cost ~one FFT apply per
-        iteration for nothing.
-
-        A cache hit is trusted only if it was built from THIS operator's
-        gather_idx: a derived BatchedK (dataclasses.replace with a new
-        flat_idx — the k+q reindex in postscf/dfpt_q) shares the parent's
-        dict, and a foreign table is silently wrong physics (the Sternheimer
-        CG then diverges to NaN). The O(nk·npw) equality check is noise next
-        to the O(nk·npw²) table build; the identity fast path covers the
-        rebuild-per-iteration case."""
+        Hamiltonian rebuilds. A cache hit is trusted only if it was built from
+        THIS operator's gather_idx (identity fast path, else an O(nk·npw)
+        equality check) — a foreign table from a derived BatchedK is silently
+        wrong physics. [D-006] history & the Sternheimer-NaN postmortem —
+        docs/design/decision-records.md"""
         if self._toep_idx is None:
             if self.bk.toep_idx_cache is None:
                 self.bk.toep_idx_cache = {}
@@ -521,13 +472,13 @@ class BatchedHamiltonian:
             out[:, lo:hi] += vg.gather(2, gath)
 
     def _use_toeplitz(self, c: torch.Tensor, v_eff: torch.Tensor) -> bool:
-        """The measured per-geometry gate for the Toeplitz local apply.
+        """The measured per-geometry gate for the Toeplitz local apply ([D-001],
+        docs/design/decision-records.md).
 
         "on" forces it (within eligibility); "auto" runs a one-time trial per
         (device, nk, npw_max, shape, dtype) signature: both local-term paths
         are timed on the real block and Toeplitz is adopted only if
-        t_toep < ``_TOEP_TRIAL_MARGIN`` · t_fft. The trial costs one extra local-term
-        evaluation once per process per signature; on a losing verdict the
+        t_toep < ``_TOEP_TRIAL_MARGIN`` · t_fft. On a losing verdict the
         trial's M and index table are freed immediately."""
         if not self._toep_eligible:
             return False
@@ -689,14 +640,9 @@ def becp_b(p: torch.Tensor, c: torch.Tensor,
     """⟨p|ψ⟩ overlaps (nk, nb, nproj) = Σ_g conj(p) c.
 
     Computed as a batched matmul against a conjugate-transpose VIEW of ``p``:
-    ``matmul(c, p.conj().mT)``. On CPU this folds the conjugation into the BLAS
-    call (cgemm with the ConjTrans flag) — no materialized conjugate table,
-    mirroring the native C kernel's ``zgemm(CblasConjTrans)``. The einsum form
-    this replaced could not fold the conj, so hot callers cached a resolved
-    ``p.conj()`` (a second full projector table resident for the H's lifetime,
-    ~0.73 GiB at Si-64/30 Ry); the matmul removes both the resident copy and the
-    per-round re-materialization.
-
-    ``p_conj`` is retained for call-site compatibility and IGNORED — the conj is
-    now folded, so no precomputed conjugate is needed."""
+    ``matmul(c, p.conj().mT)`` — BLAS folds the conjugation (cgemm ConjTrans),
+    so no conjugate table is ever materialized. ``p_conj`` is retained for
+    call-site compatibility and IGNORED.
+    [D-004] why the einsum + cached-conj form was replaced —
+    docs/design/decision-records.md"""
     return torch.matmul(c, p.conj().transpose(-2, -1))
