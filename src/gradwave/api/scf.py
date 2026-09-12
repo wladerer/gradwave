@@ -9,7 +9,6 @@ from gradwave.api._common import (
     _DEFAULT_MIXING_HISTORY,
     SPIN_XC_REGISTRY,
     XC_REGISTRY,
-    _davidson_memory_env,
     _mixing_scheme,
 )
 from gradwave.api.system import (
@@ -21,6 +20,14 @@ from gradwave.api.system import (
 )
 from gradwave.core.xc.base import XCFunctional
 from gradwave.inputs import Input, InputError
+from gradwave.scf.options import (
+    BoundaryOptions,
+    HubbardOptions,
+    MemoryOptions,
+    MixerOptions,
+    SCFOptions,
+    SpinOptions,
+)
 
 if TYPE_CHECKING:
 
@@ -44,14 +51,38 @@ def run_scf(
 
     ``start_from`` warm-starts the density from a previous converged result
     (the volume-scan chain in ``run_eos`` uses it); when None the checkpoint in
-    ``inp.restart`` is used instead, if any."""
-    # scf.memory bridge: export the Davidson subspace knobs (max_dim_factor /
-    # subspace budget / storage) to the environment that solvers.davidson reads
-    # per solve, for the duration of THIS SCF only (restored on exit, so an EOS/
-    # relax chain of run_scf calls does not leak). k_chunk is threaded as an
-    # explicit kwarg to scf() below (see _run_scf). A default Input sets nothing.
-    with _davidson_memory_env(inp):
-        return _run_scf(inp, system, verbose, start_from)
+    ``inp.restart`` is used instead, if any.
+
+    The ``scf.memory`` knobs travel as ARGUMENTS (Input → MemoryOptions →
+    scf()/scf_uspp()/scf_noncollinear() → solvers.davidson / core.batch); the
+    ``GRADWAVE_*`` env vars remain the documented user-facing overrides,
+    layered over the passed values at solve time. The former api → environment
+    bridge (``_davidson_memory_env``) is retired — config via os.environ
+    mutation was a measured incident class (an import-frozen read silently
+    ignoring it poisoned a benchmark ladder)."""
+    return _run_scf(inp, system, verbose, start_from)
+
+
+def _memory_options(inp: Input, *, k_levers: bool = True) -> MemoryOptions:
+    """The ``scf.memory`` block as a MemoryOptions for the SCF drivers.
+
+    ``k_levers=False`` strips ``k_chunk``/``k_parallel`` for the branches that
+    never threaded them (hybrid Fock couples orbitals across k; the spinor
+    driver has no k-streamed solve) — those Input fields were always silently
+    inert there, and stripping keeps that exact behaviour rather than turning
+    an old no-op into a new error. The default "complex128" storage maps to
+    None so a default Input hands the drivers an all-None group (the
+    byte-for-byte historical solve)."""
+    mem = inp.scf.memory
+    storage = mem.subspace_storage if mem.subspace_storage != "complex128" else None
+    return MemoryOptions(
+        k_chunk=mem.k_chunk if k_levers else None,
+        k_parallel=mem.k_parallel if k_levers else None,
+        max_dim_factor=mem.max_dim_factor,
+        subspace_budget_gb=mem.subspace_budget_gb,
+        subspace_storage=storage,
+        dense_budget_gb=mem.dense_budget_gb,
+    )
 
 
 def _run_scf(
@@ -129,45 +160,35 @@ def _run_scf(
 
     kerker = inp.scf.mixing.kerker
     kerker = None if kerker == "auto" else bool(kerker)
-    # dict(...) infers a value type from this mixed bag of kwargs (int | str |
-    # float | bool | list[float] | None); explicit dict[str, Any] avoids that
-    # union being checked, key-blind, against scf()/scf_uspp()'s **kwargs
-    # below (the whole point of merging these here is to share one literal
-    # between both call sites without duplicating every argument name twice).
+    # DFT+U: the same manifold list feeds the NC and USPP/PAW SCF (both take a
+    # `hubbard=` kwarg — a runtime input, so it stays a flat argument); the
+    # convergence aids ride in the HubbardOptions group. Defaults (β=1.0, ramp
+    # off) leave today's numbers bit-for-bit.
+    manifolds = _hubbard_manifolds(inp)
+    hub_grp = None
+    if manifolds is not None:
+        hub_grp = HubbardOptions(occ_mix=inp.hubbard.occ_mix,
+                                 u_ramp_iters=inp.hubbard.u_ramp_iters)
+    if inp.tot_magnetization is not None and uspp:
+        # fixed spin moment: a collinear nspin=2 pin. scf_uspp has no such
+        # mode; error rather than silently running an unconstrained SCF that
+        # would masquerade as a fixed-moment result.
+        raise NotImplementedError(
+            "tot_magnetization (fixed spin moment) is norm-conserving only "
+            "— the USPP/PAW SCF driver has no fixed-moment mode yet")
+    # The shared scalar config both drivers consume identically. dict[str, Any]
+    # for the same reason the old flat-kwarg literal used it: the value union
+    # would otherwise be checked key-blind against SCFOptions' fields.
     common: dict[str, Any] = dict(
-        nspin=inp.nspin, start_mag=mags,
         smearing=inp.smearing.type, width=inp.smearing.width,
         max_iter=inp.scf.max_iter, etol=inp.scf.etol, rhotol=inp.scf.rhotol,
-        mixing_alpha=inp.scf.mixing.alpha, precond=inp.scf.mixing.precond,
-        # auto → None so each formalism's resolver (scf / scf_uspp) picks its
-        # evidence-backed default; both branches consume it identically here.
-        mixing_scheme=_mixing_scheme(inp),
         diago_tol=inp.scf.diago_tol, verbose=verbose,
-        # energy-metric convergence gate (opt-in via scf.convergence: "energy").
-        # Both the NC scf() and USPP scf_uspp() take these kwargs; the default
-        # "density" leaves the density gate bit-for-bit unchanged.
+        # energy-metric convergence gate (opt-in via scf.convergence:
+        # "energy"); "density" leaves the density gate bit-for-bit unchanged.
         energy_metric=(inp.scf.convergence == "energy"), entol=inp.scf.entol,
+        eigensolver=inp.scf.eigensolver,
+        hubbard=hub_grp,
     )
-    # DFT+U: the same manifold list feeds the NC and USPP/PAW SCF (both take a
-    # `hubbard=` kwarg); species already resolved to the setup's integer index.
-    manifolds = _hubbard_manifolds(inp)
-    if manifolds is not None:
-        common["hubbard"] = manifolds
-        # +U convergence aids (both collinear drivers take these kwarg names);
-        # defaults (β=1.0, ramp off) leave today's numbers bit-for-bit
-        common["hub_occ_mix"] = inp.hubbard.occ_mix
-        common["hub_u_ramp_iters"] = inp.hubbard.u_ramp_iters
-    if inp.tot_magnetization is not None:
-        # fixed spin moment: a collinear nspin=2 pin — integer occupations
-        # without smearing, two-Fermi-level smeared FSM with smearing (see
-        # scf/common.py:fsm_smeared_occupations). scf_uspp has no such kwarg;
-        # error rather than silently running an unconstrained SCF that would
-        # masquerade as a fixed-moment result.
-        if uspp:
-            raise NotImplementedError(
-                "tot_magnetization (fixed spin moment) is norm-conserving only "
-                "— the USPP/PAW SCF driver has no fixed-moment mode yet")
-        common["tot_magnetization"] = inp.tot_magnetization
     # uspp (from _is_uspp(upfs) above) already tells us which concrete type
     # `system` is — the two branches below just name that for the checker.
     if uspp:
@@ -181,32 +202,53 @@ def _run_scf(
             raise InputError(
                 "scf.eigensolver='chebyshev' is norm-conserving only; the "
                 "USPP/PAW generalized S-metric problem is not supported yet")
-        # history=None keeps the per-scheme default (johnson 12, else 8);
-        # mixing_scheme rides in `common` (shared with the NC branch below)
-        return scf_uspp(cast("USPPSystem", system), xc,
-                        mixing_history=inp.scf.mixing.history,
-                        mixing_kerker=kerker, start_from=start_from,
-                        dist_ctx=dist_ctx, boundary=inp.scf.boundary,
-                        esm_bias=inp.scf.esm_bias, **common)
+        opts = SCFOptions(
+            **common,
+            # history=None keeps the per-scheme default (johnson 12, else 8);
+            # scheme auto → None so the formalism's resolver picks its
+            # evidence-backed default (_resolve_uspp_mixing_scheme)
+            mixer=MixerOptions(alpha=inp.scf.mixing.alpha,
+                               history=inp.scf.mixing.history,
+                               scheme=_mixing_scheme(inp), kerker=kerker,
+                               precond=inp.scf.mixing.precond),
+            spin=SpinOptions(nspin=inp.nspin, start_mag=mags),
+            # target_mu is NC-only and was never threaded on this branch — an
+            # Input setting it on a USPP run stays the historical silent no-op
+            # here (scf_uspp itself rejects a non-None value loudly).
+            boundary=BoundaryOptions(kind=inp.scf.boundary,
+                                     esm_bias=inp.scf.esm_bias),
+            # only dense_budget_gb: the subspace/k knobs are NC-only and the
+            # USPP generalized Davidson never read them (the old env bridge
+            # exported them unread) — scf_uspp rejects non-None values, so
+            # strip rather than convert a historical no-op into an error.
+            memory=MemoryOptions(dense_budget_gb=inp.scf.memory.dense_budget_gb),
+        )
+        return scf_uspp(cast("USPPSystem", system), xc, opts=opts,
+                        hubbard=manifolds, start_from=start_from,
+                        dist_ctx=dist_ctx)
     from gradwave.scf.loop import scf
 
-    return scf(cast("System", system), cast("XCFunctional", xc),
-               kerker=kerker, start_from=start_from,
-               eigensolver=inp.scf.eigensolver,
-               mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
-               dist_ctx=dist_ctx,
-               boundary=inp.scf.boundary,
-               esm_bias=inp.scf.esm_bias,
-               target_mu=inp.scf.target_mu,
-               # k-streaming (scf.memory.k_chunk): cap the resident Davidson
-               # subspace at k_chunk·m·npw. None → all-k solve (or the
-               # GRADWAVE_K_CHUNK env default when set — _resolve_k_chunk).
-               k_chunk=inp.scf.memory.k_chunk,
-               # k-parallel eigensolve (scf.memory.k_parallel): per-k Davidson
-               # tasks on a CPU thread pool. None → serial (or the
-               # GRADWAVE_K_PARALLEL env default — _resolve_k_parallel).
-               k_parallel=inp.scf.memory.k_parallel,
-               **common)
+    opts = SCFOptions(
+        **common,
+        mixer=MixerOptions(
+            alpha=inp.scf.mixing.alpha,
+            # the NC mixers take a fixed integer history (None → the shared
+            # default the api has always supplied)
+            history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
+            scheme=_mixing_scheme(inp), kerker=kerker,
+            precond=inp.scf.mixing.precond),
+        spin=SpinOptions(nspin=inp.nspin, start_mag=mags,
+                         tot_magnetization=inp.tot_magnetization),
+        boundary=BoundaryOptions(kind=inp.scf.boundary,
+                                 esm_bias=inp.scf.esm_bias,
+                                 target_mu=inp.scf.target_mu),
+        # k-streaming/k-parallel + Davidson subspace + dense-box budget; None
+        # fields keep the env-default fallbacks (_resolve_k_chunk /
+        # _resolve_k_parallel / solvers.davidson's per-solve resolvers).
+        memory=_memory_options(inp),
+    )
+    return scf(cast("System", system), cast("XCFunctional", xc), opts=opts,
+               hubbard=manifolds, start_from=start_from, dist_ctx=dist_ctx)
 
 
 def _run_scf_noncollinear(
@@ -266,6 +308,11 @@ def _run_scf_noncollinear(
         diago_tol=inp.scf.diago_tol, verbose=verbose,
         nonmagnetic=inp.nonmagnetic,
         hubbard=manifolds,
+        # scf.memory subspace/dense knobs → spinor eigensolve arguments (the
+        # old env bridge applied them here too); k levers stripped — the
+        # spinor driver has no k-streamed solve and those Input fields were
+        # always inert on this branch.
+        memory=_memory_options(inp, k_levers=False),
     )
 
 
@@ -306,4 +353,9 @@ def _run_scf_hybrid(
         mixing_alpha=inp.scf.mixing.alpha,
         mixing_history=inp.scf.mixing.history or _DEFAULT_MIXING_HISTORY,
         kerker=kerker, diago_tol=inp.scf.diago_tol,
-        start_from=start_from, verbose=verbose)
+        start_from=start_from, verbose=verbose,
+        # scf.memory subspace/dense knobs, forwarded through hybrid_scf's
+        # **scf_kwargs to scf(memory=...) (the old env bridge applied them on
+        # this branch too); k levers stripped — hybrid Fock couples orbitals
+        # across k, and those Input fields were always inert here.
+        memory=_memory_options(inp, k_levers=False))

@@ -123,16 +123,24 @@ def davidson_adapter(
     nbands: int | None = None,
     max_iter: int = 40,
     max_dim_factor: int = 4,
+    force_dim_factor: int | None = None,
+    subspace_budget_gb: float | None = None,
+    subspace_storage: str | None = None,
     **kw: Any,
 ) -> EigResult:
     """Batched block Davidson — the baseline. `precond` is the kinetic diagonal
     T the Teter preconditioner uses; `nbands` is implied by X0 (kept for
-    signature parity)."""
+    signature parity). The three subspace-memory kwargs are the ``scf.memory``
+    knobs threaded as arguments (None → historical behaviour / env override
+    only — see solvers.davidson's module docstring)."""
     from gradwave.solvers.davidson import davidson_batched
 
     r = davidson_batched(
         apply_H, X0, precond, mask, tol=tol, max_iter=max_iter,
         max_dim_factor=max_dim_factor,
+        force_dim_factor=force_dim_factor,
+        subspace_budget_gb=subspace_budget_gb,
+        subspace_storage=subspace_storage,
     )
     return EigResult(
         r.eigenvalues, r.eigenvectors, r.n_iter, r.residual_norms,

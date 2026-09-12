@@ -290,14 +290,13 @@ def test_gamma_real_bit_exact_through_api(tmp_path, monkeypatch):
     (GRADWAVE_GAMMA_REAL=1) reproduces the complex path (=0) byte-for-byte. The
     gamma_real flag on the result confirms the real path actually RAN under =1
     (so the test is not silently comparing complex-to-complex)."""
-    import gradwave.scf.loop as loop
 
     torch.set_num_threads(8)
     path = _write(tmp_path, mesh=(1, 1, 1), symmetry=True)  # single Γ point
 
-    monkeypatch.setattr(loop, "_GAMMA_REAL_ENV", "0")
+    monkeypatch.setenv("GRADWAVE_GAMMA_REAL", "0")
     res_c = _run(path)
-    monkeypatch.setattr(loop, "_GAMMA_REAL_ENV", "1")
+    monkeypatch.setenv("GRADWAVE_GAMMA_REAL", "1")
     res_g = _run(path)
 
     assert res_c.converged and res_g.converged
@@ -316,10 +315,9 @@ def test_gamma_real_auto_falls_back_on_multi_k(tmp_path, monkeypatch):
     provably safe at a single Γ point): the run falls back to the complex path
     (gamma_real False) and still converges — a silent mis-fire on multi-k would
     be a correctness bug."""
-    import gradwave.scf.loop as loop
 
     torch.set_num_threads(8)
-    monkeypatch.setattr(loop, "_GAMMA_REAL_ENV", "auto")
+    monkeypatch.setenv("GRADWAVE_GAMMA_REAL", "auto")
     res = _run(_write(tmp_path, **_MULTIK))
 
     assert res.converged

@@ -64,7 +64,11 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from gradwave.solvers.davidson import _resolve_max_dim_factor
+from gradwave.solvers.davidson import (
+    _fp32_expansion_mode,
+    _resolve_max_dim_factor,
+    _subspace_storage_mode,
+)
 
 if TYPE_CHECKING:
     from gradwave.solvers.registry import EigResult
@@ -149,8 +153,17 @@ def _unsupported_reason(
     apply_H: Callable[[torch.Tensor], torch.Tensor],
     X0: torch.Tensor,
     precond: torch.Tensor,
+    subspace_storage: str | None = None,
 ) -> str | None:
-    """Why this solve cannot run natively, or None if it can."""
+    """Why this solve cannot run natively, or None if it can.
+
+    The fp32-expansion / subspace-storage checks share the per-solve resolvers
+    in solvers.davidson (env layered over the passed option), so a knob
+    arriving as an argument OR an env var falls back identically. The Toeplitz
+    check reads ``core.batch._TOEPLITZ_MODE`` — the live switch (env-seeded at
+    import, and force-set by the DFPT/response paths) rather than a second,
+    possibly disagreeing env read."""
+    from gradwave.core import batch as _batch
     from gradwave.core.batch import BatchedHamiltonian
 
     h = getattr(apply_H, "__self__", None)
@@ -164,12 +177,11 @@ def _unsupported_reason(
         return "USPP dual-grid (smooth-box) Hamiltonian"
     if not torch.equal(precond, h.bk.t):
         return "preconditioner diagonal differs from the Hamiltonian kinetic"
-    if os.environ.get("GRADWAVE_FP32_EXPANSION", "off").strip().lower() != "off":
+    if _fp32_expansion_mode() != "off":
         return "GRADWAVE_FP32_EXPANSION mode"
-    if (os.environ.get("GRADWAVE_SUBSPACE_STORAGE", "complex128")
-            .strip().lower() != "complex128"):
-        return "GRADWAVE_SUBSPACE_STORAGE=complex64 mode"
-    if os.environ.get("GRADWAVE_TOEPLITZ", "auto").strip().lower() == "on":
+    if _subspace_storage_mode(subspace_storage) != "complex128":
+        return "subspace_storage=complex64 mode"
+    if _batch._TOEPLITZ_MODE == "on":
         return "Toeplitz-forced local term (native kernel is the FFT path)"
     return None
 
@@ -216,9 +228,17 @@ def native_davidson_adapter(
     nbands: int | None = None,
     max_iter: int = 40,
     max_dim_factor: int = 4,
+    force_dim_factor: int | None = None,
+    subspace_budget_gb: float | None = None,
+    subspace_storage: str | None = None,
     **kw: Any,
 ) -> EigResult:
-    """Registry adapter: native solve when in scope, eager fallback otherwise."""
+    """Registry adapter: native solve when in scope, eager fallback otherwise.
+
+    The three subspace-memory kwargs mirror ``davidson_adapter``:
+    ``subspace_storage=complex64`` is outside the native scope (falls back
+    eager, where it applies); a forced/budgeted dim factor is honoured by the
+    native kernel via the shared ``_resolve_max_dim_factor``."""
     from gradwave.solvers.registry import EigResult, davidson_adapter
 
     lib = _load()
@@ -227,11 +247,14 @@ def native_davidson_adapter(
             f"eigensolver 'davidson-native' requested but the native library "
             f"is not built at {_so_path()} — {_BUILD_HINT}")
 
-    reason = _unsupported_reason(apply_H, X0, precond)
+    reason = _unsupported_reason(apply_H, X0, precond, subspace_storage)
     if reason is not None:
         r = davidson_adapter(apply_H, X0, precond, mask, tol=tol,
                              nbands=nbands, max_iter=max_iter,
-                             max_dim_factor=max_dim_factor, **kw)
+                             max_dim_factor=max_dim_factor,
+                             force_dim_factor=force_dim_factor,
+                             subspace_budget_gb=subspace_budget_gb,
+                             subspace_storage=subspace_storage, **kw)
         r.diagnostics["fallback_reason"] = reason
         return r
 
@@ -243,7 +266,8 @@ def native_davidson_adapter(
     hub_q = h.hub_q
     nhub = int(hub_q.shape[1]) if hub_q is not None else 0
     max_dim_factor = _resolve_max_dim_factor(
-        nk, nb, m, X0.element_size(), max_dim_factor)
+        nk, nb, m, X0.element_size(), max_dim_factor,
+        force=force_dim_factor, budget_gb=subspace_budget_gb)
     max_dim = min(max_dim_factor * nb, int(mask.sum(dim=1).min()))
 
     x0_np = X0.contiguous().numpy()

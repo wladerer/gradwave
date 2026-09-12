@@ -159,3 +159,64 @@ and the code keeps a one-line greppable pointer.
   built for the parent's spheres is silently wrong physics on the derived
   one: the k+q Hamiltonian applies the wrong local term and the Sternheimer
   CG diverges to NaN.
+
+## [D-007] CUDA batched tall-skinny QR: CPU offload gated by cols ≤ 16 AND a measured fp64 penalty ≥ 8
+
+- **Date:** 2026-07 (PR #174 tune) / 2026-08 (H100 retest) · **Status:** active
+- **Sites:** `src/gradwave/solvers/davidson.py` — `_QR_CPU_MAX_COLS`,
+  `_QR_OFFLOAD_PENALTY_THRESHOLD`, `_qr_offload_active`, `_qr_offload`
+- **Decision:** offload the (nk, npw, cols) reduced QR to CPU LAPACK only when
+  cols ≤ 16 (size gate) and the device's measured fp64/fp32 GEMM ratio is ≥ 8
+  (device gate; `GRADWAVE_QR_OFFLOAD` forces either way, read per call).
+- **Evidence:** found while investigating CUDA-graph round capture (which was
+  bit-identical at 1.0× — no launch-overhead gap anywhere in the round): this
+  QR, isolated, was the single biggest cost in an RTX 3050 round, BIGGER than
+  the two-FFT H-apply next to it (~3.9 ms vs ~2.3 ms at diamond-C, 50 Ry,
+  nk=8, npw=465, cols=8); a D2H + CPU LAPACK QR + H2D round trip ran the same
+  shape in ~0.3 ms (>10×) — cuSOLVER's fixed per-call batched geqrf/orgqr tax
+  on a tiny problem, the same mechanism as issue #133's eigh offload. A sweep
+  (nk 8..112, npw 465..2500, cols 8..64) put the clear-to-break-even boundary
+  at cols ≤ 16 (worst 0.98×, typically 2-12×), mixed above. The fp64-penalty
+  threshold is bracketed by an order of magnitude on each side: the RTX 3050
+  measures ratios ~20-60 (offload a clear win), while the 4×H100 session
+  (issue #206, benchmarks/results/h100-session) measured the offload as a
+  ~13% PENALTY (Cr2O3: 37.1 s on vs 32.7 s off, identical energy to
+  1.8e-10 meV/atom, identical 16 iterations) — a datacenter fp64 GPU
+  (ratio ~1-2) has no cuSOLVER tax to escape. Threshold 8 clears both.
+
+## [D-008] CholQR2 orthonormalization exists but defaults off
+
+- **Date:** 2026-08 · **Status:** active (retest on datacenter GPUs)
+- **Sites:** `src/gradwave/solvers/davidson.py` — `_cholqr_mode`, `_cholqr2`
+- **Decision:** `GRADWAVE_CHOLQR=on` swaps the tall-skinny QR for CholQR2
+  (Gram GEMM → fp64 Cholesky → triangular solve, twice; breakdown falls back
+  to QR per call). Default off.
+- **Evidence:** measured neutral on CPU (0.94-1.03× across the battery) and
+  neutral-to-slightly-negative on RTX 3050 whole-SCF — the QR round is too
+  thin a slice at these sizes to matter. Kept (GEMM-shaped, removes the
+  D2H/H2D round trip of the QR offload entirely) for a datacenter-GPU retest.
+
+## [D-009] Γ-point real-wavefunction path defaults OFF, not "auto"
+
+- **Date:** 2026-08 · **Status:** active
+- **Sites:** `src/gradwave/scf/loop.py` — `_gamma_real_mode`,
+  `_resolve_gamma_real`; `src/gradwave/core/gamma.py`
+- **Decision:** `GRADWAVE_GAMMA_REAL` defaults to "0" (complex path,
+  byte-for-byte) even though "auto" is provably safe and exact whenever it
+  engages. Opting in with "auto"/"1" is exact either way.
+- **Evidence:** the SCF *iteration count* near the convergence boundary is
+  not bit-reproducible between the two eigensolvers. Si's degenerate valence
+  top under smearing has a gauge-ambiguous density from a partially-occupied
+  degenerate subspace; the real embedded Davidson picks a different (equally
+  valid) orthonormal basis than the complex batched Davidson, so the SCF
+  residual differs at ~1e-10 — below the ~-30 eV energy agreement (machine
+  precision vs the complex path) but right at the rhotol=1e-9 boundary. A
+  warm start that saves one SCF iteration on the complex path can converge in
+  the same count on the Γ path
+  (tests/integration/test_calculator_warmstart_grid.py). The warm DENSITY
+  seed is threaded identically on both paths — a boundary effect, not a
+  missing warm start — so it cannot be cleanly removed by threading
+  coefficients. H-apply telemetry is transparent across both paths
+  (GammaHamiltonian bumps the shared core.batch tally), so that contract no
+  longer blocks "auto"; the iteration-count nonreproducibility is the one
+  remaining reason for the conservative default.

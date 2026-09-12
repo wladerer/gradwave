@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
-import os
-from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from gradwave.core.xc.base import XCFunctional
@@ -104,51 +101,13 @@ def time_reversal_ok(inp: Input) -> bool:
     return not (inp.noncollinear and not inp.nonmagnetic)
 
 
-@contextlib.contextmanager
-def _davidson_memory_env(inp: Input) -> Iterator[None]:
-    """Bridge the ``scf.memory`` Davidson knobs to the process environment for
-    the duration of one SCF call.
-
-    ``solvers.davidson`` reads ``GRADWAVE_MAX_DIM_FACTOR`` /
-    ``GRADWAVE_SUBSPACE_BUDGET_GB`` / ``GRADWAVE_SUBSPACE_STORAGE`` from the
-    environment *per solve*. Rather than thread three new kwargs through the
-    solver signature (shared by many call sites, and the SCF/relax/eos hot
-    paths), the api layer exports the Input's values here and restores the prior
-    environment on exit. Only a NON-DEFAULT field is exported, so:
-
-    * a default ``Input`` never touches the environment (byte-for-byte the
-      historical run), and
-    * a knob left unset does not clobber an externally-set env var — the
-      pre-existing ``GRADWAVE_*`` route still works when the Input is silent.
-
-    ``k_chunk`` is NOT handled here — it is threaded as the explicit
-    ``scf.loop.scf(k_chunk=)`` kwarg in ``run_scf`` (and a None value there
-    still falls back to ``GRADWAVE_K_CHUNK``)."""
-    mem = inp.scf.memory
-    overrides: dict[str, str] = {}
-    if mem.max_dim_factor is not None:
-        overrides["GRADWAVE_MAX_DIM_FACTOR"] = str(mem.max_dim_factor)
-    if mem.subspace_budget_gb is not None:
-        overrides["GRADWAVE_SUBSPACE_BUDGET_GB"] = str(float(mem.subspace_budget_gb))
-    if mem.subspace_storage != "complex128":
-        overrides["GRADWAVE_SUBSPACE_STORAGE"] = mem.subspace_storage
-    if mem.dense_budget_gb is not None:
-        # GB → bytes: core.batch reads GRADWAVE_CPU_DENSE_BUDGET in bytes and it
-        # takes precedence over the SCF's automatic estimator.
-        overrides["GRADWAVE_CPU_DENSE_BUDGET"] = str(float(mem.dense_budget_gb) * 1e9)
-    if not overrides:
-        yield
-        return
-    saved: dict[str, str | None] = {k: os.environ.get(k) for k in overrides}
-    try:
-        os.environ.update(overrides)
-        yield
-    finally:
-        for k, old in saved.items():
-            if old is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = old
+# NOTE: the former `_davidson_memory_env` api → environment bridge lived here
+# (exporting the scf.memory knobs as GRADWAVE_* env vars for solvers.davidson /
+# core.batch to read back). Retired: the knobs now flow as explicit arguments
+# (Input → scf.options.MemoryOptions → scf()/scf_uspp()/scf_noncollinear() →
+# the solver), and the GRADWAVE_* env vars remain user-facing overrides read
+# once per solve where each knob is resolved (see solvers/davidson.py and
+# core/batch.py). Config via os.environ mutation was a measured incident class.
 
 
 def build_xc(inp: Input):

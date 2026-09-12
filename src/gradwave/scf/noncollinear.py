@@ -31,7 +31,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import numpy as np
 import torch
@@ -66,6 +66,7 @@ from gradwave.scf.guess import sad_density
 from gradwave.scf.loop import System, _stack_dij
 from gradwave.scf.mixing import PulayMixer
 from gradwave.scf.moment_penalty import field_coeff
+from gradwave.scf.options import MemoryOptions
 from gradwave.scf.spinor_common import (
     apply_local_spinor,
     pack_grid_channels,
@@ -328,6 +329,7 @@ def _solve_spinor_bands(
     mixed_precision: bool, mp_crossover: float,
     metagga_op: Callable[[torch.Tensor], torch.Tensor] | None = None,
     hub_q: torch.Tensor | None = None, hub_dij: torch.Tensor | None = None,
+    solver_kw: dict[str, Any] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, SpinorHamiltonian]:
     """Diagonalize the spinor Hamiltonian for one iteration at diagonalization
     tolerance tol_eff (optional fp32 draft with an fp64 spinor renorm over the
@@ -341,7 +343,8 @@ def _solve_spinor_bands(
     t2_solve = t2.to(RDTYPE_LOW) if use_low else t2
     h = SpinorHamiltonian(bk, grid.shape, v_r, b_xc, projs_b, q=q_so, dij_so=dij_so,
                           metagga_op=metagga_op, hub_q=hub_q, hub_dij=hub_dij)
-    dav = davidson_batched(h.apply, coeffs.to(cdtype), t2_solve, mask2, tol=tol_eff)
+    dav = davidson_batched(h.apply, coeffs.to(cdtype), t2_solve, mask2,
+                           tol=tol_eff, **(solver_kw or {}))
     eigs = dav.eigenvalues.to(RDTYPE)
     coeffs = dav.eigenvectors.to(CDTYPE)
     if use_low:
@@ -565,6 +568,11 @@ def scf_noncollinear(
     precond_op: Callable[[torch.Tensor], torch.Tensor] | None = None,  # r -> P.r on density block
     # (charge channel), overriding constant Kerker there — e.g. a fitted learned_precond filter
     mixer_hook: Callable[[int, torch.Tensor, torch.Tensor], None] | None = None,  # (it, vin, vout)
+    memory: MemoryOptions | None = None,  # scf.memory knobs (scf/options.py):
+    # the Davidson subspace fields flow to the spinor eigensolve as arguments
+    # (env layered over them per solve, see solvers/davidson.py);
+    # dense_budget_gb sets the CPU dense FFT-box override. k_chunk/k_parallel
+    # are the collinear drivers' levers and are rejected here.
     hubbard: list[HubbardManifold] | None = None,  # noncollinear DFT+U
     # (Dudarev); the 2×2 spin-block generalization of the collinear occupation
     # matrix (core.hubbard.occupation_matrices_noncollinear). Shared with SOC
@@ -587,6 +595,24 @@ def scf_noncollinear(
             "symmetry system (setup_system(..., magmoms=...)); the nonmagnetic "
             "(m⃗ ≡ 0) case keeps the full crystal symmetry — pass nonmagnetic=True"
         )
+    # scf.memory knobs → per-solve solver arguments (mirrors scf.loop.scf's
+    # solver_kw; env vars are layered over these in solvers.davidson).
+    solver_kw: dict[str, int | float | str] = {}
+    if memory is not None:
+        if memory.k_chunk is not None or memory.k_parallel is not None:
+            raise NotImplementedError(
+                "k_chunk/k_parallel are collinear-driver levers — the spinor "
+                "SCF has no k-streamed or k-parallel eigensolve yet")
+        if memory.max_dim_factor is not None:
+            solver_kw["force_dim_factor"] = memory.max_dim_factor
+        if memory.subspace_budget_gb is not None:
+            solver_kw["subspace_budget_gb"] = memory.subspace_budget_gb
+        if memory.subspace_storage is not None:
+            solver_kw["subspace_storage"] = memory.subspace_storage
+        if memory.dense_budget_gb is not None:
+            from gradwave.core.batch import set_cpu_dense_budget_override
+
+            set_cpu_dense_budget_override(memory.dense_budget_gb * 1e9)
     grid, bk = system.grid, system.batch
     # setup_system always builds System.batch (build_batched runs unconditionally);
     # the field's `| None` only accommodates dataclasses.replace()-style partial
@@ -733,7 +759,7 @@ def scf_noncollinear(
         eigs, coeffs, h = _solve_spinor_bands(
             bk, grid, v_r, b_xc, projs_b, q_so, dij_so, coeffs, t2, mask2,
             tol_eff, mixed_precision, mp_crossover, metagga_op=metagga_op,
-            hub_q=hub_q, hub_dij=hub_dij_nc)
+            hub_q=hub_q, hub_dij=hub_dij_nc, solver_kw=solver_kw)
 
         mu = float(find_fermi(eigs, system.kweights, scheme, width,
                               system.n_electrons, degeneracy=1.0))

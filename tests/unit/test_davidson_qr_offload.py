@@ -115,7 +115,7 @@ def test_qr_offload_active_auto_gates_on_penalty(monkeypatch):
     threshold: a crippled-fp64 ratio activates the offload, a datacenter ratio
     skips it. The microbenchmark is stubbed so the branch is tested without a
     GPU (a real CUDA device would run it; this isolates the decision logic)."""
-    monkeypatch.setattr(davidson, "_QR_OFFLOAD_ENV", "auto")
+    monkeypatch.setenv("GRADWAVE_QR_OFFLOAD", "auto")
     cuda = torch.device("cuda", 0)
 
     monkeypatch.setattr(davidson, "_fp64_penalty",
@@ -133,12 +133,12 @@ def test_qr_offload_env_override_wins_both_directions(monkeypatch):
     penalty stub is set to the opposite verdict to prove the env wins."""
     cuda = torch.device("cuda", 0)
 
-    monkeypatch.setattr(davidson, "_QR_OFFLOAD_ENV", "off")
+    monkeypatch.setenv("GRADWAVE_QR_OFFLOAD", "off")
     monkeypatch.setattr(davidson, "_fp64_penalty",
                         lambda dev: davidson._QR_OFFLOAD_PENALTY_THRESHOLD + 100.0)
     assert _qr_offload_active(cuda) is False
 
-    monkeypatch.setattr(davidson, "_QR_OFFLOAD_ENV", "on")
+    monkeypatch.setenv("GRADWAVE_QR_OFFLOAD", "on")
     monkeypatch.setattr(davidson, "_fp64_penalty",
                         lambda dev: 1.0)  # datacenter-class ratio
     assert _qr_offload_active(cuda) is True
