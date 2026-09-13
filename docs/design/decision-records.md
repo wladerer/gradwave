@@ -350,3 +350,102 @@ and the code keeps a one-line greppable pointer.
   (1.09×), Si2 and Al-4 native null (0.467→0.469, 4.28→4.26). No native
   config loses. The eager solver is NOT flipped: eager Al-4 regresses at 3
   (15.0 → 16.3 s — larger apply share, deeper subspace amortizes it).
+
+## [D-017] TRIM antiunitary realification: exact at every TRIM, but the broad win is already shipped (Γ) and the non-Γ extension is narrow
+
+- **Date:** 2026-09 (higher-mathematics performance moonshot, door-closer
+  probes) · **Status:** active
+- **Sites:** `src/gradwave/core/gamma.py`, `src/gradwave/scf/loop.py`
+  (`_resolve_gamma_real`, `_gamma_real_mode`);
+  `benchmarks/moonshot_doorclosers/probe_a1_trim_commute.py`,
+  `benchmarks/moonshot_doorclosers/probe_a2_gamma_real.py`
+- **Decision:** do NOT build a non-Γ TRIM realification path. At a
+  time-reversal-invariant momentum (2k ≡ G0 a reciprocal-lattice vector) the
+  complex Hermitian eigenproblem is provably the complexification of a real
+  symmetric one, and transporting to the real form halves the bandwidth-bound
+  subspace bytes — but the broad case (Γ-only: molecules, defects, large
+  supercells) is ALREADY the shipped Γ real-wavefunction path, and the only
+  novel content (general TRIM k) helps just the ~8 TRIM points of a k-mesh
+  (broadly useful only for all-TRIM coarse meshes / Γ-only, which is already
+  covered). The genuinely-unexploited lever is the shipped Γ path's OFF
+  default, adjudicated separately — see [D-009] and its re-adjudication.
+- **Evidence (asus, 8 threads):** *A1 (correctness, exact):* the antiunitary
+  J = P∘K (P the G-shift permutation G → −G−G0, K conjugation) commutes with
+  the SHIPPED H-apply (`core.batch.BatchedHamiltonian`) to machine precision
+  at every TRIM of an unshifted 2×2×2 Si mesh — ‖JHc−HJc‖/‖Hc‖ = 2.8–3.5e-17
+  at Γ AND at the zone-boundary points (½,0,0), (½,½,0), (½,½,½), with
+  J²=+1. So realification is mathematically available at general TRIM in this
+  basis, not just Γ. *A2 (economics of the shipped Γ path, Si-64 Γ-only
+  30 Ry, subspace-dominated, locked A/B pairs, exact dE=0.0):* the shipped Γ
+  real path (`GRADWAVE_GAMMA_REAL=1`) runs 275.2 s (15 it) → 135.4 s (13 it)
+  and 276.4 s (15 it) → 134.9 s (13 it) — a robust **~2.04× e2e speedup
+  INCLUDING the half↔full conversion** (~1.77× per iteration + a reproducible
+  15→13 iteration reduction). Conversion does NOT eat the win, and it is not
+  the default. So the "realification is an unexploited perf lever" claim
+  fails on scope, not on physics: the 2× is real but already banked as an
+  opt-in for the broad workload; the buildable remainder (non-Γ TRIM) is
+  narrow.
+- **Rejected:** building the general-TRIM real path (a G-shift-permutation
+  eigensolver for zone-boundary k) — narrow (mesh TRIM subset only) for a
+  large code investment, does not clear the broad-class bar. The high-value
+  follow-up is the Γ default policy (off→auto), which is NOT this record's to
+  make — see [D-009] and the separate re-adjudication task.
+
+## [D-018] s-step (Chronopoulos-Gear) reassociation of the incremental Rayleigh-Ritz: dead — the target ZGEMMs are compute-bound at Si-64 dims
+
+- **Date:** 2026-09 (moonshot door-closer probes) · **Status:** active
+- **Sites:** `src/gradwave/solvers/native/davidson_native.c` (the two
+  incremental hc/sc ZGEMMs, `cblas_zgemm(ColMajor, ConjTrans, NoTrans, …)`
+  building `hc[:,dim:newdim]` and `sc[:,dim:newdim]`, ~lines 658-663);
+  `benchmarks/moonshot_doorclosers/probe_b_sstep_traffic.py`
+- **Decision:** do NOT patch the incremental-RR kernel to generate s Krylov
+  directions per Rayleigh-Ritz. The reassociation would divide the streamed
+  V-bytes per useful flop by ~s (higher arithmetic intensity), which is the
+  right medicine for a bandwidth-bound kernel — but these two ZGEMMs are NOT
+  bandwidth-bound at Si-64 subspace dimensions, so the traffic saving does
+  not convert to wall time.
+- **Evidence (asus idle, 8 threads, real Si-64/30 Ry dims npw=23871,
+  newdim=628; GFLOP/s vs panel width p, the per-round `notcnv`):** the model
+  bytes-per-flop drops ~s× as claimed (0.503 → 0.253 → 0.128 → 0.066 → 0.035
+  at p = 4,8,16,32,64 — arithmetic identity, V-read amortized), BUT measured
+  GFLOP/s is 89.9 (p=4, AI≈2 flop/byte) then plateaus 156.8 / 158.9 / 187.0 /
+  191.4 / 171.5 / 186.0 across p = 8,16,32,64,128,256 (AI 4 → 90). The only
+  bandwidth-starved regime is p ≤ 4; every realistic cegterg panel width
+  (notcnv ≈ 8–128) sits on the compute-bound plateau, where fattening the
+  panel buys ≈0. The Si-64 "43% bandwidth-bound subspace algebra" cost
+  therefore lives in the OTHER subspace operations (the generalized
+  eigensolve, the Ritz rotation V·C, orthogonalization, density build), not
+  in these two GEMMs — s-step aimed at them misses.
+- **Rejected:** s ∈ {2,4} panel fattening of the hc/sc build — model traffic
+  drops but the operation is compute-bound at the operating point, so no wall
+  win for a substantial kernel rewrite (Chronopoulos-Gear also risks
+  orthogonality loss). Existence test only; no kernel change made.
+
+## [D-019] CheFSI-for-memory: dead — the Si-64 "10 GB working set swaps" premise is stale (fixed by [D-003] band-chunking)
+
+- **Date:** 2026-09 (moonshot door-closer probes) · **Status:** active
+- **Sites:** `src/gradwave/core/batch.py` (`_dense_band_chunk`, the
+  band-chunked dense-box transient — see [D-003]);
+  `docs/design/memory-profile-si64.md`;
+  `benchmarks/moonshot_doorclosers/probe_c_si64_rss.py`
+- **Decision:** do NOT pursue Chebyshev-filtered subspace iteration as a
+  memory lever (shrinking a supposedly-swapping [V,HV] working set). The
+  premise is stale on two counts: the [V,HV] subspace is only ~1.5 GB at
+  Si-64/30 Ry (never the ~10 GB hog), and the real hog — the eager dense-grid
+  FFT box — is already band-chunked to a byte budget ([D-003], PR #479). With
+  that fix shipped the run fits RAM with headroom and does not inherently
+  page, so CheFSI reverts to being the already-measured-negative
+  CheFSI-as-solver (see the static-subspace-solver history), not a new
+  memory win.
+- **Evidence (asus, shipped main, Si-64 = 2×2×2 diamond, 30 Ry, 2×2×2 MP →
+  4 IBZ k, npw_max=23984, grid 72³, nb=128, 8 threads):** peak RSS (VmHWM)
+  **7998 MB (7.81 GB) eager `davidson`** and **6247 MB (6.10 GB)
+  `davidson-native`** — both well under the 11.39 GB unchunked peak recorded
+  in `memory-profile-si64.md` and under the 15 GB box, with no paging
+  attributable to the run in isolation (a brief vmstat si/so blip was
+  co-tenancy with a concurrent campaign momentarily exceeding available RAM).
+  Two side findings: [D-003]/#479's band-chunking win is intact (no
+  regression), and `davidson-native` NO LONGER segfaults at Si-64/30 Ry — the
+  `memory-profile-si64.md` closing note that it does is now stale.
+- **Rejected:** CheFSI as a memory-footprint reducer — its target working set
+  is neither the largest transient nor a swapping one on shipped main.
