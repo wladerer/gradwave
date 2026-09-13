@@ -220,3 +220,133 @@ and the code keeps a one-line greppable pointer.
   (GammaHamiltonian bumps the shared core.batch tally), so that contract no
   longer blocks "auto"; the iteration-count nonreproducibility is the one
   remaining reason for the conservative default.
+
+## [D-010] Per-band diagonalization tolerance: closed by prior measurement + shipped mechanisms
+
+- **Date:** 2026-09 (survivors round) · **Status:** closed (do not re-propose)
+- **Sites:** `src/gradwave/solvers/davidson.py` (expansion selection),
+  `src/gradwave/solvers/native_davidson.py` (per-k retirement)
+- **Decision:** no per-band stop-tolerance vector. What the idea actually
+  buys is already shipped: the eager batched Davidson expands only the
+  worst *unconverged* residuals each round (`n_add = (rn > tol)` count,
+  worst-first selection), so converged bands cost only the Rayleigh-Ritz
+  ride; the native solver retires whole k-points as they converge
+  (`GRADWAVE_NATIVE_RETIRE`, default on).
+- **Evidence:** measured closure 2026-09-02 (occupation-weighted tol):
+  metals put the slowest band at E_F (occupied → no loosening headroom;
+  Al n_occ=8/12), insulators are diluted below 5% whole-SCF by mixing
+  domination + the adaptive diago-tol schedule already making early solves
+  cheap. The remaining sliver (per-band locking within a k) targets the
+  subspace-algebra share, which the survivors-round profile puts at ~2%
+  (`_eigh_subspace`) on small cells — below any shipping bar.
+
+## [D-011] Orbital (wavefunction) extrapolation across SCF/ionic steps: closed by prior measurement
+
+- **Date:** 2026-09 (survivors round) · **Status:** closed
+- **Sites:** `src/gradwave/scf/loop.py` `_seed_orbitals` (warm start),
+  density extrapolation across sweep steps shipped separately (#475)
+- **Decision:** no orbital-velocity extrapolation seed. Prior measurement
+  (2026-09-02, 4-atom Al relax): per-geometry SCF iterations
+  none=[12,11,11,11,11], density-reuse=[12,11,11,10,10], full quadratic
+  density extrapolation=[12,11,10,10,9] — the SCF is mixing-convergence
+  dominated; the orbital seed is a sub-effect of an already ~7% effect,
+  and costs coefficient-history state (~GBs at slab scale) plus
+  cross-geometry subspace alignment. The wavefunction analog of #475
+  remains unbuilt on purpose.
+
+## [D-012] Transform dedup (density-build ↔ warm-apply FFT reuse): skipped by Amdahl ceiling
+
+- **Date:** 2026-09 (survivors round) · **Status:** closed (measured ceiling)
+- **Sites:** `src/gradwave/core/batch.py` (`density_b`, `BatchedHamiltonian.apply`)
+- **Decision:** not built. The proposed reuse — cache ψ(r) from iteration
+  n's density build and skip the forward transform of the warm block in
+  iteration n+1's first Davidson round — has a measured ceiling below the
+  1.05× gate, before its costs (a (nk, nb, n1n2n3) complex cache, an
+  ortho-skip flag to keep the warm block bit-identical to the density's).
+- **Evidence:** asus 8-thread cProfile, Al-4 eager (14.0 s wall): ALL
+  H-apply FFT work is 2.75 s (20%); the dedupable slice (round-1 forward
+  transforms of the warm block ≈ the density build's `g_to_r_b` twin,
+  0.60 s) is 2–4% end-to-end. Si2: smaller still (density_b = 0.05 of
+  1.0 s). On the native-solver headline path the solver-side transforms
+  live inside the C kernel and the duplicate cannot be threaded across —
+  ceiling ~1%. Eager wall is glue/subspace algebra, not FFT.
+
+## [D-013] Chord / frozen-C tail (single-RR solves in the mixing tail): parked — one-config win, losses elsewhere
+
+- **Date:** 2026-09 (survivors round) · **Status:** parked (probe wiring REVERTED; implementation in branch history, commit 3af4ebe4 on perf/survivors-round)
+- **Sites:** probed via `GRADWAVE_CHORD_TAIL` in `scf.loop` + `max_iter=1`
+  solver rounds; the exact `it == max_iter` early break in
+  `solvers/davidson.py` is the one piece kept (byte-identical results,
+  strictly fewer applies on max_iter-limited solves)
+- **Decision:** not shipped, wiring reverted. Once |Δρ| < X·rhotol the probe
+  caps the eigensolve at one Rayleigh-Ritz round (frozen-C + subspace
+  rotation + exact eigenvalue refresh — one nb-wide apply) and forces one
+  full solve before any convergence claim (the stale-solve clause cannot
+  see a chorded solve's unreached tol_eff).
+- **Evidence (asus, 8 threads, min of reps; X=30/100 vs baseline):**
+  Al-32 native: 162.5 → 156.7 / 149.5 s (+1 iter, E to 1e-10) = up to
+  1.087×, the only win. Si-64 native: 283.8 → 283.6 (null, +1 iter).
+  Small cells all lose — outer iterations grow faster than chorded solves
+  save: Si2 native 0.468 → 0.489 s (+1 it), Al-4 native 4.22 → 4.98 /
+  8.19 s (11 → 15/33 iters!), Fe-1 native 1.95 → 2.14 / 2.43 s (37 →
+  40/51), eager likewise. A single ~9% regime-specific win under a
+  size+metal gate does not meet the shipping bar (meaningful-broad-win
+  directive, 2026-09-12); the frozen-C density response is the missing
+  physics, and the mixer pays for it in iterations.
+
+## [D-014] Thick Ritz buffer across outer iterations: parked — narrow eager-only win
+
+- **Date:** 2026-09 (survivors round) · **Status:** parked (probe wiring REVERTED; implementation in branch history, commit 3af4ebe4 on perf/survivors-round)
+- **Sites:** probed via `GRADWAVE_RITZ_TAIL` in `scf.loop` + an `n_gate`
+  argument on `davidson_batched` (buffer rows ride the Rayleigh-Ritz,
+  never gated/expanded)
+- **Decision:** not shipped, wiring reverted. Carrying nb+2..8 Ritz vectors across outer
+  iterations does cut H-apply work (band-vector applies drop 8–14%), but
+  the wall-clock verdict is regime-dependent and eager-path-only (the
+  native C solver, the CPU headline path, has no seed-buffer entry point).
+- **Evidence (asus, 8 threads, eager, min of 3 reps, buffer 0/2/4/8):**
+  Si2 1.051 → 0.997/0.944/0.919 s (1.14× at 8; hpsi 4792 → 4144; same 9
+  iters; E identical). Fe-1 3.30 → 3.19/3.10/3.25 s (1.07× at 4; 38 → 37
+  iters). Al-4 14.34 → 14.65/15.98/14.65 s (LOSS — wider RR/ortho glue
+  outgrows the apply savings at nk=36-large batches). A win that only
+  exists on the slower-by-3× eager arm of small insulators does not meet
+  the shipping bar; revisit only if the native solver grows a seed-buffer
+  interface AND the apply share climbs back above ~50% there.
+
+## [D-015] Davidson glue retune: no expansion-width cap; eager default max_dim_factor=4 stands
+
+- **Date:** 2026-09 (survivors round) · **Status:** closed
+- **Sites:** `solvers/davidson.py` (`max_dim_factor`, user-facing via
+  `scf.memory.max_dim_factor` / `GRADWAVE_MAX_DIM_FACTOR`); an expansion-width
+  cap (`n_add_cap`) was probed and reverted (branch history, commit 3af4ebe4)
+- **Decision:** do not add an expansion-width cap; the EAGER solver keeps
+  `max_dim_factor=4`. The one robust finding — the native solver prefers 3 —
+  ships as the native adapter's default ([D-016]).
+- **Evidence (asus, 8 threads, min of 3 reps, factor 2/3/4/6):**
+  n_add cap: iteration-count roulette, not a mechanism — Fe-1 eager
+  38 iters → 24 (cap 2, 4.28 s LOSS) → 21 (cap 4, 2.73 s "win") → 41
+  (cap 8, 3.67 s LOSS) vs 3.32 s baseline; Al-4 ±9%; Si2 null. The
+  trajectory perturbation swamps the glue effect; nothing robust to ship.
+  max_dim_factor on the eager path: Si2 0.96/1.06/1.02/0.96, Al-4
+  17.4/16.3/15.0/19.1 (4 best, 3 REGRESSES), Fe-1 5.8/3.6/3.3/3.1 —
+  no consistent winner ≠ 4.
+
+## [D-016] Native Davidson defaults to max_dim_factor=3 (eager stays 4)
+
+- **Date:** 2026-09 (survivors round) · **Status:** active
+- **Sites:** `src/gradwave/solvers/native_davidson.py`
+  (`native_davidson_adapter`, `max_dim_factor=None` → 3 native / 4 on any
+  eager fallback); overrides unchanged (`GRADWAVE_MAX_DIM_FACTOR` /
+  `scf.memory.max_dim_factor` layer over it in `_resolve_max_dim_factor`)
+- **Decision:** the native C solver's wall is subspace algebra
+  (Rayleigh-Ritz/ortho), not H-applies, so a shallower grown subspace —
+  more frequent but cheap restarts — wins where the solve is expensive and
+  is a null elsewhere. Exact by construction (restart cadence changes the
+  path, not the converged eigenpairs) and cuts the V/HV subspace bytes 25%.
+- **Evidence (asus, 8 threads; interleaved A/B for the headline pairs,
+  min of reps; E agreement 1e-10 or better):** Al-32 native 162.3/162.6 →
+  145.9/144.9 s (**1.12×**, same 13 iters), Si-64 15 Ry native 285.0 →
+  266.0 s (**1.07×**, 38 → 35 iters, same E), Fe-1 native 2.19 → 2.01 s
+  (1.09×), Si2 and Al-4 native null (0.467→0.469, 4.28→4.26). No native
+  config loses. The eager solver is NOT flipped: eager Al-4 regresses at 3
+  (15.0 → 16.3 s — larger apply share, deeper subspace amortizes it).

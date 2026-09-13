@@ -891,6 +891,11 @@ def davidson_batched(
         if not sync_free:
             if float(rn.max()) < tol:
                 return _result(eig, x, it, rn)
+            if it == max_iter:
+                # the final round's expansion (H-applies + ortho) is never
+                # consumed — the post-loop return repackages THIS round's
+                # Ritz block. Byte-identical result, strictly fewer applies.
+                break
             # expand with the worst unconverged residuals only — uniform
             # count across k (max over k of the per-k unconverged tally)
             # keeps batching
